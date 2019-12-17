@@ -100,6 +100,7 @@ int main(int argc, char **argv) {
         Molecule mol1 = LoadFile(argv[2]);
         Molecule mol2 = LoadFile(argv[3]);
 
+        mol1.print_geom();
 
         RMSDDriver *driver = new RMSDDriver(mol1, mol2);
         std::cout << "RMSD for two molecules " << driver->CalculateRMSD() << std::endl;

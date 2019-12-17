@@ -1,4 +1,24 @@
-#include "molecule.h"
+/*
+ * <Some globale definition for chemical structures.>
+ * Copyright (C) 2019  Conrad Hübler <Conrad.Huebler@gmx.net>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "elements.h"
+
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -8,29 +28,27 @@
 #include <cmath>
 #include <array>
 
-
+#include "molecule.h"
 
 void Molecule::print_geom() const
 {
-    std::cout << natom  << endl << endl;
-    for(int i=0; i < natom; i++)
-    {
-        if(atoms[i].size())
-            printf("%s %8.5f %8.5f %8.5f\n", atoms[i].c_str(), geom[i][0], geom[i][1], geom[i][2]);
+    std::cout << AtomCount() << endl
+              << endl;
+    for (int i = 0; i < AtomCount(); i++) {
+        printf("%s %8.5f %8.5f %8.5f\n", Elements::ElementAbbr[m_atoms[i]].c_str(), geom[i][0], geom[i][1], geom[i][2]);
     }
 }
 
 void Molecule::printAtom(int i) const
 {
-    --i;
-    if(i < natom)
-        printf("%s %8.5f %8.5f %8.5f", atoms[i].c_str(), geom[i][0], geom[i][1], geom[i][2]);
+    if (i < AtomCount())
+        printf("%s %8.5f %8.5f %8.5f", m_atoms[i], geom[i][0], geom[i][1], geom[i][2]);
 }
 
 
 void Molecule::translate(double x, double y, double z)
 {
-    for(int i=0; i < natom; i++) {
+    for (int i = 0; i < AtomCount(); i++) {
         geom[i][0] += x;
         geom[i][1] += y;
         geom[i][2] += z;
@@ -39,12 +57,9 @@ void Molecule::translate(double x, double y, double z)
 
 Molecule::Molecule(int n, int q)
 {
-    natom = n;
     charge = q;
-    
-    atoms = std::vector<std::string>(natom);
-    for(int i=0; i < natom; i++)
-    {
+
+    for (int i = 0; i < n; i++) {
         std::array<double, 3> atom = {0,0,0};
         geom.push_back(  atom );
 //         geom[i][0] = 0;
@@ -61,7 +76,7 @@ Molecule::~Molecule()
 
 double Molecule::Distance(int i, int j) const
 {
-    if(i >= natom || j >= natom)
+    if (i >= AtomCount() || j >= AtomCount())
         return 0;
     
     double x_i = geom[i][0];
@@ -110,17 +125,18 @@ void Molecule::setAtom(const std::string& internal, int i)
             element.push_back(c);
         else
         {
-            if(element.size())
+            if (element.size()) {
                 elements.push_back(element);
+            }
             element.clear();
         }
     }
                     
     elements.push_back(element);
+    m_atoms.push_back(Elements::String2Element(elements[0]));
 
     if(elements.size() == 7)
     {
-        atoms[i] = elements[0];
         
         int atom_1 = stoi(elements[1]);
         int atom_2 = stoi(elements[2]);
@@ -153,17 +169,18 @@ void Molecule::setXYZ(const std::string& internal, int i)
             element.push_back(c);
         else
         {
-            if(element.size())
+            if (element.size()) {
                 elements.push_back(element);
+            }
             element.clear();
         }
     }
 
     elements.push_back(element);
+    m_atoms.push_back(Elements::String2Element(elements[0]));
 
     if(elements.size() >= 4)
     {
-        atoms[i] = elements[0];
         
         double x = stod(elements[1]);
         double y = stod(elements[2]);

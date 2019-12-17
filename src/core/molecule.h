@@ -54,15 +54,13 @@ class Molecule
     Geometry getGeometry() const;
     bool setGeometry(const Geometry &geometry);
     Position Centroid(bool hydrogen = true) const;
+    inline int AtomCount() const { return m_atoms.size(); }
 
 private:
-    int natom;
     int charge;
     int *zvals;
-    std::vector<std::string > atoms;
     std::vector< std::array<double, 3> > geom;
-    std::vector< int > m_elements;
+    std::vector<int> m_atoms;
 
-//     double **geom;
     string point_group;
 };
