@@ -1,6 +1,6 @@
 /*
  * <Internal Coordinate Handler for chemical structures.>
- * Copyright (C) 2019  Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
  * 
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -103,7 +103,12 @@ int main(int argc, char **argv) {
         mol1.print_geom();
 
         RMSDDriver *driver = new RMSDDriver(mol1, mol2);
-        std::cout << "RMSD for two molecules " << driver->CalculateRMSD() << std::endl;
+        driver->AutoPilot();
+        std::cout << "RMSD for two molecules " << driver->RMSD() << std::endl;
+
+        driver->ReferenceAligned().writeXYZFile("reference.xyz");
+        driver->TargetAligned().writeXYZFile("target_align.xyz");
+        driver->TargetReorderd().writeXYZFile("target_reorder.xyz");
 
         delete driver;
 

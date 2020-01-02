@@ -1,6 +1,6 @@
 /*
  * <Some globale definition for chemical structures.>
- * Copyright (C) 2019  Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -57,22 +57,40 @@ void Molecule::translate(double x, double y, double z)
 
 Molecule::Molecule(int n, int q)
 {
-    charge = q;
-
-    for (int i = 0; i < n; i++) {
-        std::array<double, 3> atom = {0,0,0};
-        geom.push_back(  atom );
-//         geom[i][0] = 0;
-//         geom[i][1] = 0;
-//         geom[i][2] = 0;
-//         zvals[i] = 0;
-    }
+    m_charge = q;
+    InitialiseEmptyGeometry(n);
 }
+
+Molecule::Molecule()
+{
+}
+
 Molecule::~Molecule()
 { 
 
 }
 
+void Molecule::InitialiseEmptyGeometry(int atoms)
+{
+    for (int i = 0; i < atoms; i++) {
+        std::array<double, 3> atom = { 0, 0, 0 };
+        geom.push_back(atom);
+    }
+}
+
+bool Molecule::addPair(const std::pair<int, Position>& atom)
+{
+    bool exist = true;
+    // const std::array<double, 3> at = { atom.second(0),  atom.second(1),  atom.second(2)};
+    geom.push_back({ atom.second(0), atom.second(1), atom.second(2) });
+    m_atoms.push_back(atom.first);
+
+    for (int i = 0; i < AtomCount(); ++i)
+        for (int j = i + 1; j < AtomCount(); ++j)
+            if (Distance(i, j) < 1e-6)
+                exist = false;
+    return exist;
+}
 
 double Molecule::Distance(int i, int j) const
 {
@@ -193,6 +211,30 @@ void Molecule::setXYZ(const std::string& internal, int i)
         
 }
 
+void Molecule::clear()
+{
+    m_atoms.clear();
+    geom.clear();
+}
+
+void Molecule::LoadMolecule(const Molecule& molecule)
+{
+    clear();
+    m_charge = molecule.Charge();
+    m_atoms = molecule.Atoms();
+    InitialiseEmptyGeometry(molecule.AtomCount());
+    setGeometry(molecule.getGeometry());
+}
+
+void Molecule::LoadMolecule(const Molecule* molecule)
+{
+    clear();
+    m_charge = molecule->Charge();
+    m_atoms = molecule->Atoms();
+    InitialiseEmptyGeometry(molecule->AtomCount());
+    setGeometry(molecule->getGeometry());
+}
+
 Geometry Molecule::getGeometry() const
 {
     Geometry geometry(geom.size(), 3);
@@ -238,4 +280,21 @@ Position  Molecule::Centroid(bool hydrogen) const
         throw -1;
     }
     return position;
+}
+
+std::pair<int, Position> Molecule::Atom(int i) const
+{
+    return std::pair<int, Position>(m_atoms[i], { geom[i][0], geom[i][1], geom[i][2] });
+}
+
+void Molecule::writeXYZFile(const std::string& filename)
+{
+    std::ofstream input;
+    input.open(filename, ios::out);
+    input << AtomCount() << std::endl
+          << std::endl;
+    for (int i = 0; i < AtomCount(); ++i) {
+        input << Elements::ElementAbbr[m_atoms[i]].c_str() << "\t" << geom[i][0] << "\t" << geom[i][1] << "\t" << geom[i][2] << std::endl;
+    }
+    input.close();
 }
