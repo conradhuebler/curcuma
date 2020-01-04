@@ -94,17 +94,23 @@ int main(int argc, char **argv) {
 
         if(strcmp(argv[1], "-rmsd") == 0)
         {
-            if(argc != 4)
-            {
+            if (argc < 4) {
                 std::cerr << "Please use curcuma for rmsd calcultion as follows\ncurcuma -rmsd A.xyz B.xyz" << std::endl;
                 exit(1);
             }
         Molecule mol1 = LoadFile(argv[2]);
         Molecule mol2 = LoadFile(argv[3]);
 
+        bool reorder = false;
+        if (argc == 5) {
+            if (strcmp(argv[4], "-reorder"))
+                reorder = true;
+        }
+
         mol1.print_geom();
 
         RMSDDriver *driver = new RMSDDriver(mol1, mol2);
+        driver->setForceReorder(reorder);
         driver->AutoPilot();
         std::cout << "RMSD for two molecules " << driver->RMSD() << std::endl;
 
@@ -117,23 +123,27 @@ int main(int argc, char **argv) {
         exit(0);
         } else if (strcmp(argv[1], "-dock") == 0) {
 
-            if (argc != 7) {
+            if (argc < 4) {
                 std::cerr << "Please use curcuma for rmsd calcultion as follows\ncurcuma -dock A.xyz B.xyz XXX YYY ZZZ" << std::endl;
                 exit(1);
             }
             Molecule mol1 = LoadFile(argv[2]);
             Molecule mol2 = LoadFile(argv[3]);
 
-            double XXX = stod(std::string(argv[4]));
-            double YYY = stod(std::string(argv[5]));
-            double ZZZ = stod(std::string(argv[6]));
-
-            std::cout << "Docking Position:" << XXX << " " << YYY << " " << ZZZ << std::endl;
 
             Docking* docking = new Docking;
             docking->setHostStructure(mol1);
             docking->setGuestStructure(mol2);
-            docking->setAnchorPosition(Position{ XXX, YYY, ZZZ });
+
+            if (argc == 7) {
+                double XXX = stod(std::string(argv[4]));
+                double YYY = stod(std::string(argv[5]));
+                double ZZZ = stod(std::string(argv[6]));
+
+                std::cout << "Docking Position:" << XXX << " " << YYY << " " << ZZZ << std::endl;
+                docking->setAnchorPosition(Position{ XXX, YYY, ZZZ });
+            }
+
             docking->PerformDocking();
 
             docking->getMolecule().writeXYZFile("docked.xyz");
