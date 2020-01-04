@@ -41,4 +41,10 @@ inline Geometry TranslateMolecule(const Molecule &molecule, const Position &star
 
 }
 
+inline double Distance(const Position& a, const Position& b)
+{
+    double distance = 0;
+    distance = sqrt((a(0) - b(0)) * (a(0) - b(0)) + (a(1) - b(1)) * (a(1) - b(1)) + (a(2) - b(2)) * (a(2) - b(2)));
+    return distance;
+}
 }

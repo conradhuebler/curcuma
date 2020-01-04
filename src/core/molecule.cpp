@@ -294,7 +294,7 @@ void Molecule::writeXYZFile(const std::string& filename)
     input << AtomCount() << std::endl
           << std::endl;
     for (int i = 0; i < AtomCount(); ++i) {
-        input << Elements::ElementAbbr[m_atoms[i]].c_str() << "\t" << geom[i][0] << "\t" << geom[i][1] << "\t" << geom[i][2] << std::endl;
+        input << Elements::ElementAbbr[m_atoms[i]].c_str() << "      " << geom[i][0] << "      " << geom[i][1] << "      " << geom[i][2] << std::endl;
     }
     input.close();
 }

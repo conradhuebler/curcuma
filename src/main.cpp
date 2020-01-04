@@ -18,6 +18,8 @@
  */
 
 #include "src/core/molecule.h"
+
+#include "src/capabilities/docking.h"
 #include "src/capabilities/rmsd.h"
 
 #include <iostream>
@@ -113,8 +115,30 @@ int main(int argc, char **argv) {
         delete driver;
 
         exit(0);
-        }else if(strcmp(argv[1],"-hbonds") == 0)
-        {
+        } else if (strcmp(argv[1], "-dock") == 0) {
+
+            if (argc != 7) {
+                std::cerr << "Please use curcuma for rmsd calcultion as follows\ncurcuma -dock A.xyz B.xyz XXX YYY ZZZ" << std::endl;
+                exit(1);
+            }
+            Molecule mol1 = LoadFile(argv[2]);
+            Molecule mol2 = LoadFile(argv[3]);
+
+            double XXX = stod(std::string(argv[4]));
+            double YYY = stod(std::string(argv[5]));
+            double ZZZ = stod(std::string(argv[6]));
+
+            std::cout << "Docking Position:" << XXX << " " << YYY << " " << ZZZ << std::endl;
+
+            Docking* docking = new Docking;
+            docking->setHostStructure(mol1);
+            docking->setGuestStructure(mol2);
+            docking->setAnchorPosition(Position{ XXX, YYY, ZZZ });
+            docking->PerformDocking();
+
+            docking->getMolecule().writeXYZFile("docked.xyz");
+
+        } else if (strcmp(argv[1], "-hbonds") == 0) {
             if(argc != 6)
             {
                 std::cerr << "Please use curcuma for hydrogen bond analysis as follows\ncurcuma -hbonds A.xyz index_donor index_proton index_acceptor" << std::endl;
@@ -167,15 +191,14 @@ int main(int argc, char **argv) {
                 index++;
             }
 
-        }else
-        {
-            std::cerr << "Opening file " << argv[2] << std::endl;
-            std::ifstream input( argv[2] );
+        } else {
+            std::cerr << "Opening file " << argv[1] << std::endl;
+            std::ifstream input(argv[1]);
             std::vector<std::string> lines;
             int atoms = 0;
             int index = 0;
             int i = 0;
-            bool xyzfile = std::string(argv[2]).find(".xyz") != std::string::npos;
+            bool xyzfile = std::string(argv[1]).find(".xyz") != std::string::npos;
             Molecule mol(atoms, 0);
             for( std::string line; getline( input, line ); )
             {
@@ -195,10 +218,12 @@ int main(int argc, char **argv) {
 
                             mol.print_geom();
                             std::cout << std::endl << std::endl;
-                            std::cout << mol.getGeometry() << std::endl;
+                            std::cout << mol.getGeometry() << std::endl
+                                      << std::endl;
+                            std::cout << "Centroid: " << mol.Centroid(true).transpose() << std::endl;
 
-                        i = -1;
-                        mol = Molecule(atoms, 0);
+                            i = -1;
+                            mol = Molecule(atoms, 0);
                     }
                     ++i;
                 }else
@@ -208,7 +233,6 @@ int main(int argc, char **argv) {
                 index++;
             }
         }
-
     }
     return 0;
 }
