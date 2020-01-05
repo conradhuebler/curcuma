@@ -25,6 +25,8 @@
 
 #include "src/tools/geometry.h"
 
+#include <map>
+
 class Docking {
 public:
     Docking();
@@ -59,4 +61,5 @@ private:
     Molecule m_host_structure, m_guest_structure, m_supramol;
     Position m_initial_anchor = Position{ 0, 0, 0 };
     int m_xxx_rotation = 1, m_yyy_rotation = 1, m_zzz_rotation = 1;
+    std::map<double, Vector> m_docking_list;
 };

@@ -26,6 +26,7 @@
 #include <iostream>
 
 #include "src/core/elements.h"
+#include "src/core/global.h"
 #include "src/core/molecule.h"
 #include "src/core/pseudoff.h"
 
@@ -65,9 +66,13 @@ struct MyFunctor : Functor<double> {
     inline ~MyFunctor() {}
     inline int operator()(const Eigen::VectorXd& position, Eigen::VectorXd& fvec) const
     {
-
-        Geometry destination = GeometryTools::TranslateMolecule(guest, guest.Centroid(), position);
-        guest.setGeometry(destination);
+        Molecule guest = m_guest;
+        guest.setGeometry(
+            GeometryTools::TranslateAndRotate(
+                guest.getGeometry(),
+                guest.Centroid(),
+                Position{ position(0), position(1), position(2) },
+                Position{ position(3), position(4), position(5) }));
 
         for (int i = 0; i < m_host->AtomCount(); ++i) {
             fvec(i) = 0;
@@ -82,7 +87,7 @@ struct MyFunctor : Functor<double> {
     int no_points;
     const Molecule* m_host;
 
-    mutable Molecule guest;
+    Molecule m_guest;
 
     int inputs() const { return no_parameter; }
     int values() const { return no_points; }
@@ -91,15 +96,13 @@ struct MyFunctor : Functor<double> {
 struct MyFunctorNumericalDiff : Eigen::NumericalDiff<MyFunctor> {
 };
 
-Position OptimiseAnchor(const Molecule* host, const Molecule& guest, Position anchor)
+std::pair<Position, Position> OptimiseAnchor(const Molecule* host, const Molecule& guest, Position anchor, Position rotation)
 {
-    Eigen::VectorXd parameter(3);
-    for (int i = 0; i < 3; ++i)
-        parameter(i) = anchor(i);
+    Vector parameter = PositionPair2Vector(anchor, rotation);
 
-    MyFunctor functor(3, host->AtomCount());
+    MyFunctor functor(6, host->AtomCount());
     functor.m_host = host;
-    functor.guest = guest;
+    functor.m_guest = guest;
     Eigen::NumericalDiff<MyFunctor> numDiff(functor);
     Eigen::LevenbergMarquardt<Eigen::NumericalDiff<MyFunctor>> lm(numDiff);
     int iter = 0;
@@ -116,22 +119,18 @@ Position OptimiseAnchor(const Molecule* host, const Molecule& guest, Position an
     Eigen::LevenbergMarquardtSpace::Status status = lm.minimizeInit(parameter);
 
     int MaxIter = 3000;
-    Position positon{ parameter(0), parameter(1), parameter(2) };
+    Vector old_param = parameter;
+    // std::cout << parameter.transpose() << std::endl;
     for (; iter < MaxIter /*&& ((qAbs(error_0 - error_2) > ErrorConvergence) || norm > DeltaParameter)*/; ++iter) {
-        Position old_pos{ parameter(0), parameter(1), parameter(2) };
         status = lm.minimizeOneStep(parameter);
 
-        positon = Position{ parameter(0), parameter(1), parameter(2) };
-
-        std::cout << parameter.transpose() << " " << GeometryTools::Distance(positon, old_pos) << std::endl;
-
-        if (GeometryTools::Distance(positon, old_pos) < 1e-5)
+        if ((old_param - parameter).norm() < 1e-5)
             break;
+
+        old_param = parameter;
     }
+    // std::cout << parameter.transpose() << std::endl;
+    // std::cout << "took " << iter << " optimisation steps." << std::endl;
 
-    for (int i = 0; i < 3; ++i)
-        anchor(i) = parameter(i);
-    std::cout << "took " << iter << " optimisation steps." << std::endl;
-
-    return anchor;
+    return Vector2PositionPair(parameter);
 }
