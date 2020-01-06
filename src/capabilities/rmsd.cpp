@@ -163,27 +163,22 @@ void RMSDDriver::ReorderMolecule()
     /* Lets initialise a molecule with two atom from the reference */
     Molecule reference;
     int index = 0;
-    int sum_elem = 0;
     std::vector<int> elements = m_reference.Atoms();
     for (int i = 0; i < m_reference.AtomCount() && index < 2; i++) {
         if (elements[i] != 1) {
             reference.addPair(m_reference.Atom(i));
-            sum_elem += elements[i];
             index++;
         }
     }
 
     std::vector<int> elements_target = m_target.Atoms();
-
+    std::vector<int> tmp_reference = reference.Atoms();
     for (int i = 0; i < m_target.AtomCount(); ++i)
         for (int j = i + 1; j < m_target.AtomCount(); ++j) {
-            double distance = m_target.Distance(i, j);
-            if (sum_elem == (elements_target[i] + elements_target[j])) {
-                // std::cout << "Pair (" << i << ";" << j << ") with distance of " << distance << std::endl;
-                //std::cout << m_target.Atom(i).second.transpose() << "    ....     " << m_target.Atom(j).second.transpose() << std::endl;
+            if (tmp_reference[0] == elements_target[i] && tmp_reference[1] == elements_target[j])
                 m_intermediate_results.push({ i, j });
+            if (tmp_reference[0] == elements_target[j] && tmp_reference[1] == elements_target[i])
                 m_intermediate_results.push({ j, i });
-            }
         }
 
     m_rmsd = CalculateRMSD(m_reference, m_target) / double(m_reference.AtomCount());
