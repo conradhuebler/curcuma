@@ -49,7 +49,8 @@ void RMSDDriver::AutoPilot()
             std::cout << "Initial RMSD is " << m_rmsd_raw << std::endl;
             ReorderMolecule();
         }
-    }
+    } else
+        m_target_reordered = m_target;
 
     Molecule *reference = new Molecule, *target = new Molecule;
     m_rmsd = CalculateRMSD(m_reference, m_target_reordered, reference, target);
