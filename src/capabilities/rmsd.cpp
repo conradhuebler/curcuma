@@ -49,7 +49,8 @@ void RMSDDriver::AutoPilot()
             std::cout << "Initial RMSD is " << m_rmsd_raw << std::endl;
             ReorderMolecule();
         }
-    }
+    } else
+        m_target_reordered = m_target;
 
     Molecule *reference = new Molecule, *target = new Molecule;
     m_rmsd = CalculateRMSD(m_reference, m_target_reordered, reference, target);
@@ -202,7 +203,6 @@ void RMSDDriver::InitialisePair()
 {
     Molecule reference;
     int index = 0;
-
     std::vector<int> elements = m_reference.Atoms();
     for (int i = 0; i < m_reference.AtomCount() && index < 2; i++) {
         if (elements[i] != 1) {
@@ -279,25 +279,8 @@ void RMSDDriver::ReorderStraight()
         if (count == 0) // store the best result in any way
             m_target_reordered = mol2;
 
-        /*
-        auto connect = mol2.getConnectivtiy(scaling);
-        std::cout << "Check connectivitiy for result with rmsd =  " << m_rmsd << std::endl;
-        int match = 0;
-        for (std::size_t i = 0; i < connect.size(); ++i) {
-            auto target = connect[i];
-
-            auto reference = m_connectivity[i];
-            if (reference == target) {
-                std::cout << " the same for " << i << std::endl;
-                match++;
-            } else
-                std::cout << "NOT the same for " << i << std::endl;
-        }
-        if (match == connect.size()) {
-            m_target_reordered = mol2;
-            break;
-        }*/
         if (CheckConnectivitiy(m_reference, mol2)) {
+            std::cout << "Found fitting solution, taking ... " << std::endl;
             m_target_reordered = mol2;
             break;
         }
@@ -363,8 +346,6 @@ void RMSDDriver::ReorderConstrainedConnectivity()
 
     while (m_intermediate_results.size()) {
         std::vector<int> inter = m_intermediate_results.front();
-        //std::cout << inter.size() << std::endl;
-        //if(inter.size() <  m_target.AtomCount())
         SolveIntermediate(inter);
         m_intermediate_results.pop();
     }
@@ -374,7 +355,6 @@ void RMSDDriver::ReorderConstrainedConnectivity()
 
         for (const auto& element : (*m_storage[i].data())) {
             int index = element.second.size();
-            //std::cout << m_reference.Atom(i).first << " " << std::endl;
             SolveIntermediate(element.second);
         }
     }
@@ -408,7 +388,6 @@ void RMSDDriver::SolveIntermediateConstrained(std::vector<int> intermediate)
     }
 
     int i = reference.AtomCount();
-    //for (int i = reference.AtomCount(); i < m_reference.AtomCount(); ++i) {
     Molecule reference_local(reference);
     int element_local = m_reference.Atom(i).first;
     reference_local.addPair(m_reference.Atom(i));
