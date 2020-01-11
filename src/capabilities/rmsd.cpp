@@ -155,6 +155,49 @@ Geometry RMSDDriver::CenterMolecule(const Molecule &mol) const
     return GeometryTools::TranslateMolecule(mol, mol.Centroid(), Position{0, 0, 0});
 }
 
+bool RMSDDriver::CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) const
+{
+
+    auto connect_1 = mol1.getConnectivtiy(m_scaling);
+    auto connect_2 = mol2.getConnectivtiy(m_scaling);
+
+    if (connect_1.size() != connect_2.size())
+        return false;
+
+    int match = 0;
+    for (std::size_t i = 0; i < connect_1.size(); ++i) {
+        auto target = connect_1[i];
+
+        auto reference = connect_2[i];
+        if (reference == target) {
+            match++;
+        }
+    }
+
+    return match == connect_1.size();
+}
+
+bool RMSDDriver::CheckConnectivitiy(const Molecule& mol1) const
+{
+
+    auto connect = mol1.getConnectivtiy(m_scaling);
+
+    if (m_connectivity.size() != connect.size())
+        return false;
+
+    int match = 0;
+    for (std::size_t i = 0; i < connect.size(); ++i) {
+        auto target = connect[i];
+
+        auto reference = m_connectivity.at(i);
+        if (reference == target) {
+            match++;
+        }
+    }
+
+    return match == connect.size();
+}
+
 void RMSDDriver::InitialisePair()
 {
     Molecule reference;
@@ -198,7 +241,7 @@ void RMSDDriver::ReorderMolecule()
 void RMSDDriver::ReorderStraight()
 {
 
-    int inter_size = m_reference.AtomCount() * (m_reference.AtomCount() - 1) * 100;
+    int inter_size = m_reference.AtomCount() * (m_reference.AtomCount() - 1);
     m_storage = std::vector<IntermediateStorage>(m_reference.AtomCount() - 1, IntermediateStorage(inter_size));
 
     double scaling = 1.5;
@@ -233,6 +276,10 @@ void RMSDDriver::ReorderStraight()
             mol2.addPair(m_target.Atom(element.second[i]));
         }
         m_rmsd = CalculateRMSD(m_reference, mol2);
+        if (count == 0) // store the best result in any way
+            m_target_reordered = mol2;
+
+        /*
         auto connect = mol2.getConnectivtiy(scaling);
         std::cout << "Check connectivitiy for result with rmsd =  " << m_rmsd << std::endl;
         int match = 0;
@@ -249,10 +296,12 @@ void RMSDDriver::ReorderStraight()
         if (match == connect.size()) {
             m_target_reordered = mol2;
             break;
+        }*/
+        if (CheckConnectivitiy(m_reference, mol2)) {
+            m_target_reordered = mol2;
+            break;
         }
         count++;
-        //if (count == 9)
-        //    break;
     }
 
     return;
@@ -284,7 +333,8 @@ void RMSDDriver::SolveIntermediate(std::vector<int> intermediate)
                 double rmsd_local = CalculateRMSD(reference_local, target_local);
                 if (target_local.AtomCount() < m_target.AtomCount()) {
                     rmsd = rmsd_local;
-                    match.insert(std::pair<double, int>(rmsd_local, j));
+                    if (CheckConnectivitiy(reference_local, target_local))
+                        match.insert(std::pair<double, int>(rmsd_local, j));
                 } else {
                     std::vector<int> inter = intermediate;
                     inter.push_back(j);

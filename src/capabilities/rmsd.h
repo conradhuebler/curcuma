@@ -94,6 +94,9 @@ private:
     void SolveIntermediate(std::vector<int> intermediate);
     void SolveIntermediateConstrained(std::vector<int> intermediate);
 
+    bool CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) const;
+    bool CheckConnectivitiy(const Molecule& mol1) const;
+
     Eigen::Matrix3d BestFitRotation(const Molecule& reference, const Molecule& target, int factor = 1) const;
     Geometry CenterMolecule(const Molecule &mol) const;
 
@@ -103,6 +106,6 @@ private:
     std::map<double, std::vector<int>> m_results;
     std::map<int, std::vector<int>> m_connectivity;
     std::vector<IntermediateStorage> m_storage;
-    double m_rmsd = 0, m_rmsd_raw = 0;
+    double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5;
     int m_hit = 1;
 };
