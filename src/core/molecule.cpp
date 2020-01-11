@@ -19,14 +19,15 @@
 
 #include "elements.h"
 
-#include <cstdio>
-#include <fstream>
-#include <sstream>
-#include <istream>
-#include <iostream>
-#include <cstring>
-#include <cmath>
 #include <array>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <istream>
+#include <map>
+#include <sstream>
 
 #include "molecule.h"
 
@@ -297,4 +298,56 @@ void Molecule::writeXYZFile(const std::string& filename)
         input << Elements::ElementAbbr[m_atoms[i]].c_str() << "      " << geom[i][0] << "      " << geom[i][1] << "      " << geom[i][2] << std::endl;
     }
     input.close();
+}
+
+std::vector<int> Molecule::BoundHydrogens(int atom, double scaling) const
+{
+    std::vector<int> result;
+
+    if (atom >= AtomCount() || Atom(atom).first == 1)
+        return result;
+
+    for (int i = 0; i < AtomCount(); ++i) {
+        // std::cout << Atom(i).first << std::endl;
+        if (atom == i || Atom(i).first != 1)
+            continue;
+        double distance = Distance(i, atom);
+        // std::cout << i << " " << atom << " " << distance << std::endl;
+        if (distance < (Elements::CovalentRadius[Atom(atom).first] + Elements::CovalentRadius[1]) * scaling)
+            result.push_back(i);
+    }
+    return result;
+}
+
+std::map<int, std::vector<int>> Molecule::getConnectivtiy(double scaling, int latest) const
+{
+    if (latest == -1 || latest > AtomCount())
+        latest = AtomCount();
+    std::map<int, std::vector<int>> connections;
+    for (int i = 0; i < AtomCount(); ++i) {
+        std::vector<int> connect = BoundHydrogens(i, scaling);
+        if (connect.size() == 0)
+            continue;
+
+        connections.insert(std::pair<int, std::vector<int>>(i, connect));
+    }
+    return connections;
+}
+
+void Molecule::PrintConnectivitiy(double scaling) const
+{
+    print_geom();
+
+    for (std::size_t i = 0; i < AtomCount(); ++i) {
+        std::cout << Atom(i).first << " ... " << Atom(i).second.transpose() << std::endl;
+        if (Atom(i).first != 1) {
+            for (std::size_t j = i + 1; j < AtomCount(); ++j) {
+                if (Atom(j).first == 1) {
+                    double distance = Distance(i, j);
+                    if (distance < (Elements::CovalentRadius[Atom(i).first] + Elements::CovalentRadius[Atom(j).first]) * scaling)
+                        std::cout << "Atom " << i << " and Atom " << j << ": Distance = " << distance << " - Cov Rad: " << (Elements::CovalentRadius[Atom(i).first] + Elements::CovalentRadius[Atom(j).first]) << std::endl;
+                }
+            }
+        }
+    }
 }

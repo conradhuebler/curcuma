@@ -155,36 +155,56 @@ Geometry RMSDDriver::CenterMolecule(const Molecule &mol) const
     return GeometryTools::TranslateMolecule(mol, mol.Centroid(), Position{0, 0, 0});
 }
 
-void RMSDDriver::ReorderMolecule()
+void RMSDDriver::InitialisePair()
 {
-    int inter_size = m_reference.AtomCount() * (m_reference.AtomCount() - 1);
-    m_storage = std::vector<IntermediateStorage>(m_reference.AtomCount() - 1, IntermediateStorage(inter_size));
-
-    /* Lets initialise a molecule with two atom from the reference */
     Molecule reference;
     int index = 0;
-    int sum_elem = 0;
+
     std::vector<int> elements = m_reference.Atoms();
     for (int i = 0; i < m_reference.AtomCount() && index < 2; i++) {
         if (elements[i] != 1) {
             reference.addPair(m_reference.Atom(i));
-            sum_elem += elements[i];
             index++;
         }
     }
 
     std::vector<int> elements_target = m_target.Atoms();
+    std::vector<int> tmp_reference = reference.Atoms();
 
-    for (int i = 0; i < m_target.AtomCount(); ++i)
+    for (int i = 0; i < m_target.AtomCount(); ++i) {
+        if (m_target.Atom(i).first == 1) // Skip first atom if Proton
+            continue;
         for (int j = i + 1; j < m_target.AtomCount(); ++j) {
-            double distance = m_target.Distance(i, j);
-            if (sum_elem == (elements_target[i] + elements_target[j])) {
-                // std::cout << "Pair (" << i << ";" << j << ") with distance of " << distance << std::endl;
-                //std::cout << m_target.Atom(i).second.transpose() << "    ....     " << m_target.Atom(j).second.transpose() << std::endl;
+            if (m_target.Atom(j).first == 1) // Skip second atom if Proton
+                continue;
+            if (tmp_reference[0] == elements_target[i] && tmp_reference[1] == elements_target[j])
                 m_intermediate_results.push({ i, j });
+            if (tmp_reference[0] == elements_target[j] && tmp_reference[1] == elements_target[i])
                 m_intermediate_results.push({ j, i });
-            }
         }
+    }
+}
+
+void RMSDDriver::ReorderMolecule()
+{
+    double scaling = 1.5;
+
+    m_connectivity = m_reference.getConnectivtiy(scaling);
+
+    //ReorderConstrainedConnectivity();
+    ReorderStraight();
+}
+
+void RMSDDriver::ReorderStraight()
+{
+
+    int inter_size = m_reference.AtomCount() * (m_reference.AtomCount() - 1) * 100;
+    m_storage = std::vector<IntermediateStorage>(m_reference.AtomCount() - 1, IntermediateStorage(inter_size));
+
+    double scaling = 1.5;
+
+    /* Lets initialise a molecule with two atom from the reference */
+    InitialisePair();
 
     m_rmsd = CalculateRMSD(m_reference, m_target) / double(m_reference.AtomCount());
 
@@ -206,12 +226,118 @@ void RMSDDriver::ReorderMolecule()
 
     int count = 0;
     std::vector<int> intermediate;
+
+    for (const auto& element : m_results) {
+        Molecule mol2;
+        for (int i = 0; i < element.second.size(); i++) {
+            mol2.addPair(m_target.Atom(element.second[i]));
+        }
+        m_rmsd = CalculateRMSD(m_reference, mol2);
+        auto connect = mol2.getConnectivtiy(scaling);
+        std::cout << "Check connectivitiy for result with rmsd =  " << m_rmsd << std::endl;
+        int match = 0;
+        for (std::size_t i = 0; i < connect.size(); ++i) {
+            auto target = connect[i];
+
+            auto reference = m_connectivity[i];
+            if (reference == target) {
+                std::cout << " the same for " << i << std::endl;
+                match++;
+            } else
+                std::cout << "NOT the same for " << i << std::endl;
+        }
+        if (match == connect.size()) {
+            m_target_reordered = mol2;
+            break;
+        }
+        count++;
+        //if (count == 9)
+        //    break;
+    }
+
+    return;
+}
+
+void RMSDDriver::SolveIntermediate(std::vector<int> intermediate)
+{
+    Molecule reference;
+    Molecule target;
+    std::vector<int> elements_target = m_target.Atoms();
+
+    for (int i = 0; i < intermediate.size(); i++) {
+        reference.addPair(m_reference.Atom(i));
+        target.addPair(m_target.Atom(intermediate[i]));
+    }
+
+    int i = reference.AtomCount();
+    //for (int i = reference.AtomCount(); i < m_reference.AtomCount(); ++i) {
+    Molecule reference_local(reference);
+    int element_local = m_reference.Atom(i).first;
+    reference_local.addPair(m_reference.Atom(i));
+    double rmsd = 1e22;
+    std::map<double, int> match;
+
+    for (int j = 0; j < m_target.AtomCount(); ++j) {
+        if (elements_target[j] == element_local) {
+            Molecule target_local(target);
+            if (target_local.addPair(m_target.Atom(j))) {
+                double rmsd_local = CalculateRMSD(reference_local, target_local);
+                if (target_local.AtomCount() < m_target.AtomCount()) {
+                    rmsd = rmsd_local;
+                    match.insert(std::pair<double, int>(rmsd_local, j));
+                } else {
+                    std::vector<int> inter = intermediate;
+                    inter.push_back(j);
+                    m_results.insert(std::pair<double, std::vector<int>>(rmsd_local, inter));
+                }
+            }
+        }
+    }
+    for (const auto& element : match) {
+        std::vector<int> temp = intermediate;
+        temp.push_back(element.second);
+        m_storage[temp.size() - 1].addItem(temp, element.first);
+    }
+}
+
+void RMSDDriver::ReorderConstrainedConnectivity()
+{
+    double scaling = 1.5;
+    int inter_size = m_reference.AtomCount() * (m_reference.AtomCount() - 1);
+    m_storage = std::vector<IntermediateStorage>(m_reference.AtomCount() - 1, IntermediateStorage(inter_size));
+
+    /* Lets initialise a molecule with two atom from the reference */
+    InitialisePair();
+
+    m_rmsd = CalculateRMSD(m_reference, m_target) / double(m_reference.AtomCount());
+
+    while (m_intermediate_results.size()) {
+        std::vector<int> inter = m_intermediate_results.front();
+        //std::cout << inter.size() << std::endl;
+        //if(inter.size() <  m_target.AtomCount())
+        SolveIntermediate(inter);
+        m_intermediate_results.pop();
+    }
+
+    for (int i = 0; i < m_storage.size(); ++i) {
+        std::cout << double(i) / double(m_reference.AtomCount()) * 100 << " % done " << std::endl;
+
+        for (const auto& element : (*m_storage[i].data())) {
+            int index = element.second.size();
+            //std::cout << m_reference.Atom(i).first << " " << std::endl;
+            SolveIntermediate(element.second);
+        }
+    }
+
+    int count = 0;
+    std::vector<int> intermediate;
     for (const auto& element : m_results) {
         for (int i = 0; i < element.second.size(); i++) {
             m_target_reordered.addPair(m_target.Atom(element.second[i]));
         }
         m_rmsd = CalculateRMSD(m_reference, m_target_reordered);
 
+        std::vector<std::vector<int>> connectivity;
         count++;
         if (count == 1)
             break;
@@ -220,7 +346,7 @@ void RMSDDriver::ReorderMolecule()
     return;
 }
 
-void RMSDDriver::SolveIntermediate(std::vector<int> intermediate)
+void RMSDDriver::SolveIntermediateConstrained(std::vector<int> intermediate)
 {
     Molecule reference;
     Molecule target;

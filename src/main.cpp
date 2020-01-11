@@ -152,7 +152,7 @@ int main(int argc, char **argv) {
             if(argc != 6)
             {
                 std::cerr << "Please use curcuma for hydrogen bond analysis as follows\ncurcuma -hbonds A.xyz index_donor index_proton index_acceptor" << std::endl;
-                exit;
+                return -1;
             }
 
             std::cerr << "Opening file " << argv[2] << std::endl;

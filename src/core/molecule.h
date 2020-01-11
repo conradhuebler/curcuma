@@ -20,6 +20,7 @@
 #pragma once
 
 #include <array>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -62,11 +63,16 @@ class Molecule
     Geometry getGeometry() const;
     bool setGeometry(const Geometry &geometry);
     Position Centroid(bool hydrogen = true) const;
-    inline int AtomCount() const { return m_atoms.size(); }
+    inline std::size_t AtomCount() const { return m_atoms.size(); }
     std::vector<int> Atoms() const { return m_atoms; }
     std::pair<int, Position> Atom(int i) const;
 
     void writeXYZFile(const std::string& filename);
+
+    std::vector<int> BoundHydrogens(int atom, double scaling = 1.5) const;
+    std::map<int, std::vector<int>> getConnectivtiy(double scaling = 1.5, int latest = -1) const;
+
+    void PrintConnectivitiy(double scaling = 1.5) const;
 
 private:
     void InitialiseEmptyGeometry(int atoms);

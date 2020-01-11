@@ -86,7 +86,14 @@ public:
     Molecule getFitIndex(int index);
 
 private:
+    void ReorderStraight();
+    void ReorderConstrainedConnectivity();
+
+    void InitialisePair();
+
     void SolveIntermediate(std::vector<int> intermediate);
+    void SolveIntermediateConstrained(std::vector<int> intermediate);
+
     Eigen::Matrix3d BestFitRotation(const Molecule& reference, const Molecule& target, int factor = 1) const;
     Geometry CenterMolecule(const Molecule &mol) const;
 
@@ -94,6 +101,7 @@ private:
     bool m_force_reorder = false;
     std::queue<std::vector<int>> m_intermediate_results;
     std::map<double, std::vector<int>> m_results;
+    std::map<int, std::vector<int>> m_connectivity;
     std::vector<IntermediateStorage> m_storage;
     double m_rmsd = 0, m_rmsd_raw = 0;
     int m_hit = 1;
