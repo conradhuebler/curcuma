@@ -60,9 +60,12 @@ class Molecule
     bool addPair(const std::pair<int, Position>& atom);
     double Distance(int i, int j) const;
 
-    Geometry getGeometry() const;
+    Geometry getGeometry(int first = 0, int last = -1) const;
+    Geometry getGeometry(std::vector<int> atoms) const;
+    Geometry getGeometryByFragment(int fragment) const;
+
     bool setGeometry(const Geometry &geometry);
-    Position Centroid(bool hydrogen = true) const;
+    Position Centroid(bool hydrogen = true, int fragment = -1) const;
     inline std::size_t AtomCount() const { return m_atoms.size(); }
     std::vector<int> Atoms() const { return m_atoms; }
     std::pair<int, Position> Atom(int i) const;
@@ -74,13 +77,14 @@ class Molecule
 
     void PrintConnectivitiy(double scaling = 1.5) const;
 
+    std::vector<std::vector<int>> GetFragments();
+
 private:
     void InitialiseEmptyGeometry(int atoms);
 
     int m_charge = 0;
-    int *zvals;
     std::vector< std::array<double, 3> > geom;
     std::vector<int> m_atoms;
-
+    std::vector<std::vector<int>> m_fragments;
     string point_group;
 };

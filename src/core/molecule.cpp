@@ -236,17 +236,42 @@ void Molecule::LoadMolecule(const Molecule* molecule)
     setGeometry(molecule->getGeometry());
 }
 
-Geometry Molecule::getGeometry() const
+Geometry Molecule::getGeometry(int start, int end) const
 {
+    if (start < 0 || start >= geom.size())
+        start = 0;
+
+    if (end < 0 || end >= geom.size())
+        end = geom.size();
+
     Geometry geometry(geom.size(), 3);
 
-    for(int i = 0; i < geom.size(); ++i)
-    {
+    for (int i = start; i < end; ++i) {
         geometry(i, 0) = geom[i][0];
         geometry(i, 1) = geom[i][1];
         geometry(i, 2) = geom[i][2];
     }
     return geometry;
+}
+
+Geometry Molecule::getGeometry(std::vector<int> atoms) const
+{
+    Geometry geometry(geom.size(), 3);
+
+    for (int i : atoms) {
+        geometry(i, 0) = geom[i][0];
+        geometry(i, 1) = geom[i][1];
+        geometry(i, 2) = geom[i][2];
+    }
+    return geometry;
+}
+
+Geometry Molecule::getGeometryByFragment(int fragment) const
+{
+    if (fragment == -1)
+        return getGeometry();
+    else
+        return getGeometry(m_fragments[fragment]);
 }
 
 bool Molecule::setGeometry(const Geometry &geometry)
@@ -264,10 +289,10 @@ bool Molecule::setGeometry(const Geometry &geometry)
     return true;
 }
 
-Position  Molecule::Centroid(bool hydrogen) const
+Position Molecule::Centroid(bool hydrogen, int fragment) const
 {
     Position position = {0 , 0 , 0};
-    Geometry geom = getGeometry();
+    Geometry geom = getGeometry(fragment);
     if(hydrogen)
     {
         for(int i = 0; i < geom.rows(); ++i)
@@ -350,4 +375,38 @@ void Molecule::PrintConnectivitiy(double scaling) const
             }
         }
     }
+}
+
+std::vector<std::vector<int>> Molecule::GetFragments()
+{
+    double scaling = 1.5;
+    if (m_fragments.size() > 0)
+        return m_fragments;
+
+    std::vector<int> fragment, atoms, cached;
+    for (std::size_t i = 0; i < m_atoms.size(); ++i)
+        atoms.push_back(i);
+
+    while (atoms.size()) {
+        fragment.push_back(atoms.at(0));
+        atoms.erase(atoms.begin());
+        for (std::size_t i = 0; i < fragment.size(); ++i) {
+            for (std::size_t j = 0; j < atoms.size(); ++j) {
+                double distance = Distance(fragment[i], atoms[j]);
+                //std::cout << "Fragment No: " << m_fragments.size() + 1 << " ("<< fragment.size() <<")  ##  Atom " << fragment[i] << " (Index " << i << ") and Atom " << atoms[j] << " - Distance: " << distance << " Thresh " << (Elements::CovalentRadius[Atom(fragment[i]).first] + Elements::CovalentRadius[Atom(atoms[j]).first]);
+                if (distance < (Elements::CovalentRadius[Atom(fragment[i]).first] + Elements::CovalentRadius[Atom(atoms[j]).first]) * scaling) {
+                    //std::cout << " ... taken " << std::endl;
+                    fragment.push_back(atoms.at(j));
+                    atoms.erase(atoms.begin() + j);
+                    --j; // We have to decrease the atom vector counter since it got one element removed and we dont want to skip single elements
+                } //else
+                //   std::cout  << std::endl;
+            }
+        }
+
+        m_fragments.push_back(fragment);
+        fragment.clear();
+    }
+
+    return m_fragments;
 }

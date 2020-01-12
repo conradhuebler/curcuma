@@ -85,14 +85,15 @@ public:
     /*! \brief Get n'th/rd best fit result */
     Molecule getFitIndex(int index);
 
+    /*! \brief Set the index of the fragment that is used for rmsd calculation/atom reordering */
+    inline void setFragment(int fragment) { m_fragment = fragment; }
+
 private:
     void ReorderStraight();
-    void ReorderConstrainedConnectivity();
 
     void InitialisePair();
 
     void SolveIntermediate(std::vector<int> intermediate);
-    void SolveIntermediateConstrained(std::vector<int> intermediate);
 
     bool CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) const;
     bool CheckConnectivitiy(const Molecule& mol1) const;
@@ -107,5 +108,5 @@ private:
     std::map<int, std::vector<int>> m_connectivity;
     std::vector<IntermediateStorage> m_storage;
     double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5;
-    int m_hit = 1;
+    int m_hit = 1, m_fragment = -1;
 };
