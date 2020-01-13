@@ -18,6 +18,7 @@
  */
 
 #include "elements.h"
+#include "src/tools/geometry.h"
 
 #include <array>
 #include <cmath>
@@ -38,6 +39,12 @@ void Molecule::print_geom() const
     for (int i = 0; i < AtomCount(); i++) {
         printf("%s %8.5f %8.5f %8.5f\n", Elements::ElementAbbr[m_atoms[i]].c_str(), geom[i][0], geom[i][1], geom[i][2]);
     }
+    std::cout << std::endl
+              << std::endl
+              << "***********************************************************" << std::endl;
+    std::cout << "**         Center of Mass = " << Centroid().transpose() << std::endl;
+    std::cout << "**         Number of Fragments = " << GetFragments().size() << std::endl;
+    std::cout << "***********************************************************" << std::endl;
 }
 
 void Molecule::printAtom(int i) const
@@ -77,6 +84,7 @@ void Molecule::InitialiseEmptyGeometry(int atoms)
         std::array<double, 3> atom = { 0, 0, 0 };
         geom.push_back(atom);
     }
+    m_dirty = true;
 }
 
 bool Molecule::addPair(const std::pair<int, Position>& atom)
@@ -90,6 +98,9 @@ bool Molecule::addPair(const std::pair<int, Position>& atom)
         for (int j = i + 1; j < AtomCount(); ++j)
             if (Distance(i, j) < 1e-6)
                 exist = false;
+
+    m_dirty = true;
+
     return exist;
 }
 
@@ -174,7 +185,8 @@ void Molecule::setAtom(const std::string& internal, int i)
         geom[i][1] = y;
         geom[i][2] = z;
     }
-        
+
+    m_dirty = true;
 }
 
 void Molecule::setXYZ(const std::string& internal, int i)
@@ -209,13 +221,15 @@ void Molecule::setXYZ(const std::string& internal, int i)
         geom[i][1] = y;
         geom[i][2] = z;
     }
-        
+
+    m_dirty = true;
 }
 
 void Molecule::clear()
 {
     m_atoms.clear();
     geom.clear();
+    m_dirty = true;
 }
 
 void Molecule::LoadMolecule(const Molecule& molecule)
@@ -236,8 +250,11 @@ void Molecule::LoadMolecule(const Molecule* molecule)
     setGeometry(molecule->getGeometry());
 }
 
-Geometry Molecule::getGeometry(int start, int end) const
+Geometry Molecule::getGeometry(const IntPair& pair, bool protons) const
 {
+    int start = pair.first;
+    int end = pair.second;
+
     if (start < 0 || start >= geom.size())
         start = 0;
 
@@ -245,33 +262,61 @@ Geometry Molecule::getGeometry(int start, int end) const
         end = geom.size();
 
     Geometry geometry(geom.size(), 3);
+    int index = 0;
 
-    for (int i = start; i < end; ++i) {
-        geometry(i, 0) = geom[i][0];
-        geometry(i, 1) = geom[i][1];
-        geometry(i, 2) = geom[i][2];
+    if (protons) {
+        for (int i = start; i < end; ++i) {
+            geometry(index, 0) = geom[i][0];
+            geometry(index, 1) = geom[i][1];
+            geometry(index, 2) = geom[i][2];
+            index++;
+        }
+    } else {
+        for (int i = start; i < end; ++i) {
+            if (m_atoms[i] != 1) {
+                geometry(index, 0) = geom[i][0];
+                geometry(index, 1) = geom[i][1];
+                geometry(index, 2) = geom[i][2];
+                index++;
+            }
+        }
     }
-    return geometry;
+    return geometry.block(0, 0, index, 3);
+    ;
 }
 
-Geometry Molecule::getGeometry(std::vector<int> atoms) const
+Geometry Molecule::getGeometry(std::vector<int> atoms, bool protons) const
 {
     Geometry geometry(geom.size(), 3);
 
-    for (int i : atoms) {
-        geometry(i, 0) = geom[i][0];
-        geometry(i, 1) = geom[i][1];
-        geometry(i, 2) = geom[i][2];
+    int index = 0;
+    if (protons) {
+        for (int i : atoms) {
+            geometry(index, 0) = geom[i][0];
+            geometry(index, 1) = geom[i][1];
+            geometry(index, 2) = geom[i][2];
+            index++;
+        }
+    } else {
+        for (int i : atoms) {
+            if (m_atoms[i] != 1) {
+                geometry(index, 0) = geom[i][0];
+                geometry(index, 1) = geom[i][1];
+                geometry(index, 2) = geom[i][2];
+                index++;
+            }
+        }
     }
-    return geometry;
+    return geometry.block(0, 0, index, 3);
+    ;
 }
 
-Geometry Molecule::getGeometryByFragment(int fragment) const
+Geometry Molecule::getGeometryByFragment(int fragment, bool protons) const
 {
     if (fragment == -1)
-        return getGeometry();
+        return getGeometry(protons);
     else
-        return getGeometry(m_fragments[fragment]);
+        return getGeometry(m_fragments[fragment], protons);
 }
 
 bool Molecule::setGeometry(const Geometry &geometry)
@@ -289,23 +334,9 @@ bool Molecule::setGeometry(const Geometry &geometry)
     return true;
 }
 
-Position Molecule::Centroid(bool hydrogen, int fragment) const
+Position Molecule::Centroid(bool protons, int fragment) const
 {
-    Position position = {0 , 0 , 0};
-    Geometry geom = getGeometry(fragment);
-    if(hydrogen)
-    {
-        for(int i = 0; i < geom.rows(); ++i)
-        {
-            position += geom.row(i);
-        }
-
-        position /= double(geom.rows());
-    }else
-    {
-        throw -1;
-    }
-    return position;
+    return GeometryTools::Centroid(getGeometryByFragment(fragment, protons));
 }
 
 std::pair<int, Position> Molecule::Atom(int i) const
@@ -377,10 +408,10 @@ void Molecule::PrintConnectivitiy(double scaling) const
     }
 }
 
-std::vector<std::vector<int>> Molecule::GetFragments()
+std::vector<std::vector<int>> Molecule::GetFragments() const
 {
     double scaling = 1.5;
-    if (m_fragments.size() > 0)
+    if (m_fragments.size() > 0 && !m_dirty)
         return m_fragments;
 
     std::vector<int> fragment, atoms, cached;
@@ -407,6 +438,6 @@ std::vector<std::vector<int>> Molecule::GetFragments()
         m_fragments.push_back(fragment);
         fragment.clear();
     }
-
+    m_dirty = false;
     return m_fragments;
 }

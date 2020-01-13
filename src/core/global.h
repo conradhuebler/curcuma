@@ -26,6 +26,7 @@ const double pi = 3.14159265359;
 typedef Eigen::MatrixXd Geometry;
 typedef Eigen::Vector3d Position;
 typedef Eigen::VectorXd Vector;
+typedef std::pair<int, int> IntPair;
 
 inline Vector PositionPair2Vector(const std::pair<Position, Position>& pair)
 {

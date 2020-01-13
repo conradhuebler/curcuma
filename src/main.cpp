@@ -108,9 +108,11 @@ int main(int argc, char **argv) {
         }
 
         mol1.print_geom();
+        mol2.print_geom();
 
         RMSDDriver *driver = new RMSDDriver(mol1, mol2);
         driver->setForceReorder(reorder);
+        // driver->setFragment(1);
         driver->AutoPilot();
         std::cout << "RMSD for two molecules " << driver->RMSD() << std::endl;
 

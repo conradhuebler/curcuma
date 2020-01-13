@@ -59,7 +59,7 @@ void RMSDDriver::AutoPilot()
     m_target_aligned.LoadMolecule(target);
 }
 
-Eigen::Matrix3d RMSDDriver::BestFitRotation(const Molecule& reference_mol, const Molecule& target_mol, int factor) const
+Eigen::Matrix3d RMSDDriver::BestFitRotation(const Geometry& reference_mol, const Geometry& target_mol, int factor) const
 {
     /* The rmsd kabsch algorithmn was adopted from here:
  * https://github.com/oleg-alexandrov/projects/blob/master/eigen/Kabsch.cpp
@@ -87,17 +87,22 @@ Eigen::Matrix3d RMSDDriver::BestFitRotation(const Molecule& reference_mol, const
     return svd.matrixV() * I * svd.matrixU().transpose();
 }
 
+Eigen::Matrix3d RMSDDriver::BestFitRotation(const Molecule& reference_mol, const Molecule& target_mol, int factor) const
+{
+    return BestFitRotation(reference_mol.getGeometryByFragment(m_fragment, m_protons), target_mol.getGeometryByFragment(m_fragment, m_protons), factor);
+}
+
 double RMSDDriver::CalculateRMSD(const Molecule& reference_mol, const Molecule& target_mol, Molecule* ret_ref, Molecule* ret_tar, int factor) const
 {
     Eigen::Matrix3d R = BestFitRotation(reference_mol, target_mol, factor);
 
     double rmsd = 0;
+    int fragment = m_fragment;
 
-    Geometry reference = CenterMolecule(reference_mol);
-    Geometry target = CenterMolecule(target_mol);
+    Geometry reference = GeometryTools::TranslateGeometry(reference_mol.getGeometry(), GeometryTools::Centroid(m_reference.getGeometryByFragment(m_fragment)), Position{ 0, 0, 0 }); // CenterMolecule(reference_mol);
+    Geometry target = GeometryTools::TranslateGeometry(target_mol.getGeometry(), GeometryTools::Centroid(target_mol.getGeometryByFragment(m_fragment)), Position{ 0, 0, 0 }); //CenterMolecule(target_mol);
     Eigen::MatrixXd tar = target.transpose();
 
-    // std::cout << std::endl << R << std::endl << std::endl;
 
     Geometry rotated = tar.transpose()*R;
 
@@ -111,17 +116,17 @@ double RMSDDriver::CalculateRMSD(const Molecule& reference_mol, const Molecule& 
 
     if (ret_tar != nullptr) {
         ret_tar->LoadMolecule(target_mol);
-        rotated.transposeInPlace();
         ret_tar->setGeometry(rotated);
     }
 
     if (ret_ref != nullptr) {
         ret_ref->LoadMolecule(reference_mol);
-        reference.transposeInPlace();
         ret_ref->setGeometry(reference);
     }
+    m_fragment = fragment;
     return sqrt(rmsd);
 }
+
 std::vector<double> RMSDDriver::IndivRMSD(const Molecule& reference_mol, const Molecule& target_mol, int factor) const
 {
     Eigen::Matrix3d R = BestFitRotation(reference_mol, target_mol, factor);
@@ -153,7 +158,13 @@ double RMSDDriver::CalculateRMSD()
 
 Geometry RMSDDriver::CenterMolecule(const Molecule &mol) const
 {
-    return GeometryTools::TranslateMolecule(mol, mol.Centroid(), Position{0, 0, 0});
+    const Geometry cached = mol.getGeometryByFragment(m_fragment, m_protons);
+    return GeometryTools::TranslateGeometry(cached, GeometryTools::Centroid(cached), Position{ 0, 0, 0 });
+}
+
+Geometry RMSDDriver::CenterMolecule(const Geometry& mol) const
+{
+    return GeometryTools::TranslateGeometry(mol, GeometryTools::Centroid(mol), Position{ 0, 0, 0 });
 }
 
 bool RMSDDriver::CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) const

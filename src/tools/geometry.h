@@ -144,4 +144,17 @@ inline double Distance(const Position& a, const Position& b)
     distance = sqrt((a(0) - b(0)) * (a(0) - b(0)) + (a(1) - b(1)) * (a(1) - b(1)) + (a(2) - b(2)) * (a(2) - b(2)));
     return distance;
 }
+
+inline Position Centroid(const Geometry& geom)
+{
+    Position position{ 0, 0, 0 };
+
+    for (int i = 0; i < geom.rows(); ++i) {
+        position += geom.row(i);
+    }
+
+    position /= double(geom.rows());
+
+    return position;
+}
 }

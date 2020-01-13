@@ -43,9 +43,7 @@ class Molecule
     inline int Charge() const { return m_charge; }
     void setCharge(int charge) { m_charge = charge; }
 
-    //     void rotate(double phi);
     void translate(double x, double y, double z);
-//     double bond(int atom1, int atom2) const;
     double angle(int atom1, int atom2, int atom3) const;
     double DotProduct(std::array<double, 3> pos1, std::array<double, 3> pos2) const;
 //     double torsion(int atom1, int atom2, int atom3, int atom4);
@@ -60,9 +58,10 @@ class Molecule
     bool addPair(const std::pair<int, Position>& atom);
     double Distance(int i, int j) const;
 
-    Geometry getGeometry(int first = 0, int last = -1) const;
-    Geometry getGeometry(std::vector<int> atoms) const;
-    Geometry getGeometryByFragment(int fragment) const;
+    Geometry getGeometry(const IntPair& pair, bool protons = true) const;
+    Geometry getGeometry(std::vector<int> atoms, bool protons = true) const;
+    Geometry getGeometryByFragment(int fragment, bool protons = true) const;
+    inline Geometry getGeometry(bool protons = true) const { return getGeometry(IntPair(0, -1), protons); }
 
     bool setGeometry(const Geometry &geometry);
     Position Centroid(bool hydrogen = true, int fragment = -1) const;
@@ -77,7 +76,8 @@ class Molecule
 
     void PrintConnectivitiy(double scaling = 1.5) const;
 
-    std::vector<std::vector<int>> GetFragments();
+    /*! \brief Return Fragments, will be determined on first call, then stored */
+    std::vector<std::vector<int>> GetFragments() const;
 
 private:
     void InitialiseEmptyGeometry(int atoms);
@@ -85,6 +85,7 @@ private:
     int m_charge = 0;
     std::vector< std::array<double, 3> > geom;
     std::vector<int> m_atoms;
-    std::vector<std::vector<int>> m_fragments;
+    mutable std::vector<std::vector<int>> m_fragments;
     string point_group;
+    mutable bool m_dirty = true;
 };
