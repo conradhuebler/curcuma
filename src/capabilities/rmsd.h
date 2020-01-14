@@ -98,6 +98,12 @@ public:
     /*! \brief Force Connectivitiy Check */
     inline bool CheckConnections() const { return m_check_connections; }
 
+    /*! \brief Number of Proton changes allowed */
+    inline int ProtonTransfer() const { return m_pt; }
+
+    /*! \brief Set number of allowed proton transfer */
+    inline void setProtonTransfer(int pt) { m_pt = pt; }
+
 private:
     void ReorderStraight();
 
@@ -115,12 +121,12 @@ private:
     Geometry CenterMolecule(const Geometry& mol) const;
 
     Molecule m_reference, m_target, m_reference_aligned, m_target_aligned, m_target_reordered;
-    bool m_force_reorder = false, m_protons = true;
+    bool m_force_reorder = false, m_protons = true, m_print_intermediate = false;
     std::queue<std::vector<int>> m_intermediate_results;
     std::map<double, std::vector<int>> m_results;
     std::map<int, std::vector<int>> m_connectivity;
     std::vector<IntermediateStorage> m_storage;
     double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_check_connections = false;
-    int m_hit = 1;
+    int m_hit = 1, m_pt = 0;
     mutable int m_fragment = -1;
 };

@@ -102,7 +102,7 @@ int main(int argc, char **argv) {
         Molecule mol2 = LoadFile(argv[3]);
 
         bool reorder = false, check_connect = false;
-        int fragment = -1;
+        int fragment = -1, pt = 0;
         if (argc >= 5) {
 
             for (std::size_t i = 4; i < argc; ++i) {
@@ -110,6 +110,15 @@ int main(int argc, char **argv) {
                 if (strcmp(argv[i], "-fragment") == 0) {
                     if (i + 1 < argc) {
                         fragment = std::stoi(argv[i + 1]);
+                        ++i;
+                    }
+                    ++i;
+                    continue;
+                }
+
+                if (strcmp(argv[i], "-pt") == 0) {
+                    if (i + 1 < argc) {
+                        pt = std::stoi(argv[i + 1]);
                         ++i;
                     }
                     ++i;

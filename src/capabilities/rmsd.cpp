@@ -18,6 +18,7 @@
  */
 
 #include "src/core/molecule.h"
+#include "src/tools/general.h"
 #include "src/tools/geometry.h"
 
 #include <cstring>
@@ -182,14 +183,45 @@ bool RMSDDriver::CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) 
         return false;
 
     int match = 0;
+    if (m_print_intermediate)
+        std::cout << std::endl
+                  << std::endl
+                  << " *** Connectivitiy check will be performed ***" << std::endl
+                  << std::endl;
     for (std::size_t i = 0; i < connect_1.size(); ++i) {
         auto target = connect_1[i];
 
         auto reference = connect_2[i];
+        std::cout << "vector difference " << Tools::VectorDifference(reference, target) << std::endl;
         if (reference == target) {
+            if (m_print_intermediate) {
+                std::cout << i << " matches. Fine!" << std::endl;
+                for (const auto& i : reference)
+                    std::cout << " " << i;
+                std::cout << std::endl;
+
+                for (const auto& i : target)
+                    std::cout << " " << i;
+                std::cout << std::endl;
+            }
             match++;
+        } else {
+            if (m_print_intermediate) {
+                std::cout << "No match for " << i << std::endl;
+                for (const auto& i : reference)
+                    std::cout << " " << i;
+                std::cout << std::endl;
+
+                for (const auto& i : target)
+                    std::cout << " " << i;
+                std::cout << std::endl;
+            }
         }
     }
+    std::cout << std::endl
+              << std::endl
+              << " *** Connectivitiy check done! ***" << std::endl
+              << std::endl;
 
     return match == connect_1.size();
 }
@@ -202,15 +234,49 @@ bool RMSDDriver::CheckConnectivitiy(const Molecule& mol1) const
     if (m_connectivity.size() != connect.size())
         return false;
 
+    if (m_print_intermediate)
+        std::cout << std::endl
+                  << std::endl
+                  << " *** Connectivitiy check will be performed ***" << std::endl
+                  << std::endl;
+
     int match = 0;
     for (std::size_t i = 0; i < connect.size(); ++i) {
         auto target = connect[i];
 
         auto reference = m_connectivity.at(i);
+        std::cout << "vector difference " << Tools::VectorDifference(reference, target) << std::endl;
+
         if (reference == target) {
+            if (m_print_intermediate) {
+                std::cout << i << " matches. Fine!" << std::endl;
+                for (const auto& i : reference)
+                    std::cout << " " << i;
+                std::cout << std::endl;
+
+                for (const auto& i : target)
+                    std::cout << " " << i;
+                std::cout << std::endl;
+            }
             match++;
+        } else {
+            if (m_print_intermediate) {
+                std::cout << "No match for " << i << std::endl;
+                for (const auto& i : reference)
+                    std::cout << " " << i;
+                std::cout << std::endl;
+
+                for (const auto& i : target)
+                    std::cout << " " << i;
+                std::cout << std::endl;
+            }
         }
     }
+    if (m_print_intermediate)
+        std::cout << std::endl
+                  << std::endl
+                  << " *** Connectivitiy check done! ***" << std::endl
+                  << std::endl;
 
     return match == connect.size();
 }
@@ -284,7 +350,7 @@ void RMSDDriver::ReorderStraight()
 
     int count = 0;
     std::vector<int> intermediate;
-
+    m_print_intermediate = true;
     for (const auto& element : m_results) {
         Molecule mol2;
         for (int i = 0; i < element.second.size(); i++) {
@@ -300,8 +366,9 @@ void RMSDDriver::ReorderStraight()
             break;
         }
         count++;
+        break;
     }
-
+    m_print_intermediate = false;
     return;
 }
 
