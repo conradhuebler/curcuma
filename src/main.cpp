@@ -101,10 +101,33 @@ int main(int argc, char **argv) {
         Molecule mol1 = LoadFile(argv[2]);
         Molecule mol2 = LoadFile(argv[3]);
 
-        bool reorder = false;
-        if (argc == 5) {
-            if (strcmp(argv[4], "-reorder"))
-                reorder = true;
+        bool reorder = false, check_connect = false;
+        int fragment = -1;
+        if (argc >= 5) {
+
+            for (std::size_t i = 4; i < argc; ++i) {
+                // std::cout << argv[i] << " " << strcmp(argv[i], "-fragment") << std::endl;
+                if (strcmp(argv[i], "-fragment") == 0) {
+                    if (i + 1 < argc) {
+                        fragment = std::stoi(argv[i + 1]);
+                        ++i;
+                    }
+                    ++i;
+                    continue;
+                }
+
+                if (strcmp(argv[i], "-reorder") == 0) {
+                    reorder = true;
+                    ++i;
+                    continue;
+                }
+
+                if (strcmp(argv[i], "-check") == 0) {
+                    check_connect = true;
+                    ++i;
+                    continue;
+                }
+            }
         }
 
         mol1.print_geom();
@@ -112,7 +135,8 @@ int main(int argc, char **argv) {
 
         RMSDDriver *driver = new RMSDDriver(mol1, mol2);
         driver->setForceReorder(reorder);
-        // driver->setFragment(1);
+        driver->setFragment(fragment);
+        driver->setCheckConnections(check_connect);
         driver->AutoPilot();
         std::cout << "RMSD for two molecules " << driver->RMSD() << std::endl;
 

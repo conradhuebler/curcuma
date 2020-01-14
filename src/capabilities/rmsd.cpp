@@ -39,6 +39,11 @@ RMSDDriver::RMSDDriver(const Molecule &reference, const Molecule &target)
 
 void RMSDDriver::AutoPilot()
 {
+    if (m_fragment < -1 || m_fragment > m_reference.GetFragments().size() || m_fragment > m_target.GetFragments().size()) {
+        std::cout << "*** Index of Fragment ( " << m_fragment << " ) is invalid, I will just use the whole molecule (Sometimes false negative ... - WIP) . ***" << std::endl;
+        m_fragment = -1;
+    }
+
     m_rmsd_raw = CalculateRMSD(m_reference, m_target);
 
     if (m_reference.Atoms() != m_target.Atoms() || ForceReorder()) {
@@ -326,7 +331,10 @@ void RMSDDriver::SolveIntermediate(std::vector<int> intermediate)
                 double rmsd_local = CalculateRMSD(reference_local, target_local);
                 if (target_local.AtomCount() < m_target.AtomCount()) {
                     rmsd = rmsd_local;
-                    if (CheckConnectivitiy(reference_local, target_local))
+                    if (CheckConnections()) {
+                        if (CheckConnectivitiy(reference_local, target_local))
+                            match.insert(std::pair<double, int>(rmsd_local, j));
+                    } else
                         match.insert(std::pair<double, int>(rmsd_local, j));
                 } else {
                     std::vector<int> inter = intermediate;

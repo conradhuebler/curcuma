@@ -80,7 +80,7 @@ public:
     /*! \brief Force Reordering, even the sequence of elements are equal */
     inline void setForceReorder(bool reorder) { m_force_reorder = reorder; }
 
-    /*! \brief Check, if Reordering is force */
+    /*! \brief Check, if Reordering is forced */
     inline bool ForceReorder() const { return m_force_reorder; }
 
     /*! \brief Get n'th/rd best fit result */
@@ -91,6 +91,12 @@ public:
 
     /*! \brief Set to use protons (true = default or false) */
     inline void setProtons(bool protons) { m_protons = protons; }
+
+    /*! \brief Set Connectivitiy Check forced (true or false = default) */
+    inline void setCheckConnections(bool check) { m_check_connections = check; }
+
+    /*! \brief Force Connectivitiy Check */
+    inline bool CheckConnections() const { return m_check_connections; }
 
 private:
     void ReorderStraight();
@@ -114,7 +120,7 @@ private:
     std::map<double, std::vector<int>> m_results;
     std::map<int, std::vector<int>> m_connectivity;
     std::vector<IntermediateStorage> m_storage;
-    double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5;
+    double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_check_connections = false;
     int m_hit = 1;
     mutable int m_fragment = -1;
 };
