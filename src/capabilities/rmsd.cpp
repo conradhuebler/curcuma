@@ -38,21 +38,27 @@ RMSDDriver::RMSDDriver(const Molecule &reference, const Molecule &target)
 
 }
 
+RMSDDriver::RMSDDriver(const Molecule* reference, const Molecule* target)
+    : m_reference(reference)
+    , m_target(target)
+{
+}
+
 void RMSDDriver::AutoPilot()
 {
     if (m_fragment < -1 || m_fragment > m_reference.GetFragments().size() || m_fragment > m_target.GetFragments().size()) {
-        std::cout << "*** Index of Fragment ( " << m_fragment << " ) is invalid, I will just use the whole molecule (Sometimes false negative ... - WIP) . ***" << std::endl;
+        std::cerr << "*** Index of Fragment ( " << m_fragment << " ) is invalid, I will just use the whole molecule (Sometimes false negative ... - WIP) . ***" << std::endl;
         m_fragment = -1;
     }
 
     m_rmsd_raw = CalculateRMSD(m_reference, m_target);
 
     if (m_reference.Atoms() != m_target.Atoms() || ForceReorder()) {
-        std::cout << "Molecules are different. What now?\n";
+        std::cerr << "Molecules are different. What now?\n";
 
         if (m_reference.AtomCount() == m_target.AtomCount()) {
-            std::cout << "Try to reorder the structures?\n";
-            std::cout << "Initial RMSD is " << m_rmsd_raw << std::endl;
+            std::cerr << "Try to reorder the structures?\n";
+            std::cerr << "Initial RMSD is " << m_rmsd_raw << std::endl;
             ReorderMolecule();
         }
     } else

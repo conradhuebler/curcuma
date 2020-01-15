@@ -35,15 +35,16 @@ class Molecule
 {
   public:
     Molecule(int n, int q = 0);
+    Molecule(const Molecule* other);
+    Molecule(const Molecule& other);
     Molecule();
     ~Molecule();
 
-    void print_geom() const;
+    void print_geom(bool moreinfo = true) const;
     void printAtom(int i) const;
     inline int Charge() const { return m_charge; }
     void setCharge(int charge) { m_charge = charge; }
 
-    void translate(double x, double y, double z);
     double angle(int atom1, int atom2, int atom3) const;
     double DotProduct(std::array<double, 3> pos1, std::array<double, 3> pos2) const;
 //     double torsion(int atom1, int atom2, int atom3, int atom4);
@@ -70,6 +71,7 @@ class Molecule
     std::pair<int, Position> Atom(int i) const;
 
     void writeXYZFile(const std::string& filename);
+    inline void writeXYZFile() { writeXYZFile(Name() + ".xyz"); }
 
     std::vector<int> BoundHydrogens(int atom, double scaling = 1.5) const;
     std::map<int, std::vector<int>> getConnectivtiy(double scaling = 1.5, int latest = -1) const;
@@ -78,6 +80,14 @@ class Molecule
 
     /*! \brief Return Fragments, will be determined on first call, then stored */
     std::vector<std::vector<int>> GetFragments() const;
+
+    inline void setName(const std::string& name) { m_name = name; }
+
+    inline void setEnergy(double energy) { m_energy = energy; }
+
+    inline double Energy() const { return m_energy; }
+
+    inline std::string Name() const { return m_name; }
 
 private:
     void InitialiseEmptyGeometry(int atoms);
@@ -88,4 +98,6 @@ private:
     mutable std::vector<std::vector<int>> m_fragments;
     string point_group;
     mutable bool m_dirty = true;
+    std::string m_name;
+    double m_energy = 0;
 };

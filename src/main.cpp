@@ -19,8 +19,11 @@
 
 #include "src/core/molecule.h"
 
+#include "src/capabilities/confscan.h"
 #include "src/capabilities/docking.h"
 #include "src/capabilities/rmsd.h"
+
+#include "src/tools/general.h"
 
 #include <iostream>
 #include <string>
@@ -46,40 +49,7 @@ void Distance(const Molecule &mol, char **argv)
 
 }
 
-Molecule LoadFile(const string &filename)
-{
 
-    bool xyzfile = std::string(filename).find(".xyz") != std::string::npos;
-
-    if(xyzfile == false)
-        throw 1;
-
-    std::vector<std::string> lines;
-    std::ifstream input( filename );
-
-    int atoms = 0;
-    int index = 0;
-    int i = 0;
-
-    Molecule mol(atoms, 0);
-    for( std::string line; getline( input, line ); )
-    {
-        if(index == 0 && xyzfile)
-        {
-            atoms = stoi(line);
-            if(atoms < 1)
-                throw 2;
-            mol = Molecule(atoms, 0);
-        }
-        if(i > 1)
-        {
-            mol.setXYZ(line, i-2);
-        }
-        index++;
-        ++i;
-    }
-    return mol;
-}
 
 int main(int argc, char **argv) {
     
@@ -98,45 +68,45 @@ int main(int argc, char **argv) {
                 std::cerr << "Please use curcuma for rmsd calcultion as follows\ncurcuma -rmsd A.xyz B.xyz" << std::endl;
                 exit(1);
             }
-        Molecule mol1 = LoadFile(argv[2]);
-        Molecule mol2 = LoadFile(argv[3]);
+            Molecule mol1 = Tools::LoadFile(argv[2]);
+            Molecule mol2 = Tools::LoadFile(argv[3]);
 
-        bool reorder = false, check_connect = false;
-        int fragment = -1, pt = 0;
-        if (argc >= 5) {
+            bool reorder = false, check_connect = false;
+            int fragment = -1, pt = 0;
+            if (argc >= 5) {
 
-            for (std::size_t i = 4; i < argc; ++i) {
-                // std::cout << argv[i] << " " << strcmp(argv[i], "-fragment") << std::endl;
-                if (strcmp(argv[i], "-fragment") == 0) {
-                    if (i + 1 < argc) {
-                        fragment = std::stoi(argv[i + 1]);
+                for (std::size_t i = 4; i < argc; ++i) {
+                    // std::cout << argv[i] << " " << strcmp(argv[i], "-fragment") << std::endl;
+                    if (strcmp(argv[i], "-fragment") == 0) {
+                        if (i + 1 < argc) {
+                            fragment = std::stoi(argv[i + 1]);
+                            ++i;
+                        }
                         ++i;
+                        continue;
                     }
-                    ++i;
-                    continue;
-                }
 
-                if (strcmp(argv[i], "-pt") == 0) {
-                    if (i + 1 < argc) {
-                        pt = std::stoi(argv[i + 1]);
+                    if (strcmp(argv[i], "-pt") == 0) {
+                        if (i + 1 < argc) {
+                            pt = std::stoi(argv[i + 1]);
+                            ++i;
+                        }
                         ++i;
+                        continue;
                     }
-                    ++i;
-                    continue;
-                }
 
-                if (strcmp(argv[i], "-reorder") == 0) {
-                    reorder = true;
-                    ++i;
-                    continue;
-                }
+                    if (strcmp(argv[i], "-reorder") == 0) {
+                        reorder = true;
+                        ++i;
+                        continue;
+                    }
 
-                if (strcmp(argv[i], "-check") == 0) {
-                    check_connect = true;
-                    ++i;
-                    continue;
+                    if (strcmp(argv[i], "-check") == 0) {
+                        check_connect = true;
+                        ++i;
+                        continue;
+                    }
                 }
-            }
         }
 
         mol1.print_geom();
@@ -162,9 +132,8 @@ int main(int argc, char **argv) {
                 std::cerr << "Please use curcuma for rmsd calcultion as follows\ncurcuma -dock A.xyz B.xyz XXX YYY ZZZ" << std::endl;
                 exit(1);
             }
-            Molecule mol1 = LoadFile(argv[2]);
-            Molecule mol2 = LoadFile(argv[3]);
-
+            Molecule mol1 = Tools::LoadFile(argv[2]);
+            Molecule mol2 = Tools::LoadFile(argv[3]);
 
             Docking* docking = new Docking;
             docking->setHostStructure(mol1);
@@ -236,6 +205,41 @@ int main(int argc, char **argv) {
                 index++;
             }
 
+        } else if (strcmp(argv[1], "-confscan") == 0) {
+            if (argc < 3) {
+                std::cerr << "Please use curcuma for hydrogen bond analysis as follows\ncurcuma -confs conffile.xyz" << std::endl;
+                return -1;
+            }
+            bool writeXYZ = false;
+            int rank = 1e10;
+            if (argc >= 4) {
+
+                for (std::size_t i = 3; i < argc; ++i) {
+
+                    if (strcmp(argv[i], "-rank") == 0) {
+                        if (i + 1 < argc) {
+                            rank = std::stoi(argv[i + 1]);
+                            ++i;
+                        }
+                        ++i;
+                    }
+
+                    if (strcmp(argv[i], "-writeXYZ") == 0) {
+                        writeXYZ = true;
+                        ++i;
+                    }
+                }
+            }
+
+            std::cerr << "Opening file " << argv[2] << std::endl;
+
+            ConfScan* scan = new ConfScan;
+            scan->setFileName(argv[2]);
+            scan->setMaxRank(rank);
+            scan->setWriteXYZ(writeXYZ);
+            scan->scan();
+
+            return 0;
         } else {
             std::cerr << "Opening file " << argv[1] << std::endl;
             std::ifstream input(argv[1]);

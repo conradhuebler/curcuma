@@ -25,43 +25,13 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <istream>
 #include <map>
 #include <sstream>
 
 #include "molecule.h"
-
-void Molecule::print_geom() const
-{
-    std::cout << AtomCount() << endl
-              << endl;
-    for (int i = 0; i < AtomCount(); i++) {
-        printf("%s %8.5f %8.5f %8.5f\n", Elements::ElementAbbr[m_atoms[i]].c_str(), geom[i][0], geom[i][1], geom[i][2]);
-    }
-    std::cout << std::endl
-              << std::endl
-              << "***********************************************************" << std::endl;
-    std::cout << "**         Center of Mass = " << Centroid().transpose() << std::endl;
-    std::cout << "**         Number of Fragments = " << GetFragments().size() << std::endl;
-    std::cout << "***********************************************************" << std::endl;
-}
-
-void Molecule::printAtom(int i) const
-{
-    if (i < AtomCount())
-        printf("%s %8.5f %8.5f %8.5f", m_atoms[i], geom[i][0], geom[i][1], geom[i][2]);
-}
-
-
-void Molecule::translate(double x, double y, double z)
-{
-    for (int i = 0; i < AtomCount(); i++) {
-        geom[i][0] += x;
-        geom[i][1] += y;
-        geom[i][2] += z;
-    }
-}
 
 Molecule::Molecule(int n, int q)
 {
@@ -73,10 +43,53 @@ Molecule::Molecule()
 {
 }
 
-Molecule::~Molecule()
-{ 
-
+Molecule::Molecule(const Molecule& other)
+{
+    geom = other.geom;
+    m_charge = other.m_charge;
+    m_fragments = other.m_fragments;
+    m_atoms = other.m_atoms;
+    m_name = other.m_name;
+    m_energy = other.m_energy;
 }
+
+Molecule::Molecule(const Molecule* other)
+{
+    geom = other->geom;
+    m_charge = other->m_charge;
+    m_fragments = other->m_fragments;
+    m_atoms = other->m_atoms;
+    m_name = other->m_name;
+    m_energy = other->m_energy;
+}
+
+Molecule::~Molecule()
+{
+}
+
+void Molecule::print_geom(bool moreinfo) const
+{
+    std::cout << AtomCount() << std::endl;
+    std::cout << Name() << " " << std::setprecision(12) << Energy() << std::endl;
+    for (int i = 0; i < AtomCount(); i++) {
+        printf("%s %8.5f %8.5f %8.5f\n", Elements::ElementAbbr[m_atoms[i]].c_str(), geom[i][0], geom[i][1], geom[i][2]);
+    }
+    if (moreinfo) {
+        std::cout << std::endl
+                  << std::endl
+                  << "***********************************************************" << std::endl;
+        std::cout << "**         Center of Mass = " << Centroid().transpose() << std::endl;
+        std::cout << "**         Number of Fragments = " << GetFragments().size() << std::endl;
+        std::cout << "***********************************************************" << std::endl;
+    }
+}
+
+void Molecule::printAtom(int i) const
+{
+    if (i < AtomCount())
+        printf("%s %8.5f %8.5f %8.5f", m_atoms[i], geom[i][0], geom[i][1], geom[i][2]);
+}
+
 
 void Molecule::InitialiseEmptyGeometry(int atoms)
 {
@@ -349,6 +362,7 @@ void Molecule::writeXYZFile(const std::string& filename)
     std::ofstream input;
     input.open(filename, ios::out);
     input << AtomCount() << std::endl
+          << Name() << " ** Energy = " << std::setprecision(12) << Energy() << " Eh **"
           << std::endl;
     for (int i = 0; i < AtomCount(); ++i) {
         input << Elements::ElementAbbr[m_atoms[i]].c_str() << "      " << geom[i][0] << "      " << geom[i][1] << "      " << geom[i][2] << std::endl;

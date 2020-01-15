@@ -21,12 +21,71 @@
 
 #include <Eigen/Dense>
 
+#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <vector>
+
 #include "src/core/global.h"
 #include "src/core/molecule.h"
 
+typedef std::vector<std::string> StringList;
+
 namespace Tools {
 
-int VectorDifference(const std::vector<int>& tmp_a, const std::vector<int>& tmp_b)
+inline StringList SplitString(const std::string& string)
+{
+    StringList elements;
+    std::string element;
+    const char* delim = " ";
+    for (const char& c : string) {
+        if (*delim != c)
+            element.push_back(c);
+        else {
+            if (element.size()) {
+                elements.push_back(element);
+            }
+            element.clear();
+        }
+    }
+    elements.push_back(element);
+    return elements;
+}
+
+inline Molecule LoadFile(const string& filename)
+{
+
+    bool xyzfile = std::string(filename).find(".xyz") != std::string::npos;
+
+    if (xyzfile == false)
+        throw 1;
+
+    std::vector<std::string> lines;
+    std::ifstream input(filename);
+
+    int atoms = 0;
+    int index = 0;
+    int i = 0;
+
+    Molecule mol(atoms, 0);
+    for (std::string line; getline(input, line);) {
+        if (index == 0 && xyzfile) {
+            atoms = stoi(line);
+            if (atoms < 1)
+                throw 2;
+            mol = Molecule(atoms, 0);
+        }
+        if (i > 1) {
+            mol.setXYZ(line, i - 2);
+        }
+        index++;
+        ++i;
+    }
+    return mol;
+}
+
+inline int VectorDifference(const std::vector<int>& tmp_a, const std::vector<int>& tmp_b)
 {
     int difference = 0;
     std::vector<int> a, b;
