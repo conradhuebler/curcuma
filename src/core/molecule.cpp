@@ -20,6 +20,8 @@
 #include "elements.h"
 #include "src/tools/geometry.h"
 
+#include <Eigen/Dense>
+
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -387,6 +389,52 @@ std::vector<int> Molecule::BoundHydrogens(int atom, double scaling) const
             result.push_back(i);
     }
     return result;
+}
+
+void Molecule::CalculateRotationalConstants()
+{
+    m_Ia = 0, m_Ib = 0, m_Ic = 0;
+    double mass = 0;
+    Position pos = { 0, 0, 0 };
+    for (int i = 0; i < AtomCount(); ++i) {
+        double m = Elements::AtomicMass[m_atoms[i]];
+        mass += m;
+        pos(0) += m * geom[i][0];
+        pos(1) += m * geom[i][1];
+        pos(2) += m * geom[i][2];
+    }
+    pos(0) /= mass;
+    pos(1) /= mass;
+    pos(2) /= mass;
+    // std::cout << Centroid().transpose() << std::endl << pos.transpose() << std::endl;
+    Geometry geom = GeometryTools::TranslateGeometry(getGeometry(), Centroid(), pos);
+    Geometry matrix = Geometry::Zero(3, 3);
+    for (int i = 0; i < AtomCount(); ++i) {
+        double m = Elements::AtomicMass[m_atoms[i]];
+        double x = geom(i, 0);
+        double y = geom(i, 1);
+        double z = geom(i, 2);
+        double x2 = x * x;
+        double y2 = y * y;
+        double z2 = z * z;
+        matrix(0, 0) += m * (y2 + z2);
+        matrix(1, 1) += m * (x2 + z2);
+        matrix(2, 2) += m * (x2 + y2);
+        matrix(0, 1) += m * x * y;
+        matrix(0, 2) += m * x * z;
+        matrix(1, 2) += m * y * z;
+    }
+    matrix(1, 0) = matrix(0, 1);
+    matrix(2, 0) = matrix(0, 2);
+    matrix(2, 1) = matrix(1, 2);
+
+    Eigen::SelfAdjointEigenSolver<Geometry> diag_I;
+    diag_I.compute(matrix);
+
+    //std::cout << diag_I.eigenvalues().transpose() << std::endl;
+    m_Ia = diag_I.eigenvalues()(0);
+    m_Ib = diag_I.eigenvalues()(1);
+    m_Ic = diag_I.eigenvalues()(2);
 }
 
 std::map<int, std::vector<int>> Molecule::getConnectivtiy(double scaling, int latest) const

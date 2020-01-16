@@ -92,32 +92,44 @@ void ConfScan::scan()
     bool ok = true;
 
     std::vector<std::string> filtered;
-
+    std::size_t start = 0;
+    std::size_t ende = m_ordered_list.size();
     for (const auto& i : m_ordered_list) {
 
         int index = i.second;
         mol1 = m_molecules.at(index).second;
         if (mol1->AtomCount() == 0)
             continue;
-
+        mol1->CalculateRotationalConstants();
+        std::cout << start / double(ende) * 100;
         for (const auto* mol2 : m_result) {
             double difference = abs(mol1->Energy() - mol2->Energy()) * 2625.5;
             double rmsd = 0;
+            double Ia = abs(mol1->Ia() - mol2->Ia()) / mol2->Ia();
+            double Ib = abs(mol1->Ib() - mol2->Ib()) / mol2->Ib();
+            double Ic = abs(mol1->Ic() - mol2->Ic()) / mol2->Ic();
+            double diff_rot = Ia + Ib + Ic;
             RMSDDriver* driver = new RMSDDriver(mol1, mol2);
             // driver->setForceReorder(reorder);
             //driver->setFragment(fragment);
             //driver->setCheckConnections(check_connect);
             driver->AutoPilot();
             rmsd = driver->RMSD();
+            // std::cout << mol2->Ia() << " " << mol2->Ib() << " " << mol2->Ic() << std::endl;
+
+            //std::cout << Ia/mol2->Ia() << " " << Ib/mol2->Ib() << " " << Ic/mol2->Ic() << std::endl;
             delete driver;
-            if (difference < m_energy_threshold || rmsd < m_rmsd_threshold || m_result.size() >= m_maxrank) {
+            if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && diff_rot < 0.3) || m_result.size() >= m_maxrank) {
                 ok = false;
                 filtered.push_back(mol1->Name());
             }
+            std::cout << ".";
         }
         if (ok)
             m_result.push_back(mol1);
         ok = true;
+        start++;
+        std::cout << " " << start / double(ende) * 100 << "% done!" << std::endl;
     }
 
     for (const auto molecule : m_result)
@@ -130,7 +142,7 @@ void ConfScan::scan()
 
     std::sort(filtered.begin(), filtered.end());
     std::vector<std::string>::iterator iterator;
-    std::cerr << m_result.size() << " structures were keept - of " << m_molecules.size() << " total!" << std::endl;
+    std::cerr << m_result.size() << " structures were kept - of " << m_molecules.size() << " total!" << std::endl;
     iterator = std::unique(filtered.begin(), filtered.end());
     filtered.resize(std::distance(filtered.begin(), iterator));
     std::cerr << "List of filtered names ... " << std::endl;

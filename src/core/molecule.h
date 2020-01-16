@@ -88,6 +88,11 @@ class Molecule
     inline double Energy() const { return m_energy; }
 
     inline std::string Name() const { return m_name; }
+    void CalculateRotationalConstants();
+
+    inline double Ia() const { return m_Ia; }
+    inline double Ib() const { return m_Ib; }
+    inline double Ic() const { return m_Ic; }
 
 private:
     void InitialiseEmptyGeometry(int atoms);
@@ -99,5 +104,5 @@ private:
     string point_group;
     mutable bool m_dirty = true;
     std::string m_name;
-    double m_energy = 0;
+    double m_energy = 0, m_Ia = 0, m_Ib = 0, m_Ic = 0;
 };

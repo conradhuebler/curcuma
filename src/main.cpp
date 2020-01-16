@@ -270,6 +270,8 @@ int main(int argc, char **argv) {
                             std::cout << mol.getGeometry() << std::endl
                                       << std::endl;
                             std::cout << "Centroid: " << mol.Centroid(true).transpose() << std::endl;
+                            mol.CalculateRotationalConstants();
+                            // std::cout << mol.Ia() << " " << mol.Ib() << " " << mol.Ic() << std::endl;
 
                             i = -1;
                             mol = Molecule(atoms, 0);

@@ -47,7 +47,7 @@ RMSDDriver::RMSDDriver(const Molecule* reference, const Molecule* target)
 void RMSDDriver::AutoPilot()
 {
     if (m_fragment < -1 || m_fragment > m_reference.GetFragments().size() || m_fragment > m_target.GetFragments().size()) {
-        std::cerr << "*** Index of Fragment ( " << m_fragment << " ) is invalid, I will just use the whole molecule (Sometimes false negative ... - WIP) . ***" << std::endl;
+        //std::cerr << "*** Index of Fragment ( " << m_fragment << " ) is invalid, I will just use the whole molecule (Sometimes false negative ... - WIP) . ***" << std::endl;
         m_fragment = -1;
     }
 
