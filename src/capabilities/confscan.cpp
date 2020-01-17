@@ -59,8 +59,10 @@ bool ConfScan::openFile()
     for (std::string line; getline(input, line);) {
         if (i == 0 && xyzfile) {
             atoms = stoi(line);
-            if (atoms < 1)
-                throw 2;
+            if (atoms < 1) {
+                ++i;
+                continue;
+            }
             //if (mol->AtomCount())
             //{
             std::pair<std::string, Molecule*> pair(mol->Name(), mol);
@@ -74,8 +76,8 @@ bool ConfScan::openFile()
         if (i == 1) {
             StringList list = Tools::SplitString(line);
             if (list.size() == 4) {
-                // mol->setName(list[0]);
-                mol->setName("Molecule " + std::to_string(molecule));
+                mol->setName(list[0]);
+                //mol->setName("Molecule " + std::to_string(molecule));
                 if (list[3] == "")
                     mol->setEnergy(0);
                 else {
@@ -131,7 +133,7 @@ void ConfScan::scan()
             mol1->CalculateRotationalConstants();
             //std::cout << start / double(ende) * 100;
             for (auto* mol2 : m_result) {
-                std::cerr << std::endl
+                std::cout << std::endl
                           << std::endl
                           << std::endl
                           << "Reference Molecule:" << mol1->Name() << "        Target Molecule " << mol2->Name() << std::endl;
@@ -143,7 +145,7 @@ void ConfScan::scan()
                 double Ic = abs(mol1->Ic() - mol2->Ic()) / mol2->Ic();
 
                 double diff_rot = (Ia + Ib + Ic) * 0.33333;
-                std::cerr << "Energy Difference: " << difference << "        Average Difference in rot constant " << diff_rot << std::endl;
+                std::cout << "Energy Difference: " << difference << "        Average Difference in rot constant " << diff_rot << std::endl;
 
                 RMSDDriver* driver = new RMSDDriver(mol1, mol2);
                 driver->setSilent(true);
@@ -176,12 +178,12 @@ void ConfScan::scan()
                 if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && diff_rot < 0.3) || m_result.size() >= m_maxrank) {
                     ok = false;
                     filtered.push_back(mol1->Name());
-                    std::cerr << "  ** Rejecting structure **" << std::endl;
+                    std::cout << "  ** Rejecting structure **" << std::endl;
                 }
                 if (diff_rot < 0.01) {
                     ok = false;
                     filtered.push_back(mol1->Name());
-                    std::cerr << "  ** Rejecting structure **" << std::endl;
+                    std::cout << "  ** Rejecting structure **" << std::endl;
                 }
                 //std::cout << ".";
             }
@@ -207,12 +209,12 @@ void ConfScan::scan()
 
     std::sort(filtered.begin(), filtered.end());
     std::vector<std::string>::iterator iterator;
-    std::cerr << m_result.size() << " structures were kept - of " << m_molecules.size() - fail << " total!" << std::endl;
+    std::cout << m_result.size() << " structures were kept - of " << m_molecules.size() - fail << " total!" << std::endl;
 
     std::cout << "Best structure is " << m_result[0]->Name() << " Energy = " << m_result[0]->Energy() << std::endl;
     iterator = std::unique(filtered.begin(), filtered.end());
     filtered.resize(std::distance(filtered.begin(), iterator));
-    std::cerr << "List of filtered names ... " << std::endl;
+    std::cout << "List of filtered names ... " << std::endl;
     for (const auto& element : filtered)
         std::cout << element << std::endl;
     std::cout << " done :-) " << std::endl;

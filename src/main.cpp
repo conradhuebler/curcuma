@@ -52,11 +52,29 @@ void Distance(const Molecule &mol, char **argv)
 
 
 int main(int argc, char **argv) {
-    
-    
+
+    std::cout << "*************************************************" << std::endl
+              << "*   Curcuma - Simple Molecular Modelling tool   *" << std::endl
+              << "*                                               *" << std::endl
+              << "*    Written by Conrad Hübler TU Freiberg       *" << std::endl
+              << "*                                               *" << std::endl
+              << "*    Visit the website for initial usage        *" << std::endl
+              << "*    https://github.com/conradhuebler/curcuma   *" << std::endl
+              << "*                                               *" << std::endl
+              << "*    This program comes without any warranty    *" << std::endl
+              << "*    It might even be total useless             *" << std::endl
+              << "*                                               *" << std::endl
+              << "*    Nothing to cite yet ...                    *" << std::endl
+              << "*                                               *" << std::endl
+              << "*************************************************" << std::endl;
+
     if(argc < 2)
     {
         std::cerr << "No arguments given!" << std::endl;
+        std::cerr << "Use:" << std::endl
+                  << "-rmsd        * RMSD Calulator                *" << std::endl
+                  << "-confscan    * Filter list of conformers     *" << std::endl
+                  << "-dock        * Perform some docking          *" << std::endl;
     }
     
     if(argc >= 2)
@@ -75,7 +93,7 @@ int main(int argc, char **argv) {
             Molecule mol1 = Tools::LoadFile(argv[2]);
             Molecule mol2 = Tools::LoadFile(argv[3]);
 
-            bool reorder = false, check_connect = false;
+            bool reorder = false, check_connect = false, heavy = false;
             int fragment = -1, pt = 0;
             if (argc >= 5) {
 
@@ -105,6 +123,12 @@ int main(int argc, char **argv) {
                         continue;
                     }
 
+                    if (strcmp(argv[i], "-heavy") == 0) {
+                        heavy = true;
+                        ++i;
+                        continue;
+                    }
+
                     if (strcmp(argv[i], "-check") == 0) {
                         check_connect = true;
                         ++i;
@@ -118,6 +142,7 @@ int main(int argc, char **argv) {
 
         RMSDDriver *driver = new RMSDDriver(mol1, mol2);
         driver->setForceReorder(reorder);
+        driver->setProtons(!heavy);
         driver->setFragment(fragment);
         driver->setCheckConnections(check_connect);
         driver->AutoPilot();
