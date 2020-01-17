@@ -22,10 +22,7 @@ cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make
 ```
-or use the script in the subdirectory. It should automatically update the submodules.
-```sh
-sh scripts/build_unix.sh 
-```
+
 On Windows Systems use for example
 ```sh
 cd suprafit
@@ -37,7 +34,7 @@ For Visual Studio use
 cmake -G "Visual Studio 15 2017 Win64" -DCMAKE_BUILD_TYPE=Release  ..
 ```
 
-or for MinGW (openMP is enabled, libgomp-1.dll is expected) use
+or for MinGW use
 
 ```sh
 cmake -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release ..

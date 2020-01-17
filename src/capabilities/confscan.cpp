@@ -76,7 +76,15 @@ bool ConfScan::openFile()
             if (list.size() == 4) {
                 // mol->setName(list[0]);
                 mol->setName("Molecule " + std::to_string(molecule));
-                mol->setEnergy(std::stod((list[3])));
+                if (list[3] == "")
+                    mol->setEnergy(0);
+                else {
+                    try {
+                        mol->setEnergy(std::stod((list[3])));
+                    } catch (const std::string& what_arg) {
+                        mol->setEnergy(0);
+                    }
+                }
             } else if (list.size() == 1) {
                 try {
                     mol->setEnergy(std::stod((list[0])));
@@ -116,62 +124,67 @@ void ConfScan::scan()
             fail++;
             continue;
         }
-        mol1->CalculateRotationalConstants();
-        //std::cout << start / double(ende) * 100;
-        for (auto* mol2 : m_result) {
-            std::cerr << std::endl
-                      << std::endl
-                      << std::endl
-                      << "Reference Molecule:" << mol1->Name() << "        Target Molecule " << mol2->Name() << std::endl;
-            double difference = abs(mol1->Energy() - mol2->Energy()) * 2625.5;
-
-            double rmsd = 0;
-            double Ia = abs(mol1->Ia() - mol2->Ia()) / mol2->Ia();
-            double Ib = abs(mol1->Ib() - mol2->Ib()) / mol2->Ib();
-            double Ic = abs(mol1->Ic() - mol2->Ic()) / mol2->Ic();
-
-            double diff_rot = (Ia + Ib + Ic) * 0.33333;
-            std::cerr << "Energy Difference: " << difference << "        Average Difference in rot constant " << diff_rot << std::endl;
-
-            RMSDDriver* driver = new RMSDDriver(mol1, mol2);
-            driver->setSilent(true);
-            driver->setForceReorder(ForceReorder());
-            driver->setCheckConnections(CheckConnections());
-            //driver->setFragment(fragment);
-            driver->AutoPilot();
-            rmsd = driver->RMSD();
-            if (rmsd > 0.5 && difference < 1 && diff_rot < 0.1 && diff_rot > 0.01) {
-                std::cout << std::endl
+        if (mol1->Energy() == 0) {
+            filtered.push_back(mol1->Name());
+            ok = false;
+        } else {
+            mol1->CalculateRotationalConstants();
+            //std::cout << start / double(ende) * 100;
+            for (auto* mol2 : m_result) {
+                std::cerr << std::endl
                           << std::endl
-                          << "*** Reordering forced as energies and rotational constants are too close and rmsd (" << rmsd << ") is too different! ***" << std::endl
-                          << std::endl;
-                driver->setForceReorder(true);
+                          << std::endl
+                          << "Reference Molecule:" << mol1->Name() << "        Target Molecule " << mol2->Name() << std::endl;
+                double difference = abs(mol1->Energy() - mol2->Energy()) * 2625.5;
+
+                double rmsd = 0;
+                double Ia = abs(mol1->Ia() - mol2->Ia()) / mol2->Ia();
+                double Ib = abs(mol1->Ib() - mol2->Ib()) / mol2->Ib();
+                double Ic = abs(mol1->Ic() - mol2->Ic()) / mol2->Ic();
+
+                double diff_rot = (Ia + Ib + Ic) * 0.33333;
+                std::cerr << "Energy Difference: " << difference << "        Average Difference in rot constant " << diff_rot << std::endl;
+
+                RMSDDriver* driver = new RMSDDriver(mol1, mol2);
+                driver->setSilent(true);
+                driver->setForceReorder(ForceReorder());
+                driver->setCheckConnections(CheckConnections());
+                //driver->setFragment(fragment);
                 driver->AutoPilot();
-                double rmsd_tmp = driver->RMSD();
-                std::cout << "New rmsd is " << rmsd_tmp << ". Old was " << rmsd << std::endl;
-                rmsd = rmsd_tmp;
-            } else {
-                std::cout << "RMSD is " << rmsd << std::endl;
-            }
-            // std::cout << mol2->Ia() << " " << mol2->Ib() << " " << mol2->Ic() << std::endl;
+                rmsd = driver->RMSD();
+                if (rmsd > 0.5 && difference < 1 && diff_rot < 0.1 && diff_rot > 0.01) {
+                    std::cout << std::endl
+                              << std::endl
+                              << "*** Reordering forced as energies and rotational constants are too close and rmsd (" << rmsd << ") is too different! ***" << std::endl
+                              << std::endl;
+                    driver->setForceReorder(true);
+                    driver->AutoPilot();
+                    double rmsd_tmp = driver->RMSD();
+                    std::cout << "New rmsd is " << rmsd_tmp << ". Old was " << rmsd << std::endl;
+                    rmsd = rmsd_tmp;
+                } else {
+                    std::cout << "RMSD is " << rmsd << std::endl;
+                }
+                // std::cout << mol2->Ia() << " " << mol2->Ib() << " " << mol2->Ic() << std::endl;
 
-            //std::cout << Ia/mol2->Ia() << " " << Ib/mol2->Ib() << " " << Ic/mol2->Ic() << std::endl;
-            delete driver;
+                //std::cout << Ia/mol2->Ia() << " " << Ib/mol2->Ib() << " " << Ic/mol2->Ic() << std::endl;
+                delete driver;
 
-            //if(mol1->Energy() > mol2->Energy() && rmsd < m_rmsd_threshold)
-            //    std::swap(mol1, mol2);
+                //if(mol1->Energy() > mol2->Energy() && rmsd < m_rmsd_threshold)
+                //    std::swap(mol1, mol2);
 
-            if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && diff_rot < 0.3) || m_result.size() >= m_maxrank) {
-                ok = false;
-                filtered.push_back(mol1->Name());
-                std::cerr << "  ** Rejecting structure **" << std::endl;
+                if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && diff_rot < 0.3) || m_result.size() >= m_maxrank) {
+                    ok = false;
+                    filtered.push_back(mol1->Name());
+                    std::cerr << "  ** Rejecting structure **" << std::endl;
+                }
+                if (diff_rot < 0.01) {
+                    ok = false;
+                    filtered.push_back(mol1->Name());
+                    std::cerr << "  ** Rejecting structure **" << std::endl;
+                }
+                //std::cout << ".";
             }
-            if (diff_rot < 0.01) {
-                ok = false;
-                filtered.push_back(mol1->Name());
-                std::cerr << "  ** Rejecting structure **" << std::endl;
-            }
-            //std::cout << ".";
         }
         if (ok)
             m_result.push_back(mol1);
