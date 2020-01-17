@@ -80,8 +80,11 @@ void Molecule::print_geom(bool moreinfo) const
         std::cout << std::endl
                   << std::endl
                   << "***********************************************************" << std::endl;
-        std::cout << "**         Center of Mass = " << Centroid().transpose() << std::endl;
+        std::cout << "**         Center = " << Centroid().transpose() << std::endl;
         std::cout << "**         Number of Fragments = " << GetFragments().size() << std::endl;
+        std::cout << "**         Ia = " << Ia() << std::endl;
+        std::cout << "**         Ib = " << Ib() << std::endl;
+        std::cout << "**         Ic = " << Ic() << std::endl;
         std::cout << "***********************************************************" << std::endl;
     }
 }

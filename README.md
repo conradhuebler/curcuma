@@ -74,4 +74,25 @@ to automatically move B to the center of mass of A, which is only interesting fo
 
 After docking a PseudoFF optimisation of the docking position will be performed, where the Lennard-Jones-Potential between both structures is calculated.
 
+## Conformation Filter
+Curcuma has some conformation filter based on energy, rmsd, rotation constants and rank limitation. As some structures may be identic, yet can not be aligned due to atom ordering, depending on the difference of the energy and rotational constants and the rmsd, automatic reordering in rmsd calculation will be performed.
+
+Use
+```sh
+curcuma -confscan conformation.xyz
+```
+to simple filter the conformation. The results will be printed out.
+
+Use
+```sh
+curcuma -confscan conformation.xyz -writeXYZ
+```
+to store the structures as xyz files
+
+Use
+```sh
+curcuma -confscan conformation.xyz -reorder
+```
+to force reordering for every rmsd calculation.
+
 Have a lot of fun!

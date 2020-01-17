@@ -39,6 +39,18 @@ public:
     inline void setMaxRank(int rank) { m_maxrank = rank; }
     inline void setWriteXYZ(bool writeXYZ) { m_writeXYZ = writeXYZ; }
 
+    /*! \brief Set Connectivitiy Check forced (true or false = default) */
+    inline void setCheckConnections(bool check) { m_check_connections = check; }
+
+    /*! \brief Force Connectivitiy Check */
+    inline bool CheckConnections() const { return m_check_connections; }
+
+    /*! \brief Force Reordering, even the sequence of elements are equal */
+    inline void setForceReorder(bool reorder) { m_force_reorder = reorder; }
+
+    /*! \brief Check, if Reordering is forced */
+    inline bool ForceReorder() const { return m_force_reorder; }
+
 private:
     bool openFile();
 
@@ -49,4 +61,6 @@ private:
     std::vector<Molecule*> m_result;
     int m_maxrank = 10000;
     bool m_writeXYZ = false;
+    bool m_check_connections = false;
+    bool m_force_reorder = false;
 };

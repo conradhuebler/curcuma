@@ -61,16 +61,29 @@ bool ConfScan::openFile()
             atoms = stoi(line);
             if (atoms < 1)
                 throw 2;
+            //if (mol->AtomCount())
+            //{
             std::pair<std::string, Molecule*> pair(mol->Name(), mol);
             m_molecules.push_back(pair);
             m_ordered_list.insert(std::pair<double, int>(mol->Energy(), molecule));
             molecule++;
+            //}
+
             mol = new Molecule(atoms, 0);
         }
         if (i == 1) {
             StringList list = Tools::SplitString(line);
-            mol->setName(list[0]);
-            mol->setEnergy(std::stod((list[3])));
+            if (list.size() == 4) {
+                // mol->setName(list[0]);
+                mol->setName("Molecule " + std::to_string(molecule));
+                mol->setEnergy(std::stod((list[3])));
+            } else if (list.size() == 1) {
+                try {
+                    mol->setEnergy(std::stod((list[0])));
+                } catch (const std::string& what_arg) {
+                }
+                mol->setName("Molecule " + std::to_string(molecule));
+            }
             // std::cout << mol->Name() << " " << mol->Energy() << std::endl;
         }
         if (i > 1) {
@@ -92,45 +105,84 @@ void ConfScan::scan()
     bool ok = true;
 
     std::vector<std::string> filtered;
+    std::size_t fail = 0;
     std::size_t start = 0;
     std::size_t ende = m_ordered_list.size();
-    for (const auto& i : m_ordered_list) {
+    for (auto& i : m_ordered_list) {
 
         int index = i.second;
         mol1 = m_molecules.at(index).second;
-        if (mol1->AtomCount() == 0)
+        if (mol1->AtomCount() == 0) {
+            fail++;
             continue;
+        }
         mol1->CalculateRotationalConstants();
-        std::cout << start / double(ende) * 100;
-        for (const auto* mol2 : m_result) {
+        //std::cout << start / double(ende) * 100;
+        for (auto* mol2 : m_result) {
+            std::cerr << std::endl
+                      << std::endl
+                      << std::endl
+                      << "Reference Molecule:" << mol1->Name() << "        Target Molecule " << mol2->Name() << std::endl;
             double difference = abs(mol1->Energy() - mol2->Energy()) * 2625.5;
+
             double rmsd = 0;
             double Ia = abs(mol1->Ia() - mol2->Ia()) / mol2->Ia();
             double Ib = abs(mol1->Ib() - mol2->Ib()) / mol2->Ib();
             double Ic = abs(mol1->Ic() - mol2->Ic()) / mol2->Ic();
-            double diff_rot = Ia + Ib + Ic;
+
+            double diff_rot = (Ia + Ib + Ic) * 0.33333;
+            std::cerr << "Energy Difference: " << difference << "        Average Difference in rot constant " << diff_rot << std::endl;
+
             RMSDDriver* driver = new RMSDDriver(mol1, mol2);
-            // driver->setForceReorder(reorder);
+            driver->setSilent(true);
+            driver->setForceReorder(ForceReorder());
+            driver->setCheckConnections(CheckConnections());
             //driver->setFragment(fragment);
-            //driver->setCheckConnections(check_connect);
             driver->AutoPilot();
             rmsd = driver->RMSD();
+            if (rmsd > 0.5 && difference < 1 && diff_rot < 0.1 && diff_rot > 0.01) {
+                std::cout << std::endl
+                          << std::endl
+                          << "*** Reordering forced as energies and rotational constants are too close and rmsd (" << rmsd << ") is too different! ***" << std::endl
+                          << std::endl;
+                driver->setForceReorder(true);
+                driver->AutoPilot();
+                double rmsd_tmp = driver->RMSD();
+                std::cout << "New rmsd is " << rmsd_tmp << ". Old was " << rmsd << std::endl;
+                rmsd = rmsd_tmp;
+            } else {
+                std::cout << "RMSD is " << rmsd << std::endl;
+            }
             // std::cout << mol2->Ia() << " " << mol2->Ib() << " " << mol2->Ic() << std::endl;
 
             //std::cout << Ia/mol2->Ia() << " " << Ib/mol2->Ib() << " " << Ic/mol2->Ic() << std::endl;
             delete driver;
+
+            //if(mol1->Energy() > mol2->Energy() && rmsd < m_rmsd_threshold)
+            //    std::swap(mol1, mol2);
+
             if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && diff_rot < 0.3) || m_result.size() >= m_maxrank) {
                 ok = false;
                 filtered.push_back(mol1->Name());
+                std::cerr << "  ** Rejecting structure **" << std::endl;
             }
-            std::cout << ".";
+            if (diff_rot < 0.01) {
+                ok = false;
+                filtered.push_back(mol1->Name());
+                std::cerr << "  ** Rejecting structure **" << std::endl;
+            }
+            //std::cout << ".";
         }
         if (ok)
             m_result.push_back(mol1);
         ok = true;
         start++;
-        std::cout << " " << start / double(ende) * 100 << "% done!" << std::endl;
+        std::cout << std::endl
+                  << std::endl
+                  << "             ###   " << start / double(ende) * 100 << "% done!   ###" << std::endl;
     }
+    if (m_result.size() == 0)
+        return;
 
     for (const auto molecule : m_result)
         molecule->print_geom(false);
@@ -142,7 +194,9 @@ void ConfScan::scan()
 
     std::sort(filtered.begin(), filtered.end());
     std::vector<std::string>::iterator iterator;
-    std::cerr << m_result.size() << " structures were kept - of " << m_molecules.size() << " total!" << std::endl;
+    std::cerr << m_result.size() << " structures were kept - of " << m_molecules.size() - fail << " total!" << std::endl;
+
+    std::cout << "Best structure is " << m_result[0]->Name() << " Energy = " << m_result[0]->Energy() << std::endl;
     iterator = std::unique(filtered.begin(), filtered.end());
     filtered.resize(std::distance(filtered.begin(), iterator));
     std::cerr << "List of filtered names ... " << std::endl;

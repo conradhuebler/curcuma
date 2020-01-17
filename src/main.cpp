@@ -66,6 +66,10 @@ int main(int argc, char **argv) {
         {
             if (argc < 4) {
                 std::cerr << "Please use curcuma for rmsd calcultion as follows\ncurcuma -rmsd A.xyz B.xyz" << std::endl;
+                std::cerr << "Additonal arguments are:" << std::endl;
+                std::cerr << "-reorder    **** Force reordering of structure! - It will be done automatically, if energies are close and rmsd is big." << std::endl;
+                std::cerr << "-check      **** Check methyl group connectivity." << std::endl;
+                std::cerr << "-fragment n **** Use n'th fragment. Bonds are determined from simple covalent radii for now!" << std::endl;
                 exit(1);
             }
             Molecule mol1 = Tools::LoadFile(argv[2]);
@@ -129,7 +133,7 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[1], "-dock") == 0) {
 
             if (argc < 4) {
-                std::cerr << "Please use curcuma for rmsd calcultion as follows\ncurcuma -dock A.xyz B.xyz XXX YYY ZZZ" << std::endl;
+                std::cerr << "Please use curcuma for docking  as follows\ncurcuma -dock A.xyz B.xyz XXX YYY ZZZ" << std::endl;
                 exit(1);
             }
             Molecule mol1 = Tools::LoadFile(argv[2]);
@@ -207,10 +211,15 @@ int main(int argc, char **argv) {
 
         } else if (strcmp(argv[1], "-confscan") == 0) {
             if (argc < 3) {
-                std::cerr << "Please use curcuma for hydrogen bond analysis as follows\ncurcuma -confs conffile.xyz" << std::endl;
+                std::cerr << "Please use curcuma for conformation scan and judge as follows\ncurcuma -confscan conffile.xyz" << std::endl;
+                std::cerr << "Additonal arguments are:" << std::endl;
+                std::cerr << "-writeXYZ  **** Write results to xyz files!" << std::endl;
+                std::cerr << "-rank n    **** Write only the first n results!" << std::endl;
+                std::cerr << "-reorder   **** Force reordering of structure! - It will be done automatically, if energies are close and rmsd is big." << std::endl;
                 return -1;
             }
             bool writeXYZ = false;
+            bool reorder = false, check_connect = false;
             int rank = 1e10;
             if (argc >= 4) {
 
@@ -226,7 +235,17 @@ int main(int argc, char **argv) {
 
                     if (strcmp(argv[i], "-writeXYZ") == 0) {
                         writeXYZ = true;
-                        ++i;
+                        continue;
+                    }
+
+                    if (strcmp(argv[i], "-reorder") == 0) {
+                        reorder = true;
+                        continue;
+                    }
+
+                    if (strcmp(argv[i], "-check") == 0) {
+                        check_connect = true;
+                        continue;
                     }
                 }
             }
@@ -237,6 +256,8 @@ int main(int argc, char **argv) {
             scan->setFileName(argv[2]);
             scan->setMaxRank(rank);
             scan->setWriteXYZ(writeXYZ);
+            scan->setForceReorder(reorder);
+            scan->setCheckConnections(check_connect);
             scan->scan();
 
             return 0;
@@ -264,17 +285,15 @@ int main(int argc, char **argv) {
                     }
                     if(i-1 == atoms)
                     {
+                        mol.CalculateRotationalConstants();
+                        mol.print_geom();
+                        std::cout << std::endl
+                                  << std::endl;
+                        //std::cout << "Centroid: " << mol.Centroid(true).transpose() << std::endl;
+                        // std::cout << mol.Ia() << " " << mol.Ib() << " " << mol.Ic() << std::endl;
 
-                            mol.print_geom();
-                            std::cout << std::endl << std::endl;
-                            std::cout << mol.getGeometry() << std::endl
-                                      << std::endl;
-                            std::cout << "Centroid: " << mol.Centroid(true).transpose() << std::endl;
-                            mol.CalculateRotationalConstants();
-                            // std::cout << mol.Ia() << " " << mol.Ib() << " " << mol.Ic() << std::endl;
-
-                            i = -1;
-                            mol = Molecule(atoms, 0);
+                        i = -1;
+                        mol = Molecule(atoms, 0);
                     }
                     ++i;
                 }else
