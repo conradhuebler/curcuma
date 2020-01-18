@@ -41,6 +41,7 @@ class Molecule
     ~Molecule();
 
     void print_geom(bool moreinfo = true) const;
+    void printFragmente();
     void printAtom(int i) const;
     inline int Charge() const { return m_charge; }
     void setCharge(int charge) { m_charge = charge; }

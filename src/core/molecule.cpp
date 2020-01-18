@@ -89,6 +89,28 @@ void Molecule::print_geom(bool moreinfo) const
     }
 }
 
+void Molecule::printFragmente()
+{
+    if (m_fragments.size() == 0)
+        GetFragments();
+
+    std::cout << std::endl
+              << std::endl
+              << "***********************************************************" << std::endl;
+    std::cout << "**         Center = " << Centroid().transpose() << std::endl;
+    std::cout << "**         Number of Fragments = " << GetFragments().size() << std::endl;
+    std::cout << "**         Ia = " << Ia() << std::endl;
+    std::cout << "**         Ib = " << Ib() << std::endl;
+    std::cout << "**         Ic = " << Ic() << std::endl;
+    std::cout << "***********************************************************" << std::endl;
+
+    for (std::size_t i = 0; i < m_fragments.size(); ++i) {
+        for (const auto& atom : m_fragments[i]) {
+            printf("%s(%i) %8.5f %8.5f %8.5f\n", Elements::ElementAbbr[m_atoms[atom]].c_str(), i + 1, geom[atom][0], geom[atom][1], geom[atom][2]);
+        }
+    }
+}
+
 void Molecule::printAtom(int i) const
 {
     if (i < AtomCount())

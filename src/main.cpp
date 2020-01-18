@@ -286,6 +286,15 @@ int main(int argc, char **argv) {
             scan->scan();
 
             return 0;
+        } else if (strcmp(argv[1], "-led") == 0) {
+            if (argc < 2) {
+                std::cerr << "Please use curcuma for fragment assignment as follows:\ncurcuma -scan input.xyz" << std::endl;
+                return 0;
+            }
+
+            Molecule mol1 = Tools::LoadFile(argv[2]);
+            mol1.printFragmente();
+
         } else {
             std::cerr << "Opening file " << argv[1] << std::endl;
             std::ifstream input(argv[1]);
