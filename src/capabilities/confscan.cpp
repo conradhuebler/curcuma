@@ -126,6 +126,7 @@ void ConfScan::scan()
             fail++;
             continue;
         }
+
         if (mol1->Energy() == 0) {
             filtered.push_back(mol1->Name());
             ok = false;
@@ -133,6 +134,12 @@ void ConfScan::scan()
             mol1->CalculateRotationalConstants();
             //std::cout << start / double(ende) * 100;
             for (auto* mol2 : m_result) {
+                std::vector< std::string >::iterator find = std::find(filtered.begin(), filtered.end(), mol2->Name());
+                if(find != filtered.end())
+                {
+                    std::cout << "We already had this structure on blacklist" << std::endl;
+                    continue;
+                }
                 std::cout << std::endl
                           << std::endl
                           << std::endl
@@ -149,6 +156,7 @@ void ConfScan::scan()
 
                 RMSDDriver* driver = new RMSDDriver(mol1, mol2);
                 driver->setSilent(true);
+                driver->setProtons(!m_heavy);
                 driver->setForceReorder(ForceReorder());
                 driver->setCheckConnections(CheckConnections());
                 //driver->setFragment(fragment);

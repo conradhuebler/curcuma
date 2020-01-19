@@ -51,6 +51,8 @@ public:
     /*! \brief Check, if Reordering is forced */
     inline bool ForceReorder() const { return m_force_reorder; }
 
+    /*! \brief Use only heavy atoms for rmsd and reordering */
+    inline void setHeavyRMSD(bool heavy) { m_heavy = heavy; }
 private:
     bool openFile();
 
@@ -63,4 +65,5 @@ private:
     bool m_writeXYZ = false;
     bool m_check_connections = false;
     bool m_force_reorder = false;
+    bool m_heavy = false;
 };

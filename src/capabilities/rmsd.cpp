@@ -46,6 +46,8 @@ RMSDDriver::RMSDDriver(const Molecule* reference, const Molecule* target)
 
 void RMSDDriver::AutoPilot()
 {
+    if(m_protons == false)
+        ProtonDepleted();
     if (m_fragment < -1 || m_fragment > m_reference.GetFragments().size() || m_fragment > m_target.GetFragments().size()) {
         //std::cerr << "*** Index of Fragment ( " << m_fragment << " ) is invalid, I will just use the whole molecule (Sometimes false negative ... - WIP) . ***" << std::endl;
         m_fragment = -1;
@@ -73,6 +75,29 @@ void RMSDDriver::AutoPilot()
     m_reference_aligned.LoadMolecule(reference);
     m_target_aligned.LoadMolecule(target);
 }
+
+void RMSDDriver::ProtonDepleted()
+{
+    std::cerr << "Will perform calculation on proton depleted structure." << std::endl;
+    Molecule reference;
+    for(std::size_t i = 0; i < m_reference.AtomCount(); ++i)
+    {
+        std::pair<int, Position> atom = m_reference.Atom(i);
+        if(atom.first != 1)
+            reference.addPair(atom);
+    }
+
+    Molecule target;
+    for(std::size_t i = 0; i < m_target.AtomCount(); ++i)
+    {
+        std::pair<int, Position> atom = m_target.Atom(i);
+        if(atom.first != 1)
+            target.addPair(atom);
+    }
+    m_reference = reference;
+    m_target = target;
+}
+
 
 Eigen::Matrix3d RMSDDriver::BestFitRotation(const Geometry& reference_mol, const Geometry& target_mol, int factor) const
 {

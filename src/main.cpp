@@ -104,7 +104,6 @@ int main(int argc, char **argv) {
                             fragment = std::stoi(argv[i + 1]);
                             ++i;
                         }
-                        ++i;
                         continue;
                     }
 
@@ -113,25 +112,21 @@ int main(int argc, char **argv) {
                             pt = std::stoi(argv[i + 1]);
                             ++i;
                         }
-                        ++i;
                         continue;
                     }
 
                     if (strcmp(argv[i], "-reorder") == 0) {
                         reorder = true;
-                        ++i;
                         continue;
                     }
 
                     if (strcmp(argv[i], "-heavy") == 0) {
                         heavy = true;
-                        ++i;
                         continue;
                     }
 
                     if (strcmp(argv[i], "-check") == 0) {
                         check_connect = true;
-                        ++i;
                         continue;
                     }
                 }
@@ -241,10 +236,12 @@ int main(int argc, char **argv) {
                 std::cerr << "-writeXYZ  **** Write results to xyz files!" << std::endl;
                 std::cerr << "-rank n    **** Write only the first n results!" << std::endl;
                 std::cerr << "-reorder   **** Force reordering of structure! - It will be done automatically, if energies are close and rmsd is big." << std::endl;
+                std::cerr << "-heavy     **** Use only heavy atoms for rmsd calculation." << std::endl;
+
                 return -1;
             }
             bool writeXYZ = false;
-            bool reorder = false, check_connect = false;
+            bool reorder = false, check_connect = false, heavy = false;
             int rank = 1e10;
             if (argc >= 4) {
 
@@ -272,6 +269,11 @@ int main(int argc, char **argv) {
                         check_connect = true;
                         continue;
                     }
+
+                    if (strcmp(argv[i], "-heavy") == 0) {
+                        heavy = true;
+                        continue;
+                    }
                 }
             }
 
@@ -279,6 +281,7 @@ int main(int argc, char **argv) {
 
             ConfScan* scan = new ConfScan;
             scan->setFileName(argv[2]);
+            scan->setHeavyRMSD(heavy);
             scan->setMaxRank(rank);
             scan->setWriteXYZ(writeXYZ);
             scan->setForceReorder(reorder);

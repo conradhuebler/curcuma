@@ -55,6 +55,12 @@ Computes RMSD. If the two structures are ordered differently, curcuma will autom
 curcuma -rmsd file1.xyz file2.xyz -reorder
 ```
 
+Add
+```sh
+-heavy
+```
+to perform calculation only on non-proton atoms.
+
 ## Docking tool
 Some docking can be performed (WIP). Rotation will be added soon. (And many more.)
 
@@ -91,5 +97,11 @@ Use
 curcuma -confscan conformation.xyz -reorder
 ```
 to force reordering for every rmsd calculation.
+
+Add
+```sh
+-heavy
+```
+to perform rmsd calculation and reordering only on non-proton atoms. Reordering is much faster then!
 
 Have a lot of fun!

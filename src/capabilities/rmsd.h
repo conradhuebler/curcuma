@@ -59,6 +59,8 @@ public:
     double CalculateRMSD();
     double CalculateRMSD(const Molecule& reference, const Molecule& target, Molecule* ret_ref = nullptr, Molecule* ret_tar = nullptr, int factor = 1) const;
 
+    void ProtonDepleted();
+
     std::vector<double> IndivRMSD(const Molecule& reference, const Molecule& target, int factor = 1) const;
 
     void ReorderMolecule();
