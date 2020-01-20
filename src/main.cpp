@@ -21,6 +21,7 @@
 
 #include "src/capabilities/confscan.h"
 #include "src/capabilities/docking.h"
+#include "src/capabilities/nebdocking.h"
 #include "src/capabilities/rmsd.h"
 
 #include "src/tools/general.h"
@@ -293,12 +294,36 @@ int main(int argc, char **argv) {
             return 0;
         } else if (strcmp(argv[1], "-led") == 0) {
             if (argc < 2) {
-                std::cerr << "Please use curcuma for fragment assignment as follows:\ncurcuma -scan input.xyz" << std::endl;
+                std::cerr << "Please use curcuma for fragment assignment as follows:\ncurcuma -led input.xyz" << std::endl;
                 return 0;
             }
 
             Molecule mol1 = Tools::LoadFile(argv[2]);
             mol1.printFragmente();
+
+        } else if (strcmp(argv[1], "-nebprep") == 0) {
+            if (argc < 3) {
+                std::cerr << "Please use curcuma for geometry preparation for nudge-elastic-band calculation follows:\ncurcuma -nebprep first.xyz second.xyz" << std::endl;
+                return 0;
+            }
+
+            int pt = 0;
+            for (std::size_t i = 3; i < argc; ++i) {
+                if (strcmp(argv[i], "-pt") == 0) {
+                    if (i + 1 < argc) {
+                        pt = std::stoi(argv[i + 1]);
+                        ++i;
+                    }
+                }
+            }
+            Molecule mol1 = Tools::LoadFile(argv[2]);
+            Molecule mol2 = Tools::LoadFile(argv[3]);
+
+            NEBDocking* nebdock = new NEBDocking;
+            nebdock->setStructures(mol1, mol2);
+            nebdock->setProtonTransfer(pt);
+            nebdock->Prepare();
+            delete nebdock;
 
         } else {
             std::cerr << "Opening file " << argv[1] << std::endl;

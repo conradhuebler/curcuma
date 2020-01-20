@@ -374,6 +374,33 @@ bool Molecule::setGeometry(const Geometry &geometry)
     return true;
 }
 
+bool Molecule::setGeometryByFragment(const Geometry& geometry, int fragment, bool protons)
+{
+    if (fragment >= GetFragments().size())
+        return false;
+
+    std::vector<int> frag = m_fragments[fragment];
+    int index = 0;
+    if (protons) {
+        for (int i : frag) {
+            geom[i][0] = geometry(index, 0);
+            geom[i][1] = geometry(index, 1);
+            geom[i][2] = geometry(index, 2);
+            index++;
+        }
+    } else {
+        for (int i : frag) {
+            if (Atom(i).first == 1)
+                continue;
+            geom[i][0] = geometry(index, 0);
+            geom[i][1] = geometry(index, 1);
+            geom[i][2] = geometry(index, 2);
+            index++;
+        }
+    }
+    return true;
+}
+
 Position Molecule::Centroid(bool protons, int fragment) const
 {
     return GeometryTools::Centroid(getGeometryByFragment(fragment, protons));
@@ -505,6 +532,8 @@ std::vector<std::vector<int>> Molecule::GetFragments() const
     for (std::size_t i = 0; i < m_atoms.size(); ++i)
         atoms.push_back(i);
 
+    m_fragments.clear();
+
     while (atoms.size()) {
         fragment.push_back(atoms.at(0));
         atoms.erase(atoms.begin());
@@ -521,7 +550,7 @@ std::vector<std::vector<int>> Molecule::GetFragments() const
                 //   std::cout  << std::endl;
             }
         }
-
+        std::sort(fragment.begin(), fragment.end());
         m_fragments.push_back(fragment);
         fragment.clear();
     }

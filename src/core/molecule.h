@@ -66,6 +66,8 @@ class Molecule
     inline Geometry getGeometry(bool protons = true) const { return getGeometry(IntPair(0, -1), protons); }
 
     bool setGeometry(const Geometry &geometry);
+    bool setGeometryByFragment(const Geometry& geometry, int fragment, bool protons = true);
+
     Position Centroid(bool hydrogen = true, int fragment = -1) const;
     inline std::size_t AtomCount() const { return m_atoms.size(); }
     std::vector<int> Atoms() const { return m_atoms; }

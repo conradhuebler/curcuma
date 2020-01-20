@@ -118,8 +118,8 @@ private:
 
     void SolveIntermediate(std::vector<int> intermediate);
 
-    bool CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) const;
-    bool CheckConnectivitiy(const Molecule& mol1) const;
+    int CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) const;
+    int CheckConnectivitiy(const Molecule& mol1) const;
 
     Eigen::Matrix3d BestFitRotation(const Molecule& reference, const Molecule& target, int factor = 1) const;
     Eigen::Matrix3d BestFitRotation(const Geometry& reference, const Geometry& target, int factor = 1) const;

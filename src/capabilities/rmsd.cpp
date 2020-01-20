@@ -47,7 +47,6 @@ RMSDDriver::RMSDDriver(const Molecule* reference, const Molecule* target)
 
 void RMSDDriver::AutoPilot()
 {
-    //std::chrono::milliseconds start = duration_cast< milliseconds >(        system_clock::now().time_since_epoch() );
     RunTimer timer(false);
     if(m_protons == false)
         ProtonDepleted();
@@ -57,6 +56,12 @@ void RMSDDriver::AutoPilot()
     }
 
     m_rmsd_raw = CalculateRMSD(m_reference, m_target);
+    /*
+    std::vector<double> terms = IndivRMSD(m_reference, m_target);
+    for(double i : terms)
+        std::cout << i << " ";
+    std::cout << std::endl;
+    */
 
     if (m_reference.Atoms() != m_target.Atoms() || ForceReorder()) {
         if (!m_silent)
@@ -67,6 +72,7 @@ void RMSDDriver::AutoPilot()
                 std::cerr << "Try to reorder the structures?\n";
                 std::cerr << "Initial RMSD is " << m_rmsd_raw << std::endl;
             }
+
             ReorderMolecule();
         }
     } else
@@ -77,7 +83,13 @@ void RMSDDriver::AutoPilot()
 
     m_reference_aligned.LoadMolecule(reference);
     m_target_aligned.LoadMolecule(target);
-    // std::chrono::milliseconds end = duration_cast< milliseconds >(        system_clock::now().time_since_epoch() );
+
+    /*
+    terms = IndivRMSD(m_reference_aligned, m_target_aligned);
+    for(double i : terms)
+        std::cout << i << " ";
+    std::cout << std::endl;
+    */
     std::cout << "RMSD calculation took " << timer.Elapsed() << " msecs." << std::endl;
 }
 
@@ -212,15 +224,15 @@ Geometry RMSDDriver::CenterMolecule(const Geometry& mol) const
     return GeometryTools::TranslateGeometry(mol, GeometryTools::Centroid(mol), Position{ 0, 0, 0 });
 }
 
-bool RMSDDriver::CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) const
+int RMSDDriver::CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) const
 {
 
     auto connect_1 = mol1.getConnectivtiy(m_scaling);
     auto connect_2 = mol2.getConnectivtiy(m_scaling);
 
     if (connect_1.size() != connect_2.size())
-        return false;
-
+        return -1;
+    int difference = 0;
     int match = 0;
     if (!m_silent)
         if (m_print_intermediate)
@@ -232,6 +244,7 @@ bool RMSDDriver::CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) 
         auto target = connect_1[i];
 
         auto reference = connect_2[i];
+        difference += Tools::VectorDifference(reference, target);
         if (!m_silent)
             if (m_print_intermediate)
                 std::cout << "vector difference " << Tools::VectorDifference(reference, target) << std::endl;
@@ -269,16 +282,16 @@ bool RMSDDriver::CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) 
                       << " *** Connectivitiy check done! ***" << std::endl
                       << std::endl;
 
-    return match == connect_1.size();
+    return difference;
 }
 
-bool RMSDDriver::CheckConnectivitiy(const Molecule& mol1) const
+int RMSDDriver::CheckConnectivitiy(const Molecule& mol1) const
 {
 
     auto connect = mol1.getConnectivtiy(m_scaling);
 
     if (m_connectivity.size() != connect.size())
-        return false;
+        return -1;
     if (!m_silent)
         if (m_print_intermediate)
             std::cout << std::endl
@@ -287,10 +300,14 @@ bool RMSDDriver::CheckConnectivitiy(const Molecule& mol1) const
                       << std::endl;
 
     int match = 0;
+    int difference = 0;
+
     for (std::size_t i = 0; i < connect.size(); ++i) {
         auto target = connect[i];
 
         auto reference = m_connectivity.at(i);
+        difference += Tools::VectorDifference(reference, target);
+
         if (!m_silent)
             if (m_print_intermediate)
                 std::cout << "vector difference " << Tools::VectorDifference(reference, target) << std::endl;
@@ -326,7 +343,7 @@ bool RMSDDriver::CheckConnectivitiy(const Molecule& mol1) const
                   << " *** Connectivitiy check done! ***" << std::endl
                   << std::endl;
 
-    return match == connect.size();
+    return difference;
 }
 
 void RMSDDriver::InitialisePair()
@@ -409,7 +426,7 @@ void RMSDDriver::ReorderStraight()
         if (count == 0) // store the best result in any way
             m_target_reordered = mol2;
 
-        if (CheckConnectivitiy(m_reference, mol2)) {
+        if (CheckConnectivitiy(m_reference, mol2) == m_pt) {
             if (!m_silent)
                 std::cout << "Found fitting solution, taking ... " << std::endl;
             m_target_reordered = mol2;
@@ -449,7 +466,8 @@ void RMSDDriver::SolveIntermediate(std::vector<int> intermediate)
                 if (target_local.AtomCount() < m_target.AtomCount()) {
                     rmsd = rmsd_local;
                     if (CheckConnections()) {
-                        if (CheckConnectivitiy(reference_local, target_local))
+                        int difference = CheckConnectivitiy(reference_local, target_local);
+                        if (difference <= m_pt)
                             match.insert(std::pair<double, int>(rmsd_local, j));
                     } else
                         match.insert(std::pair<double, int>(rmsd_local, j));
