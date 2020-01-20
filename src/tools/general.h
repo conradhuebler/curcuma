@@ -21,7 +21,9 @@
 
 #include <Eigen/Dense>
 
+#include <chrono>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -31,6 +33,38 @@
 #include "src/core/molecule.h"
 
 typedef std::vector<std::string> StringList;
+
+class RunTimer {
+public:
+    RunTimer(bool print = false)
+        : m_print(print)
+    {
+        m_start = std::chrono::system_clock::now();
+        if (m_print) {
+            std::time_t end_time = std::chrono::system_clock::to_time_t(m_start);
+            std::cout << "Started computation at " << std::ctime(&end_time) << std::endl;
+        }
+    }
+
+    ~RunTimer()
+    {
+        if (m_print) {
+            std::cout << "Finished after " << Elapsed() / 1000 << " seconds!" << std::endl;
+            std::time_t end_time = std::chrono::system_clock::to_time_t(m_end);
+            std::cout << "Finished computation at " << std::ctime(&end_time) << std::endl;
+        }
+    }
+
+    inline int Elapsed()
+    {
+        m_end = std::chrono::system_clock::now();
+        return std::chrono::duration_cast<std::chrono::milliseconds>(m_end - m_start).count();
+    }
+
+private:
+    std::chrono::time_point<std::chrono::system_clock> m_start, m_end;
+    bool m_print;
+};
 
 namespace Tools {
 

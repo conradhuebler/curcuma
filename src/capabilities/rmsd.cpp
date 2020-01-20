@@ -21,6 +21,7 @@
 #include "src/tools/general.h"
 #include "src/tools/geometry.h"
 
+#include <chrono>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -46,6 +47,8 @@ RMSDDriver::RMSDDriver(const Molecule* reference, const Molecule* target)
 
 void RMSDDriver::AutoPilot()
 {
+    //std::chrono::milliseconds start = duration_cast< milliseconds >(        system_clock::now().time_since_epoch() );
+    RunTimer timer(false);
     if(m_protons == false)
         ProtonDepleted();
     if (m_fragment < -1 || m_fragment > m_reference.GetFragments().size() || m_fragment > m_target.GetFragments().size()) {
@@ -74,6 +77,8 @@ void RMSDDriver::AutoPilot()
 
     m_reference_aligned.LoadMolecule(reference);
     m_target_aligned.LoadMolecule(target);
+    // std::chrono::milliseconds end = duration_cast< milliseconds >(        system_clock::now().time_since_epoch() );
+    std::cout << "RMSD calculation took " << timer.Elapsed() << " msecs." << std::endl;
 }
 
 void RMSDDriver::ProtonDepleted()

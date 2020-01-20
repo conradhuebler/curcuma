@@ -22,6 +22,7 @@
 #include "src/core/molecule.h"
 #include "src/core/global.h"
 
+#include <chrono>
 #include <map>
 #include <queue>
 

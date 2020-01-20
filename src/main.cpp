@@ -68,6 +68,8 @@ int main(int argc, char **argv) {
               << "*                                               *" << std::endl
               << "*************************************************" << std::endl;
 
+    RunTimer timer(true);
+
     if(argc < 2)
     {
         std::cerr << "No arguments given!" << std::endl;
