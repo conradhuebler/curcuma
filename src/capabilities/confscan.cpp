@@ -114,7 +114,7 @@ void ConfScan::scan()
     Molecule* mol1;
     bool ok = true;
 
-    std::vector<std::string> filtered;
+    std::map<std::string, std::vector<std::string>> filtered;
     std::size_t fail = 0;
     std::size_t start = 0;
     std::size_t ende = m_ordered_list.size();
@@ -128,18 +128,18 @@ void ConfScan::scan()
         }
 
         if (mol1->Energy() == 0) {
-            filtered.push_back(mol1->Name());
+            filtered[mol1->Name()].push_back("Empty");
             ok = false;
         } else {
             mol1->CalculateRotationalConstants();
             //std::cout << start / double(ende) * 100;
             for (auto* mol2 : m_result) {
-                std::vector< std::string >::iterator find = std::find(filtered.begin(), filtered.end(), mol2->Name());
+                /*std::vector< std::string >::iterator find = std::find(filtered.begin(), filtered.end(), mol2->Name());
                 if(find != filtered.end())
                 {
                     std::cout << "We already had this structure on blacklist" << std::endl;
                     continue;
-                }
+                }*/
                 std::cout << std::endl
                           << std::endl
                           << std::endl
@@ -185,13 +185,18 @@ void ConfScan::scan()
 
                 if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && diff_rot < 0.3) || m_result.size() >= m_maxrank) {
                     ok = false;
-                    filtered.push_back(mol1->Name());
+                    filtered[mol1->Name()].push_back(mol2->Name());
+
+                    //filtered.push_back(mol1->Name());
                     std::cout << "  ** Rejecting structure **" << std::endl;
+                    continue;
                 }
                 if (diff_rot < 0.01) {
                     ok = false;
-                    filtered.push_back(mol1->Name());
+                    filtered[mol1->Name()].push_back(mol2->Name());
+                    //filtered.push_back(mol1->Name());
                     std::cout << "  ** Rejecting structure **" << std::endl;
+                    continue;
                 }
                 //std::cout << ".";
             }
@@ -215,15 +220,19 @@ void ConfScan::scan()
             molecule->writeXYZFile();
     }
 
-    std::sort(filtered.begin(), filtered.end());
-    std::vector<std::string>::iterator iterator;
+    //std::sort(filtered.begin(), filtered.end());
+    //std::vector<std::string>::iterator iterator;
     std::cout << m_result.size() << " structures were kept - of " << m_molecules.size() - fail << " total!" << std::endl;
 
     std::cout << "Best structure is " << m_result[0]->Name() << " Energy = " << m_result[0]->Energy() << std::endl;
-    iterator = std::unique(filtered.begin(), filtered.end());
-    filtered.resize(std::distance(filtered.begin(), iterator));
+    //iterator = std::unique(filtered.begin(), filtered.end());
+    //filtered.resize(std::distance(filtered.begin(), iterator));
     std::cout << "List of filtered names ... " << std::endl;
-    for (const auto& element : filtered)
-        std::cout << element << std::endl;
+    for (const auto& element : filtered) {
+        std::cout << element.first << " rejected due to: ";
+        for (const std::string& str : element.second)
+            std::cout << str << " ";
+        std::cout << std::endl;
+    }
     std::cout << " done :-) " << std::endl;
 }
