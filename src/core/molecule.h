@@ -76,6 +76,9 @@ class Molecule
     void writeXYZFile(const std::string& filename);
     inline void writeXYZFile() { writeXYZFile(Name() + ".xyz"); }
 
+    void appendXYZFile(const std::string& filename);
+    inline void appendXYZFile() { appendXYZFile(Name() + ".xyz"); }
+
     std::vector<int> BoundHydrogens(int atom, double scaling = 1.5) const;
     std::map<int, std::vector<int>> getConnectivtiy(double scaling = 1.5, int latest = -1) const;
 
@@ -104,6 +107,7 @@ private:
     std::vector< std::array<double, 3> > geom;
     std::vector<int> m_atoms;
     mutable std::vector<std::vector<int>> m_fragments;
+    mutable std::vector<double> m_mass_fragments;
     string point_group;
     mutable bool m_dirty = true;
     std::string m_name;

@@ -57,6 +57,9 @@ public:
     /*! \brief Use the AutoPilot to automatically perform everything, results are stored as long the object exsist */
     void AutoPilot();
 
+    inline void setReference(const Molecule& reference) { m_reference = reference; }
+    inline void setTarget(const Molecule& target) { m_target = target; }
+
     double CalculateRMSD();
     double CalculateRMSD(const Molecule& reference, const Molecule& target, Molecule* ret_ref = nullptr, Molecule* ret_tar = nullptr, int factor = 1) const;
 

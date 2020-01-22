@@ -17,7 +17,7 @@
  *
  */
 
-#include "src/capabilities/LevMarNEBDocking.h"
+#include "src/capabilities/optimiser/LevMarNEBDocking.h"
 
 #include "src/capabilities/rmsd.h"
 
@@ -37,18 +37,29 @@ void NEBDocking::Prepare()
     driver->AutoPilot();
 
     Molecule end = driver->TargetAligned();
+    end.writeXYZFile("neb_pre_ende.xyz");
+
     Molecule first, second;
-    if (m_start.GetFragments().size() >= m_end.GetFragments().size()) {
-        second = DockForNEB(m_start, end);
-    } else {
-        second = DockForNEB(end, m_start);
-    }
+    std::pair<Molecule, Molecule> result;
+
+    result = DockForNEB(m_start, end);
+
+    driver->setReference(result.first);
+    driver->setTarget(result.second);
+    driver->setForceReorder(false);
+
+    driver->AutoPilot();
+    end = driver->TargetAligned();
+    end.writeXYZFile("neb_ende.xyz");
 }
 
-Molecule NEBDocking::DockForNEB(const Molecule& first, const Molecule& second)
+std::pair<Molecule, Molecule> NEBDocking::DockForNEB(const Molecule& first, const Molecule& second)
 {
-    Molecule result;
-    result = OptimiseAtoms(&first, second);
-    result.writeXYZFile("neb_ende.xyz");
+    std::pair<Molecule, Molecule> result;
+    result = OptimiseAtoms(first, second);
+
+    result.first.writeXYZFile("neb_first.xyz");
+    result.second.writeXYZFile("neb_second.xyz");
+
     return result;
 }

@@ -19,7 +19,7 @@
 
 #include "src/core/pseudoff.h"
 
-#include "src/capabilities/LevMarDocking.h"
+#include "src/capabilities/optimiser/LevMarDocking.h"
 
 #include <iostream>
 

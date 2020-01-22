@@ -104,4 +104,14 @@ Add
 ```
 to perform rmsd calculation and reordering only on non-proton atoms. Reordering is much faster then!
 
+
+## NEB Input structure preparation
+Some very experimental stuff - reorder (like in -rmsd a.xyz b.xyz -reorder) and rmsd alignment and fragment moving to prepare some NEB structures.
+
+```sh
+curcuma -nebprep start.xyz end.xyz
+```
+
+
+
 Have a lot of fun!

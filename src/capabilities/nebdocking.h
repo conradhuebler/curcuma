@@ -40,7 +40,7 @@ public:
     inline void setProtonTransfer(int pt) { m_pt = pt; }
 
 private:
-    Molecule DockForNEB(const Molecule& first, const Molecule& second);
+    std::pair<Molecule, Molecule> DockForNEB(const Molecule& first, const Molecule& second);
     Molecule m_start, m_end;
     int m_pt = 0;
 };

@@ -41,9 +41,7 @@ Molecule::Molecule(int n, int q)
     InitialiseEmptyGeometry(n);
 }
 
-Molecule::Molecule()
-{
-}
+Molecule::Molecule() = default;
 
 Molecule::Molecule(const Molecule& other)
 {
@@ -424,6 +422,19 @@ void Molecule::writeXYZFile(const std::string& filename)
     input.close();
 }
 
+void Molecule::appendXYZFile(const std::string& filename)
+{
+    std::ofstream input;
+    input.open(filename, std::ios_base::app);
+    input << AtomCount() << std::endl
+          << Name() << " ** Energy = " << std::setprecision(12) << Energy() << " Eh **"
+          << std::endl;
+    for (int i = 0; i < AtomCount(); ++i) {
+        input << Elements::ElementAbbr[m_atoms[i]].c_str() << "      " << geom[i][0] << "      " << geom[i][1] << "      " << geom[i][2] << std::endl;
+    }
+    input.close();
+}
+
 std::vector<int> Molecule::BoundHydrogens(int atom, double scaling) const
 {
     std::vector<int> result;
@@ -528,7 +539,10 @@ std::vector<std::vector<int>> Molecule::GetFragments() const
     if (m_fragments.size() > 0 && !m_dirty)
         return m_fragments;
 
+    std::map<double, std::vector<int>> ordered_list;
+
     std::vector<int> fragment, atoms, cached;
+    double mass = 0;
     for (std::size_t i = 0; i < m_atoms.size(); ++i)
         atoms.push_back(i);
 
@@ -544,6 +558,7 @@ std::vector<std::vector<int>> Molecule::GetFragments() const
                 if (distance < (Elements::CovalentRadius[Atom(fragment[i]).first] + Elements::CovalentRadius[Atom(atoms[j]).first]) * scaling) {
                     //std::cout << " ... taken " << std::endl;
                     fragment.push_back(atoms.at(j));
+                    mass += Elements::AtomicMass[Atom(atoms.at(j)).first];
                     atoms.erase(atoms.begin() + j);
                     --j; // We have to decrease the atom vector counter since it got one element removed and we dont want to skip single elements
                 } //else
@@ -551,8 +566,15 @@ std::vector<std::vector<int>> Molecule::GetFragments() const
             }
         }
         std::sort(fragment.begin(), fragment.end());
-        m_fragments.push_back(fragment);
+        //m_fragments.push_back(fragment);
+        mass *= -1; // I think, that is an easy way to ***
+        ordered_list[mass] = fragment;
         fragment.clear();
+        mass = 0;
+    }
+    for (const auto& entry : ordered_list) {
+        m_mass_fragments.push_back(-1 * entry.first); // *** make the std::map container sort in reverse order :-)
+        m_fragments.push_back(entry.second);
     }
     m_dirty = false;
     return m_fragments;
