@@ -52,15 +52,20 @@ public:
     inline bool ForceReorder() const { return m_force_reorder; }
 
     /*! \brief Use only heavy atoms for rmsd and reordering */
-    inline void setHeavyRMSD(bool heavy) { m_heavy = heavy; }
+    inline void setHeavyRMSD(bool heavy)
+    {
+        m_heavy = heavy;
+        m_rmsd_threshold = 0.75;
+    }
+
 private:
     bool openFile();
 
     std::string m_filename;
     std::map<double, int> m_ordered_list;
     std::vector<std::pair<std::string, Molecule*>> m_molecules;
-    double m_energy_threshold = 1.0, m_rmsd_threshold = 1.0;
-    std::vector<Molecule*> m_result;
+    double m_energy_threshold = 1.0, m_rmsd_threshold = 1.0, m_diff_rot_loose = 0.3, m_diff_rot_tight = 0.01, m_nearly_missed = 0.8;
+    std::vector<Molecule*> m_result, m_nearly;
     int m_maxrank = 10000;
     bool m_writeXYZ = false;
     bool m_check_connections = false;

@@ -48,6 +48,8 @@ RMSDDriver::RMSDDriver(const Molecule* reference, const Molecule* target)
 void RMSDDriver::AutoPilot()
 {
     RunTimer timer(false);
+    clear();
+
     if(m_protons == false)
         ProtonDepleted();
     if (m_fragment < -1 || m_fragment > m_reference.GetFragments().size() || m_fragment > m_target.GetFragments().size()) {
@@ -93,9 +95,18 @@ void RMSDDriver::AutoPilot()
     std::cout << "RMSD calculation took " << timer.Elapsed() << " msecs." << std::endl;
 }
 
+void RMSDDriver::clear()
+{
+    m_results.clear();
+    m_connectivity.clear();
+    m_storage.clear();
+}
+
 void RMSDDriver::ProtonDepleted()
 {
-    std::cerr << "Will perform calculation on proton depleted structure." << std::endl;
+    if (!m_silent)
+        std::cerr << "Will perform calculation on proton depleted structure." << std::endl;
+
     Molecule reference;
     for(std::size_t i = 0; i < m_reference.AtomCount(); ++i)
     {

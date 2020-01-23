@@ -94,7 +94,6 @@ bool ConfScan::openFile()
                 }
                 mol->setName("Molecule " + std::to_string(molecule));
             }
-            // std::cout << mol->Name() << " " << mol->Energy() << std::endl;
         }
         if (i > 1) {
             mol->setXYZ(line, i - 2);
@@ -118,6 +117,34 @@ void ConfScan::scan()
     std::size_t fail = 0;
     std::size_t start = 0;
     std::size_t ende = m_ordered_list.size();
+
+    std::string result_name = m_filename;
+    result_name.erase(result_name.end() - 4, result_name.end());
+    std::string nearly_missed = result_name + "_missed.xyz";
+    result_name += +"_filter.xyz";
+
+    std::cout << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
+              << "'" << std::endl;
+
+    if (m_heavy)
+        std::cout << "'    RMSD Calculation will be performed only on heavy atoms! " << std::endl;
+    else
+        std::cout << "'    RMSD Calculation will be performed on all atoms! " << std::endl;
+
+    std::cout << "'    RMSD Threshold set to: " << m_rmsd_threshold << " Angstrom" << std::endl;
+    std::cout << "'    Energy Threshold set to: " << m_energy_threshold << " kJ/mol" << std::endl;
+    std::cout << "'    Average Difference in rot constants: " << std::endl;
+    std::cout << "'    Loose Threshold: " << m_diff_rot_loose << std::endl;
+    std::cout << "'    Tight Threshold: " << m_diff_rot_tight << std::endl;
+    std::cout << "'" << std::endl
+              << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
+              << std::endl;
+    RMSDDriver* driver = new RMSDDriver;
+    driver->setSilent(true);
+    driver->setProtons(!m_heavy);
+    driver->setForceReorder(ForceReorder());
+    driver->setCheckConnections(CheckConnections());
+
     for (auto& i : m_ordered_list) {
 
         int index = i.second;
@@ -132,14 +159,12 @@ void ConfScan::scan()
             ok = false;
         } else {
             mol1->CalculateRotationalConstants();
-            //std::cout << start / double(ende) * 100;
             for (auto* mol2 : m_result) {
-                /*std::vector< std::string >::iterator find = std::find(filtered.begin(), filtered.end(), mol2->Name());
-                if(find != filtered.end())
-                {
-                    std::cout << "We already had this structure on blacklist" << std::endl;
+                if (filtered.count(mol1->Name())) {
+                    std::cout << mol1->Name() << " already rejected. Skipping check against " << mol2->Name() << std::endl;
                     continue;
-                }*/
+                }
+
                 std::cout << std::endl
                           << std::endl
                           << std::endl
@@ -154,12 +179,9 @@ void ConfScan::scan()
                 double diff_rot = (Ia + Ib + Ic) * 0.33333;
                 std::cout << "Energy Difference: " << difference << "        Average Difference in rot constant " << diff_rot << std::endl;
 
-                RMSDDriver* driver = new RMSDDriver(mol1, mol2);
-                driver->setSilent(true);
-                driver->setProtons(!m_heavy);
-                driver->setForceReorder(ForceReorder());
-                driver->setCheckConnections(CheckConnections());
-                //driver->setFragment(fragment);
+                driver->setReference(mol1);
+                driver->setTarget(mol2);
+
                 driver->AutoPilot();
                 rmsd = driver->RMSD();
                 if (rmsd > 0.5 && difference < 1 && diff_rot < 0.1 && diff_rot > 0.01) {
@@ -169,64 +191,66 @@ void ConfScan::scan()
                               << std::endl;
                     driver->setForceReorder(true);
                     driver->AutoPilot();
+                    driver->setForceReorder(ForceReorder());
+
                     double rmsd_tmp = driver->RMSD();
                     std::cout << "New rmsd is " << rmsd_tmp << ". Old was " << rmsd << std::endl;
                     rmsd = rmsd_tmp;
                 } else {
                     std::cout << "RMSD is " << rmsd << std::endl;
                 }
-                // std::cout << mol2->Ia() << " " << mol2->Ib() << " " << mol2->Ic() << std::endl;
 
-                //std::cout << Ia/mol2->Ia() << " " << Ib/mol2->Ib() << " " << Ic/mol2->Ic() << std::endl;
-                delete driver;
-
-                //if(mol1->Energy() > mol2->Energy() && rmsd < m_rmsd_threshold)
-                //    std::swap(mol1, mol2);
-
-                if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && diff_rot < 0.3) || m_result.size() >= m_maxrank) {
+                if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && diff_rot < m_diff_rot_loose) || m_result.size() >= m_maxrank) {
                     ok = false;
                     filtered[mol1->Name()].push_back(mol2->Name());
-
-                    //filtered.push_back(mol1->Name());
+                    std::cout << "  ** Rejecting structure **" << std::endl;
+                    if (rmsd <= m_rmsd_threshold * m_nearly_missed) {
+                        std::cout << " Nearly missed for " << mol1->Name() << std::endl;
+                        m_nearly.push_back(mol1);
+                    }
+                    continue;
+                }
+                if (diff_rot < m_diff_rot_tight) {
+                    ok = false;
+                    filtered[mol1->Name()].push_back(mol2->Name());
                     std::cout << "  ** Rejecting structure **" << std::endl;
                     continue;
                 }
-                if (diff_rot < 0.01) {
-                    ok = false;
-                    filtered[mol1->Name()].push_back(mol2->Name());
-                    //filtered.push_back(mol1->Name());
-                    std::cout << "  ** Rejecting structure **" << std::endl;
-                    continue;
-                }
-                //std::cout << ".";
             }
         }
-        if (ok)
+        if (ok) {
+            std::cout << std::endl
+                      << std::endl
+                      << "               ** Accepting " << mol1->Name() << " **" << std::endl;
             m_result.push_back(mol1);
+        }
         ok = true;
         start++;
         std::cout << std::endl
                   << std::endl
                   << "             ###   " << start / double(ende) * 100 << "% done!   ###" << std::endl;
     }
+    delete driver;
+
     if (m_result.size() == 0)
         return;
 
-    for (const auto molecule : m_result)
+    for (const auto molecule : m_result) {
         molecule->print_geom(false);
-
+        molecule->appendXYZFile(result_name);
+    }
     if (m_writeXYZ) {
         for (const auto molecule : m_result)
             molecule->writeXYZFile();
     }
 
-    //std::sort(filtered.begin(), filtered.end());
-    //std::vector<std::string>::iterator iterator;
+    for (const auto molecule : m_nearly) {
+        molecule->appendXYZFile(nearly_missed);
+    }
+
     std::cout << m_result.size() << " structures were kept - of " << m_molecules.size() - fail << " total!" << std::endl;
 
     std::cout << "Best structure is " << m_result[0]->Name() << " Energy = " << m_result[0]->Energy() << std::endl;
-    //iterator = std::unique(filtered.begin(), filtered.end());
-    //filtered.resize(std::distance(filtered.begin(), iterator));
     std::cout << "List of filtered names ... " << std::endl;
     for (const auto& element : filtered) {
         std::cout << element.first << " rejected due to: ";

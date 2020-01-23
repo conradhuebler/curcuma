@@ -53,6 +53,7 @@ class RMSDDriver{
 public:
     RMSDDriver(const Molecule& reference, const Molecule& target);
     RMSDDriver(const Molecule* reference, const Molecule* target);
+    RMSDDriver() = default;
 
     /*! \brief Use the AutoPilot to automatically perform everything, results are stored as long the object exsist */
     void AutoPilot();
@@ -123,6 +124,8 @@ private:
 
     int CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) const;
     int CheckConnectivitiy(const Molecule& mol1) const;
+
+    void clear();
 
     Eigen::Matrix3d BestFitRotation(const Molecule& reference, const Molecule& target, int factor = 1) const;
     Eigen::Matrix3d BestFitRotation(const Geometry& reference, const Geometry& target, int factor = 1) const;
