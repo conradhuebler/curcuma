@@ -533,12 +533,14 @@ void Molecule::PrintConnectivitiy(double scaling) const
     }
 }
 
-std::vector<std::vector<int>> Molecule::GetFragments() const
+std::vector<std::vector<int>> Molecule::GetFragments(double scaling) const
 {
-    double scaling = 1.5;
+    if (scaling != m_scaling)
+        m_dirty = true;
     if (m_fragments.size() > 0 && !m_dirty)
         return m_fragments;
 
+    m_scaling = scaling;
     std::map<double, std::vector<int>> ordered_list;
 
     std::vector<int> fragment, atoms, cached;
@@ -555,7 +557,7 @@ std::vector<std::vector<int>> Molecule::GetFragments() const
             for (std::size_t j = 0; j < atoms.size(); ++j) {
                 double distance = Distance(fragment[i], atoms[j]);
                 //std::cout << "Fragment No: " << m_fragments.size() + 1 << " ("<< fragment.size() <<")  ##  Atom " << fragment[i] << " (Index " << i << ") and Atom " << atoms[j] << " - Distance: " << distance << " Thresh " << (Elements::CovalentRadius[Atom(fragment[i]).first] + Elements::CovalentRadius[Atom(atoms[j]).first]);
-                if (distance < (Elements::CovalentRadius[Atom(fragment[i]).first] + Elements::CovalentRadius[Atom(atoms[j]).first]) * scaling) {
+                if (distance < (Elements::CovalentRadius[Atom(fragment[i]).first] + Elements::CovalentRadius[Atom(atoms[j]).first]) * m_scaling) {
                     //std::cout << " ... taken " << std::endl;
                     fragment.push_back(atoms.at(j));
                     mass += Elements::AtomicMass[Atom(atoms.at(j)).first];

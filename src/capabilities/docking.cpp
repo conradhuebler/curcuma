@@ -29,34 +29,14 @@ Docking::Docking()
 {
 }
 
-/* Junk code
 
-
-    for(int x = 0; x < 1; ++x)
-    {
-        Geometry rotation = GeometryTools::RotationX(x*10);
-        for(int y = 0; y < 36; ++y)
-        {
-            rotation *= GeometryTools::RotationY(y*10);
-
-            for(int z = 0; z < 1; ++z)
-            {
-                rotation *= GeometryTools::RotationZ(z*10).transpose();
-                m_guest_structure.setGeometry(destination*rotation);
-                m_guest_structure.writeXYZFile(std::to_string(x*10) + "_" + std::to_string(y*10)+ "_" + std::to_string(z*10)+ "_rot.xyz");
-            }
-        }
-    }
-
-
- */
 void Docking::PerformDocking()
 {
     Molecule guest = m_guest_structure;
     Molecule result = m_host_structure;
 
     std::cout << m_guest_structure.Centroid().transpose() << " = Centroid of Guest" << std::endl;
-    std::cout << PseudoFF::LennardJones(m_host_structure, m_guest_structure) << std::endl;
+
     Geometry stored_guest = m_guest_structure.getGeometry();
     Position initial_centroid = m_guest_structure.Centroid();
 
@@ -66,37 +46,64 @@ void Docking::PerformDocking()
     std::cout << PseudoFF::LennardJones(m_host_structure, m_guest_structure) << std::endl;
     std::cout << m_guest_structure.Centroid().transpose() << " = Centroid of Guest" << std::endl;
     */
+    std::cout << std::endl
+              << "** Docking Phase 0 - Starting **" << std::endl
+              << std::endl;
+    int X = 10;
+    int Y = 10;
+    int Z = 10;
 
-    for (int x = 0; x < 36; ++x) {
-        for (int y = 0; y < 36; ++y) {
-            for (int z = 0; z < 36; ++z) {
-                std::pair<Position, Position> pair = OptimiseAnchor(&m_host_structure, guest, m_initial_anchor, Position{ x * 10, y * 10, z * 10 });
+    for (int x = 0; x < X; ++x) {
+        for (int y = 0; y < Y; ++y) {
+            for (int z = 0; z < Z; ++z) {
+                Molecule* molecule = new Molecule(m_host_structure);
+                guest = m_guest_structure;
+
+                std::pair<Position, Position> pair = OptimiseAnchor(&m_host_structure, guest, m_initial_anchor, Position{ x * 36, y * 36, z * 36 });
+
+                bool accept = true;
+
+                for (std::size_t i = 0; i < m_anchor_accepted.size(); ++i) {
+                    Position anchor = m_anchor_accepted[i];
+                    Position rotation = m_rotation_accepted[i];
+                    if (GeometryTools::Distance(anchor, pair.first) < 1e-1 || GeometryTools::Distance(rotation, pair.second) < 1e-1)
+                        accept = false;
+                    //std::cout << GeometryTools::Distance(anchor, pair.first) << " --- "  << GeometryTools::Distance(rotation, pair.second) << std::endl;
+                }
+                if (accept == false)
+                    continue;
+                m_anchor_accepted.push_back(pair.first);
+                m_rotation_accepted.push_back(pair.second);
+
                 Geometry destination = GeometryTools::TranslateAndRotate(stored_guest, initial_centroid, pair.first, pair.second);
+
+                // std::cout << pair.first.transpose() << " " << pair.second.transpose() << std::endl;
+
                 guest.setGeometry(destination);
                 double energy = PseudoFF::LennardJones(m_host_structure, guest);
                 m_docking_list.insert(std::pair<double, Vector>(energy, PositionPair2Vector(pair)));
-                guest = m_guest_structure;
+                result = m_host_structure;
+                for (std::size_t i = 0; i < guest.AtomCount(); ++i) {
+                    molecule->addPair(guest.Atom(i));
+                }
+                m_result_list.insert(std::pair<double, Molecule*>(energy, molecule));
             }
         }
+        std::cout << (x / double(X)) * 100 << std::endl;
     }
     guest = m_guest_structure;
-
+    std::cout << std::endl
+              << "** Docking Phase 0 - Finished **" << std::endl;
     int index = 0;
-    for (const auto& element : m_docking_list) {
-        if (element.first > 0)
-            break;
 
-        std::pair<Position, Position> pair = Vector2PositionPair(element.second);
-        std::cout << pair.first.transpose() << " " << pair.second.transpose() << std::endl;
-        Geometry destination = GeometryTools::TranslateAndRotate(stored_guest, initial_centroid, pair.first, pair.second);
-        guest.setGeometry(destination);
-        std::cout << guest.Centroid().transpose() << " = Centroid of Guest ### Psudeo FF Energy = " << element.first << std::endl;
-        if (index == 0) {
-            for (int i = 0; i < guest.AtomCount(); ++i) {
-                result.addPair(guest.Atom(i));
-            }
-            m_supramol = result;
-        }
-        index++;
+    for (const auto& pair : m_result_list) {
+        ++index;
+
+        //if(index == 1)
+        //    continue;
+        std::cout << pair.first << std::endl;
+        pair.second->appendXYZFile("docked_structures_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
+        pair.second->print_geom();
+        delete pair.second;
     }
 }

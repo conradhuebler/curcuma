@@ -102,64 +102,14 @@ struct LevMarNEBFunctor : LevMarNEBBaseFunctor<double> {
         }
         double scaling = 1.5;
         double LJ_energy = 0;
-        /*
-        for (int i = 0; i < m_fragments_a; ++i) {
-            for (int j = i; j < m_fragments_a; ++j) {
-                std::vector<int> frag_a = first.GetFragments()[i];
-                std::vector<int> frag_b = first.GetFragments()[i];
-                for(int ai : frag_a)
-                {
-                    for(int bi : frag_b)
-                    {
-                        double energy = PseudoFF::LJPotential(first.Atom(ai), first.Atom(bi));
-                        if(!std::isinf(energy) && energy < magic_threshold && energy > 0)
-                        {
-                            LJ_energy += energy;
-                            std::cout << energy << " "<< ai << " " << bi << std::endl;
-                        }
-                    }
-                }
-            }
-        }
 
-        for (int i = 0; i < m_fragments_b; ++i) {
-            for (int j = i; j < m_fragments_b; ++j) {
-                std::vector<int> frag_a = second.GetFragments()[i];
-                std::vector<int> frag_b = second.GetFragments()[i];
-                for(int ai : frag_a)
-                {
-                    for(int bi : frag_b)
-                    {
-                        double energy = PseudoFF::LJPotential(first.Atom(ai), first.Atom(bi));
-                        if(!std::isinf(energy) && energy < magic_threshold && energy > 0)
-                        {
-                            LJ_energy += energy;
-                            std::cout << energy  << " "<< ai << " " << bi << std::endl;
-                        }
-                    }
-                }
-            }
-        }
-    */
         for (int i = 0; i <= m_fragments_a; ++i) {
             for (int j = i + 1; j <= m_fragments_a; ++j) {
                 std::vector<int> frag_a = m_first.GetFragments()[i];
                 std::vector<int> frag_b = m_first.GetFragments()[j];
                 for (int ai : frag_a) {
                     for (int bi : frag_b) {
-                        double distance = first.Distance(ai, bi);
-                        double mind = (Elements::CovalentRadius[first.Atom(ai).first] + Elements::CovalentRadius[first.Atom(bi).first]) * scaling;
-                        //std::cout << mind << " " << distance << " " << ai << " " << bi << std::endl;
-
-                        if (distance < (Elements::CovalentRadius[first.Atom(ai).first] + Elements::CovalentRadius[first.Atom(bi).first]) * scaling)
-                            LJ_energy += mind - distance;
-                        /*
-                        double energy = PseudoFF::LJPotential(first.Atom(ai), first.Atom(bi));
-                        if(!std::isinf(energy) && energy < magic_threshold && energy > 0)
-                        {
-                            LJ_energy += energy;
-                            std::cout << energy << " "<< ai << " " << bi << std::endl;
-                        }*/
+                        LJ_energy += PseudoFF::DistancePenalty(first.Atom(ai), first.Atom(bi), scaling);
                     }
                 }
             }
@@ -171,22 +121,11 @@ struct LevMarNEBFunctor : LevMarNEBBaseFunctor<double> {
                 std::vector<int> frag_b = m_second.GetFragments()[j];
                 for (int ai : frag_a) {
                     for (int bi : frag_b) {
-                        double distance = second.Distance(ai, bi);
-                        double mind = (Elements::CovalentRadius[second.Atom(ai).first] + Elements::CovalentRadius[second.Atom(bi).first]) * scaling;
-                        //   std::cout << mind << " " << distance << " " << ai << " " << bi << std::endl;
-
-                        if (distance < (Elements::CovalentRadius[second.Atom(ai).first] + Elements::CovalentRadius[second.Atom(bi).first]) * scaling)
-                            LJ_energy += mind - distance;
+                        LJ_energy += PseudoFF::DistancePenalty(second.Atom(ai), second.Atom(bi), scaling);
                     }
                 }
             }
         }
-
-        //std::cout << "Fragment No: " << m_fragments.size() + 1 << " ("<< fragment.size() <<")  ##  Atom " << fragment[i] << " (Index " << i << ") and Atom " << atoms[j] << " - Distance: " << distance << " Thresh " << (Elements::CovalentRadius[Atom(fragment[i]).first] + Elements::CovalentRadius[Atom(atoms[j]).first]);
-        //std::cout << " ... taken " << std::endl;
-
-        // std::cout << LJ_energy << std::endl;
-        //        LJ_energy = 0;
 
         if (m_protons) {
             for (int i = 0; i < first.AtomCount(); ++i)

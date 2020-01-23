@@ -46,4 +46,17 @@ public:
 
         return LJPotential(distance, vdW_A, vdW_B);
     }
+
+    inline static double DistancePenalty(const std::pair<int, Position>& a, const std::pair<int, Position>& b, double scaling = 1.5)
+    {
+        double error = 0;
+
+        const double distance = GeometryTools::Distance(a.second, b.second);
+        const double cov_A = Elements::CovalentRadius[a.first];
+        const double cov_B = Elements::CovalentRadius[b.first];
+        double mind = (cov_A + cov_B) * scaling;
+
+        error = (distance < mind) * (mind - distance);
+        return error;
+    }
 };

@@ -77,7 +77,7 @@ struct MyFunctor : Functor<double> {
         for (int i = 0; i < m_host->AtomCount(); ++i) {
             fvec(i) = 0;
             for (int j = 0; j < guest.AtomCount(); ++j) {
-                fvec(i) += PseudoFF::LJPotential(m_host->Atom(i), guest.Atom(j));
+                fvec(i) += PseudoFF::LJPotential(m_host->Atom(i), guest.Atom(j)) + PseudoFF::DistancePenalty(m_host->Atom(i), guest.Atom(j));
             }
         }
 

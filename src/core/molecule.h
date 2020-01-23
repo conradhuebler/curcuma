@@ -85,7 +85,8 @@ class Molecule
     void PrintConnectivitiy(double scaling = 1.5) const;
 
     /*! \brief Return Fragments, will be determined on first call, then stored */
-    std::vector<std::vector<int>> GetFragments() const;
+    std::vector<std::vector<int>> GetFragments(double scaling) const;
+    inline std::vector<std::vector<int>> GetFragments() const { return GetFragments(m_scaling); }
 
     inline void setName(const std::string& name) { m_name = name; }
 
@@ -112,4 +113,5 @@ private:
     mutable bool m_dirty = true;
     std::string m_name;
     double m_energy = 0, m_Ia = 0, m_Ib = 0, m_Ic = 0;
+    mutable double m_scaling = 1.5;
 };
