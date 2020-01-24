@@ -49,9 +49,9 @@ void Docking::PerformDocking()
     std::cout << std::endl
               << "** Docking Phase 0 - Starting **" << std::endl
               << std::endl;
-    int X = 10;
-    int Y = 10;
-    int Z = 10;
+    int X = 36;
+    int Y = 36;
+    int Z = 36;
 
     for (int x = 0; x < X; ++x) {
         for (int y = 0; y < Y; ++y) {
@@ -59,9 +59,14 @@ void Docking::PerformDocking()
                 Molecule* molecule = new Molecule(m_host_structure);
                 guest = m_guest_structure;
 
-                std::pair<Position, Position> pair = OptimiseAnchor(&m_host_structure, guest, m_initial_anchor, Position{ x * 36, y * 36, z * 36 });
+                std::pair<Position, Position> pair = OptimiseAnchor(&m_host_structure, guest, m_initial_anchor, Position{ x * 10, y * 10, z * 10 });
 
                 bool accept = true;
+
+                if (GeometryTools::Distance(m_initial_anchor, pair.first) > 1e5) {
+                    accept = false;
+                    continue;
+                }
 
                 for (std::size_t i = 0; i < m_anchor_accepted.size(); ++i) {
                     Position anchor = m_anchor_accepted[i];
@@ -89,7 +94,7 @@ void Docking::PerformDocking()
                 m_result_list.insert(std::pair<double, Molecule*>(energy, molecule));
             }
         }
-        std::cout << (x / double(X)) * 100 << std::endl;
+        std::cout << (x / double(X)) * 100 << "% - " << m_anchor_accepted.size() << " stored structures." << std::endl;
     }
     guest = m_guest_structure;
     std::cout << std::endl
@@ -99,8 +104,6 @@ void Docking::PerformDocking()
     for (const auto& pair : m_result_list) {
         ++index;
 
-        //if(index == 1)
-        //    continue;
         std::cout << pair.first << std::endl;
         pair.second->appendXYZFile("docked_structures_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
         pair.second->print_geom();
