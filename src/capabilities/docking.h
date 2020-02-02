@@ -57,6 +57,8 @@ public:
 
     Molecule getMolecule() const { return m_supramol; }
 
+    void setCheck(bool check) { m_check = check; }
+
 private:
     Molecule m_host_structure, m_guest_structure, m_supramol;
     Position m_initial_anchor = Position{ 0, 0, 0 };
@@ -64,4 +66,5 @@ private:
     std::map<double, Vector> m_docking_list;
     std::map<double, Molecule*> m_result_list;
     std::vector<Position> m_anchor_accepted, m_rotation_accepted;
+    bool m_check = false;
 };

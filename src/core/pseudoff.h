@@ -59,4 +59,48 @@ public:
         error = (distance < mind) * (mind - distance);
         return error;
     }
+    /*
+    inline static Vector4d DistancePenaltyDiff(const std::pair<int, Position>& a, const std::pair<int, Position>& b, double scaling = 1.5)
+    {
+        double distance = 0;
+        double dx = 0, dy = 0, dz = 0;
+        dx = (a.second(0) - b.second(0)) * (a.second(0) - b.second(0));
+        dy = (a.second(1) - b.second(1)) * (a.second(1) - b.second(1));
+        dz = (a.second(2) - b.second(2)) * (a.second(2) - b.second(2));
+        distance = sqrt(dx + dy + dz);
+        double ddx = 0, ddy = 0, ddz = 0;
+        double error = 0;
+        const double cov_A = Elements::CovalentRadius[a.first];
+        const double cov_B = Elements::CovalentRadius[b.first];
+        double mind = (cov_A + cov_B) * scaling;
+
+        error = (distance < mind) * (mind - distance);
+        ddx = (2 * dx / distance < mind) * (mind - distance);
+        ddy = (2 * dy / distance < mind) * (mind - distance);
+        ddz = (2 * dz / distance < mind) * (mind - distance);
+
+        return Vector4d{ error, ddx, ddy, ddz };
+    }
+    */
+    inline static Vector4d DistancePenaltyDiff(const std::pair<int, Position>& a, const std::pair<int, Position>& b, double scaling = 1.5)
+    {
+        double distance = 0;
+        double dx = 0, dy = 0, dz = 0;
+        const double vdW_A = Elements::VanDerWaalsRadius[a.first];
+        const double vdW_B = Elements::VanDerWaalsRadius[b.first];
+
+        dx = (a.second(0) - b.second(0)) * (a.second(0) - b.second(0));
+        dy = (a.second(1) - b.second(1)) * (a.second(1) - b.second(1));
+        dz = (a.second(2) - b.second(2)) * (a.second(2) - b.second(2));
+
+        distance = sqrt(dx + dy + dz);
+        double ddx = 0, ddy = 0, ddz = 0;
+        double error = 2 * pow((vdW_A + vdW_B) / (distance), 2);
+
+        ddx = dx * 48 * pow((vdW_A + vdW_B) / (sqrt(dx + dy + dz)), 3) / (vdW_A + vdW_B);
+        ddy = dy * 48 * pow((vdW_A + vdW_B) / (sqrt(dy + dx + dz)), 3) / (vdW_A + vdW_B);
+        ddz = dz * 48 * pow((vdW_A + vdW_B) / (sqrt(dz + dx + dy)), 3) / (vdW_A + vdW_B);
+
+        return Vector4d{ error, ddx, ddy, ddz };
+    }
 };

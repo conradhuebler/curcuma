@@ -105,7 +105,7 @@ private:
     void InitialiseEmptyGeometry(int atoms);
 
     int m_charge = 0;
-    std::vector< std::array<double, 3> > geom;
+    std::vector<std::array<double, 3>> m_geometry;
     std::vector<int> m_atoms;
     mutable std::vector<std::vector<int>> m_fragments;
     mutable std::vector<double> m_mass_fragments;

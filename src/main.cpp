@@ -18,11 +18,15 @@
  */
 
 #include "src/core/molecule.h"
+#include "src/core/xtbinterface.h"
 
 #include "src/capabilities/confscan.h"
 #include "src/capabilities/docking.h"
 #include "src/capabilities/nebdocking.h"
 #include "src/capabilities/rmsd.h"
+#include "src/capabilities/simplemd.h"
+
+#include "src/capabilities/optimiser/LBFGSInterface.h"
 
 #include "src/tools/general.h"
 
@@ -78,6 +82,7 @@ int main(int argc, char **argv) {
                   << "-rmsd        * RMSD Calulator                *" << std::endl
                   << "-confscan    * Filter list of conformers     *" << std::endl
                   << "-dock        * Perform some docking          *" << std::endl;
+        XTBInterface interface;
     }
     
     if(argc >= 2)
@@ -166,7 +171,7 @@ int main(int argc, char **argv) {
             docking->setHostStructure(mol1);
             docking->setGuestStructure(mol2);
 
-            if (argc == 7) {
+            if (argc >= 7) {
                 double XXX = stod(std::string(argv[4]));
                 double YYY = stod(std::string(argv[5]));
                 double ZZZ = stod(std::string(argv[6]));
@@ -174,7 +179,17 @@ int main(int argc, char **argv) {
                 std::cout << "Docking Position:" << XXX << " " << YYY << " " << ZZZ << std::endl;
                 docking->setAnchorPosition(Position{ XXX, YYY, ZZZ });
             }
+            bool check = false;
+            if (argc >= 7) {
 
+                for (std::size_t i = 3; i < argc; ++i) {
+                    if (strcmp(argv[i], "-check") == 0) {
+                        check = true;
+                        continue;
+                    }
+                }
+            }
+            docking->setCheck(check);
             docking->PerformDocking();
 
             docking->getMolecule().writeXYZFile("docked.xyz");
@@ -301,6 +316,28 @@ int main(int argc, char **argv) {
             Molecule mol1 = Tools::LoadFile(argv[2]);
             mol1.printFragmente();
 
+        } else if (strcmp(argv[1], "-opt") == 0) {
+            if (argc < 2) {
+                std::cerr << "Please use curcuma for optimisation as follows:\ncurcuma -opt input.xyz" << std::endl;
+                return 0;
+            }
+
+            Molecule mol1 = Tools::LoadFile(argv[2]);
+            Molecule mol2 = OptimiseGeometry(&mol1);
+            mol2.writeXYZFile("optimised_structure.xyz");
+            return 0;
+        } else if (strcmp(argv[1], "-md") == 0) {
+            if (argc < 2) {
+                std::cerr << "Please use curcuma for test md assignment as follows:\ncurcuma -md input.xyz" << std::endl;
+                return 0;
+            }
+
+            Molecule mol1 = Tools::LoadFile(argv[2]);
+
+            SimpleMD md;
+            md.setMolecule(mol1);
+            md.Initialise();
+            md.Dance();
         } else if (strcmp(argv[1], "-nebprep") == 0) {
             if (argc < 3) {
                 std::cerr << "Please use curcuma for geometry preparation for nudge-elastic-band calculation follows:\ncurcuma -nebprep first.xyz second.xyz" << std::endl;
@@ -353,6 +390,8 @@ int main(int argc, char **argv) {
                         mol.print_geom();
                         std::cout << std::endl
                                   << std::endl;
+                        // XTBInterface interface;
+                        // interface.GFN1Energy(mol);
                         //std::cout << "Centroid: " << mol.Centroid(true).transpose() << std::endl;
                         // std::cout << mol.Ia() << " " << mol.Ib() << " " << mol.Ic() << std::endl;
 

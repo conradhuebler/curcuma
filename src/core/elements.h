@@ -61,7 +61,7 @@ static int String2Element(const std::string& string)
     int element = 0;
 
     for (int i = 0; i < ElementAbbr.size(); ++i) {
-        if (string.find(ElementAbbr[i]) != std::string::npos) {
+        if (string.compare(ElementAbbr[i]) == 0) {
             element = i;
             return element;
         }

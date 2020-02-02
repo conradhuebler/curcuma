@@ -20,6 +20,7 @@
 #include "src/core/pseudoff.h"
 
 #include "src/capabilities/optimiser/LevMarDocking.h"
+#include "src/capabilities/optimiser/XTBDocking.h"
 
 #include <iostream>
 
@@ -40,7 +41,15 @@ void Docking::PerformDocking()
     Geometry stored_guest = m_guest_structure.getGeometry();
     Position initial_centroid = m_guest_structure.Centroid();
 
+    Geometry geometry = GeometryTools::TranslateAndRotate(stored_guest, initial_centroid, m_initial_anchor, Position{ 0, 0, 0 });
     /*
+    Molecule temp_guest = guest;
+    temp_guest.setGeometry(geometry);
+    Geometry geom2 = PrepareHost(&m_host_structure, &temp_guest);
+    Molecule host2 = m_host_structure;
+    host2.setGeometry(geom2);
+
+
     Geometry destination = GeometryTools::TranslateMolecule(guest,initial_centroid, m_initial_anchor);
 
     std::cout << PseudoFF::LennardJones(m_host_structure, m_guest_structure) << std::endl;
@@ -53,13 +62,22 @@ void Docking::PerformDocking()
     int Y = 36;
     int Z = 36;
 
+    int max = 10;
+    if (m_check) {
+        X = 10;
+        Y = 10;
+        Z = 10;
+        max = 36;
+        std::cout << "Fewer sampling " << std::endl;
+    }
+    int excluded = 0;
     for (int x = 0; x < X; ++x) {
         for (int y = 0; y < Y; ++y) {
             for (int z = 0; z < Z; ++z) {
                 Molecule* molecule = new Molecule(m_host_structure);
                 guest = m_guest_structure;
 
-                std::pair<Position, Position> pair = OptimiseAnchor(&m_host_structure, guest, m_initial_anchor, Position{ x * 10, y * 10, z * 10 });
+                std::pair<Position, Position> pair = OptimiseAnchor(&m_host_structure, guest, m_initial_anchor, Position{ x * max, y * max, z * max });
 
                 bool accept = true;
 
@@ -73,10 +91,13 @@ void Docking::PerformDocking()
                     Position rotation = m_rotation_accepted[i];
                     if (GeometryTools::Distance(anchor, pair.first) < 1e-1 || GeometryTools::Distance(rotation, pair.second) < 1e-1)
                         accept = false;
+
                     //std::cout << GeometryTools::Distance(anchor, pair.first) << " --- "  << GeometryTools::Distance(rotation, pair.second) << std::endl;
                 }
-                if (accept == false)
+                if (accept == false) {
+                    excluded++;
                     continue;
+                }
                 m_anchor_accepted.push_back(pair.first);
                 m_rotation_accepted.push_back(pair.second);
 
@@ -94,7 +115,7 @@ void Docking::PerformDocking()
                 m_result_list.insert(std::pair<double, Molecule*>(energy, molecule));
             }
         }
-        std::cout << (x / double(X)) * 100 << "% - " << m_anchor_accepted.size() << " stored structures." << std::endl;
+        std::cout << (x / double(X)) * 100 << "% - " << m_anchor_accepted.size() << " stored structures. " << excluded << " structures were skipped, due to being duplicate!" << std::endl;
     }
     guest = m_guest_structure;
     std::cout << std::endl
@@ -105,7 +126,17 @@ void Docking::PerformDocking()
         ++index;
 
         std::cout << pair.first << std::endl;
-        pair.second->appendXYZFile("docked_structures_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
+        pair.second->CalculateRotationalConstants();
+        double IA = pair.second->Ia();
+        double IB = pair.second->Ib();
+        double IC = pair.second->Ic();
+        if (2 * IA < IB && 2 * IA < IC)
+            pair.second->appendXYZFile("docked_structures_IA_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
+        else if (2 * IA > IB && 2 * IA < IC)
+            pair.second->appendXYZFile("docked_structures_IB_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
+        else
+            pair.second->appendXYZFile("docked_structures_IC_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
+
         pair.second->print_geom();
         delete pair.second;
     }

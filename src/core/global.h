@@ -22,9 +22,15 @@
 #include <Eigen/Dense>
 
 const double pi = 3.14159265359;
+const double au = 0.52917721092;
+const double amu2au = 1822.8884850;
+const double kb = 3.166811e-6;
+const double fs2amu = 41.34137314;
 
 typedef Eigen::MatrixXd Geometry;
 typedef Eigen::Vector3d Position;
+typedef Eigen::Vector4d Vector4d;
+
 typedef Eigen::VectorXd Vector;
 typedef std::pair<int, int> IntPair;
 
