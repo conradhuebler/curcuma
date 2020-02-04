@@ -67,4 +67,6 @@ private:
     std::map<double, Molecule*> m_result_list;
     std::vector<Position> m_anchor_accepted, m_rotation_accepted;
     bool m_check = false;
+    double m_sum_distance = 0;
+    double m_window_seperator = 0.66666;
 };

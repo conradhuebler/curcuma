@@ -106,13 +106,16 @@ void Docking::PerformDocking()
                 // std::cout << pair.first.transpose() << " " << pair.second.transpose() << std::endl;
 
                 guest.setGeometry(destination);
-                double energy = PseudoFF::LennardJones(m_host_structure, guest);
-                m_docking_list.insert(std::pair<double, Vector>(energy, PositionPair2Vector(pair)));
+                //double energy = PseudoFF::LennardJones(m_host_structure, guest);
+                double distance = GeometryTools::Distance(pair.first, m_host_structure.Centroid());
+                m_sum_distance += distance;
+                m_docking_list.insert(std::pair<double, Vector>(distance, PositionPair2Vector(pair)));
                 result = m_host_structure;
                 for (std::size_t i = 0; i < guest.AtomCount(); ++i) {
                     molecule->addPair(guest.Atom(i));
                 }
-                m_result_list.insert(std::pair<double, Molecule*>(energy, molecule));
+                molecule->setEnergy(distance);
+                m_result_list.insert(std::pair<double, Molecule*>(distance, molecule));
             }
         }
         std::cout << (x / double(X)) * 100 << "% - " << m_anchor_accepted.size() << " stored structures. " << excluded << " structures were skipped, due to being duplicate!" << std::endl;
@@ -121,11 +124,13 @@ void Docking::PerformDocking()
     std::cout << std::endl
               << "** Docking Phase 0 - Finished **" << std::endl;
     int index = 0;
+    double average_distance = m_sum_distance / double(m_result_list.size());
 
     for (const auto& pair : m_result_list) {
         ++index;
 
         std::cout << pair.first << std::endl;
+        /*
         pair.second->CalculateRotationalConstants();
         double IA = pair.second->Ia();
         double IB = pair.second->Ib();
@@ -136,7 +141,13 @@ void Docking::PerformDocking()
             pair.second->appendXYZFile("docked_structures_IB_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
         else
             pair.second->appendXYZFile("docked_structures_IC_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
-
+        */
+        if (pair.first < average_distance * m_window_seperator)
+            pair.second->appendXYZFile("docked_structures_compact_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
+        else if (pair.first > average_distance * m_window_seperator && pair.first < average_distance * (2 - m_window_seperator))
+            pair.second->appendXYZFile("docked_structures_loose_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
+        else
+            pair.second->appendXYZFile("docked_structures_free_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
         pair.second->print_geom();
         delete pair.second;
     }
