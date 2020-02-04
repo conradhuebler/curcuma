@@ -19,6 +19,7 @@
 
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -76,15 +77,24 @@ bool ConfScan::openFile()
         if (i == 1) {
             StringList list = Tools::SplitString(line);
             if (list.size() == 4) {
-                mol->setName(list[0]);
-                //mol->setName("Molecule " + std::to_string(molecule));
-                if (list[3] == "")
-                    mol->setEnergy(0);
-                else {
+                if (list[0].compare("SCF") == 0 && list[1].compare("done") == 0) {
+                    mol->setName("Molecule " + std::to_string(molecule));
                     try {
-                        mol->setEnergy(std::stod((list[3])));
+                        mol->setEnergy(std::stod((list[2])));
                     } catch (const std::string& what_arg) {
                         mol->setEnergy(0);
+                    }
+                } else {
+                    mol->setName(list[0]);
+                    //mol->setName("Molecule " + std::to_string(molecule));
+                    if (list[3] == "")
+                        mol->setEnergy(0);
+                    else {
+                        try {
+                            mol->setEnergy(std::stod((list[3])));
+                        } catch (const std::string& what_arg) {
+                            mol->setEnergy(0);
+                        }
                     }
                 }
             } else if (list.size() == 1) {
@@ -166,9 +176,10 @@ void ConfScan::scan()
                 }
 
                 std::cout << std::endl
+                          << std::setprecision(10)
                           << std::endl
                           << std::endl
-                          << "Reference Molecule:" << mol1->Name() << "        Target Molecule " << mol2->Name() << std::endl;
+                          << "Reference Molecule:" << mol1->Name() << " (" << mol1->Energy() << " Eh)        Target Molecule " << mol2->Name() << " (" << mol2->Energy() << " Eh)" << std::endl;
                 double difference = abs(mol1->Energy() - mol2->Energy()) * 2625.5;
 
                 double rmsd = 0;

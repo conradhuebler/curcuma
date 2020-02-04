@@ -70,6 +70,8 @@ int main(int argc, char **argv) {
               << "*    It might even be total useless             *" << std::endl
               << "*                                               *" << std::endl
               << "*    Nothing to cite yet ...                    *" << std::endl
+              << "*    Git Commit Hash: " << git_commit_hash << "                   *" << std::endl
+              //<< "*    Git Commit Date: " << git_date << "                   *" << std::endl
               << "*                                               *" << std::endl
               << "*************************************************" << std::endl;
 

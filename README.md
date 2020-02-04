@@ -5,9 +5,11 @@ A simple Open Source molecular modelling tool.
 ## Download and requirements
 git clones automatically eigen.
 - [eigen](https://gitlab.com/libeigen/eigen) provides eigen C++ library for linear algebra
+- [LBFGSpp](https://github.com/yixuan/LBFGSpp/) prvodies LBFGS optimiser
+- [XTB](https://github.com/grimme-lab/xtb) eXtended TightBinding - Some methods use this, however it is disabled by default. Add '-DUSE_XTB=true ' to the cmake command line to enable it. GCC 8 or later has to be used.
 
 ## Compiling
-To compile SupraFit you will need [CMake](https://cmake.org/download/) 3 or newer and a C++14-capable compiler.
+To compile Curcuma you will need [CMake](https://cmake.org/download/) 3.15 or newer and a C++14-capable compiler.
 
 To obtain the most recent version
 ```sh
@@ -21,27 +23,6 @@ mkdir build
 cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make
-```
-
-On Windows Systems use for example
-```sh
-cd suprafit
-mkdir build
-cd build
-```
-For Visual Studio use
-```sh
-cmake -G "Visual Studio 15 2017 Win64" -DCMAKE_BUILD_TYPE=Release  ..
-```
-
-or for MinGW use
-
-```sh
-cmake -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release ..
-```
-
-```sh
-cmake --build . --config Release
 ```
 
 # Usage

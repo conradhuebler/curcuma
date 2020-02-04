@@ -1,0 +1,33 @@
+#pragma once
+#include "src/global_config.h"
+
+#include <string>
+
+const std::string git_commit_hash = "@GIT_COMMIT_HASH@"; /*! Current hash of the git branch */
+const  std::string git_branch = "@GIT_BRANCH@";      /*! Current name of the branch as printable string    */
+
+#ifdef _UNIX
+const  std::string git_date = "Commit Date: @GIT_COMMIT_DATE@"; /*! Current date of the git branch branch as printable string*/
+#else
+const  std::string git_date = ""; /*! Current date of the git branch branch as printable string*/
+#endif
+
+const  std::string branch = " Git Branch: @GIT_BRANCH@ -- ";      /*! Current name of the branch as printable string    */
+const  std::string commit_hash = "Commit: @GIT_COMMIT_HASH@ --"; /*! Current hash of the git branch branch as printable string*/
+
+#ifdef _UNIX
+const  std::string date = "Commit Date: @GIT_COMMIT_DATE@"; /*! Current date of the git branch branch as printable string*/
+#else
+const  std::string date = "Forever young."; /*! Current date of the git branch branch as printable string*/
+#endif
+
+#ifdef _DEBUG
+const  std::string conf_mode = "DEBUG Mode"; /*! Last compilation mode used */
+#else
+const  std::string conf_mode = "RELEASE Mode"; /*! Last compilation mode used */
+#endif
+
+// const  std::string version = std::string("Curcuma 0.1 pre-Alpha \n\t%1 %2 %3 -  %4").arg(branch).arg(commit_hash).arg(date).arg(conf_mode); /*! Version name */
+
+
+const int qint_version = 0.1;

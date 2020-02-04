@@ -21,6 +21,9 @@
 
 #include <Eigen/Dense>
 
+#include "src/global_config.h"
+#include "src/version.h"
+
 const double pi = 3.14159265359;
 const double au = 0.52917721092;
 const double amu2au = 1822.8884850;
