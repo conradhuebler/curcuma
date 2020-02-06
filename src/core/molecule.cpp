@@ -531,6 +531,26 @@ void Molecule::PrintConnectivitiy(double scaling) const
     }
 }
 
+void Molecule::AnalyseIntermoleculeDistance() const
+{
+    double cutoff = 2.5;
+    for (std::size_t i = 0; i < m_fragments.size(); ++i) {
+        for (std::size_t j = i + 1; j < m_fragments.size(); ++j) {
+
+            for (int a : m_fragments[i]) {
+
+                for (int b : m_fragments[j]) {
+                    double distance = Distance(a, b);
+                    if (distance < cutoff) {
+                        if (Atom(a).first == 1 && Atom(b).first != 1 || Atom(a).first != 1 && Atom(b).first == 1)
+                            std::cout << std::setprecision(6) << distance << " " << a << "(" << Atom(a).first << ") - " << b << "(" << Atom(b).first << ")" << std::endl;
+                    }
+                }
+            }
+        }
+    }
+}
+
 std::vector<std::vector<int>> Molecule::GetFragments(double scaling) const
 {
     if (scaling != m_scaling)
