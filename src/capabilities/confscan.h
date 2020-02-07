@@ -58,6 +58,8 @@ public:
         m_rmsd_threshold = 0.75;
     }
 
+    void setEnergyThreshold(double energy) { m_energy_threshold = energy; }
+
 private:
     bool openFile();
 

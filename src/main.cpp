@@ -263,6 +263,7 @@ int main(int argc, char **argv) {
             bool writeXYZ = false;
             bool reorder = false, check_connect = false, heavy = false;
             int rank = 1e10;
+            double energy = 1.0;
             if (argc >= 4) {
 
                 for (std::size_t i = 3; i < argc; ++i) {
@@ -272,7 +273,13 @@ int main(int argc, char **argv) {
                             rank = std::stoi(argv[i + 1]);
                             ++i;
                         }
-                        ++i;
+                    }
+
+                    if (strcmp(argv[i], "-energy") == 0) {
+                        if (i + 1 < argc) {
+                            energy = std::stod(argv[i + 1]);
+                            ++i;
+                        }
                     }
 
                     if (strcmp(argv[i], "-writeXYZ") == 0) {
@@ -306,6 +313,7 @@ int main(int argc, char **argv) {
             scan->setWriteXYZ(writeXYZ);
             scan->setForceReorder(reorder);
             scan->setCheckConnections(check_connect);
+            scan->setEnergyThreshold(energy);
             scan->scan();
 
             return 0;

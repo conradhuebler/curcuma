@@ -87,6 +87,42 @@ inline StringList SplitString(const std::string& string)
     return elements;
 }
 
+inline StringList SplitString(const std::string& string, const char* delim)
+{
+    StringList elements;
+    std::string element;
+    for (const char& c : string) {
+        if (*delim != c)
+            element.push_back(c);
+        else {
+            if (element.size()) {
+                elements.push_back(element);
+            }
+            element.clear();
+        }
+    }
+    elements.push_back(element);
+    return elements;
+}
+
+inline bool isInt(const std::string& input)
+{
+    return std::all_of(input.begin(), input.end(), ::isdigit);
+}
+
+inline bool isDouble(const std::string& input)
+{
+    const char* delim = ".";
+    StringList list = SplitString(input, delim);
+    if (list.size() != 2)
+        return false;
+
+    bool left = isInt(list[0]);
+    bool right = isInt(list[1]);
+    return left && right;
+    // return std::all_of(input.begin(), input.end(), ::isdigit);
+}
+
 inline Molecule LoadFile(const string& filename)
 {
 

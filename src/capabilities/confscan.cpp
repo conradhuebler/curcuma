@@ -103,6 +103,16 @@ bool ConfScan::openFile()
                 } catch (const std::string& what_arg) {
                 }
                 mol->setName("Molecule " + std::to_string(molecule));
+            } else {
+                for (const string& s : list) {
+                    double energy = 0;
+                    if (Tools::isDouble(s)) {
+                        energy = std::stod(s);
+                        mol->setEnergy(energy);
+                        break;
+                    }
+                }
+                mol->setName("Molecule " + std::to_string(molecule));
             }
         }
         if (i > 1) {
@@ -247,7 +257,7 @@ void ConfScan::scan()
         return;
 
     for (const auto molecule : m_result) {
-        molecule->print_geom(false);
+        //molecule->print_geom(false);
         molecule->appendXYZFile(result_name);
     }
     if (m_writeXYZ) {
