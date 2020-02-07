@@ -37,9 +37,12 @@ public:
 private:
     void InitialisePairs(const Molecule* molecule);
     void ScanPairs(const Molecule* molecule);
-    void addPair(std::pair<int, int> pair);
+    void BlackListProtons(const Molecule* molecule);
+    void addPair(std::pair<int, int> pair, std::vector<std::pair<int, int>>& pairs);
     std::string m_filename;
-    std::vector<std::pair<int, int>> m_pairs;
+    std::vector<std::pair<int, int>> m_intra_pairs, m_inter_pairs;
+    std::vector<int> m_proton_blacklist;
     bool m_intramolecular = false, m_intermolecule = true;
-    double m_cutoff = 2.5;
+    double m_cutoff = 2.5, m_scaling = 1.3;
+    std::ofstream m_intermol_file, m_intramol_file, m_centroid_file;
 };

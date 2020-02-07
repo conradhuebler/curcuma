@@ -25,7 +25,10 @@
 #include <string>
 #include <vector>
 
+#include "src/core/elements.h"
 #include "src/core/molecule.h"
+
+#include "src/tools/geometry.h"
 
 #include "pairmapper.h"
 
@@ -35,6 +38,14 @@ PairMapper::PairMapper()
 
 void PairMapper::FindPairs()
 {
+    string outfile = m_filename;
+    for (int i = 0; i < 4; ++i)
+        outfile.pop_back();
+
+    m_intermol_file.open(outfile + "_intermol.dat");
+    m_intramol_file.open(outfile + "_intramol.dat");
+    m_centroid_file.open(outfile + "_centroid.dat");
+
     std::ifstream input(m_filename);
     std::vector<std::string> lines;
     int atoms = 0;
@@ -63,10 +74,17 @@ void PairMapper::FindPairs()
         index++;
     }
 
-    for (const std::pair<int, int> p : m_pairs) {
-        std::cout << std::setprecision(6) << p.first << " - " << p.second << "   ";
+    m_intermol_file << "# ";
+    for (const std::pair<int, int> p : m_inter_pairs) {
+        m_intermol_file << "(" << std::setprecision(6) << p.first + 1 << "-" << p.second + 1 << ")   ";
     }
-    std::cout << std::endl;
+    m_intermol_file << std::endl;
+
+    m_intramol_file << "# ";
+    for (const std::pair<int, int> p : m_intra_pairs) {
+        m_intramol_file << "(" << std::setprecision(6) << p.first + 1 << "-" << p.second + 1 << ")   ";
+    }
+    m_intramol_file << std::endl;
 
     std::ifstream input2(m_filename);
 
@@ -90,41 +108,49 @@ void PairMapper::FindPairs()
         }
         index++;
     }
+
+    m_intermol_file.close();
+    m_intramol_file.close();
+    m_centroid_file.close();
 }
 
 void PairMapper::InitialisePairs(const Molecule* molecule)
 {
-    if (m_intramolecular) // can be better, I know ....
-    {
-        for (std::size_t i = 0; i < molecule->GetFragments().size(); ++i) {
-            for (int a : molecule->GetFragments()[i]) {
-                for (int b : molecule->GetFragments()[i]) {
-                    double distance = molecule->Distance(a, b);
-                    if (distance < m_cutoff) {
-                        if ((molecule->Atom(a).first == 1 && molecule->Atom(b).first != 1) || (molecule->Atom(a).first != 1 && molecule->Atom(b).first == 1)) {
-                            addPair(std::pair<double, double>(a, b));
-                        }
-                        //std::cout <<  std::setprecision(6) << distance << " " << a << "(" << Atom(a).first << ") - " << b << "(" << Atom(b).first << ")" << std::endl;
+
+    if (m_proton_blacklist.size() == 0) {
+        BlackListProtons(molecule);
+    }
+
+    std::vector<std::vector<int>> f = molecule->GetFragments();
+
+    for (std::size_t i = 0; i < f.size(); ++i) {
+        for (std::size_t k = 0; k < f[i].size(); ++k) {
+            for (std::size_t l = k + 1; l < f[i].size(); ++l) {
+
+                int a = f[i][k];
+                int b = f[i][l];
+                if ((std::find(m_proton_blacklist.begin(), m_proton_blacklist.end(), a) != m_proton_blacklist.end()) || (std::find(m_proton_blacklist.begin(), m_proton_blacklist.end(), b) != m_proton_blacklist.end()))
+                    continue;
+                double distance = molecule->Distance(a, b);
+                if (distance < m_cutoff && distance > (Elements::CovalentRadius[molecule->Atom(a).first] + Elements::CovalentRadius[molecule->Atom(b).first]) * m_scaling) {
+                    if ((molecule->Atom(a).first == 1 && (molecule->Atom(b).first == 7 || molecule->Atom(b).first == 8)) || ((molecule->Atom(a).first == 7 || molecule->Atom(a).first == 8) && molecule->Atom(b).first == 1)) {
+                        addPair(std::pair<double, double>(a, b), m_intra_pairs);
                     }
                 }
             }
         }
     }
 
-    if (m_intermolecule) {
-        std::vector<std::vector<int>> f = molecule->GetFragments();
-        for (std::size_t i = 0; i < molecule->GetFragments().size(); ++i) {
-            for (std::size_t j = i + 1; j < molecule->GetFragments().size(); ++j) {
+    for (std::size_t i = 0; i < molecule->GetFragments().size(); ++i) {
+        for (std::size_t j = i + 1; j < molecule->GetFragments().size(); ++j) {
 
-                for (int a : f[i]) {
+            for (int a : f[i]) {
 
-                    for (int b : f[j]) {
-                        double distance = molecule->Distance(a, b);
-                        if (distance < m_cutoff) {
-                            if ((molecule->Atom(a).first == 1 && molecule->Atom(b).first != 1) || (molecule->Atom(a).first != 1 && molecule->Atom(b).first == 1)) {
-                                addPair(std::pair<double, double>(a, b));
-                            }
-                            //std::cout <<  std::setprecision(6) << distance << " " << a << "(" << Atom(a).first << ") - " << b << "(" << Atom(b).first << ")" << std::endl;
+                for (int b : f[j]) {
+                    double distance = molecule->Distance(a, b);
+                    if (distance < m_cutoff) {
+                        if ((molecule->Atom(a).first == 1 && (molecule->Atom(b).first == 7 || molecule->Atom(b).first == 8)) || ((molecule->Atom(b).first == 7 || molecule->Atom(b).first == 8) && molecule->Atom(b).first == 1)) {
+                            addPair(std::pair<double, double>(a, b), m_inter_pairs);
                         }
                     }
                 }
@@ -135,21 +161,57 @@ void PairMapper::InitialisePairs(const Molecule* molecule)
 
 void PairMapper::ScanPairs(const Molecule* molecule)
 {
-    for (const std::pair<int, int> p : m_pairs) {
-        std::cout << molecule->Distance(p.first, p.second) << "    ";
+    for (const std::pair<int, int> p : m_intra_pairs) {
+        m_intramol_file << molecule->Distance(p.first, p.second) << "    ";
     }
-    std::cout << std::endl;
+    m_intramol_file << std::endl;
+
+    for (const std::pair<int, int> p : m_inter_pairs) {
+        m_intermol_file << molecule->Distance(p.first, p.second) << "    ";
+    }
+    m_intermol_file << std::endl;
+
+    std::vector<std::vector<int>> f = molecule->GetFragments();
+    for (std::size_t i = 0; i < molecule->GetFragments().size(); ++i) {
+        for (std::size_t j = i + 1; j < molecule->GetFragments().size(); ++j) {
+            Geometry geom1 = molecule->getGeometryByFragment(i);
+            Geometry geom2 = molecule->getGeometryByFragment(j);
+            double distance = GeometryTools::Distance(GeometryTools::Centroid(geom1), GeometryTools::Centroid(geom2));
+            m_centroid_file << distance << "    ";
+        }
+    }
+    m_centroid_file << std::endl;
 }
 
-void PairMapper::addPair(std::pair<int, int> pair)
+void PairMapper::addPair(std::pair<int, int> pair, std::vector<std::pair<int, int>>& pairs)
 {
     bool exist = false;
-    for (const std::pair<int, int> p : m_pairs)
+    for (const std::pair<int, int> p : pairs)
         if (pair == p) {
             exist = true;
             break;
         }
 
     if (!exist)
-        m_pairs.push_back(pair);
+        pairs.push_back(pair);
+}
+
+void PairMapper::BlackListProtons(const Molecule* molecule)
+{
+    for (std::size_t i = 0; i < molecule->AtomCount(); ++i) {
+        if (molecule->Atom(i).first != 1)
+            continue;
+        double distance = 1e8;
+        int element = 0;
+        for (std::size_t j = 0; j < molecule->AtomCount(); ++j) {
+            if (i == j)
+                continue;
+            double d = molecule->Distance(i, j);
+            if (d < distance)
+                element = molecule->Atom(j).first;
+            distance = min(d, distance);
+        }
+        if (element == 6)
+            m_proton_blacklist.push_back(i);
+    }
 }
