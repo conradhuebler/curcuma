@@ -23,6 +23,7 @@
 #include "src/capabilities/confscan.h"
 #include "src/capabilities/docking.h"
 #include "src/capabilities/nebdocking.h"
+#include "src/capabilities/pairmapper.h"
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/simplemd.h"
 
@@ -326,6 +327,16 @@ int main(int argc, char **argv) {
             Molecule mol1 = Tools::LoadFile(argv[2]);
             mol1.printFragmente();
 
+        } else if (strcmp(argv[1], "-hmap") == 0) {
+            if (argc < 2) {
+                std::cerr << "Please use curcuma for hydrogen bond mapping as follows:\ncurcuma -hmap trajectory.xyz" << std::endl;
+                return 0;
+            }
+
+            PairMapper mapper;
+            mapper.setFile(argv[2]);
+            mapper.FindPairs();
+
         } else if (strcmp(argv[1], "-opt") == 0) {
             if (argc < 2) {
                 std::cerr << "Please use curcuma for optimisation as follows:\ncurcuma -opt input.xyz" << std::endl;
@@ -398,6 +409,7 @@ int main(int argc, char **argv) {
                     {
                         mol.CalculateRotationalConstants();
                         mol.print_geom();
+                        mol.AnalyseIntermoleculeDistance();
                         std::cout << std::endl
                                   << std::endl;
                         // XTBInterface interface;

@@ -101,6 +101,8 @@ class Molecule
     inline double Ib() const { return m_Ib; }
     inline double Ic() const { return m_Ic; }
 
+    void AnalyseIntermoleculeDistance() const;
+
 private:
     void InitialiseEmptyGeometry(int atoms);
 
