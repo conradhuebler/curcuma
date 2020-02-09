@@ -52,9 +52,12 @@ void RMSDDriver::AutoPilot()
 
     if(m_protons == false)
         ProtonDepleted();
-    if (m_fragment < -1 || m_fragment > m_reference.GetFragments().size() || m_fragment > m_target.GetFragments().size()) {
+    if (m_fragment_reference < -1 || m_fragment_reference > m_reference.GetFragments().size()) {
         //std::cerr << "*** Index of Fragment ( " << m_fragment << " ) is invalid, I will just use the whole molecule (Sometimes false negative ... - WIP) . ***" << std::endl;
-        m_fragment = -1;
+        m_fragment_reference = -1;
+    }
+    if (m_fragment_target < -1 || m_fragment_target > m_target.GetFragments().size()) {
+        m_fragment_target = -1;
     }
 
     m_rmsd_raw = CalculateRMSD(m_reference, m_target);
@@ -76,7 +79,8 @@ void RMSDDriver::AutoPilot()
             }
 
             ReorderMolecule();
-        }
+        } else if (m_fragment_target != m_fragment_reference)
+            m_target_reordered = m_target;
     } else
         m_target_reordered = m_target;
 
@@ -157,7 +161,9 @@ Eigen::Matrix3d RMSDDriver::BestFitRotation(const Geometry& reference_mol, const
 
 Eigen::Matrix3d RMSDDriver::BestFitRotation(const Molecule& reference_mol, const Molecule& target_mol, int factor) const
 {
-    return BestFitRotation(reference_mol.getGeometryByFragment(m_fragment, m_protons), target_mol.getGeometryByFragment(m_fragment, m_protons), factor);
+    const Geometry ref = reference_mol.getGeometryByFragment(m_fragment_reference, m_protons);
+    const Geometry tar = target_mol.getGeometryByFragment(m_fragment_target, m_protons);
+    return BestFitRotation(ref, tar, factor);
 }
 
 double RMSDDriver::CalculateRMSD(const Molecule& reference_mol, const Molecule& target_mol, Molecule* ret_ref, Molecule* ret_tar, int factor) const
@@ -165,15 +171,24 @@ double RMSDDriver::CalculateRMSD(const Molecule& reference_mol, const Molecule& 
     Eigen::Matrix3d R = BestFitRotation(reference_mol, target_mol, factor);
 
     double rmsd = 0;
-    int fragment = m_fragment;
+    // int fragment_reference = m_fragment_reference;
+    //  int fragment_target = m_fragment_target;
 
-    Geometry reference = GeometryTools::TranslateGeometry(reference_mol.getGeometry(), GeometryTools::Centroid(m_reference.getGeometryByFragment(m_fragment)), Position{ 0, 0, 0 }); // CenterMolecule(reference_mol);
-    Geometry target = GeometryTools::TranslateGeometry(target_mol.getGeometry(), GeometryTools::Centroid(target_mol.getGeometryByFragment(m_fragment)), Position{ 0, 0, 0 }); //CenterMolecule(target_mol);
+    Geometry reference;
+    Geometry target;
+
+    if (m_fragment_target == m_fragment_reference) {
+        reference = GeometryTools::TranslateGeometry(reference_mol.getGeometry(), GeometryTools::Centroid(m_reference.getGeometryByFragment(m_fragment_reference)), Position{ 0, 0, 0 }); // CenterMolecule(reference_mol);
+        target = GeometryTools::TranslateGeometry(target_mol.getGeometry(), GeometryTools::Centroid(target_mol.getGeometryByFragment(m_fragment_target)), Position{ 0, 0, 0 }); //CenterMolecule(target_mol);
+    } else {
+        reference = GeometryTools::TranslateGeometry(reference_mol.getGeometryByFragment(m_fragment_reference), GeometryTools::Centroid(m_reference.getGeometryByFragment(m_fragment_reference)), Position{ 0, 0, 0 }); // CenterMolecule(reference_mol);
+        target = GeometryTools::TranslateGeometry(target_mol.getGeometryByFragment(m_fragment_target), GeometryTools::Centroid(target_mol.getGeometryByFragment(m_fragment_target)), Position{ 0, 0, 0 }); //CenterMolecule(target_mol);
+    }
     Eigen::MatrixXd tar = target.transpose();
 
 
     Geometry rotated = tar.transpose()*R;
-
+    std::cout << rotated.cols() << " " << rotated.rows() << std::endl;
     for(int i = 0; i < rotated.rows(); ++i)
     {
         rmsd += (rotated(i, 0) - reference(i, 0))*(rotated(i, 0) - reference(i, 0)) +
@@ -191,7 +206,7 @@ double RMSDDriver::CalculateRMSD(const Molecule& reference_mol, const Molecule& 
         ret_ref->LoadMolecule(reference_mol);
         ret_ref->setGeometry(reference);
     }
-    m_fragment = fragment;
+    //m_fragment_reference = fragment_reference;
     return sqrt(rmsd);
 }
 
@@ -201,8 +216,8 @@ std::vector<double> RMSDDriver::IndivRMSD(const Molecule& reference_mol, const M
 
     std::vector<double> terms;
 
-    Geometry reference = CenterMolecule(reference_mol);
-    Geometry target = CenterMolecule(target_mol);
+    Geometry reference = CenterMolecule(reference_mol, m_fragment_reference);
+    Geometry target = CenterMolecule(target_mol, m_fragment_target);
     Eigen::MatrixXd tar = target.transpose();
 
     Geometry rotated = tar.transpose() * R;
@@ -224,9 +239,9 @@ double RMSDDriver::CalculateRMSD()
     return rmsd;
 }
 
-Geometry RMSDDriver::CenterMolecule(const Molecule &mol) const
+Geometry RMSDDriver::CenterMolecule(const Molecule& mol, int fragment) const
 {
-    const Geometry cached = mol.getGeometryByFragment(m_fragment, m_protons);
+    const Geometry cached = mol.getGeometryByFragment(fragment, m_protons);
     return GeometryTools::TranslateGeometry(cached, GeometryTools::Centroid(cached), Position{ 0, 0, 0 });
 }
 

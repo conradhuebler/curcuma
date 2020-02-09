@@ -95,7 +95,18 @@ public:
     Molecule getFitIndex(int index);
 
     /*! \brief Set the index of the fragment that is used for rmsd calculation/atom reordering */
-    inline void setFragment(int fragment) { m_fragment = fragment; }
+    inline void setFragment(int fragment)
+    {
+        m_fragment = fragment;
+        m_fragment_reference = fragment;
+        m_fragment_target = fragment;
+    }
+
+    /*! \brief Set the index of the fragment that is used for rmsd calculation/atom reordering */
+    inline void setFragmentTarget(int fragment) { m_fragment_target = fragment; }
+
+    /*! \brief Set the index of the fragment that is used for rmsd calculation/atom reordering */
+    inline void setFragmentReference(int fragment) { m_fragment_reference = fragment; }
 
     /*! \brief Set to use protons (true = default or false) */
     inline void setProtons(bool protons) { m_protons = protons; }
@@ -130,8 +141,8 @@ private:
     Eigen::Matrix3d BestFitRotation(const Molecule& reference, const Molecule& target, int factor = 1) const;
     Eigen::Matrix3d BestFitRotation(const Geometry& reference, const Geometry& target, int factor = 1) const;
 
-    Geometry CenterMolecule(const Molecule &mol) const;
-    Geometry CenterMolecule(const Geometry& mol) const;
+    Geometry CenterMolecule(const Molecule& mol, int fragment) const;
+    Geometry CenterMolecule(const Geometry& molt) const;
 
     Molecule m_reference, m_target, m_reference_aligned, m_target_aligned, m_target_reordered;
     bool m_force_reorder = false, m_protons = true, m_print_intermediate = false, m_silent = false;
@@ -142,5 +153,5 @@ private:
     double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5;
     bool m_check_connections = false;
     int m_hit = 1, m_pt = 0;
-    mutable int m_fragment = -1;
+    mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
 };

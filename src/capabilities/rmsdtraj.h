@@ -1,5 +1,5 @@
 /*
- * <Collect HBond Pairs in Trajectories. >
+ * <Trajectory RMSD Analyse. >
  * Copyright (C) 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -26,24 +26,20 @@
 #include <string>
 #include <vector>
 
-
-#include "src/core/molecule.h"
-
-class PairMapper {
+class RMSDTraj {
 public:
-    PairMapper();
+    RMSDTraj();
     void setFile(const std::string& filename) { m_filename = filename; }
-    void FindPairs();
+    void AnalyseTrajectory();
+
+    void setReferenceStructure(const std::string& reference) { m_reference = reference; }
+
+    /*! \brief Set the index of the fragment that is used for rmsd calculation/atom reordering */
+    inline void setFragment(int fragment) { m_fragment = fragment; }
 
 private:
-    void InitialisePairs(const Molecule* molecule);
-    void ScanPairs(const Molecule* molecule);
-    void BlackListProtons(const Molecule* molecule);
-    void addPair(std::pair<int, int> pair, std::vector<std::pair<int, int>>& pairs);
-    std::string m_filename;
-    std::vector<std::pair<int, int>> m_intra_pairs, m_inter_pairs;
-    std::vector<int> m_proton_blacklist;
-    bool m_intramolecular = false, m_intermolecule = true;
-    double m_cutoff = 2.5, m_scaling = 1.3;
-    std::ofstream m_intermol_file, m_intramol_file, m_centroid_file;
+    std::string m_filename, m_reference;
+    std::ofstream m_rmsd_file;
+    std::vector<Molecule> m_stored_structures;
+    int m_fragment = -1;
 };

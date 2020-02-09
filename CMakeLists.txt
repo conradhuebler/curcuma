@@ -97,10 +97,11 @@ configure_file(
 add_executable(curcuma
         src/capabilities/optimiser/LBFGSInterface.h
         src/capabilities/confscan.cpp
-        src/capabilities/pairmapper.cpp
         src/capabilities/docking.cpp
-        src/capabilities/rmsd.cpp
         src/capabilities/nebdocking.cpp
+        src/capabilities/pairmapper.cpp
+        src/capabilities/rmsd.cpp
+        src/capabilities/rmsdtraj.cpp
         src/capabilities/simplemd.cpp
         src/core/molecule.cpp
         src/core/xtbinterface.cpp

@@ -25,6 +25,7 @@
 #include "src/capabilities/nebdocking.h"
 #include "src/capabilities/pairmapper.h"
 #include "src/capabilities/rmsd.h"
+#include "src/capabilities/rmsdtraj.h"
 #include "src/capabilities/simplemd.h"
 
 #include "src/capabilities/optimiser/LBFGSInterface.h"
@@ -359,6 +360,35 @@ int main(int argc, char **argv) {
             md.setMolecule(mol1);
             md.Initialise();
             md.Dance();
+        } else if (strcmp(argv[1], "-rmsdtraj") == 0) {
+            if (argc < 2) {
+                std::cerr << "Please use curcuma for rmsd analysis of trajectories as follows:\ncurcuma -rmsdtraj input.xyz" << std::endl;
+                return 0;
+            }
+            int fragment = -1;
+            string reference;
+            for (std::size_t i = 3; i < argc; ++i) {
+                if (strcmp(argv[i], "-fragment") == 0) {
+                    if (i + 1 < argc) {
+                        fragment = std::stoi(argv[i + 1]);
+                        ++i;
+                    }
+                    continue;
+                }
+                if (strcmp(argv[i], "-reference") == 0) {
+                    if (i + 1 < argc) {
+                        reference = argv[i + 1];
+                        ++i;
+                    }
+                }
+            }
+
+            RMSDTraj traj;
+            traj.setReferenceStructure(reference);
+            traj.setFile(argv[2]);
+            traj.setFragment(fragment);
+            traj.AnalyseTrajectory();
+
         } else if (strcmp(argv[1], "-nebprep") == 0) {
             if (argc < 3) {
                 std::cerr << "Please use curcuma for geometry preparation for nudge-elastic-band calculation follows:\ncurcuma -nebprep first.xyz second.xyz" << std::endl;
@@ -390,7 +420,7 @@ int main(int argc, char **argv) {
             int atoms = 0;
             int index = 0;
             int i = 0;
-            bool xyzfile = std::string(argv[1]).find(".xyz") != std::string::npos;
+            bool xyzfile = std::string(argv[1]).find(".xyz") != std::string::npos || std::string(argv[1]).find(".trj") != std::string::npos;
             Molecule mol(atoms, 0);
             for( std::string line; getline( input, line ); )
             {

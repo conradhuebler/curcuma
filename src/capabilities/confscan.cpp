@@ -44,7 +44,7 @@ ConfScan::~ConfScan()
 bool ConfScan::openFile()
 {
 
-    bool xyzfile = std::string(m_filename).find(".xyz") != std::string::npos;
+    bool xyzfile = std::string(m_filename).find(".xyz") != std::string::npos || std::string(m_filename).find(".trj") != std::string::npos;
 
     if (xyzfile == false)
         throw 1;

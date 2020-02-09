@@ -51,7 +51,7 @@ void PairMapper::FindPairs()
     int atoms = 0;
     int index = 0;
     int i = 0;
-    bool xyzfile = std::string(m_filename).find(".xyz") != std::string::npos;
+    bool xyzfile = std::string(m_filename).find(".xyz") != std::string::npos || std::string(m_filename).find(".trj") != std::string::npos;
     Molecule mol(atoms, 0);
     for (std::string line; getline(input, line);) {
         if (index == 0 && xyzfile) {

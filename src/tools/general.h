@@ -126,7 +126,7 @@ inline bool isDouble(const std::string& input)
 inline Molecule LoadFile(const string& filename)
 {
 
-    bool xyzfile = std::string(filename).find(".xyz") != std::string::npos;
+    bool xyzfile = std::string(filename).find(".xyz") != std::string::npos || std::string(filename).find(".trj") != std::string::npos;
 
     if (xyzfile == false)
         throw 1;
