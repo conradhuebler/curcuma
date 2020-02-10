@@ -82,9 +82,12 @@ void RMSDTraj::AnalyseTrajectory()
                     m_stored_structures.push_back(mol);
                 else {
                     for (std::size_t i = 0; i < mol.GetFragments().size(); ++i)
-                        if (mol.getGeometryByFragment(i).rows() == atoms_target)
+                        if (mol.getGeometryByFragment(i).rows() == atoms_target) {
                             driver->setFragmentTarget(i);
+                            driver->setPartialRMSD(true);
+                        }
                 }
+                driver->setScaling(1.3);
                 driver->setReference(m_stored_structures[0]);
                 driver->setTarget(mol);
                 driver->AutoPilot();

@@ -126,6 +126,11 @@ public:
     /*! \brief Set silent */
     inline void setSilent(bool silent) { m_silent = silent; }
 
+    /*! \brief Set silent */
+    inline void setPartialRMSD(bool partial_rmsd) { m_partial_rmsd = partial_rmsd; }
+
+    void setScaling(double scaling) { m_scaling = scaling; }
+
 private:
     void ReorderStraight();
 
@@ -151,7 +156,7 @@ private:
     std::map<int, std::vector<int>> m_connectivity;
     std::vector<IntermediateStorage> m_storage;
     double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5;
-    bool m_check_connections = false;
+    bool m_check_connections = false, m_partial_rmsd = false;
     int m_hit = 1, m_pt = 0;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
 };

@@ -52,11 +52,11 @@ void RMSDDriver::AutoPilot()
 
     if(m_protons == false)
         ProtonDepleted();
-    if (m_fragment_reference < -1 || m_fragment_reference > m_reference.GetFragments().size()) {
+    if (m_fragment_reference < -1 || m_fragment_reference > m_reference.GetFragments(m_scaling).size()) {
         //std::cerr << "*** Index of Fragment ( " << m_fragment << " ) is invalid, I will just use the whole molecule (Sometimes false negative ... - WIP) . ***" << std::endl;
         m_fragment_reference = -1;
     }
-    if (m_fragment_target < -1 || m_fragment_target > m_target.GetFragments().size()) {
+    if (m_fragment_target < -1 || m_fragment_target > m_target.GetFragments(m_scaling).size()) {
         m_fragment_target = -1;
     }
 
@@ -177,7 +177,7 @@ double RMSDDriver::CalculateRMSD(const Molecule& reference_mol, const Molecule& 
     Geometry reference;
     Geometry target;
 
-    if (m_fragment_target == m_fragment_reference) {
+    if (!m_partial_rmsd) {
         reference = GeometryTools::TranslateGeometry(reference_mol.getGeometry(), GeometryTools::Centroid(m_reference.getGeometryByFragment(m_fragment_reference)), Position{ 0, 0, 0 }); // CenterMolecule(reference_mol);
         target = GeometryTools::TranslateGeometry(target_mol.getGeometry(), GeometryTools::Centroid(target_mol.getGeometryByFragment(m_fragment_target)), Position{ 0, 0, 0 }); //CenterMolecule(target_mol);
     } else {
@@ -188,7 +188,6 @@ double RMSDDriver::CalculateRMSD(const Molecule& reference_mol, const Molecule& 
 
 
     Geometry rotated = tar.transpose()*R;
-    std::cout << rotated.cols() << " " << rotated.rows() << std::endl;
     for(int i = 0; i < rotated.rows(); ++i)
     {
         rmsd += (rotated(i, 0) - reference(i, 0))*(rotated(i, 0) - reference(i, 0)) +
