@@ -34,6 +34,8 @@ public:
     PairMapper();
     void setFile(const std::string& filename) { m_filename = filename; }
     void FindPairs();
+    inline void addPair(std::pair<int, int> pair) { addPair(pair, m_user_pairs); }
+    inline void addElementPair(std::pair<int, int> pair) { addPair(pair, m_element_pairs); }
 
 private:
     void InitialisePairs(const Molecule* molecule);
@@ -41,9 +43,9 @@ private:
     void BlackListProtons(const Molecule* molecule);
     void addPair(std::pair<int, int> pair, std::vector<std::pair<int, int>>& pairs);
     std::string m_filename;
-    std::vector<std::pair<int, int>> m_intra_pairs, m_inter_pairs;
+    std::vector<std::pair<int, int>> m_intra_pairs, m_inter_pairs, m_user_pairs, m_element_pairs;
     std::vector<int> m_proton_blacklist;
     bool m_intramolecular = false, m_intermolecule = true;
     double m_cutoff = 2.5, m_scaling = 1.3;
-    std::ofstream m_intermol_file, m_intramol_file, m_centroid_file;
+    std::ofstream m_intermol_file, m_intramol_file, m_centroid_file, m_user_file;
 };

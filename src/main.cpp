@@ -334,8 +334,37 @@ int main(int argc, char **argv) {
                 return 0;
             }
 
+            std::vector<std::pair<int, int>> pairs, elements;
+
+            if (argc >= 3) {
+
+                for (std::size_t i = 3; i < argc; ++i) {
+
+                    if (strcmp(argv[i], "-pair") == 0) {
+                        if (i + 2 < argc) {
+                            if (Tools::isInt(argv[i + 1]) && Tools::isInt(argv[i + 2])) {
+                                int first = std::stoi(argv[i + 1]) - 1;
+                                int second = std::stoi(argv[i + 2]) - 1;
+                                ++i;
+                                pairs.push_back(std::pair<int, int>(first, second));
+                            } else {
+                                int first = Elements::String2Element(argv[i + 1]);
+                                int second = Elements::String2Element(argv[i + 2]);
+                                ++i;
+                                elements.push_back(std::pair<int, int>(first, second));
+                            }
+                        }
+                    }
+                }
+            }
+
             PairMapper mapper;
             mapper.setFile(argv[2]);
+            for (const std::pair<int, int>& pair : pairs)
+                mapper.addPair(pair);
+            for (const std::pair<int, int>& pair : elements)
+                mapper.addElementPair(pair);
+
             mapper.FindPairs();
 
         } else if (strcmp(argv[1], "-opt") == 0) {

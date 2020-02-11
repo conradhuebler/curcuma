@@ -43,6 +43,7 @@ void PairMapper::FindPairs()
         outfile.pop_back();
 
     m_intermol_file.open(outfile + "_intermol.dat");
+    m_user_file.open(outfile + "_user.dat");
     m_intramol_file.open(outfile + "_intramol.dat");
     m_centroid_file.open(outfile + "_centroid.dat");
 
@@ -86,6 +87,12 @@ void PairMapper::FindPairs()
     }
     m_intramol_file << std::endl;
 
+    m_user_file << "# ";
+    for (const std::pair<int, int> p : m_user_pairs) {
+        m_user_file << "(" << std::setprecision(6) << p.first + 1 << "-" << p.second + 1 << ")   ";
+    }
+    m_user_file << std::endl;
+
     std::ifstream input2(m_filename);
 
     for (std::string line; getline(input2, line);) {
@@ -116,6 +123,17 @@ void PairMapper::FindPairs()
 
 void PairMapper::InitialisePairs(const Molecule* molecule)
 {
+
+    for (std::size_t i = 0; i < molecule->AtomCount(); ++i) {
+        const int element_A = molecule->Atom(i).first;
+        for (std::size_t j = i + 1; j < molecule->AtomCount(); ++j) {
+            const int element_B = molecule->Atom(j).first;
+            for (const std::pair<int, int>& pair : m_element_pairs) {
+                if ((element_A == pair.first && element_B == pair.second) || (element_B == pair.first && element_A == pair.second))
+                    addPair(std::pair<int, int>(i, j));
+            }
+        }
+    }
 
     if (m_proton_blacklist.size() == 0) {
         BlackListProtons(molecule);
@@ -170,6 +188,11 @@ void PairMapper::ScanPairs(const Molecule* molecule)
         m_intermol_file << molecule->Distance(p.first, p.second) << "    ";
     }
     m_intermol_file << std::endl;
+
+    for (const std::pair<int, int> p : m_user_pairs) {
+        m_user_file << molecule->Distance(p.first, p.second) << "    ";
+    }
+    m_user_file << std::endl;
 
     std::vector<std::vector<int>> f = molecule->GetFragments();
     for (std::size_t i = 0; i < molecule->GetFragments().size(); ++i) {
