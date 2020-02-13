@@ -145,6 +145,14 @@ void ConfScan::scan()
     std::string nearly_missed = result_name + "_missed.xyz";
     result_name += +"_filter.xyz";
 
+    std::ofstream result_file;
+    result_file.open(result_name);
+    result_file.close();
+
+    std::ofstream missed_file;
+    missed_file.open(nearly_missed);
+    missed_file.close();
+
     std::cout << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
               << "'" << std::endl;
 
@@ -246,6 +254,7 @@ void ConfScan::scan()
                       << std::endl
                       << "               ** Accepting " << mol1->Name() << " **" << std::endl;
             m_result.push_back(mol1);
+            mol1->appendXYZFile(result_name);
         }
         ok = true;
         start++;
@@ -258,10 +267,12 @@ void ConfScan::scan()
     if (m_result.size() == 0)
         return;
 
+    /*
     for (const auto molecule : m_result) {
         //molecule->print_geom(false);
         molecule->appendXYZFile(result_name);
     }
+    */
     if (m_writeXYZ) {
         for (const auto molecule : m_result)
             molecule->writeXYZFile();
