@@ -60,6 +60,10 @@ public:
 
     void setEnergyThreshold(double energy) { m_energy_threshold = energy; }
 
+    void setNoName(bool noname) { m_noname = noname; }
+
+    inline string NamePattern(int index) const { return "input_" + std::to_string(index); }
+
 private:
     bool openFile();
 
@@ -73,4 +77,5 @@ private:
     bool m_check_connections = false;
     bool m_force_reorder = false;
     bool m_heavy = false;
+    bool m_noname = false;
 };

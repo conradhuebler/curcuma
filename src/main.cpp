@@ -259,11 +259,12 @@ int main(int argc, char **argv) {
                 std::cerr << "-rank n    **** Write only the first n results!" << std::endl;
                 std::cerr << "-reorder   **** Force reordering of structure! - It will be done automatically, if energies are close and rmsd is big." << std::endl;
                 std::cerr << "-heavy     **** Use only heavy atoms for rmsd calculation." << std::endl;
+                std::cerr << "-noname    **** Do not read possible name from xyz file." << std::endl;
 
                 return -1;
             }
             bool writeXYZ = false;
-            bool reorder = false, check_connect = false, heavy = false;
+            bool reorder = false, check_connect = false, heavy = false, noname = false;
             int rank = 1e10;
             double energy = 1.0;
             if (argc >= 4) {
@@ -303,6 +304,11 @@ int main(int argc, char **argv) {
                         heavy = true;
                         continue;
                     }
+
+                    if (strcmp(argv[i], "-noname") == 0) {
+                        noname = true;
+                        continue;
+                    }
                 }
             }
 
@@ -316,6 +322,7 @@ int main(int argc, char **argv) {
             scan->setForceReorder(reorder);
             scan->setCheckConnections(check_connect);
             scan->setEnergyThreshold(energy);
+            scan->setNoName(noname);
             scan->scan();
 
             return 0;

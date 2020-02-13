@@ -112,8 +112,10 @@ bool ConfScan::openFile()
                         break;
                     }
                 }
-                mol->setName("Molecule " + std::to_string(molecule));
+                mol->setName(NamePattern(molecule));
             }
+            if (m_noname)
+                mol->setName(NamePattern(molecule));
         }
         if (i > 1) {
             mol->setXYZ(line, i - 2);
