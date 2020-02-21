@@ -53,6 +53,7 @@ void RMSDTraj::AnalyseTrajectory()
         outfile.pop_back();
 
     m_rmsd_file.open(outfile + "_rmsd.dat");
+    m_pca_file.open(outfile + "_pca.dat");
 
     RMSDDriver* driver = new RMSDDriver;
     driver->setSilent(true);
@@ -92,7 +93,13 @@ void RMSDTraj::AnalyseTrajectory()
                 driver->setTarget(mol);
                 driver->AutoPilot();
                 m_rmsd_file << driver->RMSD() << std::endl;
+                Molecule mol2 = driver->TargetAligned();
 
+                for (std::size_t j = 0; j < mol2.AtomCount(); ++j) {
+                    if (mol2.Atom(j).first != 1)
+                        m_pca_file << mol2.Atom(j).second(0) << " " << mol2.Atom(j).second(1) << " " << mol2.Atom(j).second(2);
+                }
+                m_pca_file << std::endl;
                 i = -1;
                 mol = Molecule(atoms, 0);
             }

@@ -39,7 +39,7 @@ public:
 
 private:
     std::string m_filename, m_reference;
-    std::ofstream m_rmsd_file;
+    std::ofstream m_rmsd_file, m_pca_file;
     std::vector<Molecule> m_stored_structures;
     int m_fragment = -1;
 };

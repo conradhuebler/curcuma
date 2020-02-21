@@ -46,6 +46,7 @@ void PairMapper::FindPairs()
     m_user_file.open(outfile + "_user.dat");
     m_intramol_file.open(outfile + "_intramol.dat");
     m_centroid_file.open(outfile + "_centroid.dat");
+    m_pair_file.open(outfile + "_pairs.dat");
 
     std::ifstream input(m_filename);
     std::vector<std::string> lines;
@@ -80,6 +81,10 @@ void PairMapper::FindPairs()
         m_intermol_file << "(" << std::setprecision(6) << p.first + 1 << "-" << p.second + 1 << ")   ";
     }
     m_intermol_file << std::endl;
+
+    for (const std::pair<int, int> p : m_inter_pairs) {
+        m_pair_file << "" << std::setprecision(6) << p.first + 1 << " " << p.second + 1 << std::endl;
+    }
 
     m_intramol_file << "# ";
     for (const std::pair<int, int> p : m_intra_pairs) {
@@ -165,6 +170,8 @@ void PairMapper::InitialisePairs(const Molecule* molecule)
             for (int a : f[i]) {
 
                 for (int b : f[j]) {
+                    if ((std::find(m_proton_blacklist.begin(), m_proton_blacklist.end(), a) != m_proton_blacklist.end()) || (std::find(m_proton_blacklist.begin(), m_proton_blacklist.end(), b) != m_proton_blacklist.end()))
+                        continue;
                     double distance = molecule->Distance(a, b);
                     if (distance < m_cutoff) {
                         if ((molecule->Atom(a).first == 1 && (molecule->Atom(b).first == 7 || molecule->Atom(b).first == 8)) || ((molecule->Atom(b).first == 7 || molecule->Atom(b).first == 8) && molecule->Atom(b).first == 1)) {

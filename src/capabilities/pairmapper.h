@@ -47,5 +47,5 @@ private:
     std::vector<int> m_proton_blacklist;
     bool m_intramolecular = false, m_intermolecule = true;
     double m_cutoff = 2.5, m_scaling = 1.3;
-    std::ofstream m_intermol_file, m_intramol_file, m_centroid_file, m_user_file;
+    std::ofstream m_intermol_file, m_intramol_file, m_centroid_file, m_user_file, m_pair_file;
 };

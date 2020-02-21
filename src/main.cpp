@@ -362,6 +362,25 @@ int main(int argc, char **argv) {
                             }
                         }
                     }
+
+                    if (strcmp(argv[i], "-pairfile") == 0) {
+                        if (i + 1 < argc) {
+
+                            std::ifstream input(argv[i + 1]);
+
+                            for (std::string line; getline(input, line);) {
+
+                                std::vector<std::string> numbers = Tools::SplitString(line);
+                                if (numbers.size() == 2) {
+                                    if (Tools::isInt(numbers[0]) && Tools::isInt(numbers[1])) {
+                                        int first = std::stoi(numbers[0]) - 1;
+                                        int second = std::stoi(numbers[1]) - 1;
+                                        pairs.push_back(std::pair<int, int>(first, second));
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
