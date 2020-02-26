@@ -55,6 +55,7 @@ public:
     RMSDDriver(const Molecule* reference, const Molecule* target);
     RMSDDriver() = default;
 
+    ~RMSDDriver();
     /*! \brief Use the AutoPilot to automatically perform everything, results are stored as long the object exsist */
     void AutoPilot();
 

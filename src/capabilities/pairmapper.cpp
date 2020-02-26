@@ -28,6 +28,7 @@
 #include "src/core/elements.h"
 #include "src/core/molecule.h"
 
+#include "src/tools/general.h"
 #include "src/tools/geometry.h"
 
 #include "pairmapper.h"
@@ -95,6 +96,7 @@ void PairMapper::FindPairs()
     m_user_file << "# ";
     for (const std::pair<int, int> p : m_user_pairs) {
         m_user_file << "(" << std::setprecision(6) << p.first + 1 << "-" << p.second + 1 << ")   ";
+        m_user_vector.push_back(std::vector<double>());
     }
     m_user_file << std::endl;
 
@@ -121,9 +123,12 @@ void PairMapper::FindPairs()
         index++;
     }
 
+    Statistic();
+
     m_intermol_file.close();
     m_intramol_file.close();
     m_centroid_file.close();
+    m_user_file.close();
 }
 
 void PairMapper::InitialisePairs(const Molecule* molecule)
@@ -164,17 +169,18 @@ void PairMapper::InitialisePairs(const Molecule* molecule)
         }
     }
 
-    for (std::size_t i = 0; i < molecule->GetFragments().size(); ++i) {
-        for (std::size_t j = i + 1; j < molecule->GetFragments().size(); ++j) {
+    for (std::size_t i = 0; i < f.size(); ++i) {
+        for (std::size_t j = i + 1; j < f.size(); ++j) {
 
             for (int a : f[i]) {
-
                 for (int b : f[j]) {
+
                     if ((std::find(m_proton_blacklist.begin(), m_proton_blacklist.end(), a) != m_proton_blacklist.end()) || (std::find(m_proton_blacklist.begin(), m_proton_blacklist.end(), b) != m_proton_blacklist.end()))
                         continue;
-                    double distance = molecule->Distance(a, b);
+
+                    double distance = GeometryTools::Distance(molecule->Atom(a).second, molecule->Atom(b).second); //molecule->Distance(a, b);
                     if (distance < m_cutoff) {
-                        if ((molecule->Atom(a).first == 1 && (molecule->Atom(b).first == 7 || molecule->Atom(b).first == 8)) || ((molecule->Atom(b).first == 7 || molecule->Atom(b).first == 8) && molecule->Atom(b).first == 1)) {
+                        if ((molecule->Atom(a).first == 1 && (molecule->Atom(b).first == 7 || molecule->Atom(b).first == 8)) || ((molecule->Atom(a).first == 7 || molecule->Atom(a).first == 8) && molecule->Atom(b).first == 1)) {
                             addPair(std::pair<double, double>(a, b), m_inter_pairs);
                         }
                     }
@@ -196,8 +202,11 @@ void PairMapper::ScanPairs(const Molecule* molecule)
     }
     m_intermol_file << std::endl;
 
+    int index = 0;
     for (const std::pair<int, int> p : m_user_pairs) {
         m_user_file << molecule->Distance(p.first, p.second) << "    ";
+        m_user_vector[index].push_back(molecule->Distance(p.first, p.second));
+        index++;
     }
     m_user_file << std::endl;
 
@@ -211,6 +220,50 @@ void PairMapper::ScanPairs(const Molecule* molecule)
         }
     }
     m_centroid_file << std::endl;
+}
+
+void PairMapper::Statistic()
+{
+    std::vector<double> mean, median, stdev, entropy;
+
+    for (std::vector<double> vector : m_user_vector) {
+        std::sort(vector.begin(), vector.end());
+        double m = Tools::mean(vector);
+        double stde = Tools::stdev(vector, m);
+        auto hist = Tools::Histogram(vector, 100);
+        double shannon = Tools::ShannonEntropy(hist);
+        double med = Tools::median(vector);
+
+        mean.push_back(m);
+        median.push_back(med);
+        stdev.push_back(stde);
+        entropy.push_back(shannon);
+    }
+
+    m_user_file << "#";
+
+    for (auto val : mean) {
+        m_user_file << std::setprecision(6) << val << "   ";
+    }
+    m_user_file << std::endl
+                << "#";
+
+    for (auto val : median) {
+        m_user_file << std::setprecision(6) << val << "   ";
+    }
+    m_user_file << std::endl
+                << "#";
+
+    for (auto val : stdev) {
+        m_user_file << std::setprecision(6) << val << "   ";
+    }
+    m_user_file << std::endl
+                << "#";
+
+    for (auto val : entropy) {
+        m_user_file << std::setprecision(6) << val << "   ";
+    }
+    m_user_file << std::endl;
 }
 
 void PairMapper::addPair(std::pair<int, int> pair, std::vector<std::pair<int, int>>& pairs)

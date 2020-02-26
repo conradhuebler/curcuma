@@ -45,6 +45,10 @@ RMSDDriver::RMSDDriver(const Molecule* reference, const Molecule* target)
 {
 }
 
+RMSDDriver::~RMSDDriver()
+{
+}
+
 void RMSDDriver::AutoPilot()
 {
     RunTimer timer(false);
@@ -96,7 +100,10 @@ void RMSDDriver::AutoPilot()
         std::cout << i << " ";
     std::cout << std::endl;
     */
-    std::cout << "RMSD calculation took " << timer.Elapsed() << " msecs." << std::endl;
+    if (!m_silent)
+        std::cout << "RMSD calculation took " << timer.Elapsed() << " msecs." << std::endl;
+    delete reference;
+    delete target;
 }
 
 void RMSDDriver::clear()

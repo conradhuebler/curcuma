@@ -156,8 +156,7 @@ double Molecule::Distance(int i, int j) const
     double z_i = m_geometry[i][2];
     double z_j = m_geometry[j][2];
 
-    return sqrt( ( ((x_i-x_j)*(x_i-x_j))+((y_i-y_j)*(y_i-y_j))+((z_i-z_j)*(z_i-z_j)) ));
-    
+    return sqrt((((x_i - x_j) * (x_i - x_j)) + ((y_i - y_j) * (y_i - y_j)) + ((z_i - z_j) * (z_i - z_j))));
 }
 
 double Molecule::DotProduct(std::array<double, 3> pos1, std::array<double, 3> pos2) const

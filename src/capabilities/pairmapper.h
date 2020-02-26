@@ -36,6 +36,7 @@ public:
     void FindPairs();
     inline void addPair(std::pair<int, int> pair) { addPair(pair, m_user_pairs); }
     inline void addElementPair(std::pair<int, int> pair) { addPair(pair, m_element_pairs); }
+    void Statistic();
 
 private:
     void InitialisePairs(const Molecule* molecule);
@@ -48,4 +49,5 @@ private:
     bool m_intramolecular = false, m_intermolecule = true;
     double m_cutoff = 2.5, m_scaling = 1.3;
     std::ofstream m_intermol_file, m_intramol_file, m_centroid_file, m_user_file, m_pair_file;
+    std::vector<std::vector<double>> m_user_vector;
 };

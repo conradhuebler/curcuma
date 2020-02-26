@@ -175,4 +175,98 @@ inline int VectorDifference(const std::vector<int>& tmp_a, const std::vector<int
     return difference;
 }
 
+inline double median(const std::vector<double>& vector)
+{
+    double median = 0;
+
+    if (vector.size() % 2)
+        median = vector[vector.size() / 2];
+    else {
+        double left = vector[vector.size() / 2 - 1];
+        double right = vector[vector.size() / 2];
+        median = (left + right) * 0.5;
+    }
+    return median;
+}
+
+inline double mean(const std::vector<double>& vector)
+{
+    double mean = 0;
+    for (double val : vector)
+        mean += val;
+    return mean / double(vector.size());
+}
+
+inline double stdev(const std::vector<double>& vector, double mean)
+{
+    double stdev = 0;
+    for (double val : vector)
+        stdev += (val - mean) * (val - mean);
+    return sqrt(stdev / double(vector.size() - 1));
+}
+
+inline std::vector<std::pair<double, double>> Histogram(const std::vector<double>& vector, int bins)
+{
+    std::vector<std::pair<double, double>> histogram;
+    if (vector.size() == 0)
+        return histogram;
+
+    double min = vector[0];
+    double max = vector[0];
+
+    for (double val : vector) {
+        min = std::min(min, val);
+        max = std::max(max, val);
+    }
+
+    std::vector<std::pair<double, int>> hist;
+    double h = (max - min) / double(bins);
+
+    std::vector<double> x(bins, 0);
+
+    for (int j = 0; j < bins; j++) {
+        x[j] = min + h / 2. + j * h;
+        std::pair<double, int> bin;
+        bin.second = 0;
+        bin.first = min + h / 2. + j * h;
+        hist.push_back(bin);
+    }
+
+    for (double val : vector) {
+        int jStar = std::floor((val - min) / h); // use the floor function to get j* for the nearest point to x_j* to phi
+        if (jStar >= bins || jStar < 0)
+            continue; // if you are outside the grid continue
+        hist[jStar].second++;
+    }
+    int max_val = 0;
+    for (auto element : hist)
+        max_val = std::max(max_val, element.second);
+
+    for (auto element : hist)
+        histogram.push_back(std::pair<double, double>(element.first, element.second / double(max_val)));
+
+    return histogram;
+}
+
+inline double ShannonEntropy(const std::vector<std::pair<double, double>>& histogram)
+{
+    double entropy = 0;
+    double sum = 0.0;
+
+    for (int i = 0; i < histogram.size(); ++i) {
+        sum += histogram[i].second;
+    }
+
+    double d = (histogram[histogram.size() - 1].first - histogram[0].first) / double(histogram.size());
+    double lower = 1 / double(histogram.size());
+
+    for (int i = 0; i < histogram.size(); ++i) {
+        if (histogram[i].second < lower)
+            continue;
+        const double value = histogram[i].second / sum * d;
+        entropy += value * log2(value);
+    }
+
+    return -1 * entropy;
+}
 }

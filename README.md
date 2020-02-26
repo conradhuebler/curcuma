@@ -9,7 +9,7 @@ git clones automatically eigen.
 - [XTB](https://github.com/grimme-lab/xtb) eXtended TightBinding - Some methods use this, however it is disabled by default. Add '-DUSE_XTB=true ' to the cmake command line to enable it. GCC 8 or later has to be used.
 
 ## Compiling
-To compile Curcuma you will need [CMake](https://cmake.org/download/) 3.15 or newer and a C++14-capable compiler.
+To compile Curcuma you will need [CMake](https://cmake.org/download/) 3.15 or newer and a C++14-capable compiler, both gcc and icc (quite recent version) work.
 
 To obtain the most recent version
 ```sh
@@ -18,7 +18,7 @@ git clone --recursive https://github.com/conradhuebler/curcuma
 
 Compile it as follows on Unix Platform:
 ```sh
-cd suprafit
+cd curcuma 
 mkdir build
 cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
