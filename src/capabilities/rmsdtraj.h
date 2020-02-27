@@ -37,9 +37,15 @@ public:
     /*! \brief Set the index of the fragment that is used for rmsd calculation/atom reordering */
     inline void setFragment(int fragment) { m_fragment = fragment; }
 
+    inline void setRMSDThreshold(double rmsd_threshold) { m_rmsd_threshold = rmsd_threshold; }
+
+    inline void WriteUnique(bool write_unique) { m_write_unique = write_unique; }
+
 private:
     std::string m_filename, m_reference;
     std::ofstream m_rmsd_file, m_pca_file;
     std::vector<Molecule> m_stored_structures;
     int m_fragment = -1;
+    bool m_write_unique = false;
+    double m_rmsd_threshold = 1.0;
 };

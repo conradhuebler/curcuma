@@ -417,30 +417,53 @@ int main(int argc, char **argv) {
             md.Initialise();
             md.Dance();
         } else if (strcmp(argv[1], "-rmsdtraj") == 0) {
-            if (argc < 2) {
+            if (argc <= 2) {
                 std::cerr << "Please use curcuma for rmsd analysis of trajectories as follows:\ncurcuma -rmsdtraj input.xyz" << std::endl;
+                std::cerr << "Additonal arguments are:" << std::endl;
+                std::cerr << "-write        **** Write unique conformers!" << std::endl;
+                std::cerr << "-rmsd d       **** Set rmsd threshold to d ( default = 1.0)!" << std::endl;
+                std::cerr << "-fragment n   **** Set fragment to n." << std::endl;
+                std::cerr << "-reference    **** Add different xyz structure as reference." << std::endl;
                 return 0;
             }
             int fragment = -1;
             string reference;
+            double rmsd = 1;
+            bool write_unique = false;
             for (std::size_t i = 3; i < argc; ++i) {
                 if (strcmp(argv[i], "-fragment") == 0) {
                     if (i + 1 < argc) {
                         fragment = std::stoi(argv[i + 1]);
                         ++i;
                     }
-                    continue;
+                    // continue;
                 }
                 if (strcmp(argv[i], "-reference") == 0) {
                     if (i + 1 < argc) {
                         reference = argv[i + 1];
                         ++i;
                     }
+                    // continue;
+                }
+
+                if (strcmp(argv[i], "-rmsd") == 0) {
+                    if (i + 1 < argc) {
+                        rmsd = std::stod(argv[i + 1]);
+                        ++i;
+                    }
+                    // continue;
+                }
+
+                if (strcmp(argv[i], "-write") == 0) {
+                    write_unique = true;
+                    continue;
                 }
             }
 
             RMSDTraj traj;
             traj.setReferenceStructure(reference);
+            traj.WriteUnique(write_unique);
+            traj.setRMSDThreshold(rmsd);
             traj.setFile(argv[2]);
             traj.setFragment(fragment);
             traj.AnalyseTrajectory();
