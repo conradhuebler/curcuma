@@ -42,6 +42,15 @@ RMSDTraj::RMSDTraj()
 void RMSDTraj::AnalyseTrajectory()
 {
 
+    std::cout << "'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
+    std::cout << "'    Scanning Trajectory file for RMSD and Conformers     '" << std::endl;
+    std::cout << "'    Write Conformers ";
+    if (m_write_unique) {
+        std::cout << "  Yes                              '" << std::endl;
+        std::cout << "'    RMSD Threshold =  " << std::setprecision(3) << m_rmsd_threshold << "                                  '" << std::endl;
+    } else
+        std::cout << "  No                                '" << std::endl;
+    std::cout << "'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
     int atoms_target = -1;
     if (m_reference.size() != 0) {
         m_stored_structures.push_back(Tools::LoadFile(m_reference));
@@ -61,27 +70,82 @@ void RMSDTraj::AnalyseTrajectory()
     driver->setForceReorder(false);
     driver->setCheckConnections(false);
     driver->setFragment(m_fragment);
+    std::ofstream export_file;
+    if (m_write_unique) {
+        export_file.open(outfile + "_unique.xyz");
+        export_file.close();
+    }
     std::ifstream input(m_filename);
     std::vector<std::string> lines;
     int atoms = 0;
     int index = 0;
     int i = 0;
+    int molecule = 0;
+    std::ifstream inFile(m_filename);
+    int max = std::count(std::istreambuf_iterator<char>(inFile),
+        std::istreambuf_iterator<char>(), '\n');
+
     bool xyzfile = std::string(m_filename).find(".xyz") != std::string::npos || std::string(m_filename).find(".trj") != std::string::npos;
     Molecule mol(atoms, 0);
     for (std::string line; getline(input, line);) {
         if (index == 0 && xyzfile) {
             atoms = stoi(line);
             mol = Molecule(atoms, 0);
+            molecule++;
+            mol.setName(std::to_string(molecule));
         }
         if (xyzfile) {
             if (i > 1) {
                 mol.setXYZ(line, i - 2);
             }
+            if (i == 1) {
+                StringList list = Tools::SplitString(line);
+                if (list.size() == 4) {
+                    if (list[0].compare("SCF") == 0 && list[1].compare("done") == 0) {
+                        try {
+                            mol.setEnergy(std::stod((list[2])));
+                        } catch (const std::string& what_arg) {
+                            mol.setEnergy(0);
+                        }
+                    } else {
+                        if (list[3] == "")
+                            mol.setEnergy(0);
+                        else {
+                            try {
+                                mol.setEnergy(std::stod((list[3])));
+                            } catch (const std::string& what_arg) {
+                                mol.setEnergy(0);
+                            }
+                        }
+                    }
+                } else if (list.size() == 2) {
+                    try {
+                        mol.setEnergy(std::stod((list[0])));
+                    } catch (const std::string& what_arg) {
+                    }
+                } else if (list.size() == 1) {
+                    try {
+                        mol.setEnergy(std::stod((list[0])));
+                    } catch (const std::string& what_arg) {
+                    }
+                } else {
+                    for (const string& s : list) {
+                        double energy = 0;
+                        if (Tools::isDouble(s)) {
+                            energy = std::stod(s);
+                            mol.setEnergy(energy);
+                            break;
+                        }
+                    }
+                }
+            }
             if (i - 1 == atoms) {
 
-                if (m_stored_structures.size() == 0)
+                if (m_stored_structures.size() == 0) {
+                    if (m_write_unique)
+                        mol.appendXYZFile(outfile + "_unique.xyz");
                     m_stored_structures.push_back(mol);
-                else {
+                } else {
                     for (std::size_t i = 0; i < mol.GetFragments().size(); ++i)
                         if (mol.getGeometryByFragment(i).rows() == atoms_target) {
                             driver->setFragmentTarget(i);
@@ -108,17 +172,21 @@ void RMSDTraj::AnalyseTrajectory()
                     }
                     rmsd_results.push_back(driver->RMSD());
                 }
-                int add = 0;
-                for (double rmsd : rmsd_results) {
-                    add += rmsd > 1;
-                }
-                if (add == rmsd_results.size()) {
-                    m_stored_structures.push_back(mol);
-                    mol.appendXYZFile(outfile + "_unique.xyz");
-                    std::cout << "New structure added ... ( " << m_stored_structures.size() << ")." << std::endl;
+                if (m_write_unique) {
+                    int add = 0;
+                    for (double rmsd : rmsd_results) {
+                        add += rmsd > m_rmsd_threshold;
+                    }
+                    if (add == rmsd_results.size()) {
+                        m_stored_structures.push_back(mol);
+                        mol.appendXYZFile(outfile + "_unique.xyz");
+                        std::cout << "New structure added ... ( " << m_stored_structures.size() << "). " << int(index / double(max) * 100) << " % done ...!" << std::endl;
+                    }
                 }
                 i = -1;
                 mol = Molecule(atoms, 0);
+                molecule++;
+                mol.setName(std::to_string(molecule));
             }
             ++i;
         } else {
