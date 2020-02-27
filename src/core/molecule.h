@@ -58,8 +58,9 @@ class Molecule
     void setAtom(const std::string &internal, int i);
     void setXYZ(const std::string &coord, int i);
     bool addPair(const std::pair<int, Position>& atom);
-    double Distance(int i, int j) const;
+    bool Contains(const std::pair<int, Position>& atom);
 
+    double Distance(int i, int j) const;
     Geometry getGeometry(const IntPair& pair, bool protons = true) const;
     Geometry getGeometry(std::vector<int> atoms, bool protons = true) const;
     Geometry getGeometryByFragment(int fragment, bool protons = true) const;

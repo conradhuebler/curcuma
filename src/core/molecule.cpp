@@ -132,14 +132,25 @@ bool Molecule::addPair(const std::pair<int, Position>& atom)
     m_geometry.push_back({ atom.second(0), atom.second(1), atom.second(2) });
     m_atoms.push_back(atom.first);
 
-    for (int i = 0; i < AtomCount(); ++i)
-        for (int j = i + 1; j < AtomCount(); ++j)
+    for (std::size_t i = 0; i < AtomCount(); ++i)
+        for (std::size_t j = i + 1; j < AtomCount(); ++j)
             if (Distance(i, j) < 1e-6)
                 exist = false;
 
     m_dirty = true;
 
     return exist;
+}
+
+bool Molecule::Contains(const std::pair<int, Position>& atom)
+{
+
+    for (std::size_t i = 0; i < AtomCount(); ++i) {
+        if (GeometryTools::Distance(Atom(i).second, atom.second) < 1e-6)
+            return true;
+    }
+
+    return false;
 }
 
 double Molecule::Distance(int i, int j) const

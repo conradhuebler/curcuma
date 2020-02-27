@@ -100,6 +100,7 @@ int main(int argc, char **argv) {
                 std::cerr << "-reorder    **** Force reordering of structure! - It will be done automatically, if energies are close and rmsd is big." << std::endl;
                 std::cerr << "-check      **** Check methyl group connectivity." << std::endl;
                 std::cerr << "-fragment n **** Use n'th fragment. Bonds are determined from simple covalent radii for now!" << std::endl;
+
                 exit(1);
             }
             Molecule mol1 = Tools::LoadFile(argv[2]);
