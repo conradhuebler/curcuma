@@ -424,12 +424,15 @@ int main(int argc, char **argv) {
                 std::cerr << "-rmsd d       **** Set rmsd threshold to d ( default = 1.0)!" << std::endl;
                 std::cerr << "-fragment n   **** Set fragment to n." << std::endl;
                 std::cerr << "-reference    **** Add different xyz structure as reference." << std::endl;
+                std::cerr << "-second       **** Add second trajectory." << std::endl;
+
                 return 0;
             }
             int fragment = -1;
-            string reference;
+            string reference, second;
             double rmsd = 1;
             bool write_unique = false;
+            bool isSecond = false;
             for (std::size_t i = 3; i < argc; ++i) {
                 if (strcmp(argv[i], "-fragment") == 0) {
                     if (i + 1 < argc) {
@@ -441,6 +444,15 @@ int main(int argc, char **argv) {
                 if (strcmp(argv[i], "-reference") == 0) {
                     if (i + 1 < argc) {
                         reference = argv[i + 1];
+                        ++i;
+                    }
+                    // continue;
+                }
+
+                if (strcmp(argv[i], "-second") == 0) {
+                    if (i + 1 < argc) {
+                        second = argv[i + 1];
+                        isSecond = true;
                         ++i;
                     }
                     // continue;
@@ -466,6 +478,8 @@ int main(int argc, char **argv) {
             traj.setRMSDThreshold(rmsd);
             traj.setFile(argv[2]);
             traj.setFragment(fragment);
+            if (isSecond)
+                traj.setSecondFile(second);
             traj.AnalyseTrajectory();
 
         } else if (strcmp(argv[1], "-nebprep") == 0) {
