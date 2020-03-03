@@ -567,9 +567,8 @@ std::vector<std::vector<int>> Molecule::GetFragments(double scaling) const
         m_dirty = true;
     if (m_fragments.size() > 0 && !m_dirty)
         return m_fragments;
-
     m_scaling = scaling;
-    std::map<double, std::vector<int>> ordered_list;
+    std::multimap<double, std::vector<int>> ordered_list;
 
     std::vector<int> fragment, atoms, cached;
     double mass = 0;
@@ -598,7 +597,7 @@ std::vector<std::vector<int>> Molecule::GetFragments(double scaling) const
         std::sort(fragment.begin(), fragment.end());
         //m_fragments.push_back(fragment);
         mass *= -1; // I think, that is an easy way to ***
-        ordered_list[mass] = fragment;
+        ordered_list.insert(std::pair<double, std::vector<int>>(mass, fragment));
         fragment.clear();
         mass = 0;
     }

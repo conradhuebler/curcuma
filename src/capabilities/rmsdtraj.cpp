@@ -186,8 +186,10 @@ void RMSDTraj::AnalyseTrajectory()
                         driver->setTarget(mol);
                         driver->AutoPilot();
                         if (mols == 0) {
-                            m_rmsd_file << driver->RMSD() << std::endl;
-
+                            {
+                                m_rmsd_file << driver->RMSD() << std::endl;
+                                m_rmsd_vector.push_back(driver->RMSD());
+                            }
                             Molecule mol2 = driver->TargetAligned();
 
                             for (std::size_t j = 0; j < mol2.AtomCount(); ++j) {
@@ -232,6 +234,17 @@ void RMSDTraj::AnalyseTrajectory()
         }
         index++;
     }
+
+    double mean = Tools::mean(m_rmsd_vector);
+    double median = Tools::median(m_rmsd_vector);
+    double std = Tools::stdev(m_rmsd_vector, mean);
+    auto hist = Tools::Histogram(m_rmsd_vector, 100);
+    double shannon = Tools::ShannonEntropy(hist);
+
+    m_rmsd_file << "#" << mean << std::endl;
+    m_rmsd_file << "#" << median << std::endl;
+    m_rmsd_file << "#" << std << std::endl;
+    m_rmsd_file << "#" << shannon << std::endl;
 
     delete driver;
 }

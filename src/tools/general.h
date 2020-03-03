@@ -66,6 +66,34 @@ private:
     bool m_print;
 };
 
+namespace General {
+
+inline void StartUp(int argc, char** argv)
+{
+    std::cout << "*************************************************" << std::endl
+              << "*   Curcuma - Simple Molecular Modelling tool   *" << std::endl
+              << "*                                               *" << std::endl
+              << "*    Written by Conrad Hübler TU Freiberg       *" << std::endl
+              << "*                                               *" << std::endl
+              << "*    Visit the website for initial usage        *" << std::endl
+              << "*    https://github.com/conradhuebler/curcuma   *" << std::endl
+              << "*                                               *" << std::endl
+              << "*    This program comes without any warranty    *" << std::endl
+              << "*    It might even be total useless             *" << std::endl
+              << "*                                               *" << std::endl
+              << "*    Nothing to cite yet ...                    *" << std::endl
+              << "*    Git Commit Hash: " << git_commit_hash << "                   *" << std::endl
+              //<< "*    Git Commit Date: " << git_date << "                   *" << std::endl
+              << "*                                               *" << std::endl
+              << "*************************************************" << std::endl;
+
+    for (int index = 0; index < argc; ++index)
+        std::cout << argv[index] << " ";
+    std::cout << std::endl;
+}
+
+}
+
 namespace Tools {
 
 inline StringList SplitString(const std::string& string)

@@ -84,6 +84,7 @@ class Molecule
     std::map<int, std::vector<int>> getConnectivtiy(double scaling = 1.5, int latest = -1) const;
 
     void PrintConnectivitiy(double scaling = 1.5) const;
+    inline void PrintConnectivitiy() const { PrintConnectivitiy(m_scaling); }
 
     /*! \brief Return Fragments, will be determined on first call, then stored */
     std::vector<std::vector<int>> GetFragments(double scaling) const;
@@ -103,6 +104,8 @@ class Molecule
     inline double Ic() const { return m_Ic; }
 
     void AnalyseIntermoleculeDistance() const;
+
+    inline void setScaling(double scaling) { m_scaling = scaling; }
 
 private:
     void InitialiseEmptyGeometry(int atoms);
