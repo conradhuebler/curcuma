@@ -117,4 +117,10 @@ else()
     target_link_libraries(curcuma)
 endif()
 
+
+add_executable(curcuma_helper
+        src/helpers/main.cpp)
+set_property(TARGET curcuma_helper PROPERTY CXX_STANDARD 14)
+
 install(TARGETS curcuma RUNTIME DESTINATION bin)
+install(TARGETS curcuma_helper RUNTIME DESTINATION bin)
