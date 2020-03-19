@@ -60,22 +60,7 @@ void Distance(const Molecule &mol, char **argv)
 
 int main(int argc, char **argv) {
 
-    std::cout << "*************************************************" << std::endl
-              << "*   Curcuma - Simple Molecular Modelling tool   *" << std::endl
-              << "*                                               *" << std::endl
-              << "*    Written by Conrad Hübler TU Freiberg       *" << std::endl
-              << "*                                               *" << std::endl
-              << "*    Visit the website for initial usage        *" << std::endl
-              << "*    https://github.com/conradhuebler/curcuma   *" << std::endl
-              << "*                                               *" << std::endl
-              << "*    This program comes without any warranty    *" << std::endl
-              << "*    It might even be total useless             *" << std::endl
-              << "*                                               *" << std::endl
-              << "*    Nothing to cite yet ...                    *" << std::endl
-              << "*    Git Commit Hash: " << git_commit_hash << "                   *" << std::endl
-              //<< "*    Git Commit Date: " << git_date << "                   *" << std::endl
-              << "*                                               *" << std::endl
-              << "*************************************************" << std::endl;
+    General::StartUp(argc, argv);
 
     RunTimer timer(true);
 
@@ -424,12 +409,15 @@ int main(int argc, char **argv) {
                 std::cerr << "-rmsd d       **** Set rmsd threshold to d ( default = 1.0)!" << std::endl;
                 std::cerr << "-fragment n   **** Set fragment to n." << std::endl;
                 std::cerr << "-reference    **** Add different xyz structure as reference." << std::endl;
+                std::cerr << "-second       **** Add second trajectory." << std::endl;
+
                 return 0;
             }
             int fragment = -1;
-            string reference;
+            string reference, second;
             double rmsd = 1;
             bool write_unique = false;
+            bool isSecond = false;
             for (std::size_t i = 3; i < argc; ++i) {
                 if (strcmp(argv[i], "-fragment") == 0) {
                     if (i + 1 < argc) {
@@ -441,6 +429,15 @@ int main(int argc, char **argv) {
                 if (strcmp(argv[i], "-reference") == 0) {
                     if (i + 1 < argc) {
                         reference = argv[i + 1];
+                        ++i;
+                    }
+                    // continue;
+                }
+
+                if (strcmp(argv[i], "-second") == 0) {
+                    if (i + 1 < argc) {
+                        second = argv[i + 1];
+                        isSecond = true;
                         ++i;
                     }
                     // continue;
@@ -466,6 +463,8 @@ int main(int argc, char **argv) {
             traj.setRMSDThreshold(rmsd);
             traj.setFile(argv[2]);
             traj.setFragment(fragment);
+            if (isSecond)
+                traj.setSecondFile(second);
             traj.AnalyseTrajectory();
 
         } else if (strcmp(argv[1], "-nebprep") == 0) {
@@ -492,6 +491,85 @@ int main(int argc, char **argv) {
             nebdock->Prepare();
             delete nebdock;
 
+        } else if (strcmp(argv[1], "-centroid") == 0) {
+            if (argc < 3) {
+                std::cerr << "Please use curcuma for centroid calculation of user definable fragments:\ncurcuma -centroid first.xyz" << std::endl;
+                return 0;
+            }
+
+            int pt = 0, fragment = 0;
+            std::vector<int> frag;
+            for (std::size_t i = 3; i < argc; ++i) {
+                if (strcmp(argv[i], "-fragment") == 0) {
+                    if (i + 1 < argc) {
+                        fragment = std::stoi(argv[i + 1]);
+                        ++i;
+                    }
+                    // continue;
+                }
+                if (strcmp(argv[i], "-addfragment") == 0) {
+                    bool loop = true;
+                    while (i + 1 < argc && loop) {
+                        StringList list = Tools::SplitString(argv[i + 1]);
+                        if (list.size() > 1) {
+                            for (auto element : list)
+                                frag.push_back(std::stoi(element) - 1);
+                        }
+                        if (Tools::isInt(argv[i + 1]))
+                            frag.push_back(std::stoi(argv[i + 1]) - 1);
+                        else
+                            loop = false;
+                        ++i;
+                    }
+                    // continue;
+                }
+            }
+
+            if (frag.size()) {
+                std::cout << "Using fragment of atoms :";
+                for (int atom : frag)
+                    std::cout << atom + 1 << " ";
+                std::cout << std::endl;
+                std::cout << "to calculate centroid!" << std::endl;
+            }
+
+            std::ofstream result_file;
+            result_file.open("centroids.dat");
+            std::ifstream input(argv[2]);
+            std::vector<std::string> lines;
+            int atoms = 0;
+            int index = 0;
+            int i = 0;
+            bool xyzfile = std::string(argv[2]).find(".xyz") != std::string::npos || std::string(argv[1]).find(".trj") != std::string::npos;
+            Molecule mol(atoms, 0);
+            for (std::string line; getline(input, line);) {
+                if (index == 0 && xyzfile) {
+                    atoms = stoi(line);
+                    mol = Molecule(atoms, 0);
+                }
+                if (xyzfile) {
+                    if (i > 1) {
+                        mol.setXYZ(line, i - 2);
+                    }
+                    if (i - 1 == atoms) {
+
+                        if (frag.size()) {
+                            result_file << GeometryTools::Centroid(mol.getGeometry(frag)).transpose() << std::endl;
+                            std::cout << mol.getGeometry(frag) << std::endl;
+                        } else {
+                            mol.GetFragments(1.2);
+                            result_file << GeometryTools::Centroid(mol.getGeometryByFragment(fragment)).transpose() << std::endl;
+                        }
+                        i = -1;
+                        mol = Molecule(atoms, 0);
+                    }
+                    ++i;
+                } else {
+                    mol.setAtom(line, i);
+                }
+                index++;
+            }
+
         } else {
             std::cerr << "Opening file " << argv[1] << std::endl;
             std::ifstream input(argv[1]);
@@ -516,6 +594,7 @@ int main(int argc, char **argv) {
                     }
                     if(i-1 == atoms)
                     {
+                        mol.setScaling(1.2);
                         mol.CalculateRotationalConstants();
                         mol.print_geom();
                         mol.AnalyseIntermoleculeDistance();

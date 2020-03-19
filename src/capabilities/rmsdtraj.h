@@ -30,6 +30,12 @@ class RMSDTraj {
 public:
     RMSDTraj();
     void setFile(const std::string& filename) { m_filename = filename; }
+    void setSecondFile(const std::string& filename)
+    {
+        m_second_file = filename;
+        m_pairwise = true;
+    }
+
     void AnalyseTrajectory();
 
     void setReferenceStructure(const std::string& reference) { m_reference = reference; }
@@ -42,10 +48,11 @@ public:
     inline void WriteUnique(bool write_unique) { m_write_unique = write_unique; }
 
 private:
-    std::string m_filename, m_reference;
-    std::ofstream m_rmsd_file, m_pca_file;
+    std::string m_filename, m_reference, m_second_file;
+    std::ofstream m_rmsd_file, m_pca_file, m_pairwise_file;
     std::vector<Molecule> m_stored_structures;
+    std::vector<double> m_rmsd_vector;
     int m_fragment = -1;
-    bool m_write_unique = false;
+    bool m_write_unique = false, m_pairwise = false;
     double m_rmsd_threshold = 1.0;
 };
