@@ -1,6 +1,7 @@
 # The (incomplete) curcuma Changelog
 
 ### pre Alpha
+- add reordering for non-conformer/non-isomer structures
 - find more or less unique conformers in trajectories
 - scan xyz files (trajectories) for hbonds and prints each single distance for each step
 - include optional XTB
