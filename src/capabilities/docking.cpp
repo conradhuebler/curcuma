@@ -124,7 +124,7 @@ void Docking::PerformDocking()
     std::cout << std::endl
               << "** Docking Phase 0 - Finished **" << std::endl;
     int index = 0;
-    double average_distance = m_sum_distance / double(m_result_list.size());
+    //double average_distance = m_sum_distance / double(m_result_list.size());
 
     for (const auto& pair : m_result_list) {
         ++index;
@@ -142,6 +142,11 @@ void Docking::PerformDocking()
         else
             pair.second->appendXYZFile("docked_structures_IC_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
         */
+
+
+        pair.second->appendXYZFile("docked_structures_frag_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
+
+        /*
         if (pair.first < average_distance * m_window_seperator)
             pair.second->appendXYZFile("docked_structures_compact_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
         else if (pair.first > average_distance * m_window_seperator && pair.first < average_distance * (2 - m_window_seperator))
@@ -149,6 +154,7 @@ void Docking::PerformDocking()
         else
             pair.second->appendXYZFile("docked_structures_free_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
         pair.second->print_geom();
+        */
         delete pair.second;
     }
 }

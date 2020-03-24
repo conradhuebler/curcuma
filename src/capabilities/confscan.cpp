@@ -169,11 +169,7 @@ void ConfScan::scan()
     std::cout << "'" << std::endl
               << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
               << std::endl;
-    RMSDDriver* driver = new RMSDDriver;
-    driver->setSilent(true);
-    driver->setProtons(!m_heavy);
-    driver->setForceReorder(ForceReorder());
-    driver->setCheckConnections(CheckConnections());
+
 
     for (auto& i : m_ordered_list) {
 
@@ -194,6 +190,11 @@ void ConfScan::scan()
                     std::cout << mol1->Name() << " already rejected. Skipping check against " << mol2->Name() << std::endl;
                     continue;
                 }
+                RMSDDriver* driver = new RMSDDriver;
+                driver->setSilent(true);
+                driver->setProtons(!m_heavy);
+                driver->setForceReorder(ForceReorder());
+                driver->setCheckConnections(CheckConnections());
 
                 std::cout << std::endl
                           << std::setprecision(10)
@@ -247,6 +248,7 @@ void ConfScan::scan()
                     std::cout << "  ** Rejecting structure **" << std::endl;
                     continue;
                 }
+                delete driver;
             }
         }
         if (ok) {
@@ -262,7 +264,6 @@ void ConfScan::scan()
                   << std::endl
                   << "             ###   " << start / double(ende) * 100 << "% done!   ###" << std::endl;
     }
-    delete driver;
 
     if (m_result.size() == 0)
         return;
