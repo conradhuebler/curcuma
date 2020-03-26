@@ -19,9 +19,12 @@
 
 #include "src/core/pseudoff.h"
 
+#include "src/tools/general.h"
+
 #include "src/capabilities/optimiser/LevMarDocking.h"
 #include "src/capabilities/optimiser/XTBDocking.h"
 
+#include <algorithm>
 #include <iostream>
 
 #include "docking.h"
@@ -70,10 +73,11 @@ void Docking::PerformDocking()
         max = 36;
         std::cout << "Fewer sampling " << std::endl;
     }
-    int excluded = 0;
+    int excluded = 0, all = 0;
     for (int x = 0; x < X; ++x) {
         for (int y = 0; y < Y; ++y) {
             for (int z = 0; z < Z; ++z) {
+                ++all;
                 Molecule* molecule = new Molecule(m_host_structure);
                 guest = m_guest_structure;
 
@@ -91,8 +95,6 @@ void Docking::PerformDocking()
                     Position rotation = m_rotation_accepted[i];
                     if (GeometryTools::Distance(anchor, pair.first) < 1e-1 || GeometryTools::Distance(rotation, pair.second) < 1e-1)
                         accept = false;
-
-                    //std::cout << GeometryTools::Distance(anchor, pair.first) << " --- "  << GeometryTools::Distance(rotation, pair.second) << std::endl;
                 }
                 if (accept == false) {
                     excluded++;
@@ -103,10 +105,7 @@ void Docking::PerformDocking()
 
                 Geometry destination = GeometryTools::TranslateAndRotate(stored_guest, initial_centroid, pair.first, pair.second);
 
-                // std::cout << pair.first.transpose() << " " << pair.second.transpose() << std::endl;
-
                 guest.setGeometry(destination);
-                //double energy = PseudoFF::LennardJones(m_host_structure, guest);
                 double distance = GeometryTools::Distance(pair.first, m_host_structure.Centroid());
                 m_sum_distance += distance;
                 m_docking_list.insert(std::pair<double, Vector>(distance, PositionPair2Vector(pair)));
@@ -118,43 +117,29 @@ void Docking::PerformDocking()
                 m_result_list.insert(std::pair<double, Molecule*>(distance, molecule));
             }
         }
-        std::cout << (x / double(X)) * 100 << "% - " << m_anchor_accepted.size() << " stored structures. " << excluded << " structures were skipped, due to being duplicate!" << std::endl;
+        std::cout << (x / double(X)) * 100 << "% - " << m_anchor_accepted.size() << " stored structures. " << excluded << " structures were skipped, due to being duplicate!" << all << " checked!" << std::endl;
     }
+
+    std::cout << m_anchor_accepted.size() << " stored structures. " << excluded << " structures were skipped, due to being duplicate!" << all << " checked!" << std::endl;
+
     guest = m_guest_structure;
     std::cout << std::endl
               << "** Docking Phase 0 - Finished **" << std::endl;
     int index = 0;
-    //double average_distance = m_sum_distance / double(m_result_list.size());
-
+    std::vector<int> frags = { 0, 0 };
     for (const auto& pair : m_result_list) {
         ++index;
-
+        frags[pair.second->GetFragments(1.3).size()]++;
         std::cout << pair.first << std::endl;
-        /*
-        pair.second->CalculateRotationalConstants();
-        double IA = pair.second->Ia();
-        double IB = pair.second->Ib();
-        double IC = pair.second->Ic();
-        if (2 * IA < IB && 2 * IA < IC)
-            pair.second->appendXYZFile("docked_structures_IA_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
-        else if (2 * IA > IB && 2 * IA < IC)
-            pair.second->appendXYZFile("docked_structures_IB_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
-        else
-            pair.second->appendXYZFile("docked_structures_IC_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
-        */
+        const std::string name = "Docking_B" + std::to_string(frags[pair.second->GetFragments(1.3).size()] % 100 + 1) + "_F" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz";
+        pair.second->appendXYZFile(name);
+        if (std::binary_search(m_files.begin(), m_files.end(), name))
+            m_files.push_back(name);
 
-
-        pair.second->appendXYZFile("docked_structures_frag_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
-
-        /*
-        if (pair.first < average_distance * m_window_seperator)
-            pair.second->appendXYZFile("docked_structures_compact_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
-        else if (pair.first > average_distance * m_window_seperator && pair.first < average_distance * (2 - m_window_seperator))
-            pair.second->appendXYZFile("docked_structures_loose_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
-        else
-            pair.second->appendXYZFile("docked_structures_free_" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz");
-        pair.second->print_geom();
-        */
         delete pair.second;
     }
+}
+
+void Docking::PostOptimise()
+{
 }

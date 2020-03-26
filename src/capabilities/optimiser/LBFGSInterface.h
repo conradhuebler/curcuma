@@ -161,7 +161,7 @@ private:
     RMSDDriver* m_driver;
 };
 
-Molecule OptimiseGeometry(const Molecule* host)
+Molecule OptimiseGeometry(const Molecule* host, bool writeXYZ = true, bool printOutput = true)
 {
     Geometry geometry = host->getGeometry();
     Molecule tmp(host);
@@ -211,11 +211,15 @@ Molecule OptimiseGeometry(const Molecule* host)
         driver->setTarget(h);
         driver->AutoPilot();
 
-        std::cout << outer << "\t" << std::setprecision(9) << fun.m_energy << "\t\t" << std::setprecision(5) << (fun.m_energy - final_energy) * 2625.5 << "\t\t" << std::setprecision(5) << driver->RMSD() << std::endl;
+        if (printOutput)
+            std::cout << outer << "\t" << std::setprecision(9) << fun.m_energy << "\t\t" << std::setprecision(5) << (fun.m_energy - final_energy) * 2625.5 << "\t\t" << std::setprecision(5) << driver->RMSD() << std::endl;
+
         final_energy = fun.m_energy;
         tmp = h;
-        h.setEnergy(final_energy);
-        h.appendXYZFile("curcuma_optim.xyz");
+        if (writeXYZ) {
+            h.setEnergy(final_energy);
+            h.appendXYZFile("curcuma_optim.xyz");
+        }
         if (((fun.m_energy - final_energy) * 2625.5 < 0.75 && driver->RMSD() < 0.01) || niter < param.max_iterations)
             break;
     }

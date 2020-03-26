@@ -23,6 +23,7 @@
 #include "src/core/global.h"
 #include "src/core/molecule.h"
 
+#include "src/tools/general.h"
 #include "src/tools/geometry.h"
 
 #include <map>
@@ -55,6 +56,8 @@ public:
 
     void PerformDocking();
 
+    void PostOptimise();
+
     Molecule getMolecule() const { return m_supramol; }
 
     void setCheck(bool check) { m_check = check; }
@@ -69,4 +72,5 @@ private:
     bool m_check = false;
     double m_sum_distance = 0;
     double m_window_seperator = 0.66666;
+    StringList m_files;
 };

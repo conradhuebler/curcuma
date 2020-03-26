@@ -17,6 +17,7 @@
  * 
  */
 
+#include "src/core/fileiterator.h"
 #include "src/core/molecule.h"
 #include "src/core/xtbinterface.h"
 
@@ -191,6 +192,22 @@ int main(int argc, char **argv) {
                 return -1;
             }
 
+            FileIterator file(argv[1]);
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                if (argc == 6) {
+                    if (std::string(argv[1]).find("-hbonds") != std::string::npos) {
+                        Distance(mol, argv);
+                    }
+                } else {
+                    mol.print_geom();
+                    std::cout << std::endl
+                              << std::endl;
+                    std::cout << mol.getGeometry() << std::endl;
+                }
+            }
+
+            /*
             std::cerr << "Opening file " << argv[2] << std::endl;
             std::ifstream input( argv[2] );
             std::vector<std::string> lines;
@@ -236,7 +253,7 @@ int main(int argc, char **argv) {
                 }
                 index++;
             }
-
+          */
         } else if (strcmp(argv[1], "-confscan") == 0) {
             if (argc < 3) {
                 std::cerr << "Please use curcuma for conformation scan and judge as follows\ncurcuma -confscan conffile.xyz" << std::endl;
@@ -385,9 +402,21 @@ int main(int argc, char **argv) {
                 return 0;
             }
 
-            Molecule mol1 = Tools::LoadFile(argv[2]);
-            Molecule mol2 = OptimiseGeometry(&mol1);
-            mol2.writeXYZFile("optimised_structure.xyz");
+            string outfile = std::string(argv[2]);
+            for (int i = 0; i < 4; ++i)
+                outfile.pop_back();
+            outfile += "_opt.xyz";
+            FileIterator file(argv[2]);
+            std::multimap<double, Molecule> results;
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                Molecule mol2 = OptimiseGeometry(&mol, false, true);
+                //mol2.writeXYZFile(outfile);
+                results.insert(std::pair<double, Molecule>(mol2.Energy(), mol2));
+            }
+            for (const auto& ref : results)
+                ref.second.appendXYZFile(outfile);
+
             return 0;
         } else if (strcmp(argv[1], "-md") == 0) {
             if (argc < 2) {
@@ -541,6 +570,20 @@ int main(int argc, char **argv) {
             }
 
             std::ofstream result_file;
+
+            FileIterator file(argv[2]);
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                if (frag.size()) {
+                    result_file << GeometryTools::Centroid(mol.getGeometry(frag)).transpose() << std::endl;
+                    std::cout << mol.getGeometry(frag) << std::endl;
+                } else {
+                    mol.GetFragments(1.2);
+                    result_file << GeometryTools::Centroid(mol.getGeometryByFragment(fragment)).transpose() << std::endl;
+                }
+            }
+
+            /*
             result_file.open("centroids.dat");
             std::ifstream input(argv[2]);
             std::vector<std::string> lines;
@@ -575,52 +618,19 @@ int main(int argc, char **argv) {
                     mol.setAtom(line, i);
                 }
                 index++;
-            }
+            }*/
 
         } else {
-            std::cerr << "Opening file " << argv[1] << std::endl;
-            std::ifstream input(argv[1]);
-            std::vector<std::string> lines;
-            int atoms = 0;
-            int index = 0;
-            int i = 0;
-            bool xyzfile = std::string(argv[1]).find(".xyz") != std::string::npos || std::string(argv[1]).find(".trj") != std::string::npos;
-            Molecule mol(atoms, 0);
-            for( std::string line; getline( input, line ); )
-            {
-                if(index == 0 && xyzfile)
-                {
-                    atoms = stoi(line);
-                    mol = Molecule(atoms, 0);
-                }
-                if(xyzfile)
-                {
-                    if(i > 1)
-                    {
-                        mol.setXYZ(line, i-2);
-                    }
-                    if(i-1 == atoms)
-                    {
-                        mol.setScaling(1.2);
-                        mol.CalculateRotationalConstants();
-                        mol.print_geom();
-                        mol.AnalyseIntermoleculeDistance();
-                        std::cout << std::endl
-                                  << std::endl;
-                        XTBInterface interface;
-                        interface.GFN1Energy(mol);
-                        std::cout << "Centroid: " << mol.Centroid(true).transpose() << std::endl;
-                        std::cout << mol.Ia() << " " << mol.Ib() << " " << mol.Ic() << std::endl;
 
-                        i = -1;
-                        mol = Molecule(atoms, 0);
-                    }
-                    ++i;
-                }else
-                {
-                    mol.setAtom(line, i);
-                }
-                index++;
+            FileIterator file(argv[1]);
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                mol.setScaling(1.2);
+                mol.CalculateRotationalConstants();
+                mol.print_geom();
+                mol.AnalyseIntermoleculeDistance();
+                std::cout << std::endl
+                          << std::endl;
             }
         }
     }
