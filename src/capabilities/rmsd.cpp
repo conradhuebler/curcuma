@@ -398,6 +398,20 @@ void RMSDDriver::InitialisePair()
     Molecule reference;
     int index = 0;
     std::vector<int> elements = m_reference.Atoms();
+    /*
+    std::vector<std::vector<int>> fragments = m_reference.GetFragments();
+    for(int i = 0; i < fragments.size(); ++i)
+    {
+        int index = 0;
+        for(int j = 0; j < fragments[i].size() && index < 1; ++j)
+        {
+            if (elements[fragments[i][j]] != 1) {
+                reference.addPair(m_reference.Atom(fragments[i][j]));
+                index++;
+            }
+        }
+    }
+    */
     for (int i = 0; i < m_reference.AtomCount() && index < 2; i++) {
         if (elements[i] != 1) {
             reference.addPair(m_reference.Atom(i));
@@ -453,9 +467,18 @@ void RMSDDriver::ReorderStraight()
     }
 
     for (int i = 0; i < m_storage.size(); ++i) {
-        if (!m_silent)
+        if (!m_silent) {
+            // int ct = 0;
+            /* for (const auto& element : (*m_storage[i].data())) {
+                {
+                    ct++;
+                    std::cout << " " << element.first << " ";
+                    if(ct == 10)
+                        break;
+                }
+            }*/
             std::cout << double(i) / double(m_reference.AtomCount()) * 100 << " % done " << std::endl;
-
+        }
         // std::cout << (i < m_target.AtomCount() - 1) << std::endl;
         //if( i == m_target.AtomCount() - 1)
         //{

@@ -144,6 +144,7 @@ void ConfScan::scan()
     result_name.erase(result_name.end() - 4, result_name.end());
     std::string nearly_missed = result_name + "_missed.xyz";
     result_name += +"_filter.xyz";
+    std::string failed = result_name + "_failed.xyz";
 
     std::ofstream result_file;
     result_file.open(result_name);
@@ -151,6 +152,10 @@ void ConfScan::scan()
 
     std::ofstream missed_file;
     missed_file.open(nearly_missed);
+    missed_file.close();
+
+    std::ofstream failed_file;
+    missed_file.open(failed);
     missed_file.close();
 
     std::cout << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
@@ -227,6 +232,11 @@ void ConfScan::scan()
 
                     double rmsd_tmp = driver->RMSD();
                     std::cout << "New rmsd is " << rmsd_tmp << ". Old was " << rmsd << std::endl;
+                    if (rmsd_tmp > rmsd) {
+                        std::cout << "Reordering failed, a better fit was not found! This may happen, mainly for supramolecular structures." << std::endl;
+                        m_failed.push_back(mol1);
+                        m_failed.push_back(mol2);
+                    }
                     rmsd = rmsd_tmp;
                 } else {
                     std::cout << "RMSD is " << rmsd << std::endl;
@@ -242,7 +252,7 @@ void ConfScan::scan()
                     }
                     continue;
                 }
-                if (diff_rot < m_diff_rot_tight) {
+                if (diff_rot < m_diff_rot_tight && difference < m_energy_threshold) {
                     ok = false;
                     filtered[mol1->Name()].push_back(mol2->Name());
                     std::cout << "  ** Rejecting structure **" << std::endl;
@@ -281,6 +291,10 @@ void ConfScan::scan()
 
     for (const auto molecule : m_nearly) {
         molecule->appendXYZFile(nearly_missed);
+    }
+
+    for (const auto molecule : m_failed) {
+        molecule->appendXYZFile(failed);
     }
 
     std::cout << m_result.size() << " structures were kept - of " << m_molecules.size() - fail << " total!" << std::endl;

@@ -52,7 +52,7 @@ double XTBInterface::GFN1Energy(const Molecule& molecule)
         attyp[i] = atoms[i];
     }
 
-    xtb::SCC_options const opt = (xtb::SCC_options){ 2, 0, 1.0, 300.0, true, true, true, 30, "none" };
+    xtb::SCC_options const opt = (xtb::SCC_options){ 0, 0, 1.0, 300.0, true, true, true, 30, "none" };
 
     double dipole[3];
     double q[natoms];
@@ -86,7 +86,7 @@ double XTBInterface::GFN2Energy(const Molecule& molecule)
         attyp[i] = atoms[i];
     }
 
-    xtb::SCC_options const opt = (xtb::SCC_options){ 2, 1, 1.0, 300.0, true, true, true, 30, "none" };
+    xtb::SCC_options const opt = (xtb::SCC_options){ 0, 1, 2.0, 300.0, true, true, true, 30, "none" };
 
     double dipole[3];
     double q[natoms];
@@ -105,7 +105,7 @@ double XTBInterface::GFN2Energy(const int* attyp, const double* coord, const int
 {
     double energy = 0;
 #ifdef USE_XTB
-    xtb::SCC_options const opt = (xtb::SCC_options){ 2, 1, 1.0, 300.0, true, true, true, 30, "none" };
+    xtb::SCC_options const opt = (xtb::SCC_options){ 0, 1, 2.0, 300.0, true, true, true, 30, "none" };
 
     double dipole[3];
     double q[natoms];

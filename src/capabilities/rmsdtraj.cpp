@@ -69,7 +69,7 @@ void RMSDTraj::AnalyseTrajectory()
     }
     RMSDDriver* driver = new RMSDDriver;
     driver->setSilent(true);
-    driver->setProtons(true);
+    driver->setProtons(!m_heavy);
     driver->setForceReorder(false);
     driver->setCheckConnections(false);
     driver->setFragment(m_fragment);

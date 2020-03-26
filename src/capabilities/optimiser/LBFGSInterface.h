@@ -23,7 +23,10 @@
 #include <Eigen/Sparse>
 #include <unsupported/Eigen/NonLinearOptimization>
 
+#include <iomanip>
 #include <iostream>
+
+#include "src/capabilities/rmsd.h"
 
 #include "src/core/elements.h"
 #include "src/core/global.h"
@@ -49,10 +52,17 @@ public:
             error[i] = -1;
         error[n] = 0;
         m_diis_last = error;
+
+        m_driver = new RMSDDriver;
+        m_driver->setSilent(true);
+        m_driver->setProtons(true);
+        m_driver->setForceReorder(false);
+        m_driver->setCheckConnections(false);
     }
     double operator()(const VectorXd& x, VectorXd& grad)
     {
         VectorXd v = x;
+        parameter = x;
         /*
         if(m_iter >= 2)
         {
@@ -100,17 +110,20 @@ public:
         double dist_gradient[3 * natoms];
 
         for (int i = 0; i < m_host->AtomCount(); ++i) {
-            geometry(i, 0) = v(3 * i);
-            geometry(i, 1) = v(3 * i + 1);
-            geometry(i, 2) = v(3 * i + 2);
+            //geometry(i, 0) = v(3 * i);
+            //geometry(i, 1) = v(3 * i + 1);
+            //geometry(i, 2) = v(3 * i + 2);
             attyp[i] = host.Atoms()[i];
             coord[3 * i + 0] = v(3 * i + 0) / au;
             coord[3 * i + 1] = v(3 * i + 1) / au;
             coord[3 * i + 2] = v(3 * i + 2) / au;
         }
 
-        host.setGeometry(geometry);
-
+        //host.setGeometry(geometry);
+        /*
+        m_driver->setReference(m_last);
+        m_driver->setTarget(host);
+        m_driver->AutoPilot();*/
         double Energy = interface->GFN2Energy(attyp, coord, natoms, charge, gradient);
         fx = Energy;
         for (int i = 0; i < host.AtomCount(); ++i) {
@@ -118,13 +131,16 @@ public:
             grad[3 * i + 1] = gradient[3 * i + 1];
             grad[3 * i + 2] = gradient[3 * i + 2];
         }
-        host.setEnergy(fx);
-        host.appendXYZFile("move_host.xyz");
-        m_energy = Energy;
-        m_iter++;
-        std::cout << m_iter << " " << m_energy << std::endl;
+        //host.setEnergy(fx);
+        //host.appendXYZFile("move_host.xyz");
+        //m_iter++;
+        //m_last_change =  (Energy - m_energy)*2625.5;
 
-        m_previous = v;
+        //std::cout << m_iter << "\t"<< std::setprecision(9) << fx << "\t\t" << std::setprecision(5) << (Energy - m_energy)*2625.5 << "\t\t" << std::setprecision(5)<< m_driver->RMSD() <<std::endl;
+        m_energy = Energy;
+        //m_last_rmsd = m_driver->RMSD();
+        //m_previous = v;
+        m_last = host;
         return fx;
     }
 
@@ -134,17 +150,21 @@ public:
     std::vector<VectorXd> m_coords;
 
     VectorXd m_previous, m_diis_last;
+    Molecule m_last;
+    double m_energy = 0, m_last_change = 0, m_last_rmsd = 0;
+    Vector parameter;
 
 private:
     int m_iter = 0;
     int n;
-    double m_energy = 0;
     XTBInterface* interface;
+    RMSDDriver* m_driver;
 };
 
 Molecule OptimiseGeometry(const Molecule* host)
 {
     Geometry geometry = host->getGeometry();
+    Molecule tmp(host);
     Molecule h(host);
     Vector parameter(3 * host->AtomCount());
 
@@ -154,21 +174,70 @@ Molecule OptimiseGeometry(const Molecule* host)
         parameter(3 * i + 2) = geometry(i, 2);
     }
 
+    std::cout << "Step\tCurrent Energy [Eh]\tEnergy Change\tRMSD Change" << std::endl;
+    int maxouter = 100;
+    double final_energy = 0;
+
     LBFGSParam<double> param;
-    param.epsilon = 1e-6;
-    param.max_iterations = 100;
+    param.epsilon = 1e-5;
+    param.max_iterations = 20;
 
     LBFGSSolver<double> solver(param);
     LBFGSInterface fun(3 * host->AtomCount());
     fun.m_host = host;
+    fun.m_last = host;
+    double fx;
+
+    RMSDDriver* driver = new RMSDDriver;
+
+    driver->setSilent(true);
+    driver->setProtons(true);
+    driver->setForceReorder(false);
+    driver->setCheckConnections(false);
+
+    int atoms_count = host->AtomCount();
+    for (int outer = 0; outer < maxouter; ++outer) {
+        int niter = solver.minimize(fun, parameter, fx);
+        parameter = fun.parameter;
+
+        for (int i = 0; i < atoms_count; ++i) {
+            geometry(i, 0) = parameter(3 * i);
+            geometry(i, 1) = parameter(3 * i + 1);
+            geometry(i, 2) = parameter(3 * i + 2);
+        }
+        h.setGeometry(geometry);
+
+        driver->setReference(tmp);
+        driver->setTarget(h);
+        driver->AutoPilot();
+
+        std::cout << outer << "\t" << std::setprecision(9) << fun.m_energy << "\t\t" << std::setprecision(5) << (fun.m_energy - final_energy) * 2625.5 << "\t\t" << std::setprecision(5) << driver->RMSD() << std::endl;
+        final_energy = fun.m_energy;
+        tmp = h;
+        h.setEnergy(final_energy);
+        h.appendXYZFile("curcuma_optim.xyz");
+        if (((fun.m_energy - final_energy) * 2625.5 < 0.75 && driver->RMSD() < 0.01) || niter < param.max_iterations)
+            break;
+    }
+
+    /*
+    LBFGSParam<double> param;
+    param.epsilon = 1e-5;
+    param.max_iterations = 2000;
+
+    LBFGSSolver<double> solver(param);
+    LBFGSInterface fun(3 * host->AtomCount());
+    fun.m_host = host;
+    fun.m_last = host;
     double fx;
     int niter = solver.minimize(fun, parameter, fx);
+    */
     for (int i = 0; i < host->AtomCount(); ++i) {
         geometry(i, 0) = parameter(3 * i);
         geometry(i, 1) = parameter(3 * i + 1);
         geometry(i, 2) = parameter(3 * i + 2);
     }
-    h.setEnergy(fun.LastEnergy());
+    h.setEnergy(final_energy);
     h.setGeometry(geometry);
     return h;
 }

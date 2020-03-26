@@ -159,7 +159,7 @@ private:
     std::map<double, std::vector<int>> m_results;
     std::map<int, std::vector<int>> m_connectivity;
     std::vector<IntermediateStorage> m_storage;
-    double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1.0;
+    double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 2.0;
     bool m_check_connections = false, m_partial_rmsd = false, m_postprocess = true;
     int m_hit = 1, m_pt = 0, m_reference_reordered = 0;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;

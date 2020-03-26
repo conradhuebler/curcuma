@@ -410,13 +410,14 @@ int main(int argc, char **argv) {
                 std::cerr << "-fragment n   **** Set fragment to n." << std::endl;
                 std::cerr << "-reference    **** Add different xyz structure as reference." << std::endl;
                 std::cerr << "-second       **** Add second trajectory." << std::endl;
+                std::cerr << "-heavy        **** Check only heavy atoms. Do not use with write." << std::endl;
 
                 return 0;
             }
             int fragment = -1;
             string reference, second;
             double rmsd = 1;
-            bool write_unique = false;
+            bool write_unique = false, heavy = false;
             bool isSecond = false;
             for (std::size_t i = 3; i < argc; ++i) {
                 if (strcmp(argv[i], "-fragment") == 0) {
@@ -455,6 +456,11 @@ int main(int argc, char **argv) {
                     write_unique = true;
                     continue;
                 }
+
+                if (strcmp(argv[i], "-heavy") == 0) {
+                    heavy = true;
+                    continue;
+                }
             }
 
             RMSDTraj traj;
@@ -463,6 +469,7 @@ int main(int argc, char **argv) {
             traj.setRMSDThreshold(rmsd);
             traj.setFile(argv[2]);
             traj.setFragment(fragment);
+            traj.setHeavy(heavy);
             if (isSecond)
                 traj.setSecondFile(second);
             traj.AnalyseTrajectory();
@@ -600,10 +607,10 @@ int main(int argc, char **argv) {
                         mol.AnalyseIntermoleculeDistance();
                         std::cout << std::endl
                                   << std::endl;
-                        // XTBInterface interface;
-                        // interface.GFN1Energy(mol);
-                        //std::cout << "Centroid: " << mol.Centroid(true).transpose() << std::endl;
-                        // std::cout << mol.Ia() << " " << mol.Ib() << " " << mol.Ic() << std::endl;
+                        XTBInterface interface;
+                        interface.GFN1Energy(mol);
+                        std::cout << "Centroid: " << mol.Centroid(true).transpose() << std::endl;
+                        std::cout << mol.Ia() << " " << mol.Ib() << " " << mol.Ic() << std::endl;
 
                         i = -1;
                         mol = Molecule(atoms, 0);
