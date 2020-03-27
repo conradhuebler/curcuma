@@ -269,6 +269,12 @@ void PairMapper::Statistic()
 void PairMapper::addPair(std::pair<int, int> pair, std::vector<std::pair<int, int>>& pairs)
 {
     bool exist = false;
+    if (pair.second < pair.first) {
+        int first = pair.first;
+        pair.first = pair.second;
+        pair.second = first;
+    }
+
     for (const std::pair<int, int> p : pairs)
         if (pair == p) {
             exist = true;

@@ -241,7 +241,7 @@ void ConfScan::scan()
                     }
                     continue;
                 }
-                if (diff_rot < m_diff_rot_tight) {
+                if (diff_rot < m_diff_rot_tight && difference < m_energy_threshold) {
                     ok = false;
                     filtered[mol1->Name()].push_back(mol2->Name());
                     std::cout << "  ** Rejecting structure **" << std::endl;

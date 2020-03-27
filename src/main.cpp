@@ -555,7 +555,6 @@ int main(int argc, char **argv) {
 
                         if (frag.size()) {
                             result_file << GeometryTools::Centroid(mol.getGeometry(frag)).transpose() << std::endl;
-                            std::cout << mol.getGeometry(frag) << std::endl;
                         } else {
                             mol.GetFragments(1.2);
                             result_file << GeometryTools::Centroid(mol.getGeometryByFragment(fragment)).transpose() << std::endl;
