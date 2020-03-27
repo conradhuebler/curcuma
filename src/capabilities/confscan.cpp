@@ -143,8 +143,9 @@ void ConfScan::scan()
     std::string result_name = m_filename;
     result_name.erase(result_name.end() - 4, result_name.end());
     std::string nearly_missed = result_name + "_missed.xyz";
-    result_name += +"_filter.xyz";
     std::string failed = result_name + "_failed.xyz";
+
+    result_name += +"_filter.xyz";
 
     std::ofstream result_file;
     result_file.open(result_name);
@@ -158,6 +159,7 @@ void ConfScan::scan()
     missed_file.open(failed);
     missed_file.close();
 
+    std::vector<std::vector<int>> rules_list;
     std::cout << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
               << "'" << std::endl;
 
@@ -221,23 +223,44 @@ void ConfScan::scan()
 
                 driver->AutoPilot();
                 rmsd = driver->RMSD();
-                if (rmsd > 0.5 && difference < 1 && diff_rot < 0.1 && diff_rot > 0.01) {
+                if (rmsd > m_rmsd_threshold && difference < 1 && diff_rot < 0.1 && diff_rot > 0.01) {
                     std::cout << std::endl
                               << std::endl
                               << "*** Reordering forced as energies and rotational constants are too close and rmsd (" << rmsd << ") is too different! ***" << std::endl
                               << std::endl;
-                    driver->setForceReorder(true);
-                    driver->AutoPilot();
-                    driver->setForceReorder(ForceReorder());
 
-                    double rmsd_tmp = driver->RMSD();
-                    std::cout << "New rmsd is " << rmsd_tmp << ". Old was " << rmsd << std::endl;
-                    if (rmsd_tmp > rmsd) {
-                        std::cout << "Reordering failed, a better fit was not found! This may happen, mainly for supramolecular structures." << std::endl;
-                        m_failed.push_back(mol1);
-                        m_failed.push_back(mol2);
+                    bool digDeeper = true;
+                    std::cout << "*** Checking old reordering solutions first. ***" << std::endl;
+                    for (const auto rule : rules_list) {
+                        double tmp_rmsd = driver->Rules2RMSD(rule);
+                        std::cout << tmp_rmsd << " ";
+                        if (tmp_rmsd < m_rmsd_threshold) {
+                            digDeeper = false;
+                            std::cout << std::endl
+                                      << std::endl
+                                      << "*** Old reordering solution worked here! ***" << std::endl
+                                      << std::endl;
+                            break;
+                        }
                     }
-                    rmsd = rmsd_tmp;
+                    std::cout << std::endl;
+                    if (digDeeper) {
+                        std::cout << "*** Nothing fitting found, reorder now! ***" << std::endl;
+                        driver->setForceReorder(true);
+                        driver->AutoPilot();
+                        driver->setForceReorder(ForceReorder());
+
+                        double rmsd_tmp = driver->RMSD();
+                        rules_list.push_back(driver->ReorderRules());
+
+                        std::cout << "New rmsd is " << rmsd_tmp << ". Old was " << rmsd << std::endl;
+                        if (rmsd_tmp > rmsd) {
+                            std::cout << "Reordering failed, a better fit was not found! This may happen." << std::endl;
+                            m_failed.push_back(mol1);
+                            m_failed.push_back(mol2);
+                        }
+                        rmsd = rmsd_tmp;
+                    }
                 } else {
                     std::cout << "RMSD is " << rmsd << std::endl;
                 }
@@ -266,6 +289,7 @@ void ConfScan::scan()
                       << std::endl
                       << "               ** Accepting " << mol1->Name() << " **" << std::endl;
             m_result.push_back(mol1);
+            /* Write each accepted structure immediately */
             mol1->appendXYZFile(result_name);
         }
         ok = true;
@@ -278,12 +302,6 @@ void ConfScan::scan()
     if (m_result.size() == 0)
         return;
 
-    /*
-    for (const auto molecule : m_result) {
-        //molecule->print_geom(false);
-        molecule->appendXYZFile(result_name);
-    }
-    */
     if (m_writeXYZ) {
         for (const auto molecule : m_result)
             molecule->writeXYZFile();

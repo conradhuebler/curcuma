@@ -118,6 +118,14 @@ void RMSDDriver::AutoPilot()
     delete target;
 }
 
+double RMSDDriver::Rules2RMSD(const std::vector<int> rules)
+{
+    Molecule target;
+    for (auto i : rules)
+        target.addPair(m_target.Atom(i));
+    return CalculateRMSD(m_reference, target);
+}
+
 void RMSDDriver::clear()
 {
     m_results.clear();
@@ -520,6 +528,7 @@ void RMSDDriver::ReorderStraight()
         for (int i = 0; i < element.second.size(); i++) {
             mol2.addPair(m_target.Atom(element.second[i]));
         }
+        m_reorder_rules = element.second;
         m_rmsd = CalculateRMSD(m_reference, mol2);
         if (count == 0) // store the best result in any way
             m_target_reordered = mol2;
@@ -616,10 +625,12 @@ void RMSDDriver::SolveIntermediate(std::vector<int> intermediate)
 
 void RMSDDriver::ReconstructTarget(const std::vector<int>& atoms)
 {
+    std::vector<int> reorder_rules;
     Molecule target_cached, target, reference;
     int index = 0;
     for (int atom : atoms) {
         target_cached.addPair(m_target.Atom(atom));
+        reorder_rules.push_back(atom);
         reference.addPair(m_reference.Atom(index));
         index++;
     }
@@ -629,7 +640,9 @@ void RMSDDriver::ReconstructTarget(const std::vector<int>& atoms)
         if (target.Contains(m_target.Atom(i)))
             continue;
         target.addPair(m_target.Atom(i));
+        reorder_rules.push_back(i);
     }
+    m_reorder_rules = reorder_rules;
     m_target_reordered.LoadMolecule(target);
 
     if (m_postprocess) {
