@@ -46,6 +46,7 @@ public:
     inline void setRMSDThreshold(double rmsd_threshold) { m_rmsd_threshold = rmsd_threshold; }
 
     inline void WriteUnique(bool write_unique) { m_write_unique = write_unique; }
+    inline void setHeavy(bool heavy) { m_heavy = heavy; }
 
 private:
     std::string m_filename, m_reference, m_second_file;
@@ -53,6 +54,6 @@ private:
     std::vector<Molecule> m_stored_structures;
     std::vector<double> m_rmsd_vector;
     int m_fragment = -1;
-    bool m_write_unique = false, m_pairwise = false;
+    bool m_write_unique = false, m_pairwise = false, m_heavy = false;
     double m_rmsd_threshold = 1.0;
 };

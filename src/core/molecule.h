@@ -74,11 +74,11 @@ class Molecule
     std::vector<int> Atoms() const { return m_atoms; }
     std::pair<int, Position> Atom(int i) const;
 
-    void writeXYZFile(const std::string& filename);
-    inline void writeXYZFile() { writeXYZFile(Name() + ".xyz"); }
+    void writeXYZFile(const std::string& filename) const;
+    inline void writeXYZFile() const { writeXYZFile(Name() + ".xyz"); }
 
-    void appendXYZFile(const std::string& filename);
-    inline void appendXYZFile() { appendXYZFile(Name() + ".xyz"); }
+    void appendXYZFile(const std::string& filename) const;
+    inline void appendXYZFile() const { appendXYZFile(Name() + ".xyz"); }
 
     std::vector<int> BoundHydrogens(int atom, double scaling = 1.5) const;
     std::map<int, std::vector<int>> getConnectivtiy(double scaling = 1.5, int latest = -1) const;

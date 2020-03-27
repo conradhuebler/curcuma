@@ -121,6 +121,12 @@ endif()
 add_executable(curcuma_helper
         src/helpers/main.cpp)
 set_property(TARGET curcuma_helper PROPERTY CXX_STANDARD 14)
-
+if(USE_XTB)
+add_executable(xtb_helper
+        src/helpers/xtb_helper.cpp
+        )
+    set_property(TARGET xtb_helper PROPERTY CXX_STANDARD 14)
+    target_link_libraries(xtb_helper xtb_shared)
+endif()
 install(TARGETS curcuma RUNTIME DESTINATION bin)
 install(TARGETS curcuma_helper RUNTIME DESTINATION bin)

@@ -71,7 +71,7 @@ private:
     std::map<double, int> m_ordered_list;
     std::vector<std::pair<std::string, Molecule*>> m_molecules;
     double m_energy_threshold = 1.0, m_rmsd_threshold = 1.0, m_diff_rot_loose = 0.3, m_diff_rot_tight = 0.01, m_nearly_missed = 0.8;
-    std::vector<Molecule*> m_result, m_nearly;
+    std::vector<Molecule*> m_result, m_nearly, m_failed;
     int m_maxrank = 10000;
     bool m_writeXYZ = false;
     bool m_check_connections = false;

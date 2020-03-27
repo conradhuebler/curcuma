@@ -417,7 +417,7 @@ std::pair<int, Position> Molecule::Atom(int i) const
     return std::pair<int, Position>(m_atoms[i], { m_geometry[i][0], m_geometry[i][1], m_geometry[i][2] });
 }
 
-void Molecule::writeXYZFile(const std::string& filename)
+void Molecule::writeXYZFile(const std::string& filename) const
 {
     std::ofstream input;
     input.open(filename, ios::out);
@@ -430,7 +430,7 @@ void Molecule::writeXYZFile(const std::string& filename)
     input.close();
 }
 
-void Molecule::appendXYZFile(const std::string& filename)
+void Molecule::appendXYZFile(const std::string& filename) const
 {
     std::ofstream input;
     input.open(filename, std::ios_base::app);

@@ -52,7 +52,7 @@ double XTBInterface::GFN1Energy(const Molecule& molecule)
         attyp[i] = atoms[i];
     }
 
-    xtb::SCC_options const opt = (xtb::SCC_options){ 2, 0, 1.0, 300.0, true, true, true, 30, "none" };
+    xtb::SCC_options const opt = (xtb::SCC_options){ 0, 0, 1.0, 300.0, true, true, true, 30, "none" };
 
     double dipole[3];
     double q[natoms];
@@ -86,7 +86,7 @@ double XTBInterface::GFN2Energy(const Molecule& molecule)
         attyp[i] = atoms[i];
     }
 
-    xtb::SCC_options const opt = (xtb::SCC_options){ 2, 1, 1.0, 300.0, true, true, true, 30, "none" };
+    xtb::SCC_options const opt = (xtb::SCC_options){ 0, 1, 2.0, 300.0, true, true, true, 30, "none" };
 
     double dipole[3];
     double q[natoms];
@@ -105,7 +105,7 @@ double XTBInterface::GFN2Energy(const int* attyp, const double* coord, const int
 {
     double energy = 0;
 #ifdef USE_XTB
-    xtb::SCC_options const opt = (xtb::SCC_options){ 2, 1, 1.0, 300.0, true, true, true, 30, "none" };
+    xtb::SCC_options const opt = (xtb::SCC_options){ 0, 1, 2.0, 300.0, true, true, true, 30, "none" };
 
     double dipole[3];
     double q[natoms];
@@ -114,6 +114,43 @@ double XTBInterface::GFN2Energy(const int* attyp, const double* coord, const int
     char output;
     int stat = xtb::GFN2_calculation(&natoms, attyp, &charge, NULL, coord, &opt, &output,
         &energy, grad, dipole, q, NULL, qp, wbo);
+#else
+    throw("XTB is not included, sorry for that");
+#endif
+    return energy;
+}
+
+double XTBInterface::GFN1Energy(const int* attyp, const double* coord, const int natoms, const double charge, double* grad)
+{
+    double energy = 0;
+#ifdef USE_XTB
+    xtb::SCC_options const opt = (xtb::SCC_options){ 0, 1, 2.0, 300.0, true, true, true, 30, "none" };
+
+    double dipole[3];
+    double q[natoms];
+    double qp[6 * natoms];
+    double wbo[natoms * natoms];
+    char output;
+    int stat = xtb::GFN1_calculation(&natoms, attyp, &charge, NULL, coord, &opt, &output,
+        &energy, grad, dipole, q, wbo);
+#else
+    throw("XTB is not included, sorry for that");
+#endif
+    return energy;
+}
+
+double XTBInterface::GFN0Energy(const int* attyp, const double* coord, const int natoms, const double charge, double* grad)
+{
+    double energy = 0;
+#ifdef USE_XTB
+    xtb::PEEQ_options const opt = (xtb::PEEQ_options){ 0, 1, 2.0, 300, true, false, "none" };
+
+    double dipole[3];
+    double q[natoms];
+    double qp[6 * natoms];
+    double wbo[natoms * natoms];
+    char output;
+    int stat = xtb::GFN0_calculation(&natoms, attyp, &charge, NULL, coord, &opt, &output, &energy, grad);
 #else
     throw("XTB is not included, sorry for that");
 #endif
