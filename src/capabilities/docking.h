@@ -62,6 +62,8 @@ public:
 
     void setCheck(bool check) { m_check = check; }
 
+    StringList Files() const { return m_files; }
+
 private:
     Molecule m_host_structure, m_guest_structure, m_supramol;
     Position m_initial_anchor = Position{ 0, 0, 0 };

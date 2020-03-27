@@ -1,5 +1,5 @@
 /*
- * <LevenbergMarquardt Anchor Optimisation for Docking. >
+ * <Geometrie optimisation using external LBFGS and xtb. >
  * Copyright (C) 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -31,7 +31,6 @@
 #include "src/core/elements.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
-#include "src/core/pseudoff.h"
 #include "src/core/xtbinterface.h"
 
 #include "src/tools/geometry.h"
@@ -47,121 +46,54 @@ public:
     LBFGSInterface(int n_)
         : n(n_)
     {
-        VectorXd error(n + 1);
-        for (int i = 0; i < n; ++i)
-            error[i] = -1;
-        error[n] = 0;
-        m_diis_last = error;
-
-        m_driver = new RMSDDriver;
-        m_driver->setSilent(true);
-        m_driver->setProtons(true);
-        m_driver->setForceReorder(false);
-        m_driver->setCheckConnections(false);
     }
     double operator()(const VectorXd& x, VectorXd& grad)
     {
-        VectorXd v = x;
-        parameter = x;
-        /*
-        if(m_iter >= 2)
-        {
-            VectorXd error(n+1);
-            for(int i = 0; i < n; ++i)
-                error[i] = abs(x[i] - m_previous[i]);
-            error[n] = -1;
-            m_error.push_back(error);
-            if(m_error.size() == 8)
-                m_error.erase(m_error.begin());
-            Eigen::MatrixXd matrix(m_error.size() + 1, n + 1);
-            Eigen::VectorXd vector(m_error.size() + 1);
-            for(int i = 0; i < m_error.size(); ++i)
-            {
-              matrix.row(i) = m_error[i];
-              vector(i) = 0;
-            }
-            matrix.row(m_error.size()) = m_diis_last;
-            vector(m_error.size()) = -1;
-            std::cout << matrix << std::endl;
-            std::cout << vector << std::endl;
-            Eigen::VectorXd solved = matrix.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(vector);
-            std::cout << solved.transpose() << std::endl;
-            VectorXd zero = VectorXd::Zero(x.size());
-            for(int i = 0; i < m_coords.size(); ++i)
-                zero += m_coords[i] * solved(i);
-            std::cout << zero.transpose() << std::endl << std::endl << v.transpose() << std::endl;
-            v = zero;
-        }
-        m_coords.push_back(v);
-        if(m_coords.size() == 8)
-            m_coords.erase(m_coords.begin());
-        */
         double fx = 0.0;
-
-        Molecule host = m_host;
-
-        Geometry geometry = host.getGeometry();
-        int natoms = host.AtomCount();
-        int attyp[host.AtomCount()];
+        int attyp[m_atoms];
         double charge = 0;
-        std::vector<int> atoms = host.Atoms();
-        double coord[3 * natoms];
-        double gradient[3 * natoms];
-        double dist_gradient[3 * natoms];
+        std::vector<int> atoms = m_molecule->Atoms();
+        double coord[3 * m_atoms];
+        double gradient[3 * m_atoms];
+        double dist_gradient[3 * m_atoms];
 
-        for (int i = 0; i < m_host->AtomCount(); ++i) {
-            //geometry(i, 0) = v(3 * i);
-            //geometry(i, 1) = v(3 * i + 1);
-            //geometry(i, 2) = v(3 * i + 2);
-            attyp[i] = host.Atoms()[i];
-            coord[3 * i + 0] = v(3 * i + 0) / au;
-            coord[3 * i + 1] = v(3 * i + 1) / au;
-            coord[3 * i + 2] = v(3 * i + 2) / au;
+        for (int i = 0; i < m_atoms; ++i) {
+            attyp[i] = m_molecule->Atoms()[i];
+            coord[3 * i + 0] = x(3 * i + 0) / au;
+            coord[3 * i + 1] = x(3 * i + 1) / au;
+            coord[3 * i + 2] = x(3 * i + 2) / au;
         }
-
-        //host.setGeometry(geometry);
-        /*
-        m_driver->setReference(m_last);
-        m_driver->setTarget(host);
-        m_driver->AutoPilot();*/
-        double Energy = interface->GFN2Energy(attyp, coord, natoms, charge, gradient);
-        fx = Energy;
-        for (int i = 0; i < host.AtomCount(); ++i) {
+        fx = interface->GFN1Energy(attyp, coord, m_atoms, charge, gradient);
+        for (int i = 0; i < m_atoms; ++i) {
             grad[3 * i + 0] = gradient[3 * i + 0];
             grad[3 * i + 1] = gradient[3 * i + 1];
             grad[3 * i + 2] = gradient[3 * i + 2];
         }
-        //host.setEnergy(fx);
-        //host.appendXYZFile("move_host.xyz");
-        //m_iter++;
-        //m_last_change =  (Energy - m_energy)*2625.5;
-
-        //std::cout << m_iter << "\t"<< std::setprecision(9) << fx << "\t\t" << std::setprecision(5) << (Energy - m_energy)*2625.5 << "\t\t" << std::setprecision(5)<< m_driver->RMSD() <<std::endl;
-        m_energy = Energy;
-        //m_last_rmsd = m_driver->RMSD();
-        //m_previous = v;
-        m_last = host;
+        m_energy = fx;
+        m_parameter = x;
         return fx;
     }
 
-    const Molecule* m_host;
     double LastEnergy() const { return m_energy; }
-    std::vector<VectorXd> m_error;
-    std::vector<VectorXd> m_coords;
 
-    VectorXd m_previous, m_diis_last;
-    Molecule m_last;
     double m_energy = 0, m_last_change = 0, m_last_rmsd = 0;
-    Vector parameter;
+    Vector Parameter() const { return m_parameter; }
+    void setMolecule(const Molecule* molecule)
+    {
+        m_molecule = molecule;
+        m_atoms = m_molecule->AtomCount();
+    }
 
 private:
     int m_iter = 0;
+    int m_atoms = 0;
     int n;
     XTBInterface* interface;
-    RMSDDriver* m_driver;
+    Vector m_parameter;
+    const Molecule* m_molecule;
 };
 
-Molecule OptimiseGeometry(const Molecule* host, bool writeXYZ = true, bool printOutput = true)
+Molecule OptimiseGeometry(const Molecule* host, bool writeXYZ = true, bool printOutput = true, double dE = 0.75, double dRMSD = 0.01)
 {
     Geometry geometry = host->getGeometry();
     Molecule tmp(host);
@@ -184,8 +116,7 @@ Molecule OptimiseGeometry(const Molecule* host, bool writeXYZ = true, bool print
 
     LBFGSSolver<double> solver(param);
     LBFGSInterface fun(3 * host->AtomCount());
-    fun.m_host = host;
-    fun.m_last = host;
+    fun.setMolecule(host);
     double fx;
 
     RMSDDriver* driver = new RMSDDriver;
@@ -198,7 +129,7 @@ Molecule OptimiseGeometry(const Molecule* host, bool writeXYZ = true, bool print
     int atoms_count = host->AtomCount();
     for (int outer = 0; outer < maxouter; ++outer) {
         int niter = solver.minimize(fun, parameter, fx);
-        parameter = fun.parameter;
+        parameter = fun.Parameter();
 
         for (int i = 0; i < atoms_count; ++i) {
             geometry(i, 0) = parameter(3 * i);
@@ -220,22 +151,11 @@ Molecule OptimiseGeometry(const Molecule* host, bool writeXYZ = true, bool print
             h.setEnergy(final_energy);
             h.appendXYZFile("curcuma_optim.xyz");
         }
-        if (((fun.m_energy - final_energy) * 2625.5 < 0.75 && driver->RMSD() < 0.01) || niter < param.max_iterations)
+        if (((fun.m_energy - final_energy) * 2625.5 < dE && driver->RMSD() < dRMSD) || niter < param.max_iterations)
             break;
     }
 
-    /*
-    LBFGSParam<double> param;
-    param.epsilon = 1e-5;
-    param.max_iterations = 2000;
 
-    LBFGSSolver<double> solver(param);
-    LBFGSInterface fun(3 * host->AtomCount());
-    fun.m_host = host;
-    fun.m_last = host;
-    double fx;
-    int niter = solver.minimize(fun, parameter, fx);
-    */
     for (int i = 0; i < host->AtomCount(); ++i) {
         geometry(i, 0) = parameter(3 * i);
         geometry(i, 1) = parameter(3 * i + 1);

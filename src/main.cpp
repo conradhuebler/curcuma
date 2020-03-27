@@ -155,13 +155,37 @@ int main(int argc, char **argv) {
                 std::cerr << "Please use curcuma for docking  as follows\ncurcuma -dock A.xyz B.xyz XXX YYY ZZZ" << std::endl;
                 exit(1);
             }
+            bool opt = false, filter = false;
+            bool check = false;
+
+            if (argc >= 4) {
+
+                for (std::size_t i = 4; i < argc; ++i) {
+
+                    if (strcmp(argv[i], "-opt") == 0) {
+                        opt = true;
+                        continue;
+                    }
+
+                    if (strcmp(argv[i], "-filter") == 0) {
+                        filter = true;
+                        continue;
+                    }
+
+                    if (strcmp(argv[i], "-check") == 0) {
+                        check = true;
+                        continue;
+                    }
+                }
+            }
+
             Molecule mol1 = Tools::LoadFile(argv[2]);
             Molecule mol2 = Tools::LoadFile(argv[3]);
 
             Docking* docking = new Docking;
             docking->setHostStructure(mol1);
             docking->setGuestStructure(mol2);
-
+            /*
             if (argc >= 7) {
                 double XXX = stod(std::string(argv[4]));
                 double YYY = stod(std::string(argv[5]));
@@ -170,21 +194,52 @@ int main(int argc, char **argv) {
                 std::cout << "Docking Position:" << XXX << " " << YYY << " " << ZZZ << std::endl;
                 docking->setAnchorPosition(Position{ XXX, YYY, ZZZ });
             }
-            bool check = false;
             if (argc >= 7) {
 
-                for (std::size_t i = 3; i < argc; ++i) {
-                    if (strcmp(argv[i], "-check") == 0) {
-                        check = true;
-                        continue;
-                    }
-                }
-            }
+
+            }*/
             docking->setCheck(check);
             docking->PerformDocking();
 
-            docking->getMolecule().writeXYZFile("docked.xyz");
+            StringList files = docking->Files();
+            StringList optfile;
 
+            if (opt) {
+                for (auto file : files) {
+
+                    FileIterator fileiter(file);
+
+                    std::multimap<double, Molecule> results;
+                    while (!fileiter.AtEnd()) {
+                        Molecule mol = fileiter.Next();
+                        Molecule mol2 = OptimiseGeometry(&mol, false, true, 1, 0.05);
+                        results.insert(std::pair<double, Molecule>(mol2.Energy(), mol2));
+                    }
+                    for (int i = 0; i < 4; ++i)
+                        file.pop_back();
+
+                    file += "_opt.xyz";
+                    optfile.push_back(file);
+                    for (const auto& ref : results)
+                        ref.second.appendXYZFile(file);
+                }
+
+                if (filter) {
+                    for (auto file : optfile) {
+
+                        ConfScan* scan = new ConfScan;
+                        scan->setFileName(file);
+                        scan->setHeavyRMSD(true);
+                        //scan->setMaxRank(rank);
+                        //scan->setWriteXYZ(writeXYZ);
+                        //scan->setForceReorder(reorder);
+                        //scan->setCheckConnections(check_connect);
+                        //scan->setEnergyThreshold(energy);
+                        scan->setNoName(true);
+                        scan->scan();
+                    }
+                }
+            }
         } else if (strcmp(argv[1], "-hbonds") == 0) {
             if(argc != 6)
             {

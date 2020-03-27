@@ -130,10 +130,10 @@ void Docking::PerformDocking()
     for (const auto& pair : m_result_list) {
         ++index;
         frags[pair.second->GetFragments(1.3).size()]++;
-        std::cout << pair.first << std::endl;
-        const std::string name = "Docking_B" + std::to_string(frags[pair.second->GetFragments(1.3).size()] % 100 + 1) + "_F" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz";
+        //std::cout << pair.first << std::endl;
+        const std::string name = "Docking_B" + std::to_string(frags[pair.second->GetFragments(1.3).size()] / 100 + 1) + "_F" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz";
         pair.second->appendXYZFile(name);
-        if (std::binary_search(m_files.begin(), m_files.end(), name))
+        if (!std::binary_search(m_files.begin(), m_files.end(), name))
             m_files.push_back(name);
 
         delete pair.second;
