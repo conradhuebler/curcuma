@@ -144,7 +144,7 @@ private:
 
     void InitialisePair();
 
-    void SolveIntermediate(std::vector<int> intermediate);
+    bool SolveIntermediate(std::vector<int> intermediate, bool fast = false);
 
     int CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) const;
     int CheckConnectivitiy(const Molecule& mol1) const;
@@ -161,10 +161,11 @@ private:
     bool m_force_reorder = false, m_protons = true, m_print_intermediate = false, m_silent = false;
     std::queue<std::vector<int>> m_intermediate_results;
     std::map<double, std::vector<int>> m_results;
+    std::vector<double> m_last_rmsd;
     std::vector<int> m_reorder_rules;
     std::map<int, std::vector<int>> m_connectivity;
     std::vector<IntermediateStorage> m_storage;
-    double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 2.0;
+    double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99;
     bool m_check_connections = false, m_partial_rmsd = false, m_postprocess = true;
     int m_hit = 1, m_pt = 0, m_reference_reordered = 0;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;

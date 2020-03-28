@@ -40,7 +40,8 @@ static const std::vector<std::string> ElementAbbr_Low = { "h", "he",
     "rb", "sr", "y", "zr", "nb", "mo", "tc", "ru", "rh", "pd", "ag", "cd", "in", "sn", "sb", "te", "i", "xe",
     "cs", "ba" };
 
-static const std::vector<double> AtomicMass = { 1.008, 4.003 };
+static const std::vector<double> AtomicMass = { 1.0079, 4.00326,
+    6.941, 9.0122, 10.811, 12.011, 14.007, 15.999, 18.998, 20.180 };
 
 /* for now, taken from here
  * https://de.wikipedia.org/wiki/Van-der-Waals-Radius */

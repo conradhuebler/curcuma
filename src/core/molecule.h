@@ -46,6 +46,8 @@ class Molecule
     inline int Charge() const { return m_charge; }
     void setCharge(int charge) { m_charge = charge; }
 
+    void InitialiseConnectedMass(double scaling = 1.3);
+    inline double ConnectedMass(int atom) const { return m_connect_mass[atom]; }
     double angle(int atom1, int atom2, int atom3) const;
     double DotProduct(std::array<double, 3> pos1, std::array<double, 3> pos2) const;
 //     double torsion(int atom1, int atom2, int atom3, int atom4);
@@ -113,6 +115,9 @@ private:
     int m_charge = 0;
     std::vector<std::array<double, 3>> m_geometry;
     std::vector<int> m_atoms;
+
+    std::vector<int> m_connect_mass;
+
     mutable std::vector<std::vector<int>> m_fragments;
     mutable std::vector<double> m_mass_fragments;
     string point_group;

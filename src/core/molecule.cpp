@@ -608,3 +608,21 @@ std::vector<std::vector<int>> Molecule::GetFragments(double scaling) const
     m_dirty = false;
     return m_fragments;
 }
+
+void Molecule::InitialiseConnectedMass(double scaling)
+{
+    for (int i = 0; i < AtomCount(); ++i) {
+        int mass = 0;
+        auto atom_i = Atom(i);
+        for (int j = i + 1; j < AtomCount(); ++j) {
+            auto atom_j = Atom(j);
+            double distance = Distance(i, j);
+            if (distance < (Elements::CovalentRadius[atom_i.first - 1] + Elements::CovalentRadius[atom_j.first - 1]) * scaling) {
+                //      std::cout << atom_i.first - 1<< " "  << atom_j.first - 1<< " " << Elements::AtomicMass[atom_j.first - 1] << std::endl;
+                mass += atom_j.first; //Elements::AtomicMass[atom_j.first - 1];
+            }
+        }
+        m_connect_mass.push_back(mass);
+        //std::cout << i << " " << mass << std::endl;
+    }
+}

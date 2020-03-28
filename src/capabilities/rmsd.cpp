@@ -456,6 +456,8 @@ void RMSDDriver::ReorderMolecule()
 void RMSDDriver::ReorderStraight()
 {
 
+    m_reference.InitialiseConnectedMass(1.5);
+    m_target.InitialiseConnectedMass(1.5);
     int inter_size = m_reference.AtomCount() * (m_reference.AtomCount() - 1) * m_intermedia_storage;
     m_storage = std::vector<IntermediateStorage>(m_reference.AtomCount() - 1, IntermediateStorage(inter_size));
 
@@ -473,11 +475,12 @@ void RMSDDriver::ReorderStraight()
         SolveIntermediate(inter);
         m_intermediate_results.pop();
     }
-
-    for (int i = 0; i < m_storage.size(); ++i) {
+    int i = 0;
+    int next = 0;
+    for (; i < m_storage.size(); ++i) {
         if (!m_silent) {
-            // int ct = 0;
-            /* for (const auto& element : (*m_storage[i].data())) {
+            /*int ct = 0;
+             for (const auto& element : (*m_storage[i].data())) {
                 {
                     ct++;
                     std::cout << " " << element.first << " ";
@@ -485,15 +488,46 @@ void RMSDDriver::ReorderStraight()
                         break;
                 }
             }*/
-            std::cout << double(i) / double(m_reference.AtomCount()) * 100 << " % done " << std::endl;
+            //std::cout << double(i) / double(m_reference.AtomCount()) * 100 << " % done " << std::endl;
         }
-        // std::cout << (i < m_target.AtomCount() - 1) << std::endl;
-        //if( i == m_target.AtomCount() - 1)
-        //{
-        //    std::cout << "blob" << std::endl;
-        //}
         for (const auto& element : (*m_storage[i].data())) {
+            if (element.first < m_threshold)
+                if (!SolveIntermediate(element.second) && !next)
+                    next = i;
+        }
+        std::sort(m_last_rmsd.begin(), m_last_rmsd.end());
+        //m_threshold = (2*Tools::median(m_last_rmsd) +  m_last_rmsd[0])/3.0;
+        m_threshold = Tools::median(m_last_rmsd);
+        //std::cout << m_threshold << std::endl;
+        if ((*m_storage[i].data()).size()) {
+            m_last_rmsd.clear();
+        }
+    }
+    if (next)
+        i = next;
+    for (; i < m_storage.size(); ++i) {
+        std::cout << "next " << i << std::endl;
+        if (!m_silent) {
+            /*int ct = 0;
+             for (const auto& element : (*m_storage[i].data())) {
+                {
+                    ct++;
+                    std::cout << " " << element.first << " ";
+                    if(ct == 10)
+                        break;
+                }
+            }*/
+            //std::cout << double(i) / double(m_reference.AtomCount()) * 100 << " % done " << std::endl;
+        }
+        for (const auto& element : (*m_storage[i].data())) {
+            //if(element.first < m_threshold)
             SolveIntermediate(element.second);
+        }
+
+        m_threshold = Tools::median(m_last_rmsd);
+        //std::cout << m_threshold << std::endl;
+        if ((*m_storage[i].data()).size()) {
+            m_last_rmsd.clear();
         }
     }
 
@@ -547,10 +581,10 @@ void RMSDDriver::ReorderStraight()
     return;
 }
 
-void RMSDDriver::SolveIntermediate(std::vector<int> intermediate)
+bool RMSDDriver::SolveIntermediate(std::vector<int> intermediate, bool fast)
 {
     if (m_reference_reordered + intermediate.size() >= m_reference.AtomCount())
-        return;
+        return false;
     //std::cout << "Reference reordered " << m_reference_reordered << std::endl;
     Molecule reference;
     Molecule target;
@@ -574,10 +608,17 @@ void RMSDDriver::SolveIntermediate(std::vector<int> intermediate)
 
     for (int j = 0; j < m_target.AtomCount(); ++j) {
         if (elements_target[j] == element_local) {
+            //if(m_reference.ConnectedMass(i) != m_target.ConnectedMass(j) && fast)
+            //{
+            //    continue;
+            //}
+            //std::cout <<i<< " " <<m_reference.ConnectedMass(i)<< " "<< j <<" " <<m_target.ConnectedMass(j) << std::endl;;
+
             found_none = false;
             Molecule target_local(target);
             if (target_local.addPair(m_target.Atom(j))) {
                 double rmsd_local = CalculateRMSD(reference_local, target_local);
+
                 if (target_local.AtomCount() < m_target.AtomCount()) {
                     //std::cout << "count smaller " << m_target.AtomCount() << " ";
                     rmsd = rmsd_local;
@@ -587,6 +628,7 @@ void RMSDDriver::SolveIntermediate(std::vector<int> intermediate)
                             match.insert(std::pair<double, int>(rmsd_local, j));
                     } else {
                         match.insert(std::pair<double, int>(rmsd_local, j));
+                        m_last_rmsd.push_back(rmsd_local);
                         // std::cout << target_local.AtomCount() <<  " added  (" << match.size() << ")" << std::endl;
                     }
                 } else {
@@ -613,14 +655,14 @@ void RMSDDriver::SolveIntermediate(std::vector<int> intermediate)
         // m_reference.print_geom(false);
         m_reference_reordered++;
         SolveIntermediate(intermediate);
-        return;
+        return false;
     }
-
     for (const auto& element : match) {
         std::vector<int> temp = intermediate;
         temp.push_back(element.second);
         m_storage[temp.size() - 1].addItem(temp, element.first);
     }
+    return true;
 }
 
 void RMSDDriver::ReconstructTarget(const std::vector<int>& atoms)
@@ -649,7 +691,7 @@ void RMSDDriver::ReconstructTarget(const std::vector<int>& atoms)
 
         double mean_0 = 0;
         bool allow_loop = true;
-        std::cout << CalculateRMSD(reference, target_cached) << std::endl;
+        //std::cout << CalculateRMSD(reference, target_cached) << std::endl;
 
         while (allow_loop) {
             Molecule target2, reference2;
@@ -663,18 +705,18 @@ void RMSDDriver::ReconstructTarget(const std::vector<int>& atoms)
                     target2.addPair(target_cached.Atom(index));
                     reference2.addPair(reference.Atom(index));
 
-                } else
-                    std::cout << index << " " << terms[index] << " " << mean << std::endl;
+                } // else
+                //std::cout << index << " " << terms[index] << " " << mean << std::endl;
             }
 
             target_cached = target2;
             reference = reference2;
-            std::cout << CalculateRMSD(reference, target_cached) << " " << reference.AtomCount() << std::endl;
+            //std::cout << CalculateRMSD(reference, target_cached) << " " << reference.AtomCount() << std::endl;
             mean_0 = mean;
         }
     }
 
-    std::cout << CalculateRMSD(reference, target_cached) << std::endl;
+    //std::cout << CalculateRMSD(reference, target_cached) << std::endl;
     Eigen::Matrix3d R = BestFitRotation(reference, target_cached);
 
     Geometry reference_geom, target_geom;
