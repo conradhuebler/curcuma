@@ -46,7 +46,7 @@ class Molecule
     inline int Charge() const { return m_charge; }
     void setCharge(int charge) { m_charge = charge; }
 
-    void InitialiseConnectedMass(double scaling = 1.3);
+    void InitialiseConnectedMass(double scaling = 1.3, bool protons = true);
     inline double ConnectedMass(int atom) const { return m_connect_mass[atom]; }
     double angle(int atom1, int atom2, int atom3) const;
     double DotProduct(std::array<double, 3> pos1, std::array<double, 3> pos2) const;

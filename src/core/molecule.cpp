@@ -609,11 +609,13 @@ std::vector<std::vector<int>> Molecule::GetFragments(double scaling) const
     return m_fragments;
 }
 
-void Molecule::InitialiseConnectedMass(double scaling)
+void Molecule::InitialiseConnectedMass(double scaling, bool protons)
 {
     for (int i = 0; i < AtomCount(); ++i) {
         int mass = 0;
         auto atom_i = Atom(i);
+        if (!protons && atom_i.first == 1)
+            continue;
         for (int j = i + 1; j < AtomCount(); ++j) {
             auto atom_j = Atom(j);
             double distance = Distance(i, j);

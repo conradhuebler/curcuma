@@ -154,6 +154,9 @@ private:
     Eigen::Matrix3d BestFitRotation(const Molecule& reference, const Molecule& target, int factor = 1) const;
     Eigen::Matrix3d BestFitRotation(const Geometry& reference, const Geometry& target, int factor = 1) const;
 
+    double CalculateShortRMSD(const Geometry& reference_mol, const Molecule& target_mol) const;
+    Eigen::Matrix3d BestFitRotationShort(const Geometry& reference, const Geometry& target) const;
+
     Geometry CenterMolecule(const Molecule& mol, int fragment) const;
     Geometry CenterMolecule(const Geometry& molt) const;
 

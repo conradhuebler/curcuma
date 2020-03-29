@@ -58,8 +58,11 @@ void RMSDDriver::AutoPilot()
         m_reference = m_target;
         m_target = reference;
     }
-
+    m_intermedia_storage = 1;
     clear();
+
+    m_reference.InitialiseConnectedMass(1.5, m_protons);
+    m_target.InitialiseConnectedMass(1.5, m_protons);
 
     if(m_protons == false)
         ProtonDepleted();
@@ -157,6 +160,32 @@ void RMSDDriver::ProtonDepleted()
     m_target = target;
 }
 
+Eigen::Matrix3d RMSDDriver::BestFitRotationShort(const Geometry& reference_mol, const Geometry& target_mol) const
+{
+    /* The rmsd kabsch algorithmn was adopted from here:
+ * https://github.com/oleg-alexandrov/projects/blob/master/eigen/Kabsch.cpp
+ * The specific git commit was
+ * https://github.com/oleg-alexandrov/projects/blob/e7b1eb7a4d83d41af563c24859072e4ddd9b730b/eigen/Kabsch.cpp
+ */
+
+    Geometry target = CenterMolecule(target_mol);
+
+    Eigen::MatrixXd ref = reference_mol.transpose();
+    Eigen::MatrixXd tar = target.transpose();
+
+    Eigen::MatrixXd Cov = ref * tar.transpose();
+    Eigen::JacobiSVD<Eigen::MatrixXd> svd(Cov, Eigen::ComputeThinU | Eigen::ComputeThinV);
+
+    double d = (svd.matrixV() * svd.matrixU().transpose()).determinant();
+    if (d > 0)
+        d = 1 * 1.0;
+    else
+        d = 1 * -1.0;
+    Eigen::Matrix3d I = Eigen::Matrix3d::Identity(3, 3);
+    I(2, 2) = d;
+
+    return svd.matrixV() * I * svd.matrixU().transpose();
+}
 
 Eigen::Matrix3d RMSDDriver::BestFitRotation(const Geometry& reference_mol, const Geometry& target_mol, int factor) const
 {
@@ -191,6 +220,26 @@ Eigen::Matrix3d RMSDDriver::BestFitRotation(const Molecule& reference_mol, const
     const Geometry ref = reference_mol.getGeometryByFragment(m_fragment_reference, m_protons);
     const Geometry tar = target_mol.getGeometryByFragment(m_fragment_target, m_protons);
     return BestFitRotation(ref, tar, factor);
+}
+
+double RMSDDriver::CalculateShortRMSD(const Geometry& reference_mol, const Molecule& target_mol) const
+{
+
+    const Geometry tar = CenterMolecule(target_mol.getGeometry());
+
+    Eigen::Matrix3d R = BestFitRotationShort(reference_mol, tar);
+
+    double rmsd = 0;
+
+    Eigen::MatrixXd target_transposed = tar.transpose();
+
+    Geometry rotated = target_transposed.transpose() * R;
+    for (int i = 0; i < rotated.rows(); ++i) {
+        rmsd += (rotated(i, 0) - reference_mol(i, 0)) * (rotated(i, 0) - reference_mol(i, 0)) + (rotated(i, 1) - reference_mol(i, 1)) * (rotated(i, 1) - reference_mol(i, 1)) + (rotated(i, 2) - reference_mol(i, 2)) * (rotated(i, 2) - reference_mol(i, 2));
+    }
+    rmsd /= double(rotated.rows());
+
+    return sqrt(rmsd);
 }
 
 double RMSDDriver::CalculateRMSD(const Molecule& reference_mol, const Molecule& target_mol, Molecule* ret_ref, Molecule* ret_tar, int factor) const
@@ -456,8 +505,6 @@ void RMSDDriver::ReorderMolecule()
 void RMSDDriver::ReorderStraight()
 {
 
-    m_reference.InitialiseConnectedMass(1.5);
-    m_target.InitialiseConnectedMass(1.5);
     int inter_size = m_reference.AtomCount() * (m_reference.AtomCount() - 1) * m_intermedia_storage;
     m_storage = std::vector<IntermediateStorage>(m_reference.AtomCount() - 1, IntermediateStorage(inter_size));
 
@@ -488,14 +535,14 @@ void RMSDDriver::ReorderStraight()
                         break;
                 }
             }*/
-            //std::cout << double(i) / double(m_reference.AtomCount()) * 100 << " % done " << std::endl;
+            // std::cout << double(i) / double(m_reference.AtomCount()) * 100 << " % done " << std::endl;
         }
         for (const auto& element : (*m_storage[i].data())) {
             if (element.first < m_threshold)
                 if (!SolveIntermediate(element.second) && !next)
                     next = i;
         }
-        std::sort(m_last_rmsd.begin(), m_last_rmsd.end());
+        //std::sort(m_last_rmsd.begin(), m_last_rmsd.end());
         //m_threshold = (2*Tools::median(m_last_rmsd) +  m_last_rmsd[0])/3.0;
         m_threshold = Tools::median(m_last_rmsd);
         //std::cout << m_threshold << std::endl;
@@ -588,40 +635,47 @@ bool RMSDDriver::SolveIntermediate(std::vector<int> intermediate, bool fast)
     //std::cout << "Reference reordered " << m_reference_reordered << std::endl;
     Molecule reference;
     Molecule target;
-    std::vector<int> elements_target = m_target.Atoms();
+    //std::vector<int> elements_target = m_target.Atoms();
 
     for (int i = 0; i < intermediate.size(); i++) {
         reference.addPair(m_reference.Atom(i));
         target.addPair(m_target.Atom(intermediate[i]));
     }
 
-    int i = reference.AtomCount();
+    const int i = reference.AtomCount();
     //for (int i = reference.AtomCount(); i < m_reference.AtomCount(); ++i) {
     Molecule reference_local(reference);
-    int element_local = m_reference.Atom(i).first;
+    const int element_local = m_reference.Atom(i).first;
     // std::cout << "Current element to check is " << element_local << " at reference position " << i << std::endl;
+    const Position blob = GeometryTools::Centroid(CenterMolecule(reference_local.getGeometry()));
+    const Position blob1 = GeometryTools::Centroid(CenterMolecule(target.getGeometry()));
+
+    //std::cout << GeometryTools::Distance(blob, m_reference.Atom(i).second) << std::endl;
     reference_local.addPair(m_reference.Atom(i));
-    double rmsd = 1e22;
+    //double rmsd = 1e22;
     std::map<double, int> match;
+    const Geometry ref = CenterMolecule(reference_local.getGeometry());
 
     bool found_none = true;
 
     for (int j = 0; j < m_target.AtomCount(); ++j) {
-        if (elements_target[j] == element_local) {
-            //if(m_reference.ConnectedMass(i) != m_target.ConnectedMass(j) && fast)
-            //{
-            //    continue;
-            //}
+        if (m_target.Atoms()[j] == element_local) {
+            if ((m_reference.ConnectedMass(i) != m_target.ConnectedMass(j) || GeometryTools::Distance(blob1, m_target.Atom(j).second) > 1.5 * GeometryTools::Distance(blob, m_reference.Atom(i).second)) && fast) {
+                continue;
+            }
+            //if(GeometryTools::Distance(blob1, m_target.Atom(j).second) < 2 *GeometryTools::Distance(blob, m_reference.Atom(i).second))
+            //std::cout << GeometryTools::Distance(blob1, m_target.Atom(j).second) << std::endl;
+
             //std::cout <<i<< " " <<m_reference.ConnectedMass(i)<< " "<< j <<" " <<m_target.ConnectedMass(j) << std::endl;;
 
             found_none = false;
             Molecule target_local(target);
             if (target_local.addPair(m_target.Atom(j))) {
-                double rmsd_local = CalculateRMSD(reference_local, target_local);
+                double rmsd_local = CalculateShortRMSD(ref, target_local);
 
                 if (target_local.AtomCount() < m_target.AtomCount()) {
                     //std::cout << "count smaller " << m_target.AtomCount() << " ";
-                    rmsd = rmsd_local;
+                    //rmsd = rmsd_local;
                     if (CheckConnections()) {
                         int difference = CheckConnectivitiy(reference_local, target_local);
                         if (difference <= m_pt)
