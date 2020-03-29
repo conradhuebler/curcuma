@@ -553,7 +553,7 @@ void RMSDDriver::ReorderStraight()
     if (next)
         i = next;
     for (; i < m_storage.size(); ++i) {
-        std::cout << "next " << i << std::endl;
+        //std::cout << "next " << i << std::endl;
         if (!m_silent) {
             /*int ct = 0;
              for (const auto& element : (*m_storage[i].data())) {

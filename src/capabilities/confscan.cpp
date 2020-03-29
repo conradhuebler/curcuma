@@ -161,22 +161,21 @@ void ConfScan::scan()
 
     std::vector<std::vector<int>> rules_list;
     std::cout << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
-              << "'" << std::endl;
+              << "" << std::endl;
 
     if (m_heavy)
-        std::cout << "'    RMSD Calculation will be performed only on heavy atoms! " << std::endl;
+        std::cout << "    RMSD Calculation will be performed only on heavy atoms! " << std::endl;
     else
-        std::cout << "'    RMSD Calculation will be performed on all atoms! " << std::endl;
+        std::cout << "    RMSD Calculation will be performed on all atoms! " << std::endl;
 
-    std::cout << "'    RMSD Threshold set to: " << m_rmsd_threshold << " Angstrom" << std::endl;
-    std::cout << "'    Energy Threshold set to: " << m_energy_threshold << " kJ/mol" << std::endl;
-    std::cout << "'    Average Difference in rot constants: " << std::endl;
-    std::cout << "'    Loose Threshold: " << m_diff_rot_loose << std::endl;
-    std::cout << "'    Tight Threshold: " << m_diff_rot_tight << std::endl;
-    std::cout << "'" << std::endl
+    std::cout << "    RMSD Threshold set to: " << m_rmsd_threshold << " Angstrom" << std::endl;
+    std::cout << "    Energy Threshold set to: " << m_energy_threshold << " kJ/mol" << std::endl;
+    std::cout << "    Average Difference in rot constants: " << std::endl;
+    std::cout << "    Loose Threshold: " << m_diff_rot_loose << std::endl;
+    std::cout << "    Tight Threshold: " << m_diff_rot_tight << std::endl;
+    std::cout << "" << std::endl
               << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
               << std::endl;
-
 
     for (auto& i : m_ordered_list) {
 
@@ -217,41 +216,48 @@ void ConfScan::scan()
                 double Ic = abs(mol1->Ic() - mol2->Ic()) / mol2->Ic();
 
                 double diff_rot = (Ia + Ib + Ic) * 0.33333;
-                std::cout << "Energy Difference: " << difference << "        Average Difference in rot constant " << diff_rot << std::endl;
 
                 driver->setReference(mol1);
                 driver->setTarget(mol2);
 
                 driver->AutoPilot();
                 rmsd = driver->RMSD();
+
+                std::cout << "Energy Difference: " << std::setprecision(2) << difference << " kJ/mol" << std::endl;
+                std::cout << "Average Difference in rot constant " << std::setprecision(4) << diff_rot << " some unit" << std::endl;
+                std::cout << "RMSD = " << std::setprecision(5) << rmsd << " A" << std::endl;
+
                 if (rmsd > m_rmsd_threshold && difference < 1 && diff_rot < 0.1 && diff_rot > 0.01) {
                     temp_list.push_back(mol2);
+                    std::cout << "~~ Reordering forced as energies and rotational constants are too close and rmsd is too different! ~~" << std::endl;
                     std::cout << "*** Adding " << mol2->Name() << " to the list as RMSD is " << rmsd << "! ***" << std::endl;
                 } else {
-                    std::cout << "RMSD is " << rmsd << std::endl;
-                }
-
-                if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && diff_rot < m_diff_rot_loose) || m_result.size() >= m_maxrank) {
-                    ok = false;
-                    filtered[mol1->Name()].push_back(mol2->Name());
-                    std::cout << "  ** Rejecting structure **" << std::endl;
-                    if (rmsd <= m_rmsd_threshold * m_nearly_missed) {
-                        std::cout << " Nearly missed for " << mol1->Name() << std::endl;
-                        m_nearly.push_back(mol1);
+                    if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && diff_rot < m_diff_rot_loose)) {
+                        ok = false;
+                        filtered[mol1->Name()].push_back(mol2->Name());
+                        std::cout << "  ** Rejecting structure **" << std::endl;
+                        if (rmsd <= m_rmsd_threshold * m_nearly_missed) {
+                            std::cout << " Nearly missed for " << mol1->Name() << std::endl;
+                            m_nearly.push_back(mol1);
+                        }
+                        continue;
                     }
-                    continue;
-                }
-                if (diff_rot < m_diff_rot_tight && difference < m_energy_threshold) {
-                    ok = false;
-                    filtered[mol1->Name()].push_back(mol2->Name());
-                    std::cout << "  ** Rejecting structure **" << std::endl;
-                    continue;
+                    if (diff_rot < m_diff_rot_tight && difference < m_energy_threshold) {
+                        ok = false;
+                        filtered[mol1->Name()].push_back(mol2->Name());
+                        std::cout << "  ** Rejecting structure **" << std::endl;
+                        continue;
+                    }
                 }
                 delete driver;
             }
         }
-        std::cout << std::endl
-                  << "             ###   " << start / double(ende) * 100 << "% done!   ###" << std::endl;
+
+        if (temp_list.size()) {
+            std::cout << std::endl
+                      << "             ###   " << std::setprecision(4) << start / double(ende) * 100 << "% done!   ###" << std::endl;
+            std::cout << "*** Start Reordering Block **" << std::endl;
+        }
         if (!filtered.count(mol1->Name())) {
             for (const auto mol2 : temp_list) {
                 if (filtered.count(mol1->Name())) {
@@ -289,13 +295,14 @@ void ConfScan::scan()
                 std::cout << "*** Checking old reordering solutions first. ***" << std::endl;
                 for (const auto rule : rules_list) {
                     double tmp_rmsd = driver->Rules2RMSD(rule);
-                    std::cout << tmp_rmsd << " ";
+                    std::cout << tmp_rmsd << " A ";
                     if (tmp_rmsd < m_rmsd_threshold) {
                         digDeeper = false;
                         std::cout << std::endl
                                   << std::endl
                                   << "*** Old reordering solution worked here! ***" << std::endl
                                   << std::endl;
+                        ok = false;
                         break;
                     }
                 }
@@ -317,7 +324,7 @@ void ConfScan::scan()
                     }
                     rmsd = rmsd_tmp;
                 }
-                if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && diff_rot < m_diff_rot_loose) || m_result.size() >= m_maxrank) {
+                if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && diff_rot < m_diff_rot_loose)) {
                     ok = false;
                     filtered[mol1->Name()].push_back(mol2->Name());
                     std::cout << "  ** Rejecting structure **" << std::endl;
@@ -338,19 +345,20 @@ void ConfScan::scan()
         } else {
             std::cout << "Skipping check, as structure already rejected." << std::endl;
         }
-        if (ok) {
-            std::cout << std::endl
-                      << std::endl
-                      << "               ** Accepting " << mol1->Name() << " **" << std::endl;
+        if (ok /* && m_result.size() < m_maxrank*/) {
             m_result.push_back(mol1);
-            /* Write each accepted structure immediately */
             mol1->appendXYZFile(result_name);
+
+            std::cout << std::endl
+                      << "Having now " << m_result.size() << " structures accepted." << std::endl
+                      << "               ** Accepting " << mol1->Name() << " **" << std::endl;
+            /* Write each accepted structure immediately */
         }
         ok = true;
         start++;
         std::cout << std::endl
                   << std::endl
-                  << "             ###   " << start / double(ende) * 100 << "% done!   ###" << std::endl;
+                  << "             ###   " << std::setprecision(4) << start / double(ende) * 100 << "% done!   ###" << std::endl;
     }
 
     if (m_result.size() == 0)
