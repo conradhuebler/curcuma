@@ -303,6 +303,7 @@ void ConfScan::scan()
                                   << "*** Old reordering solution worked here! ***" << std::endl
                                   << std::endl;
                         ok = false;
+                        filtered[mol1->Name()].push_back(mol2->Name());
                         break;
                     }
                 }
