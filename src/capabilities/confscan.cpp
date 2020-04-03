@@ -76,7 +76,13 @@ bool ConfScan::openFile()
         }
         if (i == 1) {
             StringList list = Tools::SplitString(line);
-            if (list.size() == 4) {
+            if (list.size() == 7) {
+                try {
+                    mol->setEnergy(std::stod((list[4])));
+                } catch (const std::string& what_arg) {
+                    mol->setEnergy(0);
+                }
+            } else if (list.size() == 4) {
                 if (list[0].compare("SCF") == 0 && list[1].compare("done") == 0) {
                     mol->setName("Molecule " + std::to_string(molecule));
                     try {

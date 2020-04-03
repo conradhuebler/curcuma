@@ -63,7 +63,7 @@ public:
             coord[3 * i + 1] = x(3 * i + 1) / au;
             coord[3 * i + 2] = x(3 * i + 2) / au;
         }
-        fx = interface->GFN1Energy(attyp, coord, m_atoms, charge, gradient);
+        fx = interface->GFN2Energy(attyp, coord, m_atoms, charge, gradient);
         for (int i = 0; i < m_atoms; ++i) {
             grad[3 * i + 0] = gradient[3 * i + 0];
             grad[3 * i + 1] = gradient[3 * i + 1];
