@@ -51,6 +51,12 @@ public:
     /*! \brief Check, if Reordering is forced */
     inline bool ForceReorder() const { return m_force_reorder; }
 
+    /*! \brief Force Reordering, even the sequence of elements are equal */
+    inline void setPreventReorder(bool reorder) { m_prevent_reorder = reorder; }
+
+    /*! \brief Check, if Reordering is forced */
+    inline bool PreventReorder() const { return m_prevent_reorder; }
+
     /*! \brief Use only heavy atoms for rmsd and reordering */
     inline void setHeavyRMSD(bool heavy)
     {
@@ -64,18 +70,21 @@ public:
 
     inline string NamePattern(int index) const { return "input_" + std::to_string(index); }
 
+    /*! \brief Set maximal relative Energy to lowest */
+    void setEnergyCutOff(double energy) { m_energy_cutoff = energy; }
+
 private:
     bool openFile();
 
     std::string m_filename;
     std::map<double, int> m_ordered_list;
     std::vector<std::pair<std::string, Molecule*>> m_molecules;
-    double m_energy_threshold = 1.0, m_rmsd_threshold = 1.0, m_diff_rot_loose = 0.3, m_diff_rot_tight = 0.01, m_nearly_missed = 0.8;
+    double m_energy_threshold = 1.0, m_rmsd_threshold = 1.0, m_diff_rot_loose = 0.3, m_diff_rot_tight = 0.01, m_nearly_missed = 0.8, m_energy_cutoff = -1;
     std::vector<Molecule*> m_result, m_nearly, m_failed;
     int m_maxrank = 10000;
     bool m_writeXYZ = false;
     bool m_check_connections = false;
-    bool m_force_reorder = false;
+    bool m_force_reorder = false, m_prevent_reorder = false;
     bool m_heavy = false;
     bool m_noname = false;
 };

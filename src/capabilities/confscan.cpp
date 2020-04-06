@@ -191,6 +191,10 @@ void ConfScan::scan()
             fail++;
             continue;
         }
+        if (m_result.size() >= m_maxrank) {
+            ok = false;
+            continue;
+        }
         /* Lets postpone the reordering */
         std::vector<Molecule*> temp_list;
         if (mol1->Energy() == 0) {
@@ -215,7 +219,11 @@ void ConfScan::scan()
                           << std::endl
                           << "Reference Molecule:" << mol1->Name() << " (" << mol1->Energy() << " Eh)        Target Molecule " << mol2->Name() << " (" << mol2->Energy() << " Eh)" << std::endl;
                 double difference = abs(mol1->Energy() - mol2->Energy()) * 2625.5;
-
+                if (m_energy_cutoff > 0)
+                    if (difference < m_energy_cutoff) {
+                        ok = false;
+                        continue;
+                    }
                 double rmsd = 0;
                 double Ia = abs(mol1->Ia() - mol2->Ia()) / mol2->Ia();
                 double Ib = abs(mol1->Ib() - mol2->Ib()) / mol2->Ib();
@@ -234,9 +242,13 @@ void ConfScan::scan()
                 std::cout << "RMSD = " << std::setprecision(5) << rmsd << " A" << std::endl;
 
                 if (rmsd > m_rmsd_threshold && difference < 1 && diff_rot < 0.1 && diff_rot > 0.01) {
-                    temp_list.push_back(mol2);
-                    std::cout << "~~ Reordering forced as energies and rotational constants are too close and rmsd is too different! ~~" << std::endl;
-                    std::cout << "*** Adding " << mol2->Name() << " to the list as RMSD is " << rmsd << "! ***" << std::endl;
+                    if (!m_prevent_reorder) {
+                        temp_list.push_back(mol2);
+                        std::cout << "~~ Reordering forced as energies and rotational constants are too close and rmsd is too different! ~~" << std::endl;
+                        std::cout << "*** Adding " << mol2->Name() << " to the list as RMSD is " << rmsd << "! ***" << std::endl;
+                    } else {
+                        std::cout << "~~ Reordering prevented, so no more will be done regarding these structures. ~~" << std::endl;
+                    }
                 } else {
                     if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && diff_rot < m_diff_rot_loose)) {
                         ok = false;
@@ -386,7 +398,7 @@ void ConfScan::scan()
 
     std::cout << m_result.size() << " structures were kept - of " << m_molecules.size() - fail << " total!" << std::endl;
 
-    std::cout << "Best structure is " << m_result[0]->Name() << " Energy = " << m_result[0]->Energy() << std::endl;
+    std::cout << "Best structure is " << m_result[0]->Name() << " Energy = " << std::setprecision(8) << m_result[0]->Energy() << std::endl;
     std::cout << "List of filtered names ... " << std::endl;
     for (const auto& element : filtered) {
         std::cout << element.first << " rejected due to: ";

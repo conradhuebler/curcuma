@@ -318,13 +318,16 @@ int main(int argc, char **argv) {
                 std::cerr << "-reorder   **** Force reordering of structure! - It will be done automatically, if energies are close and rmsd is big." << std::endl;
                 std::cerr << "-heavy     **** Use only heavy atoms for rmsd calculation." << std::endl;
                 std::cerr << "-noname    **** Do not read possible name from xyz file." << std::endl;
+                std::cerr << "-noreorder **** Prevent reordering in any cases." << std::endl;
+                std::cerr << "-maxenergy **** Maximal energy difference between best and current conformer [kJ/mol] for a conformer to be analysed." << std::endl;
+                std::cerr << "-energy    **** Energy threshold for identical structures [kJ/mol]." << std::endl;
 
                 return -1;
             }
             bool writeXYZ = false;
-            bool reorder = false, check_connect = false, heavy = false, noname = false;
+            bool reorder = false, check_connect = false, heavy = false, noname = false, preventreorder = false;
             int rank = 1e10;
-            double energy = 1.0;
+            double energy = 1.0, maxenergy = -1;
             if (argc >= 4) {
 
                 for (std::size_t i = 3; i < argc; ++i) {
@@ -343,6 +346,13 @@ int main(int argc, char **argv) {
                         }
                     }
 
+                    if (strcmp(argv[i], "-maxenergy") == 0) {
+                        if (i + 1 < argc) {
+                            maxenergy = std::stod(argv[i + 1]);
+                            ++i;
+                        }
+                    }
+
                     if (strcmp(argv[i], "-writeXYZ") == 0) {
                         writeXYZ = true;
                         continue;
@@ -350,6 +360,11 @@ int main(int argc, char **argv) {
 
                     if (strcmp(argv[i], "-reorder") == 0) {
                         reorder = true;
+                        continue;
+                    }
+
+                    if (strcmp(argv[i], "-noreorder") == 0) {
+                        preventreorder = true;
                         continue;
                     }
 
@@ -381,6 +396,8 @@ int main(int argc, char **argv) {
             scan->setCheckConnections(check_connect);
             scan->setEnergyThreshold(energy);
             scan->setNoName(noname);
+            scan->setPreventReorder(preventreorder);
+            scan->setEnergyCutOff(maxenergy);
             scan->scan();
 
             return 0;
