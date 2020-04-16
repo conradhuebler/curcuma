@@ -26,6 +26,8 @@
 #include "src/capabilities/optimiser/LevMarDocking.h"
 #include "src/capabilities/optimiser/XTBDocking.h"
 
+#include "src/capabilities/confscan.h"
+
 #include <algorithm>
 #include <future>
 #include <iostream>
@@ -40,6 +42,8 @@ Docking::Docking()
 
 void Docking::PerformDocking()
 {
+    double frag_scaling = 1.2;
+
     Molecule guest = m_guest_structure;
     Molecule result = m_host_structure;
 
@@ -81,8 +85,6 @@ void Docking::PerformDocking()
     for (int x = 0; x < X; ++x) {
         for (int y = 0; y < Y; ++y) {
             for (int z = 0; z < Z; ++z) {
-                if (m_result_list.size() >= 5)
-                    continue;
                 ++all;
                 Molecule* molecule = new Molecule(m_host_structure);
                 guest = m_guest_structure;
@@ -135,9 +137,9 @@ void Docking::PerformDocking()
     std::vector<int> frags = { 0, 0 };
     for (const auto& pair : m_result_list) {
         ++index;
-        frags[pair.second->GetFragments(1.3).size()]++;
+        frags[pair.second->GetFragments(frag_scaling).size()]++;
         //std::cout << pair.first << std::endl;
-        const std::string name = "Docking_B" + std::to_string(frags[pair.second->GetFragments(1.3).size()] / 100 + 1) + "_F" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz";
+        const std::string name = "Docking_B" + std::to_string(frags[pair.second->GetFragments(frag_scaling).size()] / 100 + 1) + "_F" + std::to_string(pair.second->GetFragments(frag_scaling).size()) + ".xyz";
         pair.second->appendXYZFile(name);
         if (!std::binary_search(m_files.begin(), m_files.end(), name))
             m_files.push_back(name);
@@ -147,9 +149,11 @@ void Docking::PerformDocking()
 
 void Docking::PostOptimise()
 {
+    double frag_scaling = 1.2;
     int threads = 1; // xtb is not thread-safe yet
     std::map<double, Molecule*> result_list;
     auto iter = m_result_list.begin();
+    int index = 0;
     while (iter != m_result_list.end()) {
         std::vector<Thread*> thread_block;
         std::cout << "Batch calculation started! " << std::endl;
@@ -165,6 +169,7 @@ void Docking::PostOptimise()
             thread_block.push_back(th);
 
             ++iter;
+            index++;
         }
         std::cout << "Batch evaluation ... " << std::endl;
         for (auto thread : thread_block) {
@@ -174,7 +179,7 @@ void Docking::PostOptimise()
             result_list.insert(std::pair<double, Molecule*>(mol2->Energy(), mol2));
             delete thread;
         }
-        std::cout << "Done!" << std::endl;
+        std::cout << "Done! (" << index / m_result_list.size() * 100 << ")" << std::endl;
     }
     std::cout << "** Docking Phase 2 - Finished **" << std::endl;
     /*
@@ -184,17 +189,48 @@ void Docking::PostOptimise()
         delete pair.second;
     }
     */
-    std::vector<int> frags = { 0, 0 };
-    int index = 0;
-    for (const auto& pair : result_list) {
-        ++index;
-        frags[pair.second->GetFragments(1.3).size()]++;
-        //std::cout << pair.first << std::endl;
-        const std::string name = "Optimise_B" + std::to_string(frags[pair.second->GetFragments(1.3).size()] / 100 + 1) + "_F" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz";
-        pair.second->appendXYZFile(name);
-        if (!std::binary_search(m_files.begin(), m_files.end(), name))
-            m_files.push_back(name);
+    {
+        std::vector<int> frags = { 0, 0 };
+        int index = 0;
+        for (const auto& pair : result_list) {
+            ++index;
+            frags[pair.second->GetFragments(frag_scaling).size()]++;
+            //std::cout << pair.first << std::endl;
+            const std::string name = "Optimise_B" + std::to_string(frags[pair.second->GetFragments(frag_scaling).size()] / 100 + 1) + "_F" + std::to_string(pair.second->GetFragments(frag_scaling).size()) + ".xyz";
+            pair.second->appendXYZFile(name);
+            if (!std::binary_search(m_files.begin(), m_files.end(), name))
+                m_files.push_back(name);
+        }
+    }
+    std::cout << "** Docking Phase 3 - Fast Filtering **" << std::endl;
 
-        delete pair.second;
+    ConfScan* scan = new ConfScan;
+    scan->setHeavyRMSD(true);
+    scan->setMaxRank(99999);
+    scan->setWriteXYZ(false);
+    scan->setForceReorder(false);
+    scan->setCheckConnections(false);
+    scan->setEnergyThreshold(1);
+    scan->setNoName(true);
+    scan->setPreventReorder(true);
+    scan->setEnergyCutOff(1e5);
+    scan->setMolecules(result_list);
+    scan->scan();
+
+    std::vector<Molecule*> result = scan->Result();
+
+    {
+        int index = 0;
+        std::vector<int> frags = { 0, 0 };
+        for (const auto mol : result) {
+            ++index;
+            frags[mol->GetFragments(frag_scaling).size()]++;
+            const std::string name = "Filtered_B" + std::to_string(frags[mol->GetFragments(frag_scaling).size()] / 100 + 1) + "_F" + std::to_string(mol->GetFragments(frag_scaling).size()) + ".xyz";
+            mol->appendXYZFile(name);
+            if (!std::binary_search(m_files.begin(), m_files.end(), name))
+                m_files.push_back(name);
+
+            delete mol;
+        }
     }
 }

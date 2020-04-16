@@ -41,7 +41,7 @@ public:
     inline Molecule getMolecule() const { return m_final; }
     inline void start()
     {
-        auto thread = std::thread(&OptimiseGeometryThreaded, &m_molecule, &result, &m_final, 1e4, 1);
+        auto thread = std::thread(&OptimiseGeometryThreaded, &m_molecule, &result, &m_final, 50, 0.1);
         thread.swap(m_thread);
     }
     inline void wait()

@@ -59,6 +59,9 @@ class Molecule
 
     void setAtom(const std::string &internal, int i);
     void setXYZ(const std::string &coord, int i);
+
+    void setXYZComment(const std::string& comment);
+
     bool addPair(const std::pair<int, Position>& atom);
     bool Contains(const std::pair<int, Position>& atom);
 

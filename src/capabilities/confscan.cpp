@@ -26,6 +26,9 @@
 
 #include "src/capabilities/rmsd.h"
 
+#include "src/core/fileiterator.h"
+#include "src/core/molecule.h"
+
 #include "src/tools/general.h"
 
 #include "confscan.h"
@@ -49,13 +52,27 @@ bool ConfScan::openFile()
     if (xyzfile == false)
         throw 1;
 
+    int molecule = 0;
+
+    FileIterator file(m_filename);
+    while (!file.AtEnd()) {
+        Molecule* mol = new Molecule(file.Next());
+        molecule++;
+        //if(m_noname)
+        mol->setName(NamePattern(molecule));
+        std::pair<std::string, Molecule*> pair(mol->Name(), mol);
+        m_molecules.push_back(pair);
+        m_ordered_list.insert(std::pair<double, int>(mol->Energy(), molecule));
+    }
+
+    /*
+
     std::vector<std::string> lines;
     std::ifstream input(m_filename);
 
     int atoms = 0;
     int index = 0;
     int i = 0;
-    int molecule = 0;
     Molecule* mol = new Molecule(atoms, 0);
     for (std::string line; getline(input, line);) {
         if (i == 0 && xyzfile) {
@@ -131,13 +148,30 @@ bool ConfScan::openFile()
         if (i - 2 == atoms)
             i = 0;
     }
-
+    */
     return true;
+}
+
+void ConfScan::setMolecules(const std::map<double, Molecule*>& molecules)
+{
+    std::cout << "Loading molecules" << std::endl;
+    int molecule = 0;
+    for (const auto m : molecules) {
+        Molecule* mol = new Molecule(m.second);
+        if (m_noname)
+            mol->setName(NamePattern(molecule));
+        std::pair<std::string, Molecule*> pair(mol->Name(), mol);
+        m_molecules.push_back(pair);
+        m_ordered_list.insert(std::pair<double, int>(mol->Energy(), molecule));
+        molecule++;
+    }
+    m_writeFiles = false;
+    std::cout << "Loading molecules done!" << std::endl;
+    m_filename = "blocklist.xyz";
 }
 
 void ConfScan::scan()
 {
-    openFile();
     Molecule* mol1;
     bool ok = true;
 
@@ -154,16 +188,22 @@ void ConfScan::scan()
     result_name += +"_filter.xyz";
 
     std::ofstream result_file;
-    result_file.open(result_name);
-    result_file.close();
+    if (m_writeFiles) {
+        result_file.open(result_name);
+        result_file.close();
+    }
 
     std::ofstream missed_file;
-    missed_file.open(nearly_missed);
-    missed_file.close();
+    if (m_writeFiles) {
+        missed_file.open(nearly_missed);
+        missed_file.close();
+    }
 
     std::ofstream failed_file;
-    missed_file.open(failed);
-    missed_file.close();
+    if (m_writeFiles) {
+        missed_file.open(failed);
+        missed_file.close();
+    }
 
     std::vector<std::vector<int>> rules_list;
     std::cout << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
@@ -220,7 +260,7 @@ void ConfScan::scan()
                           << "Reference Molecule:" << mol1->Name() << " (" << mol1->Energy() << " Eh)        Target Molecule " << mol2->Name() << " (" << mol2->Energy() << " Eh)" << std::endl;
                 double difference = abs(mol1->Energy() - mol2->Energy()) * 2625.5;
                 if (m_energy_cutoff > 0)
-                    if (difference < m_energy_cutoff) {
+                    if (difference > m_energy_cutoff) {
                         ok = false;
                         continue;
                     }
@@ -366,7 +406,8 @@ void ConfScan::scan()
         }
         if (ok /* && m_result.size() < m_maxrank*/) {
             m_result.push_back(mol1);
-            mol1->appendXYZFile(result_name);
+            if (m_writeFiles)
+                mol1->appendXYZFile(result_name);
 
             std::cout << std::endl
                       << "Having now " << m_result.size() << " structures accepted." << std::endl
@@ -382,20 +423,20 @@ void ConfScan::scan()
 
     if (m_result.size() == 0)
         return;
+    if (m_writeFiles) {
+        if (m_writeXYZ) {
+            for (const auto molecule : m_result)
+                molecule->writeXYZFile();
+        }
 
-    if (m_writeXYZ) {
-        for (const auto molecule : m_result)
-            molecule->writeXYZFile();
+        for (const auto molecule : m_nearly) {
+            molecule->appendXYZFile(nearly_missed);
+        }
+
+        for (const auto molecule : m_failed) {
+            molecule->appendXYZFile(failed);
+        }
     }
-
-    for (const auto molecule : m_nearly) {
-        molecule->appendXYZFile(nearly_missed);
-    }
-
-    for (const auto molecule : m_failed) {
-        molecule->appendXYZFile(failed);
-    }
-
     std::cout << m_result.size() << " structures were kept - of " << m_molecules.size() - fail << " total!" << std::endl;
 
     std::cout << "Best structure is " << m_result[0]->Name() << " Energy = " << std::setprecision(8) << m_result[0]->Energy() << std::endl;

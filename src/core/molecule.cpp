@@ -18,8 +18,9 @@
  */
 
 #include "elements.h"
-#include "src/tools/geometry.h"
 
+#include "src/tools/general.h"
+#include "src/tools/geometry.h"
 #include <Eigen/Dense>
 
 #include <array>
@@ -140,6 +141,54 @@ bool Molecule::addPair(const std::pair<int, Position>& atom)
     m_dirty = true;
 
     return exist;
+}
+
+void Molecule::setXYZComment(const std::string& comment)
+{
+    StringList list = Tools::SplitString(comment);
+    if (list.size() == 7) {
+        try {
+            setEnergy(std::stod((list[4])));
+        } catch (const std::string& what_arg) {
+            setEnergy(0);
+        }
+    } else if (list.size() == 4) {
+        if (list[0].compare("SCF") == 0 && list[1].compare("done") == 0) {
+            //mol->setName("Molecule " + std::to_string(molecule));
+            try {
+                setEnergy(std::stod((list[2])));
+            } catch (const std::string& what_arg) {
+                setEnergy(0);
+            }
+        } else {
+            setName(list[0]);
+            //mol->setName("Molecule " + std::to_string(molecule));
+            if (list[3] == "")
+                setEnergy(0);
+            else {
+                try {
+                    setEnergy(std::stod((list[3])));
+                } catch (const std::string& what_arg) {
+                    setEnergy(0);
+                }
+            }
+        }
+    } else if (list.size() == 1) {
+        try {
+            setEnergy(std::stod((list[0])));
+        } catch (const std::string& what_arg) {
+        }
+        //mol->setName("Molecule " + std::to_string(molecule));
+    } else {
+        for (const string& s : list) {
+            double energy = 0;
+            if (Tools::isDouble(s)) {
+                energy = std::stod(s);
+                setEnergy(energy);
+                break;
+            }
+        }
+    }
 }
 
 bool Molecule::Contains(const std::pair<int, Position>& atom)

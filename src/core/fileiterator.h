@@ -72,6 +72,8 @@ private:
                 mol = Molecule(atoms, 0);
             }
             if (xyzfile) {
+                if (i == 1)
+                    mol.setXYZComment(line);
                 if (i > 1) {
                     mol.setXYZ(line, i - 2);
                 }

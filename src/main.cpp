@@ -151,9 +151,6 @@ int main(int argc, char **argv) {
                 }
         }
 
-        // mol1.print_geom();
-        // mol2.print_geom();
-
         RMSDDriver *driver = new RMSDDriver(mol1, mol2);
         driver->setForceReorder(reorder);
         driver->setProtons(!heavy);
@@ -221,45 +218,6 @@ int main(int argc, char **argv) {
             docking->setCheck(check);
             docking->PerformDocking();
 
-            StringList files = docking->Files();
-            StringList optfile;
-
-            if (opt) {
-                for (auto file : files) {
-
-                    FileIterator fileiter(file);
-
-                    std::multimap<double, Molecule> results;
-                    while (!fileiter.AtEnd()) {
-                        Molecule mol = fileiter.Next();
-                        Molecule mol2 = OptimiseGeometry(&mol, false, true, 1, 0.05);
-                        results.insert(std::pair<double, Molecule>(mol2.Energy(), mol2));
-                    }
-                    for (int i = 0; i < 4; ++i)
-                        file.pop_back();
-
-                    file += "_opt.xyz";
-                    optfile.push_back(file);
-                    for (const auto& ref : results)
-                        ref.second.appendXYZFile(file);
-                }
-
-                if (filter) {
-                    for (auto file : optfile) {
-
-                        ConfScan* scan = new ConfScan;
-                        scan->setFileName(file);
-                        scan->setHeavyRMSD(true);
-                        //scan->setMaxRank(rank);
-                        //scan->setWriteXYZ(writeXYZ);
-                        //scan->setForceReorder(reorder);
-                        //scan->setCheckConnections(check_connect);
-                        //scan->setEnergyThreshold(energy);
-                        scan->setNoName(true);
-                        scan->scan();
-                    }
-                }
-            }
         } else if (strcmp(argv[1], "-hbonds") == 0) {
             if(argc != 6)
             {
@@ -281,54 +239,6 @@ int main(int argc, char **argv) {
                     std::cout << mol.getGeometry() << std::endl;
                 }
             }
-
-            /*
-            std::cerr << "Opening file " << argv[2] << std::endl;
-            std::ifstream input( argv[2] );
-            std::vector<std::string> lines;
-            int atoms = 0;
-            int index = 0;
-            int i = 0;
-            bool xyzfile = std::string(argv[2]).find(".xyz") != std::string::npos;
-            Molecule mol(atoms, 0);
-            for( std::string line; getline( input, line ); )
-            {
-                if(index == 0 && xyzfile)
-                {
-                    atoms = stoi(line);
-                    mol = Molecule(atoms, 0);
-                }
-                if(xyzfile)
-                {
-                    if(i > 1)
-                    {
-                        mol.setXYZ(line, i-2);
-                    }
-                    if(i-1 == atoms)
-                    {
-                        if(argc == 6)
-                        {
-                            if(std::string(argv[1]).find("-hbonds") != std::string::npos)
-                            {
-                               Distance(mol, argv);
-                            }
-                        }else
-                        {
-                            mol.print_geom();
-                            std::cout << std::endl << std::endl;
-                            std::cout << mol.getGeometry() << std::endl;
-                        }
-                        i = -1;
-                        mol = Molecule(atoms, 0);
-                    }
-                    ++i;
-                }else
-                {
-                    mol.setAtom(line, i);
-                }
-                index++;
-            }
-          */
         } else if (strcmp(argv[1], "-confscan") == 0) {
             if (argc < 3) {
                 std::cerr << "Please use curcuma for conformation scan and judge as follows\ncurcuma -confscan conffile.xyz" << std::endl;
@@ -404,9 +314,6 @@ int main(int argc, char **argv) {
                     }
                 }
             }
-
-            std::cerr << "Opening file " << argv[2] << std::endl;
-
             ConfScan* scan = new ConfScan;
             scan->setFileName(argv[2]);
             scan->setHeavyRMSD(heavy);
@@ -674,42 +581,6 @@ int main(int argc, char **argv) {
                     result_file << GeometryTools::Centroid(mol.getGeometryByFragment(fragment)).transpose() << std::endl;
                 }
             }
-
-            /*
-            result_file.open("centroids.dat");
-            std::ifstream input(argv[2]);
-            std::vector<std::string> lines;
-            int atoms = 0;
-            int index = 0;
-            int i = 0;
-            bool xyzfile = std::string(argv[2]).find(".xyz") != std::string::npos || std::string(argv[1]).find(".trj") != std::string::npos;
-            Molecule mol(atoms, 0);
-            for (std::string line; getline(input, line);) {
-                if (index == 0 && xyzfile) {
-                    atoms = stoi(line);
-                    mol = Molecule(atoms, 0);
-                }
-                if (xyzfile) {
-                    if (i > 1) {
-                        mol.setXYZ(line, i - 2);
-                    }
-                    if (i - 1 == atoms) {
-
-                        if (frag.size()) {
-                            result_file << GeometryTools::Centroid(mol.getGeometry(frag)).transpose() << std::endl;
-                        } else {
-                            mol.GetFragments(1.2);
-                            result_file << GeometryTools::Centroid(mol.getGeometryByFragment(fragment)).transpose() << std::endl;
-                        }
-                        i = -1;
-                        mol = Molecule(atoms, 0);
-                    }
-                    ++i;
-                } else {
-                    mol.setAtom(line, i);
-                }
-                index++;
-            }*/
 
         } else {
 

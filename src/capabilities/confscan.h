@@ -33,7 +33,14 @@ public:
     ConfScan();
     ~ConfScan();
 
-    void setFileName(const std::string& filename) { m_filename = filename; }
+    void setFileName(const std::string& filename)
+    {
+        m_filename = filename;
+        openFile();
+    }
+
+    void setMolecules(const std::map<double, Molecule*>& molecules);
+
     void scan();
 
     inline void setMaxRank(int rank) { m_maxrank = rank; }
@@ -73,6 +80,9 @@ public:
     /*! \brief Set maximal relative Energy to lowest */
     void setEnergyCutOff(double energy) { m_energy_cutoff = energy; }
 
+    std::vector<Molecule*> Result() const { return m_result; }
+    std::vector<Molecule*> Failed() const { return m_failed; }
+
 private:
     bool openFile();
 
@@ -87,4 +97,5 @@ private:
     bool m_force_reorder = false, m_prevent_reorder = false;
     bool m_heavy = false;
     bool m_noname = false;
+    bool m_writeFiles = true;
 };
