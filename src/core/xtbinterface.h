@@ -29,9 +29,13 @@ public:
     double GFN2Energy(const Molecule& molecule);
     double GFN1Energy(const Molecule& molecule);
 
-    double GFN2Energy(const int* attyp, const double* coord, const int natoms, const double charge, double* grad = 0);
-    double GFN1Energy(const int* attyp, const double* coord, const int natoms, const double charge, double* grad = 0);
-    double GFN0Energy(const int* attyp, const double* coord, const int natoms, const double charge, double* grad = 0);
+    double GFN2Energy(const int* attyp, const double* coord, const int natoms, const double charge);
+    double GFN1Energy(const int* attyp, const double* coord, const int natoms, const double charge);
+    double GFN0Energy(const int* attyp, const double* coord, const int natoms, const double charge);
+
+    double GFN2Gradient(const int* attyp, const double* coord, const int natoms, const double charge, double* grad = 0);
+    double GFN1Gradient(const int* attyp, const double* coord, const int natoms, const double charge, double* grad = 0);
+    double GFN0Gradient(const int* attyp, const double* coord, const int natoms, const double charge, double* grad = 0);
 
 private:
     double m_thr = 1.0e-10;

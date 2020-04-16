@@ -21,11 +21,15 @@
 
 #include "src/tools/general.h"
 
+#include "src/capabilities/optimiser/LBFGSInterface.h"
+
 #include "src/capabilities/optimiser/LevMarDocking.h"
 #include "src/capabilities/optimiser/XTBDocking.h"
 
 #include <algorithm>
+#include <future>
 #include <iostream>
+#include <thread>
 
 #include "docking.h"
 
@@ -77,6 +81,8 @@ void Docking::PerformDocking()
     for (int x = 0; x < X; ++x) {
         for (int y = 0; y < Y; ++y) {
             for (int z = 0; z < Z; ++z) {
+                if (m_result_list.size() >= 5)
+                    continue;
                 ++all;
                 Molecule* molecule = new Molecule(m_host_structure);
                 guest = m_guest_structure;
@@ -135,11 +141,60 @@ void Docking::PerformDocking()
         pair.second->appendXYZFile(name);
         if (!std::binary_search(m_files.begin(), m_files.end(), name))
             m_files.push_back(name);
-
-        delete pair.second;
     }
+    PostOptimise();
 }
 
 void Docking::PostOptimise()
 {
+    int threads = 1; // xtb is not thread-safe yet
+    std::map<double, Molecule*> result_list;
+    auto iter = m_result_list.begin();
+    while (iter != m_result_list.end()) {
+        std::vector<Thread*> thread_block;
+        std::cout << "Batch calculation started! " << std::endl;
+        for (int i = 0; i < threads; ++i) {
+            if (iter == m_result_list.end())
+                continue;
+
+            auto pair = *iter;
+
+            Thread* th = new Thread;
+            th->setMolecule(pair.second);
+            th->start();
+            thread_block.push_back(th);
+
+            ++iter;
+        }
+        std::cout << "Batch evaluation ... " << std::endl;
+        for (auto thread : thread_block) {
+            thread->wait();
+
+            Molecule* mol2 = new Molecule(thread->getMolecule());
+            result_list.insert(std::pair<double, Molecule*>(mol2->Energy(), mol2));
+            delete thread;
+        }
+        std::cout << "Done!" << std::endl;
+    }
+    std::cout << "** Docking Phase 2 - Finished **" << std::endl;
+    /*
+    for (const auto& pair : m_result_list) {
+        Molecule *mol2 = new Molecule(OptimiseGeometry(pair.second, false, true, 1e4, 0.5));
+        result_list.insert(std::pair<double, Molecule *>(mol2->Energy(), mol2));
+        delete pair.second;
+    }
+    */
+    std::vector<int> frags = { 0, 0 };
+    int index = 0;
+    for (const auto& pair : result_list) {
+        ++index;
+        frags[pair.second->GetFragments(1.3).size()]++;
+        //std::cout << pair.first << std::endl;
+        const std::string name = "Optimise_B" + std::to_string(frags[pair.second->GetFragments(1.3).size()] / 100 + 1) + "_F" + std::to_string(pair.second->GetFragments(1.3).size()) + ".xyz";
+        pair.second->appendXYZFile(name);
+        if (!std::binary_search(m_files.begin(), m_files.end(), name))
+            m_files.push_back(name);
+
+        delete pair.second;
+    }
 }

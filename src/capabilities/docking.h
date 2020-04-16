@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include "src/capabilities/optimiser/LBFGSInterface.h"
+
 #include "src/core/elements.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
@@ -27,6 +29,33 @@
 #include "src/tools/geometry.h"
 
 #include <map>
+#include <thread>
+
+class Thread {
+
+public:
+    Thread() = default;
+    ~Thread() = default;
+
+    inline void setMolecule(const Molecule& molecule) { m_molecule = molecule; }
+    inline Molecule getMolecule() const { return m_final; }
+    inline void start()
+    {
+        auto thread = std::thread(&OptimiseGeometryThreaded, &m_molecule, &result, &m_final, 1e4, 1);
+        thread.swap(m_thread);
+    }
+    inline void wait()
+    {
+        m_thread.join();
+        std::cout << result << std::endl;
+    }
+    inline thread::id Id() const { return m_thread.get_id(); }
+
+private:
+    std::string result;
+    std::thread m_thread;
+    Molecule m_molecule, m_final;
+};
 
 class Docking {
 public:

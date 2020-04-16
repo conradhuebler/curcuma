@@ -115,7 +115,7 @@ void SimpleMD::Dance()
 
 double SimpleMD::Gradient(const int* attyp, const double* coord, double* grad)
 {
-    double Energy = m_interface->GFN2Energy(attyp, coord, m_natoms, m_charge, grad);
+    double Energy = m_interface->GFN2Gradient(attyp, coord, m_natoms, m_charge, grad);
     return Energy;
 }
 

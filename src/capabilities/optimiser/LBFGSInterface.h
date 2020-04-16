@@ -63,7 +63,7 @@ public:
             coord[3 * i + 1] = x(3 * i + 1) / au;
             coord[3 * i + 2] = x(3 * i + 2) / au;
         }
-        fx = interface->GFN2Energy(attyp, coord, m_atoms, charge, gradient);
+        fx = interface->GFN2Gradient(attyp, coord, m_atoms, charge, gradient);
         for (int i = 0; i < m_atoms; ++i) {
             grad[3 * i + 0] = gradient[3 * i + 0];
             grad[3 * i + 1] = gradient[3 * i + 1];
@@ -93,7 +93,7 @@ private:
     const Molecule* m_molecule;
 };
 
-Molecule OptimiseGeometry(const Molecule* host, bool writeXYZ = true, bool printOutput = true, double dE = 0.75, double dRMSD = 0.01)
+inline Molecule OptimiseGeometry(const Molecule* host, bool writeXYZ = true, bool printOutput = true, double dE = 0.75, double dRMSD = 0.01)
 {
     Geometry geometry = host->getGeometry();
     Molecule tmp(host);
@@ -105,10 +105,12 @@ Molecule OptimiseGeometry(const Molecule* host, bool writeXYZ = true, bool print
         parameter(3 * i + 1) = geometry(i, 1);
         parameter(3 * i + 2) = geometry(i, 2);
     }
-
-    std::cout << "Step\tCurrent Energy [Eh]\tEnergy Change\tRMSD Change" << std::endl;
+    std::chrono::time_point<std::chrono::system_clock> start = std::chrono::system_clock::now(), end;
+    std::cout << "Step\tCurrent Energy [Eh]\tEnergy Change\tRMSD Change\tt [s]" << std::endl;
     int maxouter = 100;
-    double final_energy = 0;
+
+    XTBInterface interface;
+    double final_energy = interface.GFN2Energy(*host);
 
     LBFGSParam<double> param;
     param.epsilon = 1e-5;
@@ -141,10 +143,11 @@ Molecule OptimiseGeometry(const Molecule* host, bool writeXYZ = true, bool print
         driver->setReference(tmp);
         driver->setTarget(h);
         driver->AutoPilot();
-
-        if (printOutput)
-            std::cout << outer << "\t" << std::setprecision(9) << fun.m_energy << "\t\t" << std::setprecision(5) << (fun.m_energy - final_energy) * 2625.5 << "\t\t" << std::setprecision(5) << driver->RMSD() << std::endl;
-
+        if (printOutput) {
+            end = std::chrono::system_clock::now();
+            std::cout << outer << "\t" << std::setprecision(9) << fun.m_energy << "\t\t" << std::setprecision(5) << (fun.m_energy - final_energy) * 2625.5 << "\t\t" << std::setprecision(6) << driver->RMSD() << "\t" << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0 << std::endl;
+            start = std::chrono::system_clock::now();
+        }
         final_energy = fun.m_energy;
         tmp = h;
         if (writeXYZ) {
@@ -164,4 +167,77 @@ Molecule OptimiseGeometry(const Molecule* host, bool writeXYZ = true, bool print
     h.setEnergy(final_energy);
     h.setGeometry(geometry);
     return h;
+}
+
+inline void OptimiseGeometryThreaded(const Molecule* host, std::string* result_string, Molecule* result_molecule, double dE = 0.75, double dRMSD = 0.01)
+{
+    stringstream ss;
+
+    Geometry geometry = host->getGeometry();
+    Molecule tmp(host);
+    Molecule h(host);
+    Vector parameter(3 * host->AtomCount());
+
+    for (int i = 0; i < host->AtomCount(); ++i) {
+        parameter(3 * i) = geometry(i, 0);
+        parameter(3 * i + 1) = geometry(i, 1);
+        parameter(3 * i + 2) = geometry(i, 2);
+    }
+    std::chrono::time_point<std::chrono::system_clock> start = std::chrono::system_clock::now(), end;
+
+    ss << "Step\tCurrent Energy [Eh]\tEnergy Change\tRMSD Change\tt [s]" << std::endl;
+    int maxouter = 100;
+    XTBInterface interface;
+    double final_energy = interface.GFN2Energy(*host);
+
+    LBFGSParam<double> param;
+    param.epsilon = 1e-5;
+    param.max_iterations = 20;
+
+    LBFGSSolver<double> solver(param);
+    LBFGSInterface fun(3 * host->AtomCount());
+    fun.setMolecule(host);
+    double fx;
+
+    RMSDDriver* driver = new RMSDDriver;
+
+    driver->setSilent(true);
+    driver->setProtons(true);
+    driver->setForceReorder(false);
+    driver->setCheckConnections(false);
+
+    int atoms_count = host->AtomCount();
+    for (int outer = 0; outer < maxouter; ++outer) {
+        int niter = solver.minimize(fun, parameter, fx);
+        parameter = fun.Parameter();
+
+        for (int i = 0; i < atoms_count; ++i) {
+            geometry(i, 0) = parameter(3 * i);
+            geometry(i, 1) = parameter(3 * i + 1);
+            geometry(i, 2) = parameter(3 * i + 2);
+        }
+        h.setGeometry(geometry);
+
+        driver->setReference(tmp);
+        driver->setTarget(h);
+        driver->AutoPilot();
+        end = std::chrono::system_clock::now();
+        ss << outer << "\t" << std::setprecision(9) << fun.m_energy << "\t\t" << std::setprecision(5) << (fun.m_energy - final_energy) * 2625.5 << "\t\t" << std::setprecision(6) << driver->RMSD() << "\t" << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0 << std::endl;
+        start = std::chrono::system_clock::now();
+
+        final_energy = fun.m_energy;
+        tmp = h;
+        if (((fun.m_energy - final_energy) * 2625.5 < dE && driver->RMSD() < dRMSD) || niter < param.max_iterations)
+            break;
+    }
+
+    for (int i = 0; i < host->AtomCount(); ++i) {
+        geometry(i, 0) = parameter(3 * i);
+        geometry(i, 1) = parameter(3 * i + 1);
+        geometry(i, 2) = parameter(3 * i + 2);
+    }
+    h.setEnergy(final_energy);
+    h.setGeometry(geometry);
+    result_string->append(ss.str());
+    result_molecule->LoadMolecule(h);
 }

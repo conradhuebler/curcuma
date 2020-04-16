@@ -284,6 +284,7 @@ void Molecule::LoadMolecule(const Molecule& molecule)
     clear();
     m_charge = molecule.Charge();
     m_atoms = molecule.Atoms();
+    m_energy = molecule.Energy();
     InitialiseEmptyGeometry(molecule.AtomCount());
     setGeometry(molecule.getGeometry());
 }
