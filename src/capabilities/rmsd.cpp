@@ -61,11 +61,18 @@ void RMSDDriver::AutoPilot()
     m_intermedia_storage = 1;
     clear();
 
+    if (m_initial_fragment != -1 && m_initial.size() == 0)
+        m_initial = m_reference.GetFragments()[m_initial_fragment];
+
+    if (m_initial.size())
+        InitialiseOrder();
+
     m_reference.InitialiseConnectedMass(1.5, m_protons);
     m_target.InitialiseConnectedMass(1.5, m_protons);
 
     if(m_protons == false)
         ProtonDepleted();
+
     if (m_fragment_reference < -1 || m_fragment_reference > m_reference.GetFragments(m_scaling).size()) {
         //std::cerr << "*** Index of Fragment ( " << m_fragment << " ) is invalid, I will just use the whole molecule (Sometimes false negative ... - WIP) . ***" << std::endl;
         m_fragment_reference = -1;
@@ -158,6 +165,7 @@ void RMSDDriver::ProtonDepleted()
     }
     m_reference = reference;
     m_target = target;
+    m_init_count = m_heavy_init;
 }
 
 Eigen::Matrix3d RMSDDriver::BestFitRotationShort(const Geometry& reference_mol, const Geometry& target_mol) const
@@ -450,6 +458,30 @@ int RMSDDriver::CheckConnectivitiy(const Molecule& mol1) const
     return difference;
 }
 
+void RMSDDriver::InitialiseOrder()
+{
+    Molecule target, reference;
+
+    for (int a : m_initial) {
+        m_heavy_init += m_reference.Atom(a).first != 1;
+        reference.addPair(m_reference.Atom(a));
+        target.addPair(m_target.Atom(a));
+    }
+
+    /* As they may be different, we have two loops working here */
+    for (int i = 0; i < m_reference.AtomCount(); ++i)
+        if (!reference.Contains(m_reference.Atom(i)))
+            reference.addPair(m_reference.Atom(i));
+
+    for (int i = 0; i < m_target.AtomCount(); ++i)
+        if (!target.Contains(m_target.Atom(i)))
+            target.addPair(m_target.Atom(i));
+
+    m_reference = reference;
+    m_target = target;
+    m_init_count = m_initial.size();
+}
+
 void RMSDDriver::InitialisePair()
 {
     Molecule reference;
@@ -469,27 +501,35 @@ void RMSDDriver::InitialisePair()
         }
     }
     */
-    for (int i = 0; i < m_reference.AtomCount() && index < 2; i++) {
-        if (elements[i] != 1) {
-            reference.addPair(m_reference.Atom(i));
-            index++;
+
+    if (m_initial.size() == 0) {
+        for (int i = 0; i < m_reference.AtomCount() && index < 2; i++) {
+            if (elements[i] != 1) {
+                reference.addPair(m_reference.Atom(i));
+                index++;
+            }
         }
-    }
 
-    std::vector<int> elements_target = m_target.Atoms();
-    std::vector<int> tmp_reference = reference.Atoms();
+        std::vector<int> elements_target = m_target.Atoms();
+        std::vector<int> tmp_reference = reference.Atoms();
 
-    for (int i = 0; i < m_target.AtomCount(); ++i) {
-        if (m_target.Atom(i).first == 1) // Skip first atom if Proton
-            continue;
-        for (int j = i + 1; j < m_target.AtomCount(); ++j) {
-            if (m_target.Atom(j).first == 1) // Skip second atom if Proton
+        for (int i = 0; i < m_target.AtomCount(); ++i) {
+            if (m_target.Atom(i).first == 1) // Skip first atom if Proton
                 continue;
-            if (tmp_reference[0] == elements_target[i] && tmp_reference[1] == elements_target[j])
-                m_intermediate_results.push({ i, j });
-            if (tmp_reference[0] == elements_target[j] && tmp_reference[1] == elements_target[i])
-                m_intermediate_results.push({ j, i });
+            for (int j = i + 1; j < m_target.AtomCount(); ++j) {
+                if (m_target.Atom(j).first == 1) // Skip second atom if Proton
+                    continue;
+                if (tmp_reference[0] == elements_target[i] && tmp_reference[1] == elements_target[j])
+                    m_intermediate_results.push({ i, j });
+                if (tmp_reference[0] == elements_target[j] && tmp_reference[1] == elements_target[i])
+                    m_intermediate_results.push({ j, i });
+            }
         }
+    } else {
+        std::vector<int> start;
+        for (int i = 0; i < m_init_count; ++i)
+            start.push_back(i);
+        m_intermediate_results.push(start);
     }
 }
 
@@ -535,17 +575,25 @@ void RMSDDriver::ReorderStraight()
                         break;
                 }
             }*/
-            // std::cout << double(i) / double(m_reference.AtomCount()) * 100 << " % done " << std::endl;
+            std::cout << double(i) / double(m_reference.AtomCount()) * 100 << " % done " << std::endl;
         }
+        // std::cout << (*m_storage[i].data()).size() << " size of block ";
+        int counter = 0;
+        // std::chrono::time_point<std::chrono::system_clock> start = std::chrono::system_clock::now();
         for (const auto& element : (*m_storage[i].data())) {
-            if (element.first < m_threshold)
+            //   std::cout << element.first << "(" << m_threshold << ")" << std::endl;
+            if (element.first < m_threshold) {
+                counter++;
                 if (!SolveIntermediate(element.second) && !next)
                     next = i;
+            }
         }
+        //std::cout << " " << counter << " results used " << (*m_storage[i].data()).size() - counter << " ignored (" << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - start).count() << ")" << std::endl;
+
         //std::sort(m_last_rmsd.begin(), m_last_rmsd.end());
         //m_threshold = (2*Tools::median(m_last_rmsd) +  m_last_rmsd[0])/3.0;
-        m_threshold = Tools::median(m_last_rmsd);
-        //std::cout << m_threshold << std::endl;
+        m_threshold = Tools::mean(m_last_rmsd);
+        // std::cout << m_threshold << std::endl;
         if ((*m_storage[i].data()).size()) {
             m_last_rmsd.clear();
         }
@@ -660,13 +708,10 @@ bool RMSDDriver::SolveIntermediate(std::vector<int> intermediate, bool fast)
 
     for (int j = 0; j < m_target.AtomCount(); ++j) {
         if (m_target.Atoms()[j] == element_local) {
+
             if ((m_reference.ConnectedMass(i) != m_target.ConnectedMass(j) || GeometryTools::Distance(blob1, m_target.Atom(j).second) > 1.5 * GeometryTools::Distance(blob, m_reference.Atom(i).second)) && fast) {
                 continue;
             }
-            //if(GeometryTools::Distance(blob1, m_target.Atom(j).second) < 2 *GeometryTools::Distance(blob, m_reference.Atom(i).second))
-            //std::cout << GeometryTools::Distance(blob1, m_target.Atom(j).second) << std::endl;
-
-            //std::cout <<i<< " " <<m_reference.ConnectedMass(i)<< " "<< j <<" " <<m_target.ConnectedMass(j) << std::endl;;
 
             found_none = false;
             Molecule target_local(target);
@@ -686,8 +731,6 @@ bool RMSDDriver::SolveIntermediate(std::vector<int> intermediate, bool fast)
                         // std::cout << target_local.AtomCount() <<  " added  (" << match.size() << ")" << std::endl;
                     }
                 } else {
-                    // std::cout << "count NOT smaller " << std::endl;
-
                     std::vector<int> inter = intermediate;
                     inter.push_back(j);
                     m_results.insert(std::pair<double, std::vector<int>>(rmsd_local, inter));
@@ -697,8 +740,6 @@ bool RMSDDriver::SolveIntermediate(std::vector<int> intermediate, bool fast)
     }
 
     if (match.size() == 0) {
-        //std::cout << "found to element for " << i << " which is " << element_local << std::endl;
-
         Molecule ref;
         for (std::size_t index = 0; index < m_reference.AtomCount(); index++) {
             if (i != index)
@@ -706,11 +747,11 @@ bool RMSDDriver::SolveIntermediate(std::vector<int> intermediate, bool fast)
         }
         ref.addPair(m_reference.Atom(i));
         m_reference = ref;
-        // m_reference.print_geom(false);
         m_reference_reordered++;
         SolveIntermediate(intermediate);
         return false;
     }
+
     for (const auto& element : match) {
         std::vector<int> temp = intermediate;
         temp.push_back(element.second);

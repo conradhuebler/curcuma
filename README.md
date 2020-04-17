@@ -8,8 +8,16 @@ git clones automatically eigen.
 - [LBFGSpp](https://github.com/yixuan/LBFGSpp/) prvodies LBFGS optimiser
 - [XTB](https://github.com/grimme-lab/xtb) eXtended TightBinding - Some methods use this, however it is disabled by default. Add '-DUSE_XTB=true ' to the cmake command line to enable it. GCC 8 or later has to be used.
 
+### Using XTB in curcuma
+XTB is automatically obtained during git clone, however it is not included in curcuma with default compile settings. There are two ways of including XTB:
+- Compiling and linking automatically, set **COMPILE_XTB** to true ( with -DCOMPILE_XTB=true or via ccmake). XTB will be compiled with the c++ and fortran compiler in the path (using the blas and lapack libraries in the path as well). The xtb program is then quite slow.
+- Linking curcuma to the official library (get if from the xtb github page). Set **LINK_XTB** to true and define the path to **XTB_DIR** where the libxtb.so has been placed. As the xtb source has been obtained already, no additional header file is needed. However, curcuma has to be compiled with an intel compiler.
+
+- Only xtb GFN2 can be used as method right now.
+- As xtb is not thread-safe (yet), xtb itself can be run in parallel, but only one xtb process can be executed. This affects the the crude optimisation after docking.
+
 ## Compiling
-To compile Curcuma you will need [CMake](https://cmake.org/download/) 3.15 or newer and a C++14-capable compiler, both gcc and icc (quite recent version) work.
+To compile Curcuma you will need [CMake](https://cmake.org/download/) 3.15 or newer and a C++17-capable compiler, both gcc and icc (quite recent version) work.
 
 To obtain the most recent version
 ```sh
@@ -93,6 +101,11 @@ Some very experimental stuff - reorder (like in -rmsd a.xyz b.xyz -reorder) and 
 curcuma -nebprep start.xyz end.xyz
 ```
 
+## Find unique structures in trajectories
+xyz and trj are handled equally.
+```sh
+curcuma -rmsdtraj XXX.trj -write -rmsd 1.5
+```
 
 
 Have a lot of fun!

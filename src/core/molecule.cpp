@@ -147,14 +147,16 @@ void Molecule::setXYZComment(const std::string& comment)
 {
     StringList list = Tools::SplitString(comment);
     if (list.size() == 7) {
-        try {
-            setEnergy(std::stod((list[4])));
-        } catch (const std::string& what_arg) {
-            setEnergy(0);
-        }
+        if (list[2].compare("gnorm:") == 0) {
+            //setEnergy(std::stod((list[1])));
+        } else
+            try {
+                setEnergy(std::stod((list[4])));
+            } catch (const std::string& what_arg) {
+                setEnergy(0);
+            }
     } else if (list.size() == 4) {
         if (list[0].compare("SCF") == 0 && list[1].compare("done") == 0) {
-            //mol->setName("Molecule " + std::to_string(molecule));
             try {
                 setEnergy(std::stod((list[2])));
             } catch (const std::string& what_arg) {
@@ -162,7 +164,6 @@ void Molecule::setXYZComment(const std::string& comment)
             }
         } else {
             setName(list[0]);
-            //mol->setName("Molecule " + std::to_string(molecule));
             if (list[3] == "")
                 setEnergy(0);
             else {
@@ -178,7 +179,6 @@ void Molecule::setXYZComment(const std::string& comment)
             setEnergy(std::stod((list[0])));
         } catch (const std::string& what_arg) {
         }
-        //mol->setName("Molecule " + std::to_string(molecule));
     } else {
         for (const string& s : list) {
             double energy = 0;

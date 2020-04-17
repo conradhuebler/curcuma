@@ -2,6 +2,7 @@
 
 ### pre Alpha
 
+- docking with post-optimisation and filtering (needs XTB GFN 2)
 - add reordering for non-conformer/non-isomer structures
 - add step-wise-rmsd for two trajectories
 - find more or less unique conformers in trajectories

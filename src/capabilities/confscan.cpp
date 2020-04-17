@@ -57,12 +57,12 @@ bool ConfScan::openFile()
     FileIterator file(m_filename);
     while (!file.AtEnd()) {
         Molecule* mol = new Molecule(file.Next());
+        m_ordered_list.insert(std::pair<double, int>(mol->Energy(), molecule));
         molecule++;
-        //if(m_noname)
-        mol->setName(NamePattern(molecule));
+        if (m_noname)
+            mol->setName(NamePattern(molecule));
         std::pair<std::string, Molecule*> pair(mol->Name(), mol);
         m_molecules.push_back(pair);
-        m_ordered_list.insert(std::pair<double, int>(mol->Energy(), molecule));
     }
 
     /*

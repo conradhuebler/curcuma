@@ -138,10 +138,14 @@ public:
 
     inline std::vector<int> ReorderRules() const { return m_reorder_rules; }
 
+    inline void setInitial(std::vector<int> initial) { m_initial = initial; }
+    inline void setInitialFragment(int fragment) { m_initial_fragment = fragment; }
+
 private:
     void ReorderStraight();
     void ReconstructTarget(const std::vector<int>& atoms);
 
+    void InitialiseOrder();
     void InitialisePair();
 
     bool SolveIntermediate(std::vector<int> intermediate, bool fast = false);
@@ -170,6 +174,7 @@ private:
     std::vector<IntermediateStorage> m_storage;
     double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99;
     bool m_check_connections = false, m_partial_rmsd = false, m_postprocess = true;
-    int m_hit = 1, m_pt = 0, m_reference_reordered = 0;
+    int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
+    std::vector<int> m_initial;
 };

@@ -91,7 +91,9 @@ int main(int argc, char **argv) {
         std::cerr << "Use:" << std::endl
                   << "-rmsd        * RMSD Calulator                *" << std::endl
                   << "-confscan    * Filter list of conformers     *" << std::endl
-                  << "-dock        * Perform some docking          *" << std::endl;
+                  << "-dock        * Perform some docking          *" << std::endl
+                  << "-opt         * LBFGS optimiser using GFN2    *" << std::endl
+                  << "-rmsdtraj    * Find unique structures        *" << std::endl;
         XTBInterface interface;
     }
     
@@ -105,15 +107,16 @@ int main(int argc, char **argv) {
                 std::cerr << "Additonal arguments are:" << std::endl;
                 std::cerr << "-reorder    **** Force reordering of structure! - It will be done automatically, if energies are close and rmsd is big." << std::endl;
                 std::cerr << "-check      **** Check methyl group connectivity." << std::endl;
+                std::cerr << "-heavy      **** Calculate RMSD for heavy atoms only. Affects Reordering." << std::endl;
                 std::cerr << "-fragment n **** Use n'th fragment. Bonds are determined from simple covalent radii for now!" << std::endl;
-
+                std::cerr << "-init n     **** Initialse Reordering with fixed fragement n" << std::endl;
                 exit(1);
             }
             Molecule mol1 = Tools::LoadFile(argv[2]);
             Molecule mol2 = Tools::LoadFile(argv[3]);
 
             bool reorder = false, check_connect = false, heavy = false;
-            int fragment = -1, pt = 0;
+            int fragment = -1, pt = 0, init = -1;
             if (argc >= 5) {
 
                 for (std::size_t i = 4; i < argc; ++i) {
@@ -121,6 +124,14 @@ int main(int argc, char **argv) {
                     if (strcmp(argv[i], "-fragment") == 0) {
                         if (i + 1 < argc) {
                             fragment = std::stoi(argv[i + 1]);
+                            ++i;
+                        }
+                        continue;
+                    }
+
+                    if (strcmp(argv[i], "-init") == 0) {
+                        if (i + 1 < argc) {
+                            init = std::stoi(argv[i + 1]);
                             ++i;
                         }
                         continue;
@@ -156,6 +167,7 @@ int main(int argc, char **argv) {
         driver->setProtons(!heavy);
         driver->setFragment(fragment);
         driver->setCheckConnections(check_connect);
+        driver->setInitialFragment(init);
         driver->AutoPilot();
         std::cout << "RMSD for two molecules " << driver->RMSD() << std::endl;
 
