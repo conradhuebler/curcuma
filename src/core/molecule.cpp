@@ -132,6 +132,7 @@ bool Molecule::addPair(const std::pair<int, Position>& atom)
     // const std::array<double, 3> at = { atom.second(0),  atom.second(1),  atom.second(2)};
     m_geometry.push_back({ atom.second(0), atom.second(1), atom.second(2) });
     m_atoms.push_back(atom.first);
+    m_mass += Elements::AtomicMass[atom.first];
 
     for (std::size_t i = 0; i < AtomCount(); ++i)
         for (std::size_t j = i + 1; j < AtomCount(); ++j)
@@ -141,6 +142,15 @@ bool Molecule::addPair(const std::pair<int, Position>& atom)
     m_dirty = true;
 
     return exist;
+}
+
+double Molecule::CalculateMass()
+{
+    double mass = 0;
+    for (int atom : m_atoms)
+        mass += Elements::AtomicMass[atom];
+    m_mass = mass;
+    return mass;
 }
 
 void Molecule::setXYZComment(const std::string& comment)
@@ -652,9 +662,16 @@ std::vector<std::vector<int>> Molecule::GetFragments(double scaling) const
         mass = 0;
     }
     for (const auto& entry : ordered_list) {
-        m_mass_fragments.push_back(-1 * entry.first); // *** make the std::map container sort in reverse order :-)
+        //m_mass_fragments.push_back(-1 * entry.first); // *** make the std::map container sort in reverse order :-)
         m_fragments.push_back(entry.second);
     }
+    for (auto fragment : m_fragments) {
+        double mass = 0;
+        for (auto atom : fragment)
+            mass += Elements::AtomicMass[Atom(atom).first];
+        m_mass_fragments.push_back(mass);
+    }
+
     m_dirty = false;
     return m_fragments;
 }

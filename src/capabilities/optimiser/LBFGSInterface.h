@@ -183,7 +183,7 @@ inline void OptimiseGeometryThreaded(const Molecule* host, std::string* result_s
         parameter(3 * i + 1) = geometry(i, 1);
         parameter(3 * i + 2) = geometry(i, 2);
     }
-    std::chrono::time_point<std::chrono::system_clock> start = std::chrono::system_clock::now(), end;
+    std::chrono::time_point<std::chrono::system_clock> init = std::chrono::system_clock::now(), start = std::chrono::system_clock::now(), end;
 
     ss << "Step\tCurrent Energy [Eh]\tEnergy Change\tRMSD Change\tt [s]" << std::endl;
     int maxouter = 100;
@@ -238,6 +238,9 @@ inline void OptimiseGeometryThreaded(const Molecule* host, std::string* result_s
     }
     h.setEnergy(final_energy);
     h.setGeometry(geometry);
+    ss << "Final"
+       << "\t" << std::setprecision(9) << final_energy << "\t\t" << std::setprecision(5) << (fun.m_energy - final_energy) * 2625.5 << "\t\t" << std::setprecision(6) << driver->RMSD() << "\t" << std::chrono::duration_cast<std::chrono::milliseconds>(end - init).count() / 1000.0 << std::endl;
+
     result_string->append(ss.str());
     result_molecule->LoadMolecule(h);
 }

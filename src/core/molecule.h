@@ -46,6 +46,10 @@ class Molecule
     inline int Charge() const { return m_charge; }
     void setCharge(int charge) { m_charge = charge; }
 
+    inline double Mass() const { return m_mass; }
+    double CalculateMass();
+    std::vector<double> FragmentMass() const { return m_mass_fragments; }
+
     void InitialiseConnectedMass(double scaling = 1.3, bool protons = true);
     inline double ConnectedMass(int atom) const { return m_connect_mass[atom]; }
     double angle(int atom1, int atom2, int atom3) const;
@@ -126,6 +130,6 @@ private:
     string point_group;
     mutable bool m_dirty = true;
     std::string m_name;
-    double m_energy = 0, m_Ia = 0, m_Ib = 0, m_Ic = 0;
+    double m_energy = 0, m_Ia = 0, m_Ib = 0, m_Ic = 0, m_mass = 0;
     mutable double m_scaling = 1.5;
 };

@@ -46,7 +46,14 @@ void Docking::PerformDocking()
 
     Molecule guest = m_guest_structure;
     Molecule result = m_host_structure;
+    guest.CalculateMass();
+    result.CalculateMass();
+    m_fragments_mass.push_back(result.Mass());
+    m_fragments_mass.push_back(guest.Mass());
 
+    /* for( auto a : m_fragments_mass)
+        std::cout << a << " " ;
+    */
     std::cout << m_guest_structure.Centroid().transpose() << " = Centroid of Guest" << std::endl;
 
     Geometry stored_guest = m_guest_structure.getGeometry();
@@ -125,7 +132,7 @@ void Docking::PerformDocking()
                 m_result_list.insert(std::pair<double, Molecule*>(distance, molecule));
             }
         }
-        std::cout << (x / double(X)) * 100 << "% - " << m_anchor_accepted.size() << " stored structures. " << excluded << " structures were skipped, due to being duplicate!" << all << " checked!" << std::endl;
+        std::cout << (x / double(X)) * 100 << "% - " << m_anchor_accepted.size() << " stored structures. " << excluded << " structures were skipped, due to being duplicate! " << all << " checked all together!" << std::endl;
     }
 
     std::cout << m_anchor_accepted.size() << " stored structures. " << excluded << " structures were skipped, due to being duplicate!" << all << " checked!" << std::endl;
@@ -134,7 +141,8 @@ void Docking::PerformDocking()
     std::cout << std::endl
               << "** Docking Phase 0 - Finished **" << std::endl;
     int index = 0;
-    std::vector<int> frags = { 0, 0 };
+    // Will be removed some day
+    std::vector<int> frags = { 0, 0, 0, 0, 0 };
     for (const auto& pair : m_result_list) {
         ++index;
         frags[pair.second->GetFragments(frag_scaling).size()]++;
@@ -149,9 +157,9 @@ void Docking::PerformDocking()
 
 void Docking::PostOptimise()
 {
-    double frag_scaling = 1.2;
+    double frag_scaling = 1.5;
     int threads = 1; // xtb is not thread-safe yet
-    std::map<double, Molecule*> result_list;
+    std::map<double, Molecule*> result_list, final_results;
     auto iter = m_result_list.begin();
     int index = 0;
     while (iter != m_result_list.end()) {
@@ -179,30 +187,42 @@ void Docking::PostOptimise()
             result_list.insert(std::pair<double, Molecule*>(mol2->Energy(), mol2));
             delete thread;
         }
-        std::cout << "Done! (" << index / m_result_list.size() * 100 << ")" << std::endl;
+        std::cout << "Done! " << index << " of " << m_result_list.size() << " (" << index / double(m_result_list.size()) * 100 << " %)" << std::endl;
     }
     std::cout << "** Docking Phase 2 - Finished **" << std::endl;
-    /*
-    for (const auto& pair : m_result_list) {
-        Molecule *mol2 = new Molecule(OptimiseGeometry(pair.second, false, true, 1e4, 0.5));
-        result_list.insert(std::pair<double, Molecule *>(mol2->Energy(), mol2));
-        delete pair.second;
-    }
-    */
+
     {
-        std::vector<int> frags = { 0, 0 };
+        // Will be removed some day
+        std::vector<int> frags = { 0, 0, 0, 0, 0 };
         int index = 0;
         for (const auto& pair : result_list) {
             ++index;
             frags[pair.second->GetFragments(frag_scaling).size()]++;
-            //std::cout << pair.first << std::endl;
             const std::string name = "Optimise_B" + std::to_string(frags[pair.second->GetFragments(frag_scaling).size()] / 100 + 1) + "_F" + std::to_string(pair.second->GetFragments(frag_scaling).size()) + ".xyz";
             pair.second->appendXYZFile(name);
             if (!std::binary_search(m_files.begin(), m_files.end(), name))
                 m_files.push_back(name);
+
+            if (pair.second->GetFragments(frag_scaling).size() == 2) {
+                double sum = 0;
+                std::vector<double> fragments = pair.second->FragmentMass();
+
+                for (int i = 0; i < fragments.size(); ++i)
+                    sum += abs(m_fragments_mass[i] - fragments[i]);
+                for (auto a : fragments)
+                    std::cout << a << " ";
+                std::cout << " Difference " << sum;
+                if (sum < 1e-3) {
+                    final_results.insert(pair);
+                    std::cout << " taking! E = " << pair.first << " Eh" << std::endl;
+                } else {
+                    std::cout << " skipping! E = " << pair.first << " Eh" << std::endl;
+                }
+            }
         }
     }
-    std::cout << "** Docking Phase 3 - Fast Filtering **" << std::endl;
+
+    std::cout << "** Docking Phase 3 - Fast Filtering structures with correct fragments **" << std::endl;
 
     ConfScan* scan = new ConfScan;
     scan->setHeavyRMSD(true);
@@ -214,22 +234,19 @@ void Docking::PostOptimise()
     scan->setNoName(true);
     scan->setPreventReorder(true);
     scan->setEnergyCutOff(1e5);
-    scan->setMolecules(result_list);
+    scan->setMolecules(final_results);
     scan->scan();
 
     std::vector<Molecule*> result = scan->Result();
 
+    std::cout << "** Docking Phase 4 - Writing structures to Final_Result.xyz **" << std::endl;
+
     {
         int index = 0;
-        std::vector<int> frags = { 0, 0 };
         for (const auto mol : result) {
             ++index;
-            frags[mol->GetFragments(frag_scaling).size()]++;
-            const std::string name = "Filtered_B" + std::to_string(frags[mol->GetFragments(frag_scaling).size()] / 100 + 1) + "_F" + std::to_string(mol->GetFragments(frag_scaling).size()) + ".xyz";
+            const std::string name = "Final_Result.xyz";
             mol->appendXYZFile(name);
-            if (!std::binary_search(m_files.begin(), m_files.end(), name))
-                m_files.push_back(name);
-
             delete mol;
         }
     }
