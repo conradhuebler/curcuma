@@ -327,6 +327,8 @@ int main(int argc, char **argv) {
                 }
             }
             ConfScan* scan = new ConfScan;
+            scan->setNoName(noname);
+
             scan->setFileName(argv[2]);
             scan->setHeavyRMSD(heavy);
             scan->setMaxRank(rank);
@@ -334,7 +336,6 @@ int main(int argc, char **argv) {
             scan->setForceReorder(reorder);
             scan->setCheckConnections(check_connect);
             scan->setEnergyThreshold(energy);
-            scan->setNoName(noname);
             scan->setPreventReorder(preventreorder);
             scan->setEnergyCutOff(maxenergy);
             scan->scan();
