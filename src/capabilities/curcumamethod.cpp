@@ -38,9 +38,17 @@ CurcumaMethod::CurcumaMethod()
 void CurcumaMethod::TriggerWriteRestart()
 {
     std::ofstream restart_file("curcuma_restart.json");
-    json restart;
-    restart[MethodName()] = WriteRestartInformation();
-    restart_file << restart << std::endl;
+    nlohmann::json restart;
+    try {
+        restart[MethodName()] = WriteRestartInformation();
+
+    } catch (nlohmann::json::type_error& e) {
+    }
+    try {
+        restart_file << restart << std::endl;
+
+    } catch (nlohmann::json::type_error& e) {
+    }
 }
 
 StringList CurcumaMethod::RestartFiles() const

@@ -25,12 +25,13 @@
 
 #include "json.hpp"
 
-// for convenience
-using json = nlohmann::json;
-
 class CurcumaMethod {
+
 public:
     CurcumaMethod();
+
+    inline void setRestart(bool restart) { m_restart = restart; }
+    inline bool Restart() const { return m_restart; }
 
 protected:
     void TriggerWriteRestart();
@@ -45,4 +46,6 @@ private:
     virtual bool LoadRestartInformation() = 0;
 
     virtual std::string MethodName() const = 0;
+
+    bool m_restart = true;
 };

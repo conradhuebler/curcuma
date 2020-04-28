@@ -246,13 +246,14 @@ int main(int argc, char **argv) {
                 std::cerr << "-heavy     **** Use only heavy atoms for rmsd calculation." << std::endl;
                 std::cerr << "-noname    **** Do not read possible name from xyz file." << std::endl;
                 std::cerr << "-noreorder **** Prevent reordering in any cases." << std::endl;
+                std::cerr << "-norestart **** Prevent restarting in any cases." << std::endl;
                 std::cerr << "-maxenergy **** Maximal energy difference between best and current conformer [kJ/mol] for a conformer to be analysed." << std::endl;
                 std::cerr << "-energy    **** Energy threshold for identical structures [kJ/mol]." << std::endl;
 
                 return -1;
             }
             bool writeXYZ = false;
-            bool reorder = false, check_connect = false, heavy = false, noname = false, preventreorder = false;
+            bool reorder = false, check_connect = false, heavy = false, noname = false, preventreorder = false, restart = true;
             int rank = 1e10;
             double energy = 1.0, maxenergy = -1;
             if (argc >= 4) {
@@ -285,6 +286,11 @@ int main(int argc, char **argv) {
                         continue;
                     }
 
+                    if (strcmp(argv[i], "-norestart") == 0) {
+                        restart = false;
+                        continue;
+                    }
+
                     if (strcmp(argv[i], "-reorder") == 0) {
                         reorder = true;
                         continue;
@@ -313,7 +319,7 @@ int main(int argc, char **argv) {
             }
             ConfScan* scan = new ConfScan;
             scan->setNoName(noname);
-
+            scan->setRestart(restart);
             scan->setFileName(argv[2]);
             scan->setHeavyRMSD(heavy);
             scan->setMaxRank(rank);

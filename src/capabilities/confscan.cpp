@@ -101,17 +101,36 @@ void ConfScan::setMolecules(const std::map<double, Molecule*>& molecules)
 
 bool ConfScan::LoadRestartInformation()
 {
+    if (!Restart())
+        return false;
     StringList files = RestartFiles();
     m_prevent_reorder = files.size() > 1;
+    int error = 0;
     for (const auto& f : files) {
         std::vector<std::vector<int>> reorder_cached;
 
         std::cout << "Reading file " << f << std::endl;
         std::ifstream file(f);
         json restart;
-        file >> restart;
+        try {
+            file >> restart;
+        } catch (json::type_error& e) {
+            error++;
+            continue;
 
-        json confscan = restart[MethodName()];
+        } catch (json::parse_error& e) {
+            error++;
+            continue;
+        }
+
+        json confscan;
+        try {
+            confscan = restart[MethodName()];
+        } catch (json::type_error& e) {
+            error++;
+            continue;
+        }
+
         try {
             reorder_cached = Tools::String2VectorVector(confscan["ReorderRules"]);
         } catch (json::type_error& e) {
@@ -132,7 +151,8 @@ bool ConfScan::LoadRestartInformation()
         m_reference_last_energy = 0;
         m_target_last_energy = 0;
     }
-    m_useRestart = files.size() == 1;
+
+    m_useRestart = files.size() == 1 && error != int(files.size());
 
     std::cout << "Starting with " << m_reorder_rules.size() << " initial reorder rules." << std::endl;
     return true;
@@ -144,7 +164,6 @@ nlohmann::json ConfScan::WriteRestartInformation()
     block["ReorderRules"] = Tools::VectorVector2String(m_reorder_rules);
     block["ReferenceLastEnergy"] = m_reference_last_energy;
     block["TargetLastEnergy"] = m_target_last_energy;
-
     return block;
 }
 
