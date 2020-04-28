@@ -33,6 +33,40 @@ XTBInterface::XTBInterface()
 {
 }
 
+double XTBInterface::GFN0Energy(const Molecule& molecule)
+{
+    double energy = 0;
+#ifdef USE_XTB
+    int const natoms = molecule.AtomCount();
+    double const charge = 0.0;
+
+    int attyp[natoms];
+    std::vector<int> atoms = molecule.Atoms();
+    double coord[3 * natoms];
+
+    for (int i = 0; i < atoms.size(); ++i) {
+        std::pair<int, Position> atom = molecule.Atom(i);
+        coord[3 * i + 0] = atom.second(0) / au;
+        coord[3 * i + 1] = atom.second(1) / au;
+        coord[3 * i + 2] = atom.second(2) / au;
+        attyp[i] = atoms[i];
+    }
+
+    xtb::PEEQ_options const opt = (xtb::PEEQ_options){ 0, 1, 2.0, 300, false, false, "none" };
+
+    double dipole[3];
+    double q[natoms];
+    double qp[6 * natoms];
+    double wbo[natoms * natoms];
+    char output;
+    double* grad = 0;
+    int stat = xtb::GFN0_calculation(&natoms, attyp, &charge, NULL, coord, &opt, &output, &energy, grad);
+#else
+    throw("XTB is not included, sorry for that");
+#endif
+    return energy;
+}
+
 double XTBInterface::GFN1Energy(const Molecule& molecule)
 {
     double energy = 0;

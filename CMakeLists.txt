@@ -79,8 +79,8 @@ ENDIF(CMAKE_COMPILER_IS_GNUCXX)
 
 if(COMPILE_XTB)
     add_subdirectory(external/xtb)
-    set_target_properties(xtb_shared PROPERTIES
-      IMPORTED_LOCATION "${CMAKE_CURRENT_BINARY_DIR}/libxtb_shared.so"
+    set_target_properties(lib-xtb-shared PROPERTIES
+      IMPORTED_LOCATION "${CMAKE_CURRENT_BINARY_DIR}/libxtb.so"
     )
     set(USE_XTB on)
 endif()
@@ -150,7 +150,7 @@ endif(C17)
 
 if(USE_XTB)
     if(COMPILE_XTB)
-        target_link_libraries(curcuma xtb_shared pthread dl)
+        target_link_libraries(curcuma lib-xtb-shared pthread dl)
     else()
         target_link_libraries(curcuma ${XTB_DIR}/libxtb.so pthread dl)
     endif()
@@ -179,7 +179,7 @@ if(USE_XTB)
     endif(C17)
 
     if(COMPILE_XTB)
-        target_link_libraries(xtb_helper xtb_shared pthread dl)
+        target_link_libraries(xtb_helper lib-xtb-shared pthread dl)
     else()
         target_link_libraries(xtb_helper ${XTB_DIR}/libxtb.so pthread dl)
     endif()

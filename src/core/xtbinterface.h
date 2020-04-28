@@ -28,6 +28,7 @@ public:
     XTBInterface();
     double GFN2Energy(const Molecule& molecule);
     double GFN1Energy(const Molecule& molecule);
+    double GFN0Energy(const Molecule& molecule);
 
     double GFN2Energy(const int* attyp, const double* coord, const int natoms, const double charge);
     double GFN1Energy(const int* attyp, const double* coord, const int natoms, const double charge);
