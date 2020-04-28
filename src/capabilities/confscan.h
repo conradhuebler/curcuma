@@ -28,7 +28,9 @@
 
 #include "src/core/molecule.h"
 
-class ConfScan {
+#include "curcumamethod.h"
+
+class ConfScan : public CurcumaMethod {
 public:
     ConfScan();
     ~ConfScan();
@@ -84,12 +86,22 @@ public:
     std::vector<Molecule*> Failed() const { return m_failed; }
 
 private:
+    /* Lets have this for all modules */
+    nlohmann::json WriteRestartInformation() override;
+
+    /* Lets have this for all modules */
+    bool LoadRestartInformation() override;
+
+    std::string MethodName() const override { return std::string("ConfScan"); }
+
     bool openFile();
+
+    std::vector<std::vector<int>> m_reorder_rules;
 
     std::string m_filename;
     std::map<double, int> m_ordered_list;
     std::vector<std::pair<std::string, Molecule*>> m_molecules;
-    double m_energy_threshold = 1.0, m_rmsd_threshold = 1.0, m_diff_rot_loose = 0.3, m_diff_rot_tight = 0.01, m_nearly_missed = 0.8, m_energy_cutoff = -1;
+    double m_energy_threshold = 1.0, m_rmsd_threshold = 1.0, m_diff_rot_loose = 0.3, m_diff_rot_tight = 0.01, m_nearly_missed = 0.8, m_energy_cutoff = -1, m_reference_last_energy = 0, m_target_last_energy = 0;
     std::vector<Molecule*> m_result, m_nearly, m_failed;
     int m_maxrank = 10000;
     bool m_writeXYZ = false;
@@ -98,4 +110,5 @@ private:
     bool m_heavy = false;
     bool m_noname = false;
     bool m_writeFiles = true;
+    bool m_useRestart = false;
 };

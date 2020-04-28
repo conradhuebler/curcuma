@@ -1,5 +1,5 @@
 /*
- * <General parser for input block, cmd-arguments etc.>
+ * <Abstract Curcuma Method, please try to subclass from that!>
  * Copyright (C) 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -17,24 +17,32 @@
  *
  */
 
+#pragma once
+
+#include "src/tools/general.h"
+
+#include <string>
+
 #include "json.hpp"
 
-#include "parser.h"
-
+// for convenience
 using json = nlohmann::json;
 
-Parser::Parser()
-{
+class CurcumaMethod {
+public:
+    CurcumaMethod();
 
-}
+protected:
+    void TriggerWriteRestart();
 
-/*
- static json Parser::General()
-{
-    json general ={
-        {"Help", "yes"}
-    };
+    StringList RestartFiles() const;
 
-    return general;
-}
-*/
+private:
+    /* Lets have this for all modules */
+    virtual nlohmann::json WriteRestartInformation() = 0;
+
+    /* Lets have this for all modules */
+    virtual bool LoadRestartInformation() = 0;
+
+    virtual std::string MethodName() const = 0;
+};

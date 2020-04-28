@@ -2,6 +2,7 @@
 
 ### pre Alpha
 
+- make confscan (silently) restartable
 - docking with post-optimisation and filtering (needs XTB GFN 2)
 - add reordering for non-conformer/non-isomer structures
 - add step-wise-rmsd for two trajectories

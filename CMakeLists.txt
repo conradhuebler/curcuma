@@ -9,9 +9,11 @@ option (COMPILE_XTB
 option (LINK_XTB
     "Link to prebuilt XTB library" OFF)
 
+option (C17
+    "Use C++ 17 Standard" ON)
 
-include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/eigen)
-include_directories(${PROJECT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} ${PROJECT_SOURCE_DIR}/external/eigen)
+include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/eigen ${CMAKE_CURRENT_BINARY_DIR}/src/)
+include_directories(${PROJECT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} )
 
 # Get the current working branch
 execute_process(
@@ -125,6 +127,7 @@ configure_file(
 
 add_executable(curcuma
         src/capabilities/optimiser/LBFGSInterface.h
+        src/capabilities/curcumamethod.cpp
         src/capabilities/confscan.cpp
         src/capabilities/docking.cpp
         src/capabilities/nebdocking.cpp
@@ -139,7 +142,11 @@ add_executable(curcuma
         src/tools/general.h
         src/tools/parser.h
         src/main.cpp)
-set_property(TARGET curcuma PROPERTY CXX_STANDARD 14)
+if(C17)
+    set_property(TARGET curcuma PROPERTY CXX_STANDARD 17)
+else()
+    set_property(TARGET curcuma PROPERTY CXX_STANDARD 14)
+endif(C17)
 
 if(USE_XTB)
     if(COMPILE_XTB)
@@ -154,13 +161,23 @@ endif()
 
 add_executable(curcuma_helper
         src/helpers/main.cpp)
-set_property(TARGET curcuma_helper PROPERTY CXX_STANDARD 17)
+
+if(C17)
+    set_property(TARGET curcuma_helper PROPERTY CXX_STANDARD 17)
+else()
+    set_property(TARGET curcuma_helper PROPERTY CXX_STANDARD 14)
+endif(C17)
 
 if(USE_XTB)
     add_executable(xtb_helper
         src/helpers/xtb_helper.cpp
         )
-    set_property(TARGET xtb_helper PROPERTY CXX_STANDARD 17)
+    if(C17)
+        set_property(TARGET xtb_helper PROPERTY CXX_STANDARD 17)
+    else()
+        set_property(TARGET xtb_helper PROPERTY CXX_STANDARD 14)
+    endif(C17)
+
     if(COMPILE_XTB)
         target_link_libraries(xtb_helper xtb_shared pthread dl)
     else()

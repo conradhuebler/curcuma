@@ -31,6 +31,11 @@
 
 #include "src/tools/general.h"
 
+#include "json.hpp"
+
+// for convenience
+using json = nlohmann::json;
+
 #include "confscan.h"
 
 ConfScan::ConfScan()
@@ -59,96 +64,20 @@ bool ConfScan::openFile()
         Molecule* mol = new Molecule(file.Next());
         m_ordered_list.insert(std::pair<double, int>(mol->Energy(), molecule));
         molecule++;
+        std::vector<int> lala = { 1, 2, 3, 4 };
+        std::ofstream o("pretty.json");
+        {
+            json j;
+            j["1"] = Tools::Vector2String(lala);
+
+            o << std::setw(4) << j << std::endl;
+        }
         if (m_noname)
             mol->setName(NamePattern(molecule));
         std::pair<std::string, Molecule*> pair(mol->Name(), mol);
         m_molecules.push_back(pair);
     }
 
-    /*
-
-    std::vector<std::string> lines;
-    std::ifstream input(m_filename);
-
-    int atoms = 0;
-    int index = 0;
-    int i = 0;
-    Molecule* mol = new Molecule(atoms, 0);
-    for (std::string line; getline(input, line);) {
-        if (i == 0 && xyzfile) {
-            atoms = stoi(line);
-            if (atoms < 1) {
-                ++i;
-                continue;
-            }
-            //if (mol->AtomCount())
-            //{
-            std::pair<std::string, Molecule*> pair(mol->Name(), mol);
-            m_molecules.push_back(pair);
-            m_ordered_list.insert(std::pair<double, int>(mol->Energy(), molecule));
-            molecule++;
-            //}
-
-            mol = new Molecule(atoms, 0);
-        }
-        if (i == 1) {
-            StringList list = Tools::SplitString(line);
-            if (list.size() == 7) {
-                try {
-                    mol->setEnergy(std::stod((list[4])));
-                } catch (const std::string& what_arg) {
-                    mol->setEnergy(0);
-                }
-            } else if (list.size() == 4) {
-                if (list[0].compare("SCF") == 0 && list[1].compare("done") == 0) {
-                    mol->setName("Molecule " + std::to_string(molecule));
-                    try {
-                        mol->setEnergy(std::stod((list[2])));
-                    } catch (const std::string& what_arg) {
-                        mol->setEnergy(0);
-                    }
-                } else {
-                    mol->setName(list[0]);
-                    //mol->setName("Molecule " + std::to_string(molecule));
-                    if (list[3] == "")
-                        mol->setEnergy(0);
-                    else {
-                        try {
-                            mol->setEnergy(std::stod((list[3])));
-                        } catch (const std::string& what_arg) {
-                            mol->setEnergy(0);
-                        }
-                    }
-                }
-            } else if (list.size() == 1) {
-                try {
-                    mol->setEnergy(std::stod((list[0])));
-                } catch (const std::string& what_arg) {
-                }
-                mol->setName("Molecule " + std::to_string(molecule));
-            } else {
-                for (const string& s : list) {
-                    double energy = 0;
-                    if (Tools::isDouble(s)) {
-                        energy = std::stod(s);
-                        mol->setEnergy(energy);
-                        break;
-                    }
-                }
-                mol->setName(NamePattern(molecule));
-            }
-            if (m_noname)
-                mol->setName(NamePattern(molecule));
-        }
-        if (i > 1) {
-            mol->setXYZ(line, i - 2);
-        }
-        index++;
-        ++i;
-        if (i - 2 == atoms)
-            i = 0;
-    }
-    */
     return true;
 }
 
@@ -170,8 +99,59 @@ void ConfScan::setMolecules(const std::map<double, Molecule*>& molecules)
     m_filename = "blocklist.xyz";
 }
 
+bool ConfScan::LoadRestartInformation()
+{
+    StringList files = RestartFiles();
+    m_prevent_reorder = files.size() > 1;
+    for (const auto& f : files) {
+        std::vector<std::vector<int>> reorder_cached;
+
+        std::cout << "Reading file " << f << std::endl;
+        std::ifstream file(f);
+        json restart;
+        file >> restart;
+
+        json confscan = restart[MethodName()];
+        try {
+            reorder_cached = Tools::String2VectorVector(confscan["ReorderRules"]);
+        } catch (json::type_error& e) {
+        }
+        try {
+            m_reference_last_energy = confscan["ReferenceLastEnergy"];
+        } catch (json::type_error& e) {
+        }
+        try {
+            m_target_last_energy = confscan["TargetLastEnergy"];
+        } catch (json::type_error& e) {
+        }
+        for (const auto& vector : reorder_cached)
+            if (std::find(m_reorder_rules.begin(), m_reorder_rules.end(), vector) == m_reorder_rules.end())
+                m_reorder_rules.push_back(vector);
+    }
+    if (files.size() != 1) {
+        m_reference_last_energy = 0;
+        m_target_last_energy = 0;
+    }
+    m_useRestart = files.size() == 1;
+
+    std::cout << "Starting with " << m_reorder_rules.size() << " initial reorder rules." << std::endl;
+    return true;
+}
+
+nlohmann::json ConfScan::WriteRestartInformation()
+{
+    json block;
+    block["ReorderRules"] = Tools::VectorVector2String(m_reorder_rules);
+    block["ReferenceLastEnergy"] = m_reference_last_energy;
+    block["TargetLastEnergy"] = m_target_last_energy;
+
+    return block;
+}
+
 void ConfScan::scan()
 {
+    LoadRestartInformation();
+
     Molecule* mol1;
     bool ok = true;
 
@@ -205,7 +185,6 @@ void ConfScan::scan()
         missed_file.close();
     }
 
-    std::vector<std::vector<int>> rules_list;
     std::cout << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
               << "" << std::endl;
 
@@ -258,6 +237,11 @@ void ConfScan::scan()
                           << std::endl
                           << std::endl
                           << "Reference Molecule:" << mol1->Name() << " (" << mol1->Energy() << " Eh)        Target Molecule " << mol2->Name() << " (" << mol2->Energy() << " Eh)" << std::endl;
+                if (!m_useRestart) {
+                    m_reference_last_energy = mol1->Energy();
+                    m_target_last_energy = mol2->Energy();
+                }
+
                 double difference = abs(mol1->Energy() - mol2->Energy()) * 2625.5;
                 if (m_energy_cutoff > 0)
                     if (difference > m_energy_cutoff) {
@@ -282,13 +266,13 @@ void ConfScan::scan()
                 std::cout << "RMSD = " << std::setprecision(5) << rmsd << " A" << std::endl;
 
                 if (rmsd > m_rmsd_threshold && difference < 1 && diff_rot < 0.1 && diff_rot > 0.01) {
-                    if (!m_prevent_reorder) {
-                        temp_list.push_back(mol2);
-                        std::cout << "~~ Reordering forced as energies and rotational constants are too close and rmsd is too different! ~~" << std::endl;
-                        std::cout << "*** Adding " << mol2->Name() << " to the list as RMSD is " << rmsd << "! ***" << std::endl;
-                    } else {
-                        std::cout << "~~ Reordering prevented, so no more will be done regarding these structures. ~~" << std::endl;
-                    }
+                    // if (!m_prevent_reorder) {
+                    temp_list.push_back(mol2);
+                    std::cout << "~~ Reordering forced as energies and rotational constants are too close and rmsd is too different! ~~" << std::endl;
+                    std::cout << "*** Adding " << mol2->Name() << " to the list as RMSD is " << rmsd << "! ***" << std::endl;
+                    //} else {
+                    //    std::cout << "~~ Reordering prevented, so no more will be done regarding these structures. ~~" << std::endl;
+                    // }
                 } else {
                     if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && diff_rot < m_diff_rot_loose)) {
                         ok = false;
@@ -310,6 +294,7 @@ void ConfScan::scan()
                 delete driver;
             }
         }
+        TriggerWriteRestart();
 
         if (temp_list.size()) {
             std::cout << std::endl
@@ -351,7 +336,7 @@ void ConfScan::scan()
 
                 bool digDeeper = true;
                 std::cout << "*** Checking old reordering solutions first. ***" << std::endl;
-                for (const auto rule : rules_list) {
+                for (const auto& rule : m_reorder_rules) {
                     double tmp_rmsd = driver->Rules2RMSD(rule);
                     std::cout << tmp_rmsd << " A ";
                     if (tmp_rmsd < m_rmsd_threshold) {
@@ -366,14 +351,37 @@ void ConfScan::scan()
                     }
                 }
                 std::cout << std::endl;
+
+                if (m_reference_last_energy - mol1->Energy() > 1e-5 && m_useRestart) {
+                    //if(m_target_last_energy - mol2->Energy() > 1e-5 )
+                    {
+                        std::cout << "*** Skip reordering, as we are in Restart Modus *** " << std::endl;
+                        digDeeper = false;
+                    }
+                } else {
+                    m_useRestart = false;
+                }
+                if (m_prevent_reorder) {
+                    digDeeper = false;
+                    std::cout << "~~ Reordering prevented, so no more will be done regarding these structures. ~~" << std::endl;
+                }
                 if (digDeeper) {
+
+                    {
+                        m_reference_last_energy = mol1->Energy();
+                        m_target_last_energy = mol2->Energy();
+                    }
                     std::cout << "*** Nothing fitting found, reorder now! ***" << std::endl;
                     driver->setForceReorder(true);
                     driver->AutoPilot();
                     driver->setForceReorder(ForceReorder());
 
                     double rmsd_tmp = driver->RMSD();
-                    rules_list.push_back(driver->ReorderRules());
+                    if (std::find(m_reorder_rules.begin(), m_reorder_rules.end(), driver->ReorderRules()) == m_reorder_rules.end()) {
+                        std::cout << "*** Newly obtained reorder solution added to heap of information ***" << std::endl;
+                        m_reorder_rules.push_back(driver->ReorderRules());
+                    }
+                    TriggerWriteRestart();
 
                     std::cout << "New rmsd is " << rmsd_tmp << ". Old was " << rmsd << std::endl;
                     if (rmsd_tmp > rmsd) {
@@ -437,6 +445,12 @@ void ConfScan::scan()
             molecule->appendXYZFile(failed);
         }
     }
+    {
+        m_reference_last_energy = 0;
+        m_target_last_energy = 0;
+    }
+    TriggerWriteRestart();
+
     std::cout << m_result.size() << " structures were kept - of " << m_molecules.size() - fail << " total!" << std::endl;
 
     std::cout << "Best structure is " << m_result[0]->Name() << " Energy = " << std::setprecision(8) << m_result[0]->Energy() << std::endl;

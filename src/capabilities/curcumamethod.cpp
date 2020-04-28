@@ -1,0 +1,60 @@
+/*
+ * <Abstract Curcuma Method, please try to subclass from that!>
+ * Copyright (C) 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
+#include "src/global_config.h"
+
+#include "src/tools/general.h"
+
+#include <fstream>
+#include <iostream>
+
+#ifdef C17
+#include <filesystem>
+namespace fs = std::filesystem;
+#endif
+
+#include "curcumamethod.h"
+
+CurcumaMethod::CurcumaMethod()
+{
+}
+
+void CurcumaMethod::TriggerWriteRestart()
+{
+    std::ofstream restart_file("curcuma_restart.json");
+    json restart;
+    restart[MethodName()] = WriteRestartInformation();
+    restart_file << restart << std::endl;
+}
+
+StringList CurcumaMethod::RestartFiles() const
+{
+    StringList file_list;
+
+#ifdef C17
+    for (auto& p : fs::directory_iterator(".")) {
+        std::string file(p.path());
+        if (file.find("curcuma_restart") != string::npos)
+            file_list.push_back(file);
+    }
+#else
+    file_list.push_back("curcuma_restart.json");
+#endif
+    return file_list;
+}

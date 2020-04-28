@@ -297,4 +297,46 @@ inline double ShannonEntropy(const std::vector<std::pair<double, double>>& histo
 
     return -1 * entropy;
 }
+
+inline std::string Vector2String(const std::vector<int>& vector)
+{
+    std::string result = " ";
+
+    for (auto i : vector)
+        result += std::to_string(i) + "|";
+    result.pop_back();
+
+    result += " ";
+
+    return result;
+}
+
+inline std::vector<int> String2Vector(const std::string& string)
+{
+    std::vector<int> vector;
+    StringList tmp = SplitString(string, "|");
+    for (auto i : tmp)
+        vector.push_back(std::stoi(i));
+    return vector;
+}
+
+inline std::string VectorVector2String(const std::vector<std::vector<int>>& vector)
+{
+    std::string result;
+    for (auto vec : vector) {
+        result += Vector2String(vec) + ";";
+    }
+    result.pop_back();
+    return result;
+}
+
+inline std::vector<std::vector<int>> String2VectorVector(const std::string& string)
+{
+    std::vector<std::vector<int>> result;
+
+    StringList vectors = SplitString(string, ";");
+    for (const auto& element : vectors)
+        result.push_back(String2Vector(element));
+    return result;
+}
 }

@@ -1,3 +1,4 @@
 #pragma once
 
 #cmakedefine USE_XTB
+#cmakedefine C17

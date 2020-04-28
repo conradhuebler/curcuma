@@ -18,7 +18,7 @@
  */
 
 #pragma once
-/*
+
 #include "json.hpp"
 
 // for convenience
@@ -36,8 +36,5 @@ class Parser
 public:
     Parser();
 
-    static json General();
+    //  static json General();
 };
-
-
-*/

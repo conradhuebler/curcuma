@@ -40,10 +40,10 @@
 #include <fstream>
 #include <vector>
 
-//#include "json.hpp"
+#include "json.hpp"
 
 // for convenience
-//using json = nlohmann::json;
+using json = nlohmann::json;
 
 void Distance(const Molecule &mol, char **argv)
 {
@@ -66,21 +66,6 @@ void Distance(const Molecule &mol, char **argv)
 
 int main(int argc, char **argv) {
 
-    /*
-    json h = general; //Parser::General();
-
-   for(auto l : h)
-       std::cout << l << std::endl;
-
-   for (json::iterator it = h.begin(); it != h.end(); ++it) {
-     std::cout << (*it) << '\n';
-   }
-    //std::cout << h.("yes") << std::endl;
-
-   for (json::iterator it = h.begin(); it != h.end(); ++it) {
-     std::cout << it.key() << " : " << it.value() << "\n";
-   }
-    */
     General::StartUp(argc, argv);
 
     RunTimer timer(true);
