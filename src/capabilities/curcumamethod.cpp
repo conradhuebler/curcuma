@@ -62,7 +62,9 @@ StringList CurcumaMethod::RestartFiles() const
             file_list.push_back(file);
     }
 #else
-    file_list.push_back("curcuma_restart.json");
+    ifstream test_file("curcuma_restart.json");
+    if (test_file.is_open())
+        file_list.push_back("curcuma_restart.json");
 #endif
     return file_list;
 }

@@ -298,6 +298,7 @@ int main(int argc, char **argv) {
 
                     if (strcmp(argv[i], "-noreorder") == 0) {
                         preventreorder = true;
+                        std::cout << " - Prevent reordering set to true!" << std::endl;
                         continue;
                     }
 

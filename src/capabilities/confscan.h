@@ -111,4 +111,5 @@ private:
     bool m_noname = false;
     bool m_writeFiles = true;
     bool m_useRestart = false;
+    bool m_silent = false;
 };
