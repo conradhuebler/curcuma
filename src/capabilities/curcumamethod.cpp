@@ -68,3 +68,18 @@ StringList CurcumaMethod::RestartFiles() const
 #endif
     return file_list;
 }
+
+nlohmann::json CurcumaMethod::LoadControl() const
+{
+    nlohmann::json control;
+    std::ifstream restart_file("curcuma_control.json");
+    try {
+        restart_file >> control;
+    } catch (nlohmann::json::type_error& e) {
+        throw 404;
+    } catch (nlohmann::json::parse_error& e) {
+        throw 404;
+    }
+    std::cout << control << std::endl;
+    return control;
+}

@@ -100,9 +100,22 @@ private:
 
     std::string MethodName() const override { return std::string("ConfScan"); }
 
+    /* Lets have all methods read the input/control file */
+    virtual void ReadControlFile() override;
+
     bool openFile();
 
     std::vector<std::vector<int>> m_reorder_rules;
+
+    int PreCheckAgainstAccepted(int index);
+    int CheckTempList(int index);
+    void PrintStatus();
+
+    std::map<std::string, std::vector<std::string>> m_filtered;
+    bool m_ok;
+    std::size_t m_fail = 0, m_start = 0, m_end;
+    std::vector<Molecule*> m_global_temp_list;
+    int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0;
 
     std::string m_filename;
     std::map<double, int> m_ordered_list;
@@ -120,4 +133,5 @@ private:
     bool m_useRestart = false;
     bool m_silent = false;
     bool m_internal_parametrised = false;
+    bool m_parameter_loaded = false;
 };

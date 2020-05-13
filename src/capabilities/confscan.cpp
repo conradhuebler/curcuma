@@ -33,7 +33,6 @@
 
 #include "json.hpp"
 
-// for convenience
 using json = nlohmann::json;
 
 #include "confscan.h"
@@ -72,6 +71,28 @@ bool ConfScan::openFile()
     }
 
     return true;
+}
+
+void ConfScan::ReadControlFile()
+{
+    json control;
+    try {
+        control = LoadControl();
+    } catch (int error) {
+        if (error == 404) // No control given
+            return;
+    }
+    json confscan;
+    try {
+        confscan = control[MethodName()];
+    } catch (json::type_error& e) {
+        return; // File does not contain control information for ConfScan
+    }
+
+    try {
+        m_maxrank = confscan["MaxRank"];
+    } catch (json::type_error& e) {
+    }
 }
 
 void ConfScan::setMolecules(const std::map<double, Molecule*>& molecules)
@@ -135,10 +156,14 @@ bool ConfScan::LoadRestartInformation()
         }
         try {
             m_diff_rot_abs_tight = confscan["AbsRotationalTight"];
+            m_parameter_loaded = true;
+            m_internal_parametrised = true;
         } catch (json::type_error& e) {
         }
         try {
             m_diff_rot_abs_loose = confscan["AbsRotationalLoose"];
+            m_parameter_loaded = true;
+            m_internal_parametrised = true;
         } catch (json::type_error& e) {
         }
 
@@ -189,8 +214,6 @@ void ConfScan::ParametriseRotationalCutoffs()
 
             Molecule* mol1 = m_molecules.at(i).second;
             Molecule* mol2 = m_molecules.at(j).second;
-            //mol1->CalculateRotationalConstants();
-            //mol2->CalculateRotationalConstants();
 
             double Ia = abs(mol1->Ia() - mol2->Ia());
             double Ib = abs(mol1->Ib() - mol2->Ib());
@@ -237,16 +260,17 @@ int ConfScan::AcceptRotationalConstant(double constant)
 
 void ConfScan::scan()
 {
+    ReadControlFile();
     LoadRestartInformation();
 
     m_silent = m_ordered_list.size() > 500;
     Molecule* mol1;
     bool ok = true;
 
-    std::map<std::string, std::vector<std::string>> filtered;
-    std::size_t fail = 0;
-    std::size_t start = 0;
-    std::size_t ende = m_ordered_list.size();
+    //std::map<std::string, std::vector<std::string>> m_filtered;
+    m_fail = 0;
+    m_start = 0;
+    m_end = m_ordered_list.size();
 
     std::string result_name = m_filename;
     result_name.erase(result_name.end() - 4, result_name.end());
@@ -273,11 +297,11 @@ void ConfScan::scan()
         missed_file.close();
     }
 
-    //if(!m_useRestart)
-    ParametriseRotationalCutoffs();
+    if (!m_parameter_loaded)
+        ParametriseRotationalCutoffs();
 
-    std::ofstream filtered_rules;
-    filtered_rules.open("filtered_rules.txt");
+    // std::ofstream m_filtered_rules;
+    // m_filtered_rules.open("m_filtered_rules.txt");
     std::cout << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
               << "" << std::endl;
 
@@ -302,267 +326,41 @@ void ConfScan::scan()
      * reordered_failed_complete got a worse rmsd after reordering
      * reordered_reused every time an old solution did the trick
      */
-    int rejected = 0, accepted = 0, reordered = 0, reordered_worked = 0, reordered_failed_completely = 0, reordered_reused = 0;
+    m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0;
     for (auto& i : m_ordered_list) {
 
         int index = i.second;
-        mol1 = m_molecules.at(index).second;
-        if (mol1->AtomCount() == 0) {
-            fail++;
+        Molecule* mol1 = m_molecules.at(index).second;
+        int result = PreCheckAgainstAccepted(index);
+        if (result == -1)
             continue;
-        }
-        if (m_result.size() >= m_maxrank) {
-            ok = false;
-            continue;
-        }
-        /* Lets postpone the reordering */
-        std::vector<Molecule*> temp_list;
-        if (mol1->Energy() == 0) {
-            filtered[mol1->Name()].push_back("Empty");
-            ok = false;
-        } else {
-            //mol1->CalculateRotationalConstants();
-            for (auto* mol2 : m_result) {
-                if (filtered.count(mol1->Name())) {
-                    if (!m_silent)
-                        std::cout << mol1->Name() << " already rejected. Skipping check against " << mol2->Name() << std::endl;
-                    continue;
-                }
-                RMSDDriver* driver = new RMSDDriver;
-                driver->setSilent(true);
-                driver->setProtons(!m_heavy);
-                driver->setForceReorder(ForceReorder());
-                driver->setCheckConnections(CheckConnections());
+        else
+            ok = result;
 
-                if (!m_silent) {
-                    std::cout << std::endl
-                              << std::setprecision(10)
-                              << std::endl
-                              << std::endl
-                              << "Reference Molecule:" << mol1->Name() << " (" << mol1->Energy() << " Eh)        Target Molecule " << mol2->Name() << " (" << mol2->Energy() << " Eh)" << std::endl;
-                }
-                if (!m_useRestart) {
-                    m_reference_last_energy = mol1->Energy();
-                    m_target_last_energy = mol2->Energy();
-                }
-
-                double difference = abs(mol1->Energy() - mol2->Energy()) * 2625.5;
-                if (m_energy_cutoff > 0)
-                    if (difference > m_energy_cutoff) {
-                        ok = false;
-                        continue;
-                    }
-                double rmsd = 0;
-                double Ia = abs(mol1->Ia() - mol2->Ia());
-                double Ib = abs(mol1->Ib() - mol2->Ib());
-                double Ic = abs(mol1->Ic() - mol2->Ic());
-
-                double diff_rot = (Ia + Ib + Ic) * third;
-
-                driver->setReference(mol1);
-                driver->setTarget(mol2);
-
-                driver->AutoPilot();
-                rmsd = driver->RMSD();
-
-                int accepted_rotational = AcceptRotationalConstant(diff_rot);
-                std::cout << accepted_rotational << " ";
-                if (!m_silent) {
-                    std::cout << "Energy Difference: " << std::setprecision(2) << difference << " kJ/mol" << std::endl;
-                    std::cout << "Average Difference in rot constant " << std::setprecision(4) << Ia << " MHz" << std::endl;
-                    std::cout << "Average Difference in rot constant " << std::setprecision(4) << Ib << " MHz" << std::endl;
-                    std::cout << "Average Difference in rot constant " << std::setprecision(4) << Ic << " MHz" << std::endl;
-
-                    std::cout << "RMSD = " << std::setprecision(5) << rmsd << " A" << std::endl;
-                }
-                if (rmsd > m_rmsd_threshold && difference < 1 && accepted_rotational == 0) {
-                    temp_list.push_back(mol2);
-                    if (!m_silent) {
-                        std::cout << "~~ Reordering forced as energies and rotational constants are too close and rmsd is too different! ~~" << std::endl;
-                        std::cout << "*** Adding " << mol2->Name() << " to the list as RMSD is " << rmsd << "! ***" << std::endl;
-                    }
-                } else {
-                    if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && accepted_rotational > 0)) {
-                        ok = false;
-                        filtered[mol1->Name()].push_back(mol2->Name());
-                        if (!m_silent) {
-                            std::cout << "  ** Rejecting structure **" << std::endl;
-                        }
-                        if (rmsd <= m_rmsd_threshold * m_nearly_missed) {
-                            if (!m_silent) {
-                                std::cout << " Nearly missed for " << mol1->Name() << std::endl;
-                            }
-                            m_nearly.push_back(mol1);
-                        }
-                        continue;
-                    }
-                    if (accepted_rotational < 0 && difference < m_energy_threshold) {
-                        if (accepted_rotational < 0) {
-                            std::cout << mol1->Name() << " alalalalala " << mol2->Name() << std::endl;
-                            mol1->appendXYZFile("rot_tight.xyz");
-                            mol2->appendXYZFile("rot_tight.xyz");
-                        }
-                        ok = false;
-                        filtered[mol1->Name()].push_back(mol2->Name());
-                        if (!m_silent) {
-                            std::cout << "  ** Rejecting structure **" << std::endl;
-                        }
-                        continue;
-                    }
-                }
-                delete driver;
-            }
-        }
         TriggerWriteRestart();
 
-        if (temp_list.size()) {
+        if (m_global_temp_list.size()) {
             if (!m_silent) {
                 std::cout << std::endl
-                          << "             ###   " << std::setprecision(4) << start / double(ende) * 100 << "% done!   ###" << std::endl;
+                          << "             ###   " << std::setprecision(4) << m_start / double(m_end) * 100 << "% done!   ###" << std::endl;
                 std::cout << "*** Start Reordering Block **" << std::endl;
             }
         }
-        if (!filtered.count(mol1->Name())) {
-            for (const auto mol2 : temp_list) {
-                if (filtered.count(mol1->Name())) {
-                    if (!m_silent) {
-                        std::cout << mol1->Name() << " already rejected. Skipping check against " << mol2->Name() << std::endl;
-                    }
+        if (!m_filtered.count(mol1->Name())) {
+            if (m_global_temp_list.size()) {
+                int result = CheckTempList(index);
+                if (result == -1)
                     continue;
-                }
-                if (!m_silent) {
-                    std::cout << "*** Reordering " << mol2->Name() << " now! ***" << std::endl;
-                }
-                double difference = abs(mol1->Energy() - mol2->Energy()) * 2625.5;
-
-                RMSDDriver* driver = new RMSDDriver;
-                driver->setSilent(true);
-                driver->setProtons(!m_heavy);
-                driver->setForceReorder(ForceReorder());
-                driver->setCheckConnections(CheckConnections());
-
-                driver->setReference(mol1);
-                driver->setTarget(mol2);
-
-                driver->AutoPilot();
-                double rmsd = driver->RMSD();
-
-                if (!m_silent) {
-                    std::cout << std::endl
-                              << std::endl
-                              << "*** Reordering forced as energies and rotational constants are too close and rmsd (" << rmsd << ") is too different! ***" << std::endl
-                              << std::endl;
-                }
-                bool digDeeper = true;
-                if (!m_silent) {
-                    std::cout << "*** Checking old reordering solutions first. ***" << std::endl;
-                }
-                for (const auto& rule : m_reorder_rules) {
-                    double tmp_rmsd = driver->Rules2RMSD(rule);
-                    if (!m_silent) {
-                        std::cout << tmp_rmsd << " A ";
-                    }
-                    if (tmp_rmsd < m_rmsd_threshold) {
-                        digDeeper = false;
-                        if (!m_silent) {
-                            std::cout << std::endl
-                                      << std::endl
-                                      << "*** Old reordering solution worked here! ***" << std::endl
-                                      << std::endl;
-                        }
-                        mol1->appendXYZFile("reused.xyz");
-                        mol2->appendXYZFile("reused.xyz");
-                        filtered_rules << Tools::Vector2String(rule) << std::endl;
-                        ok = false;
-                        filtered[mol1->Name()].push_back(mol2->Name());
-                        reordered_reused++;
-                        break;
-                    }
-                }
-                if (!m_silent) {
-                    std::cout << std::endl;
-                }
-                if (m_reference_last_energy - mol1->Energy() > 1e-5 && m_useRestart) {
-                    {
-                        if (!m_silent) {
-                            std::cout << "*** Skip reordering, as we are in Restart Modus *** " << std::endl;
-                        }
-                        digDeeper = false;
-                    }
-                } else {
-                    m_useRestart = false;
-                }
-                if (m_prevent_reorder) {
-                    digDeeper = false;
-                    if (!m_silent) {
-                        std::cout << "~~ Reordering prevented, so no more will be done regarding these structures. ~~" << std::endl;
-                    }
-                }
-                if (digDeeper) {
-
-                    {
-                        m_reference_last_energy = mol1->Energy();
-                        m_target_last_energy = mol2->Energy();
-                    }
-                    if (!m_silent) {
-                        std::cout << "*** Nothing fitting found, reorder now! ***" << std::endl;
-                    }
-                    driver->setForceReorder(true);
-                    driver->AutoPilot();
-                    driver->setForceReorder(ForceReorder());
-                    reordered++;
-                    double rmsd_tmp = driver->RMSD();
-                    if (std::find(m_reorder_rules.begin(), m_reorder_rules.end(), driver->ReorderRules()) == m_reorder_rules.end()) {
-                        if (!m_silent) {
-                            std::cout << "*** Newly obtained reorder solution added to heap of information ***" << std::endl;
-                        }
-                        m_reorder_rules.push_back(driver->ReorderRules());
-                    }
-                    TriggerWriteRestart();
-                    if (!m_silent) {
-                        std::cout << "New rmsd is " << rmsd_tmp << ". Old was " << rmsd << std::endl;
-                    }
-                    if (rmsd_tmp > rmsd) {
-                        if (!m_silent) {
-                            std::cout << "Reordering failed, a better fit was not found! This may happen." << std::endl;
-                        }
-                        reordered_failed_completely++;
-                        m_failed.push_back(mol1);
-                        m_failed.push_back(mol2);
-                    }
-                    rmsd = rmsd_tmp;
-                }
-                if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold)) {
-                    reordered_worked++;
-                    ok = false;
-                    filtered[mol1->Name()].push_back(mol2->Name());
-                    if (!m_silent) {
-                        std::cout << "  ** Rejecting structure **" << std::endl;
-                    }
-                    if (rmsd <= m_rmsd_threshold * m_nearly_missed) {
-                        if (!m_silent) {
-                            std::cout << " Nearly missed for " << mol1->Name() << std::endl;
-                        }
-                        m_nearly.push_back(mol1);
-                    }
-                    continue;
-                }
-                if (difference < m_energy_threshold) {
-                    ok = false;
-                    filtered[mol1->Name()].push_back(mol2->Name());
-                    if (!m_silent) {
-                        std::cout << "  ** Rejecting structure **" << std::endl;
-                    }
-                    continue;
-                }
-                delete driver;
+                else
+                    ok = result;
             }
+
         } else {
             if (!m_silent) {
                 std::cout << "Skipping check, as structure already rejected." << std::endl;
             }
         }
-        if (ok && accepted < m_maxrank && m_maxrank > 0) {
+        if (ok && m_accepted < m_maxrank && m_maxrank > 0) {
             m_result.push_back(mol1);
             if (m_writeFiles)
                 mol1->appendXYZFile(result_name);
@@ -572,20 +370,13 @@ void ConfScan::scan()
                           << "Having now " << m_result.size() << " structures accepted." << std::endl
                           << "               ** Accepting " << mol1->Name() << " **" << std::endl;
             }
-            accepted++;
+            m_accepted++;
             /* Write each accepted structure immediately */
         } else
-            rejected++;
+            m_rejected++;
         ok = true;
-        start++;
-        std::cout << std::endl
-                  << "             ###   " << std::setprecision(4) << start / double(ende) * 100 << "% done!   ###" << std::endl;
-        std::cout << "# Accepted : " << accepted << "     ";
-        std::cout << "# Rejected : " << rejected << "     ";
-        std::cout << "# Reordered : " << reordered << "     ";
-        std::cout << "# Successfully : " << reordered_worked << "    ";
-        std::cout << "# Not at all : " << reordered_failed_completely << "     ";
-        std::cout << "# Reused Results : " << reordered_reused << std::endl;
+        m_start++;
+        PrintStatus();
     }
 
     if (m_result.size() == 0)
@@ -610,15 +401,287 @@ void ConfScan::scan()
     }
     TriggerWriteRestart();
 
-    std::cout << m_result.size() << " structures were kept - of " << m_molecules.size() - fail << " total!" << std::endl;
+    std::cout << m_result.size() << " structures were kept - of " << m_molecules.size() - m_fail << " total!" << std::endl;
 
     std::cout << "Best structure is " << m_result[0]->Name() << " Energy = " << std::setprecision(8) << m_result[0]->Energy() << std::endl;
-    std::cout << "List of filtered names ... " << std::endl;
-    for (const auto& element : filtered) {
+    std::cout << "List of m_filtered names ... " << std::endl;
+    for (const auto& element : m_filtered) {
         std::cout << element.first << " rejected due to: ";
         for (const std::string& str : element.second)
             std::cout << str << " ";
         std::cout << std::endl;
     }
     std::cout << " done :-) " << std::endl;
+}
+
+int ConfScan::PreCheckAgainstAccepted(int index)
+{
+    bool ok = true;
+    Molecule* mol1 = m_molecules.at(index).second;
+    if (mol1->AtomCount() == 0) {
+        m_fail++;
+        return -1;
+    }
+    if (m_result.size() >= m_maxrank) {
+        ok = false;
+        return -1;
+    }
+    m_global_temp_list.clear();
+    if (mol1->Energy() == 0) {
+        m_filtered[mol1->Name()].push_back("Empty");
+        ok = false;
+    } else {
+        for (auto* mol2 : m_result) {
+            if (m_filtered.count(mol1->Name())) {
+                if (!m_silent)
+                    std::cout << mol1->Name() << " already rejected. Skipping check against " << mol2->Name() << std::endl;
+                continue;
+            }
+            RMSDDriver* driver = new RMSDDriver;
+            driver->setSilent(true);
+            driver->setProtons(!m_heavy);
+            driver->setForceReorder(ForceReorder());
+            driver->setCheckConnections(CheckConnections());
+
+            if (!m_silent) {
+                std::cout << std::endl
+                          << std::setprecision(10)
+                          << std::endl
+                          << std::endl
+                          << "Reference Molecule:" << mol1->Name() << " (" << mol1->Energy() << " Eh)        Target Molecule " << mol2->Name() << " (" << mol2->Energy() << " Eh)" << std::endl;
+            }
+            if (!m_useRestart) {
+                m_reference_last_energy = mol1->Energy();
+                m_target_last_energy = mol2->Energy();
+            }
+
+            double difference = abs(mol1->Energy() - mol2->Energy()) * 2625.5;
+            if (m_energy_cutoff > 0)
+                if (difference > m_energy_cutoff) {
+                    ok = false;
+                    continue;
+                }
+            double rmsd = 0;
+            double Ia = abs(mol1->Ia() - mol2->Ia());
+            double Ib = abs(mol1->Ib() - mol2->Ib());
+            double Ic = abs(mol1->Ic() - mol2->Ic());
+
+            double diff_rot = (Ia + Ib + Ic) * third;
+
+            driver->setReference(mol1);
+            driver->setTarget(mol2);
+
+            driver->AutoPilot();
+            rmsd = driver->RMSD();
+
+            int accepted_rotational = AcceptRotationalConstant(diff_rot);
+
+            if (!m_silent) {
+                std::cout << "Energy Difference: " << std::setprecision(2) << difference << " kJ/mol" << std::endl;
+                std::cout << "Difference in Ia " << std::setprecision(2) << Ia << " MHz" << std::endl;
+                std::cout << "Difference in Ib " << std::setprecision(2) << Ib << " MHz" << std::endl;
+                std::cout << "Difference in Ic " << std::setprecision(2) << Ic << " MHz" << std::endl;
+
+                std::cout << "RMSD = " << std::setprecision(5) << rmsd << " A" << std::endl;
+            }
+            if (rmsd > m_rmsd_threshold && difference < 1 && accepted_rotational == 0) {
+                m_global_temp_list.push_back(mol2);
+                if (!m_silent) {
+                    std::cout << "~~ Reordering forced as energies and rotational constants are too close and rmsd is too different! ~~" << std::endl;
+                    std::cout << "*** Adding " << mol2->Name() << " to the list as RMSD is " << rmsd << "! ***" << std::endl;
+                }
+            } else {
+                if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && accepted_rotational > 0)) {
+                    ok = false;
+                    std::string reject_reason = mol2->Name() + " RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference) + "; dIx = " + std::to_string(diff_rot);
+                    m_filtered[mol1->Name()].push_back(reject_reason);
+                    if (!m_silent) {
+                        std::cout << "  ** Rejecting structure **" << std::endl;
+                    }
+                    if (rmsd <= m_rmsd_threshold * m_nearly_missed) {
+                        if (!m_silent) {
+                            std::cout << " Nearly missed for " << mol1->Name() << std::endl;
+                        }
+                        m_nearly.push_back(mol1);
+                    }
+                    continue;
+                }
+                if (/*accepted_rotational < 0 ||*/ rmsd < m_rmsd_threshold) {
+                    if (accepted_rotational < 0 && rmsd > m_rmsd_threshold) {
+                        std::cout << mol1->Name() << " alalalalala " << mol2->Name() << std::endl;
+                        mol1->appendXYZFile("rot_tight.xyz");
+                        mol2->appendXYZFile("rot_tight.xyz");
+                    }
+                    ok = false;
+
+                    std::string reject_reason = mol2->Name() + " RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference) + "; dIx = " + std::to_string(diff_rot);
+                    m_filtered[mol1->Name()].push_back(reject_reason);
+                    if (!m_silent) {
+                        std::cout << "  ** Rejecting structure **" << std::endl;
+                    }
+                    continue;
+                }
+            }
+            delete driver;
+        }
+    }
+    return ok;
+}
+
+int ConfScan::CheckTempList(int index)
+{
+    bool ok = true;
+    Molecule* mol1 = m_molecules.at(index).second;
+
+    for (const auto mol2 : m_global_temp_list) {
+        if (m_filtered.count(mol1->Name())) {
+            if (!m_silent) {
+                std::cout << mol1->Name() << " already rejected. Skipping check against " << mol2->Name() << std::endl;
+            }
+            return -1;
+        }
+        if (!m_silent) {
+            std::cout << "*** Reordering " << mol2->Name() << " now! ***" << std::endl;
+        }
+        double difference = abs(mol1->Energy() - mol2->Energy()) * 2625.5;
+
+        RMSDDriver* driver = new RMSDDriver;
+        driver->setSilent(true);
+        driver->setProtons(!m_heavy);
+        driver->setForceReorder(ForceReorder());
+        driver->setCheckConnections(CheckConnections());
+
+        driver->setReference(mol1);
+        driver->setTarget(mol2);
+
+        driver->AutoPilot();
+        double rmsd = driver->RMSD();
+
+        if (!m_silent) {
+            std::cout << std::endl
+                      << std::endl
+                      << "*** Reordering forced as energies and rotational constants are too close and rmsd (" << rmsd << ") is too different! ***" << std::endl
+                      << std::endl;
+        }
+        bool digDeeper = true;
+        if (!m_silent) {
+            std::cout << "*** Checking old reordering solutions first. ***" << std::endl;
+        }
+        for (const auto& rule : m_reorder_rules) {
+            double tmp_rmsd = driver->Rules2RMSD(rule);
+            if (!m_silent) {
+                std::cout << tmp_rmsd << " A ";
+            }
+            if (tmp_rmsd < m_rmsd_threshold) {
+                digDeeper = false;
+                if (!m_silent) {
+                    std::cout << std::endl
+                              << std::endl
+                              << "*** Old reordering solution worked here! ***" << std::endl
+                              << std::endl;
+                }
+                mol1->appendXYZFile("reused.xyz");
+                mol2->appendXYZFile("reused.xyz");
+                // m_filtered_rules << Tools::Vector2String(rule) << std::endl;
+                ok = false;
+
+                std::string reject_reason = mol2->Name() + " RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference);
+                m_filtered[mol1->Name()].push_back(reject_reason);
+                m_reordered_reused++;
+                break;
+            }
+        }
+        if (!m_silent) {
+            std::cout << std::endl;
+        }
+        if (m_reference_last_energy - mol1->Energy() > 1e-5 && m_useRestart) {
+            {
+                if (!m_silent) {
+                    std::cout << "*** Skip reordering, as we are in Restart Modus *** " << std::endl;
+                }
+                digDeeper = false;
+            }
+        } else {
+            m_useRestart = false;
+        }
+        if (m_prevent_reorder) {
+            digDeeper = false;
+            if (!m_silent) {
+                std::cout << "~~ Reordering prevented, so no more will be done regarding these structures. ~~" << std::endl;
+            }
+        }
+        if (digDeeper) {
+
+            {
+                m_reference_last_energy = mol1->Energy();
+                m_target_last_energy = mol2->Energy();
+            }
+            if (!m_silent) {
+                std::cout << "*** Nothing fitting found, reorder now! ***" << std::endl;
+            }
+            driver->setForceReorder(true);
+            driver->AutoPilot();
+            driver->setForceReorder(ForceReorder());
+            m_reordered++;
+            double rmsd_tmp = driver->RMSD();
+            if (std::find(m_reorder_rules.begin(), m_reorder_rules.end(), driver->ReorderRules()) == m_reorder_rules.end()) {
+                if (!m_silent) {
+                    std::cout << "*** Newly obtained reorder solution added to heap of information ***" << std::endl;
+                }
+                m_reorder_rules.push_back(driver->ReorderRules());
+            }
+            TriggerWriteRestart();
+            if (!m_silent) {
+                std::cout << "New rmsd is " << rmsd_tmp << ". Old was " << rmsd << std::endl;
+            }
+            if (rmsd_tmp > rmsd) {
+                if (!m_silent) {
+                    std::cout << "Reordering failed, a better fit was not found! This may happen." << std::endl;
+                }
+                m_reordered_failed_completely++;
+                m_failed.push_back(mol1);
+                m_failed.push_back(mol2);
+            }
+            rmsd = rmsd_tmp;
+        }
+        if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold)) {
+            m_reordered_worked++;
+            ok = false;
+
+            std::string reject_reason = mol2->Name() + " RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference);
+            m_filtered[mol1->Name()].push_back(reject_reason);
+            if (!m_silent) {
+                std::cout << "  ** Rejecting structure **" << std::endl;
+            }
+            if (rmsd <= m_rmsd_threshold * m_nearly_missed) {
+                if (!m_silent) {
+                    std::cout << " Nearly missed for " << mol1->Name() << std::endl;
+                }
+                m_nearly.push_back(mol1);
+            }
+            continue;
+        }
+        if (rmsd < m_rmsd_threshold) {
+            ok = false;
+            m_filtered[mol1->Name()].push_back(mol2->Name());
+            if (!m_silent) {
+                std::cout << "  ** Rejecting structure **" << std::endl;
+            }
+            continue;
+        }
+        delete driver;
+    }
+    return ok;
+}
+
+void ConfScan::PrintStatus()
+{
+    std::cout << std::endl
+              << "             ###   " << std::setprecision(4) << m_start / double(m_end) * 100 << "% done!   ###" << std::endl;
+    std::cout << "# Accepted : " << m_accepted << "     ";
+    std::cout << "# Rejected : " << m_rejected << "     ";
+    std::cout << "# Reordered : " << m_reordered << "     ";
+    std::cout << "# Successfully : " << m_reordered_worked << "    ";
+    std::cout << "# Not at all : " << m_reordered_failed_completely << "     ";
+    std::cout << "# Reused Results : " << m_reordered_reused << std::endl;
 }

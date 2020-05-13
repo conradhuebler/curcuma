@@ -38,6 +38,8 @@ protected:
 
     StringList RestartFiles() const;
 
+    nlohmann::json LoadControl() const;
+
 private:
     /* Lets have this for all modules */
     virtual nlohmann::json WriteRestartInformation() = 0;
@@ -46,6 +48,9 @@ private:
     virtual bool LoadRestartInformation() = 0;
 
     virtual std::string MethodName() const = 0;
+
+    /* Lets have all methods read the input/control file */
+    virtual void ReadControlFile() = 0;
 
     bool m_restart = true;
 };
