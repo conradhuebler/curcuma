@@ -185,9 +185,13 @@ void Molecule::setXYZComment(const std::string& comment)
             }
         }
     } else if (list.size() == 1) {
-        try {
-            setEnergy(std::stod((list[0])));
-        } catch (const std::string& what_arg) {
+        if (list[0].compare("") == 0) {
+            // Ignore empty comment line
+        } else {
+            try {
+                setEnergy(std::stod((list[0])));
+            } catch (const std::string& what_arg) {
+            }
         }
     } else {
         for (const string& s : list) {
@@ -537,8 +541,8 @@ void Molecule::CalculateRotationalConstants()
     pos(0) /= mass;
     pos(1) /= mass;
     pos(2) /= mass;
-    // std::cout << Centroid().transpose() << std::endl << pos.transpose() << std::endl;
-    Geometry geom = GeometryTools::TranslateGeometry(getGeometry(), Centroid(), pos);
+
+    Geometry geom = GeometryTools::TranslateGeometry(getGeometry(), pos, { 0, 0, 0 });
     Geometry matrix = Geometry::Zero(3, 3);
     for (int i = 0; i < AtomCount(); ++i) {
         double m = Elements::AtomicMass[m_atoms[i]];
@@ -561,11 +565,13 @@ void Molecule::CalculateRotationalConstants()
 
     Eigen::SelfAdjointEigenSolver<Geometry> diag_I;
     diag_I.compute(matrix);
+    double conv = 1.6605402E-24 * 10E-10 * 10E-10 * 10;
+    double conv2 = 6.6260755E-34 / pi / pi / 8;
 
     //std::cout << diag_I.eigenvalues().transpose() << std::endl;
-    m_Ia = diag_I.eigenvalues()(0);
-    m_Ib = diag_I.eigenvalues()(1);
-    m_Ic = diag_I.eigenvalues()(2);
+    m_Ia = conv2 / (diag_I.eigenvalues()(0) * conv);
+    m_Ib = conv2 / (diag_I.eigenvalues()(1) * conv);
+    m_Ic = conv2 / (diag_I.eigenvalues()(2) * conv);
 }
 
 std::map<int, std::vector<int>> Molecule::getConnectivtiy(double scaling, int latest) const

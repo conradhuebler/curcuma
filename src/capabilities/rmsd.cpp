@@ -583,6 +583,11 @@ void RMSDDriver::ReorderStraight()
         for (const auto& element : (*m_storage[i].data())) {
             //   std::cout << element.first << "(" << m_threshold << ")" << std::endl;
             if (element.first < m_threshold) {
+                /*if(i > 34)
+                {
+                    if(counter < 20)
+                        std::cout << element.first << " " << Tools::Vector2String(element.second) << std::endl;
+                }*/
                 counter++;
                 if (!SolveIntermediate(element.second) && !next)
                     next = i;

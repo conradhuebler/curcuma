@@ -66,6 +66,7 @@ bool ConfScan::openFile()
         molecule++;
         if (m_noname)
             mol->setName(NamePattern(molecule));
+        mol->CalculateRotationalConstants();
         std::pair<std::string, Molecule*> pair(mol->Name(), mol);
         m_molecules.push_back(pair);
     }
@@ -133,6 +134,15 @@ bool ConfScan::LoadRestartInformation()
         } catch (json::type_error& e) {
         }
         try {
+            m_diff_rot_abs_tight = confscan["AbsRotationalTight"];
+        } catch (json::type_error& e) {
+        }
+        try {
+            m_diff_rot_abs_loose = confscan["AbsRotationalLoose"];
+        } catch (json::type_error& e) {
+        }
+
+        try {
             m_target_last_energy = confscan["TargetLastEnergy"];
         } catch (json::type_error& e) {
         }
@@ -157,7 +167,72 @@ nlohmann::json ConfScan::WriteRestartInformation()
     block["ReorderRules"] = Tools::VectorVector2String(m_reorder_rules);
     block["ReferenceLastEnergy"] = m_reference_last_energy;
     block["TargetLastEnergy"] = m_target_last_energy;
+    block["AbsRotationalTight"] = m_diff_rot_abs_tight;
+    block["AbsRotationalLoose"] = m_diff_rot_abs_loose;
+
     return block;
+}
+
+void ConfScan::ParametriseRotationalCutoffs()
+{
+    std::cout << "Parametrise cutoff of rotational constants for reordering decison tree!" << std::endl;
+    m_internal_parametrised = true;
+    std::vector<double> accepted, rejected;
+    double accepted_single = 0;
+    for (int i = 0; i < m_ordered_list.size(); ++i) {
+        for (int j = i + 1; j < m_ordered_list.size(); ++j) {
+            RMSDDriver* driver = new RMSDDriver;
+            driver->setSilent(true);
+            driver->setProtons(!m_heavy);
+            driver->setForceReorder(false);
+            driver->setCheckConnections(false);
+
+            Molecule* mol1 = m_molecules.at(i).second;
+            Molecule* mol2 = m_molecules.at(j).second;
+            //mol1->CalculateRotationalConstants();
+            //mol2->CalculateRotationalConstants();
+
+            double Ia = abs(mol1->Ia() - mol2->Ia());
+            double Ib = abs(mol1->Ib() - mol2->Ib());
+            double Ic = abs(mol1->Ic() - mol2->Ic());
+
+            double diff_rot = (Ia + Ib + Ic) * third;
+            driver->setReference(mol1);
+            driver->setTarget(mol2);
+
+            driver->AutoPilot();
+            double rmsd = driver->RMSD();
+            delete driver;
+            if (rmsd < m_rmsd_threshold) {
+                accepted.push_back(diff_rot);
+                accepted_single = std::max(accepted_single, diff_rot);
+            } else
+                rejected.push_back(diff_rot);
+        }
+    }
+    double scale_upper = 2;
+    m_diff_rot_abs_tight = Tools::median(accepted) * 0.5;
+    m_diff_rot_abs_loose = Tools::median(rejected) * scale_upper;
+}
+
+int ConfScan::AcceptRotationalConstant(double constant)
+{
+    /* This has to be compressed to logic gatters to avoid branching */
+    if (m_internal_parametrised) {
+        if (constant < m_diff_rot_abs_tight)
+            return -1;
+        else if (m_diff_rot_abs_tight < constant && constant < m_diff_rot_abs_loose)
+            return 0;
+        else
+            return 1;
+    } else {
+        if (constant < m_diff_rot_rel_tight)
+            return -1;
+        else if (m_diff_rot_rel_tight < constant && constant < m_diff_rot_rel_loose)
+            return 0;
+        else
+            return 1;
+    }
 }
 
 void ConfScan::scan()
@@ -198,6 +273,11 @@ void ConfScan::scan()
         missed_file.close();
     }
 
+    //if(!m_useRestart)
+    ParametriseRotationalCutoffs();
+
+    std::ofstream filtered_rules;
+    filtered_rules.open("filtered_rules.txt");
     std::cout << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
               << "" << std::endl;
 
@@ -208,9 +288,9 @@ void ConfScan::scan()
 
     std::cout << "    RMSD Threshold set to: " << m_rmsd_threshold << " Angstrom" << std::endl;
     std::cout << "    Energy Threshold set to: " << m_energy_threshold << " kJ/mol" << std::endl;
-    std::cout << "    Average Difference in rot constants: " << std::endl;
-    std::cout << "    Loose Threshold: " << m_diff_rot_loose << std::endl;
-    std::cout << "    Tight Threshold: " << m_diff_rot_tight << std::endl;
+    std::cout << "    Thresholds in rotational constants (averaged over Ia, Ib and Ic): " << std::endl;
+    std::cout << "    Loose Threshold: " << m_diff_rot_abs_loose << " MHz" << std::endl;
+    std::cout << "    Tight Threshold: " << m_diff_rot_abs_tight << " MHz" << std::endl;
     std::cout << "" << std::endl
               << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
               << std::endl;
@@ -241,7 +321,7 @@ void ConfScan::scan()
             filtered[mol1->Name()].push_back("Empty");
             ok = false;
         } else {
-            mol1->CalculateRotationalConstants();
+            //mol1->CalculateRotationalConstants();
             for (auto* mol2 : m_result) {
                 if (filtered.count(mol1->Name())) {
                     if (!m_silent)
@@ -273,30 +353,36 @@ void ConfScan::scan()
                         continue;
                     }
                 double rmsd = 0;
-                double Ia = abs(mol1->Ia() - mol2->Ia()) / mol2->Ia();
-                double Ib = abs(mol1->Ib() - mol2->Ib()) / mol2->Ib();
-                double Ic = abs(mol1->Ic() - mol2->Ic()) / mol2->Ic();
+                double Ia = abs(mol1->Ia() - mol2->Ia());
+                double Ib = abs(mol1->Ib() - mol2->Ib());
+                double Ic = abs(mol1->Ic() - mol2->Ic());
 
-                double diff_rot = (Ia + Ib + Ic) * 0.33333;
+                double diff_rot = (Ia + Ib + Ic) * third;
 
                 driver->setReference(mol1);
                 driver->setTarget(mol2);
 
                 driver->AutoPilot();
                 rmsd = driver->RMSD();
+
+                int accepted_rotational = AcceptRotationalConstant(diff_rot);
+                std::cout << accepted_rotational << " ";
                 if (!m_silent) {
                     std::cout << "Energy Difference: " << std::setprecision(2) << difference << " kJ/mol" << std::endl;
-                    std::cout << "Average Difference in rot constant " << std::setprecision(4) << diff_rot << " some unit" << std::endl;
+                    std::cout << "Average Difference in rot constant " << std::setprecision(4) << Ia << " MHz" << std::endl;
+                    std::cout << "Average Difference in rot constant " << std::setprecision(4) << Ib << " MHz" << std::endl;
+                    std::cout << "Average Difference in rot constant " << std::setprecision(4) << Ic << " MHz" << std::endl;
+
                     std::cout << "RMSD = " << std::setprecision(5) << rmsd << " A" << std::endl;
                 }
-                if (rmsd > m_rmsd_threshold && difference < 1 && diff_rot < 0.1 && diff_rot > 0.01) {
+                if (rmsd > m_rmsd_threshold && difference < 1 && accepted_rotational == 0) {
                     temp_list.push_back(mol2);
                     if (!m_silent) {
                         std::cout << "~~ Reordering forced as energies and rotational constants are too close and rmsd is too different! ~~" << std::endl;
                         std::cout << "*** Adding " << mol2->Name() << " to the list as RMSD is " << rmsd << "! ***" << std::endl;
                     }
                 } else {
-                    if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && diff_rot < m_diff_rot_loose)) {
+                    if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && accepted_rotational > 0)) {
                         ok = false;
                         filtered[mol1->Name()].push_back(mol2->Name());
                         if (!m_silent) {
@@ -310,7 +396,12 @@ void ConfScan::scan()
                         }
                         continue;
                     }
-                    if (diff_rot < m_diff_rot_tight && difference < m_energy_threshold) {
+                    if (accepted_rotational < 0 && difference < m_energy_threshold) {
+                        if (accepted_rotational < 0) {
+                            std::cout << mol1->Name() << " alalalalala " << mol2->Name() << std::endl;
+                            mol1->appendXYZFile("rot_tight.xyz");
+                            mol2->appendXYZFile("rot_tight.xyz");
+                        }
                         ok = false;
                         filtered[mol1->Name()].push_back(mol2->Name());
                         if (!m_silent) {
@@ -344,12 +435,6 @@ void ConfScan::scan()
                 }
                 double difference = abs(mol1->Energy() - mol2->Energy()) * 2625.5;
 
-                double Ia = abs(mol1->Ia() - mol2->Ia()) / mol2->Ia();
-                double Ib = abs(mol1->Ib() - mol2->Ib()) / mol2->Ib();
-                double Ic = abs(mol1->Ic() - mol2->Ic()) / mol2->Ic();
-
-                double diff_rot = (Ia + Ib + Ic) * 0.33333;
-
                 RMSDDriver* driver = new RMSDDriver;
                 driver->setSilent(true);
                 driver->setProtons(!m_heavy);
@@ -361,6 +446,7 @@ void ConfScan::scan()
 
                 driver->AutoPilot();
                 double rmsd = driver->RMSD();
+
                 if (!m_silent) {
                     std::cout << std::endl
                               << std::endl
@@ -384,6 +470,9 @@ void ConfScan::scan()
                                       << "*** Old reordering solution worked here! ***" << std::endl
                                       << std::endl;
                         }
+                        mol1->appendXYZFile("reused.xyz");
+                        mol2->appendXYZFile("reused.xyz");
+                        filtered_rules << Tools::Vector2String(rule) << std::endl;
                         ok = false;
                         filtered[mol1->Name()].push_back(mol2->Name());
                         reordered_reused++;
@@ -443,7 +532,7 @@ void ConfScan::scan()
                     }
                     rmsd = rmsd_tmp;
                 }
-                if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && diff_rot < m_diff_rot_loose)) {
+                if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold)) {
                     reordered_worked++;
                     ok = false;
                     filtered[mol1->Name()].push_back(mol2->Name());
@@ -458,7 +547,7 @@ void ConfScan::scan()
                     }
                     continue;
                 }
-                if (diff_rot < m_diff_rot_tight && difference < m_energy_threshold) {
+                if (difference < m_energy_threshold) {
                     ok = false;
                     filtered[mol1->Name()].push_back(mol2->Name());
                     if (!m_silent) {

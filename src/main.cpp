@@ -160,6 +160,8 @@ int main(int argc, char **argv) {
         driver->TargetAligned().writeXYZFile("target_align.xyz");
         driver->TargetReorderd().writeXYZFile("target_reorder.xyz");
 
+        std::cout << Tools::Vector2String(driver->ReorderRules()) << std::endl;
+
         delete driver;
 
         exit(0);
