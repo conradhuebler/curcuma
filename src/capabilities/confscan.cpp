@@ -93,6 +93,23 @@ void ConfScan::ReadControlFile()
         m_maxrank = confscan["MaxRank"];
     } catch (json::type_error& e) {
     }
+
+    try {
+        m_rmsd_threshold = confscan["RMSDThreshold"];
+    } catch (json::type_error& e) {
+    }
+    try {
+        m_diff_rot_abs_tight = confscan["AbsRotationalTight"];
+        m_parameter_loaded = true;
+        m_internal_parametrised = true;
+    } catch (json::type_error& e) {
+    }
+    try {
+        m_diff_rot_abs_loose = confscan["AbsRotationalLoose"];
+        m_parameter_loaded = true;
+        m_internal_parametrised = true;
+    } catch (json::type_error& e) {
+    }
 }
 
 void ConfScan::setMolecules(const std::map<double, Molecule*>& molecules)
@@ -507,11 +524,11 @@ int ConfScan::PreCheckAgainstAccepted(int index)
                     continue;
                 }
                 if (/*accepted_rotational < 0 ||*/ rmsd < m_rmsd_threshold) {
-                    if (accepted_rotational < 0 && rmsd > m_rmsd_threshold) {
+                    /*if (accepted_rotational < 0 && rmsd > m_rmsd_threshold) {
                         std::cout << mol1->Name() << " alalalalala " << mol2->Name() << std::endl;
                         mol1->appendXYZFile("rot_tight.xyz");
                         mol2->appendXYZFile("rot_tight.xyz");
-                    }
+                    }*/
                     ok = false;
 
                     std::string reject_reason = mol2->Name() + " RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference) + "; dIx = " + std::to_string(diff_rot);
@@ -647,7 +664,6 @@ int ConfScan::CheckTempList(int index)
         if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold)) {
             m_reordered_worked++;
             ok = false;
-
             std::string reject_reason = mol2->Name() + " RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference);
             m_filtered[mol1->Name()].push_back(reject_reason);
             if (!m_silent) {
@@ -663,7 +679,8 @@ int ConfScan::CheckTempList(int index)
         }
         if (rmsd < m_rmsd_threshold) {
             ok = false;
-            m_filtered[mol1->Name()].push_back(mol2->Name());
+            std::string reject_reason = mol2->Name() + " RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference);
+            m_filtered[mol1->Name()].push_back(reject_reason);
             if (!m_silent) {
                 std::cout << "  ** Rejecting structure **" << std::endl;
             }
