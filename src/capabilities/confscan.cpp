@@ -217,6 +217,9 @@ nlohmann::json ConfScan::WriteRestartInformation()
 
 void ConfScan::ParametriseRotationalCutoffs()
 {
+    if (m_prevent_reorder)
+        return;
+
     std::cout << "Parametrise cutoff of rotational constants for reordering decison tree!" << std::endl;
     m_internal_parametrised = true;
     std::vector<double> accepted, rejected;
@@ -260,18 +263,18 @@ int ConfScan::AcceptRotationalConstant(double constant)
     /* This has to be compressed to logic gatters to avoid branching */
     if (m_internal_parametrised) {
         if (constant < m_diff_rot_abs_tight)
-            return -1;
+            return -1; // Assume identical without reordering
         else if (m_diff_rot_abs_tight < constant && constant < m_diff_rot_abs_loose)
-            return 0;
+            return 0; // Lets reorder it
         else
-            return 1;
+            return 1 && m_prevent_reorder == false; // Do not reorder it
     } else {
         if (constant < m_diff_rot_rel_tight)
-            return -1;
+            return -1; // Assume identical without reordering
         else if (m_diff_rot_rel_tight < constant && constant < m_diff_rot_rel_loose)
-            return 0;
+            return 0; // Lets reorder it
         else
-            return 1;
+            return 1 && m_prevent_reorder == false; // Do not reorder it
     }
 }
 
@@ -282,7 +285,7 @@ void ConfScan::scan()
 
     m_silent = m_ordered_list.size() > 500;
     Molecule* mol1;
-    bool ok = true;
+    bool accept = true;
 
     //std::map<std::string, std::vector<std::string>> m_filtered;
     m_fail = 0;
@@ -352,7 +355,7 @@ void ConfScan::scan()
         if (result == -1)
             continue;
         else
-            ok = result;
+            accept = result;
 
         TriggerWriteRestart();
 
@@ -369,7 +372,7 @@ void ConfScan::scan()
                 if (result == -1)
                     continue;
                 else
-                    ok = result;
+                    accept = result;
             }
 
         } else {
@@ -377,7 +380,7 @@ void ConfScan::scan()
                 std::cout << "Skipping check, as structure already rejected." << std::endl;
             }
         }
-        if (ok && m_accepted < m_maxrank && m_maxrank > 0) {
+        if (accept && m_accepted < m_maxrank && m_maxrank > 0) {
             m_result.push_back(mol1);
             if (m_writeFiles)
                 mol1->appendXYZFile(result_name);
@@ -391,7 +394,7 @@ void ConfScan::scan()
             /* Write each accepted structure immediately */
         } else
             m_rejected++;
-        ok = true;
+        accept = true;
         m_start++;
         PrintStatus();
     }
@@ -433,20 +436,20 @@ void ConfScan::scan()
 
 int ConfScan::PreCheckAgainstAccepted(int index)
 {
-    bool ok = true;
+    bool accept = true;
     Molecule* mol1 = m_molecules.at(index).second;
     if (mol1->AtomCount() == 0) {
         m_fail++;
         return -1;
     }
     if (m_result.size() >= m_maxrank) {
-        ok = false;
+        accept = false;
         return -1;
     }
     m_global_temp_list.clear();
     if (mol1->Energy() == 0) {
         m_filtered[mol1->Name()].push_back("Empty");
-        ok = false;
+        accept = false;
     } else {
         for (auto* mol2 : m_result) {
             if (m_filtered.count(mol1->Name())) {
@@ -475,7 +478,7 @@ int ConfScan::PreCheckAgainstAccepted(int index)
             double difference = abs(mol1->Energy() - mol2->Energy()) * 2625.5;
             if (m_energy_cutoff > 0)
                 if (difference > m_energy_cutoff) {
-                    ok = false;
+                    accept = false;
                     continue;
                 }
             double rmsd = 0;
@@ -501,53 +504,34 @@ int ConfScan::PreCheckAgainstAccepted(int index)
 
                 std::cout << "RMSD = " << std::setprecision(5) << rmsd << " A" << std::endl;
             }
-            if (rmsd > m_rmsd_threshold && difference < 1 && accepted_rotational == 0) {
+
+            if (rmsd < m_rmsd_threshold /*|| accepted_rotational == -1*/) {
+                accept = false;
+                std::string reject_reason = mol2->Name() + " [I] RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference) + "; dIx = " + std::to_string(diff_rot);
+                m_filtered[mol1->Name()].push_back(reject_reason);
+                if (!m_silent) {
+                    std::cout << "  ** Rejecting structure **" << std::endl;
+                }
+                delete driver;
+                return accept;
+            } else if (rmsd >= m_rmsd_threshold && accepted_rotational == 0) {
                 m_global_temp_list.push_back(mol2);
                 if (!m_silent) {
                     std::cout << "~~ Reordering forced as energies and rotational constants are too close and rmsd is too different! ~~" << std::endl;
                     std::cout << "*** Adding " << mol2->Name() << " to the list as RMSD is " << rmsd << "! ***" << std::endl;
                 }
-            } else {
-                if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold && accepted_rotational > 0)) {
-                    ok = false;
-                    std::string reject_reason = mol2->Name() + " RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference) + "; dIx = " + std::to_string(diff_rot);
-                    m_filtered[mol1->Name()].push_back(reject_reason);
-                    if (!m_silent) {
-                        std::cout << "  ** Rejecting structure **" << std::endl;
-                    }
-                    if (rmsd <= m_rmsd_threshold * m_nearly_missed) {
-                        if (!m_silent) {
-                            std::cout << " Nearly missed for " << mol1->Name() << std::endl;
-                        }
-                        m_nearly.push_back(mol1);
-                    }
-                    continue;
-                }
-                if (/*accepted_rotational < 0 ||*/ rmsd < m_rmsd_threshold) {
-                    /*if (accepted_rotational < 0 && rmsd > m_rmsd_threshold) {
-                        std::cout << mol1->Name() << " alalalalala " << mol2->Name() << std::endl;
-                        mol1->appendXYZFile("rot_tight.xyz");
-                        mol2->appendXYZFile("rot_tight.xyz");
-                    }*/
-                    ok = false;
-
-                    std::string reject_reason = mol2->Name() + " RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference) + "; dIx = " + std::to_string(diff_rot);
-                    m_filtered[mol1->Name()].push_back(reject_reason);
-                    if (!m_silent) {
-                        std::cout << "  ** Rejecting structure **" << std::endl;
-                    }
-                    continue;
-                }
+                delete driver;
+                continue;
             }
             delete driver;
         }
     }
-    return ok;
+    return accept;
 }
 
 int ConfScan::CheckTempList(int index)
 {
-    bool ok = true;
+    bool accept = true;
     Molecule* mol1 = m_molecules.at(index).second;
 
     for (const auto mol2 : m_global_temp_list) {
@@ -597,12 +581,11 @@ int ConfScan::CheckTempList(int index)
                               << "*** Old reordering solution worked here! ***" << std::endl
                               << std::endl;
                 }
-                mol1->appendXYZFile("reused.xyz");
-                mol2->appendXYZFile("reused.xyz");
-                // m_filtered_rules << Tools::Vector2String(rule) << std::endl;
-                ok = false;
+                //mol1->appendXYZFile("reused.xyz");
+                //mol2->appendXYZFile("reused.xyz");
+                accept = false;
 
-                std::string reject_reason = mol2->Name() + " RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference);
+                std::string reject_reason = mol2->Name() + " [II]  RMSD = " + std::to_string(tmp_rmsd) + "; dE = " + std::to_string(difference);
                 m_filtered[mol1->Name()].push_back(reject_reason);
                 m_reordered_reused++;
                 break;
@@ -661,10 +644,10 @@ int ConfScan::CheckTempList(int index)
             }
             rmsd = rmsd_tmp;
         }
-        if ((difference < m_energy_threshold && rmsd < m_rmsd_threshold)) {
+        if (rmsd < m_rmsd_threshold) {
             m_reordered_worked++;
-            ok = false;
-            std::string reject_reason = mol2->Name() + " RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference);
+            accept = false;
+            std::string reject_reason = mol2->Name() + "  [III] RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference);
             m_filtered[mol1->Name()].push_back(reject_reason);
             if (!m_silent) {
                 std::cout << "  ** Rejecting structure **" << std::endl;
@@ -675,20 +658,23 @@ int ConfScan::CheckTempList(int index)
                 }
                 m_nearly.push_back(mol1);
             }
+            delete driver;
             continue;
-        }
+        } else
+            accept = true;
+        /*
         if (rmsd < m_rmsd_threshold) {
-            ok = false;
+            accept = false;
             std::string reject_reason = mol2->Name() + " RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference);
             m_filtered[mol1->Name()].push_back(reject_reason);
             if (!m_silent) {
                 std::cout << "  ** Rejecting structure **" << std::endl;
             }
             continue;
-        }
+        }*/
         delete driver;
     }
-    return ok;
+    return accept;
 }
 
 void ConfScan::PrintStatus()
