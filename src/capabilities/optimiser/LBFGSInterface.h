@@ -40,6 +40,8 @@
 using Eigen::VectorXd;
 using namespace LBFGSpp;
 
+const int method = 2;
+
 class LBFGSInterface {
 
 public:
@@ -63,7 +65,7 @@ public:
             coord[3 * i + 1] = x(3 * i + 1) / au;
             coord[3 * i + 2] = x(3 * i + 2) / au;
         }
-        fx = interface->GFN2Gradient(attyp, coord, m_atoms, charge, gradient);
+        fx = interface->GFNCalculation(attyp, coord, m_atoms, charge, method, gradient);
         for (int i = 0; i < m_atoms; ++i) {
             grad[3 * i + 0] = gradient[3 * i + 0];
             grad[3 * i + 1] = gradient[3 * i + 1];
@@ -110,7 +112,7 @@ inline Molecule OptimiseGeometry(const Molecule* host, bool writeXYZ = true, boo
     int maxouter = 100;
 
     XTBInterface interface;
-    double final_energy = interface.GFN2Energy(*host);
+    double final_energy = interface.GFNCalculation(*host, method);
 
     LBFGSParam<double> param;
     param.epsilon = 1e-5;
@@ -150,10 +152,10 @@ inline Molecule OptimiseGeometry(const Molecule* host, bool writeXYZ = true, boo
         }
         final_energy = fun.m_energy;
         tmp = h;
-        if (writeXYZ) {
-            h.setEnergy(final_energy);
-            h.appendXYZFile("curcuma_optim.xyz");
-        }
+        //if (writeXYZ) {
+        h.setEnergy(final_energy);
+        h.appendXYZFile("curcuma_optim.xyz");
+        //}
         if (((fun.m_energy - final_energy) * 2625.5 < dE && driver->RMSD() < dRMSD) || niter < param.max_iterations)
             break;
     }
@@ -188,7 +190,7 @@ inline void OptimiseGeometryThreaded(const Molecule* host, std::string* result_s
     ss << "Step\tCurrent Energy [Eh]\tEnergy Change\tRMSD Change\tt [s]" << std::endl;
     int maxouter = 100;
     XTBInterface interface;
-    double final_energy = interface.GFN2Energy(*host);
+    double final_energy = interface.GFNCalculation(*host, method);
 
     LBFGSParam<double> param;
     param.epsilon = 1e-5;

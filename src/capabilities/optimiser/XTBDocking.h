@@ -160,7 +160,7 @@ public:
         host.setGeometry(geometry);
 
         double scal = 0.9999;
-        double Energy = interface->GFN2Gradient(attyp, coord, natoms, charge, gradient);
+        double Energy = interface->GFNCalculation(attyp, coord, natoms, charge, 2, gradient);
 
         double distance = 0;
         double max_x = 0, max_y = 0, max_z = 0;

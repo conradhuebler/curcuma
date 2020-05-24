@@ -26,17 +26,22 @@
 class XTBInterface {
 public:
     XTBInterface();
-    double GFN2Energy(const Molecule& molecule);
-    double GFN1Energy(const Molecule& molecule);
-    double GFN0Energy(const Molecule& molecule);
 
-    double GFN2Energy(const int* attyp, const double* coord, const int natoms, const double charge);
-    double GFN1Energy(const int* attyp, const double* coord, const int natoms, const double charge);
-    double GFN0Energy(const int* attyp, const double* coord, const int natoms, const double charge);
+    /* int parameter
+     * -1 = xtb GFN FF
+     * 0 = xtb GFN 0
+     * 1 = xtb GFN 1
+     * 2 = xtb GFN 2
+     * */
+    double GFNCalculation(const Molecule& molecule, int parameter = 2, double* grad = 0);
 
-    double GFN2Gradient(const int* attyp, const double* coord, const int natoms, const double charge, double* grad = 0);
-    double GFN1Gradient(const int* attyp, const double* coord, const int natoms, const double charge, double* grad = 0);
-    double GFN0Gradient(const int* attyp, const double* coord, const int natoms, const double charge, double* grad = 0);
+    /* int parameter
+     * -1 = xtb GFN FF
+     * 0 = xtb GFN 0
+     * 1 = xtb GFN 1
+     * 2 = xtb GFN 2
+     * */
+    double GFNCalculation(const int* attyp, const double* coord, const int natoms, const double charge, int parameter = 2, double* grad = NULL);
 
 private:
     double m_thr = 1.0e-10;

@@ -33,10 +33,83 @@ XTBInterface::XTBInterface()
 {
 }
 
-double XTBInterface::GFN0Energy(const Molecule& molecule)
+double XTBInterface::GFNCalculation(const int* attyp, const double* coord, const int natoms, const double charge, int parameter, double* grad)
 {
     double energy = 0;
 #ifdef USE_XTB
+    //double dipole[3];
+    //double q[natoms];
+    //double qp[6 * natoms];
+    //double wbo[natoms * natoms];
+    //char output;
+    xtb_TEnvironment env;
+    xtb_TMolecule mol;
+    xtb_TCalculator calc;
+    xtb_TResults res;
+
+    env = xtb_newEnvironment();
+    calc = xtb_newCalculator();
+    res = xtb_newResults();
+    mol = xtb_newMolecule(env, &natoms, attyp, coord, &charge, NULL, NULL, NULL);
+    if (xtb_checkEnvironment(env)) {
+        xtb_showEnvironment(env, NULL);
+        return 1;
+    }
+
+    xtb_setVerbosity(env, XTB_VERBOSITY_MUTED);
+    if (xtb_checkEnvironment(env)) {
+        xtb_showEnvironment(env, NULL);
+        return 2;
+    }
+
+    if (parameter == -1) {
+        xtb_loadGFNFF(env, mol, calc, NULL);
+        if (xtb_checkEnvironment(env)) {
+            xtb_showEnvironment(env, NULL);
+            return 3;
+        }
+    } else if (parameter == 0) {
+        xtb_loadGFN0xTB(env, mol, calc, NULL);
+        if (xtb_checkEnvironment(env)) {
+            xtb_showEnvironment(env, NULL);
+            return 3;
+        }
+    } else if (parameter == 1) {
+        xtb_loadGFN1xTB(env, mol, calc, NULL);
+        if (xtb_checkEnvironment(env)) {
+            xtb_showEnvironment(env, NULL);
+            return 3;
+        }
+    }
+
+    else if (parameter == 2) {
+        xtb_loadGFN2xTB(env, mol, calc, NULL);
+        if (xtb_checkEnvironment(env)) {
+            xtb_showEnvironment(env, NULL);
+            return 3;
+        }
+    }
+
+    xtb_singlepoint(env, mol, calc, res);
+    if (xtb_checkEnvironment(env)) {
+        xtb_showEnvironment(env, NULL);
+        return 4;
+    }
+
+    xtb_getEnergy(env, res, &energy);
+    if (grad != NULL)
+        xtb_getGradient(env, res, grad);
+#else
+    throw("XTB is not included, sorry for that");
+#endif
+    return energy;
+}
+
+double XTBInterface::GFNCalculation(const Molecule& molecule, int parameter, double* grad)
+{
+    double energy = 0;
+#ifdef USE_XTB
+
     int const natoms = molecule.AtomCount();
     double const charge = 0.0;
 
@@ -52,198 +125,63 @@ double XTBInterface::GFN0Energy(const Molecule& molecule)
         attyp[i] = atoms[i];
     }
 
-    xtb::PEEQ_options const opt = (xtb::PEEQ_options){ 0, 1, 2.0, 300, false, false, "none" };
+    xtb_TEnvironment env;
+    xtb_TMolecule mol;
+    xtb_TCalculator calc;
+    xtb_TResults res;
 
-    double dipole[3];
-    double q[natoms];
-    double qp[6 * natoms];
-    double wbo[natoms * natoms];
-    char output;
-    double* grad = 0;
-    int stat = xtb::GFN0_calculation(&natoms, attyp, &charge, NULL, coord, &opt, &output, &energy, grad);
-#else
-    throw("XTB is not included, sorry for that");
-#endif
-    return energy;
-}
-
-double XTBInterface::GFN1Energy(const Molecule& molecule)
-{
-    double energy = 0;
-#ifdef USE_XTB
-    int const natoms = molecule.AtomCount();
-    double const charge = 0.0;
-
-    int attyp[natoms];
-    std::vector<int> atoms = molecule.Atoms();
-    double coord[3 * natoms];
-
-    for (int i = 0; i < atoms.size(); ++i) {
-        std::pair<int, Position> atom = molecule.Atom(i);
-        coord[3 * i + 0] = atom.second(0) / au;
-        coord[3 * i + 1] = atom.second(1) / au;
-        coord[3 * i + 2] = atom.second(2) / au;
-        attyp[i] = atoms[i];
+    env = xtb_newEnvironment();
+    calc = xtb_newCalculator();
+    res = xtb_newResults();
+    mol = xtb_newMolecule(env, &natoms, attyp, coord, &charge, NULL, NULL, NULL);
+    if (xtb_checkEnvironment(env)) {
+        xtb_showEnvironment(env, NULL);
+        return 1;
     }
 
-    xtb::SCC_options const opt = (xtb::SCC_options){ 0, 0, 1.0, 300.0, true, true, true, 30, "none" };
-
-    double dipole[3];
-    double q[natoms];
-    double qp[6 * natoms];
-    double wbo[natoms * natoms];
-    char output;
-    int stat = xtb::GFN1_calculation(&natoms, attyp, &charge, NULL, coord, &opt, &output,
-        &energy, NULL, dipole, q, NULL);
-#else
-    throw("XTB is not included, sorry for that");
-#endif
-    return energy;
-}
-
-double XTBInterface::GFN2Energy(const Molecule& molecule)
-{
-    double energy = 0;
-#ifdef USE_XTB
-    int const natoms = molecule.AtomCount();
-    double const charge = 0.0;
-
-    int attyp[natoms];
-    std::vector<int> atoms = molecule.Atoms();
-    double coord[3 * natoms];
-
-    for (int i = 0; i < atoms.size(); ++i) {
-        std::pair<int, Position> atom = molecule.Atom(i);
-        coord[3 * i + 0] = atom.second(0) / au;
-        coord[3 * i + 1] = atom.second(1) / au;
-        coord[3 * i + 2] = atom.second(2) / au;
-        attyp[i] = atoms[i];
+    xtb_setVerbosity(env, XTB_VERBOSITY_MUTED);
+    if (xtb_checkEnvironment(env)) {
+        xtb_showEnvironment(env, NULL);
+        return 2;
     }
 
-    xtb::SCC_options const opt = (xtb::SCC_options){ 0, 1, 2.0, 300.0, false, false, true, 30, "none" };
+    if (parameter == -1) {
+        xtb_loadGFNFF(env, mol, calc, NULL);
+        if (xtb_checkEnvironment(env)) {
+            xtb_showEnvironment(env, NULL);
+            return 3;
+        }
+    } else if (parameter == 0) {
+        xtb_loadGFN0xTB(env, mol, calc, NULL);
+        if (xtb_checkEnvironment(env)) {
+            xtb_showEnvironment(env, NULL);
+            return 3;
+        }
+    } else if (parameter == 1) {
+        xtb_loadGFN1xTB(env, mol, calc, NULL);
+        if (xtb_checkEnvironment(env)) {
+            xtb_showEnvironment(env, NULL);
+            return 3;
+        }
+    }
 
-    double dipole[3];
-    double q[natoms];
-    double qp[6 * natoms];
-    double wbo[natoms * natoms];
-    char output;
-    int stat = xtb::GFN2_calculation(&natoms, attyp, &charge, NULL, coord, &opt, &output,
-        &energy, NULL, dipole, q, NULL, qp, wbo);
-#else
-    throw("XTB is not included, sorry for that");
-#endif
-    return energy;
-}
+    else if (parameter == 2) {
+        xtb_loadGFN2xTB(env, mol, calc, NULL);
+        if (xtb_checkEnvironment(env)) {
+            xtb_showEnvironment(env, NULL);
+            return 3;
+        }
+    }
+    xtb_singlepoint(env, mol, calc, res);
+    if (xtb_checkEnvironment(env)) {
+        xtb_showEnvironment(env, NULL);
+        return 4;
+    }
 
-double XTBInterface::GFN2Gradient(const int* attyp, const double* coord, const int natoms, const double charge, double* grad)
-{
-    double energy = 0;
-#ifdef USE_XTB
-    xtb::SCC_options const opt = (xtb::SCC_options){ 0, 1, 2.0, 300.0, true, true, true, 30, "none" };
+    xtb_getEnergy(env, res, &energy);
+    if (grad != NULL)
+        xtb_getGradient(env, res, grad);
 
-    double dipole[3];
-    double q[natoms];
-    double qp[6 * natoms];
-    double wbo[natoms * natoms];
-    char output;
-    int stat = xtb::GFN2_calculation(&natoms, attyp, &charge, NULL, coord, &opt, &output,
-        &energy, grad, dipole, q, NULL, qp, wbo);
-#else
-    throw("XTB is not included, sorry for that");
-#endif
-    return energy;
-}
-
-double XTBInterface::GFN2Energy(const int* attyp, const double* coord, const int natoms, const double charge)
-{
-    double energy = 0;
-#ifdef USE_XTB
-    xtb::SCC_options const opt = (xtb::SCC_options){ 0, 1, 2.0, 300.0, false, false, true, 30, "none" };
-
-    double dipole[3];
-    double q[natoms];
-    double qp[6 * natoms];
-    double wbo[natoms * natoms];
-    char output;
-    double* grad = 0;
-    int stat = xtb::GFN2_calculation(&natoms, attyp, &charge, NULL, coord, &opt, &output,
-        &energy, grad, dipole, q, NULL, qp, wbo);
-#else
-    throw("XTB is not included, sorry for that");
-#endif
-    return energy;
-}
-
-double XTBInterface::GFN1Gradient(const int* attyp, const double* coord, const int natoms, const double charge, double* grad)
-{
-    double energy = 0;
-#ifdef USE_XTB
-    xtb::SCC_options const opt = (xtb::SCC_options){ 0, 1, 2.0, 300.0, true, false, true, 30, "none" };
-
-    double dipole[3];
-    double q[natoms];
-    double qp[6 * natoms];
-    double wbo[natoms * natoms];
-    char output;
-    int stat = xtb::GFN1_calculation(&natoms, attyp, &charge, NULL, coord, &opt, &output,
-        &energy, grad, dipole, q, wbo);
-#else
-    throw("XTB is not included, sorry for that");
-#endif
-    return energy;
-}
-
-double XTBInterface::GFN1Energy(const int* attyp, const double* coord, const int natoms, const double charge)
-{
-    double energy = 0;
-#ifdef USE_XTB
-    xtb::SCC_options const opt = (xtb::SCC_options){ 0, 1, 2.0, 300.0, false, false, true, 30, "none" };
-
-    double dipole[3];
-    double q[natoms];
-    double qp[6 * natoms];
-    double wbo[natoms * natoms];
-    char output;
-    double* grad = 0;
-    int stat = xtb::GFN1_calculation(&natoms, attyp, &charge, NULL, coord, &opt, &output,
-        &energy, grad, dipole, q, wbo);
-#else
-    throw("XTB is not included, sorry for that");
-#endif
-    return energy;
-}
-
-double XTBInterface::GFN0Gradient(const int* attyp, const double* coord, const int natoms, const double charge, double* grad)
-{
-    double energy = 0;
-#ifdef USE_XTB
-    xtb::PEEQ_options const opt = (xtb::PEEQ_options){ 0, 1, 2.0, 300, true, false, "none" };
-
-    double dipole[3];
-    double q[natoms];
-    double qp[6 * natoms];
-    double wbo[natoms * natoms];
-    char output;
-    int stat = xtb::GFN0_calculation(&natoms, attyp, &charge, NULL, coord, &opt, &output, &energy, grad);
-#else
-    throw("XTB is not included, sorry for that");
-#endif
-    return energy;
-}
-
-double XTBInterface::GFN0Energy(const int* attyp, const double* coord, const int natoms, const double charge)
-{
-    double energy = 0;
-#ifdef USE_XTB
-    xtb::PEEQ_options const opt = (xtb::PEEQ_options){ 0, 1, 2.0, 300, false, false, "none" };
-
-    double dipole[3];
-    double q[natoms];
-    double qp[6 * natoms];
-    double wbo[natoms * natoms];
-    char output;
-    double* grad = 0;
-    int stat = xtb::GFN0_calculation(&natoms, attyp, &charge, NULL, coord, &opt, &output, &energy, grad);
 #else
     throw("XTB is not included, sorry for that");
 #endif
