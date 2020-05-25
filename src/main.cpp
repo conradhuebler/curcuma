@@ -70,6 +70,9 @@ int main(int argc, char **argv) {
 
     RunTimer timer(true);
 
+    json controller = CLI2Json(argc, argv);
+    //std::cout << controller << std::endl;
+
     if(argc < 2)
     {
         std::cerr << "No arguments given!" << std::endl;
@@ -412,19 +415,14 @@ int main(int argc, char **argv) {
             for (int i = 0; i < 4; ++i)
                 outfile.pop_back();
             outfile += "_opt.xyz";
+            json key = Json2KeyWord(controller, "opt", json());
+
             FileIterator file(argv[2]);
             std::multimap<double, Molecule> results;
-            json controller;
-            controller["writeXYZ"] = true;
-            controller["printOutput"] = true;
-            controller["dE"] = 0.75;
-            controller["dRMSD"] = 0.01;
-            controller["GFN"] = 2;
-            controller["InnerLoop"] = 1;
 
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
-                Molecule mol2 = OptimiseGeometry(&mol, controller);
+                Molecule mol2 = OptimiseGeometry(&mol, key);
                 //mol2.writeXYZFile(outfile);
                 results.insert(std::pair<double, Molecule>(mol2.Energy(), mol2));
             }

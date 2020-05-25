@@ -118,7 +118,7 @@ double XTBInterface::GFNCalculation(int parameter, double* grad)
         return 2;
     }
 
-    if (parameter == -1) {
+    if (parameter == 77) {
         xtb_loadGFNFF(m_env, m_mol, m_calc, NULL);
         if (xtb_checkEnvironment(m_env)) {
             xtb_showEnvironment(m_env, NULL);

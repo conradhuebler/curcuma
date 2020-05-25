@@ -35,7 +35,7 @@ public:
     bool UpdateMolecule(const double* coord);
 
     /* int parameter
-     * -1 = xtb GFN FF
+     * 77 = xtb GFN FF
      * 0 = xtb GFN 0
      * 1 = xtb GFN 1
      * 2 = xtb GFN 2

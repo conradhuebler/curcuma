@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <set>
 #include <string>
@@ -390,12 +391,13 @@ static const std::vector<double> CovalentRadius = { 0.32, 0.32,
     1.96, 1.74, 1.44, 1.36, 1.25, 1.27, 1.39, 1.25, 1.26, 1.21, 1.38, 1.31, 1.26, 1.22, 1.21, 1.16, 1.14, 1.10,
     2.11, 1.92, 1.62, 1.48, 1.37, 1.45, 1.31, 1.26, 1.35, 1.31, 1.53, 1.48, 1.44, 1.41, 1.38, 1.35, 1.33, 1.30 };
 */
-static int String2Element(const std::string& string)
+static int String2Element(std::string string)
 {
+    transform(string.begin(), string.end(), string.begin(), ::tolower);
     int element = 0;
 
-    for (int i = 0; i < ElementAbbr.size(); ++i) {
-        if (string.compare(ElementAbbr[i]) == 0) {
+    for (int i = 0; i < ElementAbbr_Low.size(); ++i) {
+        if (string.compare(ElementAbbr_Low[i]) == 0) {
             element = i;
             return element;
         }

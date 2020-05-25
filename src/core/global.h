@@ -71,8 +71,58 @@ inline std::pair<Position, Position> Vector2PositionPair(const Vector& vector)
     return std::pair<Position, Position>(Position{ vector(0), vector(1), vector(2) }, Position{ vector(3), vector(4), vector(5) });
 }
 
+inline json CLI2Json(int argc, char** argv)
+{
+    json controller;
+    json key;
+    if (argc < 1)
+        return controller;
+    std::string keyword = argv[1];
+    keyword.erase(0, 1);
+    for (int i = 2; i < argc; ++i) {
+        std::string current = argv[i];
+        std::string sub = current.substr(0, 1);
+        if ((i + 1) >= argc) {
+            current.erase(0, 1);
+            if (sub.compare("-") == 0)
+                key[current] = true;
+            else
+                key[current] = false;
+        } else {
+            if (sub.compare("-") == 0 && ((i + 1) < argc)) {
+                std::string next = argv[i + 1];
+                std::string next_sub = next.substr(0, 1);
+                if (next_sub.compare("-") == 0) {
+                    current.erase(0, 1);
+                    key[current] = true;
+                    continue;
+                } else if (next_sub.compare("+") == 0) {
+                    current.erase(0, 1);
+                    key[current] = false;
+                    continue;
+                } else {
+                    current.erase(0, 1);
+                    try {
+                        key[current] = std::stoi(argv[i + 1]);
+                    } catch (const std::invalid_argument& error) {
+                        try {
+                            key[current] = std::stod(argv[i + 1]);
+                        } catch (const std::invalid_argument& error) {
+                            key[current] = argv[i + 1];
+                        }
+                    }
+
+                    ++i;
+                }
+            }
+        }
+    }
+    controller[keyword] = key;
+    return controller;
+}
+
 template <class T>
-T Json2KeyWord(const json& controller, const std::string& name, T def)
+inline T Json2KeyWord(const json& controller, const std::string& name, T def)
 {
     T temp;
     try {

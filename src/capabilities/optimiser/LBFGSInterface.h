@@ -86,7 +86,6 @@ public:
     {
         m_molecule = molecule;
         m_atoms = m_molecule->AtomCount();
-        //interface->InitialiseMolecule(m_molecule);
     }
     void setInterface(XTBInterface* interface) { m_interface = interface; }
     void setMethod(int method) { m_method = method; }
@@ -103,13 +102,13 @@ private:
 
 inline Molecule OptimiseGeometry(const Molecule* host, const json& controller) //,
 {
-    bool writeXYZ = Json2KeyWord(controller, "writeXYZ", true);
-    bool printOutput = Json2KeyWord(controller, "printOutput", true);
-    double dE = Json2KeyWord(controller, "dE", 0.75);
-    double dRMSD = Json2KeyWord(controller, "dRMSD", 0.01);
-    int method = Json2KeyWord(controller, "GFN", 2);
-    int InnerLoop = Json2KeyWord(controller, "InnerLoop", 20);
-    int OuterLoop = Json2KeyWord(controller, "OuterLoop", 100);
+    bool writeXYZ = controller.value("writeXYZ", false);
+    bool printOutput = controller.value("printOutput", true);
+    double dE = controller.value("dE", 0.75);
+    double dRMSD = controller.value("dRMSD", 0.01);
+    int method = controller.value("GFN", 2);
+    int InnerLoop = controller.value("InnerLoop", 20);
+    int OuterLoop = controller.value("OuterLoop", 100);
 
     Geometry geometry = host->getGeometry();
     Molecule tmp(host);
