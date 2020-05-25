@@ -414,9 +414,17 @@ int main(int argc, char **argv) {
             outfile += "_opt.xyz";
             FileIterator file(argv[2]);
             std::multimap<double, Molecule> results;
+            json controller;
+            controller["writeXYZ"] = true;
+            controller["printOutput"] = true;
+            controller["dE"] = 0.75;
+            controller["dRMSD"] = 0.01;
+            controller["GFN"] = 2;
+            controller["InnerLoop"] = 1;
+
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
-                Molecule mol2 = OptimiseGeometry(&mol, false, true);
+                Molecule mol2 = OptimiseGeometry(&mol, controller);
                 //mol2.writeXYZFile(outfile);
                 results.insert(std::pair<double, Molecule>(mol2.Energy(), mol2));
             }

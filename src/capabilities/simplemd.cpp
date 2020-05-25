@@ -34,6 +34,8 @@
 
 #include "simplemd.h"
 
+const int method = -1;
+
 SimpleMD::SimpleMD()
 {
     m_interface = new XTBInterface;
@@ -72,7 +74,7 @@ void SimpleMD::Initialise()
         m_mass[3 * i + 1] = Elements::AtomicMass[m_atomtype[i]] * amu2au;
         m_mass[3 * i + 2] = Elements::AtomicMass[m_atomtype[i]] * amu2au;
     }
-
+    m_interface->InitialiseMolecule(m_molecule);
     m_initialised = true;
 }
 
@@ -115,7 +117,9 @@ void SimpleMD::Dance()
 
 double SimpleMD::Gradient(const int* attyp, const double* coord, double* grad)
 {
-    double Energy = m_interface->GFNCalculation(attyp, coord, m_natoms, m_charge, 2, grad);
+    m_interface->UpdateMolecule(coord);
+
+    double Energy = m_interface->GFNCalculation(method, grad);
     return Energy;
 }
 

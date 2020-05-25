@@ -32,7 +32,6 @@
 #include "src/tools/general.h"
 
 #include "json.hpp"
-
 using json = nlohmann::json;
 
 #include "confscan.h"

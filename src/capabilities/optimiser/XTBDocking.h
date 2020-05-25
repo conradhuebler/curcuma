@@ -33,93 +33,9 @@
 
 #include "src/tools/geometry.h"
 
-/*
-template <typename _Scalar, int NX = Eigen::Dynamic, int NY = Eigen::Dynamic>
-
-struct LevMarXTBDockingFunctor {
-    typedef _Scalar Scalar;
-    enum {
-        InputsAtCompileTime = NX,
-        ValuesAtCompileTime = NY
-    };
-    typedef Eigen::Matrix<Scalar, InputsAtCompileTime, 1> InputType;
-    typedef Eigen::Matrix<Scalar, ValuesAtCompileTime, 1> ValueType;
-    typedef Eigen::Matrix<Scalar, ValuesAtCompileTime, InputsAtCompileTime> JacobianType;
-
-    int m_inputs, m_values;
-
-    inline LevMarXTBDockingFunctor(int inputs, int values)
-        : m_inputs(inputs)
-        , m_values(values)
-    {
-    }
-
-    int inputs() const { return m_inputs; }
-    int values() const { return m_values; }
-};
-
-struct LevMarXTBDockingFunction : LevMarXTBDockingFunctor<double> {
-    inline LevMarXTBDockingFunction(int inputs, int values)
-        : LevMarXTBDockingFunctor(inputs, values)
-        , no_parameter(inputs)
-        , no_points(values)
-    {
-        interface = new XTBInterface;
-    }
-    inline ~LevMarXTBDockingFunction() {delete interface;}
-    inline int operator()(const Eigen::VectorXd& position, Eigen::VectorXd& fvec) const
-    {
-        Molecule host = m_host;
-        Molecule guest = m_guest;
-
-        Geometry geometry = host.getGeometry();
-        int natoms = host.AtomCount();
-        int attyp[host.AtomCount()];
-        double charge = 0;
-        std::vector<int> atoms = host.Atoms();
-        double coord[3*natoms];
-
-        for(int i = 0; i < m_host->AtomCount(); ++i)
-        {
-            geometry(i, 0) = position(3*i);
-            geometry(i, 1) = position(3*i + 1);
-            geometry(i, 2) = position(3*i + 2);
-            attyp[i] = host.Atoms()[i];
-            coord[3*i+0] = position(3*i+0)/au;
-            coord[3*i+1] = position(3*i+1)/au;
-            coord[3*i+2] = position(3*i+2)/au;
-        }
-
-        host.setGeometry(geometry);
-        // host.appendXYZFile("move_host.xyz");
-
-        double Energy = interface->GFN2Energy(attyp, coord, natoms, charge);
-
-        double distance = 0;
-        for (int i = 0; i < m_host->AtomCount(); ++i) {
-            for (int j = 0; j < guest.AtomCount(); ++j) {
-                distance += PseudoFF::LJPotential(m_host->Atom(i), guest.Atom(j)) + PseudoFF::DistancePenalty(m_host->Atom(i), guest.Atom(j));
-            }
-        }
-        std::cout << Energy << " " << distance << std::endl;
-        fvec(0) = Energy + distance;
-        return 0;
-    }
-    int no_parameter;
-    int no_points;
-    const Molecule* m_host;
-    const Molecule* m_guest;;
-    XTBInterface *interface;
-    int inputs() const { return no_parameter; }
-    int values() const { return no_points; }
-};
-
-struct LevMarXTBDockingFunctionNumericalDiff : Eigen::NumericalDiff<LevMarXTBDockingFunction> {
-};
-*/
 
 #include <external/LBFGSpp/include/LBFGS.h>
-
+/*
 using Eigen::VectorXd;
 using namespace LBFGSpp;
 
@@ -237,3 +153,4 @@ Geometry PrepareHost(const Molecule* host, const Molecule* guest)
 
     return geometry;
 }
+*/

@@ -22,7 +22,6 @@
 #include "src/core/global.h"
 #include "src/core/molecule.h"
 
-#include <assert.h>
 #include <iostream>
 #include <math.h>
 #include <stdio.h>
@@ -31,85 +30,25 @@
 
 XTBInterface::XTBInterface()
 {
-}
-
-double XTBInterface::GFNCalculation(const int* attyp, const double* coord, const int natoms, const double charge, int parameter, double* grad)
-{
-    double energy = 0;
 #ifdef USE_XTB
-    //double dipole[3];
-    //double q[natoms];
-    //double qp[6 * natoms];
-    //double wbo[natoms * natoms];
-    //char output;
-    xtb_TEnvironment env;
-    xtb_TMolecule mol;
-    xtb_TCalculator calc;
-    xtb_TResults res;
-
-    env = xtb_newEnvironment();
-    calc = xtb_newCalculator();
-    res = xtb_newResults();
-    mol = xtb_newMolecule(env, &natoms, attyp, coord, &charge, NULL, NULL, NULL);
-    if (xtb_checkEnvironment(env)) {
-        xtb_showEnvironment(env, NULL);
-        return 1;
-    }
-
-    xtb_setVerbosity(env, XTB_VERBOSITY_MUTED);
-    if (xtb_checkEnvironment(env)) {
-        xtb_showEnvironment(env, NULL);
-        return 2;
-    }
-
-    if (parameter == -1) {
-        xtb_loadGFNFF(env, mol, calc, NULL);
-        if (xtb_checkEnvironment(env)) {
-            xtb_showEnvironment(env, NULL);
-            return 3;
-        }
-    } else if (parameter == 0) {
-        xtb_loadGFN0xTB(env, mol, calc, NULL);
-        if (xtb_checkEnvironment(env)) {
-            xtb_showEnvironment(env, NULL);
-            return 3;
-        }
-    } else if (parameter == 1) {
-        xtb_loadGFN1xTB(env, mol, calc, NULL);
-        if (xtb_checkEnvironment(env)) {
-            xtb_showEnvironment(env, NULL);
-            return 3;
-        }
-    }
-
-    else if (parameter == 2) {
-        xtb_loadGFN2xTB(env, mol, calc, NULL);
-        if (xtb_checkEnvironment(env)) {
-            xtb_showEnvironment(env, NULL);
-            return 3;
-        }
-    }
-
-    xtb_singlepoint(env, mol, calc, res);
-    if (xtb_checkEnvironment(env)) {
-        xtb_showEnvironment(env, NULL);
-        return 4;
-    }
-
-    xtb_getEnergy(env, res, &energy);
-    if (grad != NULL)
-        xtb_getGradient(env, res, grad);
-#else
-    throw("XTB is not included, sorry for that");
+    m_env = xtb_newEnvironment();
+    m_calc = xtb_newCalculator();
+    m_res = xtb_newResults();
 #endif
-    return energy;
 }
 
-double XTBInterface::GFNCalculation(const Molecule& molecule, int parameter, double* grad)
+XTBInterface::~XTBInterface()
 {
-    double energy = 0;
 #ifdef USE_XTB
+    xtb_delResults(&m_res);
+    xtb_delCalculator(&m_calc);
+    xtb_delMolecule(&m_mol);
+    xtb_delEnvironment(&m_env);
+#endif
+}
 
+bool XTBInterface::InitialiseMolecule(const Molecule& molecule)
+{
     int const natoms = molecule.AtomCount();
     double const charge = 0.0;
 
@@ -124,64 +63,98 @@ double XTBInterface::GFNCalculation(const Molecule& molecule, int parameter, dou
         coord[3 * i + 2] = atom.second(2) / au;
         attyp[i] = atoms[i];
     }
+    return InitialiseMolecule(attyp, coord, natoms, charge);
+}
 
-    xtb_TEnvironment env;
-    xtb_TMolecule mol;
-    xtb_TCalculator calc;
-    xtb_TResults res;
-
-    env = xtb_newEnvironment();
-    calc = xtb_newCalculator();
-    res = xtb_newResults();
-    mol = xtb_newMolecule(env, &natoms, attyp, coord, &charge, NULL, NULL, NULL);
-    if (xtb_checkEnvironment(env)) {
-        xtb_showEnvironment(env, NULL);
-        return 1;
+bool XTBInterface::InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge)
+{
+#ifdef USE_XTB
+    m_mol = xtb_newMolecule(m_env, &natoms, attyp, coord, &charge, NULL, NULL, NULL);
+    if (xtb_checkEnvironment(m_env)) {
+        xtb_showEnvironment(m_env, NULL);
+        return false;
     }
+    return true;
+#else
+    return false;
+#endif
+}
 
-    xtb_setVerbosity(env, XTB_VERBOSITY_MUTED);
-    if (xtb_checkEnvironment(env)) {
-        xtb_showEnvironment(env, NULL);
+bool XTBInterface::UpdateMolecule(const Molecule& molecule)
+{
+    int const natoms = molecule.AtomCount();
+    double coord[3 * natoms];
+
+    for (int i = 0; i < natoms; ++i) {
+        std::pair<int, Position> atom = molecule.Atom(i);
+        coord[3 * i + 0] = atom.second(0) / au;
+        coord[3 * i + 1] = atom.second(1) / au;
+        coord[3 * i + 2] = atom.second(2) / au;
+    }
+    return UpdateMolecule(coord);
+}
+
+bool XTBInterface::UpdateMolecule(const double* coord)
+{
+#ifdef USE_XTB
+    xtb_updateMolecule(m_env, m_mol, coord, NULL);
+    if (xtb_checkEnvironment(m_env)) {
+        xtb_showEnvironment(m_env, NULL);
+        return false;
+    }
+    return true;
+#else
+    return false;
+#endif
+}
+
+double XTBInterface::GFNCalculation(int parameter, double* grad)
+{
+    double energy = 0;
+#ifdef USE_XTB
+    xtb_setVerbosity(m_env, XTB_VERBOSITY_MUTED);
+    if (xtb_checkEnvironment(m_env)) {
+        xtb_showEnvironment(m_env, NULL);
         return 2;
     }
 
     if (parameter == -1) {
-        xtb_loadGFNFF(env, mol, calc, NULL);
-        if (xtb_checkEnvironment(env)) {
-            xtb_showEnvironment(env, NULL);
+        xtb_loadGFNFF(m_env, m_mol, m_calc, NULL);
+        if (xtb_checkEnvironment(m_env)) {
+            xtb_showEnvironment(m_env, NULL);
             return 3;
         }
     } else if (parameter == 0) {
-        xtb_loadGFN0xTB(env, mol, calc, NULL);
-        if (xtb_checkEnvironment(env)) {
-            xtb_showEnvironment(env, NULL);
+        xtb_loadGFN0xTB(m_env, m_mol, m_calc, NULL);
+        if (xtb_checkEnvironment(m_env)) {
+            xtb_showEnvironment(m_env, NULL);
             return 3;
         }
     } else if (parameter == 1) {
-        xtb_loadGFN1xTB(env, mol, calc, NULL);
-        if (xtb_checkEnvironment(env)) {
-            xtb_showEnvironment(env, NULL);
+        xtb_loadGFN1xTB(m_env, m_mol, m_calc, NULL);
+        if (xtb_checkEnvironment(m_env)) {
+            xtb_showEnvironment(m_env, NULL);
             return 3;
         }
     }
 
     else if (parameter == 2) {
-        xtb_loadGFN2xTB(env, mol, calc, NULL);
-        if (xtb_checkEnvironment(env)) {
-            xtb_showEnvironment(env, NULL);
+        xtb_loadGFN2xTB(m_env, m_mol, m_calc, NULL);
+        if (xtb_checkEnvironment(m_env)) {
+            xtb_showEnvironment(m_env, NULL);
             return 3;
         }
     }
-    xtb_singlepoint(env, mol, calc, res);
-    if (xtb_checkEnvironment(env)) {
-        xtb_showEnvironment(env, NULL);
+
+    xtb_singlepoint(m_env, m_mol, m_calc, m_res);
+    if (xtb_checkEnvironment(m_env)) {
+        xtb_showEnvironment(m_env, NULL);
         return 4;
     }
 
-    xtb_getEnergy(env, res, &energy);
+    xtb_getEnergy(m_env, m_res, &energy);
     if (grad != NULL)
-        xtb_getGradient(env, res, grad);
-
+        xtb_getGradient(m_env, m_res, grad);
 #else
     throw("XTB is not included, sorry for that");
 #endif

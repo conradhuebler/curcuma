@@ -26,6 +26,13 @@
 class XTBInterface {
 public:
     XTBInterface();
+    ~XTBInterface();
+
+    bool InitialiseMolecule(const Molecule& molecule);
+    bool InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge);
+
+    bool UpdateMolecule(const Molecule& molecule);
+    bool UpdateMolecule(const double* coord);
 
     /* int parameter
      * -1 = xtb GFN FF
@@ -33,16 +40,14 @@ public:
      * 1 = xtb GFN 1
      * 2 = xtb GFN 2
      * */
-    double GFNCalculation(const Molecule& molecule, int parameter = 2, double* grad = 0);
-
-    /* int parameter
-     * -1 = xtb GFN FF
-     * 0 = xtb GFN 0
-     * 1 = xtb GFN 1
-     * 2 = xtb GFN 2
-     * */
-    double GFNCalculation(const int* attyp, const double* coord, const int natoms, const double charge, int parameter = 2, double* grad = NULL);
+    double GFNCalculation(int parameter = 2, double* grad = 0);
 
 private:
+#ifdef USE_XTB
     double m_thr = 1.0e-10;
+    xtb_TEnvironment m_env;
+    xtb_TMolecule m_mol;
+    xtb_TCalculator m_calc;
+    xtb_TResults m_res;
+#endif
 };

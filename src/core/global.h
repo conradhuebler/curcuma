@@ -24,6 +24,11 @@
 #include "src/global_config.h"
 #include "src/version.h"
 
+#include "json.hpp"
+
+// for convenience
+using json = nlohmann::json;
+
 const double pi = 3.14159265359;
 const double au = 0.52917721092;
 const double amu2au = 1822.8884850;
@@ -64,4 +69,16 @@ inline Vector PositionPair2Vector(const Position& first, const Position& second)
 inline std::pair<Position, Position> Vector2PositionPair(const Vector& vector)
 {
     return std::pair<Position, Position>(Position{ vector(0), vector(1), vector(2) }, Position{ vector(3), vector(4), vector(5) });
+}
+
+template <class T>
+T Json2KeyWord(const json& controller, const std::string& name, T def)
+{
+    T temp;
+    try {
+        temp = controller[name];
+    } catch (json::type_error& e) {
+        return def;
+    }
+    return temp;
 }

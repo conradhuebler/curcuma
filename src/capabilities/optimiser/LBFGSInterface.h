@@ -35,12 +35,12 @@
 
 #include "src/tools/geometry.h"
 
+#include "json.hpp"
 #include <external/LBFGSpp/include/LBFGS.h>
+using json = nlohmann::json;
 
 using Eigen::VectorXd;
 using namespace LBFGSpp;
-
-const int method = 2;
 
 class LBFGSInterface {
 
@@ -65,7 +65,9 @@ public:
             coord[3 * i + 1] = x(3 * i + 1) / au;
             coord[3 * i + 2] = x(3 * i + 2) / au;
         }
-        fx = interface->GFNCalculation(attyp, coord, m_atoms, charge, method, gradient);
+        m_interface->UpdateMolecule(coord);
+        fx = m_interface->GFNCalculation(m_method, gradient);
+
         for (int i = 0; i < m_atoms; ++i) {
             grad[3 * i + 0] = gradient[3 * i + 0];
             grad[3 * i + 1] = gradient[3 * i + 1];
@@ -84,19 +86,31 @@ public:
     {
         m_molecule = molecule;
         m_atoms = m_molecule->AtomCount();
+        //interface->InitialiseMolecule(m_molecule);
     }
+    void setInterface(XTBInterface* interface) { m_interface = interface; }
+    void setMethod(int method) { m_method = method; }
 
 private:
     int m_iter = 0;
     int m_atoms = 0;
     int n;
-    XTBInterface* interface;
+    int m_method = 2;
+    XTBInterface* m_interface;
     Vector m_parameter;
     const Molecule* m_molecule;
 };
 
-inline Molecule OptimiseGeometry(const Molecule* host, bool writeXYZ = true, bool printOutput = true, double dE = 0.75, double dRMSD = 0.01)
+inline Molecule OptimiseGeometry(const Molecule* host, const json& controller) //,
 {
+    bool writeXYZ = Json2KeyWord(controller, "writeXYZ", true);
+    bool printOutput = Json2KeyWord(controller, "printOutput", true);
+    double dE = Json2KeyWord(controller, "dE", 0.75);
+    double dRMSD = Json2KeyWord(controller, "dRMSD", 0.01);
+    int method = Json2KeyWord(controller, "GFN", 2);
+    int InnerLoop = Json2KeyWord(controller, "InnerLoop", 20);
+    int OuterLoop = Json2KeyWord(controller, "OuterLoop", 100);
+
     Geometry geometry = host->getGeometry();
     Molecule tmp(host);
     Molecule h(host);
@@ -109,18 +123,21 @@ inline Molecule OptimiseGeometry(const Molecule* host, bool writeXYZ = true, boo
     }
     std::chrono::time_point<std::chrono::system_clock> start = std::chrono::system_clock::now(), end;
     std::cout << "Step\tCurrent Energy [Eh]\tEnergy Change\tRMSD Change\tt [s]" << std::endl;
-    int maxouter = 100;
 
     XTBInterface interface;
-    double final_energy = interface.GFNCalculation(*host, method);
+    interface.InitialiseMolecule(host);
+
+    double final_energy = interface.GFNCalculation(method);
 
     LBFGSParam<double> param;
     param.epsilon = 1e-5;
-    param.max_iterations = 20;
+    param.max_iterations = InnerLoop;
 
     LBFGSSolver<double> solver(param);
     LBFGSInterface fun(3 * host->AtomCount());
     fun.setMolecule(host);
+    fun.setInterface(&interface);
+    fun.setMethod(method);
     double fx;
 
     RMSDDriver* driver = new RMSDDriver;
@@ -131,7 +148,7 @@ inline Molecule OptimiseGeometry(const Molecule* host, bool writeXYZ = true, boo
     driver->setCheckConnections(false);
 
     int atoms_count = host->AtomCount();
-    for (int outer = 0; outer < maxouter; ++outer) {
+    for (int outer = 0; outer < OuterLoop; ++outer) {
         int niter = solver.minimize(fun, parameter, fx);
         parameter = fun.Parameter();
 
@@ -152,14 +169,13 @@ inline Molecule OptimiseGeometry(const Molecule* host, bool writeXYZ = true, boo
         }
         final_energy = fun.m_energy;
         tmp = h;
-        //if (writeXYZ) {
-        h.setEnergy(final_energy);
-        h.appendXYZFile("curcuma_optim.xyz");
-        //}
+        if (writeXYZ) {
+            h.setEnergy(final_energy);
+            h.appendXYZFile("curcuma_optim.xyz");
+        }
         if (((fun.m_energy - final_energy) * 2625.5 < dE && driver->RMSD() < dRMSD) || niter < param.max_iterations)
             break;
     }
-
 
     for (int i = 0; i < host->AtomCount(); ++i) {
         geometry(i, 0) = parameter(3 * i);
@@ -174,6 +190,7 @@ inline Molecule OptimiseGeometry(const Molecule* host, bool writeXYZ = true, boo
 inline void OptimiseGeometryThreaded(const Molecule* host, std::string* result_string, Molecule* result_molecule, double dE = 0.75, double dRMSD = 0.01)
 {
     stringstream ss;
+    int method = 2;
 
     Geometry geometry = host->getGeometry();
     Molecule tmp(host);
@@ -190,7 +207,9 @@ inline void OptimiseGeometryThreaded(const Molecule* host, std::string* result_s
     ss << "Step\tCurrent Energy [Eh]\tEnergy Change\tRMSD Change\tt [s]" << std::endl;
     int maxouter = 100;
     XTBInterface interface;
-    double final_energy = interface.GFNCalculation(*host, method);
+    interface.InitialiseMolecule(host);
+
+    double final_energy = interface.GFNCalculation(method);
 
     LBFGSParam<double> param;
     param.epsilon = 1e-5;
@@ -199,6 +218,7 @@ inline void OptimiseGeometryThreaded(const Molecule* host, std::string* result_s
     LBFGSSolver<double> solver(param);
     LBFGSInterface fun(3 * host->AtomCount());
     fun.setMolecule(host);
+    fun.setInterface(&interface);
     double fx;
 
     RMSDDriver* driver = new RMSDDriver;

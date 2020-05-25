@@ -1,5 +1,5 @@
 /*
- * <Load xyz files and iterator through. >
+ * <Load xyz files and iterate through them.>
  * Copyright (C) 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
