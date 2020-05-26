@@ -31,7 +31,8 @@ namespace fs = std::filesystem;
 
 #include "curcumamethod.h"
 
-CurcumaMethod::CurcumaMethod()
+CurcumaMethod::CurcumaMethod(const json controller)
+    : m_controller(controller)
 {
 }
 

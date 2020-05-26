@@ -224,16 +224,18 @@ void Docking::PostOptimise()
 
     std::cout << "** Docking Phase 3 - Fast Filtering structures with correct fragments **" << std::endl;
 
-    ConfScan* scan = new ConfScan;
-    scan->setHeavyRMSD(true);
-    scan->setMaxRank(99999);
-    scan->setWriteXYZ(false);
-    scan->setForceReorder(false);
-    scan->setCheckConnections(false);
-    scan->setEnergyThreshold(1);
-    scan->setNoName(true);
-    scan->setPreventReorder(true);
-    scan->setEnergyCutOff(1e5);
+    json confscan = ConfScanJson;
+    confscan["heavy"] = true;
+    confscan["maxrank"] = -1;
+    confscan["writeXYZ"] = false;
+    confscan["ForceReorder"] = false;
+    confscan["check"] = false;
+    confscan["energy"] = 1.0;
+    confscan["noname"] = true;
+    confscan["preventReorder"] = true;
+    confscan["maxenergy"] = -1;
+
+    ConfScan* scan = new ConfScan(confscan);
     scan->setMolecules(final_results);
     scan->scan();
 

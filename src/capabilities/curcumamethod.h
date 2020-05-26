@@ -28,10 +28,11 @@
 class CurcumaMethod {
 
 public:
-    CurcumaMethod();
+    CurcumaMethod(const json controller);
 
     inline void setRestart(bool restart) { m_restart = restart; }
     inline bool Restart() const { return m_restart; }
+    inline void setController(const json& controller) { m_controller = controller; }
 
 protected:
     void TriggerWriteRestart();
@@ -39,6 +40,9 @@ protected:
     StringList RestartFiles() const;
 
     nlohmann::json LoadControl() const;
+
+    json m_controller;
+    bool m_restart = true;
 
 private:
     /* Lets have this for all modules */
@@ -51,6 +55,4 @@ private:
 
     /* Lets have all methods read the input/control file */
     virtual void ReadControlFile() = 0;
-
-    bool m_restart = true;
 };

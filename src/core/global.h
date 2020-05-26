@@ -75,7 +75,7 @@ inline json CLI2Json(int argc, char** argv)
 {
     json controller;
     json key;
-    if (argc < 1)
+    if (argc < 2)
         return controller;
     std::string keyword = argv[1];
     keyword.erase(0, 1);
@@ -122,13 +122,21 @@ inline json CLI2Json(int argc, char** argv)
 }
 
 template <class T>
-inline T Json2KeyWord(const json& controller, const std::string& name, T def)
+inline T Json2KeyWord(const json& controller, std::string name)
 {
     T temp;
-    try {
-        temp = controller[name];
-    } catch (json::type_error& e) {
-        return def;
+    bool found = false;
+    transform(name.begin(), name.end(), name.begin(), ::tolower);
+    for (auto& el : controller.items()) {
+        std::string key = el.key();
+        transform(key.begin(), key.end(), key.begin(), ::tolower);
+        if (key.compare(name) == 0) {
+            temp = el.value();
+            found = true;
+        }
     }
-    return temp;
+    if (found)
+        return temp;
+    else
+        throw -1;
 }

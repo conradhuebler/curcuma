@@ -32,9 +32,23 @@
 
 constexpr double third = 1 / 3.0;
 
+static const json ConfScanJson = {
+    { "noname", true },
+    { "restart", true },
+    { "heavy", false },
+    { "rmsd", 1 },
+    { "maxrank", -1 },
+    { "writeXYZ", false },
+    { "forceReorder", false },
+    { "check", false },
+    { "energy", 1.0 },
+    { "maxenergy", -1.0 },
+    { "preventreorder", false },
+};
+
 class ConfScan : public CurcumaMethod {
 public:
-    ConfScan();
+    ConfScan(const json controller);
     ~ConfScan();
 
     void setFileName(const std::string& filename)
@@ -47,42 +61,16 @@ public:
 
     void scan();
 
-    inline void setMaxRank(int rank) { m_maxrank = rank; }
-    inline void setWriteXYZ(bool writeXYZ) { m_writeXYZ = writeXYZ; }
-
-    /*! \brief Set Connectivitiy Check forced (true or false = default) */
-    inline void setCheckConnections(bool check) { m_check_connections = check; }
-
     /*! \brief Force Connectivitiy Check */
     inline bool CheckConnections() const { return m_check_connections; }
-
-    /*! \brief Force Reordering, even the sequence of elements are equal */
-    inline void setForceReorder(bool reorder) { m_force_reorder = reorder; }
 
     /*! \brief Check, if Reordering is forced */
     inline bool ForceReorder() const { return m_force_reorder; }
 
-    /*! \brief Force Reordering, even the sequence of elements are equal */
-    inline void setPreventReorder(bool reorder) { m_prevent_reorder = reorder; }
-
     /*! \brief Check, if Reordering is forced */
     inline bool PreventReorder() const { return m_prevent_reorder; }
 
-    /*! \brief Use only heavy atoms for rmsd and reordering */
-    inline void setHeavyRMSD(bool heavy)
-    {
-        m_heavy = heavy;
-        m_rmsd_threshold = 0.75;
-    }
-
-    void setEnergyThreshold(double energy) { m_energy_threshold = energy; }
-
-    void setNoName(bool noname) { m_noname = noname; }
-
     inline string NamePattern(int index) const { return "input_" + std::to_string(index); }
-
-    /*! \brief Set maximal relative Energy to lowest */
-    void setEnergyCutOff(double energy) { m_energy_cutoff = energy; }
 
     std::vector<Molecule*> Result() const { return m_result; }
     std::vector<Molecule*> Failed() const { return m_failed; }

@@ -36,8 +36,24 @@ using json = nlohmann::json;
 
 #include "confscan.h"
 
-ConfScan::ConfScan()
+ConfScan::ConfScan(const json controller)
+    : CurcumaMethod(controller)
 {
+    m_controller = ConfScanJson;
+    m_controller.merge_patch(controller);
+    m_noname = Json2KeyWord<bool>(m_controller, "noname");
+    m_restart = Json2KeyWord<bool>(m_controller, "restart");
+    m_heavy = Json2KeyWord<bool>(m_controller, "heavy");
+    if (m_heavy)
+        m_rmsd_threshold = 0.75;
+    m_rmsd_threshold = Json2KeyWord<double>(m_controller, "rmsd");
+    m_maxrank = Json2KeyWord<double>(m_controller, "maxrank");
+    m_writeXYZ = Json2KeyWord<bool>(m_controller, "writeXYZ");
+    m_force_reorder = Json2KeyWord<bool>(m_controller, "forceReorder");
+    m_check_connections = Json2KeyWord<bool>(m_controller, "check");
+    m_energy_threshold = Json2KeyWord<double>(m_controller, "energy");
+    m_energy_cutoff = Json2KeyWord<double>(m_controller, "maxenergy");
+    m_prevent_reorder = Json2KeyWord<bool>(m_controller, "preventReorder");
 }
 
 ConfScan::~ConfScan()

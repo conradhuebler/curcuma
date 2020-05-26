@@ -39,6 +39,16 @@
 #include <external/LBFGSpp/include/LBFGS.h>
 using json = nlohmann::json;
 
+const json OptJson{
+    { "writeXYZ", false },
+    { "printOutput", true },
+    { "dE", 0.75 },
+    { "dRMSD", 0.01 },
+    { "method", 2 },
+    { "InnerLoop", 20 },
+    { "OuterLoop", 100 }
+};
+
 using Eigen::VectorXd;
 using namespace LBFGSpp;
 
@@ -102,13 +112,13 @@ private:
 
 inline Molecule OptimiseGeometry(const Molecule* host, const json& controller) //,
 {
-    bool writeXYZ = controller.value("writeXYZ", false);
-    bool printOutput = controller.value("printOutput", true);
-    double dE = controller.value("dE", 0.75);
-    double dRMSD = controller.value("dRMSD", 0.01);
-    int method = controller.value("GFN", 2);
-    int InnerLoop = controller.value("InnerLoop", 20);
-    int OuterLoop = controller.value("OuterLoop", 100);
+    bool writeXYZ = Json2KeyWord<bool>(controller, "writeXYZ");
+    bool printOutput = Json2KeyWord<bool>(controller, "printOutput");
+    double dE = Json2KeyWord<double>(controller, "dE");
+    double dRMSD = Json2KeyWord<double>(controller, "dRMSD");
+    int method = Json2KeyWord<int>(controller, "GFN");
+    int InnerLoop = Json2KeyWord<int>(controller, "InnerLoop");
+    int OuterLoop = Json2KeyWord<int>(controller, "OuterLoop");
 
     Geometry geometry = host->getGeometry();
     Molecule tmp(host);
@@ -189,7 +199,7 @@ inline Molecule OptimiseGeometry(const Molecule* host, const json& controller) /
 inline void OptimiseGeometryThreaded(const Molecule* host, std::string* result_string, Molecule* result_molecule, double dE = 0.75, double dRMSD = 0.01)
 {
     stringstream ss;
-    int method = 2;
+    int method = 77;
 
     Geometry geometry = host->getGeometry();
     Molecule tmp(host);

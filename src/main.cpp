@@ -59,7 +59,6 @@ void Distance(const Molecule &mol, char **argv)
     mol.printAtom(acceptor);
     std::cout << std::endl << "Hydrogen Bond Angle: "<<  mol.angle(donor, proton, acceptor) << std::endl;
     std::cout << "Hydrogen bond length " << mol.Distance(proton - 1, acceptor - 1) << std::endl;
-
 }
 
 
@@ -71,16 +70,15 @@ int main(int argc, char **argv) {
     RunTimer timer(true);
 
     json controller = CLI2Json(argc, argv);
-    //std::cout << controller << std::endl;
 
     if(argc < 2)
     {
         std::cerr << "No arguments given!" << std::endl;
         std::cerr << "Use:" << std::endl
-                  << "-rmsd        * RMSD Calulator                *" << std::endl
+                  << "-rmsd        * RMSD Calculator               *" << std::endl
                   << "-confscan    * Filter list of conformers     *" << std::endl
                   << "-dock        * Perform some docking          *" << std::endl
-                  << "-opt         * LBFGS optimiser using GFN2    *" << std::endl
+                  << "-opt         * LBFGS optimiser using xtb GFN *" << std::endl
                   << "-rmsdtraj    * Find unique structures        *" << std::endl;
         XTBInterface interface;
     }
@@ -257,84 +255,9 @@ int main(int argc, char **argv) {
 
                 return -1;
             }
-            bool writeXYZ = false;
-            bool reorder = false, check_connect = false, heavy = false, noname = false, preventreorder = false, restart = true;
-            int rank = 1e10;
-            double energy = 1.0, maxenergy = -1;
-            if (argc >= 4) {
 
-                for (std::size_t i = 3; i < argc; ++i) {
-
-                    if (strcmp(argv[i], "-rank") == 0) {
-                        if (i + 1 < argc) {
-                            rank = std::stoi(argv[i + 1]);
-                            ++i;
-                        }
-                    }
-
-                    if (strcmp(argv[i], "-energy") == 0) {
-                        if (i + 1 < argc) {
-                            energy = std::stod(argv[i + 1]);
-                            ++i;
-                        }
-                    }
-
-                    if (strcmp(argv[i], "-maxenergy") == 0) {
-                        if (i + 1 < argc) {
-                            maxenergy = std::stod(argv[i + 1]);
-                            ++i;
-                        }
-                    }
-
-                    if (strcmp(argv[i], "-writeXYZ") == 0) {
-                        writeXYZ = true;
-                        continue;
-                    }
-
-                    if (strcmp(argv[i], "-norestart") == 0) {
-                        restart = false;
-                        continue;
-                    }
-
-                    if (strcmp(argv[i], "-reorder") == 0) {
-                        reorder = true;
-                        continue;
-                    }
-
-                    if (strcmp(argv[i], "-noreorder") == 0) {
-                        preventreorder = true;
-                        std::cout << " - Prevent reordering set to true!" << std::endl;
-                        continue;
-                    }
-
-                    if (strcmp(argv[i], "-check") == 0) {
-                        check_connect = true;
-                        continue;
-                    }
-
-                    if (strcmp(argv[i], "-heavy") == 0) {
-                        heavy = true;
-                        continue;
-                    }
-
-                    if (strcmp(argv[i], "-noname") == 0) {
-                        noname = true;
-                        continue;
-                    }
-                }
-            }
-            ConfScan* scan = new ConfScan;
-            scan->setNoName(noname);
-            scan->setRestart(restart);
+            ConfScan* scan = new ConfScan(controller["confscan"]);
             scan->setFileName(argv[2]);
-            scan->setHeavyRMSD(heavy);
-            scan->setMaxRank(rank);
-            scan->setWriteXYZ(writeXYZ);
-            scan->setForceReorder(reorder);
-            scan->setCheckConnections(check_connect);
-            scan->setEnergyThreshold(energy);
-            scan->setPreventReorder(preventreorder);
-            scan->setEnergyCutOff(maxenergy);
             scan->scan();
 
             return 0;
@@ -415,7 +338,9 @@ int main(int argc, char **argv) {
             for (int i = 0; i < 4; ++i)
                 outfile.pop_back();
             outfile += "_opt.xyz";
-            json key = Json2KeyWord(controller, "opt", json());
+
+            json key = OptJson;
+            key.patch(controller.value("opt", json()));
 
             FileIterator file(argv[2]);
             std::multimap<double, Molecule> results;
