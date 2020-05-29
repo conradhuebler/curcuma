@@ -67,7 +67,8 @@ void RMSDTraj::AnalyseTrajectory()
     if (m_pairwise) {
         m_pairwise_file.open(outfile + "_pairwise.dat");
     }
-    RMSDDriver* driver = new RMSDDriver;
+    json rmsd = RMSDJson;
+    RMSDDriver* driver = new RMSDDriver();
     driver->setSilent(true);
     driver->setProtons(!m_heavy);
     driver->setForceReorder(false);

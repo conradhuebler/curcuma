@@ -82,78 +82,30 @@ int main(int argc, char **argv) {
             if (argc < 4) {
                 std::cerr << "Please use curcuma for rmsd calcultion as follows\ncurcuma -rmsd A.xyz B.xyz" << std::endl;
                 std::cerr << "Additonal arguments are:" << std::endl;
-                std::cerr << "-reorder    **** Force reordering of structure! - It will be done automatically, if energies are close and rmsd is big." << std::endl;
+                std::cerr << "-reorder    **** Force reordering of structure!" << std::endl;
                 std::cerr << "-check      **** Check methyl group connectivity." << std::endl;
                 std::cerr << "-heavy      **** Calculate RMSD for heavy atoms only. Affects Reordering." << std::endl;
                 std::cerr << "-fragment n **** Use n'th fragment. Bonds are determined from simple covalent radii for now!" << std::endl;
                 std::cerr << "-init n     **** Initialse Reordering with fixed fragement n" << std::endl;
                 exit(1);
             }
+
             Molecule mol1 = Tools::LoadFile(argv[2]);
             Molecule mol2 = Tools::LoadFile(argv[3]);
 
-            bool reorder = false, check_connect = false, heavy = false;
-            int fragment = -1, pt = 0, init = -1;
-            if (argc >= 5) {
+            RMSDDriver* driver = new RMSDDriver(controller);
+            driver->setReference(mol1);
+            driver->setTarget(mol2);
+            driver->AutoPilot();
+            std::cout << "RMSD for two molecules " << driver->RMSD() << std::endl;
 
-                for (std::size_t i = 4; i < argc; ++i) {
-                    // std::cout << argv[i] << " " << strcmp(argv[i], "-fragment") << std::endl;
-                    if (strcmp(argv[i], "-fragment") == 0) {
-                        if (i + 1 < argc) {
-                            fragment = std::stoi(argv[i + 1]);
-                            ++i;
-                        }
-                        continue;
-                    }
+            driver->ReferenceAligned().writeXYZFile("reference.xyz");
+            driver->TargetAligned().writeXYZFile("target_align.xyz");
+            driver->TargetReorderd().writeXYZFile("target_reorder.xyz");
 
-                    if (strcmp(argv[i], "-init") == 0) {
-                        if (i + 1 < argc) {
-                            init = std::stoi(argv[i + 1]);
-                            ++i;
-                        }
-                        continue;
-                    }
-
-                    if (strcmp(argv[i], "-pt") == 0) {
-                        if (i + 1 < argc) {
-                            pt = std::stoi(argv[i + 1]);
-                            ++i;
-                        }
-                        continue;
-                    }
-
-                    if (strcmp(argv[i], "-reorder") == 0) {
-                        reorder = true;
-                        continue;
-                    }
-
-                    if (strcmp(argv[i], "-heavy") == 0) {
-                        heavy = true;
-                        continue;
-                    }
-
-                    if (strcmp(argv[i], "-check") == 0) {
-                        check_connect = true;
-                        continue;
-                    }
-                }
-        }
-        RMSDDriver *driver = new RMSDDriver(mol1, mol2);
-        driver->setForceReorder(reorder);
-        driver->setProtons(!heavy);
-        driver->setFragment(fragment);
-        driver->setCheckConnections(check_connect);
-        driver->setInitialFragment(init);
-        driver->AutoPilot();
-        std::cout << "RMSD for two molecules " << driver->RMSD() << std::endl;
-
-        driver->ReferenceAligned().writeXYZFile("reference.xyz");
-        driver->TargetAligned().writeXYZFile("target_align.xyz");
-        driver->TargetReorderd().writeXYZFile("target_reorder.xyz");
-
-        std::cout << Tools::Vector2String(driver->ReorderRules()) << std::endl;
-        delete driver;
-        exit(0);
+            std::cout << Tools::Vector2String(driver->ReorderRules()) << std::endl;
+            delete driver;
+            exit(0);
         } else if (strcmp(argv[1], "-dock") == 0) {
 
             if (argc < 4) {

@@ -30,7 +30,9 @@ NEBDocking::NEBDocking()
 void NEBDocking::Prepare()
 {
     /* First reorder structures and contrain proton connectivity */
-    RMSDDriver* driver = new RMSDDriver(m_start, m_end);
+    RMSDDriver* driver = new RMSDDriver();
+    driver->setReference(m_start);
+    driver->setTarget(m_end);
     driver->setForceReorder(true);
     driver->setCheckConnections(true);
     driver->setProtonTransfer(ProtonTransfer());

@@ -30,23 +30,28 @@
 #include <string>
 #include <vector>
 
+#include "json.hpp"
+using json = nlohmann::json;
+
 #include "rmsd.h"
 
-RMSDDriver::RMSDDriver(const Molecule &reference, const Molecule &target)
-    : m_reference(reference)
-    , m_target(target)
+RMSDDriver::RMSDDriver(const json& controller)
+    : CurcumaMethod(controller)
 {
-
-}
-
-RMSDDriver::RMSDDriver(const Molecule* reference, const Molecule* target)
-    : m_reference(reference)
-    , m_target(target)
-{
+    LoadControlJson();
 }
 
 RMSDDriver::~RMSDDriver()
 {
+}
+
+void RMSDDriver::LoadControlJson()
+{
+    m_fragment = Json2KeyWord<int>(m_controller, "fragment");
+    m_initial_fragment = Json2KeyWord<int>(m_controller, "init");
+    m_pt = Json2KeyWord<int>(m_controller, "pt");
+    m_force_reorder = Json2KeyWord<bool>(m_controller, "reorder");
+    m_protons = !Json2KeyWord<bool>(m_controller, "heavy");
 }
 
 void RMSDDriver::AutoPilot()

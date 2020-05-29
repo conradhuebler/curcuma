@@ -26,6 +26,11 @@
 #include <map>
 #include <queue>
 
+#include "json.hpp"
+using json = nlohmann::json;
+
+#include "curcumamethod.h"
+
 class IntermediateStorage {
 public:
     inline IntermediateStorage(unsigned int size)
@@ -48,14 +53,20 @@ private:
     std::map<double, std::vector<int>> m_shelf;
 };
 
-class RMSDDriver{
+static const json RMSDJson = {
+    { "reorder", false },
+    { "check", false },
+    { "heavy", false },
+    { "fragment", 0 },
+    { "init", 0 }
+};
+
+class RMSDDriver : public CurcumaMethod {
 
 public:
-    RMSDDriver(const Molecule& reference, const Molecule& target);
-    RMSDDriver(const Molecule* reference, const Molecule* target);
-    RMSDDriver() = default;
+    RMSDDriver(const json& controller = RMSDJson);
 
-    ~RMSDDriver();
+    virtual ~RMSDDriver();
     /*! \brief Use the AutoPilot to automatically perform everything, results are stored as long the object exsist */
     void AutoPilot();
 
@@ -142,6 +153,20 @@ public:
     inline void setInitialFragment(int fragment) { m_initial_fragment = fragment; }
 
 private:
+    /* Read Controller has to be implemented for all */
+    void LoadControlJson() override;
+
+    /* Lets have this for all modules */
+    nlohmann::json WriteRestartInformation() override { return json(); }
+
+    /* Lets have this for all modules */
+    bool LoadRestartInformation() override { return true; }
+
+    std::string MethodName() const override { return std::string("RMSD"); }
+
+    /* Lets have all methods read the input/control file */
+    void ReadControlFile() override {}
+
     void ReorderStraight();
     void ReconstructTarget(const std::vector<int>& atoms);
 

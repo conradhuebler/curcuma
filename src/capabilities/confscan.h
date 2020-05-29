@@ -49,7 +49,7 @@ static const json ConfScanJson = {
 class ConfScan : public CurcumaMethod {
 public:
     ConfScan(const json controller);
-    ~ConfScan();
+    virtual ~ConfScan();
 
     void setFileName(const std::string& filename)
     {
