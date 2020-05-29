@@ -40,6 +40,11 @@ protected:
     StringList RestartFiles() const;
 
     nlohmann::json LoadControl() const;
+    inline void UpdateController(json controller)
+    {
+        controller.patch(m_controller);
+        m_controller = controller;
+    }
 
     json m_controller;
     bool m_restart = true;
@@ -55,4 +60,7 @@ private:
 
     /* Lets have all methods read the input/control file */
     virtual void ReadControlFile() = 0;
+
+    /* Read Controller has to be implemented for all */
+    virtual void LoadControlJson() = 0;
 };

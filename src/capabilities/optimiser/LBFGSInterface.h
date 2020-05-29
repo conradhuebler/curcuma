@@ -110,7 +110,7 @@ private:
     const Molecule* m_molecule;
 };
 
-inline Molecule OptimiseGeometry(const Molecule* host, const json& controller) //,
+inline Molecule OptimiseGeometry(const Molecule* host, const json& controller)
 {
     bool writeXYZ = Json2KeyWord<bool>(controller, "writeXYZ");
     bool printOutput = Json2KeyWord<bool>(controller, "printOutput");
@@ -196,10 +196,17 @@ inline Molecule OptimiseGeometry(const Molecule* host, const json& controller) /
     return h;
 }
 
-inline void OptimiseGeometryThreaded(const Molecule* host, std::string* result_string, Molecule* result_molecule, double dE = 0.75, double dRMSD = 0.01)
+inline void OptimiseGeometryThreaded(const Molecule* host, std::string* result_string, Molecule* result_molecule, const json& controller)
 {
+    bool writeXYZ = Json2KeyWord<bool>(controller, "writeXYZ");
+    bool printOutput = Json2KeyWord<bool>(controller, "printOutput");
+    double dE = Json2KeyWord<double>(controller, "dE");
+    double dRMSD = Json2KeyWord<double>(controller, "dRMSD");
+    int method = Json2KeyWord<int>(controller, "GFN");
+    int InnerLoop = Json2KeyWord<int>(controller, "InnerLoop");
+    int OuterLoop = Json2KeyWord<int>(controller, "OuterLoop");
+
     stringstream ss;
-    int method = 77;
 
     Geometry geometry = host->getGeometry();
     Molecule tmp(host);

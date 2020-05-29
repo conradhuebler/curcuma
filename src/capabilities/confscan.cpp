@@ -39,8 +39,20 @@ using json = nlohmann::json;
 ConfScan::ConfScan(const json controller)
     : CurcumaMethod(controller)
 {
-    m_controller = ConfScanJson;
+    m_controller = ConfScanJson[MethodName()];
     m_controller.merge_patch(controller);
+    LoadControlJson();
+}
+
+ConfScan::~ConfScan()
+{
+    for (auto i : m_molecules) {
+        delete i.second;
+    }
+}
+
+void ConfScan::LoadControlJson()
+{
     m_noname = Json2KeyWord<bool>(m_controller, "noname");
     m_restart = Json2KeyWord<bool>(m_controller, "restart");
     m_heavy = Json2KeyWord<bool>(m_controller, "heavy");
@@ -56,16 +68,8 @@ ConfScan::ConfScan(const json controller)
     m_prevent_reorder = Json2KeyWord<bool>(m_controller, "preventReorder");
 }
 
-ConfScan::~ConfScan()
-{
-    for (auto i : m_molecules) {
-        delete i.second;
-    }
-}
-
 bool ConfScan::openFile()
 {
-
     bool xyzfile = std::string(m_filename).find(".xyz") != std::string::npos || std::string(m_filename).find(".trj") != std::string::npos;
 
     if (xyzfile == false)

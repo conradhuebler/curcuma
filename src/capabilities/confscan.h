@@ -91,6 +91,9 @@ private:
     /* Lets have all methods read the input/control file */
     virtual void ReadControlFile() override;
 
+    /* Read Controller has to be implemented for all */
+    void LoadControlJson() override;
+
     bool openFile();
 
     std::vector<std::vector<int>> m_reorder_rules;

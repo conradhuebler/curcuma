@@ -31,6 +31,11 @@
 #include <map>
 #include <thread>
 
+#include "json.hpp"
+using json = nlohmann::json;
+
+#include "curcumamethod.h"
+
 class Thread {
 
 public:
@@ -41,7 +46,7 @@ public:
     inline Molecule getMolecule() const { return m_final; }
     inline void start()
     {
-        auto thread = std::thread(&OptimiseGeometryThreaded, &m_molecule, &result, &m_final, 50, 0.1);
+        auto thread = std::thread(&OptimiseGeometryThreaded, &m_molecule, &result, &m_final, m_controller);
         thread.swap(m_thread);
     }
     inline void wait()
@@ -50,16 +55,30 @@ public:
         std::cout << result << std::endl;
     }
     inline thread::id Id() const { return m_thread.get_id(); }
+    inline void setController(const json& controller) { m_controller = controller; }
 
 private:
     std::string result;
     std::thread m_thread;
     Molecule m_molecule, m_final;
+    json m_controller = OptJson;
 };
 
-class Docking {
+static const json DockingJson = {
+    { "Pos_X", 0.0 },
+    { "Pos_Y", 0.0 },
+    { "Pos_Z", 0.0 },
+    { "AutoPos", true },
+    { "Filter", true },
+    { "PostOpt", true },
+    { "Step_X", 10 },
+    { "Step_Y", 10 },
+    { "Step_z", 10 }
+};
+
+class Docking : public CurcumaMethod {
 public:
-    Docking();
+    Docking(const json& controller);
 
     /*! \brief Set the structure of the host molecule */
     void setHostStructure(const Molecule& molecule)
@@ -71,37 +90,38 @@ public:
     /*! \brief Set the structure of the guest molecule */
     void setGuestStructure(const Molecule& molecule) { m_guest_structure = molecule; }
 
-    /*! \brief Initial Position, where the guest structure has to be placed */
-    void setAnchorPosition(const Position& position) { m_initial_anchor = position; }
-
-    /*! \brief Set the rotation on the x axis */
-    void setXRotation(int xxx) { m_xxx_rotation = xxx; }
-
-    /*! \brief Set the rotation on the y axis */
-    void setYRotation(int yyy) { m_yyy_rotation = yyy; }
-
-    /*! \brief Set the rotation on the z axis */
-    void setZRotation(int zzz) { m_zzz_rotation = zzz; }
-
     void PerformDocking();
 
     void PostOptimise();
 
     Molecule getMolecule() const { return m_supramol; }
 
-    void setCheck(bool check) { m_check = check; }
-
     StringList Files() const { return m_files; }
 
 private:
+    /* Read Controller has to be implemented for all */
+    void LoadControlJson() override;
+
+    /* Lets have this for all modules */
+    nlohmann::json WriteRestartInformation() override { return json(); }
+
+    /* Lets have this for all modules */
+    bool LoadRestartInformation() override { return true; }
+
+    std::string MethodName() const override { return std::string("Docking"); }
+
+    /* Lets have all methods read the input/control file */
+    void ReadControlFile() override {}
+
     Molecule m_host_structure, m_guest_structure, m_supramol;
     Position m_initial_anchor = Position{ 0, 0, 0 };
-    int m_xxx_rotation = 1, m_yyy_rotation = 1, m_zzz_rotation = 1;
+    int m_step_X = 1, m_step_Y = 1, m_step_Z = 1;
     std::map<double, Vector> m_docking_list;
     std::map<double, Molecule*> m_result_list;
     std::vector<Position> m_anchor_accepted, m_rotation_accepted;
     std::vector<double> m_fragments_mass;
     bool m_check = false;
+    bool m_PostFilter = true, m_PostOptimise = true, m_AutoPos = true;
     double m_sum_distance = 0;
     double m_window_seperator = 0.66666;
     StringList m_files;

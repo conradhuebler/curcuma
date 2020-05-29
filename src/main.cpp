@@ -41,8 +41,6 @@
 #include <vector>
 
 #include "json.hpp"
-
-// for convenience
 using json = nlohmann::json;
 
 void Distance(const Molecule &mol, char **argv)
@@ -61,16 +59,11 @@ void Distance(const Molecule &mol, char **argv)
     std::cout << "Hydrogen bond length " << mol.Distance(proton - 1, acceptor - 1) << std::endl;
 }
 
-
-
 int main(int argc, char **argv) {
 
     General::StartUp(argc, argv);
-
     RunTimer timer(true);
-
     json controller = CLI2Json(argc, argv);
-
     if(argc < 2)
     {
         std::cerr << "No arguments given!" << std::endl;
@@ -82,10 +75,8 @@ int main(int argc, char **argv) {
                   << "-rmsdtraj    * Find unique structures        *" << std::endl;
         XTBInterface interface;
     }
-    
     if(argc >= 2)
     {
-
         if(strcmp(argv[1], "-rmsd") == 0)
         {
             if (argc < 4) {
@@ -147,7 +138,6 @@ int main(int argc, char **argv) {
                     }
                 }
         }
-
         RMSDDriver *driver = new RMSDDriver(mol1, mol2);
         driver->setForceReorder(reorder);
         driver->setProtons(!heavy);
@@ -162,9 +152,7 @@ int main(int argc, char **argv) {
         driver->TargetReorderd().writeXYZFile("target_reorder.xyz");
 
         std::cout << Tools::Vector2String(driver->ReorderRules()) << std::endl;
-
         delete driver;
-
         exit(0);
         } else if (strcmp(argv[1], "-dock") == 0) {
 
@@ -172,59 +160,18 @@ int main(int argc, char **argv) {
                 std::cerr << "Please use curcuma for docking  as follows\ncurcuma -dock A.xyz B.xyz XXX YYY ZZZ" << std::endl;
                 exit(1);
             }
-            bool opt = false, filter = false;
-            bool check = false;
-
-            if (argc >= 4) {
-
-                for (std::size_t i = 4; i < argc; ++i) {
-
-                    if (strcmp(argv[i], "-opt") == 0) {
-                        opt = true;
-                        continue;
-                    }
-
-                    if (strcmp(argv[i], "-filter") == 0) {
-                        filter = true;
-                        continue;
-                    }
-
-                    if (strcmp(argv[i], "-check") == 0) {
-                        check = true;
-                        continue;
-                    }
-                }
-            }
-
             Molecule mol1 = Tools::LoadFile(argv[2]);
             Molecule mol2 = Tools::LoadFile(argv[3]);
-
-            Docking* docking = new Docking;
+            Docking* docking = new Docking(controller);
             docking->setHostStructure(mol1);
             docking->setGuestStructure(mol2);
-            /*
-            if (argc >= 7) {
-                double XXX = stod(std::string(argv[4]));
-                double YYY = stod(std::string(argv[5]));
-                double ZZZ = stod(std::string(argv[6]));
-
-                std::cout << "Docking Position:" << XXX << " " << YYY << " " << ZZZ << std::endl;
-                docking->setAnchorPosition(Position{ XXX, YYY, ZZZ });
-            }
-            if (argc >= 7) {
-
-
-            }*/
-            docking->setCheck(check);
             docking->PerformDocking();
-
         } else if (strcmp(argv[1], "-hbonds") == 0) {
             if(argc != 6)
             {
                 std::cerr << "Please use curcuma for hydrogen bond analysis as follows\ncurcuma -hbonds A.xyz index_donor index_proton index_acceptor" << std::endl;
                 return -1;
             }
-
             FileIterator file(argv[1]);
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
@@ -255,11 +202,9 @@ int main(int argc, char **argv) {
 
                 return -1;
             }
-
-            ConfScan* scan = new ConfScan(controller["confscan"]);
+            ConfScan* scan = new ConfScan(controller);
             scan->setFileName(argv[2]);
             scan->scan();
-
             return 0;
         } else if (strcmp(argv[1], "-led") == 0) {
             if (argc < 2) {
@@ -269,7 +214,6 @@ int main(int argc, char **argv) {
 
             Molecule mol1 = Tools::LoadFile(argv[2]);
             mol1.printFragmente();
-
         } else if (strcmp(argv[1], "-hmap") == 0) {
             if (argc < 2) {
                 std::cerr << "Please use curcuma for hydrogen bond mapping as follows:\ncurcuma -hmap trajectory.xyz" << std::endl;
@@ -279,9 +223,7 @@ int main(int argc, char **argv) {
             std::vector<std::pair<int, int>> pairs, elements;
 
             if (argc >= 3) {
-
                 for (std::size_t i = 3; i < argc; ++i) {
-
                     if (strcmp(argv[i], "-pair") == 0) {
                         if (i + 2 < argc) {
                             if (Tools::isInt(argv[i + 1]) && Tools::isInt(argv[i + 2])) {
@@ -327,13 +269,11 @@ int main(int argc, char **argv) {
                 mapper.addElementPair(pair);
 
             mapper.FindPairs();
-
         } else if (strcmp(argv[1], "-opt") == 0) {
             if (argc < 2) {
                 std::cerr << "Please use curcuma for optimisation as follows:\ncurcuma -opt input.xyz" << std::endl;
                 return 0;
             }
-
             string outfile = std::string(argv[2]);
             for (int i = 0; i < 4; ++i)
                 outfile.pop_back();
@@ -344,7 +284,6 @@ int main(int argc, char **argv) {
 
             FileIterator file(argv[2]);
             std::multimap<double, Molecule> results;
-
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
                 Molecule mol2 = OptimiseGeometry(&mol, key);
@@ -362,7 +301,6 @@ int main(int argc, char **argv) {
             }
 
             Molecule mol1 = Tools::LoadFile(argv[2]);
-
             SimpleMD md;
             md.setMolecule(mol1);
             md.Initialise();
@@ -428,7 +366,6 @@ int main(int argc, char **argv) {
                     continue;
                 }
             }
-
             RMSDTraj traj;
             traj.setReferenceStructure(reference);
             traj.WriteUnique(write_unique);
@@ -439,13 +376,11 @@ int main(int argc, char **argv) {
             if (isSecond)
                 traj.setSecondFile(second);
             traj.AnalyseTrajectory();
-
         } else if (strcmp(argv[1], "-nebprep") == 0) {
             if (argc < 3) {
                 std::cerr << "Please use curcuma for geometry preparation for nudge-elastic-band calculation follows:\ncurcuma -nebprep first.xyz second.xyz" << std::endl;
                 return 0;
             }
-
             int pt = 0;
             for (std::size_t i = 3; i < argc; ++i) {
                 if (strcmp(argv[i], "-pt") == 0) {
@@ -455,15 +390,14 @@ int main(int argc, char **argv) {
                     }
                 }
             }
+
             Molecule mol1 = Tools::LoadFile(argv[2]);
             Molecule mol2 = Tools::LoadFile(argv[3]);
-
             NEBDocking* nebdock = new NEBDocking;
             nebdock->setStructures(mol1, mol2);
             nebdock->setProtonTransfer(pt);
             nebdock->Prepare();
             delete nebdock;
-
         } else if (strcmp(argv[1], "-centroid") == 0) {
             if (argc < 3) {
                 std::cerr << "Please use curcuma for centroid calculation of user definable fragments:\ncurcuma -centroid first.xyz" << std::endl;
@@ -507,7 +441,6 @@ int main(int argc, char **argv) {
             }
 
             std::ofstream result_file;
-
             FileIterator file(argv[2]);
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
@@ -519,9 +452,7 @@ int main(int argc, char **argv) {
                     result_file << GeometryTools::Centroid(mol.getGeometryByFragment(fragment)).transpose() << std::endl;
                 }
             }
-
         } else {
-
             FileIterator file(argv[1]);
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();

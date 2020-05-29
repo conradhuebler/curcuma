@@ -33,10 +33,32 @@
 #include <iostream>
 #include <thread>
 
+#include "json.hpp"
+using json = nlohmann::json;
+
 #include "docking.h"
 
-Docking::Docking()
+Docking::Docking(const json& controller)
+    : CurcumaMethod(controller)
 {
+    json c = DockingJson;
+    c["opt"] = OptJson;
+    UpdateController(c);
+    LoadControlJson();
+}
+
+void Docking::LoadControlJson()
+{
+    double Pos_X = Json2KeyWord<double>(m_controller, "Pos_X");
+    double Pos_Y = Json2KeyWord<double>(m_controller, "Pos_Y");
+    double Pos_Z = Json2KeyWord<double>(m_controller, "Pos_Z");
+    m_initial_anchor = Position{ Pos_X, Pos_Y, Pos_Z };
+    m_step_X = Json2KeyWord<int>(m_controller, "Step_X");
+    m_step_Y = Json2KeyWord<int>(m_controller, "Step_Y");
+    m_step_Z = Json2KeyWord<int>(m_controller, "Step_Z");
+    m_AutoPos = Json2KeyWord<bool>(m_controller, "AutoPos");
+    m_PostFilter = Json2KeyWord<bool>(m_controller, "Filter");
+    m_PostOptimise = Json2KeyWord<bool>(m_controller, "PostOpt");
 }
 
 
@@ -76,27 +98,20 @@ void Docking::PerformDocking()
     std::cout << std::endl
               << "** Docking Phase 0 - Starting **" << std::endl
               << std::endl;
-    int X = 36;
-    int Y = 36;
-    int Z = 36;
 
-    int max = 10;
-    if (m_check) {
-        X = 10;
-        Y = 10;
-        Z = 10;
-        max = 36;
-        std::cout << "Fewer sampling " << std::endl;
-    }
+    int max_X = 360 / double(m_step_X);
+    int max_Y = 360 / double(m_step_Y);
+    int max_Z = 360 / double(m_step_Z);
+
     int excluded = 0, all = 0;
-    for (int x = 0; x < X; ++x) {
-        for (int y = 0; y < Y; ++y) {
-            for (int z = 0; z < Z; ++z) {
+    for (int x = 0; x < m_step_X; ++x) {
+        for (int y = 0; y < m_step_Y; ++y) {
+            for (int z = 0; z < m_step_Z; ++z) {
                 ++all;
                 Molecule* molecule = new Molecule(m_host_structure);
                 guest = m_guest_structure;
 
-                std::pair<Position, Position> pair = OptimiseAnchor(&m_host_structure, guest, m_initial_anchor, Position{ x * max, y * max, z * max });
+                std::pair<Position, Position> pair = OptimiseAnchor(&m_host_structure, guest, m_initial_anchor, Position{ x * max_X, y * max_Y, z * max_Z });
 
                 bool accept = true;
 
@@ -132,7 +147,7 @@ void Docking::PerformDocking()
                 m_result_list.insert(std::pair<double, Molecule*>(distance, molecule));
             }
         }
-        std::cout << (x / double(X)) * 100 << "% - " << m_anchor_accepted.size() << " stored structures. " << excluded << " structures were skipped, due to being duplicate! " << all << " checked all together!" << std::endl;
+        std::cout << (x / double(m_step_X)) * 100 << "% - " << m_anchor_accepted.size() << " stored structures. " << excluded << " structures were skipped, due to being duplicate! " << all << " checked all together!" << std::endl;
     }
 
     std::cout << m_anchor_accepted.size() << " stored structures. " << excluded << " structures were skipped, due to being duplicate!" << all << " checked!" << std::endl;
@@ -162,6 +177,9 @@ void Docking::PostOptimise()
     std::map<double, Molecule*> result_list, final_results;
     auto iter = m_result_list.begin();
     int index = 0;
+    json opt = OptJson;
+    opt["dE"] = 50;
+    opt["dRMSD"] = 0.1;
     while (iter != m_result_list.end()) {
         std::vector<Thread*> thread_block;
         std::cout << "Batch calculation started! " << std::endl;
@@ -173,6 +191,7 @@ void Docking::PostOptimise()
 
             Thread* th = new Thread;
             th->setMolecule(pair.second);
+            th->setController(opt);
             th->start();
             thread_block.push_back(th);
 
