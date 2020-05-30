@@ -38,6 +38,10 @@ using json = nlohmann::json;
 RMSDDriver::RMSDDriver(const json& controller)
     : CurcumaMethod(controller)
 {
+
+    m_controller = RMSDJson;
+    json rmsd = Json2KeyWord<json>(controller, MethodName());
+    m_controller.merge_patch(rmsd);
     LoadControlJson();
 }
 

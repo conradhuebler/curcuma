@@ -36,11 +36,12 @@ using json = nlohmann::json;
 
 #include "confscan.h"
 
-ConfScan::ConfScan(const json controller)
+ConfScan::ConfScan(const json& controller)
     : CurcumaMethod(controller)
 {
-    m_controller = ConfScanJson[MethodName()];
-    m_controller.merge_patch(controller);
+    m_controller = ConfScanJson;
+    json confscan = Json2KeyWord<json>(controller, MethodName());
+    m_controller.merge_patch(confscan);
     LoadControlJson();
 }
 
@@ -56,9 +57,10 @@ void ConfScan::LoadControlJson()
     m_noname = Json2KeyWord<bool>(m_controller, "noname");
     m_restart = Json2KeyWord<bool>(m_controller, "restart");
     m_heavy = Json2KeyWord<bool>(m_controller, "heavy");
+
+    m_rmsd_threshold = Json2KeyWord<double>(m_controller, "rmsd");
     if (m_heavy)
         m_rmsd_threshold = 0.75;
-    m_rmsd_threshold = Json2KeyWord<double>(m_controller, "rmsd");
     m_maxrank = Json2KeyWord<double>(m_controller, "maxrank");
     m_writeXYZ = Json2KeyWord<bool>(m_controller, "writeXYZ");
     m_force_reorder = Json2KeyWord<bool>(m_controller, "forceReorder");
@@ -66,6 +68,7 @@ void ConfScan::LoadControlJson()
     m_energy_threshold = Json2KeyWord<double>(m_controller, "energy");
     m_energy_cutoff = Json2KeyWord<double>(m_controller, "maxenergy");
     m_prevent_reorder = Json2KeyWord<bool>(m_controller, "preventReorder");
+    m_force_silent = Json2KeyWord<bool>(m_controller, "silent");
 }
 
 bool ConfScan::openFile()
@@ -302,7 +305,7 @@ void ConfScan::scan()
     ReadControlFile();
     LoadRestartInformation();
 
-    m_silent = m_ordered_list.size() > 500;
+    m_silent = m_ordered_list.size() > 500 || m_force_silent;
     Molecule* mol1;
     bool accept = true;
 
@@ -371,9 +374,10 @@ void ConfScan::scan()
         int index = i.second;
         Molecule* mol1 = m_molecules.at(index).second;
         int result = PreCheckAgainstAccepted(index);
-        if (result == -1)
+        if (result == -1) {
+            m_rejected++;
             continue;
-        else
+        } else
             accept = result;
 
         TriggerWriteRestart();
@@ -388,9 +392,10 @@ void ConfScan::scan()
         if (!m_filtered.count(mol1->Name())) {
             if (m_global_temp_list.size()) {
                 int result = CheckTempList(index);
-                if (result == -1)
+                if (result == -1) {
+                    m_rejected++;
                     continue;
-                else
+                } else
                     accept = result;
             }
 
@@ -399,7 +404,12 @@ void ConfScan::scan()
                 std::cout << "Skipping check, as structure already rejected." << std::endl;
             }
         }
-        if (accept && m_accepted < m_maxrank && m_maxrank > 0) {
+        if (accept) {
+            if (m_maxrank > 0 && m_accepted > m_maxrank) {
+                accept = false;
+                m_rejected++;
+                continue;
+            }
             m_result.push_back(mol1);
             if (m_writeFiles)
                 mol1->appendXYZFile(result_name);
@@ -604,8 +614,9 @@ int ConfScan::CheckTempList(int index)
                 //mol2->appendXYZFile("reused.xyz");
                 accept = false;
 
-                std::string reject_reason = mol2->Name() + " [II]  RMSD = " + std::to_string(tmp_rmsd) + "; dE = " + std::to_string(difference);
-                m_filtered[mol1->Name()].push_back(reject_reason);
+                //std::string reject_reason = mol2->Name() + " [II]  RMSD = " + std::to_string(tmp_rmsd) + "; dE = " + std::to_string(difference);
+                rmsd = tmp_rmsd;
+                //m_filtered[mol1->Name()].push_back(reject_reason);
                 m_reordered_reused++;
                 break;
             }

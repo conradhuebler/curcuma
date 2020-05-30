@@ -44,11 +44,11 @@ static const json ConfScanJson = {
     { "energy", 1.0 },
     { "maxenergy", -1.0 },
     { "preventreorder", false },
+    { "silent", false }
 };
-
 class ConfScan : public CurcumaMethod {
 public:
-    ConfScan(const json controller);
+    ConfScan(const json& controller);
     virtual ~ConfScan();
 
     void setFileName(const std::string& filename)
@@ -125,4 +125,5 @@ private:
     bool m_silent = false;
     bool m_internal_parametrised = false;
     bool m_parameter_loaded = false;
+    bool m_force_silent = false;
 };
