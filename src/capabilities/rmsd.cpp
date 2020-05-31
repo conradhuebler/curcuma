@@ -38,10 +38,21 @@ using json = nlohmann::json;
 RMSDDriver::RMSDDriver(const json& controller)
     : CurcumaMethod(controller)
 {
-
     m_controller = RMSDJson;
-    json rmsd = Json2KeyWord<json>(controller, MethodName());
-    m_controller.merge_patch(rmsd);
+    json rmsd;
+    try {
+        rmsd = Json2KeyWord<json>(controller, MethodName());
+    } catch (int error) {
+        if (error == -1)
+            try {
+                m_controller.merge_patch(rmsd);
+            } catch (const json::exception& e) {
+            }
+    }
+    try {
+        m_controller.merge_patch(controller);
+    } catch (const json::exception& e) {
+    }
     LoadControlJson();
 }
 
@@ -56,6 +67,7 @@ void RMSDDriver::LoadControlJson()
     m_pt = Json2KeyWord<int>(m_controller, "pt");
     m_force_reorder = Json2KeyWord<bool>(m_controller, "reorder");
     m_protons = !Json2KeyWord<bool>(m_controller, "heavy");
+    m_silent = Json2KeyWord<bool>(m_controller, "silent");
 }
 
 void RMSDDriver::AutoPilot()
@@ -241,7 +253,6 @@ Eigen::Matrix3d RMSDDriver::BestFitRotation(const Molecule& reference_mol, const
 
 double RMSDDriver::CalculateShortRMSD(const Geometry& reference_mol, const Molecule& target_mol) const
 {
-
     const Geometry tar = CenterMolecule(target_mol.getGeometry());
 
     Eigen::Matrix3d R = BestFitRotationShort(reference_mol, tar);
@@ -347,7 +358,6 @@ Geometry RMSDDriver::CenterMolecule(const Geometry& mol) const
 
 int RMSDDriver::CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) const
 {
-
     auto connect_1 = mol1.getConnectivtiy(m_scaling);
     auto connect_2 = mol2.getConnectivtiy(m_scaling);
 
@@ -363,8 +373,8 @@ int RMSDDriver::CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) c
                       << std::endl;
     for (std::size_t i = 0; i < connect_1.size(); ++i) {
         auto target = connect_1[i];
-
         auto reference = connect_2[i];
+
         difference += Tools::VectorDifference(reference, target);
         if (!m_silent)
             if (m_print_intermediate)
@@ -408,7 +418,6 @@ int RMSDDriver::CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) c
 
 int RMSDDriver::CheckConnectivitiy(const Molecule& mol1) const
 {
-
     auto connect = mol1.getConnectivtiy(m_scaling);
 
     if (m_connectivity.size() != connect.size())
@@ -545,15 +554,12 @@ void RMSDDriver::InitialisePair()
 void RMSDDriver::ReorderMolecule()
 {
     double scaling = 1.5;
-
     m_connectivity = m_reference.getConnectivtiy(scaling);
-
     ReorderStraight();
 }
 
 void RMSDDriver::ReorderStraight()
 {
-
     int inter_size = m_reference.AtomCount() * (m_reference.AtomCount() - 1) * m_intermedia_storage;
     m_storage = std::vector<IntermediateStorage>(m_reference.AtomCount() - 1, IntermediateStorage(inter_size));
 
@@ -722,7 +728,6 @@ bool RMSDDriver::SolveIntermediate(std::vector<int> intermediate, bool fast)
 
     for (int j = 0; j < m_target.AtomCount(); ++j) {
         if (m_target.Atoms()[j] == element_local) {
-
             if ((m_reference.ConnectedMass(i) != m_target.ConnectedMass(j) || GeometryTools::Distance(blob1, m_target.Atom(j).second) > 1.5 * GeometryTools::Distance(blob, m_reference.Atom(i).second)) && fast) {
                 continue;
             }
@@ -797,7 +802,6 @@ void RMSDDriver::ReconstructTarget(const std::vector<int>& atoms)
     m_target_reordered.LoadMolecule(target);
 
     if (m_postprocess) {
-
         double mean_0 = 0;
         bool allow_loop = true;
         //std::cout << CalculateRMSD(reference, target_cached) << std::endl;
@@ -813,7 +817,6 @@ void RMSDDriver::ReconstructTarget(const std::vector<int>& atoms)
                 if (terms[index] < 1.5 * mean) {
                     target2.addPair(target_cached.Atom(index));
                     reference2.addPair(reference.Atom(index));
-
                 } // else
                 //std::cout << index << " " << terms[index] << " " << mean << std::endl;
             }

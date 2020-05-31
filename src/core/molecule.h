@@ -28,8 +28,6 @@
 #include <Eigen/Dense>
 
 #include "src/core/global.h"
-
-using namespace std;
  
 class Molecule
 {
@@ -54,7 +52,6 @@ class Molecule
     inline double ConnectedMass(int atom) const { return m_connect_mass[atom]; }
     double angle(int atom1, int atom2, int atom3) const;
     double DotProduct(std::array<double, 3> pos1, std::array<double, 3> pos2) const;
-//     double torsion(int atom1, int atom2, int atom3, int atom4);
 
     void clear();
 
@@ -117,6 +114,16 @@ class Molecule
     inline void setScaling(double scaling) { m_scaling = scaling; }
 
 private:
+    bool setXYZComment_0(const StringList& list);
+    bool setXYZComment_1(const StringList& list);
+    bool setXYZComment_2(const StringList& list);
+    bool setXYZComment_3(const StringList& list);
+    bool setXYZComment_4(const StringList& list);
+    bool setXYZComment_5(const StringList& list);
+    bool setXYZComment_6(const StringList& list);
+    bool setXYZComment_7(const StringList& list);
+    bool setXYZComment_8(const StringList& list);
+
     void InitialiseEmptyGeometry(int atoms);
 
     int m_charge = 0;
@@ -127,7 +134,6 @@ private:
 
     mutable std::vector<std::vector<int>> m_fragments;
     mutable std::vector<double> m_mass_fragments;
-    string point_group;
     mutable bool m_dirty = true;
     std::string m_name;
     double m_energy = 0, m_Ia = 0, m_Ib = 0, m_Ic = 0, m_mass = 0;

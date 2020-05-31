@@ -32,8 +32,6 @@
 #include "src/core/global.h"
 #include "src/core/molecule.h"
 
-typedef std::vector<std::string> StringList;
-
 class RunTimer {
 public:
     RunTimer(bool print = false)
@@ -151,7 +149,7 @@ inline bool isDouble(const std::string& input)
     // return std::all_of(input.begin(), input.end(), ::isdigit);
 }
 
-inline Molecule LoadFile(const string& filename)
+inline Molecule LoadFile(const std::string& filename)
 {
 
     bool xyzfile = std::string(filename).find(".xyz") != std::string::npos || std::string(filename).find(".trj") != std::string::npos;

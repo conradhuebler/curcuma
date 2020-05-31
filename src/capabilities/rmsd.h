@@ -59,7 +59,8 @@ static const json RMSDJson = {
     { "heavy", false },
     { "fragment", 0 },
     { "init", -1 },
-    { "pt", 0 }
+    { "pt", 0 },
+    { "silent", false }
 };
 
 class RMSDDriver : public CurcumaMethod {

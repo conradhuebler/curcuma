@@ -17,13 +17,7 @@
  *
  */
 
-#include <cstring>
-#include <fstream>
-#include <iomanip>
-#include <iostream>
-#include <map>
-#include <string>
-#include <vector>
+#include "curcumamethod.h"
 
 #include "src/capabilities/rmsd.h"
 
@@ -33,15 +27,42 @@
 #include "src/tools/general.h"
 #include "src/tools/geometry.h"
 
+#include <cstring>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <map>
+#include <string>
+#include <vector>
+
+#include "json.hpp"
+using json = nlohmann::json;
+
 #include "rmsdtraj.h"
 
-RMSDTraj::RMSDTraj()
+RMSDTraj::RMSDTraj(const json& controller)
+    : CurcumaMethod(controller)
 {
+    m_controller = RMSDJson;
+    json rmsd;
+    try {
+        rmsd = Json2KeyWord<json>(controller, MethodName());
+    } catch (int error) {
+        if (error == -1)
+            try {
+                m_controller.merge_patch(rmsd);
+            } catch (const json::exception& e) {
+            }
+    }
+    try {
+        m_controller.merge_patch(controller);
+    } catch (const json::exception& e) {
+    }
+    LoadControlJson();
 }
 
 void RMSDTraj::AnalyseTrajectory()
 {
-
     std::cout << "'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
     std::cout << "'    Scanning Trajectory file for RMSD and Conformers     '" << std::endl;
     std::cout << "'    Write Conformers ";
@@ -57,7 +78,7 @@ void RMSDTraj::AnalyseTrajectory()
         atoms_target = m_stored_structures[0].AtomCount();
     }
 
-    string outfile = m_filename;
+    std::string outfile = m_filename;
     for (int i = 0; i < 4; ++i)
         outfile.pop_back();
 
@@ -156,7 +177,7 @@ void RMSDTraj::AnalyseTrajectory()
                     } catch (const std::string& what_arg) {
                     }
                 } else {
-                    for (const string& s : list) {
+                    for (const std::string& s : list) {
                         double energy = 0;
                         if (Tools::isDouble(s)) {
                             energy = std::stod(s);
@@ -248,4 +269,15 @@ void RMSDTraj::AnalyseTrajectory()
     m_rmsd_file << "#" << shannon << std::endl;
 
     delete driver;
+}
+
+void RMSDTraj::LoadControlJson()
+{
+    m_heavy = Json2KeyWord<bool>(m_controller, "heavy");
+    m_write_unique = Json2KeyWord<bool>(m_controller, "write");
+    m_rmsd_threshold = Json2KeyWord<double>(m_controller, "rmsd");
+    m_fragment = Json2KeyWord<int>(m_controller, "fragment");
+    m_reference = Json2KeyWord<std::string>(m_controller, "reference");
+    m_second_file = Json2KeyWord<std::string>(m_controller, "second");
+    m_pairwise = (m_second_file.compare("none") != 0);
 }

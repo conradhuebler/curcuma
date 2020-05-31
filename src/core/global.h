@@ -41,6 +41,7 @@ typedef Eigen::Vector4d Vector4d;
 
 typedef Eigen::VectorXd Vector;
 typedef std::pair<int, int> IntPair;
+typedef std::vector<std::string> StringList;
 
 inline Vector PositionPair2Vector(const std::pair<Position, Position>& pair)
 {

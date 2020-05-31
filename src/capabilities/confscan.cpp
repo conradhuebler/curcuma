@@ -56,12 +56,13 @@ void ConfScan::LoadControlJson()
 {
     m_noname = Json2KeyWord<bool>(m_controller, "noname");
     m_restart = Json2KeyWord<bool>(m_controller, "restart");
-    m_heavy = Json2KeyWord<bool>(m_controller, "heavy");
 
+    m_heavy = Json2KeyWord<bool>(m_controller, "heavy");
     m_rmsd_threshold = Json2KeyWord<double>(m_controller, "rmsd");
     if (m_heavy)
         m_rmsd_threshold = 0.75;
-    m_maxrank = Json2KeyWord<double>(m_controller, "maxrank");
+
+    m_maxrank = Json2KeyWord<double>(m_controller, "rank");
     m_writeXYZ = Json2KeyWord<bool>(m_controller, "writeXYZ");
     m_force_reorder = Json2KeyWord<bool>(m_controller, "forceReorder");
     m_check_connections = Json2KeyWord<bool>(m_controller, "check");
@@ -69,6 +70,8 @@ void ConfScan::LoadControlJson()
     m_energy_cutoff = Json2KeyWord<double>(m_controller, "maxenergy");
     m_prevent_reorder = Json2KeyWord<bool>(m_controller, "preventReorder");
     m_force_silent = Json2KeyWord<bool>(m_controller, "silent");
+    m_scale_loose = Json2KeyWord<double>(m_controller, "scaleLoose");
+    m_scale_tight = Json2KeyWord<double>(m_controller, "scaleTight");
 }
 
 bool ConfScan::openFile()
@@ -241,19 +244,18 @@ void ConfScan::ParametriseRotationalCutoffs()
 {
     if (m_prevent_reorder)
         return;
-
+    json rmsd = RMSDJson;
+    rmsd["silent"] = true;
+    rmsd["reorder"] = false;
+    rmsd["check"] = false;
+    rmsd["heavy"] = m_heavy;
     std::cout << "Parametrise cutoff of rotational constants for reordering decison tree!" << std::endl;
     m_internal_parametrised = true;
     std::vector<double> accepted, rejected;
     double accepted_single = 0;
     for (int i = 0; i < m_ordered_list.size(); ++i) {
         for (int j = i + 1; j < m_ordered_list.size(); ++j) {
-            RMSDDriver* driver = new RMSDDriver;
-            driver->setSilent(true);
-            driver->setProtons(!m_heavy);
-            driver->setForceReorder(false);
-            driver->setCheckConnections(false);
-
+            RMSDDriver* driver = new RMSDDriver(rmsd);
             Molecule* mol1 = m_molecules.at(i).second;
             Molecule* mol2 = m_molecules.at(j).second;
 
@@ -275,18 +277,17 @@ void ConfScan::ParametriseRotationalCutoffs()
                 rejected.push_back(diff_rot);
         }
     }
-    double scale_upper = 2;
-    m_diff_rot_abs_tight = Tools::median(accepted) * 0.5;
-    m_diff_rot_abs_loose = Tools::median(rejected) * scale_upper;
+    m_diff_rot_abs_tight = Tools::median(accepted);
+    m_diff_rot_abs_loose = Tools::median(rejected);
 }
 
 int ConfScan::AcceptRotationalConstant(double constant)
 {
     /* This has to be compressed to logic gatters to avoid branching */
     if (m_internal_parametrised) {
-        if (constant < m_diff_rot_abs_tight)
+        if (constant < m_diff_rot_abs_tight * m_scale_tight)
             return -1; // Assume identical without reordering
-        else if (m_diff_rot_abs_tight < constant && constant < m_diff_rot_abs_loose)
+        else if (m_diff_rot_abs_tight * m_scale_tight < constant && constant < m_diff_rot_abs_loose * m_scale_loose)
             return 0; // Lets reorder it
         else
             return 1 && m_prevent_reorder == false; // Do not reorder it

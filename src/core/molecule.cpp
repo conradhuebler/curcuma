@@ -157,33 +157,9 @@ void Molecule::setXYZComment(const std::string& comment)
 {
     StringList list = Tools::SplitString(comment);
     if (list.size() == 7) {
-        if (list[2].compare("gnorm:") == 0) {
-            //setEnergy(std::stod((list[1])));
-        } else
-            try {
-                setEnergy(std::stod((list[4])));
-            } catch (const std::string& what_arg) {
-                setEnergy(0);
-            }
+        setXYZComment_7(list);
     } else if (list.size() == 4) {
-        if (list[0].compare("SCF") == 0 && list[1].compare("done") == 0) {
-            try {
-                setEnergy(std::stod((list[2])));
-            } catch (const std::string& what_arg) {
-                setEnergy(0);
-            }
-        } else {
-            setName(list[0]);
-            if (list[3] == "")
-                setEnergy(0);
-            else {
-                try {
-                    setEnergy(std::stod((list[3])));
-                } catch (const std::string& what_arg) {
-                    setEnergy(0);
-                }
-            }
-        }
+        setXYZComment_4(list);
     } else if (list.size() == 1) {
         if (list[0].compare("") == 0) {
             // Ignore empty comment line
@@ -194,7 +170,7 @@ void Molecule::setXYZComment(const std::string& comment)
             }
         }
     } else {
-        for (const string& s : list) {
+        for (const std::string& s : list) {
             double energy = 0;
             if (Tools::isDouble(s)) {
                 energy = std::stod(s);
@@ -205,9 +181,79 @@ void Molecule::setXYZComment(const std::string& comment)
     }
 }
 
+bool Molecule::setXYZComment_0(const StringList& list)
+{
+    return true;
+}
+
+bool Molecule::setXYZComment_1(const StringList& list)
+{
+    return true;
+}
+
+bool Molecule::setXYZComment_2(const StringList& list)
+{
+    return true;
+}
+
+bool Molecule::setXYZComment_3(const StringList& list)
+{
+    return true;
+}
+
+bool Molecule::setXYZComment_4(const StringList& list)
+{
+    if (list[0].compare("SCF") == 0 && list[1].compare("done") == 0) {
+        try {
+            setEnergy(std::stod((list[2])));
+        } catch (const std::string& what_arg) {
+            setEnergy(0);
+        }
+    } else {
+        setName(list[0]);
+        if (list[3] == "")
+            setEnergy(0);
+        else {
+            try {
+                setEnergy(std::stod((list[3])));
+            } catch (const std::string& what_arg) {
+                setEnergy(0);
+            }
+        }
+    }
+    return true;
+}
+
+bool Molecule::setXYZComment_5(const StringList& list)
+{
+    return true;
+}
+
+bool Molecule::setXYZComment_6(const StringList& list)
+{
+    return true;
+}
+
+bool Molecule::setXYZComment_7(const StringList& list)
+{
+    if (list[2].compare("gnorm:") == 0) {
+        //setEnergy(std::stod((list[1])));
+    } else
+        try {
+            setEnergy(std::stod((list[4])));
+        } catch (const std::string& what_arg) {
+            setEnergy(0);
+        }
+    return true;
+}
+
+bool Molecule::setXYZComment_8(const StringList& list)
+{
+    return true;
+}
+
 bool Molecule::Contains(const std::pair<int, Position>& atom)
 {
-
     for (std::size_t i = 0; i < AtomCount(); ++i) {
         if (GeometryTools::Distance(Atom(i).second, atom.second) < 1e-6)
             return true;
@@ -241,7 +287,6 @@ double Molecule::DotProduct(std::array<double, 3> pos1, std::array<double, 3> po
 
 double Molecule::angle(int atom1, int atom2, int atom3) const
 {
-
     std::array<double, 3> atom_0 = { m_geometry[atom2 - 1] }; // Proton
     std::array<double, 3> atom_1 = { m_geometry[atom3 - 1] }; // Acceptor
     std::array<double, 3> atom_2 = { m_geometry[atom1 - 1] }; // Donor
@@ -277,11 +322,10 @@ void Molecule::setAtom(const std::string& internal, int i)
 
     if(elements.size() == 7)
     {
-        
         int atom_1 = stoi(elements[1]);
         int atom_2 = stoi(elements[2]);
         int atom_3 = stoi(elements[3]);
-        
+
         double r_ij = stod(elements[4]);
         double omega = stod(elements[5]);
         double theta = stod(elements[6]);
@@ -295,7 +339,6 @@ void Molecule::setAtom(const std::string& internal, int i)
         m_geometry[i][1] = y;
         m_geometry[i][2] = z;
     }
-
     m_dirty = true;
 }
 
@@ -320,9 +363,7 @@ void Molecule::setXYZ(const std::string& internal, int i)
     elements.push_back(element);
     m_atoms.push_back(Elements::String2Element(elements[0]));
 
-    if(elements.size() >= 4)
-    {
-        
+    if (elements.size() >= 4) {
         double x = stod(elements[1]);
         double y = stod(elements[2]);
         double z = stod(elements[3]);
@@ -484,7 +525,7 @@ std::pair<int, Position> Molecule::Atom(int i) const
 void Molecule::writeXYZFile(const std::string& filename) const
 {
     std::ofstream input;
-    input.open(filename, ios::out);
+    input.open(filename, std::ios::out);
     input << AtomCount() << std::endl
           << Name() << " ** Energy = " << std::setprecision(12) << Energy() << " Eh **"
           << std::endl;
@@ -612,9 +653,7 @@ void Molecule::AnalyseIntermoleculeDistance() const
     double cutoff = 2.5;
     for (std::size_t i = 0; i < m_fragments.size(); ++i) {
         for (std::size_t j = i + 1; j < m_fragments.size(); ++j) {
-
             for (int a : m_fragments[i]) {
-
                 for (int b : m_fragments[j]) {
                     double distance = Distance(a, b);
                     if (distance < cutoff) {

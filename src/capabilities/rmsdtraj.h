@@ -26,9 +26,28 @@
 #include <string>
 #include <vector>
 
-class RMSDTraj {
+#include "src/core/molecule.h"
+
+#include "curcumamethod.h"
+
+#include "json.hpp"
+using json = nlohmann::json;
+
+const json RMSDTrajJson{
+    { "write", false },
+    { "rmsd", 1.5 },
+    { "fragment", -1 },
+    { "reference", "none" },
+    { "second", "none" },
+    { "heavy", false }
+};
+
+class RMSDTraj : public CurcumaMethod {
+
 public:
-    RMSDTraj();
+    RMSDTraj(const json& controller = RMSDTrajJson);
+    virtual ~RMSDTraj() {}
+
     void setFile(const std::string& filename) { m_filename = filename; }
     void setSecondFile(const std::string& filename)
     {
@@ -49,6 +68,20 @@ public:
     inline void setHeavy(bool heavy) { m_heavy = heavy; }
 
 private:
+    /* Read Controller has to be implemented for all */
+    void LoadControlJson() override;
+
+    /* Lets have this for all modules */
+    nlohmann::json WriteRestartInformation() override { return json(); }
+
+    /* Lets have this for all modules */
+    bool LoadRestartInformation() override { return true; }
+
+    std::string MethodName() const override { return std::string("RMSDTraj"); }
+
+    /* Lets have all methods read the input/control file */
+    void ReadControlFile() override {}
+
     std::string m_filename, m_reference, m_second_file;
     std::ofstream m_rmsd_file, m_pca_file, m_pairwise_file;
     std::vector<Molecule> m_stored_structures;

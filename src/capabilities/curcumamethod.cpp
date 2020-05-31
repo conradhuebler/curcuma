@@ -59,7 +59,7 @@ StringList CurcumaMethod::RestartFiles() const
 #ifdef C17
     for (auto& p : fs::directory_iterator(".")) {
         std::string file(p.path());
-        if (file.find("curcuma_restart") != string::npos)
+        if (file.find("curcuma_restart") != std::string::npos)
             file_list.push_back(file);
     }
 #else

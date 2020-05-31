@@ -206,7 +206,7 @@ inline void OptimiseGeometryThreaded(const Molecule* host, std::string* result_s
     int InnerLoop = Json2KeyWord<int>(controller, "InnerLoop");
     int OuterLoop = Json2KeyWord<int>(controller, "OuterLoop");
 
-    stringstream ss;
+    std::stringstream ss;
 
     Geometry geometry = host->getGeometry();
     Molecule tmp(host);

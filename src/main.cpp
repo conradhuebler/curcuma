@@ -51,9 +51,11 @@ void Distance(const Molecule &mol, char **argv)
     std::cout << "Using atoms" << std::endl;
     std::cout << "Donor ";
     mol.printAtom(donor);
-    std::cout << endl << "Proton: ";
+    std::cout << std::endl
+              << "Proton: ";
     mol.printAtom(proton);
-    std::cout << endl << "Acceptor: ";
+    std::cout << std::endl
+              << "Acceptor: ";
     mol.printAtom(acceptor);
     std::cout << std::endl << "Hydrogen Bond Angle: "<<  mol.angle(donor, proton, acceptor) << std::endl;
     std::cout << "Hydrogen bond length " << mol.Distance(proton - 1, acceptor - 1) << std::endl;
@@ -107,7 +109,6 @@ int main(int argc, char **argv) {
             delete driver;
             exit(0);
         } else if (strcmp(argv[1], "-dock") == 0) {
-
             if (argc < 4) {
                 std::cerr << "Please use curcuma for docking  as follows\ncurcuma -dock A.xyz B.xyz XXX YYY ZZZ" << std::endl;
                 exit(1);
@@ -151,7 +152,6 @@ int main(int argc, char **argv) {
                 std::cerr << "-norestart **** Prevent restarting in any cases." << std::endl;
                 std::cerr << "-maxenergy **** Maximal energy difference between best and current conformer [kJ/mol] for a conformer to be analysed." << std::endl;
                 std::cerr << "-energy    **** Energy threshold for identical structures [kJ/mol]." << std::endl;
-
                 return -1;
             }
             ConfScan* scan = new ConfScan(controller);
@@ -226,7 +226,7 @@ int main(int argc, char **argv) {
                 std::cerr << "Please use curcuma for optimisation as follows:\ncurcuma -opt input.xyz" << std::endl;
                 return 0;
             }
-            string outfile = std::string(argv[2]);
+            std::string outfile = std::string(argv[2]);
             for (int i = 0; i < 4; ++i)
                 outfile.pop_back();
             outfile += "_opt.xyz";
@@ -266,12 +266,12 @@ int main(int argc, char **argv) {
                 std::cerr << "-fragment n   **** Set fragment to n." << std::endl;
                 std::cerr << "-reference    **** Add different xyz structure as reference." << std::endl;
                 std::cerr << "-second       **** Add second trajectory." << std::endl;
-                std::cerr << "-heavy        **** Check only heavy atoms. Do not use with write." << std::endl;
-
+                std::cerr << "-heavy        **** Check only heavy atoms. Do not use with -write." << std::endl;
                 return 0;
             }
+            /*
             int fragment = -1;
-            string reference, second;
+            std::string reference, second;
             double rmsd = 1;
             bool write_unique = false, heavy = false;
             bool isSecond = false;
@@ -318,16 +318,18 @@ int main(int argc, char **argv) {
                     continue;
                 }
             }
-            RMSDTraj traj;
-            traj.setReferenceStructure(reference);
-            traj.WriteUnique(write_unique);
-            traj.setRMSDThreshold(rmsd);
+    */
+            RMSDTraj traj(RMSDTrajJson);
+            //traj.setReferenceStructure(reference);
+            //traj.WriteUnique(write_unique);
+            //traj.setRMSDThreshold(rmsd);
             traj.setFile(argv[2]);
-            traj.setFragment(fragment);
-            traj.setHeavy(heavy);
-            if (isSecond)
-                traj.setSecondFile(second);
+            //traj.setFragment(fragment);
+            //traj.setHeavy(heavy);
+            //if (isSecond)
+            //    traj.setSecondFile(second);
             traj.AnalyseTrajectory();
+
         } else if (strcmp(argv[1], "-nebprep") == 0) {
             if (argc < 3) {
                 std::cerr << "Please use curcuma for geometry preparation for nudge-elastic-band calculation follows:\ncurcuma -nebprep first.xyz second.xyz" << std::endl;

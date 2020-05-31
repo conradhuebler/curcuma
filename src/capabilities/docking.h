@@ -54,7 +54,7 @@ public:
         m_thread.join();
         std::cout << result << std::endl;
     }
-    inline thread::id Id() const { return m_thread.get_id(); }
+    inline std::thread::id Id() const { return m_thread.get_id(); }
     inline void setController(const json& controller) { m_controller = controller; }
 
 private:

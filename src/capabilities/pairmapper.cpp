@@ -39,7 +39,7 @@ PairMapper::PairMapper()
 
 void PairMapper::FindPairs()
 {
-    string outfile = m_filename;
+    std::string outfile = m_filename;
     for (int i = 0; i < 4; ++i)
         outfile.pop_back();
 
@@ -298,7 +298,7 @@ void PairMapper::BlackListProtons(const Molecule* molecule)
             double d = molecule->Distance(i, j);
             if (d < distance)
                 element = molecule->Atom(j).first;
-            distance = min(d, distance);
+            distance = std::min(d, distance);
         }
         if (element == 6)
             m_proton_blacklist.push_back(i);
