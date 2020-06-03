@@ -92,7 +92,7 @@ private:
     std::string MethodName() const override { return std::string("ConfScan"); }
 
     /* Lets have all methods read the input/control file */
-    virtual void ReadControlFile() override;
+    void ReadControlFile() override;
 
     /* Read Controller has to be implemented for all */
     void LoadControlJson() override;

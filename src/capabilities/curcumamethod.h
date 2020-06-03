@@ -26,28 +26,37 @@
 #include "json.hpp"
 
 class CurcumaMethod {
-
 public:
     CurcumaMethod(const json controller);
 
     inline void setRestart(bool restart) { m_restart = restart; }
+
     inline bool Restart() const { return m_restart; }
+
     inline void setController(const json& controller) { m_controller = controller; }
 
+    virtual bool Initialise() { return true; } // TODO make pure virtual
+
+    void printError()
+    {
+        for (const auto& error : m_error_list)
+            std::cerr << error << std::endl;
+        m_error_list.clear();
+    }
+
+    virtual void start() {} // TODO make pure virtual and move all main action here
 protected:
     void TriggerWriteRestart();
 
     StringList RestartFiles() const;
 
     nlohmann::json LoadControl() const;
-    inline void UpdateController(json controller)
-    {
-        controller.patch(m_controller);
-        m_controller = controller;
-    }
+    void UpdateController(const json& controller);
 
     json m_controller;
     bool m_restart = true;
+
+    void AppendError(const std::string& error) { m_error_list.push_back(error); }
 
 private:
     /* Lets have this for all modules */
@@ -63,4 +72,6 @@ private:
 
     /* Read Controller has to be implemented for all */
     virtual void LoadControlJson() = 0;
+
+    StringList m_error_list;
 };

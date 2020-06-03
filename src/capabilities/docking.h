@@ -37,7 +37,6 @@ using json = nlohmann::json;
 #include "curcumamethod.h"
 
 class Thread {
-
 public:
     Thread() = default;
     ~Thread() = default;
@@ -73,22 +72,18 @@ static const json DockingJson = {
     { "PostOpt", true },
     { "Step_X", 10 },
     { "Step_Y", 10 },
-    { "Step_z", 10 }
+    { "Step_z", 10 },
+    { "Host", "none" },
+    { "Guest", "none" },
+    { "Complex", "none" },
+    { "scaling", 1.5 }
 };
 
 class Docking : public CurcumaMethod {
+
 public:
     Docking(const json& controller);
-
-    /*! \brief Set the structure of the host molecule */
-    void setHostStructure(const Molecule& molecule)
-    {
-        m_host_structure = molecule;
-        m_initial_anchor = m_host_structure.Centroid();
-    }
-
-    /*! \brief Set the structure of the guest molecule */
-    void setGuestStructure(const Molecule& molecule) { m_guest_structure = molecule; }
+    bool Initialise() override;
 
     void PerformDocking();
 
@@ -97,6 +92,8 @@ public:
     Molecule getMolecule() const { return m_supramol; }
 
     StringList Files() const { return m_files; }
+
+    void start() override { PerformDocking(); }
 
 private:
     /* Read Controller has to be implemented for all */
@@ -108,7 +105,7 @@ private:
     /* Lets have this for all modules */
     bool LoadRestartInformation() override { return true; }
 
-    std::string MethodName() const override { return std::string("Docking"); }
+    std::string MethodName() const override { return std::string("dock"); }
 
     /* Lets have all methods read the input/control file */
     void ReadControlFile() override {}
@@ -123,6 +120,8 @@ private:
     bool m_check = false;
     bool m_PostFilter = true, m_PostOptimise = true, m_AutoPos = true;
     double m_sum_distance = 0;
+    double m_scaling = 1.5;
     double m_window_seperator = 0.66666;
     StringList m_files;
+    std::string m_host, m_guest, m_complex;
 };

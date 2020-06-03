@@ -39,16 +39,15 @@ using json = nlohmann::json;
 #include "docking.h"
 
 Docking::Docking(const json& controller)
-    : CurcumaMethod(controller)
+    : CurcumaMethod(DockingJson)
 {
-    json c = DockingJson;
-    c["opt"] = OptJson;
-    UpdateController(c);
+    UpdateController(controller);
     LoadControlJson();
 }
 
 void Docking::LoadControlJson()
 {
+    std::cout << m_controller << std::endl;
     double Pos_X = Json2KeyWord<double>(m_controller, "Pos_X");
     double Pos_Y = Json2KeyWord<double>(m_controller, "Pos_Y");
     double Pos_Z = Json2KeyWord<double>(m_controller, "Pos_Z");
@@ -59,8 +58,64 @@ void Docking::LoadControlJson()
     m_AutoPos = Json2KeyWord<bool>(m_controller, "AutoPos");
     m_PostFilter = Json2KeyWord<bool>(m_controller, "Filter");
     m_PostOptimise = Json2KeyWord<bool>(m_controller, "PostOpt");
+    m_host = Json2KeyWord<std::string>(m_controller, "host");
+    m_guest = Json2KeyWord<std::string>(m_controller, "guest");
+    m_complex = Json2KeyWord<std::string>(m_controller, "complex");
 }
 
+bool Docking::Initialise()
+{
+    if ((m_host.compare("none") == 0 && m_guest.compare("none") == 0) && (m_complex.compare("none") == 0)) {
+        AppendError("Neither host nor guest or a complex structure given. Sorry");
+        return false;
+    }
+    Molecule host, guest, complex;
+    bool host_loaded = true, guest_loaded = true, complex_loaded = true;
+    try {
+        host = Tools::LoadFile(m_host);
+    } catch (int error) {
+        host_loaded = false;
+    }
+    try {
+        guest = Tools::LoadFile(m_guest);
+    } catch (int error) {
+        guest_loaded = false;
+    }
+    try {
+        complex = Tools::LoadFile(m_complex);
+    } catch (int error) {
+        complex_loaded = false;
+    }
+    if (!host_loaded && !guest_loaded && !complex_loaded) {
+        AppendError("Neither host nor guest or a complex structure where loaded. Sorry");
+        return false;
+    }
+
+    if ((host.AtomCount() == 0 && guest.AtomCount() == 0) && (complex.AtomCount() == 0)) {
+        AppendError("Host, guest or complex structure are empty. Nothing I can do now.");
+        return false;
+    }
+    bool useComplex = false;
+    if (complex.AtomCount()) {
+        auto fragments = complex.GetFragments(m_scaling);
+        if (fragments.size() == 2) {
+            std::cout << "Complex structure is used." << std::endl;
+            useComplex = true;
+
+            m_host_structure.LoadMolecule(complex.getFragmentMolecule(0));
+            m_guest_structure.LoadMolecule(complex.getFragmentMolecule(1));
+            m_initial_anchor = m_guest_structure.Centroid(true);
+            return true;
+        }
+    }
+    if (!useComplex && host.AtomCount() && guest.AtomCount()) {
+        m_host_structure.LoadMolecule(host);
+        m_guest_structure.LoadMolecule(guest);
+        return true;
+    }
+    AppendError("Hmm, something was missing. Please check your input structures.");
+    return false;
+}
 
 void Docking::PerformDocking()
 {

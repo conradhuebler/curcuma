@@ -133,7 +133,6 @@ void PairMapper::FindPairs()
 
 void PairMapper::InitialisePairs(const Molecule* molecule)
 {
-
     for (std::size_t i = 0; i < molecule->AtomCount(); ++i) {
         const int element_A = molecule->Atom(i).first;
         for (std::size_t j = i + 1; j < molecule->AtomCount(); ++j) {
@@ -154,7 +153,6 @@ void PairMapper::InitialisePairs(const Molecule* molecule)
     for (std::size_t i = 0; i < f.size(); ++i) {
         for (std::size_t k = 0; k < f[i].size(); ++k) {
             for (std::size_t l = k + 1; l < f[i].size(); ++l) {
-
                 int a = f[i][k];
                 int b = f[i][l];
                 if ((std::find(m_proton_blacklist.begin(), m_proton_blacklist.end(), a) != m_proton_blacklist.end()) || (std::find(m_proton_blacklist.begin(), m_proton_blacklist.end(), b) != m_proton_blacklist.end()))
@@ -171,10 +169,8 @@ void PairMapper::InitialisePairs(const Molecule* molecule)
 
     for (std::size_t i = 0; i < f.size(); ++i) {
         for (std::size_t j = i + 1; j < f.size(); ++j) {
-
             for (int a : f[i]) {
                 for (int b : f[j]) {
-
                     if ((std::find(m_proton_blacklist.begin(), m_proton_blacklist.end(), a) != m_proton_blacklist.end()) || (std::find(m_proton_blacklist.begin(), m_proton_blacklist.end(), b) != m_proton_blacklist.end()))
                         continue;
 

@@ -371,7 +371,6 @@ void ConfScan::scan()
      */
     m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0;
     for (auto& i : m_ordered_list) {
-
         int index = i.second;
         Molecule* mol1 = m_molecules.at(index).second;
         int result = PreCheckAgainstAccepted(index);
@@ -642,7 +641,6 @@ int ConfScan::CheckTempList(int index)
             }
         }
         if (digDeeper) {
-
             {
                 m_reference_last_energy = mol1->Energy();
                 m_target_last_energy = mol2->Energy();

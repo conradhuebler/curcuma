@@ -62,7 +62,6 @@ void Distance(const Molecule &mol, char **argv)
 }
 
 int main(int argc, char **argv) {
-
     General::StartUp(argc, argv);
     RunTimer timer(true);
     json controller = CLI2Json(argc, argv);
@@ -110,15 +109,16 @@ int main(int argc, char **argv) {
             exit(0);
         } else if (strcmp(argv[1], "-dock") == 0) {
             if (argc < 4) {
-                std::cerr << "Please use curcuma for docking  as follows\ncurcuma -dock A.xyz B.xyz XXX YYY ZZZ" << std::endl;
+                std::cerr << "Please use curcuma for docking as follows\ncurcuma -dock -host A.xyz -guest B.xyz -Step_x 10 -Step_y 10 -Step_z 10" << std::endl;
                 exit(1);
             }
-            Molecule mol1 = Tools::LoadFile(argv[2]);
-            Molecule mol2 = Tools::LoadFile(argv[3]);
+
             Docking* docking = new Docking(controller);
-            docking->setHostStructure(mol1);
-            docking->setGuestStructure(mol2);
-            docking->PerformDocking();
+            if (docking->Initialise() == false) {
+                docking->printError();
+                return 0;
+            }
+            docking->start();
         } else if (strcmp(argv[1], "-hbonds") == 0) {
             if(argc != 6)
             {
@@ -191,14 +191,10 @@ int main(int argc, char **argv) {
                             }
                         }
                     }
-
                     if (strcmp(argv[i], "-pairfile") == 0) {
                         if (i + 1 < argc) {
-
                             std::ifstream input(argv[i + 1]);
-
                             for (std::string line; getline(input, line);) {
-
                                 std::vector<std::string> numbers = Tools::SplitString(line);
                                 if (numbers.size() == 2) {
                                     if (Tools::isInt(numbers[0]) && Tools::isInt(numbers[1])) {

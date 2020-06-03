@@ -42,12 +42,10 @@ void CurcumaMethod::TriggerWriteRestart()
     nlohmann::json restart;
     try {
         restart[MethodName()] = WriteRestartInformation();
-
     } catch (nlohmann::json::type_error& e) {
     }
     try {
         restart_file << restart << std::endl;
-
     } catch (nlohmann::json::type_error& e) {
     }
 }
@@ -83,4 +81,22 @@ nlohmann::json CurcumaMethod::LoadControl() const
     }
     std::cout << control << std::endl;
     return control;
+}
+
+void CurcumaMethod::UpdateController(const json& controller)
+{
+    json method = Json2KeyWord<json>(controller, MethodName());
+
+    // yeah, nested loops, for they will do forever
+    for (const auto& object : method.items()) {
+        std::string outer = object.key();
+        transform(outer.begin(), outer.end(), outer.begin(), ::tolower);
+        for (const auto& local : m_controller.items()) {
+            std::string inner = local.key();
+            transform(inner.begin(), inner.end(), inner.begin(), ::tolower);
+            if (outer.compare(inner) == 0) {
+                m_controller[local.key()] = object.value();
+            }
+        }
+    }
 }

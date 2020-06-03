@@ -53,16 +53,27 @@ to perform calculation only on non-proton atoms.
 ## Docking tool
 Some docking can be performed (WIP). Rotation will be added soon. (And many more.)
 
+Use
 ```sh
-curcuma -dock A.xyz B.xyz XXX YYY ZZZ
+curcuma -dock -host A.xyz -guest B.xyz
 ```
-To move molcule B to the position.
+to perform docking of B as guest and A as host molecule or use
+```sh
+curcuma -dock -complex AB.xyz
+```
+to perform docking on a complex.
 
 Use
 ```sh
-curcuma -dock A.xyz B.xyz
+curcuma -dock -host A.xyz -guest B.xyz -Step_X X  -Step_Y Y -Step_Z Z
 ```
-to automatically move B to the center of mass of A, which is only interesting for special macrocyclic structures.
+with X, Y and Z being the steps of rotation. With X = 10, 10 rotations with 360/X ° will be performed.
+
+Use
+```sh
+curcuma -dock -host A.xyz -guest B.xyz -Pos_X X  -Pos_X Y -Pos_X Z
+```
+with {X, Y, Z} being the initial anchor position for the substrat.
 
 After docking a PseudoFF optimisation of the docking position will be performed, where the Lennard-Jones-Potential between both structures is calculated.
 

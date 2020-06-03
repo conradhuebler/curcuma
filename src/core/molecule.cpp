@@ -402,6 +402,17 @@ void Molecule::LoadMolecule(const Molecule* molecule)
     setGeometry(molecule->getGeometry());
 }
 
+Molecule Molecule::getFragmentMolecule(int fragment) const
+{
+    // Lets make that one day faster, but not today ...
+    Molecule result;
+    auto atoms = GetFragments()[fragment];
+    for (auto atom : atoms) {
+        result.addPair(Atom(atom));
+    }
+    return result;
+}
+
 Geometry Molecule::getGeometry(const IntPair& pair, bool protons) const
 {
     int start = pair.first;

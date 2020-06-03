@@ -66,6 +66,8 @@ class Molecule
     bool addPair(const std::pair<int, Position>& atom);
     bool Contains(const std::pair<int, Position>& atom);
 
+    Molecule getFragmentMolecule(int fragment) const;
+
     double Distance(int i, int j) const;
     Geometry getGeometry(const IntPair& pair, bool protons = true) const;
     Geometry getGeometry(std::vector<int> atoms, bool protons = true) const;

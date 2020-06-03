@@ -44,7 +44,7 @@ const json OptJson{
     { "printOutput", true },
     { "dE", 0.75 },
     { "dRMSD", 0.01 },
-    { "method", 2 },
+    { "GFN", 2 },
     { "InnerLoop", 20 },
     { "OuterLoop", 100 }
 };
@@ -53,7 +53,6 @@ using Eigen::VectorXd;
 using namespace LBFGSpp;
 
 class LBFGSInterface {
-
 public:
     LBFGSInterface(int n_)
         : n(n_)
