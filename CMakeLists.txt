@@ -73,7 +73,7 @@ IF(CMAKE_COMPILER_IS_GNUCXX)
                                            -Wunused -Wunused-function  -Wunused-label  -Wunused-parameter\
                                            -Wunused-value  -Wunused-variable  -Wvariadic-macros\
                                            -Wvolatile-register-var  -Wwrite-strings -Wdeprecated-declarations\
-                                           -Wno-error=unused-local-typedefs -Wno-error=enum-compare -Wno-narrowing -Werror=return-type")
+                                           -Wno-error=unused-local-typedefs -Wno-error=enum-compare -Wno-narrowing -Werror=return-type -g -rdynamic")
 ENDIF(CMAKE_COMPILER_IS_GNUCXX)
 
 

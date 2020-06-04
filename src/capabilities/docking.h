@@ -83,6 +83,8 @@ class Docking : public CurcumaMethod {
 
 public:
     Docking(const json& controller);
+    virtual ~Docking() = default;
+
     bool Initialise() override;
 
     void PerformDocking();

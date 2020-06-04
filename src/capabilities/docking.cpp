@@ -99,18 +99,23 @@ bool Docking::Initialise()
     if (complex.AtomCount()) {
         auto fragments = complex.GetFragments(m_scaling);
         if (fragments.size() == 2) {
-            std::cout << "Complex structure is used." << std::endl;
             useComplex = true;
 
             m_host_structure.LoadMolecule(complex.getFragmentMolecule(0));
             m_guest_structure.LoadMolecule(complex.getFragmentMolecule(1));
             m_initial_anchor = m_guest_structure.Centroid(true);
-            return true;
         }
     }
     if (!useComplex && host.AtomCount() && guest.AtomCount()) {
         m_host_structure.LoadMolecule(host);
         m_guest_structure.LoadMolecule(guest);
+        return true;
+    } else if (useComplex && !host_loaded && guest_loaded && guest.AtomCount()) {
+        std::cout << "Complex structure is used, with substrat replace by -guest argument!" << std::endl;
+        m_guest_structure.LoadMolecule(guest);
+        return true;
+    } else if (useComplex && !host_loaded && !guest_loaded) {
+        std::cout << "Complex structure is used." << std::endl;
         return true;
     }
     AppendError("Hmm, something was missing. Please check your input structures.");
@@ -206,7 +211,6 @@ void Docking::PerformDocking()
     }
 
     std::cout << m_anchor_accepted.size() << " stored structures. " << excluded << " structures were skipped, due to being duplicate!" << all << " checked!" << std::endl;
-
     guest = m_guest_structure;
     std::cout << std::endl
               << "** Docking Phase 0 - Finished **" << std::endl;
@@ -306,10 +310,11 @@ void Docking::PostOptimise()
     confscan["check"] = false;
     confscan["energy"] = 1.0;
     confscan["noname"] = true;
-    confscan["preventReorder"] = true;
+    confscan["preventreorder"] = true;
     confscan["maxenergy"] = -1;
-
-    ConfScan* scan = new ConfScan(confscan);
+    json controller;
+    controller["confscan"] = confscan;
+    ConfScan* scan = new ConfScan(controller);
     scan->setMolecules(final_results);
     scan->scan();
 

@@ -57,11 +57,16 @@ Use
 ```sh
 curcuma -dock -host A.xyz -guest B.xyz
 ```
-to perform docking of B as guest and A as host molecule or use
+to perform docking of B as guest and A as host molecule, use
 ```sh
 curcuma -dock -complex AB.xyz
 ```
-to perform docking on a complex.
+to perform docking on a complex or use
+```sh
+curcuma -dock -complex AB.xyz -guest C.xyz
+```
+to replace substrat structures in complex AB with C.
+
 
 Use
 ```sh

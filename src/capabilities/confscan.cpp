@@ -37,11 +37,9 @@ using json = nlohmann::json;
 #include "confscan.h"
 
 ConfScan::ConfScan(const json& controller)
-    : CurcumaMethod(controller)
+    : CurcumaMethod(ConfScanJson)
 {
-    m_controller = ConfScanJson;
-    json confscan = Json2KeyWord<json>(controller, MethodName());
-    m_controller.merge_patch(confscan);
+    UpdateController(controller);
     LoadControlJson();
 }
 
@@ -276,6 +274,12 @@ void ConfScan::ParametriseRotationalCutoffs()
             } else
                 rejected.push_back(diff_rot);
         }
+    }
+    if (accepted.size() < 2 || rejected.size() < 2) {
+        std::cout << " To few samples. Parametrisation rejected!" << std::endl;
+        if (!m_force_reorder)
+            m_prevent_reorder = true;
+        return;
     }
     m_diff_rot_abs_tight = Tools::median(accepted);
     m_diff_rot_abs_loose = Tools::median(rejected);
