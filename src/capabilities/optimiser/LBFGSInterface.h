@@ -46,7 +46,8 @@ const json OptJson{
     { "dRMSD", 0.01 },
     { "GFN", 2 },
     { "InnerLoop", 20 },
-    { "OuterLoop", 100 }
+    { "OuterLoop", 100 },
+    { "LBFGS_eps", 1e-5 }
 };
 
 using Eigen::VectorXd;
@@ -111,10 +112,12 @@ private:
 
 inline Molecule OptimiseGeometry(const Molecule* host, const json& controller)
 {
+    PrintController(controller);
     bool writeXYZ = Json2KeyWord<bool>(controller, "writeXYZ");
     bool printOutput = Json2KeyWord<bool>(controller, "printOutput");
     double dE = Json2KeyWord<double>(controller, "dE");
     double dRMSD = Json2KeyWord<double>(controller, "dRMSD");
+    double LBFGS_eps = Json2KeyWord<double>(controller, "LBFGS_eps");
     int method = Json2KeyWord<int>(controller, "GFN");
     int InnerLoop = Json2KeyWord<int>(controller, "InnerLoop");
     int OuterLoop = Json2KeyWord<int>(controller, "OuterLoop");
@@ -129,8 +132,6 @@ inline Molecule OptimiseGeometry(const Molecule* host, const json& controller)
         parameter(3 * i + 1) = geometry(i, 1);
         parameter(3 * i + 2) = geometry(i, 2);
     }
-    std::chrono::time_point<std::chrono::system_clock> start = std::chrono::system_clock::now(), end;
-    std::cout << "Step\tCurrent Energy [Eh]\tEnergy Change\tRMSD Change\tt [s]" << std::endl;
 
     XTBInterface interface;
     interface.InitialiseMolecule(host);
@@ -138,7 +139,7 @@ inline Molecule OptimiseGeometry(const Molecule* host, const json& controller)
     double final_energy = interface.GFNCalculation(method);
 
     LBFGSParam<double> param;
-    param.epsilon = 1e-5;
+    param.epsilon = LBFGS_eps;
     param.max_iterations = InnerLoop;
 
     LBFGSSolver<double> solver(param);
@@ -146,6 +147,99 @@ inline Molecule OptimiseGeometry(const Molecule* host, const json& controller)
     fun.setMolecule(host);
     fun.setInterface(&interface);
     fun.setMethod(method);
+    double fx;
+
+    RMSDDriver* driver = new RMSDDriver;
+    driver->setSilent(true);
+    driver->setProtons(true);
+    driver->setForceReorder(false);
+    driver->setCheckConnections(false);
+
+    std::chrono::time_point<std::chrono::system_clock> start = std::chrono::system_clock::now(), end;
+    std::cout << "Step\tCurrent Energy [Eh]\tEnergy Change\tRMSD Change\tt [s]" << std::endl;
+
+    int atoms_count = host->AtomCount();
+    for (int outer = 0; outer < OuterLoop; ++outer) {
+        int niter = solver.minimize(fun, parameter, fx);
+        parameter = fun.Parameter();
+
+        for (int i = 0; i < atoms_count; ++i) {
+            geometry(i, 0) = parameter(3 * i);
+            geometry(i, 1) = parameter(3 * i + 1);
+            geometry(i, 2) = parameter(3 * i + 2);
+        }
+        h.setGeometry(geometry);
+
+        driver->setReference(tmp);
+        driver->setTarget(h);
+        driver->start();
+        if (printOutput) {
+            end = std::chrono::system_clock::now();
+            std::cout << outer << "\t" << std::setprecision(9) << fun.m_energy << "\t\t" << std::setprecision(5) << (fun.m_energy - final_energy) * 2625.5 << "\t\t" << std::setprecision(6) << driver->RMSD() << "\t" << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0 << std::endl;
+            start = std::chrono::system_clock::now();
+        }
+        final_energy = fun.m_energy;
+        tmp = h;
+        if (writeXYZ) {
+            h.setEnergy(final_energy);
+            h.appendXYZFile("curcuma_optim.xyz");
+        }
+        if (((fun.m_energy - final_energy) * 2625.5 < dE && driver->RMSD() < dRMSD))
+            break;
+    }
+
+    for (int i = 0; i < host->AtomCount(); ++i) {
+        geometry(i, 0) = parameter(3 * i);
+        geometry(i, 1) = parameter(3 * i + 1);
+        geometry(i, 2) = parameter(3 * i + 2);
+    }
+    h.setEnergy(final_energy);
+    h.setGeometry(geometry);
+    return h;
+}
+
+inline void OptimiseGeometryThreaded(const Molecule* host, std::string* result_string, Molecule* result_molecule, const json& controller)
+{
+    PrintController(controller);
+    bool writeXYZ = Json2KeyWord<bool>(controller, "writeXYZ");
+    bool printOutput = Json2KeyWord<bool>(controller, "printOutput");
+    double dE = Json2KeyWord<double>(controller, "dE");
+    double dRMSD = Json2KeyWord<double>(controller, "dRMSD");
+    int method = Json2KeyWord<int>(controller, "GFN");
+    int InnerLoop = Json2KeyWord<int>(controller, "InnerLoop");
+    int OuterLoop = Json2KeyWord<int>(controller, "OuterLoop");
+    double LBFGS_eps = Json2KeyWord<double>(controller, "LBFGS_eps");
+
+    std::stringstream ss;
+
+    Geometry geometry = host->getGeometry();
+    Molecule tmp(host);
+    Molecule h(host);
+    Vector parameter(3 * host->AtomCount());
+
+    for (int i = 0; i < host->AtomCount(); ++i) {
+        parameter(3 * i) = geometry(i, 0);
+        parameter(3 * i + 1) = geometry(i, 1);
+        parameter(3 * i + 2) = geometry(i, 2);
+    }
+    std::chrono::time_point<std::chrono::system_clock> init = std::chrono::system_clock::now(), start = std::chrono::system_clock::now(), end;
+
+    ss << "Step\tCurrent Energy [Eh]\tEnergy Change\tRMSD Change\tt [s]" << std::endl;
+    XTBInterface interface;
+    interface.InitialiseMolecule(host);
+
+    double final_energy = interface.GFNCalculation(method);
+
+    LBFGSParam<double> param;
+    param.epsilon = LBFGS_eps;
+    param.max_iterations = InnerLoop;
+
+    LBFGSSolver<double> solver(param);
+    LBFGSInterface fun(3 * host->AtomCount());
+    fun.setMolecule(host);
+    fun.setInterface(&interface);
+    fun.setMethod(method);
+
     double fx;
 
     RMSDDriver* driver = new RMSDDriver;
@@ -169,102 +263,14 @@ inline Molecule OptimiseGeometry(const Molecule* host, const json& controller)
 
         driver->setReference(tmp);
         driver->setTarget(h);
-        driver->AutoPilot();
-        if (printOutput) {
-            end = std::chrono::system_clock::now();
-            std::cout << outer << "\t" << std::setprecision(9) << fun.m_energy << "\t\t" << std::setprecision(5) << (fun.m_energy - final_energy) * 2625.5 << "\t\t" << std::setprecision(6) << driver->RMSD() << "\t" << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0 << std::endl;
-            start = std::chrono::system_clock::now();
-        }
-        final_energy = fun.m_energy;
-        tmp = h;
-        if (writeXYZ) {
-            h.setEnergy(final_energy);
-            h.appendXYZFile("curcuma_optim.xyz");
-        }
-        if (((fun.m_energy - final_energy) * 2625.5 < dE && driver->RMSD() < dRMSD) || niter < param.max_iterations)
-            break;
-    }
-
-    for (int i = 0; i < host->AtomCount(); ++i) {
-        geometry(i, 0) = parameter(3 * i);
-        geometry(i, 1) = parameter(3 * i + 1);
-        geometry(i, 2) = parameter(3 * i + 2);
-    }
-    h.setEnergy(final_energy);
-    h.setGeometry(geometry);
-    return h;
-}
-
-inline void OptimiseGeometryThreaded(const Molecule* host, std::string* result_string, Molecule* result_molecule, const json& controller)
-{
-    bool writeXYZ = Json2KeyWord<bool>(controller, "writeXYZ");
-    bool printOutput = Json2KeyWord<bool>(controller, "printOutput");
-    double dE = Json2KeyWord<double>(controller, "dE");
-    double dRMSD = Json2KeyWord<double>(controller, "dRMSD");
-    int method = Json2KeyWord<int>(controller, "GFN");
-    int InnerLoop = Json2KeyWord<int>(controller, "InnerLoop");
-    int OuterLoop = Json2KeyWord<int>(controller, "OuterLoop");
-
-    std::stringstream ss;
-
-    Geometry geometry = host->getGeometry();
-    Molecule tmp(host);
-    Molecule h(host);
-    Vector parameter(3 * host->AtomCount());
-
-    for (int i = 0; i < host->AtomCount(); ++i) {
-        parameter(3 * i) = geometry(i, 0);
-        parameter(3 * i + 1) = geometry(i, 1);
-        parameter(3 * i + 2) = geometry(i, 2);
-    }
-    std::chrono::time_point<std::chrono::system_clock> init = std::chrono::system_clock::now(), start = std::chrono::system_clock::now(), end;
-
-    ss << "Step\tCurrent Energy [Eh]\tEnergy Change\tRMSD Change\tt [s]" << std::endl;
-    int maxouter = 100;
-    XTBInterface interface;
-    interface.InitialiseMolecule(host);
-
-    double final_energy = interface.GFNCalculation(method);
-
-    LBFGSParam<double> param;
-    param.epsilon = 1e-5;
-    param.max_iterations = 20;
-
-    LBFGSSolver<double> solver(param);
-    LBFGSInterface fun(3 * host->AtomCount());
-    fun.setMolecule(host);
-    fun.setInterface(&interface);
-    double fx;
-
-    RMSDDriver* driver = new RMSDDriver;
-
-    driver->setSilent(true);
-    driver->setProtons(true);
-    driver->setForceReorder(false);
-    driver->setCheckConnections(false);
-
-    int atoms_count = host->AtomCount();
-    for (int outer = 0; outer < maxouter; ++outer) {
-        int niter = solver.minimize(fun, parameter, fx);
-        parameter = fun.Parameter();
-
-        for (int i = 0; i < atoms_count; ++i) {
-            geometry(i, 0) = parameter(3 * i);
-            geometry(i, 1) = parameter(3 * i + 1);
-            geometry(i, 2) = parameter(3 * i + 2);
-        }
-        h.setGeometry(geometry);
-
-        driver->setReference(tmp);
-        driver->setTarget(h);
-        driver->AutoPilot();
+        driver->start();
         end = std::chrono::system_clock::now();
         ss << outer << "\t" << std::setprecision(9) << fun.m_energy << "\t\t" << std::setprecision(5) << (fun.m_energy - final_energy) * 2625.5 << "\t\t" << std::setprecision(6) << driver->RMSD() << "\t" << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0 << std::endl;
         start = std::chrono::system_clock::now();
 
         final_energy = fun.m_energy;
         tmp = h;
-        if (((fun.m_energy - final_energy) * 2625.5 < dE && driver->RMSD() < dRMSD) || niter < param.max_iterations)
+        if (((fun.m_energy - final_energy) * 2625.5 < dE && driver->RMSD() < dRMSD))
             break;
     }
 

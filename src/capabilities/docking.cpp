@@ -38,29 +38,28 @@ using json = nlohmann::json;
 
 #include "docking.h"
 
-Docking::Docking(const json& controller)
-    : CurcumaMethod(DockingJson)
+Docking::Docking(const json& controller, bool silent)
+    : CurcumaMethod(DockingJson, controller, silent)
 {
     UpdateController(controller);
-    LoadControlJson();
 }
 
 void Docking::LoadControlJson()
 {
-    std::cout << m_controller << std::endl;
-    double Pos_X = Json2KeyWord<double>(m_controller, "Pos_X");
-    double Pos_Y = Json2KeyWord<double>(m_controller, "Pos_Y");
-    double Pos_Z = Json2KeyWord<double>(m_controller, "Pos_Z");
+    double Pos_X = Json2KeyWord<double>(m_defaults, "Pos_X");
+    double Pos_Y = Json2KeyWord<double>(m_defaults, "Pos_Y");
+    double Pos_Z = Json2KeyWord<double>(m_defaults, "Pos_Z");
     m_initial_anchor = Position{ Pos_X, Pos_Y, Pos_Z };
-    m_step_X = Json2KeyWord<int>(m_controller, "Step_X");
-    m_step_Y = Json2KeyWord<int>(m_controller, "Step_Y");
-    m_step_Z = Json2KeyWord<int>(m_controller, "Step_Z");
-    m_AutoPos = Json2KeyWord<bool>(m_controller, "AutoPos");
-    m_PostFilter = Json2KeyWord<bool>(m_controller, "Filter");
-    m_PostOptimise = Json2KeyWord<bool>(m_controller, "PostOpt");
-    m_host = Json2KeyWord<std::string>(m_controller, "host");
-    m_guest = Json2KeyWord<std::string>(m_controller, "guest");
-    m_complex = Json2KeyWord<std::string>(m_controller, "complex");
+    m_step_X = Json2KeyWord<int>(m_defaults, "Step_X");
+    m_step_Y = Json2KeyWord<int>(m_defaults, "Step_Y");
+    m_step_Z = Json2KeyWord<int>(m_defaults, "Step_Z");
+    m_AutoPos = Json2KeyWord<bool>(m_defaults, "AutoPos");
+    m_PostFilter = Json2KeyWord<bool>(m_defaults, "Filter");
+    m_PostOptimise = Json2KeyWord<bool>(m_defaults, "PostOpt");
+    m_NoOpt = Json2KeyWord<bool>(m_defaults, "NoOpt");
+    m_host = Json2KeyWord<std::string>(m_defaults, "host");
+    m_guest = Json2KeyWord<std::string>(m_defaults, "guest");
+    m_complex = Json2KeyWord<std::string>(m_defaults, "complex");
 }
 
 bool Docking::Initialise()
@@ -164,52 +163,72 @@ void Docking::PerformDocking()
     int max_Z = 360 / double(m_step_Z);
 
     int excluded = 0, all = 0;
-    for (int x = 0; x < m_step_X; ++x) {
-        for (int y = 0; y < m_step_Y; ++y) {
-            for (int z = 0; z < m_step_Z; ++z) {
-                ++all;
-                Molecule* molecule = new Molecule(m_host_structure);
-                guest = m_guest_structure;
 
-                std::pair<Position, Position> pair = OptimiseAnchor(&m_host_structure, guest, m_initial_anchor, Position{ x * max_X, y * max_Y, z * max_Z });
-
-                bool accept = true;
-
-                if (GeometryTools::Distance(m_initial_anchor, pair.first) > 1e5) {
-                    accept = false;
-                    continue;
+    if (m_NoOpt) // Loop unrolled
+    {
+        for (int x = 0; x < m_step_X; ++x) {
+            for (int y = 0; y < m_step_Y; ++y) {
+                for (int z = 0; z < m_step_Z; ++z) {
+                    ++all;
+                    Molecule* molecule = new Molecule(m_host_structure);
+                    guest = m_guest_structure;
+                    Geometry destination = GeometryTools::TranslateAndRotate(stored_guest, initial_centroid, m_initial_anchor, Position{ x * max_X, y * max_Y, z * max_Z });
+                    guest.setGeometry(destination);
+                    for (std::size_t i = 0; i < guest.AtomCount(); ++i) {
+                        molecule->addPair(guest.Atom(i));
+                    }
+                    m_result_list.insert(std::pair<double, Molecule*>(all, molecule));
                 }
-
-                for (std::size_t i = 0; i < m_anchor_accepted.size(); ++i) {
-                    Position anchor = m_anchor_accepted[i];
-                    Position rotation = m_rotation_accepted[i];
-                    if (GeometryTools::Distance(anchor, pair.first) < 1e-1 || GeometryTools::Distance(rotation, pair.second) < 1e-1)
-                        accept = false;
-                }
-                if (accept == false) {
-                    excluded++;
-                    continue;
-                }
-                m_anchor_accepted.push_back(pair.first);
-                m_rotation_accepted.push_back(pair.second);
-
-                Geometry destination = GeometryTools::TranslateAndRotate(stored_guest, initial_centroid, pair.first, pair.second);
-
-                guest.setGeometry(destination);
-                double distance = GeometryTools::Distance(pair.first, m_host_structure.Centroid());
-                m_sum_distance += distance;
-                m_docking_list.insert(std::pair<double, Vector>(distance, PositionPair2Vector(pair)));
-                result = m_host_structure;
-                for (std::size_t i = 0; i < guest.AtomCount(); ++i) {
-                    molecule->addPair(guest.Atom(i));
-                }
-                molecule->setEnergy(distance);
-                m_result_list.insert(std::pair<double, Molecule*>(distance, molecule));
             }
+            std::cout << (x / double(m_step_X)) * 100 << "% done." << std::endl;
         }
-        std::cout << (x / double(m_step_X)) * 100 << "% - " << m_anchor_accepted.size() << " stored structures. " << excluded << " structures were skipped, due to being duplicate! " << all << " checked all together!" << std::endl;
-    }
+    } else {
+        for (int x = 0; x < m_step_X; ++x) {
+            for (int y = 0; y < m_step_Y; ++y) {
+                for (int z = 0; z < m_step_Z; ++z) {
+                    ++all;
+                    Molecule* molecule = new Molecule(m_host_structure);
+                    guest = m_guest_structure;
 
+                    std::pair<Position, Position> pair = OptimiseAnchor(&m_host_structure, guest, m_initial_anchor, Position{ x * max_X, y * max_Y, z * max_Z });
+
+                    bool accept = true;
+
+                    if (GeometryTools::Distance(m_initial_anchor, pair.first) > 1e5) {
+                        accept = false;
+                        continue;
+                    }
+
+                    for (std::size_t i = 0; i < m_anchor_accepted.size(); ++i) {
+                        Position anchor = m_anchor_accepted[i];
+                        Position rotation = m_rotation_accepted[i];
+                        if (GeometryTools::Distance(anchor, pair.first) < 1e-1 || GeometryTools::Distance(rotation, pair.second) < 1e-1)
+                            accept = false;
+                    }
+                    if (accept == false) {
+                        excluded++;
+                        continue;
+                    }
+                    m_anchor_accepted.push_back(pair.first);
+                    m_rotation_accepted.push_back(pair.second);
+
+                    Geometry destination = GeometryTools::TranslateAndRotate(stored_guest, initial_centroid, pair.first, pair.second);
+
+                    guest.setGeometry(destination);
+                    double distance = GeometryTools::Distance(pair.first, m_host_structure.Centroid());
+                    m_sum_distance += distance;
+                    m_docking_list.insert(std::pair<double, Vector>(distance, PositionPair2Vector(pair)));
+                    result = m_host_structure;
+                    for (std::size_t i = 0; i < guest.AtomCount(); ++i) {
+                        molecule->addPair(guest.Atom(i));
+                    }
+                    molecule->setEnergy(distance);
+                    m_result_list.insert(std::pair<double, Molecule*>(all, molecule));
+                }
+            }
+            std::cout << (x / double(m_step_X)) * 100 << "% - " << m_anchor_accepted.size() << " stored structures. " << excluded << " structures were skipped, due to being duplicate! " << all << " checked all together!" << std::endl;
+        }
+    }
     std::cout << m_anchor_accepted.size() << " stored structures. " << excluded << " structures were skipped, due to being duplicate!" << all << " checked!" << std::endl;
     guest = m_guest_structure;
     std::cout << std::endl
@@ -221,12 +240,19 @@ void Docking::PerformDocking()
         ++index;
         frags[pair.second->GetFragments(frag_scaling).size()]++;
         //std::cout << pair.first << std::endl;
-        const std::string name = "Docking_B" + std::to_string(frags[pair.second->GetFragments(frag_scaling).size()] / 100 + 1) + "_F" + std::to_string(pair.second->GetFragments(frag_scaling).size()) + ".xyz";
+
+        std::string name;
+        if (!m_NoOpt)
+            name = "Docking_B" + std::to_string(frags[pair.second->GetFragments(frag_scaling).size()] / 100 + 1) + "_F" + std::to_string(pair.second->GetFragments(frag_scaling).size()) + ".xyz";
+        else
+            name = "Docking_B" + std::to_string(frags[pair.second->GetFragments(frag_scaling).size()] / 100 + 1) + ".xyz";
         pair.second->appendXYZFile(name);
         if (!std::binary_search(m_files.begin(), m_files.end(), name))
             m_files.push_back(name);
     }
-    PostOptimise();
+
+    if (!m_NoOpt)
+        PostOptimise();
 }
 
 void Docking::PostOptimise()
@@ -239,6 +265,7 @@ void Docking::PostOptimise()
     json opt = OptJson;
     opt["dE"] = 50;
     opt["dRMSD"] = 0.1;
+    opt = MergeJson(opt, m_controller["dock"]);
     while (iter != m_result_list.end()) {
         std::vector<Thread*> thread_block;
         std::cout << "Batch calculation started! " << std::endl;
@@ -316,7 +343,7 @@ void Docking::PostOptimise()
     controller["confscan"] = confscan;
     ConfScan* scan = new ConfScan(controller);
     scan->setMolecules(final_results);
-    scan->scan();
+    scan->start();
 
     std::vector<Molecule*> result = scan->Result();
 

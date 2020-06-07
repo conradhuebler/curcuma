@@ -35,25 +35,10 @@ using json = nlohmann::json;
 
 #include "rmsd.h"
 
-RMSDDriver::RMSDDriver(const json& controller)
-    : CurcumaMethod(controller)
+RMSDDriver::RMSDDriver(const json& controller, bool silent)
+    : CurcumaMethod(RMSDJson, controller, silent)
 {
-    m_controller = RMSDJson;
-    json rmsd;
-    try {
-        rmsd = Json2KeyWord<json>(controller, MethodName());
-    } catch (int error) {
-        if (error == -1)
-            try {
-                m_controller.merge_patch(rmsd);
-            } catch (const json::exception& e) {
-            }
-    }
-    try {
-        m_controller.merge_patch(controller);
-    } catch (const json::exception& e) {
-    }
-    LoadControlJson();
+    UpdateController(controller);
 }
 
 RMSDDriver::~RMSDDriver()
@@ -62,15 +47,16 @@ RMSDDriver::~RMSDDriver()
 
 void RMSDDriver::LoadControlJson()
 {
-    m_fragment = Json2KeyWord<int>(m_controller, "fragment");
-    m_initial_fragment = Json2KeyWord<int>(m_controller, "init");
-    m_pt = Json2KeyWord<int>(m_controller, "pt");
-    m_force_reorder = Json2KeyWord<bool>(m_controller, "reorder");
-    m_protons = !Json2KeyWord<bool>(m_controller, "heavy");
-    m_silent = Json2KeyWord<bool>(m_controller, "silent");
+    m_fragment = Json2KeyWord<int>(m_defaults, "fragment");
+    m_initial_fragment = Json2KeyWord<int>(m_defaults, "init");
+    m_pt = Json2KeyWord<int>(m_defaults, "pt");
+    m_force_reorder = Json2KeyWord<bool>(m_defaults, "reorder");
+    m_protons = !Json2KeyWord<bool>(m_defaults, "heavy");
+    m_silent = Json2KeyWord<bool>(m_defaults, "silent");
+    m_intermedia_storage = Json2KeyWord<double>(m_defaults, "storage");
 }
 
-void RMSDDriver::AutoPilot()
+void RMSDDriver::start()
 {
     RunTimer timer(false);
 

@@ -27,7 +27,7 @@
 
 class CurcumaMethod {
 public:
-    CurcumaMethod(const json controller);
+    CurcumaMethod(const json& defaults, const json& controller, bool silent);
 
     inline void setRestart(bool restart) { m_restart = restart; }
 
@@ -44,16 +44,18 @@ public:
         m_error_list.clear();
     }
 
-    virtual void start() {} // TODO make pure virtual and move all main action here
+    void UpdateController(const json& controller);
+
+    virtual void start() = 0; // TODO make pure virtual and move all main action here
+
 protected:
     void TriggerWriteRestart();
 
     StringList RestartFiles() const;
 
     nlohmann::json LoadControl() const;
-    void UpdateController(const json& controller);
 
-    json m_controller;
+    json m_defaults, m_controller;
     bool m_restart = true;
 
     void AppendError(const std::string& error) { m_error_list.push_back(error); }
@@ -74,4 +76,6 @@ private:
     virtual void LoadControlJson() = 0;
 
     StringList m_error_list;
+
+    bool m_silent = true;
 };

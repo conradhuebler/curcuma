@@ -60,17 +60,16 @@ static const json RMSDJson = {
     { "fragment", 0 },
     { "init", -1 },
     { "pt", 0 },
-    { "silent", false }
+    { "silent", false },
+    { "storage", 1.0 }
 };
 
 class RMSDDriver : public CurcumaMethod {
 
 public:
-    RMSDDriver(const json& controller = RMSDJson);
+    RMSDDriver(const json& controller = RMSDJson, bool silent = true);
 
     virtual ~RMSDDriver();
-    /*! \brief Use the AutoPilot to automatically perform everything, results are stored as long the object exsist */
-    void AutoPilot();
 
     inline void setReference(const Molecule& reference) { m_reference = reference; }
     inline void setTarget(const Molecule& target) { m_target = target; }
@@ -153,6 +152,8 @@ public:
 
     inline void setInitial(std::vector<int> initial) { m_initial = initial; }
     inline void setInitialFragment(int fragment) { m_initial_fragment = fragment; }
+
+    void start() override;
 
 private:
     /* Read Controller has to be implemented for all */

@@ -36,7 +36,7 @@ void NEBDocking::Prepare()
     driver->setForceReorder(true);
     driver->setCheckConnections(true);
     driver->setProtonTransfer(ProtonTransfer());
-    driver->AutoPilot();
+    driver->start();
 
     Molecule end = driver->TargetAligned();
     end.writeXYZFile("neb_pre_ende.xyz");
@@ -50,7 +50,7 @@ void NEBDocking::Prepare()
     driver->setTarget(result.second);
     driver->setForceReorder(false);
 
-    driver->AutoPilot();
+    driver->start();
     end = driver->TargetAligned();
     end.writeXYZFile("neb_ende.xyz");
 }

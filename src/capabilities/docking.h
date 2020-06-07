@@ -76,13 +76,14 @@ static const json DockingJson = {
     { "Host", "none" },
     { "Guest", "none" },
     { "Complex", "none" },
-    { "scaling", 1.5 }
+    { "scaling", 1.5 },
+    { "NoOpt", false }
 };
 
 class Docking : public CurcumaMethod {
 
 public:
-    Docking(const json& controller);
+    Docking(const json& controller = DockingJson, bool silent = true);
     virtual ~Docking() = default;
 
     bool Initialise() override;
@@ -120,7 +121,7 @@ private:
     std::vector<Position> m_anchor_accepted, m_rotation_accepted;
     std::vector<double> m_fragments_mass;
     bool m_check = false;
-    bool m_PostFilter = true, m_PostOptimise = true, m_AutoPos = true;
+    bool m_PostFilter = true, m_PostOptimise = true, m_AutoPos = true, m_NoOpt = false;
     double m_sum_distance = 0;
     double m_scaling = 1.5;
     double m_window_seperator = 0.66666;

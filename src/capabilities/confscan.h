@@ -51,7 +51,7 @@ static const json ConfScanJson = {
 
 class ConfScan : public CurcumaMethod {
 public:
-    ConfScan(const json& controller);
+    ConfScan(const json& controller = ConfScanJson, bool silent = true);
     virtual ~ConfScan();
 
     void setFileName(const std::string& filename)
@@ -61,8 +61,6 @@ public:
     }
 
     void setMolecules(const std::map<double, Molecule*>& molecules);
-
-    void scan();
 
     /*! \brief Force Connectivitiy Check */
     inline bool CheckConnections() const { return m_check_connections; }
@@ -81,6 +79,8 @@ public:
     void ParametriseRotationalCutoffs();
 
     int AcceptRotationalConstant(double constant);
+
+    void start() override; // TODO make pure virtual and move all main action here
 
 private:
     /* Lets have this for all modules */

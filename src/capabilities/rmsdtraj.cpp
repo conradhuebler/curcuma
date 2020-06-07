@@ -40,28 +40,13 @@ using json = nlohmann::json;
 
 #include "rmsdtraj.h"
 
-RMSDTraj::RMSDTraj(const json& controller)
-    : CurcumaMethod(controller)
+RMSDTraj::RMSDTraj(const json& controller, bool silent)
+    : CurcumaMethod(RMSDJson, controller, silent)
 {
-    m_controller = RMSDJson;
-    json rmsd;
-    try {
-        rmsd = Json2KeyWord<json>(controller, MethodName());
-    } catch (int error) {
-        if (error == -1)
-            try {
-                m_controller.merge_patch(rmsd);
-            } catch (const json::exception& e) {
-            }
-    }
-    try {
-        m_controller.merge_patch(controller);
-    } catch (const json::exception& e) {
-    }
-    LoadControlJson();
+    UpdateController(controller);
 }
 
-void RMSDTraj::AnalyseTrajectory()
+void RMSDTraj::start()
 {
     std::cout << "'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
     std::cout << "'    Scanning Trajectory file for RMSD and Conformers     '" << std::endl;
@@ -83,7 +68,9 @@ void RMSDTraj::AnalyseTrajectory()
         outfile.pop_back();
 
     m_rmsd_file.open(outfile + "_rmsd.dat");
-    m_pca_file.open(outfile + "_pca.dat");
+
+    if (m_pcafile)
+        m_pca_file.open(outfile + "_pca.dat");
 
     if (m_pairwise) {
         m_pairwise_file.open(outfile + "_pairwise.dat");
@@ -206,19 +193,20 @@ void RMSDTraj::AnalyseTrajectory()
                     for (std::size_t mols = 0; mols < m_stored_structures.size(); ++mols) {
                         driver->setReference(m_stored_structures[mols]);
                         driver->setTarget(mol);
-                        driver->AutoPilot();
+                        driver->start();
                         if (mols == 0) {
                             {
                                 m_rmsd_file << driver->RMSD() << std::endl;
                                 m_rmsd_vector.push_back(driver->RMSD());
                             }
                             Molecule mol2 = driver->TargetAligned();
-
-                            for (std::size_t j = 0; j < mol2.AtomCount(); ++j) {
-                                if (mol2.Atom(j).first != 1)
-                                    m_pca_file << mol2.Atom(j).second(0) << " " << mol2.Atom(j).second(1) << " " << mol2.Atom(j).second(2);
+                            if (m_pcafile) {
+                                for (std::size_t j = 0; j < mol2.AtomCount(); ++j) {
+                                    if (mol2.Atom(j).first != 1)
+                                        m_pca_file << mol2.Atom(j).second(0) << " " << mol2.Atom(j).second(1) << " " << mol2.Atom(j).second(2);
+                                }
+                                m_pca_file << std::endl;
                             }
-                            m_pca_file << std::endl;
                         }
                         rmsd_results.push_back(driver->RMSD());
                     }
@@ -236,7 +224,7 @@ void RMSDTraj::AnalyseTrajectory()
                 } else {
                     driver->setReference(mol);
                     driver->setTarget(mol_2);
-                    driver->AutoPilot();
+                    driver->start();
                     m_pairwise_file << driver->RMSD() << std::endl;
                 }
                 i = -1;
@@ -273,11 +261,12 @@ void RMSDTraj::AnalyseTrajectory()
 
 void RMSDTraj::LoadControlJson()
 {
-    m_heavy = Json2KeyWord<bool>(m_controller, "heavy");
-    m_write_unique = Json2KeyWord<bool>(m_controller, "write");
-    m_rmsd_threshold = Json2KeyWord<double>(m_controller, "rmsd");
-    m_fragment = Json2KeyWord<int>(m_controller, "fragment");
-    m_reference = Json2KeyWord<std::string>(m_controller, "reference");
-    m_second_file = Json2KeyWord<std::string>(m_controller, "second");
+    m_heavy = Json2KeyWord<bool>(m_defaults, "heavy");
+    m_pcafile = Json2KeyWord<bool>(m_defaults, "pcafile");
+    m_write_unique = Json2KeyWord<bool>(m_defaults, "write");
+    m_rmsd_threshold = Json2KeyWord<double>(m_defaults, "rmsd");
+    m_fragment = Json2KeyWord<int>(m_defaults, "fragment");
+    m_reference = Json2KeyWord<std::string>(m_defaults, "reference");
+    m_second_file = Json2KeyWord<std::string>(m_defaults, "second");
     m_pairwise = (m_second_file.compare("none") != 0);
 }

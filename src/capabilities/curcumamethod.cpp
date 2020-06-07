@@ -31,8 +31,10 @@ namespace fs = std::filesystem;
 
 #include "curcumamethod.h"
 
-CurcumaMethod::CurcumaMethod(const json controller)
-    : m_controller(controller)
+CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, bool silent)
+    : m_defaults(defaults)
+    , m_controller(controller)
+    , m_silent(silent)
 {
 }
 
@@ -61,10 +63,11 @@ StringList CurcumaMethod::RestartFiles() const
             file_list.push_back(file);
     }
 #else
-    ifstream test_file("curcuma_restart.json");
+    std::ifstream test_file("curcuma_restart.json");
     if (test_file.is_open())
         file_list.push_back("curcuma_restart.json");
 #endif
+
     return file_list;
 }
 
@@ -85,18 +88,14 @@ nlohmann::json CurcumaMethod::LoadControl() const
 
 void CurcumaMethod::UpdateController(const json& controller)
 {
-    json method = Json2KeyWord<json>(controller, MethodName());
-
-    // yeah, nested loops, for they will do forever
-    for (const auto& object : method.items()) {
-        std::string outer = object.key();
-        transform(outer.begin(), outer.end(), outer.begin(), ::tolower);
-        for (const auto& local : m_controller.items()) {
-            std::string inner = local.key();
-            transform(inner.begin(), inner.end(), inner.begin(), ::tolower);
-            if (outer.compare(inner) == 0) {
-                m_controller[local.key()] = object.value();
-            }
-        }
+    json method;
+    try {
+        method = Json2KeyWord<json>(controller, MethodName());
+    } catch (int i) {
+        method = controller;
     }
+    m_defaults = MergeJson(m_defaults, method);
+    if (!m_silent)
+        PrintController(m_defaults);
+    LoadControlJson();
 }

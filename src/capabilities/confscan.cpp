@@ -36,11 +36,10 @@ using json = nlohmann::json;
 
 #include "confscan.h"
 
-ConfScan::ConfScan(const json& controller)
-    : CurcumaMethod(ConfScanJson)
+ConfScan::ConfScan(const json& controller, bool silent)
+    : CurcumaMethod(ConfScanJson, controller, silent)
 {
     UpdateController(controller);
-    LoadControlJson();
 }
 
 ConfScan::~ConfScan()
@@ -52,24 +51,24 @@ ConfScan::~ConfScan()
 
 void ConfScan::LoadControlJson()
 {
-    m_noname = Json2KeyWord<bool>(m_controller, "noname");
-    m_restart = Json2KeyWord<bool>(m_controller, "restart");
+    m_noname = Json2KeyWord<bool>(m_defaults, "noname");
+    m_restart = Json2KeyWord<bool>(m_defaults, "restart");
 
-    m_heavy = Json2KeyWord<bool>(m_controller, "heavy");
-    m_rmsd_threshold = Json2KeyWord<double>(m_controller, "rmsd");
+    m_heavy = Json2KeyWord<bool>(m_defaults, "heavy");
+    m_rmsd_threshold = Json2KeyWord<double>(m_defaults, "rmsd");
     if (m_heavy)
         m_rmsd_threshold = 0.75;
 
-    m_maxrank = Json2KeyWord<double>(m_controller, "rank");
-    m_writeXYZ = Json2KeyWord<bool>(m_controller, "writeXYZ");
-    m_force_reorder = Json2KeyWord<bool>(m_controller, "forceReorder");
-    m_check_connections = Json2KeyWord<bool>(m_controller, "check");
-    m_energy_threshold = Json2KeyWord<double>(m_controller, "energy");
-    m_energy_cutoff = Json2KeyWord<double>(m_controller, "maxenergy");
-    m_prevent_reorder = Json2KeyWord<bool>(m_controller, "preventReorder");
-    m_force_silent = Json2KeyWord<bool>(m_controller, "silent");
-    m_scale_loose = Json2KeyWord<double>(m_controller, "scaleLoose");
-    m_scale_tight = Json2KeyWord<double>(m_controller, "scaleTight");
+    m_maxrank = Json2KeyWord<double>(m_defaults, "rank");
+    m_writeXYZ = Json2KeyWord<bool>(m_defaults, "writeXYZ");
+    m_force_reorder = Json2KeyWord<bool>(m_defaults, "forceReorder");
+    m_check_connections = Json2KeyWord<bool>(m_defaults, "check");
+    m_energy_threshold = Json2KeyWord<double>(m_defaults, "energy");
+    m_energy_cutoff = Json2KeyWord<double>(m_defaults, "maxenergy");
+    m_prevent_reorder = Json2KeyWord<bool>(m_defaults, "preventReorder");
+    m_force_silent = Json2KeyWord<bool>(m_defaults, "silent");
+    m_scale_loose = Json2KeyWord<double>(m_defaults, "scaleLoose");
+    m_scale_tight = Json2KeyWord<double>(m_defaults, "scaleTight");
 }
 
 bool ConfScan::openFile()
@@ -265,7 +264,7 @@ void ConfScan::ParametriseRotationalCutoffs()
             driver->setReference(mol1);
             driver->setTarget(mol2);
 
-            driver->AutoPilot();
+            driver->start();
             double rmsd = driver->RMSD();
             delete driver;
             if (rmsd < m_rmsd_threshold) {
@@ -305,7 +304,7 @@ int ConfScan::AcceptRotationalConstant(double constant)
     }
 }
 
-void ConfScan::scan()
+void ConfScan::start()
 {
     ReadControlFile();
     LoadRestartInformation();
@@ -471,6 +470,11 @@ int ConfScan::PreCheckAgainstAccepted(int index)
 {
     bool accept = true;
     Molecule* mol1 = m_molecules.at(index).second;
+    json rmsd = RMSDJson;
+    rmsd["silent"] = true;
+    rmsd["reorder"] = ForceReorder();
+    rmsd["check"] = CheckConnections();
+    rmsd["heavy"] = m_heavy;
     if (mol1->AtomCount() == 0) {
         m_fail++;
         return -1;
@@ -490,12 +494,7 @@ int ConfScan::PreCheckAgainstAccepted(int index)
                     std::cout << mol1->Name() << " already rejected. Skipping check against " << mol2->Name() << std::endl;
                 continue;
             }
-            RMSDDriver* driver = new RMSDDriver;
-            driver->setSilent(true);
-            driver->setProtons(!m_heavy);
-            driver->setForceReorder(ForceReorder());
-            driver->setCheckConnections(CheckConnections());
-
+            RMSDDriver* driver = new RMSDDriver(rmsd);
             if (!m_silent) {
                 std::cout << std::endl
                           << std::setprecision(10)
@@ -524,7 +523,7 @@ int ConfScan::PreCheckAgainstAccepted(int index)
             driver->setReference(mol1);
             driver->setTarget(mol2);
 
-            driver->AutoPilot();
+            driver->start();
             rmsd = driver->RMSD();
 
             int accepted_rotational = AcceptRotationalConstant(diff_rot);
@@ -567,6 +566,12 @@ int ConfScan::CheckTempList(int index)
     bool accept = true;
     Molecule* mol1 = m_molecules.at(index).second;
 
+    json rmsd = RMSDJson;
+    rmsd["silent"] = true;
+    rmsd["reorder"] = ForceReorder();
+    rmsd["check"] = CheckConnections();
+    rmsd["heavy"] = m_heavy;
+
     for (const auto mol2 : m_global_temp_list) {
         if (m_filtered.count(mol1->Name())) {
             if (!m_silent) {
@@ -579,16 +584,11 @@ int ConfScan::CheckTempList(int index)
         }
         double difference = abs(mol1->Energy() - mol2->Energy()) * 2625.5;
 
-        RMSDDriver* driver = new RMSDDriver;
-        driver->setSilent(true);
-        driver->setProtons(!m_heavy);
-        driver->setForceReorder(ForceReorder());
-        driver->setCheckConnections(CheckConnections());
-
+        RMSDDriver* driver = new RMSDDriver(rmsd);
         driver->setReference(mol1);
         driver->setTarget(mol2);
 
-        driver->AutoPilot();
+        driver->start();
         double rmsd = driver->RMSD();
 
         if (!m_silent) {
@@ -653,7 +653,7 @@ int ConfScan::CheckTempList(int index)
                 std::cout << "*** Nothing fitting found, reorder now! ***" << std::endl;
             }
             driver->setForceReorder(true);
-            driver->AutoPilot();
+            driver->start();
             driver->setForceReorder(ForceReorder());
             m_reordered++;
             double rmsd_tmp = driver->RMSD();

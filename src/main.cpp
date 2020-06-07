@@ -90,6 +90,7 @@ void Distance(const Molecule &mol, char **argv)
 int main(int argc, char **argv) {
 #if __GNUC__
     signal(SIGSEGV, bt_handler);
+    signal(SIGABRT, bt_handler);
 #endif
 
     General::StartUp(argc, argv);
@@ -124,10 +125,10 @@ int main(int argc, char **argv) {
             Molecule mol1 = Tools::LoadFile(argv[2]);
             Molecule mol2 = Tools::LoadFile(argv[3]);
 
-            RMSDDriver* driver = new RMSDDriver(controller);
+            RMSDDriver* driver = new RMSDDriver(controller, false);
             driver->setReference(mol1);
             driver->setTarget(mol2);
-            driver->AutoPilot();
+            driver->start();
             std::cout << "RMSD for two molecules " << driver->RMSD() << std::endl;
 
             driver->ReferenceAligned().writeXYZFile("reference.xyz");
@@ -143,7 +144,7 @@ int main(int argc, char **argv) {
                 exit(1);
             }
 
-            Docking* docking = new Docking(controller);
+            Docking* docking = new Docking(controller, false);
             if (docking->Initialise() == false) {
                 docking->printError();
                 return 0;
@@ -186,7 +187,7 @@ int main(int argc, char **argv) {
             }
             ConfScan* scan = new ConfScan(controller);
             scan->setFileName(argv[2]);
-            scan->scan();
+            scan->start();
             return 0;
         } else if (strcmp(argv[1], "-led") == 0) {
             if (argc < 2) {
@@ -258,7 +259,7 @@ int main(int argc, char **argv) {
             outfile += "_opt.xyz";
 
             json key = OptJson;
-            key.patch(controller.value("opt", json()));
+            key = MergeJson(key, controller["opt"]);
 
             FileIterator file(argv[2]);
             std::multimap<double, Molecule> results;
@@ -345,7 +346,7 @@ int main(int argc, char **argv) {
                 }
             }
     */
-            RMSDTraj traj(RMSDTrajJson);
+            RMSDTraj traj(RMSDTrajJson, false);
             //traj.setReferenceStructure(reference);
             //traj.WriteUnique(write_unique);
             //traj.setRMSDThreshold(rmsd);
@@ -354,7 +355,7 @@ int main(int argc, char **argv) {
             //traj.setHeavy(heavy);
             //if (isSecond)
             //    traj.setSecondFile(second);
-            traj.AnalyseTrajectory();
+            traj.start();
 
         } else if (strcmp(argv[1], "-nebprep") == 0) {
             if (argc < 3) {

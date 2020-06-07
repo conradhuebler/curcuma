@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include <iostream>
+
 #include <Eigen/Dense>
 
 #include "src/global_config.h"
@@ -103,17 +105,17 @@ inline json CLI2Json(int argc, char** argv)
                     continue;
                 } else {
                     current.erase(0, 1);
+                    //try {
+                    //    key[current] = std::stoi(argv[i + 1]);
+                    //} catch (const std::invalid_argument& error) {
                     try {
-                        key[current] = std::stoi(argv[i + 1]);
-                    } catch (const std::invalid_argument& error) {
-                        try {
-                            key[current] = std::stod(argv[i + 1]);
+                        key[current] = std::stod(argv[i + 1]);
                         } catch (const std::invalid_argument& error) {
                             key[current] = argv[i + 1];
                         }
-                    }
+                        //}
 
-                    ++i;
+                        ++i;
                 }
             }
         }
@@ -140,4 +142,27 @@ inline T Json2KeyWord(const json& controller, std::string name)
         return temp;
     else
         throw -1;
+}
+
+inline json MergeJson(const json& reference, const json& patch)
+{
+    json result = reference;
+    for (const auto& object : patch.items()) {
+        std::string outer = object.key();
+        transform(outer.begin(), outer.end(), outer.begin(), ::tolower);
+        for (const auto& local : reference.items()) {
+            std::string inner = local.key();
+            transform(inner.begin(), inner.end(), inner.begin(), ::tolower);
+            if (outer.compare(inner) == 0) {
+                result[local.key()] = object.value();
+            }
+        }
+    }
+    return result;
+}
+
+inline void PrintController(const json& controller)
+{
+    for (const auto& entry : controller.items())
+        std::cout << entry.key() << ": " << entry.value() << std::endl;
 }
