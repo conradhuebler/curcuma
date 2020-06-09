@@ -46,7 +46,8 @@ static const json ConfScanJson = {
     { "preventreorder", false },
     { "silent", false },
     { "scaleLoose", 2 },
-    { "scaleTight", 0.5 }
+    { "scaleTight", 0.5 },
+    { "skip", 0 }
 };
 
 class ConfScan : public CurcumaMethod {
@@ -109,7 +110,7 @@ private:
     bool m_ok;
     std::size_t m_fail = 0, m_start = 0, m_end;
     std::vector<Molecule*> m_global_temp_list;
-    int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0;
+    int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0, m_skip = 0;
 
     std::string m_filename;
     std::map<double, int> m_ordered_list;

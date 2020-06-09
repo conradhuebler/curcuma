@@ -69,6 +69,7 @@ void ConfScan::LoadControlJson()
     m_force_silent = Json2KeyWord<bool>(m_defaults, "silent");
     m_scale_loose = Json2KeyWord<double>(m_defaults, "scaleLoose");
     m_scale_tight = Json2KeyWord<double>(m_defaults, "scaleTight");
+    m_skip = Json2KeyWord<int>(m_defaults, "skip");
 }
 
 bool ConfScan::openFile()
@@ -374,6 +375,10 @@ void ConfScan::start()
      */
     m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0;
     for (auto& i : m_ordered_list) {
+        if (m_skip) {
+            m_skip--;
+            continue;
+        }
         int index = i.second;
         Molecule* mol1 = m_molecules.at(index).second;
         int result = PreCheckAgainstAccepted(index);
