@@ -41,7 +41,7 @@ using json = nlohmann::json;
 #include "rmsdtraj.h"
 
 RMSDTraj::RMSDTraj(const json& controller, bool silent)
-    : CurcumaMethod(RMSDJson, controller, silent)
+    : CurcumaMethod(RMSDTrajJson, controller, silent)
 {
     UpdateController(controller);
 }
@@ -58,7 +58,7 @@ void RMSDTraj::start()
         std::cout << "  No                                '" << std::endl;
     std::cout << "'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
     int atoms_target = -1;
-    if (m_reference.size() != 0) {
+    if (m_reference.compare("none") != 0) {
         m_stored_structures.push_back(Tools::LoadFile(m_reference));
         atoms_target = m_stored_structures[0].AtomCount();
     }
@@ -175,7 +175,6 @@ void RMSDTraj::start()
                 }
             }
             if (i - 1 == atoms) {
-
                 if (m_stored_structures.size() == 0) {
                     if (m_write_unique)
                         mol.appendXYZFile(outfile + "_unique.xyz");

@@ -346,7 +346,7 @@ int main(int argc, char **argv) {
                 }
             }
     */
-            RMSDTraj traj(RMSDTrajJson, false);
+            RMSDTraj traj(controller, false);
             //traj.setReferenceStructure(reference);
             //traj.WriteUnique(write_unique);
             //traj.setRMSDThreshold(rmsd);

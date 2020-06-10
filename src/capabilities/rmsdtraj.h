@@ -44,7 +44,6 @@ const json RMSDTrajJson{
 };
 
 class RMSDTraj : public CurcumaMethod {
-
 public:
     RMSDTraj(const json& controller = RMSDTrajJson, bool silent = true);
     virtual ~RMSDTraj() {}

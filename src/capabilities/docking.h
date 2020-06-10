@@ -77,7 +77,10 @@ static const json DockingJson = {
     { "Guest", "none" },
     { "Complex", "none" },
     { "scaling", 1.5 },
-    { "NoOpt", false }
+    { "NoOpt", false },
+    { "CentroidMaxDistance", 1e5 },
+    { "CentroidTolDis", 1e-1 },
+    { "RotationTolDis", 1e-1 }
 };
 
 class Docking : public CurcumaMethod {
@@ -125,6 +128,10 @@ private:
     double m_sum_distance = 0;
     double m_scaling = 1.5;
     double m_window_seperator = 0.66666;
+    double m_centroid_max_distance = 1e5;
+    double m_centroid_tol_distance = 1e-1;
+    double m_centroid_rot_distance = 1e-1;
+
     StringList m_files;
     std::string m_host, m_guest, m_complex;
 };

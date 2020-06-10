@@ -40,7 +40,6 @@ public:
 
     inline void addItem(const std::vector<int>& vector, double rmsd)
     {
-
         m_shelf.insert(std::pair<double, std::vector<int>>(rmsd, vector));
         if (m_shelf.size() >= m_size)
             m_shelf.erase(--m_shelf.end());
@@ -65,7 +64,6 @@ static const json RMSDJson = {
 };
 
 class RMSDDriver : public CurcumaMethod {
-
 public:
     RMSDDriver(const json& controller = RMSDJson, bool silent = true);
 

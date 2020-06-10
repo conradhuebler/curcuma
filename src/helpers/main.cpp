@@ -28,7 +28,6 @@
 
 int main(int argc, char** argv)
 {
-
     General::StartUp(argc, argv);
 
     RunTimer timer(true);
@@ -40,7 +39,6 @@ int main(int argc, char** argv)
     }
 
     if (argc >= 2) {
-
         if (strcmp(argv[1], "-statistic") == 0) {
             if (argc < 3) {
                 std::cerr << "Please use curcuma for statistical tools follows\ncurcuma_tools -statistic file.dat" << std::endl;
@@ -53,7 +51,6 @@ int main(int argc, char** argv)
             int bins = 100;
             bool force = false;
             if (argc >= 3) {
-
                 for (std::size_t i = 3; i < argc; ++i) {
                     if (strcmp(argv[i], "-bins") == 0) {
                         if (i + 1 < argc) {
@@ -146,6 +143,5 @@ int main(int argc, char** argv)
             }
         }
     }
-
     return 0;
 }

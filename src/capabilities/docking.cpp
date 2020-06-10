@@ -60,6 +60,9 @@ void Docking::LoadControlJson()
     m_host = Json2KeyWord<std::string>(m_defaults, "host");
     m_guest = Json2KeyWord<std::string>(m_defaults, "guest");
     m_complex = Json2KeyWord<std::string>(m_defaults, "complex");
+    m_centroid_max_distance = Json2KeyWord<double>(m_defaults, "CentroidMaxDistance");
+    m_centroid_tol_distance = Json2KeyWord<double>(m_defaults, "CentroidTolDis");
+    m_centroid_rot_distance = Json2KeyWord<double>(m_defaults, "RotationTolDis");
 }
 
 bool Docking::Initialise()
@@ -194,7 +197,7 @@ void Docking::PerformDocking()
 
                     bool accept = true;
 
-                    if (GeometryTools::Distance(m_initial_anchor, pair.first) > 1e5) {
+                    if (GeometryTools::Distance(m_initial_anchor, pair.first) > m_centroid_max_distance) {
                         accept = false;
                         continue;
                     }
@@ -202,7 +205,7 @@ void Docking::PerformDocking()
                     for (std::size_t i = 0; i < m_anchor_accepted.size(); ++i) {
                         Position anchor = m_anchor_accepted[i];
                         Position rotation = m_rotation_accepted[i];
-                        if (GeometryTools::Distance(anchor, pair.first) < 1e-1 || GeometryTools::Distance(rotation, pair.second) < 1e-1)
+                        if (GeometryTools::Distance(anchor, pair.first) < m_centroid_tol_distance || GeometryTools::Distance(rotation, pair.second) < m_centroid_rot_distance)
                             accept = false;
                     }
                     if (accept == false) {
@@ -251,7 +254,7 @@ void Docking::PerformDocking()
             m_files.push_back(name);
     }
 
-    if (!m_NoOpt)
+    if (!m_NoOpt && m_PostOptimise)
         PostOptimise();
 }
 
@@ -326,6 +329,8 @@ void Docking::PostOptimise()
             }
         }
     }
+    if (!m_PostFilter)
+        return;
 
     std::cout << "** Docking Phase 3 - Fast Filtering structures with correct fragments **" << std::endl;
 

@@ -115,7 +115,6 @@ inline Geometry TranslateMolecule(const Molecule &molecule, const Position &star
         geom.row(i) += direction;
 
     return geom;
-
 }
 
 inline Geometry TranslateGeometry(const Geometry& geom, const Position& start, const Position& destination)

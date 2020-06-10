@@ -151,7 +151,6 @@ inline bool isDouble(const std::string& input)
 
 inline Molecule LoadFile(const std::string& filename)
 {
-
     bool xyzfile = std::string(filename).find(".xyz") != std::string::npos || std::string(filename).find(".trj") != std::string::npos;
 
     if (xyzfile == false)
@@ -203,6 +202,8 @@ inline int VectorDifference(const std::vector<int>& tmp_a, const std::vector<int
 
 inline double median(const std::vector<double>& vector)
 {
+    if (vector.size() == 0)
+        return 0;
     double median = 0;
 
     if (vector.size() % 2)
@@ -276,6 +277,8 @@ inline std::vector<std::pair<double, double>> Histogram(const std::vector<double
 
 inline double ShannonEntropy(const std::vector<std::pair<double, double>>& histogram)
 {
+    if (histogram.size() == 0)
+        return 0;
     double entropy = 0;
     double sum = 0.0;
 
