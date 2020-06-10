@@ -160,6 +160,7 @@ endif()
 
 
 add_executable(curcuma_helper
+        src/core/molecule.cpp
         src/helpers/main.cpp)
 
 if(C17)

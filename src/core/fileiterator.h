@@ -56,6 +56,10 @@ public:
     {
         return m_end || m_init;
     }
+    inline Molecule Current() const
+    {
+        return m_current;
+    }
 
 private:
     bool CheckNext()

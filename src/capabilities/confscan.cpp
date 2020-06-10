@@ -70,6 +70,7 @@ void ConfScan::LoadControlJson()
     m_scale_loose = Json2KeyWord<double>(m_defaults, "scaleLoose");
     m_scale_tight = Json2KeyWord<double>(m_defaults, "scaleTight");
     m_skip = Json2KeyWord<int>(m_defaults, "skip");
+    m_allxyz = Json2KeyWord<bool>(m_defaults, "allxyz");
 }
 
 bool ConfScan::openFile()
@@ -457,6 +458,9 @@ void ConfScan::start()
         m_target_last_energy = 0;
     }
     TriggerWriteRestart();
+
+    if (m_allxyz)
+        Tools::xyz2allxyz(result_name);
 
     std::cout << m_result.size() << " structures were kept - of " << m_molecules.size() - m_fail << " total!" << std::endl;
 

@@ -47,7 +47,8 @@ static const json ConfScanJson = {
     { "silent", false },
     { "scaleLoose", 2 },
     { "scaleTight", 0.5 },
-    { "skip", 0 }
+    { "skip", 0 },
+    { "allxyz", false }
 };
 
 class ConfScan : public CurcumaMethod {
@@ -130,4 +131,5 @@ private:
     bool m_internal_parametrised = false;
     bool m_parameter_loaded = false;
     bool m_force_silent = false;
+    bool m_allxyz = false;
 };

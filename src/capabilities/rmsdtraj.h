@@ -40,7 +40,9 @@ const json RMSDTrajJson{
     { "reference", "none" },
     { "second", "none" },
     { "heavy", false },
-    { "pcafile", false }
+    { "pcafile", false },
+    { "allxyz", false }
+
 };
 
 class RMSDTraj : public CurcumaMethod {
@@ -88,5 +90,6 @@ private:
     std::vector<double> m_rmsd_vector;
     int m_fragment = -1;
     bool m_write_unique = false, m_pairwise = false, m_heavy = false, m_pcafile = false;
+    bool m_allxyz = false;
     double m_rmsd_threshold = 1.0;
 };

@@ -87,6 +87,7 @@ class Molecule
 
     void appendXYZFile(const std::string& filename) const;
     inline void appendXYZFile() const { appendXYZFile(Name() + ".xyz"); }
+    std::string XYZString() const;
 
     std::vector<int> BoundHydrogens(int atom, double scaling = 1.5) const;
     std::map<int, std::vector<int>> getConnectivtiy(double scaling = 1.5, int latest = -1) const;

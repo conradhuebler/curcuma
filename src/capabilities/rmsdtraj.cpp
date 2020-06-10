@@ -243,6 +243,8 @@ void RMSDTraj::start()
         }
         index++;
     }
+    if (m_write_unique && m_allxyz)
+        Tools::xyz2allxyz(outfile + "_unique.xyz");
 
     double mean = Tools::mean(m_rmsd_vector);
     double median = Tools::median(m_rmsd_vector);
@@ -268,4 +270,5 @@ void RMSDTraj::LoadControlJson()
     m_reference = Json2KeyWord<std::string>(m_defaults, "reference");
     m_second_file = Json2KeyWord<std::string>(m_defaults, "second");
     m_pairwise = (m_second_file.compare("none") != 0);
+    m_allxyz = Json2KeyWord<bool>(m_defaults, "allxyz");
 }

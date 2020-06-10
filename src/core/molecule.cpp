@@ -559,6 +559,19 @@ void Molecule::appendXYZFile(const std::string& filename) const
     input.close();
 }
 
+std::string Molecule::XYZString() const
+{
+    std::string result;
+    std::stringstream stream;
+    stream << AtomCount() << std::endl
+           << Name() << " ** Energy = " << std::setprecision(12) << Energy() << " Eh **"
+           << std::endl;
+    for (int i = 0; i < AtomCount(); ++i) {
+        stream << Elements::ElementAbbr[m_atoms[i]].c_str() << "      " << m_geometry[i][0] << "      " << m_geometry[i][1] << "      " << m_geometry[i][2] << std::endl;
+    }
+    return stream.str();
+}
+
 std::vector<int> Molecule::BoundHydrogens(int atom, double scaling) const
 {
     std::vector<int> result;

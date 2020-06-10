@@ -29,6 +29,7 @@
 #include <string>
 #include <vector>
 
+#include "src/core/fileiterator.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
 
@@ -339,5 +340,23 @@ inline std::vector<std::vector<int>> String2VectorVector(const std::string& stri
     for (const auto& element : vectors)
         result.push_back(String2Vector(element));
     return result;
+}
+
+inline void xyz2allxyz(const std::string& xyzfile)
+{
+    std::string allxyz = xyzfile;
+    allxyz.erase(allxyz.end() - 3, allxyz.end());
+
+    std::ofstream input;
+    input.open(allxyz + "allxyz", std::ios_base::app);
+    FileIterator file(xyzfile);
+    while (!file.AtEnd()) {
+        Molecule mol = file.Next();
+        input << mol.XYZString();
+        if (!file.AtEnd())
+            input << ">" << std::endl;
+    }
+    //input << "\n";
+    input.close();
 }
 }
