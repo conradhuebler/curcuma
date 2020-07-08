@@ -122,9 +122,10 @@ int main(int argc, char **argv) {
                 exit(1);
             }
 
-            Molecule mol1 = Tools::LoadFile(argv[2]);
-            Molecule mol2 = Tools::LoadFile(argv[3]);
-
+            Molecule mol1 = Tools::LoadFile(argv[2]); // will only take first structure
+            Molecule mol2 = Tools::LoadFile(argv[3]); // will only take first structure
+            if (mol1.AtomCount() == 0 || mol2.AtomCount() == 0)
+                exit(0);
             RMSDDriver* driver = new RMSDDriver(controller, false);
             driver->setReference(mol1);
             driver->setTarget(mol2);

@@ -36,7 +36,7 @@ static const json ConfScanJson = {
     { "noname", true },
     { "restart", true },
     { "heavy", false },
-    { "rmsd", 1 },
+    { "rmsd", -1 },
     { "rank", -1 },
     { "writeXYZ", false },
     { "forceReorder", false },
@@ -48,7 +48,9 @@ static const json ConfScanJson = {
     { "scaleLoose", 2 },
     { "scaleTight", 0.5 },
     { "skip", 0 },
-    { "allxyz", false }
+    { "allxyz", false },
+    { "update", false },
+    { "MaxParam", -1 }
 };
 
 class ConfScan : public CurcumaMethod {
@@ -99,6 +101,10 @@ private:
     /* Read Controller has to be implemented for all */
     void LoadControlJson() override;
 
+    void AddRules(const std::vector<int>& rules);
+
+    void CheckStored();
+
     bool openFile();
 
     std::vector<std::vector<int>> m_reorder_rules;
@@ -120,6 +126,7 @@ private:
     double m_diff_rot_abs_tight = 0, m_diff_rot_abs_loose = 0, m_scale_tight = 0.5, m_scale_loose = 2;
     std::vector<Molecule*> m_result, m_nearly, m_failed;
     int m_maxrank = 10000;
+    int m_maxParam = -1;
     bool m_writeXYZ = false;
     bool m_check_connections = false;
     bool m_force_reorder = false, m_prevent_reorder = false;
@@ -132,4 +139,5 @@ private:
     bool m_parameter_loaded = false;
     bool m_force_silent = false;
     bool m_allxyz = false;
+    bool m_update = false;
 };

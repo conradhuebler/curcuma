@@ -172,7 +172,7 @@ inline Molecule LoadFile(const std::string& filename)
                 throw 2;
             mol = Molecule(atoms, 0);
         }
-        if (i > 1) {
+        if (i > 1 && mol.AtomCount() < atoms) { // Load only the first file, TODO make it more flexible
             mol.setXYZ(line, i - 2);
         }
         index++;

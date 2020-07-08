@@ -55,9 +55,13 @@ void ConfScan::LoadControlJson()
     m_restart = Json2KeyWord<bool>(m_defaults, "restart");
 
     m_heavy = Json2KeyWord<bool>(m_defaults, "heavy");
+
     m_rmsd_threshold = Json2KeyWord<double>(m_defaults, "rmsd");
-    if (m_heavy)
+
+    if (m_heavy && m_rmsd_threshold == -1)
         m_rmsd_threshold = 0.75;
+    else if (!m_heavy && m_rmsd_threshold == -1)
+        m_rmsd_threshold = 1;
 
     m_maxrank = Json2KeyWord<double>(m_defaults, "rank");
     m_writeXYZ = Json2KeyWord<bool>(m_defaults, "writeXYZ");
@@ -71,6 +75,8 @@ void ConfScan::LoadControlJson()
     m_scale_tight = Json2KeyWord<double>(m_defaults, "scaleTight");
     m_skip = Json2KeyWord<int>(m_defaults, "skip");
     m_allxyz = Json2KeyWord<bool>(m_defaults, "allxyz");
+    m_update = Json2KeyWord<bool>(m_defaults, "update");
+    m_maxParam = Json2KeyWord<int>(m_defaults, "MaxParam");
 }
 
 bool ConfScan::openFile()
@@ -252,8 +258,11 @@ void ConfScan::ParametriseRotationalCutoffs()
     m_internal_parametrised = true;
     std::vector<double> accepted, rejected;
     double accepted_single = 0;
-    for (int i = 0; i < m_ordered_list.size(); ++i) {
-        for (int j = i + 1; j < m_ordered_list.size(); ++j) {
+    int counter = 0;
+    if (m_maxParam == -1)
+        m_maxParam = m_ordered_list.size() * (m_ordered_list.size() - 1);
+    for (int i = 0; i < m_ordered_list.size() && counter < m_maxParam; ++i) {
+        for (int j = i + 1; j < m_ordered_list.size() && counter < m_maxParam; ++j) {
             RMSDDriver* driver = new RMSDDriver(rmsd);
             Molecule* mol1 = m_molecules.at(i).second;
             Molecule* mol2 = m_molecules.at(j).second;
@@ -274,6 +283,7 @@ void ConfScan::ParametriseRotationalCutoffs()
                 accepted_single = std::max(accepted_single, diff_rot);
             } else
                 rejected.push_back(diff_rot);
+            counter++;
         }
     }
     if (accepted.size() < 2 || rejected.size() < 2) {
@@ -414,7 +424,8 @@ void ConfScan::start()
             }
         }
         if (accept) {
-            if (m_maxrank > 0 && m_accepted > m_maxrank) {
+            if (m_maxrank > 0 && m_result.size() > m_maxrank) {
+                //if (m_maxrank > 0 && m_accepted > m_maxrank) {
                 accept = false;
                 m_rejected++;
                 continue;
@@ -666,12 +677,7 @@ int ConfScan::CheckTempList(int index)
             driver->setForceReorder(ForceReorder());
             m_reordered++;
             double rmsd_tmp = driver->RMSD();
-            if (std::find(m_reorder_rules.begin(), m_reorder_rules.end(), driver->ReorderRules()) == m_reorder_rules.end()) {
-                if (!m_silent) {
-                    std::cout << "*** Newly obtained reorder solution added to heap of information ***" << std::endl;
-                }
-                m_reorder_rules.push_back(driver->ReorderRules());
-            }
+            AddRules(driver->ReorderRules());
             TriggerWriteRestart();
             if (!m_silent) {
                 std::cout << "New rmsd is " << rmsd_tmp << ". Old was " << rmsd << std::endl;
@@ -717,6 +723,69 @@ int ConfScan::CheckTempList(int index)
         delete driver;
     }
     return accept;
+}
+
+void ConfScan::AddRules(const std::vector<int>& rules)
+{
+    if (std::find(m_reorder_rules.begin(), m_reorder_rules.end(), rules) == m_reorder_rules.end()) {
+        if (!m_silent) {
+            std::cout << "*** Newly obtained reorder solution added to heap of information ***" << std::endl;
+        }
+        m_reorder_rules.push_back(rules);
+        if (m_update)
+            CheckStored();
+    }
+}
+
+void ConfScan::CheckStored()
+{
+    if (!m_silent) {
+        std::cout << std::endl
+                  << std::endl
+                  << "*** Checking new reorder rules against accepted molecules! ***" << std::endl
+                  << std::endl;
+    }
+
+    json rmsd = RMSDJson;
+    rmsd["silent"] = true;
+    rmsd["reorder"] = ForceReorder();
+    rmsd["check"] = CheckConnections();
+    rmsd["heavy"] = m_heavy;
+
+    std::vector<Molecule*> tmp = m_result;
+    m_result.clear();
+    for (const auto& mol1 : tmp) {
+        bool accept = true;
+        for (const auto& mol2 : m_result) {
+            RMSDDriver* driver = new RMSDDriver(rmsd);
+            driver->setReference(mol1);
+            driver->setTarget(mol2);
+
+            driver->start();
+
+            for (const auto& rule : m_reorder_rules) {
+                double tmp_rmsd = driver->Rules2RMSD(rule);
+                if (!m_silent) {
+                    std::cout << tmp_rmsd << " A ";
+                }
+                if (tmp_rmsd < m_rmsd_threshold) {
+                    if (!m_silent) {
+                        std::cout << std::endl
+                                  << std::endl
+                                  << "*** Old reordering solution worked here! ***" << std::endl
+                                  << std::endl;
+                    }
+                    accept = false;
+                    rmsd = tmp_rmsd;
+                    m_reordered_reused++;
+                    break;
+                }
+            }
+            delete driver;
+        }
+        if (accept)
+            m_result.push_back(mol1);
+    }
 }
 
 void ConfScan::PrintStatus()
