@@ -47,7 +47,9 @@ RMSDDriver::~RMSDDriver()
 
 void RMSDDriver::LoadControlJson()
 {
-    m_fragment = Json2KeyWord<int>(m_defaults, "fragment");
+    m_fragment_reference = Json2KeyWord<int>(m_defaults, "fragment");
+    m_fragment_target = Json2KeyWord<int>(m_defaults, "fragment");
+
     m_initial_fragment = Json2KeyWord<int>(m_defaults, "init");
     m_pt = Json2KeyWord<int>(m_defaults, "pt");
     m_force_reorder = Json2KeyWord<bool>(m_defaults, "reorder");

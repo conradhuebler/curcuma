@@ -218,6 +218,8 @@ bool Molecule::setXYZComment_4(const StringList& list)
                 setEnergy(std::stod((list[3])));
             } catch (const std::string& what_arg) {
                 setEnergy(0);
+            } catch (const std::invalid_argument& what) {
+                setEnergy(0);
             }
         }
     }

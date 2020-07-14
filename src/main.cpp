@@ -423,6 +423,7 @@ int main(int argc, char **argv) {
             }
 
             std::ofstream result_file;
+            result_file.open("centroids.dat");
             FileIterator file(argv[2]);
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
