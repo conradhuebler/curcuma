@@ -49,13 +49,19 @@ void RMSDDriver::LoadControlJson()
 {
     m_fragment_reference = Json2KeyWord<int>(m_defaults, "fragment");
     m_fragment_target = Json2KeyWord<int>(m_defaults, "fragment");
-
+    m_fragment = Json2KeyWord<int>(m_defaults, "fragment");
     m_initial_fragment = Json2KeyWord<int>(m_defaults, "init");
     m_pt = Json2KeyWord<int>(m_defaults, "pt");
     m_force_reorder = Json2KeyWord<bool>(m_defaults, "reorder");
     m_protons = !Json2KeyWord<bool>(m_defaults, "heavy");
     m_silent = Json2KeyWord<bool>(m_defaults, "silent");
     m_intermedia_storage = Json2KeyWord<double>(m_defaults, "storage");
+    std::string method = Json2KeyWord<std::string>(m_defaults, "method");
+
+    if (method.compare("template") == 0)
+        m_method = 2;
+    else
+        m_method = 1;
 }
 
 void RMSDDriver::start()
@@ -543,7 +549,13 @@ void RMSDDriver::ReorderMolecule()
 {
     double scaling = 1.5;
     m_connectivity = m_reference.getConnectivtiy(scaling);
-    ReorderStraight();
+
+    if (m_method == 1)
+        ReorderStraight();
+    else if (m_method == 2)
+        TemplateReorder();
+
+    FinaliseReorder();
 }
 
 void RMSDDriver::ReorderStraight()
@@ -634,7 +646,6 @@ void RMSDDriver::ReorderStraight()
         }
     }
 
-    int count = 0;
     std::vector<int> intermediate;
     m_print_intermediate = true;
 
@@ -660,6 +671,29 @@ void RMSDDriver::ReorderStraight()
         }
     }
 
+    m_print_intermediate = false;
+    return;
+}
+
+void RMSDDriver::FinaliseReorder()
+{
+    if (m_results.size()) {
+        m_reorder_rules = m_results.begin()->second;
+    }
+
+    Molecule mol2 = ApplyOrder(m_reorder_rules, m_target);
+
+    m_rmsd = CalculateRMSD(m_reference, mol2);
+    m_target_reordered = mol2;
+    /*
+        if (CheckConnectivitiy(m_reference, mol2) == m_pt) {
+            if (!m_silent)
+                std::cout << "Found fitting solution, taking ... " << std::endl;
+            m_target_reordered = mol2;
+
+        }*/
+
+    /*
     for (const auto& element : m_results) {
         Molecule mol2;
         for (int i = 0; i < element.second.size(); i++) {
@@ -679,9 +713,7 @@ void RMSDDriver::ReorderStraight()
         count++;
         break;
     }
-
-    m_print_intermediate = false;
-    return;
+    */
 }
 
 bool RMSDDriver::SolveIntermediate(std::vector<int> intermediate, bool fast)
@@ -832,4 +864,87 @@ void RMSDDriver::ReconstructTarget(const std::vector<int>& atoms)
     m_reference_aligned.LoadMolecule(m_reference);
     m_reference_aligned.setGeometry(reference_geom);
     m_target_aligned.LoadMolecule(target);
+}
+
+Molecule RMSDDriver::ApplyOrder(const std::vector<int>& order, const Molecule& mol)
+{
+    Molecule result;
+
+    for (auto i : order)
+        result.addPair(mol.Atom(i));
+    return result;
+}
+
+int RMSDDriver::CheckFragments()
+{
+    if (m_fragment != -1)
+        return m_fragment;
+    return -1;
+}
+
+bool RMSDDriver::TemplateReorder()
+{
+    int fragments = CheckFragments();
+
+    if (fragments == -1)
+        return false;
+
+    m_fragment = -1;
+    m_fragment_target = -1;
+    m_fragment_reference = -1;
+
+    Molecule reference_mol = m_reference.getFragmentMolecule(fragments);
+    Molecule target_mol = m_target.getFragmentMolecule(fragments);
+
+    Eigen::Matrix3d R = BestFitRotation(reference_mol, target_mol, 1);
+
+    std::vector<double> terms;
+
+    Geometry reference = CenterMolecule(reference_mol, m_fragment_reference);
+    Geometry target = CenterMolecule(target_mol, m_fragment_target);
+
+    Geometry cached_reference = m_reference.getGeometryByFragment(fragments, m_protons);
+    Geometry cached_target = m_target.getGeometryByFragment(fragments, m_protons);
+
+    Geometry ref = GeometryTools::TranslateMolecule(m_reference, GeometryTools::Centroid(cached_reference), Position{ 0, 0, 0 });
+    Geometry tget = GeometryTools::TranslateMolecule(m_target, GeometryTools::Centroid(cached_target), Position{ 0, 0, 0 });
+
+    Eigen::MatrixXd tar = tget.transpose();
+
+    Geometry rotated = tar.transpose() * R;
+
+    Molecule ref_mol = m_reference;
+    ref_mol.setGeometry(ref);
+    ref_mol.writeXYZFile("lalala.xyz");
+    Molecule tar_mol = m_target;
+    tar_mol.setGeometry(rotated);
+    tar_mol.writeXYZFile("lalala2.xyz");
+    std::vector<int> new_order(m_reference.AtomCount(), -1), done;
+
+    while (done.size() < m_reference.AtomCount()) {
+        double distance = 1e10;
+        int match_reference = 0;
+        int match_target = 0;
+        for (int i = 0; i < tar_mol.AtomCount(); ++i) {
+            if (std::find(done.begin(), done.end(), i) != done.end())
+                continue;
+            for (int j = 0; j < ref_mol.AtomCount(); ++j) {
+
+                if (tar_mol.Atom(i).first != ref_mol.Atom(j).first)
+                    continue;
+
+                const double local_distance = GeometryTools::Distance(tar_mol.Atom(i).second, ref_mol.Atom(j).second);
+                if (local_distance <= distance) {
+                    distance = local_distance;
+                    match_target = i;
+                    match_reference = j;
+                }
+            }
+        }
+        new_order[match_target] = match_reference;
+        done.push_back(match_target);
+    }
+    std::cout << "New RMSD is " << Rules2RMSD(new_order) << std::endl;
+    m_reorder_rules = new_order;
+    return true;
 }

@@ -60,7 +60,8 @@ static const json RMSDJson = {
     { "init", -1 },
     { "pt", 0 },
     { "silent", false },
-    { "storage", 1.0 }
+    { "storage", 1.0 },
+    { "method", "incr" }
 };
 
 class RMSDDriver : public CurcumaMethod {
@@ -153,6 +154,8 @@ public:
 
     void start() override;
 
+    Molecule ApplyOrder(const std::vector<int>& order, const Molecule& mol);
+
 private:
     /* Read Controller has to be implemented for all */
     void LoadControlJson() override;
@@ -179,6 +182,11 @@ private:
     int CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) const;
     int CheckConnectivitiy(const Molecule& mol1) const;
 
+    bool TemplateReorder();
+    int CheckFragments();
+
+    void FinaliseReorder();
+
     void clear();
 
     Eigen::Matrix3d BestFitRotation(const Molecule& reference, const Molecule& target, int factor = 1) const;
@@ -200,7 +208,7 @@ private:
     std::vector<IntermediateStorage> m_storage;
     double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99;
     bool m_check_connections = false, m_partial_rmsd = false, m_postprocess = true;
-    int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1;
+    int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1, m_method = 1;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
     std::vector<int> m_initial;
 };
