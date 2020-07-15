@@ -56,12 +56,13 @@ static const json RMSDJson = {
     { "reorder", false },
     { "check", false },
     { "heavy", false },
-    { "fragment", 0 },
+    { "fragment", -1 },
     { "init", -1 },
     { "pt", 0 },
     { "silent", false },
     { "storage", 1.0 },
-    { "method", "incr" }
+    { "method", "incr" },
+    { "noreorder", false }
 };
 
 class RMSDDriver : public CurcumaMethod {
@@ -73,7 +74,7 @@ public:
     inline void setReference(const Molecule& reference) { m_reference = reference; }
     inline void setTarget(const Molecule& target) { m_target = target; }
 
-    double Rules2RMSD(const std::vector<int> rules);
+    double Rules2RMSD(const std::vector<int> rules, int fragment = -1);
 
     double CalculateRMSD();
     double CalculateRMSD(const Molecule& reference, const Molecule& target, Molecule* ret_ref = nullptr, Molecule* ret_tar = nullptr, int factor = 1) const;
@@ -156,6 +157,8 @@ public:
 
     Molecule ApplyOrder(const std::vector<int>& order, const Molecule& mol);
 
+    std::vector<std::vector<int>> StoredRules() const { return m_stored_rules; }
+
 private:
     /* Read Controller has to be implemented for all */
     void LoadControlJson() override;
@@ -183,7 +186,7 @@ private:
     int CheckConnectivitiy(const Molecule& mol1) const;
 
     bool TemplateReorder();
-    int CheckFragments();
+    std::pair<int, int> CheckFragments();
 
     void FinaliseReorder();
 
@@ -204,10 +207,11 @@ private:
     std::map<double, std::vector<int>> m_results;
     std::vector<double> m_last_rmsd;
     std::vector<int> m_reorder_rules;
+    std::vector<std::vector<int>> m_stored_rules;
     std::map<int, std::vector<int>> m_connectivity;
     std::vector<IntermediateStorage> m_storage;
     double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99;
-    bool m_check_connections = false, m_partial_rmsd = false, m_postprocess = true;
+    bool m_check_connections = false, m_partial_rmsd = false, m_postprocess = true, m_noreorder = false;
     int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1, m_method = 1;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
     std::vector<int> m_initial;

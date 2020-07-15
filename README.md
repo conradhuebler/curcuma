@@ -44,6 +44,12 @@ Computes RMSD. If the two structures are ordered differently, curcuma will autom
 curcuma -rmsd file1.xyz file2.xyz -reorder
 ```
 
+Two different approaches are currently implemented, one incremental method without any requirements. The template based approaches is useful for supramolecular systems, where the substrate (fragment 1, counting begins with 0) structures are ordered equally. Use
+```sh
+-method template -fragment 1
+```
+to use the second structure, eg the one bound non-covalently by the first structure, as template. With this approach a much faster reordering is obtained. Omitting -fragment, curcuma tries used the smallest fragment.
+
 Add
 ```sh
 -heavy
@@ -51,7 +57,7 @@ Add
 to perform calculation only on non-proton atoms.
 
 ## Docking tool
-Some docking can be performed (WIP). Rotation will be added soon. (And many more.)
+Some docking can be performed (WIP).
 
 Use
 ```sh
@@ -80,7 +86,7 @@ curcuma -dock -host A.xyz -guest B.xyz -Pos_X X  -Pos_X Y -Pos_X Z
 ```
 with {X, Y, Z} being the initial anchor position for the substrat.
 
-After docking a PseudoFF optimisation of the docking position will be performed, where the Lennard-Jones-Potential between both structures is calculated.
+After docking a PseudoFF optimisation of the docking position will be performed, where the Lennard-Jones-Potential between both structures is calculated. XTB is then used to preoptimise the unique docking structures and the results are filtered using ConfScan and the template based reordering approach.
 
 ## Conformation Filter
 Curcuma has some conformation filter based on energy, rmsd, rotation constants and rank limitation. As some structures may be identic, yet can not be aligned due to atom ordering, depending on the difference of the energy and rotational constants and the rmsd, automatic reordering in rmsd calculation will be performed.
@@ -109,7 +115,17 @@ Add
 ```
 to perform rmsd calculation and reordering only on non-proton atoms. Reordering is much faster then!
 
+Adding
+```sh
+-RMSDmethod template
+```
+the template based reordering is used.
 
+With
+```sh
+-Useorders X
+```
+up to X reorder results will be reused from the last reorder calculation. Template based approaches result in only one reorder rule, however X is set to 0 in automatically, but can be changed with that argument.
 ## NEB Input structure preparation
 Some very experimental stuff - reorder (like in -rmsd a.xyz b.xyz -reorder) and rmsd alignment and fragment moving to prepare some NEB structures.
 

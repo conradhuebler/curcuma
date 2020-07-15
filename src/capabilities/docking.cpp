@@ -344,6 +344,7 @@ void Docking::PostOptimise()
     confscan["noname"] = true;
     confscan["preventreorder"] = true;
     confscan["maxenergy"] = -1;
+    confscan["RMSDMethod"] = "template";
     json controller;
     controller["confscan"] = confscan;
     ConfScan* scan = new ConfScan(controller);

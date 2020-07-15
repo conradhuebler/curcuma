@@ -56,6 +56,7 @@ void RMSDDriver::LoadControlJson()
     m_protons = !Json2KeyWord<bool>(m_defaults, "heavy");
     m_silent = Json2KeyWord<bool>(m_defaults, "silent");
     m_intermedia_storage = Json2KeyWord<double>(m_defaults, "storage");
+    m_noreorder = Json2KeyWord<bool>(m_defaults, "noreorder");
     std::string method = Json2KeyWord<std::string>(m_defaults, "method");
 
     if (method.compare("template") == 0)
@@ -89,23 +90,25 @@ void RMSDDriver::start()
         ProtonDepleted();
 
     if (m_fragment_reference < -1 || m_fragment_reference > m_reference.GetFragments(m_scaling).size()) {
-        //std::cerr << "*** Index of Fragment ( " << m_fragment << " ) is invalid, I will just use the whole molecule (Sometimes false negative ... - WIP) . ***" << std::endl;
         m_fragment_reference = -1;
     }
     if (m_fragment_target < -1 || m_fragment_target > m_target.GetFragments(m_scaling).size()) {
         m_fragment_target = -1;
     }
 
+    if ((m_reference.AtomCount() != m_target.AtomCount()) && (m_fragment_target != -1) && (m_fragment_reference != -1)) {
+        if (m_reference.getFragmentMolecule(m_fragment_target).AtomCount() == m_target.getFragmentMolecule(m_fragment_target).AtomCount())
+            m_partial_rmsd = true;
+        else {
+            std::cout << "Nothing fitting at all." << std::endl;
+            m_noreorder = false;
+        }
+    }
+
     if (m_reference.Atoms() == m_target.Atoms())
         m_rmsd_raw = CalculateRMSD(m_reference, m_target);
-    /*
-    std::vector<double> terms = IndivRMSD(m_reference, m_target);
-    for(double i : terms)
-        std::cout << i << " ";
-    std::cout << std::endl;
-    */
 
-    if (m_reference.Atoms() != m_target.Atoms() || ForceReorder()) {
+    if ((m_reference.Atoms() != m_target.Atoms() || ForceReorder()) && m_noreorder == false) {
         if (!m_silent)
             std::cerr << "Molecules are different. What now?\n";
 
@@ -126,29 +129,34 @@ void RMSDDriver::start()
         m_target_reordered = m_target;
 
     Molecule *reference = new Molecule, *target = new Molecule;
+    m_target_reordered.writeXYZFile("tar.xyz");
+    m_reference.writeXYZFile("ref.xyz");
     m_rmsd = CalculateRMSD(m_reference, m_target_reordered, reference, target);
 
     m_reference_aligned.LoadMolecule(reference);
     m_target_aligned.LoadMolecule(target);
-
-    /*
-    terms = IndivRMSD(m_reference_aligned, m_target_aligned);
-    for(double i : terms)
-        std::cout << i << " ";
-    std::cout << std::endl;
-    */
+    //m_target_aligned.writeXYZFile("last_align.xyz");
     if (!m_silent)
         std::cout << "RMSD calculation took " << timer.Elapsed() << " msecs." << std::endl;
     delete reference;
     delete target;
 }
 
-double RMSDDriver::Rules2RMSD(const std::vector<int> rules)
+double RMSDDriver::Rules2RMSD(const std::vector<int> rules, int fragment)
 {
     Molecule target;
     for (auto i : rules)
         target.addPair(m_target.Atom(i));
-    return CalculateRMSD(m_reference, target);
+    int tmp_ref = m_fragment_reference;
+    int tmp_tar = m_fragment_target;
+
+    m_fragment_target = fragment;
+    m_fragment_reference = fragment;
+
+    double rmsd = CalculateRMSD(m_reference, target);
+    m_fragment_reference = tmp_ref;
+    m_fragment_target = tmp_tar;
+    return rmsd;
 }
 
 void RMSDDriver::clear()
@@ -266,7 +274,7 @@ double RMSDDriver::CalculateShortRMSD(const Geometry& reference_mol, const Molec
 
 double RMSDDriver::CalculateRMSD(const Molecule& reference_mol, const Molecule& target_mol, Molecule* ret_ref, Molecule* ret_tar, int factor) const
 {
-    if (reference_mol.AtomCount() != target_mol.AtomCount())
+    if (reference_mol.AtomCount() != target_mol.AtomCount() && m_partial_rmsd == false)
         return 10;
 
     Eigen::Matrix3d R = BestFitRotation(reference_mol, target_mol, factor);
@@ -300,11 +308,13 @@ double RMSDDriver::CalculateRMSD(const Molecule& reference_mol, const Molecule& 
     if (ret_tar != nullptr) {
         ret_tar->LoadMolecule(target_mol);
         ret_tar->setGeometry(rotated);
+        // ret_tar->writeXYZFile("tar2.xyz");
     }
 
     if (ret_ref != nullptr) {
         ret_ref->LoadMolecule(reference_mol);
         ret_ref->setGeometry(reference);
+        // ret_ref->writeXYZFile("ref2.xyz");
     }
     //m_fragment_reference = fragment_reference;
     return sqrt(rmsd);
@@ -558,6 +568,51 @@ void RMSDDriver::ReorderMolecule()
     FinaliseReorder();
 }
 
+void RMSDDriver::FinaliseReorder()
+{
+    if (m_results.size()) {
+        m_reorder_rules = m_results.begin()->second;
+    } else
+        m_stored_rules.push_back(m_reorder_rules);
+
+    Molecule mol2 = ApplyOrder(m_reorder_rules, m_target);
+    m_rmsd = CalculateRMSD(m_reference, mol2);
+    m_target_reordered = mol2;
+    // m_target_reordered.writeXYZFile("lalala3.xyz");
+    for (const auto& element : m_results) {
+        m_stored_rules.push_back(element.second);
+    }
+    /*
+        if (CheckConnectivitiy(m_reference, mol2) == m_pt) {
+            if (!m_silent)
+                std::cout << "Found fitting solution, taking ... " << std::endl;
+            m_target_reordered = mol2;
+
+        }*/
+
+    /*
+    for (const auto& element : m_results) {
+        Molecule mol2;
+        for (int i = 0; i < element.second.size(); i++) {
+            mol2.addPair(m_target.Atom(element.second[i]));
+        }
+        m_reorder_rules = element.second;
+        m_rmsd = CalculateRMSD(m_reference, mol2);
+        if (count == 0) // store the best result in any way
+            m_target_reordered = mol2;
+
+        if (CheckConnectivitiy(m_reference, mol2) == m_pt) {
+            if (!m_silent)
+                std::cout << "Found fitting solution, taking ... " << std::endl;
+            m_target_reordered = mol2;
+            break;
+        }
+        count++;
+        break;
+    }
+    */
+}
+
 void RMSDDriver::ReorderStraight()
 {
     int inter_size = m_reference.AtomCount() * (m_reference.AtomCount() - 1) * m_intermedia_storage;
@@ -670,50 +725,8 @@ void RMSDDriver::ReorderStraight()
             }
         }
     }
-
     m_print_intermediate = false;
     return;
-}
-
-void RMSDDriver::FinaliseReorder()
-{
-    if (m_results.size()) {
-        m_reorder_rules = m_results.begin()->second;
-    }
-
-    Molecule mol2 = ApplyOrder(m_reorder_rules, m_target);
-
-    m_rmsd = CalculateRMSD(m_reference, mol2);
-    m_target_reordered = mol2;
-    /*
-        if (CheckConnectivitiy(m_reference, mol2) == m_pt) {
-            if (!m_silent)
-                std::cout << "Found fitting solution, taking ... " << std::endl;
-            m_target_reordered = mol2;
-
-        }*/
-
-    /*
-    for (const auto& element : m_results) {
-        Molecule mol2;
-        for (int i = 0; i < element.second.size(); i++) {
-            mol2.addPair(m_target.Atom(element.second[i]));
-        }
-        m_reorder_rules = element.second;
-        m_rmsd = CalculateRMSD(m_reference, mol2);
-        if (count == 0) // store the best result in any way
-            m_target_reordered = mol2;
-
-        if (CheckConnectivitiy(m_reference, mol2) == m_pt) {
-            if (!m_silent)
-                std::cout << "Found fitting solution, taking ... " << std::endl;
-            m_target_reordered = mol2;
-            break;
-        }
-        count++;
-        break;
-    }
-    */
 }
 
 bool RMSDDriver::SolveIntermediate(std::vector<int> intermediate, bool fast)
@@ -869,32 +882,41 @@ void RMSDDriver::ReconstructTarget(const std::vector<int>& atoms)
 Molecule RMSDDriver::ApplyOrder(const std::vector<int>& order, const Molecule& mol)
 {
     Molecule result;
-
     for (auto i : order)
         result.addPair(mol.Atom(i));
     return result;
 }
 
-int RMSDDriver::CheckFragments()
+std::pair<int, int> RMSDDriver::CheckFragments()
 {
     if (m_fragment != -1)
-        return m_fragment;
-    return -1;
+        return std::pair<int, int>(m_fragment, m_fragment);
+
+    auto ref_mass = m_reference.FragmentMass();
+    auto tar_mass = m_target.FragmentMass();
+
+    for (int i = ref_mass.size() - 1; i >= 0; --i) {
+        for (int j = tar_mass.size() - 1; j >= 0; --j) {
+            if (ref_mass[i] == tar_mass[j])
+                return std::pair<int, int>(i, j);
+        }
+    }
+    return std::pair<int, int>(-1, -1);
 }
 
 bool RMSDDriver::TemplateReorder()
 {
-    int fragments = CheckFragments();
+    auto fragments = CheckFragments();
 
-    if (fragments == -1)
+    if (fragments.first == -1 || fragments.second == -1)
         return false;
 
     m_fragment = -1;
     m_fragment_target = -1;
     m_fragment_reference = -1;
 
-    Molecule reference_mol = m_reference.getFragmentMolecule(fragments);
-    Molecule target_mol = m_target.getFragmentMolecule(fragments);
+    Molecule reference_mol = m_reference.getFragmentMolecule(fragments.first);
+    Molecule target_mol = m_target.getFragmentMolecule(fragments.second);
 
     Eigen::Matrix3d R = BestFitRotation(reference_mol, target_mol, 1);
 
@@ -903,8 +925,8 @@ bool RMSDDriver::TemplateReorder()
     Geometry reference = CenterMolecule(reference_mol, m_fragment_reference);
     Geometry target = CenterMolecule(target_mol, m_fragment_target);
 
-    Geometry cached_reference = m_reference.getGeometryByFragment(fragments, m_protons);
-    Geometry cached_target = m_target.getGeometryByFragment(fragments, m_protons);
+    Geometry cached_reference = m_reference.getGeometryByFragment(fragments.first, m_protons);
+    Geometry cached_target = m_target.getGeometryByFragment(fragments.second, m_protons);
 
     Geometry ref = GeometryTools::TranslateMolecule(m_reference, GeometryTools::Centroid(cached_reference), Position{ 0, 0, 0 });
     Geometry tget = GeometryTools::TranslateMolecule(m_target, GeometryTools::Centroid(cached_target), Position{ 0, 0, 0 });
@@ -915,20 +937,22 @@ bool RMSDDriver::TemplateReorder()
 
     Molecule ref_mol = m_reference;
     ref_mol.setGeometry(ref);
-    ref_mol.writeXYZFile("lalala.xyz");
+
     Molecule tar_mol = m_target;
     tar_mol.setGeometry(rotated);
-    tar_mol.writeXYZFile("lalala2.xyz");
-    std::vector<int> new_order(m_reference.AtomCount(), -1), done;
 
-    while (done.size() < m_reference.AtomCount()) {
+    std::vector<int> new_order(m_reference.AtomCount(), -1), done_ref, done_tar;
+
+    while (done_ref.size() < m_reference.AtomCount()) {
         double distance = 1e10;
         int match_reference = 0;
         int match_target = 0;
         for (int i = 0; i < tar_mol.AtomCount(); ++i) {
-            if (std::find(done.begin(), done.end(), i) != done.end())
+            if (std::find(done_tar.begin(), done_tar.end(), i) != done_tar.end())
                 continue;
             for (int j = 0; j < ref_mol.AtomCount(); ++j) {
+                if (std::find(done_ref.begin(), done_ref.end(), j) != done_ref.end())
+                    continue;
 
                 if (tar_mol.Atom(i).first != ref_mol.Atom(j).first)
                     continue;
@@ -942,9 +966,9 @@ bool RMSDDriver::TemplateReorder()
             }
         }
         new_order[match_target] = match_reference;
-        done.push_back(match_target);
+        done_tar.push_back(match_target);
+        done_ref.push_back(match_reference);
     }
-    std::cout << "New RMSD is " << Rules2RMSD(new_order) << std::endl;
     m_reorder_rules = new_order;
     return true;
 }

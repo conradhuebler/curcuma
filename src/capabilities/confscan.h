@@ -50,7 +50,9 @@ static const json ConfScanJson = {
     { "skip", 0 },
     { "allxyz", false },
     { "update", false },
-    { "MaxParam", -1 }
+    { "MaxParam", -1 },
+    { "UseOrders", -1 },
+    { "RMSDMethod", "incr" }
 };
 
 class ConfScan : public CurcumaMethod {
@@ -127,6 +129,8 @@ private:
     std::vector<Molecule*> m_result, m_nearly, m_failed;
     int m_maxrank = 10000;
     int m_maxParam = -1;
+    int m_useorders = 10;
+    int m_RMSDmethod = 1;
     bool m_writeXYZ = false;
     bool m_check_connections = false;
     bool m_force_reorder = false, m_prevent_reorder = false;

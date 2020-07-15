@@ -161,6 +161,15 @@ inline json MergeJson(const json& reference, const json& patch)
     return result;
 }
 
+inline json IncludeJson(const json& reference, const json& patch)
+{
+    json result = reference;
+    for (const auto& object : patch.items()) {
+        result[object.key()] = object.value();
+    }
+    return result;
+}
+
 inline void PrintController(const json& controller)
 {
     for (const auto& entry : controller.items())

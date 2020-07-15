@@ -58,7 +58,7 @@ void bt_handler(int sig)
     size = backtrace(array, 10);
 
     // print out all the frames to stderr
-    fprintf(stderr, "Curcuma crashed. Although this is probably unintended, it happened anyway.\n Some kind backtrace will be printed out!\n\n");
+    fprintf(stderr, "Curcuma crashed. Although this is probably unintended, it happened anyway.\n Some kind of backtrace will be printed out!\n\n");
     fprintf(stderr, "Error: signal %d:\n", sig);
     backtrace_symbols_fd(array, size, STDERR_FILENO);
     fprintf(stderr, "Good-By\n");

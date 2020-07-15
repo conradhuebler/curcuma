@@ -77,6 +77,19 @@ void ConfScan::LoadControlJson()
     m_allxyz = Json2KeyWord<bool>(m_defaults, "allxyz");
     m_update = Json2KeyWord<bool>(m_defaults, "update");
     m_maxParam = Json2KeyWord<int>(m_defaults, "MaxParam");
+    m_useorders = Json2KeyWord<int>(m_defaults, "UseOrders");
+
+    std::string method = Json2KeyWord<std::string>(m_defaults, "RMSDMethod");
+
+    if (method.compare("template") == 0) {
+        m_RMSDmethod = 2;
+        if (m_useorders == -1)
+            m_useorders = 0;
+    } else {
+        m_RMSDmethod = 1;
+        if (m_useorders == -1)
+            m_useorders = 10;
+    }
 }
 
 bool ConfScan::openFile()
@@ -247,7 +260,7 @@ nlohmann::json ConfScan::WriteRestartInformation()
 
 void ConfScan::ParametriseRotationalCutoffs()
 {
-    if (m_prevent_reorder)
+    if (m_prevent_reorder || m_RMSDmethod == 2)
         return;
     json rmsd = RMSDJson;
     rmsd["silent"] = true;
@@ -495,6 +508,7 @@ int ConfScan::PreCheckAgainstAccepted(int index)
     rmsd["reorder"] = ForceReorder();
     rmsd["check"] = CheckConnections();
     rmsd["heavy"] = m_heavy;
+
     if (mol1->AtomCount() == 0) {
         m_fail++;
         return -1;
@@ -591,7 +605,12 @@ int ConfScan::CheckTempList(int index)
     rmsd["reorder"] = ForceReorder();
     rmsd["check"] = CheckConnections();
     rmsd["heavy"] = m_heavy;
+    if (m_RMSDmethod == 2)
+        rmsd["method"] = "template";
+    else
+        rmsd["method"] = "incr";
 
+    rmsd = MergeJson(rmsd, m_controller["confscan"]);
     for (const auto mol2 : m_global_temp_list) {
         if (m_filtered.count(mol1->Name())) {
             if (!m_silent) {
@@ -677,7 +696,11 @@ int ConfScan::CheckTempList(int index)
             driver->setForceReorder(ForceReorder());
             m_reordered++;
             double rmsd_tmp = driver->RMSD();
-            AddRules(driver->ReorderRules());
+
+            auto rules = driver->StoredRules();
+            for (int rule = 0; rule < m_useorders && rule < rules.size(); ++rule)
+                AddRules(rules[rule]);
+
             TriggerWriteRestart();
             if (!m_silent) {
                 std::cout << "New rmsd is " << rmsd_tmp << ". Old was " << rmsd << std::endl;
@@ -735,6 +758,7 @@ void ConfScan::AddRules(const std::vector<int>& rules)
         if (m_update)
             CheckStored();
     }
+    // std::cout << m_reorder_rules.size() << std::endl;
 }
 
 void ConfScan::CheckStored()
