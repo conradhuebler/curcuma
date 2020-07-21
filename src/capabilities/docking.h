@@ -80,7 +80,8 @@ static const json DockingJson = {
     { "NoOpt", false },
     { "CentroidMaxDistance", 1e5 },
     { "CentroidTolDis", 1e-1 },
-    { "RotationTolDis", 1e-1 }
+    { "RotationTolDis", 1e-1 },
+    { "Threads", 1 }
 };
 
 class Docking : public CurcumaMethod {
@@ -131,7 +132,7 @@ private:
     double m_centroid_max_distance = 1e5;
     double m_centroid_tol_distance = 1e-1;
     double m_centroid_rot_distance = 1e-1;
-
+    int m_threads = 1;
     StringList m_files;
     std::string m_host, m_guest, m_complex;
 };

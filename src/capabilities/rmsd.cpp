@@ -129,8 +129,8 @@ void RMSDDriver::start()
         m_target_reordered = m_target;
 
     Molecule *reference = new Molecule, *target = new Molecule;
-    m_target_reordered.writeXYZFile("tar.xyz");
-    m_reference.writeXYZFile("ref.xyz");
+    //m_target_reordered.writeXYZFile("tar.xyz");
+    //m_reference.writeXYZFile("ref.xyz");
     m_rmsd = CalculateRMSD(m_reference, m_target_reordered, reference, target);
 
     m_reference_aligned.LoadMolecule(reference);

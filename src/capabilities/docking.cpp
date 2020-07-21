@@ -63,6 +63,7 @@ void Docking::LoadControlJson()
     m_centroid_max_distance = Json2KeyWord<double>(m_defaults, "CentroidMaxDistance");
     m_centroid_tol_distance = Json2KeyWord<double>(m_defaults, "CentroidTolDis");
     m_centroid_rot_distance = Json2KeyWord<double>(m_defaults, "RotationTolDis");
+    m_threads = Json2KeyWord<int>(m_defaults, "threads");
 }
 
 bool Docking::Initialise()
@@ -261,7 +262,7 @@ void Docking::PerformDocking()
 void Docking::PostOptimise()
 {
     double frag_scaling = 1.5;
-    int threads = 1; // xtb is not thread-safe yet
+    int threads = m_threads; // xtb is not thread-safe yet
     std::map<double, Molecule*> result_list, final_results;
     auto iter = m_result_list.begin();
     int index = 0;
