@@ -159,6 +159,8 @@ public:
 
     std::vector<std::vector<int>> StoredRules() const { return m_stored_rules; }
 
+    inline int HBondTopoDifference() const { return m_htopo_diff; }
+
 private:
     /* Read Controller has to be implemented for all */
     void LoadControlJson() override;
@@ -212,7 +214,7 @@ private:
     std::vector<IntermediateStorage> m_storage;
     double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99;
     bool m_check_connections = false, m_partial_rmsd = false, m_postprocess = true, m_noreorder = false;
-    int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1, m_method = 1;
+    int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1, m_method = 1, m_htopo_diff = -1;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
     std::vector<int> m_initial;
 };

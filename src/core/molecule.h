@@ -116,6 +116,9 @@ class Molecule
 
     inline void setScaling(double scaling) { m_scaling = scaling; }
 
+    void MapHydrogenBonds();
+    Matrix HydrogenBondMatrix(int f1, int f2);
+
 private:
     bool setXYZComment_0(const StringList& list);
     bool setXYZComment_1(const StringList& list);
@@ -134,11 +137,13 @@ private:
     std::vector<int> m_atoms;
 
     std::vector<int> m_connect_mass;
-
+    Matrix m_HydrogenBondMap;
     mutable std::vector<std::vector<int>> m_fragments;
+    mutable std::map<int, int> m_fragment_assignment;
+
     mutable std::vector<double> m_mass_fragments;
     mutable bool m_dirty = true;
     std::string m_name;
-    double m_energy = 0, m_Ia = 0, m_Ib = 0, m_Ic = 0, m_mass = 0;
+    double m_energy = 0, m_Ia = 0, m_Ib = 0, m_Ic = 0, m_mass = 0, m_hbond_cutoff = 3;
     mutable double m_scaling = 1.5;
 };

@@ -736,10 +736,12 @@ std::vector<std::vector<int>> Molecule::GetFragments(double scaling) const
         //m_mass_fragments.push_back(-1 * entry.first); // *** make the std::map container sort in reverse order :-)
         m_fragments.push_back(entry.second);
     }
-    for (auto fragment : m_fragments) {
+    for (int i = 0; i < m_fragments.size(); ++i) {
         double mass = 0;
-        for (auto atom : fragment)
+        for (auto atom : m_fragments[i]) {
             mass += Elements::AtomicMass[Atom(atom).first];
+            m_fragment_assignment.insert(std::pair<int, int>(atom, i));
+        }
         m_mass_fragments.push_back(mass);
     }
 
@@ -757,7 +759,7 @@ void Molecule::InitialiseConnectedMass(double scaling, bool protons)
         for (int j = i + 1; j < AtomCount(); ++j) {
             auto atom_j = Atom(j);
             double distance = Distance(i, j);
-            if (distance < (Elements::CovalentRadius[atom_i.first - 1] + Elements::CovalentRadius[atom_j.first - 1]) * scaling) {
+            if (distance < (Elements::CovalentRadius[atom_i.first] + Elements::CovalentRadius[atom_j.first]) * scaling) {
                 //      std::cout << atom_i.first - 1<< " "  << atom_j.first - 1<< " " << Elements::AtomicMass[atom_j.first - 1] << std::endl;
                 mass += atom_j.first; //Elements::AtomicMass[atom_j.first - 1];
             }
@@ -765,4 +767,71 @@ void Molecule::InitialiseConnectedMass(double scaling, bool protons)
         m_connect_mass.push_back(mass);
         //std::cout << i << " " << mass << std::endl;
     }
+}
+
+void Molecule::MapHydrogenBonds()
+{
+    std::vector<int> whitelist_proton;
+    for (std::size_t i = 0; i < AtomCount(); ++i) {
+        if (Atom(i).first != 1)
+            continue;
+        double distance = 1e8;
+        int element = 0;
+        for (std::size_t j = 0; j < AtomCount(); ++j) {
+            if (i == j)
+                continue;
+
+            double d = Distance(i, j);
+            if (d < distance)
+                element = Atom(j).first;
+            distance = std::min(d, distance);
+        }
+        if (element == 7 || element == 8) {
+            whitelist_proton.push_back(i);
+        }
+    }
+
+    m_HydrogenBondMap = Matrix::Zero(AtomCount(), AtomCount());
+    double h_radius = Elements::CovalentRadius[1];
+
+    for (int hydrogen : whitelist_proton) {
+        if (Atom(hydrogen).first != 1)
+            continue;
+        int accepted_donor = -1;
+        double accepted_distance = m_hbond_cutoff;
+        for (int donor = 0; donor < AtomCount(); ++donor) {
+            int element = Atom(donor).first;
+            if (!(element == 8 || element == 7))
+                continue;
+
+            double distance = Distance(donor, hydrogen);
+            if (distance > (Elements::CovalentRadius[element] + h_radius) * m_scaling && distance < accepted_distance)
+                accepted_donor = donor;
+        }
+        if (accepted_donor > -1) {
+            m_HydrogenBondMap(accepted_donor, hydrogen) = 1;
+            m_HydrogenBondMap(hydrogen, accepted_donor) = 1;
+        }
+    }
+}
+
+Matrix Molecule::HydrogenBondMatrix(int f1, int f2)
+{
+    if (m_HydrogenBondMap.rows() != AtomCount())
+        MapHydrogenBonds();
+
+    if (f1 == f2 && f1 == -1)
+        return m_HydrogenBondMap;
+
+    Matrix HydrogenBondMap = Matrix::Zero(AtomCount(), AtomCount());
+
+    for (int i = 0; i < AtomCount(); ++i) {
+        for (int j = i + 1; j < AtomCount(); ++j) {
+            HydrogenBondMap(i, j) = m_HydrogenBondMap(i, j) * // has to be identified as hydrogen bond before
+                int((m_fragment_assignment[i] == f1) || (m_fragment_assignment[j] == f1) || (f1 == -1)) * // f1 is either i, j or -1
+                int((m_fragment_assignment[i] == f2) || (m_fragment_assignment[j] == f2) || (f2 == -1)); // f2 is either i, j or -1
+            HydrogenBondMap(j, i) = HydrogenBondMap(i, j);
+        }
+    }
+    return HydrogenBondMap;
 }

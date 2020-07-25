@@ -445,6 +445,8 @@ int main(int argc, char **argv) {
                 mol.AnalyseIntermoleculeDistance();
                 std::cout << std::endl
                           << std::endl;
+                // CompactTopo(mol.HydrogenBondMatrix(-1,-1));
+                // std::cout << CompareTopoMatrix(mol.HydrogenBondMatrix(-1,-1),mol.HydrogenBondMatrix(-1,-1) ) << std::endl;
             }
         }
     }

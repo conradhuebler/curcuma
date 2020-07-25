@@ -136,8 +136,11 @@ void RMSDDriver::start()
     m_reference_aligned.LoadMolecule(reference);
     m_target_aligned.LoadMolecule(target);
     //m_target_aligned.writeXYZFile("last_align.xyz");
-    if (!m_silent)
+    m_htopo_diff = CompareTopoMatrix(m_reference_aligned.HydrogenBondMatrix(-1, -1), m_target_aligned.HydrogenBondMatrix(-1, -1));
+    if (!m_silent) {
         std::cout << "RMSD calculation took " << timer.Elapsed() << " msecs." << std::endl;
+        std::cout << "Difference in Topological Hydrogen Bond Matrix is " << m_htopo_diff << std::endl;
+    }
     delete reference;
     delete target;
 }

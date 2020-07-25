@@ -38,6 +38,7 @@ const double kb = 3.166811e-6;
 const double fs2amu = 41.34137314;
 
 typedef Eigen::MatrixXd Geometry;
+typedef Eigen::MatrixXd Matrix;
 typedef Eigen::Vector3d Position;
 typedef Eigen::Vector4d Vector4d;
 
@@ -72,6 +73,27 @@ inline Vector PositionPair2Vector(const Position& first, const Position& second)
 inline std::pair<Position, Position> Vector2PositionPair(const Vector& vector)
 {
     return std::pair<Position, Position>(Position{ vector(0), vector(1), vector(2) }, Position{ vector(3), vector(4), vector(5) });
+}
+
+inline int CompareTopoMatrix(const Matrix& m1, const Matrix& m2)
+{
+    if (m1.rows() != m2.rows() || m1.cols() != m2.cols() || m1.cols() != m1.rows())
+        return -1;
+    int result = 0;
+    for (int i = 0; i < m1.rows(); ++i)
+        for (int j = i + 1; j < m1.cols(); ++j)
+            result += (m1(i, j) != m2(i, j)) + (m1(j, i) != m2(j, i));
+
+    return result;
+}
+
+inline void CompactTopo(const Matrix& m1)
+{
+    for (int i = 0; i < m1.rows(); ++i)
+        for (int j = i + 1; j < m1.cols(); ++j) {
+            if (m1(i, j) == 1)
+                std::cout << "  " << i << "   ... " << j << std::endl;
+        }
 }
 
 inline json CLI2Json(int argc, char** argv)

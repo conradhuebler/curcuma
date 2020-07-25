@@ -52,7 +52,8 @@ static const json ConfScanJson = {
     { "update", false },
     { "MaxParam", -1 },
     { "UseOrders", -1 },
-    { "RMSDMethod", "incr" }
+    { "RMSDMethod", "incr" },
+    { "MaxHTopoDiff", -1 }
 };
 
 class ConfScan : public CurcumaMethod {
@@ -131,6 +132,7 @@ private:
     int m_maxParam = -1;
     int m_useorders = 10;
     int m_RMSDmethod = 1;
+    int m_MaxHTopoDiff = -1;
     bool m_writeXYZ = false;
     bool m_check_connections = false;
     bool m_force_reorder = false, m_prevent_reorder = false;

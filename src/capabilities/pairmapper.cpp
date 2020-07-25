@@ -83,18 +83,18 @@ void PairMapper::FindPairs()
     }
     m_intermol_file << std::endl;
 
-    for (const std::pair<int, int> p : m_inter_pairs) {
+    for (const std::pair<int, int>& p : m_inter_pairs) {
         m_pair_file << "" << std::setprecision(6) << p.first + 1 << " " << p.second + 1 << std::endl;
     }
 
     m_intramol_file << "# ";
-    for (const std::pair<int, int> p : m_intra_pairs) {
+    for (const std::pair<int, int>& p : m_intra_pairs) {
         m_intramol_file << "(" << std::setprecision(6) << p.first + 1 << "-" << p.second + 1 << ")   ";
     }
     m_intramol_file << std::endl;
 
     m_user_file << "# ";
-    for (const std::pair<int, int> p : m_user_pairs) {
+    for (const std::pair<int, int>& p : m_user_pairs) {
         m_user_file << "(" << std::setprecision(6) << p.first + 1 << "-" << p.second + 1 << ")   ";
         m_user_vector.push_back(std::vector<double>());
     }
@@ -188,18 +188,18 @@ void PairMapper::InitialisePairs(const Molecule* molecule)
 
 void PairMapper::ScanPairs(const Molecule* molecule)
 {
-    for (const std::pair<int, int> p : m_intra_pairs) {
+    for (const std::pair<int, int>& p : m_intra_pairs) {
         m_intramol_file << molecule->Distance(p.first, p.second) << "    ";
     }
     m_intramol_file << std::endl;
 
-    for (const std::pair<int, int> p : m_inter_pairs) {
+    for (const std::pair<int, int>& p : m_inter_pairs) {
         m_intermol_file << molecule->Distance(p.first, p.second) << "    ";
     }
     m_intermol_file << std::endl;
 
     int index = 0;
-    for (const std::pair<int, int> p : m_user_pairs) {
+    for (const std::pair<int, int>& p : m_user_pairs) {
         m_user_file << molecule->Distance(p.first, p.second) << "    ";
         m_user_vector[index].push_back(molecule->Distance(p.first, p.second));
         index++;

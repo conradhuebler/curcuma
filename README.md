@@ -13,8 +13,9 @@ XTB is automatically obtained during git clone, however it is not included in cu
 - Compiling and linking automatically, set **COMPILE_XTB** to true ( with -DCOMPILE_XTB=true or via ccmake). XTB will be compiled with the c++ and fortran compiler in the path (using the blas and lapack libraries in the path as well). The xtb program is then quite slow.
 - Linking curcuma to the official library (get if from the xtb github page). Set **LINK_XTB** to true and define the path to **XTB_DIR** where the libxtb.so has been placed. As the xtb source has been obtained already, no additional header file is needed. However, curcuma has to be compiled with an intel compiler.
 
-- Only xtb GFN2 can be used as method right now.
-- xtb calculation may be thread-safe now, so parallel optimisation after docking are possible now. However, the variable **OMP_NUM_THREADS** should be set to 1.
+Using xtb calculation in curcuma can be controlled for now as follows:
+- Add **-gfn 1** to run GFN1 calculation, **-gfn 66** to run GFN-FF calculation.
+- xtb calculation may be thread-safe now, so parallel optimisation after docking are possible now. However, the variable **OMP_NUM_THREADS** should be set to 1. Add **-thread 12** to run optimisation after docking with 12 threads. GFN FF calculation will surely fail, might be due to the topo file.
 
 ## Compiling
 To compile Curcuma you will need [CMake](https://cmake.org/download/) 3.15 or newer and a C++17-capable compiler, both gcc and icc (quite recent version) work.
