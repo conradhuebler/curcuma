@@ -11,7 +11,7 @@ git clones automatically some submodules.
 ### Using XTB in curcuma
 XTB is automatically obtained during git clone, however it is not included in curcuma with the default compiler settings. There are two ways of including XTB:
 - Compiling and linking automatically, set **COMPILE_XTB** to true ( with -DCOMPILE_XTB=true or via ccmake). XTB will be compiled with the c++ and fortran compiler in the path (using the blas and lapack libraries in the path as well). The xtb program is then quite slow.
-- Linking curcuma to the official library (get if from the xtb github page). Set **LINK_XTB** to true and define the path to **XTB_DIR** where the libxtb.so has been placed. As the xtb source has been obtained already, no additional header file is needed. However, curcuma has to be compiled with an intel compiler.
+- Linking curcuma to the official library (get it from the xtb github page). Set **LINK_XTB** to true and define the path to **XTB_DIR** where the libxtb.so has been placed. As the xtb source has been obtained already, no additional header file is needed. However, curcuma has to be compiled with an intel compiler.
 
 Using xtb calculation in curcuma can be controlled for now as follows:
 - Add **-gfn 1** to run GFN1 calculation, **-gfn 66** to run GFN-FF calculation.
@@ -102,9 +102,13 @@ Use
 ```sh
 curcuma -confscan conformation.xyz -writeXYZ
 ```
-to store the structures as xyz files
+to store the structures as single xyz files as well.
 
 Use
+```sh
+curcuma -confscan conformation.xyz -MaxHTopoDiff 0
+```
+to ensure, that even the rmsd is smaller than the threshold, the second molecule is only rejected if there is no difference in the hydrogen bond pattern. Set to ***-MaxHTopoDiff 2*** if two two changes are allowed. A detailed description will follow some time.
 ```sh
 curcuma -confscan conformation.xyz -reorder
 ```

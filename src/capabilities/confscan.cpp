@@ -78,8 +78,8 @@ void ConfScan::LoadControlJson()
     m_update = Json2KeyWord<bool>(m_defaults, "update");
     m_maxParam = Json2KeyWord<int>(m_defaults, "MaxParam");
     m_useorders = Json2KeyWord<int>(m_defaults, "UseOrders");
-    m_MaxHTopoDiff = Json2KeyWord<int>(m_defaults, "UseOrders");
-    std::string method = Json2KeyWord<std::string>(m_defaults, "MaxHTopoDiff");
+    m_MaxHTopoDiff = Json2KeyWord<int>(m_defaults, "MaxHTopoDiff");
+    std::string method = Json2KeyWord<std::string>(m_defaults, "RMSDMethod");
 
     if (method.compare("template") == 0) {
         m_RMSDmethod = 2;
@@ -571,7 +571,7 @@ int ConfScan::PreCheckAgainstAccepted(int index)
                 std::cout << "RMSD = " << std::setprecision(5) << rmsd << " A" << std::endl;
             }
 
-            if (rmsd < m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() < m_MaxHTopoDiff) /*|| accepted_rotational == -1*/) {
+            if (rmsd < m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() <= m_MaxHTopoDiff) /*|| accepted_rotational == -1*/) {
 
                 accept = false;
                 std::string reject_reason = mol2->Name() + " [I] RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference) + "; dIx = " + std::to_string(diff_rot);
@@ -646,7 +646,7 @@ int ConfScan::CheckTempList(int index)
             if (!m_silent) {
                 std::cout << tmp_rmsd << " A ";
             }
-            if (tmp_rmsd < m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() < m_MaxHTopoDiff)) {
+            if (tmp_rmsd < m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
                 digDeeper = false;
                 if (!m_silent) {
                     std::cout << std::endl
@@ -716,7 +716,7 @@ int ConfScan::CheckTempList(int index)
             }
             rmsd = rmsd_tmp;
         }
-        if (rmsd < m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() < m_MaxHTopoDiff)) {
+        if (rmsd < m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
             m_reordered_worked++;
             accept = false;
             std::string reject_reason = mol2->Name() + "  [III] RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference);

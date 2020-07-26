@@ -1,6 +1,7 @@
 # The (incomplete) curcuma Changelog
 
 ### pre Alpha
+- add restriction for hydrogen bond patterns in conformational scan
 - add template based reorder method for rmsd calculation
 - make confscan (silently) restartable
 - docking with post-optimisation and filtering (needs XTB GFN 2)
