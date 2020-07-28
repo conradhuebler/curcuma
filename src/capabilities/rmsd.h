@@ -203,6 +203,9 @@ private:
     Geometry CenterMolecule(const Molecule& mol, int fragment) const;
     Geometry CenterMolecule(const Geometry& molt) const;
 
+    std::pair<Matrix, Position> GetOperateVectors(int fragment_reference, int fragment_target);
+    std::pair<Matrix, Position> GetOperateVectors(const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms);
+
     Molecule m_reference, m_target, m_reference_aligned, m_target_aligned, m_target_reordered;
     bool m_force_reorder = false, m_protons = true, m_print_intermediate = false, m_silent = false;
     std::queue<std::vector<int>> m_intermediate_results;
@@ -213,8 +216,8 @@ private:
     std::map<int, std::vector<int>> m_connectivity;
     std::vector<IntermediateStorage> m_storage;
     double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99;
-    bool m_check_connections = false, m_partial_rmsd = false, m_postprocess = true, m_noreorder = false;
-    int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1, m_method = 1, m_htopo_diff = -1;
+    bool m_check_connections = false, m_postprocess = true, m_noreorder = false;
+    int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1, m_method = 1, m_htopo_diff = -1, m_partial_rmsd = -1;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
     std::vector<int> m_initial;
 };

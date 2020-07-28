@@ -130,6 +130,8 @@ private:
     bool setXYZComment_7(const StringList& list);
     bool setXYZComment_8(const StringList& list);
 
+    std::vector<int> WhiteListProtons() const;
+
     void InitialiseEmptyGeometry(int atoms);
 
     int m_charge = 0;

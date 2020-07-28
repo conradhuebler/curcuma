@@ -572,7 +572,6 @@ int ConfScan::PreCheckAgainstAccepted(int index)
             }
 
             if (rmsd < m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() <= m_MaxHTopoDiff) /*|| accepted_rotational == -1*/) {
-
                 accept = false;
                 std::string reject_reason = mol2->Name() + " [I] RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference) + "; dIx = " + std::to_string(diff_rot);
                 m_filtered[mol1->Name()].push_back(reject_reason);

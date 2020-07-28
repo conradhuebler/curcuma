@@ -95,7 +95,6 @@ int main(int argc, char **argv) {
 
     General::StartUp(argc, argv);
     RunTimer timer(true);
-    json controller = CLI2Json(argc, argv);
     if(argc < 2)
     {
         std::cerr << "No arguments given!" << std::endl;
@@ -105,10 +104,12 @@ int main(int argc, char **argv) {
                   << "-dock        * Perform some docking          *" << std::endl
                   << "-opt         * LBFGS optimiser using xtb GFN *" << std::endl
                   << "-rmsdtraj    * Find unique structures        *" << std::endl;
-        XTBInterface interface;
+        exit(1);
     }
     if(argc >= 2)
     {
+        json controller = CLI2Json(argc, argv);
+
         if(strcmp(argv[1], "-rmsd") == 0)
         {
             if (argc < 4) {
