@@ -61,8 +61,13 @@ void RMSDDriver::LoadControlJson()
 
     if (method.compare("template") == 0)
         m_method = 2;
+    else if (method.compare("hybrid") == 0)
+        m_method = 3;
     else
         m_method = 1;
+
+    m_HybridInit = Json2KeyWord<int>(m_defaults, "HybridInit");
+    m_HybridTest = Json2KeyWord<int>(m_defaults, "HybridTest");
 }
 
 void RMSDDriver::start()
@@ -581,6 +586,8 @@ void RMSDDriver::ReorderMolecule()
         ReorderStraight();
     else if (m_method == 2)
         TemplateReorder();
+    else if (m_method == 3)
+        HybridReorder();
 
     FinaliseReorder();
 }
@@ -744,6 +751,74 @@ void RMSDDriver::ReorderStraight()
     }
     m_print_intermediate = false;
     return;
+}
+
+bool RMSDDriver::HybridReorder()
+{
+    std::cout << "Hybrid - Reordering" << std::endl;
+    int inter_size = m_reference.AtomCount() * (m_reference.AtomCount() - 1) * m_intermedia_storage;
+    m_storage = std::vector<IntermediateStorage>(m_reference.AtomCount() - 1, IntermediateStorage(inter_size));
+
+    double scaling = 1.5;
+
+    /* Lets initialise a molecule with two atom from the reference */
+    InitialisePair();
+
+    m_rmsd = CalculateRMSD(m_reference, m_target);
+
+    while (m_intermediate_results.size()) {
+        std::vector<int> inter = m_intermediate_results.front();
+        SolveIntermediate(inter);
+        m_intermediate_results.pop();
+    }
+    int i = 0;
+    int next = 0;
+    bool increase = true;
+    bool protons = m_protons;
+    double rmsd = m_rmsd;
+    int counter = 0;
+    for (; i < m_storage.size(); ++i) {
+        if (increase == false) {
+            return true;
+        }
+        if (!m_silent) {
+            std::cout << double(i) / double(m_reference.AtomCount()) * 100 << " % done " << std::endl;
+        }
+        std::cout << (*m_storage[i].data()).size() << std::endl;
+        for (const auto& element : (*m_storage[i].data())) {
+            std::vector<int> ref_fragment;
+            for (int j = 0; j < element.second.size(); ++j)
+                ref_fragment.push_back(j);
+            if (element.second.size() < m_HybridInit && element.second.size() < m_target.AtomCount() - 2) {
+                m_protons = false;
+                if (!SolveIntermediate(element.second) && !next)
+                    next = i;
+            } else {
+                m_protons = protons;
+                if (element.second[0] == 4 && element.second[1] == 5 && element.second[2] == 0)
+                    std::cout << std::endl;
+                auto tmp = Fragment2RMSD(ref_fragment, element.second);
+                if (element.second[0] == 4 && element.second[1] == 5 && element.second[2] == 0) {
+                    std::cout << "lalala" << element.second.size() << std::endl;
+                    std::cout << tmp.second[0] << " " << tmp.second[1] << " " << tmp.second[2] << std::endl;
+                }
+                if (tmp.first <= 1.5 * rmsd) {
+                    std::cout << tmp.first << " " << std::endl;
+                }
+                if (tmp.first <= rmsd) {
+                    rmsd = tmp.first;
+                    std::cout << rmsd << std::endl;
+                    m_reorder_rules = tmp.second;
+                }
+                if (counter > m_HybridTest)
+                    return true;
+                counter++;
+                increase = false;
+            }
+        }
+    }
+
+    return true;
 }
 
 bool RMSDDriver::SolveIntermediate(std::vector<int> intermediate, bool fast)
@@ -921,6 +996,36 @@ std::pair<int, int> RMSDDriver::CheckFragments()
     return std::pair<int, int>(-1, -1);
 }
 
+std::pair<double, std::vector<int>> RMSDDriver::Fragment2RMSD(const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms)
+{
+    auto operators = GetOperateVectors(reference_atoms, target_atoms);
+    Molecule reference = m_reference;
+    Molecule target = m_target;
+
+    Geometry temp_ref = m_reference.getGeometry(reference_atoms, m_protons);
+    Geometry temp_tar = m_target.getGeometry(target_atoms, m_protons);
+
+    // Geometry ref = GeometryTools::TranslateMolecule(m_reference, GeometryTools::Centroid(m_reference.getGeometry()), Position{ 0, 0, 0 });
+    // Geometry tget = GeometryTools::TranslateMolecule(m_target, GeometryTools::Centroid(m_target.getGeometry()), Position{ 0, 0, 0 });
+
+    Geometry ref = GeometryTools::TranslateMolecule(m_reference, GeometryTools::Centroid(temp_ref), Position{ 0, 0, 0 });
+    Geometry tget = GeometryTools::TranslateMolecule(m_target, GeometryTools::Centroid(temp_tar), Position{ 0, 0, 0 });
+
+    Eigen::MatrixXd tar = tget.transpose();
+
+    Geometry rotated = tar.transpose() * operators.first;
+
+    reference.setGeometry(ref);
+
+    target.setGeometry(rotated);
+
+    std::vector<int> rules = ReorderDistance(reference, target, target_atoms);
+    ;
+    double rmsd = Rules2RMSD(rules);
+
+    return std::pair<double, std::vector<int>>(rmsd, rules);
+}
+
 std::pair<Matrix, Position> RMSDDriver::GetOperateVectors(int fragment_reference, int fragment_target)
 {
     Molecule reference_mol = m_reference.getFragmentMolecule(fragment_reference);
@@ -953,6 +1058,44 @@ std::pair<Matrix, Position> RMSDDriver::GetOperateVectors(const std::vector<int>
     Position translate = GeometryTools::Centroid(cached_reference) - GeometryTools::Centroid(cached_target);
 
     return std::pair<Matrix, Position>(R, translate);
+}
+
+std::vector<int> RMSDDriver::ReorderDistance(const Molecule& reference, const Molecule& target, const std::vector<int>& init)
+{
+    std::vector<int> new_order(reference.AtomCount(), -1), done_ref, done_tar;
+
+    for (int i = 0; i < init.size(); ++i) {
+        new_order[i] = init[i];
+        done_tar.push_back(i);
+        done_ref.push_back(init[i]);
+    }
+    while (done_ref.size() < reference.AtomCount()) {
+        double distance = 1e10;
+        int match_reference = 0;
+        int match_target = 0;
+        for (int i = 0; i < target.AtomCount(); ++i) {
+            if (std::find(done_tar.begin(), done_tar.end(), i) != done_tar.end())
+                continue;
+            for (int j = 0; j < reference.AtomCount(); ++j) {
+                if (std::find(done_ref.begin(), done_ref.end(), j) != done_ref.end())
+                    continue;
+
+                if (target.Atom(i).first != reference.Atom(j).first)
+                    continue;
+
+                const double local_distance = GeometryTools::Distance(target.Atom(i).second, reference.Atom(j).second);
+                if (local_distance <= distance) {
+                    distance = local_distance;
+                    match_target = i;
+                    match_reference = j;
+                }
+            }
+        }
+        new_order[match_target] = match_reference;
+        done_tar.push_back(match_target);
+        done_ref.push_back(match_reference);
+    }
+    return new_order;
 }
 
 bool RMSDDriver::TemplateReorder()
@@ -988,34 +1131,6 @@ bool RMSDDriver::TemplateReorder()
     Molecule tar_mol = m_target;
     tar_mol.setGeometry(rotated);
 
-    std::vector<int> new_order(m_reference.AtomCount(), -1), done_ref, done_tar;
-
-    while (done_ref.size() < m_reference.AtomCount()) {
-        double distance = 1e10;
-        int match_reference = 0;
-        int match_target = 0;
-        for (int i = 0; i < tar_mol.AtomCount(); ++i) {
-            if (std::find(done_tar.begin(), done_tar.end(), i) != done_tar.end())
-                continue;
-            for (int j = 0; j < ref_mol.AtomCount(); ++j) {
-                if (std::find(done_ref.begin(), done_ref.end(), j) != done_ref.end())
-                    continue;
-
-                if (tar_mol.Atom(i).first != ref_mol.Atom(j).first)
-                    continue;
-
-                const double local_distance = GeometryTools::Distance(tar_mol.Atom(i).second, ref_mol.Atom(j).second);
-                if (local_distance <= distance) {
-                    distance = local_distance;
-                    match_target = i;
-                    match_reference = j;
-                }
-            }
-        }
-        new_order[match_target] = match_reference;
-        done_tar.push_back(match_target);
-        done_ref.push_back(match_reference);
-    }
-    m_reorder_rules = new_order;
+    m_reorder_rules = ReorderDistance(ref_mol, tar_mol);
     return true;
 }

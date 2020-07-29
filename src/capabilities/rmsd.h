@@ -62,7 +62,9 @@ static const json RMSDJson = {
     { "silent", false },
     { "storage", 1.0 },
     { "method", "incr" },
-    { "noreorder", false }
+    { "noreorder", false },
+    { "HybridInit", 3 },
+    { "HybridTest", 1e2 }
 };
 
 class RMSDDriver : public CurcumaMethod {
@@ -187,10 +189,15 @@ private:
     int CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) const;
     int CheckConnectivitiy(const Molecule& mol1) const;
 
+    bool HybridReorder();
+
     bool TemplateReorder();
     std::pair<int, int> CheckFragments();
 
     void FinaliseReorder();
+
+    std::vector<int> ReorderDistance(const Molecule& reference, const Molecule& target, const std::vector<int>& init = {}, int ende = -1);
+    std::pair<double, std::vector<int>> Fragment2RMSD(const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms);
 
     void clear();
 
@@ -217,7 +224,7 @@ private:
     std::vector<IntermediateStorage> m_storage;
     double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99;
     bool m_check_connections = false, m_postprocess = true, m_noreorder = false;
-    int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1, m_method = 1, m_htopo_diff = -1, m_partial_rmsd = -1;
+    int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1, m_method = 1, m_htopo_diff = -1, m_partial_rmsd = -1, m_HybridInit = 3, m_HybridTest = 1e2;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
     std::vector<int> m_initial;
 };
