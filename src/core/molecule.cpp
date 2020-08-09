@@ -577,7 +577,6 @@ std::string Molecule::XYZString() const
 std::vector<int> Molecule::BoundHydrogens(int atom, double scaling) const
 {
     std::vector<int> result;
-
     if (atom >= AtomCount() || Atom(atom).first == 1)
         return result;
 
@@ -769,7 +768,7 @@ void Molecule::InitialiseConnectedMass(double scaling, bool protons)
     }
 }
 
-void Molecule::MapHydrogenBonds()
+std::vector<int> Molecule::WhiteListProtons() const
 {
     std::vector<int> whitelist_proton;
     for (std::size_t i = 0; i < AtomCount(); ++i) {
@@ -790,13 +789,15 @@ void Molecule::MapHydrogenBonds()
             whitelist_proton.push_back(i);
         }
     }
+    return whitelist_proton;
+}
 
+void Molecule::MapHydrogenBonds()
+{
+    std::vector<int> whitelist_proton = WhiteListProtons();
     m_HydrogenBondMap = Matrix::Zero(AtomCount(), AtomCount());
     double h_radius = Elements::CovalentRadius[1];
-
     for (int hydrogen : whitelist_proton) {
-        if (Atom(hydrogen).first != 1)
-            continue;
         int accepted_donor = -1;
         double accepted_distance = m_hbond_cutoff;
         for (int donor = 0; donor < AtomCount(); ++donor) {

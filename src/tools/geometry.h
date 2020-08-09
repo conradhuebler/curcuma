@@ -108,11 +108,18 @@ inline Position rotateZ(const Position& position, double alpha)
 inline Geometry TranslateMolecule(const Molecule &molecule, const Position &start, const Position &destination)
 {
     Geometry geom = molecule.getGeometry();
-
     Position direction = destination - start;
-
     for(int i = 0; i < geom.rows(); ++i)
         geom.row(i) += direction;
+
+    return geom;
+}
+
+inline Geometry TranslateMolecule(const Molecule& molecule, const Position& translate)
+{
+    Geometry geom = molecule.getGeometry();
+    for (int i = 0; i < geom.rows(); ++i)
+        geom.row(i) += translate;
 
     return geom;
 }
@@ -123,6 +130,15 @@ inline Geometry TranslateGeometry(const Geometry& geom, const Position& start, c
     Geometry temp = geom;
     for (int i = 0; i < geom.rows(); ++i)
         temp.row(i) += direction;
+
+    return temp;
+}
+
+inline Geometry TranslateGeometry(const Geometry& geom, const Position& translate)
+{
+    Geometry temp = geom;
+    for (int i = 0; i < geom.rows(); ++i)
+        temp.row(i) += translate;
 
     return temp;
 }
