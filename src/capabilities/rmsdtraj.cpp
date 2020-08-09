@@ -51,7 +51,7 @@ void RMSDTraj::start()
     std::cout << "'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
     std::cout << "'    Scanning Trajectory file for RMSD and Conformers     '" << std::endl;
     std::cout << "'    Write Conformers ";
-    if (m_write_unique) {
+    if (m_writeUnique) {
         std::cout << "  Yes                              '" << std::endl;
         std::cout << "'    RMSD Threshold =  " << std::setprecision(3) << m_rmsd_threshold << "                                  '" << std::endl;
     } else
@@ -83,8 +83,12 @@ void RMSDTraj::start()
     driver->setCheckConnections(false);
     driver->setFragment(m_fragment);
     std::ofstream export_file;
-    if (m_write_unique) {
+    if (m_writeUnique) {
         export_file.open(outfile + "_unique.xyz");
+        export_file.close();
+    }
+    if (m_writeAligned) {
+        export_file.open(outfile + "_aligned.xyz");
         export_file.close();
     }
     std::ifstream input(m_filename);
@@ -176,7 +180,7 @@ void RMSDTraj::start()
             }
             if (i - 1 == atoms) {
                 if (m_stored_structures.size() == 0) {
-                    if (m_write_unique)
+                    if (m_writeUnique)
                         mol.appendXYZFile(outfile + "_unique.xyz");
                     m_stored_structures.push_back(mol);
                 } else {
@@ -197,6 +201,9 @@ void RMSDTraj::start()
                             {
                                 m_rmsd_file << driver->RMSD() << std::endl;
                                 m_rmsd_vector.push_back(driver->RMSD());
+                                if (m_writeAligned) {
+                                    driver->TargetAligned().appendXYZFile(outfile + "_aligned.xyz");
+                                }
                             }
                             Molecule mol2 = driver->TargetAligned();
                             if (m_pcafile) {
@@ -209,7 +216,7 @@ void RMSDTraj::start()
                         }
                         rmsd_results.push_back(driver->RMSD());
                     }
-                    if (m_write_unique) {
+                    if (m_writeUnique) {
                         int add = 0;
                         for (double rmsd : rmsd_results) {
                             add += rmsd > m_rmsd_threshold;
@@ -243,7 +250,7 @@ void RMSDTraj::start()
         }
         index++;
     }
-    if (m_write_unique && m_allxyz)
+    if (m_writeUnique && m_allxyz)
         Tools::xyz2allxyz(outfile + "_unique.xyz");
 
     double mean = Tools::mean(m_rmsd_vector);
@@ -264,7 +271,8 @@ void RMSDTraj::LoadControlJson()
 {
     m_heavy = Json2KeyWord<bool>(m_defaults, "heavy");
     m_pcafile = Json2KeyWord<bool>(m_defaults, "pcafile");
-    m_write_unique = Json2KeyWord<bool>(m_defaults, "write");
+    m_writeUnique = Json2KeyWord<bool>(m_defaults, "writeUnqiue");
+    m_writeAligned = Json2KeyWord<bool>(m_defaults, "writeAligned");
     m_rmsd_threshold = Json2KeyWord<double>(m_defaults, "rmsd");
     m_fragment = Json2KeyWord<int>(m_defaults, "fragment");
     m_reference = Json2KeyWord<std::string>(m_defaults, "reference");
