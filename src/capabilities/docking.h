@@ -121,6 +121,7 @@ private:
     Position m_initial_anchor = Position{ 0, 0, 0 };
     int m_step_X = 1, m_step_Y = 1, m_step_Z = 1;
     std::map<double, Vector> m_docking_list;
+    std::vector<Position> m_initial_list;
     std::map<double, Molecule*> m_result_list;
     std::vector<Position> m_anchor_accepted, m_rotation_accepted;
     std::vector<double> m_fragments_mass;

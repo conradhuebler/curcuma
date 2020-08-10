@@ -141,6 +141,9 @@ void Docking::PerformDocking()
     */
     std::cout << m_guest_structure.Centroid().transpose() << " = Centroid of Guest" << std::endl;
 
+    if (m_AutoPos)
+        m_initial_anchor = m_host_structure.Centroid();
+
     Geometry stored_guest = m_guest_structure.getGeometry();
     Position initial_centroid = m_guest_structure.Centroid();
 
@@ -166,7 +169,7 @@ void Docking::PerformDocking()
     int max_Y = 360 / double(m_step_Y);
     int max_Z = 360 / double(m_step_Z);
 
-    int excluded = 0, all = 0;
+    int excluded = 0, all = 0, distance = 0;
 
     if (m_NoOpt) // Loop unrolled
     {
@@ -200,6 +203,8 @@ void Docking::PerformDocking()
 
                     if (GeometryTools::Distance(m_initial_anchor, pair.first) > m_centroid_max_distance) {
                         accept = false;
+                        distance++;
+                        m_initial_list.push_back(Position{ x * max_X, y * max_Y, z * max_Z });
                         continue;
                     }
 
@@ -232,6 +237,15 @@ void Docking::PerformDocking()
             }
             std::cout << (x / double(m_step_X)) * 100 << "% - " << m_anchor_accepted.size() << " stored structures. " << excluded << " structures were skipped, due to being duplicate! " << all << " checked all together!" << std::endl;
         }
+    }
+    for (auto& rotate : m_initial_list) {
+        Geometry destination = GeometryTools::TranslateAndRotate(stored_guest, initial_centroid, m_initial_anchor, rotate);
+        Molecule molecule = Molecule(m_host_structure);
+        guest.setGeometry(destination);
+        for (std::size_t i = 0; i < guest.AtomCount(); ++i) {
+            molecule.addPair(guest.Atom(i));
+        }
+        molecule.appendXYZFile("Docking_Failed.xyz");
     }
     std::cout << m_anchor_accepted.size() << " stored structures. " << excluded << " structures were skipped, due to being duplicate!" << all << " checked!" << std::endl;
     guest = m_guest_structure;
