@@ -19,6 +19,9 @@
 
 #pragma once
 
+#define _CxxThreadPool_Verbose
+#define _CxxThreadPool_TimeOut 100
+
 #include "src/capabilities/optimiser/LBFGSInterface.h"
 
 #include "src/core/elements.h"
@@ -28,6 +31,8 @@
 #include "src/tools/general.h"
 #include "src/tools/geometry.h"
 
+#include "external/CxxThreadPool/include/CxxThreadPool.h"
+
 #include <map>
 #include <thread>
 
@@ -36,29 +41,25 @@ using json = nlohmann::json;
 
 #include "curcumamethod.h"
 
-class Thread {
+class Thread : public CxxThread {
 public:
     Thread() = default;
     ~Thread() = default;
 
     inline void setMolecule(const Molecule& molecule) { m_molecule = molecule; }
     inline Molecule getMolecule() const { return m_final; }
-    inline void start()
+    inline int execute()
     {
-        auto thread = std::thread(&OptimiseGeometryThreaded, &m_molecule, &result, &m_final, m_controller);
-        thread.swap(m_thread);
+        // OptimiseGeometryThreaded(&m_molecule, &m_result, &m_final, m_controller);
+        m_final = OptimiseGeometry(&m_molecule, m_controller);
+        return 0;
     }
-    inline void wait()
-    {
-        m_thread.join();
-        std::cout << result << std::endl;
-    }
-    inline std::thread::id Id() const { return m_thread.get_id(); }
+
     inline void setController(const json& controller) { m_controller = controller; }
+    std::string Output() const { return m_result; }
 
 private:
-    std::string result;
-    std::thread m_thread;
+    std::string m_result;
     Molecule m_molecule, m_final;
     json m_controller = OptJson;
 };

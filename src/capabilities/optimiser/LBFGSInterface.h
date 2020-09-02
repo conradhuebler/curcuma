@@ -112,7 +112,7 @@ private:
 
 inline Molecule OptimiseGeometry(const Molecule* host, const json& controller)
 {
-    PrintController(controller);
+    //PrintController(controller);
     bool writeXYZ = Json2KeyWord<bool>(controller, "writeXYZ");
     bool printOutput = Json2KeyWord<bool>(controller, "printOutput");
     double dE = Json2KeyWord<double>(controller, "dE");
@@ -200,7 +200,7 @@ inline Molecule OptimiseGeometry(const Molecule* host, const json& controller)
 
 inline void OptimiseGeometryThreaded(const Molecule* host, std::string* result_string, Molecule* result_molecule, const json& controller)
 {
-    PrintController(controller);
+    //PrintController(controller);
     bool writeXYZ = Json2KeyWord<bool>(controller, "writeXYZ");
     bool printOutput = Json2KeyWord<bool>(controller, "printOutput");
     double dE = Json2KeyWord<double>(controller, "dE");
@@ -260,7 +260,8 @@ inline void OptimiseGeometryThreaded(const Molecule* host, std::string* result_s
             geometry(i, 2) = parameter(3 * i + 2);
         }
         h.setGeometry(geometry);
-
+        //h.setEnergy(final_energy);
+        //h.appendXYZFile("curcuma_optim.xyz");
         driver->setReference(tmp);
         driver->setTarget(h);
         driver->start();

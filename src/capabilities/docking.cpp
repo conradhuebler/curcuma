@@ -17,6 +17,9 @@
  *
  */
 
+#define _CxxThreadPool_Verbose
+#define _CxxThreadPool_TimeOut 100
+
 #include "src/core/pseudoff.h"
 
 #include "src/tools/general.h"
@@ -27,6 +30,8 @@
 #include "src/capabilities/optimiser/XTBDocking.h"
 
 #include "src/capabilities/confscan.h"
+
+#include "external/CxxThreadPool/include/CxxThreadPool.h"
 
 #include <algorithm>
 #include <future>
@@ -276,7 +281,7 @@ void Docking::PerformDocking()
 void Docking::PostOptimise()
 {
     double frag_scaling = 1.5;
-    int threads = m_threads; // xtb is not thread-safe yet
+    int threads = m_threads;
     std::map<double, Molecule*> result_list, final_results;
     auto iter = m_result_list.begin();
     int index = 0;
@@ -284,9 +289,12 @@ void Docking::PostOptimise()
     opt["dE"] = 50;
     opt["dRMSD"] = 0.1;
     opt = MergeJson(opt, m_controller["dock"]);
+    PrintController(opt);
+    std::cout << "Load Batch for Calculation ... " << std::endl;
+    CxxThreadPool* pool = new CxxThreadPool;
+    pool->setActiveThreadCount(threads);
+    std::vector<Thread*> thread_block;
     while (iter != m_result_list.end()) {
-        std::vector<Thread*> thread_block;
-        std::cout << "Batch calculation started! " << std::endl;
         for (int i = 0; i < threads; ++i) {
             if (iter == m_result_list.end())
                 continue;
@@ -296,22 +304,25 @@ void Docking::PostOptimise()
             Thread* th = new Thread;
             th->setMolecule(pair.second);
             th->setController(opt);
-            th->start();
+            //th->start();
             thread_block.push_back(th);
+            pool->addThread(th);
 
             ++iter;
             index++;
         }
-        std::cout << "Batch evaluation ... " << std::endl;
-        for (auto thread : thread_block) {
-            thread->wait();
-
-            Molecule* mol2 = new Molecule(thread->getMolecule());
-            result_list.insert(std::pair<double, Molecule*>(mol2->Energy(), mol2));
-            delete thread;
-        }
-        std::cout << "Done! " << index << " of " << m_result_list.size() << " (" << index / double(m_result_list.size()) * 100 << " %)" << std::endl;
     }
+
+    std::cout << "Batch calculation started! " << std::endl;
+    pool->StartAndWait();
+    std::cout << "Batch evaluation ... " << std::endl;
+    for (auto thread : thread_block) {
+        Molecule* mol2 = new Molecule(thread->getMolecule());
+        result_list.insert(std::pair<double, Molecule*>(mol2->Energy(), mol2));
+        delete thread;
+    }
+    //std::cout << "Done! " << index << " of " << m_result_list.size() << " (" << index / double(m_result_list.size()) * 100 << " %)" << std::endl;
+
     std::cout << "** Docking Phase 2 - Finished **" << std::endl;
 
     {
