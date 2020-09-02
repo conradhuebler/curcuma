@@ -19,9 +19,6 @@
 
 #pragma once
 
-#define _CxxThreadPool_Verbose
-#define _CxxThreadPool_TimeOut 100
-
 #include "src/capabilities/optimiser/LBFGSInterface.h"
 
 #include "src/core/elements.h"

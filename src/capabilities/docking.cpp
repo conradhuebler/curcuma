@@ -17,7 +17,7 @@
  *
  */
 
-#define _CxxThreadPool_Verbose
+// #define _CxxThreadPool_Verbose
 #define _CxxThreadPool_TimeOut 100
 
 #include "src/core/pseudoff.h"
@@ -288,6 +288,7 @@ void Docking::PostOptimise()
     json opt = OptJson;
     opt["dE"] = 50;
     opt["dRMSD"] = 0.1;
+    opt["printOutput"] = false;
     opt = MergeJson(opt, m_controller["dock"]);
     PrintController(opt);
     std::cout << "Load Batch for Calculation ... " << std::endl;
@@ -304,7 +305,6 @@ void Docking::PostOptimise()
             Thread* th = new Thread;
             th->setMolecule(pair.second);
             th->setController(opt);
-            //th->start();
             thread_block.push_back(th);
             pool->addThread(th);
 
@@ -321,7 +321,6 @@ void Docking::PostOptimise()
         result_list.insert(std::pair<double, Molecule*>(mol2->Energy(), mol2));
         delete thread;
     }
-    //std::cout << "Done! " << index << " of " << m_result_list.size() << " (" << index / double(m_result_list.size()) * 100 << " %)" << std::endl;
 
     std::cout << "** Docking Phase 2 - Finished **" << std::endl;
 
@@ -368,6 +367,7 @@ void Docking::PostOptimise()
     confscan["check"] = false;
     confscan["energy"] = 1.0;
     confscan["noname"] = true;
+    confscan["silent"] = true;
     confscan["preventreorder"] = true;
     confscan["maxenergy"] = -1;
     confscan["RMSDMethod"] = "template";

@@ -156,8 +156,9 @@ inline Molecule OptimiseGeometry(const Molecule* host, const json& controller)
     driver->setCheckConnections(false);
 
     std::chrono::time_point<std::chrono::system_clock> start = std::chrono::system_clock::now(), end;
-    std::cout << "Step\tCurrent Energy [Eh]\tEnergy Change\tRMSD Change\tt [s]" << std::endl;
-
+    if (printOutput) {
+        std::cout << "Step\tCurrent Energy [Eh]\tEnergy Change\tRMSD Change\tt [s]" << std::endl;
+    }
     int atoms_count = host->AtomCount();
     for (int outer = 0; outer < OuterLoop; ++outer) {
         int niter = solver.minimize(fun, parameter, fx);
