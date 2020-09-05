@@ -20,6 +20,7 @@
 #pragma once
 
 #include "src/capabilities/optimiser/LBFGSInterface.h"
+#include "src/capabilities/optimiser/LevMarDocking.h"
 
 #include "src/core/elements.h"
 #include "src/core/global.h"
@@ -37,6 +38,36 @@
 using json = nlohmann::json;
 
 #include "curcumamethod.h"
+
+class DockThread : public CxxThread {
+public:
+    inline DockThread(const Molecule& host, const Molecule& guest)
+        : m_host(host)
+        , m_guest(guest)
+    {
+    }
+    ~DockThread() = default;
+
+    inline void setPosition(const Position& position) { m_position = position; }
+    inline void setRotation(const Position& rotation) { m_rotation = rotation; }
+
+    inline int execute()
+    {
+        std::pair<Position, Position> pair = OptimiseAnchor(&m_host, m_guest, m_position, m_rotation);
+        m_last_position = pair.first;
+        m_last_rotation = pair.second;
+        return 0;
+    }
+
+    inline Position InitialPositon() const { return m_position; }
+    inline Position InitialRotation() const { return m_rotation; }
+    inline Position LastPosition() const { return m_last_position; }
+    inline Position LastRotation() const { return m_last_rotation; }
+
+private:
+    Position m_position, m_rotation, m_last_position, m_last_rotation;
+    Molecule m_host, m_guest;
+};
 
 class Thread : public CxxThread {
 public:
@@ -79,7 +110,8 @@ static const json DockingJson = {
     { "CentroidMaxDistance", 1e5 },
     { "CentroidTolDis", 1e-1 },
     { "RotationTolDis", 1e-1 },
-    { "Threads", 1 }
+    { "Threads", 1 },
+    { "DockingThreads", 1 }
 };
 
 class Docking : public CurcumaMethod {
@@ -132,6 +164,7 @@ private:
     double m_centroid_tol_distance = 1e-1;
     double m_centroid_rot_distance = 1e-1;
     int m_threads = 1;
+    int m_docking_threads = 1;
     StringList m_files;
     std::string m_host, m_guest, m_complex;
 };

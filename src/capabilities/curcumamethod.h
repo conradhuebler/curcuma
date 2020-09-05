@@ -59,6 +59,7 @@ protected:
     bool m_restart = true;
 
     void AppendError(const std::string& error) { m_error_list.push_back(error); }
+    std::filebuf m_curcuma_progress;
 
 private:
     /* Lets have this for all modules */
@@ -76,6 +77,5 @@ private:
     virtual void LoadControlJson() = 0;
 
     StringList m_error_list;
-
     bool m_silent = true;
 };

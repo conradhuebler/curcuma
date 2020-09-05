@@ -96,7 +96,7 @@ struct MyFunctor : Functor<double> {
 struct MyFunctorNumericalDiff : Eigen::NumericalDiff<MyFunctor> {
 };
 
-std::pair<Position, Position> OptimiseAnchor(const Molecule* host, const Molecule& guest, Position anchor, Position rotation)
+inline std::pair<Position, Position> OptimiseAnchor(const Molecule* host, const Molecule& guest, Position anchor, Position rotation)
 {
     Vector parameter = PositionPair2Vector(anchor, rotation);
 

@@ -57,6 +57,7 @@ if (OPENMP_FOUND)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
     set (openMP ON)
 endif()
+
 IF(CMAKE_COMPILER_IS_GNUCXX)
     SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wno-reorder -pedantic \
                                            -Wextra -Wcast-align -Wcast-qual  -Wchar-subscripts  \
@@ -108,9 +109,9 @@ endif()
 
 
 if(NOT EXISTS src/json.hpp)
-  file(DOWNLOAD https://github.com/nlohmann/json/releases/download/v3.7.3/json.hpp src/json.hpp
+  file(DOWNLOAD https://github.com/nlohmann/json/releases/download/v3.9.1/json.hpp src/json.hpp
        TIMEOUT 60  # seconds
-       EXPECTED_HASH SHA512=4ecbbdd2c5e88c897096670cfdaa7ec00483ac9ed6e8ac33be23b05f4da70f213e10c4b381f5e8799619a24a58f417f04dd442d1d59a2e0bfca3385007e620d5
+       EXPECTED_HASH SHA256=7804b38146921d03374549c9e2a5e3acda097814c43caf2b96a0278e58df26e0
        TLS_VERIFY ON)
 endif()
 

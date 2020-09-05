@@ -69,6 +69,7 @@ void Docking::LoadControlJson()
     m_centroid_tol_distance = Json2KeyWord<double>(m_defaults, "CentroidTolDis");
     m_centroid_rot_distance = Json2KeyWord<double>(m_defaults, "RotationTolDis");
     m_threads = Json2KeyWord<int>(m_defaults, "threads");
+    m_docking_threads = Json2KeyWord<int>(m_defaults, "DockingThreads");
 }
 
 bool Docking::Initialise()
@@ -195,53 +196,66 @@ void Docking::PerformDocking()
             std::cout << (x / double(m_step_X)) * 100 << "% done." << std::endl;
         }
     } else {
+        std::vector<DockThread*> threads;
+        CxxThreadPool* pool = new CxxThreadPool;
+        pool->setActiveThreadCount(m_docking_threads * m_threads);
         for (int x = 0; x < m_step_X; ++x) {
             for (int y = 0; y < m_step_Y; ++y) {
                 for (int z = 0; z < m_step_Z; ++z) {
-                    ++all;
-                    Molecule* molecule = new Molecule(m_host_structure);
-                    guest = m_guest_structure;
-
-                    std::pair<Position, Position> pair = OptimiseAnchor(&m_host_structure, guest, m_initial_anchor, Position{ x * max_X, y * max_Y, z * max_Z });
-
-                    bool accept = true;
-
-                    if (GeometryTools::Distance(m_initial_anchor, pair.first) > m_centroid_max_distance) {
-                        accept = false;
-                        distance++;
-                        m_initial_list.push_back(Position{ x * max_X, y * max_Y, z * max_Z });
-                        continue;
-                    }
-
-                    for (std::size_t i = 0; i < m_anchor_accepted.size(); ++i) {
-                        Position anchor = m_anchor_accepted[i];
-                        Position rotation = m_rotation_accepted[i];
-                        if (GeometryTools::Distance(anchor, pair.first) < m_centroid_tol_distance || GeometryTools::Distance(rotation, pair.second) < m_centroid_rot_distance)
-                            accept = false;
-                    }
-                    if (accept == false) {
-                        excluded++;
-                        continue;
-                    }
-                    m_anchor_accepted.push_back(pair.first);
-                    m_rotation_accepted.push_back(pair.second);
-
-                    Geometry destination = GeometryTools::TranslateAndRotate(stored_guest, initial_centroid, pair.first, pair.second);
-
-                    guest.setGeometry(destination);
-                    double distance = GeometryTools::Distance(pair.first, m_host_structure.Centroid());
-                    m_sum_distance += distance;
-                    m_docking_list.insert(std::pair<double, Vector>(distance, PositionPair2Vector(pair)));
-                    result = m_host_structure;
-                    for (std::size_t i = 0; i < guest.AtomCount(); ++i) {
-                        molecule->addPair(guest.Atom(i));
-                    }
-                    molecule->setEnergy(distance);
-                    m_result_list.insert(std::pair<double, Molecule*>(all, molecule));
+                    DockThread* thread = new DockThread(m_host_structure, guest);
+                    thread->setPosition(m_initial_anchor);
+                    thread->setRotation(Position{ x * max_X, y * max_Y, z * max_Z });
+                    pool->addThread(thread);
+                    threads.push_back(thread);
                 }
             }
-            std::cout << (x / double(m_step_X)) * 100 << "% - " << m_anchor_accepted.size() << " stored structures. " << excluded << " structures were skipped, due to being duplicate! " << all << " checked all together!" << std::endl;
         }
+        pool->StartAndWait();
+        std::cout //<< std::endl
+            << "** Docking Phase 0 - Finished - Now collection results **" << std::endl
+            << std::endl;
+        for (const auto* t : pool->Finished()) {
+            const DockThread* thread = static_cast<const DockThread*>(t);
+            ++all;
+            Molecule* molecule = new Molecule(m_host_structure);
+            guest = m_guest_structure;
+
+            bool accept = true;
+
+            if (GeometryTools::Distance(m_initial_anchor, thread->LastPosition()) > m_centroid_max_distance) {
+                accept = false;
+                distance++;
+                m_initial_list.push_back(thread->InitialPositon());
+                continue;
+            }
+
+            for (std::size_t i = 0; i < m_anchor_accepted.size(); ++i) {
+                Position anchor = m_anchor_accepted[i];
+                Position rotation = m_rotation_accepted[i];
+                if (GeometryTools::Distance(anchor, thread->LastPosition()) < m_centroid_tol_distance || GeometryTools::Distance(rotation, thread->LastRotation()) < m_centroid_rot_distance)
+                    accept = false;
+            }
+            if (accept == false) {
+                excluded++;
+                continue;
+            }
+            m_anchor_accepted.push_back(thread->LastPosition());
+            m_rotation_accepted.push_back(thread->LastRotation());
+
+            Geometry destination = GeometryTools::TranslateAndRotate(stored_guest, initial_centroid, thread->LastPosition(), thread->LastRotation());
+
+            guest.setGeometry(destination);
+            double distance = GeometryTools::Distance(thread->LastPosition(), m_host_structure.Centroid());
+            m_sum_distance += distance;
+            m_docking_list.insert(std::pair<double, Vector>(distance, PositionPair2Vector(std::pair<Position, Position>(thread->LastPosition(), thread->LastRotation()))));
+            result = m_host_structure;
+            for (std::size_t i = 0; i < guest.AtomCount(); ++i) {
+                molecule->addPair(guest.Atom(i));
+            }
+            molecule->setEnergy(distance);
+            m_result_list.insert(std::pair<double, Molecule*>(all, molecule));
+        }
+        delete pool;
     }
     for (auto& rotate : m_initial_list) {
         Geometry destination = GeometryTools::TranslateAndRotate(stored_guest, initial_centroid, m_initial_anchor, rotate);
@@ -252,7 +266,10 @@ void Docking::PerformDocking()
         }
         molecule.appendXYZFile("Docking_Failed.xyz");
     }
-    std::cout << m_anchor_accepted.size() << " stored structures. " << excluded << " structures were skipped, due to being duplicate!" << all << " checked!" << std::endl;
+
+    std::cout << m_anchor_accepted.size() << " stored structures. " << std::endl
+              << excluded << " structures were skipped, due to being duplicate!" << std::endl
+              << all << " checked!" << std::endl;
     guest = m_guest_structure;
     std::cout << std::endl
               << "** Docking Phase 0 - Finished **" << std::endl;
@@ -293,6 +310,8 @@ void Docking::PostOptimise()
     PrintController(opt);
     std::cout << "Load Batch for Calculation ... " << std::endl;
     CxxThreadPool* pool = new CxxThreadPool;
+    //pool->RedirectOutput(&m_curcuma_progress);
+    pool->EcoBar(true);
     pool->setActiveThreadCount(threads);
     std::vector<Thread*> thread_block;
     while (iter != m_result_list.end()) {
@@ -316,12 +335,13 @@ void Docking::PostOptimise()
     std::cout << "Batch calculation started! " << std::endl;
     pool->StartAndWait();
     std::cout << "Batch evaluation ... " << std::endl;
-    for (auto thread : thread_block) {
+    for (auto* t : pool->Finished()) {
+        const Thread* thread = static_cast<const Thread*>(t);
         Molecule* mol2 = new Molecule(thread->getMolecule());
         result_list.insert(std::pair<double, Molecule*>(mol2->Energy(), mol2));
-        delete thread;
+        //delete thread;
     }
-
+    delete pool;
     std::cout << "** Docking Phase 2 - Finished **" << std::endl;
 
     {
