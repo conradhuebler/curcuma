@@ -22,6 +22,8 @@
 #include "src/core/molecule.h"
 #include "src/core/global.h"
 
+#include "external/CxxThreadPool/include/CxxThreadPool.h"
+
 #include <chrono>
 #include <map>
 #include <queue>
@@ -30,6 +32,17 @@
 using json = nlohmann::json;
 
 #include "curcumamethod.h"
+
+class RMSDThread : public CxxThread {
+public:
+    RMSDThread() = default;
+    ~RMSDThread() = default;
+
+    inline int execute() override
+    {
+        return 0;
+    }
+};
 
 class IntermediateStorage {
 public:
@@ -57,6 +70,8 @@ static const json RMSDJson = {
     { "check", false },
     { "heavy", false },
     { "fragment", -1 },
+    { "fragment_reference", -1 },
+    { "fragment_target", -1 },
     { "init", -1 },
     { "pt", 0 },
     { "silent", false },
@@ -160,6 +175,12 @@ public:
     std::vector<std::vector<int>> StoredRules() const { return m_stored_rules; }
 
     inline int HBondTopoDifference() const { return m_htopo_diff; }
+
+    double SimpleRMSD();
+
+    double BestFitRMSD();
+
+    double CustomRotation();
 
 private:
     /* Read Controller has to be implemented for all */

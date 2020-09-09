@@ -17,9 +17,13 @@
  *
  */
 
+#include "rmsd_functions.h"
+
 #include "src/core/molecule.h"
 #include "src/tools/general.h"
 #include "src/tools/geometry.h"
+
+#include "external/CxxThreadPool/include/CxxThreadPool.h"
 
 #include <chrono>
 #include <cstring>
@@ -47,8 +51,8 @@ RMSDDriver::~RMSDDriver()
 
 void RMSDDriver::LoadControlJson()
 {
-    m_fragment_reference = Json2KeyWord<int>(m_defaults, "fragment");
-    m_fragment_target = Json2KeyWord<int>(m_defaults, "fragment");
+    m_fragment_reference = Json2KeyWord<int>(m_defaults, "fragment_reference");
+    m_fragment_target = Json2KeyWord<int>(m_defaults, "fragment_target");
     m_fragment = Json2KeyWord<int>(m_defaults, "fragment");
     m_initial_fragment = Json2KeyWord<int>(m_defaults, "init");
     m_pt = Json2KeyWord<int>(m_defaults, "pt");
@@ -67,13 +71,19 @@ void RMSDDriver::LoadControlJson()
 
 void RMSDDriver::start()
 {
+
     RunTimer timer(false);
 
+    int reference_fragments = m_reference.GetFragments(m_scaling).size();
+    int target_fragments = m_target.GetFragments(m_scaling).size();
+    m_target_reordered = m_target;
+    m_target_aligned = m_target;
     //if (m_target.AtomCount() > m_reference.AtomCount()) {
     //    Molecule reference = m_reference;
     //    m_reference = m_target;
     //    m_target = reference;
     //}
+    /*
     m_intermedia_storage = 1;
     clear();
 
@@ -138,22 +148,56 @@ void RMSDDriver::start()
         }
     } else
         m_target_reordered = m_target;
-
-    Molecule *reference = new Molecule, *target = new Molecule;
-    //m_target_reordered.writeXYZFile("tar.xyz");
-    //m_reference.writeXYZFile("ref.xyz");
-    m_rmsd = CalculateRMSD(m_reference, m_target_reordered, reference, target);
-
-    m_reference_aligned.LoadMolecule(reference);
-    m_target_aligned.LoadMolecule(target);
-    //m_target_aligned.writeXYZFile("last_align.xyz");
+    */
+    if (m_fragment_reference != -1 && m_fragment_target != -1) {
+        m_rmsd = CustomRotation();
+    } else
+        m_rmsd = BestFitRMSD();
     m_htopo_diff = CompareTopoMatrix(m_reference_aligned.HydrogenBondMatrix(-1, -1), m_target_aligned.HydrogenBondMatrix(-1, -1));
     if (!m_silent) {
         std::cout << "RMSD calculation took " << timer.Elapsed() << " msecs." << std::endl;
         std::cout << "Difference in Topological Hydrogen Bond Matrix is " << m_htopo_diff << std::endl;
     }
-    delete reference;
-    delete target;
+}
+
+double RMSDDriver::SimpleRMSD()
+{
+    double rmsd = 0;
+    rmsd = RMSDFunctions::getRMSD(m_reference.getGeometry(), m_target.getGeometry());
+    return rmsd;
+}
+
+double RMSDDriver::BestFitRMSD()
+{
+    double rmsd = 0;
+    auto reference = CenterMolecule(m_reference.getGeometry());
+    auto target = CenterMolecule(m_target.getGeometry());
+    const auto t = RMSDFunctions::getAligned(reference, target, 1);
+    m_target_aligned.setGeometry(t);
+    rmsd = RMSDFunctions::getRMSD(reference, t);
+    return rmsd;
+}
+
+double RMSDDriver::CustomRotation()
+{
+    double rmsd = 0;
+    int fragment_reference = m_fragment_reference;
+    int fragment_target = m_fragment_target;
+    auto reference_frag = CenterMolecule(m_reference.getGeometryByFragment(fragment_reference));
+    auto target_frag = CenterMolecule(m_target.getGeometryByFragment(fragment_target));
+
+    Eigen::Matrix3d rotation = RMSDFunctions::BestFitRotation(reference_frag, target_frag, 1);
+
+    auto reference = GeometryTools::TranslateGeometry(m_reference.getGeometry(), GeometryTools::Centroid(m_reference.getGeometryByFragment(fragment_reference)), Position{ 0, 0, 0 }); // CenterMolecule(reference_mol);
+    auto target = GeometryTools::TranslateGeometry(m_target.getGeometry(), GeometryTools::Centroid(m_target.getGeometryByFragment(fragment_target)), Position{ 0, 0, 0 }); //CenterMolecule(target_mol);
+    const auto t = RMSDFunctions::applyRotation(target, rotation);
+    m_reference.setGeometry(reference);
+    m_reference.writeXYZFile("ref.xyz");
+    m_target_aligned.setGeometry(t);
+    m_target_aligned.writeXYZFile("tar.xyz");
+    rmsd = RMSDFunctions::getRMSD(reference, t);
+
+    return rmsd;
 }
 
 double RMSDDriver::Rules2RMSD(const std::vector<int> rules, int fragment)
@@ -750,10 +794,8 @@ bool RMSDDriver::SolveIntermediate(std::vector<int> intermediate, bool fast)
 {
     if (m_reference_reordered + intermediate.size() >= m_reference.AtomCount())
         return false;
-    //std::cout << "Reference reordered " << m_reference_reordered << std::endl;
     Molecule reference;
     Molecule target;
-    //std::vector<int> elements_target = m_target.Atoms();
 
     for (int i = 0; i < intermediate.size(); i++) {
         reference.addPair(m_reference.Atom(i));
@@ -761,16 +803,12 @@ bool RMSDDriver::SolveIntermediate(std::vector<int> intermediate, bool fast)
     }
 
     const int i = reference.AtomCount();
-    //for (int i = reference.AtomCount(); i < m_reference.AtomCount(); ++i) {
     Molecule reference_local(reference);
     const int element_local = m_reference.Atom(i).first;
-    // std::cout << "Current element to check is " << element_local << " at reference position " << i << std::endl;
     const Position blob = GeometryTools::Centroid(CenterMolecule(reference_local.getGeometry()));
     const Position blob1 = GeometryTools::Centroid(CenterMolecule(target.getGeometry()));
 
-    //std::cout << GeometryTools::Distance(blob, m_reference.Atom(i).second) << std::endl;
     reference_local.addPair(m_reference.Atom(i));
-    //double rmsd = 1e22;
     std::map<double, int> match;
     const Geometry ref = CenterMolecule(reference_local.getGeometry());
 
@@ -788,8 +826,6 @@ bool RMSDDriver::SolveIntermediate(std::vector<int> intermediate, bool fast)
                 double rmsd_local = CalculateShortRMSD(ref, target_local);
 
                 if (target_local.AtomCount() < m_target.AtomCount()) {
-                    //std::cout << "count smaller " << m_target.AtomCount() << " ";
-                    //rmsd = rmsd_local;
                     if (CheckConnections()) {
                         int difference = CheckConnectivitiy(reference_local, target_local);
                         if (difference <= m_pt)
@@ -797,7 +833,6 @@ bool RMSDDriver::SolveIntermediate(std::vector<int> intermediate, bool fast)
                     } else {
                         match.insert(std::pair<double, int>(rmsd_local, j));
                         m_last_rmsd.push_back(rmsd_local);
-                        // std::cout << target_local.AtomCount() <<  " added  (" << match.size() << ")" << std::endl;
                     }
                 } else {
                     std::vector<int> inter = intermediate;

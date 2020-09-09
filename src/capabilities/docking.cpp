@@ -198,7 +198,7 @@ void Docking::PerformDocking()
     } else {
         std::vector<DockThread*> threads;
         CxxThreadPool* pool = new CxxThreadPool;
-        pool->setActiveThreadCount(m_docking_threads * m_threads);
+        pool->setActiveThreadCount(m_threads);
         for (int x = 0; x < m_step_X; ++x) {
             for (int y = 0; y < m_step_Y; ++y) {
                 for (int z = 0; z < m_step_Z; ++z) {
@@ -210,6 +210,7 @@ void Docking::PerformDocking()
                 }
             }
         }
+        pool->DynamicPool();
         pool->StartAndWait();
         std::cout //<< std::endl
             << "** Docking Phase 0 - Finished - Now collection results **" << std::endl
