@@ -35,13 +35,29 @@ using json = nlohmann::json;
 
 class RMSDThread : public CxxThread {
 public:
-    RMSDThread() = default;
-    ~RMSDThread() = default;
-
-    inline int execute() override
+    inline RMSDThread(const Molecule& target, const Geometry& reference, const std::vector<int> intermediate, double connected_mass, int element)
+        : m_target(target)
+        , m_reference(reference)
+        , m_intermediate(intermediate)
+        , m_connected_mass(connected_mass)
+        , m_element(element)
     {
-        return 0;
     }
+    inline virtual ~RMSDThread() = default;
+
+    int execute() override;
+
+    const std::map<double, std::vector<int>>* data() const { return &m_shelf; }
+    inline int Match() const { return m_match; }
+
+private:
+    Molecule m_target;
+    Geometry m_reference;
+    std::map<double, std::vector<int>> m_shelf;
+    std::vector<int> m_intermediate;
+    double m_connected_mass = 0;
+    int m_element = -1;
+    int m_match;
 };
 
 class IntermediateStorage {
@@ -77,7 +93,8 @@ static const json RMSDJson = {
     { "silent", false },
     { "storage", 1.0 },
     { "method", "incr" },
-    { "noreorder", false }
+    { "noreorder", false },
+    { "threads", 1 }
 };
 
 class RMSDDriver : public CurcumaMethod {
@@ -197,11 +214,15 @@ private:
     /* Lets have all methods read the input/control file */
     void ReadControlFile() override {}
 
+    void ReorderIncremental();
+
     void ReorderStraight();
     void ReconstructTarget(const std::vector<int>& atoms);
 
+    std::vector<int> FillMissing(const std::vector<int>& order);
+
     void InitialiseOrder();
-    void InitialisePair();
+    Molecule InitialisePair();
 
     bool SolveIntermediate(std::vector<int> intermediate, bool fast = false);
 
@@ -227,9 +248,10 @@ private:
     std::pair<Matrix, Position> GetOperateVectors(int fragment_reference, int fragment_target);
     std::pair<Matrix, Position> GetOperateVectors(const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms);
 
-    Molecule m_reference, m_target, m_reference_aligned, m_target_aligned, m_target_reordered;
+    Molecule m_reference, m_target, m_reference_aligned, m_target_aligned, m_target_reordered, m_reorder_reference, m_reorder_target;
+    Geometry m_reorder_reference_geometry;
     bool m_force_reorder = false, m_protons = true, m_print_intermediate = false, m_silent = false;
-    std::queue<std::vector<int>> m_intermediate_results;
+    std::vector<std::vector<int>> m_intermediate_results;
     std::map<double, std::vector<int>> m_results;
     std::vector<double> m_last_rmsd;
     std::vector<int> m_reorder_rules;
@@ -238,7 +260,7 @@ private:
     std::vector<IntermediateStorage> m_storage;
     double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99;
     bool m_check_connections = false, m_postprocess = true, m_noreorder = false;
-    int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1, m_method = 1, m_htopo_diff = -1, m_partial_rmsd = -1;
+    int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1, m_method = 1, m_htopo_diff = -1, m_partial_rmsd = -1, m_threads = 1;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
     std::vector<int> m_initial;
 };

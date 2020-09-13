@@ -39,6 +39,83 @@ using json = nlohmann::json;
 
 #include "rmsd.h"
 
+int RMSDThread::execute()
+{
+
+    //if (m_reference_reordered + intermediate.size() >= m_reference.AtomCount())
+    //    return false;
+    Molecule reference;
+    Molecule target;
+
+    for (int i = 0; i < m_intermediate.size(); i++) {
+        target.addPair(m_target.Atom(m_intermediate[i]));
+    }
+
+    const int i = reference.AtomCount();
+    Molecule reference_local(reference);
+    // const Position blob = GeometryTools::Centroid(m_reference);
+    // const Position blob1 = GeometryTools::Centroid(CenterMolecule(target.getGeometry()));
+
+    //    reference_local.addPair(m_reference.Atom(i));
+    std::map<double, int> match;
+    //const Geometry ref = CenterMolecule(reference_local.getGeometry());
+
+    bool found_none = true;
+
+    for (int j = 0; j < m_target.AtomCount(); ++j) {
+        if (m_target.Atoms()[j] == m_element) {
+            // if ((std::abs(m_connected_mass - m_target.ConnectedMass(j)) >= 1e-5))//  || GeometryTools::Distance(blob1, m_target.Atom(j).second) > 1.5 * GeometryTools::Distance(blob, m_reference.Atom(i).second)) && fast) {
+            //     continue;
+
+            found_none = false;
+            Molecule target_local(target);
+            if (target_local.addPair(m_target.Atom(j))) {
+                const auto t = RMSDFunctions::getAligned(m_reference, target_local.getGeometry(), 1);
+                double rmsd_local = RMSDFunctions::getRMSD(m_reference, t);
+                //double rmsd_local = CalculateShortRMSD(ref, target_local);
+
+                if (target_local.AtomCount() < m_target.AtomCount()) {
+                    /*if (CheckConnections()) {
+                        int difference = CheckConnectivitiy(reference_local, target_local);
+                        if (difference <= m_pt)
+                            match.insert(std::pair<double, int>(rmsd_local, j));
+                    } else*/
+                    {
+                        match.insert(std::pair<double, int>(rmsd_local, j));
+                        //m_last_rmsd.push_back(rmsd_local);
+                    }
+                } /* else {
+                    std::vector<int> inter = m_intermediate;
+                    inter.push_back(j);
+                    m_results.insert(std::pair<double, std::vector<int>>(rmsd_local, inter));
+                }*/
+            }
+        }
+    }
+    m_match = match.size();
+    /*
+    if (match.size() == 0) {
+        Molecule ref;
+        for (std::size_t index = 0; index < m_reference.AtomCount(); index++) {
+            if (i != index)
+                ref.addPair(m_reference.Atom(index));
+        }
+        ref.addPair(m_reference.Atom(i));
+        m_reference = ref;
+        m_reference_reordered++;
+        SolveIntermediate(intermediate);
+        return false;
+    }*/
+
+    for (const auto& element : match) {
+        std::vector<int> temp = m_intermediate;
+        temp.push_back(element.second);
+        m_shelf.insert(std::pair<double, std::vector<int>>(element.first, temp));
+    }
+
+    return 0;
+}
+
 RMSDDriver::RMSDDriver(const json& controller, bool silent)
     : CurcumaMethod(RMSDJson, controller, silent)
 {
@@ -54,6 +131,7 @@ void RMSDDriver::LoadControlJson()
     m_fragment_reference = Json2KeyWord<int>(m_defaults, "fragment_reference");
     m_fragment_target = Json2KeyWord<int>(m_defaults, "fragment_target");
     m_fragment = Json2KeyWord<int>(m_defaults, "fragment");
+    m_threads = Json2KeyWord<int>(m_defaults, "threads");
     m_initial_fragment = Json2KeyWord<int>(m_defaults, "init");
     m_pt = Json2KeyWord<int>(m_defaults, "pt");
     m_force_reorder = Json2KeyWord<bool>(m_defaults, "reorder");
@@ -74,17 +152,7 @@ void RMSDDriver::start()
 
     RunTimer timer(false);
 
-    int reference_fragments = m_reference.GetFragments(m_scaling).size();
-    int target_fragments = m_target.GetFragments(m_scaling).size();
-    m_target_reordered = m_target;
-    m_target_aligned = m_target;
-    //if (m_target.AtomCount() > m_reference.AtomCount()) {
-    //    Molecule reference = m_reference;
-    //    m_reference = m_target;
-    //    m_target = reference;
-    //}
-    /*
-    m_intermedia_storage = 1;
+    //m_intermedia_storage = 1;
     clear();
 
     if (m_initial_fragment != -1 && m_initial.size() == 0)
@@ -101,6 +169,15 @@ void RMSDDriver::start()
 
     if(m_protons == false)
         ProtonDepleted();
+
+    m_target_aligned = m_target;
+    ReorderIncremental();
+    //if (m_target.AtomCount() > m_reference.AtomCount()) {
+    //    Molecule reference = m_reference;
+    //    m_reference = m_target;
+    //    m_target = reference;
+    //}
+    /*
 
     if (m_fragment_reference < -1 || m_fragment_reference > reference_fragments) {
         m_fragment_reference = -1;
@@ -198,6 +275,76 @@ double RMSDDriver::CustomRotation()
     rmsd = RMSDFunctions::getRMSD(reference, t);
 
     return rmsd;
+}
+
+void RMSDDriver::ReorderIncremental()
+{
+    int inter_size = m_reference.AtomCount() * (m_reference.AtomCount() - 1) * m_intermedia_storage;
+    m_storage = std::vector<IntermediateStorage>(m_reference.AtomCount() - 1, IntermediateStorage(inter_size));
+
+    m_reorder_reference = m_reference;
+    m_reorder_target = m_target;
+
+    m_reorder_reference.setGeometry(CenterMolecule(m_reference.getGeometry()));
+    m_reorder_target.setGeometry(CenterMolecule(m_target.getGeometry()));
+    m_reorder_target.AnalyseIntermoleculeDistance();
+
+    Molecule ref = InitialisePair();
+    int wake_up = 100;
+    while (m_reorder_reference_geometry.rows() < m_reorder_reference.AtomCount()) {
+        int thread_count = 0;
+        auto storage = m_storage[m_reorder_reference_geometry.rows() - 1];
+        CxxThreadPool* pool = new CxxThreadPool;
+        pool->setActiveThreadCount(m_threads);
+        Molecule reference = ref;
+        int i = reference.AtomCount();
+        double mass = m_reference.ConnectedMass(i);
+        auto atom = m_reorder_reference.Atom(i);
+        std::cout << i / double(m_reorder_reference.AtomCount()) * 100 << " % " << std::endl;
+        int element = atom.first;
+        reference.addPair(atom);
+        m_reorder_reference_geometry = reference.getGeometry();
+
+        for (const auto& e : *storage.data()) {
+
+            RMSDThread* thread = new RMSDThread(m_reorder_target, m_reorder_reference_geometry, e.second, mass, element);
+            pool->addThread(thread);
+            thread_count++;
+        }
+        pool->StaticPool();
+        pool->setWakeUp(wake_up);
+        pool->StartAndWait();
+        for (const auto t : pool->Finished()) {
+            RMSDThread* thread = static_cast<RMSDThread*>(t);
+            for (const auto& item : (*thread->data())) {
+                m_storage[m_reorder_reference_geometry.rows() - 1].addItem(item.second, item.first);
+            }
+        }
+        wake_up = 2 * pool->WakeUp();
+        delete pool;
+        ref = reference;
+    }
+    int count = 0;
+    auto storage = m_storage[m_storage.size() - 1];
+    for (const auto& e : *storage.data()) {
+        if (count > 10)
+            continue;
+        m_stored_rules.push_back(FillMissing(e.second));
+        count++;
+    }
+    m_reorder_rules = m_stored_rules[0];
+    m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
+    m_target = m_target_reordered;
+}
+
+std::vector<int> RMSDDriver::FillMissing(const std::vector<int>& order)
+{
+    std::vector<int> result = order;
+    for (int i = 0; i < m_reference.AtomCount(); ++i) {
+        if (std::find(result.begin(), result.end(), i) == result.end())
+            result.push_back(i);
+    }
+    return result;
 }
 
 double RMSDDriver::Rules2RMSD(const std::vector<int> rules, int fragment)
@@ -565,55 +712,45 @@ void RMSDDriver::InitialiseOrder()
     m_init_count = m_initial.size();
 }
 
-void RMSDDriver::InitialisePair()
+Molecule RMSDDriver::InitialisePair()
 {
     Molecule reference;
     int index = 0;
-    std::vector<int> elements = m_reference.Atoms();
-    /*
-    std::vector<std::vector<int>> fragments = m_reference.GetFragments();
-    for(int i = 0; i < fragments.size(); ++i)
-    {
-        int index = 0;
-        for(int j = 0; j < fragments[i].size() && index < 1; ++j)
-        {
-            if (elements[fragments[i][j]] != 1) {
-                reference.addPair(m_reference.Atom(fragments[i][j]));
-                index++;
-            }
-        }
-    }
-    */
+    std::vector<int> elements = m_reorder_reference.Atoms();
 
     if (m_initial.size() == 0) {
-        for (int i = 0; i < m_reference.AtomCount() && index < 2; i++) {
+        for (int i = 0; i < m_reorder_reference.AtomCount() && index < 2; i++) {
             if (elements[i] != 1) {
-                reference.addPair(m_reference.Atom(i));
+                reference.addPair(m_reorder_reference.Atom(i));
                 index++;
             }
         }
+        m_reorder_reference_geometry = reference.getGeometry();
 
-        std::vector<int> elements_target = m_target.Atoms();
+        std::vector<int> elements_target = m_reorder_target.Atoms();
         std::vector<int> tmp_reference = reference.Atoms();
 
-        for (int i = 0; i < m_target.AtomCount(); ++i) {
-            if (m_target.Atom(i).first == 1) // Skip first atom if Proton
+        for (int i = 0; i < m_reorder_target.AtomCount(); ++i) {
+            if (m_reorder_target.Atom(i).first == 1) // Skip first atom if Proton
                 continue;
-            for (int j = i + 1; j < m_target.AtomCount(); ++j) {
-                if (m_target.Atom(j).first == 1) // Skip second atom if Proton
+            for (int j = i + 1; j < m_reorder_target.AtomCount(); ++j) {
+                if (m_reorder_target.Atom(j).first == 1) // Skip second atom if Proton
                     continue;
                 if (tmp_reference[0] == elements_target[i] && tmp_reference[1] == elements_target[j])
-                    m_intermediate_results.push({ i, j });
+                    m_intermediate_results.push_back({ i, j });
                 if (tmp_reference[0] == elements_target[j] && tmp_reference[1] == elements_target[i])
-                    m_intermediate_results.push({ j, i });
+                    m_intermediate_results.push_back({ j, i });
             }
         }
     } else {
         std::vector<int> start;
         for (int i = 0; i < m_init_count; ++i)
             start.push_back(i);
-        m_intermediate_results.push(start);
+        m_intermediate_results.push_back(start);
     }
+    for (int i = 0; i < m_intermediate_results.size(); ++i)
+        m_storage[1].addItem(m_intermediate_results[i], i);
+    return reference;
 }
 
 void RMSDDriver::ReorderMolecule()
@@ -686,13 +823,14 @@ void RMSDDriver::ReorderStraight()
 
     m_rmsd = CalculateRMSD(m_reference, m_target) / double(m_reference.AtomCount());
 
-    while (m_intermediate_results.size()) {
-        std::vector<int> inter = m_intermediate_results.front();
+    for (const auto& t : m_intermediate_results)
+        //while (m_intermediate_results.size()) {
         //std::cout << inter.size() << std::endl;
         //if(inter.size() <  m_target.AtomCount())
-        SolveIntermediate(inter);
-        m_intermediate_results.pop();
-    }
+        SolveIntermediate(t);
+    //m_intermediate_results.pop();
+    //}
+    m_intermediate_results.clear();
     int i = 0;
     int next = 0;
     for (; i < m_storage.size(); ++i) {

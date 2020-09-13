@@ -1,6 +1,7 @@
 # The (incomplete) curcuma Changelog
 
 ### pre Alpha
+- parallel docking due to CxxThreadPool
 - add restriction for hydrogen bond patterns in conformational scan
 - add template based reorder method for rmsd calculation
 - make confscan (silently) restartable
