@@ -41,9 +41,6 @@ using json = nlohmann::json;
 
 int RMSDThread::execute()
 {
-
-    //if (m_reference_reordered + intermediate.size() >= m_reference.AtomCount())
-    //    return false;
     Molecule reference;
     Molecule target;
 
@@ -53,20 +50,11 @@ int RMSDThread::execute()
 
     const int i = reference.AtomCount();
     Molecule reference_local(reference);
-    // const Position blob = GeometryTools::Centroid(m_reference);
-    // const Position blob1 = GeometryTools::Centroid(CenterMolecule(target.getGeometry()));
-
-    //    reference_local.addPair(m_reference.Atom(i));
     std::map<double, int> match;
-    //const Geometry ref = CenterMolecule(reference_local.getGeometry());
-
     bool found_none = true;
 
     for (int j = 0; j < m_target.AtomCount(); ++j) {
         if (m_target.Atoms()[j] == m_element) {
-            // if ((std::abs(m_connected_mass - m_target.ConnectedMass(j)) >= 1e-5))//  || GeometryTools::Distance(blob1, m_target.Atom(j).second) > 1.5 * GeometryTools::Distance(blob, m_reference.Atom(i).second)) && fast) {
-            //     continue;
-
             found_none = false;
             Molecule target_local(target);
             if (target_local.addPair(m_target.Atom(j))) {
@@ -82,7 +70,6 @@ int RMSDThread::execute()
                     } else*/
                     {
                         match.insert(std::pair<double, int>(rmsd_local, j));
-                        //m_last_rmsd.push_back(rmsd_local);
                     }
                 } /* else {
                     std::vector<int> inter = m_intermediate;
@@ -93,20 +80,6 @@ int RMSDThread::execute()
         }
     }
     m_match = match.size();
-    /*
-    if (match.size() == 0) {
-        Molecule ref;
-        for (std::size_t index = 0; index < m_reference.AtomCount(); index++) {
-            if (i != index)
-                ref.addPair(m_reference.Atom(index));
-        }
-        ref.addPair(m_reference.Atom(i));
-        m_reference = ref;
-        m_reference_reordered++;
-        SolveIntermediate(intermediate);
-        return false;
-    }*/
-
     for (const auto& element : match) {
         std::vector<int> temp = m_intermediate;
         temp.push_back(element.second);
@@ -291,9 +264,11 @@ void RMSDDriver::ReorderIncremental()
 
     Molecule ref = InitialisePair();
     int wake_up = 100;
-    while (m_reorder_reference_geometry.rows() < m_reorder_reference.AtomCount()) {
+    while (m_reorder_reference_geometry.rows() < m_reorder_reference.AtomCount() && m_reorder_reference_geometry.rows() < m_reorder_target.AtomCount()) {
         int thread_count = 0;
         auto storage = m_storage[m_reorder_reference_geometry.rows() - 1];
+        if (storage.data()->size() == 0)
+            storage = m_storage[m_reorder_reference_geometry.rows() - 2];
         CxxThreadPool* pool = new CxxThreadPool;
         pool->setActiveThreadCount(m_threads);
         Molecule reference = ref;
@@ -306,7 +281,6 @@ void RMSDDriver::ReorderIncremental()
         m_reorder_reference_geometry = reference.getGeometry();
 
         for (const auto& e : *storage.data()) {
-
             RMSDThread* thread = new RMSDThread(m_reorder_target, m_reorder_reference_geometry, e.second, mass, element);
             pool->addThread(thread);
             thread_count++;
@@ -314,15 +288,28 @@ void RMSDDriver::ReorderIncremental()
         pool->StaticPool();
         pool->setWakeUp(wake_up);
         pool->StartAndWait();
+        int match = 0;
         for (const auto t : pool->Finished()) {
             RMSDThread* thread = static_cast<RMSDThread*>(t);
             for (const auto& item : (*thread->data())) {
-                m_storage[m_reorder_reference_geometry.rows() - 1].addItem(item.second, item.first);
+                if (thread->Match())
+                    m_storage[m_reorder_reference_geometry.rows() - 1].addItem(item.second, item.first);
+                match += thread->Match();
             }
         }
+        if (match == 0) {
+            Molecule ref_0;
+            for (std::size_t index = 0; index < m_reference.AtomCount(); index++) {
+                if (i != index)
+                    ref_0.addPair(m_reference.Atom(index));
+            }
+            ref_0.addPair(m_reorder_reference.Atom(i));
+            m_reorder_reference = ref_0;
+            m_reference_reordered++;
+        } else
+            ref = reference;
         wake_up = 2 * pool->WakeUp();
         delete pool;
-        ref = reference;
     }
     int count = 0;
     auto storage = m_storage[m_storage.size() - 1];
