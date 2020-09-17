@@ -17,8 +17,6 @@
  *
  */
 
-// #define _CxxThreadPool_Verbose
-#define _CxxThreadPool_TimeOut 100
 
 #include "src/core/pseudoff.h"
 
@@ -34,9 +32,7 @@
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
 
 #include <algorithm>
-#include <future>
 #include <iostream>
-#include <thread>
 
 #include "json.hpp"
 using json = nlohmann::json;
@@ -142,9 +138,6 @@ void Docking::PerformDocking()
     m_fragments_mass.push_back(result.Mass());
     m_fragments_mass.push_back(guest.Mass());
 
-    /* for( auto a : m_fragments_mass)
-        std::cout << a << " " ;
-    */
     std::cout << m_guest_structure.Centroid().transpose() << " = Centroid of Guest" << std::endl;
 
     if (m_AutoPos)
@@ -210,6 +203,7 @@ void Docking::PerformDocking()
                 }
             }
         }
+        pool->setProgressBar(CxxThreadPool::ProgressBarType::Continously);
         pool->DynamicPool();
         pool->StartAndWait();
         std::cout //<< std::endl
@@ -312,7 +306,7 @@ void Docking::PostOptimise()
     std::cout << "Load Batch for Calculation ... " << std::endl;
     CxxThreadPool* pool = new CxxThreadPool;
     //pool->RedirectOutput(&m_curcuma_progress);
-    pool->EcoBar(true);
+    pool->setProgressBar(CxxThreadPool::ProgressBarType::Continously);
     pool->setActiveThreadCount(threads);
     std::vector<Thread*> thread_block;
     while (iter != m_result_list.end()) {

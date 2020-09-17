@@ -32,7 +32,6 @@
 #include "src/capabilities/optimiser/LBFGSInterface.h"
 
 #include "src/tools/general.h"
-#include "src/tools/parser.h"
 
 #include <iostream>
 #include <string>

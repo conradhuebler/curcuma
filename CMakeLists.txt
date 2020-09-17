@@ -141,7 +141,6 @@ add_executable(curcuma
         src/core/pseudoff.cpp
         src/tools/geometry.h
         src/tools/general.h
-        src/tools/parser.h
         src/main.cpp)
 if(C17)
     set_property(TARGET curcuma PROPERTY CXX_STANDARD 17)

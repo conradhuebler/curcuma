@@ -1,0 +1,31 @@
+name: AutomaticBuild
+
+on:
+  push:
+    branches: [ master ] #Everytime master branch is updated
+    #    paths: ['.github/workflows/*',  'src/*'] #only when these files are modifed
+  pull_request:
+    branches: [ master ] #for every pull request going to master
+    #    paths: ['.github/workflows/*', 'src/*'] #only when these files are modifed
+
+jobs:
+  linux:
+
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v1
+      with:
+        submodules: true
+    - name: Update Modules and Build
+      run: sh scripts/build_unix_github.sh
+      
+#    - name: Deploy
+#      run: sh scripts/deploy_unix.sh
+      
+#    - uses: actions/upload-artifact@v1
+#      with:
+#        name: SupraFit
+#        path: ./build/bin/linux/SupraFit-nightly-x86_64.AppImage
+
+

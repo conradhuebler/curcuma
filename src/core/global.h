@@ -70,6 +70,30 @@ inline Vector PositionPair2Vector(const Position& first, const Position& second)
     return vector;
 }
 
+class LimitedStorage {
+public:
+    inline LimitedStorage(unsigned int size)
+        : m_size(size)
+    {
+    }
+    inline ~LimitedStorage()
+    {
+        m_shelf.clear();
+    }
+    inline void addItem(const std::vector<int>& vector, double rmsd)
+    {
+        m_shelf.insert(std::pair<double, std::vector<int>>(rmsd, vector));
+        if (m_shelf.size() >= m_size)
+            m_shelf.erase(--m_shelf.end());
+    }
+
+    inline const std::map<double, std::vector<int>>* data() const { return &m_shelf; }
+
+private:
+    unsigned int m_size;
+    std::map<double, std::vector<int>> m_shelf;
+};
+
 inline std::pair<Position, Position> Vector2PositionPair(const Vector& vector)
 {
     return std::pair<Position, Position>(Position{ vector(0), vector(1), vector(2) }, Position{ vector(3), vector(4), vector(5) });

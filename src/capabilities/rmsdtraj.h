@@ -43,7 +43,6 @@ const json RMSDTrajJson{
     { "heavy", false },
     { "pcafile", false },
     { "allxyz", false }
-
 };
 
 class RMSDTraj : public CurcumaMethod {

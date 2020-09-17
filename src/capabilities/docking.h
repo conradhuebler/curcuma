@@ -85,7 +85,6 @@ public:
 
     inline void setController(const json& controller) { m_controller = controller; }
     std::string Output() const { return m_result; }
-
 private:
     std::string m_result;
     Molecule m_molecule, m_final;

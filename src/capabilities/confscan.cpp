@@ -192,7 +192,6 @@ bool ConfScan::LoadRestartInformation()
         } catch (json::type_error& e) {
             error++;
             continue;
-
         } catch (json::parse_error& e) {
             error++;
             continue;

@@ -216,15 +216,12 @@ private:
 
     void ReorderIncremental();
 
-    void ReorderStraight();
     void ReconstructTarget(const std::vector<int>& atoms);
 
-    std::vector<int> FillMissing(const std::vector<int>& order);
+    std::vector<int> FillMissing(const Molecule& molecule, const std::vector<int>& order);
 
     void InitialiseOrder();
-    Molecule InitialisePair();
-
-    bool SolveIntermediate(std::vector<int> intermediate, bool fast = false);
+    std::pair<Molecule, LimitedStorage> InitialisePair();
 
     int CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) const;
     int CheckConnectivitiy(const Molecule& mol1) const;
@@ -257,7 +254,6 @@ private:
     std::vector<int> m_reorder_rules;
     std::vector<std::vector<int>> m_stored_rules;
     std::map<int, std::vector<int>> m_connectivity;
-    std::vector<IntermediateStorage> m_storage;
     double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99;
     bool m_check_connections = false, m_postprocess = true, m_noreorder = false;
     int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1, m_method = 1, m_htopo_diff = -1, m_partial_rmsd = -1, m_threads = 1;
