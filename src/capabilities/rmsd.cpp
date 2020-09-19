@@ -144,7 +144,7 @@ void RMSDDriver::start()
         ProtonDepleted();
 
     m_target_aligned = m_target;
-    ReorderIncremental();
+    ReorderMolecule();
     //if (m_target.AtomCount() > m_reference.AtomCount()) {
     //    Molecule reference = m_reference;
     //    m_reference = m_target;
@@ -747,13 +747,13 @@ void RMSDDriver::ReorderMolecule()
 {
     double scaling = 1.5;
     m_connectivity = m_reference.getConnectivtiy(scaling);
-    /*
+
     if (m_method == 1)
-        ReorderStraight();
+        ReorderIncremental();
     else if (m_method == 2)
         TemplateReorder();
-*/
-    FinaliseReorder();
+
+    //FinaliseReorder();
 }
 
 void RMSDDriver::FinaliseReorder()
@@ -992,5 +992,7 @@ bool RMSDDriver::TemplateReorder()
         done_ref.push_back(match_reference);
     }
     m_reorder_rules = new_order;
+    m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
+    m_target = m_target_reordered;
     return true;
 }
