@@ -149,11 +149,23 @@ inline Molecule OptimiseGeometry(const Molecule* host, const json& controller)
     fun.setMethod(method);
     double fx;
 
-    RMSDDriver* driver = new RMSDDriver;
-    driver->setSilent(true);
-    driver->setProtons(true);
-    driver->setForceReorder(false);
-    driver->setCheckConnections(false);
+    json RMSDJsonControl = {
+        { "reorder", false },
+        { "check", false },
+        { "heavy", false },
+        { "fragment", -1 },
+        { "fragment_reference", -1 },
+        { "fragment_target", -1 },
+        { "init", -1 },
+        { "pt", 0 },
+        { "silent", true },
+        { "storage", 1.0 },
+        { "method", "incr" },
+        { "noreorder", true },
+        { "threads", 1 }
+    };
+
+    RMSDDriver* driver = new RMSDDriver(RMSDJsonControl);
 
     std::chrono::time_point<std::chrono::system_clock> start = std::chrono::system_clock::now(), end;
     if (printOutput) {
@@ -242,13 +254,22 @@ inline void OptimiseGeometryThreaded(const Molecule* host, std::string* result_s
     fun.setMethod(method);
 
     double fx;
-
-    RMSDDriver* driver = new RMSDDriver;
-
-    driver->setSilent(true);
-    driver->setProtons(true);
-    driver->setForceReorder(false);
-    driver->setCheckConnections(false);
+    json RMSDJsonControl = {
+        { "reorder", false },
+        { "check", false },
+        { "heavy", false },
+        { "fragment", -1 },
+        { "fragment_reference", -1 },
+        { "fragment_target", -1 },
+        { "init", -1 },
+        { "pt", 0 },
+        { "silent", true },
+        { "storage", 1.0 },
+        { "method", "incr" },
+        { "noreorder", true },
+        { "threads", 1 }
+    };
+    RMSDDriver* driver = new RMSDDriver(RMSDJsonControl);
 
     int atoms_count = host->AtomCount();
     for (int outer = 0; outer < OuterLoop; ++outer) {

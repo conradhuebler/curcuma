@@ -504,9 +504,10 @@ int ConfScan::PreCheckAgainstAccepted(int index)
     Molecule* mol1 = m_molecules.at(index).second;
     json rmsd = RMSDJson;
     rmsd["silent"] = true;
-    rmsd["reorder"] = ForceReorder();
+    //rmsd["reorder"] = ForceReorder();
     rmsd["check"] = CheckConnections();
     rmsd["heavy"] = m_heavy;
+    rmsd["noreorder"] = true;
 
     if (mol1->AtomCount() == 0) {
         m_fail++;
