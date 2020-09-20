@@ -30,6 +30,7 @@
 #include "src/capabilities/simplemd.h"
 
 #include "src/capabilities/optimiser/LBFGSInterface.h"
+//#include "src/capabilities/optimiser/Proton.h"
 
 #include "src/tools/general.h"
 
@@ -274,7 +275,33 @@ int main(int argc, char **argv) {
                 ref.second.appendXYZFile(outfile);
 
             return 0;
-        } else if (strcmp(argv[1], "-md") == 0) {
+        } /* else if (strcmp(argv[1], "-optp") == 0) {
+            if (argc < 2) {
+                std::cerr << "Please use curcuma for optimisation as follows:\ncurcuma -opt input.xyz" << std::endl;
+                return 0;
+            }
+            std::string outfile = std::string(argv[2]);
+            for (int i = 0; i < 4; ++i)
+                outfile.pop_back();
+            outfile += "_opt.xyz";
+
+            json key = OptJson;
+            key = MergeJson(key, controller["opt"]);
+
+            FileIterator file(argv[2]);
+            std::multimap<double, Molecule> results;
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                Molecule mol2 = OptimiseProtons(&mol, key);
+                //mol2.writeXYZFile(outfile);
+                results.insert(std::pair<double, Molecule>(mol2.Energy(), mol2));
+            }
+            for (const auto& ref : results)
+                ref.second.appendXYZFile(outfile);
+
+            return 0;
+        } */
+        else if (strcmp(argv[1], "-md") == 0) {
             if (argc < 2) {
                 std::cerr << "Please use curcuma for test md assignment as follows:\ncurcuma -md input.xyz" << std::endl;
                 return 0;

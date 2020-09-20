@@ -75,8 +75,23 @@ void RMSDTraj::start()
     if (m_pairwise) {
         m_pairwise_file.open(outfile + "_pairwise.dat");
     }
-    json rmsd = RMSDJson;
-    RMSDDriver* driver = new RMSDDriver();
+
+    json RMSDJsonControl = {
+        { "reorder", false },
+        { "check", false },
+        { "heavy", false },
+        { "fragment", -1 },
+        { "fragment_reference", -1 },
+        { "fragment_target", -1 },
+        { "init", -1 },
+        { "pt", 0 },
+        { "silent", true },
+        { "storage", 1.0 },
+        { "method", "incr" },
+        { "noreorder", true },
+        { "threads", 1 }
+    };
+    RMSDDriver* driver = new RMSDDriver(RMSDJsonControl);
     driver->setSilent(true);
     driver->setProtons(!m_heavy);
     driver->setForceReorder(false);

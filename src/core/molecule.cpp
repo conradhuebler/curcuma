@@ -158,6 +158,8 @@ void Molecule::setXYZComment(const std::string& comment)
     StringList list = Tools::SplitString(comment);
     if (list.size() == 7) {
         setXYZComment_7(list);
+    } else if (list.size() == 6) {
+        setXYZComment_6(list);
     } else if (list.size() == 4) {
         setXYZComment_4(list);
     } else if (list.size() == 1) {
@@ -233,6 +235,11 @@ bool Molecule::setXYZComment_5(const StringList& list)
 
 bool Molecule::setXYZComment_6(const StringList& list)
 {
+    try {
+        setEnergy(std::stod((list[3])));
+    } catch (const std::string& what_arg) {
+        setEnergy(0);
+    }
     return true;
 }
 
