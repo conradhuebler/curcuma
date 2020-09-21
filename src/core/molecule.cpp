@@ -64,6 +64,38 @@ Molecule::Molecule(const Molecule* other)
     m_energy = other->m_energy;
 }
 
+Molecule::Molecule(const std::string& file)
+{
+    std::vector<std::string> lines;
+    int atoms = 0;
+    int index = 0;
+    int i = 0;
+    bool xyzfile = std::string(file).find(".xyz") != std::string::npos || std::string(file).find(".trj") != std::string::npos;
+    if (xyzfile) {
+        auto m_file = new std::ifstream(file);
+        for (std::string line; getline(*m_file, line);) {
+            if (index == 0 && xyzfile) {
+                atoms = stoi(line);
+                InitialiseEmptyGeometry(atoms);
+            }
+            if (xyzfile) {
+                if (i == 1)
+                    setXYZComment(line);
+                if (i > 1) {
+                    setXYZ(line, i - 2);
+                }
+                if (i - 1 == atoms) {
+                    break;
+                }
+                ++i;
+            } else {
+                setAtom(line, i);
+            }
+            index++;
+        }
+    }
+}
+
 Molecule::~Molecule()
 {
 }
@@ -246,7 +278,11 @@ bool Molecule::setXYZComment_6(const StringList& list)
 bool Molecule::setXYZComment_7(const StringList& list)
 {
     if (list[2].compare("gnorm:") == 0) {
-        //setEnergy(std::stod((list[1])));
+        try {
+            setEnergy(std::stod((list[1])));
+        } catch (const std::string& what_arg) {
+            setEnergy(0);
+        }
     } else
         try {
             setEnergy(std::stod((list[4])));
@@ -306,11 +342,8 @@ double Molecule::angle(int atom1, int atom2, int atom3) const
     return acos(DotProduct(vec_1,vec_2)/(sqrt(DotProduct(vec_1,vec_1)*DotProduct(vec_2,vec_2))))*360/2.0/pi;
 }
 
-
-
-void Molecule::setAtom(const std::string& internal, int i)
+void Molecule::ParseString(const std::string& internal, std::vector<std::string>& elements)
 {
-    std::vector<std::string > elements;
     std::string element;
     const char *delim = " ";
     for (const char & c : internal)
@@ -325,8 +358,15 @@ void Molecule::setAtom(const std::string& internal, int i)
             element.clear();
         }
     }
-                    
+
     elements.push_back(element);
+}
+
+void Molecule::setAtom(const std::string& internal, int i)
+{
+    std::vector<std::string> elements;
+    ParseString(internal, elements);
+
     m_atoms.push_back(Elements::String2Element(elements[0]));
 
     if(elements.size() == 7)
@@ -354,22 +394,8 @@ void Molecule::setAtom(const std::string& internal, int i)
 void Molecule::setXYZ(const std::string& internal, int i)
 {
     std::vector<std::string > elements;
-    std::string element;
-    const char *delim = " ";
-    for (const char & c : internal)
-    {
-        if(*delim != c)
-            element.push_back(c);
-        else
-        {
-            if (element.size()) {
-                elements.push_back(element);
-            }
-            element.clear();
-        }
-    }
+    ParseString(internal, elements);
 
-    elements.push_back(element);
     m_atoms.push_back(Elements::String2Element(elements[0]));
 
     if (elements.size() >= 4) {

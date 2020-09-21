@@ -28,6 +28,7 @@
 
 #include "src/core/fileiterator.h"
 #include "src/core/molecule.h"
+#include "src/core/xtbinterface.h"
 
 #include "src/tools/general.h"
 
@@ -90,6 +91,7 @@ void ConfScan::LoadControlJson()
         if (m_useorders == -1)
             m_useorders = 10;
     }
+    m_gfn = Json2KeyWord<int>(m_defaults, "GFN");
 }
 
 bool ConfScan::openFile()
@@ -104,7 +106,17 @@ bool ConfScan::openFile()
     FileIterator file(m_filename);
     while (!file.AtEnd()) {
         Molecule* mol = new Molecule(file.Next());
-        m_ordered_list.insert(std::pair<double, int>(mol->Energy(), molecule));
+        double energy = mol->Energy();
+        if (energy < 1e-5 || m_gfn != -1) {
+            XTBInterface interface; // As long as xtb leaks, we have to put it heare
+                // I might not leak really, but was unable to clear everything
+            if (m_gfn == -1)
+                m_gfn = 2;
+            interface.InitialiseMolecule(mol);
+            energy = interface.GFNCalculation(m_gfn, 0);
+            //interface.clear();
+        }
+        m_ordered_list.insert(std::pair<double, int>(energy, molecule));
         molecule++;
         if (m_noname)
             mol->setName(NamePattern(molecule));

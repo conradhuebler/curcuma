@@ -88,6 +88,7 @@ public:
     }
 
     inline const std::map<double, std::vector<int>>* data() const { return &m_shelf; }
+    inline int size() const { return data()->size(); }
 
 private:
     unsigned int m_size;
@@ -220,4 +221,18 @@ inline void PrintController(const json& controller)
 {
     for (const auto& entry : controller.items())
         std::cout << entry.key() << ": " << entry.value() << std::endl;
+}
+
+inline int MaxThreads()
+{
+    int threads = 1;
+    const char* val = std::getenv("CurcumaThreads");
+    if (val == nullptr) { // invalid to assign nullptr to std::string
+    } else {
+        try {
+            threads = atoi(std::getenv("CurcumaThreads"));
+        } catch (const std::invalid_argument& error) {
+        }
+    }
+    return threads;
 }

@@ -49,6 +49,8 @@ XTBInterface::~XTBInterface()
 
 bool XTBInterface::InitialiseMolecule(const Molecule& molecule)
 {
+    if (m_initialised)
+        UpdateMolecule(molecule);
     int const natoms = molecule.AtomCount();
     double const charge = 0.0;
 
@@ -66,14 +68,39 @@ bool XTBInterface::InitialiseMolecule(const Molecule& molecule)
     return InitialiseMolecule(attyp, coord, natoms, charge);
 }
 
+bool XTBInterface::InitialiseMolecule(const Molecule* molecule)
+{
+    if (m_initialised)
+        UpdateMolecule(molecule);
+    int const natoms = molecule->AtomCount();
+    double const charge = 0.0;
+
+    int attyp[natoms];
+    std::vector<int> atoms = molecule->Atoms();
+    double coord[3 * natoms];
+
+    for (int i = 0; i < atoms.size(); ++i) {
+        std::pair<int, Position> atom = molecule->Atom(i);
+        coord[3 * i + 0] = atom.second(0) / au;
+        coord[3 * i + 1] = atom.second(1) / au;
+        coord[3 * i + 2] = atom.second(2) / au;
+        attyp[i] = atoms[i];
+    }
+    return InitialiseMolecule(attyp, coord, natoms, charge);
+}
+
 bool XTBInterface::InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge)
 {
+    if (m_initialised)
+        UpdateMolecule(coord);
+
 #ifdef USE_XTB
     m_mol = xtb_newMolecule(m_env, &natoms, attyp, coord, &charge, NULL, NULL, NULL);
     if (xtb_checkEnvironment(m_env)) {
         xtb_showEnvironment(m_env, NULL);
         return false;
     }
+    m_initialised = true;
     return true;
 #else
     return false;
@@ -159,4 +186,10 @@ double XTBInterface::GFNCalculation(int parameter, double* grad)
     throw("XTB is not included, sorry for that");
 #endif
     return energy;
+}
+
+void XTBInterface::clear()
+{
+    xtb_delResults(&m_res);
+    m_res = xtb_newResults();
 }

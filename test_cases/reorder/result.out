@@ -1,0 +1,33 @@
+*************************************************
+*   Curcuma - Simple Molecular Modelling tool   *
+*                                               *
+*    Written by Conrad Hübler TU Freiberg       *
+*                                               *
+*    Visit the website for initial usage        *
+*    https://github.com/conradhuebler/curcuma   *
+*                                               *
+*    This program comes without any warranty    *
+*    It might even be total useless             *
+*                                               *
+*    Nothing to cite yet ...                    *
+*    Git Commit Hash: e3f2063                   *
+*                                               *
+*************************************************
+curcuma -rmsd input_aa.xyz input_ab.xyz -threads 12 -silent 
+Started computation at Mon Sep 21 23:54:19 2020
+
+check: false
+fragment: -1
+fragment_reference: -1
+fragment_target: -1
+heavy: false
+init: -1
+method: "incr"
+noreorder: false
+pt: 0
+reorder: false
+silent: true
+storage: 1.0
+threads: 12.0
+RMSD for two molecules 2.05127
+ 2|3|4|5|0|1|62|63|65|66|64|67|68|69|70|76|72|75|74|73|71|53|83|84|85|86|82|78|80|28|81|87|88|77|6|7|10|89|9|11|8|13|14|15|16|17|18|19|20|31|50|25|52|21|26|27|23|30|29|12|33|32|34|35|38|37|36|39|40|41|42|47|44|46|55|45|43|61|48|56|58|59|57|22|51|24|54|49|60|79 

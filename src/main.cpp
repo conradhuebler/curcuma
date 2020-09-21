@@ -1,5 +1,5 @@
 /*
- * <Internal Coordinate Handler for chemical structures.>
+ * <Curcuma main file.>
  * Copyright (C) 2019 - 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
  * 
  * This program is free software: you can redistribute it and/or modify

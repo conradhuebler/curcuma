@@ -122,7 +122,6 @@ void RMSDDriver::LoadControlJson()
 
 void RMSDDriver::start()
 {
-
     RunTimer timer(false);
 
     //m_intermedia_storage = 1;
@@ -276,7 +275,9 @@ void RMSDDriver::ReorderIncremental()
         int i = reference.AtomCount();
         double mass = m_reference.ConnectedMass(i);
         auto atom = m_reorder_reference.Atom(i);
-        std::cout << i / double(m_reorder_reference.AtomCount()) * 100 << " % " << std::endl;
+        if (!m_silent) {
+            std::cout << int(i / double(m_reorder_reference.AtomCount()) * 100) << " % " << std::endl;
+        }
         int element = atom.first;
         reference.addPair(atom);
         m_reorder_reference_geometry = reference.getGeometry();
@@ -728,9 +729,9 @@ std::pair<Molecule, LimitedStorage> RMSDDriver::InitialisePair()
                 if (m_reorder_target.Atom(j).first == 1) // Skip second atom if Proton
                     continue;
                 if (tmp_reference[0] == elements_target[i] && tmp_reference[1] == elements_target[j])
-                    m_intermediate_results.push_back({ i, j });
+                    storage.addItem({ i, j }, storage.size());
                 if (tmp_reference[0] == elements_target[j] && tmp_reference[1] == elements_target[i])
-                    m_intermediate_results.push_back({ j, i });
+                    storage.addItem({ j, i }, storage.size());
             }
         }
     } else {
@@ -739,8 +740,6 @@ std::pair<Molecule, LimitedStorage> RMSDDriver::InitialisePair()
             start.push_back(i);
         m_intermediate_results.push_back(start);
     }
-    for (int i = 0; i < m_intermediate_results.size(); ++i)
-        storage.addItem(m_intermediate_results[i], i);
     return std::pair<Molecule, LimitedStorage>(reference, storage);
 }
 

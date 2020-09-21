@@ -126,7 +126,7 @@ configure_file(
   "${CMAKE_BINARY_DIR}/src/version.h"
 )
 
-add_executable(curcuma
+set(curcuma_core_SRC
         src/capabilities/optimiser/LBFGSInterface.h
         src/capabilities/curcumamethod.cpp
         src/capabilities/confscan.cpp
@@ -141,7 +141,19 @@ add_executable(curcuma
         src/core/pseudoff.cpp
         src/tools/geometry.h
         src/tools/general.h
-        src/main.cpp)
+        )
+    add_library(curcuma_core  ${curcuma_core_SRC})
+
+    add_executable(curcuma
+            src/main.cpp)
+
+        target_link_libraries(curcuma curcuma_core)
+if(C17)
+    set_property(TARGET curcuma_core PROPERTY CXX_STANDARD 17)
+else()
+    set_property(TARGET curcuma_core PROPERTY CXX_STANDARD 14)
+endif(C17)
+
 if(C17)
     set_property(TARGET curcuma PROPERTY CXX_STANDARD 17)
 else()
@@ -160,8 +172,10 @@ endif()
 
 
 add_executable(curcuma_helper
-        src/core/molecule.cpp
         src/helpers/main.cpp)
+
+    target_link_libraries(curcuma_helper curcuma_core)
+
 
 if(C17)
     set_property(TARGET curcuma_helper PROPERTY CXX_STANDARD 17)
@@ -185,6 +199,8 @@ if(USE_XTB)
         target_link_libraries(xtb_helper ${XTB_DIR}/libxtb.so pthread dl)
     endif()
 endif()
+
+add_subdirectory(test_cases)
 
 install(TARGETS curcuma RUNTIME DESTINATION bin)
 install(TARGETS curcuma_helper RUNTIME DESTINATION bin)

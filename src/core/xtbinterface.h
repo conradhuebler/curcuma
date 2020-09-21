@@ -29,6 +29,7 @@ public:
     ~XTBInterface();
 
     bool InitialiseMolecule(const Molecule& molecule);
+    bool InitialiseMolecule(const Molecule* molecule);
     bool InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge);
 
     bool UpdateMolecule(const Molecule& molecule);
@@ -42,6 +43,8 @@ public:
      * */
     double GFNCalculation(int parameter = 2, double* grad = 0);
 
+    void clear();
+
 private:
 #ifdef USE_XTB
     double m_thr = 1.0e-10;
@@ -50,4 +53,5 @@ private:
     xtb_TCalculator m_calc;
     xtb_TResults m_res;
 #endif
+    bool m_initialised = false;
 };

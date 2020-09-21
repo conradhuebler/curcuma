@@ -35,6 +35,8 @@ class Molecule
     Molecule(int n, int q = 0);
     Molecule(const Molecule* other);
     Molecule(const Molecule& other);
+    Molecule(const std::string& file);
+
     Molecule();
     ~Molecule();
 
@@ -120,6 +122,8 @@ class Molecule
     Matrix HydrogenBondMatrix(int f1, int f2);
 
 private:
+    void ParseString(const std::string& internal, std::vector<std::string>& elements);
+
     bool setXYZComment_0(const StringList& list);
     bool setXYZComment_1(const StringList& list);
     bool setXYZComment_2(const StringList& list);
