@@ -78,7 +78,10 @@ public:
             coord[3 * i + 2] = x(3 * i + 2) / au;
         }
         m_interface->UpdateMolecule(coord);
+        //try {
         fx = m_interface->GFNCalculation(m_method, gradient);
+        //} catch (const std::logic_error& error) {
+        // }
 
         for (int i = 0; i < m_atoms; ++i) {
             grad[3 * i + 0] = gradient[3 * i + 0];
@@ -175,7 +178,11 @@ inline Molecule OptimiseGeometry(const Molecule* host, const json& controller)
     }
     int atoms_count = host->AtomCount();
     for (int outer = 0; outer < OuterLoop; ++outer) {
-        int niter = solver.minimize(fun, parameter, fx);
+        int niter = 0;
+        try {
+            niter = solver.minimize(fun, parameter, fx);
+        } catch (const std::logic_error& error) {
+        }
         parameter = fun.Parameter();
 
         for (int i = 0; i < atoms_count; ++i) {
