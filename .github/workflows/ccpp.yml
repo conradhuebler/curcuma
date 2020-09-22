@@ -23,9 +23,12 @@ jobs:
 #    - name: Deploy
 #      run: sh scripts/deploy_unix.sh
       
-#    - uses: actions/upload-artifact@v1
-#      with:
-#        name: SupraFit
-#        path: ./build/bin/linux/SupraFit-nightly-x86_64.AppImage
+    - uses: actions/upload-artifact@v1
+      with:
+        name: Curcuma_no_xtb
+        path: curcuma_no_xtb.tar.xz
 
-
+    - uses: actions/upload-artifact@v1
+      with:
+        name: Curcuma_xtb
+        path: curcuma_xtb.tar.xz

@@ -159,6 +159,9 @@ else()
     set_property(TARGET curcuma PROPERTY CXX_STANDARD 14)
 endif(C17)
 
+set_property(TARGET curcuma PROPERTY LINK_FLAGS_RELEASE -s)
+set_property(TARGET curcuma PROPERTY LINK_FLAGS_RELWITHDEBINFO -s)
+
 if(USE_XTB)
     if(COMPILE_XTB)
         target_link_libraries(curcuma_core lib-xtb-shared pthread dl)
@@ -175,7 +178,9 @@ add_executable(curcuma_helper
         src/helpers/main.cpp)
 
     target_link_libraries(curcuma_helper curcuma_core)
-
+    
+set_property(TARGET curcuma_helper PROPERTY LINK_FLAGS_RELEASE -s)
+set_property(TARGET curcuma_helper PROPERTY LINK_FLAGS_RELWITHDEBINFO -s)
 
 if(C17)
     set_property(TARGET curcuma_helper PROPERTY CXX_STANDARD 17)

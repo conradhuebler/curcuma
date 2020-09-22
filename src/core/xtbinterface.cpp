@@ -190,6 +190,8 @@ double XTBInterface::GFNCalculation(int parameter, double* grad)
 
 void XTBInterface::clear()
 {
+#ifdef USE_XTB
     xtb_delResults(&m_res);
     m_res = xtb_newResults();
+#endif
 }
