@@ -1,8 +1,8 @@
 #!/bin/bash
 set -ex
 
-export CXX="g++-8"
-export CC="gcc-8"
+export CXX="g++-9"
+export CC="gcc-9"
 git submodule init
 git submodule update --recursive
 # check submodules, seems not to work automatically
@@ -28,8 +28,9 @@ cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo .. -DCOMPILE_XTB=true -DCMAKE_INSTALL_PR
 make
 make install
 cd ..
-
-tar cJf curcuma_no_xtb.tar.xz ~/curcuma_no_xtb/
-tar cJf curcuma_xtb.tar.xz ~/curcuma_xtb/
+cp -r ~/curcuma_no_xtb .
+cp -r ~/curcuma_xtb .
+tar cJf curcuma_no_xtb.tar.xz curcuma_no_xtb
+tar cJf curcuma_xtb.tar.xz curcuma_xtb
 
 

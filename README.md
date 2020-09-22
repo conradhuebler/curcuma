@@ -1,4 +1,4 @@
-[![CodeFactor](https://www.codefactor.io/repository/github/conradhuebler/curcuma/badge)](https://www.codefactor.io/repository/github/conradhuebler/curcuma) ![Build](https://github.com/conradhuebler/curcuma/workflows/AutomaticBuild/badge.svg) 
+[![CodeFactor](https://www.codefactor.io/repository/github/conradhuebler/curcuma/badge)](https://www.codefactor.io/repository/github/conradhuebler/curcuma) ![Build](https://github.com/conradhuebler/curcuma/workflows/AutomaticBuild/badge.svg)(https://github.com/conradhuebler/curcuma/actions) 
 
 # Curcuma
 
