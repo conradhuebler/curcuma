@@ -1,6 +1,3 @@
-[submodule "external/eigen"]
-	path = external/eigen
-	url = https://gitlab.com/libeigen/eigen.git
 [submodule "external/xtb"]
 	path = external/xtb
 	url = https://github.com/grimme-lab/xtb

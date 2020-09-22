@@ -147,7 +147,6 @@ set(curcuma_core_SRC
     add_executable(curcuma
             src/main.cpp)
 
-        target_link_libraries(curcuma curcuma_core)
 if(C17)
     set_property(TARGET curcuma_core PROPERTY CXX_STANDARD 17)
 else()
@@ -162,14 +161,15 @@ endif(C17)
 
 if(USE_XTB)
     if(COMPILE_XTB)
-        target_link_libraries(curcuma lib-xtb-shared pthread dl)
+        target_link_libraries(curcuma_core lib-xtb-shared pthread dl)
     else()
-        target_link_libraries(curcuma ${XTB_DIR}/libxtb.so pthread dl)
+        target_link_libraries(curcuma_core ${XTB_DIR}/libxtb.so pthread dl)
     endif()
 else()
-    target_link_libraries(curcuma  pthread dl)
+    target_link_libraries(curcuma_core pthread dl)
 endif()
 
+        target_link_libraries(curcuma curcuma_core)
 
 add_executable(curcuma_helper
         src/helpers/main.cpp)

@@ -1,12 +1,15 @@
+[![CodeFactor](https://www.codefactor.io/repository/github/conradhuebler/curcuma/badge)](https://www.codefactor.io/repository/github/conradhuebler/curcuma) ![Build](https://github.com/conradhuebler/curcuma/workflows/AutomaticBuild/badge.svg) 
+
 # Curcuma
 
 A simple Open Source molecular modelling tool.
 
 ## Download and requirements
 git clones automatically some submodules.
-- [eigen](https://gitlab.com/libeigen/eigen) provides eigen C++ library for linear algebra. If eigen is not downloaded automatically, change into the **external** subdirectory and clone eigen.
 - [LBFGSpp](https://github.com/yixuan/LBFGSpp/) prvodies LBFGS optimiser
 - [XTB](https://github.com/grimme-lab/xtb) eXtended TightBinding - Some methods use this, however it is disabled by default. Add '-DUSE_XTB=true ' to the cmake command line to enable it. GCC 8 or later has to be used.
+- [CxxThreadPool](https://github.com/conradhuebler/CxxThreadPool) - C++ Thread Pool for parallel calculation
+- [eigen](https://gitlab.com/libeigen/eigen) provides eigen C++ library for linear algebra. Eigen is not downloaded automatically, but will be fetched and updated if the build scripts in the **scripts** subdirectory are used.
 
 ### Using XTB in curcuma
 XTB is automatically obtained during git clone, however it is not included in curcuma with the default compiler settings. There are two ways of including XTB:

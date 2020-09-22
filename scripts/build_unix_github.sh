@@ -9,6 +9,7 @@ git submodule update --recursive
 
 cd external
 for i in $(ls -d */); do cd $i; git checkout master; git submodule init; git submodule update --recursive; cd ..; done
+git clone https://gitlab.com/libeigen/eigen.git/
 cd ..
 
 mkdir -p release
