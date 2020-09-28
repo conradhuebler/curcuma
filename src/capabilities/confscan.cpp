@@ -107,7 +107,7 @@ bool ConfScan::openFile()
     while (!file.AtEnd()) {
         Molecule* mol = new Molecule(file.Next());
         double energy = mol->Energy();
-        if (energy < 1e-5 || m_gfn != -1) {
+        if (std::abs(energy) < 1e-5 || m_gfn != -1) {
             XTBInterface interface; // As long as xtb leaks, we have to put it heare
                 // I might not leak really, but was unable to clear everything
             if (m_gfn == -1)
