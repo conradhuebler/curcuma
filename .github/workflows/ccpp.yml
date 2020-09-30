@@ -11,7 +11,7 @@ on:
 jobs:
   linux:
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-16.04
     
     steps:
     - uses: actions/checkout@v1
@@ -19,20 +19,10 @@ jobs:
         submodules: true
     - name: Update Modules and Build
       run: sh scripts/build_unix_github.sh
-      
-#    - name: Deploy
-#      run: sh scripts/deploy_unix.sh
-      
-#    - uses: actions/upload-artifact@v1
-#      with:
-#        name: Curcuma_no_xtb
-#        path: curcuma_no_xtb.tar.xz
 
-#    - uses: actions/upload-artifact@v1
-#      with:
-#        name: Curcuma_xtb
-#        path: curcuma_xtb.tar.xz
-
+    - name: Deploy
+      run: sh scripts/deploy_unix_github.sh 
+      
     - name: Create Release
       id: create_release
       uses: actions/create-release@v1
@@ -51,8 +41,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./curcuma_no_xtb.tar.xz
-        asset_name: Curcuma
+        asset_path: ./packages/curcuma-nightly-x86_64.AppImage
+        asset_name: curcuma
         asset_content_type: application/zip
         
 

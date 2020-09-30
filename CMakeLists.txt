@@ -159,6 +159,7 @@ else()
     set_property(TARGET curcuma PROPERTY CXX_STANDARD 14)
 endif(C17)
 
+set(target_dir "bin")
 set_property(TARGET curcuma PROPERTY LINK_FLAGS_RELEASE -s)
 set_property(TARGET curcuma PROPERTY LINK_FLAGS_RELWITHDEBINFO -s)
 
