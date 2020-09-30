@@ -8,7 +8,7 @@ git submodule update --recursive
 # check submodules, seems not to work automatically
 
 cd external
-for i in $(ls -d */); do cd $i; git checkout master; git submodule init; git submodule update --recursive; cd ..; done
+for i in $(ls -d */); do cd $i; git checkout master; git submodule init; git submodule update --recursive; git pull; cd ..; done
 if [ ! -e "eigen" ]
 	then
 		git clone https://gitlab.com/libeigen/eigen.git/
