@@ -3,6 +3,7 @@ set -ex
 
 export CXX="g++-9"
 export CC="gcc-9"
+export FC="gfortran-9"
 git submodule init
 git submodule update --recursive
 # check submodules, seems not to work automatically
