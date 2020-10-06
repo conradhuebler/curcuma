@@ -122,6 +122,7 @@ void RMSDTraj::start()
     }
 
     bool xyzfile = std::string(m_filename).find(".xyz") != std::string::npos || std::string(m_filename).find(".trj") != std::string::npos;
+    Molecule initial(atoms, 0);
     Molecule mol(atoms, 0);
     Molecule mol_2(atoms2, 0);
     for (std::string line; getline(input, line);) {
@@ -198,6 +199,7 @@ void RMSDTraj::start()
                     if (m_writeUnique)
                         mol.appendXYZFile(outfile + "_unique.xyz");
                     m_stored_structures.push_back(mol);
+                    initial = mol;
                 } else {
                     for (std::size_t i = 0; i < mol.GetFragments().size(); ++i)
                         if (mol.getGeometryByFragment(i).rows() == atoms_target) {
@@ -208,35 +210,41 @@ void RMSDTraj::start()
                 driver->setScaling(1.3);
                 if (m_pairwise == false) {
                     std::vector<double> rmsd_results;
-                    for (std::size_t mols = 0; mols < m_stored_structures.size(); ++mols) {
-                        driver->setReference(m_stored_structures[mols]);
-                        driver->setTarget(mol);
-                        driver->start();
-                        if (mols == 0) {
-                            {
-                                m_rmsd_file << driver->RMSD() << std::endl;
-                                m_rmsd_vector.push_back(driver->RMSD());
-                                if (m_writeAligned) {
-                                    driver->TargetAligned().appendXYZFile(outfile + "_aligned.xyz");
-                                }
-                            }
-                            Molecule mol2 = driver->TargetAligned();
-                            if (m_pcafile) {
-                                for (std::size_t j = 0; j < mol2.AtomCount(); ++j) {
-                                    if (mol2.Atom(j).first != 1)
-                                        m_pca_file << mol2.Atom(j).second(0) << " " << mol2.Atom(j).second(1) << " " << mol2.Atom(j).second(2);
-                                }
-                                m_pca_file << std::endl;
-                            }
-                        }
-                        rmsd_results.push_back(driver->RMSD());
+
+                    driver->setReference(initial);
+                    driver->setTarget(mol);
+                    driver->start();
+                    m_rmsd_file << driver->RMSD() << std::endl;
+                    m_rmsd_vector.push_back(driver->RMSD());
+                    if (m_writeAligned) {
+                        driver->TargetAligned().appendXYZFile(outfile + "_aligned.xyz");
                     }
-                    if (m_writeUnique) {
-                        int add = 0;
-                        for (double rmsd : rmsd_results) {
-                            add += rmsd > m_rmsd_threshold;
+
+                    if (m_pcafile) {
+                        Molecule mol2 = driver->TargetAligned();
+                        for (std::size_t j = 0; j < mol2.AtomCount(); ++j) {
+                            if (mol2.Atom(j).first != 1)
+                                m_pca_file << mol2.Atom(j).second(0) << " " << mol2.Atom(j).second(1) << " " << mol2.Atom(j).second(2);
                         }
-                        if (add == rmsd_results.size()) {
+                        m_pca_file << std::endl;
+                    }
+
+                    double first_rmsd = driver->RMSD();
+                    if (m_writeUnique) {
+                        bool perform_rmsd = true;
+
+                        for (std::size_t mols = m_stored_structures.size() - 1; mols > 0 && perform_rmsd; --mols) {
+                            driver->setReference(m_stored_structures[mols]);
+                            driver->setTarget(mol);
+                            driver->start();
+
+                            rmsd_results.push_back(driver->RMSD());
+                            perform_rmsd = driver->RMSD() > m_rmsd_threshold;
+                        }
+                        perform_rmsd = first_rmsd > m_rmsd_threshold && perform_rmsd;
+                        rmsd_results.push_back(first_rmsd);
+
+                        if (perform_rmsd) {
                             m_stored_structures.push_back(mol);
                             mol.appendXYZFile(outfile + "_unique.xyz");
                             std::cout << "New structure added ... ( " << m_stored_structures.size() << "). " << int(index / double(max) * 100) << " % done ...!" << std::endl;
