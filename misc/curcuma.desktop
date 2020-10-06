@@ -1,0 +1,14 @@
+#!/usr/bin/xdg-open
+[Desktop Entry]
+Comment[de_DE]=curcuma
+Comment=curcuma
+Exec=curcuma
+GenericName[de_DE]=curcuma
+GenericName=curcuma
+Icon=curcuma
+MimeType=
+Name[de_DE]=curcuma
+Name=curcuma
+Terminal=true
+Type=Application
+Categories=Science;Education;Chemistry;

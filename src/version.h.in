@@ -4,7 +4,8 @@
 #include <string>
 
 const std::string git_commit_hash = "@GIT_COMMIT_HASH@"; /*! Current hash of the git branch */
-const  std::string git_branch = "@GIT_BRANCH@";      /*! Current name of the branch as printable string    */
+const std::string git_branch = "@GIT_BRANCH@";      /*! Current name of the branch as printable string    */
+const std::string git_tag = "@GIT_COMMIT_TAG@";      /*! Current name of the branch as printable string    */
 
 #ifdef _UNIX
 const  std::string git_date = "Commit Date: @GIT_COMMIT_DATE@"; /*! Current date of the git branch branch as printable string*/

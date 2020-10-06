@@ -23,6 +23,14 @@ execute_process(
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
+# Get the latest tag within the working branch
+execute_process(
+  COMMAND git describe --tags
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  OUTPUT_VARIABLE GIT_COMMIT_TAG
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
 # Get the latest abbreviated commit hash of the working branch
 execute_process(
   COMMAND git log -1 --format=%h
@@ -43,7 +51,7 @@ endif(UNIX)
 add_definitions("-DGIT_COMMIT_HASH=${GIT_COMMIT_HASH}")
 add_definitions("-DGIT_BRANCH=${GIT_BRANCH}")
 add_definitions("-DGIT_COMMIT_DATE=${GIT_COMMIT_DATE}")
-
+add_definitions("-DGIT_COMMIT_TAG=${GIT_COMMIT_TAG}")
 
 if(CMAKE_COMPILER_IS_GNUCXX)
     set (_UNIX  ON)
