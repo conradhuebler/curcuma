@@ -121,158 +121,86 @@ void RMSDTraj::start()
         second.open(m_second_file);
     }
 
-    bool xyzfile = std::string(m_filename).find(".xyz") != std::string::npos || std::string(m_filename).find(".trj") != std::string::npos;
     Molecule initial(atoms, 0);
     Molecule mol(atoms, 0);
     Molecule mol_2(atoms2, 0);
-    for (std::string line; getline(input, line);) {
-        std::string line2;
-        if (m_pairwise) {
-            getline(second, line2);
+
+    FileIterator file(m_filename);
+    while (!file.AtEnd()) {
+        Molecule mol(file.Next());
+        index += mol.AtomCount();
+
+        if (m_stored_structures.size() == 0) {
+            if (m_writeUnique)
+                mol.appendXYZFile(outfile + "_unique.xyz");
+            m_stored_structures.push_back(mol);
+            initial = mol;
+        } else {
+            for (std::size_t i = 0; i < mol.GetFragments().size(); ++i)
+                if (mol.getGeometryByFragment(i).rows() == atoms_target) {
+                    driver->setFragmentTarget(i);
+                    driver->setPartialRMSD(true);
+                }
         }
-        if (index == 0 && xyzfile) {
-            atoms = stoi(line);
-            mol = Molecule(atoms, 0);
-            molecule++;
-            mol.setName(std::to_string(molecule));
+        driver->setScaling(1.3);
+        if (m_pairwise == false) {
+            std::vector<double> rmsd_results;
 
-            if (m_pairwise) {
-                atoms2 = stoi(line2);
+            driver->setReference(initial);
+            driver->setTarget(mol);
+            driver->start();
+            m_rmsd_file << driver->RMSD() << std::endl;
+            m_rmsd_vector.push_back(driver->RMSD());
+            if (m_writeAligned) {
+                driver->TargetAligned().appendXYZFile(outfile + "_aligned.xyz");
+            }
 
-                if (atoms2 != atoms) {
-                    std::cout << "Different atom count in structures " << std::endl;
-                    return;
+            if (m_pcafile) {
+                Molecule mol2 = driver->TargetAligned();
+                for (std::size_t j = 0; j < mol2.AtomCount(); ++j) {
+                    if (mol2.Atom(j).first != 1)
+                        m_pca_file << mol2.Atom(j).second(0) << " " << mol2.Atom(j).second(1) << " " << mol2.Atom(j).second(2);
                 }
-                mol_2 = Molecule(atoms2, 0);
-                mol_2.setName(std::to_string(molecule));
+                m_pca_file << std::endl;
             }
-        }
-        if (xyzfile) {
-            if (i > 1) {
-                mol.setXYZ(line, i - 2);
-                if (m_pairwise)
-                    mol_2.setXYZ(line2, i - 2);
-            }
-            if (i == 1) {
-                StringList list = Tools::SplitString(line);
-                if (list.size() == 4) {
-                    if (list[0].compare("SCF") == 0 && list[1].compare("done") == 0) {
-                        try {
-                            mol.setEnergy(std::stod((list[2])));
-                        } catch (const std::string& what_arg) {
-                            mol.setEnergy(0);
-                        }
-                    } else {
-                        if (list[3] == "")
-                            mol.setEnergy(0);
-                        else {
-                            try {
-                                mol.setEnergy(std::stod((list[3])));
-                            } catch (const std::string& what_arg) {
-                                mol.setEnergy(0);
-                            }
-                        }
-                    }
-                } else if (list.size() == 2) {
-                    try {
-                        mol.setEnergy(std::stod((list[0])));
-                    } catch (const std::string& what_arg) {
-                    }
-                } else if (list.size() == 1) {
-                    try {
-                        mol.setEnergy(std::stod((list[0])));
-                    } catch (const std::string& what_arg) {
-                    }
-                } else {
-                    for (const std::string& s : list) {
-                        double energy = 0;
-                        if (Tools::isDouble(s)) {
-                            energy = std::stod(s);
-                            mol.setEnergy(energy);
-                            break;
-                        }
-                    }
-                }
-            }
-            if (i - 1 == atoms) {
-                if (m_stored_structures.size() == 0) {
-                    if (m_writeUnique)
-                        mol.appendXYZFile(outfile + "_unique.xyz");
-                    m_stored_structures.push_back(mol);
-                    initial = mol;
-                } else {
-                    for (std::size_t i = 0; i < mol.GetFragments().size(); ++i)
-                        if (mol.getGeometryByFragment(i).rows() == atoms_target) {
-                            driver->setFragmentTarget(i);
-                            driver->setPartialRMSD(true);
-                        }
-                }
-                driver->setScaling(1.3);
-                if (m_pairwise == false) {
-                    std::vector<double> rmsd_results;
 
-                    driver->setReference(initial);
+            double first_rmsd = driver->RMSD();
+            if (m_writeUnique) {
+                bool perform_rmsd = true;
+
+                for (std::size_t mols = m_stored_structures.size() - 1; mols > 0 && perform_rmsd; --mols) {
+                    driver->setReference(m_stored_structures[mols]);
                     driver->setTarget(mol);
                     driver->start();
-                    m_rmsd_file << driver->RMSD() << std::endl;
-                    m_rmsd_vector.push_back(driver->RMSD());
-                    if (m_writeAligned) {
-                        driver->TargetAligned().appendXYZFile(outfile + "_aligned.xyz");
-                    }
 
-                    if (m_pcafile) {
-                        Molecule mol2 = driver->TargetAligned();
-                        for (std::size_t j = 0; j < mol2.AtomCount(); ++j) {
-                            if (mol2.Atom(j).first != 1)
-                                m_pca_file << mol2.Atom(j).second(0) << " " << mol2.Atom(j).second(1) << " " << mol2.Atom(j).second(2);
-                        }
-                        m_pca_file << std::endl;
-                    }
-
-                    double first_rmsd = driver->RMSD();
-                    if (m_writeUnique) {
-                        bool perform_rmsd = true;
-
-                        for (std::size_t mols = m_stored_structures.size() - 1; mols > 0 && perform_rmsd; --mols) {
-                            driver->setReference(m_stored_structures[mols]);
-                            driver->setTarget(mol);
-                            driver->start();
-
-                            rmsd_results.push_back(driver->RMSD());
-                            perform_rmsd = driver->RMSD() > m_rmsd_threshold;
-                        }
-                        perform_rmsd = first_rmsd > m_rmsd_threshold && perform_rmsd;
-                        rmsd_results.push_back(first_rmsd);
-
-                        if (perform_rmsd) {
-                            m_stored_structures.push_back(mol);
-                            mol.appendXYZFile(outfile + "_unique.xyz");
-                            std::cout << "New structure added ... ( " << m_stored_structures.size() << "). " << int(index / double(max) * 100) << " % done ...!" << std::endl;
-                        }
-                    }
-                } else {
-                    driver->setReference(mol);
-                    driver->setTarget(mol_2);
-                    driver->start();
-                    m_pairwise_file << driver->RMSD() << std::endl;
+                    rmsd_results.push_back(driver->RMSD());
+                    perform_rmsd = driver->RMSD() > m_rmsd_threshold;
                 }
-                i = -1;
-                mol = Molecule(atoms, 0);
-                molecule++;
-                mol.setName(std::to_string(molecule));
-                if (m_pairwise) {
-                    mol_2 = Molecule(atoms, 0);
-                    mol_2.setName(std::to_string(molecule));
+                perform_rmsd = first_rmsd > m_rmsd_threshold && perform_rmsd;
+                rmsd_results.push_back(first_rmsd);
+
+                if (perform_rmsd) {
+                    m_stored_structures.push_back(mol);
+                    mol.appendXYZFile(outfile + "_unique.xyz");
+                    std::cout << "New structure added ... ( " << m_stored_structures.size() << "). " << int(index / double(max) * 100) << " % done ...!" << std::endl;
                 }
             }
-            ++i;
         } else {
-            mol.setAtom(line, i);
-            if (m_pairwise)
-                mol_2.setAtom(line2, i);
+            driver->setReference(mol);
+            driver->setTarget(mol_2);
+            driver->start();
+            m_pairwise_file << driver->RMSD() << std::endl;
         }
-        index++;
+        i = -1;
+        mol = Molecule(atoms, 0);
+        molecule++;
+        mol.setName(std::to_string(molecule));
+        if (m_pairwise) {
+            mol_2 = Molecule(atoms, 0);
+            mol_2.setName(std::to_string(molecule));
+        }
     }
+
     if (m_writeUnique && m_allxyz)
         Tools::xyz2allxyz(outfile + "_unique.xyz");
 
