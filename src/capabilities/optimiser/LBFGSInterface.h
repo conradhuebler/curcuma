@@ -182,6 +182,9 @@ inline Molecule OptimiseGeometry(const Molecule* host, const json& controller)
         try {
             niter = solver.minimize(fun, parameter, fx);
         } catch (const std::logic_error& error) {
+            break;
+        } catch (const std::runtime_error& error) {
+            break;
         }
         parameter = fun.Parameter();
 

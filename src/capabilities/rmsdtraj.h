@@ -34,7 +34,7 @@
 using json = nlohmann::json;
 
 const json RMSDTrajJson{
-    { "writeUnqiue", false },
+    { "writeUnique", false },
     { "writeAligned", false },
     { "rmsd", 1.5 },
     { "fragment", -1 },

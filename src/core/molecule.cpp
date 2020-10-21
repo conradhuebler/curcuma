@@ -188,28 +188,34 @@ double Molecule::CalculateMass()
 void Molecule::setXYZComment(const std::string& comment)
 {
     StringList list = Tools::SplitString(comment);
-    if (list.size() == 7) {
-        setXYZComment_7(list);
-    } else if (list.size() == 6) {
-        setXYZComment_6(list);
-    } else if (list.size() == 4) {
-        setXYZComment_4(list);
-    } else if (list.size() == 1) {
-        if (list[0].compare("") == 0) {
-            // Ignore empty comment line
-        } else {
-            try {
-                setEnergy(std::stod((list[0])));
-            } catch (const std::string& what_arg) {
-            }
-        }
+    if (comment.find("Curcuma") != std::string::npos && list.size() >= 8) {
+        setEnergy(std::stod(list[3]));
+        setCharge(std::stod(list[8]));
     } else {
-        for (const std::string& s : list) {
-            double energy = 0;
-            if (Tools::isDouble(s)) {
-                energy = std::stod(s);
-                setEnergy(energy);
-                break;
+
+        if (list.size() == 7) {
+            setXYZComment_7(list);
+        } else if (list.size() == 6) {
+            setXYZComment_6(list);
+        } else if (list.size() == 4) {
+            setXYZComment_4(list);
+        } else if (list.size() == 1) {
+            if (list[0].compare("") == 0) {
+                // Ignore empty comment line
+            } else {
+                try {
+                    setEnergy(std::stod((list[0])));
+                } catch (const std::string& what_arg) {
+                }
+            }
+        } else {
+            for (const std::string& s : list) {
+                double energy = 0;
+                if (Tools::isDouble(s)) {
+                    energy = std::stod(s);
+                    setEnergy(energy);
+                    break;
+                }
             }
         }
     }
@@ -573,7 +579,7 @@ void Molecule::writeXYZFile(const std::string& filename) const
     std::ofstream input;
     input.open(filename, std::ios::out);
     input << AtomCount() << std::endl
-          << Name() << " ** Energy = " << std::setprecision(12) << Energy() << " Eh **"
+          << Name() << " ** Energy = " << std::setprecision(12) << Energy() << " Eh ** Charge = " << Charge() << " ** Curcuma " << qint_version
           << std::endl;
     for (int i = 0; i < AtomCount(); ++i) {
         input << Elements::ElementAbbr[m_atoms[i]].c_str() << "      " << m_geometry[i][0] << "      " << m_geometry[i][1] << "      " << m_geometry[i][2] << std::endl;
@@ -586,7 +592,7 @@ void Molecule::appendXYZFile(const std::string& filename) const
     std::ofstream input;
     input.open(filename, std::ios_base::app);
     input << AtomCount() << std::endl
-          << Name() << " ** Energy = " << std::setprecision(12) << Energy() << " Eh **"
+          << Name() << " ** Energy = " << std::setprecision(12) << Energy() << " Eh ** Charge = " << Charge() << " ** Curcuma " << qint_version
           << std::endl;
     for (int i = 0; i < AtomCount(); ++i) {
         input << Elements::ElementAbbr[m_atoms[i]].c_str() << "      " << m_geometry[i][0] << "      " << m_geometry[i][1] << "      " << m_geometry[i][2] << std::endl;
@@ -599,7 +605,7 @@ std::string Molecule::XYZString() const
     std::string result;
     std::stringstream stream;
     stream << AtomCount() << std::endl
-           << Name() << " ** Energy = " << std::setprecision(12) << Energy() << " Eh **"
+           << Name() << " ** Energy = " << std::setprecision(12) << Energy() << " Eh ** Charge = " << Charge() << " ** Curcuma " << qint_version
            << std::endl;
     for (int i = 0; i < AtomCount(); ++i) {
         stream << Elements::ElementAbbr[m_atoms[i]].c_str() << "      " << m_geometry[i][0] << "      " << m_geometry[i][1] << "      " << m_geometry[i][2] << std::endl;
