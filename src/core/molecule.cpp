@@ -581,6 +581,26 @@ void Molecule::writeXYZFile(const std::string& filename) const
     input.close();
 }
 
+void Molecule::writeXYZFragments(const std::string& filename) const
+{
+    auto fragments = GetFragments();
+    for (int frag = 0; frag < fragments.size(); ++frag) {
+        auto fragment = fragments[frag];
+        std::ofstream input;
+        input.open(filename + "_F" + std::to_string(frag + 1) + ".xyz", std::ios::out);
+        input << fragment.size() << std::endl
+              << Name() << " ** Energy = " << std::setprecision(12) << Energy() << " Eh **"
+              << std::endl;
+        for (int j = 0; j < fragment.size(); ++j) {
+            {
+                int i = fragment[j];
+                input << Elements::ElementAbbr[m_atoms[i]].c_str() << "      " << m_geometry[i][0] << "      " << m_geometry[i][1] << "      " << m_geometry[i][2] << std::endl;
+            }
+        }
+        input.close();
+    }
+}
+
 void Molecule::appendXYZFile(const std::string& filename) const
 {
     std::ofstream input;

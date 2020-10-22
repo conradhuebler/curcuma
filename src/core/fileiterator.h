@@ -32,9 +32,8 @@ public:
     {
         std::cerr << "Opening file " << m_filename << std::endl;
         m_file = new std::ifstream(m_filename);
+        m_lines = CountLines();
         m_init = CheckNext();
-        /* int max = std::count(std::istreambuf_iterator<char>(inFile),
-            std::istreambuf_iterator<char>(), '\n');*/
     }
 
     inline FileIterator(char* filename)
@@ -42,6 +41,7 @@ public:
         m_filename = std::string(filename);
         std::cerr << "Opening file " << m_filename << std::endl;
         m_file = new std::ifstream(m_filename);
+        m_lines = CountLines();
         m_init = CheckNext();
     }
 
@@ -61,6 +61,10 @@ public:
         return m_current;
     }
 
+    inline int MaxMolecules() const { return m_mols; }
+
+    inline int CurrentMolecule() const { return m_current_mol; }
+
 private:
     bool CheckNext()
     {
@@ -73,7 +77,9 @@ private:
         for (std::string line; getline(*m_file, line);) {
             if (index == 0 && xyzfile) {
                 atoms = stoi(line);
+                m_mols = m_lines / (atoms + 2);
                 mol = Molecule(atoms, 0);
+                m_current_mol++;
             }
             if (xyzfile) {
                 if (i == 1)
@@ -91,11 +97,19 @@ private:
             }
             index++;
         }
-
         return true;
     }
+
+    inline int CountLines() const
+    {
+        std::ifstream inFile(m_filename);
+        return std::count(std::istreambuf_iterator<char>(inFile),
+            std::istreambuf_iterator<char>(), '\n');
+    }
+
     std::string m_filename;
     std::ifstream* m_file;
     bool m_end = false, m_init = false;
     Molecule m_current;
+    int m_lines = 0, m_current_mol = 0, m_mols = 0;
 };

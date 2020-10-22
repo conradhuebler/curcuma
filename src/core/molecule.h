@@ -120,6 +120,7 @@ class Molecule
 
     void MapHydrogenBonds();
     Matrix HydrogenBondMatrix(int f1, int f2);
+    void writeXYZFragments(const std::string& basename) const;
 
 private:
     void ParseString(const std::string& internal, std::vector<std::string>& elements);

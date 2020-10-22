@@ -462,12 +462,42 @@ int main(int argc, char **argv) {
                     result_file << GeometryTools::Centroid(mol.getGeometryByFragment(fragment)).transpose() << std::endl;
                 }
             }
+        } else if (strcmp(argv[1], "-split") == 0) {
+            if (argc < 2) {
+                std::cerr << "Please use curcuma to split supramolecular structures as foloows:\ncurcuma -split molecule.xyz" << std::endl;
+                return 0;
+            }
+            FileIterator file(argv[2]);
+            int index = 1;
+            std::string outfile = argv[2];
+            for (int i = 0; i < 4; ++i)
+                outfile.pop_back();
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                mol.setScaling(1.2);
+                std::cout << file.MaxMolecules() << std::endl;
+                if (file.MaxMolecules() <= 1)
+                    mol.writeXYZFragments(outfile);
+                else
+                    mol.writeXYZFragments(outfile + "_M" + std::to_string(index));
+                index++;
+            }
+
         } else {
+            bool centered = false;
+            for (std::size_t i = 2; i < argc; ++i) {
+                if (strcmp(argv[i], "-center") == 0) {
+                    centered = true;
+                }
+            }
+
             FileIterator file(argv[1]);
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
                 mol.setScaling(1.2);
                 mol.CalculateRotationalConstants();
+                if (centered)
+                    mol.setGeometry(GeometryTools::TranslateGeometry(mol.getGeometry(), GeometryTools::Centroid(mol.getGeometry()), Position{ 0, 0, 0 }));
                 mol.print_geom();
                 mol.AnalyseIntermoleculeDistance();
                 std::cout << std::endl

@@ -3,10 +3,10 @@ name: AutomaticBuild
 on:
   push:
     branches: [ master ] #Everytime master branch is updated
-    paths: ['.github/workflows/*',  'src/*'] #only when these files are modifed
+    # paths: ['.github/workflows/*',  'src/*'] #only when these files are modifed
   pull_request:
     branches: [ master ] #for every pull request going to master
-    paths: ['.github/workflows/*', 'src/*'] #only when these files are modifed
+    # paths: ['.github/workflows/*', 'src/*'] #only when these files are modifed
 
 jobs:
 
