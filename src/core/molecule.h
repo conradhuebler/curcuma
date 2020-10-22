@@ -134,6 +134,7 @@ private:
     bool setXYZComment_6(const StringList& list);
     bool setXYZComment_7(const StringList& list);
     bool setXYZComment_8(const StringList& list);
+    bool setXYZComment_10(const StringList& list);
 
     std::vector<int> WhiteListProtons() const;
 

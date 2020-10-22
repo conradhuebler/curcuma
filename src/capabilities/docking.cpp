@@ -66,6 +66,7 @@ void Docking::LoadControlJson()
     m_centroid_rot_distance = Json2KeyWord<double>(m_defaults, "RotationTolDis");
     m_threads = Json2KeyWord<int>(m_defaults, "threads");
     m_docking_threads = Json2KeyWord<int>(m_defaults, "DockingThreads");
+    m_charge = Json2KeyWord<int>(m_defaults, "Charge");
 }
 
 bool Docking::Initialise()
@@ -248,6 +249,7 @@ void Docking::PerformDocking()
                 molecule->addPair(guest.Atom(i));
             }
             molecule->setEnergy(distance);
+            molecule->setCharge(m_charge);
             m_result_list.insert(std::pair<double, Molecule*>(all, molecule));
         }
         delete pool;

@@ -52,7 +52,7 @@ bool XTBInterface::InitialiseMolecule(const Molecule& molecule)
     if (m_initialised)
         UpdateMolecule(molecule);
     int const natoms = molecule.AtomCount();
-    double const charge = 0.0;
+    double const charge = molecule.Charge();
 
     int attyp[natoms];
     std::vector<int> atoms = molecule.Atoms();
@@ -73,7 +73,7 @@ bool XTBInterface::InitialiseMolecule(const Molecule* molecule)
     if (m_initialised)
         UpdateMolecule(molecule);
     int const natoms = molecule->AtomCount();
-    double const charge = 0.0;
+    double const charge = molecule->Charge();
 
     int attyp[natoms];
     std::vector<int> atoms = molecule->Atoms();

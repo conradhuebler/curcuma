@@ -110,7 +110,8 @@ static const json DockingJson = {
     { "CentroidTolDis", 1e-1 },
     { "RotationTolDis", 1e-1 },
     { "Threads", 1 },
-    { "DockingThreads", 1 }
+    { "DockingThreads", 1 },
+    { "Charge", 0 }
 };
 
 class Docking : public CurcumaMethod {
@@ -164,6 +165,7 @@ private:
     double m_centroid_rot_distance = 1e-1;
     int m_threads = 1;
     int m_docking_threads = 1;
+    int m_charge = 0;
     StringList m_files;
     std::string m_host, m_guest, m_complex;
 };

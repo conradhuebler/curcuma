@@ -142,27 +142,39 @@ inline json CLI2Json(int argc, char** argv)
             if (sub.compare("-") == 0 && ((i + 1) < argc)) {
                 std::string next = argv[i + 1];
                 std::string next_sub = next.substr(0, 1);
-                if (next_sub.compare("-") == 0) {
+                bool isNumber = true;
+                double number = 0.0;
+                try {
+                    number = std::stod(next);
+                } catch (const std::invalid_argument& error) {
+                    isNumber = false;
+                }
+                if (isNumber) {
                     current.erase(0, 1);
-                    key[current] = true;
-                    continue;
-                } else if (next_sub.compare("+") == 0) {
-                    current.erase(0, 1);
-                    key[current] = false;
-                    continue;
+                    key[current] = number;
                 } else {
-                    current.erase(0, 1);
-                    //try {
-                    //    key[current] = std::stoi(argv[i + 1]);
-                    //} catch (const std::invalid_argument& error) {
-                    try {
-                        key[current] = std::stod(argv[i + 1]);
+                    if (next_sub.compare("-") == 0) {
+                        current.erase(0, 1);
+                        key[current] = true;
+                        continue;
+                    } else if (next_sub.compare("+") == 0) {
+                        current.erase(0, 1);
+                        key[current] = false;
+                        continue;
+                    } else {
+                        current.erase(0, 1);
+                        //try {
+                        //    key[current] = std::stoi(argv[i + 1]);
+                        //} catch (const std::invalid_argument& error) {
+                        try {
+                            key[current] = std::stod(argv[i + 1]);
                         } catch (const std::invalid_argument& error) {
                             key[current] = argv[i + 1];
                         }
                         //}
 
                         ++i;
+                }
                 }
             }
         }
