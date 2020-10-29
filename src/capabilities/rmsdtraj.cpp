@@ -88,11 +88,10 @@ void RMSDTraj::start()
         { "silent", true },
         { "storage", 1.0 },
         { "method", "incr" },
-        { "noreorder", true },
+        { "noreorder", false },
         { "threads", 1 }
     };
     RMSDDriver* driver = new RMSDDriver(RMSDJsonControl);
-    driver->setSilent(true);
     driver->setProtons(!m_heavy);
     driver->setForceReorder(false);
     driver->setCheckConnections(false);
@@ -124,7 +123,7 @@ void RMSDTraj::start()
     Molecule initial(atoms, 0);
     Molecule mol(atoms, 0);
     Molecule mol_2(atoms2, 0);
-
+    Molecule prev;
     FileIterator file(m_filename);
     while (!file.AtEnd()) {
         Molecule mol(file.Next());
@@ -135,6 +134,7 @@ void RMSDTraj::start()
                 mol.appendXYZFile(outfile + "_unique.xyz");
             m_stored_structures.push_back(mol);
             initial = mol;
+            prev = mol;
         } else {
             for (std::size_t i = 0; i < mol.GetFragments().size(); ++i)
                 if (mol.getGeometryByFragment(i).rows() == atoms_target) {
@@ -146,9 +146,22 @@ void RMSDTraj::start()
         if (m_pairwise == false) {
             std::vector<double> rmsd_results;
 
+            if (!m_ref_first) // If we reference to the previouse (default) we have to pre-reorder and then calculate the rmsd with respect to the first structure and not the prevouise
+            {
+                driver->setReference(prev);
+                driver->setTarget(mol);
+                driver->start();
+                prev = driver->TargetAligned();
+                mol = driver->TargetAligned();
+            }
+
             driver->setReference(initial);
             driver->setTarget(mol);
             driver->start();
+
+            if (driver->ReorderRules().size())
+                std::cout << Tools::Vector2String(driver->ReorderRules()) << std::endl;
+
             m_rmsd_file << driver->RMSD() << std::endl;
             m_rmsd_vector.push_back(driver->RMSD());
             if (m_writeAligned) {
@@ -191,6 +204,7 @@ void RMSDTraj::start()
             driver->start();
             m_pairwise_file << driver->RMSD() << std::endl;
         }
+        driver->clear();
         i = -1;
         mol = Molecule(atoms, 0);
         molecule++;
@@ -222,7 +236,7 @@ void RMSDTraj::LoadControlJson()
 {
     m_heavy = Json2KeyWord<bool>(m_defaults, "heavy");
     m_pcafile = Json2KeyWord<bool>(m_defaults, "pcafile");
-    m_writeUnique = Json2KeyWord<bool>(m_defaults, "writeUnqiue");
+    m_writeUnique = Json2KeyWord<bool>(m_defaults, "writeUnique");
     m_writeAligned = Json2KeyWord<bool>(m_defaults, "writeAligned");
     m_rmsd_threshold = Json2KeyWord<double>(m_defaults, "rmsd");
     m_fragment = Json2KeyWord<int>(m_defaults, "fragment");
@@ -230,4 +244,5 @@ void RMSDTraj::LoadControlJson()
     m_second_file = Json2KeyWord<std::string>(m_defaults, "second");
     m_pairwise = (m_second_file.compare("none") != 0);
     m_allxyz = Json2KeyWord<bool>(m_defaults, "allxyz");
+    m_ref_first = Json2KeyWord<bool>(m_defaults, "RefFirst");
 }

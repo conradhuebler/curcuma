@@ -157,7 +157,7 @@ void PairMapper::InitialisePairs(const Molecule* molecule)
                 int b = f[i][l];
                 if ((std::find(m_proton_blacklist.begin(), m_proton_blacklist.end(), a) != m_proton_blacklist.end()) || (std::find(m_proton_blacklist.begin(), m_proton_blacklist.end(), b) != m_proton_blacklist.end()))
                     continue;
-                double distance = molecule->Distance(a, b);
+                double distance = molecule->CalculateDistance(a, b);
                 if (distance < m_cutoff && distance > (Elements::CovalentRadius[molecule->Atom(a).first] + Elements::CovalentRadius[molecule->Atom(b).first]) * m_scaling) {
                     if ((molecule->Atom(a).first == 1 && (molecule->Atom(b).first == 7 || molecule->Atom(b).first == 8)) || ((molecule->Atom(a).first == 7 || molecule->Atom(a).first == 8) && molecule->Atom(b).first == 1)) {
                         addPair(std::pair<double, double>(a, b), m_intra_pairs);
@@ -189,19 +189,19 @@ void PairMapper::InitialisePairs(const Molecule* molecule)
 void PairMapper::ScanPairs(const Molecule* molecule)
 {
     for (const std::pair<int, int>& p : m_intra_pairs) {
-        m_intramol_file << molecule->Distance(p.first, p.second) << "    ";
+        m_intramol_file << molecule->CalculateDistance(p.first, p.second) << "    ";
     }
     m_intramol_file << std::endl;
 
     for (const std::pair<int, int>& p : m_inter_pairs) {
-        m_intermol_file << molecule->Distance(p.first, p.second) << "    ";
+        m_intermol_file << molecule->CalculateDistance(p.first, p.second) << "    ";
     }
     m_intermol_file << std::endl;
 
     int index = 0;
     for (const std::pair<int, int>& p : m_user_pairs) {
-        m_user_file << molecule->Distance(p.first, p.second) << "    ";
-        m_user_vector[index].push_back(molecule->Distance(p.first, p.second));
+        m_user_file << molecule->CalculateDistance(p.first, p.second) << "    ";
+        m_user_vector[index].push_back(molecule->CalculateDistance(p.first, p.second));
         index++;
     }
     m_user_file << std::endl;
@@ -291,7 +291,7 @@ void PairMapper::BlackListProtons(const Molecule* molecule)
         for (std::size_t j = 0; j < molecule->AtomCount(); ++j) {
             if (i == j)
                 continue;
-            double d = molecule->Distance(i, j);
+            double d = molecule->CalculateDistance(i, j);
             if (d < distance)
                 element = molecule->Atom(j).first;
             distance = std::min(d, distance);

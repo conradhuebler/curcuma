@@ -134,18 +134,32 @@ With
 -Useorders X
 ```
 up to X reorder results will be reused from the last reorder calculation. Template based approaches result in only one reorder rule, however X is set to 0 in automatically, but can be changed with that argument.
-## NEB Input structure preparation
-Some very experimental stuff - reorder (like in -rmsd a.xyz b.xyz -reorder) and rmsd alignment and fragment moving to prepare some NEB structures.
-
-```sh
-curcuma -nebprep start.xyz end.xyz
-```
 
 ## Find unique structures in trajectories
 xyz and trj are handled equally.
 ```sh
-curcuma -rmsdtraj XXX.trj -write -rmsd 1.5
+curcuma -rmsdtraj XXX.trj -writeUnique -rmsd 1.5
 ```
 
+## Reorder and Align trajectories
+To reorder trajectory files with dissordered atomic indicies, for example after merging several minimum energy path files from NEB calculation, use
+```sh
+curcuma -rmsdtraj XXX.xyz -writeAligned
+```
+Reordering will be done with respect to the previouse structure in the trajectory. If the first structure should be used, add ***-reffirst*** as additional argument. The new trajectory is called XXX_aligned.xyz.
+
+Using ***-rmsdtraj*** argument, a file **XXX_rmsd.dat** will be written, where the rmsd is stored.
+
+## Distance and angle calculation
+
+```sh
+curcuma -distance XXX.trj atom1 atom2
+```
+
+```sh
+curcuma -angle XXX.trj atom1 atom2 atom3
+```
+
+The index starts with 1. Using grep and sed via ***|grep '::' |sed 's/:://g'*** omitts unused output.
 
 Have a lot of fun!

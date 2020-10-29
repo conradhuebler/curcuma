@@ -143,8 +143,10 @@ void RMSDDriver::start()
         ProtonDepleted();
 
     m_target_aligned = m_target;
-    if (!m_noreorder)
-        ReorderMolecule();
+    if (m_reference.Atoms() != m_target.Atoms()) {
+        if (!m_noreorder)
+            ReorderMolecule();
+    }
     //if (m_target.AtomCount() > m_reference.AtomCount()) {
     //    Molecule reference = m_reference;
     //    m_reference = m_target;
@@ -327,6 +329,7 @@ void RMSDDriver::ReorderIncremental()
     m_reorder_rules = m_stored_rules[0];
     m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
     m_target = m_target_reordered;
+    m_target_aligned = m_target;
 }
 
 std::vector<int> RMSDDriver::FillMissing(const Molecule& molecule, const std::vector<int>& order)
@@ -360,6 +363,7 @@ void RMSDDriver::clear()
 {
     m_results.clear();
     m_connectivity.clear();
+    m_stored_rules.clear();
 }
 
 void RMSDDriver::ProtonDepleted()

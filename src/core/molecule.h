@@ -52,7 +52,7 @@ class Molecule
 
     void InitialiseConnectedMass(double scaling = 1.3, bool protons = true);
     inline double ConnectedMass(int atom) const { return m_connect_mass[atom]; }
-    double angle(int atom1, int atom2, int atom3) const;
+    double CalculateAngle(int atom1, int atom2, int atom3) const;
     double DotProduct(std::array<double, 3> pos1, std::array<double, 3> pos2) const;
 
     void clear();
@@ -70,7 +70,7 @@ class Molecule
 
     Molecule getFragmentMolecule(int fragment) const;
 
-    double Distance(int i, int j) const;
+    double CalculateDistance(int i, int j) const;
     Geometry getGeometry(const IntPair& pair, bool protons = true) const;
     Geometry getGeometry(std::vector<int> atoms, bool protons = true) const;
     Geometry getGeometryByFragment(int fragment, bool protons = true) const;

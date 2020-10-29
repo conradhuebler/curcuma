@@ -145,7 +145,7 @@ void Molecule::printFragmente()
 void Molecule::printAtom(int i) const
 {
     if (i < AtomCount())
-        printf("%s %8.5f %8.5f %8.5f", m_atoms[i], m_geometry[i][0], m_geometry[i][1], m_geometry[i][2]);
+        printf("%s %8.5f %8.5f %8.5f", Elements::ElementAbbr[m_atoms[i]].c_str(), m_geometry[i][0], m_geometry[i][1], m_geometry[i][2]);
 }
 
 
@@ -168,7 +168,7 @@ bool Molecule::addPair(const std::pair<int, Position>& atom)
 
     for (std::size_t i = 0; i < AtomCount(); ++i)
         for (std::size_t j = i + 1; j < AtomCount(); ++j)
-            if (Distance(i, j) < 1e-6)
+            if (CalculateDistance(i, j) < 1e-6)
                 exist = false;
 
     m_dirty = true;
@@ -277,7 +277,10 @@ bool Molecule::setXYZComment_6(const StringList& list)
         setEnergy(std::stod((list[3])));
     } catch (const std::string& what_arg) {
         setEnergy(0);
+    } catch (const std::invalid_argument& ia) {
+        setEnergy(0);
     }
+
     return true;
 }
 
@@ -313,7 +316,7 @@ bool Molecule::Contains(const std::pair<int, Position>& atom)
     return false;
 }
 
-double Molecule::Distance(int i, int j) const
+double Molecule::CalculateDistance(int i, int j) const
 {
     if (i >= AtomCount() || j >= AtomCount())
         return 0;
@@ -335,12 +338,11 @@ double Molecule::DotProduct(std::array<double, 3> pos1, std::array<double, 3> po
     return pos1[0]*pos2[0]+pos1[1]*pos2[1]+pos1[2]*pos2[2];
 }
 
-
-double Molecule::angle(int atom1, int atom2, int atom3) const
+double Molecule::CalculateAngle(int atom1, int atom2, int atom3) const
 {
-    std::array<double, 3> atom_0 = { m_geometry[atom2 - 1] }; // Proton
-    std::array<double, 3> atom_1 = { m_geometry[atom3 - 1] }; // Acceptor
-    std::array<double, 3> atom_2 = { m_geometry[atom1 - 1] }; // Donor
+    std::array<double, 3> atom_0 = { m_geometry[atom2] }; // Proton
+    std::array<double, 3> atom_1 = { m_geometry[atom3] }; // Acceptor
+    std::array<double, 3> atom_2 = { m_geometry[atom1] }; // Donor
 
     std::array<double, 3> vec_1 = { atom_0[0]-atom_1[0], atom_0[1]-atom_1[1], atom_0[2]-atom_1[2] };
     std::array<double, 3> vec_2 = { atom_0[0]-atom_2[0], atom_0[1]-atom_2[1], atom_0[2]-atom_2[2] };
@@ -384,9 +386,9 @@ void Molecule::setAtom(const std::string& internal, int i)
         double r_ij = stod(elements[4]);
         double omega = stod(elements[5]);
         double theta = stod(elements[6]);
-        
-        double r_ik = Distance(atom_2, atom_1);
-        
+
+        double r_ik = CalculateDistance(atom_2, atom_1);
+
         double x = r_ik + r_ij*cos(omega);
         double y = r_ij*sin(omega);
         double z = 0;
@@ -643,7 +645,7 @@ std::vector<int> Molecule::BoundHydrogens(int atom, double scaling) const
         // std::cout << Atom(i).first << std::endl;
         if (atom == i || Atom(i).first != 1)
             continue;
-        double distance = Distance(i, atom);
+        double distance = CalculateDistance(i, atom);
         // std::cout << i << " " << atom << " " << distance << std::endl;
         if (distance < (Elements::CovalentRadius[Atom(atom).first] + Elements::CovalentRadius[1]) * scaling)
             result.push_back(i);
@@ -723,7 +725,7 @@ void Molecule::PrintConnectivitiy(double scaling) const
         if (Atom(i).first != 1) {
             for (std::size_t j = i + 1; j < AtomCount(); ++j) {
                 if (Atom(j).first == 1) {
-                    double distance = Distance(i, j);
+                    double distance = CalculateDistance(i, j);
                     if (distance < (Elements::CovalentRadius[Atom(i).first] + Elements::CovalentRadius[Atom(j).first]) * scaling)
                         std::cout << "Atom " << i << " and Atom " << j << ": Distance = " << distance << " - Cov Rad: " << (Elements::CovalentRadius[Atom(i).first] + Elements::CovalentRadius[Atom(j).first]) << std::endl;
                 }
@@ -739,7 +741,7 @@ void Molecule::AnalyseIntermoleculeDistance() const
         for (std::size_t j = i + 1; j < m_fragments.size(); ++j) {
             for (int a : m_fragments[i]) {
                 for (int b : m_fragments[j]) {
-                    double distance = Distance(a, b);
+                    double distance = CalculateDistance(a, b);
                     if (distance < cutoff) {
                         if (Atom(a).first == 1 && Atom(b).first != 1 || Atom(a).first != 1 && Atom(b).first == 1)
                             std::cout << std::setprecision(6) << distance << " " << a << "(" << Atom(a).first << ") - " << b << "(" << Atom(b).first << ")" << std::endl;
@@ -771,7 +773,7 @@ std::vector<std::vector<int>> Molecule::GetFragments(double scaling) const
         atoms.erase(atoms.begin());
         for (std::size_t i = 0; i < fragment.size(); ++i) {
             for (std::size_t j = 0; j < atoms.size(); ++j) {
-                double distance = Distance(fragment[i], atoms[j]);
+                double distance = CalculateDistance(fragment[i], atoms[j]);
                 //std::cout << "Fragment No: " << m_fragments.size() + 1 << " ("<< fragment.size() <<")  ##  Atom " << fragment[i] << " (Index " << i << ") and Atom " << atoms[j] << " - Distance: " << distance << " Thresh " << (Elements::CovalentRadius[Atom(fragment[i]).first] + Elements::CovalentRadius[Atom(atoms[j]).first]);
                 if (distance < (Elements::CovalentRadius[Atom(fragment[i]).first] + Elements::CovalentRadius[Atom(atoms[j]).first]) * m_scaling) {
                     //std::cout << " ... taken " << std::endl;
@@ -816,7 +818,7 @@ void Molecule::InitialiseConnectedMass(double scaling, bool protons)
             continue;
         for (int j = i + 1; j < AtomCount(); ++j) {
             auto atom_j = Atom(j);
-            double distance = Distance(i, j);
+            double distance = CalculateDistance(i, j);
             if (distance < (Elements::CovalentRadius[atom_i.first] + Elements::CovalentRadius[atom_j.first]) * scaling) {
                 //      std::cout << atom_i.first - 1<< " "  << atom_j.first - 1<< " " << Elements::AtomicMass[atom_j.first - 1] << std::endl;
                 mass += atom_j.first; //Elements::AtomicMass[atom_j.first - 1];
@@ -839,7 +841,7 @@ std::vector<int> Molecule::WhiteListProtons() const
             if (i == j)
                 continue;
 
-            double d = Distance(i, j);
+            double d = CalculateDistance(i, j);
             if (d < distance)
                 element = Atom(j).first;
             distance = std::min(d, distance);
@@ -864,7 +866,7 @@ void Molecule::MapHydrogenBonds()
             if (!(element == 8 || element == 7))
                 continue;
 
-            double distance = Distance(donor, hydrogen);
+            double distance = CalculateDistance(donor, hydrogen);
             if (distance > (Elements::CovalentRadius[element] + h_radius) * m_scaling && distance < accepted_distance)
                 accepted_donor = donor;
         }

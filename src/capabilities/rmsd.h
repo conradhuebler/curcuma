@@ -199,6 +199,8 @@ public:
 
     double CustomRotation();
 
+    void clear();
+
 private:
     /* Read Controller has to be implemented for all */
     void LoadControlJson() override;
@@ -230,9 +232,6 @@ private:
     std::pair<int, int> CheckFragments();
 
     void FinaliseReorder();
-
-    void clear();
-
     Eigen::Matrix3d BestFitRotation(const Molecule& reference, const Molecule& target, int factor = 1) const;
     Eigen::Matrix3d BestFitRotation(const Geometry& reference, const Geometry& target, int factor = 1) const;
 

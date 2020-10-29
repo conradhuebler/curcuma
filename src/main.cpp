@@ -74,7 +74,7 @@ void Distance(const Molecule &mol, char **argv)
     int donor = stoi(std::string(argv[3]));
     int proton = stoi(std::string(argv[4]));
     int acceptor = stoi(std::string(argv[5]));
-    std::cout << "Using atoms" << std::endl;
+    std::cout << "Using atoms " << donor << " " << proton << " " << acceptor << std::endl;
     std::cout << "Donor ";
     mol.printAtom(donor);
     std::cout << std::endl
@@ -83,8 +83,9 @@ void Distance(const Molecule &mol, char **argv)
     std::cout << std::endl
               << "Acceptor: ";
     mol.printAtom(acceptor);
-    std::cout << std::endl << "Hydrogen Bond Angle: "<<  mol.angle(donor, proton, acceptor) << std::endl;
-    std::cout << "Hydrogen bond length " << mol.Distance(proton - 1, acceptor - 1) << std::endl;
+    std::cout << std::endl
+              << "Hydrogen Bond Angle: " << mol.CalculateAngle(donor - 1, proton - 1, acceptor - 1) << std::endl;
+    std::cout << "Hydrogen bond length " << mol.CalculateDistance(proton - 1, acceptor - 1) << std::endl;
 }
 
 int main(int argc, char **argv) {
@@ -158,7 +159,7 @@ int main(int argc, char **argv) {
                 std::cerr << "Please use curcuma for hydrogen bond analysis as follows\ncurcuma -hbonds A.xyz index_donor index_proton index_acceptor" << std::endl;
                 return -1;
             }
-            FileIterator file(argv[1]);
+            FileIterator file(argv[2]);
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
                 if (argc == 6) {
@@ -464,7 +465,7 @@ int main(int argc, char **argv) {
             }
         } else if (strcmp(argv[1], "-split") == 0) {
             if (argc < 2) {
-                std::cerr << "Please use curcuma to split supramolecular structures as foloows:\ncurcuma -split molecule.xyz" << std::endl;
+                std::cerr << "Please use curcuma to split supramolecular structures as follows:\ncurcuma -split molecule.xyz" << std::endl;
                 return 0;
             }
             FileIterator file(argv[2]);
@@ -483,6 +484,67 @@ int main(int argc, char **argv) {
                 index++;
             }
 
+        } else if (strcmp(argv[1], "-distance") == 0) {
+            if (argc < 4) {
+                std::cerr << "Please use curcuma to calculate distances as follows:\ncurcuma -distance molecule.xyz indexA indexB" << std::endl;
+                return 0;
+            }
+
+            int indexA = 0, indexB = 0;
+            try {
+                indexA = std::stoi(argv[3]);
+            } catch (const std::invalid_argument& arg) {
+                std::cerr << "Please use curcuma to calculate distances as follows:\ncurcuma -distance molecule.xyz indexA indexB" << std::endl;
+                return 0;
+            }
+            try {
+                indexB = std::stoi(argv[4]);
+            } catch (const std::invalid_argument& arg) {
+                std::cerr << "Please use curcuma to calculate distances as follows:\ncurcuma -distance molecule.xyz indexA indexB" << std::endl;
+                return 0;
+            }
+            FileIterator file(argv[2]);
+            std::string outfile = argv[2];
+
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                std::cout << ":: " << mol.CalculateDistance(indexA - 1, indexB - 1) << "::" << std::endl;
+            }
+
+        } else if (strcmp(argv[1], "-angle") == 0) {
+            if (argc < 6) {
+                std::cerr << "Please use curcuma to calculate angles as follows:\ncurcuma -distance molecule.xyz indexA indexB indexC" << std::endl;
+                return 0;
+            }
+
+            int indexA = 0, indexB = 0, indexC = 0;
+            try {
+                indexA = std::stoi(argv[3]);
+            } catch (const std::invalid_argument& arg) {
+                std::cerr << "Please use curcuma to calculate angles as follows:\ncurcuma -distance molecule.xyz indexA indexB indexC" << std::endl;
+                return 0;
+            }
+            try {
+                indexB = std::stoi(argv[4]);
+            } catch (const std::invalid_argument& arg) {
+                std::cerr << "Please use curcuma to calculate angles as follows:\ncurcuma -distance molecule.xyz indexA indexB indexC" << std::endl;
+                return 0;
+            }
+            try {
+                indexC = std::stoi(argv[5]);
+            } catch (const std::invalid_argument& arg) {
+                std::cerr << "Please use curcuma to calculate angles as follows:\ncurcuma -distance molecule.xyz indexA indexB indexC" << std::endl;
+                return 0;
+            }
+            FileIterator file(argv[2]);
+
+            printf("\n  Angle\t\tr(%u,%u)\tr(%u,%u)\tr(%u,%u)\n", indexA - 1, indexB - 1, indexA - 1, indexC - 1, indexC - 1, indexB - 1);
+
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                printf(":: %8.4f\t%8.4f\t%8.4f\t%8.4f ::\n", mol.CalculateAngle(indexA - 1, indexB - 1, indexC - 1), mol.CalculateDistance(indexA - 1, indexB - 1), mol.CalculateDistance(indexA - 1, indexC - 1), mol.CalculateDistance(indexC - 1, indexB - 1));
+            }
+            printf("\n\n");
         } else {
             bool centered = false;
             for (std::size_t i = 2; i < argc; ++i) {
