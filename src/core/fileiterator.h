@@ -76,7 +76,13 @@ private:
         Molecule mol(atoms, 0);
         for (std::string line; getline(*m_file, line);) {
             if (index == 0 && xyzfile) {
-                atoms = stoi(line);
+                try {
+                    atoms = stoi(line);
+                } catch (const std::invalid_argument& arg) {
+                    std::cerr << "FileIterator::CheckNext() Got some error at line " << line << "\n";
+                    std::cerr << "Skipping molecules that follow after  " << m_current_mol << " molecule!" << std::endl;
+                    return false;
+                }
                 m_mols = m_lines / (atoms + 2);
                 mol = Molecule(atoms, 0);
                 m_current_mol++;
@@ -85,7 +91,13 @@ private:
                 if (i == 1)
                     mol.setXYZComment(line);
                 if (i > 1) {
-                    mol.setXYZ(line, i - 2);
+                    try {
+                        mol.setXYZ(line, i - 2);
+                    } catch (const std::invalid_argument& arg) {
+                        std::cerr << "FileIterator::CheckNext() Got some error at line " << line << "\n";
+                        std::cerr << "Skipping molecules that follow after  " << m_current_mol << " molecule!" << std::endl;
+                        return false;
+                    }
                 }
                 if (i - 1 == atoms) {
                     m_current = mol;

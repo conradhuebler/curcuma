@@ -100,11 +100,15 @@ int main(int argc, char **argv) {
     {
         std::cerr << "No arguments given!" << std::endl;
         std::cerr << "Use:" << std::endl
-                  << "-rmsd        * RMSD Calculator               *" << std::endl
-                  << "-confscan    * Filter list of conformers     *" << std::endl
-                  << "-dock        * Perform some docking          *" << std::endl
-                  << "-opt         * LBFGS optimiser using xtb GFN *" << std::endl
-                  << "-rmsdtraj    * Find unique structures        *" << std::endl;
+                  << "-rmsd        * RMSD Calculator                                            *" << std::endl
+                  << "-confscan    * Filter list of conformers                                  *" << std::endl
+                  << "-dock        * Perform some docking                                       *" << std::endl
+                  << "-opt         * LBFGS optimiser using xtb GFN                              *" << std::endl
+                  << "-block       * Split files with many structures in block                  *" << std::endl
+                  << "-distance    * Calculate distance between two atoms                       *" << std::endl
+                  << "-angle       * Calculate angle between three atoms                        *" << std::endl
+                  << "-split       * Split a supramolcular structure in individual molecules    *" << std::endl
+                  << "-rmsdtraj    * Find unique structures                                     *" << std::endl;
         exit(1);
     }
     if(argc >= 2)
@@ -302,7 +306,35 @@ int main(int argc, char **argv) {
 
             return 0;
         } */
-        else if (strcmp(argv[1], "-md") == 0) {
+        else if (strcmp(argv[1], "-block") == 0) {
+            if (argc < 3) {
+                std::cerr << "Please use curcuma to split a file with many structures (trajectories) into several smaller:\ncurcuma block input.xyz X" << std::endl;
+                std::cerr << "With X the number of files to produce!" << std::endl;
+
+                return 0;
+            }
+            int blocks = std::stoi(argv[3]);
+            std::string outfile = std::string(argv[2]);
+            for (int i = 0; i < 4; ++i)
+                outfile.pop_back();
+            FileIterator file(argv[2]);
+            int mols = file.MaxMolecules();
+            std::multimap<double, Molecule> results;
+            int block = mols / blocks;
+            int index = 0;
+            int i = 0;
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                mol.appendXYZFile(outfile + "_" + std::to_string(index + 1) + ".xyz");
+                i++;
+                if (i == block) {
+                    index++;
+                    i = 0;
+                }
+            }
+
+            return 0;
+        } else if (strcmp(argv[1], "-md") == 0) {
             if (argc < 2) {
                 std::cerr << "Please use curcuma for test md assignment as follows:\ncurcuma -md input.xyz" << std::endl;
                 return 0;
@@ -464,7 +496,7 @@ int main(int argc, char **argv) {
                 }
             }
         } else if (strcmp(argv[1], "-split") == 0) {
-            if (argc < 2) {
+            if (argc < 3) {
                 std::cerr << "Please use curcuma to split supramolecular structures as follows:\ncurcuma -split molecule.xyz" << std::endl;
                 return 0;
             }

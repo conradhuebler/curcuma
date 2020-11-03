@@ -189,8 +189,8 @@ void Molecule::setXYZComment(const std::string& comment)
 {
     StringList list = Tools::SplitString(comment);
     if (comment.find("Curcuma") != std::string::npos && list.size() >= 8) {
-        setEnergy(std::stod(list[3]));
-        setCharge(std::stod(list[8]));
+        setEnergy(std::stod(list[4]));
+        setCharge(std::stod(list[9]));
     } else {
 
         if (list.size() == 7) {

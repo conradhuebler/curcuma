@@ -48,7 +48,7 @@ public:
     ~RunTimer()
     {
         if (m_print) {
-            std::cout << "Finished after " << Elapsed() / 1000 << " seconds!" << std::endl;
+            std::cout << "\n\nFinished after " << Elapsed() / 1000 << " seconds!" << std::endl;
             std::time_t end_time = std::chrono::system_clock::to_time_t(m_end);
             std::cout << "Finished computation at " << std::ctime(&end_time) << std::endl;
         }
