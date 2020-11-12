@@ -248,6 +248,8 @@ bool Molecule::setXYZComment_4(const StringList& list)
             setEnergy(std::stod((list[2])));
         } catch (const std::string& what_arg) {
             setEnergy(0);
+        } catch (const std::invalid_argument& argument) {
+            setEnergy(0);
         }
     } else {
         setName(list[0]);
@@ -291,13 +293,18 @@ bool Molecule::setXYZComment_7(const StringList& list)
             setEnergy(std::stod((list[1])));
         } catch (const std::string& what_arg) {
             setEnergy(0);
+        } catch (const std::invalid_argument& argument) {
+            setEnergy(0);
         }
-    } else
+    } else {
         try {
             setEnergy(std::stod((list[4])));
         } catch (const std::string& what_arg) {
             setEnergy(0);
+        } catch (const std::invalid_argument& argument) {
+            setEnergy(0);
         }
+    }
     return true;
 }
 

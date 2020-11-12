@@ -38,6 +38,7 @@ int main(int argc, char** argv)
 
     json controller = RMSDJson;
     controller["threads"] = threads;
+    controller["reorder"] = true;
     RMSDDriver* driver = new RMSDDriver(controller, false);
     driver->setReference(m1);
     driver->setTarget(m2);

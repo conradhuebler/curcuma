@@ -143,7 +143,7 @@ void RMSDDriver::start()
         ProtonDepleted();
 
     m_target_aligned = m_target;
-    if (m_reference.Atoms() != m_target.Atoms()) {
+    if (m_reference.Atoms() != m_target.Atoms() || m_force_reorder) {
         if (!m_noreorder)
             ReorderMolecule();
     }
