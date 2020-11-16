@@ -22,6 +22,7 @@
 #include "src/core/xtbinterface.h"
 
 #include "src/capabilities/confscan.h"
+#include "src/capabilities/confstat.h"
 #include "src/capabilities/docking.h"
 #include "src/capabilities/nebdocking.h"
 #include "src/capabilities/pairmapper.h"
@@ -102,6 +103,7 @@ int main(int argc, char **argv) {
         std::cerr << "Use:" << std::endl
                   << "-rmsd        * RMSD Calculator                                            *" << std::endl
                   << "-confscan    * Filter list of conformers                                  *" << std::endl
+                  << "-confstat    * Conformation statistics                                    *" << std::endl
                   << "-dock        * Perform some docking                                       *" << std::endl
                   << "-opt         * LBFGS optimiser using xtb GFN                              *" << std::endl
                   << "-block       * Split files with many structures in block                  *" << std::endl
@@ -195,6 +197,16 @@ int main(int argc, char **argv) {
             ConfScan* scan = new ConfScan(controller);
             scan->setFileName(argv[2]);
             scan->start();
+            return 0;
+        } else if (strcmp(argv[1], "-confstat") == 0) {
+            if (argc < 3) {
+                std::cerr << "Please use curcuma for conformation statistics as follows\ncurcuma -confstat conffile.xyz" << std::endl;
+
+                return -1;
+            }
+            ConfStat* stat = new ConfStat(controller);
+            stat->setFileName(argv[2]);
+            stat->start();
             return 0;
         } else if (strcmp(argv[1], "-led") == 0) {
             if (argc < 2) {
@@ -577,6 +589,25 @@ int main(int argc, char **argv) {
                 printf(":: %8.4f\t%8.4f\t%8.4f\t%8.4f ::\n", mol.CalculateAngle(indexA - 1, indexB - 1, indexC - 1), mol.CalculateDistance(indexA - 1, indexB - 1), mol.CalculateDistance(indexA - 1, indexC - 1), mol.CalculateDistance(indexC - 1, indexB - 1));
             }
             printf("\n\n");
+        } else if (strcmp(argv[1], "-center") == 0) {
+            if (argc < 3) {
+                std::cerr << "Please use curcuma to center a structure as follows:\ncurcuma -center molecule.xyz" << std::endl;
+                return 0;
+            }
+            FileIterator file(argv[2]);
+            int index = 1;
+            std::string outfile = argv[2];
+            for (int i = 0; i < 4; ++i)
+                outfile.pop_back();
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                mol.setGeometry(GeometryTools::TranslateGeometry(mol.getGeometry(), GeometryTools::Centroid(mol.getGeometry()), Position{ 0, 0, 0 }));
+                if (file.MaxMolecules() <= 1)
+                    mol.writeXYZFragments(outfile);
+                else
+                    mol.writeXYZFragments(outfile + "_M" + std::to_string(index));
+                index++;
+            }
         } else {
             bool centered = false;
             for (std::size_t i = 2; i < argc; ++i) {

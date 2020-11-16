@@ -36,6 +36,7 @@ const double au = 0.52917721092;
 const double amu2au = 1822.8884850;
 const double kb = 3.166811e-6;
 const double fs2amu = 41.34137314;
+const double R = 8.31446261815324;
 
 typedef Eigen::MatrixXd Geometry;
 typedef Eigen::MatrixXd Matrix;

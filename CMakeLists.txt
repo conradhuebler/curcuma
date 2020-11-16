@@ -138,6 +138,7 @@ set(curcuma_core_SRC
         src/capabilities/optimiser/LBFGSInterface.h
         src/capabilities/curcumamethod.cpp
         src/capabilities/confscan.cpp
+        src/capabilities/confstat.cpp
         src/capabilities/docking.cpp
         src/capabilities/nebdocking.cpp
         src/capabilities/pairmapper.cpp
