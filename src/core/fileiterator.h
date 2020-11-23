@@ -75,6 +75,8 @@ private:
         bool xyzfile = std::string(m_filename).find(".xyz") != std::string::npos || std::string(m_filename).find(".trj") != std::string::npos;
         Molecule mol(atoms, 0);
         for (std::string line; getline(*m_file, line);) {
+            if (line.size() == 0)
+                continue;
             if (index == 0 && xyzfile) {
                 try {
                     atoms = stoi(line);

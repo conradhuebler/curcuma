@@ -223,21 +223,54 @@ void Molecule::setXYZComment(const std::string& comment)
 
 bool Molecule::setXYZComment_0(const StringList& list)
 {
+    for (const std::string& s : list) {
+        double energy = 0;
+        if (Tools::isDouble(s)) {
+            energy = std::stod(s);
+            setEnergy(energy);
+            break;
+        }
+    }
+
     return true;
 }
 
 bool Molecule::setXYZComment_1(const StringList& list)
 {
+    for (const std::string& s : list) {
+        double energy = 0;
+        if (Tools::isDouble(s)) {
+            energy = std::stod(s);
+            setEnergy(energy);
+            break;
+        }
+    }
     return true;
 }
 
 bool Molecule::setXYZComment_2(const StringList& list)
 {
+    for (const std::string& s : list) {
+        double energy = 0;
+        if (Tools::isDouble(s)) {
+            energy = std::stod(s);
+            setEnergy(energy);
+            break;
+        }
+    }
     return true;
 }
 
 bool Molecule::setXYZComment_3(const StringList& list)
 {
+    for (const std::string& s : list) {
+        double energy = 0;
+        if (Tools::isDouble(s)) {
+            energy = std::stod(s);
+            setEnergy(energy);
+            break;
+        }
+    }
     return true;
 }
 

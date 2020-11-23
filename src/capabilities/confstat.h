@@ -30,7 +30,8 @@
 
 static json ConfStatJson{
     "Cutoff", 10,
-    "Temp", 298.5
+    "Temp", 298.5,
+    "Threshold", 0.5
 };
 
 class ConfStat : public CurcumaMethod {
@@ -62,4 +63,5 @@ private:
     std::vector<double> m_energies;
     double m_temp = 298.5;
     double m_cutoff = 10;
+    double m_print_threshold = 0.5;
 };

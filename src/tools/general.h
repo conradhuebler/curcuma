@@ -141,6 +141,17 @@ inline bool isInt(const std::string& input)
 
 inline bool isDouble(const std::string& input)
 {
+    bool isD = true;
+
+    try {
+        std::stod(input);
+    } catch (const std::string& what_arg) {
+        isD = false;
+    } catch (const std::invalid_argument& argument) {
+        isD = false;
+    }
+    return isD;
+    /*
     const char* delim = ".";
     StringList list = SplitString(input, delim);
     if (list.size() != 2)
@@ -149,6 +160,7 @@ inline bool isDouble(const std::string& input)
     bool left = isInt(list[0]);
     bool right = isInt(list[1]);
     return left && right;
+    */
     // return std::all_of(input.begin(), input.end(), ::isdigit);
 }
 

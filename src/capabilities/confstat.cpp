@@ -57,21 +57,36 @@ void ConfStat::start()
         m_molecules.push_back(pair);
         */
     }
+
+    if (m_energies.size() == 0)
+        return;
+
     std::sort(m_energies.begin(), m_energies.end());
     double factor = -1 * 1000 * 2625.5 / (R * m_temp);
     double sum = 0;
-    double max = 1;
-    for (int i = 1; i < m_energies.size(); ++i) {
+    double max = 0;
+    double CR = 0;
+    double consistency = 0.0;
+    for (int i = 0; i < m_energies.size(); ++i) {
         double diff = m_energies[i] - m_energies[0];
-        max += exp(-1 * (diff)*2625.5 * 1000 / R / m_temp);
+        double pi = exp((diff)*factor);
+        max += pi;
     }
-
-    std::cout << "Lowest energy is " << m_energies[0] << " Eh, populated by " << 1 / max * 100 << " %!" << std::endl;
-    for (int i = 1; i < m_energies.size(); ++i) {
+    printf("\n\nLowest energy is %8.5f Eh!\n\n", m_energies[0]);
+    printf("   Diff E (in Eh and kJ/mol) |Intermediates    | Population\n\n");
+    for (int i = 0; i < m_energies.size(); ++i) {
         double diff = m_energies[i] - m_energies[0];
         double tmp = exp(diff * factor);
+        double pi = exp(-1 * (diff)*2625.5 * 1000 / R / m_temp) / max;
+        CR -= pi * log(pi);
         sum += tmp;
-        std::cout << diff << " " << (diff)*2625.5 << " " << tmp << " " << sum << " " << -R * m_temp * log(1 + sum) / 1000.0 << " " << exp(-1 * (diff)*2625.5 * 1000 / R / m_temp) / max * 100 << " %" << std::endl;
+        if (pi * 100 >= m_print_threshold || i < 10)
+            printf("%8.5f %8.2f | %8.5f %8.5f %8.5f | %8.5f\n", diff, (diff)*2625.5, tmp, sum, -R * m_temp * log(1 + sum) / 1000.0, pi * 100);
+        // consistency +=  pi/max * 100;
+        // std::cout << pi << std::endl;
+        //std::cout << diff << " " << (diff)*2625.5 << " " << tmp << " " << sum << " " << -R * m_temp * log(1 + sum) / 1000.0 << " " << exp(-1 * (diff)*2625.5 * 1000 / R / m_temp) / max * 100 << " %" << std::endl;
     }
-    std::cout << "Finallay add " << -R * m_temp * log(1 + sum) / 1000 << " kJ/mol to the free enthalpy / energy !" << std::endl;
+    std::cout << "Finally add " << -R * m_temp * log(sum) / 1000 << " kJ/mol to the free enthalpy / energy !" << std::endl;
+    std::cout << "Scr " << R * CR << " J/mol*K to the entropy = " << -1 * CR * R * m_temp / 1000 << " kJ/mol !" << std::endl;
+    // std::cout << consistency << std::endl;
 }

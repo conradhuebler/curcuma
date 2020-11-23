@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 
+#include "src/capabilities/confstat.h"
 #include "src/capabilities/rmsd.h"
 
 #include "src/core/fileiterator.h"
@@ -80,6 +81,8 @@ void ConfScan::LoadControlJson()
     m_maxParam = Json2KeyWord<int>(m_defaults, "MaxParam");
     m_useorders = Json2KeyWord<int>(m_defaults, "UseOrders");
     m_MaxHTopoDiff = Json2KeyWord<int>(m_defaults, "MaxHTopoDiff");
+    m_RMSDthreads = Json2KeyWord<int>(m_defaults, "RMSDThreads");
+
     std::string method = Json2KeyWord<std::string>(m_defaults, "RMSDMethod");
 
     if (method.compare("template") == 0) {
@@ -276,6 +279,7 @@ void ConfScan::ParametriseRotationalCutoffs()
     json rmsd = RMSDJson;
     rmsd["silent"] = true;
     rmsd["reorder"] = false;
+    rmsd["noreorder"] = true;
     rmsd["check"] = false;
     rmsd["heavy"] = m_heavy;
     std::cout << "Parametrise cutoff of rotational constants for reordering decison tree!" << std::endl;
@@ -508,6 +512,12 @@ void ConfScan::start()
         std::cout << std::endl;
     }
     std::cout << " done :-) " << std::endl;
+
+    /*
+    ConfStat *statistic = new ConfStat(ConfStatJson);
+    statistic->setFileName(result_name);
+    statistic->start();
+    */
 }
 
 int ConfScan::PreCheckAgainstAccepted(int index)
@@ -617,6 +627,7 @@ int ConfScan::CheckTempList(int index)
     rmsd["reorder"] = ForceReorder();
     rmsd["check"] = CheckConnections();
     rmsd["heavy"] = m_heavy;
+    rmsd["threads"] = m_RMSDthreads;
     if (m_RMSDmethod == 2)
         rmsd["method"] = "template";
     else
