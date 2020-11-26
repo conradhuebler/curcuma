@@ -60,22 +60,12 @@ int RMSDThread::execute()
             if (target_local.addPair(m_target.Atom(j))) {
                 const auto t = RMSDFunctions::getAligned(m_reference, target_local.getGeometry(), 1);
                 double rmsd_local = RMSDFunctions::getRMSD(m_reference, t);
-                //double rmsd_local = CalculateShortRMSD(ref, target_local);
 
                 if (target_local.AtomCount() < m_target.AtomCount()) {
-                    /*if (CheckConnections()) {
-                        int difference = CheckConnectivitiy(reference_local, target_local);
-                        if (difference <= m_pt)
-                            match.insert(std::pair<double, int>(rmsd_local, j));
-                    } else*/
                     {
                         match.insert(std::pair<double, int>(rmsd_local, j));
                     }
-                } /* else {
-                    std::vector<int> inter = m_intermediate;
-                    inter.push_back(j);
-                    m_results.insert(std::pair<double, std::vector<int>>(rmsd_local, inter));
-                }*/
+                }
             }
         }
     }
@@ -716,10 +706,8 @@ std::pair<Molecule, LimitedStorage> RMSDDriver::InitialisePair()
 
     if (m_initial.size() == 0) {
         for (int i = 0; i < m_reorder_reference.AtomCount() && index < 2; i++) {
-            if (elements[i] != 1) {
                 reference.addPair(m_reorder_reference.Atom(i));
                 index++;
-            }
         }
         m_reorder_reference_geometry = reference.getGeometry();
 
@@ -727,11 +715,7 @@ std::pair<Molecule, LimitedStorage> RMSDDriver::InitialisePair()
         std::vector<int> tmp_reference = reference.Atoms();
 
         for (int i = 0; i < m_reorder_target.AtomCount(); ++i) {
-            if (m_reorder_target.Atom(i).first == 1) // Skip first atom if Proton
-                continue;
             for (int j = i + 1; j < m_reorder_target.AtomCount(); ++j) {
-                if (m_reorder_target.Atom(j).first == 1) // Skip second atom if Proton
-                    continue;
                 if (tmp_reference[0] == elements_target[i] && tmp_reference[1] == elements_target[j])
                     storage.addItem({ i, j }, storage.size());
                 if (tmp_reference[0] == elements_target[j] && tmp_reference[1] == elements_target[i])
