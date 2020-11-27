@@ -130,19 +130,29 @@ int main(int argc, char **argv) {
                 exit(1);
             }
 
-            Molecule mol1 = Tools::LoadFile(argv[2]); // will only take first structure
-            Molecule mol2 = Tools::LoadFile(argv[3]); // will only take first structure
-            if (mol1.AtomCount() == 0 || mol2.AtomCount() == 0)
+            Molecule mol1(argv[2]); // will only take first structure
+            Molecule mol2(argv[3]); // will only take first structure
+
+            if (mol1.AtomCount() == 0 || mol2.AtomCount() == 0) {
+                std::cout << "At least one structure is empty:\n";
+                std::cout << argv[2] << " " << mol1.AtomCount() << " atoms" << std::endl;
+                std::cout << argv[3] << " " << mol2.AtomCount() << " atoms" << std::endl;
                 exit(0);
+            }
+
+            std::string reffile = argv[2];
+            std::string tarfile = argv[3];
+            reffile.erase(reffile.end() - 4, reffile.end());
+            tarfile.erase(tarfile.end() - 4, tarfile.end());
             RMSDDriver* driver = new RMSDDriver(controller, false);
             driver->setReference(mol1);
             driver->setTarget(mol2);
             driver->start();
             std::cout << "RMSD for two molecules " << driver->RMSD() << std::endl;
 
-            driver->ReferenceAligned().writeXYZFile("reference.xyz");
-            driver->TargetAligned().writeXYZFile("target_align.xyz");
-            driver->TargetReorderd().writeXYZFile("target_reorder.xyz");
+            driver->ReferenceAligned().writeXYZFile(reffile + "_centered.xyz");
+            driver->TargetAligned().writeXYZFile(tarfile + "_centered.xyz");
+            driver->TargetReorderd().writeXYZFile(tarfile + "_reordered.xyz");
 
             std::cout << Tools::Vector2String(driver->ReorderRules()) << std::endl;
             delete driver;

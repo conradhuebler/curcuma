@@ -133,6 +133,7 @@ void RMSDDriver::start()
         ProtonDepleted();
 
     m_target_aligned = m_target;
+    m_reference_aligned.LoadMolecule(m_reference);
     if (m_reference.Atoms() != m_target.Atoms() || m_force_reorder) {
         if (!m_noreorder)
             ReorderMolecule();
@@ -215,6 +216,7 @@ double RMSDDriver::BestFitRMSD()
     auto reference = CenterMolecule(m_reference.getGeometry());
     auto target = CenterMolecule(m_target.getGeometry());
     const auto t = RMSDFunctions::getAligned(reference, target, 1);
+    m_reference_aligned.setGeometry(reference);
     m_target_aligned.setGeometry(t);
     rmsd = RMSDFunctions::getRMSD(reference, t);
     return rmsd;
@@ -233,7 +235,7 @@ double RMSDDriver::CustomRotation()
     auto reference = GeometryTools::TranslateGeometry(m_reference.getGeometry(), GeometryTools::Centroid(m_reference.getGeometryByFragment(fragment_reference)), Position{ 0, 0, 0 }); // CenterMolecule(reference_mol);
     auto target = GeometryTools::TranslateGeometry(m_target.getGeometry(), GeometryTools::Centroid(m_target.getGeometryByFragment(fragment_target)), Position{ 0, 0, 0 }); //CenterMolecule(target_mol);
     const auto t = RMSDFunctions::applyRotation(target, rotation);
-    m_reference.setGeometry(reference);
+    m_reference_aligned.setGeometry(reference);
     m_reference.writeXYZFile("ref.xyz");
     m_target_aligned.setGeometry(t);
     m_target_aligned.writeXYZFile("tar.xyz");
