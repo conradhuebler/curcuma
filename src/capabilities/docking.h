@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include "src/capabilities/curcumaopt.h"
 #include "src/capabilities/optimiser/LBFGSInterface.h"
 #include "src/capabilities/optimiser/LevMarDocking.h"
 
@@ -79,7 +80,7 @@ public:
     inline int execute()
     {
         // OptimiseGeometryThreaded(&m_molecule, &m_result, &m_final, m_controller);
-        m_final = OptimiseGeometry(&m_molecule, m_controller);
+        m_final = CurcumaOpt::LBFGSOptimise(&m_molecule, m_controller);
         return 0;
     }
 

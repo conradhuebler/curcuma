@@ -23,6 +23,7 @@
 
 #include "src/capabilities/confscan.h"
 #include "src/capabilities/confstat.h"
+#include "src/capabilities/curcumaopt.h"
 #include "src/capabilities/docking.h"
 #include "src/capabilities/nebdocking.h"
 #include "src/capabilities/pairmapper.h"
@@ -282,53 +283,13 @@ int main(int argc, char **argv) {
                 std::cerr << "Please use curcuma for optimisation as follows:\ncurcuma -opt input.xyz" << std::endl;
                 return 0;
             }
-            std::string outfile = std::string(argv[2]);
-            for (int i = 0; i < 4; ++i)
-                outfile.pop_back();
-            outfile += "_opt.xyz";
 
-            json key = OptJson;
-            key = MergeJson(key, controller["opt"]);
-
-            FileIterator file(argv[2]);
-            std::multimap<double, Molecule> results;
-            while (!file.AtEnd()) {
-                Molecule mol = file.Next();
-                Molecule mol2 = OptimiseGeometry(&mol, key);
-                //mol2.writeXYZFile(outfile);
-                results.insert(std::pair<double, Molecule>(mol2.Energy(), mol2));
-            }
-            for (const auto& ref : results)
-                ref.second.appendXYZFile(outfile);
+            CurcumaOpt opt(controller, false);
+            opt.setFileName(argv[2]);
+            opt.start();
 
             return 0;
-        } /* else if (strcmp(argv[1], "-optp") == 0) {
-            if (argc < 2) {
-                std::cerr << "Please use curcuma for optimisation as follows:\ncurcuma -opt input.xyz" << std::endl;
-                return 0;
-            }
-            std::string outfile = std::string(argv[2]);
-            for (int i = 0; i < 4; ++i)
-                outfile.pop_back();
-            outfile += "_opt.xyz";
-
-            json key = OptJson;
-            key = MergeJson(key, controller["opt"]);
-
-            FileIterator file(argv[2]);
-            std::multimap<double, Molecule> results;
-            while (!file.AtEnd()) {
-                Molecule mol = file.Next();
-                Molecule mol2 = OptimiseProtons(&mol, key);
-                //mol2.writeXYZFile(outfile);
-                results.insert(std::pair<double, Molecule>(mol2.Energy(), mol2));
-            }
-            for (const auto& ref : results)
-                ref.second.appendXYZFile(outfile);
-
-            return 0;
-        } */
-        else if (strcmp(argv[1], "-block") == 0) {
+        } else if (strcmp(argv[1], "-block") == 0) {
             if (argc < 3) {
                 std::cerr << "Please use curcuma to split a file with many structures (trajectories) into several smaller:\ncurcuma block input.xyz X" << std::endl;
                 std::cerr << "With X the number of files to produce!" << std::endl;
@@ -379,65 +340,9 @@ int main(int argc, char **argv) {
                 std::cerr << "-heavy        **** Check only heavy atoms. Do not use with -write." << std::endl;
                 return 0;
             }
-            /*
-            int fragment = -1;
-            std::string reference, second;
-            double rmsd = 1;
-            bool write_unique = false, heavy = false;
-            bool isSecond = false;
-            for (std::size_t i = 3; i < argc; ++i) {
-                if (strcmp(argv[i], "-fragment") == 0) {
-                    if (i + 1 < argc) {
-                        fragment = std::stoi(argv[i + 1]);
-                        ++i;
-                    }
-                    // continue;
-                }
-                if (strcmp(argv[i], "-reference") == 0) {
-                    if (i + 1 < argc) {
-                        reference = argv[i + 1];
-                        ++i;
-                    }
-                    // continue;
-                }
 
-                if (strcmp(argv[i], "-second") == 0) {
-                    if (i + 1 < argc) {
-                        second = argv[i + 1];
-                        isSecond = true;
-                        ++i;
-                    }
-                    // continue;
-                }
-
-                if (strcmp(argv[i], "-rmsd") == 0) {
-                    if (i + 1 < argc) {
-                        rmsd = std::stod(argv[i + 1]);
-                        ++i;
-                    }
-                    // continue;
-                }
-
-                if (strcmp(argv[i], "-write") == 0) {
-                    write_unique = true;
-                    continue;
-                }
-
-                if (strcmp(argv[i], "-heavy") == 0) {
-                    heavy = true;
-                    continue;
-                }
-            }
-    */
             RMSDTraj traj(controller, false);
-            //traj.setReferenceStructure(reference);
-            //traj.WriteUnique(write_unique);
-            //traj.setRMSDThreshold(rmsd);
             traj.setFile(argv[2]);
-            //traj.setFragment(fragment);
-            //traj.setHeavy(heavy);
-            //if (isSecond)
-            //    traj.setSecondFile(second);
             traj.start();
 
         } else if (strcmp(argv[1], "-nebprep") == 0) {
