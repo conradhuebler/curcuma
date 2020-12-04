@@ -27,18 +27,19 @@ static json CurcumaOptJson{
     { "Solver", 1 },
     { "writeXYZ", false },
     { "printOutput", true },
-    { "dE", 0.75 },
+    { "dE", 0.1 },
     { "dRMSD", 0.01 },
     { "GFN", 2 },
     { "InnerLoop", 20 },
     { "OuterLoop", 100 },
-    { "LBFGS_eps", 1e-5 }
+    { "LBFGS_eps", 1e-5 },
+    { "Threads", 1 }
 };
 
 const json OptJsonPrivate{
     { "writeXYZ", false },
     { "printOutput", true },
-    { "dE", 0.75 },
+    { "dE", 0.1 },
     { "dRMSD", 0.01 },
     { "GFN", 2 },
     { "InnerLoop", 20 },
@@ -79,9 +80,9 @@ public:
     void start() override; // TODO make pure virtual and move all main action here
 
     static Molecule LBFGSOptimise(const Molecule* host, const json& controller);
-
+#ifdef test
     static Molecule CppNumSolvOptimise(const Molecule* host, const json& controller);
-
+#endif
 private:
     /* Lets have this for all modules */
     inline nlohmann::json WriteRestartInformation() override { return json(); }
@@ -89,7 +90,7 @@ private:
     /* Lets have this for all modules */
     inline bool LoadRestartInformation() override { return true; }
 
-    inline std::string MethodName() const override { return std::string("CurcumaOpt"); }
+    inline std::string MethodName() const override { return std::string("opt"); }
 
     /* Lets have all methods read the input/control file */
     void ReadControlFile() override{};
@@ -100,5 +101,7 @@ private:
     std::string m_filename;
     Molecule m_molecule;
     std::vector<Molecule> m_molecules;
-    bool m_file_set = false, m_mol_set = false, m_mols_set = false;
+    bool m_file_set = false, m_mol_set = false, m_mols_set = false, m_writeXYZ = true, m_printoutput = true;
+    int m_threads = 1, m_GFNmethod = 2;
+    double m_dE = 0.1, m_dRMSD = 0.01;
 };

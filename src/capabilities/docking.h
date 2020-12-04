@@ -20,7 +20,6 @@
 #pragma once
 
 #include "src/capabilities/curcumaopt.h"
-#include "src/capabilities/optimiser/LBFGSInterface.h"
 #include "src/capabilities/optimiser/LevMarDocking.h"
 
 #include "src/core/elements.h"
@@ -89,7 +88,7 @@ public:
 private:
     std::string m_result;
     Molecule m_molecule, m_final;
-    json m_controller = OptJson;
+    json m_controller = CurcumaOptJson;
 };
 
 static const json DockingJson = {

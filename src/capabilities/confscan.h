@@ -127,7 +127,7 @@ private:
     std::string m_filename;
     std::map<double, int> m_ordered_list;
     std::vector<std::pair<std::string, Molecule*>> m_molecules;
-    double m_energy_threshold = 1.0, m_rmsd_threshold = 1.0, m_diff_rot_rel_loose = 0.3, m_diff_rot_rel_tight = 0.01, m_nearly_missed = 0.8, m_energy_cutoff = -1, m_reference_last_energy = 0, m_target_last_energy = 0;
+    double m_energy_threshold = 1.0, m_rmsd_threshold = 1.0, m_diff_rot_rel_loose = 0.3, m_diff_rot_rel_tight = 0.01, m_nearly_missed = 0.8, m_energy_cutoff = -1, m_reference_last_energy = 0, m_target_last_energy = 0, m_lowest_energy = 1;
     double m_diff_rot_abs_tight = 0, m_diff_rot_abs_loose = 0, m_scale_tight = 0.5, m_scale_loose = 2;
     std::vector<Molecule*> m_result, m_nearly, m_failed;
     int m_maxrank = 10000;

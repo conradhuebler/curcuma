@@ -31,9 +31,6 @@
 #include "src/capabilities/rmsdtraj.h"
 #include "src/capabilities/simplemd.h"
 
-#include "src/capabilities/optimiser/LBFGSInterface.h"
-//#include "src/capabilities/optimiser/Proton.h"
-
 #include "src/tools/general.h"
 
 #include <iostream>
@@ -540,7 +537,7 @@ int main(int argc, char **argv) {
                     mol.setGeometry(GeometryTools::TranslateGeometry(mol.getGeometry(), GeometryTools::Centroid(mol.getGeometry()), Position{ 0, 0, 0 }));
                 mol.print_geom();
                 mol.AnalyseIntermoleculeDistance();
-                std::cout << std::endl
+                std::cout << mol.Check() << std::endl
                           << std::endl;
                 // CompactTopo(mol.HydrogenBondMatrix(-1,-1));
                 // std::cout << CompareTopoMatrix(mol.HydrogenBondMatrix(-1,-1),mol.HydrogenBondMatrix(-1,-1) ) << std::endl;

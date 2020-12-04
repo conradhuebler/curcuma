@@ -30,8 +30,8 @@
 #include <iostream>
 #include <list>
 
-#include "function.h"
-#include "solver/lbfgs.h"
+#include "cppoptlib/function.h"
+#include "cppoptlib/solver/lbfgs.h"
 
 class CppNumSolvInterface : public cppoptlib::function::Function<double> {
 public:

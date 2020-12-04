@@ -12,7 +12,7 @@ option (LINK_XTB
 option (C17
     "Use C++ 17 Standard" ON)
 
-include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/eigen ${PROJECT_SOURCE_DIR}/external/LBFGSpp/include ${PROJECT_SOURCE_DIR}/external/CppNumericalSolvers/include/cppoptlib  ${CMAKE_CURRENT_BINARY_DIR}/src/)
+include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/eigen ${PROJECT_SOURCE_DIR}/external/LBFGSpp/include ${PROJECT_SOURCE_DIR}/external/CppNumericalSolvers/include  ${CMAKE_CURRENT_BINARY_DIR}/src/)
 include_directories(${PROJECT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} )
 
 # Get the current working branch

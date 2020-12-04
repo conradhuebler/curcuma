@@ -27,8 +27,10 @@
 #include <LBFGS.h>
 #include <LBFGSB.h>
 
-#include "function.h"
-#include "solver/lbfgs.h"
+#ifdef test
+#include "cppoptlib/function.h"
+#include "cppoptlib/solver/lbfgs.h"
+#endif
 
 #include <iomanip>
 #include <iostream>
@@ -56,31 +58,28 @@ CurcumaOpt::CurcumaOpt(const json& controller, bool silent)
 
 void CurcumaOpt::LoadControlJson()
 {
-    // m_cutoff = Json2KeyWord<double>(m_defaults, "Cutoff");
-    // m_temp = Json2KeyWord<double>(m_defaults, "Temp");
+    m_threads = Json2KeyWord<int>(m_defaults, "threads");
+    m_writeXYZ = Json2KeyWord<bool>(m_defaults, "writeXYZ");
+    m_printoutput = Json2KeyWord<bool>(m_defaults, "printOutput");
+    m_dE = Json2KeyWord<double>(m_defaults, "dE");
+    m_dRMSD = Json2KeyWord<double>(m_defaults, "dRMSD");
+    m_GFNmethod = Json2KeyWord<int>(m_defaults, "GFN");
 }
 
 void CurcumaOpt::start()
 {
-    int threads = 12; //MaxThreads();
+    int threads = m_threads;
     if (m_file_set) {
         std::string outfile = std::string(m_filename);
         for (int i = 0; i < 4; ++i)
             outfile.pop_back();
-        outfile += "_opt.xyz";
+        outfile += ".opt.xyz";
 
-        json key = CurcumaOptJson;
-        key = MergeJson(key, m_controller);
         std::vector<Molecule> mols;
         FileIterator file(m_filename);
         std::multimap<double, Molecule> results;
         while (!file.AtEnd()) {
             mols.push_back(file.Next());
-            //Molecule mol = file.Next();
-            //Molecule mol2 = LBFGSOptimise(&mol, key);
-            // CppNumSolvOptimise(&mol, key);
-            //mol2.writeXYZFile(outfile);
-            //results.insert(std::pair<double, Molecule>(mol2.Energy(), mol2));
         }
 
         CxxThreadPool* pool = new CxxThreadPool;
@@ -94,11 +93,9 @@ void CurcumaOpt::start()
                 if (iter == mols.end())
                     continue;
 
-                auto pair = *iter;
-
                 OptThread* th = new OptThread;
-                th->setMolecule(pair);
-                th->setController(OptJsonPrivate);
+                th->setMolecule(*iter);
+                th->setController(m_defaults);
                 thread_block.push_back(th);
                 pool->addThread(th);
 
@@ -106,19 +103,24 @@ void CurcumaOpt::start()
             }
         }
 
+        std::ofstream result_file;
+        result_file.open(outfile);
+        result_file.close();
+
         std::cout << "Batch calculation started! " << std::endl;
         pool->StartAndWait();
         std::cout << "Batch evaluation ... " << std::endl;
-        for (auto* t : pool->Finished()) {
-            const OptThread* thread = static_cast<const OptThread*>(t);
+        for (auto t : pool->OrderedList()) {
+            const OptThread* thread = static_cast<const OptThread*>(t.second);
+            if (!thread->Finished())
+                continue;
             Molecule* mol2 = new Molecule(thread->getMolecule());
             mol2->appendXYZFile(outfile);
-            //delete thread;
         }
         delete pool;
     }
 }
-
+#ifdef test
 Molecule CurcumaOpt::CppNumSolvOptimise(const Molecule* host, const json& controller)
 {
     using Solver = cppoptlib::solver::Lbfgs<CppNumSolvInterface>;
@@ -233,10 +235,10 @@ Molecule CurcumaOpt::CppNumSolvOptimise(const Molecule* host, const json& contro
     h.setGeometry(geometry);
     return h;
 }
+#endif
 
 Molecule CurcumaOpt::LBFGSOptimise(const Molecule* host, const json& controller)
 {
-    PrintController(controller);
     bool writeXYZ = Json2KeyWord<bool>(controller, "writeXYZ");
     bool printOutput = Json2KeyWord<bool>(controller, "printOutput");
     double dE = Json2KeyWord<double>(controller, "dE");
@@ -245,6 +247,14 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* host, const json& controller)
     int method = Json2KeyWord<int>(controller, "GFN");
     int InnerLoop = Json2KeyWord<int>(controller, "InnerLoop");
     int OuterLoop = Json2KeyWord<int>(controller, "OuterLoop");
+    if(Json2KeyWord<int>(controller, "threads") > 1 )
+    {
+        printOutput = false;
+        writeXYZ = false;
+    }
+
+    if (printOutput)
+        PrintController(controller);
 
     Geometry geometry = host->getGeometry();
     Molecule tmp(host);
@@ -292,6 +302,7 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* host, const json& controller)
     RMSDDriver* driver = new RMSDDriver(RMSDJsonControl);
 
     std::chrono::time_point<std::chrono::system_clock> start = std::chrono::system_clock::now(), end;
+
     if (printOutput) {
         printf("Step\tCurrent Energy\t\tEnergy Change\t\tRMSD Change\t   t\n");
         printf("\t[Eh]\t\t\t[kJ/mol]\t\t [A]\t\t   [s]\n");

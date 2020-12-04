@@ -290,10 +290,15 @@ void ConfScan::ParametriseRotationalCutoffs()
     if (m_maxParam == -1)
         m_maxParam = m_ordered_list.size() * (m_ordered_list.size() - 1);
     for (int i = 0; i < m_ordered_list.size() && counter < m_maxParam; ++i) {
+        Molecule* mol1 = m_molecules.at(i).second;
+        if (mol1->Check() == 1)
+            continue;
+
         for (int j = i + 1; j < m_ordered_list.size() && counter < m_maxParam; ++j) {
             RMSDDriver* driver = new RMSDDriver(rmsd);
-            Molecule* mol1 = m_molecules.at(i).second;
             Molecule* mol2 = m_molecules.at(j).second;
+            if (mol2->Check() == 1)
+                continue;
 
             double Ia = abs(mol1->Ia() - mol2->Ia());
             double Ib = abs(mol1->Ib() - mol2->Ib());
@@ -350,7 +355,6 @@ void ConfScan::start()
     LoadRestartInformation();
 
     m_silent = m_ordered_list.size() > 500 || m_force_silent;
-    Molecule* mol1;
     bool accept = true;
 
     //std::map<std::string, std::vector<std::string>> m_filtered;
@@ -420,6 +424,22 @@ void ConfScan::start()
         }
         int index = i.second;
         Molecule* mol1 = m_molecules.at(index).second;
+        if (mol1->Check() == 1) {
+            m_rejected++;
+            m_start++;
+            PrintStatus();
+            continue;
+        }
+        if (m_lowest_energy > 0)
+            m_lowest_energy = mol1->Energy();
+
+        double difference = abs(mol1->Energy() - m_lowest_energy) * 2625.5;
+        if (difference > m_energy_cutoff) {
+            m_rejected++;
+            m_start++;
+            PrintStatus();
+            continue;
+        }
         int result = PreCheckAgainstAccepted(index);
         if (result == -1) {
             m_rejected++;
@@ -567,6 +587,7 @@ int ConfScan::PreCheckAgainstAccepted(int index)
             if (m_energy_cutoff > 0)
                 if (difference > m_energy_cutoff) {
                     accept = false;
+                    delete driver;
                     continue;
                 }
             double rmsd = 0;
@@ -676,13 +697,8 @@ int ConfScan::CheckTempList(int index)
                               << "*** Old reordering solution worked here! ***" << std::endl
                               << std::endl;
                 }
-                //mol1->appendXYZFile("reused.xyz");
-                //mol2->appendXYZFile("reused.xyz");
                 accept = false;
-
-                //std::string reject_reason = mol2->Name() + " [II]  RMSD = " + std::to_string(tmp_rmsd) + "; dE = " + std::to_string(difference);
                 rmsd = tmp_rmsd;
-                //m_filtered[mol1->Name()].push_back(reject_reason);
                 m_reordered_reused++;
                 break;
             }
@@ -844,5 +860,6 @@ void ConfScan::PrintStatus()
     std::cout << "# Reordered : " << m_reordered << "     ";
     std::cout << "# Successfully : " << m_reordered_worked << "    ";
     std::cout << "# Not at all : " << m_reordered_failed_completely << "     ";
-    std::cout << "# Reused Results : " << m_reordered_reused << std::endl;
+    std::cout << "# Reused Results : " << m_reordered_reused << "     ";
+    std::cout << "# Current Energy [kJ/mol] : " << (m_target_last_energy - m_lowest_energy) * 2625.5 << std::endl;
 }

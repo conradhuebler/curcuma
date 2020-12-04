@@ -1,4 +1,5 @@
-[![CodeFactor](https://www.codefactor.io/repository/github/conradhuebler/curcuma/badge)](https://www.codefactor.io/repository/github/conradhuebler/curcuma) [![Build](https://github.com/conradhuebler/curcuma/workflows/AutomaticBuild/badge.svg)](https://github.com/conradhuebler/curcuma/actions) 
+[![CodeFactor](https://www.codefactor.io/repository/github/conradhuebler/curcuma/badge)](https://www.codefactor.io/repository/github/conradhuebler/curcuma) [![Build](https://github.com/conradhuebler/curcuma/workflows/AutomaticBuild/badge.svg)](https://github.com/conradhuebler/curcuma/actions)  [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.4302722.svg)](https://doi.org/10.5281/zenodo.4302722)
+
 
 # Curcuma
 
@@ -18,7 +19,7 @@ XTB is automatically obtained during git clone, however it is not included in cu
 
 Using xtb calculation in curcuma can be controlled for now as follows:
 - Add **-gfn 1** to run GFN1 calculation, **-gfn 66** to run GFN-FF calculation.
-- xtb calculation may be thread-safe now, so parallel optimisation after docking are possible now. However, the variable **OMP_NUM_THREADS** should be set to 1. Add **-thread 12** to run optimisation after docking with 12 threads. GFN FF calculation will surely fail, might be due to the topo file.
+- xtb calculation may be thread-safe now, so parallel optimisation ( after docking ) are possible now. However, the variable **OMP_NUM_THREADS** should be set to 1. Add **-thread 12** to run optimisation after docking with 12 threads. GFN FF calculation will surely fail, might be due to the topo file.
 
 ## Compiling
 To compile Curcuma you will need [CMake](https://cmake.org/download/) 3.15 or newer and a C++17-capable compiler, both gcc and icc (quite recent version) work.
@@ -52,7 +53,7 @@ Two different approaches are currently implemented, one incremental method witho
 ```sh
 -method template -fragment 1
 ```
-to use the second structure, eg the one bound non-covalently by the first structure, as template. With this approach a much faster reordering is obtained. Omitting -fragment, curcuma tries used the smallest fragment.
+to use the second structure, eg the one bound non-covalently by the first structure, as template. With this approach a much faster reordering is obtained. Omitting -fragment, curcuma tries using the smallest fragment.
 
 Add
 ```sh
@@ -139,6 +140,16 @@ up to X reorder results will be reused from the last reorder calculation. Templa
 xyz and trj are handled equally.
 ```sh
 curcuma -rmsdtraj XXX.trj -writeUnique -rmsd 1.5
+```
+
+## Batch optimisation
+Geometry optimisation can be performed with curcuma using 
+```sh
+curcuma -opt XXX.xyz
+```
+A file called XXX.opt.xyz with the optimised structures will be written. The number of threads can be controlled with
+```sh
+-threads X
 ```
 
 ## Reorder and Align trajectories

@@ -1,6 +1,7 @@
 # The (incomplete) curcuma Changelog
 
 ### pre Alpha
+- add parallel batch optimisation
 - add conformation statistics
 - parallel docking due to CxxThreadPool
 - add restriction for hydrogen bond patterns in conformational scan

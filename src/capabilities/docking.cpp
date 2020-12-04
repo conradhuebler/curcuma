@@ -22,8 +22,6 @@
 
 #include "src/tools/general.h"
 
-#include "src/capabilities/optimiser/LBFGSInterface.h"
-
 #include "src/capabilities/optimiser/LevMarDocking.h"
 #include "src/capabilities/optimiser/XTBDocking.h"
 
@@ -299,7 +297,7 @@ void Docking::PostOptimise()
     std::map<double, Molecule*> result_list, final_results;
     auto iter = m_result_list.begin();
     int index = 0;
-    json opt = OptJson;
+    json opt = CurcumaOptJson;
     opt["dE"] = 50;
     opt["dRMSD"] = 0.1;
     opt["printOutput"] = false;

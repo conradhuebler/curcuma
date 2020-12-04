@@ -122,6 +122,8 @@ class Molecule
     Matrix HydrogenBondMatrix(int f1, int f2);
     void writeXYZFragments(const std::string& basename) const;
 
+    int Check() const;
+
 private:
     void ParseString(const std::string& internal, std::vector<std::string>& elements);
 

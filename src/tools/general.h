@@ -72,7 +72,7 @@ inline void StartUp(int argc, char** argv)
     std::cout << "*************************************************" << std::endl
               << "*   Curcuma - Simple Molecular Modelling tool   *" << std::endl
               << "*                                               *" << std::endl
-              << "*    Curcuma - Version " << git_tag << "                *" << std::endl
+              << "*    Curcuma - Version " << git_tag << "                   *" << std::endl
               << "*                                               *" << std::endl
               << "*    Written by Conrad Hübler TU Freiberg       *" << std::endl
               << "*                                               *" << std::endl

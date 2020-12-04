@@ -120,6 +120,16 @@ void Molecule::print_geom(bool moreinfo) const
     }
 }
 
+int Molecule::Check() const
+{
+    for (int i = 1; i < AtomCount(); ++i)
+        for (int j = 0; j < i; ++j) {
+            if (CalculateDistance(i, j) < 1e-1)
+                return 1;
+        }
+    return 0;
+}
+
 void Molecule::printFragmente()
 {
     if (m_fragments.size() == 0)
