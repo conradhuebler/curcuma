@@ -135,7 +135,6 @@ configure_file(
 )
 
 set(curcuma_core_SRC
-        src/capabilities/optimiser/LBFGSInterface.h
         src/capabilities/curcumamethod.cpp
         src/capabilities/curcumaopt.cpp
         src/capabilities/confscan.cpp
