@@ -35,7 +35,10 @@
 #include <iomanip>
 #include <iostream>
 
+#ifdef test
 #include "optimiser/CppNumericalSolversInterface.h"
+#endif
+
 #include "optimiser/LBFGSppInterface.h"
 
 #include "curcumaopt.h"
