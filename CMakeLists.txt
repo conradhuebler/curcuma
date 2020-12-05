@@ -12,7 +12,9 @@ option (LINK_XTB
 option (C17
     "Use C++ 17 Standard" ON)
 
-include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/eigen ${PROJECT_SOURCE_DIR}/external/LBFGSpp/include ${PROJECT_SOURCE_DIR}/external/CppNumericalSolvers/include  ${CMAKE_CURRENT_BINARY_DIR}/src/)
+add_subdirectory(${PROJECT_SOURCE_DIR}/external/fmt EXCLUDE_FROM_ALL)
+
+include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/fmt/include ${PROJECT_SOURCE_DIR}/external/eigen ${PROJECT_SOURCE_DIR}/external/LBFGSpp/include ${PROJECT_SOURCE_DIR}/external/CppNumericalSolvers/include  ${CMAKE_CURRENT_BINARY_DIR}/src/)
 include_directories(${PROJECT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} )
 
 # Get the current working branch
@@ -174,19 +176,21 @@ set_property(TARGET curcuma PROPERTY LINK_FLAGS_RELWITHDEBINFO -s)
 
 if(USE_XTB)
     if(COMPILE_XTB)
-        target_link_libraries(curcuma_core lib-xtb-shared pthread dl)
+        target_link_libraries(curcuma_core lib-xtb-shared pthread dl fmt::fmt-header-only)
     else()
-        target_link_libraries(curcuma_core ${XTB_DIR}/libxtb.so pthread dl)
+        target_link_libraries(curcuma_core ${XTB_DIR}/libxtb.so pthread dl fmt::fmt-header-only)
     endif()
 else()
-    target_link_libraries(curcuma_core pthread dl)
+    target_link_libraries(curcuma_core pthread dl fmt::fmt-header-only)
 endif()
 
-        target_link_libraries(curcuma curcuma_core)
+    target_link_libraries(curcuma fmt::fmt-header-only)
+    target_link_libraries(curcuma curcuma_core)
 
 add_executable(curcuma_helper
         src/helpers/main.cpp)
 
+    target_link_libraries(curcuma_helper fmt::fmt-header-only)
     target_link_libraries(curcuma_helper curcuma_core)
     
 set_property(TARGET curcuma_helper PROPERTY LINK_FLAGS_RELEASE -s)

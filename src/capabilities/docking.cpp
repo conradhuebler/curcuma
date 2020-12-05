@@ -17,15 +17,11 @@
  *
  */
 
-
-#include "src/core/pseudoff.h"
-
 #include "src/tools/general.h"
 
-#include "src/capabilities/optimiser/LevMarDocking.h"
-#include "src/capabilities/optimiser/XTBDocking.h"
-
 #include "src/capabilities/confscan.h"
+#include "src/capabilities/curcumaopt.h"
+#include "src/capabilities/optimiser/LevMarDocking.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
 
@@ -146,19 +142,7 @@ void Docking::PerformDocking()
     Position initial_centroid = m_guest_structure.Centroid();
 
     Geometry geometry = GeometryTools::TranslateAndRotate(stored_guest, initial_centroid, m_initial_anchor, Position{ 0, 0, 0 });
-    /*
-    Molecule temp_guest = guest;
-    temp_guest.setGeometry(geometry);
-    Geometry geom2 = PrepareHost(&m_host_structure, &temp_guest);
-    Molecule host2 = m_host_structure;
-    host2.setGeometry(geom2);
 
-
-    Geometry destination = GeometryTools::TranslateMolecule(guest,initial_centroid, m_initial_anchor);
-
-    std::cout << PseudoFF::LennardJones(m_host_structure, m_guest_structure) << std::endl;
-    std::cout << m_guest_structure.Centroid().transpose() << " = Centroid of Guest" << std::endl;
-    */
     std::cout << std::endl
               << "** Docking Phase 0 - Starting **" << std::endl
               << std::endl;
@@ -293,53 +277,29 @@ void Docking::PerformDocking()
 void Docking::PostOptimise()
 {
     double frag_scaling = 1.5;
-    int threads = m_threads;
+
     std::map<double, Molecule*> result_list, final_results;
     auto iter = m_result_list.begin();
-    int index = 0;
     json opt = CurcumaOptJson;
     opt["dE"] = 50;
     opt["dRMSD"] = 0.1;
-    opt["printOutput"] = false;
-    opt = MergeJson(opt, m_controller["dock"]);
-    PrintController(opt);
-    std::cout << "Load Batch for Calculation ... " << std::endl;
-    CxxThreadPool* pool = new CxxThreadPool;
-    //pool->RedirectOutput(&m_curcuma_progress);
-    pool->setProgressBar(CxxThreadPool::ProgressBarType::Continously);
-    pool->setActiveThreadCount(threads);
-    std::vector<Thread*> thread_block;
+    opt["printOutput"] = true;
+    opt["threads"] = m_threads;
+    CurcumaOpt optimise(opt, false);
+
     while (iter != m_result_list.end()) {
-        for (int i = 0; i < threads; ++i) {
-            if (iter == m_result_list.end())
-                continue;
-
-            auto pair = *iter;
-
-            Thread* th = new Thread;
-            th->setMolecule(pair.second);
-            th->setController(opt);
-            thread_block.push_back(th);
-            pool->addThread(th);
-
-            ++iter;
-            index++;
-        }
+        auto pair = *iter;
+        optimise.addMolecule(pair.second);
+        ++iter;
     }
+    optimise.setBaseName("Optimise_F2");
+    optimise.start();
 
-    std::cout << "Batch calculation started! " << std::endl;
-    pool->StartAndWait();
-    std::cout << "Batch evaluation ... " << std::endl;
-    for (auto* t : pool->Finished()) {
-        const Thread* thread = static_cast<const Thread*>(t);
-        Molecule* mol2 = new Molecule(thread->getMolecule());
+    for (const auto& t : *optimise.Molecules()) {
+        Molecule* mol2 = new Molecule(t);
         result_list.insert(std::pair<double, Molecule*>(mol2->Energy(), mol2));
-        //delete thread;
     }
-    delete pool;
-    std::cout << "** Docking Phase 2 - Finished **" << std::endl;
 
-    {
         // Will be removed some day
         std::vector<int> frags = { 0, 0, 0, 0, 0 };
         int index = 0;
@@ -368,22 +328,22 @@ void Docking::PostOptimise()
                 }
             }
         }
-    }
+
     if (!m_PostFilter)
         return;
 
     std::cout << "** Docking Phase 3 - Fast Filtering structures with correct fragments **" << std::endl;
 
     json confscan = ConfScanJson;
-    confscan["heavy"] = true;
+    confscan["heavy"] = false;
     confscan["maxrank"] = -1;
     confscan["writeXYZ"] = false;
-    confscan["ForceReorder"] = false;
+    confscan["ForceReorder"] = true;
     confscan["check"] = false;
-    confscan["energy"] = 1.0;
+    //confscan["energy"] = 1.0;
     confscan["noname"] = true;
     confscan["silent"] = true;
-    confscan["preventreorder"] = true;
+    //confscan["preventreorder"] = true;
     confscan["maxenergy"] = -1;
     confscan["RMSDMethod"] = "template";
     json controller;
@@ -393,16 +353,13 @@ void Docking::PostOptimise()
     scan->start();
 
     std::vector<Molecule*> result = scan->Result();
-
     std::cout << "** Docking Phase 4 - Writing structures to Final_Result.xyz **" << std::endl;
 
-    {
-        int index = 0;
-        for (const auto mol : result) {
-            ++index;
-            const std::string name = "Final_Result.xyz";
-            mol->appendXYZFile(name);
-            delete mol;
-        }
+    index = 0;
+    for (const auto mol : result) {
+        ++index;
+        const std::string name = "Final_Result.xyz";
+        mol->appendXYZFile(name);
+        delete mol;
     }
 }

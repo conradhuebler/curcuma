@@ -32,6 +32,7 @@
 #include "src/capabilities/simplemd.h"
 
 #include "src/tools/general.h"
+#include "src/tools/info.h"
 
 #include <iostream>
 #include <string>

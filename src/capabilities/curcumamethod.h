@@ -59,7 +59,7 @@ protected:
     bool m_restart = true;
 
     void AppendError(const std::string& error) { m_error_list.push_back(error); }
-    std::filebuf m_curcuma_progress;
+    //std::filebuf m_curcuma_progress;
 
 private:
     /* Lets have this for all modules */

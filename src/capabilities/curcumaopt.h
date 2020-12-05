@@ -25,7 +25,7 @@
 
 static json CurcumaOptJson{
     { "Solver", 1 },
-    { "writeXYZ", false },
+    { "writeXYZ", true },
     { "printOutput", true },
     { "dE", 0.1 },
     { "dRMSD", 0.01 },
@@ -58,11 +58,13 @@ public:
 
     inline void setController(const json& controller) { m_controller = controller; }
     std::string Output() const { return m_result; }
+    const std::vector<Molecule>* Intermediates() const { return &m_intermediate; }
 
 private:
     std::string m_result;
     Molecule m_molecule, m_final;
     json m_controller = OptJsonPrivate;
+    std::vector<Molecule> m_intermediate;
 };
 
 class CurcumaOpt : public CurcumaMethod {
@@ -72,14 +74,44 @@ public:
     void setFileName(const std::string& filename)
     {
         m_filename = filename;
+        m_basename = std::string(m_filename);
+        for (int i = 0; i < 4; ++i)
+            m_basename.pop_back();
+
         m_file_set = true;
         m_mol_set = false;
         m_mols_set = false;
     }
 
+    inline void addMolecule(const Molecule& molecule)
+    {
+        m_molecules.push_back(molecule);
+        m_file_set = false;
+        m_mol_set = false;
+        m_mols_set = true;
+    }
+
+    inline void setBaseName(const std::string& basename)
+    {
+        m_basename = basename;
+
+        std::ofstream tfile1;
+        tfile1.open(Optfile());
+        tfile1.close();
+
+        std::ofstream tfile2;
+        tfile2.open(Trjfile());
+        tfile2.close();
+    }
+
+    inline std::string Optfile() const { return std::string(m_basename + ".opt.xyz"); }
+    inline std::string Trjfile() const { return std::string(m_basename + ".trj.xyz"); }
+
     void start() override; // TODO make pure virtual and move all main action here
 
-    static Molecule LBFGSOptimise(const Molecule* host, const json& controller);
+    inline const std::vector<Molecule>* Molecules() const { return &m_molecules; }
+
+    static Molecule LBFGSOptimise(const Molecule* host, const json& controller, std::string& output, std::vector<Molecule>* intermediate);
 #ifdef test
     static Molecule CppNumSolvOptimise(const Molecule* host, const json& controller);
 #endif
@@ -98,7 +130,9 @@ private:
     /* Read Controller has to be implemented for all */
     void LoadControlJson() override;
 
-    std::string m_filename;
+    void ProcessMolecules(const std::vector<Molecule>& molecule);
+
+    std::string m_filename, m_basename = "curcuma_job";
     Molecule m_molecule;
     std::vector<Molecule> m_molecules;
     bool m_file_set = false, m_mol_set = false, m_mols_set = false, m_writeXYZ = true, m_printoutput = true;

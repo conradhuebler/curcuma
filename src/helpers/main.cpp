@@ -18,6 +18,7 @@
  */
 
 #include "src/tools/general.h"
+#include "src/tools/info.h"
 
 #include <cstring>
 #include <fstream>

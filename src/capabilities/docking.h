@@ -69,28 +69,6 @@ private:
     Molecule m_host, m_guest;
 };
 
-class Thread : public CxxThread {
-public:
-    Thread() = default;
-    ~Thread() = default;
-
-    inline void setMolecule(const Molecule& molecule) { m_molecule = molecule; }
-    inline Molecule getMolecule() const { return m_final; }
-    inline int execute()
-    {
-        // OptimiseGeometryThreaded(&m_molecule, &m_result, &m_final, m_controller);
-        m_final = CurcumaOpt::LBFGSOptimise(&m_molecule, m_controller);
-        return 0;
-    }
-
-    inline void setController(const json& controller) { m_controller = controller; }
-    std::string Output() const { return m_result; }
-private:
-    std::string m_result;
-    Molecule m_molecule, m_final;
-    json m_controller = CurcumaOptJson;
-};
-
 static const json DockingJson = {
     { "Pos_X", 0.0 },
     { "Pos_Y", 0.0 },

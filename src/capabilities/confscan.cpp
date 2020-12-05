@@ -434,7 +434,7 @@ void ConfScan::start()
             m_lowest_energy = mol1->Energy();
 
         double difference = abs(mol1->Energy() - m_lowest_energy) * 2625.5;
-        if (difference > m_energy_cutoff) {
+        if (difference > m_energy_cutoff && m_energy_cutoff != -1) {
             m_rejected++;
             m_start++;
             PrintStatus();

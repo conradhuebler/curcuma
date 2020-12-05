@@ -11,6 +11,10 @@ git clones automatically some submodules.
 - [XTB](https://github.com/grimme-lab/xtb) eXtended TightBinding - Some methods use this, however it is disabled by default. Add '-DUSE_XTB=true ' to the cmake command line to enable it. GCC 8 or later has to be used.
 - [CxxThreadPool](https://github.com/conradhuebler/CxxThreadPool) - C++ Thread Pool for parallel calculation
 - [eigen](https://gitlab.com/libeigen/eigen) provides eigen C++ library for linear algebra. Eigen is not downloaded automatically, but will be fetched and updated if the build scripts in the **scripts** subdirectory are used.
+- [fmt](https://github.com/fmtlib/fmt) formatted console output
+- [CppNumericalSolvers](https://github.com/PatWie/CppNumericalSolvers) disabled alternative LBFGS solver
+
+Additionally, [nlohmann/json](https://github.com/nlohmann/json) is obtained via cmake.
 
 ### Using XTB in curcuma
 XTB is automatically obtained during git clone, however it is not included in curcuma with the default compiler settings. There are two ways of including XTB:
@@ -147,7 +151,7 @@ Geometry optimisation can be performed with curcuma using
 ```sh
 curcuma -opt XXX.xyz
 ```
-A file called XXX.opt.xyz with the optimised structures will be written. The number of threads can be controlled with
+A file called XXX.opt.xyz with the optimised structures will be written. The individual steps are stored in XXX.trj.xyz. The number of threads can be controlled with
 ```sh
 -threads X
 ```

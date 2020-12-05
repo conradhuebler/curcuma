@@ -36,7 +36,7 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, bool 
     , m_controller(controller)
     , m_silent(silent)
 {
-    m_curcuma_progress.open("curcuma_progress", std::ios::out);
+    //m_curcuma_progress.open("curcuma_progress", std::ios::out);
 }
 
 void CurcumaMethod::TriggerWriteRestart()
