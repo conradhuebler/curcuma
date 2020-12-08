@@ -108,6 +108,10 @@ class Molecule
     inline double Energy() const { return m_energy; }
 
     inline std::string Name() const { return m_name; }
+
+    std::string Atom2String(int i) const;
+    std::string Header() const;
+
     void CalculateRotationalConstants();
 
     inline double Ia() const { return m_Ia; }
@@ -123,6 +127,9 @@ class Molecule
     void writeXYZFragments(const std::string& basename) const;
 
     int Check() const;
+
+    inline void setSpin(int spin) { m_spin = spin; }
+    inline int Spin() const { return m_spin; }
 
 private:
     void ParseString(const std::string& internal, std::vector<std::string>& elements);
@@ -142,7 +149,7 @@ private:
 
     void InitialiseEmptyGeometry(int atoms);
 
-    int m_charge = 0;
+    int m_charge = 0, m_spin = 0;
     std::vector<std::array<double, 3>> m_geometry;
     std::vector<int> m_atoms;
 

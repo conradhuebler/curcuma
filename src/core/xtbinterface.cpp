@@ -52,7 +52,6 @@ bool XTBInterface::InitialiseMolecule(const Molecule& molecule)
     if (m_initialised)
         UpdateMolecule(molecule);
     int const natoms = molecule.AtomCount();
-    double const charge = molecule.Charge();
 
     int attyp[natoms];
     std::vector<int> atoms = molecule.Atoms();
@@ -65,7 +64,7 @@ bool XTBInterface::InitialiseMolecule(const Molecule& molecule)
         coord[3 * i + 2] = atom.second(2) / au;
         attyp[i] = atoms[i];
     }
-    return InitialiseMolecule(attyp, coord, natoms, charge);
+    return InitialiseMolecule(attyp, coord, natoms, molecule.Charge(), molecule.Spin());
 }
 
 bool XTBInterface::InitialiseMolecule(const Molecule* molecule)
@@ -73,7 +72,6 @@ bool XTBInterface::InitialiseMolecule(const Molecule* molecule)
     if (m_initialised)
         UpdateMolecule(molecule);
     int const natoms = molecule->AtomCount();
-    double const charge = molecule->Charge();
 
     int attyp[natoms];
     std::vector<int> atoms = molecule->Atoms();
@@ -86,16 +84,16 @@ bool XTBInterface::InitialiseMolecule(const Molecule* molecule)
         coord[3 * i + 2] = atom.second(2) / au;
         attyp[i] = atoms[i];
     }
-    return InitialiseMolecule(attyp, coord, natoms, charge);
+    return InitialiseMolecule(attyp, coord, natoms, molecule->Charge(), molecule->Spin());
 }
 
-bool XTBInterface::InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge)
+bool XTBInterface::InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge, const int spin)
 {
     if (m_initialised)
         UpdateMolecule(coord);
 
 #ifdef USE_XTB
-    m_mol = xtb_newMolecule(m_env, &natoms, attyp, coord, &charge, NULL, NULL, NULL);
+    m_mol = xtb_newMolecule(m_env, &natoms, attyp, coord, &charge, &spin, NULL, NULL);
     if (xtb_checkEnvironment(m_env)) {
         xtb_showEnvironment(m_env, NULL);
         return false;

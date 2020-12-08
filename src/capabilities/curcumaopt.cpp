@@ -70,6 +70,8 @@ void CurcumaOpt::LoadControlJson()
     m_dE = Json2KeyWord<double>(m_defaults, "dE");
     m_dRMSD = Json2KeyWord<double>(m_defaults, "dRMSD");
     m_GFNmethod = Json2KeyWord<int>(m_defaults, "GFN");
+    m_charge = Json2KeyWord<double>(m_defaults, "Charge");
+    m_spin = Json2KeyWord<double>(m_defaults, "Spin");
 }
 
 void CurcumaOpt::start()
@@ -78,7 +80,10 @@ void CurcumaOpt::start()
         FileIterator file(m_filename);
         std::multimap<double, Molecule> results;
         while (!file.AtEnd()) {
-            m_molecules.push_back(file.Next());
+            Molecule mol = file.Next();
+            mol.setCharge(m_charge);
+            mol.setSpin(m_spin);
+            m_molecules.push_back(mol);
         }
     }
 
@@ -103,6 +108,7 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
                 continue;
 
             OptThread* th = new OptThread;
+
             th->setMolecule(*iter);
             th->setController(m_defaults);
             thread_block.push_back(th);
@@ -308,6 +314,7 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
     RMSDDriver* driver = new RMSDDriver(RMSDJsonControl);
 
     std::chrono::time_point<std::chrono::system_clock> start = std::chrono::system_clock::now(), end;
+    output += fmt::format("Charge {} Spin {}\n\n", initial->Charge(), initial->Spin());
     output += fmt::format("{2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}}\n", "", 15, "Step", "Current Energy", "Energy Change", "RMSD Change", "time");
     output += fmt::format("{2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}}\n", "", 15, " ", "[Eh]", "[kJ/mol]", "[A]", "[s]");
 
@@ -322,8 +329,22 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
         try {
             niter = solver.minimize(fun, parameter, fx);
         } catch (const std::logic_error& error) {
+            output += fmt::format("LBFGS interface signalled some logic error!\n");
+            output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
+
+            if (printOutput) {
+                std::cout << output;
+                output.clear();
+            }
             break;
         } catch (const std::runtime_error& error) {
+            output += fmt::format("LBFGS interface signalled some runtime error!\n");
+            output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
+
+            if (printOutput) {
+                std::cout << output;
+                output.clear();
+            }
             break;
         }
         parameter = fun.Parameter();
@@ -350,17 +371,24 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
             tmp = h;
             h.setEnergy(final_energy);
             intermediate->push_back(h);
-        } else
+        } else {
+            output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation  Not Really converged ***");
+            if (printOutput) {
+                std::cout << output;
+                output.clear();
+            }
             break;
-        if (((fun.m_energy - final_energy) * 2625.5 < dE && driver->RMSD() < dRMSD))
+        }
+        if (((fun.m_energy - final_energy) * 2625.5 < dE && driver->RMSD() < dRMSD)) {
+            output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation converged ***");
+            if (printOutput) {
+                std::cout << output;
+                output.clear();
+            }
             break;
+        }
     }
 
-    output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation converged ***");
-    if (printOutput) {
-        std::cout << output;
-        output.clear();
-    }
     if (tmp.Check() == 0) {
         for (int i = 0; i < initial->AtomCount(); ++i) {
             geometry(i, 0) = parameter(3 * i);

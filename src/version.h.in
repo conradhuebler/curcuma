@@ -31,4 +31,4 @@ const  std::string conf_mode = "RELEASE Mode"; /*! Last compilation mode used */
 // const  std::string version = std::string("Curcuma 0.1 pre-Alpha \n\t%1 %2 %3 -  %4").arg(branch).arg(commit_hash).arg(date).arg(conf_mode); /*! Version name */
 
 
-const int qint_version = 0.1;
+const double qint_version = 0.1;

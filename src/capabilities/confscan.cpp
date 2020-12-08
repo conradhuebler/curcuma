@@ -524,7 +524,7 @@ void ConfScan::start()
     std::cout << m_result.size() << " structures were kept - of " << m_molecules.size() - m_fail << " total!" << std::endl;
 
     std::cout << "Best structure is " << m_result[0]->Name() << " Energy = " << std::setprecision(8) << m_result[0]->Energy() << std::endl;
-    std::cout << "List of m_filtered names ... " << std::endl;
+    std::cout << "List of filtered names ... " << std::endl;
     for (const auto& element : m_filtered) {
         std::cout << element.first << " rejected due to: ";
         for (const std::string& str : element.second)

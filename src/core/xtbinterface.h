@@ -30,7 +30,7 @@ public:
 
     bool InitialiseMolecule(const Molecule& molecule);
     bool InitialiseMolecule(const Molecule* molecule);
-    bool InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge);
+    bool InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge, const int spin);
 
     bool UpdateMolecule(const Molecule& molecule);
     bool UpdateMolecule(const double* coord);

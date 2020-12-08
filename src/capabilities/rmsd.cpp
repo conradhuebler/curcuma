@@ -817,7 +817,6 @@ void RMSDDriver::FinaliseTemplate(std::pair<std::vector<int>, std::vector<int>> 
     }
     m_stored_rules.clear();
     for (const auto& i : local_results) {
-        //fmt::print("{} {}\n", i.first, i.second);
         m_stored_rules.push_back(i.second);
     }
     m_reorder_rules = local_results.begin()->second;
@@ -859,7 +858,6 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareHeavyTemplate()
         for (auto index : m_stored_rules[i])
             tmp.push_back(target_indicies[index]);
         transformed_rules.push_back(tmp);
-        //fmt::print("{}\n", tmp);
     }
     m_stored_rules = transformed_rules;
     std::vector<int> target_indices = m_reorder_rules;

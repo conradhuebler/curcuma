@@ -21,7 +21,11 @@
 
 #include "src/tools/general.h"
 #include "src/tools/geometry.h"
+
 #include <Eigen/Dense>
+
+#include <fmt/core.h>
+#include <fmt/format.h>
 
 #include <array>
 #include <cmath>
@@ -52,6 +56,7 @@ Molecule::Molecule(const Molecule& other)
     m_atoms = other.m_atoms;
     m_name = other.m_name;
     m_energy = other.m_energy;
+    m_spin = other.m_spin;
 }
 
 Molecule::Molecule(const Molecule* other)
@@ -62,6 +67,7 @@ Molecule::Molecule(const Molecule* other)
     m_atoms = other->m_atoms;
     m_name = other->m_name;
     m_energy = other->m_energy;
+    m_spin = other->m_spin;
 }
 
 Molecule::Molecule(const std::string& file)
@@ -638,13 +644,18 @@ void Molecule::writeXYZFile(const std::string& filename) const
 {
     std::ofstream input;
     input.open(filename, std::ios::out);
-    input << AtomCount() << std::endl
-          << Name() << " ** Energy = " << std::setprecision(12) << Energy() << " Eh ** Charge = " << Charge() << " ** Curcuma " << qint_version
-          << std::endl;
-    for (int i = 0; i < AtomCount(); ++i) {
-        input << Elements::ElementAbbr[m_atoms[i]].c_str() << "      " << m_geometry[i][0] << "      " << m_geometry[i][1] << "      " << m_geometry[i][2] << std::endl;
-    }
+    input << XYZString();
     input.close();
+}
+
+std::string Molecule::Header() const
+{
+    return fmt::format(" ** Energy = {:f} Eh ** Charge = {} ** Spin = {} ** Curcuma {} ({})\n", Energy(), Charge(), Spin(), qint_version, git_tag);
+}
+
+std::string Molecule::Atom2String(int i) const
+{
+    return fmt::format("{}  {:f}    {:f}    {:f}\n", Elements::ElementAbbr[m_atoms[i]].c_str(), m_geometry[i][0], m_geometry[i][1], m_geometry[i][2]);
 }
 
 void Molecule::writeXYZFragments(const std::string& filename) const
@@ -654,43 +665,45 @@ void Molecule::writeXYZFragments(const std::string& filename) const
         auto fragment = fragments[frag];
         std::ofstream input;
         input.open(filename + "_F" + std::to_string(frag + 1) + ".xyz", std::ios::out);
-        input << fragment.size() << std::endl
-              << Name() << " ** Energy = " << std::setprecision(12) << Energy() << " Eh **"
-              << std::endl;
+
+        std::string output;
+        output += Header();
+        int atoms = 0;
         for (int j = 0; j < fragment.size(); ++j) {
-            {
-                int i = fragment[j];
-                input << Elements::ElementAbbr[m_atoms[i]].c_str() << "      " << m_geometry[i][0] << "      " << m_geometry[i][1] << "      " << m_geometry[i][2] << std::endl;
-            }
+            int i = fragment[j];
+            atoms++;
+            output += Atom2String(i);
         }
+        input << atoms << std::endl;
+        input << output;
+
         input.close();
     }
 }
 
 void Molecule::appendXYZFile(const std::string& filename) const
 {
+    std::string output;
+    output += fmt::format("{}\n", AtomCount());
+    output += Header();
+    for (int i = 0; i < AtomCount(); ++i) {
+        output += Atom2String(i);
+    }
     std::ofstream input;
     input.open(filename, std::ios_base::app);
-    input << AtomCount() << std::endl
-          << Name() << " ** Energy = " << std::setprecision(12) << Energy() << " Eh ** Charge = " << Charge() << " ** Curcuma " << qint_version
-          << std::endl;
-    for (int i = 0; i < AtomCount(); ++i) {
-        input << Elements::ElementAbbr[m_atoms[i]].c_str() << "      " << m_geometry[i][0] << "      " << m_geometry[i][1] << "      " << m_geometry[i][2] << std::endl;
-    }
+    input << output;
     input.close();
 }
 
 std::string Molecule::XYZString() const
 {
-    std::string result;
-    std::stringstream stream;
-    stream << AtomCount() << std::endl
-           << Name() << " ** Energy = " << std::setprecision(12) << Energy() << " Eh ** Charge = " << Charge() << " ** Curcuma " << qint_version
-           << std::endl;
+    std::string output;
+    output += fmt::format("{}\n", AtomCount());
+    output += Header();
     for (int i = 0; i < AtomCount(); ++i) {
-        stream << Elements::ElementAbbr[m_atoms[i]].c_str() << "      " << m_geometry[i][0] << "      " << m_geometry[i][1] << "      " << m_geometry[i][2] << std::endl;
+        output += Atom2String(i);
     }
-    return stream.str();
+    return output;
 }
 
 std::vector<int> Molecule::BoundHydrogens(int atom, double scaling) const

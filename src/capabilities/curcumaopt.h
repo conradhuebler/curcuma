@@ -33,7 +33,9 @@ static json CurcumaOptJson{
     { "InnerLoop", 20 },
     { "OuterLoop", 100 },
     { "LBFGS_eps", 1e-5 },
-    { "Threads", 1 }
+    { "Threads", 1 },
+    { "Charge", 0 },
+    { "Spin", 0 }
 };
 
 const json OptJsonPrivate{
@@ -138,4 +140,5 @@ private:
     bool m_file_set = false, m_mol_set = false, m_mols_set = false, m_writeXYZ = true, m_printoutput = true;
     int m_threads = 1, m_GFNmethod = 2;
     double m_dE = 0.1, m_dRMSD = 0.01;
+    int m_charge = 0, m_spin = 0;
 };
