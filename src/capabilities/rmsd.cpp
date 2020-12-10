@@ -143,8 +143,34 @@ void RMSDDriver::start()
     if(m_protons == false)
         ProtonDepleted();
 
+    if (std::abs(m_reference.Mass() - m_target.Mass()) < 1e-4) {
+        bool stop = false;
+        if (!m_silent)
+            fmt::print("Atom count diveres for both molecules, check for supramolecular fragments, that may match!\nFor now, will take only one pair.");
+
+        auto ref_fragments = m_reference.GetFragments();
+        auto tar_fragments = m_target.GetFragments();
+        for (int i = 0; i < ref_fragments.size() && !stop; ++i) {
+            for (int j = 0; j < tar_fragments.size() && !stop; ++j) {
+                if (abs(m_reference.getFragmentMolecule(i).Mass() - m_target.getFragmentMolecule(j).Mass()) < 1e-4) {
+                    if (!m_silent) {
+                        fmt::print("\n\nOverwriting reference molecule (mass = {0:f}) with fragment {1} (mass = {2:f}).\n", m_reference.Mass(), i, m_reference.getFragmentMolecule(i).Mass());
+                        fmt::print("Overwriting target molecule (mass = {0:f}) with fragment {1} (mass = {2:f}).\n\n\n", m_target.Mass(), j, m_target.getFragmentMolecule(j).Mass());
+                    }
+                    m_reference = m_reference.getFragmentMolecule(i);
+                    m_target = m_target.getFragmentMolecule(j);
+                    stop = true;
+                    /*
+                     * https://stackoverflow.com/questions/9695902/how-to-break-out-of-nested-loops - NoGo2
+                     */
+                }
+            }
+        }
+    }
+
     m_target_aligned = m_target;
     m_reference_aligned.LoadMolecule(m_reference);
+
     if (m_reference.Atoms() != m_target.Atoms() || m_force_reorder) {
         if (!m_noreorder)
             ReorderMolecule();

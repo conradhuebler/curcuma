@@ -127,6 +127,7 @@ void RMSDTraj::start()
     FileIterator file(m_filename);
     while (!file.AtEnd()) {
         Molecule mol(file.Next());
+        double energy = mol.Energy();
         index += mol.AtomCount();
 
         if (m_stored_structures.size() == 0) {
@@ -136,11 +137,15 @@ void RMSDTraj::start()
             initial = mol;
             prev = mol;
         } else {
+            prev = m_stored_structures[0];
+            initial = prev;
+            /*
             for (std::size_t i = 0; i < mol.GetFragments().size(); ++i)
                 if (mol.getGeometryByFragment(i).rows() == atoms_target) {
                     driver->setFragmentTarget(i);
                     driver->setPartialRMSD(true);
                 }
+                */
         }
         driver->setScaling(1.3);
         if (m_pairwise == false) {
@@ -162,8 +167,9 @@ void RMSDTraj::start()
             if (driver->ReorderRules().size())
                 std::cout << Tools::Vector2String(driver->ReorderRules()) << std::endl;
 
-            m_rmsd_file << driver->RMSD() << std::endl;
+            m_rmsd_file << driver->RMSD() << "\t" << std::setprecision(10) << energy << std::endl;
             m_rmsd_vector.push_back(driver->RMSD());
+            m_energy_vector.push_back(energy);
             if (m_writeAligned) {
                 driver->TargetAligned().appendXYZFile(outfile + "_aligned.xyz");
             }
@@ -218,16 +224,22 @@ void RMSDTraj::start()
     if (m_writeUnique && m_allxyz)
         Tools::xyz2allxyz(outfile + "_unique.xyz");
 
-    double mean = Tools::mean(m_rmsd_vector);
-    double median = Tools::median(m_rmsd_vector);
-    double std = Tools::stdev(m_rmsd_vector, mean);
-    auto hist = Tools::Histogram(m_rmsd_vector, 100);
-    double shannon = Tools::ShannonEntropy(hist);
+    double rmsd_mean = Tools::mean(m_rmsd_vector);
+    double rmsd_median = Tools::median(m_rmsd_vector);
+    double rmsd_std = Tools::stdev(m_rmsd_vector, rmsd_mean);
+    auto rmsd_hist = Tools::Histogram(m_rmsd_vector, 100);
+    double rmsd_shannon = Tools::ShannonEntropy(rmsd_hist);
 
-    m_rmsd_file << "#" << mean << std::endl;
-    m_rmsd_file << "#" << median << std::endl;
-    m_rmsd_file << "#" << std << std::endl;
-    m_rmsd_file << "#" << shannon << std::endl;
+    double energy_mean = Tools::mean(m_energy_vector);
+    double energy_median = Tools::median(m_energy_vector);
+    double energy_std = Tools::stdev(m_energy_vector, energy_mean);
+    auto energy_hist = Tools::Histogram(m_energy_vector, 100);
+    double energy_shannon = Tools::ShannonEntropy(energy_hist);
+
+    m_rmsd_file << "#" << rmsd_mean << "\t" << energy_mean << std::endl;
+    m_rmsd_file << "#" << rmsd_median << "\t" << energy_median << std::endl;
+    m_rmsd_file << "#" << rmsd_std << "\t" << energy_std << std::endl;
+    m_rmsd_file << "#" << rmsd_shannon << "\t" << energy_shannon << std::endl;
 
     delete driver;
 }

@@ -22,12 +22,15 @@
 #include <fmt/color.h>
 #include <fmt/core.h>
 
+#include "src/global_config.h"
 #include "src/version.h"
 
 namespace General {
 
 inline void StartUp(int argc, char** argv)
 {
+    std::string xtb;
+
     std::string version_string = "Curcuma - Version:  " + git_tag;
     std::string hastag = "Git Commit Hash: " + git_commit_hash;
     fmt::print(
@@ -63,6 +66,50 @@ inline void StartUp(int argc, char** argv)
         "http://doi.org/10.5281/zenodo.4302722",
         hastag,
         "Written by Conrad Hübler TU Freiberg");
+
+#ifdef USE_XTB
+    fmt::print(
+        "*{0:~^{1}}*\n"
+        "*{0: ^{1}}*\n"
+        "*{2: ^{1}}*\n"
+        "*{0: ^{1}}*\n"
+        "*{3: ^{1}}*\n"
+        "*{0: ^{1}}*\n"
+        "*{4: ^{1}}*\n"
+        "*{5: ^{1}}*\n"
+        "*{0: ^{1}}*\n"
+        "*{6: ^{1}}*\n"
+        "*{7: ^{1}}*\n"
+        "*{8: ^{1}}*\n"
+        "*{9: ^{1}}*\n"
+        "*{0: ^{1}}*\n"
+        "*{10: ^{1}}*\n"
+        "*{11: ^{1}}*\n"
+        "*{0: ^{1}}*\n"
+        "*{0: ^{1}}*\n"
+        "*{12: ^{1}}*\n"
+        "*{13: ^{1}}*\n"
+        "*{0: ^{1}}*\n"
+        "*{0:~^{1}}*\n",
+        "",
+        60,
+        "Curcuma was compiled with xtb support!",
+        "Please cite the xtbs method as well!",
+        "General",
+        "https://doi.org/10.1002/wcms.1493",
+        "GFN Methods",
+        "https://dx.doi.org/10.1021/acs.jctc.7b00118",
+        "https://dx.doi.org/10.1021/acs.jctc.8b01176",
+        "https://dx.doi.org/10.26434/chemrxiv.8326202.v1",
+        "GFN-FF",
+        "https://doi.org/10.1002/anie.202004239",
+        "More information about xtb can be found at",
+        "https://github.com/grimme-lab/xtb");
+
+    fmt::print(fg(fmt::color::light_salmon) | fmt::emphasis::bold, "\n\nConsider setting  OMP_NUM_THREADS to 1 for best parallel performance as curcuma can spawn several xtb calculation itself!\n");
+    fmt::print(fg(fmt::color::light_salmon) | fmt::emphasis::bold, "bash: export OMP_NUM_THREADS=1\n");
+    fmt::print(fg(fmt::color::light_salmon) | fmt::emphasis::bold, "fish: set -x OMP_NUM_THREADS 1\n\n");
+#endif
 
     fmt::print("\nCurcuma was started as:\n");
     for (int index = 0; index < argc; ++index)

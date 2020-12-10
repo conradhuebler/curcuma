@@ -124,6 +124,10 @@ bool Docking::Initialise()
 
 void Docking::PerformDocking()
 {
+#ifndef USE_XTB
+    m_PostOptimise = false;
+#endif
+
     double frag_scaling = 1.2;
 
     Molecule guest = m_guest_structure;
@@ -254,24 +258,25 @@ void Docking::PerformDocking()
               << "** Docking Phase 0 - Finished **" << std::endl;
     int index = 0;
     // Will be removed some day
-    std::vector<int> frags = { 0, 0, 0, 0, 0 };
     for (const auto& pair : m_result_list) {
         ++index;
-        frags[pair.second->GetFragments(frag_scaling).size()]++;
-        //std::cout << pair.first << std::endl;
-
         std::string name;
         if (!m_NoOpt)
-            name = "Docking_B" + std::to_string(frags[pair.second->GetFragments(frag_scaling).size()] / 100 + 1) + "_F" + std::to_string(pair.second->GetFragments(frag_scaling).size()) + ".xyz";
+            name = "Docking_F" + std::to_string(pair.second->GetFragments(frag_scaling).size()) + ".xyz";
         else
-            name = "Docking_B" + std::to_string(frags[pair.second->GetFragments(frag_scaling).size()] / 100 + 1) + ".xyz";
+            name = "Docking.xyz";
         pair.second->appendXYZFile(name);
         if (!std::binary_search(m_files.begin(), m_files.end(), name))
             m_files.push_back(name);
     }
 
-    if (!m_NoOpt && m_PostOptimise)
+    if (!m_NoOpt && m_PostOptimise) {
+#ifdef USE_XTB
         PostOptimise();
+#else
+        std::cerr << "xtb support was not included into the binary. Sorry for that!" << std::endl;
+#endif
+    }
 }
 
 void Docking::PostOptimise()

@@ -103,9 +103,11 @@ int main(int argc, char **argv) {
                   << "-rmsd        * RMSD Calculator                                            *" << std::endl
                   << "-confscan    * Filter list of conformers                                  *" << std::endl
                   << "-confstat    * Conformation statistics                                    *" << std::endl
-                  << "-dock        * Perform some docking                                       *" << std::endl
-                  << "-opt         * LBFGS optimiser using xtb GFN                              *" << std::endl
-                  << "-block       * Split files with many structures in block                  *" << std::endl
+                  << "-dock        * Perform some docking                                       *" << std::endl;
+#ifdef USE_XTB
+        std::cout << "-opt         * LBFGS optimiser using xtb GFN                              *" << std::endl;
+#endif
+        std::cout << "-block       * Split files with many structures in block                  *" << std::endl
                   << "-distance    * Calculate distance between two atoms                       *" << std::endl
                   << "-angle       * Calculate angle between three atoms                        *" << std::endl
                   << "-split       * Split a supramolcular structure in individual molecules    *" << std::endl
@@ -281,11 +283,13 @@ int main(int argc, char **argv) {
                 std::cerr << "Please use curcuma for optimisation as follows:\ncurcuma -opt input.xyz" << std::endl;
                 return 0;
             }
-
+#ifdef USE_XTB
             CurcumaOpt opt(controller, false);
             opt.setFileName(argv[2]);
             opt.start();
-
+#else
+            std::cerr << "Curcuma was not compiled with xtb support, optimisation can not work, sorry! ..." << std::endl;
+#endif
             return 0;
         } else if (strcmp(argv[1], "-block") == 0) {
             if (argc < 3) {
