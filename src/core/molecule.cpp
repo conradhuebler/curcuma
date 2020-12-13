@@ -691,6 +691,7 @@ void Molecule::appendXYZFile(const std::string& filename) const
     }
     std::ofstream input;
     input.open(filename, std::ios_base::app);
+    //std::cout << output << std::endl;
     input << output;
     input.close();
 }

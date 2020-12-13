@@ -190,6 +190,7 @@ void ConfScan::setMolecules(const std::map<double, Molecule*>& molecules)
 
 bool ConfScan::LoadRestartInformation()
 {
+    return true;
     if (!Restart())
         return false;
     StringList files = RestartFiles();
@@ -274,7 +275,7 @@ nlohmann::json ConfScan::WriteRestartInformation()
 
 void ConfScan::ParametriseRotationalCutoffs()
 {
-    if (m_prevent_reorder || m_RMSDmethod == 2)
+    if (m_prevent_reorder)
         return;
     json rmsd = RMSDJson;
     rmsd["silent"] = true;
@@ -283,12 +284,17 @@ void ConfScan::ParametriseRotationalCutoffs()
     rmsd["check"] = false;
     rmsd["heavy"] = m_heavy;
     std::cout << "Parametrise cutoff of rotational constants for reordering decison tree!" << std::endl;
+
     m_internal_parametrised = true;
     std::vector<double> accepted, rejected;
     double accepted_single = 0;
     int counter = 0;
     if (m_maxParam == -1)
         m_maxParam = m_ordered_list.size() * (m_ordered_list.size() - 1);
+    if (m_maxParam > 1e4)
+        m_maxParam = 1e4;
+    std::cout << m_maxParam << " RMSD calculation will be performed." << std::endl;
+
     for (int i = 0; i < m_ordered_list.size() && counter < m_maxParam; ++i) {
         Molecule* mol1 = m_molecules.at(i).second;
         if (mol1->Check() == 1)
@@ -331,6 +337,7 @@ void ConfScan::ParametriseRotationalCutoffs()
 
 int ConfScan::AcceptRotationalConstant(double constant)
 {
+    return 0;
     /* This has to be compressed to logic gatters to avoid branching */
     if (m_internal_parametrised) {
         if (constant < m_diff_rot_abs_tight * m_scale_tight)
@@ -349,8 +356,80 @@ int ConfScan::AcceptRotationalConstant(double constant)
     }
 }
 
+void ConfScan::SetUp()
+{
+    ReadControlFile();
+    LoadRestartInformation();
+
+    m_silent = m_ordered_list.size() > 500 || m_force_silent;
+
+    //std::map<std::string, std::vector<std::string>> m_filtered;
+    m_fail = 0;
+    m_start = 0;
+    m_end = m_ordered_list.size();
+
+    m_result_basename = m_filename;
+    m_result_basename.erase(m_result_basename.end() - 4, m_result_basename.end());
+
+    m_accepted_filename = m_result_basename + ".accepted.xyz";
+    m_rejected_filename = m_result_basename + ".rejected.xyz";
+
+    std::ofstream result_file;
+    if (m_writeFiles) {
+        result_file.open(m_accepted_filename);
+        result_file.close();
+    }
+
+    /*
+    std::ofstream missed_file;
+    if (m_writeFiles) {
+        missed_file.open(nearly_missed);
+        missed_file.close();
+    }
+    */
+    std::ofstream failed_file;
+    if (m_writeFiles) {
+        failed_file.open(m_rejected_filename);
+        failed_file.close();
+    }
+    /*
+    if (!m_parameter_loaded)
+        ParametriseRotationalCutoffs();
+*/
+
+    std::cout << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
+              << "" << std::endl;
+
+    if (m_heavy)
+        std::cout << "    RMSD Calculation will be performed only on heavy atoms! " << std::endl;
+    else
+        std::cout << "    RMSD Calculation will be performed on all atoms! " << std::endl;
+
+    std::cout << "    RMSD Threshold set to: " << m_rmsd_threshold << " Angstrom" << std::endl;
+    std::cout << "    Energy Threshold set to: " << m_energy_threshold << " kJ/mol" << std::endl;
+    std::cout << "    Thresholds in rotational constants (averaged over Ia, Ib and Ic): " << std::endl;
+    std::cout << "    Loose Threshold: " << m_diff_rot_abs_loose << " MHz" << std::endl;
+    std::cout << "    Tight Threshold: " << m_diff_rot_abs_tight << " MHz" << std::endl;
+    std::cout << "" << std::endl
+              << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
+              << std::endl;
+}
+
 void ConfScan::start()
 {
+    PrintController(m_controller);
+    SetUp();
+
+    CheckRMSD();
+
+    if (m_prevent_reorder == false) {
+        ReorderCheck();
+        ReorderCheck(true);
+    }
+
+    Finalise();
+
+    /*
     ReadControlFile();
     LoadRestartInformation();
 
@@ -408,7 +487,7 @@ void ConfScan::start()
     std::cout << "" << std::endl
               << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
               << std::endl;
-
+*/
     /*
      * rejected, accepted are clear
      * reordered - for every reorder calculation increase this
@@ -416,6 +495,7 @@ void ConfScan::start()
      * reordered_failed_complete got a worse rmsd after reordering
      * reordered_reused every time an old solution did the trick
      */
+    /*
     m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0;
     for (auto& i : m_ordered_list) {
         if (m_skip) {
@@ -488,8 +568,9 @@ void ConfScan::start()
                           << "               ** Accepting " << mol1->Name() << " **" << std::endl;
             }
             m_accepted++;
-            /* Write each accepted structure immediately */
-        } else
+            */
+    /* Write each accepted structure immediately */
+    /*       } else
             m_rejected++;
         accept = true;
         m_start++;
@@ -532,11 +613,296 @@ void ConfScan::start()
         std::cout << std::endl;
     }
     std::cout << " done :-) " << std::endl;
-
+*/
     /*
     ConfStat *statistic = new ConfStat(ConfStatJson);
     statistic->setFileName(result_name);
     statistic->start();
+    */
+}
+
+void ConfScan::CheckRMSD()
+{
+    m_maxmol = m_ordered_list.size();
+
+    json rmsd = RMSDJson;
+    rmsd["silent"] = true;
+    rmsd["check"] = CheckConnections();
+    rmsd["heavy"] = m_heavy;
+    rmsd["noreorder"] = true;
+
+    for (auto& i : m_ordered_list) {
+
+        if (m_skip) {
+            m_skip--;
+            continue;
+        }
+        int index = i.second;
+        Molecule* mol1 = m_molecules.at(index).second;
+        if (mol1->Check() == 1) {
+            m_rejected++;
+            m_start++;
+            PrintStatus();
+            continue;
+        }
+        if (m_result.size() == 0) {
+            m_result.push_back(mol1);
+            continue;
+        }
+        if (m_lowest_energy > 0)
+            m_lowest_energy = mol1->Energy();
+
+        bool keep_molecule = true;
+        RMSDDriver* driver = new RMSDDriver(rmsd);
+        for (const auto& mol2 : m_result) {
+            if (!m_silent) {
+                std::cout << std::endl
+                          << std::setprecision(10)
+                          << std::endl
+                          << std::endl
+                          << "Reference Molecule:" << mol1->Name() << " (" << mol1->Energy() << " Eh)        Target Molecule " << mol2->Name() << " (" << mol2->Energy() << " Eh)" << std::endl;
+            }
+            //if (!m_useRestart) {
+            m_reference_last_energy = mol1->Energy();
+            m_target_last_energy = mol2->Energy();
+            //}
+
+            double rmsd = 0;
+            double Ia = abs(mol1->Ia() - mol2->Ia());
+            double Ib = abs(mol1->Ib() - mol2->Ib());
+            double Ic = abs(mol1->Ic() - mol2->Ic());
+
+            double diff_rot = (Ia + Ib + Ic) * third;
+
+            driver->setReference(mol1);
+            driver->setTarget(mol2);
+
+            driver->start();
+            rmsd = driver->RMSD();
+            double difference = abs(mol1->Energy() - m_lowest_energy) * 2625.5;
+            if (difference > m_energy_cutoff && m_energy_cutoff != -1) {
+                keep_molecule = false;
+                break;
+            }
+
+            if (!m_silent) {
+                std::cout << "Energy Difference: " << std::setprecision(2) << difference << " kJ/mol" << std::endl;
+                std::cout << "Difference in Ia " << std::setprecision(2) << Ia << " MHz" << std::endl;
+                std::cout << "Difference in Ib " << std::setprecision(2) << Ib << " MHz" << std::endl;
+                std::cout << "Difference in Ic " << std::setprecision(2) << Ic << " MHz" << std::endl;
+
+                std::cout << "RMSD = " << std::setprecision(5) << rmsd << " A" << std::endl;
+            }
+
+            if (rmsd <= m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() <= m_MaxHTopoDiff) /*|| accepted_rotational == -1*/) {
+                keep_molecule = false;
+                std::string reject_reason = mol2->Name() + " [I] RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference) + "; dIx = " + std::to_string(diff_rot);
+                m_filtered[mol1->Name()].push_back(reject_reason);
+                m_accept_rmsd.push_back(diff_rot);
+                if (!m_silent) {
+                    std::cout << "  ** Rejecting structure **" << std::endl;
+                }
+                continue;
+            } else if (rmsd > m_rmsd_threshold) {
+                m_reject_rmsd.push_back(diff_rot);
+            }
+        }
+        if (keep_molecule) {
+            m_result.push_back(mol1);
+            m_accepted++;
+        } else {
+            m_rejected_structures.push_back(mol1);
+            m_rejected++;
+        }
+        PrintStatus();
+        delete driver;
+    }
+}
+
+void ConfScan::ReorderCheck(bool reuse_only)
+{
+    m_maxmol = m_result.size();
+
+    m_diff_rot_abs_tight = Tools::median(m_accept_rmsd);
+    m_diff_rot_abs_loose = Tools::median(m_reject_rmsd);
+
+    std::cout << "    Thresholds in rotational constants (averaged over Ia, Ib and Ic): " << std::endl;
+    std::cout << "    Loose Threshold: " << m_diff_rot_abs_loose << " MHz" << std::endl;
+    std::cout << "    Tight Threshold: " << m_diff_rot_abs_tight << " MHz" << std::endl;
+    std::cout << "" << std::endl
+              << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
+              << std::endl;
+
+    m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0;
+
+    json rmsd = RMSDJson;
+    rmsd["silent"] = true;
+    rmsd["reorder"] = true;
+    rmsd["check"] = CheckConnections();
+    rmsd["heavy"] = m_heavy;
+    rmsd["threads"] = m_RMSDthreads;
+    if (m_RMSDmethod == 2)
+        rmsd["method"] = "template";
+    else
+        rmsd["method"] = "incr";
+
+    std::vector<Molecule*> cached = m_result;
+    m_result.clear();
+    for (Molecule* mol1 : cached) {
+
+        if (m_result.size() == 0) {
+            m_result.push_back(mol1);
+            continue;
+        }
+
+        bool keep_molecule = true;
+        RMSDDriver* driver = new RMSDDriver(rmsd);
+        for (const auto& mol2 : m_result) {
+            if (keep_molecule == false)
+                continue;
+
+            if (!m_silent) {
+                std::cout << std::endl
+                          << std::setprecision(10)
+                          << std::endl
+                          << std::endl
+                          << "Reference Molecule:" << mol1->Name() << " (" << mol1->Energy() << " Eh)        Target Molecule " << mol2->Name() << " (" << mol2->Energy() << " Eh)" << std::endl;
+            }
+
+            m_reference_last_energy = mol1->Energy();
+            m_target_last_energy = mol2->Energy();
+
+            bool allow_reorder = true;
+
+            double rmsd = 0;
+            driver->setReference(mol1);
+            driver->setTarget(mol2);
+
+            for (const auto& rule : m_reorder_rules) {
+                double tmp_rmsd = driver->Rules2RMSD(rule);
+                if (!m_silent) {
+                    std::cout << tmp_rmsd << " A ";
+                }
+                if (tmp_rmsd < m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
+                    if (!m_silent) {
+                        std::cout << std::endl
+                                  << std::endl
+                                  << "*** Old reordering solution worked here! ***" << std::endl
+                                  << std::endl;
+                    }
+                    keep_molecule = false;
+                    allow_reorder = false;
+
+                    if (reuse_only) {
+                        mol1->writeXYZFile(m_result_basename + ".M1_X" + std::to_string(m_reordered_reused) + ".xyz");
+                        mol2->writeXYZFile(m_result_basename + ".M2_X" + std::to_string(m_reordered_reused) + ".xyz");
+                    }
+                    rmsd = tmp_rmsd;
+                    m_reordered_reused++;
+                    continue;
+                }
+            }
+
+            double Ia = abs(mol1->Ia() - mol2->Ia());
+            double Ib = abs(mol1->Ib() - mol2->Ib());
+            double Ic = abs(mol1->Ic() - mol2->Ic());
+
+            double diff_rot = (Ia + Ib + Ic) * third;
+
+            if (m_reference_last_energy - mol1->Energy() > 1e-5 && m_useRestart) {
+                {
+                    if (!m_silent) {
+                        std::cout << "*** Skip reordering, as we are in Restart Modus *** " << std::endl;
+                    }
+                    allow_reorder = false;
+                }
+            } else {
+                m_useRestart = false;
+            }
+
+            if (diff_rot < m_diff_rot_abs_loose && allow_reorder && reuse_only == false) {
+                driver->setReference(mol1);
+                driver->setTarget(mol2);
+
+                driver->start();
+                rmsd = driver->RMSD();
+                m_reordered++;
+                if (!m_silent) {
+                    std::cout << "Difference in Ia " << std::setprecision(2) << Ia << " MHz" << std::endl;
+                    std::cout << "Difference in Ib " << std::setprecision(2) << Ib << " MHz" << std::endl;
+                    std::cout << "Difference in Ic " << std::setprecision(2) << Ic << " MHz" << std::endl;
+
+                    std::cout << "RMSD = " << std::setprecision(5) << rmsd << " A" << std::endl;
+                }
+
+                if (rmsd <= m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() <= m_MaxHTopoDiff) /*|| accepted_rotational == -1*/) {
+                    keep_molecule = false;
+                    m_reordered_worked++;
+                    std::string reject_reason = mol2->Name() + " [I] RMSD = " + std::to_string(rmsd) + "; dIx = " + std::to_string(diff_rot);
+                    m_filtered[mol1->Name()].push_back(reject_reason);
+                    m_accept_rmsd.push_back(diff_rot);
+                    if (!m_silent) {
+                        std::cout << "  ** Rejecting structure **" << std::endl;
+                    }
+                    AddRules(driver->ReorderRules());
+
+                    continue;
+                } else if (rmsd > m_rmsd_threshold) {
+                    m_reject_rmsd.push_back(diff_rot);
+                }
+            }
+        }
+        if (keep_molecule) {
+            m_result.push_back(mol1);
+            m_accepted++;
+        } else {
+            m_rejected_structures.push_back(mol1);
+            m_rejected++;
+        }
+
+        PrintStatus();
+        TriggerWriteRestart();
+        delete driver;
+        if (m_result.size() >= m_maxrank)
+            break;
+        double difference = abs(mol1->Energy() - m_lowest_energy) * 2625.5;
+        if (difference > m_energy_cutoff && m_energy_cutoff != -1) {
+            break;
+        }
+    }
+}
+
+void ConfScan::Finalise()
+{
+    int i = 0;
+    for (const auto molecule : m_result) {
+        double difference = abs(molecule->Energy() - m_lowest_energy) * 2625.5;
+        if (i >= m_maxrank && m_maxrank != -1) {
+            molecule->appendXYZFile(m_rejected_filename);
+            continue;
+        }
+
+        if (difference > m_energy_cutoff && m_energy_cutoff != -1) {
+            molecule->appendXYZFile(m_rejected_filename);
+            continue;
+        }
+        molecule->appendXYZFile(m_accepted_filename);
+        i++;
+    }
+    for (const auto molecule : m_rejected_structures) {
+        molecule->appendXYZFile(m_rejected_filename);
+    }
+    std::cout << m_result.size() << " structures were kept - of " << m_molecules.size() - m_fail << " total!" << std::endl;
+    /*
+    //  std::cout << "Best structure is " << m_result[0]->Name() << " Energy = " << std::setprecision(8) << m_result[0]->Energy() << std::endl;
+    std::cout << "List of filtered names ... " << std::endl;
+    for (const auto& element : m_filtered) {
+        std::cout << element.first << " rejected due to: ";
+        for (const std::string& str : element.second)
+            std::cout << str << " ";
+        std::cout << std::endl;
+    }
+    std::cout << " done :-) " << std::endl;
     */
 }
 
@@ -749,8 +1115,8 @@ int ConfScan::CheckTempList(int index)
                     std::cout << "Reordering failed, a better fit was not found! This may happen." << std::endl;
                 }
                 m_reordered_failed_completely++;
-                m_failed.push_back(mol1);
-                m_failed.push_back(mol2);
+                //m_failed.push_back(mol1);
+                //m_failed.push_back(mol2);
             }
             rmsd = rmsd_tmp;
         }
@@ -766,22 +1132,11 @@ int ConfScan::CheckTempList(int index)
                 if (!m_silent) {
                     std::cout << " Nearly missed for " << mol1->Name() << std::endl;
                 }
-                m_nearly.push_back(mol1);
             }
             delete driver;
             continue;
         } else
             accept = true;
-        /*
-        if (rmsd < m_rmsd_threshold) {
-            accept = false;
-            std::string reject_reason = mol2->Name() + " RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference);
-            m_filtered[mol1->Name()].push_back(reject_reason);
-            if (!m_silent) {
-                std::cout << "  ** Rejecting structure **" << std::endl;
-            }
-            continue;
-        }*/
         delete driver;
     }
     return accept;
@@ -797,7 +1152,6 @@ void ConfScan::AddRules(const std::vector<int>& rules)
         if (m_update)
             CheckStored();
     }
-    // std::cout << m_reorder_rules.size() << std::endl;
 }
 
 void ConfScan::CheckStored()
@@ -854,8 +1208,8 @@ void ConfScan::CheckStored()
 void ConfScan::PrintStatus()
 {
     std::cout << std::endl
-              << "             ###   " << std::setprecision(4) << m_start / double(m_end) * 100 << "% done!   ###" << std::endl;
-    std::cout << "# Accepted : " << m_accepted << "     ";
+              << "             ###   " << std::setprecision(4) << (m_result.size() + m_rejected) / double(m_maxmol) * 100 << "% done!   ###" << std::endl;
+    std::cout << "# Accepted : " << m_result.size() << "     ";
     std::cout << "# Rejected : " << m_rejected << "     ";
     std::cout << "# Reordered : " << m_reordered << "     ";
     std::cout << "# Successfully : " << m_reordered_worked << "    ";

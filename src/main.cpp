@@ -312,7 +312,7 @@ int main(int argc, char **argv) {
                 Molecule mol = file.Next();
                 mol.appendXYZFile(outfile + "_" + std::to_string(index + 1) + ".xyz");
                 i++;
-                if (i == block) {
+                if (i > block) {
                     index++;
                     i = 0;
                 }

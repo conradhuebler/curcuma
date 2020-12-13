@@ -223,6 +223,8 @@ private:
 
     void AtomTemplate();
 
+    void TemplateFree();
+
     std::pair<std::vector<int>, std::vector<int>> PrepareHeavyTemplate();
 
     std::pair<std::vector<int>, std::vector<int>> PrepareAtomTemplate(int templateatom);
@@ -260,6 +262,7 @@ private:
 
     std::pair<Matrix, Position> GetOperateVectors(int fragment_reference, int fragment_target);
     std::pair<Matrix, Position> GetOperateVectors(const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms);
+    std::pair<Matrix, Position> GetOperateVectors(const Molecule& reference, const Molecule& target);
 
     Molecule m_reference, m_target, m_reference_aligned, m_target_aligned, m_target_reordered, m_reorder_reference, m_reorder_target;
     Geometry m_reorder_reference_geometry;

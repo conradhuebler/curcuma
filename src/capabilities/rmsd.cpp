@@ -117,6 +117,8 @@ void RMSDDriver::LoadControlJson()
         m_method = 3;
     else if (method.compare("hybrid") == 0)
         m_method = 4;
+    else if (method.compare("free") == 0)
+        m_method = 5;
     else
         m_method = 1;
 }
@@ -143,7 +145,7 @@ void RMSDDriver::start()
     if(m_protons == false)
         ProtonDepleted();
 
-    if (std::abs(m_reference.Mass() - m_target.Mass()) < 1e-4) {
+    if (std::abs(m_reference.Mass() - m_target.Mass()) > 1e-4) {
         bool stop = false;
         if (!m_silent)
             fmt::print("Atom count diveres for both molecules, check for supramolecular fragments, that may match!\nFor now, will take only one pair.");
@@ -278,9 +280,9 @@ double RMSDDriver::CustomRotation()
     auto target = GeometryTools::TranslateGeometry(m_target.getGeometry(), GeometryTools::Centroid(m_target.getGeometryByFragment(fragment_target)), Position{ 0, 0, 0 }); //CenterMolecule(target_mol);
     const auto t = RMSDFunctions::applyRotation(target, rotation);
     m_reference_aligned.setGeometry(reference);
-    m_reference.writeXYZFile("ref.xyz");
+    //m_reference.writeXYZFile("ref.xyz");
     m_target_aligned.setGeometry(t);
-    m_target_aligned.writeXYZFile("tar.xyz");
+    //m_target_aligned.writeXYZFile("tar.xyz");
     rmsd = RMSDFunctions::getRMSD(reference, t);
 
     return rmsd;
@@ -334,12 +336,10 @@ void RMSDDriver::ReorderIncremental()
             for (const auto& item : (*thread->data())) {
                 if (thread->Match()) {
                     storage_shelf_next.addItem(item.second, item.first);
-                    // fmt::print("{}\n\n", item.second);
                 }
                 match += thread->Match();
             }
         }
-        // std::cout << match << " match " << std::endl;
         if (match == 0) {
             Molecule ref_0;
             for (std::size_t index = 0; index < m_reference.AtomCount(); index++) {
@@ -361,7 +361,6 @@ void RMSDDriver::ReorderIncremental()
         if (count > 50)
             continue;
         m_stored_rules.push_back(FillMissing(m_reference, e.second));
-        //fmt::print("{}\n", e.second);
         count++;
     }
     m_reorder_rules = m_stored_rules[0];
@@ -789,6 +788,8 @@ void RMSDDriver::ReorderMolecule()
         HeavyTemplate();
     else if (m_method == 4)
         AtomTemplate();
+    else if (m_method == 5)
+        TemplateFree();
 }
 
 void RMSDDriver::AtomTemplate()
@@ -811,6 +812,73 @@ void RMSDDriver::HeavyTemplate()
     FinaliseTemplate(pairs);
 
     m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
+    m_target = m_target_reordered;
+    m_target_aligned = m_target;
+}
+
+void RMSDDriver::TemplateFree()
+{
+    auto operators = GetOperateVectors(m_reference, m_target);
+    Eigen::Matrix3d R = operators.first;
+
+    Geometry cached_reference = m_reference.getGeometry();
+    Geometry cached_target = m_target.getGeometry();
+
+    Geometry ref = GeometryTools::TranslateMolecule(m_reference, m_reference.Centroid(true), Position{ 0, 0, 0 });
+    Geometry tget = GeometryTools::TranslateMolecule(m_target, m_target.Centroid(true), Position{ 0, 0, 0 });
+
+    Eigen::MatrixXd tar = tget.transpose();
+
+    Geometry rotated = tar.transpose() * R;
+
+    Molecule ref_mol = m_reference;
+    ref_mol.setGeometry(ref);
+    Molecule tar_mol = m_target;
+    tar_mol.setGeometry(rotated);
+
+    std::vector<int> new_order(m_reference.AtomCount(), -1), done_ref, done_tar;
+    std::pair<int, int> last_indicies(-1, -1);
+    auto ReorderPrivate = [tar_mol, ref_mol](auto& done_tar, auto& new_order, auto& done_ref, auto& last_indicies, bool skip_protons) -> bool {
+        double distance = 1e10;
+        bool match = false;
+        int match_reference = 0;
+        int match_target = 0;
+        for (int i = 0; i < tar_mol.AtomCount(); ++i) {
+            if (std::find(done_tar.begin(), done_tar.end(), i) != done_tar.end() || (skip_protons == true && tar_mol.Atom(i).first == 1))
+                continue;
+
+            for (int j = 0; j < ref_mol.AtomCount(); ++j) {
+                if (std::find(done_ref.begin(), done_ref.end(), j) != done_ref.end())
+                    continue;
+
+                if (tar_mol.Atom(i).first != ref_mol.Atom(j).first)
+                    continue;
+
+                const double local_distance = GeometryTools::Distance(tar_mol.Atom(i).second, ref_mol.Atom(j).second);
+                if (local_distance <= distance) {
+                    distance = local_distance;
+                    match_target = i;
+                    match_reference = j;
+                    match = true;
+                }
+            }
+        }
+        if (match) {
+            new_order[match_target] = match_reference;
+            done_tar.push_back(match_target);
+            done_ref.push_back(match_reference);
+            last_indicies.first = match_reference;
+            last_indicies.second = match_target;
+        }
+        return match;
+    };
+
+    bool match = true;
+    while (done_ref.size() < m_reference.AtomCount() && match) {
+        match = ReorderPrivate(done_tar, new_order, done_ref, last_indicies, false);
+    }
+
+    m_target_reordered = ApplyOrder(new_order, m_target);
     m_target = m_target_reordered;
     m_target_aligned = m_target;
 }
@@ -931,7 +999,6 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareAtomTemplate(in
         for (auto index : m_stored_rules[i])
             tmp.push_back(target_indicies[index]);
         transformed_rules.push_back(tmp);
-        //  fmt::print("{}\n", tmp);
     }
     m_stored_rules = transformed_rules;
     std::vector<int> target_indices = m_reorder_rules;
@@ -964,10 +1031,10 @@ std::pair<std::vector<int>, std::pair<int, int>> RMSDDriver::AlignByVectorPair(s
 
     Molecule ref_mol = m_reference;
     ref_mol.setGeometry(ref);
-    ref_mol.writeXYZFile("ref.xyz");
+    //ref_mol.writeXYZFile("ref.xyz");
     Molecule tar_mol = m_target;
     tar_mol.setGeometry(rotated);
-    tar_mol.writeXYZFile("tar.xyz");
+    //tar_mol.writeXYZFile("tar.xyz");
 
     std::vector<int> new_order(m_reference.AtomCount(), -1), done_ref, done_tar;
     std::pair<int, int> last_indicies(-1, -1);
@@ -1124,15 +1191,7 @@ std::pair<Matrix, Position> RMSDDriver::GetOperateVectors(int fragment_reference
 {
     Molecule reference_mol = m_reference.getFragmentMolecule(fragment_reference);
     Molecule target_mol = m_target.getFragmentMolecule(fragment_target);
-
-    Eigen::Matrix3d R = BestFitRotation(reference_mol, target_mol, 1);
-
-    Geometry cached_reference = reference_mol.getGeometry();
-    Geometry cached_target = target_mol.getGeometry();
-
-    Position translate = GeometryTools::Centroid(cached_reference) - GeometryTools::Centroid(cached_target);
-
-    return std::pair<Matrix, Position>(R, translate);
+    return GetOperateVectors(reference_mol, target_mol);
 }
 
 std::pair<Matrix, Position> RMSDDriver::GetOperateVectors(const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms)
@@ -1143,11 +1202,15 @@ std::pair<Matrix, Position> RMSDDriver::GetOperateVectors(const std::vector<int>
         reference_mol.addPair(m_reference.Atom(reference_atoms[i]));
         target_mol.addPair(m_target.Atom(target_atoms[i]));
     }
+    return GetOperateVectors(reference_mol, target_mol);
+}
 
-    Eigen::Matrix3d R = BestFitRotation(reference_mol, target_mol, 1);
+std::pair<Matrix, Position> RMSDDriver::GetOperateVectors(const Molecule& reference, const Molecule& target)
+{
+    Eigen::Matrix3d R = BestFitRotation(reference, target, 1);
 
-    Geometry cached_reference = reference_mol.getGeometry();
-    Geometry cached_target = target_mol.getGeometry();
+    Geometry cached_reference = reference.getGeometry();
+    Geometry cached_target = target.getGeometry();
 
     Position translate = GeometryTools::Centroid(cached_reference) - GeometryTools::Centroid(cached_target);
 

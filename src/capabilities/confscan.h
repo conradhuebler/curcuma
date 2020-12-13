@@ -83,7 +83,7 @@ public:
     inline std::string NamePattern(int index) const { return "input_" + std::to_string(index); }
 
     std::vector<Molecule*> Result() const { return m_result; }
-    std::vector<Molecule*> Failed() const { return m_failed; }
+    // std::vector<Molecule*> Failed() const { return m_failed; }
 
     void ParametriseRotationalCutoffs();
 
@@ -92,6 +92,14 @@ public:
     void start() override; // TODO make pure virtual and move all main action here
 
 private:
+    void SetUp();
+
+    void CheckRMSD();
+
+    void ReorderCheck(bool reuse_only = false);
+
+    void Finalise();
+
     /* Lets have this for all modules */
     nlohmann::json WriteRestartInformation() override;
 
@@ -124,12 +132,14 @@ private:
     std::vector<Molecule*> m_global_temp_list;
     int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0, m_skip = 0;
 
-    std::string m_filename;
+    std::string m_filename, m_accepted_filename, m_rejected_filename, m_result_basename;
     std::map<double, int> m_ordered_list;
     std::vector<std::pair<std::string, Molecule*>> m_molecules;
     double m_energy_threshold = 1.0, m_rmsd_threshold = 1.0, m_diff_rot_rel_loose = 0.3, m_diff_rot_rel_tight = 0.01, m_nearly_missed = 0.8, m_energy_cutoff = -1, m_reference_last_energy = 0, m_target_last_energy = 0, m_lowest_energy = 1;
     double m_diff_rot_abs_tight = 0, m_diff_rot_abs_loose = 0, m_scale_tight = 0.5, m_scale_loose = 2;
-    std::vector<Molecule*> m_result, m_nearly, m_failed;
+    std::vector<Molecule*> m_result, m_rejected_structures;
+    std::vector<double> m_accept_rmsd, m_reject_rmsd;
+    int m_maxmol = 0;
     int m_maxrank = 10000;
     int m_maxParam = -1;
     int m_useorders = 10;
