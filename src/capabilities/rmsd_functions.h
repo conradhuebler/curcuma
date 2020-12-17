@@ -51,6 +51,11 @@ inline Eigen::Matrix3d BestFitRotation(const Geometry& reference, const Geometry
     return svd.matrixV() * I * svd.matrixU().transpose();
 }
 
+inline Eigen::Matrix3d BestFitRotation(const Molecule& reference, const Molecule& target, int factor = 1)
+{
+    return BestFitRotation(reference.getGeometry(), target.getGeometry(), factor);
+}
+
 inline Geometry applyRotation(const Geometry& geometry, const Eigen::Matrix3d& rotation)
 {
     return geometry * rotation;

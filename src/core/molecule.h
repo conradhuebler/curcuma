@@ -28,7 +28,9 @@
 #include <Eigen/Dense>
 
 #include "src/core/global.h"
- 
+
+typedef std::pair<int, Position> AtomDef;
+
 class Molecule
 {
   public:

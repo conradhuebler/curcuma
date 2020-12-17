@@ -200,6 +200,8 @@ public:
 
     double CustomRotation();
 
+    double PartialRMSD(const Molecule& ref, const Molecule& tar);
+
     void clear();
 
 private:
@@ -237,25 +239,16 @@ private:
         return AlignByVectorPair(pair.first, pair.second, singlestep);
     }
 
-    void ReconstructTarget(const std::vector<int>& atoms);
-
     std::vector<int> FillMissing(const Molecule& molecule, const std::vector<int>& order);
 
     void InitialiseOrder();
     std::pair<Molecule, LimitedStorage> InitialisePair();
-
+    /*
     int CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) const;
     int CheckConnectivitiy(const Molecule& mol1) const;
-
+*/
     bool TemplateReorder();
     std::pair<int, int> CheckFragments();
-
-    void FinaliseReorder();
-    Eigen::Matrix3d BestFitRotation(const Molecule& reference, const Molecule& target, int factor = 1) const;
-    Eigen::Matrix3d BestFitRotation(const Geometry& reference, const Geometry& target, int factor = 1) const;
-
-    double CalculateShortRMSD(const Geometry& reference_mol, const Molecule& target_mol) const;
-    Eigen::Matrix3d BestFitRotationShort(const Geometry& reference, const Geometry& target) const;
 
     Geometry CenterMolecule(const Molecule& mol, int fragment) const;
     Geometry CenterMolecule(const Geometry& molt) const;
@@ -274,7 +267,7 @@ private:
     std::vector<std::vector<int>> m_stored_rules;
     std::map<int, std::vector<int>> m_connectivity;
     double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99;
-    bool m_check_connections = false, m_postprocess = true, m_noreorder = false;
+    bool m_check_connections = false, m_postprocess = true, m_noreorder = false, m_swap = false;
     int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1, m_method = 1, m_htopo_diff = -1, m_partial_rmsd = -1, m_threads = 1, m_element = 7;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
     std::vector<int> m_initial;

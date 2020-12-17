@@ -96,7 +96,7 @@ private:
 
     void CheckRMSD();
 
-    void ReorderCheck(bool reuse_only = false);
+    void ReorderCheck(bool reuse_only = false, bool limit = false);
 
     void Finalise();
 
@@ -116,14 +116,10 @@ private:
 
     void AddRules(const std::vector<int>& rules);
 
-    void CheckStored();
-
     bool openFile();
 
     std::vector<std::vector<int>> m_reorder_rules;
 
-    int PreCheckAgainstAccepted(int index);
-    int CheckTempList(int index);
     void PrintStatus();
 
     std::map<std::string, std::vector<std::string>> m_filtered;

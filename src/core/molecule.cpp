@@ -660,6 +660,7 @@ std::string Molecule::Atom2String(int i) const
 
 void Molecule::writeXYZFragments(const std::string& filename) const
 {
+    /* For now we write only single fragments and pairs, more complex structures (quarternary etc) will follow some time later */
     auto fragments = GetFragments();
     for (int frag = 0; frag < fragments.size(); ++frag) {
         auto fragment = fragments[frag];
@@ -678,6 +679,27 @@ void Molecule::writeXYZFragments(const std::string& filename) const
         input << output;
 
         input.close();
+        for (int frag2 = frag + 1; frag2 < fragments.size(); ++frag2) {
+            auto fragment2 = fragments[frag];
+            for (auto a : fragment2)
+                fragment.push_back(a);
+
+            std::ofstream input;
+            input.open(filename + "_F" + std::to_string(frag + 1) + "_F" + std::to_string(frag2 + 1) + ".xyz", std::ios::out);
+
+            std::string output;
+            output += Header();
+            int atoms = 0;
+            for (int j = 0; j < fragment.size(); ++j) {
+                int i = fragment[j];
+                atoms++;
+                output += Atom2String(i);
+            }
+            input << atoms << std::endl;
+            input << output;
+
+            input.close();
+        }
     }
 }
 
