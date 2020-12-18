@@ -107,6 +107,8 @@ void RMSDDriver::LoadControlJson()
     m_protons = !Json2KeyWord<bool>(m_defaults, "heavy");
     m_silent = Json2KeyWord<bool>(m_defaults, "silent");
     m_intermedia_storage = Json2KeyWord<double>(m_defaults, "storage");
+    m_dynamic_center = Json2KeyWord<bool>(m_defaults, "DynamicCenter");
+
     m_noreorder = Json2KeyWord<bool>(m_defaults, "noreorder");
     m_element = Json2KeyWord<int>(m_defaults, "element");
     std::string method = Json2KeyWord<std::string>(m_defaults, "method");
@@ -153,6 +155,7 @@ void RMSDDriver::start()
     if(m_protons == false)
         ProtonDepleted();
 
+    /*
     if (std::abs(m_reference.Mass() - m_target.Mass()) > 1e-4) {
         bool stop = false;
         if (!m_silent)
@@ -169,14 +172,14 @@ void RMSDDriver::start()
                     }
                     m_reference = m_reference.getFragmentMolecule(i);
                     m_target = m_target.getFragmentMolecule(j);
-                    stop = true;
-                    /*
+                    stop = true;*/
+    /*
                      * https://stackoverflow.com/questions/9695902/how-to-break-out-of-nested-loops - NoGo2
                      */
-                }
+    /*}
             }
         }
-    }
+    }*/
 
     m_target_aligned = m_target;
     m_reference_aligned.LoadMolecule(m_reference);
@@ -322,7 +325,10 @@ void RMSDDriver::ReorderIncremental()
         }
         int element = atom.first;
         reference.addPair(atom);
-        m_reorder_reference_geometry = GeometryTools::TranslateGeometry(reference.getGeometry(), reference.Centroid(true), Position{ 0, 0, 0 });
+        if (m_dynamic_center)
+            m_reorder_reference_geometry = GeometryTools::TranslateGeometry(reference.getGeometry(), reference.Centroid(true), Position{ 0, 0, 0 });
+        else
+            m_reorder_reference_geometry = reference.getGeometry();
 
         for (const auto& e : *storage_shelf.data()) {
             RMSDThread* thread = new RMSDThread(m_reorder_target, m_reorder_reference_geometry, e.second, mass, element);

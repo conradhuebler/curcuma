@@ -24,6 +24,9 @@
 #include <string>
 #include <vector>
 
+#include <fmt/color.h>
+#include <fmt/core.h>
+
 #include "src/capabilities/confstat.h"
 #include "src/capabilities/rmsd.h"
 
@@ -527,13 +530,42 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
     m_diff_rot_abs_tight = Tools::median(m_accept_rmsd);
     m_diff_rot_abs_loose = Tools::median(m_reject_rmsd);
 
+    // To be finalised and tested
+
+    /*
+    fmt::print(
+        "'{0:'^{1}}'\n"
+        "'{2: ^{1}}'\n"
+        "'{0: ^{1}}'\n"
+        "*{3: ^{1}}*\n"
+        "*{0: ^{1}}*\n"
+        "*{12: ^{1}}*\n"
+        "*{0: ^{1}}*\n"
+        "*{4: ^{1}}*\n"
+        "*{5: ^{1}}*\n"
+        "*{0: ^{1}}*\n"
+        "*{6: ^{1}}*\n"
+        "*{7: ^{1}}*\n"
+        "*{0: ^{1}}*\n"
+        "*{8: ^{1}}*\n"
+        "*{9: ^{1}}*\n"
+        "*{10: ^{1}}*\n"
+        "*{0: ^{1}}*\n"
+        "*{11: ^{1}}*\n"
+        "*{0: ^{1}}*\n"
+        "*{0:*^{1}}*\n",
+        "", 60,
+        "Thresholds in rotational constants (averaged over Ia, Ib and Ic):");
+
+    std::cout << "" << std::endl
+              << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
     std::cout << "    Thresholds in rotational constants (averaged over Ia, Ib and Ic): " << std::endl;
     std::cout << "    Loose Threshold: " << m_diff_rot_abs_loose << " MHz" << std::endl;
     std::cout << "    Tight Threshold: " << m_diff_rot_abs_tight << " MHz" << std::endl;
     std::cout << "" << std::endl
               << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
               << std::endl;
-
+*/
     m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0;
 
     json rmsd = RMSDJson;
@@ -594,10 +626,11 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                     keep_molecule = false;
                     allow_reorder = false;
 
-                    if (reuse_only) {
+                    /*                   if (reuse_only) {
                         mol1->writeXYZFile(m_result_basename + ".M1_X" + std::to_string(m_reordered_reused) + ".xyz");
                         mol2->writeXYZFile(m_result_basename + ".M2_X" + std::to_string(m_reordered_reused) + ".xyz");
                     }
+                    */
                     rmsd = tmp_rmsd;
                     m_reordered_reused++;
                     continue;
@@ -624,7 +657,6 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
             if (diff_rot < m_diff_rot_abs_loose && allow_reorder && reuse_only == false) {
                 driver->setReference(mol1);
                 driver->setTarget(mol2);
-
                 driver->start();
                 rmsd = driver->RMSD();
                 m_reordered++;
@@ -646,7 +678,6 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                         std::cout << "  ** Rejecting structure **" << std::endl;
                     }
                     AddRules(driver->ReorderRules());
-
                     continue;
                 } else if (rmsd > m_rmsd_threshold) {
                     m_reject_rmsd.push_back(diff_rot);

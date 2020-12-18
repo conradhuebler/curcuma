@@ -680,9 +680,9 @@ void Molecule::writeXYZFragments(const std::string& filename) const
 
         input.close();
         for (int frag2 = frag + 1; frag2 < fragments.size(); ++frag2) {
-            auto fragment2 = fragments[frag];
-            for (auto a : fragment2)
-                fragment.push_back(a);
+            auto fragment2 = fragments[frag2];
+            for (auto a : fragment)
+                fragment2.push_back(a);
 
             std::ofstream input;
             input.open(filename + "_F" + std::to_string(frag + 1) + "_F" + std::to_string(frag2 + 1) + ".xyz", std::ios::out);
@@ -690,8 +690,8 @@ void Molecule::writeXYZFragments(const std::string& filename) const
             std::string output;
             output += Header();
             int atoms = 0;
-            for (int j = 0; j < fragment.size(); ++j) {
-                int i = fragment[j];
+            for (int j = 0; j < fragment2.size(); ++j) {
+                int i = fragment2[j];
                 atoms++;
                 output += Atom2String(i);
             }
