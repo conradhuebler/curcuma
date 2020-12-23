@@ -144,11 +144,18 @@ inline json CLI2Json(int argc, char** argv)
                 std::string next = argv[i + 1];
                 std::string next_sub = next.substr(0, 1);
                 bool isNumber = true;
+                bool isVector = false;
                 double number = 0.0;
-                try {
-                    number = std::stod(next);
-                } catch (const std::invalid_argument& error) {
+                std::size_t found = next.find("|");
+                if (found != std::string::npos) {
                     isNumber = false;
+                    isVector = true;
+                } else {
+                    try {
+                        number = std::stod(next);
+                    } catch (const std::invalid_argument& error) {
+                        isNumber = false;
+                    }
                 }
                 if (isNumber) {
                     current.erase(0, 1);
@@ -164,13 +171,17 @@ inline json CLI2Json(int argc, char** argv)
                         continue;
                     } else {
                         current.erase(0, 1);
-                        //try {
-                        //    key[current] = std::stoi(argv[i + 1]);
-                        //} catch (const std::invalid_argument& error) {
-                        try {
-                            key[current] = std::stod(argv[i + 1]);
-                        } catch (const std::invalid_argument& error) {
+                        if (isVector) {
                             key[current] = argv[i + 1];
+                        } else {
+                            //try {
+                            //    key[current] = std::stoi(argv[i + 1]);
+                            //} catch (const std::invalid_argument& error) {
+                            try {
+                                key[current] = std::stod(argv[i + 1]);
+                            } catch (const std::invalid_argument& error) {
+                                key[current] = argv[i + 1];
+                            }
                         }
                         //}
 

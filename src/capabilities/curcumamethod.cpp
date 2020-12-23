@@ -23,6 +23,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <stdio.h>
 
 #ifdef C17
 #include <filesystem>
@@ -37,6 +38,15 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, bool 
     , m_silent(silent)
 {
     //m_curcuma_progress.open("curcuma_progress", std::ios::out);
+}
+
+CurcumaMethod::~CurcumaMethod()
+{
+#ifdef C17
+    std::filesystem::remove("stop");
+#else
+    remove("stop");
+#endif
 }
 
 void CurcumaMethod::TriggerWriteRestart()
@@ -99,4 +109,16 @@ void CurcumaMethod::UpdateController(const json& controller)
     if (!m_silent)
         PrintController(m_defaults);
     LoadControlJson();
+}
+
+bool CurcumaMethod::CheckStop() const
+{
+#ifdef C17
+    return std::filesystem::exists("stop");
+#else
+    std::ifstream test_file("stop");
+    bool result = test_file.is_open();
+    test.close();
+    return result;
+#endif
 }

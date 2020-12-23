@@ -96,7 +96,8 @@ static const json RMSDJson = {
     { "noreorder", false },
     { "threads", 1 },
     { "Element", 7 },
-    { "DynamicCenter", false }
+    { "DynamicCenter", false },
+    { "order", "" }
 };
 
 class RMSDDriver : public CurcumaMethod {
@@ -234,10 +235,12 @@ private:
 
     void FinaliseTemplate(std::pair<std::vector<int>, std::vector<int>> initial);
 
-    std::pair<std::vector<int>, std::pair<int, int>> AlignByVectorPair(std::vector<int> first, std::vector<int> second, bool singlestep = false);
-    inline std::pair<std::vector<int>, std::pair<int, int>> AlignByVectorPair(std::pair<std::vector<int>, std::vector<int>> pair, bool singlestep = false)
+    std::vector<int> DistanceReorder(const Molecule& reference, const Molecule& target);
+
+    std::vector<int> AlignByVectorPair(std::vector<int> first, std::vector<int> second);
+    inline std::vector<int> AlignByVectorPair(std::pair<std::vector<int>, std::vector<int>> pair)
     {
-        return AlignByVectorPair(pair.first, pair.second, singlestep);
+        return AlignByVectorPair(pair.first, pair.second);
     }
 
     std::vector<int> FillMissing(const Molecule& molecule, const std::vector<int>& order);

@@ -415,11 +415,20 @@ void ConfScan::start()
     PrintController(m_controller);
     SetUp();
 
+    fmt::print("\n\n1st Pass\nPerforming RMSD calculation without reordering now!\n\n");
+    RunTimer timer(false);
     CheckRMSD();
-
-    if (m_prevent_reorder == false) {
+    fmt::print("\n1st Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
+    if (m_prevent_reorder == false && CheckStop() == false) {
+        timer.Reset();
+        fmt::print("\n\n2nd Pass\nPerforming RMSD calculation with reordering now!\n\n");
         ReorderCheck(false, false);
+        fmt::print("\n2nd Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
+
+        timer.Reset();
+        fmt::print("\n\n3rd Pass\nPerforming RMSD calculation with reordering, but only reuse previouse reordering rules.\n\n");
         ReorderCheck(true, true);
+        fmt::print("\n3rd Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
     }
 
     Finalise();
@@ -436,7 +445,6 @@ void ConfScan::CheckRMSD()
     rmsd["noreorder"] = true;
 
     for (auto& i : m_ordered_list) {
-
         if (m_skip) {
             m_skip--;
             continue;
@@ -459,57 +467,14 @@ void ConfScan::CheckRMSD()
         bool keep_molecule = true;
         RMSDDriver* driver = new RMSDDriver(rmsd);
         for (const auto& mol2 : m_result) {
-            if (!m_silent) {
-                std::cout << std::endl
-                          << std::setprecision(10)
-                          << std::endl
-                          << std::endl
-                          << "Reference Molecule:" << mol1->Name() << " (" << mol1->Energy() << " Eh)        Target Molecule " << mol2->Name() << " (" << mol2->Energy() << " Eh)" << std::endl;
+            if (CheckStop()) {
+                fmt::print("\n\n** Found stop file, will end now! **\n\n");
+                delete driver;
+                return;
             }
-            //if (!m_useRestart) {
-            m_reference_last_energy = mol1->Energy();
-            m_target_last_energy = mol2->Energy();
-            //}
-
-            double rmsd = 0;
-            double Ia = abs(mol1->Ia() - mol2->Ia());
-            double Ib = abs(mol1->Ib() - mol2->Ib());
-            double Ic = abs(mol1->Ic() - mol2->Ic());
-
-            double diff_rot = (Ia + Ib + Ic) * third;
-
-            driver->setReference(mol1);
-            driver->setTarget(mol2);
-
-            driver->start();
-            rmsd = driver->RMSD();
-            double difference = abs(mol1->Energy() - m_lowest_energy) * 2625.5;
-            if (difference > m_energy_cutoff && m_energy_cutoff != -1) {
-                keep_molecule = false;
+            keep_molecule = SingleCheckRMSD(mol1, mol2, driver);
+            if (keep_molecule == false)
                 break;
-            }
-
-            if (!m_silent) {
-                std::cout << "Energy Difference: " << std::setprecision(2) << difference << " kJ/mol" << std::endl;
-                std::cout << "Difference in Ia " << std::setprecision(2) << Ia << " MHz" << std::endl;
-                std::cout << "Difference in Ib " << std::setprecision(2) << Ib << " MHz" << std::endl;
-                std::cout << "Difference in Ic " << std::setprecision(2) << Ic << " MHz" << std::endl;
-
-                std::cout << "RMSD = " << std::setprecision(5) << rmsd << " A" << std::endl;
-            }
-
-            if (rmsd <= m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() <= m_MaxHTopoDiff) /*|| accepted_rotational == -1*/) {
-                keep_molecule = false;
-                std::string reject_reason = mol2->Name() + " [I] RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference) + "; dIx = " + std::to_string(diff_rot);
-                m_filtered[mol1->Name()].push_back(reject_reason);
-                m_accept_rmsd.push_back(diff_rot);
-                if (!m_silent) {
-                    std::cout << "  ** Rejecting structure **" << std::endl;
-                }
-                continue;
-            } else if (rmsd > m_rmsd_threshold) {
-                m_reject_rmsd.push_back(diff_rot);
-            }
         }
         if (keep_molecule) {
             m_result.push_back(mol1);
@@ -521,6 +486,61 @@ void ConfScan::CheckRMSD()
         PrintStatus();
         delete driver;
     }
+}
+
+bool ConfScan::SingleCheckRMSD(const Molecule* mol1, const Molecule* mol2, RMSDDriver* driver)
+{
+    bool keep_molecule = true;
+    if (!m_silent) {
+        std::cout << std::endl
+                  << std::setprecision(10)
+                  << std::endl
+                  << std::endl
+                  << "Reference Molecule:" << mol1->Name() << " (" << mol1->Energy() << " Eh)        Target Molecule " << mol2->Name() << " (" << mol2->Energy() << " Eh)" << std::endl;
+    }
+    //if (!m_useRestart) {
+    m_reference_last_energy = mol1->Energy();
+    m_target_last_energy = mol2->Energy();
+    //}
+
+    double rmsd = 0;
+    double Ia = abs(mol1->Ia() - mol2->Ia());
+    double Ib = abs(mol1->Ib() - mol2->Ib());
+    double Ic = abs(mol1->Ic() - mol2->Ic());
+
+    double diff_rot = (Ia + Ib + Ic) * third;
+
+    driver->setReference(mol1);
+    driver->setTarget(mol2);
+
+    driver->start();
+    rmsd = driver->RMSD();
+    double difference = abs(mol1->Energy() - m_lowest_energy) * 2625.5;
+    if (difference > m_energy_cutoff && m_energy_cutoff != -1) {
+        keep_molecule = false;
+    }
+
+    if (!m_silent) {
+        std::cout << "Energy Difference: " << std::setprecision(2) << difference << " kJ/mol" << std::endl;
+        std::cout << "Difference in Ia " << std::setprecision(2) << Ia << " MHz" << std::endl;
+        std::cout << "Difference in Ib " << std::setprecision(2) << Ib << " MHz" << std::endl;
+        std::cout << "Difference in Ic " << std::setprecision(2) << Ic << " MHz" << std::endl;
+
+        std::cout << "RMSD = " << std::setprecision(5) << rmsd << " A" << std::endl;
+    }
+
+    if (rmsd <= m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() <= m_MaxHTopoDiff) /*|| accepted_rotational == -1*/) {
+        keep_molecule = false;
+        std::string reject_reason = mol2->Name() + " [I] RMSD = " + std::to_string(rmsd) + "; dE = " + std::to_string(difference) + "; dIx = " + std::to_string(diff_rot);
+        m_filtered[mol1->Name()].push_back(reject_reason);
+        m_accept_rmsd.push_back(diff_rot);
+        if (!m_silent) {
+            std::cout << "  ** Rejecting structure **" << std::endl;
+        }
+    } else if (rmsd > m_rmsd_threshold) {
+        m_reject_rmsd.push_back(diff_rot);
+    }
+    return keep_molecule;
 }
 
 void ConfScan::ReorderCheck(bool reuse_only, bool limit)
@@ -582,7 +602,6 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
     std::vector<Molecule*> cached = m_result;
     m_result.clear();
     for (Molecule* mol1 : cached) {
-
         if (m_result.size() == 0) {
             m_result.push_back(mol1);
             continue;
@@ -591,98 +610,16 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
         bool keep_molecule = true;
         RMSDDriver* driver = new RMSDDriver(rmsd);
         for (const auto& mol2 : m_result) {
+            if (CheckStop()) {
+                delete driver;
+                fmt::print("\n\n** Found stop file, will end now! **\n\n");
+                return;
+            }
             if (keep_molecule == false)
-                continue;
-
-            if (!m_silent) {
-                std::cout << std::endl
-                          << std::setprecision(10)
-                          << std::endl
-                          << std::endl
-                          << "Reference Molecule:" << mol1->Name() << " (" << mol1->Energy() << " Eh)        Target Molecule " << mol2->Name() << " (" << mol2->Energy() << " Eh)" << std::endl;
-            }
-
-            m_reference_last_energy = mol1->Energy();
-            m_target_last_energy = mol2->Energy();
-
-            bool allow_reorder = true;
-
-            double rmsd = 0;
-            driver->setReference(mol1);
-            driver->setTarget(mol2);
-
-            for (const auto& rule : m_reorder_rules) {
-                double tmp_rmsd = driver->Rules2RMSD(rule);
-                if (!m_silent) {
-                    std::cout << tmp_rmsd << " A ";
-                }
-                if (tmp_rmsd < m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
-                    if (!m_silent) {
-                        std::cout << std::endl
-                                  << std::endl
-                                  << "*** Old reordering solution worked here! ***" << std::endl
-                                  << std::endl;
-                    }
-                    keep_molecule = false;
-                    allow_reorder = false;
-
-                    /*                   if (reuse_only) {
-                        mol1->writeXYZFile(m_result_basename + ".M1_X" + std::to_string(m_reordered_reused) + ".xyz");
-                        mol2->writeXYZFile(m_result_basename + ".M2_X" + std::to_string(m_reordered_reused) + ".xyz");
-                    }
-                    */
-                    rmsd = tmp_rmsd;
-                    m_reordered_reused++;
-                    continue;
-                }
-            }
-
-            double Ia = abs(mol1->Ia() - mol2->Ia());
-            double Ib = abs(mol1->Ib() - mol2->Ib());
-            double Ic = abs(mol1->Ic() - mol2->Ic());
-
-            double diff_rot = (Ia + Ib + Ic) * third;
-
-            if (m_reference_last_energy - mol1->Energy() > 1e-5 && m_useRestart) {
-                {
-                    if (!m_silent) {
-                        std::cout << "*** Skip reordering, as we are in Restart Modus *** " << std::endl;
-                    }
-                    allow_reorder = false;
-                }
-            } else {
-                m_useRestart = false;
-            }
-
-            if (diff_rot < m_diff_rot_abs_loose && allow_reorder && reuse_only == false) {
-                driver->setReference(mol1);
-                driver->setTarget(mol2);
-                driver->start();
-                rmsd = driver->RMSD();
-                m_reordered++;
-                if (!m_silent) {
-                    std::cout << "Difference in Ia " << std::setprecision(2) << Ia << " MHz" << std::endl;
-                    std::cout << "Difference in Ib " << std::setprecision(2) << Ib << " MHz" << std::endl;
-                    std::cout << "Difference in Ic " << std::setprecision(2) << Ic << " MHz" << std::endl;
-
-                    std::cout << "RMSD = " << std::setprecision(5) << rmsd << " A" << std::endl;
-                }
-
-                if (rmsd <= m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() <= m_MaxHTopoDiff) /*|| accepted_rotational == -1*/) {
-                    keep_molecule = false;
-                    m_reordered_worked++;
-                    std::string reject_reason = mol2->Name() + " [I] RMSD = " + std::to_string(rmsd) + "; dIx = " + std::to_string(diff_rot);
-                    m_filtered[mol1->Name()].push_back(reject_reason);
-                    m_accept_rmsd.push_back(diff_rot);
-                    if (!m_silent) {
-                        std::cout << "  ** Rejecting structure **" << std::endl;
-                    }
-                    AddRules(driver->ReorderRules());
-                    continue;
-                } else if (rmsd > m_rmsd_threshold) {
-                    m_reject_rmsd.push_back(diff_rot);
-                }
-            }
+                break;
+            keep_molecule = SingleReorderRMSD(mol1, mol2, driver, reuse_only);
+            if (keep_molecule == false)
+                break;
         }
         if (keep_molecule) {
             m_result.push_back(mol1);
@@ -695,13 +632,108 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
         PrintStatus();
         TriggerWriteRestart();
         delete driver;
-        if (m_result.size() >= m_maxrank && limit)
+        if ((m_result.size() >= m_maxrank && limit) || (m_result.size() >= 2 * m_maxrank && !limit))
             break;
         double difference = abs(mol1->Energy() - m_lowest_energy) * 2625.5;
         if (difference > m_energy_cutoff && m_energy_cutoff != -1) {
             break;
         }
     }
+}
+
+bool ConfScan::SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMSDDriver* driver, bool reuse_only)
+{
+    bool keep_molecule = true;
+    if (!m_silent) {
+        std::cout << std::endl
+                  << std::setprecision(10)
+                  << std::endl
+                  << std::endl
+                  << "Reference Molecule:" << mol1->Name() << " (" << mol1->Energy() << " Eh)        Target Molecule " << mol2->Name() << " (" << mol2->Energy() << " Eh)" << std::endl;
+    }
+
+    m_reference_last_energy = mol1->Energy();
+    m_target_last_energy = mol2->Energy();
+
+    bool allow_reorder = true;
+
+    double rmsd = 0;
+    driver->setReference(mol1);
+    driver->setTarget(mol2);
+
+    for (const auto& rule : m_reorder_rules) {
+        double tmp_rmsd = driver->Rules2RMSD(rule);
+        if (!m_silent) {
+            std::cout << tmp_rmsd << " A ";
+        }
+        if (tmp_rmsd < m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
+            if (!m_silent) {
+                std::cout << std::endl
+                          << std::endl
+                          << "*** Old reordering solution worked here! ***" << std::endl
+                          << std::endl;
+            }
+            keep_molecule = false;
+            allow_reorder = false;
+
+            /*
+            if (reuse_only) {
+                mol1->writeXYZFile(m_result_basename + ".M1_X" + std::to_string(m_reordered_reused) + ".xyz");
+                mol2->writeXYZFile(m_result_basename + ".M2_X" + std::to_string(m_reordered_reused) + ".xyz");
+            }
+            */
+            rmsd = tmp_rmsd;
+            m_reordered_reused++;
+            break;
+        }
+    }
+
+    double Ia = abs(mol1->Ia() - mol2->Ia());
+    double Ib = abs(mol1->Ib() - mol2->Ib());
+    double Ic = abs(mol1->Ic() - mol2->Ic());
+
+    double diff_rot = (Ia + Ib + Ic) * third;
+
+    if (m_reference_last_energy - mol1->Energy() > 1e-5 && m_useRestart) {
+        {
+            if (!m_silent) {
+                std::cout << "*** Skip reordering, as we are in Restart Modus *** " << std::endl;
+            }
+            allow_reorder = false;
+        }
+    } else {
+        m_useRestart = false;
+    }
+
+    if (diff_rot < m_diff_rot_abs_loose && allow_reorder && reuse_only == false) {
+        driver->setReference(mol1);
+        driver->setTarget(mol2);
+        driver->start();
+        rmsd = driver->RMSD();
+        m_reordered++;
+        if (!m_silent) {
+            std::cout << "Difference in Ia " << std::setprecision(2) << Ia << " MHz" << std::endl;
+            std::cout << "Difference in Ib " << std::setprecision(2) << Ib << " MHz" << std::endl;
+            std::cout << "Difference in Ic " << std::setprecision(2) << Ic << " MHz" << std::endl;
+
+            std::cout << "RMSD = " << std::setprecision(5) << rmsd << " A" << std::endl;
+        }
+
+        if (rmsd <= m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() <= m_MaxHTopoDiff) /*|| accepted_rotational == -1*/) {
+            keep_molecule = false;
+            m_reordered_worked++;
+            std::string reject_reason = mol2->Name() + " [I] RMSD = " + std::to_string(rmsd) + "; dIx = " + std::to_string(diff_rot);
+            m_filtered[mol1->Name()].push_back(reject_reason);
+            m_accept_rmsd.push_back(diff_rot);
+            if (!m_silent) {
+                std::cout << "  ** Rejecting structure **" << std::endl;
+            }
+            AddRules(driver->ReorderRules());
+        } else if (rmsd > m_rmsd_threshold) {
+            m_reject_rmsd.push_back(diff_rot);
+        }
+    }
+    return keep_molecule;
 }
 
 void ConfScan::Finalise()

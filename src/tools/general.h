@@ -60,6 +60,11 @@ public:
         return std::chrono::duration_cast<std::chrono::milliseconds>(m_end - m_start).count();
     }
 
+    inline void Reset()
+    {
+        m_start = std::chrono::system_clock::now();
+    }
+
 private:
     std::chrono::time_point<std::chrono::system_clock> m_start, m_end;
     bool m_print;
@@ -303,8 +308,13 @@ inline std::vector<int> String2Vector(const std::string& string)
 {
     std::vector<int> vector;
     StringList tmp = SplitString(string, "|");
-    for (auto i : tmp)
-        vector.push_back(std::stoi(i));
+    for (auto i : tmp) {
+        try {
+            vector.push_back(std::stoi(i));
+        } catch (const std::invalid_argument& argument) {
+            continue;
+        }
+    }
     return vector;
 }
 

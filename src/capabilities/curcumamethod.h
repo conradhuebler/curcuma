@@ -28,6 +28,7 @@
 class CurcumaMethod {
 public:
     CurcumaMethod(const json& defaults, const json& controller, bool silent);
+    ~CurcumaMethod();
 
     inline void setRestart(bool restart) { m_restart = restart; }
 
@@ -47,6 +48,8 @@ public:
     void UpdateController(const json& controller);
 
     virtual void start() = 0; // TODO make pure virtual and move all main action here
+
+    bool CheckStop() const;
 
 protected:
     void TriggerWriteRestart();

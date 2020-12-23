@@ -58,6 +58,8 @@ static const json ConfScanJson = {
     { "RMSDThreads", 1 }
 };
 
+class RMSDDriver;
+
 class ConfScan : public CurcumaMethod {
 public:
     ConfScan(const json& controller = ConfScanJson, bool silent = true);
@@ -95,8 +97,10 @@ private:
     void SetUp();
 
     void CheckRMSD();
+    bool SingleCheckRMSD(const Molecule* mol1, const Molecule* mol2, RMSDDriver* driver);
 
     void ReorderCheck(bool reuse_only = false, bool limit = false);
+    bool SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMSDDriver* driver, bool reuse_only);
 
     void Finalise();
 
