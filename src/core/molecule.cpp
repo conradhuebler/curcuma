@@ -106,6 +106,26 @@ Molecule::~Molecule()
 {
 }
 
+void Molecule::LoadMolecule(const std::string& tmol, bool trimmed)
+{
+    StringList lines = Tools::SplitString(tmol, "\n");
+    if (!trimmed) {
+        auto first = lines[0];
+        InitialiseEmptyGeometry(stoi(first));
+        auto second = lines[1];
+        setXYZComment(second);
+        lines.erase(lines.begin(), lines.begin() + 2);
+    } else {
+        int i = 0;
+        InitialiseEmptyGeometry(lines.size());
+
+        for (const auto& line : lines) {
+            setXYZ(line, i);
+            ++i;
+        }
+    }
+}
+
 void Molecule::print_geom(bool moreinfo) const
 {
     std::cout << AtomCount() << std::endl;
@@ -467,7 +487,8 @@ void Molecule::setXYZ(const std::string& internal, int i)
 {
     std::vector<std::string > elements;
     ParseString(internal, elements);
-
+    if (elements.size() < 4)
+        return;
     m_atoms.push_back(Elements::String2Element(elements[0]));
 
     if (elements.size() >= 4) {

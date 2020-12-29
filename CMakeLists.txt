@@ -136,6 +136,8 @@ configure_file(
   "${CMAKE_BINARY_DIR}/src/version.h"
 )
 
+
+
 set(curcuma_core_SRC
         src/capabilities/curcumamethod.cpp
         src/capabilities/curcumaopt.cpp
@@ -158,6 +160,9 @@ set(curcuma_core_SRC
     add_executable(curcuma
             src/main.cpp)
 
+    add_executable(optinterface
+            src/helpers/interface.cpp)
+
 if(C17)
     set_property(TARGET curcuma_core PROPERTY CXX_STANDARD 17)
 else()
@@ -166,13 +171,18 @@ endif(C17)
 
 if(C17)
     set_property(TARGET curcuma PROPERTY CXX_STANDARD 17)
+    set_property(TARGET optinterface PROPERTY CXX_STANDARD 17)
 else()
     set_property(TARGET curcuma PROPERTY CXX_STANDARD 14)
+    set_property(TARGET optinterface PROPERTY CXX_STANDARD 14)
 endif(C17)
 
 set(target_dir "bin")
 set_property(TARGET curcuma PROPERTY LINK_FLAGS_RELEASE -s)
 set_property(TARGET curcuma PROPERTY LINK_FLAGS_RELWITHDEBINFO -s)
+
+set_property(TARGET optinterface PROPERTY LINK_FLAGS_RELEASE -s)
+set_property(TARGET optinterface PROPERTY LINK_FLAGS_RELWITHDEBINFO -s)
 
 if(USE_XTB)
     if(COMPILE_XTB)
@@ -186,6 +196,7 @@ endif()
 
     target_link_libraries(curcuma fmt::fmt-header-only)
     target_link_libraries(curcuma curcuma_core)
+    target_link_libraries(optinterface curcuma_core)
 
 add_executable(curcuma_helper
         src/helpers/main.cpp)

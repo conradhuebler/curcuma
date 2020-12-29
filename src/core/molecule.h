@@ -61,6 +61,7 @@ class Molecule
 
     void LoadMolecule(const Molecule& molecule);
     void LoadMolecule(const Molecule* molecule);
+    void LoadMolecule(const std::string& tmol, bool trimmed = true);
 
     void setAtom(const std::string &internal, int i);
     void setXYZ(const std::string &coord, int i);
