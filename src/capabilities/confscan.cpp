@@ -449,6 +449,9 @@ void ConfScan::CheckRMSD()
             m_skip--;
             continue;
         }
+        if (m_prevent_reorder && m_maxrank <= m_accepted)
+            continue;
+
         int index = i.second;
         Molecule* mol1 = m_molecules.at(index).second;
         if (mol1->Check() == 1) {

@@ -1,6 +1,6 @@
 /*
  * <Curcuma main file.>
- * Copyright (C) 2019 - 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2021 Conrad Hübler <Conrad.Huebler@gmx.net>
  * 
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,6 +21,7 @@
 #include "src/core/molecule.h"
 #include "src/core/xtbinterface.h"
 
+#include "src/capabilities/analysenciplot.h"
 #include "src/capabilities/confscan.h"
 #include "src/capabilities/confstat.h"
 #include "src/capabilities/curcumaopt.h"
@@ -278,6 +279,22 @@ int main(int argc, char **argv) {
                 mapper.addElementPair(pair);
 
             mapper.FindPairs();
+        } else if (strcmp(argv[1], "-nci") == 0) {
+
+            if (argc < 4) {
+                std::cerr << "Please use curcuma to post-process two RDG vs rho plots from NCIPLOT as follows:\ncurcuma -nci file1.dat file2.dat" << std::endl;
+                std::cerr << "Additonal arguments are:" << std::endl;
+                std::cerr << "-bins             **** Number of bins during indexing the file!" << std::endl;
+                std::cerr << "-scale_d1         **** Scale minimal distance for file1.dat!" << std::endl;
+                std::cerr << "-scale_d2         **** Scale minimal distance for file2.dat!" << std::endl;
+                std::cerr << "-local_distance   **** Recalculate distance for every bin (false = default)" << std::endl;
+                return 0;
+            }
+
+            AnalyseNCIPlot analyse(controller);
+            analyse.setFiles(argv[2], argv[3]);
+            analyse.start();
+
         } else if (strcmp(argv[1], "-opt") == 0) {
             if (argc < 2) {
                 std::cerr << "Please use curcuma for optimisation as follows:\ncurcuma -opt input.xyz" << std::endl;

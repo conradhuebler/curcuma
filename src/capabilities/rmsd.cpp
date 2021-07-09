@@ -153,14 +153,20 @@ void RMSDDriver::start()
     if (m_initial.size())
         InitialiseOrder();
 
+    if (m_fragment != -1) {
+        m_fragment_reference = m_fragment;
+        m_fragment_target = m_fragment;
+    }
+
+    if (m_protons == false)
+        ProtonDepleted();
+
     int reference_fragments = m_reference.GetFragments(m_scaling).size();
     int target_fragments = m_target.GetFragments(m_scaling).size();
 
     m_reference.InitialiseConnectedMass(1.5, m_protons);
     m_target.InitialiseConnectedMass(1.5, m_protons);
 
-    if(m_protons == false)
-        ProtonDepleted();
 
     /*
     if (std::abs(m_reference.Mass() - m_target.Mass()) > 1e-4) {

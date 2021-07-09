@@ -137,11 +137,13 @@ configure_file(
 )
 
 set(curcuma_core_SRC
+        src/capabilities/analysenciplot.cpp
         src/capabilities/curcumamethod.cpp
         src/capabilities/curcumaopt.cpp
         src/capabilities/confscan.cpp
         src/capabilities/confstat.cpp
         src/capabilities/docking.cpp
+        src/capabilities/analysenciplot.cpp
         src/capabilities/nebdocking.cpp
         src/capabilities/pairmapper.cpp
         src/capabilities/rmsd.cpp

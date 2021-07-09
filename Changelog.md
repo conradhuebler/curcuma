@@ -1,6 +1,7 @@
 # The (incomplete) curcuma Changelog
 
 ### pre Alpha
+- compare/analyse NCIPLOT's RDG vs rho plots
 - add parallel batch optimisation
 - add conformation statistics
 - parallel docking due to CxxThreadPool

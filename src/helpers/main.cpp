@@ -88,11 +88,19 @@ int main(int argc, char** argv)
                     int sub = 0;
                     std::vector<double> row;
                     for (auto element : list) {
+                        double val = 0.0;
+                        bool ok = true;
                         try {
-                            storage[sub].push_back(std::stod(element));
+                            val = std::stod(element);
                         } catch (const std::string& what_arg) {
+                            ok = false;
+                        } catch (const std::invalid_argument& arg) {
+                            ok = false;
                         }
-                        sub++;
+                        if (ok) {
+                            storage[sub].push_back(val);
+                            sub++;
+                        }
                     }
                 }
             }

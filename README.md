@@ -7,7 +7,7 @@ A simple Open Source molecular modelling tool.
 
 ## Download and requirements
 git clones automatically some submodules.
-- [LBFGSpp](https://github.com/yixuan/LBFGSpp/) prvodies LBFGS optimiser
+- [LBFGSpp](https://github.com/yixuan/LBFGSpp/) provides LBFGS optimiser
 - [XTB](https://github.com/grimme-lab/xtb) eXtended TightBinding - Some methods use this, however it is disabled by default. Add '-DUSE_XTB=true ' to the cmake command line to enable it. GCC 8 or later has to be used.
 - [CxxThreadPool](https://github.com/conradhuebler/CxxThreadPool) - C++ Thread Pool for parallel calculation
 - [eigen](https://gitlab.com/libeigen/eigen) provides eigen C++ library for linear algebra. Eigen is not downloaded automatically, but will be fetched and updated if the build scripts in the **scripts** subdirectory are used.
@@ -179,6 +179,14 @@ curcuma -angle XXX.trj atom1 atom2 atom3
 ```
 
 The index starts with 1. Using grep and sed via ***|grep '::' |sed 's/:://g'*** omitts unused output.
+
+## Compare two RDG vs sign(λ<sub>2</sub>)ρ plots 
+Using 
+```sh
+curcuma -nci file1.dat file2.dat
+```
+one can ''remove'' RDG vs sign(λ<sub>2</sub>)ρ points which occur in both plots (file1.dat and file2.dat). The similarity of two points is set to true, if the distance is below a threshold distance, which is defined by the averaged distance of two adjacent points.
+
 
 # Citation
 Please cite the software package if you obtain results:

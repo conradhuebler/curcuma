@@ -34,12 +34,14 @@ XTBInterface::XTBInterface()
     m_env = xtb_newEnvironment();
     m_calc = xtb_newCalculator();
     m_res = xtb_newResults();
+//    xtb_setOutput(m_env, "/dev/null");
 #endif
 }
 
 XTBInterface::~XTBInterface()
 {
 #ifdef USE_XTB
+    //    xtb_releaseOutput(m_env);
     xtb_delResults(&m_res);
     xtb_delCalculator(&m_calc);
     xtb_delMolecule(&m_mol);
@@ -137,6 +139,8 @@ double XTBInterface::GFNCalculation(int parameter, double* grad)
 {
     double energy = 0;
 #ifdef USE_XTB
+    auto old_buffer = std::cout.rdbuf(nullptr);
+
     xtb_setVerbosity(m_env, XTB_VERBOSITY_MUTED);
     if (xtb_checkEnvironment(m_env)) {
         xtb_showEnvironment(m_env, NULL);
@@ -144,9 +148,12 @@ double XTBInterface::GFNCalculation(int parameter, double* grad)
     }
 
     if (parameter == 66) {
-        xtb_loadGFNFF(m_env, m_mol, m_calc, NULL);
+
+        char* f = "filename";
+        xtb_loadGFNFF(m_env, m_mol, m_calc, f);
+
         if (xtb_checkEnvironment(m_env)) {
-            xtb_showEnvironment(m_env, NULL);
+            xtb_showEnvironment(m_env, f);
             return 3;
         }
     } else if (parameter == 0) {
@@ -180,6 +187,8 @@ double XTBInterface::GFNCalculation(int parameter, double* grad)
     xtb_getEnergy(m_env, m_res, &energy);
     if (grad != NULL)
         xtb_getGradient(m_env, m_res, grad);
+    std::cout.rdbuf(old_buffer);
+
 #else
     throw("XTB is not included, sorry for that");
 #endif
