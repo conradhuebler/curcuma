@@ -155,7 +155,7 @@ int main(int argc, char** argv)
                 std::cerr << "Please use curcuma for converting xyz files into allxyz files (orca format) as follows\ncurcuma_tools -allxyz input.xyz" << std::endl;
                 exit(1);
             }
-            Tools::xyz2allxyz(argv[2]);
+            // Files::xyz2allxyz(argv[2]);
         }
     }
     return 0;

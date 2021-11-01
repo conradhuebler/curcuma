@@ -1,4 +1,4 @@
-/*
+﻿/*
  * <Geometry tools for chemical structures.>
  * Copyright (C) 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
@@ -29,10 +29,15 @@
 #include <string>
 #include <vector>
 
-#include "src/core/fileiterator.h"
+#include <fmt/color.h>
+#include <fmt/core.h>
+
+#include "src/core/elements.h"
+//#include "src/core/fileiterator.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
 
+#include "src/tools/formats.h"
 class RunTimer {
 public:
     RunTimer(bool print = false)
@@ -139,37 +144,6 @@ inline bool isDouble(const std::string& input)
     return left && right;
     */
     // return std::all_of(input.begin(), input.end(), ::isdigit);
-}
-
-inline Molecule LoadFile(const std::string& filename)
-{
-    bool xyzfile = std::string(filename).find(".xyz") != std::string::npos || std::string(filename).find(".trj") != std::string::npos;
-
-    if (xyzfile == false)
-        throw 1;
-
-    std::vector<std::string> lines;
-    std::ifstream input(filename);
-
-    int atoms = 0;
-    int index = 0;
-    int i = 0;
-
-    Molecule mol(atoms, 0);
-    for (std::string line; getline(input, line);) {
-        if (index == 0 && xyzfile) {
-            atoms = stoi(line);
-            if (atoms < 1)
-                throw 2;
-            mol = Molecule(atoms, 0);
-        }
-        if (i > 1 && mol.AtomCount() < atoms) { // Load only the first file, TODO make it more flexible
-            mol.setXYZ(line, i - 2);
-        }
-        index++;
-        ++i;
-    }
-    return mol;
 }
 
 inline int VectorDifference(const std::vector<int>& tmp_a, const std::vector<int>& tmp_b)
@@ -338,21 +312,4 @@ inline std::vector<std::vector<int>> String2VectorVector(const std::string& stri
     return result;
 }
 
-inline void xyz2allxyz(const std::string& xyzfile)
-{
-    std::string allxyz = xyzfile;
-    allxyz.erase(allxyz.end() - 3, allxyz.end());
-
-    std::ofstream input;
-    input.open(allxyz + "allxyz", std::ios_base::app);
-    FileIterator file(xyzfile);
-    while (!file.AtEnd()) {
-        Molecule mol = file.Next();
-        input << mol.XYZString();
-        if (!file.AtEnd())
-            input << ">" << std::endl;
-    }
-    //input << "\n";
-    input.close();
-}
 }

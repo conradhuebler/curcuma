@@ -152,6 +152,7 @@ set(curcuma_core_SRC
         src/core/molecule.cpp
         src/core/xtbinterface.cpp
         src/core/pseudoff.cpp
+        src/tools/formats.h
         src/tools/geometry.h
         src/tools/general.h
         )

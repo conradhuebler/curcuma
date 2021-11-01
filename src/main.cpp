@@ -226,8 +226,9 @@ int main(int argc, char **argv) {
                 return 0;
             }
 
-            Molecule mol1 = Tools::LoadFile(argv[2]);
-            mol1.printFragmente();
+            Molecule mol1 = Files::LoadFile(argv[2]);
+            if (mol1.Atoms().size())
+                mol1.printFragmente();
         } else if (strcmp(argv[1], "-hmap") == 0) {
             if (argc < 2) {
                 std::cerr << "Please use curcuma for hydrogen bond mapping as follows:\ncurcuma -hmap trajectory.xyz" << std::endl;
@@ -342,7 +343,7 @@ int main(int argc, char **argv) {
                 return 0;
             }
 
-            Molecule mol1 = Tools::LoadFile(argv[2]);
+            Molecule mol1 = Files::LoadFile(argv[2]);
             SimpleMD md;
             md.setMolecule(mol1);
             md.Initialise();
@@ -379,8 +380,8 @@ int main(int argc, char **argv) {
                 }
             }
 
-            Molecule mol1 = Tools::LoadFile(argv[2]);
-            Molecule mol2 = Tools::LoadFile(argv[3]);
+            Molecule mol1 = Files::LoadFile(argv[2]);
+            Molecule mol2 = Files::LoadFile(argv[3]);
             NEBDocking* nebdock = new NEBDocking;
             nebdock->setStructures(mol1, mol2);
             nebdock->setProtonTransfer(pt);

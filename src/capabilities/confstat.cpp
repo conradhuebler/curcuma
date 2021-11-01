@@ -17,6 +17,8 @@
  *
  */
 
+#include "src/core/fileiterator.h"
+
 #include "confstat.h"
 
 ConfStat::ConfStat(const json& controller, bool silent)

@@ -31,6 +31,19 @@
 
 typedef std::pair<int, Position> AtomDef;
 
+struct Mol {
+    double m_energy;
+    double m_spin;
+
+    int m_number_atoms;
+    int m_charge;
+
+    std::string m_commentline;
+
+    std::vector<std::array<double, 3>> m_geometry;
+    std::vector<int> m_atoms;
+};
+
 class Molecule
 {
   public:
@@ -38,6 +51,8 @@ class Molecule
     Molecule(const Molecule* other);
     Molecule(const Molecule& other);
     Molecule(const std::string& file);
+    Molecule(const Mol& mol);
+    Molecule(const Mol* mol);
 
     Molecule();
     ~Molecule();
@@ -61,6 +76,9 @@ class Molecule
 
     void LoadMolecule(const Molecule& molecule);
     void LoadMolecule(const Molecule* molecule);
+
+    void LoadMolecule(const Mol& molecule);
+    void LoadMolecule(const Mol* molecule);
 
     void setAtom(const std::string &internal, int i);
     void setXYZ(const std::string &coord, int i);

@@ -22,8 +22,10 @@
 #include "src/capabilities/rmsd.h"
 
 #include "src/core/elements.h"
+#include "src/core/fileiterator.h"
 #include "src/core/molecule.h"
 
+#include "src/tools/formats.h"
 #include "src/tools/general.h"
 #include "src/tools/geometry.h"
 
@@ -59,7 +61,7 @@ void RMSDTraj::start()
     std::cout << "'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
     int atoms_target = -1;
     if (m_reference.compare("none") != 0) {
-        m_stored_structures.push_back(Tools::LoadFile(m_reference));
+        m_stored_structures.push_back(Files::LoadFile(m_reference));
         atoms_target = m_stored_structures[0].AtomCount();
     }
 
@@ -220,10 +222,10 @@ void RMSDTraj::start()
             mol_2.setName(std::to_string(molecule));
         }
     }
-
+    /*
     if (m_writeUnique && m_allxyz)
-        Tools::xyz2allxyz(outfile + "_unique.xyz");
-
+        Files::xyz2allxyz(outfile + "_unique.xyz");
+*/
     double rmsd_mean = Tools::mean(m_rmsd_vector);
     double rmsd_median = Tools::median(m_rmsd_vector);
     double rmsd_std = Tools::stdev(m_rmsd_vector, rmsd_mean);

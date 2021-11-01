@@ -21,6 +21,9 @@
 
 #include "src/core/molecule.h"
 
+#include "src/tools/formats.h"
+#include "src/tools/general.h"
+
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -73,44 +76,49 @@ private:
         int index = 0;
         int i = 0;
         bool xyzfile = std::string(m_filename).find(".xyz") != std::string::npos || std::string(m_filename).find(".trj") != std::string::npos;
-        Molecule mol(atoms, 0);
-        for (std::string line; getline(*m_file, line);) {
-            if (line.size() == 0 && i != 1)
-                continue;
-            if (index == 0 && xyzfile) {
-                try {
-                    atoms = stoi(line);
-                } catch (const std::invalid_argument& arg) {
-                    std::cerr << "FileIterator::CheckNext() Got some error at line " << line << "\n";
-                    std::cerr << "Skipping molecules that follow after  " << m_current_mol << " molecule!" << std::endl;
-                    return false;
-                }
-                m_mols = m_lines / (atoms + 2);
-                mol = Molecule(atoms, 0);
-                m_current_mol++;
-            }
-            if (xyzfile) {
-                if (i == 1)
-                    mol.setXYZComment(line);
-                if (i > 1) {
+        if (xyzfile) {
+            Molecule mol(atoms, 0);
+            for (std::string line; getline(*m_file, line);) {
+                if (line.size() == 0 && i != 1)
+                    continue;
+                if (index == 0 && xyzfile) {
                     try {
-                        mol.setXYZ(line, i - 2);
+                        atoms = stoi(line);
                     } catch (const std::invalid_argument& arg) {
                         std::cerr << "FileIterator::CheckNext() Got some error at line " << line << "\n";
                         std::cerr << "Skipping molecules that follow after  " << m_current_mol << " molecule!" << std::endl;
                         return false;
                     }
+                    m_mols = m_lines / (atoms + 2);
+                    mol = Molecule(atoms, 0);
+                    m_current_mol++;
                 }
-                if (i - 1 == atoms) {
-                    m_current = mol;
-                    index = 0;
-                    return false;
+                if (xyzfile) {
+                    if (i == 1)
+                        mol.setXYZComment(line);
+                    if (i > 1) {
+                        try {
+                            mol.setXYZ(line, i - 2);
+                        } catch (const std::invalid_argument& arg) {
+                            std::cerr << "FileIterator::CheckNext() Got some error at line " << line << "\n";
+                            std::cerr << "Skipping molecules that follow after  " << m_current_mol << " molecule!" << std::endl;
+                            return false;
+                        }
+                    }
+                    if (i - 1 == atoms) {
+                        m_current = mol;
+                        index = 0;
+                        return false;
+                    }
+                    ++i;
+                } else {
+                    mol.setAtom(line, i);
                 }
-                ++i;
-            } else {
-                mol.setAtom(line, i);
+                index++;
             }
-            index++;
+        } else {
+            m_current = Files::LoadFile(m_filename);
+            return false;
         }
         return true;
     }

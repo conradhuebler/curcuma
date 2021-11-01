@@ -72,17 +72,17 @@ bool Docking::Initialise()
     Molecule host, guest, complex;
     bool host_loaded = true, guest_loaded = true, complex_loaded = true;
     try {
-        host = Tools::LoadFile(m_host);
+        host = Files::LoadFile(m_host);
     } catch (int error) {
         host_loaded = false;
     }
     try {
-        guest = Tools::LoadFile(m_guest);
+        guest = Files::LoadFile(m_guest);
     } catch (int error) {
         guest_loaded = false;
     }
     try {
-        complex = Tools::LoadFile(m_complex);
+        complex = Files::LoadFile(m_complex);
     } catch (int error) {
         complex_loaded = false;
     }

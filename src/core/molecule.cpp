@@ -70,8 +70,29 @@ Molecule::Molecule(const Molecule* other)
     m_spin = other->m_spin;
 }
 
+Molecule::Molecule(const Mol& other)
+{
+    setXYZComment(other.m_commentline);
+    m_geometry = other.m_geometry;
+    m_charge = other.m_charge;
+    m_atoms = other.m_atoms;
+    m_energy = other.m_energy;
+    m_spin = other.m_spin;
+}
+
+Molecule::Molecule(const Mol* other)
+{
+    setXYZComment(other->m_commentline);
+    m_geometry = other->m_geometry;
+    m_charge = other->m_charge;
+    m_atoms = other->m_atoms;
+    m_energy = other->m_energy;
+    m_spin = other->m_spin;
+}
+
 Molecule::Molecule(const std::string& file)
 {
+    /*
     std::vector<std::string> lines;
     int atoms = 0;
     int index = 0;
@@ -81,7 +102,11 @@ Molecule::Molecule(const std::string& file)
         auto m_file = new std::ifstream(file);
         for (std::string line; getline(*m_file, line);) {
             if (index == 0 && xyzfile) {
-                atoms = stoi(line);
+                try {
+                    atoms = stoi(line);
+                } catch (const std::invalid_argument& arg) {
+                    atoms = 0;
+                }
                 InitialiseEmptyGeometry(atoms);
             }
             if (xyzfile) {
@@ -99,7 +124,8 @@ Molecule::Molecule(const std::string& file)
             }
             index++;
         }
-    }
+    }*/
+    LoadMolecule(Files::LoadFile(file));
 }
 
 Molecule::~Molecule()
@@ -230,6 +256,7 @@ void Molecule::setXYZComment(const std::string& comment)
                 try {
                     setEnergy(std::stod((list[0])));
                 } catch (const std::string& what_arg) {
+                } catch (const std::invalid_argument& arg) {
                 }
             }
         } else {
@@ -507,6 +534,30 @@ void Molecule::LoadMolecule(const Molecule* molecule)
     m_atoms = molecule->Atoms();
     InitialiseEmptyGeometry(molecule->AtomCount());
     setGeometry(molecule->getGeometry());
+}
+
+void Molecule::LoadMolecule(const Mol& molecule)
+{
+    clear();
+
+    setXYZComment(molecule.m_commentline);
+    m_charge = molecule.m_charge;
+    m_atoms = molecule.m_atoms;
+    m_energy = molecule.m_energy;
+    InitialiseEmptyGeometry(AtomCount());
+    m_geometry = (molecule.m_geometry);
+}
+
+void Molecule::LoadMolecule(const Mol* molecule)
+{
+    clear();
+
+    setXYZComment(molecule->m_commentline);
+    m_charge = molecule->m_charge;
+    m_atoms = molecule->m_atoms;
+    m_energy = molecule->m_energy;
+    InitialiseEmptyGeometry(AtomCount());
+    m_geometry = (molecule->m_geometry);
 }
 
 Molecule Molecule::getFragmentMolecule(int fragment) const
