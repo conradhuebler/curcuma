@@ -13,3 +13,6 @@
 [submodule "external/fmt"]
 	path = external/fmt
 	url = https://github.com/fmtlib/fmt
+[submodule "external/ripser"]
+	path = external/ripser
+	url = https://github.com/conradhuebler/ripser
