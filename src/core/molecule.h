@@ -96,6 +96,8 @@ class Molecule
     Geometry getGeometryByFragment(int fragment, bool protons = true) const;
     inline Geometry getGeometry(bool protons = true) const { return getGeometry(IntPair(0, -1), protons); }
 
+    std::string LowerDistanceMatrix() const;
+
     bool setGeometry(const Geometry &geometry);
     bool setGeometryByFragment(const Geometry& geometry, int fragment, bool protons = true);
 

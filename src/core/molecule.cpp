@@ -681,6 +681,20 @@ bool Molecule::setGeometryByFragment(const Geometry& geometry, int fragment, boo
     return true;
 }
 
+std::string Molecule::LowerDistanceMatrix() const
+{
+    std::ostringstream stream;
+    for (int i = 0; i < AtomCount(); ++i) {
+        for (int j = 0; j <= i; ++j) {
+            stream << std::to_string(CalculateDistance(i, j)) + ",";
+        }
+        stream << std::endl;
+    }
+    std::string matrix;
+    matrix = stream.str();
+    return matrix;
+}
+
 Position Molecule::Centroid(bool protons, int fragment) const
 {
     return GeometryTools::Centroid(getGeometryByFragment(fragment, protons));

@@ -112,7 +112,8 @@ int main(int argc, char **argv) {
                   << "-distance    * Calculate distance between two atoms                       *" << std::endl
                   << "-angle       * Calculate angle between three atoms                        *" << std::endl
                   << "-split       * Split a supramolcular structure in individual molecules    *" << std::endl
-                  << "-rmsdtraj    * Find unique structures                                     *" << std::endl;
+                  << "-rmsdtraj    * Find unique structures                                     *" << std::endl
+                  << "-distance    * Calculate distance matrix                                  *" << std::endl;
         exit(1);
     }
     if(argc >= 2)
@@ -524,6 +525,33 @@ int main(int argc, char **argv) {
                 printf(":: %8.4f\t%8.4f\t%8.4f\t%8.4f ::\n", mol.CalculateAngle(indexA - 1, indexB - 1, indexC - 1), mol.CalculateDistance(indexA - 1, indexB - 1), mol.CalculateDistance(indexA - 1, indexC - 1), mol.CalculateDistance(indexC - 1, indexB - 1));
             }
             printf("\n\n");
+        } else if (strcmp(argv[1], "-dMatrix") == 0) {
+            if (argc < 3) {
+                std::cerr << "Please use curcuma to calculate a distance matrix for a molecule as follows:\ncurcuma -dMatrix molecule.xyz" << std::endl;
+                return 0;
+            }
+            FileIterator file(argv[2]);
+            bool print = false;
+            json dMatrix = controller["dMatrix"];
+            std::string outfile;
+            try {
+                outfile = Json2KeyWord<std::string>(dMatrix, "o");
+            } catch (int i) {
+                if (i == -1) {
+                    print = true;
+                }
+            }
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                if (print)
+                    std::cout << mol.LowerDistanceMatrix();
+                else {
+                    std::ofstream input;
+                    input.open(outfile, std::ios::out);
+                    input << mol.LowerDistanceMatrix();
+                    input.close();
+                }
+            }
         } else if (strcmp(argv[1], "-center") == 0) {
             if (argc < 3) {
                 std::cerr << "Please use curcuma to center a structure as follows:\ncurcuma -center molecule.xyz" << std::endl;
