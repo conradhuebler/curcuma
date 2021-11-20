@@ -28,6 +28,7 @@
 #include "src/capabilities/docking.h"
 #include "src/capabilities/nebdocking.h"
 #include "src/capabilities/pairmapper.h"
+#include "src/capabilities/persistentdiagram.h"
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
 #include "src/capabilities/simplemd.h"
@@ -40,6 +41,8 @@
 #include <cstring>
 #include <fstream>
 #include <vector>
+
+// #include "ripser.h"
 
 #if __GNUC__
 // Thanks to
@@ -493,7 +496,7 @@ int main(int argc, char **argv) {
 
         } else if (strcmp(argv[1], "-angle") == 0) {
             if (argc < 6) {
-                std::cerr << "Please use curcuma to calculate angles as follows:\ncurcuma -distance molecule.xyz indexA indexB indexC" << std::endl;
+                std::cerr << "Please use curcuma to calculate angles as follows:\ncurcuma -angle molecule.xyz indexA indexB indexC" << std::endl;
                 return 0;
             }
 
@@ -501,19 +504,19 @@ int main(int argc, char **argv) {
             try {
                 indexA = std::stoi(argv[3]);
             } catch (const std::invalid_argument& arg) {
-                std::cerr << "Please use curcuma to calculate angles as follows:\ncurcuma -distance molecule.xyz indexA indexB indexC" << std::endl;
+                std::cerr << "Please use curcuma to calculate angles as follows:\ncurcuma -angle molecule.xyz indexA indexB indexC" << std::endl;
                 return 0;
             }
             try {
                 indexB = std::stoi(argv[4]);
             } catch (const std::invalid_argument& arg) {
-                std::cerr << "Please use curcuma to calculate angles as follows:\ncurcuma -distance molecule.xyz indexA indexB indexC" << std::endl;
+                std::cerr << "Please use curcuma to calculate angles as follows:\ncurcuma -angle molecule.xyz indexA indexB indexC" << std::endl;
                 return 0;
             }
             try {
                 indexC = std::stoi(argv[5]);
             } catch (const std::invalid_argument& arg) {
-                std::cerr << "Please use curcuma to calculate angles as follows:\ncurcuma -distance molecule.xyz indexA indexB indexC" << std::endl;
+                std::cerr << "Please use curcuma to calculate angles as follows:\ncurcuma -angle molecule.xyz indexA indexB indexC" << std::endl;
                 return 0;
             }
             FileIterator file(argv[2]);
@@ -543,9 +546,49 @@ int main(int argc, char **argv) {
             }
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
-                if (print)
+                if (print) {
                     std::cout << mol.LowerDistanceMatrix();
-                else {
+
+                    auto vector = mol.LowerDistanceVector();
+                    /*
+                    index_t dim_max = 2;
+                    value_t threshold = std::numeric_limits<value_t>::max();
+                    float ratio = 1;
+                    coefficient_t modulus = 2;
+                    compressed_lower_distance_matrix dist = compressed_lower_distance_matrix(std::move(vector));
+
+                    value_t enclosing_radius = std::numeric_limits<value_t>::infinity();
+                    if (threshold == std::numeric_limits<value_t>::max()) {
+                        for (size_t i = 0; i < dist.size(); ++i) {
+                            value_t r_i = -std::numeric_limits<value_t>::infinity();
+                            for (size_t j = 0; j < dist.size(); ++j)
+                                r_i = std::max(r_i, dist(i, j));
+                            enclosing_radius = std::min(enclosing_radius, r_i);
+                        }
+                    }
+
+                    auto result = ripser<compressed_lower_distance_matrix>(std::move(dist), dim_max, enclosing_radius,
+                        ratio, modulus)
+                                      .compute_barcodes();
+
+                    for(const auto &r : result)
+                    {
+                        for(const auto &v : r.second)
+                            std::cout << v.first << " " << v.second << std::endl;
+
+                    }
+  */
+                    PersistentDiagram diagram;
+                    diagram.setDistanceMatrix(vector);
+                    auto l = diagram.generatePairs();
+
+                    for (const auto& r : l) {
+                        std::cout << r.first << " " << r.second << std::endl;
+                    }
+                    diagram.setXRange(0, 4);
+                    diagram.setYRange(0, 4);
+                    std::cout << diagram.generateImage(l);
+                } else {
                     std::ofstream input;
                     input.open(outfile, std::ios::out);
                     input << mol.LowerDistanceMatrix();

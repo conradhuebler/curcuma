@@ -14,7 +14,7 @@ option (C17
 
 add_subdirectory(${PROJECT_SOURCE_DIR}/external/fmt EXCLUDE_FROM_ALL)
 
-include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/fmt/include ${PROJECT_SOURCE_DIR}/external/eigen ${PROJECT_SOURCE_DIR}/external/LBFGSpp/include ${PROJECT_SOURCE_DIR}/external/CppNumericalSolvers/include  ${CMAKE_CURRENT_BINARY_DIR}/src/)
+include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/fmt/include ${PROJECT_SOURCE_DIR}/external/eigen ${PROJECT_SOURCE_DIR}/external/LBFGSpp/include ${PROJECT_SOURCE_DIR}/external/CppNumericalSolvers/include ${PROJECT_SOURCE_DIR}/external/ripser ${CMAKE_CURRENT_BINARY_DIR}/src/)
 include_directories(${PROJECT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} )
 
 # Get the current working branch
@@ -137,6 +137,7 @@ configure_file(
 )
 
 set(curcuma_core_SRC
+        src/capabilities/persistentdiagram.cpp
         src/capabilities/analysenciplot.cpp
         src/capabilities/curcumamethod.cpp
         src/capabilities/curcumaopt.cpp

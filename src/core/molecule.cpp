@@ -695,6 +695,17 @@ std::string Molecule::LowerDistanceMatrix() const
     return matrix;
 }
 
+std::vector<float> Molecule::LowerDistanceVector() const
+{
+    std::vector<float> vector;
+    for (int i = 0; i < AtomCount(); ++i) {
+        for (int j = 0; j < i; ++j) {
+            vector.push_back((CalculateDistance(i, j)));
+        }
+    }
+    return vector;
+}
+
 Position Molecule::Centroid(bool protons, int fragment) const
 {
     return GeometryTools::Centroid(getGeometryByFragment(fragment, protons));
