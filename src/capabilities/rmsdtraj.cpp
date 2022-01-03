@@ -90,7 +90,7 @@ void RMSDTraj::start()
         { "silent", true },
         { "storage", 1.0 },
         { "method", "incr" },
-        { "noreorder", false },
+        //{ "noreorder", m_noreorder },
         { "threads", 1 }
     };
     RMSDDriver* driver = new RMSDDriver(RMSDJsonControl);

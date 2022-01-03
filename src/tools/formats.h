@@ -21,6 +21,7 @@
 
 #include <Eigen/Dense>
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <ctime>
@@ -94,6 +95,7 @@ inline Mol XYZ2Mol(const std::string& filename)
         if (index == 0) {
             try {
                 molecule.m_number_atoms = stoi(line);
+                atoms = stoi(line);
             } catch (const std::invalid_argument& arg) {
                 atoms = 0;
             }

@@ -85,7 +85,21 @@ static const std::vector<std::string> ElementAbbr = {
     "Xe",
     "Cs",
     "Ba",
-    "La" /*,
+    "La",
+    "Ce",
+    "Pr",
+    "Nd",
+    "Pm",
+    "Sm",
+    "Eu",
+    "Gd",
+    "Tb",
+    "Dy",
+    "Ho",
+    "Er",
+    "Tm",
+    "Yb",
+    "Lu",
     "Hf",
     "Ta",
     "W",
@@ -100,7 +114,7 @@ static const std::vector<std::string> ElementAbbr = {
     "Bi",
     "Po",
     "At",
-    "Rn"*/
+    "Rn"
     // La - Block not written down here
 };
 
@@ -161,8 +175,22 @@ static const std::vector<std::string> ElementAbbr_Low = {
     "i",
     "xe",
     "cs",
-    "ba"
-    "la" /*,,
+    "ba",
+    "la",
+    "ce",
+    "pr",
+    "nd",
+    "pm",
+    "sm",
+    "eu",
+    "gd",
+    "tb",
+    "dy",
+    "ho",
+    "er",
+    "tm",
+    "yb",
+    "lu",
     "hf",
     "ta",
     "w",
@@ -177,7 +205,7 @@ static const std::vector<std::string> ElementAbbr_Low = {
     "bi",
     "po",
     "at",
-    "rn"*/
+    "rn"
     // La - Block not written down here
 };
 
@@ -240,6 +268,34 @@ static const std::vector<double> AtomicMass = {
     132.9054, // Cs
     137.3270, // Ba
     138.9055, // La
+    140.116, // Ce
+    140.908, // Pr
+    144.242, // Nd
+    145.000, // Pm
+    150.36, // Sm
+    151.964, // Eu
+    157.25, // Gd
+    158.925, // Tb
+    162.5, // Dy
+    164.93, // Ho
+    167.259, // Er
+    168.934, // Tm
+    173.054, // Yb
+    174.967, // Lu
+    178.49, // Hf
+    180.948, // Ta
+    183.84, // W
+    186.207, // Re
+    190.23, // Os
+    192.217, // Ir
+    195.084, // Pt
+    196.967, // Au
+    200.59, // Hg
+    204.383, // Tl
+    207.2, // Pb
+    208.98, // Bi
+    209, // Po
+    210 // At
 };
 
 /*
@@ -306,7 +362,35 @@ static const std::vector<double> VanDerWaalsRadius = {
     2.16, // Xe
     3.43, // Cs
     2.68, // Ba
-    /* 138.9055, // La */
+    2.5, // La
+    2.48, // Ce
+    2.47, // Pr
+    2.45, // Nd
+    2.43, // Pm
+    2.42, // Sm
+    2.40, // Eu
+    2.38, // Gd
+    2.37, // Tb
+    2.35, // Dy
+    2.33, // Ho
+    2.32, // Er
+    2.30, // Tm
+    2.28, // Yb
+    2.27, // Lu
+    2.25, // Hf
+    2.20, // Ta
+    2.10, // W
+    2.05, // Re
+    2.00, // Os
+    2.00, // Ir
+    2.05, // Pt
+    2.10, // Au
+    2.05, // Hg
+    2.20, // Tl
+    2.30, // Pb
+    2.30, // Bi
+    2.00, // Po
+    2.00 // At
 };
 
 /*
@@ -371,7 +455,35 @@ static const std::vector<double> CovalentRadius = {
     1.31, // Xe
     2.32, // Cs
     1.96, // Ba
-    /* 138.9055, // La */
+    1.69, // La
+    1.69, // Ce - taken from La
+    1.69, // Pr - taken from La
+    1.69, // Nd - taken from La
+    1.69, // Pm - taken from La
+    1.69, // Sm - taken from La
+    1.69, // Eu - taken from La
+    1.69, // Gd - taken from La
+    1.69, // Tb - taken from La
+    1.69, // Dy - taken from La
+    1.69, // Ho - taken from La
+    1.69, // Er - taken from La
+    1.69, // Tm - taken from La
+    1.69, // Yb - taken from La
+    1.60, // Lu
+    1.50, // Hf
+    1.38, // Ta
+    1.46, // W
+    1.59, // Re
+    1.28, // Os
+    1.37, // Ir
+    1.28, // Pt
+    1.44, // Au
+    1.49, // Hg
+    1.48, // Tl
+    1.47, // Pb
+    1.46, // Bi
+    1.46, // Po - taken from Bi
+    1.46 // At - taken from Bi
 };
 
 // The old ones
