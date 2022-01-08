@@ -145,7 +145,7 @@ void ConfScan::ReadControlFile()
     }
     json confscan;
     try {
-        confscan = control[MethodName()];
+        confscan = control[MethodName()[0]];
     } catch (json::type_error& e) {
         return; // File does not contain control information for ConfScan
     }
@@ -218,7 +218,7 @@ bool ConfScan::LoadRestartInformation()
 
         json confscan;
         try {
-            confscan = restart[MethodName()];
+            confscan = restart[MethodName()[0]];
         } catch (json::type_error& e) {
             error++;
             continue;

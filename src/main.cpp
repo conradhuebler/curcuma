@@ -110,6 +110,8 @@ int main(int argc, char **argv) {
                   << "-dock        * Perform some docking                                       *" << std::endl;
 #ifdef USE_XTB
         std::cout << "-opt         * LBFGS optimiser using xtb GFN                              *" << std::endl;
+        std::cout << "-sp          * Single point calculation using xtb GFN                     *" << std::endl;
+
 #endif
         std::cout << "-block       * Split files with many structures in block                  *" << std::endl
                   << "-distance    * Calculate distance between two atoms                       *" << std::endl
@@ -311,6 +313,22 @@ int main(int argc, char **argv) {
             opt.start();
 #else
             std::cerr << "Curcuma was not compiled with xtb support, optimisation can not work, sorry! ..." << std::endl;
+#endif
+            return 0;
+        } else if (strcmp(argv[1], "-sp") == 0) {
+            if (argc < 2) {
+                std::cerr << "Please use curcuma for energy calculation as follows:\ncurcuma -opt input.xyz" << std::endl;
+                return 0;
+            }
+#ifdef USE_XTB
+            json sp = controller["sp"];
+            sp["SinglePoint"] = true;
+            controller["sp"] = sp;
+            CurcumaOpt opt(controller, false);
+            opt.setFileName(argv[2]);
+            opt.start();
+#else
+            std::cerr << "Curcuma was not compiled with xtb support, energy calculation can not work, sorry! ..." << std::endl;
 #endif
             return 0;
         } else if (strcmp(argv[1], "-block") == 0) {

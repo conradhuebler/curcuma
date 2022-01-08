@@ -54,12 +54,30 @@ int OptThread::execute()
 {
     // OptimiseGeometryThreaded(&m_molecule, &m_result, &m_final, m_controller);
     m_final = CurcumaOpt::LBFGSOptimise(&m_molecule, m_controller, m_result, &m_intermediate);
+    std::cout << m_result << std::endl
+              << std::endl;
+    return 0;
+}
+
+int SPThread::execute()
+{
+    // OptimiseGeometryThreaded(&m_molecule, &m_result, &m_final, m_controller);
+    auto start = std::chrono::system_clock::now();
+
+    double energy = CurcumaOpt::SinglePoint(&m_molecule, m_controller, m_result);
+    m_final = m_molecule;
+    m_final.setEnergy(energy);
+    auto end = std::chrono::system_clock::now();
+
+    m_result = fmt::format("Single Point Energy = {0} Eh ({1} secs)\n", energy, std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
+    std::cout << m_result;
     return 0;
 }
 
 CurcumaOpt::CurcumaOpt(const json& controller, bool silent)
     : CurcumaMethod(CurcumaOptJson, controller, silent)
 {
+    std::cout << controller << std::endl;
     UpdateController(controller);
 }
 
@@ -73,6 +91,7 @@ void CurcumaOpt::LoadControlJson()
     m_GFNmethod = Json2KeyWord<int>(m_defaults, "GFN");
     m_charge = Json2KeyWord<double>(m_defaults, "Charge");
     m_spin = Json2KeyWord<double>(m_defaults, "Spin");
+    m_singlepoint = Json2KeyWord<bool>(m_defaults, "SinglePoint");
 }
 
 void CurcumaOpt::start()
@@ -99,7 +118,7 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
     pool->setProgressBar(CxxThreadPool::ProgressBarType::Continously);
     pool->setActiveThreadCount(threads);
     pool->StaticPool();
-    std::vector<OptThread*> thread_block;
+    std::vector<SPThread*> thread_block;
     auto iter = molecules.begin();
     while (iter != molecules.end()) {
         for (int i = 0; i < threads; ++i) {
@@ -108,7 +127,11 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
             if (iter->AtomCount() == 0)
                 continue;
 
-            OptThread* th = new OptThread;
+            SPThread* th;
+            if (!m_singlepoint)
+                th = new OptThread;
+            else
+                th = new SPThread;
 
             th->setMolecule(*iter);
             th->setController(m_defaults);
@@ -121,11 +144,12 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
     pool->StartAndWait();
     m_molecules.clear();
     for (auto t : pool->OrderedList()) {
-        const OptThread* thread = static_cast<const OptThread*>(t.second);
+        const SPThread* thread = static_cast<const SPThread*>(t.second);
         if (!thread->Finished())
             continue;
         if (m_threads > 1)
             std::cout << thread->Output();
+
         Molecule* mol2 = new Molecule(thread->getMolecule());
         mol2->appendXYZFile(Optfile());
         m_molecules.push_back(Molecule(mol2));
@@ -253,6 +277,36 @@ Molecule CurcumaOpt::CppNumSolvOptimise(const Molecule* host, const json& contro
     return h;
 }
 #endif
+
+double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, std::string& output)
+{
+    bool printOutput = Json2KeyWord<bool>(controller, "printOutput");
+    double dE = Json2KeyWord<double>(controller, "dE");
+    double dRMSD = Json2KeyWord<double>(controller, "dRMSD");
+    double LBFGS_eps = Json2KeyWord<double>(controller, "LBFGS_eps");
+    int method = Json2KeyWord<int>(controller, "GFN");
+    int InnerLoop = Json2KeyWord<int>(controller, "InnerLoop");
+    int OuterLoop = Json2KeyWord<int>(controller, "OuterLoop");
+    if (Json2KeyWord<int>(controller, "threads") > 1) {
+        printOutput = false;
+    }
+
+    Geometry geometry = initial->getGeometry();
+    Molecule tmp(initial);
+    Molecule h(initial);
+    Vector parameter(3 * initial->AtomCount());
+
+    for (int i = 0; i < initial->AtomCount(); ++i) {
+        parameter(3 * i) = geometry(i, 0);
+        parameter(3 * i + 1) = geometry(i, 1);
+        parameter(3 * i + 2) = geometry(i, 2);
+    }
+
+    XTBInterface interface;
+    interface.InitialiseMolecule(initial);
+
+    return interface.GFNCalculation(method);
+}
 
 Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controller, std::string& output, std::vector<Molecule>* intermediate)
 {

@@ -54,7 +54,7 @@ void CurcumaMethod::TriggerWriteRestart()
     std::ofstream restart_file("curcuma_restart.json");
     nlohmann::json restart;
     try {
-        restart[MethodName()] = WriteRestartInformation();
+        restart[MethodName()[0]] = WriteRestartInformation();
     } catch (nlohmann::json::type_error& e) {
     }
     try {
@@ -100,10 +100,12 @@ nlohmann::json CurcumaMethod::LoadControl() const
 void CurcumaMethod::UpdateController(const json& controller)
 {
     json method;
-    try {
-        method = Json2KeyWord<json>(controller, MethodName());
-    } catch (int i) {
-        method = controller;
+    for (const auto& s : MethodName()) {
+        try {
+            method = Json2KeyWord<json>(controller, s);
+        } catch (int i) {
+            method = controller;
+        }
     }
     m_defaults = MergeJson(m_defaults, method);
     if (!m_silent)

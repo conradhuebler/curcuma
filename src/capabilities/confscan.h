@@ -110,7 +110,7 @@ private:
     /* Lets have this for all modules */
     bool LoadRestartInformation() override;
 
-    std::string MethodName() const override { return std::string("ConfScan"); }
+    StringList MethodName() const override { return { std::string("ConfScan") }; }
 
     /* Lets have all methods read the input/control file */
     void ReadControlFile() override;

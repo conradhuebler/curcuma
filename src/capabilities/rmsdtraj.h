@@ -81,7 +81,7 @@ private:
     /* Lets have this for all modules */
     bool LoadRestartInformation() override { return true; }
 
-    std::string MethodName() const override { return std::string("RMSDTraj"); }
+    StringList MethodName() const override { return { std::string("RMSDTraj") }; }
 
     /* Lets have all methods read the input/control file */
     void ReadControlFile() override {}

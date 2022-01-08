@@ -51,7 +51,7 @@ private:
     /* Lets have this for all modules */
     inline bool LoadRestartInformation() override { return true; }
 
-    inline std::string MethodName() const override { return std::string("ConfStat"); }
+    inline StringList MethodName() const override { return { std::string("ConfStat") }; }
 
     /* Lets have all methods read the input/control file */
     void ReadControlFile() override{};

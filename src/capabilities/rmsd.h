@@ -216,7 +216,7 @@ private:
     /* Lets have this for all modules */
     bool LoadRestartInformation() override { return true; }
 
-    std::string MethodName() const override { return std::string("RMSD"); }
+    StringList MethodName() const override { return { std::string("RMSD") }; }
 
     /* Lets have all methods read the input/control file */
     void ReadControlFile() override {}

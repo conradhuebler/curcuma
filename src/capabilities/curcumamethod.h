@@ -71,7 +71,7 @@ private:
     /* Lets have this for all modules */
     virtual bool LoadRestartInformation() = 0;
 
-    virtual std::string MethodName() const = 0;
+    virtual StringList MethodName() const = 0;
 
     /* Lets have all methods read the input/control file */
     virtual void ReadControlFile() = 0;

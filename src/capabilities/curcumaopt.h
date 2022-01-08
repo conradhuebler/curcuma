@@ -35,7 +35,8 @@ static json CurcumaOptJson{
     { "LBFGS_eps", 1e-5 },
     { "Threads", 1 },
     { "Charge", 0 },
-    { "Spin", 0 }
+    { "Spin", 0 },
+    { "SinglePoint", false }
 };
 
 const json OptJsonPrivate{
@@ -49,24 +50,32 @@ const json OptJsonPrivate{
     { "LBFGS_eps", 1e-5 }
 };
 
-class OptThread : public CxxThread {
+class SPThread : public CxxThread {
 public:
-    OptThread() = default;
-    ~OptThread() = default;
+    SPThread() = default;
+    ~SPThread() = default;
 
     inline void setMolecule(const Molecule& molecule) { m_molecule = molecule; }
     inline Molecule getMolecule() const { return m_final; }
-    int execute();
+    virtual int execute();
 
     inline void setController(const json& controller) { m_controller = controller; }
     std::string Output() const { return m_result; }
     const std::vector<Molecule>* Intermediates() const { return &m_intermediate; }
 
-private:
+protected:
     std::string m_result;
     Molecule m_molecule, m_final;
     json m_controller = OptJsonPrivate;
     std::vector<Molecule> m_intermediate;
+};
+
+class OptThread : public SPThread {
+public:
+    OptThread() = default;
+    ~OptThread() = default;
+
+    int execute();
 };
 
 class CurcumaOpt : public CurcumaMethod {
@@ -111,9 +120,12 @@ public:
 
     void start() override; // TODO make pure virtual and move all main action here
 
+    void setSinglePoint(bool sp) { m_singlepoint = sp; }
     inline const std::vector<Molecule>* Molecules() const { return &m_molecules; }
 
     static Molecule LBFGSOptimise(const Molecule* host, const json& controller, std::string& output, std::vector<Molecule>* intermediate);
+    static double SinglePoint(const Molecule* initial, const json& controller, std::string& output);
+
 #ifdef test
     static Molecule CppNumSolvOptimise(const Molecule* host, const json& controller);
 #endif
@@ -124,7 +136,7 @@ private:
     /* Lets have this for all modules */
     inline bool LoadRestartInformation() override { return true; }
 
-    inline std::string MethodName() const override { return std::string("opt"); }
+    inline StringList MethodName() const override { return { std::string("opt"), std::string("sp") }; }
 
     /* Lets have all methods read the input/control file */
     void ReadControlFile() override{};
@@ -137,7 +149,7 @@ private:
     std::string m_filename, m_basename = "curcuma_job";
     Molecule m_molecule;
     std::vector<Molecule> m_molecules;
-    bool m_file_set = false, m_mol_set = false, m_mols_set = false, m_writeXYZ = true, m_printoutput = true;
+    bool m_file_set = false, m_mol_set = false, m_mols_set = false, m_writeXYZ = true, m_printoutput = true, m_singlepoint = false;
     int m_threads = 1, m_GFNmethod = 2;
     double m_dE = 0.1, m_dRMSD = 0.01;
     int m_charge = 0, m_spin = 0;
