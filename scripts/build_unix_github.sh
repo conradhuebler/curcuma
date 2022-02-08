@@ -21,14 +21,14 @@ cd ..
 mkdir -p release_no_xtb
 cd release_no_xtb
 cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo .. -DCMAKE_INSTALL_PREFIX=~/curcuma_no_xtb
-make -j
+make 
 make install
 cd ..
 
 mkdir -p release_xtb
 cd release_xtb
 cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo .. -DCOMPILE_XTB=true -DCMAKE_INSTALL_PREFIX=~/curcuma_xtb
-make -j
+make 
 make install
 cd ..
 
