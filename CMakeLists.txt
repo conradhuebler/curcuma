@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.18)
 project(curcuma)
 
 
@@ -14,8 +14,13 @@ option (C17
 
 add_subdirectory(${PROJECT_SOURCE_DIR}/external/fmt EXCLUDE_FROM_ALL)
 
-include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/fmt/include ${PROJECT_SOURCE_DIR}/external/eigen ${PROJECT_SOURCE_DIR}/external/LBFGSpp/include ${PROJECT_SOURCE_DIR}/external/CppNumericalSolvers/include ${PROJECT_SOURCE_DIR}/external/ripser ${CMAKE_CURRENT_BINARY_DIR}/src/)
-include_directories(${PROJECT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} )
+include_directories(SYSTEM  ${PROJECT_SOURCE_DIR}/external/fmt/include
+                            ${PROJECT_SOURCE_DIR}/external/LBFGSpp/include
+                            ${PROJECT_SOURCE_DIR}/external/CppNumericalSolvers/include
+                            ${PROJECT_SOURCE_DIR}/external/ripser
+                            ${PROJECT_BINARY_DIR}/external/eigen-3.4.0
+                            ${PROJECT_BINARY_DIR}/external/)
+include_directories(${PROJECT_SOURCE_DIR} ${PROJECT_BINARY_DIR} )
 
 # Get the current working branch
 execute_process(
@@ -118,13 +123,22 @@ endif()
 
 
 
-if(NOT EXISTS src/json.hpp)
-  file(DOWNLOAD https://github.com/nlohmann/json/releases/download/v3.9.1/json.hpp src/json.hpp
+if(NOT EXISTS ${PROJECT_BINARY_DIR}/external/json.hpp)
+  file(DOWNLOAD https://github.com/nlohmann/json/releases/download/v3.9.1/json.hpp ${PROJECT_BINARY_DIR}/external/json.hpp
        TIMEOUT 60  # seconds
        EXPECTED_HASH SHA256=7804b38146921d03374549c9e2a5e3acda097814c43caf2b96a0278e58df26e0
        TLS_VERIFY ON)
 endif()
 
+
+if(NOT EXISTS ${PROJECT_BINARY_DIR}/external/eigen-3.4.0.zip)
+  file(DOWNLOAD https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.zip ${PROJECT_BINARY_DIR}/external/eigen-3.4.0.zip
+       TIMEOUT 60  # seconds
+       EXPECTED_HASH SHA256=1ccaabbfe870f60af3d6a519c53e09f3dcf630207321dffa553564a8e75c4fc8
+       TLS_VERIFY ON)
+endif()
+
+file(ARCHIVE_EXTRACT INPUT ${PROJECT_BINARY_DIR}/external/eigen-3.4.0.zip DESTINATION ${PROJECT_BINARY_DIR}/external)
 
 configure_file (
   "${PROJECT_SOURCE_DIR}/src/global_config.h.in"
@@ -132,10 +146,9 @@ configure_file (
 )
 
 configure_file(
-  "${CMAKE_SOURCE_DIR}/src/version.h.in"
-  "${CMAKE_BINARY_DIR}/src/version.h"
+  "${PROJECT_SOURCE_DIR}/src/version.h.in"
+  "${PROJECT_BINARY_DIR}/src/version.h"
 )
-
 set(curcuma_core_SRC
         src/capabilities/persistentdiagram.cpp
         src/capabilities/analysenciplot.cpp
