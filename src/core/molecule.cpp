@@ -1065,3 +1065,25 @@ Matrix Molecule::HydrogenBondMatrix(int f1, int f2)
     }
     return HydrogenBondMap;
 }
+
+Molecule Molecule::ElementsRemoved(const std::vector<int>& elements)
+{
+    Molecule mol;
+    for (int i = 0; i < AtomCount(); ++i) {
+        auto pair = Atom(i);
+        if (std::find(elements.begin(), elements.end(), pair.first) == elements.end())
+            mol.addPair(pair);
+    }
+    return mol;
+}
+
+Molecule Molecule::AtomsRemoved(const std::vector<int>& atoms)
+{
+    Molecule mol;
+    for (int i = 0; i < AtomCount(); ++i) {
+        auto pair = Atom(i);
+        if (std::find(atoms.begin(), atoms.end(), i) == atoms.end())
+            mol.addPair(pair);
+    }
+    return mol;
+}

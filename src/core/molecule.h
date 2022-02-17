@@ -154,6 +154,14 @@ class Molecule
     inline void setSpin(int spin) { m_spin = spin; }
     inline int Spin() const { return m_spin; }
 
+    Molecule ElementsRemoved(const std::vector<int>& elements);
+    Molecule AtomsRemoved(const std::vector<int>& atoms);
+
+    int CountElement(int element)
+    {
+        return std::count(m_atoms.cbegin(), m_atoms.cend(), element);
+    }
+
 private:
     void ParseString(const std::string& internal, std::vector<std::string>& elements);
 

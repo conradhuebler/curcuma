@@ -72,13 +72,49 @@ inline std::pair<int, std::array<double, 3>> Line2Atoms(const std::string& line)
         double x = stod(elements[1]);
         double y = stod(elements[2]);
         double z = stod(elements[3]);
-
         vector[0] = x;
         vector[1] = y;
         vector[2] = z;
     }
 
     return std::pair<int, std::array<double, 3>>(element, vector);
+}
+
+inline Mol XYZString2Mol(const std::string& coord)
+{
+    Mol molecule;
+
+    std::vector<std::string> lines = SplitString(coord, "\n");
+    int atoms = 0;
+    int index = 0;
+    int i = 0;
+
+    for (const auto& line : lines) {
+        if (index == 0) {
+            try {
+                molecule.m_number_atoms = stoi(line);
+                atoms = stoi(line);
+            } catch (const std::invalid_argument& arg) {
+                atoms = 0;
+            }
+        }
+
+        if (i == 1)
+            molecule.m_commentline = line;
+        if (i > 1) {
+            auto pair = Line2Atoms(line);
+            molecule.m_atoms.push_back(pair.first);
+            molecule.m_geometry.push_back(pair.second);
+        }
+        if (i - 1 == atoms) {
+            break;
+        }
+        ++i;
+
+        index++;
+    }
+
+    return molecule;
 }
 
 inline Mol XYZ2Mol(const std::string& filename)
