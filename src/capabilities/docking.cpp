@@ -71,21 +71,32 @@ bool Docking::Initialise()
     }
     Molecule host, guest, complex;
     bool host_loaded = true, guest_loaded = true, complex_loaded = true;
-    try {
-        host = Files::LoadFile(m_host);
-    } catch (int error) {
+    if (!(m_host.compare("none") == 0)) {
+        try {
+            host = Files::LoadFile(m_host);
+        } catch (int error) {
+            host_loaded = false;
+        }
+    } else
         host_loaded = false;
-    }
-    try {
-        guest = Files::LoadFile(m_guest);
-    } catch (int error) {
+    if (!(m_guest.compare("none") == 0)) {
+        try {
+            guest = Files::LoadFile(m_guest);
+        } catch (int error) {
+            guest_loaded = false;
+        }
+    } else
         guest_loaded = false;
-    }
-    try {
-        complex = Files::LoadFile(m_complex);
-    } catch (int error) {
+
+    if (!(m_complex.compare("none") == 0)) {
+        try {
+            complex = Files::LoadFile(m_complex);
+        } catch (int error) {
+            complex_loaded = false;
+        }
+    } else
         complex_loaded = false;
-    }
+
     if (!host_loaded && !guest_loaded && !complex_loaded) {
         AppendError("Neither host nor guest or a complex structure where loaded. Sorry");
         return false;

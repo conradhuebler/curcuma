@@ -13,7 +13,7 @@ cd external
 for i in $(ls -d */|grep -v 'xtb'); do cd $i; git checkout master || true ; git submodule init; git submodule update --recursive; git pull; cd ..; done
 
 cd xtb
-git checkout main
+git checkout v6.4.1 
 git pull
 cd ..
 cd ..
