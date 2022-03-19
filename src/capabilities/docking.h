@@ -59,7 +59,7 @@ public:
         return 0;
     }
 
-    inline Position InitialPositon() const { return m_position; }
+    inline Position InitialPosition() const { return m_position; }
     inline Position InitialRotation() const { return m_rotation; }
     inline Position LastPosition() const { return m_last_position; }
     inline Position LastRotation() const { return m_last_rotation; }
@@ -89,7 +89,8 @@ static const json DockingJson = {
     { "RotationTolDis", 1e-1 },
     { "Threads", 1 },
     { "DockingThreads", 1 },
-    { "Charge", 0 }
+    { "Charge", 0 },
+    { "Cycles", 1 }
 };
 
 class Docking : public CurcumaMethod {
@@ -126,12 +127,12 @@ private:
     void ReadControlFile() override {}
 
     Molecule m_host_structure, m_guest_structure, m_supramol;
-    Position m_initial_anchor = Position{ 0, 0, 0 };
+    std::vector<Position> m_initial_anchor = { Position{ 0, 0, 0 } };
     int m_step_X = 1, m_step_Y = 1, m_step_Z = 1;
     std::map<double, Vector> m_docking_list;
-    std::vector<Position> m_initial_list;
+    std::vector<std::pair<Position, Position>> m_initial_list;
     std::map<double, Molecule*> m_result_list;
-    std::vector<Position> m_anchor_accepted, m_rotation_accepted;
+    std::vector<Position> m_anchor_accepted, m_rotation_accepted, m_reuse_anchor;
     std::vector<double> m_fragments_mass;
     bool m_check = false;
     bool m_PostFilter = true, m_PostOptimise = true, m_AutoPos = true, m_NoOpt = false;
@@ -144,6 +145,8 @@ private:
     int m_threads = 1;
     int m_docking_threads = 1;
     int m_charge = 0;
+    int m_current_cycle = 0;
+    int m_cycles = 1;
     StringList m_files;
     std::string m_host, m_guest, m_complex;
 };

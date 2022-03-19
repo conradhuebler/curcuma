@@ -106,8 +106,8 @@ void CurcumaMethod::UpdateController(const json& controller)
         } catch (int i) {
             method = controller;
         }
+        m_defaults = MergeJson(m_defaults, method);
     }
-    m_defaults = MergeJson(m_defaults, method);
     if (!m_silent)
         PrintController(m_defaults);
     LoadControlJson();

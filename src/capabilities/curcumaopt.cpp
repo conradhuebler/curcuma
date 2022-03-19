@@ -1,6 +1,6 @@
 /*
  * <Handling optimisation of structures. >
- * Copyright (C) 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -280,16 +280,7 @@ Molecule CurcumaOpt::CppNumSolvOptimise(const Molecule* host, const json& contro
 
 double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, std::string& output)
 {
-    bool printOutput = Json2KeyWord<bool>(controller, "printOutput");
-    double dE = Json2KeyWord<double>(controller, "dE");
-    double dRMSD = Json2KeyWord<double>(controller, "dRMSD");
-    double LBFGS_eps = Json2KeyWord<double>(controller, "LBFGS_eps");
     int method = Json2KeyWord<int>(controller, "GFN");
-    int InnerLoop = Json2KeyWord<int>(controller, "InnerLoop");
-    int OuterLoop = Json2KeyWord<int>(controller, "OuterLoop");
-    if (Json2KeyWord<int>(controller, "threads") > 1) {
-        printOutput = false;
-    }
 
     Geometry geometry = initial->getGeometry();
     Molecule tmp(initial);
@@ -427,7 +418,7 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
             h.setEnergy(final_energy);
             intermediate->push_back(h);
         } else {
-            output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation  Not Really converged ***");
+            output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
             if (printOutput) {
                 std::cout << output;
                 output.clear();
