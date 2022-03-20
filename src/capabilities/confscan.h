@@ -102,6 +102,8 @@ private:
     void ReorderCheck(bool reuse_only = false, bool limit = false);
     bool SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMSDDriver* driver, bool reuse_only);
 
+    void writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd);
+
     void Finalise();
 
     /* Lets have this for all modules */
@@ -132,7 +134,7 @@ private:
     std::vector<Molecule*> m_global_temp_list;
     int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0, m_skip = 0;
 
-    std::string m_filename, m_accepted_filename, m_rejected_filename, m_result_basename;
+    std::string m_filename, m_accepted_filename, m_rejected_filename, m_result_basename, m_statistic_filename;
     std::map<double, int> m_ordered_list;
     std::vector<std::pair<std::string, Molecule*>> m_molecules;
     double m_energy_threshold = 1.0, m_rmsd_threshold = 1.0, m_diff_rot_rel_loose = 0.3, m_diff_rot_rel_tight = 0.01, m_nearly_missed = 0.8, m_energy_cutoff = -1, m_reference_last_energy = 0, m_target_last_energy = 0, m_lowest_energy = 1;

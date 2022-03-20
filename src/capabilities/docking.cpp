@@ -315,15 +315,40 @@ void Docking::PostOptimise()
     opt["threads"] = 1;
     m_threads;
     opt["gfn"] = 66;
-    CurcumaOpt optimise(opt, false);
 
+    json spoint = opt;
+    spoint["SinglePoint"] = true;
+    spoint["gfn"] = 66;
+    CurcumaOpt optimise(opt, false);
+    CurcumaOpt sp(spoint, false);
     while (iter != m_result_list.end()) {
         auto pair = *iter;
-        optimise.addMolecule(pair.second);
+        if (pair.second->GetFragments(frag_scaling).size() == 2)
+            optimise.addMolecule(pair.second);
+        else if (pair.second->GetFragments(frag_scaling).size() == 1)
+            sp.addMolecule(pair.second);
         ++iter;
     }
     optimise.setBaseName("Optimise_F2");
     optimise.start();
+    // optimise.UpdateController(spoint);
+    // optimise.start();
+
+    sp.setBaseName("SP_F1");
+    sp.start();
+    std::vector<double> energies;
+    double energy = 0;
+    for (const auto& m : *sp.Molecules()) {
+        energy += m.Energy();
+    }
+    energy /= double(sp.Molecules()->size());
+    spoint["gfn"] = 2;
+
+    CurcumaOpt sp2(spoint, false);
+    for (const auto& m : *sp.Molecules())
+        if (m.Energy() < energy)
+            sp2.addMolecule(m);
+    sp2.start();
 
     for (const auto& t : *optimise.Molecules()) {
         Molecule* mol2 = new Molecule(t);

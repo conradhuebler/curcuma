@@ -126,6 +126,9 @@ public:
     /*! \brief Return the target molecule centered and aligned to the reference molecule */
     inline Molecule TargetAligned() const { return m_target_aligned; }
 
+    /*! \brief Return the target molecule centered and aligned to the reference molecule */
+    inline const Molecule* TargetAlignedReference() const { return &m_target_aligned; }
+
     /*! \brief Return the target molecule reorderd but remaining at the original position */
     inline Molecule TargetReorderd() const { return m_target_reordered; }
 

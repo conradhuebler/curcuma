@@ -375,6 +375,7 @@ void ConfScan::SetUp()
 
     m_accepted_filename = m_result_basename + ".accepted.xyz";
     m_rejected_filename = m_result_basename + ".rejected.xyz";
+    m_statistic_filename = m_result_basename + ".statistic.log";
 
     std::ofstream result_file;
     if (m_writeFiles) {
@@ -387,6 +388,13 @@ void ConfScan::SetUp()
         failed_file.open(m_rejected_filename);
         failed_file.close();
     }
+
+    std::ofstream statistic_file;
+    if (m_writeFiles) {
+        statistic_file.open(m_result_basename);
+        statistic_file.close();
+    }
+
     /*
     if (!m_parameter_loaded)
         ParametriseRotationalCutoffs();
@@ -449,7 +457,7 @@ void ConfScan::CheckRMSD()
             m_skip--;
             continue;
         }
-        if (m_prevent_reorder && m_maxrank <= m_accepted)
+        if (m_prevent_reorder && m_maxrank <= m_accepted && m_maxrank > -1)
             continue;
 
         int index = i.second;
@@ -476,8 +484,10 @@ void ConfScan::CheckRMSD()
                 return;
             }
             keep_molecule = SingleCheckRMSD(mol1, mol2, driver);
-            if (keep_molecule == false)
+            if (keep_molecule == false) {
+                writeStatisticFile(mol1, driver->TargetAlignedReference(), driver->RMSD());
                 break;
+            }
         }
         if (keep_molecule) {
             m_result.push_back(mol1);
@@ -621,8 +631,10 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
             if (keep_molecule == false)
                 break;
             keep_molecule = SingleReorderRMSD(mol1, mol2, driver, reuse_only);
-            if (keep_molecule == false)
+            if (keep_molecule == false) {
+                writeStatisticFile(mol1, driver->TargetAlignedReference(), driver->RMSD());
                 break;
+            }
         }
         if (keep_molecule) {
             m_result.push_back(mol1);
@@ -687,6 +699,7 @@ bool ConfScan::SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMS
             */
             rmsd = tmp_rmsd;
             m_reordered_reused++;
+            writeStatisticFile(mol1, driver->TargetAlignedReference(), rmsd);
             break;
         }
     }
@@ -795,4 +808,17 @@ void ConfScan::PrintStatus()
     std::cout << "# Not at all : " << m_reordered_failed_completely << "     ";
     std::cout << "# Reused Results : " << m_reordered_reused << "     ";
     std::cout << "# Current Energy [kJ/mol] : " << (m_target_last_energy - m_lowest_energy) * 2625.5 << std::endl;
+}
+
+void ConfScan::writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd)
+{
+    // std::cout << " alala" << std::endl;
+    std::ofstream result_file;
+    result_file.open(m_statistic_filename, std::ios_base::app);
+
+    result_file << "Molecule got rejected due to small rmsd " << rmsd << std::endl;
+    result_file << mol1->XYZString();
+    result_file << mol2->XYZString();
+    result_file << std::endl;
+    result_file.close();
 }
