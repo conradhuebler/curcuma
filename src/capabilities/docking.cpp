@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <iostream>
+#include <map>
 
 #include "json.hpp"
 using json = nlohmann::json;
@@ -312,13 +313,12 @@ void Docking::PostOptimise()
     opt["dE"] = 1;
     opt["dRMSD"] = 0.01;
     opt["printOutput"] = true;
-    opt["threads"] = 1;
-    m_threads;
+    opt["threads"] = m_threads;
     opt["gfn"] = 66;
 
     json spoint = opt;
     spoint["SinglePoint"] = true;
-    spoint["gfn"] = 66;
+    spoint["gfn"] = 2;
     CurcumaOpt optimise(opt, false);
     CurcumaOpt sp(spoint, false);
     while (iter != m_result_list.end()) {
@@ -331,57 +331,119 @@ void Docking::PostOptimise()
     }
     optimise.setBaseName("Optimise_F2");
     optimise.start();
-    // optimise.UpdateController(spoint);
-    // optimise.start();
 
+    optimise.UpdateController(spoint);
+    optimise.start();
+
+    double e0 = -1e7;
+    for (const auto& m : *optimise.Molecules()) {
+        e0 = std::max(m.Energy(), e0);
+    }
+    std::cout << "energy threshold " << e0 << std::endl;
     sp.setBaseName("SP_F1");
     sp.start();
+    /*
     std::vector<double> energies;
     double energy = 0;
     for (const auto& m : *sp.Molecules()) {
         energy += m.Energy();
     }
     energy /= double(sp.Molecules()->size());
-    spoint["gfn"] = 2;
+    */
+    // spoint["gfn"] = 2;
+    /*
+        CurcumaOpt sp2(spoint, false);
+        for (const auto& m : *sp.Molecules())
+            if (m.Energy() < energy)
+                sp2.addMolecule(m);
+        sp2.start();
+        */
 
-    CurcumaOpt sp2(spoint, false);
-    for (const auto& m : *sp.Molecules())
-        if (m.Energy() < energy)
-            sp2.addMolecule(m);
-    sp2.start();
+    json opt_2 = opt;
+    opt_2["gfn"] = 2;
+    opt_2["dE"] = 50;
+    opt_2["dRMSD"] = 0.1;
+
+    std::map<double, Molecule*> temp_molecules;
+
+    for (const auto& m : *sp.Molecules()) {
+        Molecule* mol1 = new Molecule(m);
+        temp_molecules.insert(std::pair<double, Molecule*>(m.Energy(), mol1));
+        //      opt2.addMolecule(m);
+    }
+    // CurcumaOpt opt2(opt_2, false);
+    // opt2.start();
 
     for (const auto& t : *optimise.Molecules()) {
         Molecule* mol2 = new Molecule(t);
         result_list.insert(std::pair<double, Molecule*>(mol2->Energy(), mol2));
     }
+    int failed = 0;
+    for (auto it = temp_molecules.begin(); it != temp_molecules.end(); ++it) {
+        CurcumaOpt opt2(opt_2, false);
+        opt2.addMolecule(it->second);
+        opt2.start();
+        Molecule m = (*opt2.Molecules())[0];
+        m.GetFragments(frag_scaling).size();
+        std::cout << m.Energy() << " ";
+        for (const auto l : m.FragmentMass())
+            std::cout << l << " " << std::endl;
 
-        // Will be removed some day
-        std::vector<int> frags = { 0, 0, 0, 0, 0 };
-        int index = 0;
-        for (const auto& pair : result_list) {
-            ++index;
-            frags[pair.second->GetFragments(frag_scaling).size()]++;
-            const std::string name = "Optimise_B" + std::to_string(frags[pair.second->GetFragments(frag_scaling).size()] / 100 + 1) + "_F" + std::to_string(pair.second->GetFragments(frag_scaling).size()) + ".xyz";
-            pair.second->appendXYZFile(name);
-            if (!std::binary_search(m_files.begin(), m_files.end(), name))
-                m_files.push_back(name);
+        if (m.GetFragments(frag_scaling).size() == 2) {
+            double sum = 0;
+            std::vector<double> fragments = m.FragmentMass();
 
-            if (pair.second->GetFragments(frag_scaling).size() == 2) {
-                double sum = 0;
-                std::vector<double> fragments = pair.second->FragmentMass();
+            for (int i = 0; i < fragments.size(); ++i)
+                sum += abs(m_fragments_mass[i] - fragments[i]);
+            for (auto a : fragments)
+                std::cout << a << " ";
+            std::cout << " Difference " << sum;
+            if (sum < 1e-3) {
+                result_list.insert(std::pair<double, Molecule*>((*opt2.Molecules())[0].Energy(), new Molecule((*opt2.Molecules())[0])));
+                std::cout << " adding new Molecule! E = " << (*opt2.Molecules())[0].Energy() << " Eh\n\n"
+                          << std::endl;
 
-                for (int i = 0; i < fragments.size(); ++i)
-                    sum += abs(m_fragments_mass[i] - fragments[i]);
-                for (auto a : fragments)
-                    std::cout << a << " ";
-                std::cout << " Difference " << sum;
-                if (sum < 1e-3) {
-                    final_results.insert(pair);
-                    std::cout << " taking! E = " << pair.first << " Eh" << std::endl;
-                } else {
-                    std::cout << " skipping! E = " << pair.first << " Eh" << std::endl;
-                }
+            } else {
+                failed++;
             }
+        } else
+            failed++;
+        if (failed > 5)
+            break;
+    }
+    /*
+        for (const auto& t : *opt2.Molecules()) {
+            Molecule* mol2 = new Molecule(t);
+            result_list.insert(std::pair<double, Molecule*>(mol2->Energy(), mol2));
+        }
+    */
+    // Will be removed some day
+    std::vector<int> frags = { 0, 0, 0, 0, 0 };
+    int index = 0;
+    for (const auto& pair : result_list) {
+        ++index;
+        frags[pair.second->GetFragments(frag_scaling).size()]++;
+        const std::string name = "Optimise_B" + std::to_string(frags[pair.second->GetFragments(frag_scaling).size()] / 100 + 1) + "_F" + std::to_string(pair.second->GetFragments(frag_scaling).size()) + ".xyz";
+        pair.second->appendXYZFile(name);
+        if (!std::binary_search(m_files.begin(), m_files.end(), name))
+            m_files.push_back(name);
+
+        if (pair.second->GetFragments(frag_scaling).size() == 2) {
+            double sum = 0;
+            std::vector<double> fragments = pair.second->FragmentMass();
+
+            for (int i = 0; i < fragments.size(); ++i)
+                sum += abs(m_fragments_mass[i] - fragments[i]);
+            for (auto a : fragments)
+                std::cout << a << " ";
+            std::cout << " Difference " << sum;
+            if (sum < 1e-3) {
+                final_results.insert(pair);
+                std::cout << " taking! E = " << pair.first << " Eh" << std::endl;
+            } else {
+                std::cout << " skipping! E = " << pair.first << " Eh" << std::endl;
+            }
+        }
         }
 
     if (!m_PostFilter)

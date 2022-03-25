@@ -71,7 +71,6 @@ int SPThread::execute()
     m_final = m_molecule;
     m_final.setEnergy(energy);
     auto end = std::chrono::system_clock::now();
-
     m_result = fmt::format("Single Point Energy = {0} Eh ({1} secs)\n", energy, std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
     std::cout << m_result;
     return 0;
@@ -148,8 +147,10 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
     m_molecules.clear();
     for (auto t : pool->OrderedList()) {
         const SPThread* thread = static_cast<const SPThread*>(t.second);
-        if (!thread->Finished())
+        if (!thread->Finished()) {
+            std::cout << " not finished " << thread->getMolecule().Energy() << std::endl;
             continue;
+        }
         if (m_threads > 1)
             std::cout << thread->Output();
 
@@ -363,7 +364,7 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
     RMSDDriver* driver = new RMSDDriver(RMSDJsonControl);
 
     std::chrono::time_point<std::chrono::system_clock> start = std::chrono::system_clock::now(), end;
-    output += fmt::format("Charge {} Spin {}\n\n", initial->Charge(), initial->Spin());
+    output += fmt::format("\nCharge {} Spin {}\n\n", initial->Charge(), initial->Spin());
     output += fmt::format("{2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}}\n", "", 15, "Step", "Current Energy", "Energy Change", "RMSD Change", "time");
     output += fmt::format("{2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}}\n", "", 15, " ", "[Eh]", "[kJ/mol]", "[A]", "[s]");
 
