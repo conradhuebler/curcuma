@@ -53,7 +53,7 @@ using namespace LBFGSpp;
 int OptThread::execute()
 {
     // OptimiseGeometryThreaded(&m_molecule, &m_result, &m_final, m_controller);
-    m_molecule.writeXYZFile("blob.xyz");
+    // m_molecule.writeXYZFile("blob.xyz");
     m_final = CurcumaOpt::LBFGSOptimise(&m_molecule, m_controller, m_result, &m_intermediate);
     std::cout << m_result << std::endl
               << std::endl;
@@ -63,7 +63,7 @@ int OptThread::execute()
 int SPThread::execute()
 {
     // OptimiseGeometryThreaded(&m_molecule, &m_result, &m_final, m_controller);
-    m_molecule.writeXYZFile("blob2.xyz");
+    // m_molecule.writeXYZFile("blob2.xyz");
 
     auto start = std::chrono::system_clock::now();
 

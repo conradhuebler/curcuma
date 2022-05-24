@@ -295,6 +295,9 @@ inline std::vector<int> String2Vector(const std::string& string)
 inline std::string VectorVector2String(const std::vector<std::vector<int>>& vector)
 {
     std::string result;
+    if (vector.size() == 0)
+        return result;
+
     for (auto vec : vector) {
         result += Vector2String(vec) + ";";
     }

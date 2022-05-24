@@ -625,7 +625,10 @@ int main(int argc, char **argv) {
                 outfile.pop_back();
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
+                std::cout << mol.Centroid() << std::endl;
                 mol.setGeometry(GeometryTools::TranslateGeometry(mol.getGeometry(), GeometryTools::Centroid(mol.getGeometry()), Position{ 0, 0, 0 }));
+                std::cout << mol.Centroid() << std::endl;
+
                 if (file.MaxMolecules() <= 1)
                     mol.writeXYZFragments(outfile);
                 else

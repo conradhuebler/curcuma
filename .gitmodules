@@ -1,6 +1,3 @@
-[submodule "external/xtb"]
-	path = external/xtb
-	url = https://github.com/grimme-lab/xtb
 [submodule "external/LBFGSpp"]
 	path = external/LBFGSpp
 	url = https://github.com/yixuan/LBFGSpp/
@@ -16,3 +13,9 @@
 [submodule "external/ripser"]
 	path = external/ripser
 	url = https://github.com/conradhuebler/ripser
+[submodule "external/--force"]
+	path = external/--force
+	url = https://github.com/conradhuebler/xtb
+[submodule "external/xtb"]
+	path = external/xtb
+	url = https://github.com/conradhuebler/xtb

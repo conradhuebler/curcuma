@@ -85,18 +85,12 @@ void ConfScan::LoadControlJson()
     m_useorders = Json2KeyWord<int>(m_defaults, "UseOrders");
     m_MaxHTopoDiff = Json2KeyWord<int>(m_defaults, "MaxHTopoDiff");
     m_RMSDthreads = Json2KeyWord<int>(m_defaults, "RMSDThreads");
+    m_RMSDElement = Json2KeyWord<int>(m_defaults, "RMSDElement");
 
-    std::string method = Json2KeyWord<std::string>(m_defaults, "RMSDMethod");
+    m_RMSDmethod = Json2KeyWord<std::string>(m_defaults, "RMSDMethod");
+    if (m_useorders == -1)
+        m_useorders = 10;
 
-    if (method.compare("template") == 0) {
-        m_RMSDmethod = 2;
-        if (m_useorders == -1)
-            m_useorders = 0;
-    } else {
-        m_RMSDmethod = 1;
-        if (m_useorders == -1)
-            m_useorders = 10;
-    }
     m_gfn = Json2KeyWord<int>(m_defaults, "GFN");
 }
 
@@ -607,10 +601,8 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
     rmsd["check"] = CheckConnections();
     rmsd["heavy"] = m_heavy;
     rmsd["threads"] = m_RMSDthreads;
-    if (m_RMSDmethod == 2)
-        rmsd["method"] = "template";
-    else
-        rmsd["method"] = "incr";
+    rmsd["method"] = m_RMSDmethod;
+    rmsd["element"] = m_RMSDElement;
 
     std::vector<Molecule*> cached = m_result;
     m_result.clear();

@@ -111,6 +111,7 @@ void RMSDDriver::LoadControlJson()
 
     m_noreorder = Json2KeyWord<bool>(m_defaults, "noreorder");
     m_element = Json2KeyWord<int>(m_defaults, "element");
+    m_check = Json2KeyWord<bool>(m_defaults, "check");
 
     std::string method = Json2KeyWord<std::string>(m_defaults, "method");
 
@@ -296,9 +297,7 @@ double RMSDDriver::CustomRotation()
     auto target = GeometryTools::TranslateGeometry(m_target.getGeometry(), GeometryTools::Centroid(m_target.getGeometryByFragment(fragment_target)), Position{ 0, 0, 0 }); //CenterMolecule(target_mol);
     const auto t = RMSDFunctions::applyRotation(target, rotation);
     m_reference_aligned.setGeometry(reference);
-    //m_reference.writeXYZFile("ref.xyz");
     m_target_aligned.setGeometry(t);
-    //m_target_aligned.writeXYZFile("tar.xyz");
     rmsd = RMSDFunctions::getRMSD(reference, t);
 
     return rmsd;
@@ -519,127 +518,7 @@ Geometry RMSDDriver::CenterMolecule(const Geometry& mol) const
 {
     return GeometryTools::TranslateGeometry(mol, GeometryTools::Centroid(mol), Position{ 0, 0, 0 });
 }
-/*
-int RMSDDriver::CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) const
-{
-    auto connect_1 = mol1.getConnectivtiy(m_scaling);
-    auto connect_2 = mol2.getConnectivtiy(m_scaling);
 
-    if (connect_1.size() != connect_2.size())
-        return -1;
-    int difference = 0;
-    int match = 0;
-    if (!m_silent)
-        if (m_print_intermediate)
-            std::cout << std::endl
-                      << std::endl
-                      << " *** Connectivitiy check will be performed ***" << std::endl
-                      << std::endl;
-    for (std::size_t i = 0; i < connect_1.size(); ++i) {
-        auto target = connect_1[i];
-        auto reference = connect_2[i];
-
-        difference += Tools::VectorDifference(reference, target);
-        if (!m_silent)
-            if (m_print_intermediate)
-                std::cout << "vector difference " << Tools::VectorDifference(reference, target) << std::endl;
-        if (reference == target) {
-            if (!m_silent)
-                if (m_print_intermediate) {
-                    std::cout << i << " matches. Fine!" << std::endl;
-                    for (const auto& i : reference)
-                        std::cout << " " << i;
-                    std::cout << std::endl;
-
-                    for (const auto& i : target)
-                        std::cout << " " << i;
-                    std::cout << std::endl;
-                }
-            match++;
-        } else {
-            if (!m_silent)
-                if (m_print_intermediate) {
-                    std::cout << "No match for " << i << std::endl;
-                    for (const auto& i : reference)
-                        std::cout << " " << i;
-                    std::cout << std::endl;
-
-                    for (const auto& i : target)
-                        std::cout << " " << i;
-                    std::cout << std::endl;
-                }
-        }
-    }
-    if (!m_silent)
-        if (m_print_intermediate)
-            std::cout << std::endl
-                      << std::endl
-                      << " *** Connectivitiy check done! ***" << std::endl
-                      << std::endl;
-
-    return difference;
-}
-
-int RMSDDriver::CheckConnectivitiy(const Molecule& mol1) const
-{
-    auto connect = mol1.getConnectivtiy(m_scaling);
-
-    if (m_connectivity.size() != connect.size())
-        return -1;
-    if (!m_silent)
-        if (m_print_intermediate)
-            std::cout << std::endl
-                      << std::endl
-                      << " *** Connectivitiy check will be performed ***" << std::endl
-                      << std::endl;
-
-    int match = 0;
-    int difference = 0;
-
-    for (std::size_t i = 0; i < connect.size(); ++i) {
-        auto target = connect[i];
-
-        auto reference = m_connectivity.at(i);
-        difference += Tools::VectorDifference(reference, target);
-
-        if (!m_silent)
-            if (m_print_intermediate)
-                std::cout << "vector difference " << Tools::VectorDifference(reference, target) << std::endl;
-
-        if (reference == target) {
-            if (m_print_intermediate) {
-                std::cout << i << " matches. Fine!" << std::endl;
-                for (const auto& i : reference)
-                    std::cout << " " << i;
-                std::cout << std::endl;
-
-                for (const auto& i : target)
-                    std::cout << " " << i;
-                std::cout << std::endl;
-            }
-            match++;
-        } else {
-            if (m_print_intermediate) {
-                std::cout << "No match for " << i << std::endl;
-                for (const auto& i : reference)
-                    std::cout << " " << i;
-                std::cout << std::endl;
-
-                for (const auto& i : target)
-                    std::cout << " " << i;
-                std::cout << std::endl;
-            }
-        }
-    }
-    if (m_print_intermediate)
-        std::cout << std::endl
-                  << std::endl
-                  << " *** Connectivitiy check done! ***" << std::endl
-                  << std::endl;
-
-    return difference;
-}
-*/
 void RMSDDriver::InitialiseOrder()
 {
     Molecule target, reference;
@@ -780,7 +659,7 @@ void RMSDDriver::FinaliseTemplate(std::pair<std::vector<int>, std::vector<int>> 
 
     Molecule target = m_target;
     std::map<double, std::vector<int>> local_results;
-    for (int outer = 0; outer < m_stored_rules.size() && outer < 10; ++outer) {
+    for (int outer = 0; outer < m_stored_rules.size() /*&& outer < 100*/; ++outer) {
         pairs.second = m_stored_rules[outer];
 
         for (int i = 0; i < 5; ++i) {
@@ -906,9 +785,8 @@ std::vector<int> RMSDDriver::AlignByVectorPair(std::vector<int> first, std::vect
 
     Geometry cached_reference = m_reference.getGeometry(first, m_protons);
     Geometry cached_target = m_target.getGeometry(second, m_protons);
-
-    Geometry ref = GeometryTools::TranslateMolecule(m_reference, m_reference.Centroid(true), Position{ 0, 0, 0 });
-    Geometry tget = GeometryTools::TranslateMolecule(m_target, m_target.Centroid(true), Position{ 0, 0, 0 });
+    Geometry ref = GeometryTools::TranslateMolecule(m_reference, m_reference.Centroid(), Position{ 0, 0, 0 });
+    Geometry tget = GeometryTools::TranslateMolecule(m_target, m_target.Centroid(), Position{ 0, 0, 0 });
 
     Eigen::MatrixXd tar = tget.transpose();
 
@@ -1021,6 +899,44 @@ bool RMSDDriver::TemplateReorder()
 }
 
 std::vector<int> RMSDDriver::DistanceReorder(const Molecule& reference, const Molecule& target)
+{
+    std::vector<int> orderV1;
+    orderV1 = DistanceReorderV1(reference, target);
+    if (!m_check)
+        return orderV1;
+    std::vector<int> orderV2 = DistanceReorderV2(reference, target);
+    double rmsdV1 = Rules2RMSD(orderV1);
+    double rmsdV2 = Rules2RMSD(orderV2);
+    if (rmsdV1 < rmsdV2)
+        return orderV1;
+    else
+        return orderV2;
+}
+
+std::vector<int> RMSDDriver::DistanceReorderV1(const Molecule& reference, const Molecule& target)
+{
+    std::vector<int> new_order;
+
+    for (int i = 0; i < m_reference.AtomCount(); ++i) {
+        double distance = 1e10;
+        int index = -1;
+        for (int j = 0; j < target.AtomCount(); ++j) {
+            if (target.Atom(j).first != reference.Atom(i).first)
+                continue;
+
+            const double local_distance = GeometryTools::Distance(target.Atom(j).second, reference.Atom(i).second);
+            if (local_distance <= distance) {
+                distance = local_distance;
+                index = j;
+            }
+        }
+        new_order.push_back(index);
+    }
+
+    return new_order;
+}
+
+std::vector<int> RMSDDriver::DistanceReorderV2(const Molecule& reference, const Molecule& target)
 {
     std::vector<int> new_order(m_reference.AtomCount(), -1), done_ref, done_tar;
 

@@ -30,6 +30,26 @@ inline double degreesToRadians(double angleDegrees) { return angleDegrees * pi /
 
 inline double radiansToDegrees(double angleRadians) { return angleRadians * 180.0 / pi; }
 
+inline double Distance(const Position& a, const Position& b)
+{
+    double distance = 0;
+    distance = sqrt((a(0) - b(0)) * (a(0) - b(0)) + (a(1) - b(1)) * (a(1) - b(1)) + (a(2) - b(2)) * (a(2) - b(2)));
+    return distance;
+}
+
+inline Position Centroid(const Geometry& geom)
+{
+    Position position{ 0, 0, 0 };
+
+    for (int i = 0; i < geom.rows(); ++i) {
+        position += geom.row(i);
+    }
+
+    position /= double(geom.rows());
+
+    return position;
+}
+
 inline Geometry RotationX(double alpha)
 {
     const double radian = degreesToRadians(alpha);
@@ -130,7 +150,6 @@ inline Geometry TranslateGeometry(const Geometry& geom, const Position& start, c
     Geometry temp = geom;
     for (int i = 0; i < geom.rows(); ++i)
         temp.row(i) += direction;
-
     return temp;
 }
 
@@ -151,25 +170,5 @@ inline Geometry TranslateAndRotate(const Geometry& geom, const Position& start, 
     rot *= GeometryTools::RotationZ(rotation(2));
     temp = temp * rot;
     return GeometryTools::TranslateGeometry(temp, Position{ 0, 0, 0 }, destination);
-}
-
-inline double Distance(const Position& a, const Position& b)
-{
-    double distance = 0;
-    distance = sqrt((a(0) - b(0)) * (a(0) - b(0)) + (a(1) - b(1)) * (a(1) - b(1)) + (a(2) - b(2)) * (a(2) - b(2)));
-    return distance;
-}
-
-inline Position Centroid(const Geometry& geom)
-{
-    Position position{ 0, 0, 0 };
-
-    for (int i = 0; i < geom.rows(); ++i) {
-        position += geom.row(i);
-    }
-
-    position /= double(geom.rows());
-
-    return position;
 }
 }

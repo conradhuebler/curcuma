@@ -55,7 +55,8 @@ static const json ConfScanJson = {
     { "RMSDMethod", "incr" },
     { "MaxHTopoDiff", -1 },
     { "GFN", -1 },
-    { "RMSDThreads", 1 }
+    { "RMSDThreads", 1 },
+    { "RMSDElement", 7 }
 };
 
 class RMSDDriver;
@@ -145,10 +146,11 @@ private:
     int m_maxrank = 10000;
     int m_maxParam = -1;
     int m_useorders = 10;
-    int m_RMSDmethod = 1;
+    std::string m_RMSDmethod = "incr";
     int m_MaxHTopoDiff = -1;
     int m_gfn = -1;
     int m_RMSDthreads = 1;
+    int m_RMSDElement = 7;
     bool m_writeXYZ = false;
     bool m_check_connections = false;
     bool m_force_reorder = false, m_prevent_reorder = false;
