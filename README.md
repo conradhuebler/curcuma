@@ -9,6 +9,7 @@ A simple Open Source molecular modelling tool.
 git clones automatically some submodules.
 - [LBFGSpp](https://github.com/yixuan/LBFGSpp/) provides LBFGS optimiser
 - [XTB](https://github.com/grimme-lab/xtb) eXtended TightBinding - Some methods use this, however it is disabled by default. Add '-DUSE_XTB=true ' to the cmake command line to enable it. GCC 8 or later has to be used.
+- [tblite](https://github.com/tblite/tblite) eXtended TightBinding via tblite 
 - [CxxThreadPool](https://github.com/conradhuebler/CxxThreadPool) - C++ Thread Pool for parallel calculation
 - [eigen](https://gitlab.com/libeigen/eigen) provides eigen C++ library for linear algebra. Eigen is not downloaded automatically, but will be fetched and updated if the build scripts in the **scripts** subdirectory are used.
 - [fmt](https://github.com/fmtlib/fmt) formatted console output
@@ -16,7 +17,7 @@ git clones automatically some submodules.
 
 Additionally, [nlohmann/json](https://github.com/nlohmann/json) is obtained via cmake.
 
-### Using xTB in curcuma
+### Using xTB in curcuma is now again WIP
 xTB is automatically obtained during git clone, however it is not included in curcuma with the default compiler settings. There are two ways of including XTB:
 - Compiling and linking automatically, set **COMPILE_XTB** to true ( with -DCOMPILE_XTB=true or via ccmake). XTB will be compiled with the c++ and fortran compiler in the path (using the blas and lapack libraries in the path as well). The xtb program is then quite slow.
 - Linking curcuma to the official library (get it from the xtb github page). Set **LINK_XTB** to true and define the path to **XTB_DIR** where the libxtb.so has been placed. As the xtb source has been obtained already, no additional header file is needed. However, curcuma has to be compiled with an intel compiler.
@@ -47,7 +48,7 @@ make
 
 # Usage
 
-## RMSD Calculator
+## RMSD Calculator 
 ```sh
 curcuma -rmsd file1.xyz file2.xyz
 ```
@@ -56,12 +57,19 @@ Computes RMSD. If the two structures are ordered differently, curcuma will autom
 curcuma -rmsd file1.xyz file2.xyz -reorder
 ```
 
-Two different approaches are currently implemented, one incremental method without any requirements. The template based approaches is useful for supramolecular systems, where the substrate (fragment 1, counting begins with 0) structures are ordered equally. Use
+Two basic approaches are currently implemented, one incremental (testing many, but not all possible orders, parallelised) method without any requirements and another Kuhn-Munkres like approach. 
+The Kuhn-Munkres like approach needs a prior alignment (only cude) of the structures, which may be obtained using a smaller substructure (template). One way is to use a molecule in a supramolecular structure . Use
 ```sh
 -method template -fragment 1
 ```
 to use the second structure, eg the one bound non-covalently by the first structure, as template. With this approach a much faster reordering is obtained. Omitting -fragment, curcuma tries using the smallest fragment.
 
+Alternatively, generate templates using the incremental approach. For this, all atoms of one element (nitrogen is the default) are used. After the templates are generated, the structures oriented according the templates are reordered using the Kuhn-Munkres like approach. Use
+```sh
+-method hybrid -element 8
+```
+for taking oxygen as template.
+ 
 Add
 ```sh
 -heavy
@@ -107,13 +115,7 @@ Use
 ```sh
 curcuma -confscan conformation.xyz
 ```
-to simple filter the conformation. The results will be printed out.
-
-Use
-```sh
-curcuma -confscan conformation.xyz -writeXYZ
-```
-to store the structures as single xyz files as well.
+to simple filter the conformation. The results will be stored in an additional xyz file.
 
 Use
 ```sh
@@ -135,7 +137,7 @@ Adding
 ```sh
 -RMSDmethod template
 ```
-the template based reordering is used.
+the template based reordering is used, **hybrid** is also working.
 
 With
 ```sh

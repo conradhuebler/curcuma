@@ -23,6 +23,7 @@
 #include "src/core/fileiterator.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
+#include "src/core/tbliteinterface.h"
 #include "src/core/xtbinterface.h"
 
 #include <LBFGS.h>
@@ -297,7 +298,8 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, 
         parameter(3 * i + 2) = geometry(i, 2);
     }
 
-    XTBInterface interface;
+    // XTBInterface interface;
+    TBLiteInterface interface;
     interface.InitialiseMolecule(initial);
 
     return interface.GFNCalculation(method);
@@ -329,7 +331,8 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
         parameter(3 * i + 2) = geometry(i, 2);
     }
 
-    XTBInterface interface;
+    // XTBInterface interface;
+    TBLiteInterface interface;
     interface.InitialiseMolecule(initial);
 
     double final_energy = interface.GFNCalculation(method);

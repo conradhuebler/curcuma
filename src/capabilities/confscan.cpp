@@ -32,6 +32,7 @@
 
 #include "src/core/fileiterator.h"
 #include "src/core/molecule.h"
+#include "src/core/tbliteinterface.h"
 #include "src/core/xtbinterface.h"
 
 #include "src/tools/general.h"
@@ -108,8 +109,9 @@ bool ConfScan::openFile()
         Molecule* mol = new Molecule(file.Next());
         double energy = mol->Energy();
         if (std::abs(energy) < 1e-5 || m_gfn != -1) {
-            XTBInterface interface; // As long as xtb leaks, we have to put it heare
-                // I might not leak really, but was unable to clear everything
+            // XTBInterface interface; // As long as xtb leaks, we have to put it heare
+            TBLiteInterface interface;
+            // I might not leak really, but was unable to clear everything
             if (m_gfn == -1)
                 m_gfn = 2;
             interface.InitialiseMolecule(mol);

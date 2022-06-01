@@ -44,6 +44,5 @@ int main(int argc, char** argv)
     delete res;
     delete ctx;
     delete error;
-
     return 0;
 }
