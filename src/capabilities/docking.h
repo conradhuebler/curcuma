@@ -90,7 +90,10 @@ static const json DockingJson = {
     { "Threads", 1 },
     { "DockingThreads", 1 },
     { "Charge", 0 },
-    { "Cycles", 1 }
+    { "Cycles", 1 },
+    { "RMSDMethod", "incr" },
+    { "RMSDThreads", 1 },
+    { "RMSDElement", 7 }
 };
 
 class Docking : public CurcumaMethod {
@@ -147,6 +150,8 @@ private:
     int m_charge = 0;
     int m_current_cycle = 0;
     int m_cycles = 1;
+    int m_RMSDthreads = 1;
+    int m_RMSDElement = 7;
     StringList m_files;
-    std::string m_host, m_guest, m_complex;
+    std::string m_host, m_guest, m_complex, m_RMSDmethod;
 };

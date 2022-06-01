@@ -410,7 +410,12 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
         driver->setTarget(h);
         driver->start();
         end = std::chrono::system_clock::now();
+#ifdef GCC
         output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f}\n", 15, outer, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, driver->RMSD(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
+#else
+        output += fmt::format("{1} {2} {3} {4} {5}\n", 15, outer, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, driver->RMSD(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
+
+#endif
         start = std::chrono::system_clock::now();
         if (printOutput) {
             std::cout << output;

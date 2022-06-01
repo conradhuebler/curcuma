@@ -90,6 +90,7 @@ IF(CMAKE_COMPILER_IS_GNUCXX)
                                            -Wunused-value  -Wunused-variable  -Wvariadic-macros\
                                            -Wvolatile-register-var  -Wwrite-strings -Wdeprecated-declarations\
                                            -Wno-error=unused-local-typedefs -Wno-error=enum-compare -Wno-narrowing -Werror=return-type -g -rdynamic")
+set (GCC ON)
 ENDIF(CMAKE_COMPILER_IS_GNUCXX)
 
 
@@ -98,6 +99,17 @@ if(COMPILE_XTB)
     set_target_properties(lib-xtb-shared PROPERTIES
       IMPORTED_LOCATION "${CMAKE_CURRENT_BINARY_DIR}/libxtb.so"
     )
+    if(NOT TARGET mctc-lib)
+      set("mctc-lib-url" "https://github.com/grimme-lab/mctc-lib")
+      message(STATUS "Retrieving mctc-lib from ${mctc-lib-url}")
+      include(FetchContent)
+      FetchContent_Declare(
+        "mctc-lib"
+        GIT_REPOSITORY "${mctc-lib-url}"
+        GIT_TAG "HEAD"
+      )
+      FetchContent_MakeAvailable("mctc-lib")
+    endif()
     set(USE_XTB on)
 endif()
 
@@ -119,8 +131,6 @@ if(LINK_XTB)
     endif()
     set(USE_XTB on)
 endif()
-
-
 
 
 if(NOT EXISTS ${PROJECT_BINARY_DIR}/external/json.hpp)
@@ -195,7 +205,8 @@ if(USE_XTB)
     if(COMPILE_XTB)
         #target_link_libraries(curcuma_core lib-xtb-shared -m64 -Wl,--no-as-needed -L/opt/intel/oneapi/mkl/latest/lib/intel64/ libmkl_intel_lp64.so libmkl_intel_thread.so libmkl_core.so libmkl_gnu_thread.so pthread -lm dl fmt::fmt-header-only)
 	#target_link_libraries(curcuma_core lib-xtb-shared -Wl,--no-as-needed -L/opt/intel/oneapi/mkl/latest/lib/intel64/ -lmkl_intel_lp64 -lmkl_core -lmkl_gnu_thread -lpthread -lm -ldl fmt::fmt-header-only)
-	target_link_libraries(curcuma_core lib-xtb-shared pthread dl fmt::fmt-header-only)
+        #target_link_libraries(curcuma_core )
+        target_link_libraries(curcuma_core PUBLIC "mctc-lib" lib-xtb-shared  pthread dl fmt::fmt-header-only)
     else()
         target_link_libraries(curcuma_core ${XTB_DIR}/libxtb.so pthread dl fmt::fmt-header-only)
     endif()

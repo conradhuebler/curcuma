@@ -63,6 +63,10 @@ void Docking::LoadControlJson()
     m_docking_threads = Json2KeyWord<int>(m_defaults, "DockingThreads");
     m_charge = Json2KeyWord<int>(m_defaults, "Charge");
     m_cycles = Json2KeyWord<int>(m_defaults, "Cycles");
+
+    m_RMSDthreads = Json2KeyWord<int>(m_defaults, "RMSDThreads");
+    m_RMSDElement = Json2KeyWord<int>(m_defaults, "RMSDElement");
+    m_RMSDmethod = Json2KeyWord<std::string>(m_defaults, "RMSDMethod");
 }
 
 bool Docking::Initialise()
@@ -313,7 +317,7 @@ void Docking::PostOptimise()
     opt["dE"] = 1;
     opt["dRMSD"] = 0.01;
     opt["printOutput"] = true;
-    opt["threads"] = m_threads;
+    opt["threads"] = 1; // m_threads;
     opt["gfn"] = 66;
 
     json spoint = opt;
@@ -462,7 +466,10 @@ void Docking::PostOptimise()
     confscan["silent"] = true;
     //confscan["preventreorder"] = true;
     confscan["maxenergy"] = -1;
-    confscan["RMSDMethod"] = "template";
+    confscan["RMSDMethod"] = m_RMSDmethod;
+    confscan["RMSDThreads"] = m_RMSDthreads;
+    confscan["RMSDElement"] = m_RMSDthreads;
+
     json controller;
     controller["confscan"] = confscan;
     ConfScan* scan = new ConfScan(controller);

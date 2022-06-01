@@ -2,3 +2,4 @@
 
 #cmakedefine USE_XTB
 #cmakedefine C17
+#cmakedefine GCC

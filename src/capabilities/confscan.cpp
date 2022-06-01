@@ -404,9 +404,9 @@ void ConfScan::SetUp()
 
     std::cout << "    RMSD Threshold set to: " << m_rmsd_threshold << " Angstrom" << std::endl;
     std::cout << "    Energy Threshold set to: " << m_energy_threshold << " kJ/mol" << std::endl;
-    std::cout << "    Thresholds in rotational constants (averaged over Ia, Ib and Ic): " << std::endl;
-    std::cout << "    Loose Threshold: " << m_diff_rot_abs_loose << " MHz" << std::endl;
-    std::cout << "    Tight Threshold: " << m_diff_rot_abs_tight << " MHz" << std::endl;
+    // std::cout << "    Thresholds in rotational constants (averaged over Ia, Ib and Ic): " << std::endl;
+    // std::cout << "    Loose Threshold: " << m_diff_rot_abs_loose << " MHz" << std::endl;
+    // std::cout << "    Tight Threshold: " << m_diff_rot_abs_tight << " MHz" << std::endl;
     std::cout << "" << std::endl
               << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
               << std::endl;
