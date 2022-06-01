@@ -96,9 +96,11 @@ ENDIF(CMAKE_COMPILER_IS_GNUCXX)
 
 if(COMPILE_XTB)
     add_subdirectory(external/xtb)
+
     set_target_properties(lib-xtb-shared PROPERTIES
       IMPORTED_LOCATION "${CMAKE_CURRENT_BINARY_DIR}/libxtb.so"
     )
+
     if(NOT TARGET mctc-lib)
       set("mctc-lib-url" "https://github.com/grimme-lab/mctc-lib")
       message(STATUS "Retrieving mctc-lib from ${mctc-lib-url}")
@@ -110,6 +112,10 @@ if(COMPILE_XTB)
       )
       FetchContent_MakeAvailable("mctc-lib")
     endif()
+
+    add_subdirectory(external/tblite)
+    include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/tblite/include)
+
     set(USE_XTB on)
 endif()
 
@@ -247,6 +253,17 @@ if(USE_XTB)
     else()
         target_link_libraries(xtb_helper ${XTB_DIR}/libxtb.so pthread dl)
     endif()
+
+    add_executable(tblite_helper
+        src/helpers/tblite_helper.cpp
+        )
+    if(C17)
+        set_property(TARGET tblite_helper PROPERTY CXX_STANDARD 17)
+    else()
+        set_property(TARGET tblite_helper PROPERTY CXX_STANDARD 14)
+    endif(C17)
+    target_link_libraries(tblite_helper PRIVATE tblite-lib gfortran pthread dl)
+
 endif()
 
 add_subdirectory(test_cases)

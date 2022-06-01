@@ -19,3 +19,6 @@
 [submodule "external/xtb"]
 	path = external/xtb
 	url = https://github.com/conradhuebler/xtb
+[submodule "external/tblite"]
+	path = external/tblite
+	url = https://github.com/tblite/tblite
