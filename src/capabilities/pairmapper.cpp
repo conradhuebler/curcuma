@@ -78,7 +78,7 @@ void PairMapper::FindPairs()
     }
 
     m_intermol_file << "# ";
-    for (const std::pair<int, int> p : m_inter_pairs) {
+    for (const std::pair<int, int>& p : m_inter_pairs) {
         m_intermol_file << "(" << std::setprecision(6) << p.first + 1 << "-" << p.second + 1 << ")   ";
     }
     m_intermol_file << std::endl;
@@ -271,7 +271,7 @@ void PairMapper::addPair(std::pair<int, int> pair, std::vector<std::pair<int, in
         pair.second = first;
     }
 
-    for (const std::pair<int, int> p : pairs)
+    for (const std::pair<int, int>& p : pairs)
         if (pair == p) {
             exist = true;
             break;

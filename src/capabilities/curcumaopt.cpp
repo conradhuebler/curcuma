@@ -24,7 +24,6 @@
 #include "src/core/global.h"
 #include "src/core/molecule.h"
 #include "src/core/tbliteinterface.h"
-#include "src/core/xtbinterface.h"
 
 #include <LBFGS.h>
 #include <LBFGSB.h>
@@ -56,8 +55,8 @@ int OptThread::execute()
     // OptimiseGeometryThreaded(&m_molecule, &m_result, &m_final, m_controller);
     // m_molecule.writeXYZFile("blob.xyz");
     m_final = CurcumaOpt::LBFGSOptimise(&m_molecule, m_controller, m_result, &m_intermediate);
-    std::cout << m_result << std::endl
-              << std::endl;
+    // std::cout << m_result << std::endl
+    //           << std::endl;
     return 0;
 }
 
@@ -73,14 +72,14 @@ int SPThread::execute()
     m_final.setEnergy(energy);
     auto end = std::chrono::system_clock::now();
     m_result = fmt::format("Single Point Energy = {0} Eh ({1} secs)\n", energy, std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
-    std::cout << m_result;
+    // std::cout << m_result;
     return 0;
 }
 
 CurcumaOpt::CurcumaOpt(const json& controller, bool silent)
     : CurcumaMethod(CurcumaOptJson, controller, silent)
 {
-    std::cout << controller << std::endl;
+    // std::cout << controller << std::endl;
     UpdateController(controller);
 }
 

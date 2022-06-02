@@ -10,12 +10,18 @@ git submodule update --recursive
 
 cd external
 
-for i in $(ls -d */|grep -v 'xtb'); do cd $i; git checkout master || true ; git submodule init; git submodule update --recursive; git pull; cd ..; done
+for i in $(ls -d */|grep -v 'tb'); do cd $i; git checkout master || true ; git submodule init; git submodule update --recursive; git pull; cd ..; done
 
 cd xtb
 git checkout main 
 git pull
 cd ..
+
+cd tblite
+git checkout main
+git pull
+cd ..
+
 cd ..
 
 mkdir -p release_no_xtb

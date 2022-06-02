@@ -20,7 +20,7 @@
 #pragma once
 
 #include "src/core/molecule.h"
-#include "src/core/xtbinterface.h"
+#include "src/core/tbliteinterface.h"
 
 class SimpleMD {
 public:
@@ -50,5 +50,5 @@ private:
     std::vector<int> m_atomtype;
     Molecule m_molecule;
     bool m_initialised = false;
-    XTBInterface* m_interface;
+    TBLiteInterface* m_interface;
 };

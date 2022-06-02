@@ -33,7 +33,6 @@
 #include "src/core/fileiterator.h"
 #include "src/core/molecule.h"
 #include "src/core/tbliteinterface.h"
-#include "src/core/xtbinterface.h"
 
 #include "src/tools/general.h"
 

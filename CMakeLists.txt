@@ -180,7 +180,6 @@ set(curcuma_core_SRC
         src/capabilities/rmsdtraj.cpp
         src/capabilities/simplemd.cpp
         src/core/molecule.cpp
-        src/core/xtbinterface.cpp
         src/core/tbliteinterface.cpp
         src/core/pseudoff.cpp
         src/tools/formats.h

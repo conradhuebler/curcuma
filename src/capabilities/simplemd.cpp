@@ -30,7 +30,7 @@
 #include "src/core/elements.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
-#include "src/core/xtbinterface.h"
+#include "src/core/tbliteinterface.h"
 
 #include "simplemd.h"
 
@@ -38,7 +38,7 @@ const int method = -1;
 
 SimpleMD::SimpleMD()
 {
-    m_interface = new XTBInterface;
+    m_interface = new TBLiteInterface;
 }
 
 SimpleMD::~SimpleMD()

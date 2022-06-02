@@ -8,11 +8,17 @@ git submodule update --recursive
 # check submodules, seems not to work automatically
 
 cd external
-for i in $(ls -d */|grep -v 'xtb'); do cd $i; git checkout master || true; git submodule init; git submodule update --recursive; git pull; cd ..; done
+for i in $(ls -d */|grep -v 'tb'); do cd $i; git checkout master || true; git submodule init; git submodule update --recursive; git pull; cd ..; done
 cd xtb
-git checkout v6.4.1 
+git checkout main
 git pull
 cd ..
+
+cd tblite
+git checkout main
+git pull
+cd ..
+
 cd ..
 
 mkdir -p release

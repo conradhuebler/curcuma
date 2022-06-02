@@ -25,7 +25,6 @@
 #include "src/core/global.h"
 #include "src/core/molecule.h"
 #include "src/core/tbliteinterface.h"
-#include "src/core/xtbinterface.h"
 
 #include "json.hpp"
 #include <LBFGS.h>
@@ -88,7 +87,6 @@ private:
     int m_atoms = 0;
     int n;
     int m_method = 2;
-    // XTBInterface* m_interface;
     TBLiteInterface* m_interface;
     Vector m_parameter;
     const Molecule* m_molecule;

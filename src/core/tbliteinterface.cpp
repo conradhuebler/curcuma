@@ -1,6 +1,6 @@
 /*
- * < C++ XTB Interface >
- * Copyright (C) 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * < C++ XTB and tblite Interface >
+ * Copyright (C) 2020 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,7 +17,11 @@
  *
  */
 
+#ifdef USE_XTB
 #include "external/tblite/include/tblite.h"
+#include "external/xtb/include/xtb.h"
+
+#endif
 
 #include "src/core/global.h"
 #include "src/core/molecule.h"
@@ -28,39 +32,36 @@
 
 #include "tbliteinterface.h"
 
-void example_callback(char* msg, int len, void* udata)
-{
-    // printf("[callback] %.*s\n", len, msg);
-}
-
 TBLiteInterface::TBLiteInterface()
 {
 #ifdef USE_XTB
+    // tblite stuff
     m_error = tblite_new_error();
-    //    mol = NULL;
-    //    res = NULL;
     m_ctx = tblite_new_context();
-    m_res = tblite_new_result();
-//    cont = NULL;
-//    xtb_setOutput(m_env, "/dev/null");
+    m_tblite_res = tblite_new_result();
+
+    // xtb stuff
+    m_env = xtb_newEnvironment();
+    m_xtb_calc = xtb_newCalculator();
+    m_xtb_res = xtb_newResults();
 #endif
 }
 
 TBLiteInterface::~TBLiteInterface()
 {
 #ifdef USE_XTB
+    // tblite stuff
     delete m_error;
     delete m_ctx;
-    delete m_res;
-    delete m_mol;
-    delete m_calc;
-    /*
-    tblite_delete(m_error);
-    tblite_delete(m_ctx);
-    //tblite_delete(m_cont);
-    tblite_delete(m_mol);
-    tblite_delete(m_res);
-    tblite_delete(m_calc);*/
+    delete m_tblite_res;
+    delete m_tblite_mol;
+    delete m_tblite_calc;
+
+    // xtb stuff
+    xtb_delResults(&m_xtb_res);
+    xtb_delCalculator(&m_xtb_calc);
+    xtb_delMolecule(&m_xtb_mol);
+    xtb_delEnvironment(&m_env);
 #endif
 }
 
@@ -110,11 +111,9 @@ bool TBLiteInterface::InitialiseMolecule(const int* attyp, const double* coord, 
         UpdateMolecule(coord);
 
 #ifdef USE_XTB
-    m_mol = tblite_new_structure(m_error, natoms, attyp, coord, &charge, &spin, NULL, NULL);
-    /* if (xtb_checkEnvironment(m_env)) {
-         xtb_showEnvironment(m_env, NULL);
-         return false;
-     }*/
+    m_tblite_mol = tblite_new_structure(m_error, natoms, attyp, coord, &charge, &spin, NULL, NULL);
+    m_xtb_mol = xtb_newMolecule(m_env, &natoms, attyp, coord, &charge, &spin, NULL, NULL);
+
     m_initialised = true;
     return true;
 #else
@@ -139,13 +138,9 @@ bool TBLiteInterface::UpdateMolecule(const Molecule& molecule)
 bool TBLiteInterface::UpdateMolecule(const double* coord)
 {
 #ifdef USE_XTB
-    tblite_update_structure_geometry(m_error, m_mol, coord, NULL);
+    tblite_update_structure_geometry(m_error, m_tblite_mol, coord, NULL);
+    xtb_updateMolecule(m_env, m_xtb_mol, coord, NULL);
     return true;
-    /*  if (xtb_checkEnvironment(m_env)) {
-          xtb_showEnvironment(m_env, NULL);
-          return false;
-      }
-      return true;*/
 #else
     return false;
 #endif
@@ -155,45 +150,35 @@ double TBLiteInterface::GFNCalculation(int parameter, double* grad)
 {
     double energy = 0;
 #ifdef USE_XTB
-    /*
-    auto old_buffer = std::cout.rdbuf(nullptr);
-
-    xtb_setVerbosity(m_env, XTB_VERBOSITY_MUTED);
-    if (xtb_checkEnvironment(m_env)) {
-        xtb_showEnvironment(m_env, NULL);
-        return 2;
-    }
-*/
-    /*
     if (parameter == 66) {
+        xtb_setVerbosity(m_env, XTB_VERBOSITY_MUTED);
 
-        //char* f = "filename";
-        xtb_loadGFNFF(m_env, m_mol, m_calc, f);
-
+        xtb_loadGFNFF(m_env, m_xtb_mol, m_xtb_calc, NULL);
+        xtb_singlepoint(m_env, m_xtb_mol, m_xtb_calc, m_xtb_res);
         if (xtb_checkEnvironment(m_env)) {
-            xtb_showEnvironment(m_env, f);
-            return 3;
+            xtb_showEnvironment(m_env, NULL);
+            return 4;
         }
-    } else
-*/
-    tblite_logger_callback callback = example_callback;
-    tblite_set_context_logger(m_ctx, callback, NULL);
 
-    if (parameter == 0) {
-        m_calc = tblite_new_ipea1_calculator(m_ctx, m_mol);
-    } else if (parameter == 1) {
-        m_calc = tblite_new_gfn1_calculator(m_ctx, m_mol);
-    } else if (parameter == 2) {
-        m_calc = tblite_new_gfn2_calculator(m_ctx, m_mol);
+        xtb_getEnergy(m_env, m_xtb_res, &energy);
+        if (grad != NULL)
+            xtb_getGradient(m_env, m_xtb_res, grad);
+    } else {
+        tblite_set_context_verbosity(m_ctx, 0);
+        if (parameter == 0) {
+            m_tblite_calc = tblite_new_ipea1_calculator(m_ctx, m_tblite_mol);
+        } else if (parameter == 1) {
+            m_tblite_calc = tblite_new_gfn1_calculator(m_ctx, m_tblite_mol);
+        } else if (parameter == 2) {
+            m_tblite_calc = tblite_new_gfn2_calculator(m_ctx, m_tblite_mol);
+        }
+
+        tblite_get_singlepoint(m_ctx, m_tblite_mol, m_tblite_calc, m_tblite_res);
+        tblite_get_result_energy(m_error, m_tblite_res, &energy);
+
+        if (grad != NULL)
+            tblite_get_result_gradient(m_error, m_tblite_res, grad);
     }
-    tblite_get_singlepoint(m_ctx, m_mol, m_calc, m_res);
-    tblite_get_result_energy(m_error, m_res, &energy);
-
-    if (grad != NULL)
-        tblite_get_result_gradient(m_error, m_res, grad);
-
-        // std::cout.rdbuf(old_buffer);
-
 #else
     throw("XTB is not included, sorry for that");
 #endif
@@ -203,6 +188,7 @@ double TBLiteInterface::GFNCalculation(int parameter, double* grad)
 void TBLiteInterface::clear()
 {
 #ifdef USE_XTB
-
+    xtb_delResults(&m_xtb_res);
+    m_xtb_res = xtb_newResults();
 #endif
 }

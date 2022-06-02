@@ -314,7 +314,7 @@ void Docking::PostOptimise()
     std::map<double, Molecule*> result_list, final_results;
     auto iter = m_result_list.begin();
     json opt = CurcumaOptJson;
-    opt["dE"] = 1;
+    opt["dE"] = 0.1;
     opt["dRMSD"] = 0.01;
     opt["printOutput"] = true;
     opt["threads"] = 1; // m_threads;
@@ -323,6 +323,8 @@ void Docking::PostOptimise()
     json spoint = opt;
     spoint["SinglePoint"] = true;
     spoint["gfn"] = 2;
+    spoint["threads"] = m_threads;
+
     CurcumaOpt optimise(opt, false);
     CurcumaOpt sp(spoint, false);
     while (iter != m_result_list.end()) {
@@ -365,29 +367,29 @@ void Docking::PostOptimise()
 
     json opt_2 = opt;
     opt_2["gfn"] = 2;
-    opt_2["dE"] = 50;
-    opt_2["dRMSD"] = 0.1;
+    opt_2["dE"] = 0.1;
+    opt_2["dRMSD"] = 0.01;
+    opt_2["threads"] = m_threads;
 
     std::map<double, Molecule*> temp_molecules;
 
     for (const auto& m : *sp.Molecules()) {
         Molecule* mol1 = new Molecule(m);
         temp_molecules.insert(std::pair<double, Molecule*>(m.Energy(), mol1));
-        //      opt2.addMolecule(m);
     }
-    // CurcumaOpt opt2(opt_2, false);
-    // opt2.start();
 
     for (const auto& t : *optimise.Molecules()) {
         Molecule* mol2 = new Molecule(t);
         result_list.insert(std::pair<double, Molecule*>(mol2->Energy(), mol2));
     }
     int failed = 0;
+    CurcumaOpt opt2(opt_2, false);
+
     for (auto it = temp_molecules.begin(); it != temp_molecules.end(); ++it) {
-        CurcumaOpt opt2(opt_2, false);
         opt2.addMolecule(it->second);
-        opt2.start();
-        Molecule m = (*opt2.Molecules())[0];
+    }
+    opt2.start();
+    for (const auto& m : *opt2.Molecules()) {
         m.GetFragments(frag_scaling).size();
         std::cout << m.Energy() << " ";
         for (const auto l : m.FragmentMass())
@@ -461,14 +463,12 @@ void Docking::PostOptimise()
     confscan["writeXYZ"] = false;
     confscan["ForceReorder"] = true;
     confscan["check"] = false;
-    //confscan["energy"] = 1.0;
     confscan["noname"] = true;
     confscan["silent"] = true;
-    //confscan["preventreorder"] = true;
     confscan["maxenergy"] = -1;
     confscan["RMSDMethod"] = m_RMSDmethod;
-    confscan["RMSDThreads"] = m_RMSDthreads;
-    confscan["RMSDElement"] = m_RMSDthreads;
+    confscan["RMSDThreads"] = m_threads;
+    confscan["RMSDElement"] = m_RMSDElement;
 
     json controller;
     controller["confscan"] = confscan;

@@ -1,6 +1,6 @@
 /*
- * <Docking tool for structures. >
- * Copyright (C) 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * < C++ XTB and tblite Interface >
+ * Copyright (C) 2020 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,7 +19,11 @@
 
 #pragma once
 
+#ifdef USE_XTB
 #include "external/tblite/include/tblite.h"
+#include "external/xtb/include/xtb.h"
+
+#endif
 
 #include "src/core/molecule.h"
 
@@ -48,11 +52,19 @@ public:
 private:
 #ifdef USE_XTB
     double m_thr = 1.0e-10;
+    // tblite stuff
     tblite_error m_error = NULL;
-    tblite_structure m_mol = NULL;
-    tblite_result m_res = NULL;
+    tblite_structure m_tblite_mol = NULL;
+    tblite_result m_tblite_res = NULL;
     tblite_context m_ctx = NULL;
-    tblite_calculator m_calc = NULL;
+    tblite_calculator m_tblite_calc = NULL;
+
+    // xtb stuff
+    xtb_TEnvironment m_env = NULL;
+    xtb_TMolecule m_xtb_mol = NULL;
+    xtb_TCalculator m_xtb_calc = NULL;
+    xtb_TResults m_xtb_res = NULL;
+
     // tblite_container cont = NULL;
 #endif
     bool m_initialised = false;
