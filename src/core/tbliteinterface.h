@@ -22,14 +22,20 @@
 #ifdef USE_XTB
 #include "external/tblite/include/tblite.h"
 #include "external/xtb/include/xtb.h"
-
 #endif
 
 #include "src/core/molecule.h"
 
+#include "src/tools/general.h"
+
+static json xTBSettings{
+    { "calculator_accuracy", 2 },
+    { "calculator_max_iter", 100 }
+};
+
 class TBLiteInterface {
 public:
-    TBLiteInterface();
+    TBLiteInterface(const json& xtbsettings = xTBSettings);
     ~TBLiteInterface();
 
     bool InitialiseMolecule(const Molecule& molecule);
@@ -68,4 +74,5 @@ private:
     // tblite_container cont = NULL;
 #endif
     bool m_initialised = false;
+    json m_xtbsettings;
 };

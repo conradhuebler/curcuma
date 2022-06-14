@@ -1,21 +1,12 @@
-[submodule "external/LBFGSpp"]
-	path = external/LBFGSpp
-	url = https://github.com/yixuan/LBFGSpp/
 [submodule "external/CxxThreadPool"]
 	path = external/CxxThreadPool
 	url = https://github.com/conradhuebler/CxxThreadPool.git
-[submodule "external/CppNumericalSolvers"]
-	path = external/CppNumericalSolvers
-	url = https://github.com/PatWie/CppNumericalSolvers
 [submodule "external/fmt"]
 	path = external/fmt
 	url = https://github.com/fmtlib/fmt
 [submodule "external/ripser"]
 	path = external/ripser
 	url = https://github.com/conradhuebler/ripser
-[submodule "external/--force"]
-	path = external/--force
-	url = https://github.com/conradhuebler/xtb
 [submodule "external/xtb"]
 	path = external/xtb
 	url = https://github.com/conradhuebler/xtb

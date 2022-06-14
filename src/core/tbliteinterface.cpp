@@ -32,7 +32,8 @@
 
 #include "tbliteinterface.h"
 
-TBLiteInterface::TBLiteInterface()
+TBLiteInterface::TBLiteInterface(const json& xtbsettings)
+    : m_xtbsettings(xtbsettings)
 {
 #ifdef USE_XTB
     // tblite stuff
@@ -172,6 +173,8 @@ double TBLiteInterface::GFNCalculation(int parameter, double* grad)
         } else if (parameter == 2) {
             m_tblite_calc = tblite_new_gfn2_calculator(m_ctx, m_tblite_mol);
         }
+        tblite_set_calculator_accuracy(m_ctx, m_tblite_calc, Json2KeyWord<double>(m_xtbsettings, "calculator_accuracy"));
+        tblite_set_calculator_max_iter(m_ctx, m_tblite_calc, Json2KeyWord<int>(m_xtbsettings, "calculator_max_iter"));
 
         tblite_get_singlepoint(m_ctx, m_tblite_mol, m_tblite_calc, m_tblite_res);
         tblite_get_result_energy(m_error, m_tblite_res, &energy);

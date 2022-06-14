@@ -30,9 +30,12 @@ static json CurcumaOptJson{
     { "dE", 0.1 },
     { "dRMSD", 0.01 },
     { "GFN", 2 },
-    { "InnerLoop", 20 },
-    { "OuterLoop", 100 },
+    { "MaxIter", 2000 },
     { "LBFGS_eps", 1e-5 },
+    { "StoreIntermediate", 600 },
+    { "SingleStep", 20 },
+    { "ConvCount", 4 },
+    { "GradNorm", 0.001 },
     { "Threads", 1 },
     { "Charge", 0 },
     { "Spin", 0 },
@@ -45,8 +48,7 @@ const json OptJsonPrivate{
     { "dE", 0.1 },
     { "dRMSD", 0.01 },
     { "GFN", 2 },
-    { "InnerLoop", 20 },
-    { "OuterLoop", 100 },
+    { "MaxIter", 2000 },
     { "LBFGS_eps", 1e-5 }
 };
 

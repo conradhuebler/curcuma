@@ -310,9 +310,14 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
     double dE = Json2KeyWord<double>(controller, "dE");
     double dRMSD = Json2KeyWord<double>(controller, "dRMSD");
     double LBFGS_eps = Json2KeyWord<double>(controller, "LBFGS_eps");
+    double GradNorm = Json2KeyWord<double>(controller, "GradNorm");
+
     int method = Json2KeyWord<int>(controller, "GFN");
-    int InnerLoop = Json2KeyWord<int>(controller, "InnerLoop");
-    int OuterLoop = Json2KeyWord<int>(controller, "OuterLoop");
+    int MaxIter = Json2KeyWord<int>(controller, "MaxIter");
+    int StoreIntermediate = Json2KeyWord<int>(controller, "StoreIntermediate");
+    int ConvCount = Json2KeyWord<int>(controller, "ConvCount");
+    int SingleStep = Json2KeyWord<int>(controller, "SingleStep");
+
     if(Json2KeyWord<int>(controller, "threads") > 1 )
     {
         printOutput = false;
@@ -338,7 +343,12 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
 
     LBFGSParam<double> param;
     param.epsilon = LBFGS_eps;
-    param.max_iterations = InnerLoop;
+    param.m = StoreIntermediate;
+    /*
+        param.linesearch = 3;
+        param.ftol = 1e-6;
+        param.wolfe = 0.1;
+    */
 
     LBFGSSolver<double> solver(param);
     LBFGSInterface fun(3 * initial->AtomCount());
@@ -367,29 +377,44 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
 
     std::chrono::time_point<std::chrono::system_clock> start = std::chrono::system_clock::now(), end;
     output += fmt::format("\nCharge {} Spin {}\n\n", initial->Charge(), initial->Spin());
-    output += fmt::format("{2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}}\n", "", 15, "Step", "Current Energy", "Energy Change", "RMSD Change", "time");
-    output += fmt::format("{2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}}\n", "", 15, " ", "[Eh]", "[kJ/mol]", "[A]", "[s]");
+    output += fmt::format("{2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}} {7: ^{1}}\n", "", 15, "Step", "Current Energy", "Energy Change", "RMSD Change", "Gradient Norm", "time");
+    output += fmt::format("{2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}} {7: ^{1}}\n", "", 15, " ", "[Eh]", "[kJ/mol]", "[A]", "[A]", "[s]");
 
     if (printOutput) {
         std::cout << output;
         output.clear();
     }
+    bool perform_optimisation = true;
+    bool error = false;
 
     int atoms_count = initial->AtomCount();
-    for (int outer = 0; outer < OuterLoop; ++outer) {
-        int niter = 0;
-        try {
-            niter = solver.minimize(fun, parameter, fx);
-        } catch (const std::logic_error& error) {
-            output += fmt::format("LBFGS interface signalled some logic error!\n");
-            output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
+    int converged = solver.InitializeSingleSteps(fun, parameter, fx);
+    int iteration = 0;
+    if (converged)
+        perform_optimisation = false;
 
-            if (printOutput) {
-                std::cout << output;
-                output.clear();
+    for (iteration = 0; iteration <= MaxIter && perform_optimisation; ++iteration) {
+        try {
+            solver.SingleStep(fun, parameter, fx);
+        } catch (const std::logic_error& error) {
+            if (solver.Step() < 1e-8) {
+                perform_optimisation = false;
+            } else {
+                perform_optimisation = false;
+
+                std::cout << error.what() << std::endl;
+                output += fmt::format("LBFGS interface signalled some logic error!\n");
+                output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
+
+                if (printOutput) {
+                    std::cout << output;
+                    output.clear();
+                }
             }
             break;
         } catch (const std::runtime_error& error) {
+
+            std::cout << error.what() << std::endl;
             output += fmt::format("LBFGS interface signalled some runtime error!\n");
             output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
 
@@ -399,23 +424,26 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
             }
             break;
         }
-        parameter = fun.Parameter();
 
-        for (int i = 0; i < atoms_count; ++i) {
-            geometry(i, 0) = parameter(3 * i);
-            geometry(i, 1) = parameter(3 * i + 1);
-            geometry(i, 2) = parameter(3 * i + 2);
-        }
-        h.setGeometry(geometry);
+        if (iteration % SingleStep == 0 && iteration) {
+            parameter = fun.Parameter();
 
-        driver->setReference(tmp);
-        driver->setTarget(h);
-        driver->start();
-        end = std::chrono::system_clock::now();
+            for (int i = 0; i < atoms_count; ++i) {
+                geometry(i, 0) = parameter(3 * i);
+                geometry(i, 1) = parameter(3 * i + 1);
+                geometry(i, 2) = parameter(3 * i + 2);
+            }
+            h.setGeometry(geometry);
+
+            driver->setReference(tmp);
+            driver->setTarget(h);
+            driver->start();
+            end = std::chrono::system_clock::now();
+
 #ifdef GCC
-        output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f}\n", 15, outer, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, driver->RMSD(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
+            output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, driver->RMSD(), solver.final_grad_norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
 #else
-        output += fmt::format("{1} {2} {3} {4} {5}\n", 15, outer, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, driver->RMSD(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
+            output += fmt::format("{1} {2} {3} {4} {5}\n", 15, iteration, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, driver->RMSD(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
 
 #endif
         start = std::chrono::system_clock::now();
@@ -423,26 +451,55 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
             std::cout << output;
             output.clear();
         }
+
+        converged = (abs(fun.m_energy - final_energy) * 2625.5 < dE)
+            + (driver->RMSD() < dRMSD)
+            + (solver.isConverged())
+            + (solver.final_grad_norm() < GradNorm);
+        perform_optimisation = converged < ConvCount;
+        /*
+        std::cout << (abs(fun.m_energy - final_energy) * 2625.5 < 0.05)
+                  << " " << (int(driver->RMSD() < 0.01))
+                  << " " << solver.isConverged()
+                  << " " << (solver.final_grad_norm()  < 0.0002)
+                  << std::endl;
+
+        std::cout << converged << " " << minConverged << " " << perform_optimisation << std::endl;
+        */
+        /*
+        if ((abs(fun.m_energy - final_energy) * 2625.5) < 0.05 && driver->RMSD() < 0.01) {
+           perform_optimisation = false;
+            break;
+        }
+        */
         final_energy = fun.m_energy;
         if (tmp.Check() == 0) {
             tmp = h;
             h.setEnergy(final_energy);
             intermediate->push_back(h);
         } else {
-            output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
-            if (printOutput) {
-                std::cout << output;
-                output.clear();
-            }
-            break;
+            perform_optimisation = false;
+            error = true;
         }
-        if (((fun.m_energy - final_energy) * 2625.5 < dE && driver->RMSD() < dRMSD)) {
-            output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation converged ***");
-            if (printOutput) {
-                std::cout << output;
-                output.clear();
-            }
-            break;
+        }
+    }
+    end = std::chrono::system_clock::now();
+    if (iteration >= MaxIter) {
+        output += fmt::format("{0: ^75}\n\n", "*** Maximum number of iterations reached! ***");
+        error = true;
+    }
+    if (error == false) {
+        output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, driver->RMSD(), solver.final_grad_norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
+        output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation converged ***");
+        if (printOutput) {
+            std::cout << output;
+            output.clear();
+        }
+    } else {
+        output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
+        if (printOutput) {
+            std::cout << output;
+            output.clear();
         }
     }
 
