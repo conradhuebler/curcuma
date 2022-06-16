@@ -91,9 +91,10 @@ static const json DockingJson = {
     { "DockingThreads", 1 },
     { "Charge", 0 },
     { "Cycles", 1 },
-    { "RMSDMethod", "incr" },
+    { "RMSDMethod", "hybrid" },
     { "RMSDThreads", 1 },
-    { "RMSDElement", 7 }
+    { "RMSDElement", 7 },
+    { "EnergyThreshold", 200 }
 };
 
 class Docking : public CurcumaMethod {
@@ -105,6 +106,10 @@ public:
     bool Initialise() override;
 
     void PerformDocking();
+
+    void OptimiseBatch();
+    void CollectStructures();
+    void FilterStructures();
 
     void PostOptimise();
 
@@ -134,7 +139,6 @@ private:
     int m_step_X = 1, m_step_Y = 1, m_step_Z = 1;
     std::map<double, Vector> m_docking_list;
     std::vector<std::pair<Position, Position>> m_initial_list;
-    std::map<double, Molecule*> m_result_list;
     std::vector<Position> m_anchor_accepted, m_rotation_accepted, m_reuse_anchor;
     std::vector<double> m_fragments_mass;
     bool m_check = false;
@@ -145,6 +149,7 @@ private:
     double m_centroid_max_distance = 1e5;
     double m_centroid_tol_distance = 1e-1;
     double m_centroid_rot_distance = 1e-1;
+    double m_energy_threshold = 200;
     int m_threads = 1;
     int m_docking_threads = 1;
     int m_charge = 0;
@@ -154,4 +159,6 @@ private:
     int m_RMSDElement = 7;
     StringList m_files;
     std::string m_host, m_guest, m_complex, m_RMSDmethod;
+    CurcumaOpt *m_optimise, *m_singlepoint;
+    std::map<double, Molecule*> m_docking_result, m_optimisation_result, m_result_list, m_final_results, m_temp_results;
 };

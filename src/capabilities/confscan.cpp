@@ -719,6 +719,8 @@ bool ConfScan::SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMS
         driver->setTarget(mol2);
         driver->start();
         rmsd = driver->RMSD();
+        AddRules(driver->ReorderRules());
+
         m_reordered++;
         if (!m_silent) {
             std::cout << "Difference in Ia " << std::setprecision(2) << Ia << " MHz" << std::endl;
@@ -737,7 +739,6 @@ bool ConfScan::SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMS
             if (!m_silent) {
                 std::cout << "  ** Rejecting structure **" << std::endl;
             }
-            AddRules(driver->ReorderRules());
         } else if (rmsd > m_rmsd_threshold) {
             m_reject_rmsd.push_back(diff_rot);
         }

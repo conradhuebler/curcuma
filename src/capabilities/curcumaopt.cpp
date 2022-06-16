@@ -28,10 +28,6 @@
 #include <LBFGS.h>
 #include <LBFGSB.h>
 
-#ifdef test
-#include "cppoptlib/function.h"
-#include "cppoptlib/solver/lbfgs.h"
-#endif
 
 #include <iomanip>
 #include <iostream>
@@ -52,19 +48,12 @@ using namespace LBFGSpp;
 
 int OptThread::execute()
 {
-    // OptimiseGeometryThreaded(&m_molecule, &m_result, &m_final, m_controller);
-    // m_molecule.writeXYZFile("blob.xyz");
     m_final = CurcumaOpt::LBFGSOptimise(&m_molecule, m_controller, m_result, &m_intermediate);
-    // std::cout << m_result << std::endl
-    //           << std::endl;
     return 0;
 }
 
 int SPThread::execute()
 {
-    // OptimiseGeometryThreaded(&m_molecule, &m_result, &m_final, m_controller);
-    // m_molecule.writeXYZFile("blob2.xyz");
-
     auto start = std::chrono::system_clock::now();
 
     double energy = CurcumaOpt::SinglePoint(&m_molecule, m_controller, m_result);
@@ -72,14 +61,12 @@ int SPThread::execute()
     m_final.setEnergy(energy);
     auto end = std::chrono::system_clock::now();
     m_result = fmt::format("Single Point Energy = {0} Eh ({1} secs)\n", energy, std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
-    // std::cout << m_result;
     return 0;
 }
 
 CurcumaOpt::CurcumaOpt(const json& controller, bool silent)
     : CurcumaMethod(CurcumaOptJson, controller, silent)
 {
-    // std::cout << controller << std::endl;
     UpdateController(controller);
 }
 
@@ -165,122 +152,10 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
     delete pool;
 }
 
-#ifdef test
-Molecule CurcumaOpt::CppNumSolvOptimise(const Molecule* host, const json& controller)
+void CurcumaOpt::clear()
 {
-    using Solver = cppoptlib::solver::Lbfgs<CppNumSolvInterface>;
-
-    PrintController(controller);
-    bool writeXYZ = Json2KeyWord<bool>(controller, "writeXYZ");
-    bool printOutput = Json2KeyWord<bool>(controller, "printOutput");
-    double dE = Json2KeyWord<double>(controller, "dE");
-    double dRMSD = Json2KeyWord<double>(controller, "dRMSD");
-    double LBFGS_eps = Json2KeyWord<double>(controller, "LBFGS_eps");
-    int method = Json2KeyWord<int>(controller, "GFN");
-    int InnerLoop = Json2KeyWord<int>(controller, "InnerLoop");
-    int OuterLoop = Json2KeyWord<int>(controller, "OuterLoop");
-
-    Geometry geometry = host->getGeometry();
-    Molecule tmp(host);
-    Molecule h(host);
-    Vector parameter(3 * host->AtomCount());
-
-    for (int i = 0; i < host->AtomCount(); ++i) {
-        parameter(3 * i) = geometry(i, 0);
-        parameter(3 * i + 1) = geometry(i, 1);
-        parameter(3 * i + 2) = geometry(i, 2);
-    }
-
-    XTBInterface interface;
-    interface.InitialiseMolecule(host);
-
-    double final_energy = interface.GFNCalculation(method);
-
-    CppNumSolvInterface xtb_function;
-    xtb_function.setMolecule(host);
-    xtb_function.setInterface(&interface);
-    xtb_function.setMethod(method); //cppoptlib::solver::State
-    Solver solver;
-    double fx;
-    // Evaluate
-    auto state = xtb_function.Eval(parameter);
-    std::cout << xtb_function(parameter) << " = " << state.value << std::endl;
-    std::cout << state.x << std::endl;
-    std::cout << state.gradient << std::endl;
-    std::cout << state.hessian << std::endl;
-
-    auto [solution, solver_state] = solver.Minimize(xtb_function, parameter);
-    /*
-    json RMSDJsonControl = {
-        { "reorder", false },
-        { "check", false },
-        { "heavy", false },
-        { "fragment", -1 },
-        { "fragment_reference", -1 },
-        { "fragment_target", -1 },
-        { "init", -1 },
-        { "pt", 0 },
-        { "silent", true },
-        { "storage", 1.0 },
-        { "method", "incr" },
-        { "noreorder", true },
-        { "threads", 1 }
-    };
-
-    RMSDDriver* driver = new RMSDDriver(RMSDJsonControl);
-
-    std::chrono::time_point<std::chrono::system_clock> start = std::chrono::system_clock::now(), end;
-    if (printOutput) {
-        printf("Step\tCurrent Energy\t\tEnergy Change\t\tRMSD Change\t   t\n");
-        printf("\t[Eh]\t\t\t[kJ/mol]\t\t [A]\t\t   [s]\n");
-    }
-    int atoms_count = host->AtomCount();
-    for (int outer = 0; outer < OuterLoop; ++outer) {
-        int niter = 0;
-        try {
-            niter = solver.Minimize(xtb_function, parameter);
-        } catch (const std::logic_error& error) {
-            break;
-        } catch (const std::runtime_error& error) {
-            break;
-        }
-
-        for (int i = 0; i < atoms_count; ++i) {
-            geometry(i, 0) = parameter(3 * i);
-            geometry(i, 1) = parameter(3 * i + 1);
-            geometry(i, 2) = parameter(3 * i + 2);
-        }
-        h.setGeometry(geometry);
-
-        driver->setReference(tmp);
-        driver->setTarget(h);
-        driver->start();
-        if (printOutput) {
-            end = std::chrono::system_clock::now();
-            printf("%i\t%8.5f\t\t%8.5f\t\t%8.5f\t%8.5f\n", outer, fun.m_energy, (fun.m_energy - final_energy) * 2625.5 ,  driver->RMSD(),std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0  );
-            start = std::chrono::system_clock::now();
-        }
-        final_energy = fun.m_energy;
-        tmp = h;
-        if (writeXYZ) {
-            h.setEnergy(final_energy);
-            h.appendXYZFile("curcuma_optim.xyz");
-        }
-        if (((fun.m_energy - final_energy) * 2625.5 < dE && driver->RMSD() < dRMSD))
-            break;
-    }
-    */
-    parameter = solution.x;
-    for (int i = 0; i < host->AtomCount(); ++i) {
-        geometry(i, 0) = parameter(3 * i);
-        geometry(i, 1) = parameter(3 * i + 1);
-        geometry(i, 2) = parameter(3 * i + 2);
-    }
-    h.setEnergy(final_energy);
-    h.setGeometry(geometry);
-    return h;
+    m_molecules.clear();
 }
-#endif
 
 double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, std::string& output)
 {
@@ -297,7 +172,6 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, 
         parameter(3 * i + 2) = geometry(i, 2);
     }
 
-    // XTBInterface interface;
     TBLiteInterface interface;
     interface.InitialiseMolecule(initial);
 
@@ -325,9 +199,9 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
 
     Geometry geometry = initial->getGeometry();
     intermediate->push_back(initial);
-    Molecule tmp(initial);
-    Molecule h(initial);
-    Vector parameter(3 * initial->AtomCount());
+    Molecule previous(initial);
+    Molecule next(initial);
+    Vector parameter(3 * initial->AtomCount()), old_parameter(3 * initial->AtomCount());
 
     for (int i = 0; i < initial->AtomCount(); ++i) {
         parameter(3 * i) = geometry(i, 0);
@@ -335,7 +209,6 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
         parameter(3 * i + 2) = geometry(i, 2);
     }
 
-    // XTBInterface interface;
     TBLiteInterface interface;
     interface.InitialiseMolecule(initial);
 
@@ -394,38 +267,49 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
         perform_optimisation = false;
 
     for (iteration = 0; iteration <= MaxIter && perform_optimisation; ++iteration) {
+        old_parameter = parameter;
         try {
             solver.SingleStep(fun, parameter, fx);
-        } catch (const std::logic_error& error) {
+        } catch (const std::logic_error& error_result) {
             if (solver.Step() < 1e-8) {
                 perform_optimisation = false;
             } else {
                 perform_optimisation = false;
-
-                std::cout << error.what() << std::endl;
+                error = true;
                 output += fmt::format("LBFGS interface signalled some logic error!\n");
+                output += fmt::format(" -- {0: ^75} --\n", error_result.what());
                 output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
 
                 if (printOutput) {
                     std::cout << output;
                     output.clear();
                 }
+                for (int i = 0; i < atoms_count; ++i) {
+                    geometry(i, 0) = old_parameter(3 * i);
+                    geometry(i, 1) = old_parameter(3 * i + 1);
+                    geometry(i, 2) = old_parameter(3 * i + 2);
+                }
+                next.setGeometry(geometry);
             }
-            break;
-        } catch (const std::runtime_error& error) {
-
-            std::cout << error.what() << std::endl;
+        } catch (const std::runtime_error& error_result) {
             output += fmt::format("LBFGS interface signalled some runtime error!\n");
+            output += fmt::format(" -- {0: ^75} --\n", error_result.what());
             output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
 
             if (printOutput) {
                 std::cout << output;
                 output.clear();
             }
-            break;
+            error = true;
+            perform_optimisation = false;
+            for (int i = 0; i < atoms_count; ++i) {
+                geometry(i, 0) = old_parameter(3 * i);
+                geometry(i, 1) = old_parameter(3 * i + 1);
+                geometry(i, 2) = old_parameter(3 * i + 2);
+            }
+            next.setGeometry(geometry);
         }
-
-        if (iteration % SingleStep == 0 && iteration) {
+        if ((iteration % SingleStep == 0 && iteration && perform_optimisation) || fun.isError()) {
             parameter = fun.Parameter();
 
             for (int i = 0; i < atoms_count; ++i) {
@@ -433,10 +317,10 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
                 geometry(i, 1) = parameter(3 * i + 1);
                 geometry(i, 2) = parameter(3 * i + 2);
             }
-            h.setGeometry(geometry);
+            next.setGeometry(geometry);
 
-            driver->setReference(tmp);
-            driver->setTarget(h);
+            driver->setReference(previous);
+            driver->setTarget(next);
             driver->start();
             end = std::chrono::system_clock::now();
 
@@ -451,12 +335,11 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
             std::cout << output;
             output.clear();
         }
-
         converged = (abs(fun.m_energy - final_energy) * 2625.5 < dE)
             + (driver->RMSD() < dRMSD)
             + (solver.isConverged())
             + (solver.final_grad_norm() < GradNorm);
-        perform_optimisation = converged < ConvCount;
+        perform_optimisation = (converged < ConvCount) && (fun.isError() == 0);
         /*
         std::cout << (abs(fun.m_energy - final_energy) * 2625.5 < 0.05)
                   << " " << (int(driver->RMSD() < 0.01))
@@ -473,10 +356,10 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
         }
         */
         final_energy = fun.m_energy;
-        if (tmp.Check() == 0) {
-            tmp = h;
-            h.setEnergy(final_energy);
-            intermediate->push_back(h);
+        if (next.Check() == 0) {
+            previous = next;
+            previous.setEnergy(final_energy);
+            intermediate->push_back(next);
         } else {
             perform_optimisation = false;
             error = true;
@@ -496,6 +379,7 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
             output.clear();
         }
     } else {
+        output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, driver->RMSD(), solver.final_grad_norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
         output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
         if (printOutput) {
             std::cout << output;
@@ -503,14 +387,14 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
         }
     }
 
-    if (tmp.Check() == 0) {
+    if (next.Check() == 0) {
         for (int i = 0; i < initial->AtomCount(); ++i) {
             geometry(i, 0) = parameter(3 * i);
             geometry(i, 1) = parameter(3 * i + 1);
             geometry(i, 2) = parameter(3 * i + 2);
         }
-        h.setEnergy(final_energy);
-        h.setGeometry(geometry);
+        previous.setEnergy(final_energy);
+        previous.setGeometry(geometry);
     }
-    return h;
+    return previous;
 }

@@ -24,13 +24,12 @@
 #include "curcumamethod.h"
 
 static json CurcumaOptJson{
-    { "Solver", 1 },
     { "writeXYZ", true },
     { "printOutput", true },
     { "dE", 0.1 },
     { "dRMSD", 0.01 },
     { "GFN", 2 },
-    { "MaxIter", 2000 },
+    { "MaxIter", 1000 },
     { "LBFGS_eps", 1e-5 },
     { "StoreIntermediate", 600 },
     { "SingleStep", 20 },
@@ -128,9 +127,8 @@ public:
     static Molecule LBFGSOptimise(const Molecule* host, const json& controller, std::string& output, std::vector<Molecule>* intermediate);
     static double SinglePoint(const Molecule* initial, const json& controller, std::string& output);
 
-#ifdef test
-    static Molecule CppNumSolvOptimise(const Molecule* host, const json& controller);
-#endif
+    void clear();
+
 private:
     /* Lets have this for all modules */
     inline nlohmann::json WriteRestartInformation() override { return json(); }

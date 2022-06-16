@@ -154,11 +154,14 @@ void Molecule::print_geom(bool moreinfo) const
 
 int Molecule::Check() const
 {
-    for (int i = 1; i < AtomCount(); ++i)
+    for (int i = 1; i < AtomCount(); ++i) {
+        if (std::isnan(m_geometry[i][0]) || std::isnan(m_geometry[i][1]) || std::isnan(m_geometry[i][2]))
+            return 1;
         for (int j = 0; j < i; ++j) {
             if (CalculateDistance(i, j) < 1e-1)
                 return 1;
         }
+    }
     return 0;
 }
 

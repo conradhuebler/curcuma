@@ -59,6 +59,8 @@ void Docking::LoadControlJson()
     m_centroid_max_distance = Json2KeyWord<double>(m_defaults, "CentroidMaxDistance");
     m_centroid_tol_distance = Json2KeyWord<double>(m_defaults, "CentroidTolDis");
     m_centroid_rot_distance = Json2KeyWord<double>(m_defaults, "RotationTolDis");
+    m_energy_threshold = Json2KeyWord<double>(m_defaults, "EnergyThreshold");
+
     m_threads = Json2KeyWord<int>(m_defaults, "threads");
     m_docking_threads = Json2KeyWord<int>(m_defaults, "DockingThreads");
     m_charge = Json2KeyWord<int>(m_defaults, "Charge");
@@ -189,7 +191,7 @@ void Docking::PerformDocking()
                             for (std::size_t i = 0; i < guest.AtomCount(); ++i) {
                                 molecule->addPair(guest.Atom(i));
                             }
-                            m_result_list.insert(std::pair<double, Molecule*>(all, molecule));
+                            m_docking_result.insert(std::pair<double, Molecule*>(all, molecule));
                         }
                     }
                 }
@@ -258,7 +260,7 @@ void Docking::PerformDocking()
                 }
                 molecule->setEnergy(distance);
                 molecule->setCharge(m_charge);
-                m_result_list.insert(std::pair<double, Molecule*>(all, molecule));
+                m_docking_result.insert(std::pair<double, Molecule*>(all, molecule));
                 if (molecule->GetFragments(frag_scaling).size() == 2)
                     m_reuse_anchor.push_back(thread->LastPosition());
             }
@@ -286,7 +288,7 @@ void Docking::PerformDocking()
               << "** Docking Phase 0 - Finished **" << std::endl;
     int index = 0;
     // Will be removed some day
-    for (const auto& pair : m_result_list) {
+    for (const auto& pair : m_docking_result) {
         ++index;
         std::string name;
         if (!m_NoOpt)
@@ -309,181 +311,152 @@ void Docking::PerformDocking()
 
 void Docking::PostOptimise()
 {
-    double frag_scaling = 1.5;
+    OptimiseBatch();
 
-    std::map<double, Molecule*> result_list, final_results;
-    auto iter = m_result_list.begin();
-    json opt = CurcumaOptJson;
-    opt["dE"] = 0.1;
-    opt["dRMSD"] = 0.01;
-    opt["printOutput"] = true;
-    opt["threads"] = 1; // m_threads;
-    opt["gfn"] = 66;
-
-    json spoint = opt;
-    spoint["SinglePoint"] = true;
-    spoint["gfn"] = 2;
-    spoint["threads"] = m_threads;
-
-    CurcumaOpt optimise(opt, false);
-    CurcumaOpt sp(spoint, false);
-    while (iter != m_result_list.end()) {
-        auto pair = *iter;
-        if (pair.second->GetFragments(frag_scaling).size() == 2)
-            optimise.addMolecule(pair.second);
-        else if (pair.second->GetFragments(frag_scaling).size() == 1)
-            sp.addMolecule(pair.second);
-        ++iter;
-    }
-    optimise.setBaseName("Optimise_F2");
-    optimise.start();
-
-    optimise.UpdateController(spoint);
-    optimise.start();
-
-    double e0 = -1e7;
-    for (const auto& m : *optimise.Molecules()) {
-        e0 = std::max(m.Energy(), e0);
-    }
-    std::cout << "energy threshold " << e0 << std::endl;
-    sp.setBaseName("SP_F1");
-    sp.start();
-    /*
-    std::vector<double> energies;
-    double energy = 0;
-    for (const auto& m : *sp.Molecules()) {
-        energy += m.Energy();
-    }
-    energy /= double(sp.Molecules()->size());
-    */
-    // spoint["gfn"] = 2;
-    /*
-        CurcumaOpt sp2(spoint, false);
-        for (const auto& m : *sp.Molecules())
-            if (m.Energy() < energy)
-                sp2.addMolecule(m);
-        sp2.start();
-        */
-
-    json opt_2 = opt;
-    opt_2["gfn"] = 2;
-    opt_2["dE"] = 0.1;
-    opt_2["dRMSD"] = 0.01;
-    opt_2["threads"] = m_threads;
-
-    std::map<double, Molecule*> temp_molecules;
-
-    for (const auto& m : *sp.Molecules()) {
-        Molecule* mol1 = new Molecule(m);
-        temp_molecules.insert(std::pair<double, Molecule*>(m.Energy(), mol1));
-    }
-
-    for (const auto& t : *optimise.Molecules()) {
-        Molecule* mol2 = new Molecule(t);
-        result_list.insert(std::pair<double, Molecule*>(mol2->Energy(), mol2));
-    }
-    int failed = 0;
-    CurcumaOpt opt2(opt_2, false);
-
-    for (auto it = temp_molecules.begin(); it != temp_molecules.end(); ++it) {
-        opt2.addMolecule(it->second);
-    }
-    opt2.start();
-    for (const auto& m : *opt2.Molecules()) {
-        m.GetFragments(frag_scaling).size();
-        std::cout << m.Energy() << " ";
-        for (const auto l : m.FragmentMass())
-            std::cout << l << " " << std::endl;
-
-        if (m.GetFragments(frag_scaling).size() == 2) {
-            double sum = 0;
-            std::vector<double> fragments = m.FragmentMass();
-
-            for (int i = 0; i < fragments.size(); ++i)
-                sum += abs(m_fragments_mass[i] - fragments[i]);
-            for (auto a : fragments)
-                std::cout << a << " ";
-            std::cout << " Difference " << sum;
-            if (sum < 1e-3) {
-                result_list.insert(std::pair<double, Molecule*>((*opt2.Molecules())[0].Energy(), new Molecule((*opt2.Molecules())[0])));
-                std::cout << " adding new Molecule! E = " << (*opt2.Molecules())[0].Energy() << " Eh\n\n"
-                          << std::endl;
-
-            } else {
-                failed++;
-            }
-        } else
-            failed++;
-        if (failed > 5)
-            break;
-    }
-    /*
-        for (const auto& t : *opt2.Molecules()) {
-            Molecule* mol2 = new Molecule(t);
-            result_list.insert(std::pair<double, Molecule*>(mol2->Energy(), mol2));
-        }
-    */
-    // Will be removed some day
-    std::vector<int> frags = { 0, 0, 0, 0, 0 };
-    int index = 0;
-    for (const auto& pair : result_list) {
-        ++index;
-        frags[pair.second->GetFragments(frag_scaling).size()]++;
-        const std::string name = "Optimise_B" + std::to_string(frags[pair.second->GetFragments(frag_scaling).size()] / 100 + 1) + "_F" + std::to_string(pair.second->GetFragments(frag_scaling).size()) + ".xyz";
-        pair.second->appendXYZFile(name);
-        if (!std::binary_search(m_files.begin(), m_files.end(), name))
-            m_files.push_back(name);
-
-        if (pair.second->GetFragments(frag_scaling).size() == 2) {
-            double sum = 0;
-            std::vector<double> fragments = pair.second->FragmentMass();
-
-            for (int i = 0; i < fragments.size(); ++i)
-                sum += abs(m_fragments_mass[i] - fragments[i]);
-            for (auto a : fragments)
-                std::cout << a << " ";
-            std::cout << " Difference " << sum;
-            if (sum < 1e-3) {
-                final_results.insert(pair);
-                std::cout << " taking! E = " << pair.first << " Eh" << std::endl;
-            } else {
-                std::cout << " skipping! E = " << pair.first << " Eh" << std::endl;
-            }
-        }
-        }
+    CollectStructures();
 
     if (!m_PostFilter)
         return;
 
-    std::cout << "** Docking Phase 3 - Fast Filtering structures with correct fragments **" << std::endl;
+    std::cout << "** Docking Phase 3 - Filtering structures with hybrid reordering**" << std::endl;
+    FilterStructures();
+}
 
+void Docking::OptimiseBatch()
+{
+    double frag_scaling = 1.5;
+    /*
+        json GFNFF = CurcumaOptJson;
+        GFNFF["printOutput"] = false;
+        GFNFF["threads"] = 1; // m_threads;
+        GFNFF["gfn"] = 66;
+        GFNFF["dE"] = 1;
+        GFNFF["dRMSD"] = 0.1;
+        GFNFF["GradNorm"] = 0.01;
+        GFNFF["ConvCount"] = 3;
+    */
+    json GFN2_crude = CurcumaOptJson;
+    GFN2_crude["SinglePoint"] = false;
+    GFN2_crude["gfn"] = 2;
+    GFN2_crude["threads"] = m_threads;
+    GFN2_crude["dE"] = 10;
+    GFN2_crude["dRMSD"] = 0.1;
+    GFN2_crude["GradNorm"] = 0.01;
+    GFN2_crude["ConvCount"] = 3;
+
+    m_optimise = new CurcumaOpt(GFN2_crude, false);
+    m_singlepoint = new CurcumaOpt(GFN2_crude, false);
+
+    /* Divide list of structures in those which already have 2 fragments (supramolecular complex) and those which have atoms to close to each other*/
+    auto iter = m_docking_result.begin();
+    while (iter != m_docking_result.end()) {
+        auto pair = *iter;
+        if (pair.second->GetFragments(frag_scaling).size() == 2)
+            m_optimise->addMolecule(pair.second);
+        else if (pair.second->GetFragments(frag_scaling).size() == 1)
+            m_singlepoint->addMolecule(pair.second);
+        ++iter;
+    }
+    /* Optimisation */
+    std::cout << "** Crude preoptimisation of " << m_optimise->Molecules()->size() << " complexes **" << std::endl;
+
+    m_optimise->setBaseName("Optimise_Crude_F2");
+    m_optimise->start();
+
+    /* Optimisation of the structures with incorrect fragments */
+    std::cout << "** Crude preoptimisation of " << m_singlepoint->Molecules()->size() << " structures with wrong connectivity **" << std::endl;
+
+    m_singlepoint->setBaseName("Optimise_Crude_FX");
+    m_singlepoint->start();
+
+    /* Update Optimiser to perform single point calculation (GFN2) of the at GFN-FF level optimised structures */
+
+    /*
+        m_optimise->UpdateController(GFN2_crude);
+        m_optimise->start();
+    */
+    /* Estimate the approximate energy of the correct complexes */
+    double e0 = -1e7;
+    for (const auto& m : *(m_optimise->Molecules())) {
+        e0 = std::max(m.Energy(), e0);
+    }
+    std::cout << " *** energy threshold " << e0 << " Eh ***" << std::endl;
+
+    // m_optimise->clear();
+
+    const std::string exclude_energy = "AboveThreshold.xyz";
+    int added = 0, excluded = 0;
+    for (const auto& m : *(m_singlepoint->Molecules())) {
+        if (abs(m.Energy() - e0) * 2625.5 < m_energy_threshold) {
+            m_optimise->addMolecule(m);
+            added++;
+            /*
+            Molecule* mol1 = new Molecule(m);
+            m_temp_results.insert(std::pair<double, Molecule*>(m.Energy(), mol1));
+            */
+        } else {
+            excluded++;
+            m.appendXYZFile(exclude_energy);
+        }
+    }
+    std::cout << " ***" << added << " complexes to optimisation batch ***" << std::endl;
+    std::cout << " ***" << excluded << " structures dropped ***" << std::endl;
+
+    json GFN2 = CurcumaOptJson;
+    GFN2["gfn"] = 2;
+    GFN2["threads"] = m_threads;
+    GFN2["printOutput"] = false;
+
+    std::cout << "** Standard optimsation of " << m_optimise->Molecules()->size() << " complexes **" << std::endl;
+
+    m_optimise->UpdateController(GFN2);
+    m_optimise->start();
+}
+
+void Docking::CollectStructures()
+{
+    double frag_scaling = 1.5;
+    const std::string name = "Final_Result.xyz";
+    const std::string excluded = "Excluded_Result.xyz";
+    int added = 0, dropped = 0;
+
+    for (const auto& m : *(m_optimise->Molecules())) {
+        m.GetFragments(frag_scaling).size();
+        if (m.GetFragments(frag_scaling).size() == 2) {
+            double sum = 0;
+            std::vector<double> fragments = m.FragmentMass();
+            for (unsigned int i = 0; i < fragments.size(); ++i)
+                sum += abs(m_fragments_mass[i] - fragments[i]);
+            if (sum < 1e-3) {
+                added++;
+                m_optimisation_result.insert(std::pair<double, Molecule*>(m.Energy(), new Molecule(m)));
+                // std::cout << " adding new Molecule! E = " << m.Energy() << " Eh\n\n"
+                //           << std::endl;
+                m.appendXYZFile(name);
+            } else
+                m.appendXYZFile(excluded);
+            dropped++;
+        }
+    }
+    std::cout << " ***" << added << " complexes to optimisation batch and written to" << name << " ***" << std::endl;
+    std::cout << " ***" << dropped << " structures dropped  - written to " << excluded << " ***" << std::endl;
+}
+
+void Docking::FilterStructures()
+{
     json confscan = ConfScanJson;
-    confscan["heavy"] = false;
-    confscan["maxrank"] = -1;
-    confscan["writeXYZ"] = false;
-    confscan["ForceReorder"] = true;
-    confscan["check"] = false;
-    confscan["noname"] = true;
+    confscan["forceReorder"] = true;
     confscan["silent"] = true;
-    confscan["maxenergy"] = -1;
     confscan["RMSDMethod"] = m_RMSDmethod;
     confscan["RMSDThreads"] = m_threads;
     confscan["RMSDElement"] = m_RMSDElement;
-
-    json controller;
-    controller["confscan"] = confscan;
-    ConfScan* scan = new ConfScan(controller);
-    scan->setMolecules(final_results);
+    // json controller;
+    // controller["ConfScan"] = confscan;
+    ConfScan* scan = new ConfScan(confscan, true);
+    // scan->setMolecules(m_optimisation_result);
+    scan->setFileName("Final_Result.xyz");
     scan->start();
 
     std::vector<Molecule*> result = scan->Result();
-    std::cout << "** Docking Phase 4 - Writing structures to Final_Result.xyz **" << std::endl;
-
-    index = 0;
-    for (const auto mol : result) {
-        ++index;
-        const std::string name = "Final_Result.xyz";
-        mol->appendXYZFile(name);
-        delete mol;
-    }
+    std::cout << "** Docking Phase 4 - Structures were written to Final_Result.accepted.xyz **" << std::endl;
 }

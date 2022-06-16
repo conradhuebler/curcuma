@@ -16,7 +16,6 @@ add_subdirectory(${PROJECT_SOURCE_DIR}/external/fmt EXCLUDE_FROM_ALL)
 
 include_directories(SYSTEM  ${PROJECT_SOURCE_DIR}/external/fmt/include
                             ${PROJECT_SOURCE_DIR}/external/LBFGSpp/include
-                            ${PROJECT_SOURCE_DIR}/external/CppNumericalSolvers/include
                             ${PROJECT_SOURCE_DIR}/external/ripser
                             ${PROJECT_BINARY_DIR}/external/eigen-3.4.0
                             ${PROJECT_BINARY_DIR}/external/)

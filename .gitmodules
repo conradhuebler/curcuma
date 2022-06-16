@@ -13,3 +13,6 @@
 [submodule "external/tblite"]
 	path = external/tblite
 	url = https://github.com/tblite/tblite
+[submodule "external/LBFGSpp"]
+	path = external/LBFGSpp
+	url = https://github.com/conradhuebler/LBFGSpp

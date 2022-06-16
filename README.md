@@ -7,24 +7,20 @@ A simple Open Source molecular modelling tool.
 
 ## Download and requirements
 git clones automatically some submodules.
-- [LBFGSpp](https://github.com/yixuan/LBFGSpp/) provides LBFGS optimiser
-- [XTB](https://github.com/grimme-lab/xtb) eXtended TightBinding - Some methods use this, however it is disabled by default. Add '-DUSE_XTB=true ' to the cmake command line to enable it. GCC 8 or later has to be used.
-- [tblite](https://github.com/tblite/tblite) eXtended TightBinding via tblite 
+- [LBFGSpp](https://github.com/conradhuebler/LBFGSpp) a fork of [yixuan/LBFGSpp](https://github.com/yixuan/LBFGSpp/) provides LBFGS optimiser, the fork allows performing single step optimisation without resetting any calculated optimsation history
+- [XTB](https://github.com/conradhuebler/xtb) a fork of the [official xtb](https://github.com/grimme-lab/xtb) program for eXtended TightBinding - It is only used for GFN-FFF calculation. The adaptions in the fork suppress the output in the GFN-FF calculations. 
+- [tblite](https://github.com/tblite/tblite) eXtended TightBinding via tblite for GFN1 and GFN2 calculation
 - [CxxThreadPool](https://github.com/conradhuebler/CxxThreadPool) - C++ Thread Pool for parallel calculation
 - [eigen](https://gitlab.com/libeigen/eigen) provides eigen C++ library for linear algebra. Eigen is not downloaded automatically, but will be fetched and updated if the build scripts in the **scripts** subdirectory are used.
 - [fmt](https://github.com/fmtlib/fmt) formatted console output
-- [CppNumericalSolvers](https://github.com/PatWie/CppNumericalSolvers) disabled alternative LBFGS solver
 
 Additionally, [nlohmann/json](https://github.com/nlohmann/json) is obtained via cmake.
 
 ### Using xTB in curcuma is now again WIP
-xTB is automatically obtained during git clone, however it is not included in curcuma with the default compiler settings. There are two ways of including XTB:
-- Compiling and linking automatically, set **COMPILE_XTB** to true ( with -DCOMPILE_XTB=true or via ccmake). XTB will be compiled with the c++ and fortran compiler in the path (using the blas and lapack libraries in the path as well). The xtb program is then quite slow.
-- Linking curcuma to the official library (get it from the xtb github page). Set **LINK_XTB** to true and define the path to **XTB_DIR** where the libxtb.so has been placed. As the xtb source has been obtained already, no additional header file is needed. However, curcuma has to be compiled with an intel compiler.
-
+xtb and tblite is automatically obtained during git clone, however it is not included in curcuma with the default compiler settings. Add '-DCOMPILE_XTB=true ' to the cmake command line to enable it. 
 Using xtb calculation in curcuma can be controlled for now as follows:
 - Add **-gfn 1** to run GFN1 calculation, **-gfn 66** to run GFN-FF calculation.
-- xtb calculation may be thread-safe now, so parallel optimisation ( after docking ) are possible now. However, the variable **OMP_NUM_THREADS** should be set to 1. Add **-thread 12** to run optimisation after docking with 12 threads. GFN FF calculation will surely fail, might be due to the topo file.
+- GFN1 and GFN2 calculation are thread-safe now, so parallel optimisation are possible now. However, the variable **OMP_NUM_THREADS** should be set to 1. Add **-thread 12** to run optimisation after docking with 12 threads. GFN-FF calculation will fail in parallel mode.
 
 
 **Please cite xtb if used within curcuma! The most recent information can be found [here](https://github.com/grimme-lab/xtb#citations)!**
@@ -76,6 +72,28 @@ Add
 ```
 to perform calculation only on non-proton atoms.
 
+
+```json
+{ "reorder", false },
+{ "check", false },
+{ "heavy", false },
+{ "fragment", -1 },
+{ "fragment_reference", -1 },
+{ "fragment_target", -1 },
+{ "init", -1 },
+{ "pt", 0 },
+{ "silent", false },
+{ "storage", 1.0 },
+{ "method", "incr" },
+{ "noreorder", false },
+{ "threads", 1 },
+{ "Element", 7 },
+{ "DynamicCenter", false },
+{ "order", "" },
+{ "check", false }
+```
+
+
 ## Docking tool
 Some docking can be performed (WIP).
 
@@ -107,6 +125,35 @@ curcuma -dock -host A.xyz -guest B.xyz -Pos_X X  -Pos_X Y -Pos_X Z
 with {X, Y, Z} being the initial anchor position for the substrat.
 
 After docking a PseudoFF optimisation of the docking position will be performed, where the Lennard-Jones-Potential between both structures is calculated. XTB is then used to preoptimise the unique docking structures and the results are filtered using ConfScan and the template based reordering approach.
+
+```json
+{ "Pos_X", 0.0 },
+{ "Pos_Y", 0.0 },
+{ "Pos_Z", 0.0 },
+{ "AutoPos", true },
+{ "Filter", true },
+{ "PostOpt", true },
+{ "Step_X", 10 },
+{ "Step_Y", 10 },
+{ "Step_z", 10 },
+{ "Host", "none" },
+{ "Guest", "none" },
+{ "Complex", "none" },
+{ "scaling", 1.5 },
+{ "NoOpt", false },
+{ "CentroidMaxDistance", 1e5 },
+{ "CentroidTolDis", 1e-1 },
+{ "RotationTolDis", 1e-1 },
+{ "Threads", 1 },
+{ "DockingThreads", 1 },
+{ "Charge", 0 },
+{ "Cycles", 1 },
+{ "RMSDMethod", "incr" },
+{ "RMSDThreads", 1 },
+{ "RMSDElement", 7 }
+```
+
+
 
 ## Conformation Filter
 Curcuma has some conformation filter based on energy, rmsd, rotation constants and rank limitation. As some structures may be identic, yet can not be aligned due to atom ordering, depending on the difference of the energy and rotational constants and the rmsd, automatic reordering in rmsd calculation will be performed.
@@ -145,13 +192,56 @@ With
 ```
 up to X reorder results will be reused from the last reorder calculation. Template based approaches result in only one reorder rule, however X is set to 0 in automatically, but can be changed with that argument.
 
+```json
+{ "noname", true },
+{ "restart", true },
+{ "heavy", false },
+{ "rmsd", -1 },
+{ "rank", -1 },
+{ "writeXYZ", false },
+{ "forceReorder", false },
+{ "check", false },
+{ "energy", 1.0 },
+{ "maxenergy", -1.0 },
+{ "preventreorder", false },
+{ "silent", false },
+{ "scaleLoose", 2 },
+{ "scaleTight", 0.5 },
+{ "skip", 0 },
+{ "allxyz", false },
+{ "update", false },
+{ "MaxParam", -1 },
+{ "UseOrders", -1 },
+{ "RMSDMethod", "incr" },
+{ "MaxHTopoDiff", -1 },
+{ "GFN", -1 },
+{ "RMSDThreads", 1 },
+{ "RMSDElement", 7 }
+```
+
+
 ## Find unique structures in trajectories
 xyz and trj are handled equally.
 ```sh
 curcuma -rmsdtraj XXX.trj -writeUnique -rmsd 1.5
 ```
 
-## Batch optimisation
+
+```json
+{ "writeUnique", false },
+{ "writeAligned", false },
+{ "rmsd", 1.5 },
+{ "fragment", -1 },
+{ "reference", "none" },
+{ "second", "none" },
+{ "heavy", false },
+{ "pcafile", false },
+{ "allxyz", false },
+{ "RefFirst", false },
+{ "noreorder", true }
+```
+
+## Geometry optimisation (batch mode possible)
 Geometry optimisation can be performed with curcuma using 
 ```sh
 curcuma -opt XXX.xyz
@@ -159,6 +249,24 @@ curcuma -opt XXX.xyz
 A file called XXX.opt.xyz with the optimised structures will be written. The individual steps are stored in XXX.trj.xyz. The number of threads can be controlled with
 ```sh
 -threads X
+```
+
+```json
+{ "writeXYZ", true },
+{ "printOutput", true },
+{ "dE", 0.1 },
+{ "dRMSD", 0.01 },
+{ "GFN", 2 },
+{ "MaxIter", 2000 },
+{ "LBFGS_eps", 1e-5 },
+{ "StoreIntermediate", 600 },
+{ "SingleStep", 20 },
+{ "ConvCount", 4 },
+{ "GradNorm", 0.001 },
+{ "Threads", 1 },
+{ "Charge", 0 },
+{ "Spin", 0 },
+{ "SinglePoint", false }
 ```
 
 ## Reorder and Align trajectories

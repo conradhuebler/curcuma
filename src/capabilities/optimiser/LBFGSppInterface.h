@@ -59,6 +59,7 @@ public:
         }
         m_interface->UpdateMolecule(coord);
         fx = m_interface->GFNCalculation(m_method, gradient);
+        m_error = std::isnan(fx);
 
         for (int i = 0; i < m_atoms; ++i) {
             grad[3 * i + 0] = gradient[3 * i + 0];
@@ -81,6 +82,7 @@ public:
     }
     void setInterface(TBLiteInterface* interface) { m_interface = interface; }
     void setMethod(int method) { m_method = method; }
+    bool isError() const { return m_error; }
 
 private:
     int m_iter = 0;
@@ -90,4 +92,5 @@ private:
     TBLiteInterface* m_interface;
     Vector m_parameter;
     const Molecule* m_molecule;
+    bool m_error = false;
 };

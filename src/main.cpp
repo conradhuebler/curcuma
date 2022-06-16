@@ -211,6 +211,7 @@ int main(int argc, char **argv) {
                 std::cerr << "-energy    **** Energy threshold for identical structures [kJ/mol]." << std::endl;
                 return -1;
             }
+            std::cout << controller << std::endl;
             ConfScan* scan = new ConfScan(controller);
             scan->setFileName(argv[2]);
             scan->start();

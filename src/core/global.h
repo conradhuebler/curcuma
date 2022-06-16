@@ -244,7 +244,9 @@ inline json IncludeJson(const json& reference, const json& patch)
 inline void PrintController(const json& controller)
 {
     for (const auto& entry : controller.items())
-        std::cout << entry.key() << ": " << entry.value() << std::endl;
+        std::cout << "**| " << entry.key() << ": " << entry.value() << " |**      ";
+    std::cout << std::endl
+              << std::endl;
 }
 
 inline int MaxThreads()

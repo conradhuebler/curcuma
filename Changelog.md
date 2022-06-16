@@ -1,6 +1,10 @@
 # The (incomplete) curcuma Changelog
 
 ### pre Alpha
+
+- add forked LBFGSpp for single steps in geometry optimisation
+- add tblite and forked xtb for better control of xTB calculation
+- extended centroids for docking
 - compare/analyse NCIPLOT's RDG vs rho plots
 - add parallel batch optimisation
 - add conformation statistics
