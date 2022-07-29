@@ -19,6 +19,8 @@
 
 #include "curcumamethod.h"
 
+#include "src/capabilities/confscan.h"
+#include "src/capabilities/curcumaopt.h"
 #include "src/capabilities/rmsd.h"
 
 #include "src/core/elements.h"
@@ -65,17 +67,17 @@ void RMSDTraj::start()
         atoms_target = m_stored_structures[0].AtomCount();
     }
 
-    std::string outfile = m_filename;
+    m_outfile = m_filename;
     for (int i = 0; i < 4; ++i)
-        outfile.pop_back();
+        m_outfile.pop_back();
 
-    m_rmsd_file.open(outfile + "_rmsd.dat");
+    m_rmsd_file.open(m_outfile + "_rmsd.dat");
 
     if (m_pcafile)
-        m_pca_file.open(outfile + "_pca.dat");
+        m_pca_file.open(m_outfile + "_pca.dat");
 
     if (m_pairwise) {
-        m_pairwise_file.open(outfile + "_pairwise.dat");
+        m_pairwise_file.open(m_outfile + "_pairwise.dat");
     }
 
     json RMSDJsonControl = {
@@ -100,11 +102,11 @@ void RMSDTraj::start()
     driver->setFragment(m_fragment);
     std::ofstream export_file;
     if (m_writeUnique) {
-        export_file.open(outfile + "_unique.xyz");
+        export_file.open(m_outfile + ".unique.xyz");
         export_file.close();
     }
     if (m_writeAligned) {
-        export_file.open(outfile + "_aligned.xyz");
+        export_file.open(m_outfile + "_aligned.xyz");
         export_file.close();
     }
     std::ifstream input(m_filename);
@@ -134,7 +136,7 @@ void RMSDTraj::start()
 
         if (m_stored_structures.size() == 0) {
             if (m_writeUnique)
-                mol.appendXYZFile(outfile + "_unique.xyz");
+                mol.appendXYZFile(m_outfile + ".unique.xyz");
             m_stored_structures.push_back(mol);
             initial = mol;
             prev = mol;
@@ -173,7 +175,7 @@ void RMSDTraj::start()
             m_rmsd_vector.push_back(driver->RMSD());
             m_energy_vector.push_back(energy);
             if (m_writeAligned) {
-                driver->TargetAligned().appendXYZFile(outfile + "_aligned.xyz");
+                driver->TargetAligned().appendXYZFile(m_outfile + "_aligned.xyz");
             }
 
             if (m_pcafile) {
@@ -202,7 +204,7 @@ void RMSDTraj::start()
 
                 if (perform_rmsd) {
                     m_stored_structures.push_back(mol);
-                    mol.appendXYZFile(outfile + "_unique.xyz");
+                    mol.appendXYZFile(m_outfile + ".unique.xyz");
                     std::cout << "New structure added ... ( " << m_stored_structures.size() << "). " << int(index / double(max) * 100) << " % done ...!" << std::endl;
                 }
             }
@@ -222,10 +224,7 @@ void RMSDTraj::start()
             mol_2.setName(std::to_string(molecule));
         }
     }
-    /*
-    if (m_writeUnique && m_allxyz)
-        Files::xyz2allxyz(outfile + "_unique.xyz");
-*/
+
     double rmsd_mean = Tools::mean(m_rmsd_vector);
     double rmsd_median = Tools::median(m_rmsd_vector);
     double rmsd_std = Tools::stdev(m_rmsd_vector, rmsd_mean);
@@ -244,6 +243,12 @@ void RMSDTraj::start()
     m_rmsd_file << "#" << rmsd_shannon << "\t" << energy_shannon << std::endl;
 
     delete driver;
+
+    if (m_opt && m_writeUnique) {
+        Optimise();
+        if (m_filter)
+            Filter();
+    }
 }
 
 void RMSDTraj::LoadControlJson()
@@ -259,4 +264,21 @@ void RMSDTraj::LoadControlJson()
     m_pairwise = (m_second_file.compare("none") != 0);
     m_allxyz = Json2KeyWord<bool>(m_defaults, "allxyz");
     m_ref_first = Json2KeyWord<bool>(m_defaults, "RefFirst");
+    m_opt = Json2KeyWord<bool>(m_defaults, "opt");
+    m_filter = Json2KeyWord<bool>(m_defaults, "filter");
+}
+
+void RMSDTraj::Optimise()
+{
+    CurcumaOpt optimise(m_controller["rmsdtraj"], true);
+    optimise.setFileName(m_outfile + ".unique.xyz");
+    optimise.setBaseName(m_outfile);
+    optimise.start();
+}
+
+void RMSDTraj::Filter()
+{
+    ConfScan* scan = new ConfScan(m_controller["rmsdtraj"], false);
+    scan->setFileName(m_outfile + ".unique.xyz");
+    scan->start();
 }

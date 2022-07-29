@@ -730,7 +730,7 @@ void Molecule::writeXYZFile(const std::string& filename) const
 std::string Molecule::Header() const
 {
 #ifdef GCC
-    return fmt::format(" ** Energy = {:e} Eh ** Charge = {} ** Spin = {} ** Curcuma {} ({})\n", Energy(), Charge(), Spin(), qint_version, git_tag);
+    return fmt::format(" ** Energy = {:10f} Eh ** Charge = {} ** Spin = {} ** Curcuma {} ({})\n", Energy(), Charge(), Spin(), qint_version, git_tag);
 #else
     return fmt::format(" ** Energy = {:} Eh ** Charge = {} ** Spin = {} ** Curcuma {} ({})\n", Energy(), Charge(), Spin(), qint_version, git_tag);
 #endif
@@ -739,7 +739,7 @@ std::string Molecule::Header() const
 std::string Molecule::Atom2String(int i) const
 {
 #ifdef GCC
-    return fmt::format("{}  {:e}    {:e}    {:e}\n", Elements::ElementAbbr[m_atoms[i]].c_str(), m_geometry[i][0], m_geometry[i][1], m_geometry[i][2]);
+    return fmt::format("{}  {:f}    {:f}    {:f}\n", Elements::ElementAbbr[m_atoms[i]].c_str(), m_geometry[i][0], m_geometry[i][1], m_geometry[i][2]);
 #else
     return fmt::format("{}  {:}    {:}    {:}\n", Elements::ElementAbbr[m_atoms[i]].c_str(), m_geometry[i][0], m_geometry[i][1], m_geometry[i][2]);
 #endif

@@ -81,6 +81,8 @@ void CurcumaOpt::LoadControlJson()
     m_charge = Json2KeyWord<double>(m_defaults, "Charge");
     m_spin = Json2KeyWord<double>(m_defaults, "Spin");
     m_singlepoint = Json2KeyWord<bool>(m_defaults, "SinglePoint");
+    if (m_GFNmethod == 66)
+        m_threads = 1;
 }
 
 void CurcumaOpt::start()

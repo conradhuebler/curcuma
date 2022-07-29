@@ -44,7 +44,9 @@ const json RMSDTrajJson{
     { "pcafile", false },
     { "allxyz", false },
     { "RefFirst", false },
-    { "noreorder", true }
+    { "noreorder", true },
+    { "opt", false },
+    { "filter", false }
 };
 
 class RMSDTraj : public CurcumaMethod {
@@ -71,6 +73,10 @@ public:
 
     void start() override;
 
+    void Optimise();
+
+    void Filter();
+
 private:
     /* Read Controller has to be implemented for all */
     void LoadControlJson() override;
@@ -86,12 +92,12 @@ private:
     /* Lets have all methods read the input/control file */
     void ReadControlFile() override {}
 
-    std::string m_filename, m_reference, m_second_file;
+    std::string m_filename, m_reference, m_second_file, m_outfile;
     std::ofstream m_rmsd_file, m_pca_file, m_pairwise_file;
     std::vector<Molecule> m_stored_structures;
     std::vector<double> m_rmsd_vector, m_energy_vector;
     int m_fragment = -1;
-    bool m_writeUnique = false, m_pairwise = false, m_heavy = false, m_pcafile = false, m_writeAligned = false, m_ref_first = false;
+    bool m_writeUnique = false, m_pairwise = false, m_heavy = false, m_pcafile = false, m_writeAligned = false, m_ref_first = false, m_opt = false, m_filter = false;
     bool m_allxyz = false;
     double m_rmsd_threshold = 1.0;
 };
