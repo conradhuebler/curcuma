@@ -56,7 +56,8 @@ static const json ConfScanJson = {
     { "MaxHTopoDiff", -1 },
     { "GFN", -1 },
     { "RMSDThreads", 1 },
-    { "RMSDElement", 7 }
+    { "RMSDElement", 7 },
+    { "accepted", "" }
 };
 
 class RMSDDriver;
@@ -138,7 +139,7 @@ private:
     std::string m_filename, m_accepted_filename, m_rejected_filename, m_result_basename, m_statistic_filename;
     std::map<double, int> m_ordered_list;
     std::vector<std::pair<std::string, Molecule*>> m_molecules;
-    double m_energy_threshold = 1.0, m_rmsd_threshold = 1.0, m_diff_rot_rel_loose = 0.3, m_diff_rot_rel_tight = 0.01, m_nearly_missed = 0.8, m_energy_cutoff = -1, m_reference_last_energy = 0, m_target_last_energy = 0, m_lowest_energy = 1;
+    double m_energy_threshold = 1.0, m_rmsd_threshold = 1.0, m_diff_rot_rel_loose = 0.3, m_diff_rot_rel_tight = 0.01, m_nearly_missed = 0.8, m_energy_cutoff = -1, m_reference_last_energy = 0, m_target_last_energy = 0, m_lowest_energy = 1, m_current_energy = 0;
     double m_diff_rot_abs_tight = 0, m_diff_rot_abs_loose = 0, m_scale_tight = 0.5, m_scale_loose = 2;
     std::vector<Molecule*> m_result, m_rejected_structures;
     std::vector<double> m_accept_rmsd, m_reject_rmsd;

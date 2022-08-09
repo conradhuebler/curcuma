@@ -404,7 +404,9 @@ void ConfScan::SetUp()
         std::cout << "    RMSD Calculation will be performed on all atoms! " << std::endl;
 
     std::cout << "    RMSD Threshold set to: " << m_rmsd_threshold << " Angstrom" << std::endl;
-    std::cout << "    Energy Threshold set to: " << m_energy_threshold << " kJ/mol" << std::endl;
+    std::cout << "    Highest energy conformer allowed: " << m_energy_cutoff << " kJ/mol " << std::endl;
+
+    //  std::cout << "    Energy Threshold set to: " << m_energy_threshold << " kJ/mol" << std::endl;
     // std::cout << "    Thresholds in rotational constants (averaged over Ia, Ib and Ic): " << std::endl;
     // std::cout << "    Loose Threshold: " << m_diff_rot_abs_loose << " MHz" << std::endl;
     // std::cout << "    Tight Threshold: " << m_diff_rot_abs_tight << " MHz" << std::endl;
@@ -465,10 +467,10 @@ void ConfScan::CheckRMSD()
         }
         if (m_result.size() == 0) {
             m_result.push_back(mol1);
+            m_lowest_energy = mol1->Energy();
             continue;
         }
-        if (m_lowest_energy > 0)
-            m_lowest_energy = mol1->Energy();
+        m_current_energy = mol1->Energy();
 
         bool keep_molecule = true;
         RMSDDriver* driver = new RMSDDriver(rmsd);
@@ -517,16 +519,17 @@ bool ConfScan::SingleCheckRMSD(const Molecule* mol1, const Molecule* mol2, RMSDD
     double Ic = abs(mol1->Ic() - mol2->Ic());
 
     double diff_rot = (Ia + Ib + Ic) * third;
+    double difference = abs(m_current_energy - m_lowest_energy) * 2625.5;
+    if (difference > m_energy_cutoff && m_energy_cutoff != -1) {
+        keep_molecule = false;
+        return false;
+    }
 
     driver->setReference(mol1);
     driver->setTarget(mol2);
 
     driver->start();
     rmsd = driver->RMSD();
-    double difference = abs(mol1->Energy() - m_lowest_energy) * 2625.5;
-    if (difference > m_energy_cutoff && m_energy_cutoff != -1) {
-        keep_molecule = false;
-    }
 
     if (!m_silent) {
         std::cout << "Energy Difference: " << std::setprecision(2) << difference << " kJ/mol" << std::endl;
@@ -612,6 +615,7 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
             m_result.push_back(mol1);
             continue;
         }
+        m_current_energy = mol1->Energy();
 
         bool keep_molecule = true;
         RMSDDriver* driver = new RMSDDriver(rmsd);
@@ -642,7 +646,7 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
         delete driver;
         if ((m_result.size() >= m_maxrank && limit) || (m_result.size() >= 2 * m_maxrank && !limit))
             break;
-        double difference = abs(mol1->Energy() - m_lowest_energy) * 2625.5;
+        double difference = abs(m_current_energy - m_lowest_energy) * 2625.5;
         if (difference > m_energy_cutoff && m_energy_cutoff != -1) {
             break;
         }
@@ -801,7 +805,7 @@ void ConfScan::PrintStatus()
     std::cout << "# Successfully : " << m_reordered_worked << "    ";
     std::cout << "# Not at all : " << m_reordered_failed_completely << "     ";
     std::cout << "# Reused Results : " << m_reordered_reused << "     ";
-    std::cout << "# Current Energy [kJ/mol] : " << (m_target_last_energy - m_lowest_energy) * 2625.5 << std::endl;
+    std::cout << "# Current Energy [kJ/mol] : " << (m_current_energy - m_lowest_energy) * 2625.5 << std::endl;
 }
 
 void ConfScan::writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd)
