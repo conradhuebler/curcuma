@@ -124,6 +124,9 @@ public:
     /*! \brief Return the reference molecule centered */
     inline Molecule ReferenceAligned() const { return m_reference_aligned; }
 
+    /*! \brief Return the reference molecule centered */
+    inline const Molecule* ReferenceAlignedReference() const { return &m_reference_aligned; }
+
     /*! \brief Return the target molecule centered and aligned to the reference molecule */
     inline Molecule TargetAligned() const { return m_target_aligned; }
 

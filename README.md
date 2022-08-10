@@ -192,6 +192,13 @@ With
 ```
 up to X reorder results will be reused from the last reorder calculation. Template based approaches result in only one reorder rule, however X is set to 0 in automatically, but can be changed with that argument.
 
+By adding the argument
+```sh
+-accepted accepted.xyz
+```
+a file with already accepted structures can be passed to curcuma. Molecules in that file (accepted.xyz) will be rejected if they appear in the conformation.xyz, thus several files with conformation can be joined.
+
+
 ```json
 { "noname", true },
 { "restart", true },
@@ -216,7 +223,8 @@ up to X reorder results will be reused from the last reorder calculation. Templa
 { "MaxHTopoDiff", -1 },
 { "GFN", -1 },
 { "RMSDThreads", 1 },
-{ "RMSDElement", 7 }
+{ "RMSDElement", 7 },
+{ "accepted", "" }
 ```
 
 

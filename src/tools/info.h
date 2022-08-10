@@ -1,6 +1,6 @@
 /*
  * <Geometry tools for chemical structures.>
- * Copyright (C) 2019 - 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -89,11 +89,15 @@ inline void StartUp(int argc, char** argv)
         "*{0: ^{1}}*\n"
         "*{12: ^{1}}*\n"
         "*{13: ^{1}}*\n"
+        "*{14: ^{1}}*\n"
+        "*{15: ^{1}}*\n"
+        "*{16: ^{1}}*\n"
         "*{0: ^{1}}*\n"
         "*{0:~^{1}}*\n",
         "",
         60,
         "Curcuma was compiled with xTB support!",
+        "using the xtb program and the tblite library",
         "Please cite the xTB methods as well!",
         "General",
         "https://doi.org/10.1002/wcms.1493",
@@ -104,7 +108,9 @@ inline void StartUp(int argc, char** argv)
         "GFN-FF",
         "https://doi.org/10.1002/anie.202004239",
         "More information about xtb can be found at",
-        "https://github.com/grimme-lab/xtb");
+        "https://github.com/grimme-lab/xtb",
+        "and",
+        "https://github.com/tblite/tblite");
 
     fmt::print(fg(fmt::color::light_salmon) | fmt::emphasis::bold, "\n\nConsider setting  OMP_NUM_THREADS to 1 for best parallel performance as curcuma can spawn several xtb calculation itself!\n");
     fmt::print(fg(fmt::color::light_salmon) | fmt::emphasis::bold, "bash: export OMP_NUM_THREADS=1\n");

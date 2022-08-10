@@ -1,6 +1,6 @@
 /*
  * <Scan and judge conformers from different input. >
- * Copyright (C) 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -86,6 +86,7 @@ void ConfScan::LoadControlJson()
     m_MaxHTopoDiff = Json2KeyWord<int>(m_defaults, "MaxHTopoDiff");
     m_RMSDthreads = Json2KeyWord<int>(m_defaults, "RMSDThreads");
     m_RMSDElement = Json2KeyWord<int>(m_defaults, "RMSDElement");
+    m_prev_accepted = Json2KeyWord<std::string>(m_defaults, "accepted");
 
     m_RMSDmethod = Json2KeyWord<std::string>(m_defaults, "RMSDMethod");
     if (m_useorders == -1)
@@ -115,7 +116,6 @@ bool ConfScan::openFile()
                 m_gfn = 2;
             interface.InitialiseMolecule(mol);
             energy = interface.GFNCalculation(m_gfn, 0);
-            //interface.clear();
         }
         m_ordered_list.insert(std::pair<double, int>(energy, molecule));
         molecule++;
@@ -126,6 +126,34 @@ bool ConfScan::openFile()
         m_molecules.push_back(pair);
     }
 
+    if (m_prev_accepted != "") {
+        double min_energy = 0;
+        bool xyzfile = std::string(m_prev_accepted).find(".xyz") != std::string::npos || std::string(m_prev_accepted).find(".trj") != std::string::npos;
+
+        if (xyzfile == false)
+            throw 1;
+
+        int molecule = 0;
+
+        FileIterator file(m_prev_accepted);
+        while (!file.AtEnd()) {
+            Molecule* mol = new Molecule(file.Next());
+            double energy = mol->Energy();
+            if (std::abs(energy) < 1e-5 || m_gfn != -1) {
+                TBLiteInterface interface;
+                // I might not leak really, but was unable to clear everything
+                if (m_gfn == -1)
+                    m_gfn = 2;
+                interface.InitialiseMolecule(mol);
+                energy = interface.GFNCalculation(m_gfn, 0);
+            }
+            min_energy = std::min(min_energy, energy);
+            mol->CalculateRotationalConstants();
+            m_previously_accepted.push_back(mol);
+        }
+        m_lowest_energy = min_energy;
+        m_result = m_previously_accepted;
+    }
     return true;
 }
 
@@ -371,6 +399,7 @@ void ConfScan::SetUp()
     m_accepted_filename = m_result_basename + ".accepted.xyz";
     m_rejected_filename = m_result_basename + ".rejected.xyz";
     m_statistic_filename = m_result_basename + ".statistic.log";
+    m_joined_filename = m_result_basename + ".joined.xyz";
 
     std::ofstream result_file;
     if (m_writeFiles) {
@@ -386,8 +415,14 @@ void ConfScan::SetUp()
 
     std::ofstream statistic_file;
     if (m_writeFiles) {
-        statistic_file.open(m_result_basename);
+        statistic_file.open(m_statistic_filename);
         statistic_file.close();
+    }
+
+    if (m_previously_accepted.size()) {
+        std::ofstream joined_file;
+        joined_file.open(m_joined_filename);
+        joined_file.close();
     }
 
     /*
@@ -413,6 +448,18 @@ void ConfScan::SetUp()
     std::cout << "" << std::endl
               << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
               << std::endl;
+}
+
+void ConfScan::AcceptMolecule(Molecule* molecule)
+{
+    m_result.push_back(molecule);
+    m_stored_structures.push_back(molecule);
+    m_accepted++;
+}
+void ConfScan::RejectMolecule(Molecule* molecule)
+{
+    m_rejected_structures.push_back(molecule);
+    m_rejected++;
 }
 
 void ConfScan::start()
@@ -466,7 +513,8 @@ void ConfScan::CheckRMSD()
             continue;
         }
         if (m_result.size() == 0) {
-            m_result.push_back(mol1);
+            AcceptMolecule(mol1);
+            // m_result.push_back(mol1);
             m_lowest_energy = mol1->Energy();
             continue;
         }
@@ -482,16 +530,19 @@ void ConfScan::CheckRMSD()
             }
             keep_molecule = SingleCheckRMSD(mol1, mol2, driver);
             if (keep_molecule == false) {
-                writeStatisticFile(mol1, driver->TargetAlignedReference(), driver->RMSD());
+                writeStatisticFile(driver->ReferenceAlignedReference(), driver->TargetAlignedReference(), driver->RMSD());
                 break;
             }
         }
         if (keep_molecule) {
-            m_result.push_back(mol1);
-            m_accepted++;
+            AcceptMolecule(mol1);
+            // m_result.push_back(mol1);
+            // m_accepted++;
         } else {
-            m_rejected_structures.push_back(mol1);
-            m_rejected++;
+            RejectMolecule(mol1);
+
+            // m_rejected_structures.push_back(mol1);
+            // m_rejected++;
         }
         PrintStatus();
         delete driver;
@@ -597,7 +648,7 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
               << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
               << std::endl;
 */
-    m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0;
+    m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_reused = 0;
 
     json rmsd = RMSDJson;
     rmsd["silent"] = true;
@@ -609,10 +660,12 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
     rmsd["element"] = m_RMSDElement;
 
     std::vector<Molecule*> cached = m_result;
-    m_result.clear();
+    m_result = m_previously_accepted;
+    m_stored_structures.clear();
     for (Molecule* mol1 : cached) {
         if (m_result.size() == 0) {
-            m_result.push_back(mol1);
+            AcceptMolecule(mol1);
+            // m_result.push_back(mol1);
             continue;
         }
         m_current_energy = mol1->Energy();
@@ -629,16 +682,18 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                 break;
             keep_molecule = SingleReorderRMSD(mol1, mol2, driver, reuse_only);
             if (keep_molecule == false) {
-                writeStatisticFile(mol1, driver->TargetAlignedReference(), driver->RMSD());
+                writeStatisticFile(driver->ReferenceAlignedReference(), driver->TargetAlignedReference(), driver->RMSD());
                 break;
             }
         }
         if (keep_molecule) {
-            m_result.push_back(mol1);
-            m_accepted++;
+            AcceptMolecule(mol1);
+            // m_result.push_back(mol1);
+            // m_accepted++;
         } else {
-            m_rejected_structures.push_back(mol1);
-            m_rejected++;
+            RejectMolecule(mol1);
+            // m_rejected_structures.push_back(mol1);
+            // m_rejected++;
         }
 
         PrintStatus();
@@ -696,7 +751,7 @@ bool ConfScan::SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMS
             */
             rmsd = tmp_rmsd;
             m_reordered_reused++;
-            writeStatisticFile(mol1, driver->TargetAlignedReference(), rmsd);
+            writeStatisticFile(driver->ReferenceAlignedReference(), driver->TargetAlignedReference(), driver->RMSD());
             break;
         }
     }
@@ -753,7 +808,7 @@ bool ConfScan::SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMS
 void ConfScan::Finalise()
 {
     int i = 0;
-    for (const auto molecule : m_result) {
+    for (const auto molecule : m_stored_structures) {
         double difference = abs(molecule->Energy() - m_lowest_energy) * 2625.5;
         if (i >= m_maxrank && m_maxrank != -1) {
             molecule->appendXYZFile(m_rejected_filename);
@@ -765,12 +820,20 @@ void ConfScan::Finalise()
             continue;
         }
         molecule->appendXYZFile(m_accepted_filename);
+        if (m_previously_accepted.size()) {
+            molecule->appendXYZFile(m_joined_filename);
+        }
         i++;
     }
+
+    for (const auto molecule : m_previously_accepted) {
+        molecule->appendXYZFile(m_joined_filename);
+    }
+
     for (const auto molecule : m_rejected_structures) {
         molecule->appendXYZFile(m_rejected_filename);
     }
-    std::cout << m_result.size() << " structures were kept - of " << m_molecules.size() - m_fail << " total!" << std::endl;
+    std::cout << m_stored_structures.size() << " structures were kept - of " << m_molecules.size() - m_fail << " total!" << std::endl;
     /*
     //  std::cout << "Best structure is " << m_result[0]->Name() << " Energy = " << std::setprecision(8) << m_result[0]->Energy() << std::endl;
     std::cout << "List of filtered names ... " << std::endl;
@@ -798,12 +861,11 @@ void ConfScan::AddRules(const std::vector<int>& rules)
 void ConfScan::PrintStatus()
 {
     std::cout << std::endl
-              << "             ###   " << std::setprecision(4) << (m_result.size() + m_rejected) / double(m_maxmol) * 100 << "% done!   ###" << std::endl;
-    std::cout << "# Accepted : " << m_result.size() << "     ";
+              << "             ###   " << std::setprecision(4) << (m_stored_structures.size() + m_rejected) / double(m_maxmol) * 100 << "% done!   ###" << std::endl;
+    std::cout << "# Accepted : " << m_stored_structures.size() << "     ";
     std::cout << "# Rejected : " << m_rejected << "     ";
     std::cout << "# Reordered : " << m_reordered << "     ";
     std::cout << "# Successfully : " << m_reordered_worked << "    ";
-    std::cout << "# Not at all : " << m_reordered_failed_completely << "     ";
     std::cout << "# Reused Results : " << m_reordered_reused << "     ";
     std::cout << "# Current Energy [kJ/mol] : " << (m_current_energy - m_lowest_energy) * 2625.5 << std::endl;
 }
@@ -814,7 +876,7 @@ void ConfScan::writeStatisticFile(const Molecule* mol1, const Molecule* mol2, do
     std::ofstream result_file;
     result_file.open(m_statistic_filename, std::ios_base::app);
 
-    result_file << "Molecule got rejected due to small rmsd " << rmsd << std::endl;
+    result_file << "Molecule got rejected due to small rmsd " << rmsd << " with and energy difference of " << std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 << std::endl;
     result_file << mol1->XYZString();
     result_file << mol2->XYZString();
     result_file << std::endl;

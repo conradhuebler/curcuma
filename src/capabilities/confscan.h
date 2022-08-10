@@ -1,6 +1,6 @@
 /*
  * <Scan and judge conformers from different input. >
- * Copyright (C) 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -108,6 +108,9 @@ private:
 
     void Finalise();
 
+    void AcceptMolecule(Molecule* molecule);
+    void RejectMolecule(Molecule* molecule);
+
     /* Lets have this for all modules */
     nlohmann::json WriteRestartInformation() override;
 
@@ -136,12 +139,12 @@ private:
     std::vector<Molecule*> m_global_temp_list;
     int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0, m_skip = 0;
 
-    std::string m_filename, m_accepted_filename, m_rejected_filename, m_result_basename, m_statistic_filename;
+    std::string m_filename, m_accepted_filename, m_rejected_filename, m_result_basename, m_statistic_filename, m_prev_accepted, m_joined_filename;
     std::map<double, int> m_ordered_list;
     std::vector<std::pair<std::string, Molecule*>> m_molecules;
     double m_energy_threshold = 1.0, m_rmsd_threshold = 1.0, m_diff_rot_rel_loose = 0.3, m_diff_rot_rel_tight = 0.01, m_nearly_missed = 0.8, m_energy_cutoff = -1, m_reference_last_energy = 0, m_target_last_energy = 0, m_lowest_energy = 1, m_current_energy = 0;
     double m_diff_rot_abs_tight = 0, m_diff_rot_abs_loose = 0, m_scale_tight = 0.5, m_scale_loose = 2;
-    std::vector<Molecule*> m_result, m_rejected_structures;
+    std::vector<Molecule*> m_result, m_rejected_structures, m_stored_structures, m_previously_accepted;
     std::vector<double> m_accept_rmsd, m_reject_rmsd;
     int m_maxmol = 0;
     int m_maxrank = 10000;
