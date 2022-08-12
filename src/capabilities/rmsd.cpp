@@ -434,6 +434,7 @@ void RMSDDriver::clear()
     m_results.clear();
     m_connectivity.clear();
     m_stored_rules.clear();
+    m_rmsd = 0.0;
 }
 
 void RMSDDriver::ProtonDepleted()
@@ -579,13 +580,15 @@ std::pair<Molecule, LimitedStorage> RMSDDriver::InitialisePair()
 
 void RMSDDriver::ReorderMolecule()
 {
+    // std::cout << m_method << " " << m_reorder_rules.size() << std::endl;
+    /*
     if (m_reorder_rules.size() != 0) {
         m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
         m_target = m_target_reordered;
         m_target_aligned = m_target;
         return;
     }
-
+    */
     double scaling = 1.5;
     m_connectivity = m_reference.getConnectivtiy(scaling);
 
@@ -603,9 +606,19 @@ void RMSDDriver::ReorderMolecule()
 
 void RMSDDriver::AtomTemplate()
 {
-    std::cout << "Prepare atom template structure:" << std::endl;
-
+    //   std::cout << "Prepare atom template structure:" << std::endl;
+    //   std::cout << m_reference.Name() << " " << m_target.Name() << std::endl;
     auto pairs = PrepareAtomTemplate(m_element);
+    /*  if(m_reference.Name() == "input_43" && m_target.Name() == "input_4")
+      {
+          for(auto i : pairs.first)
+              std::cout << i<< " ";
+          std::cout << std::endl;
+
+          for(auto i : pairs.second)
+              std::cout << i<< " ";
+          std::cout << std::endl;
+      }*/
     FinaliseTemplate(pairs);
 
     m_target_reordered = ApplyOrder(m_reorder_rules, m_target);

@@ -162,6 +162,16 @@ class Molecule
         return std::count(m_atoms.cbegin(), m_atoms.cend(), element);
     }
 
+    void setPersisentImage(const Eigen::MatrixXd image)
+    {
+        m_persistentImage = image;
+    }
+
+    Eigen::MatrixXd getPersisentImage() const
+    {
+        return m_persistentImage;
+    }
+
 private:
     void ParseString(const std::string& internal, std::vector<std::string>& elements);
 
@@ -186,6 +196,7 @@ private:
 
     std::vector<int> m_connect_mass;
     Matrix m_HydrogenBondMap;
+    Eigen::MatrixXd m_persistentImage;
     mutable std::vector<std::vector<int>> m_fragments;
     mutable std::map<int, int> m_fragment_assignment;
 
