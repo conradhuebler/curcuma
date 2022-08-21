@@ -41,8 +41,16 @@
 #include <fstream>
 #include <vector>
 
+#ifdef C17
+#ifndef _WIN32
+#include <filesystem>
+namespace fs = std::filesystem;
+#endif
+#endif
+
 // #include "ripser.h"
 
+#ifndef _WIN32
 #if __GNUC__
 // Thanks to
 // https://stackoverflow.com/questions/77005/how-to-automatically-generate-a-stacktrace-when-my-program-crashes
@@ -65,8 +73,35 @@ void bt_handler(int sig)
     fprintf(stderr, "Error: signal %d:\n", sig);
     backtrace_symbols_fd(array, size, STDERR_FILENO);
     fprintf(stderr, "Good-By\n");
+#ifdef C17
+#ifndef _WIN32
+    std::filesystem::remove("stop");
+#endif
+#else
+    remove("stop");
+#endif
     exit(1);
 }
+
+void ctrl_c_handler(int s)
+{
+    if (std::filesystem::exists("stop")) {
+#ifdef C17
+#ifndef _WIN32
+        std::filesystem::remove("stop");
+#endif
+#else
+        remove("stop");
+#endif
+        printf("Caught stop signal a second time.\nWill exit now!");
+        exit(1);
+    } else {
+        printf("Caught stop signal\nWill try to stop current stuff!");
+        std::ofstream output("stop");
+    }
+}
+
+#endif
 #endif
 
 #include "json.hpp"
@@ -92,12 +127,22 @@ void Distance(const Molecule &mol, char **argv)
 }
 
 int main(int argc, char **argv) {
+#ifndef _WIN32
 #if __GNUC__
+    signal(SIGINT, ctrl_c_handler);
     signal(SIGSEGV, bt_handler);
     signal(SIGABRT, bt_handler);
 #endif
+#endif
 
     General::StartUp(argc, argv);
+#ifdef C17
+#ifndef _WIN32
+    std::filesystem::remove("stop");
+#endif
+#else
+    remove("stop");
+#endif
     RunTimer timer(true);
     if(argc < 2)
     {
@@ -659,5 +704,13 @@ int main(int argc, char **argv) {
             }
         }
     }
+#ifdef C17
+#ifndef _WIN32
+    std::filesystem::remove("stop");
+#endif
+#else
+    remove("stop");
+#endif
+
     return 0;
 }

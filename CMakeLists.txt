@@ -88,8 +88,12 @@ IF(CMAKE_COMPILER_IS_GNUCXX)
                                            -Wunused -Wunused-function  -Wunused-label  -Wunused-parameter\
                                            -Wunused-value  -Wunused-variable  -Wvariadic-macros\
                                            -Wvolatile-register-var  -Wwrite-strings -Wdeprecated-declarations\
-                                           -Wno-error=unused-local-typedefs -Wno-error=enum-compare -Wno-narrowing -Werror=return-type -g -rdynamic")
+                                           -Wno-error=unused-local-typedefs -Wno-error=enum-compare -Wno-narrowing -Werror=return-type -g")
 set (GCC ON)
+if(WIN32) # Check if we are on Windows
+else()
+    SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -rdynamic")
+endif(WIN32)
 ENDIF(CMAKE_COMPILER_IS_GNUCXX)
 
 
@@ -208,10 +212,11 @@ set_property(TARGET curcuma PROPERTY LINK_FLAGS_RELWITHDEBINFO -s)
 
 if(USE_XTB)
     if(COMPILE_XTB)
-        #target_link_libraries(curcuma_core lib-xtb-shared -m64 -Wl,--no-as-needed -L/opt/intel/oneapi/mkl/latest/lib/intel64/ libmkl_intel_lp64.so libmkl_intel_thread.so libmkl_core.so libmkl_gnu_thread.so pthread -lm dl fmt::fmt-header-only)
-	#target_link_libraries(curcuma_core lib-xtb-shared -Wl,--no-as-needed -L/opt/intel/oneapi/mkl/latest/lib/intel64/ -lmkl_intel_lp64 -lmkl_core -lmkl_gnu_thread -lpthread -lm -ldl fmt::fmt-header-only)
-        #target_link_libraries(curcuma_core )
-        target_link_libraries(curcuma_core PUBLIC "mctc-lib" lib-xtb-shared tblite-lib gfortran pthread dl fmt::fmt-header-only)
+        target_link_libraries(curcuma_core PUBLIC "mctc-lib" lib-xtb-shared tblite-lib gfortran pthread fmt::fmt-header-only)
+        if(WIN32) # Check if we are on Windows
+        else()
+            target_link_libraries(curcuma_core PUBLIC dl )
+        endif(WIN32)
     else()
         target_link_libraries(curcuma_core ${XTB_DIR}/libxtb.so pthread dl fmt::fmt-header-only)
     endif()

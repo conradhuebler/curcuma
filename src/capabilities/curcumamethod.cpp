@@ -1,6 +1,6 @@
 /*
  * <Abstract Curcuma Method, please try to subclass from that!>
- * Copyright (C) 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -26,10 +26,11 @@
 #include <stdio.h>
 
 #ifdef C17
+#ifndef _WIN32
 #include <filesystem>
 namespace fs = std::filesystem;
 #endif
-
+#endif
 #include "curcumamethod.h"
 
 CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, bool silent)
@@ -42,11 +43,6 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, bool 
 
 CurcumaMethod::~CurcumaMethod()
 {
-#ifdef C17
-    std::filesystem::remove("stop");
-#else
-    remove("stop");
-#endif
 }
 
 void CurcumaMethod::TriggerWriteRestart()
@@ -68,11 +64,13 @@ StringList CurcumaMethod::RestartFiles() const
     StringList file_list;
 
 #ifdef C17
+#ifndef _WIN32
     for (auto& p : fs::directory_iterator(".")) {
         std::string file(p.path());
         if (file.find("curcuma_restart") != std::string::npos)
             file_list.push_back(file);
     }
+#endif
 #else
     std::ifstream test_file("curcuma_restart.json");
     if (test_file.is_open())
@@ -116,11 +114,17 @@ void CurcumaMethod::UpdateController(const json& controller)
 bool CurcumaMethod::CheckStop() const
 {
 #ifdef C17
+#ifndef _WIN32
     return std::filesystem::exists("stop");
+#endif
+    std::ifstream test_file("stop");
+    bool result = test_file.is_open();
+    test_file.close();
+    return result;
 #else
     std::ifstream test_file("stop");
     bool result = test_file.is_open();
-    test.close();
+    test_file.close();
     return result;
 #endif
 }

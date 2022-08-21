@@ -1,6 +1,6 @@
 /*
  * <Trajectory RMSD Analyse. >
- * Copyright (C) 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -279,6 +279,6 @@ void RMSDTraj::Optimise()
 void RMSDTraj::Filter()
 {
     ConfScan* scan = new ConfScan(m_controller["rmsdtraj"], false);
-    scan->setFileName(m_outfile + ".unique.xyz");
+    scan->setFileName(m_outfile + ".opt.xyz");
     scan->start();
 }
