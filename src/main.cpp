@@ -162,7 +162,8 @@ int main(int argc, char **argv) {
                   << "-angle       * Calculate angle between three atoms                        *" << std::endl
                   << "-split       * Split a supramolcular structure in individual molecules    *" << std::endl
                   << "-rmsdtraj    * Find unique structures                                     *" << std::endl
-                  << "-distance    * Calculate distance matrix                                  *" << std::endl;
+                  << "-distance    * Calculate distance matrix                                  *" << std::endl
+                  << "-reorder     * Write molecule file with randomly reordered indices        *" << std::endl;
         exit(1);
     }
     if(argc >= 2)
@@ -679,6 +680,21 @@ int main(int argc, char **argv) {
                 else
                     mol.writeXYZFragments(outfile + "_M" + std::to_string(index));
                 index++;
+            }
+        } else if (strcmp(argv[1], "-reorder") == 0) {
+            if (argc < 3) {
+                std::cerr << "Please use curcuma to center a structure as follows:\ncurcuma -center molecule.xyz" << std::endl;
+                return 0;
+            }
+            FileIterator file(argv[2]);
+            int index = 1;
+            std::string outfile = argv[2];
+            for (int i = 0; i < 4; ++i)
+                outfile.pop_back();
+            outfile += ".random.xyz";
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                mol.writeXYZFile(outfile, Tools::RandomVector(0, mol.AtomCount()));
             }
         } else {
             bool centered = false;

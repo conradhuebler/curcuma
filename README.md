@@ -17,7 +17,7 @@ git clones automatically some submodules.
 Additionally, [nlohmann/json](https://github.com/nlohmann/json) is obtained via cmake.
 
 ### Using xTB in curcuma is now again WIP
-xtb and tblite is automatically obtained during git clone, however it is not included in curcuma with the default compiler settings. Add '-DCOMPILE_XTB=true ' to the cmake command line to enable it. 
+xtb and tblite are automatically obtained during git clone, however it is not included in curcuma with the default compiler settings. Add '-DCOMPILE_XTB=true ' to the cmake command line to enable it. 
 Using xtb calculation in curcuma can be controlled for now as follows:
 - Add **-gfn 1** to run GFN1 calculation, **-gfn 66** to run GFN-FF calculation.
 - GFN1 and GFN2 calculation are thread-safe now, so parallel optimisation are possible now. However, the variable **OMP_NUM_THREADS** should be set to 1. Add **-thread 12** to run optimisation after docking with 12 threads. GFN-FF calculation will fail in parallel mode.
@@ -43,6 +43,9 @@ make
 ```
 
 # Usage
+
+## General
+curcuma catches the Ctrl-C signals from the console if used on Linux platform. It will then create an empty file called "stop". Some methods, like **confscan**, regularly check for that file and finalise the current task. If Ctrl-C is signaled and a "stop" file already exists, curcuma will stop immediately.
 
 ## RMSD Calculator 
 ```sh
@@ -198,6 +201,8 @@ By adding the argument
 ```
 a file with already accepted structures can be passed to curcuma. Molecules in that file (accepted.xyz) will be rejected if they appear in the conformation.xyz, thus several files with conformation can be joined.
 
+Confscan will write a restart file, finalise and quit, if a file called "stop" is found in the working directory. Such file will be generated if Ctrl-C is hit or if it is created using for example the **touch stop** command.
+Within a restart file, the last energy difference and the atom indicies from reordering are stored. A restart file will automatically be read upon the start of curcuma. The content of the restart file will be used to speed up the 2nd step of the conformation filtering procedure.
 
 ```json
 { "noname", true },
@@ -211,7 +216,6 @@ a file with already accepted structures can be passed to curcuma. Molecules in t
 { "energy", 1.0 },
 { "maxenergy", -1.0 },
 { "preventreorder", false },
-{ "silent", false },
 { "scaleLoose", 2 },
 { "scaleTight", 0.5 },
 { "skip", 0 },

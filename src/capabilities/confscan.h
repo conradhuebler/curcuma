@@ -101,7 +101,7 @@ private:
     void ReorderCheck(bool reuse_only = false, bool limit = false);
     bool SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMSDDriver* driver, bool reuse_only);
 
-    void writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd);
+    void writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd, bool reason = true);
 
     void Finalise();
 

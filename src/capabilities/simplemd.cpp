@@ -98,13 +98,10 @@ void SimpleMD::Dance()
     // Thermostat();
     double ekin = 0;
     for (int step = 0; step < m_maxsteps; ++step) {
-        std::cout << energy << " " << ekin << " " << m_curr_temp << " " << step / fs2amu << std::endl;
-        for (int i = 0; i < 3 * m_natoms; ++i) {
-            m_velocities[i] += +0.5 * m_timestep * gradient[i] / m_mass[i];
-            m_current_geometry[i] += m_timestep * m_velocities[i];
-            coord[i] = m_current_geometry[i];
-        }
         energy = Gradient(attyp, coord, gradient);
+        Propagate(attyp, coord, gradient);
+        std::cout << energy << " " << ekin << " " << m_curr_temp << " " << step / fs2amu << std::endl;
+
         EKin();
         for (int i = 0; i < 3 * m_natoms; ++i) {
             m_velocities[i] += +0.5 * m_timestep * gradient[i] / m_mass[i];
@@ -123,8 +120,14 @@ double SimpleMD::Gradient(const int* attyp, const double* coord, double* grad)
     return Energy;
 }
 
-void SimpleMD::Propagate()
+void SimpleMD::Propagate(const int* attyp, const double* coord, double* gradient)
 {
+    for (int i = 0; i < 3 * m_natoms; ++i) {
+        // double pos = 2*m_current_geometry[i]-
+        m_velocities[i] += +0.5 * m_timestep * gradient[i] / m_mass[i];
+        m_current_geometry[i] += m_timestep * m_velocities[i];
+        //  coord[i] = m_current_geometry[i];
+    }
 }
 
 double SimpleMD::EKin()

@@ -594,12 +594,13 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                 m_last_diff = diff_rot;
                 m_last_ripser = diff;
                 keep_molecule = false;
+                writeStatisticFile(mol1, mol2, driver->RMSD(), false);
                 m_threshold.push_back(mol2);
                 break;
             }
             keep_molecule = SingleReorderRMSD(mol1, mol2, driver, reuse_only);
             if (keep_molecule == false) {
-                writeStatisticFile(driver->ReferenceAlignedReference(), driver->TargetAlignedReference(), driver->RMSD());
+                writeStatisticFile(driver->ReferenceAlignedReference(), driver->TargetAlignedReference(), driver->RMSD(), true);
                 /*
                 std::ofstream result_file;
                 result_file.open("ripser.dat", std::ios_base::app);
@@ -642,11 +643,11 @@ bool ConfScan::SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMS
             allow_reorder = false;
             rmsd = tmp_rmsd;
             m_reordered_reused++;
-            writeStatisticFile(driver->ReferenceAlignedReference(), driver->TargetAlignedReference(), driver->RMSD());
+            writeStatisticFile(driver->ReferenceAlignedReference(), driver->TargetAlignedReference(), driver->RMSD(), true);
             break;
         }
     }
-    if (m_useRestart && /* mol1->Energy() < m_reference_restored_energy && mol2->Energy() < m_target_restored_energy*/ (m_current_energy - m_lowest_energy) * 2625.5 < m_last_dE) {
+    if (m_useRestart && (m_current_energy - m_lowest_energy) * 2625.5 < m_last_dE) {
         allow_reorder = false;
     } else {
         m_useRestart = false;
@@ -728,11 +729,11 @@ void ConfScan::PrintStatus()
     std::cout << "# Current Energy [kJ/mol] : " << (m_current_energy - m_lowest_energy) * 2625.5 << std::endl;
 }
 
-void ConfScan::writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd)
+void ConfScan::writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd, bool reason)
 {
     std::ofstream result_file;
     result_file.open(m_statistic_filename, std::ios_base::app);
-    if (std::find(m_threshold.begin(), m_threshold.end(), mol2) == m_threshold.end())
+    if (reason)
         result_file << "Molecule got rejected due to small rmsd " << rmsd << " with and energy difference of " << (m_current_energy - m_lowest_energy) * 2625.5 << std::endl;
     else
         result_file << "Molecule got rejected as differences " << m_last_diff << " MHz and " << m_last_ripser << " are below the estimated thresholds;  with and energy difference of " << std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 << std::endl;

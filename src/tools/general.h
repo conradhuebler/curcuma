@@ -29,6 +29,10 @@
 #include <string>
 #include <vector>
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
 #include <fmt/color.h>
 #include <fmt/core.h>
 
@@ -313,6 +317,20 @@ inline std::vector<std::vector<int>> String2VectorVector(const std::string& stri
     for (const auto& element : vectors)
         result.push_back(String2Vector(element));
     return result;
+}
+
+inline std::vector<int> RandomVector(int start, int end)
+{
+    /* fast taken from
+     * https://www.geeksforgeeks.org/generating-random-number-range-c/ */
+    std::vector<int> sequence;
+    while(sequence.size() < (end - start))
+    {
+        int num = (rand() % (end - start)) + start;
+        if(std::find(sequence.begin(), sequence.end(), num) == sequence.end())
+            sequence.push_back(num);
+    }
+    return sequence;
 }
 
 }

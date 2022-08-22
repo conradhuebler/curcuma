@@ -221,7 +221,11 @@ if(USE_XTB)
         target_link_libraries(curcuma_core ${XTB_DIR}/libxtb.so pthread dl fmt::fmt-header-only)
     endif()
 else()
-    target_link_libraries(curcuma_core pthread dl fmt::fmt-header-only)
+    target_link_libraries(curcuma_core pthread fmt::fmt-header-only)
+    if(WIN32) # Check if we are on Windows
+    else()
+        target_link_libraries(curcuma_core dl )
+    endif(WIN32)
 endif()
 
     target_link_libraries(curcuma fmt::fmt-header-only)
@@ -232,7 +236,7 @@ add_executable(curcuma_helper
 
     target_link_libraries(curcuma_helper fmt::fmt-header-only)
     target_link_libraries(curcuma_helper curcuma_core)
-    
+
 set_property(TARGET curcuma_helper PROPERTY LINK_FLAGS_RELEASE -s)
 set_property(TARGET curcuma_helper PROPERTY LINK_FLAGS_RELWITHDEBINFO -s)
 

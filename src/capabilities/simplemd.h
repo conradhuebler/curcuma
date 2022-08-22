@@ -36,7 +36,7 @@ public:
 
 private:
     double Gradient(const int* attyp, const double* coord, double* grad);
-    void Propagate();
+    void Propagate(const int* attyp, const double* coord, double* gradient);
     void WriteGeometry();
     double EKin();
     void Thermostat();

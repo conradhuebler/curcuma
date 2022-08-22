@@ -727,6 +727,14 @@ void Molecule::writeXYZFile(const std::string& filename) const
     input.close();
 }
 
+void Molecule::writeXYZFile(const std::string& filename, const  std::vector<int> &order) const
+{
+    std::ofstream input;
+    input.open(filename, std::ios::out);
+    input << XYZString(order);
+    input.close();
+}
+
 std::string Molecule::Header() const
 {
 #ifdef GCC
@@ -815,6 +823,19 @@ std::string Molecule::XYZString() const
     }
     return output;
 }
+
+std::string Molecule::XYZString(const std::vector<int> &order) const
+{
+    std::string output;
+    output += fmt::format("{}\n", AtomCount());
+    output += Header();
+    for (int i : order) {
+        std::cout << i << " ";
+        output += Atom2String(i);
+    }
+    return output;
+}
+
 
 std::vector<int> Molecule::BoundHydrogens(int atom, double scaling) const
 {

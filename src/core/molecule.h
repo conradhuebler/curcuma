@@ -1,6 +1,6 @@
 /*
  * <Internal Coordinate Handler for chemical structures.>
- * Copyright (C) 2019 - 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
  * 
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -108,11 +108,16 @@ class Molecule
     std::pair<int, Position> Atom(int i) const;
 
     void writeXYZFile(const std::string& filename) const;
+    void writeXYZFile(const std::string& filename, const  std::vector<int> &order) const;
+
     inline void writeXYZFile() const { writeXYZFile(Name() + ".xyz"); }
 
     void appendXYZFile(const std::string& filename) const;
     inline void appendXYZFile() const { appendXYZFile(Name() + ".xyz"); }
+
     std::string XYZString() const;
+    std::string XYZString(const std::vector<int> &order) const;
+
 
     std::vector<int> BoundHydrogens(int atom, double scaling = 1.5) const;
     std::map<int, std::vector<int>> getConnectivtiy(double scaling = 1.5, int latest = -1) const;
