@@ -22,19 +22,61 @@
 #include "src/core/molecule.h"
 #include "src/core/tbliteinterface.h"
 
-class SimpleMD {
+#include "curcumamethod.h"
+
+static json CurcumaMDJson{
+    { "writeXYZ", true },
+    { "printOutput", true },
+    { "GFN", 2 },
+    { "MaxSteps", 5000 },
+    { "T", 298.15 },
+    { "dt", 1 },
+    { "charge", 0 },
+    { "Spin", 0 },
+    { "centered", false }
+};
+
+class SimpleMD : public CurcumaMethod {
 public:
-    SimpleMD();
+    SimpleMD(const json& controller, bool silent);
     ~SimpleMD();
+
     inline void setMolecule(const Molecule& molecule)
     {
         m_molecule = molecule;
     }
-    void Initialise();
 
-    void Dance();
+    void setBaseName(const std::string& name)
+    {
+        m_basename = name;
+    }
+
+    bool Initialise() override;
+
+    void start() override;
 
 private:
+    void PrintStatus() const;
+
+    /* Lets have this for all modules */
+    virtual nlohmann::json WriteRestartInformation();
+
+    /* Lets have this for all modules */
+    virtual bool LoadRestartInformation();
+
+    virtual StringList MethodName() const
+    {
+        return { "MD" };
+    }
+
+    /* Lets have all methods read the input/control file */
+    virtual void ReadControlFile()
+    {
+    }
+
+    /* Read Controller has to be implemented for all */
+    virtual void LoadControlJson();
+
     double Gradient(const double* coord, double* grad);
     void UpdatePosition(const double* grad, double* coord);
     void UpdateVelocities(const double* gradient_prev, const double* gradient_curr);
@@ -44,15 +86,16 @@ private:
     void WriteGeometry();
     double EKin();
     void Thermostat();
+    std::string m_basename;
     int m_natoms = 0;
-    double m_curr_temp = 0;
+    int m_gfn = 2;
+    double m_T = 0, m_Epot = 0, m_Ekin = 0, m_Etot = 0;
     double m_timestep = 0.5;
-    int m_maxsteps = 10;
-    double m_charge = 0.0;
+    int m_maxsteps = 10, m_currentStep = 0, m_spin = 0, m_charge = 0;
     double m_temperatur = 298.13;
     std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient;
     std::vector<int> m_atomtype;
     Molecule m_molecule;
-    bool m_initialised = false;
+    bool m_initialised = false, m_restart = false, m_centered = false;
     TBLiteInterface* m_interface;
 };

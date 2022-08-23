@@ -282,6 +282,19 @@ inline std::string Vector2String(const std::vector<int>& vector)
     return result;
 }
 
+inline std::string DoubleVector2String(const std::vector<double>& vector)
+{
+    std::string result = " ";
+
+    for (auto i : vector)
+        result += std::to_string(i) + "|";
+    result.pop_back();
+
+    result += " ";
+
+    return result;
+}
+
 inline std::vector<int> String2Vector(const std::string& string)
 {
     std::vector<int> vector;
@@ -333,4 +346,27 @@ inline std::vector<int> RandomVector(int start, int end)
     return sequence;
 }
 
+inline std::string DoublePtr2String(const double* array, int size)
+{
+    std::string result;
+    if (size == 0)
+        return result;
+
+    for (int i = 0; i < size; ++i) {
+        result += std::to_string(array[i]) + ";";
+    }
+    result.pop_back();
+    return result;
+}
+
+inline std::vector<double> String2DoubleVec(const std::string& str)
+{
+    std::vector<double> result;
+
+    StringList vectors = SplitString(str, "|");
+    for (const auto& element : vectors)
+        result.push_back(std::stod(element));
+
+    return result;
+}
 }

@@ -93,10 +93,10 @@ void ctrl_c_handler(int s)
 #else
         remove("stop");
 #endif
-        printf("Caught stop signal a second time.\nWill exit now!");
+        printf("Caught stop signal a second time.\nWill exit now!\n\n");
         exit(1);
     } else {
-        printf("Caught stop signal\nWill try to stop current stuff!");
+        printf("Caught stop signal\nWill try to stop current stuff!\n");
         std::ofstream output("stop");
     }
 }
@@ -412,10 +412,15 @@ int main(int argc, char **argv) {
             }
 
             Molecule mol1 = Files::LoadFile(argv[2]);
-            SimpleMD md;
+            SimpleMD md(controller, false);
             md.setMolecule(mol1);
+            std::string name = std::string(argv[2]);
+            for (int i = 0; i < 4; ++i)
+                name.pop_back();
+            md.setBaseName(name);
+
             md.Initialise();
-            md.Dance();
+            md.start();
         } else if (strcmp(argv[1], "-rmsdtraj") == 0) {
             if (argc <= 2) {
                 std::cerr << "Please use curcuma for rmsd analysis of trajectories as follows:\ncurcuma -rmsdtraj input.xyz" << std::endl;

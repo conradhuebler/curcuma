@@ -309,7 +309,33 @@ curcuma -nci file1.dat file2.dat
 ```
 one can ''remove'' RDG vs sign(λ<sub>2</sub>)ρ points which occur in both plots (file1.dat and file2.dat). The similarity of two points is set to true, if the distance is below a threshold distance, which is defined by the averaged distance of two adjacent points.
 
+## Molecular Dynamics
+Curcuma has now a Molecular Dynamics modul, which can be used with:
+```sh
+curcuma -md input.xyz
+```
 
+Naturally, there are many more better fitting tools to perform molecular dynamics. Unlike curcuma, they do respect correct units etc. However, MD calculations work and can be controlled with the following arguments:
+
+```json
+{ "GFN", 2 },
+{ "MaxSteps", 5000 },
+{ "T", 298.15 },
+{ "dt", 1 },
+{ "charge", 0 },
+{ "Spin", 0 },
+{ "centered", false }
+```
+
+For example, using 
+```sh
+curcuma -md input.xyz -gfn 66
+``` 
+the GFN-FF approach will be used.
+For now, Velocity Rescaling will be applied to keep the Temperature at the desired level ...
+
+
+The MD implementation integrates well into curcuma, hence calculation can be stopped with Ctrl-C (or a "stop" file) and will be resumed (velocities and geometries are stored) if a restart file is found.
 # Citation
 Please cite the software package if you obtain results:
 [conradhuebler/curcuma: Curcuma Zenodo Citation](https://doi.org/10.5281/zenodo.4302722)
