@@ -1,6 +1,6 @@
 /*
  * <Simple MD Module for Cucuma. >
- * Copyright (C) 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -35,15 +35,19 @@ public:
     void Dance();
 
 private:
-    double Gradient(const int* attyp, const double* coord, double* grad);
-    void Propagate(const int* attyp, const double* coord, double* gradient);
+    double Gradient(const double* coord, double* grad);
+    void UpdatePosition(const double* grad, double* coord);
+    void UpdateVelocities(const double* gradient_prev, const double* gradient_curr);
+
+    void PrintMatrix(const double* matrix);
+
     void WriteGeometry();
     double EKin();
     void Thermostat();
     int m_natoms = 0;
     double m_curr_temp = 0;
     double m_timestep = 0.5;
-    int m_maxsteps = 100;
+    int m_maxsteps = 10;
     double m_charge = 0.0;
     double m_temperatur = 298.13;
     std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient;
