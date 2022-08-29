@@ -49,8 +49,12 @@ RMSDTraj::RMSDTraj(const json& controller, bool silent)
 {
     UpdateController(controller);
 }
+RMSDTraj::~RMSDTraj()
+{
+    delete m_driver;
+}
 
-void RMSDTraj::start()
+bool RMSDTraj::Initialise()
 {
     std::cout << "'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
     std::cout << "'    Scanning Trajectory file for RMSD and Conformers     '" << std::endl;
@@ -61,17 +65,17 @@ void RMSDTraj::start()
     } else
         std::cout << "  No                                '" << std::endl;
     std::cout << "'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
-    int atoms_target = -1;
     if (m_reference.compare("none") != 0) {
-        m_stored_structures.push_back(Files::LoadFile(m_reference));
-        atoms_target = m_stored_structures[0].AtomCount();
+        m_stored_structures.push_back(new Molecule(Files::LoadFile(m_reference)));
+        m_atoms = m_stored_structures[0]->AtomCount();
     }
 
     m_outfile = m_filename;
     for (int i = 0; i < 4; ++i)
         m_outfile.pop_back();
 
-    m_rmsd_file.open(m_outfile + "_rmsd.dat");
+    if (m_writeRMSD)
+        m_rmsd_file.open(m_outfile + "_rmsd.dat");
 
     if (m_pcafile)
         m_pca_file.open(m_outfile + "_pca.dat");
@@ -95,11 +99,11 @@ void RMSDTraj::start()
         //{ "noreorder", m_noreorder },
         { "threads", 1 }
     };
-    RMSDDriver* driver = new RMSDDriver(RMSDJsonControl);
-    driver->setProtons(!m_heavy);
-    driver->setForceReorder(false);
-    driver->setCheckConnections(false);
-    driver->setFragment(m_fragment);
+    m_driver = new RMSDDriver(RMSDJsonControl);
+    m_driver->setProtons(!m_heavy);
+    m_driver->setForceReorder(false);
+    m_driver->setCheckConnections(false);
+    m_driver->setFragment(m_fragment);
     std::ofstream export_file;
     if (m_writeUnique) {
         export_file.open(m_outfile + ".unique.xyz");
@@ -111,120 +115,162 @@ void RMSDTraj::start()
     }
     std::ifstream input(m_filename);
     std::vector<std::string> lines;
-    int atoms = 0, atoms2 = 0;
-    int index = 0;
-    int i = 0;
-    int molecule = 0;
+    //    int atoms = 0, atoms2 = 0;
+    m_currentIndex = 0;
+    //  int i = 0;
+    //    int molecule = 0;
     std::ifstream inFile(m_filename);
-    int max = std::count(std::istreambuf_iterator<char>(inFile),
+    m_max_lines = std::count(std::istreambuf_iterator<char>(inFile),
         std::istreambuf_iterator<char>(), '\n');
 
     std::ifstream second;
     if (m_pairwise) {
         second.open(m_second_file);
     }
-
-    Molecule initial(atoms, 0);
-    Molecule mol(atoms, 0);
-    Molecule mol_2(atoms2, 0);
+    return true;
+}
+void RMSDTraj::start()
+{
+    //  Molecule mol(m_atoms, 0);
+    //  Molecule mol_2(m_atoms, 0);
     Molecule prev;
     FileIterator file(m_filename);
+    std::vector<int> progress(10, 0);
     while (!file.AtEnd()) {
-        Molecule mol(file.Next());
-        double energy = mol.Energy();
-        index += mol.AtomCount();
-
-        if (m_stored_structures.size() == 0) {
-            if (m_writeUnique)
-                mol.appendXYZFile(m_outfile + ".unique.xyz");
-            m_stored_structures.push_back(mol);
-            initial = mol;
-            prev = mol;
-        } else {
-            prev = m_stored_structures[0];
-            initial = prev;
-            /*
-            for (std::size_t i = 0; i < mol.GetFragments().size(); ++i)
-                if (mol.getGeometryByFragment(i).rows() == atoms_target) {
-                    driver->setFragmentTarget(i);
-                    driver->setPartialRMSD(true);
-                }
-                */
+        Molecule* molecule = new Molecule(file.Next());
+        //   std::cout << molecule->Atom(0).second.transpose() << std::endl;
+        CheckMolecule(molecule);
+        if (progress[int((m_currentIndex / double(m_max_lines)) * 100) / 10] == 0) {
+            progress[int((m_currentIndex / double(m_max_lines)) * 100) / 10] = 1;
+            std::cout << int(m_currentIndex / double(m_max_lines) * 100) << " % done ...!" << std::endl;
         }
-        driver->setScaling(1.3);
-        if (m_pairwise == false) {
-            std::vector<double> rmsd_results;
-
-            if (!m_ref_first) // If we reference to the previouse (default) we have to pre-reorder and then calculate the rmsd with respect to the first structure and not the prevouise
-            {
-                driver->setReference(prev);
-                driver->setTarget(mol);
-                driver->start();
-                prev = driver->TargetAligned();
-                mol = driver->TargetAligned();
-            }
-
-            driver->setReference(initial);
-            driver->setTarget(mol);
-            driver->start();
-
-            if (driver->ReorderRules().size())
-                std::cout << Tools::Vector2String(driver->ReorderRules()) << std::endl;
-
-            m_rmsd_file << driver->RMSD() << "\t" << std::setprecision(10) << energy << std::endl;
-            m_rmsd_vector.push_back(driver->RMSD());
-            m_energy_vector.push_back(energy);
-            if (m_writeAligned) {
-                driver->TargetAligned().appendXYZFile(m_outfile + "_aligned.xyz");
-            }
-
-            if (m_pcafile) {
-                Molecule mol2 = driver->TargetAligned();
-                for (std::size_t j = 0; j < mol2.AtomCount(); ++j) {
-                    if (mol2.Atom(j).first != 1)
-                        m_pca_file << mol2.Atom(j).second(0) << " " << mol2.Atom(j).second(1) << " " << mol2.Atom(j).second(2);
-                }
-                m_pca_file << std::endl;
-            }
-
-            double first_rmsd = driver->RMSD();
-            if (m_writeUnique) {
-                bool perform_rmsd = true;
-
-                for (std::size_t mols = m_stored_structures.size() - 1; mols > 0 && perform_rmsd; --mols) {
-                    driver->setReference(m_stored_structures[mols]);
-                    driver->setTarget(mol);
-                    driver->start();
-
-                    rmsd_results.push_back(driver->RMSD());
-                    perform_rmsd = driver->RMSD() > m_rmsd_threshold;
-                }
-                perform_rmsd = first_rmsd > m_rmsd_threshold && perform_rmsd;
-                rmsd_results.push_back(first_rmsd);
-
-                if (perform_rmsd) {
-                    m_stored_structures.push_back(mol);
-                    mol.appendXYZFile(m_outfile + ".unique.xyz");
-                    std::cout << "New structure added ... ( " << m_stored_structures.size() << "). " << int(index / double(max) * 100) << " % done ...!" << std::endl;
-                }
-            }
-        } else {
-            driver->setReference(mol);
-            driver->setTarget(mol_2);
-            driver->start();
-            m_pairwise_file << driver->RMSD() << std::endl;
-        }
-        driver->clear();
-        i = -1;
-        mol = Molecule(atoms, 0);
-        molecule++;
-        mol.setName(std::to_string(molecule));
-        if (m_pairwise) {
-            mol_2 = Molecule(atoms, 0);
-            mol_2.setName(std::to_string(molecule));
-        }
+        delete molecule;
+        if (CheckStop())
+            break;
     }
 
+    PostAnalyse();
+
+    if (m_opt && m_writeUnique && !CheckStop()) {
+        Optimise();
+        if (m_filter)
+            Filter();
+    }
+}
+
+void RMSDTraj::CheckMolecule(Molecule* molecule)
+{
+    // std::cout << molecule->Atom(0).second.transpose() << std::endl << std::endl;
+
+    double energy = molecule->Energy();
+    m_currentIndex += molecule->AtomCount();
+
+    if (m_stored_structures.size() == 0) {
+        if (m_writeUnique) {
+            molecule->Center();
+            molecule->appendXYZFile(m_outfile + ".unique.xyz");
+            std::cout << "First structure added!" << std::endl;
+        }
+        m_stored_structures.push_back(new Molecule(molecule));
+        m_initial = molecule;
+        m_previous = molecule;
+        return;
+    } else {
+        m_previous = m_stored_structures[0];
+        m_initial = m_previous;
+        /*
+        for (std::size_t i = 0; i < mol.GetFragments().size(); ++i)
+            if (mol.getGeometryByFragment(i).rows() == atoms_target) {
+                driver->setFragmentTarget(i);
+                driver->setPartialRMSD(true);
+            }
+            */
+    }
+    m_driver->setScaling(1.3);
+    if (m_pairwise == false) {
+        std::vector<double> rmsd_results;
+
+        if (!m_ref_first) // If we reference to the previouse (default) we have to pre-reorder and then calculate the rmsd with respect to the first structure and not the prevouise
+        {
+            m_driver->setReference(*m_previous);
+            m_driver->setTarget(*molecule);
+            m_driver->start();
+            // m_previous = m_driver->TargetAligned();
+            // molecule = m_driver->TargetAligned();
+        }
+
+        m_driver->setReference(*m_initial);
+        m_driver->setTarget(*molecule);
+        m_driver->start();
+
+        if (m_driver->ReorderRules().size())
+            std::cout << Tools::Vector2String(m_driver->ReorderRules()) << std::endl;
+
+        m_rmsd_file << m_driver->RMSD() << "\t" << std::setprecision(10) << energy << std::endl;
+        m_rmsd_vector.push_back(m_driver->RMSD());
+        m_energy_vector.push_back(energy);
+        if (m_writeAligned) {
+            m_driver->TargetAligned().appendXYZFile(m_outfile + "_aligned.xyz");
+        }
+
+        if (m_pcafile) {
+            Molecule mol2 = m_driver->TargetAligned();
+            for (std::size_t j = 0; j < mol2.AtomCount(); ++j) {
+                if (mol2.Atom(j).first != 1)
+                    m_pca_file << mol2.Atom(j).second(0) << " " << mol2.Atom(j).second(1) << " " << mol2.Atom(j).second(2);
+            }
+            m_pca_file << std::endl;
+        }
+
+        double first_rmsd = m_driver->RMSD();
+        if (m_writeUnique) {
+            bool perform_rmsd = true;
+            //  std::cout << std::endl;
+            for (std::size_t mols = m_stored_structures.size() - 1; mols >= 0 && perform_rmsd && mols <= m_stored_structures.size(); --mols) {
+                // m_driver->clear();
+                m_driver->setReference(*m_stored_structures[mols]);
+                m_driver->setTarget(*molecule);
+                // std::cout << molecule->Atom(0).second.transpose() << " " << m_stored_structures[mols]->Atom(0).second.transpose() << std::endl;
+                m_driver->start();
+
+                rmsd_results.push_back(m_driver->RMSD());
+                perform_rmsd = m_driver->RMSD() > m_rmsd_threshold;
+                //  std::cout << m_driver->RMSD() << " ";
+            }
+            perform_rmsd = first_rmsd > m_rmsd_threshold && perform_rmsd;
+            rmsd_results.push_back(first_rmsd);
+
+            if (perform_rmsd) {
+                molecule->LoadMolecule(m_driver->TargetAlignedReference());
+                m_stored_structures.push_back(new Molecule(molecule));
+                molecule->appendXYZFile(m_outfile + ".unique.xyz");
+                std::cout << "New structure added ... ( " << m_stored_structures.size() << "). " << /*  int(m_currentIndex / double(m_max_lines) * 100) << " % done ...!" << */ std::endl;
+            }
+        }
+    } else {
+        std::cout << "Pairwise is disabled for now" << std::endl;
+        /*
+        m_driver->setReference(mol);
+        m_driver->setTarget(mol_2);
+        m_driver->start();
+        m_pairwise_file << m_driver->RMSD() << std::endl;
+        */
+    }
+    m_driver->clear();
+    // i = -1;
+    // mol = Molecule(atoms, 0);
+    molecule++;
+    // mol.setName(std::to_string(molecule));
+    if (m_pairwise) {
+        /*
+        mol_2 = Molecule(atoms, 0);
+        mol_2.setName(std::to_string(molecule));
+        */
+    }
+}
+
+void RMSDTraj::PostAnalyse()
+{
     double rmsd_mean = Tools::mean(m_rmsd_vector);
     double rmsd_median = Tools::median(m_rmsd_vector);
     double rmsd_std = Tools::stdev(m_rmsd_vector, rmsd_mean);
@@ -242,13 +288,7 @@ void RMSDTraj::start()
     m_rmsd_file << "#" << rmsd_std << "\t" << energy_std << std::endl;
     m_rmsd_file << "#" << rmsd_shannon << "\t" << energy_shannon << std::endl;
 
-    delete driver;
-
-    if (m_opt && m_writeUnique) {
-        Optimise();
-        if (m_filter)
-            Filter();
-    }
+    // delete driver;
 }
 
 void RMSDTraj::LoadControlJson()
@@ -266,6 +306,7 @@ void RMSDTraj::LoadControlJson()
     m_ref_first = Json2KeyWord<bool>(m_defaults, "RefFirst");
     m_opt = Json2KeyWord<bool>(m_defaults, "opt");
     m_filter = Json2KeyWord<bool>(m_defaults, "filter");
+    m_writeRMSD = Json2KeyWord<bool>(m_defaults, "writeRMSD");
 }
 
 void RMSDTraj::Optimise()

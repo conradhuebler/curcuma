@@ -30,6 +30,8 @@
 
 #include "curcumamethod.h"
 
+class RMSDDriver;
+
 #include "json.hpp"
 using json = nlohmann::json;
 
@@ -46,14 +48,18 @@ const json RMSDTrajJson{
     { "RefFirst", false },
     { "noreorder", true },
     { "opt", false },
-    { "filter", false }
+    { "filter", false },
+    { "writeRMSD", true }
 };
 
 class RMSDTraj : public CurcumaMethod {
 public:
     RMSDTraj(const json& controller = RMSDTrajJson, bool silent = true);
-    virtual ~RMSDTraj() {}
+    virtual ~RMSDTraj();
 
+    virtual bool Initialise();
+
+    void setBaseName(const std::string& name) { m_filename = name; }
     void setFile(const std::string& filename) { m_filename = filename; }
     void setSecondFile(const std::string& filename)
     {
@@ -72,6 +78,10 @@ public:
     inline void setHeavy(bool heavy) { m_heavy = heavy; }
 
     void start() override;
+
+    void CheckMolecule(Molecule* molecule);
+
+    void PostAnalyse();
 
     void Optimise();
 
@@ -94,10 +104,15 @@ private:
 
     std::string m_filename, m_reference, m_second_file, m_outfile;
     std::ofstream m_rmsd_file, m_pca_file, m_pairwise_file;
-    std::vector<Molecule> m_stored_structures;
+    std::vector<Molecule*> m_stored_structures;
+    Molecule *m_initial, *m_previous;
+    RMSDDriver* m_driver;
     std::vector<double> m_rmsd_vector, m_energy_vector;
     int m_fragment = -1;
-    bool m_writeUnique = false, m_pairwise = false, m_heavy = false, m_pcafile = false, m_writeAligned = false, m_ref_first = false, m_opt = false, m_filter = false;
+    int m_currentIndex = 0;
+    int m_atoms = -1;
+    int m_max_lines = -1;
+    bool m_writeUnique = false, m_pairwise = false, m_heavy = false, m_pcafile = false, m_writeAligned = false, m_ref_first = false, m_opt = false, m_filter = false, m_writeRMSD = true;
     bool m_allxyz = false;
     double m_rmsd_threshold = 1.0;
 };

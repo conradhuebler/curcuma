@@ -174,6 +174,7 @@ set(curcuma_core_SRC
         src/capabilities/curcumamethod.cpp
         src/capabilities/curcumaopt.cpp
         src/capabilities/confscan.cpp
+        src/capabilities/confsearch.cpp
         src/capabilities/confstat.cpp
         src/capabilities/docking.cpp
         src/capabilities/analysenciplot.cpp

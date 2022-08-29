@@ -177,6 +177,8 @@ class Molecule
         return m_persistentImage;
     }
 
+    void Center();
+
 private:
     void ParseString(const std::string& internal, std::vector<std::string>& elements);
 

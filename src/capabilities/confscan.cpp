@@ -28,7 +28,7 @@
 #include <fmt/core.h>
 
 #include "src/capabilities/confstat.h"
-#include "src/capabilities/persistentdiagram.h".h "
+#include "src/capabilities/persistentdiagram.h"
 #include "src/capabilities/rmsd.h"
 
 #include "src/core/fileiterator.h"
@@ -78,6 +78,8 @@ void ConfScan::LoadControlJson()
     m_prevent_reorder = Json2KeyWord<bool>(m_defaults, "preventReorder");
     m_scale_loose = Json2KeyWord<double>(m_defaults, "scaleLoose");
     m_scale_tight = Json2KeyWord<double>(m_defaults, "scaleTight");
+    m_last_dE = Json2KeyWord<double>(m_defaults, "lastdE");
+
     m_skip = Json2KeyWord<int>(m_defaults, "skip");
     m_allxyz = Json2KeyWord<bool>(m_defaults, "allxyz");
     m_update = Json2KeyWord<bool>(m_defaults, "update");
@@ -236,9 +238,11 @@ bool ConfScan::LoadRestartInformation()
             m_target_restored_energy = confscan["TargetLastEnergy"];
         } catch (json::type_error& e) {
         }
-        try {
-            m_last_dE = confscan["deltaE"];
-        } catch (json::type_error& e) {
+        if (m_last_dE < 0) {
+            try {
+                m_last_dE = confscan["deltaE"];
+            } catch (json::type_error& e) {
+            }
         }
         for (const auto& vector : reorder_cached)
             if (std::find(m_reorder_rules.begin(), m_reorder_rules.end(), vector) == m_reorder_rules.end())
@@ -256,7 +260,7 @@ nlohmann::json ConfScan::WriteRestartInformation()
     block["ReorderRules"] = Tools::VectorVector2String(m_reorder_rules);
     block["ReferenceLastEnergy"] = m_reference_last_energy;
     block["TargetLastEnergy"] = m_target_last_energy;
-    block["deltaE"] = (m_current_energy - m_lowest_energy) * 2625.5;
+    block["deltaE"] = m_dE;
     return block;
 }
 
@@ -391,6 +395,8 @@ void ConfScan::start()
             fmt::print("\n3rd Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
         }
     }
+    if (!CheckStop())
+        m_dE = -1;
 
     Finalise();
 }
@@ -427,7 +433,7 @@ void ConfScan::CheckRMSD()
             continue;
         }
         m_current_energy = mol1->Energy();
-
+        m_dE = (m_current_energy - m_lowest_energy) * 2625.5;
         bool keep_molecule = true;
         RMSDDriver* driver = new RMSDDriver(rmsd);
         for (const auto& mol2 : m_result) {
@@ -462,8 +468,7 @@ bool ConfScan::SingleCheckRMSD(const Molecule* mol1, const Molecule* mol2, RMSDD
     double Ic = abs(mol1->Ic() - mol2->Ic());
 
     double diff_rot = (Ia + Ib + Ic) * third;
-    double difference = abs(m_current_energy - m_lowest_energy) * 2625.5;
-    if (difference > m_energy_cutoff && m_energy_cutoff != -1) {
+    if (m_dE > m_energy_cutoff && m_energy_cutoff != -1) {
         keep_molecule = false;
 
         m_reference_last_energy = mol1->Energy();
@@ -567,6 +572,7 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
             continue;
         }
         m_current_energy = mol1->Energy();
+        m_dE = (m_current_energy - m_lowest_energy) * 2625.5;
 
         bool keep_molecule = true;
         RMSDDriver* driver = new RMSDDriver(rmsd);
@@ -574,7 +580,7 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
             if (CheckStop()) {
                 delete driver;
                 fmt::print("\n\n** Found stop file, will end now! **\n\n");
-                TriggerWriteRestart();
+                // TriggerWriteRestart();
                 return;
             }
 
@@ -598,6 +604,7 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                 m_threshold.push_back(mol2);
                 break;
             }
+
             keep_molecule = SingleReorderRMSD(mol1, mol2, driver, reuse_only);
             if (keep_molecule == false) {
                 writeStatisticFile(driver->ReferenceAlignedReference(), driver->TargetAlignedReference(), driver->RMSD(), true);
@@ -620,8 +627,7 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
         delete driver;
         if ((m_result.size() >= m_maxrank && limit) || (m_result.size() >= 2 * m_maxrank && !limit))
             break;
-        double difference = abs(m_current_energy - m_lowest_energy) * 2625.5;
-        if (difference > m_energy_cutoff && m_energy_cutoff != -1) {
+        if (m_dE > m_energy_cutoff && m_energy_cutoff != -1) {
             break;
         }
     }
@@ -635,8 +641,10 @@ bool ConfScan::SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMS
     double rmsd = 0;
     driver->setReference(mol1);
     driver->setTarget(mol2);
-
     for (const auto& rule : m_reorder_rules) {
+        if (rule.size() != mol1->AtomCount())
+            continue;
+
         double tmp_rmsd = driver->Rules2RMSD(rule);
         if (tmp_rmsd < m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
             keep_molecule = false;
@@ -647,7 +655,7 @@ bool ConfScan::SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMS
             break;
         }
     }
-    if (m_useRestart && (m_current_energy - m_lowest_energy) * 2625.5 < m_last_dE) {
+    if (m_useRestart && m_dE < m_last_dE) {
         allow_reorder = false;
     } else {
         m_useRestart = false;
@@ -676,6 +684,8 @@ bool ConfScan::SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMS
 
 void ConfScan::Finalise()
 {
+    TriggerWriteRestart();
+
     int i = 0;
     for (const auto molecule : m_stored_structures) {
         double difference = abs(molecule->Energy() - m_lowest_energy) * 2625.5;
@@ -726,7 +736,7 @@ void ConfScan::PrintStatus()
     std::cout << "# Reordered : " << m_reordered << "     ";
     std::cout << "# Successfully : " << m_reordered_worked << "    ";
     std::cout << "# Reused Results : " << m_reordered_reused << "     ";
-    std::cout << "# Current Energy [kJ/mol] : " << (m_current_energy - m_lowest_energy) * 2625.5 << std::endl;
+    std::cout << "# Current Energy [kJ/mol] : " << m_dE << std::endl;
 }
 
 void ConfScan::writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd, bool reason)
@@ -734,7 +744,7 @@ void ConfScan::writeStatisticFile(const Molecule* mol1, const Molecule* mol2, do
     std::ofstream result_file;
     result_file.open(m_statistic_filename, std::ios_base::app);
     if (reason)
-        result_file << "Molecule got rejected due to small rmsd " << rmsd << " with and energy difference of " << (m_current_energy - m_lowest_energy) * 2625.5 << std::endl;
+        result_file << "Molecule got rejected due to small rmsd " << rmsd << " with and energy difference of " << m_dE << std::endl;
     else
         result_file << "Molecule got rejected as differences " << m_last_diff << " MHz and " << m_last_ripser << " are below the estimated thresholds;  with and energy difference of " << std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 << std::endl;
 

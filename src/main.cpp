@@ -436,6 +436,7 @@ int main(int argc, char **argv) {
 
             RMSDTraj traj(controller, false);
             traj.setFile(argv[2]);
+            traj.Initialise();
             traj.start();
 
         } else if (strcmp(argv[1], "-nebprep") == 0) {
@@ -677,7 +678,8 @@ int main(int argc, char **argv) {
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
                 std::cout << mol.Centroid() << std::endl;
-                mol.setGeometry(GeometryTools::TranslateGeometry(mol.getGeometry(), GeometryTools::Centroid(mol.getGeometry()), Position{ 0, 0, 0 }));
+                // mol.setGeometry(GeometryTools::TranslateGeometry(mol.getGeometry(), GeometryTools::Centroid(mol.getGeometry()), Position{ 0, 0, 0 }));
+                mol.Center();
                 std::cout << mol.Centroid() << std::endl;
 
                 if (file.MaxMolecules() <= 1)

@@ -648,6 +648,8 @@ bool Molecule::setGeometry(const Geometry &geometry)
     if (geometry.rows() != m_geometry.size())
         return false;
 
+    m_dirty = true;
+
     for (int i = 0; i < m_geometry.size(); ++i) {
         m_geometry[i][0] = geometry(i, 0);
         m_geometry[i][1] = geometry(i, 1);
@@ -738,9 +740,9 @@ void Molecule::writeXYZFile(const std::string& filename, const  std::vector<int>
 std::string Molecule::Header() const
 {
 #ifdef GCC
-    return fmt::format(" ** Energy = {:10f} Eh ** Charge = {} ** Spin = {} ** Curcuma {} ({})\n", Energy(), Charge(), Spin(), qint_version, git_tag);
+    return fmt::format("{} ** Energy = {:10f} Eh ** Charge = {} ** Spin = {} ** Curcuma {} ({})\n", m_name, Energy(), Charge(), Spin(), qint_version, git_tag);
 #else
-    return fmt::format(" ** Energy = {:} Eh ** Charge = {} ** Spin = {} ** Curcuma {} ({})\n", Energy(), Charge(), Spin(), qint_version, git_tag);
+    return fmt::format("{} ** Energy = {:} Eh ** Charge = {} ** Spin = {} ** Curcuma {} ({})\n", m_name, Energy(), Charge(), Spin(), qint_version, git_tag);
 #endif
 }
 
@@ -1118,4 +1120,9 @@ Molecule Molecule::AtomsRemoved(const std::vector<int>& atoms)
             mol.addPair(pair);
     }
     return mol;
+}
+
+void Molecule::Center()
+{
+    setGeometry(GeometryTools::TranslateGeometry(getGeometry(), GeometryTools::Centroid(getGeometry()), Position{ 0, 0, 0 }));
 }

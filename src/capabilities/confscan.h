@@ -56,7 +56,8 @@ static const json ConfScanJson = {
     { "GFN", -1 },
     { "threads", 1 },
     { "RMSDElement", 7 },
-    { "accepted", "" }
+    { "accepted", "" },
+    { "lastdE", -1 }
 };
 
 class RMSDDriver;
@@ -144,7 +145,7 @@ private:
     double m_reference_restored_energy = -1e10, m_target_restored_energy = -1e10;
     double m_diff_rot_threshold_loose = 0.0, m_diff_ripser_threshold_loose = 0.0, m_diff_rot_threshold_tight = 0.0, m_diff_ripser_threshold_tight = 0.0;
     std::vector<Molecule*> m_result, m_rejected_structures, m_stored_structures, m_previously_accepted, m_threshold;
-    double m_last_diff = 0.0, m_last_ripser = 0.0, m_last_dE = 0;
+    double m_last_diff = 0.0, m_last_ripser = 0.0, m_last_dE = -1, m_dE = -1;
     int m_maxmol = 0;
     int m_maxrank = 10000;
     int m_maxParam = -1;
