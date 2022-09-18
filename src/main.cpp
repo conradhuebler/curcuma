@@ -155,6 +155,7 @@ int main(int argc, char **argv) {
 #ifdef USE_XTB
         std::cout << "-opt         * LBFGS optimiser using xtb GFN                              *" << std::endl;
         std::cout << "-sp          * Single point calculation using xtb GFN                     *" << std::endl;
+        std::cout << "-md          * Molecular dynamics using xtb GFN                           *" << std::endl;
 
 #endif
         std::cout << "-block       * Split files with many structures in block                  *" << std::endl
@@ -724,6 +725,9 @@ int main(int argc, char **argv) {
                           << std::endl;
                 // CompactTopo(mol.HydrogenBondMatrix(-1,-1));
                 // std::cout << CompareTopoMatrix(mol.HydrogenBondMatrix(-1,-1),mol.HydrogenBondMatrix(-1,-1) ) << std::endl;
+                // auto m = mol.DistanceMatrix();
+                // std::cout << m.first << std::endl;
+                // std::cout << m.second << std::endl;
             }
         }
     }

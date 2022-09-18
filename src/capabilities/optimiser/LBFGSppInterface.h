@@ -38,21 +38,21 @@ using namespace LBFGSpp;
 class LBFGSInterface {
 public:
     LBFGSInterface(int n_)
-        : n(n_)
+    //: n(n_)
     {
     }
     double operator()(const VectorXd& x, VectorXd& grad)
     {
         double fx = 0.0;
-        int attyp[m_atoms];
+        // int attyp[m_atoms];
         double charge = 0;
-        std::vector<int> atoms = m_molecule->Atoms();
+        // std::vector<int> atoms = m_molecule->Atoms();
         double coord[3 * m_atoms];
         double gradient[3 * m_atoms];
         double dist_gradient[3 * m_atoms];
 
         for (int i = 0; i < m_atoms; ++i) {
-            attyp[i] = m_molecule->Atoms()[i];
+            //    attyp[i] = m_molecule->Atoms()[i];
             coord[3 * i + 0] = x(3 * i + 0) / au;
             coord[3 * i + 1] = x(3 * i + 1) / au;
             coord[3 * i + 2] = x(3 * i + 2) / au;
@@ -62,9 +62,9 @@ public:
         m_error = std::isnan(fx);
 
         for (int i = 0; i < m_atoms; ++i) {
-            grad[3 * i + 0] = gradient[3 * i + 0];
-            grad[3 * i + 1] = gradient[3 * i + 1];
-            grad[3 * i + 2] = gradient[3 * i + 2];
+            grad[3 * i + 0] = gradient[3 * i + 0] * (m_constrains[i]);
+            grad[3 * i + 1] = gradient[3 * i + 1] * (m_constrains[i]);
+            grad[3 * i + 2] = gradient[3 * i + 2] * (m_constrains[i]);
         }
         m_energy = fx;
         m_parameter = x;
@@ -79,16 +79,20 @@ public:
     {
         m_molecule = molecule;
         m_atoms = m_molecule->AtomCount();
+        for (int i = 0; i < m_atoms; ++i)
+            m_constrains.push_back(1);
     }
+    void setConstrains(const std::vector<int> constrains) { m_constrains = constrains; }
     void setInterface(TBLiteInterface* interface) { m_interface = interface; }
     void setMethod(int method) { m_method = method; }
     bool isError() const { return m_error; }
 
 private:
-    int m_iter = 0;
+    //  int m_iter = 0;
     int m_atoms = 0;
-    int n;
+    //  int n;
     int m_method = 2;
+    std::vector<int> m_constrains;
     TBLiteInterface* m_interface;
     Vector m_parameter;
     const Molecule* m_molecule;

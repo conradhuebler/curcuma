@@ -179,6 +179,8 @@ class Molecule
 
     void Center();
 
+    std::pair<Matrix, Matrix> DistanceMatrix() const;
+
 private:
     void ParseString(const std::string& internal, std::vector<std::string>& elements);
 

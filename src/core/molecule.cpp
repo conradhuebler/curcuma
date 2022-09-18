@@ -1126,3 +1126,18 @@ void Molecule::Center()
 {
     setGeometry(GeometryTools::TranslateGeometry(getGeometry(), GeometryTools::Centroid(getGeometry()), Position{ 0, 0, 0 }));
 }
+
+std::pair<Matrix, Matrix> Molecule::DistanceMatrix() const
+{
+    Matrix distance = Eigen::MatrixXd::Zero(AtomCount(), AtomCount());
+    Matrix topo = distance;
+    for (int i = 0; i < AtomCount(); ++i) {
+        for (int j = 0; j < i; ++j) {
+            distance(i, j) = CalculateDistance(i, j);
+            distance(j, i) = distance(i, j);
+            topo(i, j) = distance(i, j) <= (Elements::CovalentRadius[Atom(i).first] + Elements::CovalentRadius[Atom(j).first]) * m_scaling;
+            topo(j, i) = topo(i, j);
+        }
+    }
+    return std::pair<Matrix, Matrix>(distance, topo);
+}

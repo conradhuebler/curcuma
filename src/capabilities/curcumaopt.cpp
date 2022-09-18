@@ -198,7 +198,8 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
     {
         printOutput = false;
     }
-
+    bool optH = Json2KeyWord<bool>(controller, "optH");
+    std::vector<int> constrain;
     Geometry geometry = initial->getGeometry();
     intermediate->push_back(initial);
     Molecule previous(initial);
@@ -209,6 +210,7 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
         parameter(3 * i) = geometry(i, 0);
         parameter(3 * i + 1) = geometry(i, 1);
         parameter(3 * i + 2) = geometry(i, 2);
+        constrain.push_back(initial->Atom(i).first == 1);
     }
 
     TBLiteInterface interface;
@@ -230,6 +232,9 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
     fun.setMolecule(initial);
     fun.setInterface(&interface);
     fun.setMethod(method);
+    if (optH)
+        fun.setConstrains(constrain);
+
     double fx;
 
     json RMSDJsonControl = {

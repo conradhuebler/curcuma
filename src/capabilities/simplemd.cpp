@@ -163,9 +163,26 @@ bool SimpleMD::Initialise()
         m_unqiue->setBaseName(m_basename + ".xyz");
         m_unqiue->Initialise();
     }
+    InitConstrainedBonds();
 
     m_initialised = true;
     return true;
+}
+
+void SimpleMD::InitConstrainedBonds()
+{
+    // current just all bonds
+
+    auto m = m_molecule.DistanceMatrix();
+
+    for (int i = 0; i < m_molecule.AtomCount(); ++i) {
+        for (int j = 0; j < i; ++j) {
+            if (m.second(i, j))
+                m_bond_constrained.push_back(std::pair<int, int>(i, j));
+        }
+    }
+    for (auto l : m_bond_constrained)
+        std::cout << l.first << " " << l.second << std::endl;
 }
 
 void SimpleMD::InitVelocities(double scaling)
@@ -414,6 +431,8 @@ void SimpleMD::start()
               << "T" << std::endl;
 #endif
     Gradient(coord, gradient_prev);
+    double lambda = 1;
+
     for (; m_currentStep < m_maxsteps; ++m_currentStep) {
         if (CheckStop() == true) {
             TriggerWriteRestart();
@@ -451,7 +470,7 @@ void SimpleMD::start()
         }
         SimpleIntegrator(coord, gradient_prev, gradient_current);
         // VelocityVerlet(coord, gradient_prev, gradient_current);
-
+        // RattleIntegrator(coord, gradient_prev, gradient_current, lambda);
         m_Ekin = EKin();
 
         if (m_currentStep % m_print == 0) {
@@ -467,12 +486,73 @@ void SimpleMD::start()
         }
     }
 }
+
 void SimpleMD::SimpleIntegrator(double* coord, double* grad_prev, double* gradient_current)
 {
     UpdatePosition(grad_prev, coord);
     m_Epot = Gradient(coord, gradient_current);
 
     UpdateVelocities(grad_prev, gradient_current);
+}
+
+void SimpleMD::RattleIntegrator(double* coord, double* grad_prev, double* gradient_current, double& lambda)
+{
+    int maxiter = 100;
+    double tol = 1e-15;
+
+    double Gqprev[3 * m_natoms], r[3 * m_natoms];
+    for (int i = 0; i < 3 * m_natoms; ++i) {
+        Gqprev[i] = grad_prev[i];
+        m_current_geometry[i] += m_timestep * m_velocities[i]; // + grad_prev[i] / (2 * m_mass[i]);
+        coord[i] = m_current_geometry[i];
+    }
+
+    double lambda_r = 0.5;
+
+    /*
+    // Solve using Newton's method.
+    for (int k = 1; k <= maxiter; k++) {
+      //if (k == maxiter)
+     //   abort();
+     // std::cout << "Position2" << std::endl;
+
+      //const double2 r = q - lambda_r * Gqprev;
+      for(int i = 0; i < 3 * m_natoms; ++i)
+      {
+          r[i] = coord[i] - lambda_r * Gqprev[i];
+         // q -= lambda_r * Gqprev; //coord
+      }
+      const double phi = 1; // calculate constrained = g(r);
+      const double dphi_dl = 1; // calculate constrained derivate -dot(G(r), Gqprev);
+      const double update = phi / dphi_dl;
+
+      if (fabs(phi) < tol && fabs(update) < tol)
+        break;
+
+      lambda_r -= update;
+    }
+*/
+    for (int i = 0; i < 3 * m_natoms; ++i) {
+        m_current_geometry[i] -= lambda_r * Gqprev[i]; // m_timestep * m_velocities[i];
+        coord[i] = m_current_geometry[i];
+        // q -= lambda_r * Gqprev; //coord
+    }
+    for (int i = 0; i < 3 * m_natoms; ++i) {
+        m_velocities[i] -= lambda_r / m_timestep * Gqprev[i] / (2 * m_mass[i]); // 0.5 * m_timestep * (grad_prev[i] * grad_prev[i]) / m_mass[i];
+        // p -= lambda_r / h * Gqprev; //gradient
+    }
+    // Deal with constraint on the tangent space.
+    // const double2 Gq = G(q);
+    double lambda_v = 0.5; // dot(Gq, p) / dot(Gq, Gq);
+    m_Epot = Gradient(coord, gradient_current);
+
+    for (int i = 0; i < 3 * m_natoms; ++i) {
+        m_velocities[i] -= lambda_v * gradient_current[i] / (2 * m_mass[i]); // Gqprev[i]; //0.5 * m_timestep * (grad_prev[i] * grad_prev[i]) / m_mass[i];
+        grad_prev[i] = gradient_current[i];
+        // p -= lambda_v * Gq;//gradient
+    }
+
+    // lambda = (lambda_r + lambda_v) / 2.0;
 }
 
 void SimpleMD::VelocityVerlet(double* coord, double* grad_prev, double* gradient_current)

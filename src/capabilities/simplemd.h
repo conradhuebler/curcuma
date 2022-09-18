@@ -106,10 +106,13 @@ private:
     bool WriteGeometry();
     void SimpleIntegrator(double* coord, double* grad_prev, double* grad_next);
     void VelocityVerlet(double* coord, double* grad_prev, double* grad_next);
-
+    void RattleIntegrator(double* coord, double* grad_prev, double* grad_next, double& lambda);
     double EKin();
     void Berendson();
 
+    void InitConstrainedBonds();
+
+    std::vector<std::pair<int, int>> m_bond_constrained;
     std::string m_basename;
     int m_natoms = 0;
     int m_gfn = 2;

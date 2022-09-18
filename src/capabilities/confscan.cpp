@@ -416,7 +416,7 @@ void ConfScan::CheckRMSD()
             m_skip--;
             continue;
         }
-        if (m_prevent_reorder && m_maxrank <= m_accepted && m_maxrank > -1)
+        if (/*m_prevent_reorder && */ m_maxrank <= m_accepted && m_maxrank > -1)
             continue;
 
         int index = i.second;
@@ -509,7 +509,7 @@ bool ConfScan::SingleCheckRMSD(const Molecule* mol1, const Molecule* mol2, RMSDD
 
 void ConfScan::ReorderCheck(bool reuse_only, bool limit)
 {
-    m_maxmol = m_result.size();
+    m_maxmol = m_stored_structures.size();
 
     // To be finalised and tested
 
@@ -563,7 +563,7 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
     rmsd["method"] = m_RMSDmethod;
     rmsd["element"] = m_RMSDElement;
 
-    std::vector<Molecule*> cached = m_result;
+    std::vector<Molecule*> cached = m_stored_structures;
     m_result = m_previously_accepted;
     m_stored_structures.clear();
     for (Molecule* mol1 : cached) {

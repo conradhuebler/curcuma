@@ -38,7 +38,8 @@ static json CurcumaOptJson{
     { "Threads", 1 },
     { "Charge", 0 },
     { "Spin", 0 },
-    { "SinglePoint", false }
+    { "SinglePoint", false },
+    { "optH", false }
 };
 
 const json OptJsonPrivate{
