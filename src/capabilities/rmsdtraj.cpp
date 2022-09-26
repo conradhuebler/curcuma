@@ -139,7 +139,11 @@ void RMSDTraj::start()
     while (!file.AtEnd()) {
         Molecule* molecule = new Molecule(file.Next());
         //   std::cout << molecule->Atom(0).second.transpose() << std::endl;
-        CheckMolecule(molecule);
+        bool check = CheckMolecule(molecule);
+        if (check) {
+            std::cout << "New structure added ... ( " << m_stored_structures.size() << "). " << /*  int(m_currentIndex / double(m_max_lines) * 100) << " % done ...!" << */ std::endl;
+        } else {
+        }
         if (progress[int((m_currentIndex / double(m_max_lines)) * 100) / 10] == 0) {
             progress[int((m_currentIndex / double(m_max_lines)) * 100) / 10] = 1;
             std::cout << int(m_currentIndex / double(m_max_lines) * 100) << " % done ...!" << std::endl;
@@ -158,8 +162,9 @@ void RMSDTraj::start()
     }
 }
 
-void RMSDTraj::CheckMolecule(Molecule* molecule)
+bool RMSDTraj::CheckMolecule(Molecule* molecule)
 {
+    bool result = false;
     // std::cout << molecule->Atom(0).second.transpose() << std::endl << std::endl;
 
     double energy = molecule->Energy();
@@ -169,12 +174,13 @@ void RMSDTraj::CheckMolecule(Molecule* molecule)
         if (m_writeUnique) {
             molecule->Center();
             molecule->appendXYZFile(m_outfile + ".unique.xyz");
-            std::cout << "First structure added!" << std::endl;
+            // std::cout << "First structure added!" << std::endl;
+            result = true;
         }
         m_stored_structures.push_back(new Molecule(molecule));
         m_initial = molecule;
         m_previous = molecule;
-        return;
+        return result;
     } else {
         m_previous = m_stored_structures[0];
         m_initial = m_previous;
@@ -244,7 +250,8 @@ void RMSDTraj::CheckMolecule(Molecule* molecule)
                 molecule->LoadMolecule(m_driver->TargetAlignedReference());
                 m_stored_structures.push_back(new Molecule(molecule));
                 molecule->appendXYZFile(m_outfile + ".unique.xyz");
-                std::cout << "New structure added ... ( " << m_stored_structures.size() << "). " << /*  int(m_currentIndex / double(m_max_lines) * 100) << " % done ...!" << */ std::endl;
+                //                std::cout << "New structure added ... ( " << m_stored_structures.size() << "). " << /*  int(m_currentIndex / double(m_max_lines) * 100) << " % done ...!" << */ std::endl;
+                result = true;
             }
         }
     } else {
@@ -267,6 +274,7 @@ void RMSDTraj::CheckMolecule(Molecule* molecule)
         mol_2.setName(std::to_string(molecule));
         */
     }
+    return result;
 }
 
 void RMSDTraj::PostAnalyse()

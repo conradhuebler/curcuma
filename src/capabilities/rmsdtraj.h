@@ -79,8 +79,9 @@ public:
 
     void start() override;
 
-    void CheckMolecule(Molecule* molecule);
+    bool CheckMolecule(Molecule* molecule);
 
+    int StoredStructures() const { return m_stored_structures.size(); }
     void PostAnalyse();
 
     void Optimise();

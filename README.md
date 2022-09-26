@@ -332,7 +332,11 @@ For example, using
 curcuma -md input.xyz -gfn 66
 ``` 
 the GFN-FF approach will be used.
-For now, Velocity Rescaling will be applied to keep the Temperature at the desired level ...
+
+```sh
+curcuma -md input.xyz -gfn 66 -T 500  -berendson 200 -dt 1 -hmass 1 -thermostat_steps 400 -velo 4 -maxtime 2e4 -dt 0.5 -impuls 500 -impuls_scaling 0.75
+``` 
+will perform some kind of conformational search using GFN-FF. Results are stored in **input.unique.xyz**! Repeating it will result in other conformations and the previous results stored in **input.unique.xyz** will be overwritten. Bonds may break from time to time ...
 
 
 The MD implementation integrates well into curcuma, hence calculation can be stopped with Ctrl-C (or a "stop" file) and will be resumed (velocities and geometries are stored) if a restart file is found.
