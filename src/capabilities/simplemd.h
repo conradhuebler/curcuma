@@ -28,6 +28,8 @@
 #include "src/core/molecule.h"
 #include "src/core/tbliteinterface.h"
 
+#include "external/CxxThreadPool/include/CxxThreadPool.h"
+
 #include "curcumamethod.h"
 
 static json CurcumaMDJson{
@@ -73,6 +75,8 @@ public:
     bool Initialise() override;
 
     void start() override;
+
+    std::vector<Molecule*> UniqueMolecules() const { return m_unique_structures; }
 
 private:
     void PrintStatus() const;
@@ -141,4 +145,36 @@ private:
     double m_pos_conv = 0, m_scale_velo = 1.0, m_berendson = 1;
     double m_impuls = 0, m_impuls_scaling = 0.75;
     Matrix m_topo_initial;
+    std::vector<Molecule*> m_unique_structures;
+};
+
+class MDThread : public CxxThread {
+
+public:
+    MDThread(int thread, const json& controller)
+        : m_thread(thread)
+        , m_controller(controller)
+    {
+    }
+    ~MDThread() = default;
+
+    inline void setMolecule(const Molecule& molecule) { m_molecule = molecule; }
+    SimpleMD* MDDriver() const { return m_mddriver; }
+
+    virtual int execute()
+    {
+        m_mddriver = new SimpleMD(m_controller, false);
+        m_mddriver->setMolecule(m_molecule);
+        m_mddriver->setBaseName("thread" + std::to_string(m_thread));
+        m_mddriver->Initialise();
+        m_mddriver->start();
+        return 0;
+    }
+
+protected:
+    int m_thread;
+    Molecule m_molecule;
+    std::string m_result;
+    json m_controller;
+    SimpleMD* m_mddriver;
 };

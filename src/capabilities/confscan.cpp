@@ -32,7 +32,7 @@
 #include "src/capabilities/rmsd.h"
 
 #include "src/core/fileiterator.h"
-#include "src/core/molecule.h"
+
 #include "src/core/tbliteinterface.h"
 
 #include "src/tools/general.h"

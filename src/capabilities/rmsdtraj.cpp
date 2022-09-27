@@ -51,6 +51,8 @@ RMSDTraj::RMSDTraj(const json& controller, bool silent)
 }
 RMSDTraj::~RMSDTraj()
 {
+    for (int i = 0; i < m_stored_structures.size(); ++i)
+        delete m_stored_structures[i];
     delete m_driver;
 }
 

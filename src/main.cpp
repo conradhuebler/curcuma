@@ -22,6 +22,7 @@
 
 #include "src/capabilities/analysenciplot.h"
 #include "src/capabilities/confscan.h"
+#include "src/capabilities/confsearch.h"
 #include "src/capabilities/confstat.h"
 #include "src/capabilities/curcumaopt.h"
 #include "src/capabilities/docking.h"
@@ -408,7 +409,7 @@ int main(int argc, char **argv) {
             return 0;
         } else if (strcmp(argv[1], "-md") == 0) {
             if (argc < 2) {
-                std::cerr << "Please use curcuma for test md assignment as follows:\ncurcuma -md input.xyz" << std::endl;
+                std::cerr << "Please use curcuma for molecular dynamics simulation as follows:\ncurcuma -md input.xyz" << std::endl;
                 return 0;
             }
 
@@ -422,6 +423,15 @@ int main(int argc, char **argv) {
 
             md.Initialise();
             md.start();
+        } else if (strcmp(argv[1], "-confsearch") == 0) {
+            if (argc < 2) {
+                std::cerr << "Please use curcuma for conformational search as follows:\ncurcuma -confsearch input.xyz" << std::endl;
+                return 0;
+            }
+
+            ConfSearch confsearch(controller, false);
+            confsearch.setFile(argv[2]);
+            confsearch.start();
         } else if (strcmp(argv[1], "-rmsdtraj") == 0) {
             if (argc <= 2) {
                 std::cerr << "Please use curcuma for rmsd analysis of trajectories as follows:\ncurcuma -rmsdtraj input.xyz" << std::endl;

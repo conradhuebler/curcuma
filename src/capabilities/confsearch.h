@@ -19,28 +19,49 @@
 
 #pragma once
 
+#include <string>
+#include <vector>
+
 #include "src/tools/general.h"
 
-#include <string>
+#include "src/core/molecule.h"
 
 #include "json.hpp"
 
+#include "external/CxxThreadPool/include/CxxThreadPool.h"
+
 #include "src/capabilities/curcumamethod.h"
 
-static const json ConfSearchJson = {
-
+static const nlohmann::json ConfSearchJson{
+    { "gfn", 66 },
+    { "charge", 0 },
+    { "Spin", 0 },
+    { "startT", 500 },
+    { "endT", 300 },
+    { "deltaT", 50 },
+    { "repeat", 5 },
+    { "time", 1e4 } // 10 ps
 };
+
+class Molecule;
 
 class ConfSearch : public CurcumaMethod {
 public:
     ConfSearch(const json& controller, bool silent);
     ~ConfSearch();
 
+    void setFile(const std::string& file);
     virtual bool Initialise();
 
     virtual void start();
 
 private:
+    std::vector<Molecule*> PerformMolecularDynamics(const std::vector<Molecule*>& molecules, const nlohmann::json& parameter);
+
+    std::vector<Molecule*> PerformOptimisation(const std::vector<Molecule*>& molecules, const nlohmann::json& parameter);
+
+    void PerformFilter(const std::vector<Molecule*>& molecules, const nlohmann::json& parameter);
+
     /* Lets have this for all modules */
     virtual nlohmann::json WriteRestartInformation();
 
@@ -59,5 +80,10 @@ private:
     virtual void LoadControlJson();
 
     StringList m_error_list;
+    std::string m_filename, m_basename;
     bool m_silent = true;
+
+    std::vector<Molecule*> m_in_stack, m_final_stack;
+    int m_gfn = 66, m_spin = 0, m_charge = 0, m_repeat = 5;
+    double m_time = 1e4, m_startT = 500, m_endT = 300, m_deltaT = 50;
 };

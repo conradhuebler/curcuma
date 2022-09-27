@@ -37,6 +37,8 @@
 
 #include "src/tools/geometry.h"
 
+#include "external/CxxThreadPool/include/CxxThreadPool.h"
+
 #include "simplemd.h"
 
 SimpleMD::SimpleMD(const json& controller, bool silent)
@@ -48,6 +50,8 @@ SimpleMD::SimpleMD(const json& controller, bool silent)
 
 SimpleMD::~SimpleMD()
 {
+    for (int i = 0; i < m_unique_structures.size(); ++i)
+        delete m_unique_structures[i];
 }
 
 void SimpleMD::LoadControlJson()
@@ -853,6 +857,7 @@ bool SimpleMD::WriteGeometry()
         if (m_unqiue->CheckMolecule(new Molecule(m_molecule))) {
             std::cout << " ** new structure was added **" << std::endl;
             PrintStatus();
+            m_unique_structures.push_back(new Molecule(m_molecule));
         }
     }
     return result;
