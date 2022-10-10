@@ -19,6 +19,7 @@
 
 #include "src/core/fileiterator.h"
 #include "src/core/molecule.h"
+#include "src/core/uff.h"
 
 #include "src/capabilities/analysenciplot.h"
 #include "src/capabilities/confscan.h"
@@ -733,6 +734,13 @@ int main(int argc, char **argv) {
                 mol.AnalyseIntermoleculeDistance();
                 std::cout << mol.Check() << std::endl
                           << std::endl;
+                /*
+                UFF forcefield;
+                forcefield.setMolecule(mol.Atoms(), mol.Coords());
+                forcefield.Initialise();
+                std::cout << forcefield.Calculate() << std::endl;
+                */
+
                 // CompactTopo(mol.HydrogenBondMatrix(-1,-1));
                 // std::cout << CompareTopoMatrix(mol.HydrogenBondMatrix(-1,-1),mol.HydrogenBondMatrix(-1,-1) ) << std::endl;
                 // auto m = mol.DistanceMatrix();

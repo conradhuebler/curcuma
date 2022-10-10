@@ -82,6 +82,8 @@ void ConfScan::LoadControlJson()
 
     m_skip = Json2KeyWord<int>(m_defaults, "skip");
     m_allxyz = Json2KeyWord<bool>(m_defaults, "allxyz");
+    m_reduced_file = Json2KeyWord<bool>(m_defaults, "fewerFile");
+
     m_update = Json2KeyWord<bool>(m_defaults, "update");
     m_maxParam = Json2KeyWord<int>(m_defaults, "MaxParam");
     m_useorders = Json2KeyWord<int>(m_defaults, "UseOrders");
@@ -291,19 +293,19 @@ void ConfScan::SetUp()
     }
 
     std::ofstream failed_file;
-    if (m_writeFiles) {
+    if (m_writeFiles && !m_reduced_file) {
         failed_file.open(m_rejected_filename);
         failed_file.close();
     }
 
     std::ofstream statistic_file;
-    if (m_writeFiles) {
+    if (m_writeFiles && !m_reduced_file) {
         statistic_file.open(m_statistic_filename);
         statistic_file.close();
     }
 
     std::ofstream thresh_file;
-    if (m_writeFiles) {
+    if (m_writeFiles && !m_reduced_file) {
         thresh_file.open(m_threshold_filename);
         thresh_file.close();
     }
@@ -315,13 +317,13 @@ void ConfScan::SetUp()
     }
 
     std::ofstream st_file;
-    if (m_writeFiles) {
+    if (m_writeFiles && !m_reduced_file) {
         st_file.open(m_1st_filename);
         st_file.close();
     }
 
     std::ofstream nd_file;
-    if (m_writeFiles) {
+    if (m_writeFiles && !m_reduced_file) {
         nd_file.open(m_2nd_filename);
         nd_file.close();
     }
@@ -362,34 +364,42 @@ void ConfScan::start()
     fmt::print("\n\n1st Pass\nPerforming RMSD calculation without reordering now!\n\n");
     RunTimer timer(false);
     std::ofstream result_file;
-    result_file.open(m_statistic_filename, std::ios_base::app);
-    result_file << "Results of 1st Pass" << std::endl;
-    result_file.close();
-    CheckRMSD();
-
-    for (const auto molecule : m_stored_structures) {
-        molecule->appendXYZFile(m_1st_filename);
+    if (m_writeFiles && !m_reduced_file) {
+        result_file.open(m_statistic_filename, std::ios_base::app);
+        result_file << "Results of 1st Pass" << std::endl;
+        result_file.close();
     }
-
+    CheckRMSD();
+    if (m_writeFiles && !m_reduced_file) {
+        for (const auto molecule : m_stored_structures) {
+            molecule->appendXYZFile(m_1st_filename);
+        }
+    }
     fmt::print("\n1st Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
     if (m_prevent_reorder == false) {
         if (!CheckStop()) {
             timer.Reset();
             fmt::print("\n\n2nd Pass\nPerforming RMSD calculation with reordering now!\n\n");
-            result_file.open(m_statistic_filename, std::ios_base::app);
-            result_file << "Results of 2nd Pass" << std::endl;
-            result_file.close();
+            if (m_writeFiles && !m_reduced_file) {
+                result_file.open(m_statistic_filename, std::ios_base::app);
+                result_file << "Results of 2nd Pass" << std::endl;
+                result_file.close();
+            }
             ReorderCheck(false, false);
-            for (const auto molecule : m_stored_structures) {
-                molecule->appendXYZFile(m_2nd_filename);
+            if (m_writeFiles && !m_reduced_file) {
+                for (const auto molecule : m_stored_structures) {
+                    molecule->appendXYZFile(m_2nd_filename);
+                }
             }
             fmt::print("\n2nd Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
             timer.Reset();
         }
         if (!CheckStop()) {
-            result_file.open(m_statistic_filename, std::ios_base::app);
-            result_file << "Results of 3rd Pass" << std::endl;
-            result_file.close();
+            if (m_writeFiles && !m_reduced_file) {
+                result_file.open(m_statistic_filename, std::ios_base::app);
+                result_file << "Results of 3rd Pass" << std::endl;
+                result_file.close();
+            }
             fmt::print("\n\n3rd Pass\nPerforming RMSD calculation with reordering, but only reuse previouse reordering rules.\n\n");
             ReorderCheck(true, true);
             fmt::print("\n3rd Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
@@ -708,14 +718,14 @@ void ConfScan::Finalise()
     for (const auto molecule : m_previously_accepted) {
         molecule->appendXYZFile(m_joined_filename);
     }
+    if (m_writeFiles && !m_reduced_file) {
+        for (const auto molecule : m_rejected_structures) {
+            molecule->appendXYZFile(m_rejected_filename);
+        }
 
-    for (const auto molecule : m_rejected_structures) {
-        molecule->appendXYZFile(m_rejected_filename);
+        for (const auto molecule : m_threshold)
+            molecule->appendXYZFile(m_threshold_filename);
     }
-
-    for (const auto molecule : m_threshold)
-        molecule->appendXYZFile(m_threshold_filename);
-
     std::cout << m_stored_structures.size() << " structures were kept - of " << m_molecules.size() - m_fail << " total!" << std::endl;
 }
 
@@ -741,6 +751,8 @@ void ConfScan::PrintStatus()
 
 void ConfScan::writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd, bool reason)
 {
+    if (m_reduced_file)
+        return;
     std::ofstream result_file;
     result_file.open(m_statistic_filename, std::ios_base::app);
     if (reason)

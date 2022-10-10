@@ -181,6 +181,8 @@ class Molecule
 
     std::pair<Matrix, Matrix> DistanceMatrix() const;
 
+    std::vector<std::array<double, 3>> Coords() const { return m_geometry; }
+
 private:
     void ParseString(const std::string& internal, std::vector<std::string>& elements);
 

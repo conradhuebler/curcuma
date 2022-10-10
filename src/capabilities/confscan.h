@@ -57,7 +57,8 @@ static const json ConfScanJson = {
     { "threads", 1 },
     { "RMSDElement", 7 },
     { "accepted", "" },
-    { "lastdE", -1 }
+    { "lastdE", -1 },
+    { "fewerFile", false }
 };
 
 class RMSDDriver;
@@ -167,4 +168,5 @@ private:
     bool m_force_silent = false;
     bool m_allxyz = false;
     bool m_update = false;
+    bool m_reduced_file = false;
 };

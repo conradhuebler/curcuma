@@ -155,6 +155,7 @@ public:
         : m_thread(thread)
         , m_controller(controller)
     {
+        setAutoDelete(true);
     }
     ~MDThread() = default;
 
