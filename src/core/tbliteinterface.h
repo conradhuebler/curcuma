@@ -33,6 +33,8 @@ static json xTBSettings{
     { "calculator_max_iter", 100 }
 };
 
+class UFF;
+
 class TBLiteInterface {
 public:
     TBLiteInterface(const json& xtbsettings = xTBSettings);
@@ -75,4 +77,5 @@ private:
 #endif
     bool m_initialised = false;
     json m_xtbsettings;
+    UFF* m_uff;
 };

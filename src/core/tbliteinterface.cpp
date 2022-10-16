@@ -25,6 +25,7 @@
 
 #include "src/core/global.h"
 #include "src/core/molecule.h"
+#include "src/core/uff.h"
 
 #include <iostream>
 #include <math.h>
@@ -46,6 +47,7 @@ TBLiteInterface::TBLiteInterface(const json& xtbsettings)
     m_xtb_calc = xtb_newCalculator();
     m_xtb_res = xtb_newResults();
 #endif
+    m_uff = new UFF;
 }
 
 TBLiteInterface::~TBLiteInterface()
@@ -64,6 +66,7 @@ TBLiteInterface::~TBLiteInterface()
     xtb_delMolecule(&m_xtb_mol);
     xtb_delEnvironment(&m_env);
 #endif
+    delete m_uff;
 }
 
 bool TBLiteInterface::InitialiseMolecule(const Molecule& molecule)
@@ -83,6 +86,8 @@ bool TBLiteInterface::InitialiseMolecule(const Molecule& molecule)
         coord[3 * i + 2] = atom.second(2) / au;
         attyp[i] = atoms[i];
     }
+    m_uff->setMolecule(atoms, molecule.Coords());
+    m_uff->Initialise();
     return InitialiseMolecule(attyp, coord, natoms, molecule.Charge(), molecule.Spin());
 }
 
@@ -103,6 +108,8 @@ bool TBLiteInterface::InitialiseMolecule(const Molecule* molecule)
         coord[3 * i + 2] = atom.second(2) / au;
         attyp[i] = atoms[i];
     }
+    m_uff->setMolecule(atoms, molecule->Coords());
+    m_uff->Initialise();
     return InitialiseMolecule(attyp, coord, natoms, molecule->Charge(), molecule->Spin());
 }
 
@@ -118,7 +125,7 @@ bool TBLiteInterface::InitialiseMolecule(const int* attyp, const double* coord, 
     m_initialised = true;
     return true;
 #else
-    return false;
+    return true;
 #endif
 }
 
@@ -133,6 +140,8 @@ bool TBLiteInterface::UpdateMolecule(const Molecule& molecule)
         coord[3 * i + 1] = atom.second(1) / au;
         coord[3 * i + 2] = atom.second(2) / au;
     }
+    m_uff->setMolecule(molecule.Atoms(), molecule.Coords());
+
     return UpdateMolecule(coord);
 }
 
@@ -141,9 +150,11 @@ bool TBLiteInterface::UpdateMolecule(const double* coord)
 #ifdef USE_XTB
     tblite_update_structure_geometry(m_error, m_tblite_mol, coord, NULL);
     xtb_updateMolecule(m_env, m_xtb_mol, coord, NULL);
+    m_uff->UpdateGeometry(coord);
     return true;
 #else
-    return false;
+    m_uff->UpdateGeometry(coord);
+    return true;
 #endif
 }
 
@@ -164,7 +175,7 @@ double TBLiteInterface::GFNCalculation(int parameter, double* grad)
         xtb_getEnergy(m_env, m_xtb_res, &energy);
         if (grad != NULL)
             xtb_getGradient(m_env, m_xtb_res, grad);
-    } else {
+    } else if (parameter == 1 || parameter == 2 || parameter == 0) {
         tblite_set_context_verbosity(m_ctx, 0);
         if (parameter == 0) {
             m_tblite_calc = tblite_new_ipea1_calculator(m_ctx, m_tblite_mol);
@@ -181,9 +192,15 @@ double TBLiteInterface::GFNCalculation(int parameter, double* grad)
 
         if (grad != NULL)
             tblite_get_result_gradient(m_error, m_tblite_res, grad);
+    } else {
+        energy = m_uff->Calculate();
+        if (grad != NULL)
+            m_uff->NumGrad(grad);
     }
 #else
-    throw("XTB is not included, sorry for that");
+    energy = m_uff->Calculate();
+    if (grad != NULL)
+        m_uff->NumGrad(grad);
 #endif
     return energy;
 }

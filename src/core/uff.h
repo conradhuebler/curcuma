@@ -61,6 +61,7 @@ class UFF {
 public:
     UFF();
 
+    void UpdateGeometry(const double* coord);
     void setMolecule(const std::vector<int>& atom_types, const std::vector<std::array<double, 3>>& geometry)
     {
         m_atom_types = atom_types;
@@ -70,7 +71,31 @@ public:
     void Initialise();
     double Calculate();
 
+    std::vector<std::array<double, 3>> Gradient() const { return m_gradient; }
+    void Gradient(double* gradient) const;
+
+    void NumGrad(double* gradient);
+
 private:
+    double BondRestLength(int i, int j, double order);
+
+    double DotProduct(std::array<double, 3> pos1, std::array<double, 3> pos2) const
+    {
+        return pos1[0] * pos2[0] + pos1[1] * pos2[1] + pos1[2] * pos2[2];
+    }
+
+    double CalculateAngle(int atom1, int atom2, int atom3) const
+    {
+        std::array<double, 3> atom_0 = { m_geometry[atom1] };
+        std::array<double, 3> atom_1 = { m_geometry[atom2] };
+        std::array<double, 3> atom_2 = { m_geometry[atom3] };
+
+        std::array<double, 3> vec_1 = { atom_0[0] - atom_1[0], atom_0[1] - atom_1[1], atom_0[2] - atom_1[2] };
+        std::array<double, 3> vec_2 = { atom_0[0] - atom_2[0], atom_0[1] - atom_2[1], atom_0[2] - atom_2[2] };
+
+        return acos(DotProduct(vec_1, vec_2) / (sqrt(DotProduct(vec_1, vec_1) * DotProduct(vec_2, vec_2)))) * 360 / 2.0 / pi;
+    }
+
     double CalculateBondStretching();
     double CalculateAngleBending();
     double CalculateDihedral();
@@ -78,10 +103,20 @@ private:
     double CalculateNonBonds();
     double CalculateElectrostatic();
 
-    std::vector<int> m_atom_types, m_uff_atom_types;
+    double Distance(double x1, double x2, double y1, double y2, double z1, double z2) const;
+    double DotProduct(double x1, double x2, double y1, double y2, double z1, double z2) const;
+
+    double BondEnergy(double distance, double r, double k_ij, double D_ij);
+
+    std::vector<int> m_atom_types, m_uff_atom_types, m_coordination;
     std::vector<std::array<double, 3>> m_geometry, m_gradient;
     std::vector<std::vector<double>> m_parameter;
     std::vector<std::pair<int, int>> m_bonds;
-    double m_scaling = 1.5;
+    std::vector<std::array<int, 3>> m_bond_angle;
+    std::vector<std::array<int, 4>> m_dihedrals;
+    double m_scaling = 1.15;
     Matrix m_topo;
+    bool m_CalculateGradient = true, m_initialised = false;
+    double m_d = 1e-4;
+    double m_au = 1;
 };
