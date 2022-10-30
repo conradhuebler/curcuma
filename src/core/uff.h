@@ -19,6 +19,14 @@
 
 #pragma once
 
+/* H4 Correction taken from
+ * https://www.rezacovi.cz/science/sw/h_bonds4.c
+ * Reference: J. Rezac, P. Hobza J. Chem. Theory Comput. 8, 141-151 (2012)
+ *            http://dx.doi.org/10.1021/ct200751e
+ *
+ */
+#include "hbonds.h"
+
 #include <vector>
 
 #include <Eigen/Dense>
@@ -56,6 +64,25 @@ const std::vector<double> OR = { 0.68, 110, 3.5, 0.06, 14.085, 2.3, 0, 2, 8.741,
 
 const std::vector<double> O2 = { 0.634, 120, 3.5, 0.06, 14.085, 2.3, 0, 2, 8.741, 6.682, 0.669 };
 const std::vector<double> O1 = { 0.639, 180, 3.5, 0.06, 14.085, 2.3, 0, 2, 8.741, 6.682, 0.669 };
+
+class TContainer {
+public:
+    TContainer() = default;
+    bool insert(std::vector<int> vector)
+    {
+        std::vector<int> cache = vector;
+        std::sort(cache.begin(), cache.end());
+        if (std::find(m_sorted.begin(), m_sorted.end(), cache) != m_sorted.end())
+            return false;
+        m_storage.push_back(vector);
+        m_sorted.push_back(cache);
+        return true;
+    }
+    const std::vector<std::vector<int>>& Storage() const { return m_storage; }
+
+private:
+    std::vector<std::vector<int>> m_storage, m_sorted;
+};
 
 class UFF {
 public:
@@ -96,6 +123,16 @@ private:
         return acos(DotProduct(vec_1, vec_2) / (sqrt(DotProduct(vec_1, vec_1) * DotProduct(vec_2, vec_2)))) * 360 / 2.0 / pi;
     }
 
+    Eigen::Vector3d NormalVector(int i, int j, int k)
+    {
+        Eigen::Vector3d aa = Eigen::Vector3d{ m_geometry[i][0], m_geometry[i][1], m_geometry[i][2] };
+        Eigen::Vector3d ab = Eigen::Vector3d{ m_geometry[j][0], m_geometry[j][1], m_geometry[j][2] };
+        Eigen::Vector3d ac = Eigen::Vector3d{ m_geometry[k][0], m_geometry[k][1], m_geometry[k][2] };
+
+        Eigen::Vector3d aba = ab - aa;
+        Eigen::Vector3d abc = ab - ac;
+        return aba.cross(abc);
+    }
     double CalculateBondStretching();
     double CalculateAngleBending();
     double CalculateDihedral();
@@ -111,12 +148,18 @@ private:
     std::vector<int> m_atom_types, m_uff_atom_types, m_coordination;
     std::vector<std::array<double, 3>> m_geometry, m_gradient;
     std::vector<std::vector<double>> m_parameter;
-    std::vector<std::pair<int, int>> m_bonds;
+    std::vector<std::pair<int, int>> m_bonds, m_non_bonds;
     std::vector<std::array<int, 3>> m_bond_angle;
-    std::vector<std::array<int, 4>> m_dihedrals;
+    std::vector<std::array<int, 4>> m_dihedrals, m_inversions;
+    std::vector<std::vector<int>> m_bonds_2, m_non_bonds_2, m_angles_2, m_dihedrals_2, m_inversions_2;
+
     double m_scaling = 1.15;
     Matrix m_topo;
     bool m_CalculateGradient = true, m_initialised = false;
     double m_d = 1e-4;
     double m_au = 1;
+    hbonds4::atom_t* h_geometry;
+    hbonds4::coord_t* h_gradient;
+    hbonds4::coord_t* h_gradient2;
+    double h_e1 = 0.01, h_e2 = 0.001;
 };
