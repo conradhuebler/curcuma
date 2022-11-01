@@ -35,7 +35,7 @@
 static json CurcumaMDJson{
     { "writeXYZ", true },
     { "printOutput", true },
-    { "GFN", 2 },
+    { "GFN", 44 },
     { "MaxTime", 5000 },
     { "T", 298.15 },
     { "dt", 1 },

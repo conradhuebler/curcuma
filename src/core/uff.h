@@ -65,6 +65,28 @@ const std::vector<double> OR = { 0.68, 110, 3.5, 0.06, 14.085, 2.3, 0, 2, 8.741,
 const std::vector<double> O2 = { 0.634, 120, 3.5, 0.06, 14.085, 2.3, 0, 2, 8.741, 6.682, 0.669 };
 const std::vector<double> O1 = { 0.639, 180, 3.5, 0.06, 14.085, 2.3, 0, 2, 8.741, 6.682, 0.669 };
 
+const int cR = 0;
+const int cTheta0 = 1;
+const int cx = 2;
+const int cD = 3;
+const int cZeta = 4;
+const int cZ = 5;
+const int cV = 6;
+const int cU = 7;
+const int cXi = 8;
+const int cHard = 9;
+const int cRadius = 10;
+
+typedef std::array<double, 3> v;
+
+inline std::array<double, 3> AddVector(const v& x, const v& y)
+{
+    return std::array<double, 3>{ x[0] + y[0], x[1] + y[1], x[2] + y[2] };
+}
+inline std::array<double, 3> SubVector(const v& x, const v& y)
+{
+    return std::array<double, 3>{ x[0] - y[0], x[1] - y[1], x[2] - y[2] };
+}
 class TContainer {
 public:
     TContainer() = default;
@@ -96,7 +118,7 @@ public:
     }
 
     void Initialise();
-    double Calculate();
+    double Calculate(bool gradient = true);
 
     std::vector<std::array<double, 3>> Gradient() const { return m_gradient; }
     void Gradient(double* gradient) const;
@@ -106,21 +128,36 @@ public:
 private:
     double BondRestLength(int i, int j, double order);
 
-    double DotProduct(std::array<double, 3> pos1, std::array<double, 3> pos2) const
+    double DotProduct(const v& pos1, const v& pos2) const
     {
         return pos1[0] * pos2[0] + pos1[1] * pos2[1] + pos1[2] * pos2[2];
     }
-
+    double Norm(const v& pos1) const
+    {
+        return sqrt(DotProduct(pos1, pos1));
+    }
     double CalculateAngle(int atom1, int atom2, int atom3) const
     {
-        std::array<double, 3> atom_0 = { m_geometry[atom1] };
-        std::array<double, 3> atom_1 = { m_geometry[atom2] };
-        std::array<double, 3> atom_2 = { m_geometry[atom3] };
+        v atom_0 = { m_geometry[atom1] };
+        v atom_1 = { m_geometry[atom2] };
+        v atom_2 = { m_geometry[atom3] };
 
-        std::array<double, 3> vec_1 = { atom_0[0] - atom_1[0], atom_0[1] - atom_1[1], atom_0[2] - atom_1[2] };
-        std::array<double, 3> vec_2 = { atom_0[0] - atom_2[0], atom_0[1] - atom_2[1], atom_0[2] - atom_2[2] };
+        v vec_1 = { atom_0[0] - atom_1[0], atom_0[1] - atom_1[1], atom_0[2] - atom_1[2] };
+        v vec_2 = { atom_0[0] - atom_2[0], atom_0[1] - atom_2[1], atom_0[2] - atom_2[2] };
 
         return acos(DotProduct(vec_1, vec_2) / (sqrt(DotProduct(vec_1, vec_1) * DotProduct(vec_2, vec_2)))) * 360 / 2.0 / pi;
+    }
+
+    v NormalVector(const v& i, const v& j, const v& k)
+    {
+        Eigen::Vector3d aa = Eigen::Vector3d{ i[0], i[1], i[2] };
+        Eigen::Vector3d ab = Eigen::Vector3d{ j[0], j[1], j[2] };
+        Eigen::Vector3d ac = Eigen::Vector3d{ k[0], k[1], k[2] };
+
+        Eigen::Vector3d aba = ab - aa;
+        Eigen::Vector3d abc = ab - ac;
+        auto p = aba.cross(abc);
+        return v{ p[0], p[1], p[2] };
     }
 
     Eigen::Vector3d NormalVector(int i, int j, int k)
@@ -134,9 +171,18 @@ private:
         return aba.cross(abc);
     }
     double CalculateBondStretching();
+
+    double AngleBend(const std::array<double, 3>& i, const std::array<double, 3>& j, const std::array<double, 3>& k, double kijk, double C0, double C1, double C2);
     double CalculateAngleBending();
+
+    double Dihedral(const v& i, const v& j, const v& k, const v& l, double V, double n, double phi0);
     double CalculateDihedral();
+
+    double FullInversion(const int& i, const int& j, const int& k, const int& l, double d_forceConstant, double C0, double C1, double C2);
+    double Inversion(const v& i, const v& j, const v& k, const v& l, double k_ijkl, double C0, double C1, double C2);
     double CalculateInversion();
+
+    double NonBonds(const v& i, const v& j, double Dij, double xij);
     double CalculateNonBonds();
     double CalculateElectrostatic();
 
@@ -156,10 +202,9 @@ private:
     double m_scaling = 1.15;
     Matrix m_topo;
     bool m_CalculateGradient = true, m_initialised = false;
-    double m_d = 1e-4;
+    double m_d = 1e-6;
     double m_au = 1;
-    hbonds4::atom_t* h_geometry;
-    hbonds4::coord_t* h_gradient;
-    hbonds4::coord_t* h_gradient2;
-    double h_e1 = 0.01, h_e2 = 0.001;
+    double h_e1 = 1, h_e2 = 1;
+    double m_final_factor = 1;
+    ;
 };

@@ -193,14 +193,14 @@ double TBLiteInterface::GFNCalculation(int parameter, double* grad)
         if (grad != NULL)
             tblite_get_result_gradient(m_error, m_tblite_res, grad);
     } else {
-        energy = m_uff->Calculate();
+        energy = m_uff->Calculate(true);
         if (grad != NULL)
-            m_uff->NumGrad(grad);
+            m_uff->Gradient(grad);
     }
 #else
-    energy = m_uff->Calculate();
+    energy = m_uff->Calculate(true);
     if (grad != NULL)
-        m_uff->NumGrad(grad);
+        m_uff->Gradient(grad);
 #endif
     return energy;
 }

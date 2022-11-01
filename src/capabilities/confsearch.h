@@ -33,7 +33,7 @@
 #include "src/capabilities/curcumamethod.h"
 
 static const nlohmann::json ConfSearchJson{
-    { "gfn", 66 },
+    { "gfn", 44 },
     { "charge", 0 },
     { "Spin", 0 },
     { "startT", 500 },
@@ -86,6 +86,6 @@ private:
     bool m_silent = true;
 
     std::vector<Molecule*> m_in_stack, m_final_stack;
-    int m_gfn = 66, m_spin = 0, m_charge = 0, m_repeat = 5, m_threads = 1;
+    int m_gfn = 44, m_spin = 0, m_charge = 0, m_repeat = 5, m_threads = 1;
     double m_time = 1e4, m_startT = 500, m_endT = 300, m_deltaT = 50, m_currentT = 0, m_rmsd = 1.25;
 };

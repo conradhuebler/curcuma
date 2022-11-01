@@ -78,6 +78,7 @@ void ConfSearch::start()
     md["berendson"] = 200;
     md["maxtime"] = m_time;
     md["rmsd"] = m_rmsd;
+    md["resuce"] = true;
     md["print"] = m_time / 3.0;
     for (m_currentT = m_startT; m_currentT >= m_endT; m_currentT -= m_deltaT) {
         std::cout << std::endl
@@ -129,12 +130,13 @@ void ConfSearch::start()
 
 std::string ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& molecules, const nlohmann::json& parameter)
 {
-
     CxxThreadPool* pool = new CxxThreadPool;
+    int index = 0;
     for (int repeat = 0; repeat < m_repeat; ++repeat) {
         for (int i = 0; i < molecules.size(); ++i) {
-            MDThread* thread = new MDThread(i, parameter);
+            MDThread* thread = new MDThread(index, parameter);
             thread->setMolecule(molecules[i * repeat]);
+            index++;
             pool->addThread(thread);
         }
     }

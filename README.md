@@ -22,8 +22,7 @@ Using xtb calculation in curcuma can be controlled for now as follows:
 - Add **-gfn 1** to run GFN1 calculation, **-gfn 66** to run GFN-FF calculation.
 - GFN1 and GFN2 calculation are thread-safe now, so parallel optimisation are possible now. However, the variable **OMP_NUM_THREADS** should be set to 1. Add **-thread 12** to run optimisation after docking with 12 threads. GFN-FF calculation will fail in parallel mode.
 
-In addition to xTB, curcuma has now an unfinished prototype of the UFF (J. Am. Chem. Soc. (1992) 114(25) p. 10024-10035) and some H4 hydrogen bond correction (J. Chem. Theory Comput. 8, 141-151 (2012)). Gradients in the force field are evaluated numerically.
-
+In addition to xTB, curcuma has now an unfinished prototype of the UFF (J. Am. Chem. Soc. (1992) 114(25) p. 10024-10035), with the  H4 hydrogen bond correction (J. Chem. Theory Comput. 8, 141-151 (2012)) included (same parameters as applied in case of PM6-D3 for now). Gradients in the force field are evaluated numerically.
 **Please cite xtb if used within curcuma! The most recent information can be found [here](https://github.com/grimme-lab/xtb#citations)!**
 
 ## Compiling
