@@ -422,8 +422,11 @@ double RMSDDriver::Rules2RMSD(const std::vector<int> rules, int fragment)
 
     m_fragment_target = fragment;
     m_fragment_reference = fragment;
+    Molecule ref;
+    Molecule tar;
+    double rmsd = CalculateRMSD(m_reference, target, &ref, &tar);
+    m_htopo_diff = CompareTopoMatrix(ref.HydrogenBondMatrix(-1, -1), tar.HydrogenBondMatrix(-1, -1));
 
-    double rmsd = CalculateRMSD(m_reference, target);
     m_fragment_reference = tmp_ref;
     m_fragment_target = tmp_tar;
     return rmsd;
@@ -691,6 +694,9 @@ void RMSDDriver::FinaliseTemplate(std::pair<std::vector<int>, std::vector<int>> 
     }
     m_stored_rules.clear();
     for (const auto& i : local_results) {
+        std::set<int> s(i.second.begin(), i.second.end());
+        if (s.size() != i.second.size()) // make sure, that only results with non-duplicate vectors are accepted
+            continue;
         m_stored_rules.push_back(i.second);
     }
     m_reorder_rules = local_results.begin()->second;

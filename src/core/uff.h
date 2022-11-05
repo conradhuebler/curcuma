@@ -44,6 +44,31 @@
  * originally published at: J. Am. Chem. Soc. (1992) 114(25) p. 10024-10035.
  */
 
+struct UFFBond {
+    int i, j;
+    double r0, kij;
+};
+
+struct UFFAngle {
+    int i, j, k;
+    double kijk, C0, C1, C2;
+};
+
+struct UFFDihedral {
+    int i, j, k, l;
+    double V, n, phi0;
+};
+
+struct UFFInversion {
+    int i, j, k, l;
+    double kijkl, C0, C1, C2;
+};
+
+struct UFFvdW {
+    int i, j;
+    double Dij, xij;
+};
+
 const std::vector<double> Dummy = { 0.01, 180, 0.4, 5000, 12, 10.0, 0, 0, 9.66, 14.92, 0.7 };
 
 const std::vector<double> H = { 0.354, 180, 2.886, 0.044, 12, 0.712, 0, 0, 4.528, 6.9452, 0.371 };
@@ -189,7 +214,7 @@ private:
     double Distance(double x1, double x2, double y1, double y2, double z1, double z2) const;
     double DotProduct(double x1, double x2, double y1, double y2, double z1, double z2) const;
 
-    double BondEnergy(double distance, double r, double k_ij, double D_ij);
+    double BondEnergy(double distance, double r, double k_ij, double D_ij = 70);
 
     std::vector<int> m_atom_types, m_uff_atom_types, m_coordination;
     std::vector<std::array<double, 3>> m_geometry, m_gradient;
@@ -199,6 +224,12 @@ private:
     std::vector<std::array<int, 4>> m_dihedrals, m_inversions;
     std::vector<std::vector<int>> m_bonds_2, m_non_bonds_2, m_angles_2, m_dihedrals_2, m_inversions_2;
 
+    std::vector<UFFBond> m_uffbonds;
+    std::vector<UFFAngle> m_uffangle;
+    std::vector<UFFDihedral> m_uffdihedral;
+    std::vector<UFFInversion> m_uffinversion;
+    std::vector<UFFvdW> m_uffvdwaals;
+
     double m_scaling = 1.15;
     Matrix m_topo;
     bool m_CalculateGradient = true, m_initialised = false;
@@ -206,5 +237,4 @@ private:
     double m_au = 1;
     double h_e1 = 1, h_e2 = 1;
     double m_final_factor = 1;
-    ;
 };

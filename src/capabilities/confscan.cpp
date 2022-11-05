@@ -67,7 +67,7 @@ void ConfScan::LoadControlJson()
     if (m_heavy && m_rmsd_threshold == -1)
         m_rmsd_threshold = 0.75;
     else if (!m_heavy && m_rmsd_threshold == -1)
-        m_rmsd_threshold = 1;
+        m_rmsd_threshold = 0.9;
 
     m_maxrank = Json2KeyWord<double>(m_defaults, "rank");
     m_writeXYZ = Json2KeyWord<bool>(m_defaults, "writeXYZ");
@@ -97,6 +97,7 @@ void ConfScan::LoadControlJson()
         m_useorders = 10;
 
     m_gfn = Json2KeyWord<int>(m_defaults, "GFN");
+    m_do_third = Json2KeyWord<bool>(m_defaults, "dothird");
 }
 
 bool ConfScan::openFile()
@@ -376,7 +377,7 @@ void ConfScan::start()
         }
     }
     fmt::print("\n1st Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
-    if (m_prevent_reorder == false) {
+    if (m_prevent_reorder == false || m_do_third == true) {
         if (!CheckStop()) {
             timer.Reset();
             fmt::print("\n\n2nd Pass\nPerforming RMSD calculation with reordering now!\n\n");
@@ -385,7 +386,7 @@ void ConfScan::start()
                 result_file << "Results of 2nd Pass" << std::endl;
                 result_file.close();
             }
-            ReorderCheck(false, false);
+            ReorderCheck(m_prevent_reorder, false);
             if (m_writeFiles && !m_reduced_file) {
                 for (const auto molecule : m_stored_structures) {
                     molecule->appendXYZFile(m_2nd_filename);
@@ -394,7 +395,7 @@ void ConfScan::start()
             fmt::print("\n2nd Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
             timer.Reset();
         }
-        if (!CheckStop()) {
+        if (!CheckStop() && m_do_third == true) {
             if (m_writeFiles && !m_reduced_file) {
                 result_file.open(m_statistic_filename, std::ios_base::app);
                 result_file << "Results of 3rd Pass" << std::endl;
@@ -617,7 +618,7 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
 
             keep_molecule = SingleReorderRMSD(mol1, mol2, driver, reuse_only);
             if (keep_molecule == false) {
-                writeStatisticFile(driver->ReferenceAlignedReference(), driver->TargetAlignedReference(), driver->RMSD(), true);
+                writeStatisticFile(mol1, mol2, driver->RMSD(), true);
                 /*
                 std::ofstream result_file;
                 result_file.open("ripser.dat", std::ios_base::app);

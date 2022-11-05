@@ -52,13 +52,14 @@ static const json ConfScanJson = {
     { "MaxParam", -1 },
     { "UseOrders", -1 },
     { "RMSDMethod", "incr" },
-    { "MaxHTopoDiff", -1 },
+    { "MaxHTopoDiff", 0 },
     { "GFN", -1 },
     { "threads", 1 },
     { "RMSDElement", 7 },
     { "accepted", "" },
     { "lastdE", -1 },
-    { "fewerFile", false }
+    { "fewerFile", false },
+    { "dothird", false }
 };
 
 class RMSDDriver;
@@ -169,4 +170,5 @@ private:
     bool m_allxyz = false;
     bool m_update = false;
     bool m_reduced_file = false;
+    bool m_do_third = false;
 };

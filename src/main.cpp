@@ -724,14 +724,14 @@ int main(int argc, char **argv) {
                 std::cout << mol.Check() << std::endl
                           << std::endl;
                 /*
-                UFF forcefield;
-                forcefield.setMolecule(mol.Atoms(), mol.Coords());
-                forcefield.Initialise();
-                std::cout << forcefield.Calculate(true) << std::endl;
-                double grad[3 * mol.AtomCount()];
-                forcefield.Gradient(grad);
-                forcefield.NumGrad(grad);
-                */
+                                UFF forcefield;
+                                forcefield.setMolecule(mol.Atoms(), mol.Coords());
+                                forcefield.Initialise();
+                                std::cout << forcefield.Calculate(true) << std::endl;
+                                double grad[3 * mol.AtomCount()];
+                                forcefield.Gradient(grad);
+                                forcefield.NumGrad(grad);
+                                */
                 // CompactTopo(mol.HydrogenBondMatrix(-1,-1));
                 // std::cout << CompareTopoMatrix(mol.HydrogenBondMatrix(-1,-1),mol.HydrogenBondMatrix(-1,-1) ) << std::endl;
                 // auto m = mol.DistanceMatrix();
