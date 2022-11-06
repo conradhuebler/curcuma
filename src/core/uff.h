@@ -27,22 +27,14 @@
  */
 #include "hbonds.h"
 
+#include "src/core/uff_par.h"
 #include <vector>
 
 #include <Eigen/Dense>
 
+#include "json.hpp"
 #include "src/core/global.h"
-
-/* this will be the basic organics stuff the uff */
-/* directly taken from
- * https://github.com/openbabel/openbabel/blob/master/data/UFF.prm
- * and
- * https://github.com/openbabel/openbabel/blob/master/src/forcefields/forcefielduff.cpp
- * and
- * https://github.com/openbabel/openbabel/blob/master/src/forcefields/forcefielduff.h
- *
- * originally published at: J. Am. Chem. Soc. (1992) 114(25) p. 10024-10035.
- */
+using json = nlohmann::json;
 
 struct UFFBond {
     int i, j;
@@ -68,39 +60,6 @@ struct UFFvdW {
     int i, j;
     double Dij, xij;
 };
-
-const std::vector<double> Dummy = { 0.01, 180, 0.4, 5000, 12, 10.0, 0, 0, 9.66, 14.92, 0.7 };
-
-const std::vector<double> H = { 0.354, 180, 2.886, 0.044, 12, 0.712, 0, 0, 4.528, 6.9452, 0.371 };
-
-const std::vector<double> C3 = { 0.757, 109.47, 3.851, 0.105, 12.73, 1.912, 2.119, 2, 5.343, 5.063, 0.759 };
-const std::vector<double> CR = { 0.729, 120, 3.851, 0.105, 12.73, 1.912, 0, 2, 5.343, 5.063, 0.759 };
-const std::vector<double> C2 = { 0.732, 120, 3.851, 0.105, 12.73, 1.912, 0, 2, 5.343, 5.063, 0.759 };
-const std::vector<double> C1 = { 0.706, 180, 3.851, 0.105, 12.73, 1.912, 0, 2, 5.343, 5.063, 0.759 };
-
-const std::vector<double> N3 = { 0.7, 106.7, 3.66, 0.069, 13.407, 2.544, 0.45, 2, 6.899, 5.88, 0.715 };
-const std::vector<double> NR = { 0.699, 120, 3.66, 0.069, 13.407, 2.544, 0, 2, 6.899, 5.88, 0.715 };
-const std::vector<double> N2 = { 0.685, 111.2, 3.66, 0.069, 13.407, 2.544, 0, 2, 6.899, 5.88, 0.715 };
-const std::vector<double> N1 = { 0.656, 180, 3.66, 0.069, 13.407, 2.544, 0, 2, 6.899, 5.88, 0.715 };
-
-const std::vector<double> O3 = { 0.658, 104.51, 3.5, 0.06, 14.085, 2.3, 0.018, 2, 8.741, 6.682, 0.669 };
-const std::vector<double> O3z = { 0.528, 146, 3.5, 0.06, 14.085, 2.3, 0.018, 2, 8.741, 6.682, 0.669 };
-const std::vector<double> OR = { 0.68, 110, 3.5, 0.06, 14.085, 2.3, 0, 2, 8.741, 6.682, 0.669 };
-
-const std::vector<double> O2 = { 0.634, 120, 3.5, 0.06, 14.085, 2.3, 0, 2, 8.741, 6.682, 0.669 };
-const std::vector<double> O1 = { 0.639, 180, 3.5, 0.06, 14.085, 2.3, 0, 2, 8.741, 6.682, 0.669 };
-
-const int cR = 0;
-const int cTheta0 = 1;
-const int cx = 2;
-const int cD = 3;
-const int cZeta = 4;
-const int cZ = 5;
-const int cV = 6;
-const int cU = 7;
-const int cXi = 8;
-const int cHard = 9;
-const int cRadius = 10;
 
 typedef std::array<double, 3> v;
 
@@ -150,7 +109,14 @@ public:
 
     void NumGrad(double* gradient);
 
+    void writeParameterFile(const std::string& file) const;
+    json writeParameter() const;
+    void readParameterFile(const std::string& file);
+    void readParameter(const json& parameters);
+
 private:
+    void AssignUffAtomTypes();
+
     double BondRestLength(int i, int j, double order);
 
     double DotProduct(const v& pos1, const v& pos2) const
@@ -218,11 +184,6 @@ private:
 
     std::vector<int> m_atom_types, m_uff_atom_types, m_coordination;
     std::vector<std::array<double, 3>> m_geometry, m_gradient;
-    std::vector<std::vector<double>> m_parameter;
-    std::vector<std::pair<int, int>> m_bonds, m_non_bonds;
-    std::vector<std::array<int, 3>> m_bond_angle;
-    std::vector<std::array<int, 4>> m_dihedrals, m_inversions;
-    std::vector<std::vector<int>> m_bonds_2, m_non_bonds_2, m_angles_2, m_dihedrals_2, m_inversions_2;
 
     std::vector<UFFBond> m_uffbonds;
     std::vector<UFFAngle> m_uffangle;
@@ -237,4 +198,6 @@ private:
     double m_au = 1;
     double h_e1 = 1, h_e2 = 1;
     double m_final_factor = 1;
+    double m_bond_force = 664.12;
+    double m_angle_force = 664.12;
 };

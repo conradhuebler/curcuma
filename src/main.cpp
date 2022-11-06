@@ -723,20 +723,26 @@ int main(int argc, char **argv) {
                 mol.AnalyseIntermoleculeDistance();
                 std::cout << mol.Check() << std::endl
                           << std::endl;
-                /*
+
                                 UFF forcefield;
                                 forcefield.setMolecule(mol.Atoms(), mol.Coords());
+                                // forcefield.readParameterFile("parameter.json");
+
                                 forcefield.Initialise();
                                 std::cout << forcefield.Calculate(true) << std::endl;
-                                double grad[3 * mol.AtomCount()];
-                                forcefield.Gradient(grad);
-                                forcefield.NumGrad(grad);
-                                */
-                // CompactTopo(mol.HydrogenBondMatrix(-1,-1));
-                // std::cout << CompareTopoMatrix(mol.HydrogenBondMatrix(-1,-1),mol.HydrogenBondMatrix(-1,-1) ) << std::endl;
-                // auto m = mol.DistanceMatrix();
-                // std::cout << m.first << std::endl;
-                // std::cout << m.second << std::endl;
+                                forcefield.writeParameterFile("parameter.json");
+                                forcefield.readParameterFile("parameter.json");
+                                std::cout << forcefield.Calculate(true) << std::endl;
+
+                                /*        double grad[3 * mol.AtomCount()];
+                                          forcefield.Gradient(grad);
+                                          forcefield.NumGrad(grad);
+                                          */
+                                // CompactTopo(mol.HydrogenBondMatrix(-1,-1));
+                                // std::cout << CompareTopoMatrix(mol.HydrogenBondMatrix(-1,-1),mol.HydrogenBondMatrix(-1,-1) ) << std::endl;
+                                // auto m = mol.DistanceMatrix();
+                                // std::cout << m.first << std::endl;
+                                // std::cout << m.second << std::endl;
             }
         }
     }

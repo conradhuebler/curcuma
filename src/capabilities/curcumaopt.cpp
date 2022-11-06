@@ -140,8 +140,8 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
             std::cout << " not finished " << thread->getMolecule().Energy() << std::endl;
             continue;
         }
-        if (m_threads > 1)
-            std::cout << thread->Output();
+        // if (m_threads > 1)
+        std::cout << thread->Output();
 
         Molecule* mol2 = new Molecule(thread->getMolecule());
         mol2->appendXYZFile(Optfile());
@@ -316,7 +316,7 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
             }
             next.setGeometry(geometry);
         }
-        if ((iteration % SingleStep == 0 && iteration && perform_optimisation) || fun.isError()) {
+        if ((iteration % SingleStep == 0 && perform_optimisation) || fun.isError()) {
             parameter = fun.Parameter();
 
             for (int i = 0; i < atoms_count; ++i) {

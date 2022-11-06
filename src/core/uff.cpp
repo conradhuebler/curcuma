@@ -33,34 +33,13 @@
 
 #include "uff.h"
 
+#include "json.hpp"
+using json = nlohmann::json;
+
 UFF::UFF()
 {
-    m_parameter = {
-        Dummy,
-        H,
-        Dummy, // D
-        Dummy, // H_b
-        Dummy, // He
-        Dummy, // Li
-        Dummy, // Be3
-        Dummy, // B3
-        Dummy, // B2
-        C3,
-        CR,
-        C2,
-        C1,
-        N3,
-        NR,
-        N2,
-        N1,
-        O3,
-        O3z,
-        OR,
-        O2,
-        O1,
-    };
     m_final_factor = 1 / 2625.15 * 4.19;
-    m_d = 1e-6;
+    m_d = 1e-7;
     h_e1 = 1;
     h_e2 = 1;
     // m_au = au;
@@ -136,43 +115,27 @@ void UFF::Initialise()
             }
         }
     }
-    for (int i = 0; i < m_atom_types.size(); ++i) {
-        if (m_atom_types[i] == 1) {
-            m_uff_atom_types[i] = 1;
-        } else if (m_atom_types[i] == 6) {
-            if (m_coordination[i] == 4)
-                m_uff_atom_types[i] = 9;
-            else if (m_coordination[i] == 3)
-                m_uff_atom_types[i] = 10;
-            else // if (coordination == 2)
-                m_uff_atom_types[i] = 12;
-        } else if (m_atom_types[i] == 7) {
-            if (m_coordination[i] == 3)
-                m_uff_atom_types[i] = 13;
-            else if (m_coordination[i] == 2)
-                m_uff_atom_types[i] = 14;
-            else // (coordination == 1)
-                m_uff_atom_types[i] = 15;
-        } else if (m_atom_types[i] == 8) {
-            if (m_coordination[i] == 3)
-                m_uff_atom_types[i] = 17;
-            else if (m_coordination[i] == 2)
-                m_uff_atom_types[i] = 19;
-            else // (coordination == 1)
-                m_uff_atom_types[i] = 21;
-        }
-    }
+
+    AssignUffAtomTypes();
 
     for (const auto& bond : bonds.Storage()) {
         UFFBond b;
 
         b.i = bond[0];
         b.j = bond[1];
+        int bond_order = 1;
 
-        b.r0 = BondRestLength(b.i, b.j, 1);
-        double cZi = m_parameter[m_uff_atom_types[b.i]][cZ];
-        double cZj = m_parameter[m_uff_atom_types[b.j]][cZ];
-        b.kij = 664.12 * cZi * cZj / (b.r0 * b.r0 * b.r0);
+        if (std::find(Conjugated.cbegin(), Conjugated.cend(), m_uff_atom_types[b.i]) != Conjugated.cend() && std::find(Conjugated.cbegin(), Conjugated.cend(), m_uff_atom_types[b.j]) != Conjugated.cend())
+            bond_order = 2;
+        else if (std::find(Triples.cbegin(), Triples.cend(), m_uff_atom_types[b.i]) != Triples.cend() || std::find(Triples.cbegin(), Triples.cend(), m_uff_atom_types[b.j]) != Triples.cend())
+            bond_order = 3;
+        else
+            bond_order = 1;
+
+        b.r0 = BondRestLength(b.i, b.j, bond_order);
+        double cZi = UFFParameters[m_uff_atom_types[b.i]][cZ];
+        double cZj = UFFParameters[m_uff_atom_types[b.j]][cZ];
+        b.kij = m_bond_force * cZi * cZj / (b.r0 * b.r0 * b.r0);
 
         m_uffbonds.push_back(b);
     }
@@ -186,12 +149,12 @@ void UFF::Initialise()
         double f = pi / 180.0;
         double rij = BondRestLength(a.i, a.j, 1);
         double rjk = BondRestLength(a.j, a.k, 1);
-        double Theta0 = m_parameter[m_uff_atom_types[a.i]][cTheta0];
+        double Theta0 = UFFParameters[m_uff_atom_types[a.i]][cTheta0];
         double cosTheta0 = cos(Theta0 * f);
         double rik = sqrt(rij * rij + rjk * rjk - 2. * rij * rjk * cosTheta0);
-        double param = 664.12;
+        double param = m_angle_force;
         double beta = 2.0 * param / (rij * rjk);
-        double preFactor = beta * m_parameter[m_uff_atom_types[a.i]][cZ] * m_parameter[m_uff_atom_types[a.k]][cZ] / (rik * rik * rik * rik * rik);
+        double preFactor = beta * UFFParameters[m_uff_atom_types[a.i]][cZ] * UFFParameters[m_uff_atom_types[a.k]][cZ] / (rik * rik * rik * rik * rik);
         double rTerm = rij * rjk;
         double inner = 3.0 * rTerm * (1.0 - cosTheta0 * cosTheta0) - rik * rik * cosTheta0;
         a.kijk = preFactor * rTerm * inner;
@@ -210,13 +173,18 @@ void UFF::Initialise()
 
         d.n = 3;
         double f = pi / 180.0;
-        double central_bond_order = 1;
-
+        double bond_order = 1;
+        if (std::find(Conjugated.cbegin(), Conjugated.cend(), m_uff_atom_types[d.k]) != Conjugated.cend() && std::find(Conjugated.cbegin(), Conjugated.cend(), m_uff_atom_types[d.j]) != Conjugated.cend())
+            bond_order = 2;
+        else if (std::find(Triples.cbegin(), Triples.cend(), m_uff_atom_types[d.k]) != Triples.cend() || std::find(Triples.cbegin(), Triples.cend(), m_uff_atom_types[d.j]) != Triples.cend())
+            bond_order = 3;
+        else
+            bond_order = 1;
         if (m_coordination[d.j] == 4 && m_coordination[d.k] == 4) {
-            d.V = sqrt(m_parameter[m_uff_atom_types[d.j]][cV] * m_parameter[m_uff_atom_types[d.k]][cV]);
+            d.V = sqrt(UFFParameters[m_uff_atom_types[d.j]][cV] * UFFParameters[m_uff_atom_types[d.k]][cV]);
             d.phi0 = 180 * f;
         } else {
-            d.V = 5 * sqrt(m_parameter[m_uff_atom_types[d.j]][cU] * m_parameter[m_uff_atom_types[d.k]][cU]) * (1 + 4.18 * log(central_bond_order));
+            d.V = 5 * sqrt(UFFParameters[m_uff_atom_types[d.j]][cU] * UFFParameters[m_uff_atom_types[d.k]][cU]) * (1 + 4.18 * log(bond_order));
             d.phi0 = 90 * f;
         }
 
@@ -238,14 +206,14 @@ void UFF::Initialise()
         double C1 = 0.0;
         double C2 = 0.0;
         double f = pi / 180.0;
-        double d_forceConstant = 0;
+        double kijkl = 0;
         if (6 <= m_atom_types[i] && m_atom_types[i] <= 8) {
             C0 = 1.0;
             C1 = -1.0;
             C2 = 0.0;
-            d_forceConstant = 6;
+            kijkl = 6;
             if (m_atom_types[inv.j] == 8 || m_atom_types[inv.k] == 8 || m_atom_types[inv.l] == 8)
-                d_forceConstant = 50;
+                kijkl = 50;
         } else {
             double w0 = pi / 180.0;
             switch (m_atom_types[i]) {
@@ -272,12 +240,12 @@ void UFF::Initialise()
             C2 = 1.0;
             C1 = -4.0 * cos(w0 * f);
             C0 = -(C1 * cos(w0 * f) + C2 * cos(2.0 * w0 * f));
-            d_forceConstant = 22.0 / (C0 + C1 + C2);
+            kijkl = 22.0 / (C0 + C1 + C2);
         }
         inv.C0 = C0;
         inv.C1 = C1;
         inv.C2 = C2;
-        inv.kijkl = d_forceConstant;
+        inv.kijkl = kijkl;
         m_uffinversion.push_back(inv);
     }
 
@@ -286,17 +254,409 @@ void UFF::Initialise()
         v.i = vdw[0];
         v.j = vdw[1];
 
-        double cDi = m_parameter[m_uff_atom_types[v.i]][cD];
-        double cDj = m_parameter[m_uff_atom_types[v.j]][cD];
-        double cxi = m_parameter[m_uff_atom_types[v.i]][cx];
-        double cxj = m_parameter[m_uff_atom_types[v.j]][cx];
-        v.Dij = sqrt(cDi * cDj);
+        double cDi = UFFParameters[m_uff_atom_types[v.i]][cD];
+        double cDj = UFFParameters[m_uff_atom_types[v.j]][cD];
+        double cxi = UFFParameters[m_uff_atom_types[v.i]][cx];
+        double cxj = UFFParameters[m_uff_atom_types[v.j]][cx];
+        v.Dij = sqrt(cDi * cDj) * 2;
 
         v.xij = sqrt(cxi * cxj);
 
         m_uffvdwaals.push_back(v);
     }
     m_initialised = true;
+}
+
+void UFF::AssignUffAtomTypes()
+{
+    for (int i = 0; i < m_atom_types.size(); ++i) {
+
+        switch (m_atom_types[i]) {
+        case 1: // Hydrogen
+            if (m_coordination[i] == 2)
+                m_uff_atom_types[i] = 3; // Bridging Hydrogen
+            else
+                m_uff_atom_types[i] = 1;
+            break;
+        case 2: // Helium
+            m_uff_atom_types[i] = 4;
+            break;
+        case 3: // Li
+            m_uff_atom_types[i] = 5;
+            break;
+        case 4: // Be
+            m_uff_atom_types[i] = 6;
+            break;
+        case 5: // B
+            m_uff_atom_types[i] = 7;
+            break;
+        case 6: // C
+            if (m_coordination[i] == 4)
+                m_uff_atom_types[i] = 9;
+            else if (m_coordination[i] == 3)
+                m_uff_atom_types[i] = 10;
+            else // if (coordination == 2)
+                m_uff_atom_types[i] = 12;
+            break;
+        case 7: // N
+            if (m_coordination[i] == 3)
+                m_uff_atom_types[i] = 13;
+            else if (m_coordination[i] == 2)
+                m_uff_atom_types[i] = 14;
+            else // if (coordination == 2)
+                m_uff_atom_types[i] = 15;
+            break;
+        case 8: // O
+            if (m_coordination[i] == 3)
+                m_uff_atom_types[i] = 17;
+            else if (m_coordination[i] == 2)
+                m_uff_atom_types[i] = 19;
+            else // if (coordination == 2)
+                m_uff_atom_types[i] = 21;
+            break;
+        case 9: // F
+            m_uff_atom_types[i] = 22;
+            break;
+        case 10: // Ne
+            m_uff_atom_types[i] = 23;
+            break;
+        case 11: // Na
+            m_uff_atom_types[i] = 24;
+            break;
+        case 12: // Mg
+            m_uff_atom_types[i] = 25;
+            break;
+        case 13: // Al
+            m_uff_atom_types[i] = 26;
+            break;
+        case 14: // Si
+            m_uff_atom_types[i] = 27;
+            break;
+        case 15: // P
+#pragma message("maybe add organometallic phosphorous (28)")
+            m_uff_atom_types[i] = 29;
+            break;
+        case 16: // S
+            if (m_coordination[i] == 2)
+                m_uff_atom_types[i] = 31;
+            else // ok, currently we do not discriminate between SO2 and SO3, just because there is H2SO3 and H2SO4
+                m_uff_atom_types[i] = 32;
+#pragma message("we have to add organic S")
+            break;
+        case 17: // Cl
+            m_uff_atom_types[i] = 36;
+            break;
+        case 18: // Ar
+            m_uff_atom_types[i] = 37;
+            break;
+        case 19: // K
+            m_uff_atom_types[i] = 38;
+            break;
+        case 20: // Ca
+            m_uff_atom_types[i] = 39;
+            break;
+        case 21: // Sc
+            m_uff_atom_types[i] = 40;
+            break;
+        case 22: // Ti
+            if (m_coordination[i] == 6)
+                m_uff_atom_types[i] = 41;
+            else
+                m_uff_atom_types[i] = 42;
+            break;
+        case 23: // Va
+            m_uff_atom_types[i] = 43;
+            break;
+        case 24: // Cr
+            m_uff_atom_types[i] = 44;
+            break;
+        case 25: // Mn
+            m_uff_atom_types[i] = 45;
+            break;
+        case 26: // Fe
+            if (m_coordination[i] == 6)
+                m_uff_atom_types[i] = 46;
+            else
+                m_uff_atom_types[i] = 47;
+            break;
+        case 27: // Co
+            m_uff_atom_types[i] = 48;
+            break;
+        case 28: // Ni
+            m_uff_atom_types[i] = 49;
+            break;
+        case 29: // Cu
+            m_uff_atom_types[i] = 50;
+            break;
+        case 30: // Zn
+            m_uff_atom_types[i] = 51;
+            break;
+        case 31: // Ga
+            m_uff_atom_types[i] = 52;
+            break;
+        case 32: // Ge
+            m_uff_atom_types[i] = 53;
+            break;
+        case 33: // As
+            m_uff_atom_types[i] = 54;
+            break;
+        case 34: // Se
+            m_uff_atom_types[i] = 55;
+            break;
+        case 35: // Br
+            m_uff_atom_types[i] = 56;
+            break;
+        case 36: // Kr
+            m_uff_atom_types[i] = 57;
+            break;
+        case 37: // Rb
+            m_uff_atom_types[i] = 58;
+            break;
+        case 38: // Sr
+            m_uff_atom_types[i] = 59;
+            break;
+        case 39: // Y
+            m_uff_atom_types[i] = 60;
+            break;
+        case 40: // Zr
+            m_uff_atom_types[i] = 61;
+            break;
+        case 41: // Nb
+            m_uff_atom_types[i] = 62;
+            break;
+        case 42: // Mo
+            if (m_coordination[i] == 6)
+                m_uff_atom_types[i] = 63;
+            else
+                m_uff_atom_types[i] = 64;
+            break;
+        case 43: // Tc
+            m_uff_atom_types[i] = 65;
+            break;
+        case 44: // Ru
+            m_uff_atom_types[i] = 66;
+            break;
+        case 45: // Rh
+            m_uff_atom_types[i] = 67;
+            break;
+        case 46: // Pd
+            m_uff_atom_types[i] = 68;
+            break;
+        case 47: // Ag
+            m_uff_atom_types[i] = 69;
+            break;
+        case 48: // Cd
+            m_uff_atom_types[i] = 70;
+            break;
+        case 49: // In
+            m_uff_atom_types[i] = 71;
+            break;
+        case 50: // Sn
+            m_uff_atom_types[i] = 72;
+            break;
+        case 51: // Sb
+            m_uff_atom_types[i] = 73;
+            break;
+        case 52: // Te
+            m_uff_atom_types[i] = 74;
+            break;
+        case 53: // I
+            m_uff_atom_types[i] = 75;
+            break;
+        case 54: // Xe
+            m_uff_atom_types[i] = 76;
+            break;
+        default:
+            m_uff_atom_types[i] = 0;
+        };
+    }
+}
+
+void UFF::writeParameterFile(const std::string& file) const
+{
+    std::ofstream parameterfile(file);
+    parameterfile << writeParameter();
+}
+
+json UFF::writeParameter() const
+{
+    json parameters;
+    json bonds;
+    for (int i = 0; i < m_uffbonds.size(); ++i) {
+        json bond;
+        bond["i"] = m_uffbonds[i].i;
+        bond["j"] = m_uffbonds[i].j;
+        bond["r0"] = m_uffbonds[i].r0;
+        bond["kij"] = m_uffbonds[i].kij;
+        bonds[i] = bond;
+    }
+    parameters["bonds"] = bonds;
+    json angles;
+
+    for (int i = 0; i < m_uffangle.size(); ++i) {
+        json angle;
+        angle["i"] = m_uffangle[i].i;
+        angle["j"] = m_uffangle[i].j;
+        angle["k"] = m_uffangle[i].k;
+
+        angle["kijk"] = m_uffangle[i].kijk;
+        angle["C0"] = m_uffangle[i].C0;
+        angle["C1"] = m_uffangle[i].C1;
+        angle["C2"] = m_uffangle[i].C2;
+
+        angles[i] = angle;
+    }
+    parameters["angles"] = angles;
+
+    json dihedrals;
+
+    for (int i = 0; i < m_uffdihedral.size(); ++i) {
+        json dihedral;
+        dihedral["i"] = m_uffdihedral[i].i;
+        dihedral["j"] = m_uffdihedral[i].j;
+        dihedral["k"] = m_uffdihedral[i].k;
+        dihedral["l"] = m_uffdihedral[i].l;
+        dihedral["V"] = m_uffdihedral[i].V;
+        dihedral["n"] = m_uffdihedral[i].n;
+        dihedral["phi0"] = m_uffdihedral[i].phi0;
+
+        dihedrals[i] = dihedral;
+    }
+    parameters["dihedrals"] = dihedrals;
+
+    json inversions;
+
+    for (int i = 0; i < m_uffinversion.size(); ++i) {
+        json inversion;
+        inversion["i"] = m_uffinversion[i].i;
+        inversion["j"] = m_uffinversion[i].j;
+        inversion["k"] = m_uffinversion[i].k;
+        inversion["l"] = m_uffinversion[i].l;
+        inversion["kijkl"] = m_uffinversion[i].kijkl;
+        inversion["C0"] = m_uffinversion[i].C0;
+        inversion["C1"] = m_uffinversion[i].C1;
+        inversion["C2"] = m_uffinversion[i].C2;
+
+        inversions[i] = inversion;
+    }
+    parameters["inversions"] = inversions;
+
+    json vdws;
+    for (int i = 0; i < m_uffvdwaals.size(); ++i) {
+        json vdw;
+        vdw["i"] = m_uffvdwaals[i].i;
+        vdw["j"] = m_uffvdwaals[i].j;
+        vdw["Dij"] = m_uffvdwaals[i].Dij;
+        vdw["xij"] = m_uffvdwaals[i].xij;
+        vdws[i] = vdw;
+    }
+    parameters["vdws"] = vdws;
+    parameters["h4"] = h_e1;
+    parameters["hh"] = h_e2;
+    parameters["bond_force"] = m_bond_force;
+    parameters["angle_force"] = m_angle_force;
+
+    return parameters;
+}
+
+void UFF::readParameter(const json& parameters)
+{
+    while (m_gradient.size() < m_atom_types.size())
+        m_gradient.push_back({ 0, 0, 0 });
+
+    h_e1 = parameters["h4"];
+    h_e2 = parameters["hh"];
+    m_bond_force = parameters["bond_force"];
+    m_angle_force = parameters["angle_force"];
+    json bonds = parameters["bonds"];
+    m_uffbonds.clear();
+    for (int i = 0; i < bonds.size(); ++i) {
+        json bond = bonds[i].get<json>();
+        UFFBond b;
+
+        b.i = bond["i"].get<int>();
+        b.j = bond["j"].get<int>();
+        b.r0 = bond["r0"].get<double>();
+        b.kij = bond["kij"].get<double>();
+        m_uffbonds.push_back(b);
+    }
+
+    json angles = parameters["angles"];
+    m_uffangle.clear();
+    for (int i = 0; i < angles.size(); ++i) {
+        json angle = angles[i].get<json>();
+        UFFAngle a;
+
+        a.i = angle["i"].get<int>();
+        a.j = angle["j"].get<int>();
+        a.k = angle["k"].get<int>();
+        a.C0 = angle["C0"].get<double>();
+        a.C1 = angle["C1"].get<double>();
+        a.C2 = angle["C2"].get<double>();
+        a.kijk = angle["kijk"].get<double>();
+        m_uffangle.push_back(a);
+    }
+
+    json dihedrals = parameters["dihedrals"];
+    m_uffdihedral.clear();
+    for (int i = 0; i < dihedrals.size(); ++i) {
+        json dihedral = dihedrals[i].get<json>();
+        UFFDihedral d;
+
+        d.i = dihedral["i"].get<int>();
+        d.j = dihedral["j"].get<int>();
+        d.k = dihedral["k"].get<int>();
+        d.l = dihedral["l"].get<int>();
+        d.V = dihedral["V"].get<double>();
+        d.n = dihedral["n"].get<double>();
+        d.phi0 = dihedral["phi0"].get<double>();
+        m_uffdihedral.push_back(d);
+    }
+
+    json inversions = parameters["inversions"];
+    m_uffinversion.clear();
+    for (int i = 0; i < inversions.size(); ++i) {
+        json inversion = inversions[i].get<json>();
+        UFFInversion inv;
+
+        inv.i = inversion["i"].get<int>();
+        inv.j = inversion["j"].get<int>();
+        inv.k = inversion["k"].get<int>();
+        inv.l = inversion["l"].get<int>();
+        inv.kijkl = inversion["kijkl"].get<double>();
+        inv.C0 = inversion["C0"].get<double>();
+        inv.C1 = inversion["C1"].get<double>();
+        inv.C2 = inversion["C2"].get<double>();
+
+        m_uffinversion.push_back(inv);
+    }
+
+    json vdws = parameters["vdws"];
+    m_uffvdwaals.clear();
+    for (int i = 0; i < vdws.size(); ++i) {
+        json vdw = vdws[i].get<json>();
+        UFFvdW v;
+
+        v.i = vdw["i"].get<int>();
+        v.j = vdw["j"].get<int>();
+        v.Dij = vdw["Dij"].get<double>();
+        v.xij = vdw["xij"].get<double>();
+
+        m_uffvdwaals.push_back(v);
+    }
+    m_initialised = true;
+}
+
+void UFF::readParameterFile(const std::string& file)
+{
+    nlohmann::json parameters;
+    std::ifstream parameterfile(file);
+    try {
+        parameterfile >> parameters;
+    } catch (nlohmann::json::type_error& e) {
+    } catch (nlohmann::json::parse_error& e) {
+    }
+    readParameter(parameters);
 }
 
 void UFF::UpdateGeometry(const double* coord)
@@ -341,10 +701,10 @@ void UFF::NumGrad(double* grad)
 
 double UFF::BondRestLength(int i, int j, double n)
 {
-    const double cRi = m_parameter[m_uff_atom_types[i]][cR];
-    const double cRj = m_parameter[m_uff_atom_types[j]][cR];
-    const double cXii = m_parameter[m_uff_atom_types[i]][cXi];
-    const double cXij = m_parameter[m_uff_atom_types[j]][cXi];
+    double cRi = UFFParameters[m_uff_atom_types[i]][cR];
+    double cRj = UFFParameters[m_uff_atom_types[j]][cR];
+    double cXii = UFFParameters[m_uff_atom_types[i]][cXi];
+    double cXij = UFFParameters[m_uff_atom_types[j]][cXi];
 
     double lambda = 0.13332;
     double r_BO = -lambda * (cRi + cRj) * log(n);
@@ -359,8 +719,8 @@ double UFF::Calculate(bool grd)
     double energy = 0.0;
 
     hbonds4::atom_t geometry[m_atom_types.size()];
-    hbonds4::coord_t* gradient;
-    hbonds4::coord_t* gradient2;
+    hbonds4::coord_t* grd_h4;
+    hbonds4::coord_t* grd_hh;
 
     for (int i = 0; i < m_atom_types.size(); ++i) {
         geometry[i].x = m_geometry[i][0] * m_au;
@@ -368,23 +728,23 @@ double UFF::Calculate(bool grd)
         geometry[i].z = m_geometry[i][2] * m_au;
         geometry[i].e = m_atom_types[i];
     }
-    hbonds4::gradient_allocate(m_atom_types.size(), &gradient); // Allocate memory for H4 gradient
-    hbonds4::gradient_allocate(m_atom_types.size(), &gradient2); // Allocate memory for HH repulsion gradient
+    hbonds4::gradient_allocate(m_atom_types.size(), &grd_h4); // Allocate memory for H4 gradient
+    hbonds4::gradient_allocate(m_atom_types.size(), &grd_hh); // Allocate memory for HH repulsion gradient
 
     energy = CalculateBondStretching() + CalculateAngleBending() + CalculateDihedral() + CalculateInversion() + CalculateNonBonds() + CalculateElectrostatic();
 
-    double energy_h4 = hbonds4::energy_corr_h4(m_atom_types.size(), geometry, gradient);
-    double energy_hh = hbonds4::energy_corr_hh_rep(m_atom_types.size(), geometry, gradient2);
+    double energy_h4 = hbonds4::energy_corr_h4(m_atom_types.size(), geometry, grd_h4);
+    double energy_hh = hbonds4::energy_corr_hh_rep(m_atom_types.size(), geometry, grd_hh);
     energy += m_final_factor * h_e1 * energy_h4 + m_final_factor * h_e2 * energy_hh;
 
     for (int i = 0; i < m_atom_types.size(); ++i) {
-        m_gradient[i][0] += m_final_factor * h_e1 * gradient[i].x + m_final_factor * h_e2 * gradient2[i].x;
-        m_gradient[i][1] += m_final_factor * h_e1 * gradient[i].y + m_final_factor * h_e2 * gradient2[i].y;
-        m_gradient[i][2] += m_final_factor * h_e1 * gradient[i].z + m_final_factor * h_e2 * gradient2[i].z;
+        m_gradient[i][0] += m_final_factor * h_e1 * grd_h4[i].x + m_final_factor * h_e2 * grd_hh[i].x;
+        m_gradient[i][1] += m_final_factor * h_e1 * grd_h4[i].y + m_final_factor * h_e2 * grd_hh[i].y;
+        m_gradient[i][2] += m_final_factor * h_e1 * grd_h4[i].z + m_final_factor * h_e2 * grd_hh[i].z;
     }
 
-    delete gradient;
-    delete gradient2;
+    delete grd_h4;
+    delete grd_hh;
 
     return energy;
 }
