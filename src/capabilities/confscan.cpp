@@ -89,7 +89,32 @@ void ConfScan::LoadControlJson()
     m_useorders = Json2KeyWord<int>(m_defaults, "UseOrders");
     m_MaxHTopoDiff = Json2KeyWord<int>(m_defaults, "MaxHTopoDiff");
     m_threads = Json2KeyWord<int>(m_defaults, "threads");
-    m_RMSDElement = Json2KeyWord<int>(m_defaults, "RMSDElement");
+
+#pragma message("these hacks to overcome the json stuff are not nice, TODO!")
+    try {
+        m_rmsd_element_templates = m_defaults["RMSDElement"].get<std::string>();
+        StringList elements = Tools::SplitString(m_rmsd_element_templates, ",");
+        for (const std::string& str : elements)
+            m_rmsd_element_templates.push_back(std::stod(str));
+
+        if (m_element_templates.size())
+            m_RMSDElement = m_element_templates[0];
+
+    } catch (const nlohmann::detail::type_error& error) {
+        m_RMSDElement = Json2KeyWord<int>(m_defaults, "RMSDElement");
+        m_rmsd_element_templates.push_back(m_RMSDElement);
+    }
+
+    // m_rmsd_element_templates = m_defaults["RMSDElement"].get<std::string>();
+    /*
+    StringList elements = Tools::SplitString(element, ",");
+    for(const std::string &str : elements)
+        m_element_templates.push_back(std::stod(str));
+
+    if(m_element_templates.size())
+        m_RMSDElement = m_element_templates[0];
+    */
+    // m_RMSDElement = Json2KeyWord<int>(m_defaults, "RMSDElement");
     m_prev_accepted = Json2KeyWord<std::string>(m_defaults, "accepted");
 
     m_RMSDmethod = Json2KeyWord<std::string>(m_defaults, "RMSDMethod");
@@ -572,7 +597,7 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
     rmsd["heavy"] = m_heavy;
     rmsd["threads"] = m_threads;
     rmsd["method"] = m_RMSDmethod;
-    rmsd["element"] = m_RMSDElement;
+    rmsd["element"] = m_rmsd_element_templates;
 
     std::vector<Molecule*> cached = m_stored_structures;
     m_result = m_previously_accepted;
@@ -679,7 +704,6 @@ bool ConfScan::SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMS
         rmsd = driver->RMSD();
 
         m_reordered++;
-
         if (rmsd <= m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
             keep_molecule = false;
             AddRules(driver->ReorderRules());

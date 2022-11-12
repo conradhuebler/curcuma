@@ -239,6 +239,7 @@ private:
     std::pair<std::vector<int>, std::vector<int>> PrepareHeavyTemplate();
 
     std::pair<std::vector<int>, std::vector<int>> PrepareAtomTemplate(int templateatom);
+    std::pair<std::vector<int>, std::vector<int>> PrepareAtomTemplate(const std::vector<int>& templateatom);
 
     void FinaliseTemplate(std::pair<std::vector<int>, std::vector<int>> initial);
 
@@ -284,5 +285,5 @@ private:
     bool m_check_connections = false, m_postprocess = true, m_noreorder = false, m_swap = false, m_dynamic_center = false;
     int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1, m_method = 1, m_htopo_diff = -1, m_partial_rmsd = -1, m_threads = 1, m_element = 7;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
-    std::vector<int> m_initial;
+    std::vector<int> m_initial, m_element_templates;
 };

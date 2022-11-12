@@ -257,7 +257,7 @@ void Molecule::setXYZComment(const std::string& comment)
                 // Ignore empty comment line
             } else {
                 try {
-                    setEnergy(std::stod((list[0])));
+                    setEnergy(std::stod(list[0]));
                 } catch (const std::string& what_arg) {
                 } catch (const std::invalid_argument& arg) {
                 }

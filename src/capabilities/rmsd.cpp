@@ -110,7 +110,27 @@ void RMSDDriver::LoadControlJson()
     m_dynamic_center = Json2KeyWord<bool>(m_defaults, "DynamicCenter");
 
     m_noreorder = Json2KeyWord<bool>(m_defaults, "noreorder");
-    m_element = Json2KeyWord<int>(m_defaults, "element");
+    // m_element = Json2KeyWord<int>(m_defaults, "element");
+    // std::cout <<  << std::endl;
+#pragma message("these hacks to overcome the json stuff are not nice, TODO!")
+    try {
+        std::string element = m_defaults["Element"].get<std::string>();
+        StringList elements = Tools::SplitString(element, ",");
+        for (const std::string& str : elements) {
+            try {
+                m_element_templates.push_back(std::stod(str));
+            } catch (const std::invalid_argument& arg) {
+                continue;
+            }
+        }
+        if (m_element_templates.size())
+            m_element = m_element_templates[0];
+
+    } catch (const nlohmann::detail::type_error& error) {
+        m_element = Json2KeyWord<int>(m_defaults, "element");
+        m_element_templates.push_back(m_element);
+    }
+
     m_check = Json2KeyWord<bool>(m_defaults, "check");
 
     std::string method = Json2KeyWord<std::string>(m_defaults, "method");
@@ -611,7 +631,8 @@ void RMSDDriver::AtomTemplate()
 {
     //   std::cout << "Prepare atom template structure:" << std::endl;
     //   std::cout << m_reference.Name() << " " << m_target.Name() << std::endl;
-    auto pairs = PrepareAtomTemplate(m_element);
+
+    auto pairs = PrepareAtomTemplate(m_element_templates);
     /*  if(m_reference.Name() == "input_43" && m_target.Name() == "input_4")
       {
           for(auto i : pairs.first)
@@ -764,6 +785,55 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareAtomTemplate(in
     for (std::size_t i = 0; i < m_target.AtomCount(); ++i) {
         std::pair<int, Position> atom = m_target.Atom(i);
         if (atom.first == templateatom) {
+            target.addPair(atom);
+            target_indicies.push_back(i);
+        }
+    }
+
+    Molecule cached_reference_mol = m_reference;
+    Molecule cached_target_mol = m_target;
+
+    m_reference = reference;
+    m_target = target;
+
+    m_init_count = m_heavy_init;
+
+    ReorderIncremental();
+
+    std::vector<std::vector<int>> transformed_rules;
+    for (int i = 0; i < m_stored_rules.size(); ++i) {
+        std::vector<int> tmp;
+        for (auto index : m_stored_rules[i])
+            tmp.push_back(target_indicies[index]);
+        transformed_rules.push_back(tmp);
+    }
+    m_stored_rules = transformed_rules;
+    std::vector<int> target_indices = m_reorder_rules;
+
+    m_reference = cached_reference_mol;
+    m_target = cached_target_mol;
+    m_reference = cached_reference_mol;
+    m_target = cached_target_mol;
+
+    return std::pair<std::vector<int>, std::vector<int>>(reference_indicies, target_indices);
+}
+
+std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareAtomTemplate(const std::vector<int>& templateatom)
+{
+    Molecule reference;
+    std::vector<int> reference_indicies, target_indicies;
+    for (std::size_t i = 0; i < m_reference.AtomCount(); ++i) {
+        std::pair<int, Position> atom = m_reference.Atom(i);
+        if (std::find(templateatom.begin(), templateatom.end(), atom.first) != templateatom.end()) {
+            reference.addPair(atom);
+            reference_indicies.push_back(i);
+        }
+    }
+
+    Molecule target;
+    for (std::size_t i = 0; i < m_target.AtomCount(); ++i) {
+        std::pair<int, Position> atom = m_target.Atom(i);
+        if (std::find(templateatom.begin(), templateatom.end(), atom.first) != templateatom.end()) {
             target.addPair(atom);
             target_indicies.push_back(i);
         }
