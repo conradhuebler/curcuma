@@ -42,6 +42,7 @@ public:
         , m_connected_mass(connected_mass)
         , m_element(element)
     {
+        // setAutoDelete(false);
     }
     inline virtual ~RMSDThread() = default;
 

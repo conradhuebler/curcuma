@@ -26,6 +26,10 @@
 #include <string>
 #include <vector>
 
+#include "src/capabilities/rmsd.h"
+
+#include "external/CxxThreadPool/include/CxxThreadPool.h"
+
 #include "src/core/molecule.h"
 
 #include "curcumamethod.h"
@@ -62,7 +66,60 @@ static const json ConfScanJson = {
     { "dothird", false }
 };
 
-class RMSDDriver;
+class ConfScanThread : public CxxThread {
+public:
+    ConfScanThread(const std::vector<std::vector<int>>& reorder_rules, double rmsd_threshold, int MaxHTopoDiff, bool reuse_only, const json& config)
+    {
+        m_driver = new RMSDDriver(config, true);
+        m_config = config;
+        m_reuse_only = reuse_only;
+        m_reorder_rules = reorder_rules;
+        m_rmsd_threshold = rmsd_threshold;
+        m_MaxHTopoDiff = MaxHTopoDiff;
+        setAutoDelete(false);
+    }
+
+    ~ConfScanThread()
+    {
+        delete m_driver;
+    }
+
+    virtual int execute() override;
+    virtual bool BreakThreadPool() const override { return false; }
+
+    bool KeepMolecule() const { return m_keep_molecule; }
+    bool ReorderWorked() const { return m_reorder_worked; }
+    bool ReusedWorked() const { return m_reused_worked; }
+
+    void setReference(const Molecule& molecule)
+    {
+        m_reference = molecule;
+        m_target = molecule;
+    }
+    void setTarget(const Molecule* molecule)
+    {
+        m_target.setGeometry(molecule->getGeometry());
+    }
+    std::vector<int> ReorderRule() const { return m_reorder_rule; }
+    void setReorderRules(const std::vector<std::vector<int>>& reorder_rules)
+    {
+        m_reorder_rules = reorder_rules;
+    }
+    void addReorderRule(const std::vector<int>& rule)
+    {
+        m_reorder_rules.push_back(rule);
+    }
+
+private:
+    bool m_keep_molecule = true, m_break_pool = false, m_reorder_worked = false, m_reuse_only = false, m_reused_worked = false;
+    Molecule m_reference, m_target;
+    double m_rmsd = 0, m_rmsd_threshold = 1;
+    int m_MaxHTopoDiff;
+    std::vector<int> m_reorder_rule;
+    std::vector<std::vector<int>> m_reorder_rules;
+    RMSDDriver* m_driver;
+    json m_config;
+};
 
 class ConfScan : public CurcumaMethod {
 public:
@@ -94,6 +151,7 @@ public:
     void ParametriseRotationalCutoffs();
 
     void start() override; // TODO make pure virtual and move all main action here
+    ConfScanThread* addThread(const Molecule* reference, const json& config, bool reuse_only);
 
 private:
     void SetUp();
@@ -125,7 +183,7 @@ private:
     /* Read Controller has to be implemented for all */
     void LoadControlJson() override;
 
-    void AddRules(const std::vector<int>& rules);
+    bool AddRules(const std::vector<int>& rules);
 
     bool openFile();
 

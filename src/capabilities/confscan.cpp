@@ -27,6 +27,8 @@
 #include <fmt/color.h>
 #include <fmt/core.h>
 
+#include "external/CxxThreadPool/include/CxxThreadPool.h"
+
 #include "src/capabilities/confstat.h"
 #include "src/capabilities/persistentdiagram.h"
 #include "src/capabilities/rmsd.h"
@@ -41,6 +43,44 @@
 using json = nlohmann::json;
 
 #include "confscan.h"
+
+int ConfScanThread::execute()
+{
+    m_driver->setReference(m_reference);
+    m_driver->setTarget(m_target);
+    m_keep_molecule = true;
+    m_break_pool = false;
+    m_reorder_worked = false;
+    m_reused_worked = false;
+    for (int i = 0; i < m_reorder_rules.size(); ++i) {
+        if (m_reorder_rules[i].size() != m_reference.AtomCount() || m_reorder_rules[i].size() == 0)
+            continue;
+
+        double tmp_rmsd = m_driver->Rules2RMSD(m_reorder_rules[i]);
+        if (tmp_rmsd < m_rmsd_threshold && (m_MaxHTopoDiff == -1 || m_driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
+            m_keep_molecule = false;
+            m_break_pool = true;
+            m_reused_worked = true;
+            return 0;
+        }
+    }
+
+    if (m_reuse_only) {
+        return 0;
+    }
+
+    m_driver->start();
+    m_rmsd = m_driver->RMSD();
+    if (m_rmsd <= m_rmsd_threshold && (m_MaxHTopoDiff == -1 || m_driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
+        m_keep_molecule = false;
+        m_break_pool = true;
+        m_reorder_worked = true;
+
+        m_reorder_rule = m_driver->ReorderRules();
+    }
+    m_driver->clear();
+    return 0;
+}
 
 ConfScan::ConfScan(const json& controller, bool silent)
     : CurcumaMethod(ConfScanJson, controller, silent)
@@ -88,8 +128,8 @@ void ConfScan::LoadControlJson()
     m_maxParam = Json2KeyWord<int>(m_defaults, "MaxParam");
     m_useorders = Json2KeyWord<int>(m_defaults, "UseOrders");
     m_MaxHTopoDiff = Json2KeyWord<int>(m_defaults, "MaxHTopoDiff");
-    m_threads = Json2KeyWord<int>(m_defaults, "threads");
-
+    // m_threads = Json2KeyWord<int>(m_defaults, "threads");
+    m_threads = m_defaults["threads"].get<int>();
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
         m_rmsd_element_templates = m_defaults["RMSDElement"].get<std::string>();
@@ -104,17 +144,6 @@ void ConfScan::LoadControlJson()
         m_RMSDElement = Json2KeyWord<int>(m_defaults, "RMSDElement");
         m_rmsd_element_templates.push_back(m_RMSDElement);
     }
-
-    // m_rmsd_element_templates = m_defaults["RMSDElement"].get<std::string>();
-    /*
-    StringList elements = Tools::SplitString(element, ",");
-    for(const std::string &str : elements)
-        m_element_templates.push_back(std::stod(str));
-
-    if(m_element_templates.size())
-        m_RMSDElement = m_element_templates[0];
-    */
-    // m_RMSDElement = Json2KeyWord<int>(m_defaults, "RMSDElement");
     m_prev_accepted = Json2KeyWord<std::string>(m_defaults, "accepted");
 
     m_RMSDmethod = Json2KeyWord<std::string>(m_defaults, "RMSDMethod");
@@ -595,26 +624,35 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
     rmsd["reorder"] = true;
     rmsd["check"] = CheckConnections();
     rmsd["heavy"] = m_heavy;
-    rmsd["threads"] = m_threads;
+    // rmsd["threads"] = m_threads;
     rmsd["method"] = m_RMSDmethod;
     rmsd["element"] = m_rmsd_element_templates;
 
     std::vector<Molecule*> cached = m_stored_structures;
     m_result = m_previously_accepted;
     m_stored_structures.clear();
+    std::vector<ConfScanThread*> threads;
+    std::vector<std::vector<int>> rules;
+    CxxThreadPool* p = new CxxThreadPool;
+    p->setActiveThreadCount(m_threads);
+
     for (Molecule* mol1 : cached) {
         if (m_result.size() == 0) {
             AcceptMolecule(mol1);
+            ConfScanThread* thread = addThread(mol1, rmsd, reuse_only);
+            threads.push_back(thread);
+            p->addThread(thread);
+
             continue;
         }
+        p->Reset();
         m_current_energy = mol1->Energy();
         m_dE = (m_current_energy - m_lowest_energy) * 2625.5;
 
         bool keep_molecule = true;
-        RMSDDriver* driver = new RMSDDriver(rmsd);
+
         for (const auto& mol2 : m_result) {
             if (CheckStop()) {
-                delete driver;
                 fmt::print("\n\n** Found stop file, will end now! **\n\n");
                 // TriggerWriteRestart();
                 return;
@@ -636,37 +674,53 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                 m_last_diff = diff_rot;
                 m_last_ripser = diff;
                 keep_molecule = false;
-                writeStatisticFile(mol1, mol2, driver->RMSD(), false);
+                writeStatisticFile(mol1, mol2, -1, false);
                 m_threshold.push_back(mol2);
                 break;
             }
+        }
 
-            keep_molecule = SingleReorderRMSD(mol1, mol2, driver, reuse_only);
-            if (keep_molecule == false) {
-                writeStatisticFile(mol1, mol2, driver->RMSD(), true);
-                /*
-                std::ofstream result_file;
-                result_file.open("ripser.dat", std::ios_base::app);
-                result_file << driver->RMSD() << "\t" << diff << "\t" << diff_rot << std::endl;
-                result_file.close();
-                */
+        for (int i = 0; i < threads.size(); ++i) {
+            threads[i]->setTarget(mol1);
+            threads[i]->setReorderRules(m_reorder_rules);
+
+            for (int j = 0; j < rules.size(); ++j)
+                threads[i]->addReorderRule(rules[j]);
+        }
+
+        p->StaticPool();
+        p->StartAndWait();
+
+        for (auto* t : threads) {
+            m_reordered++;
+            if (t->KeepMolecule() == false) {
+                keep_molecule = false;
+                m_reordered_worked += t->ReorderWorked();
+                m_reordered_reused += t->ReusedWorked();
+                if (AddRules(t->ReorderRule())) {
+                    rules.push_back(t->ReorderRule());
+                }
                 break;
             }
         }
+
         if (keep_molecule) {
             AcceptMolecule(mol1);
+            ConfScanThread* thread = addThread(mol1, rmsd, reuse_only);
+            p->addThread(thread);
+            threads.push_back(thread);
         } else {
             RejectMolecule(mol1);
         }
 
         PrintStatus();
-        delete driver;
         if ((m_result.size() >= m_maxrank && limit) || (m_result.size() >= 2 * m_maxrank && !limit))
             break;
         if (m_dE > m_energy_cutoff && m_energy_cutoff != -1) {
             break;
         }
     }
+    delete p;
 }
 
 bool ConfScan::SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMSDDriver* driver, bool reuse_only)
@@ -716,6 +770,12 @@ bool ConfScan::SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMS
 
     return keep_molecule;
 }
+ConfScanThread* ConfScan::addThread(const Molecule* reference, const json& config, bool reuse_only)
+{
+    ConfScanThread* thread = new ConfScanThread(m_reorder_rules, m_rmsd_threshold, m_MaxHTopoDiff, reuse_only, config);
+    thread->setReference(*reference);
+    return thread;
+}
 
 void ConfScan::Finalise()
 {
@@ -754,11 +814,15 @@ void ConfScan::Finalise()
     std::cout << m_stored_structures.size() << " structures were kept - of " << m_molecules.size() - m_fail << " total!" << std::endl;
 }
 
-void ConfScan::AddRules(const std::vector<int>& rules)
+bool ConfScan::AddRules(const std::vector<int>& rules)
 {
+    if (rules.size() == 0)
+        return false;
+
     if (std::find(m_reorder_rules.begin(), m_reorder_rules.end(), rules) == m_reorder_rules.end()) {
         m_reorder_rules.push_back(rules);
     }
+    return true;
 }
 
 

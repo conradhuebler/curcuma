@@ -77,7 +77,7 @@ void bt_handler(int sig)
     fprintf(stderr, "Good-By\n");
 #ifdef C17
 #ifndef _WIN32
-    std::filesystem::remove("stop");
+    //  std::filesystem::remove("stop");
 #endif
 #else
     remove("stop");

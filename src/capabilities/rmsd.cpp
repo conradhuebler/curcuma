@@ -30,6 +30,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <queue>
 #include <string>
 #include <vector>
@@ -157,8 +158,7 @@ void RMSDDriver::LoadControlJson()
 
 void RMSDDriver::start()
 {
-    RunTimer timer(false);
-
+    // RunTimer timer(false);
     clear();
 
     if (m_reference.AtomCount() < m_target.AtomCount()) {
@@ -248,7 +248,7 @@ void RMSDDriver::start()
     */
     m_htopo_diff = CompareTopoMatrix(m_reference_aligned.HydrogenBondMatrix(-1, -1), m_target_aligned.HydrogenBondMatrix(-1, -1));
     if (!m_silent) {
-        std::cout << "RMSD calculation took " << timer.Elapsed() << " msecs." << std::endl;
+        // std::cout << "RMSD calculation took " << timer.Elapsed() << " msecs." << std::endl;
         std::cout << "Difference in Topological Hydrogen Bond Matrix is " << m_htopo_diff << std::endl;
     }
     if (m_swap) {
@@ -341,13 +341,17 @@ void RMSDDriver::ReorderIncremental()
     int reference_not_reorordered = 0;
     int max = std::min(m_reference.AtomCount(), m_target.AtomCount());
     int wake_up = 100;
+    CxxThreadPool* pool = new CxxThreadPool;
+    if (m_silent)
+        pool->setProgressBar(CxxThreadPool::ProgressBarType::None);
+    else
+        pool->setProgressBar(CxxThreadPool::ProgressBarType::Continously);
+    pool->setActiveThreadCount(m_threads);
     std::vector<AtomDef> atoms;
     while (
         m_reorder_reference_geometry.rows() < m_reorder_reference.AtomCount() && m_reorder_reference_geometry.rows() < m_reorder_target.AtomCount() && ((reference_reordered + reference_not_reorordered) <= m_reference.AtomCount())) {
         int thread_count = 0;
 
-        CxxThreadPool* pool = new CxxThreadPool;
-        pool->setActiveThreadCount(m_threads);
         Molecule reference = ref;
         int i = reference.AtomCount();
         double mass = m_reference.ConnectedMass(i);
@@ -361,22 +365,22 @@ void RMSDDriver::ReorderIncremental()
             m_reorder_reference_geometry = GeometryTools::TranslateGeometry(reference.getGeometry(), reference.Centroid(true), Position{ 0, 0, 0 });
         else
             m_reorder_reference_geometry = reference.getGeometry();
-
+        std::vector<RMSDThread*> threads;
         for (const auto& e : *storage_shelf.data()) {
             RMSDThread* thread = new RMSDThread(m_reorder_target, m_reorder_reference_geometry, e.second, mass, element);
             pool->addThread(thread);
+            threads.push_back(thread);
             thread_count++;
         }
         pool->StaticPool();
         pool->setWakeUp(wake_up);
-        pool->setProgressBar(CxxThreadPool::ProgressBarType::Continously);
         int match = 0;
         /* For now, lets just dont start the threads if the current element can not be found in target */
         if (std::find(m_target.Atoms().begin(), m_target.Atoms().end(), element) != m_target.Atoms().end()) {
             pool->StartAndWait();
         }
         LimitedStorage storage_shelf_next(inter_size);
-        for (const auto t : pool->Finished()) {
+        for (const auto t : threads) {
             RMSDThread* thread = static_cast<RMSDThread*>(t);
             for (const auto& item : (*thread->data())) {
                 if (thread->Match()) {
@@ -407,8 +411,10 @@ void RMSDDriver::ReorderIncremental()
             reference_not_reorordered++;
         }
         wake_up = 2 * pool->WakeUp();
-        delete pool;
+        pool->clear();
     }
+    delete pool;
+
     int count = 0;
     for (const auto& e : *storage_shelf.data()) {
         if (count > 50)
@@ -629,20 +635,8 @@ void RMSDDriver::ReorderMolecule()
 
 void RMSDDriver::AtomTemplate()
 {
-    //   std::cout << "Prepare atom template structure:" << std::endl;
-    //   std::cout << m_reference.Name() << " " << m_target.Name() << std::endl;
 
     auto pairs = PrepareAtomTemplate(m_element_templates);
-    /*  if(m_reference.Name() == "input_43" && m_target.Name() == "input_4")
-      {
-          for(auto i : pairs.first)
-              std::cout << i<< " ";
-          std::cout << std::endl;
-
-          for(auto i : pairs.second)
-              std::cout << i<< " ";
-          std::cout << std::endl;
-      }*/
     FinaliseTemplate(pairs);
 
     m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
@@ -704,7 +698,9 @@ void RMSDDriver::FinaliseTemplate(std::pair<std::vector<int>, std::vector<int>> 
             m_reorder_rules = result;
             m_target_reordered = ApplyOrder(m_reorder_rules, target);
             local_results.insert(std::pair<double, std::vector<int>>(Rules2RMSD(m_reorder_rules), m_reorder_rules));
-
+            /*std::set<int> s(result.second.begin(), result.second.end());
+            if (s.size() != result.second.size()) // make sure, that only results with non-duplicate vectors are accepted
+                continue;*/
             result = AlignByVectorPair(tmp, m_reorder_rules);
             if (m_reorder_rules == result)
                 break;
@@ -1010,7 +1006,7 @@ std::vector<int> RMSDDriver::DistanceReorderV1(const Molecule& reference, const 
         double distance = 1e10;
         int index = -1;
         for (int j = 0; j < target.AtomCount(); ++j) {
-            if (target.Atom(j).first != reference.Atom(i).first)
+            if (target.Atom(j).first != reference.Atom(i).first || std::find(new_order.begin(), new_order.end(), j) != new_order.end())
                 continue;
 
             const double local_distance = GeometryTools::Distance(target.Atom(j).second, reference.Atom(i).second);
