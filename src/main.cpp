@@ -203,9 +203,9 @@ int main(int argc, char **argv) {
             driver->start();
             std::cout << "RMSD for two molecules " << driver->RMSD() << std::endl;
 
-            driver->ReferenceAligned().writeXYZFile(reffile + "_centered.xyz");
-            driver->TargetAligned().writeXYZFile(tarfile + "_centered.xyz");
-            driver->TargetReorderd().writeXYZFile(tarfile + "_reordered.xyz");
+            driver->ReferenceAligned().writeXYZFile(reffile + ".centered.xyz");
+            driver->TargetAligned().writeXYZFile(tarfile + ".centered.xyz");
+            driver->TargetReorderd().writeXYZFile(tarfile + ".reordered.xyz");
 
             std::cout << Tools::Vector2String(driver->ReorderRules()) << std::endl;
             delete driver;

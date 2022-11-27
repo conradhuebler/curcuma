@@ -109,12 +109,14 @@ public:
     {
         m_reorder_rules.push_back(rule);
     }
+    void setThreads(int threads) { m_threads = threads; }
 
 private:
     bool m_keep_molecule = true, m_break_pool = false, m_reorder_worked = false, m_reuse_only = false, m_reused_worked = false;
     Molecule m_reference, m_target;
     double m_rmsd = 0, m_rmsd_threshold = 1;
     int m_MaxHTopoDiff;
+    int m_threads = 1;
     std::vector<int> m_reorder_rule;
     std::vector<std::vector<int>> m_reorder_rules;
     RMSDDriver* m_driver;
@@ -197,7 +199,7 @@ private:
     std::vector<Molecule*> m_global_temp_list;
     int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0, m_skip = 0;
 
-    std::string m_filename, m_accepted_filename, m_1st_filename, m_2nd_filename, m_rejected_filename, m_result_basename, m_statistic_filename, m_prev_accepted, m_joined_filename, m_threshold_filename;
+    std::string m_filename, m_accepted_filename, m_1st_filename, m_2nd_filename, m_rejected_filename, m_result_basename, m_statistic_filename, m_prev_accepted, m_joined_filename, m_threshold_filename, m_current_filename;
     std::map<double, int> m_ordered_list;
     std::vector<std::pair<std::string, Molecule*>> m_molecules;
     double m_energy_threshold = 1.0, m_rmsd_threshold = 1.0, m_diff_rot_rel_loose = 0.3, m_diff_rot_rel_tight = 0.01, m_nearly_missed = 0.8, m_energy_cutoff = -1, m_reference_last_energy = 0, m_target_last_energy = 0, m_lowest_energy = 1, m_current_energy = 0;

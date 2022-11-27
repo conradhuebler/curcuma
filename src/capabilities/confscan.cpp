@@ -46,6 +46,7 @@ using json = nlohmann::json;
 
 int ConfScanThread::execute()
 {
+    m_driver->setThreads(m_threads);
     m_driver->setReference(m_reference);
     m_driver->setTarget(m_target);
     m_keep_molecule = true;
@@ -128,7 +129,6 @@ void ConfScan::LoadControlJson()
     m_maxParam = Json2KeyWord<int>(m_defaults, "MaxParam");
     m_useorders = Json2KeyWord<int>(m_defaults, "UseOrders");
     m_MaxHTopoDiff = Json2KeyWord<int>(m_defaults, "MaxHTopoDiff");
-    // m_threads = Json2KeyWord<int>(m_defaults, "threads");
     m_threads = m_defaults["threads"].get<int>();
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
@@ -393,7 +393,6 @@ void ConfScan::SetUp()
 
     std::cout << "    RMSD Threshold set to: " << m_rmsd_threshold << " Angstrom" << std::endl;
     std::cout << "    Highest energy conformer allowed: " << m_energy_cutoff << " kJ/mol " << std::endl;
-    //  std::cout << "    Energy Threshold set to: " << m_energy_threshold << " kJ/mol" << std::endl;
     std::cout << "" << std::endl
               << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
               << std::endl;
@@ -404,7 +403,11 @@ void ConfScan::AcceptMolecule(Molecule* molecule)
     m_result.push_back(molecule);
     m_stored_structures.push_back(molecule);
     m_accepted++;
+    if (m_writeFiles && !m_reduced_file && m_current_filename.length()) {
+        molecule->appendXYZFile(m_current_filename);
+    }
 }
+
 void ConfScan::RejectMolecule(Molecule* molecule)
 {
     m_rejected_structures.push_back(molecule);
@@ -418,6 +421,7 @@ void ConfScan::start()
 
     fmt::print("\n\n1st Pass\nPerforming RMSD calculation without reordering now!\n\n");
     RunTimer timer(false);
+    m_current_filename = m_1st_filename;
     std::ofstream result_file;
     if (m_writeFiles && !m_reduced_file) {
         result_file.open(m_statistic_filename, std::ios_base::app);
@@ -425,15 +429,12 @@ void ConfScan::start()
         result_file.close();
     }
     CheckRMSD();
-    if (m_writeFiles && !m_reduced_file) {
-        for (const auto molecule : m_stored_structures) {
-            molecule->appendXYZFile(m_1st_filename);
-        }
-    }
     fmt::print("\n1st Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
     if (m_prevent_reorder == false || m_do_third == true) {
         if (!CheckStop()) {
             timer.Reset();
+            m_current_filename = m_2nd_filename;
+
             fmt::print("\n\n2nd Pass\nPerforming RMSD calculation with reordering now!\n\n");
             if (m_writeFiles && !m_reduced_file) {
                 result_file.open(m_statistic_filename, std::ios_base::app);
@@ -441,15 +442,12 @@ void ConfScan::start()
                 result_file.close();
             }
             ReorderCheck(m_prevent_reorder, false);
-            if (m_writeFiles && !m_reduced_file) {
-                for (const auto molecule : m_stored_structures) {
-                    molecule->appendXYZFile(m_2nd_filename);
-                }
-            }
+
             fmt::print("\n2nd Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
             timer.Reset();
         }
         if (!CheckStop() && m_do_third == true) {
+            m_current_filename.clear();
             if (m_writeFiles && !m_reduced_file) {
                 result_file.open(m_statistic_filename, std::ios_base::app);
                 result_file << "Results of 3rd Pass" << std::endl;
@@ -624,7 +622,6 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
     rmsd["reorder"] = true;
     rmsd["check"] = CheckConnections();
     rmsd["heavy"] = m_heavy;
-    // rmsd["threads"] = m_threads;
     rmsd["method"] = m_RMSDmethod;
     rmsd["element"] = m_rmsd_element_templates;
 
@@ -679,11 +676,13 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                 break;
             }
         }
-
+        int free_threads = m_threads / threads.size();
+        if (free_threads < 1)
+            free_threads = 1;
         for (int i = 0; i < threads.size(); ++i) {
             threads[i]->setTarget(mol1);
             threads[i]->setReorderRules(m_reorder_rules);
-
+            threads[i]->setThreads(free_threads);
             for (int j = 0; j < rules.size(); ++j)
                 threads[i]->addReorderRule(rules[j]);
         }

@@ -43,6 +43,42 @@
 using json = nlohmann::json;
 
 #include "rmsd.h"
+RMSDThread::RMSDThread(const Molecule& reference_molecule, const Molecule& target, const Geometry& reference, const Matrix& reference_topology, const std::vector<int> intermediate, double connected_mass, int element, int topo)
+    : m_reference_molecule(reference_molecule)
+    , m_target(target)
+    , m_reference(reference)
+    , m_reference_topology(reference_topology)
+    , m_intermediate(intermediate)
+    , m_connected_mass(connected_mass)
+    , m_element(element)
+    , m_topo(topo)
+{
+    if (m_topo == 0) {
+        m_evaluator = [this](const Molecule& target_local) -> double {
+            auto t = RMSDFunctions::getAligned(m_reference, target_local.getGeometry(), 1);
+            return RMSDFunctions::getRMSD(m_reference, t);
+        };
+    } else if (m_topo == 1) {
+        m_evaluator = [this](const Molecule& target_local) -> double {
+            auto target_topo = target_local.DistanceMatrix().second;
+            return (target_topo - m_reference_topology).cwiseAbs().sum();
+        };
+    } else {
+        m_evaluator = [this](const Molecule& target_local) -> double {
+            Molecule tar;
+            Matrix reference_matrix = m_reference_molecule.DistanceMatrix().second;
+            Geometry reference_geometry = m_reference_molecule.getGeometry();
+            Geometry target_geometry = target_local.getGeometry();
+            Geometry step = (reference_geometry - target_geometry) / m_topo;
+            int topo = 0;
+            for (int j = 1; j <= m_topo; ++j) {
+                target_geometry += step;
+                topo += CompareTopoMatrix(reference_matrix, tar.DistanceMatrix().second);
+            }
+            return topo;
+        };
+    }
+}
 
 int RMSDThread::execute()
 {
@@ -63,14 +99,21 @@ int RMSDThread::execute()
             found_none = false;
             Molecule target_local(target);
             if (target_local.addPair(m_target.Atom(j))) {
+                /*
                 //const auto t = RMSDFunctions::getAligned(m_reference, GeometryTools::TranslateGeometry(target_local.getGeometry(), target_local.Centroid(true), Position{ 0, 0, 0 }), 1);
                 const auto t = RMSDFunctions::getAligned(m_reference, target_local.getGeometry(), 1);
-
-                double rmsd_local = RMSDFunctions::getRMSD(m_reference, t);
-
+                double value = 0;
+                if(!m_topo)
+                    value = RMSDFunctions::getRMSD(m_reference, t);
+                else{
+                    Matrix target_topo = target_local.DistanceMatrix().second;
+                    value = (target_topo - m_reference_topology).cwiseAbs().sum();
+                }
+                */
+                double value = m_evaluator(target_local);
                 if (target_local.AtomCount() <= m_target.AtomCount()) {
                     {
-                        match.insert(std::pair<double, int>(rmsd_local, j));
+                        match.insert(std::pair<double, int>(value, j));
                     }
                 }
             }
@@ -109,10 +152,9 @@ void RMSDDriver::LoadControlJson()
     m_silent = Json2KeyWord<bool>(m_defaults, "silent");
     m_intermedia_storage = Json2KeyWord<double>(m_defaults, "storage");
     m_dynamic_center = Json2KeyWord<bool>(m_defaults, "DynamicCenter");
-
+    m_topo = Json2KeyWord<int>(m_defaults, "topo");
+    m_write = Json2KeyWord<int>(m_defaults, "write");
     m_noreorder = Json2KeyWord<bool>(m_defaults, "noreorder");
-    // m_element = Json2KeyWord<int>(m_defaults, "element");
-    // std::cout <<  << std::endl;
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
         std::string element = m_defaults["Element"].get<std::string>();
@@ -158,7 +200,7 @@ void RMSDDriver::LoadControlJson()
 
 void RMSDDriver::start()
 {
-    // RunTimer timer(false);
+    RunTimer timer(false);
     clear();
 
     if (m_reference.AtomCount() < m_target.AtomCount()) {
@@ -248,8 +290,10 @@ void RMSDDriver::start()
     */
     m_htopo_diff = CompareTopoMatrix(m_reference_aligned.HydrogenBondMatrix(-1, -1), m_target_aligned.HydrogenBondMatrix(-1, -1));
     if (!m_silent) {
-        // std::cout << "RMSD calculation took " << timer.Elapsed() << " msecs." << std::endl;
+        std::cout << std::endl
+                  << "RMSD calculation took " << timer.Elapsed() << " msecs." << std::endl;
         std::cout << "Difference in Topological Hydrogen Bond Matrix is " << m_htopo_diff << std::endl;
+        CheckTopology();
     }
     if (m_swap) {
         Molecule reference = m_reference;
@@ -367,7 +411,7 @@ void RMSDDriver::ReorderIncremental()
             m_reorder_reference_geometry = reference.getGeometry();
         std::vector<RMSDThread*> threads;
         for (const auto& e : *storage_shelf.data()) {
-            RMSDThread* thread = new RMSDThread(m_reorder_target, m_reorder_reference_geometry, e.second, mass, element);
+            RMSDThread* thread = new RMSDThread(reference, m_reorder_target, m_reorder_reference_geometry, reference.DistanceMatrix().second, e.second, mass, element, m_topo);
             pool->addThread(thread);
             threads.push_back(thread);
             thread_count++;
@@ -417,10 +461,13 @@ void RMSDDriver::ReorderIncremental()
 
     int count = 0;
     for (const auto& e : *storage_shelf.data()) {
-        if (count > 50)
+        if (count > max * (max - 1) * m_intermedia_storage)
             continue;
-        m_stored_rules.push_back(FillMissing(m_reference, e.second));
-        count++;
+        std::vector<int> rule = FillMissing(m_reference, e.second);
+        if (std::find(m_stored_rules.begin(), m_stored_rules.end(), rule) == m_stored_rules.end()) {
+            m_stored_rules.push_back(rule);
+            count++;
+        }
     }
     m_reorder_rules = m_stored_rules[0];
     m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
@@ -458,12 +505,84 @@ double RMSDDriver::Rules2RMSD(const std::vector<int> rules, int fragment)
     return rmsd;
 }
 
+StructComp RMSDDriver::Rule2RMSD(const std::vector<int> rules, int fragment)
+{
+    StructComp result;
+    Molecule target;
+    for (auto i : rules)
+        target.addPair(m_target.Atom(i));
+    int tmp_ref = m_fragment_reference;
+    int tmp_tar = m_fragment_target;
+
+    m_fragment_target = fragment;
+    m_fragment_reference = fragment;
+    Molecule ref;
+    Molecule tar;
+    Matrix topo_reference = m_reference.DistanceMatrix().second;
+    Matrix topo_target = target.DistanceMatrix().second;
+    result.rmsd = CalculateRMSD(m_reference, target, &ref, &tar);
+    result.diff_hydrogen_bonds = CompareTopoMatrix(ref.HydrogenBondMatrix(-1, -1), tar.HydrogenBondMatrix(-1, -1));
+    result.diff_topology = (topo_target - topo_reference).cwiseAbs().sum();
+    m_fragment_reference = tmp_ref;
+    m_fragment_target = tmp_tar;
+    return result;
+}
 void RMSDDriver::clear()
 {
     m_results.clear();
     m_connectivity.clear();
     m_stored_rules.clear();
     m_rmsd = 0.0;
+}
+
+void RMSDDriver::CheckTopology()
+{
+    Matrix reference_matrix = m_reference.DistanceMatrix().second;
+    int index = 0;
+    int best_topo = reference_matrix.size() * 2;
+    int best_index = 0;
+    std::vector<int> best_rule;
+    for (const auto& rule : m_stored_rules) {
+        if (index >= m_write)
+            break;
+
+        index++;
+        if (index == 1)
+            continue;
+
+        Molecule target;
+
+        for (auto i : rule)
+            target.addPair(m_target_original.Atom(i));
+        Molecule ref;
+        Molecule tar;
+        double rmsd = CalculateRMSD(m_reference, target, &ref, &tar);
+        tar.writeXYZFile("target." + std::to_string(index) + ".reordered.xyz");
+        int topo0 = CompareTopoMatrix(reference_matrix, tar.DistanceMatrix().second);
+
+        Geometry reference_geometry = ref.getGeometry();
+        Geometry target_geometry = tar.getGeometry();
+        Geometry step = (reference_geometry - target_geometry) * 0.1;
+        int topo = 0;
+        for (int j = 1; j <= 10; ++j) {
+            target_geometry += step;
+            tar.setGeometry(target_geometry);
+            // tar.appendXYZFile(std::to_string(index) + ".test.xyz");
+            topo += CompareTopoMatrix(reference_matrix, tar.DistanceMatrix().second);
+        }
+        // ref.appendXYZFile(std::to_string(index) + ".test.xyz");
+
+        std::cout << index << " " << rmsd << " " << topo0 << " " << topo << std::endl;
+        /*  if (topo < best_topo) {
+              best_topo = topo;
+              best_rule = rule;
+              best_index = index;
+          }*/
+    }
+    /*
+    if(index > 1)
+        std::cout << best_index << " " << best_topo << std::endl;
+        */
 }
 
 void RMSDDriver::ProtonDepleted()
@@ -609,15 +728,6 @@ std::pair<Molecule, LimitedStorage> RMSDDriver::InitialisePair()
 
 void RMSDDriver::ReorderMolecule()
 {
-    // std::cout << m_method << " " << m_reorder_rules.size() << std::endl;
-    /*
-    if (m_reorder_rules.size() != 0) {
-        m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
-        m_target = m_target_reordered;
-        m_target_aligned = m_target;
-        return;
-    }
-    */
     double scaling = 1.5;
     m_connectivity = m_reference.getConnectivtiy(scaling);
 
@@ -635,7 +745,6 @@ void RMSDDriver::ReorderMolecule()
 
 void RMSDDriver::AtomTemplate()
 {
-
     auto pairs = PrepareAtomTemplate(m_element_templates);
     FinaliseTemplate(pairs);
 
@@ -646,7 +755,8 @@ void RMSDDriver::AtomTemplate()
 
 void RMSDDriver::HeavyTemplate()
 {
-    std::cout << "Prepare heavy atom template structure:" << std::endl;
+    if (!m_silent)
+        std::cout << "Prepare heavy atom template structure:" << std::endl;
 
     auto pairs = PrepareHeavyTemplate();
     FinaliseTemplate(pairs);
@@ -706,7 +816,11 @@ void RMSDDriver::FinaliseTemplate(std::pair<std::vector<int>, std::vector<int>> 
                 break;
             m_reorder_rules = result;
             m_target_reordered = ApplyOrder(m_reorder_rules, target);
-            local_results.insert(std::pair<double, std::vector<int>>(Rules2RMSD(m_reorder_rules), m_reorder_rules));
+            StructComp structcomp = Rule2RMSD(m_reorder_rules);
+            if (!m_topo)
+                local_results.insert(std::pair<double, std::vector<int>>(structcomp.rmsd, m_reorder_rules));
+            else
+                local_results.insert(std::pair<double, std::vector<int>>(structcomp.diff_topology, m_reorder_rules));
         }
     }
     m_stored_rules.clear();
