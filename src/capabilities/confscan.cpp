@@ -130,6 +130,9 @@ void ConfScan::LoadControlJson()
     m_useorders = Json2KeyWord<int>(m_defaults, "UseOrders");
     m_MaxHTopoDiff = Json2KeyWord<int>(m_defaults, "MaxHTopoDiff");
     m_threads = m_defaults["threads"].get<int>();
+    m_skipfirst = Json2KeyWord<bool>(m_defaults, "skipfirst");
+    m_RMSDmethod = Json2KeyWord<std::string>(m_defaults, "RMSDMethod");
+
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
         m_rmsd_element_templates = m_defaults["RMSDElement"].get<std::string>();
@@ -144,9 +147,13 @@ void ConfScan::LoadControlJson()
         m_RMSDElement = Json2KeyWord<int>(m_defaults, "RMSDElement");
         m_rmsd_element_templates.push_back(m_RMSDElement);
     }
+    if (m_RMSDmethod == "hybrid" || m_element_templates.size() == 0) {
+        std::cout << "Reordering method hybrid has to be combined with element types. I will chose for you nitrogen and oxygen!" << std::endl;
+        std::cout << "This is equivalent to adding:\' -rmsdelement 7,8 \' to your argument list!" << std::endl;
+        m_rmsd_element_templates = "7,8";
+    }
     m_prev_accepted = Json2KeyWord<std::string>(m_defaults, "accepted");
 
-    m_RMSDmethod = Json2KeyWord<std::string>(m_defaults, "RMSDMethod");
     if (m_useorders == -1)
         m_useorders = 10;
 
@@ -428,7 +435,12 @@ void ConfScan::start()
         result_file << "Results of 1st Pass" << std::endl;
         result_file.close();
     }
-    CheckRMSD();
+    if (!m_skipfirst)
+        CheckRMSD();
+    else {
+        for (const auto& i : m_ordered_list)
+            m_stored_structures.push_back(m_molecules.at(i.second).second);
+    }
     fmt::print("\n1st Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
     if (m_prevent_reorder == false || m_do_third == true) {
         if (!CheckStop()) {

@@ -469,7 +469,12 @@ void RMSDDriver::ReorderIncremental()
             count++;
         }
     }
-    m_reorder_rules = m_stored_rules[0];
+    if (m_stored_rules.size() == 0) {
+        std::cout << "No new solution found, sorry" << std::endl;
+        for (int i = 0; i < m_reference.AtomCount(); ++i)
+            m_reorder_rules.push_back(i);
+    } else
+        m_reorder_rules = m_stored_rules[0];
     m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
     m_target = m_target_reordered;
     m_target_aligned = m_target;

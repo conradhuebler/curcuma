@@ -63,7 +63,8 @@ static const json ConfScanJson = {
     { "accepted", "" },
     { "lastdE", -1 },
     { "fewerFile", false },
-    { "dothird", false }
+    { "dothird", false },
+    { "skipfirst", false }
 };
 
 class ConfScanThread : public CxxThread {
@@ -233,4 +234,5 @@ private:
     bool m_update = false;
     bool m_reduced_file = false;
     bool m_do_third = false;
+    bool m_skipfirst = false;
 };
