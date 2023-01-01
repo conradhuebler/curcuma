@@ -1,6 +1,6 @@
 /*
  * <Geometrie optimisation using external LBFGS and xtb. >
- * Copyright (C) 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -22,9 +22,9 @@
 #include <iomanip>
 #include <iostream>
 
+#include "src/core/energycalculator.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
-#include "src/core/tbliteinterface.h"
 
 #include "json.hpp"
 #include <LBFGS.h>
@@ -44,27 +44,16 @@ public:
     double operator()(const VectorXd& x, VectorXd& grad)
     {
         double fx = 0.0;
-        // int attyp[m_atoms];
         double charge = 0;
-        // std::vector<int> atoms = m_molecule->Atoms();
-        double coord[3 * m_atoms];
-        double gradient[3 * m_atoms];
-        double dist_gradient[3 * m_atoms];
-
-        for (int i = 0; i < m_atoms; ++i) {
-            //    attyp[i] = m_molecule->Atoms()[i];
-            coord[3 * i + 0] = x(3 * i + 0) / au;
-            coord[3 * i + 1] = x(3 * i + 1) / au;
-            coord[3 * i + 2] = x(3 * i + 2) / au;
-        }
-        m_interface->UpdateMolecule(coord);
-        fx = m_interface->GFNCalculation(m_method, gradient);
+        m_interface->updateGeometry(x);
+        fx = m_interface->CalculateEnergy(true);
+        auto gradient = m_interface->getGradient();
         m_error = std::isnan(fx);
 
         for (int i = 0; i < m_atoms; ++i) {
-            grad[3 * i + 0] = gradient[3 * i + 0] * (m_constrains[i]);
-            grad[3 * i + 1] = gradient[3 * i + 1] * (m_constrains[i]);
-            grad[3 * i + 2] = gradient[3 * i + 2] * (m_constrains[i]);
+            grad[3 * i + 0] = gradient[i][0] * (m_constrains[i]);
+            grad[3 * i + 1] = gradient[i][1] * (m_constrains[i]);
+            grad[3 * i + 2] = gradient[i][2] * (m_constrains[i]);
         }
         m_energy = fx;
         m_parameter = x;
@@ -83,7 +72,7 @@ public:
             m_constrains.push_back(1);
     }
     void setConstrains(const std::vector<int> constrains) { m_constrains = constrains; }
-    void setInterface(TBLiteInterface* interface) { m_interface = interface; }
+    void setInterface(EnergyCalculator* interface) { m_interface = interface; }
     void setMethod(int method) { m_method = method; }
     bool isError() const { return m_error; }
 
@@ -93,7 +82,7 @@ private:
     //  int n;
     int m_method = 2;
     std::vector<int> m_constrains;
-    TBLiteInterface* m_interface;
+    EnergyCalculator* m_interface;
     Vector m_parameter;
     const Molecule* m_molecule;
     bool m_error = false;

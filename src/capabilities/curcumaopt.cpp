@@ -1,6 +1,6 @@
 /*
  * <Handling optimisation of structures. >
- * Copyright (C) 2020 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,10 +20,10 @@
 #include "src/capabilities/rmsd.h"
 
 #include "src/core/elements.h"
+#include "src/core/energycalculator.h"
 #include "src/core/fileiterator.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
-#include "src/core/tbliteinterface.h"
 
 #include <LBFGS.h>
 #include <LBFGSB.h>
@@ -77,11 +77,11 @@ void CurcumaOpt::LoadControlJson()
     m_printoutput = Json2KeyWord<bool>(m_defaults, "printOutput");
     m_dE = Json2KeyWord<double>(m_defaults, "dE");
     m_dRMSD = Json2KeyWord<double>(m_defaults, "dRMSD");
-    m_GFNmethod = Json2KeyWord<int>(m_defaults, "GFN");
+    m_method = Json2KeyWord<std::string>(m_defaults, "method");
     m_charge = Json2KeyWord<double>(m_defaults, "Charge");
     m_spin = Json2KeyWord<double>(m_defaults, "Spin");
     m_singlepoint = Json2KeyWord<bool>(m_defaults, "SinglePoint");
-    if (m_GFNmethod == 66)
+    if (m_method == "GFNFF")
         m_threads = 1;
 }
 
@@ -161,7 +161,7 @@ void CurcumaOpt::clear()
 
 double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, std::string& output)
 {
-    int method = Json2KeyWord<int>(controller, "GFN");
+    std::string method = Json2KeyWord<std::string>(controller, "method");
 
     Geometry geometry = initial->getGeometry();
     Molecule tmp(initial);
@@ -174,10 +174,11 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, 
         parameter(3 * i + 2) = geometry(i, 2);
     }
 
-    TBLiteInterface interface;
-    interface.InitialiseMolecule(initial);
+    json t;
+    EnergyCalculator interface(method, t);
+    interface.setMolecule(*initial);
 
-    return interface.GFNCalculation(method);
+    return interface.CalculateEnergy(true);
 }
 
 Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controller, std::string& output, std::vector<Molecule>* intermediate)
@@ -188,7 +189,7 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
     double LBFGS_eps = Json2KeyWord<double>(controller, "LBFGS_eps");
     double GradNorm = Json2KeyWord<double>(controller, "GradNorm");
 
-    int method = Json2KeyWord<int>(controller, "GFN");
+    std::string method = Json2KeyWord<std::string>(controller, "method");
     int MaxIter = Json2KeyWord<int>(controller, "MaxIter");
     int StoreIntermediate = Json2KeyWord<int>(controller, "StoreIntermediate");
     int ConvCount = Json2KeyWord<int>(controller, "ConvCount");
@@ -213,10 +214,11 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
         constrain.push_back(initial->Atom(i).first == 1);
     }
 
-    TBLiteInterface interface;
-    interface.InitialiseMolecule(initial);
+    json tmp;
+    EnergyCalculator interface(method, tmp);
+    interface.setMolecule(*initial);
 
-    double final_energy = interface.GFNCalculation(method);
+    double final_energy = interface.CalculateEnergy(true);
 
     LBFGSParam<double> param;
     param.epsilon = LBFGS_eps;
@@ -231,7 +233,6 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
     LBFGSInterface fun(3 * initial->AtomCount());
     fun.setMolecule(initial);
     fun.setInterface(&interface);
-    fun.setMethod(method);
     if (optH)
         fun.setConstrains(constrain);
 

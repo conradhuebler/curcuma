@@ -1,6 +1,6 @@
 /*
  * <Curcuma main file.>
- * Copyright (C) 2019 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -724,25 +724,25 @@ int main(int argc, char **argv) {
                 std::cout << mol.Check() << std::endl
                           << std::endl;
 
-                                UFF forcefield;
-                                forcefield.setMolecule(mol.Atoms(), mol.Coords());
-                                // forcefield.readParameterFile("parameter.json");
+                UFF forcefield(UFFParameterJson);
+                forcefield.setMolecule(mol.Atoms(), mol.Coords());
+                // forcefield.readParameterFile("parameter.json");
 
-                                forcefield.Initialise();
-                                std::cout << forcefield.Calculate(true) << std::endl;
-                                forcefield.writeParameterFile("parameter.json");
-                                forcefield.readParameterFile("parameter.json");
-                                std::cout << forcefield.Calculate(true) << std::endl;
+                forcefield.Initialise();
+                std::cout << forcefield.Calculate(true) << std::endl;
+                forcefield.writeParameterFile("parameter.json");
+                forcefield.readParameterFile("parameter.json");
+                std::cout << forcefield.Calculate(true) << std::endl;
 
-                                /*        double grad[3 * mol.AtomCount()];
-                                          forcefield.Gradient(grad);
-                                          forcefield.NumGrad(grad);
-                                          */
-                                // CompactTopo(mol.HydrogenBondMatrix(-1,-1));
-                                // std::cout << CompareTopoMatrix(mol.HydrogenBondMatrix(-1,-1),mol.HydrogenBondMatrix(-1,-1) ) << std::endl;
-                                // auto m = mol.DistanceMatrix();
-                                // std::cout << m.first << std::endl;
-                                // std::cout << m.second << std::endl;
+                /*        double grad[3 * mol.AtomCount()];
+                          forcefield.Gradient(grad);
+                          forcefield.NumGrad(grad);
+                          */
+                // CompactTopo(mol.HydrogenBondMatrix(-1,-1));
+                // std::cout << CompareTopoMatrix(mol.HydrogenBondMatrix(-1,-1),mol.HydrogenBondMatrix(-1,-1) ) << std::endl;
+                // auto m = mol.DistanceMatrix();
+                // std::cout << m.first << std::endl;
+                // std::cout << m.second << std::endl;
             }
         }
     }

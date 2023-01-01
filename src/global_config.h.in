@@ -1,5 +1,7 @@
 #pragma once
 
 #cmakedefine USE_XTB
+#cmakedefine USE_TBLITE
+
 #cmakedefine C17
 #cmakedefine GCC

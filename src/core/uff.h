@@ -1,6 +1,6 @@
 /*
  * <Simple UFF implementation for Cucuma. >
- * Copyright (C) 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2022 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -35,6 +35,10 @@
 #include "json.hpp"
 #include "src/core/global.h"
 using json = nlohmann::json;
+
+const json UFFParameterJson{
+
+};
 
 struct UFFBond {
     int i, j;
@@ -92,9 +96,11 @@ private:
 
 class UFF {
 public:
-    UFF();
+    UFF(const json& controller);
 
     void UpdateGeometry(const double* coord);
+    void UpdateGeometry(const std::vector<std::array<double, 3>>& geometry);
+
     void setMolecule(const std::vector<int>& atom_types, const std::vector<std::array<double, 3>>& geometry)
     {
         m_atom_types = atom_types;

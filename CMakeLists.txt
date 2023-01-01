@@ -1,13 +1,11 @@
 cmake_minimum_required(VERSION 3.18)
 project(curcuma)
 
+option (USE_XTB
+    "Compile XTB and use as library" OFF)
 
-
-option (COMPILE_XTB
-    "Compile XTB and use those libs" OFF)
-
-option (LINK_XTB
-    "Link to prebuilt XTB library" OFF)
+option (USE_TBLITE
+    "Compile TBLITE and use as library" OFF)
 
 option (C17
     "Use C++ 17 Standard" ON)
@@ -17,8 +15,8 @@ add_subdirectory(${PROJECT_SOURCE_DIR}/external/fmt EXCLUDE_FROM_ALL)
 include_directories(SYSTEM  ${PROJECT_SOURCE_DIR}/external/fmt/include
                             ${PROJECT_SOURCE_DIR}/external/LBFGSpp/include
                             ${PROJECT_SOURCE_DIR}/external/ripser
-                            ${PROJECT_BINARY_DIR}/external/eigen-3.4.0
-                            ${PROJECT_BINARY_DIR}/external/)
+                            ${PROJECT_SOURCE_DIR}/external/eigen
+                            ${PROJECT_SOURCE_DIR}/external/)
 include_directories(${PROJECT_SOURCE_DIR} ${PROJECT_BINARY_DIR} )
 
 # Get the current working branch
@@ -96,68 +94,22 @@ else()
 endif(WIN32)
 ENDIF(CMAKE_COMPILER_IS_GNUCXX)
 
-
-if(COMPILE_XTB)
-    add_subdirectory(external/xtb)
-
-    set_target_properties(lib-xtb-shared PROPERTIES
-      IMPORTED_LOCATION "${CMAKE_CURRENT_BINARY_DIR}/libxtb.so"
-    )
-
-    if(NOT TARGET mctc-lib)
-      set("mctc-lib-url" "https://github.com/grimme-lab/mctc-lib")
-      message(STATUS "Retrieving mctc-lib from ${mctc-lib-url}")
-      include(FetchContent)
-      FetchContent_Declare(
-        "mctc-lib"
-        GIT_REPOSITORY "${mctc-lib-url}"
-        GIT_TAG "HEAD"
-      )
-      FetchContent_MakeAvailable("mctc-lib")
-    endif()
-
-    add_subdirectory(external/tblite)
-    include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/tblite/include)
-
-    set(USE_XTB on)
-endif()
-
-if(LINK_XTB)
-    if(COMPILE_XTB)
-        message(WARNING "Actually, I will link curcuma to the currently building xtb not a pre-built one")
-    else()
-        if(DEFINED XTB_DIR)
-            # Check does not work, strange
-            #if(EXISTS '${XTB_DIR}/libxtb.so.6')
-            #    message("XTB found :-)")
-            #else()
-            #    message("Not XTB at given location")
-            #endif()
-        else()
-            message(FATAL_ERROR "Please set XTB_DIR as variable")
-        endif()
-
-    endif()
-    set(USE_XTB on)
-endif()
-
-
-if(NOT EXISTS ${PROJECT_BINARY_DIR}/external/json.hpp)
-  file(DOWNLOAD https://github.com/nlohmann/json/releases/download/v3.9.1/json.hpp ${PROJECT_BINARY_DIR}/external/json.hpp
+if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/json.hpp)
+  file(DOWNLOAD https://github.com/nlohmann/json/releases/download/v3.9.1/json.hpp ${PROJECT_SOURCE_DIR}/external/json.hpp
        TIMEOUT 60  # seconds
        EXPECTED_HASH SHA256=7804b38146921d03374549c9e2a5e3acda097814c43caf2b96a0278e58df26e0
        TLS_VERIFY ON)
 endif()
 
 
-if(NOT EXISTS ${PROJECT_BINARY_DIR}/external/eigen-3.4.0.zip)
-  file(DOWNLOAD https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.zip ${PROJECT_BINARY_DIR}/external/eigen-3.4.0.zip
+if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip)
+  file(DOWNLOAD https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.zip ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip
        TIMEOUT 60  # seconds
        EXPECTED_HASH SHA256=1ccaabbfe870f60af3d6a519c53e09f3dcf630207321dffa553564a8e75c4fc8
        TLS_VERIFY ON)
 endif()
 
-file(ARCHIVE_EXTRACT INPUT ${PROJECT_BINARY_DIR}/external/eigen-3.4.0.zip DESTINATION ${PROJECT_BINARY_DIR}/external)
+file(ARCHIVE_EXTRACT INPUT ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip DESTINATION ${PROJECT_SOURCE_DIR}/external)
 
 configure_file (
   "${PROJECT_SOURCE_DIR}/src/global_config.h.in"
@@ -168,6 +120,7 @@ configure_file(
   "${PROJECT_SOURCE_DIR}/src/version.h.in"
   "${PROJECT_BINARY_DIR}/src/version.h"
 )
+
 set(curcuma_core_SRC
         src/capabilities/persistentdiagram.cpp
         src/capabilities/analysenciplot.cpp
@@ -183,8 +136,8 @@ set(curcuma_core_SRC
         src/capabilities/rmsd.cpp
         src/capabilities/rmsdtraj.cpp
         src/capabilities/simplemd.cpp
+        src/core/energycalculator.cpp
         src/core/molecule.cpp
-        src/core/tbliteinterface.cpp
         src/core/pseudoff.cpp
         src/core/uff.cpp
         src/tools/formats.h
@@ -213,25 +166,94 @@ set_property(TARGET curcuma PROPERTY LINK_FLAGS_RELEASE -s)
 set_property(TARGET curcuma PROPERTY LINK_FLAGS_RELWITHDEBINFO -s)
 
 if(USE_XTB)
-    if(COMPILE_XTB)
-        target_link_libraries(curcuma_core PUBLIC "mctc-lib" lib-xtb-shared tblite-lib gfortran pthread fmt::fmt-header-only)
-        if(WIN32) # Check if we are on Windows
-        else()
-            target_link_libraries(curcuma_core PUBLIC dl )
-        endif(WIN32)
-    else()
-        target_link_libraries(curcuma_core ${XTB_DIR}/libxtb.so pthread dl fmt::fmt-header-only)
+    add_subdirectory(external/xtb)
+
+    set_target_properties(lib-xtb-shared PROPERTIES
+      IMPORTED_LOCATION "${CMAKE_CURRENT_BINARY_DIR}/libxtb.so"
+    )
+
+    if(NOT TARGET mctc-lib)
+      set("mctc-lib-url" "https://github.com/grimme-lab/mctc-lib")
+      message(STATUS "Retrieving mctc-lib from ${mctc-lib-url}")
+      include(FetchContent)
+      FetchContent_Declare(
+        "mctc-lib"
+        GIT_REPOSITORY "${mctc-lib-url}"
+        GIT_TAG "HEAD"
+      )
+      FetchContent_MakeAvailable("mctc-lib")
     endif()
-else()
-    target_link_libraries(curcuma_core pthread fmt::fmt-header-only)
-    if(WIN32) # Check if we are on Windows
-    else()
-        target_link_libraries(curcuma_core dl )
-    endif(WIN32)
+    #    add_executable(xtb_helper
+    #        src/helpers/xtb_helper.cpp
+    #        )
+    #    if(C17)
+    #        set_property(TARGET xtb_helper PROPERTY CXX_STANDARD 17)
+    #    else()
+    #        set_property(TARGET xtb_helper PROPERTY CXX_STANDARD 14)
+    #    endif(C17)
+
+    #    if(COMPILE_XTB)
+    #        target_link_libraries(xtb_helper lib-xtb-shared pthread dl)
+    #    else()
+    #        target_link_libraries(xtb_helper ${XTB_DIR}/libxtb.so pthread dl)
+    #    endif()
+    set(curcuma_xtb_SRC
+        src/core/xtbinterface.cpp
+    )
+    add_library(curcuma_xtb  ${curcuma_xtb_SRC})
+
+        target_link_libraries(curcuma_xtb PUBLIC "mctc-lib" lib-xtb-shared gfortran)
+        target_link_libraries(curcuma_core curcuma_xtb)
+
 endif()
 
-    target_link_libraries(curcuma fmt::fmt-header-only)
-    target_link_libraries(curcuma curcuma_core)
+if(USE_TBLITE)
+
+    if(NOT TARGET mctc-lib)
+      set("mctc-lib-url" "https://github.com/grimme-lab/mctc-lib")
+      message(STATUS "Retrieving mctc-lib from ${mctc-lib-url}")
+      include(FetchContent)
+      FetchContent_Declare(
+        "mctc-lib"
+        GIT_REPOSITORY "${mctc-lib-url}"
+        GIT_TAG "HEAD"
+      )
+      FetchContent_MakeAvailable("mctc-lib")
+    endif()
+
+    add_subdirectory(external/tblite)
+    include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/tblite/include)
+
+    #    add_executable(tblite_helper
+    #        src/helpers/tblite_helper.cpp
+    #        )
+    #    if(C17)
+    #        set_property(TARGET tblite_helper PROPERTY CXX_STANDARD 17)
+    #    else()
+    #        set_property(TARGET tblite_helper PROPERTY CXX_STANDARD 14)
+    #    endif(C17)
+    #    target_link_libraries(tblite_helper PRIVATE tblite-lib gfortran pthread dl)
+
+    set(curcuma_tblite_SRC
+        src/core/tbliteinterface.cpp
+    )
+    add_library(curcuma_tblite  ${curcuma_tblite_SRC})
+
+        target_link_libraries(curcuma_tblite PUBLIC "mctc-lib" tblite-lib gfortran )
+        target_link_libraries(curcuma_core curcuma_tblite)
+
+endif()
+
+target_link_libraries(curcuma_core pthread fmt::fmt-header-only)
+#target_link_libraries(curcuma_core )
+
+if(WIN32) # Check if we are on Windows
+else()
+     target_link_libraries(curcuma_core dl )
+endif(WIN32)
+
+target_link_libraries(curcuma fmt::fmt-header-only)
+target_link_libraries(curcuma curcuma_core)
 
 add_executable(curcuma_helper
         src/helpers/main.cpp)
@@ -248,33 +270,33 @@ else()
     set_property(TARGET curcuma_helper PROPERTY CXX_STANDARD 14)
 endif(C17)
 
-if(USE_XTB)
-    add_executable(xtb_helper
-        src/helpers/xtb_helper.cpp
-        )
-    if(C17)
-        set_property(TARGET xtb_helper PROPERTY CXX_STANDARD 17)
-    else()
-        set_property(TARGET xtb_helper PROPERTY CXX_STANDARD 14)
-    endif(C17)
+#if(USE_XTB)
+#    add_executable(xtb_helper
+#        src/helpers/xtb_helper.cpp
+#        )
+#    if(C17)
+#        set_property(TARGET xtb_helper PROPERTY CXX_STANDARD 17)
+#    else()
+#        set_property(TARGET xtb_helper PROPERTY CXX_STANDARD 14)
+#    endif(C17)
 
-    if(COMPILE_XTB)
-        target_link_libraries(xtb_helper lib-xtb-shared pthread dl)
-    else()
-        target_link_libraries(xtb_helper ${XTB_DIR}/libxtb.so pthread dl)
-    endif()
+#    if(COMPILE_XTB)
+#        target_link_libraries(xtb_helper lib-xtb-shared pthread dl)
+#    else()
+#        target_link_libraries(xtb_helper ${XTB_DIR}/libxtb.so pthread dl)
+#    endif()
 
-    add_executable(tblite_helper
-        src/helpers/tblite_helper.cpp
-        )
-    if(C17)
-        set_property(TARGET tblite_helper PROPERTY CXX_STANDARD 17)
-    else()
-        set_property(TARGET tblite_helper PROPERTY CXX_STANDARD 14)
-    endif(C17)
-    target_link_libraries(tblite_helper PRIVATE tblite-lib gfortran pthread dl)
+#    add_executable(tblite_helper
+#        src/helpers/tblite_helper.cpp
+#        )
+#    if(C17)
+#        set_property(TARGET tblite_helper PROPERTY CXX_STANDARD 17)
+#    else()
+#        set_property(TARGET tblite_helper PROPERTY CXX_STANDARD 14)
+#    endif(C17)
+#    target_link_libraries(tblite_helper PRIVATE tblite-lib gfortran pthread dl)
 
-endif()
+#endif()
 
 add_subdirectory(test_cases)
 

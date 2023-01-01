@@ -1,6 +1,6 @@
 /*
  * <Handling optimisation of structures. >
- * Copyright (C) 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -28,7 +28,7 @@ static json CurcumaOptJson{
     { "printOutput", true },
     { "dE", 0.1 },
     { "dRMSD", 0.01 },
-    { "GFN", 44 },
+    { "method", "uff" },
     { "MaxIter", 5000 },
     { "LBFGS_eps", 1e-5 },
     { "StoreIntermediate", 2000 },
@@ -148,10 +148,11 @@ private:
     void ProcessMolecules(const std::vector<Molecule>& molecule);
 
     std::string m_filename, m_basename = "curcuma_job";
+    std::string m_method = "UFF";
     Molecule m_molecule;
     std::vector<Molecule> m_molecules;
     bool m_file_set = false, m_mol_set = false, m_mols_set = false, m_writeXYZ = true, m_printoutput = true, m_singlepoint = false;
-    int m_threads = 1, m_GFNmethod = 2;
+    int m_threads = 1;
     double m_dE = 0.1, m_dRMSD = 0.01;
     int m_charge = 0, m_spin = 0;
 };

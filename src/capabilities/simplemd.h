@@ -25,8 +25,8 @@
 
 #include "src/capabilities/rmsdtraj.h"
 
+#include "src/core/energycalculator.h".h "
 #include "src/core/molecule.h"
-#include "src/core/tbliteinterface.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
 
@@ -35,7 +35,6 @@
 static json CurcumaMDJson{
     { "writeXYZ", true },
     { "printOutput", true },
-    { "GFN", 44 },
     { "MaxTime", 5000 },
     { "T", 298.15 },
     { "dt", 1 },
@@ -54,6 +53,7 @@ static json CurcumaMDJson{
     { "berendson", 1 },
     { "MaxTopoDiff", 15 },
     { "impuls", 0 },
+    { "method", "uff" },
     { "impuls_scaling", 0.75 }
 };
 
@@ -111,10 +111,7 @@ private:
     void PrintMatrix(const double* matrix);
 
     bool WriteGeometry();
-    void SimpleIntegrator(double* coord, double* grad_prev, double* grad_next);
-    void VelocityVerlet(double* coord, double* grad_prev, double* grad_next);
-    void RattleIntegrator(double* coord, double* grad_prev, double* grad_next, double& lambda);
-    void XTBIntergrator(double* coord, double* grad_prev, double* grad_next);
+    void Integrator(double* coord, double* grad_prev, double* grad_next);
 
     void RemoveRotation(std::vector<double>& velo);
 
@@ -126,7 +123,6 @@ private:
     std::vector<std::pair<int, int>> m_bond_constrained;
     std::string m_basename;
     int m_natoms = 0;
-    int m_gfn = 2;
     int m_dumb = 1;
     double m_T = 0, m_Epot = 0, m_aver_Epot = 0, m_Ekin = 0, m_aver_Ekin = 0, m_Etot = 0, m_aver_Etot = 0;
     int m_hmass = 4;
@@ -138,7 +134,7 @@ private:
     std::vector<int> m_atomtype;
     Molecule m_molecule;
     bool m_initialised = false, m_restart = false, m_centered = false, m_writeUnique = true, m_opt = false, m_rescue = false, m_writeXYZ = true;
-    TBLiteInterface* m_interface;
+    EnergyCalculator* m_interface;
     RMSDTraj* m_unqiue;
     const std::vector<double> m_used_mass;
     int m_unix_started = 0, m_prev_index = 0, m_thermostat_steps = 10, m_max_rescue = 10, m_current_rescue = 0, m_currentTime = 0, m_max_top_diff = 15, m_step = 0;
@@ -146,6 +142,7 @@ private:
     double m_impuls = 0, m_impuls_scaling = 0.75;
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;
+    std::string m_method = "UFF";
 };
 
 class MDThread : public CxxThread {

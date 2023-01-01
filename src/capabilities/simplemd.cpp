@@ -32,9 +32,9 @@
 #include "src/capabilities/rmsdtraj.h"
 
 #include "src/core/elements.h"
+#include "src/core/energycalculator.h".h "
 #include "src/core/global.h"
 #include "src/core/molecule.h"
-#include "src/core/tbliteinterface.h"
 
 #include "src/tools/geometry.h"
 
@@ -46,7 +46,7 @@ SimpleMD::SimpleMD(const json& controller, bool silent)
     : CurcumaMethod(CurcumaMDJson, controller, silent)
 {
     UpdateController(controller);
-    m_interface = new TBLiteInterface;
+    m_interface = new EnergyCalculator(m_method, m_controller);
 }
 
 SimpleMD::~SimpleMD()
@@ -57,7 +57,7 @@ SimpleMD::~SimpleMD()
 
 void SimpleMD::LoadControlJson()
 {
-    m_gfn = Json2KeyWord<int>(m_defaults, "GFN");
+    m_method = Json2KeyWord<std::string>(m_defaults, "method");
     m_spin = Json2KeyWord<int>(m_defaults, "spin");
     m_charge = Json2KeyWord<int>(m_defaults, "charge");
     m_single_step = Json2KeyWord<double>(m_defaults, "dT"); // * fs2amu;
@@ -131,9 +131,9 @@ bool SimpleMD::Initialise()
 
         if (!m_restart) {
             Position pos = m_molecule.Atom(i).second;
-            m_current_geometry[3 * i + 0] = pos(0) / au;
-            m_current_geometry[3 * i + 1] = pos(1) / au;
-            m_current_geometry[3 * i + 2] = pos(2) / au;
+            m_current_geometry[3 * i + 0] = pos(0) / 1;
+            m_current_geometry[3 * i + 1] = pos(1) / 1;
+            m_current_geometry[3 * i + 2] = pos(2) / 1;
             /*
                         double factor;
 
@@ -161,7 +161,7 @@ bool SimpleMD::Initialise()
 
     m_molecule.setCharge(m_charge);
     m_molecule.setSpin(m_spin);
-    m_interface->InitialiseMolecule(m_molecule);
+    m_interface->setMolecule(m_molecule);
 
     if (m_writeUnique) {
         json rmsdtraj = RMSDTrajJson;
@@ -210,7 +210,7 @@ void SimpleMD::InitVelocities(double scaling)
 nlohmann::json SimpleMD::WriteRestartInformation()
 {
     nlohmann::json restart;
-    restart["GFN"] = m_gfn;
+    restart["method"] = m_method;
     restart["dT"] = m_timestep;
     restart["MaxTime"] = m_maxtime;
     restart["T"] = m_temperatur;
@@ -331,7 +331,7 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     std::string geometry, velocities;
 
     try {
-        m_gfn = state["GFN"];
+        m_method = state["method"];
     } catch (json::type_error& e) {
     }
     try {
@@ -481,10 +481,7 @@ void SimpleMD::start()
                 PrintStatus();
             }
         }
-        // SimpleIntegrator(coord, gradient_prev, gradient_current);
-        //  VelocityVerlet(coord, gradient_prev, gradient_current);
-        //  RattleIntegrator(coord, gradient_prev, gradient_current, lambda);
-        XTBIntergrator(coord, gradient_prev, gradient_current);
+        Integrator(coord, gradient_prev, gradient_current);
         m_Ekin = EKin();
 
         if ((m_step && m_step % m_print == 0)) {
@@ -511,15 +508,7 @@ void SimpleMD::start()
     // PrintStatus();
 }
 
-void SimpleMD::SimpleIntegrator(double* coord, double* grad_prev, double* grad_next)
-{
-    UpdatePosition(grad_prev, coord);
-    m_Epot = Gradient(coord, grad_next);
-
-    UpdateVelocities(grad_prev, grad_next);
-}
-
-void SimpleMD::XTBIntergrator(double* coord, double* grad_prev, double* grad_next)
+void SimpleMD::Integrator(double* coord, double* grad_prev, double* grad_next)
 {
     /*
      * This code was taken and adopted from the xtb sources
@@ -619,119 +608,6 @@ void SimpleMD::RemoveRotation(std::vector<double>& velo)
     }
 }
 
-void SimpleMD::RattleIntegrator(double* coord, double* grad_prev, double* grad_next, double& lambda)
-{
-    /*
-     * This code was taken and adopted from the xtb sources
-     * https://github.com/grimme-lab/xtb/blob/main/src/dynamic.f90
-     * Special thanks to the developers
-     */
-    // double acc[3 * m_natoms],velon[3 * m_natoms];
-    std::vector<double> acc(3 * m_natoms), velon(3 * m_natoms);
-
-    Geometry geometry = m_molecule.getGeometry();
-    for (int i = 0; i < 3 * m_natoms; ++i) {
-        velon[i] = m_velocities[i];
-    }
-    if (m_centered)
-        RemoveRotation(velon);
-
-    for (int i = 0; i < 3 * m_natoms; ++i) {
-        acc[i] = -grad_prev[i] / m_mass[i];
-        velon[i] = velon[i] + m_timestep * acc[i];
-        m_velocities[i] = velon[i];
-    }
-
-    double lambda_r = 0.5;
-
-    /*
-    // Solve using Newton's method.
-    for (int k = 1; k <= maxiter; k++) {
-      //if (k == maxiter)
-     //   abort();
-     // std::cout << "Position2" << std::endl;
-
-      //const double2 r = q - lambda_r * Gqprev;
-      for(int i = 0; i < 3 * m_natoms; ++i)
-      {
-          r[i] = coord[i] - lambda_r * Gqprev[i];
-         // q -= lambda_r * Gqprev; //coord
-      }
-      const double phi = 1; // calculate constrained = g(r);
-      const double dphi_dl = 1; // calculate constrained derivate -dot(G(r), Gqprev);
-      const double update = phi / dphi_dl;
-
-      if (fabs(phi) < tol && fabs(update) < tol)
-        break;
-
-      lambda_r -= update;
-    }
-*/
-
-    for (int i = 0; i < m_natoms; ++i) {
-        geometry(i, 0) = m_current_geometry[3 * i + 0] * au;
-        geometry(i, 1) = m_current_geometry[3 * i + 1] * au;
-        geometry(i, 2) = m_current_geometry[3 * i + 2] * au;
-    }
-
-    for (int i = 0; i < 3 * m_natoms; ++i) {
-        m_current_geometry[i] += m_timestep * velon[i];
-        coord[i] = m_current_geometry[i];
-    }
-    m_Epot = Gradient(coord, grad_next);
-
-    for (int i = 0; i < 3 * m_natoms; ++i) {
-        // m_velocities[i] -= m_timestep * ((grad_prev[i] + grad_next[i]) / (4 * m_mass[i]));
-        grad_prev[i] = grad_next[i];
-    }
-
-    /*
-        for (int i = 0; i < 3 * m_natoms; ++i) {
-            //m_velocities[i] += 0.5 * m_timestep * (gradient_current[i] * gradient_current[i]) / m_mass[i];
-            m_velocities[i] -= m_timestep * ((grad_prev[i] + gradient_current[i]) / (4 * m_mass[i]));
-            grad_prev[i] = gradient_current[i];
-        }*/
-    /*
-    for (int i = 0; i < 3 * m_natoms; ++i) {
-        m_velocities[i] -= lambda_r / m_timestep * Gqprev[i] / (2 * m_mass[i]); // 0.5 * m_timestep * (grad_prev[i] * grad_prev[i]) / m_mass[i];
-        // p -= lambda_r / h * Gqprev; //gradient
-    }
-    // Deal with constraint on the tangent space.
-    // const double2 Gq = G(q);
-    double lambda_v = 0.5; // dot(Gq, p) / dot(Gq, Gq);
-    m_Epot = Gradient(coord, gradient_current);
-
-    for (int i = 0; i < 3 * m_natoms; ++i) {
-        m_velocities[i] -= lambda_v * gradient_current[i] / (2 * m_mass[i]); // Gqprev[i]; //0.5 * m_timestep * (grad_prev[i] * grad_prev[i]) / m_mass[i];
-        grad_prev[i] = gradient_current[i];
-        // p -= lambda_v * Gq;//gradient
-    }
-    */
-    // lambda = (lambda_r + lambda_v) / 2.0;
-}
-
-void SimpleMD::VelocityVerlet(double* coord, double* grad_prev, double* grad_next)
-{
-    /*
-    for (int i = 0; i < 3 * m_natoms; ++i) {
-        m_velocities[i] += 0.5 * m_timestep * (grad_prev[i] * grad_prev[i]) / m_mass[i];
-    }
-*/
-    for (int i = 0; i < 3 * m_natoms; ++i) {
-        m_current_geometry[i] += m_timestep * (m_velocities[i] + m_timestep * 0.5 * grad_next[i] / (2 * m_mass[i]));
-        coord[i] = m_current_geometry[i];
-        grad_prev[i] = grad_next[i];
-    }
-
-    m_Epot = Gradient(coord, grad_next);
-
-    for (int i = 0; i < 3 * m_natoms; ++i) {
-        // m_velocities[i] += 0.5 * m_timestep * (gradient_current[i] * gradient_current[i]) / m_mass[i];
-        m_velocities[i] += m_timestep * (grad_next[i] + grad_prev[i]) / (4 * m_mass[i]);
-        grad_prev[i] = grad_next[i];
-    }
-}
-
 void SimpleMD::PrintStatus() const
 {
     auto unix_timestamp = std::chrono::seconds(std::time(NULL));
@@ -791,9 +667,10 @@ void SimpleMD::UpdateVelocities(double* gradient_prev, const double* gradient_cu
 
 double SimpleMD::Gradient(const double* coord, double* grad)
 {
-    m_interface->UpdateMolecule(coord);
+    m_interface->updateGeometry(coord);
 
-    double Energy = m_interface->GFNCalculation(m_gfn, grad);
+    double Energy = m_interface->CalculateEnergy(true);
+    m_interface->getGradient(grad);
     /* for(int i = 0; i < 3 * m_natoms; ++i)
      {
          grad[i] /= au;
@@ -829,9 +706,9 @@ bool SimpleMD::WriteGeometry()
     bool result = true;
     Geometry geometry = m_molecule.getGeometry();
     for (int i = 0; i < m_natoms; ++i) {
-        geometry(i, 0) = m_current_geometry[3 * i + 0] * au;
-        geometry(i, 1) = m_current_geometry[3 * i + 1] * au;
-        geometry(i, 2) = m_current_geometry[3 * i + 2] * au;
+        geometry(i, 0) = m_current_geometry[3 * i + 0];
+        geometry(i, 1) = m_current_geometry[3 * i + 1];
+        geometry(i, 2) = m_current_geometry[3 * i + 2];
     }
     // int f1 = m_molecule.GetFragments().size();
     m_molecule.setGeometry(geometry);

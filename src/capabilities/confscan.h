@@ -57,10 +57,10 @@ static const json ConfScanJson = {
     { "UseOrders", -1 },
     { "RMSDMethod", "incr" },
     { "MaxHTopoDiff", 0 },
-    { "GFN", -1 },
     { "threads", 1 },
     { "RMSDElement", 7 },
     { "accepted", "" },
+    { "method", "" },
     { "lastdE", -1 },
     { "fewerFile", false },
     { "dothird", false },
@@ -210,6 +210,8 @@ private:
     std::vector<Molecule*> m_result, m_rejected_structures, m_stored_structures, m_previously_accepted, m_threshold;
     std::vector<int> m_element_templates;
     std::string m_rmsd_element_templates;
+    std::string m_method = "";
+
     double m_last_diff = 0.0, m_last_ripser = 0.0, m_last_dE = -1, m_dE = -1;
     int m_maxmol = 0;
     int m_maxrank = 10000;
@@ -217,7 +219,6 @@ private:
     int m_useorders = 10;
     std::string m_RMSDmethod = "incr";
     int m_MaxHTopoDiff = -1;
-    int m_gfn = -1;
     int m_threads = 1;
     int m_RMSDElement = 7;
     bool m_writeXYZ = false;

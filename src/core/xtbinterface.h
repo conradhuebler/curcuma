@@ -21,21 +21,21 @@
 
 #include "src/tools/general.h"
 
-#include "external/tblite/include/tblite.h"
+#include "external/xtb/include/xtb.h"
 
 #include "src/core/molecule.h"
 
-static json TBLiteSettings{
+static json XTBSettings{
     { "calculator_accuracy", 2 },
     { "calculator_max_iter", 100 }
 };
 
 class UFF;
 
-class TBLiteInterface {
+class XTBInterface {
 public:
-    TBLiteInterface(const json& xtbsettings = TBLiteSettings);
-    ~TBLiteInterface();
+    XTBInterface(const json& xtbsettings = XTBSettings);
+    ~XTBInterface();
 
     bool InitialiseMolecule(const Molecule& molecule);
     bool InitialiseMolecule(const Molecule* molecule);
@@ -55,16 +55,12 @@ public:
     void clear();
 
 private:
-#ifdef USE_TBLITE
     double m_thr = 1.0e-10;
-    tblite_error m_error = NULL;
-    tblite_structure m_tblite_mol = NULL;
-    tblite_result m_tblite_res = NULL;
-    tblite_context m_ctx = NULL;
-    tblite_calculator m_tblite_calc = NULL;
-#endif
 
+    xtb_TEnvironment m_env = NULL;
+    xtb_TMolecule m_xtb_mol = NULL;
+    xtb_TCalculator m_xtb_calc = NULL;
+    xtb_TResults m_xtb_res = NULL;
     bool m_initialised = false;
-    json m_tblitesettings;
-    UFF* m_uff;
+    json m_xtbsettings;
 };

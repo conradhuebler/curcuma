@@ -1,6 +1,6 @@
 /*
  * <Simple UFF implementation for Cucuma. >
- * Copyright (C) 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2022 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -36,7 +36,7 @@
 #include "json.hpp"
 using json = nlohmann::json;
 
-UFF::UFF()
+UFF::UFF(const json& controller)
 {
     m_final_factor = 1 / 2625.15 * 4.19;
     m_d = 1e-7;
@@ -52,10 +52,10 @@ void UFF::Initialise()
 
     m_topo = Eigen::MatrixXd::Zero(m_atom_types.size(), m_atom_types.size());
     TContainer bonds, nonbonds, angels, dihedrals, inversions;
+    std::vector<std::vector<int>> vdw_blacklist;
     for (int i = 0; i < m_atom_types.size(); ++i) {
-
         m_gradient.push_back({ 0, 0, 0 });
-        for (int j = 0; j < m_atom_types.size(); ++j) {
+        for (int j = i + 1; j < m_atom_types.size(); ++j) {
             if (i == j)
                 continue;
             double x_i = m_geometry[i][0] * m_au;
@@ -87,6 +87,8 @@ void UFF::Initialise()
                     double r_ik = sqrt((((x_i - x_k) * (x_i - x_k)) + ((y_i - y_k) * (y_i - y_k)) + ((z_i - z_k) * (z_i - z_k))));
                     if (r_ik <= (Elements::CovalentRadius[m_atom_types[i]] + Elements::CovalentRadius[m_atom_types[k]]) * m_scaling * m_au) {
                         angels.insert({ i, j, k });
+                        vdw_blacklist.push_back(std::vector<int>({ i, k }));
+                        vdw_blacklist.push_back(std::vector<int>({ j, k }));
 
                         for (int l = 0; l < m_atom_types.size(); ++l) {
                             if (i == l || j == l || k == l)
@@ -100,19 +102,27 @@ void UFF::Initialise()
                             double r_il = sqrt((((x_l - x_i) * (x_l - x_i)) + ((y_l - y_i) * (y_l - y_i)) + ((z_l - z_i) * (z_l - z_i))));
                             if (r_kl <= (Elements::CovalentRadius[m_atom_types[l]] + Elements::CovalentRadius[m_atom_types[k]]) * m_scaling * m_au) {
                                 dihedrals.insert({ j, i, k, l });
+                                vdw_blacklist.push_back(std::vector<int>({ i, l }));
+                                vdw_blacklist.push_back(std::vector<int>({ j, l }));
+                                vdw_blacklist.push_back(std::vector<int>({ k, l }));
                             }
                             if (r_jl <= (Elements::CovalentRadius[m_atom_types[l]] + Elements::CovalentRadius[m_atom_types[j]]) * m_scaling) {
                                 dihedrals.insert({ l, j, i, k });
+                                vdw_blacklist.push_back(std::vector<int>({ i, l }));
+                                vdw_blacklist.push_back(std::vector<int>({ j, l }));
+                                vdw_blacklist.push_back(std::vector<int>({ k, l }));
                             }
                             if (r_il <= (Elements::CovalentRadius[m_atom_types[l]] + Elements::CovalentRadius[m_atom_types[i]]) * m_scaling) {
                                 inversions.insert({ i, j, k, l });
+                                vdw_blacklist.push_back(std::vector<int>({ i, l }));
+                                vdw_blacklist.push_back(std::vector<int>({ j, l }));
+                                vdw_blacklist.push_back(std::vector<int>({ k, l }));
                             }
                         }
                     }
                 }
-            } else {
+            } else
                 nonbonds.insert({ i, j });
-            }
         }
     }
 
@@ -250,6 +260,9 @@ void UFF::Initialise()
     }
 
     for (const auto& vdw : nonbonds.Storage()) {
+        if (std::find(vdw_blacklist.begin(), vdw_blacklist.end(), std::vector<int>({ vdw[0], vdw[1] })) != vdw_blacklist.end())
+            continue;
+
         UFFvdW v;
         v.i = vdw[0];
         v.j = vdw[1];
@@ -670,6 +683,14 @@ void UFF::UpdateGeometry(const double* coord)
     }
 }
 
+void UFF::UpdateGeometry(const std::vector<std::array<double, 3>>& geometry)
+{
+    for (int i = 0; i < m_atom_types.size(); ++i) {
+        m_geometry[i] = geometry[i]; // coord[3 * i] * au;
+        m_gradient[i] = { 0, 0, 0 };
+    }
+}
+
 void UFF::Gradient(double* grad) const
 {
     double factor = 1;
@@ -761,16 +782,17 @@ double UFF::DotProduct(double x1, double x2, double y1, double y2, double z1, do
 
 double UFF::BondEnergy(double distance, double r, double kij, double D_ij)
 {
+
     double energy = (0.5 * kij * (distance - r) * (distance - r)) * m_final_factor;
+    /*
+        double alpha = sqrt(kij / (2 * D_ij));
+        double exp_ij = exp(-1 * alpha * (r - distance) - 1);
+        double energy = D_ij * (exp_ij * exp_ij);
+    */
     if (isnan(energy))
         return 0;
     else
         return energy;
-    /*
-        double alpha = sqrt(kij / (2 * D_ij));
-        double exp_ij = exp(-1 * alpha * (r - distance) - 1);
-        return D_ij * (exp_ij * exp_ij);
-        */
 }
 
 double UFF::CalculateBondStretching()

@@ -35,7 +35,7 @@
 
 #include "src/core/fileiterator.h"
 
-#include "src/core/tbliteinterface.h"
+#include "src/core/energycalculator.h".h "
 
 #include "src/tools/general.h"
 
@@ -157,7 +157,6 @@ void ConfScan::LoadControlJson()
     if (m_useorders == -1)
         m_useorders = 10;
 
-    m_gfn = Json2KeyWord<int>(m_defaults, "GFN");
     m_do_third = Json2KeyWord<bool>(m_defaults, "dothird");
 }
 
@@ -174,14 +173,15 @@ bool ConfScan::openFile()
     while (!file.AtEnd()) {
         Molecule* mol = new Molecule(file.Next());
         double energy = mol->Energy();
-        if (std::abs(energy) < 1e-5 || m_gfn != -1) {
+        if (std::abs(energy) < 1e-5 || m_method.compare("") != 0) {
             // XTBInterface interface; // As long as xtb leaks, we have to put it heare
-            TBLiteInterface interface;
+            if (m_method == "")
+                m_method = "gfn2";
+            EnergyCalculator interface(m_method, m_controller);
             // I might not leak really, but was unable to clear everything
-            if (m_gfn == -1)
-                m_gfn = 2;
-            interface.InitialiseMolecule(mol);
-            energy = interface.GFNCalculation(m_gfn, 0);
+
+            interface.setMolecule(mol);
+            energy = interface.CalculateEnergy(false);
         }
         m_ordered_list.insert(std::pair<double, int>(energy, molecule));
         molecule++;
@@ -209,13 +209,15 @@ bool ConfScan::openFile()
         while (!file.AtEnd()) {
             Molecule* mol = new Molecule(file.Next());
             double energy = mol->Energy();
-            if (std::abs(energy) < 1e-5 || m_gfn != -1) {
-                TBLiteInterface interface;
+            if (std::abs(energy) < 1e-5 || m_method.compare("") != 0) {
+                // XTBInterface interface; // As long as xtb leaks, we have to put it heare
+                if (m_method == "")
+                    m_method = "gfn2";
+                EnergyCalculator interface(m_method, m_controller);
                 // I might not leak really, but was unable to clear everything
-                if (m_gfn == -1)
-                    m_gfn = 2;
-                interface.InitialiseMolecule(mol);
-                energy = interface.GFNCalculation(m_gfn, 0);
+
+                interface.setMolecule(mol);
+                energy = interface.CalculateEnergy(false);
             }
             min_energy = std::min(min_energy, energy);
             mol->CalculateRotationalConstants();
@@ -688,7 +690,10 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                 break;
             }
         }
-        int free_threads = m_threads / threads.size();
+        int free_threads = m_threads;
+        if (threads.size())
+            free_threads /= threads.size();
+
         if (free_threads < 1)
             free_threads = 1;
         for (int i = 0; i < threads.size(); ++i) {

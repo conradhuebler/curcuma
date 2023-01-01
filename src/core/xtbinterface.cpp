@@ -17,10 +17,10 @@
  *
  */
 
-#include "external/tblite/include/tblite.h"
-
 #include "src/core/global.h"
 #include "src/tools/general.h"
+
+#include "external/xtb/include/xtb.h"
 
 #include "src/core/molecule.h"
 
@@ -28,26 +28,25 @@
 #include <math.h>
 #include <stdio.h>
 
-#include "tbliteinterface.h"
+#include "xtbinterface.h"
 
-TBLiteInterface::TBLiteInterface(const json& xtbsettings)
-    : m_tblitesettings(xtbsettings)
+XTBInterface::XTBInterface(const json& xtbsettings)
+    : m_xtbsettings(xtbsettings)
 {
-    m_error = tblite_new_error();
-    m_ctx = tblite_new_context();
-    m_tblite_res = tblite_new_result();
+    m_env = xtb_newEnvironment();
+    m_xtb_calc = xtb_newCalculator();
+    m_xtb_res = xtb_newResults();
 }
 
-TBLiteInterface::~TBLiteInterface()
+XTBInterface::~XTBInterface()
 {
-    delete m_error;
-    delete m_ctx;
-    delete m_tblite_res;
-    delete m_tblite_mol;
-    delete m_tblite_calc;
+    xtb_delResults(&m_xtb_res);
+    xtb_delCalculator(&m_xtb_calc);
+    xtb_delMolecule(&m_xtb_mol);
+    xtb_delEnvironment(&m_env);
 }
 
-bool TBLiteInterface::InitialiseMolecule(const Molecule& molecule)
+bool XTBInterface::InitialiseMolecule(const Molecule& molecule)
 {
     if (m_initialised)
         UpdateMolecule(molecule);
@@ -67,7 +66,7 @@ bool TBLiteInterface::InitialiseMolecule(const Molecule& molecule)
     return InitialiseMolecule(attyp, coord, natoms, molecule.Charge(), molecule.Spin());
 }
 
-bool TBLiteInterface::InitialiseMolecule(const Molecule* molecule)
+bool XTBInterface::InitialiseMolecule(const Molecule* molecule)
 {
     if (m_initialised)
         UpdateMolecule(molecule);
@@ -87,18 +86,18 @@ bool TBLiteInterface::InitialiseMolecule(const Molecule* molecule)
     return InitialiseMolecule(attyp, coord, natoms, molecule->Charge(), molecule->Spin());
 }
 
-bool TBLiteInterface::InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge, const int spin)
+bool XTBInterface::InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge, const int spin)
 {
     if (m_initialised)
         UpdateMolecule(coord);
 
-    m_tblite_mol = tblite_new_structure(m_error, natoms, attyp, coord, &charge, &spin, NULL, NULL);
+    m_xtb_mol = xtb_newMolecule(m_env, &natoms, attyp, coord, &charge, &spin, NULL, NULL);
 
     m_initialised = true;
     return true;
 }
 
-bool TBLiteInterface::UpdateMolecule(const Molecule& molecule)
+bool XTBInterface::UpdateMolecule(const Molecule& molecule)
 {
     int const natoms = molecule.AtomCount();
     double coord[3 * natoms];
@@ -113,35 +112,39 @@ bool TBLiteInterface::UpdateMolecule(const Molecule& molecule)
     return UpdateMolecule(coord);
 }
 
-bool TBLiteInterface::UpdateMolecule(const double* coord)
+bool XTBInterface::UpdateMolecule(const double* coord)
 {
-    tblite_update_structure_geometry(m_error, m_tblite_mol, coord, NULL);
+    xtb_updateMolecule(m_env, m_xtb_mol, coord, NULL);
     return true;
 }
 
-double TBLiteInterface::GFNCalculation(int parameter, double* grad)
+double XTBInterface::GFNCalculation(int parameter, double* grad)
 {
     double energy = 0;
-    tblite_set_context_verbosity(m_ctx, 0);
+    xtb_setVerbosity(m_env, XTB_VERBOSITY_MUTED);
     if (parameter == 0) {
-        m_tblite_calc = tblite_new_ipea1_calculator(m_ctx, m_tblite_mol);
+        xtb_loadGFN0xTB(m_env, m_xtb_mol, m_xtb_calc, NULL);
     } else if (parameter == 1) {
-        m_tblite_calc = tblite_new_gfn1_calculator(m_ctx, m_tblite_mol);
+        xtb_loadGFN1xTB(m_env, m_xtb_mol, m_xtb_calc, NULL);
     } else if (parameter == 2) {
-        m_tblite_calc = tblite_new_gfn2_calculator(m_ctx, m_tblite_mol);
+        xtb_loadGFN2xTB(m_env, m_xtb_mol, m_xtb_calc, NULL);
+    } else if (parameter == 66) {
+        xtb_loadGFNFF(m_env, m_xtb_mol, m_xtb_calc, NULL);
     }
-    //  tblite_set_calculator_accuracy(m_ctx, m_tblite_calc, Json2KeyWord<double>(m_tblitesettings, "calculator_accuracy"));
-    //  tblite_set_calculator_max_iter(m_ctx, m_tblite_calc, Json2KeyWord<int>(m_tblitesettings, "calculator_max_iter"));
+    xtb_singlepoint(m_env, m_xtb_mol, m_xtb_calc, m_xtb_res);
+    if (xtb_checkEnvironment(m_env)) {
+        xtb_showEnvironment(m_env, NULL);
+        return 4;
+    }
 
-    tblite_get_singlepoint(m_ctx, m_tblite_mol, m_tblite_calc, m_tblite_res);
-    tblite_get_result_energy(m_error, m_tblite_res, &energy);
-
+    xtb_getEnergy(m_env, m_xtb_res, &energy);
     if (grad != NULL)
-        tblite_get_result_gradient(m_error, m_tblite_res, grad);
-
+        xtb_getGradient(m_env, m_xtb_res, grad);
     return energy;
 }
 
-void TBLiteInterface::clear()
+void XTBInterface::clear()
 {
+    xtb_delResults(&m_xtb_res);
+    m_xtb_res = xtb_newResults();
 }
