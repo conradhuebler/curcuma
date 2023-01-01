@@ -37,7 +37,31 @@
 using json = nlohmann::json;
 
 const json UFFParameterJson{
-
+    { "bond_scaling", 1 },
+    { "angle_scaling", 1 },
+    { "dihedral_scaling", 1 },
+    { "inversion_scaling", 1 },
+    { "vdw_scaling", 1 },
+    { "coulomb_scaling", 1 },
+    { "bond_force", 664.12 },
+    { "angle_force", 664.12 },
+    { "differential", 1e-7 },
+    { "h4_scaling", 1 },
+    { "hh_scaling", 1 },
+    { "h4_oh_o", 2.32 },
+    { "h4_oh_n", 3.10 },
+    { "h4_nh_o", 1.07 },
+    { "h4_nh_n", 2.01 },
+    { "h4_wh_o", 0.42 },
+    { "h4_nh4", 3.61 },
+    { "h4_coo", 1.41 },
+    { "hh_rep_k", 0.42 },
+    { "hh_rep_e", 12.7 },
+    { "hh_rep_r0", 2.3 },
+    { "param_file", "none" },
+    { "uff_file", "none" },
+    { "writeparam", "none" },
+    { "writeuff", "none" }
 };
 
 struct UFFBond {
@@ -116,9 +140,16 @@ public:
     void NumGrad(double* gradient);
 
     void writeParameterFile(const std::string& file) const;
+    void writeUFFFile(const std::string& file) const;
+
     json writeParameter() const;
+    json writeUFF() const;
+
     void readParameterFile(const std::string& file);
+    void readUFFFile(const std::string& file);
+
     void readParameter(const json& parameters);
+    void readUFF(const json& parameters);
 
 private:
     void AssignUffAtomTypes();
@@ -200,10 +231,15 @@ private:
     double m_scaling = 1.15;
     Matrix m_topo;
     bool m_CalculateGradient = true, m_initialised = false;
+    std::string m_writeparam = "none", m_writeuff = "none";
     double m_d = 1e-6;
     double m_au = 1;
-    double h_e1 = 1, h_e2 = 1;
+    double m_h4_scaling = 1, m_hh_scaling = 1;
     double m_final_factor = 1;
     double m_bond_force = 664.12;
     double m_angle_force = 664.12;
+
+    double m_bond_scaling = 1, m_angle_scaling = 1, m_dihedral_scaling = 1, m_inversion_scaling = 1, m_vdw_scaling = 1, m_coulmob_scaling = 1;
+
+    hbonds4::H4Correction m_h4correction;
 };

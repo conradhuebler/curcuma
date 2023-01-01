@@ -219,6 +219,7 @@ inline json MergeJson(const json& reference, const json& patch)
 {
     json result = reference;
     for (const auto& object : patch.items()) {
+        bool found = false;
         std::string outer = object.key();
         transform(outer.begin(), outer.end(), outer.begin(), ::tolower);
         for (const auto& local : reference.items()) {
@@ -226,7 +227,11 @@ inline json MergeJson(const json& reference, const json& patch)
             transform(inner.begin(), inner.end(), inner.begin(), ::tolower);
             if (outer.compare(inner) == 0) {
                 result[local.key()] = object.value();
+                found = true;
             }
+        }
+        if (!found) {
+            result[outer] = object.value();
         }
     }
     return result;

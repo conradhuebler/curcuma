@@ -174,8 +174,7 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, 
         parameter(3 * i + 2) = geometry(i, 2);
     }
 
-    json t;
-    EnergyCalculator interface(method, t);
+    EnergyCalculator interface(method, controller);
     interface.setMolecule(*initial);
 
     return interface.CalculateEnergy(true);
@@ -214,8 +213,7 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
         constrain.push_back(initial->Atom(i).first == 1);
     }
 
-    json tmp;
-    EnergyCalculator interface(method, tmp);
+    EnergyCalculator interface(method, controller);
     interface.setMolecule(*initial);
 
     double final_energy = interface.CalculateEnergy(true);
