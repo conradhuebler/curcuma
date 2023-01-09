@@ -606,7 +606,6 @@ Geometry Molecule::getGeometry(const IntPair& pair, bool protons) const
         }
     }
     return geometry.block(0, 0, index, 3);
-    ;
 }
 
 Geometry Molecule::getGeometry(std::vector<int> atoms, bool protons) const

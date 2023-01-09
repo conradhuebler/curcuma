@@ -16,3 +16,6 @@
 [submodule "external/LBFGSpp"]
 	path = external/LBFGSpp
 	url = https://github.com/conradhuebler/LBFGSpp
+[submodule "external/cpp-d4"]
+	path = external/cpp-d4
+	url = https://github.com/conradhuebler/cpp-d4

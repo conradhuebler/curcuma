@@ -154,9 +154,9 @@ int main(int argc, char **argv) {
                   << "-confscan    * Filter list of conformers                                  *" << std::endl
                   << "-confstat    * Conformation statistics                                    *" << std::endl
                   << "-dock        * Perform some docking                                       *" << std::endl;
-        std::cout << "-opt         * LBFGS optimiser using xtb GFN                              *" << std::endl;
-        std::cout << "-sp          * Single point calculation using xtb GFN                     *" << std::endl;
-        std::cout << "-md          * Molecular dynamics using xtb GFN                           *" << std::endl;
+        std::cout << "-opt         * LBFGS optimiser                                            *" << std::endl;
+        std::cout << "-sp          * Single point calculation                                   *" << std::endl;
+        std::cout << "-md          * Molecular dynamics using                                   *" << std::endl;
         std::cout << "-block       * Split files with many structures in block                  *" << std::endl
                   << "-distance    * Calculate distance between two atoms                       *" << std::endl
                   << "-angle       * Calculate angle between three atoms                        *" << std::endl

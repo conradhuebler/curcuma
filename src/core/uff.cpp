@@ -28,6 +28,9 @@
  */
 
 #include "hbonds.h"
+#ifdef USE_D4
+#include "src/core/dftd4interface.h"
+#endif
 
 #include <Eigen/Dense>
 
@@ -39,6 +42,18 @@ using json = nlohmann::json;
 UFF::UFF(const json& controller)
 {
     json parameter = MergeJson(UFFParameterJson, controller);
+
+#ifdef USE_D3
+    m_use_d3 = parameter["d3"].get<int>();
+    if (m_use_d3)
+        m_d3 = new DFTD3Interface(controller);
+#endif
+
+#ifdef USE_D4
+    m_use_d4 = parameter["d4"].get<int>();
+    if (m_use_d4)
+        m_d4 = new DFTD4Interface(controller);
+#endif
 
     std::string param_file = parameter["param_file"];
     std::string uff_file = parameter["uff_file"];
@@ -53,32 +68,7 @@ UFF::UFF(const json& controller)
     m_final_factor = 1 / 2625.15 * 4.19;
     m_d = parameter["differential"].get<double>();
 
-    /*
-        m_bond_scaling = parameter["bond_scaling"].get<double>();
-        m_angle_scaling = parameter["angle_scaling"].get<double>();
-        m_dihedral_scaling = parameter["dihedral_scaling"].get<double>();
-        m_inversion_scaling = parameter["inversion_scaling"].get<double>();
-        m_vdw_scaling = parameter["vdw_scaling"].get<double>();
-        m_coulmob_scaling = parameter["coulomb_scaling"].get<double>();
-
-        m_bond_force = parameter["bond_force"].get<double>();
-        m_angle_force = parameter["angle_force"].get<double>();
-
-        m_h4_scaling = parameter["h4_scaling"].get<double>();
-        m_hh_scaling = parameter["hh_scaling"].get<double>();
-
-        m_h4correction.set_OH_O(parameter["h4_oh_o"].get<double>());
-        m_h4correction.set_OH_N(parameter["h4_oh_n"].get<double>());
-        m_h4correction.set_NH_O(parameter["h4_nh_o"].get<double>());
-        m_h4correction.set_NH_N(parameter["h4_nh_n"].get<double>());
-
-        m_h4correction.set_WH_O(parameter["h4_wh_o"].get<double>());
-        m_h4correction.set_NH4(parameter["h4_nh4"].get<double>());
-        m_h4correction.set_COO(parameter["h4_coo"].get<double>());
-        m_h4correction.set_HH_Rep_K(parameter["hh_rep_k"].get<double>());
-        m_h4correction.set_HH_Rep_E(parameter["hh_rep_e"].get<double>());
-        m_h4correction.set_HH_Rep_R0(parameter["hh_rep_r0"].get<double>());
-    */
+    readUFF(parameter);
 
     m_writeparam = parameter["writeparam"];
     m_writeuff = parameter["writeuff"];
@@ -87,6 +77,9 @@ UFF::UFF(const json& controller)
 
 void UFF::Initialise()
 {
+    if (m_initialised)
+        return;
+
     m_uff_atom_types = std::vector<int>(m_atom_types.size(), 0);
     m_coordination = std::vector<int>(m_atom_types.size(), 0);
 
@@ -318,6 +311,16 @@ void UFF::Initialise()
         m_uffvdwaals.push_back(v);
     }
     m_h4correction.allocate(m_atom_types.size());
+
+#ifdef USE_D3
+    if (m_use_d3)
+        m_d3->InitialiseMolecule(m_atom_types);
+#endif
+
+#ifdef USE_D4
+    if (m_use_d4)
+        m_d4->InitialiseMolecule(m_atom_types);
+#endif
 
     if (m_writeparam.compare("none") != 0)
         writeParameterFile(m_writeparam + ".json");
@@ -623,6 +626,8 @@ json UFF::writeParameter() const
     parameters["angle_scaling"] = m_angle_scaling;
     parameters["inversion_scaling"] = m_inversion_scaling;
     parameters["vdw_scaling"] = m_vdw_scaling;
+    parameters["rep_scaling"] = m_rep_scaling;
+
     parameters["coulomb_scaling"] = m_coulmob_scaling;
 
     parameters["bond_force"] = m_bond_force;
@@ -643,6 +648,26 @@ json UFF::writeParameter() const
     parameters["hh_rep_e"] = m_h4correction.get_HH_Rep_E();
     parameters["hh_rep_r0"] = m_h4correction.get_HH_Rep_R0();
 
+#ifdef USE_D3
+    if (m_use_d3) {
+        parameters["d_s6"] = m_d3->ParameterS6();
+        parameters["d_s8"] = m_d3->ParameterS8();
+        parameters["d_s9"] = m_d3->ParameterS9();
+        parameters["d_a1"] = m_d3->ParameterA1();
+        parameters["d_a2"] = m_d3->ParameterA2();
+    }
+#endif
+
+#ifdef USE_D4
+    if (m_use_d4) {
+        parameters["d_s6"] = m_d4->Parameter().s6;
+        parameters["d_s8"] = m_d4->Parameter().s8;
+        parameters["d_s10"] = m_d4->Parameter().s10;
+        parameters["d_s9"] = m_d4->Parameter().s9;
+        parameters["d_a1"] = m_d4->Parameter().a1;
+        parameters["d_a2"] = m_d4->Parameter().a2;
+    }
+#endif
     return parameters;
 }
 
@@ -654,6 +679,8 @@ json UFF::writeUFF() const
     parameters["angle_scaling"] = m_angle_scaling;
     parameters["inversion_scaling"] = m_inversion_scaling;
     parameters["vdw_scaling"] = m_vdw_scaling;
+    parameters["rep_scaling"] = m_rep_scaling;
+
     parameters["coulomb_scaling"] = m_coulmob_scaling;
 
     parameters["bond_force"] = m_bond_force;
@@ -674,11 +701,41 @@ json UFF::writeUFF() const
     parameters["hh_rep_e"] = m_h4correction.get_HH_Rep_E();
     parameters["hh_rep_r0"] = m_h4correction.get_HH_Rep_R0();
 
+#ifdef USE_D3
+    if (m_use_d3) {
+        parameters["d_s6"] = m_d3->ParameterS6();
+        parameters["d_s8"] = m_d3->ParameterS8();
+        parameters["d_s9"] = m_d3->ParameterS9();
+        parameters["d_a1"] = m_d3->ParameterA1();
+        parameters["d_a2"] = m_d3->ParameterA2();
+    }
+#endif
+
+#ifdef USE_D4
+    if (m_use_d4) {
+        parameters["d4_s6"] = m_d4->Parameter().s6;
+        parameters["d4_s8"] = m_d4->Parameter().s8;
+        parameters["d4_s10"] = m_d4->Parameter().s10;
+        parameters["d4_s9"] = m_d4->Parameter().s9;
+        parameters["d4_a1"] = m_d4->Parameter().a1;
+        parameters["d4_a2"] = m_d4->Parameter().a2;
+    }
+#endif
     return parameters;
 }
 void UFF::readUFF(const json& parameters)
 {
     json parameter = MergeJson(UFFParameterJson, parameters);
+
+#ifdef USE_D3
+    if (m_use_d3)
+        m_d3->UpdateParameters(parameter);
+#endif
+
+#ifdef USE_D4
+    if (m_use_d4)
+        m_d4->UpdateParameters(parameter);
+#endif
 
     m_d = parameter["differential"].get<double>();
 
@@ -687,6 +744,8 @@ void UFF::readUFF(const json& parameters)
     m_dihedral_scaling = parameter["dihedral_scaling"].get<double>();
     m_inversion_scaling = parameter["inversion_scaling"].get<double>();
     m_vdw_scaling = parameter["vdw_scaling"].get<double>();
+    m_rep_scaling = parameter["rep_scaling"].get<double>();
+
     m_coulmob_scaling = parameter["coulomb_scaling"].get<double>();
 
     m_bond_force = parameter["bond_force"].get<double>();
@@ -715,11 +774,23 @@ void UFF::readParameter(const json& parameters)
 
     m_d = parameters["differential"].get<double>();
 
+#ifdef USE_D3
+    if (m_use_d3)
+        m_d3->UpdateParameters(parameters);
+#endif
+
+#ifdef USE_D4
+    if (m_use_d4)
+        m_d4->UpdateParameters(parameters);
+#endif
+
     m_bond_scaling = parameters["bond_scaling"].get<double>();
     m_angle_scaling = parameters["angle_scaling"].get<double>();
     m_dihedral_scaling = parameters["dihedral_scaling"].get<double>();
     m_inversion_scaling = parameters["inversion_scaling"].get<double>();
     m_vdw_scaling = parameters["vdw_scaling"].get<double>();
+    m_rep_scaling = parameters["rep_scaling"].get<double>();
+
     m_coulmob_scaling = parameters["coulomb_scaling"].get<double>();
 
     m_bond_force = parameters["bond_force"].get<double>();
@@ -891,6 +962,27 @@ void UFF::NumGrad(double* grad)
     m_CalculateGradient = g;
 }
 
+std::vector<std::array<double, 3>> UFF::NumGrad()
+{
+    std::vector<std::array<double, 3>> gradient(m_atom_types.size());
+    double dx = m_d;
+    bool g = m_CalculateGradient;
+    m_CalculateGradient = false;
+    double E1, E2;
+    for (int i = 0; i < m_atom_types.size(); ++i) {
+        for (int j = 0; j < 3; ++j) {
+            m_geometry[i][j] += dx;
+            E1 = Calculate();
+            m_geometry[i][j] -= 2 * dx;
+            E2 = Calculate();
+            gradient[i][j] = (E1 - E2) / (2 * dx);
+            m_geometry[i][j] += dx;
+        }
+    }
+    m_CalculateGradient = g;
+    return gradient;
+}
+
 double UFF::BondRestLength(int i, int j, double n)
 {
     double cRi = UFFParameters[m_uff_atom_types[i]][cR];
@@ -905,7 +997,7 @@ double UFF::BondRestLength(int i, int j, double n)
     return (r_0 + r_BO + r_EN) * m_au;
 }
 
-double UFF::Calculate(bool grd)
+double UFF::Calculate(bool grd, bool verbose)
 {
     m_CalculateGradient = grd;
     double energy = 0.0;
@@ -915,20 +1007,88 @@ double UFF::Calculate(bool grd)
         geometry[i].y = m_geometry[i][1] * m_au;
         geometry[i].z = m_geometry[i][2] * m_au;
         geometry[i].e = m_atom_types[i];
+        m_h4correction.GradientH4()[i].x = 0;
+        m_h4correction.GradientH4()[i].y = 0;
+        m_h4correction.GradientH4()[i].z = 0;
+
+        m_h4correction.GradientHH()[i].x = 0;
+        m_h4correction.GradientHH()[i].y = 0;
+        m_h4correction.GradientHH()[i].z = 0;
+
+#ifdef USE_D4
+        if (m_use_d4)
+            m_d4->UpdateAtom(i, m_geometry[i][0] / au, m_geometry[i][1] / au, m_geometry[i][2] / au);
+#endif
+
+#ifdef USE_D3
+        if (m_use_d3)
+            m_d3->UpdateAtom(i, m_geometry[i][0], m_geometry[i][1], m_geometry[i][2]);
+#endif
     }
+    double d4_energy = 0;
+    double d3_energy = 0;
+    double bond_energy = CalculateBondStretching();
+    double angle_energy = CalculateAngleBending();
+    double dihedral_energy = CalculateDihedral();
+    double inversion_energy = CalculateInversion();
+    double vdw_energy = CalculateNonBonds();
+    /* + CalculateElectrostatic(); */
+    energy = bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy;
+#ifdef USE_D3
+    if (m_use_d3) {
+        if (grd) {
+            double grad[3 * m_atom_types.size()];
+            d3_energy = m_d3->DFTD3Calculation(grad);
+            for (int i = 0; i < m_atom_types.size(); ++i) {
+                m_gradient[i][0] += grad[3 * i + 0] * au;
+                m_gradient[i][1] += grad[3 * i + 1] * au;
+                m_gradient[i][2] += grad[3 * i + 2] * au;
+            }
+        } else
+            d3_energy = m_d3->DFTD3Calculation(0);
+    }
+#endif
 
-    energy = CalculateBondStretching() + CalculateAngleBending() + CalculateDihedral() + CalculateInversion() + CalculateNonBonds() + CalculateElectrostatic();
+#ifdef USE_D4
+    if (m_use_d4) {
+        if (grd) {
+            double grad[3 * m_atom_types.size()];
+            d4_energy = m_d4->DFTD4Calculation(grad);
+            for (int i = 0; i < m_atom_types.size(); ++i) {
+                m_gradient[i][0] += grad[3 * i + 0] * au;
+                m_gradient[i][1] += grad[3 * i + 1] * au;
+                m_gradient[i][2] += grad[3 * i + 2] * au;
+            }
+        } else
+            d4_energy = m_d4->DFTD4Calculation(0);
+    }
+#endif
 
-    double energy_h4 = m_h4correction.energy_corr_h4(m_atom_types.size(), geometry);
-    double energy_hh = m_h4correction.energy_corr_hh_rep(m_atom_types.size(), geometry);
-    energy += m_final_factor * m_h4_scaling * energy_h4 + m_final_factor * m_hh_scaling * energy_hh;
-
+    double energy_h4 = 0;
+    if (m_h4_scaling > 1e-8)
+        energy_h4 = m_h4correction.energy_corr_h4(m_atom_types.size(), geometry);
+    double energy_hh = 0;
+    if (m_hh_scaling > 1e-8)
+        m_h4correction.energy_corr_hh_rep(m_atom_types.size(), geometry);
+    energy += m_final_factor * m_h4_scaling * energy_h4 + m_final_factor * m_hh_scaling * energy_hh + d3_energy + d4_energy;
     for (int i = 0; i < m_atom_types.size(); ++i) {
         m_gradient[i][0] += m_final_factor * m_h4_scaling * m_h4correction.GradientH4()[i].x + m_final_factor * m_hh_scaling * m_h4correction.GradientHH()[i].x;
         m_gradient[i][1] += m_final_factor * m_h4_scaling * m_h4correction.GradientH4()[i].y + m_final_factor * m_hh_scaling * m_h4correction.GradientHH()[i].y;
         m_gradient[i][2] += m_final_factor * m_h4_scaling * m_h4correction.GradientH4()[i].z + m_final_factor * m_hh_scaling * m_h4correction.GradientHH()[i].z;
     }
-
+    if (verbose) {
+        std::cout << "Total energy " << energy << " Eh. Sum of " << std::endl
+                  << "Bond Energy " << bond_energy << " Eh" << std::endl
+                  << "Angle Energy " << angle_energy << " Eh" << std::endl
+                  << "Dihedral Energy " << dihedral_energy << " Eh" << std::endl
+                  << "Inversion Energy " << inversion_energy << " Eh" << std::endl
+                  << "Nonbonded Energy " << vdw_energy << " Eh" << std::endl
+                  << "D3 Energy " << d3_energy << " Eh" << std::endl
+                  << "D4 Energy " << d4_energy << " Eh" << std::endl
+                  << "HBondCorrection " << m_final_factor * m_h4_scaling * energy_h4 << " Eh" << std::endl
+                  << "HHRepCorrection " << m_final_factor * m_hh_scaling * energy_hh << " Eh" << std::endl
+                  << std::endl;
+    }
     return energy;
 }
 
@@ -1165,7 +1325,7 @@ double UFF::NonBonds(const v& i, const v& j, double Dij, double xij)
 {
     double r = Distance(i[0], j[0], i[1], j[1], i[2], j[2]) * m_au;
     double pow6 = pow((xij / r), 6);
-    double energy = Dij * (-2 * pow6 + pow6 * pow6) * m_final_factor * m_vdw_scaling;
+    double energy = Dij * (-2 * pow6 * m_vdw_scaling + pow6 * pow6 * m_rep_scaling) * m_final_factor;
     if (isnan(energy))
         return 0;
     else

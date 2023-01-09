@@ -7,6 +7,12 @@ option (USE_XTB
 option (USE_TBLITE
     "Compile TBLITE and use as library" OFF)
 
+option (USE_D3
+    "Compile cpp-D4 and use as library" OFF)
+
+option (USE_D4
+    "Compile cpp-D4 and use as library" OFF)
+
 option (C17
     "Use C++ 17 Standard" ON)
 
@@ -16,6 +22,7 @@ include_directories(SYSTEM  ${PROJECT_SOURCE_DIR}/external/fmt/include
                             ${PROJECT_SOURCE_DIR}/external/LBFGSpp/include
                             ${PROJECT_SOURCE_DIR}/external/ripser
                             ${PROJECT_SOURCE_DIR}/external/eigen
+                            ${PROJECT_SOURCE_DIR}/external/cpp-d4/include
                             ${PROJECT_SOURCE_DIR}/external/)
 include_directories(${PROJECT_SOURCE_DIR} ${PROJECT_BINARY_DIR} )
 
@@ -59,9 +66,8 @@ add_definitions("-DGIT_COMMIT_TAG=${GIT_COMMIT_TAG}")
 
 if(CMAKE_COMPILER_IS_GNUCXX)
     set (_UNIX  ON)
-
-
 endif()
+
 find_package(OpenMP)
 if (OPENMP_FOUND)
     set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
@@ -86,7 +92,7 @@ IF(CMAKE_COMPILER_IS_GNUCXX)
                                            -Wunused -Wunused-function  -Wunused-label  -Wunused-parameter\
                                            -Wunused-value  -Wunused-variable  -Wvariadic-macros\
                                            -Wvolatile-register-var  -Wwrite-strings -Wdeprecated-declarations\
-                                           -Wno-error=unused-local-typedefs -Wno-error=enum-compare -Wno-narrowing -Werror=return-type -g")
+                                           -Wno-error=unused-local-typedefs -Wno-error=enum-compare -Wno-narrowing -Werror=return-type -Wno-sign-compare -g")
 set (GCC ON)
 if(WIN32) # Check if we are on Windows
 else()
@@ -168,10 +174,6 @@ set_property(TARGET curcuma PROPERTY LINK_FLAGS_RELWITHDEBINFO -s)
 if(USE_XTB)
     add_subdirectory(external/xtb)
 
-    set_target_properties(lib-xtb-shared PROPERTIES
-      IMPORTED_LOCATION "${CMAKE_CURRENT_BINARY_DIR}/libxtb.so"
-    )
-
     if(NOT TARGET mctc-lib)
       set("mctc-lib-url" "https://github.com/grimme-lab/mctc-lib")
       message(STATUS "Retrieving mctc-lib from ${mctc-lib-url}")
@@ -183,27 +185,25 @@ if(USE_XTB)
       )
       FetchContent_MakeAvailable("mctc-lib")
     endif()
-    #    add_executable(xtb_helper
-    #        src/helpers/xtb_helper.cpp
-    #        )
-    #    if(C17)
-    #        set_property(TARGET xtb_helper PROPERTY CXX_STANDARD 17)
-    #    else()
-    #        set_property(TARGET xtb_helper PROPERTY CXX_STANDARD 14)
-    #    endif(C17)
 
-    #    if(COMPILE_XTB)
-    #        target_link_libraries(xtb_helper lib-xtb-shared pthread dl)
-    #    else()
-    #        target_link_libraries(xtb_helper ${XTB_DIR}/libxtb.so pthread dl)
-    #    endif()
+    add_executable(xtb_helper
+            src/helpers/xtb_helper.cpp
+            )
+    if(C17)
+        set_property(TARGET xtb_helper PROPERTY CXX_STANDARD 17)
+    else()
+        set_property(TARGET xtb_helper PROPERTY CXX_STANDARD 14)
+    endif(C17)
+
+    target_link_libraries(xtb_helper lib-xtb-shared pthread dl)
+
     set(curcuma_xtb_SRC
         src/core/xtbinterface.cpp
     )
     add_library(curcuma_xtb  ${curcuma_xtb_SRC})
 
-        target_link_libraries(curcuma_xtb PUBLIC "mctc-lib" lib-xtb-shared gfortran)
-        target_link_libraries(curcuma_core curcuma_xtb)
+    target_link_libraries(curcuma_xtb PUBLIC "mctc-lib" lib-xtb-shared gfortran)
+    target_link_libraries(curcuma_core curcuma_xtb)
 
 endif()
 
@@ -224,28 +224,69 @@ if(USE_TBLITE)
     add_subdirectory(external/tblite)
     include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/tblite/include)
 
-    #    add_executable(tblite_helper
-    #        src/helpers/tblite_helper.cpp
-    #        )
-    #    if(C17)
-    #        set_property(TARGET tblite_helper PROPERTY CXX_STANDARD 17)
-    #    else()
-    #        set_property(TARGET tblite_helper PROPERTY CXX_STANDARD 14)
-    #    endif(C17)
-    #    target_link_libraries(tblite_helper PRIVATE tblite-lib gfortran pthread dl)
+    add_executable(tblite_helper
+           src/helpers/tblite_helper.cpp
+    )
+    if(C17)
+        set_property(TARGET tblite_helper PROPERTY CXX_STANDARD 17)
+    else()
+        set_property(TARGET tblite_helper PROPERTY CXX_STANDARD 14)
+    endif(C17)
+    target_link_libraries(tblite_helper PRIVATE tblite-lib gfortran pthread)
 
     set(curcuma_tblite_SRC
         src/core/tbliteinterface.cpp
     )
     add_library(curcuma_tblite  ${curcuma_tblite_SRC})
 
-        target_link_libraries(curcuma_tblite PUBLIC "mctc-lib" tblite-lib gfortran )
-        target_link_libraries(curcuma_core curcuma_tblite)
-
+    target_link_libraries(curcuma_tblite PUBLIC "mctc-lib" tblite-lib gfortran)
+    target_link_libraries(curcuma_core curcuma_tblite)
 endif()
 
+if(USE_D3)
+    if(NOT TARGET s-dftd3)
+        add_subdirectory(external/simple-dftd3)
+    endif()
+
+    add_executable(dftd3_helper
+           src/helpers/dftd3_helper.cpp
+    )
+    target_link_libraries(dftd3_helper PRIVATE s-dftd3 gfortran pthread)
+
+    set(curcuma_D3_SRC
+           src/core/dftd3interface.cpp
+    )
+    add_library(curcuma_D3  ${curcuma_D3_SRC})
+    target_link_libraries(curcuma_D3 PUBLIC s-dftd3 gfortran pthread)
+    target_link_libraries(curcuma_core curcuma_D3)
+endif()
+
+if(USE_D4)
+    find_package(LAPACKE REQUIRED)
+    find_package(CBLAS REQUIRED)
+
+    add_subdirectory(external/cpp-d4)
+    add_executable(dftd4_helper
+        src/helpers/dftd4_helper.cpp
+        )
+    if(C17)
+        set_property(TARGET dftd4_helper PROPERTY CXX_STANDARD 17)
+    else()
+        set_property(TARGET dftd4_helper PROPERTY CXX_STANDARD 14)
+    endif(C17)
+    target_link_libraries(dftd4_helper PRIVATE libcpp_d4 ${LAPACKE_LIBRARIES}  ${CBLAS_LIBRARIES} pthread)
+
+    set(curcuma_d4_SRC
+        src/core/dftd4interface.cpp
+    )
+    add_library(curcuma_d4  ${curcuma_d4_SRC})
+
+    target_link_libraries(curcuma_d4 PUBLIC libcpp_d4 ${LAPACKE_LIBRARIES}  ${CBLAS_LIBRARIES} )
+    target_link_libraries(curcuma_core curcuma_d4)
+endif()
+
+
 target_link_libraries(curcuma_core pthread fmt::fmt-header-only)
-#target_link_libraries(curcuma_core )
 
 if(WIN32) # Check if we are on Windows
 else()
@@ -258,8 +299,8 @@ target_link_libraries(curcuma curcuma_core)
 add_executable(curcuma_helper
         src/helpers/main.cpp)
 
-    target_link_libraries(curcuma_helper fmt::fmt-header-only)
-    target_link_libraries(curcuma_helper curcuma_core)
+target_link_libraries(curcuma_helper fmt::fmt-header-only)
+target_link_libraries(curcuma_helper curcuma_core)
 
 set_property(TARGET curcuma_helper PROPERTY LINK_FLAGS_RELEASE -s)
 set_property(TARGET curcuma_helper PROPERTY LINK_FLAGS_RELWITHDEBINFO -s)
@@ -269,34 +310,6 @@ if(C17)
 else()
     set_property(TARGET curcuma_helper PROPERTY CXX_STANDARD 14)
 endif(C17)
-
-#if(USE_XTB)
-#    add_executable(xtb_helper
-#        src/helpers/xtb_helper.cpp
-#        )
-#    if(C17)
-#        set_property(TARGET xtb_helper PROPERTY CXX_STANDARD 17)
-#    else()
-#        set_property(TARGET xtb_helper PROPERTY CXX_STANDARD 14)
-#    endif(C17)
-
-#    if(COMPILE_XTB)
-#        target_link_libraries(xtb_helper lib-xtb-shared pthread dl)
-#    else()
-#        target_link_libraries(xtb_helper ${XTB_DIR}/libxtb.so pthread dl)
-#    endif()
-
-#    add_executable(tblite_helper
-#        src/helpers/tblite_helper.cpp
-#        )
-#    if(C17)
-#        set_property(TARGET tblite_helper PROPERTY CXX_STANDARD 17)
-#    else()
-#        set_property(TARGET tblite_helper PROPERTY CXX_STANDARD 14)
-#    endif(C17)
-#    target_link_libraries(tblite_helper PRIVATE tblite-lib gfortran pthread dl)
-
-#endif()
 
 add_subdirectory(test_cases)
 

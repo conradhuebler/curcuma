@@ -55,16 +55,13 @@ public:
     void clear();
 
 private:
-#ifdef USE_TBLITE
     double m_thr = 1.0e-10;
     tblite_error m_error = NULL;
     tblite_structure m_tblite_mol = NULL;
     tblite_result m_tblite_res = NULL;
     tblite_context m_ctx = NULL;
     tblite_calculator m_tblite_calc = NULL;
-#endif
 
     bool m_initialised = false;
     json m_tblitesettings;
-    UFF* m_uff;
 };

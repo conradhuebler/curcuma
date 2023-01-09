@@ -25,7 +25,18 @@
  *            http://dx.doi.org/10.1021/ct200751e
  *
  */
+
+#include "src/core/global.h"
+
 #include "hbonds.h"
+
+#ifdef USE_D3
+#include "src/core/dftd3interface.h"
+#endif
+
+#ifdef USE_D4
+#include "src/core/dftd4interface.h"
+#endif
 
 #include "src/core/uff_par.h"
 #include <vector>
@@ -33,7 +44,6 @@
 #include <Eigen/Dense>
 
 #include "json.hpp"
-#include "src/core/global.h"
 using json = nlohmann::json;
 
 const json UFFParameterJson{
@@ -42,6 +52,7 @@ const json UFFParameterJson{
     { "dihedral_scaling", 1 },
     { "inversion_scaling", 1 },
     { "vdw_scaling", 1 },
+    { "rep_scaling", 1 },
     { "coulomb_scaling", 1 },
     { "bond_force", 664.12 },
     { "angle_force", 664.12 },
@@ -58,6 +69,17 @@ const json UFFParameterJson{
     { "hh_rep_k", 0.42 },
     { "hh_rep_e", 12.7 },
     { "hh_rep_r0", 2.3 },
+    { "d4", 0 },
+    { "d3", 0 },
+    { "d_s6", 1.00 },
+    { "d_s8", 1.20065498 },
+    { "d_s10", 0 },
+    { "d_s9", 1 },
+    { "d_a1", 0.40085597 },
+    { "d_a2", 5.02928789 },
+    { "d_alp", 16 },
+    { "d_func", "pbe0" },
+    { "d_atm", true },
     { "param_file", "none" },
     { "uff_file", "none" },
     { "writeparam", "none" },
@@ -132,12 +154,13 @@ public:
     }
 
     void Initialise();
-    double Calculate(bool gradient = true);
+    double Calculate(bool gradient = true, bool verbose = false);
 
     std::vector<std::array<double, 3>> Gradient() const { return m_gradient; }
     void Gradient(double* gradient) const;
 
     void NumGrad(double* gradient);
+    std::vector<std::array<double, 3>> NumGrad();
 
     void writeParameterFile(const std::string& file) const;
     void writeUFFFile(const std::string& file) const;
@@ -150,6 +173,8 @@ public:
 
     void readParameter(const json& parameters);
     void readUFF(const json& parameters);
+
+    void setInitialisation(bool initialised) { m_initialised = initialised; }
 
 private:
     void AssignUffAtomTypes();
@@ -239,7 +264,16 @@ private:
     double m_bond_force = 664.12;
     double m_angle_force = 664.12;
 
-    double m_bond_scaling = 1, m_angle_scaling = 1, m_dihedral_scaling = 1, m_inversion_scaling = 1, m_vdw_scaling = 1, m_coulmob_scaling = 1;
+    bool m_use_d3 = false;
+    bool m_use_d4 = false;
+
+    double m_bond_scaling = 1, m_angle_scaling = 1, m_dihedral_scaling = 1, m_inversion_scaling = 1, m_vdw_scaling = 1, m_rep_scaling = 1, m_coulmob_scaling = 1;
 
     hbonds4::H4Correction m_h4correction;
+#ifdef USE_D3
+    DFTD3Interface* m_d3;
+#endif
+#ifdef USE_D4
+    DFTD4Interface* m_d4;
+#endif
 };

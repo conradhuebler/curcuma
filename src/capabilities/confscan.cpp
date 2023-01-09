@@ -35,7 +35,7 @@
 
 #include "src/core/fileiterator.h"
 
-#include "src/core/energycalculator.h".h "
+#include "src/core/energycalculator.h"
 
 #include "src/tools/general.h"
 

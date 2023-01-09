@@ -81,6 +81,8 @@ void CurcumaOpt::LoadControlJson()
     m_charge = Json2KeyWord<double>(m_defaults, "Charge");
     m_spin = Json2KeyWord<double>(m_defaults, "Spin");
     m_singlepoint = Json2KeyWord<bool>(m_defaults, "SinglePoint");
+    m_serial = Json2KeyWord<bool>(m_defaults, "serial");
+
     if (m_method == "GFNFF")
         m_threads = 1;
 }
@@ -97,8 +99,33 @@ void CurcumaOpt::start()
             m_molecules.push_back(mol);
         }
     }
+    if (!m_serial)
+        ProcessMolecules(m_molecules);
+    else {
+        ProcessMoleculesSerial(m_molecules);
+    }
+}
 
-    ProcessMolecules(m_molecules);
+void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
+{
+    EnergyCalculator interface(Json2KeyWord<std::string>(m_defaults, "method"), m_controller["sp"]);
+
+    auto iter = molecules.begin();
+    interface.setMolecule(*iter);
+
+    while (iter != molecules.end()) {
+        if (iter == molecules.end())
+            continue;
+        if (iter->AtomCount() == 0)
+            continue;
+        auto start = std::chrono::system_clock::now();
+        interface.updateGeometry(iter->Coords());
+        double energy = interface.CalculateEnergy(true, true);
+
+        auto end = std::chrono::system_clock::now();
+        std::cout << fmt::format("Single Point Energy = {0} Eh ({1} secs)\n", energy, std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
+        ++iter;
+    }
 }
 
 void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
@@ -177,7 +204,7 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, 
     EnergyCalculator interface(method, controller);
     interface.setMolecule(*initial);
 
-    return interface.CalculateEnergy(true);
+    return interface.CalculateEnergy(true, true);
 }
 
 Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controller, std::string& output, std::vector<Molecule>* intermediate)

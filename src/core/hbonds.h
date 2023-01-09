@@ -833,8 +833,8 @@ public:
         return e_corr_sum;
     }
 
-    const coord_t* GradientH4() const { return grd_h4; }
-    const coord_t* GradientHH() const { return grd_hh; }
+    coord_t* GradientH4() { return grd_h4; }
+    coord_t* GradientHH() { return grd_hh; }
 
 private:
     // H4 correction

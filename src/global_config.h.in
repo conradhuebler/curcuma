@@ -2,6 +2,8 @@
 
 #cmakedefine USE_XTB
 #cmakedefine USE_TBLITE
+#cmakedefine USE_D3
+#cmakedefine USE_D4
 
 #cmakedefine C17
 #cmakedefine GCC

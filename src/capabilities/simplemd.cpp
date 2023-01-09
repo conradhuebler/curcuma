@@ -32,7 +32,7 @@
 #include "src/capabilities/rmsdtraj.h"
 
 #include "src/core/elements.h"
-#include "src/core/energycalculator.h".h "
+#include "src/core/energycalculator.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
 
@@ -46,7 +46,7 @@ SimpleMD::SimpleMD(const json& controller, bool silent)
     : CurcumaMethod(CurcumaMDJson, controller, silent)
 {
     UpdateController(controller);
-    m_interface = new EnergyCalculator(m_method, m_controller);
+    m_interface = new EnergyCalculator(m_method, controller["md"]);
 }
 
 SimpleMD::~SimpleMD()
@@ -73,7 +73,7 @@ void SimpleMD::LoadControlJson()
     m_rmsd = Json2KeyWord<double>(m_defaults, "rmsd");
     m_impuls = Json2KeyWord<double>(m_defaults, "impuls");
     m_impuls_scaling = Json2KeyWord<double>(m_defaults, "impuls_scaling");
-
+    m_writeUnique = Json2KeyWord<bool>(m_defaults, "unique");
     m_opt = Json2KeyWord<bool>(m_defaults, "opt");
     m_scale_velo = Json2KeyWord<double>(m_defaults, "velo");
     m_rescue = Json2KeyWord<bool>(m_defaults, "rescue");
@@ -717,11 +717,14 @@ bool SimpleMD::WriteGeometry()
     // int f2 = m_molecule.GetFragments().size();
     //   std::cout << f1 << " ... " << f2 << std::endl;
     // m_prev_index = std::abs(f2 - f1);
+    /*
     int difference = (m.second - m_topo_initial).cwiseAbs().sum();
+
     if (difference > m_max_top_diff) {
         std::cout << "*** topology changed " << difference << " ***" << std::endl;
         result = false;
     }
+    */
     if (m_writeXYZ) {
         m_molecule.setEnergy(m_Epot);
         m_molecule.setName(std::to_string(m_currentStep));

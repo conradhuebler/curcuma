@@ -34,14 +34,14 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
 {
     if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) { // UFF energy calculator requested
         m_uff = new UFF(controller);
-        m_ecengine = [this](bool gradient) {
-            this->CalculateUFF(gradient);
+        m_ecengine = [this](bool gradient, bool verbose) {
+            this->CalculateUFF(gradient, verbose);
         };
     } else if (std::find(m_tblite_methods.begin(), m_tblite_methods.end(), m_method) != m_tblite_methods.end()) { // TBLite energy calculator requested
 #ifdef USE_TBLITE
         m_tblite = new TBLiteInterface(controller);
-        m_ecengine = [this](bool gradient) {
-            this->CalculateTBlite(gradient);
+        m_ecengine = [this](bool gradient, bool verbose) {
+            this->CalculateTBlite(gradient, verbose);
         };
 #else
         std::cout << "TBlite was not included ..." << std::endl;
@@ -51,11 +51,31 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
     } else if (std::find(m_xtb_methods.begin(), m_xtb_methods.end(), m_method) != m_xtb_methods.end()) { // XTB energy calculator requested
 #ifdef USE_XTB
         m_xtb = new XTBInterface(controller);
-        m_ecengine = [this](bool gradient) {
-            this->CalculateXTB(gradient);
+        m_ecengine = [this](bool gradient, bool verbose) {
+            this->CalculateXTB(gradient, verbose);
         };
 #else
         std::cout << "XTB was not included ..." << std::endl;
+        exit(1);
+#endif
+    } else if (std::find(m_d3_methods.begin(), m_d3_methods.end(), m_method) != m_d3_methods.end()) { // Just D4 energy calculator requested
+#ifdef USE_D3
+        m_d3 = new DFTD3Interface(controller);
+        m_ecengine = [this](bool gradient, bool verbose) {
+            this->CalculateD3(gradient, verbose);
+        };
+#else
+        std::cout << "D4 was not included ..." << std::endl;
+        exit(1);
+#endif
+    } else if (std::find(m_d4_methods.begin(), m_d4_methods.end(), m_method) != m_d4_methods.end()) { // Just D4 energy calculator requested
+#ifdef USE_D4
+        m_d4 = new DFTD4Interface(controller);
+        m_ecengine = [this](bool gradient, bool verbose) {
+            this->CalculateD4(gradient, verbose);
+        };
+#else
+        std::cout << "D4 was not included ..." << std::endl;
         exit(1);
 #endif
     } else { // Fall back to UFF?
@@ -74,6 +94,14 @@ EnergyCalculator::~EnergyCalculator()
     } else if (std::find(m_xtb_methods.begin(), m_xtb_methods.end(), m_method) != m_xtb_methods.end()) { // XTB energy calculator requested
 #ifdef USE_XTB
         delete m_xtb;
+#endif
+    } else if (std::find(m_d3_methods.begin(), m_d3_methods.end(), m_method) != m_d3_methods.end()) { // XTB energy calculator requested
+#ifdef USE_D3
+        delete m_d3;
+#endif
+    } else if (std::find(m_d4_methods.begin(), m_d4_methods.end(), m_method) != m_d4_methods.end()) { // XTB energy calculator requested
+#ifdef USE_D4
+        delete m_d4;
 #endif
     } else { // Fall back to UFF?
         delete m_uff;
@@ -121,6 +149,14 @@ void EnergyCalculator::setMolecule(const Molecule& molecule)
         else if (m_method.compare("gfnff") == 0)
             m_gfn = 66;
 #endif
+    } else if (std::find(m_d3_methods.begin(), m_d3_methods.end(), m_method) != m_d3_methods.end()) { // D3 energy calculator requested
+#ifdef USE_D3
+        m_d3->InitialiseMolecule(molecule.Atoms());
+#endif
+    } else if (std::find(m_d4_methods.begin(), m_d4_methods.end(), m_method) != m_d4_methods.end()) { // D4 energy calculator requested
+#ifdef USE_D4
+        m_d4->InitialiseMolecule(molecule, 1 / au);
+#endif
     } else { // Fall back to UFF?
     }
     m_initialised = true;
@@ -152,23 +188,28 @@ void EnergyCalculator::updateGeometry(const std::vector<double>& geometry)
         m_geometry[i][2] = geometry[3 * i + 2];
     }
 }
-
-double EnergyCalculator::CalculateEnergy(bool gradient)
+void EnergyCalculator::updateGeometry(const std::vector<std::array<double, 3>>& geometry)
 {
-    m_ecengine(gradient);
+    m_geometry = geometry;
+}
+
+double EnergyCalculator::CalculateEnergy(bool gradient, bool verbose)
+{
+    m_ecengine(gradient, verbose);
     return m_energy;
 }
 
-void EnergyCalculator::CalculateUFF(bool gradient)
+void EnergyCalculator::CalculateUFF(bool gradient, bool verbose)
 {
     m_uff->UpdateGeometry(m_geometry);
-    m_energy = m_uff->Calculate(true);
+    m_energy = m_uff->Calculate(gradient, verbose);
     if (gradient) {
         m_gradient = m_uff->Gradient();
+        // m_gradient = m_uff->NumGrad();
     }
 }
 
-void EnergyCalculator::CalculateTBlite(bool gradient)
+void EnergyCalculator::CalculateTBlite(bool gradient, bool verbose)
 {
 #ifdef USE_TBLITE
     double coord[3 * m_atoms];
@@ -192,7 +233,7 @@ void EnergyCalculator::CalculateTBlite(bool gradient)
 #endif
 }
 
-void EnergyCalculator::CalculateXTB(bool gradient)
+void EnergyCalculator::CalculateXTB(bool gradient, bool verbose)
 {
 #ifdef USE_XTB
     double coord[3 * m_atoms];
@@ -213,6 +254,44 @@ void EnergyCalculator::CalculateXTB(bool gradient)
         }
     } else
         m_energy = m_xtb->GFNCalculation(m_gfn);
+#endif
+}
+
+void EnergyCalculator::CalculateD3(bool gradient, bool verbose)
+{
+#ifdef USE_D3
+    for (int i = 0; i < m_atoms; ++i) {
+        m_d3->UpdateAtom(i, m_geometry[i][0], m_geometry[i][1], m_geometry[i][2]);
+    }
+    if (gradient) {
+        double grad[3 * m_atoms];
+        m_energy = m_d3->DFTD3Calculation(grad);
+        for (int i = 0; i < m_atoms; ++i) {
+            m_gradient[i][0] = grad[3 * i + 0] * au;
+            m_gradient[i][1] = grad[3 * i + 1] * au;
+            m_gradient[i][2] = grad[3 * i + 2] * au;
+        }
+    } else
+        m_energy = m_d3->DFTD3Calculation();
+#endif
+}
+
+void EnergyCalculator::CalculateD4(bool gradient, bool verbose)
+{
+#ifdef USE_D4
+    for (int i = 0; i < m_atoms; ++i) {
+        m_d4->UpdateAtom(i, m_geometry[i][0] / au, m_geometry[i][1] / au, m_geometry[i][2] / au);
+    }
+    if (gradient) {
+        double grad[3 * m_atoms];
+        m_energy = m_d4->DFTD4Calculation(grad);
+        for (int i = 0; i < m_atoms; ++i) {
+            m_gradient[i][0] = grad[3 * i + 0] * au;
+            m_gradient[i][1] = grad[3 * i + 1] * au;
+            m_gradient[i][2] = grad[3 * i + 2] * au;
+        }
+    } else
+        m_energy = m_d4->DFTD4Calculation();
 #endif
 }
 

@@ -39,7 +39,8 @@ static json CurcumaOptJson{
     { "Charge", 0 },
     { "Spin", 0 },
     { "SinglePoint", false },
-    { "optH", false }
+    { "optH", false },
+    { "serial", false }
 };
 
 const json OptJsonPrivate{
@@ -146,6 +147,7 @@ private:
     void LoadControlJson() override;
 
     void ProcessMolecules(const std::vector<Molecule>& molecule);
+    void ProcessMoleculesSerial(const std::vector<Molecule>& molecule);
 
     std::string m_filename, m_basename = "curcuma_job";
     std::string m_method = "UFF";
@@ -155,4 +157,5 @@ private:
     int m_threads = 1;
     double m_dE = 0.1, m_dRMSD = 0.01;
     int m_charge = 0, m_spin = 0;
+    int m_serial = false;
 };

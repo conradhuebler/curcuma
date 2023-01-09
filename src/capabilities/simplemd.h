@@ -25,7 +25,7 @@
 
 #include "src/capabilities/rmsdtraj.h"
 
-#include "src/core/energycalculator.h".h "
+#include "src/core/energycalculator.h"
 #include "src/core/molecule.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
@@ -43,7 +43,7 @@ static json CurcumaMDJson{
     { "centered", false },
     { "dump", 50 },
     { "print", 1000 },
-    { "unique", true },
+    { "unique", false },
     { "rmsd", 1.5 },
     { "opt", false },
     { "hmass", 4 },

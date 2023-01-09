@@ -10,20 +10,43 @@ git clones automatically some submodules.
 - [LBFGSpp](https://github.com/conradhuebler/LBFGSpp) a fork of [yixuan/LBFGSpp](https://github.com/yixuan/LBFGSpp/) provides LBFGS optimiser, the fork allows performing single step optimisation without resetting any calculated optimsation history
 - [XTB](https://github.com/conradhuebler/xtb) a fork of the [official xtb](https://github.com/grimme-lab/xtb) program for eXtended TightBinding - It is only used for GFN-FFF calculation. The adaptions in the fork suppress the output in the GFN-FF calculations. 
 - [tblite](https://github.com/tblite/tblite) eXtended TightBinding via tblite for GFN1 and GFN2 calculation
+- [simple-d3](https://github.com/dftd3/simple-dftd3) Dispersion Correction D3
+- [cpp-d4](https://github.com/conradhuebler/cpp-d4) Fork of the cpp-d4 repository for Dispersion Correction D4
 - [CxxThreadPool](https://github.com/conradhuebler/CxxThreadPool) - C++ Thread Pool for parallel calculation
 - [eigen](https://gitlab.com/libeigen/eigen) provides eigen C++ library for linear algebra. Eigen is not downloaded automatically, but will be fetched and updated if the build scripts in the **scripts** subdirectory are used.
 - [fmt](https://github.com/fmtlib/fmt) formatted console output
 
 Additionally, [nlohmann/json](https://github.com/nlohmann/json) is obtained via cmake.
 
-### Using xTB in curcuma is now again WIP
-xtb and tblite are automatically obtained during git clone, however it is not included in curcuma with the default compiler settings. Add '-DCOMPILE_XTB=true ' to the cmake command line to enable it. 
-Using xtb calculation in curcuma can be controlled for now as follows:
-- Add **-gfn 1** to run GFN1 calculation, **-gfn 66** to run GFN-FF calculation.
-- GFN1 and GFN2 calculation are thread-safe now, so parallel optimisation are possible now. However, the variable **OMP_NUM_THREADS** should be set to 1. Add **-thread 12** to run optimisation after docking with 12 threads. GFN-FF calculation will fail in parallel mode.
+### UFF, xTB and Dispersion Correction
+Curcuma has an interface to tblite, xtb as well simple-d3 and cpp-d4, enabling semiempirical calculations or combinations of UFF with D3, D4 and H4 (no parameters are adjusted yet). To use on of the methods, add **-method methodname** to your arguments:
 
-In addition to xTB, curcuma has now an unfinished prototype of the UFF (J. Am. Chem. Soc. (1992) 114(25) p. 10024-10035), with the  H4 hydrogen bond correction (J. Chem. Theory Comput. 8, 141-151 (2012)) included (same parameters as applied in case of PM6-D3 for now). Gradients in the force field are evaluated numerically.
-**Please cite xtb if used within curcuma! The most recent information can be found [here](https://github.com/grimme-lab/xtb#citations)!**
+UFF (default)
+- uff : Gradients are evaluated numerically.
+
+tblite methods:
+- gfn1
+- gfn2
+
+xtb methods:
+- gfnff
+- xtb-gfn1
+- xtb-gfn2
+
+Using only **d3** or **d4** should be possible. 
+ 
+**Please cite xtb, tblite etc if external methods are used within curcuma! The most recent information can be found at the respective gitub pages, some are listed below.
+UFF 
+- J. Am. Chem. Soc. (1992) 114(25) p. 10024-10035,
+- with the  H4 hydrogen bond correction (J. Chem. Theory Comput. 8, 141-151 (2012)) included (same parameters as applied in case of PM6-D3 for now). 
+D3:
+- J. Chem. Phys. 132, 154104 (2010); https://doi.org/10.1063/1.3382344
+
+D4:
+- E. Caldeweyher, C. Bannwarth and S. Grimme, J. Chem. Phys., 2017, 147, 034112. DOI: 10.1063/1.4993215
+- E. Caldeweyher, S. Ehlert, A. Hansen, H. Neugebauer, S. Spicher, C. Bannwarth and S. Grimme, J. Chem. Phys., 2019, 150, 154122. DOI: 10.1063/1.5090222
+
+Dispersion correction parameters are yet complicated to change, this will be improved sooner than later.
 
 ## Compiling
 To compile Curcuma you will need [CMake](https://cmake.org/download/) 3.15 or newer and a C++17-capable compiler, both gcc and icc (quite recent version) work.

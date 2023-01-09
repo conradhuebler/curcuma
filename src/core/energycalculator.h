@@ -29,6 +29,14 @@
 #include "src/core/xtbinterface.h"
 #endif
 
+#ifdef USE_D3
+#include "src/core/dftd3interface.h"
+#endif
+
+#ifdef USE_D4
+#include "src/core/dftd4interface.h"
+#endif
+
 #include "src/core/uff.h"
 
 #include <functional>
@@ -42,22 +50,30 @@ public:
 
     void updateGeometry(const double* coord);
     void updateGeometry(const std::vector<double>& geometry);
+    void updateGeometry(const std::vector<std::array<double, 3>>& geometry);
+
     void updateGeometry(const Eigen::VectorXd& geometry);
 
     void getGradient(double* coord);
     std::vector<std::array<double, 3>> getGradient() const { return m_gradient; }
 
-    double CalculateEnergy(bool gradient = false);
+    double CalculateEnergy(bool gradient = false, bool verbose = false);
 
 private:
     void InitialiseUFF();
-    void CalculateUFF(bool gradient);
+    void CalculateUFF(bool gradient, bool verbose = false);
 
     void InitialiseTBlite();
-    void CalculateTBlite(bool gradient);
+    void CalculateTBlite(bool gradient, bool verbose = false);
 
     void InitialiseXTB();
-    void CalculateXTB(bool gradient);
+    void CalculateXTB(bool gradient, bool verbose = false);
+
+    void InitialiseD4();
+    void CalculateD4(bool gradient, bool verbose = false);
+
+    void InitialiseD3();
+    void CalculateD3(bool gradient, bool verbose = false);
 
     json m_controller;
 
@@ -68,13 +84,20 @@ private:
 #ifdef USE_XTB
     XTBInterface* m_xtb;
 #endif
+#ifdef USE_D3
+    DFTD3Interface* m_d3;
+#endif
+#ifdef USE_D4
+    DFTD4Interface* m_d4;
+#endif
 
     UFF* m_uff;
     StringList m_uff_methods = { "uff" };
     StringList m_tblite_methods = { "gfn1", "gfn2" };
     StringList m_xtb_methods = { "gfnff", "xtb-gfn1", "xtb-gfn2" };
-
-    std::function<void(bool)> m_ecengine;
+    StringList m_d3_methods = { "d3" };
+    StringList m_d4_methods = { "d4" };
+    std::function<void(bool, bool)> m_ecengine;
     std::string m_method;
     std::vector<std::array<double, 3>> m_geometry, m_gradient;
     Matrix m_eigen_geometry, m_eigen_gradient;
