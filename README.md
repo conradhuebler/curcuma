@@ -35,7 +35,8 @@ xtb methods:
 
 Using only **d3** or **d4** should be possible. 
  
-**Please cite xtb, tblite etc if external methods are used within curcuma! The most recent information can be found at the respective gitub pages, some are listed below.
+Please cite xtb, tblite etc if external methods are used within curcuma! The most recent information can be found at the respective gitub pages, some are listed below.
+
 UFF 
 - J. Am. Chem. Soc. (1992) 114(25) p. 10024-10035,
 - with the  H4 hydrogen bond correction (J. Chem. Theory Comput. 8, 141-151 (2012)) included (same parameters as applied in case of PM6-D3 for now). 

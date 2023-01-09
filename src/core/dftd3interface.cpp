@@ -58,7 +58,7 @@ DFTD3Interface::~DFTD3Interface()
 
 void DFTD3Interface::PrintParameter() const
 {
-    std::cout << m_d3_s6 << " " << m_d3_s8 << " " << m_d3_s9 << " " << m_d3_a1 << " " << m_d3_a2 << " " << m_d3_alp << std::endl;
+    // std::cout << m_d3_s6 << " " << m_d3_s8 << " " << m_d3_s9 << " " << m_d3_a1 << " " << m_d3_a2 << " " << m_d3_alp << std::endl;
 }
 
 void DFTD3Interface::UpdateParameters(const json& controller)

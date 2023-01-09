@@ -19,3 +19,6 @@
 [submodule "external/cpp-d4"]
 	path = external/cpp-d4
 	url = https://github.com/conradhuebler/cpp-d4
+[submodule "external/simple-dftd3"]
+	path = external/simple-dftd3
+	url = https://github.com/dftd3/simple-dftd3

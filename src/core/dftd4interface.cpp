@@ -57,7 +57,7 @@ DFTD4Interface::~DFTD4Interface()
 
 void DFTD4Interface::PrintParameter() const
 {
-    std::cout << m_par.s8 << " " << m_par.s8 << " " << m_par.s9 << " " << m_par.s10 << " " << m_par.a1 << " " << m_par.a2 << " " << m_par.alp << std::endl;
+    // std::cout << m_par.s8 << " " << m_par.s8 << " " << m_par.s9 << " " << m_par.s10 << " " << m_par.a1 << " " << m_par.a2 << " " << m_par.alp << std::endl;
 }
 
 void DFTD4Interface::UpdateParameters(const json& controller)
@@ -102,16 +102,7 @@ double DFTD4Interface::DFTD4Calculation(double* grad)
     dftd4::TCutoff cutoff;
 
     int info;
-    /*
-    int charge;
-    std::cout << std::endl << std::endl;
-    for (int i = 0; i < atoms.size(); ++i) {
-        std::pair<int, Position> atom = m_molecule.Atom(i);
-        m_mol.UpdateAtom(i, atom.second(0) / au, atom.second(1) / au, atom.second(2) / au);
-    }*/
-    // m_mol.Print();
     info = dftd4::get_dispersion(m_mol, m_charge, m_par, cutoff, energy, grad);
-    // std::cout << energy << " " << info << std::endl;
     return energy;
 }
 
