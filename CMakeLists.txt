@@ -21,7 +21,7 @@ add_subdirectory(${PROJECT_SOURCE_DIR}/external/fmt EXCLUDE_FROM_ALL)
 include_directories(SYSTEM  ${PROJECT_SOURCE_DIR}/external/fmt/include
                             ${PROJECT_SOURCE_DIR}/external/LBFGSpp/include
                             ${PROJECT_SOURCE_DIR}/external/ripser
-                            ${PROJECT_SOURCE_DIR}/external/eigen
+                            ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0
                             ${PROJECT_SOURCE_DIR}/external/cpp-d4/include
                             ${PROJECT_SOURCE_DIR}/external/)
 include_directories(${PROJECT_SOURCE_DIR} ${PROJECT_BINARY_DIR} )
@@ -220,9 +220,12 @@ if(USE_TBLITE)
       )
       FetchContent_MakeAvailable("mctc-lib")
     endif()
-
+    if(NOT TARGET tblite-lib)
     add_subdirectory(external/tblite)
     include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/tblite/include)
+    elseif()
+ #       include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/tblite/include)
+    endif()
 
     add_executable(tblite_helper
            src/helpers/tblite_helper.cpp
