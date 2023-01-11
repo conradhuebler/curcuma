@@ -6,7 +6,7 @@ export CC="gcc-9"
 export FC="gfortran-9"
 
 #apt-get install libblas-dev checkinstall
-apt-get install liblapacke-dev checkinstall
+sudo apt-get install liblapacke-dev checkinstall
 
 git submodule init
 git submodule update --recursive
