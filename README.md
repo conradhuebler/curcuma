@@ -19,7 +19,7 @@ git clones automatically some submodules.
 Additionally, [nlohmann/json](https://github.com/nlohmann/json) is obtained via cmake.
 
 ### UFF, xTB and Dispersion Correction
-Curcuma has an interface to tblite, xtb as well simple-d3 and cpp-d4, enabling semiempirical calculations or combinations of UFF with D3, D4 and H4 (no parameters are adjusted yet). To use on of the methods, add **-method methodname** to your arguments:
+Curcuma has an interface to tblite, xtb as well simple-d3 and cpp-d4, enabling semiempirical calculations or combinations of UFF with D3, D4 and H4 (no parameters are adjusted yet). To use on of the methods, please add **-method methodname** to your arguments:
 
 UFF (default)
 - uff : Gradients are evaluated numerically.
@@ -353,12 +353,12 @@ Naturally, there are many more better fitting tools to perform molecular dynamic
 
 For example, using 
 ```sh
-curcuma -md input.xyz -gfn 66
+curcuma -md input.xyz -method gfnff
 ``` 
 the GFN-FF approach will be used.
 
 ```sh
-curcuma -md input.xyz -gfn 66 -T 500  -berendson 200 -dt 1 -hmass 1 -thermostat_steps 400 -velo 4 -maxtime 2e4 -dt 0.5 -impuls 500 -impuls_scaling 0.75
+curcuma -md input.xyz -method gfnff -T 500  -berendson 200 -dt 1 -hmass 1 -thermostat_steps 400 -velo 4 -maxtime 2e4 -dt 0.5 -impuls 500 -impuls_scaling 0.75
 ``` 
 will perform some kind of conformational search using GFN-FF. Results are stored in **input.unique.xyz**! Repeating it will result in other conformations and the previous results stored in **input.unique.xyz** will be overwritten. Bonds may break from time to time ...
 

@@ -5,7 +5,7 @@ export CXX="g++-9"
 export CC="gcc-9"
 export FC="gfortran-9"
 
-apt-get install libblas-dev checkinstall
+#apt-get install libblas-dev checkinstall
 apt-get install liblapacke-dev checkinstall
 
 git submodule init
