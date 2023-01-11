@@ -118,6 +118,8 @@ void UFF::Initialise()
                     double y_k = m_geometry[k][1] * m_au;
                     double z_k = m_geometry[k][2] * m_au;
                     double r_ik = sqrt((((x_i - x_k) * (x_i - x_k)) + ((y_i - y_k) * (y_i - y_k)) + ((z_i - z_k) * (z_i - z_k))));
+                    double r_jk = sqrt((((x_j - x_k) * (x_j - x_k)) + ((y_j - y_k) * (y_j - y_k)) + ((z_j - z_k) * (z_j - z_k))));
+
                     if (r_ik <= (Elements::CovalentRadius[m_atom_types[i]] + Elements::CovalentRadius[m_atom_types[k]]) * m_scaling * m_au) {
                         angels.insert({ i, j, k });
                         vdw_blacklist.push_back(std::vector<int>({ i, k }));
@@ -152,6 +154,41 @@ void UFF::Initialise()
                                 vdw_blacklist.push_back(std::vector<int>({ k, l }));
                             }
                         }
+                    }
+                    if (r_jk <= (Elements::CovalentRadius[m_atom_types[j]] + Elements::CovalentRadius[m_atom_types[k]]) * m_scaling * m_au) {
+                        angels.insert({ j, i, k });
+                        vdw_blacklist.push_back(std::vector<int>({ i, k }));
+                        vdw_blacklist.push_back(std::vector<int>({ j, k }));
+                        /*
+                                                for (int l = 0; l < m_atom_types.size(); ++l) {
+                                                    if (i == l || j == l || k == l)
+                                                        continue;
+
+                                                    double x_l = m_geometry[l][0] * m_au;
+                                                    double y_l = m_geometry[l][1] * m_au;
+                                                    double z_l = m_geometry[l][2] * m_au;
+                                                    double r_kl = sqrt((((x_l - x_k) * (x_l - x_k)) + ((y_l - y_k) * (y_l - y_k)) + ((z_l - z_k) * (z_l - z_k))));
+                                                    double r_jl = sqrt((((x_l - x_j) * (x_l - x_j)) + ((y_l - y_j) * (y_l - y_j)) + ((z_l - z_j) * (z_l - z_j))));
+                                                    double r_il = sqrt((((x_l - x_i) * (x_l - x_i)) + ((y_l - y_i) * (y_l - y_i)) + ((z_l - z_i) * (z_l - z_i))));
+                                                    if (r_kl <= (Elements::CovalentRadius[m_atom_types[l]] + Elements::CovalentRadius[m_atom_types[k]]) * m_scaling * m_au) {
+                                                        dihedrals.insert({ i, j, k, l });
+                                                        vdw_blacklist.push_back(std::vector<int>({ i, l }));
+                                                        vdw_blacklist.push_back(std::vector<int>({ j, l }));
+                                                        vdw_blacklist.push_back(std::vector<int>({ k, l }));
+                                                    }
+                                                    if (r_jl <= (Elements::CovalentRadius[m_atom_types[l]] + Elements::CovalentRadius[m_atom_types[j]]) * m_scaling) {
+                                                        dihedrals.insert({ l, i, j, k });
+                                                        vdw_blacklist.push_back(std::vector<int>({ i, l }));
+                                                        vdw_blacklist.push_back(std::vector<int>({ j, l }));
+                                                        vdw_blacklist.push_back(std::vector<int>({ k, l }));
+                                                    }
+                                                    if (r_il <= (Elements::CovalentRadius[m_atom_types[l]] + Elements::CovalentRadius[m_atom_types[i]]) * m_scaling) {
+                                                        inversions.insert({ j, i, k, l });
+                                                        vdw_blacklist.push_back(std::vector<int>({ i, l }));
+                                                        vdw_blacklist.push_back(std::vector<int>({ j, l }));
+                                                        vdw_blacklist.push_back(std::vector<int>({ k, l }));
+                                                    }
+                                                }*/
                     }
                 }
             } else
@@ -214,18 +251,36 @@ void UFF::Initialise()
         d.k = dihedral[2];
         d.l = dihedral[3];
 
-        d.n = 3;
+        d.n = 2;
         double f = pi / 180.0;
         double bond_order = 1;
+        d.V = 2;
+        d.n = 3;
+        d.phi0 = 180 * f;
+
         if (std::find(Conjugated.cbegin(), Conjugated.cend(), m_uff_atom_types[d.k]) != Conjugated.cend() && std::find(Conjugated.cbegin(), Conjugated.cend(), m_uff_atom_types[d.j]) != Conjugated.cend())
             bond_order = 2;
         else if (std::find(Triples.cbegin(), Triples.cend(), m_uff_atom_types[d.k]) != Triples.cend() || std::find(Triples.cbegin(), Triples.cend(), m_uff_atom_types[d.j]) != Triples.cend())
             bond_order = 3;
         else
             bond_order = 1;
-        if (m_coordination[d.j] == 4 && m_coordination[d.k] == 4) {
+
+        if (m_coordination[d.j] == 4 && m_coordination[d.k] == 4) // 2*sp3
+        {
             d.V = sqrt(UFFParameters[m_uff_atom_types[d.j]][cV] * UFFParameters[m_uff_atom_types[d.k]][cV]);
             d.phi0 = 180 * f;
+            d.n = 3;
+        }
+        if (m_coordination[d.j] == 3 && m_coordination[d.k] == 3) // 2*sp2
+        {
+            d.V = 5 * sqrt(UFFParameters[m_uff_atom_types[d.j]][cU] * UFFParameters[m_uff_atom_types[d.k]][cU]) * (1 + 4.18 * log(bond_order));
+            d.phi0 = 180 * f;
+            d.n = 2;
+        } else if ((m_coordination[d.j] == 4 && m_coordination[d.k] == 3) || (m_coordination[d.j] == 3 && m_coordination[d.k] == 4)) {
+            d.V = sqrt(UFFParameters[m_uff_atom_types[d.j]][cV] * UFFParameters[m_uff_atom_types[d.k]][cV]);
+            d.phi0 = 0 * f;
+            d.n = 6;
+
         } else {
             d.V = 5 * sqrt(UFFParameters[m_uff_atom_types[d.j]][cU] * UFFParameters[m_uff_atom_types[d.k]][cU]) * (1 + 4.18 * log(bond_order));
             d.phi0 = 90 * f;
@@ -994,7 +1049,7 @@ double UFF::BondRestLength(int i, int j, double n)
     double r_BO = -lambda * (cRi + cRj) * log(n);
     double r_EN = cRi * cRj * (sqrt(cXii) - sqrt(cXij)) * (sqrt(cXii) - sqrt(cXij)) / (cRi * cXii + cRj * cXij);
     double r_0 = cRi + cRj;
-    return (r_0 + r_BO + r_EN) * m_au;
+    return (r_0 + r_BO - r_EN) * m_au;
 }
 
 double UFF::Calculate(bool grd, bool verbose)
@@ -1214,10 +1269,11 @@ double UFF::Dihedral(const v& i, const v& j, const v& k, const v& l, double V, d
     double n_abc = Norm(nabc);
     double n_bcd = Norm(nbcd);
     double dotpr = DotProduct(nabc, nbcd);
-    double phi = acos(dotpr / (n_abc * n_bcd)) * 360 / 2.0 / pi;
-    double f = pi / 180.0;
-
-    double energy = (1 / 2.0 * V * (1 - cos(n * phi0) * cos(n * phi * f))) * m_final_factor * m_dihedral_scaling;
+    double phi = acos(dotpr / (n_abc * n_bcd)); //* 360 / 2.0 / pi;
+    // double f = pi / 180.0;
+    // std::cout << n_abc << " " << n_bcd << " " << dotpr << " " << n << std::endl;
+    // std::cout << phi* 360 / 2.0 / pi<< " " << phi << " " << phi0* 360 / 2.0 / pi << std::endl;
+    double energy = (1 / 2.0 * V * (1 - cos(n * phi0) * cos(n * phi))) * m_final_factor * m_dihedral_scaling;
     if (isnan(energy))
         return 0;
     else
@@ -1235,12 +1291,15 @@ double UFF::CalculateDihedral()
         const int j = dihedral.j;
         const int k = dihedral.k;
         const int l = dihedral.l;
+        // std::cout << i << " " << j << " " << k << " " << l << std::endl;
         v atom_i = { m_geometry[i] };
         v atom_j = { m_geometry[j] };
         v atom_k = { m_geometry[k] };
         v atom_l = { m_geometry[l] };
         energy += Dihedral(atom_i, atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0);
         if (m_CalculateGradient) {
+            //   std::cout << "gradient" << std::endl;
+
             m_gradient[i][0] += (Dihedral(AddVector(atom_i, dx), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dx), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
             m_gradient[i][1] += (Dihedral(AddVector(atom_i, dy), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dy), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
             m_gradient[i][2] += (Dihedral(AddVector(atom_i, dz), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dz), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
