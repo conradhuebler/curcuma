@@ -17,6 +17,7 @@ option (C17
     "Use C++ 17 Standard" ON)
 
 add_subdirectory(${PROJECT_SOURCE_DIR}/external/fmt EXCLUDE_FROM_ALL)
+set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
 include_directories(SYSTEM  ${PROJECT_SOURCE_DIR}/external/fmt/include
                             ${PROJECT_SOURCE_DIR}/external/LBFGSpp/include
@@ -265,8 +266,13 @@ if(USE_D3)
 endif()
 
 if(USE_D4)
-    find_package(LAPACKE REQUIRED)
-    find_package(CBLAS REQUIRED)
+    if(NOT DEFINED LIBS_DIR AND NOT DEFINED INCLUDE_DIR)
+  	find_package(LAPACKE REQUIRED)
+	find_package(CBLAS CONFIG REQUIRED)
+    endif(NOT DEFINED LIBS_DIR AND NOT DEFINED INCLUDE_DIR)
+    if(DEFINED LIBS_DIR AND DEFINED INCLUDE_DIR)
+	include_directories(${INCLUDE_DIR})
+    endif(DEFINED LIBS_DIR AND DEFINED INCLUDE_DIR)
 
     add_subdirectory(external/cpp-d4)
     add_executable(dftd4_helper
@@ -277,14 +283,21 @@ if(USE_D4)
     else()
         set_property(TARGET dftd4_helper PROPERTY CXX_STANDARD 14)
     endif(C17)
+    if(DEFINED LIBS_DIR AND DEFINED INCLUDE_DIR)
+    	link_directories(${LIBS_DIR})
+        target_link_libraries(dftd4_helper PRIVATE libcpp_d4 cblas lapacke pthread)
+    else()
     target_link_libraries(dftd4_helper PRIVATE libcpp_d4 ${LAPACKE_LIBRARIES}  ${CBLAS_LIBRARIES} pthread)
-
+    endif(DEFINED LIBS_DIR AND DEFINED INCLUDE_DIR)
     set(curcuma_d4_SRC
         src/core/dftd4interface.cpp
     )
     add_library(curcuma_d4  ${curcuma_d4_SRC})
-
-    target_link_libraries(curcuma_d4 PUBLIC libcpp_d4 ${LAPACKE_LIBRARIES}  ${CBLAS_LIBRARIES} )
+    if(DEFINED LIBS_DIR AND DEFINED INCLUDE_DIR)
+	    target_link_libraries(curcuma_d4 PUBLIC libcpp_d4 cblas lapacke )
+    else()
+	    target_link_libraries(curcuma_d4 PUBLIC libcpp_d4 ${LAPACKE_LIBRARIES}  ${CBLAS_LIBRARIES} )
+    endif(DEFINED LIBS_DIR AND DEFINED INCLUDE_DIR)
     target_link_libraries(curcuma_core curcuma_d4)
 endif()
 

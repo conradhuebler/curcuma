@@ -4,7 +4,7 @@ set -ex
 export CXX="g++-9"
 export CC="gcc-9"
 export FC="gfortran-9"
-export CMAKE_PREFIX_PATH=/usr/:/usr/lib/:/usr/include
+
 git submodule init
 git submodule update --recursive
 # check submodules, seems not to work automatically
@@ -38,7 +38,8 @@ cd ..
 
 mkdir -p release_xtb
 cd release_xtb
-cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo .. -DUSE_XTB=true -DUSE_TBLITE=true -DUSE_D3=true -DUSE_D4=true -DCMAKE_INSTALL_PREFIX=~/curcuma_xtb -DCMAKE_PREFIX_PATH=/usr/:/usr/lib/:/usr/include
+
+cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo .. -DUSE_XTB=true -DUSE_TBLITE=true -DUSE_D3=true -DUSE_D4=true -DCMAKE_INSTALL_PREFIX=~/curcuma_xtb -DLIBS_DIR=$(find /usr -name '*cblas.so' |head -n1 |sed 's/libcblas.so//g') -DINCLUDE_DIR=$(find /usr -name 'cblas.h' |head -n1 |sed 's/cblas.h//g')
 make 
 make install
 cd ..
