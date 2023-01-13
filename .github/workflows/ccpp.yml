@@ -26,7 +26,7 @@ jobs:
           release_name: Curcuma 0.0.${{ github.run_number }}
           draft: false
           prerelease: true
-  linux-18-04:
+  linux:
     needs: [makerelease]
     runs-on: ubuntu-18.04
     
@@ -55,7 +55,7 @@ jobs:
         asset_name: curcuma-nightly-${{ needs.makerelease.outputs.version }}-18_04-x86_64-Linux.AppImage
         asset_content_type: application/zip
         
-    linux-20-04:
+    linux:
       needs: [makerelease]
       runs-on: ubuntu-20.04
 
