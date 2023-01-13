@@ -59,6 +59,36 @@ public:
 
     double CalculateEnergy(bool gradient = false, bool verbose = false);
 
+    bool HasNan() const { return m_containsNaN; }
+
+#ifdef USE_TBLITE
+    TBLiteInterface* getTBLiterInterface() const
+    {
+        return m_tblite;
+    }
+#endif
+
+#ifdef USE_XTB
+    XTBInterface* getXTBInterface() const
+    {
+        return m_xtb;
+    }
+#endif
+
+#ifdef USE_D3
+    DFTD3Interface* getD3Interface() const
+    {
+        return m_d3;
+    }
+#endif
+
+#ifdef USE_D4
+    DFTD4Interface* getD4Interface() const
+    {
+        return m_d4;
+    }
+#endif
+
 private:
     void InitialiseUFF();
     void CalculateUFF(bool gradient, bool verbose = false);
@@ -78,22 +108,22 @@ private:
     json m_controller;
 
 #ifdef USE_TBLITE
-    TBLiteInterface* m_tblite;
+    TBLiteInterface* m_tblite = NULL;
 #endif
 
 #ifdef USE_XTB
-    XTBInterface* m_xtb;
+    XTBInterface* m_xtb = NULL;
 #endif
 #ifdef USE_D3
-    DFTD3Interface* m_d3;
+    DFTD3Interface* m_d3 = NULL;
 #endif
 #ifdef USE_D4
-    DFTD4Interface* m_d4;
+    DFTD4Interface* m_d4 = NULL;
 #endif
 
-    UFF* m_uff;
+    UFF* m_uff = NULL;
     StringList m_uff_methods = { "uff" };
-    StringList m_tblite_methods = { "gfn1", "gfn2" };
+    StringList m_tblite_methods = { "ipea1", "gfn1", "gfn2" };
     StringList m_xtb_methods = { "gfnff", "xtb-gfn1", "xtb-gfn2" };
     StringList m_d3_methods = { "d3" };
     StringList m_d4_methods = { "d4" };
@@ -109,4 +139,5 @@ private:
     int* m_atom_type;
 
     bool m_initialised = false;
+    bool m_containsNaN = false;
 };

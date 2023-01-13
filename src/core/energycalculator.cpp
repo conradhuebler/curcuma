@@ -114,7 +114,8 @@ void EnergyCalculator::setMolecule(const Molecule& molecule)
 
     // m_atom_type[m_atoms];
     std::vector<int> atoms = molecule.Atoms();
-    m_coord[3 * m_atoms];
+    m_coord = new double[3 * m_atoms];
+    m_grad = new double[3 * m_atoms];
     std::vector<std::array<double, 3>> geom(m_atoms);
     for (int i = 0; i < m_atoms; ++i) {
         std::pair<int, Position> atom = molecule.Atom(i);
@@ -169,6 +170,7 @@ void EnergyCalculator::updateGeometry(const Eigen::VectorXd& geometry)
         m_geometry[i][1] = geometry[3 * i + 1];
         m_geometry[i][2] = geometry[3 * i + 2];
     }
+    m_containsNaN = std::isnan(m_geometry[m_atoms - 1][0]);
 }
 
 void EnergyCalculator::updateGeometry(const double* coord)
@@ -178,6 +180,7 @@ void EnergyCalculator::updateGeometry(const double* coord)
         m_geometry[i][1] = coord[3 * i + 1];
         m_geometry[i][2] = coord[3 * i + 2];
     }
+    m_containsNaN = std::isnan(m_geometry[m_atoms - 1][0]);
 }
 
 void EnergyCalculator::updateGeometry(const std::vector<double>& geometry)
@@ -187,6 +190,7 @@ void EnergyCalculator::updateGeometry(const std::vector<double>& geometry)
         m_geometry[i][1] = geometry[3 * i + 1];
         m_geometry[i][2] = geometry[3 * i + 2];
     }
+    m_containsNaN = std::isnan(m_geometry[m_atoms - 1][0]);
 }
 void EnergyCalculator::updateGeometry(const std::vector<std::array<double, 3>>& geometry)
 {
@@ -212,21 +216,19 @@ void EnergyCalculator::CalculateUFF(bool gradient, bool verbose)
 void EnergyCalculator::CalculateTBlite(bool gradient, bool verbose)
 {
 #ifdef USE_TBLITE
-    double coord[3 * m_atoms];
     for (int i = 0; i < m_atoms; ++i) {
-        coord[3 * i + 0] = m_geometry[i][0] / au;
-        coord[3 * i + 1] = m_geometry[i][1] / au;
-        coord[3 * i + 2] = m_geometry[i][2] / au;
+        m_coord[3 * i + 0] = m_geometry[i][0] / au;
+        m_coord[3 * i + 1] = m_geometry[i][1] / au;
+        m_coord[3 * i + 2] = m_geometry[i][2] / au;
     }
-    m_tblite->UpdateMolecule(coord);
+    m_tblite->UpdateMolecule(m_coord);
 
     if (gradient) {
-        double grad[3 * m_atoms];
-        m_energy = m_tblite->GFNCalculation(m_gfn, grad);
+        m_energy = m_tblite->GFNCalculation(m_gfn, m_grad);
         for (int i = 0; i < m_atoms; ++i) {
-            m_gradient[i][0] = grad[3 * i + 0] * au;
-            m_gradient[i][1] = grad[3 * i + 1] * au;
-            m_gradient[i][2] = grad[3 * i + 2] * au;
+            m_gradient[i][0] = m_grad[3 * i + 0] * au;
+            m_gradient[i][1] = m_grad[3 * i + 1] * au;
+            m_gradient[i][2] = m_grad[3 * i + 2] * au;
         }
     } else
         m_energy = m_tblite->GFNCalculation(m_gfn);
@@ -236,21 +238,19 @@ void EnergyCalculator::CalculateTBlite(bool gradient, bool verbose)
 void EnergyCalculator::CalculateXTB(bool gradient, bool verbose)
 {
 #ifdef USE_XTB
-    double coord[3 * m_atoms];
     for (int i = 0; i < m_atoms; ++i) {
-        coord[3 * i + 0] = m_geometry[i][0] / au;
-        coord[3 * i + 1] = m_geometry[i][1] / au;
-        coord[3 * i + 2] = m_geometry[i][2] / au;
+        m_coord[3 * i + 0] = m_geometry[i][0] / au;
+        m_coord[3 * i + 1] = m_geometry[i][1] / au;
+        m_coord[3 * i + 2] = m_geometry[i][2] / au;
     }
-    m_xtb->UpdateMolecule(coord);
+    m_xtb->UpdateMolecule(m_coord);
 
     if (gradient) {
-        double grad[3 * m_atoms];
-        m_energy = m_xtb->GFNCalculation(m_gfn, grad);
+        m_energy = m_xtb->GFNCalculation(m_gfn, m_grad);
         for (int i = 0; i < m_atoms; ++i) {
-            m_gradient[i][0] = grad[3 * i + 0] * au;
-            m_gradient[i][1] = grad[3 * i + 1] * au;
-            m_gradient[i][2] = grad[3 * i + 2] * au;
+            m_gradient[i][0] = m_grad[3 * i + 0] * au;
+            m_gradient[i][1] = m_grad[3 * i + 1] * au;
+            m_gradient[i][2] = m_grad[3 * i + 2] * au;
         }
     } else
         m_energy = m_xtb->GFNCalculation(m_gfn);
@@ -264,12 +264,11 @@ void EnergyCalculator::CalculateD3(bool gradient, bool verbose)
         m_d3->UpdateAtom(i, m_geometry[i][0], m_geometry[i][1], m_geometry[i][2]);
     }
     if (gradient) {
-        double grad[3 * m_atoms];
-        m_energy = m_d3->DFTD3Calculation(grad);
+        m_energy = m_d3->DFTD3Calculation(m_grad);
         for (int i = 0; i < m_atoms; ++i) {
-            m_gradient[i][0] = grad[3 * i + 0] * au;
-            m_gradient[i][1] = grad[3 * i + 1] * au;
-            m_gradient[i][2] = grad[3 * i + 2] * au;
+            m_gradient[i][0] = m_grad[3 * i + 0] * au;
+            m_gradient[i][1] = m_grad[3 * i + 1] * au;
+            m_gradient[i][2] = m_grad[3 * i + 2] * au;
         }
     } else
         m_energy = m_d3->DFTD3Calculation();
@@ -283,12 +282,11 @@ void EnergyCalculator::CalculateD4(bool gradient, bool verbose)
         m_d4->UpdateAtom(i, m_geometry[i][0] / au, m_geometry[i][1] / au, m_geometry[i][2] / au);
     }
     if (gradient) {
-        double grad[3 * m_atoms];
-        m_energy = m_d4->DFTD4Calculation(grad);
+        m_energy = m_d4->DFTD4Calculation(m_grad);
         for (int i = 0; i < m_atoms; ++i) {
-            m_gradient[i][0] = grad[3 * i + 0] * au;
-            m_gradient[i][1] = grad[3 * i + 1] * au;
-            m_gradient[i][2] = grad[3 * i + 2] * au;
+            m_gradient[i][0] = m_grad[3 * i + 0] * au;
+            m_gradient[i][1] = m_grad[3 * i + 1] * au;
+            m_gradient[i][2] = m_grad[3 * i + 2] * au;
         }
     } else
         m_energy = m_d4->DFTD4Calculation();

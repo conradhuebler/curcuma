@@ -44,52 +44,55 @@ XTBInterface::~XTBInterface()
     xtb_delCalculator(&m_xtb_calc);
     xtb_delMolecule(&m_xtb_mol);
     xtb_delEnvironment(&m_env);
+    delete[] m_coord;
+    delete[] m_attyp;
 }
 
 bool XTBInterface::InitialiseMolecule(const Molecule& molecule)
 {
     if (m_initialised)
         UpdateMolecule(molecule);
-    int const natoms = molecule.AtomCount();
+    m_atomcount = molecule.AtomCount();
 
-    int attyp[natoms];
+    m_attyp = new int[m_atomcount];
     std::vector<int> atoms = molecule.Atoms();
-    double coord[3 * natoms];
+    m_coord = new double[3 * m_atomcount];
 
-    for (int i = 0; i < atoms.size(); ++i) {
+    for (int i = 0; i < m_atomcount; ++i) {
         std::pair<int, Position> atom = molecule.Atom(i);
-        coord[3 * i + 0] = atom.second(0) / au;
-        coord[3 * i + 1] = atom.second(1) / au;
-        coord[3 * i + 2] = atom.second(2) / au;
-        attyp[i] = atoms[i];
+        m_coord[3 * i + 0] = atom.second(0) / au;
+        m_coord[3 * i + 1] = atom.second(1) / au;
+        m_coord[3 * i + 2] = atom.second(2) / au;
+        m_attyp[i] = atoms[i];
     }
-    return InitialiseMolecule(attyp, coord, natoms, molecule.Charge(), molecule.Spin());
+    return InitialiseMolecule(m_attyp, m_coord, m_atomcount, molecule.Charge(), molecule.Spin());
 }
 
 bool XTBInterface::InitialiseMolecule(const Molecule* molecule)
 {
     if (m_initialised)
         UpdateMolecule(molecule);
-    int const natoms = molecule->AtomCount();
+    m_atomcount = molecule->AtomCount();
 
-    int attyp[natoms];
+    m_attyp = new int[m_atomcount];
     std::vector<int> atoms = molecule->Atoms();
-    double coord[3 * natoms];
+    m_coord = new double[3 * m_atomcount];
 
-    for (int i = 0; i < atoms.size(); ++i) {
+    for (int i = 0; i < m_atomcount; ++i) {
         std::pair<int, Position> atom = molecule->Atom(i);
-        coord[3 * i + 0] = atom.second(0) / au;
-        coord[3 * i + 1] = atom.second(1) / au;
-        coord[3 * i + 2] = atom.second(2) / au;
-        attyp[i] = atoms[i];
+        m_coord[3 * i + 0] = atom.second(0) / au;
+        m_coord[3 * i + 1] = atom.second(1) / au;
+        m_coord[3 * i + 2] = atom.second(2) / au;
+        m_attyp[i] = atoms[i];
     }
-    return InitialiseMolecule(attyp, coord, natoms, molecule->Charge(), molecule->Spin());
+    return InitialiseMolecule(m_attyp, m_coord, m_atomcount, molecule->Charge(), molecule->Spin());
 }
 
 bool XTBInterface::InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge, const int spin)
 {
     if (m_initialised)
         UpdateMolecule(coord);
+    m_atomcount = natoms;
 
     m_xtb_mol = xtb_newMolecule(m_env, &natoms, attyp, coord, &charge, &spin, NULL, NULL);
 
@@ -99,17 +102,13 @@ bool XTBInterface::InitialiseMolecule(const int* attyp, const double* coord, con
 
 bool XTBInterface::UpdateMolecule(const Molecule& molecule)
 {
-    int const natoms = molecule.AtomCount();
-    double coord[3 * natoms];
-
-    for (int i = 0; i < natoms; ++i) {
+    for (int i = 0; i < m_atomcount; ++i) {
         std::pair<int, Position> atom = molecule.Atom(i);
-        coord[3 * i + 0] = atom.second(0) / au;
-        coord[3 * i + 1] = atom.second(1) / au;
-        coord[3 * i + 2] = atom.second(2) / au;
+        m_coord[3 * i + 0] = atom.second(0) / au;
+        m_coord[3 * i + 1] = atom.second(1) / au;
+        m_coord[3 * i + 2] = atom.second(2) / au;
     }
-
-    return UpdateMolecule(coord);
+    return UpdateMolecule(m_coord);
 }
 
 bool XTBInterface::UpdateMolecule(const double* coord)

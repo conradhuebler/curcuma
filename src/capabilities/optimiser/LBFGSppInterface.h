@@ -46,6 +46,10 @@ public:
         double fx = 0.0;
         double charge = 0;
         m_interface->updateGeometry(x);
+        if (m_interface->HasNan()) {
+            m_error = true;
+            return 0;
+        }
         fx = m_interface->CalculateEnergy(true);
         auto gradient = m_interface->getGradient();
         m_error = std::isnan(fx);

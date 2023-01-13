@@ -82,25 +82,25 @@ private:
     void PrintStatus() const;
 
     /* Lets have this for all modules */
-    virtual nlohmann::json WriteRestartInformation();
+    virtual nlohmann::json WriteRestartInformation() override;
 
     /* Lets have this for all modules */
-    virtual bool LoadRestartInformation();
+    virtual bool LoadRestartInformation() override;
 
     bool LoadRestartInformation(const json& state);
 
-    virtual StringList MethodName() const
+    virtual StringList MethodName() const override
     {
         return { "MD" };
     }
 
     /* Lets have all methods read the input/control file */
-    virtual void ReadControlFile()
+    virtual void ReadControlFile() override
     {
     }
 
     /* Read Controller has to be implemented for all */
-    virtual void LoadControlJson();
+    virtual void LoadControlJson() override;
 
     void InitVelocities(double scaling = 1.0);
 
@@ -111,7 +111,7 @@ private:
     void PrintMatrix(const double* matrix);
 
     bool WriteGeometry();
-    void Integrator(double* coord, double* grad_prev, double* grad_next);
+    void Integrator(double* coord, double* grad_prev);
 
     void RemoveRotation(std::vector<double>& velo);
 
@@ -159,7 +159,7 @@ public:
     inline void setMolecule(const Molecule& molecule) { m_molecule = molecule; }
     SimpleMD* MDDriver() const { return m_mddriver; }
 
-    virtual int execute()
+    virtual int execute() override
     {
         m_mddriver = new SimpleMD(m_controller, false);
         m_mddriver->setMolecule(m_molecule);

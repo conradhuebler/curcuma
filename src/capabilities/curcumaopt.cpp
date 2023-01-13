@@ -303,6 +303,9 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
         old_parameter = parameter;
         try {
             solver.SingleStep(fun, parameter, fx);
+            if (fun.isError()) {
+                perform_optimisation = false;
+            }
         } catch (const std::logic_error& error_result) {
             if (solver.Step() < 1e-8) {
                 perform_optimisation = false;

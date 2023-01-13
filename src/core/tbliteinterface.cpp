@@ -30,12 +30,28 @@
 
 #include "tbliteinterface.h"
 
-TBLiteInterface::TBLiteInterface(const json& xtbsettings)
-    : m_tblitesettings(xtbsettings)
+TBLiteInterface::TBLiteInterface(const json& tblitesettings)
 {
+    m_tblitesettings = MergeJson(TBLiteSettings, tblitesettings);
+
+    m_acc = m_tblitesettings["tb_ac"];
+    m_maxiter = m_tblitesettings["tb_max_iter"];
+    m_damping = m_tblitesettings["tb_damping"];
+    m_temp = m_tblitesettings["tb_temp"];
+    m_verbose = m_tblitesettings["tb_verbose"];
+    std::string guess = m_tblitesettings["tb_guess"];
+    if (guess.compare("SAD") == 0)
+        m_guess = 0;
+    else if (guess.compare("EEQ") == 0)
+        m_guess = 1;
+    else
+        std::cout << "Dont know, ignoring ..." << std::endl;
+
     m_error = tblite_new_error();
     m_ctx = tblite_new_context();
     m_tblite_res = tblite_new_result();
+
+    tblite_set_context_verbosity(m_ctx, m_verbose);
 }
 
 TBLiteInterface::~TBLiteInterface()
@@ -45,46 +61,51 @@ TBLiteInterface::~TBLiteInterface()
     delete m_tblite_res;
     delete m_tblite_mol;
     delete m_tblite_calc;
+
+    delete[] m_coord;
+    delete[] m_attyp;
 }
 
 bool TBLiteInterface::InitialiseMolecule(const Molecule& molecule)
 {
     if (m_initialised)
         UpdateMolecule(molecule);
-    int const natoms = molecule.AtomCount();
+    m_atomcount = molecule.AtomCount();
+    m_attyp = new int[m_atomcount];
+    m_coord = new double[3 * m_atomcount];
 
-    int attyp[natoms];
     std::vector<int> atoms = molecule.Atoms();
-    double coord[3 * natoms];
 
-    for (int i = 0; i < atoms.size(); ++i) {
+    for (int i = 0; i < m_atomcount; ++i) {
         std::pair<int, Position> atom = molecule.Atom(i);
-        coord[3 * i + 0] = atom.second(0) / au;
-        coord[3 * i + 1] = atom.second(1) / au;
-        coord[3 * i + 2] = atom.second(2) / au;
-        attyp[i] = atoms[i];
+        m_coord[3 * i + 0] = atom.second(0) / au;
+        m_coord[3 * i + 1] = atom.second(1) / au;
+        m_coord[3 * i + 2] = atom.second(2) / au;
+        m_attyp[i] = atoms[i];
     }
-    return InitialiseMolecule(attyp, coord, natoms, molecule.Charge(), molecule.Spin());
+    bool init = InitialiseMolecule(m_attyp, m_coord, m_atomcount, molecule.Charge(), molecule.Spin());
+
+    return init;
 }
 
 bool TBLiteInterface::InitialiseMolecule(const Molecule* molecule)
 {
     if (m_initialised)
         UpdateMolecule(molecule);
-    int const natoms = molecule->AtomCount();
+    m_atomcount = molecule->AtomCount();
 
-    int attyp[natoms];
     std::vector<int> atoms = molecule->Atoms();
-    double coord[3 * natoms];
+    m_attyp = new int[m_atomcount];
+    m_coord = new double[3 * m_atomcount];
 
-    for (int i = 0; i < atoms.size(); ++i) {
+    for (int i = 0; i < m_atomcount; ++i) {
         std::pair<int, Position> atom = molecule->Atom(i);
-        coord[3 * i + 0] = atom.second(0) / au;
-        coord[3 * i + 1] = atom.second(1) / au;
-        coord[3 * i + 2] = atom.second(2) / au;
-        attyp[i] = atoms[i];
+        m_coord[3 * i + 0] = atom.second(0) / au;
+        m_coord[3 * i + 1] = atom.second(1) / au;
+        m_coord[3 * i + 2] = atom.second(2) / au;
+        m_attyp[i] = atoms[i];
     }
-    return InitialiseMolecule(attyp, coord, natoms, molecule->Charge(), molecule->Spin());
+    return InitialiseMolecule(m_attyp, m_coord, m_atomcount, molecule->Charge(), molecule->Spin());
 }
 
 bool TBLiteInterface::InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge, const int spin)
@@ -92,7 +113,7 @@ bool TBLiteInterface::InitialiseMolecule(const int* attyp, const double* coord, 
     if (m_initialised)
         UpdateMolecule(coord);
 
-    m_tblite_mol = tblite_new_structure(m_error, natoms, attyp, coord, &charge, &spin, NULL, NULL);
+    m_tblite_mol = tblite_new_structure(m_error, m_atomcount, attyp, coord, &charge, &spin, NULL, NULL);
 
     m_initialised = true;
     return true;
@@ -100,17 +121,14 @@ bool TBLiteInterface::InitialiseMolecule(const int* attyp, const double* coord, 
 
 bool TBLiteInterface::UpdateMolecule(const Molecule& molecule)
 {
-    int const natoms = molecule.AtomCount();
-    double coord[3 * natoms];
-
-    for (int i = 0; i < natoms; ++i) {
+    m_atomcount = molecule.AtomCount();
+    for (int i = 0; i < m_atomcount; ++i) {
         std::pair<int, Position> atom = molecule.Atom(i);
-        coord[3 * i + 0] = atom.second(0) / au;
-        coord[3 * i + 1] = atom.second(1) / au;
-        coord[3 * i + 2] = atom.second(2) / au;
+        m_coord[3 * i + 0] = atom.second(0) / au;
+        m_coord[3 * i + 1] = atom.second(1) / au;
+        m_coord[3 * i + 2] = atom.second(2) / au;
     }
-
-    return UpdateMolecule(coord);
+    return UpdateMolecule(m_coord);
 }
 
 bool TBLiteInterface::UpdateMolecule(const double* coord)
@@ -122,7 +140,6 @@ bool TBLiteInterface::UpdateMolecule(const double* coord)
 double TBLiteInterface::GFNCalculation(int parameter, double* grad)
 {
     double energy = 0;
-    tblite_set_context_verbosity(m_ctx, 0);
     if (parameter == 0) {
         m_tblite_calc = tblite_new_ipea1_calculator(m_ctx, m_tblite_mol);
     } else if (parameter == 1) {
@@ -130,9 +147,16 @@ double TBLiteInterface::GFNCalculation(int parameter, double* grad)
     } else if (parameter == 2) {
         m_tblite_calc = tblite_new_gfn2_calculator(m_ctx, m_tblite_mol);
     }
-    //  tblite_set_calculator_accuracy(m_ctx, m_tblite_calc, Json2KeyWord<double>(m_tblitesettings, "calculator_accuracy"));
-    //  tblite_set_calculator_max_iter(m_ctx, m_tblite_calc, Json2KeyWord<int>(m_tblitesettings, "calculator_max_iter"));
+    if (m_guess == 0)
+        tblite_set_calculator_guess(m_ctx, m_tblite_calc, TBLITE_GUESS_SAD);
+    else
+        tblite_set_calculator_guess(m_ctx, m_tblite_calc, TBLITE_GUESS_EEQ);
 
+    tblite_set_calculator_accuracy(m_ctx, m_tblite_calc, m_acc);
+    tblite_set_calculator_max_iter(m_ctx, m_tblite_calc, m_maxiter);
+    tblite_set_calculator_mixer_damping(m_ctx, m_tblite_calc, m_damping);
+    tblite_set_calculator_temperature(m_ctx, m_tblite_calc, m_temp);
+    tblite_set_calculator_save_integrals(m_ctx, m_tblite_calc, 0);
     tblite_get_singlepoint(m_ctx, m_tblite_mol, m_tblite_calc, m_tblite_res);
     tblite_get_result_energy(m_error, m_tblite_res, &energy);
 
@@ -144,4 +168,30 @@ double TBLiteInterface::GFNCalculation(int parameter, double* grad)
 
 void TBLiteInterface::clear()
 {
+}
+
+std::vector<double> TBLiteInterface::Charges() const
+{
+    std::vector<double> charges(m_atomcount);
+    double* c = new double[m_atomcount];
+    tblite_get_result_charges(m_error, m_tblite_res, c);
+    for (int i = 0; i < m_atomcount; ++i)
+        charges[i] = c[i];
+    delete[] c;
+    return charges;
+}
+
+std::vector<std::vector<double>> TBLiteInterface::BondOrders() const
+{
+    std::vector<std::vector<double>> bond_orders(m_atomcount);
+    double* bonds = new double[m_atomcount * m_atomcount];
+    tblite_get_result_bond_orders(m_error, m_tblite_res, bonds);
+    for (int i = 0; i < m_atomcount; ++i) {
+        std::vector<double> b(m_atomcount);
+        for (int j = 0; j < m_atomcount; ++j)
+            b[j] = bonds[i * j];
+        bond_orders[i] = b;
+    }
+    delete[] bonds;
+    return bond_orders;
 }

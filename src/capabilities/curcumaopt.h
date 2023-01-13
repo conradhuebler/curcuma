@@ -60,7 +60,7 @@ public:
 
     inline void setMolecule(const Molecule& molecule) { m_molecule = molecule; }
     inline Molecule getMolecule() const { return m_final; }
-    virtual int execute();
+    virtual int execute() override;
 
     inline void setController(const json& controller) { m_controller = controller; }
     std::string Output() const { return m_result; }
@@ -78,7 +78,7 @@ public:
     OptThread() = default;
     ~OptThread() = default;
 
-    int execute();
+    int execute() override;
 };
 
 class CurcumaOpt : public CurcumaMethod {

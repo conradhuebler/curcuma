@@ -409,13 +409,14 @@ void SimpleMD::start()
         return;
     auto unix_timestamp = std::chrono::seconds(std::time(NULL));
     m_unix_started = std::chrono::milliseconds(unix_timestamp).count();
-    double coord[3 * m_natoms];
-    double gradient_prev[3 * m_natoms], gradient_current[3 * m_natoms];
+    double* coord = new double[3 * m_natoms];
+    double* gradient_prev = new double[3 * m_natoms];
+    // double *gradient_current = new double[3 * m_natoms];
     std::vector<json> states;
     for (int i = 0; i < 3 * m_natoms; ++i) {
         coord[i] = m_current_geometry[i];
         gradient_prev[i] = 0;
-        gradient_current[i] = 0;
+        //    gradient_current[i] = 0;
     }
 
 #ifdef GCC
@@ -481,7 +482,7 @@ void SimpleMD::start()
                 PrintStatus();
             }
         }
-        Integrator(coord, gradient_prev, gradient_current);
+        Integrator(coord, gradient_prev);
         m_Ekin = EKin();
 
         if ((m_step && m_step % m_print == 0)) {
@@ -506,9 +507,12 @@ void SimpleMD::start()
         m_currentStep += m_timestep;
     }
     // PrintStatus();
+    delete[] coord;
+    delete[] gradient_prev;
+    // delete [] gradient_current;
 }
 
-void SimpleMD::Integrator(double* coord, double* grad_prev, double* grad_next)
+void SimpleMD::Integrator(double* coord, double* grad_prev)
 {
     /*
      * This code was taken and adopted from the xtb sources

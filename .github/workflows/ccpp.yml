@@ -36,7 +36,7 @@ jobs:
         submodules: true
     - uses: awalsh128/cache-apt-pkgs-action@latest
       with:
-        packages: liblapacke-dev libatlas-base-dev
+        packages: liblapacke-dev libatlas-base-dev libopenblas-dev libblas-dev liblapack-dev
         version: 1.0
     - name: Update Modules and Build
       run: sh scripts/build_unix_github.sh
@@ -65,7 +65,7 @@ jobs:
         submodules: true
     - uses: awalsh128/cache-apt-pkgs-action@latest
       with:
-        packages: liblapacke-dev libatlas-base-dev
+        packages: liblapacke-dev libatlas-base-dev libopenblas-dev libblas-dev liblapack-dev
         version: 1.0
     - name: Update Modules and Build
       run: sh scripts/build_unix_github.sh

@@ -83,10 +83,10 @@ IF(CMAKE_COMPILER_IS_GNUCXX)
                                            -Wcomment -Wdisabled-optimization \
                                            -Wformat  -Wformat=2 -Wformat-nonliteral -Wformat-security\
                                            -Wformat-y2k  -Wimport  -Winit-self  -Winline -Winvalid-pch\
-                                           -Wunsafe-loop-optimizations  -Wmissing-braces\
+                                           -Wunsafe-loop-optimizations  -Wno-missing-braces\
                                            -Wmissing-field-initializers -Wmissing-format-attribute  \
                                            -Wmissing-include-dirs -Wmissing-noreturn -Wpacked  -Wparentheses\
-                                           -Wpointer-arith -Wredundant-decls -Wsequence-point\
+                                           -Wpointer-arith -Wno-redundant-decls -Wsequence-point\
                                            -Wsign-compare  -Wstack-protector -Wstrict-aliasing\
                                            -Wstrict-aliasing=2 -Wswitch -Wsuggest-override\
                                            -Wtrigraphs  -Wuninitialized -Wunknown-pragmas  -Wunreachable-code\
@@ -300,7 +300,6 @@ if(USE_D4)
     endif(DEFINED LIBS_DIR AND DEFINED INCLUDE_DIR)
     target_link_libraries(curcuma_core curcuma_d4)
 endif()
-
 
 target_link_libraries(curcuma_core pthread fmt::fmt-header-only)
 

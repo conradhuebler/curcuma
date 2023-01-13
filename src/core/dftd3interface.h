@@ -26,14 +26,16 @@
 #include "src/core/molecule.h"
 
 static json DFTD3Settings{
-    { "d_s6", 1.00 },
-    { "d_s8", 0.7875 },
+    { "d_s6", 0 },
+    { "d_s8", 0 },
     { "d_s9", 0 },
-    { "d_a1", 0.4289 },
-    { "d_a2", 4.4407 },
-    { "d_alp", 14 },
+    { "d_a1", 0 },
+    { "d_a2", 0 },
+    { "d_alp", 0 },
+    { "d_bet", 8 },
     { "d_func", "pbe0" },
-    { "d_atm", true }
+    { "d_atm", false },
+    { "d_damping", "bj" }
 };
 
 class DFTD3Interface {
@@ -51,12 +53,8 @@ public:
     void UpdateGeometry(const double* coord);
 
     void PrintParameter() const;
-    inline void UpdateAtom(int index, double x, double y, double z)
-    {
-        m_geom[3 * index + 0] = x;
-        m_geom[3 * index + 1] = y;
-        m_geom[3 * index + 2] = z;
-    }
+    void UpdateAtom(int index, double x, double y, double z);
+
     inline double ParameterA1() const { return m_d3_a1; }
     inline double ParameterA2() const { return m_d3_a2; }
     inline double ParameterAlp() const { return m_d3_alp; }
@@ -65,9 +63,12 @@ public:
     inline double ParameterS9() const { return m_d3_s9; }
 
 private:
+    std::string m_damping;
+    std::string m_functional;
+
     int m_charge = 0;
-    int m_natoms;
-    std::vector<double> m_geom;
+    double* m_coord;
+    int* m_attyp;
 
     double m_d3_a1 = 1;
     double m_d3_a2 = 1;
@@ -77,8 +78,9 @@ private:
     double m_d3_s8 = 1;
     double m_d3_s9 = 1;
 
+    double m_bet = 8;
+    bool m_atm = false;
     dftd3_error m_error;
     dftd3_structure m_mol;
     dftd3_model m_disp;
-    dftd3_param m_param;
 };

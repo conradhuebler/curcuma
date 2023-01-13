@@ -55,8 +55,10 @@ public:
     void clear();
 
 private:
+    int m_atomcount = 0;
     double m_thr = 1.0e-10;
-
+    double* m_coord;
+    int* m_attyp;
     xtb_TEnvironment m_env = NULL;
     xtb_TMolecule m_xtb_mol = NULL;
     xtb_TCalculator m_xtb_calc = NULL;

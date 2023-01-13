@@ -57,7 +57,7 @@ public:
     RMSDTraj(const json& controller = RMSDTrajJson, bool silent = true);
     virtual ~RMSDTraj();
 
-    virtual bool Initialise();
+    virtual bool Initialise() override;
 
     void setBaseName(const std::string& name) { m_filename = name; }
     void setFile(const std::string& filename) { m_filename = filename; }
