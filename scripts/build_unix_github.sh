@@ -39,7 +39,9 @@ cd ..
 mkdir -p release_xtb
 cd release_xtb
 
-cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo .. -DUSE_XTB=true -DUSE_TBLITE=true -DUSE_D3=true -DUSE_D4=true -DCMAKE_INSTALL_PREFIX=~/curcuma_xtb -DLIBS_DIR=$(find /usr -name '*cblas.so' |head -n1 |sed 's/libcblas.so//g') -DINCLUDE_DIR=$(find /usr -name 'cblas.h' |head -n1 |sed 's/cblas.h//g')
+#cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo .. -DUSE_XTB=true -DUSE_TBLITE=true -DUSE_D3=true -DUSE_D4=true -DCMAKE_INSTALL_PREFIX=~/curcuma_xtb -DLIBS_DIR=$(find /usr -name '*cblas.so' |head -n1 |sed 's/libcblas.so//g') -DINCLUDE_DIR=$(find /usr -name 'cblas.h' |head -n1 |sed 's/cblas.h//g')
+cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo .. -DUSE_XTB=true -DUSE_TBLITE=true -DUSE_D3=true -DUSE_D4=true -DCMAKE_INSTALL_PREFIX=~/curcuma_xtb -DLIBS_DIR=/usr/lib/x86_64-linux-gnu/ -DINCLUDE_DIR=$(find /usr -name 'cblas.h' |head -n1 |sed 's/cblas.h//g')
+
 make 
 make install
 cd ..

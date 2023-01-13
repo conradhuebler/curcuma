@@ -26,7 +26,7 @@ jobs:
           release_name: Curcuma 0.0.${{ github.run_number }}
           draft: false
           prerelease: true
-  linux:
+  linux-18-04:
     needs: [makerelease]
     runs-on: ubuntu-18.04
     
@@ -52,7 +52,34 @@ jobs:
       with:
         upload_url: ${{ needs.makerelease.outputs.url }}
         asset_path: ./package/curcuma-nightly-x86_64.AppImage
-        asset_name: curcuma-nightly-${{ needs.makerelease.outputs.version }}-x86_64-Linux.AppImage
+        asset_name: curcuma-nightly-${{ needs.makerelease.outputs.version }}-18_04-x86_64-Linux.AppImage
         asset_content_type: application/zip
         
+    linux-20-04:
+      needs: [makerelease]
+      runs-on: ubuntu-20.04
 
+      steps:
+      - uses: actions/checkout@v1
+        with:
+          submodules: true
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: liblapacke-dev libatlas-base-dev
+          version: 1.0
+      - name: Update Modules and Build
+        run: sh scripts/build_unix_github.sh
+
+      - name: Deploy
+        run: sh scripts/deploy_unix_github_20_04.sh
+
+      - name: Upload Release Asset
+        id: upload-release-asset-20-04
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.makerelease.outputs.url }}
+          asset_path: ./package/curcuma-nightly-x86_64.AppImage
+          asset_name: curcuma-nightly-${{ needs.makerelease.outputs.version }}-20_04-x86_64-Linux.AppImage
+          asset_content_type: application/zip
