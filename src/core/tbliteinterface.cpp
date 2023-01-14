@@ -113,7 +113,7 @@ bool TBLiteInterface::InitialiseMolecule(const int* attyp, const double* coord, 
     if (m_initialised)
         UpdateMolecule(coord);
 
-    m_tblite_mol = tblite_new_structure(m_error, m_atomcount, attyp, coord, &charge, &spin, NULL, NULL);
+    m_tblite_mol = tblite_new_structure(m_error, natoms, attyp, coord, &charge, &spin, NULL, NULL);
 
     m_initialised = true;
     return true;

@@ -16,6 +16,9 @@ option (USE_D4
 option (C17
     "Use C++ 17 Standard" ON)
 
+option (Helper
+    "Helper apps for interfaces" OFF)
+
 add_subdirectory(${PROJECT_SOURCE_DIR}/external/fmt EXCLUDE_FROM_ALL)
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
@@ -187,9 +190,11 @@ if(USE_XTB)
       FetchContent_MakeAvailable("mctc-lib")
     endif()
 
-    add_executable(xtb_helper
-            src/helpers/xtb_helper.cpp
+    if(HELPERS)
+	add_executable(xtb_helper
+        	src/helpers/xtb_helper.cpp
             )
+
     if(C17)
         set_property(TARGET xtb_helper PROPERTY CXX_STANDARD 17)
     else()
@@ -197,7 +202,7 @@ if(USE_XTB)
     endif(C17)
 
     target_link_libraries(xtb_helper lib-xtb-shared pthread dl)
-
+    endif()
     set(curcuma_xtb_SRC
         src/core/xtbinterface.cpp
     )
@@ -227,7 +232,7 @@ if(USE_TBLITE)
     elseif()
  #       include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/tblite/include)
     endif()
-
+    if(HELPERS)
     add_executable(tblite_helper
            src/helpers/tblite_helper.cpp
     )
@@ -236,8 +241,8 @@ if(USE_TBLITE)
     else()
         set_property(TARGET tblite_helper PROPERTY CXX_STANDARD 14)
     endif(C17)
-    target_link_libraries(tblite_helper PRIVATE tblite-lib gfortran pthread)
-
+    target_link_libraries(tblite_helper PUBLIC tblite-lib gfortran pthread)
+    endif()
     set(curcuma_tblite_SRC
         src/core/tbliteinterface.cpp
     )
@@ -251,18 +256,18 @@ if(USE_D3)
     if(NOT TARGET s-dftd3)
         add_subdirectory(external/simple-dftd3)
     endif()
-
-    add_executable(dftd3_helper
+    if(HELPERS)
+        add_executable(dftd3_helper
            src/helpers/dftd3_helper.cpp
     )
-    target_link_libraries(dftd3_helper PRIVATE s-dftd3 gfortran pthread)
-
+    target_link_libraries(dftd3_helper PUBLIC s-dftd3 gfortran pthread) 
+    endif()
     set(curcuma_D3_SRC
            src/core/dftd3interface.cpp
     )
     add_library(curcuma_D3  ${curcuma_D3_SRC})
-    target_link_libraries(curcuma_D3 PUBLIC s-dftd3 gfortran pthread)
-    target_link_libraries(curcuma_core curcuma_D3)
+    target_link_libraries(curcuma_D3 s-dftd3)
+    target_link_libraries(curcuma_core curcuma_D3 gfortran pthread)
 endif()
 
 if(USE_D4)
@@ -275,6 +280,7 @@ if(USE_D4)
     endif(DEFINED LIBS_DIR AND DEFINED INCLUDE_DIR)
 
     add_subdirectory(external/cpp-d4)
+    if(HELPERS)
     add_executable(dftd4_helper
         src/helpers/dftd4_helper.cpp
         )
@@ -289,6 +295,8 @@ if(USE_D4)
     else()
     target_link_libraries(dftd4_helper PRIVATE libcpp_d4 ${LAPACKE_LIBRARIES}  ${CBLAS_LIBRARIES} pthread)
     endif(DEFINED LIBS_DIR AND DEFINED INCLUDE_DIR)
+    endif()
+
     set(curcuma_d4_SRC
         src/core/dftd4interface.cpp
     )

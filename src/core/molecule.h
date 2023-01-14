@@ -57,6 +57,9 @@ class Molecule
     Molecule();
     ~Molecule();
 
+    Molecule& operator=(const Molecule& molecule);
+    Molecule& operator=(const Molecule* molecule);
+
     void print_geom(bool moreinfo = true) const;
     void printFragmente();
     void printAtom(int i) const;

@@ -59,6 +59,18 @@ Molecule::Molecule(const Molecule& other)
     m_spin = other.m_spin;
 }
 
+Molecule& Molecule::operator=(const Molecule& other)
+{
+    m_geometry = other.m_geometry;
+    m_charge = other.m_charge;
+    m_fragments = other.m_fragments;
+    m_atoms = other.m_atoms;
+    m_name = other.m_name;
+    m_energy = other.m_energy;
+    m_spin = other.m_spin;
+    return *this;
+}
+
 Molecule::Molecule(const Molecule* other)
 {
     m_geometry = other->m_geometry;
@@ -68,6 +80,17 @@ Molecule::Molecule(const Molecule* other)
     m_name = other->m_name;
     m_energy = other->m_energy;
     m_spin = other->m_spin;
+}
+Molecule& Molecule::operator=(const Molecule* other)
+{
+    m_geometry = other->m_geometry;
+    m_charge = other->m_charge;
+    m_fragments = other->m_fragments;
+    m_atoms = other->m_atoms;
+    m_name = other->m_name;
+    m_energy = other->m_energy;
+    m_spin = other->m_spin;
+    return *this;
 }
 
 Molecule::Molecule(const Mol& other)
