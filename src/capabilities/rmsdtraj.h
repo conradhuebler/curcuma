@@ -49,7 +49,8 @@ const json RMSDTrajJson{
     { "noreorder", true },
     { "opt", false },
     { "filter", false },
-    { "writeRMSD", true }
+    { "writeRMSD", true },
+    { "offset", 0 }
 };
 
 class RMSDTraj : public CurcumaMethod {
@@ -103,6 +104,9 @@ private:
     /* Lets have all methods read the input/control file */
     void ReadControlFile() override {}
 
+    void ProcessSingleFile();
+    void CompareTrajectories();
+
     std::string m_filename, m_reference, m_second_file, m_outfile;
     std::ofstream m_rmsd_file, m_pca_file, m_pairwise_file;
     std::vector<Molecule*> m_stored_structures;
@@ -113,6 +117,7 @@ private:
     int m_currentIndex = 0;
     int m_atoms = -1;
     int m_max_lines = -1;
+    int m_offset = 0;
     bool m_writeUnique = false, m_pairwise = false, m_heavy = false, m_pcafile = false, m_writeAligned = false, m_ref_first = false, m_opt = false, m_filter = false, m_writeRMSD = true;
     bool m_allxyz = false;
     double m_rmsd_threshold = 1.0;

@@ -682,6 +682,7 @@ json UFF::writeParameter() const
     parameters["inversion_scaling"] = m_inversion_scaling;
     parameters["vdw_scaling"] = m_vdw_scaling;
     parameters["rep_scaling"] = m_rep_scaling;
+    parameters["dihedral_scaling"] = m_dihedral_scaling;
 
     parameters["coulomb_scaling"] = m_coulmob_scaling;
 
@@ -735,6 +736,7 @@ json UFF::writeUFF() const
     parameters["inversion_scaling"] = m_inversion_scaling;
     parameters["vdw_scaling"] = m_vdw_scaling;
     parameters["rep_scaling"] = m_rep_scaling;
+    parameters["dihedral_scaling"] = m_dihedral_scaling;
 
     parameters["coulomb_scaling"] = m_coulmob_scaling;
 
@@ -827,7 +829,7 @@ void UFF::readParameter(const json& parameters)
     while (m_gradient.size() < m_atom_types.size())
         m_gradient.push_back({ 0, 0, 0 });
 
-    m_d = parameters["differential"].get<double>();
+        //  m_d = parameters["differential"].get<double>();
 
 #ifdef USE_D3
     if (m_use_d3)
@@ -971,6 +973,13 @@ void UFF::readParameterFile(const std::string& file)
 
 void UFF::UpdateGeometry(const double* coord)
 {
+    if (m_gradient.size() != m_atom_types.size()) {
+        m_h4correction.allocate(m_atom_types.size());
+
+        while (m_gradient.size() < m_atom_types.size())
+            m_gradient.push_back({ 0, 0, 0 });
+    }
+
     for (int i = 0; i < m_atom_types.size(); ++i) {
         m_geometry[i][0] = coord[3 * i] * au;
         m_geometry[i][1] = coord[3 * i + 1] * au;
@@ -982,6 +991,12 @@ void UFF::UpdateGeometry(const double* coord)
 
 void UFF::UpdateGeometry(const std::vector<std::array<double, 3>>& geometry)
 {
+    if (m_gradient.size() != m_atom_types.size()) {
+        m_h4correction.allocate(m_atom_types.size());
+
+        while (m_gradient.size() < m_atom_types.size())
+            m_gradient.push_back({ 0, 0, 0 });
+    }
     for (int i = 0; i < m_atom_types.size(); ++i) {
         m_geometry[i] = geometry[i]; // coord[3 * i] * au;
         m_gradient[i] = { 0, 0, 0 };

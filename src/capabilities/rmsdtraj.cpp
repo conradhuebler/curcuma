@@ -1,6 +1,6 @@
 /*
  * <Trajectory RMSD Analyse. >
- * Copyright (C) 2020 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -132,6 +132,14 @@ bool RMSDTraj::Initialise()
     return true;
 }
 void RMSDTraj::start()
+{
+    if (m_second_file.compare("none") == 0)
+        ProcessSingleFile();
+    else
+        CompareTrajectories();
+}
+
+void RMSDTraj::ProcessSingleFile()
 {
     //  Molecule mol(m_atoms, 0);
     //  Molecule mol_2(m_atoms, 0);
@@ -279,6 +287,52 @@ bool RMSDTraj::CheckMolecule(Molecule* molecule)
     return result;
 }
 
+void RMSDTraj::CompareTrajectories()
+{
+    FileIterator file1(m_filename);
+    FileIterator file2(m_second_file);
+
+    json RMSDJsonControl = {
+        { "reorder", false },
+        { "check", false },
+        { "heavy", false },
+        { "fragment", -1 },
+        { "fragment_reference", -1 },
+        { "fragment_target", -1 },
+        { "init", -1 },
+        { "pt", 0 },
+        { "silent", true },
+        { "storage", 1.0 },
+        { "method", "incr" },
+        //{ "noreorder", m_noreorder },
+        { "threads", 1 }
+    };
+    m_driver = new RMSDDriver(RMSDJsonControl);
+    m_driver->setProtons(!m_heavy);
+    m_driver->setForceReorder(false);
+    m_driver->setCheckConnections(false);
+    m_driver->setFragment(m_fragment);
+
+    while (!file1.AtEnd() && !file2.AtEnd()) {
+        Molecule* mol1 = new Molecule(file1.Next());
+        Molecule* mol2 = new Molecule(file2.Next());
+
+        //   std::cout << molecule->Atom(0).second.transpose() << std::endl;
+        m_driver->setReference(*mol1);
+        m_driver->setTarget(*mol2);
+        m_driver->start();
+
+        double rmsd = m_driver->RMSD();
+        m_rmsd_vector.push_back(rmsd);
+        std::cout << rmsd << std::endl;
+        delete mol1;
+        delete mol2;
+        if (CheckStop())
+            break;
+    }
+    PostAnalyse();
+}
+
 void RMSDTraj::PostAnalyse()
 {
     double rmsd_mean = Tools::mean(m_rmsd_vector);
@@ -317,6 +371,7 @@ void RMSDTraj::LoadControlJson()
     m_opt = Json2KeyWord<bool>(m_defaults, "opt");
     m_filter = Json2KeyWord<bool>(m_defaults, "filter");
     m_writeRMSD = Json2KeyWord<bool>(m_defaults, "writeRMSD");
+    m_offset = m_defaults["offset"];
 }
 
 void RMSDTraj::Optimise()

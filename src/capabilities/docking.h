@@ -51,7 +51,7 @@ public:
     inline void setPosition(const Position& position) { m_position = position; }
     inline void setRotation(const Position& rotation) { m_rotation = rotation; }
 
-    inline int execute()
+    inline int execute() override
     {
         std::pair<Position, Position> pair = OptimiseAnchor(&m_host, m_guest, m_position, m_rotation);
         m_last_position = pair.first;

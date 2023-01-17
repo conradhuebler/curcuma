@@ -21,6 +21,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -62,7 +63,7 @@ void SimpleMD::LoadControlJson()
     m_charge = Json2KeyWord<int>(m_defaults, "charge");
     m_single_step = Json2KeyWord<double>(m_defaults, "dT"); // * fs2amu;
     m_maxtime = Json2KeyWord<double>(m_defaults, "MaxTime") * fs2amu;
-    m_temperatur = Json2KeyWord<double>(m_defaults, "T");
+    m_T0 = Json2KeyWord<double>(m_defaults, "T");
     m_centered = Json2KeyWord<bool>(m_defaults, "centered");
     m_dumb = Json2KeyWord<int>(m_defaults, "dump");
     m_print = Json2KeyWord<int>(m_defaults, "print");
@@ -81,12 +82,31 @@ void SimpleMD::LoadControlJson()
     m_berendson = Json2KeyWord<double>(m_defaults, "berendson") * m_single_step;
     if (m_berendson < m_timestep * m_single_step)
         m_berendson = m_timestep * m_single_step;
+
     m_writeXYZ = Json2KeyWord<bool>(m_defaults, "writeXYZ");
+    m_writeinit = Json2KeyWord<bool>(m_defaults, "writeinit");
+    m_initfile = Json2KeyWord<std::string>(m_defaults, "initfile");
+    m_norestart = Json2KeyWord<bool>(m_defaults, "norestart");
+    m_dt2 = m_timestep * m_timestep;
 }
 
 bool SimpleMD::Initialise()
 {
-    LoadRestartInformation();
+    if (!m_norestart)
+        LoadRestartInformation();
+    if (m_initfile.compare("none") != 0) {
+        json md;
+        std::ifstream restart_file(m_basename + ".init.json");
+        try {
+            restart_file >> md;
+        } catch (nlohmann::json::type_error& e) {
+            throw 404;
+        } catch (nlohmann::json::parse_error& e) {
+            throw 404;
+        }
+        LoadRestartInformation(md);
+        m_restart = true;
+    }
     if (m_molecule.AtomCount() == 0)
         return false;
 
@@ -101,7 +121,6 @@ bool SimpleMD::Initialise()
     m_mass = std::vector<double>(3 * m_natoms, 0);
     m_atomtype = std::vector<int>(m_natoms, 0);
 
-    srand(time(NULL));
     if (!m_restart) {
         m_current_geometry = std::vector<double>(3 * m_natoms, 0);
         m_velocities = std::vector<double>(3 * m_natoms, 0);
@@ -134,17 +153,6 @@ bool SimpleMD::Initialise()
             m_current_geometry[3 * i + 0] = pos(0) / 1;
             m_current_geometry[3 * i + 1] = pos(1) / 1;
             m_current_geometry[3 * i + 2] = pos(2) / 1;
-            /*
-                        double factor;
-
-                        if (m_atomtype[i] == 1)
-                            factor = sqrt(kb * m_temperatur / (Elements::AtomicMass[m_atomtype[i]] * m_hmass * amu2au)) * 2;
-                        else
-                            factor = sqrt(kb * m_temperatur / (Elements::AtomicMass[m_atomtype[i]] * amu2au)) * 2;
-
-                        m_velocities[3 * i + 0] = ((rand() / double(RAND_MAX) * 2) - 1) * factor;
-                        m_velocities[3 * i + 1] = ((rand() / double(RAND_MAX) * 2) - 1) * factor;
-                        m_velocities[3 * i + 2] = ((rand() / double(RAND_MAX) * 2) - 1) * factor;*/
         }
         if (m_atomtype[i] == 1) {
             m_mass[3 * i + 0] = Elements::AtomicMass[m_atomtype[i]] * amu2au * m_hmass;
@@ -156,9 +164,10 @@ bool SimpleMD::Initialise()
             m_mass[3 * i + 2] = Elements::AtomicMass[m_atomtype[i]] * amu2au;
         }
     }
-    if (!m_restart)
+    if (!m_restart) {
         InitVelocities(m_scale_velo);
-
+        PrintStatus();
+    }
     m_molecule.setCharge(m_charge);
     m_molecule.setSpin(m_spin);
     m_interface->setMolecule(m_molecule);
@@ -173,7 +182,13 @@ bool SimpleMD::Initialise()
         m_unqiue->Initialise();
     }
     InitConstrainedBonds();
-
+    if (m_writeinit) {
+        json init = WriteRestartInformation();
+        std::ofstream result_file;
+        result_file.open(m_basename + ".init.json");
+        result_file << init;
+        result_file.close();
+    }
     m_initialised = true;
     return true;
 }
@@ -194,16 +209,24 @@ void SimpleMD::InitConstrainedBonds()
 
 void SimpleMD::InitVelocities(double scaling)
 {
+    std::random_device rd{};
+    std::mt19937 gen{ rd() };
+    double sigma = 1;
+    std::normal_distribution<> d{ 0, sigma };
+    double Px = 0.0, Py = 0.0, Pz = 0.0;
     for (int i = 0; i < m_natoms; ++i) {
-        double factor;
-        if (m_atomtype[i] == 1)
-            factor = sqrt(kb * m_temperatur / (Elements::AtomicMass[m_atomtype[i]] * m_hmass * amu2au)) * scaling;
-        else
-            factor = sqrt(kb * m_temperatur / (Elements::AtomicMass[m_atomtype[i]] * amu2au)) * scaling;
-
-        m_velocities[3 * i + 0] = ((rand() / double(RAND_MAX) * 2) - 1) * factor;
-        m_velocities[3 * i + 1] = ((rand() / double(RAND_MAX) * 2) - 1) * factor;
-        m_velocities[3 * i + 2] = ((rand() / double(RAND_MAX) * 2) - 1) * factor;
+        double v0 = sqrt(kb * m_T0 / (m_mass[i])) * scaling;
+        m_velocities[3 * i + 0] = v0 * d(gen);
+        m_velocities[3 * i + 1] = v0 * d(gen);
+        m_velocities[3 * i + 2] = v0 * d(gen);
+        Px += m_velocities[3 * i + 0] * m_mass[i];
+        Py += m_velocities[3 * i + 1] * m_mass[i];
+        Pz += m_velocities[3 * i + 2] * m_mass[i];
+    }
+    for (int i = 0; i < m_natoms; ++i) {
+        m_velocities[3 * i + 0] -= Px / (m_mass[i] * m_natoms);
+        m_velocities[3 * i + 1] -= Py / (m_mass[i] * m_natoms);
+        m_velocities[3 * i + 2] -= Pz / (m_mass[i] * m_natoms);
     }
 }
 
@@ -213,7 +236,7 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["method"] = m_method;
     restart["dT"] = m_timestep;
     restart["MaxTime"] = m_maxtime;
-    restart["T"] = m_temperatur;
+    restart["T"] = m_T0;
     restart["currentStep"] = m_currentStep;
     restart["velocities"] = Tools::DoubleVector2String(m_velocities);
     restart["geometry"] = Tools::DoubleVector2String(m_current_geometry);
@@ -279,7 +302,7 @@ bool SimpleMD::LoadRestartInformation()
         } catch (json::type_error& e) {
         }
         try {
-            m_temperatur = md["T"];
+            m_T0 = md["T"];
         } catch (json::type_error& e) {
         }
         try {
@@ -347,7 +370,7 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     } catch (json::type_error& e) {
     }
     try {
-        m_temperatur = state["T"];
+        m_T0 = state["T"];
     } catch (json::type_error& e) {
     }
     try {
@@ -411,12 +434,10 @@ void SimpleMD::start()
     m_unix_started = std::chrono::milliseconds(unix_timestamp).count();
     double* coord = new double[3 * m_natoms];
     double* gradient_prev = new double[3 * m_natoms];
-    // double *gradient_current = new double[3 * m_natoms];
     std::vector<json> states;
     for (int i = 0; i < 3 * m_natoms; ++i) {
         coord[i] = m_current_geometry[i];
         gradient_prev[i] = 0;
-        //    gradient_current[i] = 0;
     }
 
 #ifdef GCC
@@ -482,16 +503,18 @@ void SimpleMD::start()
                 PrintStatus();
             }
         }
-        Integrator(coord, gradient_prev);
+        Verlet(coord, gradient_prev);
+
+        if (m_step % m_thermostat_steps == 0) {
+            Berendson();
+        }
         m_Ekin = EKin();
 
         if ((m_step && m_step % m_print == 0)) {
             m_Etot = m_Epot + m_Ekin;
             PrintStatus();
         }
-        if (m_step % m_thermostat_steps == 0) {
-            Berendson();
-        }
+
         if (m_impuls > m_T) {
             InitVelocities(m_scale_velo * m_impuls_scaling);
             m_Ekin = EKin();
@@ -512,15 +535,9 @@ void SimpleMD::start()
     // delete [] gradient_current;
 }
 
-void SimpleMD::Integrator(double* coord, double* grad_prev)
+void SimpleMD::Verlet(double* coord, double* grad)
 {
-    /*
-     * This code was taken and adopted from the xtb sources
-     * https://github.com/grimme-lab/xtb/blob/main/src/dynamic.f90
-     * Special thanks to the developers
-     */
     std::vector<double> acc(3 * m_natoms), velon(3 * m_natoms);
-    Geometry geometry = m_molecule.getGeometry();
     for (int i = 0; i < 3 * m_natoms; ++i) {
         velon[i] = m_velocities[i];
     }
@@ -528,15 +545,21 @@ void SimpleMD::Integrator(double* coord, double* grad_prev)
         RemoveRotation(velon);
 
     for (int i = 0; i < 3 * m_natoms; ++i) {
-        acc[i] = -grad_prev[i] / m_mass[i];
-        velon[i] = velon[i] + m_timestep * acc[i];
-        m_velocities[i] = velon[i];
-
-        m_current_geometry[i] += m_timestep * velon[i];
-        coord[i] = m_current_geometry[i];
+        coord[i] = m_current_geometry[i] - m_timestep * velon[i] - 0.5 * grad[i] / m_mass[i] * m_dt2;
+        m_velocities[i] = velon[i] + 0.5 * m_timestep * grad[i] / m_mass[i];
+        m_current_geometry[i] = coord[i];
     }
+    m_Epot = Gradient(coord, grad);
 
-    m_Epot = Gradient(coord, grad_prev);
+    double ekin = 0.0;
+    for (int i = 0; i < m_natoms; ++i) {
+        m_velocities[3 * i + 0] = m_velocities[3 * i + 0] + 0.5 * m_timestep * grad[3 * i + 0] / m_mass[3 * i + 0];
+        m_velocities[3 * i + 1] = m_velocities[3 * i + 1] + 0.5 * m_timestep * grad[3 * i + 1] / m_mass[3 * i + 1];
+        m_velocities[3 * i + 2] = m_velocities[3 * i + 2] + 0.5 * m_timestep * grad[3 * i + 2] / m_mass[3 * i + 2];
+        ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
+    }
+    ekin *= 0.5;
+    m_T = 2.0 * ekin / (kb * 3 * m_natoms);
 }
 
 void SimpleMD::RemoveRotation(std::vector<double>& velo)
@@ -731,7 +754,7 @@ bool SimpleMD::WriteGeometry()
     */
     if (m_writeXYZ) {
         m_molecule.setEnergy(m_Epot);
-        m_molecule.setName(std::to_string(m_currentStep));
+        m_molecule.setName(std::to_string(m_currentStep / fs2amu));
         /*
         if (m_centered)
             m_molecule.Center();
@@ -750,12 +773,7 @@ bool SimpleMD::WriteGeometry()
 
 void SimpleMD::Berendson()
 {
-    double lambda = sqrt(1 + m_timestep / m_berendson * (m_temperatur / m_T - 1));
-    /*
-    std::cout << " *** Applying thermostat " << lambda <<  " ***" << std::endl;
-    if(!(m_step && m_step % m_print == 0))
-        PrintStatus();
-    */
+    double lambda = sqrt(1 + (m_timestep * (m_T0 - m_T)) / (m_T * m_berendson));
     for (int i = 0; i < 3 * m_natoms; ++i) {
         m_velocities[i] *= lambda;
     }

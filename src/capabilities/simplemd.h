@@ -54,7 +54,10 @@ static json CurcumaMDJson{
     { "MaxTopoDiff", 15 },
     { "impuls", 0 },
     { "method", "uff" },
-    { "impuls_scaling", 0.75 }
+    { "impuls_scaling", 0.75 },
+    { "writeinit", false },
+    { "initfile", "none" },
+    { "norestart", false }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -111,7 +114,7 @@ private:
     void PrintMatrix(const double* matrix);
 
     bool WriteGeometry();
-    void Integrator(double* coord, double* grad_prev);
+    void Verlet(double* coord, double* grad);
 
     void RemoveRotation(std::vector<double>& velo);
 
@@ -129,20 +132,20 @@ private:
     double m_single_step = 1;
     double m_timestep = 0.5, m_currentStep = 0, m_maxtime = 1000;
     int m_spin = 0, m_charge = 0, m_print = 100;
-    double m_temperatur = 298.13, m_aver_Temp = 0, m_rmsd = 1.5;
+    double m_T0 = 298.13, m_aver_Temp = 0, m_rmsd = 1.5;
     std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient;
     std::vector<int> m_atomtype;
     Molecule m_molecule;
-    bool m_initialised = false, m_restart = false, m_centered = false, m_writeUnique = true, m_opt = false, m_rescue = false, m_writeXYZ = true;
+    bool m_initialised = false, m_restart = false, m_centered = false, m_writeUnique = true, m_opt = false, m_rescue = false, m_writeXYZ = true, m_writeinit = false, m_norestart = false;
     EnergyCalculator* m_interface;
     RMSDTraj* m_unqiue;
     const std::vector<double> m_used_mass;
     int m_unix_started = 0, m_prev_index = 0, m_thermostat_steps = 10, m_max_rescue = 10, m_current_rescue = 0, m_currentTime = 0, m_max_top_diff = 15, m_step = 0;
     double m_pos_conv = 0, m_scale_velo = 1.0, m_berendson = 1;
-    double m_impuls = 0, m_impuls_scaling = 0.75;
+    double m_impuls = 0, m_impuls_scaling = 0.75, m_dt2 = 0;
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;
-    std::string m_method = "UFF";
+    std::string m_method = "UFF", m_initfile = "none";
 };
 
 class MDThread : public CxxThread {

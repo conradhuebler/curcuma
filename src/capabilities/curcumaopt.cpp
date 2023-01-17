@@ -171,7 +171,8 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
         std::cout << thread->Output();
 
         Molecule* mol2 = new Molecule(thread->getMolecule());
-        mol2->appendXYZFile(Optfile());
+        if (!m_singlepoint)
+            mol2->appendXYZFile(Optfile());
         m_molecules.push_back(Molecule(mol2));
         if (m_writeXYZ) {
             for (const auto& m : *(thread->Intermediates()))

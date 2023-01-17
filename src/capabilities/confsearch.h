@@ -53,9 +53,9 @@ public:
     ~ConfSearch();
 
     void setFile(const std::string& file);
-    virtual bool Initialise();
+    virtual bool Initialise() override;
 
-    virtual void start();
+    virtual void start() override;
 
 private:
     std::string PerformMolecularDynamics(const std::vector<Molecule*>& molecules, const nlohmann::json& parameter);
@@ -65,21 +65,21 @@ private:
     std::string PerformFilter(const std::string& filename, const nlohmann::json& parameter);
 
     /* Lets have this for all modules */
-    virtual nlohmann::json WriteRestartInformation();
+    virtual nlohmann::json WriteRestartInformation() override;
 
     /* Lets have this for all modules */
-    virtual bool LoadRestartInformation();
+    virtual bool LoadRestartInformation() override;
 
-    virtual StringList MethodName() const
+    virtual StringList MethodName() const override
     {
         return { "ConfSearch" };
     }
 
     /* Lets have all methods read the input/control file */
-    virtual void ReadControlFile();
+    virtual void ReadControlFile() override;
 
     /* Read Controller has to be implemented for all */
-    virtual void LoadControlJson();
+    virtual void LoadControlJson() override;
 
     StringList m_error_list;
     std::string m_filename, m_basename;
