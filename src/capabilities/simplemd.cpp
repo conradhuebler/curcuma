@@ -1,6 +1,6 @@
 /*
  * <Simple MD Module for Cucuma. >
- * Copyright (C) 2020 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -61,15 +61,13 @@ void SimpleMD::LoadControlJson()
     m_method = Json2KeyWord<std::string>(m_defaults, "method");
     m_spin = Json2KeyWord<int>(m_defaults, "spin");
     m_charge = Json2KeyWord<int>(m_defaults, "charge");
-    m_single_step = Json2KeyWord<double>(m_defaults, "dT"); // * fs2amu;
-    m_maxtime = Json2KeyWord<double>(m_defaults, "MaxTime") * fs2amu;
+    m_timestep = Json2KeyWord<double>(m_defaults, "dT");
+    m_maxtime = Json2KeyWord<double>(m_defaults, "MaxTime");
     m_T0 = Json2KeyWord<double>(m_defaults, "T");
     m_centered = Json2KeyWord<bool>(m_defaults, "centered");
     m_dumb = Json2KeyWord<int>(m_defaults, "dump");
     m_print = Json2KeyWord<int>(m_defaults, "print");
     m_max_top_diff = Json2KeyWord<int>(m_defaults, "MaxTopoDiff");
-    m_timestep = m_single_step * fs2amu;
-    m_berendson = m_timestep; // Automatically choose Velocity Rescaling
 
     m_rmsd = Json2KeyWord<double>(m_defaults, "rmsd");
     m_impuls = Json2KeyWord<double>(m_defaults, "impuls");
@@ -78,10 +76,9 @@ void SimpleMD::LoadControlJson()
     m_opt = Json2KeyWord<bool>(m_defaults, "opt");
     m_scale_velo = Json2KeyWord<double>(m_defaults, "velo");
     m_rescue = Json2KeyWord<bool>(m_defaults, "rescue");
-    m_thermostat_steps = Json2KeyWord<int>(m_defaults, "thermostat_steps");
-    m_berendson = Json2KeyWord<double>(m_defaults, "berendson") * m_single_step;
-    if (m_berendson < m_timestep * m_single_step)
-        m_berendson = m_timestep * m_single_step;
+    m_berendson = Json2KeyWord<double>(m_defaults, "berendson");
+    if (m_berendson < m_timestep)
+        m_berendson = m_timestep;
 
     m_writeXYZ = Json2KeyWord<bool>(m_defaults, "writeXYZ");
     m_writeinit = Json2KeyWord<bool>(m_defaults, "writeinit");
@@ -125,26 +122,22 @@ bool SimpleMD::Initialise()
         m_current_geometry = std::vector<double>(3 * m_natoms, 0);
         m_velocities = std::vector<double>(3 * m_natoms, 0);
         m_currentStep = 0;
-    } else {
-        //   std::cout << Tools::DoubleVector2String(m_current_geometry)  << std::endl;
-        //   std::cout << Tools::DoubleVector2String(m_velocities)  << std::endl;
     }
-    /*
+
     if(m_opt)
     {
         json js = CurcumaOptJson;
         js["writeXYZ"] = false;
-        js["gfn"] = m_gfn;
+        js["method"] = m_method;
         CurcumaOpt optimise(js, true);
         optimise.addMolecule(&m_molecule);
         optimise.start();
         auto mol = optimise.Molecules();
         std::cout << mol->size() << std::endl;
         auto molecule = ((*mol)[0]);
-        for(int i = 0; i < molecule.AtomCount(); ++i)
-            m_current_geometry[i] = molecule.Atom(i).second;
+        m_molecule.setGeometry(molecule.getGeometry());
     }
-    */
+
     for (int i = 0; i < m_natoms; ++i) {
         m_atomtype[i] = m_molecule.Atom(i).first;
 
@@ -155,18 +148,17 @@ bool SimpleMD::Initialise()
             m_current_geometry[3 * i + 2] = pos(2) / 1;
         }
         if (m_atomtype[i] == 1) {
-            m_mass[3 * i + 0] = Elements::AtomicMass[m_atomtype[i]] * amu2au * m_hmass;
-            m_mass[3 * i + 1] = Elements::AtomicMass[m_atomtype[i]] * amu2au * m_hmass;
-            m_mass[3 * i + 2] = Elements::AtomicMass[m_atomtype[i]] * amu2au * m_hmass;
+            m_mass[3 * i + 0] = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
+            m_mass[3 * i + 1] = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
+            m_mass[3 * i + 2] = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
         } else {
-            m_mass[3 * i + 0] = Elements::AtomicMass[m_atomtype[i]] * amu2au;
-            m_mass[3 * i + 1] = Elements::AtomicMass[m_atomtype[i]] * amu2au;
-            m_mass[3 * i + 2] = Elements::AtomicMass[m_atomtype[i]] * amu2au;
+            m_mass[3 * i + 0] = Elements::AtomicMass[m_atomtype[i]];
+            m_mass[3 * i + 1] = Elements::AtomicMass[m_atomtype[i]];
+            m_mass[3 * i + 2] = Elements::AtomicMass[m_atomtype[i]];
         }
     }
     if (!m_restart) {
         InitVelocities(m_scale_velo);
-        PrintStatus();
     }
     m_molecule.setCharge(m_charge);
     m_molecule.setSpin(m_spin);
@@ -211,11 +203,10 @@ void SimpleMD::InitVelocities(double scaling)
 {
     std::random_device rd{};
     std::mt19937 gen{ rd() };
-    double sigma = 1;
-    std::normal_distribution<> d{ 0, sigma };
+    std::normal_distribution<> d{ 0, 1 };
     double Px = 0.0, Py = 0.0, Pz = 0.0;
     for (int i = 0; i < m_natoms; ++i) {
-        double v0 = sqrt(kb * m_T0 / (m_mass[i])) * scaling;
+        double v0 = sqrt(kb * m_T0 * amu2au / (m_mass[i])) * scaling / fs2amu;
         m_velocities[3 * i + 0] = v0 * d(gen);
         m_velocities[3 * i + 1] = v0 * d(gen);
         m_velocities[3 * i + 2] = v0 * d(gen);
@@ -246,7 +237,6 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["average_Ekin"] = m_aver_Ekin;
     restart["average_Etot"] = m_aver_Etot;
     restart["berendson"] = m_berendson;
-    restart["thermostat_steps"] = m_thermostat_steps;
     restart["MaxTopoDiff"] = m_max_top_diff;
     restart["impuls"] = m_impuls;
     restart["impuls_scaling"] = m_impuls_scaling;
@@ -282,69 +272,6 @@ bool SimpleMD::LoadRestartInformation()
             continue;
         }
         return LoadRestartInformation(md);
-        /*
-        std::string geometry, velocities;
-
-        try {
-            m_gfn = md["GFN"];
-        } catch (json::type_error& e) {
-        }
-        try {
-            m_timestep = md["dT"];
-        } catch (json::type_error& e) {
-        }
-        try {
-            m_maxsteps = md["MaxSteps"];
-        } catch (json::type_error& e) {
-        }
-        try {
-            m_centered = md["centered"];
-        } catch (json::type_error& e) {
-        }
-        try {
-            m_T0 = md["T"];
-        } catch (json::type_error& e) {
-        }
-        try {
-            m_currentStep = md["currentStep"];
-        } catch (json::type_error& e) {
-        }
-
-        try {
-            m_aver_Epot = md["average_Epot"];
-        } catch (json::type_error& e) {
-        }
-
-        try {
-            m_aver_Ekin = md["average_Ekin"];
-        } catch (json::type_error& e) {
-        }
-
-        try {
-            m_aver_Etot = md["average_Etot"];
-        } catch (json::type_error& e) {
-        }
-        try {
-            m_aver_Temp = md["average_T"];
-        } catch (json::type_error& e) {
-        }
-
-        try {
-            geometry = md["geometry"];
-        } catch (json::type_error& e) {
-        }
-        try {
-            velocities = md["velocities"];
-        } catch (json::type_error& e) {
-        }
-        if (geometry.size()) {
-            m_current_geometry = Tools::String2DoubleVec(geometry);
-        }
-        if (velocities.size()) {
-            m_velocities = Tools::String2DoubleVec(velocities);
-        }
-        m_restart = geometry.size() && velocities.size();
-        */
     }
     return true;
 };
@@ -403,11 +330,6 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     }
 
     try {
-        m_thermostat_steps = state["thermostat_steps"];
-    } catch (json::type_error& e) {
-    }
-
-    try {
         geometry = state["geometry"];
     } catch (json::type_error& e) {
     }
@@ -433,11 +355,11 @@ void SimpleMD::start()
     auto unix_timestamp = std::chrono::seconds(std::time(NULL));
     m_unix_started = std::chrono::milliseconds(unix_timestamp).count();
     double* coord = new double[3 * m_natoms];
-    double* gradient_prev = new double[3 * m_natoms];
+    double* gradient = new double[3 * m_natoms];
     std::vector<json> states;
     for (int i = 0; i < 3 * m_natoms; ++i) {
         coord[i] = m_current_geometry[i];
-        gradient_prev[i] = 0;
+        gradient[i] = 0;
     }
 
 #ifdef GCC
@@ -463,19 +385,18 @@ void SimpleMD::start()
               << "\t"
               << "T" << std::endl;
 #endif
-    m_Epot = Gradient(coord, gradient_prev);
+    m_Epot = Gradient(coord, gradient);
     m_Ekin = EKin();
     m_Etot = m_Epot + m_Ekin;
 
     double lambda = 1;
     int m_step = 0;
+    PrintStatus();
     for (; m_currentStep <= m_maxtime;) {
         if (CheckStop() == true) {
             TriggerWriteRestart();
             return;
         }
-        // Gradient(coord, gradient_prev);
-
         if (m_step % m_dumb == 0) {
             bool write = WriteGeometry();
             if (write) {
@@ -496,18 +417,18 @@ void SimpleMD::start()
                 for (int i = 0; i < 3 * m_natoms; ++i) {
                     coord[i] = m_current_geometry[i];
                 }
-                Gradient(coord, gradient_prev);
+                Gradient(coord, gradient);
                 m_Ekin = EKin();
                 m_Etot = m_Epot + m_Ekin;
                 m_current_rescue++;
                 PrintStatus();
             }
         }
-        Verlet(coord, gradient_prev);
+        if (m_centered)
+            RemoveRotation(m_velocities);
 
-        if (m_step % m_thermostat_steps == 0) {
-            Berendson();
-        }
+        Verlet(coord, gradient);
+        Berendson();
         m_Ekin = EKin();
 
         if ((m_step && m_step % m_print == 0)) {
@@ -525,37 +446,36 @@ void SimpleMD::start()
             std::cout << "Nothing really helps" << std::endl;
             break;
         }
-        // m_currentTime += m_timestep/fs2amu;
         m_step++;
         m_currentStep += m_timestep;
     }
-    // PrintStatus();
     delete[] coord;
-    delete[] gradient_prev;
-    // delete [] gradient_current;
+    delete[] gradient;
 }
 
 void SimpleMD::Verlet(double* coord, double* grad)
 {
-    std::vector<double> acc(3 * m_natoms), velon(3 * m_natoms);
-    for (int i = 0; i < 3 * m_natoms; ++i) {
-        velon[i] = m_velocities[i];
-    }
-    if (m_centered)
-        RemoveRotation(velon);
+    for (int i = 0; i < m_natoms; ++i) {
 
-    for (int i = 0; i < 3 * m_natoms; ++i) {
-        coord[i] = m_current_geometry[i] - m_timestep * velon[i] - 0.5 * grad[i] / m_mass[i] * m_dt2;
-        m_velocities[i] = velon[i] + 0.5 * m_timestep * grad[i] / m_mass[i];
-        m_current_geometry[i] = coord[i];
+        coord[3 * i + 0] = m_current_geometry[3 * i + 0] - m_timestep * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] / m_mass[3 * i + 0] * m_dt2;
+        coord[3 * i + 1] = m_current_geometry[3 * i + 1] - m_timestep * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] / m_mass[3 * i + 1] * m_dt2;
+        coord[3 * i + 2] = m_current_geometry[3 * i + 2] - m_timestep * m_velocities[3 * i + 2] - 0.5 * grad[3 * i + 2] / m_mass[3 * i + 2] * m_dt2;
+
+        m_velocities[3 * i + 0] += 0.5 * m_timestep * grad[3 * i + 0] / m_mass[3 * i + 0];
+        m_velocities[3 * i + 1] += 0.5 * m_timestep * grad[3 * i + 1] / m_mass[3 * i + 1];
+        m_velocities[3 * i + 2] += 0.5 * m_timestep * grad[3 * i + 2] / m_mass[3 * i + 2];
+
+        m_current_geometry[3 * i + 0] = coord[3 * i + 0];
+        m_current_geometry[3 * i + 1] = coord[3 * i + 1];
+        m_current_geometry[3 * i + 2] = coord[3 * i + 2];
     }
     m_Epot = Gradient(coord, grad);
-
     double ekin = 0.0;
     for (int i = 0; i < m_natoms; ++i) {
         m_velocities[3 * i + 0] = m_velocities[3 * i + 0] + 0.5 * m_timestep * grad[3 * i + 0] / m_mass[3 * i + 0];
         m_velocities[3 * i + 1] = m_velocities[3 * i + 1] + 0.5 * m_timestep * grad[3 * i + 1] / m_mass[3 * i + 1];
         m_velocities[3 * i + 2] = m_velocities[3 * i + 2] + 0.5 * m_timestep * grad[3 * i + 2] / m_mass[3 * i + 2];
+
         ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
     ekin *= 0.5;
@@ -651,14 +571,14 @@ void SimpleMD::PrintStatus() const
     if (m_writeUnique) {
 
 #ifdef GCC
-        std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}}\n", 15, m_currentStep / fs2amu / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, remaining, m_unqiue->StoredStructures());
+        std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}}\n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, remaining, m_unqiue->StoredStructures());
 #else
         std::cout << m_currentStep * m_timestep / fs2amu / 1000 << " " << m_Epot << " " << m_Ekin << " " << m_Epot + m_Ekin << m_T << std::endl;
 
 #endif
     } else {
 #ifdef GCC
-        std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f}\n", 15, m_currentStep / fs2amu / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, remaining);
+        std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f}\n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, remaining);
 #else
         std::cout << m_currentStep * m_timestep / fs2amu / 1000 << " " << m_Epot << " " << m_Ekin << " " << m_Epot + m_Ekin << m_T << std::endl;
 
@@ -675,45 +595,19 @@ void SimpleMD::PrintMatrix(const double* matrix)
     std::cout << std::endl;
 }
 
-void SimpleMD::UpdatePosition(const double* gradient, double* coord)
-{
-    for (int i = 0; i < 3 * m_natoms; ++i) {
-        // m_current_geometry[i] += m_timestep * (m_velocities[i] + m_timestep * gradient[i] / (2 * m_mass[i]));
-        m_current_geometry[i] += m_timestep * m_velocities[i]; // + gradient[i] / (2 * m_mass[i]);
-        coord[i] = m_current_geometry[i];
-    }
-}
-
-void SimpleMD::UpdateVelocities(double* gradient_prev, const double* gradient_curr)
-{
-    for (int i = 0; i < 3 * m_natoms; ++i) {
-        m_velocities[i] -= m_timestep * ((gradient_prev[i] + gradient_curr[i]) / (2 * m_mass[i]));
-        gradient_prev[i] = gradient_curr[i];
-    }
-}
-
 double SimpleMD::Gradient(const double* coord, double* grad)
 {
     m_interface->updateGeometry(coord);
 
     double Energy = m_interface->CalculateEnergy(true);
     m_interface->getGradient(grad);
-    /* for(int i = 0; i < 3 * m_natoms; ++i)
-     {
-         grad[i] /= au;
-
-     }*/
     return Energy;
 }
 
 double SimpleMD::EKin()
 {
     double ekin = 0;
-    /*
-        for (int i = 0; i < 3 * m_natoms; ++i) {
-            ekin += m_mass[i] * m_velocities[i] * m_velocities[i];
-        }
-        */
+
     for (int i = 0; i < m_natoms; ++i) {
         ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
@@ -754,11 +648,7 @@ bool SimpleMD::WriteGeometry()
     */
     if (m_writeXYZ) {
         m_molecule.setEnergy(m_Epot);
-        m_molecule.setName(std::to_string(m_currentStep / fs2amu));
-        /*
-        if (m_centered)
-            m_molecule.Center();
-        */
+        m_molecule.setName(std::to_string(m_currentStep));
         m_molecule.appendXYZFile(m_basename + ".trj.xyz");
     }
     if (m_writeUnique) {

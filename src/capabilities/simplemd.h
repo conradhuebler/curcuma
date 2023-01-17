@@ -1,6 +1,6 @@
 /*
  * <Simple MD Module for Cucuma. >
- * Copyright (C) 2020 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2023 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -46,11 +46,10 @@ static json CurcumaMDJson{
     { "unique", false },
     { "rmsd", 1.5 },
     { "opt", false },
-    { "hmass", 4 },
+    { "hmass", 1 },
     { "velo", 1 },
     { "rescue", false },
-    { "thermostat_steps", 1 },
-    { "berendson", 1 },
+    { "berendson", 10 },
     { "MaxTopoDiff", 15 },
     { "impuls", 0 },
     { "method", "uff" },
@@ -108,8 +107,6 @@ private:
     void InitVelocities(double scaling = 1.0);
 
     double Gradient(const double* coord, double* grad);
-    void UpdatePosition(const double* grad, double* coord);
-    void UpdateVelocities(double* gradient_prev, const double* gradient_curr);
 
     void PrintMatrix(const double* matrix);
 
@@ -140,7 +137,7 @@ private:
     EnergyCalculator* m_interface;
     RMSDTraj* m_unqiue;
     const std::vector<double> m_used_mass;
-    int m_unix_started = 0, m_prev_index = 0, m_thermostat_steps = 10, m_max_rescue = 10, m_current_rescue = 0, m_currentTime = 0, m_max_top_diff = 15, m_step = 0;
+    int m_unix_started = 0, m_prev_index = 0, m_max_rescue = 10, m_current_rescue = 0, m_currentTime = 0, m_max_top_diff = 15, m_step = 0;
     double m_pos_conv = 0, m_scale_velo = 1.0, m_berendson = 1;
     double m_impuls = 0, m_impuls_scaling = 0.75, m_dt2 = 0;
     Matrix m_topo_initial;
