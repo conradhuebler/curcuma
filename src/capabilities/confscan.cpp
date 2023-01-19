@@ -147,7 +147,7 @@ void ConfScan::LoadControlJson()
         m_RMSDElement = Json2KeyWord<int>(m_defaults, "RMSDElement");
         m_rmsd_element_templates.push_back(m_RMSDElement);
     }
-    if (m_RMSDmethod == "hybrid" || m_element_templates.size() == 0) {
+    if (m_RMSDmethod.compare("hybrid") == 0 && m_element_templates.size() == 0) {
         std::cout << "Reordering method hybrid has to be combined with element types. I will chose for you nitrogen and oxygen!" << std::endl;
         std::cout << "This is equivalent to adding:\' -rmsdelement 7,8 \' to your argument list!" << std::endl;
         m_rmsd_element_templates = "7,8";
@@ -567,12 +567,6 @@ bool ConfScan::SingleCheckRMSD(const Molecule* mol1, const Molecule* mol2, RMSDD
         m_diff_rot_threshold_loose = std::max(m_diff_rot_threshold_loose, diff_rot);
         m_diff_ripser_threshold_loose = std::max(m_diff_ripser_threshold_loose, diff);
     }
-    /*
-        std::ofstream result_file;
-        result_file.open("ripser.dat", std::ios_base::app);
-        result_file << rmsd << "\t" << diff << "\t" << diff_rot << std::endl;
-        result_file.close();
-    */
 
     if (rmsd <= m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
         keep_molecule = false;
@@ -856,7 +850,7 @@ void ConfScan::PrintStatus()
 
 void ConfScan::writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd, bool reason)
 {
-    if (m_reduced_file)
+    if (!(m_writeFiles && !m_reduced_file))
         return;
     std::ofstream result_file;
     result_file.open(m_statistic_filename, std::ios_base::app);

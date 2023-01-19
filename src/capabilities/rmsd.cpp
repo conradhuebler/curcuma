@@ -155,6 +155,7 @@ void RMSDDriver::LoadControlJson()
     m_topo = Json2KeyWord<int>(m_defaults, "topo");
     m_write = Json2KeyWord<int>(m_defaults, "write");
     m_noreorder = Json2KeyWord<bool>(m_defaults, "noreorder");
+    m_moi = Json2KeyWord<bool>(m_defaults, "moi");
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
         std::string element = m_defaults["Element"].get<std::string>();
@@ -259,7 +260,6 @@ void RMSDDriver::start()
 
     m_target_aligned = m_target;
     m_reference_aligned.LoadMolecule(m_reference);
-
     if (m_reference.Atoms() != m_target.Atoms() || m_force_reorder) {
         if (!m_noreorder)
             ReorderMolecule();
@@ -734,6 +734,7 @@ std::pair<Molecule, LimitedStorage> RMSDDriver::InitialisePair()
 void RMSDDriver::ReorderMolecule()
 {
     double scaling = 1.5;
+    double rmsd = 0.0;
     m_connectivity = m_reference.getConnectivtiy(scaling);
 
     if (m_method == 1)
@@ -773,28 +774,50 @@ void RMSDDriver::HeavyTemplate()
 
 void RMSDDriver::TemplateFree()
 {
-    auto operators = GetOperateVectors(m_reference, m_target);
-    Eigen::Matrix3d R = operators.first;
+    Molecule ref_mol = m_reference;
+    Molecule tar_mol = m_target;
 
     Geometry cached_reference = m_reference.getGeometry();
     Geometry cached_target = m_target.getGeometry();
 
-    Geometry ref = GeometryTools::TranslateMolecule(m_reference, m_reference.Centroid(true), Position{ 0, 0, 0 });
+    Geometry tref = GeometryTools::TranslateMolecule(m_reference, m_reference.Centroid(true), Position{ 0, 0, 0 });
     Geometry tget = GeometryTools::TranslateMolecule(m_target, m_target.Centroid(true), Position{ 0, 0, 0 });
+    ref_mol.setGeometry(tref);
+    tar_mol.setGeometry(tget);
 
-    Eigen::MatrixXd tar = tget.transpose();
+    if (m_moi) {
+        ref_mol.CalculateRotationalConstants();
+        tar_mol.CalculateRotationalConstants();
 
-    Geometry rotated = tar.transpose() * R;
+        Eigen::MatrixXd tar = tget.transpose();
+        Eigen::MatrixXd ref = tref.transpose();
 
-    Molecule ref_mol = m_reference;
-    ref_mol.setGeometry(ref);
-    Molecule tar_mol = m_target;
-    tar_mol.setGeometry(rotated);
+        Geometry rotated_reference = ref.transpose() * ref_mol.RotationMatrix();
+        Geometry rotated_target = tar.transpose() * tar_mol.RotationMatrix();
 
+        ref_mol.setGeometry(rotated_reference);
+        tar_mol.setGeometry(rotated_target);
+        ref_mol.writeXYZFile("reference.moi.xyz");
+        tar_mol.writeXYZFile("target.moi.xyz");
+    } else {
+        auto operators = GetOperateVectors(ref_mol, tar_mol);
+        Eigen::Matrix3d R = operators.first;
+        Eigen::MatrixXd tar = tget.transpose();
+
+        Geometry rotated = tar.transpose() * R;
+
+        Molecule ref_mol = m_reference;
+        ref_mol.setGeometry(tref);
+        Molecule tar_mol = m_target;
+        tar_mol.setGeometry(rotated);
+        ref_mol.writeXYZFile("reference.nomoi.xyz");
+        tar_mol.writeXYZFile("target.nomoi.xyz");
+    }
     std::vector<int> new_order = DistanceReorder(ref_mol, tar_mol);
     m_target_reordered = ApplyOrder(new_order, m_target);
     m_target = m_target_reordered;
     m_target_aligned = m_target;
+    m_reorder_rules = new_order;
 }
 
 void RMSDDriver::FinaliseTemplate(std::pair<std::vector<int>, std::vector<int>> pairs)
@@ -1104,10 +1127,7 @@ bool RMSDDriver::TemplateReorder()
 
 std::vector<int> RMSDDriver::DistanceReorder(const Molecule& reference, const Molecule& target)
 {
-    std::vector<int> orderV1;
-    orderV1 = DistanceReorderV1(reference, target);
-    if (!m_check)
-        return orderV1;
+    std::vector<int> orderV1 = DistanceReorderV1(reference, target);
     std::vector<int> orderV2 = DistanceReorderV2(reference, target);
     double rmsdV1 = Rules2RMSD(orderV1);
     double rmsdV2 = Rules2RMSD(orderV2);
@@ -1125,6 +1145,7 @@ std::vector<int> RMSDDriver::DistanceReorderV1(const Molecule& reference, const 
         double distance = 1e10;
         int index = -1;
         for (int j = 0; j < target.AtomCount(); ++j) {
+
             if (target.Atom(j).first != reference.Atom(i).first || std::find(new_order.begin(), new_order.end(), j) != new_order.end())
                 continue;
 
@@ -1136,7 +1157,6 @@ std::vector<int> RMSDDriver::DistanceReorderV1(const Molecule& reference, const 
         }
         new_order.push_back(index);
     }
-
     return new_order;
 }
 

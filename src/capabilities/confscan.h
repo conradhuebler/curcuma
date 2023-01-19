@@ -56,7 +56,7 @@ static const json ConfScanJson = {
     { "MaxParam", -1 },
     { "UseOrders", -1 },
     { "RMSDMethod", "incr" },
-    { "MaxHTopoDiff", 0 },
+    { "MaxHTopoDiff", -1 },
     { "threads", 1 },
     { "RMSDElement", 7 },
     { "accepted", "" },
@@ -99,7 +99,8 @@ public:
     }
     void setTarget(const Molecule* molecule)
     {
-        m_target.setGeometry(molecule->getGeometry());
+        // m_target.setGeometry(molecule->getGeometry());
+        m_target = *molecule;
     }
     std::vector<int> ReorderRule() const { return m_reorder_rule; }
     void setReorderRules(const std::vector<std::vector<int>>& reorder_rules)

@@ -100,7 +100,8 @@ double DFTD4Interface::DFTD4Calculation(double* grad)
 {
     double energy = 0;
     dftd4::TCutoff cutoff;
-    dftd4::get_dispersion(m_mol, m_charge, m_par, cutoff, energy, grad);
+    dftd4::TD4Model d4;
+    dftd4::get_dispersion(m_mol, m_charge, d4, m_par, cutoff, energy, grad);
     return energy;
 }
 

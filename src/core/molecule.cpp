@@ -58,7 +58,7 @@ Molecule::Molecule(const Molecule& other)
     m_energy = other.m_energy;
     m_spin = other.m_spin;
 }
-
+/*
 Molecule& Molecule::operator=(const Molecule& other)
 {
     m_geometry = other.m_geometry;
@@ -70,7 +70,7 @@ Molecule& Molecule::operator=(const Molecule& other)
     m_spin = other.m_spin;
     return *this;
 }
-
+*/
 Molecule::Molecule(const Molecule* other)
 {
     m_geometry = other->m_geometry;
@@ -81,6 +81,7 @@ Molecule::Molecule(const Molecule* other)
     m_energy = other->m_energy;
     m_spin = other->m_spin;
 }
+/*
 Molecule& Molecule::operator=(const Molecule* other)
 {
     m_geometry = other->m_geometry;
@@ -92,7 +93,7 @@ Molecule& Molecule::operator=(const Molecule* other)
     m_spin = other->m_spin;
     return *this;
 }
-
+*/
 Molecule::Molecule(const Mol& other)
 {
     setXYZComment(other.m_commentline);
@@ -596,6 +597,34 @@ Molecule Molecule::getFragmentMolecule(int fragment) const
     }
     return result;
 }
+Geometry Molecule::getGeometry(bool protons) const
+{
+    if (protons) {
+        Geometry geometry(m_geometry.size(), 3);
+        for (int i = 0; i < m_geometry.size(); ++i) {
+            geometry(i, 0) = m_geometry[i][0];
+            geometry(i, 1) = m_geometry[i][1];
+            geometry(i, 2) = m_geometry[i][2];
+        }
+        return geometry;
+    } else {
+        std::vector<int> indicies;
+        for (int i = 0; i < m_geometry.size(); ++i) {
+            if (m_atoms[i] != 1) {
+                indicies.push_back(i);
+            }
+        }
+        Geometry geometry(indicies.size(), 3);
+        int index = 0;
+        for (int i : indicies) {
+            geometry(index, 0) = m_geometry[i][0];
+            geometry(index, 1) = m_geometry[i][1];
+            geometry(index, 2) = m_geometry[i][2];
+            index++;
+        }
+        return geometry;
+    }
+}
 
 Geometry Molecule::getGeometry(const IntPair& pair, bool protons) const
 {
@@ -634,7 +663,6 @@ Geometry Molecule::getGeometry(const IntPair& pair, bool protons) const
 Geometry Molecule::getGeometry(std::vector<int> atoms, bool protons) const
 {
     Geometry geometry(m_geometry.size(), 3);
-
     int index = 0;
     if (protons) {
         for (int i : atoms) {
@@ -654,7 +682,6 @@ Geometry Molecule::getGeometry(std::vector<int> atoms, bool protons) const
         }
     }
     return geometry.block(0, 0, index, 3);
-    ;
 }
 
 Geometry Molecule::getGeometryByFragment(int fragment, bool protons) const
@@ -921,7 +948,7 @@ void Molecule::CalculateRotationalConstants()
     double conv = 1.6605402E-24 * 10E-10 * 10E-10 * 10;
     double conv2 = 6.6260755E-34 / pi / pi / 8;
 
-    //std::cout << diag_I.eigenvalues().transpose() << std::endl;
+    m_rotation_matrix = diag_I.eigenvectors().inverse();
     m_Ia = conv2 / (diag_I.eigenvalues()(0) * conv);
     m_Ib = conv2 / (diag_I.eigenvalues()(1) * conv);
     m_Ic = conv2 / (diag_I.eigenvalues()(2) * conv);
@@ -984,6 +1011,7 @@ std::vector<std::vector<int>> Molecule::GetFragments(double scaling) const
         m_dirty = true;
     if (m_fragments.size() > 0 && !m_dirty)
         return m_fragments;
+    m_mass_fragments.clear();
     m_scaling = scaling;
     std::multimap<double, std::vector<int>> ordered_list;
 

@@ -106,7 +106,8 @@ static const json RMSDJson = {
     { "order", "" },
     { "check", false },
     { "topo", 0 },
-    { "write", 0 }
+    { "write", 0 },
+    { "moi", false }
 };
 
 class RMSDDriver : public CurcumaMethod {
@@ -291,7 +292,7 @@ private:
 
     Molecule m_reference, m_target, m_target_original, m_reference_aligned, m_target_aligned, m_target_reordered, m_reorder_reference, m_reorder_target;
     Geometry m_reorder_reference_geometry;
-    bool m_force_reorder = false, m_protons = true, m_print_intermediate = false, m_silent = false;
+    bool m_force_reorder = false, m_protons = true, m_print_intermediate = false, m_silent = false, m_moi = false;
     std::vector<std::vector<int>> m_intermediate_results;
     std::map<double, std::vector<int>> m_results;
     std::vector<double> m_last_rmsd;

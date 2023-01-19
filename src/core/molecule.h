@@ -57,9 +57,9 @@ class Molecule
     Molecule();
     ~Molecule();
 
-    Molecule& operator=(const Molecule& molecule);
-    Molecule& operator=(const Molecule* molecule);
-
+    /* Molecule& operator=(const Molecule& molecule);
+     Molecule& operator=(const Molecule* molecule);
+ */
     void print_geom(bool moreinfo = true) const;
     void printFragmente();
     void printAtom(int i) const;
@@ -97,7 +97,7 @@ class Molecule
     Geometry getGeometry(const IntPair& pair, bool protons = true) const;
     Geometry getGeometry(std::vector<int> atoms, bool protons = true) const;
     Geometry getGeometryByFragment(int fragment, bool protons = true) const;
-    inline Geometry getGeometry(bool protons = true) const { return getGeometry(IntPair(0, -1), protons); }
+    Geometry getGeometry(bool protons = true) const;
 
     std::string LowerDistanceMatrix() const;
     std::vector<float> LowerDistanceVector() const;
@@ -186,6 +186,8 @@ class Molecule
 
     std::vector<std::array<double, 3>> Coords() const { return m_geometry; }
 
+    Matrix RotationMatrix() const { return m_rotation_matrix; }
+
 private:
     void ParseString(const std::string& internal, std::vector<std::string>& elements);
 
@@ -210,7 +212,7 @@ private:
 
     std::vector<int> m_connect_mass;
     Matrix m_HydrogenBondMap;
-    Eigen::MatrixXd m_persistentImage;
+    Eigen::MatrixXd m_persistentImage, m_rotation_matrix;
     mutable std::vector<std::vector<int>> m_fragments;
     mutable std::map<int, int> m_fragment_assignment;
 

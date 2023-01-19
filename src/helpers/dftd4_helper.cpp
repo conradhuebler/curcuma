@@ -25,13 +25,14 @@ int main(int argc, char** argv)
     dftd4::TMolecule mol;
     int charge = 0;
     dftd4::TCutoff cutoff;
+    dftd4::TD4Model d4;
 
     int info;
     double energy{ 0.0 };
     dftd4::d4par("b3lyp", par, "svp");
     mol.SetGeometry(coord, attyp, natoms);
 
-    info = dftd4::get_dispersion(mol, charge, par, cutoff, energy, nullptr);
+    info = dftd4::get_dispersion(mol, charge, d4, par, cutoff, energy, nullptr);
     if (info != 0)
         return EXIT_FAILURE;
 
@@ -50,7 +51,7 @@ int main(int argc, char** argv)
         mol.xyz(i, 2) = coord[3 * i + 2];
     }
 
-    info = dftd4::get_dispersion(mol, charge, par, cutoff, energy, nullptr);
+    info = dftd4::get_dispersion(mol, charge, d4, par, cutoff, energy, nullptr);
     if (info != 0)
         return EXIT_FAILURE;
 
@@ -58,7 +59,7 @@ int main(int argc, char** argv)
     energy = 0;
 
     mol.UpdateGeometry(coord);
-    info = dftd4::get_dispersion(mol, charge, par, cutoff, energy, nullptr);
+    info = dftd4::get_dispersion(mol, charge, d4, par, cutoff, energy, nullptr);
     if (info != 0)
         return EXIT_FAILURE;
 
