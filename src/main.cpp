@@ -724,6 +724,7 @@ int main(int argc, char **argv) {
                 std::cout << mol.Check() << std::endl
                           << std::endl;
 
+                /*
                 UFF forcefield(UFFParameterJson);
                 forcefield.setMolecule(mol.Atoms(), mol.Coords());
                 // forcefield.readParameterFile("parameter.json");
@@ -733,7 +734,7 @@ int main(int argc, char **argv) {
                 forcefield.writeParameterFile("parameter.json");
                 forcefield.readParameterFile("parameter.json");
                 std::cout << forcefield.Calculate(true) << std::endl;
-
+                */
                 /*        double grad[3 * mol.AtomCount()];
                           forcefield.Gradient(grad);
                           forcefield.NumGrad(grad);

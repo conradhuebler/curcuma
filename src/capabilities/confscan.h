@@ -113,6 +113,9 @@ public:
     }
     void setThreads(int threads) { m_threads = threads; }
 
+    double RMSD() const { return m_rmsd; }
+    const Molecule* Reference() const { return &m_reference; }
+
 private:
     bool m_keep_molecule = true, m_break_pool = false, m_reorder_worked = false, m_reuse_only = false, m_reused_worked = false;
     Molecule m_reference, m_target;
@@ -166,7 +169,7 @@ private:
     void ReorderCheck(bool reuse_only = false, bool limit = false);
     bool SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMSDDriver* driver, bool reuse_only);
 
-    void writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd, bool reason = true);
+    void writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd, bool reason = true, const std::vector<int>& rule = std::vector<int>(0));
 
     void Finalise();
 

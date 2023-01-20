@@ -1,6 +1,6 @@
 /*
  * <Scan and judge conformers from different input. >
- * Copyright (C) 2020 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -53,6 +53,7 @@ int ConfScanThread::execute()
     m_break_pool = false;
     m_reorder_worked = false;
     m_reused_worked = false;
+    m_reorder_rule.clear();
     for (int i = 0; i < m_reorder_rules.size(); ++i) {
         if (m_reorder_rules[i].size() != m_reference.AtomCount() || m_reorder_rules[i].size() == 0)
             continue;
@@ -62,6 +63,8 @@ int ConfScanThread::execute()
             m_keep_molecule = false;
             m_break_pool = true;
             m_reused_worked = true;
+            m_rmsd = tmp_rmsd;
+            m_reorder_rule = m_reorder_rules[i];
             return 0;
         }
     }
@@ -647,6 +650,7 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
             ConfScanThread* thread = addThread(mol1, rmsd, reuse_only);
             threads.push_back(thread);
             p->addThread(thread);
+            m_lowest_energy = mol1->Energy();
 
             continue;
         }
@@ -710,6 +714,8 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                 if (AddRules(t->ReorderRule())) {
                     rules.push_back(t->ReorderRule());
                 }
+                writeStatisticFile(t->Reference(), mol1, t->RMSD(), true, t->ReorderRule());
+
                 break;
             }
         }
@@ -848,17 +854,20 @@ void ConfScan::PrintStatus()
     std::cout << "# Current Energy [kJ/mol] : " << m_dE << std::endl;
 }
 
-void ConfScan::writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd, bool reason)
+void ConfScan::writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd, bool reason, const std::vector<int>& rule)
 {
     if (!(m_writeFiles && !m_reduced_file))
         return;
     std::ofstream result_file;
     result_file.open(m_statistic_filename, std::ios_base::app);
     if (reason)
-        result_file << "Molecule got rejected due to small rmsd " << rmsd << " with and energy difference of " << m_dE << std::endl;
+        result_file << "Molecule got rejected due to small rmsd " << rmsd << " with and energy difference of " << m_dE << " with respect to the first structure." << std::endl;
     else
-        result_file << "Molecule got rejected as differences " << m_last_diff << " MHz and " << m_last_ripser << " are below the estimated thresholds;  with and energy difference of " << std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 << std::endl;
-
+        result_file << "Molecule got rejected as differences " << m_last_diff << " MHz and " << m_last_ripser << " are below the estimated thresholds;  with and energy difference of " << m_dE << " with respect to the first structure." << std::endl;
+    if (rule.size())
+        for (auto i : rule)
+            result_file << i << "|";
+    result_file << std::endl;
     result_file << mol1->XYZString();
     result_file << mol2->XYZString();
     result_file << std::endl;
