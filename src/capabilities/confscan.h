@@ -1,6 +1,6 @@
 /*
  * <Scan and judge conformers from different input. >
- * Copyright (C) 2020 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -64,7 +64,10 @@ static const json ConfScanJson = {
     { "lastdE", -1 },
     { "fewerFile", false },
     { "dothird", false },
-    { "skipfirst", false }
+    { "skipfirst", false },
+    { "ignoreRotation", false },
+    { "ignoreBarCode", false },
+    { "skipless", false }
 };
 
 class ConfScanThread : public CxxThread {
@@ -99,8 +102,7 @@ public:
     }
     void setTarget(const Molecule* molecule)
     {
-        // m_target.setGeometry(molecule->getGeometry());
-        m_target = *molecule;
+        m_target.setGeometry(molecule->getGeometry());
     }
     std::vector<int> ReorderRule() const { return m_reorder_rule; }
     void setReorderRules(const std::vector<std::vector<int>>& reorder_rules)
@@ -126,6 +128,56 @@ private:
     std::vector<std::vector<int>> m_reorder_rules;
     RMSDDriver* m_driver;
     json m_config;
+};
+
+class ConfScanThreadNoReorder : public CxxThread {
+public:
+    ConfScanThreadNoReorder(double rmsd_threshold, int MaxHTopoDiff, const json& config)
+    {
+        m_driver = new RMSDDriver(config, true);
+        m_config = config;
+        m_rmsd_threshold = rmsd_threshold;
+        m_MaxHTopoDiff = MaxHTopoDiff;
+        setAutoDelete(false);
+    }
+
+    ~ConfScanThreadNoReorder()
+    {
+        delete m_driver;
+    }
+
+    virtual int execute() override;
+    double DiffRot() const { return m_diff_rotational; }
+    double DiffRipser() const { return m_diff_ripser; }
+    double RMSD() const { return m_rmsd; }
+    const Molecule* Reference() const { return &m_reference; }
+
+    void setReference(const Molecule& molecule)
+    {
+        m_reference = molecule;
+        m_reference.setPersisentImage(molecule.getPersisentImage());
+        m_reference.CalculateRotationalConstants();
+        m_target = molecule;
+    }
+
+    void setTarget(const Molecule* molecule)
+    {
+        m_target.setGeometry(molecule->getGeometry());
+        m_target.setPersisentImage(molecule->getPersisentImage());
+        m_target.CalculateRotationalConstants();
+    }
+
+    bool KeepMolecule() const { return m_keep_molecule; }
+
+private:
+    bool m_keep_molecule = true, m_break_pool = false;
+    double m_diff_rotational = 0, m_diff_ripser = 0;
+    Molecule m_reference, m_target;
+
+    RMSDDriver* m_driver;
+    json m_config;
+    double m_rmsd = 0, m_rmsd_threshold = 1;
+    int m_MaxHTopoDiff;
 };
 
 class ConfScan : public CurcumaMethod {
@@ -159,14 +211,19 @@ public:
 
     void start() override; // TODO make pure virtual and move all main action here
     ConfScanThread* addThread(const Molecule* reference, const json& config, bool reuse_only);
+    ConfScanThreadNoReorder* addThreadNoreorder(const Molecule* reference, const json& config);
 
 private:
     void SetUp();
 
     void CheckRMSD();
+    void CheckRMSDV2();
+
     bool SingleCheckRMSD(const Molecule* mol1, const Molecule* mol2, RMSDDriver* driver);
 
     void ReorderCheck(bool reuse_only = false, bool limit = false);
+    void ReorderCheckV2(bool reuse_only = false, bool limit = false);
+
     bool SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMSDDriver* driver, bool reuse_only);
 
     void writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd, bool reason = true, const std::vector<int>& rule = std::vector<int>(0));
@@ -202,7 +259,7 @@ private:
     bool m_ok;
     std::size_t m_fail = 0, m_start = 0, m_end;
     std::vector<Molecule*> m_global_temp_list;
-    int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0, m_skip = 0;
+    int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0, m_skip = 0, m_skiped = 0, m_rejected_directly = 0;
 
     std::string m_filename, m_accepted_filename, m_1st_filename, m_2nd_filename, m_rejected_filename, m_result_basename, m_statistic_filename, m_prev_accepted, m_joined_filename, m_threshold_filename, m_current_filename;
     std::map<double, int> m_ordered_list;
@@ -211,8 +268,10 @@ private:
     double m_diff_rot_abs_tight = 0, m_diff_rot_abs_loose = 0, m_scale_tight = 0.5, m_scale_loose = 2;
     double m_reference_restored_energy = -1e10, m_target_restored_energy = -1e10;
     double m_diff_rot_threshold_loose = 0.0, m_diff_ripser_threshold_loose = 0.0, m_diff_rot_threshold_tight = 0.0, m_diff_ripser_threshold_tight = 0.0;
-    std::vector<Molecule*> m_result, m_rejected_structures, m_stored_structures, m_previously_accepted, m_threshold;
+    std::vector<Molecule*> m_result, m_rejected_structures, m_stored_structures, m_previously_accepted;
+    std::vector<const Molecule*> m_threshold;
     std::vector<int> m_element_templates;
+
     std::string m_rmsd_element_templates;
     std::string m_method = "";
 
@@ -240,4 +299,7 @@ private:
     bool m_reduced_file = false;
     bool m_do_third = false;
     bool m_skipfirst = false;
+    bool m_ignoreRotation = false;
+    bool m_ignoreBarCode = false;
+    bool m_openLoop = true, m_closeLoop = false;
 };

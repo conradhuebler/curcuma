@@ -86,6 +86,31 @@ int ConfScanThread::execute()
     return 0;
 }
 
+int ConfScanThreadNoReorder::execute()
+{
+    m_driver->setReference(m_reference);
+    m_driver->setTarget(m_target);
+    m_keep_molecule = true;
+
+    m_driver->start();
+    m_rmsd = m_driver->RMSD();
+
+    double Ia = abs(m_reference.Ia() - m_target.Ia());
+    double Ib = abs(m_reference.Ib() - m_target.Ib());
+    double Ic = abs(m_reference.Ic() - m_target.Ic());
+
+    m_diff_rotational = (Ia + Ib + Ic) * third;
+    m_diff_ripser = (m_reference.getPersisentImage() - m_target.getPersisentImage()).cwiseAbs().sum();
+
+    if (m_rmsd <= m_rmsd_threshold && (m_MaxHTopoDiff == -1 || m_driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
+        m_keep_molecule = false;
+        m_break_pool = true;
+    }
+
+    m_driver->clear();
+    return 0;
+}
+
 ConfScan::ConfScan(const json& controller, bool silent)
     : CurcumaMethod(ConfScanJson, controller, silent)
 {
@@ -117,7 +142,7 @@ void ConfScan::LoadControlJson()
     m_writeXYZ = Json2KeyWord<bool>(m_defaults, "writeXYZ");
     m_force_reorder = Json2KeyWord<bool>(m_defaults, "forceReorder");
     m_check_connections = Json2KeyWord<bool>(m_defaults, "check");
-    m_energy_threshold = Json2KeyWord<double>(m_defaults, "energy");
+    // m_energy_threshold = Json2KeyWord<double>(m_defaults, "energy");
     m_energy_cutoff = Json2KeyWord<double>(m_defaults, "maxenergy");
     m_prevent_reorder = Json2KeyWord<bool>(m_defaults, "preventReorder");
     m_scale_loose = Json2KeyWord<double>(m_defaults, "scaleLoose");
@@ -135,6 +160,15 @@ void ConfScan::LoadControlJson()
     m_threads = m_defaults["threads"].get<int>();
     m_skipfirst = Json2KeyWord<bool>(m_defaults, "skipfirst");
     m_RMSDmethod = Json2KeyWord<std::string>(m_defaults, "RMSDMethod");
+    m_ignoreRotation = Json2KeyWord<bool>(m_defaults, "ignoreRotation");
+    m_ignoreBarCode = Json2KeyWord<bool>(m_defaults, "ignoreBarCode");
+    if (Json2KeyWord<bool>(m_defaults, "skipless")) {
+        m_openLoop = true;
+        m_closeLoop = false;
+    } else {
+        m_openLoop = true;
+        m_closeLoop = true;
+    }
 
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
@@ -190,11 +224,13 @@ bool ConfScan::openFile()
         molecule++;
         if (m_noname)
             mol->setName(NamePattern(molecule));
+
         mol->CalculateRotationalConstants();
 
         diagram.setDimension(2);
         diagram.setDistanceMatrix(mol->LowerDistanceVector());
         mol->setPersisentImage(diagram.generateImage(diagram.generatePairs()));
+
         std::pair<std::string, Molecule*> pair(mol->Name(), mol);
         m_molecules.push_back(pair);
     }
@@ -294,7 +330,22 @@ bool ConfScan::LoadRestartInformation()
             error++;
             continue;
         }
-
+        try {
+            m_diff_rot_threshold_loose = confscan["RotThreshLoose"];
+        } catch (json::type_error& e) {
+        }
+        try {
+            m_diff_ripser_threshold_loose = confscan["RipserThreshLoose"];
+        } catch (json::type_error& e) {
+        }
+        try {
+            m_diff_rot_threshold_tight = confscan["RotThreshTight"];
+        } catch (json::type_error& e) {
+        }
+        try {
+            m_diff_ripser_threshold_tight = confscan["RipserThreshTight"];
+        } catch (json::type_error& e) {
+        }
         try {
             reorder_cached = Tools::String2VectorVector(confscan["ReorderRules"]);
         } catch (json::type_error& e) {
@@ -330,6 +381,11 @@ nlohmann::json ConfScan::WriteRestartInformation()
     block["ReferenceLastEnergy"] = m_reference_last_energy;
     block["TargetLastEnergy"] = m_target_last_energy;
     block["deltaE"] = m_dE;
+    block["RotThreshLoose"] = m_diff_rot_threshold_loose;
+    block["RipserThreshLoose"] = m_diff_ripser_threshold_loose;
+    block["RotThreshTight"] = m_diff_rot_threshold_tight;
+    block["RipserThreshTight"] = m_diff_ripser_threshold_tight;
+
     return block;
 }
 
@@ -491,12 +547,98 @@ void ConfScan::CheckRMSD()
     rmsd["heavy"] = m_heavy;
     rmsd["noreorder"] = true;
 
+    std::vector<ConfScanThreadNoReorder*> threads;
+    std::vector<std::vector<int>> rules;
+    CxxThreadPool* p = new CxxThreadPool;
+    p->setActiveThreadCount(m_threads);
+
     for (auto& i : m_ordered_list) {
         if (m_skip) {
             m_skip--;
             continue;
         }
-        if (/*m_prevent_reorder && */ m_maxrank <= m_accepted && m_maxrank > -1)
+        if (m_maxrank <= m_accepted && m_maxrank > -1)
+            continue;
+
+        int index = i.second;
+        Molecule* mol1 = m_molecules.at(index).second;
+        if (mol1->Check() == 1) {
+            m_rejected++;
+            m_start++;
+            PrintStatus();
+            continue;
+        }
+        if (m_result.size() == 0) {
+            AcceptMolecule(mol1);
+            ConfScanThreadNoReorder* thread = addThreadNoreorder(mol1, rmsd);
+            threads.push_back(thread);
+            p->addThread(thread);
+
+            m_lowest_energy = mol1->Energy();
+            continue;
+        }
+        p->Reset();
+        m_current_energy = mol1->Energy();
+        m_dE = (m_current_energy - m_lowest_energy) * 2625.5;
+
+        bool keep_molecule = true;
+        for (int i = 0; i < threads.size(); ++i) {
+            threads[i]->setTarget(mol1);
+        }
+        p->StaticPool();
+        p->StartAndWait();
+
+        for (auto* t : threads) {
+            if (t->KeepMolecule() == false) {
+                keep_molecule = false;
+                if (t->RMSD() <= m_scale_tight * m_rmsd_threshold) {
+                    m_diff_rot_threshold_tight = std::max(m_diff_rot_threshold_tight, t->DiffRot());
+                    m_diff_ripser_threshold_tight = std::max(m_diff_ripser_threshold_tight, t->DiffRipser());
+                } else if (t->RMSD() <= m_scale_loose * m_rmsd_threshold) {
+                    m_diff_rot_threshold_loose = std::max(m_diff_rot_threshold_loose, t->DiffRot());
+                    m_diff_ripser_threshold_loose = std::max(m_diff_ripser_threshold_loose, t->DiffRipser());
+                    m_energy_threshold = std::max(m_energy_threshold, std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5);
+                }
+
+                std::ofstream result_file;
+                result_file.open("ripser.dat", std::ios_base::app);
+                result_file << t->RMSD() << "\t" << t->DiffRipser() << "\t" << t->DiffRot() << "\t" << m_diff_ripser_threshold_tight << "\t" << m_diff_ripser_threshold_loose << "\t" << m_diff_rot_threshold_tight << "\t" << m_diff_rot_threshold_loose << "\t" << std::endl;
+                result_file.close();
+                writeStatisticFile(t->Reference(), mol1, t->RMSD());
+                break;
+            }
+        }
+
+        if (keep_molecule) {
+            ConfScanThreadNoReorder* thread = addThreadNoreorder(mol1, rmsd);
+            threads.push_back(thread);
+            p->addThread(thread);
+            AcceptMolecule(mol1);
+        } else {
+            RejectMolecule(mol1);
+        }
+        PrintStatus();
+    }
+}
+
+void ConfScan::CheckRMSDV2()
+{
+    /* will be removed */
+
+    m_maxmol = m_ordered_list.size();
+
+    json rmsd = RMSDJson;
+    rmsd["silent"] = true;
+    rmsd["check"] = CheckConnections();
+    rmsd["heavy"] = m_heavy;
+    rmsd["noreorder"] = true;
+
+    for (auto& i : m_ordered_list) {
+        if (m_skip) {
+            m_skip--;
+            continue;
+        }
+        if (m_maxrank <= m_accepted && m_maxrank > -1)
             continue;
 
         int index = i.second;
@@ -515,6 +657,7 @@ void ConfScan::CheckRMSD()
         m_current_energy = mol1->Energy();
         m_dE = (m_current_energy - m_lowest_energy) * 2625.5;
         bool keep_molecule = true;
+
         RMSDDriver* driver = new RMSDDriver(rmsd);
         for (const auto& mol2 : m_result) {
             if (CheckStop()) {
@@ -540,6 +683,8 @@ void ConfScan::CheckRMSD()
 
 bool ConfScan::SingleCheckRMSD(const Molecule* mol1, const Molecule* mol2, RMSDDriver* driver)
 {
+    /* will be removed */
+
     bool keep_molecule = true;
 
     double rmsd = 0;
@@ -566,10 +711,15 @@ bool ConfScan::SingleCheckRMSD(const Molecule* mol1, const Molecule* mol2, RMSDD
     if (rmsd <= m_scale_tight * m_rmsd_threshold) {
         m_diff_rot_threshold_tight = std::max(m_diff_rot_threshold_tight, diff_rot);
         m_diff_ripser_threshold_tight = std::max(m_diff_ripser_threshold_tight, diff);
-    } else if (rmsd <= m_scale_loose * m_rmsd_threshold && rmsd > m_scale_tight * m_rmsd_threshold) {
+    } else if (rmsd <= m_scale_loose * m_rmsd_threshold) {
         m_diff_rot_threshold_loose = std::max(m_diff_rot_threshold_loose, diff_rot);
         m_diff_ripser_threshold_loose = std::max(m_diff_ripser_threshold_loose, diff);
     }
+
+    std::ofstream result_file;
+    result_file.open("ripser.dat", std::ios_base::app);
+    result_file << rmsd << "\t" << diff << "\t" << diff_rot << "\t" << m_diff_ripser_threshold_tight << "\t" << m_diff_ripser_threshold_loose << "\t" << m_diff_rot_threshold_tight << "\t" << m_diff_rot_threshold_loose << "\t" << std::endl;
+    result_file.close();
 
     if (rmsd <= m_rmsd_threshold && (m_MaxHTopoDiff == -1 || driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
         keep_molecule = false;
@@ -581,8 +731,9 @@ bool ConfScan::SingleCheckRMSD(const Molecule* mol1, const Molecule* mol2, RMSDD
     return keep_molecule;
 }
 
-void ConfScan::ReorderCheck(bool reuse_only, bool limit)
+void ConfScan::ReorderCheckV2(bool reuse_only, bool limit)
 {
+    /* will be removed */
     m_maxmol = m_stored_structures.size();
 
     // To be finalised and tested
@@ -612,6 +763,18 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
             "", 60,
             "Thresholds in rotational constants (averaged over Ia, Ib and Ic) and Ripser Image:");
     */
+    /* if ignore rotation or ignore barcode are true, the tight cutoffs are set to -1, that no difference is smaller
+     * than the tight threshold and the loose threshold is set to a big number, that every structure has to be reordered*/
+    m_skiped = 0;
+    m_rejected_directly = 0;
+    if (m_ignoreRotation == true) {
+        m_diff_rot_threshold_loose = 1e10;
+        m_diff_rot_threshold_tight = -1;
+    }
+    if (m_ignoreBarCode == true) {
+        m_diff_ripser_threshold_loose = 1e10;
+        m_diff_ripser_threshold_tight = -1;
+    }
     std::cout << "" << std::endl
               << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
     std::cout << "    Thresholds in rotational constants (averaged over Ia, Ib and Ic): " << std::endl;
@@ -622,9 +785,12 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
     std::cout << "    Loose Threshold: " << m_diff_ripser_threshold_loose << " " << std::endl;
     std::cout << "    Tight Threshold: " << m_diff_ripser_threshold_tight << " " << std::endl;
 
+    std::cout << "    Thresholds for energy differences: " << std::endl;
+    std::cout << "    Loose Threshold: " << m_energy_threshold << " " << std::endl;
     std::cout << "" << std::endl
               << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
               << std::endl;
+    TriggerWriteRestart();
 
     m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_reused = 0;
 
@@ -659,7 +825,7 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
         m_dE = (m_current_energy - m_lowest_energy) * 2625.5;
 
         bool keep_molecule = true;
-
+        bool reorder = false;
         for (const auto& mol2 : m_result) {
             if (CheckStop()) {
                 fmt::print("\n\n** Found stop file, will end now! **\n\n");
@@ -674,51 +840,65 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
             double diff_rot = (Ia + Ib + Ic) * third;
             double diff = (mol1->getPersisentImage() - mol2->getPersisentImage()).cwiseAbs().sum();
 
-            if (diff_rot > m_diff_rot_threshold_loose && diff > m_diff_ripser_threshold_loose) {
-                keep_molecule = true;
-                break;
-            }
-            if (diff_rot < m_diff_rot_threshold_tight && diff < m_diff_ripser_threshold_tight) {
-                std::cout << "Differences " << diff_rot << " MHz and " << diff << " below tight threshold, reject molecule directly!" << std::endl;
-                m_last_diff = diff_rot;
-                m_last_ripser = diff;
-                keep_molecule = false;
-                writeStatisticFile(mol1, mol2, -1, false);
-                m_threshold.push_back(mol2);
-                break;
-            }
-        }
-        int free_threads = m_threads;
-        if (threads.size())
-            free_threads /= threads.size();
-
-        if (free_threads < 1)
-            free_threads = 1;
-        for (int i = 0; i < threads.size(); ++i) {
-            threads[i]->setTarget(mol1);
-            threads[i]->setReorderRules(m_reorder_rules);
-            threads[i]->setThreads(free_threads);
-            for (int j = 0; j < rules.size(); ++j)
-                threads[i]->addReorderRule(rules[j]);
-        }
-
-        p->StaticPool();
-        p->StartAndWait();
-
-        for (auto* t : threads) {
-            m_reordered++;
-            if (t->KeepMolecule() == false) {
-                keep_molecule = false;
-                m_reordered_worked += t->ReorderWorked();
-                m_reordered_reused += t->ReusedWorked();
-                if (AddRules(t->ReorderRule())) {
-                    rules.push_back(t->ReorderRule());
+            if (diff_rot < m_diff_rot_threshold_loose && diff < m_diff_ripser_threshold_loose /* && std::abs(mol1->Energy() - mol2->Energy())*2625.5 < m_energy_threshold */) {
+                reorder = true;
+                if (diff_rot < m_diff_rot_threshold_tight && diff < m_diff_ripser_threshold_tight) {
+                    std::cout << "Differences " << diff_rot << " MHz and " << diff << " below tight threshold, reject molecule directly!" << std::endl;
+                    m_last_diff = diff_rot;
+                    m_last_ripser = diff;
+                    writeStatisticFile(mol1, mol2, -1, false);
+                    m_threshold.push_back(mol2);
+                    m_rejected_directly++;
+                    reorder = false;
+                    keep_molecule = false;
+                    break;
                 }
-                writeStatisticFile(t->Reference(), mol1, t->RMSD(), true, t->ReorderRule());
-
-                break;
             }
         }
+
+        if (reorder && keep_molecule) {
+            int free_threads = m_threads;
+            if (threads.size())
+                free_threads /= threads.size();
+
+            if (free_threads < 1)
+                free_threads = 1;
+            for (int i = 0; i < threads.size(); ++i) {
+                threads[i]->setTarget(mol1);
+                threads[i]->setReorderRules(m_reorder_rules);
+                threads[i]->setThreads(free_threads);
+                for (int j = 0; j < rules.size(); ++j)
+                    threads[i]->addReorderRule(rules[j]);
+            }
+
+            p->StaticPool();
+            p->StartAndWait();
+
+            for (auto* t : threads) {
+                m_reordered++;
+                if (t->KeepMolecule() == false) {
+                    keep_molecule = false;
+                    m_reordered_worked += t->ReorderWorked();
+                    m_reordered_reused += t->ReusedWorked();
+                    if (AddRules(t->ReorderRule()))
+                        rules.push_back(t->ReorderRule());
+
+                    double Ia = abs(mol1->Ia() - t->Reference()->Ia());
+                    double Ib = abs(mol1->Ib() - t->Reference()->Ib());
+                    double Ic = abs(mol1->Ic() - t->Reference()->Ic());
+
+                    double diff_rot = (Ia + Ib + Ic) * third;
+                    double diff = (mol1->getPersisentImage() - t->Reference()->getPersisentImage()).cwiseAbs().sum();
+                    std::ofstream result_file;
+                    result_file.open("ripser_2nd.dat", std::ios_base::app);
+                    result_file << t->RMSD() << "\t" << diff << "\t" << diff_rot << "\t" << m_diff_ripser_threshold_tight << "\t" << m_diff_ripser_threshold_loose << "\t" << m_diff_rot_threshold_tight << "\t" << m_diff_rot_threshold_loose << "\t" << std::endl;
+                    result_file.close();
+                    writeStatisticFile(t->Reference(), mol1, t->RMSD(), true, t->ReorderRule());
+                    break;
+                }
+            }
+        } else
+            m_skiped += threads.size();
 
         if (keep_molecule) {
             AcceptMolecule(mol1);
@@ -739,8 +919,203 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
     delete p;
 }
 
+void ConfScan::ReorderCheck(bool reuse_only, bool limit)
+{
+    m_maxmol = m_stored_structures.size();
+
+    // To be finalised and tested
+
+    /*
+        fmt::print(
+            "'{0:'^{1}}'\n"
+            "'{2: ^{1}}'\n"
+            "'{0: ^{1}}'\n"
+            "*{3: ^{1}}*\n"
+            "*{0: ^{1}}*\n"
+            "*{12: ^{1}}*\n"
+            "*{0: ^{1}}*\n"
+            "*{4: ^{1}}*\n"
+            "*{5: ^{1}}*\n"
+            "*{0: ^{1}}*\n"
+            "*{6: ^{1}}*\n"
+            "*{7: ^{1}}*\n"
+            "*{0: ^{1}}*\n"
+            "*{8: ^{1}}*\n"
+            "*{9: ^{1}}*\n"
+            "*{10: ^{1}}*\n"
+            "*{0: ^{1}}*\n"
+            "*{11: ^{1}}*\n"
+            "*{0: ^{1}}*\n"
+            "*{0:*^{1}}*\n",
+            "", 60,
+            "Thresholds in rotational constants (averaged over Ia, Ib and Ic) and Ripser Image:");
+    */
+    /* if ignore rotation or ignore barcode are true, the tight cutoffs are set to -1, that no difference is smaller
+     * than the tight threshold and the loose threshold is set to a big number, that every structure has to be reordered*/
+    m_skiped = 0;
+    m_rejected_directly = 0;
+    if (m_ignoreRotation == true) {
+        m_diff_rot_threshold_loose = 1e10;
+        m_diff_rot_threshold_tight = -1;
+    }
+    if (m_ignoreBarCode == true) {
+        m_diff_ripser_threshold_loose = 1e10;
+        m_diff_ripser_threshold_tight = -1;
+    }
+    std::cout << "" << std::endl
+              << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
+    std::cout << "    Thresholds in rotational constants (averaged over Ia, Ib and Ic): " << std::endl;
+    std::cout << "    Loose Threshold: " << m_diff_rot_threshold_loose << " MHz" << std::endl;
+    std::cout << "    Tight Threshold: " << m_diff_rot_threshold_tight << " MHz" << std::endl;
+
+    std::cout << "    Thresholds in difference of ripser images: " << std::endl;
+    std::cout << "    Loose Threshold: " << m_diff_ripser_threshold_loose << " " << std::endl;
+    std::cout << "    Tight Threshold: " << m_diff_ripser_threshold_tight << " " << std::endl;
+    std::cout << "    Thresholds for energy differences: " << std::endl;
+    std::cout << "    Loose Threshold: " << m_energy_threshold << " " << std::endl;
+
+    std::cout << "" << std::endl
+              << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
+              << std::endl;
+    TriggerWriteRestart();
+
+    m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_reused = 0;
+
+    json rmsd = RMSDJson;
+    rmsd["silent"] = true;
+    rmsd["reorder"] = true;
+    rmsd["check"] = CheckConnections();
+    rmsd["heavy"] = m_heavy;
+    rmsd["method"] = m_RMSDmethod;
+    rmsd["element"] = m_rmsd_element_templates;
+
+    std::vector<Molecule*> cached = m_stored_structures;
+    m_result = m_previously_accepted;
+    m_stored_structures.clear();
+    std::vector<ConfScanThread*> threads;
+    std::vector<std::vector<int>> rules;
+    CxxThreadPool* p = new CxxThreadPool;
+    p->setActiveThreadCount(m_threads);
+
+    for (Molecule* mol1 : cached) {
+        if (m_result.size() == 0) {
+            AcceptMolecule(mol1);
+            ConfScanThread* thread = addThread(mol1, rmsd, reuse_only);
+            threads.push_back(thread);
+            p->addThread(thread);
+            m_lowest_energy = mol1->Energy();
+
+            continue;
+        }
+        p->Reset();
+        m_current_energy = mol1->Energy();
+        m_dE = (m_current_energy - m_lowest_energy) * 2625.5;
+
+        bool keep_molecule = true;
+        bool reorder = false;
+        for (int t = 0; t < threads.size(); ++t) {
+            if (CheckStop()) {
+                fmt::print("\n\n** Found stop file, will end now! **\n\n");
+                // TriggerWriteRestart();
+                return;
+            }
+            const Molecule* mol2 = threads[t]->Reference();
+            double Ia = abs(mol1->Ia() - mol2->Ia());
+            double Ib = abs(mol1->Ib() - mol2->Ib());
+            double Ic = abs(mol1->Ic() - mol2->Ic());
+
+            double diff_rot = (Ia + Ib + Ic) * third;
+            double diff = (mol1->getPersisentImage() - mol2->getPersisentImage()).cwiseAbs().sum();
+
+            if (diff_rot < m_diff_rot_threshold_loose && diff < m_diff_ripser_threshold_loose && std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_energy_threshold) {
+                reorder = true;
+                threads[t]->setEnabled(m_openLoop);
+                if (diff_rot < m_diff_rot_threshold_tight && diff < m_diff_ripser_threshold_tight) {
+                    std::cout << "Differences " << diff_rot << " MHz and " << diff << " below tight threshold, reject molecule directly!" << std::endl;
+                    m_last_diff = diff_rot;
+                    m_last_ripser = diff;
+                    writeStatisticFile(mol1, mol2, -1, false);
+                    m_threshold.push_back(mol2);
+                    m_rejected_directly++;
+                    reorder = false;
+                    keep_molecule = false;
+                    break;
+                }
+            } else
+                threads[t]->setEnabled(m_closeLoop);
+        }
+
+        if (reorder && keep_molecule) {
+            int free_threads = m_threads;
+            if (threads.size())
+                free_threads /= threads.size();
+
+            if (free_threads < 1)
+                free_threads = 1;
+            for (int i = 0; i < threads.size(); ++i) {
+                threads[i]->setTarget(mol1);
+                threads[i]->setReorderRules(m_reorder_rules);
+                threads[i]->setThreads(free_threads);
+                for (int j = 0; j < rules.size(); ++j)
+                    threads[i]->addReorderRule(rules[j]);
+            }
+
+            p->StaticPool();
+            p->StartAndWait();
+
+            for (auto* t : threads) {
+                if (!t->isEnabled()) {
+                    t->setEnabled(true);
+                    m_skiped++;
+                    continue;
+                }
+                m_reordered++;
+                if (t->KeepMolecule() == false) {
+                    keep_molecule = false;
+                    m_reordered_worked += t->ReorderWorked();
+                    m_reordered_reused += t->ReusedWorked();
+                    if (AddRules(t->ReorderRule()))
+                        rules.push_back(t->ReorderRule());
+
+                    double Ia = abs(mol1->Ia() - t->Reference()->Ia());
+                    double Ib = abs(mol1->Ib() - t->Reference()->Ib());
+                    double Ic = abs(mol1->Ic() - t->Reference()->Ic());
+
+                    double diff_rot = (Ia + Ib + Ic) * third;
+                    double diff = (mol1->getPersisentImage() - t->Reference()->getPersisentImage()).cwiseAbs().sum();
+                    std::ofstream result_file;
+                    result_file.open("ripser_2nd.dat", std::ios_base::app);
+                    result_file << t->RMSD() << "\t" << diff << "\t" << diff_rot << "\t" << m_diff_ripser_threshold_tight << "\t" << m_diff_ripser_threshold_loose << "\t" << m_diff_rot_threshold_tight << "\t" << m_diff_rot_threshold_loose << "\t" << std::endl;
+                    result_file.close();
+                    writeStatisticFile(t->Reference(), mol1, t->RMSD(), true, t->ReorderRule());
+                    break;
+                }
+            }
+        } else
+            m_skiped += threads.size();
+
+        if (keep_molecule) {
+            AcceptMolecule(mol1);
+            ConfScanThread* thread = addThread(mol1, rmsd, reuse_only);
+            p->addThread(thread);
+            threads.push_back(thread);
+        } else {
+            RejectMolecule(mol1);
+        }
+
+        PrintStatus();
+        if ((m_result.size() >= m_maxrank && limit) || (m_result.size() >= 2 * m_maxrank && !limit))
+            break;
+        if (m_dE > m_energy_cutoff && m_energy_cutoff != -1) {
+            break;
+        }
+    }
+    delete p;
+}
 bool ConfScan::SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMSDDriver* driver, bool reuse_only)
 {
+    /* will be removed */
+
     bool keep_molecule = true;
     bool allow_reorder = true;
 
@@ -786,6 +1161,14 @@ bool ConfScan::SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMS
 
     return keep_molecule;
 }
+
+ConfScanThreadNoReorder* ConfScan::addThreadNoreorder(const Molecule* reference, const json& config)
+{
+    ConfScanThreadNoReorder* thread = new ConfScanThreadNoReorder(m_rmsd_threshold, m_MaxHTopoDiff, config);
+    thread->setReference(*reference);
+    return thread;
+}
+
 ConfScanThread* ConfScan::addThread(const Molecule* reference, const json& config, bool reuse_only)
 {
     ConfScanThread* thread = new ConfScanThread(m_reorder_rules, m_rmsd_threshold, m_MaxHTopoDiff, reuse_only, config);
@@ -851,6 +1234,9 @@ void ConfScan::PrintStatus()
     std::cout << "# Reordered : " << m_reordered << "     ";
     std::cout << "# Successfully : " << m_reordered_worked << "    ";
     std::cout << "# Reused Results : " << m_reordered_reused << "     ";
+    std::cout << "# Reordering Skipped : " << m_skiped << "     ";
+    std::cout << "# Rejected Directly : " << m_rejected_directly << "     ";
+
     std::cout << "# Current Energy [kJ/mol] : " << m_dE << std::endl;
 }
 
@@ -861,9 +1247,9 @@ void ConfScan::writeStatisticFile(const Molecule* mol1, const Molecule* mol2, do
     std::ofstream result_file;
     result_file.open(m_statistic_filename, std::ios_base::app);
     if (reason)
-        result_file << "Molecule got rejected due to small rmsd " << rmsd << " with and energy difference of " << m_dE << " with respect to the first structure." << std::endl;
+        result_file << "Molecule got rejected due to small rmsd " << rmsd << " with and energy difference of " << std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 << " kJ/mol." << std::endl;
     else
-        result_file << "Molecule got rejected as differences " << m_last_diff << " MHz and " << m_last_ripser << " are below the estimated thresholds;  with and energy difference of " << m_dE << " with respect to the first structure." << std::endl;
+        result_file << "Molecule got rejected as differences " << m_last_diff << " MHz and " << m_last_ripser << " are below the estimated thresholds;  with and energy difference of " << std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 << " kJ/mol." << std::endl;
     if (rule.size())
         for (auto i : rule)
             result_file << i << "|";

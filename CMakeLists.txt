@@ -22,6 +22,10 @@ option (Helper
 add_subdirectory(${PROJECT_SOURCE_DIR}/external/fmt EXCLUDE_FROM_ALL)
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
+#if(NOT DEFINED ${CMAKE_BUILD_TYPE})
+#    set(CMAKE_BUILD_TYPE RelWithDebInfo)
+#endif()
+
 include_directories(SYSTEM  ${PROJECT_SOURCE_DIR}/external/fmt/include
                             ${PROJECT_SOURCE_DIR}/external/LBFGSpp/include
                             ${PROJECT_SOURCE_DIR}/external/ripser
@@ -334,6 +338,13 @@ else()
 endif(C17)
 
 add_subdirectory(test_cases)
+include(CTest)
+add_test(NAME AAAbGal_template COMMAND AAAbGal template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME AAAbGal_hybrid COMMAND AAAbGal hybrid WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME AAAbGal_incremental COMMAND AAAbGal incr WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+
+set_tests_properties(AAAbGal_incremental PROPERTIES TIMEOUT 300)
+
 
 install(TARGETS curcuma RUNTIME DESTINATION bin)
 install(TARGETS curcuma_helper RUNTIME DESTINATION bin)
