@@ -50,6 +50,12 @@ static const json ConfScanJson = {
     { "preventreorder", false },
     { "scaleLoose", 1.5 },
     { "scaleTight", 0.1 },
+    { "scaleLooseEnergy", 2 },
+    { "scaleTightEnergy", 0.1 },
+    { "scaleLooseRotational", 2 },
+    { "scaleTightRotational", 0.1 },
+    { "scaleLooseRipser", 2 },
+    { "scaleTightRipser", 0.1 },
     { "skip", 0 },
     { "allxyz", false },
     { "update", false },
@@ -67,7 +73,9 @@ static const json ConfScanJson = {
     { "skipfirst", false },
     { "ignoreRotation", false },
     { "ignoreBarCode", false },
-    { "skipless", false }
+    { "skipless", false },
+    { "looseThresh", 7 },
+    { "tightThresh", 3 }
 };
 
 class ConfScanThread : public CxxThread {
@@ -217,14 +225,8 @@ private:
     void SetUp();
 
     void CheckRMSD();
-    void CheckRMSDV2();
-
-    bool SingleCheckRMSD(const Molecule* mol1, const Molecule* mol2, RMSDDriver* driver);
 
     void ReorderCheck(bool reuse_only = false, bool limit = false);
-    void ReorderCheckV2(bool reuse_only = false, bool limit = false);
-
-    bool SingleReorderRMSD(const Molecule* mol1, const Molecule* mol2, RMSDDriver* driver, bool reuse_only);
 
     void writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd, bool reason = true, const std::vector<int>& rule = std::vector<int>(0));
 
@@ -264,10 +266,15 @@ private:
     std::string m_filename, m_accepted_filename, m_1st_filename, m_2nd_filename, m_rejected_filename, m_result_basename, m_statistic_filename, m_prev_accepted, m_joined_filename, m_threshold_filename, m_current_filename;
     std::map<double, int> m_ordered_list;
     std::vector<std::pair<std::string, Molecule*>> m_molecules;
-    double m_energy_threshold = 1.0, m_rmsd_threshold = 1.0, m_diff_rot_rel_loose = 0.3, m_diff_rot_rel_tight = 0.01, m_nearly_missed = 0.8, m_energy_cutoff = -1, m_reference_last_energy = 0, m_target_last_energy = 0, m_lowest_energy = 1, m_current_energy = 0;
-    double m_diff_rot_abs_tight = 0, m_diff_rot_abs_loose = 0, m_scale_tight = 0.5, m_scale_loose = 2;
+    double m_rmsd_threshold = 1.0, m_nearly_missed = 0.8, m_energy_cutoff = -1, m_reference_last_energy = 0, m_target_last_energy = 0, m_lowest_energy = 1, m_current_energy = 0;
+    double m_scaleTightEnergy = 0.1, m_scaleLooseEnergy = 1.5;
+    double m_scaleTightRotational = 0.1, m_scaleLooseRotational = 1.5;
+    double m_scaleTightRipser = 0.1, m_scaleLooseRipser = 1.5;
+
     double m_reference_restored_energy = -1e10, m_target_restored_energy = -1e10;
-    double m_diff_rot_threshold_loose = 0.0, m_diff_ripser_threshold_loose = 0.0, m_diff_rot_threshold_tight = 0.0, m_diff_ripser_threshold_tight = 0.0;
+    double m_diff_rot_threshold_loose = 0.0, m_diff_ripser_threshold_loose = 0.0, m_diff_energy_threshold_loose = 0.0;
+    double m_diff_rot_threshold_tight = 0.0, m_diff_ripser_threshold_tight = 0.0, m_diff_energy_threshold_tight = 0.0;
+
     std::vector<Molecule*> m_result, m_rejected_structures, m_stored_structures, m_previously_accepted;
     std::vector<const Molecule*> m_threshold;
     std::vector<int> m_element_templates;
@@ -280,6 +287,7 @@ private:
     int m_maxrank = 10000;
     int m_maxParam = -1;
     int m_useorders = 10;
+    int m_looseThresh = 7, m_tightThresh = 3;
     std::string m_RMSDmethod = "incr";
     int m_MaxHTopoDiff = -1;
     int m_threads = 1;
