@@ -33,7 +33,7 @@ static json CurcumaOptJson{
     { "LBFGS_eps", 1e-5 },
     { "StoreIntermediate", 2000 },
     { "SingleStep", 20 },
-    { "ConvCount", 4 },
+    { "ConvCount", 11 },
     { "GradNorm", 0.001 },
     { "Threads", 1 },
     { "Charge", 0 },
