@@ -107,7 +107,9 @@ static const json RMSDJson = {
     { "check", false },
     { "topo", 0 },
     { "write", 0 },
-    { "moi", false }
+    { "moi", false },
+    { "update-rotation", false },
+    { "damping", 0.8 }
 };
 
 class RMSDDriver : public CurcumaMethod {
@@ -265,6 +267,8 @@ private:
 
     std::vector<int> DistanceReorderV1(const Molecule& reference, const Molecule& target);
     std::vector<int> DistanceReorderV2(const Molecule& reference, const Molecule& target);
+    std::vector<int> DistanceReorderV3(const Molecule& reference, const Molecule& target);
+    std::vector<int> DistanceReorderV4(const Molecule& reference, const Molecule& target);
 
     std::vector<int> AlignByVectorPair(std::vector<int> first, std::vector<int> second);
     inline std::vector<int> AlignByVectorPair(std::pair<std::vector<int>, std::vector<int>> pair)
@@ -299,8 +303,10 @@ private:
     std::vector<int> m_reorder_rules;
     std::vector<std::vector<int>> m_stored_rules;
     std::map<int, std::vector<int>> m_connectivity;
-    double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99, m_check = false;
+    double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99, m_damping = 0.8;
+    bool m_check = false;
     bool m_check_connections = false, m_postprocess = true, m_noreorder = false, m_swap = false, m_dynamic_center = false;
+    bool m_update_rotation = false;
     int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1, m_method = 1, m_htopo_diff = -1, m_partial_rmsd = -1, m_threads = 1, m_element = 7, m_write = 0, m_topo = 0;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
     std::vector<int> m_initial, m_element_templates;

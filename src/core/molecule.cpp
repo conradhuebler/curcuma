@@ -493,7 +493,12 @@ void Molecule::setAtom(const std::string& internal, int i)
     std::vector<std::string> elements;
     ParseString(internal, elements);
 
-    m_atoms.push_back(Elements::String2Element(elements[0]));
+    int atom = 0;
+    if (Tools::isInt(elements[0]))
+        atom = std::stoi(elements[0]);
+    else
+        atom = Elements::String2Element(elements[0]);
+    m_atoms.push_back(atom);
 
     if(elements.size() == 7)
     {
@@ -521,8 +526,12 @@ void Molecule::setXYZ(const std::string& internal, int i)
 {
     std::vector<std::string > elements;
     ParseString(internal, elements);
-
-    m_atoms.push_back(Elements::String2Element(elements[0]));
+    int atom = 0;
+    if (Tools::isInt(elements[0]))
+        atom = std::stoi(elements[0]);
+    else
+        atom = Elements::String2Element(elements[0]);
+    m_atoms.push_back(atom);
 
     if (elements.size() >= 4) {
         double x = stod(elements[1]);

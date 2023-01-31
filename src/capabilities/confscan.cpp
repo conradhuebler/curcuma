@@ -170,6 +170,8 @@ void ConfScan::LoadControlJson()
     m_RMSDmethod = Json2KeyWord<std::string>(m_defaults, "RMSDMethod");
     m_ignoreRotation = Json2KeyWord<bool>(m_defaults, "ignoreRotation");
     m_ignoreBarCode = Json2KeyWord<bool>(m_defaults, "ignoreBarCode");
+    m_update_rotation = Json2KeyWord<bool>(m_defaults, "update-rotation");
+
     //   if (Json2KeyWord<bool>(m_defaults, "skipless")) {
     m_openLoop = true;
     m_closeLoop = false;
@@ -472,6 +474,12 @@ void ConfScan::SetUp()
 
     std::cout << "    RMSD Threshold set to: " << m_rmsd_threshold << " Angstrom" << std::endl;
     std::cout << "    Highest energy conformer allowed: " << m_energy_cutoff << " kJ/mol " << std::endl;
+    std::cout << "    Threshold multipliers are loose / tight " << std::endl;
+
+    std::cout << "    Ripser " << m_scaleLooseRipser << " " << m_scaleTightRipser << std::endl;
+    std::cout << "    Rotational Constants " << m_scaleLooseRotational << " " << m_scaleTightRotational << std::endl;
+    std::cout << "    Energy " << m_scaleLooseEnergy << " " << m_scaleTightEnergy << std::endl;
+
     std::cout << "" << std::endl
               << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
               << std::endl;
@@ -499,6 +507,7 @@ void ConfScan::start()
     SetUp();
 
     fmt::print("\n\n1st Pass\nPerforming RMSD calculation without reordering now!\n\n");
+
     RunTimer timer(false);
     m_current_filename = m_1st_filename;
     std::ofstream result_file;
@@ -702,6 +711,8 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
     rmsd["heavy"] = m_heavy;
     rmsd["method"] = m_RMSDmethod;
     rmsd["element"] = m_rmsd_element_templates;
+    rmsd["update-rotation"] = m_update_rotation;
+    rmsd["damping"] = m_damping;
 
     std::vector<Molecule*> cached = m_stored_structures;
     m_result = m_previously_accepted;

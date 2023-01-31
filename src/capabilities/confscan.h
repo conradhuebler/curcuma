@@ -75,7 +75,9 @@ static const json ConfScanJson = {
     { "ignoreBarCode", false },
     { "skipless", false },
     { "looseThresh", 7 },
-    { "tightThresh", 3 }
+    { "tightThresh", 3 },
+    { "update-rotation", false },
+    { "damping", 0.8 }
 };
 
 class ConfScanThread : public CxxThread {
@@ -282,7 +284,7 @@ private:
     std::string m_rmsd_element_templates;
     std::string m_method = "";
 
-    double m_last_diff = 0.0, m_last_ripser = 0.0, m_last_dE = -1, m_dE = -1;
+    double m_last_diff = 0.0, m_last_ripser = 0.0, m_last_dE = -1, m_dE = -1, m_damping = 0.8;
     int m_maxmol = 0;
     int m_maxrank = 10000;
     int m_maxParam = -1;
@@ -310,4 +312,5 @@ private:
     bool m_ignoreRotation = false;
     bool m_ignoreBarCode = false;
     bool m_openLoop = true, m_closeLoop = false;
+    bool m_update_rotation = false;
 };
