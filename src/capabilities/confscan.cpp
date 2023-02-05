@@ -171,6 +171,8 @@ void ConfScan::LoadControlJson()
     m_ignoreRotation = Json2KeyWord<bool>(m_defaults, "ignoreRotation");
     m_ignoreBarCode = Json2KeyWord<bool>(m_defaults, "ignoreBarCode");
     m_update_rotation = Json2KeyWord<bool>(m_defaults, "update-rotation");
+    m_split = Json2KeyWord<bool>(m_defaults, "split");
+    m_write = Json2KeyWord<bool>(m_defaults, "writefiles");
 
     //   if (Json2KeyWord<bool>(m_defaults, "skipless")) {
     m_openLoop = true;
@@ -940,4 +942,9 @@ void ConfScan::writeStatisticFile(const Molecule* mol1, const Molecule* mol2, do
     result_file << mol2->XYZString();
     result_file << std::endl;
     result_file.close();
+
+    if (m_write && rule.size()) {
+        mol1->writeXYZFile("A" + std::to_string(m_rejected) + ".xyz");
+        mol2->writeXYZFile("B" + std::to_string(m_rejected) + ".xyz");
+    }
 }

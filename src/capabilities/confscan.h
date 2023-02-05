@@ -77,7 +77,9 @@ static const json ConfScanJson = {
     { "looseThresh", 7 },
     { "tightThresh", 3 },
     { "update-rotation", false },
-    { "damping", 0.8 }
+    { "damping", 0.8 },
+    { "split", false },
+    { "writefiles", false }
 };
 
 class ConfScanThread : public CxxThread {
@@ -313,4 +315,6 @@ private:
     bool m_ignoreBarCode = false;
     bool m_openLoop = true, m_closeLoop = false;
     bool m_update_rotation = false;
+    bool m_split = false;
+    bool m_write = false;
 };
