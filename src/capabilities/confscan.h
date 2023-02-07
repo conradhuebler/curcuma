@@ -61,7 +61,7 @@ static const json ConfScanJson = {
     { "update", false },
     { "MaxParam", -1 },
     { "UseOrders", -1 },
-    { "RMSDMethod", "incr" },
+    { "RMSDMethod", "hybrid" },
     { "MaxHTopoDiff", -1 },
     { "threads", 1 },
     { "RMSDElement", 7 },
@@ -79,7 +79,8 @@ static const json ConfScanJson = {
     { "update-rotation", false },
     { "damping", 0.8 },
     { "split", false },
-    { "writefiles", false }
+    { "writefiles", false },
+    { "nomunkres", false }
 };
 
 class ConfScanThread : public CxxThread {
@@ -292,7 +293,7 @@ private:
     int m_maxParam = -1;
     int m_useorders = 10;
     int m_looseThresh = 7, m_tightThresh = 3;
-    std::string m_RMSDmethod = "incr";
+    std::string m_RMSDmethod = "hybrid";
     int m_MaxHTopoDiff = -1;
     int m_threads = 1;
     int m_RMSDElement = 7;
@@ -317,4 +318,5 @@ private:
     bool m_update_rotation = false;
     bool m_split = false;
     bool m_write = false;
+    bool m_nomunkres = false;
 };

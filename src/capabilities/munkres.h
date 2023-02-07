@@ -22,11 +22,11 @@
  *
  */
 
-// Hungarian / Munkress assignment algorithm, adopted as header only library taken from
+// Hungarian / Munkres' assignment algorithm, adopted as header only library taken from
 // https://brc2.com/the-algorithm-workshop/
 #pragma once
 
-#include <eigen3/Eigen/Dense>
+#include <Eigen/Dense>
 
 #include <iostream>
 

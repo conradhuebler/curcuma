@@ -19,7 +19,7 @@
 
 #include "rmsd_functions.h"
 
-#include "munkress.h"
+#include "munkres.h"
 
 #include "src/core/molecule.h"
 #include "src/tools/general.h"
@@ -159,7 +159,7 @@ void RMSDDriver::LoadControlJson()
     m_noreorder = Json2KeyWord<bool>(m_defaults, "noreorder");
     m_moi = Json2KeyWord<bool>(m_defaults, "moi");
     m_update_rotation = Json2KeyWord<bool>(m_defaults, "update-rotation");
-    m_nomunkress = Json2KeyWord<bool>(m_defaults, "nomunkress");
+    m_nomunkres = Json2KeyWord<bool>(m_defaults, "nomunkres");
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
         std::string element = m_defaults["Element"].get<std::string>();
@@ -837,28 +837,25 @@ void RMSDDriver::FinaliseTemplate(std::pair<std::vector<int>, std::vector<int>> 
     Molecule target = m_target;
     std::map<double, std::vector<int>> local_results;
     std::vector<std::vector<int>> rules = m_stored_rules;
-    for (int outer = 0; outer < rules.size() && outer < 10; ++outer) {
+    for (int outer = 0; outer < rules.size() && outer < 5; ++outer) {
         pairs.second = rules[outer];
-
-        for (int i = 0; i < 5; ++i) {
-            auto result = AlignByVectorPair(pairs);
-            m_reorder_rules = result;
-            m_target_reordered = ApplyOrder(m_reorder_rules, target);
-            local_results.insert(std::pair<double, std::vector<int>>(Rules2RMSD(m_reorder_rules), m_reorder_rules));
-            /*std::set<int> s(result.second.begin(), result.second.end());
-            if (s.size() != result.second.size()) // make sure, that only results with non-duplicate vectors are accepted
-                continue;*/
-            result = AlignByVectorPair(tmp, m_reorder_rules);
-            if (m_reorder_rules == result)
-                break;
-            m_reorder_rules = result;
-            m_target_reordered = ApplyOrder(m_reorder_rules, target);
-            StructComp structcomp = Rule2RMSD(m_reorder_rules);
-            if (!m_topo)
-                local_results.insert(std::pair<double, std::vector<int>>(structcomp.rmsd, m_reorder_rules));
-            else
-                local_results.insert(std::pair<double, std::vector<int>>(structcomp.diff_topology, m_reorder_rules));
-        }
+        auto result = AlignByVectorPair(pairs);
+        m_reorder_rules = result;
+        m_target_reordered = ApplyOrder(m_reorder_rules, target);
+        local_results.insert(std::pair<double, std::vector<int>>(Rules2RMSD(m_reorder_rules), m_reorder_rules));
+        /*std::set<int> s(result.second.begin(), result.second.end());
+        if (s.size() != result.second.size()) // make sure, that only results with non-duplicate vectors are accepted
+            continue;*/
+        result = AlignByVectorPair(tmp, m_reorder_rules);
+        if (m_reorder_rules == result)
+            break;
+        m_reorder_rules = result;
+        m_target_reordered = ApplyOrder(m_reorder_rules, target);
+        StructComp structcomp = Rule2RMSD(m_reorder_rules);
+        if (!m_topo)
+            local_results.insert(std::pair<double, std::vector<int>>(structcomp.rmsd, m_reorder_rules));
+        else
+            local_results.insert(std::pair<double, std::vector<int>>(structcomp.diff_topology, m_reorder_rules));
     }
     m_stored_rules.clear();
     for (const auto& i : local_results) {
@@ -1150,7 +1147,7 @@ std::vector<int> RMSDDriver::DistanceReorder(const Molecule& reference, const Mo
     rules.insert(std::pair<double, std::vector<int>>(rmsdV1, orderV1));
     rules.insert(std::pair<double, std::vector<int>>(rmsdV2, orderV2));
 
-    if (m_nomunkress == false) {
+    if (m_nomunkres == false) {
         std::vector<int> munkress = Munkress(reference, target);
         double rmsdM = Rules2RMSD(munkress);
         rules.insert(std::pair<double, std::vector<int>>(rmsdM, munkress));

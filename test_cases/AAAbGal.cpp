@@ -29,6 +29,53 @@
 #include "json.hpp"
 using json = nlohmann::json;
 
+int AAAbGal_mtemplate() // template
+{
+    int threads = MaxThreads();
+
+    Molecule m1("A.xyz");
+    Molecule m2("B.xyz");
+
+    json controller = RMSDJson;
+    controller["threads"] = threads;
+    controller["reorder"] = true;
+    controller["method"] = "template";
+    RMSDDriver* driver = new RMSDDriver(controller, false);
+    driver->setReference(m1);
+    driver->setTarget(m2);
+    driver->start();
+    if (abs(driver->RMSD() - 0.457061) < 1e-5) {
+        std::cout << "RMSD calculation with reordering passed (" << driver->RMSD() << ")." << std::endl;
+        return 0;
+    } else {
+        std::cout << "RMSD calculation with reordering failed (" << driver->RMSD() << ")." << std::endl;
+        return -1;
+    }
+}
+
+int AAAbGal_mhybrid() // hybrid
+{
+    int threads = MaxThreads();
+
+    Molecule m1("A.xyz");
+    Molecule m2("B.xyz");
+
+    json controller = RMSDJson;
+    controller["threads"] = threads;
+    controller["reorder"] = true;
+    controller["method"] = "hybrid";
+    RMSDDriver* driver = new RMSDDriver(controller, false);
+    driver->setReference(m1);
+    driver->setTarget(m2);
+    driver->start();
+    if (abs(driver->RMSD() - 0.457061) < 1e-5) {
+        std::cout << "RMSD calculation with reordering passed (" << driver->RMSD() << ")." << std::endl;
+        return EXIT_SUCCESS;
+    } else {
+        std::cout << "RMSD calculation with reordering failed (" << driver->RMSD() << ")." << std::endl;
+        return EXIT_FAILURE;
+    }
+}
 
 int AAAbGal_template() // template
 {
@@ -41,6 +88,7 @@ int AAAbGal_template() // template
     controller["threads"] = threads;
     controller["reorder"] = true;
     controller["method"] = "template";
+    controller["nomunkres"] = true;
     RMSDDriver* driver = new RMSDDriver(controller, false);
     driver->setReference(m1);
     driver->setTarget(m2);
@@ -65,6 +113,8 @@ int AAAbGal_hybrid() // hybrid
     controller["threads"] = threads;
     controller["reorder"] = true;
     controller["method"] = "hybrid";
+    controller["nomunkres"] = true;
+
     RMSDDriver* driver = new RMSDDriver(controller, false);
     driver->setReference(m1);
     driver->setTarget(m2);
@@ -113,4 +163,8 @@ int main(int argc, char** argv)
         return AAAbGal_hybrid();
     else if(std::string(argv[1]).compare("incr") == 0)
         return AAAbGal_incr();
+    else if (std::string(argv[1]).compare("mhybrid") == 0)
+        return AAAbGal_mhybrid();
+    else if (std::string(argv[1]).compare("mtemplate") == 0)
+        return AAAbGal_mtemplate();
 }
