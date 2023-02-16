@@ -147,7 +147,7 @@ inline json CLI2Json(int argc, char** argv)
                 bool isVector = false;
                 double number = 0.0;
                 // std::size_t found = next.find("|");
-                if (next.find("|") != std::string::npos || next.find(",") != std::string::npos) {
+                if (next.find("|") != std::string::npos || next.find(",") != std::string::npos || next.find(":") != std::string::npos) {
                     isNumber = false;
                     isVector = true;
                 } else {

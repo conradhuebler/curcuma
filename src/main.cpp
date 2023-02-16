@@ -128,6 +128,35 @@ void Distance(const Molecule &mol, char **argv)
     std::cout << "Hydrogen bond length " << mol.CalculateDistance(proton - 1, acceptor - 1) << std::endl;
 }
 
+std::vector<int> CreateList(const std::string& list)
+{
+    std::vector<int> result;
+
+    StringList tmp_list = Tools::SplitString(list, ",");
+    for (const std::string& single : tmp_list) {
+        if (Tools::StringContains(single, ":")) {
+            auto sub = Tools::SplitString(single, ":");
+            if (sub.size() != 2)
+                continue;
+            if (!Tools::isInt(sub[0]) || !Tools::isInt(sub[1]))
+                continue;
+            int start = std::stoi(sub[0]);
+            int ende = std::stoi(sub[1]);
+
+            while (start <= ende) {
+                result.push_back(start);
+                start++;
+            }
+        } else {
+            if (Tools::isInt(single)) {
+                int i = std::stoi(single);
+                result.push_back(i);
+            }
+        }
+    }
+    return result;
+}
+
 int main(int argc, char **argv) {
 #ifndef _WIN32
 #if __GNUC__
@@ -163,7 +192,8 @@ int main(int argc, char **argv) {
                   << "-split       * Split a supramolcular structure in individual molecules    *" << std::endl
                   << "-rmsdtraj    * Find unique structures                                     *" << std::endl
                   << "-distance    * Calculate distance matrix                                  *" << std::endl
-                  << "-reorder     * Write molecule file with randomly reordered indices        *" << std::endl;
+                  << "-reorder     * Write molecule file with randomly reordered indices        *" << std::endl
+                  << "-centroid    * Calculate centroid of specific atoms/fragments             *" << std::endl;
         exit(1);
     }
     if(argc >= 2)
@@ -468,7 +498,26 @@ int main(int argc, char **argv) {
                 return 0;
             }
 
+            std::cout << controller << std::endl;
+            std::vector<int> frag_list, atom_list;
+            if (controller["centroid"].contains("addfragment"))
+                frag_list = CreateList(controller["centroid"]["addfragment"].get<std::string>());
+
+            if (controller["centroid"].contains("addatoms")) {
+                if (controller["centroid"]["addatoms"].is_number())
+                    atom_list.push_back(controller["centroid"]["addatoms"]);
+                else
+                    atom_list = CreateList(controller["centroid"]["addatoms"].get<std::string>());
+                for (int i : atom_list)
+                    std::cout << i << " ";
+                std::cout << std::endl;
+            }
+            if (frag_list.size() && atom_list.size()) {
+                std::cout << "Having both, fragments and atoms, added is for now mutale exclusive. Might be changed someday ...";
+                exit(1);
+            }
             int pt = 0, fragment = 0;
+            /*
             std::vector<int> frag;
             for (std::size_t i = 3; i < argc; ++i) {
                 if (strcmp(argv[i], "-fragment") == 0) {
@@ -495,26 +544,39 @@ int main(int argc, char **argv) {
                     // continue;
                 }
             }
-
-            if (frag.size()) {
+            */
+            if (frag_list.size()) {
                 std::cout << "Using fragment of atoms :";
-                for (int atom : frag)
+                for (int atom : frag_list)
                     std::cout << atom + 1 << " ";
                 std::cout << std::endl;
                 std::cout << "to calculate centroid!" << std::endl;
-            }
 
-            std::ofstream result_file;
-            result_file.open("centroids.dat");
-            FileIterator file(argv[2]);
-            while (!file.AtEnd()) {
-                Molecule mol = file.Next();
-                if (frag.size()) {
-                    result_file << GeometryTools::Centroid(mol.getGeometry(frag)).transpose() << std::endl;
-                    std::cout << mol.getGeometry(frag) << std::endl;
-                } else {
-                    mol.GetFragments(1.2);
-                    result_file << GeometryTools::Centroid(mol.getGeometryByFragment(fragment)).transpose() << std::endl;
+                std::ofstream result_file;
+                result_file.open("centroids.dat");
+                FileIterator file(argv[2]);
+                while (!file.AtEnd()) {
+                    Molecule mol = file.Next();
+                    if (frag_list.size()) {
+                        result_file << GeometryTools::Centroid(mol.getGeometry(frag_list)).transpose() << std::endl;
+                        std::cout << mol.getGeometry(frag_list) << std::endl;
+                    } else {
+                        mol.GetFragments(1.2);
+                        result_file << GeometryTools::Centroid(mol.getGeometryByFragment(fragment)).transpose() << std::endl;
+                    }
+                }
+            }
+            if (atom_list.size()) {
+                std::ofstream result_file;
+                result_file.open("centroids.dat");
+                FileIterator file(argv[2]);
+                while (!file.AtEnd()) {
+                    Molecule mol = file.Next();
+                    Molecule tmp;
+                    for (int atom : atom_list)
+                        tmp.addPair(mol.Atom(atom - 1));
+                    result_file << GeometryTools::Centroid(tmp.getGeometry()).transpose() << std::endl;
+                    // std::cout << tmp.getGeometry() << std::endl;
                 }
             }
         } else if (strcmp(argv[1], "-split") == 0) {

@@ -805,8 +805,8 @@ void RMSDDriver::TemplateFree()
 
         ref_mol.setGeometry(rotated_reference);
         tar_mol.setGeometry(rotated_target);
-        // ref_mol.writeXYZFile("reference.moi.xyz");
-        // tar_mol.writeXYZFile("target.moi.xyz");
+        ref_mol.writeXYZFile("reference.moi.xyz");
+        tar_mol.writeXYZFile("target.moi.xyz");
     } else {
         auto operators = GetOperateVectors(ref_mol, tar_mol);
         Eigen::Matrix3d R = operators.first;
@@ -818,8 +818,8 @@ void RMSDDriver::TemplateFree()
         ref_mol.setGeometry(tref);
         Molecule tar_mol = m_target;
         tar_mol.setGeometry(rotated);
-        // ref_mol.writeXYZFile("reference.nomoi.xyz");
-        // tar_mol.writeXYZFile("target.nomoi.xyz");
+        ref_mol.writeXYZFile("reference.nomoi.xyz");
+        tar_mol.writeXYZFile("target.nomoi.xyz");
     }
     std::vector<int> new_order = DistanceReorder(ref_mol, tar_mol);
     m_target_reordered = ApplyOrder(new_order, m_target);

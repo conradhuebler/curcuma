@@ -39,6 +39,7 @@
 #endif
 
 #include "src/core/uff_par.h"
+#include <set>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -83,7 +84,8 @@ const json UFFParameterJson{
     { "param_file", "none" },
     { "uff_file", "none" },
     { "writeparam", "none" },
-    { "writeuff", "none" }
+    { "writeuff", "none" },
+    { "verbose", false }
 };
 
 struct UFFBond {
@@ -127,12 +129,20 @@ public:
     bool insert(std::vector<int> vector)
     {
         std::vector<int> cache = vector;
-        std::sort(cache.begin(), cache.end());
-        if (std::find(m_sorted.begin(), m_sorted.end(), cache) != m_sorted.end())
-            return false;
+        // std::sort(cache.begin(), cache.end());
+        // if (std::find(m_sorted.begin(), m_sorted.end(), cache) != m_sorted.end())
+        //     return false;
         m_storage.push_back(vector);
-        m_sorted.push_back(cache);
+        // m_sorted.push_back(cache);
         return true;
+    }
+    inline void clean()
+    {
+        std::set<std::vector<int>> s;
+        unsigned size = m_storage.size();
+        for (unsigned i = 0; i < size; ++i)
+            s.insert(m_storage[i]);
+        m_storage.assign(s.begin(), s.end());
     }
     const std::vector<std::vector<int>>& Storage() const { return m_storage; }
 
@@ -154,6 +164,8 @@ public:
     }
 
     void Initialise();
+    void Initialise1st();
+
     double Calculate(bool gradient = true, bool verbose = false);
 
     std::vector<std::array<double, 3>> Gradient() const { return m_gradient; }
@@ -245,6 +257,8 @@ private:
     double BondEnergy(double distance, double r, double k_ij, double D_ij = 70);
 
     std::vector<int> m_atom_types, m_uff_atom_types, m_coordination;
+    std::vector<std::vector<int>> m_stored_bonds;
+
     std::vector<std::array<double, 3>> m_geometry, m_gradient;
 
     std::vector<UFFBond> m_uffbonds;
@@ -266,7 +280,7 @@ private:
 
     bool m_use_d3 = false;
     bool m_use_d4 = false;
-
+    bool m_verbose = false;
     double m_bond_scaling = 1, m_angle_scaling = 1, m_dihedral_scaling = 1, m_inversion_scaling = 1, m_vdw_scaling = 1, m_rep_scaling = 1, m_coulmob_scaling = 1;
 
     hbonds4::H4Correction m_h4correction;
