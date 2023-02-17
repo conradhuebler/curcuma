@@ -93,7 +93,7 @@ bool SimpleMD::Initialise()
         LoadRestartInformation();
     if (m_initfile.compare("none") != 0) {
         json md;
-        std::ifstream restart_file(m_basename + ".init.json");
+        std::ifstream restart_file(m_initfile);
         try {
             restart_file >> md;
         } catch (nlohmann::json::type_error& e) {
@@ -434,6 +434,9 @@ void SimpleMD::start()
         if ((m_step && m_step % m_print == 0)) {
             m_Etot = m_Epot + m_Ekin;
             PrintStatus();
+            std::ofstream restart_file("curcuma_step_" + std::to_string(m_step) + ".json");
+            nlohmann::json restart;
+            restart_file << WriteRestartInformation() << std::endl;
         }
 
         if (m_impuls > m_T) {
@@ -479,7 +482,9 @@ void SimpleMD::Verlet(double* coord, double* grad)
         ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
     ekin *= 0.5;
-    m_T = 2.0 * ekin / (kb * 3 * m_natoms);
+    double T = 2.0 * ekin / (kb * 3 * m_natoms);
+    m_unstable = T > 100 * m_T;
+    m_T = T;
 }
 
 void SimpleMD::RemoveRotation(std::vector<double>& velo)

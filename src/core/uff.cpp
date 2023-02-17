@@ -73,6 +73,7 @@ UFF::UFF(const json& controller)
     m_writeparam = parameter["writeparam"];
     m_writeuff = parameter["writeuff"];
     m_verbose = parameter["verbose"];
+    m_rings = parameter["rings"];
     m_scaling = 1.4;
     // m_au = au;
 }
@@ -84,14 +85,13 @@ void UFF::Initialise()
 
     m_uff_atom_types = std::vector<int>(m_atom_types.size(), 0);
     m_coordination = std::vector<int>(m_atom_types.size(), 0);
-    std::vector<std::vector<int>> ignored_vdw; // = std::vector< std::vector<int> >(m_atom_types.size(), 0);
+    std::vector<std::set<int>> ignored_vdw;
     m_topo = Eigen::MatrixXd::Zero(m_atom_types.size(), m_atom_types.size());
     TContainer bonds, nonbonds, angels, dihedrals, inversions;
-    std::vector<std::vector<int>> vdw_blacklist;
     m_scaling = 1.4;
     for (int i = 0; i < m_atom_types.size(); ++i) {
         m_stored_bonds.push_back(std::vector<int>());
-        ignored_vdw.push_back(std::vector<int>());
+        ignored_vdw.push_back(std::set<int>({ i }));
         m_gradient.push_back({ 0, 0, 0 });
         for (int j = 0; j < m_atom_types.size() && m_stored_bonds[i].size() < CoordinationNumber[m_atom_types[i]]; ++j) {
             if (i == j)
@@ -111,7 +111,7 @@ void UFF::Initialise()
                 if (bonds.insert({ std::min(i, j), std::max(i, j) })) {
                     m_coordination[i]++;
                     m_stored_bonds[i].push_back(j);
-                    ignored_vdw[i].push_back(j);
+                    ignored_vdw[i].insert(j);
                 }
                 m_topo(i, j) = 1;
                 m_topo(j, i) = 1;
@@ -119,6 +119,8 @@ void UFF::Initialise()
         }
     }
     AssignUffAtomTypes();
+    if (m_rings)
+        FindRings();
 
     bonds.clean();
 
@@ -153,8 +155,7 @@ void UFF::Initialise()
             if (t == j)
                 continue;
             angels.insert({ std::min(t, j), i, std::max(j, t) });
-            vdw_blacklist.push_back(std::vector<int>({ std::min(j, t), std::max(j, t) }));
-            ignored_vdw[i].push_back(t);
+            ignored_vdw[i].insert(t);
         }
 
         std::vector<int> l_bodies;
@@ -164,8 +165,7 @@ void UFF::Initialise()
             if (t == i)
                 continue;
             angels.insert({ std::min(i, t), j, std::max(t, i) });
-            vdw_blacklist.push_back(std::vector<int>({ std::min(i, t), std::max(i, t) }));
-            ignored_vdw[j].push_back(t);
+            ignored_vdw[j].insert(t);
         }
 
         for (int k : k_bodies) {
@@ -173,11 +173,12 @@ void UFF::Initialise()
                 if (k == i || k == j || k == l || i == j || i == l || j == l)
                     continue;
                 dihedrals.insert({ k, i, j, l });
-                vdw_blacklist.push_back(std::vector<int>({ std::min(k, l), std::max(k, l) }));
-                ignored_vdw[i].push_back(k);
-                ignored_vdw[j].push_back(k);
-                ignored_vdw[i].push_back(l);
-                ignored_vdw[j].push_back(l);
+                ignored_vdw[i].insert(k);
+                ignored_vdw[i].insert(l);
+                ignored_vdw[j].insert(k);
+                ignored_vdw[j].insert(l);
+                ignored_vdw[k].insert(l);
+                ignored_vdw[l].insert(k);
             }
         }
         if (m_stored_bonds[i].size() == 3) {
@@ -321,8 +322,8 @@ void UFF::Initialise()
     nonbonds.clean();
 
     for (int i = 0; i < m_atom_types.size(); ++i) {
-        for (int j = i + i; j < m_atom_types.size(); ++j) {
-            if (std::find(ignored_vdw[i].begin(), ignored_vdw[i].end(), j) != ignored_vdw[i].end())
+        for (int j = i + 1; j < m_atom_types.size(); ++j) {
+            if (std::find(ignored_vdw[i].begin(), ignored_vdw[i].end(), j) != ignored_vdw[i].end() || std::find(ignored_vdw[j].begin(), ignored_vdw[j].end(), i) != ignored_vdw[j].end())
                 continue;
             UFFvdW v;
             v.i = i;
@@ -338,25 +339,6 @@ void UFF::Initialise()
 
             m_uffvdwaals.push_back(v);
         }
-    }
-
-    for (const auto& vdw : nonbonds.Storage()) {
-        if (std::find(vdw_blacklist.begin(), vdw_blacklist.end(), std::vector<int>({ vdw[0], vdw[1] })) != vdw_blacklist.end())
-            continue;
-
-        UFFvdW v;
-        v.i = vdw[0];
-        v.j = vdw[1];
-
-        double cDi = UFFParameters[m_uff_atom_types[v.i]][cD];
-        double cDj = UFFParameters[m_uff_atom_types[v.j]][cD];
-        double cxi = UFFParameters[m_uff_atom_types[v.i]][cx];
-        double cxj = UFFParameters[m_uff_atom_types[v.j]][cx];
-        v.Dij = sqrt(cDi * cDj) * 2;
-
-        v.xij = sqrt(cxi * cxj);
-
-        m_uffvdwaals.push_back(v);
     }
     m_h4correction.allocate(m_atom_types.size());
 
@@ -379,315 +361,83 @@ void UFF::Initialise()
     m_initialised = true;
 }
 
-void UFF::Initialise1st()
+void UFF::FindRings()
 {
-    if (m_initialised)
-        return;
+    std::vector<int> done;
 
-    m_uff_atom_types = std::vector<int>(m_atom_types.size(), 0);
-    m_coordination = std::vector<int>(m_atom_types.size(), 0);
-
-    m_topo = Eigen::MatrixXd::Zero(m_atom_types.size(), m_atom_types.size());
-    TContainer bonds, nonbonds, angels, dihedrals, inversions;
-    std::vector<std::vector<int>> vdw_blacklist;
     for (int i = 0; i < m_atom_types.size(); ++i) {
-        m_gradient.push_back({ 0, 0, 0 });
-        // std::cout << i << " " << std::endl;
-        for (int j = i + 1; j < m_atom_types.size(); ++j) {
-            if (i == j)
-                continue;
-            double x_i = m_geometry[i][0] * m_au;
-            double x_j = m_geometry[j][0] * m_au;
+        if (std::find(done.begin(), done.end(), i) != done.end())
+            continue;
 
-            double y_i = m_geometry[i][1] * m_au;
-            double y_j = m_geometry[j][1] * m_au;
+        bool loop = true;
+        std::vector<int> bonded = m_stored_bonds[i];
+        std::vector<int> knots, outer;
 
-            double z_i = m_geometry[i][2] * m_au;
-            double z_j = m_geometry[j][2] * m_au;
+        for (int atom : bonded) {
+            if (m_stored_bonds[atom].size() == 1)
+                done.push_back(atom);
+            knots.push_back(atom);
+            outer.push_back(atom);
+        }
+        std::vector<std::vector<int>> stash;
+        stash.push_back(knots);
+        // done.push_back(std::vector<int>());
+        int index = -1;
+        while (loop) {
+            for (int s = 0; s < stash.size(); ++s) {
+                int atom = stash[s][stash[s].size() - 1];
+                {
+                    std::vector<int> bonded = m_stored_bonds[atom];
+                    std::vector<int> vacant;
 
-            double r_ij = sqrt((((x_i - x_j) * (x_i - x_j)) + ((y_i - y_j) * (y_i - y_j)) + ((z_i - z_j) * (z_i - z_j))));
+                    for (int atom : bonded) {
+                        if (m_stored_bonds[atom].size() == 1) {
+                            done.push_back(atom);
+                            continue;
+                        }
+                        if (std::find(stash[s].begin(), stash[s].end(), atom) != stash[s].end()) {
+                            continue;
+                        }
+                        if (std::find(done.begin(), done.end(), atom) != done.end()) {
+                            continue;
+                        }
+                        vacant.push_back(atom);
+                        if (stash[s].size() == 1)
+                            break;
+                    }
+                    if (vacant.size() == 0) {
+                        loop = false;
+                        index = s;
+                        m_identified_rings.push_back(stash[s]);
+                        for (int a : stash[s])
+                            done.push_back(a);
+                        stash.erase(stash.begin() + s);
+                        // done.erase(done.begin() + s);
 
-            if (r_ij <= (Elements::CovalentRadius[m_atom_types[i]] + Elements::CovalentRadius[m_atom_types[j]]) * m_scaling * m_au) {
-                if (bonds.insert({ i, j })) {
-                    m_coordination[i]++;
-                    m_coordination[j]++;
-                }
+                        // break;
+                    } else if (vacant.size() == 1)
+                        stash[s].push_back(vacant[0]);
+                    else {
+                        auto currentstash = stash[s];
+                        stash.erase(stash.begin() + s);
+                        // auto currdone = done[s];
+                        // done.erase(done.begin() + s);
 
-                m_topo(i, j) = 1;
-                m_topo(j, i) = 1;
-                for (int k = 0; k < m_atom_types.size(); ++k) {
-                    if (i == k || j == k)
-                        continue;
-
-                    double x_k = m_geometry[k][0] * m_au;
-                    double y_k = m_geometry[k][1] * m_au;
-                    double z_k = m_geometry[k][2] * m_au;
-                    double r_ik = sqrt((((x_i - x_k) * (x_i - x_k)) + ((y_i - y_k) * (y_i - y_k)) + ((z_i - z_k) * (z_i - z_k))));
-                    double r_jk = sqrt((((x_j - x_k) * (x_j - x_k)) + ((y_j - y_k) * (y_j - y_k)) + ((z_j - z_k) * (z_j - z_k))));
-
-                    if (r_ik <= (Elements::CovalentRadius[m_atom_types[i]] + Elements::CovalentRadius[m_atom_types[k]]) * m_scaling * m_au) {
-                        angels.insert({ i, j, k });
-                        vdw_blacklist.push_back(std::vector<int>({ i, k }));
-                        vdw_blacklist.push_back(std::vector<int>({ j, k }));
-
-                        for (int l = 0; l < m_atom_types.size(); ++l) {
-                            if (i == l || j == l || k == l)
-                                continue;
-
-                            double x_l = m_geometry[l][0] * m_au;
-                            double y_l = m_geometry[l][1] * m_au;
-                            double z_l = m_geometry[l][2] * m_au;
-                            double r_kl = sqrt((((x_l - x_k) * (x_l - x_k)) + ((y_l - y_k) * (y_l - y_k)) + ((z_l - z_k) * (z_l - z_k))));
-                            double r_jl = sqrt((((x_l - x_j) * (x_l - x_j)) + ((y_l - y_j) * (y_l - y_j)) + ((z_l - z_j) * (z_l - z_j))));
-                            double r_il = sqrt((((x_l - x_i) * (x_l - x_i)) + ((y_l - y_i) * (y_l - y_i)) + ((z_l - z_i) * (z_l - z_i))));
-                            if (r_kl <= (Elements::CovalentRadius[m_atom_types[l]] + Elements::CovalentRadius[m_atom_types[k]]) * m_scaling * m_au) {
-                                dihedrals.insert({ j, i, k, l });
-                                vdw_blacklist.push_back(std::vector<int>({ i, l }));
-                                vdw_blacklist.push_back(std::vector<int>({ j, l }));
-                                vdw_blacklist.push_back(std::vector<int>({ k, l }));
-                            }
-                            if (r_jl <= (Elements::CovalentRadius[m_atom_types[l]] + Elements::CovalentRadius[m_atom_types[j]]) * m_scaling) {
-                                dihedrals.insert({ l, j, i, k });
-                                vdw_blacklist.push_back(std::vector<int>({ i, l }));
-                                vdw_blacklist.push_back(std::vector<int>({ j, l }));
-                                vdw_blacklist.push_back(std::vector<int>({ k, l }));
-                            }
-                            if (r_il <= (Elements::CovalentRadius[m_atom_types[l]] + Elements::CovalentRadius[m_atom_types[i]]) * m_scaling) {
-                                inversions.insert({ i, j, k, l });
-                                vdw_blacklist.push_back(std::vector<int>({ i, l }));
-                                vdw_blacklist.push_back(std::vector<int>({ j, l }));
-                                vdw_blacklist.push_back(std::vector<int>({ k, l }));
-                            }
+                        for (int atom : vacant) {
+                            stash.push_back(currentstash);
+                            stash[stash.size() - 1].push_back(atom);
+                            //  done.push_back(currdone);
                         }
                     }
-                    if (r_jk <= (Elements::CovalentRadius[m_atom_types[j]] + Elements::CovalentRadius[m_atom_types[k]]) * m_scaling * m_au) {
-                        angels.insert({ j, i, k });
-                        vdw_blacklist.push_back(std::vector<int>({ i, k }));
-                        vdw_blacklist.push_back(std::vector<int>({ j, k }));
-                        /*
-                                                for (int l = 0; l < m_atom_types.size(); ++l) {
-                                                    if (i == l || j == l || k == l)
-                                                        continue;
-
-                                                    double x_l = m_geometry[l][0] * m_au;
-                                                    double y_l = m_geometry[l][1] * m_au;
-                                                    double z_l = m_geometry[l][2] * m_au;
-                                                    double r_kl = sqrt((((x_l - x_k) * (x_l - x_k)) + ((y_l - y_k) * (y_l - y_k)) + ((z_l - z_k) * (z_l - z_k))));
-                                                    double r_jl = sqrt((((x_l - x_j) * (x_l - x_j)) + ((y_l - y_j) * (y_l - y_j)) + ((z_l - z_j) * (z_l - z_j))));
-                                                    double r_il = sqrt((((x_l - x_i) * (x_l - x_i)) + ((y_l - y_i) * (y_l - y_i)) + ((z_l - z_i) * (z_l - z_i))));
-                                                    if (r_kl <= (Elements::CovalentRadius[m_atom_types[l]] + Elements::CovalentRadius[m_atom_types[k]]) * m_scaling * m_au) {
-                                                        dihedrals.insert({ i, j, k, l });
-                                                        vdw_blacklist.push_back(std::vector<int>({ i, l }));
-                                                        vdw_blacklist.push_back(std::vector<int>({ j, l }));
-                                                        vdw_blacklist.push_back(std::vector<int>({ k, l }));
-                                                    }
-                                                    if (r_jl <= (Elements::CovalentRadius[m_atom_types[l]] + Elements::CovalentRadius[m_atom_types[j]]) * m_scaling) {
-                                                        dihedrals.insert({ l, i, j, k });
-                                                        vdw_blacklist.push_back(std::vector<int>({ i, l }));
-                                                        vdw_blacklist.push_back(std::vector<int>({ j, l }));
-                                                        vdw_blacklist.push_back(std::vector<int>({ k, l }));
-                                                    }
-                                                    if (r_il <= (Elements::CovalentRadius[m_atom_types[l]] + Elements::CovalentRadius[m_atom_types[i]]) * m_scaling) {
-                                                        inversions.insert({ j, i, k, l });
-                                                        vdw_blacklist.push_back(std::vector<int>({ i, l }));
-                                                        vdw_blacklist.push_back(std::vector<int>({ j, l }));
-                                                        vdw_blacklist.push_back(std::vector<int>({ k, l }));
-                                                    }
-                                                }*/
-                    }
                 }
-            } else
-                nonbonds.insert({ i, j });
-        }
-    }
-    // std::cout << "First step done" << std::endl;
-    AssignUffAtomTypes();
-    bonds.clean();
-    for (const auto& bond : bonds.Storage()) {
-        UFFBond b;
-
-        b.i = bond[0];
-        b.j = bond[1];
-        int bond_order = 1;
-
-        if (std::find(Conjugated.cbegin(), Conjugated.cend(), m_uff_atom_types[b.i]) != Conjugated.cend() && std::find(Conjugated.cbegin(), Conjugated.cend(), m_uff_atom_types[b.j]) != Conjugated.cend())
-            bond_order = 2;
-        else if (std::find(Triples.cbegin(), Triples.cend(), m_uff_atom_types[b.i]) != Triples.cend() || std::find(Triples.cbegin(), Triples.cend(), m_uff_atom_types[b.j]) != Triples.cend())
-            bond_order = 3;
-        else
-            bond_order = 1;
-
-        b.r0 = BondRestLength(b.i, b.j, bond_order);
-        double cZi = UFFParameters[m_uff_atom_types[b.i]][cZ];
-        double cZj = UFFParameters[m_uff_atom_types[b.j]][cZ];
-        b.kij = 0.5 * m_bond_force * cZi * cZj / (b.r0 * b.r0 * b.r0);
-
-        m_uffbonds.push_back(b);
-    }
-    angels.clean();
-    for (const auto& angle : angels.Storage()) {
-        UFFAngle a;
-        a.i = angle[0];
-        a.j = angle[1];
-        a.k = angle[2];
-        double f = pi / 180.0;
-        double rij = BondRestLength(a.i, a.j, 1);
-        double rjk = BondRestLength(a.j, a.k, 1);
-        double Theta0 = UFFParameters[m_uff_atom_types[a.i]][cTheta0];
-        double cosTheta0 = cos(Theta0 * f);
-        double rik = sqrt(rij * rij + rjk * rjk - 2. * rij * rjk * cosTheta0);
-        double param = m_angle_force;
-        double beta = 2.0 * param / (rij * rjk);
-        double preFactor = beta * UFFParameters[m_uff_atom_types[a.i]][cZ] * UFFParameters[m_uff_atom_types[a.k]][cZ] / (rik * rik * rik * rik * rik);
-        double rTerm = rij * rjk;
-        double inner = 3.0 * rTerm * (1.0 - cosTheta0 * cosTheta0) - rik * rik * cosTheta0;
-        a.kijk = preFactor * rTerm * inner;
-        a.C2 = 1 / (4 * std::max(sin(Theta0 * f) * sin(Theta0 * f), 1e-4));
-        a.C1 = -4 * a.C2 * cosTheta0;
-        a.C0 = a.C2 * (2 * cosTheta0 * cosTheta0 + 1);
-        m_uffangle.push_back(a);
-    }
-    dihedrals.clean();
-    for (const auto& dihedral : dihedrals.Storage()) {
-        UFFDihedral d;
-        d.i = dihedral[0];
-        d.j = dihedral[1];
-        d.k = dihedral[2];
-        d.l = dihedral[3];
-
-        d.n = 2;
-        double f = pi / 180.0;
-        double bond_order = 1;
-        d.V = 2;
-        d.n = 3;
-        d.phi0 = 180 * f;
-
-        if (std::find(Conjugated.cbegin(), Conjugated.cend(), m_uff_atom_types[d.k]) != Conjugated.cend() && std::find(Conjugated.cbegin(), Conjugated.cend(), m_uff_atom_types[d.j]) != Conjugated.cend())
-            bond_order = 2;
-        else if (std::find(Triples.cbegin(), Triples.cend(), m_uff_atom_types[d.k]) != Triples.cend() || std::find(Triples.cbegin(), Triples.cend(), m_uff_atom_types[d.j]) != Triples.cend())
-            bond_order = 3;
-        else
-            bond_order = 1;
-
-        if (m_coordination[d.j] == 4 && m_coordination[d.k] == 4) // 2*sp3
-        {
-            d.V = sqrt(UFFParameters[m_uff_atom_types[d.j]][cV] * UFFParameters[m_uff_atom_types[d.k]][cV]);
-            d.phi0 = 180 * f;
-            d.n = 3;
-        }
-        if (m_coordination[d.j] == 3 && m_coordination[d.k] == 3) // 2*sp2
-        {
-            d.V = 5 * sqrt(UFFParameters[m_uff_atom_types[d.j]][cU] * UFFParameters[m_uff_atom_types[d.k]][cU]) * (1 + 4.18 * log(bond_order));
-            d.phi0 = 180 * f;
-            d.n = 2;
-        } else if ((m_coordination[d.j] == 4 && m_coordination[d.k] == 3) || (m_coordination[d.j] == 3 && m_coordination[d.k] == 4)) {
-            d.V = sqrt(UFFParameters[m_uff_atom_types[d.j]][cV] * UFFParameters[m_uff_atom_types[d.k]][cV]);
-            d.phi0 = 0 * f;
-            d.n = 6;
-
-        } else {
-            d.V = 5 * sqrt(UFFParameters[m_uff_atom_types[d.j]][cU] * UFFParameters[m_uff_atom_types[d.k]][cU]) * (1 + 4.18 * log(bond_order));
-            d.phi0 = 90 * f;
-        }
-
-        m_uffdihedral.push_back(d);
-    }
-    inversions.clean();
-    for (const auto& inversion : inversions.Storage()) {
-        const int i = inversion[0];
-        if (m_coordination[i] != 3)
-            continue;
-
-        UFFInversion inv;
-        inv.i = i;
-        inv.j = inversion[1];
-        inv.k = inversion[2];
-        inv.l = inversion[3];
-
-        double C0 = 0.0;
-        double C1 = 0.0;
-        double C2 = 0.0;
-        double f = pi / 180.0;
-        double kijkl = 0;
-        if (6 <= m_atom_types[i] && m_atom_types[i] <= 8) {
-            C0 = 1.0;
-            C1 = -1.0;
-            C2 = 0.0;
-            kijkl = 6;
-            if (m_atom_types[inv.j] == 8 || m_atom_types[inv.k] == 8 || m_atom_types[inv.l] == 8)
-                kijkl = 50;
-        } else {
-            double w0 = pi / 180.0;
-            switch (m_atom_types[i]) {
-            // if the central atom is phosphorous
-            case 15:
-                w0 *= 84.4339;
-                break;
-
-            // if the central atom is arsenic
-            case 33:
-                w0 *= 86.9735;
-                break;
-
-            // if the central atom is antimonium
-            case 51:
-                w0 *= 87.7047;
-                break;
-
-            // if the central atom is bismuth
-            case 83:
-                w0 *= 90.0;
-                break;
             }
-            C2 = 1.0;
-            C1 = -4.0 * cos(w0 * f);
-            C0 = -(C1 * cos(w0 * f) + C2 * cos(2.0 * w0 * f));
-            kijkl = 22.0 / (C0 + C1 + C2);
         }
-        inv.C0 = C0;
-        inv.C1 = C1;
-        inv.C2 = C2;
-        inv.kijkl = kijkl;
-        m_uffinversion.push_back(inv);
+        for (auto a : m_identified_rings) {
+            for (auto i : a)
+                std::cout << i << " ";
+            std::cout << std::endl;
+        }
     }
-    nonbonds.clean();
-    for (const auto& vdw : nonbonds.Storage()) {
-        if (std::find(vdw_blacklist.begin(), vdw_blacklist.end(), std::vector<int>({ vdw[0], vdw[1] })) != vdw_blacklist.end())
-            continue;
-
-        UFFvdW v;
-        v.i = vdw[0];
-        v.j = vdw[1];
-
-        double cDi = UFFParameters[m_uff_atom_types[v.i]][cD];
-        double cDj = UFFParameters[m_uff_atom_types[v.j]][cD];
-        double cxi = UFFParameters[m_uff_atom_types[v.i]][cx];
-        double cxj = UFFParameters[m_uff_atom_types[v.j]][cx];
-        v.Dij = sqrt(cDi * cDj) * 2;
-
-        v.xij = sqrt(cxi * cxj);
-
-        m_uffvdwaals.push_back(v);
-    }
-    m_h4correction.allocate(m_atom_types.size());
-
-#ifdef USE_D3
-    if (m_use_d3)
-        m_d3->InitialiseMolecule(m_atom_types);
-#endif
-
-#ifdef USE_D4
-    if (m_use_d4)
-        m_d4->InitialiseMolecule(m_atom_types);
-#endif
-
-    if (m_writeparam.compare("none") != 0)
-        writeParameterFile(m_writeparam + ".json");
-
-    if (m_writeuff.compare("none") != 0)
-        writeUFFFile(m_writeuff + ".json");
-
-    m_initialised = true;
 }
 
 void UFF::AssignUffAtomTypes()

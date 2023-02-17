@@ -143,6 +143,7 @@ private:
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;
     std::string m_method = "UFF", m_initfile = "none";
+    bool m_unstable = false;
 };
 
 class MDThread : public CxxThread {

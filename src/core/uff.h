@@ -85,7 +85,8 @@ const json UFFParameterJson{
     { "uff_file", "none" },
     { "writeparam", "none" },
     { "writeuff", "none" },
-    { "verbose", false }
+    { "verbose", false },
+    { "rings", false }
 };
 
 struct UFFBond {
@@ -128,12 +129,7 @@ public:
     TContainer() = default;
     bool insert(std::vector<int> vector)
     {
-        std::vector<int> cache = vector;
-        // std::sort(cache.begin(), cache.end());
-        // if (std::find(m_sorted.begin(), m_sorted.end(), cache) != m_sorted.end())
-        //     return false;
         m_storage.push_back(vector);
-        // m_sorted.push_back(cache);
         return true;
     }
     inline void clean()
@@ -164,7 +160,6 @@ public:
     }
 
     void Initialise();
-    void Initialise1st();
 
     double Calculate(bool gradient = true, bool verbose = false);
 
@@ -190,6 +185,7 @@ public:
 
 private:
     void AssignUffAtomTypes();
+    void FindRings();
 
     double BondRestLength(int i, int j, double order);
 
@@ -258,6 +254,7 @@ private:
 
     std::vector<int> m_atom_types, m_uff_atom_types, m_coordination;
     std::vector<std::vector<int>> m_stored_bonds;
+    std::vector<std::vector<int>> m_identified_rings;
 
     std::vector<std::array<double, 3>> m_geometry, m_gradient;
 
@@ -281,6 +278,7 @@ private:
     bool m_use_d3 = false;
     bool m_use_d4 = false;
     bool m_verbose = false;
+    bool m_rings = false;
     double m_bond_scaling = 1, m_angle_scaling = 1, m_dihedral_scaling = 1, m_inversion_scaling = 1, m_vdw_scaling = 1, m_rep_scaling = 1, m_coulmob_scaling = 1;
 
     hbonds4::H4Correction m_h4correction;
