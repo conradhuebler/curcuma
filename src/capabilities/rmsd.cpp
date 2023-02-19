@@ -157,6 +157,8 @@ void RMSDDriver::LoadControlJson()
     m_noreorder = Json2KeyWord<bool>(m_defaults, "noreorder");
     m_moi = Json2KeyWord<bool>(m_defaults, "moi");
     m_update_rotation = Json2KeyWord<bool>(m_defaults, "update-rotation");
+    m_split = Json2KeyWord<bool>(m_defaults, "split");
+
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
         std::string element = m_defaults["Element"].get<std::string>();
@@ -1138,9 +1140,14 @@ std::vector<int> RMSDDriver::DistanceReorder(const Molecule& reference, const Mo
     rules.insert(std::pair<double, std::vector<int>>(rmsdV2, orderV2));
 
     if (m_update_rotation) {
-        std::vector<int> orderV3 = DistanceReorderV3(reference, target);
-        double rmsdV3 = Rules2RMSD(orderV3);
-        rules.insert(std::pair<double, std::vector<int>>(rmsdV3, orderV3));
+        auto orderV3 = DistanceReorderV3(reference, target);
+        double rmsdV3 = Rules2RMSD(orderV3.first);
+
+        rules.insert(std::pair<double, std::vector<int>>(rmsdV3, orderV3.first));
+        if (m_split) {
+            double rmsdV4 = Rules2RMSD(orderV3.second);
+            rules.insert(std::pair<double, std::vector<int>>(rmsdV4, orderV3.first));
+        }
     }
 
     for (auto iter : rules)
@@ -1159,13 +1166,8 @@ std::vector<int> RMSDDriver::DistanceReorderV1(const Molecule& reference, const 
     Eigen::MatrixXd tar_matrix = GeometryTools::TranslateMolecule(target, target.Centroid(true), Position{ 0, 0, 0 });
     tar.setGeometry(tar_matrix);
 
-    // std::vector<int> new_order;
-
     for (int i = 0; i < ref.AtomCount(); ++i) {
-        double distance = 1e10;
-        int index = -1;
         std::map<double, int> result;
-
         for (int j = 0; j < tar.AtomCount(); ++j) {
 
             if (tar.Atom(j).first != ref.Atom(i).first || std::find(new_order.begin(), new_order.end(), j) != new_order.end())
@@ -1173,15 +1175,8 @@ std::vector<int> RMSDDriver::DistanceReorderV1(const Molecule& reference, const 
 
             const double local_distance = GeometryTools::Distance(tar.Atom(j).second, ref.Atom(i).second);
             result.insert(std::pair<double, int>(local_distance, j));
-            /*
-            if (local_distance <= distance) {
-                distance = local_distance;
-                index = j;
-            }*/
         }
         new_order.push_back(result.begin()->second);
-
-        // new_order.push_back(index);
     }
     return new_order;
 }
@@ -1220,20 +1215,19 @@ std::vector<int> RMSDDriver::DistanceReorderV2(const Molecule& reference, const 
     return new_order;
 }
 
-std::vector<int> RMSDDriver::DistanceReorderV3(const Molecule& reference, const Molecule& target)
+std::pair<std::vector<int>, std::vector<int>> RMSDDriver::DistanceReorderV3(const Molecule& reference, const Molecule& target)
 {
     Molecule ref = reference, tar = target;
 
-    std::vector<int> new_order;
+    std::vector<int> new_order, proton_free;
     Eigen::MatrixXd ref_matrix = GeometryTools::TranslateMolecule(reference, reference.Centroid(true), Position{ 0, 0, 0 });
     ref.setGeometry(ref_matrix);
     Eigen::MatrixXd tar_matrix = GeometryTools::TranslateMolecule(target, target.Centroid(true), Position{ 0, 0, 0 });
     tar.setGeometry(tar_matrix);
     double mix = 1 - m_damping;
     for (int i = 0; i < ref.AtomCount(); ++i) {
+
         std::map<double, int> result;
-        double distance = 1e10;
-        int index = -1;
         for (int j = 0; j < tar.AtomCount(); ++j) {
 
             if (tar.Atom(j).first != ref.Atom(i).first || std::find(new_order.begin(), new_order.end(), j) != new_order.end())
@@ -1245,6 +1239,7 @@ std::vector<int> RMSDDriver::DistanceReorderV3(const Molecule& reference, const 
 
         if (new_order.size() <= 3) {
             new_order.push_back(result.begin()->second);
+            proton_free.push_back((result.begin()->second * (ref.Atom(i).first != 1)) - ref.Atom(i).first == 1);
         } else {
             std::map<double, int> result2;
             std::map<double, Eigen::Matrix3d> matrix2;
@@ -1256,6 +1251,7 @@ std::vector<int> RMSDDriver::DistanceReorderV3(const Molecule& reference, const 
                 if (new_order.size() >= 4 && i % 1 == 0) {
                     Molecule w_ref, w_tar;
                     for (int i = 0; i < new_order.size(); ++i) {
+
                         w_ref.addPair(ref.Atom(i));
                         w_tar.addPair(tar.Atom(new_order[i]));
                     }
@@ -1277,48 +1273,78 @@ std::vector<int> RMSDDriver::DistanceReorderV3(const Molecule& reference, const 
             }
             rotated = tar_matrix * matrix2.begin()->second;
             tar.setGeometry(mix * rotated + (1 - mix) * tar_matrix);
-            if (result.begin()->second != result2.begin()->second) {
-                // rotated = tar_matrix * matrix2.begin()->second;
-                // tar.setGeometry(1 * rotated);
-                // tar.appendXYZFile("blob.xyz");
-                //--i;
-                // continue;
-            }
+            //  tar.appendXYZFile("blob.xyz");
             new_order.push_back(result2.begin()->second);
+            proton_free.push_back((result2.begin()->second * (ref.Atom(i).first != 1)) - ref.Atom(i).first == 1);
         }
     }
-    return new_order;
+    auto update = FillOrder(reference, target, proton_free);
+    return std::pair<std::vector<int>, std::vector<int>>(new_order, update);
 }
 
-std::vector<int> RMSDDriver::DistanceReorderV4(const Molecule& reference, const Molecule& target)
+std::vector<int> RMSDDriver::FillOrder(const Molecule& reference, const Molecule& target, const std::vector<int>& order)
 {
-    std::vector<int> new_order(m_reference.AtomCount(), -1), done_ref, done_tar;
+    Molecule ref = reference, tar = target;
 
-    while (done_ref.size() < m_reference.AtomCount()) {
-        double distance = 1e10;
-        int match_reference = 0;
-        int match_target = 0;
-        for (int i = 0; i < target.AtomCount(); ++i) {
-            if (std::find(done_tar.begin(), done_tar.end(), i) != done_tar.end())
+    std::vector<int> new_order;
+    Eigen::MatrixXd ref_matrix = GeometryTools::TranslateMolecule(reference, reference.Centroid(true), Position{ 0, 0, 0 });
+    ref.setGeometry(ref_matrix);
+    Eigen::MatrixXd tar_matrix = GeometryTools::TranslateMolecule(target, target.Centroid(true), Position{ 0, 0, 0 });
+    tar.setGeometry(tar_matrix);
+    double mix = 1 - m_damping;
+    for (int i = 0; i < order.size(); ++i) {
+        if (order[i] != -1) {
+            new_order.push_back(order[i]);
+            continue;
+        }
+        std::map<double, int> result;
+        for (int j = 0; j < tar.AtomCount(); ++j) {
+
+            if (tar.Atom(j).first != ref.Atom(i).first || std::find(new_order.begin(), new_order.end(), j) != new_order.end())
                 continue;
-            for (int j = 0; j < reference.AtomCount(); ++j) {
-                if (std::find(done_ref.begin(), done_ref.end(), j) != done_ref.end())
-                    continue;
 
-                if (target.Atom(i).first != reference.Atom(j).first)
-                    continue;
+            const double local_distance = GeometryTools::Distance(tar.Atom(j).second, ref.Atom(i).second);
+            result.insert(std::pair<double, int>(local_distance, j));
+        }
 
-                const double local_distance = GeometryTools::Distance(target.Atom(i).second, reference.Atom(j).second);
-                if (local_distance <= distance) {
-                    distance = local_distance;
-                    match_target = i;
-                    match_reference = j;
+        if (new_order.size() <= 3) {
+            new_order.push_back(result.begin()->second);
+        } else {
+            std::map<double, int> result2;
+            std::map<double, Eigen::Matrix3d> matrix2;
+
+            Geometry rotated;
+            auto iterator = result.begin();
+            for (int j = 0; j < result.size() && j < 5; ++j) {
+
+                if (new_order.size() >= 4 && i % 1 == 0) {
+                    Molecule w_ref, w_tar;
+                    for (int i = 0; i < order.size(); ++i) {
+                        if (order[i] == -1)
+                            continue;
+                        w_ref.addPair(ref.Atom(i));
+                        w_tar.addPair(tar.Atom(order[i]));
+                    }
+                    w_ref.addPair(ref.Atom(i));
+                    w_tar.addPair(tar.Atom(iterator->second));
+
+                    Geometry tref = GeometryTools::TranslateMolecule(w_ref, w_ref.Centroid(true), Position{ 0, 0, 0 });
+                    Geometry tget = GeometryTools::TranslateMolecule(w_tar, w_tar.Centroid(true), Position{ 0, 0, 0 });
+                    w_ref.setGeometry(tref);
+                    w_tar.setGeometry(tget);
+                    auto operators = GetOperateVectors(w_ref, w_tar);
+                    Eigen::Matrix3d R = operators.first;
+
+                    double rmsd = RMSDFunctions::getRMSD(tref, tget * R);
+                    result2.insert(std::pair<double, int>(rmsd, iterator->second));
+                    matrix2.insert(std::pair<double, Eigen::Matrix3d>(rmsd, R));
+                    iterator++;
                 }
             }
+            rotated = tar_matrix * matrix2.begin()->second;
+            tar.setGeometry(mix * rotated + (1 - mix) * tar_matrix);
+            new_order.push_back(result2.begin()->second);
         }
-        new_order[match_target] = match_reference;
-        done_tar.push_back(match_target);
-        done_ref.push_back(match_reference);
     }
     return new_order;
 }
