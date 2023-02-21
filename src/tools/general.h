@@ -373,4 +373,33 @@ inline std::vector<double> String2DoubleVec(const std::string& str)
 
     return result;
 }
+
+inline std::vector<int> CreateList(const std::string& list)
+{
+    std::vector<int> result;
+
+    StringList tmp_list = Tools::SplitString(list, ",");
+    for (const std::string& single : tmp_list) {
+        if (Tools::StringContains(single, ":")) {
+            auto sub = Tools::SplitString(single, ":");
+            if (sub.size() != 2)
+                continue;
+            if (!Tools::isInt(sub[0]) || !Tools::isInt(sub[1]))
+                continue;
+            int start = std::stoi(sub[0]);
+            int ende = std::stoi(sub[1]);
+
+            while (start <= ende) {
+                result.push_back(start);
+                start++;
+            }
+        } else {
+            if (Tools::isInt(single)) {
+                int i = std::stoi(single);
+                result.push_back(i);
+            }
+        }
+    }
+    return result;
+}
 }
