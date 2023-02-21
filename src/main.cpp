@@ -128,33 +128,9 @@ void Distance(const Molecule &mol, char **argv)
     std::cout << "Hydrogen bond length " << mol.CalculateDistance(proton - 1, acceptor - 1) << std::endl;
 }
 
-std::vector<int> CreateList(const std::string& list)
+double DotProduct(const Vector& pos1, const Vector& pos2)
 {
-    std::vector<int> result;
-
-    StringList tmp_list = Tools::SplitString(list, ",");
-    for (const std::string& single : tmp_list) {
-        if (Tools::StringContains(single, ":")) {
-            auto sub = Tools::SplitString(single, ":");
-            if (sub.size() != 2)
-                continue;
-            if (!Tools::isInt(sub[0]) || !Tools::isInt(sub[1]))
-                continue;
-            int start = std::stoi(sub[0]);
-            int ende = std::stoi(sub[1]);
-
-            while (start <= ende) {
-                result.push_back(start);
-                start++;
-            }
-        } else {
-            if (Tools::isInt(single)) {
-                int i = std::stoi(single);
-                result.push_back(i);
-            }
-        }
-    }
-    return result;
+    return pos1[0] * pos2[0] + pos1[1] * pos2[1] + pos1[2] * pos2[2];
 }
 
 int main(int argc, char **argv) {
@@ -501,13 +477,13 @@ int main(int argc, char **argv) {
             std::cout << controller << std::endl;
             std::vector<int> frag_list, atom_list;
             if (controller["centroid"].contains("addfragment"))
-                frag_list = CreateList(controller["centroid"]["addfragment"].get<std::string>());
+                frag_list = Tools::CreateList(controller["centroid"]["addfragment"].get<std::string>());
 
             if (controller["centroid"].contains("addatoms")) {
                 if (controller["centroid"]["addatoms"].is_number())
                     atom_list.push_back(controller["centroid"]["addatoms"]);
                 else
-                    atom_list = CreateList(controller["centroid"]["addatoms"].get<std::string>());
+                    atom_list = Tools::CreateList(controller["centroid"]["addatoms"].get<std::string>());
                 for (int i : atom_list)
                     std::cout << i << " ";
                 std::cout << std::endl;
@@ -573,10 +549,9 @@ int main(int argc, char **argv) {
                 while (!file.AtEnd()) {
                     Molecule mol = file.Next();
                     Molecule tmp;
-                    for (int atom : atom_list)
-                        tmp.addPair(mol.Atom(atom - 1));
-                    result_file << GeometryTools::Centroid(tmp.getGeometry()).transpose() << std::endl;
-                    // std::cout << tmp.getGeometry() << std::endl;
+                    // for (int atom : atom_list)
+                    //     tmp.addPair(mol.Atom(atom - 1));
+                    result_file << GeometryTools::Centroid(mol.getGeometry(atom_list)).transpose() << std::endl;
                 }
             }
         } else if (strcmp(argv[1], "-split") == 0) {
@@ -605,7 +580,10 @@ int main(int argc, char **argv) {
                 std::cerr << "Please use curcuma to calculate distances as follows:\ncurcuma -distance molecule.xyz indexA indexB" << std::endl;
                 return 0;
             }
+            std::string atomsA = std::string(argv[3]);
+            std::string atomsB = std::string(argv[4]);
 
+            /*
             int indexA = 0, indexB = 0;
             try {
                 indexA = std::stoi(argv[3]);
@@ -618,21 +596,53 @@ int main(int argc, char **argv) {
             } catch (const std::invalid_argument& arg) {
                 std::cerr << "Please use curcuma to calculate distances as follows:\ncurcuma -distance molecule.xyz indexA indexB" << std::endl;
                 return 0;
-            }
-            FileIterator file(argv[2]);
-            std::string outfile = argv[2];
+            }*/
+            std::vector<int> A = Tools::CreateList(atomsA);
+            std::vector<int> B = Tools::CreateList(atomsB);
+            /*    if(A.size() == 1 && B.size() == 1)
+                {
+                    int indexA = A[0], indexB = B[0];
+                    FileIterator file(argv[2]);
+                    std::string outfile = argv[2];
 
-            while (!file.AtEnd()) {
-                Molecule mol = file.Next();
-                std::cout << ":: " << mol.CalculateDistance(indexA - 1, indexB - 1) << "::" << std::endl;
-            }
+                    while (!file.AtEnd()) {
+                        Molecule mol = file.Next();
+                        std::cout << ":: " << mol.CalculateDistance(indexA - 1, indexB - 1) << "::" << std::endl;
+                    }
+                }else
+                */
+            {
+                for (int i : A)
+                    std::cout << i << " ";
+                std::cout << std::endl;
 
+                for (int i : B)
+                    std::cout << i << " ";
+                std::cout << std::endl;
+
+                FileIterator file(argv[2]);
+                std::string outfile = argv[2];
+
+                while (!file.AtEnd()) {
+                    Molecule mol = file.Next();
+                    Molecule tmpA, tmpB;
+                    /* for (int atom : A)
+                         tmpA.addPair(mol.Atom(atom - 1));
+                     for (int atom : B)
+                         tmpB.addPair(mol.Atom(atom - 1));*/
+                    // std::cout << mol.getGeometry(A) << std::endl << mol.getGeometry(B) << std::endl;
+                    auto cA = GeometryTools::Centroid(mol.getGeometry(A));
+                    auto cB = GeometryTools::Centroid(mol.getGeometry(B));
+                    std::cout << ":: " << sqrt((((cA[0] - cB[0]) * (cA[0] - cB[0])) + ((cA[1] - cB[1]) * (cA[1] - cB[1])) + ((cA[2] - cB[2]) * (cA[2] - cB[2])))) << "::" << std::endl;
+                }
+            }
         } else if (strcmp(argv[1], "-angle") == 0) {
             if (argc < 6) {
                 std::cerr << "Please use curcuma to calculate angles as follows:\ncurcuma -angle molecule.xyz indexA indexB indexC" << std::endl;
                 return 0;
             }
 
+            /*
             int indexA = 0, indexB = 0, indexC = 0;
             try {
                 indexA = std::stoi(argv[3]);
@@ -661,6 +671,69 @@ int main(int argc, char **argv) {
                 printf(":: %8.4f\t%8.4f\t%8.4f\t%8.4f ::\n", mol.CalculateAngle(indexA - 1, indexB - 1, indexC - 1), mol.CalculateDistance(indexA - 1, indexB - 1), mol.CalculateDistance(indexA - 1, indexC - 1), mol.CalculateDistance(indexC - 1, indexB - 1));
             }
             printf("\n\n");
+            */
+            std::string atomsA = std::string(argv[3]);
+            std::string atomsB = std::string(argv[4]);
+            std::string atomsC = std::string(argv[5]);
+
+            std::vector<int> A = Tools::CreateList(atomsA);
+            std::vector<int> B = Tools::CreateList(atomsB);
+            std::vector<int> C = Tools::CreateList(atomsC);
+
+            /* if(A.size() == 1 && B.size() == 1 && C.size() == 1)
+             {
+                 int indexA = A[0], indexB = B[0], indexC = C[0];
+
+                 FileIterator file(argv[2]);
+
+                 printf("\n  Angle\t\tr(%u,%u)\tr(%u,%u)\tr(%u,%u)\n", indexA - 1, indexB - 1, indexA - 1, indexC - 1, indexC - 1, indexB - 1);
+
+                 while (!file.AtEnd()) {
+                     Molecule mol = file.Next();
+                     printf(":: %8.4f\t%8.4f\t%8.4f\t%8.4f ::\n", mol.CalculateAngle(indexA - 1, indexB - 1, indexC - 1), mol.CalculateDistance(indexA - 1, indexB - 1), mol.CalculateDistance(indexA - 1, indexC - 1), mol.CalculateDistance(indexC - 1, indexB - 1));
+                 }
+                 printf("\n\n");
+             }else
+            */
+            {
+
+                for (int i : A)
+                    std::cout << i << " ";
+                std::cout << std::endl;
+
+                for (int i : B)
+                    std::cout << i << " ";
+                std::cout << std::endl;
+
+                for (int i : C)
+                    std::cout << i << " ";
+                std::cout << std::endl;
+                FileIterator file(argv[2]);
+
+                // printf("\n  Angle\t\tr(%u,%u)\tr(%u,%u)\tr(%u,%u)\n", indexA - 1, indexB - 1, indexA - 1, indexC - 1, indexC - 1, indexB - 1);
+
+                while (!file.AtEnd()) {
+                    Molecule mol = file.Next();
+                    /* Molecule tmpA, tmpB, tmpC;
+                     for (int atom : A)
+                         tmpA.addPair(mol.Atom(atom));
+                     for (int atom : B)
+                         tmpB.addPair(mol.Atom(atom));
+                     for (int atom : C)
+                         tmpC.addPair(mol.Atom(atom));*/
+                    auto cA = GeometryTools::Centroid(mol.getGeometry(A));
+                    auto cB = GeometryTools::Centroid(mol.getGeometry(B));
+                    auto cC = GeometryTools::Centroid(mol.getGeometry(C));
+                    auto cAB = cA - cB;
+                    auto cCB = cC - cB;
+                    double angle = acos(DotProduct(cAB, cCB) / (sqrt(DotProduct(cAB, cAB) * DotProduct(cCB, cCB)))) * 360 / 2.0 / pi;
+                    printf(":: %8.4f\t%8.4f\t%8.4f\t%8.4f ::\n",
+                        angle,
+                        sqrt((((cA[0] - cB[0]) * (cA[0] - cB[0])) + ((cA[1] - cB[1]) * (cA[1] - cB[1])) + ((cA[2] - cB[2]) * (cA[2] - cB[2])))),
+                        sqrt((((cA[0] - cC[0]) * (cA[0] - cC[0])) + ((cA[1] - cC[1]) * (cA[1] - cC[1])) + ((cA[2] - cC[2]) * (cA[2] - cC[2])))),
+                        sqrt((((cB[0] - cC[0]) * (cB[0] - cC[0])) + ((cB[1] - cC[1]) * (cB[1] - cC[1])) + ((cB[2] - cC[2]) * (cB[2] - cC[2])))));
+                }
+            }
         } else if (strcmp(argv[1], "-dMatrix") == 0) {
             if (argc < 3) {
                 std::cerr << "Please use curcuma to calculate a distance matrix for a molecule as follows:\ncurcuma -dMatrix molecule.xyz" << std::endl;
