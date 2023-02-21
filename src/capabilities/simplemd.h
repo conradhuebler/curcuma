@@ -56,7 +56,8 @@ static json CurcumaMDJson{
     { "impuls_scaling", 0.75 },
     { "writeinit", false },
     { "initfile", "none" },
-    { "norestart", false }
+    { "norestart", false },
+    { "writerestart", 500 }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -138,11 +139,13 @@ private:
     RMSDTraj* m_unqiue;
     const std::vector<double> m_used_mass;
     int m_unix_started = 0, m_prev_index = 0, m_max_rescue = 10, m_current_rescue = 0, m_currentTime = 0, m_max_top_diff = 15, m_step = 0;
+    int m_writerestart = -1;
     double m_pos_conv = 0, m_scale_velo = 1.0, m_berendson = 1;
     double m_impuls = 0, m_impuls_scaling = 0.75, m_dt2 = 0;
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;
     std::string m_method = "UFF", m_initfile = "none";
+    bool m_unstable = false;
 };
 
 class MDThread : public CxxThread {

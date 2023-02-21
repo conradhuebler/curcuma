@@ -18,6 +18,8 @@ git clones automatically some submodules.
 
 Additionally, [nlohmann/json](https://github.com/nlohmann/json) is obtained via cmake.
 
+A C++/Eigen implementation of the Munkres Algorithmus (Hungarian Method) based on [the workshop here](https://brc2.com/the-algorithm-workshop/) is included.
+
 ### UFF, xTB and Dispersion Correction
 Curcuma has an interface to tblite, xtb as well simple-d3 and cpp-d4, enabling semiempirical calculations or combinations of UFF with D3, D4 and H4 (no parameters are adjusted yet). To use on of the methods, please add **-method methodname** to your arguments:
 
@@ -117,7 +119,13 @@ to perform calculation only on non-proton atoms.
 { "Element", 7 },
 { "DynamicCenter", false },
 { "order", "" },
-{ "check", false }
+{ "check", false },
+{ "topo", 0 },
+{ "write", 0 },
+{ "moi", false },
+{ "update-rotation", false },
+{ "damping", 0.8 },
+{ "nomunkres", false }
 ```
 
 
@@ -240,22 +248,51 @@ Within a restart file, the last energy difference and the atom indicies from reo
 { "energy", 1.0 },
 { "maxenergy", -1.0 },
 { "preventreorder", false },
-{ "scaleLoose", 2 },
-{ "scaleTight", 0.5 },
+{ "scaleLoose", 1.5 },
+{ "scaleTight", 0.1 },
+{ "scaleLooseEnergy", 2 },
+{ "scaleTightEnergy", 0.1 },
+{ "scaleLooseRotational", 2 },
+{ "scaleTightRotational", 0.1 },
+{ "scaleLooseRipser", 2 },
+{ "scaleTightRipser", 0.1 },
 { "skip", 0 },
 { "allxyz", false },
 { "update", false },
 { "MaxParam", -1 },
 { "UseOrders", -1 },
-{ "RMSDMethod", "incr" },
+{ "RMSDMethod", "hybrid" },
 { "MaxHTopoDiff", -1 },
-{ "GFN", -1 },
-{ "RMSDThreads", 1 },
+{ "threads", 1 },
 { "RMSDElement", 7 },
-{ "accepted", "" }
+{ "accepted", "" },
+{ "method", "" },
+{ "lastdE", -1 },
+{ "fewerFile", false },
+{ "dothird", false },
+{ "skipfirst", false },
+{ "ignoreRotation", false },
+{ "ignoreBarCode", false },
+{ "skipless", false },
+{ "looseThresh", 7 },
+{ "tightThresh", 3 },
+{ "update-rotation", false },
+{ "damping", 0.8 },
+{ "split", false },
+{ "writefiles", false },
+{ "nomunkres", false }
 ```
 
+```cpp
+/* rotational = 1
+ * ripser     = 2
+ * energy     = 4 */
+int looseThresh = 1 * (diff_rot < m_diff_rot_threshold_loose) + 2 * (diff < m_diff_ripser_threshold_loose) + 4 * (std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_diff_energy_threshold_loose);
+if (looseThresh == m_looseThresh) 
+{
 
+}
+```
 ## Find unique structures in trajectories
 xyz and trj are handled equally.
 ```sh
@@ -274,7 +311,11 @@ curcuma -rmsdtraj XXX.trj -writeUnique -rmsd 1.5
 { "pcafile", false },
 { "allxyz", false },
 { "RefFirst", false },
-{ "noreorder", true }
+{ "noreorder", true },
+{ "opt", false },
+{ "filter", false },
+{ "writeRMSD", true },
+{ "offset", 0 }
 ```
 
 ## Geometry optimisation (batch mode possible)
@@ -292,18 +333,35 @@ A file called XXX.opt.xyz with the optimised structures will be written. The ind
 { "printOutput", true },
 { "dE", 0.1 },
 { "dRMSD", 0.01 },
-{ "GFN", 2 },
-{ "MaxIter", 2000 },
+{ "method", "uff" },
+{ "MaxIter", 5000 },
 { "LBFGS_eps", 1e-5 },
-{ "StoreIntermediate", 600 },
+{ "StoreIntermediate", 2000 },
 { "SingleStep", 20 },
-{ "ConvCount", 4 },
+{ "ConvCount", 11 },
 { "GradNorm", 0.001 },
 { "Threads", 1 },
 { "Charge", 0 },
 { "Spin", 0 },
-{ "SinglePoint", false }
+{ "SinglePoint", false },
+{ "optH", false },
+{ "serial", false }
 ```
+
+
+```cpp
+/*
+ * Energy = 1
+ * RMSD = 2
+ * LBFGS Conv = 4
+ * Gradient Norm = 8
+ * */
+converged = 1 * (abs(fun.m_energy - final_energy) * 2625.5 < dE)
+    + 2 * (driver->RMSD() < dRMSD)
+    + 4 * (solver.isConverged())
+    + 8 * (solver.final_grad_norm() < GradNorm);
+perform_optimisation = (converged != ConvCount) && (fun.isError() == 0);
+}
 
 ## Reorder and Align trajectories
 To reorder trajectory files with dissordered atomic indicies, for example after merging several minimum energy path files from NEB calculation, use

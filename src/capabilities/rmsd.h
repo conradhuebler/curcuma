@@ -1,6 +1,6 @@
 /*
  * <RMSD calculator for chemical structures.>
- * Copyright (C) 2019 - 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -110,7 +110,8 @@ static const json RMSDJson = {
     { "moi", false },
     { "update-rotation", false },
     { "damping", 0.8 },
-    { "split", false }
+    { "split", false },
+    { "nomunkres", false }
 };
 
 class RMSDDriver : public CurcumaMethod {
@@ -270,6 +271,7 @@ private:
     std::vector<int> DistanceReorderV2(const Molecule& reference, const Molecule& target);
     std::pair<std::vector<int>, std::vector<int>> DistanceReorderV3(const Molecule& reference, const Molecule& target);
     std::vector<int> FillOrder(const Molecule& reference, const Molecule& target, const std::vector<int>& order);
+    std::vector<int> Munkress(const Molecule& reference, const Molecule& target);
 
     std::vector<int> AlignByVectorPair(std::vector<int> first, std::vector<int> second);
     inline std::vector<int> AlignByVectorPair(std::pair<std::vector<int>, std::vector<int>> pair)
@@ -284,7 +286,7 @@ private:
     /*
     int CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) const;
     int CheckConnectivitiy(const Molecule& mol1) const;
-*/
+    */
     bool TemplateReorder();
     std::pair<int, int> CheckFragments();
 
@@ -307,7 +309,7 @@ private:
     double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99, m_damping = 0.8;
     bool m_check = false;
     bool m_check_connections = false, m_postprocess = true, m_noreorder = false, m_swap = false, m_dynamic_center = false;
-    bool m_update_rotation = false, m_split = false;
+    bool m_update_rotation = false, m_split = false, m_nomunkres = false;
     int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1, m_method = 1, m_htopo_diff = -1, m_partial_rmsd = -1, m_threads = 1, m_element = 7, m_write = 0, m_topo = 0;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
     std::vector<int> m_initial, m_element_templates;

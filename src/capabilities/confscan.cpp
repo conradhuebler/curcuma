@@ -173,6 +173,9 @@ void ConfScan::LoadControlJson()
     m_update_rotation = Json2KeyWord<bool>(m_defaults, "update-rotation");
     m_split = Json2KeyWord<bool>(m_defaults, "split");
     m_write = Json2KeyWord<bool>(m_defaults, "writefiles");
+
+    m_nomunkres = Json2KeyWord<bool>(m_defaults, "nomunkres");
+
     //   if (Json2KeyWord<bool>(m_defaults, "skipless")) {
     m_openLoop = true;
     m_closeLoop = false;
@@ -714,7 +717,7 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
     rmsd["element"] = m_rmsd_element_templates;
     rmsd["update-rotation"] = m_update_rotation;
     rmsd["damping"] = m_damping;
-
+    rmsd["nomunkres"] = m_nomunkres;
     std::vector<Molecule*> cached = m_stored_structures;
     m_result = m_previously_accepted;
     m_stored_structures.clear();

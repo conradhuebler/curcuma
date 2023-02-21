@@ -80,6 +80,8 @@ void SimpleMD::LoadControlJson()
     if (m_berendson < m_timestep)
         m_berendson = m_timestep;
 
+    m_writerestart = Json2KeyWord<int>(m_defaults, "writerestart");
+
     m_writeXYZ = Json2KeyWord<bool>(m_defaults, "writeXYZ");
     m_writeinit = Json2KeyWord<bool>(m_defaults, "writeinit");
     m_initfile = Json2KeyWord<std::string>(m_defaults, "initfile");
@@ -93,7 +95,7 @@ bool SimpleMD::Initialise()
         LoadRestartInformation();
     if (m_initfile.compare("none") != 0) {
         json md;
-        std::ifstream restart_file(m_basename + ".init.json");
+        std::ifstream restart_file(m_initfile);
         try {
             restart_file >> md;
         } catch (nlohmann::json::type_error& e) {
@@ -430,7 +432,11 @@ void SimpleMD::start()
         Verlet(coord, gradient);
         Berendson();
         m_Ekin = EKin();
-
+        if (m_writerestart > -1 && m_step % m_writerestart == 0) {
+            std::ofstream restart_file("curcuma_step_" + std::to_string(m_step) + ".json");
+            nlohmann::json restart;
+            restart_file << WriteRestartInformation() << std::endl;
+        }
         if ((m_step && m_step % m_print == 0)) {
             m_Etot = m_Epot + m_Ekin;
             PrintStatus();
@@ -449,6 +455,10 @@ void SimpleMD::start()
         m_step++;
         m_currentStep += m_timestep;
     }
+    std::ofstream restart_file("curcuma_final.json");
+    nlohmann::json restart;
+    restart_file << WriteRestartInformation() << std::endl;
+
     delete[] coord;
     delete[] gradient;
 }
@@ -479,7 +489,9 @@ void SimpleMD::Verlet(double* coord, double* grad)
         ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
     ekin *= 0.5;
-    m_T = 2.0 * ekin / (kb * 3 * m_natoms);
+    double T = 2.0 * ekin / (kb * 3 * m_natoms);
+    m_unstable = T > 100 * m_T;
+    m_T = T;
 }
 
 void SimpleMD::RemoveRotation(std::vector<double>& velo)

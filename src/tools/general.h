@@ -128,7 +128,6 @@ inline bool isInt(const std::string& input)
 inline bool isDouble(const std::string& input)
 {
     bool isD = true;
-
     try {
         std::stod(input);
     } catch (const std::string& what_arg) {
@@ -148,6 +147,11 @@ inline bool isDouble(const std::string& input)
     return left && right;
     */
     // return std::all_of(input.begin(), input.end(), ::isdigit);
+}
+
+inline bool StringContains(const std::string& string, const std::string& search)
+{
+    return string.find(search) != std::string::npos;
 }
 
 inline int VectorDifference(const std::vector<int>& tmp_a, const std::vector<int>& tmp_b)

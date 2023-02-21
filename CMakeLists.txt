@@ -339,6 +339,8 @@ endif(C17)
 
 add_subdirectory(test_cases)
 include(CTest)
+add_test(NAME AAAbGal_mtemplate COMMAND AAAbGal mtemplate WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME AAAbGal_mhybrid COMMAND AAAbGal mhybrid WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME AAAbGal_template COMMAND AAAbGal template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME AAAbGal_hybrid COMMAND AAAbGal hybrid WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME AAAbGal_incremental COMMAND AAAbGal incr WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)

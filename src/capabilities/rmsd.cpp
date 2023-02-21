@@ -1,6 +1,6 @@
 /*
  * <RMSD calculator for chemical structures.>
- * Copyright (C) 2019 - 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,6 +18,8 @@
  */
 
 #include "rmsd_functions.h"
+
+#include "munkres.h"
 
 #include "src/core/molecule.h"
 #include "src/tools/general.h"
@@ -158,6 +160,7 @@ void RMSDDriver::LoadControlJson()
     m_moi = Json2KeyWord<bool>(m_defaults, "moi");
     m_update_rotation = Json2KeyWord<bool>(m_defaults, "update-rotation");
     m_split = Json2KeyWord<bool>(m_defaults, "split");
+    m_nomunkres = Json2KeyWord<bool>(m_defaults, "nomunkres");
 
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
@@ -755,6 +758,10 @@ void RMSDDriver::ReorderMolecule()
 void RMSDDriver::AtomTemplate()
 {
     auto pairs = PrepareAtomTemplate(m_element_templates);
+    if (pairs.first.size() == 0 || pairs.second.size() == 0) {
+        std::cout << "Templates are empty, maybe try different elements" << std::endl;
+        return;
+    }
     FinaliseTemplate(pairs);
 
     m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
@@ -800,8 +807,8 @@ void RMSDDriver::TemplateFree()
 
         ref_mol.setGeometry(rotated_reference);
         tar_mol.setGeometry(rotated_target);
-        // ref_mol.writeXYZFile("reference.moi.xyz");
-        // tar_mol.writeXYZFile("target.moi.xyz");
+        ref_mol.writeXYZFile("reference.moi.xyz");
+        tar_mol.writeXYZFile("target.moi.xyz");
     } else {
         auto operators = GetOperateVectors(ref_mol, tar_mol);
         Eigen::Matrix3d R = operators.first;
@@ -813,8 +820,8 @@ void RMSDDriver::TemplateFree()
         ref_mol.setGeometry(tref);
         Molecule tar_mol = m_target;
         tar_mol.setGeometry(rotated);
-        // ref_mol.writeXYZFile("reference.nomoi.xyz");
-        // tar_mol.writeXYZFile("target.nomoi.xyz");
+        ref_mol.writeXYZFile("reference.nomoi.xyz");
+        tar_mol.writeXYZFile("target.nomoi.xyz");
     }
     std::vector<int> new_order = DistanceReorder(ref_mol, tar_mol);
     m_target_reordered = ApplyOrder(new_order, m_target);
@@ -831,28 +838,26 @@ void RMSDDriver::FinaliseTemplate(std::pair<std::vector<int>, std::vector<int>> 
 
     Molecule target = m_target;
     std::map<double, std::vector<int>> local_results;
-    for (int outer = 0; outer < m_stored_rules.size() /*&& outer < 100*/; ++outer) {
-        pairs.second = m_stored_rules[outer];
-
-        for (int i = 0; i < 5; ++i) {
-            auto result = AlignByVectorPair(pairs);
-            m_reorder_rules = result;
-            m_target_reordered = ApplyOrder(m_reorder_rules, target);
-            local_results.insert(std::pair<double, std::vector<int>>(Rules2RMSD(m_reorder_rules), m_reorder_rules));
-            /*std::set<int> s(result.second.begin(), result.second.end());
-            if (s.size() != result.second.size()) // make sure, that only results with non-duplicate vectors are accepted
-                continue;*/
-            result = AlignByVectorPair(tmp, m_reorder_rules);
-            if (m_reorder_rules == result)
-                break;
-            m_reorder_rules = result;
-            m_target_reordered = ApplyOrder(m_reorder_rules, target);
-            StructComp structcomp = Rule2RMSD(m_reorder_rules);
-            if (!m_topo)
-                local_results.insert(std::pair<double, std::vector<int>>(structcomp.rmsd, m_reorder_rules));
-            else
-                local_results.insert(std::pair<double, std::vector<int>>(structcomp.diff_topology, m_reorder_rules));
-        }
+    std::vector<std::vector<int>> rules = m_stored_rules;
+    for (int outer = 0; outer < rules.size() && outer < 5; ++outer) {
+        pairs.second = rules[outer];
+        auto result = AlignByVectorPair(pairs);
+        m_reorder_rules = result;
+        m_target_reordered = ApplyOrder(m_reorder_rules, target);
+        local_results.insert(std::pair<double, std::vector<int>>(Rules2RMSD(m_reorder_rules), m_reorder_rules));
+        /*std::set<int> s(result.second.begin(), result.second.end());
+        if (s.size() != result.second.size()) // make sure, that only results with non-duplicate vectors are accepted
+            continue;*/
+        result = AlignByVectorPair(tmp, m_reorder_rules);
+        if (m_reorder_rules == result)
+            break;
+        m_reorder_rules = result;
+        m_target_reordered = ApplyOrder(m_reorder_rules, target);
+        StructComp structcomp = Rule2RMSD(m_reorder_rules);
+        if (!m_topo)
+            local_results.insert(std::pair<double, std::vector<int>>(structcomp.rmsd, m_reorder_rules));
+        else
+            local_results.insert(std::pair<double, std::vector<int>>(structcomp.diff_topology, m_reorder_rules));
     }
     m_stored_rules.clear();
     for (const auto& i : local_results) {
@@ -930,7 +935,10 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareAtomTemplate(in
             target_indicies.push_back(i);
         }
     }
-
+    if (target.AtomCount() == 0 || reference.AtomCount() == 0) {
+        std::cout << " Template list is empty, try different elements please" << std::endl;
+        exit(0);
+    }
     Molecule cached_reference_mol = m_reference;
     Molecule cached_target_mol = m_target;
 
@@ -1134,10 +1142,18 @@ std::vector<int> RMSDDriver::DistanceReorder(const Molecule& reference, const Mo
 
     std::vector<int> orderV1 = DistanceReorderV1(reference, target);
     std::vector<int> orderV2 = DistanceReorderV2(reference, target);
+
     double rmsdV1 = Rules2RMSD(orderV1);
     double rmsdV2 = Rules2RMSD(orderV2);
+
     rules.insert(std::pair<double, std::vector<int>>(rmsdV1, orderV1));
     rules.insert(std::pair<double, std::vector<int>>(rmsdV2, orderV2));
+
+    if (m_nomunkres == false) {
+        std::vector<int> munkress = Munkress(reference, target);
+        double rmsdM = Rules2RMSD(munkress);
+        rules.insert(std::pair<double, std::vector<int>>(rmsdM, munkress));
+    }
 
     if (m_update_rotation) {
         auto orderV3 = DistanceReorderV3(reference, target);
@@ -1346,5 +1362,43 @@ std::vector<int> RMSDDriver::FillOrder(const Molecule& reference, const Molecule
             new_order.push_back(result2.begin()->second);
         }
     }
+    return new_order;
+}
+
+std::vector<int> RMSDDriver::Munkress(const Molecule& reference, const Molecule& target)
+{
+    double penalty = 100;
+    Molecule ref = reference, tar = target;
+
+    std::vector<int> new_order;
+    Eigen::MatrixXd ref_matrix = GeometryTools::TranslateMolecule(reference, reference.Centroid(true), Position{ 0, 0, 0 });
+    ref.setGeometry(ref_matrix);
+    Eigen::MatrixXd tar_matrix = GeometryTools::TranslateMolecule(target, target.Centroid(true), Position{ 0, 0, 0 });
+    tar.setGeometry(tar_matrix);
+
+    Eigen::MatrixXd distance = Eigen::MatrixXd::Zero(reference.AtomCount(), reference.AtomCount());
+    std::vector<int> element_reference = reference.Atoms();
+    std::vector<int> element_target = target.Atoms();
+
+    for (int i = 0; i < reference.AtomCount(); ++i) {
+        for (int j = 0; j < target.AtomCount(); ++j) {
+            distance(i, j) = GeometryTools::Distance(target.Atom(j).second, reference.Atom(i).second) + penalty * (target.Atom(j).first != reference.Atom(i).first);
+        }
+    }
+    // std::cout << distance << std::endl;
+    auto result = MunkressAssign(distance);
+    // std::cout << result << std::endl;
+
+    for (int i = 0; i < result.cols(); ++i) {
+        for (int j = 0; j < result.rows(); ++j) {
+            if (result(i, j) == 1) {
+                new_order.push_back(j);
+                break;
+            }
+        }
+    }
+    // for(auto i : new_order)
+    //     std::cout << i << " ";
+    // std::cout << std::endl;
     return new_order;
 }

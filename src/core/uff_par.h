@@ -26,6 +26,95 @@
 
 #include <vector>
 
+static const std::vector<double> CoordinationNumber = {
+    -1, // leading index
+    1, // H
+    0, // He
+    1, // Li
+    2, // Be
+    3, // B
+    4, // C
+    5, // N
+    2, // O
+    1, // F
+    0, // Ne
+    1, // Na
+    2, // Mg
+    3, // Al
+    4, // Si
+    5, // P
+    6, // S
+    1, // Cl
+    0, // Ar
+    1, // K
+    2, // Ca
+    3, // Sc
+    4, // Ti
+    5, // V
+    6, // Cr
+    7, // Mn
+    3, // Fe
+    3, // Co
+    3, // Ni
+    2, // Cu
+    2, // Zn
+    3, // Ga
+    4, // Ge
+    5, // As
+    6, // Se
+    1, // Br
+    0, // Kr
+    1, // Rb
+    2, // Sr
+    3, // Y
+    4, // Zr
+    5, // Nb
+    6, // Mo
+    1.28, // Tc
+    1.25, // Ru
+    1.25, // Rh
+    1.20, // Pd
+    1.28, // Ag
+    1.36, // Cd
+    1.42, // In
+    1.40, // Sn
+    1.40, // Sb
+    1.36, // Te
+    1.33, // I
+    1.31, // Xe
+    2.32, // Cs
+    1.96, // Ba
+    1.69, // La
+    1.69, // Ce - taken from La
+    1.69, // Pr - taken from La
+    1.69, // Nd - taken from La
+    1.69, // Pm - taken from La
+    1.69, // Sm - taken from La
+    1.69, // Eu - taken from La
+    1.69, // Gd - taken from La
+    1.69, // Tb - taken from La
+    1.69, // Dy - taken from La
+    1.69, // Ho - taken from La
+    1.69, // Er - taken from La
+    1.69, // Tm - taken from La
+    1.69, // Yb - taken from La
+    1.60, // Lu
+    1.50, // Hf
+    1.38, // Ta
+    1.46, // W
+    1.59, // Re
+    1.28, // Os
+    1.37, // Ir
+    1.28, // Pt
+    1.44, // Au
+    1.49, // Hg
+    1.48, // Tl
+    1.47, // Pb
+    1.46, // Bi
+    1.46, // Po - taken from Bi
+    1.46 // At - taken from Bi
+};
+
 const std::vector<std::vector<double>> UFFParameters{
     { 0.01, 180, 0.4, 5000, 12, 10.0, 0, 0, 9.66, 14.92, 0.7 }, // Du    0
     { 0.354, 180, 2.886, 0.044, 12, 0.712, 0, 0, 4.528, 6.9452, 0.371 }, // H_ 1

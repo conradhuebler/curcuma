@@ -72,6 +72,9 @@ UFF::UFF(const json& controller)
 
     m_writeparam = parameter["writeparam"];
     m_writeuff = parameter["writeuff"];
+    m_verbose = parameter["verbose"];
+    m_rings = parameter["rings"];
+    m_scaling = 1.4;
     // m_au = au;
 }
 
@@ -82,13 +85,15 @@ void UFF::Initialise()
 
     m_uff_atom_types = std::vector<int>(m_atom_types.size(), 0);
     m_coordination = std::vector<int>(m_atom_types.size(), 0);
-
+    std::vector<std::set<int>> ignored_vdw;
     m_topo = Eigen::MatrixXd::Zero(m_atom_types.size(), m_atom_types.size());
     TContainer bonds, nonbonds, angels, dihedrals, inversions;
-    std::vector<std::vector<int>> vdw_blacklist;
+    m_scaling = 1.4;
     for (int i = 0; i < m_atom_types.size(); ++i) {
+        m_stored_bonds.push_back(std::vector<int>());
+        ignored_vdw.push_back(std::set<int>({ i }));
         m_gradient.push_back({ 0, 0, 0 });
-        for (int j = i + 1; j < m_atom_types.size(); ++j) {
+        for (int j = 0; j < m_atom_types.size() && m_stored_bonds[i].size() < CoordinationNumber[m_atom_types[i]]; ++j) {
             if (i == j)
                 continue;
             double x_i = m_geometry[i][0] * m_au;
@@ -103,100 +108,21 @@ void UFF::Initialise()
             double r_ij = sqrt((((x_i - x_j) * (x_i - x_j)) + ((y_i - y_j) * (y_i - y_j)) + ((z_i - z_j) * (z_i - z_j))));
 
             if (r_ij <= (Elements::CovalentRadius[m_atom_types[i]] + Elements::CovalentRadius[m_atom_types[j]]) * m_scaling * m_au) {
-                if (bonds.insert({ i, j })) {
+                if (bonds.insert({ std::min(i, j), std::max(i, j) })) {
                     m_coordination[i]++;
-                    m_coordination[j]++;
+                    m_stored_bonds[i].push_back(j);
+                    ignored_vdw[i].insert(j);
                 }
-
                 m_topo(i, j) = 1;
                 m_topo(j, i) = 1;
-                for (int k = 0; k < m_atom_types.size(); ++k) {
-                    if (i == k || j == k)
-                        continue;
-
-                    double x_k = m_geometry[k][0] * m_au;
-                    double y_k = m_geometry[k][1] * m_au;
-                    double z_k = m_geometry[k][2] * m_au;
-                    double r_ik = sqrt((((x_i - x_k) * (x_i - x_k)) + ((y_i - y_k) * (y_i - y_k)) + ((z_i - z_k) * (z_i - z_k))));
-                    double r_jk = sqrt((((x_j - x_k) * (x_j - x_k)) + ((y_j - y_k) * (y_j - y_k)) + ((z_j - z_k) * (z_j - z_k))));
-
-                    if (r_ik <= (Elements::CovalentRadius[m_atom_types[i]] + Elements::CovalentRadius[m_atom_types[k]]) * m_scaling * m_au) {
-                        angels.insert({ i, j, k });
-                        vdw_blacklist.push_back(std::vector<int>({ i, k }));
-                        vdw_blacklist.push_back(std::vector<int>({ j, k }));
-
-                        for (int l = 0; l < m_atom_types.size(); ++l) {
-                            if (i == l || j == l || k == l)
-                                continue;
-
-                            double x_l = m_geometry[l][0] * m_au;
-                            double y_l = m_geometry[l][1] * m_au;
-                            double z_l = m_geometry[l][2] * m_au;
-                            double r_kl = sqrt((((x_l - x_k) * (x_l - x_k)) + ((y_l - y_k) * (y_l - y_k)) + ((z_l - z_k) * (z_l - z_k))));
-                            double r_jl = sqrt((((x_l - x_j) * (x_l - x_j)) + ((y_l - y_j) * (y_l - y_j)) + ((z_l - z_j) * (z_l - z_j))));
-                            double r_il = sqrt((((x_l - x_i) * (x_l - x_i)) + ((y_l - y_i) * (y_l - y_i)) + ((z_l - z_i) * (z_l - z_i))));
-                            if (r_kl <= (Elements::CovalentRadius[m_atom_types[l]] + Elements::CovalentRadius[m_atom_types[k]]) * m_scaling * m_au) {
-                                dihedrals.insert({ j, i, k, l });
-                                vdw_blacklist.push_back(std::vector<int>({ i, l }));
-                                vdw_blacklist.push_back(std::vector<int>({ j, l }));
-                                vdw_blacklist.push_back(std::vector<int>({ k, l }));
-                            }
-                            if (r_jl <= (Elements::CovalentRadius[m_atom_types[l]] + Elements::CovalentRadius[m_atom_types[j]]) * m_scaling) {
-                                dihedrals.insert({ l, j, i, k });
-                                vdw_blacklist.push_back(std::vector<int>({ i, l }));
-                                vdw_blacklist.push_back(std::vector<int>({ j, l }));
-                                vdw_blacklist.push_back(std::vector<int>({ k, l }));
-                            }
-                            if (r_il <= (Elements::CovalentRadius[m_atom_types[l]] + Elements::CovalentRadius[m_atom_types[i]]) * m_scaling) {
-                                inversions.insert({ i, j, k, l });
-                                vdw_blacklist.push_back(std::vector<int>({ i, l }));
-                                vdw_blacklist.push_back(std::vector<int>({ j, l }));
-                                vdw_blacklist.push_back(std::vector<int>({ k, l }));
-                            }
-                        }
-                    }
-                    if (r_jk <= (Elements::CovalentRadius[m_atom_types[j]] + Elements::CovalentRadius[m_atom_types[k]]) * m_scaling * m_au) {
-                        angels.insert({ j, i, k });
-                        vdw_blacklist.push_back(std::vector<int>({ i, k }));
-                        vdw_blacklist.push_back(std::vector<int>({ j, k }));
-                        /*
-                                                for (int l = 0; l < m_atom_types.size(); ++l) {
-                                                    if (i == l || j == l || k == l)
-                                                        continue;
-
-                                                    double x_l = m_geometry[l][0] * m_au;
-                                                    double y_l = m_geometry[l][1] * m_au;
-                                                    double z_l = m_geometry[l][2] * m_au;
-                                                    double r_kl = sqrt((((x_l - x_k) * (x_l - x_k)) + ((y_l - y_k) * (y_l - y_k)) + ((z_l - z_k) * (z_l - z_k))));
-                                                    double r_jl = sqrt((((x_l - x_j) * (x_l - x_j)) + ((y_l - y_j) * (y_l - y_j)) + ((z_l - z_j) * (z_l - z_j))));
-                                                    double r_il = sqrt((((x_l - x_i) * (x_l - x_i)) + ((y_l - y_i) * (y_l - y_i)) + ((z_l - z_i) * (z_l - z_i))));
-                                                    if (r_kl <= (Elements::CovalentRadius[m_atom_types[l]] + Elements::CovalentRadius[m_atom_types[k]]) * m_scaling * m_au) {
-                                                        dihedrals.insert({ i, j, k, l });
-                                                        vdw_blacklist.push_back(std::vector<int>({ i, l }));
-                                                        vdw_blacklist.push_back(std::vector<int>({ j, l }));
-                                                        vdw_blacklist.push_back(std::vector<int>({ k, l }));
-                                                    }
-                                                    if (r_jl <= (Elements::CovalentRadius[m_atom_types[l]] + Elements::CovalentRadius[m_atom_types[j]]) * m_scaling) {
-                                                        dihedrals.insert({ l, i, j, k });
-                                                        vdw_blacklist.push_back(std::vector<int>({ i, l }));
-                                                        vdw_blacklist.push_back(std::vector<int>({ j, l }));
-                                                        vdw_blacklist.push_back(std::vector<int>({ k, l }));
-                                                    }
-                                                    if (r_il <= (Elements::CovalentRadius[m_atom_types[l]] + Elements::CovalentRadius[m_atom_types[i]]) * m_scaling) {
-                                                        inversions.insert({ j, i, k, l });
-                                                        vdw_blacklist.push_back(std::vector<int>({ i, l }));
-                                                        vdw_blacklist.push_back(std::vector<int>({ j, l }));
-                                                        vdw_blacklist.push_back(std::vector<int>({ k, l }));
-                                                    }
-                                                }*/
-                    }
-                }
-            } else
-                nonbonds.insert({ i, j });
+            }
         }
     }
-
     AssignUffAtomTypes();
+    if (m_rings)
+        FindRings();
+
+    bonds.clean();
 
     for (const auto& bond : bonds.Storage()) {
         UFFBond b;
@@ -215,35 +141,82 @@ void UFF::Initialise()
         b.r0 = BondRestLength(b.i, b.j, bond_order);
         double cZi = UFFParameters[m_uff_atom_types[b.i]][cZ];
         double cZj = UFFParameters[m_uff_atom_types[b.j]][cZ];
-        b.kij = m_bond_force * cZi * cZj / (b.r0 * b.r0 * b.r0);
+        b.kij = 0.5 * m_bond_force * cZi * cZj / (b.r0 * b.r0 * b.r0);
 
         m_uffbonds.push_back(b);
+
+        int i = bond[0];
+        int j = bond[1];
+
+        std::vector<int> k_bodies;
+        for (auto t : m_stored_bonds[i]) {
+            k_bodies.push_back(t);
+
+            if (t == j)
+                continue;
+            angels.insert({ std::min(t, j), i, std::max(j, t) });
+            ignored_vdw[i].insert(t);
+        }
+
+        std::vector<int> l_bodies;
+        for (auto t : m_stored_bonds[j]) {
+            l_bodies.push_back(t);
+
+            if (t == i)
+                continue;
+            angels.insert({ std::min(i, t), j, std::max(t, i) });
+            ignored_vdw[j].insert(t);
+        }
+
+        for (int k : k_bodies) {
+            for (int l : l_bodies) {
+                if (k == i || k == j || k == l || i == j || i == l || j == l)
+                    continue;
+                dihedrals.insert({ k, i, j, l });
+                ignored_vdw[i].insert(k);
+                ignored_vdw[i].insert(l);
+                ignored_vdw[j].insert(k);
+                ignored_vdw[j].insert(l);
+                ignored_vdw[k].insert(l);
+                ignored_vdw[l].insert(k);
+            }
+        }
+        if (m_stored_bonds[i].size() == 3) {
+            inversions.insert({ i, m_stored_bonds[i][0], m_stored_bonds[i][1], m_stored_bonds[i][2] });
+        }
+        if (m_stored_bonds[j].size() == 3) {
+            inversions.insert({ j, m_stored_bonds[j][0], m_stored_bonds[j][1], m_stored_bonds[j][2] });
+        }
     }
 
+    angels.clean();
     for (const auto& angle : angels.Storage()) {
         UFFAngle a;
+
         a.i = angle[0];
         a.j = angle[1];
         a.k = angle[2];
-
+        if (a.i == a.j || a.i == a.k || a.j == a.k)
+            continue;
         double f = pi / 180.0;
         double rij = BondRestLength(a.i, a.j, 1);
         double rjk = BondRestLength(a.j, a.k, 1);
-        double Theta0 = UFFParameters[m_uff_atom_types[a.i]][cTheta0];
+        double Theta0 = UFFParameters[m_uff_atom_types[a.j]][cTheta0];
         double cosTheta0 = cos(Theta0 * f);
         double rik = sqrt(rij * rij + rjk * rjk - 2. * rij * rjk * cosTheta0);
         double param = m_angle_force;
         double beta = 2.0 * param / (rij * rjk);
-        double preFactor = beta * UFFParameters[m_uff_atom_types[a.i]][cZ] * UFFParameters[m_uff_atom_types[a.k]][cZ] / (rik * rik * rik * rik * rik);
+        double preFactor = beta * UFFParameters[m_uff_atom_types[a.j]][cZ] * UFFParameters[m_uff_atom_types[a.k]][cZ] / (rik * rik * rik * rik * rik);
         double rTerm = rij * rjk;
         double inner = 3.0 * rTerm * (1.0 - cosTheta0 * cosTheta0) - rik * rik * cosTheta0;
         a.kijk = preFactor * rTerm * inner;
-        a.C2 = 1 / (4 * sin(Theta0 * f) * sin(Theta0 * f));
+        a.C2 = 1 / (4 * std::max(sin(Theta0 * f) * sin(Theta0 * f), 1e-4));
         a.C1 = -4 * a.C2 * cosTheta0;
         a.C0 = a.C2 * (2 * cosTheta0 * cosTheta0 + 1);
         m_uffangle.push_back(a);
     }
 
+    dihedrals.clean();
     for (const auto& dihedral : dihedrals.Storage()) {
         UFFDihedral d;
         d.i = dihedral[0];
@@ -288,7 +261,7 @@ void UFF::Initialise()
 
         m_uffdihedral.push_back(d);
     }
-
+    inversions.clean();
     for (const auto& inversion : inversions.Storage()) {
         const int i = inversion[0];
         if (m_coordination[i] != 3)
@@ -346,24 +319,26 @@ void UFF::Initialise()
         inv.kijkl = kijkl;
         m_uffinversion.push_back(inv);
     }
+    nonbonds.clean();
 
-    for (const auto& vdw : nonbonds.Storage()) {
-        if (std::find(vdw_blacklist.begin(), vdw_blacklist.end(), std::vector<int>({ vdw[0], vdw[1] })) != vdw_blacklist.end())
-            continue;
+    for (int i = 0; i < m_atom_types.size(); ++i) {
+        for (int j = i + 1; j < m_atom_types.size(); ++j) {
+            if (std::find(ignored_vdw[i].begin(), ignored_vdw[i].end(), j) != ignored_vdw[i].end() || std::find(ignored_vdw[j].begin(), ignored_vdw[j].end(), i) != ignored_vdw[j].end())
+                continue;
+            UFFvdW v;
+            v.i = i;
+            v.j = j;
 
-        UFFvdW v;
-        v.i = vdw[0];
-        v.j = vdw[1];
+            double cDi = UFFParameters[m_uff_atom_types[v.i]][cD];
+            double cDj = UFFParameters[m_uff_atom_types[v.j]][cD];
+            double cxi = UFFParameters[m_uff_atom_types[v.i]][cx];
+            double cxj = UFFParameters[m_uff_atom_types[v.j]][cx];
+            v.Dij = sqrt(cDi * cDj) * 2;
 
-        double cDi = UFFParameters[m_uff_atom_types[v.i]][cD];
-        double cDj = UFFParameters[m_uff_atom_types[v.j]][cD];
-        double cxi = UFFParameters[m_uff_atom_types[v.i]][cx];
-        double cxj = UFFParameters[m_uff_atom_types[v.j]][cx];
-        v.Dij = sqrt(cDi * cDj) * 2;
+            v.xij = sqrt(cxi * cxj);
 
-        v.xij = sqrt(cxi * cxj);
-
-        m_uffvdwaals.push_back(v);
+            m_uffvdwaals.push_back(v);
+        }
     }
     m_h4correction.allocate(m_atom_types.size());
 
@@ -386,13 +361,147 @@ void UFF::Initialise()
     m_initialised = true;
 }
 
+void UFF::FindRings()
+{
+    std::vector<int> done;
+
+    for (int i = 0; i < m_atom_types.size(); ++i) {
+        if (std::find(done.begin(), done.end(), i) != done.end())
+            continue;
+        if (m_stored_bonds[i].size() == 1) {
+            done.push_back(i);
+            continue;
+        }
+        bool loop = true;
+        std::vector<int> bonded = m_stored_bonds[i];
+        std::vector<int> knots, outer;
+        // std::vector< std::pair<int, std::vector<int> > > mknots;
+        /*
+        for (int atom : bonded) {
+            if (m_stored_bonds[atom].size() == 1)
+                done.push_back(atom);
+            knots.push_back(atom);
+            outer.push_back(atom);
+        }*/
+        std::vector<std::vector<int>> stash;
+        stash.push_back(std::vector<int>{ i });
+        // done.push_back(std::vector<int>());
+        int index = -1;
+        while (stash.size()) {
+            for (auto tmp : knots) {
+                auto it = std::find(done.begin(), done.end(), tmp);
+                if (it != done.end())
+                    done.erase(it);
+            }
+            for (int s = 0; s < stash.size(); ++s) {
+                int outeratom = stash[s][stash[s].size() - 1];
+                {
+                    std::vector<int> bonded = m_stored_bonds[outeratom];
+                    std::vector<int> vacant;
+                    bool close_ring = false;
+                    for (int atom : bonded) {
+                        // std::cout << atom << " " << stash[s][stash[s].size() - 2] << std::endl;
+                        if (stash[s][stash[s].size() - 2] == atom)
+                            continue;
+
+                        if (stash[s][0] == atom) {
+                            vacant.push_back(atom);
+                            close_ring = true;
+                            break;
+                        }
+                        if (m_stored_bonds[atom].size() == 1) // ignore atoms with only one bond
+                        {
+                            done.push_back(atom);
+                            continue;
+                        }
+                        int counter = 0;
+                        for (auto a : stash[s]) // check if atom is already in the list
+                            counter += a == atom;
+                        bool isKnot = std::find(knots.begin(), knots.end(), atom) != knots.end(); // check if atom is a knot
+                        if (counter) // if atom is in list
+                        {
+                            if (isKnot) // take care of knot-atoms
+                            {
+                                if (counter >= m_stored_bonds[atom].size()) // if fewer counts than binding partners, except
+                                    continue;
+                            } else
+                                continue;
+                        }
+
+                        if (std::find(done.begin(), done.end(), atom) != done.end()) {
+                            continue;
+                        }
+
+                        vacant.push_back(atom);
+                        if (stash[s].size() == 1)
+                            break;
+                    }
+                    if (vacant.size() == 0 || close_ring) {
+                        loop = false;
+                        if (stash[s].size() < 3) {
+                            stash.erase(stash.begin() + s);
+                            break;
+                        }
+                        int first = stash[s][0];
+                        int last = stash[s][stash[s].size() - 1];
+                        bool connected = false;
+                        for (int a : m_stored_bonds[first]) {
+                            if (a == last) {
+                                connected = true;
+                                break;
+                            }
+                        }
+                        if (connected) {
+                            index = s;
+                            m_identified_rings.push_back(stash[s]);
+                            for (int a : stash[s]) {
+                                if (stash[s].size() < 10)
+                                    done.push_back(a);
+                                // std::cout << a << " ";
+                            }
+                            // std::cout << std::endl;
+                            stash.erase(stash.begin() + s);
+                        } else {
+                            //    for (int a : stash[s])
+                            //        done.push_back(a);
+                            stash.erase(stash.begin() + s);
+                        }
+                    } else if (vacant.size() == 1)
+                        stash[s].push_back(vacant[0]);
+                    else {
+                        auto currentstash = stash[s];
+                        stash.erase(stash.begin() + s);
+                        if (currentstash.size() > 30)
+                            break;
+                        // auto currdone = done[s];
+                        // done.erase(done.begin() + s);
+                        knots.push_back(outeratom);
+                        for (int atom : vacant) {
+                            stash.push_back(currentstash);
+                            stash[stash.size() - 1].push_back(atom);
+                            //  done.push_back(currdone);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (auto a : m_identified_rings) {
+        if (a.size() < 10) {
+            for (auto i : a)
+                std::cout << i << " ";
+            std::cout << std::endl;
+        }
+    }
+}
+
 void UFF::AssignUffAtomTypes()
 {
     for (int i = 0; i < m_atom_types.size(); ++i) {
 
         switch (m_atom_types[i]) {
         case 1: // Hydrogen
-            if (m_coordination[i] == 2)
+            if (m_stored_bonds[i].size() == 2)
                 m_uff_atom_types[i] = 3; // Bridging Hydrogen
             else
                 m_uff_atom_types[i] = 1;
@@ -588,6 +697,9 @@ void UFF::AssignUffAtomTypes()
         default:
             m_uff_atom_types[i] = 0;
         };
+        if (m_verbose) {
+            std::cout << i << " " << m_atom_types[i] << " " << m_stored_bonds[i].size() << " " << m_uff_atom_types[i] << std::endl;
+        }
     }
 }
 
@@ -1233,8 +1345,8 @@ double UFF::CalculateBondStretching()
 }
 double UFF::AngleBend(const std::array<double, 3>& i, const std::array<double, 3>& j, const std::array<double, 3>& k, double kijk, double C0, double C1, double C2)
 {
-    std::array<double, 3> vec_1 = { i[0] - j[0], i[1] - j[1], i[2] - j[2] };
-    std::array<double, 3> vec_2 = { i[0] - k[0], i[1] - k[1], i[2] - k[2] };
+    std::array<double, 3> vec_1 = { j[0] - i[0], j[1] - i[1], j[2] - i[2] };
+    std::array<double, 3> vec_2 = { j[0] - k[0], j[1] - k[1], j[2] - k[2] };
 
     double costheta = (DotProduct(vec_1, vec_2) / (sqrt(DotProduct(vec_1, vec_1) * DotProduct(vec_2, vec_2))));
     double energy = (kijk * (C0 + C1 * costheta + C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling;
@@ -1259,7 +1371,8 @@ double UFF::CalculateAngleBending()
         std::array<double, 3> atom_j = { m_geometry[j] };
         std::array<double, 3> atom_k = { m_geometry[k] };
 
-        energy += AngleBend(atom_i, atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2);
+        double e = AngleBend(atom_i, atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2);
+        energy += e;
         if (m_CalculateGradient) {
             m_gradient[i][0] += (AngleBend(AddVector(atom_i, dx), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(SubVector(atom_i, dx), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
             m_gradient[i][1] += (AngleBend(AddVector(atom_i, dy), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(SubVector(atom_i, dy), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
