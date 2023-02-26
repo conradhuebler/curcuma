@@ -91,6 +91,8 @@ void SimpleMD::LoadControlJson()
         m_integrator = [=](double* coord, double* grad) {
             this->Rattle(coord, grad);
         };
+        m_rattle_tolerance = Json2KeyWord<double>(m_defaults, "rattle_tolerance");
+
         std::cout << "Using rattle to constrained bonds!" << std::endl;
     } else {
         m_integrator = [=](double* coord, double* grad) {
@@ -136,6 +138,8 @@ bool SimpleMD::Initialise()
         m_velocities = std::vector<double>(3 * m_natoms, 0);
         m_currentStep = 0;
     }
+
+    m_gradient = std::vector<double>(3 * m_natoms, 0);
 
     if(m_opt)
     {
@@ -209,7 +213,10 @@ bool SimpleMD::Initialise()
 void SimpleMD::InitConstrainedBonds()
 {
     // current just all bonds
-
+    if (m_rattle_tolerance > 1) {
+        std::cout << "Removing contstraints" << std::endl;
+        return;
+    }
     auto m = m_molecule.DistanceMatrix();
     m_topo_initial = m.second;
     for (int i = 0; i < m_molecule.AtomCount(); ++i) {
@@ -255,6 +262,7 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["currentStep"] = m_currentStep;
     restart["velocities"] = Tools::DoubleVector2String(m_velocities);
     restart["geometry"] = Tools::DoubleVector2String(m_current_geometry);
+    restart["gradient"] = Tools::DoubleVector2String(m_gradient);
     restart["centered"] = m_centered;
     restart["average_T"] = m_aver_Temp;
     restart["average_Epot"] = m_aver_Epot;
@@ -452,6 +460,12 @@ void SimpleMD::start()
             RemoveRotation(m_velocities);
 
         m_integrator(coord, gradient);
+        if (m_unstable) {
+            std::cout << "Simulation got unstable, reverting to last step!" << std::endl;
+            std::ofstream restart_file("unstable_curcuma.json");
+            restart_file << WriteRestartInformation() << std::endl;
+            // break;
+        }
         Berendson();
         m_Ekin = EKin();
         if (m_writerestart > -1 && m_step % m_writerestart == 0) {
@@ -478,7 +492,6 @@ void SimpleMD::start()
         m_currentStep += m_timestep;
     }
     std::ofstream restart_file("curcuma_final.json");
-    nlohmann::json restart;
     restart_file << WriteRestartInformation() << std::endl;
 
     delete[] coord;
@@ -487,6 +500,10 @@ void SimpleMD::start()
 
 void SimpleMD::Verlet(double* coord, double* grad)
 {
+    std::ofstream restart_file("last_stable_curcuma.json");
+    auto fallback = WriteRestartInformation();
+    // restart_file << fallback << std::endl;
+
     for (int i = 0; i < m_natoms; ++i) {
 
         coord[3 * i + 0] = m_current_geometry[3 * i + 0] - m_timestep * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
@@ -509,10 +526,16 @@ void SimpleMD::Verlet(double* coord, double* grad)
         m_velocities[3 * i + 2] += 0.5 * m_timestep * grad[3 * i + 2] * m_rmass[3 * i + 2];
 
         ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
+        m_gradient[3 * i + 0] = grad[3 * i + 0];
+        m_gradient[3 * i + 1] = grad[3 * i + 1];
+        m_gradient[3 * i + 2] = grad[3 * i + 2];
     }
     ekin *= 0.5;
     double T = 2.0 * ekin / (kb * 3 * m_natoms);
     m_unstable = T > 100 * m_T;
+    if (m_unstable) {
+        LoadRestartInformation(fallback);
+    }
     m_T = T;
 }
 
@@ -526,7 +549,6 @@ void SimpleMD::Rattle(double* coord, double* grad)
      *
      */
 
-    double tolerance = 1e-8;
     double m_timestep_inverse = 1 / m_timestep;
     for (int i = 0; i < m_natoms; ++i) {
         m_velocities[3 * i + 0] += 0.5 * m_timestep * grad[3 * i + 0] * m_rmass[3 * i + 0];
@@ -539,7 +561,7 @@ void SimpleMD::Rattle(double* coord, double* grad)
     }
 
     double epsilon = 0;
-    while (epsilon > tolerance) {
+    while (epsilon > m_rattle_tolerance) {
         epsilon = 0;
         for (auto bond : m_bond_constrained) {
             int i = bond.first.first, j = bond.first.second;
@@ -585,9 +607,13 @@ void SimpleMD::Rattle(double* coord, double* grad)
         m_current_geometry[3 * i + 0] = coord[3 * i + 0];
         m_current_geometry[3 * i + 1] = coord[3 * i + 1];
         m_current_geometry[3 * i + 2] = coord[3 * i + 2];
+
+        m_gradient[3 * i + 0] = grad[3 * i + 0];
+        m_gradient[3 * i + 1] = grad[3 * i + 1];
+        m_gradient[3 * i + 2] = grad[3 * i + 2];
     }
 
-    while (epsilon > tolerance) {
+    while (epsilon > m_rattle_tolerance) {
         epsilon = 0;
         for (auto bond : m_bond_constrained) {
             int i = bond.first.first, j = bond.first.second;

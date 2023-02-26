@@ -38,6 +38,7 @@
 #endif
 
 #include "src/core/uff.h"
+// #include "src/core/eigen_uff.h"
 
 #include <functional>
 
@@ -121,6 +122,7 @@ private:
     DFTD4Interface* m_d4 = NULL;
 #endif
 
+    // eigenUFF* m_uff = NULL;
     UFF* m_uff = NULL;
     StringList m_uff_methods = { "uff" };
     StringList m_tblite_methods = { "ipea1", "gfn1", "gfn2" };

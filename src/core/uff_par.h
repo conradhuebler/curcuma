@@ -24,7 +24,9 @@
 
 #pragma once
 
+#include "json.hpp"
 #include <vector>
+using json = nlohmann::json;
 
 static const std::vector<double> CoordinationNumber = {
     -1, // leading index
@@ -261,3 +263,102 @@ const int cU = 7;
 const int cXi = 8;
 const int cHard = 9;
 const int cRadius = 10;
+
+struct UFFBond {
+    int i, j;
+    double r0, kij;
+};
+
+struct UFFAngle {
+    int i, j, k;
+    double kijk, C0, C1, C2;
+};
+
+struct UFFDihedral {
+    int i, j, k, l;
+    double V, n, phi0;
+};
+
+struct UFFInversion {
+    int i, j, k, l;
+    double kijkl, C0, C1, C2;
+};
+
+struct UFFvdW {
+    int i, j;
+    double Dij, xij;
+};
+
+typedef std::array<double, 3> v;
+
+inline std::array<double, 3> AddVector(const v& x, const v& y)
+{
+    return std::array<double, 3>{ x[0] + y[0], x[1] + y[1], x[2] + y[2] };
+}
+inline std::array<double, 3> SubVector(const v& x, const v& y)
+{
+    return std::array<double, 3>{ x[0] - y[0], x[1] - y[1], x[2] - y[2] };
+}
+class TContainer {
+public:
+    TContainer() = default;
+    bool insert(std::vector<int> vector)
+    {
+        m_storage.push_back(vector);
+        return true;
+    }
+    inline void clean()
+    {
+        std::set<std::vector<int>> s;
+        unsigned size = m_storage.size();
+        for (unsigned i = 0; i < size; ++i)
+            s.insert(m_storage[i]);
+        m_storage.assign(s.begin(), s.end());
+    }
+    const std::vector<std::vector<int>>& Storage() const { return m_storage; }
+
+private:
+    std::vector<std::vector<int>> m_storage, m_sorted;
+};
+
+const json UFFParameterJson{
+    { "bond_scaling", 1 },
+    { "angle_scaling", 1 },
+    { "dihedral_scaling", 1 },
+    { "inversion_scaling", 1 },
+    { "vdw_scaling", 1 },
+    { "rep_scaling", 1 },
+    { "coulomb_scaling", 1 },
+    { "bond_force", 664.12 },
+    { "angle_force", 664.12 },
+    { "differential", 1e-7 },
+    { "h4_scaling", 0 },
+    { "hh_scaling", 0 },
+    { "h4_oh_o", 2.32 },
+    { "h4_oh_n", 3.10 },
+    { "h4_nh_o", 1.07 },
+    { "h4_nh_n", 2.01 },
+    { "h4_wh_o", 0.42 },
+    { "h4_nh4", 3.61 },
+    { "h4_coo", 1.41 },
+    { "hh_rep_k", 0.42 },
+    { "hh_rep_e", 12.7 },
+    { "hh_rep_r0", 2.3 },
+    { "d4", 0 },
+    { "d3", 0 },
+    { "d_s6", 1.00 },
+    { "d_s8", 1.20065498 },
+    { "d_s10", 0 },
+    { "d_s9", 1 },
+    { "d_a1", 0.40085597 },
+    { "d_a2", 5.02928789 },
+    { "d_alp", 16 },
+    { "d_func", "pbe0" },
+    { "d_atm", true },
+    { "param_file", "none" },
+    { "uff_file", "none" },
+    { "writeparam", "none" },
+    { "writeuff", "none" },
+    { "verbose", false },
+    { "rings", false }
+};

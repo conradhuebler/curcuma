@@ -49,9 +49,29 @@
 #include "json.hpp"
 using json = nlohmann::json;
 
-class UFF {
+/*
+class UFFThread : public CxxThread
+{
 public:
-    UFF(const json& controller);
+    UFFThread();
+    ~UFFThread();
+
+    virtual int execute() override
+    {
+        m_mddriver = new SimpleMD(m_controller, false);
+        m_mddriver->setMolecule(m_molecule);
+        m_mddriver->setBaseName("thread" + std::to_string(m_thread));
+        m_mddriver->Initialise();
+        m_mddriver->start();
+        return 0;
+    }
+private:
+};
+*/
+
+class eigenUFF {
+public:
+    eigenUFF(const json& controller);
 
     void UpdateGeometry(const double* coord);
     void UpdateGeometry(const std::vector<std::array<double, 3>>& geometry);
@@ -59,14 +79,19 @@ public:
     void setMolecule(const std::vector<int>& atom_types, const std::vector<std::array<double, 3>>& geometry)
     {
         m_atom_types = atom_types;
-        m_geometry = geometry;
+        m_geometry = Eigen::MatrixXd::Zero(m_atom_types.size(), 3); // geometry;
+        for (int i = 0; i < m_atom_types.size(); ++i) {
+            m_geometry(i, 0) = geometry[i][0];
+            m_geometry(i, 1) = geometry[i][1];
+            m_geometry(i, 2) = geometry[i][2];
+        }
     }
 
     void Initialise();
 
     double Calculate(bool gradient = true, bool verbose = false);
 
-    std::vector<std::array<double, 3>> Gradient() const { return m_gradient; }
+    //   std::vector<std::array<double, 3>> Gradient() const { return m_gradient; }
     void Gradient(double* gradient) const;
 
     void NumGrad(double* gradient);
@@ -126,9 +151,9 @@ private:
 
     Eigen::Vector3d NormalVector(int i, int j, int k)
     {
-        Eigen::Vector3d aa = Eigen::Vector3d{ m_geometry[i][0], m_geometry[i][1], m_geometry[i][2] };
-        Eigen::Vector3d ab = Eigen::Vector3d{ m_geometry[j][0], m_geometry[j][1], m_geometry[j][2] };
-        Eigen::Vector3d ac = Eigen::Vector3d{ m_geometry[k][0], m_geometry[k][1], m_geometry[k][2] };
+        Eigen::Vector3d aa = Eigen::Vector3d{ m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2) };
+        Eigen::Vector3d ab = Eigen::Vector3d{ m_geometry(j, 0), m_geometry(j, 1), m_geometry(j, 2) };
+        Eigen::Vector3d ac = Eigen::Vector3d{ m_geometry(k, 0), m_geometry(k, 1), m_geometry(k, 2) };
 
         Eigen::Vector3d aba = ab - aa;
         Eigen::Vector3d abc = ab - ac;
@@ -159,7 +184,7 @@ private:
     std::vector<std::vector<int>> m_stored_bonds;
     std::vector<std::vector<int>> m_identified_rings;
 
-    std::vector<std::array<double, 3>> m_geometry, m_gradient;
+    Matrix m_geometry, m_gradient;
 
     std::vector<UFFBond> m_uffbonds;
     std::vector<UFFAngle> m_uffangle;
