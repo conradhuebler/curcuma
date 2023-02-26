@@ -57,7 +57,8 @@ static json CurcumaMDJson{
     { "writeinit", false },
     { "initfile", "none" },
     { "norestart", false },
-    { "writerestart", 500 }
+    { "writerestart", 500 },
+    { "rattle", false }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -113,6 +114,7 @@ private:
 
     bool WriteGeometry();
     void Verlet(double* coord, double* grad);
+    void Rattle(double* coord, double* grad);
 
     void RemoveRotation(std::vector<double>& velo);
 
@@ -121,7 +123,9 @@ private:
 
     void InitConstrainedBonds();
 
-    std::vector<std::pair<int, int>> m_bond_constrained;
+    std::function<void(double* coord, double* grad)> m_integrator;
+
+    std::vector<std::pair<std::pair<int, int>, double>> m_bond_constrained;
     std::string m_basename;
     int m_natoms = 0;
     int m_dumb = 1;
@@ -131,7 +135,7 @@ private:
     double m_timestep = 0.5, m_currentStep = 0, m_maxtime = 1000;
     int m_spin = 0, m_charge = 0, m_print = 100;
     double m_T0 = 298.13, m_aver_Temp = 0, m_rmsd = 1.5;
-    std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient;
+    std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient, m_rmass;
     std::vector<int> m_atomtype;
     Molecule m_molecule;
     bool m_initialised = false, m_restart = false, m_centered = false, m_writeUnique = true, m_opt = false, m_rescue = false, m_writeXYZ = true, m_writeinit = false, m_norestart = false;
