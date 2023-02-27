@@ -506,13 +506,13 @@ void SimpleMD::Verlet(double* coord, double* grad)
 
     for (int i = 0; i < m_natoms; ++i) {
 
-        coord[3 * i + 0] = m_current_geometry[3 * i + 0] - m_timestep * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
-        coord[3 * i + 1] = m_current_geometry[3 * i + 1] - m_timestep * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
-        coord[3 * i + 2] = m_current_geometry[3 * i + 2] - m_timestep * m_velocities[3 * i + 2] - 0.5 * grad[3 * i + 2] * m_rmass[3 * i + 2] * m_dt2;
+        coord[3 * i + 0] = m_current_geometry[3 * i + 0] + m_timestep * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
+        coord[3 * i + 1] = m_current_geometry[3 * i + 1] + m_timestep * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
+        coord[3 * i + 2] = m_current_geometry[3 * i + 2] + m_timestep * m_velocities[3 * i + 2] - 0.5 * grad[3 * i + 2] * m_rmass[3 * i + 2] * m_dt2;
 
-        m_velocities[3 * i + 0] += 0.5 * m_timestep * grad[3 * i + 0] * m_rmass[3 * i + 0];
-        m_velocities[3 * i + 1] += 0.5 * m_timestep * grad[3 * i + 1] * m_rmass[3 * i + 1];
-        m_velocities[3 * i + 2] += 0.5 * m_timestep * grad[3 * i + 2] * m_rmass[3 * i + 2];
+        m_velocities[3 * i + 0] -= 0.5 * m_timestep * grad[3 * i + 0] * m_rmass[3 * i + 0];
+        m_velocities[3 * i + 1] -= 0.5 * m_timestep * grad[3 * i + 1] * m_rmass[3 * i + 1];
+        m_velocities[3 * i + 2] -= 0.5 * m_timestep * grad[3 * i + 2] * m_rmass[3 * i + 2];
 
         m_current_geometry[3 * i + 0] = coord[3 * i + 0];
         m_current_geometry[3 * i + 1] = coord[3 * i + 1];
@@ -521,9 +521,9 @@ void SimpleMD::Verlet(double* coord, double* grad)
     m_Epot = Gradient(coord, grad);
     double ekin = 0.0;
     for (int i = 0; i < m_natoms; ++i) {
-        m_velocities[3 * i + 0] += 0.5 * m_timestep * grad[3 * i + 0] * m_rmass[3 * i + 0];
-        m_velocities[3 * i + 1] += 0.5 * m_timestep * grad[3 * i + 1] * m_rmass[3 * i + 1];
-        m_velocities[3 * i + 2] += 0.5 * m_timestep * grad[3 * i + 2] * m_rmass[3 * i + 2];
+        m_velocities[3 * i + 0] -= 0.5 * m_timestep * grad[3 * i + 0] * m_rmass[3 * i + 0];
+        m_velocities[3 * i + 1] -= 0.5 * m_timestep * grad[3 * i + 1] * m_rmass[3 * i + 1];
+        m_velocities[3 * i + 2] -= 0.5 * m_timestep * grad[3 * i + 2] * m_rmass[3 * i + 2];
 
         ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
         m_gradient[3 * i + 0] = grad[3 * i + 0];
@@ -551,13 +551,13 @@ void SimpleMD::Rattle(double* coord, double* grad)
 
     double m_timestep_inverse = 1 / m_timestep;
     for (int i = 0; i < m_natoms; ++i) {
-        m_velocities[3 * i + 0] += 0.5 * m_timestep * grad[3 * i + 0] * m_rmass[3 * i + 0];
-        m_velocities[3 * i + 1] += 0.5 * m_timestep * grad[3 * i + 1] * m_rmass[3 * i + 1];
-        m_velocities[3 * i + 2] += 0.5 * m_timestep * grad[3 * i + 2] * m_rmass[3 * i + 2];
+        coord[3 * i + 0] = m_current_geometry[3 * i + 0] + m_timestep * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
+        coord[3 * i + 1] = m_current_geometry[3 * i + 1] + m_timestep * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
+        coord[3 * i + 2] = m_current_geometry[3 * i + 2] + m_timestep * m_velocities[3 * i + 2] - 0.5 * grad[3 * i + 2] * m_rmass[3 * i + 2] * m_dt2;
 
-        coord[3 * i + 0] = m_current_geometry[3 * i + 0] - m_timestep * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
-        coord[3 * i + 1] = m_current_geometry[3 * i + 1] - m_timestep * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
-        coord[3 * i + 2] = m_current_geometry[3 * i + 2] - m_timestep * m_velocities[3 * i + 2] - 0.5 * grad[3 * i + 2] * m_rmass[3 * i + 2] * m_dt2;
+        m_velocities[3 * i + 0] -= 0.5 * m_timestep * grad[3 * i + 0] * m_rmass[3 * i + 0];
+        m_velocities[3 * i + 1] -= 0.5 * m_timestep * grad[3 * i + 1] * m_rmass[3 * i + 1];
+        m_velocities[3 * i + 2] -= 0.5 * m_timestep * grad[3 * i + 2] * m_rmass[3 * i + 2];
     }
 
     double epsilon = 0;
@@ -600,9 +600,9 @@ void SimpleMD::Rattle(double* coord, double* grad)
     m_Epot = Gradient(coord, grad);
     double ekin = 0.0;
     for (int i = 0; i < m_natoms; ++i) {
-        m_velocities[3 * i + 0] += 0.5 * m_timestep * grad[3 * i + 0] * m_rmass[3 * i + 0];
-        m_velocities[3 * i + 1] += 0.5 * m_timestep * grad[3 * i + 1] * m_rmass[3 * i + 1];
-        m_velocities[3 * i + 2] += 0.5 * m_timestep * grad[3 * i + 2] * m_rmass[3 * i + 2];
+        m_velocities[3 * i + 0] -= 0.5 * m_timestep * grad[3 * i + 0] * m_rmass[3 * i + 0];
+        m_velocities[3 * i + 1] -= 0.5 * m_timestep * grad[3 * i + 1] * m_rmass[3 * i + 1];
+        m_velocities[3 * i + 2] -= 0.5 * m_timestep * grad[3 * i + 2] * m_rmass[3 * i + 2];
 
         m_current_geometry[3 * i + 0] = coord[3 * i + 0];
         m_current_geometry[3 * i + 1] = coord[3 * i + 1];
