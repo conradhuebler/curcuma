@@ -57,7 +57,7 @@ static json CurcumaMDJson{
     { "writeinit", false },
     { "initfile", "none" },
     { "norestart", false },
-    { "writerestart", 500 },
+    { "writerestart", 1000 },
     { "rattle", false },
     { "rattle_tolerance", 1e-5 }
 };

@@ -461,10 +461,11 @@ void SimpleMD::start()
 
         m_integrator(coord, gradient);
         if (m_unstable) {
-            std::cout << "Simulation got unstable, reverting to last step!" << std::endl;
+            PrintStatus();
+            std::cout << "Simulation got unstable, exiting!" << std::endl;
             std::ofstream restart_file("unstable_curcuma.json");
             restart_file << WriteRestartInformation() << std::endl;
-            // break;
+            return;
         }
         Berendson();
         m_Ekin = EKin();
@@ -500,9 +501,9 @@ void SimpleMD::start()
 
 void SimpleMD::Verlet(double* coord, double* grad)
 {
-    std::ofstream restart_file("last_stable_curcuma.json");
-    auto fallback = WriteRestartInformation();
-    // restart_file << fallback << std::endl;
+    //   std::ofstream restart_file("last_stable_curcuma.json");
+    //   auto fallback = WriteRestartInformation();
+    //   restart_file << fallback << std::endl;
 
     for (int i = 0; i < m_natoms; ++i) {
 
@@ -510,9 +511,9 @@ void SimpleMD::Verlet(double* coord, double* grad)
         coord[3 * i + 1] = m_current_geometry[3 * i + 1] + m_timestep * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
         coord[3 * i + 2] = m_current_geometry[3 * i + 2] + m_timestep * m_velocities[3 * i + 2] - 0.5 * grad[3 * i + 2] * m_rmass[3 * i + 2] * m_dt2;
 
-        m_velocities[3 * i + 0] -= 0.5 * m_timestep * grad[3 * i + 0] * m_rmass[3 * i + 0];
-        m_velocities[3 * i + 1] -= 0.5 * m_timestep * grad[3 * i + 1] * m_rmass[3 * i + 1];
-        m_velocities[3 * i + 2] -= 0.5 * m_timestep * grad[3 * i + 2] * m_rmass[3 * i + 2];
+        m_velocities[3 * i + 0] = m_velocities[3 * i + 0] - 0.5 * m_timestep * grad[3 * i + 0] * m_rmass[3 * i + 0];
+        m_velocities[3 * i + 1] = m_velocities[3 * i + 1] - 0.5 * m_timestep * grad[3 * i + 1] * m_rmass[3 * i + 1];
+        m_velocities[3 * i + 2] = m_velocities[3 * i + 2] - 0.5 * m_timestep * grad[3 * i + 2] * m_rmass[3 * i + 2];
 
         m_current_geometry[3 * i + 0] = coord[3 * i + 0];
         m_current_geometry[3 * i + 1] = coord[3 * i + 1];
@@ -533,9 +534,6 @@ void SimpleMD::Verlet(double* coord, double* grad)
     ekin *= 0.5;
     double T = 2.0 * ekin / (kb * 3 * m_natoms);
     m_unstable = T > 100 * m_T;
-    if (m_unstable) {
-        LoadRestartInformation(fallback);
-    }
     m_T = T;
 }
 
