@@ -944,9 +944,9 @@ void Molecule::CalculateRotationalConstants()
         matrix(0, 0) += m * (y2 + z2);
         matrix(1, 1) += m * (x2 + z2);
         matrix(2, 2) += m * (x2 + y2);
-        matrix(0, 1) += m * x * y;
-        matrix(0, 2) += m * x * z;
-        matrix(1, 2) += m * y * z;
+        matrix(0, 1) -= m * x * y;
+        matrix(0, 2) -= m * x * z;
+        matrix(1, 2) -= m * y * z;
     }
     matrix(1, 0) = matrix(0, 1);
     matrix(2, 0) = matrix(0, 2);

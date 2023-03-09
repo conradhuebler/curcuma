@@ -758,13 +758,18 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
             /* rotational = 1
              * ripser     = 2
              * energy     = 4 */
+            // std::cout << diff_rot << " " << m_diff_rot_threshold_loose << " " << 1 * (diff_rot < m_diff_rot_threshold_loose) << " ";
+            // std::cout << diff << " " << m_diff_ripser_threshold_loose << " " << 2 * (diff < m_diff_ripser_threshold_loose) << " ";
+            // std::cout << std::abs(mol1->Energy() - mol2->Energy()) * 2625.5  << " " << m_diff_energy_threshold_loose << " " << 4 * (std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_diff_energy_threshold_loose) << std::endl;
+
             int looseThresh = 1 * (diff_rot < m_diff_rot_threshold_loose) + 2 * (diff < m_diff_ripser_threshold_loose) + 4 * (std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_diff_energy_threshold_loose);
-            if (looseThresh == m_looseThresh) {
+            // std::cout << m_looseThresh << " " << looseThresh << " " << int(looseThresh & m_looseThresh) << std::endl;
+            if ((looseThresh & m_looseThresh) == m_looseThresh) {
                 reorder = true;
                 threads[t]->setEnabled(m_openLoop);
                 int tightThresh = 1 * (diff_rot < m_diff_rot_threshold_tight) + 2 * (diff < m_diff_ripser_threshold_tight) + 4 * ((std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_diff_energy_threshold_tight));
 
-                if (tightThresh == m_tightThresh) {
+                if ((tightThresh & m_tightThresh) == m_tightThresh) {
                     std::cout << "Differences " << diff_rot << " MHz and " << diff << " below tight threshold, reject molecule directly!" << std::endl;
                     m_last_diff = diff_rot;
                     m_last_ripser = diff;

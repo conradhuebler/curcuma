@@ -51,6 +51,7 @@ public:
 
     const std::map<double, std::vector<int>>* data() const { return &m_shelf; }
     inline int Match() const { return m_match; }
+    inline int Calculations() const { return m_calculations; }
 
 private:
     Molecule m_target;
@@ -63,6 +64,7 @@ private:
     int m_element = -1;
     int m_match;
     int m_topo = 0;
+    int m_calculations = 0;
     std::function<double(const Molecule&)> m_evaluator;
 };
 

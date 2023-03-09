@@ -382,7 +382,7 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
             + 2 * (driver->RMSD() < dRMSD)
             + 4 * (solver.isConverged())
             + 8 * (solver.final_grad_norm() < GradNorm);
-        perform_optimisation = (converged != ConvCount) && (fun.isError() == 0);
+        perform_optimisation = ((converged & ConvCount) != ConvCount) && (fun.isError() == 0);
         /*
         std::cout << (abs(fun.m_energy - final_energy) * 2625.5 < 0.05)
                   << " " << (int(driver->RMSD() < 0.01))

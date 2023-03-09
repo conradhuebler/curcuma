@@ -113,6 +113,7 @@ int RMSDThread::execute()
                 }
                 */
                 double value = m_evaluator(target_local);
+                m_calculations++;
                 if (target_local.AtomCount() <= m_target.AtomCount()) {
                     {
                         match.insert(std::pair<double, int>(value, j));
@@ -390,6 +391,7 @@ void RMSDDriver::ReorderIncremental()
     int reference_reordered = 0;
     int reference_not_reorordered = 0;
     int max = std::min(m_reference.AtomCount(), m_target.AtomCount());
+    int combinations = 0;
     int wake_up = 100;
     CxxThreadPool* pool = new CxxThreadPool;
     if (m_silent)
@@ -438,6 +440,7 @@ void RMSDDriver::ReorderIncremental()
                 }
                 match += thread->Match();
             }
+            combinations += thread->Calculations();
         }
         if (match == 0) {
             Molecule ref_0;
@@ -484,6 +487,8 @@ void RMSDDriver::ReorderIncremental()
     m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
     m_target = m_target_reordered;
     m_target_aligned = m_target;
+    if (!m_silent)
+        std::cout << "Overall " << combinations << " where evaluated!" << std::endl;
 }
 
 std::vector<int> RMSDDriver::FillMissing(const Molecule& molecule, const std::vector<int>& order)
