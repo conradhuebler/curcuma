@@ -25,6 +25,7 @@
 #pragma once
 
 #include "json.hpp"
+#include <Eigen/Dense>
 #include <vector>
 using json = nlohmann::json;
 
@@ -295,10 +296,21 @@ inline std::array<double, 3> AddVector(const v& x, const v& y)
 {
     return std::array<double, 3>{ x[0] + y[0], x[1] + y[1], x[2] + y[2] };
 }
+inline Eigen::Vector3d AddVector(const Eigen::Vector3d& x, const Eigen::Vector3d& y)
+{
+    return x + y;
+}
+
 inline std::array<double, 3> SubVector(const v& x, const v& y)
 {
     return std::array<double, 3>{ x[0] - y[0], x[1] - y[1], x[2] - y[2] };
 }
+
+inline Eigen::Vector3d SubVector(const Eigen::Vector3d& x, const Eigen::Vector3d& y)
+{
+    return x - y;
+}
+
 class TContainer {
 public:
     TContainer() = default;
@@ -360,5 +372,6 @@ const json UFFParameterJson{
     { "writeparam", "none" },
     { "writeuff", "none" },
     { "verbose", false },
-    { "rings", false }
+    { "rings", false },
+    { "threads", 1 }
 };

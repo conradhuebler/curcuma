@@ -39,10 +39,308 @@
 #include "json.hpp"
 using json = nlohmann::json;
 
+int UFFThread::execute()
+{
+    //    m_CalculateGradient = grd;
+    m_d4_energy = 0;
+    m_d3_energy = 0;
+    m_bond_energy = CalculateBondStretching();
+    m_angle_energy = CalculateAngleBending();
+    m_dihedral_energy = CalculateDihedral();
+    m_inversion_energy = CalculateInversion();
+    m_vdw_energy = CalculateNonBonds();
+    /* + CalculateElectrostatic(); */
+    m_energy = m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy + m_vdw_energy;
+    return 0;
+}
+
+double UFFThread::Distance(double x1, double x2, double y1, double y2, double z1, double z2) const
+{
+    return sqrt((((x1 - x2) * (x1 - x2)) + ((y1 - y2) * (y1 - y2)) + ((z1 - z2) * (z1 - z2))));
+}
+
+double UFFThread::DotProduct(double x1, double x2, double y1, double y2, double z1, double z2) const
+{
+    return x1 * x2 + y1 * y2 + z1 * z2;
+}
+
+double UFFThread::BondEnergy(double distance, double r, double kij, double D_ij)
+{
+
+    double energy = (0.5 * kij * (distance - r) * (distance - r)) * m_final_factor * m_bond_scaling;
+    /*
+        double alpha = sqrt(kij / (2 * D_ij));
+        double exp_ij = exp(-1 * alpha * (r - distance) - 1);
+        double energy = D_ij * (exp_ij * exp_ij);
+    */
+    if (isnan(energy))
+        return 0;
+    else
+        return energy;
+}
+
+double UFFThread::CalculateBondStretching()
+{
+    double factor = 1;
+    double energy = 0.0;
+
+    for (int index = 0; index < m_uffbonds.size(); ++index) {
+        const auto& bond = m_uffbonds[index];
+        const int i = bond.i;
+        const int j = bond.j;
+        double xi = (*m_geometry)(i, 0) * m_au;
+        double xj = (*m_geometry)(j, 0) * m_au;
+
+        double yi = (*m_geometry)(i, 1) * m_au;
+        double yj = (*m_geometry)(j, 1) * m_au;
+
+        double zi = (*m_geometry)(i, 2) * m_au;
+        double zj = (*m_geometry)(j, 2) * m_au;
+        double benergy = BondEnergy(Distance(xi, xj, yi, yj, zi, zj), bond.r0, bond.kij);
+        energy += benergy;
+        if (m_CalculateGradient) {
+
+            m_gradient(i, 0) += (BondEnergy(Distance(xi + m_d, xj, yi, yj, zi, zj), bond.r0, bond.kij) - BondEnergy(Distance(xi - m_d, xj, yi, yj, zi, zj), bond.r0, bond.kij)) / (2 * m_d);
+            m_gradient(i, 1) += (BondEnergy(Distance(xi, xj, yi + m_d, yj, zi, zj), bond.r0, bond.kij) - BondEnergy(Distance(xi, xj, yi - m_d, yj, zi, zj), bond.r0, bond.kij)) / (2 * m_d);
+            m_gradient(i, 2) += (BondEnergy(Distance(xi, xj, yi, yj, zi + m_d, zj), bond.r0, bond.kij) - BondEnergy(Distance(xi, xj, yi, yj, zi - m_d, zj), bond.r0, bond.kij)) / (2 * m_d);
+
+            m_gradient(j, 0) += (BondEnergy(Distance(xi, xj + m_d, yi, yj, zi, zj), bond.r0, bond.kij) - BondEnergy(Distance(xi, xj - m_d, yi, yj, zi, zj), bond.r0, bond.kij)) / (2 * m_d);
+            m_gradient(j, 1) += (BondEnergy(Distance(xi, xj, yi, yj + m_d, zi, zj), bond.r0, bond.kij) - BondEnergy(Distance(xi, xj, yi, yj - m_d, zi, zj), bond.r0, bond.kij)) / (2 * m_d);
+            m_gradient(j, 2) += (BondEnergy(Distance(xi, xj, yi, yj, zi, zj + m_d), bond.r0, bond.kij) - BondEnergy(Distance(xi, xj, yi, yj, zi, zj - m_d), bond.r0, bond.kij)) / (2 * m_d);
+
+            /*
+            double diff = (1.0 * kij * (xi - xj) * (sqrt((zi - zj) * (zi - zj) + (yi - yj) * (yi - yj) + (xi - xj) * (xi - xj)) - rij)) / sqrt((zi - zj) * (zi - zj) + (yi - yj) * (yi - yj) + (xi - xj) * (xi - xj));
+            m_gradient[i][0] += diff;
+            m_gradient[j][0] -= diff;
+
+            m_gradient[i][1] += diff;
+            m_gradient[j][1] -= diff;
+
+            m_gradient[i][2] += diff;
+            m_gradient[j][2] -= diff;
+            */
+        }
+    }
+
+    return energy;
+}
+double UFFThread::AngleBend(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, double kijk, double C0, double C1, double C2)
+{
+    Eigen::Vector3d vec_1 = j - i;
+    Eigen::Vector3d vec_2 = j - k;
+
+    double costheta = (vec_1.dot(vec_2) / (sqrt(vec_1.dot(vec_1) * vec_2.dot(vec_2))));
+    double energy = (kijk * (C0 + C1 * costheta + C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling;
+    if (isnan(energy))
+        return 0;
+    else
+        return energy;
+}
+
+double UFFThread::CalculateAngleBending()
+{
+    double energy = 0.0;
+    Eigen::Vector3d dx = { m_d, 0, 0 };
+    Eigen::Vector3d dy = { 0, m_d, 0 };
+    Eigen::Vector3d dz = { 0, 0, m_d };
+    for (int index = 0; index < m_uffangle.size(); ++index) {
+        const auto& angle = m_uffangle[index];
+        const int i = angle.i;
+        const int j = angle.j;
+        const int k = angle.k;
+
+        auto atom_i = Position(i);
+        auto atom_j = Position(j);
+        auto atom_k = Position(k);
+
+        double e = AngleBend(atom_i, atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2);
+        energy += e;
+        if (m_CalculateGradient) {
+            m_gradient(i, 0) += (AngleBend(AddVector(atom_i, dx), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(SubVector(atom_i, dx), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
+            m_gradient(i, 1) += (AngleBend(AddVector(atom_i, dy), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(SubVector(atom_i, dy), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
+            m_gradient(i, 2) += (AngleBend(AddVector(atom_i, dz), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(SubVector(atom_i, dz), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
+
+            m_gradient(j, 0) += (AngleBend(atom_i, AddVector(atom_j, dx), atom_k, angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(atom_i, SubVector(atom_j, dx), atom_k, angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
+            m_gradient(j, 1) += (AngleBend(atom_i, AddVector(atom_j, dy), atom_k, angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(atom_i, SubVector(atom_j, dy), atom_k, angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
+            m_gradient(j, 2) += (AngleBend(atom_i, AddVector(atom_j, dz), atom_k, angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(atom_i, SubVector(atom_j, dz), atom_k, angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
+
+            m_gradient(k, 0) += (AngleBend(atom_i, atom_j, AddVector(atom_k, dx), angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(atom_i, atom_j, SubVector(atom_k, dx), angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
+            m_gradient(k, 1) += (AngleBend(atom_i, atom_j, AddVector(atom_k, dy), angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(atom_i, atom_j, SubVector(atom_k, dy), angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
+            m_gradient(k, 2) += (AngleBend(atom_i, atom_j, AddVector(atom_k, dz), angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(atom_i, atom_j, SubVector(atom_k, dz), angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
+        }
+    }
+    return energy;
+}
+
+double UFFThread::Dihedral(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, const Eigen::Vector3d& l, double V, double n, double phi0)
+{
+    Eigen::Vector3d nabc = NormalVector(i, j, k);
+    Eigen::Vector3d nbcd = NormalVector(j, k, l);
+    double n_abc = (nabc).norm();
+    double n_bcd = (nbcd).norm();
+    double dotpr = nabc.dot(nbcd);
+    double phi = acos(dotpr / (n_abc * n_bcd)); //* 360 / 2.0 / pi;
+    // double f = pi / 180.0;
+    // std::cout << n_abc << " " << n_bcd << " " << dotpr << " " << n << std::endl;
+    // std::cout << phi* 360 / 2.0 / pi<< " " << phi << " " << phi0* 360 / 2.0 / pi << std::endl;
+    double energy = (1 / 2.0 * V * (1 - cos(n * phi0) * cos(n * phi))) * m_final_factor * m_dihedral_scaling;
+    if (isnan(energy))
+        return 0;
+    else
+        return energy;
+}
+
+double UFFThread::CalculateDihedral()
+{
+    double energy = 0.0;
+    Eigen::Vector3d dx = { m_d, 0, 0 };
+    Eigen::Vector3d dy = { 0, m_d, 0 };
+    Eigen::Vector3d dz = { 0, 0, m_d };
+    for (int index = 0; index < m_uffdihedral.size(); ++index) {
+        const auto& dihedral = m_uffdihedral[index];
+        const int i = dihedral.i;
+        const int j = dihedral.j;
+        const int k = dihedral.k;
+        const int l = dihedral.l;
+        // std::cout << i << " " << j << " " << k << " " << l << std::endl;
+        Eigen::Vector3d atom_i = Position(i);
+        Eigen::Vector3d atom_j = Position(j);
+        Eigen::Vector3d atom_k = Position(k);
+        Eigen::Vector3d atom_l = Position(l);
+        energy += Dihedral(atom_i, atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0);
+        if (m_CalculateGradient) {
+            //   std::cout << "gradient" << std::endl;
+
+            m_gradient(i, 0) += (Dihedral(AddVector(atom_i, dx), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dx), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            m_gradient(i, 1) += (Dihedral(AddVector(atom_i, dy), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dy), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            m_gradient(i, 2) += (Dihedral(AddVector(atom_i, dz), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dz), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+
+            m_gradient(j, 0) += (Dihedral(atom_i, AddVector(atom_j, dx), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, SubVector(atom_j, dx), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            m_gradient(j, 1) += (Dihedral(atom_i, AddVector(atom_j, dy), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, SubVector(atom_j, dy), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            m_gradient(j, 2) += (Dihedral(atom_i, AddVector(atom_j, dz), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, SubVector(atom_j, dz), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+
+            m_gradient(k, 0) += (Dihedral(atom_i, atom_j, AddVector(atom_k, dx), atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, SubVector(atom_k, dx), atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            m_gradient(k, 1) += (Dihedral(atom_i, atom_j, AddVector(atom_k, dy), atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, SubVector(atom_k, dy), atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            m_gradient(k, 2) += (Dihedral(atom_i, atom_j, AddVector(atom_k, dz), atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, SubVector(atom_k, dz), atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+
+            m_gradient(l, 0) += (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dx), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dx), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            m_gradient(l, 1) += (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dy), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dy), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            m_gradient(l, 2) += (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dz), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dz), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+        }
+    }
+    return energy;
+}
+double UFFThread::Inversion(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, const Eigen::Vector3d& l, double k_ijkl, double C0, double C1, double C2)
+{
+    Eigen::Vector3d ail = SubVector(i, l);
+    Eigen::Vector3d nbcd = NormalVector(i, j, k);
+
+    double cosY = (nbcd.dot(ail) / ((nbcd).norm() * (ail).norm())); //* 360 / 2.0 / pi;
+
+    double sinYSq = 1.0 - cosY * cosY;
+    double sinY = ((sinYSq > 0.0) ? sqrt(sinYSq) : 0.0);
+    double cos2W = 2.0 * sinY * sinY - 1.0;
+    double energy = (k_ijkl * (C0 + C1 * sinY + C2 * cos2W)) * m_final_factor * m_inversion_scaling;
+    if (isnan(energy))
+        return 0;
+    else
+        return energy;
+}
+
+double UFFThread::FullInversion(const int& i, const int& j, const int& k, const int& l, double d_forceConstant, double C0, double C1, double C2)
+{
+    double energy;
+    Eigen::Vector3d dx = { m_d, 0, 0 };
+    Eigen::Vector3d dy = { 0, m_d, 0 };
+    Eigen::Vector3d dz = { 0, 0, m_d };
+    Eigen::Vector3d atom_i = Position(i);
+    Eigen::Vector3d atom_j = Position(j);
+    Eigen::Vector3d atom_k = Position(k);
+    Eigen::Vector3d atom_l = Position(l);
+    energy += Inversion(atom_i, atom_j, atom_k, atom_l, d_forceConstant, C0, C1, C2);
+    if (m_CalculateGradient) {
+        m_gradient(i, 0) += (Inversion(AddVector(atom_i, dx), atom_j, atom_k, atom_l, d_forceConstant, C0, C1, C2) - Inversion(SubVector(atom_i, dx), atom_j, atom_k, atom_l, d_forceConstant, C0, C1, C2)) / (2 * m_d);
+        m_gradient(i, 1) += (Inversion(AddVector(atom_i, dy), atom_j, atom_k, atom_l, d_forceConstant, C0, C1, C2) - Inversion(SubVector(atom_i, dy), atom_j, atom_k, atom_l, d_forceConstant, C0, C1, C2)) / (2 * m_d);
+        m_gradient(i, 2) += (Inversion(AddVector(atom_i, dz), atom_j, atom_k, atom_l, d_forceConstant, C0, C1, C2) - Inversion(SubVector(atom_i, dz), atom_j, atom_k, atom_l, d_forceConstant, C0, C1, C2)) / (2 * m_d);
+
+        m_gradient(j, 0) += (Inversion(atom_i, AddVector(atom_j, dx), atom_k, atom_l, d_forceConstant, C0, C1, C2) - Inversion(atom_i, SubVector(atom_j, dx), atom_k, atom_l, d_forceConstant, C0, C1, C2)) / (2 * m_d);
+        m_gradient(j, 1) += (Inversion(atom_i, AddVector(atom_j, dy), atom_k, atom_l, d_forceConstant, C0, C1, C2) - Inversion(atom_i, SubVector(atom_j, dy), atom_k, atom_l, d_forceConstant, C0, C1, C2)) / (2 * m_d);
+        m_gradient(j, 2) += (Inversion(atom_i, AddVector(atom_j, dz), atom_k, atom_l, d_forceConstant, C0, C1, C2) - Inversion(atom_i, SubVector(atom_j, dz), atom_k, atom_l, d_forceConstant, C0, C1, C2)) / (2 * m_d);
+
+        m_gradient(k, 0) += (Inversion(atom_i, atom_j, AddVector(atom_k, dx), atom_l, d_forceConstant, C0, C1, C2) - Inversion(atom_i, atom_j, SubVector(atom_k, dx), atom_l, d_forceConstant, C0, C1, C2)) / (2 * m_d);
+        m_gradient(k, 1) += (Inversion(atom_i, atom_j, AddVector(atom_k, dy), atom_l, d_forceConstant, C0, C1, C2) - Inversion(atom_i, atom_j, SubVector(atom_k, dy), atom_l, d_forceConstant, C0, C1, C2)) / (2 * m_d);
+        m_gradient(k, 2) += (Inversion(atom_i, atom_j, AddVector(atom_k, dz), atom_l, d_forceConstant, C0, C1, C2) - Inversion(atom_i, atom_j, SubVector(atom_k, dz), atom_l, d_forceConstant, C0, C1, C2)) / (2 * m_d);
+
+        m_gradient(l, 0) += (Inversion(atom_i, atom_j, atom_k, AddVector(atom_l, dx), d_forceConstant, C0, C1, C2) - Inversion(atom_i, atom_j, atom_k, SubVector(atom_l, dx), d_forceConstant, C0, C1, C2)) / (2 * m_d);
+        m_gradient(l, 1) += (Inversion(atom_i, atom_j, atom_k, AddVector(atom_l, dy), d_forceConstant, C0, C1, C2) - Inversion(atom_i, atom_j, atom_k, SubVector(atom_l, dy), d_forceConstant, C0, C1, C2)) / (2 * m_d);
+        m_gradient(l, 2) += (Inversion(atom_i, atom_j, atom_k, AddVector(atom_l, dz), d_forceConstant, C0, C1, C2) - Inversion(atom_i, atom_j, atom_k, SubVector(atom_l, dz), d_forceConstant, C0, C1, C2)) / (2 * m_d);
+    }
+    return energy;
+}
+double UFFThread::CalculateInversion()
+{
+    double energy = 0.0;
+
+    for (int index = 0; index < m_uffinversion.size(); ++index) {
+        const auto& inversion = m_uffinversion[index];
+        const int i = inversion.i;
+        const int j = inversion.j;
+        const int k = inversion.k;
+        const int l = inversion.l;
+        energy += FullInversion(i, j, k, l, inversion.kijkl, inversion.C0, inversion.C1, inversion.C2);
+    }
+    return energy;
+}
+
+double UFFThread::NonBonds(const Eigen::Vector3d& i, const Eigen::Vector3d& j, double Dij, double xij)
+{
+    double r = (i - j).norm() * m_au;
+    double pow6 = pow((xij / r), 6);
+    double energy = Dij * (-2 * pow6 * m_vdw_scaling + pow6 * pow6 * m_rep_scaling) * m_final_factor;
+    if (isnan(energy))
+        return 0;
+    else
+        return energy;
+}
+
+double UFFThread::CalculateNonBonds()
+{
+    double energy = 0.0;
+    Eigen::Vector3d dx = { m_d, 0, 0 };
+    Eigen::Vector3d dy = { 0, m_d, 0 };
+    Eigen::Vector3d dz = { 0, 0, m_d };
+    for (int index = 0; index < m_uffvdwaals.size(); ++index) {
+        const auto& vdw = m_uffvdwaals[index];
+        const int i = vdw.i;
+        const int j = vdw.j;
+        Eigen::Vector3d atom_i = Position(i);
+        Eigen::Vector3d atom_j = Position(j);
+        energy += NonBonds(atom_i, atom_j, vdw.Dij, vdw.xij);
+        if (m_CalculateGradient) {
+
+            m_gradient(i, 0) += (NonBonds(AddVector(atom_i, dx), atom_j, vdw.Dij, vdw.xij) - NonBonds(SubVector(atom_i, dx), atom_j, vdw.Dij, vdw.xij)) / (2 * m_d);
+            m_gradient(i, 1) += (NonBonds(AddVector(atom_i, dy), atom_j, vdw.Dij, vdw.xij) - NonBonds(SubVector(atom_i, dy), atom_j, vdw.Dij, vdw.xij)) / (2 * m_d);
+            m_gradient(i, 2) += (NonBonds(AddVector(atom_i, dz), atom_j, vdw.Dij, vdw.xij) - NonBonds(SubVector(atom_i, dz), atom_j, vdw.Dij, vdw.xij)) / (2 * m_d);
+
+            m_gradient(j, 0) += (NonBonds(atom_i, AddVector(atom_j, dx), vdw.Dij, vdw.xij) - NonBonds(atom_i, SubVector(atom_j, dx), vdw.Dij, vdw.xij)) / (2 * m_d);
+            m_gradient(j, 1) += (NonBonds(atom_i, AddVector(atom_j, dy), vdw.Dij, vdw.xij) - NonBonds(atom_i, SubVector(atom_j, dy), vdw.Dij, vdw.xij)) / (2 * m_d);
+            m_gradient(j, 2) += (NonBonds(atom_i, AddVector(atom_j, dz), vdw.Dij, vdw.xij) - NonBonds(atom_i, SubVector(atom_j, dz), vdw.Dij, vdw.xij)) / (2 * m_d);
+        }
+    }
+    return energy;
+}
+double UFFThread::CalculateElectrostatic()
+{
+    double energy = 0.0;
+
+    return energy;
+}
+
 eigenUFF::eigenUFF(const json& controller)
 {
     json parameter = MergeJson(UFFParameterJson, controller);
-
+    m_threadpool = new CxxThreadPool();
+    m_threadpool->setProgressBar(CxxThreadPool::ProgressBarType::None);
 #ifdef USE_D3
     m_use_d3 = parameter["d3"].get<int>();
     if (m_use_d3)
@@ -74,8 +372,16 @@ eigenUFF::eigenUFF(const json& controller)
     m_writeuff = parameter["writeuff"];
     m_verbose = parameter["verbose"];
     m_rings = parameter["rings"];
+    m_threads = parameter["threads"];
     m_scaling = 1.4;
     // m_au = au;
+}
+
+eigenUFF::~eigenUFF()
+{
+    delete m_threadpool;
+    for (int i = 0; i < m_stored_threads.size(); ++i)
+        delete m_stored_threads[i];
 }
 
 void eigenUFF::Initialise()
@@ -359,6 +665,7 @@ void eigenUFF::Initialise()
     if (m_writeuff.compare("none") != 0)
         writeUFFFile(m_writeuff + ".json");
 
+    AutoRanges();
     m_initialised = true;
 }
 
@@ -939,10 +1246,11 @@ void eigenUFF::readUFF(const json& parameters)
 
 void eigenUFF::readParameter(const json& parameters)
 {
-    while (m_gradient.size() < m_atom_types.size())
-        m_gradient.push_back({ 0, 0, 0 });
+    m_gradient = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
+    // while (m_gradient.size() < m_atom_types.size())
+    //     m_gradient.push_back({ 0, 0, 0 });
 
-        //  m_d = parameters["differential"].get<double>();
+    //  m_d = parameters["differential"].get<double>();
 
 #ifdef USE_D3
     if (m_use_d3)
@@ -1057,6 +1365,7 @@ void eigenUFF::readParameter(const json& parameters)
 
         m_uffvdwaals.push_back(v);
     }
+    AutoRanges();
     m_initialised = true;
 }
 
@@ -1084,13 +1393,46 @@ void eigenUFF::readParameterFile(const std::string& file)
     readParameter(parameters);
 }
 
+void eigenUFF::AutoRanges()
+{
+    // auto parameter = writeParameter();
+
+    for (int i = 0; i < m_threads; ++i) {
+        UFFThread* thread = new UFFThread(i, m_threads);
+        // thread->readParameter(parameter);
+        thread->setMolecule(m_atom_types, &m_geometry);
+        m_threadpool->addThread(thread);
+        m_stored_threads.push_back(thread);
+        for (int j = int(i * m_uffbonds.size() / double(m_threads)); j < int((i + 1) * m_uffbonds.size() / double(m_threads)); ++j)
+            thread->AddBond(m_uffbonds[j]);
+
+        for (int j = int(i * m_uffangle.size() / double(m_threads)); j < int((i + 1) * m_uffangle.size() / double(m_threads)); ++j)
+            thread->AddAngle(m_uffangle[j]);
+
+        for (int j = int(i * m_uffdihedral.size() / double(m_threads)); j < int((i + 1) * m_uffdihedral.size() / double(m_threads)); ++j)
+            thread->AddDihedral(m_uffdihedral[j]);
+
+        for (int j = int(i * m_uffinversion.size() / double(m_threads)); j < int((i + 1) * m_uffinversion.size() / double(m_threads)); ++j)
+            thread->AddInversion(m_uffinversion[j]);
+
+        for (int j = int(i * m_uffvdwaals.size() / double(m_threads)); j < int((i + 1) * m_uffvdwaals.size() / double(m_threads)); ++j)
+            thread->AddvdW(m_uffvdwaals[j]);
+    }
+
+    m_uff_bond_end = m_uffbonds.size();
+    m_uff_angle_end = m_uffangle.size();
+    m_uff_dihedral_end = m_uffdihedral.size();
+    m_uff_inv_end = m_uffinversion.size();
+    m_uff_vdw_end = m_uffvdwaals.size();
+}
+
 void eigenUFF::UpdateGeometry(const double* coord)
 {
+    if (m_gradient.rows() != m_atom_types.size())
+        m_gradient = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
+
     if (m_gradient.size() != m_atom_types.size()) {
         m_h4correction.allocate(m_atom_types.size());
-
-        while (m_gradient.size() < m_atom_types.size())
-            m_gradient.push_back({ 0, 0, 0 });
     }
 
     for (int i = 0; i < m_atom_types.size(); ++i) {
@@ -1106,14 +1448,11 @@ void eigenUFF::UpdateGeometry(const double* coord)
 
 void eigenUFF::UpdateGeometry(const std::vector<std::array<double, 3>>& geometry)
 {
-    if (m_gradient.rows() == 0)
+    if (m_gradient.rows() != m_atom_types.size())
         m_gradient = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
 
     if (m_gradient.size() != m_atom_types.size()) {
         m_h4correction.allocate(m_atom_types.size());
-
-        while (m_gradient.size() < m_atom_types.size())
-            m_gradient.push_back({ 0, 0, 0 });
     }
     for (int i = 0; i < m_atom_types.size(); ++i) {
         m_geometry(i, 0) = geometry[i][0];
@@ -1192,13 +1531,13 @@ double eigenUFF::BondRestLength(int i, int j, double n)
 
 double eigenUFF::Calculate(bool grd, bool verbose)
 {
+    /*
     m_CalculateGradient = grd;
-    double energy = 0.0;
     hbonds4::atom_t geometry[m_atom_types.size()];
     for (int i = 0; i < m_atom_types.size(); ++i) {
-        geometry[i].x = m_geometry[i][0] * m_au;
-        geometry[i].y = m_geometry[i][1] * m_au;
-        geometry[i].z = m_geometry[i][2] * m_au;
+        geometry[i].x = m_geometry(i,0) * m_au;
+        geometry[i].y = m_geometry(i,1) * m_au;
+        geometry[i].z = m_geometry(i,2) * m_au;
         geometry[i].e = m_atom_types[i];
         m_h4correction.GradientH4()[i].x = 0;
         m_h4correction.GradientH4()[i].y = 0;
@@ -1217,16 +1556,36 @@ double eigenUFF::Calculate(bool grd, bool verbose)
         if (m_use_d3)
             m_d3->UpdateAtom(i, m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2));
 #endif
-    }
+    }*/
+    double energy = 0.0;
     double d4_energy = 0;
     double d3_energy = 0;
-    double bond_energy = CalculateBondStretching();
-    double angle_energy = CalculateAngleBending();
-    double dihedral_energy = CalculateDihedral();
-    double inversion_energy = CalculateInversion();
-    double vdw_energy = CalculateNonBonds();
+    double bond_energy = 0.0;
+    double angle_energy = 0.0;
+    double dihedral_energy = 0.0;
+    double inversion_energy = 0.0;
+    double vdw_energy = 0.0;
+    m_threadpool->setActiveThreadCount(m_threads);
+
+    for (int i = 0; i < m_stored_threads.size(); ++i) {
+        m_stored_threads[i]->UpdateGeometry(&m_geometry);
+    }
+
+    m_threadpool->Reset();
+    m_threadpool->StartAndWait();
+    m_threadpool->setWakeUp(m_threadpool->WakeUp() / 2.0);
+    for (int i = 0; i < m_stored_threads.size(); ++i) {
+        bond_energy += m_stored_threads[i]->BondEnergy();
+        angle_energy += m_stored_threads[i]->AngleEnergy();
+        dihedral_energy += m_stored_threads[i]->DihedralEnergy();
+        inversion_energy += m_stored_threads[i]->InversionEnergy();
+        vdw_energy += m_stored_threads[i]->VdWEnergy();
+        m_gradient += m_stored_threads[i]->Gradient();
+    }
     /* + CalculateElectrostatic(); */
     energy = bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy;
+
+    /*
 #ifdef USE_D3
     if (m_use_d3) {
         if (grd) {
@@ -1268,7 +1627,8 @@ double eigenUFF::Calculate(bool grd, bool verbose)
         m_gradient(i, 0) += m_final_factor * m_h4_scaling * m_h4correction.GradientH4()[i].x + m_final_factor * m_hh_scaling * m_h4correction.GradientHH()[i].x;
         m_gradient(i, 1) += m_final_factor * m_h4_scaling * m_h4correction.GradientH4()[i].y + m_final_factor * m_hh_scaling * m_h4correction.GradientHH()[i].y;
         m_gradient(i, 2) += m_final_factor * m_h4_scaling * m_h4correction.GradientH4()[i].z + m_final_factor * m_hh_scaling * m_h4correction.GradientHH()[i].z;
-    }
+    }*/
+
     if (verbose) {
         std::cout << "Total energy " << energy << " Eh. Sum of " << std::endl
                   << "Bond Energy " << bond_energy << " Eh" << std::endl
@@ -1278,8 +1638,8 @@ double eigenUFF::Calculate(bool grd, bool verbose)
                   << "Nonbonded Energy " << vdw_energy << " Eh" << std::endl
                   << "D3 Energy " << d3_energy << " Eh" << std::endl
                   << "D4 Energy " << d4_energy << " Eh" << std::endl
-                  << "HBondCorrection " << m_final_factor * m_h4_scaling * energy_h4 << " Eh" << std::endl
-                  << "HHRepCorrection " << m_final_factor * m_hh_scaling * energy_hh << " Eh" << std::endl
+                  //              << "HBondCorrection " << m_final_factor * m_h4_scaling * energy_h4 << " Eh" << std::endl
+                  //              << "HHRepCorrection " << m_final_factor * m_hh_scaling * energy_hh << " Eh" << std::endl
                   << std::endl;
 
         for (int i = 0; i < m_atom_types.size(); ++i) {
@@ -1319,7 +1679,8 @@ double eigenUFF::CalculateBondStretching()
     double factor = 1;
     double energy = 0.0;
 
-    for (const auto& bond : m_uffbonds) {
+    for (int index = m_uff_bond_start; index < m_uff_bond_end; ++index) {
+        const auto& bond = m_uffbonds[index];
         const int i = bond.i;
         const int j = bond.j;
         double xi = m_geometry(i, 0) * m_au;
@@ -1358,12 +1719,12 @@ double eigenUFF::CalculateBondStretching()
 
     return energy;
 }
-double eigenUFF::AngleBend(const std::array<double, 3>& i, const std::array<double, 3>& j, const std::array<double, 3>& k, double kijk, double C0, double C1, double C2)
+double eigenUFF::AngleBend(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, double kijk, double C0, double C1, double C2)
 {
-    std::array<double, 3> vec_1 = { j[0] - i[0], j[1] - i[1], j[2] - i[2] };
-    std::array<double, 3> vec_2 = { j[0] - k[0], j[1] - k[1], j[2] - k[2] };
+    Eigen::Vector3d vec_1 = j - i;
+    Eigen::Vector3d vec_2 = j - k;
 
-    double costheta = (DotProduct(vec_1, vec_2) / (sqrt(DotProduct(vec_1, vec_1) * DotProduct(vec_2, vec_2))));
+    double costheta = (vec_1.dot(vec_2) / (sqrt(vec_1.dot(vec_1) * vec_2.dot(vec_2))));
     double energy = (kijk * (C0 + C1 * costheta + C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling;
     if (isnan(energy))
         return 0;
@@ -1374,17 +1735,18 @@ double eigenUFF::AngleBend(const std::array<double, 3>& i, const std::array<doub
 double eigenUFF::CalculateAngleBending()
 {
     double energy = 0.0;
-    std::array<double, 3> dx = { m_d, 0, 0 };
-    std::array<double, 3> dy = { 0, m_d, 0 };
-    std::array<double, 3> dz = { 0, 0, m_d };
-    for (const auto& angle : m_uffangle) {
+    Eigen::Vector3d dx = { m_d, 0, 0 };
+    Eigen::Vector3d dy = { 0, m_d, 0 };
+    Eigen::Vector3d dz = { 0, 0, m_d };
+    for (int index = m_uff_angle_start; index < m_uff_angle_end; ++index) {
+        const auto& angle = m_uffangle[index];
         const int i = angle.i;
         const int j = angle.j;
         const int k = angle.k;
 
-        std::array<double, 3> atom_i = { m_geometry[i] };
-        std::array<double, 3> atom_j = { m_geometry[j] };
-        std::array<double, 3> atom_k = { m_geometry[k] };
+        auto atom_i = Position(i);
+        auto atom_j = Position(j);
+        auto atom_k = Position(k);
 
         double e = AngleBend(atom_i, atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2);
         energy += e;
@@ -1405,13 +1767,13 @@ double eigenUFF::CalculateAngleBending()
     return energy;
 }
 
-double eigenUFF::Dihedral(const v& i, const v& j, const v& k, const v& l, double V, double n, double phi0)
+double eigenUFF::Dihedral(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, const Eigen::Vector3d& l, double V, double n, double phi0)
 {
-    v nabc = NormalVector(i, j, k);
-    v nbcd = NormalVector(j, k, l);
-    double n_abc = Norm(nabc);
-    double n_bcd = Norm(nbcd);
-    double dotpr = DotProduct(nabc, nbcd);
+    Eigen::Vector3d nabc = NormalVector(i, j, k);
+    Eigen::Vector3d nbcd = NormalVector(j, k, l);
+    double n_abc = (nabc).norm();
+    double n_bcd = (nbcd).norm();
+    double dotpr = nabc.dot(nbcd);
     double phi = acos(dotpr / (n_abc * n_bcd)); //* 360 / 2.0 / pi;
     // double f = pi / 180.0;
     // std::cout << n_abc << " " << n_bcd << " " << dotpr << " " << n << std::endl;
@@ -1426,19 +1788,20 @@ double eigenUFF::Dihedral(const v& i, const v& j, const v& k, const v& l, double
 double eigenUFF::CalculateDihedral()
 {
     double energy = 0.0;
-    std::array<double, 3> dx = { m_d, 0, 0 };
-    std::array<double, 3> dy = { 0, m_d, 0 };
-    std::array<double, 3> dz = { 0, 0, m_d };
-    for (const auto& dihedral : m_uffdihedral) {
+    Eigen::Vector3d dx = { m_d, 0, 0 };
+    Eigen::Vector3d dy = { 0, m_d, 0 };
+    Eigen::Vector3d dz = { 0, 0, m_d };
+    for (int index = m_uff_dihedral_start; index < m_uff_dihedral_end; ++index) {
+        const auto& dihedral = m_uffdihedral[index];
         const int i = dihedral.i;
         const int j = dihedral.j;
         const int k = dihedral.k;
         const int l = dihedral.l;
         // std::cout << i << " " << j << " " << k << " " << l << std::endl;
-        v atom_i = { m_geometry[i] };
-        v atom_j = { m_geometry[j] };
-        v atom_k = { m_geometry[k] };
-        v atom_l = { m_geometry[l] };
+        Eigen::Vector3d atom_i = Position(i);
+        Eigen::Vector3d atom_j = Position(j);
+        Eigen::Vector3d atom_k = Position(k);
+        Eigen::Vector3d atom_l = Position(l);
         energy += Dihedral(atom_i, atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0);
         if (m_CalculateGradient) {
             //   std::cout << "gradient" << std::endl;
@@ -1462,12 +1825,12 @@ double eigenUFF::CalculateDihedral()
     }
     return energy;
 }
-double eigenUFF::Inversion(const v& i, const v& j, const v& k, const v& l, double k_ijkl, double C0, double C1, double C2)
+double eigenUFF::Inversion(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, const Eigen::Vector3d& l, double k_ijkl, double C0, double C1, double C2)
 {
-    v ail = SubVector(i, l);
-    v nbcd = NormalVector(i, j, k);
+    Eigen::Vector3d ail = SubVector(i, l);
+    Eigen::Vector3d nbcd = NormalVector(i, j, k);
 
-    double cosY = (DotProduct(nbcd, ail) / (Norm(nbcd) * Norm(ail))); //* 360 / 2.0 / pi;
+    double cosY = (nbcd.dot(ail) / ((nbcd).norm() * (ail).norm())); //* 360 / 2.0 / pi;
 
     double sinYSq = 1.0 - cosY * cosY;
     double sinY = ((sinYSq > 0.0) ? sqrt(sinYSq) : 0.0);
@@ -1482,13 +1845,13 @@ double eigenUFF::Inversion(const v& i, const v& j, const v& k, const v& l, doubl
 double eigenUFF::FullInversion(const int& i, const int& j, const int& k, const int& l, double d_forceConstant, double C0, double C1, double C2)
 {
     double energy;
-    std::array<double, 3> dx = { m_d, 0, 0 };
-    std::array<double, 3> dy = { 0, m_d, 0 };
-    std::array<double, 3> dz = { 0, 0, m_d };
-    v atom_i = { m_geometry[i] };
-    v atom_j = { m_geometry[j] };
-    v atom_k = { m_geometry[k] };
-    v atom_l = { m_geometry[l] };
+    Eigen::Vector3d dx = { m_d, 0, 0 };
+    Eigen::Vector3d dy = { 0, m_d, 0 };
+    Eigen::Vector3d dz = { 0, 0, m_d };
+    Eigen::Vector3d atom_i = Position(i);
+    Eigen::Vector3d atom_j = Position(j);
+    Eigen::Vector3d atom_k = Position(k);
+    Eigen::Vector3d atom_l = Position(l);
     energy += Inversion(atom_i, atom_j, atom_k, atom_l, d_forceConstant, C0, C1, C2);
     if (m_CalculateGradient) {
         m_gradient(i, 0) += (Inversion(AddVector(atom_i, dx), atom_j, atom_k, atom_l, d_forceConstant, C0, C1, C2) - Inversion(SubVector(atom_i, dx), atom_j, atom_k, atom_l, d_forceConstant, C0, C1, C2)) / (2 * m_d);
@@ -1513,7 +1876,8 @@ double eigenUFF::CalculateInversion()
 {
     double energy = 0.0;
 
-    for (const auto& inversion : m_uffinversion) {
+    for (int index = m_uff_inv_start; index < m_uff_inv_end; ++index) {
+        const auto& inversion = m_uffinversion[index];
         const int i = inversion.i;
         const int j = inversion.j;
         const int k = inversion.k;
@@ -1523,9 +1887,9 @@ double eigenUFF::CalculateInversion()
     return energy;
 }
 
-double eigenUFF::NonBonds(const v& i, const v& j, double Dij, double xij)
+double eigenUFF::NonBonds(const Eigen::Vector3d& i, const Eigen::Vector3d& j, double Dij, double xij)
 {
-    double r = Distance(i[0], j[0], i[1], j[1], i[2], j[2]) * m_au;
+    double r = (i - j).norm() * m_au;
     double pow6 = pow((xij / r), 6);
     double energy = Dij * (-2 * pow6 * m_vdw_scaling + pow6 * pow6 * m_rep_scaling) * m_final_factor;
     if (isnan(energy))
@@ -1537,14 +1901,15 @@ double eigenUFF::NonBonds(const v& i, const v& j, double Dij, double xij)
 double eigenUFF::CalculateNonBonds()
 {
     double energy = 0.0;
-    std::array<double, 3> dx = { m_d, 0, 0 };
-    std::array<double, 3> dy = { 0, m_d, 0 };
-    std::array<double, 3> dz = { 0, 0, m_d };
-    for (const auto& vdw : m_uffvdwaals) {
+    Eigen::Vector3d dx = { m_d, 0, 0 };
+    Eigen::Vector3d dy = { 0, m_d, 0 };
+    Eigen::Vector3d dz = { 0, 0, m_d };
+    for (int index = m_uff_vdw_start; index < m_uff_vdw_end; ++index) {
+        const auto& vdw = m_uffvdwaals[index];
         const int i = vdw.i;
         const int j = vdw.j;
-        v atom_i = { m_geometry[i] };
-        v atom_j = { m_geometry[j] };
+        Eigen::Vector3d atom_i = Position(i);
+        Eigen::Vector3d atom_j = Position(j);
         energy += NonBonds(atom_i, atom_j, vdw.Dij, vdw.xij);
         if (m_CalculateGradient) {
 

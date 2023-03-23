@@ -37,8 +37,8 @@
 #include "src/core/dftd4interface.h"
 #endif
 
+#include "src/core/eigen_uff.h"
 #include "src/core/uff.h"
-// #include "src/core/eigen_uff.h"
 
 #include <functional>
 
@@ -56,7 +56,7 @@ public:
     void updateGeometry(const Eigen::VectorXd& geometry);
 
     void getGradient(double* coord);
-    std::vector<std::array<double, 3>> getGradient() const { return m_gradient; }
+    Matrix getGradient() const { return m_eigen_gradient; }
 
     double CalculateEnergy(bool gradient = false, bool verbose = false);
 
@@ -122,8 +122,8 @@ private:
     DFTD4Interface* m_d4 = NULL;
 #endif
 
-    // eigenUFF* m_uff = NULL;
-    UFF* m_uff = NULL;
+    eigenUFF* m_uff = NULL;
+    // UFF* m_uff = NULL;
     StringList m_uff_methods = { "uff" };
     StringList m_tblite_methods = { "ipea1", "gfn1", "gfn2" };
     StringList m_xtb_methods = { "gfnff", "xtb-gfn1", "xtb-gfn2" };

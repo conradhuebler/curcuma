@@ -33,7 +33,7 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
     : m_method(method)
 {
     if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) { // UFF energy calculator requested
-        m_uff = new UFF(controller);
+        m_uff = new eigenUFF(controller);
         m_ecengine = [this](bool gradient, bool verbose) {
             this->CalculateUFF(gradient, verbose);
         };
@@ -79,7 +79,7 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
         exit(1);
 #endif
     } else { // Fall back to UFF?
-        m_uff = new UFF(controller);
+        m_uff = new eigenUFF(controller);
     }
 }
 EnergyCalculator::~EnergyCalculator()
@@ -208,7 +208,7 @@ void EnergyCalculator::CalculateUFF(bool gradient, bool verbose)
     m_uff->UpdateGeometry(m_geometry);
     m_energy = m_uff->Calculate(gradient, verbose);
     if (gradient) {
-        m_gradient = m_uff->Gradient();
+        m_eigen_gradient = m_uff->Gradient();
         // m_gradient = m_uff->NumGrad();
     }
 }
@@ -296,8 +296,8 @@ void EnergyCalculator::CalculateD4(bool gradient, bool verbose)
 void EnergyCalculator::getGradient(double* gradient)
 {
     for (int i = 0; i < m_atoms; ++i) {
-        gradient[3 * i + 0] = m_gradient[i][0];
-        gradient[3 * i + 1] = m_gradient[i][1];
-        gradient[3 * i + 2] = m_gradient[i][2];
+        gradient[3 * i + 0] = m_eigen_gradient(i, 0);
+        gradient[3 * i + 1] = m_eigen_gradient(i, 1);
+        gradient[3 * i + 2] = m_eigen_gradient(i, 2);
     }
 }

@@ -152,8 +152,8 @@ set(curcuma_core_SRC
         src/capabilities/simplemd.cpp
         src/core/energycalculator.cpp
         src/core/molecule.cpp
-        src/core/pseudoff.cpp
-        #src/core/eigen_uff.cpp
+        #src/core/pseudoff.cpp
+        src/core/eigen_uff.cpp
         src/core/uff.cpp
         src/tools/formats.h
         src/tools/geometry.h
