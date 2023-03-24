@@ -144,8 +144,16 @@ bool SimpleMD::Initialise()
     if(m_opt)
     {
         json js = CurcumaOptJson;
+        js = MergeJson(js, m_defaults);
         js["writeXYZ"] = false;
         js["method"] = m_method;
+        /*
+        try {
+            js["threads"] = m_defaults["threads"].get<int>();
+        }
+        catch (const nlohmann::detail::type_error& error) {
+
+           }*/
         CurcumaOpt optimise(js, true);
         optimise.addMolecule(&m_molecule);
         optimise.start();

@@ -207,10 +207,12 @@ double UFFThread::CalculateDihedral()
         Eigen::Vector3d atom_j = Position(j);
         Eigen::Vector3d atom_k = Position(k);
         Eigen::Vector3d atom_l = Position(l);
-        energy += Dihedral(atom_i, atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0);
+        double e = Dihedral(atom_i, atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0);
+        energy += e;
         if (m_CalculateGradient) {
+            e *= 1000;
             //   std::cout << "gradient" << std::endl;
-
+            /*
             m_gradient(i, 0) += (Dihedral(AddVector(atom_i, dx), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dx), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
             m_gradient(i, 1) += (Dihedral(AddVector(atom_i, dy), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dy), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
             m_gradient(i, 2) += (Dihedral(AddVector(atom_i, dz), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dz), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
@@ -226,6 +228,79 @@ double UFFThread::CalculateDihedral()
             m_gradient(l, 0) += (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dx), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dx), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
             m_gradient(l, 1) += (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dy), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dy), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
             m_gradient(l, 2) += (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dz), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dz), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            */
+
+            double tmp = (Dihedral(AddVector(atom_i, dx), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dx), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            if (std::abs(tmp) > std::abs(e))
+                m_gradient(i, 0) += 0;
+            else
+                m_gradient(i, 0) += tmp;
+
+            tmp = (Dihedral(AddVector(atom_i, dy), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dy), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            if (std::abs(tmp) > std::abs(e))
+                m_gradient(i, 1) += 0;
+            else
+                m_gradient(i, 1) += tmp;
+
+            tmp = (Dihedral(AddVector(atom_i, dz), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dz), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            if (std::abs(tmp) > std::abs(e))
+                m_gradient(i, 2) += 0;
+            else
+                m_gradient(i, 2) += tmp;
+
+            tmp = (Dihedral(atom_i, AddVector(atom_j, dx), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, SubVector(atom_j, dx), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            if (std::abs(tmp) > std::abs(e))
+                m_gradient(j, 0) += 0;
+            else
+                m_gradient(j, 0) += tmp;
+
+            tmp = (Dihedral(atom_i, AddVector(atom_j, dy), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, SubVector(atom_j, dy), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            if (std::abs(tmp) > std::abs(e))
+                m_gradient(j, 1) += 0;
+            else
+                m_gradient(j, 1) += tmp;
+
+            tmp = (Dihedral(atom_i, AddVector(atom_j, dz), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, SubVector(atom_j, dz), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            if (std::abs(tmp) > std::abs(e))
+                m_gradient(j, 2) += 0;
+            else
+                m_gradient(j, 2) += tmp;
+
+            tmp = (Dihedral(atom_i, atom_j, AddVector(atom_k, dx), atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, SubVector(atom_k, dx), atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            if (std::abs(tmp) > std::abs(e))
+                m_gradient(k, 0) += 0;
+            else
+                m_gradient(k, 0) += tmp;
+
+            tmp = (Dihedral(atom_i, atom_j, AddVector(atom_k, dy), atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, SubVector(atom_k, dy), atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            if (std::abs(tmp) > std::abs(e))
+                m_gradient(k, 1) += 0;
+            else
+                m_gradient(k, 1) += tmp;
+
+            tmp = (Dihedral(atom_i, atom_j, AddVector(atom_k, dz), atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, SubVector(atom_k, dz), atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            if (std::abs(tmp) > std::abs(e))
+                m_gradient(k, 2) += 0;
+            else
+                m_gradient(k, 2) += tmp;
+
+            tmp = (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dx), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dx), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            if (std::abs(tmp) > std::abs(e))
+                m_gradient(l, 0) += 0;
+            else
+                m_gradient(l, 0) += tmp;
+
+            tmp = (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dy), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dy), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            if (std::abs(tmp) > std::abs(e))
+                m_gradient(l, 1) += 0;
+            else
+                m_gradient(l, 1) += tmp;
+
+            tmp = (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dz), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dz), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            if (std::abs(tmp) > std::abs(e))
+                m_gradient(l, 2) += 0;
+            else
+                m_gradient(l, 2) += tmp;
         }
     }
     return energy;
