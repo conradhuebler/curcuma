@@ -162,7 +162,7 @@ void RMSDDriver::LoadControlJson()
     m_update_rotation = Json2KeyWord<bool>(m_defaults, "update-rotation");
     m_split = Json2KeyWord<bool>(m_defaults, "split");
     m_nomunkres = Json2KeyWord<bool>(m_defaults, "nomunkres");
-
+    m_dmix = Json2KeyWord<double>(m_defaults, "dmix");
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
         std::string element = m_defaults["Element"].get<std::string>();
@@ -1389,6 +1389,10 @@ std::vector<int> RMSDDriver::Munkress(const Molecule& reference, const Molecule&
         for (int j = 0; j < target.AtomCount(); ++j) {
             distance(i, j) = GeometryTools::Distance(target.Atom(j).second, reference.Atom(i).second) + penalty * (target.Atom(j).first != reference.Atom(i).first);
         }
+    }
+    if (m_dmix <= 1 && 0 < m_dmix) {
+        Matrix d = target.DistanceMatrix().first;
+        distance = (1 - m_dmix) * distance + m_dmix * d;
     }
     // std::cout << distance << std::endl;
     auto result = MunkressAssign(distance);

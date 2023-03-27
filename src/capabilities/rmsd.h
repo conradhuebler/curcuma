@@ -113,7 +113,8 @@ static const json RMSDJson = {
     { "update-rotation", false },
     { "damping", 0.8 },
     { "split", false },
-    { "nomunkres", false }
+    { "nomunkres", false },
+    { "dmix", -1 }
 };
 
 class RMSDDriver : public CurcumaMethod {
@@ -308,7 +309,7 @@ private:
     std::vector<int> m_reorder_rules;
     std::vector<std::vector<int>> m_stored_rules;
     std::map<int, std::vector<int>> m_connectivity;
-    double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99, m_damping = 0.8;
+    double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99, m_damping = 0.8, m_dmix = -1;
     bool m_check = false;
     bool m_check_connections = false, m_postprocess = true, m_noreorder = false, m_swap = false, m_dynamic_center = false;
     bool m_update_rotation = false, m_split = false, m_nomunkres = false;
