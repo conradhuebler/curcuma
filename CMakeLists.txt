@@ -150,6 +150,7 @@ set(curcuma_core_SRC
         src/capabilities/rmsd.cpp
         src/capabilities/rmsdtraj.cpp
         src/capabilities/simplemd.cpp
+        src/core/hessian.cpp
         src/core/energycalculator.cpp
         src/core/molecule.cpp
         #src/core/pseudoff.cpp

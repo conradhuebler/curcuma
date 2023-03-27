@@ -18,6 +18,7 @@
  */
 
 #include "src/core/fileiterator.h"
+#include "src/core/hessian.h"
 #include "src/core/molecule.h"
 #include "src/core/uff.h"
 
@@ -858,7 +859,11 @@ int main(int argc, char **argv) {
                 mol.AnalyseIntermoleculeDistance();
                 std::cout << mol.Check() << std::endl
                           << std::endl;
-
+                /*
+                Hessian hess("gfn2", UFFParameterJson);
+                hess.setMolecule(mol);
+                hess.CalculateHessian();
+                */
                 /*
                 UFF forcefield(UFFParameterJson);
                 forcefield.setMolecule(mol.Atoms(), mol.Coords());

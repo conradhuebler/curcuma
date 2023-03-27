@@ -23,6 +23,7 @@
 #include "src/core/energycalculator.h"
 #include "src/core/fileiterator.h"
 #include "src/core/global.h"
+#include "src/core/hessian.h"
 #include "src/core/molecule.h"
 
 #include <LBFGS.h>
@@ -82,7 +83,7 @@ void CurcumaOpt::LoadControlJson()
     m_spin = Json2KeyWord<double>(m_defaults, "Spin");
     m_singlepoint = Json2KeyWord<bool>(m_defaults, "SinglePoint");
     m_serial = Json2KeyWord<bool>(m_defaults, "serial");
-
+    m_hessian = Json2KeyWord<bool>(m_defaults, "hessian");
     if (m_method == "GFNFF")
         m_threads = 1;
 }
@@ -121,7 +122,11 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
         auto start = std::chrono::system_clock::now();
         interface.updateGeometry(iter->Coords());
         double energy = interface.CalculateEnergy(true, true);
-
+        if (m_hessian) {
+            Hessian hess(m_method, m_defaults, m_threads);
+            hess.setMolecule(*iter);
+            hess.CalculateHessian();
+        }
         auto end = std::chrono::system_clock::now();
         std::cout << fmt::format("Single Point Energy = {0} Eh ({1} secs)\n", energy, std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
         ++iter;
@@ -171,6 +176,11 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
         std::cout << thread->Output();
 
         Molecule* mol2 = new Molecule(thread->getMolecule());
+        if (m_hessian) {
+            Hessian hess(m_method, m_defaults, m_threads);
+            hess.setMolecule(mol2);
+            hess.CalculateHessian();
+        }
         if (!m_singlepoint)
             mol2->appendXYZFile(Optfile());
         m_molecules.push_back(Molecule(mol2));
