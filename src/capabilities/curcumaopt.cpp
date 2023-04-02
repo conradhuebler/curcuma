@@ -125,7 +125,7 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
         if (m_hessian) {
             Hessian hess(m_method, m_defaults, m_threads);
             hess.setMolecule(*iter);
-            hess.CalculateHessian();
+            hess.CalculateHessian(true);
         }
         auto end = std::chrono::system_clock::now();
         std::cout << fmt::format("Single Point Energy = {0} Eh ({1} secs)\n", energy, std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
@@ -179,7 +179,7 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
         if (m_hessian) {
             Hessian hess(m_method, m_defaults, m_threads);
             hess.setMolecule(mol2);
-            hess.CalculateHessian();
+            hess.CalculateHessian(true);
         }
         if (!m_singlepoint)
             mol2->appendXYZFile(Optfile());

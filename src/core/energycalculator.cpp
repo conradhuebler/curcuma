@@ -301,3 +301,14 @@ void EnergyCalculator::getGradient(double* gradient)
         gradient[3 * i + 2] = m_gradient[i][2];
     }
 }
+
+Matrix EnergyCalculator::Gradient() const
+{
+    Matrix gradient = Eigen::MatrixXd::Ones(m_atoms, 3);
+    for (int i = 0; i < m_atoms; ++i) {
+        gradient(i, 0) = m_gradient[i][0];
+        gradient(i, 1) = m_gradient[i][1];
+        gradient(i, 2) = m_gradient[i][2];
+    }
+    return gradient;
+}
