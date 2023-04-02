@@ -51,7 +51,7 @@ public:
             return 0;
         }
         fx = m_interface->CalculateEnergy(true);
-        auto gradient = m_interface->getGradient();
+        auto gradient = m_interface->Gradient();
         m_error = std::isnan(fx);
 
         for (int i = 0; i < m_atoms; ++i) {
