@@ -101,6 +101,15 @@ Add
 ```
 to perform calculation only on non-proton atoms.
 
+A new, and all previous published (and not yet published) methods was propsed Feb 2023 by Vásquez-Pérez and coworkers. It outperforms all methods so far (and sometimes the methods implemented in curcuma). 
+It can be obtained at [Github](https://github.com/qcuaeh/molalignlib) and included in curcuma for RMSD calculation conformational filtering.
+```sh
+-reorder -method molalign -molalignbin /anypath/molalign
+-reorder -rmsdmethod molalign -molalignbin /anypath/molalign
+```
+
+If the method was used, please cite the authors!
+[J. Chem. Inf. Model. 2023, 63, 4, 1157–1165]https://pubs.acs.org/doi/abs/10.1021/acs.jcim.2c01187)
 
 ```json
 { "reorder", false },
@@ -125,7 +134,10 @@ to perform calculation only on non-proton atoms.
 { "moi", false },
 { "update-rotation", false },
 { "damping", 0.8 },
-{ "nomunkres", false }
+{ "split", false },
+{ "nomunkres", false },
+{ "dmix", -1 },
+{ "molalignbin", "molalign" }
 ```
 
 

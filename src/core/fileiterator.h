@@ -30,19 +30,21 @@
 
 class FileIterator {
 public:
-    inline FileIterator(const std::string& filename)
+    inline FileIterator(const std::string& filename, bool silent = false)
         : m_filename(filename)
     {
-        std::cerr << "Opening file " << m_filename << std::endl;
+        if (!silent)
+            std::cerr << "Opening file " << m_filename << std::endl;
         m_file = new std::ifstream(m_filename);
         m_lines = CountLines();
         m_init = CheckNext();
     }
 
-    inline FileIterator(char* filename)
+    inline FileIterator(char* filename, bool silent = false)
     {
         m_filename = std::string(filename);
-        std::cerr << "Opening file " << m_filename << std::endl;
+        if (!silent)
+            std::cerr << "Opening file " << m_filename << std::endl;
         m_file = new std::ifstream(m_filename);
         m_lines = CountLines();
         m_init = CheckNext();

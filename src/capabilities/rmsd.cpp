@@ -21,7 +21,9 @@
 
 #include "munkres.h"
 
+#include "src/core/fileiterator.h"
 #include "src/core/molecule.h"
+
 #include "src/tools/general.h"
 #include "src/tools/geometry.h"
 
@@ -36,6 +38,9 @@
 #include <queue>
 #include <string>
 #include <vector>
+
+#include <cstdlib>
+#include <stdio.h>
 
 #include <fmt/color.h>
 #include <fmt/core.h>
@@ -184,6 +189,8 @@ void RMSDDriver::LoadControlJson()
 
     m_check = Json2KeyWord<bool>(m_defaults, "check");
     m_damping = Json2KeyWord<double>(m_defaults, "damping");
+    m_molalign = Json2KeyWord<std::string>(m_defaults, "molalignbin");
+
     std::string method = Json2KeyWord<std::string>(m_defaults, "method");
 
     if (method.compare("template") == 0)
@@ -196,6 +203,8 @@ void RMSDDriver::LoadControlJson()
         m_method = 4;
     else if (method.compare("free") == 0)
         m_method = 5;
+    else if (method.compare("molalign") == 0)
+        m_method = 6;
     else
         m_method = 1;
 
@@ -758,6 +767,8 @@ void RMSDDriver::ReorderMolecule()
         AtomTemplate();
     else if (m_method == 5)
         TemplateFree();
+    else if (m_method == 6)
+        MolAlignLib();
 }
 
 void RMSDDriver::AtomTemplate()
@@ -1410,4 +1421,30 @@ std::vector<int> RMSDDriver::Munkress(const Molecule& reference, const Molecule&
     //     std::cout << i << " ";
     // std::cout << std::endl;
     return new_order;
+}
+
+void RMSDDriver::MolAlignLib()
+{
+    m_reference.writeXYZFile("molaign_ref.xyz");
+    m_target.writeXYZFile("molalign_tar.xyz");
+    int i = 0;
+    FILE* FileOpen;
+    std::string command = m_molalign + " molaign_ref.xyz " + " molalign_tar.xyz -sort -fast -tol 10";
+    FileOpen = popen(command.c_str(), "r");
+    // if(i == 0)
+    char line[130];
+    while (fgets(line, sizeof line, FileOpen)) {
+        i++;
+        // printf("%s", line);
+    }
+
+    pclose(FileOpen);
+    if (i) {
+        FileIterator file("aligned.xyz", true);
+
+        m_reference = file.Next();
+        m_target_reordered = file.Next();
+        m_target_aligned = m_target_reordered;
+        m_target = m_target_reordered;
+    }
 }

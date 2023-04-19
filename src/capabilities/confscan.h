@@ -80,7 +80,8 @@ static const json ConfScanJson = {
     { "damping", 0.8 },
     { "split", false },
     { "writefiles", false },
-    { "nomunkres", false }
+    { "nomunkres", false },
+    { "molalignbin", "molalign" }
 };
 
 class ConfScanThread : public CxxThread {
@@ -286,6 +287,7 @@ private:
 
     std::string m_rmsd_element_templates;
     std::string m_method = "";
+    std::string m_molalign = "molalign";
 
     double m_last_diff = 0.0, m_last_ripser = 0.0, m_last_dE = -1, m_dE = -1, m_damping = 0.8;
     int m_maxmol = 0;

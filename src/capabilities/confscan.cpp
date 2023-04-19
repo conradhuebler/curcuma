@@ -168,6 +168,8 @@ void ConfScan::LoadControlJson()
     m_threads = m_defaults["threads"].get<int>();
     m_skipfirst = Json2KeyWord<bool>(m_defaults, "skipfirst");
     m_RMSDmethod = Json2KeyWord<std::string>(m_defaults, "RMSDMethod");
+    if (m_RMSDmethod == "molalign")
+        m_threads = 1;
     m_ignoreRotation = Json2KeyWord<bool>(m_defaults, "ignoreRotation");
     m_ignoreBarCode = Json2KeyWord<bool>(m_defaults, "ignoreBarCode");
     m_update_rotation = Json2KeyWord<bool>(m_defaults, "update-rotation");
@@ -175,6 +177,7 @@ void ConfScan::LoadControlJson()
     m_write = Json2KeyWord<bool>(m_defaults, "writefiles");
 
     m_nomunkres = Json2KeyWord<bool>(m_defaults, "nomunkres");
+    m_molalign = Json2KeyWord<std::string>(m_defaults, "molalignbin");
 
     //   if (Json2KeyWord<bool>(m_defaults, "skipless")) {
     m_openLoop = true;
@@ -718,6 +721,7 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
     rmsd["update-rotation"] = m_update_rotation;
     rmsd["damping"] = m_damping;
     rmsd["nomunkres"] = m_nomunkres;
+    rmsd["molalignbin"] = m_molalign;
     std::vector<Molecule*> cached = m_stored_structures;
     m_result = m_previously_accepted;
     m_stored_structures.clear();
