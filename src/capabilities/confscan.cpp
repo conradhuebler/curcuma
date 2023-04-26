@@ -25,7 +25,9 @@
 #include <vector>
 
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
-#include "external/MiniDNN/include/MiniDNN.h"
+
+// #include "external/MiniDNN/include/MiniDNN.h"
+
 #include <fmt/color.h>
 #include <fmt/core.h>
 
