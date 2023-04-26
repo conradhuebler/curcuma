@@ -768,7 +768,8 @@ void RMSDDriver::ReorderMolecule()
     else if (m_method == 5)
         TemplateFree();
     else if (m_method == 6)
-        MolAlignLib();
+        if (!MolAlignLib())
+            TemplateFree();
 }
 
 void RMSDDriver::AtomTemplate()
@@ -1423,28 +1424,40 @@ std::vector<int> RMSDDriver::Munkress(const Molecule& reference, const Molecule&
     return new_order;
 }
 
-void RMSDDriver::MolAlignLib()
+bool RMSDDriver::MolAlignLib()
 {
+
     m_reference.writeXYZFile("molaign_ref.xyz");
     m_target.writeXYZFile("molalign_tar.xyz");
-    int i = 0;
     FILE* FileOpen;
-    std::string command = m_molalign + " molaign_ref.xyz " + " molalign_tar.xyz -sort -fast -tol 10";
+    std::string command = m_molalign + " molaign_ref.xyz " + " molalign_tar.xyz -sort -fast -tol 10 2>&1";
     FileOpen = popen(command.c_str(), "r");
-    // if(i == 0)
+    bool ok = false;
+    bool rndm = false;
     char line[130];
     while (fgets(line, sizeof line, FileOpen)) {
-        i++;
-        // printf("%s", line);
+        ok = std::string(line).find("RMSD") != std::string::npos;
+        rndm = std::string(line).find("random") != std::string::npos;
     }
 
     pclose(FileOpen);
-    if (i) {
+    if (ok) {
+        if (!m_silent) {
+            fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nPlease cite the follow research report!\nJ. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187\n\n");
+        }
         FileIterator file("aligned.xyz", true);
 
         m_reference = file.Next();
         m_target_reordered = file.Next();
         m_target_aligned = m_target_reordered;
         m_target = m_target_reordered;
+    } else {
+        if (!rndm)
+            fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Molalign was not found. Consider getting it from\nhttps://github.com/qcuaeh/molalignlib\nEither adding the location of the binary to the path for executables or append\n-molalignbin /yourpath/molalign\nto your argument list!\n");
     }
+    if (rndm) {
+        fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "molalign has trouble with random numbers, falling back to plain Kuhn-Munkres ...\n");
+        return false;
+    }
+    return true;
 }

@@ -237,7 +237,7 @@ public:
 
     void setThreads(int threads) { m_threads = threads; }
 
-    void MolAlignLib();
+    bool MolAlignLib();
 
 private:
     /* Read Controller has to be implemented for all */

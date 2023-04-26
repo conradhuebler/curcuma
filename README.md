@@ -105,11 +105,14 @@ A new, and all previous published (and not yet published) methods was propsed Fe
 It can be obtained at [Github](https://github.com/qcuaeh/molalignlib) and included in curcuma for RMSD calculation conformational filtering.
 ```sh
 -reorder -method molalign -molalignbin /anypath/molalign
--reorder -rmsdmethod molalign -molalignbin /anypath/molalign
 ```
 
 If the method was used, please cite the authors!
-[J. Chem. Inf. Model. 2023, 63, 4, 1157–1165]https://pubs.acs.org/doi/abs/10.1021/acs.jcim.2c01187)
+[J. Chem. Inf. Model. 2023, 63, 4, 1157–1165](https://pubs.acs.org/doi/abs/10.1021/acs.jcim.2c01187)
+The method can be applied during confscan, however, problems with the random numbers occur during the test runs for larger problems, making the less ideal than the natively in curcuma implemented methods.
+```sh
+-rmsdmethod molalign -molalignbin /anypath/molalign
+```
 
 ```json
 { "reorder", false },

@@ -36,6 +36,11 @@
 
 constexpr double third = 1 / 3.0;
 
+struct dnn_input {
+    double dE, dIa, dIb, dIc, dH, rmsd;
+    Matrix dHM;
+};
+
 static const json ConfScanJson = {
     { "noname", true },
     { "restart", true },
@@ -50,11 +55,11 @@ static const json ConfScanJson = {
     { "preventreorder", false },
     { "scaleLoose", 1.5 },
     { "scaleTight", 0.1 },
-    { "scaleLooseEnergy", 2 },
+    { "scaleLooseEnergy", 1.2 },
     { "scaleTightEnergy", 0.1 },
-    { "scaleLooseRotational", 2 },
+    { "scaleLooseRotational", 1.2 },
     { "scaleTightRotational", 0.1 },
-    { "scaleLooseRipser", 2 },
+    { "scaleLooseRipser", 1.2 },
     { "scaleTightRipser", 0.1 },
     { "skip", 0 },
     { "allxyz", false },
@@ -69,7 +74,7 @@ static const json ConfScanJson = {
     { "method", "" },
     { "lastdE", -1 },
     { "fewerFile", false },
-    { "dothird", false },
+    { "dothird", true },
     { "skipfirst", false },
     { "ignoreRotation", false },
     { "ignoreBarCode", false },
@@ -81,7 +86,17 @@ static const json ConfScanJson = {
     { "split", false },
     { "writefiles", false },
     { "nomunkres", false },
-    { "molalignbin", "molalign" }
+    { "molalignbin", "molalign" },
+    { "ripser_xmax", 4 },
+    { "ripser_xmin", 0 },
+    { "ripser_ymax", 4 },
+    { "ripser_ymin", 0 },
+    { "ripser_bins", 10 },
+    { "ripser_scaling", 0.1 },
+    { "ripser_stdx", 10 },
+    { "ripser_stdy", 10 },
+    { "ripser_ratio", 1 },
+    { "ripser_dimension", 2 }
 };
 
 class ConfScanThread : public CxxThread {
@@ -131,6 +146,9 @@ public:
 
     double RMSD() const { return m_rmsd; }
     const Molecule* Reference() const { return &m_reference; }
+    void setPredRMSD(double rmsd) { m_pred_rmsd = rmsd; }
+    double PredRMSD() const { return m_pred_rmsd; }
+    dnn_input getDNNInput() const { return m_input; }
 
 private:
     bool m_keep_molecule = true, m_break_pool = false, m_reorder_worked = false, m_reuse_only = false, m_reused_worked = false;
@@ -142,6 +160,8 @@ private:
     std::vector<std::vector<int>> m_reorder_rules;
     RMSDDriver* m_driver;
     json m_config;
+    double m_pred_rmsd = 0;
+    dnn_input m_input;
 };
 
 class ConfScanThreadNoReorder : public CxxThread {
@@ -182,6 +202,7 @@ public:
     }
 
     bool KeepMolecule() const { return m_keep_molecule; }
+    dnn_input getDNNInput() const { return m_input; }
 
 private:
     bool m_keep_molecule = true, m_break_pool = false;
@@ -192,6 +213,7 @@ private:
     json m_config;
     double m_rmsd = 0, m_rmsd_threshold = 1;
     int m_MaxHTopoDiff;
+    dnn_input m_input;
 };
 
 class ConfScan : public CurcumaMethod {
@@ -233,6 +255,7 @@ private:
     void CheckRMSD();
 
     void ReorderCheck(bool reuse_only = false, bool limit = false);
+    void ReorderTrained();
 
     void writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd, bool reason = true, const std::vector<int>& rule = std::vector<int>(0));
 
@@ -284,6 +307,7 @@ private:
     std::vector<Molecule*> m_result, m_rejected_structures, m_stored_structures, m_previously_accepted;
     std::vector<const Molecule*> m_threshold;
     std::vector<int> m_element_templates;
+    std::vector<dnn_input> m_dnn_data;
 
     std::string m_rmsd_element_templates;
     std::string m_method = "";

@@ -1,6 +1,6 @@
 /*
  * <Generate Persisent Diagrams from Distance Matrices using ripser>
- * Copyright (C) 2021 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2021 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,12 +19,30 @@
 
 #include "ripser.h"
 
+#include "json.hpp"
+
 #include <numeric>
+
+#include "src/tools/general.h"
 
 #include "persistentdiagram.h"
 
-PersistentDiagram::PersistentDiagram()
+using json = nlohmann::json;
+
+PersistentDiagram::PersistentDiagram(const json config)
 {
+    json j = MergeJson(RipserJson, config);
+    // std::cout << j << std::endl;
+    m_ratio = j["ripser_ratio"];
+    m_xmax = j["ripser_xmax"];
+    m_xmin = j["ripser_xmin"];
+    m_ymax = j["ripser_ymax"];
+    m_ymin = j["ripser_ymin"];
+    m_bins = j["ripser_bins"];
+    m_scaling = j["ripser_scaling"];
+    m_std_x = j["ripser_stdx"];
+    m_std_y = j["ripser_stdy"];
+    m_dimension = j["ripser_dimension"];
     m_threshold = std::numeric_limits<float>::max();
 }
 
@@ -59,11 +77,9 @@ dpairs PersistentDiagram::generatePairs()
 
 Eigen::MatrixXd PersistentDiagram::generateImage(const dpairs& pairs)
 {
-    Eigen::MatrixXd matrix = Eigen::MatrixXd::Zero(m_bins + 1, m_bins + 1);
+    Eigen::MatrixXd matrix = Eigen::MatrixXd::Zero(m_bins, m_bins);
 
-    double scaling = 0.1;
-    double i_bins = 1 / (m_bins);
-    double i_c = 10;
+    double i_bins = 1 / double(m_bins);
     for (int i = 0; i < matrix.cols(); ++i) // iteration over y values
     {
         double cur_y = m_ymax - (m_ymax - m_ymin) * i_bins * (i);
@@ -74,7 +90,7 @@ Eigen::MatrixXd PersistentDiagram::generateImage(const dpairs& pairs)
             for (const auto& pair : pairs) {
                 double x = pair.first;
                 double y = pair.second;
-                matrix(i, j) += scaling * exp(-((cur_x - x) * (cur_x - x) * i_c)) * exp((-(cur_y - y) * (cur_y - y) * i_c));
+                matrix(i, j) += m_scaling * exp(-((cur_x - x) * (cur_x - x) * m_std_x)) * exp((-(cur_y - y) * (cur_y - y) * m_std_y));
             }
         }
     }

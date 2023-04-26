@@ -1,6 +1,6 @@
 /*
  * <Generate Persisent Diagrams from Distance Matrices using ripser>
- * Copyright (C) 2021 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2021 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,7 +18,9 @@
  */
 
 #pragma once
-//#include "ripser.h"
+// #include "ripser.h"
+
+#include "json.hpp"
 
 #include <vector>
 
@@ -27,10 +29,24 @@
 typedef std::pair<double, double> dpair;
 
 typedef std::vector<dpair> dpairs;
+using json = nlohmann::json;
+
+static const json RipserJson = {
+    { "ripser_xmax", 4 },
+    { "ripser_xmin", 0 },
+    { "ripser_ymax", 4 },
+    { "ripser_ymin", 0 },
+    { "ripser_bins", 10 },
+    { "ripser_scaling", 0.1 },
+    { "ripser_stdx", 10 },
+    { "ripser_stdy", 10 },
+    { "ripser_ratio", 1 },
+    { "ripser_dimension", 2 }
+};
 
 class PersistentDiagram {
 public:
-    PersistentDiagram();
+    PersistentDiagram(const json config = RipserJson);
 
     inline void setDistanceMatrix(const std::vector<float>& vector)
     {
@@ -68,11 +84,19 @@ public:
 
     Eigen::MatrixXd generateImage(const dpairs& pairs);
 
+    void setScaling(double scaling) { m_scaling = scaling; }
+    void setBins(int bins) { m_bins = bins; }
+    void setStdX(double std_x) { m_std_x = std_x; }
+    void setStdY(double std_y) { m_std_x = std_y; }
+
 private:
     int m_dimension = 2;
     double m_threshold;
     double m_ratio = 1;
-    double m_xmax, m_xmin, m_ymax, m_ymin;
-    double m_bins = 10.0;
+    double m_xmax = 4, m_xmin = 0, m_ymax = 4, m_ymin = 0;
+    int m_bins = 10.0;
+    double m_scaling = 0.1;
+    double m_std_x = 10;
+    double m_std_y = 10;
     std::vector<float> m_compressed_lower_distance_matrix;
 };

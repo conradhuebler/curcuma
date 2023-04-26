@@ -24,10 +24,10 @@
 #include <string>
 #include <vector>
 
+#include "external/CxxThreadPool/include/CxxThreadPool.h"
+#include "external/MiniDNN/include/MiniDNN.h"
 #include <fmt/color.h>
 #include <fmt/core.h>
-
-#include "external/CxxThreadPool/include/CxxThreadPool.h"
 
 #include "src/capabilities/confstat.h"
 #include "src/capabilities/persistentdiagram.h"
@@ -41,7 +41,7 @@
 
 #include "json.hpp"
 using json = nlohmann::json;
-
+using namespace MiniDNN;
 #include "confscan.h"
 
 int ConfScanThread::execute()
@@ -54,6 +54,19 @@ int ConfScanThread::execute()
     m_reorder_worked = false;
     m_reused_worked = false;
     m_reorder_rule.clear();
+
+    double Ia = abs(m_reference.Ia() - m_target.Ia());
+    double Ib = abs(m_reference.Ib() - m_target.Ib());
+    double Ic = abs(m_reference.Ic() - m_target.Ic());
+    m_input.dIa = Ia;
+    m_input.dIb = Ib;
+    m_input.dIc = Ic;
+
+    Matrix m = (m_reference.getPersisentImage() - m_target.getPersisentImage());
+    bool diff_ripser = m.cwiseAbs().sum();
+    m_input.dH = diff_ripser;
+    m_input.dHM = m;
+    m_input.dE = std::abs(m_reference.Energy() - m_target.Energy()) * 2625.5;
     for (int i = 0; i < m_reorder_rules.size(); ++i) {
         if (m_reorder_rules[i].size() != m_reference.AtomCount() || m_reorder_rules[i].size() == 0)
             continue;
@@ -64,17 +77,21 @@ int ConfScanThread::execute()
             m_break_pool = true;
             m_reused_worked = true;
             m_rmsd = tmp_rmsd;
+            m_input.rmsd = m_rmsd;
             m_reorder_rule = m_reorder_rules[i];
             return 0;
         }
     }
 
     if (m_reuse_only) {
+
         return 0;
     }
 
     m_driver->start();
     m_rmsd = m_driver->RMSD();
+    m_input.rmsd = m_rmsd;
+
     if (m_rmsd <= m_rmsd_threshold && (m_MaxHTopoDiff == -1 || m_driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
         m_keep_molecule = false;
         m_break_pool = true;
@@ -94,13 +111,21 @@ int ConfScanThreadNoReorder::execute()
 
     m_driver->start();
     m_rmsd = m_driver->RMSD();
+    m_input.rmsd = m_rmsd;
 
     double Ia = abs(m_reference.Ia() - m_target.Ia());
     double Ib = abs(m_reference.Ib() - m_target.Ib());
     double Ic = abs(m_reference.Ic() - m_target.Ic());
+    m_input.dIa = Ia;
+    m_input.dIb = Ib;
+    m_input.dIc = Ic;
 
     m_diff_rotational = (Ia + Ib + Ic) * third;
-    m_diff_ripser = (m_reference.getPersisentImage() - m_target.getPersisentImage()).cwiseAbs().sum();
+    Matrix m = (m_reference.getPersisentImage() - m_target.getPersisentImage());
+    m_diff_ripser = m.cwiseAbs().sum();
+    m_input.dH = m_diff_ripser;
+    m_input.dHM = m;
+    m_input.dE = std::abs(m_reference.Energy() - m_target.Energy()) * 2625.5;
 
     if (m_rmsd <= m_rmsd_threshold && (m_MaxHTopoDiff == -1 || m_driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
         m_keep_molecule = false;
@@ -168,8 +193,10 @@ void ConfScan::LoadControlJson()
     m_threads = m_defaults["threads"].get<int>();
     m_skipfirst = Json2KeyWord<bool>(m_defaults, "skipfirst");
     m_RMSDmethod = Json2KeyWord<std::string>(m_defaults, "RMSDMethod");
-    if (m_RMSDmethod == "molalign")
+    if (m_RMSDmethod == "molalign") {
+        fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nPlease cite the follow research report!\nJ. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187\n\n");
         m_threads = 1;
+    }
     m_ignoreRotation = Json2KeyWord<bool>(m_defaults, "ignoreRotation");
     m_ignoreBarCode = Json2KeyWord<bool>(m_defaults, "ignoreBarCode");
     m_update_rotation = Json2KeyWord<bool>(m_defaults, "update-rotation");
@@ -225,7 +252,7 @@ bool ConfScan::openFile()
         throw 1;
 
     int molecule = 0;
-    PersistentDiagram diagram;
+    PersistentDiagram diagram(m_defaults);
     FileIterator file(m_filename);
     while (!file.AtEnd()) {
         Molecule* mol = new Molecule(file.Next());
@@ -246,8 +273,11 @@ bool ConfScan::openFile()
             mol->setName(NamePattern(molecule));
 
         mol->CalculateRotationalConstants();
-
+        /*
+        diagram.setXRange(0, 4);
+        diagram.setYRange(0, 4);
         diagram.setDimension(2);
+*/
         diagram.setDistanceMatrix(mol->LowerDistanceVector());
         mol->setPersisentImage(diagram.generateImage(diagram.generatePairs()));
 
@@ -529,6 +559,7 @@ void ConfScan::start()
         for (const auto& i : m_ordered_list)
             m_stored_structures.push_back(m_molecules.at(i.second).second);
     }
+    std::cout << m_dnn_data.size() << std::endl;
     fmt::print("\n1st Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
     if (m_prevent_reorder == false || m_do_third == true) {
         if (!CheckStop()) {
@@ -547,14 +578,16 @@ void ConfScan::start()
             timer.Reset();
         }
         if (!CheckStop() && m_do_third == true) {
+
             m_current_filename.clear();
             if (m_writeFiles && !m_reduced_file) {
                 result_file.open(m_statistic_filename, std::ios_base::app);
                 result_file << "Results of 3rd Pass" << std::endl;
                 result_file.close();
             }
-            fmt::print("\n\n3rd Pass\nPerforming RMSD calculation with reordering, but only reuse previouse reordering rules.\n\n");
-            ReorderCheck(true, true);
+            fmt::print("\n\n3rd Pass\nPerforming RMSD calculation with reordering, and less stricter threshold.\n\n");
+            // ReorderCheck(true, true);
+            ReorderTrained();
             fmt::print("\n3rd Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
         }
     }
@@ -633,6 +666,8 @@ void ConfScan::CheckRMSD()
                 // result_file << t->RMSD() << "\t" << t->DiffRipser() << "\t" << t->DiffRot() << "\t" << m_diff_ripser_threshold_tight << "\t" << m_diff_ripser_threshold_loose << "\t" << m_diff_rot_threshold_tight << "\t" << m_diff_rot_threshold_loose << "\t" << std::endl;
                 // result_file.close();
                 writeStatisticFile(t->Reference(), mol1, t->RMSD());
+                m_dnn_data.push_back(t->getDNNInput());
+                // std::cout << t->getDNNInput().dHM << std::endl;
                 break;
             }
         }
@@ -758,7 +793,10 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
             double Ic = abs(mol1->Ic() - mol2->Ic());
 
             double diff_rot = (Ia + Ib + Ic) * third;
+
+            // std::cout << pred << std::endl;
             double diff = (mol1->getPersisentImage() - mol2->getPersisentImage()).cwiseAbs().sum();
+
             /* rotational = 1
              * ripser     = 2
              * energy     = 4 */
@@ -813,6 +851,8 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                     m_skiped++;
                     continue;
                 }
+                m_dnn_data.push_back(t->getDNNInput());
+
                 m_reordered++;
                 if (t->KeepMolecule() == false) {
                     keep_molecule = false;
@@ -857,6 +897,302 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
     delete p;
 }
 
+void ConfScan::ReorderTrained()
+{
+
+    bool reuse_only = false;
+    bool limit = false;
+
+    /*
+    int cols = m_dnn_data.size();
+
+    int dim = 11;
+
+           // Predictors -- each column is an observation
+    //Matrix x = Matrix::Zero(5, cols);
+    Matrix x = Matrix::Zero(dim*dim, cols);
+
+    // Response variables -- each column is an observation
+    Matrix y = Matrix::Zero(1, cols);
+    //std::cout << x << std::endl << y << std::endl;
+
+    int i = 0;
+    for(const auto &element : m_dnn_data)
+    {
+        y(0,i) = element.rmsd;
+        auto l = Vector { element.dHM.reshaped() };
+        //std::cout << l.size() << std::endl <<l << std::endl;
+        /*
+        x(i, 0) = element.dE;
+        x(i, 1) = element.dIa;
+        x(i, 2) = element.dIb;
+        x(i, 3) = element.dIc;
+        x(i, 4) = element.dH;
+        */
+    /*
+        x.col(i) = l; //Eigen::Map<Eigen::RowVectorXd>(element.dHM.data(), dim);
+        i++;
+    }
+
+           //std::cout << x << std::endl << y << std::endl;
+    Network net;
+
+           // Create three layers
+    int net_dim = 2000;
+    // Layer 1 -- FullyConnected, input size 2x200
+    Layer* layer1 = new FullyConnected<Identity>(dim*dim, net_dim);
+    // Layer 2 -- max FullyConnected, input size 200x200
+    Layer* layer2 = new FullyConnected<ReLU>(net_dim, net_dim);
+    // Layer 4 -- fully connected, input size 200x1
+    Layer* layer3 = new FullyConnected<Identity>(net_dim, 1);
+                                                          // Add layers to the network object
+    net.add_layer(layer1);
+    net.add_layer(layer2);
+    net.add_layer(layer3);
+
+           // Set output layer
+    net.set_output(new RegressionMSE());
+
+           // Create optimizer object
+    RMSProp opt;
+    opt.m_lrate = 0.001;
+
+           // (Optional) set callback function object
+    VerboseCallback callback;
+    net.set_callback(callback);
+
+           // Initialize parameters with N(0, 0.01^2) using random seed 123
+    net.init(0, 0.01, 000);
+    // Fit the model with a batch size of 100, running 10 epochs with random seed 123
+    net.fit(opt, x, y, 100, 100, 000);
+    net.predict(x);
+
+    */
+    m_maxmol = m_stored_structures.size();
+
+    // To be finalised and tested
+
+    /*
+        fmt::print(
+            "'{0:'^{1}}'\n"
+            "'{2: ^{1}}'\n"
+            "'{0: ^{1}}'\n"
+            "*{3: ^{1}}*\n"
+            "*{0: ^{1}}*\n"
+            "*{12: ^{1}}*\n"
+            "*{0: ^{1}}*\n"
+            "*{4: ^{1}}*\n"
+            "*{5: ^{1}}*\n"
+            "*{0: ^{1}}*\n"
+            "*{6: ^{1}}*\n"
+            "*{7: ^{1}}*\n"
+            "*{0: ^{1}}*\n"
+            "*{8: ^{1}}*\n"
+            "*{9: ^{1}}*\n"
+            "*{10: ^{1}}*\n"
+            "*{0: ^{1}}*\n"
+            "*{11: ^{1}}*\n"
+            "*{0: ^{1}}*\n"
+            "*{0:*^{1}}*\n",
+            "", 60,
+            "Thresholds in rotational constants (averaged over Ia, Ib and Ic) and Ripser Image:");
+    */
+    /* if ignore rotation or ignore barcode are true, the tight cutoffs are set to -1, that no difference is smaller
+     * than the tight threshold and the loose threshold is set to a big number, that every structure has to be reordered*/
+    m_skiped = 0;
+    m_rejected_directly = 0;
+    if (m_ignoreRotation == true) {
+        m_diff_rot_threshold_loose = 1e10;
+        m_diff_rot_threshold_tight = -1;
+    }
+    if (m_ignoreBarCode == true) {
+        m_diff_ripser_threshold_loose = 1e10;
+        m_diff_ripser_threshold_tight = -1;
+    }
+    m_diff_rot_threshold_loose *= 2;
+    m_diff_ripser_threshold_loose *= 2;
+    m_diff_energy_threshold_loose *= 2;
+
+    std::cout << "" << std::endl
+              << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
+    std::cout << "    Thresholds in rotational constants (averaged over Ia, Ib and Ic): " << std::endl;
+    std::cout << "    Loose Threshold: " << m_diff_rot_threshold_loose << " MHz" << std::endl;
+    std::cout << "    Tight Threshold: " << m_diff_rot_threshold_tight << " MHz" << std::endl;
+    std::cout << "    Thresholds in difference of ripser images: " << std::endl;
+    std::cout << "    Loose Threshold: " << m_diff_ripser_threshold_loose << " " << std::endl;
+    std::cout << "    Tight Threshold: " << m_diff_ripser_threshold_tight << " " << std::endl;
+    std::cout << "    Thresholds for energy differences in kJ/mol: " << std::endl;
+    std::cout << "    Loose Threshold: " << m_diff_energy_threshold_loose << " " << std::endl;
+    std::cout << "    Tight Threshold: " << m_diff_energy_threshold_tight << " " << std::endl;
+
+    std::cout << "" << std::endl
+              << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
+              << std::endl;
+    TriggerWriteRestart();
+
+    m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_reused = 0;
+
+    json rmsd = RMSDJson;
+    rmsd["silent"] = true;
+    rmsd["reorder"] = true;
+    rmsd["check"] = CheckConnections();
+    rmsd["heavy"] = m_heavy;
+    rmsd["method"] = m_RMSDmethod;
+    rmsd["element"] = m_rmsd_element_templates;
+    rmsd["update-rotation"] = m_update_rotation;
+    rmsd["damping"] = m_damping;
+    rmsd["nomunkres"] = m_nomunkres;
+    rmsd["molalignbin"] = m_molalign;
+    std::vector<Molecule*> cached = m_stored_structures;
+    m_result = m_previously_accepted;
+    m_stored_structures.clear();
+    std::vector<ConfScanThread*> threads;
+    std::vector<std::vector<int>> rules;
+    CxxThreadPool* p = new CxxThreadPool;
+    p->setActiveThreadCount(m_threads);
+
+    for (Molecule* mol1 : cached) {
+        if (m_result.size() == 0) {
+            AcceptMolecule(mol1);
+            ConfScanThread* thread = addThread(mol1, rmsd, reuse_only);
+            threads.push_back(thread);
+            p->addThread(thread);
+            m_lowest_energy = mol1->Energy();
+
+            continue;
+        }
+        p->Reset();
+        m_current_energy = mol1->Energy();
+        m_dE = (m_current_energy - m_lowest_energy) * 2625.5;
+
+        bool keep_molecule = true;
+        bool reorder = false;
+        for (int t = 0; t < threads.size(); ++t) {
+            if (CheckStop()) {
+                fmt::print("\n\n** Found stop file, will end now! **\n\n");
+                // TriggerWriteRestart();
+                return;
+            }
+            const Molecule* mol2 = threads[t]->Reference();
+            double Ia = abs(mol1->Ia() - mol2->Ia());
+            double Ib = abs(mol1->Ib() - mol2->Ib());
+            double Ic = abs(mol1->Ic() - mol2->Ic());
+
+            double diff_rot = (Ia + Ib + Ic) * third;
+            // Matrix m = (mol1->getPersisentImage() - mol2->getPersisentImage());
+            // auto l = Vector { m.reshaped() };
+
+            // std::cout << pred << std::endl;
+            double diff = (mol1->getPersisentImage() - mol2->getPersisentImage()).cwiseAbs().sum();
+            // Eigen::VectorXd l(5);
+            /*
+            l(0) = std::abs(mol1->Energy() - mol2->Energy()) * 2625.5;
+            l(1) = Ia;
+            l(2) = Ib;
+            l(3) = Ic;
+            l(4) = diff;*/
+
+            // Matrix pred = net.predict(l);
+            /* rotational = 1
+             * ripser     = 2
+             * energy     = 4 */
+            // std::cout << diff_rot << " " << m_diff_rot_threshold_loose << " " << 1 * (diff_rot < m_diff_rot_threshold_loose) << " ";
+            // std::cout << diff << " " << m_diff_ripser_threshold_loose << " " << 2 * (diff < m_diff_ripser_threshold_loose) << " ";
+            // std::cout << std::abs(mol1->Energy() - mol2->Energy()) * 2625.5  << " " << m_diff_energy_threshold_loose << " " << 4 * (std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_diff_energy_threshold_loose) << std::endl;
+
+            int looseThresh = 1 * (diff_rot < m_diff_rot_threshold_loose) + 2 * (diff < m_diff_ripser_threshold_loose) + 4 * (std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_diff_energy_threshold_loose);
+            // std::cout << m_looseThresh << " " << looseThresh << " " << int(looseThresh & m_looseThresh) << std::endl;
+            if ((looseThresh & m_looseThresh) == m_looseThresh) {
+                reorder = true;
+                // threads[t]->setPredRMSD(pred(0,0));
+                threads[t]->setEnabled(m_openLoop);
+                int tightThresh = 1 * (diff_rot < m_diff_rot_threshold_tight) + 2 * (diff < m_diff_ripser_threshold_tight) + 4 * ((std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_diff_energy_threshold_tight));
+
+                if ((tightThresh & m_tightThresh) == m_tightThresh) {
+                    std::cout << "Differences " << diff_rot << " MHz and " << diff << " below tight threshold, reject molecule directly!" << std::endl;
+                    m_last_diff = diff_rot;
+                    m_last_ripser = diff;
+                    writeStatisticFile(mol1, mol2, -1, false);
+                    m_threshold.push_back(mol2);
+                    m_rejected_directly++;
+                    reorder = false;
+                    keep_molecule = false;
+                    break;
+                }
+            } else {
+                threads[t]->setEnabled(m_closeLoop);
+            }
+        }
+
+        if (reorder && keep_molecule) {
+            int free_threads = m_threads;
+            if (threads.size())
+                free_threads /= threads.size();
+
+            if (free_threads < 1)
+                free_threads = 1;
+            for (int i = 0; i < threads.size(); ++i) {
+                threads[i]->setTarget(mol1);
+                threads[i]->setReorderRules(m_reorder_rules);
+                threads[i]->setThreads(free_threads);
+                for (int j = 0; j < rules.size(); ++j)
+                    threads[i]->addReorderRule(rules[j]);
+            }
+
+            p->StaticPool();
+            p->StartAndWait();
+
+            for (auto* t : threads) {
+                if (!t->isEnabled()) {
+                    t->setEnabled(true);
+                    m_skiped++;
+                    continue;
+                }
+                // std::cout << t->RMSD() << " " << t->PredRMSD() << std::endl;
+
+                m_reordered++;
+                if (t->KeepMolecule() == false) {
+                    keep_molecule = false;
+                    m_reordered_worked += t->ReorderWorked();
+                    m_reordered_reused += t->ReusedWorked();
+                    if (AddRules(t->ReorderRule()))
+                        rules.push_back(t->ReorderRule());
+
+                    double Ia = abs(mol1->Ia() - t->Reference()->Ia());
+                    double Ib = abs(mol1->Ib() - t->Reference()->Ib());
+                    double Ic = abs(mol1->Ic() - t->Reference()->Ic());
+
+                    double diff_rot = (Ia + Ib + Ic) * third;
+                    double diff = (mol1->getPersisentImage() - t->Reference()->getPersisentImage()).cwiseAbs().sum();
+                    // std::ofstream result_file;
+                    // result_file.open("ripser_2nd.dat", std::ios_base::app);
+                    // result_file << t->RMSD() << "\t" << diff << "\t" << diff_rot << "\t" << m_diff_ripser_threshold_tight << "\t" << m_diff_ripser_threshold_loose << "\t" << m_diff_rot_threshold_tight << "\t" << m_diff_rot_threshold_loose << "\t" << std::endl;
+                    // result_file.close();
+                    writeStatisticFile(t->Reference(), mol1, t->RMSD(), true, t->ReorderRule());
+                    break;
+                }
+            }
+        } else
+            m_skiped += threads.size();
+
+        if (keep_molecule) {
+            AcceptMolecule(mol1);
+            ConfScanThread* thread = addThread(mol1, rmsd, reuse_only);
+            p->addThread(thread);
+            threads.push_back(thread);
+        } else {
+            RejectMolecule(mol1);
+        }
+
+        PrintStatus();
+        if ((m_result.size() >= m_maxrank && limit) || (m_result.size() >= 2 * m_maxrank && !limit))
+            break;
+        if (m_dE > m_energy_cutoff && m_energy_cutoff != -1) {
+            break;
+        }
+    }
+    delete p;
+}
 ConfScanThreadNoReorder* ConfScan::addThreadNoreorder(const Molecule* reference, const json& config)
 {
     ConfScanThreadNoReorder* thread = new ConfScanThreadNoReorder(m_rmsd_threshold, m_MaxHTopoDiff, config);
