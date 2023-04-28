@@ -43,7 +43,7 @@
 
 #include "json.hpp"
 using json = nlohmann::json;
-using namespace MiniDNN;
+// using namespace MiniDNN;
 #include "confscan.h"
 
 int ConfScanThread::execute()
@@ -60,15 +60,15 @@ int ConfScanThread::execute()
     double Ia = abs(m_reference.Ia() - m_target.Ia());
     double Ib = abs(m_reference.Ib() - m_target.Ib());
     double Ic = abs(m_reference.Ic() - m_target.Ic());
-    m_input.dIa = Ia;
-    m_input.dIb = Ib;
-    m_input.dIc = Ic;
+    // m_input.dIa = Ia;
+    // m_input.dIb = Ib;
+    // m_input.dIc = Ic;
 
     Matrix m = (m_reference.getPersisentImage() - m_target.getPersisentImage());
     bool diff_ripser = m.cwiseAbs().sum();
-    m_input.dH = diff_ripser;
-    m_input.dHM = m;
-    m_input.dE = std::abs(m_reference.Energy() - m_target.Energy()) * 2625.5;
+    // m_input.dH = diff_ripser;
+    // m_input.dHM = m;
+    // m_input.dE = std::abs(m_reference.Energy() - m_target.Energy()) * 2625.5;
     for (int i = 0; i < m_reorder_rules.size(); ++i) {
         if (m_reorder_rules[i].size() != m_reference.AtomCount() || m_reorder_rules[i].size() == 0)
             continue;
@@ -79,7 +79,7 @@ int ConfScanThread::execute()
             m_break_pool = true;
             m_reused_worked = true;
             m_rmsd = tmp_rmsd;
-            m_input.rmsd = m_rmsd;
+            //  m_input.rmsd = m_rmsd;
             m_reorder_rule = m_reorder_rules[i];
             return 0;
         }
@@ -92,7 +92,7 @@ int ConfScanThread::execute()
 
     m_driver->start();
     m_rmsd = m_driver->RMSD();
-    m_input.rmsd = m_rmsd;
+    // m_input.rmsd = m_rmsd;
 
     if (m_rmsd <= m_rmsd_threshold && (m_MaxHTopoDiff == -1 || m_driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
         m_keep_molecule = false;
@@ -113,21 +113,21 @@ int ConfScanThreadNoReorder::execute()
 
     m_driver->start();
     m_rmsd = m_driver->RMSD();
-    m_input.rmsd = m_rmsd;
+    // m_input.rmsd = m_rmsd;
 
     double Ia = abs(m_reference.Ia() - m_target.Ia());
     double Ib = abs(m_reference.Ib() - m_target.Ib());
     double Ic = abs(m_reference.Ic() - m_target.Ic());
-    m_input.dIa = Ia;
-    m_input.dIb = Ib;
-    m_input.dIc = Ic;
+    // m_input.dIa = Ia;
+    // m_input.dIb = Ib;
+    // m_input.dIc = Ic;
 
     m_diff_rotational = (Ia + Ib + Ic) * third;
     Matrix m = (m_reference.getPersisentImage() - m_target.getPersisentImage());
     m_diff_ripser = m.cwiseAbs().sum();
-    m_input.dH = m_diff_ripser;
-    m_input.dHM = m;
-    m_input.dE = std::abs(m_reference.Energy() - m_target.Energy()) * 2625.5;
+    // m_input.dH = m_diff_ripser;
+    // m_input.dHM = m;
+    // m_input.dE = std::abs(m_reference.Energy() - m_target.Energy()) * 2625.5;
 
     if (m_rmsd <= m_rmsd_threshold && (m_MaxHTopoDiff == -1 || m_driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
         m_keep_molecule = false;
@@ -183,6 +183,7 @@ void ConfScan::LoadControlJson()
     m_scaleTightRipser = Json2KeyWord<double>(m_defaults, "scaleTightRipser");
 
     m_last_dE = Json2KeyWord<double>(m_defaults, "lastdE");
+    m_domolalign = Json2KeyWord<double>(m_defaults, "domolalign");
 
     m_skip = Json2KeyWord<int>(m_defaults, "skip");
     m_allxyz = Json2KeyWord<bool>(m_defaults, "allxyz");
@@ -198,6 +199,7 @@ void ConfScan::LoadControlJson()
     if (m_RMSDmethod == "molalign") {
         fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nPlease cite the follow research report!\nJ. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187\n\n");
         m_threads = 1;
+        m_domolalign = -1;
     }
     m_ignoreRotation = Json2KeyWord<bool>(m_defaults, "ignoreRotation");
     m_ignoreBarCode = Json2KeyWord<bool>(m_defaults, "ignoreBarCode");
@@ -561,7 +563,7 @@ void ConfScan::start()
         for (const auto& i : m_ordered_list)
             m_stored_structures.push_back(m_molecules.at(i.second).second);
     }
-    std::cout << m_dnn_data.size() << std::endl;
+    // std::cout << m_dnn_data.size() << std::endl;
     fmt::print("\n1st Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
     if (m_prevent_reorder == false || m_do_third == true) {
         if (!CheckStop()) {
@@ -668,8 +670,8 @@ void ConfScan::CheckRMSD()
                 // result_file << t->RMSD() << "\t" << t->DiffRipser() << "\t" << t->DiffRot() << "\t" << m_diff_ripser_threshold_tight << "\t" << m_diff_ripser_threshold_loose << "\t" << m_diff_rot_threshold_tight << "\t" << m_diff_rot_threshold_loose << "\t" << std::endl;
                 // result_file.close();
                 writeStatisticFile(t->Reference(), mol1, t->RMSD());
-                m_dnn_data.push_back(t->getDNNInput());
-                // std::cout << t->getDNNInput().dHM << std::endl;
+                // m_dnn_data.push_back(t->getDNNInput());
+                //  std::cout << t->getDNNInput().dHM << std::endl;
                 break;
             }
         }
@@ -853,7 +855,7 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                     m_skiped++;
                     continue;
                 }
-                m_dnn_data.push_back(t->getDNNInput());
+                // m_dnn_data.push_back(t->getDNNInput());
 
                 m_reordered++;
                 if (t->KeepMolecule() == false) {
@@ -862,19 +864,40 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                     m_reordered_reused += t->ReusedWorked();
                     if (AddRules(t->ReorderRule()))
                         rules.push_back(t->ReorderRule());
+                    /*
+                                        double Ia = abs(mol1->Ia() - t->Reference()->Ia());
+                                        double Ib = abs(mol1->Ib() - t->Reference()->Ib());
+                                        double Ic = abs(mol1->Ic() - t->Reference()->Ic());
 
-                    double Ia = abs(mol1->Ia() - t->Reference()->Ia());
-                    double Ib = abs(mol1->Ib() - t->Reference()->Ib());
-                    double Ic = abs(mol1->Ic() - t->Reference()->Ic());
-
-                    double diff_rot = (Ia + Ib + Ic) * third;
-                    double diff = (mol1->getPersisentImage() - t->Reference()->getPersisentImage()).cwiseAbs().sum();
+                                        double diff_rot = (Ia + Ib + Ic) * third;
+                                        double diff = (mol1->getPersisentImage() - t->Reference()->getPersisentImage()).cwiseAbs().sum();
+                                       */
                     // std::ofstream result_file;
                     // result_file.open("ripser_2nd.dat", std::ios_base::app);
                     // result_file << t->RMSD() << "\t" << diff << "\t" << diff_rot << "\t" << m_diff_ripser_threshold_tight << "\t" << m_diff_ripser_threshold_loose << "\t" << m_diff_rot_threshold_tight << "\t" << m_diff_rot_threshold_loose << "\t" << std::endl;
                     // result_file.close();
                     writeStatisticFile(t->Reference(), mol1, t->RMSD(), true, t->ReorderRule());
                     break;
+                } else {
+                    if ((m_domolalign > 1) && t->RMSD() < m_domolalign * m_rmsd_threshold) {
+                        fmt::print(fg(fmt::color::yellow) | fmt::emphasis::bold, "Starting molalign for more precise reordering ...\n");
+                        json molalign = rmsd;
+                        molalign["method"] = "molalign";
+                        m_molalign_count++;
+                        RMSDDriver driver(molalign);
+                        driver.setReference(t->Reference());
+                        driver.setTarget(mol1);
+                        driver.start();
+                        if (driver.RMSD() < m_rmsd_threshold) {
+                            m_molalign_success++;
+                            keep_molecule = false;
+                            m_reordered_worked += 1;
+                            m_reordered_reused += 1;
+                            writeStatisticFile(t->Reference(), mol1, driver.RMSD(), true, { 0, 0 });
+                            fmt::print(fg(fmt::color::yellow) | fmt::emphasis::bold, "... success!\n");
+                        } else
+                            fmt::print(fg(fmt::color::yellow) | fmt::emphasis::bold, "... without effect!\n");
+                    }
                 }
             }
         } else
@@ -904,7 +927,8 @@ void ConfScan::ReorderTrained()
 
     bool reuse_only = false;
     bool limit = false;
-
+    m_molalign_count = 0;
+    m_molalign_success = 0;
     /*
     int cols = m_dnn_data.size();
 
@@ -1172,6 +1196,26 @@ void ConfScan::ReorderTrained()
                     // result_file.close();
                     writeStatisticFile(t->Reference(), mol1, t->RMSD(), true, t->ReorderRule());
                     break;
+                } else {
+                    if ((m_domolalign > 1) && t->RMSD() < m_domolalign * m_rmsd_threshold) {
+                        fmt::print(fg(fmt::color::yellow) | fmt::emphasis::bold, "Starting molalign for more precise reordering ...\n");
+                        json molalign = rmsd;
+                        molalign["method"] = "molalign";
+                        m_molalign_count++;
+                        RMSDDriver driver(molalign);
+                        driver.setReference(t->Reference());
+                        driver.setTarget(mol1);
+                        driver.start();
+                        if (driver.RMSD() < m_rmsd_threshold) {
+                            m_molalign_success++;
+                            keep_molecule = false;
+                            m_reordered_worked += 1;
+                            m_reordered_reused += 1;
+                            writeStatisticFile(t->Reference(), mol1, driver.RMSD(), true, { 0, 0 });
+                            fmt::print(fg(fmt::color::yellow) | fmt::emphasis::bold, "... success!\n");
+                        } else
+                            fmt::print(fg(fmt::color::yellow) | fmt::emphasis::bold, "... without effect!\n");
+                    }
                 }
             }
         } else
@@ -1264,8 +1308,10 @@ void ConfScan::PrintStatus()
               << "             ###   " << std::setprecision(4) << (m_stored_structures.size() + m_rejected) / double(m_maxmol) * 100 << "% done!   ###" << std::endl;
     std::cout << "# Accepted : " << m_stored_structures.size() << "     ";
     std::cout << "# Rejected : " << m_rejected << "     ";
-    std::cout << "# Reordered : " << m_reordered << "     ";
-    std::cout << "# Successfully : " << m_reordered_worked << "    ";
+    std::cout << "# Reordered : " << m_reordered << " (+ " << m_molalign_count << ")"
+              << "     ";
+    std::cout << "# Successfully : " << m_reordered_worked << " (+ " << m_molalign_success << ")"
+              << "    ";
     std::cout << "# Reused Results : " << m_reordered_reused << "     ";
     std::cout << "# Reordering Skipped : " << m_skiped << "     ";
     std::cout << "# Rejected Directly : " << m_rejected_directly << "     ";
