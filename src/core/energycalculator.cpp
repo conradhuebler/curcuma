@@ -117,6 +117,8 @@ void EnergyCalculator::setMolecule(const Molecule& molecule)
     m_coord = new double[3 * m_atoms];
     m_grad = new double[3 * m_atoms];
     std::vector<std::array<double, 3>> geom(m_atoms);
+    m_eigen_gradient = Eigen::MatrixXd::Zero(m_atoms, 3);
+
     for (int i = 0; i < m_atoms; ++i) {
         std::pair<int, Position> atom = molecule.Atom(i);
         geom[i][0] = atom.second(0);
@@ -226,9 +228,9 @@ void EnergyCalculator::CalculateTBlite(bool gradient, bool verbose)
     if (gradient) {
         m_energy = m_tblite->GFNCalculation(m_gfn, m_grad);
         for (int i = 0; i < m_atoms; ++i) {
-            m_gradient[i][0] = m_grad[3 * i + 0] * au;
-            m_gradient[i][1] = m_grad[3 * i + 1] * au;
-            m_gradient[i][2] = m_grad[3 * i + 2] * au;
+            m_eigen_gradient(i, 0) = m_grad[3 * i + 0] * au;
+            m_eigen_gradient(i, 1) = m_grad[3 * i + 1] * au;
+            m_eigen_gradient(i, 2) = m_grad[3 * i + 2] * au;
         }
     } else
         m_energy = m_tblite->GFNCalculation(m_gfn);
@@ -248,9 +250,9 @@ void EnergyCalculator::CalculateXTB(bool gradient, bool verbose)
     if (gradient) {
         m_energy = m_xtb->GFNCalculation(m_gfn, m_grad);
         for (int i = 0; i < m_atoms; ++i) {
-            m_gradient[i][0] = m_grad[3 * i + 0] * au;
-            m_gradient[i][1] = m_grad[3 * i + 1] * au;
-            m_gradient[i][2] = m_grad[3 * i + 2] * au;
+            m_eigen_gradient(i, 0) = m_grad[3 * i + 0] * au;
+            m_eigen_gradient(i, 1) = m_grad[3 * i + 1] * au;
+            m_eigen_gradient(i, 2) = m_grad[3 * i + 2] * au;
         }
     } else
         m_energy = m_xtb->GFNCalculation(m_gfn);
@@ -266,9 +268,9 @@ void EnergyCalculator::CalculateD3(bool gradient, bool verbose)
     if (gradient) {
         m_energy = m_d3->DFTD3Calculation(m_grad);
         for (int i = 0; i < m_atoms; ++i) {
-            m_gradient[i][0] = m_grad[3 * i + 0] * au;
-            m_gradient[i][1] = m_grad[3 * i + 1] * au;
-            m_gradient[i][2] = m_grad[3 * i + 2] * au;
+            m_eigen_gradient(i, 0) = m_grad[3 * i + 0] * au;
+            m_eigen_gradient(i, 1) = m_grad[3 * i + 1] * au;
+            m_eigen_gradient(i, 2) = m_grad[3 * i + 2] * au;
         }
     } else
         m_energy = m_d3->DFTD3Calculation();
@@ -284,9 +286,9 @@ void EnergyCalculator::CalculateD4(bool gradient, bool verbose)
     if (gradient) {
         m_energy = m_d4->DFTD4Calculation(m_grad);
         for (int i = 0; i < m_atoms; ++i) {
-            m_gradient[i][0] = m_grad[3 * i + 0] * au;
-            m_gradient[i][1] = m_grad[3 * i + 1] * au;
-            m_gradient[i][2] = m_grad[3 * i + 2] * au;
+            m_eigen_gradient(i, 0) = m_grad[3 * i + 0] * au;
+            m_eigen_gradient(i, 1) = m_grad[3 * i + 1] * au;
+            m_eigen_gradient(i, 2) = m_grad[3 * i + 2] * au;
         }
     } else
         m_energy = m_d4->DFTD4Calculation();
@@ -304,11 +306,5 @@ void EnergyCalculator::getGradient(double* gradient)
 
 Matrix EnergyCalculator::Gradient() const
 {
-    Matrix gradient = Eigen::MatrixXd::Ones(m_atoms, 3);
-    for (int i = 0; i < m_atoms; ++i) {
-        gradient(i, 0) = m_gradient[i][0];
-        gradient(i, 1) = m_gradient[i][1];
-        gradient(i, 2) = m_gradient[i][2];
-    }
-    return gradient;
+    return m_eigen_gradient;
 }

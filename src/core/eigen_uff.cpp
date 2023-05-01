@@ -54,6 +54,25 @@ int UFFThread::execute()
     return 0;
 }
 
+void UFFThread::readUFF(const json& parameter)
+{
+    //  json parameter = MergeJson(UFFParameterJson, parameters);
+
+    m_d = parameter["differential"].get<double>();
+
+    m_bond_scaling = parameter["bond_scaling"].get<double>();
+    m_angle_scaling = parameter["angle_scaling"].get<double>();
+    m_dihedral_scaling = parameter["dihedral_scaling"].get<double>();
+    m_inversion_scaling = parameter["inversion_scaling"].get<double>();
+    m_vdw_scaling = parameter["vdw_scaling"].get<double>();
+    m_rep_scaling = parameter["rep_scaling"].get<double>();
+
+    m_coulmob_scaling = parameter["coulomb_scaling"].get<double>();
+
+    m_bond_force = parameter["bond_force"].get<double>();
+    m_angle_force = parameter["angle_force"].get<double>();
+}
+
 double UFFThread::Distance(double x1, double x2, double y1, double y2, double z1, double z2) const
 {
     return sqrt((((x1 - x2) * (x1 - x2)) + ((y1 - y2) * (y1 - y2)) + ((z1 - z2) * (z1 - z2))));
@@ -1225,7 +1244,7 @@ json eigenUFF::writeParameter() const
 json eigenUFF::writeUFF() const
 {
     json parameters;
-
+    parameters["differential"] = m_d;
     parameters["bond_scaling"] = m_bond_scaling;
     parameters["angle_scaling"] = m_angle_scaling;
     parameters["inversion_scaling"] = m_inversion_scaling;
@@ -1474,7 +1493,7 @@ void eigenUFF::AutoRanges()
 
     for (int i = 0; i < m_threads; ++i) {
         UFFThread* thread = new UFFThread(i, m_threads);
-        // thread->readParameter(parameter);
+        thread->readUFF(writeUFF());
         thread->setMolecule(m_atom_types, &m_geometry);
         m_threadpool->addThread(thread);
         m_stored_threads.push_back(thread);
@@ -1606,7 +1625,7 @@ double eigenUFF::BondRestLength(int i, int j, double n)
 
 double eigenUFF::Calculate(bool grd, bool verbose)
 {
-    /*
+
     m_CalculateGradient = grd;
     hbonds4::atom_t geometry[m_atom_types.size()];
     for (int i = 0; i < m_atom_types.size(); ++i) {
@@ -1631,7 +1650,7 @@ double eigenUFF::Calculate(bool grd, bool verbose)
         if (m_use_d3)
             m_d3->UpdateAtom(i, m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2));
 #endif
-    }*/
+    }
     double energy = 0.0;
     double d4_energy = 0;
     double d3_energy = 0;
@@ -1660,7 +1679,6 @@ double eigenUFF::Calculate(bool grd, bool verbose)
     /* + CalculateElectrostatic(); */
     energy = bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy;
 
-    /*
 #ifdef USE_D3
     if (m_use_d3) {
         if (grd) {
@@ -1702,7 +1720,7 @@ double eigenUFF::Calculate(bool grd, bool verbose)
         m_gradient(i, 0) += m_final_factor * m_h4_scaling * m_h4correction.GradientH4()[i].x + m_final_factor * m_hh_scaling * m_h4correction.GradientHH()[i].x;
         m_gradient(i, 1) += m_final_factor * m_h4_scaling * m_h4correction.GradientH4()[i].y + m_final_factor * m_hh_scaling * m_h4correction.GradientHH()[i].y;
         m_gradient(i, 2) += m_final_factor * m_h4_scaling * m_h4correction.GradientH4()[i].z + m_final_factor * m_hh_scaling * m_h4correction.GradientHH()[i].z;
-    }*/
+    }
 
     if (verbose) {
         std::cout << "Total energy " << energy << " Eh. Sum of " << std::endl
@@ -1713,8 +1731,8 @@ double eigenUFF::Calculate(bool grd, bool verbose)
                   << "Nonbonded Energy " << vdw_energy << " Eh" << std::endl
                   << "D3 Energy " << d3_energy << " Eh" << std::endl
                   << "D4 Energy " << d4_energy << " Eh" << std::endl
-                  //              << "HBondCorrection " << m_final_factor * m_h4_scaling * energy_h4 << " Eh" << std::endl
-                  //              << "HHRepCorrection " << m_final_factor * m_hh_scaling * energy_hh << " Eh" << std::endl
+                  << "HBondCorrection " << m_final_factor * m_h4_scaling * energy_h4 << " Eh" << std::endl
+                  << "HHRepCorrection " << m_final_factor * m_hh_scaling * energy_hh << " Eh" << std::endl
                   << std::endl;
 
         for (int i = 0; i < m_atom_types.size(); ++i) {

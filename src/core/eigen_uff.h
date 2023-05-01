@@ -81,6 +81,7 @@ public:
         m_geometry = geometry;
         m_gradient = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
     }
+    void readUFF(const json& parameters);
 
     inline double Energy() const { return m_energy; }
     inline double BondEnergy() const { return m_bond_energy; }
