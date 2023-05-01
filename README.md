@@ -101,6 +101,18 @@ Add
 ```
 to perform calculation only on non-proton atoms.
 
+A new, and all previous published (and not yet published) methods was propsed Feb 2023 by Vásquez-Pérez and coworkers. It outperforms all methods so far (and sometimes the methods implemented in curcuma). 
+It can be obtained at [Github](https://github.com/qcuaeh/molalignlib) and included in curcuma for RMSD calculation conformational filtering.
+```sh
+-reorder -method molalign -molalignbin /anypath/molalign
+```
+
+If the method was used, please cite the authors!
+[J. Chem. Inf. Model. 2023, 63, 4, 1157–1165](https://pubs.acs.org/doi/abs/10.1021/acs.jcim.2c01187)
+The method can be applied during confscan, however, problems with the random numbers occur during the test runs for larger problems, making the less ideal than the natively in curcuma implemented methods.
+```sh
+-rmsdmethod molalign -molalignbin /anypath/molalign
+```
 
 ```json
 { "reorder", false },
@@ -125,7 +137,10 @@ to perform calculation only on non-proton atoms.
 { "moi", false },
 { "update-rotation", false },
 { "damping", 0.8 },
-{ "nomunkres", false }
+{ "split", false },
+{ "nomunkres", false },
+{ "dmix", -1 },
+{ "molalignbin", "molalign" }
 ```
 
 
@@ -236,6 +251,14 @@ a file with already accepted structures can be passed to curcuma. Molecules in t
 Confscan will write a restart file, finalise and quit, if a file called "stop" is found in the working directory. Such file will be generated if Ctrl-C is hit or if it is created using for example the **touch stop** command.
 Within a restart file, the last energy difference and the atom indicies from reordering are stored. A restart file will automatically be read upon the start of curcuma. The content of the restart file will be used to speed up the 2nd step of the conformation filtering procedure.
 
+Confscan supports the molalign tool. However, as too often reordering with molalign is not working, it can efficiently be used if the RMSD is only slightly above the threshold. 
+```sh
+-domolalign 1.1
+```
+Sets the threshold to 1.1*RMSDthreshold. If the molecule was accepted as to different, but the RMSD is blow 1.1*RMSDthreshold molalign will check too.
+
+Confscan write a statistic file, where for each rejected molecule the reference alongside the energy difference and the RMSD is printed out. Furthermore, the reordered indices are given, if available. Molalign does not return the reordered indices, hence they are empty or marked **0,0** if the reordered was finally performed using molalign in a standard run.
+
 ```json
 { "noname", true },
 { "restart", true },
@@ -250,11 +273,11 @@ Within a restart file, the last energy difference and the atom indicies from reo
 { "preventreorder", false },
 { "scaleLoose", 1.5 },
 { "scaleTight", 0.1 },
-{ "scaleLooseEnergy", 2 },
+{ "scaleLooseEnergy", 1.2 },
 { "scaleTightEnergy", 0.1 },
-{ "scaleLooseRotational", 2 },
+{ "scaleLooseRotational", 1.2 },
 { "scaleTightRotational", 0.1 },
-{ "scaleLooseRipser", 2 },
+{ "scaleLooseRipser", 1.2 },
 { "scaleTightRipser", 0.1 },
 { "skip", 0 },
 { "allxyz", false },
@@ -269,7 +292,7 @@ Within a restart file, the last energy difference and the atom indicies from reo
 { "method", "" },
 { "lastdE", -1 },
 { "fewerFile", false },
-{ "dothird", false },
+{ "dothird", true },
 { "skipfirst", false },
 { "ignoreRotation", false },
 { "ignoreBarCode", false },
@@ -280,7 +303,19 @@ Within a restart file, the last energy difference and the atom indicies from reo
 { "damping", 0.8 },
 { "split", false },
 { "writefiles", false },
-{ "nomunkres", false }
+{ "nomunkres", false },
+{ "molalignbin", "molalign" },
+{ "ripser_xmax", 4 },
+{ "ripser_xmin", 0 },
+{ "ripser_ymax", 4 },
+{ "ripser_ymin", 0 },
+{ "ripser_bins", 10 },
+{ "ripser_scaling", 0.1 },
+{ "ripser_stdx", 10 },
+{ "ripser_stdy", 10 },
+{ "ripser_ratio", 1 },
+{ "ripser_dimension", 2 },
+{ "domolalign", -1 }
 ```
 
 ```cpp
@@ -288,7 +323,7 @@ Within a restart file, the last energy difference and the atom indicies from reo
  * ripser     = 2
  * energy     = 4 */
 int looseThresh = 1 * (diff_rot < m_diff_rot_threshold_loose) + 2 * (diff < m_diff_ripser_threshold_loose) + 4 * (std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_diff_energy_threshold_loose);
-if (looseThresh == m_looseThresh) 
+if ((looseThresh & m_looseThresh) == m_looseThresh) 
 {
 
 }

@@ -21,7 +21,9 @@
 
 #include "munkres.h"
 
+#include "src/core/fileiterator.h"
 #include "src/core/molecule.h"
+
 #include "src/tools/general.h"
 #include "src/tools/geometry.h"
 
@@ -36,6 +38,9 @@
 #include <queue>
 #include <string>
 #include <vector>
+
+#include <cstdlib>
+#include <stdio.h>
 
 #include <fmt/color.h>
 #include <fmt/core.h>
@@ -184,6 +189,8 @@ void RMSDDriver::LoadControlJson()
 
     m_check = Json2KeyWord<bool>(m_defaults, "check");
     m_damping = Json2KeyWord<double>(m_defaults, "damping");
+    m_molalign = Json2KeyWord<std::string>(m_defaults, "molalignbin");
+
     std::string method = Json2KeyWord<std::string>(m_defaults, "method");
 
     if (method.compare("template") == 0)
@@ -196,6 +203,8 @@ void RMSDDriver::LoadControlJson()
         m_method = 4;
     else if (method.compare("free") == 0)
         m_method = 5;
+    else if (method.compare("molalign") == 0)
+        m_method = 6;
     else
         m_method = 1;
 
@@ -758,6 +767,9 @@ void RMSDDriver::ReorderMolecule()
         AtomTemplate();
     else if (m_method == 5)
         TemplateFree();
+    else if (m_method == 6)
+        if (!MolAlignLib())
+            TemplateFree();
 }
 
 void RMSDDriver::AtomTemplate()
@@ -1410,4 +1422,42 @@ std::vector<int> RMSDDriver::Munkress(const Molecule& reference, const Molecule&
     //     std::cout << i << " ";
     // std::cout << std::endl;
     return new_order;
+}
+
+bool RMSDDriver::MolAlignLib()
+{
+
+    m_reference.writeXYZFile("molaign_ref.xyz");
+    m_target.writeXYZFile("molalign_tar.xyz");
+    FILE* FileOpen;
+    std::string command = m_molalign + " molaign_ref.xyz " + " molalign_tar.xyz -sort -fast -tol 10 2>&1";
+    FileOpen = popen(command.c_str(), "r");
+    bool ok = false;
+    bool rndm = false;
+    char line[130];
+    while (fgets(line, sizeof line, FileOpen)) {
+        ok = std::string(line).find("RMSD") != std::string::npos;
+        rndm = std::string(line).find("random") != std::string::npos;
+    }
+
+    pclose(FileOpen);
+    if (ok) {
+        if (!m_silent) {
+            fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nPlease cite the follow research report!\nJ. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187\n\n");
+        }
+        FileIterator file("aligned.xyz", true);
+
+        m_reference = file.Next();
+        m_target_reordered = file.Next();
+        m_target_aligned = m_target_reordered;
+        m_target = m_target_reordered;
+    } else {
+        if (!rndm)
+            fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Molalign was not found. Consider getting it from\nhttps://github.com/qcuaeh/molalignlib\nEither adding the location of the binary to the path for executables or append\n-molalignbin /yourpath/molalign\nto your argument list!\n");
+    }
+    if (rndm) {
+        fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "molalign has trouble with random numbers, falling back to plain Kuhn-Munkres ...\n");
+        return false;
+    }
+    return true;
 }

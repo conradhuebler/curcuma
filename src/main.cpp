@@ -741,66 +741,34 @@ int main(int argc, char **argv) {
                 return 0;
             }
             FileIterator file(argv[2]);
-            bool print = false;
             json dMatrix = controller["dMatrix"];
-            std::string outfile;
-            try {
-                outfile = Json2KeyWord<std::string>(dMatrix, "o");
-            } catch (int i) {
-                if (i == -1) {
-                    print = true;
-                }
-            }
+            std::string outfile = argv[2];
+            for (int i = 0; i < 4; ++i)
+                outfile.pop_back();
+
+            int index = 0;
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
-                if (print) {
-                    std::cout << mol.LowerDistanceMatrix();
 
-                    auto vector = mol.LowerDistanceVector();
-                    /*
-                    index_t dim_max = 2;
-                    value_t threshold = std::numeric_limits<value_t>::max();
-                    float ratio = 1;
-                    coefficient_t modulus = 2;
-                    compressed_lower_distance_matrix dist = compressed_lower_distance_matrix(std::move(vector));
+                std::ofstream input;
+                input.open(outfile + "_" + std::to_string(index) + ".dMat", std::ios::out);
+                input << mol.LowerDistanceMatrix();
+                input.close();
 
-                    value_t enclosing_radius = std::numeric_limits<value_t>::infinity();
-                    if (threshold == std::numeric_limits<value_t>::max()) {
-                        for (size_t i = 0; i < dist.size(); ++i) {
-                            value_t r_i = -std::numeric_limits<value_t>::infinity();
-                            for (size_t j = 0; j < dist.size(); ++j)
-                                r_i = std::max(r_i, dist(i, j));
-                            enclosing_radius = std::min(enclosing_radius, r_i);
-                        }
-                    }
+                auto vector = mol.LowerDistanceVector();
 
-                    auto result = ripser<compressed_lower_distance_matrix>(std::move(dist), dim_max, enclosing_radius,
-                        ratio, modulus)
-                                      .compute_barcodes();
-
-                    for(const auto &r : result)
-                    {
-                        for(const auto &v : r.second)
-                            std::cout << v.first << " " << v.second << std::endl;
-
-                    }
-  */
-                    PersistentDiagram diagram;
-                    diagram.setDistanceMatrix(vector);
-                    auto l = diagram.generatePairs();
-
-                    for (const auto& r : l) {
-                        std::cout << r.first << " " << r.second << std::endl;
-                    }
-                    diagram.setXRange(0, 4);
-                    diagram.setYRange(0, 4);
-                    std::cout << diagram.generateImage(l);
-                } else {
-                    std::ofstream input;
-                    input.open(outfile, std::ios::out);
-                    input << mol.LowerDistanceMatrix();
-                    input.close();
+                PersistentDiagram diagram(controller["dMatrix"]);
+                diagram.setDistanceMatrix(vector);
+                auto l = diagram.generatePairs();
+                input.open(outfile + "_" + std::to_string(index) + ".pairs", std::ios::out);
+                for (const auto& r : l) {
+                    input << r.first << " " << r.second << std::endl;
                 }
+                input.close();
+                input.open(outfile + "_" + std::to_string(index) + ".ripser", std::ios::out);
+                input << diagram.generateImage(l);
+                input.close();
+                index++;
             }
         } else if (strcmp(argv[1], "-center") == 0) {
             if (argc < 3) {

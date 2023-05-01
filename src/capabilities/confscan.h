@@ -35,7 +35,12 @@
 #include "curcumamethod.h"
 
 constexpr double third = 1 / 3.0;
-
+/*
+struct dnn_input {
+    double dE, dIa, dIb, dIc, dH, rmsd;
+    Matrix dHM;
+};
+*/
 static const json ConfScanJson = {
     { "noname", true },
     { "restart", true },
@@ -50,11 +55,11 @@ static const json ConfScanJson = {
     { "preventreorder", false },
     { "scaleLoose", 1.5 },
     { "scaleTight", 0.1 },
-    { "scaleLooseEnergy", 2 },
+    { "scaleLooseEnergy", 1.2 },
     { "scaleTightEnergy", 0.1 },
-    { "scaleLooseRotational", 2 },
+    { "scaleLooseRotational", 1.2 },
     { "scaleTightRotational", 0.1 },
-    { "scaleLooseRipser", 2 },
+    { "scaleLooseRipser", 1.2 },
     { "scaleTightRipser", 0.1 },
     { "skip", 0 },
     { "allxyz", false },
@@ -69,7 +74,7 @@ static const json ConfScanJson = {
     { "method", "" },
     { "lastdE", -1 },
     { "fewerFile", false },
-    { "dothird", false },
+    { "dothird", true },
     { "skipfirst", false },
     { "ignoreRotation", false },
     { "ignoreBarCode", false },
@@ -80,7 +85,19 @@ static const json ConfScanJson = {
     { "damping", 0.8 },
     { "split", false },
     { "writefiles", false },
-    { "nomunkres", false }
+    { "nomunkres", false },
+    { "molalignbin", "molalign" },
+    { "ripser_xmax", 4 },
+    { "ripser_xmin", 0 },
+    { "ripser_ymax", 4 },
+    { "ripser_ymin", 0 },
+    { "ripser_bins", 10 },
+    { "ripser_scaling", 0.1 },
+    { "ripser_stdx", 10 },
+    { "ripser_stdy", 10 },
+    { "ripser_ratio", 1 },
+    { "ripser_dimension", 2 },
+    { "domolalign", -1 }
 };
 
 class ConfScanThread : public CxxThread {
@@ -130,6 +147,9 @@ public:
 
     double RMSD() const { return m_rmsd; }
     const Molecule* Reference() const { return &m_reference; }
+    void setPredRMSD(double rmsd) { m_pred_rmsd = rmsd; }
+    double PredRMSD() const { return m_pred_rmsd; }
+    // dnn_input getDNNInput() const { return m_input; }
 
 private:
     bool m_keep_molecule = true, m_break_pool = false, m_reorder_worked = false, m_reuse_only = false, m_reused_worked = false;
@@ -141,6 +161,8 @@ private:
     std::vector<std::vector<int>> m_reorder_rules;
     RMSDDriver* m_driver;
     json m_config;
+    double m_pred_rmsd = 0;
+    // dnn_input m_input;
 };
 
 class ConfScanThreadNoReorder : public CxxThread {
@@ -181,6 +203,7 @@ public:
     }
 
     bool KeepMolecule() const { return m_keep_molecule; }
+    // dnn_input getDNNInput() const { return m_input; }
 
 private:
     bool m_keep_molecule = true, m_break_pool = false;
@@ -191,6 +214,7 @@ private:
     json m_config;
     double m_rmsd = 0, m_rmsd_threshold = 1;
     int m_MaxHTopoDiff;
+    // dnn_input m_input;
 };
 
 class ConfScan : public CurcumaMethod {
@@ -232,6 +256,7 @@ private:
     void CheckRMSD();
 
     void ReorderCheck(bool reuse_only = false, bool limit = false);
+    void ReorderTrained();
 
     void writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd, bool reason = true, const std::vector<int>& rule = std::vector<int>(0));
 
@@ -266,7 +291,7 @@ private:
     bool m_ok;
     std::size_t m_fail = 0, m_start = 0, m_end;
     std::vector<Molecule*> m_global_temp_list;
-    int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0, m_skip = 0, m_skiped = 0, m_rejected_directly = 0;
+    int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0, m_skip = 0, m_skiped = 0, m_rejected_directly = 0, m_molalign_count = 0, m_molalign_success = 0;
 
     std::string m_filename, m_accepted_filename, m_1st_filename, m_2nd_filename, m_rejected_filename, m_result_basename, m_statistic_filename, m_prev_accepted, m_joined_filename, m_threshold_filename, m_current_filename;
     std::map<double, int> m_ordered_list;
@@ -283,10 +308,13 @@ private:
     std::vector<Molecule*> m_result, m_rejected_structures, m_stored_structures, m_previously_accepted;
     std::vector<const Molecule*> m_threshold;
     std::vector<int> m_element_templates;
+    // std::vector<dnn_input> m_dnn_data;
 
     std::string m_rmsd_element_templates;
     std::string m_method = "";
+    std::string m_molalign = "molalign";
 
+    double m_domolalign = -1;
     double m_last_diff = 0.0, m_last_ripser = 0.0, m_last_dE = -1, m_dE = -1, m_damping = 0.8;
     int m_maxmol = 0;
     int m_maxrank = 10000;

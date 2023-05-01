@@ -114,7 +114,8 @@ static const json RMSDJson = {
     { "damping", 0.8 },
     { "split", false },
     { "nomunkres", false },
-    { "dmix", -1 }
+    { "dmix", -1 },
+    { "molalignbin", "molalign" }
 };
 
 class RMSDDriver : public CurcumaMethod {
@@ -236,6 +237,8 @@ public:
 
     void setThreads(int threads) { m_threads = threads; }
 
+    bool MolAlignLib();
+
 private:
     /* Read Controller has to be implemented for all */
     void LoadControlJson() override;
@@ -316,4 +319,5 @@ private:
     int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1, m_method = 1, m_htopo_diff = -1, m_partial_rmsd = -1, m_threads = 1, m_element = 7, m_write = 0, m_topo = 0;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
     std::vector<int> m_initial, m_element_templates;
+    std::string m_molalign = "molalign";
 };
