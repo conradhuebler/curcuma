@@ -155,6 +155,8 @@ void RMSDDriver::LoadControlJson()
     m_threads = Json2KeyWord<int>(m_defaults, "threads");
     m_initial_fragment = Json2KeyWord<int>(m_defaults, "init");
     m_pt = Json2KeyWord<int>(m_defaults, "pt");
+    m_molaligntol = Json2KeyWord<int>(m_defaults, "molaligntol");
+
     m_force_reorder = Json2KeyWord<bool>(m_defaults, "reorder");
     m_protons = !Json2KeyWord<bool>(m_defaults, "heavy");
     m_silent = Json2KeyWord<bool>(m_defaults, "silent");
@@ -1430,14 +1432,17 @@ bool RMSDDriver::MolAlignLib()
     m_reference.writeXYZFile("molaign_ref.xyz");
     m_target.writeXYZFile("molalign_tar.xyz");
     FILE* FileOpen;
-    std::string command = m_molalign + " molaign_ref.xyz " + " molalign_tar.xyz -sort -fast -tol 10 2>&1";
+    std::string command = m_molalign + " molaign_ref.xyz " + " molalign_tar.xyz -sort -fast -tol " + std::to_string(m_molaligntol) + " 2>&1";
     FileOpen = popen(command.c_str(), "r");
     bool ok = false;
     bool rndm = false;
+    bool error = false;
     char line[130];
     while (fgets(line, sizeof line, FileOpen)) {
         ok = std::string(line).find("RMSD") != std::string::npos;
         rndm = std::string(line).find("random") != std::string::npos;
+        error = std::string(line).find("Error") != std::string::npos;
+        // printf("%s", line);
     }
 
     pclose(FileOpen);
@@ -1452,11 +1457,17 @@ bool RMSDDriver::MolAlignLib()
         m_target_aligned = m_target_reordered;
         m_target = m_target_reordered;
     } else {
-        if (!rndm)
+        if (!rndm && !error) {
             fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Molalign was not found. Consider getting it from\nhttps://github.com/qcuaeh/molalignlib\nEither adding the location of the binary to the path for executables or append\n-molalignbin /yourpath/molalign\nto your argument list!\n");
+            return false;
+        }
     }
     if (rndm) {
         fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "molalign has trouble with random numbers, falling back to plain Kuhn-Munkres ...\n");
+        return false;
+    }
+    if (error) {
+        fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "molalign has trouble with finding the solution, try to increase tolerance via -molaligntol XX \n");
         return false;
     }
     return true;

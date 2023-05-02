@@ -198,7 +198,7 @@ void ConfScan::LoadControlJson()
     m_RMSDmethod = Json2KeyWord<std::string>(m_defaults, "RMSDMethod");
     if (m_RMSDmethod == "molalign") {
         fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nPlease cite the follow research report!\nJ. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187\n\n");
-        m_threads = 1;
+        // m_threads = 1;
         m_domolalign = -1;
     }
     m_ignoreRotation = Json2KeyWord<bool>(m_defaults, "ignoreRotation");
@@ -209,6 +209,7 @@ void ConfScan::LoadControlJson()
 
     m_nomunkres = Json2KeyWord<bool>(m_defaults, "nomunkres");
     m_molalign = Json2KeyWord<std::string>(m_defaults, "molalignbin");
+    m_molaligntol = Json2KeyWord<int>(m_defaults, "molaligntol");
 
     //   if (Json2KeyWord<bool>(m_defaults, "skipless")) {
     m_openLoop = true;
@@ -761,6 +762,8 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
     rmsd["damping"] = m_damping;
     rmsd["nomunkres"] = m_nomunkres;
     rmsd["molalignbin"] = m_molalign;
+    rmsd["molaligntol"] = m_molaligntol;
+
     std::vector<Molecule*> cached = m_stored_structures;
     m_result = m_previously_accepted;
     m_stored_structures.clear();
@@ -846,8 +849,16 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                     threads[i]->addReorderRule(rules[j]);
             }
 
-            p->StaticPool();
-            p->StartAndWait();
+            if (m_RMSDmethod.compare("molalign") != 0 || m_threads == 1) {
+                p->StaticPool();
+                p->StartAndWait();
+            } else {
+                for (auto* t : threads) {
+                    t->execute();
+                    if (t->KeepMolecule() == false)
+                        break;
+                }
+            }
 
             for (auto* t : threads) {
                 if (!t->isEnabled()) {
@@ -1165,8 +1176,16 @@ void ConfScan::ReorderTrained()
                     threads[i]->addReorderRule(rules[j]);
             }
 
-            p->StaticPool();
-            p->StartAndWait();
+            if (m_RMSDmethod.compare("molalign") != 0 || m_threads == 1) {
+                p->StaticPool();
+                p->StartAndWait();
+            } else {
+                for (auto* t : threads) {
+                    t->execute();
+                    if (t->KeepMolecule() == false)
+                        break;
+                }
+            }
 
             for (auto* t : threads) {
                 if (!t->isEnabled()) {

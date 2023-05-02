@@ -97,7 +97,8 @@ static const json ConfScanJson = {
     { "ripser_stdy", 10 },
     { "ripser_ratio", 1 },
     { "ripser_dimension", 2 },
-    { "domolalign", -1 }
+    { "domolalign", -1 },
+    { "molaligntol", 10 }
 };
 
 class ConfScanThread : public CxxThread {
@@ -325,6 +326,8 @@ private:
     int m_MaxHTopoDiff = -1;
     int m_threads = 1;
     int m_RMSDElement = 7;
+    int m_molaligntol = 10;
+
     bool m_writeXYZ = false;
     bool m_check_connections = false;
     bool m_force_reorder = false, m_prevent_reorder = false;
