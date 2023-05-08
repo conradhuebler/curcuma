@@ -5,5 +5,7 @@
 #cmakedefine USE_D3
 #cmakedefine USE_D4
 
+#cmakedefine WriteMoreInfo
+
 #cmakedefine C17
 #cmakedefine GCC

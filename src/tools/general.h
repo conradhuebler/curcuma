@@ -288,13 +288,30 @@ inline std::string Vector2String(const std::vector<int>& vector)
 
 inline std::string DoubleVector2String(const std::vector<double>& vector)
 {
-    std::string result = " ";
+    std::string result = "";
 
     for (auto i : vector)
         result += std::to_string(i) + "|";
     result.pop_back();
 
     result += " ";
+
+    return result;
+}
+
+inline std::string Matrix2String(const Matrix& matrix)
+{
+    std::string result = "";
+
+    for (int i = 0; i < matrix.cols(); ++i) {
+        for (int j = 0; j < matrix.rows(); ++j)
+            result += std::to_string(matrix(i, j)) + "|";
+        result += "|";
+    }
+    result.pop_back();
+    result.pop_back();
+
+    result += "";
 
     return result;
 }

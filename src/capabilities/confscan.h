@@ -35,12 +35,13 @@
 #include "curcumamethod.h"
 
 constexpr double third = 1 / 3.0;
-/*
+#ifdef WriteMoreInfo
 struct dnn_input {
     double dE, dIa, dIb, dIc, dH, rmsd;
     Matrix dHM;
 };
-*/
+#endif
+
 static const json ConfScanJson = {
     { "noname", true },
     { "restart", true },
@@ -134,6 +135,9 @@ public:
     void setTarget(const Molecule* molecule)
     {
         m_target.setGeometry(molecule->getGeometry());
+        m_target.setPersisentImage(molecule->getPersisentImage());
+        m_target.CalculateRotationalConstants();
+        m_target.setEnergy(molecule->Energy());
     }
     std::vector<int> ReorderRule() const { return m_reorder_rule; }
     void setReorderRules(const std::vector<std::vector<int>>& reorder_rules)
@@ -148,22 +152,27 @@ public:
 
     double RMSD() const { return m_rmsd; }
     const Molecule* Reference() const { return &m_reference; }
+    double Energy() const { return m_energy; }
+#ifdef WriteMoreInfo
     void setPredRMSD(double rmsd) { m_pred_rmsd = rmsd; }
     double PredRMSD() const { return m_pred_rmsd; }
-    // dnn_input getDNNInput() const { return m_input; }
+    dnn_input getDNNInput() const { return m_input; }
+#endif
 
 private:
     bool m_keep_molecule = true, m_break_pool = false, m_reorder_worked = false, m_reuse_only = false, m_reused_worked = false;
     Molecule m_reference, m_target;
-    double m_rmsd = 0, m_rmsd_threshold = 1;
+    double m_rmsd = 0, m_rmsd_threshold = 1, m_energy = 0;
     int m_MaxHTopoDiff;
     int m_threads = 1;
     std::vector<int> m_reorder_rule;
     std::vector<std::vector<int>> m_reorder_rules;
     RMSDDriver* m_driver;
     json m_config;
+#ifdef WriteMoreInfo
     double m_pred_rmsd = 0;
-    // dnn_input m_input;
+    dnn_input m_input;
+#endif
 };
 
 class ConfScanThreadNoReorder : public CxxThread {
@@ -201,10 +210,16 @@ public:
         m_target.setGeometry(molecule->getGeometry());
         m_target.setPersisentImage(molecule->getPersisentImage());
         m_target.CalculateRotationalConstants();
+        m_target.setEnergy(molecule->Energy());
     }
 
     bool KeepMolecule() const { return m_keep_molecule; }
-    // dnn_input getDNNInput() const { return m_input; }
+#ifdef WriteMoreInfo
+    dnn_input getDNNInput() const
+    {
+        return m_input;
+    }
+#endif
 
 private:
     bool m_keep_molecule = true, m_break_pool = false;
@@ -215,7 +230,9 @@ private:
     json m_config;
     double m_rmsd = 0, m_rmsd_threshold = 1;
     int m_MaxHTopoDiff;
-    // dnn_input m_input;
+#ifdef WriteMoreInfo
+    dnn_input m_input;
+#endif
 };
 
 class ConfScan : public CurcumaMethod {
@@ -286,7 +303,7 @@ private:
 
     std::vector<std::vector<int>> m_reorder_rules;
 
-    void PrintStatus();
+    void PrintStatus(const std::string& info = "");
 
     std::map<std::string, std::vector<std::string>> m_filtered;
     bool m_ok;
@@ -309,7 +326,10 @@ private:
     std::vector<Molecule*> m_result, m_rejected_structures, m_stored_structures, m_previously_accepted;
     std::vector<const Molecule*> m_threshold;
     std::vector<int> m_element_templates;
-    // std::vector<dnn_input> m_dnn_data;
+
+#ifdef WriteMoreInfo
+    std::vector<dnn_input> m_dnn_data;
+#endif
 
     std::string m_rmsd_element_templates;
     std::string m_method = "";
