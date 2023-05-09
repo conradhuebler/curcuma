@@ -56,12 +56,12 @@ static const json ConfScanJson = {
     { "preventreorder", false },
     { "scaleLoose", 1.5 },
     { "scaleTight", 0.1 },
-    { "scaleLooseEnergy", 1.2 },
-    { "scaleTightEnergy", 0.1 },
-    { "scaleLooseRotational", 1.2 },
-    { "scaleTightRotational", 0.1 },
-    { "scaleLooseRipser", 1.2 },
-    { "scaleTightRipser", 0.1 },
+    { "sLE", 1.2 },
+    { "sTE", 0.1 },
+    { "sLI", 1.2 },
+    { "sTI", 0.1 },
+    { "sLH", 1.2 },
+    { "sTH", 0.1 },
     { "skip", 0 },
     { "allxyz", false },
     { "update", false },
@@ -315,13 +315,13 @@ private:
     std::map<double, int> m_ordered_list;
     std::vector<std::pair<std::string, Molecule*>> m_molecules;
     double m_rmsd_threshold = 1.0, m_nearly_missed = 0.8, m_energy_cutoff = -1, m_reference_last_energy = 0, m_target_last_energy = 0, m_lowest_energy = 1, m_current_energy = 0;
-    double m_scaleTightEnergy = 0.1, m_scaleLooseEnergy = 1.5;
-    double m_scaleTightRotational = 0.1, m_scaleLooseRotational = 1.5;
-    double m_scaleTightRipser = 0.1, m_scaleLooseRipser = 1.5;
+    double m_sTE = 0.1, m_sLE = 1.5;
+    double m_sTI = 0.1, m_sLI = 1.5;
+    double m_sTH = 0.1, m_sLH = 1.5;
 
     double m_reference_restored_energy = -1e10, m_target_restored_energy = -1e10;
-    double m_diff_rot_threshold_loose = 0.0, m_diff_ripser_threshold_loose = 0.0, m_diff_energy_threshold_loose = 0.0;
-    double m_diff_rot_threshold_tight = 0.0, m_diff_ripser_threshold_tight = 0.0, m_diff_energy_threshold_tight = 0.0;
+    double m_dLI = 0.0, m_dLH = 0.0, m_dLE = 0.0;
+    double m_dTI = 0.0, m_dTH = 0.0, m_dTE = 0.0;
 
     std::vector<Molecule*> m_result, m_rejected_structures, m_stored_structures, m_previously_accepted;
     std::vector<const Molecule*> m_threshold;
@@ -336,7 +336,7 @@ private:
     std::string m_molalign = "molalign";
 
     double m_domolalign = -1;
-    double m_last_diff = 0.0, m_last_ripser = 0.0, m_last_dE = -1, m_dE = -1, m_damping = 0.8;
+    double m_lastDI = 0.0, m_lastDH = 0.0, m_lastdE = -1, m_dE = -1, m_damping = 0.8;
     int m_maxmol = 0;
     int m_maxrank = 10000;
     int m_maxParam = -1;

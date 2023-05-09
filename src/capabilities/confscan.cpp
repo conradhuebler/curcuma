@@ -183,16 +183,16 @@ void ConfScan::LoadControlJson()
     m_prevent_reorder = Json2KeyWord<bool>(m_defaults, "preventReorder");
 
     // double scaleLoose = Json2KeyWord<double>(m_defaults, "scaleLoose");
-    m_scaleLooseEnergy = Json2KeyWord<double>(m_defaults, "scaleLooseEnergy");
-    m_scaleLooseRotational = Json2KeyWord<double>(m_defaults, "scaleLooseRotational");
-    m_scaleLooseRipser = Json2KeyWord<double>(m_defaults, "scaleLooseRipser");
+    m_sLE = Json2KeyWord<double>(m_defaults, "sLE");
+    m_sLI = Json2KeyWord<double>(m_defaults, "sLI");
+    m_sLH = Json2KeyWord<double>(m_defaults, "sLH");
 
     // double scaleTight = Json2KeyWord<double>(m_defaults, "scaleTight");
-    m_scaleTightEnergy = Json2KeyWord<double>(m_defaults, "scaleTightEnergy");
-    m_scaleTightRotational = Json2KeyWord<double>(m_defaults, "scaleTightRotational");
-    m_scaleTightRipser = Json2KeyWord<double>(m_defaults, "scaleTightRipser");
+    m_sTE = Json2KeyWord<double>(m_defaults, "sTE");
+    m_sTI = Json2KeyWord<double>(m_defaults, "sTI");
+    m_sTH = Json2KeyWord<double>(m_defaults, "sTH");
 
-    m_last_dE = Json2KeyWord<double>(m_defaults, "lastdE");
+    m_lastdE = Json2KeyWord<double>(m_defaults, "lastdE");
     m_domolalign = Json2KeyWord<double>(m_defaults, "domolalign");
 
     m_skip = Json2KeyWord<int>(m_defaults, "skip");
@@ -390,19 +390,19 @@ bool ConfScan::LoadRestartInformation()
             continue;
         }
         try {
-            m_diff_rot_threshold_loose = confscan["RotThreshLoose"];
+            m_dLI = confscan["RotThreshLoose"];
         } catch (json::type_error& e) {
         }
         try {
-            m_diff_ripser_threshold_loose = confscan["RipserThreshLoose"];
+            m_dLH = confscan["RipserThreshLoose"];
         } catch (json::type_error& e) {
         }
         try {
-            m_diff_rot_threshold_tight = confscan["RotThreshTight"];
+            m_dTI = confscan["RotThreshTight"];
         } catch (json::type_error& e) {
         }
         try {
-            m_diff_ripser_threshold_tight = confscan["RipserThreshTight"];
+            m_dTH = confscan["RipserThreshTight"];
         } catch (json::type_error& e) {
         }
         try {
@@ -417,9 +417,9 @@ bool ConfScan::LoadRestartInformation()
             m_target_restored_energy = confscan["TargetLastEnergy"];
         } catch (json::type_error& e) {
         }
-        if (m_last_dE < 0) {
+        if (m_lastdE < 0) {
             try {
-                m_last_dE = confscan["deltaE"];
+                m_lastdE = confscan["deltaE"];
             } catch (json::type_error& e) {
             }
         }
@@ -440,10 +440,12 @@ nlohmann::json ConfScan::WriteRestartInformation()
     block["ReferenceLastEnergy"] = m_reference_last_energy;
     block["TargetLastEnergy"] = m_target_last_energy;
     block["deltaE"] = m_dE;
-    block["RotThreshLoose"] = m_diff_rot_threshold_loose;
-    block["RipserThreshLoose"] = m_diff_ripser_threshold_loose;
-    block["RotThreshTight"] = m_diff_rot_threshold_tight;
-    block["RipserThreshTight"] = m_diff_ripser_threshold_tight;
+    block["dLI"] = m_dLI;
+    block["dLH"] = m_dLH;
+    block["dLE"] = m_dLE;
+    block["dTI"] = m_dTI;
+    block["dTH"] = m_dTH;
+    block["dTE"] = m_dTE;
 
     return block;
 }
@@ -522,9 +524,9 @@ void ConfScan::SetUp()
     std::cout << "    Highest energy conformer allowed: " << m_energy_cutoff << " kJ/mol " << std::endl;
     std::cout << "    Threshold multipliers are loose / tight " << std::endl;
 
-    std::cout << "    Ripser " << m_scaleLooseRipser << " " << m_scaleTightRipser << std::endl;
-    std::cout << "    Rotational Constants " << m_scaleLooseRotational << " " << m_scaleTightRotational << std::endl;
-    std::cout << "    Energy " << m_scaleLooseEnergy << " " << m_scaleTightEnergy << std::endl;
+    std::cout << "    Ripser Persitance Diagrams " << m_sLH << " " << m_sTH << std::endl;
+    std::cout << "    Rotational Constants " << m_sLI << " " << m_sTI << std::endl;
+    std::cout << "    Energy " << m_sLE << " " << m_sTE << std::endl;
 
     std::cout << "" << std::endl
               << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
@@ -598,7 +600,6 @@ void ConfScan::start()
                 result_file.close();
             }
             fmt::print("\n\n3rd Pass\nPerforming RMSD calculation with reordering, and less stricter threshold.\n\n");
-            // ReorderCheck(true, true);
             ReorderTrained();
             PrintStatus("Result 3rd pass:");
 
@@ -614,7 +615,7 @@ void ConfScan::start()
         data["xcount"] = 5;
         data["ycount"] = 1;
         data["Xcount"] = 1;
-        data["y"] = i.rmsd;
+        data["y1"] = i.rmsd;
         data["x1"] = i.dE;
         data["x2"] = i.dIa;
         data["x3"] = i.dIb;
@@ -682,13 +683,13 @@ void ConfScan::CheckRMSD()
 
         for (auto* t : threads) {
 
-            m_diff_rot_threshold_tight = std::max(m_diff_rot_threshold_tight, t->DiffRot() * (t->RMSD() <= (m_scaleTightRotational * m_rmsd_threshold)));
-            m_diff_ripser_threshold_tight = std::max(m_diff_ripser_threshold_tight, t->DiffRipser() * (t->RMSD() <= (m_scaleTightRipser * m_rmsd_threshold)));
-            m_diff_energy_threshold_tight = std::max(m_diff_energy_threshold_tight, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (m_scaleTightEnergy * m_rmsd_threshold)));
+            m_dTI = std::max(m_dTI, t->DiffRot() * (t->RMSD() <= (m_sTI * m_rmsd_threshold)));
+            m_dTH = std::max(m_dTH, t->DiffRipser() * (t->RMSD() <= (m_sTH * m_rmsd_threshold)));
+            m_dTE = std::max(m_dTE, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (m_sTE * m_rmsd_threshold)));
 
-            m_diff_rot_threshold_loose = std::max(m_diff_rot_threshold_loose, t->DiffRot() * (t->RMSD() <= (m_scaleLooseRotational * m_rmsd_threshold)));
-            m_diff_ripser_threshold_loose = std::max(m_diff_ripser_threshold_loose, t->DiffRipser() * (t->RMSD() <= (m_scaleLooseRipser * m_rmsd_threshold)));
-            m_diff_energy_threshold_loose = std::max(m_diff_energy_threshold_loose, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (m_scaleLooseEnergy * m_rmsd_threshold)));
+            m_dLI = std::max(m_dLI, t->DiffRot() * (t->RMSD() <= (m_sLI * m_rmsd_threshold)));
+            m_dLH = std::max(m_dLH, t->DiffRipser() * (t->RMSD() <= (m_sLH * m_rmsd_threshold)));
+            m_dLE = std::max(m_dLE, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (m_sLE * m_rmsd_threshold)));
 
             if (t->KeepMolecule() == false) {
                 keep_molecule = false;
@@ -748,24 +749,24 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
     m_skiped = 0;
     m_rejected_directly = 0;
     if (m_ignoreRotation == true) {
-        m_diff_rot_threshold_loose = 1e10;
-        m_diff_rot_threshold_tight = -1;
+        m_dLI = 1e10;
+        m_dTI = -1;
     }
     if (m_ignoreBarCode == true) {
-        m_diff_ripser_threshold_loose = 1e10;
-        m_diff_ripser_threshold_tight = -1;
+        m_dLH = 1e10;
+        m_dTH = -1;
     }
     std::cout << "" << std::endl
               << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
     std::cout << "    Thresholds in rotational constants (averaged over Ia, Ib and Ic): " << std::endl;
-    std::cout << "    Loose Threshold: " << m_diff_rot_threshold_loose << " MHz" << std::endl;
-    std::cout << "    Tight Threshold: " << m_diff_rot_threshold_tight << " MHz" << std::endl;
+    std::cout << "    Loose Threshold: " << m_dLI << " MHz" << std::endl;
+    std::cout << "    Tight Threshold: " << m_dTI << " MHz" << std::endl;
     std::cout << "    Thresholds in difference of ripser images: " << std::endl;
-    std::cout << "    Loose Threshold: " << m_diff_ripser_threshold_loose << " " << std::endl;
-    std::cout << "    Tight Threshold: " << m_diff_ripser_threshold_tight << " " << std::endl;
+    std::cout << "    Loose Threshold: " << m_dLH << " " << std::endl;
+    std::cout << "    Tight Threshold: " << m_dTH << " " << std::endl;
     std::cout << "    Thresholds for energy differences in kJ/mol: " << std::endl;
-    std::cout << "    Loose Threshold: " << m_diff_energy_threshold_loose << " " << std::endl;
-    std::cout << "    Tight Threshold: " << m_diff_energy_threshold_tight << " " << std::endl;
+    std::cout << "    Loose Threshold: " << m_dLE << " " << std::endl;
+    std::cout << "    Tight Threshold: " << m_dTE << " " << std::endl;
 
     std::cout << "" << std::endl
               << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
@@ -802,7 +803,6 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
             threads.push_back(thread);
             p->addThread(thread);
             m_lowest_energy = mol1->Energy();
-
             continue;
         }
         p->Reset();
@@ -822,29 +822,22 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
             double Ib = abs(mol1->Ib() - mol2->Ib());
             double Ic = abs(mol1->Ic() - mol2->Ic());
 
-            double diff_rot = (Ia + Ib + Ic) * third;
-
-            // std::cout << pred << std::endl;
-            double diff = (mol1->getPersisentImage() - mol2->getPersisentImage()).cwiseAbs().sum();
+            double dI = (Ia + Ib + Ic) * third;
+            double dH = (mol1->getPersisentImage() - mol2->getPersisentImage()).cwiseAbs().sum();
 
             /* rotational = 1
              * ripser     = 2
              * energy     = 4 */
-            // std::cout << diff_rot << " " << m_diff_rot_threshold_loose << " " << 1 * (diff_rot < m_diff_rot_threshold_loose) << " ";
-            // std::cout << diff << " " << m_diff_ripser_threshold_loose << " " << 2 * (diff < m_diff_ripser_threshold_loose) << " ";
-            // std::cout << std::abs(mol1->Energy() - mol2->Energy()) * 2625.5  << " " << m_diff_energy_threshold_loose << " " << 4 * (std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_diff_energy_threshold_loose) << std::endl;
-
-            int looseThresh = 1 * (diff_rot < m_diff_rot_threshold_loose) + 2 * (diff < m_diff_ripser_threshold_loose) + 4 * (std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_diff_energy_threshold_loose);
-            // std::cout << m_looseThresh << " " << looseThresh << " " << int(looseThresh & m_looseThresh) << std::endl;
+            int looseThresh = 1 * (dI < m_dLI) + 2 * (dH < m_dLH) + 4 * (std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_dLE);
             if ((looseThresh & m_looseThresh) == m_looseThresh) {
                 reorder = true;
                 threads[t]->setEnabled(m_openLoop);
-                int tightThresh = 1 * (diff_rot < m_diff_rot_threshold_tight) + 2 * (diff < m_diff_ripser_threshold_tight) + 4 * ((std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_diff_energy_threshold_tight));
+                int tightThresh = 1 * (dI < m_dTI) + 2 * (dH < m_dTH) + 4 * ((std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_dTE));
 
                 if ((tightThresh & m_tightThresh) == m_tightThresh) {
-                    std::cout << "Differences " << diff_rot << " MHz and " << diff << " below tight threshold, reject molecule directly!" << std::endl;
-                    m_last_diff = diff_rot;
-                    m_last_ripser = diff;
+                    std::cout << "Differences " << dI << " MHz and " << dH << " below tight threshold, reject molecule directly!" << std::endl;
+                    m_lastDI = dI;
+                    m_lastDH = dH;
                     writeStatisticFile(mol1, mol2, -1, false);
                     m_threshold.push_back(mol2);
                     m_rejected_directly++;
@@ -891,7 +884,6 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                 }
 #ifdef WriteMoreInfo
                 m_dnn_data.push_back(t->getDNNInput());
-                // std::cout << t->Energy() << std::endl;
 #endif
                 m_reordered++;
                 if (t->KeepMolecule() == false) {
@@ -988,28 +980,28 @@ void ConfScan::ReorderTrained()
     m_skiped = 0;
     m_rejected_directly = 0;
     if (m_ignoreRotation == true) {
-        m_diff_rot_threshold_loose = 1e10;
-        m_diff_rot_threshold_tight = -1;
+        m_dLI = 1e10;
+        m_dTI = -1;
     }
     if (m_ignoreBarCode == true) {
-        m_diff_ripser_threshold_loose = 1e10;
-        m_diff_ripser_threshold_tight = -1;
+        m_dLH = 1e10;
+        m_dTH = -1;
     }
-    m_diff_rot_threshold_loose *= 2;
-    m_diff_ripser_threshold_loose *= 2;
-    m_diff_energy_threshold_loose *= 2;
+    m_dLI *= 2;
+    m_dLH *= 2;
+    m_dLE *= 2;
 
     std::cout << "" << std::endl
               << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
     std::cout << "    Thresholds in rotational constants (averaged over Ia, Ib and Ic): " << std::endl;
-    std::cout << "    Loose Threshold: " << m_diff_rot_threshold_loose << " MHz" << std::endl;
-    std::cout << "    Tight Threshold: " << m_diff_rot_threshold_tight << " MHz" << std::endl;
+    std::cout << "    Loose Threshold: " << m_dLI << " MHz" << std::endl;
+    std::cout << "    Tight Threshold: " << m_dTI << " MHz" << std::endl;
     std::cout << "    Thresholds in difference of ripser images: " << std::endl;
-    std::cout << "    Loose Threshold: " << m_diff_ripser_threshold_loose << " " << std::endl;
-    std::cout << "    Tight Threshold: " << m_diff_ripser_threshold_tight << " " << std::endl;
+    std::cout << "    Loose Threshold: " << m_dLH << " " << std::endl;
+    std::cout << "    Tight Threshold: " << m_dTH << " " << std::endl;
     std::cout << "    Thresholds for energy differences in kJ/mol: " << std::endl;
-    std::cout << "    Loose Threshold: " << m_diff_energy_threshold_loose << " " << std::endl;
-    std::cout << "    Tight Threshold: " << m_diff_energy_threshold_tight << " " << std::endl;
+    std::cout << "    Loose Threshold: " << m_dLE << " " << std::endl;
+    std::cout << "    Tight Threshold: " << m_dTE << " " << std::endl;
 
     std::cout << "" << std::endl
               << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
@@ -1044,7 +1036,6 @@ void ConfScan::ReorderTrained()
             threads.push_back(thread);
             p->addThread(thread);
             m_lowest_energy = mol1->Energy();
-
             continue;
         }
         p->Reset();
@@ -1064,23 +1055,23 @@ void ConfScan::ReorderTrained()
             double Ib = abs(mol1->Ib() - mol2->Ib());
             double Ic = abs(mol1->Ic() - mol2->Ic());
 
-            double diff_rot = (Ia + Ib + Ic) * third;
+            double dI = (Ia + Ib + Ic) * third;
 
-            double diff = (mol1->getPersisentImage() - mol2->getPersisentImage()).cwiseAbs().sum();
+            double dH = (mol1->getPersisentImage() - mol2->getPersisentImage()).cwiseAbs().sum();
 
             /* rotational = 1
              * ripser     = 2
              * energy     = 4 */
-            int looseThresh = 1 * (diff_rot < m_diff_rot_threshold_loose) + 2 * (diff < m_diff_ripser_threshold_loose) + 4 * (std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_diff_energy_threshold_loose);
+            int looseThresh = 1 * (dI < m_dLI) + 2 * (dH < m_dLH) + 4 * (std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_dLE);
             if ((looseThresh & m_looseThresh) == m_looseThresh) {
                 reorder = true;
                 threads[t]->setEnabled(m_openLoop);
-                int tightThresh = 1 * (diff_rot < m_diff_rot_threshold_tight) + 2 * (diff < m_diff_ripser_threshold_tight) + 4 * ((std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_diff_energy_threshold_tight));
+                int tightThresh = 1 * (dI < m_dTI) + 2 * (dH < m_dTH) + 4 * ((std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_dTE));
 
                 if ((tightThresh & m_tightThresh) == m_tightThresh) {
-                    std::cout << "Differences " << diff_rot << " MHz and " << diff << " below tight threshold, reject molecule directly!" << std::endl;
-                    m_last_diff = diff_rot;
-                    m_last_ripser = diff;
+                    std::cout << "Differences " << dI << " MHz and " << dH << " below tight threshold, reject molecule directly!" << std::endl;
+                    m_lastDI = dI;
+                    m_lastDH = dH;
                     writeStatisticFile(mol1, mol2, -1, false);
                     m_threshold.push_back(mol2);
                     m_rejected_directly++;
@@ -1275,7 +1266,7 @@ void ConfScan::writeStatisticFile(const Molecule* mol1, const Molecule* mol2, do
     if (reason)
         result_file << "Molecule got rejected due to small rmsd " << rmsd << " with and energy difference of " << std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 << " kJ/mol." << std::endl;
     else
-        result_file << "Molecule got rejected as differences " << m_last_diff << " MHz and " << m_last_ripser << " are below the estimated thresholds;  with and energy difference of " << std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 << " kJ/mol." << std::endl;
+        result_file << "Molecule got rejected as differences " << m_lastDI << " MHz and " << m_lastDH << " are below the estimated thresholds;  with and energy difference of " << std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 << " kJ/mol." << std::endl;
     if (rule.size())
         for (auto i : rule)
             result_file << i << "|";

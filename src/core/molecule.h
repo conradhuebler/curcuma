@@ -101,6 +101,7 @@ class Molecule
 
     std::string LowerDistanceMatrix() const;
     std::vector<float> LowerDistanceVector() const;
+    std::vector<double> DeltaEN() const;
 
     bool setGeometry(const Geometry &geometry);
     bool setGeometryByFragment(const Geometry& geometry, int fragment, bool protons = true);

@@ -37,11 +37,11 @@
 #include <fmt/core.h>
 
 #include "src/core/elements.h"
-//#include "src/core/fileiterator.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
 
 #include "src/tools/formats.h"
+
 class RunTimer {
 public:
     RunTimer(bool print = false)
