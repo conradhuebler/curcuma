@@ -192,8 +192,8 @@ public:
     }
 
     virtual int execute() override;
-    double DiffRot() const { return m_diff_rotational; }
-    double DiffRipser() const { return m_diff_ripser; }
+    double DI() const { return m_DI; }
+    double DH() const { return m_DH; }
     double RMSD() const { return m_rmsd; }
     const Molecule* Reference() const { return &m_reference; }
 
@@ -223,7 +223,7 @@ public:
 
 private:
     bool m_keep_molecule = true, m_break_pool = false;
-    double m_diff_rotational = 0, m_diff_ripser = 0;
+    double m_DI = 0, m_DH = 0;
     Molecule m_reference, m_target;
 
     RMSDDriver* m_driver;

@@ -131,11 +131,11 @@ int ConfScanThreadNoReorder::execute()
     m_input.dIb = Ib;
     m_input.dIc = Ic;
 #endif
-    m_diff_rotational = (Ia + Ib + Ic) * third;
+    m_DI = (Ia + Ib + Ic) * third;
     const Matrix m = (m_reference.getPersisentImage() - m_target.getPersisentImage());
-    m_diff_ripser = m.cwiseAbs().sum();
+    m_DH = m.cwiseAbs().sum();
 #ifdef WriteMoreInfo
-    m_input.dH = m_diff_ripser;
+    m_input.dH = m_DH;
     m_input.dHM = m;
     m_input.dE = std::abs(m_reference.Energy() - m_target.Energy()) * 2625.5;
 #endif
@@ -683,12 +683,12 @@ void ConfScan::CheckRMSD()
 
         for (auto* t : threads) {
 
-            m_dTI = std::max(m_dTI, t->DiffRot() * (t->RMSD() <= (m_sTI * m_rmsd_threshold)));
-            m_dTH = std::max(m_dTH, t->DiffRipser() * (t->RMSD() <= (m_sTH * m_rmsd_threshold)));
+            m_dTI = std::max(m_dTI, t->DI() * (t->RMSD() <= (m_sTI * m_rmsd_threshold)));
+            m_dTH = std::max(m_dTH, t->DH() * (t->RMSD() <= (m_sTH * m_rmsd_threshold)));
             m_dTE = std::max(m_dTE, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (m_sTE * m_rmsd_threshold)));
 
-            m_dLI = std::max(m_dLI, t->DiffRot() * (t->RMSD() <= (m_sLI * m_rmsd_threshold)));
-            m_dLH = std::max(m_dLH, t->DiffRipser() * (t->RMSD() <= (m_sLH * m_rmsd_threshold)));
+            m_dLI = std::max(m_dLI, t->DI() * (t->RMSD() <= (m_sLI * m_rmsd_threshold)));
+            m_dLH = std::max(m_dLH, t->DH() * (t->RMSD() <= (m_sLH * m_rmsd_threshold)));
             m_dLE = std::max(m_dLE, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (m_sLE * m_rmsd_threshold)));
 
             if (t->KeepMolecule() == false) {
