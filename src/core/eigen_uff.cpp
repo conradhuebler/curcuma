@@ -83,21 +83,6 @@ double UFFThread::DotProduct(double x1, double x2, double y1, double y2, double 
     return x1 * x2 + y1 * y2 + z1 * z2;
 }
 
-double UFFThread::BondEnergy(double distance, double r, double kij, double D_ij)
-{
-
-    double energy = (0.5 * kij * (distance - r) * (distance - r)) * m_final_factor * m_bond_scaling;
-    /*
-        double alpha = sqrt(kij / (2 * D_ij));
-        double exp_ij = exp(-1 * alpha * (r - distance) - 1);
-        double energy = D_ij * (exp_ij * exp_ij);
-    */
-    if (isnan(energy))
-        return 0;
-    else
-        return energy;
-}
-
 double UFFThread::CalculateBondStretching()
 {
     double factor = 1;
@@ -115,29 +100,21 @@ double UFFThread::CalculateBondStretching()
 
         double zi = (*m_geometry)(i, 2) * m_au;
         double zj = (*m_geometry)(j, 2) * m_au;
-        double benergy = BondEnergy(Distance(xi, xj, yi, yj, zi, zj), bond.r0, bond.kij);
-        energy += benergy;
+        double r0 = sqrt((zi - zj) * (zi - zj) + (yi - yj) * (yi - yj) + (xi - xj) * (xi - xj));
+
+        energy += (0.5 * bond.kij * (r0 - bond.r0) * (r0 - bond.r0)) * m_final_factor * m_bond_scaling;
+        ; // benergy;
         if (m_CalculateGradient) {
 
-            m_gradient(i, 0) += (BondEnergy(Distance(xi + m_d, xj, yi, yj, zi, zj), bond.r0, bond.kij) - BondEnergy(Distance(xi - m_d, xj, yi, yj, zi, zj), bond.r0, bond.kij)) / (2 * m_d);
-            m_gradient(i, 1) += (BondEnergy(Distance(xi, xj, yi + m_d, yj, zi, zj), bond.r0, bond.kij) - BondEnergy(Distance(xi, xj, yi - m_d, yj, zi, zj), bond.r0, bond.kij)) / (2 * m_d);
-            m_gradient(i, 2) += (BondEnergy(Distance(xi, xj, yi, yj, zi + m_d, zj), bond.r0, bond.kij) - BondEnergy(Distance(xi, xj, yi, yj, zi - m_d, zj), bond.r0, bond.kij)) / (2 * m_d);
+            double diff = (bond.kij) * (r0 - bond.r0) / r0 * m_final_factor * m_bond_scaling;
+            m_gradient(i, 0) += diff * (xi - xj);
+            m_gradient(j, 0) -= diff * (xi - xj);
 
-            m_gradient(j, 0) += (BondEnergy(Distance(xi, xj + m_d, yi, yj, zi, zj), bond.r0, bond.kij) - BondEnergy(Distance(xi, xj - m_d, yi, yj, zi, zj), bond.r0, bond.kij)) / (2 * m_d);
-            m_gradient(j, 1) += (BondEnergy(Distance(xi, xj, yi, yj + m_d, zi, zj), bond.r0, bond.kij) - BondEnergy(Distance(xi, xj, yi, yj - m_d, zi, zj), bond.r0, bond.kij)) / (2 * m_d);
-            m_gradient(j, 2) += (BondEnergy(Distance(xi, xj, yi, yj, zi, zj + m_d), bond.r0, bond.kij) - BondEnergy(Distance(xi, xj, yi, yj, zi, zj - m_d), bond.r0, bond.kij)) / (2 * m_d);
+            m_gradient(i, 1) += diff * (yi - yj);
+            m_gradient(j, 1) -= diff * (yi - yj);
 
-            /*
-            double diff = (1.0 * kij * (xi - xj) * (sqrt((zi - zj) * (zi - zj) + (yi - yj) * (yi - yj) + (xi - xj) * (xi - xj)) - rij)) / sqrt((zi - zj) * (zi - zj) + (yi - yj) * (yi - yj) + (xi - xj) * (xi - xj));
-            m_gradient[i][0] += diff;
-            m_gradient[j][0] -= diff;
-
-            m_gradient[i][1] += diff;
-            m_gradient[j][1] -= diff;
-
-            m_gradient[i][2] += diff;
-            m_gradient[j][2] -= diff;
-            */
+            m_gradient(i, 2) += diff * (zi - zj);
+            m_gradient(j, 2) -= diff * (zi - zj);
         }
     }
 
@@ -386,17 +363,6 @@ double UFFThread::CalculateInversion()
     return energy;
 }
 
-double UFFThread::NonBonds(const Eigen::Vector3d& i, const Eigen::Vector3d& j, double Dij, double xij)
-{
-    double r = (i - j).norm() * m_au;
-    double pow6 = pow((xij / r), 6);
-    double energy = Dij * (-2 * pow6 * m_vdw_scaling + pow6 * pow6 * m_rep_scaling) * m_final_factor;
-    if (isnan(energy))
-        return 0;
-    else
-        return energy;
-}
-
 double UFFThread::CalculateNonBonds()
 {
     double energy = 0.0;
@@ -409,16 +375,19 @@ double UFFThread::CalculateNonBonds()
         const int j = vdw.j;
         Eigen::Vector3d atom_i = Position(i);
         Eigen::Vector3d atom_j = Position(j);
-        energy += NonBonds(atom_i, atom_j, vdw.Dij, vdw.xij);
+        double r = (atom_i - atom_j).norm() * m_au;
+        double pow6 = pow((vdw.xij / r), 6);
+
+        energy += vdw.Dij * (-2 * pow6 * m_vdw_scaling + pow6 * pow6 * m_rep_scaling) * m_final_factor;
         if (m_CalculateGradient) {
+            double diff = 12 * vdw.Dij * (pow6 * m_vdw_scaling - pow6 * pow6 * m_rep_scaling) / (r * r) * m_final_factor;
+            m_gradient(i, 0) += diff * (atom_i(0) - atom_j(0));
+            m_gradient(i, 1) += diff * (atom_i(1) - atom_j(1));
+            m_gradient(i, 2) += diff * (atom_i(2) - atom_j(2));
 
-            m_gradient(i, 0) += (NonBonds(AddVector(atom_i, dx), atom_j, vdw.Dij, vdw.xij) - NonBonds(SubVector(atom_i, dx), atom_j, vdw.Dij, vdw.xij)) / (2 * m_d);
-            m_gradient(i, 1) += (NonBonds(AddVector(atom_i, dy), atom_j, vdw.Dij, vdw.xij) - NonBonds(SubVector(atom_i, dy), atom_j, vdw.Dij, vdw.xij)) / (2 * m_d);
-            m_gradient(i, 2) += (NonBonds(AddVector(atom_i, dz), atom_j, vdw.Dij, vdw.xij) - NonBonds(SubVector(atom_i, dz), atom_j, vdw.Dij, vdw.xij)) / (2 * m_d);
-
-            m_gradient(j, 0) += (NonBonds(atom_i, AddVector(atom_j, dx), vdw.Dij, vdw.xij) - NonBonds(atom_i, SubVector(atom_j, dx), vdw.Dij, vdw.xij)) / (2 * m_d);
-            m_gradient(j, 1) += (NonBonds(atom_i, AddVector(atom_j, dy), vdw.Dij, vdw.xij) - NonBonds(atom_i, SubVector(atom_j, dy), vdw.Dij, vdw.xij)) / (2 * m_d);
-            m_gradient(j, 2) += (NonBonds(atom_i, AddVector(atom_j, dz), vdw.Dij, vdw.xij) - NonBonds(atom_i, SubVector(atom_j, dz), vdw.Dij, vdw.xij)) / (2 * m_d);
+            m_gradient(j, 0) -= diff * (atom_i(0) - atom_j(0));
+            m_gradient(j, 1) -= diff * (atom_i(1) - atom_j(1));
+            m_gradient(j, 2) -= diff * (atom_i(2) - atom_j(2));
         }
     }
     return energy;

@@ -153,14 +153,11 @@ private:
     double Inversion(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, const Eigen::Vector3d& l, double k_ijkl, double C0, double C1, double C2);
     double CalculateInversion();
 
-    double NonBonds(const Eigen::Vector3d& i, const Eigen::Vector3d& j, double Dij, double xij);
     double CalculateNonBonds();
     double CalculateElectrostatic();
 
     double Distance(double x1, double x2, double y1, double y2, double z1, double z2) const;
     double DotProduct(double x1, double x2, double y1, double y2, double z1, double z2) const;
-
-    double BondEnergy(double distance, double r, double k_ij, double D_ij = 70);
 
     inline Eigen::Vector3d Position(int pos) const { return m_geometry->row(pos); }
     std::vector<int> m_atom_types, m_uff_atom_types, m_coordination;
