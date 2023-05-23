@@ -486,6 +486,95 @@ static const std::vector<double> CovalentRadius = {
     1.46 // At - taken from Bi
 };
 
+static const std::vector<double> PaulingEN = {
+    -1, // leading index
+    2.2, // H
+    0, // He
+    0.98, // Li
+    1.57, // Be
+    2.04, // B
+    2.55, // C
+    3.04, // N
+    3.44, // O
+    3.98, // F
+    0, // Ne
+    0.93, // Na
+    1.31, // Mg
+    1.61, // Al
+    1.9, // S
+    2.19, // P
+    2.58, // S
+    3.16, // Cl
+    0, // Ar
+    0.82, // K
+    1.0, // Ca
+    1.36, // Sc
+    1.54, // Ti
+    1.63, // V
+    1.66, // Cr
+    1.55, // Mn
+    1.83, // Fe
+    1.88, // Co
+    1.91, // Ni
+    1.9, // Cu
+    1.65, // Zn
+    1.81, // Ga
+    2.01, // Ge
+    2.18, // As
+    2.55, // Se
+    2.96, // Br
+    0, // Kr
+    0.82, // Rb
+    0.95, // Sr
+    1.22, // Y
+    1.33, // Zr
+    1.6, // Nb
+    2.16, // Mo
+    1.9, // Tc
+    2.2, // Ru
+    2.28, // Rh
+    2.20, // Pd
+    1.93, // Ag
+    1.69, // Cd
+    1.78, // In
+    1.96, // Sn
+    2.05, // Sb
+    2.1, // Te
+    2.66, // I
+    0, // Xe
+    0.79, // Cs
+    0.89, // Ba
+    1.1, // La
+    1.12, // Ce - taken from La
+    1.13, // Pr - taken from La
+    1.14, // Nd - taken from La
+    1.13, // Pm - taken from La
+    1.17, // Sm - taken from La
+    1.2, // Eu - taken from La
+    1.2, // Gd - taken from La
+    1.2, // Tb - taken from La
+    1.22, // Dy - taken from La
+    1.23, // Ho - taken from La
+    1.24, // Er - taken from La
+    1.25, // Tm - taken from La
+    1.1, // Yb - taken from La
+    1.27, // Lu
+    1.3, // Hf
+    1.5, // Ta
+    2.36, // W
+    1.9, // Re
+    2.2, // Os
+    2.2, // Ir
+    2.28, // Pt
+    2.54, // Au
+    2, // Hg
+    2.04, // Tl
+    2.33, // Pb
+    2.02, // Bi
+    2.0, // Po - taken from Bi
+    2.2 // At - taken from Bi
+};
+
 // The old ones
 /* for now, taken from here
  * https://de.wikipedia.org/wiki/Van-der-Waals-Radius */

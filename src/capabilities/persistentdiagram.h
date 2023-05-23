@@ -26,9 +26,17 @@
 
 #include <Eigen/Dense>
 
+struct triple {
+    double start = 0;
+    double end = 0;
+    double scaling = 1;
+};
+
 typedef std::pair<double, double> dpair;
 
 typedef std::vector<dpair> dpairs;
+typedef std::vector<triple> triples;
+
 using json = nlohmann::json;
 
 static const json RipserJson = {
@@ -41,16 +49,22 @@ static const json RipserJson = {
     { "ripser_stdx", 10 },
     { "ripser_stdy", 10 },
     { "ripser_ratio", 1 },
-    { "ripser_dimension", 2 }
+    { "ripser_dimension", 2 },
+    { "ripser_epsilon", 0.4 }
 };
 
 class PersistentDiagram {
 public:
-    PersistentDiagram(const json config = RipserJson);
+    PersistentDiagram(const json& config = RipserJson);
 
     inline void setDistanceMatrix(const std::vector<float>& vector)
     {
         m_compressed_lower_distance_matrix = vector;
+    }
+
+    inline void setENScaling(const std::vector<double>& en_scaling)
+    {
+        m_en_scaling = en_scaling;
     }
 
     inline void setDimension(int dim)
@@ -69,6 +83,7 @@ public:
     }
 
     dpairs generatePairs();
+    triples generateTriples();
 
     inline void setXRange(double xmin, double xmax)
     {
@@ -83,6 +98,7 @@ public:
     }
 
     Eigen::MatrixXd generateImage(const dpairs& pairs);
+    Eigen::MatrixXd generateImage(const triples& pairs);
 
     void setScaling(double scaling) { m_scaling = scaling; }
     void setBins(int bins) { m_bins = bins; }
@@ -98,5 +114,7 @@ private:
     double m_scaling = 0.1;
     double m_std_x = 10;
     double m_std_y = 10;
+    double m_epsilon = 0.4;
     std::vector<float> m_compressed_lower_distance_matrix;
+    std::vector<double> m_en_scaling;
 };

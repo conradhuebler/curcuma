@@ -2,6 +2,7 @@
 
 ### pre Alpha
 
+- molalign can be used for reordering
 - add forked LBFGSpp for single steps in geometry optimisation
 - add tblite and forked xtb for better control of xTB calculation
 - extended centroids for docking

@@ -769,6 +769,17 @@ std::vector<float> Molecule::LowerDistanceVector() const
     return vector;
 }
 
+std::vector<double> Molecule::DeltaEN() const
+{
+    std::vector<double> vector;
+    for (int i = 0; i < AtomCount(); ++i) {
+        for (int j = 0; j < i; ++j) {
+            vector.push_back(std::abs(Elements::PaulingEN[m_atoms[i]] - Elements::PaulingEN[m_atoms[j]]));
+        }
+    }
+    return vector;
+}
+
 Position Molecule::Centroid(bool protons, int fragment) const
 {
     return GeometryTools::Centroid(getGeometryByFragment(fragment, protons));

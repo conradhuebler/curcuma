@@ -742,6 +742,8 @@ int main(int argc, char **argv) {
             }
             FileIterator file(argv[2]);
             json dMatrix = controller["dMatrix"];
+            fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nPlease cite the follow research report!\nTownsend, J., Micucci, C.P., Hymel, J.H. et al. Representation of molecular structures with persistent homology for machine learning applications in chemistry. Nat Commun 11, 3230 (2020). https://doi.org/10.1038/s41467-020-17035-5\n\n");
+
             std::string outfile = argv[2];
             for (int i = 0; i < 4; ++i)
                 outfile.pop_back();
@@ -759,15 +761,27 @@ int main(int argc, char **argv) {
 
                 PersistentDiagram diagram(controller["dMatrix"]);
                 diagram.setDistanceMatrix(vector);
-                auto l = diagram.generatePairs();
-                input.open(outfile + "_" + std::to_string(index) + ".pairs", std::ios::out);
-                for (const auto& r : l) {
-                    input << r.first << " " << r.second << std::endl;
+                diagram.setENScaling(mol.DeltaEN());
+                {
+                    auto l = diagram.generatePairs();
+                    input.open(outfile + "_" + std::to_string(index) + ".pairs", std::ios::out);
+                    for (const auto& r : l) {
+                        input << r.first << " " << r.second << std::endl;
+                    }
+                    input.close();
+                    std::cout << "Writing Persitance diagram as " + outfile + "_" + std::to_string(index) + ".PD" << std::endl;
+                    input.open(outfile + "_" + std::to_string(index) + ".PD", std::ios::out);
+                    input << diagram.generateImage(l);
+                    input.close();
                 }
-                input.close();
-                input.open(outfile + "_" + std::to_string(index) + ".ripser", std::ios::out);
-                input << diagram.generateImage(l);
-                input.close();
+                diagram.setDistanceMatrix(vector);
+                {
+                    std::cout << "Writing Persitance Image (EN scaled bond topology) as " + outfile + "_" + std::to_string(index) + ".PI" << std::endl;
+                    auto l = diagram.generateTriples();
+                    input.open(outfile + "_" + std::to_string(index) + ".PI", std::ios::out);
+                    input << diagram.generateImage(l);
+                    input.close();
+                }
                 index++;
             }
         } else if (strcmp(argv[1], "-center") == 0) {

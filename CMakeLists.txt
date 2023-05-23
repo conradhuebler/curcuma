@@ -19,6 +19,9 @@ option (C17
 option (Helper
     "Helper apps for interfaces" OFF)
 
+option (WriteMoreInfo
+    "Write statistic files with more info" OFF)
+
 add_subdirectory(${PROJECT_SOURCE_DIR}/external/fmt EXCLUDE_FROM_ALL)
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 

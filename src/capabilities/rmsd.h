@@ -115,7 +115,8 @@ static const json RMSDJson = {
     { "split", false },
     { "nomunkres", false },
     { "dmix", -1 },
-    { "molalignbin", "molalign" }
+    { "molalignbin", "molalign" },
+    { "molaligntol", 10 }
 };
 
 class RMSDDriver : public CurcumaMethod {
@@ -317,6 +318,7 @@ private:
     bool m_check_connections = false, m_postprocess = true, m_noreorder = false, m_swap = false, m_dynamic_center = false;
     bool m_update_rotation = false, m_split = false, m_nomunkres = false;
     int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1, m_method = 1, m_htopo_diff = -1, m_partial_rmsd = -1, m_threads = 1, m_element = 7, m_write = 0, m_topo = 0;
+    int m_molaligntol = 10;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
     std::vector<int> m_initial, m_element_templates;
     std::string m_molalign = "molalign";

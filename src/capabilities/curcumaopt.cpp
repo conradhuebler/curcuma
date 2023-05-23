@@ -259,6 +259,9 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
     LBFGSParam<double> param;
     param.epsilon = LBFGS_eps;
     param.m = StoreIntermediate;
+    // param.max_linesearch = 10000;
+    // param.ftol = 1e-10;
+    // param.max_step = 10;
     /*
         param.linesearch = 3;
         param.ftol = 1e-6;
