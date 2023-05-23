@@ -40,7 +40,7 @@ static json CurcumaMDJson{
     { "dt", 1 },
     { "charge", 0 },
     { "Spin", 0 },
-    { "centered", false },
+    { "centered", 0 },
     { "dump", 50 },
     { "print", 1000 },
     { "unique", false },

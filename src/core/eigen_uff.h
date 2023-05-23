@@ -143,7 +143,6 @@ private:
     }
     double CalculateBondStretching();
 
-    double AngleBend(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, double kijk, double C0, double C1, double C2);
     double CalculateAngleBending();
 
     double Dihedral(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, const Eigen::Vector3d& l, double V, double n, double phi0);
@@ -198,6 +197,7 @@ private:
     bool m_use_d4 = false;
     bool m_verbose = false;
     bool m_rings = false;
+    bool m_numtorsion = false;
     double m_bond_scaling = 1, m_angle_scaling = 1, m_dihedral_scaling = 1, m_inversion_scaling = 1, m_vdw_scaling = 1, m_rep_scaling = 1, m_coulmob_scaling = 1;
     int m_thread = 0, m_threads = 0;
 };
@@ -370,6 +370,7 @@ private:
     bool m_verbose = false;
     bool m_rings = false;
     double m_bond_scaling = 1, m_angle_scaling = 1, m_dihedral_scaling = 1, m_inversion_scaling = 1, m_vdw_scaling = 1, m_rep_scaling = 1, m_coulmob_scaling = 1;
+    bool m_numtorsion = false;
 
     int m_threads = 1;
     hbonds4::H4Correction m_h4correction;

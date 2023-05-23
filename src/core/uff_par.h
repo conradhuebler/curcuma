@@ -373,5 +373,6 @@ const json UFFParameterJson{
     { "writeuff", "none" },
     { "verbose", false },
     { "rings", false },
-    { "threads", 1 }
+    { "threads", 1 },
+    { "numtorsion", false }
 };

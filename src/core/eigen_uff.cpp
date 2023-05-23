@@ -71,6 +71,7 @@ void UFFThread::readUFF(const json& parameter)
 
     m_bond_force = parameter["bond_force"].get<double>();
     m_angle_force = parameter["angle_force"].get<double>();
+    m_numtorsion = parameter["numtorsion"].get<bool>();
 }
 
 double UFFThread::Distance(double x1, double x2, double y1, double y2, double z1, double z2) const
@@ -103,7 +104,6 @@ double UFFThread::CalculateBondStretching()
         double r0 = sqrt((zi - zj) * (zi - zj) + (yi - yj) * (yi - yj) + (xi - xj) * (xi - xj));
 
         energy += (0.5 * bond.kij * (r0 - bond.r0) * (r0 - bond.r0)) * m_final_factor * m_bond_scaling;
-        ; // benergy;
         if (m_CalculateGradient) {
 
             double diff = (bond.kij) * (r0 - bond.r0) / r0 * m_final_factor * m_bond_scaling;
@@ -119,18 +119,6 @@ double UFFThread::CalculateBondStretching()
     }
 
     return energy;
-}
-double UFFThread::AngleBend(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, double kijk, double C0, double C1, double C2)
-{
-    Eigen::Vector3d vec_1 = j - i;
-    Eigen::Vector3d vec_2 = j - k;
-
-    double costheta = (vec_1.dot(vec_2) / (sqrt(vec_1.dot(vec_1) * vec_2.dot(vec_2))));
-    double energy = (kijk * (C0 + C1 * costheta + C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling;
-    if (isnan(energy))
-        return 0;
-    else
-        return energy;
 }
 
 double UFFThread::CalculateAngleBending()
@@ -149,20 +137,31 @@ double UFFThread::CalculateAngleBending()
         auto atom_j = Position(j);
         auto atom_k = Position(k);
 
-        double e = AngleBend(atom_i, atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2);
-        energy += e;
+        Eigen::Vector3d vec_ij = atom_i - atom_j;
+        auto norm_ij = vec_ij / vec_ij.norm();
+        Eigen::Vector3d vec_kj = atom_k - atom_j;
+        auto norm_kj = vec_kj / vec_kj.norm();
+        double costheta = (vec_ij.dot(vec_kj) / (sqrt(vec_ij.dot(vec_ij) * vec_kj.dot(vec_kj))));
+        double e = (angle.kijk * (angle.C0 + angle.C1 * costheta + angle.C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling;
         if (m_CalculateGradient) {
-            m_gradient(i, 0) += (AngleBend(AddVector(atom_i, dx), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(SubVector(atom_i, dx), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
-            m_gradient(i, 1) += (AngleBend(AddVector(atom_i, dy), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(SubVector(atom_i, dy), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
-            m_gradient(i, 2) += (AngleBend(AddVector(atom_i, dz), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(SubVector(atom_i, dz), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
+            double sintheta = sin(acos(costheta));
+            double dEdtheta = -angle.kijk * sintheta * (angle.C1 + 4 * angle.C2 * costheta) * m_final_factor * m_angle_scaling;
+            double dThetadCosTheta = 1 / sintheta;
 
-            m_gradient(j, 0) += (AngleBend(atom_i, AddVector(atom_j, dx), atom_k, angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(atom_i, SubVector(atom_j, dx), atom_k, angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
-            m_gradient(j, 1) += (AngleBend(atom_i, AddVector(atom_j, dy), atom_k, angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(atom_i, SubVector(atom_j, dy), atom_k, angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
-            m_gradient(j, 2) += (AngleBend(atom_i, AddVector(atom_j, dz), atom_k, angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(atom_i, SubVector(atom_j, dz), atom_k, angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
+            auto dEdi = -dEdtheta * dThetadCosTheta * (norm_kj - norm_ij * costheta) / (vec_ij.norm());
+            auto dEdk = -dEdtheta * dThetadCosTheta * (norm_ij - norm_kj * costheta) / (vec_kj.norm());
 
-            m_gradient(k, 0) += (AngleBend(atom_i, atom_j, AddVector(atom_k, dx), angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(atom_i, atom_j, SubVector(atom_k, dx), angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
-            m_gradient(k, 1) += (AngleBend(atom_i, atom_j, AddVector(atom_k, dy), angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(atom_i, atom_j, SubVector(atom_k, dy), angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
-            m_gradient(k, 2) += (AngleBend(atom_i, atom_j, AddVector(atom_k, dz), angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(atom_i, atom_j, SubVector(atom_k, dz), angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
+            m_gradient(i, 0) += dEdi(0);
+            m_gradient(i, 1) += dEdi(1);
+            m_gradient(i, 2) += dEdi(2);
+
+            m_gradient(k, 0) += dEdk(0);
+            m_gradient(k, 1) += dEdk(1);
+            m_gradient(k, 2) += dEdk(2);
+
+            m_gradient(j, 0) += -dEdi(0) - dEdk(0);
+            m_gradient(j, 1) += -dEdi(1) - dEdk(1);
+            m_gradient(j, 2) += -dEdi(2) - dEdk(2);
         }
     }
     return energy;
@@ -175,7 +174,10 @@ double UFFThread::Dihedral(const Eigen::Vector3d& i, const Eigen::Vector3d& j, c
     double n_abc = (nabc).norm();
     double n_bcd = (nbcd).norm();
     double dotpr = nabc.dot(nbcd);
-    double phi = acos(dotpr / (n_abc * n_bcd)); //* 360 / 2.0 / pi;
+    Eigen::Vector3d rji = j - i;
+
+    double sign = (-1 * rji).dot(nbcd) < 0 ? -1 : 1;
+    double phi = pi + sign * acos(dotpr / (n_abc * n_bcd)); //* 360 / 2.0 / pi;
     // double f = pi / 180.0;
     // std::cout << n_abc << " " << n_bcd << " " << dotpr << " " << n << std::endl;
     // std::cout << phi* 360 / 2.0 / pi<< " " << phi << " " << phi0* 360 / 2.0 / pi << std::endl;
@@ -203,100 +205,167 @@ double UFFThread::CalculateDihedral()
         Eigen::Vector3d atom_j = Position(j);
         Eigen::Vector3d atom_k = Position(k);
         Eigen::Vector3d atom_l = Position(l);
+        Eigen::Vector3d eins = { 1.0, 1.0, 1.0 };
+        Eigen::Vector3d nabc = NormalVector(atom_i, atom_j, atom_k);
+        Eigen::Vector3d nbcd = NormalVector(atom_j, atom_k, atom_l);
+
+        double n_abc = (nabc).norm();
+        double n_bcd = (nbcd).norm();
+        double dotpr = nabc.dot(nbcd);
+        Eigen::Vector3d m = nabc;
+        Eigen::Vector3d n = nbcd;
+        Eigen::Vector3d rji = atom_j - atom_i;
+
+        double sign = (-1 * rji).dot(n) < 0 ? -1 : 1;
+        double phi = pi + sign * acos(dotpr / (n_abc * n_bcd));
+        double sinphi = sin(phi);
         double e = Dihedral(atom_i, atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0);
         energy += e;
         if (m_CalculateGradient) {
             e *= 1000;
             //   std::cout << "gradient" << std::endl;
-            /*
-            m_gradient(i, 0) += (Dihedral(AddVector(atom_i, dx), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dx), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            m_gradient(i, 1) += (Dihedral(AddVector(atom_i, dy), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dy), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            m_gradient(i, 2) += (Dihedral(AddVector(atom_i, dz), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dz), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+            if (m_numtorsion == false) {
+                Eigen::Vector3d rkj = atom_k - atom_j;
+                Eigen::Vector3d rkl = atom_k - atom_l;
+                double tmp = 0;
+                double dEdphi = (1 / 2.0 * dihedral.V * dihedral.n * (cos(dihedral.n * dihedral.phi0) * sin(dihedral.n * phi))) * m_final_factor * m_dihedral_scaling;
 
-            m_gradient(j, 0) += (Dihedral(atom_i, AddVector(atom_j, dx), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, SubVector(atom_j, dx), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            m_gradient(j, 1) += (Dihedral(atom_i, AddVector(atom_j, dy), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, SubVector(atom_j, dy), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            m_gradient(j, 2) += (Dihedral(atom_i, AddVector(atom_j, dz), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, SubVector(atom_j, dz), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+                // std::cout << m << " " << n << std::endl;
+                Eigen::Vector3d dEdi = dEdphi * rkj.norm() / (nabc.norm() * nabc.norm()) * nabc;
+                //   Eigen::Vector3d dEdi = -1*dEdphi * rkj.norm()*m/(m.norm()*m.norm());
+                //            auto dEdi = dEdphi * (rji/rji.norm()).cross(rkj/(rkj.norm()))/(sinphi*sinphi*rji.norm());
+                //            auto dEdi = dEdphi * (atom_k - atom_j).norm()/(nabc.norm()*nabc.norm())*nabc;
+                /*   std::cout <<    (Dihedral(AddVector(atom_i, dx), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dx), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d) /dEdi(0)
+                          << " "
+                          << dEdi(0)
+                          << " "
+                          << (Dihedral(AddVector(atom_i, dx), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dx), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d)
+                          << std::endl;
+    */
 
-            m_gradient(k, 0) += (Dihedral(atom_i, atom_j, AddVector(atom_k, dx), atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, SubVector(atom_k, dx), atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            m_gradient(k, 1) += (Dihedral(atom_i, atom_j, AddVector(atom_k, dy), atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, SubVector(atom_k, dy), atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            m_gradient(k, 2) += (Dihedral(atom_i, atom_j, AddVector(atom_k, dz), atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, SubVector(atom_k, dz), atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+                Eigen::Vector3d dEdl = -1 * dEdphi * rkj.norm() / (nbcd.norm() * nbcd.norm()) * nbcd;
+                //  Eigen::Vector3d dEdl = dEdphi * rkj.norm()*n/(n.norm()*n.norm());
+                // auto dEdl = dEdphi * (-1*rkj/rkj.norm()).cross(rkl/(rkl.norm()))/(sinphi*sinphi*rkl.norm());
+                /*
+                    std::cout <<    (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dx), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dx), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d) /dEdl(0)
+                              << " "
+                              << dEdl(0)
+                              << " "
+                              <<   (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dx), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dx), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d)
+                              << std::endl;
+                */
 
-            m_gradient(l, 0) += (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dx), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dx), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            m_gradient(l, 1) += (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dy), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dy), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            m_gradient(l, 2) += (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dz), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dz), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            */
+                // Eigen::Vector3d dEdj = -1 * dEdphi * (-1 * (rji.dot(rkj) / (rkj.norm() * rkj.norm()) - 1) * (rkj.norm() / nabc.norm()) * nabc - rkj.dot(rkl) / (rkj.norm() * rkj.norm()) * nbcd / (nbcd.norm() * nbcd.norm()));
+                Eigen::Vector3d dEdj = -1 * dEdi + ((-1 * rji).dot(rkj) / (rkj.norm() * rkj.norm()) * dEdi) - (rkl.dot(rkj) / (rkj.norm() * rkj.norm()) * dEdl);
+                //           Eigen::Vector3d dEdj = dEdi*-1*rji.norm()/(rkj.norm() * -1*cos(phi)) + dEdl*rkl.norm()/(rkj.norm() * -1*cos(phi));
+                /*  std::cout <<    (Dihedral(atom_i, AddVector(atom_j, dx), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, SubVector(atom_j, dx), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d) /dEdj(0)
+                            << " "
+                            << dEdj(0)
+                            << " "
+                            <<   (Dihedral(atom_i, AddVector(atom_j, dx), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, SubVector(atom_j, dx), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d)
+                            << std::endl;
+      */
 
-            double tmp = (Dihedral(AddVector(atom_i, dx), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dx), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            if (std::abs(tmp) > std::abs(e))
-                m_gradient(i, 0) += 0;
-            else
-                m_gradient(i, 0) += tmp;
+                // Eigen::Vector3d dEdk = -1 * dEdphi * ((rkj.dot(rkl) / (rkj.norm() * rkj.norm()) - 1) * (rkj.norm() / nbcd.norm()) * nbcd - rji.dot(rkj) / (rkj.norm() * rkj.norm()) * nabc / (nabc.norm() * nabc.norm()));
+                Eigen::Vector3d dEdk = -1 * (dEdi + dEdj + dEdl);
+                //  Eigen::Vector3d dEdk = -1*dEdl - ((-1*rji).dot(rkj)/(rkj.norm()*rkj.norm())*dEdi) + (rkl.dot(rkj)/(rkj.norm()*rkj.norm())*dEdl);
 
-            tmp = (Dihedral(AddVector(atom_i, dy), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dy), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            if (std::abs(tmp) > std::abs(e))
-                m_gradient(i, 1) += 0;
-            else
-                m_gradient(i, 1) += tmp;
+                /*  std::cout << (Dihedral(atom_i, atom_j, AddVector(atom_k, dx), atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, SubVector(atom_k, dx), atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d) /dEdk(0)
+                            << " "
+                            << dEdk(0)
+                            << " "
+                            << (Dihedral(atom_i, atom_j, AddVector(atom_k, dx), atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, SubVector(atom_k, dx), atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d)
+                            << std::endl;*/
+                m_gradient(i, 0) += dEdi(0);
+                m_gradient(i, 1) += dEdi(1);
+                m_gradient(i, 2) += dEdi(2);
 
-            tmp = (Dihedral(AddVector(atom_i, dz), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dz), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            if (std::abs(tmp) > std::abs(e))
-                m_gradient(i, 2) += 0;
-            else
-                m_gradient(i, 2) += tmp;
+                m_gradient(l, 0) += dEdl(0);
+                m_gradient(l, 1) += dEdl(1);
+                m_gradient(l, 2) += dEdl(2);
 
-            tmp = (Dihedral(atom_i, AddVector(atom_j, dx), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, SubVector(atom_j, dx), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            if (std::abs(tmp) > std::abs(e))
-                m_gradient(j, 0) += 0;
-            else
-                m_gradient(j, 0) += tmp;
+                m_gradient(j, 0) += dEdj(0);
+                m_gradient(j, 1) += dEdj(1);
+                m_gradient(j, 2) += dEdj(2);
 
-            tmp = (Dihedral(atom_i, AddVector(atom_j, dy), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, SubVector(atom_j, dy), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            if (std::abs(tmp) > std::abs(e))
-                m_gradient(j, 1) += 0;
-            else
-                m_gradient(j, 1) += tmp;
+                m_gradient(k, 0) += dEdk(0);
+                m_gradient(k, 1) += dEdk(1);
+                m_gradient(k, 2) += dEdk(2);
+            } else {
+                double tmp = 0.0;
 
-            tmp = (Dihedral(atom_i, AddVector(atom_j, dz), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, SubVector(atom_j, dz), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            if (std::abs(tmp) > std::abs(e))
-                m_gradient(j, 2) += 0;
-            else
-                m_gradient(j, 2) += tmp;
+                tmp = (Dihedral(AddVector(atom_i, dx), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dx), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+                if (std::abs(tmp) > std::abs(e))
+                    m_gradient(i, 0) += 0;
+                else
+                    m_gradient(i, 0) += tmp;
 
-            tmp = (Dihedral(atom_i, atom_j, AddVector(atom_k, dx), atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, SubVector(atom_k, dx), atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            if (std::abs(tmp) > std::abs(e))
-                m_gradient(k, 0) += 0;
-            else
-                m_gradient(k, 0) += tmp;
+                tmp = (Dihedral(AddVector(atom_i, dy), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dy), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+                if (std::abs(tmp) > std::abs(e))
+                    m_gradient(i, 1) += 0;
+                else
+                    m_gradient(i, 1) += tmp;
 
-            tmp = (Dihedral(atom_i, atom_j, AddVector(atom_k, dy), atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, SubVector(atom_k, dy), atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            if (std::abs(tmp) > std::abs(e))
-                m_gradient(k, 1) += 0;
-            else
-                m_gradient(k, 1) += tmp;
+                tmp = (Dihedral(AddVector(atom_i, dz), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(SubVector(atom_i, dz), atom_j, atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+                if (std::abs(tmp) > std::abs(e))
+                    m_gradient(i, 2) += 0;
+                else
+                    m_gradient(i, 2) += tmp;
 
-            tmp = (Dihedral(atom_i, atom_j, AddVector(atom_k, dz), atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, SubVector(atom_k, dz), atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            if (std::abs(tmp) > std::abs(e))
-                m_gradient(k, 2) += 0;
-            else
-                m_gradient(k, 2) += tmp;
+                tmp = (Dihedral(atom_i, AddVector(atom_j, dx), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, SubVector(atom_j, dx), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+                if (std::abs(tmp) > std::abs(e))
+                    m_gradient(j, 0) += 0;
+                else
+                    m_gradient(j, 0) += tmp;
 
-            tmp = (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dx), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dx), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            if (std::abs(tmp) > std::abs(e))
-                m_gradient(l, 0) += 0;
-            else
-                m_gradient(l, 0) += tmp;
+                tmp = (Dihedral(atom_i, AddVector(atom_j, dy), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, SubVector(atom_j, dy), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+                if (std::abs(tmp) > std::abs(e))
+                    m_gradient(j, 1) += 0;
+                else
+                    m_gradient(j, 1) += tmp;
 
-            tmp = (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dy), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dy), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            if (std::abs(tmp) > std::abs(e))
-                m_gradient(l, 1) += 0;
-            else
-                m_gradient(l, 1) += tmp;
+                tmp = (Dihedral(atom_i, AddVector(atom_j, dz), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, SubVector(atom_j, dz), atom_k, atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+                if (std::abs(tmp) > std::abs(e))
+                    m_gradient(j, 2) += 0;
+                else
+                    m_gradient(j, 2) += tmp;
 
-            tmp = (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dz), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dz), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
-            if (std::abs(tmp) > std::abs(e))
-                m_gradient(l, 2) += 0;
-            else
-                m_gradient(l, 2) += tmp;
+                tmp = (Dihedral(atom_i, atom_j, AddVector(atom_k, dx), atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, SubVector(atom_k, dx), atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+                if (std::abs(tmp) > std::abs(e))
+                    m_gradient(k, 0) += 0;
+                else
+                    m_gradient(k, 0) += tmp;
+
+                tmp = (Dihedral(atom_i, atom_j, AddVector(atom_k, dy), atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, SubVector(atom_k, dy), atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+                if (std::abs(tmp) > std::abs(e))
+                    m_gradient(k, 1) += 0;
+                else
+                    m_gradient(k, 1) += tmp;
+
+                tmp = (Dihedral(atom_i, atom_j, AddVector(atom_k, dz), atom_l, dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, SubVector(atom_k, dz), atom_l, dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+                if (std::abs(tmp) > std::abs(e))
+                    m_gradient(k, 2) += 0;
+                else
+                    m_gradient(k, 2) += tmp;
+
+                tmp = (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dx), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dx), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+                if (std::abs(tmp) > std::abs(e))
+                    m_gradient(l, 0) += 0;
+                else
+                    m_gradient(l, 0) += tmp;
+
+                tmp = (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dy), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dy), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+                if (std::abs(tmp) > std::abs(e))
+                    m_gradient(l, 1) += 0;
+                else
+                    m_gradient(l, 1) += tmp;
+
+                tmp = (Dihedral(atom_i, atom_j, atom_k, AddVector(atom_l, dz), dihedral.V, dihedral.n, dihedral.phi0) - Dihedral(atom_i, atom_j, atom_k, SubVector(atom_l, dz), dihedral.V, dihedral.n, dihedral.phi0)) / (2 * m_d);
+                if (std::abs(tmp) > std::abs(e))
+                    m_gradient(l, 2) += 0;
+                else
+                    m_gradient(l, 2) += tmp;
+            }
         }
     }
     return energy;
@@ -1166,6 +1235,7 @@ json eigenUFF::writeParameter() const
     parameters["vdw_scaling"] = m_vdw_scaling;
     parameters["rep_scaling"] = m_rep_scaling;
     parameters["dihedral_scaling"] = m_dihedral_scaling;
+    parameters["numtorsion"] = m_numtorsion;
 
     parameters["coulomb_scaling"] = m_coulmob_scaling;
 
@@ -1220,6 +1290,7 @@ json eigenUFF::writeUFF() const
     parameters["vdw_scaling"] = m_vdw_scaling;
     parameters["rep_scaling"] = m_rep_scaling;
     parameters["dihedral_scaling"] = m_dihedral_scaling;
+    parameters["numtorsion"] = m_numtorsion;
 
     parameters["coulomb_scaling"] = m_coulmob_scaling;
 
@@ -1290,7 +1361,7 @@ void eigenUFF::readUFF(const json& parameters)
 
     m_bond_force = parameter["bond_force"].get<double>();
     m_angle_force = parameter["angle_force"].get<double>();
-
+    m_numtorsion = parameter["numtorsion"].get<bool>();
     m_h4_scaling = parameter["h4_scaling"].get<double>();
     m_hh_scaling = parameter["hh_scaling"].get<double>();
 
@@ -1336,6 +1407,7 @@ void eigenUFF::readParameter(const json& parameters)
 
     m_bond_force = parameters["bond_force"].get<double>();
     m_angle_force = parameters["angle_force"].get<double>();
+    m_numtorsion = parameters["numtorsion"].get<bool>();
 
     m_h4_scaling = parameters["h4_scaling"].get<double>();
     m_hh_scaling = parameters["hh_scaling"].get<double>();

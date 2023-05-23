@@ -64,7 +64,7 @@ void SimpleMD::LoadControlJson()
     m_timestep = Json2KeyWord<double>(m_defaults, "dT");
     m_maxtime = Json2KeyWord<double>(m_defaults, "MaxTime");
     m_T0 = Json2KeyWord<double>(m_defaults, "T");
-    m_centered = Json2KeyWord<bool>(m_defaults, "centered");
+    m_centered = Json2KeyWord<int>(m_defaults, "centered");
     m_dumb = Json2KeyWord<int>(m_defaults, "dump");
     m_print = Json2KeyWord<int>(m_defaults, "print");
     m_max_top_diff = Json2KeyWord<int>(m_defaults, "MaxTopoDiff");
@@ -464,7 +464,7 @@ void SimpleMD::start()
                 PrintStatus();
             }
         }
-        if (m_centered)
+        if (m_centered && m_step % m_centered == 0)
             RemoveRotation(m_velocities);
 
         m_integrator(coord, gradient);
