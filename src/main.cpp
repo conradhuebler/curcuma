@@ -20,7 +20,6 @@
 #include "src/core/fileiterator.h"
 #include "src/core/hessian.h"
 #include "src/core/molecule.h"
-#include "src/core/uff.h"
 
 #include "src/capabilities/analysenciplot.h"
 #include "src/capabilities/confscan.h"

@@ -86,13 +86,7 @@ double UFFThread::DotProduct(double x1, double x2, double y1, double y2, double 
 
 double UFFThread::BondEnergy(double distance, double r, double kij, double D_ij)
 {
-
     double energy = (0.5 * kij * (distance - r) * (distance - r)) * m_final_factor * m_bond_scaling;
-    /*
-        double alpha = sqrt(kij / (2 * D_ij));
-        double exp_ij = exp(-1 * alpha * (r - distance) - 1);
-        double energy = D_ij * (exp_ij * exp_ij);
-    */
     if (isnan(energy))
         return 0;
     else
@@ -230,12 +224,8 @@ double UFFThread::Dihedral(const Eigen::Vector3d& i, const Eigen::Vector3d& j, c
     double n_bcd = (nbcd).norm();
     double dotpr = nabc.dot(nbcd);
     Eigen::Vector3d rji = j - i;
-
     double sign = (-1 * rji).dot(nbcd) < 0 ? -1 : 1;
-    double phi = pi + sign * acos(dotpr / (n_abc * n_bcd)); //* 360 / 2.0 / pi;
-    // double f = pi / 180.0;
-    // std::cout << n_abc << " " << n_bcd << " " << dotpr << " " << n << std::endl;
-    // std::cout << phi* 360 / 2.0 / pi<< " " << phi << " " << phi0* 360 / 2.0 / pi << std::endl;
+    double phi = pi + sign * acos(dotpr / (n_abc * n_bcd));
     double energy = (1 / 2.0 * V * (1 - cos(n * phi0) * cos(n * phi))) * m_final_factor * m_dihedral_scaling;
     if (isnan(energy))
         return 0;
@@ -255,7 +245,6 @@ double UFFThread::CalculateDihedral()
         const int j = dihedral.j;
         const int k = dihedral.k;
         const int l = dihedral.l;
-        // std::cout << i << " " << j << " " << k << " " << l << std::endl;
         Eigen::Vector3d atom_i = Position(i);
         Eigen::Vector3d atom_j = Position(j);
         Eigen::Vector3d atom_k = Position(k);
@@ -412,7 +401,6 @@ double UFFThread::Inversion(const Eigen::Vector3d& i, const Eigen::Vector3d& j, 
     double sinYSq = 1.0 - cosY * cosY;
     double sinY = ((sinYSq > 0.0) ? sqrt(sinYSq) : 0.0);
     double cos2Y = sinY * sinY - 1.0;
-    // std::cout << cosY << std::endl;
     double energy = (k_ijkl * (C0 + C1 * sinY + C2 * cos2Y)) * m_final_factor * m_inversion_scaling;
     if (isnan(energy))
         return 0;
@@ -451,11 +439,9 @@ double UFFThread::FullInversion(const int& i, const int& j, const int& k, const 
             nijk /= nijk.norm();
 
             double cosY = (nijk.dot(rjl));
-            // clipToOne(cosY);
             double sinYSq = 1.0 - cosY * cosY;
             double sinY = ((sinYSq > 0.0) ? sqrt(sinYSq) : 0.0);
             double cosTheta = (rji.dot(rjk));
-            // clipToOne(cosTheta);
             double sinThetaSq = std::max(1.0 - cosTheta * cosTheta, 1.0e-8);
             double sinTheta = std::max(((sinThetaSq > 0.0) ? sqrt(sinThetaSq) : 0.0), 1.0e-8);
 
@@ -656,7 +642,6 @@ void eigenUFF::Initialise()
     for (int i = 0; i < m_atom_types.size(); ++i) {
         m_stored_bonds.push_back(std::vector<int>());
         ignored_vdw.push_back(std::set<int>({ i }));
-        // m_gradient.push_back({ 0, 0, 0 });
         for (int j = 0; j < m_atom_types.size() && m_stored_bonds[i].size() < CoordinationNumber[m_atom_types[i]]; ++j) {
             if (i == j)
                 continue;
