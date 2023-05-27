@@ -374,5 +374,5 @@ const json UFFParameterJson{
     { "verbose", false },
     { "rings", false },
     { "threads", 1 },
-    { "numtorsion", false }
+    { "gradient", 0 }
 };

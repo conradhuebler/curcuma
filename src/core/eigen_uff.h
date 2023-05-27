@@ -141,8 +141,11 @@ private:
         Eigen::Vector3d abc = ab - ac;
         return aba.cross(abc);
     }
+
+    double BondEnergy(double distance, double r, double k_ij, double D_ij = 70);
     double CalculateBondStretching();
 
+    double AngleBend(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, double kijk, double C0, double C1, double C2);
     double CalculateAngleBending();
 
     double Dihedral(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, const Eigen::Vector3d& l, double V, double n, double phi0);
@@ -152,6 +155,7 @@ private:
     double Inversion(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, const Eigen::Vector3d& l, double k_ijkl, double C0, double C1, double C2);
     double CalculateInversion();
 
+    double NonBonds(const Eigen::Vector3d& i, const Eigen::Vector3d& j, double Dij, double xij);
     double CalculateNonBonds();
     double CalculateElectrostatic();
 
@@ -197,7 +201,8 @@ private:
     bool m_use_d4 = false;
     bool m_verbose = false;
     bool m_rings = false;
-    bool m_numtorsion = false;
+    int m_calc_gradient = 0;
+
     double m_bond_scaling = 1, m_angle_scaling = 1, m_dihedral_scaling = 1, m_inversion_scaling = 1, m_vdw_scaling = 1, m_rep_scaling = 1, m_coulmob_scaling = 1;
     int m_thread = 0, m_threads = 0;
 };
@@ -229,7 +234,7 @@ public:
     void Gradient(double* gradient) const;
 
     void NumGrad(double* gradient);
-    std::vector<std::array<double, 3>> NumGrad();
+    Eigen::MatrixXd NumGrad();
 
     void writeParameterFile(const std::string& file) const;
     void writeUFFFile(const std::string& file) const;
@@ -282,57 +287,6 @@ private:
 
     double BondRestLength(int i, int j, double order);
 
-    double CalculateAngle(int atom1, int atom2, int atom3) const
-    {
-        auto atom_0 = m_geometry.row(atom1);
-        auto atom_1 = m_geometry.row(atom2);
-        auto atom_2 = m_geometry.row(atom3);
-
-        auto vec_1 = atom_0 - atom_1; //{ atom_0[0] - atom_1[0], atom_0[1] - atom_1[1], atom_0[2] - atom_1[2] };
-        auto vec_2 = atom_0 - atom_2; //{ atom_0[0] - atom_2[0], atom_0[1] - atom_2[1], atom_0[2] - atom_2[2] };
-
-        return acos(vec_1.dot(vec_2) / sqrt(vec_1.dot(vec_1)) * sqrt(vec_2.dot(vec_2))) * 360 / 2.0 / pi;
-    }
-
-    Eigen::Vector3d NormalVector(const Eigen::Vector3d& aa, const Eigen::Vector3d& ab, const Eigen::Vector3d& ac)
-    {
-        Eigen::Vector3d aba = ab - aa;
-        Eigen::Vector3d abc = ab - ac;
-        return aba.cross(abc);
-    }
-
-    Eigen::Vector3d NormalVector(int i, int j, int k)
-    {
-        auto aa = m_geometry.row(i);
-        auto ab = m_geometry.row(j);
-        auto ac = m_geometry.row(k);
-
-        Eigen::Vector3d aba = ab - aa;
-        Eigen::Vector3d abc = ab - ac;
-        return aba.cross(abc);
-    }
-    double CalculateBondStretching();
-
-    double AngleBend(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, double kijk, double C0, double C1, double C2);
-    double CalculateAngleBending();
-
-    double Dihedral(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, const Eigen::Vector3d& l, double V, double n, double phi0);
-    double CalculateDihedral();
-
-    double FullInversion(const int& i, const int& j, const int& k, const int& l, double d_forceConstant, double C0, double C1, double C2);
-    double Inversion(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, const Eigen::Vector3d& l, double k_ijkl, double C0, double C1, double C2);
-    double CalculateInversion();
-
-    double NonBonds(const Eigen::Vector3d& i, const Eigen::Vector3d& j, double Dij, double xij);
-    double CalculateNonBonds();
-    double CalculateElectrostatic();
-
-    double Distance(double x1, double x2, double y1, double y2, double z1, double z2) const;
-    double DotProduct(double x1, double x2, double y1, double y2, double z1, double z2) const;
-
-    double BondEnergy(double distance, double r, double k_ij, double D_ij = 70);
-
-    inline Eigen::Vector3d Position(int pos) const { return m_geometry.row(pos); }
     std::vector<int> m_atom_types, m_uff_atom_types, m_coordination;
     std::vector<std::vector<int>> m_stored_bonds;
     std::vector<std::vector<int>> m_identified_rings;
@@ -371,6 +325,7 @@ private:
     bool m_rings = false;
     double m_bond_scaling = 1, m_angle_scaling = 1, m_dihedral_scaling = 1, m_inversion_scaling = 1, m_vdw_scaling = 1, m_rep_scaling = 1, m_coulmob_scaling = 1;
     bool m_numtorsion = false;
+    int m_calc_gradient = 0;
 
     int m_threads = 1;
     hbonds4::H4Correction m_h4correction;
