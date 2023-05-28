@@ -34,6 +34,8 @@
 
 #include <Eigen/Dense>
 
+#include "src/core/forcefieldderivaties.h"
+
 #include "eigen_uff.h"
 
 #include "json.hpp"
@@ -79,11 +81,6 @@ double UFFThread::Distance(double x1, double x2, double y1, double y2, double z1
     return sqrt((((x1 - x2) * (x1 - x2)) + ((y1 - y2) * (y1 - y2)) + ((z1 - z2) * (z1 - z2))));
 }
 
-double UFFThread::DotProduct(double x1, double x2, double y1, double y2, double z1, double z2) const
-{
-    return x1 * x2 + y1 * y2 + z1 * z2;
-}
-
 double UFFThread::BondEnergy(double distance, double r, double kij, double D_ij)
 {
     double energy = (0.5 * kij * (distance - r) * (distance - r)) * m_final_factor * m_bond_scaling;
@@ -102,32 +99,29 @@ double UFFThread::CalculateBondStretching()
         const auto& bond = m_uffbonds[index];
         const int i = bond.i;
         const int j = bond.j;
-        double xi = (*m_geometry)(i, 0) * m_au;
-        double xj = (*m_geometry)(j, 0) * m_au;
 
-        double yi = (*m_geometry)(i, 1) * m_au;
-        double yj = (*m_geometry)(j, 1) * m_au;
-
-        double zi = (*m_geometry)(i, 2) * m_au;
-        double zj = (*m_geometry)(j, 2) * m_au;
-        double r0 = sqrt((zi - zj) * (zi - zj) + (yi - yj) * (yi - yj) + (xi - xj) * (xi - xj));
+        Vector x = Position(i);
+        Vector y = Position(j);
+        Matrix derivate;
+        double r0 = BondStretching(x, y, derivate, m_CalculateGradient);
 
         energy += (0.5 * bond.kij * (r0 - bond.r0) * (r0 - bond.r0)) * m_final_factor * m_bond_scaling;
         if (m_CalculateGradient) {
             if (m_calc_gradient == 0) {
 
-                double diff = (bond.kij) * (r0 - bond.r0) / r0 * m_final_factor * m_bond_scaling;
-                m_gradient(i, 0) += diff * (xi - xj);
-                m_gradient(j, 0) -= diff * (xi - xj);
-
-                m_gradient(i, 1) += diff * (yi - yj);
-                m_gradient(j, 1) -= diff * (yi - yj);
-
-                m_gradient(i, 2) += diff * (zi - zj);
-                m_gradient(j, 2) -= diff * (zi - zj);
+                double diff = (bond.kij) * (r0 - bond.r0) * m_final_factor * m_bond_scaling;
+                m_gradient.row(i) += diff * derivate.row(0);
+                m_gradient.row(j) += diff * derivate.row(1);
 
             } else if (m_calc_gradient == 1) {
+                double xi = (*m_geometry)(i, 0) * m_au;
+                double xj = (*m_geometry)(j, 0) * m_au;
 
+                double yi = (*m_geometry)(i, 1) * m_au;
+                double yj = (*m_geometry)(j, 1) * m_au;
+
+                double zi = (*m_geometry)(i, 2) * m_au;
+                double zj = (*m_geometry)(j, 2) * m_au;
                 m_gradient(i, 0) += (BondEnergy(Distance(xi + m_d, xj, yi, yj, zi, zj), bond.r0, bond.kij) - BondEnergy(Distance(xi - m_d, xj, yi, yj, zi, zj), bond.r0, bond.kij)) / (2 * m_d);
                 m_gradient(i, 1) += (BondEnergy(Distance(xi, xj, yi + m_d, yj, zi, zj), bond.r0, bond.kij) - BondEnergy(Distance(xi, xj, yi - m_d, yj, zi, zj), bond.r0, bond.kij)) / (2 * m_d);
                 m_gradient(i, 2) += (BondEnergy(Distance(xi, xj, yi, yj, zi + m_d, zj), bond.r0, bond.kij) - BondEnergy(Distance(xi, xj, yi, yj, zi - m_d, zj), bond.r0, bond.kij)) / (2 * m_d);
@@ -170,34 +164,19 @@ double UFFThread::CalculateAngleBending()
         auto atom_i = Position(i);
         auto atom_j = Position(j);
         auto atom_k = Position(k);
+        Matrix derivate;
+        double costheta = AngleBending(atom_i, atom_j, atom_k, derivate, m_CalculateGradient);
 
-        Eigen::Vector3d vec_ij = atom_i - atom_j;
-        auto norm_ij = vec_ij / vec_ij.norm();
-        Eigen::Vector3d vec_kj = atom_k - atom_j;
-        auto norm_kj = vec_kj / vec_kj.norm();
-        double costheta = (vec_ij.dot(vec_kj) / (sqrt(vec_ij.dot(vec_ij) * vec_kj.dot(vec_kj))));
         double e = (angle.kijk * (angle.C0 + angle.C1 * costheta + angle.C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling;
         if (m_CalculateGradient) {
             if (m_calc_gradient == 0) {
 
                 double sintheta = sin(acos(costheta));
                 double dEdtheta = -angle.kijk * sintheta * (angle.C1 + 4 * angle.C2 * costheta) * m_final_factor * m_angle_scaling;
-                double dThetadCosTheta = 1 / sintheta;
+                m_gradient.row(i) += dEdtheta * derivate.row(0);
+                m_gradient.row(j) += dEdtheta * derivate.row(1);
+                m_gradient.row(k) += dEdtheta * derivate.row(2);
 
-                auto dEdi = -dEdtheta * dThetadCosTheta * (norm_kj - norm_ij * costheta) / (vec_ij.norm());
-                auto dEdk = -dEdtheta * dThetadCosTheta * (norm_ij - norm_kj * costheta) / (vec_kj.norm());
-
-                m_gradient(i, 0) += dEdi(0);
-                m_gradient(i, 1) += dEdi(1);
-                m_gradient(i, 2) += dEdi(2);
-
-                m_gradient(k, 0) += dEdk(0);
-                m_gradient(k, 1) += dEdk(1);
-                m_gradient(k, 2) += dEdk(2);
-
-                m_gradient(j, 0) += -dEdi(0) - dEdk(0);
-                m_gradient(j, 1) += -dEdi(1) - dEdk(1);
-                m_gradient(j, 2) += -dEdi(2) - dEdk(2);
             } else if (m_calc_gradient == 1) {
                 m_gradient(i, 0) += (AngleBend(AddVector(atom_i, dx), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(SubVector(atom_i, dx), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
                 m_gradient(i, 1) += (AngleBend(AddVector(atom_i, dy), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2) - AngleBend(SubVector(atom_i, dy), atom_j, atom_k, angle.kijk, angle.C0, angle.C1, angle.C2)) / (2 * m_d);
@@ -1830,7 +1809,12 @@ double eigenUFF::Calculate(bool grd, bool verbose)
     }
     /* + CalculateElectrostatic(); */
     energy = bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy;
-
+    /*
+    if(m_calc_gradient == 2 && m_CalculateGradient)
+    {
+        m_gradient = NumGrad();
+    }
+    */
 #ifdef USE_D3
     if (m_use_d3) {
         if (grd) {

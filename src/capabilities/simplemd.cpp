@@ -19,6 +19,7 @@
 
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <random>
@@ -59,6 +60,8 @@ SimpleMD::~SimpleMD()
 void SimpleMD::LoadControlJson()
 {
     m_method = Json2KeyWord<std::string>(m_defaults, "method");
+    m_thermostat = Json2KeyWord<std::string>(m_defaults, "thermostat");
+
     m_spin = Json2KeyWord<int>(m_defaults, "spin");
     m_charge = Json2KeyWord<int>(m_defaults, "charge");
     m_timestep = Json2KeyWord<double>(m_defaults, "dT");
@@ -76,11 +79,12 @@ void SimpleMD::LoadControlJson()
     m_opt = Json2KeyWord<bool>(m_defaults, "opt");
     m_scale_velo = Json2KeyWord<double>(m_defaults, "velo");
     m_rescue = Json2KeyWord<bool>(m_defaults, "rescue");
-    m_berendson = Json2KeyWord<double>(m_defaults, "berendson");
-    if (m_berendson < m_timestep)
-        m_berendson = m_timestep;
+    m_coupling = Json2KeyWord<double>(m_defaults, "coupling");
+    if (m_coupling < m_timestep)
+        m_coupling = m_timestep;
 
     m_writerestart = Json2KeyWord<int>(m_defaults, "writerestart");
+    m_respa = Json2KeyWord<int>(m_defaults, "respa");
 
     m_writeXYZ = Json2KeyWord<bool>(m_defaults, "writeXYZ");
     m_writeinit = Json2KeyWord<bool>(m_defaults, "writeinit");
@@ -264,6 +268,7 @@ nlohmann::json SimpleMD::WriteRestartInformation()
 {
     nlohmann::json restart;
     restart["method"] = m_method;
+    restart["thermostat"] = m_thermostat;
     restart["dT"] = m_timestep;
     restart["MaxTime"] = m_maxtime;
     restart["T"] = m_T0;
@@ -276,11 +281,11 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["average_Epot"] = m_aver_Epot;
     restart["average_Ekin"] = m_aver_Ekin;
     restart["average_Etot"] = m_aver_Etot;
-    restart["berendson"] = m_berendson;
+    restart["coupling"] = m_coupling;
     restart["MaxTopoDiff"] = m_max_top_diff;
     restart["impuls"] = m_impuls;
     restart["impuls_scaling"] = m_impuls_scaling;
-
+    restart["respa"] = m_respa;
     return restart;
 };
 
@@ -365,7 +370,17 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     }
 
     try {
-        m_berendson = state["berendson"];
+        m_coupling = state["coupling"];
+    } catch (json::type_error& e) {
+    }
+
+    try {
+        m_respa = state["respa"];
+    } catch (json::type_error& e) {
+    }
+
+    try {
+        m_thermostat = state["thermostat"];
     } catch (json::type_error& e) {
     }
 
@@ -373,6 +388,7 @@ bool SimpleMD::LoadRestartInformation(const json& state)
         geometry = state["geometry"];
     } catch (json::type_error& e) {
     }
+
     try {
         velocities = state["velocities"];
     } catch (json::type_error& e) {
@@ -402,6 +418,17 @@ void SimpleMD::start()
         gradient[i] = 0;
     }
 
+    if (m_thermostat.compare("csvr") == 0) {
+        fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Canonical sampling through velocity rescaling (CSVR) Thermostat\nJ. Chem. Phys. 126, 014101 (2007) - DOI: 10.1063/1.2408420\n\n");
+        ThermostatFunction = std::bind(&SimpleMD::CSVR, this);
+    } else if (m_thermostat.compare("berendson") == 0) {
+        fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Berendson Thermostat\nJ. Chem. Phys. 81, 3684 (1984) - DOI: 10.1063/1.448118\n\n");
+        ThermostatFunction = std::bind(&SimpleMD::Berendson, this);
+    } else {
+        std::cout << "No Thermostat applied\n"
+                  << std::endl;
+    }
+
 #ifdef GCC
     //         std::cout << fmt::format("{0: ^{0}} {1: ^{1}} {2: ^{2}} {3: ^{3}} {4: ^{4}}\n", "Step", "Epot", "Ekin", "Etot", "T");
     // std::cout << fmt::format("{1: ^{0}} {1: ^{1}} {1: ^{2}} {1: ^{3}} {1: ^{4}}\n", "", "Eh", "Eh", "Eh", "K");
@@ -429,9 +456,10 @@ void SimpleMD::start()
     m_Ekin = EKin();
     m_Etot = m_Epot + m_Ekin;
 
-    double lambda = 1;
     int m_step = 0;
+
     PrintStatus();
+
     for (; m_currentStep <= m_maxtime;) {
         if (CheckStop() == true) {
             TriggerWriteRestart();
@@ -464,18 +492,19 @@ void SimpleMD::start()
                 PrintStatus();
             }
         }
-        if (m_centered && m_step % m_centered == 0)
+        if (m_centered && m_step % m_centered == 0 && m_step >= m_centered) {
             RemoveRotation(m_velocities);
-
+        }
         m_integrator(coord, gradient);
         if (m_unstable) {
             PrintStatus();
-            std::cout << "Simulation got unstable, exiting!" << std::endl;
+            fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Simulation got unstable, exiting!\n");
+
             std::ofstream restart_file("unstable_curcuma.json");
             restart_file << WriteRestartInformation() << std::endl;
             return;
         }
-        Berendson();
+        ThermostatFunction();
         m_Ekin = EKin();
         if (m_writerestart > -1 && m_step % m_writerestart == 0) {
             std::ofstream restart_file("curcuma_step_" + std::to_string(m_step) + ".json");
@@ -494,12 +523,15 @@ void SimpleMD::start()
         }
 
         if (m_current_rescue >= m_max_rescue) {
-            std::cout << "Nothing really helps" << std::endl;
+            fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Nothing really helps");
             break;
         }
         m_step++;
         m_currentStep += m_timestep;
     }
+    if (m_thermostat.compare("csvr") == 0)
+        std::cout << "Exchange with heat bath " << m_Ekin_exchange << "Eh" << std::endl;
+
     std::ofstream restart_file("curcuma_final.json");
     restart_file << WriteRestartInformation() << std::endl;
 
@@ -835,8 +867,29 @@ bool SimpleMD::WriteGeometry()
 
 void SimpleMD::Berendson()
 {
-    double lambda = sqrt(1 + (m_timestep * (m_T0 - m_T)) / (m_T * m_berendson));
+    double lambda = sqrt(1 + (m_timestep * (m_T0 - m_T)) / (m_T * m_coupling));
     for (int i = 0; i < 3 * m_natoms; ++i) {
         m_velocities[i] *= lambda;
+    }
+}
+
+void SimpleMD::CSVR()
+{
+    double Ekin_target = 1.5 * kb * m_T0 * m_natoms;
+    double dof = 3 * m_natoms;
+    double c = exp(-(m_timestep * m_respa) / m_coupling);
+    std::random_device rd{};
+    std::mt19937 gen{ rd() };
+    std::normal_distribution<> d{ 0, 1 };
+    std::chi_squared_distribution<float> dchi{ dof };
+
+    double R = d(gen);
+    double SNf = dchi(gen);
+    double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (dof * m_Ekin) + 2 * R * sqrt(c * (1 - c) * Ekin_target / (dof * m_Ekin));
+    m_Ekin_exchange += m_Ekin * (alpha2 - 1);
+    double alpha = sqrt(alpha2);
+
+    for (int i = 0; i < 3 * m_natoms; ++i) {
+        m_velocities[i] *= alpha;
     }
 }

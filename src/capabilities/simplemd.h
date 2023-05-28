@@ -21,6 +21,7 @@
 
 #include <chrono>
 #include <ctime>
+#include <functional>
 #include <ratio>
 
 #include "src/capabilities/rmsdtraj.h"
@@ -49,7 +50,7 @@ static json CurcumaMDJson{
     { "hmass", 1 },
     { "velo", 1 },
     { "rescue", false },
-    { "berendson", 10 },
+    { "coupling", 10 },
     { "MaxTopoDiff", 15 },
     { "impuls", 0 },
     { "method", "uff" },
@@ -59,7 +60,9 @@ static json CurcumaMDJson{
     { "norestart", false },
     { "writerestart", 1000 },
     { "rattle", false },
-    { "rattle_tolerance", 1e-5 }
+    { "rattle_tolerance", 1e-5 },
+    { "thermostat", "csvr" },
+    { "respa", 1 }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -84,6 +87,7 @@ public:
     std::vector<Molecule*> UniqueMolecules() const { return m_unique_structures; }
 
 private:
+    std::function<void(void)> ThermostatFunction;
     void PrintStatus() const;
 
     /* Lets have this for all modules */
@@ -121,6 +125,7 @@ private:
 
     double EKin();
     void Berendson();
+    void CSVR();
 
     void InitConstrainedBonds();
 
@@ -137,22 +142,25 @@ private:
     int m_spin = 0, m_charge = 0, m_print = 100;
     double m_T0 = 298.13, m_aver_Temp = 0, m_rmsd = 1.5;
     double m_x0 = 0, m_y0 = 0, m_z0 = 0;
+    double m_Ekin_exchange = 0.0;
     std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient, m_rmass;
     std::vector<int> m_atomtype;
     Molecule m_molecule;
-    bool m_initialised = false, m_restart = false, m_centered = false, m_writeUnique = true, m_opt = false, m_rescue = false, m_writeXYZ = true, m_writeinit = false, m_norestart = false;
+    bool m_initialised = false, m_restart = false, m_writeUnique = true, m_opt = false, m_rescue = false, m_writeXYZ = true, m_writeinit = false, m_norestart = false;
+    int m_centered = 0;
     EnergyCalculator* m_interface;
     RMSDTraj* m_unqiue;
     const std::vector<double> m_used_mass;
     int m_unix_started = 0, m_prev_index = 0, m_max_rescue = 10, m_current_rescue = 0, m_currentTime = 0, m_max_top_diff = 15, m_step = 0;
     int m_writerestart = -1;
-    double m_pos_conv = 0, m_scale_velo = 1.0, m_berendson = 1;
+    int m_respa = 1;
+    double m_pos_conv = 0, m_scale_velo = 1.0, m_coupling = 10;
     double m_impuls = 0, m_impuls_scaling = 0.75, m_dt2 = 0;
     double m_rattle_tolerance = 1e-4;
 
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;
-    std::string m_method = "UFF", m_initfile = "none";
+    std::string m_method = "UFF", m_initfile = "none", m_thermostat = "csvr";
     bool m_unstable = false;
 };
 
