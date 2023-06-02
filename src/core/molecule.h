@@ -107,6 +107,8 @@ class Molecule
     bool setGeometryByFragment(const Geometry& geometry, int fragment, bool protons = true);
 
     Position Centroid(bool hydrogen = true, int fragment = -1) const;
+    Position MassCentroid(bool hydrogen = true, int fragment = -1) const;
+
     inline std::size_t AtomCount() const { return m_atoms.size(); }
     std::vector<int> Atoms() const { return m_atoms; }
     std::pair<int, Position> Atom(int i) const;
@@ -145,6 +147,7 @@ class Molecule
     std::string Header() const;
 
     void CalculateRotationalConstants();
+    void AlignAxis();
 
     inline double Ia() const { return m_Ia; }
     inline double Ib() const { return m_Ib; }
@@ -181,13 +184,13 @@ class Molecule
         return m_persistentImage;
     }
 
-    void Center();
+    void Center(bool mass = false);
 
     std::pair<Matrix, Matrix> DistanceMatrix() const;
 
     std::vector<std::array<double, 3>> Coords() const { return m_geometry; }
 
-    Matrix RotationMatrix() const { return m_rotation_matrix; }
+    Matrix AlignmentAxes() const { return m_alignmentAxes; }
 
 private:
     void ParseString(const std::string& internal, std::vector<std::string>& elements);
@@ -213,7 +216,7 @@ private:
 
     std::vector<int> m_connect_mass;
     Matrix m_HydrogenBondMap;
-    Eigen::MatrixXd m_persistentImage, m_rotation_matrix;
+    Eigen::MatrixXd m_persistentImage, m_alignmentAxes;
     mutable std::vector<std::vector<int>> m_fragments;
     mutable std::map<int, int> m_fragment_assignment;
 

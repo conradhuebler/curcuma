@@ -23,6 +23,8 @@ option (WriteMoreInfo
     "Write statistic files with more info" OFF)
 
 add_subdirectory(${PROJECT_SOURCE_DIR}/external/fmt EXCLUDE_FROM_ALL)
+add_subdirectory(${PROJECT_SOURCE_DIR}/external/finite-diff/ EXCLUDE_FROM_ALL)
+
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
 #if(NOT DEFINED ${CMAKE_BUILD_TYPE})
@@ -43,6 +45,7 @@ include_directories(SYSTEM  ${PROJECT_SOURCE_DIR}/external/fmt/include
                             ${PROJECT_SOURCE_DIR}/external/ripser
                             ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0
                             ${PROJECT_SOURCE_DIR}/external/cpp-d4/include
+                            ${PROJECT_SOURCE_DIR}/external/finite-diff/src
                             ${PROJECT_SOURCE_DIR}/external/)
 include_directories(${PROJECT_SOURCE_DIR} ${PROJECT_BINARY_DIR} )
 
@@ -324,7 +327,8 @@ if(USE_D4)
     endif(DEFINED D4LIBS_DIR AND DEFINED D4INCLUDE_DIR)
     target_link_libraries(curcuma_core curcuma_d4)
 endif()
- target_link_libraries(curcuma_core pthread fmt::fmt-header-only )
+
+target_link_libraries(curcuma_core pthread fmt::fmt-header-only finitediff::finitediff)
 
 if(WIN32) # Check if we are on Windows
 else()
@@ -332,8 +336,8 @@ else()
 endif(WIN32)
 
 target_link_libraries(curcuma fmt::fmt-header-only)
-target_link_libraries(curcuma curcuma_core)
 
+target_link_libraries(curcuma curcuma_core)
 add_executable(curcuma_helper
         src/helpers/main.cpp)
 

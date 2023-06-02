@@ -66,7 +66,7 @@ public:
 
     void setMolecule(const Molecule& molecule);
 
-    void CalculateHessian(bool fullnumerical = false);
+    void CalculateHessian(int type = 1);
 
 private:
     void CalculateHessianNumerical();

@@ -142,39 +142,25 @@ Hessian::Hessian(const std::string& method, const json& controller, int threads)
 void Hessian::setMolecule(const Molecule& molecule)
 {
     m_molecule = molecule;
+    // std::cout << m_molecule.Centroid().transpose() << std::endl;
+    // m_molecule.Center(false);
+    // m_molecule.AlignAxis();
+    // std::cout << m_molecule.Centroid().transpose() << std::endl;
 }
 
-void Hessian::CalculateHessian(bool fullnumerical)
+void Hessian::CalculateHessian(int type)
 {
-    //   m_hessian = Eigen::MatrixXd::Ones(3 * m_molecule.AtomCount(), 3 * m_molecule.AtomCount());
-    /*
-        if (fullnumerical)
-            CalculateHessianNumerical();
-        else
-            CalculateHessianSemiNumerical();
-    */
-
-    /*
-
+    if (type == 1)
+        CalculateHessianSemiNumerical();
+    else if (type == 2)
         CalculateHessianNumerical();
-        auto freqs = ConvertHessian(m_hessian);
-        std::cout << " Frequencies " << std::endl << std::endl;
-        std::cout << freqs.transpose() << std::endl;
-        std::cout <<std::endl << std::endl;
-    */
-    CalculateHessianSemiNumerical();
+    else if (type == 3) {
+        std::cout << "external hessian approach not implemented" << std::endl;
+        std::cout << "use -hessian 1 or -hessian 2" << std::endl;
+        // FiniteDiffHess();
+    }
+
     auto freqs = ConvertHessian(m_hessian);
-    // std::cout << freqs.transpose() << std::endl;
-    // std::cout <<std::endl << std::endl;
-
-    /*
-
-        FiniteDiffHess();
-        freqs = ConvertHessian(m_hessian);
-        std::cout << " Frequencies " << std::endl << std::endl;
-        std::cout << freqs.transpose() << std::endl;
-        std::cout <<std::endl << std::endl;
-    */
 }
 
 Vector Hessian::ConvertHessian(Matrix& hessian)
@@ -279,22 +265,17 @@ void Hessian::CalculateHessianSemiNumerical()
     }
     pool->DynamicPool(2);
     pool->StartAndWait();
-    // std::cout <<std::endl << m_hessian << std::endl << std::endl;
 
     for (auto* t : pool->Finished()) {
         HessianThread* thread = static_cast<HessianThread*>(t);
         int i = thread->I();
         int xi = thread->XI();
-        // std::cout << i << " " << xi << std::endl;
-        // std::cout << thread->Gradient() << std::endl;
         Matrix gradient = thread->Gradient();
         for (int j = 0; j < gradient.rows(); ++j) {
             for (int k = 0; k < gradient.cols(); ++k) {
-                //         std::cout << thread->Gradient()(j, k) <<  " ";
                 m_hessian(3 * i + xi, 3 * j + k) = thread->Gradient()(j, k);
             }
         }
-        //  std::cout <<std::endl << m_hessian << std::endl << std::endl;
     }
 
     for (int i = 0; i < m_molecule.AtomCount(); ++i) {
@@ -309,11 +290,6 @@ void Hessian::CalculateHessianSemiNumerical()
             }
         }
     }
-    /*
-    std::cout << std::endl
-              << std::endl;
-    std::cout << m_hessian << std::endl;
-    */
     delete pool;
 }
 
@@ -338,10 +314,11 @@ void Hessian::FiniteDiffHess()
         x(3*i + 2) = m_molecule.Atom(i).second[2];
 
     }
-      Eigen::MatrixXd hess = Eigen::MatrixXd::Zero(3*m_molecule.AtomCount(), 3*m_molecule.AtomCount());
+    Eigen::MatrixXd hess = Eigen::MatrixXd::Zero(3 * m_molecule.AtomCount(), 3 * m_molecule.AtomCount());
 
-      Eigen::MatrixXd fhess;
-      finite_hessian(x, f, fhess, EIGHTH);
-      m_hessian = fhess;
-      */
+    Eigen::MatrixXd fhess;
+    fd::finite_hessian(x, f, fhess, fd::EIGHTH);
+
+    m_hessian = fhess;
+*/
 }
