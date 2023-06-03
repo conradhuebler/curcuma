@@ -182,12 +182,10 @@ void ConfScan::LoadControlJson()
     m_energy_cutoff = Json2KeyWord<double>(m_defaults, "maxenergy");
     m_prevent_reorder = Json2KeyWord<bool>(m_defaults, "preventReorder");
 
-    // double scaleLoose = Json2KeyWord<double>(m_defaults, "scaleLoose");
     m_sLE = Json2KeyWord<double>(m_defaults, "sLE");
     m_sLI = Json2KeyWord<double>(m_defaults, "sLI");
     m_sLH = Json2KeyWord<double>(m_defaults, "sLH");
 
-    // double scaleTight = Json2KeyWord<double>(m_defaults, "scaleTight");
     m_sTE = Json2KeyWord<double>(m_defaults, "sTE");
     m_sTI = Json2KeyWord<double>(m_defaults, "sTI");
     m_sTH = Json2KeyWord<double>(m_defaults, "sTH");
@@ -567,6 +565,11 @@ void ConfScan::start()
     if (!m_skipfirst) {
         CheckRMSD();
         PrintStatus("Result 1st pass:");
+        std::ofstream result_file;
+        result_file.open(m_result_basename + ".first.dot");
+        result_file << "digraph graphname \n {\n";
+        result_file << m_first_content << std::endl;
+        result_file << "}";
     } else {
         for (const auto& i : m_ordered_list)
             m_stored_structures.push_back(m_molecules.at(i.second).second);
@@ -588,7 +591,11 @@ void ConfScan::start()
             }
             ReorderCheck(m_prevent_reorder, false);
             PrintStatus("Result 2nd pass:");
-
+            std::ofstream result_file;
+            result_file.open(m_result_basename + ".second.dot");
+            result_file << "digraph graphname \n {\n";
+            result_file << m_second_content << std::endl;
+            result_file << "}";
             fmt::print("\n2nd Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
             timer.Reset();
         }
@@ -602,7 +609,11 @@ void ConfScan::start()
             fmt::print("\n\n3rd Pass\nPerforming RMSD calculation with reordering, and less stricter threshold.\n\n");
             ReorderTrained();
             PrintStatus("Result 3rd pass:");
-
+            std::ofstream result_file;
+            result_file.open(m_result_basename + ".third.dot");
+            result_file << "digraph graphname \n {\n";
+            result_file << m_third_content << std::endl;
+            result_file << "}";
             fmt::print("\n3rd Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
         }
     }
@@ -627,11 +638,23 @@ void ConfScan::start()
         index++;
     }
 #endif
+    std::ofstream dotfile;
+    dotfile.open(m_result_basename + ".dot");
+    dotfile << "digraph graphname \n {\n";
+    dotfile << "edge [color=green];" << std::endl;
+    dotfile << m_first_content << std::endl;
+    dotfile << "edge [color=red];" << std::endl;
+    dotfile << m_second_content << std::endl;
+    dotfile << "edge [color=blue];" << std::endl;
+    dotfile << m_third_content << std::endl;
+    dotfile << "}";
     Finalise();
 }
 
 void ConfScan::CheckRMSD()
 {
+    std::string content_dot;
+    std::string laststring;
     m_maxmol = m_ordered_list.size();
 
     json rmsd = RMSDJson;
@@ -694,6 +717,15 @@ void ConfScan::CheckRMSD()
             if (t->KeepMolecule() == false) {
                 keep_molecule = false;
                 writeStatisticFile(t->Reference(), mol1, t->RMSD());
+
+                if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
+                    m_first_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted];\n";
+
+                m_first_content += "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
+                m_first_content += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
+                m_first_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
+                laststring = t->Reference()->Name();
+
 #ifdef WriteMoreInfo
                 m_dnn_data.push_back(t->getDNNInput());
 #endif
@@ -716,7 +748,8 @@ void ConfScan::CheckRMSD()
 void ConfScan::ReorderCheck(bool reuse_only, bool limit)
 {
     m_maxmol = m_stored_structures.size();
-
+    std::string content_dot;
+    std::string laststring;
     // To be finalised and tested
 
     /*
@@ -845,6 +878,8 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                     keep_molecule = false;
                     break;
                 }
+                m_exclude_list.push_back(std::pair<std::string, std::string>(mol1->Name(), mol2->Name()));
+
             } else {
                 threads[t]->setEnabled(m_closeLoop);
             }
@@ -893,6 +928,14 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                     if (AddRules(t->ReorderRule()))
                         rules.push_back(t->ReorderRule());
 
+                    if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
+                        m_second_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted];\n";
+
+                    m_second_content += "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
+                    m_second_content += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
+                    m_second_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
+                    laststring = t->Reference()->Name();
+
                     writeStatisticFile(t->Reference(), mol1, t->RMSD(), true, t->ReorderRule());
                     break;
                 } else {
@@ -911,6 +954,15 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                             m_reordered_worked += 1;
                             m_reordered_reused += 1;
                             writeStatisticFile(t->Reference(), mol1, driver.RMSD(), true, { 0, 0 });
+
+                            if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
+                                m_second_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted];\n";
+
+                            m_second_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\";\n";
+                            m_second_content += "\"" + mol1->Name() + "\" [shape=box, style=filled,color=\".7 .3 1.0\"];\n";
+                            m_second_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(driver.RMSD()) + "];\n";
+                            laststring = t->Reference()->Name();
+
                             fmt::print(fg(fmt::color::yellow) | fmt::emphasis::bold, "... success!\n");
                         } else
                             fmt::print(fg(fmt::color::yellow) | fmt::emphasis::bold, "... without effect!\n");
@@ -947,6 +999,8 @@ void ConfScan::ReorderTrained()
     m_molalign_success = 0;
 
     m_maxmol = m_stored_structures.size();
+    std::string content_dot;
+    std::string laststring;
 
     // To be finalised and tested
 
@@ -1051,6 +1105,11 @@ void ConfScan::ReorderTrained()
                 return;
             }
             const Molecule* mol2 = threads[t]->Reference();
+            std::pair<std::string, std::string> names(mol1->Name(), mol2->Name());
+            if (std::find(m_exclude_list.begin(), m_exclude_list.end(), names) != m_exclude_list.end()) {
+                m_duplicated++;
+                continue;
+            }
             double Ia = abs(mol1->Ia() - mol2->Ia());
             double Ib = abs(mol1->Ib() - mol2->Ib());
             double Ic = abs(mol1->Ic() - mol2->Ic());
@@ -1132,6 +1191,15 @@ void ConfScan::ReorderTrained()
                     double diff_rot = (Ia + Ib + Ic) * third;
                     double diff = (mol1->getPersisentImage() - t->Reference()->getPersisentImage()).cwiseAbs().sum();
                     writeStatisticFile(t->Reference(), mol1, t->RMSD(), true, t->ReorderRule());
+
+                    if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
+                        m_third_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted];\n";
+
+                    m_third_content += "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
+                    m_third_content += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
+                    m_third_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
+
+                    laststring = t->Reference()->Name();
                     break;
                 } else {
                     if ((m_domolalign > 1) && t->RMSD() < m_domolalign * m_rmsd_threshold) {
@@ -1146,6 +1214,15 @@ void ConfScan::ReorderTrained()
                         if (driver.RMSD() < m_rmsd_threshold) {
                             m_molalign_success++;
                             keep_molecule = false;
+
+                            if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
+                                m_third_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted];\n";
+
+                            m_third_content += "\"" + mol1->Name() + "\" [shape=box, style=filled,color=\".7 .3 1.0\"];\n";
+                            m_third_content += "\"" + t->Reference()->Name() + "\" [shape=box];\n";
+                            m_third_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(driver.RMSD()) + "];\n";
+
+                            laststring = t->Reference()->Name();
                             m_reordered_worked += 1;
                             m_reordered_reused += 1;
                             writeStatisticFile(t->Reference(), mol1, driver.RMSD(), true, { 0, 0 });
@@ -1251,7 +1328,7 @@ void ConfScan::PrintStatus(const std::string& info)
     std::cout << "# Successfully : " << m_reordered_worked << " (+ " << m_molalign_success << ")"
               << "    ";
     std::cout << "# Reused Results : " << m_reordered_reused << "     ";
-    std::cout << "# Reordering Skipped : " << m_skiped << "     ";
+    std::cout << "# Reordering Skipped : " << m_skiped << " (+ " << m_duplicated << ")";
     std::cout << "# Rejected Directly : " << m_rejected_directly << "     ";
 
     std::cout << "# Current Energy [kJ/mol] : " << m_dE << std::endl;

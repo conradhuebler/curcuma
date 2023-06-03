@@ -54,13 +54,11 @@ static const json ConfScanJson = {
     { "energy", 1.0 },
     { "maxenergy", -1.0 },
     { "preventreorder", false },
-    { "scaleLoose", 1.5 },
-    { "scaleTight", 0.1 },
-    { "sLE", 1.2 },
+    { "sLE", 1.0 },
     { "sTE", 0.1 },
-    { "sLI", 1.2 },
+    { "sLI", 1.0 },
     { "sTI", 0.1 },
-    { "sLH", 1.2 },
+    { "sLH", 1.0 },
     { "sTH", 0.1 },
     { "skip", 0 },
     { "allxyz", false },
@@ -309,7 +307,7 @@ private:
     bool m_ok;
     std::size_t m_fail = 0, m_start = 0, m_end;
     std::vector<Molecule*> m_global_temp_list;
-    int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0, m_skip = 0, m_skiped = 0, m_rejected_directly = 0, m_molalign_count = 0, m_molalign_success = 0;
+    int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0, m_skip = 0, m_skiped = 0, m_duplicated = 0, m_rejected_directly = 0, m_molalign_count = 0, m_molalign_success = 0;
 
     std::string m_filename, m_accepted_filename, m_1st_filename, m_2nd_filename, m_rejected_filename, m_result_basename, m_statistic_filename, m_prev_accepted, m_joined_filename, m_threshold_filename, m_current_filename;
     std::map<double, int> m_ordered_list;
@@ -326,15 +324,14 @@ private:
     std::vector<Molecule*> m_result, m_rejected_structures, m_stored_structures, m_previously_accepted;
     std::vector<const Molecule*> m_threshold;
     std::vector<int> m_element_templates;
-
+    std::vector<std::pair<std::string, std::string>> m_exclude_list;
 #ifdef WriteMoreInfo
     std::vector<dnn_input> m_dnn_data;
 #endif
-
+    std::string m_first_content, m_second_content, m_third_content;
     std::string m_rmsd_element_templates;
     std::string m_method = "";
     std::string m_molalign = "molalign";
-
     double m_domolalign = -1;
     double m_lastDI = 0.0, m_lastDH = 0.0, m_lastdE = -1, m_dE = -1, m_damping = 0.8;
     int m_maxmol = 0;
