@@ -150,6 +150,8 @@ public:
 
     double RMSD() const { return m_rmsd; }
     const Molecule* Reference() const { return &m_reference; }
+    const Molecule* Target() const { return &m_target; }
+
     double Energy() const { return m_energy; }
 #ifdef WriteMoreInfo
     void setPredRMSD(double rmsd) { m_pred_rmsd = rmsd; }
@@ -267,12 +269,14 @@ public:
     ConfScanThreadNoReorder* addThreadNoreorder(const Molecule* reference, const json& config);
 
 private:
+    void PrintSetUp();
     void SetUp();
 
     void CheckRMSD();
 
     void ReorderCheck(bool reuse_only = false, bool limit = false);
     void ReorderTrained();
+    void Check4th();
 
     void writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd, bool reason = true, const std::vector<int>& rule = std::vector<int>(0));
 
@@ -309,8 +313,10 @@ private:
     std::vector<Molecule*> m_global_temp_list;
     int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0, m_skip = 0, m_skiped = 0, m_duplicated = 0, m_rejected_directly = 0, m_molalign_count = 0, m_molalign_success = 0;
 
-    std::string m_filename, m_accepted_filename, m_1st_filename, m_2nd_filename, m_rejected_filename, m_result_basename, m_statistic_filename, m_prev_accepted, m_joined_filename, m_threshold_filename, m_current_filename;
+    std::string m_filename, m_accepted_filename, m_1st_filename, m_2nd_filename, m_3rd_filename, m_rejected_filename, m_result_basename, m_statistic_filename, m_prev_accepted, m_joined_filename, m_threshold_filename, m_current_filename;
     std::map<double, int> m_ordered_list;
+    std::map<double, Molecule*> m_final_batch;
+
     std::vector<std::pair<std::string, Molecule*>> m_molecules;
     double m_rmsd_threshold = 1.0, m_nearly_missed = 0.8, m_energy_cutoff = -1, m_reference_last_energy = 0, m_target_last_energy = 0, m_lowest_energy = 1, m_current_energy = 0;
     double m_sTE = 0.1, m_sLE = 1.5;
@@ -328,7 +334,7 @@ private:
 #ifdef WriteMoreInfo
     std::vector<dnn_input> m_dnn_data;
 #endif
-    std::string m_first_content, m_second_content, m_third_content;
+    std::string m_first_content, m_second_content, m_third_content, m_4th_content;
     std::string m_rmsd_element_templates;
     std::string m_method = "";
     std::string m_molalign = "molalign";

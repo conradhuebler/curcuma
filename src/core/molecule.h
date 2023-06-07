@@ -60,6 +60,8 @@ class Molecule
     /* Molecule& operator=(const Molecule& molecule);
      Molecule& operator=(const Molecule* molecule);
  */
+    void ApplyReorderRule(const std::vector<int>& rule);
+
     void print_geom(bool moreinfo = true) const;
     void printFragmente();
     void printAtom(int i) const;
