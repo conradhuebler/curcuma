@@ -50,15 +50,17 @@ static const json ConfScanJson = {
     { "rank", -1 },
     { "writeXYZ", false },
     { "forceReorder", false },
+    { "noreorderpass", false },
+    { "doreuse", false },
     { "check", false },
     { "energy", 1.0 },
     { "maxenergy", -1.0 },
     { "preventreorder", false },
-    { "sLE", 1.0 },
+    { "sLE", "1.0;2.0" },
     { "sTE", 0.1 },
-    { "sLI", 1.0 },
+    { "sLI", "1.0;2.0" },
     { "sTI", 0.1 },
-    { "sLH", 1.0 },
+    { "sLH", "1.0;2.0" },
     { "sTH", 0.1 },
     { "skip", 0 },
     { "allxyz", false },
@@ -73,7 +75,6 @@ static const json ConfScanJson = {
     { "method", "" },
     { "lastdE", -1 },
     { "fewerFile", false },
-    { "dothird", true },
     { "skipfirst", false },
     { "ignoreRotation", false },
     { "ignoreBarCode", false },
@@ -265,18 +266,20 @@ public:
     void ParametriseRotationalCutoffs();
 
     void start() override; // TODO make pure virtual and move all main action here
-    ConfScanThread* addThread(const Molecule* reference, const json& config, bool reuse_only);
+    ConfScanThread* addThread(const Molecule* reference, const json& config, bool reuse_only = false);
     ConfScanThreadNoReorder* addThreadNoreorder(const Molecule* reference, const json& config);
 
 private:
-    void PrintSetUp();
+    void PrintSetUp(double dLE, double dLI, double dLH);
     void SetUp();
 
     void CheckRMSD();
 
-    void ReorderCheck(bool reuse_only = false, bool limit = false);
-    void ReorderTrained();
-    void Check4th();
+    void CheckOnly(double sLE, double sLI, double sLH);
+    void Reorder(double dLE, double dLI, double dLH, bool reuse_only = false);
+    void ReuseOnly();
+
+    void WriteDotFile(const std::string& filename, const std::string& content);
 
     void writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd, bool reason = true, const std::vector<int>& rule = std::vector<int>(0));
 
@@ -315,29 +318,29 @@ private:
 
     std::string m_filename, m_accepted_filename, m_1st_filename, m_2nd_filename, m_3rd_filename, m_rejected_filename, m_result_basename, m_statistic_filename, m_prev_accepted, m_joined_filename, m_threshold_filename, m_current_filename;
     std::map<double, int> m_ordered_list;
-    std::map<double, Molecule*> m_final_batch;
 
     std::vector<std::pair<std::string, Molecule*>> m_molecules;
     double m_rmsd_threshold = 1.0, m_nearly_missed = 0.8, m_energy_cutoff = -1, m_reference_last_energy = 0, m_target_last_energy = 0, m_lowest_energy = 1, m_current_energy = 0;
-    double m_sTE = 0.1, m_sLE = 1.5;
-    double m_sTI = 0.1, m_sLI = 1.5;
-    double m_sTH = 0.1, m_sLH = 1.5;
+    double m_sTE = 0.1; /* m_sLE = 1.0; */
+    double m_sTI = 0.1; /* m_sLI = 1.0; */
+    double m_sTH = 0.1; /* m_sLH = 1.0; */
 
     double m_reference_restored_energy = -1e10, m_target_restored_energy = -1e10;
     double m_dLI = 0.0, m_dLH = 0.0, m_dLE = 0.0;
     double m_dTI = 0.0, m_dTH = 0.0, m_dTE = 0.0;
 
-    std::vector<Molecule*> m_result, m_rejected_structures, m_stored_structures, m_previously_accepted;
+    std::vector<Molecule*> m_result, m_rejected_structures, m_stored_structures, m_previously_accepted, m_all_structures;
     std::vector<const Molecule*> m_threshold;
     std::vector<int> m_element_templates;
     std::vector<std::pair<std::string, std::string>> m_exclude_list;
 #ifdef WriteMoreInfo
     std::vector<dnn_input> m_dnn_data;
 #endif
-    std::string m_first_content, m_second_content, m_third_content, m_4th_content;
+    std::string m_first_content, m_second_content, m_third_content, m_4th_content, m_collective_content;
     std::string m_rmsd_element_templates;
     std::string m_method = "";
     std::string m_molalign = "molalign";
+    std::vector<double> m_sLE = { 1.0 }, m_sLI = { 1.0 }, m_sLH = { 1.0 };
     double m_domolalign = -1;
     double m_lastDI = 0.0, m_lastDH = 0.0, m_lastdE = -1, m_dE = -1, m_damping = 0.8;
     int m_maxmol = 0;
@@ -364,7 +367,6 @@ private:
     bool m_allxyz = false;
     bool m_update = false;
     bool m_reduced_file = false;
-    bool m_do_third = false;
     bool m_skipfirst = false;
     bool m_ignoreRotation = false;
     bool m_ignoreBarCode = false;
@@ -373,4 +375,6 @@ private:
     bool m_split = false;
     bool m_write = false;
     bool m_nomunkres = false;
+    bool m_noreorderpass = false;
+    bool n_doreusepass = false;
 };

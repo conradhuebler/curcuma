@@ -380,11 +380,11 @@ inline std::string DoublePtr2String(const double* array, int size)
     return result;
 }
 
-inline std::vector<double> String2DoubleVec(const std::string& str)
+inline std::vector<double> String2DoubleVec(const std::string& str, const char* delim = ";")
 {
     std::vector<double> result;
 
-    StringList vectors = SplitString(str, "|");
+    StringList vectors = SplitString(str, delim);
     for (const auto& element : vectors)
         result.push_back(std::stod(element));
 
