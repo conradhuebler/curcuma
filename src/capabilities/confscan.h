@@ -50,17 +50,17 @@ static const json ConfScanJson = {
     { "rank", -1 },
     { "writeXYZ", false },
     { "forceReorder", false },
+    { "reset", false },
     { "noreorderpass", false },
-    { "doreuse", false },
     { "check", false },
     { "energy", 1.0 },
     { "maxenergy", -1.0 },
     { "preventreorder", false },
-    { "sLE", "1.0;2.0" },
+    { "sLE", "1.0,2.0" },
     { "sTE", 0.1 },
-    { "sLI", "1.0;2.0" },
+    { "sLI", "1.0,2.0" },
     { "sTI", 0.1 },
-    { "sLH", "1.0;2.0" },
+    { "sLH", "1.0,2.0" },
     { "sTH", 0.1 },
     { "skip", 0 },
     { "allxyz", false },
@@ -75,10 +75,11 @@ static const json ConfScanJson = {
     { "method", "" },
     { "lastdE", -1 },
     { "fewerFile", false },
-    { "skipfirst", false },
+    { "skipinit", false },
+    { "skipreorder", false },
+    { "skipreuse", false },
     { "ignoreRotation", false },
     { "ignoreBarCode", false },
-    { "skipless", false },
     { "looseThresh", 7 },
     { "tightThresh", 3 },
     { "update-rotation", false },
@@ -276,8 +277,7 @@ private:
     void CheckRMSD();
 
     void CheckOnly(double sLE, double sLI, double sLH);
-    void Reorder(double dLE, double dLI, double dLH, bool reuse_only = false);
-    void ReuseOnly();
+    void Reorder(double dLE, double dLI, double dLH, bool reuse_only = false, bool reset = false);
 
     void WriteDotFile(const std::string& filename, const std::string& content);
 
@@ -367,14 +367,15 @@ private:
     bool m_allxyz = false;
     bool m_update = false;
     bool m_reduced_file = false;
-    bool m_skipfirst = false;
+    bool m_skipinit = false;
+    bool m_skipreorder = false;
+    bool m_skipreuse = false;
+
     bool m_ignoreRotation = false;
     bool m_ignoreBarCode = false;
-    bool m_openLoop = true, m_closeLoop = false;
     bool m_update_rotation = false;
     bool m_split = false;
     bool m_write = false;
     bool m_nomunkres = false;
-    bool m_noreorderpass = false;
-    bool n_doreusepass = false;
+    bool m_reset = false;
 };

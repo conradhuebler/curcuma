@@ -108,7 +108,6 @@ double UFFThread::CalculateBondStretching()
         energy += (0.5 * bond.kij * (r0 - bond.r0) * (r0 - bond.r0)) * m_final_factor * m_bond_scaling;
         if (m_CalculateGradient) {
             if (m_calc_gradient == 0) {
-
                 double diff = (bond.kij) * (r0 - bond.r0) * m_final_factor * m_bond_scaling;
                 m_gradient.row(i) += diff * derivate.row(0);
                 m_gradient.row(j) += diff * derivate.row(1);
@@ -166,11 +165,10 @@ double UFFThread::CalculateAngleBending()
         auto atom_k = Position(k);
         Matrix derivate;
         double costheta = AngleBending(atom_i, atom_j, atom_k, derivate, m_CalculateGradient);
-
         double e = (angle.kijk * (angle.C0 + angle.C1 * costheta + angle.C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling;
+
         if (m_CalculateGradient) {
             if (m_calc_gradient == 0) {
-
                 double sintheta = sin(acos(costheta));
                 double dEdtheta = -angle.kijk * sintheta * (angle.C1 + 4 * angle.C2 * costheta) * m_final_factor * m_angle_scaling;
                 m_gradient.row(i) += dEdtheta * derivate.row(0);
@@ -407,6 +405,7 @@ double UFFThread::FullInversion(const int& i, const int& j, const int& k, const 
 
             if (rji.norm() < 1e-5 || rjk.norm() < 1e-5 || rjl.norm() < 1e-5)
                 return 0;
+
             double dji = rji.norm();
             double djk = rjk.norm();
             double djl = rjl.norm();
@@ -465,7 +464,6 @@ double UFFThread::FullInversion(const int& i, const int& j, const int& k, const 
             m_gradient(l, 1) += dEdY * dYdl(1);
             m_gradient(l, 2) += dEdY * dYdl(2);
         } else if (m_calc_gradient == 1) {
-
             m_gradient(i, 0) += (Inversion(AddVector(atom_i, dx), atom_j, atom_k, atom_l, d_forceConstant, C0, C1, C2) - Inversion(SubVector(atom_i, dx), atom_j, atom_k, atom_l, d_forceConstant, C0, C1, C2)) / (2 * m_d);
             m_gradient(i, 1) += (Inversion(AddVector(atom_i, dy), atom_j, atom_k, atom_l, d_forceConstant, C0, C1, C2) - Inversion(SubVector(atom_i, dy), atom_j, atom_k, atom_l, d_forceConstant, C0, C1, C2)) / (2 * m_d);
             m_gradient(i, 2) += (Inversion(AddVector(atom_i, dz), atom_j, atom_k, atom_l, d_forceConstant, C0, C1, C2) - Inversion(SubVector(atom_i, dz), atom_j, atom_k, atom_l, d_forceConstant, C0, C1, C2)) / (2 * m_d);
@@ -485,10 +483,10 @@ double UFFThread::FullInversion(const int& i, const int& j, const int& k, const 
     }
     return energy;
 }
+
 double UFFThread::CalculateInversion()
 {
     double energy = 0.0;
-
     for (int index = 0; index < m_uffinversion.size(); ++index) {
         const auto& inversion = m_uffinversion[index];
         const int i = inversion.i;
@@ -538,7 +536,6 @@ double UFFThread::CalculateNonBonds()
                 m_gradient(j, 1) -= diff * (atom_i(1) - atom_j(1));
                 m_gradient(j, 2) -= diff * (atom_i(2) - atom_j(2));
             } else if (m_calc_gradient == 1) {
-
                 m_gradient(i, 0) += (NonBonds(AddVector(atom_i, dx), atom_j, vdw.Dij, vdw.xij) - NonBonds(SubVector(atom_i, dx), atom_j, vdw.Dij, vdw.xij)) / (2 * m_d);
                 m_gradient(i, 1) += (NonBonds(AddVector(atom_i, dy), atom_j, vdw.Dij, vdw.xij) - NonBonds(SubVector(atom_i, dy), atom_j, vdw.Dij, vdw.xij)) / (2 * m_d);
                 m_gradient(i, 2) += (NonBonds(AddVector(atom_i, dz), atom_j, vdw.Dij, vdw.xij) - NonBonds(SubVector(atom_i, dz), atom_j, vdw.Dij, vdw.xij)) / (2 * m_d);
@@ -551,6 +548,7 @@ double UFFThread::CalculateNonBonds()
     }
     return energy;
 }
+
 double UFFThread::CalculateElectrostatic()
 {
     double energy = 0.0;
@@ -1027,7 +1025,6 @@ void eigenUFF::FindRings()
 void eigenUFF::AssignUffAtomTypes()
 {
     for (int i = 0; i < m_atom_types.size(); ++i) {
-
         switch (m_atom_types[i]) {
         case 1: // Hydrogen
             if (m_stored_bonds[i].size() == 2)
@@ -1756,7 +1753,6 @@ double eigenUFF::BondRestLength(int i, int j, double n)
 
 double eigenUFF::Calculate(bool grd, bool verbose)
 {
-
     m_CalculateGradient = grd;
     hbonds4::atom_t geometry[m_atom_types.size()];
     for (int i = 0; i < m_atom_types.size(); ++i) {

@@ -173,7 +173,7 @@ void RMSDDriver::LoadControlJson()
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
         std::string element = m_defaults["Element"].get<std::string>();
-        StringList elements = Tools::SplitString(element, ";");
+        StringList elements = Tools::SplitString(element, ",");
         for (const std::string& str : elements) {
             try {
                 m_element_templates.push_back(std::stod(str));

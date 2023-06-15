@@ -180,30 +180,32 @@ void ConfScan::LoadControlJson()
     m_force_reorder = Json2KeyWord<bool>(m_defaults, "forceReorder");
     m_check_connections = Json2KeyWord<bool>(m_defaults, "check");
     m_energy_cutoff = Json2KeyWord<double>(m_defaults, "maxenergy");
-    m_prevent_reorder = Json2KeyWord<bool>(m_defaults, "preventReorder");
 
     if (m_defaults["sLE"].is_number())
         m_sLE = { Json2KeyWord<double>(m_defaults, "sLE") };
     else if (m_defaults["sLE"].is_string())
-        m_sLE = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLE"), ";");
+        m_sLE = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLE"), ",");
 
     if (m_defaults["sLI"].is_number())
         m_sLI = { Json2KeyWord<double>(m_defaults, "sLI") };
     else if (m_defaults["sLI"].is_string())
-        m_sLI = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLI"), ";");
+        m_sLI = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLI"), ",");
 
     if (m_defaults["sLH"].is_number())
         m_sLH = { Json2KeyWord<double>(m_defaults, "sLH") };
     else if (m_defaults["sLH"].is_string())
-        m_sLH = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLH"), ";");
+        m_sLH = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLH"), ",");
 
     if (m_sLE.size() != m_sLI.size() || m_sLE.size() != m_sLH.size()) {
         std::cout << "Inconsistent length of steps requested, will abort now." << std::endl;
         exit(1);
     }
 
-    m_noreorderpass = Json2KeyWord<bool>(m_defaults, "noreorderpass");
-    n_doreusepass = Json2KeyWord<bool>(m_defaults, "doreuse");
+    m_reset = Json2KeyWord<bool>(m_defaults, "reset");
+
+    m_skipinit = Json2KeyWord<bool>(m_defaults, "skipinit");
+    m_skipreorder = Json2KeyWord<bool>(m_defaults, "skipreorder");
+    m_skipreuse = Json2KeyWord<bool>(m_defaults, "skipreuse");
 
     m_sTE = Json2KeyWord<double>(m_defaults, "sTE");
     m_sTI = Json2KeyWord<double>(m_defaults, "sTI");
@@ -221,7 +223,6 @@ void ConfScan::LoadControlJson()
     m_useorders = Json2KeyWord<int>(m_defaults, "UseOrders");
     m_MaxHTopoDiff = Json2KeyWord<int>(m_defaults, "MaxHTopoDiff");
     m_threads = m_defaults["threads"].get<int>();
-    m_skipfirst = Json2KeyWord<bool>(m_defaults, "skipfirst");
     m_RMSDmethod = Json2KeyWord<std::string>(m_defaults, "RMSDMethod");
     if (m_RMSDmethod == "molalign") {
         fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nPlease cite the follow research report!\nJ. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187\n\n");
@@ -237,16 +238,13 @@ void ConfScan::LoadControlJson()
     m_molalign = Json2KeyWord<std::string>(m_defaults, "molalignbin");
     m_molaligntol = Json2KeyWord<int>(m_defaults, "molaligntol");
 
-    m_openLoop = true;
-    m_closeLoop = false;
-
     m_looseThresh = m_defaults["looseThresh"];
     m_tightThresh = m_defaults["tightThresh"];
 
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
         m_rmsd_element_templates = m_defaults["RMSDElement"].get<std::string>();
-        StringList elements = Tools::SplitString(m_rmsd_element_templates, ";");
+        StringList elements = Tools::SplitString(m_rmsd_element_templates, ",");
         for (const std::string& str : elements)
             m_rmsd_element_templates.push_back(std::stod(str));
 
@@ -259,8 +257,8 @@ void ConfScan::LoadControlJson()
     }
     if (m_RMSDmethod.compare("hybrid") == 0 /* && m_rmsd_element_templates.compare("") == 0 */) {
         std::cout << "Reordering method hybrid has to be combined with element types. I will chose for you nitrogen and oxygen!" << std::endl;
-        std::cout << "This is equivalent to adding:\' -rmsdelement 7;8 \' to your argument list!" << std::endl;
-        m_rmsd_element_templates = "7;8";
+        std::cout << "This is equivalent to adding:\' -rmsdelement 7,8 \' to your argument list!" << std::endl;
+        m_rmsd_element_templates = "7,8";
     }
     m_prev_accepted = Json2KeyWord<std::string>(m_defaults, "accepted");
 
@@ -373,8 +371,7 @@ bool ConfScan::LoadRestartInformation()
     if (!Restart())
         return false;
     StringList files = RestartFiles();
-    if (!m_prevent_reorder)
-        m_prevent_reorder = files.size() > 1;
+
     int error = 0;
     for (const auto& f : files) {
         std::vector<std::vector<int>> reorder_cached;
@@ -391,7 +388,6 @@ bool ConfScan::LoadRestartInformation()
             error++;
             continue;
         }
-
         json confscan;
         try {
             confscan = restart[MethodName()[0]];
@@ -422,7 +418,6 @@ bool ConfScan::LoadRestartInformation()
                 m_reorder_rules.push_back(vector);
     }
     m_useRestart = files.size() == 1 && error != int(files.size());
-
     std::cout << "Starting with " << m_reorder_rules.size() << " initial reorder rules." << std::endl;
     return true;
 }
@@ -501,12 +496,6 @@ void ConfScan::SetUp()
         st_file.close();
     }
 
-    std::ofstream nd_file;
-    if (m_writeFiles && !m_reduced_file) {
-        nd_file.open(m_2nd_filename);
-        nd_file.close();
-    }
-
     std::cout << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
               << "" << std::endl;
 
@@ -568,35 +557,50 @@ void ConfScan::start()
     PrintController(m_controller);
     SetUp();
 
-    fmt::print("\n\n1st Pass\nPerforming RMSD calculation without reordering now!\n\n");
-    RunTimer timer(false);
-    m_current_filename = m_1st_filename;
-    std::ofstream result_file;
-    if (m_writeFiles && !m_reduced_file) {
-        result_file.open(m_statistic_filename, std::ios_base::app);
-        result_file << "Results of 1st Pass" << std::endl;
-        result_file.close();
-    }
-    if (!m_skipfirst) {
+    if (!m_skipinit) {
+        fmt::print("\n\nInitial Pass\nPerforming RMSD calculation without reordering now!\n\n");
+        RunTimer timer(false);
+        m_current_filename = m_1st_filename;
+        std::ofstream result_file;
+        if (m_writeFiles && !m_reduced_file) {
+            result_file.open(m_statistic_filename, std::ios_base::app);
+            result_file << "Results of 1st Pass" << std::endl;
+            result_file.close();
+        }
         CheckOnly(m_sLE[0], m_sLI[0], m_sLH[0]);
-        PrintStatus("Result 1st pass:");
+        PrintStatus("Result initial pass:");
         WriteDotFile(m_result_basename + ".initial.dot", m_first_content);
         m_sLE[0] = 1;
         m_sLI[0] = 1;
         m_sLH[0] = 1;
         m_collective_content = "edge [color=green];\n";
         m_collective_content += m_first_content + "\n";
+#ifdef WriteMoreInfo
+        std::cout << m_dnn_data.size() << std::endl;
+#endif
+        fmt::print("\nInitial Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
+
     } else {
+        fmt::print("\n\nSkipping initial pass!\n\nSettings thresholds to high value ...");
+
         for (const auto& i : m_ordered_list)
             m_stored_structures.push_back(m_molecules.at(i.second).second);
+        m_dLI = 1e23;
+        m_dLH = 1e23;
+        m_dLE = 1e23;
+        m_looseThresh = 0;
+        m_skipreuse = true;
     }
-#ifdef WriteMoreInfo
-    std::cout << m_dnn_data.size() << std::endl;
-#endif
-    fmt::print("\nInitial Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
 
-    if (!m_noreorderpass) {
+    if (!m_skipreorder) {
         for (int run = 0; run < m_sLE.size(); ++run) {
+            m_current_filename = m_2nd_filename + "." + std::to_string(run + 1) + ".xyz";
+
+            std::ofstream nd_file;
+            if (m_writeFiles && !m_reduced_file) {
+                nd_file.open(m_current_filename);
+                nd_file.close();
+            }
             double dLI = m_dLI;
             double dLH = m_dLH;
             double dLE = m_dLE;
@@ -607,7 +611,6 @@ void ConfScan::start()
 
             if (!CheckStop()) {
                 timer.Reset();
-                m_current_filename = m_2nd_filename + "." + std::to_string(run + 1) + ".xyz";
                 fmt::print("\n\nReorder Pass\nPerforming RMSD calculation with reordering now!\n\n");
                 if (m_writeFiles && !m_reduced_file) {
                     result_file.open(m_statistic_filename, std::ios_base::app);
@@ -626,18 +629,21 @@ void ConfScan::start()
         }
     } else
         fmt::print("\nReorder Pass skipped!\n");
-
-    if (n_doreusepass) {
+    if (!m_skipreuse) {
         if (!CheckStop()) {
             timer.Reset();
             m_current_filename = m_3rd_filename;
-            fmt::print("\n\nReuse Pass\nPerforming RMSD calculation with stored reorder rules using all structures.\n\n");
+            if (m_reset)
+                fmt::print("\n\nReuse Pass\nPerforming RMSD calculation with stored reorder rules using all structures.\n\n");
+            else
+                fmt::print("\n\nReuse Pass\nPerforming RMSD calculation with stored reorder rules using previously accepted structures.\n\n");
+
             if (m_writeFiles && !m_reduced_file) {
                 result_file.open(m_statistic_filename, std::ios_base::app);
                 PrintStatus("Result Reuse pass:");
                 result_file.close();
             }
-            Reorder(-1, -1, -1, true);
+            Reorder(-1, -1, -1, true, m_reset);
             PrintStatus("Result reuse pass:");
             WriteDotFile(m_result_basename + ".reuse.dot", m_second_content);
             fmt::print("\nReuse Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
@@ -645,9 +651,7 @@ void ConfScan::start()
             m_collective_content += "edge [color=blue];\n";
             m_collective_content += m_second_content + "\n";
         }
-    } else
-        fmt::print("\Reuse Pass skipped!\n");
-
+    }
 #ifdef WriteMoreInfo
     int index = 1;
     for (const auto& i : m_dnn_data) {
@@ -730,7 +734,6 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
         p->StartAndWait();
 
         for (auto* t : threads) {
-
             m_dTI = std::max(m_dTI, t->DI() * (t->RMSD() <= (m_sTI * m_rmsd_threshold)));
             m_dTH = std::max(m_dTH, t->DH() * (t->RMSD() <= (m_sTH * m_rmsd_threshold)));
             m_dTE = std::max(m_dTE, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (m_sTE * m_rmsd_threshold)));
@@ -820,7 +823,7 @@ void ConfScan::PrintSetUp(double dLE, double dLI, double dLH)
               << std::endl;
 }
 
-void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only)
+void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool reset)
 {
     std::string content_dot;
     std::string laststring;
@@ -856,7 +859,7 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only)
     rmsd["molaligntol"] = m_molaligntol;
 
     std::vector<Molecule*> cached;
-    if (dLE < 0 && dLI < 0 && dLH < 0)
+    if (reset)
         cached = m_all_structures;
     else
         cached = m_stored_structures;
@@ -891,10 +894,15 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only)
                 return;
             }
             const Molecule* mol2 = threads[t]->Reference();
+            std::pair<std::string, std::string> names(mol1->Name(), mol2->Name());
+            if (std::find(m_exclude_list.begin(), m_exclude_list.end(), names) != m_exclude_list.end()) {
+                m_duplicated++;
+                continue;
+            }
+
             double Ia = abs(mol1->Ia() - mol2->Ia());
             double Ib = abs(mol1->Ib() - mol2->Ib());
             double Ic = abs(mol1->Ic() - mol2->Ic());
-
             double dI = (Ia + Ib + Ic) * third;
             double dH = (mol1->getPersisentImage() - mol2->getPersisentImage()).cwiseAbs().sum();
 
@@ -904,7 +912,7 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only)
             int looseThresh = 1 * (dI < dLI) + 2 * (dH < dLH) + 4 * (std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < dLE);
             if ((looseThresh & m_looseThresh) == m_looseThresh || (dLI <= 1e-8 && dLH <= 1e-8 && dLE <= 1e-8)) {
                 reorder = true;
-                threads[t]->setEnabled(m_openLoop);
+                threads[t]->setEnabled(true);
                 int tightThresh = 1 * (dI < m_dTI) + 2 * (dH < m_dTH) + 4 * ((std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_dTE));
 
                 if ((tightThresh & m_tightThresh) == m_tightThresh) {
@@ -919,10 +927,8 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only)
                     break;
                 }
                 m_exclude_list.push_back(std::pair<std::string, std::string>(mol1->Name(), mol2->Name()));
-
-            } else {
-                threads[t]->setEnabled(m_closeLoop);
-            }
+            } else
+                threads[t]->setEnabled(false);
         }
 
         if (reorder && keep_molecule) {
@@ -1033,316 +1039,6 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only)
     delete p;
 }
 
-void ConfScan::ReuseOnly()
-{
-    bool reuse_only = false;
-    m_molalign_count = 0;
-    m_molalign_success = 0;
-
-    m_maxmol = m_stored_structures.size();
-    std::string content_dot;
-    std::string laststring;
-
-    /* if ignore rotation or ignore barcode are true, the tight cutoffs are set to -1, that no difference is smaller
-     * than the tight threshold and the loose threshold is set to a big number, that every structure has to be reordered*/
-    m_skiped = 0;
-    m_rejected_directly = 0;
-    if (m_ignoreRotation == true) {
-        m_dLI = 1e10;
-        m_dTI = -1;
-    }
-    if (m_ignoreBarCode == true) {
-        m_dLH = 1e10;
-        m_dTH = -1;
-    }
-    m_dLI *= 2;
-    m_dLH *= 2;
-    m_dLE *= 2;
-
-    PrintSetUp(m_dLI, m_dLH, m_dLE);
-
-    TriggerWriteRestart();
-
-    m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_reused = 0;
-
-    json rmsd = RMSDJson;
-    rmsd["silent"] = true;
-    rmsd["reorder"] = true;
-    rmsd["check"] = CheckConnections();
-    rmsd["heavy"] = m_heavy;
-    rmsd["method"] = m_RMSDmethod;
-    rmsd["element"] = m_rmsd_element_templates;
-    rmsd["update-rotation"] = m_update_rotation;
-    rmsd["damping"] = m_damping;
-    rmsd["nomunkres"] = m_nomunkres;
-    rmsd["molalignbin"] = m_molalign;
-    std::vector<Molecule*> cached = m_stored_structures;
-    m_result = m_previously_accepted;
-    m_stored_structures.clear();
-    std::vector<ConfScanThread*> threads;
-    std::vector<std::vector<int>> rules;
-    CxxThreadPool* p = new CxxThreadPool;
-    p->setActiveThreadCount(m_threads);
-
-    for (Molecule* mol1 : cached) {
-        if (m_result.size() == 0) {
-            AcceptMolecule(mol1);
-            ConfScanThread* thread = addThread(mol1, rmsd, reuse_only);
-            threads.push_back(thread);
-            p->addThread(thread);
-            m_lowest_energy = mol1->Energy();
-            continue;
-        }
-        p->Reset();
-        m_current_energy = mol1->Energy();
-        m_dE = (m_current_energy - m_lowest_energy) * 2625.5;
-
-        bool keep_molecule = true;
-        bool reorder = false;
-        for (int t = 0; t < threads.size(); ++t) {
-            if (CheckStop()) {
-                fmt::print("\n\n** Found stop file, will end now! **\n\n");
-                // TriggerWriteRestart();
-                return;
-            }
-            const Molecule* mol2 = threads[t]->Reference();
-            std::pair<std::string, std::string> names(mol1->Name(), mol2->Name());
-            if (std::find(m_exclude_list.begin(), m_exclude_list.end(), names) != m_exclude_list.end()) {
-                m_duplicated++;
-                continue;
-            }
-            double Ia = abs(mol1->Ia() - mol2->Ia());
-            double Ib = abs(mol1->Ib() - mol2->Ib());
-            double Ic = abs(mol1->Ic() - mol2->Ic());
-
-            double dI = (Ia + Ib + Ic) * third;
-
-            double dH = (mol1->getPersisentImage() - mol2->getPersisentImage()).cwiseAbs().sum();
-
-            /* rotational = 1
-             * ripser     = 2
-             * energy     = 4 */
-            int looseThresh = 1 * (dI < m_dLI) + 2 * (dH < m_dLH) + 4 * (std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_dLE);
-            if ((looseThresh & m_looseThresh) == m_looseThresh /* || (m_dLI == 0 && m_dLH == 0 && m_dLE == 0)*/) {
-                reorder = true;
-                threads[t]->setEnabled(m_openLoop);
-                int tightThresh = 1 * (dI < m_dTI) + 2 * (dH < m_dTH) + 4 * ((std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_dTE));
-
-                if ((tightThresh & m_tightThresh) == m_tightThresh) {
-                    std::cout << "Differences " << dI << " MHz and " << dH << " below tight threshold, reject molecule directly!" << std::endl;
-                    m_lastDI = dI;
-                    m_lastDH = dH;
-                    writeStatisticFile(mol1, mol2, -1, false);
-                    m_threshold.push_back(mol2);
-                    m_rejected_directly++;
-                    reorder = false;
-                    keep_molecule = false;
-                    break;
-                }
-            } else {
-                threads[t]->setEnabled(m_closeLoop);
-            }
-        }
-
-        if (reorder && keep_molecule) {
-            int free_threads = m_threads;
-            if (threads.size())
-                free_threads /= threads.size();
-
-            if (free_threads < 1)
-                free_threads = 1;
-            for (int i = 0; i < threads.size(); ++i) {
-                threads[i]->setTarget(mol1);
-                threads[i]->setReorderRules(m_reorder_rules);
-                threads[i]->setThreads(free_threads);
-                for (int j = 0; j < rules.size(); ++j)
-                    threads[i]->addReorderRule(rules[j]);
-            }
-
-            if (m_RMSDmethod.compare("molalign") != 0 || m_threads == 1) {
-                p->StaticPool();
-                p->StartAndWait();
-            } else {
-                for (auto* t : threads) {
-                    t->execute();
-                    if (t->KeepMolecule() == false)
-                        break;
-                }
-            }
-
-            for (auto* t : threads) {
-                if (!t->isEnabled()) {
-                    t->setEnabled(true);
-                    m_skiped++;
-                    continue;
-                }
-
-                m_reordered++;
-                if (t->KeepMolecule() == false) {
-                    keep_molecule = false;
-                    m_reordered_worked += t->ReorderWorked();
-                    m_reordered_reused += t->ReusedWorked();
-                    if (AddRules(t->ReorderRule()))
-                        rules.push_back(t->ReorderRule());
-
-                    writeStatisticFile(t->Reference(), mol1, t->RMSD(), true, t->ReorderRule());
-                    mol1->ApplyReorderRule(t->ReorderRule());
-
-                    if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
-                        m_third_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted];\n";
-
-                    m_third_content += "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
-                    m_third_content += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
-                    m_third_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
-
-                    laststring = t->Reference()->Name();
-                    break;
-                } else {
-                    if ((m_domolalign > 1) && t->RMSD() < m_domolalign * m_rmsd_threshold) {
-                        fmt::print(fg(fmt::color::yellow) | fmt::emphasis::bold, "Starting molalign for more precise reordering ...\n");
-                        json molalign = rmsd;
-                        molalign["method"] = "molalign";
-                        m_molalign_count++;
-                        RMSDDriver driver(molalign);
-                        driver.setReference(t->Reference());
-                        driver.setTarget(mol1);
-                        driver.start();
-                        mol1->LoadMolecule(driver.TargetReorderd());
-                        if (driver.RMSD() < m_rmsd_threshold) {
-                            m_molalign_success++;
-                            keep_molecule = false;
-
-                            if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
-                                m_third_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted];\n";
-
-                            m_third_content += "\"" + mol1->Name() + "\" [shape=box, style=filled,color=\".7 .3 1.0\"];\n";
-                            m_third_content += "\"" + t->Reference()->Name() + "\" [shape=box];\n";
-                            m_third_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(driver.RMSD()) + "];\n";
-
-                            laststring = t->Reference()->Name();
-                            m_reordered_worked += 1;
-                            m_reordered_reused += 1;
-                            writeStatisticFile(t->Reference(), mol1, driver.RMSD(), true, { 0, 0 });
-                            fmt::print(fg(fmt::color::yellow) | fmt::emphasis::bold, "... success!\n");
-                        } else
-                            fmt::print(fg(fmt::color::yellow) | fmt::emphasis::bold, "... without effect!\n");
-                    }
-                }
-            }
-        } else
-            m_skiped += threads.size();
-
-        if (keep_molecule) {
-            AcceptMolecule(mol1);
-
-            ConfScanThread* thread = addThread(mol1, rmsd, reuse_only);
-            p->addThread(thread);
-            threads.push_back(thread);
-        } else {
-            RejectMolecule(mol1);
-        }
-
-        PrintStatus();
-        if (m_result.size() >= 2 * m_maxrank)
-            break;
-        if (m_dE > m_energy_cutoff && m_energy_cutoff != -1) {
-            break;
-        }
-    }
-    p->clear();
-    delete p;
-}
-/*
-void ConfScan::ReuseOnly()
-{
-    m_stored_structures.clear();
-    m_maxmol = m_final_batch.size();
-    m_rejected = 0;
-    m_reordered_reused = 0;
-    m_reordered_worked = 0;
-    m_skiped = 0;
-    std::string content_dot;
-    std::string laststring;
-    m_maxmol = m_ordered_list.size();
-
-    json rmsd = RMSDJson;
-    rmsd["silent"] = true;
-    rmsd["check"] = CheckConnections();
-    rmsd["heavy"] = m_heavy;
-    rmsd["noreorder"] = true;
-
-    std::vector<ConfScanThreadNoReorder*> threads;
-    std::vector<std::vector<int>> rules;
-    CxxThreadPool* p = new CxxThreadPool;
-    p->setActiveThreadCount(m_threads);
-
-    for (auto& i : m_final_batch) {
-        if (m_skip) {
-            m_skip--;
-            continue;
-        }
-        if (m_maxrank <= m_accepted && m_maxrank > -1)
-            continue;
-
-        Molecule* mol1 = i.second;
-        if (mol1->Check() == 1) {
-            m_rejected++;
-            m_start++;
-            PrintStatus();
-            continue;
-        }
-        if (m_result.size() == 0) {
-            AcceptMolecule(mol1);
-            ConfScanThreadNoReorder* thread = addThreadNoreorder(mol1, rmsd);
-            threads.push_back(thread);
-            p->addThread(thread);
-
-            m_lowest_energy = mol1->Energy();
-            continue;
-        }
-        p->Reset();
-        m_current_energy = mol1->Energy();
-        m_dE = (m_current_energy - m_lowest_energy) * 2625.5;
-
-        bool keep_molecule = true;
-        for (int i = 0; i < threads.size(); ++i) {
-            threads[i]->setTarget(mol1);
-        }
-        p->StaticPool();
-        p->StartAndWait();
-
-        for (auto* t : threads) {
-
-            if (t->KeepMolecule() == false) {
-                keep_molecule = false;
-                writeStatisticFile(t->Reference(), mol1, t->RMSD());
-
-                if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
-                    m_4th_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted];\n";
-
-                m_4th_content += "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
-                m_4th_content += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
-                m_4th_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
-                laststring = t->Reference()->Name();
-
-                break;
-            }
-        }
-
-        if (keep_molecule) {
-            ConfScanThreadNoReorder* thread = addThreadNoreorder(mol1, rmsd);
-            threads.push_back(thread);
-            p->addThread(thread);
-            AcceptMolecule(mol1);
-        } else {
-            RejectMolecule(mol1);
-        }
-        PrintStatus();
-    }
-    p->clear();
-    delete p;
-}
-*/
 ConfScanThreadNoReorder* ConfScan::addThreadNoreorder(const Molecule* reference, const json& config)
 {
     ConfScanThreadNoReorder* thread = new ConfScanThreadNoReorder(m_rmsd_threshold, m_MaxHTopoDiff, config);
