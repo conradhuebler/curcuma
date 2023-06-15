@@ -556,12 +556,12 @@ void ConfScan::start()
 {
     PrintController(m_controller);
     SetUp();
+    RunTimer timer(false);
+    std::ofstream result_file;
 
     if (!m_skipinit) {
         fmt::print("\n\nInitial Pass\nPerforming RMSD calculation without reordering now!\n\n");
-        RunTimer timer(false);
         m_current_filename = m_1st_filename;
-        std::ofstream result_file;
         if (m_writeFiles && !m_reduced_file) {
             result_file.open(m_statistic_filename, std::ios_base::app);
             result_file << "Results of 1st Pass" << std::endl;
@@ -579,7 +579,6 @@ void ConfScan::start()
         std::cout << m_dnn_data.size() << std::endl;
 #endif
         fmt::print("\nInitial Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
-
     } else {
         fmt::print("\n\nSkipping initial pass!\n\nSettings thresholds to high value ...");
 
