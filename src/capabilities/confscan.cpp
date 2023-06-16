@@ -55,11 +55,11 @@ int ConfScanThread::execute()
     m_reused_worked = false;
     m_reorder_rule.clear();
 
+#ifdef WriteMoreInfo
     double Ia = abs(m_reference.Ia() - m_target.Ia());
     double Ib = abs(m_reference.Ib() - m_target.Ib());
     double Ic = abs(m_reference.Ic() - m_target.Ic());
 
-#ifdef WriteMoreInfo
     m_input.dIa = Ia;
     m_input.dIb = Ib;
     m_input.dIc = Ic;
@@ -206,6 +206,7 @@ void ConfScan::LoadControlJson()
     m_skipinit = Json2KeyWord<bool>(m_defaults, "skipinit");
     m_skipreorder = Json2KeyWord<bool>(m_defaults, "skipreorder");
     m_skipreuse = Json2KeyWord<bool>(m_defaults, "skipreuse");
+    m_mapped = Json2KeyWord<bool>(m_defaults, "mapped");
 
     m_sTE = Json2KeyWord<double>(m_defaults, "sTE");
     m_sTI = Json2KeyWord<double>(m_defaults, "sTI");
@@ -603,11 +604,25 @@ void ConfScan::start()
             double dLI = m_dLI;
             double dLH = m_dLH;
             double dLE = m_dLE;
+            if (!m_mapped) {
+                std::cout << m_sLI[run] << " " << m_sLH[run] << " " << m_sLE[run] << std::endl;
+                std::cout << m_dLI << " " << m_dLH << " " << m_dLE << std::endl;
 
-            dLI = m_dLI * m_sLI[run];
-            dLH = m_dLH * m_sLH[run];
-            dLE = m_dLE * m_sLE[run];
+                dLI = m_dLI * m_sLI[run];
+                dLH = m_dLH * m_sLH[run];
+                dLE = m_dLE * m_sLE[run];
+            } else {
+                for (const auto& i : m_listThresh) {
+                    if (i.first <= m_sLI[run] * m_rmsd_threshold)
+                        dLI = std::max(dLI, i.second[2]);
 
+                    if (i.first <= m_sLH[run] * m_rmsd_threshold)
+                        dLH = std::max(dLH, i.second[1]);
+
+                    if (i.first <= m_sLE[run] * m_rmsd_threshold)
+                        dLE = std::max(dLE, i.second[0]);
+                }
+            }
             if (!CheckStop()) {
                 timer.Reset();
                 fmt::print("\n\nReorder Pass\nPerforming RMSD calculation with reordering now!\n\n");
@@ -642,6 +657,7 @@ void ConfScan::start()
                 PrintStatus("Result Reuse pass:");
                 result_file.close();
             }
+            m_exclude_list.clear();
             Reorder(-1, -1, -1, true, m_reset);
             PrintStatus("Result reuse pass:");
             WriteDotFile(m_result_basename + ".reuse.dot", m_second_content);
@@ -733,13 +749,16 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
         p->StartAndWait();
 
         for (auto* t : threads) {
+            if (!m_mapped) {
+                m_dLI = std::max(m_dLI, t->DI() * (t->RMSD() <= (sLI * m_rmsd_threshold)));
+                m_dLH = std::max(m_dLH, t->DH() * (t->RMSD() <= (sLH * m_rmsd_threshold)));
+                m_dLE = std::max(m_dLE, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (sLE * m_rmsd_threshold)));
+            } else
+                m_listThresh.insert(std::pair<double, std::vector<double>>(t->RMSD(), { (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5), t->DH(), t->DI() }));
+
             m_dTI = std::max(m_dTI, t->DI() * (t->RMSD() <= (m_sTI * m_rmsd_threshold)));
             m_dTH = std::max(m_dTH, t->DH() * (t->RMSD() <= (m_sTH * m_rmsd_threshold)));
             m_dTE = std::max(m_dTE, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (m_sTE * m_rmsd_threshold)));
-
-            m_dLI = std::max(m_dLI, t->DI() * (t->RMSD() <= (sLI * m_rmsd_threshold)));
-            m_dLH = std::max(m_dLH, t->DH() * (t->RMSD() <= (sLH * m_rmsd_threshold)));
-            m_dLE = std::max(m_dLE, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (sLE * m_rmsd_threshold)));
 
             if (t->KeepMolecule() == false) {
                 keep_molecule = false;
@@ -831,6 +850,7 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
      * than the tight threshold and the loose threshold is set to a big number, that every structure has to be reordered*/
     m_skiped = 0;
     m_rejected_directly = 0;
+    m_duplicated = 0;
     if (m_ignoreRotation == true) {
         m_dLI = 1e10;
         m_dTI = -1;

@@ -99,7 +99,8 @@ static const json ConfScanJson = {
     { "ripser_ratio", 1 },
     { "ripser_dimension", 2 },
     { "domolalign", -1 },
-    { "molaligntol", 10 }
+    { "molaligntol", 10 },
+    { "mapped", false }
 };
 
 class ConfScanThread : public CxxThread {
@@ -340,6 +341,8 @@ private:
     std::string m_rmsd_element_templates;
     std::string m_method = "";
     std::string m_molalign = "molalign";
+    std::map<double, double> m_listH, m_listI, m_listE;
+    std::map<double, std::vector<double>> m_listThresh;
     std::vector<double> m_sLE = { 1.0 }, m_sLI = { 1.0 }, m_sLH = { 1.0 };
     double m_domolalign = -1;
     double m_lastDI = 0.0, m_lastDH = 0.0, m_lastdE = -1, m_dE = -1, m_damping = 0.8;
@@ -378,4 +381,5 @@ private:
     bool m_write = false;
     bool m_nomunkres = false;
     bool m_reset = false;
+    bool m_mapped = false;
 };

@@ -239,8 +239,20 @@ public:
     void writeParameterFile(const std::string& file) const;
     void writeUFFFile(const std::string& file) const;
 
-    json writeParameter() const;
+    // json writeParameter() const;
     json writeUFF() const;
+
+    json Bonds() const;
+    json Angles() const;
+    json Dihedrals() const;
+    json Inversions() const;
+    json vdWs() const;
+
+    void setBonds(const json& bonds);
+    void setAngles(const json& angles);
+    void setDihedrals(const json& dihedrals);
+    void setInversions(const json& inversions);
+    void setvdWs(const json& vdws);
 
     void readParameterFile(const std::string& file);
     void readUFFFile(const std::string& file);

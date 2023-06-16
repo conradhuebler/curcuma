@@ -1231,19 +1231,25 @@ void eigenUFF::AssignUffAtomTypes()
 
 void eigenUFF::writeParameterFile(const std::string& file) const
 {
+    json parameters = writeUFF();
+    parameters["bonds"] = Bonds();
+    parameters["angles"] = Angles();
+    parameters["dihedrals"] = Dihedrals();
+    parameters["inversions"] = Inversions();
+    parameters["vdws"] = vdWs();
     std::ofstream parameterfile(file);
-    parameterfile << writeParameter();
+    parameterfile << parameters;
 }
 
 void eigenUFF::writeUFFFile(const std::string& file) const
 {
+    json parameters = writeUFF();
     std::ofstream parameterfile(file);
     parameterfile << writeUFF();
 }
 
-json eigenUFF::writeParameter() const
+json eigenUFF::Bonds() const
 {
-    json parameters;
     json bonds;
     for (int i = 0; i < m_uffbonds.size(); ++i) {
         json bond;
@@ -1253,7 +1259,11 @@ json eigenUFF::writeParameter() const
         bond["kij"] = m_uffbonds[i].kij;
         bonds[i] = bond;
     }
-    parameters["bonds"] = bonds;
+    return bonds;
+}
+
+json eigenUFF::Angles() const
+{
     json angles;
 
     for (int i = 0; i < m_uffangle.size(); ++i) {
@@ -1269,10 +1279,12 @@ json eigenUFF::writeParameter() const
 
         angles[i] = angle;
     }
-    parameters["angles"] = angles;
+    return angles;
+}
 
+json eigenUFF::Dihedrals() const
+{
     json dihedrals;
-
     for (int i = 0; i < m_uffdihedral.size(); ++i) {
         json dihedral;
         dihedral["i"] = m_uffdihedral[i].i;
@@ -1285,10 +1297,12 @@ json eigenUFF::writeParameter() const
 
         dihedrals[i] = dihedral;
     }
-    parameters["dihedrals"] = dihedrals;
+    return dihedrals;
+}
 
+json eigenUFF::Inversions() const
+{
     json inversions;
-
     for (int i = 0; i < m_uffinversion.size(); ++i) {
         json inversion;
         inversion["i"] = m_uffinversion[i].i;
@@ -1302,8 +1316,11 @@ json eigenUFF::writeParameter() const
 
         inversions[i] = inversion;
     }
-    parameters["inversions"] = inversions;
+    return inversions;
+}
 
+json eigenUFF::vdWs() const
+{
     json vdws;
     for (int i = 0; i < m_uffvdwaals.size(); ++i) {
         json vdw;
@@ -1313,7 +1330,18 @@ json eigenUFF::writeParameter() const
         vdw["xij"] = m_uffvdwaals[i].xij;
         vdws[i] = vdw;
     }
-    parameters["vdws"] = vdws;
+    return vdws;
+}
+/*
+json eigenUFF::writeParameter() const
+{
+    json parameters;
+
+    parameters["bonds"] = Bonds();
+    parameters["angles"] = Angles();
+    parameters["dihedrals"] = Dihedrals();
+    parameters["inversions"] = Inversions();
+    parameters["vdws"] = vdWs();
 
     parameters["bond_scaling"] = m_bond_scaling;
     parameters["angle_scaling"] = m_angle_scaling;
@@ -1365,7 +1393,7 @@ json eigenUFF::writeParameter() const
 #endif
     return parameters;
 }
-
+*/
 json eigenUFF::writeUFF() const
 {
     json parameters;
@@ -1467,50 +1495,62 @@ void eigenUFF::readUFF(const json& parameters)
 void eigenUFF::readParameter(const json& parameters)
 {
     m_gradient = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
+    readUFF(parameters);
     // while (m_gradient.size() < m_atom_types.size())
     //     m_gradient.push_back({ 0, 0, 0 });
 
     //  m_d = parameters["differential"].get<double>();
+    /*
+    #ifdef USE_D3
+        if (m_use_d3)
+            m_d3->UpdateParameters(parameters);
+    #endif
 
-#ifdef USE_D3
-    if (m_use_d3)
-        m_d3->UpdateParameters(parameters);
-#endif
+    #ifdef USE_D4
+        if (m_use_d4)
+            m_d4->UpdateParameters(parameters);
+    #endif
 
-#ifdef USE_D4
-    if (m_use_d4)
-        m_d4->UpdateParameters(parameters);
-#endif
+        m_bond_scaling = parameters["bond_scaling"].get<double>();
+        m_angle_scaling = parameters["angle_scaling"].get<double>();
+        m_dihedral_scaling = parameters["dihedral_scaling"].get<double>();
+        m_inversion_scaling = parameters["inversion_scaling"].get<double>();
+        m_vdw_scaling = parameters["vdw_scaling"].get<double>();
+        m_rep_scaling = parameters["rep_scaling"].get<double>();
 
-    m_bond_scaling = parameters["bond_scaling"].get<double>();
-    m_angle_scaling = parameters["angle_scaling"].get<double>();
-    m_dihedral_scaling = parameters["dihedral_scaling"].get<double>();
-    m_inversion_scaling = parameters["inversion_scaling"].get<double>();
-    m_vdw_scaling = parameters["vdw_scaling"].get<double>();
-    m_rep_scaling = parameters["rep_scaling"].get<double>();
+        m_coulmob_scaling = parameters["coulomb_scaling"].get<double>();
 
-    m_coulmob_scaling = parameters["coulomb_scaling"].get<double>();
+        m_bond_force = parameters["bond_force"].get<double>();
+        m_angle_force = parameters["angle_force"].get<double>();
+        m_calc_gradient = parameters["gradient"].get<int>();
 
-    m_bond_force = parameters["bond_force"].get<double>();
-    m_angle_force = parameters["angle_force"].get<double>();
-    m_calc_gradient = parameters["gradient"].get<int>();
+        m_h4_scaling = parameters["h4_scaling"].get<double>();
+        m_hh_scaling = parameters["hh_scaling"].get<double>();
 
-    m_h4_scaling = parameters["h4_scaling"].get<double>();
-    m_hh_scaling = parameters["hh_scaling"].get<double>();
+        m_h4correction.set_OH_O(parameters["h4_oh_o"].get<double>());
+        m_h4correction.set_OH_N(parameters["h4_oh_n"].get<double>());
+        m_h4correction.set_NH_O(parameters["h4_nh_o"].get<double>());
+        m_h4correction.set_NH_N(parameters["h4_nh_n"].get<double>());
 
-    m_h4correction.set_OH_O(parameters["h4_oh_o"].get<double>());
-    m_h4correction.set_OH_N(parameters["h4_oh_n"].get<double>());
-    m_h4correction.set_NH_O(parameters["h4_nh_o"].get<double>());
-    m_h4correction.set_NH_N(parameters["h4_nh_n"].get<double>());
+        m_h4correction.set_WH_O(parameters["h4_wh_o"].get<double>());
+        m_h4correction.set_NH4(parameters["h4_nh4"].get<double>());
+        m_h4correction.set_COO(parameters["h4_coo"].get<double>());
+        m_h4correction.set_HH_Rep_K(parameters["hh_rep_k"].get<double>());
+        m_h4correction.set_HH_Rep_E(parameters["hh_rep_e"].get<double>());
+        m_h4correction.set_HH_Rep_R0(parameters["hh_rep_r0"].get<double>());
+        */
+    setBonds(parameters["bonds"]);
+    setAngles(parameters["angles"]);
+    setDihedrals(parameters["dihedrals"]);
+    setInversions(parameters["inversions"]);
+    setvdWs(parameters["vdws"]);
 
-    m_h4correction.set_WH_O(parameters["h4_wh_o"].get<double>());
-    m_h4correction.set_NH4(parameters["h4_nh4"].get<double>());
-    m_h4correction.set_COO(parameters["h4_coo"].get<double>());
-    m_h4correction.set_HH_Rep_K(parameters["hh_rep_k"].get<double>());
-    m_h4correction.set_HH_Rep_E(parameters["hh_rep_e"].get<double>());
-    m_h4correction.set_HH_Rep_R0(parameters["hh_rep_r0"].get<double>());
+    AutoRanges();
+    m_initialised = true;
+}
 
-    json bonds = parameters["bonds"];
+void eigenUFF::setBonds(const json& bonds)
+{
     m_uffbonds.clear();
     for (int i = 0; i < bonds.size(); ++i) {
         json bond = bonds[i].get<json>();
@@ -1522,8 +1562,10 @@ void eigenUFF::readParameter(const json& parameters)
         b.kij = bond["kij"].get<double>();
         m_uffbonds.push_back(b);
     }
+}
 
-    json angles = parameters["angles"];
+void eigenUFF::setAngles(const json& angles)
+{
     m_uffangle.clear();
     for (int i = 0; i < angles.size(); ++i) {
         json angle = angles[i].get<json>();
@@ -1538,8 +1580,10 @@ void eigenUFF::readParameter(const json& parameters)
         a.kijk = angle["kijk"].get<double>();
         m_uffangle.push_back(a);
     }
+}
 
-    json dihedrals = parameters["dihedrals"];
+void eigenUFF::setDihedrals(const json& dihedrals)
+{
     m_uffdihedral.clear();
     for (int i = 0; i < dihedrals.size(); ++i) {
         json dihedral = dihedrals[i].get<json>();
@@ -1554,8 +1598,10 @@ void eigenUFF::readParameter(const json& parameters)
         d.phi0 = dihedral["phi0"].get<double>();
         m_uffdihedral.push_back(d);
     }
+}
 
-    json inversions = parameters["inversions"];
+void eigenUFF::setInversions(const json& inversions)
+{
     m_uffinversion.clear();
     for (int i = 0; i < inversions.size(); ++i) {
         json inversion = inversions[i].get<json>();
@@ -1572,8 +1618,10 @@ void eigenUFF::readParameter(const json& parameters)
 
         m_uffinversion.push_back(inv);
     }
+}
 
-    json vdws = parameters["vdws"];
+void eigenUFF::setvdWs(const json& vdws)
+{
     m_uffvdwaals.clear();
     for (int i = 0; i < vdws.size(); ++i) {
         json vdw = vdws[i].get<json>();
@@ -1586,8 +1634,6 @@ void eigenUFF::readParameter(const json& parameters)
 
         m_uffvdwaals.push_back(v);
     }
-    AutoRanges();
-    m_initialised = true;
 }
 
 void eigenUFF::readUFFFile(const std::string& file)
@@ -1616,8 +1662,6 @@ void eigenUFF::readParameterFile(const std::string& file)
 
 void eigenUFF::AutoRanges()
 {
-    // auto parameter = writeParameter();
-
     for (int i = 0; i < m_threads; ++i) {
         UFFThread* thread = new UFFThread(i, m_threads);
         thread->readUFF(writeUFF());
