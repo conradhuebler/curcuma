@@ -35,12 +35,10 @@
 #include "curcumamethod.h"
 
 constexpr double third = 1 / 3.0;
-#ifdef WriteMoreInfo
 struct dnn_input {
     double dE, dIa, dIb, dIc, dH, rmsd;
     Matrix dHM;
 };
-#endif
 
 static const json ConfScanJson = {
     { "noname", true },
@@ -100,7 +98,8 @@ static const json ConfScanJson = {
     { "ripser_dimension", 2 },
     { "domolalign", -1 },
     { "molaligntol", 10 },
-    { "mapped", false }
+    { "mapped", false },
+    { "analyse", false }
 };
 
 class ConfScanThread : public CxxThread {
@@ -152,6 +151,7 @@ public:
     void setThreads(int threads) { m_threads = threads; }
 
     double RMSD() const { return m_rmsd; }
+    double OldRMSD() const { return m_old_rmsd; }
     const Molecule* Reference() const { return &m_reference; }
     const Molecule* Target() const { return &m_target; }
 
@@ -159,13 +159,16 @@ public:
 #ifdef WriteMoreInfo
     void setPredRMSD(double rmsd) { m_pred_rmsd = rmsd; }
     double PredRMSD() const { return m_pred_rmsd; }
-    dnn_input getDNNInput() const { return m_input; }
 #endif
+    dnn_input getDNNInput() const
+    {
+        return m_input;
+    }
 
 private:
     bool m_keep_molecule = true, m_break_pool = false, m_reorder_worked = false, m_reuse_only = false, m_reused_worked = false;
     Molecule m_reference, m_target;
-    double m_rmsd = 0, m_rmsd_threshold = 1, m_energy = 0;
+    double m_rmsd = 0, m_old_rmsd = 0, m_rmsd_threshold = 1, m_energy = 0;
     int m_MaxHTopoDiff;
     int m_threads = 1;
     std::vector<int> m_reorder_rule;
@@ -174,8 +177,8 @@ private:
     json m_config;
 #ifdef WriteMoreInfo
     double m_pred_rmsd = 0;
-    dnn_input m_input;
 #endif
+    dnn_input m_input;
 };
 
 class ConfScanThreadNoReorder : public CxxThread {
@@ -217,12 +220,10 @@ public:
     }
 
     bool KeepMolecule() const { return m_keep_molecule; }
-#ifdef WriteMoreInfo
     dnn_input getDNNInput() const
     {
         return m_input;
     }
-#endif
 
 private:
     bool m_keep_molecule = true, m_break_pool = false;
@@ -233,9 +234,7 @@ private:
     json m_config;
     double m_rmsd = 0, m_rmsd_threshold = 1;
     int m_MaxHTopoDiff;
-#ifdef WriteMoreInfo
     dnn_input m_input;
-#endif
 };
 
 class ConfScan : public CurcumaMethod {
@@ -317,7 +316,7 @@ private:
     std::vector<Molecule*> m_global_temp_list;
     int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0, m_skip = 0, m_skiped = 0, m_duplicated = 0, m_rejected_directly = 0, m_molalign_count = 0, m_molalign_success = 0;
 
-    std::string m_filename, m_accepted_filename, m_1st_filename, m_2nd_filename, m_3rd_filename, m_rejected_filename, m_result_basename, m_statistic_filename, m_prev_accepted, m_joined_filename, m_threshold_filename, m_current_filename;
+    std::string m_filename, m_accepted_filename, m_1st_filename, m_2nd_filename, m_3rd_filename, m_rejected_filename, m_result_basename, m_statistic_filename, m_prev_accepted, m_joined_filename, m_threshold_filename, m_current_filename, m_param_file, m_skip_file, m_perform_file, m_success_file, m_limit_file;
     std::map<double, int> m_ordered_list;
 
     std::vector<std::pair<std::string, Molecule*>> m_molecules;
@@ -343,6 +342,7 @@ private:
     std::string m_molalign = "molalign";
     std::map<double, double> m_listH, m_listI, m_listE;
     std::map<double, std::vector<double>> m_listThresh;
+    std::vector<std::vector<double>> m_list_skipped, m_list_performed;
     std::vector<double> m_sLE = { 1.0 }, m_sLI = { 1.0 }, m_sLH = { 1.0 };
     double m_domolalign = -1;
     double m_lastDI = 0.0, m_lastDH = 0.0, m_lastdE = -1, m_dE = -1, m_damping = 0.8;
@@ -382,4 +382,5 @@ private:
     bool m_nomunkres = false;
     bool m_reset = false;
     bool m_mapped = false;
+    bool m_analyse = false;
 };
