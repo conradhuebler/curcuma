@@ -278,7 +278,6 @@ void Molecule::setXYZComment(const std::string& comment)
             }
         }
     } else {
-
         if (list.size() == 7) {
             setXYZComment_7(list);
         } else if (list.size() == 6) {

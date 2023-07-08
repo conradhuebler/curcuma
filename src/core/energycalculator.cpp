@@ -140,7 +140,6 @@ void EnergyCalculator::setMolecule(const Molecule& molecule)
 #endif
 
     } else if (std::find(m_xtb_methods.begin(), m_xtb_methods.end(), m_method) != m_xtb_methods.end()) { // XTB energy calculator requested
-
 #ifdef USE_XTB
         m_xtb->InitialiseMolecule(molecule);
         if (m_method.compare("xtb-gfn1") == 0)

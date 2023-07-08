@@ -1281,7 +1281,6 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::DistanceReorderV3(cons
                 if (new_order.size() >= 4 && i % 1 == 0) {
                     Molecule w_ref, w_tar;
                     for (int i = 0; i < new_order.size(); ++i) {
-
                         w_ref.addPair(ref.Atom(i));
                         w_tar.addPair(tar.Atom(new_order[i]));
                     }

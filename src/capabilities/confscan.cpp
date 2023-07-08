@@ -54,7 +54,12 @@ int ConfScanThread::execute()
     m_reorder_worked = false;
     m_reused_worked = false;
     m_reorder_rule.clear();
-
+    m_rmsd = m_driver->BestFitRMSD();
+    if (m_rmsd < m_rmsd_threshold) {
+        m_keep_molecule = false;
+        m_break_pool = true;
+        return 0;
+    }
 #ifdef WriteMoreInfo
     double Ia = abs(m_reference.Ia() - m_target.Ia());
     double Ib = abs(m_reference.Ib() - m_target.Ib());

@@ -98,7 +98,6 @@ static const json DockingJson = {
 };
 
 class Docking : public CurcumaMethod {
-
 public:
     Docking(const json& controller = DockingJson, bool silent = true);
     virtual ~Docking() = default;
