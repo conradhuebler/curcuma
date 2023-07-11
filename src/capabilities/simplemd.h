@@ -165,7 +165,6 @@ private:
 };
 
 class MDThread : public CxxThread {
-
 public:
     MDThread(int thread, const json& controller)
         : m_thread(thread)

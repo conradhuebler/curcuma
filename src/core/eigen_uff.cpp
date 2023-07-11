@@ -613,7 +613,7 @@ void eigenUFF::Initialise()
     m_coordination = std::vector<int>(m_atom_types.size(), 0);
     std::vector<std::set<int>> ignored_vdw;
     m_topo = Eigen::MatrixXd::Zero(m_atom_types.size(), m_atom_types.size());
-    TContainer bonds, nonbonds, angels, dihedrals, inversions;
+    TContainer bonds, nonbonds, angles, dihedrals, inversions;
     m_scaling = 1.4;
     m_gradient = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
     for (int i = 0; i < m_atom_types.size(); ++i) {
@@ -649,7 +649,44 @@ void eigenUFF::Initialise()
         FindRings();
 
     bonds.clean();
+    setBonds(bonds, ignored_vdw, angles, dihedrals, inversions);
 
+    angles.clean();
+    setAngles(angles, ignored_vdw);
+
+    dihedrals.clean();
+    setDihedrals(dihedrals);
+
+    inversions.clean();
+    setInversions(inversions);
+
+    nonbonds.clean();
+    setvdWs(ignored_vdw);
+
+    m_h4correction.allocate(m_atom_types.size());
+
+#ifdef USE_D3
+    if (m_use_d3)
+        m_d3->InitialiseMolecule(m_atom_types);
+#endif
+
+#ifdef USE_D4
+    if (m_use_d4)
+        m_d4->InitialiseMolecule(m_atom_types);
+#endif
+
+    if (m_writeparam.compare("none") != 0)
+        writeParameterFile(m_writeparam + ".json");
+
+    if (m_writeuff.compare("none") != 0)
+        writeUFFFile(m_writeuff + ".json");
+
+    AutoRanges();
+    m_initialised = true;
+}
+
+void eigenUFF::setBonds(const TContainer& bonds, std::vector<std::set<int>>& ignored_vdw, TContainer& angels, TContainer& dihedrals, TContainer& inversions)
+{
     for (const auto& bond : bonds.Storage()) {
         UFFBond b;
 
@@ -714,9 +751,11 @@ void eigenUFF::Initialise()
             inversions.insert({ j, m_stored_bonds[j][0], m_stored_bonds[j][1], m_stored_bonds[j][2] });
         }
     }
+}
 
-    angels.clean();
-    for (const auto& angle : angels.Storage()) {
+void eigenUFF::setAngles(const TContainer& angles, const std::vector<std::set<int>>& ignored_vdw)
+{
+    for (const auto& angle : angles.Storage()) {
         UFFAngle a;
 
         a.i = angle[0];
@@ -741,8 +780,10 @@ void eigenUFF::Initialise()
         a.C0 = a.C2 * (2 * cosTheta0 * cosTheta0 + 1);
         m_uffangle.push_back(a);
     }
+}
 
-    dihedrals.clean();
+void eigenUFF::setDihedrals(const TContainer& dihedrals)
+{
     for (const auto& dihedral : dihedrals.Storage()) {
         UFFDihedral d;
         d.i = dihedral[0];
@@ -787,7 +828,10 @@ void eigenUFF::Initialise()
 
         m_uffdihedral.push_back(d);
     }
-    inversions.clean();
+}
+
+void eigenUFF::setInversions(const TContainer& inversions)
+{
     for (const auto& inversion : inversions.Storage()) {
         const int i = inversion[0];
         if (m_coordination[i] != 3)
@@ -819,17 +863,17 @@ void eigenUFF::Initialise()
                 w0 *= 84.4339;
                 break;
 
-            // if the central atom is arsenic
+                // if the central atom is arsenic
             case 33:
                 w0 *= 86.9735;
                 break;
 
-            // if the central atom is antimonium
+                // if the central atom is antimonium
             case 51:
                 w0 *= 87.7047;
                 break;
 
-            // if the central atom is bismuth
+                // if the central atom is bismuth
             case 83:
                 w0 *= 90.0;
                 break;
@@ -845,8 +889,10 @@ void eigenUFF::Initialise()
         inv.kijkl = kijkl;
         m_uffinversion.push_back(inv);
     }
-    nonbonds.clean();
+}
 
+void eigenUFF::setvdWs(const std::vector<std::set<int>>& ignored_vdw)
+{
     for (int i = 0; i < m_atom_types.size(); ++i) {
         for (int j = i + 1; j < m_atom_types.size(); ++j) {
             if (std::find(ignored_vdw[i].begin(), ignored_vdw[i].end(), j) != ignored_vdw[i].end() || std::find(ignored_vdw[j].begin(), ignored_vdw[j].end(), i) != ignored_vdw[j].end())
@@ -866,26 +912,6 @@ void eigenUFF::Initialise()
             m_uffvdwaals.push_back(v);
         }
     }
-    m_h4correction.allocate(m_atom_types.size());
-
-#ifdef USE_D3
-    if (m_use_d3)
-        m_d3->InitialiseMolecule(m_atom_types);
-#endif
-
-#ifdef USE_D4
-    if (m_use_d4)
-        m_d4->InitialiseMolecule(m_atom_types);
-#endif
-
-    if (m_writeparam.compare("none") != 0)
-        writeParameterFile(m_writeparam + ".json");
-
-    if (m_writeuff.compare("none") != 0)
-        writeUFFFile(m_writeuff + ".json");
-
-    AutoRanges();
-    m_initialised = true;
 }
 
 void eigenUFF::FindRings()

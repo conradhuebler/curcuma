@@ -320,7 +320,7 @@ private:
     std::map<double, int> m_ordered_list;
 
     std::vector<std::pair<std::string, Molecule*>> m_molecules;
-    double m_rmsd_threshold = 1.0, m_nearly_missed = 0.8, m_energy_cutoff = -1, m_reference_last_energy = 0, m_target_last_energy = 0, m_lowest_energy = 1, m_current_energy = 0;
+    double m_rmsd_threshold = 1.0, m_print_rmsd = 0, m_nearly_missed = 0.8, m_energy_cutoff = -1, m_reference_last_energy = 0, m_target_last_energy = 0, m_lowest_energy = 1, m_current_energy = 0;
     double m_sTE = 0.1; /* m_sLE = 1.0; */
     double m_sTI = 0.1; /* m_sLI = 1.0; */
     double m_sTH = 0.1; /* m_sLH = 1.0; */

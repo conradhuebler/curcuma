@@ -339,7 +339,6 @@ int main(int argc, char **argv) {
 
             mapper.FindPairs();
         } else if (strcmp(argv[1], "-nci") == 0) {
-
             if (argc < 4) {
                 std::cerr << "Please use curcuma to post-process two RDG vs rho plots from NCIPLOT as follows:\ncurcuma -nci file1.dat file2.dat" << std::endl;
                 std::cerr << "Additonal arguments are:" << std::endl;
@@ -696,7 +695,6 @@ int main(int argc, char **argv) {
              }else
             */
             {
-
                 for (int i : A)
                     std::cout << i << " ";
                 std::cout << std::endl;

@@ -52,7 +52,6 @@ void AnalyseNCIPlot::start()
     std::vector<double> distances_1, distances_2;
     std::map<int, std::map<double, double>::iterator> index_mapper_1, index_mapper_2;
     for (auto iter = m_NCI1.begin(); iter != m_NCI1.end(); ++iter) {
-
         if (index_mapper_1.find(int(iter->first * scaling)) == index_mapper_1.end())
             index_mapper_1.insert(std::pair<int, std::map<double, double>::iterator>(int(iter->first * scaling), iter));
 
@@ -66,7 +65,6 @@ void AnalyseNCIPlot::start()
     index_mapper_1.insert(std::pair<int, std::map<double, double>::iterator>(index_mapper_1.size(), m_NCI1.end()));
 
     for (auto iter = m_NCI2.begin(); iter != m_NCI2.end(); ++iter) {
-
         if (index_mapper_2.find(int(iter->first * scaling)) == index_mapper_2.end())
             index_mapper_2.insert(std::pair<int, std::map<double, double>::iterator>(int(iter->first * scaling), iter));
 

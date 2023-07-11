@@ -50,7 +50,6 @@ int ConfScanThread::execute()
     m_driver->setReference(m_reference);
     m_driver->setTarget(m_target);
 
-    m_old_rmsd = m_driver->BestFitRMSD();
     m_keep_molecule = true;
     m_break_pool = false;
     m_reorder_worked = false;
@@ -69,6 +68,14 @@ int ConfScanThread::execute()
     m_input.dH = diff_ripser;
     m_input.dHM = m;
     m_input.dE = std::abs(m_reference.Energy() - m_target.Energy()) * 2625.5;
+
+    m_old_rmsd = m_driver->BestFitRMSD();
+    if (m_old_rmsd < m_rmsd_threshold) {
+        m_rmsd = m_old_rmsd;
+        m_keep_molecule = false;
+        m_break_pool = true;
+        return 0;
+    }
 
     for (int i = 0; i < m_reorder_rules.size(); ++i) {
         if (m_reorder_rules[i].size() != m_reference.AtomCount() || m_reorder_rules[i].size() == 0)
@@ -639,13 +646,12 @@ void ConfScan::start()
             double dLH = m_dLH;
             double dLE = m_dLE;
             if (!m_mapped) {
-                std::cout << m_sLI[run] << " " << m_sLH[run] << " " << m_sLE[run] << std::endl;
-                std::cout << m_dLI << " " << m_dLH << " " << m_dLE << std::endl;
-
                 dLI = m_dLI * m_sLI[run];
                 dLH = m_dLH * m_sLH[run];
                 dLE = m_dLE * m_sLE[run];
+                m_print_rmsd = m_rmsd_threshold;
             } else {
+                m_print_rmsd = m_sLI[run] * m_rmsd_threshold;
                 for (const auto& i : m_listThresh) {
                     if (i.first <= m_sLI[run] * m_rmsd_threshold)
                         dLI = std::max(dLI, i.second[2]);
@@ -730,6 +736,40 @@ void ConfScan::start()
             m_collective_content += "edge [color=blue];\n";
             m_collective_content += m_second_content + "\n";
         }
+    }
+    if (m_analyse) {
+        std::ofstream energy;
+        energy.open(m_result_basename + ".energy.gnuplot");
+        energy << "scale = 4063.0/800.0" << std::endl;
+        energy << "set terminal pngcairo  transparent size 600*scale,400*scale transparent font \"Noto Sans\" fontscale scale linewidth scale pointscale scale" << std::endl;
+        energy << "set encoding utf8" << std::endl;
+        energy << "set xlabel \"RMSD [Å]\"" << std::endl;
+        energy << "set ylabel \"Energy ΔE [kJ/mol]\"" << std::endl;
+        energy << "set key left horizontal  font \"Helvetica, 10\" maxrows 1 outside" << std::endl;
+        energy << "plot '" << m_result_basename << ".param.dat' using 1:2 pt 10 ps 0.5 lt rgb \"grey\" title \"Parametrisation\", '" << m_result_basename << ".param.skip.dat' using 1:2 pt 10 ps 0.1 lt rgb \"blue\" title \"Reorder skipped\", '" << m_result_basename << ".param.perf.dat' using 1:2 pt 10 ps 0.1 lt rgb \"yellow\" title \"Reorder performed\", '" << m_result_basename << ".param.success.dat' using 2:3 pt 10 ps 0.5 lt rgb \"red\" title \"Reorder successful\", '" << m_result_basename << ".param.limit.dat' using 1:2 with linespoints linestyle 1 notitle" << std::endl;
+        energy.close();
+
+        std::ofstream ripser;
+        ripser.open(m_result_basename + ".ripser.gnuplot");
+        ripser << "scale = 4063.0/800.0" << std::endl;
+        ripser << "set terminal pngcairo  transparent size 600*scale,400*scale transparent font \"Noto Sans\" fontscale scale linewidth scale pointscale scale" << std::endl;
+        ripser << "set encoding utf8" << std::endl;
+        ripser << "set xlabel \"RMSD [Å]\"" << std::endl;
+        ripser << "set ylabel \"ΔH\"" << std::endl;
+        ripser << "set key left horizontal  font \"Helvetica, 10\" maxrows 1 outside" << std::endl;
+        ripser << "plot '" << m_result_basename << ".param.dat' using 1:3 pt 10 ps 0.5 lt rgb \"grey\" title \"Parametrisation\", '" << m_result_basename << ".param.skip.dat' using 1:3 pt 10 ps 0.1 lt rgb \"blue\" title \"Reorder skipped\", '" << m_result_basename << ".param.perf.dat' using 1:3 pt 10 ps 0.1 lt rgb \"yellow\" title \"Reorder performed\",  '" << m_result_basename << ".param.success.dat' using 2:4 pt 10 ps 0.5 lt rgb \"red\" title \"Reorder successful\", '" << m_result_basename << ".param.limit.dat' using 1:3 with linespoints linestyle 1 notitle" << std::endl;
+        ripser.close();
+
+        std::ofstream rotational;
+        rotational.open(m_result_basename + ".rotational.gnuplot");
+        rotational << "scale = 4063.0/800.0" << std::endl;
+        rotational << "set terminal pngcairo  transparent size 600*scale,400*scale transparent font \"Noto Sans\" fontscale scale linewidth scale pointscale scale" << std::endl;
+        rotational << "set encoding utf8" << std::endl;
+        rotational << "set xlabel \"RMSD [Å]\"" << std::endl;
+        rotational << "set ylabel \"ΔI [MHz]\"" << std::endl;
+        rotational << "set key left horizontal  font \"Helvetica, 10\" maxrows 1 outside" << std::endl;
+        rotational << "plot '" << m_result_basename << ".param.dat' using 1:4 pt 10 ps 0.5 lt rgb \"grey\" title \"Parametrisation\", '" << m_result_basename << ".param.skip.dat' using 1:4 pt 10 ps 0.1 lt rgb \"blue\" title \"Reorder skipped\", '" << m_result_basename << ".param.perf.dat' using 1:4 pt 10 ps 0.1 lt rgb \"yellow\" title \"Reorder performed\",  '" << m_result_basename << ".param.success.dat' using 2:5 pt 10 ps 0.5 lt rgb \"red\" title \"Reorder successful\", '" << m_result_basename << ".param.limit.dat' using 1:4 with linespoints linestyle 1 notitle" << std::endl;
+        rotational.close();
     }
 
 #ifdef WriteMoreInfo
@@ -911,6 +951,9 @@ void ConfScan::PrintSetUp(double dLE, double dLI, double dLH)
         parameters_limit << "0\t" << dLE << "\t" << dLH << "\t" << dLI << std::endl;
         parameters_limit << std::prev(m_listThresh.end())->first << "\t" << dLE << "\t" << dLH << "\t" << dLI << std::endl;
         parameters_limit << std::endl;
+        parameters_limit << m_print_rmsd << "\t" << 0 << "\t" << 0 << "\t" << 0 << std::endl;
+        parameters_limit << m_print_rmsd << "\t" << dLE << "\t" << dLH << "\t" << dLI << std::endl;
+        parameters_limit << std::endl;
         parameters_limit.close();
     }
 }
@@ -1028,7 +1071,6 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
             } else {
                 threads[t]->setEnabled(false);
                 m_list_skipped.push_back({ std::abs(mol1->Energy() - mol2->Energy()) * 2625.5, dH, dI });
-                // parameters_skip << std::abs(mol1->Energy() - mol2->Energy())* 2625.5 << " " << dH << " " << dI << std::endl;
             }
         }
 

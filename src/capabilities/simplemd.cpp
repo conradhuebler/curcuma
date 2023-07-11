@@ -296,7 +296,6 @@ bool SimpleMD::LoadRestartInformation()
     StringList files = RestartFiles();
     int error = 0;
     for (const auto& f : files) {
-
         std::ifstream file(f);
         json restart;
         try {
@@ -546,7 +545,6 @@ void SimpleMD::Verlet(double* coord, double* grad)
     //   restart_file << fallback << std::endl;
 
     for (int i = 0; i < m_natoms; ++i) {
-
         coord[3 * i + 0] = m_current_geometry[3 * i + 0] + m_timestep * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
         coord[3 * i + 1] = m_current_geometry[3 * i + 1] + m_timestep * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
         coord[3 * i + 2] = m_current_geometry[3 * i + 2] + m_timestep * m_velocities[3 * i + 2] - 0.5 * grad[3 * i + 2] * m_rmass[3 * i + 2] * m_dt2;
@@ -773,7 +771,6 @@ void SimpleMD::PrintStatus() const
         remaining = (m_maxtime - m_currentStep) * duration;
 #pragma message("awfull, fix it ")
     if (m_writeUnique) {
-
 #ifdef GCC
         std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}}\n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, remaining, m_unqiue->StoredStructures());
 #else

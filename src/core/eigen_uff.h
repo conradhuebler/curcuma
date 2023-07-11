@@ -249,10 +249,19 @@ public:
     json vdWs() const;
 
     void setBonds(const json& bonds);
+    void setBonds(const TContainer& bonds, std::vector<std::set<int>>& ignored_vdw, TContainer& angels, TContainer& dihedrals, TContainer& inversions);
+
     void setAngles(const json& angles);
+    void setAngles(const TContainer& angles, const std::vector<std::set<int>>& ignored_vdw);
+
     void setDihedrals(const json& dihedrals);
+    void setDihedrals(const TContainer& dihedrals);
+
     void setInversions(const json& inversions);
+    void setInversions(const TContainer& inversions);
+
     void setvdWs(const json& vdws);
+    void setvdWs(const std::vector<std::set<int>>& ignored_vdw);
 
     void readParameterFile(const std::string& file);
     void readUFFFile(const std::string& file);
