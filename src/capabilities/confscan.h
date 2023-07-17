@@ -259,7 +259,7 @@ public:
     /*! \brief Check, if Reordering is forced */
     inline bool PreventReorder() const { return m_prevent_reorder; }
 
-    inline std::string NamePattern(int index) const { return "input_" + std::to_string(index); }
+    inline std::string NamePattern(int index) const { return "#" + std::to_string(index); }
 
     std::vector<Molecule*> Result() const { return m_result; }
     // std::vector<Molecule*> Failed() const { return m_failed; }
@@ -317,7 +317,7 @@ private:
     int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0, m_skip = 0, m_skiped = 0, m_duplicated = 0, m_rejected_directly = 0, m_molalign_count = 0, m_molalign_success = 0;
 
     std::string m_filename, m_accepted_filename, m_1st_filename, m_2nd_filename, m_3rd_filename, m_rejected_filename, m_result_basename, m_statistic_filename, m_prev_accepted, m_joined_filename, m_threshold_filename, m_current_filename, m_param_file, m_skip_file, m_perform_file, m_success_file, m_limit_file;
-    std::map<double, int> m_ordered_list;
+    std::multimap<double, int> m_ordered_list;
 
     std::vector<std::pair<std::string, Molecule*>> m_molecules;
     double m_rmsd_threshold = 1.0, m_print_rmsd = 0, m_nearly_missed = 0.8, m_energy_cutoff = -1, m_reference_last_energy = 0, m_target_last_energy = 0, m_lowest_energy = 1, m_current_energy = 0;
@@ -340,8 +340,9 @@ private:
     std::string m_rmsd_element_templates;
     std::string m_method = "";
     std::string m_molalign = "molalign";
-    std::map<double, double> m_listH, m_listI, m_listE;
-    std::map<double, std::vector<double>> m_listThresh;
+    std::multimap<double, double> m_listH, m_listI, m_listE;
+    std::multimap<double, std::vector<double>> m_listThresh;
+    std::map<double, std::string> m_nodes;
     std::vector<std::vector<double>> m_list_skipped, m_list_performed;
     std::vector<double> m_sLE = { 1.0 }, m_sLI = { 1.0 }, m_sLH = { 1.0 };
     double m_domolalign = -1;

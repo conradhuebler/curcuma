@@ -599,6 +599,9 @@ void ConfScan::start()
         m_sLI[0] = 1;
         m_sLH[0] = 1;
         m_collective_content = "edge [color=green];\n";
+        for (auto node : m_nodes)
+            m_collective_content += node.second;
+        m_nodes.clear();
         m_collective_content += m_first_content + "\n";
 
         std::ofstream parameters_file;
@@ -673,7 +676,8 @@ void ConfScan::start()
                 }
                 std::ofstream parameters_success;
                 parameters_success.open(m_success_file, std::ios_base::app);
-                parameters_success << "# " << run << " run" << std::endl;
+                parameters_success << std::endl
+                                   << "# " << run << " run" << std::endl;
 
                 Reorder(dLE, dLI, dLH, false);
                 PrintStatus("Result Reorder pass:");
@@ -681,6 +685,9 @@ void ConfScan::start()
                 fmt::print("\nReorder Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
                 timer.Reset();
                 m_collective_content += "edge [color=red];\n";
+                for (auto node : m_nodes)
+                    m_collective_content += node.second;
+                m_nodes.clear();
                 m_collective_content += m_second_content + "\n";
                 m_second_content.clear();
                 if (m_analyse) {
@@ -728,12 +735,20 @@ void ConfScan::start()
                 result_file.close();
             }
             m_exclude_list.clear();
+            std::ofstream parameters_success;
+            parameters_success.open(m_success_file, std::ios_base::app);
+            parameters_success << std::endl
+                               << "# reuse run" << std::endl;
+
             Reorder(-1, -1, -1, true, m_reset);
             PrintStatus("Result reuse pass:");
             WriteDotFile(m_result_basename + ".reuse.dot", m_second_content);
             fmt::print("\nReuse Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
             timer.Reset();
             m_collective_content += "edge [color=blue];\n";
+            for (auto node : m_nodes)
+                m_collective_content += node.second;
+            m_nodes.clear();
             m_collective_content += m_second_content + "\n";
         }
     }
@@ -870,10 +885,12 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
                 writeStatisticFile(t->Reference(), mol1, t->RMSD());
 
                 if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
-                    m_first_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted];\n";
-
-                m_first_content += "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
-                m_first_content += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
+                    m_first_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
+                std::string node = "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
+                node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
+                m_nodes.insert(std::pair<double, std::string>(t->Reference()->Energy(), node));
+                //                m_first_content +=
+                //                m_first_content +=
                 m_first_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
                 laststring = t->Reference()->Name();
 
@@ -1118,10 +1135,14 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
                         rules.push_back(t->ReorderRule());
 
                     if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
-                        m_second_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted];\n";
+                        m_second_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
 
-                    m_second_content += "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
-                    m_second_content += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
+                    std::string node = "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
+                    node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
+                    m_nodes.insert(std::pair<double, std::string>(t->Reference()->Energy(), node));
+
+                    // m_second_content += "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
+                    // m_second_content += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
                     m_second_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
                     laststring = t->Reference()->Name();
                     auto i = t->getDNNInput();
@@ -1148,7 +1169,7 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
                             writeStatisticFile(t->Reference(), mol1, driver.RMSD(), true, { 0, 0 });
 
                             if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
-                                m_second_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted];\n";
+                                m_second_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
 
                             m_second_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\";\n";
                             m_second_content += "\"" + mol1->Name() + "\" [shape=box, style=filled,color=\".7 .3 1.0\"];\n";
