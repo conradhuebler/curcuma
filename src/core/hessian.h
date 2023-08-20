@@ -57,7 +57,7 @@ private:
     int m_i, m_j, m_xi, m_xj;
     bool m_fullnumerical = true;
     double m_dd = 0;
-    double m_d = 1e-5;
+    double m_d = 5e-3;
 };
 
 class Hessian {
@@ -68,11 +68,15 @@ public:
 
     void CalculateHessian(int type = 1);
 
+    void PrintVibrations(Vector& eigenvalues, const Vector& projected);
+
 private:
     void CalculateHessianNumerical();
     void CalculateHessianSemiNumerical();
     void FiniteDiffHess();
+    std::function<double(double)> m_scale_functions;
 
+    Matrix ProjectHessian(const Matrix& hessian);
     Vector ConvertHessian(Matrix& hessian);
 
     Matrix m_eigen_geometry, m_eigen_gradient, m_hessian;

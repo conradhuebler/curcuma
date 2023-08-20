@@ -22,7 +22,7 @@
 // #include <catch2/catch_test_macros.hpp>
 // #include <catch2/generators/catch_generators_all.hpp>
 
-// #include <finitediff.hpp>
+#include <finitediff.hpp>
 // #include <spdlog/spdlog.h>
 
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
@@ -31,7 +31,7 @@
 
 #include "hessian.h"
 
-// using namespace fd;
+using namespace fd;
 
 HessianThread::HessianThread(const std::string& method, const json& controller, int i, int j, int xi, int xj, bool fullnumerical)
     : m_method(method)
@@ -45,7 +45,7 @@ HessianThread::HessianThread(const std::string& method, const json& controller, 
     setAutoDelete(true);
 
     if (m_fullnumerical)
-        m_schema = [this]() {
+        m_schema = [this, i, j, xi, xj]() {
             this->Numerical();
         };
     else
@@ -71,8 +71,6 @@ int HessianThread::execute()
 
 void HessianThread::Numerical()
 {
-    m_d = 5e-3;
-
     m_geom_ip_jp = m_molecule.Coords();
     m_geom_im_jp = m_molecule.Coords();
     m_geom_ip_jm = m_molecule.Coords();
@@ -109,7 +107,6 @@ void HessianThread::Numerical()
 }
 void HessianThread::Seminumerical()
 {
-    m_d = 5e-3;
     m_geom_ip_jp = m_molecule.Coords();
     m_geom_im_jp = m_molecule.Coords();
 
@@ -127,9 +124,7 @@ void HessianThread::Seminumerical()
     energy.updateGeometry(m_geom_im_jp);
     double energy_im_jp = energy.CalculateEnergy(true, false);
     Matrix gradientm = energy.Gradient();
-    // std::cout << gradientp << std::endl << std::endl << gradientm << std::endl;
     m_gradient = (gradientp - gradientm) / (2 * m_d) / au / au;
-    // std::cout << m_gradient << std::endl << std::endl;
 }
 
 Hessian::Hessian(const std::string& method, const json& controller, int threads)
@@ -137,15 +132,21 @@ Hessian::Hessian(const std::string& method, const json& controller, int threads)
     , m_controller(controller)
     , m_threads(threads)
 {
+    /* Yeah, thats not really correct, but it works a bit */
+    if (m_method.compare("gfnff") == 0) {
+        m_scale_functions = [](double val) -> double {
+            return val * 2720.57 - 0.0338928;
+        };
+    } else {
+        m_scale_functions = [](double val) -> double {
+            return val * 2720.57 - 0.0338928;
+        };
+    }
 }
 
 void Hessian::setMolecule(const Molecule& molecule)
 {
     m_molecule = molecule;
-    // std::cout << m_molecule.Centroid().transpose() << std::endl;
-    // m_molecule.Center(false);
-    // m_molecule.AlignAxis();
-    // std::cout << m_molecule.Centroid().transpose() << std::endl;
 }
 
 void Hessian::CalculateHessian(int type)
@@ -157,67 +158,102 @@ void Hessian::CalculateHessian(int type)
     else if (type == 3) {
         std::cout << "external hessian approach not implemented" << std::endl;
         std::cout << "use -hessian 1 or -hessian 2" << std::endl;
-        // FiniteDiffHess();
+        FiniteDiffHess();
+    }
+    auto eigenvalues = ConvertHessian(m_hessian);
+    auto hessian2 = ProjectHessian(m_hessian);
+    auto projected = ConvertHessian(hessian2);
+
+    PrintVibrations(eigenvalues, projected);
+}
+
+Matrix Hessian::ProjectHessian(const Matrix& hessian)
+{
+    Matrix D = Eigen::MatrixXd::Random(3 * m_molecule.AtomCount(), 3 * m_molecule.AtomCount());
+    Eigen::RowVector3d ex = { 1, 0, 0 };
+    Eigen::RowVector3d ey = { 0, 1, 0 };
+    Eigen::RowVector3d ez = { 0, 0, 1 };
+
+    for (int i = 0; i < 3 * m_molecule.AtomCount(); ++i) {
+        D(i, 0) = int(i % 3 == 0);
+        D(i, 2) = int((i + 1) % 3 == 0);
+        D(i, 1) = int((i + 2) % 3 == 0);
     }
 
-    auto freqs = ConvertHessian(m_hessian);
+    for (int i = 0; i < m_molecule.AtomCount(); ++i) {
+        auto dx = ex.cross(m_molecule.Atom(i).second);
+        auto dy = ey.cross(m_molecule.Atom(i).second);
+        auto dz = ez.cross(m_molecule.Atom(i).second);
+
+        D(3 * i, 3) = dx(0);
+        D(3 * i + 1, 3) = dx(1);
+        D(3 * i + 2, 3) = dx(2);
+
+        D(3 * i, 4) = dy(0);
+        D(3 * i + 1, 4) = dy(1);
+        D(3 * i + 2, 4) = dy(2);
+
+        D(3 * i, 5) = dz(0);
+        D(3 * i + 1, 5) = dz(1);
+        D(3 * i + 2, 5) = dz(2);
+    }
+
+    Eigen::MatrixXd XtX = D.transpose() * D;
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(XtX);
+    Eigen::MatrixXd S = es.operatorInverseSqrt();
+    Matrix R = D * S;
+    Matrix f = R.transpose() * hessian * R;
+    for (int i = 0; i < 3 * m_molecule.AtomCount(); ++i) {
+        for (int j = 0; j < 3 * m_molecule.AtomCount(); ++j) {
+            if (i < 6 || j < 6)
+                f(i, j) = 0;
+        }
+    }
+    return f;
 }
 
 Vector Hessian::ConvertHessian(Matrix& hessian)
 {
-    // std::cout << hessian << std::endl;
-    {
-        Eigen::SelfAdjointEigenSolver<Geometry> diag_I;
-        diag_I.compute(hessian);
-        // std::cout << diag_I.eigenvalues().cwiseSqrt() << std::endl;
-    }
     Vector vector;
-    constexpr double Eh_to_cm = 27.211386 * 8065.54;
-    double Eh_to_Ha = 1.0 / 27.211386; // convert from Eh to Ha
-    double Ha_to_eV = 27.211386; // convert from Ha to eV
-    double amu_to_kg = 1.66054E-27; // convert from amu to kg
-    double Angstrom_to_m = 1E-10; // convert from Angstrom to meters
-    double c = 2.99792E10; // speed of light in cm/s
-    double h = 6.62607E-34; // Planck's constant in J*s
-    double eV_to_cm_inv = 8065.54; // convert from eV to cm^-1
-    const double conv = 1.0e12; // conversion factor from Angstroms to cm
-    auto amu = m_molecule.Atoms();
 
     for (int i = 0; i < m_molecule.AtomCount() * 3; i++) {
         for (int j = 0; j < m_molecule.AtomCount() * 3; j++) {
             double mass = 1 / sqrt(Elements::AtomicMass[m_molecule.Atoms()[i / 3]] * Elements::AtomicMass[m_molecule.Atoms()[j / 3]]);
-
-            hessian(i, j) *= Ha_to_eV; // convert from Eh/A^2 to eV/A^2
-            hessian(i, j) /= (Angstrom_to_m * Angstrom_to_m); // from A^2 to m^2
-            hessian(i, j) *= mass * amu_to_kg; // sqrt(Elements::AtomicMass[amu[i/3]]*Elements::AtomicMass[amu[j/3]]); // convert from Ha/m^2 to Ha/(amu*m^2)
+            hessian(i, j) *= mass;
         }
     }
 
     Eigen::SelfAdjointEigenSolver<Geometry> diag_I;
     diag_I.compute(hessian);
+    return diag_I.eigenvalues();
+}
 
-    vector = diag_I.eigenvalues().cwiseSqrt();
-    // std::cout << vector.transpose() << std::endl;
-    /* this conversation factor has to be made pure unit based ... */
-    vector *= 1.2796e+06; //(2.0 * M_PI * c) * eV_to_cm_inv*conv; // / sqrt(Elements::AtomicMass[amu[i/3]]);
-    // std::cout << eV_to_cm_inv*conv/(2.0 * M_PI * c) << std::endl;
-    // vector *= Ha_to_eV*eV_to_cm_inv*conv/(2.0 * M_PI * c);
-    // std::cout << vector.transpose() << std::endl;
-
+void Hessian::PrintVibrations(Vector& eigenvalues, const Vector& projected)
+{
+    Vector eigval = eigenvalues.cwiseSqrt();
     std::cout << std::endl
               << " Frequencies: " << std::endl;
 
     for (int i = 0; i < m_molecule.AtomCount() * 3; ++i) {
         if (i % 6 == 0)
             std::cout << std::endl;
-        if (diag_I.eigenvalues()(i) < 0)
-            std::cout << sqrt(std::abs(diag_I.eigenvalues()(i))) * 1.2796e+06 << "(i)"
+        if (projected(i) < 0)
+            std::cout << m_scale_functions(sqrt(std::abs(eigenvalues(i)))) << "(i) "
                       << " ";
-        else
-            std::cout << vector(i) << " ";
+        else {
+            if (projected(i) < 1e-10) {
+                std::cout << projected(i) << "(*) ";
+
+            } else {
+                if (eigenvalues(i) < 0)
+                    std::cout << m_scale_functions(sqrt(std::abs(eigenvalues(i)))) << "(*) "
+                              << " ";
+                else
+                    std::cout << m_scale_functions(eigval(i)) << " ";
+            }
+        }
     }
     std::cout << std::endl;
-    return vector;
 }
 
 void Hessian::CalculateHessianNumerical()
@@ -295,7 +331,7 @@ void Hessian::CalculateHessianSemiNumerical()
 
 void Hessian::FiniteDiffHess()
 {
-    /*
+
     m_hessian = Eigen::MatrixXd::Ones(3 * m_molecule.AtomCount(), 3 * m_molecule.AtomCount());
 
       EnergyCalculator energy(m_method, m_controller);
@@ -314,11 +350,10 @@ void Hessian::FiniteDiffHess()
         x(3*i + 2) = m_molecule.Atom(i).second[2];
 
     }
-    Eigen::MatrixXd hess = Eigen::MatrixXd::Zero(3 * m_molecule.AtomCount(), 3 * m_molecule.AtomCount());
+    // Eigen::MatrixXd hess = Eigen::MatrixXd::Zero(3 * m_molecule.AtomCount(), 3 * m_molecule.AtomCount());
 
     Eigen::MatrixXd fhess;
-    fd::finite_hessian(x, f, fhess, fd::EIGHTH);
+    fd::finite_hessian(x, f, fhess, fd::SECOND);
 
-    m_hessian = fhess;
-*/
+    m_hessian = fhess / au / au;
 }
