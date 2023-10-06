@@ -21,7 +21,9 @@
 
 #include "src/tools/general.h"
 
-#include "external/tblite/include/tblite.h"
+#ifndef tblite_delete
+#include "tblite.h"
+#endif
 
 #include "src/core/molecule.h"
 
@@ -59,6 +61,8 @@ public:
     void clear();
 
     std::vector<double> Charges() const;
+    std::vector<double> Dipole() const;
+
     std::vector<std::vector<double>> BondOrders() const;
 
 private:

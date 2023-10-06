@@ -206,6 +206,7 @@ if(USE_XTB)
       )
       FetchContent_MakeAvailable("mctc-lib")
     endif()
+    include_directories(SYSTEM ${PROJECT_BINARY_DIR}/_deps/tblite-src/include/)
 
     if(HELPERS)
 	add_executable(xtb_helper

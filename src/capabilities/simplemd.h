@@ -62,7 +62,8 @@ static json CurcumaMDJson{
     { "rattle", false },
     { "rattle_tolerance", 1e-5 },
     { "thermostat", "csvr" },
-    { "respa", 1 }
+    { "respa", 1 },
+    { "dipole", false }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -135,7 +136,7 @@ private:
     std::string m_basename;
     int m_natoms = 0;
     int m_dumb = 1;
-    double m_T = 0, m_Epot = 0, m_aver_Epot = 0, m_Ekin = 0, m_aver_Ekin = 0, m_Etot = 0, m_aver_Etot = 0;
+    double m_T = 0, m_Epot = 0, m_aver_Epot = 0, m_Ekin = 0, m_aver_Ekin = 0, m_Etot = 0, m_aver_Etot = 0, m_aver_dipol = 0, m_curr_dipole = 0;
     int m_hmass = 4;
     double m_single_step = 1;
     double m_timestep = 0.5, m_currentStep = 0, m_maxtime = 1000;
@@ -157,11 +158,12 @@ private:
     double m_pos_conv = 0, m_scale_velo = 1.0, m_coupling = 10;
     double m_impuls = 0, m_impuls_scaling = 0.75, m_dt2 = 0;
     double m_rattle_tolerance = 1e-4;
-
+    std::vector<double> m_collected_dipole;
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;
     std::string m_method = "UFF", m_initfile = "none", m_thermostat = "csvr";
     bool m_unstable = false;
+    bool m_dipole = false;
 };
 
 class MDThread : public CxxThread {

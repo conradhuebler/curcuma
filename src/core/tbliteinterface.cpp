@@ -17,7 +17,9 @@
  *
  */
 
-#include "external/tblite/include/tblite.h"
+#ifndef tblite_delete
+#include "tblite.h"
+#endif
 
 #include "src/core/global.h"
 #include "src/tools/general.h"
@@ -179,6 +181,17 @@ std::vector<double> TBLiteInterface::Charges() const
         charges[i] = c[i];
     delete[] c;
     return charges;
+}
+
+std::vector<double> TBLiteInterface::Dipole() const
+{
+    std::vector<double> dipole(3);
+    double* c = new double[3];
+    tblite_get_result_dipole(m_error, m_tblite_res, c);
+    for (int i = 0; i < 3; ++i)
+        dipole[i] = c[i];
+    delete[] c;
+    return dipole;
 }
 
 std::vector<std::vector<double>> TBLiteInterface::BondOrders() const

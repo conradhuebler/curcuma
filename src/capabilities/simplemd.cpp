@@ -85,6 +85,7 @@ void SimpleMD::LoadControlJson()
 
     m_writerestart = Json2KeyWord<int>(m_defaults, "writerestart");
     m_respa = Json2KeyWord<int>(m_defaults, "respa");
+    m_dipole = Json2KeyWord<bool>(m_defaults, "dipole");
 
     m_writeXYZ = Json2KeyWord<bool>(m_defaults, "writeXYZ");
     m_writeinit = Json2KeyWord<bool>(m_defaults, "writeinit");
@@ -530,7 +531,16 @@ void SimpleMD::start()
     }
     if (m_thermostat.compare("csvr") == 0)
         std::cout << "Exchange with heat bath " << m_Ekin_exchange << "Eh" << std::endl;
-
+    if (m_dipole) {
+        /*
+        double dipole = 0.0;
+        for( auto d : m_collected_dipole)
+            dipole += d;
+        dipole /= m_collected_dipole.size();
+        std::cout << dipole*2.5418 << " average dipole in Debye and " << dipole*2.5418*3.3356e-30 << " Cm" << std::endl;
+        */
+        std::cout << "Calculated averaged dipole moment " << m_aver_dipol * 2.5418 << " Debye and " << m_aver_dipol * 2.5418 * 3.3356 << " Cm [e-30]" << std::endl;
+    }
     std::ofstream restart_file("curcuma_final.json");
     restart_file << WriteRestartInformation() << std::endl;
 
@@ -779,7 +789,10 @@ void SimpleMD::PrintStatus() const
 #endif
     } else {
 #ifdef GCC
-        std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f}\n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, remaining);
+        if (m_dipole)
+            std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f}  {11: ^{0}f}\n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_aver_dipol * 2.5418 * 3.3356, remaining);
+        else
+            std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} \n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, remaining);
 #else
         std::cout << m_currentStep * m_timestep / fs2amu / 1000 << " " << m_Epot << " " << m_Ekin << " " << m_Epot + m_Ekin << m_T << std::endl;
 
@@ -802,6 +815,11 @@ double SimpleMD::Gradient(const double* coord, double* grad)
 
     double Energy = m_interface->CalculateEnergy(true);
     m_interface->getGradient(grad);
+    if (m_dipole) {
+        std::vector<double> dipole = m_interface->Dipole();
+        m_curr_dipole = sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]);
+        m_collected_dipole.push_back(sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]));
+    }
     return Energy;
 }
 
@@ -819,7 +837,9 @@ double SimpleMD::EKin()
     m_aver_Epot = (m_Epot + (m_currentStep)*m_aver_Epot) / (m_currentStep + 1);
     m_aver_Ekin = (m_Ekin + (m_currentStep)*m_aver_Ekin) / (m_currentStep + 1);
     m_aver_Etot = (m_Etot + (m_currentStep)*m_aver_Etot) / (m_currentStep + 1);
-
+    if (m_dipole) {
+        m_aver_dipol = (m_curr_dipole + (m_currentStep)*m_aver_dipol) / (m_currentStep + 1);
+    }
     return ekin;
 }
 
