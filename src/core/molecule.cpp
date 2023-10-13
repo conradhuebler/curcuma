@@ -156,6 +156,15 @@ Molecule::~Molecule()
 {
 }
 
+void Molecule::ApplyReorderRule(const std::vector<int>& rule)
+{
+    Molecule mol;
+    for (auto& i : rule)
+        mol.addPair(Atom(i));
+    m_geometry = mol.m_geometry;
+    m_atoms = mol.m_atoms;
+}
+
 void Molecule::print_geom(bool moreinfo) const
 {
     std::cout << AtomCount() << std::endl;
@@ -269,7 +278,6 @@ void Molecule::setXYZComment(const std::string& comment)
             }
         }
     } else {
-
         if (list.size() == 7) {
             setXYZComment_7(list);
         } else if (list.size() == 6) {

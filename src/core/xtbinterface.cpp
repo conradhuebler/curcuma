@@ -152,6 +152,43 @@ double XTBInterface::GFNCalculation(int parameter, double* grad)
     return energy;
 }
 
+std::vector<double> XTBInterface::Charges() const
+{
+    std::vector<double> charges(m_atomcount);
+    double* c = new double[m_atomcount];
+    xtb_getCharges(m_env, m_xtb_res, c);
+    for (int i = 0; i < m_atomcount; ++i)
+        charges[i] = c[i];
+    delete[] c;
+    return charges;
+}
+
+std::vector<double> XTBInterface::Dipole() const
+{
+    std::vector<double> dipole(3);
+    double* c = new double[3];
+    xtb_getDipole(m_env, m_xtb_res, c);
+    for (int i = 0; i < 3; ++i)
+        dipole[i] = c[i];
+    delete[] c;
+    return dipole;
+}
+
+std::vector<std::vector<double>> XTBInterface::BondOrders() const
+{
+    std::vector<std::vector<double>> bond_orders(m_atomcount);
+    double* bonds = new double[m_atomcount * m_atomcount];
+    xtb_getBondOrders(m_env, m_xtb_res, bonds);
+    for (int i = 0; i < m_atomcount; ++i) {
+        std::vector<double> b(m_atomcount);
+        for (int j = 0; j < m_atomcount; ++j)
+            b[j] = bonds[i * j];
+        bond_orders[i] = b;
+    }
+    delete[] bonds;
+    return bond_orders;
+}
+
 void XTBInterface::clear()
 {
     xtb_delResults(&m_xtb_res);

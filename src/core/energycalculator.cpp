@@ -32,6 +32,16 @@
 EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller)
     : m_method(method)
 {
+    m_charges = []() {
+        return std::vector<double>{};
+    };
+    m_dipole = []() {
+        return std::vector<double>{};
+    };
+    m_bonds = []() {
+        return std::vector<std::vector<double>>{ {} };
+    };
+
     if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) { // UFF energy calculator requested
         m_uff = new eigenUFF(controller);
         m_ecengine = [this](bool gradient, bool verbose) {
@@ -43,6 +53,15 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
         m_ecengine = [this](bool gradient, bool verbose) {
             this->CalculateTBlite(gradient, verbose);
         };
+        m_charges = [this]() {
+            return this->m_tblite->Charges();
+        };
+        m_dipole = [this]() {
+            return this->m_tblite->Dipole();
+        };
+        m_bonds = [this]() {
+            return this->m_tblite->BondOrders();
+        };
 #else
         std::cout << "TBlite was not included ..." << std::endl;
         exit(1);
@@ -53,6 +72,15 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
         m_xtb = new XTBInterface(controller);
         m_ecengine = [this](bool gradient, bool verbose) {
             this->CalculateXTB(gradient, verbose);
+        };
+        m_charges = [this]() {
+            return this->m_xtb->Charges();
+        };
+        m_dipole = [this]() {
+            return this->m_xtb->Dipole();
+        };
+        m_bonds = [this]() {
+            return this->m_xtb->BondOrders();
         };
 #else
         std::cout << "XTB was not included ..." << std::endl;
@@ -140,7 +168,6 @@ void EnergyCalculator::setMolecule(const Molecule& molecule)
 #endif
 
     } else if (std::find(m_xtb_methods.begin(), m_xtb_methods.end(), m_method) != m_xtb_methods.end()) { // XTB energy calculator requested
-
 #ifdef USE_XTB
         m_xtb->InitialiseMolecule(molecule);
         if (m_method.compare("xtb-gfn1") == 0)
@@ -307,4 +334,19 @@ void EnergyCalculator::getGradient(double* gradient)
 Matrix EnergyCalculator::Gradient() const
 {
     return m_eigen_gradient;
+}
+
+std::vector<double> EnergyCalculator::Charges() const
+{
+    return m_charges();
+}
+
+std::vector<double> EnergyCalculator::Dipole() const
+{
+    return m_dipole();
+}
+
+std::vector<std::vector<double>> EnergyCalculator::BondOrders() const
+{
+    return m_bonds();
 }

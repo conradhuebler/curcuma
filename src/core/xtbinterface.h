@@ -54,6 +54,10 @@ public:
     double GFNCalculation(int parameter = 2, double* grad = 0);
 
     void clear();
+    std::vector<double> Charges() const;
+    std::vector<double> Dipole() const;
+
+    std::vector<std::vector<double>> BondOrders() const;
 
 private:
     int m_atomcount = 0;

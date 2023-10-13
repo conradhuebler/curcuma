@@ -49,6 +49,7 @@ int ConfScanThread::execute()
     m_driver->setThreads(m_threads);
     m_driver->setReference(m_reference);
     m_driver->setTarget(m_target);
+
     m_keep_molecule = true;
     m_break_pool = false;
     m_reorder_worked = false;
@@ -59,7 +60,6 @@ int ConfScanThread::execute()
     double Ib = abs(m_reference.Ib() - m_target.Ib());
     double Ic = abs(m_reference.Ic() - m_target.Ic());
 
-#ifdef WriteMoreInfo
     m_input.dIa = Ia;
     m_input.dIb = Ib;
     m_input.dIc = Ic;
@@ -68,7 +68,14 @@ int ConfScanThread::execute()
     m_input.dH = diff_ripser;
     m_input.dHM = m;
     m_input.dE = std::abs(m_reference.Energy() - m_target.Energy()) * 2625.5;
-#endif
+
+    m_old_rmsd = m_driver->BestFitRMSD();
+    if (m_old_rmsd < m_rmsd_threshold) {
+        m_rmsd = m_old_rmsd;
+        m_keep_molecule = false;
+        m_break_pool = true;
+        return 0;
+    }
 
     for (int i = 0; i < m_reorder_rules.size(); ++i) {
         if (m_reorder_rules[i].size() != m_reference.AtomCount() || m_reorder_rules[i].size() == 0)
@@ -81,9 +88,7 @@ int ConfScanThread::execute()
             m_reused_worked = true;
             m_rmsd = tmp_rmsd;
 
-#ifdef WriteMoreInfo
             m_input.rmsd = m_rmsd;
-#endif
             m_reorder_rule = m_reorder_rules[i];
             return 0;
         }
@@ -96,9 +101,7 @@ int ConfScanThread::execute()
     m_driver->start();
     m_rmsd = m_driver->RMSD();
 
-#ifdef WriteMoreInfo
     m_input.rmsd = m_rmsd;
-#endif
 
     if (m_rmsd <= m_rmsd_threshold && (m_MaxHTopoDiff == -1 || m_driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
         m_keep_molecule = false;
@@ -119,26 +122,20 @@ int ConfScanThreadNoReorder::execute()
 
     m_driver->start();
     m_rmsd = m_driver->RMSD();
-#ifdef WriteMoreInfo
     m_input.rmsd = m_rmsd;
-#endif
 
     double Ia = abs(m_reference.Ia() - m_target.Ia());
     double Ib = abs(m_reference.Ib() - m_target.Ib());
     double Ic = abs(m_reference.Ic() - m_target.Ic());
-#ifdef WriteMoreInfo
     m_input.dIa = Ia;
     m_input.dIb = Ib;
     m_input.dIc = Ic;
-#endif
     m_DI = (Ia + Ib + Ic) * third;
     const Matrix m = (m_reference.getPersisentImage() - m_target.getPersisentImage());
     m_DH = m.cwiseAbs().sum();
-#ifdef WriteMoreInfo
     m_input.dH = m_DH;
     m_input.dHM = m;
     m_input.dE = std::abs(m_reference.Energy() - m_target.Energy()) * 2625.5;
-#endif
     if (m_rmsd <= m_rmsd_threshold && (m_MaxHTopoDiff == -1 || m_driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
         m_keep_molecule = false;
         m_break_pool = true;
@@ -180,14 +177,35 @@ void ConfScan::LoadControlJson()
     m_force_reorder = Json2KeyWord<bool>(m_defaults, "forceReorder");
     m_check_connections = Json2KeyWord<bool>(m_defaults, "check");
     m_energy_cutoff = Json2KeyWord<double>(m_defaults, "maxenergy");
-    m_prevent_reorder = Json2KeyWord<bool>(m_defaults, "preventReorder");
 
-    // double scaleLoose = Json2KeyWord<double>(m_defaults, "scaleLoose");
-    m_sLE = Json2KeyWord<double>(m_defaults, "sLE");
-    m_sLI = Json2KeyWord<double>(m_defaults, "sLI");
-    m_sLH = Json2KeyWord<double>(m_defaults, "sLH");
+    if (m_defaults["sLE"].is_number())
+        m_sLE = { Json2KeyWord<double>(m_defaults, "sLE") };
+    else if (m_defaults["sLE"].is_string())
+        m_sLE = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLE"), ",");
 
-    // double scaleTight = Json2KeyWord<double>(m_defaults, "scaleTight");
+    if (m_defaults["sLI"].is_number())
+        m_sLI = { Json2KeyWord<double>(m_defaults, "sLI") };
+    else if (m_defaults["sLI"].is_string())
+        m_sLI = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLI"), ",");
+
+    if (m_defaults["sLH"].is_number())
+        m_sLH = { Json2KeyWord<double>(m_defaults, "sLH") };
+    else if (m_defaults["sLH"].is_string())
+        m_sLH = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLH"), ",");
+
+    if (m_sLE.size() != m_sLI.size() || m_sLE.size() != m_sLH.size()) {
+        std::cout << "Inconsistent length of steps requested, will abort now." << std::endl;
+        exit(1);
+    }
+
+    m_reset = Json2KeyWord<bool>(m_defaults, "reset");
+    m_analyse = Json2KeyWord<bool>(m_defaults, "analyse");
+
+    m_skipinit = Json2KeyWord<bool>(m_defaults, "skipinit");
+    m_skipreorder = Json2KeyWord<bool>(m_defaults, "skipreorder");
+    m_skipreuse = Json2KeyWord<bool>(m_defaults, "skipreuse");
+    m_mapped = Json2KeyWord<bool>(m_defaults, "mapped");
+
     m_sTE = Json2KeyWord<double>(m_defaults, "sTE");
     m_sTI = Json2KeyWord<double>(m_defaults, "sTI");
     m_sTH = Json2KeyWord<double>(m_defaults, "sTH");
@@ -204,7 +222,6 @@ void ConfScan::LoadControlJson()
     m_useorders = Json2KeyWord<int>(m_defaults, "UseOrders");
     m_MaxHTopoDiff = Json2KeyWord<int>(m_defaults, "MaxHTopoDiff");
     m_threads = m_defaults["threads"].get<int>();
-    m_skipfirst = Json2KeyWord<bool>(m_defaults, "skipfirst");
     m_RMSDmethod = Json2KeyWord<std::string>(m_defaults, "RMSDMethod");
     if (m_RMSDmethod == "molalign") {
         fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nPlease cite the follow research report!\nJ. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187\n\n");
@@ -219,14 +236,6 @@ void ConfScan::LoadControlJson()
     m_nomunkres = Json2KeyWord<bool>(m_defaults, "nomunkres");
     m_molalign = Json2KeyWord<std::string>(m_defaults, "molalignbin");
     m_molaligntol = Json2KeyWord<int>(m_defaults, "molaligntol");
-
-    //   if (Json2KeyWord<bool>(m_defaults, "skipless")) {
-    m_openLoop = true;
-    m_closeLoop = false;
-    // #    } else {
-    //         m_openLoop = true;
-    //         m_closeLoop = true;
-    //     }
 
     m_looseThresh = m_defaults["looseThresh"];
     m_tightThresh = m_defaults["tightThresh"];
@@ -245,7 +254,7 @@ void ConfScan::LoadControlJson()
         m_RMSDElement = Json2KeyWord<int>(m_defaults, "RMSDElement");
         m_rmsd_element_templates.push_back(m_RMSDElement);
     }
-    if (m_RMSDmethod.compare("hybrid") == 0 && m_element_templates.size() == 0) {
+    if (m_RMSDmethod.compare("hybrid") == 0 /* && m_rmsd_element_templates.compare("") == 0 */) {
         std::cout << "Reordering method hybrid has to be combined with element types. I will chose for you nitrogen and oxygen!" << std::endl;
         std::cout << "This is equivalent to adding:\' -rmsdelement 7,8 \' to your argument list!" << std::endl;
         m_rmsd_element_templates = "7,8";
@@ -254,8 +263,6 @@ void ConfScan::LoadControlJson()
 
     if (m_useorders == -1)
         m_useorders = 10;
-
-    m_do_third = Json2KeyWord<bool>(m_defaults, "dothird");
 }
 
 bool ConfScan::openFile()
@@ -363,8 +370,7 @@ bool ConfScan::LoadRestartInformation()
     if (!Restart())
         return false;
     StringList files = RestartFiles();
-    if (!m_prevent_reorder)
-        m_prevent_reorder = files.size() > 1;
+
     int error = 0;
     for (const auto& f : files) {
         std::vector<std::vector<int>> reorder_cached;
@@ -381,29 +387,12 @@ bool ConfScan::LoadRestartInformation()
             error++;
             continue;
         }
-
         json confscan;
         try {
             confscan = restart[MethodName()[0]];
         } catch (json::type_error& e) {
             error++;
             continue;
-        }
-        try {
-            m_dLI = confscan["RotThreshLoose"];
-        } catch (json::type_error& e) {
-        }
-        try {
-            m_dLH = confscan["RipserThreshLoose"];
-        } catch (json::type_error& e) {
-        }
-        try {
-            m_dTI = confscan["RotThreshTight"];
-        } catch (json::type_error& e) {
-        }
-        try {
-            m_dTH = confscan["RipserThreshTight"];
-        } catch (json::type_error& e) {
         }
         try {
             reorder_cached = Tools::String2VectorVector(confscan["ReorderRules"]);
@@ -428,7 +417,6 @@ bool ConfScan::LoadRestartInformation()
                 m_reorder_rules.push_back(vector);
     }
     m_useRestart = files.size() == 1 && error != int(files.size());
-
     std::cout << "Starting with " << m_reorder_rules.size() << " initial reorder rules." << std::endl;
     return true;
 }
@@ -463,13 +451,21 @@ void ConfScan::SetUp()
     m_result_basename.erase(m_result_basename.end() - 4, m_result_basename.end());
 
     m_accepted_filename = m_result_basename + ".accepted.xyz";
-    m_1st_filename = m_result_basename + ".1st.xyz";
-    m_2nd_filename = m_result_basename + ".2nd.xyz";
+    m_1st_filename = m_result_basename + ".initial.xyz";
+    m_2nd_filename = m_result_basename + ".reorder";
+    m_3rd_filename = m_result_basename + ".reuse.xyz";
 
     m_rejected_filename = m_result_basename + ".rejected.xyz";
     m_statistic_filename = m_result_basename + ".statistic.log";
     m_joined_filename = m_result_basename + ".joined.xyz";
     m_threshold_filename = m_result_basename + ".thresh.xyz";
+
+    m_param_file = m_result_basename + ".param.dat";
+    m_skip_file = m_result_basename + ".param.skip.dat";
+    m_perform_file = m_result_basename + ".param.perf.dat";
+    m_success_file = m_result_basename + ".param.success.dat";
+    m_limit_file = m_result_basename + ".param.limit.dat";
+
     std::ofstream result_file;
     if (m_writeFiles) {
         result_file.open(m_accepted_filename);
@@ -506,10 +502,23 @@ void ConfScan::SetUp()
         st_file.close();
     }
 
-    std::ofstream nd_file;
-    if (m_writeFiles && !m_reduced_file) {
-        nd_file.open(m_2nd_filename);
-        nd_file.close();
+    std::ofstream parameters_file;
+    parameters_file.open(m_success_file);
+    parameters_file << "# RMSD(new)\tRMSD(old)\tDelta E\tDelta H\tDelta I" << std::endl;
+    parameters_file.close();
+
+    if (m_analyse) {
+        std::ofstream parameters_skipped;
+        parameters_skipped.open(m_skip_file);
+        parameters_skipped.close();
+
+        std::ofstream parameters_performed;
+        parameters_performed.open(m_perform_file);
+        parameters_performed.close();
+
+        std::ofstream parameters_limit;
+        parameters_limit.open(m_limit_file);
+        parameters_limit.close();
     }
 
     std::cout << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
@@ -524,9 +533,19 @@ void ConfScan::SetUp()
     std::cout << "    Highest energy conformer allowed: " << m_energy_cutoff << " kJ/mol " << std::endl;
     std::cout << "    Threshold multipliers are loose / tight " << std::endl;
 
-    std::cout << "    Ripser Persitance Diagrams " << m_sLH << " " << m_sTH << std::endl;
-    std::cout << "    Rotational Constants " << m_sLI << " " << m_sTI << std::endl;
-    std::cout << "    Energy " << m_sLE << " " << m_sTE << std::endl;
+    std::cout << "    Ripser Persitance Diagrams definition for loose ";
+    for (const auto& d : m_sLH)
+        std::cout << d << " ";
+    std::cout << " and tight thresholds " << m_sTH << std::endl;
+    std::cout << "    Rotational Constants definition for loose ";
+    for (const auto& d : m_sLI)
+        std::cout << d << " ";
+    std::cout << " and tight thresholds " << m_sTI << std::endl;
+
+    std::cout << "    Energy definition for loose ";
+    for (const auto& d : m_sLE)
+        std::cout << d << " ";
+    std::cout << " and tight thresholds " << m_sTE << std::endl;
 
     std::cout << "" << std::endl
               << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
@@ -549,65 +568,225 @@ void ConfScan::RejectMolecule(Molecule* molecule)
     m_rejected++;
 }
 
+void ConfScan::WriteDotFile(const std::string& filename, const std::string& content)
+{
+    std::ofstream result_file;
+    result_file.open(filename);
+    result_file << "digraph graphname \n {\n";
+    result_file << content << std::endl;
+    result_file << "}";
+}
+
 void ConfScan::start()
 {
     PrintController(m_controller);
     SetUp();
-
-    fmt::print("\n\n1st Pass\nPerforming RMSD calculation without reordering now!\n\n");
-
     RunTimer timer(false);
-    m_current_filename = m_1st_filename;
     std::ofstream result_file;
-    if (m_writeFiles && !m_reduced_file) {
-        result_file.open(m_statistic_filename, std::ios_base::app);
-        result_file << "Results of 1st Pass" << std::endl;
-        result_file.close();
-    }
-    if (!m_skipfirst) {
-        CheckRMSD();
-        PrintStatus("Result 1st pass:");
+
+    if (!m_skipinit) {
+        fmt::print("\n\nInitial Pass\nPerforming RMSD calculation without reordering now!\n\n");
+        m_current_filename = m_1st_filename;
+        if (m_writeFiles && !m_reduced_file) {
+            result_file.open(m_statistic_filename, std::ios_base::app);
+            result_file << "Results of 1st Pass" << std::endl;
+            result_file.close();
+        }
+        CheckOnly(m_sLE[0], m_sLI[0], m_sLH[0]);
+        PrintStatus("Result initial pass:");
+        WriteDotFile(m_result_basename + ".initial.dot", m_first_content);
+        m_sLE[0] = 1;
+        m_sLI[0] = 1;
+        m_sLH[0] = 1;
+        m_collective_content = "edge [color=green];\n";
+        for (auto node : m_nodes)
+            m_collective_content += node.second;
+        m_nodes.clear();
+        m_collective_content += m_first_content + "\n";
+
+        std::ofstream parameters_file;
+        parameters_file.open(m_param_file);
+        parameters_file << "# RMSD(old)\tDelta E\tDelta H\tDelta I" << std::endl;
+        bool breakline = false;
+        for (const auto& i : m_listThresh) {
+            if (i.first > m_rmsd_threshold && !breakline) {
+                parameters_file << std::endl;
+                breakline = true;
+            }
+            parameters_file << i.first << " " << i.second[0] << " " << i.second[1] << " " << i.second[2] << std::endl;
+        }
+
+        fmt::print("\nInitial Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
     } else {
+        fmt::print("\n\nSkipping initial pass!\n\nSettings thresholds to high value ...");
+
         for (const auto& i : m_ordered_list)
             m_stored_structures.push_back(m_molecules.at(i.second).second);
+        m_dLI = 1e23;
+        m_dLH = 1e23;
+        m_dLE = 1e23;
+        m_looseThresh = 0;
+        m_skipreuse = true;
     }
-#ifdef WriteMoreInfo
-    std::cout << m_dnn_data.size() << std::endl;
-#endif
 
-    fmt::print("\n1st Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
-    if (m_prevent_reorder == false || m_do_third == true) {
+    if (!m_skipreorder) {
+        std::ofstream parameters_skip;
+        parameters_skip.open(m_skip_file, std::ios_base::app);
+        parameters_skip << "# RMSD(old)\tDelta E\tDelta H\tDelta I" << std::endl;
+
+        std::ofstream parameters_performed;
+        parameters_performed.open(m_perform_file, std::ios_base::app);
+        parameters_performed << "# RMSD(old)\tDelta E\tDelta H\tDelta I" << std::endl;
+        for (int run = 0; run < m_sLE.size(); ++run) {
+            m_current_filename = m_2nd_filename + "." + std::to_string(run + 1) + ".xyz";
+
+            std::ofstream nd_file;
+            if (m_writeFiles && !m_reduced_file) {
+                nd_file.open(m_current_filename);
+                nd_file.close();
+            }
+            double dLI = m_dLI;
+            double dLH = m_dLH;
+            double dLE = m_dLE;
+            if (!m_mapped) {
+                dLI = m_dLI * m_sLI[run];
+                dLH = m_dLH * m_sLH[run];
+                dLE = m_dLE * m_sLE[run];
+                m_print_rmsd = m_rmsd_threshold;
+            } else {
+                m_print_rmsd = m_sLI[run] * m_rmsd_threshold;
+                for (const auto& i : m_listThresh) {
+                    if (i.first <= m_sLI[run] * m_rmsd_threshold)
+                        dLI = std::max(dLI, i.second[2]);
+
+                    if (i.first <= m_sLH[run] * m_rmsd_threshold)
+                        dLH = std::max(dLH, i.second[1]);
+
+                    if (i.first <= m_sLE[run] * m_rmsd_threshold)
+                        dLE = std::max(dLE, i.second[0]);
+                }
+            }
+            if (!CheckStop()) {
+                timer.Reset();
+                fmt::print("\n\nReorder Pass\nPerforming RMSD calculation with reordering now!\n\n");
+                if (m_writeFiles && !m_reduced_file) {
+                    result_file.open(m_statistic_filename, std::ios_base::app);
+                    result_file << "Results of Reorder Pass #" << run + 1 << std::endl;
+                    result_file.close();
+                }
+                std::ofstream parameters_success;
+                parameters_success.open(m_success_file, std::ios_base::app);
+                parameters_success << std::endl
+                                   << "# " << run << " run" << std::endl;
+
+                Reorder(dLE, dLI, dLH, false);
+                PrintStatus("Result Reorder pass:");
+                WriteDotFile(m_result_basename + ".reorder." + std::to_string(run + 1) + ".dot", m_second_content);
+                fmt::print("\nReorder Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
+                timer.Reset();
+                m_collective_content += "edge [color=red];\n";
+                for (auto node : m_nodes)
+                    m_collective_content += node.second;
+                m_nodes.clear();
+                m_collective_content += m_second_content + "\n";
+                m_second_content.clear();
+                if (m_analyse) {
+                    parameters_performed << "# " << run << " run" << std::endl
+                                         << std::endl;
+                    parameters_skip << "# " << run << " run" << std::endl
+                                    << std::endl;
+
+                    for (const auto& i : m_listThresh) {
+                        std::vector<double> element = { i.second[0], i.second[1], i.second[2] };
+                        auto position = std::find(m_list_skipped.begin(), m_list_skipped.end(), element);
+                        if (position != m_list_skipped.end()) {
+                            parameters_skip << i.first << " " << i.second[0] << " " << i.second[1] << " " << i.second[2] << std::endl;
+                            m_list_skipped.erase(position);
+                            continue;
+                        }
+
+                        position = std::find(m_list_performed.begin(), m_list_performed.end(), element);
+                        if (position != m_list_performed.end()) {
+                            parameters_performed << i.first << " " << i.second[0] << " " << i.second[1] << " " << i.second[2] << std::endl;
+                            m_list_performed.erase(position);
+                        }
+                    }
+                    parameters_performed << std::endl;
+                    parameters_skip << std::endl;
+                }
+            }
+        }
+        parameters_skip.close();
+        parameters_performed.close();
+    } else
+        fmt::print("\nReorder Pass skipped!\n");
+    if (!m_skipreuse) {
         if (!CheckStop()) {
             timer.Reset();
-            m_current_filename = m_2nd_filename;
-            fmt::print("\n\n2nd Pass\nPerforming RMSD calculation with reordering now!\n\n");
+            m_current_filename = m_3rd_filename;
+            if (m_reset)
+                fmt::print("\n\nReuse Pass\nPerforming RMSD calculation with stored reorder rules using all structures.\n\n");
+            else
+                fmt::print("\n\nReuse Pass\nPerforming RMSD calculation with stored reorder rules using previously accepted structures.\n\n");
+
             if (m_writeFiles && !m_reduced_file) {
                 result_file.open(m_statistic_filename, std::ios_base::app);
-                result_file << "Results of 2nd Pass" << std::endl;
+                PrintStatus("Result Reuse pass:");
                 result_file.close();
             }
-            ReorderCheck(m_prevent_reorder, false);
-            PrintStatus("Result 2nd pass:");
+            m_exclude_list.clear();
+            std::ofstream parameters_success;
+            parameters_success.open(m_success_file, std::ios_base::app);
+            parameters_success << std::endl
+                               << "# reuse run" << std::endl;
 
-            fmt::print("\n2nd Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
+            Reorder(-1, -1, -1, true, m_reset);
+            PrintStatus("Result reuse pass:");
+            WriteDotFile(m_result_basename + ".reuse.dot", m_second_content);
+            fmt::print("\nReuse Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
             timer.Reset();
-        }
-        if (!CheckStop() && m_do_third == true) {
-            m_current_filename.clear();
-            if (m_writeFiles && !m_reduced_file) {
-                result_file.open(m_statistic_filename, std::ios_base::app);
-                result_file << "Results of 3rd Pass" << std::endl;
-                result_file.close();
-            }
-            fmt::print("\n\n3rd Pass\nPerforming RMSD calculation with reordering, and less stricter threshold.\n\n");
-            ReorderTrained();
-            PrintStatus("Result 3rd pass:");
-
-            fmt::print("\n3rd Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
+            m_collective_content += "edge [color=blue];\n";
+            for (auto node : m_nodes)
+                m_collective_content += node.second;
+            m_nodes.clear();
+            m_collective_content += m_second_content + "\n";
         }
     }
-    if (!CheckStop())
-        m_dE = -1;
+    if (m_analyse) {
+        std::ofstream energy;
+        energy.open(m_result_basename + ".energy.gnuplot");
+        energy << "scale = 4063.0/800.0" << std::endl;
+        energy << "set terminal pngcairo  transparent size 600*scale,400*scale transparent font \"Noto Sans\" fontscale scale linewidth scale pointscale scale" << std::endl;
+        energy << "set encoding utf8" << std::endl;
+        energy << "set xlabel \"RMSD [Å]\"" << std::endl;
+        energy << "set ylabel \"Energy ΔE [kJ/mol]\"" << std::endl;
+        energy << "set key left horizontal  font \"Helvetica, 10\" maxrows 1 outside" << std::endl;
+        energy << "plot '" << m_result_basename << ".param.dat' using 1:2 pt 10 ps 0.5 lt rgb \"grey\" title \"Parametrisation\", '" << m_result_basename << ".param.skip.dat' using 1:2 pt 10 ps 0.1 lt rgb \"blue\" title \"Reorder skipped\", '" << m_result_basename << ".param.perf.dat' using 1:2 pt 10 ps 0.1 lt rgb \"yellow\" title \"Reorder performed\", '" << m_result_basename << ".param.success.dat' using 2:3 pt 10 ps 0.5 lt rgb \"red\" title \"Reorder successful\", '" << m_result_basename << ".param.limit.dat' using 1:2 with linespoints linestyle 1 notitle" << std::endl;
+        energy.close();
+
+        std::ofstream ripser;
+        ripser.open(m_result_basename + ".ripser.gnuplot");
+        ripser << "scale = 4063.0/800.0" << std::endl;
+        ripser << "set terminal pngcairo  transparent size 600*scale,400*scale transparent font \"Noto Sans\" fontscale scale linewidth scale pointscale scale" << std::endl;
+        ripser << "set encoding utf8" << std::endl;
+        ripser << "set xlabel \"RMSD [Å]\"" << std::endl;
+        ripser << "set ylabel \"ΔH\"" << std::endl;
+        ripser << "set key left horizontal  font \"Helvetica, 10\" maxrows 1 outside" << std::endl;
+        ripser << "plot '" << m_result_basename << ".param.dat' using 1:3 pt 10 ps 0.5 lt rgb \"grey\" title \"Parametrisation\", '" << m_result_basename << ".param.skip.dat' using 1:3 pt 10 ps 0.1 lt rgb \"blue\" title \"Reorder skipped\", '" << m_result_basename << ".param.perf.dat' using 1:3 pt 10 ps 0.1 lt rgb \"yellow\" title \"Reorder performed\",  '" << m_result_basename << ".param.success.dat' using 2:4 pt 10 ps 0.5 lt rgb \"red\" title \"Reorder successful\", '" << m_result_basename << ".param.limit.dat' using 1:3 with linespoints linestyle 1 notitle" << std::endl;
+        ripser.close();
+
+        std::ofstream rotational;
+        rotational.open(m_result_basename + ".rotational.gnuplot");
+        rotational << "scale = 4063.0/800.0" << std::endl;
+        rotational << "set terminal pngcairo  transparent size 600*scale,400*scale transparent font \"Noto Sans\" fontscale scale linewidth scale pointscale scale" << std::endl;
+        rotational << "set encoding utf8" << std::endl;
+        rotational << "set xlabel \"RMSD [Å]\"" << std::endl;
+        rotational << "set ylabel \"ΔI [MHz]\"" << std::endl;
+        rotational << "set key left horizontal  font \"Helvetica, 10\" maxrows 1 outside" << std::endl;
+        rotational << "plot '" << m_result_basename << ".param.dat' using 1:4 pt 10 ps 0.5 lt rgb \"grey\" title \"Parametrisation\", '" << m_result_basename << ".param.skip.dat' using 1:4 pt 10 ps 0.1 lt rgb \"blue\" title \"Reorder skipped\", '" << m_result_basename << ".param.perf.dat' using 1:4 pt 10 ps 0.1 lt rgb \"yellow\" title \"Reorder performed\",  '" << m_result_basename << ".param.success.dat' using 2:5 pt 10 ps 0.5 lt rgb \"red\" title \"Reorder successful\", '" << m_result_basename << ".param.limit.dat' using 1:4 with linespoints linestyle 1 notitle" << std::endl;
+        rotational.close();
+    }
+
 #ifdef WriteMoreInfo
     int index = 1;
     for (const auto& i : m_dnn_data) {
@@ -627,11 +806,18 @@ void ConfScan::start()
         index++;
     }
 #endif
+    std::ofstream dotfile;
+    dotfile.open(m_result_basename + ".dot");
+    dotfile << "digraph graphname \n {\n";
+    dotfile << m_collective_content;
+    dotfile << "}";
     Finalise();
 }
 
-void ConfScan::CheckRMSD()
+void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
 {
+    std::string content_dot;
+    std::string laststring;
     m_maxmol = m_ordered_list.size();
 
     json rmsd = RMSDJson;
@@ -666,6 +852,7 @@ void ConfScan::CheckRMSD()
             ConfScanThreadNoReorder* thread = addThreadNoreorder(mol1, rmsd);
             threads.push_back(thread);
             p->addThread(thread);
+            m_all_structures.push_back(mol1);
 
             m_lowest_energy = mol1->Energy();
             continue;
@@ -682,18 +869,31 @@ void ConfScan::CheckRMSD()
         p->StartAndWait();
 
         for (auto* t : threads) {
+            if (!m_mapped) {
+                m_dLI = std::max(m_dLI, t->DI() * (t->RMSD() <= (sLI * m_rmsd_threshold)));
+                m_dLH = std::max(m_dLH, t->DH() * (t->RMSD() <= (sLH * m_rmsd_threshold)));
+                m_dLE = std::max(m_dLE, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (sLE * m_rmsd_threshold)));
+            }
+            m_listThresh.insert(std::pair<double, std::vector<double>>(t->RMSD(), { (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5), t->DH(), t->DI() }));
 
             m_dTI = std::max(m_dTI, t->DI() * (t->RMSD() <= (m_sTI * m_rmsd_threshold)));
             m_dTH = std::max(m_dTH, t->DH() * (t->RMSD() <= (m_sTH * m_rmsd_threshold)));
             m_dTE = std::max(m_dTE, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (m_sTE * m_rmsd_threshold)));
 
-            m_dLI = std::max(m_dLI, t->DI() * (t->RMSD() <= (m_sLI * m_rmsd_threshold)));
-            m_dLH = std::max(m_dLH, t->DH() * (t->RMSD() <= (m_sLH * m_rmsd_threshold)));
-            m_dLE = std::max(m_dLE, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (m_sLE * m_rmsd_threshold)));
-
             if (t->KeepMolecule() == false) {
                 keep_molecule = false;
                 writeStatisticFile(t->Reference(), mol1, t->RMSD());
+
+                if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
+                    m_first_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
+                std::string node = "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
+                node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
+                m_nodes.insert(std::pair<double, std::string>(t->Reference()->Energy(), node));
+                //                m_first_content +=
+                //                m_first_content +=
+                m_first_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
+                laststring = t->Reference()->Name();
+
 #ifdef WriteMoreInfo
                 m_dnn_data.push_back(t->getDNNInput());
 #endif
@@ -710,13 +910,14 @@ void ConfScan::CheckRMSD()
             RejectMolecule(mol1);
         }
         PrintStatus();
+        m_all_structures.push_back(mol1);
     }
+    p->clear();
+    delete p;
 }
 
-void ConfScan::ReorderCheck(bool reuse_only, bool limit)
+void ConfScan::PrintSetUp(double dLE, double dLI, double dLH)
 {
-    m_maxmol = m_stored_structures.size();
-
     // To be finalised and tested
 
     /*
@@ -744,10 +945,46 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
             "", 60,
             "Thresholds in rotational constants (averaged over Ia, Ib and Ic) and Ripser Image:");
     */
+
+    std::cout << "" << std::endl
+              << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
+    std::cout << "    Thresholds in rotational constants (averaged over Ia, Ib and Ic): " << std::endl;
+    std::cout << "    Loose Threshold: " << dLI << " MHz" << std::endl;
+    std::cout << "    Tight Threshold: " << m_dTI << " MHz" << std::endl;
+    std::cout << "    Thresholds in difference of ripser images: " << std::endl;
+    std::cout << "    Loose Threshold: " << dLH << " " << std::endl;
+    std::cout << "    Tight Threshold: " << m_dTH << " " << std::endl;
+    std::cout << "    Thresholds for energy differences: " << std::endl;
+    std::cout << "    Loose Threshold: " << dLE << " kJ/mol" << std::endl;
+    std::cout << "    Tight Threshold: " << m_dTE << " kJ/mol" << std::endl;
+
+    std::cout << "" << std::endl
+              << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
+              << std::endl;
+
+    if (dLE > 0 || dLH > 0 || dLI > 0) {
+        std::ofstream parameters_limit;
+        parameters_limit.open(m_limit_file, std::ios_base::app);
+        parameters_limit << "0\t" << dLE << "\t" << dLH << "\t" << dLI << std::endl;
+        parameters_limit << std::prev(m_listThresh.end())->first << "\t" << dLE << "\t" << dLH << "\t" << dLI << std::endl;
+        parameters_limit << std::endl;
+        parameters_limit << m_print_rmsd << "\t" << 0 << "\t" << 0 << "\t" << 0 << std::endl;
+        parameters_limit << m_print_rmsd << "\t" << dLE << "\t" << dLH << "\t" << dLI << std::endl;
+        parameters_limit << std::endl;
+        parameters_limit.close();
+    }
+}
+
+void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool reset)
+{
+    std::string content_dot;
+    std::string laststring;
+    PrintSetUp(dLE, dLI, dLH);
     /* if ignore rotation or ignore barcode are true, the tight cutoffs are set to -1, that no difference is smaller
      * than the tight threshold and the loose threshold is set to a big number, that every structure has to be reordered*/
     m_skiped = 0;
     m_rejected_directly = 0;
+    m_duplicated = 0;
     if (m_ignoreRotation == true) {
         m_dLI = 1e10;
         m_dTI = -1;
@@ -756,21 +993,7 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
         m_dLH = 1e10;
         m_dTH = -1;
     }
-    std::cout << "" << std::endl
-              << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
-    std::cout << "    Thresholds in rotational constants (averaged over Ia, Ib and Ic): " << std::endl;
-    std::cout << "    Loose Threshold: " << m_dLI << " MHz" << std::endl;
-    std::cout << "    Tight Threshold: " << m_dTI << " MHz" << std::endl;
-    std::cout << "    Thresholds in difference of ripser images: " << std::endl;
-    std::cout << "    Loose Threshold: " << m_dLH << " " << std::endl;
-    std::cout << "    Tight Threshold: " << m_dTH << " " << std::endl;
-    std::cout << "    Thresholds for energy differences in kJ/mol: " << std::endl;
-    std::cout << "    Loose Threshold: " << m_dLE << " " << std::endl;
-    std::cout << "    Tight Threshold: " << m_dTE << " " << std::endl;
 
-    std::cout << "" << std::endl
-              << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
-              << std::endl;
     TriggerWriteRestart();
 
     m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_reused = 0;
@@ -788,13 +1011,22 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
     rmsd["molalignbin"] = m_molalign;
     rmsd["molaligntol"] = m_molaligntol;
 
-    std::vector<Molecule*> cached = m_stored_structures;
+    std::vector<Molecule*> cached;
+    if (reset)
+        cached = m_all_structures;
+    else
+        cached = m_stored_structures;
+    m_maxmol = cached.size();
+
     m_result = m_previously_accepted;
     m_stored_structures.clear();
     std::vector<ConfScanThread*> threads;
     std::vector<std::vector<int>> rules;
     CxxThreadPool* p = new CxxThreadPool;
     p->setActiveThreadCount(m_threads);
+
+    std::ofstream parameters_success;
+    parameters_success.open(m_success_file, std::ios_base::app);
 
     for (Molecule* mol1 : cached) {
         if (m_result.size() == 0) {
@@ -818,20 +1050,26 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                 return;
             }
             const Molecule* mol2 = threads[t]->Reference();
+            std::pair<std::string, std::string> names(mol1->Name(), mol2->Name());
+
             double Ia = abs(mol1->Ia() - mol2->Ia());
             double Ib = abs(mol1->Ib() - mol2->Ib());
             double Ic = abs(mol1->Ic() - mol2->Ic());
-
             double dI = (Ia + Ib + Ic) * third;
             double dH = (mol1->getPersisentImage() - mol2->getPersisentImage()).cwiseAbs().sum();
 
             /* rotational = 1
              * ripser     = 2
              * energy     = 4 */
-            int looseThresh = 1 * (dI < m_dLI) + 2 * (dH < m_dLH) + 4 * (std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_dLE);
-            if ((looseThresh & m_looseThresh) == m_looseThresh) {
+            int looseThresh = 1 * (dI < dLI) + 2 * (dH < dLH) + 4 * (std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < dLE);
+            if ((looseThresh & m_looseThresh) == m_looseThresh || (dLI <= 1e-8 && dLH <= 1e-8 && dLE <= 1e-8)) {
+                if (std::find(m_exclude_list.begin(), m_exclude_list.end(), names) != m_exclude_list.end()) {
+                    m_duplicated++;
+                    m_list_performed.push_back({ std::abs(mol1->Energy() - mol2->Energy()) * 2625.5, dH, dI });
+                    continue;
+                }
                 reorder = true;
-                threads[t]->setEnabled(m_openLoop);
+                threads[t]->setEnabled(true);
                 int tightThresh = 1 * (dI < m_dTI) + 2 * (dH < m_dTH) + 4 * ((std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_dTE));
 
                 if ((tightThresh & m_tightThresh) == m_tightThresh) {
@@ -845,8 +1083,11 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                     keep_molecule = false;
                     break;
                 }
+                m_list_performed.push_back({ std::abs(mol1->Energy() - mol2->Energy()) * 2625.5, dH, dI });
+                m_exclude_list.push_back(std::pair<std::string, std::string>(mol1->Name(), mol2->Name()));
             } else {
-                threads[t]->setEnabled(m_closeLoop);
+                threads[t]->setEnabled(false);
+                m_list_skipped.push_back({ std::abs(mol1->Energy() - mol2->Energy()) * 2625.5, dH, dI });
             }
         }
 
@@ -893,7 +1134,21 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                     if (AddRules(t->ReorderRule()))
                         rules.push_back(t->ReorderRule());
 
+                    if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
+                        m_second_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
+
+                    std::string node = "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
+                    node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
+                    m_nodes.insert(std::pair<double, std::string>(t->Reference()->Energy(), node));
+
+                    // m_second_content += "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
+                    // m_second_content += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
+                    m_second_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
+                    laststring = t->Reference()->Name();
+                    auto i = t->getDNNInput();
+                    parameters_success << t->RMSD() << " " << t->OldRMSD() << " " << i.dE << " " << i.dH << " " << (i.dIa + i.dIb + i.dIc) * third << std::endl;
                     writeStatisticFile(t->Reference(), mol1, t->RMSD(), true, t->ReorderRule());
+                    mol1->ApplyReorderRule(t->ReorderRule());
                     break;
                 } else {
                     if ((m_domolalign > 1) && t->RMSD() < m_domolalign * m_rmsd_threshold) {
@@ -905,12 +1160,22 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
                         driver.setReference(t->Reference());
                         driver.setTarget(mol1);
                         driver.start();
+                        mol1->LoadMolecule(driver.TargetReorderd());
                         if (driver.RMSD() < m_rmsd_threshold) {
                             m_molalign_success++;
                             keep_molecule = false;
                             m_reordered_worked += 1;
                             m_reordered_reused += 1;
                             writeStatisticFile(t->Reference(), mol1, driver.RMSD(), true, { 0, 0 });
+
+                            if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
+                                m_second_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
+
+                            m_second_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\";\n";
+                            m_second_content += "\"" + mol1->Name() + "\" [shape=box, style=filled,color=\".7 .3 1.0\"];\n";
+                            m_second_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(driver.RMSD()) + "];\n";
+                            laststring = t->Reference()->Name();
+
                             fmt::print(fg(fmt::color::yellow) | fmt::emphasis::bold, "... success!\n");
                         } else
                             fmt::print(fg(fmt::color::yellow) | fmt::emphasis::bold, "... without effect!\n");
@@ -928,254 +1193,19 @@ void ConfScan::ReorderCheck(bool reuse_only, bool limit)
         } else {
             RejectMolecule(mol1);
         }
-
         PrintStatus();
-        if ((m_result.size() >= m_maxrank && limit) || (m_result.size() >= 2 * m_maxrank && !limit))
+        if (m_result.size() >= m_maxrank)
             break;
         if (m_dE > m_energy_cutoff && m_energy_cutoff != -1) {
             break;
         }
     }
+    parameters_success.close();
+
+    p->clear();
     delete p;
 }
 
-void ConfScan::ReorderTrained()
-{
-    bool reuse_only = false;
-    bool limit = false;
-    m_molalign_count = 0;
-    m_molalign_success = 0;
-
-    m_maxmol = m_stored_structures.size();
-
-    // To be finalised and tested
-
-    /*
-        fmt::print(
-            "'{0:'^{1}}'\n"
-            "'{2: ^{1}}'\n"
-            "'{0: ^{1}}'\n"
-            "*{3: ^{1}}*\n"
-            "*{0: ^{1}}*\n"
-            "*{12: ^{1}}*\n"
-            "*{0: ^{1}}*\n"
-            "*{4: ^{1}}*\n"
-            "*{5: ^{1}}*\n"
-            "*{0: ^{1}}*\n"
-            "*{6: ^{1}}*\n"
-            "*{7: ^{1}}*\n"
-            "*{0: ^{1}}*\n"
-            "*{8: ^{1}}*\n"
-            "*{9: ^{1}}*\n"
-            "*{10: ^{1}}*\n"
-            "*{0: ^{1}}*\n"
-            "*{11: ^{1}}*\n"
-            "*{0: ^{1}}*\n"
-            "*{0:*^{1}}*\n",
-            "", 60,
-            "Thresholds in rotational constants (averaged over Ia, Ib and Ic) and Ripser Image:");
-    */
-    /* if ignore rotation or ignore barcode are true, the tight cutoffs are set to -1, that no difference is smaller
-     * than the tight threshold and the loose threshold is set to a big number, that every structure has to be reordered*/
-    m_skiped = 0;
-    m_rejected_directly = 0;
-    if (m_ignoreRotation == true) {
-        m_dLI = 1e10;
-        m_dTI = -1;
-    }
-    if (m_ignoreBarCode == true) {
-        m_dLH = 1e10;
-        m_dTH = -1;
-    }
-    m_dLI *= 2;
-    m_dLH *= 2;
-    m_dLE *= 2;
-
-    std::cout << "" << std::endl
-              << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
-    std::cout << "    Thresholds in rotational constants (averaged over Ia, Ib and Ic): " << std::endl;
-    std::cout << "    Loose Threshold: " << m_dLI << " MHz" << std::endl;
-    std::cout << "    Tight Threshold: " << m_dTI << " MHz" << std::endl;
-    std::cout << "    Thresholds in difference of ripser images: " << std::endl;
-    std::cout << "    Loose Threshold: " << m_dLH << " " << std::endl;
-    std::cout << "    Tight Threshold: " << m_dTH << " " << std::endl;
-    std::cout << "    Thresholds for energy differences in kJ/mol: " << std::endl;
-    std::cout << "    Loose Threshold: " << m_dLE << " " << std::endl;
-    std::cout << "    Tight Threshold: " << m_dTE << " " << std::endl;
-
-    std::cout << "" << std::endl
-              << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
-              << std::endl;
-    TriggerWriteRestart();
-
-    m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_reused = 0;
-
-    json rmsd = RMSDJson;
-    rmsd["silent"] = true;
-    rmsd["reorder"] = true;
-    rmsd["check"] = CheckConnections();
-    rmsd["heavy"] = m_heavy;
-    rmsd["method"] = m_RMSDmethod;
-    rmsd["element"] = m_rmsd_element_templates;
-    rmsd["update-rotation"] = m_update_rotation;
-    rmsd["damping"] = m_damping;
-    rmsd["nomunkres"] = m_nomunkres;
-    rmsd["molalignbin"] = m_molalign;
-    std::vector<Molecule*> cached = m_stored_structures;
-    m_result = m_previously_accepted;
-    m_stored_structures.clear();
-    std::vector<ConfScanThread*> threads;
-    std::vector<std::vector<int>> rules;
-    CxxThreadPool* p = new CxxThreadPool;
-    p->setActiveThreadCount(m_threads);
-
-    for (Molecule* mol1 : cached) {
-        if (m_result.size() == 0) {
-            AcceptMolecule(mol1);
-            ConfScanThread* thread = addThread(mol1, rmsd, reuse_only);
-            threads.push_back(thread);
-            p->addThread(thread);
-            m_lowest_energy = mol1->Energy();
-            continue;
-        }
-        p->Reset();
-        m_current_energy = mol1->Energy();
-        m_dE = (m_current_energy - m_lowest_energy) * 2625.5;
-
-        bool keep_molecule = true;
-        bool reorder = false;
-        for (int t = 0; t < threads.size(); ++t) {
-            if (CheckStop()) {
-                fmt::print("\n\n** Found stop file, will end now! **\n\n");
-                // TriggerWriteRestart();
-                return;
-            }
-            const Molecule* mol2 = threads[t]->Reference();
-            double Ia = abs(mol1->Ia() - mol2->Ia());
-            double Ib = abs(mol1->Ib() - mol2->Ib());
-            double Ic = abs(mol1->Ic() - mol2->Ic());
-
-            double dI = (Ia + Ib + Ic) * third;
-
-            double dH = (mol1->getPersisentImage() - mol2->getPersisentImage()).cwiseAbs().sum();
-
-            /* rotational = 1
-             * ripser     = 2
-             * energy     = 4 */
-            int looseThresh = 1 * (dI < m_dLI) + 2 * (dH < m_dLH) + 4 * (std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_dLE);
-            if ((looseThresh & m_looseThresh) == m_looseThresh) {
-                reorder = true;
-                threads[t]->setEnabled(m_openLoop);
-                int tightThresh = 1 * (dI < m_dTI) + 2 * (dH < m_dTH) + 4 * ((std::abs(mol1->Energy() - mol2->Energy()) * 2625.5 < m_dTE));
-
-                if ((tightThresh & m_tightThresh) == m_tightThresh) {
-                    std::cout << "Differences " << dI << " MHz and " << dH << " below tight threshold, reject molecule directly!" << std::endl;
-                    m_lastDI = dI;
-                    m_lastDH = dH;
-                    writeStatisticFile(mol1, mol2, -1, false);
-                    m_threshold.push_back(mol2);
-                    m_rejected_directly++;
-                    reorder = false;
-                    keep_molecule = false;
-                    break;
-                }
-            } else {
-                threads[t]->setEnabled(m_closeLoop);
-            }
-        }
-
-        if (reorder && keep_molecule) {
-            int free_threads = m_threads;
-            if (threads.size())
-                free_threads /= threads.size();
-
-            if (free_threads < 1)
-                free_threads = 1;
-            for (int i = 0; i < threads.size(); ++i) {
-                threads[i]->setTarget(mol1);
-                threads[i]->setReorderRules(m_reorder_rules);
-                threads[i]->setThreads(free_threads);
-                for (int j = 0; j < rules.size(); ++j)
-                    threads[i]->addReorderRule(rules[j]);
-            }
-
-            if (m_RMSDmethod.compare("molalign") != 0 || m_threads == 1) {
-                p->StaticPool();
-                p->StartAndWait();
-            } else {
-                for (auto* t : threads) {
-                    t->execute();
-                    if (t->KeepMolecule() == false)
-                        break;
-                }
-            }
-
-            for (auto* t : threads) {
-                if (!t->isEnabled()) {
-                    t->setEnabled(true);
-                    m_skiped++;
-                    continue;
-                }
-
-                m_reordered++;
-                if (t->KeepMolecule() == false) {
-                    keep_molecule = false;
-                    m_reordered_worked += t->ReorderWorked();
-                    m_reordered_reused += t->ReusedWorked();
-                    if (AddRules(t->ReorderRule()))
-                        rules.push_back(t->ReorderRule());
-
-                    double Ia = abs(mol1->Ia() - t->Reference()->Ia());
-                    double Ib = abs(mol1->Ib() - t->Reference()->Ib());
-                    double Ic = abs(mol1->Ic() - t->Reference()->Ic());
-
-                    double diff_rot = (Ia + Ib + Ic) * third;
-                    double diff = (mol1->getPersisentImage() - t->Reference()->getPersisentImage()).cwiseAbs().sum();
-                    writeStatisticFile(t->Reference(), mol1, t->RMSD(), true, t->ReorderRule());
-                    break;
-                } else {
-                    if ((m_domolalign > 1) && t->RMSD() < m_domolalign * m_rmsd_threshold) {
-                        fmt::print(fg(fmt::color::yellow) | fmt::emphasis::bold, "Starting molalign for more precise reordering ...\n");
-                        json molalign = rmsd;
-                        molalign["method"] = "molalign";
-                        m_molalign_count++;
-                        RMSDDriver driver(molalign);
-                        driver.setReference(t->Reference());
-                        driver.setTarget(mol1);
-                        driver.start();
-                        if (driver.RMSD() < m_rmsd_threshold) {
-                            m_molalign_success++;
-                            keep_molecule = false;
-                            m_reordered_worked += 1;
-                            m_reordered_reused += 1;
-                            writeStatisticFile(t->Reference(), mol1, driver.RMSD(), true, { 0, 0 });
-                            fmt::print(fg(fmt::color::yellow) | fmt::emphasis::bold, "... success!\n");
-                        } else
-                            fmt::print(fg(fmt::color::yellow) | fmt::emphasis::bold, "... without effect!\n");
-                    }
-                }
-            }
-        } else
-            m_skiped += threads.size();
-
-        if (keep_molecule) {
-            AcceptMolecule(mol1);
-            ConfScanThread* thread = addThread(mol1, rmsd, reuse_only);
-            p->addThread(thread);
-            threads.push_back(thread);
-        } else {
-            RejectMolecule(mol1);
-        }
-
-        PrintStatus();
-        if ((m_result.size() >= m_maxrank && limit) || (m_result.size() >= 2 * m_maxrank && !limit))
-            break;
-        if (m_dE > m_energy_cutoff && m_energy_cutoff != -1) {
-            break;
-        }
-    }
-    delete p;
-}
 ConfScanThreadNoReorder* ConfScan::addThreadNoreorder(const Molecule* reference, const json& config)
 {
     ConfScanThreadNoReorder* thread = new ConfScanThreadNoReorder(m_rmsd_threshold, m_MaxHTopoDiff, config);
@@ -1251,7 +1281,7 @@ void ConfScan::PrintStatus(const std::string& info)
     std::cout << "# Successfully : " << m_reordered_worked << " (+ " << m_molalign_success << ")"
               << "    ";
     std::cout << "# Reused Results : " << m_reordered_reused << "     ";
-    std::cout << "# Reordering Skipped : " << m_skiped << "     ";
+    std::cout << "# Reordering Skipped : " << m_skiped << " (+ " << m_duplicated << ")";
     std::cout << "# Rejected Directly : " << m_rejected_directly << "     ";
 
     std::cout << "# Current Energy [kJ/mol] : " << m_dE << std::endl;

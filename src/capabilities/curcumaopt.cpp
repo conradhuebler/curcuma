@@ -110,6 +110,7 @@ void CurcumaOpt::start()
 void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
 {
     EnergyCalculator interface(Json2KeyWord<std::string>(m_defaults, "method"), m_controller["sp"]);
+    std::string method = Json2KeyWord<std::string>(m_defaults, "method");
 
     auto iter = molecules.begin();
     interface.setMolecule(*iter);
@@ -122,6 +123,15 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
         auto start = std::chrono::system_clock::now();
         interface.updateGeometry(iter->Coords());
         double energy = interface.CalculateEnergy(true, true);
+        std::cout << "dipole?" << std::endl;
+#ifdef USE_TBLITE
+        if (method.compare("gfn2") == 0) {
+            std::vector<double> dipole = interface.Dipole();
+            std::cout << std::endl
+                      << std::endl
+                      << "Dipole momement " << dipole[0] << " " << dipole[1] << " " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) << std::endl;
+        }
+#endif
         if (m_hessian) {
             Hessian hess(m_method, m_defaults, m_threads);
             hess.setMolecule(*iter);
@@ -215,7 +225,18 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, 
     EnergyCalculator interface(method, controller);
     interface.setMolecule(*initial);
 
-    return interface.CalculateEnergy(true, true);
+    double energy = interface.CalculateEnergy(true, true);
+    std::cout << "dipole1" << std::endl;
+
+#ifdef USE_TBLITE
+    if (method.compare("gfn2") == 0) {
+        std::vector<double> dipole = interface.Dipole();
+        std::cout << std::endl
+                  << std::endl
+                  << "Dipole momement " << dipole[0] << " " << dipole[1] << " " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) * 2.5418 << std::endl;
+    }
+#endif
+    return energy;
 }
 
 Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controller, std::string& output, std::vector<Molecule>* intermediate)

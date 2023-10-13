@@ -183,7 +183,6 @@ void RMSDDriver::LoadControlJson()
         }
         if (m_element_templates.size())
             m_element = m_element_templates[0];
-
     } catch (const nlohmann::detail::type_error& error) {
         m_element = Json2KeyWord<int>(m_defaults, "element");
         m_element_templates.push_back(m_element);
@@ -1204,7 +1203,6 @@ std::vector<int> RMSDDriver::DistanceReorderV1(const Molecule& reference, const 
     for (int i = 0; i < ref.AtomCount(); ++i) {
         std::map<double, int> result;
         for (int j = 0; j < tar.AtomCount(); ++j) {
-
             if (tar.Atom(j).first != ref.Atom(i).first || std::find(new_order.begin(), new_order.end(), j) != new_order.end())
                 continue;
 
@@ -1261,10 +1259,8 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::DistanceReorderV3(cons
     tar.setGeometry(tar_matrix);
     double mix = 1 - m_damping;
     for (int i = 0; i < ref.AtomCount(); ++i) {
-
         std::map<double, int> result;
         for (int j = 0; j < tar.AtomCount(); ++j) {
-
             if (tar.Atom(j).first != ref.Atom(i).first || std::find(new_order.begin(), new_order.end(), j) != new_order.end())
                 continue;
 
@@ -1282,11 +1278,9 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::DistanceReorderV3(cons
             Geometry rotated;
             auto iterator = result.begin();
             for (int j = 0; j < result.size() && j < 5; ++j) {
-
                 if (new_order.size() >= 4 && i % 1 == 0) {
                     Molecule w_ref, w_tar;
                     for (int i = 0; i < new_order.size(); ++i) {
-
                         w_ref.addPair(ref.Atom(i));
                         w_tar.addPair(tar.Atom(new_order[i]));
                     }
@@ -1334,7 +1328,6 @@ std::vector<int> RMSDDriver::FillOrder(const Molecule& reference, const Molecule
         }
         std::map<double, int> result;
         for (int j = 0; j < tar.AtomCount(); ++j) {
-
             if (tar.Atom(j).first != ref.Atom(i).first || std::find(new_order.begin(), new_order.end(), j) != new_order.end())
                 continue;
 
@@ -1351,7 +1344,6 @@ std::vector<int> RMSDDriver::FillOrder(const Molecule& reference, const Molecule
             Geometry rotated;
             auto iterator = result.begin();
             for (int j = 0; j < result.size() && j < 5; ++j) {
-
                 if (new_order.size() >= 4 && i % 1 == 0) {
                     Molecule w_ref, w_tar;
                     for (int i = 0; i < order.size(); ++i) {
@@ -1428,7 +1420,6 @@ std::vector<int> RMSDDriver::Munkress(const Molecule& reference, const Molecule&
 
 bool RMSDDriver::MolAlignLib()
 {
-
     m_reference.writeXYZFile("molaign_ref.xyz");
     m_target.writeXYZFile("molalign_tar.xyz");
     FILE* FileOpen;

@@ -35,12 +35,10 @@
 #include "curcumamethod.h"
 
 constexpr double third = 1 / 3.0;
-#ifdef WriteMoreInfo
 struct dnn_input {
     double dE, dIa, dIb, dIc, dH, rmsd;
     Matrix dHM;
 };
-#endif
 
 static const json ConfScanJson = {
     { "noname", true },
@@ -50,17 +48,17 @@ static const json ConfScanJson = {
     { "rank", -1 },
     { "writeXYZ", false },
     { "forceReorder", false },
+    { "reset", false },
+    { "noreorderpass", false },
     { "check", false },
     { "energy", 1.0 },
     { "maxenergy", -1.0 },
     { "preventreorder", false },
-    { "scaleLoose", 1.5 },
-    { "scaleTight", 0.1 },
-    { "sLE", 1.2 },
+    { "sLE", "1.0,2.0" },
     { "sTE", 0.1 },
-    { "sLI", 1.2 },
+    { "sLI", "1.0,2.0" },
     { "sTI", 0.1 },
-    { "sLH", 1.2 },
+    { "sLH", "1.0,2.0" },
     { "sTH", 0.1 },
     { "skip", 0 },
     { "allxyz", false },
@@ -75,11 +73,11 @@ static const json ConfScanJson = {
     { "method", "" },
     { "lastdE", -1 },
     { "fewerFile", false },
-    { "dothird", true },
-    { "skipfirst", false },
+    { "skipinit", false },
+    { "skipreorder", false },
+    { "skipreuse", false },
     { "ignoreRotation", false },
     { "ignoreBarCode", false },
-    { "skipless", false },
     { "looseThresh", 7 },
     { "tightThresh", 3 },
     { "update-rotation", false },
@@ -99,7 +97,9 @@ static const json ConfScanJson = {
     { "ripser_ratio", 1 },
     { "ripser_dimension", 2 },
     { "domolalign", -1 },
-    { "molaligntol", 10 }
+    { "molaligntol", 10 },
+    { "mapped", false },
+    { "analyse", false }
 };
 
 class ConfScanThread : public CxxThread {
@@ -151,18 +151,24 @@ public:
     void setThreads(int threads) { m_threads = threads; }
 
     double RMSD() const { return m_rmsd; }
+    double OldRMSD() const { return m_old_rmsd; }
     const Molecule* Reference() const { return &m_reference; }
+    const Molecule* Target() const { return &m_target; }
+
     double Energy() const { return m_energy; }
 #ifdef WriteMoreInfo
     void setPredRMSD(double rmsd) { m_pred_rmsd = rmsd; }
     double PredRMSD() const { return m_pred_rmsd; }
-    dnn_input getDNNInput() const { return m_input; }
 #endif
+    dnn_input getDNNInput() const
+    {
+        return m_input;
+    }
 
 private:
     bool m_keep_molecule = true, m_break_pool = false, m_reorder_worked = false, m_reuse_only = false, m_reused_worked = false;
     Molecule m_reference, m_target;
-    double m_rmsd = 0, m_rmsd_threshold = 1, m_energy = 0;
+    double m_rmsd = 0, m_old_rmsd = 0, m_rmsd_threshold = 1, m_energy = 0;
     int m_MaxHTopoDiff;
     int m_threads = 1;
     std::vector<int> m_reorder_rule;
@@ -171,8 +177,8 @@ private:
     json m_config;
 #ifdef WriteMoreInfo
     double m_pred_rmsd = 0;
-    dnn_input m_input;
 #endif
+    dnn_input m_input;
 };
 
 class ConfScanThreadNoReorder : public CxxThread {
@@ -214,12 +220,10 @@ public:
     }
 
     bool KeepMolecule() const { return m_keep_molecule; }
-#ifdef WriteMoreInfo
     dnn_input getDNNInput() const
     {
         return m_input;
     }
-#endif
 
 private:
     bool m_keep_molecule = true, m_break_pool = false;
@@ -230,9 +234,7 @@ private:
     json m_config;
     double m_rmsd = 0, m_rmsd_threshold = 1;
     int m_MaxHTopoDiff;
-#ifdef WriteMoreInfo
     dnn_input m_input;
-#endif
 };
 
 class ConfScan : public CurcumaMethod {
@@ -257,7 +259,7 @@ public:
     /*! \brief Check, if Reordering is forced */
     inline bool PreventReorder() const { return m_prevent_reorder; }
 
-    inline std::string NamePattern(int index) const { return "input_" + std::to_string(index); }
+    inline std::string NamePattern(int index) const { return "#" + std::to_string(index); }
 
     std::vector<Molecule*> Result() const { return m_result; }
     // std::vector<Molecule*> Failed() const { return m_failed; }
@@ -265,16 +267,19 @@ public:
     void ParametriseRotationalCutoffs();
 
     void start() override; // TODO make pure virtual and move all main action here
-    ConfScanThread* addThread(const Molecule* reference, const json& config, bool reuse_only);
+    ConfScanThread* addThread(const Molecule* reference, const json& config, bool reuse_only = false);
     ConfScanThreadNoReorder* addThreadNoreorder(const Molecule* reference, const json& config);
 
 private:
+    void PrintSetUp(double dLE, double dLI, double dLH);
     void SetUp();
 
     void CheckRMSD();
 
-    void ReorderCheck(bool reuse_only = false, bool limit = false);
-    void ReorderTrained();
+    void CheckOnly(double sLE, double sLI, double sLH);
+    void Reorder(double dLE, double dLI, double dLH, bool reuse_only = false, bool reset = false);
+
+    void WriteDotFile(const std::string& filename, const std::string& content);
 
     void writeStatisticFile(const Molecule* mol1, const Molecule* mol2, double rmsd, bool reason = true, const std::vector<int>& rule = std::vector<int>(0));
 
@@ -309,32 +314,37 @@ private:
     bool m_ok;
     std::size_t m_fail = 0, m_start = 0, m_end;
     std::vector<Molecule*> m_global_temp_list;
-    int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0, m_skip = 0, m_skiped = 0, m_rejected_directly = 0, m_molalign_count = 0, m_molalign_success = 0;
+    int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0, m_skip = 0, m_skiped = 0, m_duplicated = 0, m_rejected_directly = 0, m_molalign_count = 0, m_molalign_success = 0;
 
-    std::string m_filename, m_accepted_filename, m_1st_filename, m_2nd_filename, m_rejected_filename, m_result_basename, m_statistic_filename, m_prev_accepted, m_joined_filename, m_threshold_filename, m_current_filename;
-    std::map<double, int> m_ordered_list;
+    std::string m_filename, m_accepted_filename, m_1st_filename, m_2nd_filename, m_3rd_filename, m_rejected_filename, m_result_basename, m_statistic_filename, m_prev_accepted, m_joined_filename, m_threshold_filename, m_current_filename, m_param_file, m_skip_file, m_perform_file, m_success_file, m_limit_file;
+    std::multimap<double, int> m_ordered_list;
+
     std::vector<std::pair<std::string, Molecule*>> m_molecules;
-    double m_rmsd_threshold = 1.0, m_nearly_missed = 0.8, m_energy_cutoff = -1, m_reference_last_energy = 0, m_target_last_energy = 0, m_lowest_energy = 1, m_current_energy = 0;
-    double m_sTE = 0.1, m_sLE = 1.5;
-    double m_sTI = 0.1, m_sLI = 1.5;
-    double m_sTH = 0.1, m_sLH = 1.5;
+    double m_rmsd_threshold = 1.0, m_print_rmsd = 0, m_nearly_missed = 0.8, m_energy_cutoff = -1, m_reference_last_energy = 0, m_target_last_energy = 0, m_lowest_energy = 1, m_current_energy = 0;
+    double m_sTE = 0.1; /* m_sLE = 1.0; */
+    double m_sTI = 0.1; /* m_sLI = 1.0; */
+    double m_sTH = 0.1; /* m_sLH = 1.0; */
 
     double m_reference_restored_energy = -1e10, m_target_restored_energy = -1e10;
     double m_dLI = 0.0, m_dLH = 0.0, m_dLE = 0.0;
     double m_dTI = 0.0, m_dTH = 0.0, m_dTE = 0.0;
 
-    std::vector<Molecule*> m_result, m_rejected_structures, m_stored_structures, m_previously_accepted;
+    std::vector<Molecule*> m_result, m_rejected_structures, m_stored_structures, m_previously_accepted, m_all_structures;
     std::vector<const Molecule*> m_threshold;
     std::vector<int> m_element_templates;
-
+    std::vector<std::pair<std::string, std::string>> m_exclude_list;
 #ifdef WriteMoreInfo
     std::vector<dnn_input> m_dnn_data;
 #endif
-
+    std::string m_first_content, m_second_content, m_third_content, m_4th_content, m_collective_content;
     std::string m_rmsd_element_templates;
     std::string m_method = "";
     std::string m_molalign = "molalign";
-
+    std::multimap<double, double> m_listH, m_listI, m_listE;
+    std::multimap<double, std::vector<double>> m_listThresh;
+    std::map<double, std::string> m_nodes;
+    std::vector<std::vector<double>> m_list_skipped, m_list_performed;
+    std::vector<double> m_sLE = { 1.0 }, m_sLI = { 1.0 }, m_sLH = { 1.0 };
     double m_domolalign = -1;
     double m_lastDI = 0.0, m_lastDH = 0.0, m_lastdE = -1, m_dE = -1, m_damping = 0.8;
     int m_maxmol = 0;
@@ -361,13 +371,17 @@ private:
     bool m_allxyz = false;
     bool m_update = false;
     bool m_reduced_file = false;
-    bool m_do_third = false;
-    bool m_skipfirst = false;
+    bool m_skipinit = false;
+    bool m_skipreorder = false;
+    bool m_skipreuse = false;
+
     bool m_ignoreRotation = false;
     bool m_ignoreBarCode = false;
-    bool m_openLoop = true, m_closeLoop = false;
     bool m_update_rotation = false;
     bool m_split = false;
     bool m_write = false;
     bool m_nomunkres = false;
+    bool m_reset = false;
+    bool m_mapped = false;
+    bool m_analyse = false;
 };
