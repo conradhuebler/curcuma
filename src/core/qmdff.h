@@ -49,10 +49,19 @@
 #include "json.hpp"
 using json = nlohmann::json;
 
-class UFFThread : public CxxThread
-{
+struct QMDFFBond {
+    int a, b;
+    double reAB, kAB, exponA;
+};
+
+struct QMDFFAngle {
+    int a, b, c;
+    double thetae, kabc, reAB, reAC;
+};
+
+class QMDFFThread : public CxxThread {
 public:
-    UFFThread(int thread, int threads)
+    QMDFFThread(int thread, int threads)
         : m_thread(thread)
         , m_threads(threads)
     {
@@ -90,13 +99,13 @@ public:
     inline double InversionEnergy() const { return m_inversion_energy; }
     inline double VdWEnergy() const { return m_vdw_energy; }
 
-    void AddBond(const UFFBond& bond)
+    void AddBond(const QMDFFBond& bond)
     {
-        m_uffbonds.push_back(bond);
+        m_qmdff12bonds.push_back(bond);
     }
-    void AddAngle(const UFFAngle& angle)
+    void AddAngle(const QMDFFAngle& angle)
     {
-        m_uffangle.push_back(angle);
+        m_qmdffangle.push_back(angle);
     }
     void AddDihedral(const UFFDihedral& dihedral)
     {
@@ -142,11 +151,18 @@ private:
         return aba.cross(abc);
     }
 
-    double BondEnergy(double distance, double r, double k_ij, double D_ij = 70);
-    double CalculateBondStretching();
+    double StretchEnergy(double distance, double r, double k_ij, double D_ij = 70);
+    double CalculateStretchEnergy();
+
+    double AngleDamping(double rAB, double rAC, double reAB, double reAC);
 
     double AngleBend(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, double kijk, double C0, double C1, double C2);
     double CalculateAngleBending();
+
+    double LinearAngleBend(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, double kijk, double C0, double C1, double C2);
+    double CalculateLinearAngleBending();
+
+    double TorsionDamping(double rCA, double rAB, double rBD, double reCA, double reAB, double reBD);
 
     double Dihedral(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, const Eigen::Vector3d& l, double V, double n, double phi0);
     double CalculateDihedral();
@@ -169,10 +185,13 @@ private:
 
     Matrix *m_geometry, m_gradient;
 
-    std::vector<UFFBond> m_uffbonds;
-    int m_uff_bond_start = 0, m_uff_bond_end = 0;
+    std::vector<QMDFFBond> m_qmdff12bonds;
+    std::vector<QMDFFBond> m_qmdff13bonds;
 
-    std::vector<UFFAngle> m_uffangle;
+    int m_qmdff_12_bond_start = 0, m_qmdff_12_bond_end = 0;
+    int m_qmdff_13_bond_start = 0, m_qmdff_13_bond_end = 0;
+
+    std::vector<QMDFFAngle> m_qmdffangle;
     int m_uff_angle_start = 0, m_uff_angle_end = 0;
 
     std::vector<UFFDihedral> m_uffdihedral;
@@ -207,10 +226,10 @@ private:
     int m_thread = 0, m_threads = 0;
 };
 
-class eigenUFF {
+class QMDFF {
 public:
-    eigenUFF(const json& controller);
-    ~eigenUFF();
+    QMDFF(const json& controller);
+    ~QMDFF();
 
     void UpdateGeometry(const double* coord);
     void UpdateGeometry(const std::vector<std::array<double, 3>>& geometry);
@@ -225,6 +244,11 @@ public:
             m_geometry(i, 2) = geometry[i][2];
         }
     }
+
+    void setParameter(const json& parameter);
+    json writeParameter() const;
+    std::vector<double> getForceConstants() const;
+    void UpdateForceConstants();
 
     void Initialise();
 
@@ -303,8 +327,6 @@ public:
     }
 
 private:
-    void AssignUffAtomTypes();
-
     double BondRestLength(int i, int j, double order);
 
     std::vector<int> m_atom_types, m_uff_atom_types, m_coordination;
@@ -313,10 +335,12 @@ private:
 
     Matrix m_geometry, m_gradient;
 
-    std::vector<UFFBond> m_uffbonds;
+    std::vector<QMDFFBond> m_qmdff12bonds;
+    std::vector<QMDFFBond> m_qmdff13bonds;
+
     int m_uff_bond_start = 0, m_uff_bond_end = 0;
 
-    std::vector<UFFAngle> m_uffangle;
+    std::vector<QMDFFAngle> m_qmdffangle;
     int m_uff_angle_start = 0, m_uff_angle_end = 0;
 
     std::vector<UFFDihedral> m_uffdihedral;
@@ -349,7 +373,7 @@ private:
 
     int m_threads = 1;
     hbonds4::H4Correction m_h4correction;
-    std::vector<UFFThread*> m_stored_threads;
+    std::vector<QMDFFThread*> m_stored_threads;
     CxxThreadPool* m_threadpool;
 
 #ifdef USE_D3

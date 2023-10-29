@@ -156,6 +156,47 @@ Molecule::~Molecule()
 {
 }
 
+json Molecule::ExportJson() const
+{
+    json structure;
+    structure["atoms"] = m_atoms.size();
+    structure["elements"] = Tools::Vector2String(m_atoms);
+    structure["name"] = m_name;
+    for (int i = 0; i < m_atoms.size(); ++i) {
+        structure["atom" + std::to_string(i)] = Tools::DoubleVector2String({ m_geometry[i][0], m_geometry[i][1], m_geometry[i][2] });
+    }
+    structure["charge"] = m_charge;
+    return structure;
+}
+
+void Molecule::WriteJsonFile(const std::string& filename)
+{
+    std::ofstream input;
+    input.open(filename, std::ios::out);
+    input << ExportJson();
+    input.close();
+}
+
+void Molecule::ImportJson(const std::string& jsonfile)
+{
+    json molecule;
+    std::ifstream file(jsonfile);
+    file >> molecule;
+    ImportJson(molecule);
+}
+
+void Molecule::ImportJson(const json& molecule)
+{
+    int atoms = molecule["atoms"];
+    m_name = molecule["name"];
+    m_atoms = Tools::String2Vector(molecule["elements"]);
+    m_charge = molecule["charge"];
+    for (int i = 0; i < atoms; ++i) {
+        auto position = Tools::String2DoubleVec(molecule["atom" + std::to_string(i)], "|");
+        m_geometry.push_back(std::array<double, 3>({ position[0], position[1], position[2] }));
+    }
+}
+
 void Molecule::ApplyReorderRule(const std::vector<int>& rule)
 {
     Molecule mol;

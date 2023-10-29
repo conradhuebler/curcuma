@@ -120,6 +120,7 @@ private:
             }
         } else {
             m_current = Files::LoadFile(m_filename);
+            m_init = true;
             return false;
         }
         return true;

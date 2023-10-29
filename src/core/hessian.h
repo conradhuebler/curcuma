@@ -23,9 +23,25 @@
 
 #include "src/core/energycalculator.h"
 
+#include "src/capabilities/curcumamethod.h"
+
 #include <functional>
 
 #pragma once
+
+/* some of the stuff might be important later, but are not used now */
+
+static const json HessianJson = {
+    { "hess_read_file", "hessian" },
+    { "hess_read_xyz", "none" },
+    { "hess_calc", true },
+    { "hess_read", false },
+    { "hess_write_file", "none" },
+    { "freq_scale", 1 },
+    { "thermo", 298.15 },
+    { "freq_cutoff", 50 },
+    { "hess", 1 }
+};
 
 class HessianThread : public CxxThread {
 public:
@@ -60,18 +76,40 @@ private:
     double m_d = 1e-5;
 };
 
-class Hessian {
+class Hessian : public CurcumaMethod {
 public:
-    Hessian(const std::string& method, const json& controller, int threads);
+    Hessian(const std::string& method, const json& controller, int threads, bool silent = true);
+    Hessian(const json& controller, bool silent = true);
 
     void setMolecule(const Molecule& molecule);
 
     void CalculateHessian(bool fullnumerical = false);
 
+    void start() override;
+
+    Matrix getHessian() const { return m_hessian; }
+
 private:
+    /* Lets have this for all modules */
+    nlohmann::json WriteRestartInformation() override { return json(); }
+
+    /* Lets have this for all modules */
+    bool LoadRestartInformation() override { return true; }
+
+    StringList MethodName() const override { return { std::string("Hessian") }; }
+
+    /* Lets have all methods read the input/control file */
+    void ReadControlFile() override {}
+
+    /* Read Controller has to be implemented for all */
+    void LoadControlJson() override;
+
     void CalculateHessianNumerical();
     void CalculateHessianSemiNumerical();
     void FiniteDiffHess();
+
+    void LoadMolecule(const std::string& file);
+    void LoadHessian(const std::string& file);
 
     Vector ConvertHessian(Matrix& hessian);
 
@@ -80,4 +118,9 @@ private:
     std::string m_method;
     json m_controller;
     int m_threads = 1;
+    int m_atom_count = 0;
+    double m_freq_scale = 1, m_thermo = 298.5, m_freq_cutoff = 50;
+    bool m_hess_calc = true, m_hess_write = false, m_hess_read = false;
+    int m_hess = 1;
+    std::string m_read_file = "none", m_write_file = "none", m_read_xyz = "none";
 };

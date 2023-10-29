@@ -29,6 +29,9 @@
 
 #include "src/core/global.h"
 
+#include "json.hpp"
+using json = nlohmann::json;
+
 typedef std::pair<int, Position> AtomDef;
 
 struct Mol {
@@ -60,6 +63,12 @@ class Molecule
     /* Molecule& operator=(const Molecule& molecule);
      Molecule& operator=(const Molecule* molecule);
  */
+    json ExportJson() const;
+    void WriteJsonFile(const std::string& filename);
+
+    void ImportJson(const std::string& jsonfile);
+    void ImportJson(const json& molecule);
+
     void ApplyReorderRule(const std::vector<int>& rule);
 
     void print_geom(bool moreinfo = true) const;

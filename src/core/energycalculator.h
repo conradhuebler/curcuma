@@ -38,6 +38,7 @@
 #endif
 
 #include "src/core/eigen_uff.h"
+#include "src/core/qmdff.h"
 
 #include <functional>
 
@@ -56,6 +57,7 @@ public:
     void updateGeometry(const Eigen::VectorXd& geometry);
 
     void getGradient(double* coord);
+
     Matrix getGradient() const { return m_eigen_gradient; }
 
     Matrix Gradient() const;
@@ -92,6 +94,11 @@ public:
     }
 #endif
 
+    QMDFF* getQMDFFInterface() const
+    {
+        return m_qmdff;
+    }
+
     std::vector<double> Charges() const;
     std::vector<double> Dipole() const;
 
@@ -113,6 +120,9 @@ private:
     void InitialiseD3();
     void CalculateD3(bool gradient, bool verbose = false);
 
+    void InitialiseQMDFF();
+    void CalculateQMDFF(bool gradient, bool verbose = false);
+
     json m_controller;
 
 #ifdef USE_TBLITE
@@ -130,7 +140,9 @@ private:
 #endif
 
     eigenUFF* m_uff = NULL;
+    QMDFF* m_qmdff = NULL;
     StringList m_uff_methods = { "uff" };
+    StringList m_qmdff_method = { "qmdff" };
     StringList m_tblite_methods = { "ipea1", "gfn1", "gfn2" };
     StringList m_xtb_methods = { "gfnff", "xtb-gfn1", "xtb-gfn2" };
     StringList m_d3_methods = { "d3" };

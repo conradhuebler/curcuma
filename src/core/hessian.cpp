@@ -1,5 +1,5 @@
 /*
- * < General Calculator for the Hessian>
+ * < General Calculator for the Hessian and thermodynamics>
  * Copyright (C) 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -132,11 +132,39 @@ void HessianThread::Seminumerical()
     // std::cout << m_gradient << std::endl << std::endl;
 }
 
-Hessian::Hessian(const std::string& method, const json& controller, int threads)
-    : m_method(method)
+Hessian::Hessian(const std::string& method, const json& controller, int threads, bool silent)
+    : CurcumaMethod(HessianJson, controller, silent)
+    , m_method(method)
     , m_controller(controller)
     , m_threads(threads)
 {
+    UpdateController(controller);
+}
+
+Hessian::Hessian(const json& controller, bool silent)
+    : CurcumaMethod(HessianJson, controller, silent)
+    , m_controller(controller)
+{
+    UpdateController(controller);
+}
+
+void Hessian::LoadControlJson()
+{
+    m_hess_calc = Json2KeyWord<bool>(m_defaults, "hess_calc");
+    m_write_file = Json2KeyWord<std::string>(m_defaults, "hess_write_file");
+    m_hess_read = Json2KeyWord<bool>(m_defaults, "hess_read");
+    m_read_file = Json2KeyWord<std::string>(m_defaults, "hess_read_file");
+    m_read_xyz = Json2KeyWord<std::string>(m_defaults, "hess_read_xyz");
+
+    m_write_file = Json2KeyWord<std::string>(m_defaults, "hess_write_file");
+    if (m_hess_read) {
+        m_hess_calc = false;
+    }
+
+    m_freq_scale = Json2KeyWord<double>(m_defaults, "freq_scale");
+    m_thermo = Json2KeyWord<double>(m_defaults, "thermo");
+    m_freq_cutoff = Json2KeyWord<double>(m_defaults, "freq_cutoff");
+    m_hess = Json2KeyWord<int>(m_defaults, "hess");
 }
 
 void Hessian::setMolecule(const Molecule& molecule)
@@ -144,8 +172,56 @@ void Hessian::setMolecule(const Molecule& molecule)
     m_molecule = molecule;
 }
 
+void Hessian::LoadMolecule(const std::string& file)
+{
+    m_molecule = Files::LoadFile(file);
+    m_atom_count = m_molecule.AtomCount();
+}
+
+void Hessian::LoadHessian(const std::string& file)
+{
+    if (file.compare("hessian") == 0) {
+        std::ifstream f(file);
+        m_hessian = Matrix::Ones(3 * m_atom_count, 3 * m_atom_count);
+        int row = 0, column = 0;
+        for (std::string line; getline(f, line);) {
+            if (line.compare("$hessian") == 0)
+                continue;
+            StringList entries = Tools::SplitString(line);
+            for (int i = 0; i < entries.size(); ++i) {
+                if (!Tools::isDouble(entries[i]))
+                    continue;
+                m_hessian(row, column) = std::stod(entries[i]) / au / au; // hessian files are some units ...
+                column++;
+                if (column == 3 * m_atom_count) {
+                    column = 0;
+                    row++;
+                }
+            }
+        }
+    } else {
+        // will be json file
+    }
+}
+
+void Hessian::start()
+{
+    if (m_hess_calc) {
+        if (m_hess == 1) {
+            CalculateHessianSemiNumerical();
+        } else {
+            CalculateHessianNumerical();
+        }
+    } else {
+        LoadMolecule(m_read_xyz);
+        LoadHessian(m_read_file);
+    }
+    auto freqs = ConvertHessian(m_hessian);
+}
+
 void Hessian::CalculateHessian(bool fullnumerical)
 {
+    start();
     //   m_hessian = Eigen::MatrixXd::Ones(3 * m_molecule.AtomCount(), 3 * m_molecule.AtomCount());
     /*
         if (fullnumerical)
@@ -162,10 +238,10 @@ void Hessian::CalculateHessian(bool fullnumerical)
         std::cout << freqs.transpose() << std::endl;
         std::cout <<std::endl << std::endl;
     */
-    CalculateHessianSemiNumerical();
-    auto freqs = ConvertHessian(m_hessian);
-    // std::cout << freqs.transpose() << std::endl;
-    // std::cout <<std::endl << std::endl;
+    // CalculateHessianSemiNumerical();
+    // auto freqs = ConvertHessian(m_hessian);
+    //  std::cout << freqs.transpose() << std::endl;
+    //  std::cout <<std::endl << std::endl;
 
     /*
 

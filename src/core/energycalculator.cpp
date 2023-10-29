@@ -106,6 +106,12 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
         std::cout << "D4 was not included ..." << std::endl;
         exit(1);
 #endif
+    } else if (std::find(m_qmdff_method.begin(), m_qmdff_method.end(), m_method) != m_qmdff_method.end()) { // Just D4 energy calculator requested
+        m_qmdff = new QMDFF(controller);
+        m_ecengine = [this](bool gradient, bool verbose) {
+            this->CalculateQMDFF(gradient, verbose);
+        };
+
     } else { // Fall back to UFF?
         m_uff = new eigenUFF(controller);
     }
@@ -187,6 +193,10 @@ void EnergyCalculator::setMolecule(const Molecule& molecule)
 #ifdef USE_D4
         m_d4->InitialiseMolecule(molecule, 1 / au);
 #endif
+    } else if (std::find(m_qmdff_method.begin(), m_qmdff_method.end(), m_method) != m_qmdff_method.end()) { //
+        m_qmdff->setMolecule(atoms, geom);
+        m_qmdff->Initialise();
+
     } else { // Fall back to UFF?
     }
     m_initialised = true;
@@ -320,6 +330,15 @@ void EnergyCalculator::CalculateD4(bool gradient, bool verbose)
     } else
         m_energy = m_d4->DFTD4Calculation();
 #endif
+}
+
+void EnergyCalculator::CalculateQMDFF(bool gradient, bool verbose)
+{
+    m_qmdff->UpdateGeometry(m_geometry);
+    m_energy = m_qmdff->Calculate(gradient, verbose);
+    if (gradient) {
+        m_eigen_gradient = m_qmdff->Gradient();
+    }
 }
 
 void EnergyCalculator::getGradient(double* gradient)

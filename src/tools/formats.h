@@ -247,7 +247,11 @@ inline Molecule LoadFile(const std::string& filename)
         return Molecule(Mol22Mol(filename));
     else if (std::string(filename).find(".sdf") != std::string::npos)
         return Molecule(SDF2Mol(filename));
-    else if (std::string(filename).find("coord") != std::string::npos || std::string(filename).find("tmol") != std::string::npos)
+    else if (std::string(filename).find(".json") != std::string::npos) {
+        Molecule molecule;
+        molecule.ImportJson(filename);
+        return molecule;
+    } else if (std::string(filename).find("coord") != std::string::npos || std::string(filename).find("tmol") != std::string::npos)
         return Molecule(Coord2Mol(filename));
     else {
         fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "\nI dont understand the file type. Please use xyz (trj), sdf, mol2 or turbomole coord files as input.\n");

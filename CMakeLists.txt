@@ -167,6 +167,7 @@ set(curcuma_core_SRC
         src/core/molecule.cpp
         #src/core/pseudoff.cpp
         src/core/eigen_uff.cpp
+        src/core/qmdff.cpp
         src/tools/formats.h
         src/tools/geometry.h
         src/tools/general.h

@@ -819,6 +819,16 @@ int main(int argc, char **argv) {
                 Molecule mol = file.Next();
                 mol.writeXYZFile(outfile, Tools::RandomVector(0, mol.AtomCount()));
             }
+        } else if (strcmp(argv[1], "-hessian") == 0) {
+            if (argc < 3) {
+                std::cerr << "Please use curcuma to analyse hessians of molecules as follow:\ncurcuma -hessian -hess_read_xyz molecule.xyz -hess_read_file hessian" << std::endl;
+                std::cerr << "or" << std::endl;
+                std::cerr << "Please use curcuma to analyse hessians of molecules as follow:\ncurcuma -hessian -hess_read_file hessian.json" << std::endl;
+                return 0;
+            }
+
+            Hessian hessian(controller["hessian"]);
+            hessian.start();
         } else {
             bool centered = false;
             for (std::size_t i = 2; i < argc; ++i) {
@@ -835,6 +845,7 @@ int main(int argc, char **argv) {
                 if (centered)
                     mol.setGeometry(GeometryTools::TranslateGeometry(mol.getGeometry(), GeometryTools::Centroid(mol.getGeometry()), Position{ 0, 0, 0 }));
                 mol.print_geom();
+
                 mol.AnalyseIntermoleculeDistance();
                 std::cout << mol.Check() << std::endl
                           << std::endl;
