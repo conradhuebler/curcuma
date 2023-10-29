@@ -26,8 +26,9 @@
 #include "src/core/molecule.h"
 
 static json XTBSettings{
-    { "calculator_accuracy", 2 },
-    { "calculator_max_iter", 100 }
+    { "xtb_ac", 2 },
+    { "xtb_maxiter", 100 },
+    { "xtb_temp", 298 }
 };
 
 class UFF;
@@ -63,6 +64,8 @@ private:
     double m_thr = 1.0e-10;
     double* m_coord;
     int* m_attyp;
+    int m_accuracy = 1, m_maxiter = 100;
+    double m_temp = 298;
     xtb_TEnvironment m_env = NULL;
     xtb_TMolecule m_xtb_mol = NULL;
     xtb_TCalculator m_xtb_calc = NULL;

@@ -820,8 +820,8 @@ void RMSDDriver::TemplateFree()
         Eigen::MatrixXd tar = tget.transpose();
         Eigen::MatrixXd ref = tref.transpose();
 
-        Geometry rotated_reference = ref.transpose() * ref_mol.RotationMatrix();
-        Geometry rotated_target = tar.transpose() * tar_mol.RotationMatrix();
+        Geometry rotated_reference = ref.transpose() * ref_mol.AlignmentAxes();
+        Geometry rotated_target = tar.transpose() * tar_mol.AlignmentAxes();
 
         ref_mol.setGeometry(rotated_reference);
         tar_mol.setGeometry(rotated_target);

@@ -154,7 +154,7 @@ double TBLiteInterface::GFNCalculation(int parameter, double* grad)
     else
         tblite_set_calculator_guess(m_ctx, m_tblite_calc, TBLITE_GUESS_EEQ);
 
-    tblite_set_calculator_accuracy(m_ctx, m_tblite_calc, 0.01);
+    tblite_set_calculator_accuracy(m_ctx, m_tblite_calc, m_acc);
     tblite_set_calculator_max_iter(m_ctx, m_tblite_calc, m_maxiter);
     tblite_set_calculator_mixer_damping(m_ctx, m_tblite_calc, m_damping);
     tblite_set_calculator_temperature(m_ctx, m_tblite_calc, m_temp);

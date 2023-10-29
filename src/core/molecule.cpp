@@ -834,6 +834,18 @@ Position Molecule::Centroid(bool protons, int fragment) const
     return GeometryTools::Centroid(getGeometryByFragment(fragment, protons));
 }
 
+Position Molecule::MassCentroid(bool protons, int fragment) const
+{
+    Position pos = { 0, 0, 0 };
+    double mass = 0.0;
+    for (int i = 0; i < m_atoms.size(); ++i) {
+        pos += Atom(i).second;
+        mass += Elements::AtomicMass[Atom(i).first];
+    }
+    pos /= mass;
+    return pos;
+}
+
 std::pair<int, Position> Molecule::Atom(int i) const
 {
     return std::pair<int, Position>(m_atoms[i], { m_geometry[i][0], m_geometry[i][1], m_geometry[i][2] });
@@ -956,7 +968,6 @@ std::string Molecule::XYZString(const std::vector<int> &order) const
     return output;
 }
 
-
 std::vector<int> Molecule::BoundHydrogens(int atom, double scaling) const
 {
     std::vector<int> result;
@@ -973,6 +984,14 @@ std::vector<int> Molecule::BoundHydrogens(int atom, double scaling) const
             result.push_back(i);
     }
     return result;
+}
+
+void Molecule::Center(bool mass)
+{
+    if (!mass)
+        setGeometry(GeometryTools::TranslateGeometry(getGeometry(), GeometryTools::Centroid(getGeometry()), Position{ 0, 0, 0 }));
+    else
+        setGeometry(GeometryTools::TranslateGeometry(getGeometry(), MassCentroid(), Position{ 0, 0, 0 }));
 }
 
 void Molecule::CalculateRotationalConstants()
@@ -1017,10 +1036,39 @@ void Molecule::CalculateRotationalConstants()
     double conv = 1.6605402E-24 * 10E-10 * 10E-10 * 10;
     double conv2 = 6.6260755E-34 / pi / pi / 8;
 
-    m_rotation_matrix = diag_I.eigenvectors().inverse();
+    m_alignmentAxes = diag_I.eigenvectors();
+
     m_Ia = conv2 / (diag_I.eigenvalues()(0) * conv);
     m_Ib = conv2 / (diag_I.eigenvalues()(1) * conv);
     m_Ic = conv2 / (diag_I.eigenvalues()(2) * conv);
+}
+
+void Molecule::AlignAxis()
+{
+    CalculateRotationalConstants();
+    Geometry coordinates = getGeometry(true);
+    {
+        Eigen::Vector3d alignmentAxis = m_alignmentAxes.col(0);
+        Eigen::Vector3d referenceAxis = Eigen::Vector3d::UnitZ(); // Specify the desired reference axis (e.g., z-axis)
+        Eigen::Quaterniond alignmentQuaternion;
+        alignmentQuaternion.setFromTwoVectors(alignmentAxis, referenceAxis);
+        coordinates = (alignmentQuaternion.toRotationMatrix() * getGeometry().transpose()).transpose();
+    }
+    {
+        Eigen::Vector3d alignmentAxis = m_alignmentAxes.col(1);
+        Eigen::Vector3d referenceAxis = Eigen::Vector3d::UnitY(); // Specify the desired reference axis (e.g., z-axis)
+        Eigen::Quaterniond alignmentQuaternion;
+        alignmentQuaternion.setFromTwoVectors(alignmentAxis, referenceAxis);
+        coordinates = (alignmentQuaternion.toRotationMatrix() * getGeometry().transpose()).transpose();
+    }
+    {
+        Eigen::Vector3d alignmentAxis = m_alignmentAxes.col(2);
+        Eigen::Vector3d referenceAxis = Eigen::Vector3d::UnitX(); // Specify the desired reference axis (e.g., z-axis)
+        Eigen::Quaterniond alignmentQuaternion;
+        alignmentQuaternion.setFromTwoVectors(alignmentAxis, referenceAxis);
+        coordinates = (alignmentQuaternion.toRotationMatrix() * getGeometry().transpose()).transpose();
+    }
+    setGeometry(coordinates);
 }
 
 std::map<int, std::vector<int>> Molecule::getConnectivtiy(double scaling, int latest) const
@@ -1239,11 +1287,6 @@ Molecule Molecule::AtomsRemoved(const std::vector<int>& atoms)
             mol.addPair(pair);
     }
     return mol;
-}
-
-void Molecule::Center()
-{
-    setGeometry(GeometryTools::TranslateGeometry(getGeometry(), GeometryTools::Centroid(getGeometry()), Position{ 0, 0, 0 }));
 }
 
 std::pair<Matrix, Matrix> Molecule::DistanceMatrix() const

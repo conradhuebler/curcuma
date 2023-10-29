@@ -83,7 +83,7 @@ void CurcumaOpt::LoadControlJson()
     m_spin = Json2KeyWord<double>(m_defaults, "Spin");
     m_singlepoint = Json2KeyWord<bool>(m_defaults, "SinglePoint");
     m_serial = Json2KeyWord<bool>(m_defaults, "serial");
-    m_hessian = Json2KeyWord<bool>(m_defaults, "hessian");
+    m_hessian = Json2KeyWord<int>(m_defaults, "hessian");
     if (m_method == "GFNFF")
         m_threads = 1;
 }
@@ -135,7 +135,7 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
         if (m_hessian) {
             Hessian hess(m_method, m_defaults, m_threads);
             hess.setMolecule(*iter);
-            hess.CalculateHessian(true);
+            hess.CalculateHessian(m_hessian);
         }
         auto end = std::chrono::system_clock::now();
         std::cout << fmt::format("Single Point Energy = {0} Eh ({1} secs)\n", energy, std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
@@ -189,7 +189,7 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
         if (m_hessian) {
             Hessian hess(m_method, m_defaults, m_threads);
             hess.setMolecule(mol2);
-            hess.CalculateHessian(true);
+            hess.CalculateHessian(m_hessian);
         }
         if (!m_singlepoint)
             mol2->appendXYZFile(Optfile());

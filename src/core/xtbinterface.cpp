@@ -36,6 +36,12 @@ XTBInterface::XTBInterface(const json& xtbsettings)
     m_env = xtb_newEnvironment();
     m_xtb_calc = xtb_newCalculator();
     m_xtb_res = xtb_newResults();
+    m_xtbsettings = MergeJson(XTBSettings, xtbsettings);
+    // std::cout << m_xtbsettings << std::endl;
+
+    m_accuracy = m_xtbsettings["xtb_ac"];
+    m_maxiter = m_xtbsettings["xtb_maxiter"];
+    m_temp = m_xtbsettings["xtb_temp"];
 }
 
 XTBInterface::~XTBInterface()
@@ -130,6 +136,10 @@ double XTBInterface::GFNCalculation(int parameter, double* grad)
     } else if (parameter == 66) {
         xtb_loadGFNFF(m_env, m_xtb_mol, m_xtb_calc, NULL);
     }
+    xtb_setAccuracy(m_env, m_xtb_calc, m_accuracy);
+    xtb_setMaxIter(m_env, m_xtb_calc, m_maxiter);
+    xtb_setElectronicTemp(m_env, m_xtb_calc, m_temp);
+
     xtb_singlepoint(m_env, m_xtb_mol, m_xtb_calc, m_xtb_res);
     if (xtb_checkEnvironment(m_env)) {
         xtb_showEnvironment(m_env, NULL);
