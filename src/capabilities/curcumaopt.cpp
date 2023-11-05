@@ -17,13 +17,13 @@
  *
  */
 
+#include "src/capabilities/hessian.h"
 #include "src/capabilities/rmsd.h"
 
 #include "src/core/elements.h"
 #include "src/core/energycalculator.h"
 #include "src/core/fileiterator.h"
 #include "src/core/global.h"
-#include "src/core/hessian.h"
 #include "src/core/molecule.h"
 
 #include <LBFGS.h>

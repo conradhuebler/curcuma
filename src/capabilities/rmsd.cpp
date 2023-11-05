@@ -31,6 +31,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -1422,31 +1423,34 @@ bool RMSDDriver::MolAlignLib()
 {
     m_reference.writeXYZFile("molaign_ref.xyz");
     m_target.writeXYZFile("molalign_tar.xyz");
+
     FILE* FileOpen;
-    std::string command = m_molalign + " molaign_ref.xyz " + " molalign_tar.xyz -sort -fast -tol " + std::to_string(m_molaligntol) + " 2>&1";
+    std::string command = m_molalign + " molaign_ref.xyz " + " molalign_tar.xyz -reorder -fast -tol " + std::to_string(m_molaligntol) + " 2>&1";
+    if (!m_silent)
+        std::cout << command << std::endl;
     FileOpen = popen(command.c_str(), "r");
-    bool ok = false;
+    bool ok = true;
     bool rndm = false;
     bool error = false;
     char line[130];
+
     while (fgets(line, sizeof line, FileOpen)) {
-        ok = std::string(line).find("RMSD") != std::string::npos;
+        //  ok = std::string(line).find("RMSD") != std::string::npos;
         rndm = std::string(line).find("random") != std::string::npos;
         error = std::string(line).find("Error") != std::string::npos;
         // printf("%s", line);
     }
-
     pclose(FileOpen);
-    if (ok) {
+
+    if (std::filesystem::exists("aligned.xyz") and !rndm) {
         if (!m_silent) {
             fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nPlease cite the follow research report!\nJ. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187\n\n");
         }
         FileIterator file("aligned.xyz", true);
-
-        m_reference = file.Next();
         m_target_reordered = file.Next();
         m_target_aligned = m_target_reordered;
         m_target = m_target_reordered;
+        std::filesystem::remove("aligned.xyz");
     } else {
         if (!rndm && !error) {
             fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Molalign was not found. Consider getting it from\nhttps://github.com/qcuaeh/molalignlib\nEither adding the location of the binary to the path for executables or append\n-molalignbin /yourpath/molalign\nto your argument list!\n");

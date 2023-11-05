@@ -40,7 +40,8 @@ static const json HessianJson = {
     { "freq_scale", 1 },
     { "thermo", 298.15 },
     { "freq_cutoff", 50 },
-    { "hess", 1 }
+    { "hess", 1 },
+    { "method", "uff" }
 };
 
 class HessianThread : public CxxThread {
@@ -49,7 +50,7 @@ public:
     ~HessianThread();
 
     void setMolecule(const Molecule& molecule);
-
+    void setParameter(const json& parameter) { m_parameter = parameter; }
     int execute() override;
 
     int I() const { return m_i; }
@@ -66,7 +67,7 @@ private:
 
     EnergyCalculator* m_calculator;
     std::string m_method;
-    json m_controller;
+    json m_controller, m_parameter;
     Molecule m_molecule;
     Matrix m_gradient;
     std::vector<std::array<double, 3>> m_geom_ip_jp, m_geom_im_jp, m_geom_ip_jm, m_geom_im_jm;
@@ -90,6 +91,7 @@ public:
     void start() override;
 
     Matrix getHessian() const { return m_hessian; }
+    void setParameter(const json& parameter) { m_parameter = parameter; }
 
 private:
     /* Lets have this for all modules */
@@ -114,7 +116,6 @@ private:
     void LoadMolecule(const std::string& file);
     void LoadHessian(const std::string& file);
 
-
     Matrix ProjectHessian(const Matrix& hessian);
 
     Vector ConvertHessian(Matrix& hessian);
@@ -122,7 +123,7 @@ private:
     Matrix m_eigen_geometry, m_eigen_gradient, m_hessian;
     Molecule m_molecule;
     std::string m_method;
-    json m_controller;
+    json m_controller, m_parameter;
     int m_threads = 1;
     int m_atom_count = 0;
     double m_freq_scale = 1, m_thermo = 298.5, m_freq_cutoff = 50;

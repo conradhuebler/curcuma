@@ -42,6 +42,9 @@
 
 #include <functional>
 
+#include "json.hpp"
+using json = nlohmann::json;
+
 class EnergyCalculator {
 public:
     EnergyCalculator(const std::string& method, const json& controller);
@@ -99,6 +102,13 @@ public:
         return m_qmdff;
     }
 
+    inline void setParameter(const json& parameter)
+    {
+        m_parameter = parameter;
+        if (m_qmdff != NULL)
+            m_qmdff->setParameter(parameter);
+    }
+
     std::vector<double> Charges() const;
     std::vector<double> Dipole() const;
 
@@ -150,7 +160,7 @@ private:
     std::function<void(bool, bool)> m_ecengine;
     std::function<std::vector<double>()> m_charges, m_dipole;
     std::function<std::vector<std::vector<double>>()> m_bonds;
-
+    json m_parameter;
     std::string m_method;
     std::vector<std::array<double, 3>> m_geometry, m_gradient;
     Matrix m_eigen_geometry, m_eigen_gradient;

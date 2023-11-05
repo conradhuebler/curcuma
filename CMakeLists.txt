@@ -165,7 +165,8 @@ set(curcuma_core_SRC
         src/capabilities/rmsd.cpp
         src/capabilities/rmsdtraj.cpp
         src/capabilities/simplemd.cpp
-        src/core/hessian.cpp
+        src/capabilities/hessian.cpp
+        src/capabilities/qmdfffit.cpp
         src/core/energycalculator.cpp
         src/core/molecule.cpp
         #src/core/pseudoff.cpp
@@ -178,7 +179,8 @@ set(curcuma_core_SRC
     add_library(curcuma_core  ${curcuma_core_SRC})
 
     add_executable(curcuma
-            src/main.cpp)
+            src/main.cpp
+            )
 
 if(C17)
     set_property(TARGET curcuma_core PROPERTY CXX_STANDARD 17)
@@ -357,6 +359,11 @@ endif(C17)
 
 add_subdirectory(test_cases)
 include(CTest)
+
+target_sources(Continuous
+  PRIVATE
+    src/core/qmdff_par.h
+)
 add_test(NAME AAAbGal_mtemplate COMMAND AAAbGal mtemplate WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME AAAbGal_mhybrid COMMAND AAAbGal mhybrid WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME AAAbGal_template COMMAND AAAbGal template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)

@@ -18,7 +18,6 @@
  */
 
 #include "src/core/fileiterator.h"
-#include "src/core/hessian.h"
 #include "src/core/molecule.h"
 
 #include "src/capabilities/analysenciplot.h"
@@ -27,9 +26,11 @@
 #include "src/capabilities/confstat.h"
 #include "src/capabilities/curcumaopt.h"
 #include "src/capabilities/docking.h"
+#include "src/capabilities/hessian.h"
 #include "src/capabilities/nebdocking.h"
 #include "src/capabilities/pairmapper.h"
 #include "src/capabilities/persistentdiagram.h"
+#include "src/capabilities/qmdfffit.h"
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
 #include "src/capabilities/simplemd.h"
@@ -826,9 +827,24 @@ int main(int argc, char **argv) {
                 std::cerr << "Please use curcuma to analyse hessians of molecules as follow:\ncurcuma -hessian -hess_read_file hessian.json" << std::endl;
                 return 0;
             }
+            Molecule mol1 = Files::LoadFile(argv[2]);
 
             Hessian hessian(controller["hessian"]);
+            hessian.setMolecule(mol1);
+
             hessian.start();
+        } else if (strcmp(argv[1], "-qmdfffit") == 0) {
+            if (argc < 3) {
+                std::cerr << "Please use curcuma to analyse hessians of molecules as follow:\ncurcuma -hessian -hess_read_xyz molecule.xyz -hess_read_file hessian" << std::endl;
+                std::cerr << "or" << std::endl;
+                std::cerr << "Please use curcuma to analyse hessians of molecules as follow:\ncurcuma -hessian -hess_read_file hessian.json" << std::endl;
+                return 0;
+            }
+            Molecule mol1 = Files::LoadFile(argv[2]);
+
+            QMDFFFit qmdfffit(controller["qmdfffit"]);
+            qmdfffit.setMolecule(mol1);
+            qmdfffit.start();
         } else {
             bool centered = false;
             for (std::size_t i = 2; i < argc; ++i) {

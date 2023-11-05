@@ -27,18 +27,11 @@
  */
 
 #include "src/core/global.h"
+#include "src/core/qmdff_par.h"
 
 #include "hbonds.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
-
-#ifdef USE_D3
-#include "src/core/dftd3interface.h"
-#endif
-
-#ifdef USE_D4
-#include "src/core/dftd4interface.h"
-#endif
 
 #include "src/core/uff_par.h"
 #include <set>
@@ -48,16 +41,6 @@
 
 #include "json.hpp"
 using json = nlohmann::json;
-
-struct QMDFFBond {
-    int a, b;
-    double reAB, kAB, exponA;
-};
-
-struct QMDFFAngle {
-    int a, b, c;
-    double thetae, kabc, reAB, reAC;
-};
 
 class QMDFFThread : public CxxThread {
 public:
@@ -101,7 +84,7 @@ public:
 
     void AddBond(const QMDFFBond& bond)
     {
-        m_qmdff12bonds.push_back(bond);
+        m_qmdffbonds.push_back(bond);
     }
     void AddAngle(const QMDFFAngle& angle)
     {
@@ -185,8 +168,7 @@ private:
 
     Matrix *m_geometry, m_gradient;
 
-    std::vector<QMDFFBond> m_qmdff12bonds;
-    std::vector<QMDFFBond> m_qmdff13bonds;
+    std::vector<QMDFFBond> m_qmdffbonds;
 
     int m_qmdff_12_bond_start = 0, m_qmdff_12_bond_end = 0;
     int m_qmdff_13_bond_start = 0, m_qmdff_13_bond_end = 0;
@@ -229,6 +211,8 @@ private:
 class QMDFF {
 public:
     QMDFF(const json& controller);
+    QMDFF();
+
     ~QMDFF();
 
     void UpdateGeometry(const double* coord);
@@ -243,6 +227,14 @@ public:
             m_geometry(i, 1) = geometry[i][1];
             m_geometry(i, 2) = geometry[i][2];
         }
+        m_gradient = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
+    }
+
+    void setMolecule(const std::vector<int>& atom_types, const Matrix& geometry)
+    {
+        m_atom_types = atom_types;
+        m_geometry = geometry;
+        m_gradient = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
     }
 
     void setParameter(const json& parameter);
@@ -335,8 +327,7 @@ private:
 
     Matrix m_geometry, m_gradient;
 
-    std::vector<QMDFFBond> m_qmdff12bonds;
-    std::vector<QMDFFBond> m_qmdff13bonds;
+    std::vector<QMDFFBond> m_qmdffbonds;
 
     int m_uff_bond_start = 0, m_uff_bond_end = 0;
 
@@ -372,14 +363,6 @@ private:
     int m_calc_gradient = 0;
 
     int m_threads = 1;
-    hbonds4::H4Correction m_h4correction;
     std::vector<QMDFFThread*> m_stored_threads;
     CxxThreadPool* m_threadpool;
-
-#ifdef USE_D3
-    DFTD3Interface* m_d3;
-#endif
-#ifdef USE_D4
-    DFTD4Interface* m_d4;
-#endif
 };
