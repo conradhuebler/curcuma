@@ -819,6 +819,18 @@ int main(int argc, char **argv) {
                 Molecule mol = file.Next();
                 mol.writeXYZFile(outfile, Tools::RandomVector(0, mol.AtomCount()));
             }
+        } else if (strcmp(argv[1], "-gyration") == 0) {
+            FileIterator file(argv[2]);
+            int count = 1;
+            double sum = 0;
+
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                double gyr = mol.GyrationRadius();
+                sum += gyr;
+                std::cout << ":: " << gyr << " " << sum / double(count) << std::endl;
+                count++;
+            }
         } else {
             bool centered = false;
             for (std::size_t i = 2; i < argc; ++i) {
@@ -838,6 +850,8 @@ int main(int argc, char **argv) {
                 mol.AnalyseIntermoleculeDistance();
                 std::cout << mol.Check() << std::endl
                           << std::endl;
+                std::cout << mol.COM().transpose() << std::endl;
+                std::cout << mol.GyrationRadius() << std::endl;
                 /*
                 Hessian hess("gfn2", UFFParameterJson);
                 hess.setMolecule(mol);

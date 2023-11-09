@@ -96,6 +96,8 @@ class Molecule
     Molecule getFragmentMolecule(int fragment) const;
 
     double CalculateDistance(int i, int j) const;
+    double GyrationRadius(bool hydrogen = true, int fragment = -1);
+
     Geometry getGeometry(const IntPair& pair, bool protons = true) const;
     Geometry getGeometry(std::vector<int> atoms, bool protons = true) const;
     Geometry getGeometryByFragment(int fragment, bool protons = true) const;
@@ -109,6 +111,7 @@ class Molecule
     bool setGeometryByFragment(const Geometry& geometry, int fragment, bool protons = true);
 
     Position Centroid(bool hydrogen = true, int fragment = -1) const;
+    Eigen::Vector3d COM(bool hydrogen = true, int fragment = -1);
     inline std::size_t AtomCount() const { return m_atoms.size(); }
     std::vector<int> Atoms() const { return m_atoms; }
     std::pair<int, Position> Atom(int i) const;

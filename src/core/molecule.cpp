@@ -793,6 +793,35 @@ Position Molecule::Centroid(bool protons, int fragment) const
     return GeometryTools::Centroid(getGeometryByFragment(fragment, protons));
 }
 
+Eigen::Vector3d Molecule::COM(bool protons, int fragment)
+{
+    // todo implement heavy and fragements ...
+    if (m_mass < 1)
+        CalculateMass();
+    Eigen::Vector3d com = { 0, 0, 0 };
+    for (int i = 0; i < m_geometry.size(); ++i) {
+        double mass = Elements::AtomicMass[m_atoms[i]];
+        com(0) += mass * m_geometry[i][0];
+        com(1) += mass * m_geometry[i][1];
+        com(2) += mass * m_geometry[i][2];
+    }
+    com(0) /= m_mass;
+    com(1) /= m_mass;
+    com(2) /= m_mass;
+    return com;
+}
+
+double Molecule::GyrationRadius(bool protons, int fragment)
+{
+    Eigen::Vector3d com = COM(protons, fragment);
+    double gyr = 0;
+    for (int i = 0; i < m_geometry.size(); ++i) {
+        gyr += ((com(0) - m_geometry[i][0]) * (com(0) - m_geometry[i][0]) + (com(0) - m_geometry[i][0]) * (com(0) - m_geometry[i][0]) + (com(0) - m_geometry[i][0]) * (com(0) - m_geometry[i][0]));
+    }
+    gyr /= double(m_geometry.size());
+    return gyr;
+}
+
 std::pair<int, Position> Molecule::Atom(int i) const
 {
     return std::pair<int, Position>(m_atoms[i], { m_geometry[i][0], m_geometry[i][1], m_geometry[i][2] });
