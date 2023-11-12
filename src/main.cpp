@@ -17,6 +17,7 @@
  *
  */
 
+#include "src/core/eht.h"
 #include "src/core/fileiterator.h"
 #include "src/core/molecule.h"
 
@@ -845,6 +846,15 @@ int main(int argc, char **argv) {
             QMDFFFit qmdfffit(controller["qmdfffit"]);
             qmdfffit.setMolecule(mol1);
             qmdfffit.start();
+        } else if (strcmp(argv[1], "-eht") == 0) {
+            if (argc < 3) {
+                return 0;
+            }
+            Molecule mol1 = Files::LoadFile(argv[2]);
+
+            EHT eht;
+            eht.setMolecule(mol1);
+            eht.start();
         } else {
             bool centered = false;
             for (std::size_t i = 2; i < argc; ++i) {
