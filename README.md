@@ -1,7 +1,7 @@
 [![CodeFactor](https://www.codefactor.io/repository/github/conradhuebler/curcuma/badge)](https://www.codefactor.io/repository/github/conradhuebler/curcuma) [![Build](https://github.com/conradhuebler/curcuma/workflows/AutomaticBuild/badge.svg)](https://github.com/conradhuebler/curcuma/actions)  [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.4302722.svg)](https://doi.org/10.5281/zenodo.4302722)
 
 
-![curcuma Logo](https://github.com/conradhuebler/curcuma/raw/master/misc/curcuma_II.png)
+![curcuma Logo](https://github.com/hattiwie/curcuma/raw/master/misc/curcuma_II.png)
 
 # Curcuma
 
