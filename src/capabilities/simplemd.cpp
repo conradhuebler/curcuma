@@ -71,6 +71,7 @@ void SimpleMD::LoadControlJson()
     m_dumb = Json2KeyWord<int>(m_defaults, "dump");
     m_print = Json2KeyWord<int>(m_defaults, "print");
     m_max_top_diff = Json2KeyWord<int>(m_defaults, "MaxTopoDiff");
+    m_seed = Json2KeyWord<int>(m_defaults, "seed");
 
     m_rmsd = Json2KeyWord<double>(m_defaults, "rmsd");
     m_impuls = Json2KeyWord<double>(m_defaults, "impuls");
@@ -247,7 +248,14 @@ void SimpleMD::InitVelocities(double scaling)
 {
     std::random_device rd{};
     std::mt19937 gen{ rd() };
-    std::normal_distribution<> d{ 0, 1 };
+    if (m_seed == -1) {
+        const auto start = std::chrono::high_resolution_clock::now();
+        m_seed = std::chrono::duration_cast<std::chrono::seconds>(start.time_since_epoch()).count();
+    } else if (m_seed == 0)
+        m_seed = m_T0 * m_mass.size();
+    std::cout << "Random seed is " << m_seed << std::endl;
+    gen.seed(m_seed);
+    std::normal_distribution<> d{ -1, 1 };
     double Px = 0.0, Py = 0.0, Pz = 0.0;
     for (int i = 0; i < m_natoms; ++i) {
         double v0 = sqrt(kb * m_T0 * amu2au / (m_mass[i])) * scaling / fs2amu;
@@ -897,6 +905,7 @@ void SimpleMD::CSVR()
     double c = exp(-(m_timestep * m_respa) / m_coupling);
     std::random_device rd{};
     std::mt19937 gen{ rd() };
+    gen.seed(m_seed);
     std::normal_distribution<> d{ 0, 1 };
     std::chi_squared_distribution<float> dchi{ dof };
 
