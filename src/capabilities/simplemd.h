@@ -63,7 +63,8 @@ static json CurcumaMDJson{
     { "rattle_tolerance", 1e-5 },
     { "thermostat", "csvr" },
     { "respa", 1 },
-    { "dipole", false }
+    { "dipole", false },
+    { "seed", -1 }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -164,6 +165,7 @@ private:
     std::string m_method = "UFF", m_initfile = "none", m_thermostat = "csvr";
     bool m_unstable = false;
     bool m_dipole = false;
+    int m_seed = -1;
 };
 
 class MDThread : public CxxThread {
