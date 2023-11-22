@@ -109,8 +109,6 @@ void SimpleMD::LoadControlJson()
 
 bool SimpleMD::Initialise()
 {
-    if (!m_norestart)
-        LoadRestartInformation();
     if (m_initfile.compare("none") != 0) {
         json md;
         std::ifstream restart_file(m_initfile);
@@ -123,7 +121,9 @@ bool SimpleMD::Initialise()
         }
         LoadRestartInformation(md);
         m_restart = true;
-    }
+    } else if (!m_norestart)
+        LoadRestartInformation();
+
     if (m_molecule.AtomCount() == 0)
         return false;
 
@@ -220,6 +220,22 @@ bool SimpleMD::Initialise()
         result_file << init;
         result_file.close();
     }
+    double dof = 3 * m_natoms;
+
+    /*   if (m_seed == -1) {
+           const auto start = std::chrono::high_resolution_clock::now();
+           m_seed = std::chrono::duration_cast<std::chrono::seconds>(start.time_since_epoch()).count();
+       } else if (m_seed == 0)
+           m_seed = m_T0 * m_mass.size();
+       std::cout << "Random seed is " << m_seed << std::endl;*/
+    // gen.seed(m_seed);
+    /*
+        m_random_device = new std::random_device;
+        m_random_generator = new std::mt19937(&m_random_device);
+        m_random_generator->seed(m_seed);
+        m_normal_distribution = new std::normal_distribution<>(0,1);
+        m_chi_squared_distribution = new std::chi_squared_distribution<float>(dof) ;
+    */
     m_initialised = true;
     return true;
 }
@@ -246,8 +262,8 @@ void SimpleMD::InitConstrainedBonds()
 
 void SimpleMD::InitVelocities(double scaling)
 {
-    std::random_device rd{};
-    std::mt19937 gen{ rd() };
+    static std::random_device rd{};
+    static std::mt19937 gen{ rd() };
     if (m_seed == -1) {
         const auto start = std::chrono::high_resolution_clock::now();
         m_seed = std::chrono::duration_cast<std::chrono::seconds>(start.time_since_epoch()).count();
@@ -255,7 +271,7 @@ void SimpleMD::InitVelocities(double scaling)
         m_seed = m_T0 * m_mass.size();
     std::cout << "Random seed is " << m_seed << std::endl;
     gen.seed(m_seed);
-    std::normal_distribution<> d{ -1, 1 };
+    std::normal_distribution<> d{ 0, 1 };
     double Px = 0.0, Py = 0.0, Pz = 0.0;
     for (int i = 0; i < m_natoms; ++i) {
         double v0 = sqrt(kb * m_T0 * amu2au / (m_mass[i])) * scaling / fs2amu;
@@ -402,10 +418,10 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     } catch (json::type_error& e) {
     }
     if (geometry.size()) {
-        m_current_geometry = Tools::String2DoubleVec(geometry);
+        m_current_geometry = Tools::String2DoubleVec(geometry, "|");
     }
     if (velocities.size()) {
-        m_velocities = Tools::String2DoubleVec(velocities);
+        m_velocities = Tools::String2DoubleVec(velocities, "|");
     }
     m_restart = geometry.size() && velocities.size();
 
@@ -903,11 +919,11 @@ void SimpleMD::CSVR()
     double Ekin_target = 1.5 * kb * m_T0 * m_natoms;
     double dof = 3 * m_natoms;
     double c = exp(-(m_timestep * m_respa) / m_coupling);
-    std::random_device rd{};
-    std::mt19937 gen{ rd() };
-    gen.seed(m_seed);
-    std::normal_distribution<> d{ 0, 1 };
-    std::chi_squared_distribution<float> dchi{ dof };
+    static std::random_device rd{};
+    static std::mt19937 gen{ rd() };
+    static std::normal_distribution<> d{ 0, 1 };
+    static std::chi_squared_distribution<float> dchi{ dof };
+    // static std::normal_distribution<> d2{ dof, sqrt(2*dof) };
 
     double R = d(gen);
     double SNf = dchi(gen);

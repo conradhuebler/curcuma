@@ -22,6 +22,7 @@
 #include <chrono>
 #include <ctime>
 #include <functional>
+#include <random>
 #include <ratio>
 
 #include "src/capabilities/rmsdtraj.h"
@@ -166,6 +167,11 @@ private:
     bool m_unstable = false;
     bool m_dipole = false;
     int m_seed = -1;
+    /*
+    std::random_device *m_random_device;
+    std::mt19937 *m_random_generator;
+    std::normal_distribution<> * m_normal_distribution;
+    std::chi_squared_distribution<float> * m_chi_squared_distribution;*/
 };
 
 class MDThread : public CxxThread {
