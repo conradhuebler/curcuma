@@ -19,6 +19,7 @@
 
 #ifndef tblite_delete
 #include "tblite.h"
+// #include "tblite/container.h"
 #endif
 
 #include "src/core/global.h"
@@ -36,12 +37,27 @@ TBLiteInterface::TBLiteInterface(const json& tblitesettings)
 {
     m_tblitesettings = MergeJson(TBLiteSettings, tblitesettings);
 
-    m_acc = m_tblitesettings["tb_ac"];
+    m_acc = m_tblitesettings["tb_acc"];
     m_maxiter = m_tblitesettings["tb_max_iter"];
     m_damping = m_tblitesettings["tb_damping"];
     m_temp = m_tblitesettings["tb_temp"];
     m_verbose = m_tblitesettings["tb_verbose"];
     std::string guess = m_tblitesettings["tb_guess"];
+
+    m_cpcm_eps = m_tblitesettings["cpcm_eps"];
+    m_alpb_eps = m_tblitesettings["alpb_eps"];
+
+    std::string tmp = m_tblitesettings["cpcm_solv"];
+    m_cpcm = tmp.compare("none") != 0;
+    m_cpcm_solv = new char[tmp.length() + 1];
+    strcpy(m_cpcm_solv, tmp.c_str());
+
+    tmp = m_tblitesettings["alpb_solv"];
+    m_alpb = tmp.compare("none") != 0;
+
+    m_alpb_solv = new char[tmp.length() + 1];
+    strcpy(m_alpb_solv, tmp.c_str());
+
     if (guess.compare("SAD") == 0)
         m_guess = 0;
     else if (guess.compare("EEQ") == 0)
@@ -63,6 +79,7 @@ TBLiteInterface::~TBLiteInterface()
     delete m_tblite_res;
     delete m_tblite_mol;
     delete m_tblite_calc;
+    delete m_tb_cont;
 
     delete[] m_coord;
     delete[] m_attyp;
@@ -154,7 +171,47 @@ double TBLiteInterface::GFNCalculation(int parameter, double* grad)
     else
         tblite_set_calculator_guess(m_ctx, m_tblite_calc, TBLITE_GUESS_EEQ);
 
-    tblite_set_calculator_accuracy(m_ctx, m_tblite_calc, 0.01);
+    int count = m_cpcm + m_cpcm_eps != -1 + m_alpb + m_alpb_eps != -1;
+    if (count == 1) {
+        if (m_cpcm && m_cpcm_eps == -1) {
+            m_tb_cont = tblite_new_cpcm_solvation_solvent(m_ctx, m_tblite_mol, m_tblite_calc, m_cpcm_solv);
+            if (tblite_check_context(m_ctx)) {
+                std::cout << "Error during CPCM calculation, ... Sorry for that" << std::endl;
+                return 0;
+            }
+            tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
+        } else if (!m_cpcm && m_cpcm_eps != -1) {
+            m_tb_cont = tblite_new_cpcm_solvation_epsilon(m_ctx, m_tblite_mol, m_tblite_calc, m_cpcm_eps);
+            if (tblite_check_context(m_ctx)) {
+                std::cout << "Error during CPCM calculation, ... Sorry for that" << std::endl;
+                return 0;
+            }
+            tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
+        }
+
+        if (m_alpb && m_alpb_eps == -1) {
+            m_tb_cont = tblite_new_alpb_solvation_solvent(m_ctx, m_tblite_mol, m_tblite_calc, m_alpb_solv);
+            if (tblite_check_context(m_ctx)) {
+                std::cout << "Error during ALPB calculation, ... Sorry for that" << std::endl;
+                return 0;
+            }
+            tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
+        } else if (!m_alpb && m_alpb_eps != -1) {
+            m_tb_cont = tblite_new_alpb_solvation_epsilon(m_ctx, m_tblite_mol, m_tblite_calc, m_alpb_eps);
+            if (tblite_check_context(m_ctx)) {
+                std::cout << "Error during ALPB calculation, ... Sorry for that" << std::endl;
+                return 0;
+            }
+            tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
+        }
+    } else {
+        std::cout << count << std::endl
+                  << std::endl
+                  << "If three witches had three watches, which witch would watch which watch?\n Ignoring epsilon and solvent or two solvation models given simultaneously" << std::endl
+                  << std::endl
+                  << std::endl;
+    }
+    tblite_set_calculator_accuracy(m_ctx, m_tblite_calc, m_acc);
     tblite_set_calculator_max_iter(m_ctx, m_tblite_calc, m_maxiter);
     tblite_set_calculator_mixer_damping(m_ctx, m_tblite_calc, m_damping);
     tblite_set_calculator_temperature(m_ctx, m_tblite_calc, m_temp);
