@@ -485,6 +485,8 @@ void SimpleMD::start()
     PrintStatus();
 
     for (; m_currentStep <= m_maxtime;) {
+        auto step0 = std::chrono::system_clock::now();
+
         if (CheckStop() == true) {
             TriggerWriteRestart();
             return;
@@ -514,6 +516,7 @@ void SimpleMD::start()
                 m_Etot = m_Epot + m_Ekin;
                 m_current_rescue++;
                 PrintStatus();
+                m_time_step = 0;
             }
         }
         if (m_centered && m_step % m_centered == 0 && m_step >= m_centered) {
@@ -526,6 +529,7 @@ void SimpleMD::start()
 
             std::ofstream restart_file("unstable_curcuma.json");
             restart_file << WriteRestartInformation() << std::endl;
+            m_time_step = 0;
             return;
         }
         ThermostatFunction();
@@ -538,12 +542,14 @@ void SimpleMD::start()
         if ((m_step && m_step % m_print == 0)) {
             m_Etot = m_Epot + m_Ekin;
             PrintStatus();
+            m_time_step = 0;
         }
 
         if (m_impuls > m_T) {
             InitVelocities(m_scale_velo * m_impuls_scaling);
             m_Ekin = EKin();
             PrintStatus();
+            m_time_step = 0;
         }
 
         if (m_current_rescue >= m_max_rescue) {
@@ -552,6 +558,7 @@ void SimpleMD::start()
         }
         m_step++;
         m_currentStep += m_timestep;
+        m_time_step += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - step0).count();
     }
     if (m_thermostat.compare("csvr") == 0)
         std::cout << "Exchange with heat bath " << m_Ekin_exchange << "Eh" << std::endl;
@@ -806,7 +813,7 @@ void SimpleMD::PrintStatus() const
 #pragma message("awfull, fix it ")
     if (m_writeUnique) {
 #ifdef GCC
-        std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}}\n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, remaining, m_unqiue->StoredStructures());
+        std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}}\n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, remaining, m_time_step / 1000.0, m_unqiue->StoredStructures());
 #else
         std::cout << m_currentStep * m_timestep / fs2amu / 1000 << " " << m_Epot << " " << m_Ekin << " " << m_Epot + m_Ekin << m_T << std::endl;
 
@@ -814,9 +821,9 @@ void SimpleMD::PrintStatus() const
     } else {
 #ifdef GCC
         if (m_dipole)
-            std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f}  {11: ^{0}f}\n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_aver_dipol * 2.5418 * 3.3356, remaining);
+            std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}}\n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_aver_dipol * 2.5418 * 3.3356, m_time_step / 1000.0, remaining);
         else
-            std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} \n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, remaining);
+            std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f}\n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, remaining, m_time_step / 1000.0);
 #else
         std::cout << m_currentStep * m_timestep / fs2amu / 1000 << " " << m_Epot << " " << m_Ekin << " " << m_Epot + m_Ekin << m_T << std::endl;
 
@@ -900,6 +907,7 @@ bool SimpleMD::WriteGeometry()
         if (m_unqiue->CheckMolecule(new Molecule(m_molecule))) {
             std::cout << " ** new structure was added **" << std::endl;
             PrintStatus();
+            m_time_step = 0;
             m_unique_structures.push_back(new Molecule(m_molecule));
         }
     }

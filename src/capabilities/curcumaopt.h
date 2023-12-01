@@ -127,7 +127,7 @@ public:
     void setSinglePoint(bool sp) { m_singlepoint = sp; }
     inline const std::vector<Molecule>* Molecules() const { return &m_molecules; }
 
-    static Molecule LBFGSOptimise(const Molecule* host, const json& controller, std::string& output, std::vector<Molecule>* intermediate);
+    static Molecule LBFGSOptimise(const Molecule* host, const json& controller, std::string& output, std::vector<Molecule>* intermediate, int thread = -1);
     static double SinglePoint(const Molecule* initial, const json& controller, std::string& output);
 
     void clear();

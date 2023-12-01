@@ -49,7 +49,7 @@ using namespace LBFGSpp;
 
 int OptThread::execute()
 {
-    m_final = CurcumaOpt::LBFGSOptimise(&m_molecule, m_controller, m_result, &m_intermediate);
+    m_final = CurcumaOpt::LBFGSOptimise(&m_molecule, m_controller, m_result, &m_intermediate, ThreadId());
     return 0;
 }
 
@@ -168,6 +168,7 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
 
             th->setMolecule(*iter);
             th->setController(m_defaults);
+            th->setThreadId(i);
             thread_block.push_back(th);
             pool->addThread(th);
 
@@ -239,7 +240,7 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, 
     return energy;
 }
 
-Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controller, std::string& output, std::vector<Molecule>* intermediate)
+Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controller, std::string& output, std::vector<Molecule>* intermediate, int thread)
 {
     bool printOutput = Json2KeyWord<bool>(controller, "printOutput");
     double dE = Json2KeyWord<double>(controller, "dE");
@@ -261,6 +262,8 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
     std::vector<int> constrain;
     Geometry geometry = initial->getGeometry();
     intermediate->push_back(initial);
+
+    initial->writeXYZFile("curcuma_opt_thread_" + std::to_string(thread) + ".xyz");
     Molecule previous(initial);
     Molecule next(initial);
     Vector parameter(3 * initial->AtomCount()), old_parameter(3 * initial->AtomCount());
@@ -437,6 +440,8 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
             previous = next;
             previous.setEnergy(final_energy);
             intermediate->push_back(next);
+            next.appendXYZFile("curcuma_opt_thread_" + std::to_string(thread) + ".xyz");
+
         } else {
             perform_optimisation = false;
             error = true;

@@ -167,6 +167,7 @@ private:
     bool m_unstable = false;
     bool m_dipole = false;
     int m_seed = -1;
+    int m_time_step = 0;
     /*
     std::random_device *m_random_device;
     std::mt19937 *m_random_generator;
