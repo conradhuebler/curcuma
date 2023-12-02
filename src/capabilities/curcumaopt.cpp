@@ -49,7 +49,7 @@ using namespace LBFGSpp;
 
 int OptThread::execute()
 {
-    m_final = CurcumaOpt::LBFGSOptimise(&m_molecule, m_controller, m_result, &m_intermediate, ThreadId());
+    m_final = CurcumaOpt::LBFGSOptimise(&m_molecule, m_controller, m_result, &m_intermediate, ThreadId(), Basename() + ".opt.trj");
     return 0;
 }
 
@@ -90,6 +90,7 @@ void CurcumaOpt::LoadControlJson()
 
 void CurcumaOpt::start()
 {
+    getBasename(m_filename);
     if (m_file_set) {
         FileIterator file(m_filename);
         std::multimap<double, Molecule> results;
@@ -166,6 +167,8 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
             else
                 th = new SPThread;
 
+            th->setBaseName(Basename());
+
             th->setMolecule(*iter);
             th->setController(m_defaults);
             th->setThreadId(i);
@@ -240,7 +243,7 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, 
     return energy;
 }
 
-Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controller, std::string& output, std::vector<Molecule>* intermediate, int thread)
+Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, const json& controller, std::string& output, std::vector<Molecule>* intermediate, int thread, const std::string& basename)
 {
     bool printOutput = Json2KeyWord<bool>(controller, "printOutput");
     double dE = Json2KeyWord<double>(controller, "dE");
@@ -263,7 +266,6 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
     Geometry geometry = initial->getGeometry();
     intermediate->push_back(initial);
 
-    initial->writeXYZFile("curcuma_opt_thread_" + std::to_string(thread) + ".xyz");
     Molecule previous(initial);
     Molecule next(initial);
     Vector parameter(3 * initial->AtomCount()), old_parameter(3 * initial->AtomCount());
@@ -279,7 +281,9 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
     interface.setMolecule(*initial);
 
     double final_energy = interface.CalculateEnergy(true);
-
+    initial->setEnergy(final_energy);
+    initial->writeXYZFile(basename + ".t" + std::to_string(thread) + ".xyz");
+    std::cout << "Initial energy " << final_energy << "Eh" << std::endl;
     LBFGSParam<double> param;
     param.epsilon = LBFGS_eps;
     param.m = StoreIntermediate;
@@ -337,7 +341,7 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
     if (converged)
         perform_optimisation = false;
 
-    for (iteration = 0; iteration <= MaxIter && perform_optimisation; ++iteration) {
+    for (iteration = 1; iteration <= MaxIter && perform_optimisation; ++iteration) {
         old_parameter = parameter;
         try {
             solver.SingleStep(fun, parameter, fx);
@@ -420,6 +424,13 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
             + 4 * (solver.isConverged())
             + 8 * (solver.final_grad_norm() < GradNorm);
         perform_optimisation = ((converged & ConvCount) != ConvCount) && (fun.isError() == 0);
+        std::ifstream test_file("stop");
+        bool result = test_file.is_open();
+        test_file.close();
+        if (result) {
+            perform_optimisation = false;
+            error = true;
+        }
         /*
         std::cout << (abs(fun.m_energy - final_energy) * 2625.5 < 0.05)
                   << " " << (int(driver->RMSD() < 0.01))
@@ -438,9 +449,9 @@ Molecule CurcumaOpt::LBFGSOptimise(const Molecule* initial, const json& controll
         final_energy = fun.m_energy;
         if (next.Check() == 0) {
             previous = next;
-            previous.setEnergy(final_energy);
+            next.setEnergy(final_energy);
             intermediate->push_back(next);
-            next.appendXYZFile("curcuma_opt_thread_" + std::to_string(thread) + ".xyz");
+            next.appendXYZFile(basename + ".t" + std::to_string(thread) + ".xyz");
 
         } else {
             perform_optimisation = false;

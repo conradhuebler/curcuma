@@ -48,11 +48,8 @@ ConfSearch::~ConfSearch()
 
 void ConfSearch::setFile(const std::string& filename)
 {
+    getBasename(filename);
     m_filename = filename;
-    std::string name = std::string(filename);
-    for (int i = 0; i < 4; ++i)
-        name.pop_back();
-    m_basename = name;
 
     FileIterator file(m_filename);
     while (!file.AtEnd()) {
@@ -69,17 +66,21 @@ bool ConfSearch::Initialise()
 void ConfSearch::start()
 {
     nlohmann::json md = CurcumaMDJson;
-    md["gfn"] = m_gfn;
+    md["method"] = m_method;
     md["impuls_scaling"] = 0.75;
-    md["dt"] = 0.5;
-    md["velo"] = 4;
-    md["thermostat_steps"] = 400;
+    md["dt"] = 0.25;
+    md["velo"] = 1.5;
+    md["coupling"] = 10;
     md["hmass"] = 1;
-    md["berendson"] = 200;
+    md["thermostat"] = "csvr";
     md["maxtime"] = m_time;
     md["rmsd"] = m_rmsd;
     md["resuce"] = true;
-    md["print"] = m_time / 3.0;
+    md["print"] = 1000;
+    md["rattle"] = true;
+    md["rattle_tolerance"] = 1e-9;
+    md["unique"] = true;
+
     for (m_currentT = m_startT; m_currentT >= m_endT; m_currentT -= m_deltaT) {
         std::cout << std::endl
                   << std::endl
@@ -94,7 +95,7 @@ void ConfSearch::start()
         //      uniques.push_back(r);
 
         nlohmann::json opt = CurcumaOptJson;
-        opt["gfn"] = m_gfn;
+        opt["method"] = m_method;
         opt["threads"] = m_threads;
         PerformOptimisation(std::string("fff"), opt);
 
@@ -102,7 +103,7 @@ void ConfSearch::start()
         scan["rmsdmethod"] = "hybrid";
         scan["fewerFile"] = true;
         scan["threads"] = m_threads;
-        scan["gfn"] = m_gfn;
+        scan["method"] = m_method;
 
         PerformFilter(std::string("fff"), scan);
         /*
@@ -110,9 +111,9 @@ void ConfSearch::start()
             delete m_in_stack[i];
         m_in_stack.clear();
         */
-        std::string name = m_basename;
-        setFile(m_basename + "." + std::to_string(m_currentT) + ".opt.accepted.xyz");
-        m_basename = name;
+        std::string name = Basename();
+        setFile(Basename() + "." + std::to_string(m_currentT) + ".opt.accepted.xyz");
+        //   m_basename = name;
 
         /*
         for (int i = 0; i < uniques.size(); ++i)
@@ -134,18 +135,20 @@ std::string ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& m
     int index = 0;
     for (int repeat = 0; repeat < m_repeat; ++repeat) {
         for (int i = 0; i < molecules.size(); ++i) {
-            MDThread* thread = new MDThread(index, parameter);
+            MDThread* thread = new MDThread(parameter);
+            thread->setThreadId(index);
+            thread->setBasename(Basename() + ".confsearch");
             thread->setMolecule(molecules[i * repeat]);
             index++;
             pool->addThread(thread);
         }
     }
-    if (m_gfn == 66)
+    if (m_method.compare("gfnff") == 0)
         pool->setActiveThreadCount(1);
     else
         pool->setActiveThreadCount(m_threads);
     pool->StartAndWait();
-    std::string file = m_basename + "." + std::to_string(m_currentT) + ".unqiues.xyz";
+    std::string file = Basename() + "." + std::to_string(m_currentT) + ".unqiues.xyz";
 
     for (const auto& thread : pool->Finished()) {
         auto structures = static_cast<MDThread*>(thread)->MDDriver()->UniqueMolecules();
@@ -159,11 +162,11 @@ std::string ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& m
 
 std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann::json& parameter)
 {
-    std::string file = m_basename + "." + std::to_string(m_currentT) + ".unqiues.xyz";
+    std::string file = Basename() + "." + std::to_string(m_currentT) + ".unqiues.xyz";
 
     CurcumaOpt optimise(parameter, false);
     optimise.setFileName(file);
-    optimise.setBaseName(m_basename + "." + std::to_string(m_currentT));
+    optimise.overrideBasename(Basename() + "." + std::to_string(m_currentT));
     optimise.start();
 
     return file;
@@ -180,7 +183,7 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
     auto mols = opt.Molecules();
     for (const Molecule& mol : *mols) {
         optimised.push_back(new Molecule(mol));
-        mol.appendXYZFile(m_basename + std::to_string(m_currentT) + ".optimised.xyz");
+        mol.appendXYZFile(Basename() + std::to_string(m_currentT) + ".optimised.xyz");
     }
     return optimised;
     */
@@ -189,7 +192,7 @@ std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann
 std::string ConfSearch::PerformFilter(const std::string& f, const nlohmann::json& parameter)
 {
     ConfScan* scan = new ConfScan(parameter, false);
-    scan->setFileName(m_basename + "." + std::to_string(m_currentT) + ".opt.xyz");
+    scan->setFileName(Basename() + "." + std::to_string(m_currentT) + ".opt.xyz");
     scan->start();
     return std::string("fff");
 }
@@ -211,7 +214,7 @@ void ConfSearch::ReadControlFile()
 
 void ConfSearch::LoadControlJson()
 {
-    m_gfn = Json2KeyWord<int>(m_defaults, "GFN");
+    m_method = Json2KeyWord<std::string>(m_defaults, "method");
     m_spin = Json2KeyWord<int>(m_defaults, "spin");
     m_charge = Json2KeyWord<int>(m_defaults, "charge");
     //    m_single_step = Json2KeyWord<double>(m_defaults, "dT"); // * fs2amu;

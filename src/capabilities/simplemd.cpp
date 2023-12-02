@@ -109,6 +109,16 @@ void SimpleMD::LoadControlJson()
 
 bool SimpleMD::Initialise()
 {
+    static std::random_device rd{};
+    static std::mt19937 gen{ rd() };
+    if (m_seed == -1) {
+        const auto start = std::chrono::high_resolution_clock::now();
+        m_seed = std::chrono::duration_cast<std::chrono::seconds>(start.time_since_epoch()).count();
+    } else if (m_seed == 0)
+        m_seed = m_T0 * m_mass.size();
+    std::cout << "Random seed is " << m_seed << std::endl;
+    gen.seed(m_seed);
+
     if (m_initfile.compare("none") != 0) {
         json md;
         std::ifstream restart_file(m_initfile);
@@ -129,7 +139,7 @@ bool SimpleMD::Initialise()
 
     if (!m_restart) {
         std::ofstream result_file;
-        result_file.open(m_basename + ".trj.xyz");
+        result_file.open(Basename() + ".trj.xyz");
         result_file.close();
     }
     m_natoms = m_molecule.AtomCount();
@@ -209,14 +219,14 @@ bool SimpleMD::Initialise()
         rmsdtraj["rmsd"] = m_rmsd;
         rmsdtraj["writeRMSD"] = false;
         m_unqiue = new RMSDTraj(rmsdtraj, true);
-        m_unqiue->setBaseName(m_basename + ".xyz");
+        m_unqiue->setBaseName(Basename() + ".xyz");
         m_unqiue->Initialise();
     }
     InitConstrainedBonds();
     if (m_writeinit) {
         json init = WriteRestartInformation();
         std::ofstream result_file;
-        result_file.open(m_basename + ".init.json");
+        result_file.open(Basename() + ".init.json");
         result_file << init;
         result_file.close();
     }
@@ -264,13 +274,6 @@ void SimpleMD::InitVelocities(double scaling)
 {
     static std::random_device rd{};
     static std::mt19937 gen{ rd() };
-    if (m_seed == -1) {
-        const auto start = std::chrono::high_resolution_clock::now();
-        m_seed = std::chrono::duration_cast<std::chrono::seconds>(start.time_since_epoch()).count();
-    } else if (m_seed == 0)
-        m_seed = m_T0 * m_mass.size();
-    std::cout << "Random seed is " << m_seed << std::endl;
-    gen.seed(m_seed);
     std::normal_distribution<> d{ 0, 1 };
     double Px = 0.0, Py = 0.0, Pz = 0.0;
     for (int i = 0; i < m_natoms; ++i) {
@@ -548,7 +551,7 @@ void SimpleMD::start()
         if (m_impuls > m_T) {
             InitVelocities(m_scale_velo * m_impuls_scaling);
             m_Ekin = EKin();
-            PrintStatus();
+            // PrintStatus();
             m_time_step = 0;
         }
 
@@ -901,7 +904,7 @@ bool SimpleMD::WriteGeometry()
     if (m_writeXYZ) {
         m_molecule.setEnergy(m_Epot);
         m_molecule.setName(std::to_string(m_currentStep));
-        m_molecule.appendXYZFile(m_basename + ".trj.xyz");
+        m_molecule.appendXYZFile(Basename() + ".trj.xyz");
     }
     if (m_writeUnique) {
         if (m_unqiue->CheckMolecule(new Molecule(m_molecule))) {

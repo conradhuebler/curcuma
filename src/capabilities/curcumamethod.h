@@ -51,6 +51,10 @@ public:
 
     bool CheckStop() const;
 
+    std::string Basename() const { return m_basename; }
+    void getBasename(const std::string& filename);
+    void overrideBasename(const std::string& basename) { m_basename = basename; }
+
 protected:
     void TriggerWriteRestart();
 
@@ -81,4 +85,5 @@ private:
 
     StringList m_error_list;
     bool m_silent = true;
+    std::string m_basename;
 };

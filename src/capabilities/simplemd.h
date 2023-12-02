@@ -77,12 +77,12 @@ public:
     {
         m_molecule = molecule;
     }
-
+    /*
     void setBaseName(const std::string& name)
     {
         m_basename = name;
     }
-
+    */
     bool Initialise() override;
 
     void start() override;
@@ -135,7 +135,6 @@ private:
     std::function<void(double* coord, double* grad)> m_integrator;
 
     std::vector<std::pair<std::pair<int, int>, double>> m_bond_constrained;
-    std::string m_basename;
     int m_natoms = 0;
     int m_dumb = 1;
     double m_T = 0, m_Epot = 0, m_aver_Epot = 0, m_Ekin = 0, m_aver_Ekin = 0, m_Etot = 0, m_aver_Etot = 0, m_aver_dipol = 0, m_curr_dipole = 0;
@@ -168,39 +167,35 @@ private:
     bool m_dipole = false;
     int m_seed = -1;
     int m_time_step = 0;
-    /*
-    std::random_device *m_random_device;
-    std::mt19937 *m_random_generator;
-    std::normal_distribution<> * m_normal_distribution;
-    std::chi_squared_distribution<float> * m_chi_squared_distribution;*/
 };
 
 class MDThread : public CxxThread {
 public:
-    MDThread(int thread, const json& controller)
-        : m_thread(thread)
-        , m_controller(controller)
+    MDThread(const json& controller)
+        : m_controller(controller)
     {
         setAutoDelete(true);
     }
     ~MDThread() = default;
-
+    void setBasename(const std::string& basename) { m_basename = basename; }
     inline void setMolecule(const Molecule& molecule) { m_molecule = molecule; }
     SimpleMD* MDDriver() const { return m_mddriver; }
 
     virtual int execute() override
     {
-        m_mddriver = new SimpleMD(m_controller, false);
+        json controller;
+        controller["md"] = m_controller;
+        m_mddriver = new SimpleMD(controller, false);
         m_mddriver->setMolecule(m_molecule);
-        m_mddriver->setBaseName("thread" + std::to_string(m_thread));
+        m_mddriver->overrideBasename(m_basename + ".t" + std::to_string(ThreadId()));
         m_mddriver->Initialise();
         m_mddriver->start();
         return 0;
     }
 
 protected:
-    int m_thread;
     Molecule m_molecule;
+    std::string m_basename;
     std::string m_result;
     json m_controller;
     SimpleMD* m_mddriver;
