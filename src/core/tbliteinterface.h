@@ -54,12 +54,6 @@ public:
     bool UpdateMolecule(const Molecule& molecule);
     bool UpdateMolecule(const double* coord);
 
-    /* int parameter
-     * 66 = xtb GFN FF
-     * 0 = xtb GFN 0
-     * 1 = xtb GFN 1
-     * 2 = xtb GFN 2
-     * */
     double GFNCalculation(int parameter = 2, double* grad = 0);
 
     void clear();
@@ -70,6 +64,11 @@ public:
     std::vector<std::vector<double>> BondOrders() const;
 
 private:
+    void ApplySolvation();
+
+    void tbliteError();
+    void tbliteContextError();
+    Molecule m_molecule;
     double* m_coord;
     int* m_attyp;
 
@@ -91,6 +90,6 @@ private:
     tblite_calculator m_tblite_calc = NULL;
     tblite_container m_tb_cont = NULL;
 
-    bool m_initialised = false;
+    bool m_initialised = false, m_calculator = false;
     json m_tblitesettings;
 };

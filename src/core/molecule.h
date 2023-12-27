@@ -60,6 +60,7 @@ class Molecule
     /* Molecule& operator=(const Molecule& molecule);
      Molecule& operator=(const Molecule* molecule);
  */
+    void Initialise(const int* attyp, const double* coord, const int natoms, const double charge, const int spin);
     void ApplyReorderRule(const std::vector<int>& rule);
 
     void print_geom(bool moreinfo = true) const;
@@ -127,6 +128,8 @@ class Molecule
     std::string XYZString() const;
     std::string XYZString(const std::vector<int> &order) const;
 
+    Position CalculateDipoleMoments();
+    Position CalculateDipoleMoment();
 
     std::vector<int> BoundHydrogens(int atom, double scaling = 1.5) const;
     std::map<int, std::vector<int>> getConnectivtiy(double scaling = 1.5, int latest = -1) const;

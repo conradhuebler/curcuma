@@ -61,11 +61,13 @@ static json CurcumaMDJson{
     { "norestart", false },
     { "writerestart", 1000 },
     { "rattle", false },
-    { "rattle_tolerance", 1e-5 },
+    { "rattle_tolerance_a", 1 },
+    { "rattle_tolerance_b", 0.1 },
     { "thermostat", "csvr" },
     { "respa", 1 },
     { "dipole", false },
-    { "seed", -1 }
+    { "seed", -1 },
+    { "cleanenergy", false }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -116,7 +118,8 @@ private:
 
     void InitVelocities(double scaling = 1.0);
 
-    double Gradient(const double* coord, double* grad);
+    double FastEnergy(const double* coord, double* grad);
+    double CleanEnergy(const double* coord, double* grad);
 
     void PrintMatrix(const double* matrix);
 
@@ -133,6 +136,7 @@ private:
     void InitConstrainedBonds();
 
     std::function<void(double* coord, double* grad)> m_integrator;
+    std::function<double(double* coord, double* grad)> m_energy;
 
     std::vector<std::pair<std::pair<int, int>, double>> m_bond_constrained;
     int m_natoms = 0;
@@ -158,13 +162,15 @@ private:
     int m_respa = 1;
     double m_pos_conv = 0, m_scale_velo = 1.0, m_coupling = 10;
     double m_impuls = 0, m_impuls_scaling = 0.75, m_dt2 = 0;
-    double m_rattle_tolerance = 1e-4;
+    double m_rattle_tolerance_a = 1, m_rattle_tolerance_b = 0.1;
+    int m_rattle = 0;
     std::vector<double> m_collected_dipole;
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;
     std::string m_method = "UFF", m_initfile = "none", m_thermostat = "csvr";
     bool m_unstable = false;
     bool m_dipole = false;
+    bool m_clean_energy = false;
     int m_seed = -1;
     int m_time_step = 0;
 };

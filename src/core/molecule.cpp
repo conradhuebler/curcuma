@@ -156,6 +156,18 @@ Molecule::~Molecule()
 {
 }
 
+void Molecule::Initialise(const int* attyp, const double* coord, const int natoms, const double charge, const int spin)
+{
+    m_charge = charge;
+    m_spin = spin;
+    Molecule mol;
+    for (int i = 0; i < natoms; ++i) {
+        m_geometry.push_back({ coord[3 * i], coord[3 * i + 1], coord[3 * i + 2] });
+        m_atoms.push_back(attyp[i]);
+        m_mass += Elements::AtomicMass[attyp[i]];
+    }
+}
+
 void Molecule::ApplyReorderRule(const std::vector<int>& rule)
 {
     Molecule mol;
@@ -810,6 +822,17 @@ Eigen::Vector3d Molecule::COM(bool protons, int fragment)
     com(2) /= m_mass;
     return com;
 }
+/*
+Position Molecule::CalculateDipoleMoments()
+{
+
+}
+
+Position Molecule::CalculateDipoleMoment()
+{
+
+}
+*/
 
 double Molecule::GyrationRadius(bool protons, int fragment)
 {

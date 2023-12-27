@@ -19,7 +19,10 @@
 
 #ifndef tblite_delete
 #include "tblite.h"
-// #include "tblite/container.h"
+#include "tblite/container.h"
+#include "tblite/context.h"
+#include "tblite/error.h"
+
 #endif
 
 #include "src/core/global.h"
@@ -74,12 +77,12 @@ TBLiteInterface::TBLiteInterface(const json& tblitesettings)
 
 TBLiteInterface::~TBLiteInterface()
 {
-    delete m_error;
-    delete m_ctx;
-    delete m_tblite_res;
-    delete m_tblite_mol;
-    delete m_tblite_calc;
-    delete m_tb_cont;
+    tblite_delete_error(&m_error);
+    tblite_delete_context(&m_ctx);
+    tblite_delete_result(&m_tblite_res);
+    tblite_delete_structure(&m_tblite_mol);
+    tblite_delete_calculator(&m_tblite_calc);
+    tblite_delete_container(&m_tb_cont);
 
     delete[] m_coord;
     delete[] m_attyp;
@@ -103,7 +106,6 @@ bool TBLiteInterface::InitialiseMolecule(const Molecule& molecule)
         m_attyp[i] = atoms[i];
     }
     bool init = InitialiseMolecule(m_attyp, m_coord, m_atomcount, molecule.Charge(), molecule.Spin());
-
     return init;
 }
 
@@ -135,6 +137,8 @@ bool TBLiteInterface::InitialiseMolecule(const int* attyp, const double* coord, 
     m_tblite_mol = tblite_new_structure(m_error, natoms, attyp, coord, &charge, &spin, NULL, NULL);
 
     m_initialised = true;
+    m_molecule.Initialise(attyp, coord, natoms, charge, spin);
+
     return true;
 }
 
@@ -156,35 +160,35 @@ bool TBLiteInterface::UpdateMolecule(const double* coord)
     return true;
 }
 
-double TBLiteInterface::GFNCalculation(int parameter, double* grad)
+void TBLiteInterface::ApplySolvation()
 {
-    double energy = 0;
-    if (parameter == 0) {
-        m_tblite_calc = tblite_new_ipea1_calculator(m_ctx, m_tblite_mol);
-    } else if (parameter == 1) {
-        m_tblite_calc = tblite_new_gfn1_calculator(m_ctx, m_tblite_mol);
-    } else if (parameter == 2) {
-        m_tblite_calc = tblite_new_gfn2_calculator(m_ctx, m_tblite_mol);
-    }
-    if (m_guess == 0)
-        tblite_set_calculator_guess(m_ctx, m_tblite_calc, TBLITE_GUESS_SAD);
-    else
-        tblite_set_calculator_guess(m_ctx, m_tblite_calc, TBLITE_GUESS_EEQ);
+    int count = ((m_cpcm + m_cpcm_eps) != -1) + ((m_alpb + m_alpb_eps) != -1);
 
-    int count = m_cpcm + m_cpcm_eps != -1 + m_alpb + m_alpb_eps != -1;
     if (count == 1) {
         if (m_cpcm && m_cpcm_eps == -1) {
             m_tb_cont = tblite_new_cpcm_solvation_solvent(m_ctx, m_tblite_mol, m_tblite_calc, m_cpcm_solv);
             if (tblite_check_context(m_ctx)) {
-                std::cout << "Error during CPCM calculation, ... Sorry for that" << std::endl;
-                return 0;
+                tbliteError();
+                tbliteContextError();
+                std::cout << "Error during CPCM calculation, ...  Retry with increased verbosity" << std::endl;
+                tblite_set_context_verbosity(m_ctx, m_verbose + 1);
+                tblite_delete_container(&m_tb_cont);
+                m_tb_cont = tblite_new_cpcm_solvation_solvent(m_ctx, m_tblite_mol, m_tblite_calc, m_cpcm_solv);
+
+                //     return 0;
             }
             tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
         } else if (!m_cpcm && m_cpcm_eps != -1) {
             m_tb_cont = tblite_new_cpcm_solvation_epsilon(m_ctx, m_tblite_mol, m_tblite_calc, m_cpcm_eps);
             if (tblite_check_context(m_ctx)) {
-                std::cout << "Error during CPCM calculation, ... Sorry for that" << std::endl;
-                return 0;
+                tbliteError();
+                tbliteContextError();
+                std::cout << "Error during CPCM calculation, ...  Retry with increased verbosity" << std::endl;
+                tblite_set_context_verbosity(m_ctx, m_verbose + 1);
+                tblite_delete_container(&m_tb_cont);
+                m_tb_cont = tblite_new_cpcm_solvation_epsilon(m_ctx, m_tblite_mol, m_tblite_calc, m_cpcm_eps);
+
+                //      return 0;
             }
             tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
         }
@@ -192,25 +196,61 @@ double TBLiteInterface::GFNCalculation(int parameter, double* grad)
         if (m_alpb && m_alpb_eps == -1) {
             m_tb_cont = tblite_new_alpb_solvation_solvent(m_ctx, m_tblite_mol, m_tblite_calc, m_alpb_solv);
             if (tblite_check_context(m_ctx)) {
-                std::cout << "Error during ALPB calculation, ... Sorry for that" << std::endl;
-                return 0;
+                tbliteError();
+                tbliteContextError();
+                std::cout << "Error during ALPB calculation, ...  Retry with increased verbosity" << std::endl;
+                tblite_set_context_verbosity(m_ctx, m_verbose + 1);
+                tblite_delete_container(&m_tb_cont);
+                m_tb_cont = tblite_new_alpb_solvation_solvent(m_ctx, m_tblite_mol, m_tblite_calc, m_alpb_solv);
+
+                //       return 0;
             }
             tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
         } else if (!m_alpb && m_alpb_eps != -1) {
             m_tb_cont = tblite_new_alpb_solvation_epsilon(m_ctx, m_tblite_mol, m_tblite_calc, m_alpb_eps);
             if (tblite_check_context(m_ctx)) {
-                std::cout << "Error during ALPB calculation, ... Sorry for that" << std::endl;
-                return 0;
+                tbliteError();
+                tbliteContextError();
+                std::cout << "Error during ALPB calculation, ... Retry with increased verbosity" << std::endl;
+
+                tblite_set_context_verbosity(m_ctx, m_verbose + 1);
+                tblite_delete_container(&m_tb_cont);
+                m_tb_cont = tblite_new_alpb_solvation_epsilon(m_ctx, m_tblite_mol, m_tblite_calc, m_alpb_eps);
+                //     return 0;
             }
             tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
         }
-    } else {
+    } else if (count != 0) {
         std::cout << count << std::endl
                   << std::endl
                   << "If three witches had three watches, which witch would watch which watch?\n Ignoring epsilon and solvent or two solvation models given simultaneously" << std::endl
                   << std::endl
                   << std::endl;
     }
+}
+
+double TBLiteInterface::GFNCalculation(int parameter, double* grad)
+{
+    double energy = 0;
+    int count = ((m_cpcm + m_cpcm_eps) != -1) + ((m_alpb + m_alpb_eps) != -1);
+
+    if (!m_calculator) {
+        if (parameter == 0) {
+            m_tblite_calc = tblite_new_ipea1_calculator(m_ctx, m_tblite_mol);
+        } else if (parameter == 1) {
+            m_tblite_calc = tblite_new_gfn1_calculator(m_ctx, m_tblite_mol);
+        } else if (parameter == 2) {
+            m_tblite_calc = tblite_new_gfn2_calculator(m_ctx, m_tblite_mol);
+        }
+        if (m_guess == 0)
+            tblite_set_calculator_guess(m_ctx, m_tblite_calc, TBLITE_GUESS_SAD);
+        else
+            tblite_set_calculator_guess(m_ctx, m_tblite_calc, TBLITE_GUESS_EEQ);
+        m_calculator = true;
+    }
+
+    ApplySolvation();
+
     tblite_set_calculator_accuracy(m_ctx, m_tblite_calc, m_acc);
     tblite_set_calculator_max_iter(m_ctx, m_tblite_calc, m_maxiter);
     tblite_set_calculator_mixer_damping(m_ctx, m_tblite_calc, m_damping);
@@ -218,10 +258,55 @@ double TBLiteInterface::GFNCalculation(int parameter, double* grad)
     tblite_set_calculator_save_integrals(m_ctx, m_tblite_calc, 0);
     tblite_get_singlepoint(m_ctx, m_tblite_mol, m_tblite_calc, m_tblite_res);
     tblite_get_result_energy(m_error, m_tblite_res, &energy);
+    if (tblite_check_context(m_ctx)) {
+        std::cerr << "Error during SCF Calculation, reset wavefunction ..." << std::endl;
+        tbliteContextError();
+        tbliteError();
 
-    if (grad != NULL)
+        tblite_set_context_verbosity(m_ctx, m_verbose + 1);
+        if (count == 1) {
+            tblite_delete_container(&m_tb_cont);
+        }
+        tblite_delete_error(&m_error);
+        tblite_delete_context(&m_ctx);
+        tblite_delete_result(&m_tblite_res);
+        // tblite_delete_structure(  &m_tblite_mol );
+        tblite_delete_calculator(&m_tblite_calc);
+        tblite_delete_container(&m_tb_cont);
+
+        m_error = tblite_new_error();
+        m_ctx = tblite_new_context();
+        m_tblite_res = tblite_new_result();
+
+        tblite_set_context_verbosity(m_ctx, m_verbose);
+
+        if (parameter == 0) {
+            m_tblite_calc = tblite_new_ipea1_calculator(m_ctx, m_tblite_mol);
+        } else if (parameter == 1) {
+            m_tblite_calc = tblite_new_gfn1_calculator(m_ctx, m_tblite_mol);
+        } else if (parameter == 2) {
+            m_tblite_calc = tblite_new_gfn2_calculator(m_ctx, m_tblite_mol);
+        }
+        if (m_guess == 0)
+            tblite_set_calculator_guess(m_ctx, m_tblite_calc, TBLITE_GUESS_SAD);
+        else
+            tblite_set_calculator_guess(m_ctx, m_tblite_calc, TBLITE_GUESS_EEQ);
+        ApplySolvation();
+        tblite_get_singlepoint(m_ctx, m_tblite_mol, m_tblite_calc, m_tblite_res);
+        tblite_set_context_verbosity(m_ctx, m_verbose);
+    }
+    // double* virial = 0;
+    // tblite_get_result_virial(m_error, m_tblite_res, &virial);
+    // std::cout << virial << std::endl;
+    if (grad != NULL) {
         tblite_get_result_gradient(m_error, m_tblite_res, grad);
-
+        if (tblite_check_context(m_ctx)) {
+            tbliteContextError();
+            //     return 0;
+        }
+    }
+    if (count == 1)
+        tblite_delete_container(&m_tb_cont);
     return energy;
 }
 
@@ -264,4 +349,23 @@ std::vector<std::vector<double>> TBLiteInterface::BondOrders() const
     }
     delete[] bonds;
     return bond_orders;
+}
+
+void TBLiteInterface::tbliteError()
+{
+    char message[512];
+    tblite_get_error(m_error, message, NULL);
+    std::cerr << "[Message] " << message << std::endl;
+
+    // printf("[Message] %s\n", message);
+    tblite_clear_error(m_error);
+}
+
+void TBLiteInterface::tbliteContextError()
+{
+    char message[512];
+    tblite_get_context_error(m_ctx, message, NULL);
+    std::cerr << "[Message] " << message << std::endl;
+    // printf("[Message] %s\n", message);
+    tblite_clear_error(m_error);
 }
