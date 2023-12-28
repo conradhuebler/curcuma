@@ -236,6 +236,8 @@ bool SimpleMD::Initialise()
         m_unqiue->setBaseName(Basename() + ".xyz");
         m_unqiue->Initialise();
     }
+    m_dof = 3 * m_natoms;
+
     InitConstrainedBonds();
     if (m_writeinit) {
         json init = WriteRestartInformation();
@@ -244,7 +246,6 @@ bool SimpleMD::Initialise()
         result_file << init;
         result_file.close();
     }
-    double dof = 3 * m_natoms;
     m_initialised = true;
     return true;
 }
@@ -268,6 +269,7 @@ void SimpleMD::InitConstrainedBonds()
         }
     }
     std::cout << m_bond_constrained.size() << " constrains active" << std::endl;
+    m_dof -= m_bond_constrained.size();
 }
 
 void SimpleMD::InitVelocities(double scaling)
@@ -522,9 +524,14 @@ void SimpleMD::start()
                 m_time_step = 0;
             }
         }
-        if (m_centered && m_step % m_centered == 0 && m_step >= m_centered) {
+        // if (m_centered && m_step % m_centered == 0 && m_step >= m_centered) {
+        //     RemoveRotation(m_velocities);
+        // }
+        if (m_centered == 1)
             RemoveRotation(m_velocities);
-        }
+        else if (m_centered == 2)
+            RemoveRotations(m_velocities);
+
         m_integrator(coord, gradient);
         if (m_unstable) {
             PrintStatus();
@@ -538,7 +545,7 @@ void SimpleMD::start()
         ThermostatFunction();
         m_Ekin = EKin();
         if (m_writerestart > -1 && m_step % m_writerestart == 0) {
-            std::ofstream restart_file("curcuma_step_" + std::to_string(m_step) + ".json");
+            std::ofstream restart_file("curcuma_step_" + std::to_string(int(m_step * m_timestep)) + ".json");
             nlohmann::json restart;
             restart_file << WriteRestartInformation() << std::endl;
         }
@@ -614,7 +621,7 @@ void SimpleMD::Verlet(double* coord, double* grad)
         m_gradient[3 * i + 2] = grad[3 * i + 2];
     }
     ekin *= 0.5;
-    double T = 2.0 * ekin / (kb * 3 * m_natoms);
+    double T = 2.0 * ekin / (kb * m_dof);
     m_unstable = T > 100 * m_T;
     m_T = T;
 }
@@ -654,9 +661,7 @@ void SimpleMD::Rattle(double* coord, double* grad)
                 + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
                 + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
             double r = distance - distance_current;
-
             epsilon += std::abs(r);
-            // std::cout << r <<  " " << epsilon << std::endl;
         }
         if (epsilon > m_rattle_tolerance_a) {
             for (auto bond : m_bond_constrained) {
@@ -692,9 +697,7 @@ void SimpleMD::Rattle(double* coord, double* grad)
                 m_velocities[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j] * m_timestep_inverse;
             }
         }
-        //   std::cout << epsilon << " ";
     }
-    // std::cout << m_rattle_tolerance_a << std::endl;
 
     m_Epot = m_energy(coord, grad);
     double ekin = 0.0;
@@ -756,18 +759,92 @@ void SimpleMD::Rattle(double* coord, double* grad)
                     m_velocities[3 * j + 2] -= dz * mu * m_rmass[j];
                 }
             }
-            //  std::cout << epsilon << " ";
         }
-        //  std::cout << m_rattle_tolerance_b << std::endl;
-        //  std::cout << std::endl;
     }
     for (int i = 0; i < m_natoms; ++i) {
         ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
     ekin *= 0.5;
-    double T = 2.0 * ekin / (kb * 3 * m_natoms);
+    double T = 2.0 * ekin / (kb * m_dof);
     m_unstable = T > 100 * m_T;
     m_T = T;
+}
+
+void SimpleMD::RemoveRotations(std::vector<double>& velo)
+{
+    /*
+     * This code was taken and adopted from the xtb sources
+     * https://github.com/grimme-lab/xtb/blob/main/src/rmrottr.f90
+     * Special thanks to the developers
+     */
+    double mass = 0;
+    Position pos = { 0, 0, 0 }, angom{ 0, 0, 0 };
+    Geometry geom(m_natoms, 3);
+
+    std::vector<std::vector<int>> fragments = m_molecule.GetFragments();
+    // std::cout << fragments.size() << std::endl;
+    for (int f = 0; f < fragments.size(); ++f) {
+        for (int i : fragments[f]) {
+            double m = m_mass[i];
+            mass += m;
+            pos(0) += m * m_current_geometry[3 * i + 0];
+            pos(1) += m * m_current_geometry[3 * i + 1];
+            pos(2) += m * m_current_geometry[3 * i + 2];
+
+            geom(i, 0) = m_current_geometry[3 * i + 0];
+            geom(i, 1) = m_current_geometry[3 * i + 1];
+            geom(i, 2) = m_current_geometry[3 * i + 2];
+        }
+        pos(0) /= mass;
+        pos(1) /= mass;
+        pos(2) /= mass;
+
+        Geometry matrix = Geometry::Zero(3, 3);
+        for (int i : fragments[f]) {
+            double m = m_mass[i];
+            geom(i, 0) -= pos(0);
+            geom(i, 1) -= pos(1);
+            geom(i, 2) -= pos(2);
+
+            double x = geom(i, 0);
+            double y = geom(i, 1);
+            double z = geom(i, 2);
+            angom(0) += m_mass[i] * (geom(i, 1) * velo[3 * i + 2] - geom(i, 2) * velo[3 * i + 1]);
+            angom(1) += m_mass[i] * (geom(i, 2) * velo[3 * i + 0] - geom(i, 0) * velo[3 * i + 2]);
+            angom(2) += m_mass[i] * (geom(i, 0) * velo[3 * i + 1] - geom(i, 1) * velo[3 * i + 0]);
+            double x2 = x * x;
+            double y2 = y * y;
+            double z2 = z * z;
+            matrix(0, 0) += m * (y2 + z2);
+            matrix(1, 1) += m * (x2 + z2);
+            matrix(2, 2) += m * (x2 + y2);
+            matrix(0, 1) -= m * x * y;
+            matrix(0, 2) -= m * x * z;
+            matrix(1, 2) -= m * y * z;
+        }
+        matrix(1, 0) = matrix(0, 1);
+        matrix(2, 0) = matrix(0, 2);
+        matrix(2, 1) = matrix(1, 2);
+
+        Position omega = matrix.inverse() * angom;
+
+        Position rlm = { 0, 0, 0 }, ram = { 0, 0, 0 };
+        for (int i : fragments[f]) {
+            rlm(0) = rlm(0) + m_mass[i] * velo[3 * i + 0];
+            rlm(1) = rlm(1) + m_mass[i] * velo[3 * i + 1];
+            rlm(2) = rlm(2) + m_mass[i] * velo[3 * i + 2];
+        }
+
+        for (int i : fragments[f]) {
+            ram(0) = (omega(1) * geom(i, 2) - omega(2) * geom(i, 1));
+            ram(1) = (omega(2) * geom(i, 0) - omega(0) * geom(i, 2));
+            ram(2) = (omega(0) * geom(i, 1) - omega(1) * geom(i, 0));
+
+            velo[3 * i + 0] = velo[3 * i + 0] - rlm(0) / mass - ram(0);
+            velo[3 * i + 1] = velo[3 * i + 1] - rlm(1) / mass - ram(1);
+            velo[3 * i + 2] = velo[3 * i + 2] - rlm(2) / mass - ram(2);
+        }
+    }
 }
 
 void SimpleMD::RemoveRotation(std::vector<double>& velo)
@@ -815,9 +892,9 @@ void SimpleMD::RemoveRotation(std::vector<double>& velo)
         matrix(0, 0) += m * (y2 + z2);
         matrix(1, 1) += m * (x2 + z2);
         matrix(2, 2) += m * (x2 + y2);
-        matrix(0, 1) += m * x * y;
-        matrix(0, 2) += m * x * z;
-        matrix(1, 2) += m * y * z;
+        matrix(0, 1) -= m * x * y;
+        matrix(0, 2) -= m * x * z;
+        matrix(1, 2) -= m * y * z;
     }
     matrix(1, 0) = matrix(0, 1);
     matrix(2, 0) = matrix(0, 2);
@@ -923,7 +1000,7 @@ double SimpleMD::EKin()
         ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
     ekin *= 0.5;
-    m_T = 2.0 * ekin / (kb * 3 * m_natoms);
+    m_T = 2.0 * ekin / (kb * m_dof);
 
     m_aver_Temp = (m_T + (m_currentStep)*m_aver_Temp) / (m_currentStep + 1);
     m_aver_Epot = (m_Epot + (m_currentStep)*m_aver_Epot) / (m_currentStep + 1);
@@ -985,18 +1062,16 @@ void SimpleMD::Berendson()
 
 void SimpleMD::CSVR()
 {
-    double Ekin_target = 1.5 * kb * m_T0 * m_natoms;
-    double dof = 3 * m_natoms;
+    double Ekin_target = 0.5 * kb * m_T0 * m_dof;
     double c = exp(-(m_timestep * m_respa) / m_coupling);
     static std::random_device rd{};
     static std::mt19937 gen{ rd() };
     static std::normal_distribution<> d{ 0, 1 };
-    static std::chi_squared_distribution<float> dchi{ dof };
-    // static std::normal_distribution<> d2{ dof, sqrt(2*dof) };
+    static std::chi_squared_distribution<float> dchi{ m_dof };
 
     double R = d(gen);
     double SNf = dchi(gen);
-    double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (dof * m_Ekin) + 2 * R * sqrt(c * (1 - c) * Ekin_target / (dof * m_Ekin));
+    double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (m_dof * m_Ekin) + 2 * R * sqrt(c * (1 - c) * Ekin_target / (m_dof * m_Ekin));
     m_Ekin_exchange += m_Ekin * (alpha2 - 1);
     double alpha = sqrt(alpha2);
 

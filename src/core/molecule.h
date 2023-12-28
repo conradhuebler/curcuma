@@ -128,7 +128,7 @@ class Molecule
     std::string XYZString() const;
     std::string XYZString(const std::vector<int> &order) const;
 
-    Position CalculateDipoleMoments();
+    std::vector<Position> CalculateDipoleMoments();
     Position CalculateDipoleMoment();
 
     std::vector<int> BoundHydrogens(int atom, double scaling = 1.5) const;
@@ -197,6 +197,8 @@ class Molecule
 
     Matrix RotationMatrix() const { return m_rotation_matrix; }
 
+    void setPartialCharges(const std::vector<double>& charges) { m_charges = charges; }
+
 private:
     void ParseString(const std::string& internal, std::vector<std::string>& elements);
 
@@ -218,6 +220,7 @@ private:
     int m_charge = 0, m_spin = 0;
     std::vector<std::array<double, 3>> m_geometry;
     std::vector<int> m_atoms;
+    std::vector<double> m_charges;
 
     std::vector<int> m_connect_mass;
     Matrix m_HydrogenBondMap;

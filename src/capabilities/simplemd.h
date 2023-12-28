@@ -128,6 +128,7 @@ private:
     void Rattle(double* coord, double* grad);
 
     void RemoveRotation(std::vector<double>& velo);
+    void RemoveRotations(std::vector<double>& velo);
 
     double EKin();
     void Berendson();
@@ -173,6 +174,7 @@ private:
     bool m_clean_energy = false;
     int m_seed = -1;
     int m_time_step = 0;
+    int m_dof = 0;
 };
 
 class MDThread : public CxxThread {

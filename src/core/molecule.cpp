@@ -822,17 +822,67 @@ Eigen::Vector3d Molecule::COM(bool protons, int fragment)
     com(2) /= m_mass;
     return com;
 }
-/*
-Position Molecule::CalculateDipoleMoments()
-{
 
+std::vector<Position> Molecule::CalculateDipoleMoments()
+{
+    std::vector<Position> dipole_moments;
+    double quickndirty_scaling = 3;
+
+    if (m_charges.size() != m_geometry.size()) {
+        std::cout << "No partial charges available" << std::endl;
+        return dipole_moments;
+    }
+
+    for (int f = 0; f < GetFragments().size(); ++f) {
+        Position pos = { 0, 0, 0 }, dipole = { 0, 0, 0 };
+        double mass = 0;
+        for (int i : m_fragments[f]) {
+            double m = Elements::AtomicMass[m_atoms[i]];
+            mass += m;
+            pos(0) += m * m_geometry[i][0];
+            pos(1) += m * m_geometry[i][1];
+            pos(2) += m * m_geometry[i][2];
+        }
+        pos(0) /= mass;
+        pos(1) /= mass;
+        pos(2) /= mass;
+        for (int i : m_fragments[f]) {
+            dipole(0) += m_charges[i] * (m_geometry[i][0] - pos(0)) * quickndirty_scaling;
+            dipole(1) += m_charges[i] * (m_geometry[i][1] - pos(1)) * quickndirty_scaling;
+            dipole(2) += m_charges[i] * (m_geometry[i][2] - pos(2)) * quickndirty_scaling;
+        }
+        dipole_moments.push_back(dipole);
+    }
+    return dipole_moments;
 }
 
 Position Molecule::CalculateDipoleMoment()
 {
+    double quickndirty_scaling = 3;
+    double mass = 0;
 
+    Position pos = { 0, 0, 0 }, dipole = { 0, 0, 0 };
+    if (m_charges.size() != m_geometry.size()) {
+        std::cout << "No partial charges available" << std::endl;
+        return dipole;
+    }
+    for (int i = 0; i < m_geometry.size(); ++i) {
+        double m = Elements::AtomicMass[m_atoms[i]];
+        mass += m;
+        pos(0) += m * m_geometry[i][0];
+        pos(1) += m * m_geometry[i][1];
+        pos(2) += m * m_geometry[i][2];
+    }
+    pos(0) /= mass;
+    pos(1) /= mass;
+    pos(2) /= mass;
+    for (int i = 0; i < m_geometry.size(); ++i) {
+        dipole(0) += m_charges[i] * (m_geometry[i][0] - pos(0)) * quickndirty_scaling;
+        dipole(1) += m_charges[i] * (m_geometry[i][1] - pos(1)) * quickndirty_scaling;
+        dipole(2) += m_charges[i] * (m_geometry[i][2] - pos(2)) * quickndirty_scaling;
+    }
+    return dipole;
 }
-*/
 
 double Molecule::GyrationRadius(bool protons, int fragment)
 {

@@ -124,15 +124,28 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
         auto start = std::chrono::system_clock::now();
         interface.updateGeometry(iter->Coords());
         double energy = interface.CalculateEnergy(true, true);
-        std::cout << "dipole?" << std::endl;
+        std::cout << "!dipole?" << std::endl;
 #ifdef USE_TBLITE
         if (method.compare("gfn2") == 0) {
             std::vector<double> dipole = interface.Dipole();
             std::cout << std::endl
                       << std::endl
-                      << "Dipole momement " << dipole[0] << " " << dipole[1] << " " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) << std::endl;
+                      << "Dipole momement (GFN2)" << dipole[0] << " " << dipole[1] << " " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) << std::endl;
         }
 #endif
+        Molecule mol(*iter);
+        mol.setPartialCharges(interface.Charges());
+        auto dipoles = mol.CalculateDipoleMoments();
+        for (const auto& dipole : dipoles) {
+            std::cout << std::endl
+                      << std::endl
+                      << "Dipole momement for single molecule " << dipole[0] << " " << dipole[1] << " " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) * 2.5418 << std::endl;
+        }
+        auto dipole = mol.CalculateDipoleMoment();
+        std::cout << std::endl
+                  << std::endl
+                  << "Dipole momement for whole structure " << dipole[0] << " " << dipole[1] << " " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) * 2.5418 << std::endl;
+
         if (m_hessian) {
             Hessian hess(m_method, m_defaults, m_threads);
             hess.setMolecule(*iter);
@@ -237,9 +250,22 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, 
         std::vector<double> dipole = interface.Dipole();
         std::cout << std::endl
                   << std::endl
-                  << "Dipole momement " << dipole[0] << " " << dipole[1] << " " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) * 2.5418 << std::endl;
+                  << "Dipole momement (GNF2)" << dipole[0] << " " << dipole[1] << " " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) * 2.5418 << std::endl;
     }
 #endif
+    Molecule mol(*initial);
+    mol.setPartialCharges(interface.Charges());
+    auto dipoles = mol.CalculateDipoleMoments();
+    for (const auto& dipole : dipoles) {
+        std::cout << std::endl
+                  << std::endl
+                  << "Dipole momement for single molecule " << dipole[0] << " " << dipole[1] << " " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) * 2.5418 << std::endl;
+    }
+    auto dipole = mol.CalculateDipoleMoment();
+    std::cout << std::endl
+              << std::endl
+              << "Dipole momement for whole structure " << dipole[0] << " " << dipole[1] << " " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) * 2.5418 << std::endl;
+
     return energy;
 }
 
