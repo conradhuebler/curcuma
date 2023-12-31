@@ -37,6 +37,8 @@
 #include "src/tools/general.h"
 #include "src/tools/info.h"
 
+#include "src/capabilities/optimiser/OptimiseDipoleScaling.h"
+
 #include <iostream>
 #include <string>
 #include <cstring>
@@ -833,6 +835,56 @@ int main(int argc, char **argv) {
                 std::cout << ":: " << gyr << " " << sum / double(count) << std::endl;
                 count++;
             }
+        } else if (strcmp(argv[1], "-dipole") == 0) {
+            FileIterator file(argv[2]);
+
+            double target = 0, threshold = 1e-1, initial = 3;
+            bool target_set = false;
+            int maxiter = 10;
+            json blob = controller["dipole"];
+            if (blob.contains("target")) {
+                target = blob["target"];
+                target_set = true;
+            }
+            if (blob.contains("threshold")) {
+                threshold = blob["threshold"];
+            }
+            if (blob.contains("initial")) {
+                initial = blob["initial"];
+            }
+            if (blob.contains("maxiter")) {
+                maxiter = blob["maxiter"];
+            }
+
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                EnergyCalculator interface("gfn2", blob);
+                interface.setMolecule(mol);
+                interface.CalculateEnergy(false, true);
+                mol.setPartialCharges(interface.Charges());
+                std::vector<double> dipole_moment = interface.Dipole();
+                if (!target_set)
+                    target = sqrt(dipole_moment[0] * dipole_moment[0] + dipole_moment[1] * dipole_moment[1] + dipole_moment[2] * dipole_moment[2]);
+                std::cout << "Target dipole moment: " << target << std::endl;
+                auto dipoles = mol.CalculateDipoleMoments();
+                for (const auto& dipole : dipoles) {
+                    std::cout << std::endl
+                              << std::endl
+                              << "Dipole momement for single molecule " << dipole[0] << " " << dipole[1] << " " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) * 2.5418 << std::endl;
+                }
+                auto dipole = mol.CalculateDipoleMoment();
+                std::cout << std::endl
+                          << std::endl
+                          << "Dipole momement for whole structure " << dipole[0] << " " << dipole[1] << " " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) * 2.5418 << std::endl;
+
+                auto result = OptimiseScaling(&mol, target, initial, threshold, maxiter);
+                std::cout << "Final dipole moment " << result.first * 2.5418 << std::endl;
+                std::cout << "Final dipole moment " << result.first << std::endl;
+
+                for (auto i : result.second)
+                    std::cout << i << " ";
+                std::cout << std::endl;
+            }
         } else {
             bool centered = false;
             for (std::size_t i = 2; i < argc; ++i) {
@@ -854,31 +906,6 @@ int main(int argc, char **argv) {
                           << std::endl;
                 std::cout << mol.COM().transpose() << std::endl;
                 std::cout << mol.GyrationRadius() << std::endl;
-                /*
-                Hessian hess("gfn2", UFFParameterJson);
-                hess.setMolecule(mol);
-                hess.CalculateHessian();
-                */
-                /*
-                UFF forcefield(UFFParameterJson);
-                forcefield.setMolecule(mol.Atoms(), mol.Coords());
-                // forcefield.readParameterFile("parameter.json");
-
-                forcefield.Initialise();
-                std::cout << forcefield.Calculate(true) << std::endl;
-                forcefield.writeParameterFile("parameter.json");
-                forcefield.readParameterFile("parameter.json");
-                std::cout << forcefield.Calculate(true) << std::endl;
-                */
-                /*        double grad[3 * mol.AtomCount()];
-                          forcefield.Gradient(grad);
-                          forcefield.NumGrad(grad);
-                          */
-                // CompactTopo(mol.HydrogenBondMatrix(-1,-1));
-                // std::cout << CompareTopoMatrix(mol.HydrogenBondMatrix(-1,-1),mol.HydrogenBondMatrix(-1,-1) ) << std::endl;
-                // auto m = mol.DistanceMatrix();
-                // std::cout << m.first << std::endl;
-                // std::cout << m.second << std::endl;
             }
         }
     }

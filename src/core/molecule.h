@@ -128,8 +128,8 @@ class Molecule
     std::string XYZString() const;
     std::string XYZString(const std::vector<int> &order) const;
 
-    std::vector<Position> CalculateDipoleMoments();
-    Position CalculateDipoleMoment();
+    std::vector<Position> CalculateDipoleMoments(const std::vector<double>& scaling = std::vector<double>()) const;
+    Position CalculateDipoleMoment(const std::vector<double>& scaling = std::vector<double>()) const;
 
     std::vector<int> BoundHydrogens(int atom, double scaling = 1.5) const;
     std::map<int, std::vector<int>> getConnectivtiy(double scaling = 1.5, int latest = -1) const;

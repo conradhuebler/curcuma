@@ -823,10 +823,9 @@ Eigen::Vector3d Molecule::COM(bool protons, int fragment)
     return com;
 }
 
-std::vector<Position> Molecule::CalculateDipoleMoments()
+std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>& scaling) const
 {
     std::vector<Position> dipole_moments;
-    double quickndirty_scaling = 3;
 
     if (m_charges.size() != m_geometry.size()) {
         std::cout << "No partial charges available" << std::endl;
@@ -847,18 +846,22 @@ std::vector<Position> Molecule::CalculateDipoleMoments()
         pos(1) /= mass;
         pos(2) /= mass;
         for (int i : m_fragments[f]) {
-            dipole(0) += m_charges[i] * (m_geometry[i][0] - pos(0)) * quickndirty_scaling;
-            dipole(1) += m_charges[i] * (m_geometry[i][1] - pos(1)) * quickndirty_scaling;
-            dipole(2) += m_charges[i] * (m_geometry[i][2] - pos(2)) * quickndirty_scaling;
+            double scale = 3;
+            if (scaling.size() > i)
+                scale = scaling[i];
+            dipole(0) += m_charges[i] * (m_geometry[i][0] - pos(0)) * scale;
+            dipole(1) += m_charges[i] * (m_geometry[i][1] - pos(1)) * scale;
+            dipole(2) += m_charges[i] * (m_geometry[i][2] - pos(2)) * scale;
+            //  std::cout << scale << " ";
         }
+        // std::cout << std::endl;
         dipole_moments.push_back(dipole);
     }
     return dipole_moments;
 }
 
-Position Molecule::CalculateDipoleMoment()
+Position Molecule::CalculateDipoleMoment(const std::vector<double>& scaling) const
 {
-    double quickndirty_scaling = 3;
     double mass = 0;
 
     Position pos = { 0, 0, 0 }, dipole = { 0, 0, 0 };
@@ -877,10 +880,15 @@ Position Molecule::CalculateDipoleMoment()
     pos(1) /= mass;
     pos(2) /= mass;
     for (int i = 0; i < m_geometry.size(); ++i) {
-        dipole(0) += m_charges[i] * (m_geometry[i][0] - pos(0)) * quickndirty_scaling;
-        dipole(1) += m_charges[i] * (m_geometry[i][1] - pos(1)) * quickndirty_scaling;
-        dipole(2) += m_charges[i] * (m_geometry[i][2] - pos(2)) * quickndirty_scaling;
+        double scale = 3;
+        if (scaling.size() > i)
+            scale = scaling[i];
+        dipole(0) += m_charges[i] * (m_geometry[i][0] - pos(0)) * scale;
+        dipole(1) += m_charges[i] * (m_geometry[i][1] - pos(1)) * scale;
+        dipole(2) += m_charges[i] * (m_geometry[i][2] - pos(2)) * scale;
+        // std::cout << scale << " ";
     }
+    // std::cout << std::endl;
     return dipole;
 }
 
