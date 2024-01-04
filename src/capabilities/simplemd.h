@@ -42,7 +42,8 @@ static json CurcumaMDJson{
     { "dt", 1 },
     { "charge", 0 },
     { "Spin", 0 },
-    { "centered", 0 },
+    { "rmrottrans", 0 },
+    { "nocenter", false },
     { "dump", 50 },
     { "print", 1000 },
     { "unique", false },
@@ -67,7 +68,21 @@ static json CurcumaMDJson{
     { "respa", 1 },
     { "dipole", false },
     { "seed", -1 },
-    { "cleanenergy", false }
+    { "cleanenergy", false },
+    { "wall", "none" }, // can be spheric or rect
+    { "wall_type", "logfermi" }, // can be logfermi or harmonic
+    { "wall_spheric_radius", 0 },
+    { "wall_xl", 0 },
+    { "wall_yl", 0 },
+    { "wall_zl", 0 },
+    { "wall_x_min", 0 },
+    { "wall_x_max", 0 },
+    { "wall_y_min", 0 },
+    { "wall_y_max", 0 },
+    { "wall_z_min", 0 },
+    { "wall_z_max", 0 },
+    { "wall_temp", 298.15 },
+    { "wall_beta", 6 }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -134,14 +149,23 @@ private:
     void Berendson();
     void CSVR();
 
+    void InitialiseWalls();
+
+    double ApplySphericLogFermiWalls(double* grad);
+    double ApplyRectLogFermiWalls(double* grad);
+
+    double ApplySphericHarmonicWalls(double* grad);
+    double ApplyRectHarmonicWalls(double* grad);
+
     void InitConstrainedBonds();
 
-    std::function<void(double* coord, double* grad)> m_integrator;
-    std::function<double(double* coord, double* grad)> m_energy;
+    std::function<void(double* coord, double* grad)> Integrator;
+    std::function<double(double* coord, double* grad)> Energy;
+    std::function<double(double* grad)> WallPotential;
 
     std::vector<std::pair<std::pair<int, int>, double>> m_bond_constrained;
     int m_natoms = 0;
-    int m_dumb = 1;
+    int m_dump = 1;
     double m_T = 0, m_Epot = 0, m_aver_Epot = 0, m_Ekin = 0, m_aver_Ekin = 0, m_Etot = 0, m_aver_Etot = 0, m_aver_dipol = 0, m_curr_dipole = 0;
     int m_hmass = 4;
     double m_single_step = 1;
@@ -154,7 +178,8 @@ private:
     std::vector<int> m_atomtype;
     Molecule m_molecule;
     bool m_initialised = false, m_restart = false, m_writeUnique = true, m_opt = false, m_rescue = false, m_writeXYZ = true, m_writeinit = false, m_norestart = false;
-    int m_centered = 0;
+    int m_rmrottrans = 0;
+    bool m_nocenter = false;
     EnergyCalculator* m_interface;
     RMSDTraj* m_unqiue;
     const std::vector<double> m_used_mass;
@@ -164,6 +189,9 @@ private:
     double m_pos_conv = 0, m_scale_velo = 1.0, m_coupling = 10;
     double m_impuls = 0, m_impuls_scaling = 0.75, m_dt2 = 0;
     double m_rattle_tolerance_a = 1, m_rattle_tolerance_b = 0.1;
+    double m_wall_spheric_radius = 6, m_wall_temp = 298.15, m_wall_beta = 6;
+    double m_wall_x_min = 0, m_wall_x_max = 0, m_wall_y_min = 0, m_wall_y_max = 0, m_wall_z_min = 0, m_wall_z_max = 0;
+    double m_wall_potential = 0, m_average_wall_potential = 0;
     int m_rattle = 0;
     std::vector<double> m_collected_dipole;
     Matrix m_topo_initial;

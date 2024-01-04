@@ -67,8 +67,9 @@ void SimpleMD::LoadControlJson()
     m_timestep = Json2KeyWord<double>(m_defaults, "dT");
     m_maxtime = Json2KeyWord<double>(m_defaults, "MaxTime");
     m_T0 = Json2KeyWord<double>(m_defaults, "T");
-    m_centered = Json2KeyWord<int>(m_defaults, "centered");
-    m_dumb = Json2KeyWord<int>(m_defaults, "dump");
+    m_rmrottrans = Json2KeyWord<int>(m_defaults, "rmrottrans");
+    m_nocenter = Json2KeyWord<bool>(m_defaults, "nocenter");
+    m_dump = Json2KeyWord<int>(m_defaults, "dump");
     m_print = Json2KeyWord<int>(m_defaults, "print");
     m_max_top_diff = Json2KeyWord<int>(m_defaults, "MaxTopoDiff");
     m_seed = Json2KeyWord<int>(m_defaults, "seed");
@@ -94,7 +95,7 @@ void SimpleMD::LoadControlJson()
     m_norestart = Json2KeyWord<bool>(m_defaults, "norestart");
     m_dt2 = m_timestep * m_timestep;
     if (Json2KeyWord<int>(m_defaults, "rattle")) {
-        m_integrator = [=](double* coord, double* grad) {
+        Integrator = [=](double* coord, double* grad) {
             this->Rattle(coord, grad);
         };
         m_rattle_tolerance_a = Json2KeyWord<double>(m_defaults, "rattle_tolerance_a") / m_timestep;
@@ -103,22 +104,64 @@ void SimpleMD::LoadControlJson()
         m_rattle = Json2KeyWord<int>(m_defaults, "rattle");
         std::cout << "Using rattle to constrained bonds!" << std::endl;
     } else {
-        m_integrator = [=](double* coord, double* grad) {
+        Integrator = [=](double* coord, double* grad) {
             this->Verlet(coord, grad);
         };
     }
 
     if (Json2KeyWord<bool>(m_defaults, "cleanenergy")) {
-        m_energy = [=](double* coord, double* grad) -> double {
+        Energy = [=](double* coord, double* grad) -> double {
             return this->CleanEnergy(coord, grad);
         };
         std::cout << "Energy Calculator will be set up for each step! Single steps are slower, but more reliable. Recommended for the combination of GFN2 and solvation." << std::endl;
     } else {
-        m_energy = [=](double* coord, double* grad) -> double {
+        Energy = [=](double* coord, double* grad) -> double {
             return this->FastEnergy(coord, grad);
         };
         std::cout << "Energy Calculator will NOT be set up for each step! Fast energy calculation! This is the default way and should not be changed unless the energy and gradient calculation are unstable (happens with GFN2 and solvation)." << std::endl;
     }
+
+    if (Json2KeyWord<std::string>(m_defaults, "wall").compare("spheric") == 0) {
+        if (Json2KeyWord<std::string>(m_defaults, "wall_type").compare("logfermi") == 0) {
+            WallPotential = [=](double* grad) -> double {
+                this->m_wall_potential = this->ApplySphericLogFermiWalls(grad);
+                return m_wall_potential;
+            };
+        } else if (Json2KeyWord<std::string>(m_defaults, "wall_type").compare("harmonic") == 0) {
+            WallPotential = [=](double* grad) -> double {
+                this->m_wall_potential = this->ApplySphericHarmonicWalls(grad);
+                return m_wall_potential;
+            };
+        } else {
+            std::cout << "Did not understand wall potential input. Exit now!" << std::endl;
+            exit(1);
+        }
+        std::cout << "Setting up spherical potential" << std::endl;
+
+        InitialiseWalls();
+    } else if (Json2KeyWord<std::string>(m_defaults, "wall").compare("rect") == 0) {
+        if (Json2KeyWord<std::string>(m_defaults, "wall_type").compare("logfermi") == 0) {
+            WallPotential = [=](double* grad) -> double {
+                this->m_wall_potential = this->ApplyRectLogFermiWalls(grad);
+                return m_wall_potential;
+            };
+        } else if (Json2KeyWord<std::string>(m_defaults, "wall_type").compare("harmonic") == 0) {
+            WallPotential = [=](double* grad) -> double {
+                this->m_wall_potential = this->ApplyRectHarmonicWalls(grad);
+                return m_wall_potential;
+            };
+
+        } else {
+            std::cout << "Did not understand wall potential input. Exit now!" << std::endl;
+            exit(1);
+        }
+        std::cout << "Setting up rectangular potential" << std::endl;
+
+        InitialiseWalls();
+    } else
+        WallPotential = [=](double* grad) -> double {
+            return 0;
+        };
 }
 
 bool SimpleMD::Initialise()
@@ -158,6 +201,11 @@ bool SimpleMD::Initialise()
     }
     m_natoms = m_molecule.AtomCount();
     m_molecule.setCharge(0);
+    if (!m_nocenter) {
+        std::cout << "Move stucture to the origin ... " << std::endl;
+        m_molecule.setGeometry(GeometryTools::TranslateGeometry(m_molecule.getGeometry(), GeometryTools::Centroid(m_molecule.getGeometry()), Position{ 0, 0, 0 }));
+    } else
+        std::cout << "Move stucture NOT to the origin ... " << std::endl;
 
     m_mass = std::vector<double>(3 * m_natoms, 0);
     m_rmass = std::vector<double>(3 * m_natoms, 0);
@@ -252,24 +300,28 @@ bool SimpleMD::Initialise()
 
 void SimpleMD::InitConstrainedBonds()
 {
-    auto m = m_molecule.DistanceMatrix();
-    m_topo_initial = m.second;
-    for (int i = 0; i < m_molecule.AtomCount(); ++i) {
-        for (int j = 0; j < i; ++j) {
-            if (m.second(i, j)) {
-                if (m_rattle == 2) {
-                    if (m_molecule.Atom(i).first != 1 && m_molecule.Atom(j).first != 1)
-                        continue;
+    if (m_rattle) {
+        auto m = m_molecule.DistanceMatrix();
+        m_topo_initial = m.second;
+        for (int i = 0; i < m_molecule.AtomCount(); ++i) {
+            for (int j = 0; j < i; ++j) {
+                if (m.second(i, j)) {
+                    if (m_rattle == 2) {
+                        if (m_molecule.Atom(i).first != 1 && m_molecule.Atom(j).first != 1)
+                            continue;
+                    }
+                    std::pair<int, int> indicies(i, j);
+                    std::pair<std::pair<int, int>, double> bond(indicies, m_molecule.CalculateDistance(i, j) * m_molecule.CalculateDistance(i, j));
+                    m_bond_constrained.push_back(std::pair<std::pair<int, int>, double>(bond));
+                    // std::cout << i << " " << j << " " << bond.second << std::endl;
                 }
-                std::pair<int, int> indicies(i, j);
-                std::pair<std::pair<int, int>, double> bond(indicies, m_molecule.CalculateDistance(i, j) * m_molecule.CalculateDistance(i, j));
-                m_bond_constrained.push_back(std::pair<std::pair<int, int>, double>(bond));
-                std::cout << i << " " << j << " " << bond.second << std::endl;
             }
         }
     }
+    std::cout << m_dof << " initial degrees of freedom " << std::endl;
     std::cout << m_bond_constrained.size() << " constrains active" << std::endl;
     m_dof -= m_bond_constrained.size();
+    std::cout << m_dof << " degrees of freedom remaining ..." << std::endl;
 }
 
 void SimpleMD::InitVelocities(double scaling)
@@ -279,7 +331,8 @@ void SimpleMD::InitVelocities(double scaling)
     std::normal_distribution<> d{ 0, 1 };
     double Px = 0.0, Py = 0.0, Pz = 0.0;
     for (int i = 0; i < m_natoms; ++i) {
-        double v0 = sqrt(kb * m_T0 * amu2au / (m_mass[i])) * scaling / fs2amu;
+        double v0 = sqrt(kb_Eh * m_T0 * amu2au / (m_mass[i])) * scaling / fs2amu;
+        // double v0 = sqrt(kb_SI * m_T0 / (m_mass[i] * atomic_mass)) * scaling;
         m_velocities[3 * i + 0] = v0 * d(gen);
         m_velocities[3 * i + 1] = v0 * d(gen);
         m_velocities[3 * i + 2] = v0 * d(gen);
@@ -294,6 +347,30 @@ void SimpleMD::InitVelocities(double scaling)
     }
 }
 
+void SimpleMD::InitialiseWalls()
+{
+    /*
+    { "wall_xl", 0},
+    { "wall_yl", 0},
+    { "wall_zl", 0},
+    { "wall_x_min", 0},
+    { "wall_x_max", 0},
+    { "wall_y_min", 0},
+    { "wall_y_max", 0},
+    { "wall_z_min", 0},
+    { "wall_z_max", 0},*/
+    m_wall_spheric_radius = Json2KeyWord<double>(m_defaults, "wall_spheric_radius");
+    m_wall_temp = Json2KeyWord<double>(m_defaults, "wall_temp");
+    m_wall_beta = Json2KeyWord<double>(m_defaults, "wall_beta");
+
+    m_wall_x_min = Json2KeyWord<double>(m_defaults, "wall_x_min");
+    m_wall_x_max = Json2KeyWord<double>(m_defaults, "wall_x_max");
+    m_wall_y_min = Json2KeyWord<double>(m_defaults, "wall_y_min");
+    m_wall_y_max = Json2KeyWord<double>(m_defaults, "wall_y_max");
+    m_wall_z_min = Json2KeyWord<double>(m_defaults, "wall_z_min");
+    m_wall_z_max = Json2KeyWord<double>(m_defaults, "wall_z_max");
+}
+
 nlohmann::json SimpleMD::WriteRestartInformation()
 {
     nlohmann::json restart;
@@ -306,7 +383,8 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["velocities"] = Tools::DoubleVector2String(m_velocities);
     restart["geometry"] = Tools::DoubleVector2String(m_current_geometry);
     restart["gradient"] = Tools::DoubleVector2String(m_gradient);
-    restart["centered"] = m_centered;
+    restart["rmrottrans"] = m_rmrottrans;
+    restart["nocenter"] = m_nocenter;
     restart["average_T"] = m_aver_Temp;
     restart["average_Epot"] = m_aver_Epot;
     restart["average_Ekin"] = m_aver_Ekin;
@@ -367,7 +445,11 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     } catch (json::type_error& e) {
     }
     try {
-        m_centered = state["centered"];
+        m_rmrottrans = state["rmrottrans"];
+    } catch (json::type_error& e) {
+    }
+    try {
+        m_nocenter = state["nocenter"];
     } catch (json::type_error& e) {
     }
     try {
@@ -481,22 +563,21 @@ void SimpleMD::start()
               << "\t"
               << "T" << std::endl;
 #endif
-    m_Epot = m_energy(coord, gradient);
+    m_Epot = Energy(coord, gradient);
     m_Ekin = EKin();
     m_Etot = m_Epot + m_Ekin;
 
     int m_step = 0;
 
     PrintStatus();
-
-    for (; m_currentStep <= m_maxtime;) {
+    for (; m_currentStep < m_maxtime;) {
         auto step0 = std::chrono::system_clock::now();
 
         if (CheckStop() == true) {
             TriggerWriteRestart();
             return;
         }
-        if (m_step % m_dumb == 0) {
+        if (m_step % m_dump == 0) {
             bool write = WriteGeometry();
             if (write) {
                 states.push_back(WriteRestartInformation());
@@ -516,7 +597,7 @@ void SimpleMD::start()
                 for (int i = 0; i < 3 * m_natoms; ++i) {
                     coord[i] = m_current_geometry[i];
                 }
-                m_energy(coord, gradient);
+                Energy(coord, gradient);
                 m_Ekin = EKin();
                 m_Etot = m_Epot + m_Ekin;
                 m_current_rescue++;
@@ -524,15 +605,19 @@ void SimpleMD::start()
                 m_time_step = 0;
             }
         }
-        // if (m_centered && m_step % m_centered == 0 && m_step >= m_centered) {
-        //     RemoveRotation(m_velocities);
-        // }
-        if (m_centered == 1)
-            RemoveRotation(m_velocities);
-        else if (m_centered == 2)
-            RemoveRotations(m_velocities);
 
-        m_integrator(coord, gradient);
+        if (m_rmrottrans == 1)
+            RemoveRotation(m_velocities);
+        else if (m_rmrottrans == 2)
+            RemoveRotations(m_velocities);
+        else if (m_rmrottrans == 3) {
+            RemoveRotations(m_velocities);
+            RemoveRotation(m_velocities);
+        }
+
+        WallPotential(gradient);
+        Integrator(coord, gradient);
+
         if (m_unstable) {
             PrintStatus();
             fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Simulation got unstable, exiting!\n");
@@ -549,7 +634,7 @@ void SimpleMD::start()
             nlohmann::json restart;
             restart_file << WriteRestartInformation() << std::endl;
         }
-        if ((m_step && m_step % m_print == 0)) {
+        if ((m_step && int(m_step * m_timestep) % m_print == 0)) {
             m_Etot = m_Epot + m_Ekin;
             PrintStatus();
             m_time_step = 0;
@@ -570,6 +655,7 @@ void SimpleMD::start()
         m_currentStep += m_timestep;
         m_time_step += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - step0).count();
     }
+    PrintStatus();
     if (m_thermostat.compare("csvr") == 0)
         std::cout << "Exchange with heat bath " << m_Ekin_exchange << "Eh" << std::endl;
     if (m_dipole) {
@@ -608,7 +694,7 @@ void SimpleMD::Verlet(double* coord, double* grad)
         m_current_geometry[3 * i + 1] = coord[3 * i + 1];
         m_current_geometry[3 * i + 2] = coord[3 * i + 2];
     }
-    m_Epot = m_energy(coord, grad);
+    m_Epot = Energy(coord, grad);
     double ekin = 0.0;
     for (int i = 0; i < m_natoms; ++i) {
         m_velocities[3 * i + 0] -= 0.5 * m_timestep * grad[3 * i + 0] * m_rmass[3 * i + 0];
@@ -621,7 +707,7 @@ void SimpleMD::Verlet(double* coord, double* grad)
         m_gradient[3 * i + 2] = grad[3 * i + 2];
     }
     ekin *= 0.5;
-    double T = 2.0 * ekin / (kb * m_dof);
+    double T = 2.0 * ekin / (kb_Eh * m_dof);
     m_unstable = T > 100 * m_T;
     m_T = T;
 }
@@ -699,7 +785,7 @@ void SimpleMD::Rattle(double* coord, double* grad)
         }
     }
 
-    m_Epot = m_energy(coord, grad);
+    m_Epot = Energy(coord, grad);
     double ekin = 0.0;
     for (int i = 0; i < m_natoms; ++i) {
         m_velocities[3 * i + 0] -= 0.5 * m_timestep * grad[3 * i + 0] * m_rmass[3 * i + 0];
@@ -765,9 +851,154 @@ void SimpleMD::Rattle(double* coord, double* grad)
         ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
     ekin *= 0.5;
-    double T = 2.0 * ekin / (kb * m_dof);
-    m_unstable = T > 100 * m_T;
+    double T = 2.0 * ekin / (kb_Eh * m_dof);
+    m_unstable = T > 1000 * m_T;
     m_T = T;
+}
+
+double SimpleMD::ApplySphericLogFermiWalls(double* grad)
+{
+    double potential = 0;
+    double kbT = m_wall_temp * kb_Eh;
+    // int counter = 0;
+    for (int i = 0; i < m_natoms; ++i) {
+        double distance = sqrt(m_current_geometry[3 * i + 0] * m_current_geometry[3 * i + 0] + m_current_geometry[3 * i + 1] * m_current_geometry[3 * i + 1] + m_current_geometry[3 * i + 2] * m_current_geometry[3 * i + 2]);
+        double exp_expr = exp(m_wall_beta * (distance - m_wall_spheric_radius));
+        double curr_pot = kbT * log(1 + exp_expr);
+        // counter += distance > m_wall_radius;
+        // std::cout << m_wall_beta*m_current_geometry[3 * i + 0]*exp_expr/(distance*(1-exp_expr)) << " ";
+        grad[3 * i + 0] -= kbT * m_wall_beta * m_current_geometry[3 * i + 0] * exp_expr / (distance * (1 - exp_expr));
+        grad[3 * i + 1] -= kbT * m_wall_beta * m_current_geometry[3 * i + 1] * exp_expr / (distance * (1 - exp_expr));
+        grad[3 * i + 2] -= kbT * m_wall_beta * m_current_geometry[3 * i + 2] * exp_expr / (distance * (1 - exp_expr));
+
+        // std::cout << distance << " ";
+        potential += curr_pot;
+    }
+    //    std::cout << counter << " ";
+    return potential;
+    // std::cout << potential*kbT << std::endl;
+}
+
+double SimpleMD::ApplyRectLogFermiWalls(double* grad)
+{
+    double potential = 0;
+    double kbT = m_wall_temp * kb_Eh;
+    int counter = 0;
+    double b = m_wall_beta;
+    double sum_grad = 0;
+    for (int i = 0; i < m_natoms; ++i) {
+        double exp_expr_xl = exp(b * (m_wall_x_min - m_current_geometry[3 * i + 0]));
+        double exp_expr_xu = exp(b * (m_current_geometry[3 * i + 0] - m_wall_x_max));
+
+        double exp_expr_yl = exp(b * (m_wall_y_min - m_current_geometry[3 * i + 1]));
+        double exp_expr_yu = exp(b * (m_current_geometry[3 * i + 1] - m_wall_y_max));
+
+        double exp_expr_zl = exp(b * (m_wall_z_min - m_current_geometry[3 * i + 2]));
+        double exp_expr_zu = exp(b * (m_current_geometry[3 * i + 2] - m_wall_z_max));
+
+        double curr_pot = kbT * (log(1 + exp_expr_xl) + log(1 + exp_expr_xu) + log(1 + exp_expr_yl) + log(1 + exp_expr_yu) + log(1 + exp_expr_zl) + log(1 + exp_expr_zu));
+        counter += (m_current_geometry[3 * i + 0] - m_wall_x_min) < 0 || (m_wall_x_max - m_current_geometry[3 * i + 0]) < 0 || (m_current_geometry[3 * i + 1] - m_wall_y_min) < 0 || (m_wall_y_max - m_current_geometry[3 * i + 1]) < 0 || (m_current_geometry[3 * i + 2] - m_wall_z_min) < 0 || (m_wall_z_max - m_current_geometry[3 * i + 2]) < 0;
+        // std::cout << i << " " << counter << std::endl;
+
+        // std::cout << m_wall_beta*m_current_geometry[3 * i + 0]*exp_expr/(distance*(1-exp_expr)) << " ";
+        if (i == 81) {
+            //    std::cout << std::endl;
+            //    std::cout << m_current_geometry[3 * i + 0] << " " << m_current_geometry[3 * i + 1] << " " << m_current_geometry[3 * i + 2] << std::endl;
+            //    std::cout << grad[3 * i + 0] << " " << grad[3 * i + 1] << " " <<grad[3 * i + 2] << std::endl;
+        }
+        grad[3 * i + 0] += kbT * b * (exp_expr_xu / (1 - exp_expr_xu) - exp_expr_xl / (1 - exp_expr_xl)); // m_current_geometry[3 * i + 0]*exp_expr/(distance*(1-exp_expr));
+        grad[3 * i + 1] += kbT * b * (exp_expr_yu / (1 - exp_expr_yu) - exp_expr_yl / (1 - exp_expr_yl));
+        grad[3 * i + 2] += kbT * b * (exp_expr_zu / (1 - exp_expr_zu) - exp_expr_zl / (1 - exp_expr_zl));
+        sum_grad += grad[3 * i + 0] + grad[3 * i + 1] + grad[3 * i + 2];
+        // if( i == 81)
+        {
+            // std::cout << i << " " <<grad[3 * i + 0] << " " << grad[3 * i + 1] << " " <<grad[3 * i + 2] << std::endl;
+        }
+        // std::cout << distance << " ";
+        potential += curr_pot;
+    }
+    std::cout << counter << " " << sum_grad;
+    return potential;
+    // std::cout << potential*kbT << std::endl;
+}
+
+double SimpleMD::ApplySphericHarmonicWalls(double* grad)
+{
+    double potential = 0;
+    double k = m_wall_temp * kb_Eh;
+    int counter = 0;
+    for (int i = 0; i < m_natoms; ++i) {
+        double distance = sqrt(m_current_geometry[3 * i + 0] * m_current_geometry[3 * i + 0] + m_current_geometry[3 * i + 1] * m_current_geometry[3 * i + 1] + m_current_geometry[3 * i + 2] * m_current_geometry[3 * i + 2]);
+        double curr_pot = 0.5 * k * (m_wall_spheric_radius - distance) * (m_wall_spheric_radius - distance) * (distance > m_wall_spheric_radius);
+        double out = distance > m_wall_spheric_radius;
+        counter += out;
+
+        double diff = k * (m_wall_spheric_radius - distance) * (distance > m_wall_spheric_radius);
+
+        double dx = diff * m_current_geometry[3 * i + 0] / distance;
+        double dy = diff * m_current_geometry[3 * i + 1] / distance;
+        double dz = diff * m_current_geometry[3 * i + 2] / distance;
+
+        grad[3 * i + 0] -= dx;
+        grad[3 * i + 1] -= dy;
+        grad[3 * i + 2] -= dz;
+        /*
+        if(out)
+        {
+            std::cout << m_current_geometry[3 * i + 0]  << " " << m_current_geometry[3 * i + 1]  << " " << m_current_geometry[3 * i + 2] << std::endl;
+            std::cout << dx << " " << dy << " " << dz << std::endl;
+        }*/
+        // std::cout << distance << " ";
+        potential += curr_pot;
+    }
+    // std::cout << counter << " ";
+    return potential;
+    // std::cout << potential*kbT << std::endl;
+}
+
+double SimpleMD::ApplyRectHarmonicWalls(double* grad)
+{
+    double potential = 0;
+    double k = m_wall_temp * kb_Eh;
+    int counter = 0;
+    double b = m_wall_beta;
+    double sum_grad = 0;
+    for (int i = 0; i < m_natoms; ++i) {
+        double Vx = (m_current_geometry[3 * i + 0] - m_wall_x_min) * (m_current_geometry[3 * i + 0] - m_wall_x_min) * (m_current_geometry[3 * i + 0] < m_wall_x_min)
+            + (m_current_geometry[3 * i + 0] - m_wall_x_max) * (m_current_geometry[3 * i + 0] - m_wall_x_max) * (m_current_geometry[3 * i + 0] > m_wall_x_max);
+
+        double Vy = (m_current_geometry[3 * i + 1] - m_wall_y_min) * (m_current_geometry[3 * i + 1] - m_wall_y_min) * (m_current_geometry[3 * i + 1] < m_wall_y_min)
+            + (m_current_geometry[3 * i + 1] - m_wall_y_max) * (m_current_geometry[3 * i + 1] - m_wall_y_max) * (m_current_geometry[3 * i + 1] > m_wall_y_max);
+
+        double Vz = (m_current_geometry[3 * i + 2] - m_wall_z_min) * (m_current_geometry[3 * i + 2] - m_wall_z_min) * (m_current_geometry[3 * i + 2] < m_wall_z_min)
+            + (m_current_geometry[3 * i + 2] - m_wall_z_max) * (m_current_geometry[3 * i + 2] - m_wall_z_max) * (m_current_geometry[3 * i + 2] > m_wall_z_max);
+
+        double curr_pot = 0.5 * k * (Vx + Vy + Vz);
+        int out = (m_current_geometry[3 * i + 0] - m_wall_x_min) < 0 || (m_wall_x_max - m_current_geometry[3 * i + 0]) < 0 || (m_current_geometry[3 * i + 1] - m_wall_y_min) < 0 || (m_wall_y_max - m_current_geometry[3 * i + 1]) < 0 || (m_current_geometry[3 * i + 2] - m_wall_z_min) < 0 || (m_wall_z_max - m_current_geometry[3 * i + 2]) < 0;
+        counter += out;
+
+        // std::cout << i << " " << counter << std::endl;
+
+        double dx = k * (std::abs(m_current_geometry[3 * i + 0] - m_wall_x_min) * (m_current_geometry[3 * i + 0] < m_wall_x_min) - (m_current_geometry[3 * i + 0] - m_wall_x_max) * (m_current_geometry[3 * i + 0] > m_wall_x_max));
+
+        double dy = k * (std::abs(m_current_geometry[3 * i + 1] - m_wall_y_min) * (m_current_geometry[3 * i + 1] < m_wall_y_min) - (m_current_geometry[3 * i + 1] - m_wall_y_max) * (m_current_geometry[3 * i + 1] > m_wall_y_max));
+
+        double dz = k * (std::abs(m_current_geometry[3 * i + 2] - m_wall_z_min) * (m_current_geometry[3 * i + 2] < m_wall_z_min) - (m_current_geometry[3 * i + 2] - m_wall_z_max) * (m_current_geometry[3 * i + 2] > m_wall_z_max));
+        grad[3 * i + 0] -= dx;
+        grad[3 * i + 1] -= dy;
+        grad[3 * i + 2] -= dz;
+        /* if(out)
+         {
+             std::cout << m_current_geometry[3 * i + 0]  << " " << m_current_geometry[3 * i + 1]  << " " << m_current_geometry[3 * i + 2] << std::endl;
+             std::cout << dx << " " << dy << " " << dz << std::endl;
+         }*/
+        sum_grad += dx + dy + dz;
+
+        potential += curr_pot;
+    }
+    // std::cout << counter << " " << sum_grad;
+    return potential;
+    // std::cout << potential*kbT << std::endl;
 }
 
 void SimpleMD::RemoveRotations(std::vector<double>& velo)
@@ -935,7 +1166,7 @@ void SimpleMD::PrintStatus() const
 #pragma message("awfull, fix it ")
     if (m_writeUnique) {
 #ifdef GCC
-        std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}}\n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, remaining, m_time_step / 1000.0, m_unqiue->StoredStructures());
+        std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}ff} {13: ^{0}} {14: ^{0}}\n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential, remaining, m_time_step / 1000.0, m_unqiue->StoredStructures());
 #else
         std::cout << m_currentStep * m_timestep / fs2amu / 1000 << " " << m_Epot << " " << m_Ekin << " " << m_Epot + m_Ekin << m_T << std::endl;
 
@@ -943,9 +1174,9 @@ void SimpleMD::PrintStatus() const
     } else {
 #ifdef GCC
         if (m_dipole)
-            std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}}\n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_aver_dipol * 2.5418 * 3.3356, m_time_step / 1000.0, remaining);
+            std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}f} {13: ^{0}f} {14: ^{0}f}\n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential, m_aver_dipol * 2.5418 * 3.3356, m_time_step / 1000.0, remaining);
         else
-            std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f}\n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, remaining, m_time_step / 1000.0);
+            std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}f} {13: ^{0}f}\n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential, remaining, m_time_step / 1000.0);
 #else
         std::cout << m_currentStep * m_timestep / fs2amu / 1000 << " " << m_Epot << " " << m_Ekin << " " << m_Epot + m_Ekin << m_T << std::endl;
 
@@ -1000,7 +1231,7 @@ double SimpleMD::EKin()
         ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
     ekin *= 0.5;
-    m_T = 2.0 * ekin / (kb * m_dof);
+    m_T = 2.0 * ekin / (kb_Eh * m_dof);
 
     m_aver_Temp = (m_T + (m_currentStep)*m_aver_Temp) / (m_currentStep + 1);
     m_aver_Epot = (m_Epot + (m_currentStep)*m_aver_Epot) / (m_currentStep + 1);
@@ -1009,6 +1240,8 @@ double SimpleMD::EKin()
     if (m_dipole) {
         m_aver_dipol = (m_curr_dipole + (m_currentStep)*m_aver_dipol) / (m_currentStep + 1);
     }
+    m_average_wall_potential = (m_wall_potential + (m_currentStep)*m_average_wall_potential) / (m_currentStep + 1);
+
     return ekin;
 }
 
@@ -1062,7 +1295,7 @@ void SimpleMD::Berendson()
 
 void SimpleMD::CSVR()
 {
-    double Ekin_target = 0.5 * kb * m_T0 * m_dof;
+    double Ekin_target = 0.5 * kb_Eh * m_T0 * m_dof;
     double c = exp(-(m_timestep * m_respa) / m_coupling);
     static std::random_device rd{};
     static std::mt19937 gen{ rd() };
