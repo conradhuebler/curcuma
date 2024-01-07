@@ -60,6 +60,7 @@ class Molecule
     /* Molecule& operator=(const Molecule& molecule);
      Molecule& operator=(const Molecule* molecule);
  */
+    void Initialise(const int* attyp, const double* coord, const int natoms, const double charge, const int spin);
     void ApplyReorderRule(const std::vector<int>& rule);
 
     void print_geom(bool moreinfo = true) const;
@@ -96,6 +97,8 @@ class Molecule
     Molecule getFragmentMolecule(int fragment) const;
 
     double CalculateDistance(int i, int j) const;
+    double GyrationRadius(bool hydrogen = true, int fragment = -1);
+
     Geometry getGeometry(const IntPair& pair, bool protons = true) const;
     Geometry getGeometry(std::vector<int> atoms, bool protons = true) const;
     Geometry getGeometryByFragment(int fragment, bool protons = true) const;
@@ -110,6 +113,7 @@ class Molecule
 
     Position Centroid(bool hydrogen = true, int fragment = -1) const;
     Position MassCentroid(bool hydrogen = true, int fragment = -1) const;
+    Eigen::Vector3d COM(bool hydrogen = true, int fragment = -1);
 
     inline std::size_t AtomCount() const { return m_atoms.size(); }
     std::vector<int> Atoms() const { return m_atoms; }
@@ -126,6 +130,8 @@ class Molecule
     std::string XYZString() const;
     std::string XYZString(const std::vector<int> &order) const;
 
+    std::vector<Position> CalculateDipoleMoments(const std::vector<double>& scaling = std::vector<double>()) const;
+    Position CalculateDipoleMoment(const std::vector<double>& scaling = std::vector<double>()) const;
 
     std::vector<int> BoundHydrogens(int atom, double scaling = 1.5) const;
     std::map<int, std::vector<int>> getConnectivtiy(double scaling = 1.5, int latest = -1) const;
@@ -194,6 +200,8 @@ class Molecule
 
     Matrix AlignmentAxes() const { return m_alignmentAxes; }
 
+    void setPartialCharges(const std::vector<double>& charges) { m_charges = charges; }
+
 private:
     void ParseString(const std::string& internal, std::vector<std::string>& elements);
 
@@ -215,6 +223,7 @@ private:
     int m_charge = 0, m_spin = 0;
     std::vector<std::array<double, 3>> m_geometry;
     std::vector<int> m_atoms;
+    std::vector<double> m_charges;
 
     std::vector<int> m_connect_mass;
     Matrix m_HydrogenBondMap;

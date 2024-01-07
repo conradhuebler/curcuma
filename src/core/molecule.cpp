@@ -156,6 +156,18 @@ Molecule::~Molecule()
 {
 }
 
+void Molecule::Initialise(const int* attyp, const double* coord, const int natoms, const double charge, const int spin)
+{
+    m_charge = charge;
+    m_spin = spin;
+    Molecule mol;
+    for (int i = 0; i < natoms; ++i) {
+        m_geometry.push_back({ coord[3 * i], coord[3 * i + 1], coord[3 * i + 2] });
+        m_atoms.push_back(attyp[i]);
+        m_mass += Elements::AtomicMass[attyp[i]];
+    }
+}
+
 void Molecule::ApplyReorderRule(const std::vector<int>& rule)
 {
     Molecule mol;
@@ -793,6 +805,7 @@ Position Molecule::Centroid(bool protons, int fragment) const
     return GeometryTools::Centroid(getGeometryByFragment(fragment, protons));
 }
 
+
 Position Molecule::MassCentroid(bool protons, int fragment) const
 {
     Position pos = { 0, 0, 0 };
@@ -803,6 +816,105 @@ Position Molecule::MassCentroid(bool protons, int fragment) const
     }
     pos /= mass;
     return pos;
+}
+
+Eigen::Vector3d Molecule::COM(bool protons, int fragment)
+{
+    // todo implement heavy and fragements ...
+    if (m_mass < 1)
+        CalculateMass();
+    Eigen::Vector3d com = { 0, 0, 0 };
+    for (int i = 0; i < m_geometry.size(); ++i) {
+        double mass = Elements::AtomicMass[m_atoms[i]];
+        com(0) += mass * m_geometry[i][0];
+        com(1) += mass * m_geometry[i][1];
+        com(2) += mass * m_geometry[i][2];
+    }
+    com(0) /= m_mass;
+    com(1) /= m_mass;
+    com(2) /= m_mass;
+    return com;
+}
+
+std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>& scaling) const
+{
+    std::vector<Position> dipole_moments;
+
+    if (m_charges.size() != m_geometry.size()) {
+        std::cout << "No partial charges available" << std::endl;
+        return dipole_moments;
+    }
+
+    for (int f = 0; f < GetFragments().size(); ++f) {
+        Position pos = { 0, 0, 0 }, dipole = { 0, 0, 0 };
+        double mass = 0;
+        for (int i : m_fragments[f]) {
+            double m = Elements::AtomicMass[m_atoms[i]];
+            mass += m;
+            pos(0) += m * m_geometry[i][0];
+            pos(1) += m * m_geometry[i][1];
+            pos(2) += m * m_geometry[i][2];
+        }
+        pos(0) /= mass;
+        pos(1) /= mass;
+        pos(2) /= mass;
+        for (int i : m_fragments[f]) {
+            double scale = 3;
+            if (scaling.size() > i)
+                scale = scaling[i];
+            dipole(0) += m_charges[i] * (m_geometry[i][0] - pos(0)) * scale;
+            dipole(1) += m_charges[i] * (m_geometry[i][1] - pos(1)) * scale;
+            dipole(2) += m_charges[i] * (m_geometry[i][2] - pos(2)) * scale;
+            //  std::cout << scale << " ";
+        }
+        // std::cout << std::endl;
+        dipole_moments.push_back(dipole);
+    }
+    return dipole_moments;
+}
+
+Position Molecule::CalculateDipoleMoment(const std::vector<double>& scaling) const
+{
+    double mass = 0;
+
+    Position pos = { 0, 0, 0 }, dipole = { 0, 0, 0 };
+    if (m_charges.size() != m_geometry.size()) {
+        std::cout << "No partial charges available" << std::endl;
+        return dipole;
+    }
+    for (int i = 0; i < m_geometry.size(); ++i) {
+        double m = Elements::AtomicMass[m_atoms[i]];
+        mass += m;
+        pos(0) += m * m_geometry[i][0];
+        pos(1) += m * m_geometry[i][1];
+        pos(2) += m * m_geometry[i][2];
+    }
+    pos(0) /= mass;
+    pos(1) /= mass;
+    pos(2) /= mass;
+    for (int i = 0; i < m_geometry.size(); ++i) {
+        double scale = 3;
+        if (scaling.size() > i)
+            scale = scaling[i];
+        dipole(0) += m_charges[i] * (m_geometry[i][0] - pos(0)) * scale;
+        dipole(1) += m_charges[i] * (m_geometry[i][1] - pos(1)) * scale;
+        dipole(2) += m_charges[i] * (m_geometry[i][2] - pos(2)) * scale;
+        // std::cout << scale << " ";
+    }
+    // std::cout << std::endl;
+    return dipole;
+}
+
+double Molecule::GyrationRadius(bool protons, int fragment)
+{
+    Eigen::Vector3d com = COM(protons, fragment);
+    double gyr = 0;
+    for (int i = 0; i < m_geometry.size(); ++i) {
+        gyr += ((com(0) - m_geometry[i][0]) * (com(0) - m_geometry[i][0]) + (com(0) - m_geometry[i][0]) * (com(0) - m_geometry[i][0]) + (com(0) - m_geometry[i][0]) * (com(0) - m_geometry[i][0]));
+    }
+    gyr /= double(m_geometry.size());
+    return gyr;
+
 }
 
 std::pair<int, Position> Molecule::Atom(int i) const

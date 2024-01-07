@@ -357,7 +357,7 @@ private:
     int m_threads = 1;
     int m_RMSDElement = 7;
     int m_molaligntol = 10;
-
+    int m_timing_rot = 0, m_timing_ripser = 0;
     bool m_writeXYZ = false;
     bool m_check_connections = false;
     bool m_force_reorder = false, m_prevent_reorder = false;

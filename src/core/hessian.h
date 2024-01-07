@@ -69,6 +69,7 @@ public:
     void CalculateHessian(int type = 1);
 
     void PrintVibrations(Vector& eigenvalues, const Vector& projected);
+    void PrintVibrationsPlain(const Vector& eigenvalues);
 
 private:
     void CalculateHessianNumerical();

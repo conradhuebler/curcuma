@@ -21,6 +21,8 @@
 
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
 
+#include "optimiser/LBFGSppInterface.h"
+
 #include "curcumamethod.h"
 
 static json CurcumaOptJson{
@@ -30,11 +32,20 @@ static json CurcumaOptJson{
     { "dRMSD", 0.01 },
     { "method", "uff" },
     { "MaxIter", 5000 },
-    { "LBFGS_eps", 1e-5 },
-    { "StoreIntermediate", 2000 },
-    { "SingleStep", 20 },
+ //   { "LBFGS_LS", 3},
+    { "LBFGS_m", 2000 },
+    { "LBFGS_past", 0},
+    { "LBFGS_eps_abs", 1e-5 },
+    { "LBFGS_eps_rel", 1e-5 },
+    { "LBFGS_delta", 0 },
+    { "LBFGS_LST", 3},
+    { "LBFGS_ls_iter", 2 },
+    { "LBFGS_min_step", 1e-4 },
+    { "LBFGS_ftol", 1e-4 },
+    { "LBFGS_wolfe", 0.9 },
+    { "SingleStep", 1 },
     { "ConvCount", 11 },
-    { "GradNorm", 0.001 },
+    { "GradNorm", 1e-4 },
     { "Threads", 1 },
     { "Charge", 0 },
     { "Spin", 0 },
@@ -66,12 +77,15 @@ public:
     inline void setController(const json& controller) { m_controller = controller; }
     std::string Output() const { return m_result; }
     const std::vector<Molecule>* Intermediates() const { return &m_intermediate; }
+    void setBaseName(const std::string& basename) { m_basename = basename; }
+    std::string Basename() const { return m_basename; }
 
 protected:
     std::string m_result;
     Molecule m_molecule, m_final;
     json m_controller = OptJsonPrivate;
     std::vector<Molecule> m_intermediate;
+    std::string m_basename;
 };
 
 class OptThread : public SPThread {
@@ -89,9 +103,15 @@ public:
     void setFileName(const std::string& filename)
     {
         m_filename = filename;
-        m_basename = std::string(m_filename);
-        for (int i = 0; i < 4; ++i)
-            m_basename.pop_back();
+
+        getBasename(filename);
+        std::ofstream tfile1;
+        tfile1.open(Optfile());
+        tfile1.close();
+
+        std::ofstream tfile2;
+        tfile2.open(Trjfile());
+        tfile2.close();
 
         m_file_set = true;
         m_mol_set = false;
@@ -105,10 +125,10 @@ public:
         m_mol_set = false;
         m_mols_set = true;
     }
-
-    inline void setBaseName(const std::string& basename)
+    /*
+    inline void setBaseName()
     {
-        m_basename = basename;
+        //m_basename = basename;
 
         std::ofstream tfile1;
         tfile1.open(Optfile());
@@ -118,16 +138,16 @@ public:
         tfile2.open(Trjfile());
         tfile2.close();
     }
+*/
 
-    inline std::string Optfile() const { return std::string(m_basename + ".opt.xyz"); }
-    inline std::string Trjfile() const { return std::string(m_basename + ".trj.xyz"); }
-
+    inline std::string Optfile() const { return std::string(Basename() + ".opt.xyz"); }
+    inline std::string Trjfile() const { return std::string(Basename() + ".trj.xyz"); }
     void start() override; // TODO make pure virtual and move all main action here
 
     void setSinglePoint(bool sp) { m_singlepoint = sp; }
     inline const std::vector<Molecule>* Molecules() const { return &m_molecules; }
 
-    static Molecule LBFGSOptimise(const Molecule* host, const json& controller, std::string& output, std::vector<Molecule>* intermediate);
+    static Molecule LBFGSOptimise(Molecule* host, const json& controller, std::string& output, std::vector<Molecule>* intermediate, int thread = -1, const std::string& basename = "base");
     static double SinglePoint(const Molecule* initial, const json& controller, std::string& output);
 
     void clear();
@@ -150,7 +170,7 @@ private:
     void ProcessMolecules(const std::vector<Molecule>& molecule);
     void ProcessMoleculesSerial(const std::vector<Molecule>& molecule);
 
-    std::string m_filename, m_basename = "curcuma_job";
+    std::string m_filename;
     std::string m_method = "UFF";
     Molecule m_molecule;
     std::vector<Molecule> m_molecules;

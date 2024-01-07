@@ -23,7 +23,6 @@ option (WriteMoreInfo
     "Write statistic files with more info" OFF)
 
 add_subdirectory(${PROJECT_SOURCE_DIR}/external/fmt EXCLUDE_FROM_ALL)
-add_subdirectory(${PROJECT_SOURCE_DIR}/external/finite-diff/ EXCLUDE_FROM_ALL)
 
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
@@ -31,21 +30,13 @@ set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 #    set(CMAKE_BUILD_TYPE RelWithDebInfo)
 #endif()
 
-#include(FetchContent)
-#FetchContent_Declare(
-#    finite-diff
-#    GIT_REPOSITORY https://github.com/zfergus/finite-diff.git
-#    GIT_TAG "v1.0.1"
-#    GIT_SHALLOW TRUE
-#)
-#FetchContent_MakeAvailable(finite-diff)
+
 
 include_directories(SYSTEM  ${PROJECT_SOURCE_DIR}/external/fmt/include
                             ${PROJECT_SOURCE_DIR}/external/LBFGSpp/include
                             ${PROJECT_SOURCE_DIR}/external/ripser
                             ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0
                             ${PROJECT_SOURCE_DIR}/external/cpp-d4/include
-                            ${PROJECT_SOURCE_DIR}/external/finite-diff/src
                             ${PROJECT_SOURCE_DIR}/external/)
 include_directories(${PROJECT_SOURCE_DIR} ${PROJECT_BINARY_DIR} )
 
@@ -329,7 +320,8 @@ if(USE_D4)
     target_link_libraries(curcuma_core curcuma_d4)
 endif()
 
-target_link_libraries(curcuma_core pthread fmt::fmt-header-only finitediff::finitediff)
+#target_link_libraries(curcuma_core pthread fmt::fmt-header-only finitediff::finitediff)
+target_link_libraries(curcuma_core pthread fmt::fmt-header-only )
 
 if(WIN32) # Check if we are on Windows
 else()
