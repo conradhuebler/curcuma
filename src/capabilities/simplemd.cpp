@@ -64,7 +64,7 @@ void SimpleMD::LoadControlJson()
 
     m_spin = Json2KeyWord<int>(m_defaults, "spin");
     m_charge = Json2KeyWord<int>(m_defaults, "charge");
-    m_timestep = Json2KeyWord<double>(m_defaults, "dT");
+    m_dT = Json2KeyWord<double>(m_defaults, "dT");
     m_maxtime = Json2KeyWord<double>(m_defaults, "MaxTime");
     m_T0 = Json2KeyWord<double>(m_defaults, "T");
     m_rmrottrans = Json2KeyWord<int>(m_defaults, "rmrottrans");
@@ -82,8 +82,8 @@ void SimpleMD::LoadControlJson()
     m_scale_velo = Json2KeyWord<double>(m_defaults, "velo");
     m_rescue = Json2KeyWord<bool>(m_defaults, "rescue");
     m_coupling = Json2KeyWord<double>(m_defaults, "coupling");
-    if (m_coupling < m_timestep)
-        m_coupling = m_timestep;
+    if (m_coupling < m_dT)
+        m_coupling = m_dT;
 
     m_writerestart = Json2KeyWord<int>(m_defaults, "writerestart");
     m_respa = Json2KeyWord<int>(m_defaults, "respa");
@@ -93,16 +93,18 @@ void SimpleMD::LoadControlJson()
     m_writeinit = Json2KeyWord<bool>(m_defaults, "writeinit");
     m_initfile = Json2KeyWord<std::string>(m_defaults, "initfile");
     m_norestart = Json2KeyWord<bool>(m_defaults, "norestart");
-    m_dt2 = m_timestep * m_timestep;
-    if (Json2KeyWord<int>(m_defaults, "rattle")) {
+    m_dt2 = m_dT * m_dT;
+    m_rm_COM = Json2KeyWord<double>(m_defaults, "rm_COM");
+    int rattle = Json2KeyWord<int>(m_defaults, "rattle");
+    m_rattle_maxiter = Json2KeyWord<int>(m_defaults, "rattle_maxiter");
+    if (rattle == 1) {
         Integrator = [=](double* coord, double* grad) {
             this->Rattle(coord, grad);
         };
-        m_rattle_tolerance_a = Json2KeyWord<double>(m_defaults, "rattle_tolerance_a") / m_timestep;
-        m_rattle_tolerance_b = Json2KeyWord<double>(m_defaults, "rattle_tolerance_b") / m_timestep;
-        m_coupling = m_timestep;
+        m_rattle_tolerance = Json2KeyWord<double>(m_defaults, "rattle_tolerance");
+        m_coupling = m_dT;
         m_rattle = Json2KeyWord<int>(m_defaults, "rattle");
-        std::cout << "Using rattle to constrained bonds!" << std::endl;
+        std::cout << "Using rattle to constrain bonds!" << std::endl;
     } else {
         Integrator = [=](double* coord, double* grad) {
             this->Verlet(coord, grad);
@@ -162,6 +164,7 @@ void SimpleMD::LoadControlJson()
         WallPotential = [=](double* grad) -> double {
             return 0;
         };
+    m_rm_COM_step = m_rm_COM / m_dT;
 }
 
 bool SimpleMD::Initialise()
@@ -311,8 +314,10 @@ void SimpleMD::InitConstrainedBonds()
                             continue;
                     }
                     std::pair<int, int> indicies(i, j);
+                    std::pair<double, double> minmax(m_molecule.CalculateDistance(i, j) * m_molecule.CalculateDistance(i, j), m_molecule.CalculateDistance(i, j) * m_molecule.CalculateDistance(i, j));
                     std::pair<std::pair<int, int>, double> bond(indicies, m_molecule.CalculateDistance(i, j) * m_molecule.CalculateDistance(i, j));
                     m_bond_constrained.push_back(std::pair<std::pair<int, int>, double>(bond));
+
                     // std::cout << i << " " << j << " " << bond.second << std::endl;
                 }
             }
@@ -376,7 +381,7 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     nlohmann::json restart;
     restart["method"] = m_method;
     restart["thermostat"] = m_thermostat;
-    restart["dT"] = m_timestep;
+    restart["dT"] = m_dT;
     restart["MaxTime"] = m_maxtime;
     restart["T"] = m_T0;
     restart["currentStep"] = m_currentStep;
@@ -389,11 +394,15 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["average_Epot"] = m_aver_Epot;
     restart["average_Ekin"] = m_aver_Ekin;
     restart["average_Etot"] = m_aver_Etot;
+    restart["average_Virial"] = m_average_virial_correction;
+    restart["average_Wall"] = m_average_wall_potential;
+
     restart["coupling"] = m_coupling;
     restart["MaxTopoDiff"] = m_max_top_diff;
     restart["impuls"] = m_impuls;
     restart["impuls_scaling"] = m_impuls_scaling;
     restart["respa"] = m_respa;
+    restart["rm_COM"] = m_rm_COM;
     return restart;
 };
 
@@ -430,14 +439,14 @@ bool SimpleMD::LoadRestartInformation()
 
 bool SimpleMD::LoadRestartInformation(const json& state)
 {
-    std::string geometry, velocities;
+    std::string geometry, velocities, constrains;
 
     try {
         m_method = state["method"];
     } catch (json::type_error& e) {
     }
     try {
-        m_timestep = state["dT"];
+        m_dT = state["dT"];
     } catch (json::type_error& e) {
     }
     try {
@@ -477,6 +486,16 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     }
     try {
         m_aver_Temp = state["average_T"];
+    } catch (json::type_error& e) {
+    }
+
+    try {
+        m_average_virial_correction = state["average_Virial"];
+    } catch (json::type_error& e) {
+    }
+
+    try {
+        m_average_wall_potential = state["average_Wall"];
     } catch (json::type_error& e) {
     }
 
@@ -606,15 +625,17 @@ void SimpleMD::start()
             }
         }
 
-        if (m_rmrottrans == 1)
-            RemoveRotation(m_velocities);
-        else if (m_rmrottrans == 2)
-            RemoveRotations(m_velocities);
-        else if (m_rmrottrans == 3) {
-            RemoveRotations(m_velocities);
-            RemoveRotation(m_velocities);
+        if (m_rm_COM_step > 0 && m_step % m_rm_COM_step == 0) {
+            std::cout << "Removing COM motion." << std::endl;
+            if (m_rmrottrans == 1)
+                RemoveRotation(m_velocities);
+            else if (m_rmrottrans == 2)
+                RemoveRotations(m_velocities);
+            else if (m_rmrottrans == 3) {
+                RemoveRotations(m_velocities);
+                RemoveRotation(m_velocities);
+            }
         }
-
         WallPotential(gradient);
         Integrator(coord, gradient);
 
@@ -630,11 +651,11 @@ void SimpleMD::start()
         ThermostatFunction();
         m_Ekin = EKin();
         if (m_writerestart > -1 && m_step % m_writerestart == 0) {
-            std::ofstream restart_file("curcuma_step_" + std::to_string(int(m_step * m_timestep)) + ".json");
+            std::ofstream restart_file("curcuma_step_" + std::to_string(int(m_step * m_dT)) + ".json");
             nlohmann::json restart;
             restart_file << WriteRestartInformation() << std::endl;
         }
-        if ((m_step && int(m_step * m_timestep) % m_print == 0)) {
+        if ((m_step && int(m_step * m_dT) % m_print == 0)) {
             m_Etot = m_Epot + m_Ekin;
             PrintStatus();
             m_time_step = 0;
@@ -652,7 +673,7 @@ void SimpleMD::start()
             break;
         }
         m_step++;
-        m_currentStep += m_timestep;
+        m_currentStep += m_dT;
         m_time_step += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - step0).count();
     }
     PrintStatus();
@@ -682,13 +703,13 @@ void SimpleMD::Verlet(double* coord, double* grad)
     //   restart_file << fallback << std::endl;
 
     for (int i = 0; i < m_natoms; ++i) {
-        coord[3 * i + 0] = m_current_geometry[3 * i + 0] + m_timestep * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
-        coord[3 * i + 1] = m_current_geometry[3 * i + 1] + m_timestep * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
-        coord[3 * i + 2] = m_current_geometry[3 * i + 2] + m_timestep * m_velocities[3 * i + 2] - 0.5 * grad[3 * i + 2] * m_rmass[3 * i + 2] * m_dt2;
+        coord[3 * i + 0] = m_current_geometry[3 * i + 0] + m_dT * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
+        coord[3 * i + 1] = m_current_geometry[3 * i + 1] + m_dT * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
+        coord[3 * i + 2] = m_current_geometry[3 * i + 2] + m_dT * m_velocities[3 * i + 2] - 0.5 * grad[3 * i + 2] * m_rmass[3 * i + 2] * m_dt2;
 
-        m_velocities[3 * i + 0] = m_velocities[3 * i + 0] - 0.5 * m_timestep * grad[3 * i + 0] * m_rmass[3 * i + 0];
-        m_velocities[3 * i + 1] = m_velocities[3 * i + 1] - 0.5 * m_timestep * grad[3 * i + 1] * m_rmass[3 * i + 1];
-        m_velocities[3 * i + 2] = m_velocities[3 * i + 2] - 0.5 * m_timestep * grad[3 * i + 2] * m_rmass[3 * i + 2];
+        m_velocities[3 * i + 0] = m_velocities[3 * i + 0] - 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
+        m_velocities[3 * i + 1] = m_velocities[3 * i + 1] - 0.5 * m_dT * grad[3 * i + 1] * m_rmass[3 * i + 1];
+        m_velocities[3 * i + 2] = m_velocities[3 * i + 2] - 0.5 * m_dT * grad[3 * i + 2] * m_rmass[3 * i + 2];
 
         m_current_geometry[3 * i + 0] = coord[3 * i + 0];
         m_current_geometry[3 * i + 1] = coord[3 * i + 1];
@@ -697,9 +718,9 @@ void SimpleMD::Verlet(double* coord, double* grad)
     m_Epot = Energy(coord, grad);
     double ekin = 0.0;
     for (int i = 0; i < m_natoms; ++i) {
-        m_velocities[3 * i + 0] -= 0.5 * m_timestep * grad[3 * i + 0] * m_rmass[3 * i + 0];
-        m_velocities[3 * i + 1] -= 0.5 * m_timestep * grad[3 * i + 1] * m_rmass[3 * i + 1];
-        m_velocities[3 * i + 2] -= 0.5 * m_timestep * grad[3 * i + 2] * m_rmass[3 * i + 2];
+        m_velocities[3 * i + 0] -= 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
+        m_velocities[3 * i + 1] -= 0.5 * m_dT * grad[3 * i + 1] * m_rmass[3 * i + 1];
+        m_velocities[3 * i + 2] -= 0.5 * m_dT * grad[3 * i + 2] * m_rmass[3 * i + 2];
 
         ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
         m_gradient[3 * i + 0] = grad[3 * i + 0];
@@ -719,43 +740,37 @@ void SimpleMD::Rattle(double* coord, double* grad)
      * by
      * Griebel, Knapek, Zumbusch, Caglar
      * 2003, Springer-Verlag
-     *
+     * and from
+     * Molecular Simulation of Fluids
+     * by Richard J. Sadus
+     * some suff was just ignored or corrected
+     * like dT^3 -> dT^2 and
+     * updated velocities of the second atom (minus instread of plus)
      */
 
-    double m_timestep_inverse = 1 / m_timestep;
-    std::vector<double> velo(m_natoms, 0);
+    double m_dT_inverse = 1 / m_dT;
+    std::vector<int> moved(m_natoms, 0);
     for (int i = 0; i < m_natoms; ++i) {
-        coord[3 * i + 0] = m_current_geometry[3 * i + 0] + m_timestep * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
-        coord[3 * i + 1] = m_current_geometry[3 * i + 1] + m_timestep * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
-        coord[3 * i + 2] = m_current_geometry[3 * i + 2] + m_timestep * m_velocities[3 * i + 2] - 0.5 * grad[3 * i + 2] * m_rmass[3 * i + 2] * m_dt2;
+        coord[3 * i + 0] = m_current_geometry[3 * i + 0] + m_dT * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
+        coord[3 * i + 1] = m_current_geometry[3 * i + 1] + m_dT * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
+        coord[3 * i + 2] = m_current_geometry[3 * i + 2] + m_dT * m_velocities[3 * i + 2] - 0.5 * grad[3 * i + 2] * m_rmass[3 * i + 2] * m_dt2;
 
-        m_velocities[3 * i + 0] -= 0.5 * m_timestep * grad[3 * i + 0] * m_rmass[3 * i + 0];
-        m_velocities[3 * i + 1] -= 0.5 * m_timestep * grad[3 * i + 1] * m_rmass[3 * i + 1];
-        m_velocities[3 * i + 2] -= 0.5 * m_timestep * grad[3 * i + 2] * m_rmass[3 * i + 2];
-        velo[i] = m_velocities[3 * i + 0] * m_velocities[3 * i + 0] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2];
+        m_velocities[3 * i + 0] -= 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
+        m_velocities[3 * i + 1] -= 0.5 * m_dT * grad[3 * i + 1] * m_rmass[3 * i + 1];
+        m_velocities[3 * i + 2] -= 0.5 * m_dT * grad[3 * i + 2] * m_rmass[3 * i + 2];
     }
 
-    double epsilon = 2 * m_rattle_tolerance_a;
     double iter = 0;
-    while (epsilon > m_rattle_tolerance_a && iter < 100) {
+    while (iter < m_rattle_maxiter) {
         iter++;
-        epsilon = 0;
         for (auto bond : m_bond_constrained) {
             int i = bond.first.first, j = bond.first.second;
             double distance = bond.second;
             double distance_current = ((coord[3 * i + 0] - coord[3 * j + 0]) * (coord[3 * i + 0] - coord[3 * j + 0])
                 + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
                 + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
-            double r = distance - distance_current;
-            epsilon += std::abs(r);
-        }
-        if (epsilon > m_rattle_tolerance_a) {
-            for (auto bond : m_bond_constrained) {
-                int i = bond.first.first, j = bond.first.second;
-                double distance = bond.second;
-                double distance_current = ((coord[3 * i + 0] - coord[3 * j + 0]) * (coord[3 * i + 0] - coord[3 * j + 0])
-                    + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
-                    + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
+
+            if (std::abs(distance - distance_current) > 2 * m_rattle_tolerance * distance) {
                 double r = distance - distance_current;
 
                 double dx = m_current_geometry[3 * i + 0] - m_current_geometry[3 * j + 0];
@@ -765,22 +780,27 @@ void SimpleMD::Rattle(double* coord, double* grad)
                 double scalarproduct = (dx) * (coord[3 * i + 0] - coord[3 * j + 0])
                     + (dy) * (coord[3 * i + 1] - coord[3 * j + 1])
                     + (dz) * (coord[3 * i + 2] - coord[3 * j + 2]);
-                double lambda = r / (1 * (m_rmass[i] + m_rmass[j]) * scalarproduct);
-                coord[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i];
-                coord[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i];
-                coord[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i];
+                if (scalarproduct >= m_rattle_tolerance * distance) {
+                    moved[i] = 1;
+                    moved[j] = 1;
 
-                coord[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j];
-                coord[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j];
-                coord[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j];
+                    double lambda = r / (1 * (m_rmass[i] + m_rmass[j]) * scalarproduct);
+                    coord[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i];
+                    coord[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i];
+                    coord[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i];
 
-                m_velocities[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i] * m_timestep_inverse;
-                m_velocities[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i] * m_timestep_inverse;
-                m_velocities[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i] * m_timestep_inverse;
+                    coord[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j];
+                    coord[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j];
+                    coord[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j];
 
-                m_velocities[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j] * m_timestep_inverse;
-                m_velocities[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j] * m_timestep_inverse;
-                m_velocities[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j] * m_timestep_inverse;
+                    m_velocities[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+                    m_velocities[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+                    m_velocities[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+
+                    m_velocities[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                    m_velocities[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                    m_velocities[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                }
             }
         }
     }
@@ -788,9 +808,9 @@ void SimpleMD::Rattle(double* coord, double* grad)
     m_Epot = Energy(coord, grad);
     double ekin = 0.0;
     for (int i = 0; i < m_natoms; ++i) {
-        m_velocities[3 * i + 0] -= 0.5 * m_timestep * grad[3 * i + 0] * m_rmass[3 * i + 0];
-        m_velocities[3 * i + 1] -= 0.5 * m_timestep * grad[3 * i + 1] * m_rmass[3 * i + 1];
-        m_velocities[3 * i + 2] -= 0.5 * m_timestep * grad[3 * i + 2] * m_rmass[3 * i + 2];
+        m_velocities[3 * i + 0] -= 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
+        m_velocities[3 * i + 1] -= 0.5 * m_dT * grad[3 * i + 1] * m_rmass[3 * i + 1];
+        m_velocities[3 * i + 2] -= 0.5 * m_dT * grad[3 * i + 2] * m_rmass[3 * i + 2];
 
         m_current_geometry[3 * i + 0] = coord[3 * i + 0];
         m_current_geometry[3 * i + 1] = coord[3 * i + 1];
@@ -800,17 +820,15 @@ void SimpleMD::Rattle(double* coord, double* grad)
         m_gradient[3 * i + 1] = grad[3 * i + 1];
         m_gradient[3 * i + 2] = grad[3 * i + 2];
     }
-    {
-        double epsilon = 2 * m_rattle_tolerance_b;
-        double iter = 0;
+    m_virial_correction = 0;
+    iter = 0;
 
-        while (epsilon > m_rattle_tolerance_b && iter < 100) {
-            epsilon = 0;
-
-            iter++;
-
-            for (auto bond : m_bond_constrained) {
-                int i = bond.first.first, j = bond.first.second;
+    while (iter < m_rattle_maxiter) {
+        iter++;
+        for (auto bond : m_bond_constrained) {
+            int i = bond.first.first, j = bond.first.second;
+            if (moved[i] == 1 && moved[j] == 1) {
+                double distance = bond.second;
 
                 double dx = coord[3 * i + 0] - coord[3 * j + 0];
                 double dy = coord[3 * i + 1] - coord[3 * j + 1];
@@ -820,22 +838,10 @@ void SimpleMD::Rattle(double* coord, double* grad)
                 double dvz = m_velocities[3 * i + 2] - m_velocities[3 * j + 2];
 
                 double r = (dx) * (dvx) + (dy) * (dvy) + (dz) * (dvz);
-                epsilon += std::abs(r);
-            }
-            if (epsilon > m_rattle_tolerance_b) {
-                for (auto bond : m_bond_constrained) {
-                    int i = bond.first.first, j = bond.first.second;
-                    double distance = bond.second;
 
-                    double dx = coord[3 * i + 0] - coord[3 * j + 0];
-                    double dy = coord[3 * i + 1] - coord[3 * j + 1];
-                    double dz = coord[3 * i + 2] - coord[3 * j + 2];
-                    double dvx = m_velocities[3 * i + 0] - m_velocities[3 * j + 0];
-                    double dvy = m_velocities[3 * i + 1] - m_velocities[3 * j + 1];
-                    double dvz = m_velocities[3 * i + 2] - m_velocities[3 * j + 2];
-
-                    double r = (dx) * (dvx) + (dy) * (dvy) + (dz) * (dvz);
-                    double mu = -1 * r / ((m_rmass[i] + m_rmass[j]) * distance);
+                double mu = -1 * r / ((m_rmass[i] + m_rmass[j]) * distance);
+                if (std::abs(mu) > m_rattle_tolerance) {
+                    m_virial_correction += mu * distance;
                     m_velocities[3 * i + 0] += dx * mu * m_rmass[i];
                     m_velocities[3 * i + 1] += dy * mu * m_rmass[i];
                     m_velocities[3 * i + 2] += dz * mu * m_rmass[i];
@@ -847,6 +853,7 @@ void SimpleMD::Rattle(double* coord, double* grad)
             }
         }
     }
+
     for (int i = 0; i < m_natoms; ++i) {
         ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
@@ -1061,12 +1068,14 @@ void SimpleMD::RemoveRotations(std::vector<double>& velo)
 
         Position rlm = { 0, 0, 0 }, ram = { 0, 0, 0 };
         for (int i : fragments[f]) {
+
             rlm(0) = rlm(0) + m_mass[i] * velo[3 * i + 0];
             rlm(1) = rlm(1) + m_mass[i] * velo[3 * i + 1];
             rlm(2) = rlm(2) + m_mass[i] * velo[3 * i + 2];
         }
 
         for (int i : fragments[f]) {
+
             ram(0) = (omega(1) * geom(i, 2) - omega(2) * geom(i, 1));
             ram(1) = (omega(2) * geom(i, 0) - omega(0) * geom(i, 2));
             ram(2) = (omega(0) * geom(i, 1) - omega(1) * geom(i, 0));
@@ -1166,19 +1175,22 @@ void SimpleMD::PrintStatus() const
 #pragma message("awfull, fix it ")
     if (m_writeUnique) {
 #ifdef GCC
-        std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}ff} {13: ^{0}} {14: ^{0}}\n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential, remaining, m_time_step / 1000.0, m_unqiue->StoredStructures());
+        std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}f} {13: ^{0}f} {14: ^{0}f} {15: ^{0}} {16: ^{0}}\n", 15,
+            m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential, m_virial_correction, m_average_virial_correction, remaining, m_time_step / 1000.0, m_unqiue->StoredStructures());
 #else
-        std::cout << m_currentStep * m_timestep / fs2amu / 1000 << " " << m_Epot << " " << m_Ekin << " " << m_Epot + m_Ekin << m_T << std::endl;
+        std::cout << m_currentStep * m_dT / fs2amu / 1000 << " " << m_Epot << " " << m_Ekin << " " << m_Epot + m_Ekin << m_T << std::endl;
 
 #endif
     } else {
 #ifdef GCC
         if (m_dipole)
-            std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}f} {13: ^{0}f} {14: ^{0}f}\n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential, m_aver_dipol * 2.5418 * 3.3356, m_time_step / 1000.0, remaining);
+            std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}f} {13: ^{0}f} {14: ^{0}f} {15: ^{0}f} {16: ^{0}f}\n", 15,
+                m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential, m_aver_dipol * 2.5418 * 3.3356, m_virial_correction, m_average_virial_correction, remaining, m_time_step / 1000.0);
         else
-            std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}f} {13: ^{0}f}\n", 15, m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential, remaining, m_time_step / 1000.0);
+            std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}f} {13: ^{0}f} {14: ^{0}f} {15: ^{0}f}\n", 15,
+                m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential, m_virial_correction, m_average_virial_correction, remaining, m_time_step / 1000.0);
 #else
-        std::cout << m_currentStep * m_timestep / fs2amu / 1000 << " " << m_Epot << " " << m_Ekin << " " << m_Epot + m_Ekin << m_T << std::endl;
+        std::cout << m_currentStep * m_dT / fs2amu / 1000 << " " << m_Epot << " " << m_Ekin << " " << m_Epot + m_Ekin << m_T << std::endl;
 
 #endif
     }
@@ -1241,6 +1253,7 @@ double SimpleMD::EKin()
         m_aver_dipol = (m_curr_dipole + (m_currentStep)*m_aver_dipol) / (m_currentStep + 1);
     }
     m_average_wall_potential = (m_wall_potential + (m_currentStep)*m_average_wall_potential) / (m_currentStep + 1);
+    m_average_virial_correction = (m_virial_correction + (m_currentStep)*m_average_virial_correction) / (m_currentStep + 1);
 
     return ekin;
 }
@@ -1287,7 +1300,7 @@ bool SimpleMD::WriteGeometry()
 
 void SimpleMD::Berendson()
 {
-    double lambda = sqrt(1 + (m_timestep * (m_T0 - m_T)) / (m_T * m_coupling));
+    double lambda = sqrt(1 + (m_dT * (m_T0 - m_T)) / (m_T * m_coupling));
     for (int i = 0; i < 3 * m_natoms; ++i) {
         m_velocities[i] *= lambda;
     }
@@ -1295,8 +1308,8 @@ void SimpleMD::Berendson()
 
 void SimpleMD::CSVR()
 {
-    double Ekin_target = 0.5 * kb_Eh * m_T0 * m_dof;
-    double c = exp(-(m_timestep * m_respa) / m_coupling);
+    double Ekin_target = 0.5 * kb_Eh * (m_T0)*m_dof;
+    double c = exp(-(m_dT * m_respa) / m_coupling);
     static std::random_device rd{};
     static std::mt19937 gen{ rd() };
     static std::normal_distribution<> d{ 0, 1 };

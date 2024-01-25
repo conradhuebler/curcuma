@@ -39,7 +39,8 @@ static json CurcumaMDJson{
     { "printOutput", true },
     { "MaxTime", 5000 },
     { "T", 298.15 },
-    { "dt", 1 },
+    { "dt", 1 }, // single step in fs
+    { "rm_COM", 100 }, // remove translation and rotation every x fs
     { "charge", 0 },
     { "Spin", 0 },
     { "rmrottrans", 0 },
@@ -59,11 +60,12 @@ static json CurcumaMDJson{
     { "impuls_scaling", 0.75 },
     { "writeinit", false },
     { "initfile", "none" },
+    { "constrain_file", "none" },
     { "norestart", false },
     { "writerestart", 1000 },
     { "rattle", false },
-    { "rattle_tolerance_a", 1 },
-    { "rattle_tolerance_b", 0.1 },
+    { "rattle_tolerance", 1e-6 },
+    { "rattle_maxiter", 10 },
     { "thermostat", "csvr" },
     { "respa", 1 },
     { "dipole", false },
@@ -164,12 +166,15 @@ private:
     std::function<double(double* grad)> WallPotential;
 
     std::vector<std::pair<std::pair<int, int>, double>> m_bond_constrained;
+
     int m_natoms = 0;
     int m_dump = 1;
     double m_T = 0, m_Epot = 0, m_aver_Epot = 0, m_Ekin = 0, m_aver_Ekin = 0, m_Etot = 0, m_aver_Etot = 0, m_aver_dipol = 0, m_curr_dipole = 0;
+    double m_rm_COM = 100;
+    int m_rm_COM_step = -1;
     int m_hmass = 4;
     double m_single_step = 1;
-    double m_timestep = 0.5, m_currentStep = 0, m_maxtime = 1000;
+    double m_dT = 0.5, m_currentStep = 0, m_maxtime = 1000;
     int m_spin = 0, m_charge = 0, m_print = 100;
     double m_T0 = 298.13, m_aver_Temp = 0, m_rmsd = 1.5;
     double m_x0 = 0, m_y0 = 0, m_z0 = 0;
@@ -178,7 +183,7 @@ private:
     std::vector<int> m_atomtype;
     Molecule m_molecule;
     bool m_initialised = false, m_restart = false, m_writeUnique = true, m_opt = false, m_rescue = false, m_writeXYZ = true, m_writeinit = false, m_norestart = false;
-    int m_rmrottrans = 0;
+    int m_rmrottrans = 0, m_rattle_maxiter = 100;
     bool m_nocenter = false;
     EnergyCalculator* m_interface;
     RMSDTraj* m_unqiue;
@@ -188,10 +193,12 @@ private:
     int m_respa = 1;
     double m_pos_conv = 0, m_scale_velo = 1.0, m_coupling = 10;
     double m_impuls = 0, m_impuls_scaling = 0.75, m_dt2 = 0;
-    double m_rattle_tolerance_a = 1, m_rattle_tolerance_b = 0.1;
+    double m_rattle_tolerance = 1;
     double m_wall_spheric_radius = 6, m_wall_temp = 298.15, m_wall_beta = 6;
     double m_wall_x_min = 0, m_wall_x_max = 0, m_wall_y_min = 0, m_wall_y_max = 0, m_wall_z_min = 0, m_wall_z_max = 0;
     double m_wall_potential = 0, m_average_wall_potential = 0;
+    double m_virial_correction = 0, m_average_virial_correction = 0;
+    double m_deltaT = 0;
     int m_rattle = 0;
     std::vector<double> m_collected_dipole;
     Matrix m_topo_initial;
