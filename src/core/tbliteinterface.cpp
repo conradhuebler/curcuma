@@ -260,6 +260,7 @@ double TBLiteInterface::GFNCalculation(int parameter, double* grad)
     tblite_get_singlepoint(m_ctx, m_tblite_mol, m_tblite_calc, m_tblite_res);
     tblite_get_result_energy(m_error, m_tblite_res, &energy);
     if (tblite_check_context(m_ctx)) {
+        m_error_count++;
         std::cerr << "Error during SCF Calculation, reset wavefunction ..." << std::endl;
         tbliteContextError();
         tbliteError();

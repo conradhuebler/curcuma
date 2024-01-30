@@ -64,6 +64,7 @@ public:
 
     bool HasNan() const { return m_containsNaN; }
 
+    bool Error() const { return m_error; }
 #ifdef USE_TBLITE
     TBLiteInterface* getTBLiterInterface() const
     {
@@ -151,4 +152,5 @@ private:
 
     bool m_initialised = false;
     bool m_containsNaN = false;
+    bool m_error = false;
 };

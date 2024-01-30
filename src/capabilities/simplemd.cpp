@@ -639,7 +639,7 @@ void SimpleMD::start()
         WallPotential(gradient);
         Integrator(coord, gradient);
 
-        if (m_unstable) {
+        if (m_unstable || m_interface->Error() || m_interface->HasNan()) {
             PrintStatus();
             fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Simulation got unstable, exiting!\n");
 
@@ -689,9 +689,10 @@ void SimpleMD::start()
         */
         std::cout << "Calculated averaged dipole moment " << m_aver_dipol * 2.5418 << " Debye and " << m_aver_dipol * 2.5418 * 3.3356 << " Cm [e-30]" << std::endl;
     }
+
     std::ofstream restart_file("curcuma_final.json");
     restart_file << WriteRestartInformation() << std::endl;
-
+    std::remove("curcuma_restart.json");
     delete[] coord;
     delete[] gradient;
 }
@@ -747,9 +748,11 @@ void SimpleMD::Rattle(double* coord, double* grad)
      * like dT^3 -> dT^2 and
      * updated velocities of the second atom (minus instread of plus)
      */
-
+    // TriggerWriteRestart();
     double m_dT_inverse = 1 / m_dT;
+    // double T_begin = 0, T_rattle_1 = 0, T_verlet = 0;
     std::vector<int> moved(m_natoms, 0);
+    // double kin = 0;
     for (int i = 0; i < m_natoms; ++i) {
         coord[3 * i + 0] = m_current_geometry[3 * i + 0] + m_dT * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
         coord[3 * i + 1] = m_current_geometry[3 * i + 1] + m_dT * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
@@ -758,9 +761,12 @@ void SimpleMD::Rattle(double* coord, double* grad)
         m_velocities[3 * i + 0] -= 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
         m_velocities[3 * i + 1] -= 0.5 * m_dT * grad[3 * i + 1] * m_rmass[3 * i + 1];
         m_velocities[3 * i + 2] -= 0.5 * m_dT * grad[3 * i + 2] * m_rmass[3 * i + 2];
+        // kin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
-
+    // T_begin = kin / (kb_Eh * m_dof);
     double iter = 0;
+    double max_mu = 10;
+
     while (iter < m_rattle_maxiter) {
         iter++;
         for (auto bond : m_bond_constrained) {
@@ -785,6 +791,8 @@ void SimpleMD::Rattle(double* coord, double* grad)
                     moved[j] = 1;
 
                     double lambda = r / (1 * (m_rmass[i] + m_rmass[j]) * scalarproduct);
+                    while (std::abs(lambda) > max_mu)
+                        lambda /= 2;
                     coord[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i];
                     coord[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i];
                     coord[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i];
@@ -800,17 +808,23 @@ void SimpleMD::Rattle(double* coord, double* grad)
                     m_velocities[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
                     m_velocities[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
                     m_velocities[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                    //                std::cout << i << " " << j <<  " " <<lambda << " :: " ;
                 }
             }
         }
     }
-
+    // std::cout << std::endl;
     m_Epot = Energy(coord, grad);
     double ekin = 0.0;
+    // kin = 0;
+
     for (int i = 0; i < m_natoms; ++i) {
+        //    kin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
+
         m_velocities[3 * i + 0] -= 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
         m_velocities[3 * i + 1] -= 0.5 * m_dT * grad[3 * i + 1] * m_rmass[3 * i + 1];
         m_velocities[3 * i + 2] -= 0.5 * m_dT * grad[3 * i + 2] * m_rmass[3 * i + 2];
+        //    ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
 
         m_current_geometry[3 * i + 0] = coord[3 * i + 0];
         m_current_geometry[3 * i + 1] = coord[3 * i + 1];
@@ -822,7 +836,9 @@ void SimpleMD::Rattle(double* coord, double* grad)
     }
     m_virial_correction = 0;
     iter = 0;
-
+    // T_rattle_1 = kin / (kb_Eh * m_dof);
+    // T_verlet = ekin / (kb_Eh * m_dof);
+    ekin = 0.0;
     while (iter < m_rattle_maxiter) {
         iter++;
         for (auto bond : m_bond_constrained) {
@@ -840,7 +856,9 @@ void SimpleMD::Rattle(double* coord, double* grad)
                 double r = (dx) * (dvx) + (dy) * (dvy) + (dz) * (dvz);
 
                 double mu = -1 * r / ((m_rmass[i] + m_rmass[j]) * distance);
-                if (std::abs(mu) > m_rattle_tolerance) {
+                while (std::abs(mu) > max_mu)
+                    mu /= 2;
+                if (std::abs(mu) > m_rattle_tolerance && std::abs(mu) < max_mu) {
                     m_virial_correction += mu * distance;
                     m_velocities[3 * i + 0] += dx * mu * m_rmass[i];
                     m_velocities[3 * i + 1] += dy * mu * m_rmass[i];
@@ -849,6 +867,7 @@ void SimpleMD::Rattle(double* coord, double* grad)
                     m_velocities[3 * j + 0] -= dx * mu * m_rmass[j];
                     m_velocities[3 * j + 1] -= dy * mu * m_rmass[j];
                     m_velocities[3 * j + 2] -= dz * mu * m_rmass[j];
+                    // std::cout << i << " " << j <<  " " << mu << " :: " ;
                 }
             }
         }
@@ -859,7 +878,10 @@ void SimpleMD::Rattle(double* coord, double* grad)
     }
     ekin *= 0.5;
     double T = 2.0 * ekin / (kb_Eh * m_dof);
-    m_unstable = T > 1000 * m_T;
+    m_unstable = T > 10000 * m_T;
+    // std::cout << std::endl;
+
+    // std::cout << T_begin << " " << T_rattle_1 <<  " " << T_verlet << " " << T << std::endl;
     m_T = T;
 }
 
@@ -1267,6 +1289,7 @@ bool SimpleMD::WriteGeometry()
         geometry(i, 1) = m_current_geometry[3 * i + 1];
         geometry(i, 2) = m_current_geometry[3 * i + 2];
     }
+    TriggerWriteRestart();
     // int f1 = m_molecule.GetFragments().size();
     m_molecule.setGeometry(geometry);
     auto m = m_molecule.DistanceMatrix();
@@ -1320,7 +1343,6 @@ void SimpleMD::CSVR()
     double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (m_dof * m_Ekin) + 2 * R * sqrt(c * (1 - c) * Ekin_target / (m_dof * m_Ekin));
     m_Ekin_exchange += m_Ekin * (alpha2 - 1);
     double alpha = sqrt(alpha2);
-
     for (int i = 0; i < 3 * m_natoms; ++i) {
         m_velocities[i] *= alpha;
     }

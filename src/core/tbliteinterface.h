@@ -54,6 +54,7 @@ public:
     bool UpdateMolecule(const Molecule& molecule);
     bool UpdateMolecule(const double* coord);
 
+    bool Error() { return m_error_count >= 10; }
     double GFNCalculation(int parameter = 2, double* grad = 0);
 
     void clear();
@@ -78,6 +79,7 @@ private:
     int m_maxiter = 100;
     int m_verbose = 0;
     int m_guess = 0;
+    int m_error_count = 0;
     double m_damping = 0.5;
     double m_temp = 1000;
     double m_cpcm_eps = -1, m_alpb_eps = -1;

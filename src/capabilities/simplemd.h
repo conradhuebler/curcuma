@@ -60,7 +60,6 @@ static json CurcumaMDJson{
     { "impuls_scaling", 0.75 },
     { "writeinit", false },
     { "initfile", "none" },
-    { "constrain_file", "none" },
     { "norestart", false },
     { "writerestart", 1000 },
     { "rattle", false },

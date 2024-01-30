@@ -52,6 +52,7 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
         m_tblite = new TBLiteInterface(controller);
         m_ecengine = [this](bool gradient, bool verbose) {
             this->CalculateTBlite(gradient, verbose);
+            m_error = this->m_tblite->Error();
         };
         m_charges = [this]() {
             return this->m_tblite->Charges();
