@@ -94,6 +94,8 @@ class Molecule
     bool addPair(const std::pair<int, Position>& atom);
     bool Contains(const std::pair<int, Position>& atom);
 
+    std::vector<double> GetBox() const;
+
     Molecule getFragmentMolecule(int fragment) const;
 
     double CalculateDistance(int i, int j) const;

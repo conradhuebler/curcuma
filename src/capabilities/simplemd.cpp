@@ -374,6 +374,29 @@ void SimpleMD::InitialiseWalls()
     m_wall_y_max = Json2KeyWord<double>(m_defaults, "wall_y_max");
     m_wall_z_min = Json2KeyWord<double>(m_defaults, "wall_z_min");
     m_wall_z_max = Json2KeyWord<double>(m_defaults, "wall_z_max");
+    std::vector<double> box = m_molecule.GetBox();
+    double radius = 0;
+    if (m_wall_x_min - m_wall_x_max < 1) {
+        m_wall_x_min = -box[0] * 0.75;
+        m_wall_x_max = -1 * m_wall_x_min;
+        radius = std::max(radius, box[0]);
+    }
+
+    if (m_wall_y_min - m_wall_y_max < 1) {
+        m_wall_y_min = -box[1] * 0.75;
+        m_wall_y_max = -1 * m_wall_y_min;
+        radius = std::max(radius, box[1]);
+    }
+
+    if (m_wall_z_min - m_wall_z_max < 1) {
+        m_wall_z_min = -box[2] * 0.75;
+        m_wall_z_max = -1 * m_wall_z_min;
+        radius = std::max(radius, box[2]);
+    }
+
+    if (m_wall_spheric_radius < radius) {
+        m_wall_spheric_radius = radius + 5;
+    }
 }
 
 nlohmann::json SimpleMD::WriteRestartInformation()
@@ -626,7 +649,7 @@ void SimpleMD::start()
         }
 
         if (m_rm_COM_step > 0 && m_step % m_rm_COM_step == 0) {
-            std::cout << "Removing COM motion." << std::endl;
+            // std::cout << "Removing COM motion." << std::endl;
             if (m_rmrottrans == 1)
                 RemoveRotation(m_velocities);
             else if (m_rmrottrans == 2)

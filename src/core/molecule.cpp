@@ -1374,3 +1374,25 @@ std::pair<Matrix, Matrix> Molecule::DistanceMatrix() const
     }
     return std::pair<Matrix, Matrix>(distance, topo);
 }
+
+std::vector<double> Molecule::GetBox() const
+{
+    double x_min = 0, x_max = 0, y_min = 0, y_max = 0, z_min = 0, z_max = 0;
+
+    for (int i = 0; i < AtomCount(); ++i) {
+        auto pair = Atom(i);
+        x_min = std::min(pair.second[0], x_min);
+        x_min = std::max(pair.second[0], x_max);
+
+        y_min = std::min(pair.second[1], y_min);
+        y_min = std::max(pair.second[1], y_max);
+
+        z_min = std::min(pair.second[2], z_min);
+        z_min = std::max(pair.second[2], z_max);
+    }
+    std::vector<double> box;
+    box.push_back(x_max - x_min);
+    box.push_back(y_max - y_min);
+    box.push_back(z_max - z_min);
+    return box;
+}
