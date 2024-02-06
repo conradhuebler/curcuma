@@ -28,12 +28,16 @@
 #include "src/core/molecule.h"
 
 static json TBLiteSettings{
-    { "tb_ac", 1 },
+    { "tb_acc", 1 },
     { "tb_max_iter", 250 },
     { "tb_damping", 0.4 },
     { "tb_temp", 9.500e-4 },
     { "tb_verbose", 0 },
-    { "tb_guess", "SAD" }
+    { "tb_guess", "SAD" },
+    { "cpcm_solv", "none" },
+    { "alpb_solv", "none" },
+    { "cpcm_eps", -1 },
+    { "alpb_eps", -1 }
 };
 
 class UFF;
@@ -50,12 +54,7 @@ public:
     bool UpdateMolecule(const Molecule& molecule);
     bool UpdateMolecule(const double* coord);
 
-    /* int parameter
-     * 66 = xtb GFN FF
-     * 0 = xtb GFN 0
-     * 1 = xtb GFN 1
-     * 2 = xtb GFN 2
-     * */
+    bool Error() { return m_error_count >= 10; }
     double GFNCalculation(int parameter = 2, double* grad = 0);
 
     void clear();
@@ -66,6 +65,11 @@ public:
     std::vector<std::vector<double>> BondOrders() const;
 
 private:
+    void ApplySolvation();
+
+    void tbliteError();
+    void tbliteContextError();
+    Molecule m_molecule;
     double* m_coord;
     int* m_attyp;
 
@@ -75,15 +79,19 @@ private:
     int m_maxiter = 100;
     int m_verbose = 0;
     int m_guess = 0;
+    int m_error_count = 0;
     double m_damping = 0.5;
     double m_temp = 1000;
-
+    double m_cpcm_eps = -1, m_alpb_eps = -1;
+    char *m_cpcm_solv = "none", *m_alpb_solv = "none";
+    bool m_cpcm = false, m_alpb = false;
     tblite_error m_error = NULL;
     tblite_structure m_tblite_mol = NULL;
     tblite_result m_tblite_res = NULL;
     tblite_context m_ctx = NULL;
     tblite_calculator m_tblite_calc = NULL;
+    tblite_container m_tb_cont = NULL;
 
-    bool m_initialised = false;
+    bool m_initialised = false, m_calculator = false;
     json m_tblitesettings;
 };

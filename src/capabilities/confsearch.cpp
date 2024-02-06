@@ -48,16 +48,14 @@ ConfSearch::~ConfSearch()
 
 void ConfSearch::setFile(const std::string& filename)
 {
+    getBasename(filename);
     m_filename = filename;
-    std::string name = std::string(filename);
-    for (int i = 0; i < 4; ++i)
-        name.pop_back();
-    m_basename = name;
 
     FileIterator file(m_filename);
     while (!file.AtEnd()) {
         Molecule* mol = new Molecule(file.Next());
         m_in_stack.push_back(mol);
+        m_topo_matrix = mol->DistanceMatrix().second;
     }
 }
 
@@ -69,17 +67,23 @@ bool ConfSearch::Initialise()
 void ConfSearch::start()
 {
     nlohmann::json md = CurcumaMDJson;
-    md["gfn"] = m_gfn;
+    md["method"] = m_method;
     md["impuls_scaling"] = 0.75;
-    md["dt"] = 0.5;
-    md["velo"] = 4;
-    md["thermostat_steps"] = 400;
+    md["dt"] = 4;
+    md["velo"] = 1.5;
+    md["coupling"] = 10;
     md["hmass"] = 1;
-    md["berendson"] = 200;
+    md["thermostat"] = "csvr";
     md["maxtime"] = m_time;
     md["rmsd"] = m_rmsd;
     md["resuce"] = true;
-    md["print"] = m_time / 3.0;
+    md["print"] = 1000;
+    md["rattle"] = true;
+    md["rm_COM"] = 10;
+    md["rattle_tolerance"] = 1e-3;
+    md["unique"] = true;
+    md["rmrottrans"] = 2;
+
     for (m_currentT = m_startT; m_currentT >= m_endT; m_currentT -= m_deltaT) {
         std::cout << std::endl
                   << std::endl
@@ -90,41 +94,41 @@ void ConfSearch::start()
         std::cout << md << std::endl;
         std::vector<Molecule*> uniques;
         PerformMolecularDynamics(m_in_stack, md);
-        //  for (Molecule* r : result)
-        //      uniques.push_back(r);
 
         nlohmann::json opt = CurcumaOptJson;
-        opt["gfn"] = m_gfn;
+        opt["method"] = m_method;
         opt["threads"] = m_threads;
-        PerformOptimisation(std::string("fff"), opt);
+        PerformOptimisation("ff", opt);
 
         nlohmann::json scan = ConfSearchJson;
         scan["rmsdmethod"] = "hybrid";
         scan["fewerFile"] = true;
         scan["threads"] = m_threads;
-        scan["gfn"] = m_gfn;
+        scan["method"] = m_method;
 
-        PerformFilter(std::string("fff"), scan);
-        /*
+        PerformFilter("ff", scan);
+
         for (int i = 0; i < m_in_stack.size(); ++i)
             delete m_in_stack[i];
         m_in_stack.clear();
-        */
-        std::string name = m_basename;
-        setFile(m_basename + "." + std::to_string(m_currentT) + ".opt.accepted.xyz");
-        m_basename = name;
-
-        /*
-        for (int i = 0; i < uniques.size(); ++i)
-            delete uniques[i];
-
-        for (Molecule* r : optimised)
-        {
-            std::cout << r->Energy() << std::endl;
-            m_in_stack.push_back(new Molecule(r));
-            delete r;
+        double energy = 0;
+        FileIterator file("confsearch.unique.opt.accepted.xyz");
+        while (!file.AtEnd()) {
+            Molecule* mol = new Molecule(file.Next());
+            if ((m_topo_matrix - mol->DistanceMatrix().second).cwiseAbs().sum() != 0) {
+                delete mol;
+                continue;
+            }
+            if (energy < 0) {
+                if ((mol->Energy() < energy) * 2625.5 < m_energy_window)
+                    m_in_stack.push_back(mol);
+                else
+                    delete mol;
+            } else {
+                m_in_stack.push_back(mol);
+                energy = mol->Energy();
+            }
         }
-        */
     }
 }
 
@@ -134,23 +138,32 @@ std::string ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& m
     int index = 0;
     for (int repeat = 0; repeat < m_repeat; ++repeat) {
         for (int i = 0; i < molecules.size(); ++i) {
-            MDThread* thread = new MDThread(index, parameter);
+            MDThread* thread = new MDThread(parameter);
+            thread->setThreadId(index);
+            thread->setBasename("confsearch");
             thread->setMolecule(molecules[i * repeat]);
             index++;
             pool->addThread(thread);
         }
     }
-    if (m_gfn == 66)
+    if (m_method.compare("gfnff") == 0)
         pool->setActiveThreadCount(1);
     else
         pool->setActiveThreadCount(m_threads);
     pool->StartAndWait();
-    std::string file = m_basename + "." + std::to_string(m_currentT) + ".unqiues.xyz";
+
+    std::string file = "confsearch.unique.xyz";
+    std::ofstream result_file;
+    result_file.open(file);
+    result_file.close();
 
     for (const auto& thread : pool->Finished()) {
         auto structures = static_cast<MDThread*>(thread)->MDDriver()->UniqueMolecules();
+        int index = 0;
         for (const auto* molecule : structures) {
-            molecule->appendXYZFile(file);
+            if (index != 0 || molecules.size() == 0)
+                molecule->appendXYZFile(file);
+            index++;
         }
     }
     delete pool;
@@ -159,37 +172,23 @@ std::string ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& m
 
 std::string ConfSearch::PerformOptimisation(const std::string& f, const nlohmann::json& parameter)
 {
-    std::string file = m_basename + "." + std::to_string(m_currentT) + ".unqiues.xyz";
+    std::string file = "confsearch.unique";
+    std::ofstream result_file;
+    result_file.open(file);
+    result_file.close();
 
     CurcumaOpt optimise(parameter, false);
-    optimise.setFileName(file);
-    optimise.setBaseName(m_basename + "." + std::to_string(m_currentT));
+    optimise.setFileName("confsearch.unique.xyz");
+    optimise.overrideBasename(file);
     optimise.start();
 
     return file;
-    /*
-    CurcumaOpt opt(parameter, false);
-    for (Molecule* molecule : molecules) {
-        opt.addMolecule(Molecule(molecule));
-        delete molecule;
-    }
-    opt.start();
-    */
-    /*
-    std::vector<Molecule*> optimised;
-    auto mols = opt.Molecules();
-    for (const Molecule& mol : *mols) {
-        optimised.push_back(new Molecule(mol));
-        mol.appendXYZFile(m_basename + std::to_string(m_currentT) + ".optimised.xyz");
-    }
-    return optimised;
-    */
 }
 
 std::string ConfSearch::PerformFilter(const std::string& f, const nlohmann::json& parameter)
 {
     ConfScan* scan = new ConfScan(parameter, false);
-    scan->setFileName(m_basename + "." + std::to_string(m_currentT) + ".opt.xyz");
+    scan->setFileName("confsearch.unique.opt.xyz");
     scan->start();
     return std::string("fff");
 }
@@ -211,7 +210,7 @@ void ConfSearch::ReadControlFile()
 
 void ConfSearch::LoadControlJson()
 {
-    m_gfn = Json2KeyWord<int>(m_defaults, "GFN");
+    m_method = Json2KeyWord<std::string>(m_defaults, "method");
     m_spin = Json2KeyWord<int>(m_defaults, "spin");
     m_charge = Json2KeyWord<int>(m_defaults, "charge");
     //    m_single_step = Json2KeyWord<double>(m_defaults, "dT"); // * fs2amu;
@@ -222,4 +221,5 @@ void ConfSearch::LoadControlJson()
     m_repeat = Json2KeyWord<int>(m_defaults, "repeat");
     m_rmsd = Json2KeyWord<double>(m_defaults, "rmsd");
     m_threads = Json2KeyWord<int>(m_defaults, "threads");
+    m_energy_window = Json2KeyWord<double>(m_defaults, "energy_window");
 }

@@ -360,13 +360,13 @@ void Docking::OptimiseBatch()
     /* Optimisation */
     std::cout << "** Crude preoptimisation of " << m_optimise->Molecules()->size() << " complexes **" << std::endl;
 
-    m_optimise->setBaseName("Optimise_Crude_F2");
+    m_optimise->overrideBasename("Optimise_Crude_F2");
     m_optimise->start();
 
     /* Optimisation of the structures with incorrect fragments */
     std::cout << "** Crude preoptimisation of " << m_singlepoint->Molecules()->size() << " structures with wrong connectivity **" << std::endl;
 
-    m_singlepoint->setBaseName("Optimise_Crude_FX");
+    m_singlepoint->overrideBasename("Optimise_Crude_FX");
     m_singlepoint->start();
 
     /* Update Optimiser to perform single point calculation (GFN2) of the at GFN-FF level optimised structures */

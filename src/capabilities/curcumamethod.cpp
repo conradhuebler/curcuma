@@ -128,3 +128,11 @@ bool CurcumaMethod::CheckStop() const
     return result;
 #endif
 }
+
+void CurcumaMethod::getBasename(const std::string& filename)
+{
+    std::string name = std::string(filename);
+    for (int i = 0; i < 4; ++i)
+        name.pop_back();
+    m_basename = name;
+}

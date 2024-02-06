@@ -84,9 +84,14 @@ public:
 
     void setMolecule(const Molecule& molecule);
 
-    void CalculateHessian(int type = 1);
+    void CalculateHessian(int type = 1)
+    {
+        m_hess_calc = type;
+        start();
+    }
 
     void PrintVibrations(Vector& eigenvalues, const Vector& projected);
+    void PrintVibrationsPlain(const Vector& eigenvalues);
 
     void start() override;
 

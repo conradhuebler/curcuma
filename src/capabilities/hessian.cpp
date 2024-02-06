@@ -19,19 +19,11 @@
 
 #include <Eigen/Dense>
 
-// #include <catch2/catch_test_macros.hpp>
-// #include <catch2/generators/catch_generators_all.hpp>
-
-// #include <finitediff.hpp>
-// #include <spdlog/spdlog.h>
-
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
 
 #include "src/core/energycalculator.h"
 
 #include "hessian.h"
-
-// using namespace fd;
 
 HessianThread::HessianThread(const std::string& method, const json& controller, int i, int j, int xi, int xj, bool fullnumerical)
     : m_method(method)
@@ -237,35 +229,13 @@ void Hessian::start()
     }
 
     auto eigenvalues = ConvertHessian(m_hessian);
+
+    // PrintVibrationsPlain(eigenvalues);
+
     auto hessian2 = ProjectHessian(m_hessian);
     auto projected = ConvertHessian(hessian2);
     if (!m_silent)
         PrintVibrations(eigenvalues, projected);
-}
-
-void Hessian::CalculateHessian(int type)
-{
-    start();
-    //   m_hessian = Eigen::MatrixXd::Ones(3 * m_molecule.AtomCount(), 3 * m_molecule.AtomCount());
-    /*
-        if (fullnumerical)
-            CalculateHessianNumerical();
-        else
-            CalculateHessianSemiNumerical();
-    */
-
-    /*
-
-        CalculateHessianNumerical();
-        auto freqs = ConvertHessian(m_hessian);
-        std::cout << " Frequencies " << std::endl << std::endl;
-        std::cout << freqs.transpose() << std::endl;
-        std::cout <<std::endl << std::endl;
-    */
-    // CalculateHessianSemiNumerical();
-    // auto freqs = ConvertHessian(m_hessian);
-    //  std::cout << freqs.transpose() << std::endl;
-    //  std::cout <<std::endl << std::endl;
 }
 
 Matrix Hessian::ProjectHessian(const Matrix& hessian)
@@ -327,6 +297,20 @@ Vector Hessian::ConvertHessian(Matrix& hessian)
     Eigen::SelfAdjointEigenSolver<Geometry> diag_I;
     diag_I.compute(hessian);
     return diag_I.eigenvalues();
+}
+
+void Hessian::PrintVibrationsPlain(const Vector& eigenvalues)
+{
+    Vector eigval = eigenvalues.cwiseSqrt();
+    std::cout << std::endl
+              << " Frequencies: " << std::endl;
+
+    for (int i = 0; i < m_molecule.AtomCount() * 3; ++i) {
+        if (i % 6 == 0)
+            std::cout << std::endl;
+        std::cout << m_scale_functions(eigval(i)) << " ";
+    }
+    std::cout << std::endl;
 }
 
 void Hessian::PrintVibrations(Vector& eigenvalues, const Vector& projected)
@@ -436,34 +420,4 @@ void Hessian::CalculateHessianSemiNumerical()
         }
     }
     delete pool;
-}
-
-void Hessian::FiniteDiffHess()
-{
-    /*
-        m_hessian = Eigen::MatrixXd::Ones(3 * m_molecule.AtomCount(), 3 * m_molecule.AtomCount());
-
-          EnergyCalculator energy(m_method, m_controller);
-          energy.setMolecule(m_molecule);
-
-          const auto f = [&energy](const Eigen::VectorXd& x) -> double {
-              energy.updateGeometry(x);
-              return energy.CalculateEnergy(false, false);
-          };
-
-          Eigen::VectorXd x = Eigen::VectorXd::Zero(3*m_molecule.AtomCount());
-        for(int i = 0; i < m_molecule.AtomCount(); ++i)
-        {
-            x(3*i + 0) = m_molecule.Atom(i).second[0];
-            x(3*i + 1) = m_molecule.Atom(i).second[1];
-            x(3*i + 2) = m_molecule.Atom(i).second[2];
-
-        }
-        // Eigen::MatrixXd hess = Eigen::MatrixXd::Zero(3 * m_molecule.AtomCount(), 3 * m_molecule.AtomCount());
-
-        Eigen::MatrixXd fhess;
-        fd::finite_hessian(x, f, fhess, fd::SECOND);
-
-        m_hessian = fhess / au / au;
-        */
 }

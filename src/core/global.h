@@ -34,9 +34,13 @@ using json = nlohmann::json;
 const double pi = 3.14159265359;
 const double au = 0.52917721092;
 const double amu2au = 1822.8884850;
-const double kb = 3.166811e-6; // Hartree
+const double kb_Eh = 3.166811e-6; // Hartree
+const double kb_SI = 1.380649e-23; // SI
+const double kb_eV = 8.617333262e-5; // eV
 const double fs2amu = 41.34137314;
 const double R = 8.31446261815324;
+const double atomic_mass = 1.66053906660e-27;
+const double T_Eh = 3.1577464e5;
 
 typedef Eigen::MatrixXd Geometry;
 typedef Eigen::MatrixXd Matrix;

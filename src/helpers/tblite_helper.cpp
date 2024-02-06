@@ -22,8 +22,7 @@ int main(int argc, char** argv)
     double gradient[3 * 7];
     auto error = tblite_new_error();
     auto ctx = tblite_new_context();
-    auto res = tblite_new_result();
-
+    auto cont = tblite_container();
     auto mol = tblite_new_structure(
         error,
         natoms,
@@ -36,6 +35,9 @@ int main(int argc, char** argv)
     tblite_set_context_logger(ctx, NULL, NULL);
     tblite_set_context_color(ctx, 5);
     auto calc = tblite_new_gfn2_calculator(ctx, mol);
+    cont = tblite_new_cpcm_solvation_solvent(ctx, mol, calc, "ethanol");
+    auto res = tblite_new_result();
+
     tblite_get_singlepoint(ctx, mol, calc, res);
     tblite_get_result_gradient(error, res, gradient);
     for (int i = 0; i < 3 * 7; ++i)
@@ -44,5 +46,6 @@ int main(int argc, char** argv)
     delete res;
     delete ctx;
     delete error;
+    delete cont;
     return 0;
 }

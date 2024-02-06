@@ -275,6 +275,16 @@ bool ConfScan::openFile()
     int molecule = 0;
     PersistentDiagram diagram(m_defaults);
     FileIterator file(m_filename);
+    int calcH = 0;
+    int calcI = 0;
+    // std::cout << m_looseThresh <<" "<<int((m_looseThresh & 1) == 1) << " " << int((m_looseThresh & 2) == 2) << std::endl;
+
+    std::cout << "Calculation of ... " << std::endl;
+    if ((m_looseThresh & 1) == 1)
+        std::cout << "rotational constants" << std::endl;
+    if ((m_looseThresh & 2) == 2)
+        std::cout << "ripser barcodes" << std::endl;
+    std::cout << " required" << std::endl;
     while (!file.AtEnd()) {
         Molecule* mol = new Molecule(file.Next());
         double energy = mol->Energy();
@@ -293,9 +303,16 @@ bool ConfScan::openFile()
         if (m_noname)
             mol->setName(NamePattern(molecule));
 
-        mol->CalculateRotationalConstants();
-        diagram.setDistanceMatrix(mol->LowerDistanceVector());
-        mol->setPersisentImage(diagram.generateImage(diagram.generatePairs()));
+        auto rot = std::chrono::system_clock::now();
+        if ((m_looseThresh & 1) == 1)
+            mol->CalculateRotationalConstants();
+        auto ripser = std::chrono::system_clock::now();
+        if ((m_looseThresh & 2) == 2) {
+            diagram.setDistanceMatrix(mol->LowerDistanceVector());
+            mol->setPersisentImage(diagram.generateImage(diagram.generatePairs()));
+        }
+        calcH += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - ripser).count();
+        calcI += std::chrono::duration_cast<std::chrono::milliseconds>(ripser - rot).count();
 
         std::pair<std::string, Molecule*> pair(mol->Name(), mol);
         m_molecules.push_back(pair);
@@ -325,16 +342,30 @@ bool ConfScan::openFile()
                 energy = interface.CalculateEnergy(false);
             }
             min_energy = std::min(min_energy, energy);
-            mol->CalculateRotationalConstants();
+            auto rot = std::chrono::system_clock::now();
+            if ((m_looseThresh & 1) == 1)
+                mol->CalculateRotationalConstants();
+            auto ripser = std::chrono::system_clock::now();
 
-            diagram.setDimension(2);
-            diagram.setDistanceMatrix(mol->LowerDistanceVector());
-            mol->setPersisentImage(diagram.generateImage(diagram.generatePairs()));
+            // diagram.setDimension(2);
+            if ((m_looseThresh & 2) == 2) {
+                diagram.setDistanceMatrix(mol->LowerDistanceVector());
+                mol->setPersisentImage(diagram.generateImage(diagram.generatePairs()));
+            }
+            calcH += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - ripser).count();
+            calcI += std::chrono::duration_cast<std::chrono::milliseconds>(ripser - rot).count();
+
             m_previously_accepted.push_back(mol);
         }
         m_lowest_energy = min_energy;
         m_result = m_previously_accepted;
     }
+    m_timing_rot = calcI;
+    m_timing_ripser = calcH;
+    std::cout << "time for calculating descriptors:" << std::endl;
+    std::cout << "Rotational constants " << m_timing_rot / 1000.0 << " seconds." << std::endl;
+    std::cout << "Ripser bar code " << m_timing_ripser / 1000.0 << " seconds." << std::endl;
+
     return true;
 }
 
@@ -1223,6 +1254,10 @@ ConfScanThread* ConfScan::addThread(const Molecule* reference, const json& confi
 void ConfScan::Finalise()
 {
     TriggerWriteRestart();
+
+    std::cout << "time for calculating descriptors:" << std::endl;
+    std::cout << "Rotational constants " << m_timing_rot << std::endl;
+    std::cout << "Ripser bar code difference" << m_timing_ripser << std::endl;
 
     int i = 0;
     for (const auto molecule : m_stored_structures) {

@@ -22,6 +22,7 @@
 #include <chrono>
 #include <ctime>
 #include <functional>
+#include <random>
 #include <ratio>
 
 #include "src/capabilities/rmsdtraj.h"
@@ -38,10 +39,12 @@ static json CurcumaMDJson{
     { "printOutput", true },
     { "MaxTime", 5000 },
     { "T", 298.15 },
-    { "dt", 1 },
+    { "dt", 1 }, // single step in fs
+    { "rm_COM", 100 }, // remove translation and rotation every x fs
     { "charge", 0 },
     { "Spin", 0 },
-    { "centered", 0 },
+    { "rmrottrans", 0 },
+    { "nocenter", false },
     { "dump", 50 },
     { "print", 1000 },
     { "unique", false },
@@ -60,10 +63,27 @@ static json CurcumaMDJson{
     { "norestart", false },
     { "writerestart", 1000 },
     { "rattle", false },
-    { "rattle_tolerance", 1e-5 },
+    { "rattle_tolerance", 1e-6 },
+    { "rattle_maxiter", 10 },
     { "thermostat", "csvr" },
     { "respa", 1 },
-    { "dipole", false }
+    { "dipole", false },
+    { "seed", -1 },
+    { "cleanenergy", false },
+    { "wall", "none" }, // can be spheric or rect
+    { "wall_type", "logfermi" }, // can be logfermi or harmonic
+    { "wall_spheric_radius", 0 },
+    { "wall_xl", 0 },
+    { "wall_yl", 0 },
+    { "wall_zl", 0 },
+    { "wall_x_min", 0 },
+    { "wall_x_max", 0 },
+    { "wall_y_min", 0 },
+    { "wall_y_max", 0 },
+    { "wall_z_min", 0 },
+    { "wall_z_max", 0 },
+    { "wall_temp", 298.15 },
+    { "wall_beta", 6 }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -75,12 +95,12 @@ public:
     {
         m_molecule = molecule;
     }
-
+    /*
     void setBaseName(const std::string& name)
     {
         m_basename = name;
     }
-
+    */
     bool Initialise() override;
 
     void start() override;
@@ -114,7 +134,8 @@ private:
 
     void InitVelocities(double scaling = 1.0);
 
-    double Gradient(const double* coord, double* grad);
+    double FastEnergy(const double* coord, double* grad);
+    double CleanEnergy(const double* coord, double* grad);
 
     void PrintMatrix(const double* matrix);
 
@@ -123,23 +144,36 @@ private:
     void Rattle(double* coord, double* grad);
 
     void RemoveRotation(std::vector<double>& velo);
+    void RemoveRotations(std::vector<double>& velo);
 
     double EKin();
     void Berendson();
     void CSVR();
 
+    void InitialiseWalls();
+
+    double ApplySphericLogFermiWalls(double* grad);
+    double ApplyRectLogFermiWalls(double* grad);
+
+    double ApplySphericHarmonicWalls(double* grad);
+    double ApplyRectHarmonicWalls(double* grad);
+
     void InitConstrainedBonds();
 
-    std::function<void(double* coord, double* grad)> m_integrator;
+    std::function<void(double* coord, double* grad)> Integrator;
+    std::function<double(double* coord, double* grad)> Energy;
+    std::function<double(double* grad)> WallPotential;
 
     std::vector<std::pair<std::pair<int, int>, double>> m_bond_constrained;
-    std::string m_basename;
+
     int m_natoms = 0;
-    int m_dumb = 1;
+    int m_dump = 1;
     double m_T = 0, m_Epot = 0, m_aver_Epot = 0, m_Ekin = 0, m_aver_Ekin = 0, m_Etot = 0, m_aver_Etot = 0, m_aver_dipol = 0, m_curr_dipole = 0;
+    double m_rm_COM = 100;
+    int m_rm_COM_step = -1;
     int m_hmass = 4;
     double m_single_step = 1;
-    double m_timestep = 0.5, m_currentStep = 0, m_maxtime = 1000;
+    double m_dT = 0.5, m_currentStep = 0, m_maxtime = 1000;
     int m_spin = 0, m_charge = 0, m_print = 100;
     double m_T0 = 298.13, m_aver_Temp = 0, m_rmsd = 1.5;
     double m_x0 = 0, m_y0 = 0, m_z0 = 0;
@@ -148,7 +182,8 @@ private:
     std::vector<int> m_atomtype;
     Molecule m_molecule;
     bool m_initialised = false, m_restart = false, m_writeUnique = true, m_opt = false, m_rescue = false, m_writeXYZ = true, m_writeinit = false, m_norestart = false;
-    int m_centered = 0;
+    int m_rmrottrans = 0, m_rattle_maxiter = 100;
+    bool m_nocenter = false;
     EnergyCalculator* m_interface;
     RMSDTraj* m_unqiue;
     const std::vector<double> m_used_mass;
@@ -157,41 +192,52 @@ private:
     int m_respa = 1;
     double m_pos_conv = 0, m_scale_velo = 1.0, m_coupling = 10;
     double m_impuls = 0, m_impuls_scaling = 0.75, m_dt2 = 0;
-    double m_rattle_tolerance = 1e-4;
+    double m_rattle_tolerance = 1;
+    double m_wall_spheric_radius = 6, m_wall_temp = 298.15, m_wall_beta = 6;
+    double m_wall_x_min = 0, m_wall_x_max = 0, m_wall_y_min = 0, m_wall_y_max = 0, m_wall_z_min = 0, m_wall_z_max = 0;
+    double m_wall_potential = 0, m_average_wall_potential = 0;
+    double m_virial_correction = 0, m_average_virial_correction = 0;
+    double m_deltaT = 0;
+    int m_rattle = 0;
     std::vector<double> m_collected_dipole;
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;
     std::string m_method = "UFF", m_initfile = "none", m_thermostat = "csvr";
     bool m_unstable = false;
     bool m_dipole = false;
+    bool m_clean_energy = false;
+    int m_seed = -1;
+    int m_time_step = 0;
+    int m_dof = 0;
 };
 
 class MDThread : public CxxThread {
 public:
-    MDThread(int thread, const json& controller)
-        : m_thread(thread)
-        , m_controller(controller)
+    MDThread(const json& controller)
+        : m_controller(controller)
     {
         setAutoDelete(true);
     }
     ~MDThread() = default;
-
+    void setBasename(const std::string& basename) { m_basename = basename; }
     inline void setMolecule(const Molecule& molecule) { m_molecule = molecule; }
     SimpleMD* MDDriver() const { return m_mddriver; }
 
     virtual int execute() override
     {
-        m_mddriver = new SimpleMD(m_controller, false);
+        json controller;
+        controller["md"] = m_controller;
+        m_mddriver = new SimpleMD(controller, false);
         m_mddriver->setMolecule(m_molecule);
-        m_mddriver->setBaseName("thread" + std::to_string(m_thread));
+        m_mddriver->overrideBasename(m_basename + ".t" + std::to_string(ThreadId()));
         m_mddriver->Initialise();
         m_mddriver->start();
         return 0;
     }
 
 protected:
-    int m_thread;
     Molecule m_molecule;
+    std::string m_basename;
     std::string m_result;
     json m_controller;
     SimpleMD* m_mddriver;

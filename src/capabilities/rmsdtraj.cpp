@@ -378,7 +378,7 @@ void RMSDTraj::Optimise()
 {
     CurcumaOpt optimise(m_controller["rmsdtraj"], true);
     optimise.setFileName(m_outfile + ".unique.xyz");
-    optimise.setBaseName(m_outfile);
+    // optimise.setBaseName(m_outfile);
     optimise.start();
 }
 
