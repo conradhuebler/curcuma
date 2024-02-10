@@ -944,15 +944,17 @@ Position Molecule::CalculateDipoleMoment(const std::vector<double>& scaling) con
     return dipole;
 }
 
-double Molecule::GyrationRadius(bool protons, int fragment)
+std::pair<double, double> Molecule::GyrationRadius(bool protons, int fragment)
 {
     Eigen::Vector3d com = COM(protons, fragment);
-    double gyr = 0;
+    double gyr = 0, gyr_mass = 0;
     for (int i = 0; i < m_geometry.size(); ++i) {
-        gyr += ((com(0) - m_geometry[i][0]) * (com(0) - m_geometry[i][0]) + (com(0) - m_geometry[i][0]) * (com(0) - m_geometry[i][0]) + (com(0) - m_geometry[i][0]) * (com(0) - m_geometry[i][0]));
+        gyr += ((com(0) - m_geometry[i][0]) * (com(0) - m_geometry[i][0]) + (com(1) - m_geometry[i][1]) * (com(1) - m_geometry[i][1]) + (com(2) - m_geometry[i][2]) * (com(2) - m_geometry[i][2]));
+        gyr_mass += Elements::AtomicMass[m_atoms[i]] * ((com(0) - m_geometry[i][0]) * (com(0) - m_geometry[i][0]) + (com(1) - m_geometry[i][1]) * (com(1) - m_geometry[i][1]) + (com(2) - m_geometry[i][2]) * (com(2) - m_geometry[i][2]));
     }
     gyr /= double(m_geometry.size());
-    return gyr;
+    gyr_mass /= double(m_mass);
+    return std::pair<double, double>(gyr, gyr_mass);
 }
 
 std::pair<int, Position> Molecule::Atom(int i) const

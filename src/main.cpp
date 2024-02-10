@@ -862,13 +862,16 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[1], "-gyration") == 0) {
             FileIterator file(argv[2]);
             int count = 1;
-            double sum = 0;
+            double sum = 0, sum_mass = 0, sqrt_sum = 0, sqrt_sum_mass = 0;
 
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
-                double gyr = mol.GyrationRadius();
-                sum += gyr;
-                std::cout << ":: " << gyr << " " << sum / double(count) << std::endl;
+                std::pair<double, double> gyr = mol.GyrationRadius();
+                sum += gyr.first;
+                sum_mass += gyr.second;
+                sqrt_sum += sqrt(gyr.first);
+                sqrt_sum_mass += sqrt(gyr.second);
+                std::cout << ":: " << gyr.first << " " << sum / double(count) << " " << gyr.second << " " << sum_mass / double(count) << " " << sqrt(gyr.first) << " " << sqrt_sum / double(count) << " " << sqrt(gyr.second) << " " << sqrt_sum_mass / double(count) << std::endl;
                 count++;
             }
         } else if (strcmp(argv[1], "-dipole") == 0) {
@@ -942,7 +945,7 @@ int main(int argc, char **argv) {
                 std::cout << mol.Check() << std::endl
                           << std::endl;
                 std::cout << mol.COM().transpose() << std::endl;
-                std::cout << mol.GyrationRadius() << std::endl;
+                std::cout << mol.GyrationRadius().first << " " << mol.GyrationRadius().second << " " << sqrt(mol.GyrationRadius().first) << " " << sqrt(mol.GyrationRadius().second) << std::endl;
             }
         }
     }
