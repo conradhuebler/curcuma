@@ -34,8 +34,6 @@
 
 static const nlohmann::json ConfSearchJson{
     { "method", "uff" },
-    { "charge", 0 },
-    { "Spin", 0 },
     { "startT", 600 },
     { "endT", 300 },
     { "deltaT", 50 },
@@ -43,7 +41,55 @@ static const nlohmann::json ConfSearchJson{
     { "time", 5e4 }, // 10 ps
     { "rmsd", 1.25 },
     { "threads", 1 },
-    { "energy_window", 100 }
+    { "energy_window", 100 },
+    { "writeXYZ", true },
+    { "printOutput", true },
+    { "MaxTime", 5000 },
+    { "T", 298.15 },
+    { "dt", 1 }, // single step in fs
+    { "rm_COM", 100 }, // remove translation and rotation every x fs
+    { "charge", 0 },
+    { "Spin", 0 },
+    { "rmrottrans", 0 },
+    { "nocenter", false },
+    { "dump", 50 },
+    { "print", 1000 },
+    { "unique", false },
+    { "rmsd", 1.5 },
+    { "opt", false },
+    { "hmass", 1 },
+    { "velo", 1 },
+    { "rescue", false },
+    { "coupling", 10 },
+    { "MaxTopoDiff", 15 },
+    { "impuls", 0 },
+    { "impuls_scaling", 0.75 },
+    { "writeinit", false },
+    { "initfile", "none" },
+    { "norestart", false },
+    { "writerestart", 1000 },
+    { "rattle", false },
+    { "rattle_tolerance", 1e-2 },
+    { "rattle_maxiter", 10 },
+    { "thermostat", "csvr" },
+    { "respa", 1 },
+    { "dipole", false },
+    { "seed", -1 },
+    { "cleanenergy", false },
+    { "wall", "none" }, // can be spheric or rect
+    { "wall_type", "logfermi" }, // can be logfermi or harmonic
+    { "wall_spheric_radius", 0 },
+    { "wall_xl", 0 },
+    { "wall_yl", 0 },
+    { "wall_zl", 0 },
+    { "wall_x_min", 0 },
+    { "wall_x_max", 0 },
+    { "wall_y_min", 0 },
+    { "wall_y_max", 0 },
+    { "wall_z_min", 0 },
+    { "wall_z_max", 0 },
+    { "wall_temp", 298.15 },
+    { "wall_beta", 6 }
 };
 
 class Molecule;
@@ -83,9 +129,9 @@ private:
     virtual void LoadControlJson() override;
 
     StringList m_error_list;
-    std::string m_filename, m_method;
-    bool m_silent = true;
-
+    std::string m_filename, m_method, m_thermostat;
+    bool m_silent = true, m_rattle = true;
+    double m_dT = 4;
     std::vector<Molecule*> m_in_stack, m_final_stack;
     int m_spin = 0, m_charge = 0, m_repeat = 5, m_threads = 1;
     double m_time = 1e4, m_startT = 500, m_endT = 300, m_deltaT = 50, m_currentT = 0, m_rmsd = 1.25, m_energy_window = 100;

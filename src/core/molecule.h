@@ -99,7 +99,7 @@ class Molecule
     Molecule getFragmentMolecule(int fragment) const;
 
     double CalculateDistance(int i, int j) const;
-    double GyrationRadius(bool hydrogen = true, int fragment = -1);
+    std::pair<double, double> GyrationRadius(bool hydrogen = true, int fragment = -1);
 
     Geometry getGeometry(const IntPair& pair, bool protons = true) const;
     Geometry getGeometry(std::vector<int> atoms, bool protons = true) const;

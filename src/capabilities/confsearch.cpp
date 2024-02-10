@@ -66,24 +66,8 @@ bool ConfSearch::Initialise()
 
 void ConfSearch::start()
 {
-    nlohmann::json md = CurcumaMDJson;
-    md["method"] = m_method;
-    md["impuls_scaling"] = 0.75;
-    md["dt"] = 4;
-    md["velo"] = 1.5;
-    md["coupling"] = 10;
-    md["hmass"] = 1;
-    md["thermostat"] = "csvr";
-    md["maxtime"] = m_time;
-    md["rmsd"] = m_rmsd;
-    md["resuce"] = true;
-    md["print"] = 1000;
-    md["rattle"] = true;
-    md["rm_COM"] = 10;
-    md["rattle_tolerance"] = 1e-3;
+    nlohmann::json md = m_defaults;
     md["unique"] = true;
-    md["rmrottrans"] = 2;
-
     for (m_currentT = m_startT; m_currentT >= m_endT; m_currentT -= m_deltaT) {
         std::cout << std::endl
                   << std::endl
@@ -92,7 +76,7 @@ void ConfSearch::start()
         md["T"] = m_currentT;
         md["impuls"] = m_currentT;
         std::cout << md << std::endl;
-        std::vector<Molecule*> uniques;
+        // std::vector<Molecule*> uniques;
         PerformMolecularDynamics(m_in_stack, md);
 
         nlohmann::json opt = CurcumaOptJson;
@@ -136,6 +120,7 @@ std::string ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& m
 {
     CxxThreadPool* pool = new CxxThreadPool;
     int index = 0;
+    std::cout << "Filling pool" << std::endl;
     for (int repeat = 0; repeat < m_repeat; ++repeat) {
         for (int i = 0; i < molecules.size(); ++i) {
             MDThread* thread = new MDThread(parameter);
@@ -211,6 +196,8 @@ void ConfSearch::ReadControlFile()
 void ConfSearch::LoadControlJson()
 {
     m_method = Json2KeyWord<std::string>(m_defaults, "method");
+    m_thermostat = Json2KeyWord<std::string>(m_defaults, "thermostat");
+    m_rattle = Json2KeyWord<bool>(m_defaults, "rattle");
     m_spin = Json2KeyWord<int>(m_defaults, "spin");
     m_charge = Json2KeyWord<int>(m_defaults, "charge");
     //    m_single_step = Json2KeyWord<double>(m_defaults, "dT"); // * fs2amu;
@@ -222,4 +209,5 @@ void ConfSearch::LoadControlJson()
     m_rmsd = Json2KeyWord<double>(m_defaults, "rmsd");
     m_threads = Json2KeyWord<int>(m_defaults, "threads");
     m_energy_window = Json2KeyWord<double>(m_defaults, "energy_window");
+    m_dT = Json2KeyWord<double>(m_defaults, "dT");
 }
