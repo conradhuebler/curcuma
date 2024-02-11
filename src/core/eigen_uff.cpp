@@ -84,7 +84,7 @@ double UFFThread::Distance(double x1, double x2, double y1, double y2, double z1
 
 double UFFThread::BondEnergy(double distance, double r, double kij, double D_ij)
 {
-    double energy = (0.5 * kij * (distance - r) * (distance - r)) * m_final_factor * m_bond_scaling;
+    double energy = (0.25 * kij * (distance - r) * (distance - r)) * m_final_factor * m_bond_scaling;
     if (isnan(energy))
         return 0;
     else
@@ -106,7 +106,7 @@ double UFFThread::CalculateBondStretching()
         Matrix derivate;
         double r0 = BondStretching(x, y, derivate, m_CalculateGradient);
 
-        energy += (0.5 * bond.kij * (r0 - bond.r0) * (r0 - bond.r0)) * m_final_factor * m_bond_scaling;
+        energy += (0.25 * bond.kij * (r0 - bond.r0) * (r0 - bond.r0)) * m_final_factor * m_bond_scaling;
         if (m_CalculateGradient) {
             if (m_calc_gradient == 0) {
                 double diff = (bond.kij) * (r0 - bond.r0) * m_final_factor * m_bond_scaling;
@@ -560,6 +560,7 @@ double UFFThread::CalculateElectrostatic()
 eigenUFF::eigenUFF(const json& controller)
 {
     json parameter = MergeJson(UFFParameterJson, controller);
+    std::cout << parameter["threads"] << std::endl;
     m_threadpool = new CxxThreadPool();
     m_threadpool->setProgressBar(CxxThreadPool::ProgressBarType::None);
 #ifdef USE_D3
@@ -605,7 +606,7 @@ eigenUFF::~eigenUFF()
         delete m_stored_threads[i];
 }
 
-void eigenUFF::Initialise()
+void eigenUFF::Initialise(const std::vector<std::pair<int, int>>& formed_bonds)
 {
     if (m_initialised)
         return;
@@ -617,32 +618,57 @@ void eigenUFF::Initialise()
     TContainer bonds, nonbonds, angles, dihedrals, inversions;
     m_scaling = 1.4;
     m_gradient = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
-    for (int i = 0; i < m_atom_types.size(); ++i) {
-        m_stored_bonds.push_back(std::vector<int>());
-        ignored_vdw.push_back(std::set<int>({ i }));
-        for (int j = 0; j < m_atom_types.size() && m_stored_bonds[i].size() < CoordinationNumber[m_atom_types[i]]; ++j) {
-            if (i == j)
-                continue;
-            double x_i = m_geometry(i, 0) * m_au;
-            double x_j = m_geometry(j, 0) * m_au;
+    if (formed_bonds.size() == 0) {
+        for (int i = 0; i < m_atom_types.size(); ++i) {
+            m_stored_bonds.push_back(std::vector<int>());
+            ignored_vdw.push_back(std::set<int>({ i }));
+            for (int j = 0; j < m_atom_types.size() && m_stored_bonds[i].size() < CoordinationNumber[m_atom_types[i]]; ++j) {
+                if (i == j)
+                    continue;
+                double x_i = m_geometry(i, 0) * m_au;
+                double x_j = m_geometry(j, 0) * m_au;
 
-            double y_i = m_geometry(i, 1) * m_au;
-            double y_j = m_geometry(j, 1) * m_au;
+                double y_i = m_geometry(i, 1) * m_au;
+                double y_j = m_geometry(j, 1) * m_au;
 
-            double z_i = m_geometry(i, 2) * m_au;
-            double z_j = m_geometry(j, 2) * m_au;
+                double z_i = m_geometry(i, 2) * m_au;
+                double z_j = m_geometry(j, 2) * m_au;
 
-            double r_ij = sqrt((((x_i - x_j) * (x_i - x_j)) + ((y_i - y_j) * (y_i - y_j)) + ((z_i - z_j) * (z_i - z_j))));
+                double r_ij = sqrt((((x_i - x_j) * (x_i - x_j)) + ((y_i - y_j) * (y_i - y_j)) + ((z_i - z_j) * (z_i - z_j))));
 
-            if (r_ij <= (Elements::CovalentRadius[m_atom_types[i]] + Elements::CovalentRadius[m_atom_types[j]]) * m_scaling * m_au) {
-                if (bonds.insert({ std::min(i, j), std::max(i, j) })) {
-                    m_coordination[i]++;
-                    m_stored_bonds[i].push_back(j);
-                    ignored_vdw[i].insert(j);
+                if (r_ij <= (Elements::CovalentRadius[m_atom_types[i]] + Elements::CovalentRadius[m_atom_types[j]]) * m_scaling * m_au) {
+                    if (bonds.insert({ std::min(i, j), std::max(i, j) })) {
+                        m_coordination[i]++;
+                        m_stored_bonds[i].push_back(j);
+                        ignored_vdw[i].insert(j);
+                    }
+                    m_topo(i, j) = 1;
+                    m_topo(j, i) = 1;
                 }
-                m_topo(i, j) = 1;
-                m_topo(j, i) = 1;
             }
+        }
+    } else {
+        for (int i = 0; i < m_atom_types.size(); ++i) {
+            m_stored_bonds.push_back(std::vector<int>());
+            ignored_vdw.push_back(std::set<int>({ i }));
+        }
+        for (const std::pair<int, int>& bond : formed_bonds) {
+
+            int i = bond.first - 1;
+            int j = bond.second - 1;
+
+            if (bonds.insert({ std::min(i, j), std::max(i, j) })) {
+                m_coordination[i]++;
+                m_coordination[j]++;
+
+                m_stored_bonds[i].push_back(j);
+                m_stored_bonds[j].push_back(i);
+
+                ignored_vdw[i].insert(j);
+                ignored_vdw[j].insert(i);
+            }
+            m_topo(i, j) = 1;
+            m_topo(j, i) = 1;
         }
     }
     AssignUffAtomTypes();
@@ -1723,13 +1749,14 @@ double eigenUFF::Calculate(bool grd, bool verbose)
     double dihedral_energy = 0.0;
     double inversion_energy = 0.0;
     double vdw_energy = 0.0;
-    m_threadpool->setActiveThreadCount(m_threads);
 
     for (int i = 0; i < m_stored_threads.size(); ++i) {
         m_stored_threads[i]->UpdateGeometry(&m_geometry);
     }
 
     m_threadpool->Reset();
+    m_threadpool->setActiveThreadCount(m_threads);
+
     m_threadpool->StartAndWait();
     m_threadpool->setWakeUp(m_threadpool->WakeUp() / 2.0);
     for (int i = 0; i < m_stored_threads.size(); ++i) {

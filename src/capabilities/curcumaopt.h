@@ -52,7 +52,9 @@ static json CurcumaOptJson{
     { "SinglePoint", false },
     { "optH", false },
     { "serial", false },
-    { "hessian", 0 }
+    { "hessian", 0 },
+    { "fusion", false },
+    { "maxrise", 100 }
 };
 
 const json OptJsonPrivate{
@@ -174,10 +176,10 @@ private:
     std::string m_method = "UFF";
     Molecule m_molecule;
     std::vector<Molecule> m_molecules;
-    bool m_file_set = false, m_mol_set = false, m_mols_set = false, m_writeXYZ = true, m_printoutput = true, m_singlepoint = false;
+    bool m_file_set = false, m_mol_set = false, m_mols_set = false, m_writeXYZ = true, m_printoutput = true, m_singlepoint = false, m_fusion = false;
     int m_hessian = 0;
     int m_threads = 1;
-    double m_dE = 0.1, m_dRMSD = 0.01;
+    double m_dE = 0.1, m_dRMSD = 0.01, m_maxenergy = 100;
     int m_charge = 0, m_spin = 0;
     int m_serial = false;
 };

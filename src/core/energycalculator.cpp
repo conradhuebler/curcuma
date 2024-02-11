@@ -165,7 +165,7 @@ void EnergyCalculator::setMolecule(const Molecule& molecule)
     m_geometry = geom;
     if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) { // UFF energy calculator requested
         m_uff->setMolecule(atoms, geom);
-        m_uff->Initialise();
+        m_uff->Initialise(molecule.Bonds());
     } else if (std::find(m_tblite_methods.begin(), m_tblite_methods.end(), m_method) != m_tblite_methods.end()) { // TBLite energy calculator requested
 #ifdef USE_TBLITE
         m_tblite->InitialiseMolecule(molecule);

@@ -90,8 +90,8 @@ void CurcumaOpt::LoadControlJson()
 
 void CurcumaOpt::start()
 {
-    getBasename(m_filename);
     if (m_file_set) {
+        getBasename(m_filename);
         FileIterator file(m_filename);
         std::multimap<double, Molecule> results;
         while (!file.AtEnd()) {
@@ -246,19 +246,21 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, 
 Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, const json& controller, std::string& output, std::vector<Molecule>* intermediate, int thread, const std::string& basename)
 {
     bool printOutput = Json2KeyWord<bool>(controller, "printOutput");
+    bool fusion = Json2KeyWord<bool>(controller, "fusion");
     double dE = Json2KeyWord<double>(controller, "dE");
     double dRMSD = Json2KeyWord<double>(controller, "dRMSD");
     double GradNorm = Json2KeyWord<double>(controller, "GradNorm");
-
+    double maxrise = Json2KeyWord<double>(controller, "maxrise");
     std::string method = Json2KeyWord<std::string>(controller, "method");
     int MaxIter = Json2KeyWord<int>(controller, "MaxIter");
     int ConvCount = Json2KeyWord<int>(controller, "ConvCount");
     int SingleStep = Json2KeyWord<int>(controller, "SingleStep");
-
-    if(Json2KeyWord<int>(controller, "threads") > 1 )
-    {
-        printOutput = false;
-    }
+    /*
+        if(Json2KeyWord<int>(controller, "threads") > 1 )
+        {
+            printOutput = false;
+        }
+        */
     bool optH = Json2KeyWord<bool>(controller, "optH");
     std::vector<int> constrain;
     Geometry geometry = initial->getGeometry();
@@ -276,6 +278,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, const json& controller, st
     }
 
     EnergyCalculator interface(method, controller);
+
     interface.setMolecule(*initial);
 
     double final_energy = interface.CalculateEnergy(true);
@@ -284,7 +287,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, const json& controller, st
     std::cout << "Initial energy " << final_energy << "Eh" << std::endl;
     LBFGSParam<double> param;
     param.m = Json2KeyWord<int>(controller, "LBFGS_m");
-    ;
+
     param.epsilon = Json2KeyWord<double>(controller, "LBFGS_eps_abs");
     param.epsilon_rel = Json2KeyWord<double>(controller, "LBFGS_eps_rel");
     param.past = Json2KeyWord<int>(controller, "LBFGS_past");
@@ -388,7 +391,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, const json& controller, st
             }
             next.setGeometry(geometry);
         }
-        if ((fun.m_energy - final_energy) * 2625.5 > 10 && iteration > 10) {
+        if ((fun.m_energy - final_energy) * 2625.5 > maxrise && iteration > 10) {
             if (printOutput) {
                 output += fmt::format("Energy rises too much!\n");
                 output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation sufficiantly converged ***");
@@ -464,13 +467,15 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, const json& controller, st
         }
         */
         final_energy = fun.m_energy;
-        if (next.Check() == 0) {
+        if (next.Check() == 0 || (next.Check() == 1 && fusion)) {
             previous = next;
             next.setEnergy(final_energy);
             intermediate->push_back(next);
             next.appendXYZFile(basename + ".t" + std::to_string(thread) + ".xyz");
 
         } else {
+            output += fmt::format("{0: ^75}\n\n", "*** Check next failed! ***");
+
             perform_optimisation = false;
             error = true;
         }

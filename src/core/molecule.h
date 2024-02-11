@@ -44,6 +44,7 @@ struct Mol {
     std::string m_commentline;
 
     std::vector<std::array<double, 3>> m_geometry;
+    std::vector<std::pair<int, int>> m_bonds;
     std::vector<int> m_atoms;
 };
 
@@ -213,6 +214,8 @@ class Molecule
 
     void setPartialCharges(const std::vector<double>& charges) { m_charges = charges; }
 
+    inline std::vector<std::pair<int, int>> Bonds() const { return m_bonds; }
+
 private:
     void ParseString(const std::string& internal, std::vector<std::string>& elements);
 
@@ -243,6 +246,8 @@ private:
     mutable std::map<int, int> m_fragment_assignment;
 
     mutable std::vector<double> m_mass_fragments;
+    std::vector<std::pair<int, int>> m_bonds;
+
     mutable bool m_dirty = true;
     std::string m_name;
     double m_energy = 0, m_Ia = 0, m_Ib = 0, m_Ic = 0, m_mass = 0, m_hbond_cutoff = 3;

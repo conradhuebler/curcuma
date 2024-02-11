@@ -174,11 +174,6 @@ inline Mol Coord2Mol(const std::string& filename)
             } catch (const std::invalid_argument& arg) {
             }
         }
-        //}
-        //if(line.compare("@<TRIPOS>ATOM") == 0)
-        //    readblock = true;
-        //if(line.compare("@<TRIPOS>BOND") == 0)
-        //    readblock = false;
     }
 
     return molecule;
@@ -202,11 +197,6 @@ inline Mol SDF2Mol(const std::string& filename)
             } catch (const std::invalid_argument& arg) {
             }
         }
-        //}
-        //if(line.compare("@<TRIPOS>ATOM") == 0)
-        //    readblock = true;
-        //if(line.compare("@<TRIPOS>BOND") == 0)
-        //    readblock = false;
     }
     return molecule;
 }
@@ -214,10 +204,10 @@ inline Mol SDF2Mol(const std::string& filename)
 inline Mol Mol22Mol(const std::string& filename)
 {
     Mol molecule;
-    int readblock = false;
+    int read_atom = false, read_bond = false;
     auto file = new std::ifstream(filename);
     for (std::string line; getline(*file, line);) {
-        if (readblock) {
+        if (read_atom) {
             auto strings = SplitString(line, " ");
             if (strings.size() == 9) {
                 try {
@@ -231,10 +221,24 @@ inline Mol Mol22Mol(const std::string& filename)
                 }
             }
         }
-        if (line.compare("@<TRIPOS>ATOM") == 0)
-            readblock = true;
-        if (line.compare("@<TRIPOS>BOND") == 0)
-            readblock = false;
+        if (read_bond) {
+            auto strings = SplitString(line, " ");
+            if (strings.size() == 4) {
+                try {
+                    std::pair<int, int> vector(std::stoi(strings[1]), std::stoi(strings[2]));
+                    molecule.m_bonds.push_back(vector);
+                } catch (const std::invalid_argument& arg) {
+                }
+            }
+        }
+        if (line.compare("@<TRIPOS>ATOM") == 0) {
+            read_atom = true;
+            read_bond = false;
+        }
+        if (line.compare("@<TRIPOS>BOND") == 0) {
+            read_atom = false;
+            read_bond = true;
+        }
     }
     return molecule;
 }

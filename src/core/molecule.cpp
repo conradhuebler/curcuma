@@ -57,6 +57,7 @@ Molecule::Molecule(const Molecule& other)
     m_name = other.m_name;
     m_energy = other.m_energy;
     m_spin = other.m_spin;
+    m_bonds = other.m_bonds;
 }
 /*
 Molecule& Molecule::operator=(const Molecule& other)
@@ -80,6 +81,7 @@ Molecule::Molecule(const Molecule* other)
     m_name = other->m_name;
     m_energy = other->m_energy;
     m_spin = other->m_spin;
+    m_bonds = other->m_bonds;
 }
 /*
 Molecule& Molecule::operator=(const Molecule* other)
@@ -102,6 +104,7 @@ Molecule::Molecule(const Mol& other)
     m_atoms = other.m_atoms;
     m_energy = other.m_energy;
     m_spin = other.m_spin;
+    m_bonds = other.m_bonds;
 }
 
 Molecule::Molecule(const Mol* other)
@@ -112,6 +115,7 @@ Molecule::Molecule(const Mol* other)
     m_atoms = other->m_atoms;
     m_energy = other->m_energy;
     m_spin = other->m_spin;
+    m_bonds = other->m_bonds;
 }
 
 Molecule::Molecule(const std::string& file)
@@ -239,9 +243,11 @@ void Molecule::print_geom(bool moreinfo) const
 
 int Molecule::Check() const
 {
-    for (int i = 1; i < AtomCount(); ++i) {
+    return 0;
+
+    for (int i = 0; i < AtomCount(); ++i) {
         if (std::isnan(m_geometry[i][0]) || std::isnan(m_geometry[i][1]) || std::isnan(m_geometry[i][2]))
-            return 1;
+            return 2;
         for (int j = 0; j < i; ++j) {
             if (CalculateDistance(i, j) < 1e-1)
                 return 1;
@@ -619,6 +625,7 @@ void Molecule::LoadMolecule(const Molecule& molecule)
     m_charge = molecule.Charge();
     m_atoms = molecule.Atoms();
     m_energy = molecule.Energy();
+    m_bonds = molecule.m_bonds;
     InitialiseEmptyGeometry(molecule.AtomCount());
     setGeometry(molecule.getGeometry());
 }
@@ -628,6 +635,8 @@ void Molecule::LoadMolecule(const Molecule* molecule)
     clear();
     m_charge = molecule->Charge();
     m_atoms = molecule->Atoms();
+    m_bonds = molecule->m_bonds;
+
     InitialiseEmptyGeometry(molecule->AtomCount());
     setGeometry(molecule->getGeometry());
 }
@@ -642,6 +651,7 @@ void Molecule::LoadMolecule(const Mol& molecule)
     m_energy = molecule.m_energy;
     InitialiseEmptyGeometry(AtomCount());
     m_geometry = (molecule.m_geometry);
+    m_bonds = molecule.m_bonds;
 }
 
 void Molecule::LoadMolecule(const Mol* molecule)
@@ -654,6 +664,7 @@ void Molecule::LoadMolecule(const Mol* molecule)
     m_energy = molecule->m_energy;
     InitialiseEmptyGeometry(AtomCount());
     m_geometry = (molecule->m_geometry);
+    m_bonds = molecule->m_bonds;
 }
 
 Molecule Molecule::getFragmentMolecule(int fragment) const

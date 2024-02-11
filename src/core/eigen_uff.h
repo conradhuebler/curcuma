@@ -226,7 +226,7 @@ public:
         }
     }
 
-    void Initialise();
+    void Initialise(const std::vector<std::pair<int, int>>& formed_bonds = std::vector<std::pair<int, int>>());
 
     double Calculate(bool gradient = true, bool verbose = false);
 
@@ -250,6 +250,7 @@ public:
 
     void setBonds(const json& bonds);
     void setBonds(const TContainer& bonds, std::vector<std::set<int>>& ignored_vdw, TContainer& angels, TContainer& dihedrals, TContainer& inversions);
+    void setBonds(const std::vector<std::pair<int, int>>& bonds);
 
     void setAngles(const json& angles);
     void setAngles(const TContainer& angles, const std::vector<std::set<int>>& ignored_vdw);

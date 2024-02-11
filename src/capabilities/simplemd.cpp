@@ -239,9 +239,10 @@ bool SimpleMD::Initialise()
         optimise.addMolecule(&m_molecule);
         optimise.start();
         auto mol = optimise.Molecules();
-        std::cout << mol->size() << std::endl;
+
         auto molecule = ((*mol)[0]);
         m_molecule.setGeometry(molecule.getGeometry());
+        m_molecule.appendXYZFile(Basename() + ".opt.xyz");
     }
 
     for (int i = 0; i < m_natoms; ++i) {
@@ -337,7 +338,6 @@ void SimpleMD::InitVelocities(double scaling)
     double Px = 0.0, Py = 0.0, Pz = 0.0;
     for (int i = 0; i < m_natoms; ++i) {
         double v0 = sqrt(kb_Eh * m_T0 * amu2au / (m_mass[i])) * scaling / fs2amu;
-        // double v0 = sqrt(kb_SI * m_T0 / (m_mass[i] * atomic_mass)) * scaling;
         m_velocities[3 * i + 0] = v0 * d(gen);
         m_velocities[3 * i + 1] = v0 * d(gen);
         m_velocities[3 * i + 2] = v0 * d(gen);
