@@ -46,6 +46,7 @@ void QMDFFFit::start()
     std::cout << "Parametrising QMDFF (see S. Grimmme, J. Chem. Theory Comput. 2014, 10, 10, 4497–4514 [10.1021/ct500573f]) for the original publication!" << std::endl;
 
     std::cout << "Starting with the hessian ..." << std::endl;
+    std::cout << m_defaults << m_controller << std::endl;
     Hessian hessian(m_defaults);
     hessian.setMolecule(m_molecule);
     m_atom_types = m_molecule.Atoms();
@@ -83,7 +84,7 @@ void QMDFFFit::start()
                 const_hessian_matrix(j, i) = 0;
             }
         }
-    std::cout << const_hessian_matrix << std::endl;
+    // std::cout << const_hessian_matrix << std::endl;
     int counter = 1;
     for (int start = 0; start < 10 && counter; ++start) {
         parameter["bonds"] = Bonds();

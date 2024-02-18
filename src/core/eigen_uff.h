@@ -118,8 +118,8 @@ private:
         auto atom_1 = m_geometry->row(atom2);
         auto atom_2 = m_geometry->row(atom3);
 
-        auto vec_1 = atom_0 - atom_1; //{ atom_0[0] - atom_1[0], atom_0[1] - atom_1[1], atom_0[2] - atom_1[2] };
-        auto vec_2 = atom_0 - atom_2; //{ atom_0[0] - atom_2[0], atom_0[1] - atom_2[1], atom_0[2] - atom_2[2] };
+        auto vec_1 = atom_0 - atom_1;
+        auto vec_2 = atom_0 - atom_2;
 
         return acos(vec_1.dot(vec_2) / sqrt(vec_1.dot(vec_1)) * sqrt(vec_2.dot(vec_2))) * 360 / 2.0 / pi;
     }

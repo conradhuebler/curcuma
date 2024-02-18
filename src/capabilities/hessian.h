@@ -41,7 +41,8 @@ static const json HessianJson = {
     { "thermo", 298.15 },
     { "freq_cutoff", 50 },
     { "hess", 1 },
-    { "method", "uff" }
+    { "method", "uff" },
+    { "threads", 1 }
 };
 
 class HessianThread : public CxxThread {

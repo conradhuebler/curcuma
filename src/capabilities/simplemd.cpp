@@ -1313,21 +1313,8 @@ bool SimpleMD::WriteGeometry()
         geometry(i, 2) = m_current_geometry[3 * i + 2];
     }
     TriggerWriteRestart();
-    // int f1 = m_molecule.GetFragments().size();
     m_molecule.setGeometry(geometry);
-    auto m = m_molecule.DistanceMatrix();
 
-    // int f2 = m_molecule.GetFragments().size();
-    //   std::cout << f1 << " ... " << f2 << std::endl;
-    // m_prev_index = std::abs(f2 - f1);
-    /*
-    int difference = (m.second - m_topo_initial).cwiseAbs().sum();
-
-    if (difference > m_max_top_diff) {
-        std::cout << "*** topology changed " << difference << " ***" << std::endl;
-        result = false;
-    }
-    */
     if (m_writeXYZ) {
         m_molecule.setEnergy(m_Epot);
         m_molecule.setName(std::to_string(m_currentStep));

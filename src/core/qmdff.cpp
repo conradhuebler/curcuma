@@ -132,13 +132,17 @@ double QMDFFThread::CalculateStretchEnergy()
 
                 double za = (*m_geometry)(a, 2) * m_au;
                 double zb = (*m_geometry)(b, 2) * m_au;
-                m_gradient(a, 0) += (StretchEnergy(Distance(xa + m_d, xb, ya, yb, za, zb), bond.reAB, bond.kAB, bond.exponA) - StretchEnergy(Distance(xa - m_d, xb, ya, yb, za, zb), bond.reAB, bond.kAB, bond.exponA)) / (2 * m_d);
-                m_gradient(a, 1) += (StretchEnergy(Distance(xa, xb, ya + m_d, yb, za, zb), bond.reAB, bond.kAB, bond.exponA) - StretchEnergy(Distance(xa, xb, ya - m_d, yb, za, zb), bond.reAB, bond.kAB, bond.exponA)) / (2 * m_d);
-                m_gradient(a, 2) += (StretchEnergy(Distance(xa, xb, ya, yb, za + m_d, zb), bond.reAB, bond.kAB, bond.exponA) - StretchEnergy(Distance(xa, xb, ya, yb, za - m_d, zb), bond.reAB, bond.kAB, bond.exponA)) / (2 * m_d);
 
-                m_gradient(b, 0) += (StretchEnergy(Distance(xa, xb + m_d, ya, yb, za, zb), bond.reAB, bond.kAB, bond.exponA) - StretchEnergy(Distance(xa, xb - m_d, ya, yb, za, zb), bond.reAB, bond.kAB, bond.exponA)) / (2 * m_d);
-                m_gradient(b, 1) += (StretchEnergy(Distance(xa, xb, ya, yb + m_d, za, zb), bond.reAB, bond.kAB, bond.exponA) - StretchEnergy(Distance(xa, xb, ya, yb - m_d, za, zb), bond.reAB, bond.kAB, bond.exponA)) / (2 * m_d);
-                m_gradient(b, 2) += (StretchEnergy(Distance(xa, xb, ya, yb, za, zb + m_d), bond.reAB, bond.kAB, bond.exponA) - StretchEnergy(Distance(xa, xb, ya, yb, za, zb - m_d), bond.reAB, bond.kAB, bond.exponA)) / (2 * m_d);
+                double d_x = (StretchEnergy(Distance(xa + m_d, xb, ya, yb, za, zb), bond.reAB, bond.kAB, bond.exponA) - StretchEnergy(Distance(xa - m_d, xb, ya, yb, za, zb), bond.reAB, bond.kAB, bond.exponA)) / (2 * m_d);
+                double d_y = (StretchEnergy(Distance(xa, xb, ya + m_d, yb, za, zb), bond.reAB, bond.kAB, bond.exponA) - StretchEnergy(Distance(xa, xb, ya - m_d, yb, za, zb), bond.reAB, bond.kAB, bond.exponA)) / (2 * m_d);
+                double d_z = (StretchEnergy(Distance(xa, xb, ya, yb, za + m_d, zb), bond.reAB, bond.kAB, bond.exponA) - StretchEnergy(Distance(xa, xb, ya, yb, za - m_d, zb), bond.reAB, bond.kAB, bond.exponA)) / (2 * m_d);
+                m_gradient(a, 0) += d_x;
+                m_gradient(a, 1) += d_y;
+                m_gradient(a, 2) += d_z;
+
+                m_gradient(b, 0) -= d_x; //(StretchEnergy(Distance(xa, xb + m_d, ya, yb, za, zb), bond.reAB, bond.kAB, bond.exponA) - StretchEnergy(Distance(xa, xb - m_d, ya, yb, za, zb), bond.reAB, bond.kAB, bond.exponA)) / (2 * m_d);
+                m_gradient(b, 1) -= d_y; //(StretchEnergy(Distance(xa, xb, ya, yb + m_d, za, zb), bond.reAB, bond.kAB, bond.exponA) - StretchEnergy(Distance(xa, xb, ya, yb - m_d, za, zb), bond.reAB, bond.kAB, bond.exponA)) / (2 * m_d);
+                m_gradient(b, 2) -= d_z; //(StretchEnergy(Distance(xa, xb, ya, yb, za, zb + m_d), bond.reAB, bond.kAB, bond.exponA) - StretchEnergy(Distance(xa, xb, ya, yb, za, zb - m_d), bond.reAB, bond.kAB, bond.exponA)) / (2 * m_d);
             }
         }
     }

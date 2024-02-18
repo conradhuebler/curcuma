@@ -178,6 +178,7 @@ void Hessian::LoadControlJson()
     m_freq_cutoff = Json2KeyWord<double>(m_defaults, "freq_cutoff");
     m_hess = Json2KeyWord<int>(m_defaults, "hess");
     m_method = Json2KeyWord<std::string>(m_defaults, "method");
+    m_threads = Json2KeyWord<int>(m_defaults, "threads");
 }
 
 void Hessian::setMolecule(const Molecule& molecule)

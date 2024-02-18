@@ -164,6 +164,10 @@ set(curcuma_core_SRC
         src/core/eigen_uff.cpp
         src/core/qmdff.cpp
         src/core/eht.cpp
+        #src/core/forcefield.h
+        #src/core/forcefield.cpp
+        #src/core/forcefieldfunctions.h
+        #src/core/forcefield_terms/qmdff_terms.h
         src/tools/formats.h
         src/tools/geometry.h
         src/tools/general.h
@@ -172,6 +176,7 @@ set(curcuma_core_SRC
 
     add_executable(curcuma
             src/main.cpp
+
             )
 
 if(C17)
