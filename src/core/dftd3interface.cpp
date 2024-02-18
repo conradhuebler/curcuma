@@ -46,7 +46,7 @@ DFTD3Interface::DFTD3Interface(const json& controller)
     m_atm = parameter["d_atm"];
     m_damping = parameter["d_damping"];
     m_functional = parameter["d_func"];
-
+    CreateParameter();
     m_error = dftd3_new_error();
 }
 
@@ -55,6 +55,8 @@ DFTD3Interface::~DFTD3Interface()
     dftd3_delete_model(&m_disp);
     dftd3_delete_structure(&m_mol);
     dftd3_delete_error(&m_error);
+    dftd3_delete_param(&m_param);
+
     delete m_coord;
     delete m_attyp;
 }
@@ -63,32 +65,39 @@ void DFTD3Interface::PrintParameter() const
 {
     std::cout << m_d3_s6 << " " << m_d3_s8 << " " << m_d3_s9 << " " << m_d3_a1 << " " << m_d3_a2 << " " << m_d3_alp << std::endl;
 }
-/*
-void DFTD3Interface::LoadParameter()
+
+void DFTD3Interface::CreateParameter()
 {
-    dftd3_delete_param(&m_param);
-    char *cstr = new char[m_functional.length() + 1];
-    strcpy(cstr, m_functional.c_str());
-    if(m_damping.compare("bj") == 0)
-    {
-        m_param = dftd3_load_zero_damping(m_error, cstr, m_atm);
-    }else if(m_damping.compare("zero") == 0)
-    {
-        m_param = dftd3_load_rational_damping(m_error, cstr, m_atm);
-    }else if(m_damping.compare("bjm") == 0)
-    {
-        m_param = dftd3_load_mrational_damping(m_error, cstr, m_atm);
-    }else if(m_damping.compare("zerom") == 0)
-    {
-        m_param = dftd3_load_mzero_damping(m_error, cstr, m_atm);
-    }else if(m_damping.compare("op") == 0)
-    {
-        m_param = dftd3_load_optimizedpower_damping(m_error, cstr, m_atm);
+    if (m_d3_a1 > 1e-8 || m_d3_a2 > 1e-8 || m_d3_s6 > 1e-8 || m_d3_s8 > 1e-8 || m_d3_s9 > 1e-8) {
+        if (m_damping.compare("bj")) {
+            m_param = dftd3_new_rational_damping(m_error, m_d3_s6, m_d3_s8, m_d3_s9, m_d3_a1, m_d3_a2, m_d3_alp);
+        } else if (m_damping.compare("zero")) {
+            m_param = dftd3_new_zero_damping(m_error, m_d3_s6, m_d3_s8, m_d3_s9, m_d3_a1, m_d3_a2, m_d3_alp);
+        } else if (m_damping.compare("bjm")) {
+            m_param = dftd3_new_mrational_damping(m_error, m_d3_s6, m_d3_s8, m_d3_s9, m_d3_a1, m_d3_a2, m_d3_alp);
+        } else if (m_damping.compare("zerom")) {
+            m_param = dftd3_new_mzero_damping(m_error, m_d3_s6, m_d3_s8, m_d3_s9, m_d3_a1, m_d3_a2, m_d3_alp, m_bet);
+        } else if (m_damping.compare("op")) {
+            m_param = dftd3_new_optimizedpower_damping(m_error, m_d3_s6, m_d3_s8, m_d3_s9, m_d3_a1, m_d3_a2, m_d3_alp, m_bet);
+        }
+    } else {
+        char* cstr = new char[m_functional.length() + 1];
+        strcpy(cstr, m_functional.c_str());
+        if (m_damping.compare("bj") == 0) {
+            m_param = dftd3_load_rational_damping(m_error, cstr, m_atm);
+        } else if (m_damping.compare("zero") == 0) {
+            m_param = dftd3_load_zero_damping(m_error, cstr, m_atm);
+        } else if (m_damping.compare("bjm") == 0) {
+            m_param = dftd3_load_mrational_damping(m_error, cstr, m_atm);
+        } else if (m_damping.compare("zerom") == 0) {
+            m_param = dftd3_load_mzero_damping(m_error, cstr, m_atm);
+        } else if (m_damping.compare("op") == 0) {
+            m_param = dftd3_load_optimizedpower_damping(m_error, cstr, m_atm);
+        }
+        delete[] cstr;
     }
-    delete [] cstr;
-    PrintParameter();
 }
-*/
+
 void DFTD3Interface::UpdateParameters(const json& controller)
 {
     json parameter = MergeJson(DFTD3Settings, controller);
@@ -100,6 +109,7 @@ void DFTD3Interface::UpdateParameters(const json& controller)
     m_d3_s8 = parameter["d_s8"];
 
     m_d3_s9 = parameter["d_s9"];
+    CreateParameter();
 
     PrintParameter();
 }
@@ -109,9 +119,9 @@ bool DFTD3Interface::InitialiseMolecule(const std::vector<int>& atomtypes)
     m_attyp = new int[atomtypes.size()];
     m_coord = new double[3 * atomtypes.size()];
     for (int i = 0; i < atomtypes.size(); ++i) {
-        m_coord[3 * i + 0] = 0 / au;
-        m_coord[3 * i + 1] = 0 / au;
-        m_coord[3 * i + 2] = 0 / au;
+        m_coord[3 * i + 0] = (3 * i + 0) / au;
+        m_coord[3 * i + 1] = (3 * i + 1) / au;
+        m_coord[3 * i + 2] = (3 * i + 2) / au;
         m_attyp[i] = atomtypes[i];
     }
 
@@ -132,40 +142,9 @@ double DFTD3Interface::DFTD3Calculation(double* grad)
 {
     double energy = 0;
     double sigma[9];
-    dftd3_param param;
 
-    if (m_d3_a1 > 1e-8 || m_d3_a2 > 1e-8 || m_d3_s6 > 1e-8 || m_d3_s8 > 1e-8 || m_d3_s9 > 1e-8) {
-        if (m_damping.compare("bj")) {
-            param = dftd3_new_rational_damping(m_error, m_d3_s6, m_d3_s8, m_d3_s9, m_d3_a1, m_d3_a2, m_d3_alp);
-        } else if (m_damping.compare("zero")) {
-            param = dftd3_new_zero_damping(m_error, m_d3_s6, m_d3_s8, m_d3_s9, m_d3_a1, m_d3_a2, m_d3_alp);
-        } else if (m_damping.compare("bjm")) {
-            param = dftd3_new_mrational_damping(m_error, m_d3_s6, m_d3_s8, m_d3_s9, m_d3_a1, m_d3_a2, m_d3_alp);
-        } else if (m_damping.compare("zerom")) {
-            param = dftd3_new_mzero_damping(m_error, m_d3_s6, m_d3_s8, m_d3_s9, m_d3_a1, m_d3_a2, m_d3_alp, m_bet);
-        } else if (m_damping.compare("op")) {
-            param = dftd3_new_optimizedpower_damping(m_error, m_d3_s6, m_d3_s8, m_d3_s9, m_d3_a1, m_d3_a2, m_d3_alp, m_bet);
-        }
-    } else {
-        char* cstr = new char[m_functional.length() + 1];
-        strcpy(cstr, m_functional.c_str());
-        if (m_damping.compare("bj") == 0) {
-            param = dftd3_load_rational_damping(m_error, cstr, m_atm);
-        } else if (m_damping.compare("zero") == 0) {
-            param = dftd3_load_zero_damping(m_error, cstr, m_atm);
-        } else if (m_damping.compare("bjm") == 0) {
-            param = dftd3_load_mrational_damping(m_error, cstr, m_atm);
-        } else if (m_damping.compare("zerom") == 0) {
-            param = dftd3_load_mzero_damping(m_error, cstr, m_atm);
-        } else if (m_damping.compare("op") == 0) {
-            param = dftd3_load_optimizedpower_damping(m_error, cstr, m_atm);
-        }
-        delete[] cstr;
-    }
     dftd3_update_structure(m_error, m_mol, m_coord, NULL);
-    dftd3_get_dispersion(m_error, m_mol, m_disp, param, &energy, grad, sigma);
-
-    dftd3_delete_param(&param);
+    dftd3_get_dispersion(m_error, m_mol, m_disp, m_param, &energy, grad, sigma);
 
     return energy;
 }

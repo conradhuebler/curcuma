@@ -1,6 +1,6 @@
 /*
  * <LevenbergMarquardt QMDFF FC Fit. >
- * Copyright (C) 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2023 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -33,6 +33,9 @@
 #include "src/core/pseudoff.h"
 
 #include "src/tools/geometry.h"
+
+#include "json.hpp"
+using json = nlohmann::json;
 
 template <typename _Scalar, int NX = Eigen::Dynamic, int NY = Eigen::Dynamic>
 
@@ -68,11 +71,7 @@ struct MyFCFunctor : FCFunctor<double> {
     inline ~MyFCFunctor() {}
     inline int operator()(const Eigen::VectorXd& fc, Eigen::VectorXd& fvec) const
     {
-        // std::cout << fc.transpose() << std::endl;
-        json hc = HessianJson;
-        hc["method"] = "qmdff";
-        hc["threads"] = m_threads;
-        Hessian he2(hc, true);
+        Hessian he2(m_controller, true);
 
         json bonds = m_parameter["bonds"];
         json angles = m_parameter["angles"];
@@ -94,43 +93,59 @@ struct MyFCFunctor : FCFunctor<double> {
         Matrix hessian = he2.getHessian();
 
         index = 0;
+        double diff = 0;
         for (int i = 0; i < m_hessian.rows(); ++i) {
-            for (int j = 0; j < m_hessian.cols(); ++j) {
-                fvec(index++) = (m_hessian(i, j) - hessian(i, j)) * (m_hessian(i, j) - hessian(i, j)); // + PseudoFF::DistancePenalty(m_host->Atom(i), guest.Atom(j));
+            for (int j = i; j < m_hessian.cols(); ++j) {
+                index++;
+                if (index >= fvec.size())
+                    break;
+                fvec(index) = (m_hessian(i, j) - (hessian(i, j) + m_const_hessian(i, j)));
+                diff += (m_hessian(i, j) - (hessian(i, j) + m_const_hessian(i, j)));
             }
         }
-
         return 0;
     }
+
+    void Controller(const json& controller)
+    {
+        m_controller = MergeJson(HessianJson, m_controller);
+        m_controller["method"] = "qmdff";
+    }
+
     int no_parameter;
     int no_points;
-    int m_threads = 1;
 
     int inputs() const { return no_parameter; }
     int values() const { return no_points; }
-    Matrix m_hessian;
-    json m_parameter;
+    Matrix m_hessian, m_const_hessian;
+    json m_parameter, m_controller;
     Molecule m_molecule;
 };
 
 struct MyFunctorNumericalDiff : Eigen::NumericalDiff<MyFCFunctor> {
 };
 
-inline Vector OptimiseFC(const Molecule& molecule, const Matrix& hessian, const Vector& fc, const json& parameters, int threads)
+inline Vector OptimiseFC(const Molecule& molecule, const Matrix& hessian, const Matrix& const_hessian, const Vector& fc, const json& parameters, const json& controller)
 {
-
-    // Vector parameter = PositionPair2Vector(anchor, rotation);
     Vector parameter = fc;
-    MyFCFunctor functor(fc.size(), hessian.cols() * hessian.rows());
+    MyFCFunctor functor(fc.size(), hessian.cols() * hessian.rows() / 2 + hessian.cols() / 2);
     functor.m_hessian = hessian;
+    functor.m_const_hessian = const_hessian;
     functor.m_molecule = molecule;
     functor.m_parameter = parameters;
-    functor.m_threads = threads;
+    functor.m_controller = controller;
+
+    std::cout << controller << std::endl;
 
     Eigen::NumericalDiff<MyFCFunctor> numDiff(functor);
     Eigen::LevenbergMarquardt<Eigen::NumericalDiff<MyFCFunctor>> lm(numDiff);
     int iter = 0;
-
+    /*
+        std::cout << "Target hessian " << std::endl
+                  << hessian << std::endl;
+        std::cout << "Const part of qmdff hessian " << std::endl
+                  << const_hessian << std::endl;
+    */
     /*
     lm.parameters.factor = config["LevMar_Factor"].toInt(); //step bound for the diagonal shift, is this related to damping parameter, lambda?
     lm.parameters.maxfev = config["LevMar_MaxFEv"].toDouble(); //max number of function evaluations
@@ -141,21 +156,17 @@ inline Vector OptimiseFC(const Molecule& molecule, const Matrix& hessian, const 
     */
 
     Eigen::LevenbergMarquardtSpace::Status status = lm.minimizeInit(parameter);
-    // std::cout << parameter.transpose() << std::endl;
-    int MaxIter = 300;
+    int MaxIter = 30;
     Vector old_param = parameter;
-    // std::cout << parameter.transpose() << std::endl;
     for (; iter < MaxIter /*&& ((qAbs(error_0 - error_2) > ErrorConvergence) || norm > DeltaParameter)*/; ++iter) {
         std::cout << "Step " << iter << " of maximal " << MaxIter << std::endl;
         status = lm.minimizeOneStep(parameter);
-
+        std::cout << "Norm " << (old_param - parameter).norm() << std::endl;
         if ((old_param - parameter).norm() < 1e-8)
             break;
         std::cout << parameter.transpose() << std::endl;
         old_param = parameter;
     }
-    // std::cout << parameter.transpose() << std::endl;
-    // std::cout << "took " << iter << " optimisation steps." << std::endl;
 
     return old_param;
 }

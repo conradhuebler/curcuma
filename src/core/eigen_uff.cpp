@@ -560,7 +560,6 @@ double UFFThread::CalculateElectrostatic()
 eigenUFF::eigenUFF(const json& controller)
 {
     json parameter = MergeJson(UFFParameterJson, controller);
-    std::cout << parameter["threads"] << std::endl;
     m_threadpool = new CxxThreadPool();
     m_threadpool->setProgressBar(CxxThreadPool::ProgressBarType::None);
 #ifdef USE_D3

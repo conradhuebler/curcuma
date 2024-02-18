@@ -46,7 +46,7 @@ static const json HessianJson = {
 
 class HessianThread : public CxxThread {
 public:
-    HessianThread(const std::string& method, const json& controller, int i, int j, int xi, int xj, bool fullnumerical = true);
+    HessianThread(const json& controller, int i, int j, int xi, int xj, bool fullnumerical = true);
     ~HessianThread();
 
     void setMolecule(const Molecule& molecule);
@@ -65,7 +65,7 @@ private:
     void Seminumerical();
     std::function<void(void)> m_schema;
 
-    EnergyCalculator* m_calculator;
+    // EnergyCalculator* m_calculator;
     std::string m_method;
     json m_controller, m_parameter;
     Molecule m_molecule;
@@ -79,7 +79,7 @@ private:
 
 class Hessian : public CurcumaMethod {
 public:
-    Hessian(const std::string& method, const json& controller, int threads, bool silent = true);
+    Hessian(const std::string& method, const json& controller, bool silent = true);
     Hessian(const json& controller, bool silent = true);
 
     void setMolecule(const Molecule& molecule);
@@ -89,6 +89,7 @@ public:
         m_hess_calc = type;
         start();
     }
+    void PrintVibrations() { PrintVibrationsPlain(m_frequencies); }
 
     void PrintVibrations(Vector& eigenvalues, const Vector& projected);
     void PrintVibrationsPlain(const Vector& eigenvalues);
@@ -97,6 +98,7 @@ public:
 
     Matrix getHessian() const { return m_hessian; }
     void setParameter(const json& parameter) { m_parameter = parameter; }
+    Vector Frequencies() { return m_frequencies; }
 
 private:
     /* Lets have this for all modules */
@@ -126,6 +128,7 @@ private:
     Vector ConvertHessian(Matrix& hessian);
 
     Matrix m_eigen_geometry, m_eigen_gradient, m_hessian;
+    Vector m_frequencies;
     Molecule m_molecule;
     std::string m_method;
     json m_controller, m_parameter;

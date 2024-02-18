@@ -25,9 +25,8 @@
 
 #include "hessian.h"
 
-HessianThread::HessianThread(const std::string& method, const json& controller, int i, int j, int xi, int xj, bool fullnumerical)
-    : m_method(method)
-    , m_controller(controller)
+HessianThread::HessianThread(const json& controller, int i, int j, int xi, int xj, bool fullnumerical)
+    : m_controller(controller)
     , m_i(i)
     , m_j(j)
     , m_xi(xi)
@@ -35,6 +34,7 @@ HessianThread::HessianThread(const std::string& method, const json& controller, 
     , m_fullnumerical(fullnumerical)
 {
     setAutoDelete(true);
+    m_method = m_controller["method"];
 
     if (m_fullnumerical)
         m_schema = [this, i, j, xi, xj]() {
@@ -105,6 +105,7 @@ void HessianThread::Seminumerical()
     m_geom_im_jp = m_molecule.Coords();
 
     m_geom_ip_jp[m_i][m_xi] += m_d;
+    // std::cout << m_controller << std::endl;
 
     EnergyCalculator energy(m_method, m_controller);
     energy.setMolecule(m_molecule);
@@ -122,13 +123,14 @@ void HessianThread::Seminumerical()
     m_gradient = (gradientp - gradientm) / (2 * m_d) / au / au;
 }
 
-Hessian::Hessian(const std::string& method, const json& controller, int threads, bool silent)
+Hessian::Hessian(const std::string& method, const json& controller, bool silent)
     : CurcumaMethod(HessianJson, controller, silent)
     , m_method(method)
     , m_controller(controller)
-    , m_threads(threads)
+
 {
     UpdateController(controller);
+    m_threads = m_controller["threads"];
     /* Yeah, thats not really correct, but it works a bit */
     if (m_method.compare("gfnff") == 0) {
         m_scale_functions = [](double val) -> double {
@@ -228,14 +230,14 @@ void Hessian::start()
         LoadHessian(m_read_file);
     }
 
-    auto eigenvalues = ConvertHessian(m_hessian);
+    m_frequencies = ConvertHessian(m_hessian);
 
     // PrintVibrationsPlain(eigenvalues);
 
     auto hessian2 = ProjectHessian(m_hessian);
     auto projected = ConvertHessian(hessian2);
     if (!m_silent)
-        PrintVibrations(eigenvalues, projected);
+        PrintVibrations(m_frequencies, projected);
 }
 
 Matrix Hessian::ProjectHessian(const Matrix& hessian)
@@ -356,7 +358,7 @@ void Hessian::CalculateHessianNumerical()
         for (int j = 0; j < m_molecule.AtomCount(); ++j) {
             for (int xi = 0; xi < 3; ++xi)
                 for (int xj = 0; xj < 3; ++xj) {
-                    HessianThread* thread = new HessianThread(m_method, m_controller, i, j, xi, xj, true);
+                    HessianThread* thread = new HessianThread(m_controller, i, j, xi, xj, true);
                     thread->setMolecule(m_molecule);
                     thread->setParameter(m_parameter);
                     pool->addThread(thread);
@@ -386,7 +388,7 @@ void Hessian::CalculateHessianSemiNumerical()
 
     for (int i = 0; i < m_molecule.AtomCount(); ++i) {
         for (int xi = 0; xi < 3; ++xi) {
-            HessianThread* thread = new HessianThread(m_method, m_controller, i, 0, xi, 0, false);
+            HessianThread* thread = new HessianThread(m_controller, i, 0, xi, 0, false);
             thread->setMolecule(m_molecule);
             thread->setParameter(m_parameter);
             pool->addThread(thread);

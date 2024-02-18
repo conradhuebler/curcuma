@@ -272,12 +272,12 @@ if(USE_D3)
     if(NOT TARGET s-dftd3)
         add_subdirectory(external/simple-dftd3)
     endif()
-    if(HELPERS)
+    #if(HELPERS)
         add_executable(dftd3_helper
            src/helpers/dftd3_helper.cpp
     )
     target_link_libraries(dftd3_helper PUBLIC s-dftd3 gfortran pthread) 
-    endif()
+    #endif()
     set(curcuma_D3_SRC
            src/core/dftd3interface.cpp
     )
@@ -288,8 +288,8 @@ endif()
 
 if(USE_D4)
     if(NOT DEFINED D4LIBS_DIR AND NOT DEFINED D4INCLUDE_DIR)
-  	find_package(LAPACKE REQUIRED)
-	find_package(CBLAS CONFIG REQUIRED)
+        #find_package(LAPACKE REQUIRED)
+        #find_package(CBLAS CONFIG REQUIRED)
     else()
 	include_directories(${INCLUDE_DIR})
     endif(NOT DEFINED D4LIBS_DIR AND NOT DEFINED D4INCLUDE_DIR)

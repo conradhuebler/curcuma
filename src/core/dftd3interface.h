@@ -63,6 +63,8 @@ public:
     inline double ParameterS9() const { return m_d3_s9; }
 
 private:
+    void CreateParameter();
+
     std::string m_damping;
     std::string m_functional;
 
@@ -83,4 +85,5 @@ private:
     dftd3_error m_error;
     dftd3_structure m_mol;
     dftd3_model m_disp;
+    dftd3_param m_param;
 };

@@ -109,7 +109,8 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
 #endif
     } else if (std::find(m_qmdff_method.begin(), m_qmdff_method.end(), m_method) != m_qmdff_method.end()) { // Just D4 energy calculator requested
         m_qmdff = new QMDFF(controller);
-        m_qmdff->setParameter(m_parameter);
+        if (m_parameter.size())
+            m_qmdff->setParameter(m_parameter);
         m_ecengine = [this](bool gradient, bool verbose) {
             this->CalculateQMDFF(gradient, verbose);
         };
@@ -118,6 +119,7 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
         m_uff = new eigenUFF(controller);
     }
 }
+
 EnergyCalculator::~EnergyCalculator()
 {
     if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) { // UFF energy calculator requested
@@ -139,6 +141,8 @@ EnergyCalculator::~EnergyCalculator()
 #ifdef USE_D4
         delete m_d4;
 #endif
+    } else if (std::find(m_qmdff_method.begin(), m_qmdff_method.end(), m_method) != m_qmdff_method.end()) { // Just D4 energy calculator requested
+        delete m_qmdff;
     } else { // Fall back to UFF?
         delete m_uff;
     }
@@ -197,7 +201,7 @@ void EnergyCalculator::setMolecule(const Molecule& molecule)
 #endif
     } else if (std::find(m_qmdff_method.begin(), m_qmdff_method.end(), m_method) != m_qmdff_method.end()) { //
         m_qmdff->setMolecule(atoms, geom);
-        // m_qmdff->Initialise();
+        m_qmdff->Initialise();
 
     } else { // Fall back to UFF?
     }

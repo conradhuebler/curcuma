@@ -33,6 +33,9 @@
 
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
 
+#include "src/core/dftd3interface.h"
+#include "src/core/dftd4interface.h"
+
 #include "src/core/uff_par.h"
 #include <set>
 #include <vector>
@@ -62,7 +65,7 @@ public:
     void UpdateGeometry(Matrix* geometry)
     {
         m_geometry = geometry;
-        m_gradient = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
+        m_gradient = Eigen::MatrixXd::Zero(geometry->rows(), 3);
     }
 
     Matrix Gradient() const { return m_gradient; }
@@ -73,7 +76,8 @@ public:
         m_geometry = geometry;
         m_gradient = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
     }
-    void readUFF(const json& parameters);
+
+    void readFF(const json& parameters);
 
     inline double Energy() const { return m_energy; }
     inline double BondEnergy() const { return m_bond_energy; }
@@ -211,31 +215,14 @@ private:
 class QMDFF {
 public:
     QMDFF(const json& controller);
-    QMDFF();
 
     ~QMDFF();
 
     void UpdateGeometry(const double* coord);
     void UpdateGeometry(const std::vector<std::array<double, 3>>& geometry);
 
-    void setMolecule(const std::vector<int>& atom_types, const std::vector<std::array<double, 3>>& geometry)
-    {
-        m_atom_types = atom_types;
-        m_geometry = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
-        for (int i = 0; i < m_atom_types.size(); ++i) {
-            m_geometry(i, 0) = geometry[i][0];
-            m_geometry(i, 1) = geometry[i][1];
-            m_geometry(i, 2) = geometry[i][2];
-        }
-        m_gradient = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
-    }
-
-    void setMolecule(const std::vector<int>& atom_types, const Matrix& geometry)
-    {
-        m_atom_types = atom_types;
-        m_geometry = geometry;
-        m_gradient = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
-    }
+    void setMolecule(const std::vector<int>& atom_types, const std::vector<std::array<double, 3>>& geometry);
+    void setMolecule(const std::vector<int>& atom_types, const Matrix& geometry);
 
     void setParameter(const json& parameter);
     json writeParameter() const;
@@ -253,10 +240,10 @@ public:
     Eigen::MatrixXd NumGrad();
 
     void writeParameterFile(const std::string& file) const;
-    void writeUFFFile(const std::string& file) const;
+    void writeFFFile(const std::string& file) const;
 
     // json writeParameter() const;
-    json writeUFF() const;
+    json writeFF() const;
 
     json Bonds() const;
     json Angles() const;
@@ -265,25 +252,16 @@ public:
     json vdWs() const;
 
     void setBonds(const json& bonds);
-    void setBonds(const TContainer& bonds, std::vector<std::set<int>>& ignored_vdw, TContainer& angels, TContainer& dihedrals, TContainer& inversions);
-
     void setAngles(const json& angles);
-    void setAngles(const TContainer& angles, const std::vector<std::set<int>>& ignored_vdw);
-
     void setDihedrals(const json& dihedrals);
-    void setDihedrals(const TContainer& dihedrals);
-
     void setInversions(const json& inversions);
-    void setInversions(const TContainer& inversions);
-
-    void setvdWs(const json& vdws);
-    void setvdWs(const std::vector<std::set<int>>& ignored_vdw);
+    // void setvdWs(const json& vdws);
 
     void readParameterFile(const std::string& file);
-    void readUFFFile(const std::string& file);
+    void readFFFile(const std::string& file);
 
     void readParameter(const json& parameters);
-    void readUFF(const json& parameters);
+    void readFF(const json& parameters);
 
     void setInitialisation(bool initialised) { m_initialised = initialised; }
 
@@ -363,6 +341,9 @@ private:
     int m_calc_gradient = 0;
 
     int m_threads = 1;
+    bool m_variable = true, m_const = true;
     std::vector<QMDFFThread*> m_stored_threads;
     CxxThreadPool* m_threadpool;
+    hbonds4::H4Correction m_h4correction;
+    DFTD3Interface* m_d3;
 };

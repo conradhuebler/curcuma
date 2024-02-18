@@ -28,9 +28,8 @@
  */
 
 #include "hbonds.h"
-#ifdef USE_D4
+#include "src/core/dftd3interface.h"
 #include "src/core/dftd4interface.h"
-#endif
 
 #include "src/core/qmdff_par.h"
 #include "src/core/topology.h"
@@ -60,7 +59,7 @@ int QMDFFThread::execute()
     return 0;
 }
 
-void QMDFFThread::readUFF(const json& parameter)
+void QMDFFThread::readFF(const json& parameter)
 {
     //  json parameter = MergeJson(UFFParameterJson, parameters);
     /*
@@ -90,7 +89,6 @@ double QMDFFThread::StretchEnergy(double rAB, double reAB, double kAB, double a)
 {
     double ratio = reAB / rAB;
     double energy = kAB * (1 + pow(ratio, a) - 2 * pow(ratio, a * 0.5));
-    // double energy = (0.5 * kij * (distance - r) * (distance - r)) * m_final_factor * m_bond_scaling;
     if (isnan(energy))
         return 0;
     else
@@ -118,12 +116,10 @@ double QMDFFThread::CalculateStretchEnergy()
         Vector x = Position(a);
         Vector y = Position(b);
         Matrix derivate;
-        double r0 = // BondStretching(x, y, derivate, m_CalculateGradient);
-
-            energy += StretchEnergy(Distance(xa, xb, ya, yb, za, zb), bond.reAB, bond.kAB, bond.exponA); //(0.5 * bond.kij * (r0 - bond.r0) * (r0 - bond.r0)) * m_final_factor * m_bond_scaling;
+        energy += StretchEnergy(Distance(xa, xb, ya, yb, za, zb), bond.reAB, bond.kAB, bond.exponA);
         if (m_CalculateGradient) {
             if (m_calc_gradient == 0) {
-                double diff = 0; //(bond.kij) * (r0 - bond.r0) * m_final_factor * m_bond_scaling;
+                double diff = 0;
                 m_gradient.row(a) += diff * derivate.row(0);
                 m_gradient.row(b) += diff * derivate.row(1);
 
@@ -213,11 +209,19 @@ double QMDFFThread::CalculateAngleBending()
         if (std::abs(costheta - pi) < threshold)
 
             angle_function = [this](const Eigen::Vector3d& a, const Eigen::Vector3d& b, const Eigen::Vector3d& c, double thetae, double kabc, double reAB, double reAC) -> double {
-                return this->LinearAngleBend(a, b, c, thetae, kabc, reAB, reAC);
+                double val = this->LinearAngleBend(a, b, c, thetae, kabc, reAB, reAC);
+                if (std::isnan(val))
+                    return 0;
+                else
+                    return val;
             };
         else
             angle_function = [this](const Eigen::Vector3d& a, const Eigen::Vector3d& b, const Eigen::Vector3d& c, double thetae, double kabc, double reAB, double reAC) -> double {
-                return this->AngleBend(a, b, c, thetae, kabc, reAB, reAC);
+                double val = this->AngleBend(a, b, c, thetae, kabc, reAB, reAC);
+                if (std::isnan(val))
+                    return 0;
+                else
+                    return val;
             };
 
         double e = angle_function(atom_a, atom_b, atom_c, angle.thetae, angle.kabc, angle.reAB, angle.reAC); //(angle.kijk * (angle.C0 + angle.C1 * costheta + angle.C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling;
@@ -629,43 +633,54 @@ double QMDFFThread::CalculateElectrostatic()
 
 QMDFF::QMDFF(const json& controller)
 {
-    json parameter = MergeJson(UFFParameterJson, controller);
+    json parameter = MergeJson(QMDFFParameterJson, controller);
+    // std::cout << parameter << std::endl;
+
     m_threadpool = new CxxThreadPool();
     m_threadpool->setProgressBar(CxxThreadPool::ProgressBarType::None);
 
     std::string param_file = parameter["param_file"];
-    std::string uff_file = parameter["uff_file"];
+    std::string uff_file = parameter["ff_file"];
     if (param_file.compare("none") != 0) {
         readParameterFile(param_file);
     }
 
     if (uff_file.compare("none") != 0) {
-        readUFFFile(uff_file);
+        readFFFile(uff_file);
     }
 
     m_final_factor = 1 / 2625.15 * 4.19;
     m_d = parameter["differential"].get<double>();
+    json d3settings = DFTD3Settings;
+    // the following parameter are simply taken from the HF calculation with def2-SVP basis set (later should be not important)
+    d3settings["d_s6"] = 1.0;
+    d3settings["d_s8"] = s8;
+    d3settings["d_s9"] = 1.0;
 
-    readUFF(parameter);
+    d3settings["d_a1"] = a1;
+    d3settings["d_a2"] = a2;
+    d3settings["d_alp"] = 1;
+
+    m_d3 = new DFTD3Interface(d3settings);
+    m_h4correction.allocate(m_atom_types.size());
+
+    readFF(parameter);
 
     m_writeparam = parameter["writeparam"];
-    m_writeuff = parameter["writeuff"];
+    m_writeuff = parameter["writeff"];
     m_verbose = parameter["verbose"];
     m_rings = parameter["rings"];
     m_threads = parameter["threads"];
-    m_scaling = 1.4;
-    // m_au = au;
-}
-
-QMDFF::QMDFF()
-{
-    m_threadpool = new CxxThreadPool();
+    m_const = parameter["const"];
+    m_variable = parameter["variable"];
+    // std::cout << "Calculating variable " << int(m_variable) << " and constants terms " << int(m_const) << std::endl;
     m_scaling = 1.4;
     // m_au = au;
 }
 
 QMDFF::~QMDFF()
 {
+    delete m_d3;
     delete m_threadpool;
     for (int i = 0; i < m_stored_threads.size(); ++i)
         delete m_stored_threads[i];
@@ -686,7 +701,7 @@ void QMDFF::setParameter(const json& parameter)
 
 json QMDFF::writeParameter() const
 {
-    json parameters = writeUFF();
+    json parameters = writeFF();
     parameters["bonds"] = Bonds();
     // parameters["angles"] = Angles();
     // parameters["dihedrals"] = Dihedrals();
@@ -698,7 +713,7 @@ void QMDFF::Initialise()
 {
     if (m_initialised)
         return;
-    std::cout << "Initialising QMDFF (see S. Grimmme, J. Chem. Theory Comput. 2014, 10, 10, 4497–4514 [10.1021/ct500573f]) for the original publication!" << std::endl;
+    // std::cout << "Initialising QMDFF (see S. Grimmme, J. Chem. Theory Comput. 2014, 10, 10, 4497–4514 [10.1021/ct500573f]) for the original publication!" << std::endl;
 
     m_uff_atom_types = std::vector<int>(m_atom_types.size(), 0);
     m_coordination = std::vector<int>(m_atom_types.size(), 0);
@@ -738,293 +753,57 @@ void QMDFF::Initialise()
 
     if (m_rings)
         m_identified_rings = Topology::FindRings(m_stored_bonds, m_atom_types.size());
+    /*
+        bonds.clean();
+        setBonds(bonds, ignored_vdw, angles, dihedrals, inversions);
 
-    bonds.clean();
-    setBonds(bonds, ignored_vdw, angles, dihedrals, inversions);
+        angles.clean();
+        setAngles(angles, ignored_vdw);
 
-    angles.clean();
-    setAngles(angles, ignored_vdw);
+        dihedrals.clean();
+        setDihedrals(dihedrals);
 
-    dihedrals.clean();
-    setDihedrals(dihedrals);
+        inversions.clean();
+        setInversions(inversions);
 
-    inversions.clean();
-    setInversions(inversions);
-
-    nonbonds.clean();
-    setvdWs(ignored_vdw);
-
+        nonbonds.clean();
+        setvdWs(ignored_vdw);
+        */
     if (m_writeparam.compare("none") != 0)
         writeParameterFile(m_writeparam + ".json");
 
     if (m_writeuff.compare("none") != 0)
-        writeUFFFile(m_writeuff + ".json");
+        writeFFFile(m_writeuff + ".json");
 
     AutoRanges();
     m_initialised = true;
 }
 
-void QMDFF::setBonds(const TContainer& bonds, std::vector<std::set<int>>& ignored_vdw, TContainer& angels, TContainer& dihedrals, TContainer& inversions)
+void QMDFF::setMolecule(const std::vector<int>& atom_types, const std::vector<std::array<double, 3>>& geometry)
 {
-    for (const auto& bond : bonds.Storage()) {
-        QMDFFBond b;
-
-        b.a = bond[0];
-        b.b = bond[1];
-        double xa = (m_geometry)(b.a, 0) * m_au;
-        double xb = (m_geometry)(b.b, 0) * m_au;
-
-        double ya = (m_geometry)(b.a, 1) * m_au;
-        double yb = (m_geometry)(b.b, 1) * m_au;
-
-        double za = (m_geometry)(b.a, 2) * m_au;
-        double zb = (m_geometry)(b.b, 2) * m_au;
-
-        b.reAB = Topology::Distance(xa, xb, ya, yb, za, zb); // BondRestLength(b.i, b.j, bond_order);
-        b.kAB = 100; // 0.5 * m_bond_force * cZi * cZj / (b.r0 * b.r0 * b.r0);
-        double kaA = ka(m_atom_types[b.a]);
-        double kaB = ka(m_atom_types[b.b]);
-        double dEN = Elements::PaulingEN[m_atom_types[b.a]] - Elements::PaulingEN[m_atom_types[b.b]];
-        b.exponA = kaA * kaB + kEN * dEN * dEN;
-        b.distance = 0;
-        m_qmdffbonds.push_back(b);
-
-        int i = bond[0];
-        int j = bond[1];
-
-        std::vector<int> k_bodies;
-        for (auto t : m_stored_bonds[i]) {
-            k_bodies.push_back(t);
-
-            if (t == j)
-                continue;
-            angels.insert({ i, std::min(t, j), std::max(j, t) });
-            ignored_vdw[i].insert(t);
-        }
-
-        std::vector<int> l_bodies;
-        for (auto t : m_stored_bonds[j]) {
-            l_bodies.push_back(t);
-
-            if (t == i)
-                continue;
-            angels.insert({ std::min(i, t), j, std::max(t, i) });
-            ignored_vdw[j].insert(t);
-        }
-
-        for (int k : k_bodies) {
-            for (int l : l_bodies) {
-                if (k == i || k == j || k == l || i == j || i == l || j == l)
-                    continue;
-                dihedrals.insert({ k, i, j, l });
-
-                ignored_vdw[i].insert(k);
-                ignored_vdw[i].insert(l);
-                ignored_vdw[j].insert(k);
-                ignored_vdw[j].insert(l);
-                ignored_vdw[k].insert(l);
-                ignored_vdw[l].insert(k);
-            }
-        }
-        if (m_stored_bonds[i].size() == 3) {
-            inversions.insert({ i, m_stored_bonds[i][0], m_stored_bonds[i][1], m_stored_bonds[i][2] });
-        }
-        if (m_stored_bonds[j].size() == 3) {
-            inversions.insert({ j, m_stored_bonds[j][0], m_stored_bonds[j][1], m_stored_bonds[j][2] });
-        }
-    }
-}
-
-void QMDFF::setAngles(const TContainer& angles, const std::vector<std::set<int>>& ignored_vdw)
-{
-    for (const auto& angle : angles.Storage()) {
-
-        QMDFFAngle a;
-
-        a.a = angle[0];
-        a.b = angle[1];
-        a.c = angle[2];
-        if (a.a == a.b || a.a == a.c || a.b == a.c)
-            continue;
-
-        QMDFFBond b;
-
-        b.a = angle[1];
-        b.b = angle[2];
-        b.distance = 1;
-#pragma message("which distance should be used")
-        double xa = (m_geometry)(a.a, 0) * m_au;
-        double xb = (m_geometry)(a.b, 0) * m_au;
-        double xc = (m_geometry)(a.c, 0) * m_au;
-
-        double ya = (m_geometry)(a.a, 1) * m_au;
-        double yb = (m_geometry)(a.b, 1) * m_au;
-        double yc = (m_geometry)(a.c, 1) * m_au;
-
-        double za = (m_geometry)(a.a, 2) * m_au;
-        double zb = (m_geometry)(a.b, 2) * m_au;
-        double zc = (m_geometry)(a.c, 2) * m_au;
-
-        b.reAB = Topology::Distance(xb, xc, yb, yc, zb, zc); // BondRestLength(b.i, b.j, bond_order);
-        b.kAB = 100; // 0.5 * m_bond_force * cZi * cZj / (b.r0 * b.r0 * b.r0);
-        double kaA = ka(m_atom_types[b.a]);
-        double kaB = ka(m_atom_types[b.b]);
-        double dEN = Elements::PaulingEN[m_atom_types[b.a]] - Elements::PaulingEN[m_atom_types[b.b]];
-        b.exponA = ka13 + kb13 * kaA * kaB;
-        b.distance = 1;
-        m_qmdffbonds.push_back(b);
-
-        a.reAB = Topology::Distance(xa, xb, ya, yb, za, zb);
-        a.reAC = Topology::Distance(xa, xc, ya, yc, za, zc);
-        auto atom_0 = m_geometry.row(a.a);
-        auto atom_1 = m_geometry.row(a.b);
-        auto atom_2 = m_geometry.row(a.c);
-
-        auto vec_1 = atom_0 - atom_1; //{ atom_0[0] - atom_1[0], atom_0[1] - atom_1[1], atom_0[2] - atom_1[2] };
-        auto vec_2 = atom_0 - atom_2; //{ atom_0[0] - atom_2[0], atom_0[1] - atom_2[1], atom_0[2] - atom_2[2] };
-
-        a.thetae = (vec_1.dot(vec_2) / sqrt(vec_1.dot(vec_1)) * sqrt(vec_2.dot(vec_2))) * 360 / 2.0 / pi;
-        a.kabc = 1;
-
-        m_qmdffangle.push_back(a);
-    }
-}
-
-void QMDFF::setDihedrals(const TContainer& dihedrals)
-{
-    for (const auto& dihedral : dihedrals.Storage()) {
-        UFFDihedral d;
-        d.i = dihedral[0];
-        d.j = dihedral[1];
-        d.k = dihedral[2];
-        d.l = dihedral[3];
-
-        d.n = 2;
-        double f = pi / 180.0;
-        double bond_order = 1;
-        d.V = 2;
-        d.n = 3;
-        d.phi0 = 180 * f;
-
-        if (std::find(Conjugated.cbegin(), Conjugated.cend(), m_uff_atom_types[d.k]) != Conjugated.cend() && std::find(Conjugated.cbegin(), Conjugated.cend(), m_uff_atom_types[d.j]) != Conjugated.cend())
-            bond_order = 2;
-        else if (std::find(Triples.cbegin(), Triples.cend(), m_uff_atom_types[d.k]) != Triples.cend() || std::find(Triples.cbegin(), Triples.cend(), m_uff_atom_types[d.j]) != Triples.cend())
-            bond_order = 3;
-        else
-            bond_order = 1;
-
-        if (m_coordination[d.j] == 4 && m_coordination[d.k] == 4) // 2*sp3
-        {
-            d.V = sqrt(UFFParameters[m_uff_atom_types[d.j]][cV] * UFFParameters[m_uff_atom_types[d.k]][cV]);
-            d.phi0 = 180 * f;
-            d.n = 3;
-        }
-        if (m_coordination[d.j] == 3 && m_coordination[d.k] == 3) // 2*sp2
-        {
-            d.V = 5 * sqrt(UFFParameters[m_uff_atom_types[d.j]][cU] * UFFParameters[m_uff_atom_types[d.k]][cU]) * (1 + 4.18 * log(bond_order));
-            d.phi0 = 180 * f;
-            d.n = 2;
-        } else if ((m_coordination[d.j] == 4 && m_coordination[d.k] == 3) || (m_coordination[d.j] == 3 && m_coordination[d.k] == 4)) {
-            d.V = sqrt(UFFParameters[m_uff_atom_types[d.j]][cV] * UFFParameters[m_uff_atom_types[d.k]][cV]);
-            d.phi0 = 0 * f;
-            d.n = 6;
-
-        } else {
-            d.V = 5 * sqrt(UFFParameters[m_uff_atom_types[d.j]][cU] * UFFParameters[m_uff_atom_types[d.k]][cU]) * (1 + 4.18 * log(bond_order));
-            d.phi0 = 90 * f;
-        }
-
-        m_uffdihedral.push_back(d);
-    }
-}
-
-void QMDFF::setInversions(const TContainer& inversions)
-{
-    for (const auto& inversion : inversions.Storage()) {
-        const int i = inversion[0];
-        if (m_coordination[i] != 3)
-            continue;
-
-        UFFInversion inv;
-        inv.i = i;
-        inv.j = inversion[1];
-        inv.k = inversion[2];
-        inv.l = inversion[3];
-
-        double C0 = 0.0;
-        double C1 = 0.0;
-        double C2 = 0.0;
-        double f = pi / 180.0;
-        double kijkl = 0;
-        if (6 <= m_atom_types[i] && m_atom_types[i] <= 8) {
-            C0 = 1.0;
-            C1 = -1.0;
-            C2 = 0.0;
-            kijkl = 6;
-            if (m_atom_types[inv.j] == 8 || m_atom_types[inv.k] == 8 || m_atom_types[inv.l] == 8)
-                kijkl = 50;
-        } else {
-            double w0 = pi / 180.0;
-            switch (m_atom_types[i]) {
-            // if the central atom is phosphorous
-            case 15:
-                w0 *= 84.4339;
-                break;
-
-                // if the central atom is arsenic
-            case 33:
-                w0 *= 86.9735;
-                break;
-
-                // if the central atom is antimonium
-            case 51:
-                w0 *= 87.7047;
-                break;
-
-                // if the central atom is bismuth
-            case 83:
-                w0 *= 90.0;
-                break;
-            }
-            C2 = 1.0;
-            C1 = -4.0 * cos(w0 * f);
-            C0 = -(C1 * cos(w0 * f) + C2 * cos(2.0 * w0 * f));
-            kijkl = 22.0 / (C0 + C1 + C2);
-        }
-        inv.C0 = C0;
-        inv.C1 = C1;
-        inv.C2 = C2;
-        inv.kijkl = kijkl;
-        m_uffinversion.push_back(inv);
-    }
-}
-
-void QMDFF::setvdWs(const std::vector<std::set<int>>& ignored_vdw)
-{
+    m_atom_types = atom_types;
+    m_geometry = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
     for (int i = 0; i < m_atom_types.size(); ++i) {
-        for (int j = i + 1; j < m_atom_types.size(); ++j) {
-            // if (std::find(ignored_vdw[i].begin(), ignored_vdw[i].end(), j) != ignored_vdw[i].end() || std::find(ignored_vdw[j].begin(), ignored_vdw[j].end(), i) != ignored_vdw[j].end())
-            //     continue;
-            UFFvdW v;
-            v.i = i;
-            v.j = j;
-
-            double cDi = UFFParameters[m_uff_atom_types[v.i]][cD];
-            double cDj = UFFParameters[m_uff_atom_types[v.j]][cD];
-            double cxi = UFFParameters[m_uff_atom_types[v.i]][cx];
-            double cxj = UFFParameters[m_uff_atom_types[v.j]][cx];
-            v.Dij = sqrt(cDi * cDj) * 2;
-
-            v.xij = sqrt(cxi * cxj);
-
-            m_uffvdwaals.push_back(v);
-        }
+        m_geometry(i, 0) = geometry[i][0];
+        m_geometry(i, 1) = geometry[i][1];
+        m_geometry(i, 2) = geometry[i][2];
     }
+    m_gradient = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
+    m_d3->InitialiseMolecule(m_atom_types);
+    m_h4correction.allocate(m_atom_types.size());
+}
+
+void QMDFF::setMolecule(const std::vector<int>& atom_types, const Matrix& geometry)
+{
+    m_atom_types = atom_types;
+    m_geometry = geometry;
+    m_gradient = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
+    m_d3->InitialiseMolecule(m_atom_types);
 }
 
 void QMDFF::writeParameterFile(const std::string& file) const
 {
-    json parameters = writeUFF();
+    json parameters = writeFF();
     parameters["bonds"] = Bonds();
     parameters["angles"] = Angles();
     parameters["dihedrals"] = Dihedrals();
@@ -1034,11 +813,11 @@ void QMDFF::writeParameterFile(const std::string& file) const
     parameterfile << parameters;
 }
 
-void QMDFF::writeUFFFile(const std::string& file) const
+void QMDFF::writeFFFile(const std::string& file) const
 {
-    json parameters = writeUFF();
+    json parameters = writeFF();
     std::ofstream parameterfile(file);
-    parameterfile << writeUFF();
+    parameterfile << writeFF();
 }
 
 json QMDFF::Bonds() const
@@ -1128,21 +907,22 @@ json QMDFF::vdWs() const
     return vdws;
 }
 
-json QMDFF::writeUFF() const
+json QMDFF::writeFF() const
 {
     json parameters;
 
     return parameters;
 }
-void QMDFF::readUFF(const json& parameters)
+void QMDFF::readFF(const json& parameters)
 {
     json parameter = MergeJson(UFFParameterJson, parameters);
+    setParameter(parameter);
 }
 
 void QMDFF::readParameter(const json& parameters)
 {
     m_gradient = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
-    readUFF(parameters);
+    readFF(parameters);
 
     AutoRanges();
     m_initialised = true;
@@ -1220,7 +1000,7 @@ void QMDFF::setInversions(const json& inversions)
         m_uffinversion.push_back(inv);
     }
 }
-
+/*
 void QMDFF::setvdWs(const json& vdws)
 {
     m_uffvdwaals.clear();
@@ -1236,8 +1016,8 @@ void QMDFF::setvdWs(const json& vdws)
         m_uffvdwaals.push_back(v);
     }
 }
-
-void QMDFF::readUFFFile(const std::string& file)
+*/
+void QMDFF::readFFFile(const std::string& file)
 {
     nlohmann::json parameters;
     std::ifstream parameterfile(file);
@@ -1246,7 +1026,7 @@ void QMDFF::readUFFFile(const std::string& file)
     } catch (nlohmann::json::type_error& e) {
     } catch (nlohmann::json::parse_error& e) {
     }
-    readUFF(parameters);
+    readFF(parameters);
 }
 
 void QMDFF::readParameterFile(const std::string& file)
@@ -1265,31 +1045,35 @@ void QMDFF::AutoRanges()
 {
     for (int i = 0; i < m_threads; ++i) {
         QMDFFThread* thread = new QMDFFThread(i, m_threads);
-        thread->readUFF(writeUFF());
+        thread->readFF(writeFF());
         thread->setMolecule(m_atom_types, &m_geometry);
         m_threadpool->addThread(thread);
         m_stored_threads.push_back(thread);
-        for (int j = int(i * m_qmdffbonds.size() / double(m_threads)); j < int((i + 1) * m_qmdffbonds.size() / double(m_threads)); ++j)
-            thread->AddBond(m_qmdffbonds[j]);
+        if (m_variable)
+            for (int j = int(i * m_qmdffbonds.size() / double(m_threads)); j < int((i + 1) * m_qmdffbonds.size() / double(m_threads)); ++j)
+                thread->AddBond(m_qmdffbonds[j]);
+        if (m_variable)
+            for (int j = int(i * m_qmdffangle.size() / double(m_threads)); j < int((i + 1) * m_qmdffangle.size() / double(m_threads)); ++j)
+                thread->AddAngle(m_qmdffangle[j]);
 
-        for (int j = int(i * m_qmdffangle.size() / double(m_threads)); j < int((i + 1) * m_qmdffangle.size() / double(m_threads)); ++j)
-            thread->AddAngle(m_qmdffangle[j]);
+        if (m_const)
+            for (int j = int(i * m_uffdihedral.size() / double(m_threads)); j < int((i + 1) * m_uffdihedral.size() / double(m_threads)); ++j)
+                thread->AddDihedral(m_uffdihedral[j]);
 
-        for (int j = int(i * m_uffdihedral.size() / double(m_threads)); j < int((i + 1) * m_uffdihedral.size() / double(m_threads)); ++j)
-            thread->AddDihedral(m_uffdihedral[j]);
-
-        for (int j = int(i * m_uffinversion.size() / double(m_threads)); j < int((i + 1) * m_uffinversion.size() / double(m_threads)); ++j)
-            thread->AddInversion(m_uffinversion[j]);
-
-        for (int j = int(i * m_uffvdwaals.size() / double(m_threads)); j < int((i + 1) * m_uffvdwaals.size() / double(m_threads)); ++j)
-            thread->AddvdW(m_uffvdwaals[j]);
+        if (m_const)
+            for (int j = int(i * m_uffinversion.size() / double(m_threads)); j < int((i + 1) * m_uffinversion.size() / double(m_threads)); ++j)
+                thread->AddInversion(m_uffinversion[j]);
+        /*
+                for (int j = int(i * m_uffvdwaals.size() / double(m_threads)); j < int((i + 1) * m_uffvdwaals.size() / double(m_threads)); ++j)
+                    thread->AddvdW(m_uffvdwaals[j]);
+                */
     }
 
     m_uff_bond_end = m_qmdffbonds.size();
     m_uff_angle_end = m_qmdffangle.size();
     m_uff_dihedral_end = m_uffdihedral.size();
     m_uff_inv_end = m_uffinversion.size();
-    m_uff_vdw_end = m_uffvdwaals.size();
+    // m_uff_vdw_end = m_uffvdwaals.size();
 }
 
 void QMDFF::UpdateGeometry(const double* coord)
@@ -1378,6 +1162,21 @@ Eigen::MatrixXd QMDFF::NumGrad()
 double QMDFF::Calculate(bool grd, bool verbose)
 {
     m_CalculateGradient = grd;
+    hbonds4::atom_t geometry[m_atom_types.size()];
+    for (int i = 0; i < m_atom_types.size(); ++i) {
+        geometry[i].x = m_geometry(i, 0) * m_au;
+        geometry[i].y = m_geometry(i, 1) * m_au;
+        geometry[i].z = m_geometry(i, 2) * m_au;
+        geometry[i].e = m_atom_types[i];
+        m_h4correction.GradientH4()[i].x = 0;
+        m_h4correction.GradientH4()[i].y = 0;
+        m_h4correction.GradientH4()[i].z = 0;
+
+        m_h4correction.GradientHH()[i].x = 0;
+        m_h4correction.GradientHH()[i].y = 0;
+        m_h4correction.GradientHH()[i].z = 0;
+        m_d3->UpdateAtom(i, m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2));
+    }
 
     double energy = 0.0;
 
@@ -1385,7 +1184,9 @@ double QMDFF::Calculate(bool grd, bool verbose)
     double angle_energy = 0.0;
     double dihedral_energy = 0.0;
     double inversion_energy = 0.0;
-    double vdw_energy = 0.0;
+    // double vdw_energy = 0.0;
+    double d3_energy = 0;
+
     m_threadpool->setActiveThreadCount(m_threads);
 
     for (int i = 0; i < m_stored_threads.size(); ++i) {
@@ -1400,19 +1201,52 @@ double QMDFF::Calculate(bool grd, bool verbose)
         angle_energy += m_stored_threads[i]->AngleEnergy();
         dihedral_energy += m_stored_threads[i]->DihedralEnergy();
         inversion_energy += m_stored_threads[i]->InversionEnergy();
-        vdw_energy += m_stored_threads[i]->VdWEnergy();
+        // vdw_energy += m_stored_threads[i]->VdWEnergy();
         m_gradient += m_stored_threads[i]->Gradient();
     }
     /* + CalculateElectrostatic(); */
-    energy = bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy;
 
+    double energy_h4 = 0;
+    double energy_hh = 0;
+
+    if (m_const) {
+
+        if (m_h4_scaling > 1e-8)
+            energy_h4 = m_h4correction.energy_corr_h4(m_atom_types.size(), geometry);
+        if (m_hh_scaling > 1e-8)
+            m_h4correction.energy_corr_hh_rep(m_atom_types.size(), geometry);
+        for (int i = 0; i < m_atom_types.size(); ++i) {
+            m_gradient(i, 0) += m_final_factor * m_h4_scaling * m_h4correction.GradientH4()[i].x + m_final_factor * m_hh_scaling * m_h4correction.GradientHH()[i].x;
+            m_gradient(i, 1) += m_final_factor * m_h4_scaling * m_h4correction.GradientH4()[i].y + m_final_factor * m_hh_scaling * m_h4correction.GradientHH()[i].y;
+            m_gradient(i, 2) += m_final_factor * m_h4_scaling * m_h4correction.GradientH4()[i].z + m_final_factor * m_hh_scaling * m_h4correction.GradientHH()[i].z;
+        }
+
+        if (grd) {
+            double grad[3 * m_atom_types.size()];
+            d3_energy = m_d3->DFTD3Calculation(grad);
+            for (int i = 0; i < m_atom_types.size(); ++i) {
+                double val = grad[3 * i + 0] * au;
+                if (!std::isnan(val) && std::abs(val) < 1e10)
+                    m_gradient(i, 0) += val;
+                val = grad[3 * i + 1] * au;
+                if (!std::isnan(val) && std::abs(val) < 1e10)
+                    m_gradient(i, 1) += val;
+                val = grad[3 * i + 2] * au;
+                if (!std::isnan(val) && std::abs(val) < 1e10)
+                    m_gradient(i, 2) += val;
+            }
+        } else
+            d3_energy = m_d3->DFTD3Calculation(0);
+        energy += m_final_factor * m_h4_scaling * energy_h4 + m_final_factor * m_hh_scaling * energy_hh + d3_energy;
+    }
+    energy = bond_energy + angle_energy + dihedral_energy + inversion_energy; // + vdw_energy;
     if (verbose) {
         std::cout << "Total energy " << energy << " Eh. Sum of " << std::endl
                   << "Bond Energy " << bond_energy << " Eh" << std::endl
                   << "Angle Energy " << angle_energy << " Eh" << std::endl
                   << "Dihedral Energy " << dihedral_energy << " Eh" << std::endl
                   << "Inversion Energy " << inversion_energy << " Eh" << std::endl
-                  << "Nonbonded Energy " << vdw_energy << " Eh" << std::endl
+                  << "Nonbonded Energy " << d3_energy + m_final_factor * m_h4_scaling * energy_h4 + m_final_factor * m_hh_scaling * energy_hh << " Eh" << std::endl
                   << std::endl;
 
         for (int i = 0; i < m_atom_types.size(); ++i) {
