@@ -1,6 +1,6 @@
 /*
  * <RMSD calculator for chemical structures.>
- * Copyright (C) 2019 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -37,6 +37,7 @@
 #include <map>
 #include <mutex>
 #include <queue>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -803,32 +804,35 @@ void RMSDDriver::HeavyTemplate()
 
 void RMSDDriver::TemplateFree()
 {
+
     Molecule ref_mol = m_reference;
     Molecule tar_mol = m_target;
+    for (int i = 0; i < 2; ++i) {
 
-    Geometry cached_reference = m_reference.getGeometry();
-    Geometry cached_target = m_target.getGeometry();
+        Geometry cached_reference = m_reference.getGeometry();
+        Geometry cached_target = m_target.getGeometry();
 
-    Geometry tref = GeometryTools::TranslateMolecule(m_reference, m_reference.Centroid(true), Position{ 0, 0, 0 });
-    Geometry tget = GeometryTools::TranslateMolecule(m_target, m_target.Centroid(true), Position{ 0, 0, 0 });
-    ref_mol.setGeometry(tref);
-    tar_mol.setGeometry(tget);
+        Geometry tref = GeometryTools::TranslateMolecule(m_reference, m_reference.Centroid(true), Position{ 0, 0, 0 });
+        Geometry tget = GeometryTools::TranslateMolecule(m_target, m_target.Centroid(true), Position{ 0, 0, 0 });
+        ref_mol.setGeometry(tref);
+        tar_mol.setGeometry(tget);
+        /*
+            if (m_moi) {
+                ref_mol.CalculateRotationalConstants();
+                tar_mol.CalculateRotationalConstants();
 
-    if (m_moi) {
-        ref_mol.CalculateRotationalConstants();
-        tar_mol.CalculateRotationalConstants();
+                Eigen::MatrixXd tar = tget.transpose();
+                Eigen::MatrixXd ref = tref.transpose();
 
-        Eigen::MatrixXd tar = tget.transpose();
-        Eigen::MatrixXd ref = tref.transpose();
+                Geometry rotated_reference = ref.transpose() * ref_mol.AlignmentAxes();
+                Geometry rotated_target = tar.transpose() * tar_mol.AlignmentAxes();
 
-        Geometry rotated_reference = ref.transpose() * ref_mol.AlignmentAxes();
-        Geometry rotated_target = tar.transpose() * tar_mol.AlignmentAxes();
-
-        ref_mol.setGeometry(rotated_reference);
-        tar_mol.setGeometry(rotated_target);
-        ref_mol.writeXYZFile("reference.moi.xyz");
-        tar_mol.writeXYZFile("target.moi.xyz");
-    } else {
+                ref_mol.setGeometry(rotated_reference);
+                tar_mol.setGeometry(rotated_target);
+                ref_mol.writeXYZFile("reference.moi.xyz");
+                tar_mol.writeXYZFile("target.moi.xyz");
+            } else {
+             */
         auto operators = GetOperateVectors(ref_mol, tar_mol);
         Eigen::Matrix3d R = operators.first;
         Eigen::MatrixXd tar = tget.transpose();
@@ -839,14 +843,17 @@ void RMSDDriver::TemplateFree()
         ref_mol.setGeometry(tref);
         Molecule tar_mol = m_target;
         tar_mol.setGeometry(rotated);
-        ref_mol.writeXYZFile("reference.nomoi.xyz");
-        tar_mol.writeXYZFile("target.nomoi.xyz");
+        //  ref_mol.writeXYZFile("reference.nomoi.xyz");
+        //  tar_mol.writeXYZFile("target.nomoi.xyz");
+        // }
+
+        std::vector<int> new_order = DistanceReorder(ref_mol, tar_mol);
+        auto rules = ApplyOrder(new_order, m_target);
+        double rmsd = Rules2RMSD(new_order);
+        m_target = rules;
+        m_target_aligned = m_target;
+        m_reorder_rules = new_order;
     }
-    std::vector<int> new_order = DistanceReorder(ref_mol, tar_mol);
-    m_target_reordered = ApplyOrder(new_order, m_target);
-    m_target = m_target_reordered;
-    m_target_aligned = m_target;
-    m_reorder_rules = new_order;
 }
 
 void RMSDDriver::FinaliseTemplate(std::pair<std::vector<int>, std::vector<int>> pairs)
@@ -863,13 +870,15 @@ void RMSDDriver::FinaliseTemplate(std::pair<std::vector<int>, std::vector<int>> 
         auto result = AlignByVectorPair(pairs);
         m_reorder_rules = result;
         m_target_reordered = ApplyOrder(m_reorder_rules, target);
-        local_results.insert(std::pair<double, std::vector<int>>(Rules2RMSD(m_reorder_rules), m_reorder_rules));
+        double rmsd = Rules2RMSD(m_reorder_rules);
+        // std::cout << rmsd << " ";
+        local_results.insert(std::pair<double, std::vector<int>>(rmsd, m_reorder_rules));
         /*std::set<int> s(result.second.begin(), result.second.end());
         if (s.size() != result.second.size()) // make sure, that only results with non-duplicate vectors are accepted
             continue;*/
         result = AlignByVectorPair(tmp, m_reorder_rules);
-        if (m_reorder_rules == result)
-            break;
+        // if (m_reorder_rules == result)
+        //     break;
         m_reorder_rules = result;
         m_target_reordered = ApplyOrder(m_reorder_rules, target);
         StructComp structcomp = Rule2RMSD(m_reorder_rules);
@@ -1158,7 +1167,7 @@ bool RMSDDriver::TemplateReorder()
 std::vector<int> RMSDDriver::DistanceReorder(const Molecule& reference, const Molecule& target)
 {
     std::map<double, std::vector<int>> rules;
-
+    /*
     std::vector<int> orderV1 = DistanceReorderV1(reference, target);
     std::vector<int> orderV2 = DistanceReorderV2(reference, target);
 
@@ -1167,24 +1176,25 @@ std::vector<int> RMSDDriver::DistanceReorder(const Molecule& reference, const Mo
 
     rules.insert(std::pair<double, std::vector<int>>(rmsdV1, orderV1));
     rules.insert(std::pair<double, std::vector<int>>(rmsdV2, orderV2));
-
+*/
     if (m_nomunkres == false) {
         std::vector<int> munkress = Munkress(reference, target);
         double rmsdM = Rules2RMSD(munkress);
+        // std::cout << rmsdM << ": " << std::endl;
         rules.insert(std::pair<double, std::vector<int>>(rmsdM, munkress));
     }
+    /*
+        if (m_update_rotation) {
+            auto orderV3 = DistanceReorderV3(reference, target);
+            double rmsdV3 = Rules2RMSD(orderV3.first);
 
-    if (m_update_rotation) {
-        auto orderV3 = DistanceReorderV3(reference, target);
-        double rmsdV3 = Rules2RMSD(orderV3.first);
-
-        rules.insert(std::pair<double, std::vector<int>>(rmsdV3, orderV3.first));
-        if (m_split) {
-            double rmsdV4 = Rules2RMSD(orderV3.second);
-            rules.insert(std::pair<double, std::vector<int>>(rmsdV4, orderV3.first));
+            rules.insert(std::pair<double, std::vector<int>>(rmsdV3, orderV3.first));
+            if (m_split) {
+                double rmsdV4 = Rules2RMSD(orderV3.second);
+                rules.insert(std::pair<double, std::vector<int>>(rmsdV4, orderV3.first));
+            }
         }
-    }
-
+    */
     for (auto iter : rules)
         m_stored_rules.push_back(iter.second);
 
@@ -1391,19 +1401,25 @@ std::vector<int> RMSDDriver::Munkress(const Molecule& reference, const Molecule&
     Eigen::MatrixXd distance = Eigen::MatrixXd::Zero(reference.AtomCount(), reference.AtomCount());
     std::vector<int> element_reference = reference.Atoms();
     std::vector<int> element_target = target.Atoms();
-
+    double min = penalty;
+    static std::random_device rd{};
+    static std::mt19937 gen{ rd() };
+    static std::normal_distribution<> d{ 0, 3 };
     for (int i = 0; i < reference.AtomCount(); ++i) {
         for (int j = 0; j < target.AtomCount(); ++j) {
-            distance(i, j) = GeometryTools::Distance(target.Atom(j).second, reference.Atom(i).second) + penalty * (target.Atom(j).first != reference.Atom(i).first);
+
+            distance(i, j) = GeometryTools::Distance(target.Atom(j).second, reference.Atom(i).second) * GeometryTools::Distance(target.Atom(j).second, reference.Atom(i).second)
+                // + (target.Atom(j).second.norm() - reference.Atom(i).second.norm())*(target.Atom(j).second.norm() - reference.Atom(i).second.norm())
+                // + d(gen)
+                + penalty * (target.Atom(j).first != reference.Atom(i).first);
         }
     }
     if (m_dmix <= 1 && 0 < m_dmix) {
         Matrix d = target.DistanceMatrix().first;
         distance = (1 - m_dmix) * distance + m_dmix * d;
     }
-    // std::cout << distance << std::endl;
+
     auto result = MunkressAssign(distance);
-    // std::cout << result << std::endl;
 
     for (int i = 0; i < result.cols(); ++i) {
         for (int j = 0; j < result.rows(); ++j) {
@@ -1413,9 +1429,6 @@ std::vector<int> RMSDDriver::Munkress(const Molecule& reference, const Molecule&
             }
         }
     }
-    // for(auto i : new_order)
-    //     std::cout << i << " ";
-    // std::cout << std::endl;
     return new_order;
 }
 
@@ -1425,7 +1438,7 @@ bool RMSDDriver::MolAlignLib()
     m_target.writeXYZFile("molalign_tar.xyz");
 
     FILE* FileOpen;
-    std::string command = m_molalign + " molaign_ref.xyz " + " molalign_tar.xyz -reorder -fast -tol " + std::to_string(m_molaligntol) + " 2>&1";
+    std::string command = m_molalign + " molaign_ref.xyz " + " molalign_tar.xyz -sort -fast -tol " + std::to_string(m_molaligntol) + " 2>&1";
     if (!m_silent)
         std::cout << command << std::endl;
     FileOpen = popen(command.c_str(), "r");
@@ -1447,10 +1460,11 @@ bool RMSDDriver::MolAlignLib()
             fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nPlease cite the follow research report!\nJ. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187\n\n");
         }
         FileIterator file("aligned.xyz", true);
+        file.Next();
         m_target_reordered = file.Next();
         m_target_aligned = m_target_reordered;
         m_target = m_target_reordered;
-        std::filesystem::remove("aligned.xyz");
+        // std::filesystem::remove("aligned.xyz");
     } else {
         if (!rndm && !error) {
             fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Molalign was not found. Consider getting it from\nhttps://github.com/qcuaeh/molalignlib\nEither adding the location of the binary to the path for executables or append\n-molalignbin /yourpath/molalign\nto your argument list!\n");

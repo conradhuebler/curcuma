@@ -182,7 +182,7 @@ int main(int argc, char **argv) {
 
         if(strcmp(argv[1], "-rmsd") == 0)
         {
-            if (argc < 4) {
+            if (argc < 3) {
                 std::cerr << "Please use curcuma for rmsd calcultion as follows\ncurcuma -rmsd A.xyz B.xyz" << std::endl;
                 std::cerr << "Additonal arguments are:" << std::endl;
                 std::cerr << "-reorder    **** Force reordering of structure!" << std::endl;
@@ -197,10 +197,15 @@ int main(int argc, char **argv) {
             Molecule mol2(argv[3]); // will only take first structure
 
             if (mol1.AtomCount() == 0 || mol2.AtomCount() == 0) {
-                std::cout << "At least one structure is empty:\n";
-                std::cout << argv[2] << " " << mol1.AtomCount() << " atoms" << std::endl;
-                std::cout << argv[3] << " " << mol2.AtomCount() << " atoms" << std::endl;
-                exit(0);
+                FileIterator file(argv[2]);
+                file.Next();
+                mol2 = file.Next();
+                if (mol2.AtomCount() == 0) {
+                    std::cout << "At least one structure is empty:\n";
+                    std::cout << argv[2] << " " << mol1.AtomCount() << " atoms" << std::endl;
+                    std::cout << argv[3] << " " << mol2.AtomCount() << " atoms" << std::endl;
+                    exit(0);
+                }
             }
 
             std::string reffile = argv[2];

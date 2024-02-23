@@ -1,6 +1,6 @@
 /*
  * < Generic force field class for curcuma . >
- * Copyright (C) 2022 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,143 +21,10 @@
 #include "src/core/qmdff_par.h"
 #include "src/core/uff_par.h"
 
+#include "forcefieldfunctions.h"
+
 #include "forcefield.h"
-
-ForceFieldThread::ForceFieldThread()
-{
-}
-
-double ForceFieldThread::LJBondStretching()
-{
-    double factor = m_final_factor * m_bond_scaling;
-    double energy = 0.0;
-    Eigen::Vector3d dx = { m_d, 0, 0 };
-    Eigen::Vector3d dy = { 0, m_d, 0 };
-    Eigen::Vector3d dz = { 0, 0, m_d };
-
-    for (int index = 0; index < m_bonds.size(); ++index) {
-        const auto& bond = m_bonds[index];
-
-        Vector i = Position(bond.i);
-        Vector j = Position(bond.j);
-
-        // Matrix derivate;
-        energy += StretchEnergy(i - j, bond.r0_ij, bond.fc, bond.exponent) * factor;
-        if (m_calculate_gradient) {
-            /*if (m_calc_gradient == 0) {
-                double diff = 0;
-                m_gradient.row(a) += diff * derivate.row(0);
-                m_gradient.row(b) += diff * derivate.row(1);
-
-            } else if (m_calc_gradient == 1) {*/
-            double d_x = (StretchEnergy(i + dx - j, bond.r0_ij, bond.fc, bond.exponent) - StretchEnergy(i - dx - j, bond.r0_ij, bond.fc, bond.exponent)) / (2 * m_d) * factor;
-            double d_y = (StretchEnergy(i + dy - j, bond.r0_ij, bond.fc, bond.exponent) - StretchEnergy(i - dy - j, bond.r0_ij, bond.fc, bond.exponent)) / (2 * m_d) * factor;
-            double d_z = (StretchEnergy(i + dz - j, bond.r0_ij, bond.fc, bond.exponent) - StretchEnergy(i - dz - j, bond.r0_ij, bond.fc, bond.exponent)) / (2 * m_d) * factor;
-            m_gradient(bond.a, 0) += d_x;
-            m_gradient(bond.a, 1) += d_y;
-            m_gradient(bond.a, 2) += d_z;
-
-            m_gradient(bond.b, 0) -= d_x;
-            m_gradient(bond.b, 1) -= d_y;
-            m_gradient(bond.b, 2) -= d_x;
-            //}
-        }
-    }
-
-    return energy;
-}
-
-double ForceFieldThread::HarmonicBondStretching()
-{
-    double factor = m_final_factor * m_bond_scaling;
-    double energy = 0.0;
-
-    for (int index = 0; index < m_bonds.size(); ++index) {
-        const auto& bond = m_bonds[index];
-        const int i = bond.i;
-        const int j = bond.j;
-
-        Vector x = Position(i);
-        Vector y = Position(j);
-        Matrix derivate;
-        double r0 = BondStretching(x, y, derivate, m_calculate_gradient);
-
-        energy += (0.5 * bond.fc * (r0 - bond.r0_ij) * (r0 - bond.r0_ij)) * factor;
-        if (m_calculate_gradient) {
-            double diff = (bond.fc) * (r0 - bond.r0_ij) * factor;
-            m_gradient.row(i) += diff * derivate.row(0);
-            m_gradient.row(j) += diff * derivate.row(1);
-        }
-    }
-
-    return energy;
-}
-
-double QMDFFThread::CalculateAngleBending()
-{
-    double threshold = 1e-2;
-    double energy = 0.0;
-    Eigen::Vector3d dx = { m_d, 0, 0 };
-    Eigen::Vector3d dy = { 0, m_d, 0 };
-    Eigen::Vector3d dz = { 0, 0, m_d };
-    for (int index = 0; index < m_qmdffangle.size(); ++index) {
-        const auto& angle = m_qmdffangle[index];
-        const int a = angle.a;
-        const int b = angle.b;
-        const int c = angle.c;
-
-        auto atom_a = Position(a);
-        auto atom_b = Position(b);
-        auto atom_c = Position(c);
-        Matrix derivate;
-        double costheta = AngleBending(atom_a, atom_b, atom_c, derivate, m_CalculateGradient);
-        std::function<double(const Eigen::Vector3d&, const Eigen::Vector3d&, const Eigen::Vector3d&, double, double, double, double)> angle_function;
-        if (std::abs(costheta - pi) < threshold)
-
-            angle_function = [this](const Eigen::Vector3d& a, const Eigen::Vector3d& b, const Eigen::Vector3d& c, double thetae, double kabc, double reAB, double reAC) -> double {
-                double val = this->LinearAngleBend(a, b, c, thetae, kabc, reAB, reAC);
-                if (std::isnan(val))
-                    return 0;
-                else
-                    return val;
-            };
-        else
-            angle_function = [this](const Eigen::Vector3d& a, const Eigen::Vector3d& b, const Eigen::Vector3d& c, double thetae, double kabc, double reAB, double reAC) -> double {
-                double val = this->AngleBend(a, b, c, thetae, kabc, reAB, reAC);
-                if (std::isnan(val))
-                    return 0;
-                else
-                    return val;
-            };
-
-        double e = angle_function(atom_a, atom_b, atom_c, angle.thetae, angle.kabc, angle.reAB, angle.reAC); //(angle.kijk * (angle.C0 + angle.C1 * costheta + angle.C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling;
-
-        if (m_CalculateGradient) {
-            if (m_calc_gradient == 0) {
-                /*
-                double sintheta = sin(acos(costheta));
-                double dEdtheta = -angle.kijk * sintheta * (angle.C1 + 4 * angle.C2 * costheta) * m_final_factor * m_angle_scaling;
-                m_gradient.row(i) += dEdtheta * derivate.row(0);
-                m_gradient.row(j) += dEdtheta * derivate.row(1);
-                m_gradient.row(k) += dEdtheta * derivate.row(2);
-                */
-            } else if (m_calc_gradient == 1) {
-                m_gradient(a, 0) += (angle_function(AddVector(atom_a, dx), atom_b, atom_c, angle.thetae, angle.kabc, angle.reAB, angle.reAC) - angle_function(SubVector(atom_a, dx), atom_b, atom_c, angle.thetae, angle.kabc, angle.reAB, angle.reAC)) / (2 * m_d);
-                m_gradient(a, 1) += (angle_function(AddVector(atom_a, dy), atom_b, atom_c, angle.thetae, angle.kabc, angle.reAB, angle.reAC) - angle_function(SubVector(atom_a, dy), atom_b, atom_c, angle.thetae, angle.kabc, angle.reAB, angle.reAC)) / (2 * m_d);
-                m_gradient(a, 2) += (angle_function(AddVector(atom_a, dz), atom_b, atom_c, angle.thetae, angle.kabc, angle.reAB, angle.reAC) - angle_function(SubVector(atom_a, dz), atom_b, atom_c, angle.thetae, angle.kabc, angle.reAB, angle.reAC)) / (2 * m_d);
-
-                m_gradient(b, 0) += (angle_function(atom_a, AddVector(atom_b, dx), atom_c, angle.thetae, angle.kabc, angle.reAB, angle.reAC) - angle_function(atom_a, SubVector(atom_b, dx), atom_c, angle.thetae, angle.kabc, angle.reAB, angle.reAC)) / (2 * m_d);
-                m_gradient(b, 1) += (angle_function(atom_a, AddVector(atom_b, dy), atom_c, angle.thetae, angle.kabc, angle.reAB, angle.reAC) - angle_function(atom_a, SubVector(atom_b, dy), atom_c, angle.thetae, angle.kabc, angle.reAB, angle.reAC)) / (2 * m_d);
-                m_gradient(b, 2) += (angle_function(atom_a, AddVector(atom_b, dz), atom_c, angle.thetae, angle.kabc, angle.reAB, angle.reAC) - angle_function(atom_a, SubVector(atom_b, dz), atom_c, angle.thetae, angle.kabc, angle.reAB, angle.reAC)) / (2 * m_d);
-
-                m_gradient(c, 0) += (angle_function(atom_a, atom_b, AddVector(atom_c, dx), angle.thetae, angle.kabc, angle.reAB, angle.reAC) - angle_function(atom_a, atom_b, SubVector(atom_c, dx), angle.thetae, angle.kabc, angle.reAB, angle.reAC)) / (2 * m_d);
-                m_gradient(c, 1) += (angle_function(atom_a, atom_b, AddVector(atom_c, dy), angle.thetae, angle.kabc, angle.reAB, angle.reAC) - angle_function(atom_a, atom_b, SubVector(atom_c, dy), angle.thetae, angle.kabc, angle.reAB, angle.reAC)) / (2 * m_d);
-                m_gradient(c, 2) += (angle_function(atom_a, atom_b, AddVector(atom_c, dz), angle.thetae, angle.kabc, angle.reAB, angle.reAC) - angle_function(atom_a, atom_b, SubVector(atom_c, dz), angle.thetae, angle.kabc, angle.reAB, angle.reAC)) / (2 * m_d);
-            }
-        }
-    }
-    return energy;
-}
+#include "forcefieldthread.h"
 
 ForceField::ForceField(const json& controller)
 {
@@ -178,7 +45,7 @@ void ForceField::UpdateGeometry(const double* coord)
     }
 }
 
-void ForceField::UpdateGeometry(const std::vector<std::array<double, 3>>& geometry);
+void ForceField::UpdateGeometry(const std::vector<std::array<double, 3>>& geometry)
 {
 #pragma message("replace with raw data")
     for (int i = 0; i < m_natoms; ++i) {
@@ -190,4 +57,131 @@ void ForceField::UpdateGeometry(const std::vector<std::array<double, 3>>& geomet
 
 void ForceField::setParameter(const json& parameter)
 {
+}
+
+void ForceField::setBonds(const json& bonds)
+{
+    m_bonds.clear();
+    for (int i = 0; i < bonds.size(); ++i) {
+        json bond = bonds[i].get<json>();
+        Bond b;
+        b.type = bond["type"];
+        b.i = bond["i"];
+        b.j = bond["j"];
+        b.k = bond["k"];
+        b.distance = bond["distance"];
+
+        b.r0_ij = bond["r0_ij"];
+        b.r0_ik = bond["r0_ik"];
+
+        b.fc = bond["fc"];
+        m_bonds.push_back(b);
+    }
+}
+
+void ForceField::setAngles(const json& angles)
+{
+    m_angles.clear();
+    for (int i = 0; i < angles.size(); ++i) {
+        json angle = angles[i].get<json>();
+        Angle a;
+
+        a.type = angle["type"];
+
+        a.i = angle["i"];
+        a.j = angle["j"];
+        a.k = angle["k"];
+        a.C0 = angle["C0"];
+        a.C1 = angle["C1"];
+        a.C2 = angle["C2"];
+        a.fc = angle["fc"];
+        a.r0_ij = angle["r0_ij"];
+        a.r0_ik = angle["r0_ik"];
+        a.theta0_ijk = angle["theta0_ijk"];
+        m_angles.push_back(a);
+    }
+}
+
+void ForceField::setDihedrals(const json& dihedrals)
+{
+    m_dihedrals.clear();
+    for (int i = 0; i < dihedrals.size(); ++i) {
+        json dihedral = dihedrals[i].get<json>();
+        Dihedral d;
+        d.type = dihedral["type"];
+
+        d.i = dihedral["i"];
+        d.j = dihedral["j"];
+        d.k = dihedral["k"];
+        d.l = dihedral["l"];
+        d.V = dihedral["V"];
+        d.n = dihedral["n"];
+        d.phi0 = dihedral["phi0"];
+        m_dihedrals.push_back(d);
+    }
+}
+
+void ForceField::setInversions(const json& inversions)
+{
+    m_inversions.clear();
+    for (int i = 0; i < inversions.size(); ++i) {
+        json inversion = inversions[i].get<json>();
+        Inversion inv;
+        inv.type = inversion["type"];
+
+        inv.i = inversion["i"];
+        inv.j = inversion["j"];
+        inv.k = inversion["k"];
+        inv.l = inversion["l"];
+        inv.fc = inversion["fc"];
+        inv.C0 = inversion["C0"];
+        inv.C1 = inversion["C1"];
+        inv.C2 = inversion["C2"];
+
+        m_inversions.push_back(inv);
+    }
+}
+
+void ForceField::setvdWs(const json& vdws)
+{
+    m_vdWs.clear();
+    for (int i = 0; i < vdws.size(); ++i) {
+        json vdw = vdws[i].get<json>();
+        vdW v;
+        v.type = vdw["type"];
+
+        v.i = vdw["i"];
+        v.j = vdw["j"];
+        v.C_ij = vdw["C_ij"];
+        v.r0_ij = vdw["r0_ij"];
+
+        m_vdWs.push_back(v);
+    }
+}
+
+void ForceField::AutoRanges()
+{
+    for (int i = 0; i < m_threads; ++i) {
+        ForceFieldThread* thread = new ForceFieldThread(i, m_threads);
+        thread->setGeometry(m_geometry);
+        m_threadpool->addThread(thread);
+        m_stored_threads.push_back(thread);
+        for (int j = int(i * m_bonds.size() / double(m_threads)); j < int((i + 1) * m_bonds.size() / double(m_threads)); ++j)
+            thread->addBond(m_bonds[j]);
+
+        for (int j = int(i * m_angles.size() / double(m_threads)); j < int((i + 1) * m_angles.size() / double(m_threads)); ++j)
+            thread->addAngle(m_angles[j]);
+
+        for (int j = int(i * m_dihedrals.size() / double(m_threads)); j < int((i + 1) * m_dihedrals.size() / double(m_threads)); ++j)
+            thread->addDihedral(m_dihedrals[j]);
+
+        for (int j = int(i * m_inversions.size() / double(m_threads)); j < int((i + 1) * m_inversions.size() / double(m_threads)); ++j)
+            thread->addInversion(m_inversions[j]);
+
+        for (int j = int(i * m_vdWs.size() / double(m_threads)); j < int((i + 1) * m_vdWs.size() / double(m_threads)); ++j)
+            thread->addvdW(m_vdWs[j]);
+
+        for (int j = int(i * m_EQs.size() / double(m_threads)); j < int((i + 1) * m_EQs.size() / double(m_threads)); ++j)
+            thread->addEQ(m_EQs[j]);
+    }
 }

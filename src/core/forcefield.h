@@ -1,6 +1,6 @@
 /*
  * < Generic force field class for curcuma . >
- * Copyright (C) 2022 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,6 +21,8 @@
 
 #include "src/core/global.h"
 
+#include "forcefieldthread.h"
+
 #include "hbonds.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
@@ -36,6 +38,7 @@
 #include "src/core/qmdff_par.h"
 #include "src/core/uff_par.h"
 
+#include <functional>
 #include <set>
 #include <vector>
 
@@ -43,40 +46,6 @@
 
 #include "json.hpp"
 using json = nlohmann::json;
-
-struct Bond {
-    int i = 0, j = 0, k = 0, distance = 0;
-    double fc = 0, exponent = 0, r0_ij = 0, r0_ik = 0;
-};
-
-struct Angle {
-    int i = 0, j = 0, k = 0;
-    double fc = 0, r0_ij = 0, r0_ik = 0, theta0_ijk = 0;
-};
-
-class ForceFieldThread : public CxxThread {
-
-public:
-    ForceFieldThread();
-
-private:
-    double CalculateBondContribution();
-
-    double HarmonicBondStretching();
-
-    double LJBondStretching();
-
-    double m_final_factor = 1;
-    double m_bond_scaling = 1;
-    double m_au = 1;
-    double m_d = 1e-3;
-    int m_calc_gradient = 1;
-    bool m_calculate_gradient = true;
-
-    Matrix m_geometry, m_gradient;
-
-    std::vector<Bond> m_bonds;
-};
 
 class ForceField {
 
@@ -93,8 +62,26 @@ public:
     Matrix Gradient() const { return m_gradient; }
 
     void setParameter(const json& parameter);
+    void setParameterFile(const std::string& file);
 
 private:
+    void AutoRanges();
+    void setBonds(const json& bonds);
+    void setAngles(const json& angles);
+    void setDihedrals(const json& dihedrals);
+    void setInversions(const json& inversions);
+
+    std::vector<ForceFieldThread*> m_stored_threads;
+    CxxThreadPool* m_threadpool;
+    void setvdWs(const json& vdws);
+
     Matrix m_geometry, m_gradient;
     int m_natoms = 0;
+    int m_threads = 1;
+    std::vector<Bond> m_bonds;
+    std::vector<Angle> m_angles;
+    std::vector<Dihedral> m_dihedrals;
+    std::vector<Inversion> m_inversions;
+    std::vector<vdW> m_vdWs;
+    std::vector<EQ> m_EQs;
 };

@@ -208,6 +208,7 @@ double QMDFFThread::CalculateAngleBending()
         auto atom_b = Position(b);
         auto atom_c = Position(c);
         Matrix derivate;
+
         double costheta = AngleBending(atom_a, atom_b, atom_c, derivate, m_CalculateGradient);
         std::function<double(const Eigen::Vector3d&, const Eigen::Vector3d&, const Eigen::Vector3d&, double, double, double, double)> angle_function;
         if (std::abs(costheta - pi) < threshold)

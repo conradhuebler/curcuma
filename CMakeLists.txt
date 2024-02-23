@@ -164,9 +164,9 @@ set(curcuma_core_SRC
         src/core/eigen_uff.cpp
         src/core/qmdff.cpp
         src/core/eht.cpp
-        #src/core/forcefield.h
-        #src/core/forcefield.cpp
-        #src/core/forcefieldfunctions.h
+        src/core/forcefieldthread.cpp
+        src/core/forcefield.cpp
+        src/core/forcefieldfunctions.h
         #src/core/forcefield_terms/qmdff_terms.h
         src/tools/formats.h
         src/tools/geometry.h
@@ -277,12 +277,12 @@ if(USE_D3)
     if(NOT TARGET s-dftd3)
         add_subdirectory(external/simple-dftd3)
     endif()
-    #if(HELPERS)
+    if(HELPERS)
         add_executable(dftd3_helper
            src/helpers/dftd3_helper.cpp
     )
     target_link_libraries(dftd3_helper PUBLIC s-dftd3 gfortran pthread) 
-    #endif()
+    endif()
     set(curcuma_D3_SRC
            src/core/dftd3interface.cpp
     )
