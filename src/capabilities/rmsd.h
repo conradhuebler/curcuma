@@ -263,9 +263,12 @@ private:
 
     void TemplateFree();
 
+    void DistanceTemplate();
+
     void CheckTopology();
 
     std::pair<std::vector<int>, std::vector<int>> PrepareHeavyTemplate();
+    std::pair<std::vector<int>, std::vector<int>> PrepareDistanceTemplate(int number);
 
     std::pair<std::vector<int>, std::vector<int>> PrepareAtomTemplate(int templateatom);
     std::pair<std::vector<int>, std::vector<int>> PrepareAtomTemplate(const std::vector<int>& templateatom);

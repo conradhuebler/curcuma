@@ -70,6 +70,6 @@ private:
     xtb_TMolecule m_xtb_mol = NULL;
     xtb_TCalculator m_xtb_calc = NULL;
     xtb_TResults m_xtb_res = NULL;
-    bool m_initialised = false;
+    bool m_initialised = false, m_setup = false;
     json m_xtbsettings;
 };

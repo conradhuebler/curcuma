@@ -126,20 +126,22 @@ bool XTBInterface::UpdateMolecule(const double* coord)
 double XTBInterface::GFNCalculation(int parameter, double* grad)
 {
     double energy = 0;
-    xtb_setVerbosity(m_env, XTB_VERBOSITY_MUTED);
-    if (parameter == 0) {
-        xtb_loadGFN0xTB(m_env, m_xtb_mol, m_xtb_calc, NULL);
-    } else if (parameter == 1) {
-        xtb_loadGFN1xTB(m_env, m_xtb_mol, m_xtb_calc, NULL);
-    } else if (parameter == 2) {
-        xtb_loadGFN2xTB(m_env, m_xtb_mol, m_xtb_calc, NULL);
-    } else if (parameter == 66) {
-        xtb_loadGFNFF(m_env, m_xtb_mol, m_xtb_calc, NULL);
+    if (!m_setup) {
+        xtb_setVerbosity(m_env, XTB_VERBOSITY_MUTED);
+        if (parameter == 0) {
+            xtb_loadGFN0xTB(m_env, m_xtb_mol, m_xtb_calc, NULL);
+        } else if (parameter == 1) {
+            xtb_loadGFN1xTB(m_env, m_xtb_mol, m_xtb_calc, NULL);
+        } else if (parameter == 2) {
+            xtb_loadGFN2xTB(m_env, m_xtb_mol, m_xtb_calc, NULL);
+        } else if (parameter == 66) {
+            xtb_loadGFNFF(m_env, m_xtb_mol, m_xtb_calc, NULL);
+        }
+        xtb_setAccuracy(m_env, m_xtb_calc, m_accuracy);
+        xtb_setMaxIter(m_env, m_xtb_calc, m_maxiter);
+        xtb_setElectronicTemp(m_env, m_xtb_calc, m_temp);
+        m_setup = true;
     }
-    xtb_setAccuracy(m_env, m_xtb_calc, m_accuracy);
-    xtb_setMaxIter(m_env, m_xtb_calc, m_maxiter);
-    xtb_setElectronicTemp(m_env, m_xtb_calc, m_temp);
-
     xtb_singlepoint(m_env, m_xtb_mol, m_xtb_calc, m_xtb_res);
     if (xtb_checkEnvironment(m_env)) {
         xtb_showEnvironment(m_env, NULL);
