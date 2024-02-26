@@ -61,16 +61,17 @@ inline Geometry applyRotation(const Geometry& geometry, const Eigen::Matrix3d& r
     return geometry * rotation;
 }
 
-inline Geometry getAligned(const Geometry& reference, const Geometry& target, int factor)
+inline Geometry getAligned(const Geometry& reference, const Geometry& target, int factor, Eigen::Matrix3d& rotation)
 {
-    Eigen::Matrix3d rotation = BestFitRotation(reference, target, factor);
+    rotation = BestFitRotation(reference, target, factor);
     return applyRotation(target, rotation);
 }
 
 inline Molecule getAligned(const Molecule& reference, const Molecule& target, int factor)
 {
     Molecule result = target;
-    result.setGeometry(getAligned(reference.getGeometry(), target.getGeometry(), factor));
+    Eigen::Matrix3d rotation;
+    result.setGeometry(getAligned(reference.getGeometry(), target.getGeometry(), factor, rotation));
     return result;
 }
 

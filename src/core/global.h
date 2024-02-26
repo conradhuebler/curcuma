@@ -85,19 +85,19 @@ public:
     {
         m_shelf.clear();
     }
-    inline void addItem(const std::vector<int>& vector, double rmsd)
+    inline void addItem(const std::vector<int>& vector, double rmsd, const Eigen::Matrix3d& rotation)
     {
-        m_shelf.insert(std::pair<double, std::vector<int>>(rmsd, vector));
+        m_shelf.insert(std::pair<double, std::pair<std::vector<int>, Eigen::Matrix3d>>(rmsd, std::pair<std::vector<int>, Eigen::Matrix3d>(vector, rotation)));
         if (m_shelf.size() >= m_size)
             m_shelf.erase(--m_shelf.end());
     }
 
-    inline const std::map<double, std::vector<int>>* data() const { return &m_shelf; }
+    inline const std::map<double, std::pair<std::vector<int>, Eigen::Matrix3d>>* data() const { return &m_shelf; }
     inline int size() const { return data()->size(); }
 
 private:
     unsigned int m_size;
-    std::map<double, std::vector<int>> m_shelf;
+    std::map<double, std::pair<std::vector<int>, Eigen::Matrix3d>> m_shelf;
 };
 
 inline std::pair<Position, Position> Vector2PositionPair(const Vector& vector)

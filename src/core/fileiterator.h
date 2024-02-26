@@ -30,11 +30,18 @@
 
 class FileIterator {
 public:
+    inline FileIterator(bool silent = false)
+
+    {
+    }
+
     inline FileIterator(const std::string& filename, bool silent = false)
         : m_filename(filename)
     {
         if (!silent)
             std::cerr << "Opening file " << m_filename << std::endl;
+        m_basename = filename;
+        m_basename.erase(m_basename.end() - 4, m_basename.end());
         m_file = new std::ifstream(m_filename);
         m_lines = CountLines();
         m_init = CheckNext();
@@ -45,6 +52,19 @@ public:
         m_filename = std::string(filename);
         if (!silent)
             std::cerr << "Opening file " << m_filename << std::endl;
+        m_basename = std::string(filename);
+        ;
+        m_basename.erase(m_basename.end() - 4, m_basename.end());
+        m_file = new std::ifstream(m_filename);
+        m_lines = CountLines();
+        m_init = CheckNext();
+    }
+
+    inline void setFile(const std::string& filename)
+    {
+        m_filename = filename;
+        m_basename = filename;
+        m_basename.erase(m_basename.end() - 4, m_basename.end());
         m_file = new std::ifstream(m_filename);
         m_lines = CountLines();
         m_init = CheckNext();
@@ -69,6 +89,8 @@ public:
     inline int MaxMolecules() const { return m_mols; }
 
     inline int CurrentMolecule() const { return m_current_mol; }
+
+    inline std::string Basename() const { return m_basename; }
 
 private:
     bool CheckNext()
@@ -133,7 +155,7 @@ private:
             std::istreambuf_iterator<char>(), '\n');
     }
 
-    std::string m_filename;
+    std::string m_filename, m_basename;
     std::ifstream* m_file;
     bool m_end = false, m_init = false;
     Molecule m_current;

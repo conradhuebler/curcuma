@@ -49,7 +49,7 @@ public:
 
     int execute() override;
 
-    const std::map<double, std::vector<int>>* data() const { return &m_shelf; }
+    const std::map<double, std::pair<std::vector<int>, Eigen::Matrix3d>>* data() const { return &m_shelf; }
     inline int Match() const { return m_match; }
     inline int Calculations() const { return m_calculations; }
 
@@ -58,14 +58,14 @@ private:
     Molecule m_reference_molecule;
     Geometry m_reference;
     Matrix m_reference_topology;
-    std::map<double, std::vector<int>> m_shelf;
+    std::map<double, std::pair<std::vector<int>, Eigen::Matrix3d>> m_shelf;
     std::vector<int> m_intermediate;
     double m_connected_mass = 0;
     int m_element = -1;
     int m_match;
     int m_topo = 0;
     int m_calculations = 0;
-    std::function<double(const Molecule&)> m_evaluator;
+    std::function<double(const Molecule&, Eigen::Matrix3d&)> m_evaluator;
 };
 
 class IntermediateStorage {
@@ -75,18 +75,18 @@ public:
     {
     }
 
-    inline void addItem(const std::vector<int>& vector, double rmsd)
+    inline void addItem(const std::vector<int>& vector, double rmsd, const Eigen::Matrix3d& rotation)
     {
-        m_shelf.insert(std::pair<double, std::vector<int>>(rmsd, vector));
+        m_shelf.insert(std::pair<double, std::pair<std::vector<int>, Eigen::Matrix3d>>(rmsd, std::pair<std::vector<int>, Eigen::Matrix3d>(vector, rotation)));
         if (m_shelf.size() >= m_size)
             m_shelf.erase(--m_shelf.end());
     }
 
-    const std::map<double, std::vector<int>>* data() const { return &m_shelf; }
+    const std::map<double, std::pair<std::vector<int>, Eigen::Matrix3d>>* data() const { return &m_shelf; }
 
 private:
     unsigned int m_size;
-    std::map<double, std::vector<int>> m_shelf;
+    std::map<double, std::pair<std::vector<int>, Eigen::Matrix3d>> m_shelf;
 };
 
 static const json RMSDJson = {
@@ -275,11 +275,8 @@ private:
 
     void FinaliseTemplate(std::pair<std::vector<int>, std::vector<int>> initial);
 
-    std::vector<int> DistanceReorder(const Molecule& reference, const Molecule& target);
+    std::vector<int> DistanceReorder(const Molecule& reference, const Molecule& target, int max = 2);
 
-    std::vector<int> DistanceReorderV1(const Molecule& reference, const Molecule& target);
-    std::vector<int> DistanceReorderV2(const Molecule& reference, const Molecule& target);
-    std::pair<std::vector<int>, std::vector<int>> DistanceReorderV3(const Molecule& reference, const Molecule& target);
     std::vector<int> FillOrder(const Molecule& reference, const Molecule& target, const std::vector<int>& order);
     std::vector<int> Munkress(const Molecule& reference, const Molecule& target);
 
@@ -315,14 +312,18 @@ private:
     std::vector<double> m_last_rmsd;
     std::vector<int> m_reorder_rules;
     std::vector<std::vector<int>> m_stored_rules;
+    std::vector<Eigen::Matrix3d> m_stored_rotations;
+    std::vector<double> m_tmp_rmsd;
     std::map<int, std::vector<int>> m_connectivity;
     double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99, m_damping = 0.8, m_dmix = -1;
     bool m_check = false;
     bool m_check_connections = false, m_postprocess = true, m_noreorder = false, m_swap = false, m_dynamic_center = false;
     bool m_update_rotation = false, m_split = false, m_nomunkres = false;
     int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1, m_method = 1, m_htopo_diff = -1, m_partial_rmsd = -1, m_threads = 1, m_element = 7, m_write = 0, m_topo = 0;
+    int m_munkress_cycle = 1;
     int m_molaligntol = 10;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
     std::vector<int> m_initial, m_element_templates;
     std::string m_molalign = "molalign";
+    std::map<double, std::pair<int, int>> m_distance_reference, m_distance_target;
 };

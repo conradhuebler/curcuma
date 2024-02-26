@@ -182,8 +182,10 @@ int main(int argc, char **argv) {
 
         if(strcmp(argv[1], "-rmsd") == 0)
         {
-            if (argc < 3) {
+            if (argc < 2) {
                 std::cerr << "Please use curcuma for rmsd calcultion as follows\ncurcuma -rmsd A.xyz B.xyz" << std::endl;
+                std::cerr << "Please use curcuma for rmsd calcultion as follows\ncurcuma -rmsd AB.xyz" << std::endl;
+
                 std::cerr << "Additonal arguments are:" << std::endl;
                 std::cerr << "-reorder    **** Force reordering of structure!" << std::endl;
                 std::cerr << "-check      **** Check methyl group connectivity." << std::endl;
@@ -193,28 +195,36 @@ int main(int argc, char **argv) {
                 exit(1);
             }
 
-            Molecule mol1(argv[2]); // will only take first structure
-            Molecule mol2(argv[3]); // will only take first structure
+            Molecule molecule1, molecule2;
+            FileIterator file1, file2;
+            std::string reffile;
+            std::string tarfile;
 
-            if (mol1.AtomCount() == 0 || mol2.AtomCount() == 0) {
-                FileIterator file(argv[2]);
-                file.Next();
-                mol2 = file.Next();
-                if (mol2.AtomCount() == 0) {
-                    std::cout << "At least one structure is empty:\n";
-                    std::cout << argv[2] << " " << mol1.AtomCount() << " atoms" << std::endl;
-                    std::cout << argv[3] << " " << mol2.AtomCount() << " atoms" << std::endl;
-                    exit(0);
-                }
+            if (std::filesystem::exists(std::string(argv[2]))) {
+                file1.setFile(argv[2]);
+                molecule1 = file1.Next();
+                reffile = file1.Basename();
+            }
+            if (std::filesystem::exists(argv[3])) {
+                file2.setFile(argv[3]);
+                tarfile = file2.Basename();
+                molecule2 = file2.Next();
+            } else {
+                tarfile = file1.Basename();
+                molecule2 = file1.Next();
             }
 
-            std::string reffile = argv[2];
-            std::string tarfile = argv[3];
-            reffile.erase(reffile.end() - 4, reffile.end());
-            tarfile.erase(tarfile.end() - 4, tarfile.end());
+            if (molecule1.AtomCount() == 0 || molecule2.AtomCount() == 0) {
+
+                std::cout << "At least one structure is empty:\n";
+                std::cout << argv[2] << " " << molecule1.AtomCount() << " atoms" << std::endl;
+                std::cout << argv[3] << " " << molecule2.AtomCount() << " atoms" << std::endl;
+                exit(0);
+            }
+
             RMSDDriver* driver = new RMSDDriver(controller, false);
-            driver->setReference(mol1);
-            driver->setTarget(mol2);
+            driver->setReference(molecule1);
+            driver->setTarget(molecule2);
             driver->start();
             std::cout << "RMSD for two molecules " << driver->RMSD() << std::endl;
 
