@@ -783,11 +783,13 @@ void QMDFF::Initialise()
     AutoRanges();
     m_initialised = true;
 }
-
-void QMDFF::setMolecule(const std::vector<int>& atom_types, const std::vector<std::array<double, 3>>& geometry)
+/*
+void QMDFF::setMolecule(const std::vector<int>& atom_types, const Matrix& geometry)
 {
     m_atom_types = atom_types;
-    m_geometry = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
+    m_geometry = geometry; //Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
+
+
     for (int i = 0; i < m_atom_types.size(); ++i) {
         m_geometry(i, 0) = geometry[i][0];
         m_geometry(i, 1) = geometry[i][1];
@@ -797,7 +799,7 @@ void QMDFF::setMolecule(const std::vector<int>& atom_types, const std::vector<st
     m_d3->InitialiseMolecule(m_atom_types);
     m_h4correction.allocate(m_atom_types.size());
 }
-
+*/
 void QMDFF::setMolecule(const std::vector<int>& atom_types, const Matrix& geometry)
 {
     m_atom_types = atom_types;
@@ -1097,15 +1099,15 @@ void QMDFF::UpdateGeometry(const double* coord)
     }
 }
 
-void QMDFF::UpdateGeometry(const std::vector<std::array<double, 3>>& geometry)
+void QMDFF::UpdateGeometry(const Matrix& geometry)
 {
     if (m_gradient.rows() != m_atom_types.size())
         m_gradient = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
 
     for (int i = 0; i < m_atom_types.size(); ++i) {
-        m_geometry(i, 0) = geometry[i][0];
-        m_geometry(i, 1) = geometry[i][1];
-        m_geometry(i, 2) = geometry[i][2];
+        m_geometry(i, 0) = geometry(i, 0);
+        m_geometry(i, 1) = geometry(i, 1);
+        m_geometry(i, 2) = geometry(i, 2);
 
         m_gradient(i, 0) = 0;
         m_gradient(i, 1) = 0;

@@ -1,6 +1,6 @@
 /*
  * < C++ XTB and tblite Interface >
- * Copyright (C) 2020 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -48,6 +48,10 @@ DFTD4Interface::DFTD4Interface(const json& controller)
 
     dftd4::d4par(parameter["d4_func"], m_par, parameter["d4_atm"]);
     PrintParameter();
+}
+
+DFTD4Interface::DFTD4Interface()
+{
 }
 
 DFTD4Interface::~DFTD4Interface()

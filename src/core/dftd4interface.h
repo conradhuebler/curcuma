@@ -1,6 +1,6 @@
 /*
  * < C++ XTB and tblite Interface >
- * Copyright (C) 2020 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -43,6 +43,8 @@ static json DFTD4Settings{
 class DFTD4Interface {
 public:
     DFTD4Interface(const json& controller);
+    DFTD4Interface();
+
     ~DFTD4Interface();
 
     bool InitialiseMolecule(const Molecule& molecule, double factor = 1);

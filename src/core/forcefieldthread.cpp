@@ -37,19 +37,26 @@ ForceFieldThread::ForceFieldThread(int thread, int threads)
 
 int ForceFieldThread::execute()
 {
-    //    m_CalculateGradient = grd;
-    m_d4_energy = 0;
-    m_d3_energy = 0;
+    m_angle_energy = 0.0;
+    m_bond_energy = 0.0;
+    m_vdw_energy = 0;
+    m_rep_energy = 0;
+    m_inversion_energy = 0;
+    m_dihedral_energy = 0;
+    m_angle_energy = 0;
+    m_bond_energy = 0.0;
 
-    m_bond_energy = CalculateBondContribution();
+    CalculateUFFBondContribution();
+    CalculateUFFAngleContribution();
+    CalculateUFFDihedralContribution();
+    CalculateUFFInversionContribution();
+    CalculateUFFvdWContribution();
+
     /*
-    m_angle_energy = CalculateAngleBending();
-    m_dihedral_energy = CalculateDihedral();
-    m_inversion_energy = CalculateInversion();
-    m_vdw_energy = CalculateNonBonds();
+    CalculateQMDFFBondContribution();
+    CalculateQMDFFAngleContribution();
+    CalculateQMDFFDihedralContribution();
     */
-    /* + CalculateElectrostatic(); */
-    m_energy = m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy + m_vdw_energy;
     return 0;
 }
 
@@ -97,10 +104,9 @@ void ForceFieldThread::addEQ(const EQ& EQs)
         m_qmdff_EQs.push_back(EQs);
 }
 
-double ForceFieldThread::CalculateUFFBondContribution()
+void ForceFieldThread::CalculateUFFBondContribution()
 {
     double factor = m_final_factor * m_bond_scaling;
-    double energy = 0.0;
 
     for (int index = 0; index < m_uff_bonds.size(); ++index) {
         const auto& bond = m_uff_bonds[index];
@@ -110,19 +116,17 @@ double ForceFieldThread::CalculateUFFBondContribution()
         Matrix derivate;
         double rij = UFF::BondStretching(i, j, derivate, m_calculate_gradient);
 
-        energy += (0.5 * bond.fc * (rij - bond.r0_ij) * (rij - bond.r0_ij)) * factor;
+        m_bond_energy += (0.5 * bond.fc * (rij - bond.r0_ij) * (rij - bond.r0_ij)) * factor;
         if (m_calculate_gradient) {
             double diff = (bond.fc) * (rij - bond.r0_ij) * factor;
             m_gradient.row(bond.i) += diff * derivate.row(0);
             m_gradient.row(bond.j) += diff * derivate.row(1);
         }
     }
-    return energy;
 }
 
-double ForceFieldThread::CalculateUFFAngleContribution()
+void ForceFieldThread::CalculateUFFAngleContribution()
 {
-    double energy = 0;
     for (int index = 0; index < m_uff_angles.size(); ++index) {
         const auto& angle = m_uff_angles[index];
         auto i = Position(angle.i);
@@ -130,7 +134,7 @@ double ForceFieldThread::CalculateUFFAngleContribution()
         auto k = Position(angle.k);
         Matrix derivate;
         double costheta = UFF::AngleBending(i, j, k, derivate, m_calculate_gradient);
-        double e = (angle.fc * (angle.C0 + angle.C1 * costheta + angle.C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling;
+        m_angle_energy += (angle.fc * (angle.C0 + angle.C1 * costheta + angle.C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling;
 
         if (m_calculate_gradient) {
             if (m_calc_gradient == 0) {
@@ -142,12 +146,10 @@ double ForceFieldThread::CalculateUFFAngleContribution()
             }
         }
     }
-    return energy;
 }
 
-double ForceFieldThread::CalculateUFFDihedralContribution()
+void ForceFieldThread::CalculateUFFDihedralContribution()
 {
-    double energy = 0;
     for (int index = 0; index < m_uff_dihedrals.size(); ++index) {
         const auto& dihedral = m_uff_dihedrals[index];
         Eigen::Vector3d i = Position(dihedral.i);
@@ -170,7 +172,7 @@ double ForceFieldThread::CalculateUFFDihedralContribution()
         // Dihedral(i, j, k, l, dihedral.V, dihedral.n, dihedral.phi0) * m_final_factor * m_dihedral_scaling;
         if (isnan(tmp_energy))
             continue;
-        energy += tmp_energy;
+        m_dihedral_energy += tmp_energy;
         if (m_calculate_gradient) {
             Eigen::Vector3d kj = k - j;
             Eigen::Vector3d kl = k - l;
@@ -203,12 +205,10 @@ double ForceFieldThread::CalculateUFFDihedralContribution()
             m_gradient(dihedral.k, 2) += dEdk(2);
         }
     }
-    return energy;
 }
 
-double ForceFieldThread::CalculateUFFInversionContribution()
+void ForceFieldThread::CalculateUFFInversionContribution()
 {
-    double energy = 0;
 
     for (int index = 0; index < m_uff_inversions.size(); ++index) {
         const auto& inversion = m_uff_inversions[index];
@@ -230,7 +230,7 @@ double ForceFieldThread::CalculateUFFInversionContribution()
         double tmp_energy = (inversion.fc * (inversion.C0 + inversion.C1 * sinY + inversion.C2 * cos2Y)) * m_final_factor * m_inversion_scaling;
         if (std::isnan(tmp_energy))
             continue;
-        energy += tmp_energy;
+        m_inversion_energy += tmp_energy;
 
         // energy += Inversion(i, j, k, l, d_forceConstant, C0, C1, C2);
         if (m_calculate_gradient) {
@@ -292,12 +292,11 @@ double ForceFieldThread::CalculateUFFInversionContribution()
             m_gradient(inversion.l, 2) += dEdY * dYdl(2);
         }
     }
-    return energy;
 }
 
-double ForceFieldThread::CalculateUFFvdWContribution()
+void ForceFieldThread::CalculateUFFvdWContribution()
 {
-    double energy = 0;
+
     for (int index = 0; index < m_uff_vdWs.size(); ++index) {
         const auto& vdw = m_uff_vdWs[index];
         Eigen::Vector3d i = Position(vdw.i);
@@ -305,7 +304,8 @@ double ForceFieldThread::CalculateUFFvdWContribution()
         double ij = (i - j).norm() * m_au;
         double pow6 = pow((vdw.r0_ij / ij), 6);
 
-        energy += vdw.C_ij * (-2 * pow6 * m_vdw_scaling + pow6 * pow6 * m_rep_scaling) * m_final_factor;
+        m_vdw_energy += vdw.C_ij * (-2 * pow6 * m_vdw_scaling) * m_final_factor;
+        m_rep_energy += vdw.C_ij * (pow6 * pow6 * m_rep_scaling) * m_final_factor;
         if (m_calculate_gradient) {
             double diff = 12 * vdw.C_ij * (pow6 * m_vdw_scaling - pow6 * pow6 * m_rep_scaling) / (ij * ij) * m_final_factor;
             m_gradient(vdw.i, 0) += diff * (i(0) - j(0));
@@ -317,13 +317,11 @@ double ForceFieldThread::CalculateUFFvdWContribution()
             m_gradient(vdw.j, 2) -= diff * (i(2) - j(2));
         }
     }
-    return energy;
 }
 
-double ForceFieldThread::CalculateQMDFFBondContribution()
+void ForceFieldThread::CalculateQMDFFBondContribution()
 {
     double factor = m_final_factor * m_bond_scaling;
-    double energy = 0.0;
     Eigen::Vector3d dx = { m_d, 0, 0 };
     Eigen::Vector3d dy = { 0, m_d, 0 };
     Eigen::Vector3d dz = { 0, 0, m_d };
@@ -335,7 +333,7 @@ double ForceFieldThread::CalculateQMDFFBondContribution()
         Vector j = Position(bond.j);
 
         // Matrix derivate;
-        energy += QMDFF::LJStretchEnergy((i - j).norm(), bond.r0_ij, bond.fc, bond.exponent) * factor;
+        m_bond_energy += QMDFF::LJStretchEnergy((i - j).norm(), bond.r0_ij, bond.fc, bond.exponent) * factor;
         if (m_calculate_gradient) {
             /*if (m_calc_gradient == 0) {
                 double diff = 0;
@@ -356,8 +354,6 @@ double ForceFieldThread::CalculateQMDFFBondContribution()
             //}
         }
     }
-
-    return energy;
 }
 /*
 double ForceFieldThread::HarmonicBondStretching()
@@ -367,10 +363,9 @@ double ForceFieldThread::HarmonicBondStretching()
     return energy;
 }
 */
-double ForceFieldThread::CalculateQMDFFAngleContribution()
+void ForceFieldThread::CalculateQMDFFAngleContribution()
 {
     double threshold = 1e-2;
-    double energy = 0.0;
     Eigen::Vector3d dx = { m_d, 0, 0 };
     Eigen::Vector3d dy = { 0, m_d, 0 };
     Eigen::Vector3d dz = { 0, 0, m_d };
@@ -405,7 +400,7 @@ double ForceFieldThread::CalculateQMDFFAngleContribution()
                     return val;
             };
 
-        double e = angle_function(i, j, k, angle.theta0_ijk, angle.fc, angle.r0_ij, angle.r0_ik); //(angle.kijk * (angle.C0 + angle.C1 * costheta + angle.C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling;
+        m_angle_energy += angle_function(i, j, k, angle.theta0_ijk, angle.fc, angle.r0_ij, angle.r0_ik); //(angle.kijk * (angle.C0 + angle.C1 * costheta + angle.C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling;
 
         if (m_calculate_gradient) {
             if (m_calc_gradient == 0) {
@@ -425,5 +420,79 @@ double ForceFieldThread::CalculateQMDFFAngleContribution()
             }
         }
     }
-    return energy;
+}
+
+D3Thread::D3Thread(int thread, int threads)
+    : ForceFieldThread(thread, threads)
+{
+    setAutoDelete(false);
+    m_final_factor = 1 / 2625.15 * 4.19;
+    m_d = 1e-7;
+    m_d3 = new DFTD3Interface();
+}
+
+D3Thread::~D3Thread()
+{
+    delete m_d3;
+}
+
+int D3Thread::execute()
+{
+    for (int i = 0; i < m_atom_types.size(); ++i) {
+        m_d3->UpdateAtom(i, m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2));
+    }
+
+    if (m_calculate_gradient) {
+        double grad[3 * m_atom_types.size()];
+        m_vdw_energy = m_d3->DFTD3Calculation(grad);
+        for (int i = 0; i < m_atom_types.size(); ++i) {
+            m_gradient(i, 0) += grad[3 * i + 0] * au;
+            m_gradient(i, 1) += grad[3 * i + 1] * au;
+            m_gradient(i, 2) += grad[3 * i + 2] * au;
+        }
+    } else
+        m_vdw_energy = m_d3->DFTD3Calculation(0);
+
+    return 0;
+}
+
+H4Thread::H4Thread(int thread, int threads)
+    : ForceFieldThread(thread, threads)
+{
+    setAutoDelete(false);
+    m_final_factor = 1 / 2625.15 * 4.19;
+    m_d = 1e-7;
+}
+
+H4Thread::~H4Thread()
+{
+}
+
+int H4Thread::execute()
+{
+    hbonds4::atom_t geometry[m_atom_types.size()];
+
+    for (int i = 0; i < m_atom_types.size(); ++i) {
+        geometry[i].x = m_geometry(i, 0) * m_au;
+        geometry[i].y = m_geometry(i, 1) * m_au;
+        geometry[i].z = m_geometry(i, 2) * m_au;
+        geometry[i].e = m_atom_types[i];
+        m_h4correction.GradientH4()[i].x = 0;
+        m_h4correction.GradientH4()[i].y = 0;
+        m_h4correction.GradientH4()[i].z = 0;
+
+        m_h4correction.GradientHH()[i].x = 0;
+        m_h4correction.GradientHH()[i].y = 0;
+        m_h4correction.GradientHH()[i].z = 0;
+    }
+
+    m_vdw_energy = m_h4correction.energy_corr_h4(m_atom_types.size(), geometry) * m_vdw_scaling * m_final_factor;
+    m_rep_energy = m_h4correction.energy_corr_hh_rep(m_atom_types.size(), geometry) * m_rep_scaling * m_final_factor;
+
+    for (int i = 0; i < m_atom_types.size(); ++i) {
+        m_gradient(i, 0) += m_final_factor * m_vdw_scaling * m_h4correction.GradientH4()[i].x + m_final_factor * m_rep_scaling * m_h4correction.GradientHH()[i].x;
+        m_gradient(i, 1) += m_final_factor * m_vdw_scaling * m_h4correction.GradientH4()[i].y + m_final_factor * m_rep_scaling * m_h4correction.GradientHH()[i].y;
+        m_gradient(i, 2) += m_final_factor * m_vdw_scaling * m_h4correction.GradientH4()[i].z + m_final_factor * m_rep_scaling * m_h4correction.GradientHH()[i].z;
+    }
+    return 0;
 }

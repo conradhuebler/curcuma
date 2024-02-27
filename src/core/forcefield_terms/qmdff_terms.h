@@ -20,7 +20,7 @@
 #pragma once
 
 #include <Eigen/Dense>
-
+/*
 namespace QMDFFTerms {
 
 double LJStretchEnergy(double r_ij, double r0_ij, double fc, double exponent)
@@ -75,3 +75,4 @@ double LinearAngleBend(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const
 }
 
 }
+*/

@@ -1,6 +1,6 @@
 /*
  * < C++ XTB and tblite Interface >
- * Copyright (C) 2020 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -47,6 +47,11 @@ DFTD3Interface::DFTD3Interface(const json& controller)
     m_damping = parameter["d_damping"];
     m_functional = parameter["d_func"];
     CreateParameter();
+    m_error = dftd3_new_error();
+}
+
+DFTD3Interface::DFTD3Interface()
+{
     m_error = dftd3_new_error();
 }
 

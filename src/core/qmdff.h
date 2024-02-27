@@ -61,7 +61,7 @@ public:
     virtual int execute() override;
 
     void UpdateGeometry(const double* coord);
-    void UpdateGeometry(const std::vector<std::array<double, 3>>& geometry);
+    void UpdateGeometry(const Matrix& geometry);
     void UpdateGeometry(Matrix* geometry)
     {
         m_geometry = geometry;
@@ -219,9 +219,8 @@ public:
     ~QMDFF();
 
     void UpdateGeometry(const double* coord);
-    void UpdateGeometry(const std::vector<std::array<double, 3>>& geometry);
+    void UpdateGeometry(const Matrix& geometry);
 
-    void setMolecule(const std::vector<int>& atom_types, const std::vector<std::array<double, 3>>& geometry);
     void setMolecule(const std::vector<int>& atom_types, const Matrix& geometry);
 
     void setParameter(const json& parameter);

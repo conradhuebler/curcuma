@@ -55,8 +55,15 @@ void ForceField::UpdateGeometry(const std::vector<std::array<double, 3>>& geomet
     }
 }
 
-void ForceField::setParameter(const json& parameter)
+void ForceField::setParameter(const json& parameters)
 {
+    setBonds(parameters["bonds"]);
+    setAngles(parameters["angles"]);
+    setDihedrals(parameters["dihedrals"]);
+    setInversions(parameters["inversions"]);
+    setvdWs(parameters["vdws"]);
+
+    AutoRanges();
 }
 
 void ForceField::setBonds(const json& bonds)
@@ -163,7 +170,7 @@ void ForceField::AutoRanges()
 {
     for (int i = 0; i < m_threads; ++i) {
         ForceFieldThread* thread = new ForceFieldThread(i, m_threads);
-        thread->setGeometry(m_geometry);
+        thread->setGeometry(m_geometry, false);
         m_threadpool->addThread(thread);
         m_stored_threads.push_back(thread);
         for (int j = int(i * m_bonds.size() / double(m_threads)); j < int((i + 1) * m_bonds.size() / double(m_threads)); ++j)
@@ -184,4 +191,59 @@ void ForceField::AutoRanges()
         for (int j = int(i * m_EQs.size() / double(m_threads)); j < int((i + 1) * m_EQs.size() / double(m_threads)); ++j)
             thread->addEQ(m_EQs[j]);
     }
+}
+double ForceField::Calculate(bool gradient, bool verbose)
+{
+    double energy = 0.0;
+    double d4_energy = 0;
+    double d3_energy = 0;
+    double bond_energy = 0.0;
+    double angle_energy = 0.0;
+    double dihedral_energy = 0.0;
+    double inversion_energy = 0.0;
+    double vdw_energy = 0.0;
+    double rep_energy = 0.0;
+    double eq_energy = 0.0;
+    double h4_energy = 0.0;
+    double hh_energy = 0.0;
+    for (int i = 0; i < m_stored_threads.size(); ++i) {
+        m_stored_threads[i]->UpdateGeometry(m_geometry, gradient);
+    }
+
+    m_threadpool->Reset();
+    m_threadpool->setActiveThreadCount(m_threads);
+
+    m_threadpool->StartAndWait();
+    m_threadpool->setWakeUp(m_threadpool->WakeUp() / 2.0);
+    for (int i = 0; i < m_stored_threads.size(); ++i) {
+        bond_energy += m_stored_threads[i]->BondEnergy();
+        angle_energy += m_stored_threads[i]->AngleEnergy();
+        dihedral_energy += m_stored_threads[i]->DihedralEnergy();
+        inversion_energy += m_stored_threads[i]->InversionEnergy();
+        vdw_energy += m_stored_threads[i]->VdWEnergy();
+        rep_energy += m_stored_threads[i]->RepEnergy();
+        eq_energy += m_stored_threads[i]->RepEnergy();
+
+        m_gradient += m_stored_threads[i]->Gradient();
+    }
+
+    energy = bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy;
+    if (verbose) {
+        std::cout << "Total energy " << energy << " Eh. Sum of " << std::endl
+                  << "Bond Energy " << bond_energy << " Eh" << std::endl
+                  << "Angle Energy " << angle_energy << " Eh" << std::endl
+                  << "Dihedral Energy " << dihedral_energy << " Eh" << std::endl
+                  << "Inversion Energy " << inversion_energy << " Eh" << std::endl
+                  << "Nonbonded Energy " << vdw_energy << " Eh" << std::endl
+                  << "D3 Energy " << d3_energy << " Eh" << std::endl
+                  << "D4 Energy " << d4_energy << " Eh" << std::endl
+                  << "HBondCorrection " << h4_energy << " Eh" << std::endl
+                  << "HHRepCorrection " << hh_energy << " Eh" << std::endl
+                  << std::endl;
+
+        for (int i = 0; i < m_natoms; ++i) {
+            std::cout << m_gradient(i, 0) << " " << m_gradient(i, 1) << " " << m_gradient(i, 2) << std::endl;
+        }
+    }
+    return energy;
 }

@@ -90,7 +90,7 @@ inline double Dihedral(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const
 
 namespace QMDFF {
 
-double LJStretchEnergy(double r_ij, double r0_ij, double fc, double exponent)
+inline double LJStretchEnergy(double r_ij, double r0_ij, double fc, double exponent)
 {
     const double ratio = r0_ij / r_ij;
     double energy = fc * (1 + pow(ratio, exponent) - 2 * pow(ratio, exponent * 0.5));

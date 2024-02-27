@@ -94,18 +94,38 @@ public:
     void addvdW(const vdW& vdWs);
     void addEQ(const EQ& EQs);
 
-    inline void setGeometry(const Matrix& geometry) { m_geometry = geometry; }
+    inline void UpdateGeometry(const Matrix& geometry, bool gradient)
+    {
+        m_geometry = geometry;
+        m_calculate_gradient = gradient;
+    }
+
+    inline void setGeometry(const Matrix& geometry, bool gradient)
+    {
+        m_geometry = geometry;
+        m_calculate_gradient = gradient;
+    }
+
+    double BondEnergy() { return m_bond_energy; }
+    double AngleEnergy() { return m_angle_energy; }
+    double DihedralEnergy() { return m_dihedral_energy; }
+    double InversionEnergy() { return m_inversion_energy; }
+    double VdWEnergy() { return m_vdw_energy; }
+    double RepEnergy() { return m_rep_energy; }
+    double EQEnergy() { return m_eq_energy; }
+
+    Matrix Gradient() const { return m_gradient; }
 
 private:
-    double CalculateUFFBondContribution();
-    double CalculateUFFAngleContribution();
-    double CalculateUFFDihedralContribution();
-    double CalculateUFFInversionContribution();
-    double CalculateUFFvdWContribution();
+    void CalculateUFFBondContribution();
+    void CalculateUFFAngleContribution();
+    void CalculateUFFDihedralContribution();
+    void CalculateUFFInversionContribution();
+    void CalculateUFFvdWContribution();
 
-    double CalculateQMDFFBondContribution();
-    double CalculateQMDFFAngleContribution();
-    double CalculateQMDFFDihedralContribution();
+    void CalculateQMDFFBondContribution();
+    void CalculateQMDFFAngleContribution();
+    void CalculateQMDFFDihedralContribution();
 
     // double HarmonicBondStretching();
 
@@ -119,7 +139,16 @@ private:
     std::function<double()> CalculateEQContribution;
     std::function<double()> CalculateHBondContribution;
 
-    double m_energy = 0, m_bond_energy = 0.0, m_angle_energy = 0.0, m_dihedral_energy = 0.0, m_inversion_energy = 0.0, m_vdw_energy = 0.0, m_d4_energy = 0.0, m_d3_energy = 0.0, m_energy_h4 = 0.0, m_energy_hh = 0.0;
+    std::vector<Bond> m_uff_bonds, m_qmdff_bonds;
+    std::vector<Angle> m_uff_angles, m_qmdff_angles;
+    std::vector<Dihedral> m_uff_dihedrals, m_qmdff_dihedrals;
+    std::vector<Inversion> m_uff_inversions, m_qmdff_inversions;
+    std::vector<vdW> m_uff_vdWs;
+    std::vector<EQ> m_qmdff_EQs;
+
+protected:
+    Matrix m_geometry, m_gradient;
+    double m_energy = 0, m_bond_energy = 0.0, m_angle_energy = 0.0, m_dihedral_energy = 0.0, m_inversion_energy = 0.0, m_vdw_energy = 0.0, m_rep_energy = 0.0, m_eq_energy = 0.0;
 
     double m_final_factor = 1;
     double m_bond_scaling = 1, m_angle_scaling = 1, m_dihedral_scaling = 1, m_inversion_scaling = 1, m_vdw_scaling = 1, m_rep_scaling = 1;
@@ -128,13 +157,58 @@ private:
     int m_calc_gradient = 1;
     int m_thread = 0, m_threads = 0;
     bool m_calculate_gradient = true;
+};
 
-    Matrix m_geometry, m_gradient;
+class D3Thread : public ForceFieldThread {
 
-    std::vector<Bond> m_uff_bonds, m_qmdff_bonds;
-    std::vector<Angle> m_uff_angles, m_qmdff_angles;
-    std::vector<Dihedral> m_uff_dihedrals, m_qmdff_dihedrals;
-    std::vector<Inversion> m_uff_inversions, m_qmdff_inversions;
-    std::vector<vdW> m_uff_vdWs;
-    std::vector<EQ> m_qmdff_EQs;
+public:
+    D3Thread(int thread, int threads);
+    ~D3Thread();
+    void setParamater(const json& parameter)
+    {
+        m_d3->UpdateParameters(parameter);
+    }
+
+    void Initialise(const std::vector<int>& atom_types)
+    {
+        m_atom_types = atom_types;
+        m_d3->InitialiseMolecule(m_atom_types);
+    }
+    virtual int execute() override;
+
+private:
+    DFTD3Interface* m_d3;
+    std::vector<int> m_atom_types;
+};
+
+class H4Thread : public ForceFieldThread {
+
+public:
+    H4Thread(int thread, int threads);
+    ~H4Thread();
+    void setParamater(const json& parameter)
+    {
+        m_h4correction.set_OH_O(parameter["h4_oh_o"].get<double>());
+        m_h4correction.set_OH_N(parameter["h4_oh_n"].get<double>());
+        m_h4correction.set_NH_O(parameter["h4_nh_o"].get<double>());
+        m_h4correction.set_NH_N(parameter["h4_nh_n"].get<double>());
+
+        m_h4correction.set_WH_O(parameter["h4_wh_o"].get<double>());
+        m_h4correction.set_NH4(parameter["h4_nh4"].get<double>());
+        m_h4correction.set_COO(parameter["h4_coo"].get<double>());
+        m_h4correction.set_HH_Rep_K(parameter["hh_rep_k"].get<double>());
+        m_h4correction.set_HH_Rep_E(parameter["hh_rep_e"].get<double>());
+        m_h4correction.set_HH_Rep_R0(parameter["hh_rep_r0"].get<double>());
+    }
+
+    void Initialise(const std::vector<int>& atom_types)
+    {
+        m_atom_types = atom_types;
+        m_h4correction.allocate(m_atom_types.size());
+    }
+    virtual int execute() override;
+
+private:
+    hbonds4::H4Correction m_h4correction;
+    std::vector<int> m_atom_types;
 };

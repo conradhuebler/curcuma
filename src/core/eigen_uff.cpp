@@ -1629,7 +1629,7 @@ void eigenUFF::UpdateGeometry(const double* coord)
     }
 }
 
-void eigenUFF::UpdateGeometry(const std::vector<std::array<double, 3>>& geometry)
+void eigenUFF::UpdateGeometry(const Matrix& geometry)
 {
     if (m_gradient.rows() != m_atom_types.size())
         m_gradient = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
@@ -1638,9 +1638,9 @@ void eigenUFF::UpdateGeometry(const std::vector<std::array<double, 3>>& geometry
         m_h4correction.allocate(m_atom_types.size());
     }
     for (int i = 0; i < m_atom_types.size(); ++i) {
-        m_geometry(i, 0) = geometry[i][0];
-        m_geometry(i, 1) = geometry[i][1];
-        m_geometry(i, 2) = geometry[i][2];
+        m_geometry(i, 0) = geometry(i, 0);
+        m_geometry(i, 1) = geometry(i, 1);
+        m_geometry(i, 2) = geometry(i, 2);
 
         m_gradient(i, 0) = 0;
         m_gradient(i, 1) = 0;

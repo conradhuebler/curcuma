@@ -38,6 +38,7 @@
 #endif
 
 #include "src/core/eigen_uff.h"
+#include "src/core/forcefield.h"
 #include "src/core/qmdff.h"
 
 #include <functional>
@@ -61,7 +62,7 @@ public:
 
     void getGradient(double* coord);
 
-    Matrix getGradient() const { return m_eigen_gradient; }
+    Matrix getGradient() const { return m_gradient; }
 
     Matrix Gradient() const;
 
@@ -134,6 +135,9 @@ private:
     void InitialiseQMDFF();
     void CalculateQMDFF(bool gradient, bool verbose = false);
 
+    void InitialiseFF();
+    void CalculateFF(bool gradient, bool verbose = false);
+
     json m_controller;
 
 #ifdef USE_TBLITE
@@ -152,7 +156,9 @@ private:
 
     eigenUFF* m_uff = NULL;
     QMDFF* m_qmdff = NULL;
+    ForceField* m_forcefield = NULL;
     StringList m_uff_methods = { "uff" };
+    StringList m_ff_methods = { "fuff" };
     StringList m_qmdff_method = { "qmdff" };
     StringList m_tblite_methods = { "ipea1", "gfn1", "gfn2" };
     StringList m_xtb_methods = { "gfnff", "xtb-gfn1", "xtb-gfn2" };
@@ -163,8 +169,8 @@ private:
     std::function<std::vector<std::vector<double>>()> m_bonds;
     json m_parameter;
     std::string m_method;
-    std::vector<std::array<double, 3>> m_geometry, m_gradient;
-    Matrix m_eigen_geometry, m_eigen_gradient;
+    Matrix m_geometry, m_gradient;
+    // Matrix m_eigen_geometry, m_eigen_gradient;
     double m_energy;
     double *m_coord, *m_grad;
 

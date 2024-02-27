@@ -213,17 +213,12 @@ public:
     ~eigenUFF();
 
     void UpdateGeometry(const double* coord);
-    void UpdateGeometry(const std::vector<std::array<double, 3>>& geometry);
+    void UpdateGeometry(const Matrix& geometry);
 
-    void setMolecule(const std::vector<int>& atom_types, const std::vector<std::array<double, 3>>& geometry)
+    void setMolecule(const std::vector<int>& atom_types, const Matrix& geometry)
     {
         m_atom_types = atom_types;
-        m_geometry = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
-        for (int i = 0; i < m_atom_types.size(); ++i) {
-            m_geometry(i, 0) = geometry[i][0];
-            m_geometry(i, 1) = geometry[i][1];
-            m_geometry(i, 2) = geometry[i][2];
-        }
+        m_geometry = geometry;
     }
 
     void Initialise(const std::vector<std::pair<int, int>>& formed_bonds = std::vector<std::pair<int, int>>());

@@ -1,6 +1,6 @@
 /*
  * < C++ XTB and tblite Interface >
- * Copyright (C) 2020 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -41,6 +41,8 @@ static json DFTD3Settings{
 class DFTD3Interface {
 public:
     DFTD3Interface(const json& controller);
+    DFTD3Interface();
+
     ~DFTD3Interface();
 
     bool InitialiseMolecule(const std::vector<int>& atomtypes);
