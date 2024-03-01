@@ -98,12 +98,14 @@ public:
     {
         m_geometry = geometry;
         m_calculate_gradient = gradient;
+        m_gradient = Eigen::MatrixXd::Zero(m_geometry.rows(), 3);
     }
 
     inline void setGeometry(const Matrix& geometry, bool gradient)
     {
         m_geometry = geometry;
         m_calculate_gradient = gradient;
+        m_gradient = Eigen::MatrixXd::Zero(m_geometry.rows(), 3);
     }
 
     double BondEnergy() { return m_bond_energy; }

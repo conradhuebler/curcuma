@@ -111,8 +111,8 @@ void ForceFieldThread::CalculateUFFBondContribution()
     for (int index = 0; index < m_uff_bonds.size(); ++index) {
         const auto& bond = m_uff_bonds[index];
 
-        Vector i = Position(bond.i);
-        Vector j = Position(bond.j);
+        Vector i = m_geometry.row(bond.i);
+        Vector j = m_geometry.row(bond.j);
         Matrix derivate;
         double rij = UFF::BondStretching(i, j, derivate, m_calculate_gradient);
 
@@ -129,9 +129,9 @@ void ForceFieldThread::CalculateUFFAngleContribution()
 {
     for (int index = 0; index < m_uff_angles.size(); ++index) {
         const auto& angle = m_uff_angles[index];
-        auto i = Position(angle.i);
-        auto j = Position(angle.j);
-        auto k = Position(angle.k);
+        auto i = m_geometry.row(angle.i);
+        auto j = m_geometry.row(angle.j);
+        auto k = m_geometry.row(angle.k);
         Matrix derivate;
         double costheta = UFF::AngleBending(i, j, k, derivate, m_calculate_gradient);
         m_angle_energy += (angle.fc * (angle.C0 + angle.C1 * costheta + angle.C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling;
@@ -152,10 +152,10 @@ void ForceFieldThread::CalculateUFFDihedralContribution()
 {
     for (int index = 0; index < m_uff_dihedrals.size(); ++index) {
         const auto& dihedral = m_uff_dihedrals[index];
-        Eigen::Vector3d i = Position(dihedral.i);
-        Eigen::Vector3d j = Position(dihedral.j);
-        Eigen::Vector3d k = Position(dihedral.k);
-        Eigen::Vector3d l = Position(dihedral.l);
+        Eigen::Vector3d i = m_geometry.row(dihedral.i);
+        Eigen::Vector3d j = m_geometry.row(dihedral.j);
+        Eigen::Vector3d k = m_geometry.row(dihedral.k);
+        Eigen::Vector3d l = m_geometry.row(dihedral.l);
         Eigen::Vector3d eins = { 1.0, 1.0, 1.0 };
         Eigen::Vector3d nijk = UFF::NormalVector(i, j, k);
         Eigen::Vector3d njkl = UFF::NormalVector(j, k, l);
@@ -213,10 +213,10 @@ void ForceFieldThread::CalculateUFFInversionContribution()
     for (int index = 0; index < m_uff_inversions.size(); ++index) {
         const auto& inversion = m_uff_inversions[index];
 
-        Eigen::Vector3d i = Position(inversion.i);
-        Eigen::Vector3d j = Position(inversion.j);
-        Eigen::Vector3d k = Position(inversion.k);
-        Eigen::Vector3d l = Position(inversion.l);
+        Eigen::Vector3d i = m_geometry.row(inversion.i);
+        Eigen::Vector3d j = m_geometry.row(inversion.j);
+        Eigen::Vector3d k = m_geometry.row(inversion.k);
+        Eigen::Vector3d l = m_geometry.row(inversion.l);
 
         Eigen::Vector3d ail = SubVector(i, l);
         Eigen::Vector3d nijk = UFF::NormalVector(i, j, k);
@@ -299,8 +299,8 @@ void ForceFieldThread::CalculateUFFvdWContribution()
 
     for (int index = 0; index < m_uff_vdWs.size(); ++index) {
         const auto& vdw = m_uff_vdWs[index];
-        Eigen::Vector3d i = Position(vdw.i);
-        Eigen::Vector3d j = Position(vdw.j);
+        Eigen::Vector3d i = m_geometry.row(vdw.i);
+        Eigen::Vector3d j = m_geometry.row(vdw.j);
         double ij = (i - j).norm() * m_au;
         double pow6 = pow((vdw.r0_ij / ij), 6);
 
@@ -329,8 +329,8 @@ void ForceFieldThread::CalculateQMDFFBondContribution()
     for (int index = 0; index < m_qmdff_bonds.size(); ++index) {
         const auto& bond = m_qmdff_bonds[index];
 
-        Vector i = Position(bond.i);
-        Vector j = Position(bond.j);
+        Vector i = m_geometry.row(bond.i);
+        Vector j = m_geometry.row(bond.j);
 
         // Matrix derivate;
         m_bond_energy += QMDFF::LJStretchEnergy((i - j).norm(), bond.r0_ij, bond.fc, bond.exponent) * factor;
@@ -376,9 +376,9 @@ void ForceFieldThread::CalculateQMDFFAngleContribution()
         const int b = angle.b;
         const int c = angle.c;
 */
-        auto i = Position(angle.i);
-        auto j = Position(angle.j);
-        auto k = Position(angle.k);
+        Vector i = m_geometry.row(angle.i);
+        Vector j = m_geometry.row(angle.j);
+        Vector k = m_geometry.row(angle.k);
         Matrix derivate;
         double costheta = AngleBending(i, j, k, derivate, m_calculate_gradient);
         std::function<double(const Eigen::Vector3d&, const Eigen::Vector3d&, const Eigen::Vector3d&, double, double, double, double)> angle_function;

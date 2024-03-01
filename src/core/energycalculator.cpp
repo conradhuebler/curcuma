@@ -1,6 +1,6 @@
 /*
  * < General Energy and Gradient Calculator >
- * Copyright (C) 2022 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2022 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -26,6 +26,8 @@
 #endif
 
 #include <functional>
+
+#include "forcefieldgenerator.h"
 
 #include "energycalculator.h"
 
@@ -117,6 +119,7 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
 
     } else if (std::find(m_ff_methods.begin(), m_ff_methods.end(), m_method) != m_ff_methods.end()) { // Just D4 energy calculator requested
         m_forcefield = new ForceField(controller);
+        /*
         std::string file = controller["param"];
         nlohmann::json parameter;
         std::ifstream parameterfile(file);
@@ -125,7 +128,8 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
         } catch (nlohmann::json::type_error& e) {
         } catch (nlohmann::json::parse_error& e) {
         }
-        m_forcefield->setParameter(parameter);
+        ForceFieldGenerator ff;
+        m_forcefield->setParameter(parameter);*/
         m_ecengine = [this](bool gradient, bool verbose) {
             this->CalculateFF(gradient, verbose);
         };
@@ -223,10 +227,15 @@ void EnergyCalculator::setMolecule(const Molecule& molecule)
         m_qmdff->Initialise();
 
     } else if (std::find(m_ff_methods.begin(), m_ff_methods.end(), m_method) != m_ff_methods.end()) { //
-        /*
-        m_forcefield->setMolecule(atoms, geom);
-        m_forcefield->Initialise();
-        */
+
+        ForceFieldGenerator ff;
+        ff.setMolecule(molecule);
+        ff.Generate();
+        json parameters = ff.getParameter();
+        m_forcefield->setParameter(parameters);
+        // m_forcefield->setMolecule(atoms, geom);
+        // m_forcefield->Initialise();
+
     } else { // Fall back to UFF?
     }
     m_initialised = true;

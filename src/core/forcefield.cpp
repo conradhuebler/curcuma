@@ -28,6 +28,8 @@
 
 ForceField::ForceField(const json& controller)
 {
+    m_threadpool = new CxxThreadPool();
+    m_threadpool->setProgressBar(CxxThreadPool::ProgressBarType::None);
 }
 
 void ForceField::UpdateGeometry(const Matrix& geometry)
@@ -194,6 +196,7 @@ void ForceField::AutoRanges()
 }
 double ForceField::Calculate(bool gradient, bool verbose)
 {
+    m_gradient = Eigen::MatrixXd::Zero(m_geometry.rows(), 3);
     double energy = 0.0;
     double d4_energy = 0;
     double d3_energy = 0;
