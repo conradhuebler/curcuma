@@ -104,7 +104,9 @@ inline Mol XYZString2Mol(const std::string& coord)
         if (i > 1) {
             auto pair = Line2Atoms(line);
             molecule.m_atoms.push_back(pair.first);
-            molecule.m_geometry.push_back(pair.second);
+            molecule.m_geometry.conservativeResize(molecule.m_geometry.rows() + 1, molecule.m_geometry.cols());
+            molecule.m_geometry.row(molecule.m_geometry.rows() - 1) = Eigen::Vector3d(pair.second[0], pair.second[1], pair.second[2]);
+            //            push_back(pair.second);
         }
         if (i - 1 == atoms) {
             break;
@@ -132,6 +134,7 @@ inline Mol XYZ2Mol(const std::string& filename)
             try {
                 molecule.m_number_atoms = stoi(line);
                 atoms = stoi(line);
+                molecule.m_geometry = Eigen::MatrixXd::Zero(atoms, 3);
             } catch (const std::invalid_argument& arg) {
                 atoms = 0;
             }
@@ -142,7 +145,9 @@ inline Mol XYZ2Mol(const std::string& filename)
         if (i > 1) {
             auto pair = Line2Atoms(line);
             molecule.m_atoms.push_back(pair.first);
-            molecule.m_geometry.push_back(pair.second);
+            // molecule.m_geometry.push_back(pair.second);
+            // molecule.m_geometry.conservativeResize(molecule.m_geometry.rows() +  1, molecule.m_geometry.cols());
+            molecule.m_geometry.row(molecule.m_atoms.size() - 1) = Eigen::Vector3d(pair.second[0], pair.second[1], pair.second[2]);
         }
         if (i - 1 == atoms) {
             break;
@@ -158,6 +163,7 @@ inline Mol XYZ2Mol(const std::string& filename)
 inline Mol Coord2Mol(const std::string& filename)
 {
     Mol molecule;
+    molecule.m_geometry = Eigen::MatrixXd::Zero(0, 3);
 
     auto file = new std::ifstream(filename);
     for (std::string line; getline(*file, line);) {
@@ -170,7 +176,9 @@ inline Mol Coord2Mol(const std::string& filename)
                 vector[0] = std::stod(strings[0]) * au;
                 vector[1] = std::stod(strings[1]) * au;
                 vector[2] = std::stod(strings[2]) * au;
-                molecule.m_geometry.push_back(vector);
+                // molecule.m_geometry.push_back(vector);
+                molecule.m_geometry.conservativeResize(molecule.m_atoms.size(), molecule.m_geometry.cols());
+                molecule.m_geometry.row(molecule.m_geometry.rows() - 1) = Eigen::Vector3d(vector[0], vector[1], vector[2]);
             } catch (const std::invalid_argument& arg) {
             }
         }
@@ -193,7 +201,9 @@ inline Mol SDF2Mol(const std::string& filename)
                 vector[0] = std::stod(strings[0]);
                 vector[1] = std::stod(strings[1]);
                 vector[2] = std::stod(strings[2]);
-                molecule.m_geometry.push_back(vector);
+                // molecule.m_geometry.push_back(vector);
+                molecule.m_geometry.conservativeResize(molecule.m_atoms.size(), molecule.m_geometry.cols());
+                molecule.m_geometry.row(molecule.m_geometry.rows() - 1) = Eigen::Vector3d(vector[0], vector[1], vector[2]);
             } catch (const std::invalid_argument& arg) {
             }
         }
@@ -204,6 +214,8 @@ inline Mol SDF2Mol(const std::string& filename)
 inline Mol Mol22Mol(const std::string& filename)
 {
     Mol molecule;
+    molecule.m_geometry = Eigen::MatrixXd::Zero(0, 3);
+
     int read_atom = false, read_bond = false;
     auto file = new std::ifstream(filename);
     for (std::string line; getline(*file, line);) {
@@ -216,7 +228,9 @@ inline Mol Mol22Mol(const std::string& filename)
                     vector[0] = std::stod(strings[2]);
                     vector[1] = std::stod(strings[3]);
                     vector[2] = std::stod(strings[4]);
-                    molecule.m_geometry.push_back(vector);
+                    // molecule.m_geometry.push_back(vector);
+                    molecule.m_geometry.conservativeResize(molecule.m_atoms.size(), molecule.m_geometry.cols());
+                    molecule.m_geometry.row(molecule.m_geometry.rows() - 1) = Eigen::Vector3d(vector[0], vector[1], vector[2]);
                 } catch (const std::invalid_argument& arg) {
                 }
             }

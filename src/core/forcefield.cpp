@@ -30,7 +30,7 @@ ForceField::ForceField(const json& controller)
 {
     m_threadpool = new CxxThreadPool();
     m_threadpool->setProgressBar(CxxThreadPool::ProgressBarType::None);
-    m_threads = 16;
+    m_threads = 1;
 }
 
 void ForceField::UpdateGeometry(const Matrix& geometry)

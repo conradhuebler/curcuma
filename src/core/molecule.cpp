@@ -167,7 +167,7 @@ json Molecule::ExportJson() const
     structure["elements"] = Tools::Vector2String(m_atoms);
     structure["name"] = m_name;
     for (int i = 0; i < m_atoms.size(); ++i) {
-        structure["atom" + std::to_string(i)] = Tools::DoubleVector2String({ m_geometry[i][0], m_geometry[i][1], m_geometry[i][2] });
+        structure["atom" + std::to_string(i)] = Tools::DoubleVector2String({ m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2) });
     }
     structure["charge"] = m_charge;
     return structure;
@@ -195,9 +195,10 @@ void Molecule::ImportJson(const json& molecule)
     m_name = molecule["name"];
     m_atoms = Tools::String2Vector(molecule["elements"]);
     m_charge = molecule["charge"];
+    m_geometry = Eigen::MatrixXd::Zero(atoms, 3);
     for (int i = 0; i < atoms; ++i) {
         auto position = Tools::String2DoubleVec(molecule["atom" + std::to_string(i)], "|");
-        m_geometry.push_back(std::array<double, 3>({ position[0], position[1], position[2] }));
+        m_geometry.row(i) = Eigen::Vector3d(position[0], position[1], position[2]); //(std::array<double, 3>({ position[0], position[1], position[2] }));
     }
 }
 void Molecule::Initialise(const int* attyp, const double* coord, const int natoms, const double charge, const int spin)
@@ -205,8 +206,14 @@ void Molecule::Initialise(const int* attyp, const double* coord, const int natom
     m_charge = charge;
     m_spin = spin;
     Molecule mol;
+    m_geometry = Eigen::MatrixXd::Zero(natoms, 3);
+
     for (int i = 0; i < natoms; ++i) {
-        m_geometry.push_back({ coord[3 * i], coord[3 * i + 1], coord[3 * i + 2] });
+        m_geometry(i, 0) = coord[3 * i];
+        m_geometry(i, 1) = coord[3 * i + 1];
+        m_geometry(i, 2) = coord[3 * i + 2];
+
+        // m_geometry.push_back({ coord[3 * i], coord[3 * i + 1], coord[3 * i + 2] });
         m_atoms.push_back(attyp[i]);
         m_mass += Elements::AtomicMass[attyp[i]];
     }
@@ -226,7 +233,7 @@ void Molecule::print_geom(bool moreinfo) const
     std::cout << AtomCount() << std::endl;
     std::cout << Name() << " " << std::setprecision(12) << Energy() << std::endl;
     for (int i = 0; i < AtomCount(); i++) {
-        printf("%s %8.5f %8.5f %8.5f\n", Elements::ElementAbbr[m_atoms[i]].c_str(), m_geometry[i][0], m_geometry[i][1], m_geometry[i][2]);
+        printf("%s %8.5f %8.5f %8.5f\n", Elements::ElementAbbr[m_atoms[i]].c_str(), m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2));
     }
     if (moreinfo) {
         std::cout << std::endl
@@ -246,7 +253,7 @@ int Molecule::Check() const
     return 0;
 
     for (int i = 0; i < AtomCount(); ++i) {
-        if (std::isnan(m_geometry[i][0]) || std::isnan(m_geometry[i][1]) || std::isnan(m_geometry[i][2]))
+        if (std::isnan(m_geometry(i, 0)) || std::isnan(m_geometry(i, 1)) || std::isnan(m_geometry(i, 2)))
             return 2;
         for (int j = 0; j < i; ++j) {
             if (CalculateDistance(i, j) < 1e-1)
@@ -273,7 +280,7 @@ void Molecule::printFragmente()
 
     for (std::size_t i = 0; i < m_fragments.size(); ++i) {
         for (const auto& atom : m_fragments[i]) {
-            printf("%s(%i) %8.5f %8.5f %8.5f\n", Elements::ElementAbbr[m_atoms[atom]].c_str(), i + 1, m_geometry[atom][0], m_geometry[atom][1], m_geometry[atom][2]);
+            printf("%s(%i) %8.5f %8.5f %8.5f\n", Elements::ElementAbbr[m_atoms[atom]].c_str(), i + 1, m_geometry(atom, 0), m_geometry(atom, 1), m_geometry(atom, 2));
         }
     }
 }
@@ -281,16 +288,20 @@ void Molecule::printFragmente()
 void Molecule::printAtom(int i) const
 {
     if (i < AtomCount())
-        printf("%s %8.5f %8.5f %8.5f", Elements::ElementAbbr[m_atoms[i]].c_str(), m_geometry[i][0], m_geometry[i][1], m_geometry[i][2]);
+        printf("%s %8.5f %8.5f %8.5f", Elements::ElementAbbr[m_atoms[i]].c_str(), m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2));
 }
 
 
 void Molecule::InitialiseEmptyGeometry(int atoms)
 {
+    m_geometry = Eigen::MatrixXd::Zero(atoms, 3);
+    /*
     for (int i = 0; i < atoms; i++) {
         std::array<double, 3> atom = { 0, 0, 0 };
-        m_geometry.push_back(atom);
-    }
+        //m_geometry.push_back(atom);
+        m_geometry.conservativeResize(m_geometry.rows() +  1, m_geometry.cols());
+        m_geometry.row(m_geometry.rows() -  1) = Eigen::Vector3d(vector[0], vector[1], vector[2]);
+    }*/
     m_dirty = true;
 }
 
@@ -298,7 +309,10 @@ bool Molecule::addPair(const std::pair<int, Position>& atom)
 {
     bool exist = true;
     // const std::array<double, 3> at = { atom.second(0),  atom.second(1),  atom.second(2)};
-    m_geometry.push_back({ atom.second(0), atom.second(1), atom.second(2) });
+    m_geometry.conservativeResize(m_geometry.rows() + 1, 3);
+    m_geometry.row(m_geometry.rows() - 1) = atom.second;
+
+    // m_geometry.push_back({ atom.second(0), atom.second(1), atom.second(2) });
     m_atoms.push_back(atom.first);
     m_mass += Elements::AtomicMass[atom.first];
 
@@ -505,33 +519,42 @@ double Molecule::CalculateDistance(int i, int j) const
     if (i >= AtomCount() || j >= AtomCount())
         return 0;
 
-    double x_i = m_geometry[i][0];
-    double x_j = m_geometry[j][0];
+    double x_i = m_geometry(i, 0);
+    double x_j = m_geometry(j, 0);
 
-    double y_i = m_geometry[i][1];
-    double y_j = m_geometry[j][1];
+    double y_i = m_geometry(i, 1);
+    double y_j = m_geometry(j, 1);
 
-    double z_i = m_geometry[i][2];
-    double z_j = m_geometry[j][2];
+    double z_i = m_geometry(i, 2);
+    double z_j = m_geometry(j, 2);
 
     return sqrt((((x_i - x_j) * (x_i - x_j)) + ((y_i - y_j) * (y_i - y_j)) + ((z_i - z_j) * (z_i - z_j))));
 }
-
+/*
 double Molecule::DotProduct(std::array<double, 3> pos1, std::array<double, 3> pos2) const
 {
     return pos1[0]*pos2[0]+pos1[1]*pos2[1]+pos1[2]*pos2[2];
 }
-
-double Molecule::CalculateAngle(int atom1, int atom2, int atom3) const
+*/
+double Molecule::CalculateAngle(int i, int j, int k) const
 {
+#pragma message("how was it really, check for later")
+    Eigen::Vector3d rij = m_geometry.row(i) - m_geometry.row(j);
+    auto nij = rij / rij.norm();
+    Eigen::Vector3d rkj = m_geometry.row(k) - m_geometry.row(j);
+    auto nkj = rkj / rkj.norm();
+    double costheta = (rij.dot(rkj) / (sqrt(rij.dot(rij) * rkj.dot(rkj))));
+    return acos(costheta);
+    /*
     std::array<double, 3> atom_0 = { m_geometry[atom2] }; // Proton
     std::array<double, 3> atom_1 = { m_geometry[atom3] }; // Acceptor
     std::array<double, 3> atom_2 = { m_geometry[atom1] }; // Donor
 
     std::array<double, 3> vec_1 = { atom_0[0]-atom_1[0], atom_0[1]-atom_1[1], atom_0[2]-atom_1[2] };
     std::array<double, 3> vec_2 = { atom_0[0]-atom_2[0], atom_0[1]-atom_2[1], atom_0[2]-atom_2[2] };
-    
+
     return acos(DotProduct(vec_1,vec_2)/(sqrt(DotProduct(vec_1,vec_1)*DotProduct(vec_2,vec_2))))*360/2.0/pi;
+*/
 }
 
 void Molecule::ParseString(const std::string& internal, std::vector<std::string>& elements)
@@ -581,9 +604,9 @@ void Molecule::setAtom(const std::string& internal, int i)
         double x = r_ik + r_ij*cos(omega);
         double y = r_ij*sin(omega);
         double z = 0;
-        m_geometry[i][0] = x;
-        m_geometry[i][1] = y;
-        m_geometry[i][2] = z;
+        m_geometry(i, 0) = x;
+        m_geometry(i, 1) = y;
+        m_geometry(i, 2) = z;
     }
     m_dirty = true;
 }
@@ -604,9 +627,9 @@ void Molecule::setXYZ(const std::string& internal, int i)
         double y = stod(elements[2]);
         double z = stod(elements[3]);
 
-        m_geometry[i][0] = x;
-        m_geometry[i][1] = y;
-        m_geometry[i][2] = z;
+        m_geometry(i, 0) = x;
+        m_geometry(i, 1) = y;
+        m_geometry(i, 2) = z;
     }
 
     m_dirty = true;
@@ -615,7 +638,7 @@ void Molecule::setXYZ(const std::string& internal, int i)
 void Molecule::clear()
 {
     m_atoms.clear();
-    m_geometry.clear();
+    // m_geometry.clear();
     m_dirty = true;
 }
 
@@ -680,13 +703,7 @@ Molecule Molecule::getFragmentMolecule(int fragment) const
 Geometry Molecule::getGeometry(bool protons) const
 {
     if (protons) {
-        Geometry geometry(m_geometry.size(), 3);
-        for (int i = 0; i < m_geometry.size(); ++i) {
-            geometry(i, 0) = m_geometry[i][0];
-            geometry(i, 1) = m_geometry[i][1];
-            geometry(i, 2) = m_geometry[i][2];
-        }
-        return geometry;
+        return m_geometry;
     } else {
         std::vector<int> indicies;
         for (int i = 0; i < m_geometry.size(); ++i) {
@@ -697,9 +714,9 @@ Geometry Molecule::getGeometry(bool protons) const
         Geometry geometry(indicies.size(), 3);
         int index = 0;
         for (int i : indicies) {
-            geometry(index, 0) = m_geometry[i][0];
-            geometry(index, 1) = m_geometry[i][1];
-            geometry(index, 2) = m_geometry[i][2];
+            geometry(index, 0) = m_geometry(i, 0);
+            geometry(index, 1) = m_geometry(i, 1);
+            geometry(index, 2) = m_geometry(i, 2);
             index++;
         }
         return geometry;
@@ -722,17 +739,17 @@ Geometry Molecule::getGeometry(const IntPair& pair, bool protons) const
 
     if (protons) {
         for (int i = start; i < end; ++i) {
-            geometry(index, 0) = m_geometry[i][0];
-            geometry(index, 1) = m_geometry[i][1];
-            geometry(index, 2) = m_geometry[i][2];
+            geometry(index, 0) = m_geometry(i, 0);
+            geometry(index, 1) = m_geometry(i, 1);
+            geometry(index, 2) = m_geometry(i, 2);
             index++;
         }
     } else {
         for (int i = start; i < end; ++i) {
             if (m_atoms[i] != 1) {
-                geometry(index, 0) = m_geometry[i][0];
-                geometry(index, 1) = m_geometry[i][1];
-                geometry(index, 2) = m_geometry[i][2];
+                geometry(index, 0) = m_geometry(i, 0);
+                geometry(index, 1) = m_geometry(i, 1);
+                geometry(index, 2) = m_geometry(i, 2);
                 index++;
             }
         }
@@ -746,17 +763,17 @@ Geometry Molecule::getGeometry(std::vector<int> atoms, bool protons) const
     int index = 0;
     if (protons) {
         for (int i : atoms) {
-            geometry(index, 0) = m_geometry[i][0];
-            geometry(index, 1) = m_geometry[i][1];
-            geometry(index, 2) = m_geometry[i][2];
+            geometry(index, 0) = m_geometry(i, 0);
+            geometry(index, 1) = m_geometry(i, 1);
+            geometry(index, 2) = m_geometry(i, 2);
             index++;
         }
     } else {
         for (int i : atoms) {
             if (m_atoms[i] != 1) {
-                geometry(index, 0) = m_geometry[i][0];
-                geometry(index, 1) = m_geometry[i][1];
-                geometry(index, 2) = m_geometry[i][2];
+                geometry(index, 0) = m_geometry(i, 0);
+                geometry(index, 1) = m_geometry(i, 1);
+                geometry(index, 2) = m_geometry(i, 2);
                 index++;
             }
         }
@@ -778,13 +795,14 @@ bool Molecule::setGeometry(const Geometry &geometry)
         return false;
 
     m_dirty = true;
-
+    m_geometry = geometry;
+    /*
     for (int i = 0; i < m_geometry.size(); ++i) {
-        m_geometry[i][0] = geometry(i, 0);
-        m_geometry[i][1] = geometry(i, 1);
-        m_geometry[i][2] = geometry(i, 2);
+        m_geometry(i,0) = geometry(i, 0);
+        m_geometry(i,1) = geometry(i, 1);
+        m_geometry(i,2) = geometry(i, 2);
     }
-
+    */
     return true;
 }
 
@@ -797,18 +815,18 @@ bool Molecule::setGeometryByFragment(const Geometry& geometry, int fragment, boo
     int index = 0;
     if (protons) {
         for (int i : frag) {
-            m_geometry[i][0] = geometry(index, 0);
-            m_geometry[i][1] = geometry(index, 1);
-            m_geometry[i][2] = geometry(index, 2);
+            m_geometry(i, 0) = geometry(index, 0);
+            m_geometry(i, 1) = geometry(index, 1);
+            m_geometry(i, 2) = geometry(index, 2);
             index++;
         }
     } else {
         for (int i : frag) {
             if (Atom(i).first == 1)
                 continue;
-            m_geometry[i][0] = geometry(index, 0);
-            m_geometry[i][1] = geometry(index, 1);
-            m_geometry[i][2] = geometry(index, 2);
+            m_geometry(i, 0) = geometry(index, 0);
+            m_geometry(i, 1) = geometry(index, 1);
+            m_geometry(i, 2) = geometry(index, 2);
             index++;
         }
     }
@@ -876,9 +894,9 @@ Eigen::Vector3d Molecule::COM(bool protons, int fragment)
     Eigen::Vector3d com = { 0, 0, 0 };
     for (int i = 0; i < m_geometry.size(); ++i) {
         double mass = Elements::AtomicMass[m_atoms[i]];
-        com(0) += mass * m_geometry[i][0];
-        com(1) += mass * m_geometry[i][1];
-        com(2) += mass * m_geometry[i][2];
+        com(0) += mass * m_geometry(i, 0);
+        com(1) += mass * m_geometry(i, 1);
+        com(2) += mass * m_geometry(i, 2);
     }
     com(0) /= m_mass;
     com(1) /= m_mass;
@@ -901,9 +919,9 @@ std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>
         for (int i : m_fragments[f]) {
             double m = Elements::AtomicMass[m_atoms[i]];
             mass += m;
-            pos(0) += m * m_geometry[i][0];
-            pos(1) += m * m_geometry[i][1];
-            pos(2) += m * m_geometry[i][2];
+            pos(0) += m * m_geometry(i, 0);
+            pos(1) += m * m_geometry(i, 1);
+            pos(2) += m * m_geometry(i, 2);
         }
         pos(0) /= mass;
         pos(1) /= mass;
@@ -912,9 +930,9 @@ std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>
             double scale = 3;
             if (scaling.size() > i)
                 scale = scaling[i];
-            dipole(0) += m_charges[i] * (m_geometry[i][0] - pos(0)) * scale;
-            dipole(1) += m_charges[i] * (m_geometry[i][1] - pos(1)) * scale;
-            dipole(2) += m_charges[i] * (m_geometry[i][2] - pos(2)) * scale;
+            dipole(0) += m_charges[i] * (m_geometry(i, 0) - pos(0)) * scale;
+            dipole(1) += m_charges[i] * (m_geometry(i, 1) - pos(1)) * scale;
+            dipole(2) += m_charges[i] * (m_geometry(i, 2) - pos(2)) * scale;
             //  std::cout << scale << " ";
         }
         // std::cout << std::endl;
@@ -935,9 +953,9 @@ Position Molecule::CalculateDipoleMoment(const std::vector<double>& scaling) con
     for (int i = 0; i < m_geometry.size(); ++i) {
         double m = Elements::AtomicMass[m_atoms[i]];
         mass += m;
-        pos(0) += m * m_geometry[i][0];
-        pos(1) += m * m_geometry[i][1];
-        pos(2) += m * m_geometry[i][2];
+        pos(0) += m * m_geometry(i, 0);
+        pos(1) += m * m_geometry(i, 1);
+        pos(2) += m * m_geometry(i, 2);
     }
     pos(0) /= mass;
     pos(1) /= mass;
@@ -946,9 +964,9 @@ Position Molecule::CalculateDipoleMoment(const std::vector<double>& scaling) con
         double scale = 3;
         if (scaling.size() > i)
             scale = scaling[i];
-        dipole(0) += m_charges[i] * (m_geometry[i][0] - pos(0)) * scale;
-        dipole(1) += m_charges[i] * (m_geometry[i][1] - pos(1)) * scale;
-        dipole(2) += m_charges[i] * (m_geometry[i][2] - pos(2)) * scale;
+        dipole(0) += m_charges[i] * (m_geometry(i, 0) - pos(0)) * scale;
+        dipole(1) += m_charges[i] * (m_geometry(i, 1) - pos(1)) * scale;
+        dipole(2) += m_charges[i] * (m_geometry(i, 2) - pos(2)) * scale;
         // std::cout << scale << " ";
     }
     // std::cout << std::endl;
@@ -960,8 +978,8 @@ std::pair<double, double> Molecule::GyrationRadius(bool protons, int fragment)
     Eigen::Vector3d com = COM(protons, fragment);
     double gyr = 0, gyr_mass = 0;
     for (int i = 0; i < m_geometry.size(); ++i) {
-        gyr += ((com(0) - m_geometry[i][0]) * (com(0) - m_geometry[i][0]) + (com(1) - m_geometry[i][1]) * (com(1) - m_geometry[i][1]) + (com(2) - m_geometry[i][2]) * (com(2) - m_geometry[i][2]));
-        gyr_mass += Elements::AtomicMass[m_atoms[i]] * ((com(0) - m_geometry[i][0]) * (com(0) - m_geometry[i][0]) + (com(1) - m_geometry[i][1]) * (com(1) - m_geometry[i][1]) + (com(2) - m_geometry[i][2]) * (com(2) - m_geometry[i][2]));
+        gyr += ((com(0) - m_geometry(i, 0)) * (com(0) - m_geometry(i, 0)) + (com(1) - m_geometry(i, 1)) * (com(1) - m_geometry(i, 1)) + (com(2) - m_geometry(i, 2)) * (com(2) - m_geometry(i, 2)));
+        gyr_mass += Elements::AtomicMass[m_atoms[i]] * ((com(0) - m_geometry(i, 0)) * (com(0) - m_geometry(i, 0)) + (com(1) - m_geometry(i, 1)) * (com(1) - m_geometry(i, 1)) + (com(2) - m_geometry(i, 2)) * (com(2) - m_geometry(i, 2)));
     }
     gyr /= double(m_geometry.size());
     gyr_mass /= double(m_mass);
@@ -970,7 +988,7 @@ std::pair<double, double> Molecule::GyrationRadius(bool protons, int fragment)
 
 std::pair<int, Position> Molecule::Atom(int i) const
 {
-    return std::pair<int, Position>(m_atoms[i], { m_geometry[i][0], m_geometry[i][1], m_geometry[i][2] });
+    return std::pair<int, Position>(m_atoms[i], { m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2) });
 }
 
 void Molecule::writeXYZFile(const std::string& filename) const
@@ -1001,7 +1019,7 @@ std::string Molecule::Header() const
 std::string Molecule::Atom2String(int i) const
 {
 #ifdef GCC
-    return fmt::format("{}  {:f}    {:f}    {:f}\n", Elements::ElementAbbr[m_atoms[i]].c_str(), m_geometry[i][0], m_geometry[i][1], m_geometry[i][2]);
+    return fmt::format("{}  {:f}    {:f}    {:f}\n", Elements::ElementAbbr[m_atoms[i]].c_str(), m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2));
 #else
     return fmt::format("{}  {:}    {:}    {:}\n", Elements::ElementAbbr[m_atoms[i]].c_str(), m_geometry[i][0], m_geometry[i][1], m_geometry[i][2]);
 #endif
@@ -1124,9 +1142,9 @@ void Molecule::CalculateRotationalConstants()
     for (int i = 0; i < AtomCount(); ++i) {
         double m = Elements::AtomicMass[m_atoms[i]];
         mass += m;
-        pos(0) += m * m_geometry[i][0];
-        pos(1) += m * m_geometry[i][1];
-        pos(2) += m * m_geometry[i][2];
+        pos(0) += m * m_geometry(i, 0);
+        pos(1) += m * m_geometry(i, 1);
+        pos(2) += m * m_geometry(i, 2);
     }
     pos(0) /= mass;
     pos(1) /= mass;

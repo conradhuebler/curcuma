@@ -285,6 +285,18 @@ void EnergyCalculator::updateGeometry(const std::vector<double>& geometry)
     }
     // m_containsNaN = std::isnan(m_geometry[m_atoms - 1][0]);
 }
+
+void EnergyCalculator::updateGeometry(const Matrix& geometry)
+{
+    m_geometry = geometry;
+    for (int i = 0; i < m_atoms; ++i) {
+        m_coord[3 * i + 0] = geometry(i, 0) / au;
+        m_coord[3 * i + 1] = geometry(i, 1) / au;
+        m_coord[3 * i + 2] = geometry(i, 2) / au;
+    }
+}
+
+/*
 void EnergyCalculator::updateGeometry(const std::vector<std::array<double, 3>>& geometry)
 {
     for (int i = 0; i < m_atoms; ++i) {
@@ -297,7 +309,7 @@ void EnergyCalculator::updateGeometry(const std::vector<std::array<double, 3>>& 
         m_geometry(i, 2) = geometry[i][2];
     }
 }
-
+*/
 double EnergyCalculator::CalculateEnergy(bool gradient, bool verbose)
 {
     m_ecengine(gradient, verbose);

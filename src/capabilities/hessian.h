@@ -71,7 +71,7 @@ private:
     json m_controller, m_parameter;
     Molecule m_molecule;
     Matrix m_gradient;
-    std::vector<std::array<double, 3>> m_geom_ip_jp, m_geom_im_jp, m_geom_ip_jm, m_geom_im_jm;
+    Geometry m_geom_ip_jp, m_geom_im_jp, m_geom_ip_jm, m_geom_im_jm;
     int m_i, m_j, m_xi, m_xj;
     bool m_fullnumerical = true;
     double m_dd = 0;

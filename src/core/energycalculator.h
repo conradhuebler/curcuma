@@ -56,8 +56,8 @@ public:
     void updateGeometry(const double* coord);
     void updateGeometry(const std::vector<double>& geometry);
 
-    void updateGeometry(const std::vector<std::array<double, 3>>& geometry);
-
+    // void updateGeometry(const std::vector<std::array<double, 3>>& geometry);
+    void updateGeometry(const Matrix& geometry);
     void updateGeometry(const Eigen::VectorXd& geometry);
 
     void getGradient(double* coord);

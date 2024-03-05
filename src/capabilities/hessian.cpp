@@ -68,17 +68,17 @@ void HessianThread::Numerical()
     m_geom_ip_jm = m_molecule.Coords();
     m_geom_im_jm = m_molecule.Coords();
 
-    m_geom_ip_jp[m_i][m_xi] += m_d;
-    m_geom_ip_jp[m_j][m_xj] += m_d;
+    m_geom_ip_jp(m_i, m_xi) += m_d;
+    m_geom_ip_jp(m_j, m_xj) += m_d;
 
-    m_geom_im_jp[m_i][m_xi] -= m_d;
-    m_geom_im_jp[m_j][m_xj] += m_d;
+    m_geom_im_jp(m_i, m_xi) -= m_d;
+    m_geom_im_jp(m_j, m_xj) += m_d;
 
-    m_geom_ip_jm[m_i][m_xi] += m_d;
-    m_geom_ip_jm[m_j][m_xj] -= m_d;
+    m_geom_ip_jm(m_i, m_xi) += m_d;
+    m_geom_ip_jm(m_j, m_xj) -= m_d;
 
-    m_geom_im_jm[m_i][m_xi] -= m_d;
-    m_geom_im_jm[m_j][m_xj] -= m_d;
+    m_geom_im_jm(m_i, m_xi) -= m_d;
+    m_geom_im_jm(m_j, m_xj) -= m_d;
 
     EnergyCalculator energy(m_method, m_controller);
     energy.setMolecule(m_molecule);
@@ -104,7 +104,7 @@ void HessianThread::Seminumerical()
     m_geom_ip_jp = m_molecule.Coords();
     m_geom_im_jp = m_molecule.Coords();
 
-    m_geom_ip_jp[m_i][m_xi] += m_d;
+    m_geom_ip_jp(m_i, m_xi) += m_d;
     // std::cout << m_controller << std::endl;
 
     EnergyCalculator energy(m_method, m_controller);
@@ -115,7 +115,7 @@ void HessianThread::Seminumerical()
     energy.CalculateEnergy(true, false);
     Matrix gradientp = energy.Gradient();
 
-    m_geom_im_jp[m_i][m_xi] -= m_d;
+    m_geom_im_jp(m_i, m_xi) -= m_d;
 
     energy.updateGeometry(m_geom_im_jp);
     energy.CalculateEnergy(true, false);
@@ -130,7 +130,7 @@ Hessian::Hessian(const std::string& method, const json& controller, bool silent)
 
 {
     UpdateController(controller);
-    m_threads = m_controller["threads"];
+    m_threads = m_defaults["threads"];
     /* Yeah, thats not really correct, but it works a bit */
     if (m_method.compare("gfnff") == 0) {
         m_scale_functions = [](double val) -> double {

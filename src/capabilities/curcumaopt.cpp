@@ -134,7 +134,7 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
 #endif
 
         if (m_hessian) {
-            Hessian hess(m_method, m_defaults, m_threads);
+            Hessian hess(m_method, m_defaults, false);
             hess.setMolecule(*iter);
             hess.CalculateHessian(m_hessian);
         }
@@ -191,7 +191,7 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
 
         Molecule* mol2 = new Molecule(thread->getMolecule());
         if (m_hessian) {
-            Hessian hess(m_method, m_defaults, m_threads);
+            Hessian hess(m_method, m_defaults, false);
             hess.setMolecule(mol2);
             hess.CalculateHessian(m_hessian);
         }

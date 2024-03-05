@@ -43,7 +43,7 @@ struct Mol {
 
     std::string m_commentline;
 
-    std::vector<std::array<double, 3>> m_geometry;
+    Geometry m_geometry;
     std::vector<std::pair<int, int>> m_bonds;
     std::vector<int> m_atoms;
 };
@@ -86,7 +86,7 @@ class Molecule
     void InitialiseConnectedMass(double scaling = 1.3, bool protons = true);
     inline double ConnectedMass(int atom) const { return m_connect_mass[atom]; }
     double CalculateAngle(int atom1, int atom2, int atom3) const;
-    double DotProduct(std::array<double, 3> pos1, std::array<double, 3> pos2) const;
+    // double DotProduct(std::array<double, 3> pos1, std::array<double, 3> pos2) const;
 
     void clear();
 
@@ -208,7 +208,7 @@ class Molecule
 
     std::pair<Matrix, Matrix> DistanceMatrix() const;
 
-    std::vector<std::array<double, 3>> Coords() const { return m_geometry; }
+    Geometry Coords() const { return m_geometry; }
 
     Matrix AlignmentAxes() const { return m_alignmentAxes; }
 
@@ -235,7 +235,7 @@ private:
     void InitialiseEmptyGeometry(int atoms);
 
     int m_charge = 0, m_spin = 0;
-    std::vector<std::array<double, 3>> m_geometry;
+    Geometry m_geometry;
     std::vector<int> m_atoms;
     std::vector<double> m_charges;
 
