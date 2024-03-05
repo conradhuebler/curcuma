@@ -30,6 +30,7 @@ ForceField::ForceField(const json& controller)
 {
     m_threadpool = new CxxThreadPool();
     m_threadpool->setProgressBar(CxxThreadPool::ProgressBarType::None);
+    m_threads = 16;
 }
 
 void ForceField::UpdateGeometry(const Matrix& geometry)
@@ -194,6 +195,29 @@ void ForceField::AutoRanges()
             thread->addEQ(m_EQs[j]);
     }
 }
+
+Eigen::MatrixXd ForceField::NumGrad()
+{
+    Eigen::MatrixXd gradient = Eigen::MatrixXd::Zero(m_natoms, 3);
+
+    double dx = 1e-6; // m_d;
+    // bool g = m_CalculateGradient;
+    // m_CalculateGradient = false;
+    double E1, E2;
+    for (int i = 0; i < m_natoms; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            m_geometry(i, j) += dx;
+            E1 = Calculate(false, false);
+            m_geometry(i, j) -= 2 * dx;
+            E2 = Calculate(false, false);
+            gradient(i, j) = (E1 - E2) / (2 * dx);
+            m_geometry(i, j) += dx;
+        }
+    }
+    // m_CalculateGradient = g;
+    return gradient;
+}
+
 double ForceField::Calculate(bool gradient, bool verbose)
 {
     m_gradient = Eigen::MatrixXd::Zero(m_geometry.rows(), 3);
@@ -225,19 +249,19 @@ double ForceField::Calculate(bool gradient, bool verbose)
         inversion_energy += m_stored_threads[i]->InversionEnergy();
         vdw_energy += m_stored_threads[i]->VdWEnergy();
         rep_energy += m_stored_threads[i]->RepEnergy();
-        eq_energy += m_stored_threads[i]->RepEnergy();
+        // eq_energy += m_stored_threads[i]->RepEnergy();
 
         m_gradient += m_stored_threads[i]->Gradient();
     }
 
-    energy = bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy;
+    energy = bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy + rep_energy + eq_energy;
     if (verbose) {
         std::cout << "Total energy " << energy << " Eh. Sum of " << std::endl
                   << "Bond Energy " << bond_energy << " Eh" << std::endl
                   << "Angle Energy " << angle_energy << " Eh" << std::endl
                   << "Dihedral Energy " << dihedral_energy << " Eh" << std::endl
                   << "Inversion Energy " << inversion_energy << " Eh" << std::endl
-                  << "Nonbonded Energy " << vdw_energy << " Eh" << std::endl
+                  << "Nonbonded Energy " << vdw_energy + rep_energy << " Eh" << std::endl
                   << "D3 Energy " << d3_energy << " Eh" << std::endl
                   << "D4 Energy " << d4_energy << " Eh" << std::endl
                   << "HBondCorrection " << h4_energy << " Eh" << std::endl

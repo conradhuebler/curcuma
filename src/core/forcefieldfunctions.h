@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include "src/core/global.h"
 #include "src/core/qmdff_par.h"
 #include "src/core/uff_par.h"
 
@@ -69,7 +70,7 @@ inline Eigen::Vector3d NormalVector(const Eigen::Vector3d& i, const Eigen::Vecto
 {
     return (j - i).cross(j - k);
 }
-/*
+
 inline double Dihedral(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, const Eigen::Vector3d& l, double V, double n, double phi0)
 {
     Eigen::Vector3d nijk = NormalVector(i, j, k);
@@ -80,12 +81,12 @@ inline double Dihedral(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const
     Eigen::Vector3d ji = j - i;
     double sign = (-1 * ji).dot(njkl) < 0 ? -1 : 1;
     double phi = pi + sign * acos(dotpr / (n_ijk * n_jkl));
-    double energy = (1 / 2.0 * V * (1 - cos(n * phi0) * cos(n * phi))) * m_final_factor * m_dihedral_scaling;
-    if (isnan(energy))
+    double energy = (1 / 2.0 * V * (1 - cos(n * phi0) * cos(n * phi)));
+    if (std::isnan(energy))
         return 0;
     else
         return energy;
-} */
+}
 }
 
 namespace QMDFF {

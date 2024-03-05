@@ -99,7 +99,7 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
     }
     AssignUffAtomTypes();
     // if (m_rings)
-    m_identified_rings = Topology::FindRings(m_stored_bonds, m_atom_types.size());
+    // m_identified_rings = Topology::FindRings(m_stored_bonds, m_atom_types.size());
 
     setBonds(bonds);
 
@@ -143,7 +143,7 @@ void ForceFieldGenerator::setBonds(const TContainer& bonds)
         else
             bond_order = 1;
         double r0_ij = UFFBondRestLength(bond[0], bond[1], bond_order);
-        uffbond["r_ij"] = r0_ij;
+        uffbond["r0_ij"] = r0_ij;
         double cZi = UFFParameters[m_atom_types[bond[0]]][cZ];
         double cZj = UFFParameters[m_atom_types[bond[1]]][cZ];
         uffbond["fc"] = 0.5 * m_uff_bond_force * cZi * cZj / (r0_ij * r0_ij * r0_ij);
@@ -160,8 +160,8 @@ void ForceFieldGenerator::setBonds(const TContainer& bonds)
             if (t == j)
                 continue;
             json uffangle = AngleJson;
-            uffangle["i"] = i;
-            uffangle["j"] = std::min(t, j);
+            uffangle["j"] = i;
+            uffangle["i"] = std::min(t, j);
             uffangle["k"] = std::max(j, t);
 
             // angels.insert({ std::min(t, j), i, std::max(j, t) });
@@ -177,9 +177,9 @@ void ForceFieldGenerator::setBonds(const TContainer& bonds)
             if (t == i)
                 continue;
             json uffangle = AngleJson;
-            uffangle["i"] = i;
-            uffangle["j"] = std::min(t, j);
-            uffangle["k"] = std::max(j, t);
+            uffangle["j"] = j;
+            uffangle["i"] = std::min(t, i);
+            uffangle["k"] = std::max(i, t);
             if (std::find(m_angles.begin(), m_angles.end(), uffangle) == m_angles.end())
                 m_angles.push_back(uffangle);
 
@@ -192,9 +192,9 @@ void ForceFieldGenerator::setBonds(const TContainer& bonds)
                 if (k == i || k == j || k == l || i == j || i == l || j == l)
                     continue;
                 json uffdihedral = DihedralJson;
-                uffdihedral["i"] = i;
-                uffdihedral["j"] = j;
-                uffdihedral["k"] = k;
+                uffdihedral["i"] = k;
+                uffdihedral["j"] = i;
+                uffdihedral["k"] = j;
                 uffdihedral["l"] = l;
                 if (std::find(m_dihedrals.begin(), m_dihedrals.end(), uffdihedral) == m_dihedrals.end()) {
                     m_dihedrals.push_back(uffdihedral);
@@ -340,16 +340,16 @@ void ForceFieldGenerator::setInversions()
         double C2 = 0.0;
         double f = pi / 180.0;
         double kijkl = 0;
-        if (6 <= m_atom_types[i] && m_atom_types[i] <= 8) {
+        if (6 <= m_molecule.Atoms()[i] && m_molecule.Atoms()[i] <= 8) {
             C0 = 1.0;
             C1 = -1.0;
             C2 = 0.0;
             kijkl = 6;
-            if (m_atom_types[j] == 8 || m_atom_types[k] == 8 || m_atom_types[l] == 8)
+            if (m_molecule.Atoms()[j] == 8 || m_molecule.Atoms()[k] == 8 || m_molecule.Atoms()[l] == 8)
                 kijkl = 50;
         } else {
             double w0 = pi / 180.0;
-            switch (m_atom_types[i]) {
+            switch (m_molecule.Atoms()[i]) {
             // if the central atom is phosphorous
             case 15:
                 w0 *= 84.4339;
@@ -701,9 +701,13 @@ void ForceFieldGenerator::writeUFFFile(const std::string& file) const
 json ForceFieldGenerator::Bonds() const
 {
     json bonds;
+    int index = 0;
+
     for (int i = 0; i < m_bonds.size(); ++i) {
-        if (m_bonds[i]["type"] != 0)
-            bonds[i] = m_bonds[i];
+        if (m_bonds[i]["type"] != 0) {
+            bonds[index] = m_bonds[i];
+            index++;
+        }
     }
     return bonds;
 }
@@ -711,10 +715,13 @@ json ForceFieldGenerator::Bonds() const
 json ForceFieldGenerator::Angles() const
 {
     json angles;
+    int index = 0;
 
     for (int i = 0; i < m_angles.size(); ++i) {
-        if (m_angles[i]["type"] != 0)
-            angles[i] = m_angles[i];
+        if (m_angles[i]["type"] != 0) {
+            angles[index] = m_angles[i];
+            index++;
+        }
     }
     return angles;
 }
@@ -722,9 +729,13 @@ json ForceFieldGenerator::Angles() const
 json ForceFieldGenerator::Dihedrals() const
 {
     json dihedrals;
+    int index = 0;
+
     for (int i = 0; i < m_dihedrals.size(); ++i) {
-        if (m_dihedrals[i]["type"] != 0)
-            dihedrals[i] = m_dihedrals[i];
+        if (m_dihedrals[i]["type"] != 0) {
+            dihedrals[index] = m_dihedrals[i];
+            index++;
+        }
     }
     return dihedrals;
 }
@@ -732,9 +743,12 @@ json ForceFieldGenerator::Dihedrals() const
 json ForceFieldGenerator::Inversions() const
 {
     json inversions;
+    int index = 0;
     for (int i = 0; i < m_inversions.size(); ++i) {
-        if (m_inversions[i]["type"] != 0)
-            inversions[i] = m_inversions[i];
+        if (m_inversions[i]["type"] != 0 && m_inversions[i]["fc"] != 0) {
+            inversions[index] = m_inversions[i];
+            index++;
+        }
     }
     return inversions;
 }
@@ -742,9 +756,13 @@ json ForceFieldGenerator::Inversions() const
 json ForceFieldGenerator::vdWs() const
 {
     json vdws;
+    int index = 0;
+
     for (int i = 0; i < m_vdws.size(); ++i) {
-        if (m_vdws[i]["type"] != 0)
-            vdws[i] = m_vdws[i];
+        if (m_vdws[i]["type"] != 0) {
+            vdws[index] = m_vdws[i];
+            index++;
+        }
     }
     return vdws;
 }

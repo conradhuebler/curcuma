@@ -53,6 +53,7 @@ public:
     ForceField(const json& controller);
     ~ForceField();
 
+    inline void setAtomCount(int atom) { m_natoms = atom; }
     void UpdateGeometry(const Matrix& geometry);
     inline void UpdateGeometry(const double* coord);
     inline void UpdateGeometry(const std::vector<std::array<double, 3>>& geometry);
@@ -63,6 +64,7 @@ public:
 
     void setParameter(const json& parameter);
     void setParameterFile(const std::string& file);
+    Eigen::MatrixXd NumGrad();
 
 private:
     void AutoRanges();

@@ -135,15 +135,13 @@ void ForceFieldThread::CalculateUFFAngleContribution()
         Matrix derivate;
         double costheta = UFF::AngleBending(i, j, k, derivate, m_calculate_gradient);
         m_angle_energy += (angle.fc * (angle.C0 + angle.C1 * costheta + angle.C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling;
-
+        // std::cout << (angle.fc * (angle.C0 + angle.C1 * costheta + angle.C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling << " ";
         if (m_calculate_gradient) {
-            if (m_calc_gradient == 0) {
-                double sintheta = sin(acos(costheta));
-                double dEdtheta = -angle.fc * sintheta * (angle.C1 + 4 * angle.C2 * costheta) * m_final_factor * m_angle_scaling;
-                m_gradient.row(angle.i) += dEdtheta * derivate.row(0);
-                m_gradient.row(angle.j) += dEdtheta * derivate.row(1);
-                m_gradient.row(angle.k) += dEdtheta * derivate.row(2);
-            }
+            double sintheta = sin(acos(costheta));
+            double dEdtheta = -angle.fc * sintheta * (angle.C1 + 4 * angle.C2 * costheta) * m_final_factor * m_angle_scaling;
+            m_gradient.row(angle.i) += dEdtheta * derivate.row(0);
+            m_gradient.row(angle.j) += dEdtheta * derivate.row(1);
+            m_gradient.row(angle.k) += dEdtheta * derivate.row(2);
         }
     }
 }
@@ -159,7 +157,9 @@ void ForceFieldThread::CalculateUFFDihedralContribution()
         Eigen::Vector3d eins = { 1.0, 1.0, 1.0 };
         Eigen::Vector3d nijk = UFF::NormalVector(i, j, k);
         Eigen::Vector3d njkl = UFF::NormalVector(j, k, l);
-
+        Eigen::Vector3d dx = { m_d, 0, 0 };
+        Eigen::Vector3d dy = { 0, m_d, 0 };
+        Eigen::Vector3d dz = { 0, 0, m_d };
         double n_ijk = (nijk).norm();
         double n_jkl = (njkl).norm();
         double dotpr = nijk.dot(njkl);
@@ -168,16 +168,18 @@ void ForceFieldThread::CalculateUFFDihedralContribution()
         double sign = (-1 * ji).dot(njkl) < 0 ? -1 : 1;
         double phi = pi + sign * acos(dotpr / (n_ijk * n_jkl));
         double sinphi = sin(phi);
-        double tmp_energy = (1 / 2.0 * dihedral.V * (1 - cos(dihedral.n * dihedral.phi0) * cos(dihedral.n * dihedral.phi0))) * m_final_factor * m_dihedral_scaling;
-        // Dihedral(i, j, k, l, dihedral.V, dihedral.n, dihedral.phi0) * m_final_factor * m_dihedral_scaling;
+        double tmp_energy = (1 / 2.0 * dihedral.V * (1 - cos(dihedral.n * dihedral.phi0) * cos(dihedral.n * phi))) * m_final_factor * m_dihedral_scaling;
+        // std::cout << tmp_energy << ": ";
+        // m_dihedral_energy +=UFF::Dihedral(i, j, k, l, dihedral.V, dihedral.n, dihedral.phi0) * m_final_factor * m_dihedral_scaling;
         if (isnan(tmp_energy))
             continue;
         m_dihedral_energy += tmp_energy;
         if (m_calculate_gradient) {
+
             Eigen::Vector3d kj = k - j;
             Eigen::Vector3d kl = k - l;
             double tmp = 0;
-            double dEdphi = (1 / 2.0 * dihedral.V * dihedral.n * (cos(dihedral.n * dihedral.phi0) * sin(dihedral.n * phi)));
+            double dEdphi = (1 / 2.0 * dihedral.V * dihedral.n * (cos(dihedral.n * dihedral.phi0) * sin(dihedral.n * phi))) * m_final_factor * m_dihedral_scaling;
             if (isnan(dEdphi))
                 continue;
 

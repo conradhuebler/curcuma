@@ -176,6 +176,7 @@ set(curcuma_core_SRC
 
     add_executable(curcuma
             src/main.cpp
+            src/core/forcefieldgenerator.h src/core/forcefieldgenerator.cpp
 
             )
 

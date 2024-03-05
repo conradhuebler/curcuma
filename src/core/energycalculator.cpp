@@ -232,7 +232,10 @@ void EnergyCalculator::setMolecule(const Molecule& molecule)
         ff.setMolecule(molecule);
         ff.Generate();
         json parameters = ff.getParameter();
+        // std::ofstream parameterfile("uff.json");
+        // parameterfile << parameters;
         m_forcefield->setParameter(parameters);
+        m_forcefield->setAtomCount(molecule.AtomCount());
         // m_forcefield->setMolecule(atoms, geom);
         // m_forcefield->Initialise();
 
@@ -396,6 +399,7 @@ void EnergyCalculator::CalculateFF(bool gradient, bool verbose)
     m_energy = m_forcefield->Calculate(gradient, verbose);
     if (gradient) {
         m_gradient = m_forcefield->Gradient();
+        // m_gradient = m_forcefield->NumGrad();
     }
 }
 

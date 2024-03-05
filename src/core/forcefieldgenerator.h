@@ -133,7 +133,7 @@ private:
     std::vector<int> m_atom_types, m_coordination;
     std::vector<std::set<int>> m_ignored_vdw;
     std::vector<json> m_bonds, m_angles, m_dihedrals, m_inversions, m_vdws, m_eqs;
-    double m_uff_bond_force = 1, m_uff_angle_force = 1, m_scaling = 1.4;
+    double m_uff_bond_force = 664.12, m_uff_angle_force = 664.12, m_scaling = 1.4;
     double m_au = 1;
 
     int m_ff_type = 1;

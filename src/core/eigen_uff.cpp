@@ -84,7 +84,7 @@ double UFFThread::Distance(double x1, double x2, double y1, double y2, double z1
 
 double UFFThread::BondEnergy(double distance, double r, double kij, double D_ij)
 {
-    double energy = (0.25 * kij * (distance - r) * (distance - r)) * m_final_factor * m_bond_scaling;
+    double energy = (0.5 * kij * (distance - r) * (distance - r)) * m_final_factor * m_bond_scaling;
     if (isnan(energy))
         return 0;
     else
@@ -106,7 +106,7 @@ double UFFThread::CalculateBondStretching()
         Matrix derivate;
         double r0 = BondStretching(x, y, derivate, m_CalculateGradient);
 
-        energy += (0.25 * bond.kij * (r0 - bond.r0) * (r0 - bond.r0)) * m_final_factor * m_bond_scaling;
+        energy += (0.5 * bond.kij * (r0 - bond.r0) * (r0 - bond.r0)) * m_final_factor * m_bond_scaling;
         if (m_CalculateGradient) {
             if (m_calc_gradient == 0) {
                 double diff = (bond.kij) * (r0 - bond.r0) * m_final_factor * m_bond_scaling;
@@ -167,7 +167,7 @@ double UFFThread::CalculateAngleBending()
         Matrix derivate;
         double costheta = AngleBending(atom_i, atom_j, atom_k, derivate, m_CalculateGradient);
         double e = (angle.kijk * (angle.C0 + angle.C1 * costheta + angle.C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling;
-
+        energy += e;
         if (m_CalculateGradient) {
             if (m_calc_gradient == 0) {
                 double sintheta = sin(acos(costheta));
@@ -396,7 +396,6 @@ double UFFThread::FullInversion(const int& i, const int& j, const int& k, const 
     Eigen::Vector3d atom_j = Position(j);
     Eigen::Vector3d atom_k = Position(k);
     Eigen::Vector3d atom_l = Position(l);
-
     energy += Inversion(atom_i, atom_j, atom_k, atom_l, d_forceConstant, C0, C1, C2);
     if (m_CalculateGradient) {
         if (m_calc_gradient == 0) {
