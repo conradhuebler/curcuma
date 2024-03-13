@@ -33,6 +33,7 @@
 
 EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller)
     : m_method(method)
+    , m_controller(controller)
 {
     m_charges = []() {
         return std::vector<double>{};
@@ -228,16 +229,17 @@ void EnergyCalculator::setMolecule(const Molecule& molecule)
 
     } else if (std::find(m_ff_methods.begin(), m_ff_methods.end(), m_method) != m_ff_methods.end()) { //
 
-        ForceFieldGenerator ff;
+        ForceFieldGenerator ff(m_controller);
         ff.setMolecule(molecule);
         ff.Generate();
         json parameters = ff.getParameter();
         // std::ofstream parameterfile("uff.json");
         // parameterfile << parameters;
+        m_forcefield->setAtomTypes(molecule.Atoms());
         m_forcefield->setParameter(parameters);
-        m_forcefield->setAtomCount(molecule.AtomCount());
-        // m_forcefield->setMolecule(atoms, geom);
-        // m_forcefield->Initialise();
+        // m_forcefield->setAtomCount(molecule.AtomCount());
+        //  m_forcefield->setMolecule(atoms, geom);
+        //  m_forcefield->Initialise();
 
     } else { // Fall back to UFF?
     }
@@ -289,11 +291,6 @@ void EnergyCalculator::updateGeometry(const std::vector<double>& geometry)
 void EnergyCalculator::updateGeometry(const Matrix& geometry)
 {
     m_geometry = geometry;
-    for (int i = 0; i < m_atoms; ++i) {
-        m_coord[3 * i + 0] = geometry(i, 0) / au;
-        m_coord[3 * i + 1] = geometry(i, 1) / au;
-        m_coord[3 * i + 2] = geometry(i, 2) / au;
-    }
 }
 
 /*
@@ -329,6 +326,11 @@ void EnergyCalculator::CalculateUFF(bool gradient, bool verbose)
 void EnergyCalculator::CalculateTBlite(bool gradient, bool verbose)
 {
 #ifdef USE_TBLITE
+    for (int i = 0; i < m_atoms; ++i) {
+        m_coord[3 * i + 0] = m_geometry(i, 0) / au;
+        m_coord[3 * i + 1] = m_geometry(i, 1) / au;
+        m_coord[3 * i + 2] = m_geometry(i, 2) / au;
+    }
     m_tblite->UpdateMolecule(m_coord);
 
     if (gradient) {
@@ -346,6 +348,11 @@ void EnergyCalculator::CalculateTBlite(bool gradient, bool verbose)
 void EnergyCalculator::CalculateXTB(bool gradient, bool verbose)
 {
 #ifdef USE_XTB
+    for (int i = 0; i < m_atoms; ++i) {
+        m_coord[3 * i + 0] = m_geometry(i, 0) / au;
+        m_coord[3 * i + 1] = m_geometry(i, 1) / au;
+        m_coord[3 * i + 2] = m_geometry(i, 2) / au;
+    }
     m_xtb->UpdateMolecule(m_coord);
 
     if (gradient) {

@@ -791,18 +791,8 @@ Geometry Molecule::getGeometryByFragment(int fragment, bool protons) const
 
 bool Molecule::setGeometry(const Geometry &geometry)
 {
-    if (geometry.rows() != m_geometry.size())
-        return false;
-
     m_dirty = true;
     m_geometry = geometry;
-    /*
-    for (int i = 0; i < m_geometry.size(); ++i) {
-        m_geometry(i,0) = geometry(i, 0);
-        m_geometry(i,1) = geometry(i, 1);
-        m_geometry(i,2) = geometry(i, 2);
-    }
-    */
     return true;
 }
 

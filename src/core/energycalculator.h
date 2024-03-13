@@ -157,8 +157,8 @@ private:
     eigenUFF* m_uff = NULL;
     QMDFF* m_qmdff = NULL;
     ForceField* m_forcefield = NULL;
-    StringList m_uff_methods = { "uff" };
-    StringList m_ff_methods = { "fuff" };
+    StringList m_uff_methods = { "fuff" };
+    StringList m_ff_methods = { "uff", "uff-d3" };
     StringList m_qmdff_method = { "qmdff" };
     StringList m_tblite_methods = { "ipea1", "gfn1", "gfn2" };
     StringList m_xtb_methods = { "gfnff", "xtb-gfn1", "xtb-gfn2" };

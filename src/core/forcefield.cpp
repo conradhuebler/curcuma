@@ -28,9 +28,12 @@
 
 ForceField::ForceField(const json& controller)
 {
+    json parameter = MergeJson(UFFParameterJson, controller);
+
     m_threadpool = new CxxThreadPool();
     m_threadpool->setProgressBar(CxxThreadPool::ProgressBarType::None);
-    m_threads = 1;
+    m_threads = parameter["threads"];
+    m_gradient_type = parameter["gradient"];
 }
 
 void ForceField::UpdateGeometry(const Matrix& geometry)
@@ -65,7 +68,7 @@ void ForceField::setParameter(const json& parameters)
     setDihedrals(parameters["dihedrals"]);
     setInversions(parameters["inversions"]);
     setvdWs(parameters["vdws"]);
-
+    m_parameters = parameters;
     AutoRanges();
 }
 
@@ -171,27 +174,38 @@ void ForceField::setvdWs(const json& vdws)
 
 void ForceField::AutoRanges()
 {
-    for (int i = 0; i < m_threads; ++i) {
-        ForceFieldThread* thread = new ForceFieldThread(i, m_threads);
+    int free_threads = m_threads;
+    int d3 = m_parameters["d3"];
+    if (d3) {
+        if (free_threads > 1)
+            free_threads--;
+        D3Thread* thread = new D3Thread(m_threads - 1, free_threads);
+        thread->setParamater(m_parameters);
+        thread->Initialise(m_atom_types);
+        m_threadpool->addThread(thread);
+        m_stored_threads.push_back(thread);
+    }
+    for (int i = 0; i < free_threads; ++i) {
+        ForceFieldThread* thread = new ForceFieldThread(i, free_threads);
         thread->setGeometry(m_geometry, false);
         m_threadpool->addThread(thread);
         m_stored_threads.push_back(thread);
-        for (int j = int(i * m_bonds.size() / double(m_threads)); j < int((i + 1) * m_bonds.size() / double(m_threads)); ++j)
+        for (int j = int(i * m_bonds.size() / double(free_threads)); j < int((i + 1) * m_bonds.size() / double(free_threads)); ++j)
             thread->addBond(m_bonds[j]);
 
-        for (int j = int(i * m_angles.size() / double(m_threads)); j < int((i + 1) * m_angles.size() / double(m_threads)); ++j)
+        for (int j = int(i * m_angles.size() / double(free_threads)); j < int((i + 1) * m_angles.size() / double(free_threads)); ++j)
             thread->addAngle(m_angles[j]);
 
-        for (int j = int(i * m_dihedrals.size() / double(m_threads)); j < int((i + 1) * m_dihedrals.size() / double(m_threads)); ++j)
+        for (int j = int(i * m_dihedrals.size() / double(free_threads)); j < int((i + 1) * m_dihedrals.size() / double(free_threads)); ++j)
             thread->addDihedral(m_dihedrals[j]);
 
-        for (int j = int(i * m_inversions.size() / double(m_threads)); j < int((i + 1) * m_inversions.size() / double(m_threads)); ++j)
+        for (int j = int(i * m_inversions.size() / double(free_threads)); j < int((i + 1) * m_inversions.size() / double(free_threads)); ++j)
             thread->addInversion(m_inversions[j]);
 
-        for (int j = int(i * m_vdWs.size() / double(m_threads)); j < int((i + 1) * m_vdWs.size() / double(m_threads)); ++j)
+        for (int j = int(i * m_vdWs.size() / double(free_threads)); j < int((i + 1) * m_vdWs.size() / double(free_threads)); ++j)
             thread->addvdW(m_vdWs[j]);
 
-        for (int j = int(i * m_EQs.size() / double(m_threads)); j < int((i + 1) * m_EQs.size() / double(m_threads)); ++j)
+        for (int j = int(i * m_EQs.size() / double(free_threads)); j < int((i + 1) * m_EQs.size() / double(free_threads)); ++j)
             thread->addEQ(m_EQs[j]);
     }
 }
@@ -233,6 +247,7 @@ double ForceField::Calculate(bool gradient, bool verbose)
     double eq_energy = 0.0;
     double h4_energy = 0.0;
     double hh_energy = 0.0;
+#pragma omp parallel for
     for (int i = 0; i < m_stored_threads.size(); ++i) {
         m_stored_threads[i]->UpdateGeometry(m_geometry, gradient);
     }
@@ -241,7 +256,10 @@ double ForceField::Calculate(bool gradient, bool verbose)
     m_threadpool->setActiveThreadCount(m_threads);
 
     m_threadpool->StartAndWait();
-    m_threadpool->setWakeUp(m_threadpool->WakeUp() / 2.0);
+    m_threadpool->setWakeUp(m_threadpool->WakeUp() / 2);
+    omp_set_num_threads(m_threads);
+    Eigen::setNbThreads(m_threads);
+#pragma omp parallel for
     for (int i = 0; i < m_stored_threads.size(); ++i) {
         bond_energy += m_stored_threads[i]->BondEnergy();
         angle_energy += m_stored_threads[i]->AngleEnergy();

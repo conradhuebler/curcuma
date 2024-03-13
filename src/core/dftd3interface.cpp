@@ -105,6 +105,8 @@ void DFTD3Interface::CreateParameter()
 
 void DFTD3Interface::UpdateParameters(const json& controller)
 {
+#pragma message("remove and make consistent")
+
     json parameter = MergeJson(DFTD3Settings, controller);
     m_d3_a1 = parameter["d_a1"];
     m_d3_a2 = parameter["d_a2"];
@@ -116,7 +118,24 @@ void DFTD3Interface::UpdateParameters(const json& controller)
     m_d3_s9 = parameter["d_s9"];
     CreateParameter();
 
-    PrintParameter();
+    // PrintParameter();
+}
+
+void DFTD3Interface::UpdateParametersD3(const json& controller)
+{
+#pragma message("remove and make consistent")
+    json parameter = MergeJson(DFTD3Settings, controller);
+    m_d3_a1 = parameter["d3_a1"];
+    m_d3_a2 = parameter["d3_a2"];
+    m_d3_alp = parameter["d3_alp"];
+
+    m_d3_s6 = parameter["d3_s6"];
+    m_d3_s8 = parameter["d3_s8"];
+
+    m_d3_s9 = parameter["d3_s9"];
+    CreateParameter();
+
+    // PrintParameter();
 }
 
 bool DFTD3Interface::InitialiseMolecule(const std::vector<int>& atomtypes)

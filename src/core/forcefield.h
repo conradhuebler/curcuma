@@ -47,13 +47,23 @@
 #include "json.hpp"
 using json = nlohmann::json;
 
+static const json FFJson = {
+    { "threads", 1 },
+    { "gradient", 1 }
+};
+
 class ForceField {
 
 public:
     ForceField(const json& controller);
     ~ForceField();
 
-    inline void setAtomCount(int atom) { m_natoms = atom; }
+    // inline void setAtomCount(int atom) { m_natoms = atom; }
+    inline void setAtomTypes(const std::vector<int>& atom_types)
+    {
+        m_atom_types = atom_types;
+        m_natoms = atom_types.size();
+    }
     void UpdateGeometry(const Matrix& geometry);
     inline void UpdateGeometry(const double* coord);
     inline void UpdateGeometry(const std::vector<std::array<double, 3>>& geometry);
@@ -78,12 +88,15 @@ private:
     void setvdWs(const json& vdws);
 
     Matrix m_geometry, m_gradient;
+    std::vector<int> m_atom_types;
     int m_natoms = 0;
     int m_threads = 1;
+    int m_gradient_type = 1;
     std::vector<Bond> m_bonds;
     std::vector<Angle> m_angles;
     std::vector<Dihedral> m_dihedrals;
     std::vector<Inversion> m_inversions;
     std::vector<vdW> m_vdWs;
     std::vector<EQ> m_EQs;
+    json m_parameters;
 };

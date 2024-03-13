@@ -722,25 +722,20 @@ void SimpleMD::start()
 
 void SimpleMD::Verlet(double* coord, double* grad)
 {
-    //   std::ofstream restart_file("last_stable_curcuma.json");
-    //   auto fallback = WriteRestartInformation();
-    //   restart_file << fallback << std::endl;
-
+#pragma omp parallel
     for (int i = 0; i < m_natoms; ++i) {
-        coord[3 * i + 0] = m_current_geometry[3 * i + 0] + m_dT * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
-        coord[3 * i + 1] = m_current_geometry[3 * i + 1] + m_dT * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
-        coord[3 * i + 2] = m_current_geometry[3 * i + 2] + m_dT * m_velocities[3 * i + 2] - 0.5 * grad[3 * i + 2] * m_rmass[3 * i + 2] * m_dt2;
+        m_current_geometry[3 * i + 0] = m_current_geometry[3 * i + 0] + m_dT * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
+        m_current_geometry[3 * i + 1] = m_current_geometry[3 * i + 1] + m_dT * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
+        m_current_geometry[3 * i + 2] = m_current_geometry[3 * i + 2] + m_dT * m_velocities[3 * i + 2] - 0.5 * grad[3 * i + 2] * m_rmass[3 * i + 2] * m_dt2;
 
         m_velocities[3 * i + 0] = m_velocities[3 * i + 0] - 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
         m_velocities[3 * i + 1] = m_velocities[3 * i + 1] - 0.5 * m_dT * grad[3 * i + 1] * m_rmass[3 * i + 1];
         m_velocities[3 * i + 2] = m_velocities[3 * i + 2] - 0.5 * m_dT * grad[3 * i + 2] * m_rmass[3 * i + 2];
-
-        m_current_geometry[3 * i + 0] = coord[3 * i + 0];
-        m_current_geometry[3 * i + 1] = coord[3 * i + 1];
-        m_current_geometry[3 * i + 2] = coord[3 * i + 2];
     }
     m_Epot = Energy(coord, grad);
     double ekin = 0.0;
+
+#pragma omp parallel
     for (int i = 0; i < m_natoms; ++i) {
         m_velocities[3 * i + 0] -= 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
         m_velocities[3 * i + 1] -= 0.5 * m_dT * grad[3 * i + 1] * m_rmass[3 * i + 1];
@@ -769,13 +764,11 @@ void SimpleMD::Rattle(double* coord, double* grad)
      * by Richard J. Sadus
      * some suff was just ignored or corrected
      * like dT^3 -> dT^2 and
-     * updated velocities of the second atom (minus instread of plus)
+     * updated velocities of the second atom (minus instead of plus)
      */
-    // TriggerWriteRestart();
+
     double m_dT_inverse = 1 / m_dT;
-    // double T_begin = 0, T_rattle_1 = 0, T_verlet = 0;
     std::vector<int> moved(m_natoms, 0);
-    // double kin = 0;
     for (int i = 0; i < m_natoms; ++i) {
         coord[3 * i + 0] = m_current_geometry[3 * i + 0] + m_dT * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
         coord[3 * i + 1] = m_current_geometry[3 * i + 1] + m_dT * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
@@ -784,9 +777,7 @@ void SimpleMD::Rattle(double* coord, double* grad)
         m_velocities[3 * i + 0] -= 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
         m_velocities[3 * i + 1] -= 0.5 * m_dT * grad[3 * i + 1] * m_rmass[3 * i + 1];
         m_velocities[3 * i + 2] -= 0.5 * m_dT * grad[3 * i + 2] * m_rmass[3 * i + 2];
-        // kin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
-    // T_begin = kin / (kb_Eh * m_dof);
     double iter = 0;
     double max_mu = 10;
 
@@ -831,23 +822,17 @@ void SimpleMD::Rattle(double* coord, double* grad)
                     m_velocities[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
                     m_velocities[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
                     m_velocities[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
-                    //                std::cout << i << " " << j <<  " " <<lambda << " :: " ;
                 }
             }
         }
     }
-    // std::cout << std::endl;
     m_Epot = Energy(coord, grad);
     double ekin = 0.0;
-    // kin = 0;
 
     for (int i = 0; i < m_natoms; ++i) {
-        //    kin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
-
         m_velocities[3 * i + 0] -= 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
         m_velocities[3 * i + 1] -= 0.5 * m_dT * grad[3 * i + 1] * m_rmass[3 * i + 1];
         m_velocities[3 * i + 2] -= 0.5 * m_dT * grad[3 * i + 2] * m_rmass[3 * i + 2];
-        //    ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
 
         m_current_geometry[3 * i + 0] = coord[3 * i + 0];
         m_current_geometry[3 * i + 1] = coord[3 * i + 1];
@@ -859,8 +844,6 @@ void SimpleMD::Rattle(double* coord, double* grad)
     }
     m_virial_correction = 0;
     iter = 0;
-    // T_rattle_1 = kin / (kb_Eh * m_dof);
-    // T_verlet = ekin / (kb_Eh * m_dof);
     ekin = 0.0;
     while (iter < m_rattle_maxiter) {
         iter++;
@@ -890,7 +873,6 @@ void SimpleMD::Rattle(double* coord, double* grad)
                     m_velocities[3 * j + 0] -= dx * mu * m_rmass[j];
                     m_velocities[3 * j + 1] -= dy * mu * m_rmass[j];
                     m_velocities[3 * j + 2] -= dz * mu * m_rmass[j];
-                    // std::cout << i << " " << j <<  " " << mu << " :: " ;
                 }
             }
         }
@@ -902,9 +884,6 @@ void SimpleMD::Rattle(double* coord, double* grad)
     ekin *= 0.5;
     double T = 2.0 * ekin / (kb_Eh * m_dof);
     m_unstable = T > 10000 * m_T;
-    // std::cout << std::endl;
-
-    // std::cout << T_begin << " " << T_rattle_1 <<  " " << T_verlet << " " << T << std::endl;
     m_T = T;
 }
 
@@ -1268,7 +1247,7 @@ double SimpleMD::CleanEnergy(const double* coord, double* grad)
 
 double SimpleMD::FastEnergy(const double* coord, double* grad)
 {
-    m_interface->updateGeometry(coord);
+    m_interface->updateGeometry(m_current_geometry);
 
     double Energy = m_interface->CalculateEnergy(true);
     m_interface->getGradient(grad);

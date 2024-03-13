@@ -100,9 +100,30 @@ static json EQJson{
     { "r0_ij", 0 },
 };
 
+const json FFGenerator{
+    { "method", "uff" },
+    { "d3", 0 },
+    { "d4", 0 },
+    { "d3_s6", 1.0 },
+    { "d3_s8", 2.7 },
+    { "d3_s9", 1.0 },
+    { "d3_a1", 0.45 },
+    { "d3_a2", 4.0 },
+    { "d3_alp", 1 },
+    { "bond_scaling", 1 },
+    { "angle_scaling", 1 },
+    { "inversion_scaling", 1 },
+    { "vdw_scaling", 1 },
+    { "rep_scaling", 1 },
+    { "dihedral_scaling", 1 },
+    { "coulomb_scaling", 1 },
+    { "h4_scaling", 0 },
+    { "hh_scaling", 0 }
+};
+
 class ForceFieldGenerator {
 public:
-    ForceFieldGenerator();
+    ForceFieldGenerator(const json& controller);
 
     void setMolecule(const Molecule& molecule);
     void Generate(const std::vector<std::pair<int, int>>& formed_bonds = std::vector<std::pair<int, int>>());
@@ -137,4 +158,6 @@ private:
     double m_au = 1;
 
     int m_ff_type = 1;
+    std::string m_method = "uff";
+    json m_parameter;
 };

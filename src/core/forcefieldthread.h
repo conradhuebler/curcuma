@@ -168,7 +168,7 @@ public:
     ~D3Thread();
     void setParamater(const json& parameter)
     {
-        m_d3->UpdateParameters(parameter);
+        m_d3->UpdateParametersD3(parameter);
     }
 
     void Initialise(const std::vector<int>& atom_types)

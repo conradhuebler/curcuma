@@ -26,8 +26,10 @@ using json = nlohmann::json;
 
 #include "forcefieldgenerator.h"
 
-ForceFieldGenerator::ForceFieldGenerator()
+ForceFieldGenerator::ForceFieldGenerator(const json& controller)
 {
+    m_parameter = MergeJson(FFGenerator, controller);
+    m_method = m_parameter["method"];
 }
 
 void ForceFieldGenerator::setMolecule(const Molecule& molecule)
@@ -38,7 +40,6 @@ void ForceFieldGenerator::setMolecule(const Molecule& molecule)
 
 void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& formed_bonds)
 {
-
     m_atom_types = std::vector<int>(m_molecule.Atoms().size(), 0);
     m_coordination = std::vector<int>(m_molecule.Atoms().size(), 0);
     m_topo = Eigen::MatrixXd::Zero(m_molecule.Atoms().size(), m_molecule.Atoms().size());
@@ -99,8 +100,22 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
     }
     AssignUffAtomTypes();
     // if (m_rings)
-    // m_identified_rings = Topology::FindRings(m_stored_bonds, m_atom_types.size());
+    std::cout << "Crude ring finding method ... " << std::endl;
+    int maxsize = m_atom_types.size();
+    int maxcache = m_atom_types.size();
+    if (m_atom_types.size() > 1000)
+        maxcache = 5;
+    m_identified_rings = Topology::FindRings(m_stored_bonds, m_atom_types.size(), maxsize, maxcache);
+    std::cout << "... done!" << std::endl;
 
+    if (m_method.compare("uff-d3") == 0) {
+        m_parameter["d3"] = 1;
+        m_parameter["vdw_scaling"] = 0;
+    } else if (m_method.compare("qmdff") == 0) {
+        m_ff_type = 2;
+        m_parameter["d3"] = 1;
+        m_parameter["vdw_scaling"] = 0;
+    }
     setBonds(bonds);
 
     setAngles();
@@ -164,7 +179,6 @@ void ForceFieldGenerator::setBonds(const TContainer& bonds)
             uffangle["i"] = std::min(t, j);
             uffangle["k"] = std::max(j, t);
 
-            // angels.insert({ std::min(t, j), i, std::max(j, t) });
             if (std::find(m_angles.begin(), m_angles.end(), uffangle) == m_angles.end())
                 m_angles.push_back(uffangle);
             m_ignored_vdw[i].insert(t);
@@ -183,7 +197,6 @@ void ForceFieldGenerator::setBonds(const TContainer& bonds)
             if (std::find(m_angles.begin(), m_angles.end(), uffangle) == m_angles.end())
                 m_angles.push_back(uffangle);
 
-            // angels.insert({ std::min(i, t), j, std::max(t, i) });
             m_ignored_vdw[j].insert(t);
         }
 
@@ -198,7 +211,6 @@ void ForceFieldGenerator::setBonds(const TContainer& bonds)
                 uffdihedral["l"] = l;
                 if (std::find(m_dihedrals.begin(), m_dihedrals.end(), uffdihedral) == m_dihedrals.end()) {
                     m_dihedrals.push_back(uffdihedral);
-                    // dihedrals.insert({ k, i, j, l });
                     m_ignored_vdw[i].insert(k);
                     m_ignored_vdw[i].insert(l);
                     m_ignored_vdw[j].insert(k);
@@ -217,7 +229,6 @@ void ForceFieldGenerator::setBonds(const TContainer& bonds)
             if (std::find(m_inversions.begin(), m_inversions.end(), inversion) == m_inversions.end()) {
                 m_inversions.push_back(inversion);
             }
-            // inversions.insert({ i, m_stored_bonds[i][0], m_stored_bonds[i][1], m_stored_bonds[i][2] });
         }
         if (m_stored_bonds[j].size() == 3) {
             json inversion = InversionJson;
@@ -228,7 +239,6 @@ void ForceFieldGenerator::setBonds(const TContainer& bonds)
             if (std::find(m_inversions.begin(), m_inversions.end(), inversion) == m_inversions.end()) {
                 m_inversions.push_back(inversion);
             }
-            // inversions.insert({ j, m_stored_bonds[j][0], m_stored_bonds[j][1], m_stored_bonds[j][2] });
         }
     }
 }
@@ -236,8 +246,6 @@ void ForceFieldGenerator::setBonds(const TContainer& bonds)
 void ForceFieldGenerator::setAngles()
 {
     for (int index = 0; index < m_angles.size(); ++index) {
-
-        // UFFAngle a;
 
         int i = m_angles[index]["i"];
         int j = m_angles[index]["j"];
@@ -264,25 +272,16 @@ void ForceFieldGenerator::setAngles()
         m_angles[index]["C0"] = C0;
         m_angles[index]["C1"] = C1;
         m_angles[index]["C2"] = C2;
-
-        // m_uffangle.push_back(a);
     }
 }
 
 void ForceFieldGenerator::setDihedrals()
 {
     for (int index = 0; index < m_dihedrals.size(); ++index) {
-        // UFFDihedral d;
         int i = m_dihedrals[index]["i"];
         int j = m_dihedrals[index]["j"];
         int k = m_dihedrals[index]["k"];
         int l = m_dihedrals[index]["l"];
-        /*
-        d.i = dihedral[0];
-        d.j = dihedral[1];
-        d.k = dihedral[2];
-        d.l = dihedral[3];
-        */
 
         m_dihedrals[index]["n"] = 2;
         double f = pi / 180.0;
@@ -318,8 +317,6 @@ void ForceFieldGenerator::setDihedrals()
             m_dihedrals[index]["V"] = 5 * sqrt(UFFParameters[m_atom_types[j]][cU] * UFFParameters[m_atom_types[k]][cU]) * (1 + 4.18 * log(bond_order));
             m_dihedrals[index]["phi0"] = 90 * f;
         }
-
-        // m_uffdihedral.push_back(d);
     }
 }
 
@@ -330,7 +327,6 @@ void ForceFieldGenerator::setInversions()
         if (m_coordination[i] != 3)
             continue;
 
-        // UFFInversion inv;
         int j = m_inversions[index]["j"];
         int k = m_inversions[index]["k"];
         int l = m_inversions[index]["l"];
@@ -379,7 +375,6 @@ void ForceFieldGenerator::setInversions()
         m_inversions[index]["C1"] = C1;
         m_inversions[index]["C2"] = C2;
         m_inversions[index]["fc"] = kijkl;
-        // m_uffinversion.push_back(inv);
     }
 }
 
@@ -613,63 +608,9 @@ void ForceFieldGenerator::AssignUffAtomTypes()
     }
 }
 
-json ForceFieldGenerator::writeUFF()
-{
-    json parameters;
-    parameters["differential"] = 1e-5;
-    parameters["bond_scaling"] = 1;
-    parameters["angle_scaling"] = 1;
-    parameters["inversion_scaling"] = 1;
-    parameters["vdw_scaling"] = 1;
-    parameters["rep_scaling"] = 1;
-    parameters["dihedral_scaling"] = 1;
-
-    parameters["coulomb_scaling"] = 1;
-
-    parameters["bond_force"] = 1;
-    parameters["angle_force"] = 1;
-
-    parameters["h4_scaling"] = 0;
-    parameters["hh_scaling"] = 0;
-/*
-    parameters["h4_oh_o"] = m_h4correction.get_OH_O();
-    parameters["h4_oh_n"] = m_h4correction.get_OH_N();
-    parameters["h4_nh_o"] = m_h4correction.get_NH_O();
-    parameters["h4_nh_n"] = m_h4correction.get_NH_N();
-
-    parameters["h4_wh_o"] = m_h4correction.get_WH_O();
-    parameters["h4_nh4"] = m_h4correction.get_NH4();
-    parameters["h4_coo"] = m_h4correction.get_COO();
-    parameters["hh_rep_k"] = m_h4correction.get_HH_Rep_K();
-    parameters["hh_rep_e"] = m_h4correction.get_HH_Rep_E();
-    parameters["hh_rep_r0"] = m_h4correction.get_HH_Rep_R0();
-*/
-#ifdef USE_D3
-    /* if (m_use_d3) {
-         parameters["d_s6"] = m_d3->ParameterS6();
-         parameters["d_s8"] = m_d3->ParameterS8();
-         parameters["d_s9"] = m_d3->ParameterS9();
-         parameters["d_a1"] = m_d3->ParameterA1();
-         parameters["d_a2"] = m_d3->ParameterA2();
-     } */
-#endif
-
-#ifdef USE_D4
-    /* if (m_use_d4) {
-         parameters["d4_s6"] = m_d4->Parameter().s6;
-         parameters["d4_s8"] = m_d4->Parameter().s8;
-         parameters["d4_s10"] = m_d4->Parameter().s10;
-         parameters["d4_s9"] = m_d4->Parameter().s9;
-         parameters["d4_a1"] = m_d4->Parameter().a1;
-         parameters["d4_a2"] = m_d4->Parameter().a2;
-     }*/
-#endif
-    return parameters;
-}
-
 json ForceFieldGenerator::getParameter()
 {
-    json parameters = writeUFF();
+    json parameters = m_parameter;
     parameters["bonds"] = Bonds();
     parameters["angles"] = Angles();
     parameters["dihedrals"] = Dihedrals();
@@ -677,26 +618,6 @@ json ForceFieldGenerator::getParameter()
     parameters["vdws"] = vdWs();
     return parameters;
 }
-/*
-void ForceFieldGenerator::writeParameterFile(const std::string& file) const
-{
-    json parameters = writeUFF();
-    parameters["bonds"] = Bonds();
-    parameters["angles"] = Angles();
-    parameters["dihedrals"] = Dihedrals();
-    parameters["inversions"] = Inversions();
-    parameters["vdws"] = vdWs();
-    std::ofstream parameterfile(file);
-    parameterfile << parameters;
-}
-
-void ForceFieldGenerator::writeUFFFile(const std::string& file) const
-{
-    json parameters = writeUFF();
-    std::ofstream parameterfile(file);
-    parameterfile << writeUFF();
-}
-*/
 
 json ForceFieldGenerator::Bonds() const
 {

@@ -49,6 +49,7 @@ public:
 
     double DFTD3Calculation(double* grad = 0);
     void UpdateParameters(const json& controller);
+    void UpdateParametersD3(const json& controller);
 
     void clear();
 
