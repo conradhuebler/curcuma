@@ -160,7 +160,7 @@ set(curcuma_core_SRC
         src/capabilities/qmdfffit.cpp
         src/core/energycalculator.cpp
         src/core/molecule.cpp
-        #src/core/pseudoff.cpp
+        src/core/fileiterator.cpp
         src/core/eigen_uff.cpp
         src/core/qmdff.cpp
         src/core/eht.cpp

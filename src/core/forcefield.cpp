@@ -286,9 +286,9 @@ double ForceField::Calculate(bool gradient, bool verbose)
                   << "HHRepCorrection " << hh_energy << " Eh" << std::endl
                   << std::endl;
 
-        for (int i = 0; i < m_natoms; ++i) {
-            std::cout << m_gradient(i, 0) << " " << m_gradient(i, 1) << " " << m_gradient(i, 2) << std::endl;
-        }
+        // for (int i = 0; i < m_natoms; ++i) {
+        //     std::cout << m_gradient(i, 0) << " " << m_gradient(i, 1) << " " << m_gradient(i, 2) << std::endl;
+        // }
     }
     return energy;
 }

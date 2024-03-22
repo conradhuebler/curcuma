@@ -159,9 +159,9 @@ inline std::vector<std::vector<int>> FindRings(const std::vector<std::vector<int
     }
     for (auto a : identified_rings) {
         // if (a.size() < 10) {
-        for (auto i : a)
-            std::cout << i << " ";
-        std::cout << std::endl;
+        // for (auto i : a)
+        //    std::cout << i << " ";
+        // std::cout << std::endl;
         //}
     }
     return identified_rings;

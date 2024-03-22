@@ -46,6 +46,10 @@
 #include "json.hpp"
 using json = nlohmann::json;
 
+static json EnergyCalculatorJson{
+    { "param_file", "none" }
+};
+
 class EnergyCalculator {
 public:
     EnergyCalculator(const std::string& method, const json& controller);
@@ -56,7 +60,6 @@ public:
     void updateGeometry(const double* coord);
     void updateGeometry(const std::vector<double>& geometry);
 
-    // void updateGeometry(const std::vector<std::array<double, 3>>& geometry);
     void updateGeometry(const Matrix& geometry);
     void updateGeometry(const Eigen::VectorXd& geometry);
 
@@ -168,9 +171,8 @@ private:
     std::function<std::vector<double>()> m_charges, m_dipole;
     std::function<std::vector<std::vector<double>>()> m_bonds;
     json m_parameter;
-    std::string m_method;
+    std::string m_method, m_param_file;
     Matrix m_geometry, m_gradient;
-    // Matrix m_eigen_geometry, m_eigen_gradient;
     double m_energy;
     double *m_coord, *m_grad;
 
@@ -181,4 +183,5 @@ private:
     bool m_initialised = false;
     bool m_containsNaN = false;
     bool m_error = false;
+    bool m_writeparam = false;
 };

@@ -143,6 +143,11 @@ private:
     void Verlet(double* coord, double* grad);
     void Rattle(double* coord, double* grad);
 
+    void Rattle_Verlet_First(double* coord, double* grad);
+    void Rattle_Constrain_First(double* coord, double* grad);
+    void Rattle_Verlet_Second(double* coord, double* grad);
+    void Rattle_Constrain_Second(double* coord, double* grad);
+
     void RemoveRotation(std::vector<double>& velo);
     void RemoveRotations(std::vector<double>& velo);
 
