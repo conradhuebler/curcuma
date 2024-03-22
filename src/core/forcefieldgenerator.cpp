@@ -100,13 +100,13 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
     }
     AssignUffAtomTypes();
     // if (m_rings)
-    std::cout << "Crude ring finding method ... " << std::endl;
+    // std::cout << "Crude ring finding method ... " << std::endl;
     int maxsize = m_atom_types.size();
     int maxcache = m_atom_types.size();
     if (m_atom_types.size() > 1000)
         maxcache = 5;
     m_identified_rings = Topology::FindRings(m_stored_bonds, m_atom_types.size(), maxsize, maxcache);
-    std::cout << "... done!" << std::endl;
+    // std::cout << "... done!" << std::endl;
 
     if (m_method.compare("uff-d3") == 0) {
         m_parameter["d3"] = 1;

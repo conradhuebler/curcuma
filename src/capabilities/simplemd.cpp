@@ -887,6 +887,18 @@ void SimpleMD::Rattle(double* coord, double* grad)
     m_T = T;
 }
 
+void SimpleMD::Rattle_Verlet_First(double* coord, double* grad)
+{
+}
+
+void SimpleMD::Rattle_Constrain_First(double* coord, double* grad)
+{
+}
+
+void SimpleMD::Rattle_Verlet_Second(double* coord, double* grad)
+{
+}
+
 double SimpleMD::ApplySphericLogFermiWalls(double* grad)
 {
     double potential = 0;
@@ -1092,14 +1104,12 @@ void SimpleMD::RemoveRotations(std::vector<double>& velo)
 
         Position rlm = { 0, 0, 0 }, ram = { 0, 0, 0 };
         for (int i : fragments[f]) {
-
             rlm(0) = rlm(0) + m_mass[i] * velo[3 * i + 0];
             rlm(1) = rlm(1) + m_mass[i] * velo[3 * i + 1];
             rlm(2) = rlm(2) + m_mass[i] * velo[3 * i + 2];
         }
 
         for (int i : fragments[f]) {
-
             ram(0) = (omega(1) * geom(i, 2) - omega(2) * geom(i, 1));
             ram(1) = (omega(2) * geom(i, 0) - omega(0) * geom(i, 2));
             ram(2) = (omega(0) * geom(i, 1) - omega(1) * geom(i, 0));

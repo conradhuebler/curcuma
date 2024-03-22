@@ -1829,9 +1829,9 @@ double eigenUFF::Calculate(bool grd, bool verbose)
                   << "HHRepCorrection " << m_final_factor * m_hh_scaling * energy_hh << " Eh" << std::endl
                   << std::endl;
 
-        for (int i = 0; i < m_atom_types.size(); ++i) {
-            std::cout << m_gradient(i, 0) << " " << m_gradient(i, 1) << " " << m_gradient(i, 2) << std::endl;
-        }
+        //  for (int i = 0; i < m_atom_types.size(); ++i) {
+        //      std::cout << m_gradient(i, 0) << " " << m_gradient(i, 1) << " " << m_gradient(i, 2) << std::endl;
+        //  }
     }
     return energy;
 }

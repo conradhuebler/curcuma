@@ -25,6 +25,11 @@
 #include "src/core/xtbinterface.h"
 #endif
 
+#ifndef _WIN32
+#include <filesystem>
+namespace fs = std::filesystem;
+#endif
+
 #include <functional>
 
 #include "forcefieldgenerator.h"
@@ -33,8 +38,16 @@
 
 EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller)
     : m_method(method)
-    , m_controller(controller)
+
 {
+    if (controller.contains("param_file")) {
+        m_param_file = controller["param_file"];
+    }
+
+    if (controller.contains("write_param")) {
+        m_writeparam = controller["write_param"];
+    }
+
     m_charges = []() {
         return std::vector<double>{};
     };
@@ -120,17 +133,6 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
 
     } else if (std::find(m_ff_methods.begin(), m_ff_methods.end(), m_method) != m_ff_methods.end()) { // Just D4 energy calculator requested
         m_forcefield = new ForceField(controller);
-        /*
-        std::string file = controller["param"];
-        nlohmann::json parameter;
-        std::ifstream parameterfile(file);
-        try {
-            parameterfile >> parameter;
-        } catch (nlohmann::json::type_error& e) {
-        } catch (nlohmann::json::parse_error& e) {
-        }
-        ForceFieldGenerator ff;
-        m_forcefield->setParameter(parameter);*/
         m_ecengine = [this](bool gradient, bool verbose) {
             this->CalculateFF(gradient, verbose);
         };
@@ -172,25 +174,11 @@ void EnergyCalculator::setMolecule(const Molecule& molecule)
 {
     m_atoms = molecule.AtomCount();
 
-    // m_atom_type[m_atoms];
     std::vector<int> atoms = molecule.Atoms();
     m_coord = new double[3 * m_atoms];
     m_grad = new double[3 * m_atoms];
-    // std::vector<std::array<double, 3>> geom(m_atoms);
     m_gradient = Eigen::MatrixXd::Zero(m_atoms, 3);
-    m_geometry = Eigen::MatrixXd::Zero(m_atoms, 3);
-    for (int i = 0; i < m_atoms; ++i) {
-        std::pair<int, Position> atom = molecule.Atom(i);
-        m_geometry(i, 0) = atom.second(0);
-        m_geometry(i, 1) = atom.second(1);
-        m_geometry(i, 2) = atom.second(2);
-        /*
-        geom[i][0] = atom.second(0);
-        geom[i][1] = atom.second(1);
-        geom[i][2] = atom.second(2);*/
-        // m_gradient.push_back({ 0, 0, 0 });
-    }
-    // m_geometry = geom;
+    m_geometry = molecule.getGeometry();
     if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) { // UFF energy calculator requested
         m_uff->setMolecule(atoms, m_geometry);
         m_uff->Initialise(molecule.Bonds());
@@ -228,18 +216,28 @@ void EnergyCalculator::setMolecule(const Molecule& molecule)
         m_qmdff->Initialise();
 
     } else if (std::find(m_ff_methods.begin(), m_ff_methods.end(), m_method) != m_ff_methods.end()) { //
-
-        ForceFieldGenerator ff(m_controller);
-        ff.setMolecule(molecule);
-        ff.Generate();
-        json parameters = ff.getParameter();
-        // std::ofstream parameterfile("uff.json");
-        // parameterfile << parameters;
+        if (m_parameter.size() == 0) {
+            if (!std::filesystem::exists(m_param_file)) {
+                ForceFieldGenerator ff(m_controller);
+                ff.setMolecule(molecule);
+                ff.Generate();
+                m_parameter = ff.getParameter();
+                if (m_writeparam) {
+                    std::ofstream parameterfile("ff_param.json");
+                    parameterfile << m_parameter;
+                }
+            } else {
+                std::ifstream parameterfile(m_param_file);
+                try {
+                    parameterfile >> m_parameter;
+                } catch (nlohmann::json::type_error& e) {
+                } catch (nlohmann::json::parse_error& e) {
+                }
+            }
+        }
         m_forcefield->setAtomTypes(molecule.Atoms());
-        m_forcefield->setParameter(parameters);
-        // m_forcefield->setAtomCount(molecule.AtomCount());
-        //  m_forcefield->setMolecule(atoms, geom);
-        //  m_forcefield->Initialise();
+
+        m_forcefield->setParameter(m_parameter);
 
     } else { // Fall back to UFF?
     }

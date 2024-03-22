@@ -35,7 +35,6 @@ HessianThread::HessianThread(const json& controller, int i, int j, int xi, int x
 {
     setAutoDelete(true);
     m_method = m_controller["method"];
-
     if (m_fullnumerical)
         m_schema = [this, i, j, xi, xj]() {
             this->Numerical();
@@ -120,7 +119,7 @@ void HessianThread::Seminumerical()
     energy.updateGeometry(m_geom_im_jp);
     energy.CalculateEnergy(true, false);
     Matrix gradientm = energy.Gradient();
-    m_gradient = (gradientp - gradientm) / (2 * m_d) / au / au;
+    m_gradient = (gradientp - gradientm) / (2 * m_d);
 }
 
 Hessian::Hessian(const std::string& method, const json& controller, bool silent)
@@ -132,13 +131,13 @@ Hessian::Hessian(const std::string& method, const json& controller, bool silent)
     UpdateController(controller);
     m_threads = m_defaults["threads"];
     /* Yeah, thats not really correct, but it works a bit */
-    if (m_method.compare("gfnff") == 0) {
+    if (m_method.compare("uff") == 0) {
         m_scale_functions = [](double val) -> double {
-            return val * 2720.57 - 0.0338928;
+            return val * 5150.4 + 47.349;
         };
     } else {
         m_scale_functions = [](double val) -> double {
-            return val * 2720.57 - 0.0338928;
+            return val * 5150.4 + 47.349;
         };
     }
 }
@@ -148,14 +147,16 @@ Hessian::Hessian(const json& controller, bool silent)
     , m_controller(controller)
 {
     UpdateController(controller);
+    m_threads = m_defaults["threads"];
+
     /* Yeah, thats not really correct, but it works a bit */
-    if (m_method.compare("gfnff") == 0) {
+    if (m_method.compare("uff") == 0) {
         m_scale_functions = [](double val) -> double {
-            return val * 2720.57 - 0.0338928;
+            return val * 5150.4 + 47.349;
         };
     } else {
         m_scale_functions = [](double val) -> double {
-            return val * 2720.57 - 0.0338928;
+            return val * 5150.4 + 47.349;
         };
     }
 }

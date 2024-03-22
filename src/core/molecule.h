@@ -61,9 +61,8 @@ class Molecule
     Molecule();
     ~Molecule();
 
-    /* Molecule& operator=(const Molecule& molecule);
-     Molecule& operator=(const Molecule* molecule);
- */
+    Molecule& operator=(const Molecule& molecule) = default;
+
     json ExportJson() const;
     void WriteJsonFile(const std::string& filename);
 

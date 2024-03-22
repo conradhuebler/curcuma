@@ -53,7 +53,6 @@
 namespace fs = std::filesystem;
 #endif
 #endif
-
 // #include "ripser.h"
 
 #ifndef _WIN32
