@@ -171,7 +171,7 @@ void RMSDDriver::LoadControlJson()
     m_moi = Json2KeyWord<bool>(m_defaults, "moi");
     m_update_rotation = Json2KeyWord<bool>(m_defaults, "update-rotation");
     m_split = Json2KeyWord<bool>(m_defaults, "split");
-    m_nomunkres = Json2KeyWord<bool>(m_defaults, "nomunkres");
+    m_nofree = Json2KeyWord<bool>(m_defaults, "nofree");
     m_dmix = Json2KeyWord<double>(m_defaults, "dmix");
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
@@ -196,7 +196,7 @@ void RMSDDriver::LoadControlJson()
     m_molalign = Json2KeyWord<std::string>(m_defaults, "molalignbin");
 
     std::string method = Json2KeyWord<std::string>(m_defaults, "method");
-
+    m_munkress_cycle = 1;
     if (method.compare("template") == 0)
         m_method = 2;
     else if (method.compare("incr") == 0)
@@ -205,9 +205,10 @@ void RMSDDriver::LoadControlJson()
         m_method = 3;
     else if (method.compare("hybrid") == 0)
         m_method = 4;
-    else if (method.compare("free") == 0)
+    else if (method.compare("free") == 0) {
+        m_munkress_cycle = 2;
         m_method = 5;
-    else if (method.compare("molalign") == 0)
+    } else if (method.compare("molalign") == 0)
         m_method = 6;
     else if (method.compare("dtemplate") == 0)
         m_method = 7;
@@ -215,6 +216,9 @@ void RMSDDriver::LoadControlJson()
         m_method = 1;
 
     std::string order = Json2KeyWord<std::string>(m_defaults, "order");
+    int cycles = Json2KeyWord<int>(m_defaults, "cycles");
+    if (cycles != -1)
+        m_munkress_cycle = cycles;
 
     std::vector<int> vector = Tools::String2Vector(order);
     if (vector.size() != 0)
@@ -253,42 +257,21 @@ void RMSDDriver::start()
     m_reference.InitialiseConnectedMass(1.5, m_protons);
     m_target.InitialiseConnectedMass(1.5, m_protons);
 
-
-    /*
-    if (std::abs(m_reference.Mass() - m_target.Mass()) > 1e-4) {
-        bool stop = false;
-        if (!m_silent)
-            fmt::print("Atom count diveres for both molecules, check for supramolecular fragments, that may match!\nFor now, will take only one pair.");
-
-        auto ref_fragments = m_reference.GetFragments();
-        auto tar_fragments = m_target.GetFragments();
-        for (int i = 0; i < ref_fragments.size() && !stop; ++i) {
-            for (int j = 0; j < tar_fragments.size() && !stop; ++j) {
-                if (abs(m_reference.getFragmentMolecule(i).Mass() - m_target.getFragmentMolecule(j).Mass()) < 1e-4) {
-                    if (!m_silent) {
-                        fmt::print("\n\nOverwriting reference molecule (mass = {0:f}) with fragment {1} (mass = {2:f}).\n", m_reference.Mass(), i, m_reference.getFragmentMolecule(i).Mass());
-                        fmt::print("Overwriting target molecule (mass = {0:f}) with fragment {1} (mass = {2:f}).\n\n\n", m_target.Mass(), j, m_target.getFragmentMolecule(j).Mass());
-                    }
-                    m_reference = m_reference.getFragmentMolecule(i);
-                    m_target = m_target.getFragmentMolecule(j);
-                    stop = true;*/
-    /*
-                     * https://stackoverflow.com/questions/9695902/how-to-break-out-of-nested-loops - NoGo2
-                     */
-    /*}
-            }
-        }
-    }*/
-
     m_target_aligned = m_target;
     m_reference_aligned.LoadMolecule(m_reference);
     if (m_reference.Atoms() != m_target.Atoms() || m_force_reorder) {
-        if (!m_noreorder)
+        if (!m_noreorder) {
             ReorderMolecule();
+            m_reorder_rules = m_results.begin()->second;
+            m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
+            m_target = m_target_reordered;
+            m_rmsd = m_results.begin()->first;
+        }
     }
     Molecule temp_ref, temp_tar;
     int consent = true;
     for (int i = 0; i < m_reference.AtomCount() && i < m_target.AtomCount(); ++i) {
+        // std::cout << m_reference.Atom(i).first << " " << m_target.Atom(i).first << std::endl;
         if (m_reference.Atom(i).first == m_target.Atom(i).first) {
             temp_ref.addPair(m_reference.Atom(i));
             temp_tar.addPair(m_target.Atom(i));
@@ -298,8 +281,8 @@ void RMSDDriver::start()
     if (consent) {
         if (m_fragment_reference != -1 && m_fragment_target != -1) {
             m_rmsd = CustomRotation();
-        } else
-            m_rmsd = BestFitRMSD();
+        } /*else
+            m_rmsd = BestFitRMSD();*/
     } else {
         if (!m_silent)
             fmt::print("Partial RMSD is calculated, only from those atoms, that match each other.\n\n\n");
@@ -490,19 +473,21 @@ void RMSDDriver::ReorderIncremental()
         if (count > max * (max - 1) * m_intermedia_storage)
             continue;
         std::vector<int> rule = FillMissing(m_reference, e.second.first);
-        // std::cout << e.first << " " << e.second.second;
         if (std::find(m_stored_rules.begin(), m_stored_rules.end(), rule) == m_stored_rules.end()) {
             m_stored_rules.push_back(rule);
+            m_results.insert(std::pair<double, std::vector<int>>(e.first, rule));
             m_stored_rotations.push_back(e.second.second);
             count++;
         }
     }
+    m_reorder_rules = m_results.begin()->second;
     if (m_stored_rules.size() == 0) {
         std::cout << "No new solution found, sorry" << std::endl;
         for (int i = 0; i < m_reference.AtomCount(); ++i)
             m_reorder_rules.push_back(i);
-    } else
+    } else {
         m_reorder_rules = m_stored_rules[0];
+    }
     m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
     m_target = m_target_reordered;
     m_target_aligned = m_target;
@@ -562,6 +547,7 @@ StructComp RMSDDriver::Rule2RMSD(const std::vector<int> rules, int fragment)
     m_fragment_target = tmp_tar;
     return result;
 }
+
 void RMSDDriver::clear()
 {
     m_results.clear();
@@ -764,9 +750,12 @@ std::pair<Molecule, LimitedStorage> RMSDDriver::InitialisePair()
 
 void RMSDDriver::ReorderMolecule()
 {
+    /*
     double scaling = 1.5;
-    double rmsd = 0.0;
     m_connectivity = m_reference.getConnectivtiy(scaling);
+    */
+    if (!m_nofree)
+        TemplateFree();
 
     if (m_method == 1)
         ReorderIncremental();
@@ -776,11 +765,10 @@ void RMSDDriver::ReorderMolecule()
         HeavyTemplate();
     else if (m_method == 4)
         AtomTemplate();
-    else if (m_method == 5)
-        TemplateFree();
     else if (m_method == 6) {
-        if (!MolAlignLib())
-            TemplateFree();
+        if (!MolAlignLib()) {
+            return;
+        }
     } else if (m_method == 7)
         DistanceTemplate();
 }
@@ -790,11 +778,10 @@ void RMSDDriver::DistanceTemplate()
     if (!m_silent)
         std::cout << "Prepare template structure on atom distances:" << std::endl;
 
-    auto pairs = PrepareDistanceTemplate(8);
+    auto pairs = PrepareDistanceTemplate(10);
     FinaliseTemplate(pairs);
 
     m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
-    m_target = m_target_reordered;
     m_target_aligned = m_target;
 }
 
@@ -808,7 +795,6 @@ void RMSDDriver::AtomTemplate()
     FinaliseTemplate(pairs);
 
     m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
-    m_target = m_target_reordered;
     m_target_aligned = m_target;
 }
 
@@ -821,13 +807,11 @@ void RMSDDriver::HeavyTemplate()
     FinaliseTemplate(pairs);
 
     m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
-    m_target = m_target_reordered;
     m_target_aligned = m_target;
 }
 
 void RMSDDriver::TemplateFree()
 {
-
     Molecule ref_mol = m_reference;
     Molecule tar_mol = m_target;
 
@@ -850,14 +834,9 @@ void RMSDDriver::TemplateFree()
     tar_mol = m_target;
     tar_mol.setGeometry(rotated);
 
-    m_munkress_cycle = 2;
-
-    std::vector<int> new_order = DistanceReorder(ref_mol, tar_mol);
-    auto rules = ApplyOrder(new_order, m_target);
-    double rmsd = Rules2RMSD(new_order);
-    m_target = rules;
+    DistanceReorder(ref_mol, tar_mol);
+    m_reorder_rules = m_results.begin()->second;
     m_target_aligned = m_target;
-    m_reorder_rules = new_order;
 }
 
 void RMSDDriver::FinaliseTemplate(std::pair<std::vector<int>, std::vector<int>> pairs)
@@ -867,40 +846,35 @@ void RMSDDriver::FinaliseTemplate(std::pair<std::vector<int>, std::vector<int>> 
         tmp.push_back(j);
 
     Molecule target = m_target;
-    std::map<double, std::vector<int>> local_results;
+    std::map<double, std::vector<int>> local_results = m_results;
+    m_results.clear();
     std::vector<std::vector<int>> rules = m_stored_rules;
     double rmsd_prev = 10;
     int eq_counter = 0;
-    for (int outer = 0; outer < rules.size() && outer < 15; ++outer) {
-        pairs.second = rules[outer];
-        m_munkress_cycle = 1;
+    int iter = 0;
+    RunTimer time;
+    for (auto permutation : local_results) {
+        iter++;
+        pairs.second = permutation.second;
+        if (pairs.first.size() != pairs.second.size())
+            continue;
         auto result = AlignByVectorPair(pairs);
-        m_reorder_rules = result;
-        m_target_reordered = ApplyOrder(m_reorder_rules, target);
-        double rmsd = Rules2RMSD(m_reorder_rules);
-        if (rmsd > rmsd_prev || eq_counter > 1)
-            break;
+        m_target_reordered = ApplyOrder(result, target);
+        double rmsd = Rules2RMSD(result);
+        m_results.insert(std::pair<double, std::vector<int>>(rmsd, result));
+        std::cout << rmsd << " " << permutation.first << " " << time.Elapsed() << " msecs" << std::endl;
+        time.Reset();
+        /*
+        for(auto i : permutation.second)
+            std::cout << i << " ";
+        std::cout << std::endl;*/
+        /*if (rmsd > rmsd_prev || eq_counter > 1)
+            break;*/
         eq_counter += std::abs(rmsd - rmsd_prev) < 1e-3;
         rmsd_prev = rmsd;
-        std::cout << std::endl
-                  << rmsd << " ";
-
-        local_results.insert(std::pair<double, std::vector<int>>(rmsd, m_reorder_rules));
-
-        StructComp structcomp = Rule2RMSD(m_reorder_rules);
-        if (!m_topo)
-            local_results.insert(std::pair<double, std::vector<int>>(structcomp.rmsd, m_reorder_rules));
-        else
-            local_results.insert(std::pair<double, std::vector<int>>(structcomp.diff_topology, m_reorder_rules));
     }
-    m_stored_rules.clear();
-    for (const auto& i : local_results) {
-        std::set<int> s(i.second.begin(), i.second.end());
-        if (s.size() != i.second.size()) // make sure, that only results with non-duplicate vectors are accepted
-            continue;
-        m_stored_rules.push_back(i.second);
-    }
-    m_reorder_rules = local_results.begin()->second;
+
+    m_reorder_rules = m_results.begin()->second;
 }
 
 std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareHeavyTemplate()
@@ -1052,6 +1026,8 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareAtomTemplate(co
 
 std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareDistanceTemplate(int number) // const std::vector<int>& templateatom)
 {
+    std::cout << "Start Prepare Template" << std::endl;
+    RunTimer time;
     Position ref_centroid = m_reference.Centroid(true);
     Position tar_centroid = m_target.Centroid(true);
 
@@ -1129,6 +1105,8 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareDistanceTemplat
     m_init_count = m_heavy_init;
 
     ReorderIncremental();
+    m_results.clear();
+
     std::map<double, std::vector<int>> order_rules;
     std::vector<std::vector<int>> transformed_rules;
     for (int i = 0; i < m_stored_rules.size(); ++i) {
@@ -1156,25 +1134,18 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareDistanceTemplat
         std::vector<int> tmp;
         for (auto index : m_stored_rules[i])
             tmp.push_back(target_indicies[index]);
-        transformed_rules.push_back(tmp);
-        m_tmp_rmsd.push_back(sum);
-        order_rules[sum] = tmp;
+
+        m_results.insert(std::pair<double, std::vector<int>>(sum, tmp));
     }
     m_stored_rules.clear();
-    for (const auto& i : order_rules) {
-        // std::cout << i.first << " " ;
-        m_stored_rules.insert(m_stored_rules.begin(), i.second);
-        // m_stored_rules.push_back(i.second);
-    }
-    std::cout << std::endl;
-    // m_stored_rules = transformed_rules;
+
     std::vector<int> target_indices = m_reorder_rules;
 
     m_reference = cached_reference_mol;
     m_target = cached_target_mol;
     m_reference = cached_reference_mol;
     m_target = cached_target_mol;
-
+    std::cout << time.Elapsed() << " msecs for init" << std::endl;
     return std::pair<std::vector<int>, std::vector<int>>(reference_indicies, target_indices);
 }
 
@@ -1292,7 +1263,7 @@ bool RMSDDriver::TemplateReorder()
     Molecule tar_mol = m_target;
     tar_mol.setGeometry(rotated);
 
-    m_reorder_rules = DistanceReorder(ref_mol, tar_mol);
+    DistanceReorder(ref_mol, tar_mol);
     m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
     m_target = m_target_reordered;
     return true;
@@ -1300,24 +1271,19 @@ bool RMSDDriver::TemplateReorder()
 
 std::vector<int> RMSDDriver::DistanceReorder(const Molecule& reference, const Molecule& target, int max)
 {
-    std::map<double, std::vector<int>> rules;
-    Molecule t2 = target;
     double rmsd = 10;
+    std::vector<int> best;
     for (int i = 0; i < m_munkress_cycle; ++i) {
-        std::vector<int> munkress = Munkress(reference, t2);
+        std::vector<int> munkress = Munkress(reference, target);
         double rmsdM = Rules2RMSD(munkress);
-        std::cout << rmsdM << ": " << std::endl;
-        rules.insert(std::pair<double, std::vector<int>>(rmsdM, munkress));
-        t2 = ApplyOrder(munkress, t2);
+        // std::cout << rmsdM << ": ";
         if (rmsdM > rmsd)
             break;
+        best = munkress;
+        m_results.insert(std::pair<double, std::vector<int>>(rmsdM, munkress));
         rmsd = rmsdM;
     }
-
-    for (auto iter : rules)
-        m_stored_rules.push_back(iter.second);
-
-    return rules.begin()->second;
+    return best;
 }
 
 std::vector<int> RMSDDriver::FillOrder(const Molecule& reference, const Molecule& target, const std::vector<int>& order)
@@ -1403,25 +1369,28 @@ std::vector<int> RMSDDriver::Munkress(const Molecule& reference, const Molecule&
     static std::random_device rd{};
     static std::mt19937 gen{ rd() };
     static std::normal_distribution<> d{ 0, 0.1 };
+    double sum = 0;
     for (int i = 0; i < reference.AtomCount(); ++i) {
+        double min = penalty;
         for (int j = 0; j < target.AtomCount(); ++j) {
-
-            distance(i, j) = GeometryTools::Distance(target.Atom(j).second, reference.Atom(i).second) * GeometryTools::Distance(target.Atom(j).second, reference.Atom(i).second); //* GeometryTools::Distance(target.Atom(j).second, reference.Atom(i).second)* GeometryTools::Distance(target.Atom(j).second, reference.Atom(i).second)
-            //+ (target.Atom(j).second.norm() - reference.Atom(i).second.norm()) * (target.Atom(j).second.norm() - reference.Atom(i).second.norm())
-            //+ d(gen)
-            +penalty*(target.Atom(j).first != reference.Atom(i).first);
+            distance(i, j) = GeometryTools::Distance(target.Atom(j).second, reference.Atom(i).second) * GeometryTools::Distance(target.Atom(j).second, reference.Atom(i).second)
+                + penalty * (target.Atom(j).first != reference.Atom(i).first);
+            min = std::min(min, GeometryTools::Distance(target.Atom(j).second, reference.Atom(i).second) * GeometryTools::Distance(target.Atom(j).second, reference.Atom(i).second));
         }
+        sum += min;
     }
     if (m_dmix <= 1 && 0 < m_dmix) {
         Matrix d = target.DistanceMatrix().first;
         distance = (1 - m_dmix) * distance + m_dmix * d;
     }
-
+    std::cout << sum / double(reference.AtomCount() * reference.AtomCount()) << " :: ";
     auto result = MunkressAssign(distance);
 
     for (int i = 0; i < result.cols(); ++i) {
         for (int j = 0; j < result.rows(); ++j) {
             if (result(i, j) == 1) {
+                if (target.Atom(j).first != reference.Atom(i).first)
+                    std::cout << "hilfe " << distance(i, j) << distance(j, i) << " ";
                 new_order.push_back(j);
                 break;
             }
