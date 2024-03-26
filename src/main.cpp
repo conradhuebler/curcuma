@@ -1,6 +1,7 @@
 /*
  * <Curcuma main file.>
  * Copyright (C) 2019 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ *               2024 Gerd Gehrisch <gg27fyla@student.freiberg.de>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
