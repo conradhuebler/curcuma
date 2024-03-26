@@ -1,6 +1,6 @@
 /*
  * <RMSD calculator for chemical structures.>
- * Copyright (C) 2019 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -118,7 +118,8 @@ static const json RMSDJson = {
     { "molalignbin", "molalign" },
     { "molaligntol", 10 },
     { "cycles", -1 },
-    { "nofree", false }
+    { "nofree", false },
+    { "limit", 10 }
 };
 
 class RMSDDriver : public CurcumaMethod {
@@ -270,7 +271,7 @@ private:
     void CheckTopology();
 
     std::pair<std::vector<int>, std::vector<int>> PrepareHeavyTemplate();
-    std::pair<std::vector<int>, std::vector<int>> PrepareDistanceTemplate(int number);
+    std::pair<std::vector<int>, std::vector<int>> PrepareDistanceTemplate();
 
     std::pair<std::vector<int>, std::vector<int>> PrepareAtomTemplate(int templateatom);
     std::pair<std::vector<int>, std::vector<int>> PrepareAtomTemplate(const std::vector<int>& templateatom);
@@ -279,7 +280,7 @@ private:
 
     std::vector<int> DistanceReorder(const Molecule& reference, const Molecule& target, int max = 2);
 
-    std::vector<int> FillOrder(const Molecule& reference, const Molecule& target, const std::vector<int>& order);
+    // std::vector<int> FillOrder(const Molecule& reference, const Molecule& target, const std::vector<int>& order);
     std::vector<int> Munkress(const Molecule& reference, const Molecule& target);
 
     std::vector<int> AlignByVectorPair(std::vector<int> first, std::vector<int> second);
@@ -302,6 +303,9 @@ private:
     Geometry CenterMolecule(const Molecule& mol, int fragment) const;
     Geometry CenterMolecule(const Geometry& molt) const;
 
+    std::pair<double, Matrix> MakeCostMatrix(const std::pair<std::vector<int>, std::vector<int>>& pair);
+    std::vector<int> SolveCostMatrix(const Matrix& distance);
+
     std::pair<Matrix, Position> GetOperateVectors(int fragment_reference, int fragment_target);
     std::pair<Matrix, Position> GetOperateVectors(const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms);
     std::pair<Matrix, Position> GetOperateVectors(const Molecule& reference, const Molecule& target);
@@ -310,10 +314,10 @@ private:
     Geometry m_reorder_reference_geometry;
     bool m_force_reorder = false, m_protons = true, m_print_intermediate = false, m_silent = false, m_moi = false;
     std::vector<std::vector<int>> m_intermediate_results;
-    std::map<double, std::vector<int>> m_results;
+    std::map<double, std::vector<int>> m_results, m_intermediate_cost_matrices;
     std::vector<double> m_last_rmsd;
     std::vector<int> m_reorder_rules;
-    std::vector<std::vector<int>> m_stored_rules;
+    std::vector<std::vector<int>> m_stored_rules, m_intermedia_rules;
     std::vector<Eigen::Matrix3d> m_stored_rotations;
     std::vector<double> m_tmp_rmsd;
     std::map<int, std::vector<int>> m_connectivity;
@@ -325,6 +329,7 @@ private:
     int m_hit = 1, m_pt = 0, m_reference_reordered = 0, m_heavy_init = 0, m_init_count = 0, m_initial_fragment = -1, m_method = 1, m_htopo_diff = -1, m_partial_rmsd = -1, m_threads = 1, m_element = 7, m_write = 0, m_topo = 0;
     int m_munkress_cycle = 1;
     int m_molaligntol = 10;
+    int m_limit = 10;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
     std::vector<int> m_initial, m_element_templates;
     std::string m_molalign = "molalign";
