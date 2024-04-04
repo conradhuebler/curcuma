@@ -1,7 +1,7 @@
 /*
  * <Internal Coordinate Handler for chemical structures.>
  * Copyright (C) 2019 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
- * 
+ *               2024 Gerd Gehrisch
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
@@ -110,6 +110,9 @@ class Molecule
     double CalculateDistance(int i, int j) const;
     std::pair<double, double> GyrationRadius(bool hydrogen = true, int fragment = -1);
 
+    /*! \brief Methode to get the geometry of the molecule as array of vectors
+     *
+     */
     Geometry getGeometry(const IntPair& pair, bool protons = true) const;
     Geometry getGeometry(std::vector<int> atoms, bool protons = true) const;
     Geometry getGeometryByFragment(int fragment, bool protons = true) const;
@@ -141,7 +144,14 @@ class Molecule
     std::string XYZString() const;
     std::string XYZString(const std::vector<int> &order) const;
 
+    /*! \brief Methode to calculate the dipole moments of single molecules
+     *
+     */
     std::vector<Position> CalculateDipoleMoments(const std::vector<double>& scaling = std::vector<double>()) const;
+
+    /*! \brief Methode to calculate the dipole moments of whole structure
+     *
+     */
     Position CalculateDipoleMoment(const std::vector<double>& scaling = std::vector<double>()) const;
 
     std::vector<int> BoundHydrogens(int atom, double scaling = 1.5) const;
@@ -162,6 +172,11 @@ class Molecule
 
     inline std::string Name() const { return m_name; }
 
+    /*! \brief Methode to get the atom name with position
+     *
+     * Input i is the number of the atom,
+     * Output is a string as in .xyz file
+     * */
     std::string Atom2String(int i) const;
     std::string Header() const;
 

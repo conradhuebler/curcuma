@@ -30,6 +30,7 @@
 namespace fs = std::filesystem;
 #endif
 
+#include <filesystem>
 #include <functional>
 
 #include "forcefieldgenerator.h"

@@ -895,7 +895,7 @@ Eigen::Vector3d Molecule::COM(bool protons, int fragment)
 }
 
 std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>& scaling) const
-{
+{//calc classic dipole moment of the system with partial charges
     std::vector<Position> dipole_moments;
 
     if (m_charges.size() != m_geometry.rows()) {
@@ -906,6 +906,7 @@ std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>
     for (int f = 0; f < GetFragments().size(); ++f) {
         Position pos = { 0, 0, 0 }, dipole = { 0, 0, 0 };
         double mass = 0;
+        //calc center of mass of the molecule
         for (int i : m_fragments[f]) {
             double m = Elements::AtomicMass[m_atoms[i]];
             mass += m;
@@ -916,6 +917,7 @@ std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>
         pos(0) /= mass;
         pos(1) /= mass;
         pos(2) /= mass;
+        //calc dipole moment with scalar
         for (int i : m_fragments[f]) {
             double scale = 3;
             if (scaling.size() > i)

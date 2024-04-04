@@ -42,10 +42,11 @@
 
 #include "src/capabilities/optimiser/OptimiseDipoleScaling.h"
 
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
-#include <cstring>
-#include <fstream>
 #include <vector>
 
 #ifdef C17
@@ -176,15 +177,15 @@ int main(int argc, char **argv) {
                   << "-centroid    * Calculate centroid of specific atoms/fragments             *" << std::endl;
         exit(1);
     }
-    if(argc >= 2)
+    else
     {
         json controller = CLI2Json(argc, argv);
 
         if(strcmp(argv[1], "-rmsd") == 0)
         {
-            if (argc < 2) {
-                std::cerr << "Please use curcuma for rmsd calcultion as follows\ncurcuma -rmsd A.xyz B.xyz" << std::endl;
-                std::cerr << "Please use curcuma for rmsd calcultion as follows\ncurcuma -rmsd AB.xyz" << std::endl;
+            if (argc < 3) {
+                std::cerr << "Please use curcuma for rmsd calculation as follows\ncurcuma -rmsd A.xyz B.xyz" << std::endl;
+                std::cerr << "Please use curcuma for rmsd calculation as follows\ncurcuma -rmsd AB.xyz" << std::endl;
 
                 std::cerr << "Additonal arguments are:" << std::endl;
                 std::cerr << "-reorder    **** Force reordering of structure!" << std::endl;
@@ -235,6 +236,7 @@ int main(int argc, char **argv) {
             std::cout << Tools::Vector2String(driver->ReorderRules()) << std::endl;
             delete driver;
             exit(0);
+
         } else if (strcmp(argv[1], "-dock") == 0) {
             if (argc < 4) {
                 std::cerr << "Please use curcuma for docking as follows\ncurcuma -dock -host A.xyz -guest B.xyz -Step_x 10 -Step_y 10 -Step_z 10" << std::endl;
@@ -242,13 +244,14 @@ int main(int argc, char **argv) {
             }
 
             Docking* docking = new Docking(controller, false);
-            if (docking->Initialise() == false) {
+            if (!docking->Initialise()) {
                 docking->printError();
                 return 0;
             }
             docking->start();
+
         } else if (strcmp(argv[1], "-hbonds") == 0) {
-            if(argc != 6)
+            if(argc < 6)
             {
                 std::cerr << "Please use curcuma for hydrogen bond analysis as follows\ncurcuma -hbonds A.xyz index_donor index_proton index_acceptor" << std::endl;
                 return -1;
@@ -260,12 +263,12 @@ int main(int argc, char **argv) {
                     if (std::string(argv[1]).find("-hbonds") != std::string::npos) {
                         Distance(mol, argv);
                     }
-                } else {
+                }   else {
                     mol.print_geom();
                     std::cout << std::endl
                               << std::endl;
                     std::cout << mol.getGeometry() << std::endl;
-                }
+                    }
             }
         } else if (strcmp(argv[1], "-confscan") == 0) {
             if (argc < 3) {
@@ -287,6 +290,7 @@ int main(int argc, char **argv) {
             scan->setFileName(argv[2]);
             scan->start();
             return 0;
+
         } else if (strcmp(argv[1], "-confstat") == 0) {
             if (argc < 3) {
                 std::cerr << "Please use curcuma for conformation statistics as follows\ncurcuma -confstat conffile.xyz" << std::endl;
@@ -297,24 +301,26 @@ int main(int argc, char **argv) {
             stat->setFileName(argv[2]);
             stat->start();
             return 0;
+
         } else if (strcmp(argv[1], "-led") == 0) {
-            if (argc < 2) {
+            if (argc < 3) {
                 std::cerr << "Please use curcuma for fragment assignment as follows:\ncurcuma -led input.xyz" << std::endl;
                 return 0;
             }
 
             Molecule mol1 = Files::LoadFile(argv[2]);
-            if (mol1.Atoms().size())
+            if (!mol1.Atoms().empty())
                 mol1.printFragmente();
+
         } else if (strcmp(argv[1], "-hmap") == 0) {
-            if (argc < 2) {
+            if (argc < 3) {
                 std::cerr << "Please use curcuma for hydrogen bond mapping as follows:\ncurcuma -hmap trajectory.xyz" << std::endl;
                 return 0;
             }
 
             std::vector<std::pair<int, int>> pairs, elements;
 
-            if (argc >= 3) {
+            if (argc > 3) {
                 for (std::size_t i = 3; i < argc; ++i) {
                     if (strcmp(argv[i], "-pair") == 0) {
                         if (i + 2 < argc) {
@@ -322,12 +328,12 @@ int main(int argc, char **argv) {
                                 int first = std::stoi(argv[i + 1]) - 1;
                                 int second = std::stoi(argv[i + 2]) - 1;
                                 ++i;
-                                pairs.push_back(std::pair<int, int>(first, second));
+                                pairs.emplace_back(first, second);
                             } else {
                                 int first = Elements::String2Element(argv[i + 1]);
                                 int second = Elements::String2Element(argv[i + 2]);
                                 ++i;
-                                elements.push_back(std::pair<int, int>(first, second));
+                                elements.emplace_back(first, second);
                             }
                         }
                     }
@@ -340,7 +346,7 @@ int main(int argc, char **argv) {
                                     if (Tools::isInt(numbers[0]) && Tools::isInt(numbers[1])) {
                                         int first = std::stoi(numbers[0]) - 1;
                                         int second = std::stoi(numbers[1]) - 1;
-                                        pairs.push_back(std::pair<int, int>(first, second));
+                                        pairs.emplace_back(first, second);
                                     }
                                 }
                             }
@@ -357,6 +363,7 @@ int main(int argc, char **argv) {
                 mapper.addElementPair(pair);
 
             mapper.FindPairs();
+
         } else if (strcmp(argv[1], "-nci") == 0) {
             if (argc < 4) {
                 std::cerr << "Please use curcuma to post-process two RDG vs rho plots from NCIPLOT as follows:\ncurcuma -nci file1.dat file2.dat" << std::endl;
@@ -373,7 +380,7 @@ int main(int argc, char **argv) {
             analyse.start();
 
         } else if (strcmp(argv[1], "-opt") == 0) {
-            if (argc < 2) {
+            if (argc < 3) {
                 std::cerr << "Please use curcuma for optimisation as follows:\ncurcuma -opt input.xyz" << std::endl;
                 return 0;
             }
@@ -381,8 +388,9 @@ int main(int argc, char **argv) {
             opt.setFileName(argv[2]);
             opt.start();
             return 0;
+
         } else if (strcmp(argv[1], "-sp") == 0) {
-            if (argc < 2) {
+            if (argc < 3) {
                 std::cerr << "Please use curcuma for energy calculation as follows:\ncurcuma -opt input.xyz" << std::endl;
                 return 0;
             }
@@ -393,6 +401,7 @@ int main(int argc, char **argv) {
             opt.setFileName(argv[2]);
             opt.start();
             return 0;
+
         } else if (strcmp(argv[1], "-block") == 0) {
             if (argc < 3) {
                 std::cerr << "Please use curcuma to split a file with many structures (trajectories) into several smaller:\ncurcuma block input.xyz X" << std::endl;
@@ -421,8 +430,9 @@ int main(int argc, char **argv) {
             }
 
             return 0;
+
         } else if (strcmp(argv[1], "-md") == 0) {
-            if (argc < 2) {
+            if (argc < 3) {
                 std::cerr << "Please use curcuma for molecular dynamics simulation as follows:\ncurcuma -md input.xyz" << std::endl;
                 return 0;
             }
@@ -439,8 +449,9 @@ int main(int argc, char **argv) {
             */
             md.Initialise();
             md.start();
+
         } else if (strcmp(argv[1], "-confsearch") == 0) {
-            if (argc < 2) {
+            if (argc < 3) {
                 std::cerr << "Please use curcuma for conformational search as follows:\ncurcuma -confsearch input.xyz" << std::endl;
                 return 0;
             }
@@ -448,8 +459,9 @@ int main(int argc, char **argv) {
             ConfSearch confsearch(controller, false);
             confsearch.setFile(argv[2]);
             confsearch.start();
+
         } else if (strcmp(argv[1], "-rmsdtraj") == 0) {
-            if (argc <= 2) {
+            if (argc < 3) {
                 std::cerr << "Please use curcuma for rmsd analysis of trajectories as follows:\ncurcuma -rmsdtraj input.xyz" << std::endl;
                 std::cerr << "Additonal arguments are:" << std::endl;
                 std::cerr << "-write        **** Write unique conformers!" << std::endl;
@@ -488,6 +500,7 @@ int main(int argc, char **argv) {
             nebdock->setProtonTransfer(pt);
             nebdock->Prepare();
             delete nebdock;
+
         } else if (strcmp(argv[1], "-centroid") == 0) {
             if (argc < 3) {
                 std::cerr << "Please use curcuma for centroid calculation of user definable fragments:\ncurcuma -centroid first.xyz" << std::endl;
@@ -508,7 +521,7 @@ int main(int argc, char **argv) {
                     std::cout << i << " ";
                 std::cout << std::endl;
             }
-            if (frag_list.size() && atom_list.size()) {
+            if (!frag_list.empty() && !atom_list.empty()) {
                 std::cout << "Having both, fragments and atoms, added is for now mutale exclusive. Might be changed someday ...";
                 exit(1);
             }
@@ -541,7 +554,7 @@ int main(int argc, char **argv) {
                 }
             }
             */
-            if (frag_list.size()) {
+            if (!frag_list.empty()) {
                 std::cout << "Using fragment of atoms :";
                 for (int atom : frag_list)
                     std::cout << atom + 1 << " ";
@@ -553,7 +566,7 @@ int main(int argc, char **argv) {
                 FileIterator file(argv[2]);
                 while (!file.AtEnd()) {
                     Molecule mol = file.Next();
-                    if (frag_list.size()) {
+                    if (!frag_list.empty()) {
                         result_file << GeometryTools::Centroid(mol.getGeometry(frag_list)).transpose() << std::endl;
                         std::cout << mol.getGeometry(frag_list) << std::endl;
                     } else {
@@ -562,7 +575,7 @@ int main(int argc, char **argv) {
                     }
                 }
             }
-            if (atom_list.size()) {
+            if (!atom_list.empty()) {
                 std::ofstream result_file;
                 result_file.open("centroids.dat");
                 FileIterator file(argv[2]);
@@ -574,6 +587,7 @@ int main(int argc, char **argv) {
                     result_file << GeometryTools::Centroid(mol.getGeometry(atom_list)).transpose() << std::endl;
                 }
             }
+
         } else if (strcmp(argv[1], "-split") == 0) {
             if (argc < 3) {
                 std::cerr << "Please use curcuma to split supramolecular structures as follows:\ncurcuma -split molecule.xyz" << std::endl;
@@ -787,14 +801,14 @@ int main(int argc, char **argv) {
                         input << r.first << " " << r.second << std::endl;
                     }
                     input.close();
-                    std::cout << "Writing Persitance diagram as " + outfile + "_" + std::to_string(index) + ".PD" << std::endl;
+                    std::cout << "Writing Persistence diagram as " + outfile + "_" + std::to_string(index) + ".PD" << std::endl;
                     input.open(outfile + "_" + std::to_string(index) + ".PD", std::ios::out);
                     input << diagram.generateImage(l);
                     input.close();
                 }
                 diagram.setDistanceMatrix(vector);
                 {
-                    std::cout << "Writing Persitance Image (EN scaled bond topology) as " + outfile + "_" + std::to_string(index) + ".PI" << std::endl;
+                    std::cout << "Writing Persistence Image (EN scaled bond topology) as " + outfile + "_" + std::to_string(index) + ".PI" << std::endl;
                     auto l = diagram.generateTriples();
                     input.open(outfile + "_" + std::to_string(index) + ".PI", std::ios::out);
                     input << diagram.generateImage(l);
@@ -890,12 +904,16 @@ int main(int argc, char **argv) {
                 count++;
             }
         } else if (strcmp(argv[1], "-dipole") == 0) {
+            if (argc < 3) {
+                std::cerr << "Please use curcuma to optimise the dipole of molecules as follow:\ncurcuma -dipole molecule.xyz" << std::endl;
+                return 0;
+            }
             FileIterator file(argv[2]);
 
-            double target = 0, threshold = 1e-1, initial = 3;
+            double target = 0, threshold = 1e-1, initial = 3; //dec
             bool target_set = false;
             int maxiter = 10;
-            json blob = controller["dipole"];
+            json blob = controller["dipole"]; //declare blob as json,
             if (blob.contains("target")) {
                 target = blob["target"];
                 target_set = true;
@@ -910,35 +928,51 @@ int main(int argc, char **argv) {
                 maxiter = blob["maxiter"];
             }
 
-            while (!file.AtEnd()) {
-                Molecule mol = file.Next();
-                EnergyCalculator interface("gfn2", blob);
-                interface.setMolecule(mol);
-                interface.CalculateEnergy(false, true);
-                mol.setPartialCharges(interface.Charges());
-                std::vector<double> dipole_moment = interface.Dipole();
-                if (!target_set)
+            while (!file.AtEnd()) { // calculation and output dipole moment
+                Molecule mol = file.Next();  // load Molecule?
+                EnergyCalculator interface("gfn2", blob); // calc Energy with gfn2?
+                interface.setMolecule(mol);  // set molecule for calc
+                interface.CalculateEnergy(false, true); //calc energy and charges and dipole moment
+                mol.setPartialCharges(interface.Charges()); // calc Partial Charges
+                auto charges = interface.Charges();  //dec and init charges
+
+                std::cout << "Charges of the atoms: " << std::endl;
+
+                for (int i = 0; i < charges.size(); ++i ){ // Output partial charges from gfn2-xtb methode
+                    std::cout << mol.Atom2String(i);
+                    std::cout << "Charge: " << charges[i] << "\n";
+                }
+                std::cout << std::endl;
+
+                std::vector<double> dipole_moment = interface.Dipole(); // get dipole moment from gfn2-xtb methode
+
+                if (!target_set) // calc target if not set
                     target = sqrt(dipole_moment[0] * dipole_moment[0] + dipole_moment[1] * dipole_moment[1] + dipole_moment[2] * dipole_moment[2]);
-                std::cout << "Target dipole moment: " << target << std::endl;
-                auto dipoles = mol.CalculateDipoleMoments();
+
+                std::cout << "Target dipole moment: " << target << std::endl; // abs value of the dipole moment
+                auto dipoles = mol.CalculateDipoleMoments();//calc Dipole for every Molecule
+
                 for (const auto& dipole : dipoles) {
                     std::cout << std::endl
                               << std::endl
-                              << "Dipole momement for single molecule " << dipole[0] << " " << dipole[1] << " " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) * 2.5418 << std::endl;
+                              << "Dipole moment for single molecule x,y,z:abs " << dipole[0] << ", " << dipole[1] << ", " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) * 2.5418 << std::endl;
                 }
-                auto dipole = mol.CalculateDipoleMoment();
+                auto dipole = mol.CalculateDipoleMoment();//calc Dipole for whole system
                 std::cout << std::endl
                           << std::endl
-                          << "Dipole momement for whole structure " << dipole[0] << " " << dipole[1] << " " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) * 2.5418 << std::endl;
+                          << "Dipole moment for whole structure " << dipole[0] << " " << dipole[1] << " " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) * 2.5418 << std::endl;
+                std::cout << std::endl;
+
 
                 auto result = OptimiseScaling(&mol, target, initial, threshold, maxiter);
-                std::cout << "Final dipole moment " << result.first * 2.5418 << std::endl;
+                // std::cout << "Final dipole moment " << result.first * 2.5418 << std::endl;
                 std::cout << "Final dipole moment " << result.first << std::endl;
 
                 for (auto i : result.second)
                     std::cout << i << " ";
                 std::cout << std::endl;
             }
+
         } else {
             bool centered = false;
             for (std::size_t i = 2; i < argc; ++i) {

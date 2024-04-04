@@ -1,7 +1,7 @@
 /*
- * <LevenbergMarquardt Optimsation for Dipole Calculation from Partial Charges. >
+ * <LevenbergMarquardt Optimisation for Dipole Calculation from Partial Charges. >
  * Copyright (C) 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
- *
+ *               2024 Gerd Gehrisch
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or

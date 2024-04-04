@@ -5,10 +5,10 @@ option (USE_XTB
     "Compile XTB and use as library" OFF)
 
 option (USE_TBLITE
-    "Compile TBLITE and use as library" OFF)
+    "Compile TBLITE and use as library" ON)
 
 option (USE_D3
-    "Compile cpp-D4 and use as library" OFF)
+    "Compile cpp-D4 and use as library" ON)
 
 option (USE_D4
     "Compile cpp-D4 and use as library" OFF)
