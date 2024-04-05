@@ -63,6 +63,7 @@ static const json ConfScanJson = {
     { "skip", 0 },
     { "allxyz", false },
     { "update", false },
+    { "skip_orders", false },
     { "MaxParam", -1 },
     { "UseOrders", -1 },
     { "RMSDMethod", "hybrid" },
@@ -99,7 +100,8 @@ static const json ConfScanJson = {
     { "domolalign", -1 },
     { "molaligntol", 10 },
     { "mapped", false },
-    { "analyse", false }
+    { "analyse", false },
+    { "cycles", -1 }
 };
 
 class ConfScanThread : public CxxThread {
@@ -358,6 +360,7 @@ private:
     int m_RMSDElement = 7;
     int m_molaligntol = 10;
     int m_timing_rot = 0, m_timing_ripser = 0;
+    int m_cycles = -1;
     bool m_writeXYZ = false;
     bool m_check_connections = false;
     bool m_force_reorder = false, m_prevent_reorder = false;
@@ -384,4 +387,5 @@ private:
     bool m_reset = false;
     bool m_mapped = false;
     bool m_analyse = false;
+    bool m_skip_orders = false;
 };
