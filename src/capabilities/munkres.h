@@ -26,6 +26,8 @@
 // https://brc2.com/the-algorithm-workshop/
 #pragma once
 
+#include "src/tools/general.h"
+
 #include <Eigen/Dense>
 
 #include <iostream>
@@ -282,8 +284,10 @@ Matrix MunkressAssign(const Matrix& m)
     double min;
     int path_row_0 = 0;
     int path_col_0 = 0;
-
+    // RunTimer time;
     while (loop) {
+        //  std::cout << time.Elapsed() << " ";
+        //  time.Reset();
         int col = -1, row = -1;
 
         switch (step) {
@@ -313,5 +317,6 @@ Matrix MunkressAssign(const Matrix& m)
             break;
         }
     }
+    // std::cout << " ";
     return starred;
 }

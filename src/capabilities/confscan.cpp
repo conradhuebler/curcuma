@@ -205,6 +205,7 @@ void ConfScan::LoadControlJson()
     m_skipreorder = Json2KeyWord<bool>(m_defaults, "skipreorder");
     m_skipreuse = Json2KeyWord<bool>(m_defaults, "skipreuse");
     m_mapped = Json2KeyWord<bool>(m_defaults, "mapped");
+    m_skip_orders = Json2KeyWord<bool>(m_defaults, "skip_orders");
 
     m_sTE = Json2KeyWord<double>(m_defaults, "sTE");
     m_sTI = Json2KeyWord<double>(m_defaults, "sTI");
@@ -214,6 +215,8 @@ void ConfScan::LoadControlJson()
     m_domolalign = Json2KeyWord<double>(m_defaults, "domolalign");
 
     m_skip = Json2KeyWord<int>(m_defaults, "skip");
+    m_cycles = Json2KeyWord<int>(m_defaults, "cycles");
+
     m_allxyz = Json2KeyWord<bool>(m_defaults, "allxyz");
     m_reduced_file = Json2KeyWord<bool>(m_defaults, "fewerFile");
 
@@ -1040,7 +1043,7 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
     rmsd["nomunkres"] = m_nomunkres;
     rmsd["molalignbin"] = m_molalign;
     rmsd["molaligntol"] = m_molaligntol;
-
+    rmsd["cycles"] = m_cycles;
     std::vector<Molecule*> cached;
     if (reset)
         cached = m_all_structures;
@@ -1293,7 +1296,7 @@ void ConfScan::Finalise()
 
 bool ConfScan::AddRules(const std::vector<int>& rules)
 {
-    if (rules.size() == 0)
+    if (rules.size() == 0 || m_skip_orders)
         return false;
 
     if (std::find(m_reorder_rules.begin(), m_reorder_rules.end(), rules) == m_reorder_rules.end()) {

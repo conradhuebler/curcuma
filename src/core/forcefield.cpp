@@ -247,7 +247,7 @@ double ForceField::Calculate(bool gradient, bool verbose)
     double eq_energy = 0.0;
     double h4_energy = 0.0;
     double hh_energy = 0.0;
-#pragma omp parallel for
+
     for (int i = 0; i < m_stored_threads.size(); ++i) {
         m_stored_threads[i]->UpdateGeometry(m_geometry, gradient);
     }
@@ -257,9 +257,7 @@ double ForceField::Calculate(bool gradient, bool verbose)
 
     m_threadpool->StartAndWait();
     m_threadpool->setWakeUp(m_threadpool->WakeUp() / 2);
-    omp_set_num_threads(m_threads);
-    Eigen::setNbThreads(m_threads);
-#pragma omp parallel for
+
     for (int i = 0; i < m_stored_threads.size(); ++i) {
         bond_energy += m_stored_threads[i]->BondEnergy();
         angle_energy += m_stored_threads[i]->AngleEnergy();
