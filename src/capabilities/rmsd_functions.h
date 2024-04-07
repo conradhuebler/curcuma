@@ -38,6 +38,7 @@ inline Eigen::Matrix3d BestFitRotation(const Geometry& reference, const Geometry
      * https://github.com/oleg-alexandrov/projects/blob/e7b1eb7a4d83d41af563c24859072e4ddd9b730b/eigen/Kabsch.cpp
      */
 
+    //   std::cout << reference << std::endl << target << std::endl;
     Eigen::MatrixXd Cov = reference.transpose() * target;
     Eigen::JacobiSVD<Eigen::MatrixXd> svd(Cov, Eigen::ComputeThinU | Eigen::ComputeThinV);
 
@@ -48,6 +49,8 @@ inline Eigen::Matrix3d BestFitRotation(const Geometry& reference, const Geometry
         d = factor * -1.0;
     Eigen::Matrix3d I = Eigen::Matrix3d::Identity(3, 3);
     I(2, 2) = d;
+    //    std::cout <<  svd.matrixV() * I * svd.matrixU().transpose() << std::endl;
+
     return svd.matrixV() * I * svd.matrixU().transpose();
 }
 
@@ -61,17 +64,16 @@ inline Geometry applyRotation(const Geometry& geometry, const Eigen::Matrix3d& r
     return geometry * rotation;
 }
 
-inline Geometry getAligned(const Geometry& reference, const Geometry& target, int factor, Eigen::Matrix3d& rotation)
+inline Geometry getAligned(const Geometry& reference, const Geometry& target, int factor)
 {
-    rotation = BestFitRotation(reference, target, factor);
+    Eigen::Matrix3d rotation = BestFitRotation(reference, target, factor);
     return applyRotation(target, rotation);
 }
 
 inline Molecule getAligned(const Molecule& reference, const Molecule& target, int factor)
 {
     Molecule result = target;
-    Eigen::Matrix3d rotation;
-    result.setGeometry(getAligned(reference.getGeometry(), target.getGeometry(), factor, rotation));
+    result.setGeometry(getAligned(reference.getGeometry(), target.getGeometry(), factor));
     return result;
 }
 
@@ -86,5 +88,4 @@ inline double getRMSD(const Geometry& reference, const Geometry& target)
     rmsd = sqrt(rmsd / double(target.rows()));
     return rmsd;
 }
-
 };
