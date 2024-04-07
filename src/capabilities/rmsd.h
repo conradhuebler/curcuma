@@ -306,7 +306,7 @@ private:
     std::pair<double, Matrix> MakeCostMatrix(const std::vector<int>& permutation);
     std::pair<double, Matrix> MakeCostMatrix(const std::vector<int>& reference, const std::vector<int>& target);
     std::pair<double, Matrix> MakeCostMatrix(const std::pair<std::vector<int>, std::vector<int>>& pair);
-    std::pair<double, Matrix> MakeCostMatrix(const Geometry& reference, const Geometry& target, const std::vector<int> reference_atoms, const std::vector<int> target_atoms);
+    std::pair<double, Matrix> MakeCostMatrix(const Geometry& reference, const Geometry& target /*, const std::vector<int> reference_atoms, const std::vector<int> target_atoms*/);
     std::pair<double, Matrix> MakeCostMatrix(const Matrix& rotation);
 
     std::vector<int> SolveCostMatrix(Matrix& distance);

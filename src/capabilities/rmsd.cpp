@@ -567,6 +567,7 @@ void RMSDDriver::clear()
     m_connectivity.clear();
     m_stored_rules.clear();
     m_prepared_cost_matrices.clear();
+    m_intermediate_cost_matrices.clear();
     m_rmsd = 0.0;
 }
 
@@ -762,10 +763,6 @@ std::pair<Molecule, LimitedStorage> RMSDDriver::InitialisePair()
 
 void RMSDDriver::ReorderMolecule()
 {
-    /*
-    double scaling = 1.5;
-    m_connectivity = m_reference.getConnectivtiy(scaling);
-    */
     if (!m_nofree)
         TemplateFree();
 
@@ -805,7 +802,6 @@ void RMSDDriver::AtomTemplate()
         std::cout << "Templates are empty, maybe try different elements" << std::endl;
         return;
     }
-    // FinaliseTemplate();
 }
 
 void RMSDDriver::HeavyTemplate()
@@ -813,54 +809,25 @@ void RMSDDriver::HeavyTemplate()
     if (!m_silent)
         std::cout << "Prepare heavy atom template structure:" << std::endl;
 
-    auto pairs = PrepareHeavyTemplate();
-    // FinaliseTemplate();
+    PrepareHeavyTemplate();
 }
 
 void RMSDDriver::TemplateFree()
 {
-    /*
-    Molecule ref_mol = m_reference;
-    Molecule tar_mol = m_target;
-
-    Geometry cached_reference = m_reference.getGeometry();
-    Geometry cached_target = m_target.getGeometry();
-    auto blob = MakeCostMatrix(cached_reference, cached_target, m_reference.Atoms(), m_target.Atoms());*/
-    Eigen::Matrix3d indentity = Eigen::MatrixXd::Zero(3, 3);
-    indentity(0, 0) = 1;
-    indentity(1, 1) = 1;
-    indentity(2, 2) = 1;
-    auto blob = MakeCostMatrix(indentity);
+    /* Eigen::Matrix3d indentity = Eigen::MatrixXd::Zero(3, 3);
+    indentity(0, 0) = -1;
+    indentity(1, 1) = -1;
+    indentity(2, 2) = -1; */
+    auto R = GetOperateVectors(m_reference, m_target);
+    auto blob = MakeCostMatrix(R.first);
 
     m_cost_limit = blob.first;
     if (!m_silent)
-
         std::cout << blob.first << std::endl;
+
     if (m_method == 4)
         blob.first = 0;
     m_prepared_cost_matrices.insert(blob);
-
-    /*
-    Geometry tref = GeometryTools::TranslateMolecule(m_reference, m_reference.Centroid(true), Position{ 0, 0, 0 });
-    Geometry tget = GeometryTools::TranslateMolecule(m_target, m_target.Centroid(true), Position{ 0, 0, 0 });
-    ref_mol.setGeometry(tref);
-    tar_mol.setGeometry(tget);
-
-    auto operators = GetOperateVectors(ref_mol, tar_mol);
-    Eigen::Matrix3d R = operators.first;
-    Eigen::MatrixXd tar = tget.transpose();
-
-    Geometry rotated = tar.transpose() * R;
-
-    ref_mol = m_reference;
-    ref_mol.setGeometry(tref);
-    tar_mol = m_target;
-    tar_mol.setGeometry(rotated);
-
-    DistanceReorder(ref_mol, tar_mol);
-    m_reorder_rules = m_results.begin()->second;
-    m_target_aligned = m_target;
-*/
 }
 
 void RMSDDriver::FinaliseTemplate()
@@ -877,12 +844,11 @@ void RMSDDriver::FinaliseTemplate()
         m_target_reordered = ApplyOrder(result, target);
         double rmsd = Rules2RMSD(result);
         if (!m_silent)
-
             std::cout << permutation.first << " " << rmsd << " " << eq_counter << " " << time.Elapsed() << std::endl;
         m_results.insert(std::pair<double, std::vector<int>>(rmsd, result));
         time.Reset();
-        // if (eq_counter > 10 || incr_counter > 10 || iter > 10)
-        //     break;
+        if (eq_counter > 5 || incr_counter > 5 || iter > 5)
+            break;
         eq_counter += std::abs(rmsd - rmsd_prev) < 1e-3;
         incr_counter += rmsd > rmsd_prev;
         rmsd_prev = rmsd;
@@ -971,24 +937,27 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareAtomTemplate(in
     m_init_count = m_heavy_init;
 
     ReorderIncremental();
-
-    std::vector<std::vector<int>> transformed_rules;
+    m_reference = cached_reference_mol;
+    m_target = cached_target_mol;
     for (int i = 0; i < m_stored_rules.size(); ++i) {
         std::vector<int> tmp;
         for (auto index : m_stored_rules[i])
             tmp.push_back(target_indicies[index]);
-        transformed_rules.push_back(tmp);
         m_intermedia_rules.push_back(tmp);
+        auto OperateVectors = GetOperateVectors(reference_indicies, tmp);
+        auto result = MakeCostMatrix(OperateVectors.first);
+        result.first = m_prepared_cost_matrices.size();
+
+        m_prepared_cost_matrices.insert(result);
     }
-    m_stored_rules = transformed_rules;
-    std::vector<int> target_indices = m_reorder_rules;
 
-    m_reference = cached_reference_mol;
-    m_target = cached_target_mol;
-    m_reference = cached_reference_mol;
-    m_target = cached_target_mol;
+    for (const auto& indices : m_intermedia_rules) {
+        auto result = MakeCostMatrix(reference_indicies, indices);
+        result.first = m_prepared_cost_matrices.size();
+        m_prepared_cost_matrices.insert(result);
+    }
 
-    return std::pair<std::vector<int>, std::vector<int>>(reference_indicies, target_indices);
+    return std::pair<std::vector<int>, std::vector<int>>(reference_indicies, reference_indicies);
 }
 
 std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareAtomTemplate(const std::vector<int>& templateatom)
@@ -1034,9 +1003,16 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareAtomTemplate(co
         m_intermedia_rules.push_back(tmp);
         auto OperateVectors = GetOperateVectors(reference_indicies, tmp);
         auto result = MakeCostMatrix(OperateVectors.first);
+        result.first = m_prepared_cost_matrices.size();
+
         m_prepared_cost_matrices.insert(result);
     }
 
+    for (const auto& indices : m_intermedia_rules) {
+        auto result = MakeCostMatrix(reference_indicies, indices);
+        result.first = m_prepared_cost_matrices.size();
+        m_prepared_cost_matrices.insert(result);
+    }
     m_stored_rules = transformed_rules;
     std::vector<int> target_indices = m_reorder_rules;
 
@@ -1119,10 +1095,14 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareDistanceTemplat
     m_init_count = m_heavy_init;
 
     ReorderIncremental();
-    m_intermedia_rules.clear();
 
     m_reference = cached_reference_mol;
     m_target = cached_target_mol;
+    for (const auto& indices : m_intermedia_rules) {
+        auto result = MakeCostMatrix(reference_indicies, indices);
+        m_prepared_cost_matrices.insert(result);
+    }
+    m_intermedia_rules.clear();
 
     std::map<double, std::vector<int>> order_rules;
     std::vector<std::vector<int>> transformed_rules;
@@ -1140,30 +1120,7 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareDistanceTemplat
     std::vector<int> target_indices = m_reorder_rules;
     return std::pair<std::vector<int>, std::vector<int>>(reference_indicies, target_indices);
 }
-/*
-std::vector<int> RMSDDriver::AlignByVectorPair(std::vector<int> first, std::vector<int> second)
-{
-    auto operators = GetOperateVectors(first, second);
-    Eigen::Matrix3d R = operators.first;
 
-    Geometry cached_reference = m_reference.getGeometry(first, m_protons);
-    Geometry cached_target = m_target.getGeometry(second, m_protons);
-    Geometry ref = GeometryTools::TranslateMolecule(m_reference, m_reference.Centroid(), Position{ 0, 0, 0 });
-    Geometry tget = GeometryTools::TranslateMolecule(m_target, m_target.Centroid(), Position{ 0, 0, 0 });
-
-    Eigen::MatrixXd tar = tget.transpose();
-
-    Geometry rotated = tar.transpose() * R;
-
-    Molecule ref_mol = m_reference;
-    ref_mol.setGeometry(ref);
-
-    Molecule tar_mol = m_target;
-    tar_mol.setGeometry(rotated);
-
-    return DistanceReorder(ref_mol, tar_mol);
-}
-*/
 std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const std::vector<int>& permuation)
 {
     std::vector<int> first(permuation.size(), 0);
@@ -1174,17 +1131,7 @@ std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const std::vector<int>& per
 
 std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const std::vector<int>& reference, const std::vector<int>& target)
 {
-    /*
-    for(int i = 0; i < reference.size(); ++i)
-        std::cout << reference[i] << " ";
-    std::cout << std::endl;
-
-    for(int i = 0; i < target.size(); ++i)
-        std::cout << target[i] << " ";
-    std::cout << std::endl;
-*/
     auto operators = GetOperateVectors(reference, target);
-    //  std::cout << operators.first << std::endl << std::endl;
     Eigen::Matrix3d R = operators.first;
 
     Geometry cached_reference = m_reference_centered.getGeometry();
@@ -1199,96 +1146,33 @@ std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const std::vector<int>& ref
 
     Molecule tar_mol = m_target;
     tar_mol.setGeometry(rotated);
-    return MakeCostMatrix(cached_reference, rotated, m_reference.Atoms(), m_target.Atoms());
+    return MakeCostMatrix(cached_reference, rotated);
 }
 
 std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const std::pair<std::vector<int>, std::vector<int>>& pair)
 {
     return MakeCostMatrix(pair.first, pair.second);
-    /*
-    auto operators = GetOperateVectors(pair.first, pair.second);
-    Eigen::Matrix3d R = operators.first;
-
-    Geometry cached_reference = m_reference_centered.getGeometry();
-    Geometry cached_target = m_target_centered.getGeometry();
-
-    Eigen::MatrixXd tar = cached_target.transpose();
-
-    Geometry rotated = tar.transpose() * R;
-
-    Molecule ref_mol = m_reference;
-    ref_mol.setGeometry(cached_reference);
-
-    Molecule tar_mol = m_target;
-    tar_mol.setGeometry(rotated);
-    return MakeCostMatrix(cached_reference, rotated, m_reference.Atoms(), m_target.Atoms());
-*/
-    /*
-    double penalty = 100;
-
-    std::vector<int> new_order;
-
-    Eigen::MatrixXd distance = Eigen::MatrixXd::Zero(ref_mol.AtomCount(), ref_mol.AtomCount());
-    std::vector<int> element_reference = ref_mol.Atoms();
-    std::vector<int> element_target = tar_mol.Atoms();
-    double min = penalty;
-    double sum = 0;
-    for (int i = 0; i < ref_mol.AtomCount(); ++i) {
-        double min = penalty;
-        for (int j = 0; j < tar_mol.AtomCount(); ++j) {
-            distance(i, j) = GeometryTools::Distance(tar_mol.Atom(j).second, ref_mol.Atom(i).second) * GeometryTools::Distance(tar_mol.Atom(j).second, ref_mol.Atom(i).second)
-                + (tar_mol.Atom(j).second.norm() - ref_mol.Atom(i).second.norm())
-                + penalty * (tar_mol.Atom(j).first != tar_mol.Atom(i).first);
-            min = std::min(min, GeometryTools::Distance(tar_mol.Atom(j).second, ref_mol.Atom(i).second) * GeometryTools::Distance(tar_mol.Atom(j).second, ref_mol.Atom(i).second) + (tar_mol.Atom(j).second.norm() - ref_mol.Atom(i).second.norm()) * (tar_mol.Atom(j).second.norm() - ref_mol.Atom(i).second.norm()));
-        }
-        sum += min;
-    }
-    // sum = SingleMunkressAssign(distance);
-    // std::cout << sum << " ";
-    // std::cout << (distance - cache.second).cwiseAbs().sum() << std::endl;
-    return std::pair<double, Matrix>(sum, distance);
-*/
 }
 
-std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const Geometry& reference, const Geometry& target, const std::vector<int> reference_atoms, const std::vector<int> target_atoms)
+std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const Geometry& reference, const Geometry& target /*, const std::vector<int> reference_atoms, const std::vector<int> target_atoms*/)
 {
     double penalty = 100;
-
-    std::vector<int> new_order;
-    // std::cout << reference.row(1) << " "<< target.row(1) << std::endl;
     Eigen::MatrixXd distance = Eigen::MatrixXd::Zero(m_reference.AtomCount(), m_reference.AtomCount());
-    // double min = penalty;
     double sum = 0;
-    // double sum2 = 0;
-    int counter = 0;
     for (int i = 0; i < m_reference.AtomCount(); ++i) {
         double min = penalty;
-        // int row_count = 0;
+        int row_count = 0;
         for (int j = 0; j < m_reference.AtomCount(); ++j) {
             double d = (target.row(j) - reference.row(i)).norm()
                 * (target.row(j) - reference.row(i)).norm();
             double norm = (target.row(j).norm() - reference.row(i).norm())
                 * (target.row(j).norm() - reference.row(i).norm());
-            distance(i, j) = d // GeometryTools::Distance(tar_mol.Atom(j).second, ref_mol.Atom(i).second) * GeometryTools::Distance(tar_mol.Atom(j).second, ref_mol.Atom(i).second)
-                               //    + norm
-                + penalty * (target_atoms[j] != target_atoms[i]);
-            // double min2 = std::min(min, d);
-            min = std::min(min, d);
-            /* if(i == 1 && j == 1)
-                 std::cout << "Distance i j " << distance(i,j) << std::endl;*/
-            /*   if(min2 < min)
-                   row_count = 0;
-               else
-                   row_count++;*/
-            // min = min2;
-            // sum2 += d + norm;
+            distance(i, j) = d // + norm
+                + penalty * (m_reference.Atom(j).first != m_target.Atom(i).first);
+            min = std::min(min, distance(i, j));
         }
-        // counter += row_count;
-        // std::cout << min << " ";
         sum += min;
     }
-    // sum = SingleMunkressAssign(distance);
-    // std::cout << sum << " " << counter << std::endl;
     return std::pair<double, Matrix>(sum, distance);
 }
 
@@ -1297,43 +1181,26 @@ std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const Matrix& rotation)
     Geometry target = m_target.getGeometry().transpose();
     Geometry rotated = target.transpose() * rotation;
     Geometry reference = m_reference.getGeometry();
+    return MakeCostMatrix(reference, rotated);
+    /*
     double penalty = 100;
-
-    std::vector<int> new_order;
     Eigen::MatrixXd distance = Eigen::MatrixXd::Zero(m_reference.AtomCount(), m_reference.AtomCount());
-    // double min = penalty;
     double sum = 0;
-    // double sum2 = 0;
-    int counter = 0;
     for (int i = 0; i < m_reference.AtomCount(); ++i) {
         double min = penalty;
-        // int row_count = 0;
+        int row_count = 0;
         for (int j = 0; j < m_reference.AtomCount(); ++j) {
             double d = (rotated.row(j) - reference.row(i)).norm()
                 * (rotated.row(j) - reference.row(i)).norm();
             double norm = (rotated.row(j).norm() - reference.row(i).norm())
                 * (rotated.row(j).norm() - reference.row(i).norm());
-            distance(i, j) = d // GeometryTools::Distance(tar_mol.Atom(j).second, ref_mol.Atom(i).second) * GeometryTools::Distance(tar_mol.Atom(j).second, ref_mol.Atom(i).second)
-                               //    + norm
+            distance(i, j) = d
                 + penalty * (m_reference.Atom(j).first != m_target.Atom(i).first);
-            // double min2 = std::min(min, d);
             min = std::min(min, d);
-            /* if(i == 1 && j == 1)
-                 std::cout << "Distance i j " << distance(i,j) << std::endl;*/
-            /*   if(min2 < min)
-                   row_count = 0;
-               else
-                   row_count++;*/
-            // min = min2;
-            //  sum2 += d + norm;
         }
-        // counter += row_count;
-        // std::cout << min << " ";
         sum += min;
     }
-    // sum = SingleMunkressAssign(distance);
-    // std::cout << sum << " " << counter << std::endl;
-    return std::pair<double, Matrix>(sum, distance);
+    return std::pair<double, Matrix>(sum, distance);*/
 }
 
 std::vector<int> RMSDDriver::SolveCostMatrix(Matrix& distance)
@@ -1353,8 +1220,8 @@ std::vector<int> RMSDDriver::SolveCostMatrix(Matrix& distance)
         }
         auto pair = MakeCostMatrix(new_order);
         difference = (distance - pair.second).cwiseAbs().sum();
-        if (!m_silent)
-            std::cout << Rules2RMSD(new_order) << " -  " << difference << " : ";
+        // if (!m_silent)
+        //     std::cout << Rules2RMSD(new_order) << " -  " << difference << " : ";
 
         distance = pair.second;
     }
@@ -1459,81 +1326,16 @@ bool RMSDDriver::TemplateReorder()
     Molecule tar_mol = m_target;
     tar_mol.setGeometry(rotated);
 
-    auto blob = MakeCostMatrix(cached_reference, rotated, m_reference.Atoms(), m_target.Atoms());
+    auto blob = MakeCostMatrix(cached_reference, rotated);
     m_cost_limit = blob.first;
     if (!m_silent)
 
-        // std::cout << blob.first << std::endl;
         if (m_method == 4)
             blob.first = 0;
     m_prepared_cost_matrices.insert(blob);
     return true;
-    /*
-    DistanceReorder(ref_mol, tar_mol);
-    m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
-    m_target = m_target_reordered;
-    return true;*/
 }
-/*
-std::vector<int> RMSDDriver::DistanceReorder(const Molecule& reference, const Molecule& target, int max)
-{
-    double rmsd = 10;
-    std::vector<int> best;
-    for (int i = 0; i < m_munkress_cycle; ++i) {
-        std::vector<int> munkress = Munkress(reference, target);
-        double rmsdM = Rules2RMSD(munkress);
-        if (rmsdM > rmsd)
-            break;
-        best = munkress;
-        m_results.insert(std::pair<double, std::vector<int>>(rmsdM, munkress));
-        rmsd = rmsdM;
-    }
-    return best;
-}
-*/
-/*
-std::vector<int> RMSDDriver::Munkress(const Molecule& reference, const Molecule& target)
-{
-    double penalty = 100;
-    Molecule ref = reference, tar = target;
 
-    std::vector<int> new_order;
-    Eigen::MatrixXd ref_matrix = GeometryTools::TranslateMolecule(reference, reference.Centroid(true), Position{ 0, 0, 0 });
-    ref.setGeometry(ref_matrix);
-    Eigen::MatrixXd tar_matrix = GeometryTools::TranslateMolecule(target, target.Centroid(true), Position{ 0, 0, 0 });
-    tar.setGeometry(tar_matrix);
-
-    Eigen::MatrixXd distance = Eigen::MatrixXd::Zero(reference.AtomCount(), reference.AtomCount());
-    std::vector<int> element_reference = reference.Atoms();
-    std::vector<int> element_target = target.Atoms();
-    double min = penalty;
-    static std::random_device rd{};
-    static std::mt19937 gen{ rd() };
-    static std::normal_distribution<> d{ 0, 0.1 };
-    double sum = 0;
-    for (int i = 0; i < reference.AtomCount(); ++i) {
-        double min = penalty;
-        for (int j = 0; j < target.AtomCount(); ++j) {
-            distance(i, j) = GeometryTools::Distance(target.Atom(j).second, reference.Atom(i).second) * GeometryTools::Distance(target.Atom(j).second, reference.Atom(i).second)
-                + penalty * (target.Atom(j).first != reference.Atom(i).first);
-            min = std::min(min, GeometryTools::Distance(target.Atom(j).second, reference.Atom(i).second) * GeometryTools::Distance(target.Atom(j).second, reference.Atom(i).second));
-        }
-        sum += min;
-    }
-
-    auto result = MunkressAssign(distance);
-
-    for (int i = 0; i < result.cols(); ++i) {
-        for (int j = 0; j < result.rows(); ++j) {
-            if (result(i, j) == 1) {
-                new_order.push_back(j);
-                break;
-            }
-        }
-    }
-    return new_order;
-}
-*/
 bool RMSDDriver::MolAlignLib()
 {
     m_reference.writeXYZFile("molaign_ref.xyz");
