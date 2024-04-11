@@ -909,8 +909,9 @@ int main(int argc, char **argv) {
                 return 0;
             }
             FileIterator file(argv[2]);
+            Position target_dipole;
 
-            double target = 0, threshold = 1e-1, initial = 3; //dec
+            double target = 0, threshold = 1e-1, initial = 3, dx = 5e-1; //dec
             bool target_set = false;
             int maxiter = 10;
             json blob = controller["dipole"]; //declare blob as json,
@@ -927,50 +928,76 @@ int main(int argc, char **argv) {
             if (blob.contains("maxiter")) {
                 maxiter = blob["maxiter"];
             }
+            if (blob.contains("dx")) {
+                dx = blob["dx"];
+            }
+
+            std::cout << "Parameter: " << "\n"
+                      << "target " << target << "\n"
+                      << "threshold " << threshold << "\n"
+                      << "initial " << initial << "\n"
+                      << "maxiter " << maxiter << "\n"
+                      << "dx " << dx << "\n"
+                      << std::endl;
 
             while (!file.AtEnd()) { // calculation and output dipole moment
-                Molecule mol = file.Next();  // load Molecule?
-                EnergyCalculator interface("gfn2", blob); // calc Energy with gfn2?
+                Molecule mol = file.Next();  // load Molecule
+                EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb and give
                 interface.setMolecule(mol);  // set molecule for calc
                 interface.CalculateEnergy(false, true); //calc energy and charges and dipole moment
-                mol.setPartialCharges(interface.Charges()); // calc Partial Charges
+                mol.setPartialCharges(interface.Charges()); // calc Partial Charges and give it to mol
                 auto charges = interface.Charges();  //dec and init charges
 
-                std::cout << "Charges of the atoms: " << std::endl;
+                std::cout << "Charges of the atoms [e]: " << std::endl;
 
                 for (int i = 0; i < charges.size(); ++i ){ // Output partial charges from gfn2-xtb methode
-                    std::cout << mol.Atom2String(i);
-                    std::cout << "Charge: " << charges[i] << "\n";
+                    std::cout << mol.Atom2String(i).substr(0,1);
+                    std::cout << i+1 << ": ";
+                    std::cout << charges[i] << "\n";
                 }
                 std::cout << std::endl;
 
-                std::vector<double> dipole_moment = interface.Dipole(); // get dipole moment from gfn2-xtb methode
+                auto dipole_moment = interface.Dipole(); // get dipole moment from gfn2-xtb methode
 
-                if (!target_set) // calc target if not set
+                if (!target_set) { // calc target if not set
                     target = sqrt(dipole_moment[0] * dipole_moment[0] + dipole_moment[1] * dipole_moment[1] + dipole_moment[2] * dipole_moment[2]);
+                    target_dipole = dipole_moment;
+                }
+                std::cout << "Target dipole moment [eA? or ea?]: " << target << std::endl; // abs value of the dipole moment
 
-                std::cout << "Target dipole moment: " << target << std::endl; // abs value of the dipole moment
-                auto dipoles = mol.CalculateDipoleMoments();//calc Dipole for every Molecule
-
+                auto dipoles = mol.CalculateDipoleMoments();//calc Dipole for every Molecule with partial charges
                 for (const auto& dipole : dipoles) {
                     std::cout << std::endl
-                              << std::endl
-                              << "Dipole moment for single molecule x,y,z:abs " << dipole[0] << ", " << dipole[1] << ", " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) * 2.5418 << std::endl;
+                              << "Dipole moment for single molecule [eA]" //<< dipole[0] << ", " << dipole[1] << ", " << dipole[2]
+                              << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) * 2.5418 << std::endl;
                 }
-                auto dipole = mol.CalculateDipoleMoment();//calc Dipole for whole system
+                auto dipole = mol.CalculateDipoleMoment();//calc Dipole for whole system with partial charges
                 std::cout << std::endl
-                          << std::endl
-                          << "Dipole moment for whole structure " << dipole[0] << " " << dipole[1] << " " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) * 2.5418 << std::endl;
+                          << "Dipole moment for whole structure [eA]"
+                          //<< dipole[0] << " " << dipole[1] << " " << dipole[2]
+                          << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) * 2.5418 << std::endl;
                 std::cout << std::endl;
 
 
-                auto result = OptimiseScaling(&mol, target, initial, threshold, maxiter);
+                auto result = OptimiseScaling(&mol, target_dipole, initial, threshold, maxiter, dx);
                 // std::cout << "Final dipole moment " << result.first * 2.5418 << std::endl;
-                std::cout << "Final dipole moment " << result.first << std::endl;
-
-                for (auto i : result.second)
-                    std::cout << i << " ";
+                std::cout << "Final dipole moment [eA]" << result.first[0] << " " << result.first[1] << " " << result.first[2] << " " << std::endl;
+                std::cout << "Norm: " << result.first.norm() << std::endl;
                 std::cout << std::endl;
+                std::cout << std::endl;
+
+                std::cout << "Fitted scalar:\n";
+
+                double sum = 0;
+
+                for (int i = 0; i < result.second.size(); ++i ) { //(auto i : result.second)
+                    sum += result.second[i];
+                    std::cout << mol.Atom2String(i).substr(0, 1)
+                              << i + 1 << ": "
+                              << result.second[i] << "\n";
+                }
+                std::cout << std::endl;
+                std::cout << "mean of scalar: " << sum / mol.AtomCount();
             }
 
         } else {

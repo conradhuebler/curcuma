@@ -902,7 +902,7 @@ std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>
         std::cout << "No partial charges available" << std::endl;
         return dipole_moments;
     }
-
+    //calc center od mass and dipole for every fragment
     for (int f = 0; f < GetFragments().size(); ++f) {
         Position pos = { 0, 0, 0 }, dipole = { 0, 0, 0 };
         double mass = 0;
@@ -919,7 +919,7 @@ std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>
         pos(2) /= mass;
         //calc dipole moment with scalar
         for (int i : m_fragments[f]) {
-            double scale = 3;
+            double scale = 1;
             if (scaling.size() > i)
                 scale = scaling[i];
             dipole(0) += m_charges[i] * (m_geometry(i, 0) - pos(0)) * scale;
@@ -934,7 +934,7 @@ std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>
 }
 
 Position Molecule::CalculateDipoleMoment(const std::vector<double>& scaling) const
-{
+{   //dec and init
     double mass = 0;
 
     Position pos = { 0, 0, 0 }, dipole = { 0, 0, 0 };
@@ -942,6 +942,7 @@ Position Molecule::CalculateDipoleMoment(const std::vector<double>& scaling) con
         std::cout << "No partial charges available" << std::endl;
         return dipole;
     }
+    //calc center of mass
     for (int i = 0; i < m_geometry.rows(); ++i) {
         double m = Elements::AtomicMass[m_atoms[i]];
         mass += m;
@@ -952,8 +953,9 @@ Position Molecule::CalculateDipoleMoment(const std::vector<double>& scaling) con
     pos(0) /= mass;
     pos(1) /= mass;
     pos(2) /= mass;
+    //calc of the dipole moment with scalar
     for (int i = 0; i < m_geometry.rows(); ++i) {
-        double scale = 3;
+        double scale = 1;
         if (scaling.size() > i)
             scale = scaling[i];
         dipole(0) += m_charges[i] * (m_geometry(i, 0) - pos(0)) * scale;

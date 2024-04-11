@@ -115,7 +115,7 @@ public:
     }
 
     std::vector<double> Charges() const;
-    std::vector<double> Dipole() const;
+    Position Dipole() const;
 
     std::vector<std::vector<double>> BondOrders() const;
 
@@ -168,7 +168,8 @@ private:
     StringList m_d3_methods = { "d3" };
     StringList m_d4_methods = { "d4" };
     std::function<void(bool, bool)> m_ecengine;
-    std::function<std::vector<double>()> m_charges, m_dipole;
+    std::function<std::vector<double>()> m_charges;
+    std::function<Position()> m_dipole;
     std::function<std::vector<std::vector<double>>()> m_bonds;
     json m_parameter;
     std::string m_method, m_param_file;

@@ -129,8 +129,23 @@ class Molecule
     Position MassCentroid(bool hydrogen = true, int fragment = -1) const;
     Eigen::Vector3d COM(bool hydrogen = true, int fragment = -1);
 
+    /*! \brief Methode to get number of atoms
+     *
+     * @return size of the atoms
+     */
     inline std::size_t AtomCount() const { return m_atoms.size(); }
+
+    /*! \brief Methode to get array of all the atoms
+     *
+     * @return array of the atomnumber
+     */
     std::vector<int> Atoms() const { return m_atoms; }
+
+    /*! \brief Methode to get atom number from index
+     *
+     * @param i: index of the atom
+     * @return pair of atom number and the xyz position
+     */
     std::pair<int, Position> Atom(int i) const;
 
     void writeXYZFile(const std::string& filename) const;
@@ -150,7 +165,7 @@ class Molecule
     std::vector<Position> CalculateDipoleMoments(const std::vector<double>& scaling = std::vector<double>()) const;
 
     /*! \brief Methode to calculate the dipole moments of whole structure
-     *
+     * unit of dipol is electron times angstron
      */
     Position CalculateDipoleMoment(const std::vector<double>& scaling = std::vector<double>()) const;
 
@@ -178,6 +193,10 @@ class Molecule
      * Output is a string as in .xyz file
      * */
     std::string Atom2String(int i) const;
+
+    /*! \brief Methode to get the header of the xyz file
+     *
+     * */
     std::string Header() const;
 
     void CalculateRotationalConstants();
@@ -195,6 +214,9 @@ class Molecule
     Matrix HydrogenBondMatrix(int f1, int f2);
     void writeXYZFragments(const std::string& basename) const;
 
+    /*! no use at the moment
+     *
+     */
     int Check() const;
 
     inline void setSpin(int spin) { m_spin = spin; }

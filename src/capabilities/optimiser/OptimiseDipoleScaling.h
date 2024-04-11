@@ -43,38 +43,38 @@ using namespace LBFGSpp;
 
 class LBFGSDipoleInterface {
 public:
-    LBFGSDipoleInterface(int n_)
+    explicit LBFGSDipoleInterface(int n_)
     {
     }
     double operator()(const VectorXd& x, VectorXd& grad)
     {
-        double fx = 0.0;
-        double dx = 5e-1;
+        double fx;
+        double dx = m_dx;
         std::vector<double> scaling(x.size());
         for (int i = 0; i < scaling.size(); ++i) {
             scaling[i] = x(i);
         }
 
         auto dipole_vector = m_molecule->CalculateDipoleMoment(scaling);
-        double dipole = sqrt(dipole_vector[0] * dipole_vector[0] + dipole_vector[1] * dipole_vector[1] + dipole_vector[2] * dipole_vector[2]) * 2.5418;
-        fx = std::abs(m_dipole - dipole);
+        auto dipole = dipole_vector.norm();
+        fx = std::abs((m_dipole.norm() - dipole_vector.norm()));
         // std::cout << dipole << " " << m_dipole << " "<< fx<< std::endl;
         for (int i = 0; i < scaling.size(); ++i) {
             // if(std::abs(fx) < std::abs(m_smaller))
-            //     std::cout << scaling[i] << " ";
+                 std::cout << scaling[i] << " ";
             scaling[i] += dx;
             dipole_vector = m_molecule->CalculateDipoleMoment(scaling);
-            double dipolep = sqrt(dipole_vector[0] * dipole_vector[0] + dipole_vector[1] * dipole_vector[1] + dipole_vector[2] * dipole_vector[2]) * 2.5418;
+            double dipolep = dipole_vector.norm();
             scaling[i] -= 2 * dx;
             dipole_vector = m_molecule->CalculateDipoleMoment(scaling);
-            double dipolem = sqrt(dipole_vector[0] * dipole_vector[0] + dipole_vector[1] * dipole_vector[1] + dipole_vector[2] * dipole_vector[2]) * 2.5418;
+            double dipolem = dipole_vector.norm();
 
             grad[i] = (std::abs(dipolep - dipole) - std::abs(dipolem - dipole)) / (2.0 * dx);
             scaling[i] += dx;
         }
         // if(std::abs(fx) < std::abs(m_smaller))
-        //     std::cout << std::endl;
-        m_smaller = std::abs(fx);
+             std::cout << std::endl;
+        // m_smaller = std::abs(fx);
         m_parameter = x;
         return fx;
     }
@@ -85,8 +85,8 @@ public:
         m_molecule = molecule;
     }
 
-    double m_dipole;
-    double m_smaller = 1;
+    Position m_dipole;
+    double m_dx = 5e-1;
 
 private:
     int m_atoms = 0;
@@ -94,20 +94,21 @@ private:
     const Molecule* m_molecule;
 };
 
-inline std::pair<double, std::vector<double>> OptimiseScaling(const Molecule* molecule, double dipole, double initial, double threshold, int maxiter)
+inline std::pair<Position, std::vector<double>> OptimiseScaling(const Molecule* molecule, Position dipole, double initial, double threshold, int maxiter, double dx)
 {
-    Vector parameter(molecule->AtomCount());
+    Vector parameter(molecule->AtomCount()); //dec parameter as array and init size of parameter to size of atoms
     for (int i = 0; i < molecule->AtomCount(); ++i)
-        parameter(i) = initial;
+        parameter(i) = initial; //init every parameter as initial
 
-    Vector old_param = parameter;
+    //Vector old_param = parameter;
     // std::cout << parameter.transpose() << std::endl;
 
     LBFGSParam<double> param;
     param.epsilon = 1e-5;
     LBFGSSolver<double> solver(param);
     LBFGSDipoleInterface fun(parameter.size());
-    fun.m_dipole = dipole * 2.5418;
+    fun.m_dipole = dipole;
+    fun.m_dx = dx;
     fun.setMolecule(molecule);
     int iteration = 0;
     // std::cout << parameter.transpose() << std::endl;
@@ -115,14 +116,20 @@ inline std::pair<double, std::vector<double>> OptimiseScaling(const Molecule* mo
     int converged = solver.InitializeSingleSteps(fun, parameter, fx);
 
     for (iteration = 1; iteration <= maxiter && fx > threshold; ++iteration) {
-        solver.SingleStep(fun, parameter, fx);
-        std::cout << "Iteration: " << iteration << " Difference: " << fx << std::endl;
+        try {
+            solver.SingleStep(fun, parameter, fx);
+            std::cout << "Iteration: " << iteration << " Difference: " << fx << std::endl;
+        }
+        catch (const std::logic_error& e) {
+            std::cerr << e.what();
+        }
+
     }
     std::vector<double> scaling(parameter.size());
     for (int i = 0; i < scaling.size(); ++i)
         scaling[i] = parameter(i);
     auto dipole_vector = molecule->CalculateDipoleMoment(scaling);
-    dipole = sqrt(dipole_vector[0] * dipole_vector[0] + dipole_vector[1] * dipole_vector[1] + dipole_vector[2] * dipole_vector[2]);
+    dipole = dipole_vector;
 
-    return std::pair<double, std::vector<double>>(dipole, scaling);
+    return std::pair<Position, std::vector<double>>(dipole, scaling);
 }
