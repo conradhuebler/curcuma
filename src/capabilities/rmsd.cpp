@@ -16,7 +16,6 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  */
-
 #include "rmsd_functions.h"
 
 #include "munkres.h"
@@ -30,6 +29,7 @@
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -47,6 +47,8 @@
 #include <fmt/color.h>
 #include <fmt/core.h>
 #include <fmt/ranges.h>
+
+#include <LBFGS.h>
 
 #include "json.hpp"
 using json = nlohmann::json;
@@ -172,6 +174,7 @@ void RMSDDriver::LoadControlJson()
     m_split = Json2KeyWord<bool>(m_defaults, "split");
     m_nofree = Json2KeyWord<bool>(m_defaults, "nofree");
     m_dmix = Json2KeyWord<double>(m_defaults, "dmix");
+    m_maxtrial = Json2KeyWord<int>(m_defaults, "maxtrial");
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
         std::string element = m_defaults["Element"].get<std::string>();
@@ -216,6 +219,7 @@ void RMSDDriver::LoadControlJson()
     } else
         m_method = 1;
 
+    m_costmatrix = Json2KeyWord<int>(m_defaults, "costmatrix");
     std::string order = Json2KeyWord<std::string>(m_defaults, "order");
     int cycles = Json2KeyWord<int>(m_defaults, "cycles");
     if (cycles != -1)
@@ -261,8 +265,8 @@ void RMSDDriver::start()
     m_reference_centered = m_reference;
     m_target_centered = m_target;
 
-    m_reference_centered.Center();
-    m_target_centered.Center();
+    m_reference.Center();
+    m_target.Center();
 
     m_target_aligned = m_target;
     m_reference_aligned.LoadMolecule(m_reference);
@@ -273,6 +277,7 @@ void RMSDDriver::start()
             m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
             m_target = m_target_reordered;
             m_rmsd = m_results.begin()->first;
+            // std::cout << m_rmsd << std::endl;
             rmsd_calculated = true;
         }
     }
@@ -564,10 +569,11 @@ StructComp RMSDDriver::Rule2RMSD(const std::vector<int> rules, int fragment)
 void RMSDDriver::clear()
 {
     m_results.clear();
-    m_connectivity.clear();
     m_stored_rules.clear();
     m_prepared_cost_matrices.clear();
     m_intermediate_cost_matrices.clear();
+    m_intermedia_rules.clear();
+
     m_rmsd = 0.0;
 }
 
@@ -672,9 +678,7 @@ std::vector<double> RMSDDriver::IndivRMSD(const Molecule& reference_mol, const M
 
     Geometry reference = CenterMolecule(reference_mol, m_fragment_reference);
     Geometry target = CenterMolecule(target_mol, m_fragment_target);
-    Eigen::MatrixXd tar = target.transpose();
-
-    Geometry rotated = tar.transpose() * R;
+    Geometry rotated = target * R;
 
     for (int i = 0; i < rotated.rows(); ++i) {
         terms.push_back((rotated(i, 0) - reference(i, 0)) * (rotated(i, 0) - reference(i, 0)) + (rotated(i, 1) - reference(i, 1)) * (rotated(i, 1) - reference(i, 1)) + (rotated(i, 2) - reference(i, 2)) * (rotated(i, 2) - reference(i, 2)));
@@ -763,9 +767,14 @@ std::pair<Molecule, LimitedStorage> RMSDDriver::InitialisePair()
 
 void RMSDDriver::ReorderMolecule()
 {
-    if (!m_nofree)
-        TemplateFree();
+    auto R = GetOperateVectors(m_reference, m_target);
+    Eigen::Matrix3d rotation = R.first;
 
+    auto blob = MakeCostMatrix(OptimiseRotation(rotation));
+
+    if (m_method == 4)
+        blob.first = 1;
+    InsertRotation(blob);
     if (m_method == 1)
         ReorderIncremental();
     else if (m_method == 2)
@@ -774,6 +783,8 @@ void RMSDDriver::ReorderMolecule()
         HeavyTemplate();
     else if (m_method == 4)
         AtomTemplate();
+    else if (m_method == 5)
+        TemplateFree();
     else if (m_method == 6) {
         if (!MolAlignLib()) {
             return;
@@ -785,6 +796,40 @@ void RMSDDriver::ReorderMolecule()
 
     m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
     m_target_aligned = m_target;
+}
+
+void RMSDDriver::FinaliseTemplate()
+{
+    Molecule target = m_target;
+    std::vector<std::vector<int>> rules = m_stored_rules;
+    double rmsd_prev = 10;
+    int eq_counter = 0, incr_counter = 0;
+    int iter = 0;
+    RunTimer time;
+    double prev_cost = -1;
+    for (auto permutation : m_prepared_cost_matrices) {
+        iter++;
+        if (eq_counter > m_maxtrial || incr_counter > m_maxtrial || iter > m_maxtrial)
+            break;
+        if (prev_cost != -1 && prev_cost < permutation.first / 10) {
+            std::cout << permutation.first << std::endl;
+            break;
+        }
+        prev_cost = permutation.first;
+        auto result = SolveCostMatrix(permutation.second);
+        m_target_reordered = ApplyOrder(result, target);
+        double rmsd = Rules2RMSD(result);
+        if (!m_silent)
+            std::cout << permutation.first << " " << rmsd << " " << eq_counter << " " << time.Elapsed() << std::endl;
+        m_results.insert(std::pair<double, std::vector<int>>(rmsd, result));
+        time.Reset();
+
+        eq_counter += std::abs(rmsd - rmsd_prev) < 1e-3;
+        incr_counter += rmsd > rmsd_prev;
+        rmsd_prev = rmsd;
+    }
+
+    m_reorder_rules = m_results.begin()->second;
 }
 
 void RMSDDriver::DistanceTemplate()
@@ -811,50 +856,158 @@ void RMSDDriver::HeavyTemplate()
 
     PrepareHeavyTemplate();
 }
+Matrix RMSDDriver::OptimiseRotation(const Eigen::Matrix3d& rotation)
+{
+    Eigen::Vector3d euler = rotation.eulerAngles(0, 1, 2);
+
+    LBFGSRotation opt(3);
+    opt.m_reference = m_reference.getGeometry();
+    opt.m_target = m_target.getGeometry();
+    opt.m_reference_atoms = m_reference.Atoms();
+    opt.m_target_atoms = m_target.Atoms();
+    opt.m_costmatrix = m_costmatrix;
+
+    int iteration;
+    int maxiter = 1000;
+    LBFGSParam<double> param;
+    LBFGSSolver<double> solver(param);
+    Vector vector(3);
+    for (int i = 0; i < 3; ++i)
+        vector(i) = euler(i);
+
+    double fx;
+    int converged = solver.InitializeSingleSteps(opt, vector, fx);
+    Vector v_old = vector;
+    for (iteration = 1; iteration <= maxiter; ++iteration) {
+        try {
+            solver.SingleStep(opt, vector, fx);
+        } catch (const std::logic_error& error_result) {
+            break;
+        } catch (const std::runtime_error& error_result) {
+            break;
+        }
+
+        if ((vector - v_old).norm() < 1e-5)
+            break;
+        v_old = vector;
+    }
+    Eigen::Matrix3d n;
+    n = Eigen::AngleAxisd(vector[0], Eigen::Vector3d::UnitX())
+        * Eigen::AngleAxisd(vector[1], Eigen::Vector3d::UnitY())
+        * Eigen::AngleAxisd(vector[2], Eigen::Vector3d::UnitZ());
+
+    return n;
+}
 
 void RMSDDriver::TemplateFree()
 {
-    /* Eigen::Matrix3d indentity = Eigen::MatrixXd::Zero(3, 3);
-    indentity(0, 0) = -1;
-    indentity(1, 1) = -1;
-    indentity(2, 2) = -1; */
     auto R = GetOperateVectors(m_reference, m_target);
-    auto blob = MakeCostMatrix(R.first);
+    Eigen::Matrix3d rotation = R.first;
 
-    m_cost_limit = blob.first;
-    if (!m_silent)
-        std::cout << blob.first << std::endl;
+    // Eigen::Matrix3d n = OptimiseRotation(R.first);
+    for (int i = 0; i < 360; i += 60) {
+        Eigen::Matrix3d m = Eigen::Matrix3d::Zero();
+        m(0, 0) = 1;
+        m(1, 1) = 1;
+        m(2, 2) = 1;
+        m = m * Eigen::AngleAxisd(i, Eigen::Vector3d::UnitX());
+        // std::cout << m << std::endl;
 
-    if (m_method == 4)
-        blob.first = 0;
-    m_prepared_cost_matrices.insert(blob);
+        auto blob = MakeCostMatrix(OptimiseRotation(m));
+        //      std::cout << blob.first << " " << std::endl;
+        m_cost_limit = blob.first;
+
+        if (m_method == 4)
+            blob.first = 1;
+        InsertRotation(blob);
+    }
+    for (int j = 0; j < 360; j += 60) {
+        Eigen::Matrix3d m = Eigen::Matrix3d::Zero();
+        m(0, 0) = 1;
+        m(1, 1) = 1;
+        m(2, 2) = 1;
+        m = m * Eigen::AngleAxisd(j, Eigen::Vector3d::UnitY());
+        // std::cout << m << std::endl;
+
+        auto blob = MakeCostMatrix(OptimiseRotation(m));
+        //     std::cout << blob.first << " " << std::endl ;
+
+        m_cost_limit = blob.first;
+
+        if (m_method == 4)
+            blob.first = 1;
+        InsertRotation(blob);
+    }
+    for (int k = 0; k < 360; k += 60) {
+        Eigen::Matrix3d m = Eigen::Matrix3d::Zero();
+        m(0, 0) = 1;
+        m(1, 1) = 1;
+        m(2, 2) = 1;
+        m = m * Eigen::AngleAxisd(k, Eigen::Vector3d::UnitZ());
+        // std::cout << m << std::endl;
+
+        auto blob = MakeCostMatrix(OptimiseRotation(m));
+        //    std::cout << blob.first << " " << std::endl ;
+
+        m_cost_limit = blob.first;
+
+        if (m_method == 4)
+            blob.first = 1;
+        InsertRotation(blob);
+    }
 }
 
-void RMSDDriver::FinaliseTemplate()
+void RMSDDriver::InsertRotation(std::pair<double, Matrix>& rotation)
 {
-    Molecule target = m_target;
-    std::vector<std::vector<int>> rules = m_stored_rules;
-    double rmsd_prev = 10;
-    int eq_counter = 0, incr_counter = 0;
-    int iter = 0;
-    RunTimer time;
-    for (auto permutation : m_prepared_cost_matrices) {
-        iter++;
-        auto result = SolveCostMatrix(permutation.second);
-        m_target_reordered = ApplyOrder(result, target);
-        double rmsd = Rules2RMSD(result);
-        if (!m_silent)
-            std::cout << permutation.first << " " << rmsd << " " << eq_counter << " " << time.Elapsed() << std::endl;
-        m_results.insert(std::pair<double, std::vector<int>>(rmsd, result));
-        time.Reset();
-        if (eq_counter > 5 || incr_counter > 5 || iter > 5)
-            break;
-        eq_counter += std::abs(rmsd - rmsd_prev) < 1e-3;
-        incr_counter += rmsd > rmsd_prev;
-        rmsd_prev = rmsd;
+    for (auto i : m_prepared_cost_matrices) {
+        // std::cout << (rotation.second - i.second).cwiseAbs().sum()/double(i.second.rows()*i.second.rows()) << std::endl;
+        if ((rotation.second - i.second).cwiseAbs().sum() / double(i.second.rows() * i.second.rows()) < 10)
+            return;
     }
+    m_prepared_cost_matrices.insert(rotation);
+}
 
-    m_reorder_rules = m_results.begin()->second;
+bool RMSDDriver::TemplateReorder()
+{
+    auto fragments = CheckFragments();
+
+    if (fragments.first == -1 || fragments.second == -1)
+        return false;
+
+    m_fragment = -1;
+    m_fragment_target = -1;
+    m_fragment_reference = -1;
+
+    Molecule reference_mol = m_reference.getFragmentMolecule(fragments.first);
+    Molecule target_mol = m_target.getFragmentMolecule(fragments.second);
+
+    auto operators = GetOperateVectors(fragments.first, fragments.second);
+    Eigen::Matrix3d R = operators.first;
+
+    Geometry cached_reference = m_reference.getGeometryByFragment(fragments.first, m_protons);
+    Geometry cached_target = m_target.getGeometryByFragment(fragments.second, m_protons);
+
+    Geometry ref = GeometryTools::TranslateMolecule(m_reference, GeometryTools::Centroid(cached_reference), Position{ 0, 0, 0 });
+    Geometry tget = GeometryTools::TranslateMolecule(m_target, GeometryTools::Centroid(cached_target), Position{ 0, 0, 0 });
+
+    // Eigen::MatrixXd tar = tget.transpose();
+
+    Geometry rotated = tget * R;
+
+    Molecule ref_mol = m_reference;
+    ref_mol.setGeometry(ref);
+
+    Molecule tar_mol = m_target;
+    tar_mol.setGeometry(rotated);
+
+    auto blob = MakeCostMatrix(cached_reference, rotated);
+    m_cost_limit = blob.first;
+    if (!m_silent)
+
+        if (m_method == 4)
+            blob.first = 1;
+    InsertRotation(blob);
+    return true;
 }
 
 std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareHeavyTemplate()
@@ -893,7 +1046,6 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareHeavyTemplate()
         for (auto index : m_stored_rules[i])
             tmp.push_back(target_indicies[index]);
         transformed_rules.push_back(tmp);
-        m_intermedia_rules.push_back(tmp);
     }
     m_stored_rules = transformed_rules;
     std::vector<int> target_indices = m_reorder_rules;
@@ -943,18 +1095,18 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareAtomTemplate(in
         std::vector<int> tmp;
         for (auto index : m_stored_rules[i])
             tmp.push_back(target_indicies[index]);
-        m_intermedia_rules.push_back(tmp);
+
         auto OperateVectors = GetOperateVectors(reference_indicies, tmp);
         auto result = MakeCostMatrix(OperateVectors.first);
         result.first = m_prepared_cost_matrices.size();
 
-        m_prepared_cost_matrices.insert(result);
+        InsertRotation(result);
     }
 
     for (const auto& indices : m_intermedia_rules) {
         auto result = MakeCostMatrix(reference_indicies, indices);
         result.first = m_prepared_cost_matrices.size();
-        m_prepared_cost_matrices.insert(result);
+        InsertRotation(result);
     }
 
     return std::pair<std::vector<int>, std::vector<int>>(reference_indicies, reference_indicies);
@@ -1003,15 +1155,15 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareAtomTemplate(co
         m_intermedia_rules.push_back(tmp);
         auto OperateVectors = GetOperateVectors(reference_indicies, tmp);
         auto result = MakeCostMatrix(OperateVectors.first);
-        result.first = m_prepared_cost_matrices.size();
+        result.first = m_prepared_cost_matrices.size() + 1;
 
-        m_prepared_cost_matrices.insert(result);
+        InsertRotation(result);
     }
 
     for (const auto& indices : m_intermedia_rules) {
         auto result = MakeCostMatrix(reference_indicies, indices);
         result.first = m_prepared_cost_matrices.size();
-        m_prepared_cost_matrices.insert(result);
+        InsertRotation(result);
     }
     m_stored_rules = transformed_rules;
     std::vector<int> target_indices = m_reorder_rules;
@@ -1024,6 +1176,8 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareDistanceTemplat
     if (!m_silent)
         std::cout << "Start Prepare Template" << std::endl;
     RunTimer time;
+    std::map<double, std::pair<int, int>> m_distance_reference, m_distance_target;
+
     Position ref_centroid = m_reference.Centroid(true);
     Position tar_centroid = m_target.Centroid(true);
 
@@ -1100,7 +1254,7 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareDistanceTemplat
     m_target = cached_target_mol;
     for (const auto& indices : m_intermedia_rules) {
         auto result = MakeCostMatrix(reference_indicies, indices);
-        m_prepared_cost_matrices.insert(result);
+        InsertRotation(result);
     }
     m_intermedia_rules.clear();
 
@@ -1113,7 +1267,7 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareDistanceTemplat
 
         auto OperateVectors = GetOperateVectors(reference_indicies, tmp);
         auto result = MakeCostMatrix(OperateVectors.first);
-        m_prepared_cost_matrices.insert(result);
+        InsertRotation(result);
     }
 
     m_stored_rules.clear();
@@ -1137,9 +1291,9 @@ std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const std::vector<int>& ref
     Geometry cached_reference = m_reference_centered.getGeometry();
     Geometry cached_target = m_target_centered.getGeometry();
 
-    Eigen::MatrixXd tar = cached_target.transpose();
+    //  Eigen::MatrixXd tar = cached_target.transpose();
 
-    Geometry rotated = tar.transpose() * R;
+    Geometry rotated = cached_target * R;
 
     Molecule ref_mol = m_reference;
     ref_mol.setGeometry(cached_reference);
@@ -1154,21 +1308,41 @@ std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const std::pair<std::vector
     return MakeCostMatrix(pair.first, pair.second);
 }
 
+std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const Matrix& rotation)
+{
+    // Geometry target = m_target.getGeometry().transpose();
+    Geometry rotated = m_target.getGeometry() * rotation;
+    Geometry reference = m_reference.getGeometry();
+    return MakeCostMatrix(reference, rotated);
+}
+
 std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const Geometry& reference, const Geometry& target /*, const std::vector<int> reference_atoms, const std::vector<int> target_atoms*/)
 {
-    double penalty = 100;
+    double penalty = 1e23;
     Eigen::MatrixXd distance = Eigen::MatrixXd::Zero(m_reference.AtomCount(), m_reference.AtomCount());
     double sum = 0;
     for (int i = 0; i < m_reference.AtomCount(); ++i) {
         double min = penalty;
         int row_count = 0;
         for (int j = 0; j < m_reference.AtomCount(); ++j) {
-            double d = (target.row(j) - reference.row(i)).norm()
-                * (target.row(j) - reference.row(i)).norm();
-            double norm = (target.row(j).norm() - reference.row(i).norm())
-                * (target.row(j).norm() - reference.row(i).norm());
-            distance(i, j) = d // + norm
-                + penalty * (m_reference.Atom(j).first != m_target.Atom(i).first);
+            double d = (target.row(j) - reference.row(i)).norm();
+            double norm = (target.row(j).norm() - reference.row(i).norm());
+            if (m_costmatrix == 2)
+                distance(i, j) = d;
+            else if (m_costmatrix == 1)
+                distance(i, j) = d * d;
+            else if (m_costmatrix == 3)
+                distance(i, j) = d + norm;
+            else if (m_costmatrix == 4)
+                distance(i, j) = d * d + norm * norm;
+            else if (m_costmatrix == 5)
+                distance(i, j) = d * norm;
+            else if (m_costmatrix == 5)
+                distance(i, j) = d * d * norm * norm;
+            else
+                distance(i, j) = d * d;
+            // + norm
+            distance(i, j) += penalty * (m_reference.Atom(i).first != m_target.Atom(j).first);
             min = std::min(min, distance(i, j));
         }
         sum += min;
@@ -1176,31 +1350,39 @@ std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const Geometry& reference, 
     return std::pair<double, Matrix>(sum, distance);
 }
 
-std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const Matrix& rotation)
+std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const Geometry& reference, const Geometry& target, const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms, int costmatrix)
 {
-    Geometry target = m_target.getGeometry().transpose();
-    Geometry rotated = target.transpose() * rotation;
-    Geometry reference = m_reference.getGeometry();
-    return MakeCostMatrix(reference, rotated);
-    /*
-    double penalty = 100;
-    Eigen::MatrixXd distance = Eigen::MatrixXd::Zero(m_reference.AtomCount(), m_reference.AtomCount());
+    double penalty = 1e23;
+    Eigen::MatrixXd distance = Eigen::MatrixXd::Zero(reference_atoms.size(), reference_atoms.size());
     double sum = 0;
-    for (int i = 0; i < m_reference.AtomCount(); ++i) {
+    for (int i = 0; i < reference_atoms.size(); ++i) {
         double min = penalty;
         int row_count = 0;
-        for (int j = 0; j < m_reference.AtomCount(); ++j) {
-            double d = (rotated.row(j) - reference.row(i)).norm()
-                * (rotated.row(j) - reference.row(i)).norm();
-            double norm = (rotated.row(j).norm() - reference.row(i).norm())
-                * (rotated.row(j).norm() - reference.row(i).norm());
-            distance(i, j) = d
-                + penalty * (m_reference.Atom(j).first != m_target.Atom(i).first);
-            min = std::min(min, d);
+        for (int j = 0; j < reference_atoms.size(); ++j) {
+            double d = (target.row(j) - reference.row(i)).norm();
+            double norm = (target.row(j).norm() - reference.row(i).norm());
+            if (costmatrix == 2)
+                distance(i, j) = d;
+            else if (costmatrix == 1)
+                distance(i, j) = d * d;
+            else if (costmatrix == 3)
+                distance(i, j) = d + norm;
+            else if (costmatrix == 4)
+                distance(i, j) = d * d + norm * norm;
+            else if (costmatrix == 5)
+                distance(i, j) = d * norm;
+            else if (costmatrix == 5)
+                distance(i, j) = d * d * norm * norm;
+            else
+                distance(i, j) = d * d;
+
+            // + norm
+            distance(i, j) += penalty * (reference_atoms[i] != target_atoms[j]);
+            min = std::min(min, distance(i, j));
         }
         sum += min;
     }
-    return std::pair<double, Matrix>(sum, distance);*/
+    return std::pair<double, Matrix>(sum, distance);
 }
 
 std::vector<int> RMSDDriver::SolveCostMatrix(Matrix& distance)
@@ -1291,49 +1473,6 @@ std::pair<Matrix, Position> RMSDDriver::GetOperateVectors(const Molecule& refere
     Position translate = GeometryTools::Centroid(cached_reference) - GeometryTools::Centroid(cached_target);
 
     return std::pair<Matrix, Position>(R, translate);
-}
-
-bool RMSDDriver::TemplateReorder()
-{
-    auto fragments = CheckFragments();
-
-    if (fragments.first == -1 || fragments.second == -1)
-        return false;
-
-    m_fragment = -1;
-    m_fragment_target = -1;
-    m_fragment_reference = -1;
-
-    Molecule reference_mol = m_reference.getFragmentMolecule(fragments.first);
-    Molecule target_mol = m_target.getFragmentMolecule(fragments.second);
-
-    auto operators = GetOperateVectors(fragments.first, fragments.second);
-    Eigen::Matrix3d R = operators.first;
-
-    Geometry cached_reference = m_reference.getGeometryByFragment(fragments.first, m_protons);
-    Geometry cached_target = m_target.getGeometryByFragment(fragments.second, m_protons);
-
-    Geometry ref = GeometryTools::TranslateMolecule(m_reference, GeometryTools::Centroid(cached_reference), Position{ 0, 0, 0 });
-    Geometry tget = GeometryTools::TranslateMolecule(m_target, GeometryTools::Centroid(cached_target), Position{ 0, 0, 0 });
-
-    Eigen::MatrixXd tar = tget.transpose();
-
-    Geometry rotated = tar.transpose() * R;
-
-    Molecule ref_mol = m_reference;
-    ref_mol.setGeometry(ref);
-
-    Molecule tar_mol = m_target;
-    tar_mol.setGeometry(rotated);
-
-    auto blob = MakeCostMatrix(cached_reference, rotated);
-    m_cost_limit = blob.first;
-    if (!m_silent)
-
-        if (m_method == 4)
-            blob.first = 0;
-    m_prepared_cost_matrices.insert(blob);
-    return true;
 }
 
 bool RMSDDriver::MolAlignLib()

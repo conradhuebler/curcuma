@@ -957,6 +957,19 @@ Position Molecule::CalculateDipoleMoment(const std::vector<double>& scaling) con
         dipole(0) += m_charges[i] * (m_geometry(i, 0) - pos(0)) * scale;
         dipole(1) += m_charges[i] * (m_geometry(i, 1) - pos(1)) * scale;
         dipole(2) += m_charges[i] * (m_geometry(i, 2) - pos(2)) * scale;
+        for (int j = 0; j < m_geometry.rows(); ++j) {
+            if (i == j)
+                continue;
+            double scale = 3;
+            if (scaling.size() > i)
+                scale = scaling[i];
+            double revr = 1 / (m_geometry.row(i) - m_geometry.row(j)).norm();
+            // std::cout << m_charges[i] *revr *  scale << " ";
+
+            dipole(0) -= m_charges[i] * revr * scale;
+            dipole(1) -= m_charges[i] * revr * scale;
+            dipole(2) -= m_charges[i] * revr * scale;
+        }
         // std::cout << scale << " ";
     }
     // std::cout << std::endl;

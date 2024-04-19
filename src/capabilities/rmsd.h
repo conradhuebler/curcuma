@@ -31,6 +31,8 @@
 #include <map>
 #include <queue>
 
+#include <LBFGS.h>
+
 #include "json.hpp"
 using json = nlohmann::json;
 
@@ -67,28 +69,7 @@ private:
     int m_calculations = 0;
     std::function<double(const Molecule&)> m_evaluator;
 };
-/*
-class IntermediateStorage {
-public:
-    inline IntermediateStorage(unsigned int size)
-        : m_size(size)
-    {
-    }
 
-    inline void addItem(const std::vector<int>& vector, double rmsd)
-    {
-        m_shelf.insert(std::pair<double, std::vector<int>>(rmsd, vector));
-        if (m_shelf.size() >= m_size)
-            m_shelf.erase(--m_shelf.end());
-    }
-
-    const std::map<double, std::vector<int>>* data() const { return &m_shelf; }
-
-private:
-    unsigned int m_size;
-    std::map<double, std::vector<int>> m_shelf;
-};
-*/
 static const json RMSDJson = {
     { "reorder", false },
     { "check", false },
@@ -100,7 +81,7 @@ static const json RMSDJson = {
     { "pt", 0 },
     { "silent", false },
     { "storage", 1.0 },
-    { "method", "incr" },
+    { "method", "free" },
     { "noreorder", false },
     { "threads", 1 },
     { "Element", 7 },
@@ -119,7 +100,9 @@ static const json RMSDJson = {
     { "molaligntol", 10 },
     { "cycles", -1 },
     { "nofree", false },
-    { "limit", 10 }
+    { "limit", 10 },
+    { "costmatrix", 1 },
+    { "maxtrial", 3 }
 };
 
 class RMSDDriver : public CurcumaMethod {
@@ -242,6 +225,7 @@ public:
     void setThreads(int threads) { m_threads = threads; }
 
     bool MolAlignLib();
+    static std::pair<double, Matrix> MakeCostMatrix(const Geometry& reference, const Geometry& target, const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms, int costmatrix);
 
 private:
     /* Read Controller has to be implemented for all */
@@ -270,6 +254,8 @@ private:
 
     void CheckTopology();
 
+    Matrix OptimiseRotation(const Eigen::Matrix3d& rotation);
+
     std::pair<std::vector<int>, std::vector<int>> PrepareHeavyTemplate();
     std::pair<std::vector<int>, std::vector<int>> PrepareDistanceTemplate();
 
@@ -290,6 +276,7 @@ private:
     }
 
     std::vector<int> FillMissing(const Molecule& molecule, const std::vector<int>& order);
+    void InsertRotation(std::pair<double, Matrix>& rotation);
 
     void InitialiseOrder();
     std::pair<Molecule, LimitedStorage> InitialisePair();
@@ -324,7 +311,6 @@ private:
     std::vector<int> m_reorder_rules;
     std::vector<std::vector<int>> m_stored_rules, m_intermedia_rules;
     std::vector<double> m_tmp_rmsd;
-    std::map<int, std::vector<int>> m_connectivity;
     double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99, m_damping = 0.8, m_dmix = -1;
     bool m_check = false;
     bool m_check_connections = false, m_postprocess = true, m_noreorder = false, m_swap = false, m_dynamic_center = false;
@@ -334,10 +320,73 @@ private:
     int m_munkress_cycle = 1;
     int m_molaligntol = 10;
     int m_limit = 10;
+    int m_costmatrix = 1;
+    int m_maxtrial = 2;
     double m_cost_limit = 0;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
     std::vector<int> m_initial, m_element_templates;
     std::string m_molalign = "molalign";
-    std::map<double, std::pair<int, int>> m_distance_reference, m_distance_target;
     std::map<double, Matrix> m_prepared_cost_matrices;
+};
+
+using namespace LBFGSpp;
+
+class LBFGSRotation {
+public:
+    LBFGSRotation(int n_)
+    {
+    }
+    double operator()(const Eigen::VectorXd& x, Eigen::VectorXd& grad)
+    {
+        Eigen::Matrix3d n;
+        n = Eigen::AngleAxisd(x[0], Eigen::Vector3d::UnitX())
+            * Eigen::AngleAxisd(x[1], Eigen::Vector3d::UnitY())
+            * Eigen::AngleAxisd(x[2], Eigen::Vector3d::UnitZ());
+
+        // Eigen::MatrixXd tar = m_target.transpose();
+
+        // Geometry rotated = tar.transpose() * n;
+        double fx = 0.0;
+        double dx = 1e-5;
+
+        auto result = RMSDDriver::MakeCostMatrix(m_reference, m_target * n, m_reference_atoms, m_target_atoms, m_costmatrix);
+        // std::cout << result.first << std::endl;
+        Eigen::VectorXd tmp = x;
+        for (int i = 0; i < 3; ++i) {
+            tmp[i] += dx;
+            // std::cout << tmp.transpose() << std::endl;
+            Eigen::Matrix3d n;
+            n = Eigen::AngleAxisd(tmp[0], Eigen::Vector3d::UnitX())
+                * Eigen::AngleAxisd(tmp[1], Eigen::Vector3d::UnitY())
+                * Eigen::AngleAxisd(tmp[2], Eigen::Vector3d::UnitZ());
+
+            // Geometry rotated = tar.transpose() * n;
+
+            auto p = RMSDDriver::MakeCostMatrix(m_reference, m_target * n, m_reference_atoms, m_target_atoms, m_costmatrix).first;
+
+            tmp[i] -= 2 * dx;
+            // std::cout << tmp.transpose() << std::endl;
+
+            n = Eigen::AngleAxisd(tmp[0], Eigen::Vector3d::UnitX())
+                * Eigen::AngleAxisd(tmp[1], Eigen::Vector3d::UnitY())
+                * Eigen::AngleAxisd(tmp[2], Eigen::Vector3d::UnitZ());
+
+            // rotated = tar.transpose() * n;
+
+            auto m = RMSDDriver::MakeCostMatrix(m_reference, m_target * n, m_reference_atoms, m_target_atoms, m_costmatrix).first;
+            // std::cout << p << " " << m << " " << (p-m)/(2*dx) << std::endl << std::endl;
+            grad[i] = (p - m) / (2 * dx);
+        }
+
+        return result.first;
+    }
+
+    Vector Parameter() const { return m_parameter; }
+
+    Geometry m_reference, m_target;
+    std::vector<int> m_reference_atoms, m_target_atoms;
+    int m_costmatrix;
+
+private:
+    Vector m_parameter;
 };

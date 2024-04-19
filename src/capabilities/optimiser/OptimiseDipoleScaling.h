@@ -113,16 +113,25 @@ inline std::pair<double, std::vector<double>> OptimiseScaling(const Molecule* mo
     // std::cout << parameter.transpose() << std::endl;
     double fx;
     int converged = solver.InitializeSingleSteps(fun, parameter, fx);
+    bool loop = true;
+    for (iteration = 1; iteration <= maxiter && fx > threshold && loop; ++iteration) {
+        try {
+            solver.SingleStep(fun, parameter, fx);
 
-    for (iteration = 1; iteration <= maxiter && fx > threshold; ++iteration) {
-        solver.SingleStep(fun, parameter, fx);
+        } catch (const std::logic_error& error_result) {
+            loop = false;
+        } catch (const std::runtime_error& error_result) {
+            loop = false;
+        }
         std::cout << "Iteration: " << iteration << " Difference: " << fx << std::endl;
     }
     std::vector<double> scaling(parameter.size());
-    for (int i = 0; i < scaling.size(); ++i)
+    for (int i = 0; i < scaling.size(); ++i) {
         scaling[i] = parameter(i);
+        std::cout << scaling[i] << " ";
+    }
     auto dipole_vector = molecule->CalculateDipoleMoment(scaling);
     dipole = sqrt(dipole_vector[0] * dipole_vector[0] + dipole_vector[1] * dipole_vector[1] + dipole_vector[2] * dipole_vector[2]);
-
+    std::cout << std::endl;
     return std::pair<double, std::vector<double>>(dipole, scaling);
 }
