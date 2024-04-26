@@ -18,6 +18,10 @@
  */
 #include "rmsd_functions.h"
 
+extern "C" {
+#include "src/capabilities/c_code/interface.h"
+}
+
 #include "munkres.h"
 
 #include "src/core/fileiterator.h"
@@ -817,6 +821,7 @@ void RMSDDriver::FinaliseTemplate()
         }
         prev_cost = permutation.first;
         auto result = SolveCostMatrix(permutation.second);
+
         m_target_reordered = ApplyOrder(result, target);
         double rmsd = Rules2RMSD(result);
         if (!m_silent)
@@ -1319,6 +1324,7 @@ std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const Matrix& rotation)
 std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const Geometry& reference, const Geometry& target /*, const std::vector<int> reference_atoms, const std::vector<int> target_atoms*/)
 {
     double penalty = 1e23;
+
     Eigen::MatrixXd distance = Eigen::MatrixXd::Zero(m_reference.AtomCount(), m_reference.AtomCount());
     double sum = 0;
     for (int i = 0; i < m_reference.AtomCount(); ++i) {
@@ -1388,25 +1394,48 @@ std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const Geometry& reference, 
 std::vector<int> RMSDDriver::SolveCostMatrix(Matrix& distance)
 {
     std::vector<int> new_order;
+    new_order.resize(distance.rows());
     double difference = distance.cwiseAbs().sum();
-    for (int iter = 0; iter < 10 && difference != 0; ++iter) {
-        auto result = MunkressAssign(distance);
-        new_order.clear();
-        for (int i = 0; i < result.cols(); ++i) {
-            for (int j = 0; j < result.rows(); ++j) {
-                if (result(i, j) == 1) {
-                    new_order.push_back(j);
-                    break;
+    int iter = 0;
+    for (iter = 0; iter < 10 && difference != 0; ++iter) {
+        bool use_c = false;
+        int dim = distance.rows();
+        if (use_c) {
+            double* table = new double[dim * dim];
+            for (int i = 0; i < dim; ++i) {
+                for (int j = 0; j < dim; ++j) {
+                    table[i * dim + j] = distance(i, j);
+                }
+            }
+            int* order = new int[dim];
+            assign(dim, table, order);
+            // new_order.clear();
+            // new_order.resize(dim);
+            for (int i = 0; i < dim; ++i)
+                new_order[i] = order[i];
+            delete (table);
+            delete (order);
+        } else {
+            auto result = MunkressAssign(distance);
+
+            // new_order.clear();
+            // new_order.resize(dim);
+
+            for (int i = 0; i < result.cols(); ++i) {
+                for (int j = 0; j < result.rows(); ++j) {
+                    if (result(i, j) == 1) {
+                        new_order[i] = j;
+                        break;
+                    }
                 }
             }
         }
         auto pair = MakeCostMatrix(new_order);
         difference = (distance - pair.second).cwiseAbs().sum();
-        // if (!m_silent)
-        //     std::cout << Rules2RMSD(new_order) << " -  " << difference << " : ";
-
         distance = pair.second;
     }
+    if (!m_silent)
+        std::cout << iter << std::endl;
     return new_order;
 }
 

@@ -167,6 +167,7 @@ set(curcuma_core_SRC
         src/core/forcefieldthread.cpp
         src/core/forcefield.cpp
         src/core/forcefieldfunctions.h
+        src/core/forcefieldgenerator.cpp
         #src/core/forcefield_terms/qmdff_terms.h
         src/tools/formats.h
         src/tools/geometry.h
@@ -174,11 +175,16 @@ set(curcuma_core_SRC
         )
     add_library(curcuma_core  ${curcuma_core_SRC})
 
-    add_executable(curcuma
-            src/main.cpp
-            src/core/forcefieldgenerator.h src/core/forcefieldgenerator.cpp
+    set(km_SRC
+    src/capabilities/c_code/hungarian.c
+    src/capabilities/c_code/interface.c
+)
+add_library(km ${km_SRC})
+target_link_libraries(curcuma_core km)
 
-            )
+add_executable(curcuma
+        src/main.cpp
+)
 
 if(C17)
     set_property(TARGET curcuma_core PROPERTY CXX_STANDARD 17)
