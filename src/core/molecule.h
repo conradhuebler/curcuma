@@ -126,6 +126,10 @@ class Molecule
     bool setGeometryByFragment(const Geometry& geometry, int fragment, bool protons = true);
 
     Position Centroid(bool hydrogen = true, int fragment = -1) const;
+
+    /*! \brief Method to calc the center of Mass
+     *
+     */
     Position MassCentroid(bool hydrogen = true, int fragment = -1) const;
     Eigen::Vector3d COM(bool hydrogen = true, int fragment = -1);
 
@@ -141,7 +145,7 @@ class Molecule
      */
     std::vector<int> Atoms() const { return m_atoms; }
 
-    /*! \brief Methode to get atom number from index
+    /*! \brief Methode to get atom number and XYZ from index
      *
      * @param i: index of the atom
      * @return pair of atom number and the xyz position
@@ -156,6 +160,9 @@ class Molecule
     void appendXYZFile(const std::string& filename) const;
     inline void appendXYZFile() const { appendXYZFile(Name() + ".xyz"); }
 
+    void appendDipoleFile(const std::string& filename) const;
+    inline void appendDipoleFile() const { appendDipoleFile(Name() + ".dip"); }
+
     std::string XYZString() const;
     std::string XYZString(const std::vector<int> &order) const;
 
@@ -167,7 +174,7 @@ class Molecule
     /*! \brief Methode to calculate the dipole moments of whole structure
      * unit of dipol is electron times angstron
      */
-    Position CalculateDipoleMoment(const std::vector<double>& scaling = std::vector<double>()) const;
+    Position CalculateDipoleMoment(const Vector& scaling = Vector()) const;
 
     std::vector<int> BoundHydrogens(int atom, double scaling = 1.5) const;
     std::map<int, std::vector<int>> getConnectivtiy(double scaling = 1.5, int latest = -1) const;
@@ -240,6 +247,9 @@ class Molecule
         return m_persistentImage;
     }
 
+    /*! Methode to translate the coord to the centroid
+     *
+     */
     void Center(bool mass = false);
 
     std::pair<Matrix, Matrix> DistanceMatrix() const;
@@ -249,6 +259,12 @@ class Molecule
     Matrix AlignmentAxes() const { return m_alignmentAxes; }
 
     void setPartialCharges(const std::vector<double>& charges) { m_charges = charges; }
+
+    inline std::vector<double> getPartialCharges() const { return m_charges; }
+
+    void setDipole(const Position& dipole) {m_dipole = dipole; }
+
+    inline Position getDipole() const { return m_dipole; }
 
     inline std::vector<std::pair<int, int>> Bonds() const { return m_bonds; }
 
@@ -271,6 +287,7 @@ private:
     void InitialiseEmptyGeometry(int atoms);
 
     int m_charge = 0, m_spin = 0;
+    Position m_dipole;
     Geometry m_geometry;
     std::vector<int> m_atoms;
     std::vector<double> m_charges;

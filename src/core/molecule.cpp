@@ -869,7 +869,7 @@ Position Molecule::MassCentroid(bool protons, int fragment) const
     Position pos = { 0, 0, 0 };
     double mass = 0.0;
     for (int i = 0; i < m_atoms.size(); ++i) {
-        pos += Atom(i).second;
+        pos += Elements::AtomicMass[Atom(i).first] * Atom(i).second;
         mass += Elements::AtomicMass[Atom(i).first];
     }
     pos /= mass;
@@ -902,7 +902,7 @@ std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>
         std::cout << "No partial charges available" << std::endl;
         return dipole_moments;
     }
-    //calc center od mass and dipole for every fragment
+    //calc center of mass and dipole for every fragment
     for (int f = 0; f < GetFragments().size(); ++f) {
         Position pos = { 0, 0, 0 }, dipole = { 0, 0, 0 };
         double mass = 0;
@@ -933,7 +933,7 @@ std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>
     return dipole_moments;
 }
 
-Position Molecule::CalculateDipoleMoment(const std::vector<double>& scaling) const
+Position Molecule::CalculateDipoleMoment(const Vector& scaling) const
 {   //dec and init
     double mass = 0;
 
@@ -943,16 +943,8 @@ Position Molecule::CalculateDipoleMoment(const std::vector<double>& scaling) con
         return dipole;
     }
     //calc center of mass
-    for (int i = 0; i < m_geometry.rows(); ++i) {
-        double m = Elements::AtomicMass[m_atoms[i]];
-        mass += m;
-        pos(0) += m * m_geometry(i, 0);
-        pos(1) += m * m_geometry(i, 1);
-        pos(2) += m * m_geometry(i, 2);
-    }
-    pos(0) /= mass;
-    pos(1) /= mass;
-    pos(2) /= mass;
+    pos = MassCentroid();
+
     //calc of the dipole moment with scalar
     for (int i = 0; i < m_geometry.rows(); ++i) {
         double scale = 1;
@@ -1071,6 +1063,21 @@ void Molecule::appendXYZFile(const std::string& filename) const
     output += Header();
     for (int i = 0; i < AtomCount(); ++i) {
         output += Atom2String(i);
+    }
+    std::ofstream input;
+    input.open(filename, std::ios_base::app);
+    //std::cout << output << std::endl;
+    input << output;
+    input.close();
+}
+
+void Molecule::appendDipoleFile(const std::string& filename) const
+{
+    std::string output;
+    output += fmt::format("{}\n", AtomCount());
+    output += "Dipole: " + fmt::format("{:f} {:f} {:f}\n", m_dipole[0], m_dipole[1], m_dipole[2]);
+    for (int i = 0; i < AtomCount(); ++i) {
+        output += fmt::format("{}  {:f}    {:f}    {:f}    {:f}\n", Elements::ElementAbbr[m_atoms[i]].c_str(), m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2), m_charges[i]);
     }
     std::ofstream input;
     input.open(filename, std::ios_base::app);
