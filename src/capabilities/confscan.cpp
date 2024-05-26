@@ -110,6 +110,7 @@ int ConfScanThread::execute()
 
         m_reorder_rule = m_driver->ReorderRules();
     }
+    std::cout << m_rmsd << " ";
     m_driver->clear();
     return 0;
 }
@@ -225,7 +226,9 @@ void ConfScan::LoadControlJson()
     m_useorders = Json2KeyWord<int>(m_defaults, "UseOrders");
     m_MaxHTopoDiff = Json2KeyWord<int>(m_defaults, "MaxHTopoDiff");
     m_threads = m_defaults["threads"].get<int>();
-    m_RMSDmethod = Json2KeyWord<std::string>(m_defaults, "RMSDMethod");
+    m_RMSDmethod = Json2KeyWord<std::string>(m_defaults, "method");
+    fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nPermutation of atomic indices performed according to {0} \n\n", m_RMSDmethod);
+
     if (m_RMSDmethod == "molalign") {
         fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nPlease cite the follow research report!\nJ. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187\n\n");
         m_domolalign = -1;
@@ -853,7 +856,7 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
     std::string laststring;
     m_maxmol = m_ordered_list.size();
 
-    json rmsd = RMSDJson;
+    json rmsd = m_controller;
     rmsd["silent"] = true;
     rmsd["check"] = CheckConnections();
     rmsd["heavy"] = m_heavy;
@@ -1031,19 +1034,10 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
 
     m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_reused = 0;
 
-    json rmsd = RMSDJson;
+    json rmsd = m_controller;
     rmsd["silent"] = true;
     rmsd["reorder"] = true;
-    rmsd["check"] = CheckConnections();
-    rmsd["heavy"] = m_heavy;
-    rmsd["method"] = m_RMSDmethod;
-    rmsd["element"] = m_rmsd_element_templates;
-    rmsd["update-rotation"] = m_update_rotation;
-    rmsd["damping"] = m_damping;
-    rmsd["nomunkres"] = m_nomunkres;
-    rmsd["molalignbin"] = m_molalign;
-    rmsd["molaligntol"] = m_molaligntol;
-    rmsd["cycles"] = m_cycles;
+    rmsd["threads"] = 1;
     std::vector<Molecule*> cached;
     if (reset)
         cached = m_all_structures;

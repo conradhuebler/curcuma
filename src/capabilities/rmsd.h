@@ -90,12 +90,10 @@ static const json RMSDJson = {
     { "check", false },
     { "topo", 0 },
     { "write", 0 },
-    { "moi", false },
     { "update-rotation", false },
     { "damping", 0.8 },
     { "split", false },
     { "nomunkres", false },
-    { "dmix", -1 },
     { "molalignbin", "molalign" },
     { "molaligntol", 10 },
     { "cycles", -1 },
@@ -304,14 +302,14 @@ private:
 
     Molecule m_reference, m_target, m_target_original, m_reference_aligned, m_target_aligned, m_target_reordered, m_reorder_reference, m_reorder_target, m_reference_centered, m_target_centered;
     Geometry m_reorder_reference_geometry;
-    bool m_force_reorder = false, m_protons = true, m_print_intermediate = false, m_silent = false, m_moi = false;
+    bool m_force_reorder = false, m_protons = true, m_print_intermediate = false, m_silent = false;
     std::vector<std::vector<int>> m_intermediate_results;
     std::map<double, std::vector<int>> m_results, m_intermediate_cost_matrices;
     std::vector<double> m_last_rmsd;
     std::vector<int> m_reorder_rules;
     std::vector<std::vector<int>> m_stored_rules, m_intermedia_rules;
     std::vector<double> m_tmp_rmsd;
-    double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99, m_damping = 0.8, m_dmix = -1;
+    double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99, m_damping = 0.8;
     bool m_check = false;
     bool m_check_connections = false, m_postprocess = true, m_noreorder = false, m_swap = false, m_dynamic_center = false;
     bool m_update_rotation = false, m_split = false, m_nofree = false;

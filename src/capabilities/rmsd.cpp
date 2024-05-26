@@ -173,11 +173,9 @@ void RMSDDriver::LoadControlJson()
     m_topo = Json2KeyWord<int>(m_defaults, "topo");
     m_write = Json2KeyWord<int>(m_defaults, "write");
     m_noreorder = Json2KeyWord<bool>(m_defaults, "noreorder");
-    m_moi = Json2KeyWord<bool>(m_defaults, "moi");
     m_update_rotation = Json2KeyWord<bool>(m_defaults, "update-rotation");
     m_split = Json2KeyWord<bool>(m_defaults, "split");
     m_nofree = Json2KeyWord<bool>(m_defaults, "nofree");
-    m_dmix = Json2KeyWord<double>(m_defaults, "dmix");
     m_maxtrial = Json2KeyWord<int>(m_defaults, "maxtrial");
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
@@ -222,7 +220,9 @@ void RMSDDriver::LoadControlJson()
         m_limit = Json2KeyWord<int>(m_defaults, "limit");
     } else
         m_method = 1;
-
+    if (!m_silent) {
+        fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nPermutation of atomic indices performed according to {0} \n\n", m_method);
+    }
     m_costmatrix = Json2KeyWord<int>(m_defaults, "costmatrix");
     std::string order = Json2KeyWord<std::string>(m_defaults, "order");
     int cycles = Json2KeyWord<int>(m_defaults, "cycles");
@@ -277,10 +277,6 @@ void RMSDDriver::start()
     if (m_reference.Atoms() != m_target.Atoms() || m_force_reorder) {
         if (!m_noreorder) {
             ReorderMolecule();
-            m_reorder_rules = m_results.begin()->second;
-            m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
-            m_target = m_target_reordered;
-            m_rmsd = m_results.begin()->first;
             // std::cout << m_rmsd << std::endl;
             rmsd_calculated = true;
         }
@@ -315,6 +311,8 @@ void RMSDDriver::start()
         std::cout << std::endl
                   << "RMSD calculation took " << timer.Elapsed() << " msecs." << std::endl;
         std::cout << "Difference in Topological Hydrogen Bond Matrix is " << m_htopo_diff << std::endl;
+        std::cout << std::endl
+                  << std::endl;
         CheckTopology();
     }
     if (m_swap) {
@@ -504,7 +502,8 @@ void RMSDDriver::ReorderIncremental()
     }
     // m_reorder_rules = m_results.begin()->second;
     if (m_stored_rules.size() == 0) {
-        std::cout << "No new solution found, sorry" << std::endl;
+        if (!m_silent)
+            std::cout << "No new solution found, sorry" << std::endl;
         for (int i = 0; i < m_reference.AtomCount(); ++i)
             m_reorder_rules.push_back(i);
     } else {
@@ -778,7 +777,8 @@ void RMSDDriver::ReorderMolecule()
 
     if (m_method == 4)
         blob.first = 1;
-    InsertRotation(blob);
+    if (m_method != 6)
+        InsertRotation(blob);
     if (m_method == 1)
         ReorderIncremental();
     else if (m_method == 2)
@@ -791,15 +791,29 @@ void RMSDDriver::ReorderMolecule()
         TemplateFree();
     else if (m_method == 6) {
         if (!MolAlignLib()) {
+            InsertRotation(blob);
+            FinaliseTemplate();
+
+            m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
+            m_target_aligned = m_target;
+            m_reorder_rules = m_results.begin()->second;
+            m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
+            m_target = m_target_reordered;
+            m_rmsd = m_results.begin()->first;
             return;
         }
     } else if (m_method == 7)
         DistanceTemplate();
+    if (m_method != 6) {
+        FinaliseTemplate();
 
-    FinaliseTemplate();
-
-    m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
-    m_target_aligned = m_target;
+        m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
+        m_target_aligned = m_target;
+        m_reorder_rules = m_results.begin()->second;
+        m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
+        m_target = m_target_reordered;
+        m_rmsd = m_results.begin()->first;
+    }
 }
 
 void RMSDDriver::FinaliseTemplate()
@@ -816,7 +830,6 @@ void RMSDDriver::FinaliseTemplate()
         if (eq_counter > m_maxtrial || incr_counter > m_maxtrial || iter > m_maxtrial)
             break;
         if (prev_cost != -1 && prev_cost < permutation.first / 10) {
-            std::cout << permutation.first << std::endl;
             break;
         }
         prev_cost = permutation.first;
@@ -1409,18 +1422,12 @@ std::vector<int> RMSDDriver::SolveCostMatrix(Matrix& distance)
             }
             int* order = new int[dim];
             assign(dim, table, order);
-            // new_order.clear();
-            // new_order.resize(dim);
             for (int i = 0; i < dim; ++i)
                 new_order[i] = order[i];
             delete (table);
             delete (order);
         } else {
             auto result = MunkressAssign(distance);
-
-            // new_order.clear();
-            // new_order.resize(dim);
-
             for (int i = 0; i < result.cols(); ++i) {
                 for (int j = 0; j < result.rows(); ++j) {
                     if (result(i, j) == 1) {
@@ -1510,7 +1517,7 @@ bool RMSDDriver::MolAlignLib()
     m_target.writeXYZFile("molalign_tar.xyz");
 
     FILE* FileOpen;
-    std::string command = m_molalign + " molaign_ref.xyz " + " molalign_tar.xyz -sort -fast -tol " + std::to_string(m_molaligntol) + " 2>&1";
+    std::string command = m_molalign + " molaign_ref.xyz " + " molalign_tar.xyz -remap -fast -tol " + std::to_string(m_molaligntol) + " 2>&1";
     if (!m_silent)
         std::cout << command << std::endl;
     FileOpen = popen(command.c_str(), "r");
@@ -1523,7 +1530,7 @@ bool RMSDDriver::MolAlignLib()
         //  ok = std::string(line).find("RMSD") != std::string::npos;
         rndm = std::string(line).find("random") != std::string::npos;
         error = std::string(line).find("Error") != std::string::npos;
-        // printf("%s", line);
+        printf("%s", line);
     }
     pclose(FileOpen);
 
@@ -1532,11 +1539,12 @@ bool RMSDDriver::MolAlignLib()
             fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nPlease cite the follow research report!\nJ. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187\n\n");
         }
         FileIterator file("aligned.xyz", true);
-        file.Next();
+        m_reference_centered = file.Next();
         m_target_reordered = file.Next();
         m_target_aligned = m_target_reordered;
         m_target = m_target_reordered;
-        // std::filesystem::remove("aligned.xyz");
+        m_rmsd = CalculateRMSD();
+        std::filesystem::remove("aligned.xyz");
     } else {
         if (!rndm && !error) {
             fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Molalign was not found. Consider getting it from\nhttps://github.com/qcuaeh/molalignlib\nEither adding the location of the binary to the path for executables or append\n-molalignbin /yourpath/molalign\nto your argument list!\n");
