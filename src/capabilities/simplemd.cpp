@@ -42,6 +42,14 @@
 
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
 
+#ifdef Plumed
+    #include "plumed2/src/wrapper/Plumed.h"
+    extern int    plumedswitch;
+    extern plumed plumedmain;
+
+    extern int plumed_hrex;
+#endif
+
 #include "simplemd.h"
 
 SimpleMD::SimpleMD(const json& controller, bool silent)

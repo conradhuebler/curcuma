@@ -22,3 +22,6 @@
 [submodule "external/simple-dftd3"]
 	path = external/simple-dftd3
 	url = https://github.com/dftd3/simple-dftd3
+[submodule "external/plumed2"]
+	path = external/plumed2
+	url = https://github.com/plumed/plumed2

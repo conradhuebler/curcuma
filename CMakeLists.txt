@@ -22,6 +22,9 @@ option (Helper
 option (WriteMoreInfo
     "Write statistic files with more info" OFF)
 
+option (Plumed
+    "Enable interface to plumed for metadynamics")
+
 add_subdirectory(${PROJECT_SOURCE_DIR}/external/fmt EXCLUDE_FROM_ALL)
 
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
@@ -38,6 +41,10 @@ include_directories(SYSTEM  ${PROJECT_SOURCE_DIR}/external/fmt/include
                             ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0
                             ${PROJECT_SOURCE_DIR}/external/cpp-d4/include
                             ${PROJECT_SOURCE_DIR}/external/)
+if(Plumed)
+    include(${PROJECT_SOURCE_DIR}/external/plumed2/src/lib/Plumed.cmake)
+endif()
+
 include_directories(${PROJECT_SOURCE_DIR} ${PROJECT_BINARY_DIR} )
 
 # Get the current working branch
@@ -334,6 +341,11 @@ if(USE_D4)
 	    target_link_libraries(curcuma_d4 PUBLIC libcpp_d4 ${LAPACKE_LIBRARIES}  ${CBLAS_LIBRARIES} )
     endif(DEFINED D4LIBS_DIR AND DEFINED D4INCLUDE_DIR)
     target_link_libraries(curcuma_core curcuma_d4)
+endif()
+
+if(Plumed)
+   # target_link_libraries(curcuma_core ${Plumed_LIBRARIES})
+   target_link_libraries(curcuma_core ${PLUMED_LOAD})
 endif()
 
 target_link_libraries(curcuma_core pthread fmt::fmt-header-only )
