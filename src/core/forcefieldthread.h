@@ -168,18 +168,24 @@ public:
     ~D3Thread();
     void setParamater(const json& parameter)
     {
+#ifdef USE_D3
         m_d3->UpdateParametersD3(parameter);
+#endif
     }
 
     void Initialise(const std::vector<int>& atom_types)
     {
         m_atom_types = atom_types;
+#ifdef USE_D3
         m_d3->InitialiseMolecule(m_atom_types);
+#endif
     }
     virtual int execute() override;
 
 private:
+#ifdef USE_D3
     DFTD3Interface* m_d3;
+#endif
     std::vector<int> m_atom_types;
 };
 

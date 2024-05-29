@@ -20,8 +20,9 @@
 #pragma once
 
 #include "src/tools/general.h"
-
+#ifdef USE_D3
 #include "s-dftd3.h"
+#endif
 
 #include "src/core/molecule.h"
 
@@ -85,8 +86,11 @@ private:
 
     double m_bet = 8;
     bool m_atm = false;
+
+#ifdef USE_D3
     dftd3_error m_error;
     dftd3_structure m_mol;
     dftd3_model m_disp;
     dftd3_param m_param;
+#endif
 };
