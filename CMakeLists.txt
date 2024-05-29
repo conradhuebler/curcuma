@@ -22,7 +22,7 @@ option (Helper
 option (WriteMoreInfo
     "Write statistic files with more info" OFF)
 
-option (Plumed
+option (USE_Plumed
     "Enable interface to plumed for metadynamics")
 
 add_subdirectory(${PROJECT_SOURCE_DIR}/external/fmt EXCLUDE_FROM_ALL)
@@ -98,22 +98,22 @@ if (OPENMP_FOUND)
 endif()
 
 IF(CMAKE_COMPILER_IS_GNUCXX)
-    SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wno-reorder -pedantic \
-                                           -Wextra -Wcast-align -Wcast-qual  -Wchar-subscripts  \
-                                           -Wcomment -Wdisabled-optimization \
-                                           -Wformat  -Wformat=2 -Wformat-nonliteral -Wformat-security\
-                                           -Wformat-y2k  -Wimport  -Winit-self  -Winline -Winvalid-pch\
-                                           -Wunsafe-loop-optimizations  -Wno-missing-braces\
-                                           -Wmissing-field-initializers -Wmissing-format-attribute  \
-                                           -Wmissing-include-dirs -Wmissing-noreturn -Wpacked  -Wparentheses\
-                                           -Wpointer-arith -Wno-redundant-decls -Wsequence-point\
-                                           -Wsign-compare  -Wstack-protector -Wstrict-aliasing\
-                                           -Wstrict-aliasing=2 -Wswitch -Wsuggest-override\
-                                           -Wtrigraphs  -Wuninitialized -Wunknown-pragmas  -Wunreachable-code\
-                                           -Wunused -Wunused-function  -Wunused-label  -Wunused-parameter\
-                                           -Wunused-value  -Wunused-variable  -Wvariadic-macros\
-                                           -Wvolatile-register-var  -Wwrite-strings -Wdeprecated-declarations\
-                                           -Wno-error=unused-local-typedefs -Wno-error=enum-compare -Wno-narrowing -Werror=return-type -Wno-sign-compare -g")
+ #   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wno-reorder -pedantic \
+ #                                          -Wextra -Wcast-align -Wcast-qual  -Wchar-subscripts  \
+ #                                          -Wcomment -Wdisabled-optimization \
+ #                                          -Wformat  -Wformat=2 -Wformat-nonliteral -Wformat-security\
+ #                                          -Wformat-y2k  -Wimport  -Winit-self  -Winline -Winvalid-pch\
+ #                                          -Wunsafe-loop-optimizations  -Wno-missing-braces\
+ #                                          -Wmissing-field-initializers -Wmissing-format-attribute  \
+ #                                          -Wmissing-include-dirs -Wmissing-noreturn -Wpacked  -Wparentheses\
+ #                                          -Wpointer-arith -Wno-redundant-decls -Wsequence-point\
+ #                                          -Wsign-compare  -Wstack-protector -Wstrict-aliasing\
+ #                                          -Wstrict-aliasing=2 -Wswitch -Wsuggest-override\
+ #                                          -Wtrigraphs  -Wuninitialized -Wunknown-pragmas  -Wunreachable-code\
+ #                                          -Wunused -Wunused-function  -Wunused-label  -Wunused-parameter\
+ #                                          -Wunused-value  -Wunused-variable  -Wvariadic-macros\
+ #                                          -Wvolatile-register-var  -Wwrite-strings -Wdeprecated-declarations\
+ #                                          -Wno-error=unused-local-typedefs -Wno-error=enum-compare -Wno-narrowing -Werror=return-type -Wno-sign-compare -g")
 set (GCC ON)
 if(WIN32) # Check if we are on Windows
 else()
@@ -343,9 +343,11 @@ if(USE_D4)
     target_link_libraries(curcuma_core curcuma_d4)
 endif()
 
-if(Plumed)
+if(USE_Plumed)
    # target_link_libraries(curcuma_core ${Plumed_LIBRARIES})
-   target_link_libraries(curcuma_core ${PLUMED_LOAD})
+   # target_link_libraries(curcuma_core ${PLUMED_LOAD})
+   target_link_libraries(curcuma_core ${PROJECT_SOURCE_DIR}/external/plumed2/src/lib/libplumed.so)
+   #link_directories(${PROJECT_SOURCE_DIR}/external/plumed2/src/lib/libplumedKernel)
 endif()
 
 target_link_libraries(curcuma_core pthread fmt::fmt-header-only )

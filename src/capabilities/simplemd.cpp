@@ -42,14 +42,9 @@
 
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
 
-#ifdef Plumed
-    #include "plumed2/src/wrapper/Plumed.h"
-    extern int    plumedswitch;
-    extern plumed plumedmain;
-
-    extern int plumed_hrex;
+#ifdef USE_Plumed
+#include "plumed2/src/wrapper/Plumed.h"
 #endif
-
 #include "simplemd.h"
 
 SimpleMD::SimpleMD(const json& controller, bool silent)
@@ -589,6 +584,25 @@ void SimpleMD::start()
         std::cout << "No Thermostat applied\n"
                   << std::endl;
     }
+#ifdef USE_Plumed
+    plumed plumedmain;
+    plumedmain = plumed_create();
+    int real_precision = 8;
+    double energyUnits = 2625.5;
+    double lengthUnits = 100;
+    double timeUnits = 1e-3;
+    plumed_cmd(plumedmain, "setRealPrecision", &real_precision); // Pass a pointer to an integer containing the size of a real number (4 or 8)
+    plumed_cmd(plumedmain, "setMDEnergyUnits", &energyUnits); // Pass a pointer to the conversion factor between the energy unit used in your code and kJ mol-1
+    plumed_cmd(plumedmain, "setMDLengthUnits", &lengthUnits); // Pass a pointer to the conversion factor between the length unit used in your code and nm
+    plumed_cmd(plumedmain, "setMDTimeUnits", &timeUnits); // Pass a pointer to the conversion factor between the time unit used in your code and ps
+    plumed_cmd(plumedmain, "setNatoms", &m_natoms); // Pass a pointer to the number of atoms in the system to plumed
+    plumed_cmd(plumedmain, "setMDEngine", "curcuma");
+    plumed_cmd(plumedmain, "setTimestep", &m_dT); // Pass a pointer to the molecular dynamics timestep to plumed                       // Pass the name of your md engine to plumed (now it is just a label)
+    plumed_cmd(plumedmain, "setKbT", &kb_Eh);
+    plumed_cmd(plumedmain, "init", NULL);
+
+    plumed_cmd(plumedmain, "readInputLine", "DUMPATOMS ATOMS=1-231 FILE=test.xyz"); // Read a single input line directly from a string                                  // Pointer to a real containing the value of kbT
+#endif
 
 #ifdef GCC
     //         std::cout << fmt::format("{0: ^{0}} {1: ^{1}} {2: ^{2}} {3: ^{3}} {4: ^{4}}\n", "Step", "Epot", "Ekin", "Etot", "T");
@@ -669,6 +683,15 @@ void SimpleMD::start()
         }
         WallPotential(gradient);
         Integrator(coord, gradient);
+#ifdef USE_Plumed
+        plumed_cmd(plumedmain, "setStep", &m_currentStep);
+        plumed_cmd(plumedmain, "setPositions", &m_current_geometry[0]);
+        plumed_cmd(plumedmain, "setEnergy", &m_Epot); // Pass a pointer to the current value of the potential energy to plumed?
+        plumed_cmd(plumedmain, "setForces", &m_gradient[0]);
+        plumed_cmd(plumedmain, "setMasses", &m_mass[0]); // Pass a pointer to the first element in the masses array to plumed
+        plumed_cmd(plumedmain, "calc", NULL);
+        plumed_cmd(plumedmain, "update", NULL); // Calculate and apply forces from the biases defined in the plumed input                    // Pass a pointer to the first element in the foces array to plumed                                                              // Pass a pointer to the first element in the atomic positions array to plumed                                                       // Pass a pointer to the current timestep to plumed
+#endif
 
         if (m_unstable || m_interface->Error() || m_interface->HasNan()) {
             PrintStatus();
@@ -721,6 +744,9 @@ void SimpleMD::start()
         std::cout << "Calculated averaged dipole moment " << m_aver_dipol * 2.5418 << " Debye and " << m_aver_dipol * 2.5418 * 3.3356 << " Cm [e-30]" << std::endl;
     }
 
+#ifdef USE_Plumed
+    plumed_finalize(plumedmain); // Call the plumed destructor
+#endif
     std::ofstream restart_file("curcuma_final.json");
     restart_file << WriteRestartInformation() << std::endl;
     std::remove("curcuma_restart.json");
