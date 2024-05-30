@@ -176,6 +176,8 @@ class Molecule
      */
     Position CalculateDipoleMoment(const Vector& scaling = Vector()) const;
 
+    Geometry ChargeDistribution() const;
+
     std::vector<int> BoundHydrogens(int atom, double scaling = 1.5) const;
     std::map<int, std::vector<int>> getConnectivtiy(double scaling = 1.5, int latest = -1) const;
 
@@ -267,6 +269,7 @@ class Molecule
     inline Position getDipole() const { return m_dipole; }
 
     inline std::vector<std::pair<int, int>> Bonds() const { return m_bonds; }
+
 
 private:
     void ParseString(const std::string& internal, std::vector<std::string>& elements);

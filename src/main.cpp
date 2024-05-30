@@ -943,17 +943,17 @@ int main(int argc, char **argv) {
             std::vector<Molecule> conformers;
             Molecule mol;
             while (!file.AtEnd()) { // calculation and output dipole moment
-                Molecule mol = file.Next();  // load Molecule
-                mol.Center(true);
+                mol = file.Next();  // load Molecule
+                mol.Center(false);
                 EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb and give
                 interface.setMolecule(mol);  // set molecule for calc
                 interface.CalculateEnergy(false, true); //calc energy and charges and dipole moment
                 mol.setPartialCharges(interface.Charges()); // calc Partial Charges and give it to mol
                 auto charges = interface.Charges();  //dec and init charges
-                mol.setDipole(interface.Dipole());
-                auto dipole_moment = interface.Dipole(); // get dipole moment from gfn2-xtb methode
+                mol.setDipole(interface.Dipole()*au);
+                auto dipole_moment = interface.Dipole()*au; // get dipole moment from gfn2-xtb methode in au
 
-                std::cout << mol.AtomCount() << "\n"
+                /*std::cout << mol.AtomCount() << "\n"
                           << "Dipole  "
                           << dipole_moment[0]  << " "
                           << dipole_moment[1]  << " "
@@ -967,14 +967,11 @@ int main(int argc, char **argv) {
                     std::cout << "   ";
                     std::cout << charges[i] << "\n";
                 }
-                std::cout << std::endl;
+                std::cout << std::endl;*/
+
 
                 conformers.push_back(mol);
-
-
-
-
-                //mol.appendDipoleFile(file.Basename() + ".dip");
+                mol.appendDipoleFile(file.Basename() + ".dip");
 
 
                 /*if (!target_set) { // calc target if not set
@@ -992,15 +989,16 @@ int main(int argc, char **argv) {
                               << "Dipole moment for single molecule [eA]: " << dipole.norm() << "\n"
                               << dipole[0] << ", " << dipole[1] << ", " << dipole[2] << "\n"
                               << std::endl;
-                }
-                auto dipole = mol.CalculateDipoleMoment();//calc Dipole for whole system with partial charges
+                }*/
+                /*auto dipole = mol.CalculateDipoleMoment();//calc Dipole for whole system with partial charges
                 std::cout << std::endl
                           << "Dipole moment for whole structure [eA]: " << dipole.norm() << "\n"
                           << dipole[0] << ", " << dipole[1] << ", " << dipole[2] << "\n"
                           << std::endl;
                 std::cout << std::endl;
+                 */
 
-
+                /*
                 auto result = OptimiseDipoleScaling(&conformers, initial);
                 std::cout << "Final dipole moment [eA]: " << result.first.norm() << "\n"
                           << result.first[0] << ", " << result.first[1] << ", " << result.first[2] << std::endl;
@@ -1020,8 +1018,17 @@ int main(int argc, char **argv) {
                 std::cout << std::endl;
                 std::cout << "mean of scalar: " << sum / mol.AtomCount();*/
             }
-            Vector scaling = Vector::Zero(mol.AtomCount());
-            OptimiseDipoleScaling(conformers, scaling);
+            Vector scaling(mol.AtomCount());
+            for (int i = 0; i < mol.AtomCount(); ++i) {
+                scaling(i) = 1;
+            }
+            auto result = OptimiseDipoleScaling(conformers, scaling);
+            std::cout << "LM-Scaler:\n" << result << "\n" << std::endl;
+
+            Matrix Theta(mol.AtomCount(),1);
+            Theta = DipoleScalingCalculation(conformers);
+            std::cout << "Analytic-Scaler:\n" << Theta << "\n" << std::endl;
+
 
         } else {
             bool centered = false;

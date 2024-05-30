@@ -52,6 +52,8 @@ Molecule::Molecule(const Molecule& other)
 {
     m_geometry = other.m_geometry;
     m_charge = other.m_charge;
+    m_charges = other.m_charges;
+    m_dipole = other.m_dipole;
     m_fragments = other.m_fragments;
     m_atoms = other.m_atoms;
     m_name = other.m_name;
@@ -76,6 +78,8 @@ Molecule::Molecule(const Molecule* other)
 {
     m_geometry = other->m_geometry;
     m_charge = other->m_charge;
+    m_charges = other->m_charges;
+    m_dipole = other->m_dipole;
     m_fragments = other->m_fragments;
     m_atoms = other->m_atoms;
     m_name = other->m_name;
@@ -1465,4 +1469,19 @@ std::vector<double> Molecule::GetBox() const
     box.push_back(y_max - y_min);
     box.push_back(z_max - z_min);
     return box;
+}
+
+Geometry Molecule::ChargeDistribution() const
+{
+    Geometry point_charge(m_geometry.rows(),3);
+    if (m_charges.size() != m_geometry.rows()) {
+        std::cerr << "No partial charges available" << std::endl;
+        return point_charge.setZero(m_geometry.rows(),3);
+    }
+    for (int i = 0; i < m_charges.size(); ++i) {
+        point_charge(i,0) = m_geometry(i,0) * m_charges[i];
+        point_charge(i,1) = m_geometry(i,1) * m_charges[i];
+        point_charge(i,2) = m_geometry(i,2) * m_charges[i];
+    }
+    return point_charge;
 }

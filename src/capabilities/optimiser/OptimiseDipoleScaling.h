@@ -67,12 +67,13 @@ struct OptDipoleFunctor : TFunctor<double> {
         , no_points(values)
     {
     }
-    inline ~OptDipoleFunctor() {}
+    inline ~OptDipoleFunctor() = default;
     inline int operator()(const Vector& scaling, Eigen::VectorXd& fvec) const
     {
         for (int i = 0; i < m_conformers.size(); ++i ){
             auto conf = m_conformers.at(i);
             fvec(i) = (conf.getDipole() - conf.CalculateDipoleMoment(scaling)).norm() ;
+
         }
 
         return 0;
@@ -120,4 +121,40 @@ inline Vector OptimiseDipoleScaling(const std::vector<Molecule>& conformers, Vec
     }
 
     return scaling;
+}
+
+
+inline Matrix DipoleScalingCalculation(const std::vector<Molecule>& conformers){
+    std::vector<Position> y;
+    std::vector<Geometry> F;
+    auto para_size = conformers[0].AtomCount();
+    auto conformer_size = conformers.size();
+    Matrix FTF(para_size, para_size);
+    Vector FTy(para_size);
+    for (const auto & conformer : conformers) {
+        y.push_back(conformer.getDipole());//TODO Einheit überprüfen
+        F.push_back(conformer.ChargeDistribution());
+    }
+
+    for (int i = 0; i < para_size; ++i){
+        for (int j = 0; j < para_size; ++j){
+            for (auto & k : F)
+                FTF(i, j) += k(i, 0) * k(j, 0) + k(i, 1) * k(j, 1) + k(i, 2) * k(j, 2);
+        }
+    }
+
+    for (int j = 0; j < para_size; ++j) {
+        for (int i = 0; i < conformer_size; ++i){
+            FTy(j) += y[i](0) * F[i](j, 0) + y[i](1) * F[i](j, 1) + y[i](2) * F[i](j, 2);
+        }
+    }
+
+
+    Matrix Theta(para_size,1);
+
+    Theta = FTF.inverse() * FTy;
+    
+
+    //inv(F.t@F)@(F.t@y);
+    return Theta;
 }
