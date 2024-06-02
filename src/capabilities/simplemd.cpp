@@ -94,6 +94,7 @@ void SimpleMD::LoadControlJson()
 
     m_writeXYZ = Json2KeyWord<bool>(m_defaults, "writeXYZ");
     m_writeinit = Json2KeyWord<bool>(m_defaults, "writeinit");
+    m_mtd = Json2KeyWord<bool>(m_defaults, "mtd");
     m_initfile = Json2KeyWord<std::string>(m_defaults, "initfile");
     m_norestart = Json2KeyWord<bool>(m_defaults, "norestart");
     m_dt2 = m_dT * m_dT;
@@ -101,27 +102,27 @@ void SimpleMD::LoadControlJson()
     int rattle = Json2KeyWord<int>(m_defaults, "rattle");
     m_rattle_maxiter = Json2KeyWord<int>(m_defaults, "rattle_maxiter");
     if (rattle == 1) {
-        Integrator = [=](double* coord, double* grad) {
-            this->Rattle(coord, grad);
+        Integrator = [=](double* grad) {
+            this->Rattle(grad);
         };
         m_rattle_tolerance = Json2KeyWord<double>(m_defaults, "rattle_tolerance");
         m_coupling = m_dT;
         m_rattle = Json2KeyWord<int>(m_defaults, "rattle");
         std::cout << "Using rattle to constrain bonds!" << std::endl;
     } else {
-        Integrator = [=](double* coord, double* grad) {
-            this->Verlet(coord, grad);
+        Integrator = [=](double* grad) {
+            this->Verlet(grad);
         };
     }
 
     if (Json2KeyWord<bool>(m_defaults, "cleanenergy")) {
-        Energy = [=](double* coord, double* grad) -> double {
-            return this->CleanEnergy(coord, grad);
+        Energy = [=](double* grad) -> double {
+            return this->CleanEnergy(grad);
         };
         std::cout << "Energy Calculator will be set up for each step! Single steps are slower, but more reliable. Recommended for the combination of GFN2 and solvation." << std::endl;
     } else {
-        Energy = [=](double* coord, double* grad) -> double {
-            return this->FastEnergy(coord, grad);
+        Energy = [=](double* grad) -> double {
+            return this->FastEnergy(grad);
         };
         std::cout << "Energy Calculator will NOT be set up for each step! Fast energy calculation! This is the default way and should not be changed unless the energy and gradient calculation are unstable (happens with GFN2 and solvation)." << std::endl;
     }
@@ -429,6 +430,8 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["impuls_scaling"] = m_impuls_scaling;
     restart["respa"] = m_respa;
     restart["rm_COM"] = m_rm_COM;
+    restart["mtd"] = m_mtd;
+
     return restart;
 };
 
@@ -566,11 +569,11 @@ void SimpleMD::start()
         return;
     auto unix_timestamp = std::chrono::seconds(std::time(NULL));
     m_unix_started = std::chrono::milliseconds(unix_timestamp).count();
-    double* coord = new double[3 * m_natoms];
+    // double* coord = new double[3 * m_natoms];
     double* gradient = new double[3 * m_natoms];
     std::vector<json> states;
     for (int i = 0; i < 3 * m_natoms; ++i) {
-        coord[i] = m_current_geometry[i];
+        // coord[i] = m_current_geometry[i];
         gradient[i] = 0;
     }
 
@@ -586,22 +589,30 @@ void SimpleMD::start()
     }
 #ifdef USE_Plumed
     plumed plumedmain;
-    plumedmain = plumed_create();
-    int real_precision = 8;
-    double energyUnits = 2625.5;
-    double lengthUnits = 100;
-    double timeUnits = 1e-3;
-    plumed_cmd(plumedmain, "setRealPrecision", &real_precision); // Pass a pointer to an integer containing the size of a real number (4 or 8)
-    plumed_cmd(plumedmain, "setMDEnergyUnits", &energyUnits); // Pass a pointer to the conversion factor between the energy unit used in your code and kJ mol-1
-    plumed_cmd(plumedmain, "setMDLengthUnits", &lengthUnits); // Pass a pointer to the conversion factor between the length unit used in your code and nm
-    plumed_cmd(plumedmain, "setMDTimeUnits", &timeUnits); // Pass a pointer to the conversion factor between the time unit used in your code and ps
-    plumed_cmd(plumedmain, "setNatoms", &m_natoms); // Pass a pointer to the number of atoms in the system to plumed
-    plumed_cmd(plumedmain, "setMDEngine", "curcuma");
-    plumed_cmd(plumedmain, "setTimestep", &m_dT); // Pass a pointer to the molecular dynamics timestep to plumed                       // Pass the name of your md engine to plumed (now it is just a label)
-    plumed_cmd(plumedmain, "setKbT", &kb_Eh);
-    plumed_cmd(plumedmain, "init", NULL);
 
-    plumed_cmd(plumedmain, "readInputLine", "DUMPATOMS ATOMS=1-231 FILE=test.xyz"); // Read a single input line directly from a string                                  // Pointer to a real containing the value of kbT
+    if (m_mtd) {
+        plumedmain = plumed_create();
+        int real_precision = 8;
+        double energyUnits = 2625.5;
+        double lengthUnits = 10;
+        double timeUnits = 1e-3;
+        // double massUnits =
+        plumed_cmd(plumedmain, "setRealPrecision", &real_precision); // Pass a pointer to an integer containing the size of a real number (4 or 8)
+        plumed_cmd(plumedmain, "setMDEnergyUnits", &energyUnits); // Pass a pointer to the conversion factor between the energy unit used in your code and kJ mol-1
+        plumed_cmd(plumedmain, "setMDLengthUnits", &lengthUnits); // Pass a pointer to the conversion factor between the length unit used in your code and nm
+        plumed_cmd(plumedmain, "setMDTimeUnits", &timeUnits); // Pass a pointer to the conversion factor between the time unit used in your code and ps
+        plumed_cmd(plumedmain, "setNatoms", &m_natoms); // Pass a pointer to the number of atoms in the system to plumed
+        plumed_cmd(plumedmain, "setMDEngine", "curcuma");
+        //  plumed_cmd(plumedmain,"setMDMassUnits",&massUnits);            // Pass a pointer to the conversion factor between the mass unit used in your code and amu
+        plumed_cmd(plumedmain, "setTimestep", &m_dT); // Pass a pointer to the molecular dynamics timestep to plumed                       // Pass the name of your md engine to plumed (now it is just a label)
+        plumed_cmd(plumedmain, "setKbT", &kb_Eh);
+        plumed_cmd(plumedmain, "init", NULL);
+
+        plumed_cmd(plumedmain, "readInputLine", "DUMPATOMS ATOMS=1-231 FILE=test.xyz"); // Read a single input line directly from a string                                  // Pointer to a real containing the value of kbT
+        int step = 0;
+        plumed_cmd(plumedmain, "setStep", &step);
+        plumed_cmd(plumedmain, "setPositions", &m_current_geometry[0]);
+    }
 #endif
 
 #ifdef GCC
@@ -627,7 +638,7 @@ void SimpleMD::start()
               << "\t"
               << "T" << std::endl;
 #endif
-    m_Epot = Energy(coord, gradient);
+    m_Epot = Energy(gradient);
     m_Ekin = EKin();
     m_Etot = m_Epot + m_Ekin;
 
@@ -658,10 +669,7 @@ void SimpleMD::start()
                 m_molecule.setGeometry(geometry);
                 m_molecule.GetFragments();
                 InitVelocities(-1);
-                for (int i = 0; i < 3 * m_natoms; ++i) {
-                    coord[i] = m_current_geometry[i];
-                }
-                Energy(coord, gradient);
+                Energy(gradient);
                 m_Ekin = EKin();
                 m_Etot = m_Epot + m_Ekin;
                 m_current_rescue++;
@@ -682,15 +690,32 @@ void SimpleMD::start()
             }
         }
         WallPotential(gradient);
-        Integrator(coord, gradient);
+        Integrator(gradient);
 #ifdef USE_Plumed
-        plumed_cmd(plumedmain, "setStep", &m_currentStep);
-        plumed_cmd(plumedmain, "setPositions", &m_current_geometry[0]);
-        plumed_cmd(plumedmain, "setEnergy", &m_Epot); // Pass a pointer to the current value of the potential energy to plumed?
-        plumed_cmd(plumedmain, "setForces", &m_gradient[0]);
-        plumed_cmd(plumedmain, "setMasses", &m_mass[0]); // Pass a pointer to the first element in the masses array to plumed
-        plumed_cmd(plumedmain, "calc", NULL);
-        plumed_cmd(plumedmain, "update", NULL); // Calculate and apply forces from the biases defined in the plumed input                    // Pass a pointer to the first element in the foces array to plumed                                                              // Pass a pointer to the first element in the atomic positions array to plumed                                                       // Pass a pointer to the current timestep to plumed
+        if (m_mtd) {
+            int step = m_currentStep;
+            plumed_cmd(plumedmain, "setStep", &step);
+            /*
+                    std::vector<double> x(m_natoms);
+                    std::vector<double> y(m_natoms);
+                    std::vector<double> z(m_natoms);
+                    auto pos = new double [m_natoms][3];
+
+                    for(int i = 0; i < m_natoms; ++i)
+                    {
+                        pos[i][0] = m_current_geometry[3*i + 0]*10;
+                        pos[i][1] = m_current_geometry[3*i + 1]*10;
+                        pos[i][2] = m_current_geometry[3*i + 2]*10;
+
+                    }*/
+            plumed_cmd(plumedmain, "setPositions", &m_current_geometry[0]);
+
+            plumed_cmd(plumedmain, "setEnergy", &m_Epot); // Pass a pointer to the current value of the potential energy to plumed?
+            plumed_cmd(plumedmain, "setForces", &m_gradient[0]);
+            plumed_cmd(plumedmain, "setMasses", &m_mass[0]); // Pass a pointer to the first element in the masses array to plumed
+            plumed_cmd(plumedmain, "calc", NULL);
+        }
+        // plumed_cmd(plumedmain, "update", NULL); // Calculate and apply forces from the biases defined in the plumed input                    // Pass a pointer to the first element in the foces array to plumed                                                              // Pass a pointer to the first element in the atomic positions array to plumed                                                       // Pass a pointer to the current timestep to plumed
 #endif
 
         if (m_unstable || m_interface->Error() || m_interface->HasNan()) {
@@ -745,18 +770,19 @@ void SimpleMD::start()
     }
 
 #ifdef USE_Plumed
-    plumed_finalize(plumedmain); // Call the plumed destructor
+    if (m_mtd) {
+        plumed_finalize(plumedmain); // Call the plumed destructor
+    }
 #endif
     std::ofstream restart_file("curcuma_final.json");
     restart_file << WriteRestartInformation() << std::endl;
     std::remove("curcuma_restart.json");
-    delete[] coord;
+    // delete[] coord;
     delete[] gradient;
 }
 
-void SimpleMD::Verlet(double* coord, double* grad)
+void SimpleMD::Verlet(double* grad)
 {
-#pragma omp parallel
     for (int i = 0; i < m_natoms; ++i) {
         m_current_geometry[3 * i + 0] = m_current_geometry[3 * i + 0] + m_dT * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
         m_current_geometry[3 * i + 1] = m_current_geometry[3 * i + 1] + m_dT * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
@@ -766,10 +792,9 @@ void SimpleMD::Verlet(double* coord, double* grad)
         m_velocities[3 * i + 1] = m_velocities[3 * i + 1] - 0.5 * m_dT * grad[3 * i + 1] * m_rmass[3 * i + 1];
         m_velocities[3 * i + 2] = m_velocities[3 * i + 2] - 0.5 * m_dT * grad[3 * i + 2] * m_rmass[3 * i + 2];
     }
-    m_Epot = Energy(coord, grad);
+    m_Epot = Energy(grad);
     double ekin = 0.0;
 
-#pragma omp parallel
     for (int i = 0; i < m_natoms; ++i) {
         m_velocities[3 * i + 0] -= 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
         m_velocities[3 * i + 1] -= 0.5 * m_dT * grad[3 * i + 1] * m_rmass[3 * i + 1];
@@ -786,7 +811,7 @@ void SimpleMD::Verlet(double* coord, double* grad)
     m_T = T;
 }
 
-void SimpleMD::Rattle(double* coord, double* grad)
+void SimpleMD::Rattle(double* grad)
 {
     /* this part was adopted from
      * Numerische Simulation in der Moleküldynamik
@@ -800,7 +825,7 @@ void SimpleMD::Rattle(double* coord, double* grad)
      * like dT^3 -> dT^2 and
      * updated velocities of the second atom (minus instead of plus)
      */
-
+    double* coord = new double[3 * m_natoms];
     double m_dT_inverse = 1 / m_dT;
     std::vector<int> moved(m_natoms, 0);
     for (int i = 0; i < m_natoms; ++i) {
@@ -860,17 +885,18 @@ void SimpleMD::Rattle(double* coord, double* grad)
             }
         }
     }
-    m_Epot = Energy(coord, grad);
+    for (int i = 0; i < m_natoms; ++i) {
+        m_current_geometry[3 * i + 0] = coord[3 * i + 0];
+        m_current_geometry[3 * i + 1] = coord[3 * i + 1];
+        m_current_geometry[3 * i + 2] = coord[3 * i + 2];
+    }
+    m_Epot = Energy(grad);
     double ekin = 0.0;
 
     for (int i = 0; i < m_natoms; ++i) {
         m_velocities[3 * i + 0] -= 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
         m_velocities[3 * i + 1] -= 0.5 * m_dT * grad[3 * i + 1] * m_rmass[3 * i + 1];
         m_velocities[3 * i + 2] -= 0.5 * m_dT * grad[3 * i + 2] * m_rmass[3 * i + 2];
-
-        m_current_geometry[3 * i + 0] = coord[3 * i + 0];
-        m_current_geometry[3 * i + 1] = coord[3 * i + 1];
-        m_current_geometry[3 * i + 2] = coord[3 * i + 2];
 
         m_gradient[3 * i + 0] = grad[3 * i + 0];
         m_gradient[3 * i + 1] = grad[3 * i + 1];
@@ -911,7 +937,7 @@ void SimpleMD::Rattle(double* coord, double* grad)
             }
         }
     }
-
+    delete[] coord;
     for (int i = 0; i < m_natoms; ++i) {
         ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
@@ -1273,11 +1299,11 @@ void SimpleMD::PrintMatrix(const double* matrix)
     std::cout << std::endl;
 }
 
-double SimpleMD::CleanEnergy(const double* coord, double* grad)
+double SimpleMD::CleanEnergy(double* grad)
 {
     EnergyCalculator interface(m_method, m_defaults);
     interface.setMolecule(m_molecule);
-    interface.updateGeometry(coord);
+    interface.updateGeometry(m_current_geometry);
 
     double Energy = interface.CalculateEnergy(true);
     interface.getGradient(grad);
@@ -1289,7 +1315,7 @@ double SimpleMD::CleanEnergy(const double* coord, double* grad)
     return Energy;
 }
 
-double SimpleMD::FastEnergy(const double* coord, double* grad)
+double SimpleMD::FastEnergy(double* grad)
 {
     m_interface->updateGeometry(m_current_geometry);
 

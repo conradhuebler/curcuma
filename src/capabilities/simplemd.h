@@ -83,7 +83,8 @@ static json CurcumaMDJson{
     { "wall_z_min", 0 },
     { "wall_z_max", 0 },
     { "wall_temp", 298.15 },
-    { "wall_beta", 6 }
+    { "wall_beta", 6 },
+    { "mtd", false }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -134,14 +135,14 @@ private:
 
     void InitVelocities(double scaling = 1.0);
 
-    double FastEnergy(const double* coord, double* grad);
-    double CleanEnergy(const double* coord, double* grad);
+    double FastEnergy(double* grad);
+    double CleanEnergy(double* grad);
 
     void PrintMatrix(const double* matrix);
 
     bool WriteGeometry();
-    void Verlet(double* coord, double* grad);
-    void Rattle(double* coord, double* grad);
+    void Verlet(double* grad);
+    void Rattle(double* grad);
 
     void Rattle_Verlet_First(double* coord, double* grad);
     void Rattle_Constrain_First(double* coord, double* grad);
@@ -165,8 +166,8 @@ private:
 
     void InitConstrainedBonds();
 
-    std::function<void(double* coord, double* grad)> Integrator;
-    std::function<double(double* coord, double* grad)> Energy;
+    std::function<void(double* grad)> Integrator;
+    std::function<double(double* grad)> Energy;
     std::function<double(double* grad)> WallPotential;
 
     std::vector<std::pair<std::pair<int, int>, double>> m_bond_constrained;
@@ -211,6 +212,7 @@ private:
     bool m_unstable = false;
     bool m_dipole = false;
     bool m_clean_energy = false;
+    bool m_mtd = false;
     int m_seed = -1;
     int m_time_step = 0;
     int m_dof = 0;
