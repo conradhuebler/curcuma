@@ -1,6 +1,6 @@
 /*
  * <Simple MD Module for Cucuma. >
- * Copyright (C) 2023 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2023 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -68,7 +68,7 @@ static json CurcumaMDJson{
     { "thermostat", "csvr" },
     { "respa", 1 },
     { "dipole", false },
-    { "seed", -1 },
+    { "seed", 1 },
     { "cleanenergy", false },
     { "wall", "none" }, // can be spheric or rect
     { "wall_type", "logfermi" }, // can be logfermi or harmonic

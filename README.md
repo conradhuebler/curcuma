@@ -16,6 +16,7 @@ git clones automatically some submodules.
 - [CxxThreadPool](https://github.com/conradhuebler/CxxThreadPool) - C++ Thread Pool for parallel calculation
 - [eigen](https://gitlab.com/libeigen/eigen) provides eigen C++ library for linear algebra. Eigen is not downloaded automatically, but will be fetched and updated if the build scripts in the **scripts** subdirectory are used.
 - [fmt](https://github.com/fmtlib/fmt) formatted console output
+- [plumped](https://github.com/plumed/plumed2) Support for Metadynamics, must be compiled manually and enabled manually (Option USE_Plumed)
 
 Additionally, [nlohmann/json](https://github.com/nlohmann/json) is obtained via cmake.
 
@@ -427,22 +428,65 @@ curcuma -nci file1.dat file2.dat
 ```
 one can ''remove'' RDG vs sign(λ<sub>2</sub>)ρ points which occur in both plots (file1.dat and file2.dat). The similarity of two points is set to true, if the distance is below a threshold distance, which is defined by the averaged distance of two adjacent points.
 
-## Molecular Dynamics
+## Molecular Dynamics and Metadynamics
 Curcuma has now a Molecular Dynamics modul, which can be used with:
 ```sh
 curcuma -md input.xyz
 ```
 
-Naturally, there are many more better fitting tools to perform molecular dynamics. Unlike curcuma, they do respect correct units etc. However, MD calculations work and can be controlled with the following arguments:
-
+### Possible options
 ```json
-{ "GFN", 2 },
-{ "MaxSteps", 5000 },
+{ "writeXYZ", true },
+{ "printOutput", true },
+{ "MaxTime", 5000 },
 { "T", 298.15 },
-{ "dt", 1 },
+{ "dt", 1 }, // single step in fs
+{ "rm_COM", 100 }, // remove translation and rotation every x fs
 { "charge", 0 },
 { "Spin", 0 },
-{ "centered", false }
+{ "rmrottrans", 0 },
+{ "nocenter", false },
+{ "dump", 50 },
+{ "print", 1000 },
+{ "unique", false },
+{ "rmsd", 1.5 },
+{ "opt", false },
+{ "hmass", 1 },
+{ "velo", 1 },
+{ "rescue", false },
+{ "coupling", 10 },
+{ "MaxTopoDiff", 15 },
+{ "impuls", 0 },
+{ "method", "uff" },
+{ "impuls_scaling", 0.75 },
+{ "writeinit", false },
+{ "initfile", "none" },
+{ "norestart", false },
+{ "writerestart", 1000 },
+{ "rattle", false },
+{ "rattle_tolerance", 1e-6 },
+{ "rattle_maxiter", 10 },
+{ "thermostat", "csvr" },
+{ "respa", 1 },
+{ "dipole", false },
+{ "seed", 1 },
+{ "cleanenergy", false },
+{ "wall", "none" }, // can be spheric or rect
+{ "wall_type", "logfermi" }, // can be logfermi or harmonic
+{ "wall_spheric_radius", 0 },
+{ "wall_xl", 0 },
+{ "wall_yl", 0 },
+{ "wall_zl", 0 },
+{ "wall_x_min", 0 },
+{ "wall_x_max", 0 },
+{ "wall_y_min", 0 },
+{ "wall_y_max", 0 },
+{ "wall_z_min", 0 },
+{ "wall_z_max", 0 },
+{ "wall_temp", 298.15 },
+{ "wall_beta", 6 },
+{ "mtd", false },
+{ "plumed", "plumed.dat" }
 ```
 
 For example, using 
@@ -456,8 +500,22 @@ curcuma -md input.xyz -method gfnff -T 500  -berendson 200 -dt 1 -hmass 1 -therm
 ``` 
 will perform some kind of conformational search using GFN-FF. Results are stored in **input.unique.xyz**! Repeating it will result in other conformations and the previous results stored in **input.unique.xyz** will be overwritten. Bonds may break from time to time ...
 
+Rattle can be used to constrain (currently) all bonds, allowing larger time steps for integration. Up to 8 fs might be possible.
+```sh
+curcuma -md input.xyz -rattle -dt 4
+``` 
 
 The MD implementation integrates well into curcuma, hence calculation can be stopped with Ctrl-C (or a "stop" file) and will be resumed (velocities and geometries are stored) if a restart file is found.
+
+With
+```sh
+curcuma -md input.xyz -mtd
+``` 
+a metadynamics simulation can be performed using plumed. It is a ***plumed.dat*** expected, or can be set with
+```sh
+curcuma -md input.xyz -mtd -plumed input.plumed
+``` 
+
 # Citation
 Please cite the software package if you obtain results:
 [conradhuebler/curcuma: Curcuma Zenodo Citation](https://doi.org/10.5281/zenodo.4302722)

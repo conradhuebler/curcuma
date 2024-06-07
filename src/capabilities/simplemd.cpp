@@ -1,6 +1,6 @@
 /*
  * <Simple MD Module for Cucuma. >
- * Copyright (C) 2020 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -609,7 +609,7 @@ void SimpleMD::start()
         double timeUnits = 1e-3;
         double massUnits = 1;
         double chargeUnit = 1;
-
+        int restart = m_restart;
         plumed_cmd(plumedmain, "setRealPrecision", &real_precision); // Pass a pointer to an integer containing the size of a real number (4 or 8)
         plumed_cmd(plumedmain, "setMDEnergyUnits", &energyUnits); // Pass a pointer to the conversion factor between the energy unit used in your code and kJ mol-1
         plumed_cmd(plumedmain, "setMDLengthUnits", &lengthUnits); // Pass a pointer to the conversion factor between the length unit used in your code and nm
@@ -621,6 +621,7 @@ void SimpleMD::start()
         plumed_cmd(plumedmain, "setTimestep", &m_dT); // Pass a pointer to the molecular dynamics timestep to plumed                       // Pass the name of your md engine to plumed (now it is just a label)
         plumed_cmd(plumedmain, "setKbT", &kb_Eh);
         plumed_cmd(plumedmain, "setLogFile", "plumed_log.out"); // Pass the file  on which to write out the plumed log (to be created)
+        plumed_cmd(plumedmain, "setRestart", &restart); // Pointer to an integer saying if we are restarting (zero means no, one means yes)
         plumed_cmd(plumedmain, "init", NULL);
         plumed_cmd(plumedmain, "read", m_plumed.c_str());
         plumed_cmd(plumedmain, "setStep", &m_step);
@@ -629,8 +630,8 @@ void SimpleMD::start()
         plumed_cmd(plumedmain, "setForces", &m_gradient[0]);
         plumed_cmd(plumedmain, "setVirial", &m_virial[0]);
         plumed_cmd(plumedmain, "setMasses", &m_mass[0]);
-        plumed_cmd(plumedmain,"prepareCalc",NULL);
-        plumed_cmd(plumedmain,"performCalc",NULL);
+        plumed_cmd(plumedmain, "prepareCalc", NULL);
+        plumed_cmd(plumedmain, "performCalc", NULL);
     }
 #endif
     std::vector<double> charge(0, m_natoms);
@@ -700,8 +701,8 @@ void SimpleMD::start()
             plumed_cmd(plumedmain, "setVirial", &m_virial[0]);
 
             plumed_cmd(plumedmain, "setMasses", &m_mass[0]);
-            plumed_cmd(plumedmain,"prepareCalc",NULL);
-            plumed_cmd(plumedmain,"performCalc",NULL);
+            plumed_cmd(plumedmain, "prepareCalc", NULL);
+            plumed_cmd(plumedmain, "performCalc", NULL);
         }
 #endif
 
