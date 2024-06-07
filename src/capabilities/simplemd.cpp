@@ -64,6 +64,7 @@ void SimpleMD::LoadControlJson()
 {
     m_method = Json2KeyWord<std::string>(m_defaults, "method");
     m_thermostat = Json2KeyWord<std::string>(m_defaults, "thermostat");
+    m_plumed = Json2KeyWord<std::string>(m_defaults, "plumed");
 
     m_spin = Json2KeyWord<int>(m_defaults, "spin");
     m_charge = Json2KeyWord<int>(m_defaults, "charge");
@@ -596,24 +597,29 @@ void SimpleMD::start()
         double energyUnits = 2625.5;
         double lengthUnits = 10;
         double timeUnits = 1e-3;
-        // double massUnits =
+        double massUnits = 1;
+        double chargeUnit = 1;
+
         plumed_cmd(plumedmain, "setRealPrecision", &real_precision); // Pass a pointer to an integer containing the size of a real number (4 or 8)
         plumed_cmd(plumedmain, "setMDEnergyUnits", &energyUnits); // Pass a pointer to the conversion factor between the energy unit used in your code and kJ mol-1
         plumed_cmd(plumedmain, "setMDLengthUnits", &lengthUnits); // Pass a pointer to the conversion factor between the length unit used in your code and nm
         plumed_cmd(plumedmain, "setMDTimeUnits", &timeUnits); // Pass a pointer to the conversion factor between the time unit used in your code and ps
         plumed_cmd(plumedmain, "setNatoms", &m_natoms); // Pass a pointer to the number of atoms in the system to plumed
         plumed_cmd(plumedmain, "setMDEngine", "curcuma");
-        //  plumed_cmd(plumedmain,"setMDMassUnits",&massUnits);            // Pass a pointer to the conversion factor between the mass unit used in your code and amu
+        plumed_cmd(plumedmain, "setMDMassUnits", &massUnits); // Pass a pointer to the conversion factor between the mass unit used in your code and amu
+        plumed_cmd(plumedmain, "setMDChargeUnits", &chargeUnit);
         plumed_cmd(plumedmain, "setTimestep", &m_dT); // Pass a pointer to the molecular dynamics timestep to plumed                       // Pass the name of your md engine to plumed (now it is just a label)
         plumed_cmd(plumedmain, "setKbT", &kb_Eh);
+        plumed_cmd(plumedmain, "setLogFile", "plumed_log.out"); // Pass the file  on which to write out the plumed log (to be created)
         plumed_cmd(plumedmain, "init", NULL);
-
-        plumed_cmd(plumedmain, "readInputLine", "DUMPATOMS ATOMS=1-231 FILE=test.xyz"); // Read a single input line directly from a string                                  // Pointer to a real containing the value of kbT
-        int step = 0;
-        plumed_cmd(plumedmain, "setStep", &step);
-        plumed_cmd(plumedmain, "setPositions", &m_current_geometry[0]);
+        plumed_cmd(plumedmain, "read", m_plumed.c_str());
+        // plumed_cmd(plumedmain, "readInputLines", "e: ENERGY\nPRINT ARG=e FILE=colvar"); // Read a single input line directly from a string                                  // Pointer to a real containing the value of kbT
+        // int step = 0;
+        // plumed_cmd(plumedmain, "setStep", &step);
+        // plumed_cmd(plumedmain, "setPositions", &m_current_geometry[0]);
     }
 #endif
+    std::vector<double> charge(0, m_natoms);
 
 #ifdef GCC
     //         std::cout << fmt::format("{0: ^{0}} {1: ^{1}} {2: ^{2}} {3: ^{3}} {4: ^{4}}\n", "Step", "Epot", "Ekin", "Etot", "T");
@@ -693,29 +699,32 @@ void SimpleMD::start()
         Integrator(gradient);
 #ifdef USE_Plumed
         if (m_mtd) {
-            int step = m_currentStep;
+            int step = m_currentStep; // FIXME
+
+            auto pos = new double[m_natoms][3];
+            auto force = new double[m_natoms][3];
+
+            for (int i = 0; i < m_natoms; ++i) {
+                pos[i][0] = m_current_geometry[3 * i + 0] * 10;
+                pos[i][1] = m_current_geometry[3 * i + 1] * 10;
+                pos[i][2] = m_current_geometry[3 * i + 2] * 10;
+
+                force[i][0] = m_gradient[3 * i + 0];
+                force[i][1] = m_gradient[3 * i + 1];
+                force[i][2] = m_gradient[3 * i + 2];
+            }
             plumed_cmd(plumedmain, "setStep", &step);
-            /*
-                    std::vector<double> x(m_natoms);
-                    std::vector<double> y(m_natoms);
-                    std::vector<double> z(m_natoms);
-                    auto pos = new double [m_natoms][3];
-
-                    for(int i = 0; i < m_natoms; ++i)
-                    {
-                        pos[i][0] = m_current_geometry[3*i + 0]*10;
-                        pos[i][1] = m_current_geometry[3*i + 1]*10;
-                        pos[i][2] = m_current_geometry[3*i + 2]*10;
-
-                    }*/
-            plumed_cmd(plumedmain, "setPositions", &m_current_geometry[0]);
-
-            plumed_cmd(plumedmain, "setEnergy", &m_Epot); // Pass a pointer to the current value of the potential energy to plumed?
-            plumed_cmd(plumedmain, "setForces", &m_gradient[0]);
+            plumed_cmd(plumedmain, "setPositions", &pos[0][0]);
+            plumed_cmd(plumedmain, "setCharges", &charge[0]);
+            plumed_cmd(plumedmain, "setForces", &force[0][0]);
             plumed_cmd(plumedmain, "setMasses", &m_mass[0]); // Pass a pointer to the first element in the masses array to plumed
-            plumed_cmd(plumedmain, "calc", NULL);
+            plumed_cmd(plumedmain, "update", NULL);
+            plumed_cmd(plumedmain, "prepareCalc", NULL);
+            plumed_cmd(plumedmain, "setEnergy", &m_Epot); // Pass a pointer to the current value of the potential energy to plumed?
+            plumed_cmd(plumedmain, "performCalc", NULL); // Use the atomic positions collected during prepareCalc phase to calculate colvars and biases.
+            delete[] pos;
+            delete[] force;
         }
-        // plumed_cmd(plumedmain, "update", NULL); // Calculate and apply forces from the biases defined in the plumed input                    // Pass a pointer to the first element in the foces array to plumed                                                              // Pass a pointer to the first element in the atomic positions array to plumed                                                       // Pass a pointer to the current timestep to plumed
 #endif
 
         if (m_unstable || m_interface->Error() || m_interface->HasNan()) {

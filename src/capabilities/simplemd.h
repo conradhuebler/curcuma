@@ -84,7 +84,8 @@ static json CurcumaMDJson{
     { "wall_z_max", 0 },
     { "wall_temp", 298.15 },
     { "wall_beta", 6 },
-    { "mtd", false }
+    { "mtd", false },
+    { "plumed", "plumed.dat" }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -208,7 +209,7 @@ private:
     std::vector<double> m_collected_dipole;
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;
-    std::string m_method = "UFF", m_initfile = "none", m_thermostat = "csvr";
+    std::string m_method = "UFF", m_initfile = "none", m_thermostat = "csvr", m_plumed;
     bool m_unstable = false;
     bool m_dipole = false;
     bool m_clean_energy = false;
