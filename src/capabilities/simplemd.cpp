@@ -79,6 +79,8 @@ void SimpleMD::LoadControlJson()
     m_seed = Json2KeyWord<int>(m_defaults, "seed");
 
     m_rmsd = Json2KeyWord<double>(m_defaults, "rmsd");
+    m_hmass = Json2KeyWord<double>(m_defaults, "hmass");
+
     m_impuls = Json2KeyWord<double>(m_defaults, "impuls");
     m_impuls_scaling = Json2KeyWord<double>(m_defaults, "impuls_scaling");
     m_writeUnique = Json2KeyWord<bool>(m_defaults, "unique");
@@ -226,6 +228,7 @@ bool SimpleMD::Initialise()
     }
 
     m_gradient = std::vector<double>(3 * m_natoms, 0);
+    m_virial = std::vector<double>(3 * m_natoms, 0);
 
     if(m_opt)
     {
@@ -570,11 +573,9 @@ void SimpleMD::start()
         return;
     auto unix_timestamp = std::chrono::seconds(std::time(NULL));
     m_unix_started = std::chrono::milliseconds(unix_timestamp).count();
-    // double* coord = new double[3 * m_natoms];
     double* gradient = new double[3 * m_natoms];
     std::vector<json> states;
     for (int i = 0; i < 3 * m_natoms; ++i) {
-        // coord[i] = m_current_geometry[i];
         gradient[i] = 0;
     }
 
@@ -588,6 +589,15 @@ void SimpleMD::start()
         std::cout << "No Thermostat applied\n"
                   << std::endl;
     }
+
+    m_Epot = Energy(gradient);
+    m_Ekin = EKin();
+    m_Etot = m_Epot + m_Ekin;
+
+    int m_step = 0;
+
+    PrintStatus();
+
 #ifdef USE_Plumed
     plumed plumedmain;
 
@@ -613,10 +623,14 @@ void SimpleMD::start()
         plumed_cmd(plumedmain, "setLogFile", "plumed_log.out"); // Pass the file  on which to write out the plumed log (to be created)
         plumed_cmd(plumedmain, "init", NULL);
         plumed_cmd(plumedmain, "read", m_plumed.c_str());
-        // plumed_cmd(plumedmain, "readInputLines", "e: ENERGY\nPRINT ARG=e FILE=colvar"); // Read a single input line directly from a string                                  // Pointer to a real containing the value of kbT
-        // int step = 0;
-        // plumed_cmd(plumedmain, "setStep", &step);
-        // plumed_cmd(plumedmain, "setPositions", &m_current_geometry[0]);
+        plumed_cmd(plumedmain, "setStep", &m_step);
+        plumed_cmd(plumedmain, "setPositions", &m_current_geometry[0]);
+        plumed_cmd(plumedmain, "setEnergy", &m_Epot);
+        plumed_cmd(plumedmain, "setForces", &m_gradient[0]);
+        plumed_cmd(plumedmain, "setVirial", &m_virial[0]);
+        plumed_cmd(plumedmain, "setMasses", &m_mass[0]);
+        plumed_cmd(plumedmain,"prepareCalc",NULL);
+        plumed_cmd(plumedmain,"performCalc",NULL);
     }
 #endif
     std::vector<double> charge(0, m_natoms);
@@ -644,20 +658,53 @@ void SimpleMD::start()
               << "\t"
               << "T" << std::endl;
 #endif
-    m_Epot = Energy(gradient);
-    m_Ekin = EKin();
-    m_Etot = m_Epot + m_Ekin;
 
-    int m_step = 0;
-
-    PrintStatus();
     for (; m_currentStep < m_maxtime;) {
         auto step0 = std::chrono::system_clock::now();
 
         if (CheckStop() == true) {
             TriggerWriteRestart();
+#ifdef USE_Plumed
+            if (m_mtd) {
+                plumed_finalize(plumedmain); // Call the plumed destructor
+            }
+#endif
             return;
         }
+
+        if (m_rm_COM_step > 0 && m_step % m_rm_COM_step == 0) {
+            // std::cout << "Removing COM motion." << std::endl;
+            if (m_rmrottrans == 1)
+                RemoveRotation(m_velocities);
+            else if (m_rmrottrans == 2)
+                RemoveRotations(m_velocities);
+            else if (m_rmrottrans == 3) {
+                RemoveRotations(m_velocities);
+                RemoveRotation(m_velocities);
+            }
+        }
+        WallPotential(gradient);
+        Integrator(gradient);
+
+        ThermostatFunction();
+        m_Ekin = EKin();
+
+#ifdef USE_Plumed
+        if (m_mtd) {
+            plumed_cmd(plumedmain, "setStep", &m_step);
+
+            plumed_cmd(plumedmain, "setPositions", &m_current_geometry[0]);
+
+            plumed_cmd(plumedmain, "setEnergy", &m_Epot);
+            plumed_cmd(plumedmain, "setForces", &m_gradient[0]);
+            plumed_cmd(plumedmain, "setVirial", &m_virial[0]);
+
+            plumed_cmd(plumedmain, "setMasses", &m_mass[0]);
+            plumed_cmd(plumedmain,"prepareCalc",NULL);
+            plumed_cmd(plumedmain,"performCalc",NULL);
+        }
+#endif
+
         if (m_step % m_dump == 0) {
             bool write = WriteGeometry();
             if (write) {
@@ -684,49 +731,6 @@ void SimpleMD::start()
             }
         }
 
-        if (m_rm_COM_step > 0 && m_step % m_rm_COM_step == 0) {
-            // std::cout << "Removing COM motion." << std::endl;
-            if (m_rmrottrans == 1)
-                RemoveRotation(m_velocities);
-            else if (m_rmrottrans == 2)
-                RemoveRotations(m_velocities);
-            else if (m_rmrottrans == 3) {
-                RemoveRotations(m_velocities);
-                RemoveRotation(m_velocities);
-            }
-        }
-        WallPotential(gradient);
-        Integrator(gradient);
-#ifdef USE_Plumed
-        if (m_mtd) {
-            int step = m_currentStep; // FIXME
-
-            auto pos = new double[m_natoms][3];
-            auto force = new double[m_natoms][3];
-
-            for (int i = 0; i < m_natoms; ++i) {
-                pos[i][0] = m_current_geometry[3 * i + 0] * 10;
-                pos[i][1] = m_current_geometry[3 * i + 1] * 10;
-                pos[i][2] = m_current_geometry[3 * i + 2] * 10;
-
-                force[i][0] = m_gradient[3 * i + 0];
-                force[i][1] = m_gradient[3 * i + 1];
-                force[i][2] = m_gradient[3 * i + 2];
-            }
-            plumed_cmd(plumedmain, "setStep", &step);
-            plumed_cmd(plumedmain, "setPositions", &pos[0][0]);
-            plumed_cmd(plumedmain, "setCharges", &charge[0]);
-            plumed_cmd(plumedmain, "setForces", &force[0][0]);
-            plumed_cmd(plumedmain, "setMasses", &m_mass[0]); // Pass a pointer to the first element in the masses array to plumed
-            plumed_cmd(plumedmain, "update", NULL);
-            plumed_cmd(plumedmain, "prepareCalc", NULL);
-            plumed_cmd(plumedmain, "setEnergy", &m_Epot); // Pass a pointer to the current value of the potential energy to plumed?
-            plumed_cmd(plumedmain, "performCalc", NULL); // Use the atomic positions collected during prepareCalc phase to calculate colvars and biases.
-            delete[] pos;
-            delete[] force;
-        }
-#endif
-
         if (m_unstable || m_interface->Error() || m_interface->HasNan()) {
             PrintStatus();
             fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Simulation got unstable, exiting!\n");
@@ -734,10 +738,14 @@ void SimpleMD::start()
             std::ofstream restart_file("unstable_curcuma.json");
             restart_file << WriteRestartInformation() << std::endl;
             m_time_step = 0;
+#ifdef USE_Plumed
+            if (m_mtd) {
+                plumed_finalize(plumedmain); // Call the plumed destructor
+            }
+#endif
             return;
         }
-        ThermostatFunction();
-        m_Ekin = EKin();
+
         if (m_writerestart > -1 && m_step % m_writerestart == 0) {
             std::ofstream restart_file("curcuma_step_" + std::to_string(int(m_step * m_dT)) + ".json");
             nlohmann::json restart;
@@ -786,7 +794,6 @@ void SimpleMD::start()
     std::ofstream restart_file("curcuma_final.json");
     restart_file << WriteRestartInformation() << std::endl;
     std::remove("curcuma_restart.json");
-    // delete[] coord;
     delete[] gradient;
 }
 
