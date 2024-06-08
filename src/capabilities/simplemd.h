@@ -71,7 +71,7 @@ static json CurcumaMDJson{
     { "seed", 1 },
     { "cleanenergy", false },
     { "wall", "none" }, // can be spheric or rect
-    { "wall_type", "logfermi" }, // can be logfermi or harmonic
+    { "wall_type", "harmonic" }, // can be logfermi or harmonic
     { "wall_spheric_radius", 0 },
     { "wall_xl", 0 },
     { "wall_yl", 0 },
@@ -85,7 +85,8 @@ static json CurcumaMDJson{
     { "wall_temp", 298.15 },
     { "wall_beta", 6 },
     { "mtd", false },
-    { "plumed", "plumed.dat" }
+    { "plumed", "plumed.dat" },
+    { "mtd_dT", -1 }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -156,6 +157,7 @@ private:
     double EKin();
     void Berendson();
     void CSVR();
+    void None();
 
     void InitialiseWalls();
 
@@ -214,6 +216,8 @@ private:
     bool m_dipole = false;
     bool m_clean_energy = false;
     bool m_mtd = false;
+    bool m_eval_mtd = true;
+    int m_mtd_dT = -1;
     int m_seed = -1;
     int m_time_step = 0;
     int m_dof = 0;

@@ -98,6 +98,12 @@ void SimpleMD::LoadControlJson()
     m_writeXYZ = Json2KeyWord<bool>(m_defaults, "writeXYZ");
     m_writeinit = Json2KeyWord<bool>(m_defaults, "writeinit");
     m_mtd = Json2KeyWord<bool>(m_defaults, "mtd");
+    m_mtd_dT = Json2KeyWord<int>(m_defaults, "mtd_dT");
+    if (m_mtd_dT < 0) {
+        m_eval_mtd = true;
+    } else {
+        m_eval_mtd = false;
+    }
     m_initfile = Json2KeyWord<std::string>(m_defaults, "initfile");
     m_norestart = Json2KeyWord<bool>(m_defaults, "norestart");
     m_dt2 = m_dT * m_dT;
@@ -109,7 +115,7 @@ void SimpleMD::LoadControlJson()
             this->Rattle(grad);
         };
         m_rattle_tolerance = Json2KeyWord<double>(m_defaults, "rattle_tolerance");
-        m_coupling = m_dT;
+        // m_coupling = m_dT;
         m_rattle = Json2KeyWord<int>(m_defaults, "rattle");
         std::cout << "Using rattle to constrain bonds!" << std::endl;
     } else {
@@ -586,6 +592,7 @@ void SimpleMD::start()
         fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Berendson Thermostat\nJ. Chem. Phys. 81, 3684 (1984) - DOI: 10.1063/1.448118\n\n");
         ThermostatFunction = std::bind(&SimpleMD::Berendson, this);
     } else {
+        ThermostatFunction = std::bind(&SimpleMD::None, this);
         std::cout << "No Thermostat applied\n"
                   << std::endl;
     }
@@ -701,8 +708,15 @@ void SimpleMD::start()
             plumed_cmd(plumedmain, "setVirial", &m_virial[0]);
 
             plumed_cmd(plumedmain, "setMasses", &m_mass[0]);
-            plumed_cmd(plumedmain, "prepareCalc", NULL);
-            plumed_cmd(plumedmain, "performCalc", NULL);
+            if (m_eval_mtd) {
+                plumed_cmd(plumedmain, "prepareCalc", NULL);
+                plumed_cmd(plumedmain, "performCalc", NULL);
+            } else {
+                if (std::abs(m_T0 - m_aver_Temp) < m_mtd_dT && m_step > 10) {
+                    m_eval_mtd = true;
+                    std::cout << "Starting with MetaDynamics ..." << std::endl;
+                }
+            }
         }
 #endif
 
@@ -1395,6 +1409,10 @@ bool SimpleMD::WriteGeometry()
         }
     }
     return result;
+}
+
+void SimpleMD::None()
+{
 }
 
 void SimpleMD::Berendson()

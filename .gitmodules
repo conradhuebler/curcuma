@@ -9,7 +9,7 @@
 	url = https://github.com/conradhuebler/ripser
 [submodule "external/xtb"]
 	path = external/xtb
-	url = https://github.com/conradhuebler/xtb
+	url = https://github.com/grimme-lab/xtb
 [submodule "external/tblite"]
 	path = external/tblite
 	url = https://github.com/tblite/tblite
