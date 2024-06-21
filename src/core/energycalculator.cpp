@@ -100,7 +100,12 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
             return this->m_xtb->Charges();
         };
         m_dipole = [this]() {
-            return this->m_xtb->Dipole();
+            Position dipole;
+            dipole(0) = this->m_xtb->Dipole()[0];
+            dipole(1) = this->m_xtb->Dipole()[1];
+            dipole(2) = this->m_xtb->Dipole()[2];
+
+            return dipole;
         };
         m_bonds = [this]() {
             return this->m_xtb->BondOrders();
