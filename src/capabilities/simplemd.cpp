@@ -1339,7 +1339,7 @@ double SimpleMD::CleanEnergy(double* grad)
     double Energy = interface.CalculateEnergy(true);
     interface.getGradient(grad);
     if (m_dipole) {
-        std::vector<double> dipole = interface.Dipole();
+        auto dipole = interface.Dipole();
         m_curr_dipole = sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]);
         m_collected_dipole.push_back(sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]));
     }
@@ -1353,7 +1353,7 @@ double SimpleMD::FastEnergy(double* grad)
     double Energy = m_interface->CalculateEnergy(true);
     m_interface->getGradient(grad);
     if (m_dipole) {
-        std::vector<double> dipole = m_interface->Dipole();
+        auto dipole = m_interface->Dipole();
         m_curr_dipole = sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]);
         m_collected_dipole.push_back(sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]));
     }
