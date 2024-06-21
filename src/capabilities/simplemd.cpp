@@ -1,6 +1,6 @@
 /*
  * <Simple MD Module for Cucuma. >
- * Copyright (C) 2020 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -42,6 +42,9 @@
 
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
 
+#ifdef USE_Plumed
+#include "plumed2/src/wrapper/Plumed.h"
+#endif
 #include "simplemd.h"
 
 SimpleMD::SimpleMD(const json& controller, bool silent)
@@ -61,6 +64,7 @@ void SimpleMD::LoadControlJson()
 {
     m_method = Json2KeyWord<std::string>(m_defaults, "method");
     m_thermostat = Json2KeyWord<std::string>(m_defaults, "thermostat");
+    m_plumed = Json2KeyWord<std::string>(m_defaults, "plumed");
 
     m_spin = Json2KeyWord<int>(m_defaults, "spin");
     m_charge = Json2KeyWord<int>(m_defaults, "charge");
@@ -75,6 +79,8 @@ void SimpleMD::LoadControlJson()
     m_seed = Json2KeyWord<int>(m_defaults, "seed");
 
     m_rmsd = Json2KeyWord<double>(m_defaults, "rmsd");
+    m_hmass = Json2KeyWord<double>(m_defaults, "hmass");
+
     m_impuls = Json2KeyWord<double>(m_defaults, "impuls");
     m_impuls_scaling = Json2KeyWord<double>(m_defaults, "impuls_scaling");
     m_writeUnique = Json2KeyWord<bool>(m_defaults, "unique");
@@ -91,6 +97,13 @@ void SimpleMD::LoadControlJson()
 
     m_writeXYZ = Json2KeyWord<bool>(m_defaults, "writeXYZ");
     m_writeinit = Json2KeyWord<bool>(m_defaults, "writeinit");
+    m_mtd = Json2KeyWord<bool>(m_defaults, "mtd");
+    m_mtd_dT = Json2KeyWord<int>(m_defaults, "mtd_dT");
+    if (m_mtd_dT < 0) {
+        m_eval_mtd = true;
+    } else {
+        m_eval_mtd = false;
+    }
     m_initfile = Json2KeyWord<std::string>(m_defaults, "initfile");
     m_norestart = Json2KeyWord<bool>(m_defaults, "norestart");
     m_dt2 = m_dT * m_dT;
@@ -98,27 +111,27 @@ void SimpleMD::LoadControlJson()
     int rattle = Json2KeyWord<int>(m_defaults, "rattle");
     m_rattle_maxiter = Json2KeyWord<int>(m_defaults, "rattle_maxiter");
     if (rattle == 1) {
-        Integrator = [=](double* coord, double* grad) {
-            this->Rattle(coord, grad);
+        Integrator = [=](double* grad) {
+            this->Rattle(grad);
         };
         m_rattle_tolerance = Json2KeyWord<double>(m_defaults, "rattle_tolerance");
-        m_coupling = m_dT;
+        // m_coupling = m_dT;
         m_rattle = Json2KeyWord<int>(m_defaults, "rattle");
         std::cout << "Using rattle to constrain bonds!" << std::endl;
     } else {
-        Integrator = [=](double* coord, double* grad) {
-            this->Verlet(coord, grad);
+        Integrator = [=](double* grad) {
+            this->Verlet(grad);
         };
     }
 
     if (Json2KeyWord<bool>(m_defaults, "cleanenergy")) {
-        Energy = [=](double* coord, double* grad) -> double {
-            return this->CleanEnergy(coord, grad);
+        Energy = [=](double* grad) -> double {
+            return this->CleanEnergy(grad);
         };
         std::cout << "Energy Calculator will be set up for each step! Single steps are slower, but more reliable. Recommended for the combination of GFN2 and solvation." << std::endl;
     } else {
-        Energy = [=](double* coord, double* grad) -> double {
-            return this->FastEnergy(coord, grad);
+        Energy = [=](double* grad) -> double {
+            return this->FastEnergy(grad);
         };
         std::cout << "Energy Calculator will NOT be set up for each step! Fast energy calculation! This is the default way and should not be changed unless the energy and gradient calculation are unstable (happens with GFN2 and solvation)." << std::endl;
     }
@@ -221,6 +234,7 @@ bool SimpleMD::Initialise()
     }
 
     m_gradient = std::vector<double>(3 * m_natoms, 0);
+    m_virial = std::vector<double>(3 * m_natoms, 0);
 
     if(m_opt)
     {
@@ -426,6 +440,8 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["impuls_scaling"] = m_impuls_scaling;
     restart["respa"] = m_respa;
     restart["rm_COM"] = m_rm_COM;
+    restart["mtd"] = m_mtd;
+
     return restart;
 };
 
@@ -563,11 +579,9 @@ void SimpleMD::start()
         return;
     auto unix_timestamp = std::chrono::seconds(std::time(NULL));
     m_unix_started = std::chrono::milliseconds(unix_timestamp).count();
-    double* coord = new double[3 * m_natoms];
     double* gradient = new double[3 * m_natoms];
     std::vector<json> states;
     for (int i = 0; i < 3 * m_natoms; ++i) {
-        coord[i] = m_current_geometry[i];
         gradient[i] = 0;
     }
 
@@ -578,9 +592,56 @@ void SimpleMD::start()
         fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Berendson Thermostat\nJ. Chem. Phys. 81, 3684 (1984) - DOI: 10.1063/1.448118\n\n");
         ThermostatFunction = std::bind(&SimpleMD::Berendson, this);
     } else {
+        ThermostatFunction = std::bind(&SimpleMD::None, this);
         std::cout << "No Thermostat applied\n"
                   << std::endl;
     }
+
+    m_Epot = Energy(gradient);
+    m_Ekin = EKin();
+    m_Etot = m_Epot + m_Ekin;
+
+    int m_step = 0;
+
+    PrintStatus();
+
+#ifdef USE_Plumed
+    plumed plumedmain;
+
+    if (m_mtd) {
+        plumedmain = plumed_create();
+        int real_precision = 8;
+        double energyUnits = 2625.5;
+        double lengthUnits = 10;
+        double timeUnits = 1e-3;
+        double massUnits = 1;
+        double chargeUnit = 1;
+        int restart = m_restart;
+        plumed_cmd(plumedmain, "setRealPrecision", &real_precision); // Pass a pointer to an integer containing the size of a real number (4 or 8)
+        plumed_cmd(plumedmain, "setMDEnergyUnits", &energyUnits); // Pass a pointer to the conversion factor between the energy unit used in your code and kJ mol-1
+        plumed_cmd(plumedmain, "setMDLengthUnits", &lengthUnits); // Pass a pointer to the conversion factor between the length unit used in your code and nm
+        plumed_cmd(plumedmain, "setMDTimeUnits", &timeUnits); // Pass a pointer to the conversion factor between the time unit used in your code and ps
+        plumed_cmd(plumedmain, "setNatoms", &m_natoms); // Pass a pointer to the number of atoms in the system to plumed
+        plumed_cmd(plumedmain, "setMDEngine", "curcuma");
+        plumed_cmd(plumedmain, "setMDMassUnits", &massUnits); // Pass a pointer to the conversion factor between the mass unit used in your code and amu
+        plumed_cmd(plumedmain, "setMDChargeUnits", &chargeUnit);
+        plumed_cmd(plumedmain, "setTimestep", &m_dT); // Pass a pointer to the molecular dynamics timestep to plumed                       // Pass the name of your md engine to plumed (now it is just a label)
+        plumed_cmd(plumedmain, "setKbT", &kb_Eh);
+        plumed_cmd(plumedmain, "setLogFile", "plumed_log.out"); // Pass the file  on which to write out the plumed log (to be created)
+        plumed_cmd(plumedmain, "setRestart", &restart); // Pointer to an integer saying if we are restarting (zero means no, one means yes)
+        plumed_cmd(plumedmain, "init", NULL);
+        plumed_cmd(plumedmain, "read", m_plumed.c_str());
+        plumed_cmd(plumedmain, "setStep", &m_step);
+        plumed_cmd(plumedmain, "setPositions", &m_current_geometry[0]);
+        plumed_cmd(plumedmain, "setEnergy", &m_Epot);
+        plumed_cmd(plumedmain, "setForces", &m_gradient[0]);
+        plumed_cmd(plumedmain, "setVirial", &m_virial[0]);
+        plumed_cmd(plumedmain, "setMasses", &m_mass[0]);
+        plumed_cmd(plumedmain, "prepareCalc", NULL);
+        plumed_cmd(plumedmain, "performCalc", NULL);
+    }
+#endif
+    std::vector<double> charge(0, m_natoms);
 
 #ifdef GCC
     //         std::cout << fmt::format("{0: ^{0}} {1: ^{1}} {2: ^{2}} {3: ^{3}} {4: ^{4}}\n", "Step", "Epot", "Ekin", "Etot", "T");
@@ -605,20 +666,60 @@ void SimpleMD::start()
               << "\t"
               << "T" << std::endl;
 #endif
-    m_Epot = Energy(coord, gradient);
-    m_Ekin = EKin();
-    m_Etot = m_Epot + m_Ekin;
 
-    int m_step = 0;
-
-    PrintStatus();
     for (; m_currentStep < m_maxtime;) {
         auto step0 = std::chrono::system_clock::now();
 
         if (CheckStop() == true) {
             TriggerWriteRestart();
+#ifdef USE_Plumed
+            if (m_mtd) {
+                plumed_finalize(plumedmain); // Call the plumed destructor
+            }
+#endif
             return;
         }
+
+        if (m_rm_COM_step > 0 && m_step % m_rm_COM_step == 0) {
+            // std::cout << "Removing COM motion." << std::endl;
+            if (m_rmrottrans == 1)
+                RemoveRotation(m_velocities);
+            else if (m_rmrottrans == 2)
+                RemoveRotations(m_velocities);
+            else if (m_rmrottrans == 3) {
+                RemoveRotations(m_velocities);
+                RemoveRotation(m_velocities);
+            }
+        }
+        WallPotential(gradient);
+        Integrator(gradient);
+
+        ThermostatFunction();
+        m_Ekin = EKin();
+
+#ifdef USE_Plumed
+        if (m_mtd) {
+            plumed_cmd(plumedmain, "setStep", &m_step);
+
+            plumed_cmd(plumedmain, "setPositions", &m_current_geometry[0]);
+
+            plumed_cmd(plumedmain, "setEnergy", &m_Epot);
+            plumed_cmd(plumedmain, "setForces", &m_gradient[0]);
+            plumed_cmd(plumedmain, "setVirial", &m_virial[0]);
+
+            plumed_cmd(plumedmain, "setMasses", &m_mass[0]);
+            if (m_eval_mtd) {
+                plumed_cmd(plumedmain, "prepareCalc", NULL);
+                plumed_cmd(plumedmain, "performCalc", NULL);
+            } else {
+                if (std::abs(m_T0 - m_aver_Temp) < m_mtd_dT && m_step > 10) {
+                    m_eval_mtd = true;
+                    std::cout << "Starting with MetaDynamics ..." << std::endl;
+                }
+            }
+        }
+#endif
+
         if (m_step % m_dump == 0) {
             bool write = WriteGeometry();
             if (write) {
@@ -636,10 +737,7 @@ void SimpleMD::start()
                 m_molecule.setGeometry(geometry);
                 m_molecule.GetFragments();
                 InitVelocities(-1);
-                for (int i = 0; i < 3 * m_natoms; ++i) {
-                    coord[i] = m_current_geometry[i];
-                }
-                Energy(coord, gradient);
+                Energy(gradient);
                 m_Ekin = EKin();
                 m_Etot = m_Epot + m_Ekin;
                 m_current_rescue++;
@@ -648,20 +746,6 @@ void SimpleMD::start()
             }
         }
 
-        if (m_rm_COM_step > 0 && m_step % m_rm_COM_step == 0) {
-            // std::cout << "Removing COM motion." << std::endl;
-            if (m_rmrottrans == 1)
-                RemoveRotation(m_velocities);
-            else if (m_rmrottrans == 2)
-                RemoveRotations(m_velocities);
-            else if (m_rmrottrans == 3) {
-                RemoveRotations(m_velocities);
-                RemoveRotation(m_velocities);
-            }
-        }
-        WallPotential(gradient);
-        Integrator(coord, gradient);
-
         if (m_unstable || m_interface->Error() || m_interface->HasNan()) {
             PrintStatus();
             fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Simulation got unstable, exiting!\n");
@@ -669,10 +753,14 @@ void SimpleMD::start()
             std::ofstream restart_file("unstable_curcuma.json");
             restart_file << WriteRestartInformation() << std::endl;
             m_time_step = 0;
+#ifdef USE_Plumed
+            if (m_mtd) {
+                plumed_finalize(plumedmain); // Call the plumed destructor
+            }
+#endif
             return;
         }
-        ThermostatFunction();
-        m_Ekin = EKin();
+
         if (m_writerestart > -1 && m_step % m_writerestart == 0) {
             std::ofstream restart_file("curcuma_step_" + std::to_string(int(m_step * m_dT)) + ".json");
             nlohmann::json restart;
@@ -713,16 +801,19 @@ void SimpleMD::start()
         std::cout << "Calculated averaged dipole moment " << m_aver_dipol * 2.5418 << " Debye and " << m_aver_dipol * 2.5418 * 3.3356 << " Cm [e-30]" << std::endl;
     }
 
+#ifdef USE_Plumed
+    if (m_mtd) {
+        plumed_finalize(plumedmain); // Call the plumed destructor
+    }
+#endif
     std::ofstream restart_file("curcuma_final.json");
     restart_file << WriteRestartInformation() << std::endl;
     std::remove("curcuma_restart.json");
-    delete[] coord;
     delete[] gradient;
 }
 
-void SimpleMD::Verlet(double* coord, double* grad)
+void SimpleMD::Verlet(double* grad)
 {
-#pragma omp parallel
     for (int i = 0; i < m_natoms; ++i) {
         m_current_geometry[3 * i + 0] = m_current_geometry[3 * i + 0] + m_dT * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
         m_current_geometry[3 * i + 1] = m_current_geometry[3 * i + 1] + m_dT * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
@@ -732,10 +823,9 @@ void SimpleMD::Verlet(double* coord, double* grad)
         m_velocities[3 * i + 1] = m_velocities[3 * i + 1] - 0.5 * m_dT * grad[3 * i + 1] * m_rmass[3 * i + 1];
         m_velocities[3 * i + 2] = m_velocities[3 * i + 2] - 0.5 * m_dT * grad[3 * i + 2] * m_rmass[3 * i + 2];
     }
-    m_Epot = Energy(coord, grad);
+    m_Epot = Energy(grad);
     double ekin = 0.0;
 
-#pragma omp parallel
     for (int i = 0; i < m_natoms; ++i) {
         m_velocities[3 * i + 0] -= 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
         m_velocities[3 * i + 1] -= 0.5 * m_dT * grad[3 * i + 1] * m_rmass[3 * i + 1];
@@ -752,7 +842,7 @@ void SimpleMD::Verlet(double* coord, double* grad)
     m_T = T;
 }
 
-void SimpleMD::Rattle(double* coord, double* grad)
+void SimpleMD::Rattle(double* grad)
 {
     /* this part was adopted from
      * Numerische Simulation in der Moleküldynamik
@@ -766,7 +856,7 @@ void SimpleMD::Rattle(double* coord, double* grad)
      * like dT^3 -> dT^2 and
      * updated velocities of the second atom (minus instead of plus)
      */
-
+    double* coord = new double[3 * m_natoms];
     double m_dT_inverse = 1 / m_dT;
     std::vector<int> moved(m_natoms, 0);
     for (int i = 0; i < m_natoms; ++i) {
@@ -826,17 +916,18 @@ void SimpleMD::Rattle(double* coord, double* grad)
             }
         }
     }
-    m_Epot = Energy(coord, grad);
+    for (int i = 0; i < m_natoms; ++i) {
+        m_current_geometry[3 * i + 0] = coord[3 * i + 0];
+        m_current_geometry[3 * i + 1] = coord[3 * i + 1];
+        m_current_geometry[3 * i + 2] = coord[3 * i + 2];
+    }
+    m_Epot = Energy(grad);
     double ekin = 0.0;
 
     for (int i = 0; i < m_natoms; ++i) {
         m_velocities[3 * i + 0] -= 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
         m_velocities[3 * i + 1] -= 0.5 * m_dT * grad[3 * i + 1] * m_rmass[3 * i + 1];
         m_velocities[3 * i + 2] -= 0.5 * m_dT * grad[3 * i + 2] * m_rmass[3 * i + 2];
-
-        m_current_geometry[3 * i + 0] = coord[3 * i + 0];
-        m_current_geometry[3 * i + 1] = coord[3 * i + 1];
-        m_current_geometry[3 * i + 2] = coord[3 * i + 2];
 
         m_gradient[3 * i + 0] = grad[3 * i + 0];
         m_gradient[3 * i + 1] = grad[3 * i + 1];
@@ -877,7 +968,7 @@ void SimpleMD::Rattle(double* coord, double* grad)
             }
         }
     }
-
+    delete[] coord;
     for (int i = 0; i < m_natoms; ++i) {
         ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
@@ -1239,11 +1330,11 @@ void SimpleMD::PrintMatrix(const double* matrix)
     std::cout << std::endl;
 }
 
-double SimpleMD::CleanEnergy(const double* coord, double* grad)
+double SimpleMD::CleanEnergy(double* grad)
 {
     EnergyCalculator interface(m_method, m_defaults);
     interface.setMolecule(m_molecule);
-    interface.updateGeometry(coord);
+    interface.updateGeometry(m_current_geometry);
 
     double Energy = interface.CalculateEnergy(true);
     interface.getGradient(grad);
@@ -1255,7 +1346,7 @@ double SimpleMD::CleanEnergy(const double* coord, double* grad)
     return Energy;
 }
 
-double SimpleMD::FastEnergy(const double* coord, double* grad)
+double SimpleMD::FastEnergy(double* grad)
 {
     m_interface->updateGeometry(m_current_geometry);
 
@@ -1318,6 +1409,10 @@ bool SimpleMD::WriteGeometry()
         }
     }
     return result;
+}
+
+void SimpleMD::None()
+{
 }
 
 void SimpleMD::Berendson()

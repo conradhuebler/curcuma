@@ -1,6 +1,6 @@
 /*
  * <Simple MD Module for Cucuma. >
- * Copyright (C) 2023 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2023 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -68,10 +68,10 @@ static json CurcumaMDJson{
     { "thermostat", "csvr" },
     { "respa", 1 },
     { "dipole", false },
-    { "seed", -1 },
+    { "seed", 1 },
     { "cleanenergy", false },
     { "wall", "none" }, // can be spheric or rect
-    { "wall_type", "logfermi" }, // can be logfermi or harmonic
+    { "wall_type", "harmonic" }, // can be logfermi or harmonic
     { "wall_spheric_radius", 0 },
     { "wall_xl", 0 },
     { "wall_yl", 0 },
@@ -83,7 +83,10 @@ static json CurcumaMDJson{
     { "wall_z_min", 0 },
     { "wall_z_max", 0 },
     { "wall_temp", 298.15 },
-    { "wall_beta", 6 }
+    { "wall_beta", 6 },
+    { "mtd", false },
+    { "plumed", "plumed.dat" },
+    { "mtd_dT", -1 }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -134,14 +137,14 @@ private:
 
     void InitVelocities(double scaling = 1.0);
 
-    double FastEnergy(const double* coord, double* grad);
-    double CleanEnergy(const double* coord, double* grad);
+    double FastEnergy(double* grad);
+    double CleanEnergy(double* grad);
 
     void PrintMatrix(const double* matrix);
 
     bool WriteGeometry();
-    void Verlet(double* coord, double* grad);
-    void Rattle(double* coord, double* grad);
+    void Verlet(double* grad);
+    void Rattle(double* grad);
 
     void Rattle_Verlet_First(double* coord, double* grad);
     void Rattle_Constrain_First(double* coord, double* grad);
@@ -154,6 +157,7 @@ private:
     double EKin();
     void Berendson();
     void CSVR();
+    void None();
 
     void InitialiseWalls();
 
@@ -165,8 +169,8 @@ private:
 
     void InitConstrainedBonds();
 
-    std::function<void(double* coord, double* grad)> Integrator;
-    std::function<double(double* coord, double* grad)> Energy;
+    std::function<void(double* grad)> Integrator;
+    std::function<double(double* grad)> Energy;
     std::function<double(double* grad)> WallPotential;
 
     std::vector<std::pair<std::pair<int, int>, double>> m_bond_constrained;
@@ -183,7 +187,7 @@ private:
     double m_T0 = 298.13, m_aver_Temp = 0, m_rmsd = 1.5;
     double m_x0 = 0, m_y0 = 0, m_z0 = 0;
     double m_Ekin_exchange = 0.0;
-    std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient, m_rmass;
+    std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient, m_rmass, m_virial;
     std::vector<int> m_atomtype;
     Molecule m_molecule;
     bool m_initialised = false, m_restart = false, m_writeUnique = true, m_opt = false, m_rescue = false, m_writeXYZ = true, m_writeinit = false, m_norestart = false;
@@ -207,10 +211,13 @@ private:
     std::vector<double> m_collected_dipole;
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;
-    std::string m_method = "UFF", m_initfile = "none", m_thermostat = "csvr";
+    std::string m_method = "UFF", m_initfile = "none", m_thermostat = "csvr", m_plumed;
     bool m_unstable = false;
     bool m_dipole = false;
     bool m_clean_energy = false;
+    bool m_mtd = false;
+    bool m_eval_mtd = true;
+    int m_mtd_dT = -1;
     int m_seed = -1;
     int m_time_step = 0;
     int m_dof = 0;

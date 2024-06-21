@@ -284,10 +284,58 @@ Matrix MunkressAssign(const Matrix& m)
     double min;
     int path_row_0 = 0;
     int path_col_0 = 0;
-    // RunTimer time;
+    // int iter = 0;
     while (loop) {
-        //  std::cout << time.Elapsed() << " ";
-        //  time.Reset();
+        int col = -1, row = -1;
+        //  iter++;
+        switch (step) {
+        case 1:
+            step = Step1(working, min2, covered_cols, covered_rows);
+            break;
+        case 2:
+            step = Step2(starred, working, covered_cols, covered_rows);
+            break;
+
+        case 3:
+            step = Step3(starred, covered_cols);
+            break;
+
+        case 4:
+            step = Step4(starred, working, col, row, covered_rows, covered_cols, path_row_0, path_col_0);
+            break;
+        case 5:
+            step = Step5(starred, path_count, path, path_row_0, path_col_0, covered_rows, covered_cols);
+            break;
+
+        case 6:
+            step = Step6(working, covered_rows, covered_cols);
+            break;
+        case 7:
+            loop = false;
+            break;
+        }
+    }
+    // std::cout << iter << ":";
+    return starred;
+}
+
+int SingleMunkressAssign(const Matrix& m)
+{
+    int step = 1;
+    double min2 = 0;
+    Matrix working = m;
+    Matrix starred = Matrix::Zero(m.cols(), m.rows());
+    Matrix path = Matrix::Zero(m.cols(), m.rows());
+
+    bool loop = true;
+    std::vector<int> covered_rows(m.cols(), 0), covered_cols(m.rows(), 0);
+    int path_count = 0;
+    double min;
+    int path_row_0 = 0;
+    int path_col_0 = 0;
+    int iter = 0;
+    while (iter < 10) {
+        iter++;
         int col = -1, row = -1;
 
         switch (step) {
@@ -317,6 +365,5 @@ Matrix MunkressAssign(const Matrix& m)
             break;
         }
     }
-    // std::cout << " ";
-    return starred;
+    return step;
 }

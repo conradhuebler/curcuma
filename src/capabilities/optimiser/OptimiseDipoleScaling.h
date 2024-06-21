@@ -91,6 +91,7 @@ struct OptDipoleFunctorNumericalDiff : Eigen::NumericalDiff<OptDipoleFunctor> {
 
 inline Vector OptimiseDipoleScaling(const std::vector<Molecule>& conformers, Vector scaling)
 {
+
     OptDipoleFunctor functor(6,conformers.size());
     functor.m_conformers = conformers;
     Eigen::NumericalDiff<OptDipoleFunctor> numDiff(functor);
@@ -121,6 +122,7 @@ inline Vector OptimiseDipoleScaling(const std::vector<Molecule>& conformers, Vec
     }
 
     return scaling;
+
 }
 
 

@@ -344,5 +344,8 @@ private:
     std::vector<QMDFFThread*> m_stored_threads;
     CxxThreadPool* m_threadpool;
     hbonds4::H4Correction m_h4correction;
+
+#ifdef USE_D3
     DFTD3Interface* m_d3;
+#endif
 };

@@ -47,16 +47,21 @@ DFTD3Interface::DFTD3Interface(const json& controller)
     m_damping = parameter["d_damping"];
     m_functional = parameter["d_func"];
     CreateParameter();
+#ifdef USE_D3
     m_error = dftd3_new_error();
+#endif
 }
 
 DFTD3Interface::DFTD3Interface()
 {
+#ifdef USE_D3
     m_error = dftd3_new_error();
+#endif
 }
 
 DFTD3Interface::~DFTD3Interface()
 {
+#ifdef USE_D3
     dftd3_delete_model(&m_disp);
     dftd3_delete_structure(&m_mol);
     dftd3_delete_error(&m_error);
@@ -64,6 +69,7 @@ DFTD3Interface::~DFTD3Interface()
 
     delete m_coord;
     delete m_attyp;
+#endif
 }
 
 void DFTD3Interface::PrintParameter() const
@@ -73,6 +79,7 @@ void DFTD3Interface::PrintParameter() const
 
 void DFTD3Interface::CreateParameter()
 {
+#ifdef USE_D3
     if (m_d3_a1 > 1e-8 || m_d3_a2 > 1e-8 || m_d3_s6 > 1e-8 || m_d3_s8 > 1e-8 || m_d3_s9 > 1e-8) {
         if (m_damping.compare("bj")) {
             m_param = dftd3_new_rational_damping(m_error, m_d3_s6, m_d3_s8, m_d3_s9, m_d3_a1, m_d3_a2, m_d3_alp);
@@ -101,6 +108,7 @@ void DFTD3Interface::CreateParameter()
         }
         delete[] cstr;
     }
+#endif
 }
 
 void DFTD3Interface::UpdateParameters(const json& controller)
@@ -148,9 +156,10 @@ bool DFTD3Interface::InitialiseMolecule(const std::vector<int>& atomtypes)
         m_coord[3 * i + 2] = (3 * i + 2) / au;
         m_attyp[i] = atomtypes[i];
     }
-
+#ifdef USE_D3
     m_mol = dftd3_new_structure(m_error, atomtypes.size(), m_attyp, m_coord, NULL, NULL);
     m_disp = dftd3_new_d3_model(m_error, m_mol);
+#endif
 
     return true;
 }
@@ -167,15 +176,19 @@ double DFTD3Interface::DFTD3Calculation(double* grad)
     double energy = 0;
     double sigma[9];
 
+#ifdef USE_D3
     dftd3_update_structure(m_error, m_mol, m_coord, NULL);
     dftd3_get_dispersion(m_error, m_mol, m_disp, m_param, &energy, grad, sigma);
+#endif
 
     return energy;
 }
 
 void DFTD3Interface::clear()
 {
+#ifdef USE_D3
     dftd3_delete_model(&m_disp);
     dftd3_delete_structure(&m_mol);
     dftd3_delete_error(&m_error);
+#endif
 }

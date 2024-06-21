@@ -66,12 +66,12 @@ static const json ConfScanJson = {
     { "skip_orders", false },
     { "MaxParam", -1 },
     { "UseOrders", -1 },
-    { "RMSDMethod", "hybrid" },
+    { "method", "hybrid" },
     { "MaxHTopoDiff", -1 },
     { "threads", 1 },
     { "RMSDElement", 7 },
     { "accepted", "" },
-    { "method", "" },
+    { "method", "free" },
     { "lastdE", -1 },
     { "fewerFile", false },
     { "skipinit", false },
@@ -108,7 +108,7 @@ class ConfScanThread : public CxxThread {
 public:
     ConfScanThread(const std::vector<std::vector<int>>& reorder_rules, double rmsd_threshold, int MaxHTopoDiff, bool reuse_only, const json& config)
     {
-        m_driver = new RMSDDriver(config, true);
+        m_driver = new RMSDDriver(config, false);
         m_config = config;
         m_reuse_only = reuse_only;
         m_reorder_rules = reorder_rules;

@@ -665,8 +665,10 @@ QMDFF::QMDFF(const json& controller)
     d3settings["d_a1"] = a1;
     d3settings["d_a2"] = a2;
     d3settings["d_alp"] = 1;
-
+#ifdef USE_D3
     m_d3 = new DFTD3Interface(d3settings);
+#endif
+
     m_h4correction.allocate(m_atom_types.size());
 
     readFF(parameter);
@@ -685,7 +687,10 @@ QMDFF::QMDFF(const json& controller)
 
 QMDFF::~QMDFF()
 {
+#ifdef USE_D3
     delete m_d3;
+#endif
+
     delete m_threadpool;
     for (int i = 0; i < m_stored_threads.size(); ++i)
         delete m_stored_threads[i];
@@ -805,7 +810,9 @@ void QMDFF::setMolecule(const std::vector<int>& atom_types, const Matrix& geomet
     m_atom_types = atom_types;
     m_geometry = geometry;
     m_gradient = Eigen::MatrixXd::Zero(m_atom_types.size(), 3);
+#ifdef USE_D3
     m_d3->InitialiseMolecule(m_atom_types);
+#endif
 }
 
 void QMDFF::writeParameterFile(const std::string& file) const
@@ -1182,7 +1189,9 @@ double QMDFF::Calculate(bool grd, bool verbose)
         m_h4correction.GradientHH()[i].x = 0;
         m_h4correction.GradientHH()[i].y = 0;
         m_h4correction.GradientHH()[i].z = 0;
+#ifdef USE_D3
         m_d3->UpdateAtom(i, m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2));
+#endif
     }
 
     double energy = 0.0;
@@ -1230,7 +1239,10 @@ double QMDFF::Calculate(bool grd, bool verbose)
 
         if (grd) {
             double grad[3 * m_atom_types.size()];
+#ifdef USE_D3
             d3_energy = m_d3->DFTD3Calculation(grad);
+#endif
+
             for (int i = 0; i < m_atom_types.size(); ++i) {
                 double val = grad[3 * i + 0] * au;
                 if (!std::isnan(val) && std::abs(val) < 1e10)
@@ -1243,7 +1255,10 @@ double QMDFF::Calculate(bool grd, bool verbose)
                     m_gradient(i, 2) += val;
             }
         } else
+#ifdef USE_D3
             d3_energy = m_d3->DFTD3Calculation(0);
+#endif
+
         energy += m_final_factor * m_h4_scaling * energy_h4 + m_final_factor * m_hh_scaling * energy_hh + d3_energy;
     }
     energy = bond_energy + angle_energy + dihedral_energy + inversion_energy; // + vdw_energy;

@@ -9,7 +9,7 @@
 	url = https://github.com/conradhuebler/ripser
 [submodule "external/xtb"]
 	path = external/xtb
-	url = https://github.com/conradhuebler/xtb
+	url = https://github.com/grimme-lab/xtb
 [submodule "external/tblite"]
 	path = external/tblite
 	url = https://github.com/tblite/tblite
@@ -22,3 +22,6 @@
 [submodule "external/simple-dftd3"]
 	path = external/simple-dftd3
 	url = https://github.com/dftd3/simple-dftd3
+[submodule "external/plumed2"]
+	path = external/plumed2
+	url = https://github.com/plumed/plumed2
