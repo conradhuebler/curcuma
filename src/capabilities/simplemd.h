@@ -86,7 +86,11 @@ static json CurcumaMDJson{
     { "wall_beta", 6 },
     { "mtd", false },
     { "plumed", "plumed.dat" },
-    { "mtd_dT", -1 }
+    { "mtd_dT", -1 },
+    { "rmsd_mtd", false },
+    { "k", 1 },
+    { "alpha", 1 },
+    { "mtd_steps", 50 }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -145,6 +149,7 @@ private:
     bool WriteGeometry();
     void Verlet(double* grad);
     void Rattle(double* grad);
+    void ApplyRMSDMTD(double* grad);
 
     void Rattle_Verlet_First(double* coord, double* grad);
     void Rattle_Constrain_First(double* coord, double* grad);
@@ -189,13 +194,15 @@ private:
     double m_Ekin_exchange = 0.0;
     std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient, m_rmass, m_virial;
     std::vector<int> m_atomtype;
-    Molecule m_molecule;
+    Molecule m_molecule, m_reference, m_target;
     bool m_initialised = false, m_restart = false, m_writeUnique = true, m_opt = false, m_rescue = false, m_writeXYZ = true, m_writeinit = false, m_norestart = false;
     int m_rmrottrans = 0, m_rattle_maxiter = 100;
     bool m_nocenter = false;
     EnergyCalculator* m_interface;
     RMSDTraj* m_unqiue;
     const std::vector<double> m_used_mass;
+    std::vector<Geometry> m_bias_structures;
+
     int m_unix_started = 0, m_prev_index = 0, m_max_rescue = 10, m_current_rescue = 0, m_currentTime = 0, m_max_top_diff = 15, m_step = 0;
     int m_writerestart = -1;
     int m_respa = 1;
@@ -207,6 +214,10 @@ private:
     double m_wall_potential = 0, m_average_wall_potential = 0;
     double m_virial_correction = 0, m_average_virial_correction = 0;
     double m_deltaT = 0;
+    double m_k = 1;
+    double m_alpha = 1;
+
+    int m_mtd_steps = 50;
     int m_rattle = 0;
     std::vector<double> m_collected_dipole;
     Matrix m_topo_initial;
@@ -217,6 +228,7 @@ private:
     bool m_clean_energy = false;
     bool m_mtd = false;
     bool m_eval_mtd = true;
+    bool m_rmsd_mtd = false;
     int m_mtd_dT = -1;
     int m_seed = -1;
     int m_time_step = 0;

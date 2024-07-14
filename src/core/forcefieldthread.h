@@ -86,7 +86,7 @@ class ForceFieldThread : public CxxThread {
 public:
     ForceFieldThread(int thread, int threads);
     virtual int execute() override;
-
+    virtual int Type() const { return 1; }
     void addBond(const Bond& bonds);
     void addAngle(const Angle& angles);
     void addDihedral(const Dihedral& dihedrals);
@@ -166,6 +166,8 @@ class D3Thread : public ForceFieldThread {
 public:
     D3Thread(int thread, int threads);
     ~D3Thread();
+    virtual int Type() const { return 2; }
+
     void setParamater(const json& parameter)
     {
 #ifdef USE_D3
@@ -194,6 +196,8 @@ class H4Thread : public ForceFieldThread {
 public:
     H4Thread(int thread, int threads);
     ~H4Thread();
+    virtual int Type() const { return 3; }
+
     void setParamater(const json& parameter)
     {
         m_h4correction.set_OH_O(parameter["h4_oh_o"].get<double>());

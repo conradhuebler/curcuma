@@ -114,6 +114,7 @@ public:
             m_qmdff->setParameter(parameter);
     }
 
+    inline json Parameter() const { return m_parameter; }
     std::vector<double> Charges() const;
     std::vector<double> Dipole() const;
 

@@ -233,6 +233,7 @@ int main(int argc, char **argv) {
             driver->TargetReorderd().writeXYZFile(tarfile + ".reordered.xyz");
 
             std::cout << Tools::Vector2String(driver->ReorderRules()) << std::endl;
+            std::cout << driver->Gradient() << std::endl;
             delete driver;
             exit(0);
         } else if (strcmp(argv[1], "-dock") == 0) {

@@ -81,11 +81,13 @@ public:
     const std::vector<Molecule>* Intermediates() const { return &m_intermediate; }
     void setBaseName(const std::string& basename) { m_basename = basename; }
     std::string Basename() const { return m_basename; }
+    inline json Parameter() const { return m_param; }
 
 protected:
     std::string m_result;
     Molecule m_molecule, m_final;
     json m_controller = OptJsonPrivate;
+    json m_param;
     std::vector<Molecule> m_intermediate;
     std::string m_basename;
 };
@@ -149,8 +151,8 @@ public:
     void setSinglePoint(bool sp) { m_singlepoint = sp; }
     inline const std::vector<Molecule>* Molecules() const { return &m_molecules; }
 
-    static Molecule LBFGSOptimise(Molecule* host, const json& controller, std::string& output, std::vector<Molecule>* intermediate, int thread = -1, const std::string& basename = "base");
-    static double SinglePoint(const Molecule* initial, const json& controller, std::string& output);
+    static Molecule LBFGSOptimise(Molecule* host, const json& controller, std::string& output, std::vector<Molecule>* intermediate, json& param, int thread = -1, const std::string& basename = "base");
+    static double SinglePoint(const Molecule* initial, const json& controller, std::string& output, json& param);
 
     void clear();
 

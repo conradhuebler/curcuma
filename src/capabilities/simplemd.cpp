@@ -31,6 +31,7 @@
 #include <time.h>
 
 #include "src/capabilities/curcumaopt.h"
+#include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
 
 #include "src/core/elements.h"
@@ -90,6 +91,13 @@ void SimpleMD::LoadControlJson()
     m_coupling = Json2KeyWord<double>(m_defaults, "coupling");
     if (m_coupling < m_dT)
         m_coupling = m_dT;
+
+    /* RMSD Metadynamik block */
+    /* this one is used to recover https://doi.org/10.1021/acs.jctc.9b00143 */
+    m_rmsd_mtd = Json2KeyWord<bool>(m_defaults, "rmsd_mtd");
+    m_k = Json2KeyWord<double>(m_defaults, "k");
+    m_alpha = Json2KeyWord<double>(m_defaults, "alpha");
+    m_mtd_steps = Json2KeyWord<int>(m_defaults, "mtd_steps");
 
     m_writerestart = Json2KeyWord<int>(m_defaults, "writerestart");
     m_respa = Json2KeyWord<int>(m_defaults, "respa");
@@ -359,11 +367,12 @@ void SimpleMD::InitVelocities(double scaling)
         Py += m_velocities[3 * i + 1] * m_mass[i];
         Pz += m_velocities[3 * i + 2] * m_mass[i];
     }
+    /*
     for (int i = 0; i < m_natoms; ++i) {
         m_velocities[3 * i + 0] -= Px / (m_mass[i] * m_natoms);
         m_velocities[3 * i + 1] -= Py / (m_mass[i] * m_natoms);
         m_velocities[3 * i + 2] -= Pz / (m_mass[i] * m_natoms);
-    }
+    }*/
 }
 
 void SimpleMD::InitialiseWalls()
@@ -719,6 +728,18 @@ void SimpleMD::start()
             }
         }
 #endif
+        if (m_rmsd_mtd) {
+            if (m_step % m_mtd_steps == 0) {
+                Geometry geometry = m_molecule.getGeometry();
+                for (int i = 0; i < m_natoms; ++i) {
+                    geometry(i, 0) = m_current_geometry[3 * i + 0] * au;
+                    geometry(i, 1) = m_current_geometry[3 * i + 1] * au;
+                    geometry(i, 2) = m_current_geometry[3 * i + 2] * au;
+                }
+                m_bias_structures.push_back(geometry);
+            }
+            ApplyRMSDMTD(gradient);
+        }
 
         if (m_step % m_dump == 0) {
             bool write = WriteGeometry();
@@ -838,7 +859,7 @@ void SimpleMD::Verlet(double* grad)
     }
     ekin *= 0.5;
     double T = 2.0 * ekin / (kb_Eh * m_dof);
-    m_unstable = T > 100 * m_T;
+    m_unstable = false; // T > 100 * m_T;
     m_T = T;
 }
 
@@ -976,6 +997,23 @@ void SimpleMD::Rattle(double* grad)
     double T = 2.0 * ekin / (kb_Eh * m_dof);
     m_unstable = T > 10000 * m_T;
     m_T = T;
+}
+
+void SimpleMD::ApplyRMSDMTD(double* grad)
+{
+    Geometry current_geometry = m_molecule.getGeometry();
+    for (int i = 0; i < m_natoms; ++i) {
+        current_geometry(i, 0) = m_current_geometry[3 * i + 0] * au;
+        current_geometry(i, 1) = m_current_geometry[3 * i + 1] * au;
+        current_geometry(i, 2) = m_current_geometry[3 * i + 2] * au;
+    }
+    /*
+    Geometry gradient;
+    json rmsd = RMSDJson;
+    RMSDDriver driver(rmsd, true);
+    m_reference.setGeometry(current_geometry);
+    driver.setReference(m_reference);
+*/
 }
 
 void SimpleMD::Rattle_Verlet_First(double* coord, double* grad)

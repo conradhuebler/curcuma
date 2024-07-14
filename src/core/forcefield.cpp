@@ -185,6 +185,16 @@ void ForceField::AutoRanges()
         m_threadpool->addThread(thread);
         m_stored_threads.push_back(thread);
     }
+    int h4 = m_parameters["h4"];
+    if (h4) {
+        if (free_threads > 1)
+            free_threads--;
+        H4Thread* thread = new H4Thread(m_threads - 1, free_threads);
+        thread->setParamater(m_parameters);
+        thread->Initialise(m_atom_types);
+        m_threadpool->addThread(thread);
+        m_stored_threads.push_back(thread);
+    }
     for (int i = 0; i < free_threads; ++i) {
         ForceFieldThread* thread = new ForceFieldThread(i, free_threads);
         thread->setGeometry(m_geometry, false);
@@ -263,14 +273,20 @@ double ForceField::Calculate(bool gradient, bool verbose)
         angle_energy += m_stored_threads[i]->AngleEnergy();
         dihedral_energy += m_stored_threads[i]->DihedralEnergy();
         inversion_energy += m_stored_threads[i]->InversionEnergy();
-        vdw_energy += m_stored_threads[i]->VdWEnergy();
-        rep_energy += m_stored_threads[i]->RepEnergy();
+        if (m_stored_threads[i]->Type() != 3)
+            vdw_energy += m_stored_threads[i]->VdWEnergy();
+        else
+            h4_energy += m_stored_threads[i]->VdWEnergy();
+        if (m_stored_threads[i]->Type() != 3)
+            rep_energy += m_stored_threads[i]->RepEnergy();
+        else
+            hh_energy += m_stored_threads[i]->RepEnergy();
         // eq_energy += m_stored_threads[i]->RepEnergy();
 
         m_gradient += m_stored_threads[i]->Gradient();
     }
 
-    energy = bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy + rep_energy + eq_energy;
+    energy = bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy + rep_energy + eq_energy + h4_energy + hh_energy;
     if (verbose) {
         std::cout << "Total energy " << energy << " Eh. Sum of " << std::endl
                   << "Bond Energy " << bond_energy << " Eh" << std::endl

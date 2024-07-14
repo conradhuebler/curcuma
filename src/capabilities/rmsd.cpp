@@ -1561,3 +1561,8 @@ bool RMSDDriver::MolAlignLib()
     }
     return true;
 }
+
+Geometry RMSDDriver::Gradient() const
+{
+    return (m_reference.getGeometry() - m_target.getGeometry()) / (RMSD() * m_target.getGeometry().rows());
+}

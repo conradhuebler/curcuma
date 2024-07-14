@@ -30,7 +30,7 @@ ForceFieldThread::ForceFieldThread(int thread, int threads)
     , m_threads(threads)
 {
     setAutoDelete(false);
-    m_final_factor = 1 / 2625.15 * 4.19;
+    m_final_factor = 1; // / 2625.15 * 4.19;
     // m_d = parameters["differential"].get<double>();
     m_d = 1e-7;
 }

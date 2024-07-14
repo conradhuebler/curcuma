@@ -117,8 +117,23 @@ const json FFGenerator{
     { "rep_scaling", 1 },
     { "dihedral_scaling", 1 },
     { "coulomb_scaling", 1 },
-    { "h4_scaling", 0 },
-    { "hh_scaling", 0 }
+    { "h4", 0 },
+    { "hh", 0 },
+    { "h4_oh_o", 2.32 },
+    { "h4_oh_n", 3.10 },
+    { "h4_nh_o", 1.07 },
+    { "h4_nh_n", 2.01 },
+    { "h4_wh_o", 0.42 },
+    { "h4_nh4", 3.61 },
+    { "h4_coo", 1.41 },
+    { "hh_rep_k", 0.42 },
+    { "hh_rep_e", 12.7 },
+    { "hh_rep_r0", 2.3 },
+    { "bond_force", 1.0584 / 7.25 },
+    { "angle_force", 1.0584 / 7.25 },
+    { "torsion_force", 1 / 627.503 },
+    { "inversion_force", 1 / 627.503 },
+    { "vdw_force", 1 / 627.503 }
 };
 
 class ForceFieldGenerator {
@@ -154,9 +169,9 @@ private:
     std::vector<int> m_atom_types, m_coordination;
     std::vector<std::set<int>> m_ignored_vdw;
     std::vector<json> m_bonds, m_angles, m_dihedrals, m_inversions, m_vdws, m_eqs;
-    double m_uff_bond_force = 664.12, m_uff_angle_force = 664.12, m_scaling = 1.4;
+    double m_uff_bond_force = 1.0584 /* in Eh kcal/mol = 664.12 */, m_uff_angle_force = 1.0584 /* in Eh kcal/mol = 664.12 */, m_uff_dihedral_force = 1, m_uff_inversion_force = 1, m_vdw_force = 1, m_scaling = 1.4;
     double m_au = 1;
-
+    double m_glob_scale = 2;
     int m_ff_type = 1;
     std::string m_method = "uff";
     json m_parameter;

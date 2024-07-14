@@ -225,6 +225,8 @@ public:
     bool MolAlignLib();
     static std::pair<double, Matrix> MakeCostMatrix(const Geometry& reference, const Geometry& target, const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms, int costmatrix);
 
+    Geometry Gradient() const;
+
 private:
     /* Read Controller has to be implemented for all */
     void LoadControlJson() override;

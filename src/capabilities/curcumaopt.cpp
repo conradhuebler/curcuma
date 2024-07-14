@@ -49,7 +49,7 @@ using namespace LBFGSpp;
 
 int OptThread::execute()
 {
-    m_final = CurcumaOpt::LBFGSOptimise(&m_molecule, m_controller, m_result, &m_intermediate, ThreadId(), Basename() + ".opt.trj");
+    m_final = CurcumaOpt::LBFGSOptimise(&m_molecule, m_controller, m_result, &m_intermediate, m_param, ThreadId(), Basename() + ".opt.trj");
     return 0;
 }
 
@@ -57,7 +57,7 @@ int SPThread::execute()
 {
     auto start = std::chrono::system_clock::now();
 
-    double energy = CurcumaOpt::SinglePoint(&m_molecule, m_controller, m_result);
+    double energy = CurcumaOpt::SinglePoint(&m_molecule, m_controller, m_result, m_param);
     m_final = m_molecule;
     m_final.setEnergy(energy);
     auto end = std::chrono::system_clock::now();
@@ -136,6 +136,7 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
         if (m_hessian) {
             Hessian hess(m_method, m_defaults, false);
             hess.setMolecule(*iter);
+            hess.setParameter(interface.Parameter());
             hess.CalculateHessian(m_hessian);
         }
         auto end = std::chrono::system_clock::now();
@@ -192,6 +193,7 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
         Molecule* mol2 = new Molecule(thread->getMolecule());
         if (m_hessian) {
             Hessian hess(m_method, m_defaults, false);
+            hess.setParameter(thread->Parameter());
             hess.setMolecule(mol2);
             hess.CalculateHessian(m_hessian);
         }
@@ -211,7 +213,7 @@ void CurcumaOpt::clear()
     m_molecules.clear();
 }
 
-double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, std::string& output)
+double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, std::string& output, json& param)
 {
     std::string method = Json2KeyWord<std::string>(controller, "method");
 
@@ -228,6 +230,7 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, 
 
     EnergyCalculator interface(method, controller);
     interface.setMolecule(*initial);
+    param = interface.Parameter();
 
     double energy = interface.CalculateEnergy(true, true);
     double store = 0;
@@ -243,7 +246,7 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, 
     return energy;
 }
 
-Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, const json& controller, std::string& output, std::vector<Molecule>* intermediate, int thread, const std::string& basename)
+Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, const json& controller, std::string& output, std::vector<Molecule>* intermediate, json& parameters, int thread, const std::string& basename)
 {
     bool printOutput = Json2KeyWord<bool>(controller, "printOutput");
     bool fusion = Json2KeyWord<bool>(controller, "fusion");
@@ -280,7 +283,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, const json& controller, st
     EnergyCalculator interface(method, controller);
 
     interface.setMolecule(*initial);
-
+    parameters = interface.Parameter();
     double final_energy = interface.CalculateEnergy(true);
     initial->setEnergy(final_energy);
     initial->writeXYZFile(basename + ".t" + std::to_string(thread) + ".xyz");

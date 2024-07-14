@@ -80,8 +80,8 @@ void HessianThread::Numerical()
     m_geom_im_jm(m_j, m_xj) -= m_d;
 
     EnergyCalculator energy(m_method, m_controller);
-    energy.setMolecule(m_molecule);
     energy.setParameter(m_parameter);
+    energy.setMolecule(m_molecule);
 
     double d2 = 1 / (4 * m_d * m_d);
 
@@ -107,8 +107,8 @@ void HessianThread::Seminumerical()
     // std::cout << m_controller << std::endl;
 
     EnergyCalculator energy(m_method, m_controller);
-    energy.setMolecule(m_molecule);
     energy.setParameter(m_parameter);
+    energy.setMolecule(m_molecule);
 
     energy.updateGeometry(m_geom_ip_jp);
     energy.CalculateEnergy(true, false);
