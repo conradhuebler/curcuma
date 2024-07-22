@@ -88,9 +88,11 @@ static json CurcumaMDJson{
     { "plumed", "plumed.dat" },
     { "mtd_dT", -1 },
     { "rmsd_mtd", false },
-    { "k", 1 },
-    { "alpha", 1 },
-    { "mtd_steps", 50 }
+    { "k_rmsd", 0.5 },
+    { "alpha_rmsd", 0.5 },
+    { "rmsd_rmsd", 0.5 },
+    { "mtd_steps", 1 },
+    { "max_rmsd_N", -1 }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -214,11 +216,14 @@ private:
     double m_wall_potential = 0, m_average_wall_potential = 0;
     double m_virial_correction = 0, m_average_virial_correction = 0;
     double m_deltaT = 0;
-    double m_k = 1;
-    double m_alpha = 1;
-
+    double m_k_rmsd = 0.002;
+    double m_alpha_rmsd = 0.5;
+    double m_bias_energy = 0;
+    double m_rmsd_rmsd = 1;
+    int m_max_rmsd_N = -1;
     int m_mtd_steps = 50;
     int m_rattle = 0;
+    int m_reoccur = 0;
     std::vector<double> m_collected_dipole;
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;

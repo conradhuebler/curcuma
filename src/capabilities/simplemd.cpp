@@ -95,10 +95,11 @@ void SimpleMD::LoadControlJson()
     /* RMSD Metadynamik block */
     /* this one is used to recover https://doi.org/10.1021/acs.jctc.9b00143 */
     m_rmsd_mtd = Json2KeyWord<bool>(m_defaults, "rmsd_mtd");
-    m_k = Json2KeyWord<double>(m_defaults, "k");
-    m_alpha = Json2KeyWord<double>(m_defaults, "alpha");
+    m_k_rmsd = Json2KeyWord<double>(m_defaults, "k_rmsd");
+    m_alpha_rmsd = Json2KeyWord<double>(m_defaults, "alpha_rmsd");
     m_mtd_steps = Json2KeyWord<int>(m_defaults, "mtd_steps");
-
+    m_rmsd_rmsd = Json2KeyWord<double>(m_defaults, "rmsd_rmsd");
+    m_max_rmsd_N = Json2KeyWord<int>(m_defaults, "max_rmsd_N");
     m_writerestart = Json2KeyWord<int>(m_defaults, "writerestart");
     m_respa = Json2KeyWord<int>(m_defaults, "respa");
     m_dipole = Json2KeyWord<bool>(m_defaults, "dipole");
@@ -736,7 +737,7 @@ void SimpleMD::start()
                     geometry(i, 1) = m_current_geometry[3 * i + 1] * au;
                     geometry(i, 2) = m_current_geometry[3 * i + 2] * au;
                 }
-                m_bias_structures.push_back(geometry);
+                // m_bias_structures.push_back(geometry);
             }
             ApplyRMSDMTD(gradient);
         }
@@ -1007,13 +1008,53 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
         current_geometry(i, 1) = m_current_geometry[3 * i + 1] * au;
         current_geometry(i, 2) = m_current_geometry[3 * i + 2] * au;
     }
-    /*
-    Geometry gradient;
+
+    Geometry gradient = Eigen::MatrixXd::Zero(m_natoms, 3);
+
     json rmsd = RMSDJson;
+    rmsd["silent"] = true;
+    rmsd["reorder"] = false;
     RMSDDriver driver(rmsd, true);
     m_reference.setGeometry(current_geometry);
     driver.setReference(m_reference);
-*/
+    if (m_bias_structures.size() == 0) {
+        m_bias_structures.push_back(current_geometry);
+        std::cout << m_bias_structures.size() << " stored structures currently" << std::endl;
+    }
+    bool add_structure = true;
+    int index = 0;
+    for (const auto& geo : m_bias_structures) {
+        int factor = 1;
+        m_target.setGeometry(geo);
+        driver.setTarget(m_target);
+        driver.start();
+        double rmsd = driver.RMSD();
+        /*if (rmsd < m_rmsd_rmsd)
+            add_structure = false;*/
+        if (index == 0) {
+            m_reoccur += rmsd < m_rmsd_rmsd;
+            // factor = m_reoccur;
+            //  write to hills and colvar for first structure
+        }
+        m_bias_energy = m_k_rmsd * exp(-rmsd * rmsd * m_alpha_rmsd) * factor;
+        double dEdR = -2 * m_alpha_rmsd * m_k_rmsd / m_natoms * m_k_rmsd * exp(-rmsd * rmsd * m_alpha_rmsd);
+        gradient += driver.Gradient() * dEdR * factor;
+        index++;
+    }
+    for (int i = 0; i < m_natoms; ++i) {
+        grad[3 * i + 0] = gradient(i, 0);
+        grad[3 * i + 1] = gradient(i, 1);
+        grad[3 * i + 2] = gradient(i, 2);
+    }
+
+    if (add_structure) {
+        m_bias_structures.push_back(current_geometry);
+        if (m_max_rmsd_N > 0) {
+            if (m_max_rmsd_N <= m_bias_structures.size())
+                m_bias_structures.erase(m_bias_structures.begin() + 1);
+        }
+        // std::cout << m_bias_structures.size() << " stored structures currently" << std::endl;
+    }
 }
 
 void SimpleMD::Rattle_Verlet_First(double* coord, double* grad)
