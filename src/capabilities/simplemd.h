@@ -34,6 +34,14 @@
 
 #include "curcumamethod.h"
 
+struct BiasStructure {
+    Geometry geometry;
+    double time = 0;
+    double rmsd_reference = 0;
+    double energy = 0;
+    int counter = 0;
+};
+
 static json CurcumaMDJson{
     { "writeXYZ", true },
     { "printOutput", true },
@@ -88,11 +96,12 @@ static json CurcumaMDJson{
     { "plumed", "plumed.dat" },
     { "mtd_dT", -1 },
     { "rmsd_mtd", false },
-    { "k_rmsd", 0.5 },
-    { "alpha_rmsd", 0.5 },
-    { "rmsd_rmsd", 0.5 },
+    { "k_rmsd", 0.04 },
+    { "alpha_rmsd", 10 },
+    { "rmsd_rmsd", 1 },
     { "mtd_steps", 1 },
-    { "max_rmsd_N", -1 }
+    { "max_rmsd_N", -1 },
+    { "multi_rmsd", 1e4 }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -187,7 +196,7 @@ private:
     double m_T = 0, m_Epot = 0, m_aver_Epot = 0, m_Ekin = 0, m_aver_Ekin = 0, m_Etot = 0, m_aver_Etot = 0, m_aver_dipol = 0, m_curr_dipole = 0;
     double m_rm_COM = 100;
     int m_rm_COM_step = -1;
-    int m_hmass = 4;
+    int m_hmass = 1;
     double m_single_step = 1;
     double m_dT = 0.5, m_currentStep = 0, m_maxtime = 1000;
     int m_spin = 0, m_charge = 0, m_print = 100;
@@ -204,6 +213,7 @@ private:
     RMSDTraj* m_unqiue;
     const std::vector<double> m_used_mass;
     std::vector<Geometry> m_bias_structures;
+    std::vector<BiasStructure> m_biased_structures;
 
     int m_unix_started = 0, m_prev_index = 0, m_max_rescue = 10, m_current_rescue = 0, m_currentTime = 0, m_max_top_diff = 15, m_step = 0;
     int m_writerestart = -1;
@@ -220,10 +230,11 @@ private:
     double m_alpha_rmsd = 0.5;
     double m_bias_energy = 0;
     double m_rmsd_rmsd = 1;
+    double m_mult_rmsd = 1e4;
     int m_max_rmsd_N = -1;
     int m_mtd_steps = 50;
     int m_rattle = 0;
-    int m_reoccur = 0;
+    int m_colvar_incr = 0;
     std::vector<double> m_collected_dipole;
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;

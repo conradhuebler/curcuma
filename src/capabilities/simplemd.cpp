@@ -117,6 +117,7 @@ void SimpleMD::LoadControlJson()
     m_norestart = Json2KeyWord<bool>(m_defaults, "norestart");
     m_dt2 = m_dT * m_dT;
     m_rm_COM = Json2KeyWord<double>(m_defaults, "rm_COM");
+    m_mult_rmsd = Json2KeyWord<double>(m_defaults, "multi_rmsd");
     int rattle = Json2KeyWord<int>(m_defaults, "rattle");
     m_rattle_maxiter = Json2KeyWord<int>(m_defaults, "rattle_maxiter");
     if (rattle == 1) {
@@ -687,7 +688,8 @@ void SimpleMD::start()
                 plumed_finalize(plumedmain); // Call the plumed destructor
             }
 #endif
-            return;
+
+            break;
         }
 
         if (m_rm_COM_step > 0 && m_step % m_rm_COM_step == 0) {
@@ -730,16 +732,16 @@ void SimpleMD::start()
         }
 #endif
         if (m_rmsd_mtd) {
-            if (m_step % m_mtd_steps == 0) {
-                Geometry geometry = m_molecule.getGeometry();
-                for (int i = 0; i < m_natoms; ++i) {
-                    geometry(i, 0) = m_current_geometry[3 * i + 0] * au;
-                    geometry(i, 1) = m_current_geometry[3 * i + 1] * au;
-                    geometry(i, 2) = m_current_geometry[3 * i + 2] * au;
-                }
-                // m_bias_structures.push_back(geometry);
+            /*if (m_step % m_mtd_steps == 0) */ {
             }
-            ApplyRMSDMTD(gradient);
+            if (m_eval_mtd) {
+                ApplyRMSDMTD(gradient);
+            } else {
+                if (std::abs(m_T0 - m_aver_Temp) < m_mtd_dT && m_step > 10) {
+                    m_eval_mtd = true;
+                    std::cout << "Starting with MetaDynamics ..." << std::endl;
+                }
+            }
         }
 
         if (m_step % m_dump == 0) {
@@ -828,6 +830,16 @@ void SimpleMD::start()
         plumed_finalize(plumedmain); // Call the plumed destructor
     }
 #endif
+    std::cout << "Sum of Energy of COLVARs:" << std::endl;
+    for (int i = 0; i < m_biased_structures.size(); ++i) {
+        std::cout << m_biased_structures[i].rmsd_reference << "\t" << m_biased_structures[i].energy << "\t" << m_biased_structures[i].counter / double(m_colvar_incr) * 100 << std::endl;
+
+        m_molecule.setGeometry(m_biased_structures[i].geometry);
+        m_molecule.setEnergy(m_biased_structures[i].energy);
+        m_molecule.setName(std::to_string(i) + " " + std::to_string(m_biased_structures[i].rmsd_reference));
+        m_molecule.appendXYZFile(Basename() + ".mtd.xyz");
+    }
+    std::cout << std::endl;
     std::ofstream restart_file("curcuma_final.json");
     restart_file << WriteRestartInformation() << std::endl;
     std::remove("curcuma_restart.json");
@@ -860,7 +872,7 @@ void SimpleMD::Verlet(double* grad)
     }
     ekin *= 0.5;
     double T = 2.0 * ekin / (kb_Eh * m_dof);
-    m_unstable = false; // T > 100 * m_T;
+    m_unstable = T > 10000 * m_T;
     m_T = T;
 }
 
@@ -1004,9 +1016,9 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
 {
     Geometry current_geometry = m_molecule.getGeometry();
     for (int i = 0; i < m_natoms; ++i) {
-        current_geometry(i, 0) = m_current_geometry[3 * i + 0] * au;
-        current_geometry(i, 1) = m_current_geometry[3 * i + 1] * au;
-        current_geometry(i, 2) = m_current_geometry[3 * i + 2] * au;
+        current_geometry(i, 0) = m_current_geometry[3 * i + 0];
+        current_geometry(i, 1) = m_current_geometry[3 * i + 1];
+        current_geometry(i, 2) = m_current_geometry[3 * i + 2];
     }
 
     Geometry gradient = Eigen::MatrixXd::Zero(m_natoms, 3);
@@ -1017,43 +1029,85 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
     RMSDDriver driver(rmsd, true);
     m_reference.setGeometry(current_geometry);
     driver.setReference(m_reference);
-    if (m_bias_structures.size() == 0) {
-        m_bias_structures.push_back(current_geometry);
-        std::cout << m_bias_structures.size() << " stored structures currently" << std::endl;
+    if (m_biased_structures.size() == 0) {
+        BiasStructure str;
+        str.geometry = current_geometry;
+        str.rmsd_reference = 0;
+        str.time = m_currentTime;
+        str.counter = 1;
+        m_biased_structures.push_back(str);
+        std::cout << m_biased_structures.size() << " stored structures currently" << std::endl;
     }
-    bool add_structure = true;
-    int index = 0;
-    for (const auto& geo : m_bias_structures) {
-        int factor = 1;
-        m_target.setGeometry(geo);
+    double rmsd_reference = 0;
+    int add_structure = 0;
+    for (int i = 0; i < m_biased_structures.size(); ++i) {
+        double factor = 1;
+        m_target.setGeometry(m_biased_structures[i].geometry);
         driver.setTarget(m_target);
         driver.start();
         double rmsd = driver.RMSD();
-        /*if (rmsd < m_rmsd_rmsd)
-            add_structure = false;*/
-        if (index == 0) {
-            m_reoccur += rmsd < m_rmsd_rmsd;
+        double bias_energy = m_k_rmsd * exp(-rmsd * rmsd * m_alpha_rmsd);
+        /*
+                if (bias_energy >= m_k_rmsd*1e-4 && bias_energy > 0)
+                {
+                }*/
+        factor = m_biased_structures[i].counter / double(m_mtd_steps);
+        if (m_k_rmsd > bias_energy * m_mult_rmsd)
+            add_structure++;
+        else {
+
+            m_biased_structures[i].counter++;
+            m_biased_structures[i].energy += bias_energy;
+            m_colvar_incr++;
+        }
+        if (i == 0) {
+            rmsd_reference = rmsd;
             // factor = m_reoccur;
             //  write to hills and colvar for first structure
         }
-        m_bias_energy = m_k_rmsd * exp(-rmsd * rmsd * m_alpha_rmsd) * factor;
+        bias_energy *= factor;
+
+        m_bias_energy += bias_energy;
+        std::ofstream colvarfile;
+        if (i == 0) {
+            colvarfile.open("COLVAR", std::iostream::app);
+        } else {
+            colvarfile.open("COLVAR_" + std::to_string(i), std::iostream::app);
+        }
+        colvarfile << m_currentStep << " " << rmsd << " " << bias_energy << " " << m_biased_structures[i].counter << " " << factor << std::endl;
+        colvarfile.close();
+
+        std::ofstream hillsfile;
+        if (i == 0) {
+            hillsfile.open("HILLS", std::iostream::app);
+        } else {
+            hillsfile.open("HILLS_" + std::to_string(i), std::iostream::app);
+        }
+        hillsfile << m_currentStep << " " << rmsd << " " << m_alpha_rmsd << " " << m_k_rmsd << " " << "-1" << std::endl;
+        hillsfile.close();
+
         double dEdR = -2 * m_alpha_rmsd * m_k_rmsd / m_natoms * m_k_rmsd * exp(-rmsd * rmsd * m_alpha_rmsd);
         gradient += driver.Gradient() * dEdR * factor;
-        index++;
     }
+
     for (int i = 0; i < m_natoms; ++i) {
         grad[3 * i + 0] = gradient(i, 0);
         grad[3 * i + 1] = gradient(i, 1);
         grad[3 * i + 2] = gradient(i, 2);
     }
 
-    if (add_structure) {
-        m_bias_structures.push_back(current_geometry);
+    if (add_structure == m_biased_structures.size()) {
+        BiasStructure str;
+        str.geometry = current_geometry;
+        str.rmsd_reference = rmsd_reference;
+        str.time = m_currentStep;
+        str.counter = 1;
+        m_biased_structures.push_back(str);
         if (m_max_rmsd_N > 0) {
             if (m_max_rmsd_N <= m_bias_structures.size())
-                m_bias_structures.erase(m_bias_structures.begin() + 1);
+                m_biased_structures.erase(m_biased_structures.begin() + 1);
         }
-        // std::cout << m_bias_structures.size() << " stored structures currently" << std::endl;
+        std::cout << m_biased_structures.size() << " stored structures currently" << std::endl;
     }
 }
 
