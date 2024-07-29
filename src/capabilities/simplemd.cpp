@@ -1040,6 +1040,7 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
     }
     double rmsd_reference = 0;
     int add_structure = 0;
+    double current_bias = 0;
     for (int i = 0; i < m_biased_structures.size(); ++i) {
         double factor = 1;
         m_target.setGeometry(m_biased_structures[i].geometry);
@@ -1053,7 +1054,9 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
                 }*/
         factor = m_biased_structures[i].counter / double(m_mtd_steps);
         if (m_k_rmsd > bias_energy * m_mult_rmsd)
+        {
             add_structure++;
+        }
         else {
 
             m_biased_structures[i].counter++;
@@ -1067,14 +1070,12 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
         }
         bias_energy *= factor;
 
-        m_bias_energy += bias_energy;
+        current_bias += bias_energy;
         std::ofstream colvarfile;
-        if (i == 0) {
-            colvarfile.open("COLVAR", std::iostream::app);
-        } else {
-            colvarfile.open("COLVAR_" + std::to_string(i), std::iostream::app);
-        }
-        colvarfile << m_currentStep << " " << rmsd << " " << bias_energy << " " << m_biased_structures[i].counter << " " << factor << std::endl;
+
+        colvarfile.open("COLVAR_" + std::to_string(i), std::iostream::app);
+
+        colvarfile << m_currentStep << " " << rmsd << " " << bias_energy  << " " << m_biased_structures[i].counter << " " << factor << std::endl;
         colvarfile.close();
 
         std::ofstream hillsfile;
@@ -1086,17 +1087,31 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
         hillsfile << m_currentStep << " " << rmsd << " " << m_alpha_rmsd << " " << m_k_rmsd << " " << "-1" << std::endl;
         hillsfile.close();
 
-        double dEdR = -2 * m_alpha_rmsd * m_k_rmsd / m_natoms * m_k_rmsd * exp(-rmsd * rmsd * m_alpha_rmsd);
+        double dEdR = -2 * m_alpha_rmsd * m_k_rmsd / m_natoms * exp(-rmsd * rmsd * m_alpha_rmsd);
         gradient += driver.Gradient() * dEdR * factor;
     }
 
+    std::ofstream colvarfile;
+    colvarfile.open("COLVAR", std::iostream::app);
+    colvarfile << m_currentStep << " ";
+    m_molecule.setGeometry(current_geometry);
+    auto fragments = m_molecule.GetFragments();
+    for(int i = 0; i < fragments.size(); ++i)
+        for(int j = 0; j < i; ++j)
+        {
+            colvarfile << (m_molecule.Centroid(true, i) -  m_molecule.Centroid(true,j)).norm()<< " ";
+        }
+    colvarfile << current_bias  << " "  << std::endl;
+    colvarfile.close();
+
+    m_bias_energy += current_bias;
     for (int i = 0; i < m_natoms; ++i) {
         grad[3 * i + 0] = gradient(i, 0);
         grad[3 * i + 1] = gradient(i, 1);
         grad[3 * i + 2] = gradient(i, 2);
     }
 
-    if (add_structure == m_biased_structures.size()) {
+    if (current_bias*m_mult_rmsd < 1) {
         BiasStructure str;
         str.geometry = current_geometry;
         str.rmsd_reference = rmsd_reference;
