@@ -703,7 +703,7 @@ void SimpleMD::start()
                 RemoveRotation(m_velocities);
             }
         }
-        WallPotential(gradient);
+        // WallPotential(gradient);
         Integrator(gradient);
 
         ThermostatFunction();
@@ -717,6 +717,8 @@ void SimpleMD::start()
 
             plumed_cmd(plumedmain, "setEnergy", &m_Epot);
             plumed_cmd(plumedmain, "setForces", &m_gradient[0]);
+// FIXME
+#pragma message("we have to move the forces to the integrator")
             plumed_cmd(plumedmain, "setVirial", &m_virial[0]);
 
             plumed_cmd(plumedmain, "setMasses", &m_mass[0]);
@@ -732,10 +734,10 @@ void SimpleMD::start()
         }
 #endif
         if (m_rmsd_mtd) {
-            /*if (m_step % m_mtd_steps == 0) */ {
-            }
             if (m_eval_mtd) {
-                ApplyRMSDMTD(gradient);
+                if (m_step % m_mtd_steps == 0) {
+                    // ApplyRMSDMTD(gradient);
+                }
             } else {
                 if (std::abs(m_T0 - m_aver_Temp) < m_mtd_dT && m_step > 10) {
                     m_eval_mtd = true;
@@ -858,6 +860,13 @@ void SimpleMD::Verlet(double* grad)
         m_velocities[3 * i + 2] = m_velocities[3 * i + 2] - 0.5 * m_dT * grad[3 * i + 2] * m_rmass[3 * i + 2];
     }
     m_Epot = Energy(grad);
+
+    if (m_eval_mtd) {
+        if (m_step % m_mtd_steps == 0) {
+            ApplyRMSDMTD(grad);
+        }
+    }
+    WallPotential(grad);
     double ekin = 0.0;
 
     for (int i = 0; i < m_natoms; ++i) {
@@ -956,6 +965,12 @@ void SimpleMD::Rattle(double* grad)
         m_current_geometry[3 * i + 2] = coord[3 * i + 2];
     }
     m_Epot = Energy(grad);
+    if (m_eval_mtd) {
+        if (m_step % m_mtd_steps == 0) {
+            ApplyRMSDMTD(grad);
+        }
+    }
+    WallPotential(grad);
     double ekin = 0.0;
 
     for (int i = 0; i < m_natoms; ++i) {
@@ -1048,25 +1063,16 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
         driver.start();
         double rmsd = driver.RMSD();
         double bias_energy = m_k_rmsd * exp(-rmsd * rmsd * m_alpha_rmsd);
-        /*
-                if (bias_energy >= m_k_rmsd*1e-4 && bias_energy > 0)
-                {
-                }*/
-        factor = m_biased_structures[i].counter / double(m_mtd_steps);
-        if (m_k_rmsd > bias_energy * m_mult_rmsd)
-        {
-            add_structure++;
-        }
-        else {
 
+        if (bias_energy * m_mult_rmsd > 1) {
             m_biased_structures[i].counter++;
             m_biased_structures[i].energy += bias_energy;
             m_colvar_incr++;
         }
+        factor = m_biased_structures[i].counter;
+
         if (i == 0) {
             rmsd_reference = rmsd;
-            // factor = m_reoccur;
-            //  write to hills and colvar for first structure
         }
         bias_energy *= factor;
 
@@ -1106,9 +1112,9 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
 
     m_bias_energy += current_bias;
     for (int i = 0; i < m_natoms; ++i) {
-        grad[3 * i + 0] = gradient(i, 0);
-        grad[3 * i + 1] = gradient(i, 1);
-        grad[3 * i + 2] = gradient(i, 2);
+        grad[3 * i + 0] += gradient(i, 0);
+        grad[3 * i + 1] += gradient(i, 1);
+        grad[3 * i + 2] += gradient(i, 2);
     }
 
     if (current_bias*m_mult_rmsd < 1) {

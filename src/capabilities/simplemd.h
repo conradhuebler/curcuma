@@ -96,12 +96,12 @@ static json CurcumaMDJson{
     { "plumed", "plumed.dat" },
     { "mtd_dT", -1 },
     { "rmsd_mtd", false },
-    { "k_rmsd", 0.04 },
+    { "k_rmsd", 0.1 },
     { "alpha_rmsd", 10 },
     { "rmsd_rmsd", 1 },
     { "mtd_steps", 1 },
     { "max_rmsd_N", -1 },
-    { "multi_rmsd", 1e4 }
+    { "multi_rmsd", 1e8 }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -203,7 +203,7 @@ private:
     double m_T0 = 298.13, m_aver_Temp = 0, m_rmsd = 1.5;
     double m_x0 = 0, m_y0 = 0, m_z0 = 0;
     double m_Ekin_exchange = 0.0;
-    std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient, m_rmass, m_virial;
+    std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient, m_rmass, m_virial, m_gradient_bias;
     std::vector<int> m_atomtype;
     Molecule m_molecule, m_reference, m_target;
     bool m_initialised = false, m_restart = false, m_writeUnique = true, m_opt = false, m_rescue = false, m_writeXYZ = true, m_writeinit = false, m_norestart = false;
@@ -226,13 +226,13 @@ private:
     double m_wall_potential = 0, m_average_wall_potential = 0;
     double m_virial_correction = 0, m_average_virial_correction = 0;
     double m_deltaT = 0;
-    double m_k_rmsd = 0.002;
+    double m_k_rmsd = 0.04;
     double m_alpha_rmsd = 0.5;
     double m_bias_energy = 0;
     double m_rmsd_rmsd = 1;
     double m_mult_rmsd = 1e4;
     int m_max_rmsd_N = -1;
-    int m_mtd_steps = 50;
+    int m_mtd_steps = 10;
     int m_rattle = 0;
     int m_colvar_incr = 0;
     std::vector<double> m_collected_dipole;
