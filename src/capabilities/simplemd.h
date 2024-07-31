@@ -25,6 +25,10 @@
 #include <random>
 #include <ratio>
 
+#ifdef USE_Plumed
+#include "plumed2/src/wrapper/Plumed.h"
+#endif
+
 #include "src/capabilities/rmsdtraj.h"
 
 #include "src/core/energycalculator.h"
@@ -40,6 +44,7 @@ struct BiasStructure {
     double rmsd_reference = 0;
     double energy = 0;
     int counter = 0;
+    double factor = 1;
 };
 
 static json CurcumaMDJson{
@@ -101,7 +106,8 @@ static json CurcumaMDJson{
     { "rmsd_rmsd", 1 },
     { "mtd_steps", 1 },
     { "max_rmsd_N", -1 },
-    { "multi_rmsd", 1e8 }
+    { "multi_rmsd", 1e8 },
+    { "rmsd_DT", -1 }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -190,6 +196,9 @@ private:
     std::function<double(double* grad)> WallPotential;
 
     std::vector<std::pair<std::pair<int, int>, double>> m_bond_constrained;
+#ifdef USE_Plumed
+    plumed m_plumedmain;
+#endif
 
     int m_natoms = 0;
     int m_dump = 1;
@@ -231,6 +240,7 @@ private:
     double m_bias_energy = 0;
     double m_rmsd_rmsd = 1;
     double m_mult_rmsd = 1e4;
+    double m_rmsd_DT = -1;
     int m_max_rmsd_N = -1;
     int m_mtd_steps = 10;
     int m_rattle = 0;

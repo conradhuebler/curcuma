@@ -100,6 +100,9 @@ void SimpleMD::LoadControlJson()
     m_mtd_steps = Json2KeyWord<int>(m_defaults, "mtd_steps");
     m_rmsd_rmsd = Json2KeyWord<double>(m_defaults, "rmsd_rmsd");
     m_max_rmsd_N = Json2KeyWord<int>(m_defaults, "max_rmsd_N");
+    m_mult_rmsd = Json2KeyWord<double>(m_defaults, "multi_rmsd");
+    m_rmsd_DT = Json2KeyWord<double>(m_defaults, "rmsd_DT");
+
     m_writerestart = Json2KeyWord<int>(m_defaults, "writerestart");
     m_respa = Json2KeyWord<int>(m_defaults, "respa");
     m_dipole = Json2KeyWord<bool>(m_defaults, "dipole");
@@ -117,7 +120,6 @@ void SimpleMD::LoadControlJson()
     m_norestart = Json2KeyWord<bool>(m_defaults, "norestart");
     m_dt2 = m_dT * m_dT;
     m_rm_COM = Json2KeyWord<double>(m_defaults, "rm_COM");
-    m_mult_rmsd = Json2KeyWord<double>(m_defaults, "multi_rmsd");
     int rattle = Json2KeyWord<int>(m_defaults, "rattle");
     m_rattle_maxiter = Json2KeyWord<int>(m_defaults, "rattle_maxiter");
     if (rattle == 1) {
@@ -617,10 +619,8 @@ void SimpleMD::start()
     PrintStatus();
 
 #ifdef USE_Plumed
-    plumed plumedmain;
-
     if (m_mtd) {
-        plumedmain = plumed_create();
+        m_plumedmain = plumed_create();
         int real_precision = 8;
         double energyUnits = 2625.5;
         double lengthUnits = 10;
@@ -628,28 +628,28 @@ void SimpleMD::start()
         double massUnits = 1;
         double chargeUnit = 1;
         int restart = m_restart;
-        plumed_cmd(plumedmain, "setRealPrecision", &real_precision); // Pass a pointer to an integer containing the size of a real number (4 or 8)
-        plumed_cmd(plumedmain, "setMDEnergyUnits", &energyUnits); // Pass a pointer to the conversion factor between the energy unit used in your code and kJ mol-1
-        plumed_cmd(plumedmain, "setMDLengthUnits", &lengthUnits); // Pass a pointer to the conversion factor between the length unit used in your code and nm
-        plumed_cmd(plumedmain, "setMDTimeUnits", &timeUnits); // Pass a pointer to the conversion factor between the time unit used in your code and ps
-        plumed_cmd(plumedmain, "setNatoms", &m_natoms); // Pass a pointer to the number of atoms in the system to plumed
-        plumed_cmd(plumedmain, "setMDEngine", "curcuma");
-        plumed_cmd(plumedmain, "setMDMassUnits", &massUnits); // Pass a pointer to the conversion factor between the mass unit used in your code and amu
-        plumed_cmd(plumedmain, "setMDChargeUnits", &chargeUnit);
-        plumed_cmd(plumedmain, "setTimestep", &m_dT); // Pass a pointer to the molecular dynamics timestep to plumed                       // Pass the name of your md engine to plumed (now it is just a label)
-        plumed_cmd(plumedmain, "setKbT", &kb_Eh);
-        plumed_cmd(plumedmain, "setLogFile", "plumed_log.out"); // Pass the file  on which to write out the plumed log (to be created)
-        plumed_cmd(plumedmain, "setRestart", &restart); // Pointer to an integer saying if we are restarting (zero means no, one means yes)
-        plumed_cmd(plumedmain, "init", NULL);
-        plumed_cmd(plumedmain, "read", m_plumed.c_str());
-        plumed_cmd(plumedmain, "setStep", &m_step);
-        plumed_cmd(plumedmain, "setPositions", &m_current_geometry[0]);
-        plumed_cmd(plumedmain, "setEnergy", &m_Epot);
-        plumed_cmd(plumedmain, "setForces", &m_gradient[0]);
-        plumed_cmd(plumedmain, "setVirial", &m_virial[0]);
-        plumed_cmd(plumedmain, "setMasses", &m_mass[0]);
-        plumed_cmd(plumedmain, "prepareCalc", NULL);
-        plumed_cmd(plumedmain, "performCalc", NULL);
+        plumed_cmd(m_plumedmain, "setRealPrecision", &real_precision); // Pass a pointer to an integer containing the size of a real number (4 or 8)
+        plumed_cmd(m_plumedmain, "setMDEnergyUnits", &energyUnits); // Pass a pointer to the conversion factor between the energy unit used in your code and kJ mol-1
+        plumed_cmd(m_plumedmain, "setMDLengthUnits", &lengthUnits); // Pass a pointer to the conversion factor between the length unit used in your code and nm
+        plumed_cmd(m_plumedmain, "setMDTimeUnits", &timeUnits); // Pass a pointer to the conversion factor between the time unit used in your code and ps
+        plumed_cmd(m_plumedmain, "setNatoms", &m_natoms); // Pass a pointer to the number of atoms in the system to plumed
+        plumed_cmd(m_plumedmain, "setMDEngine", "curcuma");
+        plumed_cmd(m_plumedmain, "setMDMassUnits", &massUnits); // Pass a pointer to the conversion factor between the mass unit used in your code and amu
+        plumed_cmd(m_plumedmain, "setMDChargeUnits", &chargeUnit);
+        plumed_cmd(m_plumedmain, "setTimestep", &m_dT); // Pass a pointer to the molecular dynamics timestep to plumed                       // Pass the name of your md engine to plumed (now it is just a label)
+        plumed_cmd(m_plumedmain, "setKbT", &kb_Eh);
+        plumed_cmd(m_plumedmain, "setLogFile", "plumed_log.out"); // Pass the file  on which to write out the plumed log (to be created)
+        plumed_cmd(m_plumedmain, "setRestart", &restart); // Pointer to an integer saying if we are restarting (zero means no, one means yes)
+        plumed_cmd(m_plumedmain, "init", NULL);
+        plumed_cmd(m_plumedmain, "read", m_plumed.c_str());
+        plumed_cmd(m_plumedmain, "setStep", &m_step);
+        plumed_cmd(m_plumedmain, "setPositions", &m_current_geometry[0]);
+        plumed_cmd(m_plumedmain, "setEnergy", &m_Epot);
+        plumed_cmd(m_plumedmain, "setForces", &m_gradient[0]);
+        plumed_cmd(m_plumedmain, "setVirial", &m_virial[0]);
+        plumed_cmd(m_plumedmain, "setMasses", &m_mass[0]);
+        plumed_cmd(m_plumedmain, "prepareCalc", NULL);
+        plumed_cmd(m_plumedmain, "performCalc", NULL);
     }
 #endif
     std::vector<double> charge(0, m_natoms);
@@ -677,7 +677,12 @@ void SimpleMD::start()
               << "\t"
               << "T" << std::endl;
 #endif
-
+    if (m_rmsd_mtd) {
+        std::cout << "k\t" << m_k_rmsd << std::endl;
+        std::cout << "alpha\t" << m_alpha_rmsd << std::endl;
+        std::cout << "steps\t" << m_mtd_steps << std::endl;
+        std::cout << "Ethresh\t" << m_mult_rmsd << std::endl;
+    }
     for (; m_currentStep < m_maxtime;) {
         auto step0 = std::chrono::system_clock::now();
 
@@ -685,7 +690,7 @@ void SimpleMD::start()
             TriggerWriteRestart();
 #ifdef USE_Plumed
             if (m_mtd) {
-                plumed_finalize(plumedmain); // Call the plumed destructor
+                plumed_finalize(m_plumedmain); // Call the plumed destructor
             }
 #endif
 
@@ -703,42 +708,13 @@ void SimpleMD::start()
                 RemoveRotation(m_velocities);
             }
         }
-        // WallPotential(gradient);
-        Integrator(gradient);
 
+        Integrator(gradient);
         ThermostatFunction();
         m_Ekin = EKin();
 
-#ifdef USE_Plumed
         if (m_mtd) {
-            plumed_cmd(plumedmain, "setStep", &m_step);
-
-            plumed_cmd(plumedmain, "setPositions", &m_current_geometry[0]);
-
-            plumed_cmd(plumedmain, "setEnergy", &m_Epot);
-            plumed_cmd(plumedmain, "setForces", &m_gradient[0]);
-// FIXME
-#pragma message("we have to move the forces to the integrator")
-            plumed_cmd(plumedmain, "setVirial", &m_virial[0]);
-
-            plumed_cmd(plumedmain, "setMasses", &m_mass[0]);
-            if (m_eval_mtd) {
-                plumed_cmd(plumedmain, "prepareCalc", NULL);
-                plumed_cmd(plumedmain, "performCalc", NULL);
-            } else {
-                if (std::abs(m_T0 - m_aver_Temp) < m_mtd_dT && m_step > 10) {
-                    m_eval_mtd = true;
-                    std::cout << "Starting with MetaDynamics ..." << std::endl;
-                }
-            }
-        }
-#endif
-        if (m_rmsd_mtd) {
-            if (m_eval_mtd) {
-                if (m_step % m_mtd_steps == 0) {
-                    // ApplyRMSDMTD(gradient);
-                }
-            } else {
+            if (!m_eval_mtd) {
                 if (std::abs(m_T0 - m_aver_Temp) < m_mtd_dT && m_step > 10) {
                     m_eval_mtd = true;
                     std::cout << "Starting with MetaDynamics ..." << std::endl;
@@ -781,7 +757,7 @@ void SimpleMD::start()
             m_time_step = 0;
 #ifdef USE_Plumed
             if (m_mtd) {
-                plumed_finalize(plumedmain); // Call the plumed destructor
+                plumed_finalize(m_plumedmain); // Call the plumed destructor
             }
 #endif
             return;
@@ -829,7 +805,7 @@ void SimpleMD::start()
 
 #ifdef USE_Plumed
     if (m_mtd) {
-        plumed_finalize(plumedmain); // Call the plumed destructor
+        plumed_finalize(m_plumedmain); // Call the plumed destructor
     }
 #endif
     std::cout << "Sum of Energy of COLVARs:" << std::endl;
@@ -861,11 +837,35 @@ void SimpleMD::Verlet(double* grad)
     }
     m_Epot = Energy(grad);
 
-    if (m_eval_mtd) {
+    if (m_rmsd_mtd) {
         if (m_step % m_mtd_steps == 0) {
             ApplyRMSDMTD(grad);
         }
     }
+#ifdef USE_Plumed
+    if (m_mtd) {
+        plumed_cmd(m_plumedmain, "setStep", &m_step);
+
+        plumed_cmd(m_plumedmain, "setPositions", &m_current_geometry[0]);
+
+        plumed_cmd(m_plumedmain, "setEnergy", &m_Epot);
+        plumed_cmd(m_plumedmain, "setForces", &m_gradient[0]);
+// FIXME
+#pragma message("we have to move the forces to the integrator")
+        plumed_cmd(m_plumedmain, "setVirial", &m_virial[0]);
+
+        plumed_cmd(m_plumedmain, "setMasses", &m_mass[0]);
+        if (m_eval_mtd) {
+            plumed_cmd(m_plumedmain, "prepareCalc", NULL);
+            plumed_cmd(m_plumedmain, "performCalc", NULL);
+        } else {
+            if (std::abs(m_T0 - m_aver_Temp) < m_mtd_dT && m_step > 10) {
+                m_eval_mtd = true;
+                std::cout << "Starting with MetaDynamics ..." << std::endl;
+            }
+        }
+    }
+#endif
     WallPotential(grad);
     double ekin = 0.0;
 
@@ -965,11 +965,35 @@ void SimpleMD::Rattle(double* grad)
         m_current_geometry[3 * i + 2] = coord[3 * i + 2];
     }
     m_Epot = Energy(grad);
-    if (m_eval_mtd) {
+    if (m_rmsd_mtd) {
         if (m_step % m_mtd_steps == 0) {
             ApplyRMSDMTD(grad);
         }
     }
+#ifdef USE_Plumed
+    if (m_mtd) {
+        plumed_cmd(m_plumedmain, "setStep", &m_step);
+
+        plumed_cmd(m_plumedmain, "setPositions", &m_current_geometry[0]);
+
+        plumed_cmd(m_plumedmain, "setEnergy", &m_Epot);
+        plumed_cmd(m_plumedmain, "setForces", &m_gradient[0]);
+// FIXME
+#pragma message("we have to move the forces to the integrator")
+        plumed_cmd(m_plumedmain, "setVirial", &m_virial[0]);
+
+        plumed_cmd(m_plumedmain, "setMasses", &m_mass[0]);
+        if (m_eval_mtd) {
+            plumed_cmd(m_plumedmain, "prepareCalc", NULL);
+            plumed_cmd(m_plumedmain, "performCalc", NULL);
+        } else {
+            if (std::abs(m_T0 - m_aver_Temp) < m_mtd_dT && m_step > 10) {
+                m_eval_mtd = true;
+                std::cout << "Starting with MetaDynamics ..." << std::endl;
+            }
+        }
+    }
+#endif
     WallPotential(grad);
     double ekin = 0.0;
 
@@ -1062,20 +1086,24 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
         driver.setTarget(m_target);
         driver.start();
         double rmsd = driver.RMSD();
-        double bias_energy = m_k_rmsd * exp(-rmsd * rmsd * m_alpha_rmsd);
+        double expr = exp(-rmsd * rmsd * m_alpha_rmsd);
+        double bias_energy = m_k_rmsd * expr;
+        factor = m_biased_structures[i].factor;
 
-        if (bias_energy * m_mult_rmsd > 1) {
-            m_biased_structures[i].counter++;
-            m_biased_structures[i].energy += bias_energy;
-            m_colvar_incr++;
-        }
-        factor = m_biased_structures[i].counter;
-
+        if (m_rmsd_DT < 0)
+            factor = m_biased_structures[i].counter;
+        else
+            factor += (exp(-(m_biased_structures[i].energy + bias_energy) / kb_Eh / m_rmsd_DT));
+        m_biased_structures[i].factor = factor;
         if (i == 0) {
             rmsd_reference = rmsd;
         }
         bias_energy *= factor;
-
+        if (m_k_rmsd * expr * m_mult_rmsd > 1) {
+            m_biased_structures[i].counter++;
+            m_biased_structures[i].energy += bias_energy;
+            m_colvar_incr++;
+        }
         current_bias += bias_energy;
         std::ofstream colvarfile;
 
@@ -1093,8 +1121,8 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
         hillsfile << m_currentStep << " " << rmsd << " " << m_alpha_rmsd << " " << m_k_rmsd << " " << "-1" << std::endl;
         hillsfile.close();
 
-        double dEdR = -2 * m_alpha_rmsd * m_k_rmsd / m_natoms * exp(-rmsd * rmsd * m_alpha_rmsd);
-        gradient += driver.Gradient() * dEdR * factor;
+        double dEdR = -2 * m_alpha_rmsd * m_k_rmsd / m_natoms * expr * factor;
+        gradient += driver.Gradient() * dEdR;
     }
 
     std::ofstream colvarfile;
@@ -1102,6 +1130,9 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
     colvarfile << m_currentStep << " ";
     m_molecule.setGeometry(current_geometry);
     auto fragments = m_molecule.GetFragments();
+    if (fragments.size() < 2)
+        colvarfile << rmsd_reference << " ";
+
     for(int i = 0; i < fragments.size(); ++i)
         for(int j = 0; j < i; ++j)
         {
