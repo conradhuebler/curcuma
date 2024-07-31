@@ -102,6 +102,7 @@ void SimpleMD::LoadControlJson()
     m_max_rmsd_N = Json2KeyWord<int>(m_defaults, "max_rmsd_N");
     m_mult_rmsd = Json2KeyWord<double>(m_defaults, "multi_rmsd");
     m_rmsd_DT = Json2KeyWord<double>(m_defaults, "rmsd_DT");
+    m_wtmtd = Json2KeyWord<bool>(m_defaults, "wtmtd");
 
     m_writerestart = Json2KeyWord<int>(m_defaults, "writerestart");
     m_respa = Json2KeyWord<int>(m_defaults, "respa");
@@ -424,6 +425,11 @@ void SimpleMD::InitialiseWalls()
     if (m_wall_spheric_radius < radius) {
         m_wall_spheric_radius = radius + 5;
     }
+    std::cout << "Setting up potential walls " << std::endl;
+    std::cout << "Radius " << m_wall_spheric_radius << std::endl;
+    std::cout << "x-range " << m_wall_x_min << " ... " << m_wall_x_max << std::endl;
+    std::cout << "y-range " << m_wall_y_min << " ... " << m_wall_y_max << std::endl;
+    std::cout << "z-range " << m_wall_z_min << " ... " << m_wall_z_max << std::endl;
 }
 
 nlohmann::json SimpleMD::WriteRestartInformation()
@@ -682,6 +688,10 @@ void SimpleMD::start()
         std::cout << "alpha\t" << m_alpha_rmsd << std::endl;
         std::cout << "steps\t" << m_mtd_steps << std::endl;
         std::cout << "Ethresh\t" << m_mult_rmsd << std::endl;
+        if (m_wtmtd)
+            std::cout << "Well Tempered\tOn (" << m_rmsd_DT << ")" << std::endl;
+        else
+            std::cout << "Well Tempered\tOff" << std::endl;
     }
     for (; m_currentStep < m_maxtime;) {
         auto step0 = std::chrono::system_clock::now();
@@ -1078,7 +1088,6 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
         std::cout << m_biased_structures.size() << " stored structures currently" << std::endl;
     }
     double rmsd_reference = 0;
-    int add_structure = 0;
     double current_bias = 0;
     for (int i = 0; i < m_biased_structures.size(); ++i) {
         double factor = 1;
@@ -1087,23 +1096,24 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
         driver.start();
         double rmsd = driver.RMSD();
         double expr = exp(-rmsd * rmsd * m_alpha_rmsd);
-        double bias_energy = m_k_rmsd * expr;
+        double bias_energy = expr;
         factor = m_biased_structures[i].factor;
 
-        if (m_rmsd_DT < 0)
+        if (!m_wtmtd)
             factor = m_biased_structures[i].counter;
         else
-            factor += (exp(-(m_biased_structures[i].energy + bias_energy) / kb_Eh / m_rmsd_DT));
+            factor += (exp(-(m_biased_structures[i].energy) / kb_Eh / m_rmsd_DT));
         m_biased_structures[i].factor = factor;
         if (i == 0) {
             rmsd_reference = rmsd;
         }
-        bias_energy *= factor;
-        if (m_k_rmsd * expr * m_mult_rmsd > 1) {
+        if (expr * m_mult_rmsd > 1 * m_biased_structures.size()) {
             m_biased_structures[i].counter++;
             m_biased_structures[i].energy += bias_energy;
             m_colvar_incr++;
         }
+        bias_energy *= factor * m_k_rmsd;
+
         current_bias += bias_energy;
         std::ofstream colvarfile;
 

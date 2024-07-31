@@ -107,7 +107,8 @@ static json CurcumaMDJson{
     { "mtd_steps", 1 },
     { "max_rmsd_N", -1 },
     { "multi_rmsd", 1e8 },
-    { "rmsd_DT", -1 }
+    { "rmsd_DT", 1000000 },
+    { "wtmtd", false }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -235,12 +236,12 @@ private:
     double m_wall_potential = 0, m_average_wall_potential = 0;
     double m_virial_correction = 0, m_average_virial_correction = 0;
     double m_deltaT = 0;
-    double m_k_rmsd = 0.04;
-    double m_alpha_rmsd = 0.5;
-    double m_bias_energy = 0;
+    double m_k_rmsd = 0.1;
+    double m_alpha_rmsd = 10;
+    double m_bias_energy = 1e8;
     double m_rmsd_rmsd = 1;
     double m_mult_rmsd = 1e4;
-    double m_rmsd_DT = -1;
+    double m_rmsd_DT = 1000000;
     int m_max_rmsd_N = -1;
     int m_mtd_steps = 10;
     int m_rattle = 0;
@@ -255,6 +256,7 @@ private:
     bool m_mtd = false;
     bool m_eval_mtd = true;
     bool m_rmsd_mtd = false;
+    bool m_wtmtd = false;
     int m_mtd_dT = -1;
     int m_seed = -1;
     int m_time_step = 0;
