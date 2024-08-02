@@ -1,0 +1,29 @@
+--- src/capabilities/simplemd.cpp
++++ src/capabilities/simplemd.cpp
+@@ -154,6 +208,8 @@ void SimpleMD::LoadControlJson()
+     m_mtd_steps = Json2KeyWord<int>(m_defaults, "mtd_steps");
+     m_rmsd_rmsd = Json2KeyWord<double>(m_defaults, "rmsd_rmsd");
+     m_max_rmsd_N = Json2KeyWord<int>(m_defaults, "max_rmsd_N");
++    m_rmsd_ref_file = Json2KeyWord<std::string>(m_defaults, "rmsd_ref_file");
++
+     m_writerestart = Json2KeyWord<int>(m_defaults, "writerestart");
+     m_respa = Json2KeyWord<int>(m_defaults, "respa");
+     m_dipole = Json2KeyWord<bool>(m_defaults, "dipole");
+@@ -171,7 +227,7 @@ void SimpleMD::LoadControlJson()
+     m_norestart = Json2KeyWord<bool>(m_defaults, "norestart");
+     m_dt2 = m_dT * m_dT;
+     m_rm_COM = Json2KeyWord<double>(m_defaults, "rm_COM");
+-    m_mult_rmsd = Json2KeyWord<double>(m_defaults, "multi_rmsd");
++    m_rmsd_econv = Json2KeyWord<double>(m_defaults, "rmsd_econv");
+     int rattle = Json2KeyWord<int>(m_defaults, "rattle");
+     m_rattle_maxiter = Json2KeyWord<int>(m_defaults, "rattle_maxiter");
+     if (rattle == 1) {
+@@ -1135,7 +1208,7 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
+         double rmsd = driver.RMSD();
+         double bias_energy = m_k_rmsd * exp(-rmsd * rmsd * m_alpha_rmsd);
+ 
+-        if (bias_energy * m_mult_rmsd > 1) {
++        if (bias_energy * m_rmsd_econv > 1) {
+             m_biased_structures[i].counter++;
+             m_biased_structures[i].energy += bias_energy;
+             m_colvar_incr++;

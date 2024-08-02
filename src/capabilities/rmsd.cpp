@@ -236,6 +236,10 @@ void RMSDDriver::LoadControlJson()
 
 void RMSDDriver::start()
 {
+    if (m_reference.AtomCount() == 0 || m_target.AtomCount() == 0) {
+        std::cout << "At least one structure is empty, exiting ...";
+        return;
+    }
     RunTimer timer(false);
     clear();
     bool rmsd_calculated = false;
