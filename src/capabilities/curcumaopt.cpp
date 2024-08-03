@@ -126,7 +126,7 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
         double energy = interface.CalculateEnergy(true, true);
 #ifdef USE_TBLITE
         if (method.compare("gfn2") == 0) {
-            std::vector<double> dipole = interface.Dipole();
+            auto dipole = interface.Dipole();
             std::cout << std::endl
                       << std::endl
                       << "Dipole momement (GFN2)" << dipole[0] << " " << dipole[1] << " " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) << std::endl;
@@ -236,7 +236,7 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, 
     double store = 0;
 #ifdef USE_TBLITE
     if (method.compare("gfn2") == 0) {
-        std::vector<double> dipole = interface.Dipole();
+        auto dipole = interface.Dipole();
         std::cout << std::endl
                   << std::endl
                   << "Dipole momement (GNF2)" << dipole[0] << " " << dipole[1] << " " << dipole[2] << " : " << sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]) * 2.5418 << std::endl;

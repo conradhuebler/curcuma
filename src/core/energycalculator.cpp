@@ -30,6 +30,7 @@
 namespace fs = std::filesystem;
 #endif
 
+#include <filesystem>
 #include <functional>
 
 #include "forcefieldgenerator.h"
@@ -53,7 +54,7 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
         return std::vector<double>{};
     };
     m_dipole = []() {
-        return std::vector<double>{};
+        return Position{};
     };
     m_bonds = []() {
         return std::vector<std::vector<double>>{ {} };
@@ -75,7 +76,12 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
             return this->m_tblite->Charges();
         };
         m_dipole = [this]() {
-            return this->m_tblite->Dipole();
+            Position dipole;
+            dipole(0) = this->m_tblite->Dipole()[0];
+            dipole(1) = this->m_tblite->Dipole()[1];
+            dipole(2) = this->m_tblite->Dipole()[2];
+
+            return dipole;
         };
         m_bonds = [this]() {
             return this->m_tblite->BondOrders();
@@ -95,7 +101,12 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
             return this->m_xtb->Charges();
         };
         m_dipole = [this]() {
-            return this->m_xtb->Dipole();
+            Position dipole;
+            dipole(0) = this->m_xtb->Dipole()[0];
+            dipole(1) = this->m_xtb->Dipole()[1];
+            dipole(2) = this->m_xtb->Dipole()[2];
+
+            return dipole;
         };
         m_bonds = [this]() {
             return this->m_xtb->BondOrders();
@@ -440,7 +451,7 @@ std::vector<double> EnergyCalculator::Charges() const
     return m_charges();
 }
 
-std::vector<double> EnergyCalculator::Dipole() const
+Position EnergyCalculator::Dipole() const
 {
     return m_dipole();
 }
