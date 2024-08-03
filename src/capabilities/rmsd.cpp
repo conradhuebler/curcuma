@@ -347,7 +347,10 @@ double RMSDDriver::BestFitRMSD()
     const auto t = RMSDFunctions::getAligned(reference, target, 1);
     m_reference_aligned.setGeometry(reference);
     m_target_aligned.setGeometry(t);
+    m_reference.setGeometry(reference);
+    m_target.setGeometry(t);
     rmsd = RMSDFunctions::getRMSD(reference, t);
+    m_rmsd = rmsd;
     return rmsd;
 }
 

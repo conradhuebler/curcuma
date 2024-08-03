@@ -29,6 +29,7 @@
 #include "plumed2/src/wrapper/Plumed.h"
 #endif
 
+#include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
 
 #include "src/core/energycalculator.h"
@@ -43,9 +44,9 @@ struct BiasStructure {
     double time = 0;
     double rmsd_reference = 0;
     double energy = 0;
-    int counter = 0;
     double factor = 1;
     int index = 0;
+    int counter = 0;
 };
 
 class BiasThread : public CxxThread {
@@ -88,18 +89,19 @@ public:
     inline void setalpha(double alpha) { m_alpha = alpha; }
     inline void setDT(double DT) { m_DT = DT; }
     inline void setEnergyConv(double rmsd_econv) { m_rmsd_econv = rmsd_econv; }
+    inline void setWTMTD(bool wtmtd) { m_wtmtd = wtmtd; }
     inline int Counter() const { return m_counter; }
     std::vector<BiasStructure> getBiasStructure() const { return m_biased_structures; }
 
 private:
-    RMSDDriver* m_driver;
-    Geometry m_gradient;
     std::vector<BiasStructure> m_biased_structures;
+    RMSDDriver m_driver;
     json m_config;
     Molecule m_reference, m_target;
+    Geometry m_gradient;
     double m_k, m_alpha, m_DT, m_currentStep, m_rmsd_reference, m_current_bias, m_rmsd_econv;
+    int m_counter = 0, m_atoms = 0;
     bool m_wtmtd = false;
-    int m_counter = 0;
 };
 
 static json CurcumaMDJson{
@@ -323,6 +325,7 @@ private:
     int m_seed = -1;
     int m_time_step = 0;
     int m_dof = 0;
+    int m_mtd_time = 0, m_loop_time = 0;
 };
 
 class MDThread : public CxxThread {

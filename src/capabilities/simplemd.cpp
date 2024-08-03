@@ -52,33 +52,33 @@ BiasThread::BiasThread(const Molecule& reference, const json& rmsdconfig)
     : m_reference(reference)
     , m_target(reference)
 {
-    m_driver = new RMSDDriver(rmsdconfig, false);
+    m_driver = RMSDDriver(rmsdconfig, true);
     m_config = rmsdconfig;
-    setAutoDelete(false);
+    setAutoDelete(true);
     m_current_bias = 0;
-    m_gradient = Eigen::MatrixXd::Zero(m_reference.AtomCount(), 3);
     m_counter = 0;
+    m_atoms = m_reference.AtomCount();
+    m_gradient = Eigen::MatrixXd::Zero(m_reference.AtomCount(), 3);
 }
 
 BiasThread::~BiasThread()
 {
-    delete m_driver;
 }
 
 int BiasThread::execute()
 {
-    // std::cout << m_biased_structures.size() << " ";
     if (m_biased_structures.size() == 0)
         return 0;
     m_current_bias = 0;
     m_counter = 0;
-    m_driver->setReference(m_reference);
+    m_driver.setReference(m_reference);
+    m_gradient = Eigen::MatrixXd::Zero(m_reference.AtomCount(), 3);
+
     for (int i = 0; i < m_biased_structures.size(); ++i) {
         double factor = 1;
         m_target.setGeometry(m_biased_structures[i].geometry);
-        m_driver->setTarget(m_target);
-        m_driver->start();
-        double rmsd = m_driver->RMSD();
+        m_driver.setTarget(m_target);
+        double rmsd = m_driver.BestFitRMSD();
         double expr = exp(-rmsd * rmsd * m_alpha);
         double bias_energy = expr;
         factor = m_biased_structures[i].factor;
@@ -114,13 +114,11 @@ int BiasThread::execute()
         hillsfile << m_currentStep << " " << rmsd << " " << m_alpha_rmsd << " " << m_k_rmsd << " " << "-1" << std::endl;
         hillsfile.close();
         */
-        double dEdR = -2 * m_alpha * m_k / m_reference.AtomCount() * exp(-rmsd * rmsd * m_alpha);
-        if (i == 0)
-            m_gradient = m_driver->Gradient() * dEdR * factor;
-        else
-            m_gradient += m_driver->Gradient() * dEdR * factor;
+
+        double dEdR = -2 * m_alpha * m_k / m_atoms * exp(-rmsd * rmsd * m_alpha) * factor;
+
+        m_gradient += m_driver.Gradient() * dEdR;
         m_counter += m_biased_structures[i].counter;
-        m_driver->clear();
     }
     return 1;
 }
@@ -136,9 +134,6 @@ SimpleMD::~SimpleMD()
 {
     for (int i = 0; i < m_unique_structures.size(); ++i)
         delete m_unique_structures[i];
-    for (int i = 0; i < m_bias_threads.size(); ++i)
-        delete m_bias_threads[i];
-
     delete m_bias_pool;
 }
 
@@ -423,7 +418,7 @@ bool SimpleMD::Initialise()
             thread->setk(m_k_rmsd);
             thread->setalpha(m_alpha_rmsd);
             thread->setEnergyConv(m_rmsd_econv);
-
+            thread->setWTMTD(m_wtmtd);
             m_bias_threads.push_back(thread);
             m_bias_pool->addThread(thread);
         }
@@ -1170,6 +1165,10 @@ void SimpleMD::Rattle(double* grad)
 
 void SimpleMD::ApplyRMSDMTD(double* grad)
 {
+    std::chrono::time_point<std::chrono::system_clock> m_start, m_end;
+    m_start = std::chrono::system_clock::now();
+    m_colvar_incr = 0;
+
     Geometry current_geometry = m_molecule.getGeometry();
     for (int i = 0; i < m_natoms; ++i) {
         current_geometry(i, 0) = m_current_geometry[3 * i + 0];
@@ -1177,7 +1176,6 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
         current_geometry(i, 2) = m_current_geometry[3 * i + 2];
     }
 
-    Geometry gradient = Eigen::MatrixXd::Zero(m_natoms, 3);
     double current_bias = 0;
     double rmsd_reference = 0;
 
@@ -1189,28 +1187,10 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
         colvarfile.open("COLVAR");
         colvarfile.close();
     }
-    if (m_bias_structure_count < m_threads) {
-        for (int i = 0; i < m_bias_structure_count; ++i) {
-            m_bias_threads[i]->setCurrentGeometry(current_geometry, m_currentStep);
-        }
-    } else {
+    if (m_threads == 1 || m_bias_structure_count == 1) {
         for (int i = 0; i < m_bias_threads.size(); ++i) {
             m_bias_threads[i]->setCurrentGeometry(current_geometry, m_currentStep);
-        }
-    }
-
-    m_bias_pool->setActiveThreadCount(m_threads);
-
-    m_bias_pool->StaticPool();
-
-    m_bias_pool->StartAndWait();
-    m_bias_pool->setWakeUp(m_bias_pool->WakeUp() / 2);
-
-    rmsd_reference = m_bias_threads[0]->RMSDReference();
-    m_colvar_incr = 0;
-
-    for (int i = 0; i < m_bias_threads.size(); ++i) {
-        if (m_bias_threads[i]->Return() == 1) {
+            m_bias_threads[i]->start();
             current_bias += m_bias_threads[i]->BiasEnergy();
             for (int j = 0; j < m_natoms; ++j) {
                 grad[3 * j + 0] += m_bias_threads[i]->Gradient()(j, 0);
@@ -1218,10 +1198,40 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
                 grad[3 * j + 2] += m_bias_threads[i]->Gradient()(j, 2);
             }
             m_colvar_incr += m_bias_threads[i]->Counter();
+            m_loop_time += m_bias_threads[i]->Time();
         }
-    }
+    } else {
+        if (m_bias_structure_count < m_threads) {
+            for (int i = 0; i < m_bias_structure_count; ++i) {
+                m_bias_threads[i]->setCurrentGeometry(current_geometry, m_currentStep);
+            }
+        } else {
+            for (int i = 0; i < m_bias_threads.size(); ++i) {
+                m_bias_threads[i]->setCurrentGeometry(current_geometry, m_currentStep);
+            }
+        }
 
-    m_bias_pool->Reset();
+        m_bias_pool->setActiveThreadCount(m_threads);
+        m_bias_pool->StaticPool();
+        m_bias_pool->StartAndWait();
+        m_bias_pool->setWakeUp(m_bias_pool->WakeUp() / 2);
+
+        for (int i = 0; i < m_bias_threads.size(); ++i) {
+            if (m_bias_threads[i]->Return() == 1) {
+
+                current_bias += m_bias_threads[i]->BiasEnergy();
+                for (int j = 0; j < m_natoms; ++j) {
+                    grad[3 * j + 0] += m_bias_threads[i]->Gradient()(j, 0);
+                    grad[3 * j + 1] += m_bias_threads[i]->Gradient()(j, 1);
+                    grad[3 * j + 2] += m_bias_threads[i]->Gradient()(j, 2);
+                }
+                m_colvar_incr += m_bias_threads[i]->Counter();
+            }
+            m_loop_time += m_bias_threads[i]->Time();
+        }
+        m_bias_pool->Reset();
+    }
+    rmsd_reference = m_bias_threads[0]->RMSDReference();
     std::ofstream colvarfile;
     colvarfile.open("COLVAR", std::iostream::app);
     colvarfile << m_currentStep << " ";
@@ -1242,12 +1252,14 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
 
     if (current_bias * m_rmsd_econv < m_bias_structure_count) {
         int thread_index = m_bias_structure_count % m_bias_threads.size();
-        std::cout << thread_index << std::endl;
         m_bias_threads[thread_index]->addGeometry(current_geometry, rmsd_reference, m_currentTime, m_bias_structure_count);
         m_bias_structure_count++;
         m_molecule.appendXYZFile(Basename() + ".mtd.xyz");
         std::cout << m_bias_structure_count << " stored structures currently" << std::endl;
     }
+    m_end = std::chrono::system_clock::now();
+    int m_time = std::chrono::duration_cast<std::chrono::milliseconds>(m_end - m_start).count();
+    m_mtd_time += m_time;
 }
 
 void SimpleMD::Rattle_Verlet_First(double* coord, double* grad)
@@ -1591,6 +1603,7 @@ void SimpleMD::PrintStatus() const
 
 #endif
     }
+    std::cout << m_mtd_time << " " << m_loop_time << std::endl;
 }
 
 void SimpleMD::PrintMatrix(const double* matrix)
