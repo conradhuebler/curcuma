@@ -76,6 +76,20 @@ public:
          */
     }
 
+    inline void addGeometry(const Geometry& geometry, const json& bias)
+    {
+        BiasStructure str;
+        str.geometry = geometry;
+        str.rmsd_reference = bias["rmsd_reference"];
+        str.time = bias["time"];
+        str.counter = bias["counter"];
+        str.index = bias["index"];
+        str.factor = bias["factor"];
+        str.energy = bias["energy"];
+
+        m_biased_structures.push_back(str);
+    }
+
     inline void setCurrentGeometry(const Geometry& geometry, double currentStep)
     {
         m_reference.setGeometry(geometry);
@@ -92,6 +106,7 @@ public:
     inline void setWTMTD(bool wtmtd) { m_wtmtd = wtmtd; }
     inline int Counter() const { return m_counter; }
     std::vector<BiasStructure> getBiasStructure() const { return m_biased_structures; }
+    std::vector<json> getBias() const;
 
 private:
     std::vector<BiasStructure> m_biased_structures;
@@ -168,7 +183,8 @@ static json CurcumaMDJson{
     { "rmsd_econv", 1e8 },
     { "rmsd_DT", 1000000 },
     { "wtmtd", false },
-    { "rmsd_ref_file", "none" }
+    { "rmsd_ref_file", "none" },
+    { "rmsd_fix_structure", false }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -285,6 +301,7 @@ private:
     std::vector<Geometry> m_bias_structures;
     std::vector<BiasStructure> m_biased_structures;
     std::vector<BiasThread*> m_bias_threads;
+    json m_bias_json;
     CxxThreadPool* m_bias_pool;
     int m_unix_started = 0, m_prev_index = 0, m_max_rescue = 10, m_current_rescue = 0, m_currentTime = 0, m_max_top_diff = 15, m_step = 0;
     int m_writerestart = -1;
@@ -321,6 +338,8 @@ private:
     bool m_eval_mtd = true;
     bool m_rmsd_mtd = false;
     bool m_wtmtd = false;
+    bool m_rmsd_fix_structure = false;
+
     int m_mtd_dT = -1;
     int m_seed = -1;
     int m_time_step = 0;

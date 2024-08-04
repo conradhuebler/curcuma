@@ -36,6 +36,7 @@
 
 #include "src/core/elements.h"
 #include "src/core/energycalculator.h"
+#include "src/core/fileiterator.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
 
@@ -123,6 +124,23 @@ int BiasThread::execute()
     return 1;
 }
 
+std::vector<json> BiasThread::getBias() const
+{
+    std::vector<json> bias(m_biased_structures.size());
+    for (int i = 0; i < m_biased_structures.size(); ++i) {
+        json current;
+        // current["geometry"] = Tools::Matrix2String(m_biased_structures[i].geometry);
+        current["time"] = m_biased_structures[i].time;
+        current["rmsd_reference"] = m_biased_structures[i].rmsd_reference;
+        current["energy"] = m_biased_structures[i].energy;
+        current["factor"] = m_biased_structures[i].factor;
+        current["index"] = m_biased_structures[i].index;
+        current["counter"] = m_biased_structures[i].counter;
+        bias[i] = current;
+    }
+    return bias;
+}
+
 SimpleMD::SimpleMD(const json& controller, bool silent)
     : CurcumaMethod(CurcumaMDJson, controller, silent)
 {
@@ -182,6 +200,7 @@ void SimpleMD::LoadControlJson()
     m_rmsd_DT = Json2KeyWord<double>(m_defaults, "rmsd_DT");
     m_wtmtd = Json2KeyWord<bool>(m_defaults, "wtmtd");
     m_rmsd_ref_file = Json2KeyWord<std::string>(m_defaults, "rmsd_ref_file");
+    m_rmsd_fix_structure = Json2KeyWord<bool>(m_defaults, "rmsd_fix_structure");
 
     m_writerestart = Json2KeyWord<int>(m_defaults, "writerestart");
     m_respa = Json2KeyWord<int>(m_defaults, "respa");
@@ -422,6 +441,35 @@ bool SimpleMD::Initialise()
             m_bias_threads.push_back(thread);
             m_bias_pool->addThread(thread);
         }
+        if (m_restart) {
+            std::cout << "Reading structure files from " << m_rmsd_ref_file << std::endl;
+            for (const auto& i : m_bias_json)
+                std::cout << i << std::endl;
+            FileIterator file(m_rmsd_ref_file);
+            int index = 0;
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                std::cout << m_bias_json[index] << std::endl;
+                int thread_index = index % m_bias_threads.size();
+                m_bias_threads[thread_index]->addGeometry(mol.getGeometry(), m_bias_json[index]);
+                ++index;
+            }
+            m_bias_structure_count = index;
+        } else {
+            if (m_rmsd_ref_file.compare("none") != 0) {
+                std::cout << "Reading structure files from " << m_rmsd_ref_file << std::endl;
+                int index = 0;
+
+                FileIterator file(m_rmsd_ref_file);
+                while (!file.AtEnd()) {
+                    Molecule mol = file.Next();
+                    int thread_index = index % m_bias_threads.size();
+                    m_bias_threads[thread_index]->addGeometry(mol.getGeometry(), 0, 0, index);
+                    ++index;
+                }
+                m_bias_structure_count = index;
+            }
+        }
     }
 
     m_initialised = true;
@@ -559,7 +607,29 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["respa"] = m_respa;
     restart["rm_COM"] = m_rm_COM;
     restart["mtd"] = m_mtd;
+    restart["rmsd_mtd"] = m_rmsd_mtd;
+    if (m_rmsd_mtd) {
+        restart["k_rmsd"] = m_k_rmsd;
+        restart["alpha_rmsd"] = m_alpha_rmsd;
+        restart["mtd_steps"] = m_mtd_steps;
+        restart["rmsd_econv"] = m_rmsd_econv;
+        restart["wtmtd"] = m_wtmtd;
+        restart["rmsd_DT"] = m_rmsd_DT;
+        restart["rmsd_ref_file"] = Basename() + ".mtd.xyz";
+        restart["counter"] = m_bias_structure_count;
 
+        std::vector<json> bias(m_bias_structure_count);
+        for (int i = 0; i < m_bias_threads.size(); ++i) {
+            for (const auto& stored_bias : m_bias_threads[i]->getBias()) {
+                bias[stored_bias["index"]] = stored_bias;
+            }
+        }
+        json bias_restart;
+        for (int i = 0; i < bias.size(); ++i) {
+            bias_restart[i] = bias[i];
+        }
+        restart["bias"] = bias_restart;
+    }
     return restart;
 };
 
@@ -680,12 +750,35 @@ bool SimpleMD::LoadRestartInformation(const json& state)
         velocities = state["velocities"];
     } catch (json::type_error& e) {
     }
+
+    try {
+        m_mtd = state["mtd"];
+    } catch (json::type_error& e) {
+    }
+
+    try {
+        m_rmsd_mtd = state["rmsd_mtd"];
+        if (m_rmsd_mtd) {
+            m_k_rmsd = state["k_rmsd"];
+            m_alpha_rmsd = state["alpha_rmsd"];
+
+            m_mtd_steps = state["mtd_steps"];
+            m_rmsd_econv = state["rmsd_econv"];
+            m_wtmtd = state["wtmtd"];
+            m_rmsd_DT = state["rmsd_DT"];
+            m_rmsd_ref_file = state["rmsd_ref_file"];
+            m_bias_json = state["bias"];
+        }
+    } catch (json::type_error& e) {
+    }
+
     if (geometry.size()) {
         m_current_geometry = Tools::String2DoubleVec(geometry, "|");
     }
     if (velocities.size()) {
         m_velocities = Tools::String2DoubleVec(velocities, "|");
     }
+
     m_restart = geometry.size() && velocities.size();
 
     return true;
@@ -1250,9 +1343,9 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
 
     m_bias_energy += current_bias;
 
-    if (current_bias * m_rmsd_econv < m_bias_structure_count) {
+    if (current_bias * m_rmsd_econv < m_bias_structure_count && m_rmsd_fix_structure == false) {
         int thread_index = m_bias_structure_count % m_bias_threads.size();
-        m_bias_threads[thread_index]->addGeometry(current_geometry, rmsd_reference, m_currentTime, m_bias_structure_count);
+        m_bias_threads[thread_index]->addGeometry(current_geometry, rmsd_reference, m_currentStep, m_bias_structure_count);
         m_bias_structure_count++;
         m_molecule.appendXYZFile(Basename() + ".mtd.xyz");
         std::cout << m_bias_structure_count << " stored structures currently" << std::endl;
