@@ -1502,6 +1502,11 @@ Geometry Molecule::ChargeDistribution() const
 std::vector<int> Molecule::FragString2Indicies(const std::string& string) const
 {
     std::vector<int> indicies;
+    if(string.compare("-1") == 0)
+    {
+        for(int i = 0; i < AtomCount(); ++i)
+            indicies.push_back(i);
+    }else{
     StringList list = Tools::SplitString(string, ",");
     for (auto l : list) {
         if (Tools::isInt(l))
@@ -1525,12 +1530,13 @@ std::vector<int> Molecule::FragString2Indicies(const std::string& string) const
             int fragment = std::stoi(f) - 1;
             if (fragment < m_fragments.size()) {
                 for (int i = 0; i < m_fragments[fragment].size(); ++i) {
-                    indicies.push_back(i);
+                    indicies.push_back(m_fragments[fragment][i]);
                 }
             }
         }
     }
     sort(indicies.begin(), indicies.end());
     indicies.erase(unique(indicies.begin(), indicies.end()), indicies.end());
+    }
     return indicies;
 }

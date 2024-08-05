@@ -292,13 +292,16 @@ private:
     double m_Ekin_exchange = 0.0;
     std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient, m_rmass, m_virial, m_gradient_bias;
     std::vector<int> m_atomtype;
-    Molecule m_molecule, m_reference, m_target;
+    Molecule m_molecule, m_reference, m_target, m_rmsd_mtd_molecule;
     bool m_initialised = false, m_restart = false, m_writeUnique = true, m_opt = false, m_rescue = false, m_writeXYZ = true, m_writeinit = false, m_norestart = false;
     int m_rmrottrans = 0, m_rattle_maxiter = 100;
     bool m_nocenter = false;
     EnergyCalculator* m_interface;
     RMSDTraj* m_unqiue;
     const std::vector<double> m_used_mass;
+    std::vector<int> m_rmsd_indicies;
+    std::vector<std::vector<int> > m_rmsd_fragments;
+
     std::vector<Geometry> m_bias_structures;
     std::vector<BiasStructure> m_biased_structures;
     std::vector<BiasThread*> m_bias_threads;
@@ -327,11 +330,11 @@ private:
     int m_colvar_incr = 0;
     int m_threads = 0;
     int m_bias_structure_count = 0;
-
+    int m_rmsd_fragment_count = 0;
     std::vector<double> m_collected_dipole;
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;
-    std::string m_method = "UFF", m_initfile = "none", m_thermostat = "csvr", m_plumed, m_rmsd_ref_file;
+    std::string m_method = "UFF", m_initfile = "none", m_thermostat = "csvr", m_plumed, m_rmsd_ref_file, m_rmsd_atoms = "-1";
     bool m_unstable = false;
     bool m_dipole = false;
     bool m_clean_energy = false;

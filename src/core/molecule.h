@@ -101,6 +101,8 @@ class Molecule
     void setXYZComment(const std::string& comment);
 
     bool addPair(const std::pair<int, Position>& atom);
+    inline bool addAtom(const std::pair<int, Position>& atom){ return addPair(atom); }
+
     bool Contains(const std::pair<int, Position>& atom);
 
     std::vector<double> GetBox() const;

@@ -201,6 +201,7 @@ void SimpleMD::LoadControlJson()
     m_wtmtd = Json2KeyWord<bool>(m_defaults, "wtmtd");
     m_rmsd_ref_file = Json2KeyWord<std::string>(m_defaults, "rmsd_ref_file");
     m_rmsd_fix_structure = Json2KeyWord<bool>(m_defaults, "rmsd_fix_structure");
+    m_rmsd_atoms = Json2KeyWord<std::string>(m_defaults, "rmsd_atoms");
 
     m_writerestart = Json2KeyWord<int>(m_defaults, "writerestart");
     m_respa = Json2KeyWord<int>(m_defaults, "respa");
@@ -428,11 +429,21 @@ bool SimpleMD::Initialise()
         m_bias_pool = new CxxThreadPool;
         m_bias_pool->setProgressBar(CxxThreadPool::ProgressBarType::None);
         m_bias_pool->setActiveThreadCount(m_threads);
+        m_molecule.GetFragments();
+        m_rmsd_indicies = m_molecule.FragString2Indicies(m_rmsd_atoms);
+
+        for(auto i : m_rmsd_indicies)
+        {
+            std::cout << i << " ";
+            m_rmsd_mtd_molecule.addPair(m_molecule.Atom(i));
+        }
+        m_rmsd_fragment_count = m_rmsd_mtd_molecule.GetFragments().size();
+
         json config = RMSDJson;
         config["silent"] = true;
         config["reorder"] = false;
         for (int i = 0; i < m_threads; ++i) {
-            BiasThread* thread = new BiasThread(m_molecule, config);
+            BiasThread* thread = new BiasThread(m_rmsd_mtd_molecule, config);
             thread->setDT(m_rmsd_DT);
             thread->setk(m_k_rmsd);
             thread->setalpha(m_alpha_rmsd);
@@ -617,7 +628,7 @@ nlohmann::json SimpleMD::WriteRestartInformation()
         restart["rmsd_DT"] = m_rmsd_DT;
         restart["rmsd_ref_file"] = Basename() + ".mtd.xyz";
         restart["counter"] = m_bias_structure_count;
-
+        restart["rmsd_atoms"] = m_rmsd_atoms;
         std::vector<json> bias(m_bias_structure_count);
         for (int i = 0; i < m_bias_threads.size(); ++i) {
             for (const auto& stored_bias : m_bias_threads[i]->getBias()) {
@@ -1019,13 +1030,13 @@ void SimpleMD::start()
             for (int j = 0; j < structures.size(); ++j) {
                 std::cout << structures[j].rmsd_reference << "\t" << structures[j].energy << "\t" << structures[j].counter / double(m_colvar_incr) * 100 << std::endl;
 
-                m_molecule.setGeometry(structures[j].geometry);
-                m_molecule.setEnergy(structures[j].energy);
-                m_molecule.setName(std::to_string(structures[j].index) + " " + std::to_string(structures[j].rmsd_reference));
+                m_rmsd_mtd_molecule.setGeometry(structures[j].geometry);
+                m_rmsd_mtd_molecule.setEnergy(structures[j].energy);
+                m_rmsd_mtd_molecule.setName(std::to_string(structures[j].index) + " " + std::to_string(structures[j].rmsd_reference));
                 if (i == j && i == 0)
-                    m_molecule.writeXYZFile(Basename() + ".mtd.xyz");
+                    m_rmsd_mtd_molecule.writeXYZFile(Basename() + ".mtd.xyz");
                 else
-                    m_molecule.appendXYZFile(Basename() + ".mtd.xyz");
+                    m_rmsd_mtd_molecule.appendXYZFile(Basename() + ".mtd.xyz");
             }
         }
     }
@@ -1265,11 +1276,11 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
     m_start = std::chrono::system_clock::now();
     m_colvar_incr = 0;
 
-    Geometry current_geometry = m_molecule.getGeometry();
-    for (int i = 0; i < m_natoms; ++i) {
-        current_geometry(i, 0) = m_current_geometry[3 * i + 0];
-        current_geometry(i, 1) = m_current_geometry[3 * i + 1];
-        current_geometry(i, 2) = m_current_geometry[3 * i + 2];
+    Geometry current_geometry = m_rmsd_mtd_molecule.getGeometry();
+    for (int i = 0; i < m_rmsd_indicies.size(); ++i) {
+        current_geometry(i, 0) = m_current_geometry[3 * m_rmsd_indicies[i] + 0];
+        current_geometry(i, 1) = m_current_geometry[3 * m_rmsd_indicies[i] + 1];
+        current_geometry(i, 2) = m_current_geometry[3 * m_rmsd_indicies[i] + 2];
     }
 
     double current_bias = 0;
@@ -1278,7 +1289,7 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
     if (m_bias_structure_count == 0) {
         m_bias_threads[0]->addGeometry(current_geometry, 0, m_currentStep, 0);
         m_bias_structure_count++;
-        m_molecule.writeXYZFile(Basename() + ".mtd.xyz");
+        m_rmsd_mtd_molecule.writeXYZFile(Basename() + ".mtd.xyz");
         std::ofstream colvarfile;
         colvarfile.open("COLVAR");
         colvarfile.close();
@@ -1288,10 +1299,10 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
             m_bias_threads[i]->setCurrentGeometry(current_geometry, m_currentStep);
             m_bias_threads[i]->start();
             current_bias += m_bias_threads[i]->BiasEnergy();
-            for (int j = 0; j < m_natoms; ++j) {
-                grad[3 * j + 0] += m_bias_threads[i]->Gradient()(j, 0);
-                grad[3 * j + 1] += m_bias_threads[i]->Gradient()(j, 1);
-                grad[3 * j + 2] += m_bias_threads[i]->Gradient()(j, 2);
+            for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
+                grad[3 * m_rmsd_indicies[j] + 0] += m_bias_threads[i]->Gradient()(j, 0);
+                grad[3 * m_rmsd_indicies[j] + 1] += m_bias_threads[i]->Gradient()(j, 1);
+                grad[3 * m_rmsd_indicies[j] + 2] += m_bias_threads[i]->Gradient()(j, 2);
             }
             m_colvar_incr += m_bias_threads[i]->Counter();
             m_loop_time += m_bias_threads[i]->Time();
@@ -1316,10 +1327,10 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
             if (m_bias_threads[i]->Return() == 1) {
 
                 current_bias += m_bias_threads[i]->BiasEnergy();
-                for (int j = 0; j < m_natoms; ++j) {
-                    grad[3 * j + 0] += m_bias_threads[i]->Gradient()(j, 0);
-                    grad[3 * j + 1] += m_bias_threads[i]->Gradient()(j, 1);
-                    grad[3 * j + 2] += m_bias_threads[i]->Gradient()(j, 2);
+                for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
+                    grad[3 * m_rmsd_indicies[j] + 0] += m_bias_threads[i]->Gradient()(j, 0);
+                    grad[3 * m_rmsd_indicies[j] + 1] += m_bias_threads[i]->Gradient()(j, 1);
+                    grad[3 * m_rmsd_indicies[j] + 2] += m_bias_threads[i]->Gradient()(j, 2);
                 }
                 m_colvar_incr += m_bias_threads[i]->Counter();
             }
@@ -1331,15 +1342,14 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
     std::ofstream colvarfile;
     colvarfile.open("COLVAR", std::iostream::app);
     colvarfile << m_currentStep << " ";
-    m_molecule.setGeometry(current_geometry);
-    auto fragments = m_molecule.GetFragments();
-    if (fragments.size() < 2)
+    m_rmsd_mtd_molecule.setGeometry(current_geometry);
+    if (m_rmsd_fragment_count < 2)
         colvarfile << rmsd_reference << " ";
 
-    for(int i = 0; i < fragments.size(); ++i)
+    for(int i = 0; i < m_rmsd_fragment_count; ++i)
         for(int j = 0; j < i; ++j)
         {
-            colvarfile << (m_molecule.Centroid(true, i) -  m_molecule.Centroid(true,j)).norm()<< " ";
+            colvarfile << (m_rmsd_mtd_molecule.Centroid(true, i) -  m_rmsd_mtd_molecule.Centroid(true,j)).norm()<< " ";
         }
     colvarfile << current_bias  << " "  << std::endl;
     colvarfile.close();
@@ -1350,7 +1360,7 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
         int thread_index = m_bias_structure_count % m_bias_threads.size();
         m_bias_threads[thread_index]->addGeometry(current_geometry, rmsd_reference, m_currentStep, m_bias_structure_count);
         m_bias_structure_count++;
-        m_molecule.appendXYZFile(Basename() + ".mtd.xyz");
+        m_rmsd_mtd_molecule.appendXYZFile(Basename() + ".mtd.xyz");
         std::cout << m_bias_structure_count << " stored structures currently" << std::endl;
     }
     m_end = std::chrono::system_clock::now();
@@ -1699,7 +1709,7 @@ void SimpleMD::PrintStatus() const
 
 #endif
     }
-    std::cout << m_mtd_time << " " << m_loop_time << std::endl;
+    //std::cout << m_mtd_time << " " << m_loop_time << std::endl;
 }
 
 void SimpleMD::PrintMatrix(const double* matrix)
