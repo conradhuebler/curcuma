@@ -52,6 +52,8 @@ Molecule::Molecule(const Molecule& other)
 {
     m_geometry = other.m_geometry;
     m_charge = other.m_charge;
+    m_charges = other.m_charges;
+    m_dipole = other.m_dipole;
     m_fragments = other.m_fragments;
     m_atoms = other.m_atoms;
     m_name = other.m_name;
@@ -76,6 +78,8 @@ Molecule::Molecule(const Molecule* other)
 {
     m_geometry = other->m_geometry;
     m_charge = other->m_charge;
+    m_charges = other->m_charges;
+    m_dipole = other->m_dipole;
     m_fragments = other->m_fragments;
     m_atoms = other->m_atoms;
     m_name = other->m_name;
@@ -869,7 +873,7 @@ Position Molecule::MassCentroid(bool protons, int fragment) const
     Position pos = { 0, 0, 0 };
     double mass = 0.0;
     for (int i = 0; i < m_atoms.size(); ++i) {
-        pos += Atom(i).second;
+        pos += Elements::AtomicMass[Atom(i).first] * Atom(i).second;
         mass += Elements::AtomicMass[Atom(i).first];
     }
     pos /= mass;
@@ -895,17 +899,18 @@ Eigen::Vector3d Molecule::COM(bool protons, int fragment)
 }
 
 std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>& scaling) const
-{
+{ // calc classic dipole moment of the system with partial charges
     std::vector<Position> dipole_moments;
 
     if (m_charges.size() != m_geometry.rows()) {
         std::cout << "No partial charges available" << std::endl;
         return dipole_moments;
     }
-
+    // calc center of mass and dipole for every fragment
     for (int f = 0; f < GetFragments().size(); ++f) {
         Position pos = { 0, 0, 0 }, dipole = { 0, 0, 0 };
         double mass = 0;
+        // calc center of mass of the molecule
         for (int i : m_fragments[f]) {
             double m = Elements::AtomicMass[m_atoms[i]];
             mass += m;
@@ -916,8 +921,9 @@ std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>
         pos(0) /= mass;
         pos(1) /= mass;
         pos(2) /= mass;
+        // calc dipole moment with scalar
         for (int i : m_fragments[f]) {
-            double scale = 3;
+            double scale = 1;
             if (scaling.size() > i)
                 scale = scaling[i];
             dipole(0) += m_charges[i] * (m_geometry(i, 0) - pos(0)) * scale;
@@ -931,8 +937,8 @@ std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>
     return dipole_moments;
 }
 
-Position Molecule::CalculateDipoleMoment(const std::vector<double>& scaling) const
-{
+Position Molecule::CalculateDipoleMoment(const Vector& scaling) const
+{ // dec and init
     double mass = 0;
 
     Position pos = { 0, 0, 0 }, dipole = { 0, 0, 0 };
@@ -940,18 +946,12 @@ Position Molecule::CalculateDipoleMoment(const std::vector<double>& scaling) con
         std::cout << "No partial charges available" << std::endl;
         return dipole;
     }
+    // calc center of mass
+    pos = MassCentroid();
+
+    // calc of the dipole moment with scalar
     for (int i = 0; i < m_geometry.rows(); ++i) {
-        double m = Elements::AtomicMass[m_atoms[i]];
-        mass += m;
-        pos(0) += m * m_geometry(i, 0);
-        pos(1) += m * m_geometry(i, 1);
-        pos(2) += m * m_geometry(i, 2);
-    }
-    pos(0) /= mass;
-    pos(1) /= mass;
-    pos(2) /= mass;
-    for (int i = 0; i < m_geometry.rows(); ++i) {
-        double scale = 3;
+        double scale = 1;
         if (scaling.size() > i)
             scale = scaling[i];
         dipole(0) += m_charges[i] * (m_geometry(i, 0) - pos(0)) * scale;
@@ -1084,6 +1084,21 @@ void Molecule::appendXYZFile(const std::string& filename) const
     std::ofstream input;
     input.open(filename, std::ios_base::app);
     //std::cout << output << std::endl;
+    input << output;
+    input.close();
+}
+
+void Molecule::appendDipoleFile(const std::string& filename) const
+{
+    std::string output;
+    output += fmt::format("{}\n", AtomCount());
+    output += "Dipole: " + fmt::format("{:f} {:f} {:f}\n", m_dipole[0], m_dipole[1], m_dipole[2]);
+    for (int i = 0; i < AtomCount(); ++i) {
+        output += fmt::format("{}  {:f}    {:f}    {:f}    {:f}\n", Elements::ElementAbbr[m_atoms[i]].c_str(), m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2), m_charges[i]);
+    }
+    std::ofstream input;
+    input.open(filename, std::ios_base::app);
+    // std::cout << output << std::endl;
     input << output;
     input.close();
 }
@@ -1467,6 +1482,21 @@ std::vector<double> Molecule::GetBox() const
     box.push_back(y_max - y_min);
     box.push_back(z_max - z_min);
     return box;
+}
+
+Geometry Molecule::ChargeDistribution() const
+{
+    Geometry point_charge(m_geometry.rows(), 3);
+    if (m_charges.size() != m_geometry.rows()) {
+        std::cerr << "No partial charges available" << std::endl;
+        return point_charge.setZero(m_geometry.rows(), 3);
+    }
+    for (int i = 0; i < m_charges.size(); ++i) {
+        point_charge(i, 0) = m_geometry(i, 0) * m_charges[i];
+        point_charge(i, 1) = m_geometry(i, 1) * m_charges[i];
+        point_charge(i, 2) = m_geometry(i, 2) * m_charges[i];
+    }
+    return point_charge;
 }
 
 std::vector<int> Molecule::FragString2Indicies(const std::string& string) const

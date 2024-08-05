@@ -29,6 +29,7 @@
 #include "plumed2/src/wrapper/Plumed.h"
 #endif
 
+#include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
 
 #include "src/core/energycalculator.h"
@@ -43,8 +44,79 @@ struct BiasStructure {
     double time = 0;
     double rmsd_reference = 0;
     double energy = 0;
-    int counter = 0;
     double factor = 1;
+    int index = 0;
+    int counter = 0;
+};
+
+class BiasThread : public CxxThread {
+public:
+    BiasThread(const Molecule& reference, const json& rmsdconfig);
+    ~BiasThread();
+
+    virtual int execute() override;
+    inline void addGeometry(const Geometry& geometry, double rmsd, double time, int index)
+    {
+        BiasStructure str;
+        str.geometry = geometry;
+        str.rmsd_reference = rmsd;
+        str.time = time;
+        str.counter = 1;
+        str.index = index;
+        m_biased_structures.push_back(str);
+        std::ofstream colvarfile;
+        colvarfile.open("COLVAR_" + std::to_string(index));
+        colvarfile << "#m_currentStep  rmsd  bias_energy   counter  factor" << std::endl;
+        colvarfile.close();
+        /*
+                std::ofstream hillsfile;
+                hillsfile.open("HILLS_" + std::to_string(index));
+                hillsfile << "#m_currentStep  rmsd  bias_energy   counter  factor" << std::endl;
+                hillsfile.close();
+         */
+    }
+
+    inline void addGeometry(const Geometry& geometry, const json& bias)
+    {
+        BiasStructure str;
+        str.geometry = geometry;
+        str.rmsd_reference = bias["rmsd_reference"];
+        str.time = bias["time"];
+        str.counter = bias["counter"];
+        str.index = bias["index"];
+        str.factor = bias["factor"];
+        str.energy = bias["energy"];
+
+        m_biased_structures.push_back(str);
+    }
+
+    inline void setCurrentGeometry(const Geometry& geometry, double currentStep)
+    {
+        m_reference.setGeometry(geometry);
+        m_currentStep = currentStep;
+    }
+
+    inline Geometry Gradient() const { return m_gradient; }
+    inline double RMSDReference() const { return m_rmsd_reference; }
+    inline double BiasEnergy() const { return m_current_bias; }
+    inline void setk(double k) { m_k = k; }
+    inline void setalpha(double alpha) { m_alpha = alpha; }
+    inline void setDT(double DT) { m_DT = DT; }
+    inline void setEnergyConv(double rmsd_econv) { m_rmsd_econv = rmsd_econv; }
+    inline void setWTMTD(bool wtmtd) { m_wtmtd = wtmtd; }
+    inline int Counter() const { return m_counter; }
+    std::vector<BiasStructure> getBiasStructure() const { return m_biased_structures; }
+    std::vector<json> getBias() const;
+
+private:
+    std::vector<BiasStructure> m_biased_structures;
+    RMSDDriver m_driver;
+    json m_config;
+    Molecule m_reference, m_target;
+    Geometry m_gradient;
+    double m_k, m_alpha, m_DT, m_currentStep, m_rmsd_reference, m_current_bias, m_rmsd_econv;
+    int m_counter = 0, m_atoms = 0;
+    bool m_wtmtd = false;
 };
 
 static json CurcumaMDJson{
@@ -65,6 +137,7 @@ static json CurcumaMDJson{
     { "opt", false },
     { "hmass", 1 },
     { "velo", 1 },
+    { "threads", 1 },
     { "rescue", false },
     { "coupling", 10 },
     { "MaxTopoDiff", 15 },
@@ -80,6 +153,7 @@ static json CurcumaMDJson{
     { "rattle_maxiter", 10 },
     { "thermostat", "csvr" },
     { "respa", 1 },
+    { "threads", 1 },
     { "dipole", false },
     { "seed", 1 },
     { "cleanenergy", false },
@@ -106,9 +180,11 @@ static json CurcumaMDJson{
     { "rmsd_rmsd", 1 },
     { "mtd_steps", 1 },
     { "max_rmsd_N", -1 },
-    { "multi_rmsd", 1e8 },
+    { "rmsd_econv", 1e8 },
     { "rmsd_DT", 1000000 },
     { "wtmtd", false },
+    { "rmsd_ref_file", "none" },
+    { "rmsd_fix_structure", false },
     { "rmsd_atoms", "-1" }
 };
 
@@ -225,7 +301,9 @@ private:
     const std::vector<double> m_used_mass;
     std::vector<Geometry> m_bias_structures;
     std::vector<BiasStructure> m_biased_structures;
-
+    std::vector<BiasThread*> m_bias_threads;
+    json m_bias_json;
+    CxxThreadPool* m_bias_pool;
     int m_unix_started = 0, m_prev_index = 0, m_max_rescue = 10, m_current_rescue = 0, m_currentTime = 0, m_max_top_diff = 15, m_step = 0;
     int m_writerestart = -1;
     int m_respa = 1;
@@ -241,16 +319,19 @@ private:
     double m_alpha_rmsd = 10;
     double m_bias_energy = 1e8;
     double m_rmsd_rmsd = 1;
-    double m_mult_rmsd = 1e4;
+    double m_rmsd_econv = 1e8;
     double m_rmsd_DT = 1000000;
     int m_max_rmsd_N = -1;
     int m_mtd_steps = 10;
     int m_rattle = 0;
     int m_colvar_incr = 0;
+    int m_threads = 0;
+    int m_bias_structure_count = 0;
+
     std::vector<double> m_collected_dipole;
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;
-    std::string m_method = "UFF", m_initfile = "none", m_thermostat = "csvr", m_plumed;
+    std::string m_method = "UFF", m_initfile = "none", m_thermostat = "csvr", m_plumed, m_rmsd_ref_file;
     bool m_unstable = false;
     bool m_dipole = false;
     bool m_clean_energy = false;
@@ -258,10 +339,13 @@ private:
     bool m_eval_mtd = true;
     bool m_rmsd_mtd = false;
     bool m_wtmtd = false;
+    bool m_rmsd_fix_structure = false;
+
     int m_mtd_dT = -1;
     int m_seed = -1;
     int m_time_step = 0;
     int m_dof = 0;
+    int m_mtd_time = 0, m_loop_time = 0;
 };
 
 class MDThread : public CxxThread {

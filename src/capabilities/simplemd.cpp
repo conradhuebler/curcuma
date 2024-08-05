@@ -36,6 +36,7 @@
 
 #include "src/core/elements.h"
 #include "src/core/energycalculator.h"
+#include "src/core/fileiterator.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
 
@@ -48,6 +49,98 @@
 #endif
 #include "simplemd.h"
 
+BiasThread::BiasThread(const Molecule& reference, const json& rmsdconfig)
+    : m_reference(reference)
+    , m_target(reference)
+{
+    m_driver = RMSDDriver(rmsdconfig, true);
+    m_config = rmsdconfig;
+    setAutoDelete(true);
+    m_current_bias = 0;
+    m_counter = 0;
+    m_atoms = m_reference.AtomCount();
+    m_gradient = Eigen::MatrixXd::Zero(m_reference.AtomCount(), 3);
+}
+
+BiasThread::~BiasThread()
+{
+}
+
+int BiasThread::execute()
+{
+    if (m_biased_structures.size() == 0)
+        return 0;
+    m_current_bias = 0;
+    m_counter = 0;
+    m_driver.setReference(m_reference);
+    m_gradient = Eigen::MatrixXd::Zero(m_reference.AtomCount(), 3);
+
+    for (int i = 0; i < m_biased_structures.size(); ++i) {
+        double factor = 1;
+        m_target.setGeometry(m_biased_structures[i].geometry);
+        m_driver.setTarget(m_target);
+        double rmsd = m_driver.BestFitRMSD();
+        double expr = exp(-rmsd * rmsd * m_alpha);
+        double bias_energy = expr;
+        factor = m_biased_structures[i].factor;
+
+        if (!m_wtmtd)
+            factor = m_biased_structures[i].counter;
+        else
+            factor += (exp(-(m_biased_structures[i].energy) / kb_Eh / m_DT));
+        m_biased_structures[i].factor = factor;
+        if (i == 0) {
+            m_rmsd_reference = rmsd;
+        }
+        if (expr * m_rmsd_econv > 1 * m_biased_structures.size()) {
+            m_biased_structures[i].counter++;
+            m_biased_structures[i].energy += bias_energy;
+        }
+        bias_energy *= factor * m_k;
+
+        m_current_bias += bias_energy;
+
+        std::ofstream colvarfile;
+        colvarfile.open("COLVAR_" + std::to_string(m_biased_structures[i].index), std::iostream::app);
+        colvarfile << m_currentStep << " " << rmsd << " " << bias_energy << " " << m_biased_structures[i].counter << " " << factor << std::endl;
+        colvarfile.close();
+
+        /*
+        std::ofstream hillsfile;
+        if (i == 0) {
+            hillsfile.open("HILLS", std::iostream::app);
+        } else {
+            hillsfile.open("HILLS_" + std::to_string(m_biased_structures[i].index), std::iostream::app);
+        }
+        hillsfile << m_currentStep << " " << rmsd << " " << m_alpha_rmsd << " " << m_k_rmsd << " " << "-1" << std::endl;
+        hillsfile.close();
+        */
+
+        double dEdR = -2 * m_alpha * m_k / m_atoms * exp(-rmsd * rmsd * m_alpha) * factor;
+
+        m_gradient += m_driver.Gradient() * dEdR;
+        m_counter += m_biased_structures[i].counter;
+    }
+    return 1;
+}
+
+std::vector<json> BiasThread::getBias() const
+{
+    std::vector<json> bias(m_biased_structures.size());
+    for (int i = 0; i < m_biased_structures.size(); ++i) {
+        json current;
+        // current["geometry"] = Tools::Matrix2String(m_biased_structures[i].geometry);
+        current["time"] = m_biased_structures[i].time;
+        current["rmsd_reference"] = m_biased_structures[i].rmsd_reference;
+        current["energy"] = m_biased_structures[i].energy;
+        current["factor"] = m_biased_structures[i].factor;
+        current["index"] = m_biased_structures[i].index;
+        current["counter"] = m_biased_structures[i].counter;
+        bias[i] = current;
+    }
+    return bias;
+}
+
 SimpleMD::SimpleMD(const json& controller, bool silent)
     : CurcumaMethod(CurcumaMDJson, controller, silent)
 {
@@ -59,6 +152,7 @@ SimpleMD::~SimpleMD()
 {
     for (int i = 0; i < m_unique_structures.size(); ++i)
         delete m_unique_structures[i];
+    delete m_bias_pool;
 }
 
 void SimpleMD::LoadControlJson()
@@ -78,6 +172,7 @@ void SimpleMD::LoadControlJson()
     m_print = Json2KeyWord<int>(m_defaults, "print");
     m_max_top_diff = Json2KeyWord<int>(m_defaults, "MaxTopoDiff");
     m_seed = Json2KeyWord<int>(m_defaults, "seed");
+    m_threads = Json2KeyWord<double>(m_defaults, "threads");
 
     m_rmsd = Json2KeyWord<double>(m_defaults, "rmsd");
     m_hmass = Json2KeyWord<double>(m_defaults, "hmass");
@@ -89,6 +184,7 @@ void SimpleMD::LoadControlJson()
     m_scale_velo = Json2KeyWord<double>(m_defaults, "velo");
     m_rescue = Json2KeyWord<bool>(m_defaults, "rescue");
     m_coupling = Json2KeyWord<double>(m_defaults, "coupling");
+    m_threads = Json2KeyWord<double>(m_defaults, "threads");
     if (m_coupling < m_dT)
         m_coupling = m_dT;
 
@@ -100,9 +196,11 @@ void SimpleMD::LoadControlJson()
     m_mtd_steps = Json2KeyWord<int>(m_defaults, "mtd_steps");
     m_rmsd_rmsd = Json2KeyWord<double>(m_defaults, "rmsd_rmsd");
     m_max_rmsd_N = Json2KeyWord<int>(m_defaults, "max_rmsd_N");
-    m_mult_rmsd = Json2KeyWord<double>(m_defaults, "multi_rmsd");
+    m_rmsd_econv = Json2KeyWord<double>(m_defaults, "rmsd_econv");
     m_rmsd_DT = Json2KeyWord<double>(m_defaults, "rmsd_DT");
     m_wtmtd = Json2KeyWord<bool>(m_defaults, "wtmtd");
+    m_rmsd_ref_file = Json2KeyWord<std::string>(m_defaults, "rmsd_ref_file");
+    m_rmsd_fix_structure = Json2KeyWord<bool>(m_defaults, "rmsd_fix_structure");
 
     m_writerestart = Json2KeyWord<int>(m_defaults, "writerestart");
     m_respa = Json2KeyWord<int>(m_defaults, "respa");
@@ -325,6 +423,55 @@ bool SimpleMD::Initialise()
         result_file << init;
         result_file.close();
     }
+    /* Initialising MTD RMSD Threads */
+    if (m_rmsd_mtd) {
+        m_bias_pool = new CxxThreadPool;
+        m_bias_pool->setProgressBar(CxxThreadPool::ProgressBarType::None);
+        m_bias_pool->setActiveThreadCount(m_threads);
+        json config = RMSDJson;
+        config["silent"] = true;
+        config["reorder"] = false;
+        for (int i = 0; i < m_threads; ++i) {
+            BiasThread* thread = new BiasThread(m_molecule, config);
+            thread->setDT(m_rmsd_DT);
+            thread->setk(m_k_rmsd);
+            thread->setalpha(m_alpha_rmsd);
+            thread->setEnergyConv(m_rmsd_econv);
+            thread->setWTMTD(m_wtmtd);
+            m_bias_threads.push_back(thread);
+            m_bias_pool->addThread(thread);
+        }
+        if (m_restart) {
+            std::cout << "Reading structure files from " << m_rmsd_ref_file << std::endl;
+            for (const auto& i : m_bias_json)
+                std::cout << i << std::endl;
+            FileIterator file(m_rmsd_ref_file);
+            int index = 0;
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                std::cout << m_bias_json[index] << std::endl;
+                int thread_index = index % m_bias_threads.size();
+                m_bias_threads[thread_index]->addGeometry(mol.getGeometry(), m_bias_json[index]);
+                ++index;
+            }
+            m_bias_structure_count = index;
+        } else {
+            if (m_rmsd_ref_file.compare("none") != 0) {
+                std::cout << "Reading structure files from " << m_rmsd_ref_file << std::endl;
+                int index = 0;
+
+                FileIterator file(m_rmsd_ref_file);
+                while (!file.AtEnd()) {
+                    Molecule mol = file.Next();
+                    int thread_index = index % m_bias_threads.size();
+                    m_bias_threads[thread_index]->addGeometry(mol.getGeometry(), 0, 0, index);
+                    ++index;
+                }
+                m_bias_structure_count = index;
+            }
+        }
+    }
+
     m_initialised = true;
     return true;
 }
@@ -460,7 +607,29 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["respa"] = m_respa;
     restart["rm_COM"] = m_rm_COM;
     restart["mtd"] = m_mtd;
+    restart["rmsd_mtd"] = m_rmsd_mtd;
+    if (m_rmsd_mtd) {
+        restart["k_rmsd"] = m_k_rmsd;
+        restart["alpha_rmsd"] = m_alpha_rmsd;
+        restart["mtd_steps"] = m_mtd_steps;
+        restart["rmsd_econv"] = m_rmsd_econv;
+        restart["wtmtd"] = m_wtmtd;
+        restart["rmsd_DT"] = m_rmsd_DT;
+        restart["rmsd_ref_file"] = Basename() + ".mtd.xyz";
+        restart["counter"] = m_bias_structure_count;
 
+        std::vector<json> bias(m_bias_structure_count);
+        for (int i = 0; i < m_bias_threads.size(); ++i) {
+            for (const auto& stored_bias : m_bias_threads[i]->getBias()) {
+                bias[stored_bias["index"]] = stored_bias;
+            }
+        }
+        json bias_restart;
+        for (int i = 0; i < bias.size(); ++i) {
+            bias_restart[i] = bias[i];
+        }
+        restart["bias"] = bias_restart;
+    }
     return restart;
 };
 
@@ -581,12 +750,35 @@ bool SimpleMD::LoadRestartInformation(const json& state)
         velocities = state["velocities"];
     } catch (json::type_error& e) {
     }
+
+    try {
+        m_mtd = state["mtd"];
+    } catch (json::type_error& e) {
+    }
+
+    try {
+        m_rmsd_mtd = state["rmsd_mtd"];
+        if (m_rmsd_mtd) {
+            m_k_rmsd = state["k_rmsd"];
+            m_alpha_rmsd = state["alpha_rmsd"];
+
+            m_mtd_steps = state["mtd_steps"];
+            m_rmsd_econv = state["rmsd_econv"];
+            m_wtmtd = state["wtmtd"];
+            m_rmsd_DT = state["rmsd_DT"];
+            m_rmsd_ref_file = state["rmsd_ref_file"];
+            m_bias_json = state["bias"];
+        }
+    } catch (json::type_error& e) {
+    }
+
     if (geometry.size()) {
         m_current_geometry = Tools::String2DoubleVec(geometry, "|");
     }
     if (velocities.size()) {
         m_velocities = Tools::String2DoubleVec(velocities, "|");
     }
+
     m_restart = geometry.size() && velocities.size();
 
     return true;
@@ -622,8 +814,6 @@ void SimpleMD::start()
     m_Etot = m_Epot + m_Ekin;
 
     int m_step = 0;
-
-    PrintStatus();
 
 #ifdef USE_Plumed
     if (m_mtd) {
@@ -688,12 +878,14 @@ void SimpleMD::start()
         std::cout << "k\t" << m_k_rmsd << std::endl;
         std::cout << "alpha\t" << m_alpha_rmsd << std::endl;
         std::cout << "steps\t" << m_mtd_steps << std::endl;
-        std::cout << "Ethresh\t" << m_mult_rmsd << std::endl;
+        std::cout << "Ethresh\t" << m_rmsd_econv << std::endl;
         if (m_wtmtd)
             std::cout << "Well Tempered\tOn (" << m_rmsd_DT << ")" << std::endl;
         else
             std::cout << "Well Tempered\tOff" << std::endl;
     }
+    PrintStatus();
+
     for (; m_currentStep < m_maxtime;) {
         auto step0 = std::chrono::system_clock::now();
 
@@ -822,15 +1014,20 @@ void SimpleMD::start()
 #endif
     if (m_rmsd_mtd) {
         std::cout << "Sum of Energy of COLVARs:" << std::endl;
-        for (int i = 0; i < m_biased_structures.size(); ++i) {
-            std::cout << m_biased_structures[i].rmsd_reference << "\t" << m_biased_structures[i].energy << "\t" << m_biased_structures[i].counter / double(m_colvar_incr) * 100 << std::endl;
+        for (int i = 0; i < m_bias_threads.size(); ++i) {
+            auto structures = m_bias_threads[i]->getBiasStructure();
+            for (int j = 0; j < structures.size(); ++j) {
+                std::cout << structures[j].rmsd_reference << "\t" << structures[j].energy << "\t" << structures[j].counter / double(m_colvar_incr) * 100 << std::endl;
 
-            m_molecule.setGeometry(m_biased_structures[i].geometry);
-            m_molecule.setEnergy(m_biased_structures[i].energy);
-            m_molecule.setName(std::to_string(i) + " " + std::to_string(m_biased_structures[i].rmsd_reference));
-            m_molecule.appendXYZFile(Basename() + ".mtd.xyz");
+                m_molecule.setGeometry(structures[j].geometry);
+                m_molecule.setEnergy(structures[j].energy);
+                m_molecule.setName(std::to_string(structures[j].index) + " " + std::to_string(structures[j].rmsd_reference));
+                if (i == j && i == 0)
+                    m_molecule.writeXYZFile(Basename() + ".mtd.xyz");
+                else
+                    m_molecule.appendXYZFile(Basename() + ".mtd.xyz");
+            }
         }
-        std::cout << std::endl;
     }
     std::ofstream restart_file("curcuma_final.json");
     restart_file << WriteRestartInformation() << std::endl;
@@ -865,8 +1062,6 @@ void SimpleMD::Verlet(double* grad)
 
         plumed_cmd(m_plumedmain, "setEnergy", &m_Epot);
         plumed_cmd(m_plumedmain, "setForces", &m_gradient[0]);
-// FIXME
-#pragma message("we have to move the forces to the integrator")
         plumed_cmd(m_plumedmain, "setVirial", &m_virial[0]);
 
         plumed_cmd(m_plumedmain, "setMasses", &m_mass[0]);
@@ -993,8 +1188,6 @@ void SimpleMD::Rattle(double* grad)
 
         plumed_cmd(m_plumedmain, "setEnergy", &m_Epot);
         plumed_cmd(m_plumedmain, "setForces", &m_gradient[0]);
-// FIXME
-#pragma message("we have to move the forces to the integrator")
         plumed_cmd(m_plumedmain, "setVirial", &m_virial[0]);
 
         plumed_cmd(m_plumedmain, "setMasses", &m_mass[0]);
@@ -1068,6 +1261,10 @@ void SimpleMD::Rattle(double* grad)
 
 void SimpleMD::ApplyRMSDMTD(double* grad)
 {
+    std::chrono::time_point<std::chrono::system_clock> m_start, m_end;
+    m_start = std::chrono::system_clock::now();
+    m_colvar_incr = 0;
+
     Geometry current_geometry = m_molecule.getGeometry();
     for (int i = 0; i < m_natoms; ++i) {
         current_geometry(i, 0) = m_current_geometry[3 * i + 0];
@@ -1075,71 +1272,62 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
         current_geometry(i, 2) = m_current_geometry[3 * i + 2];
     }
 
-    Geometry gradient = Eigen::MatrixXd::Zero(m_natoms, 3);
-
-    json rmsd = RMSDJson;
-    rmsd["silent"] = true;
-    rmsd["reorder"] = false;
-    RMSDDriver driver(rmsd, true);
-    m_reference.setGeometry(current_geometry);
-    driver.setReference(m_reference);
-    if (m_biased_structures.size() == 0) {
-        BiasStructure str;
-        str.geometry = current_geometry;
-        str.rmsd_reference = 0;
-        str.time = m_currentTime;
-        str.counter = 1;
-        m_biased_structures.push_back(str);
-        std::cout << m_biased_structures.size() << " stored structures currently" << std::endl;
-    }
-    double rmsd_reference = 0;
     double current_bias = 0;
-    for (int i = 0; i < m_biased_structures.size(); ++i) {
-        double factor = 1;
-        m_target.setGeometry(m_biased_structures[i].geometry);
-        driver.setTarget(m_target);
-        driver.start();
-        double rmsd = driver.RMSD();
-        double expr = exp(-rmsd * rmsd * m_alpha_rmsd);
-        double bias_energy = expr;
-        factor = m_biased_structures[i].factor;
+    double rmsd_reference = 0;
 
-        if (!m_wtmtd)
-            factor = m_biased_structures[i].counter;
-        else
-            factor += (exp(-(m_biased_structures[i].energy) / kb_Eh / m_rmsd_DT));
-        m_biased_structures[i].factor = factor;
-        if (i == 0) {
-            rmsd_reference = rmsd;
-        }
-        if (expr * m_mult_rmsd > 1 * m_biased_structures.size()) {
-            m_biased_structures[i].counter++;
-            m_biased_structures[i].energy += bias_energy;
-            m_colvar_incr++;
-        }
-        bias_energy *= factor * m_k_rmsd;
-
-        current_bias += bias_energy;
+    if (m_bias_structure_count == 0) {
+        m_bias_threads[0]->addGeometry(current_geometry, 0, m_currentStep, 0);
+        m_bias_structure_count++;
+        m_molecule.writeXYZFile(Basename() + ".mtd.xyz");
         std::ofstream colvarfile;
-
-        colvarfile.open("COLVAR_" + std::to_string(i), std::iostream::app);
-
-        colvarfile << m_currentStep << " " << rmsd << " " << bias_energy  << " " << m_biased_structures[i].counter << " " << factor << std::endl;
+        colvarfile.open("COLVAR");
         colvarfile.close();
-
-        std::ofstream hillsfile;
-        if (i == 0) {
-            hillsfile.open("HILLS", std::iostream::app);
-        } else {
-            hillsfile.open("HILLS_" + std::to_string(i), std::iostream::app);
-        }
-        hillsfile << m_currentStep << " " << rmsd << " " << m_alpha_rmsd << " " << m_k_rmsd << " " << "-1" << std::endl;
-        hillsfile.close();
-
-        double dEdR = -2 * m_alpha_rmsd * m_k_rmsd / m_natoms * expr * factor;
-        gradient += driver.Gradient() * dEdR;
     }
+    if (m_threads == 1 || m_bias_structure_count == 1) {
+        for (int i = 0; i < m_bias_threads.size(); ++i) {
+            m_bias_threads[i]->setCurrentGeometry(current_geometry, m_currentStep);
+            m_bias_threads[i]->start();
+            current_bias += m_bias_threads[i]->BiasEnergy();
+            for (int j = 0; j < m_natoms; ++j) {
+                grad[3 * j + 0] += m_bias_threads[i]->Gradient()(j, 0);
+                grad[3 * j + 1] += m_bias_threads[i]->Gradient()(j, 1);
+                grad[3 * j + 2] += m_bias_threads[i]->Gradient()(j, 2);
+            }
+            m_colvar_incr += m_bias_threads[i]->Counter();
+            m_loop_time += m_bias_threads[i]->Time();
+        }
+    } else {
+        if (m_bias_structure_count < m_threads) {
+            for (int i = 0; i < m_bias_structure_count; ++i) {
+                m_bias_threads[i]->setCurrentGeometry(current_geometry, m_currentStep);
+            }
+        } else {
+            for (int i = 0; i < m_bias_threads.size(); ++i) {
+                m_bias_threads[i]->setCurrentGeometry(current_geometry, m_currentStep);
+            }
+        }
 
+        m_bias_pool->setActiveThreadCount(m_threads);
+        m_bias_pool->StaticPool();
+        m_bias_pool->StartAndWait();
+        m_bias_pool->setWakeUp(m_bias_pool->WakeUp() / 2);
+
+        for (int i = 0; i < m_bias_threads.size(); ++i) {
+            if (m_bias_threads[i]->Return() == 1) {
+
+                current_bias += m_bias_threads[i]->BiasEnergy();
+                for (int j = 0; j < m_natoms; ++j) {
+                    grad[3 * j + 0] += m_bias_threads[i]->Gradient()(j, 0);
+                    grad[3 * j + 1] += m_bias_threads[i]->Gradient()(j, 1);
+                    grad[3 * j + 2] += m_bias_threads[i]->Gradient()(j, 2);
+                }
+                m_colvar_incr += m_bias_threads[i]->Counter();
+            }
+            m_loop_time += m_bias_threads[i]->Time();
+        }
+        m_bias_pool->Reset();
+    }
+    rmsd_reference = m_bias_threads[0]->RMSDReference();
     std::ofstream colvarfile;
     colvarfile.open("COLVAR", std::iostream::app);
     colvarfile << m_currentStep << " ";
@@ -1157,25 +1345,17 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
     colvarfile.close();
 
     m_bias_energy += current_bias;
-    for (int i = 0; i < m_natoms; ++i) {
-        grad[3 * i + 0] += gradient(i, 0);
-        grad[3 * i + 1] += gradient(i, 1);
-        grad[3 * i + 2] += gradient(i, 2);
-    }
 
-    if (current_bias*m_mult_rmsd < 1) {
-        BiasStructure str;
-        str.geometry = current_geometry;
-        str.rmsd_reference = rmsd_reference;
-        str.time = m_currentStep;
-        str.counter = 1;
-        m_biased_structures.push_back(str);
-        if (m_max_rmsd_N > 0) {
-            if (m_max_rmsd_N <= m_bias_structures.size())
-                m_biased_structures.erase(m_biased_structures.begin() + 1);
-        }
-        std::cout << m_biased_structures.size() << " stored structures currently" << std::endl;
+    if (current_bias * m_rmsd_econv < m_bias_structure_count && m_rmsd_fix_structure == false) {
+        int thread_index = m_bias_structure_count % m_bias_threads.size();
+        m_bias_threads[thread_index]->addGeometry(current_geometry, rmsd_reference, m_currentStep, m_bias_structure_count);
+        m_bias_structure_count++;
+        m_molecule.appendXYZFile(Basename() + ".mtd.xyz");
+        std::cout << m_bias_structure_count << " stored structures currently" << std::endl;
     }
+    m_end = std::chrono::system_clock::now();
+    int m_time = std::chrono::duration_cast<std::chrono::milliseconds>(m_end - m_start).count();
+    m_mtd_time += m_time;
 }
 
 void SimpleMD::Rattle_Verlet_First(double* coord, double* grad)
@@ -1519,6 +1699,7 @@ void SimpleMD::PrintStatus() const
 
 #endif
     }
+    std::cout << m_mtd_time << " " << m_loop_time << std::endl;
 }
 
 void SimpleMD::PrintMatrix(const double* matrix)
@@ -1539,7 +1720,7 @@ double SimpleMD::CleanEnergy(double* grad)
     double Energy = interface.CalculateEnergy(true);
     interface.getGradient(grad);
     if (m_dipole) {
-        std::vector<double> dipole = interface.Dipole();
+        auto dipole = interface.Dipole();
         m_curr_dipole = sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]);
         m_collected_dipole.push_back(sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]));
     }
@@ -1553,7 +1734,7 @@ double SimpleMD::FastEnergy(double* grad)
     double Energy = m_interface->CalculateEnergy(true);
     m_interface->getGradient(grad);
     if (m_dipole) {
-        std::vector<double> dipole = m_interface->Dipole();
+        auto dipole = m_interface->Dipole();
         m_curr_dipole = sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]);
         m_collected_dipole.push_back(sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]));
     }

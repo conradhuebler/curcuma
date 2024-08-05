@@ -1,20 +1,20 @@
 /*
  * <Internal Coordinate Handler for chemical structures.>
  * Copyright (C) 2019 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
- * 
+ *               2024 Gerd Gehrisch
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- * 
+ *
  */
 
 #pragma once
@@ -110,6 +110,9 @@ class Molecule
     double CalculateDistance(int i, int j) const;
     std::pair<double, double> GyrationRadius(bool hydrogen = true, int fragment = -1);
 
+    /*! \brief Methode to get the geometry of the molecule as array of vectors
+     *
+     */
     Geometry getGeometry(const IntPair& pair, bool protons = true) const;
     Geometry getGeometry(std::vector<int> atoms, bool protons = true) const;
     Geometry getGeometryByFragment(int fragment, bool protons = true) const;
@@ -123,12 +126,31 @@ class Molecule
     bool setGeometryByFragment(const Geometry& geometry, int fragment, bool protons = true);
 
     Position Centroid(bool hydrogen = true, int fragment = -1) const;
+
+    /*! \brief Method to calc the center of Mass
+     *
+     */
     Position MassCentroid(bool hydrogen = true, int fragment = -1) const;
     Eigen::Vector3d COM(bool hydrogen = true, int fragment = -1);
 
+    /*! \brief Methode to get number of atoms
+     *
+     * @return size of the atoms
+     */
     inline std::size_t AtomCount() const { return m_atoms.size(); }
+
+    /*! \brief Methode to get array of all the atoms
+     *
+     * @return array of the atomnumber
+     */
     std::vector<int> Atoms() const { return m_atoms; }
     std::vector<int> FragString2Indicies(const std::string& string) const;
+
+    /*! \brief Methode to get atom number and XYZ from index
+     *
+     * @param i: index of the atom
+     * @return pair of atom number and the xyz position
+     */
 
     std::pair<int, Position> Atom(int i) const;
 
@@ -140,11 +162,23 @@ class Molecule
     void appendXYZFile(const std::string& filename) const;
     inline void appendXYZFile() const { appendXYZFile(Name() + ".xyz"); }
 
+    void appendDipoleFile(const std::string& filename) const;
+    inline void appendDipoleFile() const { appendDipoleFile(Name() + ".dip"); }
+
     std::string XYZString() const;
     std::string XYZString(const std::vector<int> &order) const;
 
+    /*! \brief Methode to calculate the dipole moments of single molecules
+     *
+     */
     std::vector<Position> CalculateDipoleMoments(const std::vector<double>& scaling = std::vector<double>()) const;
-    Position CalculateDipoleMoment(const std::vector<double>& scaling = std::vector<double>()) const;
+
+    /*! \brief Methode to calculate the dipole moments of whole structure
+     * unit of dipol is electron times angstron
+     */
+    Position CalculateDipoleMoment(const Vector& scaling = Vector()) const;
+
+    Geometry ChargeDistribution() const;
 
     std::vector<int> BoundHydrogens(int atom, double scaling = 1.5) const;
     std::map<int, std::vector<int>> getConnectivtiy(double scaling = 1.5, int latest = -1) const;
@@ -164,7 +198,16 @@ class Molecule
 
     inline std::string Name() const { return m_name; }
 
+    /*! \brief Methode to get the atom name with position
+     *
+     * Input i is the number of the atom,
+     * Output is a string as in .xyz file
+     * */
     std::string Atom2String(int i) const;
+
+    /*! \brief Methode to get the header of the xyz file
+     *
+     * */
     std::string Header() const;
 
     void CalculateRotationalConstants();
@@ -182,6 +225,9 @@ class Molecule
     Matrix HydrogenBondMatrix(int f1, int f2);
     void writeXYZFragments(const std::string& basename) const;
 
+    /*! no use at the moment
+     *
+     */
     int Check() const;
 
     inline void setSpin(int spin) { m_spin = spin; }
@@ -205,6 +251,9 @@ class Molecule
         return m_persistentImage;
     }
 
+    /*! Methode to translate the coord to the centroid
+     *
+     */
     void Center(bool mass = false);
 
     std::pair<Matrix, Matrix> DistanceMatrix() const;
@@ -214,6 +263,12 @@ class Molecule
     Matrix AlignmentAxes() const { return m_alignmentAxes; }
 
     void setPartialCharges(const std::vector<double>& charges) { m_charges = charges; }
+
+    inline std::vector<double> getPartialCharges() const { return m_charges; }
+
+    void setDipole(const Position& dipole) { m_dipole = dipole; }
+
+    inline Position getDipole() const { return m_dipole; }
 
     inline std::vector<std::pair<int, int>> Bonds() const { return m_bonds; }
 
@@ -236,6 +291,7 @@ private:
     void InitialiseEmptyGeometry(int atoms);
 
     int m_charge = 0, m_spin = 0;
+    Position m_dipole;
     Geometry m_geometry;
     std::vector<int> m_atoms;
     std::vector<double> m_charges;
