@@ -171,6 +171,7 @@ static json CurcumaMDJson{
     { "wall_z_max", 0 },
     { "wall_temp", 298.15 },
     { "wall_beta", 6 },
+    { "wall_render", false },
     { "mtd", false },
     { "plumed", "plumed.dat" },
     { "mtd_dT", -1 },
@@ -296,6 +297,7 @@ private:
     bool m_initialised = false, m_restart = false, m_writeUnique = true, m_opt = false, m_rescue = false, m_writeXYZ = true, m_writeinit = false, m_norestart = false;
     int m_rmrottrans = 0, m_rattle_maxiter = 100;
     bool m_nocenter = false;
+    bool m_wall_render = false;
     EnergyCalculator* m_interface;
     RMSDTraj* m_unqiue;
     const std::vector<double> m_used_mass;
@@ -331,6 +333,7 @@ private:
     int m_threads = 0;
     int m_bias_structure_count = 0;
     int m_rmsd_fragment_count = 0;
+    int m_wall_type = 0;
     std::vector<double> m_collected_dipole;
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;

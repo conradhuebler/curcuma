@@ -183,6 +183,7 @@ void SimpleMD::LoadControlJson()
     m_opt = Json2KeyWord<bool>(m_defaults, "opt");
     m_scale_velo = Json2KeyWord<double>(m_defaults, "velo");
     m_rescue = Json2KeyWord<bool>(m_defaults, "rescue");
+    m_wall_render = Json2KeyWord<bool>(m_defaults, "wall_render");
     m_coupling = Json2KeyWord<double>(m_defaults, "coupling");
     m_threads = Json2KeyWord<double>(m_defaults, "threads");
     if (m_coupling < m_dT)
@@ -250,11 +251,13 @@ void SimpleMD::LoadControlJson()
 
     if (Json2KeyWord<std::string>(m_defaults, "wall").compare("spheric") == 0) {
         if (Json2KeyWord<std::string>(m_defaults, "wall_type").compare("logfermi") == 0) {
+            m_wall_type = 1;
             WallPotential = [=](double* grad) -> double {
                 this->m_wall_potential = this->ApplySphericLogFermiWalls(grad);
                 return m_wall_potential;
             };
         } else if (Json2KeyWord<std::string>(m_defaults, "wall_type").compare("harmonic") == 0) {
+            m_wall_type = 1;
             WallPotential = [=](double* grad) -> double {
                 this->m_wall_potential = this->ApplySphericHarmonicWalls(grad);
                 return m_wall_potential;
@@ -265,14 +268,15 @@ void SimpleMD::LoadControlJson()
         }
         std::cout << "Setting up spherical potential" << std::endl;
 
-        InitialiseWalls();
     } else if (Json2KeyWord<std::string>(m_defaults, "wall").compare("rect") == 0) {
         if (Json2KeyWord<std::string>(m_defaults, "wall_type").compare("logfermi") == 0) {
+            m_wall_type = 2;
             WallPotential = [=](double* grad) -> double {
                 this->m_wall_potential = this->ApplyRectLogFermiWalls(grad);
                 return m_wall_potential;
             };
         } else if (Json2KeyWord<std::string>(m_defaults, "wall_type").compare("harmonic") == 0) {
+            m_wall_type = 2;
             WallPotential = [=](double* grad) -> double {
                 this->m_wall_potential = this->ApplyRectHarmonicWalls(grad);
                 return m_wall_potential;
@@ -283,8 +287,6 @@ void SimpleMD::LoadControlJson()
             exit(1);
         }
         std::cout << "Setting up rectangular potential" << std::endl;
-
-        InitialiseWalls();
     } else
         WallPotential = [=](double* grad) -> double {
             return 0;
@@ -417,6 +419,7 @@ bool SimpleMD::Initialise()
     m_dof = 3 * m_natoms;
 
     InitConstrainedBonds();
+    InitialiseWalls();
     if (m_writeinit) {
         json init = WriteRestartInformation();
         std::ofstream result_file;
@@ -582,6 +585,99 @@ void SimpleMD::InitialiseWalls()
 
     if (m_wall_spheric_radius < radius) {
         m_wall_spheric_radius = radius + 5;
+    }
+    if (m_wall_render) {
+        std::cout << "render walls" << std::endl;
+        if (m_wall_type == 1) {
+            Position x0 = Position{ m_wall_spheric_radius, 0, 0 };
+            Position x1 = Position{ -m_wall_spheric_radius, 0, 0 };
+            Position y0 = Position{ 0, m_wall_spheric_radius, 0 };
+            Position y1 = Position{ 0, -m_wall_spheric_radius, 0 };
+            Position z0 = Position{ 0, 0, m_wall_spheric_radius };
+            Position z1 = Position{ 0, 0, -m_wall_spheric_radius };
+            m_molecule.addBorderPoint(x0);
+            m_molecule.addBorderPoint(x1);
+            m_molecule.addBorderPoint(y0);
+            m_molecule.addBorderPoint(y1);
+            m_molecule.addBorderPoint(z0);
+            m_molecule.addBorderPoint(z1);
+
+            double intermedia = 1 / sqrt(2.0) * m_wall_spheric_radius;
+            x0 = Position{ intermedia, intermedia, 0 };
+            y0 = Position{ 0, intermedia, intermedia };
+            z0 = Position{ intermedia, 0, intermedia };
+
+            m_molecule.addBorderPoint(x0);
+            m_molecule.addBorderPoint(y0);
+            m_molecule.addBorderPoint(z0);
+            x0 = Position{ -intermedia, -intermedia, 0 };
+            y0 = Position{ 0, -intermedia, -intermedia };
+            z0 = Position{ -intermedia, 0, -intermedia };
+            m_molecule.addBorderPoint(x0);
+            m_molecule.addBorderPoint(y0);
+            m_molecule.addBorderPoint(z0);
+            x0 = Position{ -intermedia, intermedia, 0 };
+            y0 = Position{ 0, -intermedia, intermedia };
+            z0 = Position{ -intermedia, 0, intermedia };
+            m_molecule.addBorderPoint(x0);
+            m_molecule.addBorderPoint(y0);
+            m_molecule.addBorderPoint(z0);
+            x0 = Position{ intermedia, -intermedia, 0 };
+            y0 = Position{ 0, intermedia, -intermedia };
+            z0 = Position{ intermedia, 0, -intermedia };
+            m_molecule.addBorderPoint(x0);
+            m_molecule.addBorderPoint(y0);
+            m_molecule.addBorderPoint(z0);
+            intermedia = 1 / sqrt(3.0) * m_wall_spheric_radius;
+
+            x0 = Position{ intermedia, intermedia, intermedia };
+            m_molecule.addBorderPoint(x0);
+            x0 = Position{ -intermedia, intermedia, intermedia };
+            m_molecule.addBorderPoint(x0);
+            x0 = Position{ intermedia, -intermedia, intermedia };
+            m_molecule.addBorderPoint(x0);
+            x0 = Position{ intermedia, intermedia, -intermedia };
+            m_molecule.addBorderPoint(x0);
+            x0 = Position{ -intermedia, intermedia, -intermedia };
+            m_molecule.addBorderPoint(x0);
+            x0 = Position{ intermedia, -intermedia, -intermedia };
+            m_molecule.addBorderPoint(x0);
+            x0 = Position{ -intermedia, -intermedia, intermedia };
+            m_molecule.addBorderPoint(x0);
+            x0 = Position{ -intermedia, -intermedia, -intermedia };
+            m_molecule.addBorderPoint(x0);
+        } else if (m_wall_type == 2) {
+            Position x0 = Position{ m_wall_x_min, 0, 0 };
+            Position x1 = Position{ m_wall_x_max, 0, 0 };
+            Position y0 = Position{ 0, m_wall_y_min, 0 };
+            Position y1 = Position{ 0, m_wall_y_max, 0 };
+            Position z0 = Position{ 0, 0, m_wall_z_min };
+            Position z1 = Position{ 0, 0, m_wall_z_max };
+
+            m_molecule.addBorderPoint(x0);
+            m_molecule.addBorderPoint(x1);
+            m_molecule.addBorderPoint(y0);
+            m_molecule.addBorderPoint(y1);
+            m_molecule.addBorderPoint(z0);
+            m_molecule.addBorderPoint(z1);
+
+            x0 = Position{ m_wall_x_min, m_wall_y_min, 0 };
+            x1 = Position{ m_wall_x_max, m_wall_y_max, 0 };
+            y0 = Position{ m_wall_x_min, 0, m_wall_z_min };
+            y1 = Position{ m_wall_x_max, 0, m_wall_z_min };
+            z0 = Position{ 0, m_wall_y_min, m_wall_z_min };
+            z1 = Position{ 0, m_wall_y_max, m_wall_z_max };
+
+            m_molecule.addBorderPoint(x0);
+            m_molecule.addBorderPoint(x1);
+            m_molecule.addBorderPoint(y0);
+            m_molecule.addBorderPoint(y1);
+            m_molecule.addBorderPoint(z0);
+            m_molecule.addBorderPoint(z1);
+
+            x0 = Position{ m_wall_x_min, m_wall_y_min, m_wall_z_min };
+            m_molecule.addBorderPoint(x0);
+        }
     }
     std::cout << "Setting up potential walls " << std::endl;
     std::cout << "Radius " << m_wall_spheric_radius << std::endl;

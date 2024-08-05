@@ -274,6 +274,8 @@ class Molecule
 
     inline std::vector<std::pair<int, int>> Bonds() const { return m_bonds; }
 
+    inline void addBorderPoint(const Position& point) { m_borders.push_back(point); }
+
 private:
     void ParseString(const std::string& internal, std::vector<std::string>& elements);
 
@@ -297,7 +299,7 @@ private:
     Geometry m_geometry;
     std::vector<int> m_atoms;
     std::vector<double> m_charges;
-
+    std::vector<Position> m_borders;
     std::vector<int> m_connect_mass;
     Matrix m_HydrogenBondMap;
     Eigen::MatrixXd m_persistentImage, m_alignmentAxes;

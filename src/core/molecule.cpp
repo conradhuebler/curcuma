@@ -60,6 +60,7 @@ Molecule::Molecule(const Molecule& other)
     m_energy = other.m_energy;
     m_spin = other.m_spin;
     m_bonds = other.m_bonds;
+    m_borders = other.m_borders;
 }
 /*
 Molecule& Molecule::operator=(const Molecule& other)
@@ -86,6 +87,7 @@ Molecule::Molecule(const Molecule* other)
     m_energy = other->m_energy;
     m_spin = other->m_spin;
     m_bonds = other->m_bonds;
+    m_borders = other->m_borders;
 }
 /*
 Molecule& Molecule::operator=(const Molecule* other)
@@ -1076,10 +1078,13 @@ void Molecule::writeXYZFragments(const std::string& filename) const
 void Molecule::appendXYZFile(const std::string& filename) const
 {
     std::string output;
-    output += fmt::format("{}\n", AtomCount());
+    output += fmt::format("{}\n", AtomCount() + m_borders.size());
     output += Header();
     for (int i = 0; i < AtomCount(); ++i) {
         output += Atom2String(i);
+    }
+    for (int i = 0; i < m_borders.size(); ++i) {
+        output += "X    " + std::to_string(m_borders[i](0)) + "    " + std::to_string(m_borders[i](1)) + "    " + std::to_string(m_borders[i](2)) + "\n";
     }
     std::ofstream input;
     input.open(filename, std::ios_base::app);
@@ -1106,10 +1111,13 @@ void Molecule::appendDipoleFile(const std::string& filename) const
 std::string Molecule::XYZString() const
 {
     std::string output;
-    output += fmt::format("{}\n", AtomCount());
+    output += fmt::format("{}\n", AtomCount() + m_borders.size());
     output += Header();
     for (int i = 0; i < AtomCount(); ++i) {
         output += Atom2String(i);
+    }
+    for (int i = 0; i < m_borders.size(); ++i) {
+        output += "X    " + std::to_string(m_borders[i](0)) + "    " + std::to_string(m_borders[i](1)) + "    " + std::to_string(m_borders[i](2)) + "\n";
     }
     return output;
 }
@@ -1117,11 +1125,14 @@ std::string Molecule::XYZString() const
 std::string Molecule::XYZString(const std::vector<int> &order) const
 {
     std::string output;
-    output += fmt::format("{}\n", AtomCount());
+    output += fmt::format("{}\n", AtomCount() + m_borders.size());
     output += Header();
     for (int i : order) {
         std::cout << i << " ";
         output += Atom2String(i);
+    }
+    for (int i = 0; i < m_borders.size(); ++i) {
+        output += "X    " + std::to_string(m_borders[i](0)) + "    " + std::to_string(m_borders[i](1)) + "    " + std::to_string(m_borders[i](2)) + "\n";
     }
     return output;
 }
