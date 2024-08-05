@@ -596,6 +596,7 @@ void SimpleMD::start()
 {
     if (m_initialised == false)
         return;
+    bool aborted = false;
     auto unix_timestamp = std::chrono::seconds(std::time(NULL));
     m_unix_started = std::chrono::milliseconds(unix_timestamp).count();
     double* gradient = new double[3 * m_natoms];
@@ -698,6 +699,7 @@ void SimpleMD::start()
 
         if (CheckStop() == true) {
             TriggerWriteRestart();
+            aborted = true;
 #ifdef USE_Plumed
             if (m_mtd) {
                 plumed_finalize(m_plumedmain); // Call the plumed destructor
@@ -818,19 +820,22 @@ void SimpleMD::start()
         plumed_finalize(m_plumedmain); // Call the plumed destructor
     }
 #endif
-    std::cout << "Sum of Energy of COLVARs:" << std::endl;
-    for (int i = 0; i < m_biased_structures.size(); ++i) {
-        std::cout << m_biased_structures[i].rmsd_reference << "\t" << m_biased_structures[i].energy << "\t" << m_biased_structures[i].counter / double(m_colvar_incr) * 100 << std::endl;
+    if (m_rmsd_mtd) {
+        std::cout << "Sum of Energy of COLVARs:" << std::endl;
+        for (int i = 0; i < m_biased_structures.size(); ++i) {
+            std::cout << m_biased_structures[i].rmsd_reference << "\t" << m_biased_structures[i].energy << "\t" << m_biased_structures[i].counter / double(m_colvar_incr) * 100 << std::endl;
 
-        m_molecule.setGeometry(m_biased_structures[i].geometry);
-        m_molecule.setEnergy(m_biased_structures[i].energy);
-        m_molecule.setName(std::to_string(i) + " " + std::to_string(m_biased_structures[i].rmsd_reference));
-        m_molecule.appendXYZFile(Basename() + ".mtd.xyz");
+            m_molecule.setGeometry(m_biased_structures[i].geometry);
+            m_molecule.setEnergy(m_biased_structures[i].energy);
+            m_molecule.setName(std::to_string(i) + " " + std::to_string(m_biased_structures[i].rmsd_reference));
+            m_molecule.appendXYZFile(Basename() + ".mtd.xyz");
+        }
+        std::cout << std::endl;
     }
-    std::cout << std::endl;
     std::ofstream restart_file("curcuma_final.json");
     restart_file << WriteRestartInformation() << std::endl;
-    std::remove("curcuma_restart.json");
+    if (aborted == false)
+        std::remove("curcuma_restart.json");
     delete[] gradient;
 }
 

@@ -108,7 +108,8 @@ static json CurcumaMDJson{
     { "max_rmsd_N", -1 },
     { "multi_rmsd", 1e8 },
     { "rmsd_DT", 1000000 },
-    { "wtmtd", false }
+    { "wtmtd", false },
+    { "rmsd_atoms", "-1" }
 };
 
 class SimpleMD : public CurcumaMethod {

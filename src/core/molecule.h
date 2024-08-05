@@ -128,6 +128,8 @@ class Molecule
 
     inline std::size_t AtomCount() const { return m_atoms.size(); }
     std::vector<int> Atoms() const { return m_atoms; }
+    std::vector<int> FragString2Indicies(const std::string& string) const;
+
     std::pair<int, Position> Atom(int i) const;
 
     void writeXYZFile(const std::string& filename) const;

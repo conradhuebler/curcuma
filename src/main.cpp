@@ -952,6 +952,7 @@ int main(int argc, char **argv) {
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
                 mol.setScaling(1.2);
+
                 mol.CalculateRotationalConstants();
                 if (centered)
                     mol.setGeometry(GeometryTools::TranslateGeometry(mol.getGeometry(), GeometryTools::Centroid(mol.getGeometry()), Position{ 0, 0, 0 }));
@@ -962,6 +963,15 @@ int main(int argc, char **argv) {
                           << std::endl;
                 std::cout << mol.COM().transpose() << std::endl;
                 std::cout << mol.GyrationRadius().first << " " << mol.GyrationRadius().second << " " << sqrt(mol.GyrationRadius().first) << " " << sqrt(mol.GyrationRadius().second) << std::endl;
+                /*
+                if (argc >= 3) {
+                    std::string tests = argv[2];
+                    auto indices = mol.FragString2Indicies(tests);
+                    for (auto i : indices)
+                        std::cout << i << " ";
+                    std::cout << std::endl;
+                }
+                */
             }
         }
     }

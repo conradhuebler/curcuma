@@ -1468,3 +1468,39 @@ std::vector<double> Molecule::GetBox() const
     box.push_back(z_max - z_min);
     return box;
 }
+
+std::vector<int> Molecule::FragString2Indicies(const std::string& string) const
+{
+    std::vector<int> indicies;
+    StringList list = Tools::SplitString(string, ",");
+    for (auto l : list) {
+        if (Tools::isInt(l))
+            indicies.push_back(std::stoi(l) - 1);
+        StringList range = Tools::SplitString(l, ":");
+        if (range.size() == 2) {
+            if (Tools::isInt(range[0]) && Tools::isInt(range[1])) {
+                int start = std::stoi(range[0]);
+                int end = std::stoi(range[1]);
+                if (start > end) {
+                    std::cout << "You are a fanny fellow :-)" << std::endl;
+                    std::swap(start, end);
+                }
+                for (int i = start; i <= end; ++i)
+                    indicies.push_back(i - 1);
+            }
+        }
+        if (l.find("F") != std::string::npos) {
+            std::string f = l;
+            f.erase(f.begin());
+            int fragment = std::stoi(f) - 1;
+            if (fragment < m_fragments.size()) {
+                for (int i = 0; i < m_fragments[fragment].size(); ++i) {
+                    indicies.push_back(i);
+                }
+            }
+        }
+    }
+    sort(indicies.begin(), indicies.end());
+    indicies.erase(unique(indicies.begin(), indicies.end()), indicies.end());
+    return indicies;
+}
