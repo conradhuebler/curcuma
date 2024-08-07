@@ -152,7 +152,7 @@ SimpleMD::~SimpleMD()
 {
     for (int i = 0; i < m_unique_structures.size(); ++i)
         delete m_unique_structures[i];
-    delete m_bias_pool;
+    // delete m_bias_pool;
 }
 
 void SimpleMD::LoadControlJson()
@@ -1066,6 +1066,8 @@ void SimpleMD::start()
             std::ofstream restart_file("unstable_curcuma.json");
             restart_file << WriteRestartInformation() << std::endl;
             m_time_step = 0;
+            aborted = true;
+
 #ifdef USE_Plumed
             if (m_mtd) {
                 plumed_finalize(m_plumedmain); // Call the plumed destructor
@@ -1219,6 +1221,7 @@ void SimpleMD::Rattle(double* grad)
     double* coord = new double[3 * m_natoms];
     double m_dT_inverse = 1 / m_dT;
     std::vector<int> moved(m_natoms, 0);
+    bool move = false;
     for (int i = 0; i < m_natoms; ++i) {
         coord[3 * i + 0] = m_current_geometry[3 * i + 0] + m_dT * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
         coord[3 * i + 1] = m_current_geometry[3 * i + 1] + m_dT * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
@@ -1233,6 +1236,7 @@ void SimpleMD::Rattle(double* grad)
 
     while (iter < m_rattle_maxiter) {
         iter++;
+        int active = 0;
         for (auto bond : m_bond_constrained) {
             int i = bond.first.first, j = bond.first.second;
             double distance = bond.second;
@@ -1241,8 +1245,9 @@ void SimpleMD::Rattle(double* grad)
                 + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
 
             if (std::abs(distance - distance_current) > 2 * m_rattle_tolerance * distance) {
+                active++;
+                move = true;
                 double r = distance - distance_current;
-
                 double dx = m_current_geometry[3 * i + 0] - m_current_geometry[3 * j + 0];
                 double dy = m_current_geometry[3 * i + 1] - m_current_geometry[3 * j + 1];
                 double dz = m_current_geometry[3 * i + 2] - m_current_geometry[3 * j + 2];
@@ -1275,6 +1280,8 @@ void SimpleMD::Rattle(double* grad)
                 }
             }
         }
+        if (active == 0)
+            break;
     }
     for (int i = 0; i < m_natoms; ++i) {
         m_current_geometry[3 * i + 0] = coord[3 * i + 0];
@@ -1356,6 +1363,9 @@ void SimpleMD::Rattle(double* grad)
             }
         }
     }
+    if (move)
+        RemoveRotations(m_velocities);
+
     delete[] coord;
     for (int i = 0; i < m_natoms; ++i) {
         ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
