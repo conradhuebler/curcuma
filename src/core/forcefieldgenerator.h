@@ -133,7 +133,10 @@ const json FFGenerator{
     { "angle_force", 1.0584 / 7.25 },
     { "torsion_force", 1 / 627.503 },
     { "inversion_force", 1 / 627.503 },
-    { "vdw_force", 1 / 627.503 }
+    { "vdw_force", 1 / 627.503 },
+    { "h4_scaling", 0 },
+    { "hh_scaling", 0 },
+    { "h4", 0 }
 };
 
 class ForceFieldGenerator {
@@ -162,7 +165,7 @@ private:
     json writeUFF();
 
     Molecule m_molecule;
-    Matrix m_topo, m_geometry;
+    Matrix m_topo, m_geometry, m_distance;
 
     std::vector<std::vector<int>> m_stored_bonds;
     std::vector<std::vector<int>> m_identified_rings;
@@ -170,8 +173,9 @@ private:
     std::vector<std::set<int>> m_ignored_vdw;
     std::vector<json> m_bonds, m_angles, m_dihedrals, m_inversions, m_vdws, m_eqs;
     double m_uff_bond_force = 1.0584 /* in Eh kcal/mol = 664.12 */, m_uff_angle_force = 1.0584 /* in Eh kcal/mol = 664.12 */, m_uff_dihedral_force = 1, m_uff_inversion_force = 1, m_vdw_force = 1, m_scaling = 1.4;
+
     double m_au = 1;
-    double m_glob_scale = 2;
+
     int m_ff_type = 1;
     std::string m_method = "uff";
     json m_parameter;

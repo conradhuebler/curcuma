@@ -77,14 +77,14 @@ struct MyFCFunctor : FCFunctor<double> {
         json angles = m_parameter["angles"];
         int index = 0;
         for (int i = 0; i < bonds.size(); ++i) {
-            bonds[i]["kAB"] = fc(index);
+            bonds[i]["fc"] = fc(index);
             index++;
         }
         for (int i = 0; i < angles.size(); ++i) {
-            angles[i]["kabc"] = fc(index);
+            angles[i]["fc"] = fc(index);
             index++;
         }
-        json parameter;
+        json parameter = m_parameter;
         parameter["bonds"] = bonds;
         parameter["angles"] = angles;
         he2.setMolecule(m_molecule);
@@ -109,7 +109,7 @@ struct MyFCFunctor : FCFunctor<double> {
     void Controller(const json& controller)
     {
         m_controller = MergeJson(HessianJson, m_controller);
-        m_controller["method"] = "qmdff";
+        m_controller["method"] = "uff";
     }
 
     int no_parameter;

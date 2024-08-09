@@ -105,7 +105,7 @@ void HessianThread::Seminumerical()
 
     m_geom_ip_jp(m_i, m_xi) += m_d;
     // std::cout << m_controller << std::endl;
-
+    // std::cout << m_method << std::endl;
     EnergyCalculator energy(m_method, m_controller);
     energy.setParameter(m_parameter);
     energy.setMolecule(m_molecule);

@@ -1,6 +1,6 @@
 /*
  * < General Energy and Gradient Calculator >
- * Copyright (C) 2022 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2022 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -110,8 +110,8 @@ public:
     inline void setParameter(const json& parameter)
     {
         m_parameter = parameter;
-        if (m_qmdff != NULL)
-            m_qmdff->setParameter(parameter);
+        // if (m_qmdff != NULL)
+        //     m_qmdff->setParameter(parameter);
     }
 
     inline json Parameter() const { return m_parameter; }
@@ -162,8 +162,8 @@ private:
     QMDFF* m_qmdff = NULL;
     ForceField* m_forcefield = NULL;
     StringList m_uff_methods = { "fuff" };
-    StringList m_ff_methods = { "uff", "uff-d3" };
-    StringList m_qmdff_method = { "qmdff" };
+    StringList m_ff_methods = { "uff", "uff-d3", "qmdff" };
+    StringList m_qmdff_method = { "fqmdff" };
     StringList m_tblite_methods = { "ipea1", "gfn1", "gfn2" };
     StringList m_xtb_methods = { "gfnff", "xtb-gfn1", "xtb-gfn2" };
     StringList m_d3_methods = { "d3" };

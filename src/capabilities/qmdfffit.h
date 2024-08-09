@@ -27,6 +27,7 @@ static const json QMDFFFitJson = {
     { "method", "gfn2" },
     { "hessian", "none" },
     { "charges", "none" },
+    { "potential", "uff" }, // can be uff or qmdff
     { "threads", 1 }
 };
 
@@ -39,15 +40,6 @@ public:
     void setMolecule(const Molecule& molecule) { m_molecule = molecule; }
 
 private:
-    bool Initialise() override;
-
-    void DetermineBonds();
-    void setBonds(const TContainer& bonds, std::vector<std::set<int>>& ignored_vdw, TContainer& angels, TContainer& dihedrals, TContainer& inversions);
-    void setAngles(const TContainer& angles, const std::vector<std::set<int>>& ignored_vdw);
-
-    json Bonds() const;
-    json Angles() const;
-
     /* Lets have this for all modules */
     nlohmann::json WriteRestartInformation() override { return json(); }
 
@@ -68,8 +60,7 @@ private:
     std::vector<std::vector<int>> m_stored_bonds;
     std::vector<std::vector<int>> m_identified_rings;
     Vector m_fc_parameter;
-    std::vector<QMDFFBond> m_qmdffbonds;
-    std::vector<QMDFFAngle> m_qmdffangle;
+    json m_bonds, m_angles;
 
     double m_scaling;
     bool m_rings = true;

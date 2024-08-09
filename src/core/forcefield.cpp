@@ -63,11 +63,16 @@ void ForceField::UpdateGeometry(const std::vector<std::array<double, 3>>& geomet
 
 void ForceField::setParameter(const json& parameters)
 {
-    setBonds(parameters["bonds"]);
-    setAngles(parameters["angles"]);
-    setDihedrals(parameters["dihedrals"]);
-    setInversions(parameters["inversions"]);
-    setvdWs(parameters["vdws"]);
+    if (parameters.contains("bonds"))
+        setBonds(parameters["bonds"]);
+    if (parameters.contains("angles"))
+        setAngles(parameters["angles"]);
+    if (parameters.contains("dihedrals"))
+        setDihedrals(parameters["dihedrals"]);
+    if (parameters.contains("inversions"))
+        setInversions(parameters["inversions"]);
+    if (parameters.contains("vdws"))
+        setvdWs(parameters["vdws"]);
     m_parameters = parameters;
     AutoRanges();
 }
