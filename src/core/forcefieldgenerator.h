@@ -129,14 +129,13 @@ const json FFGenerator{
     { "hh_rep_k", 0.42 },
     { "hh_rep_e", 12.7 },
     { "hh_rep_r0", 2.3 },
-    { "bond_force", 1.0584 / 7.25 * 1.8 / 10 },
+    { "bond_force", 1.0584 / 7.25 * 1.8 },
     { "angle_force", 1.0584 / 7.25 },
     { "torsion_force", 1 / 627.503 },
     { "inversion_force", 1 / 627.503 },
     { "vdw_force", 1 / 627.503 },
     { "h4_scaling", 0 },
-    { "hh_scaling", 0 },
-    { "h4", 0 }
+    { "hh_scaling", 0 }
 };
 
 class ForceFieldGenerator {

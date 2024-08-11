@@ -53,7 +53,7 @@ void QMDFFFit::start()
     hessian.start();
     m_hessian = hessian.getHessian();
     // hessian.PrintVibrations();
-    std::cout << m_hessian << std::endl;
+    // std::cout << m_hessian << std::endl;
     // Initialise();
     ForceFieldGenerator ff(m_controller);
     ff.setMolecule(m_molecule);

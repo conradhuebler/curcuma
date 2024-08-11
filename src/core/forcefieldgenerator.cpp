@@ -334,7 +334,7 @@ void ForceFieldGenerator::setDihedrals()
             m_dihedrals[index]["phi0"] = 180 * f;
             m_dihedrals[index]["n"] = 2;
         } else if ((m_coordination[j] == 4 && m_coordination[k] == 3) || (m_coordination[j] == 3 && m_coordination[k] == 4)) {
-            m_dihedrals[index]["V"] = sqrt(UFFParameters[m_atom_types[j]][cV] * UFFParameters[m_atom_types[k]][cV]);
+            m_dihedrals[index]["V"] = sqrt(UFFParameters[m_atom_types[j]][cV] * UFFParameters[m_atom_types[k]][cV]) * m_uff_dihedral_force;
             m_dihedrals[index]["phi0"] = 0 * f;
             m_dihedrals[index]["n"] = 6;
 
