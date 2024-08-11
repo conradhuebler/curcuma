@@ -104,8 +104,6 @@ void HessianThread::Seminumerical()
     m_geom_im_jp = m_molecule.Coords();
 
     m_geom_ip_jp(m_i, m_xi) += m_d;
-    // std::cout << m_controller << std::endl;
-    // std::cout << m_method << std::endl;
     EnergyCalculator energy(m_method, m_controller);
     energy.setParameter(m_parameter);
     energy.setMolecule(m_molecule);
@@ -185,12 +183,26 @@ void Hessian::LoadControlJson()
 void Hessian::setMolecule(const Molecule& molecule)
 {
     m_molecule = molecule;
+    m_atoms_j.resize(m_molecule.AtomCount());
+    m_atoms_i.resize(m_molecule.AtomCount());
+
+    for (int i = 0; i < m_molecule.AtomCount(); ++i) {
+        m_atoms_i[i] = i;
+        m_atoms_j[i] = i;
+    }
 }
 
 void Hessian::LoadMolecule(const std::string& file)
 {
     m_molecule = Files::LoadFile(file);
     m_atom_count = m_molecule.AtomCount();
+    m_atoms_j.resize(m_atom_count);
+    m_atoms_i.resize(m_atom_count);
+
+    for (int i = 0; i < m_atom_count; ++i) {
+        m_atoms_i[i] = i;
+        m_atoms_j[i] = i;
+    }
 }
 
 void Hessian::LoadHessian(const std::string& file)
@@ -356,8 +368,8 @@ void Hessian::CalculateHessianNumerical()
     else
         std::cout << "Starting Numerical Hessian Calculation" << std::endl;
 
-    for (int i = 0; i < m_molecule.AtomCount(); ++i) {
-        for (int j = 0; j < m_molecule.AtomCount(); ++j) {
+    for (/*const auto i : m_atoms_i */ int i = 0; i < m_molecule.AtomCount(); ++i) {
+        for (/*const auto j : m_atoms_j */ int j = 0; j < m_molecule.AtomCount(); ++j) {
             for (int xi = 0; xi < 3; ++xi)
                 for (int xj = 0; xj < 3; ++xj) {
                     HessianThread* thread = new HessianThread(m_controller, i, j, xi, xj, true);
@@ -388,7 +400,7 @@ void Hessian::CalculateHessianSemiNumerical()
     else
         std::cout << "Starting Seminumerical Hessian Calculation" << std::endl;
 
-    for (int i = 0; i < m_molecule.AtomCount(); ++i) {
+    for (/*auto int i : m_atoms_i */ int i = 0; i < m_molecule.AtomCount(); ++i) {
         for (int xi = 0; xi < 3; ++xi) {
             HessianThread* thread = new HessianThread(m_controller, i, 0, xi, 0, false);
             thread->setMolecule(m_molecule);

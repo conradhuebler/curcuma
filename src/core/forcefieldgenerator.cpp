@@ -366,10 +366,8 @@ void ForceFieldGenerator::setInversions()
             C1 = -1.0;
             C2 = 0.0;
             kijkl = 6 * m_uff_inversion_force;
-            ;
             if (m_molecule.Atoms()[j] == 8 || m_molecule.Atoms()[k] == 8 || m_molecule.Atoms()[l] == 8)
                 kijkl = 50 * m_uff_inversion_force;
-            ;
         } else {
             double w0 = pi / 180.0;
             switch (m_molecule.Atoms()[i]) {
@@ -397,7 +395,6 @@ void ForceFieldGenerator::setInversions()
             C1 = -4.0 * cos(w0 * f);
             C0 = -(C1 * cos(w0 * f) + C2 * cos(2.0 * w0 * f));
             kijkl = 22.0 / (C0 + C1 + C2) * m_uff_inversion_force;
-            ;
         }
         m_inversions[index]["C0"] = C0;
         m_inversions[index]["C1"] = C1;
@@ -420,9 +417,7 @@ void ForceFieldGenerator::setvdWs()
             vdW["C_ij"] = sqrt(cDi * cDj) * m_vdw_force;
             vdW["i"] = i;
             vdW["j"] = j;
-
             vdW["r0_ij"] = sqrt(cxi * cxj);
-
             m_vdws.push_back(vdW);
         }
     }

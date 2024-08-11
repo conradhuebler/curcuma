@@ -76,10 +76,13 @@ struct MyFCFunctor : FCFunctor<double> {
         json bonds = m_parameter["bonds"];
         json angles = m_parameter["angles"];
         int index = 0;
+        std::vector<std::pair<int, int>> pairs(bonds.size());
         for (int i = 0; i < bonds.size(); ++i) {
             bonds[i]["fc"] = fc(index);
             index++;
+            pairs[i] = std::pair<int, int>(bonds[i]["i"], bonds[i]["j"]);
         }
+
         for (int i = 0; i < angles.size(); ++i) {
             angles[i]["fc"] = fc(index);
             index++;
@@ -94,15 +97,34 @@ struct MyFCFunctor : FCFunctor<double> {
 
         index = 0;
         double diff = 0;
-        for (int i = 0; i < m_hessian.rows(); ++i) {
-            for (int j = i; j < m_hessian.cols(); ++j) {
-                index++;
-                if (index >= fvec.size())
-                    break;
-                fvec(index) = (m_hessian(i, j) - (hessian(i, j) + m_const_hessian(i, j)));
-                diff += (m_hessian(i, j) - (hessian(i, j) + m_const_hessian(i, j)));
+        /*
+                for (int i = 0; i < m_hessian.rows(); ++i) {
+                    for (int j = i; j < m_hessian.cols(); ++j) {
+                        if (index >= fvec.size())
+                            break;
+                        fvec(index) = (m_hessian(i, j) - (hessian(i, j) + m_const_hessian(i, j)));
+                        diff += (m_hessian(i, j) - (hessian(i, j) + m_const_hessian(i, j)));
+                        index++;
+                    }
+                }
+        */
+        for (auto pair : pairs) {
+            int i = pair.first;
+            int j = pair.second;
+            if (index >= fvec.size()) {
+                std::cout << "mist" << index << " " << i << " " << j << std::endl;
+                break;
+            }
+            for (int c = 0; c < 3; ++c) {
+                for (int d = 0; d < 3; ++d) {
+                    fvec(index) = m_hessian(3 * i + c, 3 * j + d) - (hessian(3 * i + c, 3 * j + d) + m_const_hessian(3 * i + c, 3 * j + d));
+                    diff += m_hessian(3 * i + c, 3 * j + d) - (hessian(3 * i + c, 3 * j + d) + m_const_hessian(3 * i + c, 3 * j + d));
+                    index++;
+                }
             }
         }
+
+        // std::cout << index << " " << fvec.size()<< " " << diff << " ";
         return 0;
     }
 
@@ -128,7 +150,9 @@ struct MyFunctorNumericalDiff : Eigen::NumericalDiff<MyFCFunctor> {
 inline Vector OptimiseFC(const Molecule& molecule, const Matrix& hessian, const Matrix& const_hessian, const Vector& fc, const json& parameters, const json& controller)
 {
     Vector parameter = fc;
-    MyFCFunctor functor(fc.size(), hessian.cols() * hessian.rows() / 2 + hessian.cols() / 2);
+    // MyFCFunctor functor(fc.size(), hessian.cols() * hessian.rows() / 2 + hessian.cols() / 2 /* 6*parameters["bonds"].size() */);
+    MyFCFunctor functor(fc.size(), 9 * parameters["bonds"].size());
+
     functor.m_hessian = hessian;
     functor.m_const_hessian = const_hessian;
     functor.m_molecule = molecule;

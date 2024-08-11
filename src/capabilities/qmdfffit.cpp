@@ -53,7 +53,7 @@ void QMDFFFit::start()
     hessian.start();
     m_hessian = hessian.getHessian();
     // hessian.PrintVibrations();
-    //  std::cout << m_hessian << std::endl;
+    std::cout << m_hessian << std::endl;
     // Initialise();
     ForceFieldGenerator ff(m_controller);
     ff.setMolecule(m_molecule);
@@ -74,30 +74,36 @@ void QMDFFFit::start()
     calculator.setParameter(parameter);
     calculator.CalculateEnergy(false, false);
     Hessian const_hessian("qmdff", qmdff_init);
+    json prm = parameter;
     json bonds = parameter["bonds"];
     json angles = parameter["angles"];
 
-    /*
-    parameter["bonds"] = bonds;
-    parameter["angles"] = angles;
-    */
+    parameter.erase("bonds");
+    parameter.erase("angles");
+
     const_hessian.setMolecule(m_molecule);
     const_hessian.setParameter(parameter);
     const_hessian.start();
     Matrix const_hessian_matrix = const_hessian.getHessian();
     for (int i = 0; i < const_hessian_matrix.cols(); ++i)
         for (int j = i; j < const_hessian_matrix.cols(); ++j) {
-            // if (std::isnan(const_hessian_matrix(i, j)))
-            {
+            if (std::isnan(const_hessian_matrix(i, j))) {
                 const_hessian_matrix(i, j) = 0;
                 const_hessian_matrix(j, i) = 0;
             }
         }
     // std::cout << const_hessian_matrix << std::endl;
     int counter = 1;
+
+    parameter["bonds"] = bonds;
+    parameter["angles"] = angles;
+    parameter.erase("dihedrals");
+    parameter.erase("inversions");
+    parameter.erase("vdws");
+
     for (int start = 0; start < 10 && counter; ++start) {
         std::cout << bonds.size() << " " << angles.size() << std::endl;
-        std::cout << bonds << std::endl;
+        // std::cout << bonds << std::endl;
         parameter["bonds"] = bonds;
         parameter["angles"] = angles;
         std::ofstream parameterfile_init("qmdff_" + std::to_string(start) + "_param.json");
@@ -110,10 +116,12 @@ void QMDFFFit::start()
             m_fc_parameter(i) = b["fc"];
             ++i;
         }
+
         for (const auto& b : angles) {
             m_fc_parameter(i) = b["fc"];
             ++i;
         }
+
         qmdff_init["variable"] = true;
         qmdff_init["const"] = false;
         std::cout << m_fc_parameter << std::endl;
@@ -173,7 +181,7 @@ void QMDFFFit::start()
         qmdff_init["const"] = true;
     */
     Hessian he2(qmdff_init, false);
-
+    parameter = prm;
     parameter["bonds"] = bonds;
     parameter["angles"] = angles;
     he2.setMolecule(m_molecule);

@@ -133,6 +133,7 @@ private:
     Molecule m_molecule;
     std::string m_method;
     json m_controller, m_parameter;
+    std::vector<int> m_atoms_i, m_atoms_j;
     int m_threads = 1;
     int m_atom_count = 0;
     double m_freq_scale = 1, m_thermo = 298.5, m_freq_cutoff = 50;
