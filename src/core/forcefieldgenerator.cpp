@@ -21,6 +21,8 @@
 #include "src/core/topology.h"
 #include "src/tools/general.h"
 
+#include "src/core/forcefieldfunctions.h"
+
 #include "json.hpp"
 using json = nlohmann::json;
 
@@ -297,6 +299,7 @@ void ForceFieldGenerator::setAngles()
         m_angles[index]["C0"] = C0;
         m_angles[index]["C1"] = C1;
         m_angles[index]["C2"] = C2;
+        m_angles[index]["theta0_ijk"] = m_molecule.CalculateAngle(i, j, k) / f; // UFF::AngleBending(m_geometry.row(j), m_geometry.row(i), m_geometry.row(k), derivate, false);
     }
 }
 

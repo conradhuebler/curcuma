@@ -197,6 +197,7 @@ void ForceField::AutoRanges()
         H4Thread* thread = new H4Thread(m_threads - 1, free_threads);
         thread->setParamater(m_parameters);
         thread->Initialise(m_atom_types);
+        thread->setMethod(2);
         m_threadpool->addThread(thread);
         m_stored_threads.push_back(thread);
     }
@@ -205,6 +206,7 @@ void ForceField::AutoRanges()
         thread->setGeometry(m_geometry, false);
         m_threadpool->addThread(thread);
         m_stored_threads.push_back(thread);
+        thread->setMethod(2);
         for (int j = int(i * m_bonds.size() / double(free_threads)); j < int((i + 1) * m_bonds.size() / double(free_threads)); ++j)
             thread->addBond(m_bonds[j]);
 

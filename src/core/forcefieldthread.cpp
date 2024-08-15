@@ -47,14 +47,17 @@ int ForceFieldThread::execute()
     m_bond_energy = 0.0;
 
     CalculateUFFBondContribution();
-    CalculateUFFAngleContribution();
+    if (m_method == 1) {
+        CalculateUFFAngleContribution();
+    } else if (m_method == 2) {
+        // std::cout << m_uff_angles.size() << " " << m_qmdff_angles.size() << std::endl;
+        CalculateQMDFFAngleContribution();
+    }
     CalculateUFFDihedralContribution();
     CalculateUFFInversionContribution();
     CalculateUFFvdWContribution();
-
     /*
     CalculateQMDFFBondContribution();
-    CalculateQMDFFAngleContribution();
     CalculateQMDFFDihedralContribution();
     */
     return 0;
@@ -364,8 +367,8 @@ void ForceFieldThread::CalculateQMDFFAngleContribution()
     Eigen::Vector3d dx = { m_d, 0, 0 };
     Eigen::Vector3d dy = { 0, m_d, 0 };
     Eigen::Vector3d dz = { 0, 0, m_d };
-    for (int index = 0; index < m_qmdff_angles.size(); ++index) {
-        const auto& angle = m_qmdff_angles[index];
+    for (int index = 0; index < m_uff_angles.size(); ++index) {
+        const auto& angle = m_uff_angles[index];
         /*
         const int a = angle.a;
         const int b = angle.b;
@@ -376,11 +379,12 @@ void ForceFieldThread::CalculateQMDFFAngleContribution()
         Vector k = m_geometry.row(angle.k);
         Matrix derivate;
         double costheta = AngleBending(i, j, k, derivate, m_calculate_gradient);
+        double costheta0_ijk = cos(angle.theta0_ijk * pi / 180.0);
         std::function<double(const Eigen::Vector3d&, const Eigen::Vector3d&, const Eigen::Vector3d&, double, double, double, double)> angle_function;
-        if (std::abs(costheta - pi) < threshold)
-
+        if (std::abs(costheta0_ijk + 1) < threshold)
             angle_function = [this](const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, double thetae, double fc, double r0_ij, double r0_ik) -> double {
                 double val = QMDFF::LinearAngleBend(i, j, k, thetae, fc, r0_ij, r0_ik);
+                // std::cout << val << " ";
                 if (std::isnan(val))
                     return 0;
                 else
@@ -389,18 +393,21 @@ void ForceFieldThread::CalculateQMDFFAngleContribution()
         else
             angle_function = [this](const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, double thetae, double fc, double r0_ij, double r0_ik) -> double {
                 double val = QMDFF::AngleBend(i, j, k, thetae, fc, r0_ij, r0_ik);
+                // std::cout << val << " ";
+
                 if (std::isnan(val))
                     return 0;
                 else
                     return val;
             };
-
         m_angle_energy += angle_function(i, j, k, angle.theta0_ijk, angle.fc, angle.r0_ij, angle.r0_ik); //(angle.kijk * (angle.C0 + angle.C1 * costheta + angle.C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling;
+        // std::cout << m_angle_energy << " ";
 
         if (m_calculate_gradient) {
             if (m_calc_gradient == 0) {
 
             } else if (m_calc_gradient == 1) {
+                // std::cout << "gradient " << std::endl;
                 m_gradient(angle.i, 0) += (angle_function((i + dx), j, k, angle.theta0_ijk, angle.fc, angle.r0_ij, angle.r0_ik) - angle_function((i - dx), j, k, angle.theta0_ijk, angle.fc, angle.r0_ij, angle.r0_ik)) / (2 * m_d);
                 m_gradient(angle.i, 1) += (angle_function((i + dy), j, k, angle.theta0_ijk, angle.fc, angle.r0_ij, angle.r0_ik) - angle_function((i - dy), j, k, angle.theta0_ijk, angle.fc, angle.r0_ij, angle.r0_ik)) / (2 * m_d);
                 m_gradient(angle.i, 2) += (angle_function((i + dz), j, k, angle.theta0_ijk, angle.fc, angle.r0_ij, angle.r0_ik) - angle_function((i - dz), j, k, angle.theta0_ijk, angle.fc, angle.r0_ij, angle.r0_ik)) / (2 * m_d);

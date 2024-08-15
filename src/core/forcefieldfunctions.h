@@ -113,21 +113,23 @@ inline double AngleDamping(double r_ij, double r_ik, double r0_ij, double r0_ik)
     return 1 / finv;
 }
 
-inline double AngleBend(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, double theta0_ijk, double fc, double r0_ij, double r0_ik)
+inline double AngleBend(const Eigen::Vector3d& j, const Eigen::Vector3d& i, const Eigen::Vector3d& k, double theta0_ijk, double fc, double r0_ij, double r0_ik)
 {
     Eigen::Vector3d ij = i - j;
     Eigen::Vector3d ik = i - k;
-    double damp = AngleDamping(ij.norm(), ik.norm(), r0_ij, r0_ik);
+    double damp = 1; // AngleDamping(ij.norm(), ik.norm(), r0_ij, r0_ik);
     double costheta = (ij.dot(ik) / (sqrt(ij.dot(ij) * ik.dot(ik))));
-    double costheta0_ijk = cos(theta0_ijk);
+    double costheta0_ijk = cos(theta0_ijk * pi / 180.0);
     double energy = (fc * damp * (costheta0_ijk - costheta) * (costheta0_ijk - costheta));
+    // std::cout << acos(costheta)*180/pi << " " << theta0_ijk << std::endl;
+    // std::cout << damp << " " << costheta << " " << costheta0_ijk << " " << energy << std::endl;
     if (std::isnan(energy))
         return 0;
     else
         return energy;
 }
 
-inline double LinearAngleBend(const Eigen::Vector3d& i, const Eigen::Vector3d& j, const Eigen::Vector3d& k, double theta0_ijk, double fc, double r0_ij, double r0_ik)
+inline double LinearAngleBend(const Eigen::Vector3d& j, const Eigen::Vector3d& i, const Eigen::Vector3d& k, double theta0_ijk, double fc, double r0_ij, double r0_ik)
 {
 #pragma message("check")
     /*

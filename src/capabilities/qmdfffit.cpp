@@ -155,6 +155,8 @@ void QMDFFFit::start()
             else {
                 // c["fc"] = 0;
                 // bonds.push_back(c);
+                std::cout << c << std::endl;
+
                 counter++;
             }
         }
@@ -166,6 +168,7 @@ void QMDFFFit::start()
             else {
                 // c["fc"] = 0;
                 // angles.push_back(c);
+                std::cout << c << std::endl;
                 counter++;
             }
         }

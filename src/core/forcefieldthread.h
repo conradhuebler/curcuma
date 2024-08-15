@@ -108,6 +108,10 @@ public:
         m_gradient = Eigen::MatrixXd::Zero(m_geometry.rows(), 3);
     }
 
+    inline void setMethod(int method)
+    {
+        m_method = method;
+    }
     double BondEnergy() { return m_bond_energy; }
     double AngleEnergy() { return m_angle_energy; }
     double DihedralEnergy() { return m_dihedral_energy; }
@@ -157,7 +161,7 @@ protected:
     double m_au = 1;
     double m_d = 1e-3;
     int m_calc_gradient = 1;
-    int m_thread = 0, m_threads = 0;
+    int m_thread = 0, m_threads = 0, m_method = 1;
     bool m_calculate_gradient = true;
 };
 

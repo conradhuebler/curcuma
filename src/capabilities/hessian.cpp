@@ -127,7 +127,7 @@ Hessian::Hessian(const std::string& method, const json& controller, bool silent)
 
 {
     UpdateController(controller);
-    m_threads = m_defaults["threads"];
+    m_threads = 1; // m_defaults["threads"];
     /* Yeah, thats not really correct, but it works a bit */
     if (m_method.compare("uff") == 0) {
         m_scale_functions = [](double val) -> double {
@@ -145,7 +145,7 @@ Hessian::Hessian(const json& controller, bool silent)
     , m_controller(controller)
 {
     UpdateController(controller);
-    m_threads = m_defaults["threads"];
+    m_threads = 1; // m_defaults["threads"];
 
     /* Yeah, thats not really correct, but it works a bit */
     if (m_method.compare("uff") == 0) {
