@@ -84,7 +84,7 @@ void CurcumaOpt::LoadControlJson()
     m_singlepoint = Json2KeyWord<bool>(m_defaults, "SinglePoint");
     m_serial = Json2KeyWord<bool>(m_defaults, "serial");
     m_hessian = Json2KeyWord<int>(m_defaults, "hessian");
-    if (m_method == "GFNFF")
+    if (m_method.compare("GFNFF") == 0)
         m_threads = 1;
 }
 
@@ -192,6 +192,7 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
 
         Molecule* mol2 = new Molecule(thread->getMolecule());
         if (m_hessian) {
+            std::cout << m_defaults << std::endl;
             Hessian hess(m_method, m_defaults, false);
             hess.setParameter(thread->Parameter());
             hess.setMolecule(mol2);

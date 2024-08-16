@@ -46,7 +46,7 @@ void QMDFFFit::start()
     std::cout << "Parametrising QMDFF (see S. Grimmme, J. Chem. Theory Comput. 2014, 10, 10, 4497–4514 [10.1021/ct500573f]) for the original publication!" << std::endl;
     std::cout << "Starting with the hessian ..." << std::endl;
     std::cout << m_defaults << m_controller << std::endl;
-    Hessian hessian(m_defaults, false);
+    Hessian hessian("gfn2", m_defaults, false);
     hessian.setMolecule(m_molecule);
     m_atom_types = m_molecule.Atoms();
     m_geometry = m_molecule.getGeometry();
@@ -124,10 +124,10 @@ void QMDFFFit::start()
 
         qmdff_init["variable"] = true;
         qmdff_init["const"] = false;
-        std::cout << m_fc_parameter << std::endl;
+        // std::cout << m_fc_parameter << std::endl;
 
         Vector vec = OptimiseFC(m_molecule, m_hessian, const_hessian_matrix, m_fc_parameter, parameter, qmdff_init);
-        std::cout << vec << std::endl;
+        // std::cout << vec << std::endl;
         bonds = parameter["bonds"];
         angles = parameter["angles"];
         int index = 0;
@@ -150,15 +150,15 @@ void QMDFFFit::start()
         bonds.clear();
         counter = 0;
         for (auto c : cache) {
-            if ((c["fc"] > 0 && c["distance"] == 1) || c["distance"] == 0)
-                bonds.push_back(c);
-            else {
-                // c["fc"] = 0;
-                // bonds.push_back(c);
-                std::cout << c << std::endl;
+            // if ((c["fc"] > 0 && c["distance"] == 1) || c["distance"] == 0)
+            bonds.push_back(c);
+            // else {
+            //  c["fc"] = 0;
+            //  bonds.push_back(c);
+            //  std::cout << c << std::endl;
 
-                counter++;
-            }
+            // counter++;
+            //}
         }
         auto cache2 = angles;
         angles.clear();

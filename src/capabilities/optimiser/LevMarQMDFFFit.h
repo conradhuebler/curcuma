@@ -97,33 +97,33 @@ struct MyFCFunctor : FCFunctor<double> {
 
         index = 0;
         double diff = 0;
-
-                for (int i = 0; i < m_hessian.rows(); ++i) {
-                    for (int j = i; j < m_hessian.cols(); ++j) {
-                        if (index >= fvec.size())
-                            break;
-                        fvec(index) = (m_hessian(j, i) - (hessian(j, i) + m_const_hessian(j, i))) + (m_hessian(i, j) - (hessian(i, j) + m_const_hessian(i, j)));
-                        diff += (m_hessian(i, j) - (hessian(i, j) + m_const_hessian(i, j)));
-                        index++;
-                    }
-                }
-                /*
-                for (auto pair : pairs) {
-                    int i = pair.first;
-                    int j = pair.second;
-                    if (index >= fvec.size()) {
-                        std::cout << "mist" << index << " " << i << " " << j << std::endl;
-                        break;
-                    }
-                    for (int c = 0; c < 3; ++c) {
-                        for (int d = 0; d < 3; ++d) {
-                            fvec(index) = m_hessian(3 * i + c, 3 * j + d) - (hessian(3 * i + c, 3 * j + d) + m_const_hessian(3 * i + c, 3 * j + d));
-                            diff += m_hessian(3 * i + c, 3 * j + d) - (hessian(3 * i + c, 3 * j + d) + m_const_hessian(3 * i + c, 3 * j + d));
-                            index++;
+        /*
+                        for (int i = 0; i < m_hessian.rows(); ++i) {
+                            for (int j = i; j < m_hessian.cols(); ++j) {
+                                if (index >= fvec.size())
+                                    break;
+                                fvec(index) = (m_hessian(j, i) - (hessian(j, i) + m_const_hessian(j, i))) + (m_hessian(i, j) - (hessian(i, j) + m_const_hessian(i, j)));
+                                diff += (m_hessian(i, j) - (hessian(i, j) + m_const_hessian(i, j)));
+                                index++;
+                            }
                         }
-                    }
+                    */
+        for (auto pair : pairs) {
+            int i = pair.first;
+            int j = pair.second;
+            if (index >= fvec.size()) {
+                std::cout << "mist" << index << " " << i << " " << j << std::endl;
+                break;
+            }
+            for (int c = 0; c < 3; ++c) {
+                for (int d = 0; d < 3; ++d) {
+                    fvec(index) = m_hessian(3 * i + c, 3 * j + d) - (hessian(3 * i + c, 3 * j + d) + m_const_hessian(3 * i + c, 3 * j + d));
+                    diff += m_hessian(3 * i + c, 3 * j + d) - (hessian(3 * i + c, 3 * j + d) + m_const_hessian(3 * i + c, 3 * j + d));
+                    index++;
                 }
-                */
+            }
+                }
+
                 // std::cout << index << " " << fvec.size()<< " " << diff << " ";
                 return 0;
     }
@@ -150,8 +150,8 @@ struct MyFunctorNumericalDiff : Eigen::NumericalDiff<MyFCFunctor> {
 inline Vector OptimiseFC(const Molecule& molecule, const Matrix& hessian, const Matrix& const_hessian, const Vector& fc, const json& parameters, const json& controller)
 {
     Vector parameter = fc;
-    MyFCFunctor functor(fc.size(), hessian.cols() * hessian.rows() / 2 + hessian.cols() / 2 /* 6*parameters["bonds"].size() */);
-    // MyFCFunctor functor(fc.size(), 9 * parameters["bonds"].size());
+    // MyFCFunctor functor(fc.size(), hessian.cols() * hessian.rows() / 2 + hessian.cols() / 2 /* 6*parameters["bonds"].size() */);
+    MyFCFunctor functor(fc.size(), 9 * parameters["bonds"].size());
 
     functor.m_hessian = hessian;
     functor.m_const_hessian = const_hessian;
@@ -188,7 +188,7 @@ inline Vector OptimiseFC(const Molecule& molecule, const Matrix& hessian, const 
         std::cout << "Norm " << (old_param - parameter).norm() << std::endl;
         if ((old_param - parameter).norm() < 1e-12)
             break;
-        std::cout << parameter.transpose() << std::endl;
+        // std::cout << parameter.transpose() << std::endl;
         old_param = parameter;
     }
 

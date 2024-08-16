@@ -25,7 +25,10 @@
 
 #include "src/capabilities/curcumamethod.h"
 
+#include <algorithm>
 #include <functional>
+#include <iterator>
+#include <vector>
 
 #pragma once
 
@@ -45,11 +48,34 @@ static const json HessianJson = {
     { "threads", 1 }
 };
 
+template <typename Vector>
+inline auto split_vector(const Vector& v, unsigned number_lines)
+{
+    using Iterator = typename Vector::const_iterator;
+    std::vector<Vector> rtn;
+    Iterator it = v.cbegin();
+    const Iterator end = v.cend();
+
+    while (it != end) {
+        Vector v;
+        std::back_insert_iterator<Vector> inserter(v);
+        const auto num_to_copy = std::min(static_cast<unsigned>(
+                                              std::distance(it, end)),
+            number_lines);
+        std::copy(it, it + num_to_copy, inserter);
+        rtn.push_back(std::move(v));
+        std::advance(it, num_to_copy);
+    }
+
+    return rtn;
+}
+
 class HessianThread : public CxxThread {
 public:
     HessianThread(const json& controller, int i, int j, int xi, int xj, bool fullnumerical = true);
     ~HessianThread();
 
+    void setMethod(const std::string& method) { m_method = method; }
     void setMolecule(const Molecule& molecule);
     void setParameter(const json& parameter) { m_parameter = parameter; }
     int execute() override;
@@ -60,17 +86,23 @@ public:
     int XJ() const { return m_xj; }
     double DD() const { return m_dd; }
     Matrix Gradient() const { return m_gradient; }
+    Matrix getHessian() const { return m_hessian; }
+    void setIndices(const std::vector<int>& atoms) { m_atoms = atoms; }
 
 private:
     void Numerical();
     void Seminumerical();
+    void Threaded();
+
     std::function<void(void)> m_schema;
 
     // EnergyCalculator* m_calculator;
     std::string m_method;
+    std::vector<int> m_atoms;
+
     json m_controller, m_parameter;
     Molecule m_molecule;
-    Matrix m_gradient;
+    Matrix m_gradient, m_hessian;
     Geometry m_geom_ip_jp, m_geom_im_jp, m_geom_ip_jm, m_geom_im_jm;
     int m_i, m_j, m_xi, m_xj;
     bool m_fullnumerical = true;
@@ -82,7 +114,7 @@ class Hessian : public CurcumaMethod {
 public:
     Hessian(const std::string& method, const json& controller, bool silent = true);
     Hessian(const json& controller, bool silent = true);
-
+    ~Hessian();
     void setMolecule(const Molecule& molecule);
 
     void CalculateHessian(int type = 1)
@@ -118,6 +150,8 @@ private:
 
     void CalculateHessianNumerical();
     void CalculateHessianSemiNumerical();
+    void CalculateHessianThreaded();
+
     void FiniteDiffHess();
     std::function<double(double)> m_scale_functions;
 

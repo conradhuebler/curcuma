@@ -46,7 +46,7 @@ static json CurcumaOptJson{
     { "SingleStep", 1 },
     { "ConvCount", 11 },
     { "GradNorm", 1e-4 },
-    { "Threads", 1 },
+    { "threads", 1 },
     { "Charge", 0 },
     { "Spin", 0 },
     { "SinglePoint", false },
