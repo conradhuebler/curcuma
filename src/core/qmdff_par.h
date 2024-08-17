@@ -94,6 +94,36 @@ inline double ka(int element)
         return 1; // todo
 }
 
+inline double AllenEN(int element)
+{
+    if (element == 1 || element == 2) // H, He
+        return 2.30;
+    else if (element == 5) // B
+        return 2.051;
+    else if (element == 6) // C
+        return 2.544;
+    else if (element == 7) // N
+        return 3.066;
+    else if (element == 8) // O
+        return 3.610;
+    else if (element == 9) // F, Ne
+        return 4.193;
+    else if (element == 10)
+        return 4.787;
+    else if (element == 13) // Al
+        return 1.613;
+    else if (element == 14) // Si
+        return 1.916;
+    else if (element == 15) // P
+        return 2.253;
+    else if (element == 16) // S
+        return 2.589;
+    else if (element == 17) // Cl
+        return 2.869;
+    else
+        return 1; // todo
+}
+
 inline double kZ(int element)
 {
     if (element <= 2) // row 1

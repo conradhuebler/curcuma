@@ -135,7 +135,8 @@ const json FFGenerator{
     { "inversion_force", 1 / 627.503 },
     { "vdw_force", 1 / 627.503 },
     { "h4_scaling", 0 },
-    { "hh_scaling", 0 }
+    { "hh_scaling", 0 },
+    { "e0", 0 }
 };
 
 class ForceFieldGenerator {

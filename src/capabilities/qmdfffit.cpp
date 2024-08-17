@@ -19,6 +19,7 @@
 
 #include "src/capabilities/optimiser/LevMarQMDFFFit.h"
 
+#include "src/capabilities/curcumaopt.h"
 #include "src/capabilities/hessian.h"
 
 #include "src/core/energycalculator.h"
@@ -46,7 +47,13 @@ void QMDFFFit::start()
     std::cout << "Parametrising QMDFF (see S. Grimmme, J. Chem. Theory Comput. 2014, 10, 10, 4497–4514 [10.1021/ct500573f]) for the original publication!" << std::endl;
     std::cout << "Starting with the hessian ..." << std::endl;
     std::cout << m_defaults << m_controller << std::endl;
-    Hessian hessian("gfn2", m_defaults, false);
+
+    std::string method = "gfn2";
+    EnergyCalculator energy(method, m_defaults);
+    energy.setMolecule(m_molecule);
+
+    double e0 = energy.CalculateEnergy(false, true);
+    Hessian hessian(method, m_defaults, false);
     hessian.setMolecule(m_molecule);
     m_atom_types = m_molecule.Atoms();
     m_geometry = m_molecule.getGeometry();
@@ -59,6 +66,8 @@ void QMDFFFit::start()
     ff.setMolecule(m_molecule);
     ff.Generate();
     json parameter = ff.getParameter();
+    parameter["method"] = "quff";
+    parameter["e0"] = e0;
     // parameter["bonds"] = Bonds();
     // parameter["angles"] = Angles();
     std::ofstream parameterfile_init("qmdff_init_param.json");

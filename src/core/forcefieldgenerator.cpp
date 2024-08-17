@@ -161,6 +161,7 @@ double ForceFieldGenerator::UFFBondRestLength(int i, int j, double n)
 void ForceFieldGenerator::setBonds(const TContainer& bonds)
 {
     std::vector<std::pair<int, int>> bonded;
+    std::vector<int> atom_types = m_molecule.Atoms();
     for (const auto& bond : bonds.Storage()) {
         if (std::find(bonded.begin(), bonded.end(), std::pair<int, int>(std::min(bond[0], bond[1]), std::max(bond[0], bond[1]))) != bonded.end())
             continue;
@@ -187,7 +188,8 @@ void ForceFieldGenerator::setBonds(const TContainer& bonds)
         double cZi = UFFParameters[m_atom_types[bond[0]]][cZ];
         double cZj = UFFParameters[m_atom_types[bond[1]]][cZ];
         uffbond["fc"] = m_uff_bond_force * cZi * cZj / (r0_ij * r0_ij * r0_ij);
-
+        double exp = ka(atom_types[bond[0]]) * ka(atom_types[bond[1]]) + kEN * std::abs((AllenEN(atom_types[bond[0]]) - AllenEN(atom_types[bond[1]])) * (AllenEN(atom_types[bond[0]]) - AllenEN(atom_types[bond[1]])));
+        uffbond["exponent"] = exp;
         m_bonds.push_back(uffbond);
 
         int i = bond[0];

@@ -74,6 +74,9 @@ void ForceField::setParameter(const json& parameters)
     if (parameters.contains("vdws"))
         setvdWs(parameters["vdws"]);
     m_parameters = parameters;
+    m_method = m_parameters["method"];
+    if (m_parameters.contains("e0"))
+        m_e0 = m_parameters["e0"];
     AutoRanges();
 }
 
@@ -88,6 +91,7 @@ void ForceField::setBonds(const json& bonds)
         b.j = bond["j"];
         b.k = bond["k"];
         b.distance = bond["distance"];
+        b.exponent = bond["exponent"];
 
         b.r0_ij = bond["r0_ij"];
         b.r0_ik = bond["r0_ik"];
@@ -197,7 +201,11 @@ void ForceField::AutoRanges()
         H4Thread* thread = new H4Thread(m_threads - 1, free_threads);
         thread->setParamater(m_parameters);
         thread->Initialise(m_atom_types);
-        thread->setMethod(2);
+        if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) {
+            thread->setMethod(1);
+        } else if (std::find(m_qmdff_methods.begin(), m_qmdff_methods.end(), m_method) != m_qmdff_methods.end()) {
+            thread->setMethod(2);
+        }
         m_threadpool->addThread(thread);
         m_stored_threads.push_back(thread);
     }
@@ -293,9 +301,10 @@ double ForceField::Calculate(bool gradient, bool verbose)
         m_gradient += m_stored_threads[i]->Gradient();
     }
 
-    energy = bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy + rep_energy + eq_energy + h4_energy + hh_energy;
+    energy = m_e0 + bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy + rep_energy + eq_energy + h4_energy + hh_energy;
     if (verbose) {
         std::cout << "Total energy " << energy << " Eh. Sum of " << std::endl
+                  << "E0 (from QMDFF) " << m_e0 << " Eh" << std::endl
                   << "Bond Energy " << bond_energy << " Eh" << std::endl
                   << "Angle Energy " << angle_energy << " Eh" << std::endl
                   << "Dihedral Energy " << dihedral_energy << " Eh" << std::endl

@@ -132,6 +132,7 @@ private:
     void CalculateQMDFFBondContribution();
     void CalculateQMDFFAngleContribution();
     void CalculateQMDFFDihedralContribution();
+    void CalculateQMDFFEspContribution();
 
     // double HarmonicBondStretching();
 
@@ -145,8 +146,8 @@ private:
     std::function<double()> CalculateEQContribution;
     std::function<double()> CalculateHBondContribution;
 
-    std::vector<Bond> m_uff_bonds, m_qmdff_bonds;
-    std::vector<Angle> m_uff_angles, m_qmdff_angles;
+    std::vector<Bond> m_uff_bonds;
+    std::vector<Angle> m_uff_angles;
     std::vector<Dihedral> m_uff_dihedrals, m_qmdff_dihedrals;
     std::vector<Inversion> m_uff_inversions, m_qmdff_inversions;
     std::vector<vdW> m_uff_vdWs;
