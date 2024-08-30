@@ -25,8 +25,8 @@
 #include "curcumamethod.h"
 static const json QMDFFFitJson = {
     { "method", "gfn2" },
-    { "hessian", "none" },
-    { "charges", "none" },
+    { "hessian", "hessian.json" },
+    { "charges", "scf.json" },
     { "potential", "uff" }, // can be uff or qmdff
     { "threads", 1 }
 };
@@ -54,7 +54,7 @@ private:
     /* Read Controller has to be implemented for all */
     void LoadControlJson() override;
     Molecule m_molecule;
-    std::string m_method = "gfn2";
+    std::string m_method = "gfn2", m_hessian_file, m_scf_file;
     Matrix m_hessian, m_geometry;
     std::vector<int> m_atom_types, m_coordination, m_topo;
     std::vector<std::vector<int>> m_stored_bonds;

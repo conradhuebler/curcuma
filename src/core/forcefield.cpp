@@ -181,6 +181,24 @@ void ForceField::setvdWs(const json& vdws)
     }
 }
 
+void ForceField::setESPs(const json& esps)
+{
+    m_EQs.clear();
+    for (int i = 0; i < esps.size(); ++i) {
+        json esp = esps[i].get<json>();
+        EQ v;
+        v.type = esp["type"];
+
+        v.i = esp["i"];
+        v.j = esp["j"];
+        v.q_i = esp["q_i"];
+        v.q_j = esp["q_j"];
+        v.epsilon = esp["epsilon"];
+
+        m_EQs.push_back(v);
+    }
+}
+
 void ForceField::AutoRanges()
 {
     int free_threads = m_threads;
@@ -201,11 +219,7 @@ void ForceField::AutoRanges()
         H4Thread* thread = new H4Thread(m_threads - 1, free_threads);
         thread->setParamater(m_parameters);
         thread->Initialise(m_atom_types);
-        if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) {
-            thread->setMethod(1);
-        } else if (std::find(m_qmdff_methods.begin(), m_qmdff_methods.end(), m_method) != m_qmdff_methods.end()) {
-            thread->setMethod(2);
-        }
+
         m_threadpool->addThread(thread);
         m_stored_threads.push_back(thread);
     }
@@ -214,7 +228,11 @@ void ForceField::AutoRanges()
         thread->setGeometry(m_geometry, false);
         m_threadpool->addThread(thread);
         m_stored_threads.push_back(thread);
-        thread->setMethod(2);
+        if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) {
+            thread->setMethod(1);
+        } else if (std::find(m_qmdff_methods.begin(), m_qmdff_methods.end(), m_method) != m_qmdff_methods.end()) {
+            thread->setMethod(2);
+        }
         for (int j = int(i * m_bonds.size() / double(free_threads)); j < int((i + 1) * m_bonds.size() / double(free_threads)); ++j)
             thread->addBond(m_bonds[j]);
 

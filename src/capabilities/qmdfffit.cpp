@@ -28,6 +28,8 @@
 #include "src/core/topology.h"
 #include "src/core/uff_par.h"
 
+#include <filesystem>
+
 #include "qmdfffit.h"
 
 QMDFFFit::QMDFFFit(const json& controller, bool silent)
@@ -40,6 +42,8 @@ void QMDFFFit::LoadControlJson()
 {
     m_method = Json2KeyWord<std::string>(m_defaults, "method");
     m_threads = Json2KeyWord<int>(m_defaults, "threads");
+    m_hessian_file = Json2KeyWord<std::string>(m_defaults, "hessian");
+    m_scf_file = Json2KeyWord<std::string>(m_defaults, "charges");
 }
 
 void QMDFFFit::start()
@@ -49,23 +53,78 @@ void QMDFFFit::start()
     std::cout << m_defaults << m_controller << std::endl;
 
     std::string method = "gfn2";
-    EnergyCalculator energy(method, m_defaults);
-    energy.setMolecule(m_molecule);
+    double e0 = 0;
+    std::vector<double> charges;
 
-    double e0 = energy.CalculateEnergy(false, true);
-    Hessian hessian(method, m_defaults, false);
-    hessian.setMolecule(m_molecule);
-    m_atom_types = m_molecule.Atoms();
-    m_geometry = m_molecule.getGeometry();
-    hessian.start();
-    m_hessian = hessian.getHessian();
+    if (std::filesystem::exists(m_scf_file)) {
+        std::ifstream scffile(m_scf_file);
+
+        json scfjson;
+        scffile >> scfjson;
+        if (scfjson.contains("e0"))
+            e0 = scfjson["e0"];
+        if (scfjson.contains("charges"))
+            charges = Tools::String2DoubleVec(scfjson["charges"], "|");
+    }
+    if (charges.size() == 0) {
+        EnergyCalculator energy(method, m_defaults);
+        energy.setMolecule(m_molecule);
+
+        e0 = energy.CalculateEnergy(false, true);
+        m_molecule.setPartialCharges(energy.Charges());
+        std::string charges = Tools::DoubleVector2String(energy.Charges());
+
+        json scfjson;
+        scfjson["e0"] = e0;
+        scfjson["charges"] = charges;
+
+        std::ofstream scffile("scf.json");
+        scffile << scfjson;
+    }
+    m_molecule.setPartialCharges(charges);
+
+    if (std::filesystem::exists(m_hessian_file)) {
+        std::ifstream hess_file(m_hessian_file);
+        json hessjson;
+        hess_file >> hessjson;
+        int atoms = hessjson["atoms"];
+        m_hessian = Eigen::MatrixXd::Zero(3 * atoms, 3 * atoms);
+        std::vector<double> tmphess = Tools::String2DoubleVec(hessjson["hessian"], "|");
+        int index = 0;
+        for (int i = 0; i < 3 * atoms; ++i) {
+            for (int j = 0; j < 3 * atoms; ++j) {
+                m_hessian(i, j) = tmphess[index];
+                index++;
+            }
+        }
+    } else {
+        Hessian hessian(method, m_defaults, false);
+        hessian.setMolecule(m_molecule);
+        m_atom_types = m_molecule.Atoms();
+        m_geometry = m_molecule.getGeometry();
+        hessian.start();
+        m_hessian = hessian.getHessian();
+        std::string hessian_string = Tools::Matrix2String(m_hessian);
+
+        json hjson;
+        hjson["atoms"] = m_atom_types.size();
+        hjson["hessian"] = hessian_string;
+        std::ofstream hess_file("hessian.json");
+        hess_file << hjson;
+    }
     // hessian.PrintVibrations();
     // std::cout << m_hessian << std::endl;
     // Initialise();
+    m_controller["method"] = "qmdff";
     ForceFieldGenerator ff(m_controller);
     ff.setMolecule(m_molecule);
     ff.Generate();
-    json parameter = ff.getParameter();
+
+    // std::ifstream hess_file("qmdff_param.json");
+
+    json parameter;
+    parameter = ff.getParameter();
+    // hess_file >>parameter;
     parameter["method"] = "quff";
     parameter["e0"] = e0;
     // parameter["bonds"] = Bonds();
@@ -109,6 +168,7 @@ void QMDFFFit::start()
     parameter.erase("dihedrals");
     parameter.erase("inversions");
     parameter.erase("vdws");
+    parameter.erase("esps");
 
     for (int start = 0; start < 10 && counter; ++start) {
         std::cout << bonds.size() << " " << angles.size() << std::endl;
@@ -142,12 +202,10 @@ void QMDFFFit::start()
         int index = 0;
         for (int i = 0; i < bonds.size(); ++i) {
             bonds[i]["fc"] = vec(index);
-            // m_qmdffbonds[i].kAB = vec(index);
             index++;
         }
         for (int i = 0; i < angles.size(); ++i) {
             angles[i]["fc"] = vec(index);
-            // m_qmdffangle[i].kabc = vec(index);
             index++;
         }
         json hc = HessianJson;
@@ -159,16 +217,18 @@ void QMDFFFit::start()
         bonds.clear();
         counter = 0;
         for (auto c : cache) {
-            // if ((c["fc"] > 0 && c["distance"] == 1) || c["distance"] == 0)
-            bonds.push_back(c);
-            // else {
-            //  c["fc"] = 0;
-            //  bonds.push_back(c);
-            //  std::cout << c << std::endl;
+            // std::cout << c << std::endl;
+            if (c["fc"] > 0)
+                bonds.push_back(c);
+            else {
+                // c["fc"] = 0;
+                bonds.push_back(c);
+                // std::cout << "skipped" << std::endl;
 
-            // counter++;
-            //}
+                counter++;
+            }
         }
+
         auto cache2 = angles;
         angles.clear();
         for (auto c : cache2) {

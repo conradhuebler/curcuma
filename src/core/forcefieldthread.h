@@ -79,8 +79,9 @@ struct vdW {
 struct EQ {
     int type = 1; // 1 = UFF, 2 = QMDFF
     int i = 0, j = 0;
-    double C_ij = 0, r0_ij = 0;
+    double q_i = 0, q_j = 0, epsilon = 1;
 };
+
 class ForceFieldThread : public CxxThread {
 
 public:
@@ -133,6 +134,7 @@ private:
     void CalculateQMDFFAngleContribution();
     void CalculateQMDFFDihedralContribution();
     void CalculateQMDFFEspContribution();
+    void CalculateESPContribution();
 
     // double HarmonicBondStretching();
 
@@ -143,7 +145,7 @@ private:
     std::function<double()> CalculateTorsionContribution;
     std::function<double()> CalculateInversionContribution;
     std::function<double()> CalculateVdWContribution;
-    std::function<double()> CalculateEQContribution;
+    // std::function<double()> CalculateESPContribution;
     std::function<double()> CalculateHBondContribution;
 
     std::vector<Bond> m_uff_bonds;
@@ -151,7 +153,7 @@ private:
     std::vector<Dihedral> m_uff_dihedrals, m_qmdff_dihedrals;
     std::vector<Inversion> m_uff_inversions, m_qmdff_inversions;
     std::vector<vdW> m_uff_vdWs;
-    std::vector<EQ> m_qmdff_EQs;
+    std::vector<EQ> m_EQs;
 
 protected:
     Matrix m_geometry, m_gradient;

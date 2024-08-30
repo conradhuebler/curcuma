@@ -49,17 +49,25 @@ using namespace LBFGSpp;
 
 int OptThread::execute()
 {
-    m_final = CurcumaOpt::LBFGSOptimise(&m_molecule, m_controller, m_result, &m_intermediate, m_param, ThreadId(), Basename() + ".opt.trj");
+    std::vector<double> charges;
+    m_final = CurcumaOpt::LBFGSOptimise(&m_molecule, m_controller, m_result, &m_intermediate, m_param, charges, ThreadId(), Basename() + ".opt.trj");
+    m_scf["e0"] = m_final.Energy();
+    if (charges.size())
+        m_scf["charges"] = Tools::DoubleVector2String(charges);
     return 0;
 }
 
 int SPThread::execute()
 {
     auto start = std::chrono::system_clock::now();
+    std::vector<double> charges;
 
-    double energy = CurcumaOpt::SinglePoint(&m_molecule, m_controller, m_result, m_param);
+    double energy = CurcumaOpt::SinglePoint(&m_molecule, m_controller, m_result, m_param, charges);
     m_final = m_molecule;
     m_final.setEnergy(energy);
+    m_scf["e0"] = energy;
+    if (charges.size())
+        m_scf["charges"] = Tools::DoubleVector2String(charges);
     auto end = std::chrono::system_clock::now();
     m_result = fmt::format("Single Point Energy = {0} Eh ({1} secs)\n", energy, std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
     return 0;
@@ -138,6 +146,24 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
             hess.setMolecule(*iter);
             hess.setParameter(interface.Parameter());
             hess.CalculateHessian(m_hessian);
+
+            auto hessian = hess.getHessian();
+            std::string hessian_string = Tools::Matrix2String(hessian);
+
+            json hjson;
+            hjson["atoms"] = hessian.cols() / 3;
+            hjson["hessian"] = hessian_string;
+            std::ofstream hess_file("hessian.json");
+            hess_file << hjson;
+
+            json scfjson;
+            scfjson["e0"] = energy;
+            if (interface.Charges().size()) {
+                std::string charges = Tools::DoubleVector2String(interface.Charges());
+                scfjson["charges"] = charges;
+            }
+            std::ofstream scffile("scf.json");
+            scffile << scfjson;
         }
         auto end = std::chrono::system_clock::now();
         std::cout << fmt::format("Single Point Energy = {0} Eh ({1} secs)\n", energy, std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
@@ -197,6 +223,17 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
             hess.setParameter(thread->Parameter());
             hess.setMolecule(mol2);
             hess.CalculateHessian(m_hessian);
+            auto hessian = hess.getHessian();
+            std::string hessian_string = Tools::Matrix2String(hessian);
+
+            json hjson;
+            hjson["atoms"] = hessian.cols() / 3;
+            hjson["hessian"] = hessian_string;
+            std::ofstream hess_file("hessian.json");
+            hess_file << hjson;
+
+            std::ofstream scffile("scf.json");
+            scffile << thread->SCF();
         }
         if (!m_singlepoint)
             mol2->appendXYZFile(Optfile());
@@ -214,7 +251,7 @@ void CurcumaOpt::clear()
     m_molecules.clear();
 }
 
-double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, std::string& output, json& param)
+double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, std::string& output, json& param, std::vector<double>& charges)
 {
     std::string method = Json2KeyWord<std::string>(controller, "method");
 
@@ -244,10 +281,11 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, 
         store = sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]);
     }
 #endif
+    charges = interface.Charges();
     return energy;
 }
 
-Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, const json& controller, std::string& output, std::vector<Molecule>* intermediate, json& parameters, int thread, const std::string& basename)
+Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, const json& controller, std::string& output, std::vector<Molecule>* intermediate, json& parameters, std::vector<double>& charges, int thread, const std::string& basename)
 {
     bool printOutput = Json2KeyWord<bool>(controller, "printOutput");
     bool fusion = Json2KeyWord<bool>(controller, "fusion");
@@ -486,6 +524,8 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, const json& controller, st
         }
     }
     end = std::chrono::system_clock::now();
+    charges = interface.Charges();
+
     if (iteration >= MaxIter) {
         output += fmt::format("{0: ^75}\n\n", "*** Maximum number of iterations reached! ***");
         error = true;

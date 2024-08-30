@@ -98,16 +98,16 @@ struct MyFCFunctor : FCFunctor<double> {
         index = 0;
         double diff = 0;
         /*
-                        for (int i = 0; i < m_hessian.rows(); ++i) {
-                            for (int j = i; j < m_hessian.cols(); ++j) {
-                                if (index >= fvec.size())
-                                    break;
-                                fvec(index) = (m_hessian(j, i) - (hessian(j, i) + m_const_hessian(j, i))) + (m_hessian(i, j) - (hessian(i, j) + m_const_hessian(i, j)));
-                                diff += (m_hessian(i, j) - (hessian(i, j) + m_const_hessian(i, j)));
-                                index++;
-                            }
-                        }
-                    */
+                                for (int i = 0; i < m_hessian.rows(); ++i) {
+                                    for (int j = i; j < m_hessian.cols(); ++j) {
+                                        if (index >= fvec.size())
+                                            break;
+                                        fvec(index) = (m_hessian(j, i) - (hessian(j, i) + m_const_hessian(j, i))) + (m_hessian(i, j) - (hessian(i, j) + m_const_hessian(i, j)));
+                                        diff += (m_hessian(i, j) - (hessian(i, j) + m_const_hessian(i, j)));
+                                        index++;
+                                    }
+                                }
+                   */
         for (auto pair : pairs) {
             int i = pair.first;
             int j = pair.second;

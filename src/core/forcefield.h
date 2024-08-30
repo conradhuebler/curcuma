@@ -82,6 +82,7 @@ private:
     void setAngles(const json& angles);
     void setDihedrals(const json& dihedrals);
     void setInversions(const json& inversions);
+    void setESPs(const json& esps);
 
     std::vector<ForceFieldThread*> m_stored_threads;
     CxxThreadPool* m_threadpool;

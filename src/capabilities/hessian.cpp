@@ -432,9 +432,8 @@ void Hessian::CalculateHessianThreaded()
     for (int i = 0; i < m_molecule.AtomCount(); ++i) {
         atoms.push_back(i);
         threads[i % m_threads].push_back(i);
-        // std::cout << i % m_threads << " " << i << std::endl;
     }
-    // std::cout << threads.size() << std::endl;
+
     for (int i = 0; i < threads.size(); ++i) {
         HessianThread* thread = new HessianThread(m_controller, 0, 0, 0, 0, true);
         thread->setMethod(m_method);
@@ -444,13 +443,6 @@ void Hessian::CalculateHessianThreaded()
         pool->addThread(thread);
     }
 
-    /*
-    HessianThread* thread = new HessianThread(m_controller, 0, 0, 0, 0, true);
-    thread->setMolecule(m_molecule);
-    thread->setParameter(m_parameter);
-    thread->setIndices(atoms);
-    pool->addThread(thread);
-*/
     pool->StaticPool();
     pool->StartAndWait();
     int i = 0;
@@ -459,8 +451,6 @@ void Hessian::CalculateHessianThreaded()
         m_hessian += thread->getHessian();
         ++i;
     }
-    // std::cout << i << std::endl;
-    // std::cout << m_hessian << std::endl;
 
     delete pool;
 
@@ -544,7 +534,6 @@ void Hessian::CalculateHessianSemiNumerical()
             }
         }
     }
-    // std::cout << m_hessian << std::endl;
 
     for (int i = 0; i < m_molecule.AtomCount(); ++i) {
         for (int j = 0; j < m_molecule.AtomCount(); ++j) {

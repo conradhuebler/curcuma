@@ -53,6 +53,7 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
         for (int i = 0; i < m_molecule.Atoms().size(); ++i) {
             m_stored_bonds.push_back(std::vector<int>());
             m_ignored_vdw.push_back(std::set<int>({ i }));
+            m_1_4_charges.push_back(std::set<int>({ i }));
             for (int j = 0; j < m_molecule.Atoms().size() && m_stored_bonds[i].size() < CoordinationNumber[m_molecule.Atoms()[i]]; ++j) {
                 if (i == j)
                     continue;
@@ -141,7 +142,7 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
 
     setInversions();
 
-    setvdWs();
+    setNCI();
 }
 
 double ForceFieldGenerator::UFFBondRestLength(int i, int j, double n)
@@ -187,8 +188,13 @@ void ForceFieldGenerator::setBonds(const TContainer& bonds)
         uffbond["r0_ij"] = r0_ij;
         double cZi = UFFParameters[m_atom_types[bond[0]]][cZ];
         double cZj = UFFParameters[m_atom_types[bond[1]]][cZ];
-        uffbond["fc"] = m_uff_bond_force * cZi * cZj / (r0_ij * r0_ij * r0_ij);
-        double exp = ka(atom_types[bond[0]]) * ka(atom_types[bond[1]]) + kEN * std::abs((AllenEN(atom_types[bond[0]]) - AllenEN(atom_types[bond[1]])) * (AllenEN(atom_types[bond[0]]) - AllenEN(atom_types[bond[1]])));
+        if (m_ff_type == 2)
+            uffbond["fc"] = 0.01;
+        else
+            uffbond["fc"] = m_uff_bond_force * cZi * cZj / (r0_ij * r0_ij * r0_ij);
+
+        double exp = (ka(atom_types[bond[0]]) * ka(atom_types[bond[1]]) + kEN * std::abs((AllenEN(atom_types[bond[0]]) - AllenEN(atom_types[bond[1]])) * (AllenEN(atom_types[bond[0]]) - AllenEN(atom_types[bond[1]]))));
+        exp /= 4.75;
         uffbond["exponent"] = exp;
         m_bonds.push_back(uffbond);
 
@@ -246,6 +252,7 @@ void ForceFieldGenerator::setBonds(const TContainer& bonds)
                     m_ignored_vdw[j].insert(l);
                     m_ignored_vdw[k].insert(l);
                     m_ignored_vdw[l].insert(k);
+                    m_1_4_charges[i].insert(k);
                 }
             }
         }
@@ -274,8 +281,9 @@ void ForceFieldGenerator::setBonds(const TContainer& bonds)
 
 void ForceFieldGenerator::setAngles()
 {
-    for (int index = 0; index < m_angles.size(); ++index) {
+    std::vector<int> atom_types = m_molecule.Atoms();
 
+    for (int index = 0; index < m_angles.size(); ++index) {
         int i = m_angles[index]["i"];
         int j = m_angles[index]["j"];
         int k = m_angles[index]["k"];
@@ -302,6 +310,44 @@ void ForceFieldGenerator::setAngles()
         m_angles[index]["C1"] = C1;
         m_angles[index]["C2"] = C2;
         m_angles[index]["theta0_ijk"] = m_molecule.CalculateAngle(i, j, k) / f; // UFF::AngleBending(m_geometry.row(j), m_geometry.row(i), m_geometry.row(k), derivate, false);
+        /*
+                    if(std::find(m_qmdff_methods.begin(), m_qmdff_methods.end(), m_method) != m_qmdff_methods.end())
+                    {
+                        json uffbond = BondJson;
+
+                        uffbond["i"] = i;
+                        uffbond["j"] = k;
+                        uffbond["k"] = k;
+
+                        uffbond["type"] = m_ff_type;
+
+                        r0_ij = m_distance(i, j);
+                        r0_ik = m_distance(i, k);
+
+                        uffbond["r0_ij"] = r0_ik;
+                        uffbond["r0_ik"] = r0_ik;
+
+
+                        uffbond["fc"] = 0.01;
+                        double exp =ka13 + kb13* ka(atom_types[i]) * ka(atom_types[k]);
+                        bool found = false;
+                        for(const auto &ring : m_identified_rings)
+                        {
+                            for(const auto &atom : ring)
+                            {
+                                if((atom == i || atom == j || atom == k) && !found)
+                                {
+                                    exp += k13r;
+                                    found = true;
+                                }
+                            }
+                        }
+                       // exp /= 3.0;
+                        uffbond["exponent"] = exp;
+                        uffbond["distance"] = 2;
+                        m_bonds.push_back(uffbond);
+                    }
+    */
     }
 }
 
@@ -408,8 +454,10 @@ void ForceFieldGenerator::setInversions()
     }
 }
 
-void ForceFieldGenerator::setvdWs()
+void ForceFieldGenerator::setNCI()
 {
+    std::vector<double> charges = m_molecule.getPartialCharges();
+    double q_thresh = 1e-5;
     for (int i = 0; i < m_atom_types.size(); ++i) {
         for (int j = i + 1; j < m_atom_types.size(); ++j) {
             if (std::find(m_ignored_vdw[i].begin(), m_ignored_vdw[i].end(), j) != m_ignored_vdw[i].end() || std::find(m_ignored_vdw[j].begin(), m_ignored_vdw[j].end(), i) != m_ignored_vdw[j].end())
@@ -424,8 +472,36 @@ void ForceFieldGenerator::setvdWs()
             vdW["j"] = j;
             vdW["r0_ij"] = sqrt(cxi * cxj);
             m_vdws.push_back(vdW);
+
+            if (charges.size() <= i || charges.size() <= j)
+                continue;
+            if (std::abs(charges[i] < q_thresh) || std::abs(charges[j] < q_thresh))
+                continue;
+            json esp = EQJson;
+            esp["i"] = i;
+            esp["j"] = j;
+            esp["q_i"] = charges[i];
+            esp["q_j"] = charges[j];
+            m_esps.push_back(esp);
         }
     }
+    /*
+    for(int i = 0; i < m_1_4_charges.size(); ++i)
+    {
+        for(const auto j : m_1_4_charges[i])
+        {
+            if(i == j)
+                continue;
+            json esp = EQJson;
+            esp["i"] = i;
+            esp["j"] = j;
+            esp["q_i"] = charges[i];
+            esp["q_j"] = charges[j];
+            esp["epsilon"] = 0.85;
+            m_esps.push_back(esp);
+        }
+    }
+*/
 }
 
 void ForceFieldGenerator::AssignUffAtomTypes()
@@ -644,6 +720,8 @@ json ForceFieldGenerator::getParameter()
     parameters["dihedrals"] = Dihedrals();
     parameters["inversions"] = Inversions();
     parameters["vdws"] = vdWs();
+    parameters["esps"] = ESPs();
+
     return parameters;
 }
 
@@ -714,4 +792,18 @@ json ForceFieldGenerator::vdWs() const
         }
     }
     return vdws;
+}
+
+json ForceFieldGenerator::ESPs() const
+{
+    json esps;
+    int index = 0;
+
+    for (int i = 0; i < m_esps.size(); ++i) {
+        if (m_esps[i]["type"] != 0) {
+            esps[index] = m_esps[i];
+            index++;
+        }
+    }
+    return esps;
 }

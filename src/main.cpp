@@ -174,7 +174,9 @@ int main(int argc, char **argv) {
                   << "-rmsdtraj    * Find unique structures                                     *" << std::endl
                   << "-distance    * Calculate distance matrix                                  *" << std::endl
                   << "-reorder     * Write molecule file with randomly reordered indices        *" << std::endl
-                  << "-centroid    * Calculate centroid of specific atoms/fragments             *" << std::endl;
+                  << "-centroid    * Calculate centroid of specific atoms/fragments             *" << std::endl
+                  << "-strip       * Skip frames in trajectories                                *" << std::endl;
+
         exit(1);
     } else {
         json controller = CLI2Json(argc, argv);
@@ -1029,6 +1031,22 @@ int main(int argc, char **argv) {
                       << Theta << "\n"
                       << std::endl;
 
+        } else if (strcmp(argv[1], "-stride") == 0) {
+
+            if (argc < 4) {
+                std::cerr << "Please use curcuma to center a structure as follows:\ncurcuma -stride trjectory.xyz 100" << std::endl;
+                return 0;
+            }
+            int stride = std::stoi(argv[3]);
+
+            FileIterator file(argv[2]);
+            int index = 1;
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                if (index % stride == 0)
+                    mol.appendXYZFile(std::string("blob.xyz"));
+                index++;
+            }
         } else {
             bool centered = false;
             for (std::size_t i = 2; i < argc; ++i) {

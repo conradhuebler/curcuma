@@ -30,82 +30,6 @@
 #include <Eigen/Dense>
 
 #include "json.hpp"
-/* thanks to ChatGPT Maths module */
-// Funktion zur Berechnung des Kosinus des Winkels zwischen zwei Vektoren
-inline double cosTheta(const Eigen::Vector3d& AB, const Eigen::Vector3d& AC)
-{
-    double dotProduct = AB.dot(AC);
-    double norms = AB.norm() * AC.norm();
-    return dotProduct / norms;
-}
-
-// Funktion zur Berechnung des Gradienten von cos(theta) bezüglich eines Punktes
-inline Eigen::Vector3d gradientCosTheta(const Eigen::Vector3d& A, const Eigen::Vector3d& B, const Eigen::Vector3d& C)
-{
-    Eigen::Vector3d AB = B - A;
-    Eigen::Vector3d AC = C - A;
-
-    double cosThetaValue = cosTheta(AB, AC);
-    double normAB = AB.norm();
-    double normAC = AC.norm();
-
-    // Berechnung der Gradientenkomponenten
-    Eigen::Vector3d gradA = (AC / (normAB * normAC)) - (cosThetaValue / normAB) * (AB / normAB)
-        - (cosThetaValue / normAC) * (AC / normAC);
-
-    return gradA;
-}
-
-// Funktion zur Berechnung des Gradienten von E
-inline double computeGradient(const Eigen::Vector3d& A, const Eigen::Vector3d& B, const Eigen::Vector3d& C,
-    double fc, double cosTheta0,
-    Eigen::Vector3d& gradA, Eigen::Vector3d& gradB, Eigen::Vector3d& gradC)
-{
-    Eigen::Vector3d AB = B - A;
-    Eigen::Vector3d AC = C - A;
-
-    // Berechne cos(theta)
-    double cosThetaValue = cosTheta(AB, AC);
-    // std::cout << acos(cosThetaValue)*180/pi << " " << acos(cosTheta0)*180/pi<< std::endl;
-    //  Berechne den Faktor (cos(theta) - cos(theta_0))
-    double factor = 2 * fc * (cosThetaValue - cosTheta0);
-
-    // Berechne die Gradienten in Bezug auf A, B und C
-    gradA = factor * gradientCosTheta(A, B, C);
-    gradB = -factor * gradientCosTheta(B, A, C); // wegen AB wird zu BA und umgekehrt
-    gradC = -factor * gradientCosTheta(C, B, A); // wegen AC wird zu CA und umgekehrt
-    return fc * (cosThetaValue - cosTheta0) * (cosThetaValue - cosTheta0);
-}
-
-inline double harmonicPotential(double theta, double theta0, double k)
-{
-    return 0.5 * k * (theta - theta0) * (theta - theta0);
-}
-
-inline double computeTheta(const Eigen::Vector3d& AB, const Eigen::Vector3d& AC)
-{
-    Eigen::Vector3d crossProduct = AB.cross(AC);
-    double sinTheta = crossProduct.norm() / (AB.norm() * AC.norm());
-    return std::asin(sinTheta); // kleine Winkelannahme
-}
-
-inline double computeHarmonicGradient(const Eigen::Vector3d& A, const Eigen::Vector3d& B, const Eigen::Vector3d& C,
-    double k, double theta0,
-    Eigen::Vector3d& gradA, Eigen::Vector3d& gradB, Eigen::Vector3d& gradC)
-{
-    Eigen::Vector3d AB = B - A;
-    Eigen::Vector3d AC = C - A;
-
-    double theta = computeTheta(AB, AC);
-    double factor = -k * (theta - theta0);
-
-    // Annahme: grad_theta/grad_r proportional zu senkrechtem Abstand
-    Eigen::Vector3d crossProduct = AB.cross(AC);
-    gradA = factor * crossProduct.normalized();
-    gradB = -gradA; // Wegen der Definition des Abstands
-    gradC = -gradA;
-    return harmonicPotential(theta, theta0, k);
-}
 
 namespace UFF {
 inline double BondStretching(const Vector& i, const Vector& j, Matrix& derivate, bool gradient)
@@ -197,28 +121,6 @@ inline double AngleBend(const Eigen::Vector3d& j, const Eigen::Vector3d& i, cons
     double costheta = (ij.dot(ik) / (sqrt(ij.dot(ij) * ik.dot(ik))));
     double costheta0_ijk = cos(theta0_ijk * pi / 180.0);
     double energy = (fc * damp * (costheta0_ijk - costheta) * (costheta0_ijk - costheta));
-    // std::cout << acos(costheta)*180/pi << " " << theta0_ijk << std::endl;
-    // std::cout << damp << " " << costheta << " " << costheta0_ijk << " " << energy << std::endl;
-
-    if (!gradient) {
-        if (std::isnan(energy))
-            return 0;
-        else
-            return energy;
-    }
-    Eigen::Vector3d rij = i - j;
-    auto nij = rij / rij.norm();
-    Eigen::Vector3d rkj = k - j;
-    auto nkj = rkj / rkj.norm();
-    derivate = Matrix::Zero(3, 3);
-
-    double sintheta = sin(acos(costheta));
-    double dThetadCosTheta = 1 / sintheta;
-    double dE = fc * (sintheta * (2 * costheta + costheta0_ijk));
-    derivate = Matrix::Zero(3, 3);
-    derivate.row(0) = -dThetadCosTheta * (nkj - nij * costheta) / (rij.norm()) * dE;
-    derivate.row(2) = -dThetadCosTheta * (nij - nkj * costheta) / (rkj.norm()) * dE;
-    derivate.row(1) = -derivate.row(0) - derivate.row(2) * dE;
 
     if (std::isnan(energy))
         return 0;
@@ -229,36 +131,12 @@ inline double AngleBend(const Eigen::Vector3d& j, const Eigen::Vector3d& i, cons
 inline double LinearAngleBend(const Eigen::Vector3d& j, const Eigen::Vector3d& i, const Eigen::Vector3d& k, double theta0_ijk, double fc, double r0_ij, double r0_ik, Matrix& derivate, bool gradient)
 {
 #pragma message("check")
-    /*
-    if (kabc < 0)
-        return 0;
-*/
+
     Eigen::Vector3d ij = i - j;
     Eigen::Vector3d ik = i - k;
     double damp = AngleDamping(ij.norm(), ik.norm(), r0_ij, r0_ik);
     double theta = acos((ij.dot(ik) / (sqrt(ij.dot(ij) * ik.dot(ik)))));
     double energy = (fc * damp * (theta0_ijk - theta) * (theta0_ijk - theta));
-
-    if (!gradient) {
-        if (std::isnan(energy))
-            return 0;
-        else
-            return energy;
-    }
-    Eigen::Vector3d rij = i - j;
-    auto nij = rij / rij.norm();
-    Eigen::Vector3d rkj = k - j;
-    auto nkj = rkj / rkj.norm();
-    derivate = Matrix::Zero(3, 3);
-    double costheta = (rij.dot(rkj) / (sqrt(rij.dot(rij) * rkj.dot(rkj))));
-
-    double sintheta = sin(acos(costheta));
-    double dThetadCosTheta = 1 / sintheta;
-    double dE = 2 * fc * (theta0_ijk - theta);
-    derivate = Matrix::Zero(3, 3);
-    derivate.row(0) = -dThetadCosTheta * (nkj - nij * costheta) / (rij.norm()) * dE;
-    derivate.row(2) = -dThetadCosTheta * (nij - nkj * costheta) / (rkj.norm()) * dE;
-    derivate.row(1) = -derivate.row(0) - derivate.row(2) * dE;
 
     if (std::isnan(energy))
         return 0;
