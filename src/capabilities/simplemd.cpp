@@ -185,10 +185,12 @@ void SimpleMD::LoadControlJson()
     m_rescue = Json2KeyWord<bool>(m_defaults, "rescue");
     m_wall_render = Json2KeyWord<bool>(m_defaults, "wall_render");
     m_coupling = Json2KeyWord<double>(m_defaults, "coupling");
+    m_anderson = Json2KeyWord<double>(m_defaults, "anderson");
+
     m_threads = Json2KeyWord<double>(m_defaults, "threads");
-    /* if (m_coupling < m_dT)
-         m_coupling = m_dT;
- */
+    if (m_coupling < m_dT)
+        m_coupling = m_dT;
+
     /* RMSD Metadynamik block */
     /* this one is used to recover https://doi.org/10.1021/acs.jctc.9b00143 */
     m_rmsd_mtd = Json2KeyWord<bool>(m_defaults, "rmsd_mtd");
@@ -402,12 +404,7 @@ bool SimpleMD::Initialise()
             m_rmass[3 * i + 2] = 1 / m_mass[3 * i + 2];
         }
     }
-    if (!m_restart) {
-        InitVelocities(m_scale_velo);
-        m_xi.resize(m_chain_length, 0.0);
-        m_Q.resize(m_chain_length, mass); // Setze eine geeignete Masse für jede Kette
-        m_eta = 0.0;
-    }
+
     m_molecule.setCharge(m_charge);
     m_molecule.setSpin(m_spin);
     m_interface->setMolecule(m_molecule);
@@ -425,6 +422,17 @@ bool SimpleMD::Initialise()
 
     InitConstrainedBonds();
     InitialiseWalls();
+    if (!m_restart) {
+        InitVelocities(m_scale_velo);
+        m_xi.resize(m_chain_length, 0.0);
+        m_Q.resize(m_chain_length, 100); // Setze eine geeignete Masse für jede Kette
+        for (int i = 0; i < m_chain_length; ++i) {
+            m_xi[i] = pow(10.0, double(i)) - 1;
+            m_Q[i] = pow(10, i) * kb_Eh * m_T0 * m_dof * 100;
+            std::cout << m_xi[i] << "  " << m_Q[i] << std::endl;
+        }
+        m_eta = 0.0;
+    }
     if (m_writeinit) {
         json init = WriteRestartInformation();
         std::ofstream result_file;
@@ -497,6 +505,7 @@ bool SimpleMD::Initialise()
 
 void SimpleMD::InitConstrainedBonds()
 {
+
     if (m_rattle) {
         auto m = m_molecule.DistanceMatrix();
         m_topo_initial = m.second;
@@ -517,6 +526,7 @@ void SimpleMD::InitConstrainedBonds()
             }
         }
     }
+
     std::cout << m_dof << " initial degrees of freedom " << std::endl;
     std::cout << m_bond_constrained.size() << " constrains active" << std::endl;
     m_dof -= m_bond_constrained.size();
@@ -527,33 +537,19 @@ void SimpleMD::InitVelocities(double scaling)
 {
     static std::default_random_engine generator;
     for (size_t i = 0; i < m_natoms; ++i) {
-        std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
-        std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 / m_mass[i]));
+        std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 * m_rmass[i]));
         m_velocities[3 * i + 0] = distribution(generator);
         m_velocities[3 * i + 1] = distribution(generator);
         m_velocities[3 * i + 2] = distribution(generator);
     }
-
-    /*
-    static std::random_device rd{};
-    static std::mt19937 gen{ rd() };
-    std::normal_distribution<> d{ 0, 1 };
-    double Px = 0.0, Py = 0.0, Pz = 0.0;
-    for (int i = 0; i < m_natoms; ++i) {
-        double v0 = sqrt(kb_Eh * m_T0 * amu2au / (m_mass[i])) * scaling / fs2amu;
-        m_velocities[3 * i + 0] = v0 * d(gen);
-        m_velocities[3 * i + 1] = v0 * d(gen);
-        m_velocities[3 * i + 2] = v0 * d(gen);
-        Px += m_velocities[3 * i + 0] * m_mass[i];
-        Py += m_velocities[3 * i + 1] * m_mass[i];
-        Pz += m_velocities[3 * i + 2] * m_mass[i];
-    }*/
-    /*
-    for (int i = 0; i < m_natoms; ++i) {
-        m_velocities[3 * i + 0] -= Px / (m_mass[i] * m_natoms);
-        m_velocities[3 * i + 1] -= Py / (m_mass[i] * m_natoms);
-        m_velocities[3 * i + 2] -= Pz / (m_mass[i] * m_natoms);
-    }*/
+    RemoveRotation(m_velocities);
+    EKin();
+    double coupling = m_coupling;
+    m_coupling = m_dT;
+    Berendson();
+    Berendson();
+    EKin();
+    m_coupling = coupling;
 }
 
 void SimpleMD::InitialiseWalls()
@@ -969,9 +965,9 @@ void SimpleMD::start()
     }
 
     m_Epot = Energy(gradient);
-    m_Ekin = EKin();
+    EKin();
     m_Etot = m_Epot + m_Ekin;
-
+    AverageQuantities();
     int m_step = 0;
 
 #ifdef USE_Plumed
@@ -1045,6 +1041,7 @@ void SimpleMD::start()
     }
     PrintStatus();
 
+    /* Start MD Lopp here */
     for (; m_currentStep < m_maxtime;) {
         auto step0 = std::chrono::system_clock::now();
 
@@ -1073,8 +1070,7 @@ void SimpleMD::start()
         }
 
         Integrator(gradient);
-        // ThermostatFunction();
-        m_Ekin = EKin();
+        AverageQuantities();
 
         if (m_mtd) {
             if (!m_eval_mtd) {
@@ -1103,7 +1099,7 @@ void SimpleMD::start()
                 m_molecule.GetFragments();
                 InitVelocities(-1);
                 Energy(gradient);
-                m_Ekin = EKin();
+                EKin();
                 m_Etot = m_Epot + m_Ekin;
                 m_current_rescue++;
                 PrintStatus();
@@ -1141,7 +1137,7 @@ void SimpleMD::start()
 
         if (m_impuls > m_T) {
             InitVelocities(m_scale_velo * m_impuls_scaling);
-            m_Ekin = EKin();
+            EKin();
             // PrintStatus();
             m_time_step = 0;
         }
@@ -1199,6 +1195,8 @@ void SimpleMD::start()
 
 void SimpleMD::Verlet(double* grad)
 {
+    double ekin = 0;
+
     for (int i = 0; i < m_natoms; ++i) {
         m_current_geometry[3 * i + 0] = m_current_geometry[3 * i + 0] + m_dT * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
         m_current_geometry[3 * i + 1] = m_current_geometry[3 * i + 1] + m_dT * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
@@ -1207,10 +1205,13 @@ void SimpleMD::Verlet(double* grad)
         m_velocities[3 * i + 0] = m_velocities[3 * i + 0] - 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
         m_velocities[3 * i + 1] = m_velocities[3 * i + 1] - 0.5 * m_dT * grad[3 * i + 1] * m_rmass[3 * i + 1];
         m_velocities[3 * i + 2] = m_velocities[3 * i + 2] - 0.5 * m_dT * grad[3 * i + 2] * m_rmass[3 * i + 2];
+        ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
+    ekin *= 0.5;
+    m_T = 2.0 * ekin / (kb_Eh * m_dof);
+    m_Ekin = ekin;
     ThermostatFunction();
     m_Epot = Energy(grad);
-
     if (m_rmsd_mtd) {
         if (m_step % m_mtd_steps == 0) {
             ApplyRMSDMTD(grad);
@@ -1239,7 +1240,7 @@ void SimpleMD::Verlet(double* grad)
     }
 #endif
     WallPotential(grad);
-    double ekin = 0.0;
+    ekin = 0.0;
 
     for (int i = 0; i < m_natoms; ++i) {
         m_velocities[3 * i + 0] -= 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
@@ -1255,7 +1256,9 @@ void SimpleMD::Verlet(double* grad)
     double T = 2.0 * ekin / (kb_Eh * m_dof);
     m_unstable = T > 10000 * m_T;
     m_T = T;
+    m_Ekin = ekin;
     ThermostatFunction();
+    EKin();
 }
 
 void SimpleMD::Rattle(double* grad)
@@ -1337,14 +1340,20 @@ void SimpleMD::Rattle(double* grad)
         if (active == 0)
             break;
     }
+    double ekin = 0;
+
     for (int i = 0; i < m_natoms; ++i) {
         m_current_geometry[3 * i + 0] = coord[3 * i + 0];
         m_current_geometry[3 * i + 1] = coord[3 * i + 1];
         m_current_geometry[3 * i + 2] = coord[3 * i + 2];
+        ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
+    ekin *= 0.5;
+    m_T = 2.0 * ekin / (kb_Eh * m_dof);
+    m_Ekin = ekin;
     ThermostatFunction();
-
     m_Epot = Energy(grad);
+
     if (m_rmsd_mtd) {
         if (m_step % m_mtd_steps == 0) {
             ApplyRMSDMTD(grad);
@@ -1373,7 +1382,6 @@ void SimpleMD::Rattle(double* grad)
     }
 #endif
     WallPotential(grad);
-    double ekin = 0.0;
 
     for (int i = 0; i < m_natoms; ++i) {
         m_velocities[3 * i + 0] -= 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
@@ -1431,6 +1439,7 @@ void SimpleMD::Rattle(double* grad)
     m_unstable = T > 10000 * m_T;
     m_T = T;
     ThermostatFunction();
+    EKin();
 }
 
 void SimpleMD::ApplyRMSDMTD(double* grad)
@@ -1914,16 +1923,19 @@ double SimpleMD::FastEnergy(double* grad)
     return Energy;
 }
 
-double SimpleMD::EKin()
+void SimpleMD::EKin()
 {
     double ekin = 0;
-
     for (int i = 0; i < m_natoms; ++i) {
         ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
     ekin *= 0.5;
+    m_Ekin = ekin;
     m_T = 2.0 * ekin / (kb_Eh * m_dof);
+}
 
+void SimpleMD::AverageQuantities()
+{
     m_aver_Temp = (m_T + (m_currentStep)*m_aver_Temp) / (m_currentStep + 1);
     m_aver_Epot = (m_Epot + (m_currentStep)*m_aver_Epot) / (m_currentStep + 1);
     m_aver_Ekin = (m_Ekin + (m_currentStep)*m_aver_Ekin) / (m_currentStep + 1);
@@ -1933,8 +1945,6 @@ double SimpleMD::EKin()
     }
     m_average_wall_potential = (m_wall_potential + (m_currentStep)*m_average_wall_potential) / (m_currentStep + 1);
     m_average_virial_correction = (m_virial_correction + (m_currentStep)*m_average_virial_correction) / (m_currentStep + 1);
-
-    return ekin;
 }
 
 bool SimpleMD::WriteGeometry()
@@ -1971,31 +1981,22 @@ void SimpleMD::None()
 
 void SimpleMD::Berendson()
 {
-    double kinetic_energy = 0.0;
-
-    double lambda = sqrt(1 + (m_dT * (m_T0 - m_T)) / (m_T * m_coupling));
+    double lambda = sqrt(1 + (m_dT / 2.0 * (m_T0 - m_T)) / (m_T * m_coupling));
     for (int i = 0; i < m_natoms; ++i) {
-        // m_velocities[i] *= alpha;
         m_velocities[3 * i + 0] *= lambda;
         m_velocities[3 * i + 1] *= lambda;
         m_velocities[3 * i + 2] *= lambda;
-        kinetic_energy += 0.5 * m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
-    kinetic_energy *= 0.5;
-    double T = 2.0 * kinetic_energy / (kb_Eh * m_dof);
-    m_unstable = T > 10000 * m_T;
-    m_T = T;
 }
 
 void SimpleMD::CSVR()
 {
     double Ekin_target = 0.5 * kb_Eh * (m_T0)*m_dof;
-    double c = exp(-(m_dT * m_respa) / m_coupling);
+    double c = exp(-(m_dT / 2.0 * m_respa) / m_coupling);
     static std::default_random_engine rd{};
     static std::mt19937 gen{ rd() };
     static std::normal_distribution<> d{ 0, 1 };
     static std::chi_squared_distribution<float> dchi{ m_dof };
-    double kinetic_energy = 0.0;
 
     double R = d(gen);
     double SNf = dchi(gen);
@@ -2003,38 +2004,25 @@ void SimpleMD::CSVR()
     m_Ekin_exchange += m_Ekin * (alpha2 - 1);
     double alpha = sqrt(alpha2);
     for (int i = 0; i < m_natoms; ++i) {
-        // m_velocities[i] *= alpha;
         m_velocities[3 * i + 0] *= alpha;
         m_velocities[3 * i + 1] *= alpha;
         m_velocities[3 * i + 2] *= alpha;
-        kinetic_energy += 0.5 * m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
-    kinetic_energy *= 0.5;
-    double T = 2.0 * kinetic_energy / (kb_Eh * m_dof);
-    m_unstable = T > 10000 * m_T;
-    m_T = T;
 }
 
 void SimpleMD::Anderson()
 {
     static std::default_random_engine generator;
-    double kinetic_energy = 0.0;
-    double probability = m_coupling * m_dT;
+    double probability = m_anderson * m_dT;
     std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
     for (size_t i = 0; i < m_natoms; ++i) {
-        std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 / m_mass[i]));
         if (uniform_dist(generator) < probability) {
-            m_velocities[3 * i + 0] = distribution(generator);
-            m_velocities[3 * i + 1] = distribution(generator);
-            m_velocities[3 * i + 2] = distribution(generator);
+            std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 * m_rmass[i]));
+            m_velocities[3 * i + 0] = (m_velocities[3 * i + 0] + distribution(generator)) / 2.0;
+            m_velocities[3 * i + 1] = (m_velocities[3 * i + 1] + distribution(generator)) / 2.0;
+            m_velocities[3 * i + 2] = (m_velocities[3 * i + 2] + distribution(generator)) / 2.0;
         }
-        kinetic_energy += 0.5 * m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
-
-    kinetic_energy *= 0.5;
-    double T = 2.0 * kinetic_energy / (kb_Eh * m_dof);
-    m_unstable = T > 10000 * m_T;
-    m_T = T;
 }
 void SimpleMD::NoseHover()
 {
@@ -2051,17 +2039,11 @@ void SimpleMD::NoseHover()
 
     // Update der Geschwindigkeiten
     double scale = exp(-m_xi[0] * m_dT);
-    kinetic_energy = 0.0;
     for (int i = 0; i < m_natoms; ++i) {
         m_velocities[3 * i + 0] *= scale;
         m_velocities[3 * i + 1] *= scale;
         m_velocities[3 * i + 2] *= scale;
-        kinetic_energy += 0.5 * m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
-    kinetic_energy *= 0.5;
-    double T = 2.0 * kinetic_energy / (kb_Eh * m_dof);
-    m_unstable = T > 10000 * m_T;
-    m_T = T;
 
     // Rückwärts-Update der Thermostatkette
     for (int j = m_chain_length - 1; j >= 1; --j) {

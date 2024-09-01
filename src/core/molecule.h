@@ -110,7 +110,7 @@ class Molecule
     Molecule getFragmentMolecule(int fragment) const;
 
     double CalculateDistance(int i, int j) const;
-    std::pair<double, double> GyrationRadius(bool hydrogen = true, int fragment = -1);
+    std::pair<double, double> GyrationRadius(double hmass = 1, bool hydrogen = true, int fragment = -1);
 
     /*! \brief Methode to get the geometry of the molecule as array of vectors
      *

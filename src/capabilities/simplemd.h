@@ -187,7 +187,8 @@ static json CurcumaMDJson{
     { "rmsd_ref_file", "none" },
     { "rmsd_fix_structure", false },
     { "rmsd_atoms", "-1" },
-    { "chainlength", 3 }
+    { "chainlength", 3 },
+    { "anderson", 0.001 }
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -256,7 +257,9 @@ private:
     void RemoveRotation(std::vector<double>& velo);
     void RemoveRotations(std::vector<double>& velo);
 
-    double EKin();
+    void EKin();
+    void AverageQuantities();
+
     void Berendson();
     void CSVR();
     void None();
@@ -362,6 +365,8 @@ private:
     double m_eta; // Variable zur Speicherung der Thermostatenergie
 
     int m_chain_length = 3; // Länge der Thermostatkette
+
+    double m_anderson = 0.01;
 };
 
 class MDThread : public CxxThread {

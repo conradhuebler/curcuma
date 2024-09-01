@@ -891,11 +891,17 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[1], "-gyration") == 0) {
             FileIterator file(argv[2]);
             int count = 1;
-            double sum = 0, sum_mass = 0, sqrt_sum = 0, sqrt_sum_mass = 0;
+            double sum = 0, sum_mass = 0, sqrt_sum = 0, sqrt_sum_mass = 0, hmass = 1;
+            for (std::size_t i = 2; i < argc; ++i) {
 
+                if (strcmp(argv[i], "-hmass") == 0) {
+                    if (i + 1 < argc)
+                        hmass = std::stoi(argv[i + 1]);
+                }
+            }
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
-                std::pair<double, double> gyr = mol.GyrationRadius();
+                std::pair<double, double> gyr = mol.GyrationRadius(hmass);
                 sum += gyr.first;
                 sum_mass += gyr.second;
                 sqrt_sum += sqrt(gyr.first);
@@ -1049,9 +1055,14 @@ int main(int argc, char **argv) {
             }
         } else {
             bool centered = false;
+            bool hmass = 1;
             for (std::size_t i = 2; i < argc; ++i) {
                 if (strcmp(argv[i], "-center") == 0) {
                     centered = true;
+                }
+                if (strcmp(argv[i], "-hmass") == 0) {
+                    if (i + 1 < argc)
+                        hmass = std::stoi(argv[i + 1]);
                 }
             }
 
@@ -1069,7 +1080,7 @@ int main(int argc, char **argv) {
                 std::cout << mol.Check() << std::endl
                           << std::endl;
                 std::cout << mol.COM().transpose() << std::endl;
-                std::cout << mol.GyrationRadius().first << " " << mol.GyrationRadius().second << " " << sqrt(mol.GyrationRadius().first) << " " << sqrt(mol.GyrationRadius().second) << std::endl;
+                std::cout << mol.GyrationRadius(hmass).first << " " << mol.GyrationRadius(hmass).second << " " << sqrt(mol.GyrationRadius(hmass).first) << " " << sqrt(mol.GyrationRadius(hmass).second) << std::endl;
                 /*
                 if (argc >= 3) {
                     std::string tests = argv[2];
