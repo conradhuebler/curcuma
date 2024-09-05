@@ -953,9 +953,11 @@ int main(int argc, char **argv) {
             while (!file.AtEnd()) { // calculation and output dipole moment
                 mol = file.Next(); // load Molecule
                 mol.Center(false);
+
                 EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb and give
                 interface.setMolecule(mol); // set molecule for calc
                 interface.CalculateEnergy(false, true); // calc energy and charges and dipole moment
+
                 mol.setPartialCharges(interface.Charges()); // calc Partial Charges and give it to mol
                 auto charges = interface.Charges(); // dec and init charges
                 mol.setDipole(interface.Dipole() * au);
