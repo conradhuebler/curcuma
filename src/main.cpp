@@ -902,6 +902,8 @@ int main(int argc, char **argv) {
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
                 std::pair<double, double> gyr = mol.GyrationRadius(hmass);
+                if (std::isnan(gyr.first) || std::isnan(gyr.second))
+                    continue;
                 sum += gyr.first;
                 sum_mass += gyr.second;
                 sqrt_sum += sqrt(gyr.first);

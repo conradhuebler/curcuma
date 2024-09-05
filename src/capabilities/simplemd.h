@@ -151,7 +151,9 @@ static json CurcumaMDJson{
     { "rattle", false },
     { "rattle_tolerance", 1e-1 },
     { "rattle_maxiter", 100 },
-    { "thermostat", "csvr" },
+    { "rattle_dynamic_tol", false },
+    { "rattle_dynamic_tol_iter", 100 },
+    { "thermostat", "csvr" }, // can be csvr (default), berendson, none, anderson or nosehover
     { "respa", 1 },
     { "threads", 1 },
     { "dipole", false },
@@ -254,6 +256,8 @@ private:
     void Rattle_Verlet_Second(double* coord, double* grad);
     void Rattle_Constrain_Second(double* coord, double* grad);
 
+    void AdjustRattleTolerance();
+
     void RemoveRotation(std::vector<double>& velo);
     void RemoveRotations(std::vector<double>& velo);
 
@@ -294,7 +298,7 @@ private:
     double m_single_step = 1;
     double m_dT = 0.5, m_currentStep = 0, m_maxtime = 1000;
     int m_spin = 0, m_charge = 0, m_print = 100;
-    double m_T0 = 298.13, m_aver_Temp = 0, m_rmsd = 1.5;
+    double m_T0 = 298.13, m_aver_Temp = 0, m_aver_rattle_Temp = 0, m_rmsd = 1.5;
     double m_x0 = 0, m_y0 = 0, m_z0 = 0;
     double m_Ekin_exchange = 0.0;
     std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient, m_rmass, m_virial, m_gradient_bias;
@@ -318,6 +322,7 @@ private:
     int m_unix_started = 0, m_prev_index = 0, m_max_rescue = 10, m_current_rescue = 0, m_currentTime = 0, m_max_top_diff = 15, m_step = 0;
     int m_writerestart = -1;
     int m_respa = 1;
+    int m_rattle_dynamic_tol_iter = 100;
     double m_pos_conv = 0, m_scale_velo = 1.0, m_coupling = 10;
     double m_impuls = 0, m_impuls_scaling = 0.75, m_dt2 = 0;
     double m_rattle_tolerance = 1;
@@ -340,6 +345,7 @@ private:
     int m_bias_structure_count = 0;
     int m_rmsd_fragment_count = 0;
     int m_wall_type = 0;
+    int m_rattle_counter = 0;
     std::vector<double> m_collected_dipole;
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;
@@ -352,7 +358,7 @@ private:
     bool m_rmsd_mtd = false;
     bool m_wtmtd = false;
     bool m_rmsd_fix_structure = false;
-
+    bool m_rattle_dynamic_tol = false;
     int m_mtd_dT = -1;
     int m_seed = -1;
     int m_time_step = 0;
@@ -367,6 +373,8 @@ private:
     int m_chain_length = 3; // Länge der Thermostatkette
 
     double m_anderson = 0.01;
+
+    std::vector<std::pair<double, double>> m_rattle_tol_temp;
 };
 
 class MDThread : public CxxThread {

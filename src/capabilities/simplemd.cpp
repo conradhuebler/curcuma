@@ -226,6 +226,9 @@ void SimpleMD::LoadControlJson()
     m_rm_COM = Json2KeyWord<double>(m_defaults, "rm_COM");
     int rattle = Json2KeyWord<int>(m_defaults, "rattle");
     m_rattle_maxiter = Json2KeyWord<int>(m_defaults, "rattle_maxiter");
+    m_rattle_dynamic_tol_iter = Json2KeyWord<int>(m_defaults, "rattle_dynamic_tol_iter");
+    m_rattle_dynamic_tol = Json2KeyWord<bool>(m_defaults, "rattle_dynamic_tol");
+
     if (rattle == 1) {
         Integrator = [=](double* grad) {
             this->Rattle(grad);
@@ -718,6 +721,11 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["average_Virial"] = m_average_virial_correction;
     restart["average_Wall"] = m_average_wall_potential;
 
+    restart["rattle"] = m_rattle;
+    restart["rattle_maxiter"] = m_rattle_maxiter;
+    restart["rattle_dynamic_tol"] = m_rattle_tolerance;
+    restart["rattle_dynamic_tol_iter"] = m_rattle_dynamic_tol_iter;
+
     restart["coupling"] = m_coupling;
     restart["MaxTopoDiff"] = m_max_top_diff;
     restart["impuls"] = m_impuls;
@@ -789,7 +797,7 @@ bool SimpleMD::LoadRestartInformation()
 
 bool SimpleMD::LoadRestartInformation(const json& state)
 {
-    std::string geometry, velocities, constrains, zeta, xi, Q;
+    std::string geometry, velocities, constrains, xi, Q;
 
     try {
         m_method = state["method"];
@@ -880,10 +888,6 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     }
 
     try {
-        zeta = state["zeta"];
-    } catch (json::type_error& e) {
-    }
-    try {
         xi = state["xi"];
     } catch (json::type_error& e) {
     }
@@ -897,6 +901,30 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     } catch (json::type_error& e) {
     }
 
+    try {
+        m_rattle = state["rattle"];
+    } catch (json::type_error& e) {
+    }
+
+    try {
+        m_rattle_tolerance = state["rattle_tolerance"];
+    } catch (json::type_error& e) {
+    }
+
+    try {
+        m_rattle_maxiter = state["rattle_maxiter"];
+    } catch (json::type_error& e) {
+    }
+
+    try {
+        m_rattle_dynamic_tol = state["rattle_dynamic_tol"];
+    } catch (json::type_error& e) {
+    }
+
+    try {
+        m_rattle_dynamic_tol_iter = state["rattle_dynamic_tol_iter"];
+    } catch (json::type_error& e) {
+    }
     try {
         m_rmsd_mtd = state["rmsd_mtd"];
         if (m_rmsd_mtd) {
@@ -1112,7 +1140,10 @@ void SimpleMD::start()
             fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Simulation got unstable, exiting!\n");
 
             std::ofstream restart_file("unstable_curcuma.json");
-            restart_file << WriteRestartInformation() << std::endl;
+            nlohmann::json restart;
+            restart[MethodName()[0]] = WriteRestartInformation();
+            restart_file << restart << std::endl;
+
             m_time_step = 0;
             aborted = true;
 
@@ -1127,14 +1158,20 @@ void SimpleMD::start()
         if (m_writerestart > -1 && m_step % m_writerestart == 0) {
             std::ofstream restart_file("curcuma_step_" + std::to_string(int(m_step * m_dT)) + ".json");
             nlohmann::json restart;
-            restart_file << WriteRestartInformation() << std::endl;
+            restart[MethodName()[0]] = WriteRestartInformation();
+            restart_file << restart << std::endl;
         }
         if ((m_step && int(m_step * m_dT) % m_print == 0)) {
             m_Etot = m_Epot + m_Ekin;
             PrintStatus();
             m_time_step = 0;
         }
-
+        if (m_rattle && m_rattle_dynamic_tol) {
+            m_aver_rattle_Temp += m_T;
+            m_rattle_counter++;
+            if (m_rattle_counter == m_rattle_dynamic_tol_iter)
+                AdjustRattleTolerance();
+        }
         if (m_impuls > m_T) {
             InitVelocities(m_scale_velo * m_impuls_scaling);
             EKin();
@@ -1187,10 +1224,28 @@ void SimpleMD::start()
         }
     }
     std::ofstream restart_file("curcuma_final.json");
-    restart_file << WriteRestartInformation() << std::endl;
+    nlohmann::json restart;
+    restart[MethodName()[0]] = WriteRestartInformation();
+    restart_file << restart << std::endl;
     if (aborted == false)
         std::remove("curcuma_restart.json");
     delete[] gradient;
+}
+
+void SimpleMD::AdjustRattleTolerance()
+{
+    m_aver_rattle_Temp /= double(m_rattle_counter);
+
+    // std::pair<double, double> pair(m_rattle_tolerance, m_aver_Temp);
+
+    if (m_aver_rattle_Temp > m_T0)
+        m_rattle_tolerance -= 0.01;
+    else if (m_aver_rattle_Temp < m_T0)
+        m_rattle_tolerance += 0.01;
+    std::cout << m_rattle_counter << " " << m_aver_rattle_Temp << " " << m_rattle_tolerance << std::endl;
+    m_rattle_tolerance = std::abs(m_rattle_tolerance);
+    m_rattle_counter = 0;
+    m_aver_rattle_Temp = 0;
 }
 
 void SimpleMD::Verlet(double* grad)
@@ -1254,7 +1309,7 @@ void SimpleMD::Verlet(double* grad)
     }
     ekin *= 0.5;
     double T = 2.0 * ekin / (kb_Eh * m_dof);
-    m_unstable = T > 10000 * m_T;
+    m_unstable = T > 10000 * m_T || std::isnan(T);
     m_T = T;
     m_Ekin = ekin;
     ThermostatFunction();
@@ -1275,6 +1330,7 @@ void SimpleMD::Rattle(double* grad)
      * like dT^3 -> dT^2 and
      * updated velocities of the second atom (minus instead of plus)
      */
+    TriggerWriteRestart();
     double* coord = new double[3 * m_natoms];
     double m_dT_inverse = 1 / m_dT;
     std::vector<int> moved(m_natoms, 0);
@@ -1301,8 +1357,7 @@ void SimpleMD::Rattle(double* grad)
                 + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
                 + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
 
-            if (std::abs(distance - distance_current) > 2 * m_rattle_tolerance * distance) {
-                active++;
+            if (std::abs(distance - distance_current) > m_rattle_tolerance) {
                 move = true;
                 double r = distance - distance_current;
                 double dx = m_current_geometry[3 * i + 0] - m_current_geometry[3 * j + 0];
@@ -1315,6 +1370,7 @@ void SimpleMD::Rattle(double* grad)
                 if (scalarproduct >= m_rattle_tolerance * distance) {
                     moved[i] = 1;
                     moved[j] = 1;
+                    active++;
 
                     double lambda = r / (1 * (m_rmass[i] + m_rmass[j]) * scalarproduct);
                     while (std::abs(lambda) > max_mu)
@@ -1339,6 +1395,13 @@ void SimpleMD::Rattle(double* grad)
         }
         if (active == 0)
             break;
+    }
+    if (iter >= m_rattle_maxiter) {
+        std::cout << "numeric difficulties - 1st step in rattle velocity verlet" << std::endl;
+        std::ofstream restart_file("unstable_curcuma_" + std::to_string(m_currentStep) + ".json");
+        nlohmann::json restart;
+        restart[MethodName()[0]] = WriteRestartInformation();
+        restart_file << restart << std::endl;
     }
     double ekin = 0;
 
@@ -1397,6 +1460,7 @@ void SimpleMD::Rattle(double* grad)
     ekin = 0.0;
     while (iter < m_rattle_maxiter) {
         iter++;
+        int active = 0;
         for (auto bond : m_bond_constrained) {
             int i = bond.first.first, j = bond.first.second;
             if (moved[i] == 1 && moved[j] == 1) {
@@ -1414,7 +1478,8 @@ void SimpleMD::Rattle(double* grad)
                 double mu = -1 * r / ((m_rmass[i] + m_rmass[j]) * distance);
                 while (std::abs(mu) > max_mu)
                     mu /= 2;
-                if (std::abs(mu) > m_rattle_tolerance && std::abs(mu) < max_mu) {
+                if (std::abs(mu) > m_rattle_tolerance) {
+                    active = 1;
                     m_virial_correction += mu * distance;
                     m_velocities[3 * i + 0] += dx * mu * m_rmass[i];
                     m_velocities[3 * i + 1] += dy * mu * m_rmass[i];
@@ -1426,7 +1491,18 @@ void SimpleMD::Rattle(double* grad)
                 }
             }
         }
+        if (active == 0)
+            break;
     }
+
+    if (iter >= m_rattle_maxiter) {
+        std::cout << "numeric difficulties - 2nd in rattle velocity verlet" << iter << std::endl;
+        std::ofstream restart_file("unstable_curcuma_" + std::to_string(m_currentStep) + ".json");
+        nlohmann::json restart;
+        restart[MethodName()[0]] = WriteRestartInformation();
+        restart_file << restart << std::endl;
+    }
+
     if (move)
         RemoveRotations(m_velocities);
 
@@ -1436,7 +1512,7 @@ void SimpleMD::Rattle(double* grad)
     }
     ekin *= 0.5;
     double T = 2.0 * ekin / (kb_Eh * m_dof);
-    m_unstable = T > 10000 * m_T;
+    m_unstable = T > 10000 * m_T || std::isnan(T);
     m_T = T;
     ThermostatFunction();
     EKin();
