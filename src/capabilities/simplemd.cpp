@@ -324,8 +324,8 @@ bool SimpleMD::Initialise()
             throw 404;
         }
         LoadRestartInformation(md);
-        m_restart = true;
-    } else if (!m_norestart)
+
+    } else if (!m_restart)
         LoadRestartInformation();
 
     if (m_molecule.AtomCount() == 0)
@@ -1115,12 +1115,46 @@ void SimpleMD::start()
             }
         }
 
-/////////// Dipole calc
 
+        /////////// Dipole calc
+        //def scaling coefficient
+        std::vector<double> dipole_scale;
+        //set coefficients some values
+        for (auto i = 0; i < m_natoms; i++) {
+            dipole_scale.push_back(1);
+        }
+        dipole_scale = {-0.0850725,1.2296, -0.490071,-0.389245,-0.41952,0.853822,-0.0850725,1.2296, -0.490071,-0.389245,-0.41952,0.853822};
 
+        json blob;
+        //calc partialCharge with gnf2-xtb
+        EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb
+        interface.setMolecule(m_molecule); // set molecule for calc
+        interface.CalculateEnergy(false, true); // calc energy and charges and dipole moment
+        m_molecule.setPartialCharges(interface.Charges()); // calc Partial Charges and give it to mol
+        m_molecule.setDipole(interface.Dipole()*au);
 
+        //calc Dipoles from partial Charges and Scaling
+        auto dipoles = m_molecule.CalculateDipoleMoments(dipole_scale);
+        int i=0;
+        Position dipole_sum = {0,0,0};
+        for (auto dipole : dipoles) {
+            //Calc Dipole of System from fragments
+            dipole_sum[0] += dipole[0];
+            dipole_sum[1] += dipole[1];
+            dipole_sum[2] += dipole[2];
 
-/////////// Dipole calc
+            std::cout  << "Dipole (Fragment" << i <<  "): "
+                               << dipole[0]  << " "
+                               << dipole[1]  << " "
+                               << dipole[2]  << " D = "
+                               << dipole.norm() << " "
+                               << std::endl;
+            i++;
+        }
+        std::cout << "Dipole Sum: " << dipole_sum.norm() << " XTB2-Dipol: " << m_molecule.getDipole().norm() << std::endl;
+
+        /////////// Dipole calc
+
         if (m_step % m_dump == 0) {
             bool write = WriteGeometry();
             if (write) {
@@ -2084,7 +2118,7 @@ void SimpleMD::CSVR()
     static std::default_random_engine rd{};
     static std::mt19937 gen{ rd() };
     static std::normal_distribution<> d{ 0, 1 };
-    static std::chi_squared_distribution<float> dchi{ m_dof };
+    static std::chi_squared_distribution<float> dchi{ static_cast<float>(m_dof) };
 
     double R = d(gen);
     double SNf = dchi(gen);

@@ -704,6 +704,7 @@ Molecule Molecule::getFragmentMolecule(int fragment) const
     for (auto atom : atoms) {
         result.addPair(Atom(atom));
     }
+    //result.setPartialCharges(m_charges[atoms]);
     return result;
 }
 Geometry Molecule::getGeometry(bool protons) const

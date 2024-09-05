@@ -1,5 +1,5 @@
 /*
- * <Simple MD Module for Cucuma. >
+ * <Simple MD Module for Curcuma. >
  * Copyright (C) 2023 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
