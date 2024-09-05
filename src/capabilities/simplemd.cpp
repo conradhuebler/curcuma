@@ -73,6 +73,7 @@ void SimpleMD::LoadControlJson()
     m_T0 = Json2KeyWord<double>(m_defaults, "T");
     m_rmrottrans = Json2KeyWord<int>(m_defaults, "rmrottrans");
     m_nocenter = Json2KeyWord<bool>(m_defaults, "nocenter");
+    m_COM = Json2KeyWord<bool>(m_defaults, "COM");
     m_dump = Json2KeyWord<int>(m_defaults, "dump");
     m_print = Json2KeyWord<int>(m_defaults, "print");
     m_max_top_diff = Json2KeyWord<int>(m_defaults, "MaxTopoDiff");
@@ -219,7 +220,7 @@ bool SimpleMD::Initialise()
     m_molecule.setCharge(0);
     if (!m_nocenter) {
         std::cout << "Move stucture to the origin ... " << std::endl;
-        m_molecule.setGeometry(GeometryTools::TranslateGeometry(m_molecule.getGeometry(), GeometryTools::Centroid(m_molecule.getGeometry()), Position{ 0, 0, 0 }));
+        m_molecule.Center(m_COM);
     } else
         std::cout << "Move stucture NOT to the origin ... " << std::endl;
 
@@ -427,6 +428,7 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["gradient"] = Tools::DoubleVector2String(m_gradient);
     restart["rmrottrans"] = m_rmrottrans;
     restart["nocenter"] = m_nocenter;
+    restart["COM"] = m_COM;
     restart["average_T"] = m_aver_Temp;
     restart["average_Epot"] = m_aver_Epot;
     restart["average_Ekin"] = m_aver_Ekin;
@@ -498,6 +500,10 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     }
     try {
         m_nocenter = state["nocenter"];
+    } catch (json::type_error& e) {
+    }
+    try {
+        m_COM = state["COM"];
     } catch (json::type_error& e) {
     }
     try {
@@ -719,7 +725,11 @@ void SimpleMD::start()
             }
         }
 #endif
+/////////// Dipole calc
 
+
+
+/////////// Dipole calc
         if (m_step % m_dump == 0) {
             bool write = WriteGeometry();
             if (write) {

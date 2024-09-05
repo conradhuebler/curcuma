@@ -45,6 +45,7 @@ static json CurcumaMDJson{
     { "Spin", 0 },
     { "rmrottrans", 0 },
     { "nocenter", false },
+    { "COM", false },
     { "dump", 50 },
     { "print", 1000 },
     { "unique", false },
@@ -193,6 +194,7 @@ private:
     bool m_initialised = false, m_restart = false, m_writeUnique = true, m_opt = false, m_rescue = false, m_writeXYZ = true, m_writeinit = false, m_norestart = false;
     int m_rmrottrans = 0, m_rattle_maxiter = 100;
     bool m_nocenter = false;
+    bool m_COM = false;
     EnergyCalculator* m_interface;
     RMSDTraj* m_unqiue;
     const std::vector<double> m_used_mass;
