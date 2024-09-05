@@ -6,15 +6,15 @@
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
- * 
+ *
  */
 
 #pragma once
@@ -101,6 +101,8 @@ class Molecule
     void setXYZComment(const std::string& comment);
 
     bool addPair(const std::pair<int, Position>& atom);
+    inline bool addAtom(const std::pair<int, Position>& atom){ return addPair(atom); }
+
     bool Contains(const std::pair<int, Position>& atom);
 
     std::vector<double> GetBox() const;
@@ -108,7 +110,7 @@ class Molecule
     Molecule getFragmentMolecule(int fragment) const;
 
     double CalculateDistance(int i, int j) const;
-    std::pair<double, double> GyrationRadius(bool hydrogen = true, int fragment = -1);
+    std::pair<double, double> GyrationRadius(double hmass = 1, bool hydrogen = true, int fragment = -1);
 
     /*! \brief Methode to get the geometry of the molecule as array of vectors
      *
@@ -144,12 +146,14 @@ class Molecule
      * @return array of the atomnumber
      */
     std::vector<int> Atoms() const { return m_atoms; }
+    std::vector<int> FragString2Indicies(const std::string& string) const;
 
     /*! \brief Methode to get atom number and XYZ from index
      *
      * @param i: index of the atom
      * @return pair of atom number and the xyz position
      */
+
     std::pair<int, Position> Atom(int i) const;
 
     void writeXYZFile(const std::string& filename) const;
@@ -264,12 +268,13 @@ class Molecule
 
     inline std::vector<double> getPartialCharges() const { return m_charges; }
 
-    void setDipole(const Position& dipole) {m_dipole = dipole; }
+    void setDipole(const Position& dipole) { m_dipole = dipole; }
 
     inline Position getDipole() const { return m_dipole; }
 
     inline std::vector<std::pair<int, int>> Bonds() const { return m_bonds; }
 
+    inline void addBorderPoint(const Position& point) { m_borders.push_back(point); }
 
 private:
     void ParseString(const std::string& internal, std::vector<std::string>& elements);
@@ -294,7 +299,7 @@ private:
     Geometry m_geometry;
     std::vector<int> m_atoms;
     std::vector<double> m_charges;
-
+    std::vector<Position> m_borders;
     std::vector<int> m_connect_mass;
     Matrix m_HydrogenBondMap;
     Eigen::MatrixXd m_persistentImage, m_alignmentAxes;

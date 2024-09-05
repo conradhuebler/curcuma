@@ -174,11 +174,11 @@ int main(int argc, char **argv) {
                   << "-rmsdtraj    * Find unique structures                                     *" << std::endl
                   << "-distance    * Calculate distance matrix                                  *" << std::endl
                   << "-reorder     * Write molecule file with randomly reordered indices        *" << std::endl
-                  << "-centroid    * Calculate centroid of specific atoms/fragments             *" << std::endl;
+                  << "-centroid    * Calculate centroid of specific atoms/fragments             *" << std::endl
+                  << "-strip       * Skip frames in trajectories                                *" << std::endl;
+
         exit(1);
-    }
-    else
-    {
+    } else {
         json controller = CLI2Json(argc, argv);
 
         if(strcmp(argv[1], "-rmsd") == 0)
@@ -234,6 +234,7 @@ int main(int argc, char **argv) {
             driver->TargetReorderd().writeXYZFile(tarfile + ".reordered.xyz");
 
             std::cout << Tools::Vector2String(driver->ReorderRules()) << std::endl;
+            std::cout << driver->Gradient() << std::endl;
             delete driver;
             exit(0);
 
@@ -251,8 +252,7 @@ int main(int argc, char **argv) {
             docking->start();
 
         } else if (strcmp(argv[1], "-hbonds") == 0) {
-            if(argc < 6)
-            {
+            if (argc < 6) {
                 std::cerr << "Please use curcuma for hydrogen bond analysis as follows\ncurcuma -hbonds A.xyz index_donor index_proton index_acceptor" << std::endl;
                 return -1;
             }
@@ -263,12 +263,12 @@ int main(int argc, char **argv) {
                     if (std::string(argv[1]).find("-hbonds") != std::string::npos) {
                         Distance(mol, argv);
                     }
-                }   else {
+                } else {
                     mol.print_geom();
                     std::cout << std::endl
                               << std::endl;
                     std::cout << mol.getGeometry() << std::endl;
-                    }
+                }
             }
         } else if (strcmp(argv[1], "-confscan") == 0) {
             if (argc < 3) {
@@ -891,11 +891,19 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[1], "-gyration") == 0) {
             FileIterator file(argv[2]);
             int count = 1;
-            double sum = 0, sum_mass = 0, sqrt_sum = 0, sqrt_sum_mass = 0;
+            double sum = 0, sum_mass = 0, sqrt_sum = 0, sqrt_sum_mass = 0, hmass = 1;
+            for (std::size_t i = 2; i < argc; ++i) {
 
+                if (strcmp(argv[i], "-hmass") == 0) {
+                    if (i + 1 < argc)
+                        hmass = std::stoi(argv[i + 1]);
+                }
+            }
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
-                std::pair<double, double> gyr = mol.GyrationRadius();
+                std::pair<double, double> gyr = mol.GyrationRadius(hmass);
+                if (std::isnan(gyr.first) || std::isnan(gyr.second))
+                    continue;
                 sum += gyr.first;
                 sum_mass += gyr.second;
                 sqrt_sum += sqrt(gyr.first);
@@ -911,10 +919,10 @@ int main(int argc, char **argv) {
             FileIterator file(argv[2]);
             Position target_dipole;
 
-            double target = 0, threshold = 1e-1, initial = 3, dx = 5e-1; //dec
+            double target = 0, threshold = 1e-1, initial = 3, dx = 5e-1; // dec
             bool target_set = false;
             int maxiter = 10;
-            json blob = controller["dipole"]; //declare blob as json,
+            json blob = controller["dipole"]; // declare blob as json,
             if (blob.contains("target")) {
                 target = blob["target"];
                 target_set = true;
@@ -943,15 +951,17 @@ int main(int argc, char **argv) {
             std::vector<Molecule> conformers;
             Molecule mol;
             while (!file.AtEnd()) { // calculation and output dipole moment
-                mol = file.Next();  // load Molecule
+                mol = file.Next(); // load Molecule
                 mol.Center(false);
-                EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb
-                interface.setMolecule(mol);  // set molecule for calc
-                interface.CalculateEnergy(false, true); //calc energy and charges and dipole moment
+
+                EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb and give
+                interface.setMolecule(mol); // set molecule for calc
+                interface.CalculateEnergy(false, true); // calc energy and charges and dipole moment
+
                 mol.setPartialCharges(interface.Charges()); // calc Partial Charges and give it to mol
-                auto charges = interface.Charges();  //dec and init charges
-                mol.setDipole(interface.Dipole()*au);
-                auto dipole_moment = interface.Dipole()*au; // get dipole moment from gfn2-xtb methode in au
+                auto charges = interface.Charges(); // dec and init charges
+                mol.setDipole(interface.Dipole() * au);
+                auto dipole_moment = interface.Dipole() * au; // get dipole moment from gfn2-xtb methode in au
 
                 /*std::cout << mol.AtomCount() << "\n"
                           << "Dipole  "
@@ -969,10 +979,8 @@ int main(int argc, char **argv) {
                 }
                 std::cout << std::endl;*/
 
-
                 conformers.push_back(mol);
                 mol.appendDipoleFile(file.Basename() + ".dip");
-
 
                 /*if (!target_set) { // calc target if not set
                     target = dipole_moment.norm();
@@ -1023,18 +1031,42 @@ int main(int argc, char **argv) {
                 scaling(i) = 1;
             }
             auto result = OptimiseDipoleScaling(conformers, scaling);
-            std::cout << "LM-Scaler:\n" << result << "\n" << std::endl;
+            std::cout << "LM-Scaler:\n"
+                      << result << "\n"
+                      << std::endl;
 
-            Matrix Theta(mol.AtomCount(),1);
+            Matrix Theta(mol.AtomCount(), 1);
             Theta = DipoleScalingCalculation(conformers);
-            std::cout << "Analytic-Scaler:\n" << Theta << "\n" << std::endl;
+            std::cout << "Analytic-Scaler:\n"
+                      << Theta << "\n"
+                      << std::endl;
 
+        } else if (strcmp(argv[1], "-stride") == 0) {
 
+            if (argc < 4) {
+                std::cerr << "Please use curcuma to center a structure as follows:\ncurcuma -stride trjectory.xyz 100" << std::endl;
+                return 0;
+            }
+            int stride = std::stoi(argv[3]);
+
+            FileIterator file(argv[2]);
+            int index = 1;
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                if (index % stride == 0)
+                    mol.appendXYZFile(std::string("blob.xyz"));
+                index++;
+            }
         } else {
             bool centered = false;
+            bool hmass = 1;
             for (std::size_t i = 2; i < argc; ++i) {
                 if (strcmp(argv[i], "-center") == 0) {
                     centered = true;
+                }
+                if (strcmp(argv[i], "-hmass") == 0) {
+                    if (i + 1 < argc)
+                        hmass = std::stoi(argv[i + 1]);
                 }
             }
 
@@ -1042,6 +1074,7 @@ int main(int argc, char **argv) {
             while (!file.AtEnd()) {
                 Molecule mol = file.Next();
                 mol.setScaling(1.2);
+
                 mol.CalculateRotationalConstants();
                 if (centered)
                     mol.setGeometry(GeometryTools::TranslateGeometry(mol.getGeometry(), GeometryTools::Centroid(mol.getGeometry()), Position{ 0, 0, 0 }));
@@ -1051,7 +1084,16 @@ int main(int argc, char **argv) {
                 std::cout << mol.Check() << std::endl
                           << std::endl;
                 std::cout << mol.COM().transpose() << std::endl;
-                std::cout << mol.GyrationRadius().first << " " << mol.GyrationRadius().second << " " << sqrt(mol.GyrationRadius().first) << " " << sqrt(mol.GyrationRadius().second) << std::endl;
+                std::cout << mol.GyrationRadius(hmass).first << " " << mol.GyrationRadius(hmass).second << " " << sqrt(mol.GyrationRadius(hmass).first) << " " << sqrt(mol.GyrationRadius(hmass).second) << std::endl;
+                /*
+                if (argc >= 3) {
+                    std::string tests = argv[2];
+                    auto indices = mol.FragString2Indicies(tests);
+                    for (auto i : indices)
+                        std::cout << i << " ";
+                    std::cout << std::endl;
+                }
+                */
             }
         }
     }

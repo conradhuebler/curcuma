@@ -35,7 +35,11 @@ HessianThread::HessianThread(const json& controller, int i, int j, int xi, int x
 {
     setAutoDelete(true);
     m_method = m_controller["method"];
-    if (m_fullnumerical)
+    if (i == j && xi == i && xj == i && i == 0)
+        m_schema = [this]() {
+            this->Threaded();
+        };
+    else if (m_fullnumerical)
         m_schema = [this, i, j, xi, xj]() {
             this->Numerical();
         };
@@ -80,8 +84,8 @@ void HessianThread::Numerical()
     m_geom_im_jm(m_j, m_xj) -= m_d;
 
     EnergyCalculator energy(m_method, m_controller);
-    energy.setMolecule(m_molecule);
     energy.setParameter(m_parameter);
+    energy.setMolecule(m_molecule);
 
     double d2 = 1 / (4 * m_d * m_d);
 
@@ -104,11 +108,9 @@ void HessianThread::Seminumerical()
     m_geom_im_jp = m_molecule.Coords();
 
     m_geom_ip_jp(m_i, m_xi) += m_d;
-    // std::cout << m_controller << std::endl;
-
     EnergyCalculator energy(m_method, m_controller);
-    energy.setMolecule(m_molecule);
     energy.setParameter(m_parameter);
+    energy.setMolecule(m_molecule);
 
     energy.updateGeometry(m_geom_ip_jp);
     energy.CalculateEnergy(true, false);
@@ -122,14 +124,52 @@ void HessianThread::Seminumerical()
     m_gradient = (gradientp - gradientm) / (2 * m_d);
 }
 
+void HessianThread::Threaded()
+{
+    m_hessian = Eigen::MatrixXd::Zero(3 * m_molecule.AtomCount(), 3 * m_molecule.AtomCount());
+
+    EnergyCalculator energy(m_method, m_controller);
+    // std::cout << m_method << m_controller << std::endl;
+    energy.setParameter(m_parameter);
+    energy.setMolecule(m_molecule);
+    for (int i : m_atoms) {
+        for (int xi = 0; xi < 3; ++xi) {
+
+            m_geom_ip_jp = m_molecule.Coords();
+            m_geom_im_jp = m_molecule.Coords();
+            m_geom_ip_jp(i, xi) += m_d;
+
+            energy.updateGeometry(m_geom_ip_jp);
+            energy.CalculateEnergy(true, false);
+            Matrix gradientp = energy.Gradient();
+
+            m_geom_im_jp(i, xi) -= m_d;
+
+            energy.updateGeometry(m_geom_im_jp);
+            energy.CalculateEnergy(true, false);
+            Matrix gradientm = energy.Gradient();
+            m_gradient = (gradientp - gradientm) / (2 * m_d);
+
+            for (int j = 0; j < m_gradient.rows(); ++j) {
+                for (int k = 0; k < m_gradient.cols(); ++k) {
+                    m_hessian(3 * i + xi, 3 * j + k) = m_gradient(j, k);
+                }
+            }
+        }
+    }
+    // std::cout << "intermediate hessians" << std::endl;
+    // std::cout << std::endl << m_hessian << std::endl << std::endl;
+}
+
 Hessian::Hessian(const std::string& method, const json& controller, bool silent)
     : CurcumaMethod(HessianJson, controller, silent)
-    , m_method(method)
-    , m_controller(controller)
-
 {
+    // std::cout << controller << std::endl;
     UpdateController(controller);
-    m_threads = m_defaults["threads"];
+    m_controller = MergeJson(m_defaults, controller);
+    // std::cout << m_defaults << m_controller << std::endl;
+    // std::cout << m_controller["threads"] << "  " <<  controller["threads"]  << "  " << m_defaults["threads"] << std::endl;
+    m_threads = m_controller["threads"];
     /* Yeah, thats not really correct, but it works a bit */
     if (m_method.compare("uff") == 0) {
         m_scale_functions = [](double val) -> double {
@@ -140,14 +180,17 @@ Hessian::Hessian(const std::string& method, const json& controller, bool silent)
             return val * 5150.4 + 47.349;
         };
     }
+    m_method = method;
 }
 
 Hessian::Hessian(const json& controller, bool silent)
     : CurcumaMethod(HessianJson, controller, silent)
-    , m_controller(controller)
 {
     UpdateController(controller);
-    m_threads = m_defaults["threads"];
+    m_controller = MergeJson(m_defaults, controller);
+
+    // std::cout << m_defaults << m_controller << std::endl;
+    m_threads = m_controller["threads"];
 
     /* Yeah, thats not really correct, but it works a bit */
     if (m_method.compare("uff") == 0) {
@@ -160,37 +203,55 @@ Hessian::Hessian(const json& controller, bool silent)
         };
     }
 }
-
+Hessian::~Hessian()
+{
+}
 void Hessian::LoadControlJson()
 {
-    m_hess_calc = Json2KeyWord<bool>(m_defaults, "hess_calc");
-    m_write_file = Json2KeyWord<std::string>(m_defaults, "hess_write_file");
-    m_hess_read = Json2KeyWord<bool>(m_defaults, "hess_read");
-    m_read_file = Json2KeyWord<std::string>(m_defaults, "hess_read_file");
-    m_read_xyz = Json2KeyWord<std::string>(m_defaults, "hess_read_xyz");
+    m_controller = MergeJson(m_defaults, m_controller);
+    m_hess_calc = Json2KeyWord<bool>(m_controller, "hess_calc");
+    m_write_file = Json2KeyWord<std::string>(m_controller, "hess_write_file");
+    m_hess_read = Json2KeyWord<bool>(m_controller, "hess_read");
+    m_read_file = Json2KeyWord<std::string>(m_controller, "hess_read_file");
+    m_read_xyz = Json2KeyWord<std::string>(m_controller, "hess_read_xyz");
 
-    m_write_file = Json2KeyWord<std::string>(m_defaults, "hess_write_file");
+    m_write_file = Json2KeyWord<std::string>(m_controller, "hess_write_file");
     if (m_hess_read) {
         m_hess_calc = false;
     }
 
-    m_freq_scale = Json2KeyWord<double>(m_defaults, "freq_scale");
-    m_thermo = Json2KeyWord<double>(m_defaults, "thermo");
-    m_freq_cutoff = Json2KeyWord<double>(m_defaults, "freq_cutoff");
-    m_hess = Json2KeyWord<int>(m_defaults, "hess");
-    m_method = Json2KeyWord<std::string>(m_defaults, "method");
-    m_threads = Json2KeyWord<int>(m_defaults, "threads");
+    m_freq_scale = Json2KeyWord<double>(m_controller, "freq_scale");
+    m_thermo = Json2KeyWord<double>(m_controller, "thermo");
+    m_freq_cutoff = Json2KeyWord<double>(m_controller, "freq_cutoff");
+    m_hess = Json2KeyWord<int>(m_controller, "hess");
+    m_method = Json2KeyWord<std::string>(m_controller, "method");
+    // m_threads = Json2KeyWord<int>(m_controller, "threads");
+    m_threads = m_controller["threads"];
 }
 
 void Hessian::setMolecule(const Molecule& molecule)
 {
     m_molecule = molecule;
+    m_atoms_j.resize(m_molecule.AtomCount());
+    m_atoms_i.resize(m_molecule.AtomCount());
+
+    for (int i = 0; i < m_molecule.AtomCount(); ++i) {
+        m_atoms_i[i] = i;
+        m_atoms_j[i] = i;
+    }
 }
 
 void Hessian::LoadMolecule(const std::string& file)
 {
     m_molecule = Files::LoadFile(file);
     m_atom_count = m_molecule.AtomCount();
+    m_atoms_j.resize(m_atom_count);
+    m_atoms_i.resize(m_atom_count);
+
+    for (int i = 0; i < m_atom_count; ++i) {
+        m_atoms_i[i] = i;
+        m_atoms_j[i] = i;
+    }
 }
 
 void Hessian::LoadHessian(const std::string& file)
@@ -222,10 +283,13 @@ void Hessian::LoadHessian(const std::string& file)
 void Hessian::start()
 {
     if (m_hess_calc) {
+
         if (m_hess == 1) {
-            CalculateHessianSemiNumerical();
-        } else {
+            CalculateHessianThreaded();
+        } else if (m_hess == 2) {
             CalculateHessianNumerical();
+        } else {
+            CalculateHessianSemiNumerical();
         }
     } else {
         LoadMolecule(m_read_xyz);
@@ -345,6 +409,65 @@ void Hessian::PrintVibrations(Vector& eigenvalues, const Vector& projected)
     std::cout << std::endl;
 }
 
+void Hessian::CalculateHessianThreaded()
+{
+    m_hessian = Eigen::MatrixXd::Zero(3 * m_molecule.AtomCount(), 3 * m_molecule.AtomCount());
+
+    CxxThreadPool* pool = new CxxThreadPool;
+    pool->setActiveThreadCount(m_threads);
+    if (m_silent)
+        pool->setProgressBar(CxxThreadPool::ProgressBarType::None);
+    else
+        std::cout << "Starting Hessian" << std::endl;
+
+    std::vector<int> atoms;
+    if (m_threads > m_molecule.AtomCount())
+        m_threads = m_molecule.AtomCount();
+    if (m_method.compare("gfnff") == 0) {
+        m_threads = 1;
+        std::cout << "GFN-FF enforces single thread approach" << std::endl;
+    }
+    std::vector<std::vector<int>> threads(m_threads);
+
+    for (int i = 0; i < m_molecule.AtomCount(); ++i) {
+        atoms.push_back(i);
+        threads[i % m_threads].push_back(i);
+    }
+
+    for (int i = 0; i < threads.size(); ++i) {
+        HessianThread* thread = new HessianThread(m_controller, 0, 0, 0, 0, true);
+        thread->setMethod(m_method);
+        thread->setMolecule(m_molecule);
+        thread->setParameter(m_parameter);
+        thread->setIndices(threads[i]);
+        pool->addThread(thread);
+    }
+
+    pool->StaticPool();
+    pool->StartAndWait();
+    int i = 0;
+    for (auto* t : pool->Finished()) {
+        HessianThread* thread = static_cast<HessianThread*>(t);
+        m_hessian += thread->getHessian();
+        ++i;
+    }
+
+    delete pool;
+
+    for (int i = 0; i < m_molecule.AtomCount(); ++i) {
+        for (int j = 0; j < m_molecule.AtomCount(); ++j) {
+            double mass = 1 / sqrt(Elements::AtomicMass[m_molecule.Atoms()[i]] * Elements::AtomicMass[m_molecule.Atoms()[j]]);
+            for (int xi = 0; xi < 3; ++xi) {
+                for (int xj = 0; xj < 3; ++xj) {
+                    double value = (m_hessian(3 * i + xi, 3 * j + xj) + m_hessian(3 * j + xj, 3 * i + xi)) / 2.0;
+                    m_hessian(3 * i + xi, 3 * j + xj) = value;
+                    m_hessian(3 * j + xj, 3 * i + xi) = value;
+                }
+            }
+        }
+    }
+}
+
 void Hessian::CalculateHessianNumerical()
 {
     m_hessian = Eigen::MatrixXd::Ones(3 * m_molecule.AtomCount(), 3 * m_molecule.AtomCount());
@@ -356,8 +479,8 @@ void Hessian::CalculateHessianNumerical()
     else
         std::cout << "Starting Numerical Hessian Calculation" << std::endl;
 
-    for (int i = 0; i < m_molecule.AtomCount(); ++i) {
-        for (int j = 0; j < m_molecule.AtomCount(); ++j) {
+    for (/*const auto i : m_atoms_i */ int i = 0; i < m_molecule.AtomCount(); ++i) {
+        for (/*const auto j : m_atoms_j */ int j = 0; j < m_molecule.AtomCount(); ++j) {
             for (int xi = 0; xi < 3; ++xi)
                 for (int xj = 0; xj < 3; ++xj) {
                     HessianThread* thread = new HessianThread(m_controller, i, j, xi, xj, true);
@@ -373,13 +496,14 @@ void Hessian::CalculateHessianNumerical()
         HessianThread* thread = static_cast<HessianThread*>(t);
         m_hessian(3 * thread->I() + thread->XI(), 3 * thread->J() + thread->XJ()) *= thread->DD();
     }
+    // std::cout << m_hessian << std::endl;
 
     delete pool;
 }
 
 void Hessian::CalculateHessianSemiNumerical()
 {
-    m_hessian = Eigen::MatrixXd::Ones(3 * m_molecule.AtomCount(), 3 * m_molecule.AtomCount());
+    m_hessian = Eigen::MatrixXd::Zero(3 * m_molecule.AtomCount(), 3 * m_molecule.AtomCount());
 
     CxxThreadPool* pool = new CxxThreadPool;
     pool->setActiveThreadCount(m_threads);
@@ -388,7 +512,7 @@ void Hessian::CalculateHessianSemiNumerical()
     else
         std::cout << "Starting Seminumerical Hessian Calculation" << std::endl;
 
-    for (int i = 0; i < m_molecule.AtomCount(); ++i) {
+    for (/*auto int i : m_atoms_i */ int i = 0; i < m_molecule.AtomCount(); ++i) {
         for (int xi = 0; xi < 3; ++xi) {
             HessianThread* thread = new HessianThread(m_controller, i, 0, xi, 0, false);
             thread->setMolecule(m_molecule);

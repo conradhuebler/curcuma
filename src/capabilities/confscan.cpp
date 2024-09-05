@@ -1038,6 +1038,7 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
     rmsd["silent"] = true;
     rmsd["reorder"] = true;
     rmsd["threads"] = 1;
+    rmsd["method"] = m_RMSDmethod;
     std::vector<Molecule*> cached;
     if (reset)
         cached = m_all_structures;

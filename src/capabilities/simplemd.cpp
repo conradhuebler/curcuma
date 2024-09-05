@@ -31,10 +31,12 @@
 #include <time.h>
 
 #include "src/capabilities/curcumaopt.h"
+#include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
 
 #include "src/core/elements.h"
 #include "src/core/energycalculator.h"
+#include "src/core/fileiterator.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
 
@@ -47,6 +49,98 @@
 #endif
 #include "simplemd.h"
 
+BiasThread::BiasThread(const Molecule& reference, const json& rmsdconfig)
+    : m_reference(reference)
+    , m_target(reference)
+{
+    m_driver = RMSDDriver(rmsdconfig, true);
+    m_config = rmsdconfig;
+    setAutoDelete(true);
+    m_current_bias = 0;
+    m_counter = 0;
+    m_atoms = m_reference.AtomCount();
+    m_gradient = Eigen::MatrixXd::Zero(m_reference.AtomCount(), 3);
+}
+
+BiasThread::~BiasThread()
+{
+}
+
+int BiasThread::execute()
+{
+    if (m_biased_structures.size() == 0)
+        return 0;
+    m_current_bias = 0;
+    m_counter = 0;
+    m_driver.setReference(m_reference);
+    m_gradient = Eigen::MatrixXd::Zero(m_reference.AtomCount(), 3);
+
+    for (int i = 0; i < m_biased_structures.size(); ++i) {
+        double factor = 1;
+        m_target.setGeometry(m_biased_structures[i].geometry);
+        m_driver.setTarget(m_target);
+        double rmsd = m_driver.BestFitRMSD();
+        double expr = exp(-rmsd * rmsd * m_alpha);
+        double bias_energy = expr;
+        factor = m_biased_structures[i].factor;
+
+        if (!m_wtmtd)
+            factor = m_biased_structures[i].counter;
+        else
+            factor += (exp(-(m_biased_structures[i].energy) / kb_Eh / m_DT));
+        m_biased_structures[i].factor = factor;
+        if (i == 0) {
+            m_rmsd_reference = rmsd;
+        }
+        if (expr * m_rmsd_econv > 1 * m_biased_structures.size()) {
+            m_biased_structures[i].counter++;
+            m_biased_structures[i].energy += bias_energy;
+        }
+        bias_energy *= factor * m_k;
+
+        m_current_bias += bias_energy;
+
+        std::ofstream colvarfile;
+        colvarfile.open("COLVAR_" + std::to_string(m_biased_structures[i].index), std::iostream::app);
+        colvarfile << m_currentStep << " " << rmsd << " " << bias_energy << " " << m_biased_structures[i].counter << " " << factor << std::endl;
+        colvarfile.close();
+
+        /*
+        std::ofstream hillsfile;
+        if (i == 0) {
+            hillsfile.open("HILLS", std::iostream::app);
+        } else {
+            hillsfile.open("HILLS_" + std::to_string(m_biased_structures[i].index), std::iostream::app);
+        }
+        hillsfile << m_currentStep << " " << rmsd << " " << m_alpha_rmsd << " " << m_k_rmsd << " " << "-1" << std::endl;
+        hillsfile.close();
+        */
+
+        double dEdR = -2 * m_alpha * m_k / m_atoms * exp(-rmsd * rmsd * m_alpha) * factor;
+
+        m_gradient += m_driver.Gradient() * dEdR;
+        m_counter += m_biased_structures[i].counter;
+    }
+    return 1;
+}
+
+std::vector<json> BiasThread::getBias() const
+{
+    std::vector<json> bias(m_biased_structures.size());
+    for (int i = 0; i < m_biased_structures.size(); ++i) {
+        json current;
+        // current["geometry"] = Tools::Matrix2String(m_biased_structures[i].geometry);
+        current["time"] = m_biased_structures[i].time;
+        current["rmsd_reference"] = m_biased_structures[i].rmsd_reference;
+        current["energy"] = m_biased_structures[i].energy;
+        current["factor"] = m_biased_structures[i].factor;
+        current["index"] = m_biased_structures[i].index;
+        current["counter"] = m_biased_structures[i].counter;
+        bias[i] = current;
+    }
+    return bias;
+}
+
 SimpleMD::SimpleMD(const json& controller, bool silent)
     : CurcumaMethod(CurcumaMDJson, controller, silent)
 {
@@ -58,6 +152,7 @@ SimpleMD::~SimpleMD()
 {
     for (int i = 0; i < m_unique_structures.size(); ++i)
         delete m_unique_structures[i];
+    // delete m_bias_pool;
 }
 
 void SimpleMD::LoadControlJson()
@@ -78,6 +173,7 @@ void SimpleMD::LoadControlJson()
     m_print = Json2KeyWord<int>(m_defaults, "print");
     m_max_top_diff = Json2KeyWord<int>(m_defaults, "MaxTopoDiff");
     m_seed = Json2KeyWord<int>(m_defaults, "seed");
+    m_threads = Json2KeyWord<double>(m_defaults, "threads");
 
     m_rmsd = Json2KeyWord<double>(m_defaults, "rmsd");
     m_hmass = Json2KeyWord<double>(m_defaults, "hmass");
@@ -88,9 +184,29 @@ void SimpleMD::LoadControlJson()
     m_opt = Json2KeyWord<bool>(m_defaults, "opt");
     m_scale_velo = Json2KeyWord<double>(m_defaults, "velo");
     m_rescue = Json2KeyWord<bool>(m_defaults, "rescue");
+    m_wall_render = Json2KeyWord<bool>(m_defaults, "wall_render");
     m_coupling = Json2KeyWord<double>(m_defaults, "coupling");
+    m_anderson = Json2KeyWord<double>(m_defaults, "anderson");
+
+    m_threads = Json2KeyWord<double>(m_defaults, "threads");
     if (m_coupling < m_dT)
         m_coupling = m_dT;
+
+    /* RMSD Metadynamik block */
+    /* this one is used to recover https://doi.org/10.1021/acs.jctc.9b00143 */
+    m_rmsd_mtd = Json2KeyWord<bool>(m_defaults, "rmsd_mtd");
+    m_k_rmsd = Json2KeyWord<double>(m_defaults, "k_rmsd");
+    m_alpha_rmsd = Json2KeyWord<double>(m_defaults, "alpha_rmsd");
+    m_mtd_steps = Json2KeyWord<int>(m_defaults, "mtd_steps");
+    m_chain_length = Json2KeyWord<int>(m_defaults, "chainlength");
+    m_rmsd_rmsd = Json2KeyWord<double>(m_defaults, "rmsd_rmsd");
+    m_max_rmsd_N = Json2KeyWord<int>(m_defaults, "max_rmsd_N");
+    m_rmsd_econv = Json2KeyWord<double>(m_defaults, "rmsd_econv");
+    m_rmsd_DT = Json2KeyWord<double>(m_defaults, "rmsd_DT");
+    m_wtmtd = Json2KeyWord<bool>(m_defaults, "wtmtd");
+    m_rmsd_ref_file = Json2KeyWord<std::string>(m_defaults, "rmsd_ref_file");
+    m_rmsd_fix_structure = Json2KeyWord<bool>(m_defaults, "rmsd_fix_structure");
+    m_rmsd_atoms = Json2KeyWord<std::string>(m_defaults, "rmsd_atoms");
 
     m_writerestart = Json2KeyWord<int>(m_defaults, "writerestart");
     m_respa = Json2KeyWord<int>(m_defaults, "respa");
@@ -111,6 +227,9 @@ void SimpleMD::LoadControlJson()
     m_rm_COM = Json2KeyWord<double>(m_defaults, "rm_COM");
     int rattle = Json2KeyWord<int>(m_defaults, "rattle");
     m_rattle_maxiter = Json2KeyWord<int>(m_defaults, "rattle_maxiter");
+    m_rattle_dynamic_tol_iter = Json2KeyWord<int>(m_defaults, "rattle_dynamic_tol_iter");
+    m_rattle_dynamic_tol = Json2KeyWord<bool>(m_defaults, "rattle_dynamic_tol");
+
     if (rattle == 1) {
         Integrator = [=](double* grad) {
             this->Rattle(grad);
@@ -139,11 +258,13 @@ void SimpleMD::LoadControlJson()
 
     if (Json2KeyWord<std::string>(m_defaults, "wall").compare("spheric") == 0) {
         if (Json2KeyWord<std::string>(m_defaults, "wall_type").compare("logfermi") == 0) {
+            m_wall_type = 1;
             WallPotential = [=](double* grad) -> double {
                 this->m_wall_potential = this->ApplySphericLogFermiWalls(grad);
                 return m_wall_potential;
             };
         } else if (Json2KeyWord<std::string>(m_defaults, "wall_type").compare("harmonic") == 0) {
+            m_wall_type = 1;
             WallPotential = [=](double* grad) -> double {
                 this->m_wall_potential = this->ApplySphericHarmonicWalls(grad);
                 return m_wall_potential;
@@ -154,14 +275,15 @@ void SimpleMD::LoadControlJson()
         }
         std::cout << "Setting up spherical potential" << std::endl;
 
-        InitialiseWalls();
     } else if (Json2KeyWord<std::string>(m_defaults, "wall").compare("rect") == 0) {
         if (Json2KeyWord<std::string>(m_defaults, "wall_type").compare("logfermi") == 0) {
+            m_wall_type = 2;
             WallPotential = [=](double* grad) -> double {
                 this->m_wall_potential = this->ApplyRectLogFermiWalls(grad);
                 return m_wall_potential;
             };
         } else if (Json2KeyWord<std::string>(m_defaults, "wall_type").compare("harmonic") == 0) {
+            m_wall_type = 2;
             WallPotential = [=](double* grad) -> double {
                 this->m_wall_potential = this->ApplyRectHarmonicWalls(grad);
                 return m_wall_potential;
@@ -172,8 +294,6 @@ void SimpleMD::LoadControlJson()
             exit(1);
         }
         std::cout << "Setting up rectangular potential" << std::endl;
-
-        InitialiseWalls();
     } else
         WallPotential = [=](double* grad) -> double {
             return 0;
@@ -259,10 +379,9 @@ bool SimpleMD::Initialise()
         m_molecule.setGeometry(molecule.getGeometry());
         m_molecule.appendXYZFile(Basename() + ".opt.xyz");
     }
-
+    double mass = 0;
     for (int i = 0; i < m_natoms; ++i) {
         m_atomtype[i] = m_molecule.Atom(i).first;
-
         if (!m_restart) {
             Position pos = m_molecule.Atom(i).second;
             m_current_geometry[3 * i + 0] = pos(0) / 1;
@@ -273,6 +392,7 @@ bool SimpleMD::Initialise()
             m_mass[3 * i + 0] = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
             m_mass[3 * i + 1] = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
             m_mass[3 * i + 2] = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
+            mass += Elements::AtomicMass[m_atomtype[i]] * m_hmass;
 
             m_rmass[3 * i + 0] = 1 / m_mass[3 * i + 0];
             m_rmass[3 * i + 1] = 1 / m_mass[3 * i + 1];
@@ -281,15 +401,14 @@ bool SimpleMD::Initialise()
             m_mass[3 * i + 0] = Elements::AtomicMass[m_atomtype[i]];
             m_mass[3 * i + 1] = Elements::AtomicMass[m_atomtype[i]];
             m_mass[3 * i + 2] = Elements::AtomicMass[m_atomtype[i]];
+            mass += Elements::AtomicMass[m_atomtype[i]];
 
             m_rmass[3 * i + 0] = 1 / m_mass[3 * i + 0];
             m_rmass[3 * i + 1] = 1 / m_mass[3 * i + 1];
             m_rmass[3 * i + 2] = 1 / m_mass[3 * i + 2];
         }
     }
-    if (!m_restart) {
-        InitVelocities(m_scale_velo);
-    }
+
     m_molecule.setCharge(m_charge);
     m_molecule.setSpin(m_spin);
     m_interface->setMolecule(m_molecule);
@@ -306,6 +425,18 @@ bool SimpleMD::Initialise()
     m_dof = 3 * m_natoms;
 
     InitConstrainedBonds();
+    InitialiseWalls();
+    if (!m_restart) {
+        InitVelocities(m_scale_velo);
+        m_xi.resize(m_chain_length, 0.0);
+        m_Q.resize(m_chain_length, 100); // Setze eine geeignete Masse für jede Kette
+        for (int i = 0; i < m_chain_length; ++i) {
+            m_xi[i] = pow(10.0, double(i)) - 1;
+            m_Q[i] = pow(10, i) * kb_Eh * m_T0 * m_dof * 100;
+            std::cout << m_xi[i] << "  " << m_Q[i] << std::endl;
+        }
+        m_eta = 0.0;
+    }
     if (m_writeinit) {
         json init = WriteRestartInformation();
         std::ofstream result_file;
@@ -313,12 +444,72 @@ bool SimpleMD::Initialise()
         result_file << init;
         result_file.close();
     }
+    /* Initialising MTD RMSD Threads */
+    if (m_rmsd_mtd) {
+        m_bias_pool = new CxxThreadPool;
+        m_bias_pool->setProgressBar(CxxThreadPool::ProgressBarType::None);
+        m_bias_pool->setActiveThreadCount(m_threads);
+        m_molecule.GetFragments();
+        m_rmsd_indicies = m_molecule.FragString2Indicies(m_rmsd_atoms);
+
+        for(auto i : m_rmsd_indicies)
+        {
+            std::cout << i << " ";
+            m_rmsd_mtd_molecule.addPair(m_molecule.Atom(i));
+        }
+        m_rmsd_fragment_count = m_rmsd_mtd_molecule.GetFragments().size();
+
+        json config = RMSDJson;
+        config["silent"] = true;
+        config["reorder"] = false;
+        for (int i = 0; i < m_threads; ++i) {
+            BiasThread* thread = new BiasThread(m_rmsd_mtd_molecule, config);
+            thread->setDT(m_rmsd_DT);
+            thread->setk(m_k_rmsd);
+            thread->setalpha(m_alpha_rmsd);
+            thread->setEnergyConv(m_rmsd_econv);
+            thread->setWTMTD(m_wtmtd);
+            m_bias_threads.push_back(thread);
+            m_bias_pool->addThread(thread);
+        }
+        if (m_restart) {
+            std::cout << "Reading structure files from " << m_rmsd_ref_file << std::endl;
+            for (const auto& i : m_bias_json)
+                std::cout << i << std::endl;
+            FileIterator file(m_rmsd_ref_file);
+            int index = 0;
+            while (!file.AtEnd()) {
+                Molecule mol = file.Next();
+                std::cout << m_bias_json[index] << std::endl;
+                int thread_index = index % m_bias_threads.size();
+                m_bias_threads[thread_index]->addGeometry(mol.getGeometry(), m_bias_json[index]);
+                ++index;
+            }
+            m_bias_structure_count = index;
+        } else {
+            if (m_rmsd_ref_file.compare("none") != 0) {
+                std::cout << "Reading structure files from " << m_rmsd_ref_file << std::endl;
+                int index = 0;
+
+                FileIterator file(m_rmsd_ref_file);
+                while (!file.AtEnd()) {
+                    Molecule mol = file.Next();
+                    int thread_index = index % m_bias_threads.size();
+                    m_bias_threads[thread_index]->addGeometry(mol.getGeometry(), 0, 0, index);
+                    ++index;
+                }
+                m_bias_structure_count = index;
+            }
+        }
+    }
+
     m_initialised = true;
     return true;
 }
 
 void SimpleMD::InitConstrainedBonds()
 {
+
     if (m_rattle) {
         auto m = m_molecule.DistanceMatrix();
         m_topo_initial = m.second;
@@ -339,6 +530,7 @@ void SimpleMD::InitConstrainedBonds()
             }
         }
     }
+
     std::cout << m_dof << " initial degrees of freedom " << std::endl;
     std::cout << m_bond_constrained.size() << " constrains active" << std::endl;
     m_dof -= m_bond_constrained.size();
@@ -347,24 +539,21 @@ void SimpleMD::InitConstrainedBonds()
 
 void SimpleMD::InitVelocities(double scaling)
 {
-    static std::random_device rd{};
-    static std::mt19937 gen{ rd() };
-    std::normal_distribution<> d{ 0, 1 };
-    double Px = 0.0, Py = 0.0, Pz = 0.0;
-    for (int i = 0; i < m_natoms; ++i) {
-        double v0 = sqrt(kb_Eh * m_T0 * amu2au / (m_mass[i])) * scaling / fs2amu;
-        m_velocities[3 * i + 0] = v0 * d(gen);
-        m_velocities[3 * i + 1] = v0 * d(gen);
-        m_velocities[3 * i + 2] = v0 * d(gen);
-        Px += m_velocities[3 * i + 0] * m_mass[i];
-        Py += m_velocities[3 * i + 1] * m_mass[i];
-        Pz += m_velocities[3 * i + 2] * m_mass[i];
+    static std::default_random_engine generator;
+    for (size_t i = 0; i < m_natoms; ++i) {
+        std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 * m_rmass[i]));
+        m_velocities[3 * i + 0] = distribution(generator);
+        m_velocities[3 * i + 1] = distribution(generator);
+        m_velocities[3 * i + 2] = distribution(generator);
     }
-    for (int i = 0; i < m_natoms; ++i) {
-        m_velocities[3 * i + 0] -= Px / (m_mass[i] * m_natoms);
-        m_velocities[3 * i + 1] -= Py / (m_mass[i] * m_natoms);
-        m_velocities[3 * i + 2] -= Pz / (m_mass[i] * m_natoms);
-    }
+    RemoveRotation(m_velocities);
+    EKin();
+    double coupling = m_coupling;
+    m_coupling = m_dT;
+    Berendson();
+    Berendson();
+    EKin();
+    m_coupling = coupling;
 }
 
 void SimpleMD::InitialiseWalls()
@@ -412,6 +601,104 @@ void SimpleMD::InitialiseWalls()
     if (m_wall_spheric_radius < radius) {
         m_wall_spheric_radius = radius + 5;
     }
+    if (m_wall_render) {
+        std::cout << "render walls" << std::endl;
+        if (m_wall_type == 1) {
+            Position x0 = Position{ m_wall_spheric_radius, 0, 0 };
+            Position x1 = Position{ -m_wall_spheric_radius, 0, 0 };
+            Position y0 = Position{ 0, m_wall_spheric_radius, 0 };
+            Position y1 = Position{ 0, -m_wall_spheric_radius, 0 };
+            Position z0 = Position{ 0, 0, m_wall_spheric_radius };
+            Position z1 = Position{ 0, 0, -m_wall_spheric_radius };
+            m_molecule.addBorderPoint(x0);
+            m_molecule.addBorderPoint(x1);
+            m_molecule.addBorderPoint(y0);
+            m_molecule.addBorderPoint(y1);
+            m_molecule.addBorderPoint(z0);
+            m_molecule.addBorderPoint(z1);
+
+            double intermedia = 1 / sqrt(2.0) * m_wall_spheric_radius;
+            x0 = Position{ intermedia, intermedia, 0 };
+            y0 = Position{ 0, intermedia, intermedia };
+            z0 = Position{ intermedia, 0, intermedia };
+
+            m_molecule.addBorderPoint(x0);
+            m_molecule.addBorderPoint(y0);
+            m_molecule.addBorderPoint(z0);
+            x0 = Position{ -intermedia, -intermedia, 0 };
+            y0 = Position{ 0, -intermedia, -intermedia };
+            z0 = Position{ -intermedia, 0, -intermedia };
+            m_molecule.addBorderPoint(x0);
+            m_molecule.addBorderPoint(y0);
+            m_molecule.addBorderPoint(z0);
+            x0 = Position{ -intermedia, intermedia, 0 };
+            y0 = Position{ 0, -intermedia, intermedia };
+            z0 = Position{ -intermedia, 0, intermedia };
+            m_molecule.addBorderPoint(x0);
+            m_molecule.addBorderPoint(y0);
+            m_molecule.addBorderPoint(z0);
+            x0 = Position{ intermedia, -intermedia, 0 };
+            y0 = Position{ 0, intermedia, -intermedia };
+            z0 = Position{ intermedia, 0, -intermedia };
+            m_molecule.addBorderPoint(x0);
+            m_molecule.addBorderPoint(y0);
+            m_molecule.addBorderPoint(z0);
+            intermedia = 1 / sqrt(3.0) * m_wall_spheric_radius;
+
+            x0 = Position{ intermedia, intermedia, intermedia };
+            m_molecule.addBorderPoint(x0);
+            x0 = Position{ -intermedia, intermedia, intermedia };
+            m_molecule.addBorderPoint(x0);
+            x0 = Position{ intermedia, -intermedia, intermedia };
+            m_molecule.addBorderPoint(x0);
+            x0 = Position{ intermedia, intermedia, -intermedia };
+            m_molecule.addBorderPoint(x0);
+            x0 = Position{ -intermedia, intermedia, -intermedia };
+            m_molecule.addBorderPoint(x0);
+            x0 = Position{ intermedia, -intermedia, -intermedia };
+            m_molecule.addBorderPoint(x0);
+            x0 = Position{ -intermedia, -intermedia, intermedia };
+            m_molecule.addBorderPoint(x0);
+            x0 = Position{ -intermedia, -intermedia, -intermedia };
+            m_molecule.addBorderPoint(x0);
+        } else if (m_wall_type == 2) {
+            Position x0 = Position{ m_wall_x_min, 0, 0 };
+            Position x1 = Position{ m_wall_x_max, 0, 0 };
+            Position y0 = Position{ 0, m_wall_y_min, 0 };
+            Position y1 = Position{ 0, m_wall_y_max, 0 };
+            Position z0 = Position{ 0, 0, m_wall_z_min };
+            Position z1 = Position{ 0, 0, m_wall_z_max };
+
+            m_molecule.addBorderPoint(x0);
+            m_molecule.addBorderPoint(x1);
+            m_molecule.addBorderPoint(y0);
+            m_molecule.addBorderPoint(y1);
+            m_molecule.addBorderPoint(z0);
+            m_molecule.addBorderPoint(z1);
+
+            x0 = Position{ m_wall_x_min, m_wall_y_min, 0 };
+            x1 = Position{ m_wall_x_max, m_wall_y_max, 0 };
+            y0 = Position{ m_wall_x_min, 0, m_wall_z_min };
+            y1 = Position{ m_wall_x_max, 0, m_wall_z_min };
+            z0 = Position{ 0, m_wall_y_min, m_wall_z_min };
+            z1 = Position{ 0, m_wall_y_max, m_wall_z_max };
+
+            m_molecule.addBorderPoint(x0);
+            m_molecule.addBorderPoint(x1);
+            m_molecule.addBorderPoint(y0);
+            m_molecule.addBorderPoint(y1);
+            m_molecule.addBorderPoint(z0);
+            m_molecule.addBorderPoint(z1);
+
+            x0 = Position{ m_wall_x_min, m_wall_y_min, m_wall_z_min };
+            m_molecule.addBorderPoint(x0);
+        }
+    }
+    std::cout << "Setting up potential walls " << std::endl;
+    std::cout << "Radius " << m_wall_spheric_radius << std::endl;
+    std::cout << "x-range " << m_wall_x_min << " ... " << m_wall_x_max << std::endl;
+    std::cout << "y-range " << m_wall_y_min << " ... " << m_wall_y_max << std::endl;
+    std::cout << "z-range " << m_wall_z_min << " ... " << m_wall_z_max << std::endl;
 }
 
 nlohmann::json SimpleMD::WriteRestartInformation()
@@ -436,6 +723,11 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["average_Virial"] = m_average_virial_correction;
     restart["average_Wall"] = m_average_wall_potential;
 
+    restart["rattle"] = m_rattle;
+    restart["rattle_maxiter"] = m_rattle_maxiter;
+    restart["rattle_dynamic_tol"] = m_rattle_tolerance;
+    restart["rattle_dynamic_tol_iter"] = m_rattle_dynamic_tol_iter;
+
     restart["coupling"] = m_coupling;
     restart["MaxTopoDiff"] = m_max_top_diff;
     restart["impuls"] = m_impuls;
@@ -443,7 +735,34 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["respa"] = m_respa;
     restart["rm_COM"] = m_rm_COM;
     restart["mtd"] = m_mtd;
+    restart["rmsd_mtd"] = m_rmsd_mtd;
+    restart["chainlength"] = m_chain_length;
+    restart["eta"] = m_eta;
+    restart["xi"] = Tools::DoubleVector2String(m_xi);
+    restart["Q"] = Tools::DoubleVector2String(m_Q);
 
+    if (m_rmsd_mtd) {
+        restart["k_rmsd"] = m_k_rmsd;
+        restart["alpha_rmsd"] = m_alpha_rmsd;
+        restart["mtd_steps"] = m_mtd_steps;
+        restart["rmsd_econv"] = m_rmsd_econv;
+        restart["wtmtd"] = m_wtmtd;
+        restart["rmsd_DT"] = m_rmsd_DT;
+        restart["rmsd_ref_file"] = Basename() + ".mtd.xyz";
+        restart["counter"] = m_bias_structure_count;
+        restart["rmsd_atoms"] = m_rmsd_atoms;
+        std::vector<json> bias(m_bias_structure_count);
+        for (int i = 0; i < m_bias_threads.size(); ++i) {
+            for (const auto& stored_bias : m_bias_threads[i]->getBias()) {
+                bias[stored_bias["index"]] = stored_bias;
+            }
+        }
+        json bias_restart;
+        for (int i = 0; i < bias.size(); ++i) {
+            bias_restart[i] = bias[i];
+        }
+        restart["bias"] = bias_restart;
+    }
     return restart;
 };
 
@@ -480,7 +799,7 @@ bool SimpleMD::LoadRestartInformation()
 
 bool SimpleMD::LoadRestartInformation(const json& state)
 {
-    std::string geometry, velocities, constrains;
+    std::string geometry, velocities, constrains, xi, Q;
 
     try {
         m_method = state["method"];
@@ -555,6 +874,11 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     }
 
     try {
+        m_eta = state["eta"];
+    } catch (json::type_error& e) {
+    }
+
+    try {
         m_thermostat = state["thermostat"];
     } catch (json::type_error& e) {
     }
@@ -568,12 +892,76 @@ bool SimpleMD::LoadRestartInformation(const json& state)
         velocities = state["velocities"];
     } catch (json::type_error& e) {
     }
+
+    try {
+        xi = state["xi"];
+    } catch (json::type_error& e) {
+    }
+    try {
+        Q = state["Q"];
+    } catch (json::type_error& e) {
+    }
+
+    try {
+        m_mtd = state["mtd"];
+    } catch (json::type_error& e) {
+    }
+
+    try {
+        m_rattle = state["rattle"];
+    } catch (json::type_error& e) {
+    }
+
+    try {
+        m_rattle_tolerance = state["rattle_tolerance"];
+    } catch (json::type_error& e) {
+    }
+
+    try {
+        m_rattle_maxiter = state["rattle_maxiter"];
+    } catch (json::type_error& e) {
+    }
+
+    try {
+        m_rattle_dynamic_tol = state["rattle_dynamic_tol"];
+    } catch (json::type_error& e) {
+    }
+
+    try {
+        m_rattle_dynamic_tol_iter = state["rattle_dynamic_tol_iter"];
+    } catch (json::type_error& e) {
+    }
+    try {
+        m_rmsd_mtd = state["rmsd_mtd"];
+        if (m_rmsd_mtd) {
+            m_k_rmsd = state["k_rmsd"];
+            m_alpha_rmsd = state["alpha_rmsd"];
+
+            m_mtd_steps = state["mtd_steps"];
+            m_rmsd_econv = state["rmsd_econv"];
+            m_wtmtd = state["wtmtd"];
+            m_rmsd_DT = state["rmsd_DT"];
+            m_rmsd_ref_file = state["rmsd_ref_file"];
+            m_bias_json = state["bias"];
+        }
+    } catch (json::type_error& e) {
+    }
+
     if (geometry.size()) {
         m_current_geometry = Tools::String2DoubleVec(geometry, "|");
     }
     if (velocities.size()) {
         m_velocities = Tools::String2DoubleVec(velocities, "|");
     }
+
+    if (xi.size()) {
+        m_xi = Tools::String2DoubleVec(xi, "|");
+    }
+
+    if (Q.size()) {
+        m_Q = Tools::String2DoubleVec(Q, "|");
+    }
+
     m_restart = geometry.size() && velocities.size();
 
     return true;
@@ -583,6 +971,7 @@ void SimpleMD::start()
 {
     if (m_initialised == false)
         return;
+    bool aborted = false;
     auto unix_timestamp = std::chrono::seconds(std::time(NULL));
     m_unix_started = std::chrono::milliseconds(unix_timestamp).count();
     double* gradient = new double[3 * m_natoms];
@@ -597,6 +986,12 @@ void SimpleMD::start()
     } else if (m_thermostat.compare("berendson") == 0) {
         fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Berendson Thermostat\nJ. Chem. Phys. 81, 3684 (1984) - DOI: 10.1063/1.448118\n\n");
         ThermostatFunction = std::bind(&SimpleMD::Berendson, this);
+    } else if (m_thermostat.compare("anderson") == 0) {
+        fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Anderson Thermostat\n ... \n\n");
+        ThermostatFunction = std::bind(&SimpleMD::Anderson, this);
+    } else if (m_thermostat.compare("nosehover") == 0) {
+        fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Nosé-Hoover-Chain Thermostat\n ... \n\n");
+        ThermostatFunction = std::bind(&SimpleMD::NoseHover, this);
     } else {
         ThermostatFunction = std::bind(&SimpleMD::None, this);
         std::cout << "No Thermostat applied\n"
@@ -604,18 +999,14 @@ void SimpleMD::start()
     }
 
     m_Epot = Energy(gradient);
-    m_Ekin = EKin();
+    EKin();
     m_Etot = m_Epot + m_Ekin;
-
+    AverageQuantities();
     int m_step = 0;
 
-    PrintStatus();
-
 #ifdef USE_Plumed
-    plumed plumedmain;
-
     if (m_mtd) {
-        plumedmain = plumed_create();
+        m_plumedmain = plumed_create();
         int real_precision = 8;
         double energyUnits = 2625.5;
         double lengthUnits = 10;
@@ -623,28 +1014,28 @@ void SimpleMD::start()
         double massUnits = 1;
         double chargeUnit = 1;
         int restart = m_restart;
-        plumed_cmd(plumedmain, "setRealPrecision", &real_precision); // Pass a pointer to an integer containing the size of a real number (4 or 8)
-        plumed_cmd(plumedmain, "setMDEnergyUnits", &energyUnits); // Pass a pointer to the conversion factor between the energy unit used in your code and kJ mol-1
-        plumed_cmd(plumedmain, "setMDLengthUnits", &lengthUnits); // Pass a pointer to the conversion factor between the length unit used in your code and nm
-        plumed_cmd(plumedmain, "setMDTimeUnits", &timeUnits); // Pass a pointer to the conversion factor between the time unit used in your code and ps
-        plumed_cmd(plumedmain, "setNatoms", &m_natoms); // Pass a pointer to the number of atoms in the system to plumed
-        plumed_cmd(plumedmain, "setMDEngine", "curcuma");
-        plumed_cmd(plumedmain, "setMDMassUnits", &massUnits); // Pass a pointer to the conversion factor between the mass unit used in your code and amu
-        plumed_cmd(plumedmain, "setMDChargeUnits", &chargeUnit);
-        plumed_cmd(plumedmain, "setTimestep", &m_dT); // Pass a pointer to the molecular dynamics timestep to plumed                       // Pass the name of your md engine to plumed (now it is just a label)
-        plumed_cmd(plumedmain, "setKbT", &kb_Eh);
-        plumed_cmd(plumedmain, "setLogFile", "plumed_log.out"); // Pass the file  on which to write out the plumed log (to be created)
-        plumed_cmd(plumedmain, "setRestart", &restart); // Pointer to an integer saying if we are restarting (zero means no, one means yes)
-        plumed_cmd(plumedmain, "init", NULL);
-        plumed_cmd(plumedmain, "read", m_plumed.c_str());
-        plumed_cmd(plumedmain, "setStep", &m_step);
-        plumed_cmd(plumedmain, "setPositions", &m_current_geometry[0]);
-        plumed_cmd(plumedmain, "setEnergy", &m_Epot);
-        plumed_cmd(plumedmain, "setForces", &m_gradient[0]);
-        plumed_cmd(plumedmain, "setVirial", &m_virial[0]);
-        plumed_cmd(plumedmain, "setMasses", &m_mass[0]);
-        plumed_cmd(plumedmain, "prepareCalc", NULL);
-        plumed_cmd(plumedmain, "performCalc", NULL);
+        plumed_cmd(m_plumedmain, "setRealPrecision", &real_precision); // Pass a pointer to an integer containing the size of a real number (4 or 8)
+        plumed_cmd(m_plumedmain, "setMDEnergyUnits", &energyUnits); // Pass a pointer to the conversion factor between the energy unit used in your code and kJ mol-1
+        plumed_cmd(m_plumedmain, "setMDLengthUnits", &lengthUnits); // Pass a pointer to the conversion factor between the length unit used in your code and nm
+        plumed_cmd(m_plumedmain, "setMDTimeUnits", &timeUnits); // Pass a pointer to the conversion factor between the time unit used in your code and ps
+        plumed_cmd(m_plumedmain, "setNatoms", &m_natoms); // Pass a pointer to the number of atoms in the system to plumed
+        plumed_cmd(m_plumedmain, "setMDEngine", "curcuma");
+        plumed_cmd(m_plumedmain, "setMDMassUnits", &massUnits); // Pass a pointer to the conversion factor between the mass unit used in your code and amu
+        plumed_cmd(m_plumedmain, "setMDChargeUnits", &chargeUnit);
+        plumed_cmd(m_plumedmain, "setTimestep", &m_dT); // Pass a pointer to the molecular dynamics timestep to plumed                       // Pass the name of your md engine to plumed (now it is just a label)
+        plumed_cmd(m_plumedmain, "setKbT", &kb_Eh);
+        plumed_cmd(m_plumedmain, "setLogFile", "plumed_log.out"); // Pass the file  on which to write out the plumed log (to be created)
+        plumed_cmd(m_plumedmain, "setRestart", &restart); // Pointer to an integer saying if we are restarting (zero means no, one means yes)
+        plumed_cmd(m_plumedmain, "init", NULL);
+        plumed_cmd(m_plumedmain, "read", m_plumed.c_str());
+        plumed_cmd(m_plumedmain, "setStep", &m_step);
+        plumed_cmd(m_plumedmain, "setPositions", &m_current_geometry[0]);
+        plumed_cmd(m_plumedmain, "setEnergy", &m_Epot);
+        plumed_cmd(m_plumedmain, "setForces", &m_gradient[0]);
+        plumed_cmd(m_plumedmain, "setVirial", &m_virial[0]);
+        plumed_cmd(m_plumedmain, "setMasses", &m_mass[0]);
+        plumed_cmd(m_plumedmain, "prepareCalc", NULL);
+        plumed_cmd(m_plumedmain, "performCalc", NULL);
     }
 #endif
     std::vector<double> charge(0, m_natoms);
@@ -672,18 +1063,32 @@ void SimpleMD::start()
               << "\t"
               << "T" << std::endl;
 #endif
+    if (m_rmsd_mtd) {
+        std::cout << "k\t" << m_k_rmsd << std::endl;
+        std::cout << "alpha\t" << m_alpha_rmsd << std::endl;
+        std::cout << "steps\t" << m_mtd_steps << std::endl;
+        std::cout << "Ethresh\t" << m_rmsd_econv << std::endl;
+        if (m_wtmtd)
+            std::cout << "Well Tempered\tOn (" << m_rmsd_DT << ")" << std::endl;
+        else
+            std::cout << "Well Tempered\tOff" << std::endl;
+    }
+    PrintStatus();
 
+    /* Start MD Lopp here */
     for (; m_currentStep < m_maxtime;) {
         auto step0 = std::chrono::system_clock::now();
 
         if (CheckStop() == true) {
             TriggerWriteRestart();
+            aborted = true;
 #ifdef USE_Plumed
             if (m_mtd) {
-                plumed_finalize(plumedmain); // Call the plumed destructor
+                plumed_finalize(m_plumedmain); // Call the plumed destructor
             }
 #endif
-            return;
+
+            break;
         }
 
         if (m_rm_COM_step > 0 && m_step % m_rm_COM_step == 0) {
@@ -697,35 +1102,21 @@ void SimpleMD::start()
                 RemoveRotation(m_velocities);
             }
         }
-        WallPotential(gradient);
+
         Integrator(gradient);
+        AverageQuantities();
 
-        ThermostatFunction();
-        m_Ekin = EKin();
-
-#ifdef USE_Plumed
         if (m_mtd) {
-            plumed_cmd(plumedmain, "setStep", &m_step);
-
-            plumed_cmd(plumedmain, "setPositions", &m_current_geometry[0]);
-
-            plumed_cmd(plumedmain, "setEnergy", &m_Epot);
-            plumed_cmd(plumedmain, "setForces", &m_gradient[0]);
-            plumed_cmd(plumedmain, "setVirial", &m_virial[0]);
-
-            plumed_cmd(plumedmain, "setMasses", &m_mass[0]);
-            if (m_eval_mtd) {
-                plumed_cmd(plumedmain, "prepareCalc", NULL);
-                plumed_cmd(plumedmain, "performCalc", NULL);
-            } else {
+            if (!m_eval_mtd) {
                 if (std::abs(m_T0 - m_aver_Temp) < m_mtd_dT && m_step > 10) {
                     m_eval_mtd = true;
                     std::cout << "Starting with MetaDynamics ..." << std::endl;
                 }
             }
         }
-#endif
+
 /////////// Dipole calc
+
 
 
 
@@ -748,7 +1139,7 @@ void SimpleMD::start()
                 m_molecule.GetFragments();
                 InitVelocities(-1);
                 Energy(gradient);
-                m_Ekin = EKin();
+                EKin();
                 m_Etot = m_Epot + m_Ekin;
                 m_current_rescue++;
                 PrintStatus();
@@ -761,11 +1152,16 @@ void SimpleMD::start()
             fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Simulation got unstable, exiting!\n");
 
             std::ofstream restart_file("unstable_curcuma.json");
-            restart_file << WriteRestartInformation() << std::endl;
+            nlohmann::json restart;
+            restart[MethodName()[0]] = WriteRestartInformation();
+            restart_file << restart << std::endl;
+
             m_time_step = 0;
+            aborted = true;
+
 #ifdef USE_Plumed
             if (m_mtd) {
-                plumed_finalize(plumedmain); // Call the plumed destructor
+                plumed_finalize(m_plumedmain); // Call the plumed destructor
             }
 #endif
             return;
@@ -774,17 +1170,23 @@ void SimpleMD::start()
         if (m_writerestart > -1 && m_step % m_writerestart == 0) {
             std::ofstream restart_file("curcuma_step_" + std::to_string(int(m_step * m_dT)) + ".json");
             nlohmann::json restart;
-            restart_file << WriteRestartInformation() << std::endl;
+            restart[MethodName()[0]] = WriteRestartInformation();
+            restart_file << restart << std::endl;
         }
         if ((m_step && int(m_step * m_dT) % m_print == 0)) {
             m_Etot = m_Epot + m_Ekin;
             PrintStatus();
             m_time_step = 0;
         }
-
+        if (m_rattle && m_rattle_dynamic_tol) {
+            m_aver_rattle_Temp += m_T;
+            m_rattle_counter++;
+            if (m_rattle_counter == m_rattle_dynamic_tol_iter)
+                AdjustRattleTolerance();
+        }
         if (m_impuls > m_T) {
             InitVelocities(m_scale_velo * m_impuls_scaling);
-            m_Ekin = EKin();
+            EKin();
             // PrintStatus();
             m_time_step = 0;
         }
@@ -813,17 +1215,55 @@ void SimpleMD::start()
 
 #ifdef USE_Plumed
     if (m_mtd) {
-        plumed_finalize(plumedmain); // Call the plumed destructor
+        plumed_finalize(m_plumedmain); // Call the plumed destructor
     }
 #endif
+    if (m_rmsd_mtd) {
+        std::cout << "Sum of Energy of COLVARs:" << std::endl;
+        for (int i = 0; i < m_bias_threads.size(); ++i) {
+            auto structures = m_bias_threads[i]->getBiasStructure();
+            for (int j = 0; j < structures.size(); ++j) {
+                std::cout << structures[j].rmsd_reference << "\t" << structures[j].energy << "\t" << structures[j].counter / double(m_colvar_incr) * 100 << std::endl;
+
+                m_rmsd_mtd_molecule.setGeometry(structures[j].geometry);
+                m_rmsd_mtd_molecule.setEnergy(structures[j].energy);
+                m_rmsd_mtd_molecule.setName(std::to_string(structures[j].index) + " " + std::to_string(structures[j].rmsd_reference));
+                if (i == j && i == 0)
+                    m_rmsd_mtd_molecule.writeXYZFile(Basename() + ".mtd.xyz");
+                else
+                    m_rmsd_mtd_molecule.appendXYZFile(Basename() + ".mtd.xyz");
+            }
+        }
+    }
     std::ofstream restart_file("curcuma_final.json");
-    restart_file << WriteRestartInformation() << std::endl;
-    std::remove("curcuma_restart.json");
+    nlohmann::json restart;
+    restart[MethodName()[0]] = WriteRestartInformation();
+    restart_file << restart << std::endl;
+    if (aborted == false)
+        std::remove("curcuma_restart.json");
     delete[] gradient;
+}
+
+void SimpleMD::AdjustRattleTolerance()
+{
+    m_aver_rattle_Temp /= double(m_rattle_counter);
+
+    // std::pair<double, double> pair(m_rattle_tolerance, m_aver_Temp);
+
+    if (m_aver_rattle_Temp > m_T0)
+        m_rattle_tolerance -= 0.01;
+    else if (m_aver_rattle_Temp < m_T0)
+        m_rattle_tolerance += 0.01;
+    std::cout << m_rattle_counter << " " << m_aver_rattle_Temp << " " << m_rattle_tolerance << std::endl;
+    m_rattle_tolerance = std::abs(m_rattle_tolerance);
+    m_rattle_counter = 0;
+    m_aver_rattle_Temp = 0;
 }
 
 void SimpleMD::Verlet(double* grad)
 {
+    double ekin = 0;
+
     for (int i = 0; i < m_natoms; ++i) {
         m_current_geometry[3 * i + 0] = m_current_geometry[3 * i + 0] + m_dT * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
         m_current_geometry[3 * i + 1] = m_current_geometry[3 * i + 1] + m_dT * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
@@ -832,9 +1272,42 @@ void SimpleMD::Verlet(double* grad)
         m_velocities[3 * i + 0] = m_velocities[3 * i + 0] - 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
         m_velocities[3 * i + 1] = m_velocities[3 * i + 1] - 0.5 * m_dT * grad[3 * i + 1] * m_rmass[3 * i + 1];
         m_velocities[3 * i + 2] = m_velocities[3 * i + 2] - 0.5 * m_dT * grad[3 * i + 2] * m_rmass[3 * i + 2];
+        ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
+    ekin *= 0.5;
+    m_T = 2.0 * ekin / (kb_Eh * m_dof);
+    m_Ekin = ekin;
+    ThermostatFunction();
     m_Epot = Energy(grad);
-    double ekin = 0.0;
+    if (m_rmsd_mtd) {
+        if (m_step % m_mtd_steps == 0) {
+            ApplyRMSDMTD(grad);
+        }
+    }
+#ifdef USE_Plumed
+    if (m_mtd) {
+        plumed_cmd(m_plumedmain, "setStep", &m_step);
+
+        plumed_cmd(m_plumedmain, "setPositions", &m_current_geometry[0]);
+
+        plumed_cmd(m_plumedmain, "setEnergy", &m_Epot);
+        plumed_cmd(m_plumedmain, "setForces", &m_gradient[0]);
+        plumed_cmd(m_plumedmain, "setVirial", &m_virial[0]);
+
+        plumed_cmd(m_plumedmain, "setMasses", &m_mass[0]);
+        if (m_eval_mtd) {
+            plumed_cmd(m_plumedmain, "prepareCalc", NULL);
+            plumed_cmd(m_plumedmain, "performCalc", NULL);
+        } else {
+            if (std::abs(m_T0 - m_aver_Temp) < m_mtd_dT && m_step > 10) {
+                m_eval_mtd = true;
+                std::cout << "Starting with MetaDynamics ..." << std::endl;
+            }
+        }
+    }
+#endif
+    WallPotential(grad);
+    ekin = 0.0;
 
     for (int i = 0; i < m_natoms; ++i) {
         m_velocities[3 * i + 0] -= 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
@@ -848,8 +1321,11 @@ void SimpleMD::Verlet(double* grad)
     }
     ekin *= 0.5;
     double T = 2.0 * ekin / (kb_Eh * m_dof);
-    m_unstable = T > 100 * m_T;
+    m_unstable = T > 10000 * m_T || std::isnan(T);
     m_T = T;
+    m_Ekin = ekin;
+    ThermostatFunction();
+    EKin();
 }
 
 void SimpleMD::Rattle(double* grad)
@@ -866,9 +1342,11 @@ void SimpleMD::Rattle(double* grad)
      * like dT^3 -> dT^2 and
      * updated velocities of the second atom (minus instead of plus)
      */
+    TriggerWriteRestart();
     double* coord = new double[3 * m_natoms];
     double m_dT_inverse = 1 / m_dT;
     std::vector<int> moved(m_natoms, 0);
+    bool move = false;
     for (int i = 0; i < m_natoms; ++i) {
         coord[3 * i + 0] = m_current_geometry[3 * i + 0] + m_dT * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
         coord[3 * i + 1] = m_current_geometry[3 * i + 1] + m_dT * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
@@ -883,6 +1361,7 @@ void SimpleMD::Rattle(double* grad)
 
     while (iter < m_rattle_maxiter) {
         iter++;
+        int active = 0;
         for (auto bond : m_bond_constrained) {
             int i = bond.first.first, j = bond.first.second;
             double distance = bond.second;
@@ -890,9 +1369,9 @@ void SimpleMD::Rattle(double* grad)
                 + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
                 + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
 
-            if (std::abs(distance - distance_current) > 2 * m_rattle_tolerance * distance) {
+            if (std::abs(distance - distance_current) > m_rattle_tolerance) {
+                move = true;
                 double r = distance - distance_current;
-
                 double dx = m_current_geometry[3 * i + 0] - m_current_geometry[3 * j + 0];
                 double dy = m_current_geometry[3 * i + 1] - m_current_geometry[3 * j + 1];
                 double dz = m_current_geometry[3 * i + 2] - m_current_geometry[3 * j + 2];
@@ -903,6 +1382,7 @@ void SimpleMD::Rattle(double* grad)
                 if (scalarproduct >= m_rattle_tolerance * distance) {
                     moved[i] = 1;
                     moved[j] = 1;
+                    active++;
 
                     double lambda = r / (1 * (m_rmass[i] + m_rmass[j]) * scalarproduct);
                     while (std::abs(lambda) > max_mu)
@@ -925,14 +1405,58 @@ void SimpleMD::Rattle(double* grad)
                 }
             }
         }
+        if (active == 0)
+            break;
     }
+    if (iter >= m_rattle_maxiter) {
+        std::cout << "numeric difficulties - 1st step in rattle velocity verlet" << std::endl;
+        std::ofstream restart_file("unstable_curcuma_" + std::to_string(m_currentStep) + ".json");
+        nlohmann::json restart;
+        restart[MethodName()[0]] = WriteRestartInformation();
+        restart_file << restart << std::endl;
+    }
+    double ekin = 0;
+
     for (int i = 0; i < m_natoms; ++i) {
         m_current_geometry[3 * i + 0] = coord[3 * i + 0];
         m_current_geometry[3 * i + 1] = coord[3 * i + 1];
         m_current_geometry[3 * i + 2] = coord[3 * i + 2];
+        ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
+    ekin *= 0.5;
+    m_T = 2.0 * ekin / (kb_Eh * m_dof);
+    m_Ekin = ekin;
+    ThermostatFunction();
     m_Epot = Energy(grad);
-    double ekin = 0.0;
+
+    if (m_rmsd_mtd) {
+        if (m_step % m_mtd_steps == 0) {
+            ApplyRMSDMTD(grad);
+        }
+    }
+#ifdef USE_Plumed
+    if (m_mtd) {
+        plumed_cmd(m_plumedmain, "setStep", &m_step);
+
+        plumed_cmd(m_plumedmain, "setPositions", &m_current_geometry[0]);
+
+        plumed_cmd(m_plumedmain, "setEnergy", &m_Epot);
+        plumed_cmd(m_plumedmain, "setForces", &m_gradient[0]);
+        plumed_cmd(m_plumedmain, "setVirial", &m_virial[0]);
+
+        plumed_cmd(m_plumedmain, "setMasses", &m_mass[0]);
+        if (m_eval_mtd) {
+            plumed_cmd(m_plumedmain, "prepareCalc", NULL);
+            plumed_cmd(m_plumedmain, "performCalc", NULL);
+        } else {
+            if (std::abs(m_T0 - m_aver_Temp) < m_mtd_dT && m_step > 10) {
+                m_eval_mtd = true;
+                std::cout << "Starting with MetaDynamics ..." << std::endl;
+            }
+        }
+    }
+#endif
+    WallPotential(grad);
 
     for (int i = 0; i < m_natoms; ++i) {
         m_velocities[3 * i + 0] -= 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
@@ -948,6 +1472,7 @@ void SimpleMD::Rattle(double* grad)
     ekin = 0.0;
     while (iter < m_rattle_maxiter) {
         iter++;
+        int active = 0;
         for (auto bond : m_bond_constrained) {
             int i = bond.first.first, j = bond.first.second;
             if (moved[i] == 1 && moved[j] == 1) {
@@ -965,7 +1490,8 @@ void SimpleMD::Rattle(double* grad)
                 double mu = -1 * r / ((m_rmass[i] + m_rmass[j]) * distance);
                 while (std::abs(mu) > max_mu)
                     mu /= 2;
-                if (std::abs(mu) > m_rattle_tolerance && std::abs(mu) < max_mu) {
+                if (std::abs(mu) > m_rattle_tolerance) {
+                    active = 1;
                     m_virial_correction += mu * distance;
                     m_velocities[3 * i + 0] += dx * mu * m_rmass[i];
                     m_velocities[3 * i + 1] += dy * mu * m_rmass[i];
@@ -977,15 +1503,129 @@ void SimpleMD::Rattle(double* grad)
                 }
             }
         }
+        if (active == 0)
+            break;
     }
+
+    if (iter >= m_rattle_maxiter) {
+        std::cout << "numeric difficulties - 2nd in rattle velocity verlet" << iter << std::endl;
+        std::ofstream restart_file("unstable_curcuma_" + std::to_string(m_currentStep) + ".json");
+        nlohmann::json restart;
+        restart[MethodName()[0]] = WriteRestartInformation();
+        restart_file << restart << std::endl;
+    }
+
+    if (move)
+        RemoveRotations(m_velocities);
+
     delete[] coord;
     for (int i = 0; i < m_natoms; ++i) {
         ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
     ekin *= 0.5;
     double T = 2.0 * ekin / (kb_Eh * m_dof);
-    m_unstable = T > 10000 * m_T;
+    m_unstable = T > 10000 * m_T || std::isnan(T);
     m_T = T;
+    ThermostatFunction();
+    EKin();
+}
+
+void SimpleMD::ApplyRMSDMTD(double* grad)
+{
+    std::chrono::time_point<std::chrono::system_clock> m_start, m_end;
+    m_start = std::chrono::system_clock::now();
+    m_colvar_incr = 0;
+
+    Geometry current_geometry = m_rmsd_mtd_molecule.getGeometry();
+    for (int i = 0; i < m_rmsd_indicies.size(); ++i) {
+        current_geometry(i, 0) = m_current_geometry[3 * m_rmsd_indicies[i] + 0];
+        current_geometry(i, 1) = m_current_geometry[3 * m_rmsd_indicies[i] + 1];
+        current_geometry(i, 2) = m_current_geometry[3 * m_rmsd_indicies[i] + 2];
+    }
+
+    double current_bias = 0;
+    double rmsd_reference = 0;
+
+    if (m_bias_structure_count == 0) {
+        m_bias_threads[0]->addGeometry(current_geometry, 0, m_currentStep, 0);
+        m_bias_structure_count++;
+        m_rmsd_mtd_molecule.writeXYZFile(Basename() + ".mtd.xyz");
+        std::ofstream colvarfile;
+        colvarfile.open("COLVAR");
+        colvarfile.close();
+    }
+    if (m_threads == 1 || m_bias_structure_count == 1) {
+        for (int i = 0; i < m_bias_threads.size(); ++i) {
+            m_bias_threads[i]->setCurrentGeometry(current_geometry, m_currentStep);
+            m_bias_threads[i]->start();
+            current_bias += m_bias_threads[i]->BiasEnergy();
+            for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
+                grad[3 * m_rmsd_indicies[j] + 0] += m_bias_threads[i]->Gradient()(j, 0);
+                grad[3 * m_rmsd_indicies[j] + 1] += m_bias_threads[i]->Gradient()(j, 1);
+                grad[3 * m_rmsd_indicies[j] + 2] += m_bias_threads[i]->Gradient()(j, 2);
+            }
+            m_colvar_incr += m_bias_threads[i]->Counter();
+            m_loop_time += m_bias_threads[i]->Time();
+        }
+    } else {
+        if (m_bias_structure_count < m_threads) {
+            for (int i = 0; i < m_bias_structure_count; ++i) {
+                m_bias_threads[i]->setCurrentGeometry(current_geometry, m_currentStep);
+            }
+        } else {
+            for (int i = 0; i < m_bias_threads.size(); ++i) {
+                m_bias_threads[i]->setCurrentGeometry(current_geometry, m_currentStep);
+            }
+        }
+
+        m_bias_pool->setActiveThreadCount(m_threads);
+        m_bias_pool->StaticPool();
+        m_bias_pool->StartAndWait();
+        m_bias_pool->setWakeUp(m_bias_pool->WakeUp() / 2);
+
+        for (int i = 0; i < m_bias_threads.size(); ++i) {
+            if (m_bias_threads[i]->Return() == 1) {
+
+                current_bias += m_bias_threads[i]->BiasEnergy();
+                for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
+                    grad[3 * m_rmsd_indicies[j] + 0] += m_bias_threads[i]->Gradient()(j, 0);
+                    grad[3 * m_rmsd_indicies[j] + 1] += m_bias_threads[i]->Gradient()(j, 1);
+                    grad[3 * m_rmsd_indicies[j] + 2] += m_bias_threads[i]->Gradient()(j, 2);
+                }
+                m_colvar_incr += m_bias_threads[i]->Counter();
+            }
+            m_loop_time += m_bias_threads[i]->Time();
+        }
+        m_bias_pool->Reset();
+    }
+    rmsd_reference = m_bias_threads[0]->RMSDReference();
+    std::ofstream colvarfile;
+    colvarfile.open("COLVAR", std::iostream::app);
+    colvarfile << m_currentStep << " ";
+    m_rmsd_mtd_molecule.setGeometry(current_geometry);
+    if (m_rmsd_fragment_count < 2)
+        colvarfile << rmsd_reference << " ";
+
+    for(int i = 0; i < m_rmsd_fragment_count; ++i)
+        for(int j = 0; j < i; ++j)
+        {
+            colvarfile << (m_rmsd_mtd_molecule.Centroid(true, i) -  m_rmsd_mtd_molecule.Centroid(true,j)).norm()<< " ";
+        }
+    colvarfile << current_bias  << " "  << std::endl;
+    colvarfile.close();
+
+    m_bias_energy += current_bias;
+
+    if (current_bias * m_rmsd_econv < m_bias_structure_count && m_rmsd_fix_structure == false) {
+        int thread_index = m_bias_structure_count % m_bias_threads.size();
+        m_bias_threads[thread_index]->addGeometry(current_geometry, rmsd_reference, m_currentStep, m_bias_structure_count);
+        m_bias_structure_count++;
+        m_rmsd_mtd_molecule.appendXYZFile(Basename() + ".mtd.xyz");
+        std::cout << m_bias_structure_count << " stored structures currently" << std::endl;
+    }
+    m_end = std::chrono::system_clock::now();
+    int m_time = std::chrono::duration_cast<std::chrono::milliseconds>(m_end - m_start).count();
+    m_mtd_time += m_time;
 }
 
 void SimpleMD::Rattle_Verlet_First(double* coord, double* grad)
@@ -1329,6 +1969,7 @@ void SimpleMD::PrintStatus() const
 
 #endif
     }
+    //std::cout << m_mtd_time << " " << m_loop_time << std::endl;
 }
 
 void SimpleMD::PrintMatrix(const double* matrix)
@@ -1370,16 +2011,19 @@ double SimpleMD::FastEnergy(double* grad)
     return Energy;
 }
 
-double SimpleMD::EKin()
+void SimpleMD::EKin()
 {
     double ekin = 0;
-
     for (int i = 0; i < m_natoms; ++i) {
         ekin += m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
     }
     ekin *= 0.5;
+    m_Ekin = ekin;
     m_T = 2.0 * ekin / (kb_Eh * m_dof);
+}
 
+void SimpleMD::AverageQuantities()
+{
     m_aver_Temp = (m_T + (m_currentStep)*m_aver_Temp) / (m_currentStep + 1);
     m_aver_Epot = (m_Epot + (m_currentStep)*m_aver_Epot) / (m_currentStep + 1);
     m_aver_Ekin = (m_Ekin + (m_currentStep)*m_aver_Ekin) / (m_currentStep + 1);
@@ -1389,8 +2033,6 @@ double SimpleMD::EKin()
     }
     m_average_wall_potential = (m_wall_potential + (m_currentStep)*m_average_wall_potential) / (m_currentStep + 1);
     m_average_virial_correction = (m_virial_correction + (m_currentStep)*m_average_virial_correction) / (m_currentStep + 1);
-
-    return ekin;
 }
 
 bool SimpleMD::WriteGeometry()
@@ -1427,17 +2069,19 @@ void SimpleMD::None()
 
 void SimpleMD::Berendson()
 {
-    double lambda = sqrt(1 + (m_dT * (m_T0 - m_T)) / (m_T * m_coupling));
-    for (int i = 0; i < 3 * m_natoms; ++i) {
-        m_velocities[i] *= lambda;
+    double lambda = sqrt(1 + (m_dT / 2.0 * (m_T0 - m_T)) / (m_T * m_coupling));
+    for (int i = 0; i < m_natoms; ++i) {
+        m_velocities[3 * i + 0] *= lambda;
+        m_velocities[3 * i + 1] *= lambda;
+        m_velocities[3 * i + 2] *= lambda;
     }
 }
 
 void SimpleMD::CSVR()
 {
     double Ekin_target = 0.5 * kb_Eh * (m_T0)*m_dof;
-    double c = exp(-(m_dT * m_respa) / m_coupling);
-    static std::random_device rd{};
+    double c = exp(-(m_dT / 2.0 * m_respa) / m_coupling);
+    static std::default_random_engine rd{};
     static std::mt19937 gen{ rd() };
     static std::normal_distribution<> d{ 0, 1 };
     static std::chi_squared_distribution<float> dchi{ m_dof };
@@ -1447,7 +2091,51 @@ void SimpleMD::CSVR()
     double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (m_dof * m_Ekin) + 2 * R * sqrt(c * (1 - c) * Ekin_target / (m_dof * m_Ekin));
     m_Ekin_exchange += m_Ekin * (alpha2 - 1);
     double alpha = sqrt(alpha2);
-    for (int i = 0; i < 3 * m_natoms; ++i) {
-        m_velocities[i] *= alpha;
+    for (int i = 0; i < m_natoms; ++i) {
+        m_velocities[3 * i + 0] *= alpha;
+        m_velocities[3 * i + 1] *= alpha;
+        m_velocities[3 * i + 2] *= alpha;
     }
+}
+
+void SimpleMD::Anderson()
+{
+    static std::default_random_engine generator;
+    double probability = m_anderson * m_dT;
+    std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
+    for (size_t i = 0; i < m_natoms; ++i) {
+        if (uniform_dist(generator) < probability) {
+            std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 * m_rmass[i]));
+            m_velocities[3 * i + 0] = (m_velocities[3 * i + 0] + distribution(generator)) / 2.0;
+            m_velocities[3 * i + 1] = (m_velocities[3 * i + 1] + distribution(generator)) / 2.0;
+            m_velocities[3 * i + 2] = (m_velocities[3 * i + 2] + distribution(generator)) / 2.0;
+        }
+    }
+}
+void SimpleMD::NoseHover()
+{
+    // Berechnung der kinetischen Energie
+    double kinetic_energy = 0.0;
+    for (int i = 0; i < m_natoms; ++i) {
+        kinetic_energy += 0.5 * m_mass[i] * (m_velocities[3 * i] * m_velocities[3 * i] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]);
+    }
+    // Update der Thermostatkette
+    m_xi[0] += 0.5 * m_dT * (2.0 * kinetic_energy - m_dof * m_T0 * kb_Eh) / m_Q[0];
+    for (int j = 1; j < m_chain_length; ++j) {
+        m_xi[j] += 0.5 * m_dT * (m_Q[j - 1] * m_xi[j - 1] * m_xi[j - 1] - m_T0 * kb_Eh) / m_Q[j];
+    }
+
+    // Update der Geschwindigkeiten
+    double scale = exp(-m_xi[0] * m_dT);
+    for (int i = 0; i < m_natoms; ++i) {
+        m_velocities[3 * i + 0] *= scale;
+        m_velocities[3 * i + 1] *= scale;
+        m_velocities[3 * i + 2] *= scale;
+    }
+
+    // Rückwärts-Update der Thermostatkette
+    for (int j = m_chain_length - 1; j >= 1; --j) {
+        m_xi[j] += 0.5 * m_dT * (m_Q[j - 1] * m_xi[j - 1] * m_xi[j - 1] - m_T0 * kb_Eh) / m_Q[j];
+    }
+    m_xi[0] += 0.5 * m_dT * (2.0 * kinetic_energy - m_dof * m_T0 * kb_Eh) / m_Q[0];
 }

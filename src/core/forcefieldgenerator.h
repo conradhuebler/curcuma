@@ -96,8 +96,9 @@ static json EQJson{
     { "type", 1 },
     { "i", 0 },
     { "j", 0 },
-    { "C_ij", 1 },
-    { "r0_ij", 0 },
+    { "q_i", 0 },
+    { "q_j", 0 },
+    { "epsilon", 1 }
 };
 
 const json FFGenerator{
@@ -117,8 +118,26 @@ const json FFGenerator{
     { "rep_scaling", 1 },
     { "dihedral_scaling", 1 },
     { "coulomb_scaling", 1 },
+    { "h4", 1 },
+    { "hh", 1 },
+    { "h4_oh_o", 2.32 },
+    { "h4_oh_n", 3.10 },
+    { "h4_nh_o", 1.07 },
+    { "h4_nh_n", 2.01 },
+    { "h4_wh_o", 0.42 },
+    { "h4_nh4", 3.61 },
+    { "h4_coo", 1.41 },
+    { "hh_rep_k", 0.42 },
+    { "hh_rep_e", 12.7 },
+    { "hh_rep_r0", 2.3 },
+    { "bond_force", 1.0584 / 7.25 * 1.8 },
+    { "angle_force", 1.0584 / 7.25 },
+    { "torsion_force", 1 / 627.503 },
+    { "inversion_force", 1 / 627.503 },
+    { "vdw_force", 1 / 627.503 },
     { "h4_scaling", 0 },
-    { "hh_scaling", 0 }
+    { "hh_scaling", 0 },
+    { "e0", 0 }
 };
 
 class ForceFieldGenerator {
@@ -137,24 +156,31 @@ private:
     void setAngles();
     void setDihedrals();
     void setInversions();
-    void setvdWs();
+    void setNCI();
+    // void setESP();
 
     json Bonds() const;
     json Angles() const;
     json Dihedrals() const;
     json Inversions() const;
     json vdWs() const;
+    json ESPs() const;
+
     json writeUFF();
 
     Molecule m_molecule;
-    Matrix m_topo, m_geometry;
+    Matrix m_topo, m_geometry, m_distance;
+
+    StringList m_uff_methods = { "uff", "uff-d3" };
+    StringList m_qmdff_methods = { "qmdff", "quff" };
 
     std::vector<std::vector<int>> m_stored_bonds;
     std::vector<std::vector<int>> m_identified_rings;
     std::vector<int> m_atom_types, m_coordination;
-    std::vector<std::set<int>> m_ignored_vdw;
-    std::vector<json> m_bonds, m_angles, m_dihedrals, m_inversions, m_vdws, m_eqs;
-    double m_uff_bond_force = 664.12, m_uff_angle_force = 664.12, m_scaling = 1.4;
+    std::vector<std::set<int>> m_ignored_vdw, m_1_4_charges;
+    std::vector<json> m_bonds, m_angles, m_dihedrals, m_inversions, m_vdws, m_esps;
+    double m_uff_bond_force = 1.0584 /* in Eh kcal/mol = 664.12 */, m_uff_angle_force = 1.0584 /* in Eh kcal/mol = 664.12 */, m_uff_dihedral_force = 1, m_uff_inversion_force = 1, m_vdw_force = 1, m_scaling = 1.4;
+
     double m_au = 1;
 
     int m_ff_type = 1;

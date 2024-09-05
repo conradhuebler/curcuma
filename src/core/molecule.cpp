@@ -60,6 +60,7 @@ Molecule::Molecule(const Molecule& other)
     m_energy = other.m_energy;
     m_spin = other.m_spin;
     m_bonds = other.m_bonds;
+    m_borders = other.m_borders;
 }
 /*
 Molecule& Molecule::operator=(const Molecule& other)
@@ -86,6 +87,7 @@ Molecule::Molecule(const Molecule* other)
     m_energy = other->m_energy;
     m_spin = other->m_spin;
     m_bonds = other->m_bonds;
+    m_borders = other->m_borders;
 }
 /*
 Molecule& Molecule::operator=(const Molecule* other)
@@ -899,18 +901,18 @@ Eigen::Vector3d Molecule::COM(bool protons, int fragment)
 }
 
 std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>& scaling) const
-{//calc classic dipole moment of the system with partial charges
+{ // calc classic dipole moment of the system with partial charges
     std::vector<Position> dipole_moments;
 
     if (m_charges.size() != m_geometry.rows()) {
         std::cout << "No partial charges available" << std::endl;
         return dipole_moments;
     }
-    //calc center of mass and dipole for every fragment
+    // calc center of mass and dipole for every fragment
     for (int f = 0; f < GetFragments().size(); ++f) {
         Position pos = { 0, 0, 0 }, dipole = { 0, 0, 0 };
         double mass = 0;
-        //calc center of mass of the molecule
+        // calc center of mass of the molecule
         for (int i : m_fragments[f]) {
             double m = Elements::AtomicMass[m_atoms[i]];
             mass += m;
@@ -921,7 +923,7 @@ std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>
         pos(0) /= mass;
         pos(1) /= mass;
         pos(2) /= mass;
-        //calc dipole moment with scalar
+        // calc dipole moment with scalar
         for (int i : m_fragments[f]) {
             double scale = 1;
             if (scaling.size() > i)
@@ -938,7 +940,7 @@ std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>
 }
 
 Position Molecule::CalculateDipoleMoment(const Vector& scaling) const
-{   //dec and init
+{ // dec and init
     double mass = 0;
 
     Position pos = { 0, 0, 0 }, dipole = { 0, 0, 0 };
@@ -946,10 +948,10 @@ Position Molecule::CalculateDipoleMoment(const Vector& scaling) const
         std::cout << "No partial charges available" << std::endl;
         return dipole;
     }
-    //calc center of mass
+    // calc center of mass
     pos = MassCentroid();
 
-    //calc of the dipole moment with scalar
+    // calc of the dipole moment with scalar
     for (int i = 0; i < m_geometry.rows(); ++i) {
         double scale = 1;
         if (scaling.size() > i)
@@ -976,16 +978,23 @@ Position Molecule::CalculateDipoleMoment(const Vector& scaling) const
     return dipole;
 }
 
-std::pair<double, double> Molecule::GyrationRadius(bool protons, int fragment)
+std::pair<double, double> Molecule::GyrationRadius(double hmass, bool protons, int fragment)
 {
     Eigen::Vector3d com = COM(protons, fragment);
     double gyr = 0, gyr_mass = 0;
+    double mass = 0;
     for (int i = 0; i < m_geometry.rows(); ++i) {
         gyr += ((com(0) - m_geometry(i, 0)) * (com(0) - m_geometry(i, 0)) + (com(1) - m_geometry(i, 1)) * (com(1) - m_geometry(i, 1)) + (com(2) - m_geometry(i, 2)) * (com(2) - m_geometry(i, 2)));
-        gyr_mass += Elements::AtomicMass[m_atoms[i]] * ((com(0) - m_geometry(i, 0)) * (com(0) - m_geometry(i, 0)) + (com(1) - m_geometry(i, 1)) * (com(1) - m_geometry(i, 1)) + (com(2) - m_geometry(i, 2)) * (com(2) - m_geometry(i, 2)));
+        double m = 0;
+        if (m_atoms[i] == 1)
+            m = Elements::AtomicMass[m_atoms[i]] * hmass;
+        else
+            m = Elements::AtomicMass[m_atoms[i]];
+        mass += m;
+        gyr_mass += m * ((com(0) - m_geometry(i, 0)) * (com(0) - m_geometry(i, 0)) + (com(1) - m_geometry(i, 1)) * (com(1) - m_geometry(i, 1)) + (com(2) - m_geometry(i, 2)) * (com(2) - m_geometry(i, 2)));
     }
     gyr /= double(m_geometry.rows());
-    gyr_mass /= double(m_mass);
+    gyr_mass /= double(mass);
     return std::pair<double, double>(gyr, gyr_mass);
 }
 
@@ -1076,10 +1085,13 @@ void Molecule::writeXYZFragments(const std::string& filename) const
 void Molecule::appendXYZFile(const std::string& filename) const
 {
     std::string output;
-    output += fmt::format("{}\n", AtomCount());
+    output += fmt::format("{}\n", AtomCount() + m_borders.size());
     output += Header();
     for (int i = 0; i < AtomCount(); ++i) {
         output += Atom2String(i);
+    }
+    for (int i = 0; i < m_borders.size(); ++i) {
+        output += "X    " + std::to_string(m_borders[i](0)) + "    " + std::to_string(m_borders[i](1)) + "    " + std::to_string(m_borders[i](2)) + "\n";
     }
     std::ofstream input;
     input.open(filename, std::ios_base::app);
@@ -1098,7 +1110,7 @@ void Molecule::appendDipoleFile(const std::string& filename) const
     }
     std::ofstream input;
     input.open(filename, std::ios_base::app);
-    //std::cout << output << std::endl;
+    // std::cout << output << std::endl;
     input << output;
     input.close();
 }
@@ -1106,10 +1118,13 @@ void Molecule::appendDipoleFile(const std::string& filename) const
 std::string Molecule::XYZString() const
 {
     std::string output;
-    output += fmt::format("{}\n", AtomCount());
+    output += fmt::format("{}\n", AtomCount() + m_borders.size());
     output += Header();
     for (int i = 0; i < AtomCount(); ++i) {
         output += Atom2String(i);
+    }
+    for (int i = 0; i < m_borders.size(); ++i) {
+        output += "X    " + std::to_string(m_borders[i](0)) + "    " + std::to_string(m_borders[i](1)) + "    " + std::to_string(m_borders[i](2)) + "\n";
     }
     return output;
 }
@@ -1117,11 +1132,14 @@ std::string Molecule::XYZString() const
 std::string Molecule::XYZString(const std::vector<int> &order) const
 {
     std::string output;
-    output += fmt::format("{}\n", AtomCount());
+    output += fmt::format("{}\n", AtomCount() + m_borders.size());
     output += Header();
     for (int i : order) {
         std::cout << i << " ";
         output += Atom2String(i);
+    }
+    for (int i = 0; i < m_borders.size(); ++i) {
+        output += "X    " + std::to_string(m_borders[i](0)) + "    " + std::to_string(m_borders[i](1)) + "    " + std::to_string(m_borders[i](2)) + "\n";
     }
     return output;
 }
@@ -1486,15 +1504,57 @@ std::vector<double> Molecule::GetBox() const
 
 Geometry Molecule::ChargeDistribution() const
 {
-    Geometry point_charge(m_geometry.rows(),3);
+    Geometry point_charge(m_geometry.rows(), 3);
     if (m_charges.size() != m_geometry.rows()) {
         std::cerr << "No partial charges available" << std::endl;
-        return point_charge.setZero(m_geometry.rows(),3);
+        return point_charge.setZero(m_geometry.rows(), 3);
     }
     for (int i = 0; i < m_charges.size(); ++i) {
-        point_charge(i,0) = m_geometry(i,0) * m_charges[i];
-        point_charge(i,1) = m_geometry(i,1) * m_charges[i];
-        point_charge(i,2) = m_geometry(i,2) * m_charges[i];
+        point_charge(i, 0) = m_geometry(i, 0) * m_charges[i];
+        point_charge(i, 1) = m_geometry(i, 1) * m_charges[i];
+        point_charge(i, 2) = m_geometry(i, 2) * m_charges[i];
     }
     return point_charge;
+}
+
+std::vector<int> Molecule::FragString2Indicies(const std::string& string) const
+{
+    std::vector<int> indicies;
+    if(string.compare("-1") == 0)
+    {
+        for(int i = 0; i < AtomCount(); ++i)
+            indicies.push_back(i);
+    }else{
+    StringList list = Tools::SplitString(string, ",");
+    for (auto l : list) {
+        if (Tools::isInt(l))
+            indicies.push_back(std::stoi(l) - 1);
+        StringList range = Tools::SplitString(l, ":");
+        if (range.size() == 2) {
+            if (Tools::isInt(range[0]) && Tools::isInt(range[1])) {
+                int start = std::stoi(range[0]);
+                int end = std::stoi(range[1]);
+                if (start > end) {
+                    std::cout << "You are a fanny fellow :-)" << std::endl;
+                    std::swap(start, end);
+                }
+                for (int i = start; i <= end; ++i)
+                    indicies.push_back(i - 1);
+            }
+        }
+        if (l.find("F") != std::string::npos) {
+            std::string f = l;
+            f.erase(f.begin());
+            int fragment = std::stoi(f) - 1;
+            if (fragment < m_fragments.size()) {
+                for (int i = 0; i < m_fragments[fragment].size(); ++i) {
+                    indicies.push_back(m_fragments[fragment][i]);
+                }
+            }
+        }
+    }
+    sort(indicies.begin(), indicies.end());
+    indicies.erase(unique(indicies.begin(), indicies.end()), indicies.end());
+    }
+    return indicies;
 }

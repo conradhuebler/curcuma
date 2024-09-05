@@ -79,14 +79,15 @@ struct vdW {
 struct EQ {
     int type = 1; // 1 = UFF, 2 = QMDFF
     int i = 0, j = 0;
-    double C_ij = 0, r0_ij = 0;
+    double q_i = 0, q_j = 0, epsilon = 1;
 };
+
 class ForceFieldThread : public CxxThread {
 
 public:
     ForceFieldThread(int thread, int threads);
     virtual int execute() override;
-
+    virtual int Type() const { return 1; }
     void addBond(const Bond& bonds);
     void addAngle(const Angle& angles);
     void addDihedral(const Dihedral& dihedrals);
@@ -108,6 +109,10 @@ public:
         m_gradient = Eigen::MatrixXd::Zero(m_geometry.rows(), 3);
     }
 
+    inline void setMethod(int method)
+    {
+        m_method = method;
+    }
     double BondEnergy() { return m_bond_energy; }
     double AngleEnergy() { return m_angle_energy; }
     double DihedralEnergy() { return m_dihedral_energy; }
@@ -128,6 +133,8 @@ private:
     void CalculateQMDFFBondContribution();
     void CalculateQMDFFAngleContribution();
     void CalculateQMDFFDihedralContribution();
+    void CalculateQMDFFEspContribution();
+    void CalculateESPContribution();
 
     // double HarmonicBondStretching();
 
@@ -138,15 +145,15 @@ private:
     std::function<double()> CalculateTorsionContribution;
     std::function<double()> CalculateInversionContribution;
     std::function<double()> CalculateVdWContribution;
-    std::function<double()> CalculateEQContribution;
+    // std::function<double()> CalculateESPContribution;
     std::function<double()> CalculateHBondContribution;
 
-    std::vector<Bond> m_uff_bonds, m_qmdff_bonds;
-    std::vector<Angle> m_uff_angles, m_qmdff_angles;
+    std::vector<Bond> m_uff_bonds;
+    std::vector<Angle> m_uff_angles;
     std::vector<Dihedral> m_uff_dihedrals, m_qmdff_dihedrals;
     std::vector<Inversion> m_uff_inversions, m_qmdff_inversions;
     std::vector<vdW> m_uff_vdWs;
-    std::vector<EQ> m_qmdff_EQs;
+    std::vector<EQ> m_EQs;
 
 protected:
     Matrix m_geometry, m_gradient;
@@ -157,7 +164,7 @@ protected:
     double m_au = 1;
     double m_d = 1e-3;
     int m_calc_gradient = 1;
-    int m_thread = 0, m_threads = 0;
+    int m_thread = 0, m_threads = 0, m_method = 1;
     bool m_calculate_gradient = true;
 };
 
@@ -166,6 +173,8 @@ class D3Thread : public ForceFieldThread {
 public:
     D3Thread(int thread, int threads);
     ~D3Thread();
+    virtual int Type() const { return 2; }
+
     void setParamater(const json& parameter)
     {
 #ifdef USE_D3
@@ -194,6 +203,8 @@ class H4Thread : public ForceFieldThread {
 public:
     H4Thread(int thread, int threads);
     ~H4Thread();
+    virtual int Type() const { return 3; }
+
     void setParamater(const json& parameter)
     {
         m_h4correction.set_OH_O(parameter["h4_oh_o"].get<double>());

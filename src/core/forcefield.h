@@ -82,6 +82,7 @@ private:
     void setAngles(const json& angles);
     void setDihedrals(const json& dihedrals);
     void setInversions(const json& inversions);
+    void setESPs(const json& esps);
 
     std::vector<ForceFieldThread*> m_stored_threads;
     CxxThreadPool* m_threadpool;
@@ -89,6 +90,10 @@ private:
 
     Matrix m_geometry, m_gradient;
     std::vector<int> m_atom_types;
+    std::string m_method = "uff";
+    StringList m_uff_methods = { "uff", "uff-d3" };
+    StringList m_qmdff_methods = { "qmdff", "quff" };
+    double m_e0 = 0;
     int m_natoms = 0;
     int m_threads = 1;
     int m_gradient_type = 1;

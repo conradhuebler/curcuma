@@ -63,12 +63,20 @@ void ForceField::UpdateGeometry(const std::vector<std::array<double, 3>>& geomet
 
 void ForceField::setParameter(const json& parameters)
 {
-    setBonds(parameters["bonds"]);
-    setAngles(parameters["angles"]);
-    setDihedrals(parameters["dihedrals"]);
-    setInversions(parameters["inversions"]);
-    setvdWs(parameters["vdws"]);
+    if (parameters.contains("bonds"))
+        setBonds(parameters["bonds"]);
+    if (parameters.contains("angles"))
+        setAngles(parameters["angles"]);
+    if (parameters.contains("dihedrals"))
+        setDihedrals(parameters["dihedrals"]);
+    if (parameters.contains("inversions"))
+        setInversions(parameters["inversions"]);
+    if (parameters.contains("vdws"))
+        setvdWs(parameters["vdws"]);
     m_parameters = parameters;
+    m_method = m_parameters["method"];
+    if (m_parameters.contains("e0"))
+        m_e0 = m_parameters["e0"];
     AutoRanges();
 }
 
@@ -83,6 +91,7 @@ void ForceField::setBonds(const json& bonds)
         b.j = bond["j"];
         b.k = bond["k"];
         b.distance = bond["distance"];
+        b.exponent = bond["exponent"];
 
         b.r0_ij = bond["r0_ij"];
         b.r0_ik = bond["r0_ik"];
@@ -172,6 +181,24 @@ void ForceField::setvdWs(const json& vdws)
     }
 }
 
+void ForceField::setESPs(const json& esps)
+{
+    m_EQs.clear();
+    for (int i = 0; i < esps.size(); ++i) {
+        json esp = esps[i].get<json>();
+        EQ v;
+        v.type = esp["type"];
+
+        v.i = esp["i"];
+        v.j = esp["j"];
+        v.q_i = esp["q_i"];
+        v.q_j = esp["q_j"];
+        v.epsilon = esp["epsilon"];
+
+        m_EQs.push_back(v);
+    }
+}
+
 void ForceField::AutoRanges()
 {
     int free_threads = m_threads;
@@ -185,11 +212,27 @@ void ForceField::AutoRanges()
         m_threadpool->addThread(thread);
         m_stored_threads.push_back(thread);
     }
+    int h4 = m_parameters["h4"];
+    if (h4) {
+        if (free_threads > 1)
+            free_threads--;
+        H4Thread* thread = new H4Thread(m_threads - 1, free_threads);
+        thread->setParamater(m_parameters);
+        thread->Initialise(m_atom_types);
+
+        m_threadpool->addThread(thread);
+        m_stored_threads.push_back(thread);
+    }
     for (int i = 0; i < free_threads; ++i) {
         ForceFieldThread* thread = new ForceFieldThread(i, free_threads);
         thread->setGeometry(m_geometry, false);
         m_threadpool->addThread(thread);
         m_stored_threads.push_back(thread);
+        if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) {
+            thread->setMethod(1);
+        } else if (std::find(m_qmdff_methods.begin(), m_qmdff_methods.end(), m_method) != m_qmdff_methods.end()) {
+            thread->setMethod(2);
+        }
         for (int j = int(i * m_bonds.size() / double(free_threads)); j < int((i + 1) * m_bonds.size() / double(free_threads)); ++j)
             thread->addBond(m_bonds[j]);
 
@@ -263,16 +306,23 @@ double ForceField::Calculate(bool gradient, bool verbose)
         angle_energy += m_stored_threads[i]->AngleEnergy();
         dihedral_energy += m_stored_threads[i]->DihedralEnergy();
         inversion_energy += m_stored_threads[i]->InversionEnergy();
-        vdw_energy += m_stored_threads[i]->VdWEnergy();
-        rep_energy += m_stored_threads[i]->RepEnergy();
+        if (m_stored_threads[i]->Type() != 3)
+            vdw_energy += m_stored_threads[i]->VdWEnergy();
+        else
+            h4_energy += m_stored_threads[i]->VdWEnergy();
+        if (m_stored_threads[i]->Type() != 3)
+            rep_energy += m_stored_threads[i]->RepEnergy();
+        else
+            hh_energy += m_stored_threads[i]->RepEnergy();
         // eq_energy += m_stored_threads[i]->RepEnergy();
 
         m_gradient += m_stored_threads[i]->Gradient();
     }
 
-    energy = bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy + rep_energy + eq_energy;
+    energy = m_e0 + bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy + rep_energy + eq_energy + h4_energy + hh_energy;
     if (verbose) {
         std::cout << "Total energy " << energy << " Eh. Sum of " << std::endl
+                  << "E0 (from QMDFF) " << m_e0 << " Eh" << std::endl
                   << "Bond Energy " << bond_energy << " Eh" << std::endl
                   << "Angle Energy " << angle_energy << " Eh" << std::endl
                   << "Dihedral Energy " << dihedral_energy << " Eh" << std::endl

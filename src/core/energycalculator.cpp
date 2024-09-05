@@ -41,6 +41,7 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
     : m_method(method)
 
 {
+    m_controller = controller;
     if (controller.contains("param_file")) {
         m_param_file = controller["param_file"];
     }
