@@ -124,21 +124,21 @@ inline Vector OptimiseDipoleScaling(const std::vector<Molecule>& conformers, Vec
 
 inline Matrix DipoleScalingCalculation(const std::vector<Molecule>& conformers)
 {
-    std::vector<Position> y;
-    std::vector<Geometry> F;
-    auto para_size = conformers[0].AtomCount();
-    auto conformer_size = conformers.size();
-    Matrix FTF(para_size, para_size);
-    Vector FTy(para_size);
-    for (const auto& conformer : conformers) {
-        y.push_back(conformer.getDipole()); // TODO Einheit überprüfen
-        F.push_back(conformer.ChargeDistribution());
+    std::vector<Position> y; //Dipole moments
+    std::vector<Geometry> F; // Geometry multiplied with partial Charge
+    const auto para_size = conformers[0].AtomCount();
+    const auto conformer_size = conformers.size();
+    Matrix FTF = Matrix::Zero(para_size, para_size);
+    Matrix FTy = Matrix::Zero(para_size, 1);
+    for (int i = 0; i < conformer_size; ++i) {
+        y.push_back(conformers[i].getDipole()); // in eA
+        F.push_back(conformers[i].ChargeDistribution());
     }
-
-    for (int i = 0; i < para_size; ++i) {
-        for (int j = 0; j < para_size; ++j) {
-            for (auto& k : F)
-                FTF(i, j) += k(i, 0) * k(j, 0) + k(i, 1) * k(j, 1) + k(i, 2) * k(j, 2);
+    for (int k = 0; k < conformer_size; ++k) {
+        for (int i = 0; i < para_size; ++i) {
+            for (int j = 0; j < para_size; ++j) {
+                FTF(i, j) += F[k](i, 0) * F[k](j, 0) + F[k](i, 1) * F[k](j, 1) + F[k](i, 2) * F[k](j, 2);
+            }
         }
     }
 
@@ -149,9 +149,7 @@ inline Matrix DipoleScalingCalculation(const std::vector<Molecule>& conformers)
     }
 
     Matrix Theta(para_size, 1);
+    Theta = FTF.colPivHouseholderQr().solve(FTy);
 
-    Theta = FTF.inverse() * FTy;
-
-    // inv(F.t@F)@(F.t@y);
     return Theta;
 }

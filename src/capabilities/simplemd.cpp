@@ -1123,7 +1123,12 @@ void SimpleMD::start()
         for (auto i = 0; i < m_natoms; i++) {
             dipole_scale.push_back(1);
         }
-        dipole_scale = {-0.0850725,1.2296, -0.490071,-0.389245,-0.41952,0.853822,-0.0850725,1.2296, -0.490071,-0.389245,-0.41952,0.853822};
+        dipole_scale = {1.56698,
+1.35181,
+1.51389,
+1.52117,
+1.50273,
+1.46733}; //from -dipole LM
 
         json blob;
         //calc partialCharge with gnf2-xtb
@@ -1133,25 +1138,34 @@ void SimpleMD::start()
         m_molecule.setPartialCharges(interface.Charges()); // calc Partial Charges and give it to mol
         m_molecule.setDipole(interface.Dipole()*au);
 
+        Molecule mol;
+
         //calc Dipoles from partial Charges and Scaling
         auto dipoles = m_molecule.CalculateDipoleMoments(dipole_scale);
         int i=0;
+
         Position dipole_sum = {0,0,0};
         for (auto dipole : dipoles) {
-            //Calc Dipole of System from fragments
+            double charge = 0;
+            mol = m_molecule.getFragmentMolecule(i);
+
+            //dipole of system
             dipole_sum[0] += dipole[0];
             dipole_sum[1] += dipole[1];
             dipole_sum[2] += dipole[2];
 
-            std::cout  << "Dipole (Fragment" << i <<  "): "
-                               << dipole[0]  << " "
-                               << dipole[1]  << " "
-                               << dipole[2]  << " D = "
-                               << dipole.norm() << " "
-                               << std::endl;
+            std::cout  << "Fragment" << i << "\nDipole classic " << " = " << dipole.norm() << std::endl;
+            std::cout << "p.Charge: " << std::endl;
+            for (auto p : mol.getPartialCharges()) {
+                std::cout << p << std::endl;
+                charge += p;
+            }
+            std::cout << "charge: " << charge << std::endl;
             i++;
         }
-        std::cout << "Dipole Sum: " << dipole_sum.norm() << " XTB2-Dipol: " << m_molecule.getDipole().norm() << std::endl;
+
+        std::cout << "Dipole Sum: " << dipole_sum.norm()
+        << " XTB2-Dipole: " << m_molecule.getDipole().norm() << "\n---------" << std::endl;
 
         /////////// Dipole calc
 

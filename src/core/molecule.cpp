@@ -698,13 +698,16 @@ void Molecule::LoadMolecule(const Mol* molecule)
 
 Molecule Molecule::getFragmentMolecule(int fragment) const
 {
-    // Lets make that one day faster, but not today ...
+    // Let's make that one day faster, but not today ...
+    // TODO inherit some more properties ...
     Molecule result;
+    std::vector<double> pCharges;
     auto atoms = GetFragments()[fragment];
     for (auto atom : atoms) {
         result.addPair(Atom(atom));
+        pCharges.push_back(m_charges[atom]);
     }
-    //result.setPartialCharges(m_charges[atoms]);
+    result.setPartialCharges(pCharges);
     return result;
 }
 Geometry Molecule::getGeometry(bool protons) const

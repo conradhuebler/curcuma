@@ -46,6 +46,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <oneapi/tbb/task_group.h>
 #include <string>
 #include <vector>
 
@@ -950,9 +951,8 @@ int main(int argc, char **argv) {
                       << std::endl;*/
 
             std::vector<Molecule> conformers;
-            Molecule mol;
             while (!file.AtEnd()) { // calculation and output dipole moment
-                mol = file.Next(); // load Molecule
+                Molecule mol = file.Next(); // load Molecule
                 mol.Center(false);
 
                 EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb and give
@@ -961,33 +961,41 @@ int main(int argc, char **argv) {
 
                 mol.setPartialCharges(interface.Charges()); // calc Partial Charges and give it to mol
                 auto charges = interface.Charges(); // dec and init charges
-                mol.setDipole(interface.Dipole() * au);
+                mol.setDipole(interface.Dipole() * au); // in eA
 
                 /* Output Dipole from XTB2
-                 *std::cout << mol.AtomCount() << "\n"
+                 std::cout << mol.AtomCount() << "\n"
                           << "Dipole  "
                           << mol.getDipole()[0]  << " "
                           << mol.getDipole()[1]  << " "
-                          << mol.getDipole()[2]  << " "
+                          << mol.getDipole()[2]  << " : "
+                          << mol.getDipole().norm() << "\n"
                           << std::endl;*/
 
                 conformers.push_back(mol);
+                mol.appendDipoleFile(file.Basename() + ".dip");
             }
-
-            Vector scaling(mol.AtomCount());
-            for (int i = 0; i < mol.AtomCount(); ++i) {
-                scaling(i) = 1;
-            }
-            auto result = OptimiseDipoleScaling(conformers, scaling);
-            std::cout << "LM-Scaler:\n"
-                      << result << "\n"
-                      << std::endl;
+            Molecule mol = conformers.at(0);
 
             Matrix Theta(mol.AtomCount(), 1);
             Theta = DipoleScalingCalculation(conformers);
             std::cout << "Analytic-Scaler:\n"
                       << Theta << "\n"
                       << std::endl;
+
+            auto result = OptimiseDipoleScaling(conformers, Theta);
+            std::cout << "LM-Scaler:\n"
+                      << result << "\n"
+                      << std::endl;
+            double r2_LM = 0;
+            double r2_classic = 0;
+
+            std::cout << "LM : classic" << std::endl;
+            for (const auto& conformer : conformers) {
+                r2_LM += std::pow(conformer.CalculateDipoleMoment(result).norm() - conformer.getDipole().norm(), 2);
+                r2_classic += std::pow(conformer.CalculateDipoleMoment(Theta).norm() -conformer.getDipole().norm(), 2);
+            }
+            std::cout << r2_LM << " " << r2_classic << std::endl;
 
         } else if (strcmp(argv[1], "-stride") == 0) {
 
