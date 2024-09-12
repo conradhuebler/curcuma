@@ -304,10 +304,10 @@ void ForceFieldThread::CalculateUFFvdWContribution()
         double ij = (i - j).norm() * m_au;
         double pow6 = pow((vdw.r0_ij / ij), 6);
 
-        m_vdw_energy += vdw.C_ij * (-2 * pow6 * m_vdw_scaling) * m_final_factor;
-        m_rep_energy += vdw.C_ij * (pow6 * pow6 * m_rep_scaling) * m_final_factor;
+        m_vdw_energy += vdw.C_ij * (-2 * pow6 * m_vdw_scaling) * m_final_factor / 100;
+        m_rep_energy += vdw.C_ij * (pow6 * pow6 * m_rep_scaling) * m_final_factor / 100;
         if (m_calculate_gradient) {
-            double diff = 12 * vdw.C_ij * (pow6 * m_vdw_scaling - pow6 * pow6 * m_rep_scaling) / (ij * ij) * m_final_factor;
+            double diff = 12 * vdw.C_ij * (pow6 * m_vdw_scaling - pow6 * pow6 * m_rep_scaling) / (ij * ij) * m_final_factor / 100;
             m_gradient(vdw.i, 0) += diff * (i(0) - j(0));
             m_gradient(vdw.i, 1) += diff * (i(1) - j(1));
             m_gradient(vdw.i, 2) += diff * (i(2) - j(2));

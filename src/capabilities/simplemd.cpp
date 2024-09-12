@@ -49,9 +49,11 @@
 #endif
 #include "simplemd.h"
 
-BiasThread::BiasThread(const Molecule& reference, const json& rmsdconfig)
+BiasThread::BiasThread(const Molecule& reference, const json& rmsdconfig, bool nocolvarfile, bool nohillsfile)
     : m_reference(reference)
     , m_target(reference)
+    , m_nocolvarfile(nocolvarfile)
+    , m_nohillsfile(nohillsfile)
 {
     m_driver = RMSDDriver(rmsdconfig, true);
     m_config = rmsdconfig;
@@ -81,7 +83,7 @@ int BiasThread::execute()
         m_driver.setTarget(m_target);
         double rmsd = m_driver.BestFitRMSD();
         double expr = exp(-rmsd * rmsd * m_alpha);
-        double bias_energy = expr;
+        double bias_energy = expr * m_dT;
         factor = m_biased_structures[i].factor;
 
         if (!m_wtmtd)
@@ -99,24 +101,27 @@ int BiasThread::execute()
         bias_energy *= factor * m_k;
 
         m_current_bias += bias_energy;
-
-        std::ofstream colvarfile;
-        colvarfile.open("COLVAR_" + std::to_string(m_biased_structures[i].index), std::iostream::app);
-        colvarfile << m_currentStep << " " << rmsd << " " << bias_energy << " " << m_biased_structures[i].counter << " " << factor << std::endl;
-        colvarfile.close();
-
-        /*
-        std::ofstream hillsfile;
-        if (i == 0) {
-            hillsfile.open("HILLS", std::iostream::app);
-        } else {
-            hillsfile.open("HILLS_" + std::to_string(m_biased_structures[i].index), std::iostream::app);
+        if (m_nocolvarfile == false) {
+            std::ofstream colvarfile;
+            colvarfile.open("COLVAR_" + std::to_string(m_biased_structures[i].index), std::iostream::app);
+            colvarfile << m_currentStep << " " << rmsd << " " << bias_energy << " " << m_biased_structures[i].counter << " " << factor << std::endl;
+            colvarfile.close();
         }
-        hillsfile << m_currentStep << " " << rmsd << " " << m_alpha_rmsd << " " << m_k_rmsd << " " << "-1" << std::endl;
-        hillsfile.close();
+        /*
+        if(nohillsfile == false)
+        {
+            std::ofstream hillsfile;
+            if (i == 0) {
+                hillsfile.open("HILLS", std::iostream::app);
+            } else {
+                hillsfile.open("HILLS_" + std::to_string(m_biased_structures[i].index), std::iostream::app);
+            }
+            hillsfile << m_currentStep << " " << rmsd << " " << m_alpha_rmsd << " " << m_k_rmsd << " " << "-1" << std::endl;
+            hillsfile.close();
+        }
         */
 
-        double dEdR = -2 * m_alpha * m_k / m_atoms * exp(-rmsd * rmsd * m_alpha) * factor;
+        double dEdR = -2 * m_alpha * m_k / m_atoms * exp(-rmsd * rmsd * m_alpha) * factor * m_dT;
 
         m_gradient += m_driver.Gradient() * dEdR;
         m_counter += m_biased_structures[i].counter;
@@ -206,6 +211,9 @@ void SimpleMD::LoadControlJson()
     m_wtmtd = Json2KeyWord<bool>(m_defaults, "wtmtd");
     m_rmsd_ref_file = Json2KeyWord<std::string>(m_defaults, "rmsd_ref_file");
     m_rmsd_fix_structure = Json2KeyWord<bool>(m_defaults, "rmsd_fix_structure");
+    m_nocolvarfile = Json2KeyWord<bool>(m_defaults, "noCOLVARfile");
+    m_nohillsfile = Json2KeyWord<bool>(m_defaults, "noHILSfile");
+
     m_rmsd_atoms = Json2KeyWord<std::string>(m_defaults, "rmsd_atoms");
 
     m_writerestart = Json2KeyWord<int>(m_defaults, "writerestart");
@@ -356,7 +364,7 @@ bool SimpleMD::Initialise()
 
     m_gradient = std::vector<double>(3 * m_natoms, 0);
     m_virial = std::vector<double>(3 * m_natoms, 0);
-
+    m_atom_temp = std::vector<std::vector<double>>(m_natoms);
     if(m_opt)
     {
         json js = CurcumaOptJson;
@@ -463,7 +471,7 @@ bool SimpleMD::Initialise()
         config["silent"] = true;
         config["reorder"] = false;
         for (int i = 0; i < m_threads; ++i) {
-            BiasThread* thread = new BiasThread(m_rmsd_mtd_molecule, config);
+            BiasThread* thread = new BiasThread(m_rmsd_mtd_molecule, config, m_nocolvarfile, m_nohillsfile);
             thread->setDT(m_rmsd_DT);
             thread->setk(m_k_rmsd);
             thread->setalpha(m_alpha_rmsd);
@@ -1599,21 +1607,21 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
         m_bias_pool->Reset();
     }
     rmsd_reference = m_bias_threads[0]->RMSDReference();
-    std::ofstream colvarfile;
-    colvarfile.open("COLVAR", std::iostream::app);
-    colvarfile << m_currentStep << " ";
-    m_rmsd_mtd_molecule.setGeometry(current_geometry);
-    if (m_rmsd_fragment_count < 2)
-        colvarfile << rmsd_reference << " ";
+    if (m_nocolvarfile == false) {
+        std::ofstream colvarfile;
+        colvarfile.open("COLVAR", std::iostream::app);
+        colvarfile << m_currentStep << " ";
+        m_rmsd_mtd_molecule.setGeometry(current_geometry);
+        if (m_rmsd_fragment_count < 2)
+            colvarfile << rmsd_reference << " ";
 
-    for(int i = 0; i < m_rmsd_fragment_count; ++i)
-        for(int j = 0; j < i; ++j)
-        {
-            colvarfile << (m_rmsd_mtd_molecule.Centroid(true, i) -  m_rmsd_mtd_molecule.Centroid(true,j)).norm()<< " ";
-        }
-    colvarfile << current_bias  << " "  << std::endl;
-    colvarfile.close();
-
+        for (int i = 0; i < m_rmsd_fragment_count; ++i)
+            for (int j = 0; j < i; ++j) {
+                colvarfile << (m_rmsd_mtd_molecule.Centroid(true, i) - m_rmsd_mtd_molecule.Centroid(true, j)).norm() << " ";
+            }
+        colvarfile << current_bias << " " << std::endl;
+        colvarfile.close();
+    }
     m_bias_energy += current_bias;
 
     if (current_bias * m_rmsd_econv < m_bias_structure_count && m_rmsd_fix_structure == false) {
@@ -2086,6 +2094,29 @@ void SimpleMD::CSVR()
     static std::normal_distribution<> d{ 0, 1 };
     static std::chi_squared_distribution<float> dchi{ m_dof };
 
+    /*
+        if(int(m_step * m_dT) % 1 == 0)
+        {
+        for (int i = 0; i < m_natoms; ++i) {
+            m_atom_temp[i].push_back(m_mass[i]* (m_velocities[3 * i + 0] *m_velocities[3 * i + 0]
+                + m_velocities[3 * i + 1] *m_velocities[3 * i + 1]
+                                         + m_velocities[3 * i + 2]*m_velocities[3 * i + 2])/(kb_Eh * m_dof));
+            double T = 0;
+            double R = d(gen);
+            double SNf = dchi(gen);
+            for(int j = 0; j < m_atom_temp[i].size(); ++j)
+                T += m_atom_temp[i][j];
+            if(m_atom_temp[i].size() > 1000)
+                m_atom_temp[i].erase(m_atom_temp[i].begin());
+            double c = exp(-(T / 2.0 * m_respa) / m_coupling);
+            double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (m_dof * m_Ekin) + 2 * R * sqrt(c * (1 - c) * Ekin_target / (m_dof * m_Ekin));
+            m_Ekin_exchange += m_Ekin * (alpha2 - 1);
+            double alpha = sqrt(alpha2);
+            m_velocities[3 * i + 0] *= alpha;
+            m_velocities[3 * i + 1] *= alpha;
+            m_velocities[3 * i + 2] *= alpha;
+        }
+        }else{ */
     double R = d(gen);
     double SNf = dchi(gen);
     double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (m_dof * m_Ekin) + 2 * R * sqrt(c * (1 - c) * Ekin_target / (m_dof * m_Ekin));
@@ -2095,7 +2126,10 @@ void SimpleMD::CSVR()
         m_velocities[3 * i + 0] *= alpha;
         m_velocities[3 * i + 1] *= alpha;
         m_velocities[3 * i + 2] *= alpha;
+
+        m_atom_temp[i].push_back(m_mass[i] * (m_velocities[3 * i + 0] * m_velocities[3 * i + 0] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]) / (kb_Eh * m_dof));
     }
+    //    }
 }
 
 void SimpleMD::Anderson()

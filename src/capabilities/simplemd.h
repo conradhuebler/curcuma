@@ -51,7 +51,7 @@ struct BiasStructure {
 
 class BiasThread : public CxxThread {
 public:
-    BiasThread(const Molecule& reference, const json& rmsdconfig);
+    BiasThread(const Molecule& reference, const json& rmsdconfig, bool nocolvarfile, bool nohillsfile);
     ~BiasThread();
 
     virtual int execute() override;
@@ -102,6 +102,8 @@ public:
     inline void setk(double k) { m_k = k; }
     inline void setalpha(double alpha) { m_alpha = alpha; }
     inline void setDT(double DT) { m_DT = DT; }
+    inline void setdT(double dT) { m_dT = dT; }
+
     inline void setEnergyConv(double rmsd_econv) { m_rmsd_econv = rmsd_econv; }
     inline void setWTMTD(bool wtmtd) { m_wtmtd = wtmtd; }
     inline int Counter() const { return m_counter; }
@@ -114,9 +116,9 @@ private:
     json m_config;
     Molecule m_reference, m_target;
     Geometry m_gradient;
-    double m_k, m_alpha, m_DT, m_currentStep, m_rmsd_reference, m_current_bias, m_rmsd_econv;
+    double m_k, m_alpha, m_DT, m_currentStep, m_rmsd_reference, m_current_bias, m_rmsd_econv, m_dT = 1;
     int m_counter = 0, m_atoms = 0;
-    bool m_wtmtd = false;
+    bool m_wtmtd = false, m_nocolvarfile = false, m_nohillsfile = false;
 };
 
 static json CurcumaMDJson{
@@ -191,7 +193,10 @@ static json CurcumaMDJson{
     { "rmsd_fix_structure", false },
     { "rmsd_atoms", "-1" },
     { "chainlength", 3 },
-    { "anderson", 0.001 }
+    { "anderson", 0.001 },
+    { "noCOLVARfile", false },
+    { "noHILSfile", false },
+
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -361,12 +366,16 @@ private:
     bool m_wtmtd = false;
     bool m_rmsd_fix_structure = false;
     bool m_rattle_dynamic_tol = false;
+    bool m_nocolvarfile = false;
+    bool m_nohillsfile = false;
+
     int m_mtd_dT = -1;
     int m_seed = -1;
     int m_time_step = 0;
     int m_dof = 0;
     int m_mtd_time = 0, m_loop_time = 0;
 
+    std::vector<std::vector<double>> m_atom_temp;
     std::vector<double> m_zeta; // Thermostatische Variablen
     std::vector<double> m_xi; // Zeitderivate von zeta
     std::vector<double> m_Q; // Trägheiten der Thermostatkette
