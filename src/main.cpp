@@ -917,38 +917,15 @@ int main(int argc, char **argv) {
                 std::cerr << "Please use curcuma to optimise the dipole of molecules as follow:\ncurcuma -dipole molecule.xyz" << std::endl;
                 return 0;
             }
+
             FileIterator file(argv[2]);
+            // TODO: Add additional arguments...
+            // TODO: if -md then do first molecular dynamic to generate some conformers, then fit
+            // TODO: if -scale <array of int> then calc dipole with scalor and xtb2
+            // TODO: if -methode <String> then change methode
 
-            // TODO: if -md then do first molecular dynamic to generate some confomers, then fit
-
-            double target = 0, threshold = 1e-1, initial = 3, dx = 5e-1; // dec
-            bool target_set = false;
-            int maxiter = 10;
             json blob = controller["dipole"]; // declare blob as json,
-            if (blob.contains("target")) {
-                target = blob["target"];
-                target_set = true;
-            }
-            if (blob.contains("threshold")) {
-                threshold = blob["threshold"];
-            }
-            if (blob.contains("initial")) {
-                initial = blob["initial"];
-            }
-            if (blob.contains("maxiter")) {
-                maxiter = blob["maxiter"];
-            }
-            if (blob.contains("dx")) {
-                dx = blob["dx"];
-            }
 
-            /*std::cout << "Parameter: " << "\n"
-                      << "target " << target << "\n"
-                      << "threshold " << threshold << "\n"
-                      << "initial " << initial << "\n"
-                      << "maxiter " << maxiter << "\n"
-                      << "dx " << dx << "\n"
-                      << std::endl;*/
 
             std::vector<Molecule> conformers;
             while (!file.AtEnd()) { // calculation and output dipole moment
@@ -973,29 +950,38 @@ int main(int argc, char **argv) {
                           << std::endl;*/
 
                 conformers.push_back(mol);
-                mol.appendDipoleFile(file.Basename() + ".dip");
+                //mol.appendDipoleFile(file.Basename() + ".dip");
             }
-            Molecule mol = conformers.at(0);
+            Molecule mol = conformers.at(0); // molecule in ground state
 
-            Matrix Theta(mol.AtomCount(), 1);
-            Theta = DipoleScalingCalculation(conformers);
+            std::cout << "\nxtb2-Dipole: " << mol.getDipole().norm() << std::endl << std::endl;
+
+            Matrix theta (mol.AtomCount(), 1);
+            theta = DipoleScalingCalculation(conformers);
             std::cout << "Analytic-Scaler:\n"
-                      << Theta << "\n"
+                      << theta << "\n"
+                      << "Dipole: " << mol.CalculateDipoleMoment(theta).norm() << std::endl
                       << std::endl;
 
-            auto result = OptimiseDipoleScaling(conformers, Theta);
+
+            auto result = OptimiseDipoleScaling(conformers, theta);
             std::cout << "LM-Scaler:\n"
                       << result << "\n"
+                      << "Dipole: " << mol.CalculateDipoleMoment(result).norm() << std::endl
                       << std::endl;
             double r2_LM = 0;
             double r2_classic = 0;
+            double r2_LM_dn = 0;
+            double r2_classic_dn = 0;
 
-            std::cout << "LM : classic" << std::endl;
+            std::cout << "LM : classic : LM_dn : classic_dn" << std::endl;
             for (const auto& conformer : conformers) {
                 r2_LM += std::pow(conformer.CalculateDipoleMoment(result).norm() - conformer.getDipole().norm(), 2);
-                r2_classic += std::pow(conformer.CalculateDipoleMoment(Theta).norm() -conformer.getDipole().norm(), 2);
+                r2_classic += std::pow(conformer.CalculateDipoleMoment(theta).norm() - conformer.getDipole().norm(), 2);
+                r2_LM_dn += std::pow((conformer.CalculateDipoleMoment(result) - conformer.getDipole()).norm(), 2);
+                r2_classic_dn += std::pow((conformer.CalculateDipoleMoment(theta) - conformer.getDipole()).norm(), 2);
             }
-            std::cout << r2_LM << " " << r2_classic << std::endl;
+            std::cout << r2_LM << " : " << r2_classic << " : " << r2_LM_dn << " : " << r2_classic_dn << std::endl;
 
         } else if (strcmp(argv[1], "-stride") == 0) {
 

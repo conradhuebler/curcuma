@@ -937,6 +937,7 @@ std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>
             dipole(2) += m_charges[i] * (m_geometry(i, 2) - pos(2)) * scale;
             //  std::cout << scale << " ";
         }
+
         // std::cout << std::endl;
         dipole_moments.push_back(dipole);
     }

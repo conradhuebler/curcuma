@@ -1123,15 +1123,29 @@ void SimpleMD::start()
         for (auto i = 0; i < m_natoms; i++) {
             dipole_scale.push_back(1);
         }
-        dipole_scale = {1.56698,
-1.35181,
-1.51389,
-1.52117,
-1.50273,
-1.46733}; //from -dipole LM
+        dipole_scale = {
+            1.16126,//Wasser
+            1.44224,//*
+            1.44256,//*
+            1.56764,//Methanol
+            1.35206,//*
+            1.51374,//*
+            1.52110,//*
+            1.50372,//*
+            1.46760,//*
+            1.61581,//Ethanol
+            1.86773,//*
+            1.54639,//*
+            1.60913,//*
+            1.62602,//*
+            1.37539,//*
+            1.50891,//*
+            1.53962,//*
+            1.46714//*
+        }; // from -dipole LM
 
         json blob;
-        //calc partialCharge with gnf2-xtb
+        // calc partialCharge with gnf2-xtb
         EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb
         interface.setMolecule(m_molecule); // set molecule for calc
         interface.CalculateEnergy(false, true); // calc energy and charges and dipole moment
@@ -1146,7 +1160,7 @@ void SimpleMD::start()
 
         Position dipole_sum = {0,0,0};
         for (auto dipole : dipoles) {
-            double charge = 0;
+            // double frag_charge = 0;
             mol = m_molecule.getFragmentMolecule(i);
 
             //dipole of system
@@ -1154,18 +1168,26 @@ void SimpleMD::start()
             dipole_sum[1] += dipole[1];
             dipole_sum[2] += dipole[2];
 
-            std::cout  << "Fragment" << i << "\nDipole classic " << " = " << dipole.norm() << std::endl;
-            std::cout << "p.Charge: " << std::endl;
+
+            //std::cout << "Fragment" << i << std::endl;
+            std::cout << dipole.norm() << " " << mol.getDipole().norm() << " ";
+            //std::cout << dipole[0] << " " << dipole[1] << " " << dipole[2] << std::endl;
+            //std::cout << mol.getDipole()[0] << " " << mol.getDipole()[1] << " " << mol.getDipole()[2] << std::endl;
+
+            /*std::cout << "p.Charge: " << std::endl;
             for (auto p : mol.getPartialCharges()) {
                 std::cout << p << std::endl;
-                charge += p;
+                frag_charge += p;
             }
-            std::cout << "charge: " << charge << std::endl;
+            std::cout << "charge: " << frag_charge << std::endl;*/
             i++;
         }
-
-        std::cout << "Dipole Sum: " << dipole_sum.norm()
-        << " XTB2-Dipole: " << m_molecule.getDipole().norm() << "\n---------" << std::endl;
+        Position d = m_molecule.getDipole();
+        std::cout << std::endl;
+        /*std::cout << std::endl;
+        std::cout << "Dipole Sum: " << dipole_sum.norm() << std::endl << dipole_sum[0] << " " << dipole_sum[1] << " " << dipole_sum[2] << std::endl;
+        std::cout << "XTB2-Dipole: " << d.norm() << std::endl << d[0] << " " << d[1] << " " << d[2] << std::endl
+        << "---------" << std::endl;*/
 
         /////////// Dipole calc
 
