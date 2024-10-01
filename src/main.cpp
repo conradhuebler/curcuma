@@ -919,9 +919,10 @@ int main(int argc, char **argv) {
             }
 
             FileIterator file(argv[2]);
+            auto lm_basename = file.Basename();
             // TODO: Add additional arguments...
             // TODO: if -md then do first molecular dynamic to generate some conformers, then fit
-            // TODO: if -scale <array of int> then calc dipole with scalor and xtb2
+            // TODO: if -scale <array of int> then calc dipole with scalingfactor and xtb2
             // TODO: if -methode <String> then change methode
 
             json blob = controller["dipole"]; // declare blob as json,
@@ -963,25 +964,61 @@ int main(int argc, char **argv) {
                       << "Dipole: " << mol.CalculateDipoleMoment(theta).norm() << std::endl
                       << std::endl;
 
+            Vector one = Eigen::VectorXd::Ones(mol.AtomCount());
 
-            auto result = OptimiseDipoleScaling(conformers, theta);
-            std::cout << "LM-Scaler:\n"
+            auto result = OptimiseDipoleScaling(conformers, one);
+            std::cout << "LM-Scaler 1 as initial guess:\n"
                       << result << "\n"
                       << "Dipole: " << mol.CalculateDipoleMoment(result).norm() << std::endl
                       << std::endl;
-            double r2_LM = 0;
-            double r2_classic = 0;
-            double r2_LM_dn = 0;
-            double r2_classic_dn = 0;
 
-            std::cout << "LM : classic : LM_dn : classic_dn" << std::endl;
-            for (const auto& conformer : conformers) {
-                r2_LM += std::pow(conformer.CalculateDipoleMoment(result).norm() - conformer.getDipole().norm(), 2);
-                r2_classic += std::pow(conformer.CalculateDipoleMoment(theta).norm() - conformer.getDipole().norm(), 2);
-                r2_LM_dn += std::pow((conformer.CalculateDipoleMoment(result) - conformer.getDipole()).norm(), 2);
-                r2_classic_dn += std::pow((conformer.CalculateDipoleMoment(theta) - conformer.getDipole()).norm(), 2);
+            auto result1 = OptimiseDipoleScaling(conformers, theta);
+            std::cout << "LM-Scaler theta as initial guess:\n"
+                      << result1 << "\n"
+                      << "Dipole: " << mol.CalculateDipoleMoment(result1).norm() << std::endl
+                      << std::endl;
+
+
+            auto result2 = OptimiseDipoleScaling(conformers, theta, true);
+            std::cout << "LM-Scaler with bond true:\n"
+                      << result2 << "\n"
+                      << "Dipole: " << mol.CalculateDipoleMoment(result2, true).norm() << std::endl
+                      << std::endl;
+
+            double r2_anal = 0;
+            double r2_LM = 0;
+            double r2_LM1 = 0;
+            double r2_LM2 = 0;
+            double r2_anal_dn = 0;
+            double r2_LM_dn = 0;
+            double r2_LM1_dn = 0;
+            double r2_LM2_dn = 0;
+
+
+            for (const auto& conf : conformers) {
+                r2_anal += std::pow(conf.CalculateDipoleMoment(theta).norm() - conf.getDipole().norm(), 2);
+                r2_LM += std::pow(conf.CalculateDipoleMoment(result).norm() - conf.getDipole().norm(), 2);
+                r2_LM1 += std::pow(conf.CalculateDipoleMoment(result1).norm() - conf.getDipole().norm(), 2);
+                r2_LM2 += std::pow(conf.CalculateDipoleMoment(result2).norm() - conf.getDipole().norm(), 2);
+                /*r2_anal_dn += std::pow((conf.CalculateDipoleMoment(theta) - conf.getDipole()).norm(), 2);
+                r2_LM_dn += std::pow((conf.CalculateDipoleMoment(result) - conf.getDipole()).norm(), 2);
+                r2_LM1_dn += std::pow((conf.CalculateDipoleMoment(result1) - conf.getDipole()).norm(), 2);
+                r2_LM2_dn += std::pow((conf.CalculateDipoleMoment(result2) - conf.getDipole()).norm(), 2);*/
             }
-            std::cout << r2_LM << " : " << r2_classic << " : " << r2_LM_dn << " : " << r2_classic_dn << std::endl;
+            std::cout << "Residuals:" << std::endl
+            << "anal: " << r2_anal << std::endl
+            << "LM 1 as initial guess: " << r2_LM << std::endl
+            << "LM theta as initial guess: " << r2_LM1 << std::endl
+            << "LM bond true: " << r2_LM2 << std::endl;
+
+            //TODO add JSON output
+            std::vector<double> vec_theta(theta.data(), theta.data() + theta.rows() * theta.cols());
+            json scaling_vector;
+            scaling_vector["scaling_vector"] = Tools::DoubleVector2String(vec_theta);
+            std::ofstream out(lm_basename + "_scaling_vector.json");
+            out << scaling_vector << std::endl;
+
+
 
         } else if (strcmp(argv[1], "-stride") == 0) {
 

@@ -178,7 +178,8 @@ class Molecule
     /*! \brief Methode to calculate the dipole moments of whole structure
      * unit of dipol is electron times angstron
      */
-    Position CalculateDipoleMoment(const Vector& scaling = Vector()) const;
+    Position CalculateDipoleMoment(const Vector& scaling = Vector(), bool bond = false) const;
+    Position CalculateDipoleMoment(const std::vector<double>& scaling = std::vector<double>(), bool bond = false) const;
 
     Geometry ChargeDistribution() const;
 

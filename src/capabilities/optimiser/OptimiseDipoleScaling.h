@@ -61,13 +61,14 @@ struct OptDipoleFunctor : TFunctor<double> {
         // calculation of residuals
         for (int i = 0; i < m_conformers.size(); ++i) {
             auto conf = m_conformers.at(i);
-            fvec(i) = (conf.getDipole() - conf.CalculateDipoleMoment(scaling)).norm();
+            fvec(i) = (conf.getDipole() - conf.CalculateDipoleMoment(scaling, m_bond)).norm();
         }
         return 0;
     }
     int no_parameter;
     int no_points;
     std::vector<Molecule> m_conformers;
+    bool m_bond;
 
     int inputs() const { return no_parameter; }
     int values() const { return no_points; }
@@ -75,10 +76,11 @@ struct OptDipoleFunctor : TFunctor<double> {
 
 struct OptDipoleFunctorNumericalDiff : Eigen::NumericalDiff<OptDipoleFunctor> {};
 
-inline Vector OptimiseDipoleScaling(const std::vector<Molecule>& conformers, Vector scaling) {
+inline Vector OptimiseDipoleScaling(const std::vector<Molecule>& conformers, Vector scaling, const bool bond = false) {
 
-    OptDipoleFunctor functor(6, conformers.size());
+    OptDipoleFunctor functor(2, conformers.size());
     functor.m_conformers = conformers;
+    functor.m_bond = bond;
     Eigen::NumericalDiff numDiff(functor);
     Eigen::LevenbergMarquardt lm(numDiff);
 
@@ -93,13 +95,13 @@ inline Vector OptimiseDipoleScaling(const std::vector<Molecule>& conformers, Vec
 
     Eigen::LevenbergMarquardtSpace::Status status = lm.minimizeInit(scaling);
 
-    int MaxIter = 3000;
+    constexpr int MaxIter = 3000;
     Vector old_param = scaling;
 
     for (int iter = 0; iter < MaxIter; ++iter) {
         status = lm.minimizeOneStep(scaling);
 
-        if ((old_param - scaling).norm() < 1e-5)
+        if ((old_param - scaling).norm() < 1e-6)
             break;
 
         old_param = scaling;
@@ -134,8 +136,7 @@ inline Matrix DipoleScalingCalculation(const std::vector<Molecule>& conformers)
         }
     }
 
-    Matrix Theta(para_size, 1);
-    Theta = FTF.colPivHouseholderQr().solve(FTy);
+    Matrix Theta = FTF.colPivHouseholderQr().solve(FTy);
 
     return Theta;
 }
