@@ -68,7 +68,7 @@ BiasThread::~BiasThread()
 
 int BiasThread::execute()
 {
-    if (m_biased_structures.size() == 0)
+    if (m_biased_structures.empty())
         return 0;
     m_current_bias = 0;
     m_counter = 0;
@@ -141,7 +141,7 @@ std::vector<json> BiasThread::getBias() const
     return bias;
 }
 
-SimpleMD::SimpleMD(const json& controller, bool silent)
+SimpleMD::SimpleMD(const json& controller, const bool silent)
     : CurcumaMethod(CurcumaMDJson, controller, silent)
 {
     UpdateController(controller);
@@ -150,8 +150,8 @@ SimpleMD::SimpleMD(const json& controller, bool silent)
 
 SimpleMD::~SimpleMD()
 {
-    for (int i = 0; i < m_unique_structures.size(); ++i)
-        delete m_unique_structures[i];
+    for (const auto & m_unique_structure : m_unique_structures)
+        delete m_unique_structure;
     // delete m_bias_pool;
 }
 
@@ -173,10 +173,10 @@ void SimpleMD::LoadControlJson()
     m_print = Json2KeyWord<int>(m_defaults, "print");
     m_max_top_diff = Json2KeyWord<int>(m_defaults, "MaxTopoDiff");
     m_seed = Json2KeyWord<int>(m_defaults, "seed");
-    m_threads = Json2KeyWord<double>(m_defaults, "threads");
+    m_threads = Json2KeyWord<int>(m_defaults, "threads");
 
     m_rmsd = Json2KeyWord<double>(m_defaults, "rmsd");
-    m_hmass = Json2KeyWord<double>(m_defaults, "hmass");
+    m_hmass = Json2KeyWord<int>(m_defaults, "hmass");
 
     m_impuls = Json2KeyWord<double>(m_defaults, "impuls");
     m_impuls_scaling = Json2KeyWord<double>(m_defaults, "impuls_scaling");
@@ -188,7 +188,6 @@ void SimpleMD::LoadControlJson()
     m_coupling = Json2KeyWord<double>(m_defaults, "coupling");
     m_anderson = Json2KeyWord<double>(m_defaults, "anderson");
 
-    m_threads = Json2KeyWord<double>(m_defaults, "threads");
     if (m_coupling < m_dT)
         m_coupling = m_dT;
 
@@ -211,6 +210,7 @@ void SimpleMD::LoadControlJson()
     m_writerestart = Json2KeyWord<int>(m_defaults, "writerestart");
     m_respa = Json2KeyWord<int>(m_defaults, "respa");
     m_dipole = Json2KeyWord<bool>(m_defaults, "dipole");
+    m_scaling_json = Json2KeyWord<std::string>(m_defaults, "scaling_json");
 
     m_writeXYZ = Json2KeyWord<bool>(m_defaults, "writeXYZ");
     m_writeinit = Json2KeyWord<bool>(m_defaults, "writeinit");
@@ -256,14 +256,14 @@ void SimpleMD::LoadControlJson()
         std::cout << "Energy Calculator will NOT be set up for each step! Fast energy calculation! This is the default way and should not be changed unless the energy and gradient calculation are unstable (happens with GFN2 and solvation)." << std::endl;
     }
 
-    if (Json2KeyWord<std::string>(m_defaults, "wall").compare("spheric") == 0) {
-        if (Json2KeyWord<std::string>(m_defaults, "wall_type").compare("logfermi") == 0) {
+    if (Json2KeyWord<std::string>(m_defaults, "wall") == "spheric") {
+        if (Json2KeyWord<std::string>(m_defaults, "wall_type") == "logfermi") {
             m_wall_type = 1;
             WallPotential = [=](double* grad) -> double {
                 this->m_wall_potential = this->ApplySphericLogFermiWalls(grad);
                 return m_wall_potential;
             };
-        } else if (Json2KeyWord<std::string>(m_defaults, "wall_type").compare("harmonic") == 0) {
+        } else if (Json2KeyWord<std::string>(m_defaults, "wall_type") == "harmonic") {
             m_wall_type = 1;
             WallPotential = [=](double* grad) -> double {
                 this->m_wall_potential = this->ApplySphericHarmonicWalls(grad);
@@ -275,14 +275,14 @@ void SimpleMD::LoadControlJson()
         }
         std::cout << "Setting up spherical potential" << std::endl;
 
-    } else if (Json2KeyWord<std::string>(m_defaults, "wall").compare("rect") == 0) {
-        if (Json2KeyWord<std::string>(m_defaults, "wall_type").compare("logfermi") == 0) {
+    } else if (Json2KeyWord<std::string>(m_defaults, "wall") == "rect") {
+        if (Json2KeyWord<std::string>(m_defaults, "wall_type") == "logfermi") {
             m_wall_type = 2;
             WallPotential = [=](double* grad) -> double {
                 this->m_wall_potential = this->ApplyRectLogFermiWalls(grad);
                 return m_wall_potential;
             };
-        } else if (Json2KeyWord<std::string>(m_defaults, "wall_type").compare("harmonic") == 0) {
+        } else if (Json2KeyWord<std::string>(m_defaults, "wall_type") == "harmonic") {
             m_wall_type = 2;
             WallPotential = [=](double* grad) -> double {
                 this->m_wall_potential = this->ApplyRectHarmonicWalls(grad);
@@ -298,7 +298,7 @@ void SimpleMD::LoadControlJson()
         WallPotential = [=](double* grad) -> double {
             return 0;
         };
-    m_rm_COM_step = m_rm_COM / m_dT;
+    m_rm_COM_step = static_cast<int>(m_rm_COM / m_dT);
 }
 
 bool SimpleMD::Initialise()
@@ -313,14 +313,14 @@ bool SimpleMD::Initialise()
     std::cout << "Random seed is " << m_seed << std::endl;
     gen.seed(m_seed);
 
-    if (m_initfile.compare("none") != 0) {
+    if (m_initfile != "none") {
         json md;
         std::ifstream restart_file(m_initfile);
         try {
             restart_file >> md;
-        } catch (nlohmann::json::type_error& e) {
+        } catch ([[maybe_unused]] nlohmann::json::type_error& e) {
             throw 404;
-        } catch (nlohmann::json::parse_error& e) {
+        } catch ([[maybe_unused]] nlohmann::json::parse_error& e) {
             throw 404;
         }
         LoadRestartInformation(md);
@@ -337,6 +337,28 @@ bool SimpleMD::Initialise()
         result_file.close();
     }
     m_natoms = m_molecule.AtomCount();
+
+    m_scaling_vector = std::vector<double>(m_natoms, 1);
+    if (m_scaling_json != "none") {
+        json scaling;
+        std::ifstream file(m_scaling_json);
+        try {
+            file >> scaling;
+        } catch ([[maybe_unused]] nlohmann::json::type_error& e) {
+            throw 404;
+        } catch ([[maybe_unused]] nlohmann::json::parse_error& e) {
+            throw 404;
+        }
+        std::string scaling_vector;
+        try {
+            scaling_vector = scaling["scaling_vector"];
+        } catch ([[maybe_unused]] json::type_error& e) {
+        }
+        if (!scaling_vector.empty()) {
+            m_scaling_vector = Tools::String2DoubleVec(scaling_vector, "|");
+        }
+    }
+
     m_molecule.setCharge(0);
     if (!m_nocenter) {
         std::cout << "Move stucture to the origin ... " << std::endl;
@@ -431,7 +453,7 @@ bool SimpleMD::Initialise()
         m_xi.resize(m_chain_length, 0.0);
         m_Q.resize(m_chain_length, 100); // Setze eine geeignete Masse für jede Kette
         for (int i = 0; i < m_chain_length; ++i) {
-            m_xi[i] = pow(10.0, double(i)) - 1;
+            m_xi[i] = pow(10.0, static_cast<double>(i)) - 1;
             m_Q[i] = pow(10, i) * kb_Eh * m_T0 * m_dof * 100;
             std::cout << m_xi[i] << "  " << m_Q[i] << std::endl;
         }
@@ -463,7 +485,7 @@ bool SimpleMD::Initialise()
         config["silent"] = true;
         config["reorder"] = false;
         for (int i = 0; i < m_threads; ++i) {
-            BiasThread* thread = new BiasThread(m_rmsd_mtd_molecule, config);
+            auto* thread = new BiasThread(m_rmsd_mtd_molecule, config);
             thread->setDT(m_rmsd_DT);
             thread->setk(m_k_rmsd);
             thread->setalpha(m_alpha_rmsd);
@@ -487,7 +509,7 @@ bool SimpleMD::Initialise()
             }
             m_bias_structure_count = index;
         } else {
-            if (m_rmsd_ref_file.compare("none") != 0) {
+            if (m_rmsd_ref_file != "none") {
                 std::cout << "Reading structure files from " << m_rmsd_ref_file << std::endl;
                 int index = 0;
 
@@ -523,7 +545,7 @@ void SimpleMD::InitConstrainedBonds()
                     std::pair<int, int> indicies(i, j);
                     std::pair<double, double> minmax(m_molecule.CalculateDistance(i, j) * m_molecule.CalculateDistance(i, j), m_molecule.CalculateDistance(i, j) * m_molecule.CalculateDistance(i, j));
                     std::pair<std::pair<int, int>, double> bond(indicies, m_molecule.CalculateDistance(i, j) * m_molecule.CalculateDistance(i, j));
-                    m_bond_constrained.push_back(std::pair<std::pair<int, int>, double>(bond));
+                    m_bond_constrained.emplace_back(bond);
 
                     // std::cout << i << " " << j << " " << bond.second << std::endl;
                 }
@@ -723,6 +745,8 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["average_Virial"] = m_average_virial_correction;
     restart["average_Wall"] = m_average_wall_potential;
 
+    restart["scaling_vector"] = Tools::DoubleVector2String(m_scaling_vector);
+
     restart["rattle"] = m_rattle;
     restart["rattle_maxiter"] = m_rattle_maxiter;
     restart["rattle_dynamic_tol"] = m_rattle_tolerance;
@@ -752,8 +776,8 @@ nlohmann::json SimpleMD::WriteRestartInformation()
         restart["counter"] = m_bias_structure_count;
         restart["rmsd_atoms"] = m_rmsd_atoms;
         std::vector<json> bias(m_bias_structure_count);
-        for (int i = 0; i < m_bias_threads.size(); ++i) {
-            for (const auto& stored_bias : m_bias_threads[i]->getBias()) {
+        for (const auto & m_bias_thread : m_bias_threads) {
+            for (const auto& stored_bias : m_bias_thread->getBias()) {
                 bias[stored_bias["index"]] = stored_bias;
             }
         }
@@ -777,10 +801,10 @@ bool SimpleMD::LoadRestartInformation()
         json restart;
         try {
             file >> restart;
-        } catch (json::type_error& e) {
+        } catch ([[maybe_unused]] json::type_error& e) {
             error++;
             continue;
-        } catch (json::parse_error& e) {
+        } catch ([[maybe_unused]] json::parse_error& e) {
             error++;
             continue;
         }
@@ -788,7 +812,7 @@ bool SimpleMD::LoadRestartInformation()
         json md;
         try {
             md = restart[MethodName()[0]];
-        } catch (json::type_error& e) {
+        } catch ([[maybe_unused]] json::type_error& e) {
             error++;
             continue;
         }
@@ -799,137 +823,142 @@ bool SimpleMD::LoadRestartInformation()
 
 bool SimpleMD::LoadRestartInformation(const json& state)
 {
-    std::string geometry, velocities, constrains, xi, Q;
+    std::string geometry, scaling_vector, velocities, constrains, xi, Q;
 
     try {
         m_method = state["method"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
     try {
         m_dT = state["dT"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
     try {
         m_maxtime = state["MaxTime"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
     try {
         m_rmrottrans = state["rmrottrans"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
     try {
         m_nocenter = state["nocenter"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
     try {
         m_COM = state["COM"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
     try {
         m_T0 = state["T"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
     try {
         m_currentStep = state["currentStep"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
 
     try {
         m_aver_Epot = state["average_Epot"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
 
     try {
         m_aver_Ekin = state["average_Ekin"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
 
     try {
         m_aver_Etot = state["average_Etot"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
     try {
         m_aver_Temp = state["average_T"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
 
     try {
         m_average_virial_correction = state["average_Virial"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
 
     try {
         m_average_wall_potential = state["average_Wall"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
 
     try {
         m_coupling = state["coupling"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
 
     try {
         m_respa = state["respa"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
 
     try {
         m_eta = state["eta"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
 
     try {
         m_thermostat = state["thermostat"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
 
     try {
         geometry = state["geometry"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
+    }
+
+    try {
+        scaling_vector = state["scaling_vector"];
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
 
     try {
         velocities = state["velocities"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
 
     try {
         xi = state["xi"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
     try {
         Q = state["Q"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
 
     try {
         m_mtd = state["mtd"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
 
     try {
         m_rattle = state["rattle"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
 
     try {
         m_rattle_tolerance = state["rattle_tolerance"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
 
     try {
         m_rattle_maxiter = state["rattle_maxiter"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
 
     try {
         m_rattle_dynamic_tol = state["rattle_dynamic_tol"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
 
     try {
         m_rattle_dynamic_tol_iter = state["rattle_dynamic_tol_iter"];
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
     try {
         m_rmsd_mtd = state["rmsd_mtd"];
@@ -944,25 +973,28 @@ bool SimpleMD::LoadRestartInformation(const json& state)
             m_rmsd_ref_file = state["rmsd_ref_file"];
             m_bias_json = state["bias"];
         }
-    } catch (json::type_error& e) {
+    } catch ([[maybe_unused]] json::type_error& e) {
     }
 
-    if (geometry.size()) {
+    if (!geometry.empty()) {
         m_current_geometry = Tools::String2DoubleVec(geometry, "|");
     }
-    if (velocities.size()) {
+    if (!scaling_vector.empty()) {
+        m_scaling_vector = Tools::String2DoubleVec(scaling_vector, "|");
+    }
+    if (!velocities.empty()) {
         m_velocities = Tools::String2DoubleVec(velocities, "|");
     }
 
-    if (xi.size()) {
+    if (!xi.empty()) {
         m_xi = Tools::String2DoubleVec(xi, "|");
     }
 
-    if (Q.size()) {
+    if (!Q.empty()) {
         m_Q = Tools::String2DoubleVec(Q, "|");
     }
 
-    m_restart = geometry.size() && velocities.size();
+    m_restart = !geometry.empty() && !velocities.empty();
 
     return true;
 }
@@ -972,28 +1004,28 @@ void SimpleMD::start()
     if (m_initialised == false)
         return;
     bool aborted = false;
-    auto unix_timestamp = std::chrono::seconds(std::time(NULL));
+    auto unix_timestamp = std::chrono::seconds(std::time(nullptr));
     m_unix_started = std::chrono::milliseconds(unix_timestamp).count();
-    double* gradient = new double[3 * m_natoms];
+    auto* gradient = new double[3 * m_natoms];
     std::vector<json> states;
     for (int i = 0; i < 3 * m_natoms; ++i) {
         gradient[i] = 0;
     }
 
-    if (m_thermostat.compare("csvr") == 0) {
+    if (m_thermostat == "csvr") {
         fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Canonical sampling through velocity rescaling (CSVR) Thermostat\nJ. Chem. Phys. 126, 014101 (2007) - DOI: 10.1063/1.2408420\n\n");
-        ThermostatFunction = std::bind(&SimpleMD::CSVR, this);
-    } else if (m_thermostat.compare("berendson") == 0) {
+        ThermostatFunction = [this] { CSVR(); };
+    } else if (m_thermostat == "berendson") {
         fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Berendson Thermostat\nJ. Chem. Phys. 81, 3684 (1984) - DOI: 10.1063/1.448118\n\n");
-        ThermostatFunction = std::bind(&SimpleMD::Berendson, this);
-    } else if (m_thermostat.compare("anderson") == 0) {
+        ThermostatFunction = [this] { Berendson(); };
+    } else if (m_thermostat == "anderson") {
         fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Anderson Thermostat\n ... \n\n");
-        ThermostatFunction = std::bind(&SimpleMD::Anderson, this);
-    } else if (m_thermostat.compare("nosehover") == 0) {
+        ThermostatFunction = [this] { Anderson(); };
+    } else if (m_thermostat == "nosehover") {
         fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Nosé-Hoover-Chain Thermostat\n ... \n\n");
-        ThermostatFunction = std::bind(&SimpleMD::NoseHover, this);
+        ThermostatFunction = [this] { NoseHover(); };
     } else {
-        ThermostatFunction = std::bind(&SimpleMD::None, this);
+        ThermostatFunction = [this] { None(); };
         std::cout << "No Thermostat applied\n"
                   << std::endl;
     }
@@ -1115,85 +1147,36 @@ void SimpleMD::start()
             }
         }
 
+        /////////// Dipole
+        if (m_dipole && m_method == "gfn2") {
 
-        /////////// Dipole calc
-        //def scaling coefficient
-        std::vector<double> dipole_scale;
-        //set coefficients some values
-        for (auto i = 0; i < m_natoms; i++) {
-            dipole_scale.push_back(1);
-        }
-        dipole_scale = {
-            1.16126,//Wasser
-            1.44224,//*
-            1.44256,//*
-            1.56764,//Methanol
-            1.35206,//*
-            1.51374,//*
-            1.52110,//*
-            1.50372,//*
-            1.46760,//*
-            1.61581,//Ethanol
-            1.86773,//*
-            1.54639,//*
-            1.60913,//*
-            1.62602,//*
-            1.37539,//*
-            1.50891,//*
-            1.53962,//*
-            1.46714//*
-        }; // from -dipole LM
+            //json blob;
+            // calc partialCharge with gnf2-xtb
+            //EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb
+            //interface.setMolecule(m_molecule); // set molecule for calc
+            //interface.CalculateEnergy(false, true); // calc energy and charges and dipole moment
+            //m_molecule.setPartialCharges(interface.Charges()); // calc Partial Charges and give it to mol
+            //m_molecule.setDipole(interface.Dipole()*au);
 
-        json blob;
-        // calc partialCharge with gnf2-xtb
-        EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb
-        interface.setMolecule(m_molecule); // set molecule for calc
-        interface.CalculateEnergy(false, true); // calc energy and charges and dipole moment
-        m_molecule.setPartialCharges(interface.Charges()); // calc Partial Charges and give it to mol
-        m_molecule.setDipole(interface.Dipole()*au);
+            m_curr_dipoles = m_molecule.CalculateDipoleMoments(m_scaling_vector);
+            std::ofstream file;
+            file.open(Basename() + "_dipole.out", std::ios_base::app);
 
-        Molecule mol;
-
-        //calc Dipoles from partial Charges and Scaling
-        auto dipoles = m_molecule.CalculateDipoleMoments(dipole_scale);
-        int i=0;
-
-        Position dipole_sum = {0,0,0};
-        for (auto dipole : dipoles) {
-            // double frag_charge = 0;
-            mol = m_molecule.getFragmentMolecule(i);
-
-            //dipole of system
-            dipole_sum[0] += dipole[0];
-            dipole_sum[1] += dipole[1];
-            dipole_sum[2] += dipole[2];
-
-
-            //std::cout << "Fragment" << i << std::endl;
-            std::cout << dipole.norm() << " " << mol.getDipole().norm() << " ";
-            //std::cout << dipole[0] << " " << dipole[1] << " " << dipole[2] << std::endl;
-            //std::cout << mol.getDipole()[0] << " " << mol.getDipole()[1] << " " << mol.getDipole()[2] << std::endl;
-
-            /*std::cout << "p.Charge: " << std::endl;
-            for (auto p : mol.getPartialCharges()) {
-                std::cout << p << std::endl;
-                frag_charge += p;
+            Position d = {0,0,0};
+            for (const auto& dipole : m_curr_dipoles) {
+                d += dipole;
+                file << dipole.norm() << ", ";
             }
-            std::cout << "charge: " << frag_charge << std::endl;*/
-            i++;
-        }
-        Position d = m_molecule.getDipole();
-        std::cout << std::endl;
-        /*std::cout << std::endl;
-        std::cout << "Dipole Sum: " << dipole_sum.norm() << std::endl << dipole_sum[0] << " " << dipole_sum[1] << " " << dipole_sum[2] << std::endl;
-        std::cout << "XTB2-Dipole: " << d.norm() << std::endl << d[0] << " " << d[1] << " " << d[2] << std::endl
-        << "---------" << std::endl;*/
 
-        /////////// Dipole calc
+            file << d.norm() << " " << m_molecule.getDipole().norm() << std::endl;
+            file.close();
+
+        }
+        //////////// Dipole
+
 
         if (m_step % m_dump == 0) {
-            bool write = WriteGeometry();
-            if (write) {
+            if (bool write = WriteGeometry()) {
                 states.push_back(WriteRestartInformation());
                 m_current_rescue = 0;
             } else if (!write && m_rescue && states.size() > (1 - m_current_rescue)) {
@@ -1239,7 +1222,7 @@ void SimpleMD::start()
 
         if (m_writerestart > -1 && m_step % m_writerestart == 0) {
             std::ofstream restart_file("curcuma_step_" + std::to_string(int(m_step * m_dT)) + ".json");
-            nlohmann::json restart;
+            json restart;
             restart[MethodName()[0]] = WriteRestartInformation();
             restart_file << restart << std::endl;
         }
@@ -1268,9 +1251,9 @@ void SimpleMD::start()
         m_step++;
         m_currentStep += m_dT;
         m_time_step += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - step0).count();
-    }
+    } //MD Loop end here
     PrintStatus();
-    if (m_thermostat.compare("csvr") == 0)
+    if (m_thermostat == "csvr")
         std::cout << "Exchange with heat bath " << m_Ekin_exchange << "Eh" << std::endl;
     if (m_dipole) {
         /*
@@ -1413,7 +1396,7 @@ void SimpleMD::Rattle(double* grad)
      * updated velocities of the second atom (minus instead of plus)
      */
     TriggerWriteRestart();
-    double* coord = new double[3 * m_natoms];
+    auto* coord = new double[3 * m_natoms];
     double m_dT_inverse = 1 / m_dT;
     std::vector<int> moved(m_natoms, 0);
     bool move = false;
@@ -1625,17 +1608,17 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
         colvarfile.close();
     }
     if (m_threads == 1 || m_bias_structure_count == 1) {
-        for (int i = 0; i < m_bias_threads.size(); ++i) {
-            m_bias_threads[i]->setCurrentGeometry(current_geometry, m_currentStep);
-            m_bias_threads[i]->start();
-            current_bias += m_bias_threads[i]->BiasEnergy();
+        for (auto & m_bias_thread : m_bias_threads) {
+            m_bias_thread->setCurrentGeometry(current_geometry, m_currentStep);
+            m_bias_thread->start();
+            current_bias += m_bias_thread->BiasEnergy();
             for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
-                grad[3 * m_rmsd_indicies[j] + 0] += m_bias_threads[i]->Gradient()(j, 0);
-                grad[3 * m_rmsd_indicies[j] + 1] += m_bias_threads[i]->Gradient()(j, 1);
-                grad[3 * m_rmsd_indicies[j] + 2] += m_bias_threads[i]->Gradient()(j, 2);
+                grad[3 * m_rmsd_indicies[j] + 0] += m_bias_thread->Gradient()(j, 0);
+                grad[3 * m_rmsd_indicies[j] + 1] += m_bias_thread->Gradient()(j, 1);
+                grad[3 * m_rmsd_indicies[j] + 2] += m_bias_thread->Gradient()(j, 2);
             }
-            m_colvar_incr += m_bias_threads[i]->Counter();
-            m_loop_time += m_bias_threads[i]->Time();
+            m_colvar_incr += m_bias_thread->Counter();
+            m_loop_time += m_bias_thread->Time();
         }
     } else {
         if (m_bias_structure_count < m_threads) {
@@ -1643,8 +1626,8 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
                 m_bias_threads[i]->setCurrentGeometry(current_geometry, m_currentStep);
             }
         } else {
-            for (int i = 0; i < m_bias_threads.size(); ++i) {
-                m_bias_threads[i]->setCurrentGeometry(current_geometry, m_currentStep);
+            for (auto & m_bias_thread : m_bias_threads) {
+                m_bias_thread->setCurrentGeometry(current_geometry, m_currentStep);
             }
         }
 
@@ -1653,18 +1636,18 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
         m_bias_pool->StartAndWait();
         m_bias_pool->setWakeUp(m_bias_pool->WakeUp() / 2);
 
-        for (int i = 0; i < m_bias_threads.size(); ++i) {
-            if (m_bias_threads[i]->Return() == 1) {
+        for (auto & m_bias_thread : m_bias_threads) {
+            if (m_bias_thread->Return() == 1) {
 
-                current_bias += m_bias_threads[i]->BiasEnergy();
+                current_bias += m_bias_thread->BiasEnergy();
                 for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
-                    grad[3 * m_rmsd_indicies[j] + 0] += m_bias_threads[i]->Gradient()(j, 0);
-                    grad[3 * m_rmsd_indicies[j] + 1] += m_bias_threads[i]->Gradient()(j, 1);
-                    grad[3 * m_rmsd_indicies[j] + 2] += m_bias_threads[i]->Gradient()(j, 2);
+                    grad[3 * m_rmsd_indicies[j] + 0] += m_bias_thread->Gradient()(j, 0);
+                    grad[3 * m_rmsd_indicies[j] + 1] += m_bias_thread->Gradient()(j, 1);
+                    grad[3 * m_rmsd_indicies[j] + 2] += m_bias_thread->Gradient()(j, 2);
                 }
-                m_colvar_incr += m_bias_threads[i]->Counter();
+                m_colvar_incr += m_bias_thread->Counter();
             }
-            m_loop_time += m_bias_threads[i]->Time();
+            m_loop_time += m_bias_thread->Time();
         }
         m_bias_pool->Reset();
     }
@@ -1868,9 +1851,9 @@ void SimpleMD::RemoveRotations(std::vector<double>& velo)
 
     std::vector<std::vector<int>> fragments = m_molecule.GetFragments();
     // std::cout << fragments.size() << std::endl;
-    for (int f = 0; f < fragments.size(); ++f) {
-        for (int i : fragments[f]) {
-            double m = m_mass[i];
+    for (auto & fragment : fragments) {
+        for (const int i : fragment) {
+            const double m = m_mass[i];
             mass += m;
             pos(0) += m * m_current_geometry[3 * i + 0];
             pos(1) += m * m_current_geometry[3 * i + 1];
@@ -1885,21 +1868,21 @@ void SimpleMD::RemoveRotations(std::vector<double>& velo)
         pos(2) /= mass;
 
         Geometry matrix = Geometry::Zero(3, 3);
-        for (int i : fragments[f]) {
-            double m = m_mass[i];
+        for (const int i : fragment) {
+            const double m = m_mass[i];
             geom(i, 0) -= pos(0);
             geom(i, 1) -= pos(1);
             geom(i, 2) -= pos(2);
 
-            double x = geom(i, 0);
-            double y = geom(i, 1);
-            double z = geom(i, 2);
+            const double x = geom(i, 0);
+            const double y = geom(i, 1);
+            const double z = geom(i, 2);
             angom(0) += m_mass[i] * (geom(i, 1) * velo[3 * i + 2] - geom(i, 2) * velo[3 * i + 1]);
             angom(1) += m_mass[i] * (geom(i, 2) * velo[3 * i + 0] - geom(i, 0) * velo[3 * i + 2]);
             angom(2) += m_mass[i] * (geom(i, 0) * velo[3 * i + 1] - geom(i, 1) * velo[3 * i + 0]);
-            double x2 = x * x;
-            double y2 = y * y;
-            double z2 = z * z;
+            const double x2 = x * x;
+            const double y2 = y * y;
+            const double z2 = z * z;
             matrix(0, 0) += m * (y2 + z2);
             matrix(1, 1) += m * (x2 + z2);
             matrix(2, 2) += m * (x2 + y2);
@@ -1914,13 +1897,13 @@ void SimpleMD::RemoveRotations(std::vector<double>& velo)
         Position omega = matrix.inverse() * angom;
 
         Position rlm = { 0, 0, 0 }, ram = { 0, 0, 0 };
-        for (int i : fragments[f]) {
+        for (const int i : fragment) {
             rlm(0) = rlm(0) + m_mass[i] * velo[3 * i + 0];
             rlm(1) = rlm(1) + m_mass[i] * velo[3 * i + 1];
             rlm(2) = rlm(2) + m_mass[i] * velo[3 * i + 2];
         }
 
-        for (int i : fragments[f]) {
+        for (const int i : fragment) {
             ram(0) = (omega(1) * geom(i, 2) - omega(2) * geom(i, 1));
             ram(1) = (omega(2) * geom(i, 0) - omega(0) * geom(i, 2));
             ram(2) = (omega(0) * geom(i, 1) - omega(1) * geom(i, 0));
@@ -2007,7 +1990,7 @@ void SimpleMD::RemoveRotation(std::vector<double>& velo)
 
 void SimpleMD::PrintStatus() const
 {
-    auto unix_timestamp = std::chrono::seconds(std::time(NULL));
+    const auto unix_timestamp = std::chrono::seconds(std::time(NULL));
 
     int current = std::chrono::milliseconds(unix_timestamp).count();
     double duration = (current - m_unix_started) / (1000.0 * double(m_currentStep));
@@ -2042,7 +2025,7 @@ void SimpleMD::PrintStatus() const
     //std::cout << m_mtd_time << " " << m_loop_time << std::endl;
 }
 
-void SimpleMD::PrintMatrix(const double* matrix)
+void SimpleMD::PrintMatrix(const double* matrix) const
 {
     std::cout << "Print Matrix" << std::endl;
     for (int i = 0; i < m_natoms; ++i) {
@@ -2059,10 +2042,9 @@ double SimpleMD::CleanEnergy(double* grad)
 
     double Energy = interface.CalculateEnergy(true);
     interface.getGradient(grad);
-    if (m_dipole) {
-        auto dipole = interface.Dipole();
-        m_curr_dipole = sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]);
-        m_collected_dipole.push_back(sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]));
+    if (m_dipole && m_method == "gfn2") {
+        m_molecule.setDipole(interface.Dipole()*au);
+        m_molecule.setPartialCharges(interface.Charges());
     }
     return Energy;
 }
@@ -2073,10 +2055,9 @@ double SimpleMD::FastEnergy(double* grad)
 
     double Energy = m_interface->CalculateEnergy(true);
     m_interface->getGradient(grad);
-    if (m_dipole) {
-        auto dipole = m_interface->Dipole();
-        m_curr_dipole = sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]);
-        m_collected_dipole.push_back(sqrt(dipole[0] * dipole[0] + dipole[1] * dipole[1] + dipole[2] * dipole[2]));
+    if (m_dipole && m_method == "gfn2") {
+        m_molecule.setDipole(m_interface->Dipole()*au);
+        m_molecule.setPartialCharges(m_interface->Charges());
     }
     return Energy;
 }
@@ -2099,7 +2080,7 @@ void SimpleMD::AverageQuantities()
     m_aver_Ekin = (m_Ekin + (m_currentStep)*m_aver_Ekin) / (m_currentStep + 1);
     m_aver_Etot = (m_Etot + (m_currentStep)*m_aver_Etot) / (m_currentStep + 1);
     if (m_dipole) {
-        m_aver_dipol = (m_curr_dipole + (m_currentStep)*m_aver_dipol) / (m_currentStep + 1);
+        //m_aver_dipol = (m_curr_dipoles + (m_currentStep)*m_aver_dipol) / (m_currentStep + 1);
     }
     m_average_wall_potential = (m_wall_potential + (m_currentStep)*m_average_wall_potential) / (m_currentStep + 1);
     m_average_virial_correction = (m_virial_correction + (m_currentStep)*m_average_virial_correction) / (m_currentStep + 1);

@@ -156,8 +156,8 @@ static json CurcumaMDJson{
     { "rattle_dynamic_tol_iter", 100 },
     { "thermostat", "csvr" }, // can be csvr (default), berendson, none, anderson or nosehover
     { "respa", 1 },
-    { "threads", 1 },
     { "dipole", false },
+    { "scaling_json", "none" },
     { "seed", 1 },
     { "cleanenergy", false },
     { "wall", "none" }, // can be spheric or rect
@@ -245,7 +245,7 @@ private:
     double FastEnergy(double* grad);
     double CleanEnergy(double* grad);
 
-    void PrintMatrix(const double* matrix);
+    void PrintMatrix(const double* matrix) const;
 
     bool WriteGeometry();
     void Verlet(double* grad);
@@ -292,17 +292,18 @@ private:
 
     int m_natoms = 0;
     int m_dump = 1;
-    double m_T = 0, m_Epot = 0, m_aver_Epot = 0, m_Ekin = 0, m_aver_Ekin = 0, m_Etot = 0, m_aver_Etot = 0, m_aver_dipol = 0, m_curr_dipole = 0;
+    double m_T = 0, m_Epot = 0, m_aver_Epot = 0, m_Ekin = 0, m_aver_Ekin = 0, m_Etot = 0, m_aver_Etot = 0, m_aver_dipol = 0;
     double m_rm_COM = 100;
     int m_rm_COM_step = -1;
     int m_hmass = 1;
     double m_single_step = 1;
     double m_dT = 0.5, m_currentStep = 0, m_maxtime = 1000;
     int m_spin = 0, m_charge = 0, m_print = 100;
-    double m_T0 = 298.13, m_aver_Temp = 0, m_aver_rattle_Temp = 0, m_rmsd = 1.5;
+    double m_T0 = 298.15, m_aver_Temp = 0, m_aver_rattle_Temp = 0, m_rmsd = 1.5;
     double m_x0 = 0, m_y0 = 0, m_z0 = 0;
     double m_Ekin_exchange = 0.0;
-    std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient, m_rmass, m_virial, m_gradient_bias;
+    std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient, m_rmass, m_virial, m_gradient_bias, m_scaling_vector;
+    std::vector<Position> m_curr_dipoles;
     std::vector<int> m_atomtype;
     Molecule m_molecule, m_reference, m_target, m_rmsd_mtd_molecule;
     bool m_initialised = false, m_restart = false, m_writeUnique = true, m_opt = false, m_rescue = false, m_writeXYZ = true, m_writeinit = false, m_norestart = false;
@@ -315,6 +316,7 @@ private:
     const std::vector<double> m_used_mass;
     std::vector<int> m_rmsd_indicies;
     std::vector<std::vector<int> > m_rmsd_fragments;
+
 
     std::vector<Geometry> m_bias_structures;
     std::vector<BiasStructure> m_biased_structures;
@@ -351,7 +353,7 @@ private:
     std::vector<double> m_collected_dipole;
     Matrix m_topo_initial;
     std::vector<Molecule*> m_unique_structures;
-    std::string m_method = "UFF", m_initfile = "none", m_thermostat = "csvr", m_plumed, m_rmsd_ref_file, m_rmsd_atoms = "-1";
+    std::string m_method = "UFF", m_initfile = "none", m_thermostat = "csvr", m_plumed, m_rmsd_ref_file, m_rmsd_atoms = "-1", m_scaling_json = "none";
     bool m_unstable = false;
     bool m_dipole = false;
     bool m_clean_energy = false;
