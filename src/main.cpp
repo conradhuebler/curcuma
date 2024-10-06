@@ -46,7 +46,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <oneapi/tbb/task_group.h>
+
 #include <string>
 #include <vector>
 
@@ -224,7 +224,7 @@ int main(int argc, char **argv) {
                 exit(0);
             }
 
-            RMSDDriver* driver = new RMSDDriver(controller, false);
+            auto* driver = new RMSDDriver(controller, false);
             driver->setReference(molecule1);
             driver->setTarget(molecule2);
             driver->start();
@@ -245,7 +245,7 @@ int main(int argc, char **argv) {
                 exit(1);
             }
 
-            Docking* docking = new Docking(controller, false);
+            auto* docking = new Docking(controller, false);
             if (!docking->Initialise()) {
                 docking->printError();
                 return 0;
@@ -287,7 +287,7 @@ int main(int argc, char **argv) {
                 return -1;
             }
             std::cout << controller << std::endl;
-            ConfScan* scan = new ConfScan(controller);
+            auto* scan = new ConfScan(controller);
             scan->setFileName(argv[2]);
             scan->start();
             return 0;
@@ -298,7 +298,7 @@ int main(int argc, char **argv) {
 
                 return -1;
             }
-            ConfStat* stat = new ConfStat(controller);
+            auto* stat = new ConfStat(controller);
             stat->setFileName(argv[2]);
             stat->start();
             return 0;
@@ -496,7 +496,7 @@ int main(int argc, char **argv) {
 
             Molecule mol1 = Files::LoadFile(argv[2]);
             Molecule mol2 = Files::LoadFile(argv[3]);
-            NEBDocking* nebdock = new NEBDocking;
+            auto* nebdock = new NEBDocking;
             nebdock->setStructures(mol1, mol2);
             nebdock->setProtonTransfer(pt);
             nebdock->Prepare();
@@ -909,7 +909,7 @@ int main(int argc, char **argv) {
                 sum_mass += gyr.second;
                 sqrt_sum += sqrt(gyr.first);
                 sqrt_sum_mass += sqrt(gyr.second);
-                std::cout << ":: " << gyr.first << " " << sum / double(count) << " " << gyr.second << " " << sum_mass / double(count) << " " << sqrt(gyr.first) << " " << sqrt_sum / double(count) << " " << sqrt(gyr.second) << " " << sqrt_sum_mass / double(count) << std::endl;
+                std::cout << ":: " << gyr.first << " " << sum / static_cast<double>(count) << " " << gyr.second << " " << sum_mass / static_cast<double>(count) << " " << sqrt(gyr.first) << " " << sqrt_sum / static_cast<double>(count) << " " << sqrt(gyr.second) << " " << sqrt_sum_mass / static_cast<double>(count) << std::endl;
                 count++;
             }
         } else if (strcmp(argv[1], "-dipole") == 0) {
@@ -925,7 +925,7 @@ int main(int argc, char **argv) {
             // TODO: if -scale <array of int> then calc dipole with scalingfactor and xtb2
             // TODO: if -methode <String> then change methode
 
-            json blob = controller["dipole"]; // declare blob as json,
+            const json blob = controller["dipole"]; // declare blob as json, const why not used for now
 
 
             std::vector<Molecule> conformers;
@@ -938,80 +938,61 @@ int main(int argc, char **argv) {
                 interface.CalculateEnergy(false, true); // calc energy and charges and dipole moment
 
                 mol.setPartialCharges(interface.Charges()); // calc Partial Charges and give it to mol
-                auto charges = interface.Charges(); // dec and init charges
                 mol.setDipole(interface.Dipole() * au); // in eA
 
-                /* Output Dipole from XTB2
-                 std::cout << mol.AtomCount() << "\n"
-                          << "Dipole  "
-                          << mol.getDipole()[0]  << " "
-                          << mol.getDipole()[1]  << " "
-                          << mol.getDipole()[2]  << " : "
-                          << mol.getDipole().norm() << "\n"
-                          << std::endl;*/
-
                 conformers.push_back(mol);
-                //mol.appendDipoleFile(file.Basename() + ".dip");
             }
-            Molecule mol = conformers.at(0); // molecule in ground state
+            Molecule mol = conformers.at(0); // maybe molecule in ground state
 
-            std::cout << "\nxtb2-Dipole: " << mol.getDipole().norm() << std::endl << std::endl;
+            std::cout << "\n xtb2-Dipole: " << mol.getDipole().norm() << std::endl << std::endl;
 
-            Matrix theta (mol.AtomCount(), 1);
-            theta = DipoleScalingCalculation(conformers);
-            std::cout << "Analytic-Scaler:\n"
+            const auto theta = DipoleScalingCalculation(conformers);
+            std::cout << "Analytical Scaling vector:\n"
                       << theta << "\n"
                       << "Dipole: " << mol.CalculateDipoleMoment(theta).norm() << std::endl
                       << std::endl;
 
-            Vector one = Eigen::VectorXd::Ones(mol.AtomCount());
+            const Vector one = VectorXd::Ones(mol.AtomCount());
 
-            auto result = OptimiseDipoleScaling(conformers, one);
-            std::cout << "LM-Scaler 1 as initial guess:\n"
+            const auto result = OptimiseDipoleScaling(conformers, one);
+            std::cout << "nonlinear Scaling vector, 1 as initial guess:\n"
                       << result << "\n"
                       << "Dipole: " << mol.CalculateDipoleMoment(result).norm() << std::endl
                       << std::endl;
 
-            auto result1 = OptimiseDipoleScaling(conformers, theta);
-            std::cout << "LM-Scaler theta as initial guess:\n"
-                      << result1 << "\n"
-                      << "Dipole: " << mol.CalculateDipoleMoment(result1).norm() << std::endl
-                      << std::endl;
-
-
-            auto result2 = OptimiseDipoleScaling(conformers, theta, true);
-            std::cout << "LM-Scaler with bond true:\n"
+            const auto result2 = OptimiseDipoleScaling(conformers, theta, true);
+            std::cout << "nonlinear Scaling vector, with bond true:\n"
                       << result2 << "\n"
                       << "Dipole: " << mol.CalculateDipoleMoment(result2, true).norm() << std::endl
                       << std::endl;
 
+            //TODO make it faster...
+
             double r2_anal = 0;
             double r2_LM = 0;
-            double r2_LM1 = 0;
             double r2_LM2 = 0;
-            double r2_anal_dn = 0;
-            double r2_LM_dn = 0;
-            double r2_LM1_dn = 0;
-            double r2_LM2_dn = 0;
-
+            //double r2_anal_dn = 0;
+            //double r2_LM_dn = 0;
+            //double r2_LM1_dn = 0;
+            //double r2_LM2_dn = 0;
 
             for (const auto& conf : conformers) {
-                r2_anal += std::pow(conf.CalculateDipoleMoment(theta).norm() - conf.getDipole().norm(), 2);
-                r2_LM += std::pow(conf.CalculateDipoleMoment(result).norm() - conf.getDipole().norm(), 2);
-                r2_LM1 += std::pow(conf.CalculateDipoleMoment(result1).norm() - conf.getDipole().norm(), 2);
-                r2_LM2 += std::pow(conf.CalculateDipoleMoment(result2).norm() - conf.getDipole().norm(), 2);
-                /*r2_anal_dn += std::pow((conf.CalculateDipoleMoment(theta) - conf.getDipole()).norm(), 2);
-                r2_LM_dn += std::pow((conf.CalculateDipoleMoment(result) - conf.getDipole()).norm(), 2);
-                r2_LM1_dn += std::pow((conf.CalculateDipoleMoment(result1) - conf.getDipole()).norm(), 2);
-                r2_LM2_dn += std::pow((conf.CalculateDipoleMoment(result2) - conf.getDipole()).norm(), 2);*/
+                const double residual = conf.CalculateDipoleMoment(theta).norm() - conf.getDipole().norm();
+                r2_anal += residual * residual;
+                const double residual_1 = conf.CalculateDipoleMoment(result).norm() - conf.getDipole().norm();
+                r2_LM += residual_1 * residual_1;
+                const double residual_2 = conf.CalculateDipoleMoment(result2).norm() - conf.getDipole().norm();
+                r2_LM2 += residual_2 * residual_2;
+                //r2_anal_dn += std::pow((conf.CalculateDipoleMoment(theta) - conf.getDipole()).norm(), 2);
+                //r2_LM_dn += std::pow((conf.CalculateDipoleMoment(result) - conf.getDipole()).norm(), 2);
+                //r2_LM1_dn += std::pow((conf.CalculateDipoleMoment(result1) - conf.getDipole()).norm(), 2);
+                //r2_LM2_dn += std::pow((conf.CalculateDipoleMoment(result2) - conf.getDipole()).norm(), 2);
             }
             std::cout << "Residuals:" << std::endl
             << "anal: " << r2_anal << std::endl
             << "LM 1 as initial guess: " << r2_LM << std::endl
-            << "LM theta as initial guess: " << r2_LM1 << std::endl
             << "LM bond true: " << r2_LM2 << std::endl;
 
-            //TODO add JSON output
             std::vector<double> vec_theta(theta.data(), theta.data() + theta.rows() * theta.cols());
             json scaling_vector;
             scaling_vector["scaling_vector"] = Tools::DoubleVector2String(vec_theta);
@@ -1038,7 +1019,7 @@ int main(int argc, char **argv) {
             }
         } else {
             bool centered = false;
-            bool hmass = 1;
+            bool hmass = true;
             for (std::size_t i = 2; i < argc; ++i) {
                 if (strcmp(argv[i], "-center") == 0) {
                     centered = true;
