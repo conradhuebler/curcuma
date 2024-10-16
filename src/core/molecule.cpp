@@ -696,14 +696,27 @@ void Molecule::LoadMolecule(const Mol* molecule)
     m_bonds = molecule->m_bonds;
 }
 
-Molecule Molecule::getFragmentMolecule(int fragment) const
+Molecule Molecule::getFragmentMolecule(const int fragment) const
 {
     // Let's make that one day faster, but not today ...
     // TODO inherit some more properties ...
     Molecule result;
     std::vector<double> pCharges;
     auto atoms = GetFragments()[fragment];
-    for (auto atom : atoms) {
+    for (const auto atom : atoms) {
+        result.addPair(Atom(atom));
+        pCharges.push_back(m_charges[atom]);
+    }
+    result.setPartialCharges(pCharges);
+    return result;
+}
+Molecule Molecule::getFragmentMolecule(const std::vector<int>& atoms) const
+{
+    // Let's make that one day faster, but not today ...
+    // TODO inherit some more properties ...
+    Molecule result;
+    std::vector<double> pCharges;
+    for (const auto atom : atoms) {
         result.addPair(Atom(atom));
         pCharges.push_back(m_charges[atom]);
     }
@@ -904,23 +917,38 @@ Eigen::Vector3d Molecule::COM(bool protons, int fragment)
     return com;
 }
 
-std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>& scaling) const
+std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>& scaling, const std::vector<std::vector<int>>& fragments) const
 { // calc classic dipole moments of the every fragment with partial charges
     std::vector<Position> dipole_moments;
     if (m_charges.size() != m_geometry.rows()) {
         std::cout << "No partial charges available" << std::endl;
         return dipole_moments;
     }
-    for (int i = 0; i < GetFragments().size(); ++i) {
-        std::vector<double> frag_scaling = {};
-        for (int j = 0; j < m_fragments[i].size(); ++j) {
-            if (scaling.size() > j)
-                frag_scaling.push_back(scaling[j]);
-            else
-                frag_scaling.push_back(1.0);
+    if (!fragments.empty()) {
+        for (int i = 0; i < fragments.size(); ++i) {
+            std::vector<double> frag_scaling = {};
+            for (int j = 0; j < fragments[i].size(); ++j) {
+                if (scaling.size() > j)
+                    frag_scaling.push_back(scaling[j]);
+                else
+                    frag_scaling.push_back(1.0);
+            }
+            Molecule mol = getFragmentMolecule(fragments[i]);
+            dipole_moments.push_back(mol.CalculateDipoleMoment(frag_scaling));
         }
-        Molecule mol = getFragmentMolecule(i);
-        dipole_moments.push_back(mol.CalculateDipoleMoment(frag_scaling));
+    }
+    else {
+        for (int i = 0; i < GetFragments().size(); ++i) {
+            std::vector<double> frag_scaling = {};
+            for (int j = 0; j < m_fragments[i].size(); ++j) {
+                if (scaling.size() > j)
+                    frag_scaling.push_back(scaling[j]);
+                else
+                    frag_scaling.push_back(1.0);
+            }
+            Molecule mol = getFragmentMolecule(i);
+            dipole_moments.push_back(mol.CalculateDipoleMoment(frag_scaling));
+        }
     }
     return dipole_moments;
 }

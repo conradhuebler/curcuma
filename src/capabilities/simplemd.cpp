@@ -338,6 +338,7 @@ bool SimpleMD::Initialise()
     }
     m_natoms = m_molecule.AtomCount();
 
+    m_start_fragments = m_molecule.GetFragments();
     m_scaling_vector = std::vector<double>(m_natoms, 1);
     if (m_scaling_json != "none") {
         json scaling;
@@ -1158,7 +1159,7 @@ void SimpleMD::start()
             //m_molecule.setPartialCharges(interface.Charges()); // calc Partial Charges and give it to mol
             //m_molecule.setDipole(interface.Dipole()*au);
 
-            m_curr_dipoles = m_molecule.CalculateDipoleMoments(m_scaling_vector);
+            m_curr_dipoles = m_molecule.CalculateDipoleMoments(m_scaling_vector, m_start_fragments);
             std::ofstream file;
             file.open(Basename() + "_dipole.out", std::ios_base::app);
 
@@ -1168,7 +1169,7 @@ void SimpleMD::start()
                 file << dipole.norm() << ", ";
             }
 
-            file << d.norm() << " " << m_molecule.getDipole().norm() << std::endl;
+            file << d[0] << " " << d[1] << " " << d[2] << " " << m_molecule.getDipole()[0] << " " << m_molecule.getDipole()[1] << " " << m_molecule.getDipole()[2] << std::endl;
             file.close();
 
         }

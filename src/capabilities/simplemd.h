@@ -315,7 +315,7 @@ private:
     RMSDTraj* m_unqiue;
     const std::vector<double> m_used_mass;
     std::vector<int> m_rmsd_indicies;
-    std::vector<std::vector<int> > m_rmsd_fragments;
+    std::vector<std::vector<int> > m_rmsd_fragments, m_start_fragments;
 
 
     std::vector<Geometry> m_bias_structures;

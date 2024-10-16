@@ -108,6 +108,7 @@ class Molecule
     std::vector<double> GetBox() const;
 
     Molecule getFragmentMolecule(int fragment) const;
+    Molecule getFragmentMolecule(const std::vector<int>& atoms) const;
 
     double CalculateDistance(int i, int j) const;
     std::pair<double, double> GyrationRadius(double hmass = 1, bool hydrogen = true, int fragment = -1);
@@ -173,7 +174,7 @@ class Molecule
     /*! \brief Methode to calculate the dipole moments of single molecules
      *
      */
-    std::vector<Position> CalculateDipoleMoments(const std::vector<double>& scaling = std::vector<double>()) const;
+    std::vector<Position> CalculateDipoleMoments(const std::vector<double>& scaling = std::vector<double>(), const std::vector<std::vector<int>>& fragments = std::vector<std::vector<int>>()) const;
 
     /*! \brief Methode to calculate the dipole moments of whole structure
      * unit of dipol is electron times angstron
