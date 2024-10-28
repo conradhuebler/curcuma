@@ -60,15 +60,14 @@ struct OptDipoleFunctor : TFunctor<double> {
     int operator()(const Vector& scaling, Eigen::VectorXd& fvec) const {
         // calculation of residuals
         for (int i = 0; i < m_conformers.size(); ++i) {
-            auto conf = m_conformers.at(i);
-            fvec(i) = (conf.getDipole() - conf.CalculateDipoleMoment(scaling, m_bond)).norm();
+            const auto& conf = m_conformers.at(i);
+            fvec(i) = conf.getDipole().norm() - conf.CalculateDipoleMoment(scaling).norm();
         }
         return 0;
     }
     int no_parameter;
     int no_points;
     std::vector<Molecule> m_conformers;
-    bool m_bond;
 
     int inputs() const { return no_parameter; }
     int values() const { return no_points; }
@@ -80,7 +79,6 @@ inline Vector OptimiseDipoleScaling(const std::vector<Molecule>& conformers, Vec
 
     OptDipoleFunctor functor(2, conformers.size());
     functor.m_conformers = conformers;
-    functor.m_bond = bond;
     Eigen::NumericalDiff numDiff(functor);
     Eigen::LevenbergMarquardt lm(numDiff);
 

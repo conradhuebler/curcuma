@@ -955,49 +955,54 @@ int main(int argc, char **argv) {
             const Vector one = VectorXd::Ones(mol.AtomCount());
 
             const auto result = OptimiseDipoleScaling(conformers, one);
-            std::cout << "nonlinear Scaling vector, 1 as initial guess:\n"
+            std::cout << "nonlinear Scaling vector:\n"
                       << result << "\n"
                       << "Dipole: " << mol.CalculateDipoleMoment(result).norm() << std::endl
                       << std::endl;
 
-            const auto result2 = OptimiseDipoleScaling(conformers, theta, true);
-            std::cout << "nonlinear Scaling vector, with bond true:\n"
-                      << result2 << "\n"
-                      << "Dipole: " << mol.CalculateDipoleMoment(result2, true).norm() << std::endl
-                      << std::endl;
-
             //TODO make it faster...
 
-            double r2_anal = 0;
-            double r2_LM = 0;
-            double r2_LM2 = 0;
-            //double r2_anal_dn = 0;
-            //double r2_LM_dn = 0;
-            //double r2_LM1_dn = 0;
-            //double r2_LM2_dn = 0;
+            double r2_lin = 0;
+            double r2_nlin = 0;
+            double r2_lin_diffofnorm = 0;
+            double r2_nlin_diffofnorm = 0;
 
             for (const auto& conf : conformers) {
-                const double residual = conf.CalculateDipoleMoment(theta).norm() - conf.getDipole().norm();
-                r2_anal += residual * residual;
-                const double residual_1 = conf.CalculateDipoleMoment(result).norm() - conf.getDipole().norm();
-                r2_LM += residual_1 * residual_1;
-                const double residual_2 = conf.CalculateDipoleMoment(result2).norm() - conf.getDipole().norm();
-                r2_LM2 += residual_2 * residual_2;
-                //r2_anal_dn += std::pow((conf.CalculateDipoleMoment(theta) - conf.getDipole()).norm(), 2);
-                //r2_LM_dn += std::pow((conf.CalculateDipoleMoment(result) - conf.getDipole()).norm(), 2);
-                //r2_LM1_dn += std::pow((conf.CalculateDipoleMoment(result1) - conf.getDipole()).norm(), 2);
-                //r2_LM2_dn += std::pow((conf.CalculateDipoleMoment(result2) - conf.getDipole()).norm(), 2);
+                const double residual = (conf.CalculateDipoleMoment(theta) - conf.getDipole()).norm();
+                r2_lin += residual * residual;
+                const double residual_1 = (conf.CalculateDipoleMoment(result) - conf.getDipole()).norm();
+                r2_nlin += residual_1 * residual_1;
+                const double residual_2 = conf.CalculateDipoleMoment(theta).norm() - conf.getDipole().norm();
+                r2_lin_diffofnorm += residual_2 * residual_2;
+                const double residual_3 = conf.CalculateDipoleMoment(result).norm() - conf.getDipole().norm();
+                r2_nlin_diffofnorm += residual_3 * residual_3;
             }
-            std::cout << "Residuals:" << std::endl
-            << "anal: " << r2_anal << std::endl
-            << "LM 1 as initial guess: " << r2_LM << std::endl
-            << "LM bond true: " << r2_LM2 << std::endl;
+            std::cout << "Residuals magnitute of diffrence of Vector:" << std::endl
+            << "linear: " << r2_lin << std::endl
+            << "nonlinear " << r2_nlin << std::endl;
+            std::cout << "Residuals diffrence of magnitute of Vector:" << std::endl
+            << "linear: " << r2_lin_diffofnorm << std::endl
+            << "nonlinear: " << r2_lin_diffofnorm << std::endl;
 
             std::vector<double> vec_theta(theta.data(), theta.data() + theta.rows() * theta.cols());
+            std::vector<double> vec_nonlinear_scaling(result.data(), result.data() + result.rows() * result.cols());
             json scaling_vector;
             scaling_vector["scaling_vector"] = Tools::DoubleVector2String(vec_theta);
             std::ofstream out(lm_basename + "_scaling_vector.json");
             out << scaling_vector << std::endl;
+
+            std::ofstream file_dipole;
+            file_dipole.open(lm_basename + "_dipole.out", std::ios_base::app);
+            file_dipole << "linear Dipole of Fragments (x y z magn.); nonlinear Dipole of Fragments (x y z magn.); gfn2 Dipoles (x y z magn.)" << std::endl;
+            for (const auto& conf : conformers){
+                const auto dipole_lin = conf.CalculateDipoleMoment(vec_theta);
+                const auto dipole_nlin = conf.CalculateDipoleMoment(vec_nonlinear_scaling);
+                const auto dipole_gfn2 = conf.getDipole();
+                file_dipole << dipole_lin[0] << " " << dipole_lin[1] << " " << dipole_lin[2] << " " << dipole_lin.norm() << "; ";
+                file_dipole << dipole_nlin[0] << " " << dipole_nlin[1] << " " << dipole_nlin[2] << " " << dipole_nlin.norm() << "; ";
+                file_dipole << dipole_gfn2[0] << " " << dipole_gfn2[1] << " " << dipole_gfn2[2] << " " << dipole_gfn2.norm() << std::endl;
+            };
+            file_dipole.close();
 
 
 
