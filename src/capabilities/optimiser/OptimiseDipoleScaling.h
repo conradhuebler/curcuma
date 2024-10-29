@@ -68,6 +68,7 @@ struct OptDipoleFunctor : TFunctor<double> {
     int no_parameter;
     int no_points;
     std::vector<Molecule> m_conformers;
+    bool m_bond;
 
     int inputs() const { return no_parameter; }
     int values() const { return no_points; }
@@ -79,6 +80,7 @@ inline Vector OptimiseDipoleScaling(const std::vector<Molecule>& conformers, Vec
 
     OptDipoleFunctor functor(2, conformers.size());
     functor.m_conformers = conformers;
+    functor.m_bond = bond;
     Eigen::NumericalDiff numDiff(functor);
     Eigen::LevenbergMarquardt lm(numDiff);
 
@@ -108,33 +110,29 @@ inline Vector OptimiseDipoleScaling(const std::vector<Molecule>& conformers, Vec
     return scaling;
 }
 
-inline Matrix DipoleScalingCalculation(const std::vector<Molecule>& conformers)
+inline Vector DipoleScalingCalculation(const std::vector<Molecule>& conformers)
 {
-    std::vector<Position> y; //Dipole moments
-    std::vector<Geometry> F; // Geometry multiplied with partial Charge
     const auto para_size = conformers[0].AtomCount();
     const auto conformer_size = conformers.size();
+    Matrix F(3*conformer_size,para_size); // Geometry multiplied with partial Charge
+    Matrix y(3*conformer_size,1); //Dipoles
     Matrix FTF = Matrix::Zero(para_size, para_size);
     Matrix FTy = Matrix::Zero(para_size, 1);
     for (int i = 0; i < conformer_size; ++i) {
-        y.push_back(conformers[i].getDipole()); // in eA
-        F.push_back(conformers[i].ChargeDistribution());
-    }
-    for (auto k : F) {
-        for (int i = 0; i < para_size; ++i) {
-            for (int j = 0; j < para_size; ++j) {
-                FTF(i, j) += k(i, 0) * k(j, 0) + k(i, 1) * k(j, 1) + k(i, 2) * k(j, 2);
-            }
-        }
-    }
-
-    for (int i = 0; i < conformer_size; ++i) {
+        y(3*i,0) = conformers[i].getDipole()[0];
+        y(3*i+1,0) = conformers[i].getDipole()[1];
+        y(3*i+2,0) = conformers[i].getDipole()[2];
+        const auto& f = conformers[i].ChargeDistribution();
         for (int j = 0; j < para_size; ++j) {
-            FTy(j) += y[i](0) * F[i](j, 0) + y[i](1) * F[i](j, 1) + y[i](2) * F[i](j, 2);
+            F(3*i,j) = f(j,0);
+            F(3*i+1,j) = f(j,1);
+            F(3*i+2,j) = f(j,2);
         }
     }
-
-    Matrix Theta = FTF.colPivHouseholderQr().solve(FTy);
-
+    const Vector Theta = (F.transpose()*F).colPivHouseholderQr().solve(F.transpose()*y);
+    //const Matrix H = (F*(F.transpose()*F).inverse()*F.transpose()).diagonal();
+    //std::cout << "diag(H) x y z:" << std::endl;
+    //for (int i = 0; i < H.rows()/3; ++i)
+    //    std::cout << H(3*i,0) << " " << H(3*i+1,0) << " " << H(3*i+2,0) << " " << std::endl;
     return Theta;
 }

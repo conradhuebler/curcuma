@@ -931,78 +931,76 @@ int main(int argc, char **argv) {
             std::vector<Molecule> conformers;
             while (!file.AtEnd()) { // calculation and output dipole moment
                 Molecule mol = file.Next(); // load Molecule
-                mol.Center(false);
-
-                EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb and give
-                interface.setMolecule(mol); // set molecule for calc
-                interface.CalculateEnergy(false, true); // calc energy and charges and dipole moment
-
-                mol.setPartialCharges(interface.Charges()); // calc Partial Charges and give it to mol
-                mol.setDipole(interface.Dipole() * au); // in eA
-
+                mol.Center(false); //sets the Centroid to the origin
+                EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb
+                interface.setMolecule(mol); // set molecule
+                interface.CalculateEnergy(false, true); // calc energy and Wave function
+                mol.setPartialCharges(interface.Charges()); // calc partial Charges and set it to mol
+                mol.setDipole(interface.Dipole() * au); //calc dipole moments and set it to mol in eA
                 conformers.push_back(mol);
             }
             Molecule mol = conformers.at(0); // maybe molecule in ground state
+            //Calculation of the scaling vector linear and nonlinear
+            const auto linear_vector = DipoleScalingCalculation(conformers); //linear
+            const auto nonlinear_vector = OptimiseDipoleScaling(conformers, linear_vector); //nonlinear
+            // output scaling vector as JSON
+            std::vector<double> vec_linear_scaling(linear_vector.data(), linear_vector.data() + linear_vector.rows() * linear_vector.cols());
+            std::vector<double> vec_nonlinear_scaling(nonlinear_vector.data(), nonlinear_vector.data() + nonlinear_vector.rows() * nonlinear_vector.cols());
+            json scaling_vector;
+            scaling_vector["scaling_vector_linear"] = Tools::DoubleVector2String(vec_linear_scaling);
+            scaling_vector["scaling_vector_nonlinear"] = Tools::DoubleVector2String(vec_nonlinear_scaling);
+            std::ofstream out(lm_basename + "_scaling_vector.json");
+            out << scaling_vector << std::endl;
 
-            std::cout << "\n xtb2-Dipole: " << mol.getDipole().norm() << std::endl << std::endl;
-
-            const auto theta = DipoleScalingCalculation(conformers);
-            std::cout << "Analytical Scaling vector:\n"
-                      << theta << "\n"
-                      << "Dipole: " << mol.CalculateDipoleMoment(theta).norm() << std::endl
-                      << std::endl;
-
-            const Vector one = VectorXd::Ones(mol.AtomCount());
-
-            const auto result = OptimiseDipoleScaling(conformers, one);
-            std::cout << "nonlinear Scaling vector:\n"
-                      << result << "\n"
-                      << "Dipole: " << mol.CalculateDipoleMoment(result).norm() << std::endl
-                      << std::endl;
-
-            //TODO make it faster...
-
+            double mean_dipole_gfn2 = 0;
+            double mean_dipole_nonlinear = 0;
+            double mean_dipole_linear = 0;
             double r2_lin = 0;
             double r2_nlin = 0;
             double r2_lin_diffofnorm = 0;
             double r2_nlin_diffofnorm = 0;
-
-            for (const auto& conf : conformers) {
-                const double residual = (conf.CalculateDipoleMoment(theta) - conf.getDipole()).norm();
-                r2_lin += residual * residual;
-                const double residual_1 = (conf.CalculateDipoleMoment(result) - conf.getDipole()).norm();
-                r2_nlin += residual_1 * residual_1;
-                const double residual_2 = conf.CalculateDipoleMoment(theta).norm() - conf.getDipole().norm();
-                r2_lin_diffofnorm += residual_2 * residual_2;
-                const double residual_3 = conf.CalculateDipoleMoment(result).norm() - conf.getDipole().norm();
-                r2_nlin_diffofnorm += residual_3 * residual_3;
-            }
-            std::cout << "Residuals magnitute of diffrence of Vector:" << std::endl
-            << "linear: " << r2_lin << std::endl
-            << "nonlinear " << r2_nlin << std::endl;
-            std::cout << "Residuals diffrence of magnitute of Vector:" << std::endl
-            << "linear: " << r2_lin_diffofnorm << std::endl
-            << "nonlinear: " << r2_lin_diffofnorm << std::endl;
-
-            std::vector<double> vec_theta(theta.data(), theta.data() + theta.rows() * theta.cols());
-            std::vector<double> vec_nonlinear_scaling(result.data(), result.data() + result.rows() * result.cols());
-            json scaling_vector;
-            scaling_vector["scaling_vector"] = Tools::DoubleVector2String(vec_theta);
-            std::ofstream out(lm_basename + "_scaling_vector.json");
-            out << scaling_vector << std::endl;
-
+            //output Dipole moments + Calculation of Mean Dipole
             std::ofstream file_dipole;
             file_dipole.open(lm_basename + "_dipole.out", std::ios_base::app);
-            file_dipole << "linear Dipole of Fragments (x y z magn.); nonlinear Dipole of Fragments (x y z magn.); gfn2 Dipoles (x y z magn.)" << std::endl;
+            file_dipole << "linear Dipole (x y z magn.); nonlinear Dipole (x y z magn.); gfn2 Dipoles (x y z magn.)" << std::endl;
             for (const auto& conf : conformers){
-                const auto dipole_lin = conf.CalculateDipoleMoment(vec_theta);
+                const auto dipole_lin = conf.CalculateDipoleMoment(vec_linear_scaling);
                 const auto dipole_nlin = conf.CalculateDipoleMoment(vec_nonlinear_scaling);
                 const auto dipole_gfn2 = conf.getDipole();
+                mean_dipole_linear += dipole_lin.norm()/ conformers.size();
+                mean_dipole_nonlinear += dipole_nlin.norm()/ conformers.size();
+                mean_dipole_gfn2 += dipole_gfn2.norm()/ conformers.size();
                 file_dipole << dipole_lin[0] << " " << dipole_lin[1] << " " << dipole_lin[2] << " " << dipole_lin.norm() << "; ";
                 file_dipole << dipole_nlin[0] << " " << dipole_nlin[1] << " " << dipole_nlin[2] << " " << dipole_nlin.norm() << "; ";
                 file_dipole << dipole_gfn2[0] << " " << dipole_gfn2[1] << " " << dipole_gfn2[2] << " " << dipole_gfn2.norm() << std::endl;
+                const double residual = (conf.CalculateDipoleMoment(linear_vector) - conf.getDipole()).norm();
+                r2_lin += residual * residual;
+                const double residual_1 = (conf.CalculateDipoleMoment(nonlinear_vector) - conf.getDipole()).norm();
+                r2_nlin += residual_1 * residual_1;
+                const double residual_2 = conf.CalculateDipoleMoment(linear_vector).norm() - conf.getDipole().norm();
+                r2_lin_diffofnorm += residual_2 * residual_2;
+                const double residual_3 = conf.CalculateDipoleMoment(nonlinear_vector).norm() - conf.getDipole().norm();
+                r2_nlin_diffofnorm += residual_3 * residual_3;
             };
             file_dipole.close();
+
+            std::cout << "\nMean xtb2-Dipole: " << mean_dipole_gfn2 << " [eA], " << mean_dipole_gfn2/0.2082 << " [D]" << std::endl;
+            std::cout << "Mean linear Dipole: " << mean_dipole_linear << " [eA], " << mean_dipole_linear/0.2082 << " [D]" << std::endl
+                      << "Mean nonlinear Dipole: " << mean_dipole_nonlinear << " [eA], " << mean_dipole_nonlinear/0.2082 << " [D]" << std::endl
+                      << std::endl;
+
+            std::cout << "linear Scaling vector:\n"
+                      << linear_vector << "\n"
+                      << "nonlinear Scaling vector:\n"
+                      << nonlinear_vector << "\n"
+                      << std::endl;
+
+            std::cout << "Square Sum of Residuals of Components:" << std::endl
+            << "linear: " << r2_lin << std::endl
+            << "nonlinear " << r2_nlin << std::endl;
+            std::cout << "Square Sum of Residuals of Magnitudes" << std::endl
+            << "linear: " << r2_lin_diffofnorm << std::endl
+            << "nonlinear: " << r2_nlin_diffofnorm << std::endl;
 
 
 

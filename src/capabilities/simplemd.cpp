@@ -339,7 +339,8 @@ bool SimpleMD::Initialise()
     m_natoms = m_molecule.AtomCount();
 
     m_start_fragments = m_molecule.GetFragments();
-    m_scaling_vector = std::vector<double>(m_natoms, 1);
+    m_scaling_vector_linear = std::vector<double>(m_natoms, 1);
+    m_scaling_vector_nonlinear = std::vector<double>(m_natoms, 1);
     if (m_scaling_json != "none") {
         json scaling;
         std::ifstream file(m_scaling_json);
@@ -350,13 +351,17 @@ bool SimpleMD::Initialise()
         } catch ([[maybe_unused]] nlohmann::json::parse_error& e) {
             throw 404;
         }
-        std::string scaling_vector;
+        std::string scaling_vector_linear, scaling_vector_nonlinear;
         try {
-            scaling_vector = scaling["scaling_vector"];
+            scaling_vector_linear = scaling["scaling_vector_linear"];
+            scaling_vector_nonlinear = scaling["scaling_vector_nonlinear"];
         } catch ([[maybe_unused]] json::type_error& e) {
         }
-        if (!scaling_vector.empty()) {
-            m_scaling_vector = Tools::String2DoubleVec(scaling_vector, "|");
+        if (!scaling_vector_linear.empty()) {
+            m_scaling_vector_linear = Tools::String2DoubleVec(scaling_vector_linear, "|");
+        }
+        if (!scaling_vector_nonlinear.empty()) {
+            m_scaling_vector_nonlinear = Tools::String2DoubleVec(scaling_vector_nonlinear, "|");
         }
     }
 
@@ -746,8 +751,6 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["average_Virial"] = m_average_virial_correction;
     restart["average_Wall"] = m_average_wall_potential;
 
-    restart["scaling_vector"] = Tools::DoubleVector2String(m_scaling_vector);
-
     restart["rattle"] = m_rattle;
     restart["rattle_maxiter"] = m_rattle_maxiter;
     restart["rattle_dynamic_tol"] = m_rattle_tolerance;
@@ -824,7 +827,7 @@ bool SimpleMD::LoadRestartInformation()
 
 bool SimpleMD::LoadRestartInformation(const json& state)
 {
-    std::string geometry, scaling_vector, velocities, constrains, xi, Q;
+    std::string geometry, velocities, constrains, xi, Q;
 
     try {
         m_method = state["method"];
@@ -914,11 +917,6 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     }
 
     try {
-        scaling_vector = state["scaling_vector"];
-    } catch ([[maybe_unused]] json::type_error& e) {
-    }
-
-    try {
         velocities = state["velocities"];
     } catch ([[maybe_unused]] json::type_error& e) {
     }
@@ -979,9 +977,6 @@ bool SimpleMD::LoadRestartInformation(const json& state)
 
     if (!geometry.empty()) {
         m_current_geometry = Tools::String2DoubleVec(geometry, "|");
-    }
-    if (!scaling_vector.empty()) {
-        m_scaling_vector = Tools::String2DoubleVec(scaling_vector, "|");
     }
     if (!velocities.empty()) {
         m_velocities = Tools::String2DoubleVec(velocities, "|");
@@ -1109,7 +1104,7 @@ void SimpleMD::start()
     PrintStatus();
 
     /* Start MD Lopp here */
-    for (; m_currentStep < m_maxtime;) {
+    while (m_currentStep < m_maxtime) {
         auto step0 = std::chrono::system_clock::now();
 
         if (CheckStop() == true) {
@@ -1150,28 +1145,30 @@ void SimpleMD::start()
 
         /////////// Dipole
         if (m_dipole && m_method == "gfn2") {
-
-            //json blob;
-            // calc partialCharge with gnf2-xtb
-            //EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb
-            //interface.setMolecule(m_molecule); // set molecule for calc
-            //interface.CalculateEnergy(false, true); // calc energy and charges and dipole moment
-            //m_molecule.setPartialCharges(interface.Charges()); // calc Partial Charges and give it to mol
-            //m_molecule.setDipole(interface.Dipole()*au);
-
-            m_curr_dipoles = m_molecule.CalculateDipoleMoments(m_scaling_vector, m_start_fragments);
+            //linear Dipoles
+            auto curr_dipoles_lin = m_molecule.CalculateDipoleMoments(m_scaling_vector_linear, m_start_fragments);
+            std::cout << m_scaling_vector_linear[0] << std::endl;
             std::ofstream file;
-            file.open(Basename() + "_dipole.out", std::ios_base::app);
-
+            file.open(Basename() + "_dipole_linear.out", std::ios_base::app);
             Position d = {0,0,0};
-            for (const auto& dipole : m_curr_dipoles) {
-                d += dipole;
-                file << dipole.norm() << ", ";
+            for (const auto& dipole_lin : curr_dipoles_lin) {
+                d += dipole_lin;
+                file << dipole_lin[0] << " " << dipole_lin[1] << " " << dipole_lin[2] << " " << dipole_lin.norm() << ", ";
             }
-
-            file << d[0] << " " << d[1] << " " << d[2] << " " << m_molecule.getDipole()[0] << " " << m_molecule.getDipole()[1] << " " << m_molecule.getDipole()[2] << std::endl;
+            file << d[0] << " " << d[1] << " " << d[2] << ", " << m_molecule.getDipole()[0] << " " << m_molecule.getDipole()[1] << " " << m_molecule.getDipole()[2] << std::endl;
             file.close();
-
+            //nonlinear Dipoles
+            auto curr_dipoles_nlin = m_molecule.CalculateDipoleMoments(m_scaling_vector_nonlinear, m_start_fragments);
+            std::cout << m_scaling_vector_nonlinear[0] << std::endl;
+            std::ofstream file2;
+            file2.open(Basename() + "_dipole_nonlinear.out", std::ios_base::app);
+            Position sum = {0,0,0};
+            for (const auto& dipole_nlin : curr_dipoles_nlin) {
+                sum += dipole_nlin;
+                file2 << dipole_nlin[0] << " " << dipole_nlin[1] << " " << dipole_nlin[2] << " " << dipole_nlin.norm() <<", ";
+            }
+            file2 << sum[0] << " " << sum[1] << " " << sum[2] << ", " << m_molecule.getDipole()[0] << " " << m_molecule.getDipole()[1] << " " << m_molecule.getDipole()[2] << std::endl;
+            file2.close();
         }
         //////////// Dipole
 
@@ -1222,12 +1219,12 @@ void SimpleMD::start()
         }
 
         if (m_writerestart > -1 && m_step % m_writerestart == 0) {
-            std::ofstream restart_file("curcuma_step_" + std::to_string(int(m_step * m_dT)) + ".json");
+            std::ofstream restart_file("curcuma_step_" + std::to_string(static_cast<int>(m_step * m_dT)) + ".json");
             json restart;
             restart[MethodName()[0]] = WriteRestartInformation();
             restart_file << restart << std::endl;
         }
-        if ((m_step && int(m_step * m_dT) % m_print == 0)) {
+        if ((m_step && static_cast<int>(m_step * m_dT) % m_print == 0)) {
             m_Etot = m_Epot + m_Ekin;
             PrintStatus();
             m_time_step = 0;
@@ -1257,14 +1254,11 @@ void SimpleMD::start()
     if (m_thermostat == "csvr")
         std::cout << "Exchange with heat bath " << m_Ekin_exchange << "Eh" << std::endl;
     if (m_dipole) {
-        /*
+
         double dipole = 0.0;
-        for( auto d : m_collected_dipole)
-            dipole += d;
-        dipole /= m_collected_dipole.size();
-        std::cout << dipole*2.5418 << " average dipole in Debye and " << dipole*2.5418*3.3356e-30 << " Cm" << std::endl;
-        */
-        std::cout << "Calculated averaged dipole moment " << m_aver_dipol * 2.5418 << " Debye and " << m_aver_dipol * 2.5418 * 3.3356 << " Cm [e-30]" << std::endl;
+        //std::cout << dipole*2.5418 << " average dipole in Debye and " << dipole*2.5418*3.3356e-30 << " Cm" << std::endl;
+
+        std::cout << "Calculated averaged dipole moment " << m_aver_dipol_linear * 2.5418 << " Debye and " << m_aver_dipol_linear * 2.5418 * 3.3356 << " Cm [e-30]" << std::endl;
     }
 
 #ifdef USE_Plumed
@@ -1277,7 +1271,7 @@ void SimpleMD::start()
         for (int i = 0; i < m_bias_threads.size(); ++i) {
             auto structures = m_bias_threads[i]->getBiasStructure();
             for (int j = 0; j < structures.size(); ++j) {
-                std::cout << structures[j].rmsd_reference << "\t" << structures[j].energy << "\t" << structures[j].counter / double(m_colvar_incr) * 100 << std::endl;
+                std::cout << structures[j].rmsd_reference << "\t" << structures[j].energy << "\t" << structures[j].counter / static_cast<double>(m_colvar_incr) * 100 << std::endl;
 
                 m_rmsd_mtd_molecule.setGeometry(structures[j].geometry);
                 m_rmsd_mtd_molecule.setEnergy(structures[j].energy);
@@ -1300,7 +1294,7 @@ void SimpleMD::start()
 
 void SimpleMD::AdjustRattleTolerance()
 {
-    m_aver_rattle_Temp /= double(m_rattle_counter);
+    m_aver_rattle_Temp /= static_cast<double>(m_rattle_counter);
 
     // std::pair<double, double> pair(m_rattle_tolerance, m_aver_Temp);
 
@@ -1993,11 +1987,10 @@ void SimpleMD::PrintStatus() const
 {
     const auto unix_timestamp = std::chrono::seconds(std::time(NULL));
 
-    int current = std::chrono::milliseconds(unix_timestamp).count();
-    double duration = (current - m_unix_started) / (1000.0 * double(m_currentStep));
+    const int current = std::chrono::milliseconds(unix_timestamp).count();
+    const double duration = (current - m_unix_started) / (1000.0 * static_cast<double>(m_currentStep));
     double remaining;
-    double tmp = (m_maxtime - m_currentStep) * duration / 60;
-    if (tmp >= 1)
+    if (const double tmp = (m_maxtime - m_currentStep) * duration / 60; tmp >= 1)
         remaining = tmp;
     else
         remaining = (m_maxtime - m_currentStep) * duration;
@@ -2014,7 +2007,7 @@ void SimpleMD::PrintStatus() const
 #ifdef GCC
         if (m_dipole)
             std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}f} {13: ^{0}f} {14: ^{0}f} {15: ^{0}f} {16: ^{0}f}\n", 15,
-                m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential, m_aver_dipol * 2.5418 * 3.3356, m_virial_correction, m_average_virial_correction, remaining, m_time_step / 1000.0);
+                m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential, m_aver_dipol_linear * 2.5418 * 3.3356, m_virial_correction, m_average_virial_correction, remaining, m_time_step / 1000.0);
         else
             std::cout << fmt::format("{1: ^{0}f} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f} {7: ^{0}f} {8: ^{0}f} {9: ^{0}f} {10: ^{0}f} {11: ^{0}f} {12: ^{0}f} {13: ^{0}f} {14: ^{0}f} {15: ^{0}f}\n", 15,
                 m_currentStep / 1000, m_Epot, m_aver_Epot, m_Ekin, m_aver_Ekin, m_Etot, m_aver_Etot, m_T, m_aver_Temp, m_wall_potential, m_average_wall_potential, m_virial_correction, m_average_virial_correction, remaining, m_time_step / 1000.0);
@@ -2041,10 +2034,10 @@ double SimpleMD::CleanEnergy(double* grad)
     interface.setMolecule(m_molecule);
     interface.updateGeometry(m_current_geometry);
 
-    double Energy = interface.CalculateEnergy(true);
+    const double Energy = interface.CalculateEnergy(true);
     interface.getGradient(grad);
     if (m_dipole && m_method == "gfn2") {
-        m_molecule.setDipole(interface.Dipole()*au);
+        m_molecule.setDipole(interface.Dipole()*au);//in eA
         m_molecule.setPartialCharges(interface.Charges());
     }
     return Energy;
@@ -2054,10 +2047,10 @@ double SimpleMD::FastEnergy(double* grad)
 {
     m_interface->updateGeometry(m_current_geometry);
 
-    double Energy = m_interface->CalculateEnergy(true);
+    const double Energy = m_interface->CalculateEnergy(true);
     m_interface->getGradient(grad);
     if (m_dipole && m_method == "gfn2") {
-        m_molecule.setDipole(m_interface->Dipole()*au);
+        m_molecule.setDipole(m_interface->Dipole()*au);// in eA
         m_molecule.setPartialCharges(m_interface->Charges());
     }
     return Energy;
