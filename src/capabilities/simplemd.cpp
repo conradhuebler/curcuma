@@ -1147,7 +1147,6 @@ void SimpleMD::start()
         if (m_dipole && m_method == "gfn2") {
             //linear Dipoles
             auto curr_dipoles_lin = m_molecule.CalculateDipoleMoments(m_scaling_vector_linear, m_start_fragments);
-            std::cout << m_scaling_vector_linear[0] << std::endl;
             std::ofstream file;
             file.open(Basename() + "_dipole_linear.out", std::ios_base::app);
             Position d = {0,0,0};
@@ -1159,7 +1158,6 @@ void SimpleMD::start()
             file.close();
             //nonlinear Dipoles
             auto curr_dipoles_nlin = m_molecule.CalculateDipoleMoments(m_scaling_vector_nonlinear, m_start_fragments);
-            std::cout << m_scaling_vector_nonlinear[0] << std::endl;
             std::ofstream file2;
             file2.open(Basename() + "_dipole_nonlinear.out", std::ios_base::app);
             Position sum = {0,0,0};
