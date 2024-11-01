@@ -1004,6 +1004,66 @@ int main(int argc, char **argv) {
 
 
 
+        } else if (strcmp(argv[1], "-dipole_calc") == 0) {
+            if (argc < 5) {
+                std::cerr << "Please use curcuma to optimise the dipole of molecules as follow:\ncurcuma -dipole molecule.xyz -scaling_json scaling_vector.json" << std::endl;
+                return 0;
+            }
+            FileIterator file(argv[2]);
+            auto lm_basename = file.Basename();
+            const json blob = controller["dipole_calc"]; // declare blob as json, const why not used for now
+            int m_natoms;
+            Molecule mol;
+            while (!file.AtEnd()) { // calculation and output dipole moment
+                mol = file.Next(); // load Molecule
+                mol.Center(false); //sets the Centroid to the origin
+                EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb
+                interface.setMolecule(mol); // set molecule
+                interface.CalculateEnergy(false, true); // calc energy and Wave function
+                mol.setPartialCharges(interface.Charges()); // calc partial Charges and set it to mol
+                mol.setDipole(interface.Dipole() * au); //calc dipole moments and set it to mol in eA
+                m_natoms = mol.AtomCount();
+            }
+
+            std::vector<double> scaling_vector_linear = std::vector<double>(m_natoms, 1);
+            std::vector<double> scaling_vector_nonlinear = std::vector<double>(m_natoms, 1);
+            if (strcmp(argv[4], "none") != 0) {
+                json scaling;
+                std::ifstream file1(argv[4]);
+                try {
+                    file1 >> scaling;
+                } catch ([[maybe_unused]] nlohmann::json::type_error& e) {
+                    throw 404;
+                } catch ([[maybe_unused]] nlohmann::json::parse_error& e) {
+                    throw 404;
+                }
+                std::string str1, str2;
+                try {
+                    str1 = scaling["scaling_vector_linear"];
+                    str2 = scaling["scaling_vector_nonlinear"];
+                } catch ([[maybe_unused]] json::type_error& e) {
+                }
+                if (!str1.empty()) {
+                    scaling_vector_linear = Tools::String2DoubleVec(str1, "|");
+                }
+                if (!str2.empty()) {
+                    scaling_vector_nonlinear = Tools::String2DoubleVec(str2, "|");
+                }
+            }
+            std::cout << "scaling_vector_linear:\n" << scaling_vector_linear[0] << std::endl;
+            std::cout << "scaling_vector_nonlinear:\n" << scaling_vector_nonlinear[0] << std::endl;
+
+            auto dipole_lin = mol.CalculateDipoleMoment(scaling_vector_linear);
+            auto dipole_nlin = mol.CalculateDipoleMoment(scaling_vector_nonlinear);
+
+            std::cout << "Dipole form xtb2: "
+                      << mol.getDipole().norm() << " [eA] " << mol.getDipole().norm()*4.803 << " [D] " << std::endl;
+            std::cout << "Dipole form partial Charges and lin. Scaling: "
+                      << dipole_lin.norm() << " [eA] " << dipole_lin.norm()*4.803 << " [D] " << std::endl;
+            std::cout << "Dipole form partial Charges and nonlin. Scaling: "
+                      << dipole_nlin.norm() << " [eA] " << dipole_nlin.norm()*4.803 << " [D] " << std::endl;
+
+
         } else if (strcmp(argv[1], "-stride") == 0) {
 
             if (argc < 4) {
