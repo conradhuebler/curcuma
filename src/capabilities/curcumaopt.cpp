@@ -1,6 +1,6 @@
 /*
  * <Handling optimisation of structures. >
- * Copyright (C) 2020 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -47,16 +47,6 @@
 using Eigen::VectorXd;
 using namespace LBFGSpp;
 
-int OptThread::execute()
-{
-    std::vector<double> charges;
-    m_final = CurcumaOpt::LBFGSOptimise(&m_molecule, m_controller, m_result, &m_intermediate, m_param, charges, ThreadId(), Basename() + ".opt.trj");
-    m_scf["e0"] = m_final.Energy();
-    if (charges.size())
-        m_scf["charges"] = Tools::DoubleVector2String(charges);
-    return 0;
-}
-
 int SPThread::execute()
 {
     auto start = std::chrono::system_clock::now();
@@ -70,6 +60,29 @@ int SPThread::execute()
         m_scf["charges"] = Tools::DoubleVector2String(charges);
     auto end = std::chrono::system_clock::now();
     m_result = fmt::format("Single Point Energy = {0} Eh ({1} secs)\n", energy, std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
+    return 0;
+}
+
+int OptThread::execute()
+{
+    std::vector<double> charges;
+    m_final = CurcumaOpt::LBFGSOptimise(&m_molecule, m_controller, m_result, &m_intermediate, m_param, charges, ThreadId(), Basename() + ".opt.trj");
+    m_scf["e0"] = m_final.Energy();
+    if (charges.size())
+        m_scf["charges"] = Tools::DoubleVector2String(charges);
+    return 0;
+}
+
+int OptMThread::execute()
+{
+    std::vector<double> charges;
+
+    for (const Molecule& molecule : m_molecules) {
+        // auto m = CurcumaOpt::LBFGSOptimise(&molecule, m_controller, m_result, &m_intermediate, m_param, charges, ThreadId(), Basename() + ".opt.trj");
+        // m.appendXYZFile(Basename() + ".t" + std::to_string(ThreadId() + ".xyz");
+        // m_finals.push_back(m);
+    }
+
     return 0;
 }
 
@@ -403,6 +416,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, const json& controller, st
                 output += fmt::format("LBFGS interface signalled some logic error!\n");
                 output += fmt::format(" -- {0: ^75} --\n", error_result.what());
                 output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
+                output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
 
                 if (printOutput) {
                     std::cout << output;
@@ -419,6 +433,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, const json& controller, st
             output += fmt::format("LBFGS interface signalled some runtime error!\n");
             output += fmt::format(" -- {0: ^75} --\n", error_result.what());
             output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
+            output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
 
             if (printOutput) {
                 std::cout << output;
@@ -437,6 +452,8 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, const json& controller, st
             if (printOutput) {
                 output += fmt::format("Energy rises too much!\n");
                 output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation sufficiantly converged ***");
+                output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
+
                 std::cout << output;
                 output.clear();
             }
@@ -528,11 +545,15 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, const json& controller, st
 
     if (iteration >= MaxIter) {
         output += fmt::format("{0: ^75}\n\n", "*** Maximum number of iterations reached! ***");
+        output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
+
         error = true;
     }
     if (error == false) {
         output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, driver->RMSD(), solver.final_grad_norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
-        output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation converged ***");
+        output += fmt::format("{0: ^75}\n", "*** Geometry Optimisation converged ***");
+        output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
+
         if (printOutput) {
             std::cout << output;
             output.clear();
@@ -540,6 +561,8 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, const json& controller, st
     } else {
         output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, driver->RMSD(), solver.final_grad_norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
         output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
+        output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
+
         if (printOutput) {
             std::cout << output;
             output.clear();

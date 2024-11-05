@@ -311,16 +311,6 @@ void SimpleMD::LoadControlJson()
 
 bool SimpleMD::Initialise()
 {
-    static std::random_device rd{};
-    static std::mt19937 gen{ rd() };
-    if (m_seed == -1) {
-        const auto start = std::chrono::high_resolution_clock::now();
-        m_seed = std::chrono::duration_cast<std::chrono::seconds>(start.time_since_epoch()).count();
-    } else if (m_seed == 0)
-        m_seed = m_T0 * m_mass.size();
-    std::cout << "Random seed is " << m_seed << std::endl;
-    gen.seed(m_seed);
-
     if (m_initfile.compare("none") != 0) {
         json md;
         std::ifstream restart_file(m_initfile);
@@ -344,6 +334,17 @@ bool SimpleMD::Initialise()
         result_file.open(Basename() + ".trj.xyz");
         result_file.close();
     }
+
+    static std::random_device rd{};
+    static std::mt19937 gen{ rd() };
+    if (m_seed == -1) {
+        const auto start = std::chrono::high_resolution_clock::now();
+        m_seed = std::chrono::duration_cast<std::chrono::seconds>(start.time_since_epoch()).count();
+    } else if (m_seed == 0)
+        m_seed = m_T0 * m_mass.size();
+    std::cout << "Random seed is " << m_seed << std::endl;
+    gen.seed(m_seed);
+
     m_natoms = m_molecule.AtomCount();
     m_molecule.setCharge(0);
     if (!m_nocenter) {
@@ -718,6 +719,7 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["MaxTime"] = m_maxtime;
     restart["T"] = m_T0;
     restart["currentStep"] = m_currentStep;
+    restart["seed"] = m_seed;
     restart["velocities"] = Tools::DoubleVector2String(m_velocities);
     restart["geometry"] = Tools::DoubleVector2String(m_current_geometry);
     restart["gradient"] = Tools::DoubleVector2String(m_gradient);
@@ -937,6 +939,10 @@ bool SimpleMD::LoadRestartInformation(const json& state)
 
     try {
         m_rattle_dynamic_tol_iter = state["rattle_dynamic_tol_iter"];
+    } catch (json::type_error& e) {
+    }
+    try {
+        m_seed = state["seed"];
     } catch (json::type_error& e) {
     }
     try {
@@ -1228,8 +1234,11 @@ void SimpleMD::start()
 #endif
     if (m_rmsd_mtd) {
         std::cout << "Sum of Energy of COLVARs:" << std::endl;
+        // std::vector<BiasStructure> biased_structures;
+
         for (int i = 0; i < m_bias_threads.size(); ++i) {
             auto structures = m_bias_threads[i]->getBiasStructure();
+            // biased_structures.push_back(structures);
             for (int j = 0; j < structures.size(); ++j) {
                 std::cout << structures[j].rmsd_reference << "\t" << structures[j].energy << "\t" << structures[j].counter / double(m_colvar_incr) * 100 << std::endl;
 
@@ -1366,8 +1375,13 @@ void SimpleMD::Rattle(double* grad)
     }
     double iter = 0;
     double max_mu = 10;
-
-    while (iter < m_rattle_maxiter) {
+    double min_mu = 1e-4;
+    double difference = 0;
+    double difference_prev = 0, difference_curr = 0;
+    while (iter < 10) {
+        difference_prev = difference_curr;
+        difference_curr = 0;
+        difference = 0;
         iter++;
         int active = 0;
         for (auto bond : m_bond_constrained) {
@@ -1376,7 +1390,6 @@ void SimpleMD::Rattle(double* grad)
             double distance_current = ((coord[3 * i + 0] - coord[3 * j + 0]) * (coord[3 * i + 0] - coord[3 * j + 0])
                 + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
                 + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
-
             if (std::abs(distance - distance_current) > m_rattle_tolerance) {
                 move = true;
                 double r = distance - distance_current;
@@ -1387,14 +1400,37 @@ void SimpleMD::Rattle(double* grad)
                 double scalarproduct = (dx) * (coord[3 * i + 0] - coord[3 * j + 0])
                     + (dy) * (coord[3 * i + 1] - coord[3 * j + 1])
                     + (dz) * (coord[3 * i + 2] - coord[3 * j + 2]);
-                if (scalarproduct >= m_rattle_tolerance * distance) {
-                    moved[i] = 1;
-                    moved[j] = 1;
-                    active++;
+                // if (scalarproduct >= m_rattle_tolerance * distance) {
+                moved[i] += 1;
+                moved[j] += 1;
+                active++;
+                // std::cout << i << " " << j << " " << distance_current << " " << scalarproduct <<std::endl;
+
+                if (std::abs(scalarproduct) < min_mu) {
+                    std::cout << "small" << scalarproduct << " " << distance - distance_current << "" << std::endl;
+                    scalarproduct = std::signbit(scalarproduct) * min_mu;
+                    std::cout << scalarproduct << std::endl;
+                }
 
                     double lambda = r / (1 * (m_rmass[i] + m_rmass[j]) * scalarproduct);
-                    while (std::abs(lambda) > max_mu)
-                        lambda /= 2;
+                    if (std::isinf(lambda)) {
+                        std::cout << i << " " << j << std::endl;
+                        std::cout << r << " " << scalarproduct << " " << distance_current;
+                        std::cout << " " << (coord[3 * i + 0] - coord[3 * j + 0]) << " " << coord[3 * i + 1] - coord[3 * j + 1] << " " << (coord[3 * i + 2] - coord[3 * j + 2]);
+                        std::cout << " " << (m_current_geometry[3 * i + 0] - m_current_geometry[3 * j + 0]) << " " << m_current_geometry[3 * i + 1] - m_current_geometry[3 * j + 1] << " " << (m_current_geometry[3 * i + 2] - m_current_geometry[3 * j + 2]);
+
+                        std::cout << "inf" << std::endl;
+                        exit(0);
+                    }
+                    if (std::isnan(lambda)) {
+                        std::cout << "nan" << std::endl;
+                        exit(0);
+                    }
+
+                    while (std::abs(lambda) > max_mu) {
+                        // std::cout << " " << lambda << " " << max_mu;
+                        lambda *= 0.5;
+                    }
                     coord[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i];
                     coord[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i];
                     coord[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i];
@@ -1403,6 +1439,12 @@ void SimpleMD::Rattle(double* grad)
                     coord[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j];
                     coord[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j];
 
+                    double distance_current_New = ((coord[3 * i + 0] - coord[3 * j + 0]) * (coord[3 * i + 0] - coord[3 * j + 0])
+                        + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
+                        + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
+                    difference_curr += std::abs(distance_current_New - distance_current);
+                    // std::cout << i<< " "<< j<< " " << distance << " "<< distance_current << " " << distance_current_New << " " << lambda << std::endl << std::endl;
+
                     m_velocities[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
                     m_velocities[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
                     m_velocities[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
@@ -1410,18 +1452,55 @@ void SimpleMD::Rattle(double* grad)
                     m_velocities[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
                     m_velocities[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
                     m_velocities[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
-                }
+
+                    //}
             }
         }
-        if (active == 0)
+        // std::cout << "Current Difference: " <<  difference_curr << " Old Difference: " << difference_prev << " increasing " << difference_curr-difference_prev << " " << iter <<  std::endl;
+        difference /= double(active);
+        if ((iter > 1 && difference_curr < difference_prev)) {
+            std::cout << "rise " << difference_curr << " " << difference_prev << " " << iter << " ";
+        }
+        if (active == 0 || (iter > 1 && difference_curr > difference_prev))
             break;
     }
+    /*
+        for (auto bond : m_bond_constrained) {
+            int i = bond.first.first, j = bond.first.second;
+            double distance = bond.second;
+            double distance_current = ((coord[3 * i + 0] - coord[3 * j + 0]) * (coord[3 * i + 0] - coord[3 * j + 0])
+                + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
+                + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
+
+                double r = distance - distance_current;
+                double dx = m_current_geometry[3 * i + 0] - m_current_geometry[3 * j + 0];
+                double dy = m_current_geometry[3 * i + 1] - m_current_geometry[3 * j + 1];
+                double dz = m_current_geometry[3 * i + 2] - m_current_geometry[3 * j + 2];
+
+                double scalarproduct = (dx) * (coord[3 * i + 0] - coord[3 * j + 0])
+                    + (dy) * (coord[3 * i + 1] - coord[3 * j + 1])
+                    + (dz) * (coord[3 * i + 2] - coord[3 * j + 2]);
+
+                double lambda = r / (1 * (m_rmass[i] + m_rmass[j]) * scalarproduct);
+
+                m_velocities[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+                m_velocities[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+                m_velocities[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+
+                m_velocities[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                m_velocities[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                m_velocities[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+        }
+
+    */
+
     if (iter >= m_rattle_maxiter) {
-        std::cout << "numeric difficulties - 1st step in rattle velocity verlet" << std::endl;
+        std::cout << "numeric difficulties - 1st step in rattle velocity verlet " << difference << std::endl;
         std::ofstream restart_file("unstable_curcuma_" + std::to_string(m_currentStep) + ".json");
         nlohmann::json restart;
         restart[MethodName()[0]] = WriteRestartInformation();
         restart_file << restart << std::endl;
+        PrintStatus();
     }
     double ekin = 0;
 
@@ -1478,12 +1557,20 @@ void SimpleMD::Rattle(double* grad)
     m_virial_correction = 0;
     iter = 0;
     ekin = 0.0;
-    while (iter < m_rattle_maxiter) {
+    double sum_active = 0;
+    while (iter < 10) {
         iter++;
         int active = 0;
+        double sum_mu = 0;
         for (auto bond : m_bond_constrained) {
             int i = bond.first.first, j = bond.first.second;
-            if (moved[i] == 1 && moved[j] == 1) {
+            if (moved[i] != 0 && moved[j] != 0) {
+                moved[i] -= 1;
+                moved[j] -= 1;
+                double distance_current = ((coord[3 * i + 0] - coord[3 * j + 0]) * (coord[3 * i + 0] - coord[3 * j + 0])
+                    + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
+                    + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
+
                 double distance = bond.second;
 
                 double dx = coord[3 * i + 0] - coord[3 * j + 0];
@@ -1495,32 +1582,45 @@ void SimpleMD::Rattle(double* grad)
 
                 double r = (dx) * (dvx) + (dy) * (dvy) + (dz) * (dvz);
 
-                double mu = -1 * r / ((m_rmass[i] + m_rmass[j]) * distance);
-                while (std::abs(mu) > max_mu)
-                    mu /= 2;
-                if (std::abs(mu) > m_rattle_tolerance) {
-                    active = 1;
-                    m_virial_correction += mu * distance;
-                    m_velocities[3 * i + 0] += dx * mu * m_rmass[i];
-                    m_velocities[3 * i + 1] += dy * mu * m_rmass[i];
-                    m_velocities[3 * i + 2] += dz * mu * m_rmass[i];
-
-                    m_velocities[3 * j + 0] -= dx * mu * m_rmass[j];
-                    m_velocities[3 * j + 1] -= dy * mu * m_rmass[j];
-                    m_velocities[3 * j + 2] -= dz * mu * m_rmass[j];
+                double mu = -1 * r / ((m_rmass[i] + m_rmass[j]) * distance_current);
+                sum_mu += mu;
+                if (iter == m_rattle_maxiter) {
+                    //      std::cout << i << " " << j << " " << r << " " << (dx) * (dx) + (dy) * (dy) + (dz) * (dz) << " " << distance << " " << mu << " .. ";
                 }
+                // if (std::abs(mu) > m_rattle_tolerance) {
+                while (std::abs(mu) > max_mu)
+                    mu *= 0.5;
+                active = 1;
+                sum_active++;
+                m_virial_correction += mu * distance_current;
+                m_velocities[3 * i + 0] += dx * mu * m_rmass[i];
+                m_velocities[3 * i + 1] += dy * mu * m_rmass[i];
+                m_velocities[3 * i + 2] += dz * mu * m_rmass[i];
+
+                m_velocities[3 * j + 0] -= dx * mu * m_rmass[j];
+                m_velocities[3 * j + 1] -= dy * mu * m_rmass[j];
+                m_velocities[3 * j + 2] -= dz * mu * m_rmass[j];
+                // if(iter == m_rattle_maxiter)
+                //      std::cout << " " << mu << std::endl;
+                //}//lse
+                //{
+                // std::cout << mu <<std::endl;
+                //}
             }
+            //   std::cout << sum_mu << " (" << iter << "/" << sum_active << ") ";
         }
+        //   std::cout << std::endl;
         if (active == 0)
             break;
     }
 
     if (iter >= m_rattle_maxiter) {
-        std::cout << "numeric difficulties - 2nd in rattle velocity verlet" << iter << std::endl;
+        std::cout << "numeric difficulties - 2nd in rattle velocity verlet " << iter << std::endl;
         std::ofstream restart_file("unstable_curcuma_" + std::to_string(m_currentStep) + ".json");
         nlohmann::json restart;
         restart[MethodName()[0]] = WriteRestartInformation();
         restart_file << restart << std::endl;
+        PrintStatus();
     }
 
     if (move)
@@ -1558,9 +1658,11 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
         m_bias_threads[0]->addGeometry(current_geometry, 0, m_currentStep, 0);
         m_bias_structure_count++;
         m_rmsd_mtd_molecule.writeXYZFile(Basename() + ".mtd.xyz");
-        std::ofstream colvarfile;
-        colvarfile.open("COLVAR");
-        colvarfile.close();
+        if (m_nocolvarfile == false) {
+            std::ofstream colvarfile;
+            colvarfile.open("COLVAR");
+            colvarfile.close();
+        }
     }
     if (m_threads == 1 || m_bias_structure_count == 1) {
         for (int i = 0; i < m_bias_threads.size(); ++i) {
@@ -1607,11 +1709,12 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
         m_bias_pool->Reset();
     }
     rmsd_reference = m_bias_threads[0]->RMSDReference();
+    m_rmsd_mtd_molecule.setGeometry(current_geometry);
+
     if (m_nocolvarfile == false) {
         std::ofstream colvarfile;
         colvarfile.open("COLVAR", std::iostream::app);
         colvarfile << m_currentStep << " ";
-        m_rmsd_mtd_molecule.setGeometry(current_geometry);
         if (m_rmsd_fragment_count < 2)
             colvarfile << rmsd_reference << " ";
 
@@ -2129,7 +2232,8 @@ void SimpleMD::CSVR()
 
         m_atom_temp[i].push_back(m_mass[i] * (m_velocities[3 * i + 0] * m_velocities[3 * i + 0] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]) / (kb_Eh * m_dof));
     }
-    //    }
+    m_seed++;
+    //   }
 }
 
 void SimpleMD::Anderson()
@@ -2143,6 +2247,7 @@ void SimpleMD::Anderson()
             m_velocities[3 * i + 0] = (m_velocities[3 * i + 0] + distribution(generator)) / 2.0;
             m_velocities[3 * i + 1] = (m_velocities[3 * i + 1] + distribution(generator)) / 2.0;
             m_velocities[3 * i + 2] = (m_velocities[3 * i + 2] + distribution(generator)) / 2.0;
+            m_seed += 3;
         }
     }
 }

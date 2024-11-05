@@ -1,6 +1,6 @@
 /*
  * <Handling optimisation of structures. >
- * Copyright (C) 2020 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -100,6 +100,19 @@ public:
     ~OptThread() = default;
 
     int execute() override;
+};
+
+class OptMThread : public SPThread {
+public:
+    OptMThread() = default;
+    ~OptMThread() = default;
+
+    int execute() override;
+    inline void setMolecules(const std::vector<Molecule>& molecules) { m_molecules = molecules; }
+    std::vector<Molecule> Molecules() const { return m_finals; }
+
+private:
+    std::vector<Molecule> m_molecules, m_finals;
 };
 
 class CurcumaOpt : public CurcumaMethod {

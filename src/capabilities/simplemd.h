@@ -64,10 +64,12 @@ public:
         str.counter = 1;
         str.index = index;
         m_biased_structures.push_back(str);
-        std::ofstream colvarfile;
-        colvarfile.open("COLVAR_" + std::to_string(index));
-        colvarfile << "#m_currentStep  rmsd  bias_energy   counter  factor" << std::endl;
-        colvarfile.close();
+        if (m_nocolvarfile == false) {
+            std::ofstream colvarfile;
+            colvarfile.open("COLVAR_" + std::to_string(index));
+            colvarfile << "#m_currentStep  rmsd  bias_energy   counter  factor" << std::endl;
+            colvarfile.close();
+        }
         /*
                 std::ofstream hillsfile;
                 hillsfile.open("HILLS_" + std::to_string(index));
@@ -153,7 +155,7 @@ static json CurcumaMDJson{
     { "writerestart", 1000 },
     { "rattle", false },
     { "rattle_tolerance", 1e-1 },
-    { "rattle_maxiter", 100 },
+    { "rattle_maxiter", 1000 },
     { "rattle_dynamic_tol", false },
     { "rattle_dynamic_tol_iter", 100 },
     { "thermostat", "csvr" }, // can be csvr (default), berendson, none, anderson or nosehover

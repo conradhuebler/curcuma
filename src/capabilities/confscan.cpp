@@ -110,7 +110,6 @@ int ConfScanThread::execute()
 
         m_reorder_rule = m_driver->ReorderRules();
     }
-    std::cout << m_rmsd << " ";
     m_driver->clear();
     return 0;
 }
@@ -1018,7 +1017,7 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
     PrintSetUp(dLE, dLI, dLH);
     /* if ignore rotation or ignore barcode are true, the tight cutoffs are set to -1, that no difference is smaller
      * than the tight threshold and the loose threshold is set to a big number, that every structure has to be reordered*/
-    m_skiped = 0;
+
     m_rejected_directly = 0;
     m_duplicated = 0;
     if (m_ignoreRotation == true) {
@@ -1031,9 +1030,10 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
     }
 
     TriggerWriteRestart();
-
-    m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_reused = 0;
-
+    m_reorder_count += m_reordered;
+    m_reorder_successfull_count += m_reordered_worked;
+    m_skipped_count += m_skiped;
+    m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_reused = 0, m_skiped = 0;
     json rmsd = m_controller;
     rmsd["silent"] = true;
     rmsd["reorder"] = true;
@@ -1252,11 +1252,14 @@ void ConfScan::Finalise()
 {
     TriggerWriteRestart();
 
-    std::cout << "time for calculating descriptors:" << std::endl;
-    std::cout << "Rotational constants " << m_timing_rot << std::endl;
-    std::cout << "Ripser bar code difference" << m_timing_ripser << std::endl;
+    std::cout << "time for calculating descriptors " << std::endl;
+    std::cout << "Rotational constants: " << m_timing_rot << std::endl;
+    std::cout << "Ripser bar code difference: " << m_timing_ripser << std::endl;
+    std::cout << "Success rate in %: " << m_reorder_successfull_count / double(m_reorder_count) * 100 << std::endl;
+    std::cout << "Efficiency: " << m_skipped_count / double(m_reorder_successfull_count) << std::endl;
 
     int i = 0;
+
     for (const auto molecule : m_stored_structures) {
         double difference = abs(molecule->Energy() - m_lowest_energy) * 2625.5;
         if (i >= m_maxrank && m_maxrank != -1) {

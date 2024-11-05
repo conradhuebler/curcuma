@@ -265,3 +265,13 @@ void QMDFFFit::start()
     std::ofstream parameterfile("qmdff_param.json");
     parameterfile << parameter;
 }
+
+/*
+void QMDFFFit::FitDihedrals(json &dihedrals)
+{
+    for(int i = 0; i < dihedrals.size(); ++i)
+    {
+        std::cout << dihedrals[i] << std::endl;
+    }
+}
+*/

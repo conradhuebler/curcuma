@@ -208,7 +208,7 @@ void RMSDDriver::LoadControlJson()
         m_method = 1;
     else if (method.compare("hybrid0") == 0)
         m_method = 3;
-    else if (method.compare("hybrid") == 0) {
+    else if (method.compare("hybrid") == 0 || method.compare("subspace") == 0) {
         m_method = 4;
         m_limit = Json2KeyWord<int>(m_defaults, "limit");
     } else if (method.compare("free") == 0) {
@@ -281,7 +281,6 @@ void RMSDDriver::start()
     if (m_reference.Atoms() != m_target.Atoms() || m_force_reorder) {
         if (!m_noreorder) {
             ReorderMolecule();
-            // std::cout << m_rmsd << std::endl;
             rmsd_calculated = true;
         }
     }
@@ -985,7 +984,6 @@ void RMSDDriver::TemplateFree()
 void RMSDDriver::InsertRotation(std::pair<double, Matrix>& rotation)
 {
     for (auto i : m_prepared_cost_matrices) {
-        // std::cout << (rotation.second - i.second).cwiseAbs().sum()/double(i.second.rows()*i.second.rows()) << std::endl;
         if ((rotation.second - i.second).cwiseAbs().sum() / double(i.second.rows() * i.second.rows()) < 10)
             return;
     }
@@ -1027,10 +1025,10 @@ bool RMSDDriver::TemplateReorder()
 
     auto blob = MakeCostMatrix(cached_reference, rotated);
     m_cost_limit = blob.first;
-    if (!m_silent)
+    // if (!m_silent)
+    if (m_method == 4)
+        blob.first = 1;
 
-        if (m_method == 4)
-            blob.first = 1;
     InsertRotation(blob);
     return true;
 }
