@@ -1,6 +1,7 @@
 /*
  * <Simple MD Module for Curcuma. >
  * Copyright (C) 2023 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
+ *               2024 Gerd Gehrisch
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
