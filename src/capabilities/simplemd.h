@@ -154,10 +154,13 @@ static json CurcumaMDJson{
     { "norestart", false },
     { "writerestart", 1000 },
     { "rattle", false },
-    { "rattle_tolerance", 1e-1 },
-    { "rattle_maxiter", 1000 },
+    { "rattle_tol_12", 1e-1 },
+    { "rattle_tol_13", 2 },
+    { "rattle_maxiter", 50 },
     { "rattle_dynamic_tol", false },
     { "rattle_dynamic_tol_iter", 100 },
+    { "rattle_max", 10 },
+    { "rattle_min", 1e-4 },
     { "thermostat", "csvr" }, // can be csvr (default), berendson, none, anderson or nosehover
     { "respa", 1 },
     { "threads", 1 },
@@ -292,7 +295,7 @@ private:
     std::function<double(double* grad)> Energy;
     std::function<double(double* grad)> WallPotential;
 
-    std::vector<std::pair<std::pair<int, int>, double>> m_bond_constrained;
+    std::vector<std::pair<std::pair<int, int>, double>> m_bond_constrained, m_bond_13_constrained;
 #ifdef USE_Plumed
     plumed m_plumedmain;
 #endif
@@ -309,7 +312,7 @@ private:
     double m_T0 = 298.13, m_aver_Temp = 0, m_aver_rattle_Temp = 0, m_rmsd = 1.5;
     double m_x0 = 0, m_y0 = 0, m_z0 = 0;
     double m_Ekin_exchange = 0.0;
-    std::vector<double> m_current_geometry, m_mass, m_velocities, m_gradient, m_rmass, m_virial, m_gradient_bias;
+    std::vector<double> m_current_geometry, m_mass, m_velocities, m_rt_geom_1, m_rt_geom_2, m_rt_velo, m_gradient, m_rmass, m_virial, m_gradient_bias;
     std::vector<int> m_atomtype;
     Molecule m_molecule, m_reference, m_target, m_rmsd_mtd_molecule;
     bool m_initialised = false, m_restart = false, m_writeUnique = true, m_opt = false, m_rescue = false, m_writeXYZ = true, m_writeinit = false, m_norestart = false;
@@ -334,7 +337,7 @@ private:
     int m_rattle_dynamic_tol_iter = 100;
     double m_pos_conv = 0, m_scale_velo = 1.0, m_coupling = 10;
     double m_impuls = 0, m_impuls_scaling = 0.75, m_dt2 = 0;
-    double m_rattle_tolerance = 1;
+    double m_rattle_tol_12 = 0.1, m_rattle_tol_13 = 0.5;
     double m_wall_spheric_radius = 6, m_wall_temp = 298.15, m_wall_beta = 6;
     double m_wall_x_min = 0, m_wall_x_max = 0, m_wall_y_min = 0, m_wall_y_max = 0, m_wall_z_min = 0, m_wall_z_max = 0;
     double m_wall_potential = 0, m_average_wall_potential = 0;
@@ -346,6 +349,8 @@ private:
     double m_rmsd_rmsd = 1;
     double m_rmsd_econv = 1e8;
     double m_rmsd_DT = 1000000;
+    double m_rattle_max = 10;
+    double m_rattle_min = 1e-4;
     int m_max_rmsd_N = -1;
     int m_mtd_steps = 10;
     int m_rattle = 0;
