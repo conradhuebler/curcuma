@@ -40,6 +40,8 @@ public:
     void setMolecule(const Molecule& molecule) { m_molecule = molecule; }
 
 private:
+    // void FitDihedrals(json &dihedrals);
+
     /* Lets have this for all modules */
     nlohmann::json WriteRestartInformation() override { return json(); }
 

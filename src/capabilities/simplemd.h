@@ -52,7 +52,7 @@ struct BiasStructure {
 
 class BiasThread : public CxxThread {
 public:
-    BiasThread(const Molecule& reference, const json& rmsdconfig);
+    BiasThread(const Molecule& reference, const json& rmsdconfig, bool nocolvarfile, bool nohillsfile);
     ~BiasThread();
 
     virtual int execute() override;
@@ -65,10 +65,12 @@ public:
         str.counter = 1;
         str.index = index;
         m_biased_structures.push_back(str);
-        std::ofstream colvarfile;
-        colvarfile.open("COLVAR_" + std::to_string(index));
-        colvarfile << "#m_currentStep  rmsd  bias_energy   counter  factor" << std::endl;
-        colvarfile.close();
+        if (m_nocolvarfile == false) {
+            std::ofstream colvarfile;
+            colvarfile.open("COLVAR_" + std::to_string(index));
+            colvarfile << "#m_currentStep  rmsd  bias_energy   counter  factor" << std::endl;
+            colvarfile.close();
+        }
         /*
                 std::ofstream hillsfile;
                 hillsfile.open("HILLS_" + std::to_string(index));
@@ -103,6 +105,8 @@ public:
     inline void setk(double k) { m_k = k; }
     inline void setalpha(double alpha) { m_alpha = alpha; }
     inline void setDT(double DT) { m_DT = DT; }
+    inline void setdT(double dT) { m_dT = dT; }
+
     inline void setEnergyConv(double rmsd_econv) { m_rmsd_econv = rmsd_econv; }
     inline void setWTMTD(bool wtmtd) { m_wtmtd = wtmtd; }
     inline int Counter() const { return m_counter; }
@@ -115,9 +119,9 @@ private:
     json m_config;
     Molecule m_reference, m_target;
     Geometry m_gradient;
-    double m_k, m_alpha, m_DT, m_currentStep, m_rmsd_reference, m_current_bias, m_rmsd_econv;
+    double m_k, m_alpha, m_DT, m_currentStep, m_rmsd_reference, m_current_bias, m_rmsd_econv, m_dT = 1;
     int m_counter = 0, m_atoms = 0;
-    bool m_wtmtd = false;
+    bool m_wtmtd = false, m_nocolvarfile = false, m_nohillsfile = false;
 };
 
 static json CurcumaMDJson{
@@ -151,10 +155,13 @@ static json CurcumaMDJson{
     { "norestart", false },
     { "writerestart", 1000 },
     { "rattle", false },
-    { "rattle_tolerance", 1e-1 },
-    { "rattle_maxiter", 100 },
+    { "rattle_tol_12", 1e-1 },
+    { "rattle_tol_13", 2 },
+    { "rattle_maxiter", 50 },
     { "rattle_dynamic_tol", false },
     { "rattle_dynamic_tol_iter", 100 },
+    { "rattle_max", 10 },
+    { "rattle_min", 1e-4 },
     { "thermostat", "csvr" }, // can be csvr (default), berendson, none, anderson or nosehover
     { "respa", 1 },
     { "dipole", false },
@@ -192,7 +199,10 @@ static json CurcumaMDJson{
     { "rmsd_fix_structure", false },
     { "rmsd_atoms", "-1" },
     { "chainlength", 3 },
-    { "anderson", 0.001 }
+    { "anderson", 0.001 },
+    { "noCOLVARfile", false },
+    { "noHILSfile", false },
+
 };
 
 class SimpleMD : public CurcumaMethod {
@@ -286,7 +296,7 @@ private:
     std::function<double(double* grad)> Energy;
     std::function<double(double* grad)> WallPotential;
 
-    std::vector<std::pair<std::pair<int, int>, double>> m_bond_constrained;
+    std::vector<std::pair<std::pair<int, int>, double>> m_bond_constrained, m_bond_13_constrained;
 #ifdef USE_Plumed
     plumed m_plumedmain;
 #endif
@@ -330,7 +340,7 @@ private:
     int m_rattle_dynamic_tol_iter = 100;
     double m_pos_conv = 0, m_scale_velo = 1.0, m_coupling = 10;
     double m_impuls = 0, m_impuls_scaling = 0.75, m_dt2 = 0;
-    double m_rattle_tolerance = 1;
+    double m_rattle_tol_12 = 0.1, m_rattle_tol_13 = 0.5;
     double m_wall_spheric_radius = 6, m_wall_temp = 298.15, m_wall_beta = 6;
     double m_wall_x_min = 0, m_wall_x_max = 0, m_wall_y_min = 0, m_wall_y_max = 0, m_wall_z_min = 0, m_wall_z_max = 0;
     double m_wall_potential = 0, m_average_wall_potential = 0;
@@ -342,6 +352,8 @@ private:
     double m_rmsd_rmsd = 1;
     double m_rmsd_econv = 1e8;
     double m_rmsd_DT = 1000000;
+    double m_rattle_max = 10;
+    double m_rattle_min = 1e-4;
     int m_max_rmsd_N = -1;
     int m_mtd_steps = 10;
     int m_rattle = 0;
@@ -364,12 +376,16 @@ private:
     bool m_wtmtd = false;
     bool m_rmsd_fix_structure = false;
     bool m_rattle_dynamic_tol = false;
+    bool m_nocolvarfile = false;
+    bool m_nohillsfile = false;
+
     int m_mtd_dT = -1;
     int m_seed = -1;
     int m_time_step = 0;
     int m_dof = 0;
     int m_mtd_time = 0, m_loop_time = 0;
 
+    std::vector<std::vector<double>> m_atom_temp;
     std::vector<double> m_zeta; // Thermostatische Variablen
     std::vector<double> m_xi; // Zeitderivate von zeta
     std::vector<double> m_Q; // Trägheiten der Thermostatkette

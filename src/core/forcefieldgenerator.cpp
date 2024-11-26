@@ -119,7 +119,7 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
         m_ff_type = 1;
         m_parameter["d3"] = 1;
         m_parameter["vdw_scaling"] = 0;
-    } else if (m_method.compare("quff")) {
+    } else if (m_method.compare("quff") == 0) {
         m_ff_type = 3;
 
     } else if (m_method.compare("qmdff") == 0) {

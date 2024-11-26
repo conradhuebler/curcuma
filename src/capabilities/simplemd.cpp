@@ -50,9 +50,11 @@
 #endif
 #include "simplemd.h"
 
-BiasThread::BiasThread(const Molecule& reference, const json& rmsdconfig)
+BiasThread::BiasThread(const Molecule& reference, const json& rmsdconfig, bool nocolvarfile, bool nohillsfile)
     : m_reference(reference)
     , m_target(reference)
+    , m_nocolvarfile(nocolvarfile)
+    , m_nohillsfile(nohillsfile)
 {
     m_driver = RMSDDriver(rmsdconfig, true);
     m_config = rmsdconfig;
@@ -82,7 +84,7 @@ int BiasThread::execute()
         m_driver.setTarget(m_target);
         double rmsd = m_driver.BestFitRMSD();
         double expr = exp(-rmsd * rmsd * m_alpha);
-        double bias_energy = expr;
+        double bias_energy = expr * m_dT;
         factor = m_biased_structures[i].factor;
 
         if (!m_wtmtd)
@@ -100,24 +102,27 @@ int BiasThread::execute()
         bias_energy *= factor * m_k;
 
         m_current_bias += bias_energy;
-
-        std::ofstream colvarfile;
-        colvarfile.open("COLVAR_" + std::to_string(m_biased_structures[i].index), std::iostream::app);
-        colvarfile << m_currentStep << " " << rmsd << " " << bias_energy << " " << m_biased_structures[i].counter << " " << factor << std::endl;
-        colvarfile.close();
-
-        /*
-        std::ofstream hillsfile;
-        if (i == 0) {
-            hillsfile.open("HILLS", std::iostream::app);
-        } else {
-            hillsfile.open("HILLS_" + std::to_string(m_biased_structures[i].index), std::iostream::app);
+        if (m_nocolvarfile == false) {
+            std::ofstream colvarfile;
+            colvarfile.open("COLVAR_" + std::to_string(m_biased_structures[i].index), std::iostream::app);
+            colvarfile << m_currentStep << " " << rmsd << " " << bias_energy << " " << m_biased_structures[i].counter << " " << factor << std::endl;
+            colvarfile.close();
         }
-        hillsfile << m_currentStep << " " << rmsd << " " << m_alpha_rmsd << " " << m_k_rmsd << " " << "-1" << std::endl;
-        hillsfile.close();
+        /*
+        if(nohillsfile == false)
+        {
+            std::ofstream hillsfile;
+            if (i == 0) {
+                hillsfile.open("HILLS", std::iostream::app);
+            } else {
+                hillsfile.open("HILLS_" + std::to_string(m_biased_structures[i].index), std::iostream::app);
+            }
+            hillsfile << m_currentStep << " " << rmsd << " " << m_alpha_rmsd << " " << m_k_rmsd << " " << "-1" << std::endl;
+            hillsfile.close();
+        }
         */
 
-        double dEdR = -2 * m_alpha * m_k / m_atoms * exp(-rmsd * rmsd * m_alpha) * factor;
+        double dEdR = -2 * m_alpha * m_k / m_atoms * exp(-rmsd * rmsd * m_alpha) * factor * m_dT;
 
         m_gradient += m_driver.Gradient() * dEdR;
         m_counter += m_biased_structures[i].counter;
@@ -206,6 +211,9 @@ void SimpleMD::LoadControlJson()
     m_wtmtd = Json2KeyWord<bool>(m_defaults, "wtmtd");
     m_rmsd_ref_file = Json2KeyWord<std::string>(m_defaults, "rmsd_ref_file");
     m_rmsd_fix_structure = Json2KeyWord<bool>(m_defaults, "rmsd_fix_structure");
+    m_nocolvarfile = Json2KeyWord<bool>(m_defaults, "noCOLVARfile");
+    m_nohillsfile = Json2KeyWord<bool>(m_defaults, "noHILSfile");
+
     m_rmsd_atoms = Json2KeyWord<std::string>(m_defaults, "rmsd_atoms");
 
     m_writerestart = Json2KeyWord<int>(m_defaults, "writerestart");
@@ -229,13 +237,18 @@ void SimpleMD::LoadControlJson()
     int rattle = Json2KeyWord<int>(m_defaults, "rattle");
     m_rattle_maxiter = Json2KeyWord<int>(m_defaults, "rattle_maxiter");
     m_rattle_dynamic_tol_iter = Json2KeyWord<int>(m_defaults, "rattle_dynamic_tol_iter");
+    m_rattle_max = Json2KeyWord<double>(m_defaults, "rattle_max");
+    m_rattle_min = Json2KeyWord<double>(m_defaults, "rattle_min");
+
     m_rattle_dynamic_tol = Json2KeyWord<bool>(m_defaults, "rattle_dynamic_tol");
 
     if (rattle == 1) {
         Integrator = [=](double* grad) {
             this->Rattle(grad);
         };
-        m_rattle_tolerance = Json2KeyWord<double>(m_defaults, "rattle_tolerance");
+        m_rattle_tol_12 = Json2KeyWord<double>(m_defaults, "rattle_tol_12");
+        m_rattle_tol_13 = Json2KeyWord<double>(m_defaults, "rattle_tol_13");
+
         // m_coupling = m_dT;
         m_rattle = Json2KeyWord<int>(m_defaults, "rattle");
         std::cout << "Using rattle to constrain bonds!" << std::endl;
@@ -337,6 +350,17 @@ bool SimpleMD::Initialise()
         result_file.open(Basename() + ".trj.xyz");
         result_file.close();
     }
+
+    static std::random_device rd{};
+    static std::mt19937 gen{ rd() };
+    if (m_seed == -1) {
+        const auto start = std::chrono::high_resolution_clock::now();
+        m_seed = std::chrono::duration_cast<std::chrono::seconds>(start.time_since_epoch()).count();
+    } else if (m_seed == 0)
+        m_seed = m_T0 * m_mass.size();
+    std::cout << "Random seed is " << m_seed << std::endl;
+    gen.seed(m_seed);
+
     m_natoms = m_molecule.AtomCount();
 
     m_start_fragments = m_molecule.GetFragments();
@@ -382,10 +406,15 @@ bool SimpleMD::Initialise()
         m_velocities = std::vector<double>(3 * m_natoms, 0);
         m_currentStep = 0;
     }
+    /* */
+    m_rt_geom_1 = std::vector<double>(3 * m_natoms, 0);
+    m_rt_geom_2 = std::vector<double>(3 * m_natoms, 0);
+    m_rt_velo = std::vector<double>(3 * m_natoms, 0);
+    /* */
 
     m_gradient = std::vector<double>(3 * m_natoms, 0);
     m_virial = std::vector<double>(3 * m_natoms, 0);
-
+    m_atom_temp = std::vector<std::vector<double>>(m_natoms);
     if(m_opt)
     {
         json js = CurcumaOptJson;
@@ -553,16 +582,27 @@ void SimpleMD::InitConstrainedBonds()
                     std::pair<double, double> minmax(m_molecule.CalculateDistance(i, j) * m_molecule.CalculateDistance(i, j), m_molecule.CalculateDistance(i, j) * m_molecule.CalculateDistance(i, j));
                     std::pair<std::pair<int, int>, double> bond(indicies, m_molecule.CalculateDistance(i, j) * m_molecule.CalculateDistance(i, j));
                     m_bond_constrained.emplace_back(bond);
-
                     // std::cout << i << " " << j << " " << bond.second << std::endl;
+
+                    for (int k = 0; k < j; ++k) {
+                        if (m.second(k, j)) {
+                            std::pair<int, int> indicies(i, k);
+                            std::pair<double, double> minmax(m_molecule.CalculateDistance(i, k) * m_molecule.CalculateDistance(i, k), m_molecule.CalculateDistance(i, k) * m_molecule.CalculateDistance(i, k));
+                            std::pair<std::pair<int, int>, double> bond(indicies, m_molecule.CalculateDistance(i, k) * m_molecule.CalculateDistance(i, k));
+                            m_bond_13_constrained.push_back(std::pair<std::pair<int, int>, double>(bond));
+                            std::cout << "1,3: " << i << " " << k << " " << bond.second << " ";
+                        }
+                    }
+                }
                 }
             }
-        }
     }
 
-    std::cout << m_dof << " initial degrees of freedom " << std::endl;
+    std::cout << std::endl
+              << m_dof << " initial degrees of freedom " << std::endl;
     std::cout << m_bond_constrained.size() << " constrains active" << std::endl;
-    m_dof -= m_bond_constrained.size();
+    m_dof -= (m_bond_constrained.size() + m_bond_13_constrained.size());
+
     std::cout << m_dof << " degrees of freedom remaining ..." << std::endl;
 }
 
@@ -739,6 +779,7 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["MaxTime"] = m_maxtime;
     restart["T"] = m_T0;
     restart["currentStep"] = m_currentStep;
+    restart["seed"] = m_seed;
     restart["velocities"] = Tools::DoubleVector2String(m_velocities);
     restart["geometry"] = Tools::DoubleVector2String(m_current_geometry);
     restart["gradient"] = Tools::DoubleVector2String(m_gradient);
@@ -754,7 +795,7 @@ nlohmann::json SimpleMD::WriteRestartInformation()
 
     restart["rattle"] = m_rattle;
     restart["rattle_maxiter"] = m_rattle_maxiter;
-    restart["rattle_dynamic_tol"] = m_rattle_tolerance;
+    // restart["rattle_dynamic_tol"] = m_rattle_toler;
     restart["rattle_dynamic_tol_iter"] = m_rattle_dynamic_tol_iter;
 
     restart["coupling"] = m_coupling;
@@ -947,6 +988,10 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     }
 
     try {
+        m_rattle_tol_13 = state["rattle_tol_13"];
+    } catch (json::type_error& e) {
+    }
+    try {
         m_rattle_maxiter = state["rattle_maxiter"];
     } catch ([[maybe_unused]] json::type_error& e) {
     }
@@ -959,6 +1004,10 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     try {
         m_rattle_dynamic_tol_iter = state["rattle_dynamic_tol_iter"];
     } catch ([[maybe_unused]] json::type_error& e) {
+    }
+    try {
+        m_seed = state["seed"];
+    } catch (json::type_error& e) {
     }
     try {
         m_rmsd_mtd = state["rmsd_mtd"];
@@ -1267,8 +1316,11 @@ void SimpleMD::start()
 #endif
     if (m_rmsd_mtd) {
         std::cout << "Sum of Energy of COLVARs:" << std::endl;
+        // std::vector<BiasStructure> biased_structures;
+
         for (int i = 0; i < m_bias_threads.size(); ++i) {
             auto structures = m_bias_threads[i]->getBiasStructure();
+            // biased_structures.push_back(structures);
             for (int j = 0; j < structures.size(); ++j) {
                 std::cout << structures[j].rmsd_reference << "\t" << structures[j].energy << "\t" << structures[j].counter / static_cast<double>(m_colvar_incr) * 100 << std::endl;
 
@@ -1298,11 +1350,11 @@ void SimpleMD::AdjustRattleTolerance()
     // std::pair<double, double> pair(m_rattle_tolerance, m_aver_Temp);
 
     if (m_aver_rattle_Temp > m_T0)
-        m_rattle_tolerance -= 0.01;
+        m_rattle_tol_12 -= 0.01;
     else if (m_aver_rattle_Temp < m_T0)
-        m_rattle_tolerance += 0.01;
-    std::cout << m_rattle_counter << " " << m_aver_rattle_Temp << " " << m_rattle_tolerance << std::endl;
-    m_rattle_tolerance = std::abs(m_rattle_tolerance);
+        m_rattle_tol_12 += 0.01;
+    std::cout << m_rattle_counter << " " << m_aver_rattle_Temp << " " << m_rattle_tol_12 << std::endl;
+    m_rattle_tol_12 = std::abs(m_rattle_tol_12);
     m_rattle_counter = 0;
     m_aver_rattle_Temp = 0;
 }
@@ -1388,27 +1440,297 @@ void SimpleMD::Rattle(double* grad)
      * some suff was just ignored or corrected
      * like dT^3 -> dT^2 and
      * updated velocities of the second atom (minus instead of plus)
+     * and adjusted to some needs
      */
     TriggerWriteRestart();
     auto* coord = new double[3 * m_natoms];
     double m_dT_inverse = 1 / m_dT;
-    std::vector<int> moved(m_natoms, 0);
+    std::vector<int> moved_12(m_natoms, 0), moved_13(m_natoms, 0);
     bool move = false;
     for (int i = 0; i < m_natoms; ++i) {
         coord[3 * i + 0] = m_current_geometry[3 * i + 0] + m_dT * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
         coord[3 * i + 1] = m_current_geometry[3 * i + 1] + m_dT * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
         coord[3 * i + 2] = m_current_geometry[3 * i + 2] + m_dT * m_velocities[3 * i + 2] - 0.5 * grad[3 * i + 2] * m_rmass[3 * i + 2] * m_dt2;
 
+        m_rt_geom_1[3 * i + 0] = coord[3 * i + 0];
+        m_rt_geom_1[3 * i + 1] = coord[3 * i + 1];
+        m_rt_geom_1[3 * i + 2] = coord[3 * i + 2];
+
         m_velocities[3 * i + 0] -= 0.5 * m_dT * grad[3 * i + 0] * m_rmass[3 * i + 0];
         m_velocities[3 * i + 1] -= 0.5 * m_dT * grad[3 * i + 1] * m_rmass[3 * i + 1];
         m_velocities[3 * i + 2] -= 0.5 * m_dT * grad[3 * i + 2] * m_rmass[3 * i + 2];
-    }
-    double iter = 0;
-    double max_mu = 10;
 
+        m_rt_velo[3 * i + 0] = m_velocities[3 * i + 0];
+        m_rt_velo[3 * i + 1] = m_velocities[3 * i + 1];
+        m_rt_velo[3 * i + 2] = m_velocities[3 * i + 2];
+    }
+
+    double iter = 0;
+    double difference = 0;
+    double difference_prev = 1e22, difference_curr = 1e22;
+    double max = m_rattle_max;
+    double scale = 0.1;
     while (iter < m_rattle_maxiter) {
+        difference_prev = difference_curr;
+        difference_curr = 0;
+        difference = 0;
         iter++;
         int active = 0;
+
+        for (auto bond : m_bond_constrained) {
+            int i = bond.first.first, j = bond.first.second;
+            double distance = bond.second;
+            double distance_current = ((m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0]) * (m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0])
+                + (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1]) * (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1])
+                + (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]) * (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]));
+            if (std::abs(distance - distance_current) > m_rattle_tol_12) {
+                move = true;
+                double r = distance - distance_current;
+                double dx = m_current_geometry[3 * i + 0] - m_current_geometry[3 * j + 0];
+                double dy = m_current_geometry[3 * i + 1] - m_current_geometry[3 * j + 1];
+                double dz = m_current_geometry[3 * i + 2] - m_current_geometry[3 * j + 2];
+
+                double scalarproduct = (dx) * (m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0])
+                    + (dy) * (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1])
+                    + (dz) * (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]);
+                // if (scalarproduct >= m_rattle_tolerance * distance) {
+                moved_12[i] += 1;
+                moved_12[j] += 1;
+                active++;
+                // std::cout << i << " " << j << " " << distance_current << " " << scalarproduct <<std::endl;
+
+                if (std::abs(scalarproduct) < m_rattle_min) {
+                    std::cout << "small" << scalarproduct << " " << distance - distance_current << "" << std::endl;
+                    if (scalarproduct < 0)
+                        scalarproduct = -1 * m_rattle_min;
+                    else
+                        scalarproduct = m_rattle_min;
+
+                    std::cout << scalarproduct << std::endl;
+                }
+
+                    double lambda = r / (1 * (m_rmass[i] + m_rmass[j]) * scalarproduct);
+                    if (std::isinf(lambda)) {
+                        std::cout << i << " " << j << std::endl;
+                        std::cout << r << " " << scalarproduct << " " << distance_current;
+                        std::cout << " " << (coord[3 * i + 0] - coord[3 * j + 0]) << " " << coord[3 * i + 1] - coord[3 * j + 1] << " " << (coord[3 * i + 2] - coord[3 * j + 2]);
+                        std::cout << " " << (m_current_geometry[3 * i + 0] - m_current_geometry[3 * j + 0]) << " " << m_current_geometry[3 * i + 1] - m_current_geometry[3 * j + 1] << " " << (m_current_geometry[3 * i + 2] - m_current_geometry[3 * j + 2]);
+
+                        std::cout << "inf" << std::endl;
+                        exit(0);
+                    }
+                    if (std::isnan(lambda)) {
+                        std::cout << "nan" << std::endl;
+                        exit(0);
+                    }
+
+                    while (std::abs(lambda) > max) {
+                        // std::cout << " " << lambda << " " << max_mu;
+                        lambda *= scale;
+                    }
+
+                    m_rt_geom_1[3 * i + 0] = coord[3 * i + 0] + dx * lambda * 0.5 * m_rmass[i];
+                    m_rt_geom_1[3 * i + 1] = coord[3 * i + 1] + dy * lambda * 0.5 * m_rmass[i];
+                    m_rt_geom_1[3 * i + 2] = coord[3 * i + 2] + dz * lambda * 0.5 * m_rmass[i];
+
+                    m_rt_geom_1[3 * j + 0] = coord[3 * j + 0] - dx * lambda * 0.5 * m_rmass[j];
+                    m_rt_geom_1[3 * j + 1] = coord[3 * j + 1] - dy * lambda * 0.5 * m_rmass[j];
+                    m_rt_geom_1[3 * j + 2] = coord[3 * j + 2] - dz * lambda * 0.5 * m_rmass[j];
+                    /*
+                                        coord[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i];
+                                        coord[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i];
+                                        coord[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i];
+
+                                        coord[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j];
+                                        coord[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j];
+                                        coord[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j];
+                    */
+
+                    /*
+                    std::cout <<m_rt_geom_1[3 * i + 0] << " " << m_rt_geom_1[3 * i + 1] << " " << m_rt_geom_1[3 * i + 2] << std::endl;
+                    std::cout <<coord[3 * i + 0] << " " << coord[3 * i + 1] << " " << coord[3 * i + 2] << std::endl;
+
+                    std::cout <<m_rt_geom_1[3 * j + 0] << " " << m_rt_geom_1[3 * j + 1] << " " << m_rt_geom_1[3 * j + 2] << std::endl;
+                    std::cout <<coord[3 * j + 0] << " " << coord[3 * j + 1] << " " << coord[3 * j + 2] << std::endl << std::endl;
+
+*/
+                    double distance_current_New = ((m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0]) * (m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0])
+                        + (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1]) * (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1])
+                        + (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]) * (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]));
+                    /*
+                                        double distance_current_New = ((coord[3 * i + 0] - coord[3 * j + 0]) * (coord[3 * i + 0] - coord[3 * j + 0])
+                                            + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
+                                            + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
+                    */
+                    difference_curr += std::abs(distance_current_New - distance_current);
+                    // std::cout << i<< " "<< j<< " " << distance << " "<< distance_current << " " << distance_current_New << " " << lambda << std::endl << std::endl;
+
+                    /*
+                                        m_velocities[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+                                        m_velocities[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+                                        m_velocities[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+
+                                        m_velocities[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                                        m_velocities[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                                        m_velocities[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                    */
+                    m_rt_velo[3 * i + 0] = m_velocities[3 * i + 0] + dx * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+                    m_rt_velo[3 * i + 1] = m_velocities[3 * i + 1] + dy * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+                    m_rt_velo[3 * i + 2] = m_velocities[3 * i + 2] + dz * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+
+                    m_rt_velo[3 * j + 0] = m_velocities[3 * j + 0] - dx * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                    m_rt_velo[3 * j + 1] = m_velocities[3 * j + 1] - dy * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                    m_rt_velo[3 * j + 2] = m_velocities[3 * j + 2] - dz * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+
+                    //}
+            }
+        }
+
+        for (auto bond : m_bond_13_constrained) {
+            int i = bond.first.first, j = bond.first.second;
+            double distance = bond.second;
+            double distance_current = ((m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0]) * (m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0])
+                + (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1]) * (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1])
+                + (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]) * (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]));
+            if (std::abs(distance - distance_current) > m_rattle_tol_13) {
+                move = true;
+                double r = distance - distance_current;
+                double dx = m_current_geometry[3 * i + 0] - m_current_geometry[3 * j + 0];
+                double dy = m_current_geometry[3 * i + 1] - m_current_geometry[3 * j + 1];
+                double dz = m_current_geometry[3 * i + 2] - m_current_geometry[3 * j + 2];
+
+                double scalarproduct = (dx) * (m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0])
+                    + (dy) * (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1])
+                    + (dz) * (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]);
+                // if (scalarproduct >= m_rattle_tolerance * distance) {
+                moved_13[i] += 1;
+                moved_13[j] += 1;
+                active++;
+                // std::cout << i << " " << j << " " << distance_current << " " << scalarproduct <<std::endl;
+
+                if (std::abs(scalarproduct) < m_rattle_min) {
+                    std::cout << "small" << scalarproduct << " " << distance - distance_current << "" << std::endl;
+                    if (scalarproduct < 0)
+                        scalarproduct = -1 * m_rattle_min;
+                    else
+                        scalarproduct = m_rattle_min;
+
+                    std::cout << scalarproduct << std::endl;
+                }
+
+                double lambda = r / (1 * (m_rmass[i] + m_rmass[j]) * scalarproduct);
+                if (std::isinf(lambda)) {
+                    std::cout << i << " " << j << std::endl;
+                    std::cout << r << " " << scalarproduct << " " << distance_current;
+                    std::cout << " " << (coord[3 * i + 0] - coord[3 * j + 0]) << " " << coord[3 * i + 1] - coord[3 * j + 1] << " " << (coord[3 * i + 2] - coord[3 * j + 2]);
+                    std::cout << " " << (m_current_geometry[3 * i + 0] - m_current_geometry[3 * j + 0]) << " " << m_current_geometry[3 * i + 1] - m_current_geometry[3 * j + 1] << " " << (m_current_geometry[3 * i + 2] - m_current_geometry[3 * j + 2]);
+
+                    std::cout << "inf" << std::endl;
+                    exit(0);
+                }
+                if (std::isnan(lambda)) {
+                    std::cout << "nan" << std::endl;
+                    exit(0);
+                }
+
+                while (std::abs(lambda) > max) {
+                    // std::cout << " " << lambda << " " << max_mu;
+                    lambda *= scale;
+                }
+
+                m_rt_geom_1[3 * i + 0] = coord[3 * i + 0] + dx * lambda * 0.5 * m_rmass[i];
+                m_rt_geom_1[3 * i + 1] = coord[3 * i + 1] + dy * lambda * 0.5 * m_rmass[i];
+                m_rt_geom_1[3 * i + 2] = coord[3 * i + 2] + dz * lambda * 0.5 * m_rmass[i];
+
+                m_rt_geom_1[3 * j + 0] = coord[3 * j + 0] - dx * lambda * 0.5 * m_rmass[j];
+                m_rt_geom_1[3 * j + 1] = coord[3 * j + 1] - dy * lambda * 0.5 * m_rmass[j];
+                m_rt_geom_1[3 * j + 2] = coord[3 * j + 2] - dz * lambda * 0.5 * m_rmass[j];
+                /*
+                                    coord[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i];
+                                    coord[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i];
+                                    coord[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i];
+
+                                 coord[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j];
+                                 coord[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j];
+                                 coord[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j];
+             */
+
+                /*
+                std::cout <<m_rt_geom_1[3 * i + 0] << " " << m_rt_geom_1[3 * i + 1] << " " << m_rt_geom_1[3 * i + 2] << std::endl;
+                std::cout <<coord[3 * i + 0] << " " << coord[3 * i + 1] << " " << coord[3 * i + 2] << std::endl;
+
+                     std::cout <<m_rt_geom_1[3 * j + 0] << " " << m_rt_geom_1[3 * j + 1] << " " << m_rt_geom_1[3 * j + 2] << std::endl;
+                     std::cout <<coord[3 * j + 0] << " " << coord[3 * j + 1] << " " << coord[3 * j + 2] << std::endl << std::endl;
+
+      */
+                double distance_current_New = ((m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0]) * (m_rt_geom_1[3 * i + 0] - m_rt_geom_1[3 * j + 0])
+                    + (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1]) * (m_rt_geom_1[3 * i + 1] - m_rt_geom_1[3 * j + 1])
+                    + (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]) * (m_rt_geom_1[3 * i + 2] - m_rt_geom_1[3 * j + 2]));
+                /*
+                                    double distance_current_New = ((coord[3 * i + 0] - coord[3 * j + 0]) * (coord[3 * i + 0] - coord[3 * j + 0])
+                                        + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
+                                        + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
+                */
+                difference_curr += std::abs(distance_current_New - distance_current);
+                // std::cout << i<< " "<< j<< " " << distance << " "<< distance_current << " " << distance_current_New << " " << lambda << std::endl << std::endl;
+
+                /*
+                                    m_velocities[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+                                    m_velocities[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+                                    m_velocities[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+
+                                 m_velocities[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                                 m_velocities[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                                 m_velocities[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+             */
+                m_rt_velo[3 * i + 0] = m_velocities[3 * i + 0] + dx * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+                m_rt_velo[3 * i + 1] = m_velocities[3 * i + 1] + dy * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+                m_rt_velo[3 * i + 2] = m_velocities[3 * i + 2] + dz * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+
+                m_rt_velo[3 * j + 0] = m_velocities[3 * j + 0] - dx * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                m_rt_velo[3 * j + 1] = m_velocities[3 * j + 1] - dy * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                m_rt_velo[3 * j + 2] = m_velocities[3 * j + 2] - dz * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+
+                //}
+            }
+        }
+        /*
+                Geometry geometry = m_molecule.getGeometry();
+                for (int i = 0; i < m_natoms; ++i) {
+                    geometry(i, 0) = m_rt_geom_1[3 * i + 0];
+                    geometry(i, 1) = m_rt_geom_1[3 * i + 1];
+                    geometry(i, 2) = m_rt_geom_1[3 * i + 2];
+                }
+                m_molecule.setGeometry(geometry);
+
+                m_molecule.appendXYZFile(Basename() + ".rattle.trj.xyz");
+        */
+        //   std::cout << "Current Difference: " <<  difference_curr << " Old Difference: " << difference_prev << " increasing " << difference_curr-difference_prev << " " << iter <<  std::endl;
+        difference /= double(active);
+        if ((iter > 1 && difference_curr < difference_prev)) {
+            //    std::cout << "rise " << difference_curr << " " << difference_prev << " " << iter << " ";
+        }
+        if (active == 0 || (iter > 1 && difference_curr > difference_prev)) {
+            // std::cout <<difference_prev << " " << difference_curr << " " << iter;
+            // if(iter > 40)
+            //     break;
+            // else{
+            //     max /= 2;
+            //     scale /= 2;
+            // }
+        }
+
+        for (int i = 0; i < m_natoms; ++i) {
+            m_velocities[3 * i + 0] = m_rt_velo[3 * i + 0];
+            m_velocities[3 * i + 1] = m_rt_velo[3 * i + 1];
+            m_velocities[3 * i + 2] = m_rt_velo[3 * i + 2];
+
+            coord[3 * i + 0] = m_rt_geom_1[3 * i + 0];
+            coord[3 * i + 1] = m_rt_geom_1[3 * i + 1];
+            coord[3 * i + 2] = m_rt_geom_1[3 * i + 2];
+        }
+    }
+    /*
         for (auto bond : m_bond_constrained) {
             int i = bond.first.first, j = bond.first.second;
             double distance = bond.second;
@@ -1416,8 +1738,6 @@ void SimpleMD::Rattle(double* grad)
                 + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
                 + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
 
-            if (std::abs(distance - distance_current) > m_rattle_tolerance) {
-                move = true;
                 double r = distance - distance_current;
                 double dx = m_current_geometry[3 * i + 0] - m_current_geometry[3 * j + 0];
                 double dy = m_current_geometry[3 * i + 1] - m_current_geometry[3 * j + 1];
@@ -1426,41 +1746,27 @@ void SimpleMD::Rattle(double* grad)
                 double scalarproduct = (dx) * (coord[3 * i + 0] - coord[3 * j + 0])
                     + (dy) * (coord[3 * i + 1] - coord[3 * j + 1])
                     + (dz) * (coord[3 * i + 2] - coord[3 * j + 2]);
-                if (scalarproduct >= m_rattle_tolerance * distance) {
-                    moved[i] = 1;
-                    moved[j] = 1;
-                    active++;
 
-                    double lambda = r / (1 * (m_rmass[i] + m_rmass[j]) * scalarproduct);
-                    while (std::abs(lambda) > max_mu)
-                        lambda /= 2;
-                    coord[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i];
-                    coord[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i];
-                    coord[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i];
+                double lambda = r / (1 * (m_rmass[i] + m_rmass[j]) * scalarproduct);
 
-                    coord[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j];
-                    coord[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j];
-                    coord[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j];
+                m_velocities[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+                m_velocities[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+                m_velocities[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
 
-                    m_velocities[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
-                    m_velocities[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
-                    m_velocities[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
-
-                    m_velocities[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
-                    m_velocities[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
-                    m_velocities[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
-                }
-            }
+                m_velocities[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                m_velocities[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                m_velocities[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
         }
-        if (active == 0)
-            break;
-    }
+
+    */
+
     if (iter >= m_rattle_maxiter) {
-        std::cout << "numeric difficulties - 1st step in rattle velocity verlet" << std::endl;
-        std::ofstream restart_file("unstable_curcuma_" + std::to_string(m_currentStep) + ".json");
-        nlohmann::json restart;
-        restart[MethodName()[0]] = WriteRestartInformation();
-        restart_file << restart << std::endl;
+        //  std::cout << "numeric difficulties - 1st step in rattle velocity verlet " << difference << std::endl;
+        // std::ofstream restart_file("unstable_curcuma_" + std::to_string(m_currentStep) + ".json");
+        // nlohmann::json restart;
+        // restart[MethodName()[0]] = WriteRestartInformation();
+        // restart_file << restart << std::endl;
+        //  PrintStatus();
     }
     double ekin = 0;
 
@@ -1517,12 +1823,20 @@ void SimpleMD::Rattle(double* grad)
     m_virial_correction = 0;
     iter = 0;
     ekin = 0.0;
+    double sum_active = 0;
     while (iter < m_rattle_maxiter) {
         iter++;
         int active = 0;
+        double sum_mu = 0;
         for (auto bond : m_bond_constrained) {
             int i = bond.first.first, j = bond.first.second;
-            if (moved[i] == 1 && moved[j] == 1) {
+            if (moved_12[i] != 0 && moved_12[j] != 0) {
+                moved_12[i] -= 1;
+                moved_12[j] -= 1;
+                double distance_current = ((coord[3 * i + 0] - coord[3 * j + 0]) * (coord[3 * i + 0] - coord[3 * j + 0])
+                    + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
+                    + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
+
                 double distance = bond.second;
 
                 double dx = coord[3 * i + 0] - coord[3 * j + 0];
@@ -1534,32 +1848,93 @@ void SimpleMD::Rattle(double* grad)
 
                 double r = (dx) * (dvx) + (dy) * (dvy) + (dz) * (dvz);
 
-                double mu = -1 * r / ((m_rmass[i] + m_rmass[j]) * distance);
-                while (std::abs(mu) > max_mu)
-                    mu /= 2;
-                if (std::abs(mu) > m_rattle_tolerance) {
-                    active = 1;
-                    m_virial_correction += mu * distance;
-                    m_velocities[3 * i + 0] += dx * mu * m_rmass[i];
-                    m_velocities[3 * i + 1] += dy * mu * m_rmass[i];
-                    m_velocities[3 * i + 2] += dz * mu * m_rmass[i];
-
-                    m_velocities[3 * j + 0] -= dx * mu * m_rmass[j];
-                    m_velocities[3 * j + 1] -= dy * mu * m_rmass[j];
-                    m_velocities[3 * j + 2] -= dz * mu * m_rmass[j];
+                double mu = -1 * r / ((m_rmass[i] + m_rmass[j]) * distance_current);
+                sum_mu += mu;
+                if (iter == m_rattle_maxiter) {
+                    //      std::cout << i << " " << j << " " << r << " " << (dx) * (dx) + (dy) * (dy) + (dz) * (dz) << " " << distance << " " << mu << " .. ";
                 }
+                // if (std::abs(mu) > m_rattle_tolerance) {
+                while (std::abs(mu) > m_rattle_max)
+                    mu *= 0.1;
+                active = 1;
+                sum_active++;
+                m_virial_correction += mu * distance_current;
+                m_velocities[3 * i + 0] += dx * mu * m_rmass[i];
+                m_velocities[3 * i + 1] += dy * mu * m_rmass[i];
+                m_velocities[3 * i + 2] += dz * mu * m_rmass[i];
+
+                m_velocities[3 * j + 0] -= dx * mu * m_rmass[j];
+                m_velocities[3 * j + 1] -= dy * mu * m_rmass[j];
+                m_velocities[3 * j + 2] -= dz * mu * m_rmass[j];
+                // if(iter == m_rattle_maxiter)
+                //      std::cout << " " << mu << std::endl;
+                //}//lse
+                //{
+                // std::cout << mu <<std::endl;
+                //}
             }
+            //   std::cout << sum_mu << " (" << iter << "/" << sum_active << ") ";
         }
+
+        for (auto bond : m_bond_13_constrained) {
+            int i = bond.first.first, j = bond.first.second;
+            if (moved_13[i] != 0 && moved_13[j] != 0) {
+                moved_13[i] -= 1;
+                moved_13[j] -= 1;
+                double distance_current = ((coord[3 * i + 0] - coord[3 * j + 0]) * (coord[3 * i + 0] - coord[3 * j + 0])
+                    + (coord[3 * i + 1] - coord[3 * j + 1]) * (coord[3 * i + 1] - coord[3 * j + 1])
+                    + (coord[3 * i + 2] - coord[3 * j + 2]) * (coord[3 * i + 2] - coord[3 * j + 2]));
+
+                double distance = bond.second;
+
+                double dx = coord[3 * i + 0] - coord[3 * j + 0];
+                double dy = coord[3 * i + 1] - coord[3 * j + 1];
+                double dz = coord[3 * i + 2] - coord[3 * j + 2];
+                double dvx = m_velocities[3 * i + 0] - m_velocities[3 * j + 0];
+                double dvy = m_velocities[3 * i + 1] - m_velocities[3 * j + 1];
+                double dvz = m_velocities[3 * i + 2] - m_velocities[3 * j + 2];
+
+                double r = (dx) * (dvx) + (dy) * (dvy) + (dz) * (dvz);
+
+                double mu = -1 * r / ((m_rmass[i] + m_rmass[j]) * distance_current);
+                sum_mu += mu;
+                if (iter == m_rattle_maxiter) {
+                    //      std::cout << i << " " << j << " " << r << " " << (dx) * (dx) + (dy) * (dy) + (dz) * (dz) << " " << distance << " " << mu << " .. ";
+                }
+                // if (std::abs(mu) > m_rattle_tolerance) {
+                while (std::abs(mu) > m_rattle_max)
+                    mu *= 0.1;
+                active = 1;
+                sum_active++;
+                m_virial_correction += mu * distance_current;
+                m_velocities[3 * i + 0] += dx * mu * m_rmass[i];
+                m_velocities[3 * i + 1] += dy * mu * m_rmass[i];
+                m_velocities[3 * i + 2] += dz * mu * m_rmass[i];
+
+                m_velocities[3 * j + 0] -= dx * mu * m_rmass[j];
+                m_velocities[3 * j + 1] -= dy * mu * m_rmass[j];
+                m_velocities[3 * j + 2] -= dz * mu * m_rmass[j];
+                // if(iter == m_rattle_maxiter)
+                //      std::cout << " " << mu << std::endl;
+                //}//lse
+                //{
+                // std::cout << mu <<std::endl;
+                //}
+            }
+            //   std::cout << sum_mu << " (" << iter << "/" << sum_active << ") ";
+        }
+        //   std::cout << std::endl;
         if (active == 0)
             break;
     }
 
     if (iter >= m_rattle_maxiter) {
-        std::cout << "numeric difficulties - 2nd in rattle velocity verlet" << iter << std::endl;
-        std::ofstream restart_file("unstable_curcuma_" + std::to_string(m_currentStep) + ".json");
-        nlohmann::json restart;
-        restart[MethodName()[0]] = WriteRestartInformation();
-        restart_file << restart << std::endl;
+        std::cout << "numeric difficulties - 2nd in rattle velocity verlet " << iter << std::endl;
+        /*    std::ofstream restart_file("unstable_curcuma_" + std::to_string(m_currentStep) + ".json");
+            nlohmann::json restart;
+            restart[MethodName()[0]] = WriteRestartInformation();
+            restart_file << restart << std::endl; */
+        PrintStatus();
     }
 
     if (move)
@@ -1597,9 +1972,11 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
         m_bias_threads[0]->addGeometry(current_geometry, 0, m_currentStep, 0);
         m_bias_structure_count++;
         m_rmsd_mtd_molecule.writeXYZFile(Basename() + ".mtd.xyz");
-        std::ofstream colvarfile;
-        colvarfile.open("COLVAR");
-        colvarfile.close();
+        if (m_nocolvarfile == false) {
+            std::ofstream colvarfile;
+            colvarfile.open("COLVAR");
+            colvarfile.close();
+        }
     }
     if (m_threads == 1 || m_bias_structure_count == 1) {
         for (auto & m_bias_thread : m_bias_threads) {
@@ -1646,21 +2023,22 @@ void SimpleMD::ApplyRMSDMTD(double* grad)
         m_bias_pool->Reset();
     }
     rmsd_reference = m_bias_threads[0]->RMSDReference();
-    std::ofstream colvarfile;
-    colvarfile.open("COLVAR", std::iostream::app);
-    colvarfile << m_currentStep << " ";
     m_rmsd_mtd_molecule.setGeometry(current_geometry);
-    if (m_rmsd_fragment_count < 2)
-        colvarfile << rmsd_reference << " ";
 
-    for(int i = 0; i < m_rmsd_fragment_count; ++i)
-        for(int j = 0; j < i; ++j)
-        {
-            colvarfile << (m_rmsd_mtd_molecule.Centroid(true, i) -  m_rmsd_mtd_molecule.Centroid(true,j)).norm()<< " ";
-        }
-    colvarfile << current_bias  << " "  << std::endl;
-    colvarfile.close();
+    if (m_nocolvarfile == false) {
+        std::ofstream colvarfile;
+        colvarfile.open("COLVAR", std::iostream::app);
+        colvarfile << m_currentStep << " ";
+        if (m_rmsd_fragment_count < 2)
+            colvarfile << rmsd_reference << " ";
 
+        for (int i = 0; i < m_rmsd_fragment_count; ++i)
+            for (int j = 0; j < i; ++j) {
+                colvarfile << (m_rmsd_mtd_molecule.Centroid(true, i) - m_rmsd_mtd_molecule.Centroid(true, j)).norm() << " ";
+            }
+        colvarfile << current_bias << " " << std::endl;
+        colvarfile.close();
+    }
     m_bias_energy += current_bias;
 
     if (current_bias * m_rmsd_econv < m_bias_structure_count && m_rmsd_fix_structure == false) {
@@ -2130,6 +2508,29 @@ void SimpleMD::CSVR()
     static std::normal_distribution<> d{ 0, 1 };
     static std::chi_squared_distribution<float> dchi{ static_cast<float>(m_dof) };
 
+    /*
+        if(int(m_step * m_dT) % 1 == 0)
+        {
+        for (int i = 0; i < m_natoms; ++i) {
+            m_atom_temp[i].push_back(m_mass[i]* (m_velocities[3 * i + 0] *m_velocities[3 * i + 0]
+                + m_velocities[3 * i + 1] *m_velocities[3 * i + 1]
+                                         + m_velocities[3 * i + 2]*m_velocities[3 * i + 2])/(kb_Eh * m_dof));
+            double T = 0;
+            double R = d(gen);
+            double SNf = dchi(gen);
+            for(int j = 0; j < m_atom_temp[i].size(); ++j)
+                T += m_atom_temp[i][j];
+            if(m_atom_temp[i].size() > 1000)
+                m_atom_temp[i].erase(m_atom_temp[i].begin());
+            double c = exp(-(T / 2.0 * m_respa) / m_coupling);
+            double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (m_dof * m_Ekin) + 2 * R * sqrt(c * (1 - c) * Ekin_target / (m_dof * m_Ekin));
+            m_Ekin_exchange += m_Ekin * (alpha2 - 1);
+            double alpha = sqrt(alpha2);
+            m_velocities[3 * i + 0] *= alpha;
+            m_velocities[3 * i + 1] *= alpha;
+            m_velocities[3 * i + 2] *= alpha;
+        }
+        }else{ */
     double R = d(gen);
     double SNf = dchi(gen);
     double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (m_dof * m_Ekin) + 2 * R * sqrt(c * (1 - c) * Ekin_target / (m_dof * m_Ekin));
@@ -2139,7 +2540,11 @@ void SimpleMD::CSVR()
         m_velocities[3 * i + 0] *= alpha;
         m_velocities[3 * i + 1] *= alpha;
         m_velocities[3 * i + 2] *= alpha;
+
+        m_atom_temp[i].push_back(m_mass[i] * (m_velocities[3 * i + 0] * m_velocities[3 * i + 0] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]) / (kb_Eh * m_dof));
     }
+    m_seed++;
+    //   }
 }
 
 void SimpleMD::Anderson()
@@ -2153,6 +2558,7 @@ void SimpleMD::Anderson()
             m_velocities[3 * i + 0] = (m_velocities[3 * i + 0] + distribution(generator)) / 2.0;
             m_velocities[3 * i + 1] = (m_velocities[3 * i + 1] + distribution(generator)) / 2.0;
             m_velocities[3 * i + 2] = (m_velocities[3 * i + 2] + distribution(generator)) / 2.0;
+            m_seed += 3;
         }
     }
 }
