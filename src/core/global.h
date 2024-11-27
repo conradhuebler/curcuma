@@ -32,7 +32,7 @@
 using json = nlohmann::json;
 
 const double pi = 3.14159265359;
-const double au = 0.52917721092;
+const double au = 0.52917721092; // Angstrom
 const double amu2au = 1822.8884850;
 const double kb_Eh = 3.166811e-6; // Hartree
 const double kb_SI = 1.380649e-23; // SI

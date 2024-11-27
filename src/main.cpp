@@ -46,6 +46,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+
 #include <string>
 #include <vector>
 
@@ -223,7 +224,7 @@ int main(int argc, char **argv) {
                 exit(0);
             }
 
-            RMSDDriver* driver = new RMSDDriver(controller, false);
+            auto* driver = new RMSDDriver(controller, false);
             driver->setReference(molecule1);
             driver->setTarget(molecule2);
             driver->start();
@@ -244,7 +245,7 @@ int main(int argc, char **argv) {
                 exit(1);
             }
 
-            Docking* docking = new Docking(controller, false);
+            auto* docking = new Docking(controller, false);
             if (!docking->Initialise()) {
                 docking->printError();
                 return 0;
@@ -286,7 +287,7 @@ int main(int argc, char **argv) {
                 return -1;
             }
             std::cout << controller << std::endl;
-            ConfScan* scan = new ConfScan(controller);
+            auto* scan = new ConfScan(controller);
             scan->setFileName(argv[2]);
             scan->start();
             return 0;
@@ -297,7 +298,7 @@ int main(int argc, char **argv) {
 
                 return -1;
             }
-            ConfStat* stat = new ConfStat(controller);
+            auto* stat = new ConfStat(controller);
             stat->setFileName(argv[2]);
             stat->start();
             return 0;
@@ -495,7 +496,7 @@ int main(int argc, char **argv) {
 
             Molecule mol1 = Files::LoadFile(argv[2]);
             Molecule mol2 = Files::LoadFile(argv[3]);
-            NEBDocking* nebdock = new NEBDocking;
+            auto* nebdock = new NEBDocking;
             nebdock->setStructures(mol1, mol2);
             nebdock->setProtonTransfer(pt);
             nebdock->Prepare();
@@ -908,7 +909,7 @@ int main(int argc, char **argv) {
                 sum_mass += gyr.second;
                 sqrt_sum += sqrt(gyr.first);
                 sqrt_sum_mass += sqrt(gyr.second);
-                std::cout << ":: " << gyr.first << " " << sum / double(count) << " " << gyr.second << " " << sum_mass / double(count) << " " << sqrt(gyr.first) << " " << sqrt_sum / double(count) << " " << sqrt(gyr.second) << " " << sqrt_sum_mass / double(count) << std::endl;
+                std::cout << ":: " << gyr.first << " " << sum / static_cast<double>(count) << " " << gyr.second << " " << sum_mass / static_cast<double>(count) << " " << sqrt(gyr.first) << " " << sqrt_sum / static_cast<double>(count) << " " << sqrt(gyr.second) << " " << sqrt_sum_mass / static_cast<double>(count) << std::endl;
                 count++;
             }
         } else if (strcmp(argv[1], "-dipole") == 0) {
@@ -916,130 +917,152 @@ int main(int argc, char **argv) {
                 std::cerr << "Please use curcuma to optimise the dipole of molecules as follow:\ncurcuma -dipole molecule.xyz" << std::endl;
                 return 0;
             }
+
             FileIterator file(argv[2]);
-            Position target_dipole;
+            auto lm_basename = file.Basename();
+            // TODO: Add additional arguments...
+            // TODO: if -md then do first molecular dynamic to generate some conformers, then fit
+            // TODO: if -scale <array of int> then calc dipole with scalingfactor and xtb2
+            // TODO: if -methode <String> then change methode
 
-            double target = 0, threshold = 1e-1, initial = 3, dx = 5e-1; // dec
-            bool target_set = false;
-            int maxiter = 10;
-            json blob = controller["dipole"]; // declare blob as json,
-            if (blob.contains("target")) {
-                target = blob["target"];
-                target_set = true;
-            }
-            if (blob.contains("threshold")) {
-                threshold = blob["threshold"];
-            }
-            if (blob.contains("initial")) {
-                initial = blob["initial"];
-            }
-            if (blob.contains("maxiter")) {
-                maxiter = blob["maxiter"];
-            }
-            if (blob.contains("dx")) {
-                dx = blob["dx"];
-            }
+            const json blob = controller["dipole"]; // declare blob as json, const why not used for now
 
-            /*std::cout << "Parameter: " << "\n"
-                      << "target " << target << "\n"
-                      << "threshold " << threshold << "\n"
-                      << "initial " << initial << "\n"
-                      << "maxiter " << maxiter << "\n"
-                      << "dx " << dx << "\n"
-                      << std::endl;*/
 
             std::vector<Molecule> conformers;
+            while (!file.AtEnd()) { // calculation and output dipole moment
+                Molecule mol = file.Next(); // load Molecule
+                mol.Center(false); //sets the Centroid to the origin
+                EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb
+                interface.setMolecule(mol); // set molecule
+                interface.CalculateEnergy(false, true); // calc energy and Wave function
+                mol.setPartialCharges(interface.Charges()); // calc partial Charges and set it to mol
+                mol.setDipole(interface.Dipole() * au); //calc dipole moments and set it to mol in eA
+                conformers.push_back(mol);
+            }
+            Molecule mol = conformers.at(0); // maybe molecule in ground state
+            //Calculation of the scaling vector linear and nonlinear
+            const auto linear_vector = DipoleScalingCalculation(conformers); //linear
+            const auto nonlinear_vector = OptimiseDipoleScaling(conformers, linear_vector); //nonlinear
+            // output scaling vector as JSON
+            std::vector<double> vec_linear_scaling(linear_vector.data(), linear_vector.data() + linear_vector.rows() * linear_vector.cols());
+            std::vector<double> vec_nonlinear_scaling(nonlinear_vector.data(), nonlinear_vector.data() + nonlinear_vector.rows() * nonlinear_vector.cols());
+            json scaling_vector;
+            scaling_vector["scaling_vector_linear"] = Tools::DoubleVector2String(vec_linear_scaling);
+            scaling_vector["scaling_vector_nonlinear"] = Tools::DoubleVector2String(vec_nonlinear_scaling);
+            std::ofstream out(lm_basename + "_scaling_vector.json");
+            out << scaling_vector << std::endl;
+
+            double mean_dipole_gfn2 = 0;
+            double mean_dipole_nonlinear = 0;
+            double mean_dipole_linear = 0;
+            double r2_lin = 0;
+            double r2_nlin = 0;
+            double r2_lin_diffofnorm = 0;
+            double r2_nlin_diffofnorm = 0;
+            //output Dipole moments + Calculation of Mean Dipole
+            std::ofstream file_dipole;
+            file_dipole.open(lm_basename + "_dipole.out", std::ios_base::app);
+            file_dipole << "linear Dipole (x y z magn.); nonlinear Dipole (x y z magn.); gfn2 Dipoles (x y z magn.)" << std::endl;
+            for (const auto& conf : conformers){
+                const auto dipole_lin = conf.CalculateDipoleMoment(vec_linear_scaling);
+                const auto dipole_nlin = conf.CalculateDipoleMoment(vec_nonlinear_scaling);
+                const auto dipole_gfn2 = conf.getDipole();
+                mean_dipole_linear += dipole_lin.norm()/ conformers.size();
+                mean_dipole_nonlinear += dipole_nlin.norm()/ conformers.size();
+                mean_dipole_gfn2 += dipole_gfn2.norm()/ conformers.size();
+                file_dipole << dipole_lin[0] << " " << dipole_lin[1] << " " << dipole_lin[2] << " " << dipole_lin.norm() << "; ";
+                file_dipole << dipole_nlin[0] << " " << dipole_nlin[1] << " " << dipole_nlin[2] << " " << dipole_nlin.norm() << "; ";
+                file_dipole << dipole_gfn2[0] << " " << dipole_gfn2[1] << " " << dipole_gfn2[2] << " " << dipole_gfn2.norm() << std::endl;
+                const double residual = (conf.CalculateDipoleMoment(linear_vector) - conf.getDipole()).norm();
+                r2_lin += residual * residual;
+                const double residual_1 = (conf.CalculateDipoleMoment(nonlinear_vector) - conf.getDipole()).norm();
+                r2_nlin += residual_1 * residual_1;
+                const double residual_2 = conf.CalculateDipoleMoment(linear_vector).norm() - conf.getDipole().norm();
+                r2_lin_diffofnorm += residual_2 * residual_2;
+                const double residual_3 = conf.CalculateDipoleMoment(nonlinear_vector).norm() - conf.getDipole().norm();
+                r2_nlin_diffofnorm += residual_3 * residual_3;
+            };
+            file_dipole.close();
+
+            std::cout << "\nMean xtb2-Dipole: " << mean_dipole_gfn2 << " [eA], " << mean_dipole_gfn2/0.2082 << " [D]" << std::endl;
+            std::cout << "Mean linear Dipole: " << mean_dipole_linear << " [eA], " << mean_dipole_linear/0.2082 << " [D]" << std::endl
+                      << "Mean nonlinear Dipole: " << mean_dipole_nonlinear << " [eA], " << mean_dipole_nonlinear/0.2082 << " [D]" << std::endl
+                      << std::endl;
+
+            std::cout << "linear Scaling vector:\n"
+                      << linear_vector << "\n"
+                      << "nonlinear Scaling vector:\n"
+                      << nonlinear_vector << "\n"
+                      << std::endl;
+
+            std::cout << "Square Sum of Residuals of Components:" << std::endl
+            << "linear: " << r2_lin << std::endl
+            << "nonlinear " << r2_nlin << std::endl;
+            std::cout << "Square Sum of Residuals of Magnitudes" << std::endl
+            << "linear: " << r2_lin_diffofnorm << std::endl
+            << "nonlinear: " << r2_nlin_diffofnorm << std::endl;
+
+
+
+        } else if (strcmp(argv[1], "-dipole_calc") == 0) {
+            if (argc < 5) {
+                std::cerr << "Please use curcuma to optimise the dipole of molecules as follow:\ncurcuma -dipole molecule.xyz -scaling_json scaling_vector.json" << std::endl;
+                return 0;
+            }
+            FileIterator file(argv[2]);
+            auto lm_basename = file.Basename();
+            const json blob = controller["dipole_calc"]; // declare blob as json, const why not used for now
+            int m_natoms;
             Molecule mol;
             while (!file.AtEnd()) { // calculation and output dipole moment
                 mol = file.Next(); // load Molecule
-                mol.Center(false);
-
-                EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb and give
-                interface.setMolecule(mol); // set molecule for calc
-                interface.CalculateEnergy(false, true); // calc energy and charges and dipole moment
-
-                mol.setPartialCharges(interface.Charges()); // calc Partial Charges and give it to mol
-                auto charges = interface.Charges(); // dec and init charges
-                mol.setDipole(interface.Dipole() * au);
-                auto dipole_moment = interface.Dipole() * au; // get dipole moment from gfn2-xtb methode in au
-
-                /*std::cout << mol.AtomCount() << "\n"
-                          << "Dipole  "
-                          << dipole_moment[0]  << " "
-                          << dipole_moment[1]  << " "
-                          << dipole_moment[2]  << " "
-                          << std::endl;
-
-                for (int i = 0; i < charges.size(); ++i ){ // Output partial charges from gfn2-xtb methode
-                    std::string col = mol.Atom2String(i);
-                    col.pop_back();
-                    std::cout << col;
-                    std::cout << "   ";
-                    std::cout << charges[i] << "\n";
-                }
-                std::cout << std::endl;*/
-
-                conformers.push_back(mol);
-                mol.appendDipoleFile(file.Basename() + ".dip");
-
-                /*if (!target_set) { // calc target if not set
-                    target = dipole_moment.norm();
-                    target_dipole = dipole_moment;
-                }*/
-                /*std::cout << "Target dipole moment [eA, ea or D?]: "
-                          << target << "\n"
-                          << target_dipole[0] << ", " << target_dipole[1] << ", " << target_dipole[2] << "\n"
-                          << std::endl;
-
-                auto dipoles = mol.CalculateDipoleMoments();//calc Dipole for every Molecule with partial charges
-                for (const auto& dipole : dipoles) {
-                    std::cout << std::endl
-                              << "Dipole moment for single molecule [eA]: " << dipole.norm() << "\n"
-                              << dipole[0] << ", " << dipole[1] << ", " << dipole[2] << "\n"
-                              << std::endl;
-                }*/
-                /*auto dipole = mol.CalculateDipoleMoment();//calc Dipole for whole system with partial charges
-                std::cout << std::endl
-                          << "Dipole moment for whole structure [eA]: " << dipole.norm() << "\n"
-                          << dipole[0] << ", " << dipole[1] << ", " << dipole[2] << "\n"
-                          << std::endl;
-                std::cout << std::endl;
-                 */
-
-                /*
-                auto result = OptimiseDipoleScaling(&conformers, initial);
-                std::cout << "Final dipole moment [eA]: " << result.first.norm() << "\n"
-                          << result.first[0] << ", " << result.first[1] << ", " << result.first[2] << std::endl;
-                std::cout << std::endl;
-                std::cout << std::endl;
-
-                std::cout << "Fitted scalar:\n";
-
-                double sum = 0;
-
-                for (int i = 0; i < result.second.size(); ++i ) { //(auto i : result.second)
-                    sum += result.second[i];
-                    std::cout << mol.Atom2String(i).substr(0, 1)
-                              << i + 1 << ": "
-                              << result.second[i] << "\n";
-                }
-                std::cout << std::endl;
-                std::cout << "mean of scalar: " << sum / mol.AtomCount();*/
+                mol.Center(false); //sets the Centroid to the origin
+                EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb
+                interface.setMolecule(mol); // set molecule
+                interface.CalculateEnergy(false, true); // calc energy and Wave function
+                mol.setPartialCharges(interface.Charges()); // calc partial Charges and set it to mol
+                mol.setDipole(interface.Dipole() * au); //calc dipole moments and set it to mol in eA
+                m_natoms = mol.AtomCount();
             }
-            Vector scaling(mol.AtomCount());
-            for (int i = 0; i < mol.AtomCount(); ++i) {
-                scaling(i) = 1;
-            }
-            auto result = OptimiseDipoleScaling(conformers, scaling);
-            std::cout << "LM-Scaler:\n"
-                      << result << "\n"
-                      << std::endl;
 
-            Matrix Theta(mol.AtomCount(), 1);
-            Theta = DipoleScalingCalculation(conformers);
-            std::cout << "Analytic-Scaler:\n"
-                      << Theta << "\n"
-                      << std::endl;
+            std::vector<double> scaling_vector_linear = std::vector<double>(m_natoms, 1);
+            std::vector<double> scaling_vector_nonlinear = std::vector<double>(m_natoms, 1);
+            if (strcmp(argv[4], "none") != 0) {
+                json scaling;
+                std::ifstream file1(argv[4]);
+                try {
+                    file1 >> scaling;
+                } catch ([[maybe_unused]] nlohmann::json::type_error& e) {
+                    throw 404;
+                } catch ([[maybe_unused]] nlohmann::json::parse_error& e) {
+                    throw 404;
+                }
+                std::string str1, str2;
+                try {
+                    str1 = scaling["scaling_vector_linear"];
+                    str2 = scaling["scaling_vector_nonlinear"];
+                } catch ([[maybe_unused]] json::type_error& e) {
+                }
+                if (!str1.empty()) {
+                    scaling_vector_linear = Tools::String2DoubleVec(str1, "|");
+                }
+                if (!str2.empty()) {
+                    scaling_vector_nonlinear = Tools::String2DoubleVec(str2, "|");
+                }
+            }
+            std::cout << "scaling_vector_linear:\n" << scaling_vector_linear[0] << std::endl;
+            std::cout << "scaling_vector_nonlinear:\n" << scaling_vector_nonlinear[0] << std::endl;
+
+            auto dipole_lin = mol.CalculateDipoleMoment(scaling_vector_linear);
+            auto dipole_nlin = mol.CalculateDipoleMoment(scaling_vector_nonlinear);
+
+            std::cout << "Dipole form xtb2: "
+                      << mol.getDipole().norm() << " [eA] " << mol.getDipole().norm()*4.803 << " [D] " << std::endl;
+            std::cout << "Dipole form partial Charges and lin. Scaling: "
+                      << dipole_lin.norm() << " [eA] " << dipole_lin.norm()*4.803 << " [D] " << std::endl;
+            std::cout << "Dipole form partial Charges and nonlin. Scaling: "
+                      << dipole_nlin.norm() << " [eA] " << dipole_nlin.norm()*4.803 << " [D] " << std::endl;
+
 
         } else if (strcmp(argv[1], "-stride") == 0) {
 
@@ -1059,7 +1082,7 @@ int main(int argc, char **argv) {
             }
         } else {
             bool centered = false;
-            bool hmass = 1;
+            bool hmass = true;
             for (std::size_t i = 2; i < argc; ++i) {
                 if (strcmp(argv[i], "-center") == 0) {
                     centered = true;
