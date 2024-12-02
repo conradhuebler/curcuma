@@ -351,8 +351,6 @@ bool SimpleMD::Initialise()
         result_file.close();
     }
 
-    static std::random_device rd{};
-    static std::mt19937 gen{ rd() };
     if (m_seed == -1) {
         const auto start = std::chrono::high_resolution_clock::now();
         m_seed = std::chrono::duration_cast<std::chrono::seconds>(start.time_since_epoch()).count();
@@ -521,7 +519,7 @@ bool SimpleMD::Initialise()
         config["silent"] = true;
         config["reorder"] = false;
         for (int i = 0; i < m_threads; ++i) {
-            auto* thread = new BiasThread(m_rmsd_mtd_molecule, config);
+            auto* thread = new BiasThread(m_rmsd_mtd_molecule, config, m_nocolvarfile, m_nohillsfile);
             thread->setDT(m_rmsd_DT);
             thread->setk(m_k_rmsd);
             thread->setalpha(m_alpha_rmsd);
@@ -983,7 +981,7 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     }
 
     try {
-        m_rattle_tolerance = state["rattle_tolerance"];
+        m_rattle_tol_12 = state["rattle_tol_12"];
     } catch ([[maybe_unused]] json::type_error& e) {
     }
 
