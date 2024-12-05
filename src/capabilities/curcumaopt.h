@@ -18,12 +18,16 @@
  */
 
 #pragma once
+#include "src/core/energycalculator.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
 
-#include "optimiser/LBFGSppInterface.h"
+#include <LBFGS.h>
+#include <LBFGSB.h>
 
 #include "curcumamethod.h"
+
+class CurcumaOpt;
 
 static json CurcumaOptJson{
     { "writeXYZ", true },
@@ -67,44 +71,88 @@ const json OptJsonPrivate{
     { "LBFGS_eps", 1e-5 }
 };
 
+using Eigen::VectorXd;
+using namespace LBFGSpp;
+
+class LBFGSInterface {
+public:
+    LBFGSInterface(int n_)
+    //: n(n_)
+    {
+    }
+    double operator()(const VectorXd& x, VectorXd& grad);
+
+    double LastEnergy() const { return m_energy; }
+
+    double m_energy = 0, m_last_change = 0, m_last_rmsd = 0;
+    Vector Parameter() const { return m_parameter; }
+    void setMolecule(const Molecule* molecule);
+
+    void setConstrains(const std::vector<int> constrains) { m_constrains = constrains; }
+    void setInterface(EnergyCalculator* interface) { m_interface = interface; }
+    void setMethod(int method) { m_method = method; }
+    bool isError() const { return m_error; }
+
+private:
+    //  int m_iter = 0;
+    int m_atoms = 0;
+    //  int n;
+    int m_method = 2;
+    std::vector<int> m_constrains;
+    EnergyCalculator* m_interface;
+    Vector m_parameter;
+    const Molecule* m_molecule;
+    bool m_error = false;
+};
+
 class SPThread : public CxxThread {
 public:
-    SPThread() = default;
+    SPThread(CurcumaOpt* curcumaOpt)
+        : m_curcumaOpt(curcumaOpt)
+    {
+    }
     ~SPThread() = default;
 
     inline void setMolecule(const Molecule& molecule) { m_molecule = molecule; }
     inline Molecule getMolecule() const { return m_final; }
     virtual int execute() override;
 
-    inline void setController(const json& controller) { m_controller = controller; }
+    //  inline void setController(const json& controller) { m_controller = controller; }
     std::string Output() const { return m_result; }
     const std::vector<Molecule>* Intermediates() const { return &m_intermediate; }
     void setBaseName(const std::string& basename) { m_basename = basename; }
     std::string Basename() const { return m_basename; }
-    inline json Parameter() const { return m_param; }
+    // inline json Parameter() const { return m_param; }
     inline json SCF() const { return m_scf; }
 
 protected:
     std::string m_result;
     Molecule m_molecule, m_final;
-    json m_controller = OptJsonPrivate;
-    json m_param;
     json m_scf;
     std::vector<Molecule> m_intermediate;
     std::string m_basename;
+    CurcumaOpt* m_curcumaOpt;
 };
 
 class OptThread : public SPThread {
 public:
-    OptThread() = default;
+    OptThread(CurcumaOpt* curcumaOpt)
+        : SPThread(curcumaOpt)
+    {
+    }
     ~OptThread() = default;
 
     int execute() override;
+
+private:
 };
 
 class OptMThread : public SPThread {
 public:
-    OptMThread() = default;
+    OptMThread(CurcumaOpt* curcumaOpt)
+        : SPThread(curcumaOpt)
+    {
+    }
     ~OptMThread() = default;
 
     int execute() override;
@@ -166,8 +214,8 @@ public:
     void setSinglePoint(bool sp) { m_singlepoint = sp; }
     inline const std::vector<Molecule>* Molecules() const { return &m_molecules; }
 
-    static Molecule LBFGSOptimise(Molecule* host, const json& controller, std::string& output, std::vector<Molecule>* intermediate, json& param, std::vector<double>& charges, int thread = -1, const std::string& basename = "base");
-    static double SinglePoint(const Molecule* initial, const json& controller, std::string& output, json& param, std::vector<double>& charges);
+    Molecule LBFGSOptimise(Molecule* host, std::string& output, std::vector<Molecule>* intermediate, std::vector<double>& charges, int thread = -1, const std::string& basename = "base");
+    double SinglePoint(const Molecule* initial, std::string& output, std::vector<double>& charges);
 
     void clear();
 
@@ -192,6 +240,7 @@ private:
     std::string m_filename;
     std::string m_method = "UFF";
     Molecule m_molecule;
+    json m_parameters;
     std::vector<Molecule> m_molecules;
     bool m_file_set = false, m_mol_set = false, m_mols_set = false, m_writeXYZ = true, m_printoutput = true, m_singlepoint = false, m_fusion = false;
     int m_hessian = 0;

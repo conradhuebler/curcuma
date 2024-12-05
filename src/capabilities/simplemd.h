@@ -115,7 +115,7 @@ public:
 private:
     std::vector<BiasStructure> m_biased_structures;
     RMSDDriver m_driver;
-    json m_config;
+    json m_config, m_constrained;
     Molecule m_reference, m_target;
     Geometry m_gradient;
     double m_k, m_alpha, m_DT, m_currentStep, m_rmsd_reference, m_current_bias, m_rmsd_econv, m_dT = 1;

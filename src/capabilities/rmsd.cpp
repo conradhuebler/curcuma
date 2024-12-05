@@ -781,8 +781,8 @@ void RMSDDriver::ReorderMolecule()
 
     auto blob = MakeCostMatrix(OptimiseRotation(rotation));
 
-    if (m_method == 4)
-        blob.first = 1;
+    // if (m_method == 4)
+    //     blob.first = 1;
     if (m_method != 6)
         InsertRotation(blob);
     if (m_method == 1)
@@ -831,13 +831,18 @@ void RMSDDriver::FinaliseTemplate()
     int iter = 0;
     RunTimer time;
     double prev_cost = -1;
+    std::ofstream result_file;
+    if (m_kmstat)
+        result_file.open("kmstat.dat", std::ios_base::app);
     for (auto permutation : m_prepared_cost_matrices) {
         iter++;
+
         if (eq_counter > m_maxtrial || incr_counter > m_maxtrial || iter > m_maxtrial)
             break;
         if (prev_cost != -1 && prev_cost < permutation.first / 10) {
             break;
         }
+
         prev_cost = permutation.first;
         auto result = SolveCostMatrix(permutation.second);
 
@@ -845,6 +850,9 @@ void RMSDDriver::FinaliseTemplate()
         double rmsd = Rules2RMSD(result);
         if (!m_silent)
             std::cout << permutation.first << " " << rmsd << " " << eq_counter << " " << time.Elapsed() << std::endl;
+        if (m_kmstat)
+            result_file << permutation.first << " " << rmsd << " " << std::endl;
+
         m_results.insert(std::pair<double, std::vector<int>>(rmsd, result));
         time.Reset();
 
@@ -852,6 +860,8 @@ void RMSDDriver::FinaliseTemplate()
         incr_counter += rmsd > rmsd_prev;
         rmsd_prev = rmsd;
     }
+    if (m_kmstat)
+        result_file.close();
 
     m_reorder_rules = m_results.begin()->second;
 }
@@ -941,8 +951,8 @@ void RMSDDriver::TemplateFree()
         //      std::cout << blob.first << " " << std::endl;
         m_cost_limit = blob.first;
 
-        if (m_method == 4)
-            blob.first = 1;
+        //    if (m_method == 4)
+        //        blob.first = 1;
         InsertRotation(blob);
     }
     for (int j = 0; j < 360; j += 60) {
@@ -958,8 +968,8 @@ void RMSDDriver::TemplateFree()
 
         m_cost_limit = blob.first;
 
-        if (m_method == 4)
-            blob.first = 1;
+        //   if (m_method == 4)
+        //       blob.first = 1;
         InsertRotation(blob);
     }
     for (int k = 0; k < 360; k += 60) {
@@ -975,8 +985,8 @@ void RMSDDriver::TemplateFree()
 
         m_cost_limit = blob.first;
 
-        if (m_method == 4)
-            blob.first = 1;
+        //   if (m_method == 4)
+        //       blob.first = 1;
         InsertRotation(blob);
     }
 }
@@ -1026,8 +1036,8 @@ bool RMSDDriver::TemplateReorder()
     auto blob = MakeCostMatrix(cached_reference, rotated);
     m_cost_limit = blob.first;
     // if (!m_silent)
-    if (m_method == 4)
-        blob.first = 1;
+    // if (m_method == 4)
+    //    blob.first = 1;
 
     InsertRotation(blob);
     return true;
@@ -1121,14 +1131,14 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareAtomTemplate(in
 
         auto OperateVectors = GetOperateVectors(reference_indicies, tmp);
         auto result = MakeCostMatrix(OperateVectors.first);
-        result.first = m_prepared_cost_matrices.size();
+        // result.first = m_prepared_cost_matrices.size();
 
         InsertRotation(result);
     }
 
     for (const auto& indices : m_intermedia_rules) {
         auto result = MakeCostMatrix(reference_indicies, indices);
-        result.first = m_prepared_cost_matrices.size();
+        // result.first = m_prepared_cost_matrices.size();
         InsertRotation(result);
     }
 
@@ -1178,14 +1188,14 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareAtomTemplate(co
         m_intermedia_rules.push_back(tmp);
         auto OperateVectors = GetOperateVectors(reference_indicies, tmp);
         auto result = MakeCostMatrix(OperateVectors.first);
-        result.first = m_prepared_cost_matrices.size() + 1;
+        // result.first = m_prepared_cost_matrices.size() + 1;
 
         InsertRotation(result);
     }
 
     for (const auto& indices : m_intermedia_rules) {
         auto result = MakeCostMatrix(reference_indicies, indices);
-        result.first = m_prepared_cost_matrices.size();
+        // result.first = m_prepared_cost_matrices.size();
         InsertRotation(result);
     }
     m_stored_rules = transformed_rules;

@@ -537,12 +537,12 @@ void ConfScan::SetUp()
         st_file.close();
     }
 
-    std::ofstream parameters_file;
-    parameters_file.open(m_success_file);
-    parameters_file << "# RMSD(new)\tRMSD(old)\tDelta E\tDelta H\tDelta I" << std::endl;
-    parameters_file.close();
-
     if (m_analyse) {
+        std::ofstream parameters_file;
+        parameters_file.open(m_success_file);
+        parameters_file << "# RMSD(new)\tRMSD(old)\tDelta E\tDelta H\tDelta I" << std::endl;
+        parameters_file.close();
+
         std::ofstream parameters_skipped;
         parameters_skipped.open(m_skip_file);
         parameters_skipped.close();
@@ -629,28 +629,31 @@ void ConfScan::start()
         }
         CheckOnly(m_sLE[0], m_sLI[0], m_sLH[0]);
         PrintStatus("Result initial pass:");
-        WriteDotFile(m_result_basename + ".initial.dot", m_first_content);
+        if (m_analyse) {
+            WriteDotFile(m_result_basename + ".initial.dot", m_first_content);
+        }
         m_sLE[0] = 1;
         m_sLI[0] = 1;
         m_sLH[0] = 1;
-        m_collective_content = "edge [color=green];\n";
-        for (auto node : m_nodes)
-            m_collective_content += node.second;
-        m_nodes.clear();
-        m_collective_content += m_first_content + "\n";
+        if (m_analyse) {
+            m_collective_content = "edge [color=green];\n";
+            for (auto node : m_nodes)
+                m_collective_content += node.second;
+            m_nodes.clear();
+            m_collective_content += m_first_content + "\n";
 
-        std::ofstream parameters_file;
-        parameters_file.open(m_param_file);
-        parameters_file << "# RMSD(old)\tDelta E\tDelta H\tDelta I" << std::endl;
-        bool breakline = false;
-        for (const auto& i : m_listThresh) {
-            if (i.first > m_rmsd_threshold && !breakline) {
-                parameters_file << std::endl;
-                breakline = true;
+            std::ofstream parameters_file;
+            parameters_file.open(m_param_file);
+            parameters_file << "# RMSD(old)\tDelta E\tDelta H\tDelta I" << std::endl;
+            bool breakline = false;
+            for (const auto& i : m_listThresh) {
+                if (i.first > m_rmsd_threshold && !breakline) {
+                    parameters_file << std::endl;
+                    breakline = true;
+                }
+                parameters_file << i.first << " " << i.second[0] << " " << i.second[1] << " " << i.second[2] << std::endl;
             }
-            parameters_file << i.first << " " << i.second[0] << " " << i.second[1] << " " << i.second[2] << std::endl;
         }
-
         fmt::print("\nInitial Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
     } else {
         fmt::print("\n\nSkipping initial pass!\n\nSettings thresholds to high value ...");
@@ -666,12 +669,15 @@ void ConfScan::start()
 
     if (!m_skipreorder) {
         std::ofstream parameters_skip;
-        parameters_skip.open(m_skip_file, std::ios_base::app);
-        parameters_skip << "# RMSD(old)\tDelta E\tDelta H\tDelta I" << std::endl;
-
         std::ofstream parameters_performed;
-        parameters_performed.open(m_perform_file, std::ios_base::app);
-        parameters_performed << "# RMSD(old)\tDelta E\tDelta H\tDelta I" << std::endl;
+
+        if (m_analyse) {
+            parameters_skip.open(m_skip_file, std::ios_base::app);
+            parameters_skip << "# RMSD(old)\tDelta E\tDelta H\tDelta I" << std::endl;
+            parameters_performed.open(m_perform_file, std::ios_base::app);
+            parameters_performed << "# RMSD(old)\tDelta E\tDelta H\tDelta I" << std::endl;
+        }
+
         for (int run = 0; run < m_sLE.size(); ++run) {
             m_current_filename = m_2nd_filename + "." + std::to_string(run + 1) + ".xyz";
 
@@ -709,50 +715,57 @@ void ConfScan::start()
                     result_file << "Results of Reorder Pass #" << run + 1 << std::endl;
                     result_file.close();
                 }
-                std::ofstream parameters_success;
-                parameters_success.open(m_success_file, std::ios_base::app);
-                parameters_success << std::endl
-                                   << "# " << run << " run" << std::endl;
-
+                if (m_analyse) {
+                    std::ofstream parameters_success;
+                    parameters_success.open(m_success_file, std::ios_base::app);
+                    parameters_success << std::endl
+                                       << "# " << run << " run" << std::endl;
+                }
                 Reorder(dLE, dLI, dLH, false);
                 PrintStatus("Result Reorder pass:");
-                WriteDotFile(m_result_basename + ".reorder." + std::to_string(run + 1) + ".dot", m_second_content);
+
                 fmt::print("\nReorder Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
                 timer.Reset();
-                m_collective_content += "edge [color=red];\n";
-                for (auto node : m_nodes)
-                    m_collective_content += node.second;
-                m_nodes.clear();
-                m_collective_content += m_second_content + "\n";
-                m_second_content.clear();
                 if (m_analyse) {
-                    parameters_performed << "# " << run << " run" << std::endl
-                                         << std::endl;
-                    parameters_skip << "# " << run << " run" << std::endl
-                                    << std::endl;
+                    WriteDotFile(m_result_basename + ".reorder." + std::to_string(run + 1) + ".dot", m_second_content);
 
-                    for (const auto& i : m_listThresh) {
-                        std::vector<double> element = { i.second[0], i.second[1], i.second[2] };
-                        auto position = std::find(m_list_skipped.begin(), m_list_skipped.end(), element);
-                        if (position != m_list_skipped.end()) {
-                            parameters_skip << i.first << " " << i.second[0] << " " << i.second[1] << " " << i.second[2] << std::endl;
-                            m_list_skipped.erase(position);
-                            continue;
-                        }
+                    m_collective_content += "edge [color=red];\n";
+                    for (auto node : m_nodes)
+                        m_collective_content += node.second;
+                    m_nodes.clear();
+                    m_collective_content += m_second_content + "\n";
+                    m_second_content.clear();
+                    if (m_analyse) {
+                        parameters_performed << "# " << run << " run" << std::endl
+                                             << std::endl;
+                        parameters_skip << "# " << run << " run" << std::endl
+                                        << std::endl;
 
-                        position = std::find(m_list_performed.begin(), m_list_performed.end(), element);
-                        if (position != m_list_performed.end()) {
-                            parameters_performed << i.first << " " << i.second[0] << " " << i.second[1] << " " << i.second[2] << std::endl;
-                            m_list_performed.erase(position);
+                        for (const auto& i : m_listThresh) {
+                            std::vector<double> element = { i.second[0], i.second[1], i.second[2] };
+                            auto position = std::find(m_list_skipped.begin(), m_list_skipped.end(), element);
+                            if (position != m_list_skipped.end()) {
+                                parameters_skip << i.first << " " << i.second[0] << " " << i.second[1] << " " << i.second[2] << std::endl;
+                                m_list_skipped.erase(position);
+                                continue;
+                            }
+
+                            position = std::find(m_list_performed.begin(), m_list_performed.end(), element);
+                            if (position != m_list_performed.end()) {
+                                parameters_performed << i.first << " " << i.second[0] << " " << i.second[1] << " " << i.second[2] << std::endl;
+                                m_list_performed.erase(position);
+                            }
                         }
+                        parameters_performed << std::endl;
+                        parameters_skip << std::endl;
                     }
-                    parameters_performed << std::endl;
-                    parameters_skip << std::endl;
                 }
             }
         }
-        parameters_skip.close();
-        parameters_performed.close();
+        if (m_analyse) {
+            parameters_skip.close();
+            parameters_performed.close();
+        }
     } else
         fmt::print("\nReorder Pass skipped!\n");
     if (!m_skipreuse) {
@@ -770,21 +783,27 @@ void ConfScan::start()
                 result_file.close();
             }
             m_exclude_list.clear();
-            std::ofstream parameters_success;
-            parameters_success.open(m_success_file, std::ios_base::app);
-            parameters_success << std::endl
-                               << "# reuse run" << std::endl;
-
+            if (m_analyse) {
+                std::ofstream parameters_success;
+                parameters_success.open(m_success_file, std::ios_base::app);
+                parameters_success << std::endl
+                                   << "# reuse run" << std::endl;
+            }
             Reorder(-1, -1, -1, true, m_reset);
             PrintStatus("Result reuse pass:");
-            WriteDotFile(m_result_basename + ".reuse.dot", m_second_content);
+
             fmt::print("\nReuse Pass finished after {} seconds!\n", timer.Elapsed() / 1000.0);
             timer.Reset();
-            m_collective_content += "edge [color=blue];\n";
-            for (auto node : m_nodes)
-                m_collective_content += node.second;
-            m_nodes.clear();
-            m_collective_content += m_second_content + "\n";
+
+            if (m_analyse) {
+                WriteDotFile(m_result_basename + ".reuse.dot", m_second_content);
+
+                m_collective_content += "edge [color=blue];\n";
+                for (auto node : m_nodes)
+                    m_collective_content += node.second;
+                m_nodes.clear();
+                m_collective_content += m_second_content + "\n";
+            }
         }
     }
     if (m_analyse) {
@@ -793,6 +812,7 @@ void ConfScan::start()
         energy << "scale = 4063.0/800.0" << std::endl;
         energy << "set terminal pngcairo  transparent size 600*scale,400*scale transparent font \"Noto Sans\" fontscale scale linewidth scale pointscale scale" << std::endl;
         energy << "set encoding utf8" << std::endl;
+        energy << "set output '" << m_result_basename << ".energy.png'" << std::endl;
         energy << "set xlabel \"RMSD [Å]\"" << std::endl;
         energy << "set ylabel \"Energy ΔE [kJ/mol]\"" << std::endl;
         energy << "set key left horizontal  font \"Helvetica, 10\" maxrows 1 outside" << std::endl;
@@ -806,6 +826,7 @@ void ConfScan::start()
         ripser << "set encoding utf8" << std::endl;
         ripser << "set xlabel \"RMSD [Å]\"" << std::endl;
         ripser << "set ylabel \"ΔH\"" << std::endl;
+        ripser << "set output '" << m_result_basename << ".ripser.png'" << std::endl;
         ripser << "set key left horizontal  font \"Helvetica, 10\" maxrows 1 outside" << std::endl;
         ripser << "plot '" << m_result_basename << ".param.dat' using 1:3 pt 10 ps 0.5 lt rgb \"grey\" title \"Parametrisation\", '" << m_result_basename << ".param.skip.dat' using 1:3 pt 10 ps 0.1 lt rgb \"blue\" title \"Reorder skipped\", '" << m_result_basename << ".param.perf.dat' using 1:3 pt 10 ps 0.1 lt rgb \"yellow\" title \"Reorder performed\",  '" << m_result_basename << ".param.success.dat' using 2:4 pt 10 ps 0.5 lt rgb \"red\" title \"Reorder successful\", '" << m_result_basename << ".param.limit.dat' using 1:3 with linespoints linestyle 1 notitle" << std::endl;
         ripser.close();
@@ -817,6 +838,7 @@ void ConfScan::start()
         rotational << "set encoding utf8" << std::endl;
         rotational << "set xlabel \"RMSD [Å]\"" << std::endl;
         rotational << "set ylabel \"ΔI [MHz]\"" << std::endl;
+        rotational << "set output '" << m_result_basename << ".rotational.png'" << std::endl;
         rotational << "set key left horizontal  font \"Helvetica, 10\" maxrows 1 outside" << std::endl;
         rotational << "plot '" << m_result_basename << ".param.dat' using 1:4 pt 10 ps 0.5 lt rgb \"grey\" title \"Parametrisation\", '" << m_result_basename << ".param.skip.dat' using 1:4 pt 10 ps 0.1 lt rgb \"blue\" title \"Reorder skipped\", '" << m_result_basename << ".param.perf.dat' using 1:4 pt 10 ps 0.1 lt rgb \"yellow\" title \"Reorder performed\",  '" << m_result_basename << ".param.success.dat' using 2:5 pt 10 ps 0.5 lt rgb \"red\" title \"Reorder successful\", '" << m_result_basename << ".param.limit.dat' using 1:4 with linespoints linestyle 1 notitle" << std::endl;
         rotational.close();
@@ -841,11 +863,13 @@ void ConfScan::start()
         index++;
     }
 #endif
-    std::ofstream dotfile;
-    dotfile.open(m_result_basename + ".dot");
-    dotfile << "digraph graphname \n {\n";
-    dotfile << m_collective_content;
-    dotfile << "}";
+    if (m_analyse) {
+        std::ofstream dotfile;
+        dotfile.open(m_result_basename + ".dot");
+        dotfile << "digraph graphname \n {\n";
+        dotfile << m_collective_content;
+        dotfile << "}";
+    }
     Finalise();
 }
 
@@ -890,6 +914,18 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
             m_all_structures.push_back(mol1);
 
             m_lowest_energy = mol1->Energy();
+            if (m_analyse) {
+                laststring = mol1->Name();
+
+                //     if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
+                //        m_first_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
+                std::string node = "\"" + mol1->Name() + "\" [shape=box, label=\"" + mol1->Name() + "\"];\n";
+                node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
+                m_nodes.insert(std::pair<double, std::string>(mol1->Energy(), node));
+                //                m_first_content +=
+                //                m_first_content +=
+                //    m_first_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
+            }
             continue;
         }
         p->Reset();
@@ -918,15 +954,16 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
             if (t->KeepMolecule() == false) {
                 keep_molecule = false;
                 writeStatisticFile(t->Reference(), mol1, t->RMSD());
-
-                if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
-                    m_first_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
-                std::string node = "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
-                node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
-                m_nodes.insert(std::pair<double, std::string>(t->Reference()->Energy(), node));
-                //                m_first_content +=
-                //                m_first_content +=
-                m_first_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
+                if (m_analyse) {
+                    if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
+                        m_first_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
+                    std::string node = "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
+                    node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
+                    m_nodes.insert(std::pair<double, std::string>(t->Reference()->Energy(), node));
+                    //                m_first_content +=
+                    //                m_first_content +=
+                    m_first_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
+                }
                 laststring = t->Reference()->Name();
 
 #ifdef WriteMoreInfo
@@ -999,14 +1036,16 @@ void ConfScan::PrintSetUp(double dLE, double dLI, double dLH)
 
     if (dLE > 0 || dLH > 0 || dLI > 0) {
         std::ofstream parameters_limit;
-        parameters_limit.open(m_limit_file, std::ios_base::app);
-        parameters_limit << "0\t" << dLE << "\t" << dLH << "\t" << dLI << std::endl;
-        parameters_limit << std::prev(m_listThresh.end())->first << "\t" << dLE << "\t" << dLH << "\t" << dLI << std::endl;
-        parameters_limit << std::endl;
-        parameters_limit << m_print_rmsd << "\t" << 0 << "\t" << 0 << "\t" << 0 << std::endl;
-        parameters_limit << m_print_rmsd << "\t" << dLE << "\t" << dLH << "\t" << dLI << std::endl;
-        parameters_limit << std::endl;
-        parameters_limit.close();
+        if (m_analyse) {
+            parameters_limit.open(m_limit_file, std::ios_base::app);
+            parameters_limit << "0\t" << dLE << "\t" << dLH << "\t" << dLI << std::endl;
+            parameters_limit << std::prev(m_listThresh.end())->first << "\t" << dLE << "\t" << dLH << "\t" << dLI << std::endl;
+            parameters_limit << std::endl;
+            parameters_limit << m_print_rmsd << "\t" << 0 << "\t" << 0 << "\t" << 0 << std::endl;
+            parameters_limit << m_print_rmsd << "\t" << dLE << "\t" << dLH << "\t" << dLI << std::endl;
+            parameters_limit << std::endl;
+            parameters_limit.close();
+        }
     }
 }
 
@@ -1034,11 +1073,12 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
     m_reorder_successfull_count += m_reordered_worked;
     m_skipped_count += m_skiped;
     m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_reused = 0, m_skiped = 0;
-    json rmsd = m_controller;
+    json rmsd = m_controller["confscan"];
     rmsd["silent"] = true;
     rmsd["reorder"] = true;
     rmsd["threads"] = 1;
     rmsd["method"] = m_RMSDmethod;
+    std::cout << rmsd;
     std::vector<Molecule*> cached;
     if (reset)
         cached = m_all_structures;
@@ -1054,7 +1094,9 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
     p->setActiveThreadCount(m_threads);
 
     std::ofstream parameters_success;
-    parameters_success.open(m_success_file, std::ios_base::app);
+    if (m_analyse) {
+        parameters_success.open(m_success_file, std::ios_base::app);
+    }
 
     for (Molecule* mol1 : cached) {
         if (m_result.size() == 0) {
@@ -1161,20 +1203,22 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
                     m_reordered_reused += t->ReusedWorked();
                     if (AddRules(t->ReorderRule()))
                         rules.push_back(t->ReorderRule());
+                    if (m_analyse) {
+                        if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
+                            m_second_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
 
-                    if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
-                        m_second_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
+                        std::string node = "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
+                        node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
+                        m_nodes.insert(std::pair<double, std::string>(t->Reference()->Energy(), node));
 
-                    std::string node = "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
-                    node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
-                    m_nodes.insert(std::pair<double, std::string>(t->Reference()->Energy(), node));
+                        // m_second_content += "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
+                        // m_second_content += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
+                        m_second_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
+                        laststring = t->Reference()->Name();
+                        auto i = t->getDNNInput();
 
-                    // m_second_content += "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
-                    // m_second_content += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
-                    m_second_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
-                    laststring = t->Reference()->Name();
-                    auto i = t->getDNNInput();
-                    parameters_success << t->RMSD() << " " << t->OldRMSD() << " " << i.dE << " " << i.dH << " " << (i.dIa + i.dIb + i.dIc) * third << std::endl;
+                        parameters_success << t->RMSD() << " " << t->OldRMSD() << " " << i.dE << " " << i.dH << " " << (i.dIa + i.dIb + i.dIc) * third << std::endl;
+                    }
                     writeStatisticFile(t->Reference(), mol1, t->RMSD(), true, t->ReorderRule());
                     mol1->ApplyReorderRule(t->ReorderRule());
                     break;
@@ -1228,7 +1272,9 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
             break;
         }
     }
-    parameters_success.close();
+    if (m_analyse) {
+        parameters_success.close();
+    }
 
     p->clear();
     delete p;

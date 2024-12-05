@@ -40,19 +40,48 @@
 #include "optimiser/CppNumericalSolversInterface.h"
 #endif
 
-#include "optimiser/LBFGSppInterface.h"
-
 #include "curcumaopt.h"
 
 using Eigen::VectorXd;
 using namespace LBFGSpp;
+
+double LBFGSInterface::operator()(const VectorXd& x, VectorXd& grad)
+{
+    double fx = 0.0;
+    double charge = 0;
+    m_interface->updateGeometry(x);
+    if (m_interface->HasNan()) {
+        m_error = true;
+        return 0;
+    }
+    fx = m_interface->CalculateEnergy(true);
+    auto gradient = m_interface->Gradient();
+    m_error = std::isnan(fx);
+
+    for (int i = 0; i < m_atoms; ++i) {
+        grad[3 * i + 0] = gradient(i, 0) * (m_constrains[i]);
+        grad[3 * i + 1] = gradient(i, 1) * (m_constrains[i]);
+        grad[3 * i + 2] = gradient(i, 2) * (m_constrains[i]);
+    }
+    m_energy = fx;
+    m_parameter = x;
+    return fx;
+}
+
+void LBFGSInterface::setMolecule(const Molecule* molecule)
+{
+    m_molecule = molecule;
+    m_atoms = m_molecule->AtomCount();
+    for (int i = 0; i < m_atoms; ++i)
+        m_constrains.push_back(1);
+}
 
 int SPThread::execute()
 {
     auto start = std::chrono::system_clock::now();
     std::vector<double> charges;
 
-    double energy = CurcumaOpt::SinglePoint(&m_molecule, m_controller, m_result, m_param, charges);
+    double energy = m_curcumaOpt->SinglePoint(&m_molecule, m_result, charges);
     m_final = m_molecule;
     m_final.setEnergy(energy);
     m_scf["e0"] = energy;
@@ -66,7 +95,7 @@ int SPThread::execute()
 int OptThread::execute()
 {
     std::vector<double> charges;
-    m_final = CurcumaOpt::LBFGSOptimise(&m_molecule, m_controller, m_result, &m_intermediate, m_param, charges, ThreadId(), Basename() + ".opt.trj");
+    m_final = m_curcumaOpt->LBFGSOptimise(&m_molecule, m_result, &m_intermediate, charges, ThreadId(), Basename() + ".opt.trj");
     m_scf["e0"] = m_final.Energy();
     if (charges.size())
         m_scf["charges"] = Tools::DoubleVector2String(charges);
@@ -203,14 +232,13 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
 
             SPThread* th;
             if (!m_singlepoint)
-                th = new OptThread;
+                th = new OptThread(this);
             else
-                th = new SPThread;
+                th = new SPThread(this);
 
             th->setBaseName(Basename());
 
             th->setMolecule(*iter);
-            th->setController(m_defaults);
             th->setThreadId(i);
             thread_block.push_back(th);
             pool->addThread(th);
@@ -233,7 +261,7 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
         if (m_hessian) {
             std::cout << m_defaults << std::endl;
             Hessian hess(m_method, m_defaults, false);
-            hess.setParameter(thread->Parameter());
+            hess.setParameter(m_parameters);
             hess.setMolecule(mol2);
             hess.CalculateHessian(m_hessian);
             auto hessian = hess.getHessian();
@@ -264,9 +292,9 @@ void CurcumaOpt::clear()
     m_molecules.clear();
 }
 
-double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, std::string& output, json& param, std::vector<double>& charges)
+double CurcumaOpt::SinglePoint(const Molecule* initial, std::string& output, std::vector<double>& charges)
 {
-    std::string method = Json2KeyWord<std::string>(controller, "method");
+    std::string method = Json2KeyWord<std::string>(m_controller, "method");
 
     Geometry geometry = initial->getGeometry();
     Molecule tmp(initial);
@@ -279,9 +307,9 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, 
         parameter(3 * i + 2) = geometry(i, 2);
     }
 
-    EnergyCalculator interface(method, controller);
+    EnergyCalculator interface(method, m_controller);
     interface.setMolecule(*initial);
-    param = interface.Parameter();
+    json param = interface.Parameter();
 
     double energy = interface.CalculateEnergy(true, true);
     double store = 0;
@@ -298,25 +326,25 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, const json& controller, 
     return energy;
 }
 
-Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, const json& controller, std::string& output, std::vector<Molecule>* intermediate, json& parameters, std::vector<double>& charges, int thread, const std::string& basename)
+Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::vector<Molecule>* intermediate, std::vector<double>& charges, int thread, const std::string& basename)
 {
-    bool printOutput = Json2KeyWord<bool>(controller, "printOutput");
-    bool fusion = Json2KeyWord<bool>(controller, "fusion");
-    double dE = Json2KeyWord<double>(controller, "dE");
-    double dRMSD = Json2KeyWord<double>(controller, "dRMSD");
-    double GradNorm = Json2KeyWord<double>(controller, "GradNorm");
-    double maxrise = Json2KeyWord<double>(controller, "maxrise");
-    std::string method = Json2KeyWord<std::string>(controller, "method");
-    int MaxIter = Json2KeyWord<int>(controller, "MaxIter");
-    int ConvCount = Json2KeyWord<int>(controller, "ConvCount");
-    int SingleStep = Json2KeyWord<int>(controller, "SingleStep");
+    bool printOutput = Json2KeyWord<bool>(m_controller, "printOutput");
+    bool fusion = Json2KeyWord<bool>(m_controller, "fusion");
+    double dE = Json2KeyWord<double>(m_controller, "dE");
+    double dRMSD = Json2KeyWord<double>(m_controller, "dRMSD");
+    double GradNorm = Json2KeyWord<double>(m_controller, "GradNorm");
+    double maxrise = Json2KeyWord<double>(m_controller, "maxrise");
+    std::string method = Json2KeyWord<std::string>(m_controller, "method");
+    int MaxIter = Json2KeyWord<int>(m_controller, "MaxIter");
+    int ConvCount = Json2KeyWord<int>(m_controller, "ConvCount");
+    int SingleStep = Json2KeyWord<int>(m_controller, "SingleStep");
     /*
         if(Json2KeyWord<int>(controller, "threads") > 1 )
         {
             printOutput = false;
         }
         */
-    bool optH = Json2KeyWord<bool>(controller, "optH");
+    bool optH = Json2KeyWord<bool>(m_controller, "optH");
     std::vector<int> constrain;
     Geometry geometry = initial->getGeometry();
     intermediate->push_back(initial);
@@ -332,26 +360,26 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, const json& controller, st
         constrain.push_back(initial->Atom(i).first == 1);
     }
 
-    EnergyCalculator interface(method, controller);
+    EnergyCalculator interface(method, m_controller);
 
     interface.setMolecule(*initial);
-    parameters = interface.Parameter();
+    m_parameters = interface.Parameter();
     double final_energy = interface.CalculateEnergy(true);
     initial->setEnergy(final_energy);
     initial->writeXYZFile(basename + ".t" + std::to_string(thread) + ".xyz");
     std::cout << "Initial energy " << final_energy << "Eh" << std::endl;
     LBFGSParam<double> param;
-    param.m = Json2KeyWord<int>(controller, "LBFGS_m");
+    param.m = Json2KeyWord<int>(m_controller, "LBFGS_m");
 
-    param.epsilon = Json2KeyWord<double>(controller, "LBFGS_eps_abs");
-    param.epsilon_rel = Json2KeyWord<double>(controller, "LBFGS_eps_rel");
-    param.past = Json2KeyWord<int>(controller, "LBFGS_past");
-    param.delta = Json2KeyWord<double>(controller, "LBFGS_delta");
-    param.linesearch = Json2KeyWord<int>(controller, "LBFGS_LST");
-    param.max_linesearch = Json2KeyWord<double>(controller, "LBFGS_ls_iter");
-    param.min_step = Json2KeyWord<double>(controller, "LBFGS_min_step");
-    param.ftol = Json2KeyWord<double>(controller, "LBFGS_ftol");
-    param.wolfe = Json2KeyWord<double>(controller, "LBFGS_wolfe");
+    param.epsilon = Json2KeyWord<double>(m_controller, "LBFGS_eps_abs");
+    param.epsilon_rel = Json2KeyWord<double>(m_controller, "LBFGS_eps_rel");
+    param.past = Json2KeyWord<int>(m_controller, "LBFGS_past");
+    param.delta = Json2KeyWord<double>(m_controller, "LBFGS_delta");
+    param.linesearch = Json2KeyWord<int>(m_controller, "LBFGS_LST");
+    param.max_linesearch = Json2KeyWord<double>(m_controller, "LBFGS_ls_iter");
+    param.min_step = Json2KeyWord<double>(m_controller, "LBFGS_min_step");
+    param.ftol = Json2KeyWord<double>(m_controller, "LBFGS_ftol");
+    param.wolfe = Json2KeyWord<double>(m_controller, "LBFGS_wolfe");
 
     // param.linesearch = Json2KeyWord<int>(controller, "LBFGS_LS");
 

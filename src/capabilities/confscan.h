@@ -71,7 +71,6 @@ static const json ConfScanJson = {
     { "threads", 1 },
     { "RMSDElement", 7 },
     { "accepted", "" },
-    { "method", "free" },
     { "lastdE", -1 },
     { "fewerFile", false },
     { "skipinit", false },
