@@ -20,24 +20,15 @@
 #pragma once
 
 #include <Eigen/Dense>
-#include <Eigen/Sparse>
 #include <unsupported/Eigen/NonLinearOptimization>
 
 #include <iostream>
 
-#include "src/capabilities/optimiser/LevMarDocking.h"
-#include "src/core/elements.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
-#include "src/core/pseudoff.h"
 
-#include "src/tools/geometry.h"
 
 template <typename _Scalar, int NX = Eigen::Dynamic, int NY = Eigen::Dynamic>
-
-// Implement argmin x: F(x) = sum_i^N (y_i - f_i(x))**2
-// f_i(x) = sum_j (x*q_j*r_j), N... number of confomere
-// r_j=[ [xyz]_1, [xyz]_2, ..., [xyz]_m] m... number of atoms/parameter
 struct TFunctor {
     typedef _Scalar Scalar;
     enum {
@@ -50,51 +41,48 @@ struct TFunctor {
 
     int m_inputs, m_values;
 
-    inline TFunctor(int inputs, int values)
+    TFunctor(int inputs, int values)
         : m_inputs(inputs)
         , m_values(values)
-    {
-    }
+    {}
 
     int inputs() const { return m_inputs; }
     int values() const { return m_values; }
 };
 
 struct OptDipoleFunctor : TFunctor<double> {
-    inline OptDipoleFunctor(int inputs, int values)
+    OptDipoleFunctor(int inputs, int values)
         : TFunctor(inputs, values)
         , no_parameter(inputs)
-        , no_points(values)
-    {
+        , no_points(values) {
     }
-    inline ~OptDipoleFunctor() = default;
-    inline int operator()(const Vector& scaling, Eigen::VectorXd& fvec) const
-    {
+    ~OptDipoleFunctor() = default;
+    int operator()(const Vector& scaling, Eigen::VectorXd& fvec) const {
+        // calculation of residuals
         for (int i = 0; i < m_conformers.size(); ++i) {
-            auto conf = m_conformers.at(i);
-            fvec(i) = (conf.getDipole() - conf.CalculateDipoleMoment(scaling)).norm();
+            const auto& conf = m_conformers.at(i);
+            fvec(i) = conf.getDipole().norm() - conf.CalculateDipoleMoment(scaling).norm();
         }
-
         return 0;
     }
     int no_parameter;
     int no_points;
     std::vector<Molecule> m_conformers;
+    bool m_bond;
 
     int inputs() const { return no_parameter; }
     int values() const { return no_points; }
 };
 
-struct OptDipoleFunctorNumericalDiff : Eigen::NumericalDiff<OptDipoleFunctor> {
-};
+struct OptDipoleFunctorNumericalDiff : Eigen::NumericalDiff<OptDipoleFunctor> {};
 
-inline Vector OptimiseDipoleScaling(const std::vector<Molecule>& conformers, Vector scaling)
-{
+inline Vector OptimiseDipoleScaling(const std::vector<Molecule>& conformers, Vector scaling, const bool bond = false) {
 
-    OptDipoleFunctor functor(6, conformers.size());
+    OptDipoleFunctor functor(2, conformers.size());
     functor.m_conformers = conformers;
-    Eigen::NumericalDiff<OptDipoleFunctor> numDiff(functor);
-    Eigen::LevenbergMarquardt<Eigen::NumericalDiff<OptDipoleFunctor>> lm(numDiff);
+    functor.m_bond = bond;
+    Eigen::NumericalDiff numDiff(functor);
+    Eigen::LevenbergMarquardt lm(numDiff);
 
     /*
     lm.parameters.factor = config["LevMar_Factor"].toInt(); //step bound for the diagonal shift, is this related to damping parameter, lambda?
@@ -107,13 +95,13 @@ inline Vector OptimiseDipoleScaling(const std::vector<Molecule>& conformers, Vec
 
     Eigen::LevenbergMarquardtSpace::Status status = lm.minimizeInit(scaling);
 
-    int MaxIter = 3000;
+    constexpr int MaxIter = 3000;
     Vector old_param = scaling;
 
     for (int iter = 0; iter < MaxIter; ++iter) {
         status = lm.minimizeOneStep(scaling);
 
-        if ((old_param - scaling).norm() < 1e-5)
+        if ((old_param - scaling).norm() < 1e-6)
             break;
 
         old_param = scaling;
@@ -122,36 +110,29 @@ inline Vector OptimiseDipoleScaling(const std::vector<Molecule>& conformers, Vec
     return scaling;
 }
 
-inline Matrix DipoleScalingCalculation(const std::vector<Molecule>& conformers)
+inline Vector DipoleScalingCalculation(const std::vector<Molecule>& conformers)
 {
-    std::vector<Position> y;
-    std::vector<Geometry> F;
-    auto para_size = conformers[0].AtomCount();
-    auto conformer_size = conformers.size();
-    Matrix FTF(para_size, para_size);
-    Vector FTy(para_size);
-    for (const auto& conformer : conformers) {
-        y.push_back(conformer.getDipole()); // TODO Einheit überprüfen
-        F.push_back(conformer.ChargeDistribution());
-    }
-
-    for (int i = 0; i < para_size; ++i) {
+    const auto para_size = conformers[0].AtomCount();
+    const auto conformer_size = conformers.size();
+    Matrix F(3*conformer_size,para_size); // Geometry multiplied with partial Charge
+    Matrix y(3*conformer_size,1); //Dipoles
+    Matrix FTF = Matrix::Zero(para_size, para_size);
+    Matrix FTy = Matrix::Zero(para_size, 1);
+    for (int i = 0; i < conformer_size; ++i) {
+        y(3*i,0) = conformers[i].getDipole()[0];
+        y(3*i+1,0) = conformers[i].getDipole()[1];
+        y(3*i+2,0) = conformers[i].getDipole()[2];
+        const auto& f = conformers[i].ChargeDistribution();
         for (int j = 0; j < para_size; ++j) {
-            for (auto& k : F)
-                FTF(i, j) += k(i, 0) * k(j, 0) + k(i, 1) * k(j, 1) + k(i, 2) * k(j, 2);
+            F(3*i,j) = f(j,0);
+            F(3*i+1,j) = f(j,1);
+            F(3*i+2,j) = f(j,2);
         }
     }
-
-    for (int j = 0; j < para_size; ++j) {
-        for (int i = 0; i < conformer_size; ++i) {
-            FTy(j) += y[i](0) * F[i](j, 0) + y[i](1) * F[i](j, 1) + y[i](2) * F[i](j, 2);
-        }
-    }
-
-    Matrix Theta(para_size, 1);
-
-    Theta = FTF.inverse() * FTy;
-
-    // inv(F.t@F)@(F.t@y);
+    const Vector Theta = (F.transpose()*F).colPivHouseholderQr().solve(F.transpose()*y);
+    //const Matrix H = (F*(F.transpose()*F).inverse()*F.transpose()).diagonal();
+    //std::cout << "diag(H) x y z:" << std::endl;
+    //for (int i = 0; i < H.rows()/3; ++i)
+    //    std::cout << H(3*i,0) << " " << H(3*i+1,0) << " " << H(3*i+2,0) << " " << std::endl;
     return Theta;
 }

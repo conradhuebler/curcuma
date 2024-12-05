@@ -1,6 +1,7 @@
 /*
  * <Some globale definition for chemical structures.>
  * Copyright (C) 2019 - 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ *               2024 Gerd Gehrisch
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -696,14 +697,31 @@ void Molecule::LoadMolecule(const Mol* molecule)
     m_bonds = molecule->m_bonds;
 }
 
-Molecule Molecule::getFragmentMolecule(int fragment) const
+Molecule Molecule::getFragmentMolecule(const int fragment) const
 {
-    // Lets make that one day faster, but not today ...
+    // Let's make that one day faster, but not today ...
+    // TODO inherit some more properties ...
     Molecule result;
+    std::vector<double> pCharges;
     auto atoms = GetFragments()[fragment];
-    for (auto atom : atoms) {
+    for (const auto atom : atoms) {
         result.addPair(Atom(atom));
+        pCharges.push_back(m_charges[atom]);
     }
+    result.setPartialCharges(pCharges);
+    return result;
+}
+Molecule Molecule::getFragmentMolecule(const std::vector<int>& atoms) const
+{
+    // Let's make that one day faster, but not today ...
+    // TODO inherit some more properties ...
+    Molecule result;
+    std::vector<double> pCharges;
+    for (const auto atom : atoms) {
+        result.addPair(Atom(atom));
+        pCharges.push_back(m_charges[atom]);
+    }
+    result.setPartialCharges(pCharges);
     return result;
 }
 Geometry Molecule::getGeometry(bool protons) const
@@ -900,56 +918,53 @@ Eigen::Vector3d Molecule::COM(bool protons, int fragment)
     return com;
 }
 
-std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>& scaling) const
-{ // calc classic dipole moment of the system with partial charges
+std::vector<Position> Molecule::CalculateDipoleMoments(const std::vector<double>& scaling, const std::vector<std::vector<int>>& fragments) const
+{ // calc classic dipole moments of the every fragment with partial charges
     std::vector<Position> dipole_moments;
-
     if (m_charges.size() != m_geometry.rows()) {
         std::cout << "No partial charges available" << std::endl;
         return dipole_moments;
     }
-    // calc center of mass and dipole for every fragment
-    for (int f = 0; f < GetFragments().size(); ++f) {
-        Position pos = { 0, 0, 0 }, dipole = { 0, 0, 0 };
-        double mass = 0;
-        // calc center of mass of the molecule
-        for (int i : m_fragments[f]) {
-            double m = Elements::AtomicMass[m_atoms[i]];
-            mass += m;
-            pos(0) += m * m_geometry(i, 0);
-            pos(1) += m * m_geometry(i, 1);
-            pos(2) += m * m_geometry(i, 2);
+    if (!fragments.empty()) {
+        for (int i = 0; i < fragments.size(); ++i) {
+            std::vector<double> frag_scaling = {};
+            for (int j = 0; j < fragments[i].size(); ++j) {
+                if (scaling.size() > j)
+                    frag_scaling.push_back(scaling[j]);
+                else
+                    frag_scaling.push_back(1.0);
+            }
+            Molecule mol = getFragmentMolecule(fragments[i]);
+            dipole_moments.push_back(mol.CalculateDipoleMoment(frag_scaling));
         }
-        pos(0) /= mass;
-        pos(1) /= mass;
-        pos(2) /= mass;
-        // calc dipole moment with scalar
-        for (int i : m_fragments[f]) {
-            double scale = 1;
-            if (scaling.size() > i)
-                scale = scaling[i];
-            dipole(0) += m_charges[i] * (m_geometry(i, 0) - pos(0)) * scale;
-            dipole(1) += m_charges[i] * (m_geometry(i, 1) - pos(1)) * scale;
-            dipole(2) += m_charges[i] * (m_geometry(i, 2) - pos(2)) * scale;
-            //  std::cout << scale << " ";
+    }
+    else {
+        for (int i = 0; i < GetFragments().size(); ++i) {
+            std::vector<double> frag_scaling = {};
+            for (int j = 0; j < m_fragments[i].size(); ++j) {
+                if (scaling.size() > j)
+                    frag_scaling.push_back(scaling[j]);
+                else
+                    frag_scaling.push_back(1.0);
+            }
+            Molecule mol = getFragmentMolecule(i);
+            dipole_moments.push_back(mol.CalculateDipoleMoment(frag_scaling));
         }
-        // std::cout << std::endl;
-        dipole_moments.push_back(dipole);
     }
     return dipole_moments;
 }
 
-Position Molecule::CalculateDipoleMoment(const Vector& scaling) const
+Position Molecule::CalculateDipoleMoment(const Vector& scaling, const bool bond) const
 { // dec and init
-    double mass = 0;
-
     Position pos = { 0, 0, 0 }, dipole = { 0, 0, 0 };
     if (m_charges.size() != m_geometry.rows()) {
         std::cout << "No partial charges available" << std::endl;
         return dipole;
     }
-    // calc center of mass
-    pos = MassCentroid();
+    // calc center of geometry
+    pos = Centroid();
+    if constexpr (false)
+        pos = MassCentroid();
 
     // calc of the dipole moment with scalar
     for (int i = 0; i < m_geometry.rows(); ++i) {
@@ -959,20 +974,58 @@ Position Molecule::CalculateDipoleMoment(const Vector& scaling) const
         dipole(0) += m_charges[i] * (m_geometry(i, 0) - pos(0)) * scale;
         dipole(1) += m_charges[i] * (m_geometry(i, 1) - pos(1)) * scale;
         dipole(2) += m_charges[i] * (m_geometry(i, 2) - pos(2)) * scale;
-        for (int j = 0; j < m_geometry.rows(); ++j) {
-            if (i == j)
-                continue;
-            double scale = 3;
-            if (scaling.size() > i)
-                scale = scaling[i];
-            double revr = 1 / (m_geometry.row(i) - m_geometry.row(j)).norm();
-            // std::cout << m_charges[i] *revr *  scale << " ";
+        if (bond) {
+            for (int j = 0; j < m_geometry.rows(); ++j) {
+                if (i == j)
+                    continue;
+                double revr = 1 / (m_geometry.row(i) - m_geometry.row(j)).norm();
+                // std::cout << m_charges[i] *revr *  scale << " ";
 
-            dipole(0) -= m_charges[i] * revr * scale;
-            dipole(1) -= m_charges[i] * revr * scale;
-            dipole(2) -= m_charges[i] * revr * scale;
+                dipole(0) -= m_charges[i] * revr * scale;
+                dipole(1) -= m_charges[i] * revr * scale;
+                dipole(2) -= m_charges[i] * revr * scale;
+            }
+            // std::cout << scale << " ";
         }
-        // std::cout << scale << " ";
+    }
+    // std::cout << std::endl;
+    return dipole;
+}
+
+Position Molecule::CalculateDipoleMoment(const std::vector<double>& scaling, const bool bond) const
+{ // dec and init
+
+    Position pos = { 0, 0, 0 }, dipole = { 0, 0, 0 };
+    if (m_charges.size() != m_geometry.rows()) {
+        std::cout << "No partial charges available" << std::endl;
+        return dipole;
+    }
+    // calc center of mass
+    pos = Centroid();
+    if constexpr (false)
+        pos = MassCentroid();
+
+    // calc of the dipole moment with scalar
+    for (int i = 0; i < m_geometry.rows(); ++i) {
+        double scale = 1;
+        if (scaling.size() > i)
+            scale = scaling[i];
+        dipole(0) += m_charges[i] * (m_geometry(i, 0) - pos(0)) * scale;
+        dipole(1) += m_charges[i] * (m_geometry(i, 1) - pos(1)) * scale;
+        dipole(2) += m_charges[i] * (m_geometry(i, 2) - pos(2)) * scale;
+        if (bond) {
+            for (int j = 0; j < m_geometry.rows(); ++j) {
+                if (i == j)
+                    continue;
+                double revr = 1 / (m_geometry.row(i) - m_geometry.row(j)).norm();
+                // std::cout << m_charges[i] *revr *  scale << " ";
+
+                dipole(0) -= m_charges[i] * revr * scale;
+                dipole(1) -= m_charges[i] * revr * scale;
+                dipole(2) -= m_charges[i] * revr * scale;
+            }
+            // std::cout << scale << " ";
+        }
     }
     // std::cout << std::endl;
     return dipole;
@@ -1504,15 +1557,19 @@ std::vector<double> Molecule::GetBox() const
 
 Geometry Molecule::ChargeDistribution() const
 {
+    Position pos = Centroid();
+    if constexpr (false)
+        pos = MassCentroid();
+
     Geometry point_charge(m_geometry.rows(), 3);
     if (m_charges.size() != m_geometry.rows()) {
         std::cerr << "No partial charges available" << std::endl;
         return point_charge.setZero(m_geometry.rows(), 3);
     }
     for (int i = 0; i < m_charges.size(); ++i) {
-        point_charge(i, 0) = m_geometry(i, 0) * m_charges[i];
-        point_charge(i, 1) = m_geometry(i, 1) * m_charges[i];
-        point_charge(i, 2) = m_geometry(i, 2) * m_charges[i];
+        point_charge(i, 0) = (m_geometry(i, 0) - pos(0)) * m_charges[i];
+        point_charge(i, 1) = (m_geometry(i, 1) - pos(1)) * m_charges[i];
+        point_charge(i, 2) = (m_geometry(i, 2) - pos(2)) * m_charges[i];
     }
     return point_charge;
 }
