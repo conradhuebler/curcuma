@@ -235,6 +235,7 @@ void SimpleMD::LoadControlJson()
     m_dt2 = m_dT * m_dT;
     m_rm_COM = Json2KeyWord<double>(m_defaults, "rm_COM");
     int rattle = Json2KeyWord<int>(m_defaults, "rattle");
+
     m_rattle_maxiter = Json2KeyWord<int>(m_defaults, "rattle_maxiter");
     m_rattle_dynamic_tol_iter = Json2KeyWord<int>(m_defaults, "rattle_dynamic_tol_iter");
     m_rattle_max = Json2KeyWord<double>(m_defaults, "rattle_max");
@@ -249,9 +250,17 @@ void SimpleMD::LoadControlJson()
         m_rattle_tol_12 = Json2KeyWord<double>(m_defaults, "rattle_tol_12");
         m_rattle_tol_13 = Json2KeyWord<double>(m_defaults, "rattle_tol_13");
 
+        m_rattle_12 = Json2KeyWord<bool>(m_defaults, "rattle_12");
+        m_rattle_13 = Json2KeyWord<bool>(m_defaults, "rattle_13");
+
         // m_coupling = m_dT;
         m_rattle = Json2KeyWord<int>(m_defaults, "rattle");
         std::cout << "Using rattle to constrain bonds!" << std::endl;
+        if (m_rattle_12)
+            std::cout << "Using rattle to constrain 1,2 distances!" << std::endl;
+        if (m_rattle_13)
+            std::cout << "Using rattle to constrain 1,3 distances between two bonds!" << std::endl;
+
     } else {
         Integrator = [=](double* grad) {
             this->Verlet(grad);
@@ -479,10 +488,10 @@ bool SimpleMD::Initialise()
         m_unqiue->Initialise();
     }
     m_dof = 3 * m_natoms;
-
-    InitConstrainedBonds();
     InitialiseWalls();
     if (!m_restart) {
+
+        InitConstrainedBonds();
         InitVelocities(m_scale_velo);
         m_xi.resize(m_chain_length, 0.0);
         m_Q.resize(m_chain_length, 100); // Setze eine geeignete Masse für jede Kette
@@ -579,16 +588,20 @@ void SimpleMD::InitConstrainedBonds()
                     std::pair<int, int> indicies(i, j);
                     std::pair<double, double> minmax(m_molecule.CalculateDistance(i, j) * m_molecule.CalculateDistance(i, j), m_molecule.CalculateDistance(i, j) * m_molecule.CalculateDistance(i, j));
                     std::pair<std::pair<int, int>, double> bond(indicies, m_molecule.CalculateDistance(i, j) * m_molecule.CalculateDistance(i, j));
-                    m_bond_constrained.emplace_back(bond);
-                    // std::cout << i << " " << j << " " << bond.second << std::endl;
+                    if (m_rattle_12) {
+                        m_bond_constrained.emplace_back(bond);
+                        std::cout << "1,2: " << i << " " << j << " " << bond.second << " ";
+                    }
 
                     for (int k = 0; k < j; ++k) {
                         if (m.second(k, j)) {
                             std::pair<int, int> indicies(i, k);
                             std::pair<double, double> minmax(m_molecule.CalculateDistance(i, k) * m_molecule.CalculateDistance(i, k), m_molecule.CalculateDistance(i, k) * m_molecule.CalculateDistance(i, k));
                             std::pair<std::pair<int, int>, double> bond(indicies, m_molecule.CalculateDistance(i, k) * m_molecule.CalculateDistance(i, k));
-                            m_bond_13_constrained.push_back(std::pair<std::pair<int, int>, double>(bond));
-                            std::cout << "1,3: " << i << " " << k << " " << bond.second << " ";
+                            if (m_rattle_13) {
+                                m_bond_13_constrained.push_back(std::pair<std::pair<int, int>, double>(bond));
+                                std::cout << "1,3: " << i << " " << k << " " << bond.second << " ";
+                            }
                         }
                     }
                 }
@@ -831,6 +844,39 @@ nlohmann::json SimpleMD::WriteRestartInformation()
         }
         restart["bias"] = bias_restart;
     }
+    if (m_rattle) {
+        json constrains;
+        if (m_rattle_12) {
+            json constrains_12;
+            for (int i = 0; i < m_bond_constrained.size(); ++i) {
+                json element;
+                element["i"] = m_bond_constrained[i].first.first;
+                element["j"] = m_bond_constrained[i].first.second;
+                element["d"] = m_bond_constrained[i].second;
+
+                constrains_12[i] = element;
+            }
+            constrains["constrain_12"] = true;
+            constrains["num_constrain_12"] = m_bond_constrained.size();
+            constrains["constrains_12"] = constrains_12;
+        }
+
+        if (m_rattle_13) {
+            json constrains_13;
+            for (int i = 0; i < m_bond_13_constrained.size(); ++i) {
+                json element;
+                element["i"] = m_bond_13_constrained[i].first.first;
+                element["j"] = m_bond_13_constrained[i].first.second;
+                element["d"] = m_bond_13_constrained[i].second;
+
+                constrains_13[i] = element;
+            }
+            constrains["constrain_13"] = true;
+            constrains["num_constrain_13"] = m_bond_13_constrained.size();
+            constrains["constrains_13"] = constrains_13;
+        }
+        restart["constrains"] = constrains;
+    }
     return restart;
 };
 
@@ -1012,7 +1058,6 @@ bool SimpleMD::LoadRestartInformation(const json& state)
         if (m_rmsd_mtd) {
             m_k_rmsd = state["k_rmsd"];
             m_alpha_rmsd = state["alpha_rmsd"];
-
             m_mtd_steps = state["mtd_steps"];
             m_rmsd_econv = state["rmsd_econv"];
             m_wtmtd = state["wtmtd"];
@@ -1036,6 +1081,42 @@ bool SimpleMD::LoadRestartInformation(const json& state)
 
     if (!Q.empty()) {
         m_Q = Tools::String2DoubleVec(Q, "|");
+    }
+
+    try {
+        if (state.contains("constrains")) {
+            const json& constrains = state["constrains"];
+
+            if (constrains.contains("constrain_12") && constrains["constrain_12"].get<bool>()) {
+                m_bond_constrained.clear();
+                int num_constrain_12 = constrains["num_constrain_12"];
+                const json& constrains_12 = constrains["constrains_12"];
+
+                for (int i = 0; i < num_constrain_12; ++i) {
+                    int i_index = constrains_12[i]["i"].get<int>();
+                    int j_index = constrains_12[i]["j"].get<int>();
+                    double distance = constrains_12[i]["d"].get<double>();
+                    m_bond_constrained.emplace_back(std::make_pair(i_index, j_index), distance);
+                    std::cout << "1,2: " << i_index << " " << j_index << " " << distance << " ";
+                }
+            }
+
+            if (constrains.contains("constrain_13") && constrains["constrain_13"].get<bool>()) {
+                m_bond_13_constrained.clear();
+                int num_constrain_13 = constrains["num_constrain_13"];
+                const json& constrains_13 = constrains["constrains_13"];
+
+                for (int i = 0; i < num_constrain_13; ++i) {
+                    int i_index = constrains_13[i]["i"].get<int>();
+                    int j_index = constrains_13[i]["j"].get<int>();
+                    double distance = constrains_13[i]["d"].get<double>();
+                    m_bond_13_constrained.emplace_back(std::make_pair(i_index, j_index), distance);
+                    std::cout << "1,3: " << i_index << " " << j_index << " " << distance << " ";
+                }
+            }
+        }
+    } catch ([[maybe_unused]] json::type_error& e) {
+        std::cerr << e.what() << '\n';
     }
 
     m_restart = !geometry.empty() && !velocities.empty();

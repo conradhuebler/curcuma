@@ -155,6 +155,8 @@ static json CurcumaMDJson{
     { "norestart", false },
     { "writerestart", 1000 },
     { "rattle", false },
+    { "rattle_12", true },
+    { "rattle_13", false },
     { "rattle_tol_12", 1e-1 },
     { "rattle_tol_13", 2 },
     { "rattle_maxiter", 50 },
@@ -378,7 +380,8 @@ private:
     bool m_rattle_dynamic_tol = false;
     bool m_nocolvarfile = false;
     bool m_nohillsfile = false;
-
+    bool m_rattle_12 = false;
+    bool m_rattle_13 = false;
     int m_mtd_dT = -1;
     int m_seed = -1;
     int m_time_step = 0;

@@ -165,13 +165,13 @@ inline json CLI2Json(int argc, char** argv)
                     current.erase(0, 1);
                     key[current] = number;
                 } else {
-                    if (next_sub.compare("-") == 0) {
-                        current.erase(0, 1);
-                        key[current] = true;
-                        continue;
-                    } else if (next_sub.compare("+") == 0) {
+                    if (next.compare("-") == 0 || next.compare("false") == 0) {
                         current.erase(0, 1);
                         key[current] = false;
+                        continue;
+                    } else if (next.compare("+") == 0 || next.compare("true") == 0) {
+                        current.erase(0, 1);
+                        key[current] = true;
                         continue;
                     } else {
                         current.erase(0, 1);
@@ -190,7 +190,7 @@ inline json CLI2Json(int argc, char** argv)
                         //}
 
                         ++i;
-                }
+                    }
                 }
             }
         }
