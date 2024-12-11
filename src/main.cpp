@@ -17,7 +17,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  */
-
+#include "src/core/orcainterface.h"
 #include "src/core/eht.h"
 #include "src/core/fileiterator.h"
 #include "src/core/molecule.h"
@@ -1063,6 +1063,24 @@ int main(int argc, char **argv) {
             std::cout << "Dipole form partial Charges and nonlin. Scaling: "
                       << dipole_nlin.norm() << " [eA] " << dipole_nlin.norm()*4.803 << " [D] " << std::endl;
 
+        } else if (strcmp(argv[1], "-orca") == 0) {
+
+            if (argc < 3) {
+                std::cerr << "Please use curcuma as follows:\ncurcuma -orca input" << std::endl;
+                return -1;
+            }
+
+            OrcaInterface orca;
+            // Eingabedatei zuweisen
+            orca.setInputFile(argv[2]);
+
+            // ORCA ausführen
+            if (!orca.runOrca()) {
+                return -1;
+            }
+            // ORCA-Ausgabe lesen
+            orca.getOrcaJSON();
+            orca.readOrcaJSON();
 
         } else if (strcmp(argv[1], "-stride") == 0) {
 

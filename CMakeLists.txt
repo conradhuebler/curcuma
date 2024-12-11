@@ -177,7 +177,9 @@ set(curcuma_core_SRC
         src/tools/formats.h
         src/tools/geometry.h
         src/tools/general.h
-        )
+        src/core/orcainterface.h
+        src/core/orcainterface.cpp
+)
     add_library(curcuma_core  ${curcuma_core_SRC})
 
     set(km_SRC
