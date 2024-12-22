@@ -612,7 +612,7 @@ void SimpleMD::InitConstrainedBonds()
     std::cout << std::endl
               << m_dof << " initial degrees of freedom " << std::endl;
     std::cout << m_bond_constrained.size() << " constrains active" << std::endl;
-    m_dof -= (m_bond_constrained.size() + m_bond_13_constrained.size());
+    // m_dof -= (m_bond_constrained.size() + m_bond_13_constrained.size());
 
     std::cout << m_dof << " degrees of freedom remaining ..." << std::endl;
 }
@@ -1522,10 +1522,12 @@ void SimpleMD::Rattle(double* grad)
      * and adjusted to some needs
      */
     TriggerWriteRestart();
+
     auto* coord = new double[3 * m_natoms];
     double m_dT_inverse = 1 / m_dT;
     std::vector<int> moved_12(m_natoms, 0), moved_13(m_natoms, 0);
     bool move = false;
+    int dof = m_dof;
     for (int i = 0; i < m_natoms; ++i) {
         coord[3 * i + 0] = m_current_geometry[3 * i + 0] + m_dT * m_velocities[3 * i + 0] - 0.5 * grad[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
         coord[3 * i + 1] = m_current_geometry[3 * i + 1] + m_dT * m_velocities[3 * i + 1] - 0.5 * grad[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
@@ -1549,6 +1551,7 @@ void SimpleMD::Rattle(double* grad)
     double difference_prev = 1e22, difference_curr = 1e22;
     double max = m_rattle_max;
     double scale = 0.1;
+    int local_dof = 0;
     while (iter < m_rattle_maxiter) {
         difference_prev = difference_curr;
         difference_curr = 0;
@@ -1575,6 +1578,8 @@ void SimpleMD::Rattle(double* grad)
                 // if (scalarproduct >= m_rattle_tolerance * distance) {
                 moved_12[i] += 1;
                 moved_12[j] += 1;
+                if (moved_12[i] == 1)
+                    local_dof++;
                 active++;
                 // std::cout << i << " " << j << " " << distance_current << " " << scalarproduct <<std::endl;
 
@@ -1653,6 +1658,7 @@ void SimpleMD::Rattle(double* grad)
                                         m_velocities[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
                                         m_velocities[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
                     */
+
                     m_rt_velo[3 * i + 0] = m_velocities[3 * i + 0] + dx * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
                     m_rt_velo[3 * i + 1] = m_velocities[3 * i + 1] + dy * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
                     m_rt_velo[3 * i + 2] = m_velocities[3 * i + 2] + dz * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
@@ -1684,6 +1690,8 @@ void SimpleMD::Rattle(double* grad)
                 // if (scalarproduct >= m_rattle_tolerance * distance) {
                 moved_13[i] += 1;
                 moved_13[j] += 1;
+                if (moved_13[i] == 1)
+                    local_dof++;
                 active++;
                 // std::cout << i << " " << j << " " << distance_current << " " << scalarproduct <<std::endl;
 
@@ -1762,6 +1770,7 @@ void SimpleMD::Rattle(double* grad)
                                  m_velocities[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
                                  m_velocities[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
              */
+
                 m_rt_velo[3 * i + 0] = m_velocities[3 * i + 0] + dx * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
                 m_rt_velo[3 * i + 1] = m_velocities[3 * i + 1] + dy * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
                 m_rt_velo[3 * i + 2] = m_velocities[3 * i + 2] + dz * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
@@ -1809,6 +1818,7 @@ void SimpleMD::Rattle(double* grad)
             coord[3 * i + 2] = m_rt_geom_1[3 * i + 2];
         }
     }
+    m_dof -= local_dof;
     /*
         for (auto bond : m_bond_constrained) {
             int i = bond.first.first, j = bond.first.second;
@@ -1903,6 +1913,7 @@ void SimpleMD::Rattle(double* grad)
     iter = 0;
     ekin = 0.0;
     double sum_active = 0;
+
     while (iter < m_rattle_maxiter) {
         iter++;
         int active = 0;
@@ -2029,6 +2040,7 @@ void SimpleMD::Rattle(double* grad)
     m_T = T;
     ThermostatFunction();
     EKin();
+    m_dof = dof;
 }
 
 void SimpleMD::ApplyRMSDMTD(double* grad)
@@ -2586,30 +2598,6 @@ void SimpleMD::CSVR()
     static std::mt19937 gen{ rd() };
     static std::normal_distribution<> d{ 0, 1 };
     static std::chi_squared_distribution<float> dchi{ static_cast<float>(m_dof) };
-
-    /*
-        if(int(m_step * m_dT) % 1 == 0)
-        {
-        for (int i = 0; i < m_natoms; ++i) {
-            m_atom_temp[i].push_back(m_mass[i]* (m_velocities[3 * i + 0] *m_velocities[3 * i + 0]
-                + m_velocities[3 * i + 1] *m_velocities[3 * i + 1]
-                                         + m_velocities[3 * i + 2]*m_velocities[3 * i + 2])/(kb_Eh * m_dof));
-            double T = 0;
-            double R = d(gen);
-            double SNf = dchi(gen);
-            for(int j = 0; j < m_atom_temp[i].size(); ++j)
-                T += m_atom_temp[i][j];
-            if(m_atom_temp[i].size() > 1000)
-                m_atom_temp[i].erase(m_atom_temp[i].begin());
-            double c = exp(-(T / 2.0 * m_respa) / m_coupling);
-            double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (m_dof * m_Ekin) + 2 * R * sqrt(c * (1 - c) * Ekin_target / (m_dof * m_Ekin));
-            m_Ekin_exchange += m_Ekin * (alpha2 - 1);
-            double alpha = sqrt(alpha2);
-            m_velocities[3 * i + 0] *= alpha;
-            m_velocities[3 * i + 1] *= alpha;
-            m_velocities[3 * i + 2] *= alpha;
-        }
-        }else{ */
     double R = d(gen);
     double SNf = dchi(gen);
     double alpha2 = c + (1 - c) * (SNf + R * R) * Ekin_target / (m_dof * m_Ekin) + 2 * R * sqrt(c * (1 - c) * Ekin_target / (m_dof * m_Ekin));
@@ -2623,7 +2611,6 @@ void SimpleMD::CSVR()
         m_atom_temp[i].push_back(m_mass[i] * (m_velocities[3 * i + 0] * m_velocities[3 * i + 0] + m_velocities[3 * i + 1] * m_velocities[3 * i + 1] + m_velocities[3 * i + 2] * m_velocities[3 * i + 2]) / (kb_Eh * m_dof));
     }
     m_seed++;
-    //   }
 }
 
 void SimpleMD::Anderson()

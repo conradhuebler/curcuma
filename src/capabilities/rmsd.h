@@ -101,7 +101,9 @@ static const json RMSDJson = {
     { "limit", 10 },
     { "costmatrix", 1 },
     { "maxtrial", 3 },
-    { "kmstat", false }
+    { "kmstat", false },
+    { "km_conv", 1e-3 },
+    { "molalignarg", " -remap -fast -tol 10" }
 };
 
 class RMSDDriver : public CurcumaMethod {
@@ -312,7 +314,7 @@ private:
     std::vector<int> m_reorder_rules;
     std::vector<std::vector<int>> m_stored_rules, m_intermedia_rules;
     std::vector<double> m_tmp_rmsd;
-    double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99, m_damping = 0.8;
+    double m_rmsd = 0, m_rmsd_raw = 0, m_scaling = 1.5, m_intermedia_storage = 1, m_threshold = 99, m_damping = 0.8, m_km_convergence = 1e-3;
     bool m_check = false;
     bool m_check_connections = false, m_postprocess = true, m_noreorder = false, m_swap = false, m_dynamic_center = false;
     bool m_update_rotation = false, m_split = false, m_nofree = false;
@@ -327,7 +329,7 @@ private:
     double m_cost_limit = 0;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
     std::vector<int> m_initial, m_element_templates;
-    std::string m_molalign = "molalign";
+    std::string m_molalign = "molalign", m_molalignarg = " -remap -fast -tol 10";
     std::map<double, Matrix> m_prepared_cost_matrices;
 };
 

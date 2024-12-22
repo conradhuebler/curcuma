@@ -884,11 +884,15 @@ int main(int argc, char **argv) {
             if (argc < 3) {
                 return 0;
             }
-            Molecule mol1 = Files::LoadFile(argv[2]);
+            FileIterator file(argv[2]);
+            while (!file.AtEnd()) {
+                Molecule mol1 = file.Next();
 
-            EHT eht;
-            eht.setMolecule(mol1);
-            eht.start();
+                EHT eht;
+                eht.setMolecule(mol1);
+                eht.start();
+            }
+
         } else if (strcmp(argv[1], "-gyration") == 0) {
             FileIterator file(argv[2]);
             int count = 1;

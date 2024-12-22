@@ -1,6 +1,6 @@
 /*
  * <Scan and judge conformers from different input. >
- * Copyright (C) 2020 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -122,7 +122,7 @@ public:
     }
 
     virtual int execute() override;
-    virtual bool BreakThreadPool() const override { return false; }
+    // virtual bool BreakThreadPool() const override { return false; }
 
     bool KeepMolecule() const { return m_keep_molecule; }
     bool ReorderWorked() const { return m_reorder_worked; }
@@ -167,7 +167,7 @@ public:
     }
 
 private:
-    bool m_keep_molecule = true, m_break_pool = false, m_reorder_worked = false, m_reuse_only = false, m_reused_worked = false;
+    bool m_keep_molecule = true, m_reorder_worked = false, m_reuse_only = false, m_reused_worked = false;
     Molecule m_reference, m_target;
     double m_rmsd = 0, m_old_rmsd = 0, m_rmsd_threshold = 1, m_energy = 0;
     int m_MaxHTopoDiff;
@@ -334,6 +334,8 @@ private:
     std::vector<const Molecule*> m_threshold;
     std::vector<int> m_element_templates;
     std::vector<std::pair<std::string, std::string>> m_exclude_list;
+    StringList m_nodes_list;
+    std::string m_first_node;
 #ifdef WriteMoreInfo
     std::vector<dnn_input> m_dnn_data;
 #endif

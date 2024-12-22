@@ -147,6 +147,7 @@ configure_file(
 )
 
 set(curcuma_core_SRC
+        src/capabilities/optimiser/lbfgs.cpp
         src/capabilities/persistentdiagram.cpp
         src/capabilities/analysenciplot.cpp
         src/capabilities/curcumamethod.cpp
@@ -358,6 +359,9 @@ target_link_libraries(curcuma fmt::fmt-header-only)
 target_link_libraries(curcuma curcuma_core)
 add_executable(curcuma_helper
         src/helpers/main.cpp)
+        
+add_executable(cli_helper
+        src/helpers/cli_test.cpp)
 
 target_link_libraries(curcuma_helper fmt::fmt-header-only)
 target_link_libraries(curcuma_helper curcuma_core)

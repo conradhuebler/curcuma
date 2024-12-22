@@ -177,6 +177,9 @@ void RMSDDriver::LoadControlJson()
     m_split = Json2KeyWord<bool>(m_defaults, "split");
     m_nofree = Json2KeyWord<bool>(m_defaults, "nofree");
     m_maxtrial = Json2KeyWord<int>(m_defaults, "maxtrial");
+    m_kmstat = Json2KeyWord<bool>(m_defaults, "kmstat");
+    m_km_convergence = Json2KeyWord<double>(m_defaults, "km_conv");
+
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
         std::string element = m_defaults["Element"].get<std::string>();
@@ -856,7 +859,7 @@ void RMSDDriver::FinaliseTemplate()
         m_results.insert(std::pair<double, std::vector<int>>(rmsd, result));
         time.Reset();
 
-        eq_counter += std::abs(rmsd - rmsd_prev) < 1e-3;
+        eq_counter += std::abs(rmsd - rmsd_prev) < m_km_convergence;
         incr_counter += rmsd > rmsd_prev;
         rmsd_prev = rmsd;
     }
@@ -1532,7 +1535,7 @@ bool RMSDDriver::MolAlignLib()
     m_target.writeXYZFile("molalign_tar.xyz");
 
     FILE* FileOpen;
-    std::string command = m_molalign + " molaign_ref.xyz " + " molalign_tar.xyz -remap -fast -tol " + std::to_string(m_molaligntol) + " 2>&1";
+    std::string command = m_molalign + m_molalignarg + " molaign_ref.xyz   molalign_tar.xyz " + " 2>&1";
     if (!m_silent)
         std::cout << command << std::endl;
     FileOpen = popen(command.c_str(), "r");

@@ -20,15 +20,16 @@
 #include "src/capabilities/hessian.h"
 #include "src/capabilities/rmsd.h"
 
+#include "src/capabilities/optimiser/lbfgs.h"
+
 #include "src/core/elements.h"
 #include "src/core/energycalculator.h"
 #include "src/core/fileiterator.h"
-#include "src/core/global.h"
+#include "src/core/global.h" 1
 #include "src/core/molecule.h"
 
 #include <LBFGS.h>
 #include <LBFGSB.h>
-
 
 #include <iomanip>
 #include <iostream>
@@ -95,7 +96,11 @@ int SPThread::execute()
 int OptThread::execute()
 {
     std::vector<double> charges;
-    m_final = m_curcumaOpt->LBFGSOptimise(&m_molecule, m_result, &m_intermediate, charges, ThreadId(), Basename() + ".opt.trj");
+    if (m_optimethod == 0)
+        m_final = m_curcumaOpt->LBFGSOptimise(&m_molecule, m_result, &m_intermediate, charges, ThreadId(), Basename() + ".opt.trj");
+    else
+        m_final = m_curcumaOpt->GPTLBFGS(&m_molecule, m_result, &m_intermediate, charges, ThreadId(), Basename() + ".opt.trj");
+
     m_scf["e0"] = m_final.Energy();
     if (charges.size())
         m_scf["charges"] = Tools::DoubleVector2String(charges);
@@ -128,12 +133,31 @@ void CurcumaOpt::LoadControlJson()
     m_printoutput = Json2KeyWord<bool>(m_defaults, "printOutput");
     m_dE = Json2KeyWord<double>(m_defaults, "dE");
     m_dRMSD = Json2KeyWord<double>(m_defaults, "dRMSD");
+    m_GradNorm = Json2KeyWord<double>(m_defaults, "GradNorm");
+    m_ConvCount = Json2KeyWord<int>(m_defaults, "ConvCount");
+
     m_method = Json2KeyWord<std::string>(m_defaults, "method");
     m_charge = Json2KeyWord<double>(m_defaults, "Charge");
     m_spin = Json2KeyWord<double>(m_defaults, "Spin");
     m_singlepoint = Json2KeyWord<bool>(m_defaults, "SinglePoint");
     m_serial = Json2KeyWord<bool>(m_defaults, "serial");
     m_hessian = Json2KeyWord<int>(m_defaults, "hessian");
+    m_optH = Json2KeyWord<bool>(m_defaults, "optH");
+    m_maxiter = Json2KeyWord<int>(m_defaults, "maxiter");
+    m_maxrise = Json2KeyWord<int>(m_defaults, "maxrise");
+    m_fusion = Json2KeyWord<bool>(m_defaults, "fusion");
+    m_optimethod = Json2KeyWord<int>(m_defaults, "optimethod");
+    m_inithess = Json2KeyWord<bool>(m_defaults, "inithess");
+    m_lambda = Json2KeyWord<double>(m_defaults, "lambda");
+    m_diis_hist = Json2KeyWord<int>(m_defaults, "diis_hist");
+    m_diis_start = Json2KeyWord<int>(m_defaults, "diis_start");
+
+    if (m_optimethod == 0) {
+        std::cout << "Using external lBFGS module" << std::endl;
+    } else {
+        std::cout << "Using gpt coded optimisation module" << std::endl;
+    }
+
     if (m_method.compare("GFNFF") == 0)
         m_threads = 1;
 }
@@ -231,9 +255,10 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
                 continue;
 
             SPThread* th;
-            if (!m_singlepoint)
+            if (!m_singlepoint) {
                 th = new OptThread(this);
-            else
+                th->setOptiMethod(m_optimethod);
+            } else
                 th = new SPThread(this);
 
             th->setBaseName(Basename());
@@ -328,23 +353,6 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, std::string& output, std
 
 Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::vector<Molecule>* intermediate, std::vector<double>& charges, int thread, const std::string& basename)
 {
-    bool printOutput = Json2KeyWord<bool>(m_controller, "printOutput");
-    bool fusion = Json2KeyWord<bool>(m_controller, "fusion");
-    double dE = Json2KeyWord<double>(m_controller, "dE");
-    double dRMSD = Json2KeyWord<double>(m_controller, "dRMSD");
-    double GradNorm = Json2KeyWord<double>(m_controller, "GradNorm");
-    double maxrise = Json2KeyWord<double>(m_controller, "maxrise");
-    std::string method = Json2KeyWord<std::string>(m_controller, "method");
-    int MaxIter = Json2KeyWord<int>(m_controller, "MaxIter");
-    int ConvCount = Json2KeyWord<int>(m_controller, "ConvCount");
-    int SingleStep = Json2KeyWord<int>(m_controller, "SingleStep");
-    /*
-        if(Json2KeyWord<int>(controller, "threads") > 1 )
-        {
-            printOutput = false;
-        }
-        */
-    bool optH = Json2KeyWord<bool>(m_controller, "optH");
     std::vector<int> constrain;
     Geometry geometry = initial->getGeometry();
     intermediate->push_back(initial);
@@ -360,7 +368,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
         constrain.push_back(initial->Atom(i).first == 1);
     }
 
-    EnergyCalculator interface(method, m_controller);
+    EnergyCalculator interface(m_method, m_controller);
 
     interface.setMolecule(*initial);
     m_parameters = interface.Parameter();
@@ -369,25 +377,23 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
     initial->writeXYZFile(basename + ".t" + std::to_string(thread) + ".xyz");
     std::cout << "Initial energy " << final_energy << "Eh" << std::endl;
     LBFGSParam<double> param;
-    param.m = Json2KeyWord<int>(m_controller, "LBFGS_m");
+    param.m = Json2KeyWord<int>(m_defaults, "LBFGS_m");
 
-    param.epsilon = Json2KeyWord<double>(m_controller, "LBFGS_eps_abs");
-    param.epsilon_rel = Json2KeyWord<double>(m_controller, "LBFGS_eps_rel");
-    param.past = Json2KeyWord<int>(m_controller, "LBFGS_past");
-    param.delta = Json2KeyWord<double>(m_controller, "LBFGS_delta");
-    param.linesearch = Json2KeyWord<int>(m_controller, "LBFGS_LST");
-    param.max_linesearch = Json2KeyWord<double>(m_controller, "LBFGS_ls_iter");
-    param.min_step = Json2KeyWord<double>(m_controller, "LBFGS_min_step");
-    param.ftol = Json2KeyWord<double>(m_controller, "LBFGS_ftol");
-    param.wolfe = Json2KeyWord<double>(m_controller, "LBFGS_wolfe");
-
-    // param.linesearch = Json2KeyWord<int>(controller, "LBFGS_LS");
+    param.epsilon = Json2KeyWord<double>(m_defaults, "LBFGS_eps_abs");
+    param.epsilon_rel = Json2KeyWord<double>(m_defaults, "LBFGS_eps_rel");
+    param.past = Json2KeyWord<int>(m_defaults, "LBFGS_past");
+    param.delta = Json2KeyWord<double>(m_defaults, "LBFGS_delta");
+    param.linesearch = Json2KeyWord<int>(m_defaults, "LBFGS_LST");
+    param.max_linesearch = Json2KeyWord<double>(m_defaults, "LBFGS_ls_iter");
+    param.min_step = Json2KeyWord<double>(m_defaults, "LBFGS_min_step");
+    param.ftol = Json2KeyWord<double>(m_defaults, "LBFGS_ftol");
+    param.wolfe = Json2KeyWord<double>(m_defaults, "LBFGS_wolfe");
 
     LBFGSSolver<double, LineSearchBacktracking> solver(param);
     LBFGSInterface fun(3 * initial->AtomCount());
     fun.setMolecule(initial);
     fun.setInterface(&interface);
-    if (optH)
+    if (m_optH)
         fun.setConstrains(constrain);
 
     double fx;
@@ -415,7 +421,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
     output += fmt::format("{2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}} {7: ^{1}}\n", "", 15, "Step", "Current Energy", "Energy Change", "RMSD Change", "Gradient Norm", "time");
     output += fmt::format("{2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}} {7: ^{1}}\n", "", 15, " ", "[Eh]", "[kJ/mol]", "[A]", "[A]", "[s]");
 
-    if (printOutput) {
+    if (m_printoutput) {
         std::cout << output;
         output.clear();
     }
@@ -428,7 +434,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
     if (converged)
         perform_optimisation = false;
 
-    for (iteration = 1; iteration <= MaxIter && perform_optimisation; ++iteration) {
+    for (iteration = 1; iteration <= m_maxiter && perform_optimisation; ++iteration) {
         old_parameter = parameter;
         try {
             solver.SingleStep(fun, parameter, fx);
@@ -446,7 +452,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
                 output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
                 output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
 
-                if (printOutput) {
+                if (m_printoutput) {
                     std::cout << output;
                     output.clear();
                 }
@@ -463,7 +469,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
             output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
             output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
 
-            if (printOutput) {
+            if (m_printoutput) {
                 std::cout << output;
                 output.clear();
             }
@@ -476,8 +482,8 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
             }
             next.setGeometry(geometry);
         }
-        if ((fun.m_energy - final_energy) * 2625.5 > maxrise && iteration > 10) {
-            if (printOutput) {
+        if ((fun.m_energy - final_energy) * 2625.5 > m_maxrise && iteration > 10) {
+            if (m_printoutput) {
                 output += fmt::format("Energy rises too much!\n");
                 output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation sufficiantly converged ***");
                 output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
@@ -494,7 +500,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
             }
         }
 
-        if ((iteration % SingleStep == 0 && perform_optimisation) || fun.isError()) {
+        if ((iteration % m_singlepoint == 0 && perform_optimisation) || fun.isError()) {
             parameter = fun.Parameter();
 
             for (int i = 0; i < atoms_count; ++i) {
@@ -516,7 +522,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
 
 #endif
         start = std::chrono::system_clock::now();
-        if (printOutput) {
+        if (m_printoutput) {
             std::cout << output;
             output.clear();
         }
@@ -526,11 +532,11 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
          * LBFGS Conv = 4
          * Gradient Norm = 8
          * */
-        converged = 1 * (abs(fun.m_energy - final_energy) * 2625.5 < dE)
-            + 2 * (driver->RMSD() < dRMSD)
+        converged = 1 * (abs(fun.m_energy - final_energy) * 2625.5 < m_dE)
+            + 2 * (driver->RMSD() < m_dRMSD)
             + 4 * (solver.isConverged())
-            + 8 * (solver.final_grad_norm() < GradNorm);
-        perform_optimisation = ((converged & ConvCount) != ConvCount) && (fun.isError() == 0);
+            + 8 * (solver.final_grad_norm() < m_GradNorm);
+        perform_optimisation = ((converged & m_ConvCount) != m_ConvCount) && (fun.isError() == 0);
         std::ifstream test_file("stop");
         bool result = test_file.is_open();
         test_file.close();
@@ -554,7 +560,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
         }
         */
         final_energy = fun.m_energy;
-        if (next.Check() == 0 || (next.Check() == 1 && fusion)) {
+        if (next.Check() == 0 || (next.Check() == 1 && m_fusion)) {
             previous = next;
             next.setEnergy(final_energy);
             intermediate->push_back(next);
@@ -571,7 +577,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
     end = std::chrono::system_clock::now();
     charges = interface.Charges();
 
-    if (iteration >= MaxIter) {
+    if (iteration >= m_maxiter) {
         output += fmt::format("{0: ^75}\n\n", "*** Maximum number of iterations reached! ***");
         output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
 
@@ -582,7 +588,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
         output += fmt::format("{0: ^75}\n", "*** Geometry Optimisation converged ***");
         output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
 
-        if (printOutput) {
+        if (m_printoutput) {
             std::cout << output;
             output.clear();
         }
@@ -591,7 +597,266 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
         output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
         output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
 
-        if (printOutput) {
+        if (m_printoutput) {
+            std::cout << output;
+            output.clear();
+        }
+    }
+
+    if (next.Check() == 0) {
+        for (int i = 0; i < initial->AtomCount(); ++i) {
+            geometry(i, 0) = parameter(3 * i);
+            geometry(i, 1) = parameter(3 * i + 1);
+            geometry(i, 2) = parameter(3 * i + 2);
+        }
+        previous.setEnergy(final_energy);
+        previous.setGeometry(geometry);
+    }
+    return previous;
+}
+
+Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vector<Molecule>* intermediate, std::vector<double>& charges, int thread, const std::string& basename)
+{
+    std::vector<int> constrain;
+    Geometry geometry = initial->getGeometry();
+    intermediate->push_back(initial);
+
+    Molecule previous(initial);
+    Molecule next(initial);
+    Vector parameter(3 * initial->AtomCount()), old_parameter(3 * initial->AtomCount());
+
+    for (int i = 0; i < initial->AtomCount(); ++i) {
+        parameter(3 * i) = geometry(i, 0);
+        parameter(3 * i + 1) = geometry(i, 1);
+        parameter(3 * i + 2) = geometry(i, 2);
+        constrain.push_back(initial->Atom(i).first == 1);
+    }
+
+    EnergyCalculator interface(m_method, m_controller);
+
+    interface.setMolecule(*initial);
+    m_parameters = interface.Parameter();
+    double final_energy = interface.CalculateEnergy(true);
+    initial->setEnergy(final_energy);
+    initial->writeXYZFile(basename + ".t" + std::to_string(thread) + ".xyz");
+    std::cout << "Initial energy " << final_energy << "Eh" << std::endl;
+    LBFGSParam<double> param;
+    param.m = Json2KeyWord<int>(m_defaults, "LBFGS_m");
+
+    param.epsilon = Json2KeyWord<double>(m_defaults, "LBFGS_eps_abs");
+    param.epsilon_rel = Json2KeyWord<double>(m_defaults, "LBFGS_eps_rel");
+    param.past = Json2KeyWord<int>(m_defaults, "LBFGS_past");
+    param.delta = Json2KeyWord<double>(m_defaults, "LBFGS_delta");
+    param.linesearch = Json2KeyWord<int>(m_defaults, "LBFGS_LST");
+    param.max_linesearch = Json2KeyWord<double>(m_defaults, "LBFGS_ls_iter");
+    param.min_step = Json2KeyWord<double>(m_defaults, "LBFGS_min_step");
+    param.ftol = Json2KeyWord<double>(m_defaults, "LBFGS_ftol");
+    param.wolfe = Json2KeyWord<double>(m_defaults, "LBFGS_wolfe");
+
+    // LBFGSSolver<double, LineSearchBacktracking> solver(param);
+    // LBFGSInterface fun(3 * initial->AtomCount());
+    // fun.setMolecule(initial);
+    // fun.setInterface(&interface);
+    // if (m_optH)
+    // gptfgs.setConstrains(constrain);
+
+    double fx;
+
+    json RMSDJsonControl = {
+        { "reorder", false },
+        { "check", false },
+        { "heavy", false },
+        { "fragment", -1 },
+        { "fragment_reference", -1 },
+        { "fragment_target", -1 },
+        { "init", -1 },
+        { "pt", 0 },
+        { "silent", true },
+        { "storage", 1.0 },
+        { "method", "incr" },
+        { "noreorder", true },
+        { "threads", 1 }
+    };
+
+    RMSDDriver* driver = new RMSDDriver(RMSDJsonControl);
+
+    std::chrono::time_point<std::chrono::system_clock> start = std::chrono::system_clock::now(), end;
+    output += fmt::format("\nCharge {} Spin {}\n\n", initial->Charge(), initial->Spin());
+    output += fmt::format("{2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}} {7: ^{1}}\n", "", 15, "Step", "Current Energy", "Energy Change", "RMSD Change", "Gradient Norm", "time");
+    output += fmt::format("{2: ^{1}} {3: ^{1}} {4: ^{1}} {5: ^{1}} {6: ^{1}} {7: ^{1}}\n", "", 15, " ", "[Eh]", "[kJ/mol]", "[A]", "[A]", "[s]");
+
+    if (m_printoutput) {
+        std::cout << output;
+        output.clear();
+    }
+    bool perform_optimisation = true;
+    bool error = false;
+
+    int atoms_count = initial->AtomCount();
+    int converged = 0;
+    int iteration = 0;
+    if (converged)
+        perform_optimisation = false;
+    std::vector<double> mass = std::vector<double>(3 * initial->AtomCount(), 0);
+    for (int i = 0; i < initial->AtomCount(); ++i) {
+        mass[3 * i + 0] = Elements::AtomicMass[initial->Atom(i).first];
+        mass[3 * i + 1] = Elements::AtomicMass[initial->Atom(i).first];
+        mass[3 * i + 2] = Elements::AtomicMass[initial->Atom(i).first];
+    }
+
+    LBFGS gptfgs(Json2KeyWord<int>(m_defaults, "LBFGS_m"));
+    gptfgs.initialize(atoms_count, parameter);
+    gptfgs.setEnergyCalculator(&interface);
+    gptfgs.setOptimMethod(m_optimethod);
+    gptfgs.setLambda(m_lambda);
+    gptfgs.setMasses(mass);
+    gptfgs.setDIIS(m_diis_hist, m_diis_start);
+    std::cout << m_lambda << std::endl
+              << std::endl;
+    if (m_inithess || m_optimethod == 3) {
+        Hessian hess(m_method, m_defaults, false);
+        hess.setMolecule(*initial);
+        hess.setParameter(interface.Parameter());
+        hess.CalculateHessian(1);
+
+        auto hessian = hess.getHessian();
+        gptfgs.setHessian(hessian);
+    }
+
+    for (iteration = 1; iteration <= m_maxiter && perform_optimisation; ++iteration) {
+        old_parameter = parameter;
+
+        parameter = gptfgs.step();
+        if (gptfgs.isError()) {
+            perform_optimisation = false;
+        }
+
+        if ((gptfgs.Energy() - final_energy) * 2625.5 > m_maxrise && iteration > 10) {
+            if (m_printoutput) {
+                output += fmt::format("Energy rises too much!\n");
+                output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation sufficiantly converged ***");
+                output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
+
+                std::cout << output;
+                output.clear();
+            }
+            error = true;
+            perform_optimisation = false;
+            for (int i = 0; i < atoms_count; ++i) {
+                geometry(i, 0) = old_parameter(3 * i);
+                geometry(i, 1) = old_parameter(3 * i + 1);
+                geometry(i, 2) = old_parameter(3 * i + 2);
+            }
+        }
+
+        // if ((iteration % m_singlepoint == 0 && perform_optimisation) || gptfgs.isError()) {
+        // parameter = fun.Parameter();
+
+        for (int i = 0; i < atoms_count; ++i) {
+            geometry(i, 0) = parameter(3 * i);
+            geometry(i, 1) = parameter(3 * i + 1);
+            geometry(i, 2) = parameter(3 * i + 2);
+        }
+        next.setGeometry(geometry);
+
+        driver->setReference(previous);
+        driver->setTarget(next);
+        driver->start();
+        end = std::chrono::system_clock::now();
+
+#ifdef GCC
+        output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, gptfgs.Energy(), (gptfgs.Energy() - final_energy) * 2625.5, driver->RMSD(), gptfgs.getCurrentGradient().norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
+#else
+        output += fmt::format("{1} {2} {3} {4} {5}\n", 15, iteration, fun.m_energy, (fun.m_energy - final_energy) * 2625.5, driver->RMSD(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
+
+#endif
+        start = std::chrono::system_clock::now();
+        if (m_printoutput) {
+            std::cout << output;
+            output.clear();
+        }
+        /*
+         * Energy = 1
+         * RMSD = 2
+         * LBFGS Conv = 4
+         * Gradient Norm = 8
+         * */
+        converged = 1 * (abs(gptfgs.Energy() - final_energy) * 2625.5 < m_dE)
+            + 2 * (driver->RMSD() < m_dRMSD)
+            + 4 * (gptfgs.isConverged())
+            + 8 * (gptfgs.getCurrentGradient().norm() < m_GradNorm);
+        perform_optimisation = ((converged & m_ConvCount) != m_ConvCount) && (gptfgs.isError() == 0);
+        std::ifstream test_file("stop");
+        bool result = test_file.is_open();
+        test_file.close();
+        if (result) {
+            perform_optimisation = false;
+            error = true;
+        }
+        /*
+        std::cout << (abs(fun.m_energy - final_energy) * 2625.5 < 0.05)
+                  << " " << (int(driver->RMSD() < 0.01))
+                  << " " << solver.isConverged()
+                  << " " << (solver.final_grad_norm()  < 0.0002)
+                  << std::endl;
+
+         std::cout << converged << " " << minConverged << " " << perform_optimisation << std::endl;
+         */
+
+        // if ((abs(gptfgs.Energy() - final_energy) * 2625.5) < 0.05 && driver->RMSD() < 0.01) {
+        //    perform_optimisation = false;
+        //     break;
+        // }
+
+        final_energy = gptfgs.Energy();
+        if (next.Check() == 0 || (next.Check() == 1 && m_fusion)) {
+            previous = next;
+            next.setEnergy(final_energy);
+            intermediate->push_back(next);
+            next.appendXYZFile(basename + ".t" + std::to_string(thread) + ".xyz");
+
+        } else {
+            output += fmt::format("{0: ^75}\n\n", "*** Check next failed! ***");
+
+            perform_optimisation = false;
+            error = true;
+        }
+
+        if (m_optimethod == 3 && iteration % 20 == 0) {
+            Hessian hess(m_method, m_defaults, false);
+            hess.setMolecule(next);
+            hess.setParameter(interface.Parameter());
+            hess.CalculateHessian(1);
+
+            auto hessian = hess.getHessian();
+            gptfgs.setHessian(hessian);
+        }
+        //}
+    }
+    end = std::chrono::system_clock::now();
+    charges = interface.Charges();
+
+    if (iteration >= m_maxiter) {
+        output += fmt::format("{0: ^75}\n\n", "*** Maximum number of iterations reached! ***");
+        output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
+
+        error = true;
+    }
+    if (error == false) {
+        output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, gptfgs.Energy(), (gptfgs.Energy() - final_energy) * 2625.5, driver->RMSD(), gptfgs.getCurrentGradient().norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
+        output += fmt::format("{0: ^75}\n", "*** Geometry Optimisation converged ***");
+        output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
+
+        if (m_printoutput) {
+            std::cout << output;
+            output.clear();
+        }
+    } else {
+        output += fmt::format("{1: ^{0}} {2: ^{0}f} {3: ^{0}f} {4: ^{0}f} {5: ^{0}f} {6: ^{0}f}\n", 15, iteration, gptfgs.Energy(), (gptfgs.Energy() - final_energy) * 2625.5, driver->RMSD(), gptfgs.getCurrentGradient().norm(), std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
+        output += fmt::format("{0: ^75}\n\n", "*** Geometry Optimisation Not Really converged ***");
+        output += fmt::format("{1: ^25} {2: ^{0}f}\n", 2, "FINAL SINGLE POINT ENERGY", final_energy);
+
+        if (m_printoutput) {
             std::cout << output;
             output.clear();
         }

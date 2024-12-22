@@ -1,6 +1,6 @@
 /*
  * <Scan and judge conformers from different input. >
- * Copyright (C) 2020 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -84,7 +84,10 @@ int ConfScanThread::execute()
         double tmp_rmsd = m_driver->Rules2RMSD(m_reorder_rules[i]);
         if (tmp_rmsd < m_rmsd_threshold && (m_MaxHTopoDiff == -1 || m_driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
             m_keep_molecule = false;
-            m_break_pool = true;
+            /* if we break in the reuse part, we ge more accepted in some cases
+             * this is strange and somehow complicated to analyse
+             * stick the the combination to have the fewest finally accepted structures for the test case */
+            // m_break_pool = true;
             m_reused_worked = true;
             m_rmsd = tmp_rmsd;
 
@@ -366,9 +369,10 @@ bool ConfScan::openFile()
     }
     m_timing_rot = calcI;
     m_timing_ripser = calcH;
-    std::cout << "time for calculating descriptors:" << std::endl;
-    std::cout << "Rotational constants " << m_timing_rot / 1000.0 << " seconds." << std::endl;
-    std::cout << "Ripser bar code " << m_timing_ripser / 1000.0 << " seconds." << std::endl;
+
+    fmt::print("Time for calculating descriptors:\n");
+    fmt::print("Rotational constants {} seconds.\n", m_timing_rot / 1000.0);
+    fmt::print("Ripser bar code {} seconds.\n", m_timing_ripser / 1000.0);
 
     return true;
 }
@@ -489,98 +493,67 @@ void ConfScan::SetUp()
     m_1st_filename = m_result_basename + ".initial.xyz";
     m_2nd_filename = m_result_basename + ".reorder";
     m_3rd_filename = m_result_basename + ".reuse.xyz";
-
     m_rejected_filename = m_result_basename + ".rejected.xyz";
     m_statistic_filename = m_result_basename + ".statistic.log";
     m_joined_filename = m_result_basename + ".joined.xyz";
     m_threshold_filename = m_result_basename + ".thresh.xyz";
-
     m_param_file = m_result_basename + ".param.dat";
     m_skip_file = m_result_basename + ".param.skip.dat";
     m_perform_file = m_result_basename + ".param.perf.dat";
     m_success_file = m_result_basename + ".param.success.dat";
     m_limit_file = m_result_basename + ".param.limit.dat";
 
-    std::ofstream result_file;
+    auto createFile = [](const std::string& filename) {
+        std::ofstream file(filename);
+        file.close();
+    };
+
     if (m_writeFiles) {
-        result_file.open(m_accepted_filename);
-        result_file.close();
+        createFile(m_accepted_filename);
+        if (!m_reduced_file) {
+            createFile(m_rejected_filename);
+            createFile(m_statistic_filename);
+            createFile(m_threshold_filename);
+            createFile(m_1st_filename);
+        }
     }
 
-    std::ofstream failed_file;
-    if (m_writeFiles && !m_reduced_file) {
-        failed_file.open(m_rejected_filename);
-        failed_file.close();
-    }
-
-    std::ofstream statistic_file;
-    if (m_writeFiles && !m_reduced_file) {
-        statistic_file.open(m_statistic_filename);
-        statistic_file.close();
-    }
-
-    std::ofstream thresh_file;
-    if (m_writeFiles && !m_reduced_file) {
-        thresh_file.open(m_threshold_filename);
-        thresh_file.close();
-    }
-
-    if (m_previously_accepted.size()) {
-        std::ofstream joined_file;
-        joined_file.open(m_joined_filename);
-        joined_file.close();
-    }
-
-    std::ofstream st_file;
-    if (m_writeFiles && !m_reduced_file) {
-        st_file.open(m_1st_filename);
-        st_file.close();
+    if (!m_previously_accepted.empty()) {
+        createFile(m_joined_filename);
     }
 
     if (m_analyse) {
-        std::ofstream parameters_file;
-        parameters_file.open(m_success_file);
+        createFile(m_success_file);
+        std::ofstream parameters_file(m_success_file);
         parameters_file << "# RMSD(new)\tRMSD(old)\tDelta E\tDelta H\tDelta I" << std::endl;
         parameters_file.close();
 
-        std::ofstream parameters_skipped;
-        parameters_skipped.open(m_skip_file);
-        parameters_skipped.close();
-
-        std::ofstream parameters_performed;
-        parameters_performed.open(m_perform_file);
-        parameters_performed.close();
-
-        std::ofstream parameters_limit;
-        parameters_limit.open(m_limit_file);
-        parameters_limit.close();
+        createFile(m_skip_file);
+        createFile(m_perform_file);
+        createFile(m_limit_file);
     }
 
     std::cout << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
               << "" << std::endl;
 
-    if (m_heavy)
-        std::cout << "    RMSD Calculation will be performed only on heavy atoms! " << std::endl;
-    else
-        std::cout << "    RMSD Calculation will be performed on all atoms! " << std::endl;
-
+    std::cout << "    RMSD Calculation will be performed on "
+              << (m_heavy ? "heavy atoms!" : "all atoms!") << std::endl;
     std::cout << "    RMSD Threshold set to: " << m_rmsd_threshold << " Angstrom" << std::endl;
     std::cout << "    Highest energy conformer allowed: " << m_energy_cutoff << " kJ/mol " << std::endl;
     std::cout << "    Threshold multipliers are loose / tight " << std::endl;
 
-    std::cout << "    Ripser Persitance Diagrams definition for loose ";
-    for (const auto& d : m_sLH)
-        std::cout << d << " ";
-    std::cout << " and tight thresholds " << m_sTH << std::endl;
-    std::cout << "    Rotational Constants definition for loose ";
-    for (const auto& d : m_sLI)
-        std::cout << d << " ";
-    std::cout << " and tight thresholds " << m_sTI << std::endl;
+    auto printThresholds = [](const std::string& label, const std::vector<double>& loose, double tight) {
+        std::cout << "    " << label << " definition for loose ";
+        for (const auto& d : loose)
+            std::cout << d << " ";
+        std::cout << " and tight thresholds ";
+        std::cout << tight << " ";
+        std::cout << std::endl;
+    };
 
-    std::cout << "    Energy definition for loose ";
-    for (const auto& d : m_sLE)
-        std::cout << d << " ";
-    std::cout << " and tight thresholds " << m_sTE << std::endl;
+    printThresholds("Ripser Persistence Diagrams", m_sLH, m_sTH);
+    printThresholds("Rotational Constants", m_sLI, m_sTI);
+    printThresholds("Energy", m_sLE, m_sTE);
 
     std::cout << "" << std::endl
               << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
@@ -595,12 +568,14 @@ void ConfScan::AcceptMolecule(Molecule* molecule)
     if (m_writeFiles && !m_reduced_file && m_current_filename.length()) {
         molecule->appendXYZFile(m_current_filename);
     }
+    std::cout << "Accept " << molecule->Name() << std::endl;
 }
 
 void ConfScan::RejectMolecule(Molecule* molecule)
 {
     m_rejected_structures.push_back(molecule);
     m_rejected++;
+    std::cout << "Reject " << molecule->Name() << std::endl;
 }
 
 void ConfScan::WriteDotFile(const std::string& filename, const std::string& content)
@@ -863,6 +838,7 @@ void ConfScan::start()
         index++;
     }
 #endif
+    Finalise();
     if (m_analyse) {
         std::ofstream dotfile;
         dotfile.open(m_result_basename + ".dot");
@@ -870,7 +846,6 @@ void ConfScan::start()
         dotfile << m_collective_content;
         dotfile << "}";
     }
-    Finalise();
 }
 
 void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
@@ -908,6 +883,7 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
         }
         if (m_result.size() == 0) {
             AcceptMolecule(mol1);
+            m_first_node = mol1->Name();
             ConfScanThreadNoReorder* thread = addThreadNoreorder(mol1, rmsd);
             threads.push_back(thread);
             p->addThread(thread);
@@ -917,14 +893,9 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
             if (m_analyse) {
                 laststring = mol1->Name();
 
-                //     if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
-                //        m_first_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
                 std::string node = "\"" + mol1->Name() + "\" [shape=box, label=\"" + mol1->Name() + "\"];\n";
                 node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
                 m_nodes.insert(std::pair<double, std::string>(mol1->Energy(), node));
-                //                m_first_content +=
-                //                m_first_content +=
-                //    m_first_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
             }
             continue;
         }
@@ -957,12 +928,12 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
                 if (m_analyse) {
                     if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
                         m_first_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
+
                     std::string node = "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
                     node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
                     m_nodes.insert(std::pair<double, std::string>(t->Reference()->Energy(), node));
-                    //                m_first_content +=
-                    //                m_first_content +=
                     m_first_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
+                    //  m_nodes_list.push_back(t->Reference()->Name());
                 }
                 laststring = t->Reference()->Name();
 
@@ -990,49 +961,16 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
 
 void ConfScan::PrintSetUp(double dLE, double dLI, double dLH)
 {
-    // To be finalised and tested
-
-    /*
-        fmt::print(
-            "'{0:'^{1}}'\n"
-            "'{2: ^{1}}'\n"
-            "'{0: ^{1}}'\n"
-            "*{3: ^{1}}*\n"
-            "*{0: ^{1}}*\n"
-            "*{12: ^{1}}*\n"
-            "*{0: ^{1}}*\n"
-            "*{4: ^{1}}*\n"
-            "*{5: ^{1}}*\n"
-            "*{0: ^{1}}*\n"
-            "*{6: ^{1}}*\n"
-            "*{7: ^{1}}*\n"
-            "*{0: ^{1}}*\n"
-            "*{8: ^{1}}*\n"
-            "*{9: ^{1}}*\n"
-            "*{10: ^{1}}*\n"
-            "*{0: ^{1}}*\n"
-            "*{11: ^{1}}*\n"
-            "*{0: ^{1}}*\n"
-            "*{0:*^{1}}*\n",
-            "", 60,
-            "Thresholds in rotational constants (averaged over Ia, Ib and Ic) and Ripser Image:");
-    */
-
-    std::cout << "" << std::endl
-              << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
-    std::cout << "    Thresholds in rotational constants (averaged over Ia, Ib and Ic): " << std::endl;
-    std::cout << "    Loose Threshold: " << dLI << " MHz" << std::endl;
-    std::cout << "    Tight Threshold: " << m_dTI << " MHz" << std::endl;
-    std::cout << "    Thresholds in difference of ripser images: " << std::endl;
-    std::cout << "    Loose Threshold: " << dLH << " " << std::endl;
-    std::cout << "    Tight Threshold: " << m_dTH << " " << std::endl;
-    std::cout << "    Thresholds for energy differences: " << std::endl;
-    std::cout << "    Loose Threshold: " << dLE << " kJ/mol" << std::endl;
-    std::cout << "    Tight Threshold: " << m_dTE << " kJ/mol" << std::endl;
-
-    std::cout << "" << std::endl
-              << "''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl
-              << std::endl;
+    fmt::print(
+        "```\n"
+        "* Thresholds in Delta I (averaged over Ia, Ib and Ic):\n"
+        "  Loose Threshold: {:.2f} MHz \t Tight Threshold: {:.2f} MHz\n"
+        "* Thresholds Delta H:\n"
+        "  Loose Threshold: {:.2f} \t Tight Threshold: {:.2f}\n"
+        "* Thresholds Delta E:\n"
+        "  Loose Threshold: {:.2f} kJ/mol \t Tight Threshold: {:.2f} kJ/mol\n"
+        "```\n",
+        dLI, m_dTI, dLH, m_dTH, dLE, m_dTE);
 
     if (dLE > 0 || dLH > 0 || dLI > 0) {
         std::ofstream parameters_limit;
@@ -1078,7 +1016,6 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
     rmsd["reorder"] = true;
     rmsd["threads"] = 1;
     rmsd["method"] = m_RMSDmethod;
-    std::cout << rmsd;
     std::vector<Molecule*> cached;
     if (reset)
         cached = m_all_structures;
@@ -1198,31 +1135,33 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
 #endif
                 m_reordered++;
                 if (t->KeepMolecule() == false) {
-                    keep_molecule = false;
                     m_reordered_worked += t->ReorderWorked();
                     m_reordered_reused += t->ReusedWorked();
                     if (AddRules(t->ReorderRule()))
                         rules.push_back(t->ReorderRule());
-                    if (m_analyse) {
-                        if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
-                            m_second_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
+                    if (keep_molecule) {
+                        if (m_analyse) {
+                            if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
+                                m_second_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
 
-                        std::string node = "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
-                        node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
-                        m_nodes.insert(std::pair<double, std::string>(t->Reference()->Energy(), node));
+                            std::string node = "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
+                            node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
+                            m_nodes.insert(std::pair<double, std::string>(t->Reference()->Energy(), node));
 
-                        // m_second_content += "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
-                        // m_second_content += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
-                        m_second_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
-                        laststring = t->Reference()->Name();
-                        auto i = t->getDNNInput();
+                            m_second_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
+                            laststring = t->Reference()->Name();
+                            auto i = t->getDNNInput();
 
-                        parameters_success << t->RMSD() << " " << t->OldRMSD() << " " << i.dE << " " << i.dH << " " << (i.dIa + i.dIb + i.dIc) * third << std::endl;
+                            parameters_success << t->RMSD() << " " << t->OldRMSD() << " " << i.dE << " " << i.dH << " " << (i.dIa + i.dIb + i.dIc) * third << std::endl;
+                            // m_nodes_list.push_back(t->Reference()->Name());
+                        }
+                        writeStatisticFile(t->Reference(), mol1, t->RMSD(), true, t->ReorderRule());
+                        mol1->ApplyReorderRule(t->ReorderRule());
                     }
-                    writeStatisticFile(t->Reference(), mol1, t->RMSD(), true, t->ReorderRule());
-                    mol1->ApplyReorderRule(t->ReorderRule());
-                    break;
-                } else {
+                    keep_molecule = false;
+
+                    // break;
+                } else { /* Only if additional molaign is invoked */
                     if ((m_domolalign > 1) && t->RMSD() < m_domolalign * m_rmsd_threshold) {
                         fmt::print(fg(fmt::color::yellow) | fmt::emphasis::bold, "Starting molalign for more precise reordering ...\n");
                         json molalign = rmsd;
@@ -1275,7 +1214,6 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
     if (m_analyse) {
         parameters_success.close();
     }
-
     p->clear();
     delete p;
 }
@@ -1305,7 +1243,8 @@ void ConfScan::Finalise()
     std::cout << "Efficiency: " << m_skipped_count / double(m_reorder_successfull_count) << std::endl;
 
     int i = 0;
-
+    m_collective_content += "subgraph cluster_bevor {\nrank = same;\nstyle= invis;\n";
+    std::string content_after;
     for (const auto molecule : m_stored_structures) {
         double difference = abs(molecule->Energy() - m_lowest_energy) * 2625.5;
         if (i >= m_maxrank && m_maxrank != -1) {
@@ -1318,6 +1257,17 @@ void ConfScan::Finalise()
             continue;
         }
         molecule->appendXYZFile(m_accepted_filename);
+        if (m_analyse) {
+            std::string content = "\"" + molecule->Name() + "\" [shape=box, label=\"" + molecule->Name() + "\", fontcolor=\"orange\", fontname=\"times-bold\"];\n";
+            content_after += content;
+            if (std::find(m_nodes_list.begin(), m_nodes_list.end(), molecule->Name()) != m_nodes_list.end()) {
+                //    std::cout << molecule->Name() << " inside ";
+            } else {
+                std::string content = "\"" + molecule->Name() + "\";\n";
+                m_collective_content += content;
+                content_after += "\"" + molecule->Name() + "\" -> \"" + m_first_node + "\" [style=invis];\n";
+            }
+        }
         if (m_previously_accepted.size()) {
             molecule->appendXYZFile(m_joined_filename);
         }
@@ -1335,6 +1285,10 @@ void ConfScan::Finalise()
         for (const auto molecule : m_threshold)
             molecule->appendXYZFile(m_threshold_filename);
     }
+    m_collective_content += "}\n";
+    m_collective_content += "\"" + m_first_node + "\";\n";
+    m_collective_content += content_after;
+
     std::cout << m_stored_structures.size() << " structures were kept - of " << m_molecules.size() - m_fail << " total!" << std::endl;
 }
 
@@ -1391,4 +1345,5 @@ void ConfScan::writeStatisticFile(const Molecule* mol1, const Molecule* mol2, do
         mol1->writeXYZFile("A" + std::to_string(m_rejected) + ".xyz");
         mol2->writeXYZFile("B" + std::to_string(m_rejected) + ".xyz");
     }
+    m_nodes_list.push_back(mol1->Name());
 }

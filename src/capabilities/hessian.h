@@ -132,6 +132,7 @@ public:
     Matrix getHessian() const { return m_hessian; }
     void setParameter(const json& parameter) { m_parameter = parameter; }
     Vector Frequencies() { return m_frequencies; }
+    Matrix ProjectHessian(const Matrix& hessian);
 
 private:
     /* Lets have this for all modules */
@@ -157,8 +158,6 @@ private:
 
     void LoadMolecule(const std::string& file);
     void LoadHessian(const std::string& file);
-
-    Matrix ProjectHessian(const Matrix& hessian);
 
     Vector ConvertHessian(Matrix& hessian);
 
