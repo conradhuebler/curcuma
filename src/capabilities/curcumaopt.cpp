@@ -151,6 +151,10 @@ void CurcumaOpt::LoadControlJson()
     m_lambda = Json2KeyWord<double>(m_defaults, "lambda");
     m_diis_hist = Json2KeyWord<int>(m_defaults, "diis_hist");
     m_diis_start = Json2KeyWord<int>(m_defaults, "diis_start");
+    m_mo_scheme = Json2KeyWord<bool>(m_defaults, "mo_scheme");
+    m_mo_scale = Json2KeyWord<double>(m_defaults, "mo_scale");
+    m_mo_homo = Json2KeyWord<int>(m_defaults, "mo_homo");
+    m_mo_lumo = Json2KeyWord<int>(m_defaults, "mo_lumo");
 
     if (m_optimethod == 0) {
         std::cout << "Using external lBFGS module" << std::endl;
@@ -319,7 +323,7 @@ void CurcumaOpt::clear()
 
 double CurcumaOpt::SinglePoint(const Molecule* initial, std::string& output, std::vector<double>& charges)
 {
-    std::string method = Json2KeyWord<std::string>(m_controller, "method");
+    std::string method = m_method; // Json2KeyWord<std::string>(m_controller, "method");
 
     Geometry geometry = initial->getGeometry();
     Molecule tmp(initial);
@@ -348,7 +352,65 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, std::string& output, std
     }
 #endif
     charges = interface.Charges();
+    if (m_mo_scheme) {
+        m_orbital_energies = interface.Energies();
+        m_num_electrons = interface.NumElectrons();
+        WriteMO(m_mo_homo, m_mo_lumo);
+        WriteMOAscii();
+    }
     return energy;
+}
+
+void CurcumaOpt::WriteMO(int n, int m)
+{
+    std::ofstream file(Basename() + ".inc");
+    std::ostream& out = std::cout;
+    auto write_tikz = [&](std::ostream& os) {
+        os << "\\begin{tikzpicture}\n";
+        int highest_occupied_orbital = m_num_electrons / 2 - 1;
+        int start_orbital = std::max(0, highest_occupied_orbital - m);
+        int end_orbital = std::min(static_cast<int>(m_orbital_energies.size()), highest_occupied_orbital + n + 1);
+
+        for (int i = start_orbital; i < end_orbital; ++i) {
+            double energy = m_orbital_energies[i] * m_mo_scale;
+            os << std::fixed << std::setprecision(4);
+            os << "\t\\draw[thick] (1," << energy << ") -- (0.0," << energy << ");\n";
+            os << "\t\\node at (1.1," << energy << ") {\\tiny " << m_orbital_energies[i] << "};\n";
+
+            if (i <= highest_occupied_orbital) {
+                os << "\t\\draw[thick,<-, color=orange] (0.25," << energy << ") -- (0.25," << energy << ");\n";
+                os << "\t\\draw[thick,->, color=orange] (0.75," << energy << ") -- (0.75," << energy << ");\n";
+            }
+        }
+        os << "\t\\node at (0.5,-1) {{" + Basename() + "}};\n";
+        os << "\t\\node at (0.5,-1.25) {\\hphantom{\\tiny (" + Basename() + ")}};\n";
+        os << "\\end{tikzpicture}\n";
+    };
+
+    write_tikz(out);
+    write_tikz(file);
+
+    file.close();
+}
+
+void CurcumaOpt::WriteMOAscii()
+{
+    std::vector<std::string> levels;
+    for (size_t i = 0; i < m_orbital_energies.size(); ++i) {
+        double energy = m_orbital_energies[i] * m_mo_scale;
+        std::string level = std::to_string(m_orbital_energies[i]);
+        level.resize(10, ' '); // Adjust the width for alignment
+        if (i < m_num_electrons / 2) {
+            levels.push_back("|" + std::string(8, '-') + "|" + level + "|<--->|");
+        } else {
+            levels.push_back("|" + std::string(8, '-') + "|" + level + "|     |");
+        }
+    }
+
+    std::reverse(levels.begin(), levels.end()); // Reverse to print from top to bottom
+    for (const auto& level : levels) {
+        std::cout << level << std::endl;
+    }
 }
 
 Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::vector<Molecule>* intermediate, std::vector<double>& charges, int thread, const std::string& basename)

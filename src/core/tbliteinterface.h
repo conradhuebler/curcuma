@@ -40,8 +40,6 @@ static json TBLiteSettings{
     { "alpb_eps", -1 }
 };
 
-class UFF;
-
 class TBLiteInterface {
 public:
     TBLiteInterface(const json& tblitesettings = TBLiteSettings);
@@ -63,6 +61,8 @@ public:
     std::vector<double> Dipole() const;
 
     std::vector<std::vector<double>> BondOrders() const;
+    Vector OrbitalEnergies() const;
+    Vector OrbitalOccupations() const;
 
 private:
     void ApplySolvation();

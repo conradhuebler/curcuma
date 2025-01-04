@@ -149,6 +149,13 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
             this->CalculateFF(gradient, verbose);
         };
 
+    } else if (m_method.compare("eht") == 0) {
+        m_eht = new EHT();
+        m_ecengine = [this](bool gradient, bool verbose) {
+            this->m_eht->CalculateEHT(gradient, verbose);
+            m_orbital_energies = this->m_eht->Energies();
+            m_num_electrons = this->m_eht->NumElectrons();
+        };
     } else { // Fall back to UFF?
         m_uff = new eigenUFF(controller);
     }
@@ -251,7 +258,11 @@ void EnergyCalculator::setMolecule(const Molecule& molecule)
 
         m_forcefield->setParameter(m_parameter);
 
-    } else { // Fall back to UFF?
+    } else if (m_method.compare("eht") == 0) {
+        m_eht->setMolecule(molecule);
+        // m_eht->Initialise();
+    } else {
+        // Fall back to UFF?
     }
     m_initialised = true;
 }
@@ -352,6 +363,10 @@ void EnergyCalculator::CalculateTBlite(bool gradient, bool verbose)
         }
     } else
         m_energy = m_tblite->GFNCalculation(m_gfn);
+
+    m_orbital_energies = m_tblite->OrbitalEnergies();
+    m_orbital_occupation = m_tblite->OrbitalOccupations();
+    m_num_electrons = m_orbital_occupation.sum();
 #endif
 }
 

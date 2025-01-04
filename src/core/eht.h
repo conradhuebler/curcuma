@@ -80,7 +80,14 @@ public:
     void setMolecule(const Molecule& molecule) { m_molecule = molecule; }
     void start();
 
+    Matrix MolecularOrbitals() const { return m_mo; }
+    Vector Energies() const { return m_energies; }
+    void CalculateEHT(bool gradient, bool verbose = false);
+    int NumElectrons() const { return m_num_electrons; }
+
 private:
+    std::vector<STO_6G> MakeBasis();
+
     Molecule m_molecule;
     /* Some integrals */
     /* s - s - sigma bond */
@@ -97,5 +104,11 @@ private:
 
     Matrix MakeOverlap(const std::vector<STO_6G>& basisset);
     Matrix MakeH(const Matrix& S, const std::vector<STO_6G>& basisset);
+
     int m_num_electrons = 0;
+
+    Matrix m_mo;
+    Vector m_energies;
+
+    bool m_verbose = false;
 };

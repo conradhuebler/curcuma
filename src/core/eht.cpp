@@ -31,14 +31,29 @@
 
 #include "eht.h"
 
+#include <iomanip>
+
 EHT::EHT()
 {
 }
 
-void EHT::start()
+void EHT::CalculateEHT(bool gradient, bool verbose)
 {
-    m_molecule.print_geom();
+    m_verbose = verbose;
+    if (gradient) {
+        std::cout << "EHT does not support gradients." << std::endl;
+    }
 
+    if (m_molecule.AtomCount() == 0) {
+        std::cout << "No molecule set." << std::endl;
+        return;
+    }
+
+    start();
+}
+
+std::vector<STO_6G> EHT::MakeBasis()
+{
     std::vector<STO_6G> basisset;
     for (int i = 0; i < m_molecule.Atoms().size(); ++i) {
         if (m_molecule.Atom(i).first == 1) {
@@ -148,14 +163,23 @@ void EHT::start()
             std::cout << "O" << std::endl;
         }
     }
-    std::cout << basisset.size() << std::endl;
+    return basisset;
+}
+
+void EHT::start()
+{
+    m_molecule.print_geom();
+    auto basisset = MakeBasis();
+    if (m_verbose)
+        std::cout << basisset.size() << std::endl;
     Matrix S = MakeOverlap(basisset);
     // std::cout << S << std::endl;
     Matrix H = MakeH(S, basisset);
-    std::cout << std::endl
-              << std::endl;
-    // std::cout << H << std::endl;
-
+    if (m_verbose) {
+        std::cout << std::endl
+                  << std::endl;
+        // std::cout << H << std::endl;
+    }
     Matrix S_1_2 = Matrix::Zero(basisset.size(), basisset.size());
     Eigen::JacobiSVD<Matrix> svd(S, Eigen::ComputeThinU | Eigen::ComputeThinV);
 
@@ -171,14 +195,17 @@ void EHT::start()
     Matrix F = S_1_2.transpose() * H * S_1_2;
     diag_F.compute(F);
     std::cout << std::endl;
-    // std::cout << diag_F.eigenvalues() <<std::endl;
+    m_energies = diag_F.eigenvalues();
+    m_mo = diag_F.eigenvectors();
 
     double energy = 0;
     for (int i = 0; i < m_num_electrons / 2; ++i) {
         energy += diag_F.eigenvalues()(i) * 2;
-        std::cout << diag_F.eigenvalues()(i) << " 2" << std::endl;
+        if (m_verbose)
+            std::cout << diag_F.eigenvalues()(i) << " 2" << std::endl;
     }
     std::cout << "Total electronic energy = " << energy << " Eh." << std::endl;
+
     // std::cout << diag_F.eigenvalues().sum();
 }
 

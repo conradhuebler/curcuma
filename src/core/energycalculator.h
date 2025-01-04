@@ -37,6 +37,7 @@
 #include "src/core/dftd4interface.h"
 #endif
 
+#include "src/core/eht.h"
 #include "src/core/eigen_uff.h"
 #include "src/core/forcefield.h"
 #include "src/core/qmdff.h"
@@ -115,10 +116,14 @@ public:
     }
 
     inline json Parameter() const { return m_parameter; }
+    Vector Energies() const { return m_orbital_energies; }
+    Vector OrbitalOccuptations() const { return m_orbital_occupation; }
+
     std::vector<double> Charges() const;
     Position Dipole() const;
 
     std::vector<std::vector<double>> BondOrders() const;
+    int NumElectrons() const { return m_num_electrons; }
 
 private:
     void InitialiseUFF();
@@ -161,6 +166,7 @@ private:
     eigenUFF* m_uff = NULL;
     QMDFF* m_qmdff = NULL;
     ForceField* m_forcefield = NULL;
+    EHT* m_eht = NULL;
     StringList m_uff_methods = { "fuff" };
     StringList m_ff_methods = { "uff", "uff-d3", "qmdff" };
     StringList m_qmdff_method = { "fqmdff" };
@@ -168,17 +174,20 @@ private:
     StringList m_xtb_methods = { "gfnff", "xtb-gfn1", "xtb-gfn2" };
     StringList m_d3_methods = { "d3" };
     StringList m_d4_methods = { "d4" };
+
     std::function<void(bool, bool)> m_ecengine;
     std::function<std::vector<double>()> m_charges;
     std::function<Position()> m_dipole;
     std::function<std::vector<std::vector<double>>()> m_bonds;
     json m_parameter;
     std::string m_method, m_param_file;
-    Matrix m_geometry, m_gradient;
+    Matrix m_geometry, m_gradient, m_molecular_orbitals;
+    Vector m_orbital_energies, m_orbital_occupation;
+
     double m_energy;
     double *m_coord, *m_grad;
 
-    int m_atoms;
+    int m_atoms, m_num_electrons = 0;
     int m_gfn = 2;
     int* m_atom_type;
 

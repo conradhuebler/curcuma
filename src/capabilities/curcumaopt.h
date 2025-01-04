@@ -66,7 +66,12 @@ static json CurcumaOptJson{
     { "inithess", false },
     { "lambda", 0.1 },
     { "diis_hist", 5 },
-    { "diis_start", 5 }
+    { "diis_start", 5 },
+    { "mo_scheme", false },
+    { "mo_scale", 1.0 },
+    { "mo_homo", -1 },
+    { "mo_lumo", -1 }
+
 };
 
 const json OptJsonPrivate{
@@ -230,6 +235,8 @@ public:
     double SinglePoint(const Molecule* initial, std::string& output, std::vector<double>& charges);
 
     void clear();
+    void WriteMO(int n, int m);
+    void WriteMOAscii();
 
 private:
     /* Lets have this for all modules */
@@ -254,11 +261,14 @@ private:
     Molecule m_molecule;
     json m_parameters;
     std::vector<Molecule> m_molecules;
-    bool m_file_set = false, m_mol_set = false, m_mols_set = false, m_writeXYZ = true, m_printoutput = true, m_singlepoint = false, m_fusion = false, m_optH = false, m_inithess = false;
-    int m_hessian = 0;
+    Vector m_orbital_energies;
+    Matrix m_molecular_orbitals;
+
+    bool m_file_set = false, m_mol_set = false, m_mols_set = false, m_writeXYZ = true, m_printoutput = true, m_singlepoint = false, m_fusion = false, m_optH = false, m_inithess = false, m_mo_scheme = false;
+    int m_hessian = 0, m_num_electrons = 0, m_mo_homo = -1, m_mo_lumo = -1;
     int m_threads = 1;
     int m_ConvCount = 1;
-    double m_dE = 0.1, m_dRMSD = 0.01, m_maxenergy = 100, m_GradNorm = 1e-5, m_lambda = 0.1;
+    double m_dE = 0.1, m_dRMSD = 0.01, m_maxenergy = 100, m_GradNorm = 1e-5, m_lambda = 0.1, m_mo_scale = 1.0;
     int m_charge = 0, m_spin = 0;
     int m_serial = false;
     int m_maxiter = 100, m_maxrise = 10, m_optimethod = 1, m_diis_hist = 10, m_diis_start = 10;

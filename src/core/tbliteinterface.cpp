@@ -352,6 +352,38 @@ std::vector<std::vector<double>> TBLiteInterface::BondOrders() const
     return bond_orders;
 }
 
+Vector TBLiteInterface::OrbitalEnergies() const
+{
+    int num_orbitals;
+    tblite_get_result_number_of_orbitals(m_error, m_tblite_res, &num_orbitals);
+
+    Vector orbital_energies(num_orbitals);
+    std::vector<double> energies(num_orbitals);
+    tblite_get_result_orbital_energies(m_error, m_tblite_res, energies.data());
+
+    for (int i = 0; i < num_orbitals; ++i) {
+        orbital_energies[i] = energies[i];
+    }
+
+    return orbital_energies;
+}
+
+Vector TBLiteInterface::OrbitalOccupations() const
+{
+    int num_orbitals;
+    tblite_get_result_number_of_orbitals(m_error, m_tblite_res, &num_orbitals);
+
+    Vector orbital_occupations(num_orbitals);
+    std::vector<double> occupations(num_orbitals);
+    tblite_get_result_orbital_occupations(m_error, m_tblite_res, occupations.data());
+
+    for (int i = 0; i < num_orbitals; ++i) {
+        orbital_occupations[i] = occupations[i];
+    }
+
+    return orbital_occupations;
+}
+
 void TBLiteInterface::tbliteError()
 {
     char message[512];

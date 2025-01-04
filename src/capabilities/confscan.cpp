@@ -1113,8 +1113,9 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
                     threads[i]->addReorderRule(rules[j]);
             }
 
-            if (m_RMSDmethod.compare("molalign") != 0 || m_threads == 1) {
-                p->StaticPool();
+            if (m_RMSDmethod.compare("molalign") != 0 || m_threads != 1) {
+                if (m_threads > 2)
+                    p->StaticPool();
                 p->StartAndWait();
             } else {
                 for (auto* t : threads) {
