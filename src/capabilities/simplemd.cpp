@@ -476,7 +476,7 @@ bool SimpleMD::Initialise()
 
     m_molecule.setCharge(m_charge);
     m_molecule.setSpin(m_spin);
-    m_interface->setMolecule(m_molecule);
+    m_interface->setMolecule(m_molecule.getMolInfo());
 
     if (m_writeUnique) {
         json rmsdtraj = RMSDTrajJson;
@@ -2499,7 +2499,7 @@ void SimpleMD::PrintMatrix(const double* matrix) const
 double SimpleMD::CleanEnergy(double* grad)
 {
     EnergyCalculator interface(m_method, m_defaults);
-    interface.setMolecule(m_molecule);
+    interface.setMolecule(m_molecule.getMolInfo());
     interface.updateGeometry(m_current_geometry);
 
     const double Energy = interface.CalculateEnergy(true);

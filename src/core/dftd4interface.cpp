@@ -22,10 +22,10 @@
 #include "dftd_econv.h"
 #include "dftd_geometry.h"
 
+#include "src/core/interface/abstract_interface.h"
+
 #include "src/core/global.h"
 #include "src/tools/general.h"
-
-#include "src/core/molecule.h"
 
 #include <iostream>
 #include <math.h>
@@ -81,12 +81,12 @@ void DFTD4Interface::UpdateParameters(const json& controller)
     PrintParameter();
 }
 
-bool DFTD4Interface::InitialiseMolecule(const Molecule& molecule, double factor)
+bool DFTD4Interface::InitialiseMolecule(const Mol& mol, double factor)
 {
-    m_mol.GetMemory(molecule.AtomCount());
-    for (int i = 0; i < molecule.AtomCount(); ++i) {
-        std::pair<int, Position> atom = molecule.Atom(i);
-        m_mol.UpdateAtom(i, atom.second(0) * factor, atom.second(1) * factor, atom.second(2) * factor, atom.first);
+    m_mol.GetMemory(mol.m_number_atoms);
+    for (int i = 0; i < mol.m_number_atoms; ++i) {
+        int element = mol.m_atoms[i];
+        m_mol.UpdateAtom(i, mol.m_geometry(i, 0) * factor, mol.m_geometry(i, 1) * factor, mol.m_geometry(i, 2), element);
     }
     return true;
 }
@@ -100,13 +100,13 @@ bool DFTD4Interface::InitialiseMolecule(const std::vector<int>& atomtype)
     return true;
 }
 
-double DFTD4Interface::DFTD4Calculation(double* grad)
+double DFTD4Interface::Calculation(double* gradient, bool verbose)
 {
     double energy = 0;
     dftd4::TCutoff cutoff;
     dftd4::TD4Model d4;
     // exit(0);
-    dftd4::get_dispersion(m_mol, m_charge, d4, m_par, cutoff, energy, grad);
+    dftd4::get_dispersion(m_mol, m_charge, d4, m_par, cutoff, energy, gradient);
     return energy;
 }
 

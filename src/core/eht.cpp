@@ -37,26 +37,11 @@ EHT::EHT()
 {
 }
 
-void EHT::CalculateEHT(bool gradient, bool verbose)
-{
-    m_verbose = verbose;
-    if (gradient) {
-        std::cout << "EHT does not support gradients." << std::endl;
-    }
-
-    if (m_molecule.AtomCount() == 0) {
-        std::cout << "No molecule set." << std::endl;
-        return;
-    }
-
-    start();
-}
-
 std::vector<STO_6G> EHT::MakeBasis()
 {
     std::vector<STO_6G> basisset;
-    for (int i = 0; i < m_molecule.Atoms().size(); ++i) {
-        if (m_molecule.Atom(i).first == 1) {
+    for (int i = 0; i < m_mol.m_number_atoms; ++i) {
+        if (m_mol.m_atoms[i] == 1) {
             m_num_electrons += 1;
             STO_6G b;
             b.index = i;
@@ -68,7 +53,7 @@ std::vector<STO_6G> EHT::MakeBasis()
             b.e = -0.5;
             basisset.push_back(b);
             std::cout << "H" << std::endl;
-        } else if (m_molecule.Atom(i).first == 6) {
+        } else if (m_mol.m_atoms[i] == 6) {
             m_num_electrons += 4;
 
             STO_6G b;
@@ -99,7 +84,7 @@ std::vector<STO_6G> EHT::MakeBasis()
             b.sym = "py";
             basisset.push_back(b);
             std::cout << "C" << std::endl;
-        } else if (m_molecule.Atom(i).first == 8) {
+        } else if (m_mol.m_atoms[i] == 8) {
             m_num_electrons += 6;
 
             STO_6G b;
@@ -130,7 +115,7 @@ std::vector<STO_6G> EHT::MakeBasis()
             b.sym = "py";
             basisset.push_back(b);
             std::cout << "O" << std::endl;
-        } else if (m_molecule.Atom(i).first == 7) {
+        } else if (m_mol.m_atoms[i] == 7) {
             m_num_electrons += 5;
 
             STO_6G b;
@@ -166,9 +151,26 @@ std::vector<STO_6G> EHT::MakeBasis()
     return basisset;
 }
 
-void EHT::start()
+void EHT::Initialise()
 {
-    m_molecule.print_geom();
+    m_num_electrons = 0;
+    m_mo = Matrix::Zero(m_mol.m_number_atoms, m_mol.m_number_atoms);
+    m_energies = Vector::Zero(m_mol.m_number_atoms);
+}
+
+void EHT::Calculate(double* gradient, bool verbose)
+{
+    m_verbose = verbose;
+    if (gradient) {
+        std::cout << "EHT does not support gradients." << std::endl;
+    }
+
+    if (m_mol.m_number_atoms == 0) {
+        std::cout << "No molecule set." << std::endl;
+        return;
+    }
+
+    // m_molecule.print_geom();
     auto basisset = MakeBasis();
     if (m_verbose)
         std::cout << basisset.size() << std::endl;
@@ -217,9 +219,9 @@ Matrix EHT::MakeOverlap(const std::vector<STO_6G>& basisset)
 
     for (int i = 0; i < basisset.size(); ++i) {
         STO_6G bi = basisset[i];
-        Vector pi = m_molecule.Atom(bi.index).second;
+        Vector pi = m_mol.m_geometry.row(bi.index); //   m_molecule.Atom(bi.index).second;
         STO_6G bj = basisset[i];
-        Vector pj = m_molecule.Atom(bi.index).second;
+        Vector pj = m_mol.m_geometry.row(bi.index); //.second;
         double xx = 0;
         if (bi.sym.compare("s") == 0 && bj.sym.compare("s") == 0) {
             for (int c1 = 0; c1 < 6; ++c1)
@@ -243,10 +245,10 @@ Matrix EHT::MakeOverlap(const std::vector<STO_6G>& basisset)
 
     for (int i = 0; i < basisset.size(); ++i) {
         STO_6G bi = basisset[i];
-        Vector pi = m_molecule.Atom(bi.index).second;
+        Vector pi = m_mol.m_geometry.row(bi.index);
         for (int j = i; j < basisset.size(); ++j) {
             STO_6G bj = basisset[j];
-            Vector pj = m_molecule.Atom(bj.index).second;
+            Vector pj = m_mol.m_geometry.row(bj.index);
 
             double xx = 0;
 
@@ -345,10 +347,10 @@ Matrix EHT::MakeH(const Matrix& S, const std::vector<STO_6G>& basisset)
     Matrix H = Eigen::MatrixXd::Zero(basisset.size(), basisset.size());
     for (int i = 0; i < basisset.size(); ++i) {
         STO_6G bi = basisset[i];
-        Vector pi = m_molecule.Atom(bi.index).second;
+        Vector pi = m_mol.m_geometry.row(bi.index);
         for (int j = 0; j < basisset.size(); ++j) {
             STO_6G bj = basisset[j];
-            Vector pj = m_molecule.Atom(bj.index).second;
+            Vector pj = m_mol.m_geometry.row(bj.index);
             if (i == j)
                 H(i, j) = bi.e;
             else {

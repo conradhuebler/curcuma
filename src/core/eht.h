@@ -19,7 +19,6 @@
 
 #pragma once
 #include "src/core/global.h"
-#include "src/core/molecule.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
 
@@ -77,18 +76,18 @@ class EHT {
 public:
     EHT();
 
-    void setMolecule(const Molecule& molecule) { m_molecule = molecule; }
-    void start();
+    void setMolecule(const Mol& mol) { m_mol = mol; }
+    void Initialise();
+    void Calculate(double* gradient = nullptr, bool verbose = false);
 
     Matrix MolecularOrbitals() const { return m_mo; }
     Vector Energies() const { return m_energies; }
-    void CalculateEHT(bool gradient, bool verbose = false);
     int NumElectrons() const { return m_num_electrons; }
 
 private:
     std::vector<STO_6G> MakeBasis();
 
-    Molecule m_molecule;
+    Mol m_mol;
     /* Some integrals */
     /* s - s - sigma bond */
     double ss(double x1, double x2, double y1, double y2, double z1, double z2, double alpha1, double alpha2, double c1, double c2);

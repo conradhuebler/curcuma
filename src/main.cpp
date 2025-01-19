@@ -889,8 +889,8 @@ int main(int argc, char **argv) {
                 Molecule mol1 = file.Next();
 
                 EHT eht;
-                eht.setMolecule(mol1);
-                eht.start();
+                eht.setMolecule(mol1.getMolInfo());
+                eht.Calculate();
             }
 
         } else if (strcmp(argv[1], "-gyration") == 0) {
@@ -937,7 +937,7 @@ int main(int argc, char **argv) {
                 Molecule mol = file.Next(); // load Molecule
                 mol.Center(false); //sets the Centroid to the origin
                 EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb
-                interface.setMolecule(mol); // set molecule
+                interface.setMolecule(mol.getMolInfo()); // set molecule
                 interface.CalculateEnergy(false, true); // calc energy and Wave function
                 mol.setPartialCharges(interface.Charges()); // calc partial Charges and set it to mol
                 mol.setDipole(interface.Dipole() * au); //calc dipole moments and set it to mol in eA
@@ -1022,7 +1022,7 @@ int main(int argc, char **argv) {
                 mol = file.Next(); // load Molecule
                 mol.Center(false); //sets the Centroid to the origin
                 EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb
-                interface.setMolecule(mol); // set molecule
+                interface.setMolecule(mol.getMolInfo()); // set molecule
                 interface.CalculateEnergy(false, true); // calc energy and Wave function
                 mol.setPartialCharges(interface.Charges()); // calc partial Charges and set it to mol
                 mol.setDipole(interface.Dipole() * au); //calc dipole moments and set it to mol in eA

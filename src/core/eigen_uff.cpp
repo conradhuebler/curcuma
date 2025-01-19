@@ -1777,14 +1777,14 @@ double eigenUFF::Calculate(bool grd, bool verbose)
     if (m_use_d3) {
         if (grd) {
             double grad[3 * m_atom_types.size()];
-            d3_energy = m_d3->DFTD3Calculation(grad);
+            d3_energy = m_d3->Calculation(grad);
             for (int i = 0; i < m_atom_types.size(); ++i) {
                 m_gradient(i, 0) += grad[3 * i + 0] * au;
                 m_gradient(i, 1) += grad[3 * i + 1] * au;
                 m_gradient(i, 2) += grad[3 * i + 2] * au;
             }
         } else
-            d3_energy = m_d3->DFTD3Calculation(0);
+            d3_energy = m_d3->Calculation(0);
     }
 #endif
 

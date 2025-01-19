@@ -229,10 +229,10 @@ public:
     void setSinglePoint(bool sp) { m_singlepoint = sp; }
     inline const std::vector<Molecule>* Molecules() const { return &m_molecules; }
 
-    Molecule LBFGSOptimise(Molecule* host, std::string& output, std::vector<Molecule>* intermediate, std::vector<double>& charges, int thread = -1, const std::string& basename = "base");
-    Molecule GPTLBFGS(Molecule* host, std::string& output, std::vector<Molecule>* intermediate, std::vector<double>& charges, int thread = -1, const std::string& basename = "base");
+    Molecule LBFGSOptimise(Molecule* host, std::string& output, std::vector<Molecule>* intermediate, Vector& charges, int thread = -1, const std::string& basename = "base");
+    Molecule GPTLBFGS(Molecule* host, std::string& output, std::vector<Molecule>* intermediate, Vector& charges, int thread = -1, const std::string& basename = "base");
 
-    double SinglePoint(const Molecule* initial, std::string& output, std::vector<double>& charges);
+    double SinglePoint(const Molecule* initial, std::string& output, Vector& charges);
 
     void clear();
     void WriteMO(int n, int m);

@@ -1240,7 +1240,7 @@ double QMDFF::Calculate(bool grd, bool verbose)
         if (grd) {
             double grad[3 * m_atom_types.size()];
 #ifdef USE_D3
-            d3_energy = m_d3->DFTD3Calculation(grad);
+            d3_energy = m_d3->Calculation(grad);
 #endif
 
             for (int i = 0; i < m_atom_types.size(); ++i) {
@@ -1256,7 +1256,7 @@ double QMDFF::Calculate(bool grd, bool verbose)
             }
         } else
 #ifdef USE_D3
-            d3_energy = m_d3->DFTD3Calculation(0);
+            d3_energy = m_d3->Calculation(0);
 #endif
 
         energy += m_final_factor * m_h4_scaling * energy_h4 + m_final_factor * m_hh_scaling * energy_hh + d3_energy;

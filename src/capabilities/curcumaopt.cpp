@@ -25,7 +25,7 @@
 #include "src/core/elements.h"
 #include "src/core/energycalculator.h"
 #include "src/core/fileiterator.h"
-#include "src/core/global.h" 1
+#include "src/core/global.h"
 #include "src/core/molecule.h"
 
 #include <LBFGS.h>
@@ -80,13 +80,13 @@ void LBFGSInterface::setMolecule(const Molecule* molecule)
 int SPThread::execute()
 {
     auto start = std::chrono::system_clock::now();
-    std::vector<double> charges;
-
+    Vector charges;
     double energy = m_curcumaOpt->SinglePoint(&m_molecule, m_result, charges);
+
     m_final = m_molecule;
     m_final.setEnergy(energy);
     m_scf["e0"] = energy;
-    if (charges.size())
+    if (charges.rows())
         m_scf["charges"] = Tools::DoubleVector2String(charges);
     auto end = std::chrono::system_clock::now();
     m_result = fmt::format("Single Point Energy = {0} Eh ({1} secs)\n", energy, std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
@@ -95,7 +95,7 @@ int SPThread::execute()
 
 int OptThread::execute()
 {
-    std::vector<double> charges;
+    Vector charges;
     if (m_optimethod == 0)
         m_final = m_curcumaOpt->LBFGSOptimise(&m_molecule, m_result, &m_intermediate, charges, ThreadId(), Basename() + ".opt.trj");
     else
@@ -192,7 +192,7 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
     std::string method = Json2KeyWord<std::string>(m_defaults, "method");
 
     auto iter = molecules.begin();
-    interface.setMolecule(*iter);
+    interface.setMolecule(iter->getMolInfo());
 
     while (iter != molecules.end()) {
         if (iter == molecules.end())
@@ -321,7 +321,7 @@ void CurcumaOpt::clear()
     m_molecules.clear();
 }
 
-double CurcumaOpt::SinglePoint(const Molecule* initial, std::string& output, std::vector<double>& charges)
+double CurcumaOpt::SinglePoint(const Molecule* initial, std::string& output, Vector& charges)
 {
     std::string method = m_method; // Json2KeyWord<std::string>(m_controller, "method");
 
@@ -337,9 +337,8 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, std::string& output, std
     }
 
     EnergyCalculator interface(method, m_controller);
-    interface.setMolecule(*initial);
+    interface.setMolecule(initial->getMolInfo());
     json param = interface.Parameter();
-
     double energy = interface.CalculateEnergy(true, true);
     double store = 0;
 #ifdef USE_TBLITE
@@ -413,7 +412,7 @@ void CurcumaOpt::WriteMOAscii()
     }
 }
 
-Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::vector<Molecule>* intermediate, std::vector<double>& charges, int thread, const std::string& basename)
+Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::vector<Molecule>* intermediate, Vector& charges, int thread, const std::string& basename)
 {
     std::vector<int> constrain;
     Geometry geometry = initial->getGeometry();
@@ -432,7 +431,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
 
     EnergyCalculator interface(m_method, m_controller);
 
-    interface.setMolecule(*initial);
+    interface.setMolecule(initial->getMolInfo());
     m_parameters = interface.Parameter();
     double final_energy = interface.CalculateEnergy(true);
     initial->setEnergy(final_energy);
@@ -562,7 +561,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
             }
         }
 
-        if ((iteration % m_singlepoint == 0 && perform_optimisation) || fun.isError()) {
+        if ((perform_optimisation) || fun.isError()) {
             parameter = fun.Parameter();
 
             for (int i = 0; i < atoms_count; ++i) {
@@ -677,7 +676,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
     return previous;
 }
 
-Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vector<Molecule>* intermediate, std::vector<double>& charges, int thread, const std::string& basename)
+Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vector<Molecule>* intermediate, Vector& charges, int thread, const std::string& basename)
 {
     std::vector<int> constrain;
     Geometry geometry = initial->getGeometry();
@@ -696,7 +695,7 @@ Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vecto
 
     EnergyCalculator interface(m_method, m_controller);
 
-    interface.setMolecule(*initial);
+    interface.setMolecule(initial->getMolInfo());
     m_parameters = interface.Parameter();
     double final_energy = interface.CalculateEnergy(true);
     initial->setEnergy(final_energy);

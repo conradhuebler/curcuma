@@ -1,6 +1,6 @@
 /*
  * < C++ XTB and tblite Interface >
- * Copyright (C) 2020 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -22,13 +22,9 @@
 #include "tblite/container.h"
 #include "tblite/context.h"
 #include "tblite/error.h"
-
 #endif
 
 #include "src/core/global.h"
-#include "src/tools/general.h"
-
-#include "src/core/molecule.h"
 
 #include <iostream>
 #include <math.h>
@@ -47,15 +43,11 @@ TBLiteInterface::TBLiteInterface(const json& tblitesettings)
     m_verbose = m_tblitesettings["tb_verbose"];
     std::string guess = m_tblitesettings["tb_guess"];
 
-    m_cpcm_eps = m_tblitesettings["cpcm_eps"];
-    m_alpb_eps = m_tblitesettings["alpb_eps"];
+    m_solv_eps = m_tblitesettings["solv_eps"];
 
-    std::string tmp = m_tblitesettings["cpcm_solv"];
-    m_cpcm = tmp.compare("none") != 0;
-    m_cpcm_solv = new char[tmp.length() + 1];
-    strcpy(m_cpcm_solv, tmp.c_str());
+    std::string tmp = m_tblitesettings["solv"];
 
-    tmp = m_tblitesettings["alpb_solv"];
+    tmp = m_tblitesettings["solv"];
     m_alpb = tmp.compare("none") != 0;
 
     m_alpb_solv = new char[tmp.length() + 1];
@@ -88,45 +80,43 @@ TBLiteInterface::~TBLiteInterface()
     delete[] m_attyp;
 }
 
-bool TBLiteInterface::InitialiseMolecule(const Molecule& molecule)
+bool TBLiteInterface::InitialiseMolecule(const Mol& mol)
 {
     if (m_initialised)
-        UpdateMolecule(molecule);
-    m_atomcount = molecule.AtomCount();
+        UpdateMolecule(mol);
+    m_atomcount = mol.m_number_atoms;
     m_attyp = new int[m_atomcount];
     m_coord = new double[3 * m_atomcount];
 
-    std::vector<int> atoms = molecule.Atoms();
+    std::vector<int> atoms = mol.m_atoms; // molecule.Atoms();
 
     for (int i = 0; i < m_atomcount; ++i) {
-        std::pair<int, Position> atom = molecule.Atom(i);
-        m_coord[3 * i + 0] = atom.second(0) / au;
-        m_coord[3 * i + 1] = atom.second(1) / au;
-        m_coord[3 * i + 2] = atom.second(2) / au;
+        m_coord[3 * i + 0] = mol.m_geometry(i, 0) / au;
+        m_coord[3 * i + 1] = mol.m_geometry(i, 1) / au;
+        m_coord[3 * i + 2] = mol.m_geometry(i, 2) / au;
         m_attyp[i] = atoms[i];
     }
-    bool init = InitialiseMolecule(m_attyp, m_coord, m_atomcount, molecule.Charge(), molecule.Spin());
-    return init;
+    return InitialiseMolecule(m_attyp, m_coord, m_atomcount, mol.m_charge, mol.m_spin);
 }
 
-bool TBLiteInterface::InitialiseMolecule(const Molecule* molecule)
+bool TBLiteInterface::InitialiseMolecule(const Mol* mol)
 {
-    if (m_initialised)
-        UpdateMolecule(molecule);
-    m_atomcount = molecule->AtomCount();
+    if (m_initialised) {
+        return UpdateMolecule(mol);
+    }
+    m_atomcount = mol->m_number_atoms;
 
-    std::vector<int> atoms = molecule->Atoms();
+    std::vector<int> atoms = mol->m_atoms;
     m_attyp = new int[m_atomcount];
     m_coord = new double[3 * m_atomcount];
 
     for (int i = 0; i < m_atomcount; ++i) {
-        std::pair<int, Position> atom = molecule->Atom(i);
-        m_coord[3 * i + 0] = atom.second(0) / au;
-        m_coord[3 * i + 1] = atom.second(1) / au;
-        m_coord[3 * i + 2] = atom.second(2) / au;
+        m_coord[3 * i + 0] = mol->m_geometry(i, 0) / au;
+        m_coord[3 * i + 1] = mol->m_geometry(i, 1) / au;
+        m_coord[3 * i + 2] = mol->m_geometry(i, 2) / au;
         m_attyp[i] = atoms[i];
     }
-    return InitialiseMolecule(m_attyp, m_coord, m_atomcount, molecule->Charge(), molecule->Spin());
+    return InitialiseMolecule();
 }
 
 bool TBLiteInterface::InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge, const int spin)
@@ -134,112 +124,159 @@ bool TBLiteInterface::InitialiseMolecule(const int* attyp, const double* coord, 
     if (m_initialised)
         UpdateMolecule(coord);
 
-    m_tblite_mol = tblite_new_structure(m_error, natoms, attyp, coord, &charge, &spin, NULL, NULL);
+    m_atomcount = natoms;
+    m_charge = charge;
+    m_spin = spin;
 
-    m_initialised = true;
-    m_molecule.Initialise(attyp, coord, natoms, charge, spin);
+    for (int i = 0; i < m_atomcount; ++i) {
+        m_coord[3 * i + 0] = coord[3 * i + 0] / au;
+        m_coord[3 * i + 1] = coord[3 * i + 1] / au;
+        m_coord[3 * i + 2] = coord[3 * i + 2] / au;
+        m_attyp[i] = attyp[i];
+    }
+    InitialiseMolecule();
 
-    return true;
+    return m_initialised;
 }
 
-bool TBLiteInterface::UpdateMolecule(const Molecule& molecule)
+bool TBLiteInterface::InitialiseMolecule()
 {
-    m_atomcount = molecule.AtomCount();
-    for (int i = 0; i < m_atomcount; ++i) {
-        std::pair<int, Position> atom = molecule.Atom(i);
-        m_coord[3 * i + 0] = atom.second(0) / au;
-        m_coord[3 * i + 1] = atom.second(1) / au;
-        m_coord[3 * i + 2] = atom.second(2) / au;
+    if (m_initialised) {
+        return UpdateMolecule(m_coord);
     }
-    return UpdateMolecule(m_coord);
+
+    double charge = m_charge;
+    int spin = m_spin;
+    m_tblite_mol = tblite_new_structure(m_error, m_atomcount, m_attyp, m_coord, &charge, &spin, NULL, NULL);
+    if (tblite_check_error(m_error)) {
+        tbliteError();
+        return false;
+    }
+    m_initialised = true;
+    return m_initialised;
+}
+
+bool TBLiteInterface::UpdateMolecule(const Mol& mol)
+{
+    for (int i = 0; i < m_atomcount; ++i) {
+        m_coord[3 * i + 0] = mol.m_geometry(i, 0) / au;
+        m_coord[3 * i + 1] = mol.m_geometry(i, 1) / au;
+        m_coord[3 * i + 2] = mol.m_geometry(i, 2) / au;
+    }
+    return UpdateMolecule();
+}
+
+bool TBLiteInterface::UpdateMolecule(const Mol* mol)
+{
+    for (int i = 0; i < m_atomcount; ++i) {
+        m_coord[3 * i + 0] = mol->m_geometry(i, 0) / au;
+        m_coord[3 * i + 1] = mol->m_geometry(i, 1) / au;
+        m_coord[3 * i + 2] = mol->m_geometry(i, 2) / au;
+    }
+    return UpdateMolecule();
 }
 
 bool TBLiteInterface::UpdateMolecule(const double* coord)
 {
-    tblite_update_structure_geometry(m_error, m_tblite_mol, coord, NULL);
+    for (int i = 0; i < m_atomcount; ++i) {
+        m_coord[3 * i + 0] = coord[3 * i + 0] / au;
+        m_coord[3 * i + 1] = coord[3 * i + 1] / au;
+        m_coord[3 * i + 2] = coord[3 * i + 2] / au;
+    }
+    return UpdateMolecule();
+}
+
+bool TBLiteInterface::UpdateMolecule(const Matrix& geometry)
+{
+    for (int i = 0; i < m_atomcount; ++i) {
+        m_coord[3 * i + 0] = geometry(i, 0) / au;
+        m_coord[3 * i + 1] = geometry(i, 1) / au;
+        m_coord[3 * i + 2] = geometry(i, 2) / au;
+    }
+    return UpdateMolecule();
+}
+
+bool TBLiteInterface::UpdateMolecule()
+{
+    tblite_update_structure_geometry(m_error, m_tblite_mol, m_coord, NULL);
+    if (tblite_check_error(m_error)) {
+        tbliteError();
+        return false;
+    }
     return true;
+}
+
+void TBLiteInterface::clear()
+{
+    tblite_delete_structure(&m_tblite_mol);
+    m_initialised = false;
 }
 
 void TBLiteInterface::ApplySolvation()
 {
-    int count = ((m_cpcm + m_cpcm_eps) != -1) + ((m_alpb + m_alpb_eps) != -1);
+#pragma message("TBLiteInterface::ApplySolvation() is not fully implemented yet")
+    int count = ((m_cpcm) != -1) + ((m_alpb) != -1);
 
-    if (count == 1) {
-        if (m_cpcm && m_cpcm_eps == -1) {
-            m_tb_cont = tblite_new_cpcm_solvation_solvent(m_ctx, m_tblite_mol, m_tblite_calc, m_cpcm_solv);
-            if (tblite_check_context(m_ctx)) {
-                tbliteError();
-                tbliteContextError();
-                std::cout << "Error during CPCM calculation, ...  Retry with increased verbosity" << std::endl;
-                tblite_set_context_verbosity(m_ctx, m_verbose + 1);
-                tblite_delete_container(&m_tb_cont);
-                m_tb_cont = tblite_new_cpcm_solvation_solvent(m_ctx, m_tblite_mol, m_tblite_calc, m_cpcm_solv);
+    if (m_cpcm and !m_alpb) {
+        m_tb_cont = tblite_new_cpcm_solvation_epsilon(m_error, m_tblite_mol, m_solv_eps);
+        if (tblite_check_context(m_ctx)) {
+            tbliteError();
+            tbliteContextError();
+            std::cout << "Error during CPCM calculation, ...  Retry with increased verbosity" << std::endl;
+            tblite_set_context_verbosity(m_ctx, m_verbose + 1);
+            tblite_delete_container(&m_tb_cont);
+            m_tb_cont = tblite_new_cpcm_solvation_epsilon(m_error, m_tblite_mol, m_solv_eps);
 
-                //     return 0;
-            }
-            tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
-        } else if (!m_cpcm && m_cpcm_eps != -1) {
-            m_tb_cont = tblite_new_cpcm_solvation_epsilon(m_ctx, m_tblite_mol, m_tblite_calc, m_cpcm_eps);
-            if (tblite_check_context(m_ctx)) {
-                tbliteError();
-                tbliteContextError();
-                std::cout << "Error during CPCM calculation, ...  Retry with increased verbosity" << std::endl;
-                tblite_set_context_verbosity(m_ctx, m_verbose + 1);
-                tblite_delete_container(&m_tb_cont);
-                m_tb_cont = tblite_new_cpcm_solvation_epsilon(m_ctx, m_tblite_mol, m_tblite_calc, m_cpcm_eps);
-
-                //      return 0;
-            }
-            tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
+            //     return 0;
         }
+        tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
+    }
 
-        if (m_alpb && m_alpb_eps == -1) {
-            m_tb_cont = tblite_new_alpb_solvation_solvent(m_ctx, m_tblite_mol, m_tblite_calc, m_alpb_solv);
-            if (tblite_check_context(m_ctx)) {
-                tbliteError();
-                tbliteContextError();
-                std::cout << "Error during ALPB calculation, ...  Retry with increased verbosity" << std::endl;
-                tblite_set_context_verbosity(m_ctx, m_verbose + 1);
-                tblite_delete_container(&m_tb_cont);
-                m_tb_cont = tblite_new_alpb_solvation_solvent(m_ctx, m_tblite_mol, m_tblite_calc, m_alpb_solv);
+    else if (m_alpb and !m_cpcm) {
+        m_tb_cont = tblite_new_gb_solvation_epsilon(m_error, m_tblite_mol, m_solv_eps, m_gb_type, m_born_kernel);
+        if (tblite_check_context(m_ctx)) {
+            tbliteError();
+            tbliteContextError();
+            std::cout << "Error during ALPB calculation, ...  Retry with increased verbosity" << std::endl;
+            tblite_set_context_verbosity(m_ctx, m_verbose + 1);
+            tblite_delete_container(&m_tb_cont);
+            m_tb_cont = tblite_new_gb_solvation_epsilon(m_error, m_tblite_mol, m_solv_eps, m_gb_type, m_born_kernel);
 
-                //       return 0;
-            }
-            tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
-        } else if (!m_alpb && m_alpb_eps != -1) {
-            m_tb_cont = tblite_new_alpb_solvation_epsilon(m_ctx, m_tblite_mol, m_tblite_calc, m_alpb_eps);
-            if (tblite_check_context(m_ctx)) {
-                tbliteError();
-                tbliteContextError();
-                std::cout << "Error during ALPB calculation, ... Retry with increased verbosity" << std::endl;
-
-                tblite_set_context_verbosity(m_ctx, m_verbose + 1);
-                tblite_delete_container(&m_tb_cont);
-                m_tb_cont = tblite_new_alpb_solvation_epsilon(m_ctx, m_tblite_mol, m_tblite_calc, m_alpb_eps);
-                //     return 0;
-            }
-            tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
+            //       return 0;
         }
-    } else if (count != 0) {
-        std::cout << count << std::endl
-                  << std::endl
-                  << "If three witches had three watches, which witch would watch which watch?\n Ignoring epsilon and solvent or two solvation models given simultaneously" << std::endl
-                  << std::endl
-                  << std::endl;
+        tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
+    } else if (m_alpb) {
+        m_tb_cont = tblite_new_alpb_solvation_solvent(m_error, m_tblite_mol, m_alpb_solv, m_solv_param, m_solv_ref);
+        if (tblite_check_context(m_ctx)) {
+            tbliteError();
+            tbliteContextError();
+            std::cout << "Error during ALPB calculation, ... Retry with increased verbosity" << std::endl;
+
+            tblite_set_context_verbosity(m_ctx, m_verbose + 1);
+            tblite_delete_container(&m_tb_cont);
+            m_tb_cont = tblite_new_alpb_solvation_solvent(m_error, m_tblite_mol, m_alpb_solv, m_solv_param, m_solv_ref);
+            //     return 0;
+        }
+        tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
     }
 }
 
-double TBLiteInterface::GFNCalculation(int parameter, double* grad)
+double TBLiteInterface::Calculation(double* gradient, bool verbose)
 {
+    if (verbose)
+        tblite_set_context_verbosity(m_ctx, 3);
+    else
+        tblite_set_context_verbosity(m_ctx, m_verbose);
+
     double energy = 0;
-    int count = ((m_cpcm + m_cpcm_eps) != -1) + ((m_alpb + m_alpb_eps) != -1);
+    int count = ((m_cpcm) != -1) + (m_alpb != -1);
 
     if (!m_calculator) {
-        if (parameter == 0) {
+        if (m_method_switch == 0) {
             m_tblite_calc = tblite_new_ipea1_calculator(m_ctx, m_tblite_mol);
-        } else if (parameter == 1) {
+        } else if (m_method_switch == 1) {
             m_tblite_calc = tblite_new_gfn1_calculator(m_ctx, m_tblite_mol);
-        } else if (parameter == 2) {
+        } else if (m_method_switch == 2) {
             m_tblite_calc = tblite_new_gfn2_calculator(m_ctx, m_tblite_mol);
         }
         if (m_guess == 0)
@@ -281,11 +318,11 @@ double TBLiteInterface::GFNCalculation(int parameter, double* grad)
 
         tblite_set_context_verbosity(m_ctx, m_verbose);
 
-        if (parameter == 0) {
+        if (m_method_switch == 0) {
             m_tblite_calc = tblite_new_ipea1_calculator(m_ctx, m_tblite_mol);
-        } else if (parameter == 1) {
+        } else if (m_method_switch == 1) {
             m_tblite_calc = tblite_new_gfn1_calculator(m_ctx, m_tblite_mol);
-        } else if (parameter == 2) {
+        } else if (m_method_switch == 2) {
             m_tblite_calc = tblite_new_gfn2_calculator(m_ctx, m_tblite_mol);
         }
         if (m_guess == 0)
@@ -299,8 +336,8 @@ double TBLiteInterface::GFNCalculation(int parameter, double* grad)
     // double* virial = 0;
     // tblite_get_result_virial(m_error, m_tblite_res, &virial);
     // std::cout << virial << std::endl;
-    if (grad != NULL) {
-        tblite_get_result_gradient(m_error, m_tblite_res, grad);
+    if (gradient != NULL) {
+        tblite_get_result_gradient(m_error, m_tblite_res, gradient);
         if (tblite_check_context(m_ctx)) {
             tbliteContextError();
             //     return 0;
@@ -311,45 +348,42 @@ double TBLiteInterface::GFNCalculation(int parameter, double* grad)
     return energy;
 }
 
-void TBLiteInterface::clear()
+void TBLiteInterface::setMethod(const std::string& method)
 {
+    QMInterface::setMethod(method);
+
+    if (m_method.compare("ipea1") == 0)
+        m_method_switch = 0;
+    else if (m_method.compare("gfn1") == 0)
+        m_method_switch = 1;
+    else if (m_method.compare("gfn2") == 0)
+        m_method_switch = 2;
 }
 
-std::vector<double> TBLiteInterface::Charges() const
+Vector TBLiteInterface::Charges() const
 {
-    std::vector<double> charges(m_atomcount);
-    double* c = new double[m_atomcount];
-    tblite_get_result_charges(m_error, m_tblite_res, c);
-    for (int i = 0; i < m_atomcount; ++i)
-        charges[i] = c[i];
-    delete[] c;
+    std::cout << "Charges" << std::endl;
+    Eigen::VectorXd charges(m_atomcount);
+    std::cout << m_atomcount << std::endl;
+    tblite_get_result_charges(m_error, m_tblite_res, charges.data());
+
+    std::cout << charges << std::endl;
     return charges;
 }
 
-std::vector<double> TBLiteInterface::Dipole() const
+Vector TBLiteInterface::Dipole() const
 {
-    std::vector<double> dipole(3);
-    double* c = new double[3];
-    tblite_get_result_dipole(m_error, m_tblite_res, c);
-    for (int i = 0; i < 3; ++i)
-        dipole[i] = c[i];
-    delete[] c;
+    Vector dipole(3);
+    tblite_get_result_dipole(m_error, m_tblite_res, dipole.data());
     return dipole;
 }
 
-std::vector<std::vector<double>> TBLiteInterface::BondOrders() const
+Vector TBLiteInterface::BondOrders() const
 {
-    std::vector<std::vector<double>> bond_orders(m_atomcount);
-    double* bonds = new double[m_atomcount * m_atomcount];
-    tblite_get_result_bond_orders(m_error, m_tblite_res, bonds);
-    for (int i = 0; i < m_atomcount; ++i) {
-        std::vector<double> b(m_atomcount);
-        for (int j = 0; j < m_atomcount; ++j)
-            b[j] = bonds[i * j];
-        bond_orders[i] = b;
-    }
-    delete[] bonds;
-    return bond_orders;
+    Eigen::VectorXd bonds(m_atomcount * m_atomcount);
+    tblite_get_result_bond_orders(m_error, m_tblite_res, bonds.data());
+
+    return bonds;
 }
 
 Vector TBLiteInterface::OrbitalEnergies() const
@@ -358,12 +392,7 @@ Vector TBLiteInterface::OrbitalEnergies() const
     tblite_get_result_number_of_orbitals(m_error, m_tblite_res, &num_orbitals);
 
     Vector orbital_energies(num_orbitals);
-    std::vector<double> energies(num_orbitals);
-    tblite_get_result_orbital_energies(m_error, m_tblite_res, energies.data());
-
-    for (int i = 0; i < num_orbitals; ++i) {
-        orbital_energies[i] = energies[i];
-    }
+    tblite_get_result_orbital_energies(m_error, m_tblite_res, orbital_energies.data());
 
     return orbital_energies;
 }
@@ -374,12 +403,7 @@ Vector TBLiteInterface::OrbitalOccupations() const
     tblite_get_result_number_of_orbitals(m_error, m_tblite_res, &num_orbitals);
 
     Vector orbital_occupations(num_orbitals);
-    std::vector<double> occupations(num_orbitals);
-    tblite_get_result_orbital_occupations(m_error, m_tblite_res, occupations.data());
-
-    for (int i = 0; i < num_orbitals; ++i) {
-        orbital_occupations[i] = occupations[i];
-    }
+    tblite_get_result_orbital_occupations(m_error, m_tblite_res, orbital_occupations.data());
 
     return orbital_occupations;
 }

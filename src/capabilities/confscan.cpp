@@ -302,7 +302,7 @@ bool ConfScan::openFile()
             EnergyCalculator interface(m_method, m_controller);
             // I might not leak really, but was unable to clear everything
 
-            interface.setMolecule(mol);
+            interface.setMolecule(mol->getMolInfo());
             energy = interface.CalculateEnergy(false);
         }
         m_ordered_list.insert(std::pair<double, int>(energy, molecule));
@@ -345,7 +345,7 @@ bool ConfScan::openFile()
                 EnergyCalculator interface(m_method, m_controller);
                 // I might not leak really, but was unable to clear everything
 
-                interface.setMolecule(mol);
+                interface.setMolecule(mol->getMolInfo());
                 energy = interface.CalculateEnergy(false);
             }
             min_energy = std::min(min_energy, energy);

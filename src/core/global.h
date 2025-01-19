@@ -51,6 +51,21 @@ typedef Eigen::VectorXd Vector;
 typedef std::pair<int, int> IntPair;
 typedef std::vector<std::string> StringList;
 
+struct Mol {
+    double m_energy;
+    double m_spin;
+
+    int m_number_atoms;
+    int m_charge;
+
+    std::string m_commentline;
+
+    Geometry m_geometry;
+    Vector m_partial_charges;
+    std::vector<std::pair<int, int>> m_bonds;
+    std::vector<int> m_atoms;
+};
+
 inline Vector PositionPair2Vector(const std::pair<Position, Position>& pair)
 {
     Vector vector = Vector::Zero(6);

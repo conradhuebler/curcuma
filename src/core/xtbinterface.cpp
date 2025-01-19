@@ -16,13 +16,12 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  */
+#include "interface/abstract_interface.h"
 
 #include "src/core/global.h"
 #include "src/tools/general.h"
 
 #include "external/xtb/include/xtb.h"
-
-#include "src/core/molecule.h"
 
 #include <iostream>
 #include <math.h>
@@ -54,87 +53,155 @@ XTBInterface::~XTBInterface()
     delete[] m_attyp;
 }
 
-bool XTBInterface::InitialiseMolecule(const Molecule& molecule)
+bool XTBInterface::InitialiseMolecule(const Mol& mol)
 {
     if (m_initialised)
-        UpdateMolecule(molecule);
-    m_atomcount = molecule.AtomCount();
-
+        UpdateMolecule(mol);
+    m_atomcount = mol.m_number_atoms;
     m_attyp = new int[m_atomcount];
-    std::vector<int> atoms = molecule.Atoms();
     m_coord = new double[3 * m_atomcount];
 
+    std::vector<int> atoms = mol.m_atoms; // molecule.Atoms();
+
     for (int i = 0; i < m_atomcount; ++i) {
-        std::pair<int, Position> atom = molecule.Atom(i);
-        m_coord[3 * i + 0] = atom.second(0) / au;
-        m_coord[3 * i + 1] = atom.second(1) / au;
-        m_coord[3 * i + 2] = atom.second(2) / au;
+        m_coord[3 * i + 0] = mol.m_geometry(i, 0) / au;
+        m_coord[3 * i + 1] = mol.m_geometry(i, 1) / au;
+        m_coord[3 * i + 2] = mol.m_geometry(i, 2) / au;
         m_attyp[i] = atoms[i];
     }
-    return InitialiseMolecule(m_attyp, m_coord, m_atomcount, molecule.Charge(), molecule.Spin());
+    bool init = InitialiseMolecule(m_attyp, m_coord, m_atomcount, mol.m_charge, mol.m_spin);
+    return init;
 }
 
-bool XTBInterface::InitialiseMolecule(const Molecule* molecule)
+bool XTBInterface::InitialiseMolecule(const Mol* mol)
 {
-    if (m_initialised)
-        UpdateMolecule(molecule);
-    m_atomcount = molecule->AtomCount();
+    if (m_initialised) {
+        return UpdateMolecule(mol);
+    }
+    m_atomcount = mol->m_number_atoms;
 
+    std::vector<int> atoms = mol->m_atoms;
     m_attyp = new int[m_atomcount];
-    std::vector<int> atoms = molecule->Atoms();
     m_coord = new double[3 * m_atomcount];
 
     for (int i = 0; i < m_atomcount; ++i) {
-        std::pair<int, Position> atom = molecule->Atom(i);
-        m_coord[3 * i + 0] = atom.second(0) / au;
-        m_coord[3 * i + 1] = atom.second(1) / au;
-        m_coord[3 * i + 2] = atom.second(2) / au;
+        m_coord[3 * i + 0] = mol->m_geometry(i, 0) / au;
+        m_coord[3 * i + 1] = mol->m_geometry(i, 1) / au;
+        m_coord[3 * i + 2] = mol->m_geometry(i, 2) / au;
         m_attyp[i] = atoms[i];
     }
-    return InitialiseMolecule(m_attyp, m_coord, m_atomcount, molecule->Charge(), molecule->Spin());
+    return InitialiseMolecule();
 }
 
 bool XTBInterface::InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge, const int spin)
 {
     if (m_initialised)
         UpdateMolecule(coord);
+
     m_atomcount = natoms;
+    m_charge = charge;
+    m_spin = spin;
 
-    m_xtb_mol = xtb_newMolecule(m_env, &natoms, attyp, coord, &charge, &spin, NULL, NULL);
-
-    m_initialised = true;
-    return true;
+    for (int i = 0; i < m_atomcount; ++i) {
+        m_coord[3 * i + 0] = coord[3 * i + 0] / au;
+        m_coord[3 * i + 1] = coord[3 * i + 1] / au;
+        m_coord[3 * i + 2] = coord[3 * i + 2] / au;
+        m_attyp[i] = attyp[i];
+    }
+    return InitialiseMolecule();
 }
 
-bool XTBInterface::UpdateMolecule(const Molecule& molecule)
+bool XTBInterface::InitialiseMolecule()
+{
+    if (m_initialised) {
+        return UpdateMolecule(m_coord);
+    }
+    double charge = m_charge;
+    int spin = m_spin;
+    m_xtb_mol = xtb_newMolecule(m_env, &m_atomcount, m_attyp, m_coord, &charge, &spin, NULL, NULL);
+    /*
+        char *error;
+        int buffer;
+        xtb_getError(m_env, &error, &buffer);
+        if (error != NULL) {
+            std::cerr << "[Error] " << error << std::endl;
+            return false;
+        }
+    */
+    m_initialised = true;
+    return m_initialised;
+}
+
+bool XTBInterface::UpdateMolecule(const Mol& mol)
 {
     for (int i = 0; i < m_atomcount; ++i) {
-        std::pair<int, Position> atom = molecule.Atom(i);
-        m_coord[3 * i + 0] = atom.second(0) / au;
-        m_coord[3 * i + 1] = atom.second(1) / au;
-        m_coord[3 * i + 2] = atom.second(2) / au;
+        m_coord[3 * i + 0] = mol.m_geometry(i, 0) / au;
+        m_coord[3 * i + 1] = mol.m_geometry(i, 1) / au;
+        m_coord[3 * i + 2] = mol.m_geometry(i, 2) / au;
     }
-    return UpdateMolecule(m_coord);
+    return UpdateMolecule();
+}
+
+bool XTBInterface::UpdateMolecule(const Mol* mol)
+{
+    for (int i = 0; i < m_atomcount; ++i) {
+        m_coord[3 * i + 0] = mol->m_geometry(i, 0) / au;
+        m_coord[3 * i + 1] = mol->m_geometry(i, 1) / au;
+        m_coord[3 * i + 2] = mol->m_geometry(i, 2) / au;
+    }
+    return UpdateMolecule();
 }
 
 bool XTBInterface::UpdateMolecule(const double* coord)
 {
-    xtb_updateMolecule(m_env, m_xtb_mol, coord, NULL);
+    for (int i = 0; i < m_atomcount; ++i) {
+        m_coord[3 * i + 0] = coord[3 * i + 0] / au;
+        m_coord[3 * i + 1] = coord[3 * i + 1] / au;
+        m_coord[3 * i + 2] = coord[3 * i + 2] / au;
+    }
+    return UpdateMolecule();
+}
+
+bool XTBInterface::UpdateMolecule(const Matrix& geometry)
+{
+    for (int i = 0; i < m_atomcount; ++i) {
+        m_coord[3 * i + 0] = geometry(i, 0) / au;
+        m_coord[3 * i + 1] = geometry(i, 1) / au;
+        m_coord[3 * i + 2] = geometry(i, 2) / au;
+    }
+    return UpdateMolecule();
+}
+bool XTBInterface::UpdateMolecule()
+{
+    xtb_updateMolecule(m_env, m_xtb_mol, m_coord, NULL);
     return true;
 }
 
-double XTBInterface::GFNCalculation(int parameter, double* grad)
+void XTBInterface::setMethod(const std::string& method)
+{
+    QMInterface::setMethod(method);
+    if (method == "xtb-gfn0")
+        m_method_switch = 0;
+    else if (method == "xtb-gfn1")
+        m_method_switch = 1;
+    else if (method == "xtb-gfn2")
+        m_method_switch = 2;
+    else if (method == "gfnff")
+        m_method_switch = 66;
+}
+
+double XTBInterface::Calculation(double* gradient, bool verbose)
 {
     double energy = 0;
     if (!m_setup) {
         xtb_setVerbosity(m_env, XTB_VERBOSITY_MUTED);
-        if (parameter == 0) {
+        if (m_method_switch == 0) {
             xtb_loadGFN0xTB(m_env, m_xtb_mol, m_xtb_calc, NULL);
-        } else if (parameter == 1) {
+        } else if (m_method_switch == 1) {
             xtb_loadGFN1xTB(m_env, m_xtb_mol, m_xtb_calc, NULL);
-        } else if (parameter == 2) {
+        } else if (m_method_switch == 2) {
             xtb_loadGFN2xTB(m_env, m_xtb_mol, m_xtb_calc, NULL);
-        } else if (parameter == 66) {
+        } else if (m_method_switch == 66) {
             xtb_loadGFNFF(m_env, m_xtb_mol, m_xtb_calc, NULL);
         }
         xtb_setAccuracy(m_env, m_xtb_calc, m_accuracy);
@@ -149,46 +216,53 @@ double XTBInterface::GFNCalculation(int parameter, double* grad)
     }
 
     xtb_getEnergy(m_env, m_xtb_res, &energy);
-    if (grad != NULL)
-        xtb_getGradient(m_env, m_xtb_res, grad);
+    if (gradient != NULL)
+        xtb_getGradient(m_env, m_xtb_res, gradient);
     return energy;
 }
 
-std::vector<double> XTBInterface::Charges() const
+Vector XTBInterface::Charges() const
 {
-    std::vector<double> charges(m_atomcount);
-    double* c = new double[m_atomcount];
-    xtb_getCharges(m_env, m_xtb_res, c);
-    for (int i = 0; i < m_atomcount; ++i)
-        charges[i] = c[i];
-    delete[] c;
+    Vector charges(m_atomcount);
+    xtb_getCharges(m_env, m_xtb_res, charges.data());
     return charges;
 }
 
-std::vector<double> XTBInterface::Dipole() const
+Vector XTBInterface::Dipole() const
 {
-    std::vector<double> dipole(3);
-    double* c = new double[3];
-    xtb_getDipole(m_env, m_xtb_res, c);
-    for (int i = 0; i < 3; ++i)
-        dipole[i] = c[i];
-    delete[] c;
+    Vector dipole(3);
+    xtb_getDipole(m_env, m_xtb_res, dipole.data());
+
     return dipole;
 }
 
-std::vector<std::vector<double>> XTBInterface::BondOrders() const
+Vector XTBInterface::BondOrders() const
 {
-    std::vector<std::vector<double>> bond_orders(m_atomcount);
-    double* bonds = new double[m_atomcount * m_atomcount];
-    xtb_getBondOrders(m_env, m_xtb_res, bonds);
-    for (int i = 0; i < m_atomcount; ++i) {
-        std::vector<double> b(m_atomcount);
-        for (int j = 0; j < m_atomcount; ++j)
-            b[j] = bonds[i * j];
-        bond_orders[i] = b;
-    }
-    delete[] bonds;
+    Vector bond_orders(m_atomcount);
+    xtb_getBondOrders(m_env, m_xtb_res, bond_orders.data());
     return bond_orders;
+}
+
+Vector XTBInterface::OrbitalEnergies() const
+{
+    int num_orbitals;
+    xtb_getNao(m_env, m_xtb_res, &num_orbitals);
+
+    Vector orbital_energies(num_orbitals);
+    xtb_getOrbitalEigenvalues(m_env, m_xtb_res, orbital_energies.data());
+
+    return orbital_energies;
+}
+
+Vector XTBInterface::OrbitalOccupations() const
+{
+    int num_orbitals;
+    xtb_getNao(m_env, m_xtb_res, &num_orbitals);
+
+    Vector orbital_occupations(num_orbitals);
+    xtb_getOrbitalOccupations(m_env, m_xtb_res, orbital_occupations.data());
+
+    return orbital_occupations;
 }
 
 void XTBInterface::clear()
