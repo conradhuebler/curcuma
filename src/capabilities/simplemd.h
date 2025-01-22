@@ -330,6 +330,8 @@ private:
     std::vector<int> m_rmsd_indicies;
     std::vector<std::vector<int> > m_rmsd_fragments, m_start_fragments;
 
+    Geometry m_eigen_geometry, m_eigen_geometry_old, m_eigen_gradient, m_eigen_gradient_old, m_eigen_velocities;
+    Vector m_eigen_masses, m_eigen_inv_masses;
 
     std::vector<Geometry> m_bias_structures;
     std::vector<BiasStructure> m_biased_structures;

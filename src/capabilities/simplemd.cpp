@@ -408,6 +408,15 @@ bool SimpleMD::Initialise()
     m_rmass = std::vector<double>(3 * m_natoms, 0);
     m_atomtype = std::vector<int>(m_natoms, 0);
 
+    m_eigen_geometry = Eigen::MatrixXd::Zero(m_natoms, 3);
+    m_eigen_geometry_old = Eigen::MatrixXd::Zero(m_natoms, 3);
+    m_eigen_gradient = Eigen::MatrixXd::Zero(m_natoms, 3);
+    m_eigen_gradient_old = Eigen::MatrixXd::Zero(m_natoms, 3);
+    m_eigen_velocities = Eigen::MatrixXd::Zero(m_natoms, 3);
+
+    m_eigen_masses = Eigen::VectorXd::Zero(3*m_natoms);
+    m_eigen_inv_masses = Eigen::VectorXd::Zero(3*m_natoms);
+
     if (!m_restart) {
         m_current_geometry = std::vector<double>(3 * m_natoms, 0);
         m_velocities = std::vector<double>(3 * m_natoms, 0);
@@ -452,11 +461,24 @@ bool SimpleMD::Initialise()
             m_current_geometry[3 * i + 0] = pos(0) / 1;
             m_current_geometry[3 * i + 1] = pos(1) / 1;
             m_current_geometry[3 * i + 2] = pos(2) / 1;
+
+            m_eigen_geometry(i, 0) = pos(0) / 1;
+            m_eigen_geometry(i, 1) = pos(1) / 1;
+            m_eigen_geometry(i, 2) = pos(2) / 1;
         }
         if (m_atomtype[i] == 1) {
             m_mass[3 * i + 0] = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
             m_mass[3 * i + 1] = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
             m_mass[3 * i + 2] = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
+
+            m_eigen_masses(3*i) = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
+            m_eigen_masses(3*i+1) = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
+            m_eigen_masses(3*i+2) = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
+
+            m_eigen_inv_masses(3*i) = 1 / (Elements::AtomicMass[m_atomtype[i]] * m_hmass);
+            m_eigen_inv_masses(3*i + 1) = 1 / (Elements::AtomicMass[m_atomtype[i]] * m_hmass);
+            m_eigen_inv_masses(3*i + 2) = 1 / (Elements::AtomicMass[m_atomtype[i]] * m_hmass);  
+
             mass += Elements::AtomicMass[m_atomtype[i]] * m_hmass;
 
             m_rmass[3 * i + 0] = 1 / m_mass[3 * i + 0];
@@ -471,6 +493,14 @@ bool SimpleMD::Initialise()
             m_rmass[3 * i + 0] = 1 / m_mass[3 * i + 0];
             m_rmass[3 * i + 1] = 1 / m_mass[3 * i + 1];
             m_rmass[3 * i + 2] = 1 / m_mass[3 * i + 2];
+
+            m_eigen_masses(3*i) = Elements::AtomicMass[m_atomtype[i]];
+            m_eigen_masses(3*i+1) = Elements::AtomicMass[m_atomtype[i]];
+            m_eigen_masses(3*i+2) = Elements::AtomicMass[m_atomtype[i]];
+
+            m_eigen_inv_masses(3*i) = 1 / (Elements::AtomicMass[m_atomtype[i]]);
+            m_eigen_inv_masses(3*i + 1) = 1 / (Elements::AtomicMass[m_atomtype[i]]);
+            m_eigen_inv_masses(3*i + 2) = 1 / (Elements::AtomicMass[m_atomtype[i]]);    
         }
     }
 
