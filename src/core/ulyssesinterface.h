@@ -1,55 +1,55 @@
+/*
+ * < C++ Ulysses Interface >
+ * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+
 #pragma once
 
 #include "interface/abstract_interface.h"
 
-#include "GFN.hpp"
-
 #include <string>
 #include <vector>
 
+static json UlyssesSettings{
+    { "Tele", 300 },
+    { "ulysses_solvent", "none" },
+    { "method", "GFN2" },
+    { "SCFmaxiter", 100 }
+
+};
+class UlyssesObject;
+
 class UlyssesInterface : public QMInterface {
 public:
-    UlyssesInterface() = default;
-    ~UlyssesInterface() = default;
+    UlyssesInterface(const json& ulyssessettings = UlyssesSettings);
+    ~UlyssesInterface();
 
-    bool InitialiseMolecule(const Mol& mol);
-    bool InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge, const int spin);
-    bool UpdateMolecule(const Molecule& molecule);
-    bool UpdateMolecule(const double* coord);
+    virtual bool InitialiseMolecule() override;
+    virtual bool UpdateMolecule(const Geometry& geometry) override;
 
-    double Calculate(double* gradient = 0, bool verbose = false);
+    double Calculation(bool gradient = false, bool verbose = false) override;
 
-    // Setter Methoden
-    void setElectronTemp(double temp) { m_electron_temp = temp; }
-    void setSolvent(const std::string& solvent) { m_solvent = solvent; }
-
-    // Getter Methoden
-    /*
-    virtual Vector Charges() const { return Vector{}; }
-    virtual Vector Dipole() const { return Vector{}; }
-
-    virtual Vector BondOrders() const  { return Vector{}; }
-    virtual Vector OrbitalEnergies() const { return Vector{}; }
-    virtual Vector OrbitalOccupations() const  { return Vector{}; }
-
-    virtual void setMethod(const std::string& method) { m_method = method; }
-    */
 private:
-    void reset();
-    bool setupCalculation();
-
     Mol m_mol;
-    Molecule* m_molecule = nullptr;
-    BSet* m_basis = nullptr;
-    GFN2* m_electron = nullptr;
+    UlyssesObject* m_ulysses = nullptr;
 
-    bool m_initialised = false;
-    bool m_calculator_setup = false;
-
-    double m_electron_temp = 300.0;
+    double m_Tele = 300;
+    double m_SCFmaxiter = 100;
     std::string m_solvent = "none";
 
-    std::vector<double> m_charges;
-    std::vector<double> m_polarizabilities;
-    double m_total_polarizability = 0.0;
+    json m_ulyssessettings;
 };

@@ -171,14 +171,15 @@ void DFTD3Interface::UpdateAtom(int index, double x, double y, double z)
     m_coord[3 * index + 2] = z / au;
 }
 
-double DFTD3Interface::Calculation(double* gradient, bool verbose)
+double DFTD3Interface::Calculation(bool gradient, bool verbose)
 {
     double energy = 0;
     double sigma[9];
 
 #ifdef USE_D3
     dftd3_update_structure(m_error, m_mol, m_coord, NULL);
-    dftd3_get_dispersion(m_error, m_mol, m_disp, m_param, &energy, gradient, sigma);
+    if (gradient)
+        dftd3_get_dispersion(m_error, m_mol, m_disp, m_param, &energy, m_gradient.data(), sigma);
 #endif
 
     return energy;

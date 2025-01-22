@@ -100,13 +100,13 @@ bool DFTD4Interface::InitialiseMolecule(const std::vector<int>& atomtype)
     return true;
 }
 
-double DFTD4Interface::Calculation(double* gradient, bool verbose)
+double DFTD4Interface::Calculation(bool gradient, bool verbose)
 {
     double energy = 0;
     dftd4::TCutoff cutoff;
     dftd4::TD4Model d4;
     // exit(0);
-    dftd4::get_dispersion(m_mol, m_charge, d4, m_par, cutoff, energy, gradient);
+    dftd4::get_dispersion(m_mol, m_charge, d4, m_par, cutoff, energy, m_gradient.data());
     return energy;
 }
 

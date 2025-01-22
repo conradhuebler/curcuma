@@ -51,7 +51,7 @@ public:
     bool InitialiseMolecule(const Mol& mol, double factor = 1);
     bool InitialiseMolecule(const std::vector<int>& atomtype);
 
-    double Calculation(double* gradient = 0, bool verbose = false) override;
+    double Calculation(bool gradient = 0, bool verbose = false) override;
     void UpdateParameters(const json& controller);
 
     void clear();

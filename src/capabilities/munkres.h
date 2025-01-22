@@ -32,7 +32,7 @@
 
 #include <iostream>
 
-typedef Eigen::MatrixXd Matrix;
+typedef Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> Matrix;
 static double epsilon = 1e-8;
 
 void PrintMatrix(const Matrix& m)

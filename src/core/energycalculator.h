@@ -41,7 +41,7 @@
 // #include "src/core/eigen_uff.h"
 #include "src/core/forcefield.h"
 // #include "src/core/qmdff.h"
-//  #include "src/core/ulyssesinterface.h"
+#include "src/core/ulyssesinterface.h"
 
 #include <functional>
 
@@ -65,11 +65,7 @@ public:
     void updateGeometry(const Matrix& geometry);
     void updateGeometry(const Eigen::VectorXd& geometry);
 
-    void getGradient(double* coord);
-
-    Matrix getGradient() const { return m_gradient; }
-
-    Matrix Gradient() const;
+    Matrix Gradient() const { return m_gradient; }
 
     double CalculateEnergy(bool gradient = false, bool verbose = false);
 
@@ -130,7 +126,6 @@ private:
     // eigenUFF* m_uff = NULL;// will be switch_method 8
     // QMDFF* m_qmdff = NULL;// will be switch_method 7
     ForceField* m_forcefield = NULL; // will be switch_method 0
-    // UlyssesInterface* m_ulysses = NULL; // will be switch_method 3
     EHT* m_eht = NULL; // will be switch_method 6
 
     StringList m_uff_methods = { "fuff" };
@@ -138,7 +133,7 @@ private:
     StringList m_qmdff_method = { "fqmdff" };
     StringList m_tblite_methods = { "ipea1", "gfn1", "gfn2" };
     StringList m_xtb_methods = { "gfnff", "xtb-gfn1", "xtb-gfn2" };
-    StringList m_ulysses_methods = { "ugfn2" };
+    StringList m_ulysses_methods = { "ugfn2", "pm6" };
 
     StringList m_d3_methods = { "d3" };
     StringList m_d4_methods = { "d4" };

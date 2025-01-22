@@ -35,6 +35,7 @@
 #include <stdio.h>
 
 #include "confsearch.h"
+using curcuma::Molecule;
 
 ConfSearch::ConfSearch(const json& controller, bool silent)
     : CurcumaMethod(ConfSearchJson, controller, silent)

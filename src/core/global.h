@@ -42,8 +42,8 @@ const double R = 8.31446261815324;
 const double atomic_mass = 1.66053906660e-27;
 const double T_Eh = 3.1577464e5;
 
-typedef Eigen::MatrixXd Geometry;
-typedef Eigen::MatrixXd Matrix;
+typedef Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> Geometry;
+typedef Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> Matrix;
 typedef Eigen::Vector3d Position;
 typedef Eigen::Vector4d Vector4d;
 

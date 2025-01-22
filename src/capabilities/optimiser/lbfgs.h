@@ -6,7 +6,7 @@
 #include <vector>
 
 using Vector = Eigen::VectorXd;
-using Matrix = Eigen::MatrixXd;
+typedef Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> Matrix;
 
 class LBFGS {
 public:

@@ -39,8 +39,9 @@ namespace fs = std::filesystem;
 
 EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller)
     : m_method(method)
-
 {
+    std::transform(m_method.begin(), m_method.end(), m_method.begin(), [](unsigned char c) { return std::tolower(c); });
+
     m_controller = controller;
     if (controller.contains("param_file")) {
         m_param_file = controller["param_file"];
@@ -92,31 +93,17 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
         break;
 
     case 3:
-        /*
-            m_ulysses = new UlyssesInterface(controller);
-            m_ecengine = [this](bool gradient, bool verbose) {
-                this->CalculateUlysses(gradient, verbose);
-            };
-            m_charges = [this]() {
-                return this->m_ulysses_methods->Charges();
-            };
-            m_dipole = [this]() {
-                Position dipole;
-                dipole(0) = this->m_ulysses_methods->Dipole()[0];
-                dipole(1) = this->m_ulysses_methods->Dipole()[1];
-                dipole(2) = this->m_ulysses_methods->Dipole()[2];
-
-                return dipole;
-            };
-            m_bonds = [this]() {
-                return this->m_ulysses_methods->BondOrders();
-            };
-            */
+        m_qminterface = new UlyssesInterface(controller);
+        m_qminterface->setMethod(m_method);
+        m_ecengine = [this](bool gradient, bool verbose) {
+            this->CalculateUlysses(gradient, verbose);
+        };
         break;
 
     case 2:
 #ifdef USE_XTB
         m_qminterface = new XTBInterface(controller);
+        m_qminterface->setMethod(m_method);
         m_ecengine = [this](bool gradient, bool verbose) {
             this->CalculateXTB(gradient, verbose);
         };
@@ -134,6 +121,8 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
     case 1:
 
         m_qminterface = new TBLiteInterface(controller);
+        m_qminterface->setMethod(m_method);
+
         m_ecengine = [this](bool gradient, bool verbose) {
             this->CalculateTBlite(gradient, verbose);
             m_error = this->m_qminterface->Error();
@@ -226,7 +215,7 @@ EnergyCalculator::~EnergyCalculator()
         break;
 
     case 3:
-        // delete m_ulysses;
+        delete m_qminterface;
         break;
 
     case 2:
@@ -287,9 +276,7 @@ void EnergyCalculator::setMolecule(const Mol& mol)
         break;
 
     case 3:
-        //  m_ulysses->setMolecule(mol);
-        //  m_ulysses->Initialise();
-
+        m_qminterface->InitialiseMolecule(mol);
         break;
 
     case 2:
@@ -365,6 +352,8 @@ int EnergyCalculator::SwitchMethod(const std::string& method)
         switch_method = 0;
     } else if (m_method.compare("eht") == 0) {
         switch_method = 6;
+    } else if (std::find(m_ulysses_methods.begin(), m_ulysses_methods.end(), m_method) != m_ulysses_methods.end()) {
+        switch_method = 3;
     } else {
         switch_method = 0;
     }
@@ -430,23 +419,10 @@ void EnergyCalculator::CalculateTBlite(bool gradient, bool verbose)
 {
 #ifdef USE_TBLITE
     m_qminterface->UpdateMolecule(m_geometry);
-    if (gradient) {
+    m_energy = m_qminterface->Calculation(gradient, verbose);
+    if (gradient)
+        m_gradient = m_qminterface->Gradient();
 
-        m_energy = m_qminterface->Calculation(m_xtb_gradient.data(), false);
-        for (int i = 0; i < m_atoms; ++i) {
-            m_gradient(i, 0) = m_xtb_gradient[3 * i + 0] * au;
-            m_gradient(i, 1) = m_xtb_gradient[3 * i + 1] * au;
-            m_gradient(i, 2) = m_xtb_gradient[3 * i + 2] * au;
-        }
-    } else {
-        m_energy = m_qminterface->Calculation();
-    }
-
-/*
-    m_orbital_energies = m_qminterface->OrbitalEnergies();
-    m_orbital_occupation = m_qminterface->OrbitalOccupations();
-    m_num_electrons = m_orbital_occupation.sum();
-    */
 #endif
 }
 
@@ -454,17 +430,21 @@ void EnergyCalculator::CalculateXTB(bool gradient, bool verbose)
 {
 #ifdef USE_XTB
     m_qminterface->UpdateMolecule(m_geometry);
+    m_energy = m_qminterface->Calculation(gradient, verbose);
+    if (gradient)
+        m_gradient = m_qminterface->Gradient();
 
-    if (gradient) {
-        m_energy = m_qminterface->Calculation(m_xtb_gradient.data(), false);
-        for (int i = 0; i < m_atoms; ++i) {
-            m_gradient(i, 0) = m_xtb_gradient[3 * i + 0] * au;
-            m_gradient(i, 1) = m_xtb_gradient[3 * i + 1] * au;
-            m_gradient(i, 2) = m_xtb_gradient[3 * i + 2] * au;
-        }
-    } else
-        m_energy = m_qminterface->Calculation();
 #endif
+}
+
+void EnergyCalculator::CalculateUlysses(bool gradient, bool verbose)
+{
+
+    m_qminterface->UpdateMolecule(m_geometry);
+    m_energy = m_qminterface->Calculation(gradient, verbose);
+    if (gradient) {
+        m_gradient = m_qminterface->Gradient();
+    }
 }
 
 void EnergyCalculator::CalculateD3(bool gradient, bool verbose)
@@ -481,7 +461,7 @@ void EnergyCalculator::CalculateD3(bool gradient, bool verbose)
             m_gradient(i, 2) = m_xtb_gradient[3 * i + 2] * au;
         }
     } else
-        m_energy = m_qminterface->Calculation();
+        m_energy = m_qminterface->Calculation(false, verbose);
 #endif
 }
 
@@ -519,22 +499,7 @@ void EnergyCalculator::CalculateFF(bool gradient, bool verbose)
     m_energy = m_forcefield->Calculate(gradient, verbose);
     if (gradient) {
         m_gradient = m_forcefield->Gradient();
-        // m_gradient = m_forcefield->NumGrad();
     }
-}
-
-void EnergyCalculator::getGradient(double* gradient)
-{
-    for (int i = 0; i < m_atoms; ++i) {
-        gradient[3 * i + 0] = m_gradient(i, 0);
-        gradient[3 * i + 1] = m_gradient(i, 1);
-        gradient[3 * i + 2] = m_gradient(i, 2);
-    }
-}
-
-Matrix EnergyCalculator::Gradient() const
-{
-    return m_gradient;
 }
 
 Vector EnergyCalculator::Charges() const

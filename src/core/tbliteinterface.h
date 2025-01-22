@@ -29,9 +29,9 @@
 
 static json TBLiteSettings{
     { "tb_acc", 1 },
-    { "tb_max_iter", 250 },
+    { "SCFmaxiter", 100 },
     { "tb_damping", 0.4 },
-    { "tb_temp", 9.500e-4 },
+    { "Tele", 300 },
     { "tb_verbose", 0 },
     { "tb_guess", "SAD" },
     { "solv", "none" },
@@ -55,7 +55,7 @@ public:
     bool UpdateMolecule();
 
     bool Error() override { return m_error_count >= 10; }
-    double Calculation(double* gradient = 0, bool verbose = false);
+    double Calculation(bool gradient = 0, bool verbose = false);
 
     void clear() override;
 
@@ -77,12 +77,12 @@ private:
 
     double m_thr = 1.0e-10;
     int m_acc = 2;
-    int m_maxiter = 100;
+    int m_SCFmaxiter = 100;
     int m_verbose = 0;
     int m_guess = 0;
     int m_error_count = 0;
     double m_damping = 0.5;
-    double m_temp = 1000;
+    double m_Tele = 298;
     double m_solv_eps = -1;
     char* m_alpb_solv = NULL;
     int m_gb_type = 0, m_born_kernel = 1;

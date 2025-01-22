@@ -56,13 +56,13 @@ double LBFGSInterface::operator()(const VectorXd& x, VectorXd& grad)
         return 0;
     }
     fx = m_interface->CalculateEnergy(true);
-    auto gradient = m_interface->Gradient();
+    Geometry gradient = m_interface->Gradient();
     m_error = std::isnan(fx);
 
     for (int i = 0; i < m_atoms; ++i) {
-        grad[3 * i + 0] = gradient(i, 0) * (m_constrains[i]);
-        grad[3 * i + 1] = gradient(i, 1) * (m_constrains[i]);
-        grad[3 * i + 2] = gradient(i, 2) * (m_constrains[i]);
+        grad[3 * i + 0] = gradient.data()[3 * i + 0] * (m_constrains[i]);
+        grad[3 * i + 1] = gradient.data()[3 * i + 1] * (m_constrains[i]);
+        grad[3 * i + 2] = gradient.data()[3 * i + 2] * (m_constrains[i]);
     }
     m_energy = fx;
     m_parameter = x;

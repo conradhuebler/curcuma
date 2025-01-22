@@ -18,7 +18,6 @@
  */
 
 #pragma once
-
 #include <array>
 #include <map>
 #include <string>
@@ -33,7 +32,7 @@
 using json = nlohmann::json;
 
 typedef std::pair<int, Position> AtomDef;
-
+namespace curcuma {
 class Molecule
 {
   public:
@@ -310,3 +309,4 @@ private:
     double m_energy = 0, m_Ia = 0, m_Ib = 0, m_Ic = 0, m_mass = 0, m_hbond_cutoff = 3;
     mutable double m_scaling = 1.5;
 };
+} // namespace curcuma

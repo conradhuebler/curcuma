@@ -32,7 +32,9 @@ public:
         m_spin = molecule.m_spin;
         m_charge = molecule.m_charge;
         m_atoms = molecule.m_atoms;
-        return true;
+        m_gradient = Matrix::Zero(m_atomcount, 3);
+
+        return InitialiseMolecule();
     }
     virtual bool InitialiseMolecule(const Mol* molecule)
     {
@@ -41,8 +43,8 @@ public:
         m_spin = molecule->m_spin;
         m_charge = molecule->m_charge;
         m_atoms = molecule->m_atoms;
-
-        return true;
+        m_gradient = Matrix::Zero(m_atomcount, 3);
+        return InitialiseMolecule();
     }
     virtual bool InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge, const int spin)
     {
@@ -56,9 +58,12 @@ public:
             m_geometry(i, 1) = coord[i * 3 + 1];
             m_geometry(i, 2) = coord[i * 3 + 2];
         }
+        m_gradient = Matrix::Zero(m_atomcount, 3);
 
-        return true;
+        return InitialiseMolecule();
     }
+
+    virtual bool InitialiseMolecule() { return true; }
 
     virtual bool UpdateMolecule(const Mol& molecule)
     {
@@ -68,7 +73,7 @@ public:
         m_charge = molecule.m_charge;
         m_atoms = molecule.m_atoms;
 
-        return true;
+        return UpdateMolecule();
     }
     virtual bool UpdateMolecule(const Mol* molecule)
     {
@@ -78,7 +83,7 @@ public:
         m_charge = molecule->m_charge;
         m_atoms = molecule->m_atoms;
 
-        return true;
+        return UpdateMolecule();
     }
     virtual bool UpdateMolecule(const double* coord)
     {
@@ -88,13 +93,13 @@ public:
             m_geometry(i, 2) = coord[3 * i + 2];
         }
 
-        return true;
+        return UpdateMolecule();
     }
     virtual bool UpdateMolecule(const Matrix& geometry)
     {
         m_geometry = geometry;
 
-        return true;
+        return UpdateMolecule();
     }
     virtual bool UpdateMolecule(const Vector& geometry)
     {
@@ -104,11 +109,12 @@ public:
             m_geometry(i, 2) = geometry(3 * i + 2);
         }
 
-        return true;
+        return UpdateMolecule();
     }
 
+    virtual bool UpdateMolecule() { return true; }
     virtual bool Error() { return false; };
-    virtual double Calculation(double* gradient = 0, bool verbose = false) = 0;
+    virtual double Calculation(bool gradient = false, bool verbose = false) = 0;
 
     virtual void clear() {}
 
@@ -120,10 +126,11 @@ public:
     virtual Vector OrbitalOccupations() const { return Vector{}; }
 
     virtual void setMethod(const std::string& method) { m_method = method; }
+    virtual Geometry Gradient() const { return m_gradient; }
 
 protected:
     bool m_initialised = false;
-    Matrix m_geometry;
+    Matrix m_geometry, m_gradient;
     double m_charge, m_spin;
     std::vector<int> m_atoms;
 

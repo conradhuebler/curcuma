@@ -37,9 +37,9 @@ TBLiteInterface::TBLiteInterface(const json& tblitesettings)
     m_tblitesettings = MergeJson(TBLiteSettings, tblitesettings);
 
     m_acc = m_tblitesettings["tb_acc"];
-    m_maxiter = m_tblitesettings["tb_max_iter"];
+    m_SCFmaxiter = m_tblitesettings["SCFmaxiter"];
     m_damping = m_tblitesettings["tb_damping"];
-    m_temp = m_tblitesettings["tb_temp"];
+    m_Tele = m_tblitesettings["Tele"];
     m_verbose = m_tblitesettings["tb_verbose"];
     std::string guess = m_tblitesettings["tb_guess"];
 
@@ -152,6 +152,7 @@ bool TBLiteInterface::InitialiseMolecule()
         tbliteError();
         return false;
     }
+    m_gradient = Matrix::Zero(m_atomcount, 3);
     m_initialised = true;
     return m_initialised;
 }
@@ -199,10 +200,6 @@ bool TBLiteInterface::UpdateMolecule(const Matrix& geometry)
 bool TBLiteInterface::UpdateMolecule()
 {
     tblite_update_structure_geometry(m_error, m_tblite_mol, m_coord, NULL);
-    if (tblite_check_error(m_error)) {
-        tbliteError();
-        return false;
-    }
     return true;
 }
 
@@ -261,7 +258,7 @@ void TBLiteInterface::ApplySolvation()
     }
 }
 
-double TBLiteInterface::Calculation(double* gradient, bool verbose)
+double TBLiteInterface::Calculation(bool gradient, bool verbose)
 {
     if (verbose)
         tblite_set_context_verbosity(m_ctx, 3);
@@ -289,9 +286,9 @@ double TBLiteInterface::Calculation(double* gradient, bool verbose)
     ApplySolvation();
 
     tblite_set_calculator_accuracy(m_ctx, m_tblite_calc, m_acc);
-    tblite_set_calculator_max_iter(m_ctx, m_tblite_calc, m_maxiter);
+    tblite_set_calculator_max_iter(m_ctx, m_tblite_calc, m_SCFmaxiter);
     tblite_set_calculator_mixer_damping(m_ctx, m_tblite_calc, m_damping);
-    tblite_set_calculator_temperature(m_ctx, m_tblite_calc, m_temp);
+    tblite_set_calculator_temperature(m_ctx, m_tblite_calc, 0);
     tblite_set_calculator_save_integrals(m_ctx, m_tblite_calc, 0);
     tblite_get_singlepoint(m_ctx, m_tblite_mol, m_tblite_calc, m_tblite_res);
     tblite_get_result_energy(m_error, m_tblite_res, &energy);
@@ -336,8 +333,9 @@ double TBLiteInterface::Calculation(double* gradient, bool verbose)
     // double* virial = 0;
     // tblite_get_result_virial(m_error, m_tblite_res, &virial);
     // std::cout << virial << std::endl;
-    if (gradient != NULL) {
-        tblite_get_result_gradient(m_error, m_tblite_res, gradient);
+    if (gradient) {
+        tblite_get_result_gradient(m_error, m_tblite_res, m_gradient.data());
+        m_gradient *= au;
         if (tblite_check_context(m_ctx)) {
             tbliteContextError();
             //     return 0;
@@ -362,12 +360,8 @@ void TBLiteInterface::setMethod(const std::string& method)
 
 Vector TBLiteInterface::Charges() const
 {
-    std::cout << "Charges" << std::endl;
     Eigen::VectorXd charges(m_atomcount);
-    std::cout << m_atomcount << std::endl;
     tblite_get_result_charges(m_error, m_tblite_res, charges.data());
-
-    std::cout << charges << std::endl;
     return charges;
 }
 

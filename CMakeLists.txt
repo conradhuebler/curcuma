@@ -40,7 +40,9 @@ include_directories(SYSTEM  ${PROJECT_SOURCE_DIR}/external/fmt/include
                             ${PROJECT_SOURCE_DIR}/external/ripser
                             ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0
                             ${PROJECT_SOURCE_DIR}/external/cpp-d4/include
-                            ${PROJECT_SOURCE_DIR}/external/)
+                            ${PROJECT_SOURCE_DIR}/external/
+                            ${PROJECT_SOURCE_DIR}/external/ulysses/src/
+                            )
 
 
 include_directories(${PROJECT_SOURCE_DIR} ${PROJECT_BINARY_DIR} )
@@ -164,6 +166,7 @@ set(curcuma_core_SRC
         src/capabilities/simplemd.cpp
         src/capabilities/hessian.cpp
         src/capabilities/qmdfffit.cpp
+        src/core/ulyssesinterface.cpp
         src/core/energycalculator.cpp
         src/core/molecule.cpp
         src/core/fileiterator.cpp
@@ -186,7 +189,17 @@ set(curcuma_core_SRC
     src/capabilities/c_code/interface.c
 )
 add_library(km ${km_SRC})
-target_link_libraries(curcuma_core km)
+
+set(ulysess_SRC
+    src/core/interface/ulysses.cpp
+)
+add_library(ulysses_lib ${ulysess_SRC})
+add_executable(ulysses_helper
+src/helpers/ulysses_helper.cpp
+)
+target_link_libraries(ulysses_helper PUBLIC ulysses_lib)
+
+target_link_libraries(curcuma_core km ulysses_lib)
 
 add_executable(curcuma
         src/main.cpp
@@ -270,6 +283,8 @@ if(USE_TBLITE)
     add_executable(tblite_helper
            src/helpers/tblite_helper.cpp
     )
+
+
     if(C17)
         set_property(TARGET tblite_helper PROPERTY CXX_STANDARD 17)
     else()

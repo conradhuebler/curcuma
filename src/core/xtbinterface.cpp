@@ -39,8 +39,8 @@ XTBInterface::XTBInterface(const json& xtbsettings)
     // std::cout << m_xtbsettings << std::endl;
 
     m_accuracy = m_xtbsettings["xtb_ac"];
-    m_maxiter = m_xtbsettings["xtb_maxiter"];
-    m_temp = m_xtbsettings["xtb_temp"];
+    m_SCFmaxiter = m_xtbsettings["SCFmaxiter"];
+    m_Tele = m_xtbsettings["Tele"];
 }
 
 XTBInterface::~XTBInterface()
@@ -118,6 +118,8 @@ bool XTBInterface::InitialiseMolecule()
     }
     double charge = m_charge;
     int spin = m_spin;
+    m_gradient = Matrix::Zero(m_atomcount, 3);
+
     m_xtb_mol = xtb_newMolecule(m_env, &m_atomcount, m_attyp, m_coord, &charge, &spin, NULL, NULL);
     /*
         char *error;
@@ -190,7 +192,7 @@ void XTBInterface::setMethod(const std::string& method)
         m_method_switch = 66;
 }
 
-double XTBInterface::Calculation(double* gradient, bool verbose)
+double XTBInterface::Calculation(bool gradient, bool verbose)
 {
     double energy = 0;
     if (!m_setup) {
@@ -205,8 +207,8 @@ double XTBInterface::Calculation(double* gradient, bool verbose)
             xtb_loadGFNFF(m_env, m_xtb_mol, m_xtb_calc, NULL);
         }
         xtb_setAccuracy(m_env, m_xtb_calc, m_accuracy);
-        xtb_setMaxIter(m_env, m_xtb_calc, m_maxiter);
-        xtb_setElectronicTemp(m_env, m_xtb_calc, m_temp);
+        xtb_setMaxIter(m_env, m_xtb_calc, m_SCFmaxiter);
+        xtb_setElectronicTemp(m_env, m_xtb_calc, m_Tele);
         m_setup = true;
     }
     xtb_singlepoint(m_env, m_xtb_mol, m_xtb_calc, m_xtb_res);
@@ -216,8 +218,10 @@ double XTBInterface::Calculation(double* gradient, bool verbose)
     }
 
     xtb_getEnergy(m_env, m_xtb_res, &energy);
-    if (gradient != NULL)
-        xtb_getGradient(m_env, m_xtb_res, gradient);
+    if (gradient) {
+        xtb_getGradient(m_env, m_xtb_res, m_gradient.data());
+        m_gradient *= au;
+    }
     return energy;
 }
 

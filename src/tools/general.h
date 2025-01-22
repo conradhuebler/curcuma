@@ -39,6 +39,7 @@
 #include "src/core/elements.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
+using namespace curcuma;
 
 #include "src/tools/formats.h"
 

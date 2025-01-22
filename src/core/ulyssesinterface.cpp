@@ -1,101 +1,68 @@
-#include "interface/abstract_interface.h"
+/*
+ * < C++ Ulysses Interface >
+ * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
 
-#include "GFN.hpp"
+#include "interface/abstract_interface.h"
 
 #include <string>
 #include <vector>
 
+#include "src/core/interface/ulysses.h"
+
 #include "ulyssesinterface.h"
 
-bool UlyssesInterface::InitialiseMolecule(const Molecule& molecule)
+UlyssesInterface::UlyssesInterface(const json& ulyssessettings)
 {
-    reset();
-
-    m_mol = new Molecule(molecule); // Konvertierung zu Ulysses Molecule
-    m_initialised = true;
-
-    return setupCalculation();
+    m_ulyssessettings = MergeJson(UlyssesSettings, ulyssessettings);
+    m_Tele = m_ulyssessettings["Tele"];
+    m_SCFmaxiter = m_ulyssessettings["SCFmaxiter"];
+    m_solvent = m_ulyssessettings["ulysses_solvent"];
+    m_method = m_ulyssessettings["method"];
+    m_ulysses = new UlyssesObject();
 }
 
-bool UlyssesInterface::InitialiseMolecule(const int* attyp, const double* coord,
-    const int natoms, const double charge, const int spin)
+UlyssesInterface::~UlyssesInterface()
 {
+    delete m_ulysses;
 }
 
-bool UlyssesInterface::setupCalculation()
+bool UlyssesInterface::InitialiseMolecule()
 {
+    m_ulysses->setMethod(m_method);
+    m_ulysses->setMolecule(m_geometry, m_atoms, m_charge, m_spin, "C1");
+    return true;
 }
 
-double UlyssesInterface::Calculate(double* gradient, bool verbose)
+bool UlyssesInterface::UpdateMolecule(const Geometry& geometry)
 {
-    if (!m_calculator_setup)
-        return 0.0;
+    m_geometry = geometry;
+    m_ulysses->UpdateGeometry(geometry);
+    return true;
+}
 
-    double energy = m_electron->Calculate(0); // 0 für Standard-Berechnung
-
-    // Lade Charges und Polarizabilities
-    m_charges = m_electron->getQAtoms();
-
-    m_electron->AtomicPolarizabilities(m_polarizabilities, m_charges);
-    m_electron->TotalPolarizability(m_total_polarizability, m_charges);
-
-    if (gradient != nullptr) {
-        // Gradient-Berechnung implementieren wenn nötig
+double UlyssesInterface::Calculation(bool gradient, bool verbose)
+{
+    m_ulysses->setTele(m_Tele);
+    m_ulysses->setMaxIter(m_SCFmaxiter);
+    m_ulysses->Calculate(gradient, verbose);
+    if (gradient) {
+        m_gradient = m_ulysses->Gradient();
+        // std::cout << m_gradient << std::endl;
     }
-
-    return energy;
-}
-
-/*
-std::vector<double> UlyssesInterface::getCharges() const
-{
-    return m_charges;
-}
-
-std::vector<double> UlyssesInterface::getPolarizabilities() const
-{
-    return m_polarizabilities;
-}
-
-double UlyssesInterface::getTotalPolarizability() const
-{
-    return m_total_polarizability;
-}
-
-std::vector<size_t> UlyssesInterface::getAOBasisInfo() const
-{
-    if(!m_calculator_setup)
-        return std::vector<size_t>();
-
-    return m_basis->AtomNAOs(m_mol->Atoms());
-}
-
-void UlyssesInterface::reset()
-{
-    delete m_mol;
-    delete m_basis;
-    delete m_electron;
-
-    m_mol = nullptr;
-    m_basis = nullptr;
-    m_electron = nullptr;
-
-    m_initialised = false;
-    m_calculator_setup = false;
-
-    m_charges.clear();
-    m_polarizabilities.clear();
-    m_total_polarizability = 0.0;
-}
-*/
-bool UlyssesInterface::UpdateMolecule(const Molecule& molecule)
-{
-    // Implementiere Molekül-Update
-    return true;
-}
-
-bool UlyssesInterface::UpdateMolecule(const double* coord)
-{
-    // Implementiere Koordinaten-Update
-    return true;
+    return m_ulysses->Energy();
 }

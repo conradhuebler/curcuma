@@ -27,8 +27,8 @@
 
 static json XTBSettings{
     { "xtb_ac", 2 },
-    { "xtb_maxiter", 100 },
-    { "xtb_temp", 298 }
+    { "SCFmaxiter", 100 },
+    { "Tele", 300 },
 };
 
 class UFF;
@@ -54,7 +54,7 @@ public:
      * 1 = xtb GFN 1
      * 2 = xtb GFN 2
      * */
-    double Calculation(double* gradient = 0, bool verbose = false);
+    double Calculation(bool gradient = 0, bool verbose = false);
 
     void clear();
 
@@ -70,8 +70,8 @@ private:
     double m_thr = 1.0e-10;
     double* m_coord;
     int* m_attyp;
-    int m_accuracy = 1, m_maxiter = 100;
-    double m_temp = 298;
+    int m_accuracy = 1, m_SCFmaxiter = 100;
+    double m_Tele = 298;
     xtb_TEnvironment m_env = NULL;
     xtb_TMolecule m_xtb_mol = NULL;
     xtb_TCalculator m_xtb_calc = NULL;
