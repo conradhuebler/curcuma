@@ -365,21 +365,33 @@ void CurcumaOpt::WriteMO(int n, int m)
 {
     std::ofstream file(Basename() + ".inc");
     std::ostream& out = std::cout;
+    double spacing = 0.1;
     auto write_tikz = [&](std::ostream& os) {
         os << "\\begin{tikzpicture}\n";
         int highest_occupied_orbital = m_num_electrons / 2 - 1;
+        int lowest_unoccupied_orbital = highest_occupied_orbital + 1;
         int start_orbital = std::max(0, highest_occupied_orbital - m);
         int end_orbital = std::min(static_cast<int>(m_orbital_energies.size()), highest_occupied_orbital + n + 1);
 
         for (int i = start_orbital; i < end_orbital; ++i) {
             double energy = m_orbital_energies[i] * m_mo_scale;
             os << std::fixed << std::setprecision(4);
-            os << "\t\\draw[thick] (1," << energy << ") -- (0.0," << energy << ");\n";
-            os << "\t\\node at (1.1," << energy << ") {\\tiny " << m_orbital_energies[i] << "};\n";
+
+            // Check if the orbital is HOMO or LUMO
+            if (i == highest_occupied_orbital) {
+                os << "\t\\draw[thick, color=red] (1," << energy << ") -- (0.0," << energy << ");\n";
+                os << "\t\\node[label=below:{\\tiny " << m_orbital_energies[i] << "}] at (0.5," << energy << ") {};\n";
+            } else if (i == lowest_unoccupied_orbital) {
+                os << "\t\\draw[thick, color=blue] (1," << energy << ") -- (0.0," << energy << ");\n";
+                os << "\t\\node[label=below:{\\tiny " << m_orbital_energies[i] << "}] at (0.5," << energy << ") {};\n";
+            } else {
+                os << "\t\\draw[thick] (1," << energy << ") -- (0.0," << energy << ");\n";
+                os << "\t\\node[label=below:{\\tiny " << m_orbital_energies[i] << "}] at (0.5," << energy << ") {};\n";
+            }
 
             if (i <= highest_occupied_orbital) {
-                os << "\t\\draw[thick,<-, color=orange] (0.25," << energy << ") -- (0.25," << energy << ");\n";
-                os << "\t\\draw[thick,->, color=orange] (0.75," << energy << ") -- (0.75," << energy << ");\n";
+                os << "\t\\draw[thick,<-, color=orange] (0.25," << energy + spacing << ") -- (0.25," << energy - spacing << ");\n";
+                os << "\t\\draw[thick,->, color=orange] (0.75," << energy + spacing << ") -- (0.75," << energy - spacing << ");\n";
             }
         }
         os << "\t\\node at (0.5,-1) {{" + Basename() + "}};\n";
