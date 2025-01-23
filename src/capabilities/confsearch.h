@@ -31,7 +31,7 @@
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
 
 #include "src/capabilities/curcumamethod.h"
-
+using namespace curcuma;
 static const nlohmann::json ConfSearchJson{
     { "method", "uff" },
     { "startT", 600 },
@@ -92,7 +92,7 @@ static const nlohmann::json ConfSearchJson{
     { "wall_beta", 6 }
 };
 
-class Molecule;
+class curcuma::Molecule;
 
 class ConfSearch : public CurcumaMethod {
 public:

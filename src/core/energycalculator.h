@@ -1,6 +1,6 @@
 /*
  * < General Energy and Gradient Calculator >
- * Copyright (C) 2022 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2022 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@
 
 #pragma once
 
-#include "src/tools/general.h"
+// #include "src/tools/general.h"
 
 #ifdef USE_TBLITE
 #include "src/core/tbliteinterface.h"
@@ -38,9 +38,10 @@
 #endif
 
 #include "src/core/eht.h"
-#include "src/core/eigen_uff.h"
+// #include "src/core/eigen_uff.h"
 #include "src/core/forcefield.h"
-#include "src/core/qmdff.h"
+// #include "src/core/qmdff.h"
+#include "src/core/ulyssesinterface.h"
 
 #include <functional>
 
@@ -48,7 +49,13 @@
 using json = nlohmann::json;
 
 static json EnergyCalculatorJson{
-    { "param_file", "none" }
+    { "param_file", "none" },
+    { "multi", 1},
+    { "method", "uff"},
+    { "SCFmaxiter", 100 },
+    { "Tele", 300 },
+    { "solvent", "none"}
+
 };
 
 class EnergyCalculator {
@@ -56,7 +63,7 @@ public:
     EnergyCalculator(const std::string& method, const json& controller);
     ~EnergyCalculator();
 
-    void setMolecule(const Molecule& molecule);
+    void setMolecule(const Mol& mol);
 
     void updateGeometry(const double* coord);
     void updateGeometry(const std::vector<double>& geometry);
@@ -64,49 +71,15 @@ public:
     void updateGeometry(const Matrix& geometry);
     void updateGeometry(const Eigen::VectorXd& geometry);
 
-    void getGradient(double* coord);
-
-    Matrix getGradient() const { return m_gradient; }
-
-    Matrix Gradient() const;
+    Matrix Gradient() const { return m_gradient; }
 
     double CalculateEnergy(bool gradient = false, bool verbose = false);
 
     bool HasNan() const { return m_containsNaN; }
 
     bool Error() const { return m_error; }
-#ifdef USE_TBLITE
-    TBLiteInterface* getTBLiterInterface() const
-    {
-        return m_tblite;
-    }
-#endif
 
-#ifdef USE_XTB
-    XTBInterface* getXTBInterface() const
-    {
-        return m_xtb;
-    }
-#endif
-
-#ifdef USE_D3
-    DFTD3Interface* getD3Interface() const
-    {
-        return m_d3;
-    }
-#endif
-
-#ifdef USE_D4
-    DFTD4Interface* getD4Interface() const
-    {
-        return m_d4;
-    }
-#endif
-
-    QMDFF* getQMDFFInterface() const
-    {
-        return m_qmdff;
-    }
+    QMInterface* Interface() const { return m_qminterface; }
 
     inline void setParameter(const json& parameter)
     {
@@ -119,13 +92,15 @@ public:
     Vector Energies() const { return m_orbital_energies; }
     Vector OrbitalOccuptations() const { return m_orbital_occupation; }
 
-    std::vector<double> Charges() const;
+    Vector Charges() const;
     Position Dipole() const;
 
     std::vector<std::vector<double>> BondOrders() const;
     int NumElectrons() const { return m_num_electrons; }
 
 private:
+    int SwitchMethod(const std::string& method);
+
     void InitialiseUFF();
     void CalculateUFF(bool gradient, bool verbose = false);
 
@@ -134,6 +109,9 @@ private:
 
     void InitialiseXTB();
     void CalculateXTB(bool gradient, bool verbose = false);
+
+    void InitialiseUlysses();
+    void CalculateUlysses(bool gradient, bool verbose = false);
 
     void InitialiseD4();
     void CalculateD4(bool gradient, bool verbose = false);
@@ -149,45 +127,39 @@ private:
 
     json m_controller;
 
-#ifdef USE_TBLITE
-    TBLiteInterface* m_tblite = NULL;
-#endif
+    QMInterface* m_qminterface = NULL;
+    Mol m_mol;
+    // eigenUFF* m_uff = NULL;// will be switch_method 8
+    // QMDFF* m_qmdff = NULL;// will be switch_method 7
+    ForceField* m_forcefield = NULL; // will be switch_method 0
+    EHT* m_eht = NULL; // will be switch_method 6
 
-#ifdef USE_XTB
-    XTBInterface* m_xtb = NULL;
-#endif
-#ifdef USE_D3
-    DFTD3Interface* m_d3 = NULL;
-#endif
-#ifdef USE_D4
-    DFTD4Interface* m_d4 = NULL;
-#endif
-
-    eigenUFF* m_uff = NULL;
-    QMDFF* m_qmdff = NULL;
-    ForceField* m_forcefield = NULL;
-    EHT* m_eht = NULL;
     StringList m_uff_methods = { "fuff" };
     StringList m_ff_methods = { "uff", "uff-d3", "qmdff" };
     StringList m_qmdff_method = { "fqmdff" };
     StringList m_tblite_methods = { "ipea1", "gfn1", "gfn2" };
     StringList m_xtb_methods = { "gfnff", "xtb-gfn1", "xtb-gfn2" };
+    StringList m_ulysses_methods = { "ugfn2", "GFN2L", "pm3", "PM3PDDG", "MNDOPDDG", "PM3BP", "RM1", "AM1", "MNDO", "MNDOd", "pm6" };
+
     StringList m_d3_methods = { "d3" };
     StringList m_d4_methods = { "d4" };
 
     std::function<void(bool, bool)> m_ecengine;
-    std::function<std::vector<double>()> m_charges;
+    Vector m_charges;
     std::function<Position()> m_dipole;
     std::function<std::vector<std::vector<double>>()> m_bonds;
     json m_parameter;
     std::string m_method, m_param_file;
     Matrix m_geometry, m_gradient, m_molecular_orbitals;
     Vector m_orbital_energies, m_orbital_occupation;
-
-    double m_energy;
+    Vector m_xtb_gradient;
+    double m_energy, m_Tele = 300;
     double *m_coord, *m_grad;
 
     int m_atoms, m_num_electrons = 0;
+    int m_mult = 1, m_SCFmaxiter = 100;
+    std::string m_solvent = "none";
+
     int m_gfn = 2;
     int* m_atom_type;
 

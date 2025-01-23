@@ -17,6 +17,7 @@ git clones automatically some submodules.
 - [eigen](https://gitlab.com/libeigen/eigen) provides eigen C++ library for linear algebra. Eigen is not downloaded automatically, but will be fetched and updated if the build scripts in the **scripts** subdirectory are used.
 - [fmt](https://github.com/fmtlib/fmt) formatted console output
 - [plumped](https://github.com/plumed/plumed2) Support for Metadynamics, must be compiled manually and enabled manually (Option USE_Plumed)
+- [ulysses](https://gitlab.com/siriius/ulysses) Support for several semiemprical models via ulysses
 
 Additionally, [nlohmann/json](https://github.com/nlohmann/json) is obtained via cmake.
 

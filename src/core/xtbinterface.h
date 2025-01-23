@@ -1,6 +1,6 @@
 /*
  * < C++ XTB and tblite Interface >
- * Copyright (C) 2020 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,31 +19,36 @@
 
 #pragma once
 
+#include "interface/abstract_interface.h"
+
 #include "src/tools/general.h"
 
 #include "external/xtb/include/xtb.h"
 
-#include "src/core/molecule.h"
-
 static json XTBSettings{
     { "xtb_ac", 2 },
-    { "xtb_maxiter", 100 },
-    { "xtb_temp", 298 }
+    { "SCFmaxiter", 100 },
+    { "Tele", 300 },
+    { "spin", 0}
+
 };
 
 class UFF;
 
-class XTBInterface {
+class XTBInterface : public QMInterface {
 public:
     XTBInterface(const json& xtbsettings = XTBSettings);
     ~XTBInterface();
 
-    bool InitialiseMolecule(const Molecule& molecule);
-    bool InitialiseMolecule(const Molecule* molecule);
+    bool InitialiseMolecule(const Mol& molecule);
+    bool InitialiseMolecule(const Mol* molecule);
     bool InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge, const int spin);
-
-    bool UpdateMolecule(const Molecule& molecule);
+    bool InitialiseMolecule();
+    bool UpdateMolecule(const Mol& molecule);
+    bool UpdateMolecule(const Mol* mol);
     bool UpdateMolecule(const double* coord);
+    bool UpdateMolecule(const Matrix& geometry);
+    bool UpdateMolecule();
 
     /* int parameter
      * 66 = xtb GFN FF
@@ -51,21 +56,24 @@ public:
      * 1 = xtb GFN 1
      * 2 = xtb GFN 2
      * */
-    double GFNCalculation(int parameter = 2, double* grad = 0);
+    double Calculation(bool gradient = 0, bool verbose = false);
 
     void clear();
-    std::vector<double> Charges() const;
-    std::vector<double> Dipole() const;
 
-    std::vector<std::vector<double>> BondOrders() const;
+    Vector Charges() const;
+    Vector Dipole() const;
+    Vector BondOrders() const;
+    Vector OrbitalEnergies() const;
+    Vector OrbitalOccupations() const;
+
+    void setMethod(const std::string& method) override;
 
 private:
-    int m_atomcount = 0;
     double m_thr = 1.0e-10;
     double* m_coord;
     int* m_attyp;
-    int m_accuracy = 1, m_maxiter = 100;
-    double m_temp = 298;
+    int m_accuracy = 1, m_SCFmaxiter = 100;
+    double m_Tele = 298;
     xtb_TEnvironment m_env = NULL;
     xtb_TMolecule m_xtb_mol = NULL;
     xtb_TCalculator m_xtb_calc = NULL;

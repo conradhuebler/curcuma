@@ -19,71 +19,77 @@
 
 #pragma once
 
-#include "src/tools/general.h"
+#include "src/core/global.h"
 
 #ifndef tblite_delete
 #include "tblite.h"
 #endif
 
-#include "src/core/molecule.h"
+#include "src/core/interface/abstract_interface.h"
 
 static json TBLiteSettings{
     { "tb_acc", 1 },
-    { "tb_max_iter", 250 },
+    { "SCFmaxiter", 100 },
     { "tb_damping", 0.4 },
-    { "tb_temp", 9.500e-4 },
+    { "Tele", 300 },
     { "tb_verbose", 0 },
     { "tb_guess", "SAD" },
-    { "cpcm_solv", "none" },
-    { "alpb_solv", "none" },
-    { "cpcm_eps", -1 },
-    { "alpb_eps", -1 }
+    { "solv", "none" },
+    { "solv_eps", -1 },
+    { "spin", 0}
 };
 
-class TBLiteInterface {
+class TBLiteInterface : public QMInterface {
 public:
     TBLiteInterface(const json& tblitesettings = TBLiteSettings);
     ~TBLiteInterface();
 
-    bool InitialiseMolecule(const Molecule& molecule);
-    bool InitialiseMolecule(const Molecule* molecule);
-    bool InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge, const int spin);
+    bool InitialiseMolecule(const Mol& mol) override;
+    bool InitialiseMolecule(const Mol* mol) override;
+    bool InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge, const int spin) override;
+    bool InitialiseMolecule();
 
-    bool UpdateMolecule(const Molecule& molecule);
-    bool UpdateMolecule(const double* coord);
+    bool UpdateMolecule(const Mol& mol) override;
+    bool UpdateMolecule(const Mol* mol) override;
+    bool UpdateMolecule(const Matrix& geometry) override;
+    bool UpdateMolecule(const double* coord) override;
+    bool UpdateMolecule();
 
-    bool Error() { return m_error_count >= 10; }
-    double GFNCalculation(int parameter = 2, double* grad = 0);
+    bool Error() override { return m_error_count >= 10; }
+    double Calculation(bool gradient = 0, bool verbose = false);
 
-    void clear();
+    void clear() override;
 
-    std::vector<double> Charges() const;
-    std::vector<double> Dipole() const;
+    Vector Charges() const override;
+    Vector Dipole() const override;
 
-    std::vector<std::vector<double>> BondOrders() const;
-    Vector OrbitalEnergies() const;
-    Vector OrbitalOccupations() const;
+    Vector BondOrders() const;
+    Vector OrbitalEnergies() const override;
+    Vector OrbitalOccupations() const override;
+    void setMethod(const std::string& method) override;
 
 private:
     void ApplySolvation();
 
     void tbliteError();
     void tbliteContextError();
-    Molecule m_molecule;
     double* m_coord;
     int* m_attyp;
 
-    int m_atomcount = 0;
     double m_thr = 1.0e-10;
     int m_acc = 2;
-    int m_maxiter = 100;
+    int m_SCFmaxiter = 100;
     int m_verbose = 0;
     int m_guess = 0;
     int m_error_count = 0;
     double m_damping = 0.5;
-    double m_temp = 1000;
-    double m_cpcm_eps = -1, m_alpb_eps = -1;
-    char *m_cpcm_solv = "none", *m_alpb_solv = "none";
+    double m_Tele = 298;
+    double m_solv_eps = -1;
+    char* m_alpb_solv = NULL;
+    int m_gb_type = 0, m_born_kernel = 1;
+    int m_solv_param = 12;
+    int m_solv_ref = 1;
+
     bool m_cpcm = false, m_alpb = false;
     tblite_error m_error = NULL;
     tblite_structure m_tblite_mol = NULL;

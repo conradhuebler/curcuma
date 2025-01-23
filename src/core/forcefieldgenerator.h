@@ -144,7 +144,7 @@ class ForceFieldGenerator {
 public:
     ForceFieldGenerator(const json& controller);
 
-    void setMolecule(const Molecule& molecule);
+    void setMolecule(const Mol& mol);
     void Generate(const std::vector<std::pair<int, int>>& formed_bonds = std::vector<std::pair<int, int>>());
     json getParameter();
 
@@ -168,15 +168,18 @@ private:
 
     json writeUFF();
 
-    Molecule m_molecule;
+    Mol m_mol;
+    int m_atoms;
+
     Matrix m_topo, m_geometry, m_distance;
 
     StringList m_uff_methods = { "uff", "uff-d3" };
     StringList m_qmdff_methods = { "qmdff", "quff" };
+    Vector m_partial_charges;
 
     std::vector<std::vector<int>> m_stored_bonds;
     std::vector<std::vector<int>> m_identified_rings;
-    std::vector<int> m_atom_types, m_coordination;
+    std::vector<int> m_atom_types, m_ff_atom_types, m_coordination;
     std::vector<std::set<int>> m_ignored_vdw, m_1_4_charges;
     std::vector<json> m_bonds, m_angles, m_dihedrals, m_inversions, m_vdws, m_esps;
     double m_uff_bond_force = 1.0584 /* in Eh kcal/mol = 664.12 */, m_uff_angle_force = 1.0584 /* in Eh kcal/mol = 664.12 */, m_uff_dihedral_force = 1, m_uff_inversion_force = 1, m_vdw_force = 1, m_scaling = 1.4;

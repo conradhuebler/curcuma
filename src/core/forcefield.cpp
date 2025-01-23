@@ -36,6 +36,11 @@ ForceField::ForceField(const json& controller)
     m_gradient_type = parameter["gradient"];
 }
 
+ForceField::~ForceField()
+{
+    delete m_threadpool;
+}
+
 void ForceField::UpdateGeometry(const Matrix& geometry)
 {
     m_geometry = geometry;

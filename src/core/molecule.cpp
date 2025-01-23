@@ -167,6 +167,21 @@ Molecule::~Molecule()
 {
 }
 
+Mol Molecule::getMolInfo() const
+{
+    Mol mol;
+    mol.m_energy = m_energy;
+    mol.m_spin = m_spin;
+    mol.m_number_atoms = AtomCount();
+    mol.m_charge = m_charge;
+    mol.m_commentline = m_name;
+    mol.m_geometry = m_geometry;
+    mol.m_bonds = m_bonds;
+    mol.m_atoms = m_atoms;
+    mol.m_partial_charges = m_charges;
+    return mol;
+}
+
 json Molecule::ExportJson() const
 {
     json structure;
@@ -174,7 +189,7 @@ json Molecule::ExportJson() const
     structure["elements"] = Tools::Vector2String(m_atoms);
     structure["name"] = m_name;
     for (int i = 0; i < m_atoms.size(); ++i) {
-        structure["atom" + std::to_string(i)] = Tools::DoubleVector2String({ m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2) });
+        structure["atom" + std::to_string(i)] = Tools::DoubleVector2String(std::vector<double>{ m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2) });
     }
     structure["charge"] = m_charge;
     return structure;

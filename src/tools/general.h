@@ -39,6 +39,7 @@
 #include "src/core/elements.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
+using namespace curcuma;
 
 #include "src/tools/formats.h"
 
@@ -273,12 +274,12 @@ inline double ShannonEntropy(const std::vector<std::pair<double, double>>& histo
     return -1 * entropy;
 }
 
-inline std::string Vector2String(const std::vector<int>& vector)
+inline std::string Vector2String(const std::vector<int>& vector, const std::string& delim = "|")
 {
     std::string result = " ";
 
     for (auto i : vector)
-        result += std::to_string(i) + "|";
+        result += std::to_string(i) + delim;
     result.pop_back();
 
     result += " ";
@@ -286,12 +287,25 @@ inline std::string Vector2String(const std::vector<int>& vector)
     return result;
 }
 
-inline std::string DoubleVector2String(const std::vector<double>& vector)
+inline std::string DoubleVector2String(const std::vector<double>& vector, const std::string& delim = "|")
 {
     std::string result = "";
 
     for (auto i : vector)
-        result += std::to_string(i) + "|";
+        result += std::to_string(i) + delim;
+    result.pop_back();
+
+    result += " ";
+
+    return result;
+}
+
+inline std::string DoubleVector2String(const Vector& vector, const std::string& delim = "|")
+{
+    std::string result = "";
+
+    for (int i = 0; i < vector.rows(); ++i)
+        result += std::to_string(vector[i]) + delim;
     result.pop_back();
 
     result += " ";
@@ -328,6 +342,22 @@ inline std::vector<int> String2Vector(const std::string& string)
         }
     }
     return vector;
+}
+
+inline Vector String2EigenVector(const std::string& string, const char* delim = "|")
+{
+    std::vector<double> tmpvector;
+
+    StringList tmp = SplitString(string, delim);
+    for (auto i : tmp) {
+        try {
+            tmpvector.push_back(std::stod(i));
+        } catch (const std::invalid_argument& argument) {
+            continue;
+        }
+    }
+    return Eigen::Map<Vector>(tmpvector.data(), tmpvector.size());
+    ;
 }
 
 inline std::string VectorVector2String(const std::vector<std::vector<int>>& vector)

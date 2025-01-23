@@ -1,6 +1,6 @@
 /*
  * < General Energy and Gradient Calculator >
- * Copyright (C) 2022 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2022 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -39,9 +39,11 @@ namespace fs = std::filesystem;
 
 EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller)
     : m_method(method)
-
 {
-    m_controller = controller;
+    std::transform(m_method.begin(), m_method.end(), m_method.begin(), [](unsigned char c) { return std::tolower(c); });
+
+    m_controller = MergeJson(EnergyCalculatorJson ,controller);
+
     if (controller.contains("param_file")) {
         m_param_file = controller["param_file"];
     }
@@ -50,195 +52,207 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
         m_writeparam = controller["write_param"];
     }
 
-    m_charges = []() {
-        return std::vector<double>{};
-    };
-    m_dipole = []() {
-        return Position{};
-    };
     m_bonds = []() {
         return std::vector<std::vector<double>>{ {} };
     };
 
-    if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) { // UFF energy calculator requested
-        m_uff = new eigenUFF(controller);
-        m_ecengine = [this](bool gradient, bool verbose) {
-            this->CalculateUFF(gradient, verbose);
-        };
-    } else if (std::find(m_tblite_methods.begin(), m_tblite_methods.end(), m_method) != m_tblite_methods.end()) { // TBLite energy calculator requested
-#ifdef USE_TBLITE
-        m_tblite = new TBLiteInterface(controller);
-        m_ecengine = [this](bool gradient, bool verbose) {
-            this->CalculateTBlite(gradient, verbose);
-            m_error = this->m_tblite->Error();
-        };
-        m_charges = [this]() {
-            return this->m_tblite->Charges();
-        };
-        m_dipole = [this]() {
-            Position dipole;
-            dipole(0) = this->m_tblite->Dipole()[0];
-            dipole(1) = this->m_tblite->Dipole()[1];
-            dipole(2) = this->m_tblite->Dipole()[2];
+    m_mult = m_controller["multi"];
+    m_SCFmaxiter = m_controller["SCFmaxiter"];
+    m_solvent = m_controller["solvent"];
+    m_Tele = m_controller["Tele"];
 
-            return dipole;
-        };
-        m_bonds = [this]() {
-            return this->m_tblite->BondOrders();
-        };
-#else
-        std::cout << "TBlite was not included ..." << std::endl;
-        exit(1);
-#endif
+    switch (SwitchMethod(m_method)) {
+    case 8:
+        /*
+             m_qmdff = new QMDFF(controller);
+             if (m_parameter.size())
+                 m_qmdff->setParameter(m_parameter);
+             m_ecengine = [this](bool gradient, bool verbose) {
+                 this->CalculateQMDFF(gradient, verbose);
+             };
+             */
+        break;
+    case 7:
+        /*
+            m_uff = new eigenUFF(controller);
+            m_ecengine = [this](bool gradient, bool verbose) {
+                this->CalculateUFF(gradient, verbose);
+            };*/
+        break;
 
-    } else if (std::find(m_xtb_methods.begin(), m_xtb_methods.end(), m_method) != m_xtb_methods.end()) { // XTB energy calculator requested
+    case 6:
+        delete m_eht;
+        break;
+
+    case 5:
+        // m_d4 = new DFTD4Interface(controller);
+        //  m_ecengine = [this](bool gradient, bool verbose) {
+        //      this->CalculateD4(gradient, verbose);
+        //  };
+        break;
+
+    case 4:
+        m_qminterface = new DFTD3Interface(controller);
+        m_ecengine = [this](bool gradient, bool verbose) {
+            this->CalculateD3(gradient, verbose);
+        };
+        break;
+
+    case 3:
+        m_qminterface = new UlyssesInterface(controller);
+        m_qminterface->setMult(m_mult);
+
+        m_qminterface->setMethod(m_method);
+        m_ecengine = [this](bool gradient, bool verbose) {
+            this->CalculateUlysses(gradient, verbose);
+        };
+    break;
+
+    case 2:
 #ifdef USE_XTB
-        m_xtb = new XTBInterface(controller);
+        m_qminterface = new XTBInterface(m_controller);
+        m_qminterface->setMult(m_mult);
+        m_qminterface->setMethod(m_method);
         m_ecengine = [this](bool gradient, bool verbose) {
             this->CalculateXTB(gradient, verbose);
-        };
-        m_charges = [this]() {
-            return this->m_xtb->Charges();
-        };
-        m_dipole = [this]() {
-            Position dipole;
-            dipole(0) = this->m_xtb->Dipole()[0];
-            dipole(1) = this->m_xtb->Dipole()[1];
-            dipole(2) = this->m_xtb->Dipole()[2];
-
-            return dipole;
-        };
-        m_bonds = [this]() {
-            return this->m_xtb->BondOrders();
         };
 #else
         std::cout << "XTB was not included ..." << std::endl;
         exit(1);
 #endif
-    } else if (std::find(m_d3_methods.begin(), m_d3_methods.end(), m_method) != m_d3_methods.end()) { // Just D4 energy calculator requested
-#ifdef USE_D3
-        m_d3 = new DFTD3Interface(controller);
-        m_ecengine = [this](bool gradient, bool verbose) {
-            this->CalculateD3(gradient, verbose);
-        };
-#else
-        std::cout << "D4 was not included ..." << std::endl;
-        exit(1);
-#endif
-    } else if (std::find(m_d4_methods.begin(), m_d4_methods.end(), m_method) != m_d4_methods.end()) { // Just D4 energy calculator requested
-#ifdef USE_D4
-        m_d4 = new DFTD4Interface(controller);
-        m_ecengine = [this](bool gradient, bool verbose) {
-            this->CalculateD4(gradient, verbose);
-        };
-#else
-        std::cout << "D4 was not included ..." << std::endl;
-        exit(1);
-#endif
-    } else if (std::find(m_qmdff_method.begin(), m_qmdff_method.end(), m_method) != m_qmdff_method.end()) { // Just D4 energy calculator requested
-        m_qmdff = new QMDFF(controller);
-        if (m_parameter.size())
-            m_qmdff->setParameter(m_parameter);
-        m_ecengine = [this](bool gradient, bool verbose) {
-            this->CalculateQMDFF(gradient, verbose);
-        };
+    break;
 
-    } else if (std::find(m_ff_methods.begin(), m_ff_methods.end(), m_method) != m_ff_methods.end()) { // Just D4 energy calculator requested
+    case 1:
+        m_qminterface = new TBLiteInterface(m_controller);
+        m_qminterface->setMult(m_mult);
+
+        m_qminterface->setMethod(m_method);
+
+        m_ecengine = [this](bool gradient, bool verbose) {
+            this->CalculateTBlite(gradient, verbose);
+            m_error = this->m_qminterface->Error();
+        };
+        /*
+        m_bonds = [this]() {
+            return this->m_tblite->BondOrders();
+        };
+      */
+        break;
+
+    case 0:
+    default:
         m_forcefield = new ForceField(controller);
         m_ecengine = [this](bool gradient, bool verbose) {
             this->CalculateFF(gradient, verbose);
         };
-
-    } else if (m_method.compare("eht") == 0) {
-        m_eht = new EHT();
-        m_ecengine = [this](bool gradient, bool verbose) {
-            this->m_eht->CalculateEHT(gradient, verbose);
-            m_orbital_energies = this->m_eht->Energies();
-            m_num_electrons = this->m_eht->NumElectrons();
-        };
-    } else { // Fall back to UFF?
-        m_uff = new eigenUFF(controller);
+        break;
     }
 }
 
 EnergyCalculator::~EnergyCalculator()
 {
-    if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) { // UFF energy calculator requested
-        delete m_uff;
-    } else if (std::find(m_tblite_methods.begin(), m_tblite_methods.end(), m_method) != m_tblite_methods.end()) { // TBLite energy calculator requested
-#ifdef USE_TBLITE
-        delete m_tblite;
-#endif
+    switch (SwitchMethod(m_method)) {
+    case 8:
+        // delete m_qmdff;
+        break;
+    case 7:
+        //  delete m_uff;
+        break;
 
-    } else if (std::find(m_xtb_methods.begin(), m_xtb_methods.end(), m_method) != m_xtb_methods.end()) { // XTB energy calculator requested
-#ifdef USE_XTB
-        delete m_xtb;
-#endif
-    } else if (std::find(m_d3_methods.begin(), m_d3_methods.end(), m_method) != m_d3_methods.end()) { // XTB energy calculator requested
-#ifdef USE_D3
-        delete m_d3;
-#endif
-    } else if (std::find(m_d4_methods.begin(), m_d4_methods.end(), m_method) != m_d4_methods.end()) { // XTB energy calculator requested
-#ifdef USE_D4
-        delete m_d4;
-#endif
-    } else if (std::find(m_qmdff_method.begin(), m_qmdff_method.end(), m_method) != m_qmdff_method.end()) { // Just D4 energy calculator requested
-        delete m_qmdff;
-    } else { // Fall back to UFF?
-        delete m_uff;
+    case 6:
+        delete m_eht;
+        break;
+
+    case 5:
+        //    delete m_d4;
+        break;
+
+    case 4:
+        delete m_qminterface;
+        break;
+
+    case 3:
+        delete m_qminterface;
+        break;
+
+    case 2:
+        delete m_qminterface;
+        break;
+
+    case 1:
+        delete m_qminterface;
+        break;
+
+    case 0:
+    default:
+        delete m_forcefield;
+        break;
     }
+    // delete[] m_coord;
+    // delete[] m_grad;
 }
 
-void EnergyCalculator::setMolecule(const Molecule& molecule)
+void EnergyCalculator::setMolecule(const Mol& mol)
 {
-    m_atoms = molecule.AtomCount();
+    m_mol = mol;
+    m_atoms = mol.m_number_atoms;
+    m_geometry = mol.m_geometry;
+    m_gradient = Eigen::MatrixXd::Zero(m_atoms, 3);
+    m_xtb_gradient = Eigen::VectorXd::Zero(3 * m_atoms);
 
+    /*
     std::vector<int> atoms = molecule.Atoms();
     m_coord = new double[3 * m_atoms];
     m_grad = new double[3 * m_atoms];
     m_gradient = Eigen::MatrixXd::Zero(m_atoms, 3);
     m_geometry = molecule.getGeometry();
-    if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) { // UFF energy calculator requested
-        m_uff->setMolecule(atoms, m_geometry);
-        m_uff->Initialise(molecule.Bonds());
-    } else if (std::find(m_tblite_methods.begin(), m_tblite_methods.end(), m_method) != m_tblite_methods.end()) { // TBLite energy calculator requested
-#ifdef USE_TBLITE
-        m_tblite->InitialiseMolecule(molecule);
-        if (m_method.compare("gfn1") == 0)
-            m_gfn = 1;
-        else if (m_method.compare("gfn2") == 0)
-            m_gfn = 2;
-#endif
+    */
 
-    } else if (std::find(m_xtb_methods.begin(), m_xtb_methods.end(), m_method) != m_xtb_methods.end()) { // XTB energy calculator requested
-#ifdef USE_XTB
-        m_xtb->InitialiseMolecule(molecule);
-        if (m_method.compare("xtb-gfn1") == 0)
-            m_gfn = 1;
-        else if (m_method.compare("xtb-gfn2") == 0)
-            m_gfn = 2;
-        else if (m_method.compare("xtb-gfn0") == 0)
-            m_gfn = 0;
-        else if (m_method.compare("gfnff") == 0)
-            m_gfn = 66;
-#endif
-    } else if (std::find(m_d3_methods.begin(), m_d3_methods.end(), m_method) != m_d3_methods.end()) { // D3 energy calculator requested
-#ifdef USE_D3
-        m_d3->InitialiseMolecule(molecule.Atoms());
-#endif
-    } else if (std::find(m_d4_methods.begin(), m_d4_methods.end(), m_method) != m_d4_methods.end()) { // D4 energy calculator requested
+    switch (SwitchMethod(m_method)) {
+    case 8:
+        // m_qmdff->setMolecule(m_atoms, m_geometry);
+        // m_qmdff->Initialise();
+        break;
+    case 7:
+
+        break;
+
+    case 6:
+        m_eht->setMolecule(mol);
+        m_eht->Initialise();
+        break;
+
+    case 5:
 #ifdef USE_D4
-        m_d4->InitialiseMolecule(molecule, 1 / au);
+        static_cast<DFTD4Interface*>(m_qminterface)->InitialiseMolecule(mol, 1 / au);
 #endif
-    } else if (std::find(m_qmdff_method.begin(), m_qmdff_method.end(), m_method) != m_qmdff_method.end()) { //
-        m_qmdff->setMolecule(atoms, m_geometry);
-        m_qmdff->Initialise();
+        break;
 
-    } else if (std::find(m_ff_methods.begin(), m_ff_methods.end(), m_method) != m_ff_methods.end()) { //
+    case 4:
+        static_cast<DFTD3Interface*>(m_qminterface)->InitialiseMolecule(mol.m_atoms);
+        break;
+
+    case 3:
+        m_qminterface->InitialiseMolecule(mol);
+        break;
+
+    case 2:
+        m_qminterface->InitialiseMolecule(mol);
+        m_qminterface->setMethod(m_method);
+        break;
+
+    case 1:
+        m_qminterface->InitialiseMolecule(mol);
+        m_qminterface->setMethod(m_method);
+
+        break;
+
+    case 0:
+    default:
         if (m_parameter.size() == 0) {
             if (!std::filesystem::exists(m_param_file)) {
                 ForceFieldGenerator ff(m_controller);
-                ff.setMolecule(molecule);
+                ff.setMolecule(mol);
                 ff.Generate();
                 m_parameter = ff.getParameter();
                 if (m_writeparam) {
@@ -254,40 +268,143 @@ void EnergyCalculator::setMolecule(const Molecule& molecule)
                 }
             }
         }
-        m_forcefield->setAtomTypes(molecule.Atoms());
+        m_forcefield->setAtomTypes(mol.m_atoms);
 
         m_forcefield->setParameter(m_parameter);
-
-    } else if (m_method.compare("eht") == 0) {
-        m_eht->setMolecule(molecule);
-        // m_eht->Initialise();
-    } else {
-        // Fall back to UFF?
+        break;
     }
     m_initialised = true;
 }
 
+int EnergyCalculator::SwitchMethod(const std::string& method)
+{
+    int switch_method = 0;
+    bool find_ulysses = false, find_tblite = false, find_xtb = false, find_d3 = false, find_d4 = false, find_qmdff = false, find_ff = false, find_eht = false;
+    for(auto i : m_ulysses_methods){
+        //std::cout << i << " " << m_method << std::endl;
+        if(i.find(m_method) != std::string::npos || m_method.find(i) != std::string::npos){
+            //std::cout << "Found: " << i << " " << m_method << std::endl;
+            find_ulysses = true;
+        }
+    }
+    for(auto i : m_tblite_methods){
+        if(i.find(m_method) != std::string::npos){
+            //std::cout << "Found: " << i << " " << m_method << std::endl;
+            find_tblite = true;
+        }
+    }
+    for(auto i : m_xtb_methods){
+        if(i.find(m_method) != std::string::npos){
+            find_xtb = true;
+        }
+    }
+    for(auto i : m_d3_methods){
+        if(i.find(m_method) != std::string::npos){
+            find_d3 = true;
+        }
+    }
+    for(auto i : m_d4_methods){
+        if(i.find(m_method) != std::string::npos){
+            find_d4 = true;
+        }
+    }
+    for(auto i : m_qmdff_method){
+        if(i.find(m_method) != std::string::npos){
+            find_qmdff = true;
+        }
+    }
+    for(auto i : m_ff_methods){
+        if(i.find(m_method) != std::string::npos){
+            find_ff = true;
+        }
+    }
+    if(m_method.find("eht") != std::string::npos){
+            find_eht = true;
+        }
+    
+    
+    if(find_tblite){
+        #ifdef USE_TBLITE
+            switch_method = 1;
+        #else
+            switch_method = 3;
+        #endif
+    }else if(find_ulysses){
+        switch_method = 3;
+    } else if(find_xtb){
+        #ifdef USE_XTB
+            switch_method = 2;
+        #else   
+            switch_method = 3;
+        #endif
+    }else if(find_d3){
+        switch_method = 4;
+    }else if(find_d4){
+        switch_method = 5;
+    }else if(find_qmdff){
+        switch_method = 7;
+    }else if(find_ff){
+        switch_method = 0;
+    }else if(find_eht){
+        switch_method = 6;
+    }
+    std::cout << "Switch Method: " << switch_method << std::endl;
+    std::cout << "Method: " << m_method << std::endl;
+    /*
+    if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) { // UFF energy calculator requested
+        switch_method = 0;
+        return switch_method;
+    } else if (std::find(m_tblite_methods.begin(), m_tblite_methods.end(), m_method) != m_tblite_methods.end()) { // TBLite energy calculator requested
+#ifdef USE_TBLITE
+        switch_method = 1;
+        return switch_method;
+#endif
+        switch_method = 3;
+    } else if (std::find(m_xtb_methods.begin(), m_xtb_methods.end(), m_method) != m_xtb_methods.end()) { // XTB energy calculator requested
+#ifdef USE_XTB
+        switch_method = 2;
+        return switch_method;
+#endif
+        switch_method = 3;
+    } else if (std::find(m_d3_methods.begin(), m_d3_methods.end(), m_method) != m_d3_methods.end()) { // D3 energy calculator requested
+#ifdef USE_D3
+        switch_method = 4;
+#endif
+    } else if (std::find(m_d4_methods.begin(), m_d4_methods.end(), m_method) != m_d4_methods.end()) { // D4 energy calculator requested
+#ifdef USE_D4
+        switch_method = 5;
+#endif
+    } else if (std::find(m_qmdff_method.begin(), m_qmdff_method.end(), m_method) != m_qmdff_method.end()) { //
+        switch_method = 7;
+
+    } else if (std::find(m_ff_methods.begin(), m_ff_methods.end(), m_method) != m_ff_methods.end()) { //
+        switch_method = 0;
+    } else if (m_method.compare("eht") == 0) {
+        switch_method = 6;
+    } else if //(std::find(m_ulysses_methods.begin(), m_ulysses_methods.end(), m_method) != m_ulysses_methods.end()) {
+            
+        switch_method = 3;
+    } else {
+        switch_method = 0;
+    }*/
+    return switch_method;
+}
 void EnergyCalculator::updateGeometry(const Eigen::VectorXd& geometry)
 {
+#pragma message("Eigen::VectorXd ....")
     for (int i = 0; i < m_atoms; ++i) {
-        m_coord[3 * i + 0] = geometry[3 * i + 0] / au;
-        m_coord[3 * i + 1] = geometry[3 * i + 1] / au;
-        m_coord[3 * i + 2] = geometry[3 * i + 2] / au;
-
         m_geometry(i, 0) = geometry[3 * i + 0];
         m_geometry(i, 1) = geometry[3 * i + 1];
         m_geometry(i, 2) = geometry[3 * i + 2];
     }
+
     // m_containsNaN = std::isnan(m_geometry[m_atoms - 1][0]);
 }
 
 void EnergyCalculator::updateGeometry(const double* coord)
 {
-    for (int i = 0; i < m_atoms; ++i) {
-        m_coord[3 * i + 0] = coord[3 * i + 0] / au;
-        m_coord[3 * i + 1] = coord[3 * i + 1] / au;
-        m_coord[3 * i + 2] = coord[3 * i + 2] / au;
 
+    for (int i = 0; i < m_atoms; ++i) {
         m_geometry(i, 0) = coord[3 * i + 0];
         m_geometry(i, 1) = coord[3 * i + 1];
         m_geometry(i, 2) = coord[3 * i + 2];
@@ -298,10 +415,6 @@ void EnergyCalculator::updateGeometry(const double* coord)
 void EnergyCalculator::updateGeometry(const std::vector<double>& geometry)
 {
     for (int i = 0; i < m_atoms; ++i) {
-        m_coord[3 * i + 0] = geometry[3 * i + 0] / au;
-        m_coord[3 * i + 1] = geometry[3 * i + 1] / au;
-        m_coord[3 * i + 2] = geometry[3 * i + 2] / au;
-
         m_geometry(i, 0) = geometry[3 * i + 0];
         m_geometry(i, 1) = geometry[3 * i + 1];
         m_geometry(i, 2) = geometry[3 * i + 2];
@@ -314,20 +427,6 @@ void EnergyCalculator::updateGeometry(const Matrix& geometry)
     m_geometry = geometry;
 }
 
-/*
-void EnergyCalculator::updateGeometry(const std::vector<std::array<double, 3>>& geometry)
-{
-    for (int i = 0; i < m_atoms; ++i) {
-        m_coord[3 * i + 0] = geometry[i][0] / au;
-        m_coord[3 * i + 1] = geometry[i][1] / au;
-        m_coord[3 * i + 2] = geometry[i][2] / au;
-
-        m_geometry(i, 0) = geometry[i][0];
-        m_geometry(i, 1) = geometry[i][1];
-        m_geometry(i, 2) = geometry[i][2];
-    }
-}
-*/
 double EnergyCalculator::CalculateEnergy(bool gradient, bool verbose)
 {
     m_ecengine(gradient, verbose);
@@ -336,77 +435,63 @@ double EnergyCalculator::CalculateEnergy(bool gradient, bool verbose)
 
 void EnergyCalculator::CalculateUFF(bool gradient, bool verbose)
 {
+    /*
     m_uff->UpdateGeometry(m_geometry);
     m_energy = m_uff->Calculate(gradient, verbose);
     if (gradient) {
         m_gradient = m_uff->Gradient();
         // m_gradient = m_uff->NumGrad();
     }
+    */
 }
 
 void EnergyCalculator::CalculateTBlite(bool gradient, bool verbose)
 {
 #ifdef USE_TBLITE
-    for (int i = 0; i < m_atoms; ++i) {
-        m_coord[3 * i + 0] = m_geometry(i, 0) / au;
-        m_coord[3 * i + 1] = m_geometry(i, 1) / au;
-        m_coord[3 * i + 2] = m_geometry(i, 2) / au;
-    }
-    m_tblite->UpdateMolecule(m_coord);
+    m_qminterface->UpdateMolecule(m_geometry);
+    m_energy = m_qminterface->Calculation(gradient, verbose);
+    if (gradient)
+        m_gradient = m_qminterface->Gradient();
 
-    if (gradient) {
-        m_energy = m_tblite->GFNCalculation(m_gfn, m_grad);
-        for (int i = 0; i < m_atoms; ++i) {
-            m_gradient(i, 0) = m_grad[3 * i + 0] * au;
-            m_gradient(i, 1) = m_grad[3 * i + 1] * au;
-            m_gradient(i, 2) = m_grad[3 * i + 2] * au;
-        }
-    } else
-        m_energy = m_tblite->GFNCalculation(m_gfn);
-
-    m_orbital_energies = m_tblite->OrbitalEnergies();
-    m_orbital_occupation = m_tblite->OrbitalOccupations();
-    m_num_electrons = m_orbital_occupation.sum();
 #endif
 }
 
 void EnergyCalculator::CalculateXTB(bool gradient, bool verbose)
 {
 #ifdef USE_XTB
-    for (int i = 0; i < m_atoms; ++i) {
-        m_coord[3 * i + 0] = m_geometry(i, 0) / au;
-        m_coord[3 * i + 1] = m_geometry(i, 1) / au;
-        m_coord[3 * i + 2] = m_geometry(i, 2) / au;
-    }
-    m_xtb->UpdateMolecule(m_coord);
+    m_qminterface->UpdateMolecule(m_geometry);
+    m_energy = m_qminterface->Calculation(gradient, verbose);
+    if (gradient)
+        m_gradient = m_qminterface->Gradient();
 
-    if (gradient) {
-        m_energy = m_xtb->GFNCalculation(m_gfn, m_grad);
-        for (int i = 0; i < m_atoms; ++i) {
-            m_gradient(i, 0) = m_grad[3 * i + 0] * au;
-            m_gradient(i, 1) = m_grad[3 * i + 1] * au;
-            m_gradient(i, 2) = m_grad[3 * i + 2] * au;
-        }
-    } else
-        m_energy = m_xtb->GFNCalculation(m_gfn);
 #endif
+}
+
+void EnergyCalculator::CalculateUlysses(bool gradient, bool verbose)
+{
+
+    m_qminterface->UpdateMolecule(m_geometry);
+    m_energy = m_qminterface->Calculation(gradient, verbose);
+    if (gradient) {
+        m_gradient = m_qminterface->Gradient();
+    }
 }
 
 void EnergyCalculator::CalculateD3(bool gradient, bool verbose)
 {
 #ifdef USE_D3
     for (int i = 0; i < m_atoms; ++i) {
-        m_d3->UpdateAtom(i, m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2));
+        static_cast<DFTD3Interface*>(m_qminterface)->UpdateAtom(i, m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2));
     }
     if (gradient) {
-        m_energy = m_d3->DFTD3Calculation(m_grad);
+        m_energy = m_qminterface->Calculation(m_xtb_gradient.data());
         for (int i = 0; i < m_atoms; ++i) {
-            m_gradient(i, 0) = m_grad[3 * i + 0] * au;
-            m_gradient(i, 1) = m_grad[3 * i + 1] * au;
-            m_gradient(i, 2) = m_grad[3 * i + 2] * au;
+            m_gradient(i, 0) = m_xtb_gradient[3 * i + 0] * au;
+            m_gradient(i, 1) = m_xtb_gradient[3 * i + 1] * au;
+            m_gradient(i, 2) = m_xtb_gradient[3 * i + 2] * au;
         }
     } else
-        m_energy = m_d3->DFTD3Calculation();
+        m_energy = m_qminterface->Calculation(false, verbose);
 #endif
 }
 
@@ -414,27 +499,28 @@ void EnergyCalculator::CalculateD4(bool gradient, bool verbose)
 {
 #ifdef USE_D4
     for (int i = 0; i < m_atoms; ++i) {
-        m_d4->UpdateAtom(i, m_geometry(i, 0) / au, m_geometry(i, 1) / au, m_geometry(i, 2) / au);
+        static_cast<DFTD4Interface*>(m_qminterface)->UpdateAtom(i, m_geometry(i, 0) / au, m_geometry(i, 1) / au, m_geometry(i, 2) / au);
     }
     if (gradient) {
-        m_energy = m_d4->DFTD4Calculation(m_grad);
+        m_energy = m_qminterface->Calculation(m_grad);
         for (int i = 0; i < m_atoms; ++i) {
             m_gradient(i, 0) = m_grad[3 * i + 0] * au;
             m_gradient(i, 1) = m_grad[3 * i + 1] * au;
             m_gradient(i, 2) = m_grad[3 * i + 2] * au;
         }
     } else
-        m_energy = m_d4->DFTD4Calculation();
+        m_energy = m_qminterface->Calculation();
 #endif
 }
 
 void EnergyCalculator::CalculateQMDFF(bool gradient, bool verbose)
 {
+    /*
     m_qmdff->UpdateGeometry(m_geometry);
     m_energy = m_qmdff->Calculate(gradient, verbose);
     if (gradient) {
         m_gradient = m_qmdff->Gradient();
-    }
+    }*/
 }
 
 void EnergyCalculator::CalculateFF(bool gradient, bool verbose)
@@ -443,32 +529,21 @@ void EnergyCalculator::CalculateFF(bool gradient, bool verbose)
     m_energy = m_forcefield->Calculate(gradient, verbose);
     if (gradient) {
         m_gradient = m_forcefield->Gradient();
-        // m_gradient = m_forcefield->NumGrad();
     }
 }
 
-void EnergyCalculator::getGradient(double* gradient)
+Vector EnergyCalculator::Charges() const
 {
-    for (int i = 0; i < m_atoms; ++i) {
-        gradient[3 * i + 0] = m_gradient(i, 0);
-        gradient[3 * i + 1] = m_gradient(i, 1);
-        gradient[3 * i + 2] = m_gradient(i, 2);
-    }
-}
-
-Matrix EnergyCalculator::Gradient() const
-{
-    return m_gradient;
-}
-
-std::vector<double> EnergyCalculator::Charges() const
-{
-    return m_charges();
+    if (m_qminterface == nullptr)
+        return Vector{};
+    return m_qminterface->Charges();
 }
 
 Position EnergyCalculator::Dipole() const
 {
-    return m_dipole();
+    if (m_qminterface == nullptr)
+        return Position{};
+    return m_qminterface->Dipole();
 }
 
 std::vector<std::vector<double>> EnergyCalculator::BondOrders() const

@@ -18,7 +18,6 @@
  */
 
 #pragma once
-
 #include <array>
 #include <map>
 #include <string>
@@ -33,21 +32,7 @@
 using json = nlohmann::json;
 
 typedef std::pair<int, Position> AtomDef;
-
-struct Mol {
-    double m_energy;
-    double m_spin;
-
-    int m_number_atoms;
-    int m_charge;
-
-    std::string m_commentline;
-
-    Geometry m_geometry;
-    std::vector<std::pair<int, int>> m_bonds;
-    std::vector<int> m_atoms;
-};
-
+namespace curcuma {
 class Molecule
 {
   public:
@@ -62,6 +47,7 @@ class Molecule
     ~Molecule();
 
     Molecule& operator=(const Molecule& molecule) = default;
+    Mol getMolInfo() const;
 
     json ExportJson() const;
     void WriteJsonFile(const std::string& filename);
@@ -266,9 +252,16 @@ class Molecule
 
     Matrix AlignmentAxes() const { return m_alignmentAxes; }
 
-    void setPartialCharges(const std::vector<double>& charges) { m_charges = charges; }
+    void setPartialCharges(const Vector& charges) { m_charges = charges; }
 
-    inline std::vector<double> getPartialCharges() const { return m_charges; }
+    void setPartialCharges(const std::vector<double>& charges)
+    {
+        m_charges = Vector::Zero(charges.size());
+        for (int i = 0; i < charges.size(); ++i)
+            m_charges(i) = charges[i];
+    }
+
+    inline Vector getPartialCharges() const { return m_charges; }
 
     void setDipole(const Position& dipole) { m_dipole = dipole; }
 
@@ -300,7 +293,7 @@ private:
     Position m_dipole;
     Geometry m_geometry;
     std::vector<int> m_atoms;
-    std::vector<double> m_charges;
+    Vector m_charges;
     std::vector<Position> m_borders;
     std::vector<int> m_connect_mass;
     Matrix m_HydrogenBondMap;
@@ -316,3 +309,4 @@ private:
     double m_energy = 0, m_Ia = 0, m_Ib = 0, m_Ic = 0, m_mass = 0, m_hbond_cutoff = 3;
     mutable double m_scaling = 1.5;
 };
+} // namespace curcuma

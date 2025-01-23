@@ -25,6 +25,10 @@ option (WriteMoreInfo
 option (USE_Plumed
     "Enable interface to plumed for metadynamics")
 
+option(USE_AVX2
+    "Enable AVX2 instructions" OFF)
+
+
 add_subdirectory(${PROJECT_SOURCE_DIR}/external/fmt EXCLUDE_FROM_ALL)
 
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
@@ -40,7 +44,9 @@ include_directories(SYSTEM  ${PROJECT_SOURCE_DIR}/external/fmt/include
                             ${PROJECT_SOURCE_DIR}/external/ripser
                             ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0
                             ${PROJECT_SOURCE_DIR}/external/cpp-d4/include
-                            ${PROJECT_SOURCE_DIR}/external/)
+                            ${PROJECT_SOURCE_DIR}/external/
+                            ${PROJECT_SOURCE_DIR}/external/ulysses/src/
+                            )
 
 
 include_directories(${PROJECT_SOURCE_DIR} ${PROJECT_BINARY_DIR} )
@@ -119,6 +125,11 @@ else()
 endif(WIN32)
 ENDIF(CMAKE_COMPILER_IS_GNUCXX)
 
+if(USE_AVX2)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx2")
+
+endif()
+
 if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/json.hpp)
   file(DOWNLOAD https://github.com/nlohmann/json/releases/download/v3.9.1/json.hpp ${PROJECT_SOURCE_DIR}/external/json.hpp
        TIMEOUT 60  # seconds
@@ -133,8 +144,15 @@ if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip)
        EXPECTED_HASH SHA256=1ccaabbfe870f60af3d6a519c53e09f3dcf630207321dffa553564a8e75c4fc8
        TLS_VERIFY ON)
 endif()
-
 file(ARCHIVE_EXTRACT INPUT ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip DESTINATION ${PROJECT_SOURCE_DIR}/external)
+
+if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/ulysses.zip)
+  file(DOWNLOAD https://gitlab.com/siriius/ulysses/-/archive/main/ulysses-main.zip  ${PROJECT_SOURCE_DIR}/external/ulysses.zip
+         TIMEOUT 60  # seconds
+         EXPECTED_HASH SHA256=1b55f9368c95f5a6dc334b6a86ad5a7583a397c9c59b4abb04f73ca4535cc393)
+endif()
+
+file(ARCHIVE_EXTRACT INPUT ${PROJECT_SOURCE_DIR}/external/ulysses.zip DESTINATION ${PROJECT_SOURCE_DIR}/external)
 
 configure_file (
   "${PROJECT_SOURCE_DIR}/src/global_config.h.in"
@@ -164,6 +182,7 @@ set(curcuma_core_SRC
         src/capabilities/simplemd.cpp
         src/capabilities/hessian.cpp
         src/capabilities/qmdfffit.cpp
+        src/core/ulyssesinterface.cpp
         src/core/energycalculator.cpp
         src/core/molecule.cpp
         src/core/fileiterator.cpp
@@ -178,7 +197,9 @@ set(curcuma_core_SRC
         src/tools/formats.h
         src/tools/geometry.h
         src/tools/general.h
-        )
+        src/core/orcainterface.h
+        src/core/orcainterface.cpp
+)
     add_library(curcuma_core  ${curcuma_core_SRC})
 
     set(km_SRC
@@ -186,7 +207,17 @@ set(curcuma_core_SRC
     src/capabilities/c_code/interface.c
 )
 add_library(km ${km_SRC})
-target_link_libraries(curcuma_core km)
+
+set(ulysess_SRC
+    src/core/interface/ulysses.cpp
+)
+add_library(ulysses_lib ${ulysess_SRC})
+add_executable(ulysses_helper
+src/helpers/ulysses_helper.cpp
+)
+target_link_libraries(ulysses_helper PUBLIC ulysses_lib)
+
+target_link_libraries(curcuma_core km ulysses_lib)
 
 add_executable(curcuma
         src/main.cpp
@@ -270,6 +301,8 @@ if(USE_TBLITE)
     add_executable(tblite_helper
            src/helpers/tblite_helper.cpp
     )
+
+
     if(C17)
         set_property(TARGET tblite_helper PROPERTY CXX_STANDARD 17)
     else()

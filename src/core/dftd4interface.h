@@ -26,7 +26,8 @@
 #include "dftd_econv.h"
 #include "dftd_geometry.h"
 
-#include "src/core/molecule.h"
+#include "src/core/global.h"
+#include "src/core/interface/abstract_interface.h"
 
 static json DFTD4Settings{
     { "d4_s6", 1.00 },
@@ -40,17 +41,17 @@ static json DFTD4Settings{
     { "d4_atm", true }
 };
 
-class DFTD4Interface {
+class DFTD4Interface : public QMInterface {
 public:
     DFTD4Interface(const json& controller);
     DFTD4Interface();
 
     ~DFTD4Interface();
 
-    bool InitialiseMolecule(const Molecule& molecule, double factor = 1);
+    bool InitialiseMolecule(const Mol& mol, double factor = 1);
     bool InitialiseMolecule(const std::vector<int>& atomtype);
 
-    double DFTD4Calculation(double* grad = 0);
+    double Calculation(bool gradient = 0, bool verbose = false) override;
     void UpdateParameters(const json& controller);
 
     void clear();

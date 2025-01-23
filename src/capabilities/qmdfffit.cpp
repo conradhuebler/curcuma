@@ -54,7 +54,7 @@ void QMDFFFit::start()
 
     std::string method = "gfn2";
     double e0 = 0;
-    std::vector<double> charges;
+    Vector charges;
 
     if (std::filesystem::exists(m_scf_file)) {
         std::ifstream scffile(m_scf_file);
@@ -64,11 +64,11 @@ void QMDFFFit::start()
         if (scfjson.contains("e0"))
             e0 = scfjson["e0"];
         if (scfjson.contains("charges"))
-            charges = Tools::String2DoubleVec(scfjson["charges"], "|");
+            charges = Tools::String2EigenVector(scfjson["charges"], "|");
     }
     if (charges.size() == 0) {
         EnergyCalculator energy(method, m_defaults);
-        energy.setMolecule(m_molecule);
+        energy.setMolecule(m_molecule.getMolInfo());
 
         e0 = energy.CalculateEnergy(false, true);
         m_molecule.setPartialCharges(energy.Charges());
@@ -117,7 +117,7 @@ void QMDFFFit::start()
     // Initialise();
     m_controller["method"] = "qmdff";
     ForceFieldGenerator ff(m_controller);
-    ff.setMolecule(m_molecule);
+    ff.setMolecule(m_molecule.getMolInfo());
     ff.Generate();
 
     // std::ifstream hess_file("qmdff_param.json");
@@ -138,7 +138,7 @@ void QMDFFFit::start()
     qmdff_init["variable"] = false;
     qmdff_init["method"] = "qmdff";
     EnergyCalculator calculator("qmdff", qmdff_init);
-    calculator.setMolecule(m_molecule);
+    calculator.setMolecule(m_molecule.getMolInfo());
     calculator.setParameter(parameter);
     calculator.CalculateEnergy(false, false);
     Hessian const_hessian("qmdff", qmdff_init);

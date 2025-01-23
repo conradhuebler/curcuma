@@ -17,7 +17,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  */
-
+#include "src/core/orcainterface.h"
 #include "src/core/eht.h"
 #include "src/core/fileiterator.h"
 #include "src/core/molecule.h"
@@ -889,8 +889,8 @@ int main(int argc, char **argv) {
                 Molecule mol1 = file.Next();
 
                 EHT eht;
-                eht.setMolecule(mol1);
-                eht.start();
+                eht.setMolecule(mol1.getMolInfo());
+                eht.Calculate();
             }
 
         } else if (strcmp(argv[1], "-gyration") == 0) {
@@ -937,7 +937,7 @@ int main(int argc, char **argv) {
                 Molecule mol = file.Next(); // load Molecule
                 mol.Center(false); //sets the Centroid to the origin
                 EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb
-                interface.setMolecule(mol); // set molecule
+                interface.setMolecule(mol.getMolInfo()); // set molecule
                 interface.CalculateEnergy(false, true); // calc energy and Wave function
                 mol.setPartialCharges(interface.Charges()); // calc partial Charges and set it to mol
                 mol.setDipole(interface.Dipole() * au); //calc dipole moments and set it to mol in eA
@@ -1022,7 +1022,7 @@ int main(int argc, char **argv) {
                 mol = file.Next(); // load Molecule
                 mol.Center(false); //sets the Centroid to the origin
                 EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb
-                interface.setMolecule(mol); // set molecule
+                interface.setMolecule(mol.getMolInfo()); // set molecule
                 interface.CalculateEnergy(false, true); // calc energy and Wave function
                 mol.setPartialCharges(interface.Charges()); // calc partial Charges and set it to mol
                 mol.setDipole(interface.Dipole() * au); //calc dipole moments and set it to mol in eA
@@ -1067,6 +1067,24 @@ int main(int argc, char **argv) {
             std::cout << "Dipole form partial Charges and nonlin. Scaling: "
                       << dipole_nlin.norm() << " [eA] " << dipole_nlin.norm()*4.803 << " [D] " << std::endl;
 
+        } else if (strcmp(argv[1], "-orca") == 0) {
+
+            if (argc < 3) {
+                std::cerr << "Please use curcuma as follows:\ncurcuma -orca input" << std::endl;
+                return -1;
+            }
+
+            OrcaInterface orca;
+            // Eingabedatei zuweisen
+            orca.setInputFile(argv[2]);
+
+            // ORCA ausführen
+            if (!orca.runOrca()) {
+                return -1;
+            }
+            // ORCA-Ausgabe lesen
+            orca.getOrcaJSON();
+            orca.readOrcaJSON();
 
         } else if (strcmp(argv[1], "-stride") == 0) {
 

@@ -85,7 +85,7 @@ void HessianThread::Numerical()
 
     EnergyCalculator energy(m_method, m_controller);
     energy.setParameter(m_parameter);
-    energy.setMolecule(m_molecule);
+    energy.setMolecule(m_molecule.getMolInfo());
 
     double d2 = 1 / (4 * m_d * m_d);
 
@@ -110,7 +110,7 @@ void HessianThread::Seminumerical()
     m_geom_ip_jp(m_i, m_xi) += m_d;
     EnergyCalculator energy(m_method, m_controller);
     energy.setParameter(m_parameter);
-    energy.setMolecule(m_molecule);
+    energy.setMolecule(m_molecule.getMolInfo());
 
     energy.updateGeometry(m_geom_ip_jp);
     energy.CalculateEnergy(true, false);
@@ -131,7 +131,7 @@ void HessianThread::Threaded()
     EnergyCalculator energy(m_method, m_controller);
     // std::cout << m_method << m_controller << std::endl;
     energy.setParameter(m_parameter);
-    energy.setMolecule(m_molecule);
+    energy.setMolecule(m_molecule.getMolInfo());
     for (int i : m_atoms) {
         for (int xi = 0; xi < 3; ++xi) {
 

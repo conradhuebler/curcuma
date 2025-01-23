@@ -23,7 +23,7 @@
 
 #include "src/core/global.h"
 #include "src/core/molecule.h"
-
+using namespace curcuma;
 namespace GeometryTools {
 
 inline double degreesToRadians(double angleDegrees) { return angleDegrees * pi / 180.0; }
@@ -125,7 +125,7 @@ inline Position rotateZ(const Position& position, double alpha)
     return Position{ X, Y, Z };
 }
 
-inline Geometry TranslateMolecule(const Molecule &molecule, const Position &start, const Position &destination)
+inline Geometry TranslateMolecule(const Molecule& molecule, const Position& start, const Position& destination)
 {
     Geometry geom = molecule.getGeometry();
     Position direction = destination - start;

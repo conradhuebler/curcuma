@@ -1,6 +1,6 @@
 /*
  * < Generic force field class for curcuma . >
- * Copyright (C) 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2024 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -172,6 +172,7 @@ void ForceFieldThread::CalculateUFFDihedralContribution()
         double tmp_energy = (1 / 2.0 * dihedral.V * (1 - cos(dihedral.n * dihedral.phi0) * cos(dihedral.n * phi))) * m_final_factor * m_dihedral_scaling;
         if (isnan(tmp_energy))
             continue;
+
         m_dihedral_energy += tmp_energy;
         if (m_calculate_gradient) {
 
@@ -481,14 +482,14 @@ int D3Thread::execute()
 
     if (m_calculate_gradient) {
         double grad[3 * m_atom_types.size()];
-        m_vdw_energy = m_d3->DFTD3Calculation(grad);
+        m_vdw_energy = m_d3->Calculation(grad);
         for (int i = 0; i < m_atom_types.size(); ++i) {
             m_gradient(i, 0) += grad[3 * i + 0] * au;
             m_gradient(i, 1) += grad[3 * i + 1] * au;
             m_gradient(i, 2) += grad[3 * i + 2] * au;
         }
     } else
-        m_vdw_energy = m_d3->DFTD3Calculation(0);
+        m_vdw_energy = m_d3->Calculation(0);
 #else
     std::cerr << "D3 is not included, sorry for that" << std::endl;
     exit(1);

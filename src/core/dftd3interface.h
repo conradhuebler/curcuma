@@ -24,7 +24,8 @@
 #include "s-dftd3.h"
 #endif
 
-#include "src/core/molecule.h"
+#include "src/core/global.h"
+#include "src/core/interface/abstract_interface.h"
 
 static json DFTD3Settings{
     { "d_s6", 0 },
@@ -39,7 +40,7 @@ static json DFTD3Settings{
     { "d_damping", "bj" }
 };
 
-class DFTD3Interface {
+class DFTD3Interface : public QMInterface {
 public:
     DFTD3Interface(const json& controller);
     DFTD3Interface();
@@ -48,7 +49,7 @@ public:
 
     bool InitialiseMolecule(const std::vector<int>& atomtypes);
 
-    double DFTD3Calculation(double* grad = 0);
+    double Calculation(bool gradient = 0, bool verbose = false) override;
     void UpdateParameters(const json& controller);
     void UpdateParametersD3(const json& controller);
 
