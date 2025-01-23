@@ -28,6 +28,8 @@
 #include "Molecule.hpp"
 
 #include <iostream>
+#include <algorithm>
+#include <string>
 
 #include "ulysses.h"
 
@@ -58,29 +60,54 @@ UlyssesObject::UlyssesObject()
 UlyssesObject::~UlyssesObject()
 {
     delete m_bset;
-    delete m_electron;
+    if (m_method == "gfn2") {
+        delete m_gfn2;
+    } else if (m_method == "pm6") {
+        delete m_mndo;
+    }
 }
 
 void UlyssesObject::Calculate(bool gradient, bool verbose)
 {
     if (m_method == "gfn2")
-        m_electron->setElectronTemp(m_Tele);
-
-    m_electron->Calculate(int(verbose), m_SCFmaxiter);
-    m_energy = m_electron->getEnergy();
-    if (gradient) {
-        matrixE grad;
-        m_electron->AnalyticalGrad(grad);
-        m_gradient = Matrix2Geom(grad);
+        m_gfn2->setElectronTemp(m_Tele);
+    if (m_method == "gfn2") {
+        m_gfn2->Calculate(int(verbose), m_SCFmaxiter);
+        m_energy = m_gfn2->getEnergy();
+        if (gradient) {
+            matrixE grad;
+            m_gfn2->AnalyticalGrad(grad);
+            m_gradient = Matrix2Geom(grad);
+        }
+    } else if (m_method == "pm6") {
+        m_mndo->Calculate(int(verbose), m_SCFmaxiter);
+        m_energy = m_mndo->getEnergy();
+        if (gradient) {
+            matrixE grad;
+            m_mndo->AnalyticalGrad(grad);
+            m_gradient = Matrix2Geom(grad);
+        }
     }
+
 }
 
-void UlyssesObject::setMethod(const std::string& method)
+void UlyssesObject::setMethod(std::string& method)
 {
     if (method == "ugfn2")
         m_method = "gfn2";
     else
+    {
+    if (method.find("d3h4x") != std::string::npos) {
+        m_method = method.replace(method.find("-d3h4x"), 6, "");
+        m_correction = "D3H4X";
+    } else if (method.find("d3h+") != std::string::npos) {
+        m_method = method.replace(method.find("-d3h+"), 5, "");
+        m_correction = "D3H+";
+    } else {
         m_method = method;
+        m_correction = "0";
+    }
+    }
 }
 
 void UlyssesObject::setMolecule(const Geometry& geom, const std::vector<int>& atm, int chrge, int multpl, std::string pg)
@@ -95,14 +122,19 @@ void UlyssesObject::setMolecule(const Geometry& geom, const std::vector<int>& at
     m_bset = new BSet(mol, m_method);
 
     if (m_method == "gfn2") {
-        m_electron = new GFN2(*m_bset, mol);
+        m_gfn2 = new GFN2(*m_bset, mol);
     } else if (m_method == "pm6") {
-        m_electron = new PM6(*m_bset, mol);
+        m_mndo = new PM6(*m_bset, mol, "0", m_correction);
     }
 }
 
 void UlyssesObject::UpdateGeometry(const Geometry& geom)
 {
     auto matrix = Geom2Matrix(geom);
-    m_electron->setGeometry(matrix);
+    if (m_method == "gfn2") {
+        m_gfn2->setGeometry(matrix);
+    } else if (m_method == "pm6") {
+        m_mndo->setGeometry(matrix);
+    }
+    //m_electron->setGeometry(matrix);
 }

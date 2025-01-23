@@ -25,6 +25,8 @@ typedef Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> G
 
 class BSet;
 class QCbasis;
+class GFN2;
+class MNDOd;
 
 class UlyssesObject {
 public:
@@ -32,7 +34,7 @@ public:
     ~UlyssesObject();
 
     void Calculate(bool gradient, bool verbose);
-    void setMethod(const std::string& method);
+    void setMethod(std::string& method);
     void setMolecule(const Geometry& geom, const std::vector<int>& atm, int chrge, int multpl, std::string pg);
     void UpdateGeometry(const Geometry& geom);
     double Energy() const { return m_energy; }
@@ -42,8 +44,10 @@ public:
 
 private:
     BSet* m_bset;
-    QCbasis* m_electron;
-    std::string m_method;
+    //QCbasis* m_electron;
+    MNDOd* m_mndo;
+    GFN2* m_gfn2;
+    std::string m_method, m_correction = "0";
     double m_Tele;
     int m_SCFmaxiter;
     double m_energy;

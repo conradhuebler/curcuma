@@ -33,7 +33,9 @@ UlyssesInterface::UlyssesInterface(const json& ulyssessettings)
     m_SCFmaxiter = m_ulyssessettings["SCFmaxiter"];
     m_solvent = m_ulyssessettings["ulysses_solvent"];
     m_method = m_ulyssessettings["method"];
+    m_mult = m_ulyssessettings["mult"];
     m_ulysses = new UlyssesObject();
+
 }
 
 UlyssesInterface::~UlyssesInterface()
@@ -44,7 +46,9 @@ UlyssesInterface::~UlyssesInterface()
 bool UlyssesInterface::InitialiseMolecule()
 {
     m_ulysses->setMethod(m_method);
-    m_ulysses->setMolecule(m_geometry, m_atoms, m_charge, m_spin, "C1");
+    m_ulysses->setMolecule(m_geometry, m_atoms, m_charge, m_mult, "C1");
+    std::cout << "Initialising Ulysses with method " <<m_method << " and SCFmaxiter " << m_SCFmaxiter << std::endl;
+
     return true;
 }
 

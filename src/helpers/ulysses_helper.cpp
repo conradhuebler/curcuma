@@ -37,12 +37,27 @@ int main()
     std::vector<int> atoms = { 1, 1, 1, 6, 6, 6, 6, 6, 6, 6, 8, 8, 1, 1, 1 };
     int charge = 0;
     int spin = 0;
+    int mult = 1;
+    {
+        std::string method = "gfn2";
+        UlyssesObject ulysses;
+        ulysses.setMethod(method);
 
-    UlyssesObject ulysses;
-    ulysses.setMethod("gfn2");
+        ulysses.setMolecule(matrix, atoms, charge, spin, "C1");
+        ulysses.Calculate(true, true);
+        std::cout << ulysses.Energy() << std::endl;
+        std::cout << ulysses.Gradient() << std::endl;
+    }
 
-    ulysses.setMolecule(matrix, atoms, charge, spin, "C1");
-    ulysses.Calculate(true, true);
-    std::cout << ulysses.Gradient() << std::endl;
+    {
+        std::string method = "pm6-d3h4x";
+        UlyssesObject ulysses;
+        ulysses.setMethod(method);
+
+        ulysses.setMolecule(matrix, atoms, charge, mult, "C1");
+        ulysses.Calculate(true, true);
+        std::cout << ulysses.Energy() << std::endl;
+        std::cout << ulysses.Gradient() << std::endl;
+    }
     return 0;
 }

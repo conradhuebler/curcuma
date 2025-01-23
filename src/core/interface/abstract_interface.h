@@ -127,11 +127,15 @@ public:
 
     virtual void setMethod(const std::string& method) { m_method = method; }
     virtual Geometry Gradient() const { return m_gradient; }
-
+    void setMult(int multi)
+    {
+        m_spin = multi - 1;
+        m_muli = multi;
+    }
 protected:
     bool m_initialised = false;
     Matrix m_geometry, m_gradient;
-    double m_charge, m_spin;
+    double m_charge, m_spin = 0, m_muli = 1;
     std::vector<int> m_atoms;
 
     std::string m_method = "none";

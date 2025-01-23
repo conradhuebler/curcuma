@@ -42,7 +42,8 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
 {
     std::transform(m_method.begin(), m_method.end(), m_method.begin(), [](unsigned char c) { return std::tolower(c); });
 
-    m_controller = controller;
+    m_controller = MergeJson(EnergyCalculatorJson ,controller);
+
     if (controller.contains("param_file")) {
         m_param_file = controller["param_file"];
     }
@@ -54,6 +55,11 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
     m_bonds = []() {
         return std::vector<std::vector<double>>{ {} };
     };
+
+    m_mult = m_controller["multi"];
+    m_SCFmaxiter = m_controller["SCFmaxiter"];
+    m_solvent = m_controller["solvent"];
+    m_Tele = m_controller["Tele"];
 
     switch (SwitchMethod(m_method)) {
     case 8:
@@ -94,15 +100,18 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
 
     case 3:
         m_qminterface = new UlyssesInterface(controller);
+        m_qminterface->setMult(m_mult);
+
         m_qminterface->setMethod(m_method);
         m_ecengine = [this](bool gradient, bool verbose) {
             this->CalculateUlysses(gradient, verbose);
         };
-        break;
+    break;
 
     case 2:
 #ifdef USE_XTB
-        m_qminterface = new XTBInterface(controller);
+        m_qminterface = new XTBInterface(m_controller);
+        m_qminterface->setMult(m_mult);
         m_qminterface->setMethod(m_method);
         m_ecengine = [this](bool gradient, bool verbose) {
             this->CalculateXTB(gradient, verbose);
@@ -111,16 +120,12 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
         std::cout << "XTB was not included ..." << std::endl;
         exit(1);
 #endif
-        /*
-                m_bonds = [this]() {
-                    return this->m_qminterface->BondOrders();
-                };
-        */
-        break;
+    break;
 
     case 1:
+        m_qminterface = new TBLiteInterface(m_controller);
+        m_qminterface->setMult(m_mult);
 
-        m_qminterface = new TBLiteInterface(controller);
         m_qminterface->setMethod(m_method);
 
         m_ecengine = [this](bool gradient, bool verbose) {
@@ -141,54 +146,6 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
             this->CalculateFF(gradient, verbose);
         };
         break;
-    }
-
-    if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) { // UFF energy calculator requested
-
-    } else if (std::find(m_tblite_methods.begin(), m_tblite_methods.end(), m_method) != m_tblite_methods.end()) { // TBLite energy calculator requested
-#ifdef USE_TBLITE
-
-#else
-        std::cout << "TBlite was not included ..." << std::endl;
-        exit(1);
-#endif
-
-    } else if (std::find(m_xtb_methods.begin(), m_xtb_methods.end(), m_method) != m_xtb_methods.end()) { // XTB energy calculator requested
-#ifdef USE_XTB
-
-#else
-        std::cout << "XTB was not included ..." << std::endl;
-        exit(1);
-#endif
-    } else if (std::find(m_ulysses_methods.begin(), m_ulysses_methods.end(), m_method) != m_ulysses_methods.end()) { // XTB energy calculator requested
-#ifdef USE_XTB
-
-#else
-        std::cout << "XTB was not included ..." << std::endl;
-        exit(1);
-#endif
-    } else if (std::find(m_d3_methods.begin(), m_d3_methods.end(), m_method) != m_d3_methods.end()) { // Just D4 energy calculator requested
-#ifdef USE_D3
-
-#else
-        std::cout << "D4 was not included ..." << std::endl;
-        exit(1);
-#endif
-    } else if (std::find(m_d4_methods.begin(), m_d4_methods.end(), m_method) != m_d4_methods.end()) { // Just D4 energy calculator requested
-#ifdef USE_D4
-
-#else
-        std::cout << "D4 was not included ..." << std::endl;
-        exit(1);
-#endif
-    } else if (std::find(m_qmdff_method.begin(), m_qmdff_method.end(), m_method) != m_qmdff_method.end()) { // Just D4 energy calculator requested
-
-    } else if (std::find(m_ff_methods.begin(), m_ff_methods.end(), m_method) != m_ff_methods.end()) { // Just D4 energy calculator requested
-
-    } else if (m_method.compare("eht") == 0) {
-
-    } else { // Fall back to UFF?
-        //    m_uff = new eigenUFF(controller);
     }
 }
 
@@ -322,6 +279,78 @@ void EnergyCalculator::setMolecule(const Mol& mol)
 int EnergyCalculator::SwitchMethod(const std::string& method)
 {
     int switch_method = 0;
+    bool find_ulysses = false, find_tblite = false, find_xtb = false, find_d3 = false, find_d4 = false, find_qmdff = false, find_ff = false, find_eht = false;
+    for(auto i : m_ulysses_methods){
+        //std::cout << i << " " << m_method << std::endl;
+        if(i.find(m_method) != std::string::npos || m_method.find(i) != std::string::npos){
+            //std::cout << "Found: " << i << " " << m_method << std::endl;
+            find_ulysses = true;
+        }
+    }
+    for(auto i : m_tblite_methods){
+        if(i.find(m_method) != std::string::npos){
+            //std::cout << "Found: " << i << " " << m_method << std::endl;
+            find_tblite = true;
+        }
+    }
+    for(auto i : m_xtb_methods){
+        if(i.find(m_method) != std::string::npos){
+            find_xtb = true;
+        }
+    }
+    for(auto i : m_d3_methods){
+        if(i.find(m_method) != std::string::npos){
+            find_d3 = true;
+        }
+    }
+    for(auto i : m_d4_methods){
+        if(i.find(m_method) != std::string::npos){
+            find_d4 = true;
+        }
+    }
+    for(auto i : m_qmdff_method){
+        if(i.find(m_method) != std::string::npos){
+            find_qmdff = true;
+        }
+    }
+    for(auto i : m_ff_methods){
+        if(i.find(m_method) != std::string::npos){
+            find_ff = true;
+        }
+    }
+    if(m_method.find("eht") != std::string::npos){
+            find_eht = true;
+        }
+    
+    
+    if(find_tblite){
+        #ifdef USE_TBLITE
+            switch_method = 1;
+        #else
+            switch_method = 3;
+        #endif
+    }else if(find_ulysses){
+        switch_method = 3;
+    } else if(find_xtb){
+        #ifdef USE_XTB
+            switch_method = 2;
+        #else   
+            switch_method = 3;
+        #endif
+    }else if(find_d3){
+        switch_method = 4;
+    }else if(find_d4){
+        switch_method = 5;
+    }else if(find_qmdff){
+        switch_method = 7;
+    }else if(find_ff){
+        switch_method = 0;
+    }else if(find_eht){
+        switch_method = 6;
+    }
+    std::cout << "Switch Method: " << switch_method << std::endl;
+    std::cout << "Method: " << m_method << std::endl;
+    /*
     if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) { // UFF energy calculator requested
         switch_method = 0;
         return switch_method;
@@ -352,11 +381,12 @@ int EnergyCalculator::SwitchMethod(const std::string& method)
         switch_method = 0;
     } else if (m_method.compare("eht") == 0) {
         switch_method = 6;
-    } else if (std::find(m_ulysses_methods.begin(), m_ulysses_methods.end(), m_method) != m_ulysses_methods.end()) {
+    } else if //(std::find(m_ulysses_methods.begin(), m_ulysses_methods.end(), m_method) != m_ulysses_methods.end()) {
+            
         switch_method = 3;
     } else {
         switch_method = 0;
-    }
+    }*/
     return switch_method;
 }
 void EnergyCalculator::updateGeometry(const Eigen::VectorXd& geometry)

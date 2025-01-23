@@ -49,7 +49,13 @@
 using json = nlohmann::json;
 
 static json EnergyCalculatorJson{
-    { "param_file", "none" }
+    { "param_file", "none" },
+    { "multi", 1},
+    { "method", "uff"},
+    { "SCFmaxiter", 100 },
+    { "Tele", 300 },
+    { "solvent", "none"}
+
 };
 
 class EnergyCalculator {
@@ -133,7 +139,7 @@ private:
     StringList m_qmdff_method = { "fqmdff" };
     StringList m_tblite_methods = { "ipea1", "gfn1", "gfn2" };
     StringList m_xtb_methods = { "gfnff", "xtb-gfn1", "xtb-gfn2" };
-    StringList m_ulysses_methods = { "ugfn2", "pm6" };
+    StringList m_ulysses_methods = { "ugfn2", "GFN2L", "pm3", "PM3PDDG", "MNDOPDDG", "PM3BP", "RM1", "AM1", "MNDO", "MNDOd", "pm6" };
 
     StringList m_d3_methods = { "d3" };
     StringList m_d4_methods = { "d4" };
@@ -147,10 +153,13 @@ private:
     Matrix m_geometry, m_gradient, m_molecular_orbitals;
     Vector m_orbital_energies, m_orbital_occupation;
     Vector m_xtb_gradient;
-    double m_energy;
+    double m_energy, m_Tele = 300;
     double *m_coord, *m_grad;
 
     int m_atoms, m_num_electrons = 0;
+    int m_mult = 1, m_SCFmaxiter = 100;
+    std::string m_solvent = "none";
+
     int m_gfn = 2;
     int* m_atom_type;
 

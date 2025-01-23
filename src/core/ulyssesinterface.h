@@ -28,7 +28,8 @@ static json UlyssesSettings{
     { "Tele", 300 },
     { "ulysses_solvent", "none" },
     { "method", "GFN2" },
-    { "SCFmaxiter", 100 }
+    { "SCFmaxiter", 100 },
+    { "mult", 1}
 
 };
 class UlyssesObject;
@@ -49,6 +50,7 @@ private:
 
     double m_Tele = 300;
     double m_SCFmaxiter = 100;
+    int m_mult = 1;
     std::string m_solvent = "none";
 
     json m_ulyssessettings;

@@ -25,6 +25,10 @@ option (WriteMoreInfo
 option (USE_Plumed
     "Enable interface to plumed for metadynamics")
 
+option(USE_AVX2
+    "Enable AVX2 instructions" OFF)
+
+
 add_subdirectory(${PROJECT_SOURCE_DIR}/external/fmt EXCLUDE_FROM_ALL)
 
 set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
@@ -121,6 +125,11 @@ else()
 endif(WIN32)
 ENDIF(CMAKE_COMPILER_IS_GNUCXX)
 
+if(USE_AVX2)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx2")
+
+endif()
+
 if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/json.hpp)
   file(DOWNLOAD https://github.com/nlohmann/json/releases/download/v3.9.1/json.hpp ${PROJECT_SOURCE_DIR}/external/json.hpp
        TIMEOUT 60  # seconds
@@ -135,8 +144,15 @@ if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip)
        EXPECTED_HASH SHA256=1ccaabbfe870f60af3d6a519c53e09f3dcf630207321dffa553564a8e75c4fc8
        TLS_VERIFY ON)
 endif()
-
 file(ARCHIVE_EXTRACT INPUT ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip DESTINATION ${PROJECT_SOURCE_DIR}/external)
+
+if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/ulysses.zip)
+  file(DOWNLOAD https://gitlab.com/siriius/ulysses/-/archive/main/ulysses-main.zip  ${PROJECT_SOURCE_DIR}/external/ulysses.zip
+         TIMEOUT 60  # seconds
+         EXPECTED_HASH SHA256=1b55f9368c95f5a6dc334b6a86ad5a7583a397c9c59b4abb04f73ca4535cc393)
+endif()
+
+file(ARCHIVE_EXTRACT INPUT ${PROJECT_SOURCE_DIR}/external/ulysses.zip DESTINATION ${PROJECT_SOURCE_DIR}/external)
 
 configure_file (
   "${PROJECT_SOURCE_DIR}/src/global_config.h.in"

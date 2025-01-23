@@ -41,6 +41,10 @@ XTBInterface::XTBInterface(const json& xtbsettings)
     m_accuracy = m_xtbsettings["xtb_ac"];
     m_SCFmaxiter = m_xtbsettings["SCFmaxiter"];
     m_Tele = m_xtbsettings["Tele"];
+    m_spin = m_xtbsettings["spin"];
+
+    std::cout << "Initialising XTB with accuracy " << m_accuracy << " and SCFmaxiter " << m_SCFmaxiter << std::endl;
+    
 }
 
 XTBInterface::~XTBInterface()

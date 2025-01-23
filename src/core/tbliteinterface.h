@@ -35,7 +35,8 @@ static json TBLiteSettings{
     { "tb_verbose", 0 },
     { "tb_guess", "SAD" },
     { "solv", "none" },
-    { "solv_eps", -1 }
+    { "solv_eps", -1 },
+    { "spin", 0}
 };
 
 class TBLiteInterface : public QMInterface {
@@ -88,6 +89,7 @@ private:
     int m_gb_type = 0, m_born_kernel = 1;
     int m_solv_param = 12;
     int m_solv_ref = 1;
+
     bool m_cpcm = false, m_alpb = false;
     tblite_error m_error = NULL;
     tblite_structure m_tblite_mol = NULL;

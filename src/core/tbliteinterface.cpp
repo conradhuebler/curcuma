@@ -39,8 +39,12 @@ TBLiteInterface::TBLiteInterface(const json& tblitesettings)
     m_acc = m_tblitesettings["tb_acc"];
     m_SCFmaxiter = m_tblitesettings["SCFmaxiter"];
     m_damping = m_tblitesettings["tb_damping"];
+
+    // convert kelvin to atomic units
     m_Tele = m_tblitesettings["Tele"];
+    m_Tele /= 315775.326864009;
     m_verbose = m_tblitesettings["tb_verbose"];
+    m_spin = m_tblitesettings["spin"];
     std::string guess = m_tblitesettings["tb_guess"];
 
     m_solv_eps = m_tblitesettings["solv_eps"];
@@ -65,6 +69,8 @@ TBLiteInterface::TBLiteInterface(const json& tblitesettings)
     m_tblite_res = tblite_new_result();
 
     tblite_set_context_verbosity(m_ctx, m_verbose);
+    std::cout << "Initialising tblite with accuracy " << m_acc << " and SCFmaxiter " << m_SCFmaxiter << std::endl;
+
 }
 
 TBLiteInterface::~TBLiteInterface()
@@ -288,7 +294,7 @@ double TBLiteInterface::Calculation(bool gradient, bool verbose)
     tblite_set_calculator_accuracy(m_ctx, m_tblite_calc, m_acc);
     tblite_set_calculator_max_iter(m_ctx, m_tblite_calc, m_SCFmaxiter);
     tblite_set_calculator_mixer_damping(m_ctx, m_tblite_calc, m_damping);
-    tblite_set_calculator_temperature(m_ctx, m_tblite_calc, 0);
+    tblite_set_calculator_temperature(m_ctx, m_tblite_calc, m_Tele);
     tblite_set_calculator_save_integrals(m_ctx, m_tblite_calc, 0);
     tblite_get_singlepoint(m_ctx, m_tblite_mol, m_tblite_calc, m_tblite_res);
     tblite_get_result_energy(m_error, m_tblite_res, &energy);

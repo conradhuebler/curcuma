@@ -659,7 +659,7 @@ void SimpleMD::InitVelocities(double scaling)
         m_eigen_velocities.data()[3 * i + 1] = distribution(generator);
         m_eigen_velocities.data()[3 * i + 2] = distribution(generator);
     }
-    std::cout << m_eigen_velocities << std::endl;
+
     RemoveRotation(m_velocities);
     EKin();
     double coupling = m_coupling;
