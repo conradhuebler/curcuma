@@ -70,3 +70,13 @@ double UlyssesInterface::Calculation(bool gradient, bool verbose)
     }
     return m_ulysses->Energy();
 }
+
+Vector UlyssesInterface::Charges() const
+{
+    return m_ulysses->Charges();
+}
+
+Vector UlyssesInterface::OrbitalEnergies() const
+{
+    return m_ulysses->OrbitalEnergies();
+}

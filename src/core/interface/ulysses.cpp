@@ -17,6 +17,18 @@
  *
  */
 
+
+#include "src/global_config.h"
+
+#ifdef USE_BLAS
+    #define EIGEN_USE_BLAS
+#endif
+
+#ifdef USE_MKL
+    #define EIGEN_USE_BLAS
+    #define EIGEN_USE_LAPACK
+#endif
+
 #include "Eigen/Dense"
 #include <vector>
 
@@ -60,31 +72,34 @@ UlyssesObject::UlyssesObject()
 UlyssesObject::~UlyssesObject()
 {
     delete m_bset;
+    delete m_electron;
+    /*
     if (m_method == "gfn2") {
         delete m_gfn2;
     } else if (m_method == "pm6") {
         delete m_mndo;
     }
+    */
 }
 
 void UlyssesObject::Calculate(bool gradient, bool verbose)
 {
     if (m_method == "gfn2")
-        m_gfn2->setElectronTemp(m_Tele);
+        m_electron->setElectronTemp(m_Tele);
     if (m_method == "gfn2") {
-        m_gfn2->Calculate(int(verbose), m_SCFmaxiter);
-        m_energy = m_gfn2->getEnergy();
+        m_electron->Calculate(int(verbose), m_SCFmaxiter);
+        m_energy = m_electron->getEnergy();
         if (gradient) {
             matrixE grad;
-            m_gfn2->AnalyticalGrad(grad);
+            m_electron->AnalyticalGrad(grad);
             m_gradient = Matrix2Geom(grad);
         }
     } else if (m_method == "pm6") {
-        m_mndo->Calculate(int(verbose), m_SCFmaxiter);
-        m_energy = m_mndo->getEnergy();
+        m_electron->Calculate(int(verbose), m_SCFmaxiter);
+        m_energy = m_electron->getEnergy();
         if (gradient) {
             matrixE grad;
-            m_mndo->AnalyticalGrad(grad);
+            m_electron->AnalyticalGrad(grad);
             m_gradient = Matrix2Geom(grad);
         }
     }
@@ -122,9 +137,9 @@ void UlyssesObject::setMolecule(const Geometry& geom, const std::vector<int>& at
     m_bset = new BSet(mol, m_method);
 
     if (m_method == "gfn2") {
-        m_gfn2 = new GFN2(*m_bset, mol);
+        m_electron = new GFN2(*m_bset, mol);
     } else if (m_method == "pm6") {
-        m_mndo = new PM6(*m_bset, mol, "0", m_correction);
+        m_electron = new PM6(*m_bset, mol, "0", m_correction);
     }
 }
 
@@ -132,9 +147,42 @@ void UlyssesObject::UpdateGeometry(const Geometry& geom)
 {
     auto matrix = Geom2Matrix(geom);
     if (m_method == "gfn2") {
-        m_gfn2->setGeometry(matrix);
+        m_electron->setGeometry(matrix);
     } else if (m_method == "pm6") {
-        m_mndo->setGeometry(matrix);
+        m_electron->setGeometry(matrix);
     }
     //m_electron->setGeometry(matrix);
+}
+
+Vector UlyssesObject::Charges() const
+{
+    std::vector<double> AtmCharge = m_electron->getQAtoms();
+    Vector charges(AtmCharge.size());
+
+    for (int i = 0; i < AtmCharge.size(); i++) {
+        charges(i) = AtmCharge[i];
+    }
+
+    return Vector();
+}
+
+
+Vector UlyssesObject::OrbitalEnergies() const
+{
+    std::vector<double> OrbE = m_electron->EnMOs();
+    Vector OrbE_vector(OrbE.size());
+    for (int i = 0; i < OrbE.size(); i++) {
+        OrbE_vector(i) = OrbE[i];
+    }
+    return OrbE_vector;
+}
+
+Vector UlyssesObject::OrbitalOccupations() const
+{
+    std::vector<double> OrbOcc = m_electron->occ();
+    Vector OrbOcc_vector(OrbOcc.size());
+    for (int i = 0; i < OrbOcc.size(); i++) {
+        OrbOcc_vector(i) = OrbOcc[i];
+    }
+    return OrbOcc_vector;
 }

@@ -325,14 +325,29 @@ void SimpleMD::LoadControlJson()
 }
 
 bool SimpleMD::Initialise()
-{
+{    
+    m_natoms = m_molecule.AtomCount();
+    if(m_natoms == 0)
+        return false;
+
+    m_atomtype = std::vector<int>(m_natoms, 0);
+
+    m_eigen_geometry = Eigen::MatrixXd::Zero(m_natoms, 3);
+    m_eigen_geometry_old = Eigen::MatrixXd::Zero(m_natoms, 3);
+    m_eigen_gradient = Eigen::MatrixXd::Zero(m_natoms, 3);
+    m_eigen_gradient_old = Eigen::MatrixXd::Zero(m_natoms, 3);
+    m_eigen_velocities = Eigen::MatrixXd::Zero(m_natoms, 3);
+
+    m_eigen_masses = Eigen::VectorXd::Zero(3*m_natoms);
+    m_eigen_inv_masses = Eigen::VectorXd::Zero(3*m_natoms);
+
     static std::random_device rd{};
     static std::mt19937 gen{ rd() };
     if (m_seed == -1) {
         const auto start = std::chrono::high_resolution_clock::now();
         m_seed = std::chrono::duration_cast<std::chrono::seconds>(start.time_since_epoch()).count();
     } else if (m_seed == 0)
-        m_seed = m_T0 * m_mass.size();
+        m_seed = m_natoms * m_T0;
     std::cout << "Random seed is " << m_seed << std::endl;
     gen.seed(m_seed);
 
@@ -364,11 +379,10 @@ bool SimpleMD::Initialise()
         const auto start = std::chrono::high_resolution_clock::now();
         m_seed = std::chrono::duration_cast<std::chrono::seconds>(start.time_since_epoch()).count();
     } else if (m_seed == 0)
-        m_seed = m_T0 * m_mass.size();
+        m_seed = m_T0 * m_natoms;
     std::cout << "Random seed is " << m_seed << std::endl;
     gen.seed(m_seed);
 
-    m_natoms = m_molecule.AtomCount();
 
     m_start_fragments = m_molecule.GetFragments();
     m_scaling_vector_linear = std::vector<double>(m_natoms, 1);
@@ -404,22 +418,11 @@ bool SimpleMD::Initialise()
     } else
         std::cout << "Move stucture NOT to the origin ... " << std::endl;
 
-    m_mass = std::vector<double>(3 * m_natoms, 0);
-    m_rmass = std::vector<double>(3 * m_natoms, 0);
-    m_atomtype = std::vector<int>(m_natoms, 0);
 
-    m_eigen_geometry = Eigen::MatrixXd::Zero(m_natoms, 3);
-    m_eigen_geometry_old = Eigen::MatrixXd::Zero(m_natoms, 3);
-    m_eigen_gradient = Eigen::MatrixXd::Zero(m_natoms, 3);
-    m_eigen_gradient_old = Eigen::MatrixXd::Zero(m_natoms, 3);
-    m_eigen_velocities = Eigen::MatrixXd::Zero(m_natoms, 3);
-
-    m_eigen_masses = Eigen::VectorXd::Zero(3*m_natoms);
-    m_eigen_inv_masses = Eigen::VectorXd::Zero(3*m_natoms);
 
     if (!m_restart) {
-        m_current_geometry = std::vector<double>(3 * m_natoms, 0);
-        m_velocities = std::vector<double>(3 * m_natoms, 0);
+        m_eigen_geometry = Eigen::MatrixXd::Zero(m_natoms, 3);
+        m_eigen_velocities = Eigen::MatrixXd::Zero(m_natoms, 3);
         m_currentStep = 0;
     }
     /* */
@@ -428,7 +431,7 @@ bool SimpleMD::Initialise()
     m_rt_velo = std::vector<double>(3 * m_natoms, 0);
     /* */
 
-    m_gradient = std::vector<double>(3 * m_natoms, 0);
+    //m_gradient = std::vector<double>(3 * m_natoms, 0);
     m_virial = std::vector<double>(3 * m_natoms, 0);
     m_atom_temp = std::vector<std::vector<double>>(m_natoms);
     if(m_opt)
@@ -469,9 +472,9 @@ bool SimpleMD::Initialise()
             */
         }
         if (m_atomtype[i] == 1) {
-            m_mass[3 * i + 0] = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
-            m_mass[3 * i + 1] = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
-            m_mass[3 * i + 2] = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
+            m_eigen_masses.data()[3 * i + 0] = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
+            m_eigen_masses.data()[3 * i + 1] = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
+            m_eigen_masses.data()[3 * i + 2] = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
 
             m_eigen_masses(3*i) = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
             m_eigen_masses(3*i+1) = Elements::AtomicMass[m_atomtype[i]] * m_hmass;
@@ -483,18 +486,18 @@ bool SimpleMD::Initialise()
 
             mass += Elements::AtomicMass[m_atomtype[i]] * m_hmass;
 
-            m_rmass[3 * i + 0] = 1 / m_mass[3 * i + 0];
-            m_rmass[3 * i + 1] = 1 / m_mass[3 * i + 1];
-            m_rmass[3 * i + 2] = 1 / m_mass[3 * i + 2];
+            m_eigen_inv_masses.data()[3 * i + 0] = 1 / m_eigen_masses.data()[3 * i + 0];
+            m_eigen_inv_masses.data()[3 * i + 1] = 1 / m_eigen_masses.data()[3 * i + 1];
+            m_eigen_inv_masses.data()[3 * i + 2] = 1 / m_eigen_masses.data()[3 * i + 2];
         } else {
-            m_mass[3 * i + 0] = Elements::AtomicMass[m_atomtype[i]];
-            m_mass[3 * i + 1] = Elements::AtomicMass[m_atomtype[i]];
-            m_mass[3 * i + 2] = Elements::AtomicMass[m_atomtype[i]];
+            m_eigen_masses.data()[3 * i + 0] = Elements::AtomicMass[m_atomtype[i]];
+            m_eigen_masses.data()[3 * i + 1] = Elements::AtomicMass[m_atomtype[i]];
+            m_eigen_masses.data()[3 * i + 2] = Elements::AtomicMass[m_atomtype[i]];
             mass += Elements::AtomicMass[m_atomtype[i]];
 
-            m_rmass[3 * i + 0] = 1 / m_mass[3 * i + 0];
-            m_rmass[3 * i + 1] = 1 / m_mass[3 * i + 1];
-            m_rmass[3 * i + 2] = 1 / m_mass[3 * i + 2];
+            m_eigen_inv_masses.data()[3 * i + 0] = 1 / m_eigen_masses.data()[3 * i + 0];
+            m_eigen_inv_masses.data()[3 * i + 1] = 1 / m_eigen_masses.data()[3 * i + 1];
+            m_eigen_inv_masses.data()[3 * i + 2] = 1 / m_eigen_masses.data()[3 * i + 2];
 
             m_eigen_masses(3*i) = Elements::AtomicMass[m_atomtype[i]];
             m_eigen_masses(3*i+1) = Elements::AtomicMass[m_atomtype[i]];
@@ -531,7 +534,7 @@ bool SimpleMD::Initialise()
         for (int i = 0; i < m_chain_length; ++i) {
             m_xi[i] = pow(10.0, static_cast<double>(i)) - 1;
             m_Q[i] = pow(10, i) * kb_Eh * m_T0 * m_dof * 100;
-            std::cout << m_xi[i] << "  " << m_Q[i] << std::endl;
+            // std::cout << m_xi[i] << "  " << m_Q[i] << std::endl;
         }
         m_eta = 0.0;
     }
@@ -552,7 +555,7 @@ bool SimpleMD::Initialise()
 
         for(auto i : m_rmsd_indicies)
         {
-            std::cout << i << " ";
+            // std::cout << i << " ";
             m_rmsd_mtd_molecule.addPair(m_molecule.Atom(i));
         }
         m_rmsd_fragment_count = m_rmsd_mtd_molecule.GetFragments().size();
@@ -654,13 +657,13 @@ void SimpleMD::InitVelocities(double scaling)
 {
     static std::default_random_engine generator;
     for (size_t i = 0; i < m_natoms; ++i) {
-        std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 * m_rmass[i]));
+        std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 * m_eigen_inv_masses.data()[i]));
         m_eigen_velocities.data()[3 * i + 0] = distribution(generator);
         m_eigen_velocities.data()[3 * i + 1] = distribution(generator);
         m_eigen_velocities.data()[3 * i + 2] = distribution(generator);
     }
 
-    RemoveRotation(m_velocities);
+    RemoveRotation();
     EKin();
     double coupling = m_coupling;
     m_coupling = m_dT;
@@ -825,9 +828,9 @@ nlohmann::json SimpleMD::WriteRestartInformation()
     restart["T"] = m_T0;
     restart["currentStep"] = m_currentStep;
     restart["seed"] = m_seed;
-    restart["velocities"] = Tools::DoubleVector2String(m_velocities);
-    restart["geometry"] = Tools::DoubleVector2String(m_current_geometry);
-    restart["gradient"] = Tools::DoubleVector2String(m_gradient);
+    restart["velocities"] = Tools::Geometry2String(m_eigen_velocities);
+    restart["geometry"] = Tools::Geometry2String(m_eigen_geometry);
+    restart["gradient"] = Tools::Geometry2String(m_eigen_gradient);
     restart["rmrottrans"] = m_rmrottrans;
     restart["nocenter"] = m_nocenter;
     restart["COM"] = m_COM;
@@ -953,6 +956,7 @@ bool SimpleMD::LoadRestartInformation(const json& state)
         m_method = state["method"];
     } catch ([[maybe_unused]] json::type_error& e) {
     }
+
     try {
         m_dT = state["dT"];
     } catch ([[maybe_unused]] json::type_error& e) {
@@ -1059,29 +1063,31 @@ bool SimpleMD::LoadRestartInformation(const json& state)
         m_rattle = state["rattle"];
     } catch ([[maybe_unused]] json::type_error& e) {
     }
+    if(m_rattle)
+    {
+        try {
+            m_rattle_tol_12 = state["rattle_tol_12"];
+        } catch ([[maybe_unused]] json::type_error& e) {
+        }
 
-    try {
-        m_rattle_tol_12 = state["rattle_tol_12"];
-    } catch ([[maybe_unused]] json::type_error& e) {
-    }
+        try {
+            m_rattle_tol_13 = state["rattle_tol_13"];
+        } catch (json::type_error& e) {
+        }
+        try {
+            m_rattle_maxiter = state["rattle_maxiter"];
+        } catch ([[maybe_unused]] json::type_error& e) {
+        }
 
-    try {
-        m_rattle_tol_13 = state["rattle_tol_13"];
-    } catch (json::type_error& e) {
-    }
-    try {
-        m_rattle_maxiter = state["rattle_maxiter"];
-    } catch ([[maybe_unused]] json::type_error& e) {
-    }
+        try {
+            m_rattle_dynamic_tol = state["rattle_dynamic_tol"];
+        } catch ([[maybe_unused]] json::type_error& e) {
+        }
 
-    try {
-        m_rattle_dynamic_tol = state["rattle_dynamic_tol"];
-    } catch ([[maybe_unused]] json::type_error& e) {
-    }
-
-    try {
-        m_rattle_dynamic_tol_iter = state["rattle_dynamic_tol_iter"];
-    } catch ([[maybe_unused]] json::type_error& e) {
+        try {
+            m_rattle_dynamic_tol_iter = state["rattle_dynamic_tol_iter"];
+        } catch ([[maybe_unused]] json::type_error& e) {
+        }
     }
     try {
         m_seed = state["seed"];
@@ -1103,10 +1109,11 @@ bool SimpleMD::LoadRestartInformation(const json& state)
     }
 
     if (!geometry.empty()) {
-        m_current_geometry = Tools::String2DoubleVec(geometry, "|");
+        Tools::String2Geometry(m_eigen_geometry, geometry);
+
     }
     if (!velocities.empty()) {
-        m_velocities = Tools::String2DoubleVec(velocities, "|");
+        Tools::String2Geometry(m_eigen_velocities, velocities); 
     }
 
     if (!xi.empty()) {
@@ -1165,6 +1172,7 @@ void SimpleMD::start()
     bool aborted = false;
     auto unix_timestamp = std::chrono::seconds(std::time(nullptr));
     m_unix_started = std::chrono::milliseconds(unix_timestamp).count();
+
     std::vector<json> states;
 
     if (m_thermostat == "csvr") {
@@ -1220,7 +1228,7 @@ void SimpleMD::start()
         plumed_cmd(m_plumedmain, "setEnergy", &m_Epot);
         plumed_cmd(m_plumedmain, "setForces", &m_gradient[0]);
         plumed_cmd(m_plumedmain, "setVirial", &m_virial[0]);
-        plumed_cmd(m_plumedmain, "setMasses", &m_mass[0]);
+        plumed_cmd(m_plumedmain, "setMasses", &m_eigen_masses.data()[0]);
         plumed_cmd(m_plumedmain, "prepareCalc", NULL);
         plumed_cmd(m_plumedmain, "performCalc", NULL);
     }
@@ -1281,12 +1289,12 @@ void SimpleMD::start()
         if (m_rm_COM_step > 0 && m_step % m_rm_COM_step == 0) {
             // std::cout << "Removing COM motion." << std::endl;
             if (m_rmrottrans == 1)
-                RemoveRotation(m_velocities);
+                RemoveRotation();
             else if (m_rmrottrans == 2)
-                RemoveRotations(m_velocities);
+                RemoveRotations();
             else if (m_rmrottrans == 3) {
-                RemoveRotations(m_velocities);
-                RemoveRotation(m_velocities);
+                RemoveRotations();
+                RemoveRotation();
             }
         }
 
@@ -1470,16 +1478,16 @@ void SimpleMD::AdjustRattleTolerance()
 void SimpleMD::Verlet()
 {
     double ekin = 0;
-
+    //std::cout << m_eigen_inv_masses << std::endl;
     for (int i = 0; i < m_natoms; ++i) {
-        m_eigen_geometry.data()[3 * i + 0] = m_eigen_geometry.data()[3 * i + 0] + m_dT * m_eigen_velocities.data()[3 * i + 0] - 0.5 * m_eigen_gradient.data()[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
-        m_eigen_geometry.data()[3 * i + 1] = m_eigen_geometry.data()[3 * i + 1] + m_dT * m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_eigen_gradient.data()[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
-        m_eigen_geometry.data()[3 * i + 2] = m_eigen_geometry.data()[3 * i + 2] + m_dT * m_eigen_velocities.data()[3 * i + 2] - 0.5 * m_eigen_gradient.data()[3 * i + 2] * m_rmass[3 * i + 2] * m_dt2;
+        m_eigen_geometry.data()[3 * i + 0] = m_eigen_geometry.data()[3 * i + 0] + m_dT * m_eigen_velocities.data()[3 * i + 0] - 0.5 * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0] * m_dt2;
+        m_eigen_geometry.data()[3 * i + 1] = m_eigen_geometry.data()[3 * i + 1] + m_dT * m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1] * m_dt2;
+        m_eigen_geometry.data()[3 * i + 2] = m_eigen_geometry.data()[3 * i + 2] + m_dT * m_eigen_velocities.data()[3 * i + 2] - 0.5 * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2] * m_dt2;
 
-        m_eigen_velocities.data()[3 * i + 0] = m_eigen_velocities.data()[3 * i + 0] - 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_rmass[3 * i + 0];
-        m_eigen_velocities.data()[3 * i + 1] = m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_rmass[3 * i + 1];
-        m_eigen_velocities.data()[3 * i + 2] = m_eigen_velocities.data()[3 * i + 2] - 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_rmass[3 * i + 2];
-        ekin += m_mass[i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
+        m_eigen_velocities.data()[3 * i + 0] = m_eigen_velocities.data()[3 * i + 0] - 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
+        m_eigen_velocities.data()[3 * i + 1] = m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
+        m_eigen_velocities.data()[3 * i + 2] = m_eigen_velocities.data()[3 * i + 2] - 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
+        ekin += m_eigen_masses.data()[i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
     }
     ekin *= 0.5;
     m_T = 2.0 * ekin / (kb_Eh * m_dof);
@@ -1501,7 +1509,7 @@ void SimpleMD::Verlet()
         plumed_cmd(m_plumedmain, "setForces", &m_gradient[0]);
         plumed_cmd(m_plumedmain, "setVirial", &m_virial[0]);
 
-        plumed_cmd(m_plumedmain, "setMasses", &m_mass[0]);
+        plumed_cmd(m_plumedmain, "setMasses", &m_eigen_masses.data()[0]);
         if (m_eval_mtd) {
             plumed_cmd(m_plumedmain, "prepareCalc", NULL);
             plumed_cmd(m_plumedmain, "performCalc", NULL);
@@ -1517,14 +1525,14 @@ void SimpleMD::Verlet()
     ekin = 0.0;
 
     for (int i = 0; i < m_natoms; ++i) {
-        m_eigen_velocities.data()[3 * i + 0] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_rmass[3 * i + 0];
-        m_eigen_velocities.data()[3 * i + 1] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_rmass[3 * i + 1];
-        m_eigen_velocities.data()[3 * i + 2] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_rmass[3 * i + 2];
+        m_eigen_velocities.data()[3 * i + 0] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
+        m_eigen_velocities.data()[3 * i + 1] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
+        m_eigen_velocities.data()[3 * i + 2] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
 
-        ekin += m_mass[i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
-        m_gradient[3 * i + 0] = m_eigen_gradient.data()[3 * i + 0];
-        m_gradient[3 * i + 1] = m_eigen_gradient.data()[3 * i + 1];
-        m_gradient[3 * i + 2] = m_eigen_gradient.data()[3 * i + 2];
+        ekin += m_eigen_masses.data()[i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
+        //m_gradient[3 * i + 0] = m_eigen_gradient.data()[3 * i + 0];
+        //m_gradient[3 * i + 1] = m_eigen_gradient.data()[3 * i + 1];
+        //m_gradient[3 * i + 2] = m_eigen_gradient.data()[3 * i + 2];
     }
     ekin *= 0.5;
     double T = 2.0 * ekin / (kb_Eh * m_dof);
@@ -1558,17 +1566,17 @@ void SimpleMD::Rattle()
     bool move = false;
     int dof = m_dof;
     for (int i = 0; i < m_natoms; ++i) {
-        coord[3 * i + 0] = m_eigen_geometry.data()[3 * i + 0] + m_dT * m_eigen_velocities.data()[3 * i + 0] - 0.5 * m_eigen_gradient.data()[3 * i + 0] * m_rmass[3 * i + 0] * m_dt2;
-        coord[3 * i + 1] = m_eigen_geometry.data()[3 * i + 1] + m_dT * m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_eigen_gradient.data()[3 * i + 1] * m_rmass[3 * i + 1] * m_dt2;
-        coord[3 * i + 2] = m_eigen_geometry.data()[3 * i + 2] + m_dT * m_eigen_velocities.data()[3 * i + 2] - 0.5 * m_eigen_gradient.data()[3 * i + 2] * m_rmass[3 * i + 2] * m_dt2;
+        coord[3 * i + 0] = m_eigen_geometry.data()[3 * i + 0] + m_dT * m_eigen_velocities.data()[3 * i + 0] - 0.5 * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0] * m_dt2;
+        coord[3 * i + 1] = m_eigen_geometry.data()[3 * i + 1] + m_dT * m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1] * m_dt2;
+        coord[3 * i + 2] = m_eigen_geometry.data()[3 * i + 2] + m_dT * m_eigen_velocities.data()[3 * i + 2] - 0.5 * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2] * m_dt2;
 
         m_rt_geom_1[3 * i + 0] = coord[3 * i + 0];
         m_rt_geom_1[3 * i + 1] = coord[3 * i + 1];
         m_rt_geom_1[3 * i + 2] = coord[3 * i + 2];
 
-        m_eigen_velocities.data()[3 * i + 0] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_rmass[3 * i + 0];
-        m_eigen_velocities.data()[3 * i + 1] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_rmass[3 * i + 1];
-        m_eigen_velocities.data()[3 * i + 2] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_rmass[3 * i + 2];
+        m_eigen_velocities.data()[3 * i + 0] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
+        m_eigen_velocities.data()[3 * i + 1] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
+        m_eigen_velocities.data()[3 * i + 2] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
 
         m_rt_velo[3 * i + 0] = m_eigen_velocities.data()[3 * i + 0];
         m_rt_velo[3 * i + 1] = m_eigen_velocities.data()[3 * i + 1];
@@ -1622,7 +1630,7 @@ void SimpleMD::Rattle()
                     std::cout << scalarproduct << std::endl;
                 }
 
-                    double lambda = r / (1 * (m_rmass[i] + m_rmass[j]) * scalarproduct);
+                    double lambda = r / (1 * (m_eigen_inv_masses.data()[i] + m_eigen_inv_masses.data()[j]) * scalarproduct);
                     if (std::isinf(lambda)) {
                         std::cout << i << " " << j << std::endl;
                         std::cout << r << " " << scalarproduct << " " << distance_current;
@@ -1642,21 +1650,21 @@ void SimpleMD::Rattle()
                         lambda *= scale;
                     }
 
-                    m_rt_geom_1[3 * i + 0] = coord[3 * i + 0] + dx * lambda * 0.5 * m_rmass[i];
-                    m_rt_geom_1[3 * i + 1] = coord[3 * i + 1] + dy * lambda * 0.5 * m_rmass[i];
-                    m_rt_geom_1[3 * i + 2] = coord[3 * i + 2] + dz * lambda * 0.5 * m_rmass[i];
+                    m_rt_geom_1[3 * i + 0] = coord[3 * i + 0] + dx * lambda * 0.5 * m_eigen_inv_masses.data()[i];
+                    m_rt_geom_1[3 * i + 1] = coord[3 * i + 1] + dy * lambda * 0.5 * m_eigen_inv_masses.data()[i];
+                    m_rt_geom_1[3 * i + 2] = coord[3 * i + 2] + dz * lambda * 0.5 * m_eigen_inv_masses.data()[i];
 
-                    m_rt_geom_1[3 * j + 0] = coord[3 * j + 0] - dx * lambda * 0.5 * m_rmass[j];
-                    m_rt_geom_1[3 * j + 1] = coord[3 * j + 1] - dy * lambda * 0.5 * m_rmass[j];
-                    m_rt_geom_1[3 * j + 2] = coord[3 * j + 2] - dz * lambda * 0.5 * m_rmass[j];
+                    m_rt_geom_1[3 * j + 0] = coord[3 * j + 0] - dx * lambda * 0.5 * m_eigen_inv_masses.data()[j];
+                    m_rt_geom_1[3 * j + 1] = coord[3 * j + 1] - dy * lambda * 0.5 * m_eigen_inv_masses.data()[j];
+                    m_rt_geom_1[3 * j + 2] = coord[3 * j + 2] - dz * lambda * 0.5 * m_eigen_inv_masses.data()[j];
                     /*
-                                        coord[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i];
-                                        coord[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i];
-                                        coord[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i];
+                                        coord[3 * i + 0] += dx * lambda * 0.5 * m_eigen_inv_masses.data()[i];
+                                        coord[3 * i + 1] += dy * lambda * 0.5 * m_eigen_inv_masses.data()[i];
+                                        coord[3 * i + 2] += dz * lambda * 0.5 * m_eigen_inv_masses.data()[i];
 
-                                        coord[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j];
-                                        coord[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j];
-                                        coord[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j];
+                                        coord[3 * j + 0] -= dx * lambda * 0.5 * m_eigen_inv_masses.data()[j];
+                                        coord[3 * j + 1] -= dy * lambda * 0.5 * m_eigen_inv_masses.data()[j];
+                                        coord[3 * j + 2] -= dz * lambda * 0.5 * m_eigen_inv_masses.data()[j];
                     */
 
                     /*
@@ -1679,22 +1687,22 @@ void SimpleMD::Rattle()
                     // std::cout << i<< " "<< j<< " " << distance << " "<< distance_current << " " << distance_current_New << " " << lambda << std::endl << std::endl;
 
                     /*
-                                        m_eigen_velocities.data()[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
-                                        m_eigen_velocities.data()[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
-                                        m_eigen_velocities.data()[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+                                        m_eigen_velocities.data()[3 * i + 0] += dx * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
+                                        m_eigen_velocities.data()[3 * i + 1] += dy * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
+                                        m_eigen_velocities.data()[3 * i + 2] += dz * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
 
-                                        m_eigen_velocities.data()[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
-                                        m_eigen_velocities.data()[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
-                                        m_eigen_velocities.data()[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                                        m_eigen_velocities.data()[3 * j + 0] -= dx * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
+                                        m_eigen_velocities.data()[3 * j + 1] -= dy * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
+                                        m_eigen_velocities.data()[3 * j + 2] -= dz * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
                     */
 
-                    m_rt_velo[3 * i + 0] = m_eigen_velocities.data()[3 * i + 0] + dx * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
-                    m_rt_velo[3 * i + 1] = m_eigen_velocities.data()[3 * i + 1] + dy * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
-                    m_rt_velo[3 * i + 2] = m_eigen_velocities.data()[3 * i + 2] + dz * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+                    m_rt_velo[3 * i + 0] = m_eigen_velocities.data()[3 * i + 0] + dx * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
+                    m_rt_velo[3 * i + 1] = m_eigen_velocities.data()[3 * i + 1] + dy * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
+                    m_rt_velo[3 * i + 2] = m_eigen_velocities.data()[3 * i + 2] + dz * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
 
-                    m_rt_velo[3 * j + 0] = m_eigen_velocities.data()[3 * j + 0] - dx * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
-                    m_rt_velo[3 * j + 1] = m_eigen_velocities.data()[3 * j + 1] - dy * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
-                    m_rt_velo[3 * j + 2] = m_eigen_velocities.data()[3 * j + 2] - dz * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                    m_rt_velo[3 * j + 0] = m_eigen_velocities.data()[3 * j + 0] - dx * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
+                    m_rt_velo[3 * j + 1] = m_eigen_velocities.data()[3 * j + 1] - dy * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
+                    m_rt_velo[3 * j + 2] = m_eigen_velocities.data()[3 * j + 2] - dz * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
 
                     //}
             }
@@ -1734,7 +1742,7 @@ void SimpleMD::Rattle()
                     std::cout << scalarproduct << std::endl;
                 }
 
-                double lambda = r / (1 * (m_rmass[i] + m_rmass[j]) * scalarproduct);
+                double lambda = r / (1 * (m_eigen_inv_masses.data()[i] + m_eigen_inv_masses.data()[j]) * scalarproduct);
                 if (std::isinf(lambda)) {
                     std::cout << i << " " << j << std::endl;
                     std::cout << r << " " << scalarproduct << " " << distance_current;
@@ -1751,21 +1759,21 @@ void SimpleMD::Rattle()
                     lambda *= scale;
                 }
 
-                m_rt_geom_1[3 * i + 0] = coord[3 * i + 0] + dx * lambda * 0.5 * m_rmass[i];
-                m_rt_geom_1[3 * i + 1] = coord[3 * i + 1] + dy * lambda * 0.5 * m_rmass[i];
-                m_rt_geom_1[3 * i + 2] = coord[3 * i + 2] + dz * lambda * 0.5 * m_rmass[i];
+                m_rt_geom_1[3 * i + 0] = coord[3 * i + 0] + dx * lambda * 0.5 * m_eigen_inv_masses.data()[i];
+                m_rt_geom_1[3 * i + 1] = coord[3 * i + 1] + dy * lambda * 0.5 * m_eigen_inv_masses.data()[i];
+                m_rt_geom_1[3 * i + 2] = coord[3 * i + 2] + dz * lambda * 0.5 * m_eigen_inv_masses.data()[i];
 
-                m_rt_geom_1[3 * j + 0] = coord[3 * j + 0] - dx * lambda * 0.5 * m_rmass[j];
-                m_rt_geom_1[3 * j + 1] = coord[3 * j + 1] - dy * lambda * 0.5 * m_rmass[j];
-                m_rt_geom_1[3 * j + 2] = coord[3 * j + 2] - dz * lambda * 0.5 * m_rmass[j];
+                m_rt_geom_1[3 * j + 0] = coord[3 * j + 0] - dx * lambda * 0.5 * m_eigen_inv_masses.data()[j];
+                m_rt_geom_1[3 * j + 1] = coord[3 * j + 1] - dy * lambda * 0.5 * m_eigen_inv_masses.data()[j];
+                m_rt_geom_1[3 * j + 2] = coord[3 * j + 2] - dz * lambda * 0.5 * m_eigen_inv_masses.data()[j];
                 /*
-                                    coord[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i];
-                                    coord[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i];
-                                    coord[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i];
+                                    coord[3 * i + 0] += dx * lambda * 0.5 * m_eigen_inv_masses.data()[i];
+                                    coord[3 * i + 1] += dy * lambda * 0.5 * m_eigen_inv_masses.data()[i];
+                                    coord[3 * i + 2] += dz * lambda * 0.5 * m_eigen_inv_masses.data()[i];
 
-                                 coord[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j];
-                                 coord[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j];
-                                 coord[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j];
+                                 coord[3 * j + 0] -= dx * lambda * 0.5 * m_eigen_inv_masses.data()[j];
+                                 coord[3 * j + 1] -= dy * lambda * 0.5 * m_eigen_inv_masses.data()[j];
+                                 coord[3 * j + 2] -= dz * lambda * 0.5 * m_eigen_inv_masses.data()[j];
              */
 
                 /*
@@ -1788,22 +1796,22 @@ void SimpleMD::Rattle()
                 // std::cout << i<< " "<< j<< " " << distance << " "<< distance_current << " " << distance_current_New << " " << lambda << std::endl << std::endl;
 
                 /*
-                                    m_eigen_velocities.data()[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
-                                    m_eigen_velocities.data()[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
-                                    m_eigen_velocities.data()[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+                                    m_eigen_velocities.data()[3 * i + 0] += dx * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
+                                    m_eigen_velocities.data()[3 * i + 1] += dy * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
+                                    m_eigen_velocities.data()[3 * i + 2] += dz * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
 
-                                 m_eigen_velocities.data()[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
-                                 m_eigen_velocities.data()[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
-                                 m_eigen_velocities.data()[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                                 m_eigen_velocities.data()[3 * j + 0] -= dx * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
+                                 m_eigen_velocities.data()[3 * j + 1] -= dy * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
+                                 m_eigen_velocities.data()[3 * j + 2] -= dz * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
              */
 
-                m_rt_velo[3 * i + 0] = m_eigen_velocities.data()[3 * i + 0] + dx * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
-                m_rt_velo[3 * i + 1] = m_eigen_velocities.data()[3 * i + 1] + dy * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
-                m_rt_velo[3 * i + 2] = m_eigen_velocities.data()[3 * i + 2] + dz * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+                m_rt_velo[3 * i + 0] = m_eigen_velocities.data()[3 * i + 0] + dx * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
+                m_rt_velo[3 * i + 1] = m_eigen_velocities.data()[3 * i + 1] + dy * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
+                m_rt_velo[3 * i + 2] = m_eigen_velocities.data()[3 * i + 2] + dz * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
 
-                m_rt_velo[3 * j + 0] = m_eigen_velocities.data()[3 * j + 0] - dx * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
-                m_rt_velo[3 * j + 1] = m_eigen_velocities.data()[3 * j + 1] - dy * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
-                m_rt_velo[3 * j + 2] = m_eigen_velocities.data()[3 * j + 2] - dz * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                m_rt_velo[3 * j + 0] = m_eigen_velocities.data()[3 * j + 0] - dx * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
+                m_rt_velo[3 * j + 1] = m_eigen_velocities.data()[3 * j + 1] - dy * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
+                m_rt_velo[3 * j + 2] = m_eigen_velocities.data()[3 * j + 2] - dz * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
 
                 //}
             }
@@ -1862,15 +1870,15 @@ void SimpleMD::Rattle()
                     + (dy) * (coord[3 * i + 1] - coord[3 * j + 1])
                     + (dz) * (coord[3 * i + 2] - coord[3 * j + 2]);
 
-                double lambda = r / (1 * (m_rmass[i] + m_rmass[j]) * scalarproduct);
+                double lambda = r / (1 * (m_eigen_inv_masses.data()[i] + m_eigen_inv_masses.data()[j]) * scalarproduct);
 
-                m_eigen_velocities.data()[3 * i + 0] += dx * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
-                m_eigen_velocities.data()[3 * i + 1] += dy * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
-                m_eigen_velocities.data()[3 * i + 2] += dz * lambda * 0.5 * m_rmass[i] * m_dT_inverse;
+                m_eigen_velocities.data()[3 * i + 0] += dx * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
+                m_eigen_velocities.data()[3 * i + 1] += dy * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
+                m_eigen_velocities.data()[3 * i + 2] += dz * lambda * 0.5 * m_eigen_inv_masses.data()[i] * m_dT_inverse;
 
-                m_eigen_velocities.data()[3 * j + 0] -= dx * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
-                m_eigen_velocities.data()[3 * j + 1] -= dy * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
-                m_eigen_velocities.data()[3 * j + 2] -= dz * lambda * 0.5 * m_rmass[j] * m_dT_inverse;
+                m_eigen_velocities.data()[3 * j + 0] -= dx * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
+                m_eigen_velocities.data()[3 * j + 1] -= dy * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
+                m_eigen_velocities.data()[3 * j + 2] -= dz * lambda * 0.5 * m_eigen_inv_masses.data()[j] * m_dT_inverse;
         }
 
     */
@@ -1889,7 +1897,7 @@ void SimpleMD::Rattle()
         m_eigen_geometry.data()[3 * i + 0] = coord[3 * i + 0];
         m_eigen_geometry.data()[3 * i + 1] = coord[3 * i + 1];
         m_eigen_geometry.data()[3 * i + 2] = coord[3 * i + 2];
-        ekin += m_mass[i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
+        ekin += m_eigen_masses.data()[i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
     }
     ekin *= 0.5;
     m_T = 2.0 * ekin / (kb_Eh * m_dof);
@@ -1912,7 +1920,7 @@ void SimpleMD::Rattle()
         plumed_cmd(m_plumedmain, "setForces", &m_gradient[0]);
         plumed_cmd(m_plumedmain, "setVirial", &m_virial[0]);
 
-        plumed_cmd(m_plumedmain, "setMasses", &m_mass[0]);
+        plumed_cmd(m_plumedmain, "setMasses", &m_eigen_masses.data()[0]);
         if (m_eval_mtd) {
             plumed_cmd(m_plumedmain, "prepareCalc", NULL);
             plumed_cmd(m_plumedmain, "performCalc", NULL);
@@ -1927,13 +1935,13 @@ void SimpleMD::Rattle()
     WallPotential();
 
     for (int i = 0; i < m_natoms; ++i) {
-        m_eigen_velocities.data()[3 * i + 0] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_rmass[3 * i + 0];
-        m_eigen_velocities.data()[3 * i + 1] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_rmass[3 * i + 1];
-        m_eigen_velocities.data()[3 * i + 2] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_rmass[3 * i + 2];
+        m_eigen_velocities.data()[3 * i + 0] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 0] * m_eigen_inv_masses.data()[3 * i + 0];
+        m_eigen_velocities.data()[3 * i + 1] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
+        m_eigen_velocities.data()[3 * i + 2] -= 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
 
-        m_gradient[3 * i + 0] = m_eigen_gradient.data()[3 * i + 0];
-        m_gradient[3 * i + 1] = m_eigen_gradient.data()[3 * i + 1];
-        m_gradient[3 * i + 2] = m_eigen_gradient.data()[3 * i + 2];
+        //m_gradient[3 * i + 0] = m_eigen_gradient.data()[3 * i + 0];
+        //m_gradient[3 * i + 1] = m_eigen_gradient.data()[3 * i + 1];
+        //m_gradient[3 * i + 2] = m_eigen_gradient.data()[3 * i + 2];
     }
     m_virial_correction = 0;
     iter = 0;
@@ -1964,7 +1972,7 @@ void SimpleMD::Rattle()
 
                 double r = (dx) * (dvx) + (dy) * (dvy) + (dz) * (dvz);
 
-                double mu = -1 * r / ((m_rmass[i] + m_rmass[j]) * distance_current);
+                double mu = -1 * r / ((m_eigen_inv_masses.data()[i] + m_eigen_inv_masses.data()[j]) * distance_current);
                 sum_mu += mu;
                 if (iter == m_rattle_maxiter) {
                     //      std::cout << i << " " << j << " " << r << " " << (dx) * (dx) + (dy) * (dy) + (dz) * (dz) << " " << distance << " " << mu << " .. ";
@@ -1975,13 +1983,13 @@ void SimpleMD::Rattle()
                 active = 1;
                 sum_active++;
                 m_virial_correction += mu * distance_current;
-                m_eigen_velocities.data()[3 * i + 0] += dx * mu * m_rmass[i];
-                m_eigen_velocities.data()[3 * i + 1] += dy * mu * m_rmass[i];
-                m_eigen_velocities.data()[3 * i + 2] += dz * mu * m_rmass[i];
+                m_eigen_velocities.data()[3 * i + 0] += dx * mu * m_eigen_inv_masses.data()[i];
+                m_eigen_velocities.data()[3 * i + 1] += dy * mu * m_eigen_inv_masses.data()[i];
+                m_eigen_velocities.data()[3 * i + 2] += dz * mu * m_eigen_inv_masses.data()[i];
 
-                m_eigen_velocities.data()[3 * j + 0] -= dx * mu * m_rmass[j];
-                m_eigen_velocities.data()[3 * j + 1] -= dy * mu * m_rmass[j];
-                m_eigen_velocities.data()[3 * j + 2] -= dz * mu * m_rmass[j];
+                m_eigen_velocities.data()[3 * j + 0] -= dx * mu * m_eigen_inv_masses.data()[j];
+                m_eigen_velocities.data()[3 * j + 1] -= dy * mu * m_eigen_inv_masses.data()[j];
+                m_eigen_velocities.data()[3 * j + 2] -= dz * mu * m_eigen_inv_masses.data()[j];
                 // if(iter == m_rattle_maxiter)
                 //      std::cout << " " << mu << std::endl;
                 //}//lse
@@ -2012,7 +2020,7 @@ void SimpleMD::Rattle()
 
                 double r = (dx) * (dvx) + (dy) * (dvy) + (dz) * (dvz);
 
-                double mu = -1 * r / ((m_rmass[i] + m_rmass[j]) * distance_current);
+                double mu = -1 * r / ((m_eigen_inv_masses.data()[i] + m_eigen_inv_masses.data()[j]) * distance_current);
                 sum_mu += mu;
                 if (iter == m_rattle_maxiter) {
                     //      std::cout << i << " " << j << " " << r << " " << (dx) * (dx) + (dy) * (dy) + (dz) * (dz) << " " << distance << " " << mu << " .. ";
@@ -2023,13 +2031,13 @@ void SimpleMD::Rattle()
                 active = 1;
                 sum_active++;
                 m_virial_correction += mu * distance_current;
-                m_eigen_velocities.data()[3 * i + 0] += dx * mu * m_rmass[i];
-                m_eigen_velocities.data()[3 * i + 1] += dy * mu * m_rmass[i];
-                m_eigen_velocities.data()[3 * i + 2] += dz * mu * m_rmass[i];
+                m_eigen_velocities.data()[3 * i + 0] += dx * mu * m_eigen_inv_masses.data()[i];
+                m_eigen_velocities.data()[3 * i + 1] += dy * mu * m_eigen_inv_masses.data()[i];
+                m_eigen_velocities.data()[3 * i + 2] += dz * mu * m_eigen_inv_masses.data()[i];
 
-                m_eigen_velocities.data()[3 * j + 0] -= dx * mu * m_rmass[j];
-                m_eigen_velocities.data()[3 * j + 1] -= dy * mu * m_rmass[j];
-                m_eigen_velocities.data()[3 * j + 2] -= dz * mu * m_rmass[j];
+                m_eigen_velocities.data()[3 * j + 0] -= dx * mu * m_eigen_inv_masses.data()[j];
+                m_eigen_velocities.data()[3 * j + 1] -= dy * mu * m_eigen_inv_masses.data()[j];
+                m_eigen_velocities.data()[3 * j + 2] -= dz * mu * m_eigen_inv_masses.data()[j];
                 // if(iter == m_rattle_maxiter)
                 //      std::cout << " " << mu << std::endl;
                 //}//lse
@@ -2054,11 +2062,11 @@ void SimpleMD::Rattle()
     }
 
     if (move)
-        RemoveRotations(m_velocities);
+        RemoveRotations();
 
     delete[] coord;
     for (int i = 0; i < m_natoms; ++i) {
-        ekin += m_mass[i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
+        ekin += m_eigen_masses.data()[i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
     }
     ekin *= 0.5;
     double T = 2.0 * ekin / (kb_Eh * m_dof);
@@ -2327,7 +2335,7 @@ double SimpleMD::ApplyRectHarmonicWalls()
     // std::cout << potential*kbT << std::endl;
 }
 
-void SimpleMD::RemoveRotations(std::vector<double>& velo)
+void SimpleMD::RemoveRotations()
 {
     /*
      * This code was taken and adopted from the xtb sources
@@ -2342,7 +2350,7 @@ void SimpleMD::RemoveRotations(std::vector<double>& velo)
     // std::cout << fragments.size() << std::endl;
     for (auto & fragment : fragments) {
         for (const int i : fragment) {
-            const double m = m_mass[i];
+            const double m = m_eigen_masses.data()[i];
             mass += m;
             pos(0) += m * m_eigen_geometry.data()[3 * i + 0];
             pos(1) += m * m_eigen_geometry.data()[3 * i + 1];
@@ -2358,7 +2366,7 @@ void SimpleMD::RemoveRotations(std::vector<double>& velo)
 
         Geometry matrix = Geometry::Zero(3, 3);
         for (const int i : fragment) {
-            const double m = m_mass[i];
+            const double m = m_eigen_masses.data()[i];
             geom(i, 0) -= pos(0);
             geom(i, 1) -= pos(1);
             geom(i, 2) -= pos(2);
@@ -2366,9 +2374,9 @@ void SimpleMD::RemoveRotations(std::vector<double>& velo)
             const double x = geom(i, 0);
             const double y = geom(i, 1);
             const double z = geom(i, 2);
-            angom(0) += m_mass[i] * (geom(i, 1) * velo[3 * i + 2] - geom(i, 2) * velo[3 * i + 1]);
-            angom(1) += m_mass[i] * (geom(i, 2) * velo[3 * i + 0] - geom(i, 0) * velo[3 * i + 2]);
-            angom(2) += m_mass[i] * (geom(i, 0) * velo[3 * i + 1] - geom(i, 1) * velo[3 * i + 0]);
+            angom(0) += m_eigen_masses.data()[i] * (geom(i, 1) *  m_eigen_velocities.data()[3 * i + 2] - geom(i, 2) *  m_eigen_velocities.data()[3 * i + 1]);
+            angom(1) += m_eigen_masses.data()[i] * (geom(i, 2) *  m_eigen_velocities.data()[3 * i + 0] - geom(i, 0) *  m_eigen_velocities.data()[3 * i + 2]);
+            angom(2) += m_eigen_masses.data()[i] * (geom(i, 0) *  m_eigen_velocities.data()[3 * i + 1] - geom(i, 1) *  m_eigen_velocities.data()[3 * i + 0]);
             const double x2 = x * x;
             const double y2 = y * y;
             const double z2 = z * z;
@@ -2387,9 +2395,9 @@ void SimpleMD::RemoveRotations(std::vector<double>& velo)
 
         Position rlm = { 0, 0, 0 }, ram = { 0, 0, 0 };
         for (const int i : fragment) {
-            rlm(0) = rlm(0) + m_mass[i] * velo[3 * i + 0];
-            rlm(1) = rlm(1) + m_mass[i] * velo[3 * i + 1];
-            rlm(2) = rlm(2) + m_mass[i] * velo[3 * i + 2];
+            rlm(0) = rlm(0) + m_eigen_masses.data()[i] *  m_eigen_velocities.data()[3 * i + 0];
+            rlm(1) = rlm(1) + m_eigen_masses.data()[i] *  m_eigen_velocities.data()[3 * i + 1];
+            rlm(2) = rlm(2) + m_eigen_masses.data()[i] *  m_eigen_velocities.data()[3 * i + 2];
         }
 
         for (const int i : fragment) {
@@ -2397,14 +2405,14 @@ void SimpleMD::RemoveRotations(std::vector<double>& velo)
             ram(1) = (omega(2) * geom(i, 0) - omega(0) * geom(i, 2));
             ram(2) = (omega(0) * geom(i, 1) - omega(1) * geom(i, 0));
 
-            velo[3 * i + 0] = velo[3 * i + 0] - rlm(0) / mass - ram(0);
-            velo[3 * i + 1] = velo[3 * i + 1] - rlm(1) / mass - ram(1);
-            velo[3 * i + 2] = velo[3 * i + 2] - rlm(2) / mass - ram(2);
+             m_eigen_velocities.data()[3 * i + 0] = m_eigen_velocities.data()[3 * i + 0] - rlm(0) / mass - ram(0);
+             m_eigen_velocities.data()[3 * i + 1] = m_eigen_velocities.data()[3 * i + 1] - rlm(1) / mass - ram(1);
+             m_eigen_velocities.data()[3 * i + 2] = m_eigen_velocities.data()[3 * i + 2] - rlm(2) / mass - ram(2);
         }
     }
 }
 
-void SimpleMD::RemoveRotation(std::vector<double>& velo)
+void SimpleMD::RemoveRotation()
 {
     /*
      * This code was taken and adopted from the xtb sources
@@ -2416,7 +2424,7 @@ void SimpleMD::RemoveRotation(std::vector<double>& velo)
     Geometry geom(m_natoms, 3);
 
     for (int i = 0; i < m_natoms; ++i) {
-        double m = m_mass[i];
+        double m = m_eigen_masses.data()[i];
         mass += m;
         pos(0) += m * m_eigen_geometry.data()[3 * i + 0];
         pos(1) += m * m_eigen_geometry.data()[3 * i + 1];
@@ -2432,7 +2440,7 @@ void SimpleMD::RemoveRotation(std::vector<double>& velo)
 
     Geometry matrix = Geometry::Zero(3, 3);
     for (int i = 0; i < m_natoms; ++i) {
-        double m = m_mass[i];
+        double m = m_eigen_masses.data()[i];
         geom(i, 0) -= pos(0);
         geom(i, 1) -= pos(1);
         geom(i, 2) -= pos(2);
@@ -2440,9 +2448,9 @@ void SimpleMD::RemoveRotation(std::vector<double>& velo)
         double x = geom(i, 0);
         double y = geom(i, 1);
         double z = geom(i, 2);
-        angom(0) += m_mass[i] * (geom(i, 1) * velo[3 * i + 2] - geom(i, 2) * velo[3 * i + 1]);
-        angom(1) += m_mass[i] * (geom(i, 2) * velo[3 * i + 0] - geom(i, 0) * velo[3 * i + 2]);
-        angom(2) += m_mass[i] * (geom(i, 0) * velo[3 * i + 1] - geom(i, 1) * velo[3 * i + 0]);
+        angom(0) += m_eigen_masses.data()[i] * (geom(i, 1) * m_eigen_velocities.data()[3 * i + 2] - geom(i, 2) *  m_eigen_velocities.data()[3 * i + 1]);
+        angom(1) += m_eigen_masses.data()[i] * (geom(i, 2) * m_eigen_velocities.data()[3 * i + 0] - geom(i, 0) *  m_eigen_velocities.data()[3 * i + 2]);
+        angom(2) += m_eigen_masses.data()[i] * (geom(i, 0) * m_eigen_velocities.data()[3 * i + 1] - geom(i, 1) *  m_eigen_velocities.data()[3 * i + 0]);
         double x2 = x * x;
         double y2 = y * y;
         double z2 = z * z;
@@ -2461,9 +2469,9 @@ void SimpleMD::RemoveRotation(std::vector<double>& velo)
 
     Position rlm = { 0, 0, 0 }, ram = { 0, 0, 0 };
     for (int i = 0; i < m_natoms; ++i) {
-        rlm(0) = rlm(0) + m_mass[i] * velo[3 * i + 0];
-        rlm(1) = rlm(1) + m_mass[i] * velo[3 * i + 1];
-        rlm(2) = rlm(2) + m_mass[i] * velo[3 * i + 2];
+        rlm(0) = rlm(0) + m_eigen_masses.data()[i] *  m_eigen_velocities.data()[3 * i + 0];
+        rlm(1) = rlm(1) + m_eigen_masses.data()[i] *  m_eigen_velocities.data()[3 * i + 1];
+        rlm(2) = rlm(2) + m_eigen_masses.data()[i] *  m_eigen_velocities.data()[3 * i + 2];
     }
 
     for (int i = 0; i < m_natoms; ++i) {
@@ -2471,9 +2479,9 @@ void SimpleMD::RemoveRotation(std::vector<double>& velo)
         ram(1) = (omega(2) * geom(i, 0) - omega(0) * geom(i, 2));
         ram(2) = (omega(0) * geom(i, 1) - omega(1) * geom(i, 0));
 
-        velo[3 * i + 0] = velo[3 * i + 0] - rlm(0) / mass - ram(0);
-        velo[3 * i + 1] = velo[3 * i + 1] - rlm(1) / mass - ram(1);
-        velo[3 * i + 2] = velo[3 * i + 2] - rlm(2) / mass - ram(2);
+         m_eigen_velocities.data()[3 * i + 0] =  m_eigen_velocities.data()[3 * i + 0] - rlm(0) / mass - ram(0);
+         m_eigen_velocities.data()[3 * i + 1] =  m_eigen_velocities.data()[3 * i + 1] - rlm(1) / mass - ram(1);
+         m_eigen_velocities.data()[3 * i + 2] =  m_eigen_velocities.data()[3 * i + 2] - rlm(2) / mass - ram(2);
     }
 }
 
@@ -2555,7 +2563,7 @@ void SimpleMD::EKin()
 {
     double ekin = 0;
     for (int i = 0; i < m_natoms; ++i) {
-        ekin += m_mass[i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
+        ekin += m_eigen_masses.data()[i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
     }
     ekin *= 0.5;
     m_Ekin = ekin;
@@ -2635,7 +2643,7 @@ void SimpleMD::CSVR()
         m_eigen_velocities.data()[3 * i + 1] *= alpha;
         m_eigen_velocities.data()[3 * i + 2] *= alpha;
 
-        m_atom_temp[i].push_back(m_mass[i] * (m_eigen_velocities.data()[3 * i + 0] * m_eigen_velocities.data()[3 * i + 0] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]) / (kb_Eh * m_dof));
+        m_atom_temp[i].push_back(m_eigen_masses.data()[i] * (m_eigen_velocities.data()[3 * i + 0] * m_eigen_velocities.data()[3 * i + 0] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]) / (kb_Eh * m_dof));
     }
     m_seed++;
 }
@@ -2647,7 +2655,7 @@ void SimpleMD::Anderson()
     std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
     for (size_t i = 0; i < m_natoms; ++i) {
         if (uniform_dist(generator) < probability) {
-            std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 * m_rmass[i]));
+            std::normal_distribution<double> distribution(0.0, std::sqrt(kb_Eh * m_T0 * m_eigen_inv_masses.data()[i]));
             m_eigen_velocities.data()[3 * i + 0] = (m_eigen_velocities.data()[3 * i + 0] + distribution(generator)) / 2.0;
             m_eigen_velocities.data()[3 * i + 1] = (m_eigen_velocities.data()[3 * i + 1] + distribution(generator)) / 2.0;
             m_eigen_velocities.data()[3 * i + 2] = (m_eigen_velocities.data()[3 * i + 2] + distribution(generator)) / 2.0;
@@ -2660,7 +2668,7 @@ void SimpleMD::NoseHover()
     // Berechnung der kinetischen Energie
     double kinetic_energy = 0.0;
     for (int i = 0; i < m_natoms; ++i) {
-        kinetic_energy += 0.5 * m_mass[i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
+        kinetic_energy += 0.5 * m_eigen_masses.data()[i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
     }
     // Update der Thermostatkette
     m_xi[0] += 0.5 * m_dT * (2.0 * kinetic_energy - m_dof * m_T0 * kb_Eh) / m_Q[0];

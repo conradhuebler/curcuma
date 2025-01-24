@@ -43,6 +43,8 @@ public:
     virtual bool UpdateMolecule(const Geometry& geometry) override;
 
     double Calculation(bool gradient = false, bool verbose = false) override;
+    virtual Vector Charges() const override;
+    virtual Vector OrbitalEnergies() const override;
 
 private:
     Mol m_mol;
