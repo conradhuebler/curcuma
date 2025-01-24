@@ -123,6 +123,7 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
     break;
 
     case 1:
+#ifdef USE_TBLITE
         m_qminterface = new TBLiteInterface(m_controller);
         m_qminterface->setMult(m_mult);
 
@@ -132,6 +133,10 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
             this->CalculateTBlite(gradient, verbose);
             m_error = this->m_qminterface->Error();
         };
+#else
+        std::cout << "TBLite was not included ..." << std::endl;
+        exit(1);
+#endif
         /*
         m_bonds = [this]() {
             return this->m_tblite->BondOrders();
@@ -350,43 +355,7 @@ int EnergyCalculator::SwitchMethod(const std::string& method)
     }
     std::cout << "Switch Method: " << switch_method << std::endl;
     std::cout << "Method: " << m_method << std::endl;
-    /*
-    if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) { // UFF energy calculator requested
-        switch_method = 0;
-        return switch_method;
-    } else if (std::find(m_tblite_methods.begin(), m_tblite_methods.end(), m_method) != m_tblite_methods.end()) { // TBLite energy calculator requested
-#ifdef USE_TBLITE
-        switch_method = 1;
-        return switch_method;
-#endif
-        switch_method = 3;
-    } else if (std::find(m_xtb_methods.begin(), m_xtb_methods.end(), m_method) != m_xtb_methods.end()) { // XTB energy calculator requested
-#ifdef USE_XTB
-        switch_method = 2;
-        return switch_method;
-#endif
-        switch_method = 3;
-    } else if (std::find(m_d3_methods.begin(), m_d3_methods.end(), m_method) != m_d3_methods.end()) { // D3 energy calculator requested
-#ifdef USE_D3
-        switch_method = 4;
-#endif
-    } else if (std::find(m_d4_methods.begin(), m_d4_methods.end(), m_method) != m_d4_methods.end()) { // D4 energy calculator requested
-#ifdef USE_D4
-        switch_method = 5;
-#endif
-    } else if (std::find(m_qmdff_method.begin(), m_qmdff_method.end(), m_method) != m_qmdff_method.end()) { //
-        switch_method = 7;
 
-    } else if (std::find(m_ff_methods.begin(), m_ff_methods.end(), m_method) != m_ff_methods.end()) { //
-        switch_method = 0;
-    } else if (m_method.compare("eht") == 0) {
-        switch_method = 6;
-    } else if //(std::find(m_ulysses_methods.begin(), m_ulysses_methods.end(), m_method) != m_ulysses_methods.end()) {
-            
-        switch_method = 3;
-    } else {
-        switch_method = 0;
-    }*/
     return switch_method;
 }
 void EnergyCalculator::updateGeometry(const Eigen::VectorXd& geometry)

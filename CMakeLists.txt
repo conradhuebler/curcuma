@@ -45,7 +45,7 @@ include_directories(SYSTEM  ${PROJECT_SOURCE_DIR}/external/fmt/include
                             ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0
                             ${PROJECT_SOURCE_DIR}/external/cpp-d4/include
                             ${PROJECT_SOURCE_DIR}/external/
-                            ${PROJECT_SOURCE_DIR}/external/ulysses/src/
+                            ${PROJECT_SOURCE_DIR}/external/ulysses-main/src/
                             )
 
 
