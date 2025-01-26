@@ -28,6 +28,28 @@ option (USE_Plumed
 option(USE_AVX2
     "Enable AVX2 instructions" OFF)
 
+option(USE_BLAS
+    "Enable BLAS" OFF)
+
+option(USE_MKL
+    "Enable MKL" OFF)
+
+if(USE_MKL)
+    if(NOT DEFINED MKL_ROOT)
+        set(MKL_ROOT $ENV{MKL_ROOT})
+    endif()
+    message(STATUS "MKL_ROOT set to ${MKL_ROOT}")
+    if( MKL_ROOT STREQUAL "")
+        message(FATAL_ERROR "MKL_ROOT not set")
+        message(FATAL_ERROR "Please set MKL_ROOT to the root directory of your MKL installation")
+        message(FATAL_ERROR "For example: export MKL_ROOT=/opt/intel/oneapi/mkl/latest")
+        message(FATAL_ERROR "Or use -DMKL_ROOT=/opt/intel/oneapi/mkl/latest")
+    endif()
+    set(MKLROOT ${MKL_ROOT})
+
+endif()
+
+
 
 add_subdirectory(${PROJECT_SOURCE_DIR}/external/fmt EXCLUDE_FROM_ALL)
 
@@ -45,7 +67,7 @@ include_directories(SYSTEM  ${PROJECT_SOURCE_DIR}/external/fmt/include
                             ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0
                             ${PROJECT_SOURCE_DIR}/external/cpp-d4/include
                             ${PROJECT_SOURCE_DIR}/external/
-                            ${PROJECT_SOURCE_DIR}/external/ulysses/src/
+                            ${PROJECT_SOURCE_DIR}/external/ulysses-main/src/
                             )
 
 
@@ -215,7 +237,17 @@ add_library(ulysses_lib ${ulysess_SRC})
 add_executable(ulysses_helper
 src/helpers/ulysses_helper.cpp
 )
+
+if(USE_BLAS)
+    target_link_libraries(ulysses_lib blas)
+endif()
+if(USE_MKL)
+    target_link_libraries(ulysses_lib -m64 -I${MKLROOT}/include  -Wl,--no-as-needed -L${MKLROOT}/lib -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core)
+
+endif()
 target_link_libraries(ulysses_helper PUBLIC ulysses_lib)
+
+
 
 target_link_libraries(curcuma_core km ulysses_lib)
 
@@ -380,8 +412,13 @@ if(USE_Plumed)
 endif()
 
 target_link_libraries(curcuma_core pthread fmt::fmt-header-only )
+if(USE_BLAS)
+    target_link_libraries(curcuma_core blas)
+endif()
+if(USE_MKL)
+    target_link_libraries(curcuma_core -m64 -I${MKLROOT}/include  -Wl,--no-as-needed -L${MKLROOT}/lib -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core)
 
-
+endif()
 if(WIN32) # Check if we are on Windows
 else()
      target_link_libraries(curcuma_core dl )

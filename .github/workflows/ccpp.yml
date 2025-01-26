@@ -47,7 +47,7 @@ jobs:
 
     - name: Upload Release Asset
       id: upload-release-asset-20-04
-      uses: actions/upload-release-asset@v1
+      uses: actions/upload-release-asset@v4
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
@@ -55,3 +55,25 @@ jobs:
         asset_path: ./package/curcuma-nightly-x86_64.AppImage
         asset_name: curcuma-nightly-${{ needs.makerelease.outputs.version }}-20_04-x86_64-Linux.AppImage
         asset_content_type: application/zip
+
+  windows:
+    needs: [makerelease]
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v1
+        with:
+          submodules: true
+
+      - name: Set up MinGW
+        uses: e-t-l/setup-mingw@patch-1
+        with:
+            platform: x64
+
+      - name: Update Modules and Build
+        run: scripts/build_windows.bat
+        
+
+
+      
+

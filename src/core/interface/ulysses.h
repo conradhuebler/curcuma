@@ -27,6 +27,7 @@ class BSet;
 class QCbasis;
 class GFN2;
 class MNDOd;
+typedef Eigen::VectorXd Vector;
 
 class UlyssesObject {
 public:
@@ -42,14 +43,18 @@ public:
     void setTele(double Tele) { m_Tele = Tele; }
     void setMaxIter(int maxiter) { m_SCFmaxiter = maxiter; }
 
+    Vector Charges() const;
+    Vector OrbitalEnergies() const;
+    Vector OrbitalOccupations() const;
 private:
     BSet* m_bset;
-    //QCbasis* m_electron;
-    MNDOd* m_mndo;
-    GFN2* m_gfn2;
+    QCbasis* m_electron;
+    //MNDOd* m_mndo;
+    //GFN2* m_gfn2;
     std::string m_method, m_correction = "0";
     double m_Tele;
     int m_SCFmaxiter;
     double m_energy;
     Geometry m_gradient;
+    //Vector m_charges, m_dipole, m_orbital_energies;
 };

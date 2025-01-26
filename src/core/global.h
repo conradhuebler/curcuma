@@ -62,6 +62,7 @@ struct Mol {
 
     Geometry m_geometry;
     Vector m_partial_charges;
+    
     std::vector<std::pair<int, int>> m_bonds;
     std::vector<int> m_atoms;
 };

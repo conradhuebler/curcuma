@@ -313,6 +313,22 @@ inline std::string DoubleVector2String(const Vector& vector, const std::string& 
     return result;
 }
 
+inline std::string Geometry2String(const Geometry& matrix)
+{
+    std::string result = "";
+    for (int j = 0; j < matrix.rows(); ++j)
+        for (int i = 0; i < matrix.cols(); ++i) 
+            result += std::to_string(matrix(j,i)) + "|";
+    //    }
+    //    result += "|";
+
+    result.pop_back();
+    result.pop_back();
+
+    result += "";
+    return result;
+}
+
 inline std::string Matrix2String(const Matrix& matrix)
 {
     std::string result = "";
@@ -329,6 +345,31 @@ inline std::string Matrix2String(const Matrix& matrix)
 
     return result;
 }
+
+inline void String2Matrix(Matrix &matrix, const std::string &string, const std::string &delim = "|")
+{
+    #pragma message ("fix string char stuff")
+    StringList elements = SplitString(string, "|");
+    int rows = matrix.rows();
+    int cols = matrix.cols();
+    int index = 0;
+    for(int i = 0; i < rows; ++i)
+        for(int j = 0; j < cols; ++j)
+            matrix(j,i) = std::stod(elements[index++]);
+}
+
+inline void String2Geometry(Geometry &matrix, const std::string &string, const std::string &delim = "|")
+{
+    #pragma message ("fix string char stuff")
+    StringList elements = SplitString(string, "|");
+    int rows = matrix.rows();
+    int cols = matrix.cols();
+    int index = 0;
+    for(int i = 0; i < rows; ++i)
+        for(int j = 0; j < cols; ++j)
+            matrix(i, j) = std::stod(elements[index++]);
+}
+
 
 inline std::vector<int> String2Vector(const std::string& string)
 {
