@@ -46,15 +46,16 @@ public:
     Vector Charges() const;
     Vector OrbitalEnergies() const;
     Vector OrbitalOccupations() const;
+
 private:
     BSet* m_bset;
     QCbasis* m_electron;
-    //MNDOd* m_mndo;
-    //GFN2* m_gfn2;
+    // MNDOd* m_mndo;
+    // GFN2* m_gfn2;
     std::string m_method, m_correction = "0";
     double m_Tele;
     int m_SCFmaxiter;
     double m_energy;
     Geometry m_gradient;
-    //Vector m_charges, m_dipole, m_orbital_energies;
+    // Vector m_charges, m_dipole, m_orbital_energies;
 };

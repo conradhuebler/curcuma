@@ -81,7 +81,10 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
         break;
 
     case 6:
-        delete m_eht;
+        m_qminterface = new EHT();
+        m_ecengine = [this](bool gradient, bool verbose) {
+            m_qminterface->Calculation(gradient, verbose);
+        };
         break;
 
     case 5:
@@ -165,7 +168,7 @@ EnergyCalculator::~EnergyCalculator()
         break;
 
     case 6:
-        delete m_eht;
+        delete m_qminterface;
         break;
 
     case 5:
@@ -223,8 +226,8 @@ void EnergyCalculator::setMolecule(const Mol& mol)
         break;
 
     case 6:
-        m_eht->setMolecule(mol);
-        m_eht->Initialise();
+        m_qminterface->InitialiseMolecule(mol);
+        // m_eht->Initialise();
         break;
 
     case 5:

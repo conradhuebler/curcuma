@@ -132,6 +132,7 @@ public:
         m_spin = multi - 1;
         m_muli = multi;
     }
+
 protected:
     bool m_initialised = false;
     Matrix m_geometry, m_gradient;

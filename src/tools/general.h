@@ -84,6 +84,29 @@ private:
 
 namespace Tools {
 
+inline std::vector<int> ParseStringToVector(const std::string& input)
+{
+    std::vector<int> result;
+    std::stringstream ss(input);
+    std::string token;
+
+    while (std::getline(ss, token, ';')) {
+        size_t dash_pos = token.find('-');
+        if (dash_pos != std::string::npos) {
+            int start = std::stoi(token.substr(0, dash_pos));
+            int end = std::stoi(token.substr(dash_pos + 1));
+            for (int i = start; i <= end; ++i) {
+                result.push_back(i);
+            }
+        } else {
+            result.push_back(std::stoi(token));
+        }
+    }
+
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
 inline StringList SplitString(const std::string& string)
 {
     StringList elements;

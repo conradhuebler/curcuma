@@ -229,6 +229,7 @@ void ConfScan::LoadControlJson()
     m_MaxHTopoDiff = Json2KeyWord<int>(m_defaults, "MaxHTopoDiff");
     m_threads = m_defaults["threads"].get<int>();
     m_RMSDmethod = Json2KeyWord<std::string>(m_defaults, "method");
+
     fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nPermutation of atomic indices performed according to {0} \n\n", m_RMSDmethod);
 
     if (m_RMSDmethod == "molalign") {
@@ -271,6 +272,20 @@ void ConfScan::LoadControlJson()
 
     if (m_useorders == -1)
         m_useorders = 10;
+
+    if (!m_silent) {
+        fmt::print(fg(fmt::color::cyan) | fmt::emphasis::bold, "\nCurrent Configuration:\n");
+        fmt::print("Threads: {}\n", m_threads);
+        fmt::print("Molalign Tolerance: {}\n", m_molaligntol);
+        fmt::print("Force Reorder: {}\n", m_force_reorder);
+        fmt::print("Silent: {}\n", m_silent);
+        fmt::print("Write: {}\n", m_write);
+        fmt::print("Update Rotation: {}\n", m_update_rotation);
+        fmt::print("Split: {}\n", m_split);
+        fmt::print("Damping: {}\n", m_damping);
+        fmt::print("Molalign Bin: {}\n", m_molalign);
+        fmt::print("Method: {}\n", m_method);
+    }
 }
 
 bool ConfScan::openFile()
@@ -451,9 +466,11 @@ bool ConfScan::LoadRestartInformation()
             } catch (json::type_error& e) {
             }
         }
-        for (const auto& vector : reorder_cached)
-            if (std::find(m_reorder_rules.begin(), m_reorder_rules.end(), vector) == m_reorder_rules.end())
-                m_reorder_rules.push_back(vector);
+        if (m_restart) {
+            for (const auto& vector : reorder_cached)
+                if (std::find(m_reorder_rules.begin(), m_reorder_rules.end(), vector) == m_reorder_rules.end())
+                    m_reorder_rules.push_back(vector);
+        }
     }
     m_useRestart = files.size() == 1 && error != int(files.size());
     std::cout << "Starting with " << m_reorder_rules.size() << " initial reorder rules." << std::endl;

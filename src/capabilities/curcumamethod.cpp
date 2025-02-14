@@ -38,6 +38,10 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, bool 
     , m_controller(controller)
     , m_silent(silent)
 {
+    if (controller.count("verbose") > 0) {
+        m_silent = false;
+        m_verbose = true;
+    }
     //m_curcuma_progress.open("curcuma_progress", std::ios::out);
 }
 

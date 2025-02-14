@@ -1,6 +1,6 @@
 /*
  * <RMSD calculator for chemical structures.>
- * Copyright (C) 2019 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -77,6 +77,8 @@ static const json RMSDJson = {
     { "fragment", -1 },
     { "fragment_reference", -1 },
     { "fragment_target", -1 },
+    { "reference_atoms", "" },
+    { "target_atoms", "" },
     { "init", -1 },
     { "pt", 0 },
     { "silent", false },
@@ -118,6 +120,8 @@ public:
         m_target = target;
         m_target_original = target;
     }
+
+    void setMatchingAtoms(const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms);
 
     double Rules2RMSD(const std::vector<int> rules, int fragment = -1);
     StructComp Rule2RMSD(const std::vector<int> rules, int fragment = 1);
@@ -278,6 +282,23 @@ private:
         return AlignByVectorPair(pair.first, pair.second);
     }
 
+    static inline double Cost(double distance, double norm, int costmatrix)
+    {
+        if (costmatrix == 1)
+            return distance * distance;
+        else if (costmatrix == 2)
+            return distance;
+        else if (costmatrix == 3)
+            return distance + norm;
+        else if (costmatrix == 4)
+            return distance * distance + norm * norm;
+        else if (costmatrix == 5)
+            return distance * norm;
+        else if (costmatrix == 6)
+            return distance * distance * norm * norm;
+        else
+            return distance * distance;
+    }
     std::vector<int> FillMissing(const Molecule& molecule, const std::vector<int>& order);
     void InsertRotation(std::pair<double, Matrix>& rotation);
 
@@ -305,7 +326,7 @@ private:
     std::pair<Matrix, Position> GetOperateVectors(const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms);
     std::pair<Matrix, Position> GetOperateVectors(const Molecule& reference, const Molecule& target);
 
-    Molecule m_reference, m_target, m_target_original, m_reference_aligned, m_target_aligned, m_target_reordered, m_reorder_reference, m_reorder_target, m_reference_centered, m_target_centered;
+    Molecule m_reference, m_target, m_target_original, m_reference_aligned, m_reference_original, m_target_aligned, m_target_reordered, m_reorder_reference, m_reorder_target, m_reference_centered, m_target_centered;
     Geometry m_reorder_reference_geometry;
     bool m_force_reorder = false, m_protons = true, m_print_intermediate = false, m_silent = false;
     std::vector<std::vector<int>> m_intermediate_results;
@@ -329,6 +350,8 @@ private:
     double m_cost_limit = 0;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
     std::vector<int> m_initial, m_element_templates;
+    std::vector<int> m_reference_atoms, m_target_atoms;
+    Eigen::Matrix3d m_rotation;
     std::string m_molalign = "molalign", m_molalignarg = " -remap -fast -tol 10";
     std::map<double, Matrix> m_prepared_cost_matrices;
 };

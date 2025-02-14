@@ -171,7 +171,7 @@ file(ARCHIVE_EXTRACT INPUT ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip DESTIN
 if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/ulysses.zip)
   file(DOWNLOAD https://gitlab.com/siriius/ulysses/-/archive/main/ulysses-main.zip  ${PROJECT_SOURCE_DIR}/external/ulysses.zip
          TIMEOUT 60  # seconds
-         EXPECTED_HASH SHA256=1b55f9368c95f5a6dc334b6a86ad5a7583a397c9c59b4abb04f73ca4535cc393)
+         EXPECTED_HASH SHA256=af676fd3f0b98528bd6f7d12064192af6e4190d6da9808bdad803f1201c9feb6)
 endif()
 
 file(ARCHIVE_EXTRACT INPUT ${PROJECT_SOURCE_DIR}/external/ulysses.zip DESTINATION ${PROJECT_SOURCE_DIR}/external)
@@ -204,18 +204,17 @@ set(curcuma_core_SRC
         src/capabilities/simplemd.cpp
         src/capabilities/hessian.cpp
         src/capabilities/qmdfffit.cpp
-        src/core/ulyssesinterface.cpp
+        src/core/qm_methods/eht.cpp
+        src/core/qm_methods/ulyssesinterface.cpp
         src/core/energycalculator.cpp
         src/core/molecule.cpp
         src/core/fileiterator.cpp
-        src/core/eigen_uff.cpp
-        src/core/qmdff.cpp
-        src/core/eht.cpp
+        #src/core/eigen_uff.cpp
+        #src/core/qmdff.cpp
         src/core/forcefieldthread.cpp
         src/core/forcefield.cpp
         src/core/forcefieldfunctions.h
         src/core/forcefieldgenerator.cpp
-        #src/core/forcefield_terms/qmdff_terms.h
         src/tools/formats.h
         src/tools/geometry.h
         src/tools/general.h
@@ -231,7 +230,7 @@ set(curcuma_core_SRC
 add_library(km ${km_SRC})
 
 set(ulysess_SRC
-    src/core/interface/ulysses.cpp
+    src/core/qm_methods/interface/ulysses.cpp
 )
 add_library(ulysses_lib ${ulysess_SRC})
 add_executable(ulysses_helper
@@ -301,7 +300,7 @@ if(USE_XTB)
     target_link_libraries(xtb_helper lib-xtb-shared pthread dl)
     endif()
     set(curcuma_xtb_SRC
-        src/core/xtbinterface.cpp
+        src/core/qm_methods/xtbinterface.cpp
     )
     add_library(curcuma_xtb  ${curcuma_xtb_SRC})
 
@@ -343,7 +342,7 @@ if(USE_TBLITE)
     target_link_libraries(tblite_helper PUBLIC tblite-lib gfortran pthread)
     endif()
     set(curcuma_tblite_SRC
-        src/core/tbliteinterface.cpp
+        src/core/qm_methods/tbliteinterface.cpp
     )
     add_library(curcuma_tblite  ${curcuma_tblite_SRC})
 
@@ -362,7 +361,7 @@ if(USE_D3)
     target_link_libraries(dftd3_helper PUBLIC s-dftd3 gfortran pthread) 
     endif()
     set(curcuma_D3_SRC
-           src/core/dftd3interface.cpp
+           src/core/qm_methods/dftd3interface.cpp
     )
     add_library(curcuma_D3  ${curcuma_D3_SRC})
     target_link_libraries(curcuma_D3 s-dftd3)
@@ -396,7 +395,7 @@ if(USE_D4)
     endif()
 
     set(curcuma_d4_SRC
-        src/core/dftd4interface.cpp
+        src/core/qm_methods/dftd4interface.cpp
     )
     add_library(curcuma_d4  ${curcuma_d4_SRC})
     if(DEFINED D4LIBS_DIR AND DEFINED D4INCLUDE_DIR)
@@ -452,13 +451,20 @@ target_sources(Continuous
   PRIVATE
     src/core/qmdff_par.h
 )
-add_test(NAME AAAbGal_mtemplate COMMAND AAAbGal mtemplate WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-add_test(NAME AAAbGal_mhybrid COMMAND AAAbGal mhybrid WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-add_test(NAME AAAbGal_template COMMAND AAAbGal template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-add_test(NAME AAAbGal_hybrid COMMAND AAAbGal hybrid WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-add_test(NAME AAAbGal_incremental COMMAND AAAbGal incr WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+#add_test(NAME AAAbGal_mtemplate COMMAND AAAbGal mtemplate WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+#add_test(NAME AAAbGal_mhybrid COMMAND AAAbGal mhybrid WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+#add_test(NAME AAAbGal_template COMMAND AAAbGal template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME AAAbGal_subspace COMMAND AAAbGal subspace WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+#add_test(NAME AAAbGal_incremental COMMAND AAAbGal incr WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 
-set_tests_properties(AAAbGal_incremental PROPERTIES TIMEOUT 300)
+#set_tests_properties(AAAbGal_incremental PROPERTIES TIMEOUT 300)
+
+add_test(NAME confscan_subspace COMMAND confscan_test subspace WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME confscan_free COMMAND AAAbGal free WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME confscan_dtemplate COMMAND AAAbGal dtemplate WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME confscan_template COMMAND AAAbGal template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME confscan_molalign COMMAND AAAbGal molalign WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+
 
 
 install(TARGETS curcuma RUNTIME DESTINATION bin)

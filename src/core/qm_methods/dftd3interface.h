@@ -24,8 +24,8 @@
 #include "s-dftd3.h"
 #endif
 
+#include "interface/abstract_interface.h"
 #include "src/core/global.h"
-#include "src/core/interface/abstract_interface.h"
 
 static json DFTD3Settings{
     { "d_s6", 0 },

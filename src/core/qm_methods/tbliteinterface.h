@@ -19,13 +19,11 @@
 
 #pragma once
 
-#include "src/core/global.h"
+#include "interface/abstract_interface.h"
 
 #ifndef tblite_delete
 #include "tblite.h"
 #endif
-
-#include "src/core/interface/abstract_interface.h"
 
 static json TBLiteSettings{
     { "tb_acc", 1 },
@@ -36,7 +34,7 @@ static json TBLiteSettings{
     { "tb_guess", "SAD" },
     { "solv", "none" },
     { "solv_eps", -1 },
-    { "spin", 0}
+    { "spin", 0 }
 };
 
 class TBLiteInterface : public QMInterface {

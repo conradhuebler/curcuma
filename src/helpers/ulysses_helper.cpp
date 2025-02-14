@@ -1,6 +1,6 @@
 #include "Eigen/Dense"
 
-#include "src/core/interface/ulysses.h"
+#include "src/core/qm_methods/interface/ulysses.h"
 
 #include <iostream>
 

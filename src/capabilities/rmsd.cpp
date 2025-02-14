@@ -1,6 +1,6 @@
 /*
  * <RMSD calculator for chemical structures.>
- * Copyright (C) 2019 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -167,7 +167,8 @@ void RMSDDriver::LoadControlJson()
 
     m_force_reorder = Json2KeyWord<bool>(m_defaults, "reorder");
     m_protons = !Json2KeyWord<bool>(m_defaults, "heavy");
-    m_silent = Json2KeyWord<bool>(m_defaults, "silent");
+    if (!m_verbose)
+        m_silent = Json2KeyWord<bool>(m_defaults, "silent");
     m_intermedia_storage = Json2KeyWord<double>(m_defaults, "storage");
     m_dynamic_center = Json2KeyWord<bool>(m_defaults, "DynamicCenter");
     m_topo = Json2KeyWord<int>(m_defaults, "topo");
@@ -235,6 +236,66 @@ void RMSDDriver::LoadControlJson()
     std::vector<int> vector = Tools::String2Vector(order);
     if (vector.size() != 0)
         m_reorder_rules = vector;
+
+    std::cout << m_defaults["reference_atoms"] << std::endl;
+    std::string reference_atoms = Json2KeyWord<std::string>(m_defaults, "reference_atoms");
+    std::string target_atoms = Json2KeyWord<std::string>(m_defaults, "target_atoms");
+    if (reference_atoms.size() > 0)
+        m_reference_atoms = Tools::ParseStringToVector(reference_atoms);
+
+    if (target_atoms.size() > 0) {
+        m_target_atoms = Tools::ParseStringToVector(target_atoms);
+    }
+    if (m_reference_atoms.size() != m_target_atoms.size()) {
+        std::cout << "Number of reference and target atoms must be the same, exiting ...";
+        exit(1);
+    } else if (m_reference_atoms.size() > 0) {
+        std::cout << "Aligning molecules using atoms: ";
+        for (int i = 0; i < m_reference_atoms.size(); ++i)
+            std::cout << m_reference_atoms[i] << " " << m_target_atoms[i] << "\n";
+    }
+    if (!m_silent) {
+        fmt::print(fg(fmt::color::cyan) | fmt::emphasis::bold, "\nCurrent Configuration:\n");
+        fmt::print("Fragment Reference: {}\n", m_fragment_reference);
+        fmt::print("Fragment Target: {}\n", m_fragment_target);
+        fmt::print("Fragment: {}\n", m_fragment);
+        fmt::print("Threads: {}\n", m_threads);
+        fmt::print("Initial Fragment: {}\n", m_initial_fragment);
+        fmt::print("PT: {}\n", m_pt);
+        fmt::print("Molalign Tolerance: {}\n", m_molaligntol);
+        fmt::print("Force Reorder: {}\n", m_force_reorder);
+        fmt::print("Protons: {}\n", m_protons);
+        fmt::print("Silent: {}\n", m_silent);
+        fmt::print("Intermedia Storage: {}\n", m_intermedia_storage);
+        fmt::print("Dynamic Center: {}\n", m_dynamic_center);
+        fmt::print("Topo: {}\n", m_topo);
+        fmt::print("Write: {}\n", m_write);
+        fmt::print("No Reorder: {}\n", m_noreorder);
+        fmt::print("Update Rotation: {}\n", m_update_rotation);
+        fmt::print("Split: {}\n", m_split);
+        fmt::print("No Free: {}\n", m_nofree);
+        fmt::print("Max Trial: {}\n", m_maxtrial);
+        fmt::print("KM Stat: {}\n", m_kmstat);
+        fmt::print("KM Convergence: {}\n", m_km_convergence);
+        fmt::print("Element: {}\n", m_element);
+        fmt::print("Check: {}\n", m_check);
+        fmt::print("Damping: {}\n", m_damping);
+        fmt::print("Molalign Bin: {}\n", m_molalign);
+        fmt::print("Method: {}\n", m_method);
+        fmt::print("Cost Matrix: {}\n", m_costmatrix);
+        fmt::print("Order: {}\n", order);
+        fmt::print("Cycles: {}\n", m_munkress_cycle);
+        fmt::print("Reference Atoms: {}\n", fmt::join(m_reference_atoms, ", "));
+        fmt::print("Target Atoms: {}\n", fmt::join(m_target_atoms, ", "));
+    }
+}
+
+void RMSDDriver::setMatchingAtoms(const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms)
+{
+    m_reference_atoms = reference_atoms;
+    m_target_atoms = target_atoms;
+#pragma message("TODO: remove notreorder in the future")
+    m_noreorder = true;
 }
 
 void RMSDDriver::start()
@@ -246,6 +307,18 @@ void RMSDDriver::start()
     RunTimer timer(false);
     clear();
     bool rmsd_calculated = false;
+
+    if (m_reference_atoms.size() == m_target_atoms.size() && m_reference_atoms.size() > 0) {
+        m_target_original = m_target;
+        m_reference_original = m_reference;
+        m_target.clear();
+        m_reference.clear();
+        for (int i = 0; i < m_reference_atoms.size(); ++i) {
+            m_reference.addPair(m_reference_original.Atom(m_reference_atoms[i]));
+            m_target.addPair(m_target_original.Atom(m_target_atoms[i]));
+        }
+    }
+
     if (m_reference.AtomCount() < m_target.AtomCount()) {
         m_swap = true;
         Molecule tmp = m_reference;
@@ -288,30 +361,42 @@ void RMSDDriver::start()
         }
     }
     Molecule temp_ref, temp_tar;
-    int consent = true;
-    for (int i = 0; i < m_reference.AtomCount() && i < m_target.AtomCount(); ++i) {
-        // std::cout << m_reference.Atom(i).first << " " << m_target.Atom(i).first << std::endl;
-        if (m_reference.Atom(i).first == m_target.Atom(i).first) {
-            temp_ref.addPair(m_reference.Atom(i));
-            temp_tar.addPair(m_target.Atom(i));
-        } else
-            consent = false;
-    }
-    if (consent) {
-        if (m_fragment_reference != -1 && m_fragment_target != -1) {
-            m_rmsd = CustomRotation();
-        } else if (!rmsd_calculated)
-            m_rmsd = BestFitRMSD();
+    if (m_target_atoms.size() == 0) {
+        int consent = true;
+        for (int i = 0; i < m_reference.AtomCount() && i < m_target.AtomCount(); ++i) {
+            if (m_reference.Atom(i).first == m_target.Atom(i).first) {
+                temp_ref.addPair(m_reference.Atom(i));
+                temp_tar.addPair(m_target.Atom(i));
+            } else
+                consent = false;
+        }
+        if (consent) {
+            if (m_fragment_reference != -1 && m_fragment_target != -1) {
+                m_rmsd = CustomRotation();
+            } else if (!rmsd_calculated)
+                m_rmsd = BestFitRMSD();
+        } else {
+            if (!m_silent)
+                fmt::print("Partial RMSD is calculated, only from those atoms, that match each other.\n\n\n");
+            m_rmsd = PartialRMSD(temp_ref, temp_tar);
+        }
     } else {
-        if (!m_silent)
-            fmt::print("Partial RMSD is calculated, only from those atoms, that match each other.\n\n\n");
-        m_rmsd = PartialRMSD(temp_ref, temp_tar);
+        m_rmsd = BestFitRMSD();
+        Eigen::Matrix3d R = m_rotation;
+        auto reference = CenterMolecule(m_reference_original.getGeometry());
+        auto target = CenterMolecule(m_target_original.getGeometry());
+        m_target.clear();
+        m_reference.clear();
+        m_reference_aligned = m_reference_original;
+        m_target_aligned = m_target_original;
+        const auto t = RMSDFunctions::applyRotation(target, R);
+        m_reference_aligned.setGeometry(reference);
+        m_target_aligned.setGeometry(t);
+        m_reference.setGeometry(reference);
+        m_target.setGeometry(t);
+        //        rmsd = RMSDFunctions::getRMSD(reference, t);
     }
-    /*
-    auto terms = IndivRMSD(m_reference, m_target);
-    for(const auto  &i:terms)
-        std::cout << i << std::endl;
-    */
+
     m_htopo_diff = CompareTopoMatrix(m_reference_aligned.HydrogenBondMatrix(-1, -1), m_target_aligned.HydrogenBondMatrix(-1, -1));
     if (!m_silent) {
         std::cout << std::endl
@@ -323,13 +408,10 @@ void RMSDDriver::start()
     }
     if (m_swap) {
         Molecule reference = m_reference;
-        //Molecule reference_reorder = m_reference_reordered;
         Molecule reference_aligned = m_reference_aligned;
         m_reference = m_target;
         m_reference_aligned = m_target_aligned;
-        // m_reference_reordered = m_target_reordered;
         m_target = reference;
-        //m_target_reordered = reference_reorder;
         m_target_aligned = reference_aligned;
     }
 }
@@ -346,13 +428,16 @@ double RMSDDriver::BestFitRMSD()
     double rmsd = 0;
     auto reference = CenterMolecule(m_reference.getGeometry());
     auto target = CenterMolecule(m_target.getGeometry());
-    const auto t = RMSDFunctions::getAligned(reference, target, 1);
+    // const auto t = RMSDFunctions::getAligned(reference, target, 1);
+    Eigen::Matrix3d R = RMSDFunctions::BestFitRotation(reference, target, 1);
+    const auto t = RMSDFunctions::applyRotation(target, R);
     m_reference_aligned.setGeometry(reference);
     m_target_aligned.setGeometry(t);
     m_reference.setGeometry(reference);
     m_target.setGeometry(t);
     rmsd = RMSDFunctions::getRMSD(reference, t);
     m_rmsd = rmsd;
+    m_rotation = R;
     return rmsd;
 }
 
@@ -392,7 +477,7 @@ double RMSDDriver::CustomRotation()
     m_reference_aligned.setGeometry(reference);
     m_target_aligned.setGeometry(t);
     rmsd = RMSDFunctions::getRMSD(reference, t);
-
+    m_rotation = rotation;
     return rmsd;
 }
 
@@ -1364,21 +1449,7 @@ std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const Geometry& reference, 
         for (int j = 0; j < m_reference.AtomCount(); ++j) {
             double d = (target.row(j) - reference.row(i)).norm();
             double norm = (target.row(j).norm() - reference.row(i).norm());
-            if (m_costmatrix == 2)
-                distance(i, j) = d;
-            else if (m_costmatrix == 1)
-                distance(i, j) = d * d;
-            else if (m_costmatrix == 3)
-                distance(i, j) = d + norm;
-            else if (m_costmatrix == 4)
-                distance(i, j) = d * d + norm * norm;
-            else if (m_costmatrix == 5)
-                distance(i, j) = d * norm;
-            else if (m_costmatrix == 5)
-                distance(i, j) = d * d * norm * norm;
-            else
-                distance(i, j) = d * d;
-            // + norm
+            distance(i, j) = Cost(d, norm, m_costmatrix);
             distance(i, j) += penalty * (m_reference.Atom(i).first != m_target.Atom(j).first);
             min = std::min(min, distance(i, j));
         }
@@ -1398,22 +1469,8 @@ std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const Geometry& reference, 
         for (int j = 0; j < reference_atoms.size(); ++j) {
             double d = (target.row(j) - reference.row(i)).norm();
             double norm = (target.row(j).norm() - reference.row(i).norm());
-            if (costmatrix == 2)
-                distance(i, j) = d;
-            else if (costmatrix == 1)
-                distance(i, j) = d * d;
-            else if (costmatrix == 3)
-                distance(i, j) = d + norm;
-            else if (costmatrix == 4)
-                distance(i, j) = d * d + norm * norm;
-            else if (costmatrix == 5)
-                distance(i, j) = d * norm;
-            else if (costmatrix == 5)
-                distance(i, j) = d * d * norm * norm;
-            else
-                distance(i, j) = d * d;
+            distance(i, j) = Cost(d, norm, costmatrix);
 
-            // + norm
             distance(i, j) += penalty * (reference_atoms[i] != target_atoms[j]);
             min = std::min(min, distance(i, j));
         }

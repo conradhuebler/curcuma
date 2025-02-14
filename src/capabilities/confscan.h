@@ -271,6 +271,12 @@ public:
     ConfScanThread* addThread(const Molecule* reference, const json& config, bool reuse_only = false);
     ConfScanThreadNoReorder* addThreadNoreorder(const Molecule* reference, const json& config);
 
+    inline int AcceptedCount() const { return m_stored_structures.size(); }
+    inline int ReorderSuccessfull() const { return m_reorder_successfull_count; }
+    inline int ReorderCount() const { return m_reorder_count; }
+    inline int ReorderSkippedCount() const { return m_skipped_count; }
+    inline int ReuseCount() const { return m_reordered_reused; }
+
 private:
     void PrintSetUp(double dLE, double dLI, double dLH);
     void SetUp();

@@ -17,16 +17,15 @@
  *
  */
 
-
 #include "src/global_config.h"
 
 #ifdef USE_BLAS
-    #define EIGEN_USE_BLAS
+#define EIGEN_USE_BLAS
 #endif
 
 #ifdef USE_MKL
-    #define EIGEN_USE_BLAS
-    #define EIGEN_USE_LAPACK
+#define EIGEN_USE_BLAS
+#define EIGEN_USE_LAPACK
 #endif
 
 #include "Eigen/Dense"
@@ -39,8 +38,8 @@
 #include "MNDOd.hpp"
 #include "Molecule.hpp"
 
-#include <iostream>
 #include <algorithm>
+#include <iostream>
 #include <string>
 
 #include "ulysses.h"
@@ -103,25 +102,23 @@ void UlyssesObject::Calculate(bool gradient, bool verbose)
             m_gradient = Matrix2Geom(grad);
         }
     }
-
 }
 
 void UlyssesObject::setMethod(std::string& method)
 {
     if (method == "ugfn2")
         m_method = "gfn2";
-    else
-    {
-    if (method.find("d3h4x") != std::string::npos) {
-        m_method = method.replace(method.find("-d3h4x"), 6, "");
-        m_correction = "D3H4X";
-    } else if (method.find("d3h+") != std::string::npos) {
-        m_method = method.replace(method.find("-d3h+"), 5, "");
-        m_correction = "D3H+";
-    } else {
-        m_method = method;
-        m_correction = "0";
-    }
+    else {
+        if (method.find("d3h4x") != std::string::npos) {
+            m_method = method.replace(method.find("-d3h4x"), 6, "");
+            m_correction = "D3H4X";
+        } else if (method.find("d3h+") != std::string::npos) {
+            m_method = method.replace(method.find("-d3h+"), 5, "");
+            m_correction = "D3H+";
+        } else {
+            m_method = method;
+            m_correction = "0";
+        }
     }
 }
 
@@ -151,7 +148,7 @@ void UlyssesObject::UpdateGeometry(const Geometry& geom)
     } else if (m_method == "pm6") {
         m_electron->setGeometry(matrix);
     }
-    //m_electron->setGeometry(matrix);
+    // m_electron->setGeometry(matrix);
 }
 
 Vector UlyssesObject::Charges() const
@@ -165,7 +162,6 @@ Vector UlyssesObject::Charges() const
 
     return Vector();
 }
-
 
 Vector UlyssesObject::OrbitalEnergies() const
 {

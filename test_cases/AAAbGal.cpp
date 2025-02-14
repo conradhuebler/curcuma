@@ -44,6 +44,7 @@ int AAAbGal_mtemplate() // template
     driver->setReference(m1);
     driver->setTarget(m2);
     driver->start();
+    std::cout << driver->RMSD() << std::endl;
     if (abs(driver->RMSD() - 0.457061) < 1e-5) {
         std::cout << "RMSD calculation with reordering passed (" << driver->RMSD() << ")." << std::endl;
         return 0;
@@ -63,7 +64,7 @@ int AAAbGal_mhybrid() // hybrid
     json controller = RMSDJson;
     controller["threads"] = threads;
     controller["reorder"] = true;
-    controller["method"] = "hybrid";
+    controller["method"] = "subspace";
     RMSDDriver* driver = new RMSDDriver(controller, false);
     driver->setReference(m1);
     driver->setTarget(m2);
@@ -102,7 +103,7 @@ int AAAbGal_template() // template
     }
 }
 
-int AAAbGal_hybrid() // hybrid
+int AAAbGal_subspace() // subspace
 {
     int threads = MaxThreads();
 
@@ -112,14 +113,14 @@ int AAAbGal_hybrid() // hybrid
     json controller = RMSDJson;
     controller["threads"] = threads;
     controller["reorder"] = true;
-    controller["method"] = "hybrid";
+    controller["method"] = "subspace";
     controller["nomunkres"] = true;
 
     RMSDDriver* driver = new RMSDDriver(controller, false);
     driver->setReference(m1);
     driver->setTarget(m2);
     driver->start();
-    if (abs(driver->RMSD() - 1.21963) < 1e-5) {
+    if (abs(driver->RMSD() - 0.457061) < 1e-5) {
         std::cout << "RMSD calculation with reordering passed (" << driver->RMSD() << ")." << std::endl;
         return EXIT_SUCCESS;
     } else {
@@ -159,8 +160,8 @@ int main(int argc, char** argv)
         return EXIT_FAILURE;
     if(std::string(argv[1]).compare("template") == 0)
         return AAAbGal_template();
-    else if(std::string(argv[1]).compare("hybrid") == 0)
-        return AAAbGal_hybrid();
+    else if (std::string(argv[1]).compare("subspace") == 0)
+        return AAAbGal_subspace();
     else if(std::string(argv[1]).compare("incr") == 0)
         return AAAbGal_incr();
     else if (std::string(argv[1]).compare("mhybrid") == 0)

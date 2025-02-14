@@ -29,7 +29,7 @@ static json UlyssesSettings{
     { "ulysses_solvent", "none" },
     { "method", "GFN2" },
     { "SCFmaxiter", 100 },
-    { "mult", 1}
+    { "mult", 1 }
 
 };
 class UlyssesObject;

@@ -17,12 +17,11 @@
  *
  */
 
-#include "interface/abstract_interface.h"
-
 #include <string>
 #include <vector>
 
-#include "src/core/interface/ulysses.h"
+#include "interface/abstract_interface.h"
+#include "interface/ulysses.h"
 
 #include "ulyssesinterface.h"
 
@@ -35,7 +34,6 @@ UlyssesInterface::UlyssesInterface(const json& ulyssessettings)
     m_method = m_ulyssessettings["method"];
     m_mult = m_ulyssessettings["mult"];
     m_ulysses = new UlyssesObject();
-
 }
 
 UlyssesInterface::~UlyssesInterface()
@@ -47,7 +45,7 @@ bool UlyssesInterface::InitialiseMolecule()
 {
     m_ulysses->setMethod(m_method);
     m_ulysses->setMolecule(m_geometry, m_atoms, m_charge, m_mult, "C1");
-    std::cout << "Initialising Ulysses with method " <<m_method << " and SCFmaxiter " << m_SCFmaxiter << std::endl;
+    std::cout << "Initialising Ulysses with method " << m_method << " and SCFmaxiter " << m_SCFmaxiter << std::endl;
 
     return true;
 }

@@ -721,9 +721,11 @@ Molecule Molecule::getFragmentMolecule(const int fragment) const
     auto atoms = GetFragments()[fragment];
     for (const auto atom : atoms) {
         result.addPair(Atom(atom));
-        pCharges.push_back(m_charges[atom]);
+        if (atom < m_charges.size())
+            pCharges.push_back(m_charges[atom]);
     }
-    result.setPartialCharges(pCharges);
+    if (pCharges.size() == atoms.size())
+        result.setPartialCharges(pCharges);
     return result;
 }
 Molecule Molecule::getFragmentMolecule(const std::vector<int>& atoms) const
@@ -734,9 +736,11 @@ Molecule Molecule::getFragmentMolecule(const std::vector<int>& atoms) const
     std::vector<double> pCharges;
     for (const auto atom : atoms) {
         result.addPair(Atom(atom));
-        pCharges.push_back(m_charges[atom]);
+        if (atom < m_charges.size())
+            pCharges.push_back(m_charges[atom]);
     }
-    result.setPartialCharges(pCharges);
+    if (pCharges.size() == atoms.size())
+        result.setPartialCharges(pCharges);
     return result;
 }
 Geometry Molecule::getGeometry(bool protons) const

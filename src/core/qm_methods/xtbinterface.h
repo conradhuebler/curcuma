@@ -29,7 +29,7 @@ static json XTBSettings{
     { "xtb_ac", 2 },
     { "SCFmaxiter", 100 },
     { "Tele", 300 },
-    { "spin", 0}
+    { "spin", 0 }
 
 };
 

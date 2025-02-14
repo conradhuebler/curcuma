@@ -1226,7 +1226,7 @@ void SimpleMD::start()
         plumed_cmd(m_plumedmain, "setStep", &m_step);
         plumed_cmd(m_plumedmain, "setPositions", &m_eigen_geometry.data()[0]);
         plumed_cmd(m_plumedmain, "setEnergy", &m_Epot);
-        plumed_cmd(m_plumedmain, "setForces", &m_gradient[0]);
+        plumed_cmd(m_plumedmain, "setForces", &m_eigen_gradient.data()[0]);
         plumed_cmd(m_plumedmain, "setVirial", &m_virial[0]);
         plumed_cmd(m_plumedmain, "setMasses", &m_eigen_masses.data()[0]);
         plumed_cmd(m_plumedmain, "prepareCalc", NULL);
@@ -1506,7 +1506,7 @@ void SimpleMD::Verlet()
         plumed_cmd(m_plumedmain, "setPositions", &m_eigen_geometry.data()[0]);
 
         plumed_cmd(m_plumedmain, "setEnergy", &m_Epot);
-        plumed_cmd(m_plumedmain, "setForces", &m_gradient[0]);
+        plumed_cmd(m_plumedmain, "setForces", &m_eigen_gradient.data()[0]);
         plumed_cmd(m_plumedmain, "setVirial", &m_virial[0]);
 
         plumed_cmd(m_plumedmain, "setMasses", &m_eigen_masses.data()[0]);
@@ -1917,7 +1917,7 @@ void SimpleMD::Rattle()
         plumed_cmd(m_plumedmain, "setPositions", &m_eigen_geometry.data()[0]);
 
         plumed_cmd(m_plumedmain, "setEnergy", &m_Epot);
-        plumed_cmd(m_plumedmain, "setForces", &m_gradient[0]);
+        plumed_cmd(m_plumedmain, "setForces", &m_eigen_gradient.data()[0]);
         plumed_cmd(m_plumedmain, "setVirial", &m_virial[0]);
 
         plumed_cmd(m_plumedmain, "setMasses", &m_eigen_masses.data()[0]);

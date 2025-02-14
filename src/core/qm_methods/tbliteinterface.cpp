@@ -70,7 +70,6 @@ TBLiteInterface::TBLiteInterface(const json& tblitesettings)
 
     tblite_set_context_verbosity(m_ctx, m_verbose);
     std::cout << "Initialising tblite with accuracy " << m_acc << " and SCFmaxiter " << m_SCFmaxiter << std::endl;
-
 }
 
 TBLiteInterface::~TBLiteInterface()

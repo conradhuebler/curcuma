@@ -24,6 +24,13 @@ target_link_libraries(AAAbGal curcuma_core)
 target_link_libraries(reorder_test curcuma_core)
 
 
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/confscan/input.xyz
+        DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+
+add_executable(confscan_test
+        confscan.cpp)
+
+target_link_libraries(confscan_test curcuma_core)
 
 #target_link_libraries(curcuma_tests curcuma_core)￼
 

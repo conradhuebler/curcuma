@@ -28,11 +28,11 @@
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
 
 #ifdef USE_D3
-#include "src/core/dftd3interface.h"
+#include "src/core/qm_methods/dftd3interface.h"
 #endif
 
 #ifdef USE_D4
-#include "src/core/dftd4interface.h"
+#include "src/core/qm_methods/dftd4interface.h"
 #endif
 
 #include "src/core/qmdff_par.h"

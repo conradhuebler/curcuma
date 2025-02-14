@@ -68,6 +68,7 @@ protected:
     void AppendError(const std::string& error) { m_error_list.push_back(error); }
     //std::filebuf m_curcuma_progress;
     bool m_silent = true;
+    bool m_verbose = false;
 
 private:
     /* Lets have this for all modules */

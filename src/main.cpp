@@ -17,10 +17,10 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  */
-#include "src/core/orcainterface.h"
-#include "src/core/eht.h"
 #include "src/core/fileiterator.h"
 #include "src/core/molecule.h"
+#include "src/core/orcainterface.h"
+#include "src/core/qm_methods/eht.h"
 
 #include "src/capabilities/analysenciplot.h"
 #include "src/capabilities/confscan.h"
@@ -235,7 +235,6 @@ int main(int argc, char **argv) {
             driver->TargetReorderd().writeXYZFile(tarfile + ".reordered.xyz");
 
             std::cout << Tools::Vector2String(driver->ReorderRules()) << std::endl;
-            std::cout << driver->Gradient() << std::endl;
             delete driver;
             exit(0);
 
@@ -886,11 +885,13 @@ int main(int argc, char **argv) {
             }
             FileIterator file(argv[2]);
             while (!file.AtEnd()) {
+                /*
                 Molecule mol1 = file.Next();
 
                 EHT eht;
-                eht.setMolecule(mol1.getMolInfo());
-                eht.Calculate();
+                eht.InitialiseMolecule(mol1.getMolInfo());
+                eht.Calculation();
+                */
             }
 
         } else if (strcmp(argv[1], "-gyration") == 0) {

@@ -22,7 +22,7 @@
 #include "src/core/global.h"
 #include "src/tools/general.h"
 
-#include "src/core/interface/abstract_interface.h"
+#include "interface/abstract_interface.h"
 
 #include <iostream>
 #include <math.h>

@@ -22,26 +22,26 @@
 // #include "src/tools/general.h"
 
 #ifdef USE_TBLITE
-#include "src/core/tbliteinterface.h"
+#include "src/core/qm_methods/tbliteinterface.h"
 #endif
 
 #ifdef USE_XTB
-#include "src/core/xtbinterface.h"
+#include "src/core/qm_methods/xtbinterface.h"
 #endif
 
 #ifdef USE_D3
-#include "src/core/dftd3interface.h"
+#include "src/core/qm_methods/dftd3interface.h"
 #endif
 
 #ifdef USE_D4
-#include "src/core/dftd4interface.h"
+#include "src/core/qqm_methods/dftd4interface.h"
 #endif
 
-#include "src/core/eht.h"
+#include "src/core/qm_methods/eht.h"
 // #include "src/core/eigen_uff.h"
 #include "src/core/forcefield.h"
 // #include "src/core/qmdff.h"
-#include "src/core/ulyssesinterface.h"
+#include "src/core/qm_methods/ulyssesinterface.h"
 
 #include <functional>
 

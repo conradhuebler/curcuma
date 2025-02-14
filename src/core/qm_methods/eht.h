@@ -27,6 +27,10 @@
 
 #include <Eigen/Dense>
 
+#include "integrals.h"
+
+#include "interface/abstract_interface.h"
+
 #include "json.hpp"
 
 struct ehtSTO_6GHs {
@@ -72,22 +76,29 @@ struct STO_6G {
     double e = 0;
 };
 
-class EHT {
+typedef std::vector<STO::Orbital> Basisset;
+
+class EHT : public QMInterface {
 public:
     EHT();
-
-    void setMolecule(const Mol& mol) { m_mol = mol; }
-    void Initialise();
-    void Calculate(double* gradient = nullptr, bool verbose = false);
+    virtual bool InitialiseMolecule(const Mol& molecule) override
+    {
+        m_mol = molecule;
+        return InitialiseMolecule();
+    }
+    virtual bool InitialiseMolecule() override;
+    virtual double Calculation(bool gradient = false, bool verbose = false);
 
     Matrix MolecularOrbitals() const { return m_mo; }
     Vector Energies() const { return m_energies; }
     int NumElectrons() const { return m_num_electrons; }
 
 private:
-    std::vector<STO_6G> MakeBasis();
-
+    // std::vector<STO_6G> MakeBasis();
+    Basisset MakeBasis();
     Mol m_mol;
+    Matrix m_H, m_S;
+
     /* Some integrals */
     /* s - s - sigma bond */
     double ss(double x1, double x2, double y1, double y2, double z1, double z2, double alpha1, double alpha2, double c1, double c2);
@@ -101,8 +112,8 @@ private:
     /* p - p - sigma bond */
     double p2(double x1, double x2, double y1, double y2, double z1, double z2, double alpha1, double alpha2, double c1, double c2);
 
-    Matrix MakeOverlap(const std::vector<STO_6G>& basisset);
-    Matrix MakeH(const Matrix& S, const std::vector<STO_6G>& basisset);
+    Matrix MakeOverlap(Basisset& basisset);
+    Matrix MakeH(const Matrix& S, const Basisset& basisset);
 
     int m_num_electrons = 0;
 
