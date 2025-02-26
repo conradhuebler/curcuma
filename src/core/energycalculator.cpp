@@ -288,16 +288,13 @@ int EnergyCalculator::SwitchMethod(const std::string& method)
 {
     int switch_method = 0;
     bool find_ulysses = false, find_tblite = false, find_xtb = false, find_d3 = false, find_d4 = false, find_qmdff = false, find_ff = false, find_eht = false;
-    for(auto i : m_ulysses_methods){
-        //std::cout << i << " " << m_method << std::endl;
-        if(i.find(m_method) != std::string::npos || m_method.find(i) != std::string::npos){
-            //std::cout << "Found: " << i << " " << m_method << std::endl;
+    for (auto i : m_ulysses_methods) {
+        if (i.find(m_method) != std::string::npos || m_method.find(i) != std::string::npos) {
             find_ulysses = true;
         }
     }
     for(auto i : m_tblite_methods){
-        if(i.find(m_method) != std::string::npos){
-            //std::cout << "Found: " << i << " " << m_method << std::endl;
+        if (i.find(m_method) != std::string::npos) {
             find_tblite = true;
         }
     }
@@ -329,37 +326,37 @@ int EnergyCalculator::SwitchMethod(const std::string& method)
     if(m_method.find("eht") != std::string::npos){
             find_eht = true;
         }
-    
-    
-    if(find_tblite){
-        #ifdef USE_TBLITE
-            switch_method = 1;
-        #else
-            switch_method = 3;
-        #endif
-    }else if(find_ulysses){
-        switch_method = 3;
-    } else if(find_xtb){
-        #ifdef USE_XTB
-            switch_method = 2;
-        #else   
-            switch_method = 3;
-        #endif
-    }else if(find_d3){
-        switch_method = 4;
-    }else if(find_d4){
-        switch_method = 5;
-    }else if(find_qmdff){
-        switch_method = 7;
-    }else if(find_ff){
-        switch_method = 0;
-    }else if(find_eht){
-        switch_method = 6;
-    }
-    std::cout << "Switch Method: " << switch_method << std::endl;
-    std::cout << "Method: " << m_method << std::endl;
 
-    return switch_method;
+        if (find_tblite) {
+#ifndef USE_TBLITE
+            switch_method = 3;
+#else
+            switch_method = 1;
+#endif
+
+        } else if (find_ulysses) {
+            std::cout << "Within ulysses" << std::endl;
+            switch_method = 3;
+
+        } else if (find_xtb) {
+#ifdef USE_XTB
+            switch_method = 2;
+#else
+            switch_method = 3;
+#endif
+
+        } else if (find_d3) {
+            switch_method = 4;
+        } else if (find_d4) {
+            switch_method = 5;
+        } else if (find_qmdff) {
+            switch_method = 7;
+        } else if (find_ff) {
+            switch_method = 0;
+        } else if (find_eht) {
+            switch_method = 6;
+        }
+        return switch_method;
 }
 void EnergyCalculator::updateGeometry(const Eigen::VectorXd& geometry)
 {

@@ -336,7 +336,7 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, std::string& output, Vec
         parameter(3 * i + 2) = geometry(i, 2);
     }
 
-    EnergyCalculator interface(method, m_controller);
+    EnergyCalculator interface(method, m_controller["sp"]);
     interface.setMolecule(initial->getMolInfo());
     json param = interface.Parameter();
     double energy = interface.CalculateEnergy(true, true);
@@ -441,7 +441,7 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
         constrain.push_back(initial->Atom(i).first == 1);
     }
 
-    EnergyCalculator interface(m_method, m_controller);
+    EnergyCalculator interface(m_method, m_controller["opt"]);
 
     interface.setMolecule(initial->getMolInfo());
     m_parameters = interface.Parameter();
@@ -705,7 +705,7 @@ Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vecto
         constrain.push_back(initial->Atom(i).first == 1);
     }
 
-    EnergyCalculator interface(m_method, m_controller);
+    EnergyCalculator interface(m_method, m_controller["opt"]);
 
     interface.setMolecule(initial->getMolInfo());
     m_parameters = interface.Parameter();

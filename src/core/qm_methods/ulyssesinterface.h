@@ -26,7 +26,7 @@
 
 static json UlyssesSettings{
     { "Tele", 300 },
-    { "ulysses_solvent", "none" },
+    { "solvent", "none" },
     { "method", "GFN2" },
     { "SCFmaxiter", 100 },
     { "mult", 1 }
@@ -53,6 +53,8 @@ private:
     double m_Tele = 300;
     double m_SCFmaxiter = 100;
     int m_mult = 1;
+
+    StringList m_solvents = { "acetone", "acetone", "acetonitrile", "aniline", "benzaldehyde", "benzene", "dichloromethane", "chloroform", "carbon disulfide", "dioxane", "dmf", "dmso", "ethanol", "diethyl ether", "ethyl acetate", "furane", "hexadecane", "hexane", "methanol", "nitromethane", "octanol", "phenol", "thf", "toluene", "water", "octanol wet" };
     std::string m_solvent = "none";
 
     json m_ulyssessettings;

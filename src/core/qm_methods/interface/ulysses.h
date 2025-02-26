@@ -42,7 +42,7 @@ public:
     Geometry Gradient() const { return m_gradient; }
     void setTele(double Tele) { m_Tele = Tele; }
     void setMaxIter(int maxiter) { m_SCFmaxiter = maxiter; }
-
+    void setSolvent(std::string solvent) { m_solvent = solvent; }
     Vector Charges() const;
     Vector OrbitalEnergies() const;
     Vector OrbitalOccupations() const;
@@ -53,6 +53,7 @@ private:
     // MNDOd* m_mndo;
     // GFN2* m_gfn2;
     std::string m_method, m_correction = "0";
+    std::string m_solvent;
     double m_Tele;
     int m_SCFmaxiter;
     double m_energy;

@@ -72,17 +72,12 @@ UlyssesObject::~UlyssesObject()
 {
     delete m_bset;
     delete m_electron;
-    /*
-    if (m_method == "gfn2") {
-        delete m_gfn2;
-    } else if (m_method == "pm6") {
-        delete m_mndo;
-    }
-    */
 }
 
 void UlyssesObject::Calculate(bool gradient, bool verbose)
 {
+    if (m_solvent != "none")
+        m_electron->setSolvent(m_solvent);
     if (m_method == "gfn2")
         m_electron->setElectronTemp(m_Tele);
     if (m_method == "gfn2") {
@@ -148,7 +143,6 @@ void UlyssesObject::UpdateGeometry(const Geometry& geom)
     } else if (m_method == "pm6") {
         m_electron->setGeometry(matrix);
     }
-    // m_electron->setGeometry(matrix);
 }
 
 Vector UlyssesObject::Charges() const

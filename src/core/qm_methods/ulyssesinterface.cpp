@@ -30,9 +30,13 @@ UlyssesInterface::UlyssesInterface(const json& ulyssessettings)
     m_ulyssessettings = MergeJson(UlyssesSettings, ulyssessettings);
     m_Tele = m_ulyssessettings["Tele"];
     m_SCFmaxiter = m_ulyssessettings["SCFmaxiter"];
-    m_solvent = m_ulyssessettings["ulysses_solvent"];
+    m_solvent = m_ulyssessettings["solvent"];
     m_method = m_ulyssessettings["method"];
     m_mult = m_ulyssessettings["mult"];
+    if (std::find(m_solvents.begin(), m_solvents.end(), m_solvent) == m_solvents.end()) {
+        std::cout << "Solvent " << m_solvent << " is not supported by Ulysses" << std::endl;
+        m_solvent = "none";
+    }
     m_ulysses = new UlyssesObject();
 }
 
@@ -45,6 +49,7 @@ bool UlyssesInterface::InitialiseMolecule()
 {
     m_ulysses->setMethod(m_method);
     m_ulysses->setMolecule(m_geometry, m_atoms, m_charge, m_mult, "C1");
+
     std::cout << "Initialising Ulysses with method " << m_method << " and SCFmaxiter " << m_SCFmaxiter << std::endl;
 
     return true;
@@ -61,10 +66,10 @@ double UlyssesInterface::Calculation(bool gradient, bool verbose)
 {
     m_ulysses->setTele(m_Tele);
     m_ulysses->setMaxIter(m_SCFmaxiter);
+    m_ulysses->setSolvent(m_solvent);
     m_ulysses->Calculate(gradient, verbose);
     if (gradient) {
         m_gradient = m_ulysses->Gradient();
-        // std::cout << m_gradient << std::endl;
     }
     return m_ulysses->Energy();
 }

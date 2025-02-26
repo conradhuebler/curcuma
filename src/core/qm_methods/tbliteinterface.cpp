@@ -18,10 +18,12 @@
  */
 
 #ifndef tblite_delete
-#include "tblite.h"
+// #include "tblite.h"
 #include "tblite/container.h"
 #include "tblite/context.h"
 #include "tblite/error.h"
+#include "tblite/result.h"
+#include "tblite/solvation.h"
 #endif
 
 #include "src/core/global.h"
@@ -35,7 +37,8 @@
 TBLiteInterface::TBLiteInterface(const json& tblitesettings)
 {
     m_tblitesettings = MergeJson(TBLiteSettings, tblitesettings);
-
+    // std::cout << "Initialising TBLite Interface" << std::endl;
+    // std::cout << m_tblitesettings << std::endl;
     m_acc = m_tblitesettings["tb_acc"];
     m_SCFmaxiter = m_tblitesettings["SCFmaxiter"];
     m_damping = m_tblitesettings["tb_damping"];
@@ -46,16 +49,16 @@ TBLiteInterface::TBLiteInterface(const json& tblitesettings)
     m_verbose = m_tblitesettings["tb_verbose"];
     m_spin = m_tblitesettings["spin"];
     std::string guess = m_tblitesettings["tb_guess"];
+    m_solvent_eps = m_tblitesettings["solvent_eps"];
+    m_solvent_model = m_tblitesettings["solvent_model"];
 
-    m_solv_eps = m_tblitesettings["solv_eps"];
-
-    std::string tmp = m_tblitesettings["solv"];
-
-    tmp = m_tblitesettings["solv"];
-    m_alpb = tmp.compare("none") != 0;
-
-    m_alpb_solv = new char[tmp.length() + 1];
-    strcpy(m_alpb_solv, tmp.c_str());
+    std::string tmp = m_tblitesettings["solvent"];
+    m_solvent = new char[tmp.length() + 1];
+    strcpy(m_solvent, tmp.c_str());
+    m_solvent_gb_version = m_tblitesettings["solvent_gb_version"];
+    m_solvent_gb_kernel = m_tblitesettings["solvent_gb_kernel"];
+    m_solvent_alpb_version = m_tblitesettings["solvent_alpb_version"];
+    m_solvent_alpb_reference = m_tblitesettings["solvent_alpb_reference"];
 
     if (guess.compare("SAD") == 0)
         m_guess = 0;
@@ -216,39 +219,43 @@ void TBLiteInterface::clear()
 
 void TBLiteInterface::ApplySolvation()
 {
-#pragma message("TBLiteInterface::ApplySolvation() is not fully implemented yet")
-    int count = ((m_cpcm) != -1) + ((m_alpb) != -1);
-
-    if (m_cpcm and !m_alpb) {
-        m_tb_cont = tblite_new_cpcm_solvation_epsilon(m_error, m_tblite_mol, m_solv_eps);
+    std::cout << "Applying Solvation Model" << std::endl;
+    std::cout << "Solvent Model: " << m_solvent_model << std::endl;
+    if (m_solvent_model == 0)
+        return;
+    else if (m_solvent_model == 1 && m_solvent_eps > -1) {
+        std::cout << "Using CPCM with epsilon " << m_solvent_eps << std::endl;
+        m_tb_cont = tblite_new_cpcm_solvation_epsilon(m_error, m_tblite_mol, m_solvent_eps);
         if (tblite_check_context(m_ctx)) {
             tbliteError();
             tbliteContextError();
             std::cout << "Error during CPCM calculation, ...  Retry with increased verbosity" << std::endl;
             tblite_set_context_verbosity(m_ctx, m_verbose + 1);
             tblite_delete_container(&m_tb_cont);
-            m_tb_cont = tblite_new_cpcm_solvation_epsilon(m_error, m_tblite_mol, m_solv_eps);
-
-            //     return 0;
+            m_tb_cont = tblite_new_cpcm_solvation_epsilon(m_error, m_tblite_mol, m_solvent_eps);
         }
         tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
-    }
-
-    else if (m_alpb and !m_cpcm) {
-        m_tb_cont = tblite_new_gb_solvation_epsilon(m_error, m_tblite_mol, m_solv_eps, m_gb_type, m_born_kernel);
+        //  tbliteError();
+        //   tbliteContextError();
+    } else if (m_solvent_model == 2 && m_solvent_eps > -1) {
+        std::cout << "Using GB with epsilon " << m_solvent_eps << " and born version " << m_solvent_gb_version << " and born kernel " << m_solvent_gb_kernel << std::endl;
+        std::cout << "GB doesnt work for now" << std::endl;
+        exit(1);
+        m_tb_cont = tblite_new_gb_solvation_epsilon(m_error, m_tblite_mol, m_solvent_eps, m_solvent_gb_version, m_solvent_gb_kernel);
         if (tblite_check_context(m_ctx)) {
             tbliteError();
             tbliteContextError();
             std::cout << "Error during ALPB calculation, ...  Retry with increased verbosity" << std::endl;
             tblite_set_context_verbosity(m_ctx, m_verbose + 1);
             tblite_delete_container(&m_tb_cont);
-            m_tb_cont = tblite_new_gb_solvation_epsilon(m_error, m_tblite_mol, m_solv_eps, m_gb_type, m_born_kernel);
-
-            //       return 0;
+            m_tb_cont = tblite_new_gb_solvation_epsilon(m_error, m_tblite_mol, m_solvent_eps, m_solvent_gb_version, m_solvent_gb_kernel);
         }
         tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
-    } else if (m_alpb) {
-        m_tb_cont = tblite_new_alpb_solvation_solvent(m_error, m_tblite_mol, m_alpb_solv, m_solv_param, m_solv_ref);
+        //  tbliteError();
+        //  tbliteContextError();
+    } else if (m_solvent_model == 3) {
+        std::cout << "Using ALPB with solvent " << m_solvent << " and version " << m_solvent_alpb_version << " and reference " << m_solvent_alpb_reference << std::endl;
+        m_tb_cont = tblite_new_alpb_solvation_solvent(m_error, m_tblite_mol, m_solvent, m_solvent_alpb_version, m_solvent_alpb_reference);
         if (tblite_check_context(m_ctx)) {
             tbliteError();
             tbliteContextError();
@@ -256,10 +263,11 @@ void TBLiteInterface::ApplySolvation()
 
             tblite_set_context_verbosity(m_ctx, m_verbose + 1);
             tblite_delete_container(&m_tb_cont);
-            m_tb_cont = tblite_new_alpb_solvation_solvent(m_error, m_tblite_mol, m_alpb_solv, m_solv_param, m_solv_ref);
-            //     return 0;
+            m_tb_cont = tblite_new_alpb_solvation_solvent(m_error, m_tblite_mol, m_solvent, m_solvent_alpb_version, m_solvent_alpb_reference);
         }
         tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
+        //  tbliteError();
+        //  tbliteContextError();
     }
 }
 
@@ -271,8 +279,7 @@ double TBLiteInterface::Calculation(bool gradient, bool verbose)
         tblite_set_context_verbosity(m_ctx, m_verbose);
 
     double energy = 0;
-    int count = ((m_cpcm) != -1) + (m_alpb != -1);
-
+    int count = 0;
     if (!m_calculator) {
         if (m_method_switch == 0) {
             m_tblite_calc = tblite_new_ipea1_calculator(m_ctx, m_tblite_mol);
