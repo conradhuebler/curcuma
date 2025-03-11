@@ -13,17 +13,16 @@ jobs:
   makerelease:
     runs-on: ubuntu-latest
     outputs:
-      url: ${{ steps.create_release.outputs.upload_url }}
-      version: 0.0.${{ github.run_number  }}
+      version: 0.0.${{ github.run_number }}
     steps:
       - name: Create Release
         id: create_release
-        uses: actions/create-release@v1
+        uses: softprops/action-gh-release@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: 0.0.${{ github.run_number  }}
-          release_name: Curcuma 0.0.${{ github.run_number }}
+          tag_name: 0.0.${{ github.run_number }}
+          name: Curcuma 0.0.${{ github.run_number }}
           draft: false
           prerelease: true
 
@@ -47,15 +46,23 @@ jobs:
 
     - name: Upload Release Asset
       id: upload-release-asset-20-04
-      uses: actions/upload-release-asset@v2
+      uses: svenstaro/upload-release-action@v2
+      with:
+        upload_url: ${{ needs.makerelease.outputs.url }}
+        file: ./package/curcuma-nightly-x86_64.AppImage
+        asset_name: curcuma-nightly-${{ needs.makerelease.outputs.version }}-20_04-x86_64-Linux.AppImage
+        asset_content_type: application/zip
+        repo_token: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Upload Release Asset
+      uses: softprops/action-gh-release@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        upload_url: ${{ needs.makerelease.outputs.url }}
-        asset_path: ./package/curcuma-nightly-x86_64.AppImage
-        asset_name: curcuma-nightly-${{ needs.makerelease.outputs.version }}-20_04-x86_64-Linux.AppImage
-        asset_content_type: application/zip
-
+        tag_name: 0.0.${{ needs.makerelease.outputs.version }}
+        files: |
+          ./package/curcuma-nightly-x86_64.AppImage
+          
   windows:
     needs: [makerelease]
     runs-on: windows-latest
@@ -72,8 +79,5 @@ jobs:
 
       - name: Update Modules and Build
         run: scripts/build_windows.bat
-        
 
-
-      
 

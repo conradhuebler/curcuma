@@ -60,6 +60,7 @@ static const json ConfScanJson = {
     { "sTI", 0.1 },
     { "sLH", "1.0,2.0" },
     { "sTH", 0.1 },
+    { "sTX", "1.0,2.0" },
     { "skip", 0 },
     { "allxyz", false },
     { "update", false },
@@ -100,7 +101,8 @@ static const json ConfScanJson = {
     { "molaligntol", 10 },
     { "mapped", false },
     { "analyse", false },
-    { "cycles", -1 }
+    { "cycles", -1 },
+    { "earlybreak", 0 }
 };
 
 class ConfScanThread : public CxxThread {
@@ -139,6 +141,7 @@ public:
         m_target.setPersisentImage(molecule->getPersisentImage());
         m_target.CalculateRotationalConstants();
         m_target.setEnergy(molecule->Energy());
+        m_target.setName(molecule->Name());
     }
     std::vector<int> ReorderRule() const { return m_reorder_rule; }
     void setReorderRules(const std::vector<std::vector<int>>& reorder_rules)
@@ -165,6 +168,8 @@ public:
     {
         return m_input;
     }
+    void setEarlyBreak(int earlybreak) { m_earlybreak = earlybreak; }
+    void setVerbose(bool verbose) { m_verbose = verbose; }
 
 private:
     bool m_keep_molecule = true, m_reorder_worked = false, m_reuse_only = false, m_reused_worked = false;
@@ -173,6 +178,7 @@ private:
     int m_MaxHTopoDiff;
     int m_threads = 1;
     std::vector<int> m_reorder_rule;
+    int m_earlybreak = 0, m_verbose = 0;
     std::vector<std::vector<int>> m_reorder_rules;
     RMSDDriver* m_driver;
     json m_config;
@@ -369,6 +375,7 @@ private:
     int m_timing_rot = 0, m_timing_ripser = 0;
     int m_cycles = -1;
     int m_reorder_count = 0, m_reorder_successfull_count = 0, m_skipped_count = 0;
+    int m_earlybreak = 0;
     bool m_writeXYZ = false;
     bool m_check_connections = false;
     bool m_force_reorder = false, m_prevent_reorder = false;

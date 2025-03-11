@@ -84,15 +84,20 @@ int ConfScanThread::execute()
         double tmp_rmsd = m_driver->Rules2RMSD(m_reorder_rules[i]);
         if (tmp_rmsd < m_rmsd_threshold && (m_MaxHTopoDiff == -1 || m_driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
             m_keep_molecule = false;
-            /* if we break in the reuse part, we ge more accepted in some cases
-             * this is strange and somehow complicated to analyse
-             * stick the the combination to have the fewest finally accepted structures for the test case */
-            // m_break_pool = true;
+            /* early breaks affect the number of finally accepted structures */
+            m_break_pool = (m_earlybreak & 1) == 0;
             m_reused_worked = true;
             m_rmsd = tmp_rmsd;
 
             m_input.rmsd = m_rmsd;
             m_reorder_rule = m_reorder_rules[i];
+            if (m_verbose) {
+                std::cout << "Reuse: " << m_reference.Name() << " " << m_target.Name() << " " << m_rmsd << " ";
+                if (m_earlybreak)
+                    std::cout << "Early break" << std::endl;
+                else
+                    std::cout << std::endl;
+            }
             return 0;
         }
     }
@@ -108,10 +113,19 @@ int ConfScanThread::execute()
 
     if (m_rmsd <= m_rmsd_threshold && (m_MaxHTopoDiff == -1 || m_driver->HBondTopoDifference() <= m_MaxHTopoDiff)) {
         m_keep_molecule = false;
-        m_break_pool = true;
+        /* early breaks affect the number of finally accepted structures */
+
+        m_break_pool = (m_earlybreak & 2) == 0;
         m_reorder_worked = true;
 
         m_reorder_rule = m_driver->ReorderRules();
+    }
+    if (m_verbose) {
+        std::cout << "Permutation: " << m_reference.Name() << " " << m_target.Name() << " " << m_rmsd << " ";
+        if (m_break_pool)
+            std::cout << "Early break" << std::endl;
+        else
+            std::cout << std::endl;
     }
     m_driver->clear();
     return 0;
@@ -180,7 +194,18 @@ void ConfScan::LoadControlJson()
     m_force_reorder = Json2KeyWord<bool>(m_defaults, "forceReorder");
     m_check_connections = Json2KeyWord<bool>(m_defaults, "check");
     m_energy_cutoff = Json2KeyWord<double>(m_defaults, "maxenergy");
+    // this will be the default settings for the threshold multiplicator
+    if (m_defaults["xTX"].is_string()) {
+        m_sLE = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLX"), ",");
+        m_sLI = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLX"), ",");
+        m_sLH = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLX"), ",");
+    } else if (m_defaults["xTX"].is_number()) {
+        m_sLE = { Json2KeyWord<double>(m_defaults, "sLX") };
+        m_sLI = { Json2KeyWord<double>(m_defaults, "sLX") };
+        m_sLH = { Json2KeyWord<double>(m_defaults, "sLX") };
+    }
 
+    // and in a second step, we can overwrite the settings
     if (m_defaults["sLE"].is_number())
         m_sLE = { Json2KeyWord<double>(m_defaults, "sLE") };
     else if (m_defaults["sLE"].is_string())
@@ -248,7 +273,11 @@ void ConfScan::LoadControlJson()
 
     m_looseThresh = m_defaults["looseThresh"];
     m_tightThresh = m_defaults["tightThresh"];
-
+    m_earlybreak = m_defaults["earlybreak"];
+    if ((m_earlybreak & 1) == 0)
+        fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nEarly break in reuse part is enabled\n\n");
+    if ((m_earlybreak & 2) == 0)
+        fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nEarly break in reorder part is enabled\n\n");
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
         m_rmsd_element_templates = m_defaults["RMSDElement"].get<std::string>();
@@ -1247,6 +1276,8 @@ ConfScanThread* ConfScan::addThread(const Molecule* reference, const json& confi
 {
     ConfScanThread* thread = new ConfScanThread(m_reorder_rules, m_rmsd_threshold, m_MaxHTopoDiff, reuse_only, config);
     thread->setReference(*reference);
+    thread->setEarlyBreak(m_earlybreak);
+    thread->setVerbose(!m_silent);
     return thread;
 }
 

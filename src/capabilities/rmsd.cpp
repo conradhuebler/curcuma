@@ -233,9 +233,26 @@ void RMSDDriver::LoadControlJson()
     if (cycles != -1)
         m_munkress_cycle = cycles;
 
-    std::vector<int> vector = Tools::String2Vector(order);
-    if (vector.size() != 0)
-        m_reorder_rules = vector;
+    if (!order.empty() && std::filesystem::exists(order)) {
+        std::ifstream file(order);
+        if (file.is_open()) {
+            std::string line;
+            std::string fileContent;
+            while (std::getline(file, line)) {
+                fileContent += line;
+            }
+            file.close();
+
+            // Parse den Inhalt der Datei
+            // m_reorder_rules = Tools::ParseStringToVector(fileContent);
+            std::vector<int> vector = Tools::String2Vector(fileContent);
+            std::cout << vector.size() << std::endl;
+            if (vector.size() != 0) {
+                m_reorder_rules = vector;
+                m_method = 10;
+            }
+        }
+    }
 
     std::cout << m_defaults["reference_atoms"] << std::endl;
     std::string reference_atoms = Json2KeyWord<std::string>(m_defaults, "reference_atoms");
@@ -355,7 +372,8 @@ void RMSDDriver::start()
     m_target_aligned = m_target;
     m_reference_aligned.LoadMolecule(m_reference);
     if (m_reference.Atoms() != m_target.Atoms() || m_force_reorder) {
-        if (!m_noreorder) {
+        if (!m_noreorder || m_method == 10) {
+            // std::cout << "Reordering Atoms" << std::endl;
             ReorderMolecule();
             rmsd_calculated = true;
         }
@@ -472,7 +490,7 @@ double RMSDDriver::CustomRotation()
     Eigen::Matrix3d rotation = RMSDFunctions::BestFitRotation(reference_frag, target_frag, 1);
 
     auto reference = GeometryTools::TranslateGeometry(m_reference.getGeometry(), GeometryTools::Centroid(m_reference.getGeometryByFragment(fragment_reference)), Position{ 0, 0, 0 }); // CenterMolecule(reference_mol);
-    auto target = GeometryTools::TranslateGeometry(m_target.getGeometry(), GeometryTools::Centroid(m_target.getGeometryByFragment(fragment_target)), Position{ 0, 0, 0 }); //CenterMolecule(target_mol);
+    auto target = GeometryTools::TranslateGeometry(m_target.getGeometry(), GeometryTools::Centroid(m_target.getGeometryByFragment(fragment_target)), Position{ 0, 0, 0 }); // CenterMolecule(target_mol);
     const auto t = RMSDFunctions::applyRotation(target, rotation);
     m_reference_aligned.setGeometry(reference);
     m_target_aligned.setGeometry(t);
@@ -730,18 +748,16 @@ void RMSDDriver::ProtonDepleted()
         std::cerr << "Will perform calculation on proton depleted structure." << std::endl;
 
     Molecule reference;
-    for(std::size_t i = 0; i < m_reference.AtomCount(); ++i)
-    {
+    for (std::size_t i = 0; i < m_reference.AtomCount(); ++i) {
         std::pair<int, Position> atom = m_reference.Atom(i);
-        if(atom.first != 1)
+        if (atom.first != 1)
             reference.addPair(atom);
     }
 
     Molecule target;
-    for(std::size_t i = 0; i < m_target.AtomCount(); ++i)
-    {
+    for (std::size_t i = 0; i < m_target.AtomCount(); ++i) {
         std::pair<int, Position> atom = m_target.Atom(i);
-        if(atom.first != 1)
+        if (atom.first != 1)
             target.addPair(atom);
     }
     m_reference = reference;
@@ -837,8 +853,8 @@ std::pair<Molecule, LimitedStorage> RMSDDriver::InitialisePair()
     std::vector<int> elements = m_reorder_reference.Atoms();
     if (m_initial.size() == 0) {
         for (int i = 0; i < m_reorder_reference.AtomCount() && index < 2; i++) {
-                reference.addPair(m_reorder_reference.Atom(i));
-                index++;
+            reference.addPair(m_reorder_reference.Atom(i));
+            index++;
         }
         m_reorder_reference_geometry = reference.getGeometry();
 
@@ -898,7 +914,7 @@ void RMSDDriver::ReorderMolecule()
         }
     } else if (m_method == 7)
         DistanceTemplate();
-    if (m_method != 6) {
+    if (m_method != 6 && m_method != 10) {
         FinaliseTemplate();
 
         m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
@@ -907,6 +923,10 @@ void RMSDDriver::ReorderMolecule()
         m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
         m_target = m_target_reordered;
         m_rmsd = m_results.begin()->first;
+    } else if (m_method == 10) {
+        m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
+        m_rmsd = Rules2RMSD(m_reorder_rules);
+        std::cout << m_rmsd << std::endl;
     }
 }
 
