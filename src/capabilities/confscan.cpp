@@ -1,6 +1,6 @@
 /*
  * <Scan and judge conformers from different input. >
- * Copyright (C) 2020 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -50,6 +50,15 @@ int ConfScanThread::execute()
     m_driver->setReference(m_reference);
     m_driver->setTarget(m_target);
 
+    bool print = false;
+    /*
+    if(m_target.Name() == "#3")
+    {
+        m_target.print_geom();
+        //m_driver->TargetAligned().print_geom();
+        print = true;
+    }
+    */
     m_keep_molecule = true;
     m_break_pool = false;
     m_reorder_worked = false;
@@ -98,14 +107,34 @@ int ConfScanThread::execute()
                 else
                     std::cout << std::endl;
             }
+            m_driver->clear();
             return 0;
         }
     }
 
     if (m_reuse_only) {
+        m_driver->clear();
         return 0;
     }
+    /* In case multiple threads are working, the target molecule gets reset / wrongly overwritten or something
+        similar. This is a workaround to prevent this.
+        So using a different number of threads effects the number of finally accepted structures.
+    */
 
+    m_driver->setReference(m_reference);
+    m_driver->setTarget(m_target);
+    /*
+    if(m_reference.Name() == "#201" && m_target.Name() == "#3")
+    {
+        m_driver->setSilent(false);
+        std::cout << "Debugging" << std::endl;
+        m_target.print_geom();
+        m_driver->TargetAligned().print_geom();
+
+    }
+    else
+        m_driver->setSilent(true);
+    */
     m_driver->start();
     m_rmsd = m_driver->RMSD();
 
@@ -127,6 +156,13 @@ int ConfScanThread::execute()
         else
             std::cout << std::endl;
     }
+    /*
+    if(print)
+    {
+        m_target.print_geom();
+        m_driver->setSilent(true);
+    }
+    */
     m_driver->clear();
     return 0;
 }
@@ -183,12 +219,16 @@ void ConfScan::LoadControlJson()
     m_heavy = Json2KeyWord<bool>(m_defaults, "heavy");
 
     m_rmsd_threshold = Json2KeyWord<double>(m_defaults, "rmsd");
-
-    if (m_heavy && m_rmsd_threshold == -1)
-        m_rmsd_threshold = 0.75;
-    else if (!m_heavy && m_rmsd_threshold == -1)
-        m_rmsd_threshold = 0.9;
-
+    if (Json2KeyWord<bool>(m_defaults, "getrmsd")) {
+        m_rmsd_threshold = -1;
+        m_rmsd_set = false;
+        std::cout << "RMSD value is not set, will obtain it from ensamble." << std::endl;
+    }
+    if (m_rmsd_threshold < 0) {
+        m_rmsd_set = false;
+        m_rmsd_threshold = 1e5;
+        std::cout << "RMSD value is not set, will obtain it from ensamble." << std::endl;
+    }
     m_maxrank = Json2KeyWord<double>(m_defaults, "rank");
     m_writeXYZ = Json2KeyWord<bool>(m_defaults, "writeXYZ");
     m_force_reorder = Json2KeyWord<bool>(m_defaults, "forceReorder");
@@ -241,6 +281,7 @@ void ConfScan::LoadControlJson()
 
     m_lastdE = Json2KeyWord<double>(m_defaults, "lastdE");
     m_domolalign = Json2KeyWord<double>(m_defaults, "domolalign");
+    m_getrmsd_scale = Json2KeyWord<double>(m_defaults, "getrmsd_scale");
 
     m_skip = Json2KeyWord<int>(m_defaults, "skip");
     m_cycles = Json2KeyWord<int>(m_defaults, "cycles");
@@ -681,9 +722,15 @@ void ConfScan::start()
 
         for (const auto& i : m_ordered_list)
             m_stored_structures.push_back(m_molecules.at(i.second).second);
-        m_dLI = 1e23;
-        m_dLH = 1e23;
-        m_dLE = 1e23;
+        if (m_rmsd_set) {
+            m_dLI = 1e23;
+            m_dLH = 1e23;
+            m_dLE = 1e23;
+        } else {
+            m_dLI = 0;
+            m_dLH = 0;
+            m_dLE = 0;
+        }
         m_looseThresh = 0;
         m_skipreuse = true;
     }
@@ -955,38 +1002,45 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
         }
         p->StaticPool();
         p->StartAndWait();
-
+        double min_rmsd = 1e4;
         for (auto* t : threads) {
-            if (!m_mapped) {
-                m_dLI = std::max(m_dLI, t->DI() * (t->RMSD() <= (sLI * m_rmsd_threshold)));
-                m_dLH = std::max(m_dLH, t->DH() * (t->RMSD() <= (sLH * m_rmsd_threshold)));
-                m_dLE = std::max(m_dLE, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (sLE * m_rmsd_threshold)));
-            }
             m_listThresh.insert(std::pair<double, std::vector<double>>(t->RMSD(), { (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5), t->DH(), t->DI() }));
 
-            m_dTI = std::max(m_dTI, t->DI() * (t->RMSD() <= (m_sTI * m_rmsd_threshold)));
-            m_dTH = std::max(m_dTH, t->DH() * (t->RMSD() <= (m_sTH * m_rmsd_threshold)));
-            m_dTE = std::max(m_dTE, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (m_sTE * m_rmsd_threshold)));
+            if (!m_rmsd_set) {
+                min_rmsd = std::min(min_rmsd, t->RMSD());
+                keep_molecule = true;
 
-            if (t->KeepMolecule() == false) {
-                keep_molecule = false;
-                writeStatisticFile(t->Reference(), mol1, t->RMSD());
-                if (m_analyse) {
-                    if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
-                        m_first_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
-
-                    std::string node = "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
-                    node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
-                    m_nodes.insert(std::pair<double, std::string>(t->Reference()->Energy(), node));
-                    m_first_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
-                    //  m_nodes_list.push_back(t->Reference()->Name());
+            } else {
+                if (!m_mapped) {
+                    m_dLI = std::max(m_dLI, t->DI() * (t->RMSD() <= (sLI * m_rmsd_threshold)));
+                    m_dLH = std::max(m_dLH, t->DH() * (t->RMSD() <= (sLH * m_rmsd_threshold)));
+                    m_dLE = std::max(m_dLE, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (sLE * m_rmsd_threshold)));
                 }
-                laststring = t->Reference()->Name();
+
+                m_dTI = std::max(m_dTI, t->DI() * (t->RMSD() <= (m_sTI * m_rmsd_threshold)));
+                m_dTH = std::max(m_dTH, t->DH() * (t->RMSD() <= (m_sTH * m_rmsd_threshold)));
+                m_dTE = std::max(m_dTE, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (m_sTE * m_rmsd_threshold)));
+
+                if (t->KeepMolecule() == false) {
+                    keep_molecule = false;
+                    writeStatisticFile(t->Reference(), mol1, t->RMSD());
+                    if (m_analyse) {
+                        if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
+                            m_first_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
+
+                        std::string node = "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
+                        node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
+                        m_nodes.insert(std::pair<double, std::string>(t->Reference()->Energy(), node));
+                        m_first_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
+                        //  m_nodes_list.push_back(t->Reference()->Name());
+                    }
+                    laststring = t->Reference()->Name();
 
 #ifdef WriteMoreInfo
                 m_dnn_data.push_back(t->getDNNInput());
 #endif
                 break;
+                }
             }
         }
 
@@ -998,11 +1052,37 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
         } else {
             RejectMolecule(mol1);
         }
+        if (!m_rmsd_set) {
+            m_rmsd_threshold = std::min(min_rmsd, m_rmsd_threshold);
+            // std::cout << "RMSD threshold set to " << m_rmsd_threshold << " Å" << "obtained (" <<  min_rmsd << ")" << std::endl;
+        }
         PrintStatus();
         m_all_structures.push_back(mol1);
     }
     p->clear();
     delete p;
+    if (!m_rmsd_set) {
+        std::cout << "RMSD threshold set to " << m_rmsd_threshold << " Å" << std::endl;
+        for (const auto& i : m_listThresh) {
+            if (i.first > m_getrmsd_scale * m_rmsd_threshold)
+                break;
+            m_dLI = std::max(m_dLI, i.second[2]);
+            m_dLH = std::max(m_dLH, i.second[1]);
+            m_dLE = std::max(m_dLE, i.second[0]);
+            // std::cout << i.first << " " << i.second[0] << " " << i.second[1] << " " << i.second[2] << std::endl;
+        }
+    }
+    /*
+    for (const auto& i : m_listThresh) {
+        if (i.first > 1.1 * m_rmsd_threshold)
+            break;
+        m_dLI = std::max(m_dLI, i.second[2]);
+        m_dLH = std::max(m_dLH, i.second[1]);
+        m_dLE = std::max(m_dLE, i.second[0]);
+        // std::cout << i.first << " " << i.second[0] << " " << i.second[1] << " " << i.second[2] << std::endl;
+    }
+    */
+    m_rmsd_set = true;
 }
 
 void ConfScan::PrintSetUp(double dLE, double dLI, double dLH)
@@ -1160,8 +1240,8 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
             }
 
             if (m_RMSDmethod.compare("molalign") != 0 || m_threads != 1) {
-                if (m_threads > 2)
-                    p->StaticPool();
+                // if (m_threads > 2)
+                //     p->StaticPool();
                 p->StartAndWait();
             } else {
                 for (auto* t : threads) {
@@ -1277,7 +1357,7 @@ ConfScanThread* ConfScan::addThread(const Molecule* reference, const json& confi
     ConfScanThread* thread = new ConfScanThread(m_reorder_rules, m_rmsd_threshold, m_MaxHTopoDiff, reuse_only, config);
     thread->setReference(*reference);
     thread->setEarlyBreak(m_earlybreak);
-    thread->setVerbose(!m_silent);
+    thread->setVerbose(m_analyse);
     return thread;
 }
 

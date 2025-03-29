@@ -22,7 +22,7 @@
 #include "dftd_econv.h"
 #include "dftd_geometry.h"
 
-#include "core/qm_methods/interface/abstract_interface.h"
+#include "interface/abstract_interface.h"
 
 #include "src/core/global.h"
 #include "src/tools/general.h"

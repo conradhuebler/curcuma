@@ -226,6 +226,7 @@ public:
     double PartialRMSD(const Molecule& ref, const Molecule& tar);
 
     void clear();
+    void reset();
 
     void setThreads(int threads) { m_threads = threads; }
 

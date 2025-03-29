@@ -26,7 +26,8 @@
 #include "dftd_econv.h"
 #include "dftd_geometry.h"
 
-#include "core/qm_methods/interface/abstract_interface.h"
+#include "interface/abstract_interface.h"
+
 #include "src/core/global.h"
 
 static json DFTD4Settings{

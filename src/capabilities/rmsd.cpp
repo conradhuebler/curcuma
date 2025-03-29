@@ -322,7 +322,11 @@ void RMSDDriver::start()
         return;
     }
     RunTimer timer(false);
-    clear();
+    reset();
+    if (!m_silent) {
+        m_reference.print_geom();
+        m_target.print_geom();
+    }
     bool rmsd_calculated = false;
 
     if (m_reference_atoms.size() == m_target_atoms.size() && m_reference_atoms.size() > 0) {
@@ -681,6 +685,16 @@ StructComp RMSDDriver::Rule2RMSD(const std::vector<int> rules, int fragment)
     return result;
 }
 
+void RMSDDriver::reset()
+{
+    m_results.clear();
+    m_stored_rules.clear();
+    m_prepared_cost_matrices.clear();
+    m_intermediate_cost_matrices.clear();
+    m_intermedia_rules.clear();
+    m_rmsd = 0.0;
+}
+
 void RMSDDriver::clear()
 {
     m_results.clear();
@@ -688,7 +702,14 @@ void RMSDDriver::clear()
     m_prepared_cost_matrices.clear();
     m_intermediate_cost_matrices.clear();
     m_intermedia_rules.clear();
-
+    m_target.clear();
+    m_reference.clear();
+    m_target_aligned.clear();
+    m_reference_aligned.clear();
+    m_reorder_rules.clear();
+    m_reorder_reference.clear();
+    m_reorder_target.clear();
+    m_rotation = Eigen::Matrix3d::Identity();
     m_rmsd = 0.0;
 }
 
@@ -901,6 +922,9 @@ void RMSDDriver::ReorderMolecule()
         TemplateFree();
     else if (m_method == 6) {
         if (!MolAlignLib()) {
+            m_rmsd = CalculateRMSD();
+            return;
+            /*
             InsertRotation(blob);
             FinaliseTemplate();
 
@@ -911,6 +935,7 @@ void RMSDDriver::ReorderMolecule()
             m_target = m_target_reordered;
             m_rmsd = m_results.begin()->first;
             return;
+            */
         }
     } else if (m_method == 7)
         DistanceTemplate();
@@ -1625,7 +1650,8 @@ bool RMSDDriver::MolAlignLib()
         //  ok = std::string(line).find("RMSD") != std::string::npos;
         rndm = std::string(line).find("random") != std::string::npos;
         error = std::string(line).find("Error") != std::string::npos;
-        printf("%s", line);
+        if (!m_silent)
+            std::cout << line;
     }
     pclose(FileOpen);
 
@@ -1647,7 +1673,7 @@ bool RMSDDriver::MolAlignLib()
         }
     }
     if (rndm) {
-        fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "molalign has trouble with random numbers, falling back to plain Kuhn-Munkres ...\n");
+        fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "molalign has trouble with random numbers, no permutation will be performed ...\n");
         return false;
     }
     if (error) {

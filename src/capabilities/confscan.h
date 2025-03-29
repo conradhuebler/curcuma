@@ -1,6 +1,6 @@
 /*
  * <Scan and judge conformers from different input. >
- * Copyright (C) 2020 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -44,7 +44,7 @@ static const json ConfScanJson = {
     { "noname", true },
     { "restart", true },
     { "heavy", false },
-    { "rmsd", -1 },
+    { "rmsd", 0.9 },
     { "rank", -1 },
     { "writeXYZ", false },
     { "forceReorder", false },
@@ -102,7 +102,9 @@ static const json ConfScanJson = {
     { "mapped", false },
     { "analyse", false },
     { "cycles", -1 },
-    { "earlybreak", 0 }
+    { "earlybreak", 3 },
+    { "getrmsd", false },
+    { "getrmsd_scale", 1.1 }
 };
 
 class ConfScanThread : public CxxThread {
@@ -361,13 +363,13 @@ private:
     std::vector<std::vector<double>> m_list_skipped, m_list_performed;
     std::vector<double> m_sLE = { 1.0 }, m_sLI = { 1.0 }, m_sLH = { 1.0 };
     double m_domolalign = -1;
-    double m_lastDI = 0.0, m_lastDH = 0.0, m_lastdE = -1, m_dE = -1, m_damping = 0.8;
+    double m_lastDI = 0.0, m_lastDH = 0.0, m_lastdE = -1, m_dE = -1, m_damping = 0.8, m_getrmsd_scale = 1.1;
     int m_maxmol = 0;
     int m_maxrank = 10000;
     int m_maxParam = -1;
     int m_useorders = 10;
     int m_looseThresh = 7, m_tightThresh = 3;
-    std::string m_RMSDmethod = "hybrid";
+    std::string m_RMSDmethod = "subspace";
     int m_MaxHTopoDiff = -1;
     int m_threads = 1;
     int m_RMSDElement = 7;
@@ -403,4 +405,5 @@ private:
     bool m_mapped = false;
     bool m_analyse = false;
     bool m_skip_orders = false;
+    bool m_rmsd_set = true;
 };
