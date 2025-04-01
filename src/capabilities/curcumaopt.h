@@ -23,7 +23,7 @@
 
 #include "src/capabilities/optimiser/lbfgs.h"
 
-#include "external/CxxThreadPool/include/CxxThreadPool.h"
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include <LBFGS.h>
 #include <LBFGSB.h>

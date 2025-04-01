@@ -21,7 +21,7 @@
 #include "src/core/global.h"
 #include "src/core/molecule.h"
 
-#include "external/CxxThreadPool/include/CxxThreadPool.h"
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include <set>
 #include <vector>

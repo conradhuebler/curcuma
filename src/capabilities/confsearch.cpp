@@ -28,7 +28,7 @@
 
 #include "src/tools/general.h"
 
-#include "external/CxxThreadPool/include/CxxThreadPool.h"
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include <fstream>
 #include <iostream>
@@ -143,7 +143,7 @@ std::string ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& m
     result_file.open(file);
     result_file.close();
 
-    for (const auto& thread : pool->Finished()) {
+    for (const auto& thread : pool->getFinishedThreads()) {
         auto structures = static_cast<MDThread*>(thread)->MDDriver()->UniqueMolecules();
         int index = 0;
         for (const auto* molecule : structures) {

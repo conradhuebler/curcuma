@@ -29,7 +29,7 @@
 #include "src/tools/general.h"
 #include "src/tools/geometry.h"
 
-#include "external/CxxThreadPool/include/CxxThreadPool.h"
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include <map>
 #include <thread>

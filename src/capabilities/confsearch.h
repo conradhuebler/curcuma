@@ -28,7 +28,7 @@
 
 #include "json.hpp"
 
-#include "external/CxxThreadPool/include/CxxThreadPool.h"
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include "src/capabilities/curcumamethod.h"
 using namespace curcuma;

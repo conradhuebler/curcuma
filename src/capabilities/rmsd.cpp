@@ -30,7 +30,7 @@ extern "C" {
 #include "src/tools/general.h"
 #include "src/tools/geometry.h"
 
-#include "external/CxxThreadPool/include/CxxThreadPool.h"
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -554,7 +554,7 @@ void RMSDDriver::ReorderIncremental()
             thread_count++;
         }
         pool->StaticPool();
-        pool->setWakeUp(wake_up);
+        // pool->setWakeUp(wake_up);
         int match = 0;
         /* For now, lets just dont start the threads if the current element can not be found in target */
         if (std::find(m_target.Atoms().begin(), m_target.Atoms().end(), element) != m_target.Atoms().end()) {
@@ -599,7 +599,7 @@ void RMSDDriver::ReorderIncremental()
             }
             reference_not_reorordered++;
         }
-        wake_up = 2 * pool->WakeUp();
+        // wake_up = 2 * pool->WakeUp();
         pool->clear();
     }
     delete pool;

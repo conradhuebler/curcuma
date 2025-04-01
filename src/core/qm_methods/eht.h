@@ -20,7 +20,7 @@
 #pragma once
 #include "src/core/global.h"
 
-#include "external/CxxThreadPool/include/CxxThreadPool.h"
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include <set>
 #include <vector>

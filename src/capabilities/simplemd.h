@@ -36,7 +36,7 @@
 #include "src/core/energycalculator.h"
 #include "src/core/molecule.h"
 
-#include "external/CxxThreadPool/include/CxxThreadPool.h"
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include "curcumamethod.h"
 
@@ -423,7 +423,7 @@ public:
         controller["md"] = m_controller;
         m_mddriver = new SimpleMD(controller, false);
         m_mddriver->setMolecule(m_molecule);
-        m_mddriver->overrideBasename(m_basename + ".t" + std::to_string(ThreadId()));
+        m_mddriver->overrideBasename(m_basename + ".t" + std::to_string(getThreadId()));
         m_mddriver->Initialise();
         m_mddriver->start();
         return 0;

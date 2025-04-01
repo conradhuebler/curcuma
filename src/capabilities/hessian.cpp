@@ -19,7 +19,7 @@
 
 #include <Eigen/Dense>
 
-#include "external/CxxThreadPool/include/CxxThreadPool.h"
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include "src/core/energycalculator.h"
 
@@ -446,7 +446,7 @@ void Hessian::CalculateHessianThreaded()
     pool->StaticPool();
     pool->StartAndWait();
     int i = 0;
-    for (auto* t : pool->Finished()) {
+    for (auto* t : pool->getFinishedThreads()) {
         HessianThread* thread = static_cast<HessianThread*>(t);
         m_hessian += thread->getHessian();
         ++i;
@@ -492,7 +492,7 @@ void Hessian::CalculateHessianNumerical()
     }
     pool->DynamicPool(2);
     pool->StartAndWait();
-    for (auto* t : pool->Finished()) {
+    for (auto* t : pool->getFinishedThreads()) {
         HessianThread* thread = static_cast<HessianThread*>(t);
         m_hessian(3 * thread->I() + thread->XI(), 3 * thread->J() + thread->XJ()) *= thread->DD();
     }
@@ -523,7 +523,7 @@ void Hessian::CalculateHessianSemiNumerical()
     pool->DynamicPool(2);
     pool->StartAndWait();
 
-    for (auto* t : pool->Finished()) {
+    for (auto* t : pool->getFinishedThreads()) {
         HessianThread* thread = static_cast<HessianThread*>(t);
         int i = thread->I();
         int xi = thread->XI();

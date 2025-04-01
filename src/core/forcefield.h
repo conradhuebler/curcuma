@@ -25,7 +25,7 @@
 
 #include "hbonds.h"
 
-#include "external/CxxThreadPool/include/CxxThreadPool.h"
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #ifdef USE_D3
 #include "src/core/qm_methods/dftd3interface.h"

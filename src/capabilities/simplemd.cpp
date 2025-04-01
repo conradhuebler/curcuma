@@ -43,7 +43,7 @@
 
 #include "src/tools/geometry.h"
 
-#include "external/CxxThreadPool/include/CxxThreadPool.h"
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #ifdef USE_Plumed
 #include "plumed2/src/wrapper/Plumed.h"
@@ -2114,7 +2114,7 @@ void SimpleMD::ApplyRMSDMTD()
                 m_eigen_gradient.data()[3 * m_rmsd_indicies[j] + 2] += m_bias_thread->Gradient()(j, 2);
             }
             m_colvar_incr += m_bias_thread->Counter();
-            m_loop_time += m_bias_thread->Time();
+            m_loop_time += m_bias_thread->getExecutionTime();
         }
     } else {
         if (m_bias_structure_count < m_threads) {
@@ -2130,10 +2130,10 @@ void SimpleMD::ApplyRMSDMTD()
         m_bias_pool->setActiveThreadCount(m_threads);
         m_bias_pool->StaticPool();
         m_bias_pool->StartAndWait();
-        m_bias_pool->setWakeUp(m_bias_pool->WakeUp() / 2);
+        // m_bias_pool->setWakeUp(m_bias_pool->WakeUp() / 2);
 
         for (auto & m_bias_thread : m_bias_threads) {
-            if (m_bias_thread->Return() == 1) {
+            if (m_bias_thread->getReturnValue() == 1) {
 
                 current_bias += m_bias_thread->BiasEnergy();
                 for (int j = 0; j < m_rmsd_indicies.size(); ++j) {
@@ -2143,7 +2143,7 @@ void SimpleMD::ApplyRMSDMTD()
                 }
                 m_colvar_incr += m_bias_thread->Counter();
             }
-            m_loop_time += m_bias_thread->Time();
+            m_loop_time += m_bias_thread->getExecutionTime();
         }
         m_bias_pool->Reset();
     }

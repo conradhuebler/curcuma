@@ -23,7 +23,7 @@
 #include "src/capabilities/curcumaopt.h"
 #include "src/capabilities/optimiser/LevMarDocking.h"
 
-#include "external/CxxThreadPool/include/CxxThreadPool.h"
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include <algorithm>
 #include <iostream>
@@ -220,7 +220,7 @@ void Docking::PerformDocking()
             std::cout //<< std::endl
                 << "** Docking Phase 0 - Finished - Now collection results **" << std::endl
                 << std::endl;
-            for (const auto* t : pool->Finished()) {
+            for (const auto* t : pool->getFinishedThreads()) {
                 const DockThread* thread = static_cast<const DockThread*>(t);
                 ++all;
                 Molecule* molecule = new Molecule(m_host_structure);

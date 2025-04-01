@@ -304,7 +304,7 @@ double ForceField::Calculate(bool gradient, bool verbose)
     m_threadpool->setActiveThreadCount(m_threads);
 
     m_threadpool->StartAndWait();
-    m_threadpool->setWakeUp(m_threadpool->WakeUp() / 2);
+    // m_threadpool->setWakeUp(m_threadpool->WakeUp() / 2);
 
     for (int i = 0; i < m_stored_threads.size(); ++i) {
         bond_energy += m_stored_threads[i]->BondEnergy();

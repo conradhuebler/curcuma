@@ -24,7 +24,7 @@
 #include <string>
 #include <vector>
 
-#include "external/CxxThreadPool/include/CxxThreadPool.h"
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include <fmt/color.h>
 #include <fmt/core.h>
@@ -282,7 +282,7 @@ void ConfScan::LoadControlJson()
     m_lastdE = Json2KeyWord<double>(m_defaults, "lastdE");
     m_domolalign = Json2KeyWord<double>(m_defaults, "domolalign");
     m_getrmsd_scale = Json2KeyWord<double>(m_defaults, "getrmsd_scale");
-
+    m_getrmsd_thresh = Json2KeyWord<double>(m_defaults, "getrmsd_thresh");
     m_skip = Json2KeyWord<int>(m_defaults, "skip");
     m_cycles = Json2KeyWord<int>(m_defaults, "cycles");
 
@@ -1012,9 +1012,9 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
 
             } else {
                 if (!m_mapped) {
-                    m_dLI = std::max(m_dLI, t->DI() * (t->RMSD() <= (sLI * m_rmsd_threshold)));
-                    m_dLH = std::max(m_dLH, t->DH() * (t->RMSD() <= (sLH * m_rmsd_threshold)));
-                    m_dLE = std::max(m_dLE, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (sLE * m_rmsd_threshold)));
+                    //    m_dLI = std::max(m_dLI, t->DI() * (t->RMSD() <= (sLI * m_rmsd_threshold)));
+                    //    m_dLH = std::max(m_dLH, t->DH() * (t->RMSD() <= (sLH * m_rmsd_threshold)));
+                    //    m_dLE = std::max(m_dLE, (std::abs(t->Reference()->Energy() - mol1->Energy()) * 2625.5) * (t->RMSD() <= (sLE * m_rmsd_threshold)));
                 }
 
                 m_dTI = std::max(m_dTI, t->DI() * (t->RMSD() <= (m_sTI * m_rmsd_threshold)));
@@ -1064,7 +1064,7 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
     if (!m_rmsd_set) {
         std::cout << "RMSD threshold set to " << m_rmsd_threshold << " Å" << std::endl;
         for (const auto& i : m_listThresh) {
-            if (i.first > m_getrmsd_scale * m_rmsd_threshold)
+            if (i.first > m_getrmsd_thresh)
                 break;
             m_dLI = std::max(m_dLI, i.second[2]);
             m_dLH = std::max(m_dLH, i.second[1]);
@@ -1072,16 +1072,16 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
             // std::cout << i.first << " " << i.second[0] << " " << i.second[1] << " " << i.second[2] << std::endl;
         }
     }
-    /*
+
     for (const auto& i : m_listThresh) {
-        if (i.first > 1.1 * m_rmsd_threshold)
+        if (i.first > m_getrmsd_thresh)
             break;
         m_dLI = std::max(m_dLI, i.second[2]);
         m_dLH = std::max(m_dLH, i.second[1]);
         m_dLE = std::max(m_dLE, i.second[0]);
         // std::cout << i.first << " " << i.second[0] << " " << i.second[1] << " " << i.second[2] << std::endl;
     }
-    */
+
     m_rmsd_set = true;
 }
 

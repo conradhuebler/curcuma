@@ -28,7 +28,7 @@
 
 #include "src/capabilities/rmsd.h"
 
-#include "external/CxxThreadPool/include/CxxThreadPool.h"
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include "src/core/molecule.h"
 
@@ -104,7 +104,8 @@ static const json ConfScanJson = {
     { "cycles", -1 },
     { "earlybreak", 3 },
     { "getrmsd", false },
-    { "getrmsd_scale", 1.1 }
+    { "getrmsd_scale", 1.1 },
+    { "getrmsd_thresh", 1.0 }
 };
 
 class ConfScanThread : public CxxThread {
@@ -363,7 +364,7 @@ private:
     std::vector<std::vector<double>> m_list_skipped, m_list_performed;
     std::vector<double> m_sLE = { 1.0 }, m_sLI = { 1.0 }, m_sLH = { 1.0 };
     double m_domolalign = -1;
-    double m_lastDI = 0.0, m_lastDH = 0.0, m_lastdE = -1, m_dE = -1, m_damping = 0.8, m_getrmsd_scale = 1.1;
+    double m_lastDI = 0.0, m_lastDH = 0.0, m_lastdE = -1, m_dE = -1, m_damping = 0.8, m_getrmsd_scale = 1.1, m_getrmsd_thresh = 1.0;
     int m_maxmol = 0;
     int m_maxrank = 10000;
     int m_maxParam = -1;

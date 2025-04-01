@@ -97,9 +97,9 @@ int OptThread::execute()
 {
     Vector charges;
     if (m_optimethod == 0)
-        m_final = m_curcumaOpt->LBFGSOptimise(&m_molecule, m_result, &m_intermediate, charges, ThreadId(), Basename() + ".opt.trj");
+        m_final = m_curcumaOpt->LBFGSOptimise(&m_molecule, m_result, &m_intermediate, charges, getThreadId(), Basename() + ".opt.trj");
     else
-        m_final = m_curcumaOpt->GPTLBFGS(&m_molecule, m_result, &m_intermediate, charges, ThreadId(), Basename() + ".opt.trj");
+        m_final = m_curcumaOpt->GPTLBFGS(&m_molecule, m_result, &m_intermediate, charges, getThreadId(), Basename() + ".opt.trj");
 
     m_scf["e0"] = m_final.Energy();
     if (charges.size())
@@ -277,9 +277,10 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
     }
     pool->StartAndWait();
     m_molecules.clear();
-    for (auto t : pool->OrderedList()) {
-        const SPThread* thread = static_cast<const SPThread*>(t.second);
-        if (!thread->Finished()) {
+#pragma message "TODO: Check the following code block"
+    for (auto t : pool->getFinishedThreads()) {
+        const SPThread* thread = static_cast<const SPThread*>(t);
+        if (!thread->isFinished()) {
             std::cout << " not finished " << thread->getMolecule().Energy() << std::endl;
             continue;
         }
