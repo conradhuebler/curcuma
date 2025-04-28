@@ -968,11 +968,16 @@ void RMSDDriver::FinaliseTemplate()
     if (m_kmstat)
         result_file.open("kmstat.dat", std::ios_base::app);
     for (auto permutation : m_prepared_cost_matrices) {
+        // std::cout << permutation.first << " " << permutation.second.size() << std::endl;
         iter++;
 
-        if (eq_counter > m_maxtrial || incr_counter > m_maxtrial || iter > m_maxtrial)
+        if (eq_counter > m_maxtrial || incr_counter > m_maxtrial || iter > m_maxtrial) {
+            // std::cout << "Break first" << std::endl;
             break;
+        }
         if (prev_cost != -1 && prev_cost < permutation.first / 10) {
+            // std::cout << prev_cost << " " << permutation.first << std::endl;
+            // std::cout << "break second" << std::endl;
             break;
         }
 
@@ -1166,7 +1171,7 @@ bool RMSDDriver::TemplateReorder()
     Molecule tar_mol = m_target;
     tar_mol.setGeometry(rotated);
 
-    auto blob = MakeCostMatrix(cached_reference, rotated);
+    auto blob = MakeCostMatrix(ref, rotated);
     m_cost_limit = blob.first;
     // if (!m_silent)
     // if (m_method == 4)
@@ -1485,7 +1490,9 @@ std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const Matrix& rotation)
 std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const Geometry& reference, const Geometry& target /*, const std::vector<int> reference_atoms, const std::vector<int> target_atoms*/)
 {
     double penalty = 1e23;
-
+    if (reference.rows() != target.rows()) {
+        return std::pair<double, Matrix>(penalty, Matrix());
+    }
     Eigen::MatrixXd distance = Eigen::MatrixXd::Zero(m_reference.AtomCount(), m_reference.AtomCount());
     double sum = 0;
     for (int i = 0; i < m_reference.AtomCount(); ++i) {
@@ -1506,6 +1513,9 @@ std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const Geometry& reference, 
 std::pair<double, Matrix> RMSDDriver::MakeCostMatrix(const Geometry& reference, const Geometry& target, const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms, int costmatrix)
 {
     double penalty = 1e23;
+    if (reference.rows() != target.rows()) {
+        return std::pair<double, Matrix>(penalty, Matrix());
+    }
     Eigen::MatrixXd distance = Eigen::MatrixXd::Zero(reference_atoms.size(), reference_atoms.size());
     double sum = 0;
     for (int i = 0; i < reference_atoms.size(); ++i) {
@@ -1544,8 +1554,8 @@ std::vector<int> RMSDDriver::SolveCostMatrix(Matrix& distance)
             assign(dim, table, order);
             for (int i = 0; i < dim; ++i)
                 new_order[i] = order[i];
-            delete (table);
-            delete (order);
+            delete[] table;
+            delete[] order;
         } else {
             auto result = MunkressAssign(distance);
             for (int i = 0; i < result.cols(); ++i) {

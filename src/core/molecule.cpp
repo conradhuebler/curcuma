@@ -660,7 +660,7 @@ void Molecule::setXYZ(const std::string& internal, int i)
 void Molecule::clear()
 {
     m_atoms.clear();
-    // m_geometry.clear();
+    m_geometry.resize(0, 0);
     m_dirty = true;
 }
 

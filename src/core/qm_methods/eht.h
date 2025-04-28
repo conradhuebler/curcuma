@@ -27,7 +27,8 @@
 
 #include <Eigen/Dense>
 
-#include "integrals.h"
+#include "GTOIntegrals.hpp"
+#include "STOIntegrals.hpp"
 
 #include "interface/abstract_interface.h"
 
@@ -98,19 +99,6 @@ private:
     Basisset MakeBasis();
     Mol m_mol;
     Matrix m_H, m_S;
-
-    /* Some integrals */
-    /* s - s - sigma bond */
-    double ss(double x1, double x2, double y1, double y2, double z1, double z2, double alpha1, double alpha2, double c1, double c2);
-
-    /* s - p - sigma bond */
-    double sp(double x1, double x2, double y1, double y2, double z1, double z2, double alpha1, double alpha2, double c1, double c2);
-
-    /* p - p - pi bond */
-    double pp(double x1, double x2, double y1, double y2, double z1, double z2, double alpha1, double alpha2, double c1, double c2);
-
-    /* p - p - sigma bond */
-    double p2(double x1, double x2, double y1, double y2, double z1, double z2, double alpha1, double alpha2, double c1, double c2);
 
     Matrix MakeOverlap(Basisset& basisset);
     Matrix MakeH(const Matrix& S, const Basisset& basisset);

@@ -28,7 +28,9 @@
 
 #include <Eigen/Dense>
 
-#include "integrals.h"
+#include "GTOIntegrals.hpp"
+#include "STOIntegrals.hpp"
+#include "basissetparser.hpp"
 
 #include "json.hpp"
 
@@ -52,7 +54,7 @@ Basisset EHT::MakeBasis()
             o.x = m_mol.m_geometry(i, 0);
             o.y = m_mol.m_geometry(i, 1);
             o.z = m_mol.m_geometry(i, 2);
-            o.zeta = 1.0;
+            o.zeta = 1.2;
             o.VSIP = -0.5;
             o.atom = i;
             orbitals.push_back(o);
@@ -63,7 +65,7 @@ Basisset EHT::MakeBasis()
             o.x = m_mol.m_geometry(i, 0);
             o.y = m_mol.m_geometry(i, 1);
             o.z = m_mol.m_geometry(i, 2);
-            o.zeta = 1.7210;
+            o.zeta = 1.625;
             o.VSIP = -0.7144;
             o.atom = i;
             orbitals.push_back(o);
@@ -72,7 +74,7 @@ Basisset EHT::MakeBasis()
             o.x = m_mol.m_geometry(i, 0);
             o.y = m_mol.m_geometry(i, 1);
             o.z = m_mol.m_geometry(i, 2);
-            o.zeta = 1.62105;
+            o.zeta = 1.625;
             o.VSIP = -0.3921;
             orbitals.push_back(o);
 
@@ -80,7 +82,7 @@ Basisset EHT::MakeBasis()
             o.x = m_mol.m_geometry(i, 0);
             o.y = m_mol.m_geometry(i, 1);
             o.z = m_mol.m_geometry(i, 2);
-            o.zeta = 1.62105;
+            o.zeta = 1.625;
             o.VSIP = -0.3921;
             orbitals.push_back(o);
 
@@ -88,7 +90,7 @@ Basisset EHT::MakeBasis()
             o.x = m_mol.m_geometry(i, 0);
             o.y = m_mol.m_geometry(i, 1);
             o.z = m_mol.m_geometry(i, 2);
-            o.zeta = 1.62105;
+            o.zeta = 1.625;
             o.VSIP = -0.3921;
             orbitals.push_back(o);
         } else if (m_mol.m_atoms[i] == 8) {
@@ -202,45 +204,28 @@ Matrix EHT::MakeOverlap(Basisset& basisset)
 {
     Matrix S = Eigen::MatrixXd::Zero(basisset.size(), basisset.size());
 
-    std::vector<double> norm(basisset.size(), 0);
-    /* for(int i = 0; i < basisset.size(); ++i)
-     {
-         norm[i] = STO::calculateOverlap(basisset[i], basisset[i]);
-     }*/
+    // Aktualisiere die Atompositionen in allen Orbitalen
     for (int i = 0; i < basisset.size(); ++i) {
         basisset[i].x = m_mol.m_geometry(basisset[i].atom, 0);
         basisset[i].y = m_mol.m_geometry(basisset[i].atom, 1);
         basisset[i].z = m_mol.m_geometry(basisset[i].atom, 2);
-        norm[i] = STO::calculateOverlap(basisset[i], basisset[i]);
-        std::cout << norm[i] << std::endl;
+    }
+
+    // Berechne die Überlappungsmatrix direkt
+    for (int i = 0; i < basisset.size(); ++i) {
         for (int j = 0; j <= i; ++j) {
-            basisset[j].x = m_mol.m_geometry(basisset[j].atom, 0);
-            basisset[j].y = m_mol.m_geometry(basisset[j].atom, 1);
-            basisset[j].z = m_mol.m_geometry(basisset[j].atom, 2);
-
-            // if(norm[i] == 0 || norm[j] == 0)
-            //     continue;
-            std::cout << basisset[i].x << " " << basisset[i].y << " " << basisset[i].z << std::endl;
-            std::cout << basisset[j].x << " " << basisset[j].y << " " << basisset[j].z << std::endl;
-
-            double overlap = 0;
-            if (i != j) {
-                if (basisset[i].atom != basisset[j].atom)
-                    overlap = STO::calculateOverlap(basisset[i], basisset[j]);
-            } else
-                overlap = 1;
-
-            overlap = STO::calculateOverlap(basisset[i], basisset[j]);
-
+            // Die verbesserte calculateOverlap Funktion gibt bereits
+            // normalisierte Werte zurück
+            double overlap = STO::calculateOverlap(basisset[i], basisset[j]);
             S(i, j) = S(j, i) = overlap;
-            std::cout << i << " " << j << " " << S(i, j) << " " << std::endl;
+
+            // Debug-Ausgabe für kritische Werte
+            if (m_verbose) {
+                std::cout << "Overlap between orbital " << i << " and " << j
+                          << ": " << overlap << std::endl;
+            }
         }
     }
-    for (int i = 0; i < basisset.size(); ++i)
-        for (int j = 0; j <= i; ++j) {
-            S(i, j) /= sqrt(norm[i] * norm[j]);
-            S(j, i) = S(i, j);
-        }
 
     return S;
 }

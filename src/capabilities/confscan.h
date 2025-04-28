@@ -105,7 +105,7 @@ static const json ConfScanJson = {
     { "earlybreak", 3 },
     { "getrmsd", false },
     { "getrmsd_scale", 1.1 },
-    { "getrmsd_thresh", 1.0 }
+    { "getrmsd_thresh", 0.9 }
 };
 
 class ConfScanThread : public CxxThread {

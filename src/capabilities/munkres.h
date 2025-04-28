@@ -231,7 +231,7 @@ int Step5(Matrix& starred, int& path_count, Matrix& path, int& path_row_0, int& 
             path(path_count - 1, 1) = path(path_count - 2, 1);
         } else
             done = true;
-        if (!done) {
+        if (!done && path_count < path.cols()) { // there was crash making this fix important
             find_prime_in_row(starred, path(path_count - 1, 0), c);
             path_count += 1;
             path(path_count - 1, 0) = path(path_count - 2, 0);

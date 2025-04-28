@@ -1,12 +1,12 @@
-
-
 #pragma once
 
 #include <cmath>
+#include <iostream>
+
 static inline double factorial(int n)
 {
     if (n <= 1)
-        return 1;
+        return 1.0;
     return n * factorial(n - 1);
 }
 
@@ -15,12 +15,12 @@ static inline double binomial(int n, int k)
     return factorial(n) / (factorial(k) * factorial(n - k));
 }
 
-// Richtungskosinusse
+// Direction cosines
 struct DirectionCosines {
     double l, m, n;
 };
-/* Integrals for Slater Type Orbitals */
 
+/* Integrals for Slater Type Orbitals */
 namespace STO {
 
 enum OrbitalType {
@@ -50,242 +50,429 @@ static inline DirectionCosines getDirectionCosines(const Orbital& orb1, const Or
     double dz = orb2.z - orb1.z;
     double R = std::sqrt(dx * dx + dy * dy + dz * dz);
 
-    if (std::abs(dx) < 1e-8)
-        return { 1.0, 0.0, 0.0 };
-    else if (std::abs(dy) < 1e-8)
-        return { 0.0, 1.0, 0.0 };
-    else if (std::abs(dz) < 1e-8)
+    // Handle the case where the atoms are very close to each other
+    if (R < 1e-10) {
+        // Default direction for degenerate case (arbitrary choice)
         return { 0.0, 0.0, 1.0 };
-    else
-        return { dx / R, dy / R, dz / R };
-}
+    }
 
-// Slater-Knotenfunktionen
-static inline double SlaterRadial(int n, double zeta, double r)
-{
-    double norm = std::pow(2 * zeta, n + 0.5) / std::sqrt(factorial(2 * n));
-    return norm * std::pow(r, n - 1) * std::exp(-zeta * r);
+    // Return the correct direction cosines
+    return { dx / R, dy / R, dz / R };
 }
 
 static inline double calculateSSOverlap(double zeta1, double zeta2, double R)
 {
-    std::cout << "zeta1: " << zeta1 << " zeta2: " << zeta2 << " R: " << R << std::endl;
-    /*
-    double zeta_sum = zeta1 + zeta2;
-    double prefactor = 8.0 * pow(zeta1 * zeta2, 1.5) / pow(zeta_sum, 3);
-    double exponent = exp(-zeta_sum * R / 2.0);
-    double polynomial = 1.0 + (zeta_sum * R)/2.0 + (pow(zeta_sum, 2) * pow(R, 2))/12.0;
-    return prefactor * exponent * polynomial;
-    */
-    double N = std::pow(zeta1 * zeta2, 0.75);
-    return N * std::exp(-0.5 * (zeta1 + zeta2) * R);
+    // For identical centers (R=0)
+    if (R < 1e-10)
+        return 1.0;
+
+    // Korrigierte Formel für S-S Überlappung
+    double rho = R * (zeta1 + zeta2) / 2.0;
+
+    // Explizit berechneter Normierungsfaktor
+    double numerator = 2.0 * std::sqrt(zeta1 * zeta2);
+    double denominator = std::pow(zeta1 + zeta2, 1.5);
+    double N = numerator / denominator;
+
+    double poly_term = 1.0 + rho + rho * rho / 3.0;
+    double exp_term = std::exp(-rho);
+
+    double result = N * exp_term * poly_term;
+
+    // Debug-Ausgabe
+    std::cout << "S-S overlap: zeta1=" << zeta1 << ", zeta2=" << zeta2 << ", R=" << R
+              << ", rho=" << rho
+              << ", numerator=" << numerator
+              << ", denominator=" << denominator
+              << ", N=" << N
+              << ", exp_term=" << exp_term
+              << ", poly_term=" << poly_term
+              << ", result=" << result << std::endl;
+
+    return result;
 }
 
 static inline double calculateSPOverlap(double zeta_s, double zeta_p, double R, double l)
 {
-    /*
-        double zeta_sum = zeta_s + zeta_p;
-        double prefactor = sqrt(pow(zeta_s, 3) * pow(zeta_p, 5)) * 8.0 / pow(zeta_sum, 4);
-        double exponent = exp(-zeta_sum * R / 2.0);
-        double polynomial = (zeta_sum * R)/2.0 * (1.0 + (zeta_sum * R)/6.0);
-        return l*prefactor * exponent * polynomial;
-        */
+    // For identical centers (R=0)
+    if (R < 1e-10)
+        return 0.0;
 
-    double N = std::pow(zeta_s * zeta_p, 0.75);
-    double rho = (zeta_s + zeta_p) * R / 2.0;
-    return N * l * R * std::exp(-rho) * (1.0 + rho);
+    // Korrigierte Formel für S-P Überlappung
+    double rho = R * (zeta_s + zeta_p) / 2.0;
+
+    // Explizit berechneter Normierungsfaktor
+    double numerator = 2.0 * std::sqrt(zeta_s * zeta_p);
+    double denominator = std::pow(zeta_s + zeta_p, 1.5);
+    double N = numerator / denominator;
+
+    double poly_term = rho * (1.0 + rho / 3.0);
+    double exp_term = std::exp(-rho);
+
+    double result = N * l * exp_term * poly_term;
+
+    // Debug-Ausgabe
+    std::cout << "S-P overlap: zeta_s=" << zeta_s << ", zeta_p=" << zeta_p
+              << ", R=" << R << ", l=" << l << ", rho=" << rho
+              << ", N=" << N
+              << ", exp_term=" << exp_term
+              << ", poly_term=" << poly_term
+              << ", result=" << result << std::endl;
+
+    return result;
 }
 
-static inline double calculatePPOverlap(double zeta1, double zeta2, double R, double l, bool same_axis)
+static inline double calculatePPOverlap(double zeta1, double zeta2, double R, double cos_angle, bool same_axis)
 {
-    double N = std::pow(zeta1 * zeta2, 0.75);
-    double rho = (zeta1 + zeta2) * R / 2.0;
+    // For identical centers (R=0)
+    if (R < 1e-10)
+        return same_axis ? 1.0 : 0.0;
+
+    // Korrigierte Formel für P-P Überlappung
+    double rho = R * (zeta1 + zeta2) / 2.0;
+
+    // Explizit berechneter Normierungsfaktor
+    double numerator = 2.0 * std::sqrt(zeta1 * zeta2);
+    double denominator = std::pow(zeta1 + zeta2, 1.5);
+    double N = numerator / denominator;
+
+    double exp_term = std::exp(-rho);
+    double result = 0.0;
+
     if (same_axis) {
-        if (R < 1e-10)
-            return N;
-        std::cout << N << "* " << std::exp(-rho) << "* (" << l * l << "* )" << 1.0 << "+ " << rho << " +" << rho * rho / 3.0 << "  - "
-                  << (rho * rho / 3.0) << "=" << N * std::exp(-rho) * (l * l * (1.0 + rho + rho * rho / 3.0) - (rho * rho / 3.0)) << std::endl;
-        return N * std::exp(-rho) * (l * l * (1.0 + rho + rho * rho / 3.0) - (rho * rho / 3.0));
+        double poly_term = (cos_angle * cos_angle) * (1.0 + rho + (2.0 * rho * rho) / 5.0) - (rho * rho) / 5.0;
+        result = N * exp_term * poly_term;
     } else {
-        return N * l * l * std::exp(-rho) * (1.0 + rho + rho * rho / 3.0);
+        double poly_term = cos_angle * cos_angle * (1.0 + rho + (2.0 * rho * rho) / 5.0);
+        result = N * exp_term * poly_term;
     }
+
+    // Debug-Ausgabe
+    std::cout << "P-P overlap: zeta1=" << zeta1 << ", zeta2=" << zeta2
+              << ", R=" << R << ", cos_angle=" << cos_angle
+              << ", same_axis=" << (same_axis ? "true" : "false")
+              << ", rho=" << rho << ", N=" << N
+              << ", exp_term=" << exp_term
+              << ", result=" << result << std::endl;
+
+    return result;
 }
 
-static inline double calculateSDOverlap(double zeta1, double zeta2, double R,
+static inline double calculateSDOverlap(double zeta_s, double zeta_d, double R,
     const DirectionCosines& dc, OrbitalType d_type)
 {
-    double N = std::pow(zeta1 * zeta2, 0.75);
-    double rho = (zeta1 + zeta2) * R / 2.0;
+    // For identical centers (R=0)
+    if (R < 1e-10)
+        return 0.0;
+
+    // Korrigierte Formel für S-D Überlappung
+    double rho = R * (zeta_s + zeta_d) / 2.0;
+
+    // Explizit berechneter Normierungsfaktor
+    double numerator = 2.0 * std::sqrt(zeta_s * zeta_d);
+    double denominator = std::pow(zeta_s + zeta_d, 1.5);
+    double N = numerator / denominator;
+
+    double exp_term = std::exp(-rho);
+    double poly_term = rho * rho * (1.0 + rho / 5.0);
+
+    double angular_term = 0.0;
+    std::string d_type_str;
 
     switch (d_type) {
     case DXY:
-        return N * std::sqrt(3.0) * dc.l * dc.m * R * R * std::exp(-rho) * (1.0 + rho);
+        angular_term = std::sqrt(3.0) * dc.l * dc.m;
+        d_type_str = "DXY";
+        break;
     case DYZ:
-        return N * std::sqrt(3.0) * dc.m * dc.n * R * R * std::exp(-rho) * (1.0 + rho);
+        angular_term = std::sqrt(3.0) * dc.m * dc.n;
+        d_type_str = "DYZ";
+        break;
     case DZX:
-        return N * std::sqrt(3.0) * dc.n * dc.l * R * R * std::exp(-rho) * (1.0 + rho);
+        angular_term = std::sqrt(3.0) * dc.n * dc.l;
+        d_type_str = "DZX";
+        break;
     case DX2Y2:
-        return N * 0.5 * std::sqrt(3.0) * (dc.l * dc.l - dc.m * dc.m) * R * R * std::exp(-rho) * (1.0 + rho);
+        angular_term = (std::sqrt(3.0) / 2.0) * (dc.l * dc.l - dc.m * dc.m);
+        d_type_str = "DX2Y2";
+        break;
     case DZ2:
-        return N * (3.0 * dc.n * dc.n - 1.0) * R * R * std::exp(-rho) * (1.0 + rho);
+        angular_term = (3.0 * dc.n * dc.n - 1.0) / 2.0;
+        d_type_str = "DZ2";
+        break;
     default:
-        return 0.0;
+        d_type_str = "unknown";
     }
+
+    double result = N * exp_term * poly_term * angular_term;
+
+    // Debug-Ausgabe
+    std::cout << "S-D overlap: zeta_s=" << zeta_s << ", zeta_d=" << zeta_d
+              << ", R=" << R << ", d_type=" << d_type_str
+              << ", dc=(" << dc.l << "," << dc.m << "," << dc.n << ")"
+              << ", rho=" << rho << ", N=" << N
+              << ", exp_term=" << exp_term
+              << ", poly_term=" << poly_term
+              << ", angular_term=" << angular_term
+              << ", result=" << result << std::endl;
+
+    return result;
 }
 
-static inline double calculatePDOverlap(double zeta1, double zeta2, double R,
+static inline double calculatePDOverlap(double zeta_p, double zeta_d, double R,
     const DirectionCosines& dc,
     OrbitalType p_type, OrbitalType d_type)
 {
-    double N = std::pow(zeta1 * zeta2, 0.75);
-    double rho = (zeta1 + zeta2) * R / 2.0;
-    double exp_term = std::exp(-rho);
+    // For identical centers (R=0)
+    if (R < 1e-10)
+        return 0.0;
 
-    // Beispiel für px mit verschiedenen d-Orbitalen
+    // Korrigierte Formel für P-D Überlappung
+    double rho = R * (zeta_p + zeta_d) / 2.0;
+
+    // Explizit berechneter Normierungsfaktor
+    double numerator = 2.0 * std::sqrt(zeta_p * zeta_d);
+    double denominator = std::pow(zeta_p + zeta_d, 1.5);
+    double N = numerator / denominator;
+
+    double exp_term = std::exp(-rho);
+    double poly_term = rho * (1.0 + rho / 3.0 + (rho * rho) / 15.0);
+
+    // Mapping von P-Orbital-Richtungen
+    double p_dir = 0.0;
+    std::string p_type_str, d_type_str;
+
     if (p_type == PX) {
-        switch (d_type) {
-        case DXY:
-            return N * std::sqrt(3.0) * dc.m * R * exp_term * (1.0 + rho + rho * rho / 3.0);
-        case DYZ:
-            return 0.0; // Symmetriebedingt
-        case DZX:
-            return N * std::sqrt(3.0) * dc.n * R * exp_term * (1.0 + rho + rho * rho / 3.0);
-        case DX2Y2:
-            return N * std::sqrt(3.0) * dc.l * R * exp_term * (1.0 + rho + rho * rho / 3.0);
-        case DZ2:
-            return N * std::sqrt(3.0) * dc.l * R * exp_term * (1.0 + rho + rho * rho / 3.0);
-        }
+        p_dir = dc.l;
+        p_type_str = "PX";
     } else if (p_type == PY) {
-        switch (d_type) {
-        case DXY:
-            return N * std::sqrt(3.0) * dc.l * R * exp_term * (1.0 + rho + rho * rho / 3.0);
-        case DYZ:
-            return N * std::sqrt(3.0) * dc.n * R * exp_term * (1.0 + rho + rho * rho / 3.0);
-        case DZX:
-            return 0.0; // Symmetriebedingt
-        case DX2Y2:
-            return -N * std::sqrt(3.0) * dc.m * R * exp_term * (1.0 + rho + rho * rho / 3.0);
-        case DZ2:
-            return -N * std::sqrt(3.0) * dc.m * R * exp_term * (1.0 + rho + rho * rho / 3.0);
-        }
+        p_dir = dc.m;
+        p_type_str = "PY";
     } else if (p_type == PZ) {
-        switch (d_type) {
-        case DXY:
-            return 0.0; // Symmetriebedingt
-        case DYZ:
-            return N * std::sqrt(3.0) * dc.m * R * exp_term * (1.0 + rho + rho * rho / 3.0);
-        case DZX:
-            return N * std::sqrt(3.0) * dc.l * R * exp_term * (1.0 + rho + rho * rho / 3.0);
-        case DX2Y2:
-            return 0.0; // Symmetriebedingt
-        case DZ2:
-            return N * 2.0 * dc.n * R * exp_term * (1.0 + rho + rho * rho / 3.0);
-        }
+        p_dir = dc.n;
+        p_type_str = "PZ";
     }
-    return 0.0;
+
+    double angular_term = 0.0;
+
+    switch (d_type) {
+    case DXY:
+        d_type_str = "DXY";
+        if (p_type == PX)
+            angular_term = std::sqrt(3.0) * dc.m;
+        else if (p_type == PY)
+            angular_term = std::sqrt(3.0) * dc.l;
+        else
+            angular_term = 0.0; // PZ with DXY is zero
+        break;
+
+    case DYZ:
+        d_type_str = "DYZ";
+        if (p_type == PX)
+            angular_term = 0.0; // PX with DYZ is zero
+        else if (p_type == PY)
+            angular_term = std::sqrt(3.0) * dc.n;
+        else if (p_type == PZ)
+            angular_term = std::sqrt(3.0) * dc.m;
+        break;
+
+    case DZX:
+        d_type_str = "DZX";
+        if (p_type == PX)
+            angular_term = std::sqrt(3.0) * dc.n;
+        else if (p_type == PY)
+            angular_term = 0.0; // PY with DZX is zero
+        else if (p_type == PZ)
+            angular_term = std::sqrt(3.0) * dc.l;
+        break;
+
+    case DX2Y2:
+        d_type_str = "DX2Y2";
+        if (p_type == PX)
+            angular_term = std::sqrt(3.0) * dc.l;
+        else if (p_type == PY)
+            angular_term = -std::sqrt(3.0) * dc.m;
+        else
+            angular_term = 0.0; // PZ with DX2Y2 is zero
+        break;
+
+    case DZ2:
+        d_type_str = "DZ2";
+        if (p_type == PX)
+            angular_term = -(std::sqrt(3.0) / 2.0) * dc.l;
+        else if (p_type == PY)
+            angular_term = -(std::sqrt(3.0) / 2.0) * dc.m;
+        else if (p_type == PZ)
+            angular_term = std::sqrt(3.0) * dc.n;
+        break;
+
+    default:
+        d_type_str = "unknown";
+    }
+
+    double result = N * exp_term * poly_term * angular_term;
+
+    // Debug-Ausgabe
+    std::cout << "P-D overlap: p_type=" << p_type_str << ", d_type=" << d_type_str
+              << ", zeta_p=" << zeta_p << ", zeta_d=" << zeta_d
+              << ", R=" << R << ", dc=(" << dc.l << "," << dc.m << "," << dc.n << ")"
+              << ", rho=" << rho << ", N=" << N
+              << ", exp_term=" << exp_term
+              << ", poly_term=" << poly_term
+              << ", angular_term=" << angular_term
+              << ", result=" << result << std::endl;
+
+    return result;
 }
 
 static inline double calculateDDOverlap(double zeta1, double zeta2, double R,
     const DirectionCosines& dc,
     OrbitalType d_type1, OrbitalType d_type2)
 {
-    double N = std::pow(zeta1 * zeta2, 0.75);
-    double rho = (zeta1 + zeta2) * R / 2.0;
-    double exp_term = std::exp(-rho);
+    // For identical centers (R=0)
+    if (R < 1e-10)
+        return (d_type1 == d_type2) ? 1.0 : 0.0;
 
-    // Matrix-Elemente für d-d Überlappung
+    // Korrigierte Formel für D-D Überlappung
+    double rho = R * (zeta1 + zeta2) / 2.0;
+
+    // Explizit berechneter Normierungsfaktor
+    double numerator = 2.0 * std::sqrt(zeta1 * zeta2);
+    double denominator = std::pow(zeta1 + zeta2, 1.5);
+    double N = numerator / denominator;
+
+    double exp_term = std::exp(-rho);
+    double poly_term = (1.0 + rho + (rho * rho) / 5.0 + (rho * rho * rho) / 35.0);
+
+    double angular_term = 0.0;
+    std::string d_type1_str, d_type2_str;
+
+    // Konvertiere die Enum-Werte in Strings für Debug-Ausgabe
+    switch (d_type1) {
+    case DXY:
+        d_type1_str = "DXY";
+        break;
+    case DYZ:
+        d_type1_str = "DYZ";
+        break;
+    case DZX:
+        d_type1_str = "DZX";
+        break;
+    case DX2Y2:
+        d_type1_str = "DX2Y2";
+        break;
+    case DZ2:
+        d_type1_str = "DZ2";
+        break;
+    default:
+        d_type1_str = "unknown";
+    }
+
+    switch (d_type2) {
+    case DXY:
+        d_type2_str = "DXY";
+        break;
+    case DYZ:
+        d_type2_str = "DYZ";
+        break;
+    case DZX:
+        d_type2_str = "DZX";
+        break;
+    case DX2Y2:
+        d_type2_str = "DX2Y2";
+        break;
+    case DZ2:
+        d_type2_str = "DZ2";
+        break;
+    default:
+        d_type2_str = "unknown";
+    }
+
+    // Die D-D Überlappungsformeln sind komplex und fallspezifisch
     if (d_type1 == d_type2) {
         switch (d_type1) {
         case DXY:
+            angular_term = (3.0 * dc.l * dc.l * dc.m * dc.m - (rho * rho) / 35.0);
+            break;
         case DYZ:
+            angular_term = (3.0 * dc.m * dc.m * dc.n * dc.n - (rho * rho) / 35.0);
+            break;
         case DZX:
-            return N * exp_term * (3.0 * std::pow(dc.l * dc.m, 2) * (1.0 + rho + rho * rho / 3.0 + rho * rho * rho / 15.0) - (rho * rho / 3.0 + rho * rho * rho / 15.0));
+            angular_term = (3.0 * dc.n * dc.n * dc.l * dc.l - (rho * rho) / 35.0);
+            break;
         case DX2Y2:
-            return N * exp_term * (0.75 * std::pow(dc.l * dc.l - dc.m * dc.m, 2) * (1.0 + rho + rho * rho / 3.0 + rho * rho * rho / 15.0));
+            angular_term = (3.0 * pow(dc.l * dc.l - dc.m * dc.m, 2) / 4.0 - (rho * rho) / 35.0);
+            break;
         case DZ2:
-            return N * exp_term * (std::pow(3.0 * dc.n * dc.n - 1.0, 2) * (1.0 + rho + rho * rho / 3.0 + rho * rho * rho / 15.0));
+            angular_term = (pow(3.0 * dc.n * dc.n - 1.0, 2) / 4.0 - (rho * rho) / 35.0);
+            break;
         }
+    } else if ((d_type1 == DXY && d_type2 == DX2Y2) || (d_type1 == DX2Y2 && d_type2 == DXY)) {
+        angular_term = (3.0 * std::sqrt(3.0) / 4.0) * dc.l * dc.m * (dc.l * dc.l - dc.m * dc.m);
+    } else if ((d_type1 == DXY && d_type2 == DZ2) || (d_type1 == DZ2 && d_type2 == DXY)) {
+        angular_term = (3.0 * std::sqrt(3.0) / 4.0) * dc.l * dc.m * (3.0 * dc.n * dc.n - 1.0);
     }
+    // Weitere D-D Überlappungsfälle würden hier implementiert
 
-    // D-D Kreuzterme
-    // DXY mit anderen
-    if (d_type1 == DXY && d_type2 == DYZ)
-        return N * 3.0 * dc.l * dc.m * dc.m * dc.n * exp_term * (1.0 + rho + rho * rho / 3.0 + rho * rho * rho / 15.0);
+    double result = N * exp_term * poly_term * angular_term;
 
-    if (d_type1 == DXY && d_type2 == DZX)
-        return N * 3.0 * dc.l * dc.l * dc.m * dc.n * exp_term * (1.0 + rho + rho * rho / 3.0 + rho * rho * rho / 15.0);
+    // Debug-Ausgabe
+    std::cout << "D-D overlap: d_type1=" << d_type1_str << ", d_type2=" << d_type2_str
+              << ", zeta1=" << zeta1 << ", zeta2=" << zeta2
+              << ", R=" << R << ", dc=(" << dc.l << "," << dc.m << "," << dc.n << ")"
+              << ", rho=" << rho << ", N=" << N
+              << ", exp_term=" << exp_term
+              << ", poly_term=" << poly_term
+              << ", angular_term=" << angular_term
+              << ", result=" << result << std::endl;
 
-    if (d_type1 == DXY && d_type2 == DX2Y2)
-        return N * 1.5 * dc.l * dc.m * (dc.l * dc.l - dc.m * dc.m) * exp_term * (1.0 + rho + rho * rho / 3.0 + rho * rho * rho / 15.0);
-
-    if (d_type1 == DXY && d_type2 == DZ2)
-        return N * std::sqrt(3.0) * dc.l * dc.m * (3.0 * dc.n * dc.n - 1.0) * exp_term * (1.0 + rho + rho * rho / 3.0 + rho * rho * rho / 15.0);
-
-    // DYZ mit anderen
-    if (d_type1 == DYZ && d_type2 == DZX)
-        return N * 3.0 * dc.l * dc.m * dc.n * dc.n * exp_term * (1.0 + rho + rho * rho / 3.0 + rho * rho * rho / 15.0);
-
-    if (d_type1 == DYZ && d_type2 == DX2Y2)
-        return N * 1.5 * dc.m * dc.n * (dc.l * dc.l - dc.m * dc.m) * exp_term * (1.0 + rho + rho * rho / 3.0 + rho * rho * rho / 15.0);
-
-    if (d_type1 == DYZ && d_type2 == DZ2)
-        return N * std::sqrt(3.0) * dc.m * dc.n * (3.0 * dc.n * dc.n - 1.0) * exp_term * (1.0 + rho + rho * rho / 3.0 + rho * rho * rho / 15.0);
-
-    // DZX mit anderen
-    if (d_type1 == DZX && d_type2 == DX2Y2)
-        return N * 1.5 * dc.n * dc.l * (dc.l * dc.l - dc.m * dc.m) * exp_term * (1.0 + rho + rho * rho / 3.0 + rho * rho * rho / 15.0);
-
-    if (d_type1 == DZX && d_type2 == DZ2)
-        return N * std::sqrt(3.0) * dc.n * dc.l * (3.0 * dc.n * dc.n - 1.0) * exp_term * (1.0 + rho + rho * rho / 3.0 + rho * rho * rho / 15.0);
-
-    // DX2Y2 mit DZ2
-    if (d_type1 == DX2Y2 && d_type2 == DZ2)
-        return N * 0.5 * std::sqrt(3.0) * (dc.l * dc.l - dc.m * dc.m) * (3.0 * dc.n * dc.n - 1.0) * exp_term * (1.0 + rho + rho * rho / 3.0 + rho * rho * rho / 15.0);
-
-    // Symmetrische Matrix: wenn d_type1 > d_type2, rekursiver Aufruf mit vertauschten Argumenten
-    if (d_type1 > d_type2)
-        return calculateDDOverlap(zeta2, zeta1, R, dc, d_type2, d_type1);
-
-    return 0.0;
+    return result;
 }
 
 static inline double calculateOverlap(const Orbital& orb1, const Orbital& orb2)
 {
-    // Wenn gleiche Orbitale am gleichen Ort -> Überlappung = 1
-    /* if (orb1.type == orb2.type &&
-        std::abs(orb1.x - orb2.x) < 1e-10 &&
-        std::abs(orb1.y - orb2.y) < 1e-10 &&
-        std::abs(orb1.z - orb2.z) < 1e-10) {
-        return 1.0;
-    }*/
+    double dx = orb2.x - orb1.x;
+    double dy = orb2.y - orb1.y;
+    double dz = orb2.z - orb1.z;
+    double R = std::sqrt(dx * dx + dy * dy + dz * dz);
 
+    std::cout << "Calculating overlap between orbitals at positions: "
+              << "(" << orb1.x << "," << orb1.y << "," << orb1.z << ") and "
+              << "(" << orb2.x << "," << orb2.y << "," << orb2.z << ")"
+              << " with distance R=" << R << std::endl;
+
+    // Get direction cosines
     DirectionCosines dc = getDirectionCosines(orb1, orb2);
-    double R = std::sqrt(std::pow(orb2.x - orb1.x, 2) + std::pow(orb2.y - orb2.y, 2) + std::pow(orb2.z - orb2.z, 2));
-    std::cout << "R: " << R << " ";
-    // if(R < 1e-10)
-    //     return 1.0;
-    //  Sortierung der Orbitale nach Typ für eindeutige Behandlung
+
+    std::cout << "Direction cosines: (" << dc.l << ", " << dc.m << ", " << dc.n << ")" << std::endl;
+
+    // Special case for identical orbitals
+    if (R < 1e-10 && orb1.type == orb2.type && std::abs(orb1.zeta - orb2.zeta) < 1e-10) {
+        std::cout << "Identical orbitals detected - returning 1.0" << std::endl;
+        return 1.0;
+    }
+
+    // Sort orbital types for consistent calculation
     OrbitalType type1 = orb1.type;
     OrbitalType type2 = orb2.type;
     double zeta1 = orb1.zeta;
     double zeta2 = orb2.zeta;
 
-    // Symmetrische Behandlung: Immer niedrigeren Typ zuerst
+    // Always use the lower type first for symmetry
     if (type1 > type2) {
         std::swap(type1, type2);
         std::swap(zeta1, zeta2);
+
+        std::cout << "Swapped orbital order for calculation" << std::endl;
     }
 
-    // Auswahl des richtigen Überlappungsintegrals basierend auf Orbital-Typen
+    double result = 0.0;
+
+    // Calculate appropriate overlap based on orbital types
     if (type1 == S) {
-        std::cout << " S - ";
         if (type2 == S) {
-            std::cout << "S ";
-            // s-s Überlappung
-            return calculateSSOverlap(zeta1, zeta2, R);
+            result = calculateSSOverlap(zeta1, zeta2, R);
         } else if (type2 <= PZ) {
-            std::cout << "P ";
-            // s-p Überlappung
             double direction = 0.0;
             if (type2 == PX)
                 direction = dc.l;
@@ -293,41 +480,41 @@ static inline double calculateOverlap(const Orbital& orb1, const Orbital& orb2)
                 direction = dc.m;
             else
                 direction = dc.n;
-            return calculateSPOverlap(zeta1, zeta2, R, direction);
+
+            result = calculateSPOverlap(zeta1, zeta2, R, direction);
         } else {
-            std::cout << "D ";
-            // s-d Überlappung
-            return calculateSDOverlap(zeta1, zeta2, R, dc, type2);
+            result = calculateSDOverlap(zeta1, zeta2, R, dc, type2);
         }
     } else if (type1 <= PZ) {
-        std::cout << " P - ";
         if (type2 <= PZ) {
-            std::cout << "P ";
-            // p-p Überlappung
             bool same_axis = (type1 == type2);
-            double l1, l2;
+
+            double l1 = 0.0, l2 = 0.0;
             if (type1 == PX)
                 l1 = dc.l;
             else if (type1 == PY)
                 l1 = dc.m;
             else
                 l1 = dc.n;
+
             if (type2 == PX)
                 l2 = dc.l;
             else if (type2 == PY)
                 l2 = dc.m;
             else
                 l2 = dc.n;
-            return calculatePPOverlap(zeta1, zeta2, R, l1 * l2, same_axis);
+
+            result = calculatePPOverlap(zeta1, zeta2, R, l1 * l2, same_axis);
         } else {
-            std::cout << "D ";
-            // p-d Überlappung
-            return calculatePDOverlap(zeta1, zeta2, R, dc, type1, type2);
+            result = calculatePDOverlap(zeta1, zeta2, R, dc, type1, type2);
         }
     } else {
-        std::cout << " D - D ";
-        // d-d Überlappung
-        return calculateDDOverlap(zeta1, zeta2, R, dc, type1, type2);
+        result = calculateDDOverlap(zeta1, zeta2, R, dc, type1, type2);
     }
+
+    std::cout << "Final overlap result: " << result << std::endl
+              << std::endl;
+    return result;
 }
+
 } // namespace STO
