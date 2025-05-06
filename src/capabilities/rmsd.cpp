@@ -253,8 +253,9 @@ void RMSDDriver::LoadControlJson()
             }
         }
     }
-
-    std::cout << m_defaults["reference_atoms"] << std::endl;
+    if (!m_silent) {
+        std::cout << m_defaults["reference_atoms"] << std::endl;
+    }
     std::string reference_atoms = Json2KeyWord<std::string>(m_defaults, "reference_atoms");
     std::string target_atoms = Json2KeyWord<std::string>(m_defaults, "target_atoms");
     if (reference_atoms.size() > 0)

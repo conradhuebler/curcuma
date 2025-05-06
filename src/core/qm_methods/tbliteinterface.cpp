@@ -46,7 +46,7 @@ TBLiteInterface::TBLiteInterface(const json& tblitesettings)
     // convert kelvin to atomic units
     m_Tele = m_tblitesettings["Tele"];
     m_Tele /= 315775.326864009;
-    m_verbose = m_tblitesettings["tb_verbose"];
+    m_verbose = m_tblitesettings["verbose"];
     m_spin = m_tblitesettings["spin"];
     std::string guess = m_tblitesettings["tb_guess"];
     m_solvent_eps = m_tblitesettings["solvent_eps"];
@@ -70,9 +70,9 @@ TBLiteInterface::TBLiteInterface(const json& tblitesettings)
     m_error = tblite_new_error();
     m_ctx = tblite_new_context();
     m_tblite_res = tblite_new_result();
-
     tblite_set_context_verbosity(m_ctx, m_verbose);
-    std::cout << "Initialising tblite with accuracy " << m_acc << " and SCFmaxiter " << m_SCFmaxiter << std::endl;
+    if (m_verbose > 0)
+        std::cout << "Initialising tblite with accuracy " << m_acc << " and SCFmaxiter " << m_SCFmaxiter << std::endl;
 }
 
 TBLiteInterface::~TBLiteInterface()
@@ -219,12 +219,16 @@ void TBLiteInterface::clear()
 
 void TBLiteInterface::ApplySolvation()
 {
-    std::cout << "Applying Solvation Model" << std::endl;
-    std::cout << "Solvent Model: " << m_solvent_model << std::endl;
+    if (m_verbose > 0) {
+        std::cout << "Applying Solvation Model" << std::endl;
+        std::cout << "Solvent Model: " << m_solvent_model << std::endl;
+    }
     if (m_solvent_model == 0)
         return;
     else if (m_solvent_model == 1 && m_solvent_eps > -1) {
-        std::cout << "Using CPCM with epsilon " << m_solvent_eps << std::endl;
+        if (m_verbose > 0) {
+            std::cout << "Using CPCM with epsilon " << m_solvent_eps << std::endl;
+        }
         m_tb_cont = tblite_new_cpcm_solvation_epsilon(m_error, m_tblite_mol, m_solvent_eps);
         if (tblite_check_context(m_ctx)) {
             tbliteError();
@@ -238,8 +242,10 @@ void TBLiteInterface::ApplySolvation()
         //  tbliteError();
         //   tbliteContextError();
     } else if (m_solvent_model == 2 && m_solvent_eps > -1) {
-        std::cout << "Using GB with epsilon " << m_solvent_eps << " and born version " << m_solvent_gb_version << " and born kernel " << m_solvent_gb_kernel << std::endl;
-        std::cout << "GB doesnt work for now" << std::endl;
+        if (m_verbose > 0) {
+            std::cout << "Using GB with epsilon " << m_solvent_eps << " and born version " << m_solvent_gb_version << " and born kernel " << m_solvent_gb_kernel << std::endl;
+            std::cout << "GB doesnt work for now" << std::endl;
+        }
         exit(1);
         m_tb_cont = tblite_new_gb_solvation_epsilon(m_error, m_tblite_mol, m_solvent_eps, m_solvent_gb_version, m_solvent_gb_kernel);
         if (tblite_check_context(m_ctx)) {
@@ -254,7 +260,9 @@ void TBLiteInterface::ApplySolvation()
         //  tbliteError();
         //  tbliteContextError();
     } else if (m_solvent_model == 3) {
-        std::cout << "Using ALPB with solvent " << m_solvent << " and version " << m_solvent_alpb_version << " and reference " << m_solvent_alpb_reference << std::endl;
+        if (m_verbose > 0) {
+            std::cout << "Using ALPB with solvent " << m_solvent << " and version " << m_solvent_alpb_version << " and reference " << m_solvent_alpb_reference << std::endl;
+        }
         m_tb_cont = tblite_new_alpb_solvation_solvent(m_error, m_tblite_mol, m_solvent, m_solvent_alpb_version, m_solvent_alpb_reference);
         if (tblite_check_context(m_ctx)) {
             tbliteError();

@@ -33,6 +33,7 @@ UlyssesInterface::UlyssesInterface(const json& ulyssessettings)
     m_solvent = m_ulyssessettings["solvent"];
     m_method = m_ulyssessettings["method"];
     m_mult = m_ulyssessettings["mult"];
+    m_verbose = m_ulyssessettings["verbose"];
     if (std::find(m_solvents.begin(), m_solvents.end(), m_solvent) == m_solvents.end()) {
         std::cout << "Solvent " << m_solvent << " is not supported by Ulysses" << std::endl;
         m_solvent = "none";
@@ -49,8 +50,8 @@ bool UlyssesInterface::InitialiseMolecule()
 {
     m_ulysses->setMethod(m_method);
     m_ulysses->setMolecule(m_geometry, m_atoms, m_charge, m_mult, "C1");
-
-    std::cout << "Initialising Ulysses with method " << m_method << " and SCFmaxiter " << m_SCFmaxiter << std::endl;
+    if (m_verbose > 0)
+        std::cout << "Initialising Ulysses with method " << m_method << " and SCFmaxiter " << m_SCFmaxiter << std::endl;
 
     return true;
 }

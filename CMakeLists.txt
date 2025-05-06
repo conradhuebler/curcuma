@@ -171,7 +171,8 @@ file(ARCHIVE_EXTRACT INPUT ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip DESTIN
 if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/ulysses.zip)
   file(DOWNLOAD https://gitlab.com/siriius/ulysses/-/archive/main/ulysses-main.zip  ${PROJECT_SOURCE_DIR}/external/ulysses.zip
          TIMEOUT 60  # seconds
-         EXPECTED_HASH SHA256=af676fd3f0b98528bd6f7d12064192af6e4190d6da9808bdad803f1201c9feb6)
+         EXPECTED_HASH SHA256=5f6f39e6fb12538ab30f9aef94a76d8e283151b30f1b6eef80f80b5bed46477a
+         )
 endif()
 
 file(ARCHIVE_EXTRACT INPUT ${PROJECT_SOURCE_DIR}/external/ulysses.zip DESTINATION ${PROJECT_SOURCE_DIR}/external)
@@ -460,10 +461,10 @@ add_test(NAME AAAbGal_subspace COMMAND AAAbGal subspace WORKING_DIRECTORY ${PROJ
 #set_tests_properties(AAAbGal_incremental PROPERTIES TIMEOUT 300)
 
 add_test(NAME confscan_subspace COMMAND confscan_test subspace WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-add_test(NAME confscan_free COMMAND AAAbGal free WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-add_test(NAME confscan_dtemplate COMMAND AAAbGal dtemplate WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-add_test(NAME confscan_template COMMAND AAAbGal template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-add_test(NAME confscan_molalign COMMAND AAAbGal molalign WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME confscan_free COMMAND confscan_test free WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME confscan_dtemplate COMMAND confscan_test dtemplate WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME confscan_template COMMAND confscan_test template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME confscan_molalign COMMAND confscan_test molalign WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 
 
 

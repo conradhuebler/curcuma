@@ -30,7 +30,7 @@ static json TBLiteSettings{
     { "SCFmaxiter", 100 },
     { "tb_damping", 0.4 },
     { "Tele", 300 },
-    { "tb_verbose", 0 },
+    { "verbose", 0 },
     { "tb_guess", "SAD" },
     { "solvent_model", 0 }, // 0 - none; 1 - CPCM; 2 - GB, 3 - ALPB
     { "solvent_eps", -1 },

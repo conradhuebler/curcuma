@@ -29,6 +29,7 @@ static json UlyssesSettings{
     { "solvent", "none" },
     { "method", "GFN2" },
     { "SCFmaxiter", 100 },
+    { "verbose", 0 },
     { "mult", 1 }
 
 };
@@ -52,6 +53,7 @@ private:
 
     double m_Tele = 300;
     double m_SCFmaxiter = 100;
+    bool m_verbose = 0;
     int m_mult = 1;
 
     StringList m_solvents = { "acetone", "acetone", "acetonitrile", "aniline", "benzaldehyde", "benzene", "dichloromethane", "chloroform", "carbon disulfide", "dioxane", "dmf", "dmso", "ethanol", "diethyl ether", "ethyl acetate", "furane", "hexadecane", "hexane", "methanol", "nitromethane", "octanol", "phenol", "thf", "toluene", "water", "octanol wet" };

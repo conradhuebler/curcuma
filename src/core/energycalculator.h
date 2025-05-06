@@ -50,11 +50,12 @@ using json = nlohmann::json;
 
 static json EnergyCalculatorJson{
     { "param_file", "none" },
-    { "multi", 1},
-    { "method", "uff"},
+    { "multi", 1 },
+    { "method", "uff" },
     { "SCFmaxiter", 100 },
     { "Tele", 300 },
-    { "solvent", "none"}
+    { "solvent", "none" },
+    { "verbose", 0 }
 
 };
 
