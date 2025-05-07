@@ -180,33 +180,30 @@ static inline DirectionCosines getDirectionCosines(const Orbital& orb1, const Or
  */
 static inline double calculateSSOverlap(double zeta1, double zeta2, double R, bool debug = false)
 {
-    // For identical centers (R=0)
+    // Für identische Zentren (R=0)
     if (R < 1e-10)
         return 1.0;
 
-    // Calculate rho parameter
-    double rho = R * (zeta1 + zeta2) / 2.0;
+    // Reduzierter Zeta-Wert berechnen
+    double zeta_reduced = (zeta1 * zeta2) / (zeta1 + zeta2);
 
-    // Calculate normalization factor
-    double numerator = 2.0 * std::sqrt(zeta1 * zeta2);
-    double denominator = std::pow(zeta1 + zeta2, 1.5);
-    double N = numerator / denominator;
+    // Normalisierungsfaktor
+    double N = pow(4.0 * zeta1 * zeta2 / pow(zeta1 + zeta2, 2.0), 1.5);
 
-    // Calculate polynomial and exponential terms
-    double poly_term = 1.0 + rho + rho * rho / 3.0;
-    double exp_term = std::exp(-rho);
+    // Exponentialterm berechnen
+    double exp_term = exp(-zeta_reduced * R);
 
-    // Final result
+    // Polynomterm berechnen
+    double poly_term = 1.0 + zeta_reduced * R + (1.0 / 3.0) * pow(zeta_reduced * R, 2.0);
+
+    // Endergebnis
     double result = N * exp_term * poly_term;
 
-    // Debug output if requested
+    // Debug-Ausgabe wenn angefordert
     if (debug) {
-        std::cout << "S-S overlap: zeta1=" << zeta1 << ", zeta2=" << zeta2 << ", R=" << R
-                  << ", rho=" << rho
-                  << ", num=" << numerator
-                  << ", denom=" << denominator
-                  << ", N=" << N
-                  << ", exp=" << exp_term
+        std::cout << "S-S overlap: zeta1=" << zeta1 << ", zeta2=" << zeta2
+                  << ", R=" << R << ", zeta_reduced=" << zeta_reduced
+                  << ", N=" << N << ", exp=" << exp_term
                   << ", poly=" << poly_term
                   << ", result=" << result << std::endl;
     }
@@ -226,34 +223,36 @@ static inline double calculateSSOverlap(double zeta1, double zeta2, double R, bo
  * Formula: S_{sp} = (2√(ζₛζₚ))/(ζₛ+ζₚ)^(3/2) · λ · e^(-ρ) · ρ(1 + ρ/3)
  * where ρ = R(ζₛ+ζₚ)/2 and λ is the direction cosine
  */
-static inline double calculateSPOverlap(double zeta_s, double zeta_p, double R, double l, bool debug = false)
+static inline double calculateSPOverlap(double zeta1, double zeta2, double R,
+    double direction, bool debug = false)
 {
-    // For identical centers (R=0)
+    // Für identische Zentren (R=0)
     if (R < 1e-10)
-        return 0.0;
+        return 0.0; // P-Orbitale haben Amplitude 0 im Zentrum
 
-    // Calculate rho parameter
-    double rho = R * (zeta_s + zeta_p) / 2.0;
+    // Reduzierter Zeta-Wert berechnen
+    double zeta_reduced = (zeta1 * zeta2) / (zeta1 + zeta2);
 
-    // Calculate normalization factor
-    double numerator = 2.0 * std::sqrt(zeta_s * zeta_p);
-    double denominator = std::pow(zeta_s + zeta_p, 1.5);
-    double N = numerator / denominator;
+    // Parameter berechnen
+    double rho = 2.0 * sqrt(zeta1 * zeta2) / (zeta1 + zeta2);
+    double rho_R = rho * R;
 
-    // Calculate polynomial and exponential terms
-    double poly_term = rho * (1.0 + rho / 3.0);
-    double exp_term = std::exp(-rho);
+    // Formeln nach Mulliken/Franzblau (normalisierte Slater-Orbitale)
+    double exp_term = exp(-zeta_reduced * R);
+    double N = sqrt(zeta1 * zeta2) * pow(2.0 / (zeta1 + zeta2), 1.5);
+    double S_sp = N * R * exp_term * (1.0 + (1.0 / 3.0) * zeta_reduced * R);
 
-    // Final result
-    double result = N * l * exp_term * poly_term;
+    // Anpassung für Richtung (Projektion des P-Orbitals auf die Bindungsachse)
+    double result = direction * S_sp;
 
-    // Debug output if requested
+    // Debug-Ausgabe wenn angefordert
     if (debug) {
-        std::cout << "S-P overlap: zeta_s=" << zeta_s << ", zeta_p=" << zeta_p
-                  << ", R=" << R << ", l=" << l << ", rho=" << rho
-                  << ", N=" << N
+        std::cout << "S-P overlap: zeta1=" << zeta1 << ", zeta2=" << zeta2
+                  << ", R=" << R << ", direction=" << direction
+                  << ", zeta_reduced=" << zeta_reduced
+                  << ", rho=" << rho << ", N=" << N
                   << ", exp=" << exp_term
-                  << ", poly=" << poly_term
+                  << ", S_sp=" << S_sp
                   << ", result=" << result << std::endl;
     }
 
@@ -274,42 +273,47 @@ static inline double calculatePPOverlap(double zeta1, double zeta2, double R,
     double cos_angle, bool same_axis,
     bool debug = false)
 {
-    // For identical centers (R=0)
+    // Für identische Zentren (R=0)
     if (R < 1e-10)
         return same_axis ? 1.0 : 0.0;
 
-    // Calculate rho parameter
-    double rho = R * (zeta1 + zeta2) / 2.0;
+    // Reduzierter Zeta-Wert berechnen
+    double zeta_reduced = (zeta1 * zeta2) / (zeta1 + zeta2);
 
-    // Calculate normalization factor
-    double numerator = 2.0 * std::sqrt(zeta1 * zeta2);
-    double denominator = std::pow(zeta1 + zeta2, 1.5);
-    double N = numerator / denominator;
+    // Gemeinsamer Normalisierungsfaktor
+    double N = zeta1 * zeta2 * pow(2.0 / (zeta1 + zeta2), 3.0);
 
-    // Calculate exponential term
-    double exp_term = std::exp(-rho);
-    double poly_term;
+    // Exponentialterm
+    double exp_term = exp(-zeta_reduced * R);
+
+    // P-P Überlappungsintegrale
     double result;
 
     if (same_axis) {
-        // P-P overlap, same axis
-        poly_term = (cos_angle * cos_angle) * (1.0 + rho + (2.0 * rho * rho) / 5.0) - (rho * rho) / 5.0;
+        // Parallele P-Orbitale entlang der Bindungsachse (PPσ)
+        double poly = 1.0 - zeta_reduced * R + (1.0 / 3.0) * pow(zeta_reduced * R, 2.0);
+        result = N * exp_term * poly;
+    } else if (fabs(cos_angle) < 1e-10) {
+        // Perfekt senkrechte P-Orbitale (PPπ)
+        double poly = 1.0 + zeta_reduced * R + (1.0 / 3.0) * pow(zeta_reduced * R, 2.0);
+        result = N * exp_term * poly;
     } else {
-        // P-P overlap, different axes
-        poly_term = cos_angle * cos_angle * (1.0 + rho + (2.0 * rho * rho) / 5.0);
+        // Allgemeiner Fall mit beliebigem Winkel
+        double poly_sigma = 1.0 - zeta_reduced * R + (1.0 / 3.0) * pow(zeta_reduced * R, 2.0);
+        double poly_pi = 1.0 + zeta_reduced * R + (1.0 / 3.0) * pow(zeta_reduced * R, 2.0);
+
+        // cos²(θ) * PPσ-Überlappung + sin²(θ) * PPπ-Überlappung
+        double cos2 = cos_angle * cos_angle;
+        result = N * exp_term * (cos2 * poly_sigma + (1.0 - cos2) * poly_pi);
     }
 
-    // Final result
-    result = N * exp_term * poly_term;
-
-    // Debug output if requested
+    // Debug-Ausgabe wenn angefordert
     if (debug) {
         std::cout << "P-P overlap: zeta1=" << zeta1 << ", zeta2=" << zeta2
                   << ", R=" << R << ", cos_angle=" << cos_angle
                   << ", same_axis=" << (same_axis ? "true" : "false")
-                  << ", rho=" << rho << ", N=" << N
-                  << ", exp=" << exp_term
-                  << ", poly=" << poly_term
+                  << ", zeta_reduced=" << zeta_reduced
+                  << ", N=" << N << ", exp=" << exp_term
                   << ", result=" << result << std::endl;
     }
 

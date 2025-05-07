@@ -121,8 +121,8 @@ int ConfScanThread::execute()
         So using a different number of threads effects the number of finally accepted structures.
     */
 
-    m_driver->setReference(m_reference);
-    m_driver->setTarget(m_target);
+    // m_driver->setReference(m_reference);
+    // m_driver->setTarget(m_target);
     /*
     if(m_reference.Name() == "#201" && m_target.Name() == "#3")
     {

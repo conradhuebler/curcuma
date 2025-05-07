@@ -110,3 +110,141 @@ private:
 
     bool m_verbose = false;
 };
+
+#include <Eigen/Core>
+#include <Eigen/Eigenvalues>
+#include <chrono>
+#include <iostream>
+#include <omp.h>
+
+// Klasse für Leistungsmessung
+class Timer {
+private:
+    std::chrono::high_resolution_clock::time_point start_time;
+    std::string operation_name;
+
+public:
+    Timer(const std::string& name)
+        : operation_name(name)
+    {
+        start_time = std::chrono::high_resolution_clock::now();
+    }
+
+    ~Timer()
+    {
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+        std::cout << operation_name << ": " << duration.count() << " ms" << std::endl;
+    }
+};
+
+// Effizient parallelisierte Berechnung von S^(-1/2)
+inline Matrix calculateS12Efficient(const Matrix& S)
+{
+    Timer t("S^(-1/2) Berechnung");
+
+    // Maximale Thread-Anzahl ausgeben
+    int max_threads = omp_get_max_threads();
+    std::cout << "Verfügbare Threads: " << max_threads << std::endl;
+
+    // 1. Eigenwertzerlegung (kann nicht direkt mit OpenMP parallelisiert werden)
+    Eigen::SelfAdjointEigenSolver<Matrix> es(S);
+    const Matrix& U = es.eigenvectors();
+    const Vector& D = es.eigenvalues();
+
+    // 2. Diagonalmatrix D^(-1/2) berechnen - explizit parallelisiert
+    Vector D_sqrt_inv(D.size());
+
+#pragma omp parallel for
+    for (int i = 0; i < D.size(); ++i) {
+        D_sqrt_inv(i) = 1.0 / std::sqrt(std::max(D(i), 1e-12));
+    }
+
+    // 3. Erste Matrix-Multiplikation: Temp = U * D^(-1/2)
+    // Diese Multiplikation kann effizienter direkt implementiert werden
+    Matrix Temp(U.rows(), U.cols());
+
+#pragma omp parallel for
+    for (int i = 0; i < U.rows(); ++i) {
+        for (int j = 0; j < U.cols(); ++j) {
+            Temp(i, j) = U(i, j) * D_sqrt_inv(j);
+        }
+    }
+
+    // 4. Zweite Matrix-Multiplikation: S^(-1/2) = Temp * U^T
+    Matrix S_1_2(S.rows(), S.cols());
+
+#pragma omp parallel for
+    for (int i = 0; i < S_1_2.rows(); ++i) {
+        for (int j = 0; j < S_1_2.cols(); ++j) {
+            double sum = 0.0;
+            for (int k = 0; k < U.cols(); ++k) {
+                sum += Temp(i, k) * U(j, k); // Beachte: U^T(k,j) = U(j,k)
+            }
+            S_1_2(i, j) = sum;
+        }
+    }
+
+    return S_1_2;
+}
+
+// Effizient parallelisierte Diagonalisierung der Fock-Matrix
+inline void solveFockMatrix(const Matrix& S, const Matrix& H,
+    Vector& energies, Matrix& mo)
+{
+    Timer t("Gesamt-Diagonalisierung");
+
+    // 1. S^(-1/2) berechnen
+    Matrix S_1_2 = calculateS12Efficient(S);
+
+    {
+        Timer t2("Fock-Transformation & Diagonalisierung");
+
+        // 2. Transformierte Fock-Matrix berechnen: F' = S^(-1/2)^T * H * S^(-1/2)
+        // Dies können wir in zwei Schritten machen, um die Parallelisierung zu maximieren
+        Matrix temp(H.rows(), S_1_2.cols());
+
+#pragma omp parallel for
+        for (int i = 0; i < H.rows(); ++i) {
+            for (int j = 0; j < S_1_2.cols(); ++j) {
+                double sum = 0.0;
+                for (int k = 0; k < H.cols(); ++k) {
+                    sum += H(i, k) * S_1_2(k, j);
+                }
+                temp(i, j) = sum;
+            }
+        }
+
+        Matrix F_prime(S_1_2.rows(), temp.cols());
+
+#pragma omp parallel for
+        for (int i = 0; i < S_1_2.rows(); ++i) {
+            for (int j = 0; j < temp.cols(); ++j) {
+                double sum = 0.0;
+                for (int k = 0; k < S_1_2.cols(); ++k) {
+                    sum += S_1_2(k, i) * temp(k, j); // Beachten Sie: S_1_2^T(i,k) = S_1_2(k,i)
+                }
+                F_prime(i, j) = sum;
+            }
+        }
+
+        // 3. Diagonalisieren von F'
+        Eigen::SelfAdjointEigenSolver<Matrix> es_F(F_prime);
+        energies = es_F.eigenvalues();
+
+        // 4. Molekülorbitale berechnen: MO = S^(-1/2) * C'
+        const Matrix& C_prime = es_F.eigenvectors();
+        mo = Matrix(S_1_2.rows(), C_prime.cols());
+
+#pragma omp parallel for
+        for (int i = 0; i < mo.rows(); ++i) {
+            for (int j = 0; j < mo.cols(); ++j) {
+                double sum = 0.0;
+                for (int k = 0; k < S_1_2.cols(); ++k) {
+                    sum += S_1_2(i, k) * C_prime(k, j);
+                }
+                mo(i, j) = sum;
+            }
+        }
+    }
+}

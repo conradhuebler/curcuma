@@ -292,20 +292,31 @@ inline json CLI2Json(int argc, char** argv)
                 ++i;
             } else {
                 std::string next = argv[i + 1];
+                //       std::cout << "next: " << next << std::endl;
+
                 bool isNumber = true;
                 bool isVector = next.find("|") != std::string::npos || next.find(",") != std::string::npos || next.find(":") != std::string::npos;
-
+                //      std::cout << "isNumber: " << isNumber << std::endl
+                //                  << "isVector: " << isVector << std::endl;
+                if (isVector) {
+                    isNumber = false;
+                }
                 if (!isVector) {
                     try {
+                        // std::cout << "stod: " << std::stod(next) << std::endl;
                         std::stod(next);
+
                     } catch (const std::invalid_argument&) {
                         isNumber = false;
+                        isVector = true;
                     }
                 }
-
+                // std::cout << "isNumber: " << isNumber << std::endl
+                //             << "isVector: " << isVector << std::endl;
                 if (isNumber) {
                     key[current] = std::stod(next);
                 } else if (isVector) {
+                    //        std::cout << next << std::endl;
                     key[current] = next;
                 } else {
                     key[current] = next;

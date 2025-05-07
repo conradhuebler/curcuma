@@ -10,6 +10,7 @@ using json = nlohmann::json;
 
 void testCLI2Json()
 {
+
     // Test case 1: No arguments
     {
         char* argv[] = { (char*)"program" };
@@ -56,6 +57,7 @@ void testCLI2Json()
     {
         char* argv[] = { (char*)"program", (char*)"-keyword", (char*)"-flag", (char*)"1,2,3" };
         json result = CLI2Json(4, argv);
+        std::cout << result.dump(4) << std::endl; // Print the JSON for debugging
         assert(result["keyword"]["flag"] == "1,2,3");
     }
 
