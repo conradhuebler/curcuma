@@ -452,9 +452,9 @@ target_sources(Continuous
   PRIVATE
     src/core/qmdff_par.h
 )
-#add_test(NAME AAAbGal_mtemplate COMMAND AAAbGal mtemplate WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-#add_test(NAME AAAbGal_mhybrid COMMAND AAAbGal mhybrid WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
-#add_test(NAME AAAbGal_template COMMAND AAAbGal template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME AAAbGal_dtemplate COMMAND AAAbGal dtemplate WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME AAAbGal_free COMMAND AAAbGal free WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME AAAbGal_template COMMAND AAAbGal template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME AAAbGal_subspace COMMAND AAAbGal subspace WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 #add_test(NAME AAAbGal_incremental COMMAND AAAbGal incr WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 

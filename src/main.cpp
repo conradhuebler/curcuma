@@ -289,6 +289,12 @@ int main(int argc, char **argv) {
             auto* scan = new ConfScan(controller);
             scan->setFileName(argv[2]);
             scan->start();
+            int accepted = scan->AcceptedCount();
+            int reorder_success = scan->ReorderSuccessfull();
+            int reuse_count = scan->ReuseCount();
+            int skipped_count = scan->ReorderSkippedCount();
+            std::cout << accepted << " " << reorder_success << " " << reuse_count << " " << skipped_count << " " << std::endl;
+
             return 0;
 
         } else if (strcmp(argv[1], "-confstat") == 0) {

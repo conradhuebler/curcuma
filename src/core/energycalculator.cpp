@@ -31,6 +31,7 @@ namespace fs = std::filesystem;
 #endif
 
 #include <filesystem>
+#include <fstream>
 #include <functional>
 
 #include "forcefieldgenerator.h"
@@ -95,10 +96,16 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
         break;
 
     case 4:
+#ifdef USE_D3
         m_qminterface = new DFTD3Interface(controller);
         m_ecengine = [this](bool gradient, bool verbose) {
             this->CalculateD3(gradient, verbose);
         };
+#else
+        std::cout << "D3 was not included ..." << std::endl;
+        exit(1);
+#endif
+
         break;
 
     case 3:
@@ -237,7 +244,9 @@ void EnergyCalculator::setMolecule(const Mol& mol)
         break;
 
     case 4:
+#ifdef USE_D3
         static_cast<DFTD3Interface*>(m_qminterface)->InitialiseMolecule(mol.m_atoms);
+#endif
         break;
 
     case 3:

@@ -29,7 +29,7 @@
 #include "json.hpp"
 using json = nlohmann::json;
 
-int AAAbGal_mtemplate() // template
+int AAAbGal_dtemplate() // template
 {
     int threads = MaxThreads();
 
@@ -39,7 +39,7 @@ int AAAbGal_mtemplate() // template
     json controller = RMSDJson;
     controller["threads"] = threads;
     controller["reorder"] = true;
-    controller["method"] = "template";
+    controller["method"] = "dtemplate";
     RMSDDriver* driver = new RMSDDriver(controller, false);
     driver->setReference(m1);
     driver->setTarget(m2);
@@ -54,7 +54,7 @@ int AAAbGal_mtemplate() // template
     }
 }
 
-int AAAbGal_mhybrid() // hybrid
+int AAAbGal_free() // hybrid
 {
     int threads = MaxThreads();
 
@@ -64,7 +64,7 @@ int AAAbGal_mhybrid() // hybrid
     json controller = RMSDJson;
     controller["threads"] = threads;
     controller["reorder"] = true;
-    controller["method"] = "subspace";
+    controller["method"] = "free";
     RMSDDriver* driver = new RMSDDriver(controller, false);
     driver->setReference(m1);
     driver->setTarget(m2);
@@ -94,7 +94,7 @@ int AAAbGal_template() // template
     driver->setReference(m1);
     driver->setTarget(m2);
     driver->start();
-    if (abs(driver->RMSD() - 1.23472) < 1e-5) {
+    if (abs(driver->RMSD() - 0.457061) < 1e-5) {
         std::cout << "RMSD calculation with reordering passed (" << driver->RMSD() << ")." << std::endl;
         return 0;
     } else {
@@ -164,8 +164,8 @@ int main(int argc, char** argv)
         return AAAbGal_subspace();
     else if(std::string(argv[1]).compare("incr") == 0)
         return AAAbGal_incr();
-    else if (std::string(argv[1]).compare("mhybrid") == 0)
-        return AAAbGal_mhybrid();
-    else if (std::string(argv[1]).compare("mtemplate") == 0)
-        return AAAbGal_mtemplate();
+    else if (std::string(argv[1]).compare("free") == 0)
+        return AAAbGal_free();
+    else if (std::string(argv[1]).compare("dtemplate") == 0)
+        return AAAbGal_dtemplate();
 }

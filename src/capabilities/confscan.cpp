@@ -50,15 +50,6 @@ int ConfScanThread::execute()
     m_driver->setReference(m_reference);
     m_driver->setTarget(m_target);
 
-    bool print = false;
-    /*
-    if(m_target.Name() == "#3")
-    {
-        m_target.print_geom();
-        //m_driver->TargetAligned().print_geom();
-        print = true;
-    }
-    */
     m_keep_molecule = true;
     m_break_pool = false;
     m_reorder_worked = false;
@@ -121,20 +112,6 @@ int ConfScanThread::execute()
         So using a different number of threads effects the number of finally accepted structures.
     */
 
-    // m_driver->setReference(m_reference);
-    // m_driver->setTarget(m_target);
-    /*
-    if(m_reference.Name() == "#201" && m_target.Name() == "#3")
-    {
-        m_driver->setSilent(false);
-        std::cout << "Debugging" << std::endl;
-        m_target.print_geom();
-        m_driver->TargetAligned().print_geom();
-
-    }
-    else
-        m_driver->setSilent(true);
-    */
     m_driver->start();
     m_rmsd = m_driver->RMSD();
 
@@ -156,13 +133,7 @@ int ConfScanThread::execute()
         else
             std::cout << std::endl;
     }
-    /*
-    if(print)
-    {
-        m_target.print_geom();
-        m_driver->setSilent(true);
-    }
-    */
+
     m_driver->clear();
     return 0;
 }
@@ -947,11 +918,13 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
     std::string laststring;
     m_maxmol = m_ordered_list.size();
 
-    json rmsd = m_controller;
-    rmsd["silent"] = true;
-    rmsd["check"] = CheckConnections();
-    rmsd["heavy"] = m_heavy;
-    rmsd["noreorder"] = true;
+    json rmsd_t = m_controller;
+    rmsd_t["silent"] = true;
+    rmsd_t["check"] = CheckConnections();
+    rmsd_t["heavy"] = m_heavy;
+    rmsd_t["noreorder"] = true;
+    json rmsd;
+    rmsd["rmsd"] = rmsd_t;
 
     std::vector<ConfScanThreadNoReorder*> threads;
     std::vector<std::vector<int>> rules;
@@ -1137,11 +1110,13 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
     m_reorder_successfull_count += m_reordered_worked;
     m_skipped_count += m_skiped;
     m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_reused = 0, m_skiped = 0;
-    json rmsd = m_controller["confscan"];
-    rmsd["silent"] = true;
-    rmsd["reorder"] = true;
-    rmsd["threads"] = 1;
-    rmsd["method"] = m_RMSDmethod;
+    json rmsd_t = m_controller["confscan"];
+    json rmsd;
+    rmsd_t["silent"] = true;
+    rmsd_t["reorder"] = true;
+    rmsd_t["threads"] = 1;
+    rmsd_t["method"] = m_RMSDmethod;
+    rmsd["rmsd"] = rmsd_t;
     std::vector<Molecule*> cached;
     if (reset)
         cached = m_all_structures;
@@ -1179,7 +1154,7 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
         for (int t = 0; t < threads.size(); ++t) {
             if (CheckStop()) {
                 fmt::print("\n\n** Found stop file, will end now! **\n\n");
-                // TriggerWriteRestart();
+                TriggerWriteRestart();
                 return;
             }
             const Molecule* mol2 = threads[t]->Reference();
@@ -1358,6 +1333,7 @@ ConfScanThread* ConfScan::addThread(const Molecule* reference, const json& confi
     thread->setReference(*reference);
     thread->setEarlyBreak(m_earlybreak);
     thread->setVerbose(m_analyse);
+    // thread->setVerbose(false);
     return thread;
 }
 

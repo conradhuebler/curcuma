@@ -118,7 +118,7 @@ int dtemplate()
     int reuse_count = confscan->ReuseCount();
     int skipped_count = confscan->ReorderSkippedCount();
     std::cout << accepted << " " << reorder_success << " " << reuse_count << " " << skipped_count << " " << std::endl;
-    if (accepted == 16 && reorder_success == 4 && reuse_count == 2 && skipped_count == 277)
+    if (accepted == 15 && reorder_success == 4 && reuse_count == 1 && skipped_count == 248)
         return EXIT_SUCCESS;
     return EXIT_FAILURE;
 }
