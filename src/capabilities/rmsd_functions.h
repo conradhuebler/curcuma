@@ -30,24 +30,47 @@ namespace RMSDFunctions {
 
 /*! \brief Calculate the best fit rotation of two sets of coordinates, both have to be centered already */
 
-inline Eigen::Matrix3d BestFitRotation(const Geometry& reference, const Geometry& target, int factor = 1)
+__attribute__((optimize("no-tree-vectorize"))) inline Eigen::Matrix3d BestFitRotation(const Geometry& reference, const Geometry& target, int factor = 1)
 {
     /* The rmsd kabsch algorithmn was adopted from here:
      * https://github.com/oleg-alexandrov/projects/blob/master/eigen/Kabsch.cpp
      * The specific git commit was
      * https://github.com/oleg-alexandrov/projects/blob/e7b1eb7a4d83d41af563c24859072e4ddd9b730b/eigen/Kabsch.cpp
      */
-    Eigen::MatrixXd Cov = reference.transpose() * target;
-    Eigen::JacobiSVD<Eigen::MatrixXd> svd(Cov, Eigen::ComputeThinU | Eigen::ComputeThinV);
+    // Direkte Berechnung der Kovarianzmatrix ohne temporäre Matrizen
+    Eigen::Matrix3d Cov;
+    Cov.setZero();
 
-    double d = (svd.matrixV() * svd.matrixU().transpose()).determinant();
-    if (d > 0)
-        d = factor * 1.0;
-    else
-        d = factor * -1.0;
-    Eigen::Matrix3d I = Eigen::Matrix3d::Identity(3, 3);
-    I(2, 2) = d;
-    return svd.matrixV() * I * svd.matrixU().transpose();
+    const int n = reference.rows();
+    for (int i = 0; i < n; ++i) {
+        // Verwende Eigen's Vektorisierung für diese Operation
+        Cov += reference.row(i).transpose() * target.row(i);
+    }
+
+    // Sichere Determinantenberechnung für numerische Stabilität
+    double detCov = Cov.determinant();
+
+    // Spezieller Fall: Wenn Cov nahe an einer Nullmatrix ist
+    if (std::abs(detCov) < 1e-10) {
+        // Rückgabe einer Matrix, die nah an der Identität ist
+        return factor * Eigen::Matrix3d::Identity();
+    }
+
+    // Optimierte SVD für 3x3 Matrix
+    Eigen::JacobiSVD<Eigen::Matrix3d> svd(Cov, Eigen::ComputeFullU | Eigen::ComputeFullV);
+
+    // Direkte Konstruktion der Rotationsmatrix
+    Eigen::Matrix3d V = svd.matrixV();
+    Eigen::Matrix3d U = svd.matrixU();
+
+    // Handhabung von Reflexionen für eine echte Rotationsmatrix
+    double d = (V * U.transpose()).determinant();
+    if (d < 0) {
+        // Nur die letzte Spalte von V modifizieren
+        V.col(2) *= -1.0;
+    }
+
+    return factor * V * U.transpose();
 }
 
 inline Eigen::Matrix3d BestFitRotation(const Molecule& reference, const Molecule& target, int factor = 1)
