@@ -55,6 +55,13 @@ public:
 
     void start() override;
 
+    void setEnergiesWithDegeneracy(const std::vector<double>& energies,
+        const std::vector<int>& degeneracies)
+    {
+        m_energies = energies;
+        m_degeneracies = degeneracies;
+    }
+
 private:
     inline nlohmann::json WriteRestartInformation() override { return json(); }
     inline bool LoadRestartInformation() override { return true; }
@@ -72,13 +79,15 @@ private:
     double m_print_threshold{ 0.5 };
     std::string m_method{ "none" };
     json m_parameter;
+    std::vector<int> m_degeneracies; // Degeneracy of each conformer
 
-    // Statistics results
     struct Statistics {
         double lowest_energy{ 0.0 };
         double free_energy_contribution{ 0.0 };
         double entropy_contribution{ 0.0 };
-        std::vector<std::tuple<double, double, double>> conformer_data; // diff_energy, population, cumulative
+        // Extended to include degeneracy
+        std::vector<std::tuple<double, double, double, int>> conformer_data;
+        // (diff_energy, population, cumulative, degeneracy)
     };
     Statistics m_stats;
 };

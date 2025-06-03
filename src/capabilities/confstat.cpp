@@ -68,18 +68,36 @@ void ConfStat::calculateStatistics()
     if (m_energies.empty())
         return;
 
-    std::sort(m_energies.begin(), m_energies.end());
+    // If no degeneracies provided, assume all are 1
+    if (m_degeneracies.empty()) {
+        m_degeneracies.resize(m_energies.size(), 1);
+    }
+
+    // Sort energies and maintain degeneracy correlation
+    std::vector<size_t> indices(m_energies.size());
+    std::iota(indices.begin(), indices.end(), 0);
+    std::sort(indices.begin(), indices.end(),
+        [this](size_t a, size_t b) { return m_energies[a] < m_energies[b]; });
+
+    std::vector<double> sorted_energies;
+    std::vector<int> sorted_degeneracies;
+    for (size_t idx : indices) {
+        sorted_energies.push_back(m_energies[idx]);
+        sorted_degeneracies.push_back(m_degeneracies[idx]);
+    }
+    m_energies = sorted_energies;
+    m_degeneracies = sorted_degeneracies;
 
     const double RT = R * m_temp;
     const double hartree_to_kjmol = 2625.5;
 
-    // Calculate partition function Q
+    // Calculate partition function Q including degeneracy
     double Q = 0.0;
-    for (const double energy : m_energies) {
-        double deltaE = (energy - m_energies[0]) * hartree_to_kjmol;
+    for (size_t i = 0; i < m_energies.size(); ++i) {
+        double deltaE = (m_energies[i] - m_energies[0]) * hartree_to_kjmol;
         if (deltaE > m_cutoff)
             continue;
-        Q += std::exp(-deltaE * 1000 / RT);
+        Q += m_degeneracies[i] * std::exp(-deltaE * 1000 / RT);
     }
 
     // Calculate populations and statistics
@@ -88,28 +106,28 @@ void ConfStat::calculateStatistics()
     m_stats.lowest_energy = m_energies[0];
     m_stats.conformer_data.clear();
 
-    for (const double energy : m_energies) {
-        double deltaE = (energy - m_energies[0]) * hartree_to_kjmol;
+    for (size_t i = 0; i < m_energies.size(); ++i) {
+        double deltaE = (m_energies[i] - m_energies[0]) * hartree_to_kjmol;
         if (deltaE > m_cutoff)
             continue;
 
-        // Boltzmann population
-        double p_i = std::exp(-deltaE * 1000 / RT) / Q;
+        // Boltzmann population including degeneracy
+        double p_i = m_degeneracies[i] * std::exp(-deltaE * 1000 / RT) / Q;
 
         // Entropy contribution
-        if (p_i > 0) { // Avoid log(0)
-            S -= p_i * std::log(p_i);
+        if (p_i > 0) {
+            S -= p_i * std::log(p_i / m_degeneracies[i]); // Modified for degeneracy
         }
 
         cumulative += p_i * 100.0;
         m_stats.conformer_data.emplace_back(
-            energy - m_energies[0], // deltaE in Hartree
+            m_energies[i] - m_energies[0], // deltaE in Hartree
             p_i * 100.0, // population in %
-            cumulative // cumulative population in %
+            cumulative, // cumulative population in %
+            m_degeneracies[i] // degeneracy
         );
     }
 
-    // Final thermodynamic quantities
     m_stats.free_energy_contribution = -RT * std::log(Q) / 1000.0; // kJ/mol
     m_stats.entropy_contribution = RT * S / 1000.0; // kJ/mol
 }
@@ -125,15 +143,15 @@ void ConfStat::printStatistics() const
 
     fmt::print("Lowest energy: {:.5f} Eh\n\n", m_stats.lowest_energy);
 
-    fmt::print("{:^5} | {:^15} | {:^15} | {:^12}\n",
-        "Conf", "ΔE (kJ/mol)", "Population (%)", "Cumulative (%)");
-    fmt::print("----------------------------------------------------------\n");
+    fmt::print("{:^5} | {:^15} | {:^15} | {:^12} | {:^10}\n",
+        "Conf", "ΔE (kJ/mol)", "Population (%)", "Cumulative (%)", "Degeneracy");
+    fmt::print("--------------------------------------------------------------\n");
 
     int conf_number = 1;
-    for (const auto& [diff, pop, cum] : m_stats.conformer_data) {
+    for (const auto& [diff, pop, cum, deg] : m_stats.conformer_data) {
         if (pop >= m_print_threshold) {
-            fmt::print("{:5d} | {:15.2f} | {:15.2f} | {:12.2f}\n",
-                conf_number, diff * 2625.5, pop, cum);
+            fmt::print("{:5d} | {:15.2f} | {:15.2f} | {:12.2f} | {:10d}\n",
+                conf_number, diff * 2625.5, pop, cum, deg);
         }
         conf_number++;
     }
