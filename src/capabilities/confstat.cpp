@@ -1,6 +1,7 @@
 /*
  * <Statistics of conformers >
- * Copyright (C) 2020 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Contribution by AI Copilot Claude 3.5 Sonnet
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,6 +18,7 @@
  *
  */
 
+#include "src/core/energycalculator.h"
 #include "src/core/fileiterator.h"
 
 #include "confstat.h"
@@ -29,66 +31,115 @@ ConfStat::ConfStat(const json& controller, bool silent)
 
 void ConfStat::LoadControlJson()
 {
-    // m_cutoff = Json2KeyWord<double>(m_defaults, "Cutoff");
-    // m_temp = Json2KeyWord<double>(m_defaults, "Temp");
+    m_cutoff = Json2KeyWord<double>(m_defaults, "Cutoff");
+    m_temp = Json2KeyWord<double>(m_defaults, "Temp");
+    m_method = Json2KeyWord<std::string>(m_defaults, "Method");
+    m_parameter = Json2KeyWord<json>(m_defaults, "Parameter");
+    m_print_threshold = Json2KeyWord<double>(m_defaults, "Threshold");
 }
 
 void ConfStat::start()
 {
-    FileIterator file(m_filename);
-    while (!file.AtEnd()) {
-        Molecule* mol = new Molecule(file.Next());
-        double energy = mol->Energy();
-        /*if (std::abs(energy) < 1e-5 || m_gfn != -1) {
-            XTBInterface interface; // As long as xtb leaks, we have to put it heare
-                // I might not leak really, but was unable to clear everything
-            if (m_gfn == -1)
-                m_gfn = 2;
-            interface.InitialiseMolecule(mol);
-            energy = interface.GFNCalculation(m_gfn, 0);
-            //interface.clear();
-        }*/
-        m_energies.push_back(energy);
-        /*
-        m_ordered_list.insert(std::pair<double, int>(energy, molecule));
-        molecule++;
-        if (m_noname)
-            mol->setName(NamePattern(molecule));
-        mol->CalculateRotationalConstants();
-        std::pair<std::string, Molecule*> pair(mol->Name(), mol);
-        m_molecules.push_back(pair);
-        */
+    if (!m_filename.empty()) {
+        FileIterator file(m_filename);
+        m_energies.clear();
+
+        while (!file.AtEnd()) {
+            auto mol = std::make_unique<Molecule>(file.Next());
+            double energy = mol->Energy();
+
+            if (m_method != "none") {
+                EnergyCalculator calculator(m_method, m_controller);
+                calculator.setParameter(m_parameter);
+                calculator.setMolecule(mol->getMolInfo());
+                energy = calculator.CalculateEnergy();
+            }
+
+            m_energies.push_back(energy);
+        }
     }
 
-    if (m_energies.size() == 0)
+    calculateStatistics();
+    printStatistics();
+}
+
+void ConfStat::calculateStatistics()
+{
+    if (m_energies.empty())
         return;
 
     std::sort(m_energies.begin(), m_energies.end());
-    double factor = -1 * 1000 * 2625.5 / (R * m_temp);
-    double sum = 0;
-    double max = 0;
-    double CR = 0;
-    double consistency = 0.0;
-    for (int i = 0; i < m_energies.size(); ++i) {
-        double diff = m_energies[i] - m_energies[0];
-        double pi = exp((diff)*factor);
-        max += pi;
+
+    const double RT = R * m_temp;
+    const double hartree_to_kjmol = 2625.5;
+
+    // Calculate partition function Q
+    double Q = 0.0;
+    for (const double energy : m_energies) {
+        double deltaE = (energy - m_energies[0]) * hartree_to_kjmol;
+        if (deltaE > m_cutoff)
+            continue;
+        Q += std::exp(-deltaE * 1000 / RT);
     }
-    printf("\n\nLowest energy is %8.5f Eh!\n\n", m_energies[0]);
-    printf("   Diff E (in Eh and kJ/mol) |Intermediates    | Population\n\n");
-    for (int i = 0; i < m_energies.size(); ++i) {
-        double diff = m_energies[i] - m_energies[0];
-        double tmp = exp(diff * factor);
-        double pi = exp(-1 * (diff)*2625.5 * 1000 / R / m_temp) / max;
-        CR -= pi * log(pi);
-        sum += tmp;
-        if (pi * 100 >= m_print_threshold || i < 10)
-            printf("%8.5f %8.2f | %8.5f %8.5f %8.5f | %8.5f\n", diff, (diff)*2625.5, tmp, sum, -R * m_temp * log(1 + sum) / 1000.0, pi * 100);
-        // consistency +=  pi/max * 100;
-        // std::cout << pi << std::endl;
-        //std::cout << diff << " " << (diff)*2625.5 << " " << tmp << " " << sum << " " << -R * m_temp * log(1 + sum) / 1000.0 << " " << exp(-1 * (diff)*2625.5 * 1000 / R / m_temp) / max * 100 << " %" << std::endl;
+
+    // Calculate populations and statistics
+    double S = 0.0;
+    double cumulative = 0.0;
+    m_stats.lowest_energy = m_energies[0];
+    m_stats.conformer_data.clear();
+
+    for (const double energy : m_energies) {
+        double deltaE = (energy - m_energies[0]) * hartree_to_kjmol;
+        if (deltaE > m_cutoff)
+            continue;
+
+        // Boltzmann population
+        double p_i = std::exp(-deltaE * 1000 / RT) / Q;
+
+        // Entropy contribution
+        if (p_i > 0) { // Avoid log(0)
+            S -= p_i * std::log(p_i);
+        }
+
+        cumulative += p_i * 100.0;
+        m_stats.conformer_data.emplace_back(
+            energy - m_energies[0], // deltaE in Hartree
+            p_i * 100.0, // population in %
+            cumulative // cumulative population in %
+        );
     }
-    std::cout << "Finally add " << -R * m_temp * log(sum) / 1000 << " kJ/mol to the free enthalpy / energy !" << std::endl;
-    std::cout << "Scr " << R * CR << " J/mol*K to the entropy = " << -1 * CR * R * m_temp / 1000 << " kJ/mol !" << std::endl;
-    // std::cout << consistency << std::endl;
+
+    // Final thermodynamic quantities
+    m_stats.free_energy_contribution = -RT * std::log(Q) / 1000.0; // kJ/mol
+    m_stats.entropy_contribution = RT * S / 1000.0; // kJ/mol
+}
+
+void ConfStat::printStatistics() const
+{
+    fmt::print("\nConformer Statistics Analysis\n");
+    fmt::print("===========================\n");
+    fmt::print("Parameters:\n");
+    fmt::print("  Temperature: {:.2f} K\n", m_temp);
+    fmt::print("  Energy cutoff: {:.1f} kJ/mol\n", m_cutoff);
+    fmt::print("  Method: {}\n\n", m_method);
+
+    fmt::print("Lowest energy: {:.5f} Eh\n\n", m_stats.lowest_energy);
+
+    fmt::print("{:^5} | {:^15} | {:^15} | {:^12}\n",
+        "Conf", "ΔE (kJ/mol)", "Population (%)", "Cumulative (%)");
+    fmt::print("----------------------------------------------------------\n");
+
+    int conf_number = 1;
+    for (const auto& [diff, pop, cum] : m_stats.conformer_data) {
+        if (pop >= m_print_threshold) {
+            fmt::print("{:5d} | {:15.2f} | {:15.2f} | {:12.2f}\n",
+                conf_number, diff * 2625.5, pop, cum);
+        }
+        conf_number++;
+    }
+
+    fmt::print("\nThermodynamic Contributions\n");
+    fmt::print("-------------------------\n");
+    fmt::print("Free Energy: {:.2f} kJ/mol\n", m_stats.free_energy_contribution);
+    fmt::print("Entropy (T*S): {:.2f} kJ/mol\n", m_stats.entropy_contribution);
 }

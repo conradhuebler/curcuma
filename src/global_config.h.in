@@ -4,6 +4,7 @@
 #cmakedefine USE_TBLITE
 #cmakedefine USE_D3
 #cmakedefine USE_D4
+#cmakedefine USE_ULYSSES
 #cmakedefine USE_Plumed
 #cmakedefine WriteMoreInfo
 

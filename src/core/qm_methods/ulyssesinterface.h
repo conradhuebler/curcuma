@@ -33,7 +33,9 @@ static json UlyssesSettings{
     { "mult", 1 }
 
 };
+#ifdef USE_ULYSSES
 class UlyssesObject;
+#endif
 
 class UlyssesInterface : public QMInterface {
 public:
@@ -49,7 +51,9 @@ public:
 
 private:
     Mol m_mol;
+#ifdef USE_ULYSSES
     UlyssesObject* m_ulysses = nullptr;
+#endif
 
     double m_Tele = 300;
     double m_SCFmaxiter = 100;

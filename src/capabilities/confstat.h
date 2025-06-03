@@ -1,6 +1,7 @@
 /*
  * <Statistics of conformers >
- * Copyright (C) 2020 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ *  Contribution by AI Copilot Claude 3.5 Sonnet
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -23,45 +24,61 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "curcumamethod.h"
+#include "src/core/energycalculator.h"
+#include <fmt/format.h>
 
 static json ConfStatJson{
-    "Cutoff", 10,
-    "Temp", 298.5,
-    "Threshold", 0.5
+    { "Cutoff", 10.0 }, // Energy cutoff in kJ/mol
+    { "Temp", 298.15 }, // Temperature in Kelvin
+    { "Threshold", 0.5 }, // Population threshold for printing
+    { "Method", "none" }, // Energy calculation method
+    { "Parameter", json::object() } // Additional parameters for energy calculation
 };
 
 class ConfStat : public CurcumaMethod {
 public:
     ConfStat(const json& controller = ConfStatJson, bool silent = true);
-    void setFileName(const std::string& filename)
-    {
-        m_filename = filename;
-    }
 
-    void start() override; // TODO make pure virtual and move all main action here
+    // Set input filename
+    void setFileName(const std::string& filename) { m_filename = filename; }
+
+    // Direct energy vector input
+    void setEnergies(const std::vector<double>& energies) { m_energies = energies; }
+
+    // Calculate population statistics
+    void calculateStatistics();
+
+    void start() override;
 
 private:
-    /* Lets have this for all modules */
     inline nlohmann::json WriteRestartInformation() override { return json(); }
-
-    /* Lets have this for all modules */
     inline bool LoadRestartInformation() override { return true; }
-
     inline StringList MethodName() const override { return { std::string("ConfStat") }; }
 
-    /* Lets have all methods read the input/control file */
-    void ReadControlFile() override{};
-
-    /* Read Controller has to be implemented for all */
+    void ReadControlFile() override {};
     void LoadControlJson() override;
+    void printStatistics() const;
 
+    // Member variables with m_ prefix
     std::string m_filename;
     std::vector<double> m_energies;
-    double m_temp = 298.5;
-    double m_cutoff = 10;
-    double m_print_threshold = 0.5;
+    double m_temp{ 298.15 };
+    double m_cutoff{ 10.0 }; // in kJ/mol
+    double m_print_threshold{ 0.5 };
+    std::string m_method{ "none" };
+    json m_parameter;
+
+    // Statistics results
+    struct Statistics {
+        double lowest_energy{ 0.0 };
+        double free_energy_contribution{ 0.0 };
+        double entropy_contribution{ 0.0 };
+        std::vector<std::tuple<double, double, double>> conformer_data; // diff_energy, population, cumulative
+    };
+    Statistics m_stats;
 };

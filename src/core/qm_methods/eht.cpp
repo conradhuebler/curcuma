@@ -23,6 +23,8 @@
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
+#include "ParallelEigenSolver.hpp"
+
 #include <set>
 #include <vector>
 
@@ -144,66 +146,9 @@ bool EHT::InitialiseMolecule()
     return true;
 }
 
-// Zu Beginn des Programms, um die Parallelisierung zu kontrollieren
-#include <Eigen/Core>
-
-void configureEigenParallelization()
-{
-    // 1. Aktuelle Thread-Anzahl überprüfen
-    int current_threads = Eigen::nbThreads();
-    std::cout << "Eigen verwendet derzeit " << current_threads << " Threads." << std::endl;
-
-    // 2. Thread-Anzahl explizit auf maximale verfügbare Anzahl setzen
-    int max_threads = omp_get_max_threads();
-    Eigen::setNbThreads(max_threads);
-    std::cout << "Eigen verwendet jetzt " << Eigen::nbThreads() << " Threads." << std::endl;
-
-    // 3. Parallelisierungsschwellenwert senken (Standardwert ist oft zu hoch)
-    // Dies kann erhebliche Auswirkungen auf die Performance haben
-    // Eigen::internal::set_is_malloc_allowed(true);
-}
-
-void calculateS12Parallel(const Matrix& S, Matrix& S_1_2)
-{
-    // Eigenwertzerlegung (nicht direkt parallelisierbar)
-    Eigen::SelfAdjointEigenSolver<Matrix> es(S);
-    const Matrix& evecs = es.eigenvectors();
-    const Eigen::VectorXd& evals = es.eigenvalues();
-
-    // Parallelisierte Berechnung der Diagonalmatrix D^(-1/2)
-    Eigen::VectorXd eval_sqrt_inv(evals.size());
-
-#pragma omp parallel for schedule(dynamic)
-    for (int i = 0; i < evals.size(); ++i) {
-        eval_sqrt_inv(i) = 1.0 / std::sqrt(std::max(evals(i), 1e-10));
-    }
-
-    // Manuelle parallelisierte Matrix-Multiplikation statt Eigen
-    Matrix temp(evecs.rows(), evecs.cols());
-
-#pragma omp parallel for schedule(dynamic)
-    for (int i = 0; i < evecs.rows(); ++i) {
-        for (int j = 0; j < evecs.cols(); ++j) {
-            temp(i, j) = evecs(i, j) * eval_sqrt_inv(j);
-        }
-    }
-
-    // Letzte Multiplikation - ebenfalls manuell parallelisiert
-    S_1_2 = Matrix::Zero(S.rows(), S.cols());
-
-#pragma omp parallel for schedule(dynamic)
-    for (int i = 0; i < S_1_2.rows(); ++i) {
-        for (int j = 0; j < S_1_2.cols(); ++j) {
-            for (int k = 0; k < temp.cols(); ++k) {
-                S_1_2(i, j) += temp(i, k) * evecs(j, k);
-            }
-        }
-    }
-}
-
 double EHT::Calculation(bool gradient, bool verbose)
 {
-    configureEigenParallelization();
+    m_threads = 1;
     double energy = 0;
     m_verbose = verbose;
     if (gradient) {
@@ -222,7 +167,8 @@ double EHT::Calculation(bool gradient, bool verbose)
         std::cout << "Making overlap matrix..." << std::endl;
     }
     Matrix S = MakeOverlap(basisset);
-    /*if (m_verbose)
+    /*
+    if (m_verbose)
         std::cout << S << std::endl;
         */
     if (m_verbose)
@@ -233,13 +179,18 @@ double EHT::Calculation(bool gradient, bool verbose)
                   << std::endl;
         std::cout << H << std::endl;
     }*/
+    std::cout << m_num_electrons << std::endl;
     if (m_verbose)
         std::cout << "Diagonalizing Fock matrix parallel..." << std::endl;
 
-    Matrix S_1_2 = Matrix::Zero(basisset.size(), basisset.size());
-    calculateS12Parallel(S, S_1_2);
-    if (m_verbose)
-        std::cout << "Diagonalizing Fock matrix using standard way..." << std::endl;
+    ParallelEigenSolver solver(500, 128, 1e-10, true);
+    solver.setThreadCount(m_threads);
+    Eigen::MatrixXd mo;
+    // solver.setDebug(true);
+    bool success = solver.solve(S, H, m_energies, mo, m_threads, false);
+    m_mo = mo;
+    /*
+
     Eigen::SelfAdjointEigenSolver<Matrix> es_S(S);
 
     // Direkte Berechnung von S^(-1/2) aus den Eigenwerten/Eigenvektoren
@@ -256,7 +207,7 @@ double EHT::Calculation(bool gradient, bool verbose)
     }
 
     // Berechnung von S^(-1/2)
-    S_1_2 = U * D_1_2 * U.transpose();
+    Matrix S_1_2 = U * D_1_2 * U.transpose();
 
     // Berechnung der transformierten Fock-Matrix
     Matrix F = S_1_2.transpose() * H * S_1_2;
@@ -267,17 +218,20 @@ double EHT::Calculation(bool gradient, bool verbose)
     // Extrahieren der Eigenwerte und Eigenvektoren
     m_energies = es_F.eigenvalues();
     m_mo = S_1_2 * es_F.eigenvectors(); // Rücktransformation der MOs
+    */
+    std::cout << m_energies << std::endl;
+
     if (m_verbose) {
         std::cout << "\n\nOrbitalenergien und Besetzung:\n";
 
         // Orbital mit niedrigster Energie (erstes Orbital)
         std::cout << "\nOrbital mit niedrigster Energie:\n";
-        std::cout << "Orbital 1: " << es_F.eigenvalues()(0) << " eV (Besetzung: 2)\n";
+        std::cout << "Orbital 1: " << m_energies(0) << " eV (Besetzung: 2)\n";
 
         // HOMO-LUMO Gap und Umgebung (5 Orbitale vor HOMO und 5 nach LUMO)
         int homo_index = m_num_electrons / 2 - 1;
         int lumo_index = homo_index + 1;
-        double homo_lumo_gap = es_F.eigenvalues()(lumo_index) - es_F.eigenvalues()(homo_index);
+        double homo_lumo_gap = 0; // m_mo.eigenvalues()(lumo_index) - m_mo.eigenvalues()(homo_index);
 
         std::cout << "\nHOMO-LUMO Gap: " << homo_lumo_gap << " eV\n\n";
 
@@ -285,7 +239,7 @@ double EHT::Calculation(bool gradient, bool verbose)
         int start_homo = std::max(0, homo_index - 4);
         std::cout << "Orbitale um HOMO:\n";
         for (int i = start_homo; i <= homo_index; ++i) {
-            std::cout << "Orbital " << i + 1 << ": " << es_F.eigenvalues()(i)
+            std::cout << "Orbital " << i + 1 << ": " << m_energies(i)
                       << " eV (Besetzung: " << (i < m_num_electrons / 2 ? 2 : 0) << ")";
             if (i == homo_index)
                 std::cout << " [HOMO]";
@@ -293,10 +247,10 @@ double EHT::Calculation(bool gradient, bool verbose)
         }
 
         // 5 Orbitale nach LUMO (oder weniger, falls nicht genug vorhanden)
-        int end_lumo = std::min(lumo_index + 4, int(es_F.eigenvalues().size()) - 1);
+        int end_lumo = std::min(lumo_index + 4, int(m_energies.size()) - 1);
         std::cout << "\nOrbitale um LUMO:\n";
         for (int i = lumo_index; i <= end_lumo; ++i) {
-            std::cout << "Orbital " << i + 1 << ": " << es_F.eigenvalues()(i)
+            std::cout << "Orbital " << i + 1 << ": " << m_energies(i)
                       << " eV (Besetzung: " << (i < m_num_electrons / 2 ? 2 : 0) << ")";
             if (i == lumo_index)
                 std::cout << " [LUMO]";
@@ -308,7 +262,8 @@ double EHT::Calculation(bool gradient, bool verbose)
     if (m_verbose)
         std::cout << "Total electronic energy = " << energy << " Eh." << std::endl;
 
-    solveFockMatrix(S, H, m_energies, m_mo);
+    // solveFockMatrix(S, H, m_energies, m_mo);
+
     return energy;
 
     // std::cout << diag_F.eigenvalues().sum();

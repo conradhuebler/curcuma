@@ -109,6 +109,7 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
         break;
 
     case 3:
+#ifdef USE_ULYSSES
         m_qminterface = new UlyssesInterface(controller);
         m_qminterface->setMult(m_mult);
 
@@ -116,7 +117,11 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
         m_ecengine = [this](bool gradient, bool verbose) {
             this->CalculateUlysses(gradient, verbose);
         };
-    break;
+#else
+        std::cout << "Ulysses was not included ..." << std::endl;
+        exit(1);
+#endif
+        break;
 
     case 2:
 #ifdef USE_XTB

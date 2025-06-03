@@ -1,6 +1,6 @@
 /*
  * < C++ Abstract Class for QM Interface >
- * Copyright (C) 2020 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,8 +21,28 @@
 
 #include "src/core/global.h"
 
+static json QMInterfaceJson{
+    { "threads", 1 },
+    { "charge", 0 },
+    { "muli", 1 },
+    { "solver", "eigen" },
+    { "method", "none" },
+    { "basis", "sto-3g" },
+    { "verbose", false },
+    { "gradient", false },
+    { "maxiter", 100 },
+    { "scfconv", 1e-6 },
+    { "scfconvgrad", 1e-6 },
+    { "scfconvenergy", 1e-6 },
+    { "scfconvdensity", 1e-6 },
+    { "scfconvgradient", 1e-6 },
+    { "scfconvenergygradient", 1e-6 }
+};
+
 class QMInterface {
 public:
+    QMInterface() = default;
+
     virtual ~QMInterface() = default;
 
     virtual bool InitialiseMolecule(const Mol& molecule)

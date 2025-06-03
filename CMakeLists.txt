@@ -6,6 +6,9 @@ option (USE_XTB
 
 option (USE_TBLITE
     "Compile TBLITE and use as library" ON)
+ 
+option(USE_ULYSSES
+    "Compile Ulysses and use as library" ON)
 
 option (USE_D3
     "Compile cpp-D4 and use as library" ON)
@@ -210,8 +213,6 @@ set(curcuma_core_SRC
         src/core/energycalculator.cpp
         src/core/molecule.cpp
         src/core/fileiterator.cpp
-        #src/core/eigen_uff.cpp
-        #src/core/qmdff.cpp
         src/core/forcefieldthread.cpp
         src/core/forcefield.cpp
         src/core/forcefieldfunctions.h
@@ -222,21 +223,29 @@ set(curcuma_core_SRC
         src/core/orcainterface.h
         src/core/orcainterface.cpp
 )
-    add_library(curcuma_core  ${curcuma_core_SRC})
+
+add_library(curcuma_core  ${curcuma_core_SRC})
 
     set(km_SRC
     src/capabilities/c_code/hungarian.c
     src/capabilities/c_code/interface.c
 )
 add_library(km ${km_SRC})
+if(USE_ULYSSES)
 
 set(ulysess_SRC
     src/core/qm_methods/interface/ulysses.cpp
 )
-add_library(ulysses_lib ${ulysess_SRC})
 add_executable(ulysses_helper
 src/helpers/ulysses_helper.cpp
 )
+else()
+set(ulysess_SRC
+    src/core/qm_methods/eht.cpp
+)
+endif(USE_ULYSSES)
+add_library(ulysses_lib ${ulysess_SRC})
+
 
 if(USE_BLAS)
     target_link_libraries(ulysses_lib blas)
@@ -245,7 +254,10 @@ if(USE_MKL)
     target_link_libraries(ulysses_lib -m64 -I${MKLROOT}/include  -Wl,--no-as-needed -L${MKLROOT}/lib -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core)
 
 endif()
+if(USE_ULYSSES)
+
 target_link_libraries(ulysses_helper PUBLIC ulysses_lib)
+endif()
 
 
 
@@ -432,6 +444,9 @@ add_executable(curcuma_helper
         
 add_executable(cli_helper
         src/helpers/cli_test.cpp)
+
+add_executable(parallel_scf
+        src/helpers/parallel_scf.cpp)
 
 target_link_libraries(curcuma_helper fmt::fmt-header-only)
 target_link_libraries(curcuma_helper curcuma_core)

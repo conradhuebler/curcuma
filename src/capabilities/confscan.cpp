@@ -928,6 +928,8 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
 
     std::vector<ConfScanThreadNoReorder*> threads;
     std::vector<std::vector<int>> rules;
+    m_energies.clear();
+
     CxxThreadPool* p = new CxxThreadPool;
     p->setActiveThreadCount(m_threads);
 
@@ -1056,6 +1058,10 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
     }
 
     m_rmsd_set = true;
+
+    ConfStat stat;
+    stat.setEnergies(m_energies);
+    stat.start();
 }
 
 void ConfScan::PrintSetUp(double dLE, double dLI, double dLH)
@@ -1126,6 +1132,7 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
 
     m_result = m_previously_accepted;
     m_stored_structures.clear();
+    m_energies.clear();
     std::vector<ConfScanThread*> threads;
     std::vector<std::vector<int>> rules;
     CxxThreadPool* p = new CxxThreadPool;
@@ -1318,12 +1325,17 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
     }
     p->clear();
     delete p;
+
+    ConfStat stat;
+    stat.setEnergies(m_energies);
+    stat.start();
 }
 
 ConfScanThreadNoReorder* ConfScan::addThreadNoreorder(const Molecule* reference, const json& config)
 {
     ConfScanThreadNoReorder* thread = new ConfScanThreadNoReorder(m_rmsd_threshold, m_MaxHTopoDiff, config);
     thread->setReference(*reference);
+    m_energies.push_back(reference->Energy());
     return thread;
 }
 
@@ -1333,6 +1345,8 @@ ConfScanThread* ConfScan::addThread(const Molecule* reference, const json& confi
     thread->setReference(*reference);
     thread->setEarlyBreak(m_earlybreak);
     thread->setVerbose(m_analyse);
+    m_energies.push_back(reference->Energy());
+
     // thread->setVerbose(false);
     return thread;
 }

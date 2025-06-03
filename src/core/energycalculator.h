@@ -41,7 +41,10 @@
 // #include "src/core/eigen_uff.h"
 #include "src/core/forcefield.h"
 // #include "src/core/qmdff.h"
+
+#ifdef USE_ULYSSES
 #include "src/core/qm_methods/ulyssesinterface.h"
+#endif
 
 #include <functional>
 

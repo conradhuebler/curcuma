@@ -363,6 +363,7 @@ private:
     std::map<double, std::string> m_nodes;
     std::vector<std::vector<double>> m_list_skipped, m_list_performed;
     std::vector<double> m_sLE = { 1.0 }, m_sLI = { 1.0 }, m_sLH = { 1.0 };
+    std::vector<double> m_energies;
     double m_domolalign = -1;
     double m_lastDI = 0.0, m_lastDH = 0.0, m_lastdE = -1, m_dE = -1, m_damping = 0.8, m_getrmsd_scale = 1.1, m_getrmsd_thresh = 1.0;
     int m_maxmol = 0;
