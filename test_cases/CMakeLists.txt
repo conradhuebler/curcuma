@@ -34,3 +34,10 @@ target_link_libraries(confscan_test curcuma_core)
 
 #target_link_libraries(curcuma_tests curcuma_core)￼
 
+add_executable(confstat_tests
+    test_confstat.cpp
+)
+
+target_link_libraries(confstat_tests
+        curcuma_core
+)

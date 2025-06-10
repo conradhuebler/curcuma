@@ -162,6 +162,7 @@ int main(int argc, char **argv) {
         std::cerr << "No arguments given!" << std::endl;
         std::cerr << "Use:" << std::endl
                   << "-rmsd        * RMSD Calculator                                            *" << std::endl
+                  << "-compare     * Compare two structures, using different metrices           *" << std::endl
                   << "-confscan    * Filter list of conformers                                  *" << std::endl
                   << "-confstat    * Conformation statistics                                    *" << std::endl
                   << "-dock        * Perform some docking                                       *" << std::endl;
@@ -237,6 +238,8 @@ int main(int argc, char **argv) {
             std::cout << Tools::Vector2String(driver->ReorderRules()) << std::endl;
             delete driver;
             exit(0);
+
+        } else if (strcmp(argv[1], "-compare") == 0) {
 
         } else if (strcmp(argv[1], "-dock") == 0) {
             if (argc < 4) {
@@ -1012,8 +1015,6 @@ int main(int argc, char **argv) {
             std::cout << "Square Sum of Residuals of Magnitudes" << std::endl
             << "linear: " << r2_lin_diffofnorm << std::endl
             << "nonlinear: " << r2_nlin_diffofnorm << std::endl;
-
-
 
         } else if (strcmp(argv[1], "-dipole_calc") == 0) {
             if (argc < 5) {

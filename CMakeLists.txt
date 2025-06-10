@@ -166,7 +166,7 @@ endif()
 if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip)
   file(DOWNLOAD https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.zip ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip
        TIMEOUT 60  # seconds
-       EXPECTED_HASH SHA256=1ccaabbfe870f60af3d6a519c53e09f3dcf630207321dffa553564a8e75c4fc8
+       EXPECTED_HASH SHA256=eba3f3d414d2f8cba2919c78ec6daab08fc71ba2ba4ae502b7e5d4d99fc02cda
        TLS_VERIFY ON)
 endif()
 file(ARCHIVE_EXTRACT INPUT ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip DESTINATION ${PROJECT_SOURCE_DIR}/external)
@@ -481,6 +481,7 @@ add_test(NAME confscan_dtemplate COMMAND confscan_test dtemplate WORKING_DIRECTO
 add_test(NAME confscan_template COMMAND confscan_test template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME confscan_molalign COMMAND confscan_test molalign WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 
+add_test(NAME confstat COMMAND confstat_tests WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 
 
 install(TARGETS curcuma RUNTIME DESTINATION bin)

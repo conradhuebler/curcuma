@@ -360,7 +360,7 @@ private:
     std::string m_molalign = "molalign";
     std::multimap<double, double> m_listH, m_listI, m_listE;
     std::multimap<double, std::vector<double>> m_listThresh;
-    std::map<double, std::string> m_nodes;
+    std::multimap<double, std::string> m_nodes;
     std::vector<std::vector<double>> m_list_skipped, m_list_performed;
     std::vector<double> m_sLE = { 1.0 }, m_sLI = { 1.0 }, m_sLH = { 1.0 };
     std::vector<double> m_energies;

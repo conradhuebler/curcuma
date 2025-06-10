@@ -40,6 +40,17 @@ static json ConfStatJson{
     { "Parameter", json::object() } // Additional parameters for energy calculation
 };
 
+struct Statistics {
+    double lowest_energy{ 0.0 };
+    double highest_energy{ 0.0 };
+    double energy_span{ 0.0 };
+    double free_energy_contribution{ 0.0 };
+    double entropy_contribution{ 0.0 };
+    int total_states{ 0 }; // Sum of all degeneracies
+    int unique_conformers{ 0 }; // Number of unique energy levels
+    std::vector<std::tuple<double, double, double, int>> conformer_data;
+};
+
 class ConfStat : public CurcumaMethod {
 public:
     ConfStat(const json& controller = ConfStatJson, bool silent = true);
@@ -56,10 +67,52 @@ public:
     void start() override;
 
     void setEnergiesWithDegeneracy(const std::vector<double>& energies,
-        const std::vector<int>& degeneracies)
+        const std::vector<int>& degeneracies);
+
+    void printEnergyDistribution() const;
+    void printPopulationDistribution() const;
+
+    double getFirstPopulation() const
     {
-        m_energies = energies;
-        m_degeneracies = degeneracies;
+        return !m_stats.conformer_data.empty() ? std::get<1>(m_stats.conformer_data[0]) : 0.0;
+    }
+
+    double getSecondPopulation() const
+    {
+        return m_stats.conformer_data.size() > 1 ? std::get<1>(m_stats.conformer_data[1]) : 0.0;
+    }
+
+    std::vector<double> getPopulations() const
+    {
+        std::vector<double> populations;
+        for (const auto& [diff, pop, cum, deg] : m_stats.conformer_data) {
+            populations.push_back(pop);
+        }
+        return populations;
+    }
+
+    double getTotalPopulation() const
+    {
+        return m_stats.conformer_data.empty() ? 0.0 : std::get<2>(m_stats.conformer_data.back());
+    }
+
+    int getSignificantConformerCount() const
+    {
+        return std::count_if(m_stats.conformer_data.begin(),
+            m_stats.conformer_data.end(),
+            [this](const auto& data) {
+                return std::get<1>(data) >= m_print_threshold;
+            });
+    }
+
+    double getEntropyContribution() const
+    {
+        return m_stats.entropy_contribution;
+    }
+
+    double getFreeEnergyContribution() const
+    {
+        return m_stats.free_energy_contribution;
     }
 
 private:
@@ -81,13 +134,5 @@ private:
     json m_parameter;
     std::vector<int> m_degeneracies; // Degeneracy of each conformer
 
-    struct Statistics {
-        double lowest_energy{ 0.0 };
-        double free_energy_contribution{ 0.0 };
-        double entropy_contribution{ 0.0 };
-        // Extended to include degeneracy
-        std::vector<std::tuple<double, double, double, int>> conformer_data;
-        // (diff_energy, population, cumulative, degeneracy)
-    };
     Statistics m_stats;
 };

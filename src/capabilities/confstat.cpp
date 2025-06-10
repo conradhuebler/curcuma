@@ -130,6 +130,11 @@ void ConfStat::calculateStatistics()
 
     m_stats.free_energy_contribution = -RT * std::log(Q) / 1000.0; // kJ/mol
     m_stats.entropy_contribution = RT * S / 1000.0; // kJ/mol
+    m_stats.highest_energy = m_energies.back();
+    m_stats.energy_span = (m_stats.highest_energy - m_stats.lowest_energy) * 2625.5;
+    m_stats.total_states = std::accumulate(m_degeneracies.begin(),
+        m_degeneracies.end(), 0);
+    m_stats.unique_conformers = m_energies.size();
 }
 
 void ConfStat::printStatistics() const
@@ -155,9 +160,140 @@ void ConfStat::printStatistics() const
         }
         conf_number++;
     }
-
+    fmt::print("\nDetailed Analysis\n");
+    fmt::print("----------------\n");
+    fmt::print("Energy span: {:.2f} kJ/mol\n", m_stats.energy_span);
+    fmt::print("Total states (including degeneracy): {}\n", m_stats.total_states);
     fmt::print("\nThermodynamic Contributions\n");
     fmt::print("-------------------------\n");
     fmt::print("Free Energy: {:.2f} kJ/mol\n", m_stats.free_energy_contribution);
     fmt::print("Entropy (T*S): {:.2f} kJ/mol\n", m_stats.entropy_contribution);
+
+    printEnergyDistribution();
+    printPopulationDistribution();
+}
+
+void ConfStat::setEnergiesWithDegeneracy(const std::vector<double>& energies,
+    const std::vector<int>& degeneracies)
+{
+    if (energies.size() != degeneracies.size()) {
+        throw std::invalid_argument(
+            fmt::format("Mismatch in vector sizes: {} energies vs {} degeneracies",
+                energies.size(), degeneracies.size()));
+    }
+
+    // Validate degeneracies
+    if (std::any_of(degeneracies.begin(), degeneracies.end(),
+            [](int deg) { return deg < 1; })) {
+        throw std::invalid_argument("Degeneracy values must be positive integers");
+    }
+
+    m_energies = energies;
+    m_degeneracies = degeneracies;
+}
+
+void ConfStat::printEnergyDistribution() const
+{
+    // Create energy histogram
+    const int num_bins = 10;
+    std::vector<int> histogram(num_bins, 0);
+    double bin_width = m_stats.energy_span / num_bins;
+
+    for (const auto& [diff, pop, cum, deg] : m_stats.conformer_data) {
+        int bin = static_cast<int>(diff * 2625.5 / bin_width);
+        if (bin >= 0 && bin < num_bins) {
+            histogram[bin] += deg;
+        }
+    }
+
+    fmt::print("\nEnergy Distribution:\n");
+    for (int i = 0; i < num_bins; ++i) {
+        double energy_start = i * bin_width;
+        fmt::print("{:5.1f} - {:5.1f} kJ/mol: ", energy_start, energy_start + bin_width);
+        fmt::print("{:3d} states | ", histogram[i]);
+        fmt::print("{:*<{}}\n", "", histogram[i] / 2); // Simple bar chart
+    }
+}
+
+void ConfStat::printPopulationDistribution() const
+{
+    fmt::print("\nPopulation Distribution Analysis:\n");
+    fmt::print("------------------------------\n");
+
+    // Calculate population statistics
+    double total_pop = 0.0;
+    int significant_conformers = 0; // Conformers with population > threshold
+
+    // Population ranges for analysis (in %)
+    const std::vector<double> ranges = { 50.0, 25.0, 10.0, 5.0, 1.0, 0.1 };
+    std::vector<int> range_counts(ranges.size(), 0);
+
+    for (const auto& [diff, pop, cum, deg] : m_stats.conformer_data) {
+        total_pop += pop;
+
+        if (pop >= m_print_threshold) {
+            significant_conformers++;
+        }
+
+        // Count conformers in each population range
+        for (size_t i = 0; i < ranges.size(); ++i) {
+            if (pop >= ranges[i]) {
+                range_counts[i]++;
+            }
+        }
+    }
+
+    // Print summary
+    fmt::print("Total conformers: {}\n", m_stats.conformer_data.size());
+    fmt::print("Significant conformers (>= {:.1f}%): {}\n",
+        m_print_threshold, significant_conformers);
+
+    // Print population ranges
+    fmt::print("\nPopulation ranges:\n");
+    for (size_t i = 0; i < ranges.size(); ++i) {
+        fmt::print("Conformers with population ≥ {:5.1f}%: {:3d}\n",
+            ranges[i], range_counts[i]);
+    }
+
+    // Print population distribution histogram
+    fmt::print("\nPopulation histogram:\n");
+    const int num_bins = 10;
+    std::vector<int> histogram(num_bins, 0);
+
+    for (const auto& [diff, pop, cum, deg] : m_stats.conformer_data) {
+        int bin = static_cast<int>(pop * num_bins / 100.0);
+        if (bin >= num_bins)
+            bin = num_bins - 1;
+        if (bin < 0)
+            bin = 0;
+        histogram[bin]++;
+    }
+
+    // Print histogram
+    for (int i = 0; i < num_bins; ++i) {
+        double pop_start = i * 100.0 / num_bins;
+        double pop_end = (i + 1) * 100.0 / num_bins;
+        fmt::print("{:4.1f}% - {:4.1f}%: {:3d} conformers | ",
+            pop_start, pop_end, histogram[i]);
+        fmt::print("{:*<{}}\n", "", histogram[i]);
+    }
+
+    // Calculate and print statistical measures
+    std::vector<double> populations;
+    for (const auto& [diff, pop, cum, deg] : m_stats.conformer_data) {
+        populations.push_back(pop);
+    }
+
+    double mean_pop = total_pop / m_stats.conformer_data.size();
+
+    // Calculate standard deviation
+    double variance = 0.0;
+    for (double pop : populations) {
+        variance += (pop - mean_pop) * (pop - mean_pop);
+    }
+    double std_dev = std::sqrt(variance / populations.size());
+
+    fmt::print("\nStatistical measures:\n");
+    fmt::print("Mean population: {:.2f}%\n", mean_pop);
+    fmt::print("Population std dev: {:.2f}%\n", std_dev);
 }

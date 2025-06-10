@@ -44,6 +44,15 @@ using json = nlohmann::json;
 
 #include "confscan.h"
 
+template <typename T>
+std::string to_string_with_precision(const T a_value, const int n = 2)
+{
+    std::ostringstream out;
+    out.precision(n);
+    out << std::fixed << a_value;
+    return std::move(out).str();
+}
+
 int ConfScanThread::execute()
 {
     m_driver->setThreads(m_threads);
@@ -934,6 +943,7 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
     p->setActiveThreadCount(m_threads);
 
     for (auto& i : m_ordered_list) {
+
         if (m_skip) {
             m_skip--;
             continue;
@@ -961,11 +971,16 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
             if (m_analyse) {
                 laststring = mol1->Name();
 
-                std::string node = "\"" + mol1->Name() + "\" [shape=box, label=\"" + mol1->Name() + "\"];\n";
+                std::string node = "\"" + mol1->Name() + "\" [shape=box, label=\"" + mol1->Name() + "\\n0.00 kj/mol\",id=\"" + mol1->Name() + "\"];\n";
                 node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
                 m_nodes.insert(std::pair<double, std::string>(mol1->Energy(), node));
             }
             continue;
+        }
+        if (m_analyse) {
+            std::string node = "\"" + mol1->Name() + "\" [shape=box, label=\"" + mol1->Name() + "\\n" + to_string_with_precision((mol1->Energy() - m_lowest_energy) * 2625.5) + " kJ/mol\",id=\"" + mol1->Name() + "\"];\n";
+            node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\\n" + to_string_with_precision((mol1->Energy() - m_lowest_energy) * 2625.5) + " kJ/mol\"];\n";
+            m_nodes.insert(std::pair<double, std::string>(mol1->Energy(), node));
         }
         p->Reset();
         m_current_energy = mol1->Energy();
@@ -1001,10 +1016,10 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
                     writeStatisticFile(t->Reference(), mol1, t->RMSD());
                     if (m_analyse) {
                         if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
-                            m_first_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
+                            m_first_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\" [style=dotted,arrowhead=onormal];\n";
 
-                        std::string node = "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
-                        node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
+                        std::string node = "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\\n" + to_string_with_precision(m_dE) + " kJ/mol\",id=\"" + t->Reference()->Name() + "\"];\n";
+                        node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\\n" + to_string_with_precision((mol1->Energy() - m_lowest_energy) * 2625.5) + " kJ/mol\"];\n";
                         m_nodes.insert(std::pair<double, std::string>(t->Reference()->Energy(), node));
                         m_first_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
                         //  m_nodes_list.push_back(t->Reference()->Name());
@@ -1150,12 +1165,25 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
             threads.push_back(thread);
             p->addThread(thread);
             m_lowest_energy = mol1->Energy();
+            if (m_analyse) {
+                std::string node = "\"" + mol1->Name() + "\" [shape=box, label=\"" + mol1->Name() + "\\n" + to_string_with_precision((mol1->Energy() - m_lowest_energy) * 2625.5) + " kJ/mol\",id=\"" + mol1->Name() + "\"];\n";
+                node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\\n" + to_string_with_precision((mol1->Energy() - m_lowest_energy) * 2625.5) + " kJ/mol\"];\n";
+                m_nodes.insert(std::pair<double, std::string>(mol1->Energy(), node));
+            }
             continue;
+        }
+        if (m_analyse) {
+            std::string node = "\"" + mol1->Name() + "\" [shape=box, label=\"" + mol1->Name() + "\\n" + to_string_with_precision((mol1->Energy() - m_lowest_energy) * 2625.5) + " kJ/mol\",id=\"" + mol1->Name() + "\"];\n";
+            node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\\n" + to_string_with_precision((mol1->Energy() - m_lowest_energy) * 2625.5) + " kJ/mol\"];\n";
+            m_nodes.insert(std::pair<double, std::string>(mol1->Energy(), node));
         }
         p->Reset();
         m_current_energy = mol1->Energy();
         m_dE = (m_current_energy - m_lowest_energy) * 2625.5;
-
+        if (m_dE > m_energy_cutoff && m_energy_cutoff != -1) {
+            std::cout << "Energy of " << mol1->Name() << " is " << m_current_energy << " kJ/mol, which is above the cutoff of " << m_energy_cutoff << " kJ/mol, skipping!" << std::endl;
+            break;
+        }
         bool keep_molecule = true;
         bool reorder = false;
         for (int t = 0; t < threads.size(); ++t) {
@@ -1251,10 +1279,10 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
                     if (keep_molecule) {
                         if (m_analyse) {
                             if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
-                                m_second_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
+                                m_second_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\" [style=dotted,arrowhead=onormal];\n";
 
-                            std::string node = "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\"];\n";
-                            node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\"];\n";
+                            std::string node = "\"" + t->Reference()->Name() + "\" [shape=box, label=\"" + t->Reference()->Name() + "\\n" + to_string_with_precision(m_dE) + " kJ/mol\",id=\"" + t->Reference()->Name() + "\"];\n";
+                            node += "\"" + mol1->Name() + "\" [label=\"" + mol1->Name() + "\\n" + to_string_with_precision((mol1->Energy() - m_lowest_energy) * 2625.5) + " kJ/mol\",id = \"" + mol1->Name() + "\"];\n";
                             m_nodes.insert(std::pair<double, std::string>(t->Reference()->Energy(), node));
 
                             m_second_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\" [style=bold,label=" + std::to_string(t->RMSD()) + "];\n";
@@ -1289,7 +1317,7 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
                             writeStatisticFile(t->Reference(), mol1, driver.RMSD(), true, { 0, 0 });
 
                             if (laststring.compare("") != 0 && laststring.compare(t->Reference()->Name()) != 0)
-                                m_second_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\"[style=dotted,arrowhead=onormal];\n";
+                                m_second_content += "\"" + laststring + "\" -> \"" + t->Reference()->Name() + "\" [style=dotted,arrowhead=onormal];\n";
 
                             m_second_content += "\"" + t->Reference()->Name() + "\" -> \"" + mol1->Name() + "\";\n";
                             m_second_content += "\"" + mol1->Name() + "\" [shape=box, style=filled,color=\".7 .3 1.0\"];\n";
@@ -1316,9 +1344,6 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
         PrintStatus();
         if (m_result.size() >= m_maxrank)
             break;
-        if (m_dE > m_energy_cutoff && m_energy_cutoff != -1) {
-            break;
-        }
     }
     if (m_analyse) {
         parameters_success.close();
@@ -1377,7 +1402,7 @@ void ConfScan::Finalise()
         }
         molecule->appendXYZFile(m_accepted_filename);
         if (m_analyse) {
-            std::string content = "\"" + molecule->Name() + "\" [shape=box, label=\"" + molecule->Name() + "\", fontcolor=\"orange\", fontname=\"times-bold\"];\n";
+            std::string content = "\"" + molecule->Name() + "\" [shape=box, label=\"" + molecule->Name() + "\\n" + to_string_with_precision(difference) + " kJ/mol\", fontcolor=\"orange\", fontname=\"times-bold\",id=\"" + molecule->Name() + "\"];\n";
             content_after += content;
             if (std::find(m_nodes_list.begin(), m_nodes_list.end(), molecule->Name()) != m_nodes_list.end()) {
                 //    std::cout << molecule->Name() << " inside ";
