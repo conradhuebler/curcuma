@@ -89,6 +89,54 @@ public:
 
     void Filter();
 
+    /**
+     * @brief Prints detailed help information about the RMSDTraj module parameters
+     */
+    void printHelp() const
+    {
+        std::cout << "\n=== RMSDTraj: Trajectory RMSD Analysis Tool ===\n\n"
+                  << "This module analyzes molecular dynamics trajectories by calculating RMSD values\n"
+                  << "between structures, identifying unique conformers, and performing related analyses.\n\n"
+                  << "Parameter           | Default     | Description\n"
+                  << "-------------------|-------------|----------------------------------------------------\n"
+                  << "writeUnique        | " << std::setw(11) << (m_defaults.at("writeUnique") ? "true" : "false") << " | Write only unique conformers to output file\n"
+                  << "rmsd               | " << std::setw(11) << m_defaults.at("rmsd") << " | RMSD threshold for unique conformer detection (Å)\n"
+                  << "writeAligned       | " << std::setw(11) << (m_defaults.at("writeAligned") ? "true" : "false") << " | Write aligned structures to output file\n"
+                  << "reference          | " << std::setw(11) << m_defaults.at("reference") << " | Reference structure file for RMSD calculations\n"
+                  << "second             | " << std::setw(11) << m_defaults.at("second") << " | Second trajectory file for pairwise comparison\n"
+                  << "fragment           | " << std::setw(11) << m_defaults.at("fragment") << " | Fragment index for RMSD calculation (-1: use entire molecule)\n"
+                  << "heavy              | " << std::setw(11) << (m_defaults.at("heavy") ? "true" : "false") << " | Only use heavy atoms (non-hydrogen) for RMSD\n"
+                  << "pcafile            | " << std::setw(11) << (m_defaults.at("pcafile") ? "true" : "false") << " | Generate Principal Component Analysis output file\n"
+                  << "allxyz             | " << std::setw(11) << (m_defaults.at("allxyz") ? "true" : "false") << " | Write all structures to separate XYZ files\n"
+                  << "RefFirst           | " << std::setw(11) << (m_defaults.at("RefFirst") ? "true" : "false") << " | Use first structure in trajectory as reference\n"
+                  << "noreorder          | " << std::setw(11) << (m_defaults.at("noreorder") ? "true" : "false") << " | Disable atom reordering during RMSD calculation\n"
+                  << "opt                | " << std::setw(11) << (m_defaults.at("opt") ? "true" : "false") << " | Optimize structures before RMSD calculation\n"
+                  << "filter             | " << std::setw(11) << (m_defaults.at("filter") ? "true" : "false") << " | Apply filtering to select structures\n"
+                  << "writeRMSD          | " << std::setw(11) << (m_defaults.at("writeRMSD") ? "true" : "false") << " | Write RMSD values to output file\n"
+                  << "offset             | " << std::setw(11) << m_defaults.at("offset") << " | Number of initial frames to skip in trajectory\n"
+                  << "\n=== Output Files ===\n\n"
+                  << "Several output files are generated with the base name derived from the input file:\n"
+                  << "- [basename]_rmsd.dat     : RMSD values between structures\n"
+                  << "- [basename]_unique.xyz   : Unique conformers (if writeUnique is true)\n"
+                  << "- [basename]_aligned.xyz  : Aligned structures (if writeAligned is true)\n"
+                  << "- [basename]_pca.dat      : PCA projection data (if pcafile is true)\n"
+                  << "- [basename]_pairwise.dat : Pairwise RMSD comparison (if second file is provided)\n"
+                  << "\n=== Common Usage Examples ===\n\n"
+                  << "1. Extract unique conformers from a trajectory:\n"
+                  << "   curcuma -rmsdtraj trajectory.xyz -writeUnique -rmsd 1.0\n\n"
+                  << "2. Compare all frames to a reference structure:\n"
+                  << "   curcuma -rmsdtraj trajectory.xyz -reference ref.xyz -writeRMSD\n\n"
+                  << "3. Analyze only heavy atoms and generate PCA data:\n"
+                  << "   curcuma -rmsdtraj trajectory.xyz -heavy -pcafile\n\n"
+                  << "4. Compare two trajectories pairwise:\n"
+                  << "   curcuma -rmsdtraj traj1.xyz -second traj2.xyz\n\n"
+                  << "5. Focus analysis on a specific fragment:\n"
+                  << "   curcuma -rmsdtraj trajectory.xyz -fragment 1\n\n"
+                  << "Note: When comparing large trajectories, consider using the offset parameter\n"
+                  << "to skip initial frames that may represent equilibration periods.\n"
+                  << std::endl;
+    }
+
 private:
     /* Read Controller has to be implemented for all */
     void LoadControlJson() override;

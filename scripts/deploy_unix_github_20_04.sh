@@ -7,7 +7,7 @@ cd package
 mkdir -p lib
 cp ../release_xtb/curcuma .
 cp ../release_xtb/curcuma_helper .
-cp ../release_xtb/external/xtb/libxtb.so* lib
+#cp ../release_xtb/external/xtb/libxtb.so* lib
 
 cd ..
 wget -c -nv "https://github.com/probonopd/linuxdeployqt/releases/download/continuous/linuxdeployqt-continuous-x86_64.AppImage"

@@ -42,6 +42,7 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, bool 
         m_silent = false;
         m_verbose = true;
     }
+    controller.count("help") > 0 ? m_help = true : m_help = false;
     //m_curcuma_progress.open("curcuma_progress", std::ios::out);
 }
 
@@ -113,6 +114,14 @@ void CurcumaMethod::UpdateController(const json& controller)
     if (!m_silent)
         PrintController(m_defaults);
     LoadControlJson();
+}
+
+void CurcumaMethod::checkHelp()
+{
+    if (m_help) {
+        printHelp();
+        exit(0);
+    }
 }
 
 bool CurcumaMethod::CheckStop() const

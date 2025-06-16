@@ -240,7 +240,84 @@ int main(int argc, char **argv) {
             exit(0);
 
         } else if (strcmp(argv[1], "-compare") == 0) {
+            if (argc < 4) {
+                std::cerr << "Please use curcuma to compare structures as follows\ncurcuma -compare A.xyz B.xyz -metric [rmsd, inertia, ripser]" << std::endl;
+                exit(1);
+            }
 
+            // Parse file names
+            std::string file_a = argv[2];
+            std::string file_b = argv[3];
+
+            // Parse metric option
+            std::string metric = "rmsd"; // Default metric
+            for (int i = 4; i < argc; ++i) {
+                std::string arg = argv[i];
+                if (arg == "-metric" && i + 1 < argc) {
+                    metric = argv[i + 1];
+                    break;
+                }
+            }
+
+            // Load molecules
+            Molecule molecule1, molecule2;
+            FileIterator file1, file2;
+            std::string reffile;
+            std::string tarfile;
+
+            if (std::filesystem::exists(std::string(argv[2]))) {
+                file1.setFile(argv[2]);
+                molecule1 = file1.Next();
+                reffile = file1.Basename();
+            }
+            if (std::filesystem::exists(argv[3])) {
+                file2.setFile(argv[3]);
+                tarfile = file2.Basename();
+                molecule2 = file2.Next();
+            } else {
+                tarfile = file1.Basename();
+                molecule2 = file1.Next();
+            }
+
+            // Compare structures based on selected metric
+            if (metric == "rmsd") {
+                json config;
+                config["rmsd"] = controller["compare"];
+                RMSDDriver driver(config, true);
+                driver.setReference(molecule1);
+                driver.setTarget(molecule2);
+                driver.start();
+                std::cout << "RMSD: " << driver.RMSD() << " Å" << std::endl;
+            } else if (metric == "inertia") {
+
+                molecule1.CalculateRotationalConstants();
+                molecule2.CalculateRotationalConstants();
+
+                std::cout << "Inertia constants for " << reffile << ": " << std::endl;
+                std::cout << "Ia: " << molecule1.Ia() << " MHz, Ib: " << molecule1.Ib() << " MHz, Ic: " << molecule1.Ic() << " MHz" << std::endl;
+                std::cout << "Inertia constants for " << tarfile << ": " << std::endl;
+                std::cout << "Ia: " << molecule2.Ia() << " MHz, Ib: " << molecule2.Ib() << " MHz, Ic: " << molecule2.Ic() << " MHz" << std::endl;
+                double Ia_diff = std::abs(molecule1.Ia() - molecule2.Ia());
+                double Ib_diff = std::abs(molecule1.Ib() - molecule2.Ib());
+                double Ic_diff = std::abs(molecule1.Ic() - molecule2.Ic());
+                std::cout << "Inertia differences: " << Ia_diff << ", " << Ib_diff << ", " << Ic_diff << " MHz" << std::endl;
+            } else if (metric == "ripser") {
+                PersistentDiagram pd(controller["compare"]);
+                pd.setDistanceMatrix(molecule1.LowerDistanceVector());
+                Matrix image_a = pd.generateImage(pd.generatePairs());
+                pd.setDistanceMatrix(molecule2.LowerDistanceVector());
+                Matrix image_b = pd.generateImage(pd.generatePairs());
+                std::cout << "Persistence diagram for " << reffile << ": " << std::endl;
+                std::cout << image_a << std::endl;
+                std::cout << "Persistence diagram for " << tarfile << ": " << std::endl;
+                std::cout << image_b << std::endl;
+                double diff = (image_a - image_b).cwiseAbs().sum();
+                std::cout << "Persistence diagram difference: " << diff << std::endl;
+            } else {
+                std::cerr << "Unknown metric: " << metric << std::endl;
+                std::cerr << "Supported metrics: rmsd, inertia, ripser" << std::endl;
+                exit(1);
+            }
         } else if (strcmp(argv[1], "-dock") == 0) {
             if (argc < 4) {
                 std::cerr << "Please use curcuma for docking as follows\ncurcuma -dock -host A.xyz -guest B.xyz -Step_x 10 -Step_y 10 -Step_z 10" << std::endl;
@@ -443,6 +520,8 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[1], "-md") == 0) {
             if (argc < 3) {
                 std::cerr << "Please use curcuma for molecular dynamics simulation as follows:\ncurcuma -md input.xyz" << std::endl;
+                SimpleMD help(controller, false);
+                help.printHelp();
                 return 0;
             }
 
@@ -479,6 +558,8 @@ int main(int argc, char **argv) {
                 std::cerr << "-reference    **** Add different xyz structure as reference." << std::endl;
                 std::cerr << "-second       **** Add second trajectory." << std::endl;
                 std::cerr << "-heavy        **** Check only heavy atoms. Do not use with -write." << std::endl;
+                RMSDTraj traj(controller, false);
+                traj.printHelp();
                 return 0;
             }
 
@@ -1097,7 +1178,7 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[1], "-stride") == 0) {
 
             if (argc < 4) {
-                std::cerr << "Please use curcuma to center a structure as follows:\ncurcuma -stride trjectory.xyz 100" << std::endl;
+                std::cerr << "Please use curcuma to keep only every nth structure as follows:\ncurcuma -stride trjectory.xyz 100" << std::endl;
                 return 0;
             }
             int stride = std::stoi(argv[3]);

@@ -138,7 +138,7 @@ static json CurcumaMDJson{
     { "COM", false },
     { "dump", 50 },
     { "print", 1000 },
-    { "unique", false },
+    { "unique", false }, // TODO unused?
     { "rmsd", 1.5 },
     { "opt", false },
     { "hmass", 1 },
@@ -173,9 +173,9 @@ static json CurcumaMDJson{
     { "wall", "none" }, // can be spheric or rect
     { "wall_type", "harmonic" }, // can be logfermi or harmonic
     { "wall_spheric_radius", 0 },
-    { "wall_xl", 0 },
-    { "wall_yl", 0 },
-    { "wall_zl", 0 },
+    { "wall_xl", 0 }, // TODO unused?
+    { "wall_yl", 0 }, // TODO unused?
+    { "wall_zl", 0 }, // TODO unused?
     { "wall_x_min", 0 },
     { "wall_x_max", 0 },
     { "wall_y_min", 0 },
@@ -227,6 +227,7 @@ public:
     void start() override;
 
     std::vector<Molecule*> UniqueMolecules() const { return m_unique_structures; }
+    void printHelp() const;
 
 private:
     std::function<void(void)> ThermostatFunction;

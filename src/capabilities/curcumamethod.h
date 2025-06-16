@@ -28,6 +28,10 @@
 class CurcumaMethod {
 public:
     CurcumaMethod(const json& defaults, const json& controller, bool silent);
+    CurcumaMethod()
+    {
+        m_help = true;
+    }
     ~CurcumaMethod();
 
     inline void setRestart(bool restart) { m_restart = restart; }
@@ -48,6 +52,7 @@ public:
     void UpdateController(const json& controller);
 
     virtual void start() = 0; // TODO make pure virtual and move all main action here
+    virtual void printHelp() const { std::cout << "No help available for this method." << std::endl; };
 
     bool CheckStop() const;
 
@@ -56,6 +61,7 @@ public:
     void overrideBasename(const std::string& basename) { m_basename = basename; }
 
 protected:
+    void checkHelp();
     void TriggerWriteRestart();
 
     StringList RestartFiles() const;
@@ -69,6 +75,7 @@ protected:
     //std::filebuf m_curcuma_progress;
     bool m_silent = true;
     bool m_verbose = false;
+    bool m_help = false;
 
 private:
     /* Lets have this for all modules */

@@ -20,6 +20,8 @@
 #pragma once
 // #include "ripser.h"
 
+#include "src/capabilities/curcumamethod.h"
+
 #include "json.hpp"
 
 #include <vector>
@@ -53,9 +55,41 @@ static const json RipserJson = {
     { "ripser_epsilon", 0.4 }
 };
 
-class PersistentDiagram {
+class PersistentDiagram : public CurcumaMethod {
+    // This class generates persistent diagrams from distance matrices using ripser.
+    // It can generate pairs and triples of points, and create images based on these pairs.
+    // The parameters for the persistent diagram can be set through the constructor or setter methods.  {
 public:
-    PersistentDiagram(const json& config = RipserJson);
+    PersistentDiagram(const json& config, bool silent = true);
+
+    void start() override
+    {
+        // This method is intentionally left empty as the main action is handled in generatePairs and generateTriples.
+    }
+    nlohmann::json WriteRestartInformation() override
+    {
+        return json(); // Return an empty JSON object as there is no restart information to write.
+        // This method is intentionally left empty as there is no restart information to write.
+    }
+    bool LoadRestartInformation() override
+    {
+        // This method is intentionally left empty as there is no restart information to load.
+        return true;
+    }
+    StringList MethodName() const override
+    {
+        return StringList({ "PD" });
+    }
+
+    void ReadControlFile() override
+    {
+        // This method is intentionally left empty as there is no control file to read.
+    }
+
+    void LoadControlJson() override
+    {
+        // This method is intentionally left empty as there is no control JSON to load.
+    }
 
     inline void setDistanceMatrix(const std::vector<float>& vector)
     {
@@ -104,6 +138,8 @@ public:
     void setBins(int bins) { m_bins = bins; }
     void setStdX(double std_x) { m_std_x = std_x; }
     void setStdY(double std_y) { m_std_x = std_y; }
+
+    void printHelp() const override;
 
 private:
     int m_dimension = 2;
