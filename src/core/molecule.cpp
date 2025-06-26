@@ -866,12 +866,20 @@ bool Molecule::setGeometryByFragment(const Geometry& geometry, int fragment, boo
     return true;
 }
 
-std::string Molecule::LowerDistanceMatrix() const
+std::string Molecule::LowerDistanceMatrix(bool exclude_bonds, bool print_elements) const
 {
     std::ostringstream stream;
     for (int i = 0; i < AtomCount(); ++i) {
+        if (print_elements) {
+            stream << Elements::ElementAbbr[m_atoms[i]] << ":   ";
+        }
         for (int j = 0; j <= i; ++j) {
-            stream << std::to_string(CalculateDistance(i, j)) + ",";
+
+            if (!exclude_bonds)
+                stream << std::to_string(CalculateDistance(i, j)) + ",";
+            else if (exclude_bonds && CalculateDistance(i, j) >= (Elements::CovalentRadius[Atom(i).first] + Elements::CovalentRadius[Atom(j).first]) * m_scaling) {
+                stream << std::to_string(CalculateDistance(i, j)) + ",";
+            }
         }
         stream << std::endl;
     }
