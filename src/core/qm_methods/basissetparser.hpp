@@ -57,7 +57,7 @@ struct ElementBasis {
 using BasisSetMap = std::map<std::string, ElementBasis>;
 
 // Convert a shell type character to ShellType enum
-ShellType charToShellType(char c)
+inline ShellType charToShellType(char c)
 {
     switch (std::toupper(c)) {
     case 'S':
@@ -76,7 +76,7 @@ ShellType charToShellType(char c)
 }
 
 // Convert ShellType enum to string
-std::string shellTypeToString(ShellType type)
+inline std::string shellTypeToString(ShellType type)
 {
     switch (type) {
     case S_SHELL:
@@ -95,7 +95,7 @@ std::string shellTypeToString(ShellType type)
 }
 
 // Trim whitespace from a string
-std::string trim(const std::string& str)
+inline std::string trim(const std::string& str)
 {
     size_t first = str.find_first_not_of(" \t\n\r\f\v");
     if (first == std::string::npos)
@@ -105,7 +105,7 @@ std::string trim(const std::string& str)
 }
 
 // Convert string to uppercase
-std::string toUpper(std::string str)
+inline std::string toUpper(std::string str)
 {
     std::transform(str.begin(), str.end(), str.begin(),
         [](unsigned char c) { return std::toupper(c); });
@@ -113,7 +113,7 @@ std::string toUpper(std::string str)
 }
 
 // Parse a TURBOMOLE/ORCA basis set file
-BasisSetMap parseBasisSetFile(const std::string& filename)
+inline BasisSetMap parseBasisSetFile(const std::string& filename)
 {
     std::ifstream file(filename);
     if (!file.is_open()) {
@@ -282,7 +282,7 @@ BasisSetMap parseBasisSetFile(const std::string& filename)
 }
 
 // Create a minimal STO-type basis from a GTO basis set
-std::vector<STO::Orbital> createSTOFromGTOBasis(
+inline std::vector<STO::Orbital> createSTOFromGTOBasis(
     const ElementBasis& basis,
     double x, double y, double z,
     int atomIndex,
@@ -424,7 +424,7 @@ std::vector<STO::Orbital> createSTOFromGTOBasis(
 }
 
 // Create GTO orbitals from the parsed basis set
-std::vector<GTO::Orbital> createGTOFromBasis(
+inline std::vector<GTO::Orbital> createGTOFromBasis(
     const ElementBasis& basis,
     double x, double y, double z,
     int atomIndex)
@@ -549,7 +549,7 @@ std::vector<GTO::Orbital> createGTOFromBasis(
 }
 
 // Set VSIP values for a basis set
-void setVSIPValues(BasisSetMap& basisSet, const std::string& element,
+inline void setVSIPValues(BasisSetMap& basisSet, const std::string& element,
     double vsip_s, double vsip_p, double vsip_d = 0.0)
 {
     auto it = basisSet.find(element);
@@ -563,7 +563,7 @@ void setVSIPValues(BasisSetMap& basisSet, const std::string& element,
 }
 
 // Set VSIP values from a configuration file
-void loadVSIPValues(BasisSetMap& basisSet, const std::string& filename)
+inline void loadVSIPValues(BasisSetMap& basisSet, const std::string& filename)
 {
     std::ifstream file(filename);
     if (!file.is_open()) {
@@ -592,7 +592,7 @@ void loadVSIPValues(BasisSetMap& basisSet, const std::string& filename)
 }
 
 // Print basis set information
-void printBasisSetInfo(const BasisSetMap& basisSet)
+inline void printBasisSetInfo(const BasisSetMap& basisSet)
 {
     std::cout << "Basis Set Information:" << std::endl;
     std::cout << "======================" << std::endl;
@@ -613,7 +613,7 @@ void printBasisSetInfo(const BasisSetMap& basisSet)
 }
 
 // Example usage
-void exampleUsage(const std::string& filename)
+inline void exampleUsage(const std::string& filename)
 {
     std::cout << "Loading basis set from: " << filename << std::endl;
 

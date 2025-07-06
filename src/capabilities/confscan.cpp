@@ -214,37 +214,71 @@ void ConfScan::LoadControlJson()
     m_force_reorder = Json2KeyWord<bool>(m_defaults, "forceReorder");
     m_check_connections = Json2KeyWord<bool>(m_defaults, "check");
     m_energy_cutoff = Json2KeyWord<double>(m_defaults, "maxenergy");
+    bool read_multipliers = false;
     // this will be the default settings for the threshold multiplicator
-    if (m_defaults["xTX"].is_string()) {
-        m_sLE = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLX"), ",");
-        m_sLI = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLX"), ",");
-        m_sLH = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLX"), ",");
-    } else if (m_defaults["xTX"].is_number()) {
+    if (m_defaults["sLX"].is_string()) {
+        if (Json2KeyWord<std::string>(m_defaults, "sLX") == "default") {
+            std::cout << "Using default values for the steps." << std::endl;
+            m_sLE = { 1.0, 2.0 };
+            m_sLI = { 1.0, 2.0 };
+            m_sLH = { 1.0, 2.0 };
+            std::cout << "Set reading multipliers to true." << std::endl;
+            read_multipliers = true;
+        } else {
+            // this is the case for a string with comma separated values
+            std::cout << "Reading steps from vector string." << std::endl;
+            m_sLE = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLX"), ",");
+            m_sLI = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLX"), ",");
+            m_sLH = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLX"), ",");
+        }
+    } else if (m_defaults["sLX"].is_number()) {
+        std::cout << "Reading steps from number." << std::endl;
         m_sLE = { Json2KeyWord<double>(m_defaults, "sLX") };
         m_sLI = { Json2KeyWord<double>(m_defaults, "sLX") };
         m_sLH = { Json2KeyWord<double>(m_defaults, "sLX") };
     }
+    if (read_multipliers) {
+        std::cout << "Using read multipliers for the steps." << std::endl;
+        // if the xTX is not set, we can use the default values for the steps
+        // this is done in a first step, so that we can use the default values
+        // and in a second step, we can overwrite the settings
+        if (m_defaults["sLE"].is_number())
+            m_sLE = { Json2KeyWord<double>(m_defaults, "sLE") };
+        else if (m_defaults["sLE"].is_string())
+            if (Json2KeyWord<std::string>(m_defaults, "sLE") == "default") {
+                m_sLE = { 1.0, 2.0 };
+            } else
+                // this is the case for a string with comma separated values
+                m_sLE = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLE"), ",");
 
-    // and in a second step, we can overwrite the settings
-    if (m_defaults["sLE"].is_number())
-        m_sLE = { Json2KeyWord<double>(m_defaults, "sLE") };
-    else if (m_defaults["sLE"].is_string())
-        m_sLE = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLE"), ",");
+        if (m_defaults["sLI"].is_number())
+            m_sLI = { Json2KeyWord<double>(m_defaults, "sLI") };
+        else if (m_defaults["sLI"].is_string())
+            if (Json2KeyWord<std::string>(m_defaults, "sLI") == "default") {
+                m_sLI = { 1.0, 2.0 };
+            } else
+                // this is the case for a string with comma separated values
+                m_sLI = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLI"), ",");
 
-    if (m_defaults["sLI"].is_number())
-        m_sLI = { Json2KeyWord<double>(m_defaults, "sLI") };
-    else if (m_defaults["sLI"].is_string())
-        m_sLI = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLI"), ",");
-
-    if (m_defaults["sLH"].is_number())
-        m_sLH = { Json2KeyWord<double>(m_defaults, "sLH") };
-    else if (m_defaults["sLH"].is_string())
-        m_sLH = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLH"), ",");
-
+        if (m_defaults["sLH"].is_number())
+            m_sLH = { Json2KeyWord<double>(m_defaults, "sLH") };
+        else if (m_defaults["sLH"].is_string())
+            if (Json2KeyWord<std::string>(m_defaults, "sLH") == "default") {
+                m_sLH = { 1.0, 2.0 };
+            } else
+                // this is the case for a string with comma separated values
+                m_sLH = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLH"), ",");
+    }
     if (m_sLE.size() != m_sLI.size() || m_sLE.size() != m_sLH.size()) {
         std::cout << "Inconsistent length of steps requested, will abort now." << std::endl;
         exit(1);
     }
+
+    fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing the following steps for the thresholds:\n");
+    for (std::size_t i = 0; i < m_sLE.size(); ++i) {
+        fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "sLE: {0}, sLI: {1}, sLH: {2}\n", to_string_with_precision(m_sLE[i]), to_string_with_precision(m_sLI[i]), to_string_with_precision(m_sLH[i]));
+    }
+    fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\n");
 
     m_reset = Json2KeyWord<bool>(m_defaults, "reset");
     m_analyse = Json2KeyWord<bool>(m_defaults, "analyse");
@@ -674,9 +708,9 @@ void ConfScan::start()
         if (m_analyse) {
             WriteDotFile(m_result_basename + ".initial.dot", m_first_content);
         }
-        m_sLE[0] = 1;
-        m_sLI[0] = 1;
-        m_sLH[0] = 1;
+        // m_sLE[0] = 1;
+        // m_sLI[0] = 1;
+        // m_sLH[0] = 1;
         if (m_analyse) {
             m_collective_content = "edge [color=green];\n";
             for (auto node : m_nodes)

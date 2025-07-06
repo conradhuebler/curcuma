@@ -31,8 +31,8 @@
 #include "STOIntegrals.hpp"
 
 #include "interface/abstract_interface.h"
-
 #include "json.hpp"
+#include "qm_driver.h"
 
 struct ehtSTO_6GHs {
     std::vector<double> alpha = { 0.3552322122E+02, 0.6513143725E+01, 0.1822142904E+01, 0.6259552659E+00, 0.2430767471E+00, 0.1001124280E+00 };
@@ -79,7 +79,7 @@ struct STO_6G {
 
 typedef std::vector<STO::Orbital> Basisset;
 
-class EHT : public QMInterface {
+class EHT : public QMDriver {
 public:
     EHT();
     virtual bool InitialiseMolecule(const Mol& molecule) override
@@ -97,16 +97,7 @@ public:
 private:
     // std::vector<STO_6G> MakeBasis();
     Basisset MakeBasis();
-    Mol m_mol;
-    Matrix m_H, m_S;
 
-    Matrix MakeOverlap(Basisset& basisset);
-    Matrix MakeH(const Matrix& S, const Basisset& basisset);
-
-    int m_num_electrons = 0;
-    int m_threads = 4;
-    Matrix m_mo;
-    Vector m_energies;
-
-    bool m_verbose = false;
+    Matrix MakeOverlap(Basisset& basisset) override;
+    Matrix MakeH(const Matrix& S, const Basisset& basisset) override;
 };

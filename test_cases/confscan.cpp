@@ -146,6 +146,125 @@ int molalign()
     return EXIT_FAILURE;
 }
 
+int sLX1()
+{
+    int threads = MaxThreads();
+
+    json controller = ConfScanJson;
+    controller["method"] = "subspace";
+    controller["threads"] = threads;
+    controller["silent"] = true;
+    controller["restart"] = false;
+    controller["sLX"] = "1.0";
+
+    ConfScan* confscan = new ConfScan(controller);
+    confscan->setFileName("input.xyz");
+    confscan->start();
+    int accepted = confscan->AcceptedCount();
+    int reorder_success = confscan->ReorderSuccessfull();
+    int reuse_count = confscan->ReuseCount();
+    int skipped_count = confscan->ReorderSkippedCount();
+    std::cout << accepted << " " << reorder_success << " " << reuse_count << " " << skipped_count << " " << std::endl;
+    if (accepted == 16 && reorder_success == 3 && reuse_count == 1 && skipped_count == 138)
+        return EXIT_SUCCESS;
+    return EXIT_FAILURE;
+}
+
+int sLX2()
+{
+    int threads = MaxThreads();
+
+    json controller = ConfScanJson;
+    controller["method"] = "subspace";
+    controller["threads"] = threads;
+    controller["silent"] = true;
+    controller["restart"] = false;
+    controller["sLX"] = "2.0";
+
+    ConfScan* confscan = new ConfScan(controller);
+    confscan->setFileName("input.xyz");
+    confscan->start();
+    int accepted = confscan->AcceptedCount();
+    int reorder_success = confscan->ReorderSuccessfull();
+    int reuse_count = confscan->ReuseCount();
+    int skipped_count = confscan->ReorderSkippedCount();
+    std::cout << accepted << " " << reorder_success << " " << reuse_count << " " << skipped_count << " " << std::endl;
+    if (accepted == 14 && reorder_success == 5 && reuse_count == 1 && skipped_count == 101)
+        return EXIT_SUCCESS;
+    return EXIT_FAILURE;
+}
+
+int sLX2Reset()
+{
+    int threads = MaxThreads();
+
+    json controller = ConfScanJson;
+    controller["method"] = "subspace";
+    controller["threads"] = threads;
+    controller["silent"] = true;
+    controller["restart"] = false;
+    controller["sLX"] = "2.0";
+    controller["reset"] = true;
+    ConfScan* confscan = new ConfScan(controller);
+    confscan->setFileName("input.xyz");
+    confscan->start();
+    int accepted = confscan->AcceptedCount();
+    int reorder_success = confscan->ReorderSuccessfull();
+    int reuse_count = confscan->ReuseCount();
+    int skipped_count = confscan->ReorderSkippedCount();
+    std::cout << accepted << " " << reorder_success << " " << reuse_count << " " << skipped_count << " " << std::endl;
+    if (accepted == 16 && reorder_success == 5 && reuse_count == 10 && skipped_count == 101)
+        return EXIT_SUCCESS;
+    return EXIT_FAILURE;
+}
+
+int sLX20()
+{
+    int threads = MaxThreads();
+
+    json controller = ConfScanJson;
+    controller["method"] = "subspace";
+    controller["threads"] = threads;
+    controller["silent"] = true;
+    controller["restart"] = false;
+    controller["sLX"] = "2.0";
+    ConfScan* confscan = new ConfScan(controller);
+    confscan->setFileName("input.xyz");
+    confscan->start();
+    int accepted = confscan->AcceptedCount();
+    int reorder_success = confscan->ReorderSuccessfull();
+    int reuse_count = confscan->ReuseCount();
+    int skipped_count = confscan->ReorderSkippedCount();
+    std::cout << accepted << " " << reorder_success << " " << reuse_count << " " << skipped_count << " " << std::endl;
+    if (accepted == 15 && reorder_success == 4 && reuse_count == 0 && skipped_count == 0)
+        return EXIT_SUCCESS;
+    return EXIT_FAILURE;
+}
+
+int sLX20Reset()
+{
+    int threads = MaxThreads();
+
+    json controller = ConfScanJson;
+    controller["method"] = "subspace";
+    controller["threads"] = threads;
+    controller["silent"] = true;
+    controller["restart"] = false;
+    controller["sLX"] = "2.0";
+    controller["reset"] = true;
+    ConfScan* confscan = new ConfScan(controller);
+    confscan->setFileName("input.xyz");
+    confscan->start();
+    int accepted = confscan->AcceptedCount();
+    int reorder_success = confscan->ReorderSuccessfull();
+    int reuse_count = confscan->ReuseCount();
+    int skipped_count = confscan->ReorderSkippedCount();
+    std::cout << accepted << " " << reorder_success << " " << reuse_count << " " << skipped_count << " " << std::endl;
+    if (accepted == 16 && reorder_success == 4 && reuse_count == 6 && skipped_count == 0)
+        return EXIT_SUCCESS;
+    return EXIT_FAILURE;
+}
+
 int main(int argc, char** argv)
 {
     if (argc == 1)
@@ -160,4 +279,14 @@ int main(int argc, char** argv)
         return template_method();
     else if (std::string(argv[1]).compare("molalign") == 0)
         return molalign();
+    else if (std::string(argv[1]).compare("sLX1") == 0)
+        return sLX1();
+    else if (std::string(argv[1]).compare("sLX2") == 0)
+        return sLX2();
+    else if (std::string(argv[1]).compare("sLX2Reset") == 0)
+        return sLX2Reset();
+    else if (std::string(argv[1]).compare("sLX20") == 0)
+        return sLX20();
+    else if (std::string(argv[1]).compare("sLX20Reset") == 0)
+        return sLX20Reset();
 }

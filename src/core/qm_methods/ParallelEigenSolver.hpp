@@ -78,7 +78,7 @@ private:
  * @param debug Whether to output debug information
  * @return True on success
  */
-bool parallelMatrixMultiply(const Eigen::MatrixXd& A, const Eigen::MatrixXd& B,
+inline bool parallelMatrixMultiply(const Eigen::MatrixXd& A, const Eigen::MatrixXd& B,
     Eigen::MatrixXd& C, int threadCount, bool debug = false)
 {
     try {

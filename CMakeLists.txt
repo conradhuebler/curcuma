@@ -209,6 +209,7 @@ set(curcuma_core_SRC
         src/capabilities/hessian.cpp
         src/capabilities/qmdfffit.cpp
         src/core/qm_methods/eht.cpp
+        src/core/qm_methods/qm_driver.cpp
         src/core/qm_methods/ulyssesinterface.cpp
         src/core/energycalculator.cpp
         src/core/molecule.cpp
@@ -480,6 +481,11 @@ add_test(NAME confscan_free COMMAND confscan_test free WORKING_DIRECTORY ${PROJE
 add_test(NAME confscan_dtemplate COMMAND confscan_test dtemplate WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME confscan_template COMMAND confscan_test template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME confscan_molalign COMMAND confscan_test molalign WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME confscan_sLX1 COMMAND confscan_test sLX1 WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME confscan_sLX2 COMMAND confscan_test sLX2 WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME confscan_sLX2Reset COMMAND confscan_test sLX2Reset WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME confscan_sLX20 COMMAND confscan_test sLX20 WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+add_test(NAME confscan_sLX20Reset COMMAND confscan_test sLX20Reset WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 
 add_test(NAME confstat COMMAND confstat_tests WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 
