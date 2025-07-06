@@ -862,6 +862,20 @@ int main(int argc, char **argv) {
                 std::cerr << "Please use curcuma to calculate a distance matrix for a molecule as follows:\ncurcuma -dMatrix molecule.xyz" << std::endl;
                 return 0;
             }
+            bool exclude_bonds = false;
+            bool print_elements = false;
+            bool print_energy = false;
+            if (controller.contains("dMatrix")) {
+                if (controller["dMatrix"].contains("exclude_bonds"))
+                    exclude_bonds = controller["dMatrix"]["exclude_bonds"];
+                if (controller["dMatrix"].contains("print_elements"))
+                    print_elements = controller["dMatrix"]["print_elements"];
+                if (controller["dMatrix"].contains("print_energy"))
+                    print_energy = controller["dMatrix"]["print_energy"];
+            }
+            std::cout << "Excluding bonds: " << exclude_bonds << std::endl;
+            std::cout << "Printing elements: " << print_elements << std::endl;
+            std::cout << "Printing energy: " << print_energy << std::endl;
             FileIterator file(argv[2]);
             json dMatrix = controller["dMatrix"];
             fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nPlease cite the follow research report!\nTownsend, J., Micucci, C.P., Hymel, J.H. et al. Representation of molecular structures with persistent homology for machine learning applications in chemistry. Nat Commun 11, 3230 (2020). https://doi.org/10.1038/s41467-020-17035-5\n\n");
@@ -875,8 +889,11 @@ int main(int argc, char **argv) {
                 Molecule mol = file.Next();
 
                 std::ofstream input;
+
                 input.open(outfile + "_" + std::to_string(index) + ".dMat", std::ios::out);
-                input << mol.LowerDistanceMatrix();
+                if (print_energy)
+                    input << std::setprecision(10) << mol.Energy() << std::endl;
+                input << mol.LowerDistanceMatrix(exclude_bonds, print_elements);
                 input.close();
 
                 auto vector = mol.LowerDistanceVector();
