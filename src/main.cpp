@@ -21,6 +21,7 @@
 #include "src/core/molecule.h"
 #include "src/core/orcainterface.h"
 #include "src/core/qm_methods/eht.h"
+#include "src/core/imagewriter.hpp"
 
 #include "src/capabilities/analysenciplot.h"
 #include "src/capabilities/confscan.h"
@@ -860,11 +861,28 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[1], "-dMatrix") == 0) {
             if (argc < 3) {
                 std::cerr << "Please use curcuma to calculate a distance matrix for a molecule as follows:\ncurcuma -dMatrix molecule.xyz" << std::endl;
+                std::cerr << "Additional arguments are:" << std::endl;
+                std::cerr << "-dMatrix:exclude_bonds <true|false>  **** Exclude bonded atoms from the distance matrix." << std::endl;
+                std::cerr << "-dMatrix:print_elements <true|false> **** Print element symbols in the distance matrix." << std::endl;
+                std::cerr << "-dMatrix:print_energy <true|false>   **** Print energy in the distance matrix file." << std::endl;
+                std::cerr << "-dMatrix:save_dmat <true|false>      **** Save the distance matrix file (.dMat)." << std::endl;
+                std::cerr << "-dMatrix:save_pairs <true|false>     **** Save the persistence pairs file (.pairs)." << std::endl;
+                std::cerr << "-dMatrix:save_pd_text <true|false>   **** Save the persistence diagram as text (.PD)." << std::endl;
+                std::cerr << "-dMatrix:save_pd_image <true|false>  **** Save the persistence diagram as an image." << std::endl;
+                std::cerr << "-dMatrix:save_pi_text <true|false>   **** Save the persistence image as text (.PI)." << std::endl;
+                std::cerr << "-dMatrix:save_pi_image <true|false>  **** Save the persistence image as an image." << std::endl;
+                std::cerr << "-dMatrix:format <format>             **** Image format (png, jpg, bmp, tga)." << std::endl;
+                std::cerr << "-dMatrix:colormap <map>              **** Colormap (grayscale, jet, hot, viridis, coolwarm)." << std::endl;
+                std::cerr << "-dMatrix:resolution <w>x<h>          **** Image resolution (e.g., 800x600)." << std::endl;
                 return 0;
             }
             bool exclude_bonds = false;
             bool print_elements = false;
             bool print_energy = false;
+            std::string format = "png";
+            EigenImageWriter::ColorMap colormap = EigenImageWriter::GRAYSCALE;
+            int width = -1, height = -1;
+            bool save_dmat = false, save_pairs = false, save_pd_text = false, save_pd_image = false, save_pi_text = false, save_pi_image = false;
             if (controller.contains("dMatrix")) {
                 if (controller["dMatrix"].contains("exclude_bonds"))
                     exclude_bonds = controller["dMatrix"]["exclude_bonds"];
@@ -872,6 +890,29 @@ int main(int argc, char **argv) {
                     print_elements = controller["dMatrix"]["print_elements"];
                 if (controller["dMatrix"].contains("print_energy"))
                     print_energy = controller["dMatrix"]["print_energy"];
+                if (controller["dMatrix"].contains("format"))
+                    format = controller["dMatrix"]["format"].get<std::string>();
+                if (controller["dMatrix"].contains("colormap")) {
+                    std::string cm = controller["dMatrix"]["colormap"].get<std::string>();
+                    if (cm == "jet") colormap = EigenImageWriter::JET;
+                    else if (cm == "hot") colormap = EigenImageWriter::HOT;
+                    else if (cm == "viridis") colormap = EigenImageWriter::VIRIDIS;
+                    else if (cm == "coolwarm") colormap = EigenImageWriter::COOLWARM;
+                }
+                if (controller["dMatrix"].contains("resolution")) {
+                    std::string res = controller["dMatrix"]["resolution"].get<std::string>();
+                    size_t pos = res.find('x');
+                    if (pos != std::string::npos) {
+                        width = std::stoi(res.substr(0, pos));
+                        height = std::stoi(res.substr(pos + 1));
+                    }
+                }
+                if (controller["dMatrix"].contains("save_dmat")) save_dmat = controller["dMatrix"]["save_dmat"];
+                if (controller["dMatrix"].contains("save_pairs")) save_pairs = controller["dMatrix"]["save_pairs"];
+                if (controller["dMatrix"].contains("save_pd_text")) save_pd_text = controller["dMatrix"]["save_pd_text"];
+                if (controller["dMatrix"].contains("save_pd_image")) save_pd_image = controller["dMatrix"]["save_pd_image"];
+                if (controller["dMatrix"].contains("save_pi_text")) save_pi_text = controller["dMatrix"]["save_pi_text"];
+                if (controller["dMatrix"].contains("save_pi_image")) save_pi_image = controller["dMatrix"]["save_pi_image"];
             }
             std::cout << "Excluding bonds: " << exclude_bonds << std::endl;
             std::cout << "Printing elements: " << print_elements << std::endl;
@@ -890,11 +931,13 @@ int main(int argc, char **argv) {
 
                 std::ofstream input;
 
-                input.open(outfile + "_" + std::to_string(index) + ".dMat", std::ios::out);
-                if (print_energy)
-                    input << std::setprecision(10) << mol.Energy() << std::endl;
-                input << mol.LowerDistanceMatrix(exclude_bonds, print_elements);
-                input.close();
+                if (save_dmat) {
+                    input.open(outfile + "_" + std::to_string(index) + ".dMat", std::ios::out);
+                    if (print_energy)
+                        input << std::setprecision(10) << mol.Energy() << std::endl;
+                    input << mol.LowerDistanceMatrix(exclude_bonds, print_elements);
+                    input.close();
+                }
 
                 auto vector = mol.LowerDistanceVector();
 
@@ -903,23 +946,35 @@ int main(int argc, char **argv) {
                 diagram.setENScaling(mol.DeltaEN());
                 {
                     auto l = diagram.generatePairs();
-                    input.open(outfile + "_" + std::to_string(index) + ".pairs", std::ios::out);
-                    for (const auto& r : l) {
-                        input << r.first << " " << r.second << std::endl;
+                    if (save_pairs) {
+                        input.open(outfile + "_" + std::to_string(index) + ".pairs", std::ios::out);
+                        for (const auto& r : l) {
+                            input << r.first << " " << r.second << std::endl;
+                        }
+                        input.close();
                     }
-                    input.close();
-                    std::cout << "Writing Persistence diagram as " + outfile + "_" + std::to_string(index) + ".PD" << std::endl;
-                    input.open(outfile + "_" + std::to_string(index) + ".PD", std::ios::out);
-                    input << diagram.generateImage(l);
-                    input.close();
+                    if (save_pd_text) {
+                        std::cout << "Writing Persistence diagram as " + outfile + "_" + std::to_string(index) + ".PD" << std::endl;
+                        input.open(outfile + "_" + std::to_string(index) + ".PD", std::ios::out);
+                        input << diagram.generateImage(l);
+                        input.close();
+                    }
+                    if (save_pd_image) {
+                        EigenImageWriter::saveMatrix(diagram.generateImage(l), outfile + "_" + std::to_string(index) + ".PD." + format, colormap, 90, false, width, height);
+                    }
                 }
                 diagram.setDistanceMatrix(vector);
                 {
                     std::cout << "Writing Persistence Image (EN scaled bond topology) as " + outfile + "_" + std::to_string(index) + ".PI" << std::endl;
                     auto l = diagram.generateTriples();
-                    input.open(outfile + "_" + std::to_string(index) + ".PI", std::ios::out);
-                    input << diagram.generateImage(l);
-                    input.close();
+                    if (save_pi_text) {
+                        input.open(outfile + "_" + std::to_string(index) + ".PI", std::ios::out);
+                        input << diagram.generateImage(l);
+                        input.close();
+                    }
+                    if (save_pi_image) {
+                        EigenImageWriter::saveMatrix(diagram.generateImage(l), outfile + "_" + std::to_string(index) + ".PI." + format, colormap, 90, false, width, height);
+                    }
                 }
                 index++;
             }

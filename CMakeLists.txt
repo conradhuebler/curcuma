@@ -162,6 +162,12 @@ if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/json.hpp)
        TLS_VERIFY ON)
 endif()
 
+if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/stb_image_write.h)
+  file(DOWNLOAD https://raw.githubusercontent.com/syoyo/tinygltf/refs/heads/release/stb_image_write.h ${PROJECT_SOURCE_DIR}/external/json.hpp
+       TIMEOUT 60  # seconds
+       EXPECTED_HASH SHA256=bdbaa2c548ac9bde2913b6b46c4d315a04d2624c81ee1553390eb8fb2de2835d
+       TLS_VERIFY ON)
+endif()
 
 if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip)
   file(DOWNLOAD https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.zip ${PROJECT_SOURCE_DIR}/external/eigen-3.4.0.zip
