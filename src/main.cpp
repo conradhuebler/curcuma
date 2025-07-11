@@ -860,59 +860,81 @@ int main(int argc, char **argv) {
             }
         } else if (strcmp(argv[1], "-dMatrix") == 0) {
             if (argc < 3) {
-                std::cerr << "Please use curcuma to calculate a distance matrix for a molecule as follows:\ncurcuma -dMatrix molecule.xyz" << std::endl;
-                std::cerr << "Additional arguments are:" << std::endl;
-                std::cerr << "-dMatrix:exclude_bonds <true|false>  **** Exclude bonded atoms from the distance matrix." << std::endl;
-                std::cerr << "-dMatrix:print_elements <true|false> **** Print element symbols in the distance matrix." << std::endl;
-                std::cerr << "-dMatrix:print_energy <true|false>   **** Print energy in the distance matrix file." << std::endl;
-                std::cerr << "-dMatrix:save_dmat <true|false>      **** Save the distance matrix file (.dMat)." << std::endl;
-                std::cerr << "-dMatrix:save_pairs <true|false>     **** Save the persistence pairs file (.pairs)." << std::endl;
-                std::cerr << "-dMatrix:save_pd_text <true|false>   **** Save the persistence diagram as text (.PD)." << std::endl;
-                std::cerr << "-dMatrix:save_pd_image <true|false>  **** Save the persistence diagram as an image." << std::endl;
-                std::cerr << "-dMatrix:save_pi_text <true|false>   **** Save the persistence image as text (.PI)." << std::endl;
-                std::cerr << "-dMatrix:save_pi_image <true|false>  **** Save the persistence image as an image." << std::endl;
-                std::cerr << "-dMatrix:format <format>             **** Image format (png, jpg, bmp, tga)." << std::endl;
-                std::cerr << "-dMatrix:colormap <map>              **** Colormap (grayscale, jet, hot, viridis, coolwarm)." << std::endl;
-                std::cerr << "-dMatrix:resolution <w>x<h>          **** Image resolution (e.g., 800x600)." << std::endl;
+                std::cerr << "Please use curcuma to calculate a distance matrix for a molecule as follows:\ncurcuma -dMatrix molecule.xyz [options]" << std::endl;
+                std::cerr << "\nFile output options:" << std::endl;
+                std::cerr << "  -save_dmat       Save the distance matrix file (.dMat)." << std::endl;
+                std::cerr << "  -save_pairs      Save the persistence pairs file (.pairs)." << std::endl;
+                std::cerr << "  -save_pd_text    Save the persistence diagram as text (.PD)." << std::endl;
+                std::cerr << "  -save_pd_image   Save the persistence diagram as an image (default: true)." << std::endl;
+                std::cerr << "  -save_pi_text    Save the persistence image as text (.PI)." << std::endl;
+                std::cerr << "  -save_pi_image   Save the persistence image as an image." << std::endl;
+                std::cerr << "\nImage options:" << std::endl;
+                std::cerr << "  -format <format> Image format (png, jpg, bmp, tga, default: png)." << std::endl;
+                std::cerr << "  -colormap <map>  Colormap (grayscale, jet, hot, viridis, coolwarm, default: hot)." << std::endl;
+                std::cerr << "  -resolution <w>x<h> Image resolution (default: 800x800)." << std::endl;
+                std::cerr << "\nPersistence diagram options:" << std::endl;
+                std::cerr << "  -ripser_xmax <f>  Max x-value for persistence diagram (default: 4.0)." << std::endl;
+                std::cerr << "  -ripser_xmin <f>  Min x-value for persistence diagram (default: 0.0)." << std::endl;
+                std::cerr << "  -ripser_ymax <f>  Max y-value for persistence diagram (default: 4.0)." << std::endl;
+                std::cerr << "  -ripser_ymin <f>  Min y-value for persistence diagram (default: 0.0)." << std::endl;
+                std::cerr << "  -ripser_bins <n>  Number of bins for persistence image (default: 10)." << std::endl;
+                std::cerr << "  -ripser_scaling <f> Scaling factor for persistence image (default: 0.1)." << std::endl;
+                std::cerr << "  -ripser_stdx <f>  Standard deviation for x-axis in persistence image (default: 10.0)." << std::endl;
+                std::cerr << "  -ripser_stdy <f>  Standard deviation for y-axis in persistence image (default: 10.0)." << std::endl;
+                std::cerr << "  -ripser_ratio <f> Ratio for ripser calculation (default: 1.0)." << std::endl;
+                std::cerr << "  -ripser_dimension <n> Dimension for ripser calculation (default: 2)." << std::endl;
+                std::cerr << "  -ripser_epsilon <f> Epsilon for ripser calculation (default: 0.4)." << std::endl;
                 return 0;
             }
             bool exclude_bonds = false;
             bool print_elements = false;
             bool print_energy = false;
             std::string format = "png";
-            EigenImageWriter::ColorMap colormap = EigenImageWriter::GRAYSCALE;
-            int width = -1, height = -1;
-            bool save_dmat = false, save_pairs = false, save_pd_text = false, save_pd_image = false, save_pi_text = false, save_pi_image = false;
+            EigenImageWriter::ColorMap colormap = EigenImageWriter::HOT;
+            int width = 800, height = 800;
+            bool save_dmat = false, save_pairs = false, save_pd_text = false, save_pd_image = true, save_pi_text = false, save_pi_image = false;
+
             if (controller.contains("dMatrix")) {
-                if (controller["dMatrix"].contains("exclude_bonds"))
-                    exclude_bonds = controller["dMatrix"]["exclude_bonds"];
-                if (controller["dMatrix"].contains("print_elements"))
-                    print_elements = controller["dMatrix"]["print_elements"];
-                if (controller["dMatrix"].contains("print_energy"))
-                    print_energy = controller["dMatrix"]["print_energy"];
-                if (controller["dMatrix"].contains("format"))
-                    format = controller["dMatrix"]["format"].get<std::string>();
-                if (controller["dMatrix"].contains("colormap")) {
-                    std::string cm = controller["dMatrix"]["colormap"].get<std::string>();
+                json dMatrix_opts = controller["dMatrix"];
+                if (dMatrix_opts.contains("exclude_bonds"))
+                    exclude_bonds = dMatrix_opts["exclude_bonds"];
+                if (dMatrix_opts.contains("print_elements"))
+                    print_elements = dMatrix_opts["print_elements"];
+                if (dMatrix_opts.contains("print_energy"))
+                    print_energy = dMatrix_opts["print_energy"];
+                if (dMatrix_opts.contains("save_dmat"))
+                    save_dmat = dMatrix_opts["save_dmat"];
+                if (dMatrix_opts.contains("save_pairs"))
+                    save_pairs = dMatrix_opts["save_pairs"];
+                if (dMatrix_opts.contains("save_pd_text"))
+                    save_pd_text = dMatrix_opts["save_pd_text"];
+                if (dMatrix_opts.contains("save_pd_image"))
+                    save_pd_image = dMatrix_opts["save_pd_image"];
+                if (dMatrix_opts.contains("save_pi_text"))
+                    save_pi_text = dMatrix_opts["save_pi_text"];
+                if (dMatrix_opts.contains("save_pi_image"))
+                    save_pi_image = dMatrix_opts["save_pi_image"];
+                if (dMatrix_opts.contains("format"))
+                    format = dMatrix_opts["format"].get<std::string>();
+                if (dMatrix_opts.contains("colormap")) {
+                    std::string cm = dMatrix_opts["colormap"].get<std::string>();
                     if (cm == "jet") colormap = EigenImageWriter::JET;
                     else if (cm == "hot") colormap = EigenImageWriter::HOT;
                     else if (cm == "viridis") colormap = EigenImageWriter::VIRIDIS;
                     else if (cm == "coolwarm") colormap = EigenImageWriter::COOLWARM;
+                    else if (cm == "grayscale")
+                        colormap = EigenImageWriter::GRAYSCALE;
                 }
-                if (controller["dMatrix"].contains("resolution")) {
-                    std::string res = controller["dMatrix"]["resolution"].get<std::string>();
+                if (dMatrix_opts.contains("resolution")) {
+                    std::string res = dMatrix_opts["resolution"].get<std::string>();
                     size_t pos = res.find('x');
                     if (pos != std::string::npos) {
                         width = std::stoi(res.substr(0, pos));
                         height = std::stoi(res.substr(pos + 1));
+                    } else {
+                        width = height = std::stoi(res);
                     }
                 }
-                if (controller["dMatrix"].contains("save_dmat")) save_dmat = controller["dMatrix"]["save_dmat"];
-                if (controller["dMatrix"].contains("save_pairs")) save_pairs = controller["dMatrix"]["save_pairs"];
-                if (controller["dMatrix"].contains("save_pd_text")) save_pd_text = controller["dMatrix"]["save_pd_text"];
-                if (controller["dMatrix"].contains("save_pd_image")) save_pd_image = controller["dMatrix"]["save_pd_image"];
-                if (controller["dMatrix"].contains("save_pi_text")) save_pi_text = controller["dMatrix"]["save_pi_text"];
-                if (controller["dMatrix"].contains("save_pi_image")) save_pi_image = controller["dMatrix"]["save_pi_image"];
             }
             std::cout << "Excluding bonds: " << exclude_bonds << std::endl;
             std::cout << "Printing elements: " << print_elements << std::endl;

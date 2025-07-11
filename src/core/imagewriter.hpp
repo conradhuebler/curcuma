@@ -32,11 +32,6 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
-using namespace Eigen;
-using MatrixXd = Eigen::MatrixXd;
-using MatrixXf = Eigen::MatrixXf;
-using MatrixXi = Eigen::MatrixXi;
-
 namespace ColorMaps {
     struct RGB { unsigned char r, g, b; };
 

@@ -163,7 +163,7 @@ if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/json.hpp)
 endif()
 
 if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/stb_image_write.h)
-  file(DOWNLOAD https://raw.githubusercontent.com/syoyo/tinygltf/refs/heads/release/stb_image_write.h ${PROJECT_SOURCE_DIR}/external/json.hpp
+  file(DOWNLOAD https://raw.githubusercontent.com/syoyo/tinygltf/refs/heads/release/stb_image_write.h ${PROJECT_SOURCE_DIR}/external/stb_image_write.h
        TIMEOUT 60  # seconds
        EXPECTED_HASH SHA256=bdbaa2c548ac9bde2913b6b46c4d315a04d2624c81ee1553390eb8fb2de2835d
        TLS_VERIFY ON)

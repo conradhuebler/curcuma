@@ -20,6 +20,7 @@
 #pragma once
 
 #include <iostream>
+#include <map>
 
 #include <Eigen/Dense>
 
