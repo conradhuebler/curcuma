@@ -728,7 +728,7 @@ int main(int argc, char **argv) {
                 {
                     int indexA = A[0], indexB = B[0];
                     FileIterator file(argv[2]);
-                    std::string outfile = argv[2];
+                    outfile = argv[2];
 
                     while (!file.AtEnd()) {
                         Molecule mol = file.Next();
@@ -862,10 +862,15 @@ int main(int argc, char **argv) {
             if (argc < 3) {
                 std::cerr << "Please use curcuma to calculate a distance matrix for a molecule as follows:\ncurcuma -dMatrix molecule.xyz [options]" << std::endl;
                 std::cerr << "\nFile output options:" << std::endl;
+                std::cerr << "  -exclude_bonds  Exclude bonds from distance matrix." << std::endl;
+                std::cerr << "  -print_elements  Print elements in distance matrix." << std::endl;
+                std::cerr << "  -print_energy    Print energy in distance matrix." << std::endl;
+                std::cerr << "  -stride          Process every N-th image (default: 1)." << std::endl;
                 std::cerr << "  -save_dmat       Save the distance matrix file (.dMat)." << std::endl;
                 std::cerr << "  -save_pairs      Save the persistence pairs file (.pairs)." << std::endl;
                 std::cerr << "  -save_pd_text    Save the persistence diagram as text (.PD)." << std::endl;
                 std::cerr << "  -save_pd_image   Save the persistence diagram as an image (default: true)." << std::endl;
+                std::cerr << "  -stride          Process every N-th image (default: 1)." << std::endl;
                 std::cerr << "  -save_pi_text    Save the persistence image as text (.PI)." << std::endl;
                 std::cerr << "  -save_pi_image   Save the persistence image as an image." << std::endl;
                 std::cerr << "\nImage options:" << std::endl;
@@ -897,13 +902,16 @@ int main(int argc, char **argv) {
             std::string format = "png";
             EigenImageWriter::ColorMap colormap = EigenImageWriter::HOT;
             int width = 800, height = 800;
-            bool save_dmat = false, save_pairs = false, save_pd_text = false, save_pd_image = true, save_pi_text = false, save_pi_image = false;
+            int stride = 1;
+            bool save_dmat = false, save_pairs = false, save_pd_text = false, save_pd_image = true, save_pi_text = false, save_pi_image = false, save_pd_average_image = false, save_pd_stddev_image = false, save_pi_average_image = false, save_pi_stddev_image = false;
             EigenImageWriter::PostProcessing post_processing = EigenImageWriter::NONE;
             double temperature = 2.0, damping = 1.5;
             bool preserve_structure = true;
 
             if (controller.contains("dMatrix")) {
                 json dMatrix_opts = controller["dMatrix"];
+                if (dMatrix_opts.contains("stride"))
+                    stride = dMatrix_opts["stride"];
                 if (dMatrix_opts.contains("exclude_bonds"))
                     exclude_bonds = dMatrix_opts["exclude_bonds"];
                 if (dMatrix_opts.contains("print_elements"))
@@ -922,6 +930,14 @@ int main(int argc, char **argv) {
                     save_pi_text = dMatrix_opts["save_pi_text"];
                 if (dMatrix_opts.contains("save_pi_image"))
                     save_pi_image = dMatrix_opts["save_pi_image"];
+                if (dMatrix_opts.contains("save_pd_average_image"))
+                    save_pd_average_image = dMatrix_opts["save_pd_average_image"];
+                if (dMatrix_opts.contains("save_pd_stddev_image"))
+                    save_pd_stddev_image = dMatrix_opts["save_pd_stddev_image"];
+                if (dMatrix_opts.contains("save_pi_average_image"))
+                    save_pi_average_image = dMatrix_opts["save_pi_average_image"];
+                if (dMatrix_opts.contains("save_pi_stddev_image"))
+                    save_pi_stddev_image = dMatrix_opts["save_pi_stddev_image"];
                 if (dMatrix_opts.contains("format"))
                     format = dMatrix_opts["format"].get<std::string>();
                 if (dMatrix_opts.contains("colormap")) {
@@ -969,7 +985,18 @@ int main(int argc, char **argv) {
                 outfile.pop_back();
 
             int index = 0;
+            Eigen::MatrixXd total_pd_image_sum;
+            Eigen::MatrixXd total_pi_image_sum;
+            Eigen::MatrixXd total_pd_image_sq_sum;
+            Eigen::MatrixXd total_pi_image_sq_sum;
+            int num_images = 0;
             while (!file.AtEnd()) {
+                if (stride > 1 && index % stride != 0) {
+                    file.Next();
+                    index++;
+                    continue;
+                }
+                std::cout << "Processing image " << index + 1 << " of " << file.MaxMolecules() << std::endl;
                 Molecule mol = file.Next();
 
                 std::ofstream input;
@@ -988,10 +1015,10 @@ int main(int argc, char **argv) {
                 diagram.setDistanceMatrix(vector);
                 diagram.setENScaling(mol.DeltaEN());
                 {
-                    auto l = diagram.generatePairs();
+                    auto l_pd = diagram.generatePairs();
                     if (save_pairs) {
                         input.open(outfile + "_" + std::to_string(index) + ".pairs", std::ios::out);
-                        for (const auto& r : l) {
+                        for (const auto& r : l_pd) {
                             input << r.first << " " << r.second << std::endl;
                         }
                         input.close();
@@ -999,27 +1026,70 @@ int main(int argc, char **argv) {
                     if (save_pd_text) {
                         std::cout << "Writing Persistence diagram as " + outfile + "_" + std::to_string(index) + ".PD" << std::endl;
                         input.open(outfile + "_" + std::to_string(index) + ".PD", std::ios::out);
-                        input << diagram.generateImage(l);
+                        input << diagram.generateImage(l_pd);
                         input.close();
                     }
                     if (save_pd_image) {
-                        EigenImageWriter::saveMatrix(diagram.generateImage(l), outfile + "_" + std::to_string(index) + ".PD." + format, colormap, 90, false, width, height, post_processing, temperature, damping, preserve_structure);
+                        Eigen::MatrixXd pd_image_matrix = diagram.generateImage(l_pd);
+                        EigenImageWriter::saveMatrix(pd_image_matrix, outfile + "_" + std::to_string(index) + ".PD." + format, colormap, 90, false, width, height, post_processing, temperature, damping, preserve_structure);
+                    }
+                    Eigen::MatrixXd pd_image_matrix_for_acc = diagram.generateImage(l_pd);
+                    if (num_images == 0) {
+                        total_pd_image_sum = pd_image_matrix_for_acc;
+                        total_pd_image_sq_sum = pd_image_matrix_for_acc.array().square().matrix();
+                    } else {
+                        total_pd_image_sum += pd_image_matrix_for_acc;
+                        total_pd_image_sq_sum += pd_image_matrix_for_acc.array().square().matrix();
                     }
                 }
                 diagram.setDistanceMatrix(vector);
                 {
                     std::cout << "Writing Persistence Image (EN scaled bond topology) as " + outfile + "_" + std::to_string(index) + ".PI" << std::endl;
-                    auto l = diagram.generateTriples();
+                    auto l_pi = diagram.generateTriples();
                     if (save_pi_text) {
                         input.open(outfile + "_" + std::to_string(index) + ".PI", std::ios::out);
-                        input << diagram.generateImage(l);
+                        input << diagram.generateImage(l_pi);
                         input.close();
                     }
                     if (save_pi_image) {
-                        EigenImageWriter::saveMatrix(diagram.generateImage(l), outfile + "_" + std::to_string(index) + ".PI." + format, colormap, 90, false, width, height, post_processing, temperature, damping, preserve_structure);
+                        Eigen::MatrixXd pi_image_matrix = diagram.generateImage(l_pi);
+                        EigenImageWriter::saveMatrix(pi_image_matrix, outfile + "_" + std::to_string(index) + ".PI." + format, colormap, 90, false, width, height, post_processing, temperature, damping, preserve_structure);
+                    }
+                    Eigen::MatrixXd pi_image_matrix_for_acc = diagram.generateImage(l_pi);
+                    if (num_images == 0) {
+                        total_pi_image_sum = pi_image_matrix_for_acc;
+                        total_pi_image_sq_sum = pi_image_matrix_for_acc.array().square().matrix();
+                    } else {
+                        total_pi_image_sum += pi_image_matrix_for_acc;
+                        total_pi_image_sq_sum += pi_image_matrix_for_acc.array().square().matrix();
                     }
                 }
+                num_images++;
                 index++;
+            }
+            if (num_images > 0) {
+                if (save_pd_average_image) {
+                    Eigen::MatrixXd average_pd_image = total_pd_image_sum / num_images;
+                    EigenImageWriter::saveMatrix(average_pd_image, outfile + "_average.PD." + format, colormap, 90, false, width, height, post_processing, temperature, damping, preserve_structure);
+                }
+                if (save_pd_stddev_image) {
+                    Eigen::MatrixXd average_pd_image = total_pd_image_sum / num_images;
+                    Eigen::MatrixXd stddev_pd_image = ((total_pd_image_sq_sum / num_images) - average_pd_image.array().square().matrix()).cwiseSqrt();
+                    EigenImageWriter::saveMatrix(stddev_pd_image, outfile + "_stddev.PD." + format, colormap, 90, false, width, height, post_processing, temperature, damping, preserve_structure);
+                    Eigen::MatrixXd mean2std_matrix = average_pd_image.cwiseProduct(stddev_pd_image);
+                    EigenImageWriter::saveMatrix(mean2std_matrix, outfile + "_s2n.PI." + format, colormap, 90, false, width, height, post_processing, temperature, damping, preserve_structure);
+                }
+                if (save_pi_average_image) {
+                    Eigen::MatrixXd average_pi_image = total_pi_image_sum / num_images;
+                    EigenImageWriter::saveMatrix(average_pi_image, outfile + "_average.PI." + format, colormap, 90, false, width, height, post_processing, temperature, damping, preserve_structure);
+                }
+                if (save_pi_stddev_image) {
+                    Eigen::MatrixXd average_pi_image = total_pi_image_sum / num_images;
+                    Eigen::MatrixXd stddev_pi_image = ((total_pi_image_sq_sum / num_images) - average_pi_image.array().square().matrix()).cwiseSqrt();
+                    EigenImageWriter::saveMatrix(stddev_pi_image, outfile + "_stddev.PI." + format, colormap, 90, false, width, height, post_processing, temperature, damping, preserve_structure);
+                    Eigen::MatrixXd mean2std_matrix = average_pi_image.cwiseProduct(stddev_pi_image);
+                    EigenImageWriter::saveMatrix(mean2std_matrix, outfile + "_s2n.PI." + format, colormap, 90, false, width, height, post_processing, temperature, damping, preserve_structure);
+                }
             }
         } else if (strcmp(argv[1], "-center") == 0) {
             if (argc < 3) {
