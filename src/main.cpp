@@ -135,9 +135,9 @@ void Distance(const Molecule &mol, char **argv)
     std::cout << "Hydrogen bond length " << mol.CalculateDistance(proton - 1, acceptor - 1) << std::endl;
 }
 
-double DotProduct(const Vector& pos1, const Vector& pos2)
+double DotProduct(const Eigen::Vector3d& pos1, const Eigen::Vector3d& pos2)
 {
-    return pos1[0] * pos2[0] + pos1[1] * pos2[1] + pos1[2] * pos2[2];
+    return pos1.dot(pos2);
 }
 
 int main(int argc, char **argv) {
@@ -305,9 +305,9 @@ int main(int argc, char **argv) {
             } else if (metric == "ripser") {
                 PersistentDiagram pd(controller["compare"]);
                 pd.setDistanceMatrix(molecule1.LowerDistanceVector());
-                Matrix image_a = pd.generateImage(pd.generatePairs());
+                Eigen::MatrixXd image_a = pd.generateImage(pd.generatePairs());
                 pd.setDistanceMatrix(molecule2.LowerDistanceVector());
-                Matrix image_b = pd.generateImage(pd.generatePairs());
+                Eigen::MatrixXd image_b = pd.generateImage(pd.generatePairs());
                 std::cout << "Persistence diagram for " << reffile << ": " << std::endl;
                 std::cout << image_a << std::endl;
                 std::cout << "Persistence diagram for " << tarfile << ": " << std::endl;
@@ -872,6 +872,11 @@ int main(int argc, char **argv) {
                 std::cerr << "  -format <format> Image format (png, jpg, bmp, tga, default: png)." << std::endl;
                 std::cerr << "  -colormap <map>  Colormap (grayscale, jet, hot, viridis, coolwarm, default: hot)." << std::endl;
                 std::cerr << "  -resolution <w>x<h> Image resolution (default: 800x800)." << std::endl;
+                std::cerr << "  Post-processing options:" << std::endl;
+                std::cerr << "  -post_processing <type> Post-processing type (none, adaptive, ring_focused, default: none)." << std::endl;
+                std::cerr << "  -temperature <f>      Temperature for adaptive scaling (default: 2.0)." << std::endl;
+                std::cerr << "  -damping <f>          Damping for adaptive scaling (default: 1.5)." << std::endl;
+                std::cerr << "  -preserve_structure <true|false> Preserve structure in adaptive scaling (default: true)." << std::endl;
                 std::cerr << "\nPersistence diagram options:" << std::endl;
                 std::cerr << "  -ripser_xmax <f>  Max x-value for persistence diagram (default: 4.0)." << std::endl;
                 std::cerr << "  -ripser_xmin <f>  Min x-value for persistence diagram (default: 0.0)." << std::endl;
@@ -893,6 +898,9 @@ int main(int argc, char **argv) {
             EigenImageWriter::ColorMap colormap = EigenImageWriter::HOT;
             int width = 800, height = 800;
             bool save_dmat = false, save_pairs = false, save_pd_text = false, save_pd_image = true, save_pi_text = false, save_pi_image = false;
+            EigenImageWriter::PostProcessing post_processing = EigenImageWriter::NONE;
+            double temperature = 2.0, damping = 1.5;
+            bool preserve_structure = true;
 
             if (controller.contains("dMatrix")) {
                 json dMatrix_opts = controller["dMatrix"];
@@ -935,6 +943,19 @@ int main(int argc, char **argv) {
                         width = height = std::stoi(res);
                     }
                 }
+                if (dMatrix_opts.contains("post_processing")) {
+                    std::string pp = dMatrix_opts["post_processing"].get<std::string>();
+                    if (pp == "adaptive")
+                        post_processing = EigenImageWriter::ADAPTIVE;
+                    else if (pp == "ring_focused")
+                        post_processing = EigenImageWriter::RING_FOCUSED;
+                }
+                if (dMatrix_opts.contains("temperature"))
+                    temperature = dMatrix_opts["temperature"];
+                if (dMatrix_opts.contains("damping"))
+                    damping = dMatrix_opts["damping"];
+                if (dMatrix_opts.contains("preserve_structure"))
+                    preserve_structure = dMatrix_opts["preserve_structure"];
             }
             std::cout << "Excluding bonds: " << exclude_bonds << std::endl;
             std::cout << "Printing elements: " << print_elements << std::endl;
@@ -982,7 +1003,7 @@ int main(int argc, char **argv) {
                         input.close();
                     }
                     if (save_pd_image) {
-                        EigenImageWriter::saveMatrix(diagram.generateImage(l), outfile + "_" + std::to_string(index) + ".PD." + format, colormap, 90, false, width, height);
+                        EigenImageWriter::saveMatrix(diagram.generateImage(l), outfile + "_" + std::to_string(index) + ".PD." + format, colormap, 90, false, width, height, post_processing, temperature, damping, preserve_structure);
                     }
                 }
                 diagram.setDistanceMatrix(vector);
@@ -995,7 +1016,7 @@ int main(int argc, char **argv) {
                         input.close();
                     }
                     if (save_pi_image) {
-                        EigenImageWriter::saveMatrix(diagram.generateImage(l), outfile + "_" + std::to_string(index) + ".PI." + format, colormap, 90, false, width, height);
+                        EigenImageWriter::saveMatrix(diagram.generateImage(l), outfile + "_" + std::to_string(index) + ".PI." + format, colormap, 90, false, width, height, post_processing, temperature, damping, preserve_structure);
                     }
                 }
                 index++;
@@ -1190,6 +1211,67 @@ int main(int argc, char **argv) {
             std::cout << "Square Sum of Residuals of Magnitudes" << std::endl
             << "linear: " << r2_lin_diffofnorm << std::endl
             << "nonlinear: " << r2_nlin_diffofnorm << std::endl;
+
+        } else if (strcmp(argv[1], "-dipole_calc") == 0) {
+            if (argc < 5) {
+                std::cerr << "Please use curcuma to optimise the dipole of molecules as follow:\ncurcuma -dipole molecule.xyz -scaling_json scaling_vector.json" << std::endl;
+                return 0;
+            }
+            FileIterator file(argv[2]);
+            auto lm_basename = file.Basename();
+            const json blob = controller["dipole_calc"]; // declare blob as json, const why not used for now
+            int m_natoms;
+            Molecule mol;
+            while (!file.AtEnd()) { // calculation and output dipole moment
+                mol = file.Next(); // load Molecule
+                mol.Center(false); // sets the Centroid to the origin
+                EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb
+                interface.setMolecule(mol.getMolInfo()); // set molecule
+                interface.CalculateEnergy(false, true); // calc energy and Wave function
+                mol.setPartialCharges(interface.Charges()); // calc partial Charges and set it to mol
+                mol.setDipole(interface.Dipole() * au); // calc dipole moments and set it to mol in eA
+                m_natoms = mol.AtomCount();
+            }
+
+            std::vector<double> scaling_vector_linear = std::vector<double>(m_natoms, 1);
+            std::vector<double> scaling_vector_nonlinear = std::vector<double>(m_natoms, 1);
+            if (strcmp(argv[4], "none") != 0) {
+                json scaling;
+                std::ifstream file1(argv[4]);
+                try {
+                    file1 >> scaling;
+                } catch ([[maybe_unused]] nlohmann::json::type_error& e) {
+                    throw 404;
+                } catch ([[maybe_unused]] nlohmann::json::parse_error& e) {
+                    throw 404;
+                }
+                std::string str1, str2;
+                try {
+                    str1 = scaling["scaling_vector_linear"];
+                    str2 = scaling["scaling_vector_nonlinear"];
+                } catch ([[maybe_unused]] json::type_error& e) {
+                }
+                if (!str1.empty()) {
+                    scaling_vector_linear = Tools::String2DoubleVec(str1, "|");
+                }
+                if (!str2.empty()) {
+                    scaling_vector_nonlinear = Tools::String2DoubleVec(str2, "|");
+                }
+            }
+            std::cout << "scaling_vector_linear:\n"
+                      << scaling_vector_linear[0] << std::endl;
+            std::cout << "scaling_vector_nonlinear:\n"
+                      << scaling_vector_nonlinear[0] << std::endl;
+
+            auto dipole_lin = mol.CalculateDipoleMoment(scaling_vector_linear);
+            auto dipole_nlin = mol.CalculateDipoleMoment(scaling_vector_nonlinear);
+
+            std::cout << "Dipole form xtb2: "
+                      << mol.getDipole().norm() << " [eA] " << mol.getDipole().norm() * 4.803 << " [D] " << std::endl;
+            std::cout << "Dipole form partial Charges and lin. Scaling: "
+                      << dipole_lin.norm() << " [eA] " << dipole_lin.norm() * 4.803 << " [D] " << std::endl;
+            std::cout << "Dipole form partial Charges and nonlin. Scaling: "
+                      << dipole_nlin.norm() << " [eA] " << dipole_nlin.norm() * 4.803 << " [D] " << std::endl;
 
         } else if (strcmp(argv[1], "-dipole_calc") == 0) {
             if (argc < 5) {
