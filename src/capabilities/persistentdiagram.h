@@ -52,7 +52,8 @@ static const json RipserJson = {
     { "ripser_stdy", 10 },
     { "ripser_ratio", 1 },
     { "ripser_dimension", 2 },
-    { "ripser_epsilon", 0.4 }
+    { "ripser_epsilon", 0.4 },
+    { "ripser_min", 0 }
 };
 
 class PersistentDiagram : public CurcumaMethod {
@@ -151,6 +152,7 @@ private:
     double m_std_x = 10;
     double m_std_y = 10;
     double m_epsilon = 0.4;
+    double m_min = 0;
     std::vector<float> m_compressed_lower_distance_matrix;
     std::vector<double> m_en_scaling;
 };

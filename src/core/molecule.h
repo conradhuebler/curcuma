@@ -108,7 +108,7 @@ class Molecule
     Geometry getGeometry(bool protons = true) const;
 
     std::string LowerDistanceMatrix(bool exclude_bonds = false, bool print_elements = false) const;
-    std::vector<float> LowerDistanceVector() const;
+    std::vector<float> LowerDistanceVector(bool exclude_hydrogen = false) const;
     std::vector<double> DeltaEN() const;
 
     bool setGeometry(const Geometry &geometry);
@@ -201,7 +201,7 @@ class Molecule
     std::string Header() const;
 
     void CalculateRotationalConstants();
-    void AlignAxis();
+    void AlignAxis(const std::vector<int>& axisPermutation, const std::vector<int>& axisOrientation);
 
     inline double Ia() const { return m_Ia; }
     inline double Ib() const { return m_Ib; }

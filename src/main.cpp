@@ -894,15 +894,18 @@ int main(int argc, char **argv) {
                 std::cerr << "  -ripser_ratio <f> Ratio for ripser calculation (default: 1.0)." << std::endl;
                 std::cerr << "  -ripser_dimension <n> Dimension for ripser calculation (default: 2)." << std::endl;
                 std::cerr << "  -ripser_epsilon <f> Epsilon for ripser calculation (default: 0.4)." << std::endl;
+                std::cerr << "  -ripser_max <f>  Max value for ripser calculation (default: 0.0)." << std::endl;
                 return 0;
             }
             bool exclude_bonds = false;
             bool print_elements = false;
             bool print_energy = false;
+            bool exclude_hydrogen = true;
             std::string format = "png";
             EigenImageWriter::ColorMap colormap = EigenImageWriter::HOT;
             int width = 800, height = 800;
             int stride = 1;
+            double min = 0;
             bool save_dmat = false, save_pairs = false, save_pd_text = false, save_pd_image = true, save_pi_text = false, save_pi_image = false, save_pd_average_image = false, save_pd_stddev_image = false, save_pi_average_image = false, save_pi_stddev_image = false;
             EigenImageWriter::PostProcessing post_processing = EigenImageWriter::NONE;
             double temperature = 2.0, damping = 1.5;
@@ -1009,7 +1012,7 @@ int main(int argc, char **argv) {
                     input.close();
                 }
 
-                auto vector = mol.LowerDistanceVector();
+                auto vector = mol.LowerDistanceVector(exclude_hydrogen);
 
                 PersistentDiagram diagram(controller["dMatrix"]);
                 diagram.setDistanceMatrix(vector);

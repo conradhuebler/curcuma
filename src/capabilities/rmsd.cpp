@@ -905,12 +905,12 @@ void RMSDDriver::ReorderMolecule()
     auto R = GetOperateVectors(m_reference, m_target);
     Eigen::Matrix3d rotation = R.first;
 
-    auto blob = MakeCostMatrix(OptimiseRotation(rotation));
+    auto initial_costmatrix = MakeCostMatrix(OptimiseRotation(rotation));
 
     // if (m_method == 4)
     //     blob.first = 1;
     if (m_method != 6)
-        InsertRotation(blob);
+        InsertRotation(initial_costmatrix);
     if (m_method == 1)
         ReorderIncremental();
     else if (m_method == 2)
@@ -1074,61 +1074,181 @@ Matrix RMSDDriver::OptimiseRotation(const Eigen::Matrix3d& rotation)
 
 void RMSDDriver::TemplateFree()
 {
-    auto R = GetOperateVectors(m_reference, m_target);
-    Eigen::Matrix3d rotation = R.first;
+    // === INTELLIGENTE VORFILTERUNG BASIEREND AUF TRÄGHEITSMOMENTEN ===
 
-    // Eigen::Matrix3d n = OptimiseRotation(R.first);
-    for (int i = 0; i < 360; i += 60) {
-        Eigen::Matrix3d m = Eigen::Matrix3d::Zero();
-        m(0, 0) = 1;
-        m(1, 1) = 1;
-        m(2, 2) = 1;
-        m = m * Eigen::AngleAxisd(i, Eigen::Vector3d::UnitX());
-        // std::cout << m << std::endl;
+    // Trägheitsmomente berechnen
+    Molecule refTemp = m_reference;
+    Molecule targTemp = m_target;
+    refTemp.CalculateRotationalConstants();
+    targTemp.CalculateRotationalConstants();
 
-        auto blob = MakeCostMatrix(OptimiseRotation(m));
-        //      std::cout << blob.first << " " << std::endl;
-        m_cost_limit = blob.first;
+    std::vector<double> refMoments = { refTemp.Ia(), refTemp.Ib(), refTemp.Ic() };
+    std::vector<double> targMoments = { targTemp.Ia(), targTemp.Ib(), targTemp.Ic() };
 
-        //    if (m_method == 4)
-        //        blob.first = 1;
-        InsertRotation(blob);
+    //  std::cout << "Ref Trägheitsmomente: [" << refMoments[0] << ", " << refMoments[1] << ", " << refMoments[2] << "]" << std::endl;
+    //  std::cout << "Targ Trägheitsmomente: [" << targMoments[0] << ", " << targMoments[1] << ", " << targMoments[2] << "]" << std::endl;
+
+    // Alle Permutationen bewerten und filtern
+    std::vector<std::vector<int>> allPermutations = {
+        { 0, 1, 2 }, { 0, 2, 1 }, { 1, 0, 2 }, { 1, 2, 0 }, { 2, 0, 1 }, { 2, 1, 0 }
+    };
+
+    auto evaluatePermutation = [&](const std::vector<int>& perm) -> double {
+        double totalDiff = 0.0;
+        for (int i = 0; i < 3; i++) {
+            double refMoment = refMoments[i];
+            double targMoment = targMoments[perm[i]];
+            double relativeDiff = std::abs(refMoment - targMoment) / std::max(refMoment, targMoment);
+            totalDiff += relativeDiff;
+        }
+        return totalDiff;
+    };
+
+    // Permutationen nach Güte sortieren
+    std::vector<std::pair<double, std::vector<int>>> scoredPermutations;
+    for (const auto& perm : allPermutations) {
+        double score = evaluatePermutation(perm);
+        scoredPermutations.push_back({ score, perm });
+        // std::cout << "Permutation [" << perm[0] << "," << perm[1] << "," << perm[2] << "] Score: " << score << std::endl;
     }
-    for (int j = 0; j < 360; j += 60) {
-        Eigen::Matrix3d m = Eigen::Matrix3d::Zero();
-        m(0, 0) = 1;
-        m(1, 1) = 1;
-        m(2, 2) = 1;
-        m = m * Eigen::AngleAxisd(j, Eigen::Vector3d::UnitY());
-        // std::cout << m << std::endl;
+    std::sort(scoredPermutations.begin(), scoredPermutations.end());
 
-        auto blob = MakeCostMatrix(OptimiseRotation(m));
-        //     std::cout << blob.first << " " << std::endl ;
+    // Nur die besten Permutationen nehmen
+    std::vector<std::vector<int>> permutations;
+    double threshold = 0.5; // Anpassbar
+    int maxPerms = 3; // Max Anzahl
 
-        m_cost_limit = blob.first;
-
-        //   if (m_method == 4)
-        //       blob.first = 1;
-        InsertRotation(blob);
+    for (const auto& scored : scoredPermutations) {
+        if ((scored.first <= threshold || permutations.size() < 2) && permutations.size() < maxPerms) {
+            permutations.push_back(scored.second);
+            // std::cout << "Nutze Permutation [" << scored.second[0] << "," << scored.second[1] << "," << scored.second[2] << "] mit Score: " << scored.first << std::endl;
+        }
     }
-    for (int k = 0; k < 360; k += 60) {
-        Eigen::Matrix3d m = Eigen::Matrix3d::Zero();
-        m(0, 0) = 1;
-        m(1, 1) = 1;
-        m(2, 2) = 1;
-        m = m * Eigen::AngleAxisd(k, Eigen::Vector3d::UnitZ());
-        // std::cout << m << std::endl;
 
-        auto blob = MakeCostMatrix(OptimiseRotation(m));
-        //    std::cout << blob.first << " " << std::endl ;
+    // Orientierungen reduzieren (optional)
+    // std::vector<std::vector<int>> orientations = {
+    //      {1, 1, 1}, {-1, 1, 1}, {1, -1, 1}, {1, 1, -1}  // Nur 4 statt 8
+    // };
+    //  Oder alle 8 wenn gewünscht:
 
-        m_cost_limit = blob.first;
-
-        //   if (m_method == 4)
-        //       blob.first = 1;
-        InsertRotation(blob);
+    std::vector<std::vector<int>> orientations;
+    for (int i = 0; i < 8; i++) {
+        orientations.push_back({ (i & 1) ? 1 : -1,
+            (i & 2) ? 1 : -1,
+            (i & 4) ? 1 : -1 });
     }
+
+    // === ENDE VORFILTERUNG ===
+
+    int bestRefPerm = 0, bestRefOrient = 0;
+    int bestTargPerm = 0, bestTargOrient = 0;
+
+    /* std::cout << "Teste " << permutations.size() << " x " << orientations.size()
+               << " x " << permutations.size() << " x " << orientations.size()
+               << " = " << std::pow(permutations.size() * orientations.size(), 2)
+               << " Kombinationen (vs " << std::pow(6 * 8, 2) << " ohne Filter)..." << std::endl;
+     */
+    int counter = 0;
+
+    Molecule reference = m_reference;
+    Molecule target = m_target;
+
+    // Alle Kombinationen für Reference und Target testen
+    for (int refPerm = 0; refPerm < permutations.size(); refPerm++) {
+        for (int refOrient = 0; refOrient < orientations.size(); refOrient++) {
+            for (int targPerm = 0; targPerm < permutations.size(); targPerm++) {
+                for (int targOrient = 0; targOrient < orientations.size(); targOrient++) {
+                    counter++;
+
+                    // Reference ausrichten
+                    reference.AlignAxis(permutations[refPerm], orientations[refOrient]);
+
+                    // Target ausrichten
+                    target.AlignAxis(permutations[targPerm], orientations[targOrient]);
+
+                    // Kostmatrix berechnen
+                    auto costmatrix = MakeCostMatrix(reference.getGeometry(), target.getGeometry());
+
+                    // An InsertRotation übergeben
+                    InsertRotation(costmatrix);
+                }
+            }
+        }
+    }
+
+    // std::cout << "Fertig! Getestet: " << counter << " Kombinationen" << std::endl;
 }
+
+/*
+    Molecule reference = m_reference;
+    Molecule target = m_target;
+    reference.AlignAxis();
+    reference.writeXYZFile("reference.xyz");
+    target.AlignAxis();
+    target.writeXYZFile("target.xyz");
+    auto costmatrix = MakeCostMatrix(reference.getGeometry(), target.getGeometry());
+    m_cost_limit = costmatrix.first;
+    InsertRotation(costmatrix);
+    */
+/*
+Matrix inertia = m_reference.momentOfInertia();
+
+auto R = GetOperateVectors(m_reference, m_target);
+Eigen::Matrix3d rotation = R.first;
+
+// Eigen::Matrix3d n = OptimiseRotation(R.first);
+for (int i = 0; i < 360; i += 60) {
+    Eigen::Matrix3d m = Eigen::Matrix3d::Zero();
+    m(0, 0) = 1;
+    m(1, 1) = 1;
+    m(2, 2) = 1;
+    m = m * Eigen::AngleAxisd(i, Eigen::Vector3d::UnitX());
+    // std::cout << m << std::endl;
+
+    auto blob = MakeCostMatrix(OptimiseRotation(m));
+    //      std::cout << blob.first << " " << std::endl;
+    m_cost_limit = blob.first;
+
+    //    if (m_method == 4)
+    //        blob.first = 1;
+    InsertRotation(blob);
+}
+for (int j = 0; j < 360; j += 60) {
+    Eigen::Matrix3d m = Eigen::Matrix3d::Zero();
+    m(0, 0) = 1;
+    m(1, 1) = 1;
+    m(2, 2) = 1;
+    m = m * Eigen::AngleAxisd(j, Eigen::Vector3d::UnitY());
+    // std::cout << m << std::endl;
+
+    auto blob = MakeCostMatrix(OptimiseRotation(m));
+    //     std::cout << blob.first << " " << std::endl ;
+
+    m_cost_limit = blob.first;
+
+    //   if (m_method == 4)
+    //       blob.first = 1;
+    InsertRotation(blob);
+}
+for (int k = 0; k < 360; k += 60) {
+    Eigen::Matrix3d m = Eigen::Matrix3d::Zero();
+    m(0, 0) = 1;
+    m(1, 1) = 1;
+    m(2, 2) = 1;
+    m = m * Eigen::AngleAxisd(k, Eigen::Vector3d::UnitZ());
+    // std::cout << m << std::endl;
+
+    auto blob = MakeCostMatrix(OptimiseRotation(m));
+    //    std::cout << blob.first << " " << std::endl ;
+
+    m_cost_limit = blob.first;
+
+    //   if (m_method == 4)
+    //       blob.first = 1;
+    InsertRotation(blob);
+}
+*/
+//}
 
 void RMSDDriver::InsertRotation(std::pair<double, Matrix>& rotation)
 {

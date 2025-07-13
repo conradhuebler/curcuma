@@ -888,11 +888,15 @@ std::string Molecule::LowerDistanceMatrix(bool exclude_bonds, bool print_element
     return matrix;
 }
 
-std::vector<float> Molecule::LowerDistanceVector() const
+std::vector<float> Molecule::LowerDistanceVector(bool exclude_hydrogen) const
 {
     std::vector<float> vector;
     for (int i = 0; i < AtomCount(); ++i) {
+        if (exclude_hydrogen && Atom(i).first == 1)
+            continue; // skip hydrogen
         for (int j = 0; j < i; ++j) {
+            if (exclude_hydrogen && Atom(j).first == 1)
+                continue; // skip hydrogen
             vector.push_back((CalculateDistance(i, j)));
         }
     }
@@ -1299,31 +1303,25 @@ void Molecule::CalculateRotationalConstants()
     m_Ic = conv2 / (diag_I.eigenvalues()(2) * conv);
 }
 
-void Molecule::AlignAxis()
+void Molecule::AlignAxis(const std::vector<int>& axisPermutation,
+    const std::vector<int>& axisOrientation)
 {
     CalculateRotationalConstants();
+
+    // Rotationsmatrix basierend auf Permutation und Orientierung konstruieren
+    Eigen::Matrix3d sourceAxes;
+    sourceAxes.col(0) = axisOrientation[0] * m_alignmentAxes.col(axisPermutation[0]);
+    sourceAxes.col(1) = axisOrientation[1] * m_alignmentAxes.col(axisPermutation[1]);
+    sourceAxes.col(2) = axisOrientation[2] * m_alignmentAxes.col(axisPermutation[2]);
+
+    // Rechtshändiges System sicherstellen
+    if (sourceAxes.determinant() < 0) {
+        sourceAxes.col(2) *= -1;
+    }
+
+    // Geometrie transformieren
     Geometry coordinates = getGeometry(true);
-    {
-        Eigen::Vector3d alignmentAxis = m_alignmentAxes.col(0);
-        Eigen::Vector3d referenceAxis = Eigen::Vector3d::UnitZ(); // Specify the desired reference axis (e.g., z-axis)
-        Eigen::Quaterniond alignmentQuaternion;
-        alignmentQuaternion.setFromTwoVectors(alignmentAxis, referenceAxis);
-        coordinates = (alignmentQuaternion.toRotationMatrix() * getGeometry().transpose()).transpose();
-    }
-    {
-        Eigen::Vector3d alignmentAxis = m_alignmentAxes.col(1);
-        Eigen::Vector3d referenceAxis = Eigen::Vector3d::UnitY(); // Specify the desired reference axis (e.g., z-axis)
-        Eigen::Quaterniond alignmentQuaternion;
-        alignmentQuaternion.setFromTwoVectors(alignmentAxis, referenceAxis);
-        coordinates = (alignmentQuaternion.toRotationMatrix() * getGeometry().transpose()).transpose();
-    }
-    {
-        Eigen::Vector3d alignmentAxis = m_alignmentAxes.col(2);
-        Eigen::Vector3d referenceAxis = Eigen::Vector3d::UnitX(); // Specify the desired reference axis (e.g., z-axis)
-        Eigen::Quaterniond alignmentQuaternion;
-        alignmentQuaternion.setFromTwoVectors(alignmentAxis, referenceAxis);
-        coordinates = (alignmentQuaternion.toRotationMatrix() * getGeometry().transpose()).transpose();
-    }
+    coordinates = (sourceAxes.transpose() * coordinates.transpose()).transpose();
     setGeometry(coordinates);
 }
 

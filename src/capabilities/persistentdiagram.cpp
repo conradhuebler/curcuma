@@ -57,7 +57,7 @@ PersistentDiagram::PersistentDiagram(const json& config, bool silent)
     m_std_y = m_defaults["ripser_stdy"];
     m_dimension = m_defaults["ripser_dimension"];
     m_epsilon = m_defaults["ripser_epsilon"];
-
+    m_min = m_defaults["ripser_min"];
     m_threshold = std::numeric_limits<float>::max();
     checkHelp();
 }
@@ -167,6 +167,8 @@ Eigen::MatrixXd PersistentDiagram::generateImage(const dpairs& pairs)
             for (const auto& pair : pairs) {
                 double x = pair.first;
                 double y = pair.second;
+                if (x < m_min || y < m_min)
+                    continue; // skip points outside the defined range
                 matrix(i, j) += m_scaling * exp(-((cur_x - x) * (cur_x - x) * m_std_x)) * exp((-(cur_y - y) * (cur_y - y) * m_std_y));
             }
         }
