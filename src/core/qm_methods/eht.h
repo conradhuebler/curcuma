@@ -1,5 +1,5 @@
 /*
- * <Extendend Hückel Theory Implementation in Cucuma. >
+ * <Extended Hückel Theory Implementation in Curcuma>
  * Copyright (C) 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -15,6 +15,12 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
+ * Extended Hückel Theory (EHT) is a semi-empirical quantum chemical method
+ * developed by Roald Hoffmann. This implementation provides:
+ * - Parameterized atomic orbital energies (VSIP values)
+ * - Slater-type orbital overlap and Hamiltonian matrix construction
+ * - Molecular orbital analysis and electronic structure calculations
+ * - Support for common organic elements (H, C, N, O, F)
  */
 
 #pragma once
@@ -22,6 +28,7 @@
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
+#include <memory>
 #include <set>
 #include <vector>
 
@@ -29,75 +36,159 @@
 
 #include "GTOIntegrals.hpp"
 #include "STOIntegrals.hpp"
+#include "eht_parameters.h"
 
 #include "interface/abstract_interface.h"
 #include "json.hpp"
 #include "qm_driver.h"
 
-struct ehtSTO_6GHs {
-    std::vector<double> alpha = { 0.3552322122E+02, 0.6513143725E+01, 0.1822142904E+01, 0.6259552659E+00, 0.2430767471E+00, 0.1001124280E+00 };
-    std::vector<double> coeff = { 0.9163596281E-02, 0.4936149294E-01, 0.1685383049E+00, 0.3705627997E+00, 0.4164915298E+00, 0.1303340841E+00 };
-};
-
-struct ehtSTO_6GCs {
-    std::vector<double> alpha = { 0.3049723950E+02, 0.6036199601E+01, 0.1876046337E+01, 0.7217826470E+00, 0.3134706954E+00, 0.1436865550E+00 };
-    std::vector<double> coeff = { -0.1325278809E-01, -0.4699171014E-01, -0.3378537151E-01, 0.2502417861E+00, 0.5951172526E+00, 0.2407061763E+00 };
-};
-
-struct ehtSTO_6GCp {
-    std::vector<double> alpha = { 0.3049723950E+02, 0.6036199601E+01, 0.1876046337E+01, 0.7217826470E+00, 0.3134706954E+00, 0.1436865550E+00 };
-    std::vector<double> coeff = { 0.3759696623E-02, 0.3767936984E-01, 0.1738967435E+00, 0.4180364347E+00, 0.4258595477E+00, 0.1017082955E+00 };
-};
-
-struct ehtSTO_6GNs {
-    std::vector<double> alpha = { 0.3919880787E+02, 0.7758467071E+01, 0.2411325783E+01, 0.9277239437E+00, 0.4029111410E+00, 0.1846836552E+00 };
-    std::vector<double> coeff = { -0.1325278809E-01, -0.4699171014E-01, -0.3378537151E-01, 0.2502417861E+00, 0.5951172526E+00, 0.2407061763E+00 };
-};
-
-struct ehtSTO_6GNp {
-    std::vector<double> alpha = { 0.3919880787E+02, 0.7758467071E+01, 0.2411325783E+01, 0.9277239437E+00, 0.4029111410E+00, 0.1846836552E+00 };
-    std::vector<double> coeff = { 0.3759696623E-02, 0.3767936984E-01, 0.1738967435E+00, 0.4180364347E+00, 0.4258595477E+00, 0.1017082955E+00 };
-};
-
-struct ehtSTO_6GOs {
-    std::vector<double> alpha = { 0.5218776196E+02, 0.1032932006E+02, 0.3210344977E+01, 0.1235135428E+01, 0.5364201581E+00, 0.2458806060E+00 };
-    std::vector<double> coeff = { -0.1325278809E-01, -0.4699171014E-01, -0.3378537151E-01, 0.2502417861E+00, 0.5951172526E+00, 0.2407061763E+00 };
-};
-
-struct ehtSTO_6GOp {
-    std::vector<double> alpha = { 0.5218776196E+02, 0.1032932006E+02, 0.3210344977E+01, 0.1235135428E+01, 0.5364201581E+00, 0.2458806060E+00 };
-    std::vector<double> coeff = { 0.3759696623E-02, 0.3767936984E-01, 0.1738967435E+00, 0.4180364347E+00, 0.4258595477E+00, 0.1017082955E+00 };
-};
-
-struct STO_6G {
-    std::vector<double> alpha, coeff;
-    int x = 0, y = 0, z = 0;
-    int index = 0;
-    std::string sym = "";
-    double e = 0;
-};
-
 typedef std::vector<STO::Orbital> Basisset;
 
+/**
+ * @brief Extended Hückel Theory (EHT) Implementation
+ *
+ * This class implements the Extended Hückel Theory method for semi-empirical
+ * quantum chemical calculations. EHT is particularly useful for studying
+ * molecular orbital interactions and electronic structure of organic molecules.
+ *
+ * Key features:
+ * - Parameterized atomic orbital energies based on VSIP values
+ * - Slater-type orbital basis functions
+ * - Wolfsberg-Helmholz approximation for off-diagonal Hamiltonian elements
+ * - Support for H, C, N, O, F atoms
+ * - Molecular orbital analysis and orbital energy calculation
+ *
+ * References:
+ * - Hoffmann, R. "An Extended Hückel Theory" J. Chem. Phys. 39, 1397 (1963)
+ * - Hoffmann, R. "Solids and Surfaces: A Chemist's View of Bonding" (1988)
+ */
 class EHT : public QMDriver {
 public:
+    /**
+     * @brief Default constructor
+     * Initializes EHT with default Wolfsberg-Helmholz constant K=1.75
+     */
     EHT();
-    virtual bool InitialiseMolecule(const Mol& molecule) override
-    {
-        m_mol = molecule;
-        return InitialiseMolecule();
-    }
-    virtual bool InitialiseMolecule() override;
-    virtual double Calculation(bool gradient = false, bool verbose = false);
 
+    /**
+     * @brief Constructor with custom Wolfsberg-Helmholz constant
+     * @param K Wolfsberg-Helmholz constant (typically 1.75)
+     */
+    explicit EHT(double K);
+
+    /**
+     * @brief Initialize molecule from Mol object
+     * @param molecule Molecule object containing geometry and atom types
+     * @return true if initialization successful
+     */
+    // virtual bool InitialiseMolecule(const Mol& molecule) override;
+
+    /**
+     * @brief Initialize molecule with current stored molecule data
+     * @return true if initialization successful
+     */
+    virtual bool InitialiseMolecule() override;
+
+    /**
+     * @brief Perform EHT calculation
+     * @param gradient Currently not supported for EHT (will print warning)
+     * @param verbose Enable detailed output of calculation progress
+     * @return Total electronic energy (currently returns 0, as EHT focuses on orbital energies)
+     */
+    virtual double Calculation(bool gradient = false, bool verbose = false) override;
+
+    /**
+     * @brief Get molecular orbital coefficients matrix
+     * @return Matrix where columns represent molecular orbitals
+     */
     Matrix MolecularOrbitals() const { return m_mo; }
+
+    /**
+     * @brief Get orbital energies in ascending order
+     * @return Vector of orbital energies in eV
+     */
     Vector Energies() const { return m_energies; }
+
+    /**
+     * @brief Get total number of valence electrons
+     * @return Number of electrons in the system
+     */
     int NumElectrons() const { return m_num_electrons; }
 
+    /**
+     * @brief Get HOMO-LUMO gap
+     * @return Energy gap between HOMO and LUMO in eV
+     */
+    double getHOMOLUMOGap() const;
+
+    /**
+     * @brief Get HOMO energy
+     * @return Highest Occupied Molecular Orbital energy in eV
+     */
+    double getHOMOEnergy() const;
+
+    /**
+     * @brief Get LUMO energy
+     * @return Lowest Unoccupied Molecular Orbital energy in eV
+     */
+    double getLUMOEnergy() const;
+
+    /**
+     * @brief Set Wolfsberg-Helmholz constant
+     * @param K New K value (typically between 1.5 and 2.0)
+     */
+    void setWolfsbergHelmholzConstant(double K) { m_K = K; }
+
+    /**
+     * @brief Get current Wolfsberg-Helmholz constant
+     * @return Current K value
+     */
+    double getWolfsbergHelmholzConstant() const { return m_K; }
+
+    /**
+     * @brief Print orbital analysis summary
+     * @param num_orbitals_around_gap Number of orbitals to show around HOMO-LUMO gap
+     */
+    void printOrbitalAnalysis(int num_orbitals_around_gap = 5) const;
+
 private:
-    // std::vector<STO_6G> MakeBasis();
+    /**
+     * @brief Construct basis set from molecular geometry and atom types
+     * @return Vector of STO::Orbital objects representing the basis set
+     */
     Basisset MakeBasis();
 
+    /**
+     * @brief Construct overlap matrix S
+     * @param basisset Basis set of atomic orbitals
+     * @return Overlap matrix S_ij = <φ_i|φ_j>
+     */
     Matrix MakeOverlap(Basisset& basisset) override;
+
+    /**
+     * @brief Construct Hamiltonian matrix using Wolfsberg-Helmholz approximation
+     * @param S Overlap matrix
+     * @param basisset Basis set of atomic orbitals
+     * @return Hamiltonian matrix H_ij
+     *
+     * Uses the approximation:
+     * H_ii = VSIP_i (Valence State Ionization Potential)
+     * H_ij = K * S_ij * (VSIP_i + VSIP_j) / 2  for i ≠ j
+     */
     Matrix MakeH(const Matrix& S, const Basisset& basisset) override;
+
+    /**
+     * @brief Validate that all atoms in molecule are supported
+     * @return true if all atoms have EHT parameters available
+     */
+    bool validateMolecule() const;
+
+    /**
+     * @brief Calculate total electronic energy (sum of occupied orbital energies)
+     * @return Total electronic energy in eV
+     */
+    double calculateElectronicEnergy() const;
+
+private:
+    double m_K; ///< Wolfsberg-Helmholz constant (typically 1.75)
 };

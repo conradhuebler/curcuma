@@ -42,6 +42,7 @@ const double fs2amu = 41.34137314;
 const double R = 8.31446261815324;
 const double atomic_mass = 1.66053906660e-27;
 const double T_Eh = 3.1577464e5;
+const double eV2Eh = 27.211386245988; // Hartree
 
 typedef Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> Geometry;
 typedef Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> Matrix;

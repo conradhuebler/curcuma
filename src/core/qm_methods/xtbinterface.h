@@ -68,6 +68,7 @@ public:
     Vector OrbitalOccupations() const;
 
     void setMethod(const std::string& method) override;
+    virtual bool hasGradient() const { return true; }
 
 private:
     double m_thr = 1.0e-10;

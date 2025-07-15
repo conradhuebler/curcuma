@@ -39,17 +39,18 @@ typedef std::vector<STO::Orbital> Basisset;
 class QMDriver : public QMInterface {
 public:
     QMDriver();
-    virtual bool InitialiseMolecule(const Mol& molecule) override
-    {
-        m_mol = molecule;
-        return InitialiseMolecule();
-    }
+
     virtual bool InitialiseMolecule() override;
     virtual double Calculation(bool gradient = false, bool verbose = false) = 0;
 
     Matrix MolecularOrbitals() const { return m_mo; }
     Vector Energies() const { return m_energies; }
     int NumElectrons() const { return m_num_electrons; }
+
+    double TotalEnergy() const
+    {
+        return m_total_energy;
+    }
 
 private:
     // std::vector<STO_6G> MakeBasis();
@@ -59,7 +60,8 @@ private:
     virtual Matrix MakeH(const Matrix& S, const Basisset& basisset) = 0;
 
 protected:
-    Mol m_mol;
+    double m_total_energy = 0;
+    // Mol m_mol;
     Matrix m_H, m_S;
     int m_num_electrons = 0;
     int m_threads = 4;

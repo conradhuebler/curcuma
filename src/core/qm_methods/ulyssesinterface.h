@@ -48,6 +48,7 @@ public:
     double Calculation(bool gradient = false, bool verbose = false) override;
     virtual Vector Charges() const override;
     virtual Vector OrbitalEnergies() const override;
+    virtual bool hasGradient() const { return true; }
 
 private:
     Mol m_mol;

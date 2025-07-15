@@ -70,6 +70,7 @@ public:
     Vector OrbitalEnergies() const override;
     Vector OrbitalOccupations() const override;
     void setMethod(const std::string& method) override;
+    virtual bool hasGradient() const { return true; }
 
 private:
     void ApplySolvation();

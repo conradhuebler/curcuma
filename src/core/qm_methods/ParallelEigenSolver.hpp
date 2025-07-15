@@ -96,6 +96,7 @@ inline bool parallelMatrixMultiply(const Eigen::MatrixXd& A, const Eigen::Matrix
 
         // Create thread pool for matrix multiplication
         CxxThreadPool threadPool;
+        threadPool.setProgressBar(CxxThreadPool::ProgressBarType::None);
         if (threadCount > 0) {
             threadPool.setActiveThreadCount(threadCount);
         }
@@ -585,6 +586,7 @@ public:
 
             // Thread pool for block diagonalization
             CxxThreadPool diagonalizationPool;
+            diagonalizationPool.setProgressBar(CxxThreadPool::ProgressBarType::None);
             if (threadCount > 0) {
                 diagonalizationPool.setActiveThreadCount(threadCount);
             }

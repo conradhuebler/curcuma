@@ -47,56 +47,7 @@ QMDriver::QMDriver()
 bool QMDriver::InitialiseMolecule()
 {
     m_num_electrons = 0;
-    m_mo = Matrix::Zero(m_mol.m_number_atoms, m_mol.m_number_atoms);
-    m_energies = Vector::Zero(m_mol.m_number_atoms);
+    m_mo = Matrix::Zero(m_atoms.size(), m_atoms.size());
+    m_energies = Vector::Zero(m_atoms.size());
     return true;
-}
-
-Matrix QMDriver::MakeOverlap(Basisset& basisset)
-{
-    Matrix S = Eigen::MatrixXd::Zero(basisset.size(), basisset.size());
-
-    // Aktualisiere die Atompositionen in allen Orbitalen
-    for (int i = 0; i < basisset.size(); ++i) {
-        basisset[i].x = m_mol.m_geometry(basisset[i].atom, 0) / 0.529177;
-        basisset[i].y = m_mol.m_geometry(basisset[i].atom, 1) / 0.529177;
-        basisset[i].z = m_mol.m_geometry(basisset[i].atom, 2) / 0.529177;
-    }
-
-    // Berechne die Überlappungsmatrix direkt
-    for (int i = 0; i < basisset.size(); ++i) {
-        for (int j = 0; j <= i; ++j) {
-            // Die verbesserte calculateOverlap Funktion gibt bereits
-            // normalisierte Werte zurück
-            double overlap = STO::calculateOverlap(basisset[i], basisset[j]);
-            S(i, j) = S(j, i) = overlap;
-
-            // Debug-Ausgabe für kritische Werte
-            // if (m_verbose) {
-            //    std::cout << "Overlap between orbital " << i << " and " << j
-            //              << ": " << overlap << std::endl;
-            //}
-        }
-    }
-
-    return S;
-}
-
-Matrix QMDriver::MakeH(const Matrix& S, const Basisset& basisset)
-{
-    double K = 1.75;
-    Matrix H = Eigen::MatrixXd::Zero(basisset.size(), basisset.size());
-    for (int i = 0; i < basisset.size(); ++i) {
-        STO::Orbital bi = basisset[i];
-        for (int j = 0; j < basisset.size(); ++j) {
-            STO::Orbital bj = basisset[j];
-            if (i == j)
-                H(i, j) = bi.VSIP;
-            else {
-                H(i, j) = K * S(i, j) * (bi.VSIP + bj.VSIP) / 2.0;
-                H(j, i) = K * S(j, i) * (bi.VSIP + bj.VSIP) / 2.0;
-            }
-        }
-    }
-    return H;
 }

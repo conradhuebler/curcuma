@@ -132,7 +132,11 @@ public:
         return UpdateMolecule();
     }
 
-    virtual bool UpdateMolecule() { return true; }
+    virtual bool UpdateMolecule()
+    {
+        // std::cout << m_geometry << std::endl;
+        return true;
+    }
     virtual bool Error() { return false; };
     virtual double Calculation(bool gradient = false, bool verbose = false) = 0;
 
@@ -152,6 +156,8 @@ public:
         m_spin = multi - 1;
         m_muli = multi;
     }
+
+    virtual bool hasGradient() const { return false; }
 
 protected:
     bool m_initialised = false;

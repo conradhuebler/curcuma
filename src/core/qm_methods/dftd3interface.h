@@ -66,6 +66,7 @@ public:
     inline double ParameterS6() const { return m_d3_s6; }
     inline double ParameterS8() const { return m_d3_s8; }
     inline double ParameterS9() const { return m_d3_s9; }
+    virtual bool hasGradient() const { return true; }
 
 private:
     void CreateParameter();

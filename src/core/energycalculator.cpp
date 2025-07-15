@@ -84,7 +84,7 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
     case 6:
         m_qminterface = new EHT();
         m_ecengine = [this](bool gradient, bool verbose) {
-            m_qminterface->Calculation(gradient, verbose);
+            this->CalculateQMInterface(gradient, verbose);
         };
         break;
 
@@ -416,6 +416,26 @@ double EnergyCalculator::CalculateEnergy(bool gradient, bool verbose)
     return m_energy;
 }
 
+Eigen::MatrixXd EnergyCalculator::NumGrad()
+{
+    Eigen::MatrixXd gradient = Eigen::MatrixXd::Zero(m_atoms, 3);
+
+    double dx = 1e-4; // m_d;
+    double E1, E2;
+    for (int i = 0; i < m_atoms; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            m_geometry(i, j) += dx;
+            E1 = CalculateEnergy(false, false);
+            m_geometry(i, j) -= 2 * dx;
+            E2 = CalculateEnergy(false, false);
+            //   std::cout << E1 << " " << E2 << " " << m_energy << std::endl;
+            gradient(i, j) = (E1 - E2) / (2 * dx);
+            m_geometry(i, j) += dx;
+        }
+    }
+    return gradient;
+}
+
 void EnergyCalculator::CalculateUFF(bool gradient, bool verbose)
 {
     /*
@@ -452,11 +472,22 @@ void EnergyCalculator::CalculateXTB(bool gradient, bool verbose)
 
 void EnergyCalculator::CalculateUlysses(bool gradient, bool verbose)
 {
-
     m_qminterface->UpdateMolecule(m_geometry);
     m_energy = m_qminterface->Calculation(gradient, verbose);
     if (gradient) {
         m_gradient = m_qminterface->Gradient();
+    }
+}
+
+void EnergyCalculator::CalculateQMInterface(bool gradient, bool verbose)
+{
+    m_qminterface->UpdateMolecule(m_geometry);
+    m_energy = m_qminterface->Calculation(gradient, verbose);
+    if (gradient) {
+        if (m_qminterface->hasGradient())
+            m_gradient = m_qminterface->Gradient();
+        else
+            m_gradient = NumGrad();
     }
 }
 

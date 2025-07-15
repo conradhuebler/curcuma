@@ -215,6 +215,7 @@ set(curcuma_core_SRC
         src/capabilities/hessian.cpp
         src/capabilities/qmdfffit.cpp
         src/core/qm_methods/eht.cpp
+        src/core/qm_methods/eht_parameters.cpp
         src/core/qm_methods/qm_driver.cpp
         src/core/qm_methods/ulyssesinterface.cpp
         src/core/energycalculator.cpp

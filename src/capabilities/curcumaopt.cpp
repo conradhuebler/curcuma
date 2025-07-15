@@ -340,7 +340,7 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, std::string& output, Vec
     EnergyCalculator interface(method, m_controller["sp"]);
     interface.setMolecule(initial->getMolInfo());
     json param = interface.Parameter();
-    double energy = interface.CalculateEnergy(true, true);
+    double energy = interface.CalculateEnergy(false, true);
     double store = 0;
 #ifdef USE_TBLITE
     if (method.compare("gfn2") == 0) {

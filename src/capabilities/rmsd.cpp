@@ -180,7 +180,7 @@ void RMSDDriver::LoadControlJson()
     m_maxtrial = Json2KeyWord<int>(m_defaults, "maxtrial");
     m_kmstat = Json2KeyWord<bool>(m_defaults, "kmstat");
     m_km_convergence = Json2KeyWord<double>(m_defaults, "km_conv");
-
+    m_target_rmsd = Json2KeyWord<double>(m_defaults, "target_rmsd");
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
         std::string element = m_defaults["Element"].get<std::string>();
@@ -906,9 +906,9 @@ void RMSDDriver::ReorderMolecule()
     Eigen::Matrix3d rotation = R.first;
 
     auto initial_costmatrix = MakeCostMatrix(OptimiseRotation(rotation));
-
-    // if (m_method == 4)
-    //     blob.first = 1;
+    // std::cout << initial_costmatrix.first << std::endl;
+    //  if (m_method == 4)
+    //      blob.first = 1;
     if (m_method != 6)
         InsertRotation(initial_costmatrix);
     if (m_method == 1)
@@ -998,6 +998,8 @@ void RMSDDriver::FinaliseTemplate()
         eq_counter += std::abs(rmsd - rmsd_prev) < m_km_convergence;
         incr_counter += rmsd > rmsd_prev;
         rmsd_prev = rmsd;
+        if (rmsd < m_target_rmsd)
+            break;
     }
     if (m_kmstat)
         result_file.close();
@@ -1170,6 +1172,7 @@ void RMSDDriver::TemplateFree()
                     auto costmatrix = MakeCostMatrix(reference.getGeometry(), target.getGeometry());
 
                     // An InsertRotation übergeben
+                    // std::cout << costmatrix.first << " " << std::endl;
                     InsertRotation(costmatrix);
                 }
             }

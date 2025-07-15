@@ -102,10 +102,11 @@ static const json RMSDJson = {
     { "nofree", false },
     { "limit", 10 },
     { "costmatrix", 1 },
-    { "maxtrial", 3 },
+    { "maxtrial", 5 },
     { "kmstat", false },
     { "km_conv", 1e-3 },
-    { "molalignarg", " -remap -fast -tol 10" }
+    { "molalignarg", " -remap -fast -tol 10" },
+    { "target_rmsd", 0.0 }
 };
 
 class RMSDDriver : public CurcumaMethod {
@@ -348,7 +349,7 @@ private:
     int m_limit = 10;
     int m_costmatrix = 1;
     int m_maxtrial = 2;
-    double m_cost_limit = 0;
+    double m_cost_limit = 0, m_target_rmsd = 0.0;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
     std::vector<int> m_initial, m_element_templates;
     std::vector<int> m_reference_atoms, m_target_atoms;

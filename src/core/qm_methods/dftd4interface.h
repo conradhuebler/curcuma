@@ -74,6 +74,8 @@ public:
 
     void PrintParameter() const;
 
+    virtual bool hasGradient() const { return true; }
+
 private:
     dftd4::dparam m_par;
     dftd4::TMolecule m_mol;

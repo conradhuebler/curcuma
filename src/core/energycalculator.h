@@ -101,6 +101,7 @@ public:
 
     std::vector<std::vector<double>> BondOrders() const;
     int NumElectrons() const { return m_num_electrons; }
+    Eigen::MatrixXd NumGrad();
 
 private:
     int SwitchMethod(const std::string& method);
@@ -116,6 +117,8 @@ private:
 
     void InitialiseUlysses();
     void CalculateUlysses(bool gradient, bool verbose = false);
+
+    void CalculateQMInterface(bool gradient, bool verbose = false);
 
     void InitialiseD4();
     void CalculateD4(bool gradient, bool verbose = false);
