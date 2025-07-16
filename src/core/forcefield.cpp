@@ -34,6 +34,12 @@ ForceField::ForceField(const json& controller)
     m_threadpool->setProgressBar(CxxThreadPool::ProgressBarType::None);
     m_threads = parameter["threads"];
     m_gradient_type = parameter["gradient"];
+    
+    // Auto-detect parameter file based on geometry file
+    if (parameter.contains("geometry_file")) {
+        std::string geom_file = parameter["geometry_file"];
+        m_auto_param_file = generateParameterFileName(geom_file);
+    }
 }
 
 ForceField::~ForceField()
@@ -68,21 +74,46 @@ void ForceField::UpdateGeometry(const std::vector<std::array<double, 3>>& geomet
 
 void ForceField::setParameter(const json& parameters)
 {
-    if (parameters.contains("bonds"))
-        setBonds(parameters["bonds"]);
-    if (parameters.contains("angles"))
-        setAngles(parameters["angles"]);
-    if (parameters.contains("dihedrals"))
-        setDihedrals(parameters["dihedrals"]);
-    if (parameters.contains("inversions"))
-        setInversions(parameters["inversions"]);
-    if (parameters.contains("vdws"))
-        setvdWs(parameters["vdws"]);
-    m_parameters = parameters;
-    m_method = m_parameters["method"];
-    if (m_parameters.contains("e0"))
-        m_e0 = m_parameters["e0"];
-    AutoRanges();
+    bool loaded_from_cache = false;
+    
+    // Try loading cached parameters if caching enabled and same method
+    if (m_enable_caching && parameters.contains("method")) {
+        std::string method = parameters["method"];
+        loaded_from_cache = tryLoadAutoParameters(method);
+    }
+    
+    if (!loaded_from_cache) {
+        // Set new parameters (generation or explicit)
+        if (parameters.contains("bonds"))
+            setBonds(parameters["bonds"]);
+        if (parameters.contains("angles"))
+            setAngles(parameters["angles"]);
+        if (parameters.contains("dihedrals"))
+            setDihedrals(parameters["dihedrals"]);
+        if (parameters.contains("inversions"))
+            setInversions(parameters["inversions"]);
+        if (parameters.contains("vdws"))
+            setvdWs(parameters["vdws"]);
+        m_parameters = parameters;
+        m_method = m_parameters["method"];
+        if (m_parameters.contains("e0"))
+            m_e0 = m_parameters["e0"];
+        
+        AutoRanges();
+        
+        // Auto-save new parameters (only if caching enabled)
+        if (m_enable_caching) {
+            autoSaveParameters();
+        }
+    }
+    
+    // Set method type for ForceFieldThread (regardless of cache)
+    int method_type = 1; // default UFF
+    if (m_method == "qmdff" || m_method == "quff") {
+        method_type = 2;
+    } else if (m_method == "gfnff") {
+        method_type = 3; // GFN-FF
+    }
 }
 
 void ForceField::setBonds(const json& bonds)
@@ -237,6 +268,8 @@ void ForceField::AutoRanges()
             thread->setMethod(1);
         } else if (std::find(m_qmdff_methods.begin(), m_qmdff_methods.end(), m_method) != m_qmdff_methods.end()) {
             thread->setMethod(2);
+        } else if (m_method == "gfnff") {
+            thread->setMethod(3); // GFN-FF
         }
         for (int j = int(i * m_bonds.size() / double(free_threads)); j < int((i + 1) * m_bonds.size() / double(free_threads)); ++j)
             thread->addBond(m_bonds[j]);
@@ -278,6 +311,236 @@ Eigen::MatrixXd ForceField::NumGrad()
     }
     // m_CalculateGradient = g;
     return gradient;
+}
+
+bool ForceField::saveParametersToFile(const std::string& filename) const
+{
+    try {
+        json output = exportCurrentParameters();
+        
+        std::ofstream file(filename);
+        if (!file.is_open()) {
+            std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
+            return false;
+        }
+        
+        file << output.dump(4); // Pretty print with 4 spaces
+        file.close();
+        
+        std::cout << "Force field parameters saved to: " << filename << std::endl;
+        return true;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Error saving parameters: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+bool ForceField::loadParametersFromFile(const std::string& filename)
+{
+    try {
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
+            return false;
+        }
+        
+        json loaded_params;
+        file >> loaded_params;
+        file.close();
+        
+        // Validate that this is a force field parameter file
+        if (!loaded_params.contains("method") || !loaded_params.contains("bonds")) {
+            std::cerr << "Error: Invalid force field parameter file format" << std::endl;
+            return false;
+        }
+        
+        // Apply loaded parameters
+        setParameter(loaded_params);
+        
+        std::cout << "Force field parameters loaded from: " << filename << std::endl;
+        std::cout << "Method: " << loaded_params["method"] << std::endl;
+        std::cout << "Bonds: " << loaded_params["bonds"].size() << std::endl;
+        std::cout << "Angles: " << loaded_params["angles"].size() << std::endl;
+        
+        return true;
+        
+    } catch (const std::exception& e) {
+        std::cerr << "Error loading parameters: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+json ForceField::exportCurrentParameters() const
+{
+    json output;
+    
+    // Method identification
+    output["method"] = m_method;
+    output["natoms"] = m_natoms;
+    output["e0"] = m_e0;
+    
+    // Export bonds
+    json bonds = json::array();
+    for (const auto& bond : m_bonds) {
+        json b;
+        b["type"] = bond.type;
+        b["i"] = bond.i;
+        b["j"] = bond.j;
+        b["k"] = bond.k;
+        b["distance"] = bond.distance;
+        b["fc"] = bond.fc;
+        b["exponent"] = bond.exponent;
+        b["r0_ij"] = bond.r0_ij;
+        b["r0_ik"] = bond.r0_ik;
+        bonds.push_back(b);
+    }
+    output["bonds"] = bonds;
+    
+    // Export angles
+    json angles = json::array();
+    for (const auto& angle : m_angles) {
+        json a;
+        a["type"] = angle.type;
+        a["i"] = angle.i;
+        a["j"] = angle.j;
+        a["k"] = angle.k;
+        a["fc"] = angle.fc;
+        a["r0_ij"] = angle.r0_ij;
+        a["r0_ik"] = angle.r0_ik;
+        a["theta0_ijk"] = angle.theta0_ijk;
+        a["C0"] = angle.C0;
+        a["C1"] = angle.C1;
+        a["C2"] = angle.C2;
+        angles.push_back(a);
+    }
+    output["angles"] = angles;
+    
+    // Export dihedrals
+    json dihedrals = json::array();
+    for (const auto& dihedral : m_dihedrals) {
+        json d;
+        d["type"] = dihedral.type;
+        d["i"] = dihedral.i;
+        d["j"] = dihedral.j;
+        d["k"] = dihedral.k;
+        d["l"] = dihedral.l;
+        d["V"] = dihedral.V;
+        d["n"] = dihedral.n;
+        d["phi0"] = dihedral.phi0;
+        dihedrals.push_back(d);
+    }
+    output["dihedrals"] = dihedrals;
+    
+    // Export inversions
+    json inversions = json::array();
+    for (const auto& inversion : m_inversions) {
+        json inv;
+        inv["type"] = inversion.type;
+        inv["i"] = inversion.i;
+        inv["j"] = inversion.j;
+        inv["k"] = inversion.k;
+        inv["l"] = inversion.l;
+        inv["fc"] = inversion.fc;
+        inv["C0"] = inversion.C0;
+        inv["C1"] = inversion.C1;
+        inv["C2"] = inversion.C2;
+        inversions.push_back(inv);
+    }
+    output["inversions"] = inversions;
+    
+    // Export vdW terms
+    json vdws = json::array();
+    for (const auto& vdw : m_vdWs) {
+        json v;
+        v["type"] = vdw.type;
+        v["i"] = vdw.i;
+        v["j"] = vdw.j;
+        v["C_ij"] = vdw.C_ij;
+        v["r0_ij"] = vdw.r0_ij;
+        vdws.push_back(v);
+    }
+    output["vdws"] = vdws;
+    
+    // Export electrostatic terms
+    json eqs = json::array();
+    for (const auto& eq : m_EQs) {
+        json e;
+        e["type"] = eq.type;
+        e["i"] = eq.i;
+        e["j"] = eq.j;
+        e["q_i"] = eq.q_i;
+        e["q_j"] = eq.q_j;
+        e["epsilon"] = eq.epsilon;
+        eqs.push_back(e);
+    }
+    output["electrostatics"] = eqs;
+    
+    // Add metadata
+    output["generated_by"] = "curcuma_forcefield";
+    output["timestamp"] = std::chrono::system_clock::now().time_since_epoch().count();
+    
+    return output;
+}
+
+std::string ForceField::generateParameterFileName(const std::string& geometry_file)
+{
+    // input.xyz -> input.param.json
+    // path/to/molecule.xyz -> path/to/molecule.param.json
+    
+    size_t last_dot = geometry_file.find_last_of('.');
+    if (last_dot == std::string::npos) {
+        return geometry_file + ".param.json";
+    }
+    
+    std::string base = geometry_file.substr(0, last_dot);
+    return base + ".param.json";
+}
+
+bool ForceField::tryLoadAutoParameters(const std::string& method)
+{
+    if (m_auto_param_file.empty()) {
+        return false; // No auto-file detected
+    }
+    
+    // Check if parameter file exists
+    std::ifstream test_file(m_auto_param_file);
+    if (!test_file.good()) {
+        std::cout << "No cached parameters found at: " << m_auto_param_file << std::endl;
+        return false;
+    }
+    test_file.close();
+    
+    // Try to load parameters
+    if (!loadParametersFromFile(m_auto_param_file)) {
+        std::cout << "Failed to load parameters from: " << m_auto_param_file << std::endl;
+        return false;
+    }
+    
+    // Check if method matches
+    if (m_parameters.contains("method") && m_parameters["method"] == method) {
+        std::cout << "Loaded cached " << method << " parameters from: " << m_auto_param_file << std::endl;
+        return true;
+    } else {
+        std::cout << "Method mismatch in cached parameters (found: " 
+                  << m_parameters.value("method", "unknown") 
+                  << ", expected: " << method << ")" << std::endl;
+        m_parameters.clear();
+        return false;
+    }
+}
+
+bool ForceField::autoSaveParameters() const
+{
+    if (m_auto_param_file.empty()) {
+        return false;
+    }
+    
+    bool success = saveParametersToFile(m_auto_param_file);
+    if (success) {
+        std::cout << "Auto-saved parameters to: " << m_auto_param_file << std::endl;
+    }
+    return success;
 }
 
 double ForceField::Calculate(bool gradient, bool verbose)

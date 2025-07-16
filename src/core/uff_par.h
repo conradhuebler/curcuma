@@ -26,6 +26,7 @@
 
 #include "json.hpp"
 #include <Eigen/Dense>
+#include <set>
 #include <vector>
 using json = nlohmann::json;
 

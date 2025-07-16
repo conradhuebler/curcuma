@@ -95,6 +95,12 @@ public:
     void addvdW(const vdW& vdWs);
     void addEQ(const EQ& EQs);
 
+    void addGFNFFBond(const Bond& bonds);
+    void addGFNFFAngle(const Angle& angles);
+    void addGFNFFDihedral(const Dihedral& dihedrals);
+    void addGFNFFInversion(const Inversion& inversions);
+    void addGFNFFvdW(const vdW& vdWs);
+
     inline void UpdateGeometry(const Matrix& geometry, bool gradient)
     {
         m_geometry = geometry;
@@ -136,6 +142,12 @@ private:
     void CalculateQMDFFEspContribution();
     void CalculateESPContribution();
 
+    void CalculateGFNFFBondContribution();
+    void CalculateGFNFFAngleContribution();
+    void CalculateGFNFFDihedralContribution();
+    void CalculateGFNFFInversionContribution();
+    void CalculateGFNFFvdWContribution();
+
     // double HarmonicBondStretching();
 
     // double LJBondStretching();
@@ -154,6 +166,12 @@ private:
     std::vector<Inversion> m_uff_inversions, m_qmdff_inversions;
     std::vector<vdW> m_uff_vdWs;
     std::vector<EQ> m_EQs;
+
+    std::vector<Bond> m_gfnff_bonds;
+    std::vector<Angle> m_gfnff_angles;
+    std::vector<Dihedral> m_gfnff_dihedrals;
+    std::vector<Inversion> m_gfnff_inversions;
+    std::vector<vdW> m_gfnff_vdWs;
 
 protected:
     Matrix m_geometry, m_gradient;

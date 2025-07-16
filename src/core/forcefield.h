@@ -74,6 +74,19 @@ public:
 
     void setParameter(const json& parameter);
     void setParameterFile(const std::string& file);
+    
+    // Parameter caching functions for all FF methods (UFF, GFN-FF, QMDFF, etc.)
+    bool saveParametersToFile(const std::string& filename) const;
+    bool loadParametersFromFile(const std::string& filename);
+    json exportCurrentParameters() const;
+    bool hasParameters() const { return !m_parameters.empty(); }
+    
+    // Auto-parameter file management: input.xyz -> input.param.json
+    bool tryLoadAutoParameters(const std::string& method);
+    bool autoSaveParameters() const;
+    static std::string generateParameterFileName(const std::string& geometry_file);
+    void setParameterCaching(bool enable) { m_enable_caching = enable; }
+    
     Eigen::MatrixXd NumGrad();
 
 private:
@@ -104,4 +117,6 @@ private:
     std::vector<vdW> m_vdWs;
     std::vector<EQ> m_EQs;
     json m_parameters;
+    std::string m_auto_param_file; // Auto-detected parameter file path
+    bool m_enable_caching = true;  // Can be disabled for multi-threading
 };

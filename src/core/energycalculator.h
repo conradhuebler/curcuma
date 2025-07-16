@@ -38,6 +38,7 @@
 #endif
 
 #include "src/core/qm_methods/eht.h"
+#include "src/core/qm_methods/gfnff.h"
 // #include "src/core/eigen_uff.h"
 #include "src/core/forcefield.h"
 // #include "src/core/qmdff.h"
