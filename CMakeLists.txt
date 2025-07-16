@@ -217,6 +217,7 @@ set(curcuma_core_SRC
         src/core/qm_methods/eht.cpp
         src/core/qm_methods/eht_parameters.cpp
         src/core/qm_methods/gfnff.cpp
+        src/core/qm_methods/gfnff_advanced.cpp
         src/core/qm_methods/qm_driver.cpp
         src/core/qm_methods/ulyssesinterface.cpp
         src/core/energycalculator.cpp

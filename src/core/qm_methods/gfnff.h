@@ -160,13 +160,13 @@ private:
      * @brief Generate GFN-FF bond parameters from bond detection
      * @return JSON array of bond parameters
      */
-    json generateGFNFFBonds();
+    json generateGFNFFBonds() const;
 
     /**
      * @brief Generate GFN-FF angle parameters from topology
      * @return JSON array of angle parameters
      */
-    json generateGFNFFAngles();
+    json generateGFNFFAngles() const;
 
     /**
      * @brief Get covalent radius for element
@@ -198,6 +198,12 @@ private:
     GFNFFBondParams getGFNFFBondParameters(int z1, int z2, double distance) const;
 
     /**
+     * @brief Load atomic charges from reference GFN-FF calculation
+     * @return true if charges loaded successfully
+     */
+    bool loadGFNFFCharges();
+
+    /**
      * @brief Get GFN-FF angle parameters for element triplet
      * @param z1 Atomic number of first atom
      * @param z2 Atomic number of center atom
@@ -206,6 +212,114 @@ private:
      * @return GFN-FF angle parameters
      */
     GFNFFAngleParams getGFNFFAngleParameters(int z1, int z2, int z3, double current_angle) const;
+
+    // =================================================================================
+    // Advanced GFN-FF Parameter Generation (for future implementation)
+    // =================================================================================
+
+    /**
+     * @brief Calculate coordination numbers for all atoms
+     * @param threshold Coordination number threshold
+     * @return Vector of coordination numbers
+     */
+    Vector calculateCoordinationNumbers(double threshold = 40.0) const;
+
+    /**
+     * @brief Calculate coordination number derivatives for gradients
+     * @param cn Coordination numbers
+     * @param threshold Coordination number threshold
+     * @return 3D tensor of CN derivatives (3 x natoms x natoms)
+     */
+    std::vector<Matrix> calculateCoordinationNumberDerivatives(const Vector& cn, double threshold = 40.0) const;
+
+    /**
+     * @brief Determine hybridization states for all atoms
+     * @return Vector of hybridization states (1=sp, 2=sp2, 3=sp3, 4=sp3d, 5=sp3d2)
+     */
+    std::vector<int> determineHybridization() const;
+
+    /**
+     * @brief Detect pi-systems and conjugated fragments
+     * @param hyb Hybridization states
+     * @return Vector mapping atoms to pi-fragment IDs (0 = no pi-system)
+     */
+    std::vector<int> detectPiSystems(const std::vector<int>& hyb) const;
+
+    /**
+     * @brief Find smallest ring size for each atom
+     * @return Vector of smallest ring sizes (0 = not in ring)
+     */
+    std::vector<int> findSmallestRings() const;
+
+    /**
+     * @brief Calculate EEQ charges using extended electronegativity equalization
+     * @param cn Coordination numbers
+     * @param hyb Hybridization states
+     * @param rings Ring information
+     * @return Vector of EEQ charges
+     */
+    Vector calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb, const std::vector<int>& rings) const;
+
+    /**
+     * @brief Generate topology-aware bond parameters
+     * @param cn Coordination numbers
+     * @param hyb Hybridization states
+     * @param charges EEQ charges
+     * @param rings Ring information
+     * @return JSON with advanced bond parameters
+     */
+    json generateTopologyAwareBonds(const Vector& cn, const std::vector<int>& hyb,
+        const Vector& charges, const std::vector<int>& rings) const;
+
+    /**
+     * @brief Generate topology-aware angle parameters
+     * @param cn Coordination numbers
+     * @param hyb Hybridization states
+     * @param charges EEQ charges
+     * @param rings Ring information
+     * @return JSON with advanced angle parameters
+     */
+    json generateTopologyAwareAngles(const Vector& cn, const std::vector<int>& hyb,
+        const Vector& charges, const std::vector<int>& rings) const;
+
+    /**
+     * @brief Detect hydrogen bonds and set up A-H...B interactions
+     * @param charges EEQ charges
+     * @return JSON with hydrogen bond parameters
+     */
+    json detectHydrogenBonds(const Vector& charges) const;
+
+    // Advanced parameter structures
+    struct EEQParameters {
+        double chi; // Electronegativity
+        double gam; // Chemical hardness
+        double alp; // Polarizability
+        double xi_corr; // Environment correction
+    };
+
+    struct TopologyInfo {
+        Vector coordination_numbers;
+        std::vector<int> hybridization;
+        std::vector<int> pi_fragments;
+        std::vector<int> ring_sizes;
+        Vector eeq_charges;
+        std::vector<bool> is_metal;
+        std::vector<bool> is_aromatic;
+    };
+
+    /**
+     * @brief Calculate full topology information for advanced parametrization
+     * @return Complete topology information
+     */
+    TopologyInfo calculateTopologyInfo() const;
+
+    /**
+     * @brief Get EEQ parameters for specific atom with environment corrections
+     * @param atom_idx Atom index
+     * @param topo_info Topology information
+     * @return EEQ parameters for this atom
+     */
+    EEQParameters getEEQParameters(int atom_idx, const TopologyInfo& topo_info) const;
 
 private:
     json m_parameters;                    ///< GFN-FF parameters

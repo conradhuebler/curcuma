@@ -238,7 +238,8 @@ void ForceField::setESPs(const json& esps)
 void ForceField::AutoRanges()
 {
     int free_threads = m_threads;
-    int d3 = m_parameters["d3"];
+#pragma message("revert")
+    int d3 = false; // m_parameters["d3"];
     if (d3) {
         if (free_threads > 1)
             free_threads--;
@@ -248,7 +249,7 @@ void ForceField::AutoRanges()
         m_threadpool->addThread(thread);
         m_stored_threads.push_back(thread);
     }
-    int h4 = m_parameters["h4"];
+    int h4 = false; // m_parameters["h4"];
     if (h4) {
         if (free_threads > 1)
             free_threads--;
@@ -271,20 +272,45 @@ void ForceField::AutoRanges()
         } else if (m_method == "gfnff") {
             thread->setMethod(3); // GFN-FF
         }
-        for (int j = int(i * m_bonds.size() / double(free_threads)); j < int((i + 1) * m_bonds.size() / double(free_threads)); ++j)
-            thread->addBond(m_bonds[j]);
+        for (int j = int(i * m_bonds.size() / double(free_threads)); j < int((i + 1) * m_bonds.size() / double(free_threads)); ++j) {
+            if (m_method == "gfnff") {
+                thread->addGFNFFBond(m_bonds[j]);
+            } else {
+                thread->addBond(m_bonds[j]);
+            }
+        }
 
-        for (int j = int(i * m_angles.size() / double(free_threads)); j < int((i + 1) * m_angles.size() / double(free_threads)); ++j)
-            thread->addAngle(m_angles[j]);
+        for (int j = int(i * m_angles.size() / double(free_threads)); j < int((i + 1) * m_angles.size() / double(free_threads)); ++j) {
+            if (m_method == "gfnff") {
+                thread->addGFNFFAngle(m_angles[j]);
+            } else {
+                thread->addAngle(m_angles[j]);
+            }
+        }
 
-        for (int j = int(i * m_dihedrals.size() / double(free_threads)); j < int((i + 1) * m_dihedrals.size() / double(free_threads)); ++j)
-            thread->addDihedral(m_dihedrals[j]);
+        for (int j = int(i * m_dihedrals.size() / double(free_threads)); j < int((i + 1) * m_dihedrals.size() / double(free_threads)); ++j) {
+            if (m_method == "gfnff") {
+                thread->addGFNFFDihedral(m_dihedrals[j]);
+            } else {
+                thread->addDihedral(m_dihedrals[j]);
+            }
+        }
 
-        for (int j = int(i * m_inversions.size() / double(free_threads)); j < int((i + 1) * m_inversions.size() / double(free_threads)); ++j)
-            thread->addInversion(m_inversions[j]);
+        for (int j = int(i * m_inversions.size() / double(free_threads)); j < int((i + 1) * m_inversions.size() / double(free_threads)); ++j) {
+            if (m_method == "gfnff") {
+                thread->addGFNFFInversion(m_inversions[j]);
+            } else {
+                thread->addInversion(m_inversions[j]);
+            }
+        }
 
-        for (int j = int(i * m_vdWs.size() / double(free_threads)); j < int((i + 1) * m_vdWs.size() / double(free_threads)); ++j)
-            thread->addvdW(m_vdWs[j]);
+        for (int j = int(i * m_vdWs.size() / double(free_threads)); j < int((i + 1) * m_vdWs.size() / double(free_threads)); ++j) {
+            if (m_method == "gfnff") {
+                thread->addGFNFFvdW(m_vdWs[j]);
+            } else {
+                thread->addvdW(m_vdWs[j]);
+            }
+        }
 
         for (int j = int(i * m_EQs.size() / double(free_threads)); j < int((i + 1) * m_EQs.size() / double(free_threads)); ++j)
             thread->addEQ(m_EQs[j]);
