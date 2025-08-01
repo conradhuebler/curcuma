@@ -22,6 +22,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <random>
 #include <string>
@@ -49,6 +50,10 @@
 #include "plumed2/src/wrapper/Plumed.h"
 #endif
 #include "simplemd.h"
+
+// Claude Generated: Unit conversion constants for wall statistics
+const double au2eV = 1.0 / eV2Eh; // Convert Hartree to eV
+const double au2N = 8.2387225e-8; // Convert atomic force units (Eh/bohr) to Newton
 
 BiasThread::BiasThread(const Molecule& reference, const json& rmsdconfig, bool nocolvarfile, bool nohillsfile)
     : m_reference(reference)
@@ -809,28 +814,92 @@ void SimpleMD::InitialiseWalls()
     m_wall_y_max = Json2KeyWord<double>(m_defaults, "wall_y_max");
     m_wall_z_min = Json2KeyWord<double>(m_defaults, "wall_z_min");
     m_wall_z_max = Json2KeyWord<double>(m_defaults, "wall_z_max");
-    std::vector<double> box = m_molecule.GetBox();
+    // Claude Generated: Intelligent auto-sizing - only when boundaries are undefined or invalid
     double radius = 0;
-    if (m_wall_x_min - m_wall_x_max < 1) {
-        m_wall_x_min = -box[0] * 0.75;
-        m_wall_x_max = -1 * m_wall_x_min;
-        radius = std::max(radius, box[0]);
+    bool auto_configured = false;
+
+    // Only auto-configure if bounds are completely undefined (0,0) or clearly invalid (max <= min)
+    bool x_needs_config = (m_wall_x_min == 0 && m_wall_x_max == 0) || (m_wall_x_max <= m_wall_x_min);
+    bool y_needs_config = (m_wall_y_min == 0 && m_wall_y_max == 0) || (m_wall_y_max <= m_wall_y_min);
+    bool z_needs_config = (m_wall_z_min == 0 && m_wall_z_max == 0) || (m_wall_z_max <= m_wall_z_min);
+    bool sphere_needs_config = (m_wall_spheric_radius == 0);
+
+    if (x_needs_config || y_needs_config || z_needs_config || sphere_needs_config) {
+        auto_configured = true;
+
+        // Find actual molecular extent by analyzing all atom positions
+        double min_x = 1e10, max_x = -1e10;
+        double min_y = 1e10, max_y = -1e10;
+        double min_z = 1e10, max_z = -1e10;
+        double max_distance_from_origin = 0;
+
+        for (int i = 0; i < m_natoms; ++i) {
+            double x = m_eigen_geometry.data()[3 * i + 0];
+            double y = m_eigen_geometry.data()[3 * i + 1];
+            double z = m_eigen_geometry.data()[3 * i + 2];
+
+            // Track coordinate ranges
+            min_x = std::min(min_x, x);
+            max_x = std::max(max_x, x);
+            min_y = std::min(min_y, y);
+            max_y = std::max(max_y, y);
+            min_z = std::min(min_z, z);
+            max_z = std::max(max_z, z);
+
+            // Track maximum distance from origin for spherical walls
+            double distance = std::sqrt(x * x + y * y + z * z);
+            max_distance_from_origin = std::max(max_distance_from_origin, distance);
+        }
+
+        // Add safety margins (20% + 5 Å minimum)
+        double margin_x = std::max(0.2 * (max_x - min_x), 5.0);
+        double margin_y = std::max(0.2 * (max_y - min_y), 5.0);
+        double margin_z = std::max(0.2 * (max_z - min_z), 5.0);
+        double margin_sphere = std::max(0.2 * max_distance_from_origin, 5.0);
+
+        // Only set boundaries that actually need configuration
+        if (x_needs_config) {
+            m_wall_x_min = min_x - margin_x;
+            m_wall_x_max = max_x + margin_x;
+        }
+        if (y_needs_config) {
+            m_wall_y_min = min_y - margin_y;
+            m_wall_y_max = max_y + margin_y;
+        }
+        if (z_needs_config) {
+            m_wall_z_min = min_z - margin_z;
+            m_wall_z_max = max_z + margin_z;
+        }
+
+        // Set spherical radius with margin
+        if (sphere_needs_config) {
+            radius = max_distance_from_origin + margin_sphere;
+        }
     }
 
-    if (m_wall_y_min - m_wall_y_max < 1) {
-        m_wall_y_min = -box[1] * 0.75;
-        m_wall_y_max = -1 * m_wall_y_min;
-        radius = std::max(radius, box[1]);
+    // Fallback to old box-based method if molecule geometry isn't available
+    if (m_natoms == 0 && auto_configured) {
+        std::vector<double> box = m_molecule.GetBox();
+        if (x_needs_config) {
+            m_wall_x_min = -box[0] * 0.75;
+            m_wall_x_max = -1 * m_wall_x_min;
+            radius = std::max(radius, box[0]);
+        }
+        if (y_needs_config) {
+            m_wall_y_min = -box[1] * 0.75;
+            m_wall_y_max = -1 * m_wall_y_min;
+            radius = std::max(radius, box[1]);
+        }
+        if (z_needs_config) {
+            m_wall_z_min = -box[2] * 0.75;
+            m_wall_z_max = -1 * m_wall_z_min;
+            radius = std::max(radius, box[2]);
+        }
+        radius += 5;
     }
 
-    if (m_wall_z_min - m_wall_z_max < 1) {
-        m_wall_z_min = -box[2] * 0.75;
-        m_wall_z_max = -1 * m_wall_z_min;
-        radius = std::max(radius, box[2]);
-    }
-
-    if (m_wall_spheric_radius < radius) {
-        m_wall_spheric_radius = radius + 5;
+    if (sphere_needs_config && m_wall_spheric_radius < radius) {
+        m_wall_spheric_radius = radius;
     }
     if (m_wall_render) {
         std::cout << "render walls" << std::endl;
@@ -925,11 +994,48 @@ void SimpleMD::InitialiseWalls()
             m_molecule.addBorderPoint(x0);
         }
     }
-    std::cout << "Setting up potential walls " << std::endl;
-    std::cout << "Radius " << m_wall_spheric_radius << std::endl;
-    std::cout << "x-range " << m_wall_x_min << " ... " << m_wall_x_max << std::endl;
-    std::cout << "y-range " << m_wall_y_min << " ... " << m_wall_y_max << std::endl;
-    std::cout << "z-range " << m_wall_z_min << " ... " << m_wall_z_max << std::endl;
+    // Claude Generated: Store wall configuration info for PrintStatus() display
+    m_wall_geometry = Json2KeyWord<std::string>(m_defaults, "wall");
+    m_wall_potential_type = Json2KeyWord<std::string>(m_defaults, "wall_type");
+    m_wall_auto_configured = auto_configured;
+
+    // Calculate molecular density within wall boundaries
+    if (m_wall_geometry == "rect" && (m_wall_x_max > m_wall_x_min) && (m_wall_y_max > m_wall_y_min) && (m_wall_z_max > m_wall_z_min)) {
+        double volume = (m_wall_x_max - m_wall_x_min) * (m_wall_y_max - m_wall_y_min) * (m_wall_z_max - m_wall_z_min);
+        m_molecular_density = 1.0 / volume; // molecules per Å³
+    } else if (m_wall_geometry == "spheric" && m_wall_spheric_radius > 0) {
+        double volume = (4.0 / 3.0) * pi * m_wall_spheric_radius * m_wall_spheric_radius * m_wall_spheric_radius;
+        m_molecular_density = 1.0 / volume; // molecules per Å³
+    }
+    // Claude Generated: Wall configuration summary in PrintStatus() - show once every 10000 steps
+    if (m_wall_geometry != "none" && m_wall_geometry != "") {
+        std::cout << "\n--- Wall Setup ---\n";
+        std::cout << "Geometry: " << m_wall_geometry << " | Potential: " << m_wall_potential_type;
+        if (m_wall_auto_configured)
+            std::cout << " (auto-sized)";
+        std::cout << "\n";
+
+        if (m_wall_geometry == "spheric") {
+            std::cout << "Radius: " << m_wall_spheric_radius << " Å";
+            if (m_molecular_density > 0) {
+                std::cout << " | Density: " << m_molecular_density * 1e3 << " molecules/nm³";
+            }
+        } else if (m_wall_geometry == "rect") {
+            double volume = (m_wall_x_max - m_wall_x_min) * (m_wall_y_max - m_wall_y_min) * (m_wall_z_max - m_wall_z_min);
+            std::cout << "Bounds: [" << m_wall_x_min << "," << m_wall_x_max << "] x ["
+                      << m_wall_y_min << "," << m_wall_y_max << "] x ["
+                      << m_wall_z_min << "," << m_wall_z_max << "] Å";
+            std::cout << " | Vol: " << volume << " Å³";
+            if (m_molecular_density > 0) {
+                std::cout << " | Density: " << m_molecular_density * 1e3 << " molecules/nm³";
+            }
+        }
+
+        if (m_wall_violation_count > 0) {
+            std::cout << " | Violations: " << m_wall_violation_count << "/" << m_natoms << " atoms";
+        }
+        std::cout << "\n---------------------------------\n";
+    }
 }
 
 nlohmann::json SimpleMD::WriteRestartInformation()
@@ -2308,21 +2414,60 @@ double SimpleMD::ApplySphericLogFermiWalls()
 {
     double potential = 0;
     double kbT = m_wall_temp * kb_Eh;
-    // int counter = 0;
+    int counter = 0;
+    double sum_grad = 0; // Claude Generated: Track total wall force
     for (int i = 0; i < m_natoms; ++i) {
         double distance = sqrt(m_eigen_geometry.data()[3 * i + 0] * m_eigen_geometry.data()[3 * i + 0] + m_eigen_geometry.data()[3 * i + 1] * m_eigen_geometry.data()[3 * i + 1] + m_eigen_geometry.data()[3 * i + 2] * m_eigen_geometry.data()[3 * i + 2]);
-        double exp_expr = exp(m_wall_beta * (distance - m_wall_spheric_radius));
+
+        // Claude Generated: Add numerical stability - prevent exponential overflow and division by zero
+        double beta_arg = m_wall_beta * (distance - m_wall_spheric_radius);
+        double exp_expr;
+        if (beta_arg > 700.0) { // Prevent overflow
+            exp_expr = std::numeric_limits<double>::max() / 2.0;
+        } else if (beta_arg < -700.0) { // Prevent underflow
+            exp_expr = 0.0;
+        } else {
+            exp_expr = exp(beta_arg);
+        }
         double curr_pot = kbT * log(1 + exp_expr);
         // counter += distance > m_wall_radius;
         // std::cout << m_wall_beta*m_eigen_geometry.data()[3 * i + 0]*exp_expr/(distance*(1-exp_expr)) << " ";
-        m_eigen_gradient.data()[3 * i + 0] -= kbT * m_wall_beta * m_eigen_geometry.data()[3 * i + 0] * exp_expr / (distance * (1 - exp_expr));
-        m_eigen_gradient.data()[3 * i + 1] -= kbT * m_wall_beta * m_eigen_geometry.data()[3 * i + 1] * exp_expr / (distance * (1 - exp_expr));
-        m_eigen_gradient.data()[3 * i + 2] -= kbT * m_wall_beta * m_eigen_geometry.data()[3 * i + 2] * exp_expr / (distance * (1 - exp_expr));
+        // Claude Generated: Fix log-Fermi forces - correct denominator (1 + exp) for derivative of log(1 + e^x)
+        // Add numerical stability check for distance = 0
+        if (distance > 1e-10) {
+            double fx = kbT * m_wall_beta * m_eigen_geometry.data()[3 * i + 0] * exp_expr / (distance * (1 + exp_expr));
+            double fy = kbT * m_wall_beta * m_eigen_geometry.data()[3 * i + 1] * exp_expr / (distance * (1 + exp_expr));
+            double fz = kbT * m_wall_beta * m_eigen_geometry.data()[3 * i + 2] * exp_expr / (distance * (1 + exp_expr));
+
+            m_eigen_gradient.data()[3 * i + 0] -= fx;
+            m_eigen_gradient.data()[3 * i + 1] -= fy;
+            m_eigen_gradient.data()[3 * i + 2] -= fz;
+
+            // Track wall force magnitude
+            sum_grad += std::sqrt(fx * fx + fy * fy + fz * fz);
+        }
+
+        // Count atoms outside sphere
+        if (distance > m_wall_spheric_radius)
+            counter++;
 
         // std::cout << distance << " ";
         potential += curr_pot;
     }
-    //    std::cout << counter << " ";
+
+    // Claude Generated: Smart wall violation reporting - prevent console spam
+    m_wall_violation_count = counter;
+
+    // Only report if violations exceed 5% of atoms OR it's been 1000 steps since last report
+    bool should_report = (counter > m_natoms * 0.05) || (counter > 0 && (m_currentStep - m_wall_violation_last_reported) > 1000) || (sum_grad > 0.01); // Or if wall forces are very high
+
+    if (should_report) {
+        std::cout << "Wall stats - Atoms outside sphere: " << counter << "/" << m_natoms
+                  << ", Total wall force: " << sum_grad * au2N << " N"
+                  << ", Wall potential: " << potential * au2eV << " eV" << std::endl;
+        m_wall_violation_last_reported = m_currentStep;
+    }
+
     return potential;
     // std::cout << potential*kbT << std::endl;
 }
@@ -2354,10 +2499,17 @@ double SimpleMD::ApplyRectLogFermiWalls()
             //    std::cout << m_eigen_geometry.data()[3 * i + 0] << " " << m_eigen_geometry.data()[3 * i + 1] << " " << m_eigen_geometry.data()[3 * i + 2] << std::endl;
             //    std::cout << m_eigen_gradient.data()[3 * i + 0] << " " << m_eigen_gradient.data()[3 * i + 1] << " " <<m_eigen_gradient.data()[3 * i + 2] << std::endl;
         }
-        m_eigen_gradient.data()[3 * i + 0] += kbT * b * (exp_expr_xu / (1 - exp_expr_xu) - exp_expr_xl / (1 - exp_expr_xl)); // m_eigen_geometry.data()[3 * i + 0]*exp_expr/(distance*(1-exp_expr));
-        m_eigen_gradient.data()[3 * i + 1] += kbT * b * (exp_expr_yu / (1 - exp_expr_yu) - exp_expr_yl / (1 - exp_expr_yl));
-        m_eigen_gradient.data()[3 * i + 2] += kbT * b * (exp_expr_zu / (1 - exp_expr_zu) - exp_expr_zl / (1 - exp_expr_zl));
-        sum_grad += m_eigen_gradient.data()[3 * i + 0] + m_eigen_gradient.data()[3 * i + 1] + m_eigen_gradient.data()[3 * i + 2];
+        // Claude Generated: Fix rectangular log-Fermi forces - correct denominator (1 + exp) for derivative
+        double fx = kbT * b * (exp_expr_xu / (1 + exp_expr_xu) - exp_expr_xl / (1 + exp_expr_xl));
+        double fy = kbT * b * (exp_expr_yu / (1 + exp_expr_yu) - exp_expr_yl / (1 + exp_expr_yl));
+        double fz = kbT * b * (exp_expr_zu / (1 + exp_expr_zu) - exp_expr_zl / (1 + exp_expr_zl));
+
+        m_eigen_gradient.data()[3 * i + 0] += fx;
+        m_eigen_gradient.data()[3 * i + 1] += fy;
+        m_eigen_gradient.data()[3 * i + 2] += fz;
+
+        // Track wall force magnitude
+        sum_grad += std::abs(fx) + std::abs(fy) + std::abs(fz);
         // if( i == 81)
         {
             // std::cout << i << " " <<m_eigen_gradient.data()[3 * i + 0] << " " << m_eigen_gradient.data()[3 * i + 1] << " " <<m_eigen_gradient.data()[3 * i + 2] << std::endl;
@@ -2365,7 +2517,20 @@ double SimpleMD::ApplyRectLogFermiWalls()
         // std::cout << distance << " ";
         potential += curr_pot;
     }
-    std::cout << counter << " " << sum_grad;
+
+    // Claude Generated: Smart wall violation reporting - prevent console spam
+    m_wall_violation_count = counter;
+
+    // Only report if violations exceed 5% of atoms OR it's been 1000 steps since last report
+    bool should_report = (counter > m_natoms * 0.05) || (counter > 0 && (m_currentStep - m_wall_violation_last_reported) > 1000) || (sum_grad > 0.01); // Or if wall forces are very high
+
+    if (should_report) {
+        std::cout << "Wall stats - Atoms outside rectangular: " << counter << "/" << m_natoms
+                  << ", Total wall force: " << sum_grad * au2N << " N"
+                  << ", Wall potential: " << potential * au2eV << " eV" << std::endl;
+        m_wall_violation_last_reported = m_currentStep;
+    }
+
     return potential;
     // std::cout << potential*kbT << std::endl;
 }
@@ -2375,6 +2540,7 @@ double SimpleMD::ApplySphericHarmonicWalls()
     double potential = 0;
     double k = m_wall_temp * kb_Eh;
     int counter = 0;
+    double sum_grad = 0; // Claude Generated: Track total wall force
     for (int i = 0; i < m_natoms; ++i) {
         double distance = sqrt(m_eigen_geometry.data()[3 * i + 0] * m_eigen_geometry.data()[3 * i + 0] + m_eigen_geometry.data()[3 * i + 1] * m_eigen_geometry.data()[3 * i + 1] + m_eigen_geometry.data()[3 * i + 2] * m_eigen_geometry.data()[3 * i + 2]);
         double curr_pot = 0.5 * k * (m_wall_spheric_radius - distance) * (m_wall_spheric_radius - distance) * (distance > m_wall_spheric_radius);
@@ -2390,6 +2556,10 @@ double SimpleMD::ApplySphericHarmonicWalls()
         m_eigen_gradient.data()[3 * i + 0] -= dx;
         m_eigen_gradient.data()[3 * i + 1] -= dy;
         m_eigen_gradient.data()[3 * i + 2] -= dz;
+
+        // Claude Generated: Track wall force magnitude
+        sum_grad += std::sqrt(dx * dx + dy * dy + dz * dz);
+
         /*
         if(out)
         {
@@ -2399,7 +2569,20 @@ double SimpleMD::ApplySphericHarmonicWalls()
         // std::cout << distance << " ";
         potential += curr_pot;
     }
-    // std::cout << counter << " ";
+
+    // Claude Generated: Smart wall violation reporting - prevent console spam
+    m_wall_violation_count = counter;
+
+    // Only report if violations exceed 5% of atoms OR it's been 1000 steps since last report
+    bool should_report = (counter > m_natoms * 0.05) || (counter > 0 && (m_currentStep - m_wall_violation_last_reported) > 1000) || (sum_grad > 0.01); // Or if wall forces are very high
+
+    if (should_report) {
+        std::cout << "Wall stats - Atoms outside sphere: " << counter << "/" << m_natoms
+                  << ", Total wall force: " << sum_grad * au2N << " N"
+                  << ", Wall potential: " << potential * au2eV << " eV" << std::endl;
+        m_wall_violation_last_reported = m_currentStep;
+    }
+
     return potential;
     // std::cout << potential*kbT << std::endl;
 }
@@ -2427,11 +2610,13 @@ double SimpleMD::ApplyRectHarmonicWalls()
 
         // std::cout << i << " " << counter << std::endl;
 
-        double dx = k * (std::abs(m_eigen_geometry.data()[3 * i + 0] - m_wall_x_min) * (m_eigen_geometry.data()[3 * i + 0] < m_wall_x_min) - (m_eigen_geometry.data()[3 * i + 0] - m_wall_x_max) * (m_eigen_geometry.data()[3 * i + 0] > m_wall_x_max));
+        // Claude Generated: Fix harmonic wall forces - remove std::abs() for correct force direction
+        // Force = -k * displacement, where displacement is signed distance from boundary
+        double dx = k * ((m_eigen_geometry.data()[3 * i + 0] - m_wall_x_min) * (m_eigen_geometry.data()[3 * i + 0] < m_wall_x_min) - (m_eigen_geometry.data()[3 * i + 0] - m_wall_x_max) * (m_eigen_geometry.data()[3 * i + 0] > m_wall_x_max));
 
-        double dy = k * (std::abs(m_eigen_geometry.data()[3 * i + 1] - m_wall_y_min) * (m_eigen_geometry.data()[3 * i + 1] < m_wall_y_min) - (m_eigen_geometry.data()[3 * i + 1] - m_wall_y_max) * (m_eigen_geometry.data()[3 * i + 1] > m_wall_y_max));
+        double dy = k * ((m_eigen_geometry.data()[3 * i + 1] - m_wall_y_min) * (m_eigen_geometry.data()[3 * i + 1] < m_wall_y_min) - (m_eigen_geometry.data()[3 * i + 1] - m_wall_y_max) * (m_eigen_geometry.data()[3 * i + 1] > m_wall_y_max));
 
-        double dz = k * (std::abs(m_eigen_geometry.data()[3 * i + 2] - m_wall_z_min) * (m_eigen_geometry.data()[3 * i + 2] < m_wall_z_min) - (m_eigen_geometry.data()[3 * i + 2] - m_wall_z_max) * (m_eigen_geometry.data()[3 * i + 2] > m_wall_z_max));
+        double dz = k * ((m_eigen_geometry.data()[3 * i + 2] - m_wall_z_min) * (m_eigen_geometry.data()[3 * i + 2] < m_wall_z_min) - (m_eigen_geometry.data()[3 * i + 2] - m_wall_z_max) * (m_eigen_geometry.data()[3 * i + 2] > m_wall_z_max));
         m_eigen_gradient.data()[3 * i + 0] -= dx;
         m_eigen_gradient.data()[3 * i + 1] -= dy;
         m_eigen_gradient.data()[3 * i + 2] -= dz;
@@ -2440,11 +2625,24 @@ double SimpleMD::ApplyRectHarmonicWalls()
              std::cout << m_eigen_geometry.data()[3 * i + 0]  << " " << m_eigen_geometry.data()[3 * i + 1]  << " " << m_eigen_geometry.data()[3 * i + 2] << std::endl;
              std::cout << dx << " " << dy << " " << dz << std::endl;
          }*/
-        sum_grad += dx + dy + dz;
+        sum_grad += std::abs(dx) + std::abs(dy) + std::abs(dz);
 
         potential += curr_pot;
     }
-    // std::cout << counter << " " << sum_grad;
+
+    // Claude Generated: Smart wall violation reporting - prevent console spam
+    m_wall_violation_count = counter;
+
+    // Only report if violations exceed 5% of atoms OR it's been 1000 steps since last report
+    bool should_report = (counter > m_natoms * 0.05) || (counter > 0 && (m_currentStep - m_wall_violation_last_reported) > 1000) || (sum_grad > 0.01); // Or if wall forces are very high
+
+    if (should_report) {
+        std::cout << "Wall stats - Atoms outside rectangular: " << counter << "/" << m_natoms
+                  << ", Total wall force: " << sum_grad * au2N << " N"
+                  << ", Wall potential: " << potential * au2eV << " eV" << std::endl;
+        m_wall_violation_last_reported = m_currentStep;
+    }
+
     return potential;
     // std::cout << potential*kbT << std::endl;
 }
@@ -2632,6 +2830,7 @@ void SimpleMD::PrintStatus() const
 
 #endif
     }
+
     //std::cout << m_mtd_time << " " << m_loop_time << std::endl;
 }
 

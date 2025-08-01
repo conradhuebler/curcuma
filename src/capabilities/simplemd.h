@@ -404,6 +404,14 @@ private:
     double m_anderson = 0.01;
 
     std::vector<std::pair<double, double>> m_rattle_tol_temp;
+
+    // Claude Generated: Wall configuration and statistics tracking
+    bool m_wall_auto_configured = false;
+    std::string m_wall_geometry = "none";
+    std::string m_wall_potential_type = "harmonic";
+    int m_wall_violation_count = 0;
+    int m_wall_violation_last_reported = 0;
+    double m_molecular_density = 0.0; // molecules/Å³
 };
 
 class MDThread : public CxxThread {
