@@ -175,6 +175,7 @@ Mol Molecule::getMolInfo() const
     mol.m_number_atoms = AtomCount();
     mol.m_charge = m_charge;
     mol.m_commentline = m_name;
+    mol.m_formula = Formula(); // Claude Generated: Set molecular formula
     mol.m_geometry = m_geometry;
     mol.m_bonds = m_bonds;
     mol.m_atoms = m_atoms;
@@ -1639,4 +1640,46 @@ std::vector<int> Molecule::FragString2Indicies(const std::string& string) const
     indicies.erase(unique(indicies.begin(), indicies.end()), indicies.end());
     }
     return indicies;
+}
+
+// Claude Generated: Get molecular formula (C, H, then alphabetically)
+std::string Molecule::Formula() const
+{
+    std::map<int, int> atom_counts;
+
+    // Count each atom type
+    for (int i = 0; i < m_atoms.size(); ++i) {
+        atom_counts[m_atoms[i]]++;
+    }
+
+    // Build formula string (C, H, then alphabetically)
+    std::string formula = "";
+
+    // Carbon first
+    if (atom_counts.count(6) > 0) {
+        formula += "C";
+        if (atom_counts[6] > 1) {
+            formula += std::to_string(atom_counts[6]);
+        }
+        atom_counts.erase(6);
+    }
+
+    // Hydrogen second
+    if (atom_counts.count(1) > 0) {
+        formula += "H";
+        if (atom_counts[1] > 1) {
+            formula += std::to_string(atom_counts[1]);
+        }
+        atom_counts.erase(1);
+    }
+
+    // Remaining elements in order of atomic number
+    for (const auto& [atomic_num, count] : atom_counts) {
+        formula += Elements::ElementAbbr[atomic_num];
+        if (count > 1) {
+            formula += std::to_string(count);
+        }
+    }
+
+    return formula.empty() ? "unknown" : formula;
 }

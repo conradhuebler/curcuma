@@ -398,7 +398,8 @@ bool ConfScan::openFile()
             // XTBInterface interface; // As long as xtb leaks, we have to put it heare
             if (m_method == "")
                 m_method = "gfn2";
-            EnergyCalculator interface(m_method, m_controller);
+            // Claude Generated: Use new constructor with basename for parameter caching
+            EnergyCalculator interface(m_method, m_controller, Basename());
             // I might not leak really, but was unable to clear everything
 
             interface.setMolecule(mol->getMolInfo());
@@ -441,7 +442,8 @@ bool ConfScan::openFile()
                 // XTBInterface interface; // As long as xtb leaks, we have to put it heare
                 if (m_method == "")
                     m_method = "gfn2";
-                EnergyCalculator interface(m_method, m_controller);
+                // Claude Generated: Use new constructor with basename for parameter caching
+                EnergyCalculator interface(m_method, m_controller, Basename());
                 // I might not leak really, but was unable to clear everything
 
                 interface.setMolecule(mol->getMolInfo());

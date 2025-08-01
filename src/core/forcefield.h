@@ -89,6 +89,9 @@ public:
     
     Eigen::MatrixXd NumGrad();
 
+    // Claude Generated: Parameter analysis functionality
+    void printParameterSummary() const;
+
 private:
     void AutoRanges();
     void setBonds(const json& bonds);

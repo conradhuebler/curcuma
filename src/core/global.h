@@ -61,6 +61,7 @@ struct Mol {
     int m_charge;
 
     std::string m_commentline;
+    std::string m_formula; // Claude Generated: Molecular formula
 
     Geometry m_geometry;
     Vector m_partial_charges;

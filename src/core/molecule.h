@@ -187,6 +187,8 @@ class Molecule
     inline double Energy() const { return m_energy; }
 
     inline std::string Name() const { return m_name; }
+    // Claude Generated: Get molecular formula
+    std::string Formula() const;
 
     /*! \brief Methode to get the atom name with position
      *

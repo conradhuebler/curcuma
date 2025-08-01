@@ -66,6 +66,8 @@ static json EnergyCalculatorJson{
 class EnergyCalculator {
 public:
     EnergyCalculator(const std::string& method, const json& controller);
+    // Claude Generated: Constructor with basename for parameter caching
+    EnergyCalculator(const std::string& method, const json& controller, const std::string& basename);
     ~EnergyCalculator();
 
     void setMolecule(const Mol& mol);
@@ -94,6 +96,10 @@ public:
     }
 
     inline json Parameter() const { return m_parameter; }
+
+    // Claude Generated: Set geometry filename for parameter caching
+    void setGeometryFile(const std::string& filename) { m_geometry_file = filename; }
+    void setBasename(const std::string& basename) { m_geometry_file = basename + ".xyz"; }
     Vector Energies() const { return m_orbital_energies; }
     Vector OrbitalOccuptations() const { return m_orbital_occupation; }
 
@@ -105,6 +111,7 @@ public:
     Eigen::MatrixXd NumGrad();
 
 private:
+    void initializeCommon(const json& controller);
     int SwitchMethod(const std::string& method);
 
     void InitialiseUFF();
@@ -133,6 +140,10 @@ private:
     void InitialiseFF();
     void CalculateFF(bool gradient, bool verbose = false);
 
+    // Claude Generated: Auto-save and auto-load parameter functionality
+    void saveAutoParameters(const Mol& mol, const json& parameters);
+    bool tryLoadAutoParameters(const Mol& mol);
+
     json m_controller;
 
     QMInterface* m_qminterface = NULL;
@@ -157,7 +168,7 @@ private:
     std::function<Position()> m_dipole;
     std::function<std::vector<std::vector<double>>()> m_bonds;
     json m_parameter;
-    std::string m_method, m_param_file;
+    std::string m_method, m_param_file, m_geometry_file, m_basename;
     Matrix m_geometry, m_gradient, m_molecular_orbitals;
     Vector m_orbital_energies, m_orbital_occupation;
     Vector m_xtb_gradient;

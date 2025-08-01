@@ -188,7 +188,8 @@ void CurcumaOpt::start()
 
 void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
 {
-    EnergyCalculator interface(Json2KeyWord<std::string>(m_defaults, "method"), m_controller["sp"]);
+    // Claude Generated: Use new constructor with basename for parameter caching
+    EnergyCalculator interface(Json2KeyWord<std::string>(m_defaults, "method"), m_controller["sp"], Basename());
     std::string method = Json2KeyWord<std::string>(m_defaults, "method");
 
     auto iter = molecules.begin();
@@ -337,7 +338,8 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, std::string& output, Vec
         parameter(3 * i + 2) = geometry(i, 2);
     }
 
-    EnergyCalculator interface(method, m_controller["sp"]);
+    // Claude Generated: Use new constructor with basename for parameter caching
+    EnergyCalculator interface(method, m_controller["sp"], Basename());
     interface.setMolecule(initial->getMolInfo());
     json param = interface.Parameter();
     double energy = interface.CalculateEnergy(false, true);
@@ -442,7 +444,8 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
         constrain.push_back(initial->Atom(i).first == 1);
     }
 
-    EnergyCalculator interface(m_method, m_controller["opt"]);
+    // Claude Generated: Use new constructor with basename for parameter caching
+    EnergyCalculator interface(m_method, m_controller["opt"], Basename());
 
     interface.setMolecule(initial->getMolInfo());
     m_parameters = interface.Parameter();
@@ -706,7 +709,8 @@ Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vecto
         constrain.push_back(initial->Atom(i).first == 1);
     }
 
-    EnergyCalculator interface(m_method, m_controller["opt"]);
+    // Claude Generated: Use new constructor with basename for parameter caching
+    EnergyCalculator interface(m_method, m_controller["opt"], Basename());
 
     interface.setMolecule(initial->getMolInfo());
     m_parameters = interface.Parameter();

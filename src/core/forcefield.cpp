@@ -23,6 +23,8 @@
 
 #include "forcefieldfunctions.h"
 
+#include <fmt/core.h>
+
 #include "forcefield.h"
 #include "forcefieldthread.h"
 
@@ -114,6 +116,9 @@ void ForceField::setParameter(const json& parameters)
     } else if (m_method == "gfnff") {
         method_type = 3; // GFN-FF
     }
+
+    // Claude Generated: Print parameter summary after setting parameters
+    printParameterSummary();
 }
 
 void ForceField::setBonds(const json& bonds)
@@ -633,4 +638,91 @@ double ForceField::Calculate(bool gradient, bool verbose)
         // }
     }
     return energy;
+}
+
+// Claude Generated: Print comprehensive parameter summary
+void ForceField::printParameterSummary() const
+{
+    if (m_parameters.empty()) {
+        return;
+    }
+
+    try {
+        // Count different parameter types - parameters are stored as arrays
+        int bonds = 0, angles = 0, dihedrals = 0, inversions = 0, vdws = 0, esps = 0;
+
+        if (m_parameters.contains("bonds") && m_parameters["bonds"].is_array()) {
+            bonds = m_parameters["bonds"].size();
+        }
+        if (m_parameters.contains("angles") && m_parameters["angles"].is_array()) {
+            angles = m_parameters["angles"].size();
+        }
+        if (m_parameters.contains("dihedrals") && m_parameters["dihedrals"].is_array()) {
+            dihedrals = m_parameters["dihedrals"].size();
+        }
+        if (m_parameters.contains("inversions") && m_parameters["inversions"].is_array()) {
+            inversions = m_parameters["inversions"].size();
+        }
+        if (m_parameters.contains("vdws") && m_parameters["vdws"].is_array()) {
+            vdws = m_parameters["vdws"].size();
+        }
+        if (m_parameters.contains("esps") && m_parameters["esps"].is_array()) {
+            esps = m_parameters["esps"].size();
+        }
+
+        // Print summary in consistent format
+        fmt::print("  • {} bond terms\n", bonds);
+        fmt::print("  • {} angle terms\n", angles);
+        fmt::print("  • {} dihedral terms\n", dihedrals);
+        fmt::print("  • {} inversion terms\n", inversions);
+        fmt::print("  • {} van der Waals pairs\n", vdws);
+        fmt::print("  • {} electrostatic pairs\n", esps);
+
+        // Print scaling factors
+        fmt::print("  Scaling factors:\n");
+        if (m_parameters.contains("vdw_scaling")) {
+            fmt::print("    vdW: {:.3f}\n", m_parameters["vdw_scaling"].get<double>());
+        }
+        if (m_parameters.contains("bond_scaling")) {
+            fmt::print("    bond: {:.3f}\n", m_parameters["bond_scaling"].get<double>());
+        }
+        if (m_parameters.contains("angle_scaling")) {
+            fmt::print("    angle: {:.3f}\n", m_parameters["angle_scaling"].get<double>());
+        }
+        if (m_parameters.contains("dihedral_scaling")) {
+            fmt::print("    dihedral: {:.3f}\n", m_parameters["dihedral_scaling"].get<double>());
+        }
+        if (m_parameters.contains("inversion_scaling")) {
+            fmt::print("    inversion: {:.3f}\n", m_parameters["inversion_scaling"].get<double>());
+        }
+        if (m_parameters.contains("coulomb_scaling")) {
+            fmt::print("    coulomb: {:.3f}\n", m_parameters["coulomb_scaling"].get<double>());
+        }
+        if (m_parameters.contains("rep_scaling")) {
+            fmt::print("    repulsion: {:.3f}\n", m_parameters["rep_scaling"].get<double>());
+        }
+
+        // Print dispersion and hydrogen bonding flags
+        fmt::print("  Force field flags:\n");
+        if (m_parameters.contains("d3") && m_parameters["d3"].get<double>() != 0) {
+            fmt::print("    D3 dispersion: enabled (s6={:.3f}, s8={:.3f})\n", 
+                m_parameters.value("d3_s6", 0.0), m_parameters.value("d3_s8", 0.0));
+        }
+        if (m_parameters.contains("d4") && m_parameters["d4"].get<double>() != 0) {
+            fmt::print("    D4 dispersion: enabled\n");
+        }
+        if (m_parameters.contains("h4") && m_parameters["h4"].get<double>() != 0) {
+            fmt::print("    H4 hydrogen bonding: enabled (scaling={:.3f})\n", 
+                m_parameters.value("h4_scaling", 1.0));
+            if (m_parameters.contains("h4_nh_o")) {
+                fmt::print("      NH···O: {:.3f}\n", m_parameters["h4_nh_o"].get<double>());
+            }
+            if (m_parameters.contains("h4_oh_n")) {
+                fmt::print("      OH···N: {:.3f}\n", m_parameters["h4_oh_n"].get<double>());
+            }
+        }
+
+    } catch (const std::exception& e) {
+        fmt::print("Warning: Could not display parameter summary: {}\n", e.what());
+    }
 }

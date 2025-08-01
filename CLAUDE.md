@@ -8,6 +8,41 @@
 
 **Curcuma** is a comprehensive molecular modelling and simulation toolkit written in C++ with a focus on computational chemistry, force field methods, and quantum chemical calculations. This document provides essential information for development, debugging, and extending the codebase.
 
+## General instructions
+
+- Each source code dir has a CLAUDE.md with basic informations of the code, the corresponding knowledge and logic in the directory 
+- If a file is not present or outdated, create or update it
+- Task corresponding to code have to be placed in the correct CLAUDE.md file
+- Each CLAUDE.md may contain a variable part, where short-term information, bugs etc things are stored. Obsolete information have to be removed
+- Each CLAUDE.md has a preserved part, which should no be edited by CLAUDE, only created if not present
+- Each CLAUDE.md may contain an **instructions block** filled by the operator/programmer and from CLAUDE if approved with future tasks and visions that must be considered during code development
+- Each CLAUDE.md file content should be important for ALL subdirectories
+- If new knowledge is obtained from Claude Code Conversation preserve it in the CLAUDE.md files
+- Always give improvments to existing code
+
+## Development Guidelines
+
+### Code Organization
+- Each `src/` subdirectory contains detailed CLAUDE.md documentation
+- Variable sections updated regularly with short-term information
+- Preserved sections contain permanent knowledge and patterns
+- Instructions blocks contain operator-defined future tasks and visions
+
+### Implementation Standards
+- Mark new functions as "Claude Generated" for traceability
+- Document new functions briefly (doxygen ready)
+- Document existing undocumented functions if appearing regulary (briefly and doxygen ready)
+- Remove TODO Hashtags and text if done and approved
+- Implement comprehensive error handling and logging 
+- Debugging output with std::cout within #ifdef DEBUG_ON #endif
+- Check if this is written correctly (CMakeLists.txt and include) 
+- non-debugging console output is realised with fmt, port away from std::cout if appearing
+- Maintain backward compatibility where possible
+- **Always check and consider instructions blocks** in relevant CLAUDE.md files before implementing 
+- reformulate and clarify task and vision entries if not alredy marked as CLAUDE formatted
+- in case of compiler warning for deprecated suprafit functions, replace the old function call with the new one
+
+
 ## Current Capabilities
 
 ### 1. Quantum Mechanical Methods

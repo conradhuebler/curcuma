@@ -151,7 +151,6 @@ SimpleMD::SimpleMD(const json& controller, const bool silent)
     : CurcumaMethod(CurcumaMDJson, controller, silent)
 {
     UpdateController(controller);
-    m_interface = new EnergyCalculator(m_method, controller["md"]);
 }
 
 SimpleMD::~SimpleMD()
@@ -624,8 +623,11 @@ bool SimpleMD::Initialise()
     // std::cout << m_eigen_masses << std::endl;
     m_molecule.setCharge(m_charge);
     m_molecule.setSpin(m_spin);
-    m_interface->setMolecule(m_molecule.getMolInfo());
+    m_interface = new EnergyCalculator(m_method, m_controller["md"], Basename());
 
+    m_interface->setMolecule(m_molecule.getMolInfo());
+    // m_interface->setGeometryFile(Basename() + ".xyz"); TODO this does not really work
+    // m_interface->setBasename(Basename()); TODO this does not really work
     if (m_writeUnique) {
         json rmsdtraj = RMSDTrajJson;
         rmsdtraj["writeUnique"] = true;
@@ -2644,7 +2646,8 @@ void SimpleMD::PrintMatrix(const double* matrix) const
 
 double SimpleMD::CleanEnergy()
 {
-    EnergyCalculator interface(m_method, m_defaults);
+    // Claude Generated: Use new constructor with basename for parameter caching
+    EnergyCalculator interface(m_method, m_defaults, Basename());
     interface.setMolecule(m_molecule.getMolInfo());
     interface.updateGeometry(m_eigen_geometry);
 

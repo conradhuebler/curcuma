@@ -23,6 +23,10 @@
 
 #include "src/core/forcefieldfunctions.h"
 
+#include <chrono>
+#include <fmt/chrono.h>
+#include <fmt/core.h>
+
 #include "json.hpp"
 using json = nlohmann::json;
 
@@ -44,11 +48,19 @@ void ForceFieldGenerator::setMolecule(const Mol& mol)
     m_partial_charges = mol.m_partial_charges;
 }
 
+// Claude Generated: Enhanced Generate method with detailed timing and status output
 void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& formed_bonds)
 {
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    fmt::print("Force field parameter generation started for {} atoms using {} method\n", m_atoms, m_method);
+
     m_coordination = std::vector<int>(m_atoms, 0);
     m_topo = Eigen::MatrixXd::Zero(m_atoms, m_atoms);
     m_distance = Eigen::MatrixXd::Zero(m_atoms, m_atoms);
+
+    auto topology_start = std::chrono::high_resolution_clock::now();
+    fmt::print("  → Initializing topology and distance matrices...\n");
 
     TContainer bonds;
     m_scaling = 1.4;
@@ -106,6 +118,13 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
             m_topo(j, i) = 1;
         }
     }
+
+    auto topology_end = std::chrono::high_resolution_clock::now();
+    auto topology_duration = std::chrono::duration_cast<std::chrono::milliseconds>(topology_end - topology_start);
+    fmt::print("  → Bond detection completed: {} bonds found in {} ms\n", bonds.Storage().size(), topology_duration.count());
+
+    auto atomtype_start = std::chrono::high_resolution_clock::now();
+    fmt::print("  → Assigning UFF atom types...\n");
     AssignUffAtomTypes();
     // if (m_rings)
     // std::cout << "Crude ring finding method ... " << std::endl;
@@ -114,7 +133,13 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
     if (m_atom_types.size() > 1000)
         maxcache = 5;
     m_identified_rings = Topology::FindRings(m_stored_bonds, m_atom_types.size(), maxsize, maxcache);
-    // std::cout << "... done!" << std::endl;
+
+    auto atomtype_end = std::chrono::high_resolution_clock::now();
+    auto atomtype_duration = std::chrono::duration_cast<std::chrono::milliseconds>(atomtype_end - atomtype_start);
+    fmt::print("  → Atom type assignment and ring detection completed: {} rings found in {} ms\n",
+        m_identified_rings.size(), atomtype_duration.count());
+
+    fmt::print("  → Setting up force field method: {}\n", m_method);
     if (m_method.compare("uff") == 0) {
         m_ff_type = 1;
     } else if (m_method.compare("uff-d3") == 0) {
@@ -136,15 +161,47 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
     m_uff_inversion_force = m_parameter["inversion_force"];
     m_vdw_force = m_parameter["vdw_force"];
 
+    // Generate force field parameters with timing
+    auto bonds_start = std::chrono::high_resolution_clock::now();
+    fmt::print("  → Generating bond parameters...\n");
     setBonds(bonds);
+    auto bonds_end = std::chrono::high_resolution_clock::now();
+    auto bonds_duration = std::chrono::duration_cast<std::chrono::milliseconds>(bonds_end - bonds_start);
 
+    auto angles_start = std::chrono::high_resolution_clock::now();
+    fmt::print("  → Generating angle parameters...\n");
     setAngles();
+    auto angles_end = std::chrono::high_resolution_clock::now();
+    auto angles_duration = std::chrono::duration_cast<std::chrono::milliseconds>(angles_end - angles_start);
 
+    auto dihedrals_start = std::chrono::high_resolution_clock::now();
+    fmt::print("  → Generating dihedral parameters...\n");
     setDihedrals();
+    auto dihedrals_end = std::chrono::high_resolution_clock::now();
+    auto dihedrals_duration = std::chrono::duration_cast<std::chrono::milliseconds>(dihedrals_end - dihedrals_start);
 
+    auto inversions_start = std::chrono::high_resolution_clock::now();
+    fmt::print("  → Generating inversion parameters...\n");
     setInversions();
+    auto inversions_end = std::chrono::high_resolution_clock::now();
+    auto inversions_duration = std::chrono::duration_cast<std::chrono::milliseconds>(inversions_end - inversions_start);
 
+    auto nci_start = std::chrono::high_resolution_clock::now();
+    fmt::print("  → Generating non-covalent interaction parameters...\n");
     setNCI();
+    auto nci_end = std::chrono::high_resolution_clock::now();
+    auto nci_duration = std::chrono::duration_cast<std::chrono::milliseconds>(nci_end - nci_start);
+
+    // Summary output with timing
+    auto total_end = std::chrono::high_resolution_clock::now();
+    auto total_duration = std::chrono::duration_cast<std::chrono::milliseconds>(total_end - start_time);
+
+    fmt::print("\nForce field parameter generation completed in {} ms\n", total_duration.count());
+
+#ifdef DEBUG_ON
+    fmt::print("DEBUG: Topology setup: {} ms, Atom types: {} ms\n",
+        topology_duration.count(), atomtype_duration.count());
+#endif
 }
 
 double ForceFieldGenerator::UFFBondRestLength(int i, int j, double n)

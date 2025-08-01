@@ -187,6 +187,7 @@ public:
         m_filename = filename;
 
         getBasename(filename);
+
         std::ofstream tfile1;
         tfile1.open(Optfile());
         tfile1.close();

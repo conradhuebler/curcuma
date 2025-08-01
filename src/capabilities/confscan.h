@@ -30,6 +30,7 @@
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
+#include "src/core/energycalculator.h"
 #include "src/core/molecule.h"
 
 #include "curcumamethod.h"
@@ -255,6 +256,7 @@ public:
     void setFileName(const std::string& filename)
     {
         m_filename = filename;
+        getBasename(filename); // Claude Generated: Set basename for parameter caching
         openFile();
     }
 

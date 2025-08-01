@@ -30,16 +30,36 @@
 namespace fs = std::filesystem;
 #endif
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iomanip>
+
+#include <fmt/core.h>
+#include <fmt/format.h>
 
 #include "forcefieldgenerator.h"
+#include "src/core/elements.h"
 
 #include "energycalculator.h"
 
 EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller)
     : m_method(method)
+    , m_basename("")
+{
+    initializeCommon(controller);
+}
+
+// Claude Generated: Constructor with basename for parameter caching
+EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller, const std::string& basename)
+    : m_method(method)
+    , m_basename(basename)
+{
+    initializeCommon(controller);
+}
+
+void EnergyCalculator::initializeCommon(const json& controller)
 {
     std::transform(m_method.begin(), m_method.end(), m_method.begin(), [](unsigned char c) { return std::tolower(c); });
 
@@ -51,6 +71,10 @@ EnergyCalculator::EnergyCalculator(const std::string& method, const json& contro
 
     if (controller.contains("write_param")) {
         m_writeparam = controller["write_param"];
+    }
+
+    if (controller.contains("geometry_file")) {
+        m_geometry_file = controller["geometry_file"];
     }
 
     m_bonds = []() {
@@ -287,26 +311,30 @@ void EnergyCalculator::setMolecule(const Mol& mol)
     case 0:
     default:
         if (m_parameter.size() == 0) {
-            if (!std::filesystem::exists(m_param_file)) {
-                ForceFieldGenerator ff(m_controller);
-                ff.setMolecule(mol);
-                ff.Generate();
-                m_parameter = ff.getParameter();
-                if (m_writeparam) {
-                    std::ofstream parameterfile("ff_param.json");
-                    parameterfile << m_parameter;
-                }
-            } else {
-                std::ifstream parameterfile(m_param_file);
-                try {
-                    parameterfile >> m_parameter;
-                } catch (nlohmann::json::type_error& e) {
-                } catch (nlohmann::json::parse_error& e) {
-                }
-            }
-        }
-        m_forcefield->setAtomTypes(mol.m_atoms);
+            // Claude Generated: Try loading cached parameters first
+            bool loaded_from_cache = tryLoadAutoParameters(mol);
 
+            if (!loaded_from_cache) {
+                if (!std::filesystem::exists(m_param_file)) {
+                    ForceFieldGenerator ff(m_controller);
+                    ff.setMolecule(mol);
+                    ff.Generate();
+                    m_parameter = ff.getParameter();
+
+                    // Auto-save parameters with standardized naming
+                    saveAutoParameters(mol, m_parameter);
+
+                    // if (m_writeparam) {
+                    //     std::ofstream parameterfile("ff_param.json");
+                    //     parameterfile << m_parameter;
+                    // }
+                }
+
+                // Claude Generated: Always show parameter analysis after loading/generating
+
+            } // end if (!loaded_from_cache)
+        } // end if (m_parameter.size() == 0)
+        m_forcefield->setAtomTypes(mol.m_atoms);
         m_forcefield->setParameter(m_parameter);
         break;
     }
@@ -583,4 +611,112 @@ Position EnergyCalculator::Dipole() const
 std::vector<std::vector<double>> EnergyCalculator::BondOrders() const
 {
     return m_bonds();
+}
+
+// Claude Generated: Auto-save force field parameters with intelligent naming
+void EnergyCalculator::saveAutoParameters(const Mol& mol, const json& parameters)
+{
+    std::string param_filename;
+
+    // Priority 1: Use geometry file from controller
+    if (!m_geometry_file.empty()) {
+        param_filename = ForceField::generateParameterFileName(m_geometry_file);
+    }
+    // Priority 2: Use basename from CurcumaMethod
+    else if (!m_basename.empty()) {
+        param_filename = m_basename + ".param.json";
+    }
+    // Priority 3: Fallback to molecular formula
+    else {
+        std::string formula = mol.m_formula;
+        param_filename = fmt::format("{}_{}_{}.param.json", m_method, formula, mol.m_number_atoms);
+    }
+
+    try {
+        std::ofstream param_file(param_filename);
+        if (param_file.is_open()) {
+            // Add metadata for validation
+            json output_params = parameters;
+            output_params["generated_by"] = "curcuma_energycalculator";
+            output_params["timestamp"] = std::chrono::system_clock::now().time_since_epoch().count();
+            output_params["atoms"] = mol.m_number_atoms;
+
+            param_file << std::setw(2) << output_params << std::endl;
+            param_file.close();
+
+            fmt::print("Auto-saved force field parameters to: {}\n", param_filename);
+        } else {
+            fmt::print("Warning: Could not save parameters to {}\n", param_filename);
+        }
+    } catch (const std::exception& e) {
+        fmt::print("Error saving parameters: {}\n", e.what());
+    }
+}
+
+// Claude Generated: Try loading cached force field parameters with intelligent naming
+bool EnergyCalculator::tryLoadAutoParameters(const Mol& mol)
+{
+    std::string param_filename;
+
+    // Priority 1: Use geometry file from controller
+    if (!m_geometry_file.empty()) {
+        param_filename = ForceField::generateParameterFileName(m_geometry_file);
+    }
+    // Priority 2: Use basename from CurcumaMethod
+    else if (!m_basename.empty()) {
+        param_filename = m_basename + ".param.json";
+    }
+    // Priority 3: Fallback to molecular formula
+    else {
+        std::string formula = mol.m_formula;
+        param_filename = fmt::format("{}_{}_{}.param.json", m_method, formula, mol.m_number_atoms);
+    }
+
+    // Check if parameter file exists
+    if (!std::filesystem::exists(param_filename)) {
+        return false;
+    }
+
+    try {
+        std::ifstream param_file(param_filename);
+        if (!param_file.is_open()) {
+            return false;
+        }
+
+        json loaded_params;
+        param_file >> loaded_params;
+        param_file.close();
+
+        // Validate parameters
+        if (!loaded_params.contains("method") || !loaded_params.contains("atoms")) {
+            fmt::print("Warning: Invalid cached parameter file: {}\n", param_filename);
+            return false;
+        }
+
+        // Check method compatibility
+        std::string cached_method = loaded_params["method"];
+        if (cached_method != m_method) {
+            fmt::print("Method mismatch in cached parameters (found: {}, expected: {})\n",
+                cached_method, m_method);
+            return false;
+        }
+
+        // Check atom count compatibility
+        int cached_atoms = loaded_params["atoms"];
+        if (cached_atoms != mol.m_number_atoms) {
+            fmt::print("Atom count mismatch in cached parameters (found: {}, expected: {})\n",
+                cached_atoms, mol.m_number_atoms);
+            return false;
+        }
+
+        // Parameters are valid, use them
+        m_parameter = loaded_params;
+
+        fmt::print("Loaded cached {} parameters from: {}\n", m_method, param_filename);
+        return true;
+
+    } catch (const std::exception& e) {
+        fmt::print("Error loading cached parameters from {}: {}\n", param_filename, e.what());
+        return false;
+    }
 }
