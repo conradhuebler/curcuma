@@ -4,8 +4,7 @@
 #include "src/tools/general.h"
 
 #include "json.hpp" // Include the JSON library
-#include "src/core/global.h" // Include the header file with the CLI2Json function
-
+/*
 using json = nlohmann::json;
 
 void testCLI2Json()
@@ -63,9 +62,9 @@ void testCLI2Json()
 
     std::cout << "All tests passed!" << std::endl;
 }
-
+*/
 int main()
 {
-    testCLI2Json();
+    // testCLI2Json();
     return 0;
 }

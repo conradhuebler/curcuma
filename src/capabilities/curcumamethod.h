@@ -27,10 +27,12 @@
 
 class CurcumaMethod {
 public:
-    CurcumaMethod(const json& defaults, const json& controller, bool silent);
+    CurcumaMethod(const json& defaults, const json& controller, bool silent); // Legacy constructor
+    CurcumaMethod(const json& defaults, const json& controller, int verbosity); // New verbosity constructor - Claude Generated
     CurcumaMethod()
     {
         m_help = true;
+        m_verbosity = 1; // Default: Normal Print
     }
     ~CurcumaMethod();
 
@@ -72,10 +74,17 @@ protected:
     bool m_restart = true;
 
     void AppendError(const std::string& error) { m_error_list.push_back(error); }
+
+    // Logging system integration - Claude Generated
+    void setVerbosity(int level) { m_verbosity = level; }
+    int getVerbosity() const { return m_verbosity; }
+
     //std::filebuf m_curcuma_progress;
-    bool m_silent = true;
-    bool m_verbose = false;
+    bool m_silent = true; // Legacy - kept for backwards compatibility
+    bool m_verbose = false; // Legacy - kept for backwards compatibility
     bool m_help = false;
+    int m_verbosity = 1; // New verbosity system: 0=Silent, 1=Small, 2=Normal, 3=Informative
+    int m_threads = 1; // Number of threads for parallel processing - Claude Generated
 
 private:
     /* Lets have this for all modules */

@@ -37,6 +37,14 @@ option(USE_BLAS
 option(USE_MKL
     "Enable MKL" OFF)
 
+option(CURCUMA_DEBUG
+    "Enable debug output and timing" OFF)
+
+option(CURCUMA_COLOR_DEFAULT
+    "Enable colors by default" ON)
+
+set(CURCUMA_DEBUG_LEVEL 2 CACHE STRING "Debug verbosity level 0-3")
+
 if(USE_MKL)
     if(NOT DEFINED MKL_ROOT)
         set(MKL_ROOT $ENV{MKL_ROOT})
@@ -227,6 +235,7 @@ set(curcuma_core_SRC
         src/core/forcefield.cpp
         src/core/forcefieldfunctions.h
         src/core/forcefieldgenerator.cpp
+        src/core/curcuma_logger.cpp
         src/tools/formats.h
         src/tools/geometry.h
         src/tools/general.h

@@ -17,6 +17,8 @@
  *
  */
 #include "rmsd_functions.h"
+#include "src/core/global.h" // For CurcumaLogger - Claude Generated
+#include "src/global_config.h"
 
 extern "C" {
 #include "src/capabilities/c_code/interface.h"
@@ -167,8 +169,7 @@ void RMSDDriver::LoadControlJson()
 
     m_force_reorder = Json2KeyWord<bool>(m_defaults, "reorder");
     m_protons = !Json2KeyWord<bool>(m_defaults, "heavy");
-    if (!m_verbose)
-        m_silent = Json2KeyWord<bool>(m_defaults, "silent");
+    // Legacy silent parameter removed - using verbosity system instead - Claude Generated
     m_intermedia_storage = Json2KeyWord<double>(m_defaults, "storage");
     m_dynamic_center = Json2KeyWord<bool>(m_defaults, "DynamicCenter");
     m_topo = Json2KeyWord<int>(m_defaults, "topo");
@@ -181,6 +182,7 @@ void RMSDDriver::LoadControlJson()
     m_kmstat = Json2KeyWord<bool>(m_defaults, "kmstat");
     m_km_convergence = Json2KeyWord<double>(m_defaults, "km_conv");
     m_target_rmsd = Json2KeyWord<double>(m_defaults, "target_rmsd");
+
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
         std::string element = m_defaults["Element"].get<std::string>();
@@ -215,7 +217,7 @@ void RMSDDriver::LoadControlJson()
     else if (method.compare("hybrid") == 0 || method.compare("subspace") == 0) {
         m_method = 4;
         m_limit = Json2KeyWord<int>(m_defaults, "limit");
-    } else if (method.compare("free") == 0) {
+    } else if (method.compare("free") == 0 || (method.compare("inertia") == 0)) { // will be inertia, for compatibility
         m_method = 5;
     } else if (method.compare("molalign") == 0)
         m_method = 6;
@@ -224,8 +226,41 @@ void RMSDDriver::LoadControlJson()
         m_limit = Json2KeyWord<int>(m_defaults, "limit");
     } else
         m_method = 1;
-    if (!m_silent) {
-        fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nPermutation of atomic indices performed according to {0} \n\n", m_method);
+    // Level 1: Method approach display - Claude Generated
+    if (m_verbosity >= 1) {
+        std::string method_name;
+        switch (m_method) {
+        case 1:
+            method_name = "Incremental Alignment without Kuhn-Munkres (Legacy)";
+            break;
+        case 2:
+            method_name = "Prealignment with Template approach and Permutation with Kuhn-Munkres";
+            break;
+        case 3:
+            method_name = "Subspace: Prealignment with incremental template approach using all non-hydrogen elements and Permutation with Kuhn-Munkres (Legacy)";
+            break;
+        case 4:
+            method_name = "Subspace: Prealignment with incremental template approach using selected elements and Permutation with Kuhn-Munkres";
+            break;
+        case 5:
+            method_name = "Inertia: Prealignment with according to Moment of Intertia and Permutation with Kuhn-Munkres";
+            break;
+        case 6:
+            method_name = "MolAlign: Using external molalign for permutation";
+            break;
+        case 7:
+            method_name = "Distance template: Prealignment with incremental template approach using distance criterion and Permutation with Kuhn-Munkres";
+            break;
+        case 10:
+            method_name = "Predefined Order";
+            break;
+        default:
+            method_name = "Unknown (" + std::to_string(m_method) + ")";
+            break;
+        }
+
+        CURCUMA_SUCCESS(fmt::format("Using {} to solve Permutation problem", method_name));
+        // CURCUMA_SUCCESS(fmt::format("Permutation method: Kuhn-Munkres"));
     }
     m_costmatrix = Json2KeyWord<int>(m_defaults, "costmatrix");
     std::string order = Json2KeyWord<std::string>(m_defaults, "order");
@@ -246,15 +281,17 @@ void RMSDDriver::LoadControlJson()
             // Parse den Inhalt der Datei
             // m_reorder_rules = Tools::ParseStringToVector(fileContent);
             std::vector<int> vector = Tools::String2Vector(fileContent);
-            std::cout << vector.size() << std::endl;
+            if (m_verbosity >= 3)
+                CURCUMA_DEBUG_LOG(2, fmt::format("Reorder rule vector size: {}", vector.size()));
             if (vector.size() != 0) {
                 m_reorder_rules = vector;
                 m_method = 10;
             }
         }
     }
-    if (!m_silent) {
-        std::cout << m_defaults["reference_atoms"] << std::endl;
+    // Reference atoms debug output - Claude Generated
+    if (m_verbosity >= 3) {
+        CURCUMA_DEBUG_LOG(1, fmt::format("reference_atoms: {}", m_defaults["reference_atoms"].dump()));
     }
     std::string reference_atoms = Json2KeyWord<std::string>(m_defaults, "reference_atoms");
     std::string target_atoms = Json2KeyWord<std::string>(m_defaults, "target_atoms");
@@ -265,46 +302,44 @@ void RMSDDriver::LoadControlJson()
         m_target_atoms = Tools::ParseStringToVector(target_atoms);
     }
     if (m_reference_atoms.size() != m_target_atoms.size()) {
-        std::cout << "Number of reference and target atoms must be the same, exiting ...";
+        CURCUMA_ERROR("Number of reference and target atoms must be the same, exiting...");
         exit(1);
     } else if (m_reference_atoms.size() > 0) {
-        std::cout << "Aligning molecules using atoms: ";
-        for (int i = 0; i < m_reference_atoms.size(); ++i)
-            std::cout << m_reference_atoms[i] << " " << m_target_atoms[i] << "\n";
+        if (m_verbosity >= 2) {
+            CURCUMA_INFO("Aligning molecules using specified atoms:");
+            for (int i = 0; i < m_reference_atoms.size(); ++i) {
+                CURCUMA_INFO(fmt::format("  Reference atom {} ↔ Target atom {}",
+                    m_reference_atoms[i], m_target_atoms[i]));
+            }
+        }
     }
-    if (!m_silent) {
-        fmt::print(fg(fmt::color::cyan) | fmt::emphasis::bold, "\nCurrent Configuration:\n");
-        fmt::print("Fragment Reference: {}\n", m_fragment_reference);
-        fmt::print("Fragment Target: {}\n", m_fragment_target);
-        fmt::print("Fragment: {}\n", m_fragment);
-        fmt::print("Threads: {}\n", m_threads);
-        fmt::print("Initial Fragment: {}\n", m_initial_fragment);
-        fmt::print("PT: {}\n", m_pt);
-        fmt::print("Molalign Tolerance: {}\n", m_molaligntol);
-        fmt::print("Force Reorder: {}\n", m_force_reorder);
-        fmt::print("Protons: {}\n", m_protons);
-        fmt::print("Silent: {}\n", m_silent);
-        fmt::print("Intermedia Storage: {}\n", m_intermedia_storage);
-        fmt::print("Dynamic Center: {}\n", m_dynamic_center);
-        fmt::print("Topo: {}\n", m_topo);
-        fmt::print("Write: {}\n", m_write);
-        fmt::print("No Reorder: {}\n", m_noreorder);
-        fmt::print("Update Rotation: {}\n", m_update_rotation);
-        fmt::print("Split: {}\n", m_split);
-        fmt::print("No Free: {}\n", m_nofree);
-        fmt::print("Max Trial: {}\n", m_maxtrial);
-        fmt::print("KM Stat: {}\n", m_kmstat);
-        fmt::print("KM Convergence: {}\n", m_km_convergence);
-        fmt::print("Element: {}\n", m_element);
-        fmt::print("Check: {}\n", m_check);
-        fmt::print("Damping: {}\n", m_damping);
-        fmt::print("Molalign Bin: {}\n", m_molalign);
-        fmt::print("Method: {}\n", m_method);
-        fmt::print("Cost Matrix: {}\n", m_costmatrix);
-        fmt::print("Order: {}\n", order);
-        fmt::print("Cycles: {}\n", m_munkress_cycle);
-        fmt::print("Reference Atoms: {}\n", fmt::join(m_reference_atoms, ", "));
-        fmt::print("Target Atoms: {}\n", fmt::join(m_target_atoms, ", "));
+    // Level 3: Detailed configuration output - Claude Generated
+    if (m_verbosity >= 3) {
+        CURCUMA_HEADER("Detailed RMSD Configuration");
+        CURCUMA_PARAM("Fragment Reference", std::to_string(m_fragment_reference));
+        CURCUMA_PARAM("Fragment Target", std::to_string(m_fragment_target));
+        CURCUMA_PARAM("Fragment", std::to_string(m_fragment));
+        CURCUMA_PARAM("Threads", std::to_string(m_threads));
+        CURCUMA_PARAM("Initial Fragment", std::to_string(m_initial_fragment));
+        CURCUMA_PARAM("PT", std::to_string(m_pt));
+        CURCUMA_PARAM("Molalign Tolerance", std::to_string(m_molaligntol));
+        CURCUMA_PARAM("Force Reorder", m_force_reorder ? "true" : "false");
+        CURCUMA_PARAM("Protons", m_protons ? "true" : "false");
+        CURCUMA_PARAM("Intermedia Storage", fmt::format("{:.3f}", m_intermedia_storage));
+        CURCUMA_PARAM("Dynamic Center", m_dynamic_center ? "true" : "false");
+        CURCUMA_PARAM("Topo", std::to_string(m_topo));
+        CURCUMA_PARAM("Write", std::to_string(m_write));
+        CURCUMA_PARAM("No Reorder", m_noreorder ? "true" : "false");
+        CURCUMA_PARAM("Update Rotation", m_update_rotation ? "true" : "false");
+        CURCUMA_PARAM("Split", m_split ? "true" : "false");
+        CURCUMA_PARAM("Method", m_method);
+        CURCUMA_PARAM("Cost Matrix", std::to_string(m_costmatrix));
+        if (!m_reference_atoms.empty()) {
+            CURCUMA_PARAM("Reference Atoms", fmt::format("[{}]", fmt::join(m_reference_atoms, ", ")));
+        }
+        if (!m_target_atoms.empty()) {
+            CURCUMA_PARAM("Target Atoms", fmt::format("[{}]", fmt::join(m_target_atoms, ", ")));
+        }
     }
 }
 
@@ -319,13 +354,33 @@ void RMSDDriver::setMatchingAtoms(const std::vector<int>& reference_atoms, const
 void RMSDDriver::start()
 {
     if (m_reference.AtomCount() == 0 || m_target.AtomCount() == 0) {
-        std::cout << "At least one structure is empty, exiting ...";
+        CURCUMA_ERROR("At least one structure is empty, exiting...");
         return;
     }
+
+    // Level 3: Timing analysis for complex functions - Claude Generated
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    // Level 1: Display input parameters nicely formatted - Claude Generated
+    if (m_verbosity >= 1) {
+        CURCUMA_HEADER("RMSD Analysis");
+
+        // Display parameter comparison table showing defaults vs current settings at level 1
+        CURCUMA_PARAM_COMPARISON(m_defaults, m_controller["rmsd"], "RMSD Configuration");
+
+        if (m_verbosity >= 2) {
+            CURCUMA_INFO(fmt::format("Reference atoms: {}, Target atoms: {}",
+                m_reference.AtomCount(), m_target.AtomCount()));
+        }
+    }
+
     RunTimer timer(false);
     reset();
-    if (!m_silent) {
+
+    if (m_verbosity >= 2) {
+        CURCUMA_INFO("Reference structure:");
         m_reference.print_geom();
+        CURCUMA_INFO("Target structure:");
         m_target.print_geom();
     }
     bool rmsd_calculated = false;
@@ -399,8 +454,8 @@ void RMSDDriver::start()
             } else if (!rmsd_calculated)
                 m_rmsd = BestFitRMSD();
         } else {
-            if (!m_silent)
-                fmt::print("Partial RMSD is calculated, only from those atoms, that match each other.\n\n\n");
+            if (m_verbosity >= 2)
+                CURCUMA_WARN("Partial RMSD is calculated, only from those atoms that match each other");
             m_rmsd = PartialRMSD(temp_ref, temp_tar);
         }
     } else {
@@ -421,12 +476,12 @@ void RMSDDriver::start()
     }
 
     m_htopo_diff = CompareTopoMatrix(m_reference_aligned.HydrogenBondMatrix(-1, -1), m_target_aligned.HydrogenBondMatrix(-1, -1));
-    if (!m_silent) {
-        std::cout << std::endl
-                  << "RMSD calculation took " << timer.Elapsed() << " msecs." << std::endl;
-        std::cout << "Difference in Topological Hydrogen Bond Matrix is " << m_htopo_diff << std::endl;
-        std::cout << std::endl
-                  << std::endl;
+    // Detailed timing and topology output moved to level 3 - Claude Generated
+    if (m_verbosity >= 3) {
+        CURCUMA_INFO(fmt::format("RMSD calculation took {} msecs", timer.Elapsed()));
+        if (m_htopo_diff != 0) {
+            CURCUMA_INFO(fmt::format("Hydrogen bond topology difference: {}", m_htopo_diff));
+        }
         CheckTopology();
     }
     if (m_swap) {
@@ -436,6 +491,29 @@ void RMSDDriver::start()
         m_reference_aligned = m_target_aligned;
         m_target = reference;
         m_target_aligned = reference_aligned;
+    }
+
+    // Level 1: Final results output - Claude Generated
+    if (m_verbosity >= 1) {
+        CURCUMA_SUCCESS(fmt::format("RMSD Analysis completed"));
+        CURCUMA_RESULT_RAW(fmt::format("RMSD: {:.6f}", m_rmsd));
+        if (m_rmsd_raw != 0.0) {
+            CURCUMA_RESULT_RAW(fmt::format("RMSD_raw: {:.6f}", m_rmsd_raw));
+        }
+    }
+
+    // Level 3: Timing analysis - Claude Generated
+    if (m_verbosity >= 3) {
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+        CURCUMA_INFO(fmt::format("RMSD calculation completed in {} ms", duration.count()));
+
+        if (m_htopo_diff != 0) {
+            CURCUMA_INFO(fmt::format("Hydrogen bond topology difference: {}", m_htopo_diff));
+        }
+        if (!m_reorder_rules.empty()) {
+            CURCUMA_INFO(fmt::format("Reorder rules applied: {} atoms", m_reorder_rules.size()));
+        }
     }
 }
 
@@ -524,7 +602,8 @@ void RMSDDriver::ReorderIncremental()
     int combinations = 0;
     int wake_up = 100;
     CxxThreadPool* pool = new CxxThreadPool;
-    if (m_silent)
+    // Progress bar control based on verbosity - Claude Generated
+    if (m_verbosity == 0)
         pool->setProgressBar(CxxThreadPool::ProgressBarType::None);
     else
         pool->setProgressBar(CxxThreadPool::ProgressBarType::Continously);
@@ -538,8 +617,10 @@ void RMSDDriver::ReorderIncremental()
         int i = reference.AtomCount();
         double mass = m_reference.ConnectedMass(i);
         auto atom = m_reorder_reference.Atom(i);
-        if (!m_silent) {
-            std::cout << int((reference_reordered + reference_not_reorordered) / double(max) * 100) << " % " << std::endl;
+        // Progress reporting - Claude Generated
+        if (m_verbosity >= 2) {
+            int progress = int((reference_reordered + reference_not_reorordered) / double(max) * 100);
+            CURCUMA_PROGRESS(reference_reordered + reference_not_reorordered, max, "Reordering atoms");
         }
         int element = atom.first;
         reference.addPair(atom);
@@ -583,8 +664,10 @@ void RMSDDriver::ReorderIncremental()
                 ref_0.addPair(m_reorder_reference.Atom(i));
                 atoms.push_back(m_reorder_reference.Atom(i));
                 m_reorder_reference = ref_0;
-                fmt::print("Atom order of reference molecule was altered!\nThe current atom (formerly {}) was pushed to the end of the list!\n", i + reference_reordered);
-                fmt::print("Element {} : ({:f} {:f} {:f})\n", atom.first, atom.second[0], atom.second[1], atom.second[2]);
+                if (m_verbosity >= 2) {
+                    CURCUMA_WARN(fmt::format("Atom order altered! Atom {} pushed to end of list", i + reference_reordered));
+                    CURCUMA_INFO(fmt::format("Element {} : ({:.3f} {:.3f} {:.3f})", atom.first, atom.second[0], atom.second[1], atom.second[2]));
+                }
                 reference_reordered++;
             } else
                 reference_reordered = m_reference.AtomCount();
@@ -619,8 +702,8 @@ void RMSDDriver::ReorderIncremental()
     }
     // m_reorder_rules = m_results.begin()->second;
     if (m_stored_rules.size() == 0) {
-        if (!m_silent)
-            std::cout << "No new solution found, sorry" << std::endl;
+        if (m_verbosity >= 2)
+            CURCUMA_WARN("No new solution found");
         for (int i = 0; i < m_reference.AtomCount(); ++i)
             m_reorder_rules.push_back(i);
     } else {
@@ -629,8 +712,9 @@ void RMSDDriver::ReorderIncremental()
     m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
     m_target = m_target_reordered;
     m_target_aligned = m_target;
-    if (!m_silent)
-        std::cout << "Overall " << combinations << " where evaluated!" << std::endl;
+    if (m_verbosity >= 2) {
+        CURCUMA_INFO(fmt::format("Overall {} combinations were evaluated", combinations));
+    }
 }
 
 std::vector<int> RMSDDriver::FillMissing(const Molecule& molecule, const std::vector<int>& order)
@@ -751,7 +835,8 @@ void RMSDDriver::CheckTopology()
         }
         // ref.appendXYZFile(std::to_string(index) + ".test.xyz");
 
-        std::cout << index << " " << rmsd << " " << topo0 << " " << topo << std::endl;
+        if (m_verbosity >= 3)
+            CURCUMA_DEBUG_LOG(2, fmt::format("Topology check {}: RMSD={:.6f}, TopoInit={}, TopoStep={}", index, rmsd, topo0, topo));
         /*  if (topo < best_topo) {
               best_topo = topo;
               best_rule = rule;
@@ -766,8 +851,8 @@ void RMSDDriver::CheckTopology()
 
 void RMSDDriver::ProtonDepleted()
 {
-    if (!m_silent)
-        std::cerr << "Will perform calculation on proton depleted structure." << std::endl;
+    if (m_verbosity >= 2)
+        CURCUMA_INFO("Will perform calculation on proton depleted structure");
 
     Molecule reference;
     for (std::size_t i = 0; i < m_reference.AtomCount(); ++i) {
@@ -952,7 +1037,8 @@ void RMSDDriver::ReorderMolecule()
     } else if (m_method == 10) {
         m_target_reordered = ApplyOrder(m_reorder_rules, m_target);
         m_rmsd = Rules2RMSD(m_reorder_rules);
-        std::cout << m_rmsd << std::endl;
+        if (m_verbosity >= 2)
+            CURCUMA_INFO(fmt::format("Final RMSD: {:.6f}", m_rmsd));
     }
 }
 
@@ -987,8 +1073,10 @@ void RMSDDriver::FinaliseTemplate()
 
         m_target_reordered = ApplyOrder(result, target);
         double rmsd = Rules2RMSD(result);
-        if (!m_silent)
-            std::cout << permutation.first << " " << rmsd << " " << eq_counter << " " << time.Elapsed() << std::endl;
+        // Iteration progress output - Claude Generated
+        if (m_verbosity >= 3)
+            CURCUMA_INFO(fmt::format("Cost: {:.3f}, RMSD: {:.6f}, Counter: {}, Time: {} ms",
+                permutation.first, rmsd, eq_counter, time.Elapsed()));
         if (m_kmstat)
             result_file << permutation.first << " " << rmsd << " " << std::endl;
 
@@ -1009,8 +1097,8 @@ void RMSDDriver::FinaliseTemplate()
 
 void RMSDDriver::DistanceTemplate()
 {
-    if (!m_silent)
-        std::cout << "Prepare template structure on atom distances:" << std::endl;
+    if (m_verbosity >= 2)
+        CURCUMA_INFO("Preparing template structure on atom distances");
 
     auto pairs = PrepareDistanceTemplate();
 }
@@ -1019,15 +1107,15 @@ void RMSDDriver::AtomTemplate()
 {
     auto pairs = PrepareAtomTemplate(m_element_templates);
     if (pairs.first.size() == 0 || pairs.second.size() == 0) {
-        std::cout << "Templates are empty, maybe try different elements" << std::endl;
+        CURCUMA_ERROR("Templates are empty, maybe try different elements");
         return;
     }
 }
 
 void RMSDDriver::HeavyTemplate()
 {
-    if (!m_silent)
-        std::cout << "Prepare heavy atom template structure:" << std::endl;
+    if (m_verbosity >= 2)
+        CURCUMA_INFO("Preparing heavy atom template structure");
 
     PrepareHeavyTemplate();
 }
@@ -1372,7 +1460,7 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareAtomTemplate(in
         }
     }
     if (target.AtomCount() == 0 || reference.AtomCount() == 0) {
-        std::cout << " Template list is empty, try different elements please" << std::endl;
+        CURCUMA_ERROR("Template list is empty, try different elements please");
         exit(0);
     }
     Molecule cached_reference_mol = m_reference;
@@ -1468,8 +1556,8 @@ std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareAtomTemplate(co
 
 std::pair<std::vector<int>, std::vector<int>> RMSDDriver::PrepareDistanceTemplate() // const std::vector<int>& templateatom)
 {
-    if (!m_silent)
-        std::cout << "Start Prepare Template" << std::endl;
+    if (m_verbosity >= 2)
+        CURCUMA_INFO("Starting template preparation");
     RunTimer time;
     std::map<double, std::pair<int, int>> m_distance_reference, m_distance_target;
 
@@ -1695,8 +1783,8 @@ std::vector<int> RMSDDriver::SolveCostMatrix(Matrix& distance)
         difference = (distance - pair.second).cwiseAbs().sum();
         distance = pair.second;
     }
-    if (!m_silent)
-        std::cout << iter << std::endl;
+    if (m_verbosity >= 3)
+        CURCUMA_DEBUG_LOG(2, fmt::format("Munkres iterations: {}", iter));
     return new_order;
 }
 
@@ -1772,8 +1860,8 @@ bool RMSDDriver::MolAlignLib()
 
     FILE* FileOpen;
     std::string command = m_molalign + m_molalignarg + " molaign_ref.xyz   molalign_tar.xyz " + " 2>&1";
-    if (!m_silent)
-        std::cout << command << std::endl;
+    if (m_verbosity >= 3)
+        CURCUMA_INFO(fmt::format("MolAlign command: {}", command));
     FileOpen = popen(command.c_str(), "r");
     bool ok = true;
     bool rndm = false;
@@ -1784,14 +1872,14 @@ bool RMSDDriver::MolAlignLib()
         //  ok = std::string(line).find("RMSD") != std::string::npos;
         rndm = std::string(line).find("random") != std::string::npos;
         error = std::string(line).find("Error") != std::string::npos;
-        if (!m_silent)
-            std::cout << line;
+        if (m_verbosity >= 3)
+            CURCUMA_DEBUG_LOG(2, fmt::format("MolAlign output: {}", std::string(line).substr(0, std::string(line).find('\n'))));
     }
     pclose(FileOpen);
 
     if (std::filesystem::exists("aligned.xyz") and !rndm) {
-        if (!m_silent) {
-            fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nPlease cite the follow research report!\nJ. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187\n\n");
+        if (m_verbosity >= 1) {
+            CURCUMA_CITATION("J. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187");
         }
         FileIterator file("aligned.xyz", true);
         m_reference_centered = file.Next();
@@ -1802,16 +1890,16 @@ bool RMSDDriver::MolAlignLib()
         std::filesystem::remove("aligned.xyz");
     } else {
         if (!rndm && !error) {
-            fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "Molalign was not found. Consider getting it from\nhttps://github.com/qcuaeh/molalignlib\nEither adding the location of the binary to the path for executables or append\n-molalignbin /yourpath/molalign\nto your argument list!\n");
+            CURCUMA_ERROR("Molalign was not found. Consider getting it from https://github.com/qcuaeh/molalignlib or use -molalignbin /yourpath/molalign");
             return false;
         }
     }
     if (rndm) {
-        fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "molalign has trouble with random numbers, no permutation will be performed ...\n");
+        CURCUMA_ERROR("molalign has trouble with random numbers, no permutation will be performed");
         return false;
     }
     if (error) {
-        fmt::print(fg(fmt::color::salmon) | fmt::emphasis::bold, "molalign has trouble with finding the solution, try to increase tolerance via -molaligntol XX \n");
+        CURCUMA_ERROR("molalign has trouble with finding the solution, try to increase tolerance via -molaligntol XX");
         return false;
     }
     return true;

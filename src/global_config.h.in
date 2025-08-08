@@ -13,3 +13,52 @@
 
 #cmakedefine C17
 #cmakedefine GCC
+
+// Logging and Debug Configuration
+#cmakedefine CURCUMA_DEBUG
+#cmakedefine CURCUMA_COLOR_DEFAULT
+#define CURCUMA_DEBUG_LEVEL @CURCUMA_DEBUG_LEVEL@
+
+// Physical Constants (CODATA-2018) - Claude Generated
+#define CURCUMA_EH_TO_KJMOL 2625.4996394798
+#define CURCUMA_EH_TO_KCALMOL 627.5094740631  
+#define CURCUMA_EH_TO_EV 27.211386245988
+#define CURCUMA_EH_TO_WAVENUMBER 219474.6313632
+#define CURCUMA_BOHR_TO_ANGSTROM 0.529177210903
+#define CURCUMA_AUT_TO_FS 24.188843265857
+#define CURCUMA_SPEED_OF_LIGHT_AU 137.035999084
+#define CURCUMA_BOLTZMANN_AU 3.1668115634556e-6
+#define CURCUMA_AVOGADRO 6.02214076e23
+
+// Forward declaration for CurcumaLogger
+class CurcumaLogger;
+
+// Logging Macros - Production (always available)
+#define CURCUMA_ERROR(msg) CurcumaLogger::error(msg)
+#define CURCUMA_WARN(msg) CurcumaLogger::warn(msg)  
+#define CURCUMA_SUCCESS(msg) CurcumaLogger::success(msg)
+#define CURCUMA_INFO(msg) CurcumaLogger::info(msg)
+#define CURCUMA_PARAM(key, value) CurcumaLogger::param(key, value)
+#define CURCUMA_PARAM_TABLE(json_params, title) CurcumaLogger::param_table(json_params, title)
+#define CURCUMA_PARAM_COMPARISON(defaults, controller, title) CurcumaLogger::param_comparison_table(defaults, controller, title)
+#define CURCUMA_CITATION(ref) CurcumaLogger::citation(ref)
+#define CURCUMA_RESULT_RAW(data) CurcumaLogger::result_raw(data)
+#define CURCUMA_PROGRESS(current, total, msg) CurcumaLogger::progress(current, total, msg)
+#define CURCUMA_HEADER(title) CurcumaLogger::header(title)
+
+// Unit-aware output macros
+#define CURCUMA_ENERGY_REL(value_eh, label) CurcumaLogger::energy_rel(value_eh, label)
+#define CURCUMA_ENERGY_ABS(value_eh, label) CurcumaLogger::energy_abs(value_eh, label)
+#define CURCUMA_LENGTH(value_bohr, label) CurcumaLogger::length(value_bohr, label)
+#define CURCUMA_TIME(value_aut, label) CurcumaLogger::time(value_aut, label)
+
+// Debug Macros - only available if CURCUMA_DEBUG is defined
+#ifdef CURCUMA_DEBUG
+#define CURCUMA_DEBUG_LOG(level, msg) do { if (level <= CURCUMA_DEBUG_LEVEL) CurcumaLogger::debug(level, msg); } while(0)
+#define CURCUMA_DEBUG_VAR(var) CurcumaLogger::debug_var(#var, var)
+#define CURCUMA_DEBUG_TIMING(label) CurcumaLogger::debug_timing(label)
+#else
+#define CURCUMA_DEBUG_LOG(level, msg) do { } while(0)
+#define CURCUMA_DEBUG_VAR(var) do { } while(0)
+#define CURCUMA_DEBUG_TIMING(label) do { } while(0)
+#endif

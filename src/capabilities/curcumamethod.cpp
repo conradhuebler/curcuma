@@ -17,6 +17,7 @@
  *
  */
 
+#include "src/core/global.h"
 #include "src/global_config.h"
 
 #include "src/tools/general.h"
@@ -38,11 +39,85 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, bool 
     , m_controller(controller)
     , m_silent(silent)
 {
+    // Legacy constructor - convert boolean silent to verbosity levels
     if (controller.count("verbose") > 0) {
         m_silent = false;
         m_verbose = true;
+        m_verbosity = 3; // Verbose = Informative Print
+    } else {
+        m_verbosity = silent ? 0 : 1; // Silent or Normal Print
     }
+
+    // Check for explicit verbosity level in CLI arguments - Claude Generated
+    if (controller.count("verbosity") > 0) {
+        try {
+            m_verbosity = controller["verbosity"].get<int>();
+            // Clamp to valid range 0-3
+            m_verbosity = std::max(0, std::min(3, m_verbosity));
+            // Update legacy flags for backwards compatibility
+            m_silent = (m_verbosity == 0);
+            m_verbose = (m_verbosity >= 3);
+        } catch (const std::exception& e) {
+            // Invalid verbosity value, keep current setting
+        }
+    }
+
+    // Check for threads setting in CLI arguments - Claude Generated
+    if (controller.count("threads") > 0) {
+        try {
+            m_threads = controller["threads"].get<int>();
+            m_threads = std::max(1, m_threads); // At least 1 thread
+        } catch (const std::exception& e) {
+            // Invalid threads value, keep default
+        }
+    }
+
     controller.count("help") > 0 ? m_help = true : m_help = false;
+
+    // Initialize CurcumaLogger with this method's verbosity - Claude Generated
+    CurcumaLogger::set_verbosity(m_verbosity);
+
+    // m_curcuma_progress.open("curcuma_progress", std::ios::out);
+}
+
+// New verbosity constructor - Claude Generated
+CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, int verbosity)
+    : m_defaults(defaults)
+    , m_controller(controller)
+    , m_verbosity(verbosity)
+{
+    // Set legacy flags for backwards compatibility
+    m_silent = (verbosity == 0);
+    m_verbose = (verbosity >= 3);
+
+    // Check for verbosity override in controller
+    if (controller.count("verbosity") > 0) {
+        try {
+            m_verbosity = controller["verbosity"].get<int>();
+            // Clamp to valid range 0-3
+            m_verbosity = std::max(0, std::min(3, m_verbosity));
+            m_silent = (m_verbosity == 0);
+            m_verbose = (m_verbosity >= 3);
+        } catch (const std::exception& e) {
+            // Invalid verbosity value, keep parameter setting
+        }
+    }
+
+    // Check for threads setting in CLI arguments - Claude Generated
+    if (controller.count("threads") > 0) {
+        try {
+            m_threads = controller["threads"].get<int>();
+            m_threads = std::max(1, m_threads); // At least 1 thread
+        } catch (const std::exception& e) {
+            // Invalid threads value, keep default
+        }
+    }
+
+    controller.count("help") > 0 ? m_help = true : m_help = false;
+
+    // Initialize CurcumaLogger with this method's verbosity - Claude Generated
+    CurcumaLogger::set_verbosity(m_verbosity);
+
     //m_curcuma_progress.open("curcuma_progress", std::ios::out);
 }
 

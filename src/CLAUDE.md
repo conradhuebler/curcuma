@@ -26,7 +26,7 @@ src/
 - All new functions marked as "Claude Generated" for traceability
 - Doxygen-ready documentation for new and frequently used functions
 - Remove completed TODO hashtags when approved
-- Use qDebug() for debugging within `#ifdef DEBUG_ON #endif`
+- Use std::cout for debugging within `#ifdef DEBUG_ON #endif`
 - Port std::cout to fmt for non-debugging console output
 - Replace deprecated suprafit functions when compiler warnings appear
 

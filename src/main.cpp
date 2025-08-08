@@ -140,6 +140,100 @@ double DotProduct(const Eigen::Vector3d& pos1, const Eigen::Vector3d& pos2)
     return pos1.dot(pos2);
 }
 
+json CLI2Json(int argc, char** argv)
+{
+    json controller;
+    json key;
+    if (argc < 2)
+        return controller;
+
+    std::string keyword = argv[1];
+    keyword.erase(0, 1);
+
+    std::set<std::string> global_params = {
+        "verbosity", "threads"
+    };
+
+    for (int i = 2; i < argc; ++i) {
+        std::string current = argv[i];
+        std::string sub = current.substr(0, 1);
+
+        if (sub == "-") {
+            current.erase(0, 1);
+
+            // Handle special verbosity shortcuts - Claude Generated
+            if (current == "silent" || current == "quiet") {
+                key["verbosity"] = 0;
+                continue;
+            } else if (current == "verbose") {
+                key["verbosity"] = 3;
+                continue;
+            } else if (current == "v") {
+                // Handle -v N syntax for verbosity level
+                if ((i + 1) < argc) {
+                    try {
+                        int verbosity_level = std::stoi(argv[i + 1]);
+                        if (verbosity_level >= 0 && verbosity_level <= 3) {
+                            key["verbosity"] = verbosity_level;
+                            ++i; // Skip next argument
+                            continue;
+                        }
+                    } catch (const std::exception&) {
+                        // Fall through to normal processing
+                    }
+                }
+            }
+
+            if ((i + 1) >= argc || argv[i + 1][0] == '-' || argv[i + 1] == std::string("true") || argv[i + 1] == std::string("+")) {
+                key[current] = true;
+            } else if (argv[i + 1] == std::string("false")) {
+                key[current] = false;
+                ++i;
+            } else {
+                std::string next = argv[i + 1];
+                //       std::cout << "next: " << next << std::endl;
+
+                bool isNumber = true;
+                bool isVector = next.find("|") != std::string::npos || next.find(",") != std::string::npos || next.find(":") != std::string::npos;
+                //      std::cout << "isNumber: " << isNumber << std::endl
+                //                  << "isVector: " << isVector << std::endl;
+                if (isVector) {
+                    isNumber = false;
+                }
+                if (!isVector) {
+                    try {
+                        // std::cout << "stod: " << std::stod(next) << std::endl;
+                        std::stod(next);
+
+                    } catch (const std::invalid_argument&) {
+                        isNumber = false;
+                        isVector = true;
+                    }
+                }
+                // std::cout << "isNumber: " << isNumber << std::endl
+                //             << "isVector: " << isVector << std::endl;
+                if (isNumber) {
+                    key[current] = std::stod(next);
+                } else if (isVector) {
+                    //        std::cout << next << std::endl;
+                    key[current] = next;
+                } else {
+                    key[current] = next;
+                }
+                ++i;
+            }
+        }
+    }
+
+    controller[keyword] = key;
+    for (const auto& param : global_params) {
+        if (key.count(param) > 0) {
+            controller[param] = key[param]; // Ensure global parameters are always set in the controller
+        }
+    }
+    return controller;
+}
+
 int main(int argc, char **argv) {
 #ifndef _WIN32
 #if __GNUC__

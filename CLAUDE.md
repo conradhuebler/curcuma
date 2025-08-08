@@ -34,14 +34,11 @@
 - Document existing undocumented functions if appearing regulary (briefly and doxygen ready)
 - Remove TODO Hashtags and text if done and approved
 - Implement comprehensive error handling and logging 
-- Debugging output with std::cout within #ifdef DEBUG_ON #endif
-- Check if this is written correctly (CMakeLists.txt and include) 
-- non-debugging console output is realised with fmt, port away from std::cout if appearing
 - Maintain backward compatibility where possible
 - **Always check and consider instructions blocks** in relevant CLAUDE.md files before implementing 
 - reformulate and clarify task and vision entries if not alredy marked as CLAUDE formatted
-- in case of compiler warning for deprecated suprafit functions, replace the old function call with the new one
-
+- in case of compiler warning for deprecated functions, replace the old function call with the new one
+- Implement timing analysis for complex funtions
 
 ## Current Capabilities
 
@@ -181,11 +178,141 @@ cmake .. && make -j4
 ./curcuma -sp input.xyz -method cgfnff
 ```
 
+## Curcuma Development Standards
+
+### Logging and Output System
+
+#### Verbosity Levels (0-3)
+**All modules must implement 4-tier verbosity system:**
+- **0 (Silent)**: Keine Ausgaben außer kritische Fehler und wichtigste Endergebnisse
+- **1 (Small Print)**: Nur wichtige Endergebnisse, minimal formatiert, für Batch-Jobs, Includes nicely formatted input/arguments parameter (json structure)
+- **2 (Normal Print)**: Standard-Fortschrittsinformationen, schön formatiert, Default für interaktive Nutzung
+- **3 (Informative Print)**: Detaillierte Informationen mit vollem Styling für Debugging und Analyse, auch Timing Analysen
+
+#### Farb-Schema und Formatierung
+**Einheitliche Farbkodierung für alle Ausgaben:**
+- **Fehler/Errors**: `fmt::color::red` - Immer sichtbar, unabhängig von Verbosity
+- **Warnungen/Warnings**: `fmt::color::orange` - Ab Level 1
+- **Erfolg/Status**: `fmt::color::lime_green` - Wichtige positive Meldungen
+- **Zitationshinweise**: `fmt::color::green` - Literaturverweise und Credits
+- **Parameter/Werte**: `fmt::color::blue` - Konfiguration und numerische Werte
+- **Info/Standard**: Terminal-Default - Normale Informationen
+- **Debug**: `fmt::color::magenta` - Debug-Ausgaben (nur bei CURCUMA_DEBUG)
+
+#### Output-Modi
+- **RAW Mode**: Keine Farben, maschinenlesbar (`CURCUMA_NO_COLOR=1` oder `--no-color`)
+- **TERMINAL Mode**: Vollfarben für interaktive Nutzung (Default)
+- **MARKDOWN Mode**: Optional für Reports (`--output-format=markdown`)
+
+#### Logging-Makros (zu implementieren)
+```cpp
+// Produktions-Logging (immer verfügbar)
+CURCUMA_ERROR(message)                // Rot, immer sichtbar
+CURCUMA_WARN(message)                 // Orange, ab Level 1  
+CURCUMA_SUCCESS(message)              // Grün, ab Level 1
+CURCUMA_INFO(message)                 // Standard, ab Level 2
+CURCUMA_PARAM(key, value)             // Blau, ab Level 2
+CURCUMA_CITATION(reference)           // Grün, ab Level 2
+CURCUMA_RESULT_RAW(data)              // Unformatiert für Scripting
+CURCUMA_PROGRESS(current, total, msg) // Fortschrittsbalken ab Level 2
+CURCUMA_HEADER(title)                 // Section-Header ab Level 2
+
+// Debug-Logging (nur bei CURCUMA_DEBUG build, compile-time eliminiert)
+CURCUMA_DEBUG(level, message)         // Magenta, Debug-Level 0-3
+CURCUMA_DEBUG_VAR(variable)           // Variable dump
+CURCUMA_DEBUG_TIMING(label)           // Performance-Messungen
+```
+
+#### Debug-System (Build-Zeit-Kontrolle)
+- **CMake Option**: `option(CURCUMA_DEBUG "Enable debug output" OFF)`
+- **Makro**: `#ifdef CURCUMA_DEBUG` für vollständige compile-time Eliminierung
+- **Performance**: Debug-Code nimmt in Release-Builds KEINE Rechenleistung
+- **Debug-Level**: 0-3 für verschiedene Debug-Detailgrade
+
+### Unit System and Conversions
+
+#### Internal Unit System (Atomic Units)
+**Alle Rechnungen intern in atomaren Einheiten:**
+- **Energie**: Hartree (Eh) - 1 Eh = 27.211386245988 eV = 2625.4996394798 kJ/mol
+- **Länge**: Bohr (a₀) - 1 a₀ = 0.529177210903 Å  
+- **Zeit**: Atomare Zeit (aut) - 1 aut = 24.188843265857 fs
+- **Masse**: Elektronenmasse (mₑ) - für relative Atommassen
+- **Temperatur**: Kelvin - direkt verwendbar
+- **Ladung**: Elementarladung (e) - direkt verwendbar
+
+#### Output Unit Preferences
+**Benutzerfreundliche Ausgaben mit automatischer Einheitenwahl:**
+
+**Energien:**
+- **Absolute Energien**: Hartree (Eh) - für QM-Rechnungen
+- **Relative Energien**: kJ/mol - für thermodynamische Größen
+- **Kleine Energiedifferenzen**: meV oder cm⁻¹ - für Spektroskopie
+- **Aktivierungsbarrieren**: kcal/mol - für Kinetik
+
+**Geometrien:**
+- **Atomabstände**: Ångström (Å) - Standard in Molekülchemie
+- **Große Systeme**: nm - für Biomoleküle
+- **Zellparameter**: Å oder pm - je nach Größe
+
+**Zeit/Dynamik:**
+- **MD-Schritte**: fs - Femtosekunden für Molekulardynamik
+- **Reaktionszeiten**: ps, ns - je nach Zeitskala
+- **Optimierung**: Anzahl Zyklen - dimensionslos
+
+#### Automatische Unit Conversion Functions (zu implementieren)
+```cpp
+// Energy conversions
+double hartree_to_kjmol(double eh);
+double hartree_to_kcalmol(double eh);
+double hartree_to_ev(double eh);  
+double hartree_to_wavenumber(double eh); // cm⁻¹
+
+// Length conversions  
+double bohr_to_angstrom(double bohr);
+double angstrom_to_bohr(double ang);
+
+// Smart formatting with automatic unit selection
+std::string format_energy_relative(double eh_diff); // Auto: kJ/mol, meV, cm⁻¹
+std::string format_energy_absolute(double eh);      // Always Hartree
+std::string format_length(double bohr);             // Auto: Å, pm, nm
+std::string format_time(double aut);                // Auto: fs, ps, ns
+
+// Unit-aware output macros
+CURCUMA_ENERGY_REL(value_eh, label);  // Automatisch kJ/mol mit Einheit
+CURCUMA_ENERGY_ABS(value_eh, label);  // Hartree mit Einheit  
+CURCUMA_LENGTH(value_bohr, label);    // Ångström mit Einheit
+CURCUMA_TIME(value_aut, label);       // fs/ps mit Einheit
+```
+
+#### Physical Constants (Internal Reference)
+```cpp
+// Fundamental constants in atomic units
+const double SPEED_OF_LIGHT_AU = 137.035999084;     // c in a.u.
+const double BOLTZMANN_AU = 3.1668115634556e-6;     // kB in Eh/K
+const double AVOGADRO = 6.02214076e23;              // mol⁻¹
+
+// Conversion factors (exact values)
+const double EH_TO_KJMOL = 2625.4996394798;
+const double EH_TO_KCALMOL = 627.5094740631;  
+const double EH_TO_EV = 27.211386245988;
+const double EH_TO_WAVENUMBER = 219474.6313632;     // cm⁻¹
+const double BOHR_TO_ANGSTROM = 0.529177210903;
+const double AUT_TO_FS = 24.188843265857;
+```
+
+#### Implementation Guidelines
+- **Konsistenz**: Alle Module verwenden dieselben Umrechnungsfunktionen
+- **Präzision**: Verwende CODATA-2018 Werte für physikalische Konstanten  
+- **Automatik**: Intelligente Einheitenwahl basierend auf Wertebereichen
+- **Klarheit**: Immer Einheiten in Ausgaben anzeigen
+- **Kompatibilität**: Input/Output kann verschiedene Einheiten akzeptieren
+
 ## Known Issues
 
 1. **cgfnff JSON bug**: Parameter generation creates null values causing crashes
-2. **Missing real GFN-FF parameters**: Currently uses placeholder values
-3. **Documentation accuracy**: This file needs human review and correction
+2. **Missing real GFN-FF parameters**: Currently uses placeholder values  
+3. **Logging system**: Needs complete overhaul to new standards above
+4. **Unit inconsistencies**: Mixed unit usage throughout codebase needs standardization
 
 ---
 

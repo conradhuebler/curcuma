@@ -72,6 +72,7 @@ capabilities/
 ### Known Issues
 - Memory usage optimization needed for large systems
 - Enhanced error handling for failed optimizations
+- **ConfScan verbosity issue**: Accept/Reject messages not showing at default verbosity level - need to investigate default verbosity settings and ensure user feedback is always visible
 
 ### TODO - SimpleMD Wall Potential Fixes (January 2025)
 **CRITICAL CORRECTNESS ISSUES IDENTIFIED:**

@@ -111,7 +111,8 @@ static const json ConfScanJson = {
 
 class ConfScanThread : public CxxThread {
 public:
-    ConfScanThread(const std::vector<std::vector<int>>& reorder_rules, double rmsd_threshold, int MaxHTopoDiff, bool reuse_only, const json& config)
+    ConfScanThread(const std::vector<std::vector<int>>& reorder_rules, double rmsd_threshold, int MaxHTopoDiff, bool reuse_only, const json& config, int verbosity)
+        : m_verbosity(verbosity)
     {
         m_driver = new RMSDDriver(config, true);
         m_config = config;
@@ -190,11 +191,13 @@ private:
     double m_pred_rmsd = 0;
 #endif
     dnn_input m_input;
+    bool m_verbosity = 1;
 };
 
 class ConfScanThreadNoReorder : public CxxThread {
 public:
-    ConfScanThreadNoReorder(double rmsd_threshold, int MaxHTopoDiff, const json& config)
+    ConfScanThreadNoReorder(double rmsd_threshold, int MaxHTopoDiff, const json& config, int verbosity)
+        : m_verbosity(verbosity)
     {
         m_driver = new RMSDDriver(config, true);
         m_config = config;
@@ -246,6 +249,7 @@ private:
     double m_rmsd = 0, m_rmsd_threshold = 1;
     int m_MaxHTopoDiff;
     dnn_input m_input;
+    int m_verbosity = 1;
 };
 
 class ConfScan : public CurcumaMethod {
