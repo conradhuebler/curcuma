@@ -114,6 +114,12 @@ private:
     void initializeCommon(const json& controller);
     int SwitchMethod(const std::string& method);
 
+    // Claude Generated: Centralized method dispatch to reduce code duplication
+    void dispatchMethodAction(const std::string& action, const Mol* mol = nullptr);
+
+    // Claude Generated: Helper function to check compilation flags
+    bool isCompiled(const std::string& flag) const;
+
     void InitialiseUFF();
     void CalculateUFF(bool gradient, bool verbose = false);
 
@@ -154,7 +160,7 @@ private:
     EHT* m_eht = NULL; // will be switch_method 6
 
     StringList m_uff_methods = { "fuff" };
-    StringList m_ff_methods = { "uff", "uff-d3", "qmdff" };
+    StringList m_ff_methods = { "uff", "uff-d3", "qmdff", "cgfnff" };
     StringList m_qmdff_method = { "fqmdff" };
     StringList m_tblite_methods = { "ipea1", "gfn1", "gfn2" };
     StringList m_xtb_methods = { "gfnff", "xtb-gfn1", "xtb-gfn2" };

@@ -68,6 +68,15 @@ struct Mol {
     
     std::vector<std::pair<int, int>> m_bonds;
     std::vector<int> m_atoms;
+
+    int AtomCount()
+    {
+        return m_number_atoms;
+    }
+    Geometry getGeometry() const
+    {
+        return m_geometry;
+    }
 };
 
 inline Vector PositionPair2Vector(const std::pair<Position, Position>& pair)

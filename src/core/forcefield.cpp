@@ -49,6 +49,23 @@ ForceField::~ForceField()
     delete m_threadpool;
 }
 
+// Claude Generated: Temporary method for EnergyCalculator compatibility
+// TODO: Eventually merge QMInterface and ForceField into unified interface
+void ForceField::setMolecule(const Mol& mol)
+{
+    // Extract basic molecular information
+    m_natoms = mol.m_number_atoms;
+    m_geometry = mol.m_geometry;
+
+    // Set atom types from atomic numbers
+    std::vector<int> atom_types;
+    atom_types.reserve(m_natoms);
+    for (int i = 0; i < m_natoms; ++i) {
+        atom_types.push_back(mol.m_atoms[i]);
+    }
+    setAtomTypes(atom_types);
+}
+
 void ForceField::UpdateGeometry(const Matrix& geometry)
 {
     m_geometry = geometry;

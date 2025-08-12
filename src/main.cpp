@@ -1008,7 +1008,7 @@ int main(int argc, char **argv) {
                     input.open(outfile + "_" + std::to_string(index) + ".dMat", std::ios::out);
                     if (print_energy)
                         input << std::setprecision(10) << mol.Energy() << std::endl;
-                    input << mol.LowerDistanceMatrix(exclude_bonds, print_elements);
+                    input << mol.DistanceMatrixString(exclude_bonds, print_elements);
                     input.close();
                 }
 
