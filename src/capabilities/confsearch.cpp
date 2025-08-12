@@ -49,10 +49,9 @@ ConfSearch::~ConfSearch()
 
 void ConfSearch::setFile(const std::string& filename)
 {
-    getBasename(filename);
-    m_filename = filename;
+    CurcumaMethod::setFile(filename);
 
-    FileIterator file(m_filename);
+    FileIterator file(Filename());
     while (!file.AtEnd()) {
         Molecule* mol = new Molecule(file.Next());
         m_in_stack.push_back(mol);

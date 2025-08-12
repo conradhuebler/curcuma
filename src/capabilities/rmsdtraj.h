@@ -60,8 +60,8 @@ public:
 
     virtual bool Initialise() override;
 
-    void setBaseName(const std::string& name) { m_filename = name; }
-    void setFile(const std::string& filename) { m_filename = filename; }
+    void setBaseName(const std::string& name) { setFile(name); }
+    void setFile(const std::string& filename) override { CurcumaMethod::setFile(filename); }
     void setSecondFile(const std::string& filename)
     {
         m_second_file = filename;
@@ -155,7 +155,7 @@ private:
     void ProcessSingleFile();
     void CompareTrajectories();
 
-    std::string m_filename, m_reference, m_second_file, m_outfile;
+    std::string m_reference, m_second_file, m_outfile;
     std::ofstream m_rmsd_file, m_pca_file, m_pairwise_file;
     std::vector<Molecule*> m_stored_structures;
     Molecule *m_initial, *m_previous;

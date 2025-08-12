@@ -72,7 +72,7 @@ bool RMSDTraj::Initialise()
         m_atoms = m_stored_structures[0]->AtomCount();
     }
 
-    m_outfile = m_filename;
+    m_outfile = Filename();
     for (int i = 0; i < 4; ++i)
         m_outfile.pop_back();
 
@@ -115,13 +115,13 @@ bool RMSDTraj::Initialise()
         export_file.open(m_outfile + "_aligned.xyz");
         export_file.close();
     }
-    std::ifstream input(m_filename);
+    std::ifstream input(Filename());
     std::vector<std::string> lines;
     //    int atoms = 0, atoms2 = 0;
     m_currentIndex = 0;
     //  int i = 0;
     //    int molecule = 0;
-    std::ifstream inFile(m_filename);
+    std::ifstream inFile(Filename());
     m_max_lines = std::count(std::istreambuf_iterator<char>(inFile),
         std::istreambuf_iterator<char>(), '\n');
 
@@ -144,7 +144,7 @@ void RMSDTraj::ProcessSingleFile()
     //  Molecule mol(m_atoms, 0);
     //  Molecule mol_2(m_atoms, 0);
     Molecule prev;
-    FileIterator file(m_filename);
+    FileIterator file(Filename());
     std::vector<int> progress(10, 0);
     while (!file.AtEnd()) {
         Molecule* molecule = new Molecule(file.Next());
@@ -289,7 +289,7 @@ bool RMSDTraj::CheckMolecule(Molecule* molecule)
 
 void RMSDTraj::CompareTrajectories()
 {
-    FileIterator file1(m_filename);
+    FileIterator file1(Filename());
     FileIterator file2(m_second_file);
 
     json RMSDJsonControl = {

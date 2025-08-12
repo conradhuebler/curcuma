@@ -40,8 +40,8 @@ void ConfStat::LoadControlJson()
 
 void ConfStat::start()
 {
-    if (!m_filename.empty()) {
-        FileIterator file(m_filename);
+    if (!Filename().empty()) {
+        FileIterator file(Filename());
         m_energies.clear();
 
         while (!file.AtEnd()) {

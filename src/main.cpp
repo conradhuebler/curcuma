@@ -529,7 +529,7 @@ int main(int argc, char **argv) {
             Molecule mol1 = Files::LoadFile(argv[2]);
             SimpleMD md(controller, false);
             md.setMolecule(mol1);
-            md.getBasename(argv[2]);
+            md.setFile(argv[2]);
             /*
             std::string name = std::string(argv[2]);
             for (int i = 0; i < 4; ++i)

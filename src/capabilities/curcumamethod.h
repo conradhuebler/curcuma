@@ -57,8 +57,10 @@ public:
     bool CheckStop() const;
 
     std::string Basename() const { return m_basename; }
+    std::string Filename() const { return m_filename; }
     void getBasename(const std::string& filename);
     void overrideBasename(const std::string& basename) { m_basename = basename; }
+    virtual void setFile(const std::string& filename);
 
 protected:
     void checkHelp();
@@ -95,4 +97,5 @@ private:
     StringList m_error_list;
 
     std::string m_basename;
+    std::string m_filename;
 };

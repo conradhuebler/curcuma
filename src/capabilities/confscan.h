@@ -255,8 +255,7 @@ public:
 
     void setFileName(const std::string& filename)
     {
-        m_filename = filename;
-        getBasename(filename); // Claude Generated: Set basename for parameter caching
+        setFile(filename); // Claude Generated: Set basename for parameter caching
         openFile();
     }
 
@@ -334,7 +333,7 @@ private:
     std::vector<Molecule*> m_global_temp_list;
     int m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_failed_completely = 0, m_reordered_reused = 0, m_skip = 0, m_skiped = 0, m_duplicated = 0, m_rejected_directly = 0, m_molalign_count = 0, m_molalign_success = 0;
 
-    std::string m_filename, m_accepted_filename, m_1st_filename, m_2nd_filename, m_3rd_filename, m_rejected_filename, m_result_basename, m_statistic_filename, m_prev_accepted, m_joined_filename, m_threshold_filename, m_current_filename, m_param_file, m_skip_file, m_perform_file, m_success_file, m_limit_file;
+    std::string m_accepted_filename, m_1st_filename, m_2nd_filename, m_3rd_filename, m_rejected_filename, m_result_basename, m_statistic_filename, m_prev_accepted, m_joined_filename, m_threshold_filename, m_current_filename, m_param_file, m_skip_file, m_perform_file, m_success_file, m_limit_file;
     std::multimap<double, int> m_ordered_list;
 
     std::vector<std::pair<std::string, Molecule*>> m_molecules;

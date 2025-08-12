@@ -13,3 +13,4 @@
 
 #cmakedefine C17
 #cmakedefine GCC
+#cmakedefine DEBUG_ON
