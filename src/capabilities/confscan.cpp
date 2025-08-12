@@ -396,13 +396,13 @@ void ConfScan::LoadControlJson()
 
 bool ConfScan::openFile()
 {
-    bool xyzfile = std::string(m_filename).find(".xyz") != std::string::npos || std::string(m_filename).find(".trj") != std::string::npos;
+    bool xyzfile = std::string(Filename()).find(".xyz") != std::string::npos || std::string(Filename()).find(".trj") != std::string::npos;
     if (xyzfile == false)
         throw 1;
 
     int molecule = 0;
     PersistentDiagram diagram(m_defaults);
-    FileIterator file(m_filename);
+    FileIterator file(Filename());
     int calcH = 0;
     int calcI = 0;
     // std::cout << m_looseThresh <<" "<<int((m_looseThresh & 1) == 1) << " " << int((m_looseThresh & 2) == 2) << std::endl;
@@ -619,7 +619,7 @@ void ConfScan::SetUp()
     m_start = 0;
     m_end = m_ordered_list.size();
 
-    m_result_basename = m_filename;
+    m_result_basename = Filename();
     m_result_basename.erase(m_result_basename.end() - 4, m_result_basename.end());
 
     m_accepted_filename = m_result_basename + ".accepted.xyz";

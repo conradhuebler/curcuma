@@ -108,6 +108,8 @@ class Molecule
     Geometry getGeometry(bool protons = true) const;
 
     std::string LowerDistanceMatrix(bool exclude_bonds = false, bool print_elements = false) const;
+    std::string DistanceMatrixString(bool exclude_bonds = false, bool print_elements = false) const;
+
     std::vector<float> LowerDistanceVector(bool exclude_hydrogen = false) const;
     std::vector<double> DeltaEN() const;
 

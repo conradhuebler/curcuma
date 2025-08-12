@@ -184,9 +184,7 @@ public:
 
     void setFileName(const std::string& filename)
     {
-        m_filename = filename;
-
-        getBasename(filename);
+        setFile(filename);
 
         std::ofstream tfile1;
         tfile1.open(Optfile());
@@ -257,7 +255,6 @@ private:
     void ProcessMolecules(const std::vector<Molecule>& molecule);
     void ProcessMoleculesSerial(const std::vector<Molecule>& molecule);
 
-    std::string m_filename;
     std::string m_method = "UFF";
     Molecule m_molecule;
     json m_parameters;

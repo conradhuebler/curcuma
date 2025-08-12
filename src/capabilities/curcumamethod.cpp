@@ -224,3 +224,9 @@ void CurcumaMethod::getBasename(const std::string& filename)
         name.pop_back();
     m_basename = name;
 }
+
+void CurcumaMethod::setFile(const std::string& filename)
+{
+    m_filename = filename;
+    getBasename(filename);
+}

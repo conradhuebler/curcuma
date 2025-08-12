@@ -39,6 +39,7 @@
 - reformulate and clarify task and vision entries if not alredy marked as CLAUDE formatted
 - in case of compiler warning for deprecated functions, replace the old function call with the new one
 - Implement timing analysis for complex funtions
+- Keep track of significant improvements ins AIChangelog.md, one line per fact
 
 ## Current Capabilities
 

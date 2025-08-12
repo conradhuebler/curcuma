@@ -129,7 +129,7 @@ private:
     virtual void LoadControlJson() override;
 
     StringList m_error_list;
-    std::string m_filename, m_method, m_thermostat;
+    std::string m_method, m_thermostat;
     bool m_silent = true, m_rattle = true;
     double m_dT = 4;
     std::vector<Molecule*> m_in_stack, m_final_stack;

@@ -64,6 +64,10 @@ public:
         m_atom_types = atom_types;
         m_natoms = atom_types.size();
     }
+
+    // Claude Generated: Temporary method for EnergyCalculator compatibility
+    // TODO: Eventually merge QMInterface and ForceField into unified interface
+    void setMolecule(const Mol& mol);
     void UpdateGeometry(const Matrix& geometry);
     inline void UpdateGeometry(const double* coord);
     inline void UpdateGeometry(const std::vector<std::array<double, 3>>& geometry);

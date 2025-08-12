@@ -45,6 +45,10 @@ option(CURCUMA_COLOR_DEFAULT
 
 set(CURCUMA_DEBUG_LEVEL 2 CACHE STRING "Debug verbosity level 0-3")
 
+
+option(USE_PCH
+    "Enable Precompiled Headers for faster compilation" ON)
+
 if(USE_MKL)
     if(NOT DEFINED MKL_ROOT)
         set(MKL_ROOT $ENV{MKL_ROOT})
@@ -248,6 +252,22 @@ set(curcuma_core_SRC
 
 add_library(curcuma_core  ${curcuma_core_SRC})
 
+# Enable precompiled headers for faster compilation
+if(USE_PCH)
+    target_precompile_headers(curcuma_core PRIVATE src/pch.h)
+    message(STATUS "Precompiled headers enabled for curcuma_core")
+    
+    # Additional PCH configuration for Ulysses-heavy builds
+    if(USE_ULYSSES)
+        message(STATUS "Ulysses PCH module enabled - significant compilation speedup expected")
+    endif()
+    
+    # Additional PCH configuration for external libraries
+    if(USE_D3 OR USE_D4)
+        message(STATUS "DFT dispersion correction PCH modules enabled")
+    endif()
+endif()
+
     set(km_SRC
     src/capabilities/c_code/hungarian.c
     src/capabilities/c_code/interface.c
@@ -288,6 +308,11 @@ target_link_libraries(curcuma_core km ulysses_lib)
 add_executable(curcuma
         src/main.cpp
 )
+
+# Enable precompiled headers for main executable
+if(USE_PCH)
+    target_precompile_headers(curcuma REUSE_FROM curcuma_core)
+endif()
 
 if(C17)
     set_property(TARGET curcuma_core PROPERTY CXX_STANDARD 17)
@@ -472,6 +497,13 @@ add_executable(parallel_scf
 
 target_link_libraries(curcuma_helper fmt::fmt-header-only)
 target_link_libraries(curcuma_helper curcuma_core)
+
+# Enable precompiled headers for helper executables
+if(USE_PCH)
+    target_precompile_headers(curcuma_helper REUSE_FROM curcuma_core)
+    target_precompile_headers(cli_helper REUSE_FROM curcuma_core)
+    target_precompile_headers(parallel_scf REUSE_FROM curcuma_core)
+endif()
 
 set_property(TARGET curcuma_helper PROPERTY LINK_FLAGS_RELEASE -s)
 set_property(TARGET curcuma_helper PROPERTY LINK_FLAGS_RELWITHDEBINFO -s)

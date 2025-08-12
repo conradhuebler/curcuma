@@ -65,7 +65,7 @@ bool RMSDTraj::Initialise()
     CurcumaLogger::header("Trajectory RMSD Analysis");
 
     // Enhanced parameter display with more context
-    CurcumaLogger::param("Input trajectory", m_filename);
+    CurcumaLogger::param("Input trajectory", Filename());
     CurcumaLogger::param("Write conformers", m_writeUnique ? "Yes" : "No");
     if (m_writeUnique) {
         CurcumaLogger::param("RMSD threshold", fmt::format("{:.3f} Å", m_rmsd_threshold));
@@ -79,8 +79,8 @@ bool RMSDTraj::Initialise()
         CurcumaLogger::param("Reference atoms", std::to_string(m_atoms));
     }
 
-    // Modern C++ way to remove file extension
-    m_outfile = m_filename;
+    // Modern C++ way to remove file extension - more robust than pop_back()
+    m_outfile = Filename();
     size_t last_dot = m_outfile.find_last_of('.');
     if (last_dot != std::string::npos) {
         m_outfile = m_outfile.substr(0, last_dot);
@@ -135,13 +135,13 @@ bool RMSDTraj::Initialise()
         export_file.open(m_outfile + ".aligned.xyz");
         export_file.close();
     }
-    std::ifstream input(m_filename);
+    std::ifstream input(Filename());
     std::vector<std::string> lines;
     //    int atoms = 0, atoms2 = 0;
     m_currentIndex = 0;
     //  int i = 0;
     //    int molecule = 0;
-    std::ifstream inFile(m_filename);
+    std::ifstream inFile(Filename());
     m_max_lines = std::count(std::istreambuf_iterator<char>(inFile),
         std::istreambuf_iterator<char>(), '\n');
 
@@ -171,7 +171,7 @@ void RMSDTraj::ProcessSingleFile()
     // Count actual molecules, not lines - this is more accurate for XYZ trajectories
     m_max_lines = 0;
     {
-        FileIterator counter(m_filename);
+        FileIterator counter(Filename());
         while (!counter.AtEnd()) {
             counter.Next(); // Skip the molecule data, just count
             m_max_lines++;
@@ -181,7 +181,7 @@ void RMSDTraj::ProcessSingleFile()
     CurcumaLogger::success_fmt("Found {} trajectory frames to analyze", m_max_lines);
 
     Molecule prev;
-    FileIterator file(m_filename);
+    FileIterator file(Filename());
     // Improved progress tracking with better efficiency
     std::vector<bool> progress_reported(21, false); // 5% increments
     int structures_processed = 0;
@@ -192,10 +192,9 @@ void RMSDTraj::ProcessSingleFile()
 
     // Better debugging information
     if (m_verbosity >= 2) {
-        CurcumaLogger::info_fmt("FileIterator initialized for: {}", m_filename);
+        CurcumaLogger::info_fmt("FileIterator initialized for: {}", Filename());
         CurcumaLogger::info_fmt("Expected {} lines to process", m_max_lines);
     }
-
     while (!file.AtEnd()) {
         auto molecule = std::make_unique<Molecule>(file.Next());
         structures_processed++;
@@ -389,7 +388,7 @@ void RMSDTraj::CompareTrajectories()
 
     CurcumaLogger::success("Comparing two trajectories...");
 
-    FileIterator file1(m_filename);
+    FileIterator file1(Filename());
     FileIterator file2(m_second_file);
 
     json RMSDJsonControl = {

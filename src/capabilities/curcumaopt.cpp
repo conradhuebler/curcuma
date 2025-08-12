@@ -169,8 +169,7 @@ void CurcumaOpt::LoadControlJson()
 void CurcumaOpt::start()
 {
     if (m_file_set) {
-        getBasename(m_filename);
-        FileIterator file(m_filename);
+        FileIterator file(Filename());
         std::multimap<double, Molecule> results;
         while (!file.AtEnd()) {
             Molecule mol = file.Next();

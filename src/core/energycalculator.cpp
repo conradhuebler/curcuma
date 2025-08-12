@@ -87,13 +87,6 @@ void EnergyCalculator::initializeCommon(const json& controller)
     m_Tele = m_controller["Tele"];
 
     switch (SwitchMethod(m_method)) {
-    case 9:
-        m_qminterface = new GFNFF(controller);
-        m_ecengine = [this](bool gradient, bool verbose) {
-            this->CalculateQMInterface(gradient, verbose);
-        };
-        break;
-        
     case 8:
         /*
              m_qmdff = new QMDFF(controller);
@@ -202,47 +195,8 @@ void EnergyCalculator::initializeCommon(const json& controller)
 
 EnergyCalculator::~EnergyCalculator()
 {
-    switch (SwitchMethod(m_method)) {
-    case 9:
-        delete m_qminterface;
-        break;
-        
-    case 8:
-        // delete m_qmdff;
-        break;
-    case 7:
-        //  delete m_uff;
-        break;
-
-    case 6:
-        delete m_qminterface;
-        break;
-
-    case 5:
-        //    delete m_d4;
-        break;
-
-    case 4:
-        delete m_qminterface;
-        break;
-
-    case 3:
-        delete m_qminterface;
-        break;
-
-    case 2:
-        delete m_qminterface;
-        break;
-
-    case 1:
-        delete m_qminterface;
-        break;
-
-    case 0:
-    default:
-        delete m_forcefield;
-        break;
-    }
+    // Claude Generated: Use centralized dispatch for cleanup
+    dispatchMethodAction("cleanup");
     // delete[] m_coord;
     // delete[] m_grad;
 }
@@ -264,10 +218,6 @@ void EnergyCalculator::setMolecule(const Mol& mol)
     */
 
     switch (SwitchMethod(m_method)) {
-    case 9:
-        m_qminterface->InitialiseMolecule(mol);
-        break;
-        
     case 8:
         // m_qmdff->setMolecule(m_atoms, m_geometry);
         // m_qmdff->Initialise();
@@ -277,8 +227,14 @@ void EnergyCalculator::setMolecule(const Mol& mol)
         break;
 
     case 6:
-        m_qminterface->InitialiseMolecule(mol);
-        // m_eht->Initialise();
+    case 3:
+    case 2:
+    case 1:
+        // Claude Generated: Use centralized dispatch for standard QM methods
+        dispatchMethodAction("setmolecule", &mol);
+        if (SwitchMethod(m_method) == 2 || SwitchMethod(m_method) == 1) {
+            m_qminterface->setMethod(m_method);
+        }
         break;
 
     case 5:
@@ -291,21 +247,6 @@ void EnergyCalculator::setMolecule(const Mol& mol)
 #ifdef USE_D3
         static_cast<DFTD3Interface*>(m_qminterface)->InitialiseMolecule(mol.m_atoms);
 #endif
-        break;
-
-    case 3:
-        m_qminterface->InitialiseMolecule(mol);
-        break;
-
-    case 2:
-        m_qminterface->InitialiseMolecule(mol);
-        m_qminterface->setMethod(m_method);
-        break;
-
-    case 1:
-        m_qminterface->InitialiseMolecule(mol);
-        m_qminterface->setMethod(m_method);
-
         break;
 
     case 0:
@@ -334,7 +275,8 @@ void EnergyCalculator::setMolecule(const Mol& mol)
 
             } // end if (!loaded_from_cache)
         } // end if (m_parameter.size() == 0)
-        m_forcefield->setAtomTypes(mol.m_atoms);
+        // Claude Generated: Use centralized dispatch for ForceField
+        dispatchMethodAction("setmolecule", &mol);
         m_forcefield->setParameter(m_parameter);
         break;
     }
@@ -343,82 +285,212 @@ void EnergyCalculator::setMolecule(const Mol& mol)
 
 int EnergyCalculator::SwitchMethod(const std::string& method)
 {
-    int switch_method = 0;
-    bool find_ulysses = false, find_tblite = false, find_xtb = false, find_d3 = false, find_d4 = false, find_qmdff = false, find_ff = false, find_eht = false, find_cgfnff = false;
-    for (auto i : m_ulysses_methods) {
-        if (i.find(m_method) != std::string::npos || m_method.find(i) != std::string::npos) {
-            find_ulysses = true;
+    // Claude Generated: Helper function to get module name from case number
+    auto getModuleName = [](int case_num) -> std::string {
+        switch (case_num) {
+        case 0:
+            return "ForceField";
+        case 1:
+            return "TBLite";
+        case 2:
+            return "XTB";
+        case 3:
+            return "Ulysses";
+        case 4:
+            return "DFT-D3";
+        case 5:
+            return "DFT-D4";
+        case 6:
+            return "EHT";
+        case 7:
+            return "QMDFF (legacy)";
+        case 8:
+            return "UFF (legacy)";
+        default:
+            return "Unknown";
         }
-    }
-    for(auto i : m_tblite_methods){
-        if (i.find(m_method) != std::string::npos) {
-            find_tblite = true;
-        }
-    }
-    for(auto i : m_xtb_methods){
-        if(i.find(m_method) != std::string::npos){
-            find_xtb = true;
-        }
-    }
-    for(auto i : m_d3_methods){
-        if(i.find(m_method) != std::string::npos){
-            find_d3 = true;
-        }
-    }
-    for(auto i : m_d4_methods){
-        if(i.find(m_method) != std::string::npos){
-            find_d4 = true;
-        }
-    }
-    for(auto i : m_qmdff_method){
-        if(i.find(m_method) != std::string::npos){
-            find_qmdff = true;
-        }
-    }
-    for(auto i : m_ff_methods){
-        if(i.find(m_method) != std::string::npos){
-            find_ff = true;
-        }
-    }
-    if(m_method.find("eht") != std::string::npos){
-            find_eht = true;
-        }
-    if(m_method.find("cgfnff") != std::string::npos){
-            find_cgfnff = true;
-        }
+    };
 
-        if (find_cgfnff) {
-            switch_method = 9;
-        } else if (find_tblite) {
-#ifndef USE_TBLITE
-            switch_method = 3;
+    // Claude Generated: Debug logger to show available modules
+    static bool logged = false;
+    if (!logged) {
+        std::cout << "=== Available Curcuma Modules ===" << std::endl;
+        std::cout << "ForceField: YES (always available)" << std::endl;
+#ifdef USE_TBLITE
+        std::cout << "TBLite: YES" << std::endl;
 #else
-            switch_method = 1;
+        std::cout << "TBLite: NO" << std::endl;
 #endif
-
-        } else if (find_ulysses) {
-            std::cout << "Within ulysses" << std::endl;
-            switch_method = 3;
-
-        } else if (find_xtb) {
 #ifdef USE_XTB
-            switch_method = 2;
+        std::cout << "XTB: YES" << std::endl;
 #else
-            switch_method = 3;
+        std::cout << "XTB: NO" << std::endl;
 #endif
+#ifdef USE_ULYSSES
+        std::cout << "Ulysses: YES" << std::endl;
+#else
+        std::cout << "Ulysses: NO" << std::endl;
+#endif
+#ifdef USE_D3
+        std::cout << "DFT-D3: YES" << std::endl;
+#else
+        std::cout << "DFT-D3: NO" << std::endl;
+#endif
+#ifdef USE_D4
+        std::cout << "DFT-D4: YES" << std::endl;
+#else
+        std::cout << "DFT-D4: NO" << std::endl;
+#endif
+        std::cout << "EHT: YES (always available)" << std::endl;
+        std::cout << "===================================" << std::endl;
+        logged = true;
+    }
 
-        } else if (find_d3) {
-            switch_method = 4;
-        } else if (find_d4) {
-            switch_method = 5;
-        } else if (find_qmdff) {
-            switch_method = 7;
-        } else if (find_ff) {
-            switch_method = 0;
-        } else if (find_eht) {
-            switch_method = 6;
+    // Claude Generated: Lookup-table driven method resolution with priorities and fallbacks
+
+    // 1. Explicit method mappings (highest priority, no fallbacks)
+    static const std::map<std::string, int> explicit_methods = {
+        { "cgfnff", 0 }, // Native GFN-FF
+        { "ugfn2", 3 }, // Explicit Ulysses GFN2
+        { "eht", 6 }, // Extended Hückel Theory
+        { "d3", 4 }, // DFT-D3
+        { "d4", 5 } // DFT-D4
+    };
+
+    // 2. Shared methods with priority fallbacks (TBLite > Ulysses > XTB)
+    struct MethodPriority {
+        std::string method_name;
+        std::vector<std::pair<int, std::string>> priorities; // {case_number, compilation_flag}
+    };
+
+    static const std::vector<MethodPriority> shared_methods = {
+        { "gfn2", { { 1, "USE_TBLITE" }, { 3, "USE_ULYSSES" }, { 2, "USE_XTB" } } },
+        { "gfn1", { { 1, "USE_TBLITE" }, { 2, "USE_XTB" } } },
+        { "ipea1", { { 1, "USE_TBLITE" } } },
+        { "gfnff", { { 0, "" } } } // Alias for cgfnff → ForceField
+    };
+
+    // 3. Library-specific methods (exact match from lists)
+    struct LibraryMethods {
+        const StringList* method_list;
+        int case_number;
+        std::string compilation_flag;
+    };
+
+    static const std::vector<LibraryMethods> library_methods = {
+        { &m_ff_methods, 0, "" },
+        { &m_ulysses_methods, 3, "USE_ULYSSES" },
+        { &m_xtb_methods, 2, "USE_XTB" },
+        { &m_qmdff_method, 7, "" },
+        { &m_uff_methods, 8, "" } // Legacy
+    };
+
+    // Method resolution logic:
+
+    // Check explicit methods first
+    auto explicit_it = explicit_methods.find(method);
+    if (explicit_it != explicit_methods.end()) {
+        std::cout << "Method '" << method << "' resolved to: " << getModuleName(explicit_it->second) << " (explicit mapping)" << std::endl;
+        return explicit_it->second;
+    }
+
+    // Check shared methods with priority fallbacks
+    for (const auto& shared : shared_methods) {
+        if (method == shared.method_name) {
+            for (const auto& priority : shared.priorities) {
+                if (priority.second.empty() || isCompiled(priority.second)) {
+                    std::cout << "Method '" << method << "' resolved to: " << getModuleName(priority.first) << " (priority fallback)" << std::endl;
+                    return priority.first;
+                }
+            }
         }
-        return switch_method;
+    }
+
+    // Check library-specific methods
+    for (const auto& lib : library_methods) {
+        for (const auto& lib_method : *lib.method_list) {
+            if (method.find(lib_method) != std::string::npos) {
+                if (lib.compilation_flag.empty() || isCompiled(lib.compilation_flag)) {
+                    std::cout << "Method '" << method << "' resolved to: " << getModuleName(lib.case_number) << " (library-specific)" << std::endl;
+                    return lib.case_number;
+                } else {
+                    std::cerr << "Library not available for " << method << std::endl;
+                }
+            }
+        }
+    }
+
+    // Default fallback
+    std::cerr << "Unknown method: " << method << ", using default ForceField" << std::endl;
+    std::cout << "Method '" << method << "' resolved to: " << getModuleName(0) << " (default fallback)" << std::endl;
+    return 0;
+}
+
+// Claude Generated: Helper function to check compilation flags
+bool EnergyCalculator::isCompiled(const std::string& flag) const
+{
+    if (flag == "USE_TBLITE") {
+#ifdef USE_TBLITE
+        return true;
+#else
+        return false;
+#endif
+    }
+    if (flag == "USE_ULYSSES") {
+#ifdef USE_ULYSSES
+        return true;
+#else
+        return false;
+#endif
+    }
+    if (flag == "USE_XTB") {
+#ifdef USE_XTB
+        return true;
+#else
+        return false;
+#endif
+    }
+    // Add other flags as needed
+    return true; // Empty flag means always available
+}
+
+// Claude Generated: Centralized method dispatch to reduce repetitive switch statements
+void EnergyCalculator::dispatchMethodAction(const std::string& action, const Mol* mol)
+{
+    int method_case = SwitchMethod(m_method);
+
+    if (action == "cleanup") {
+        // Destructor logic - centralized cleanup
+        switch (method_case) {
+        case 6:
+        case 4:
+        case 3:
+        case 2:
+        case 1:
+            delete m_qminterface;
+            break;
+        case 0:
+            delete m_forcefield;
+            break;
+            // cases 8, 7, 5 are commented out legacy methods
+        }
+    } else if (action == "setmolecule" && mol != nullptr) {
+        // setMolecule logic - centralized molecule setting
+        switch (method_case) {
+        case 6:
+        case 4:
+        case 3:
+        case 2:
+        case 1:
+            m_qminterface->InitialiseMolecule(*mol);
+            break;
+        case 0:
+            m_forcefield->setMolecule(*mol);
+            break;
+            // cases 8, 7, 5 are commented out legacy methods
+        }
+    }
+    // Note: Constructor logic remains in switch statement due to complexity
 }
 void EnergyCalculator::updateGeometry(const Eigen::VectorXd& geometry)
 {

@@ -13,8 +13,7 @@
 
 #cmakedefine C17
 #cmakedefine GCC
-
-// Logging and Debug Configuration
+// Logging and Debug Configuration - Claude Generated
 #cmakedefine CURCUMA_DEBUG
 #cmakedefine CURCUMA_COLOR_DEFAULT
 #define CURCUMA_DEBUG_LEVEL @CURCUMA_DEBUG_LEVEL@

@@ -56,7 +56,7 @@ public:
     ConfStat(const json& controller = ConfStatJson, bool silent = true);
 
     // Set input filename
-    void setFileName(const std::string& filename) { m_filename = filename; }
+    void setFileName(const std::string& filename) { setFile(filename); }
 
     // Direct energy vector input
     void setEnergies(const std::vector<double>& energies) { m_energies = energies; }
@@ -125,7 +125,6 @@ private:
     void printStatistics() const;
 
     // Member variables with m_ prefix
-    std::string m_filename;
     std::vector<double> m_energies;
     double m_temp{ 298.15 };
     double m_cutoff{ 10.0 }; // in kJ/mol
