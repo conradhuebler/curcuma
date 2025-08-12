@@ -18,6 +18,7 @@
  */
 
 #include "curcumamethod.h"
+#include "src/global_config.h"
 
 #include "src/capabilities/confscan.h"
 #include "src/capabilities/curcumaopt.h"
@@ -58,32 +59,51 @@ RMSDTraj::~RMSDTraj()
 
 bool RMSDTraj::Initialise()
 {
-    std::cout << "'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
-    std::cout << "'    Scanning Trajectory file for RMSD and Conformers     '" << std::endl;
-    std::cout << "'    Write Conformers ";
+    // Synchronize CurcumaLogger verbosity with local verbosity
+    CurcumaLogger::set_verbosity(m_verbosity);
+
+    CurcumaLogger::header("Trajectory RMSD Analysis");
+
+    // Enhanced parameter display with more context
+    CurcumaLogger::param("Input trajectory", m_filename);
+    CurcumaLogger::param("Write conformers", m_writeUnique ? "Yes" : "No");
     if (m_writeUnique) {
-        std::cout << "  Yes                              '" << std::endl;
-        std::cout << "'    RMSD Threshold =  " << std::setprecision(3) << m_rmsd_threshold << "                                  '" << std::endl;
-    } else
-        std::cout << "  No                                '" << std::endl;
-    std::cout << "'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''" << std::endl;
+        CurcumaLogger::param("RMSD threshold", fmt::format("{:.3f} Å", m_rmsd_threshold));
+    }
+    CurcumaLogger::param("Write RMSD data", m_writeRMSD ? "Yes" : "No");
+    CurcumaLogger::param("Write aligned structures", m_writeAligned ? "Yes" : "No");
     if (m_reference.compare("none") != 0) {
+        CurcumaLogger::param("Reference structure", m_reference);
         m_stored_structures.push_back(new Molecule(Files::LoadFile(m_reference)));
         m_atoms = m_stored_structures[0]->AtomCount();
+        CurcumaLogger::param("Reference atoms", std::to_string(m_atoms));
     }
 
+    // Modern C++ way to remove file extension
     m_outfile = m_filename;
-    for (int i = 0; i < 4; ++i)
-        m_outfile.pop_back();
+    size_t last_dot = m_outfile.find_last_of('.');
+    if (last_dot != std::string::npos) {
+        m_outfile = m_outfile.substr(0, last_dot);
+    }
 
-    if (m_writeRMSD)
-        m_rmsd_file.open(m_outfile + "_rmsd.dat");
+    // Initialize output files with user feedback
+    if (m_writeRMSD) {
+        m_rmsd_file.open(m_outfile + ".rmsd.dat");
+        CurcumaLogger::success_fmt("RMSD data will be written to: {}.rmsd.dat", m_outfile);
+    }
 
-    if (m_pcafile)
-        m_pca_file.open(m_outfile + "_pca.dat");
+    if (m_pcafile) {
+        m_pca_file.open(m_outfile + ".pca.dat");
+        CurcumaLogger::success_fmt("PCA data will be written to: {}.pca.dat", m_outfile);
+    }
 
     if (m_pairwise) {
-        m_pairwise_file.open(m_outfile + "_pairwise.dat");
+        m_pairwise_file.open(m_outfile + ".pairwise.dat");
+        CurcumaLogger::success_fmt("Pairwise RMSD will be written to: {}.pairwise.dat", m_outfile);
+    }
+
+    if (m_writeUnique) {
+        CurcumaLogger::success_fmt("Unique conformers will be written to: {}.unique.xyz", m_outfile);
     }
 
     json RMSDJsonControl = {
@@ -112,7 +132,7 @@ bool RMSDTraj::Initialise()
         export_file.close();
     }
     if (m_writeAligned) {
-        export_file.open(m_outfile + "_aligned.xyz");
+        export_file.open(m_outfile + ".aligned.xyz");
         export_file.close();
     }
     std::ifstream input(m_filename);
@@ -133,6 +153,9 @@ bool RMSDTraj::Initialise()
 }
 void RMSDTraj::start()
 {
+    // Ensure CurcumaLogger verbosity is synchronized throughout execution
+    CurcumaLogger::set_verbosity(m_verbosity);
+
     if (m_second_file.compare("none") == 0)
         ProcessSingleFile();
     else
@@ -141,26 +164,95 @@ void RMSDTraj::start()
 
 void RMSDTraj::ProcessSingleFile()
 {
-    //  Molecule mol(m_atoms, 0);
-    //  Molecule mol_2(m_atoms, 0);
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    CurcumaLogger::success("Counting trajectory frames...");
+
+    // Count actual molecules, not lines - this is more accurate for XYZ trajectories
+    m_max_lines = 0;
+    {
+        FileIterator counter(m_filename);
+        while (!counter.AtEnd()) {
+            counter.Next(); // Skip the molecule data, just count
+            m_max_lines++;
+        }
+    }
+
+    CurcumaLogger::success_fmt("Found {} trajectory frames to analyze", m_max_lines);
+
     Molecule prev;
     FileIterator file(m_filename);
-    std::vector<int> progress(10, 0);
+    // Improved progress tracking with better efficiency
+    std::vector<bool> progress_reported(21, false); // 5% increments
+    int structures_processed = 0;
+    int structures_accepted = 0;
+    int last_percent_reported = -1;
+
+    CurcumaLogger::success("Starting trajectory analysis...");
+
+    // Better debugging information
+    if (m_verbosity >= 2) {
+        CurcumaLogger::info_fmt("FileIterator initialized for: {}", m_filename);
+        CurcumaLogger::info_fmt("Expected {} lines to process", m_max_lines);
+    }
+
     while (!file.AtEnd()) {
-        Molecule* molecule = new Molecule(file.Next());
-        //   std::cout << molecule->Atom(0).second.transpose() << std::endl;
-        bool check = CheckMolecule(molecule);
+        auto molecule = std::make_unique<Molecule>(file.Next());
+        structures_processed++;
+
+        // Debug: Always show first few structures at high verbosity
+        if (structures_processed <= 5 && m_verbosity >= 3) {
+            CurcumaLogger::info_fmt("Processing structure #{}", structures_processed);
+        }
+
+        bool check = CheckMolecule(molecule.get());
         if (check) {
-            std::cout << "New structure added ... ( " << m_stored_structures.size() << "). " << /*  int(m_currentIndex / double(m_max_lines) * 100) << " % done ...!" << */ std::endl;
-        } else {
+            structures_accepted++;
+            // Only report significant milestones, not every single structure
+            if (structures_accepted % 10 == 1 || (structures_accepted < 10)) {
+                CurcumaLogger::success_fmt("Structure #{} accepted (total: {})",
+                    structures_processed, structures_accepted);
+                std::cout.flush();
+            }
+        } else if (structures_processed <= 10 && m_verbosity >= 3) {
+            CurcumaLogger::warn_fmt("Structure #{} rejected", structures_processed);
         }
-        if (progress[int((m_currentIndex / double(m_max_lines)) * 100) / 10] == 0) {
-            progress[int((m_currentIndex / double(m_max_lines)) * 100) / 10] = 1;
-            std::cout << int(m_currentIndex / double(m_max_lines) * 100) << " % done ...!" << std::endl;
+
+        // More efficient progress reporting - 5% increments based on actual progress
+        int current_percent = int((structures_processed / double(m_max_lines)) * 100);
+        int progress_step = current_percent / 5; // 5% increments
+
+        if (progress_step < progress_reported.size() && !progress_reported[progress_step] && current_percent != last_percent_reported && current_percent >= 5) {
+
+            progress_reported[progress_step] = true;
+            last_percent_reported = current_percent;
+
+            CurcumaLogger::progress(structures_processed, m_max_lines,
+                fmt::format("Processing trajectory - {}% done, {} structures accepted",
+                    current_percent, structures_accepted));
+            std::cout.flush();
         }
-        delete molecule;
+
         if (CheckStop())
             break;
+    }
+
+    // Final timing and summary
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+
+    CurcumaLogger::success_fmt("Trajectory analysis completed: {} structures processed, {} accepted",
+        structures_processed, structures_accepted);
+    CurcumaLogger::info_fmt("Analysis time: {:.3f} seconds", duration.count() / 1000.0);
+
+    if (structures_processed > 0) {
+        double acceptance_rate = (structures_accepted / double(structures_processed)) * 100.0;
+        CurcumaLogger::param("Acceptance rate", fmt::format("{:.1f}%", acceptance_rate));
+
+        if (duration.count() > 0) {
+            double throughput = structures_processed / (duration.count() / 1000.0);
+            CurcumaLogger::param("Throughput", fmt::format("{:.1f} structures/second", throughput));
+        }
     }
 
     PostAnalyse();
@@ -178,7 +270,7 @@ bool RMSDTraj::CheckMolecule(Molecule* molecule)
     // std::cout << molecule->Atom(0).second.transpose() << std::endl << std::endl;
 
     double energy = molecule->Energy();
-    m_currentIndex += molecule->AtomCount();
+    // Note: m_currentIndex removed - using structures_processed for progress instead
 
     if (m_stored_structures.size() == 0) {
         if (m_writeUnique) {
@@ -219,8 +311,11 @@ bool RMSDTraj::CheckMolecule(Molecule* molecule)
         m_driver->setTarget(*molecule);
         m_driver->start();
 
-        if (m_driver->ReorderRules().size())
-            std::cout << Tools::Vector2String(m_driver->ReorderRules()) << std::endl;
+#ifdef CURCUMA_DEBUG
+        if (m_driver->ReorderRules().size() && CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info_fmt("Reorder Rules: {}", Tools::Vector2String(m_driver->ReorderRules()));
+        }
+#endif
 
         m_rmsd_file << m_driver->RMSD() << "\t" << std::setprecision(10) << energy << std::endl;
         m_rmsd_vector.push_back(m_driver->RMSD());
@@ -265,7 +360,7 @@ bool RMSDTraj::CheckMolecule(Molecule* molecule)
             }
         }
     } else {
-        std::cout << "Pairwise is disabled for now" << std::endl;
+        CurcumaLogger::warn("Pairwise is disabled for now");
         /*
         m_driver->setReference(mol);
         m_driver->setTarget(mol_2);
@@ -289,6 +384,11 @@ bool RMSDTraj::CheckMolecule(Molecule* molecule)
 
 void RMSDTraj::CompareTrajectories()
 {
+    // Ensure CurcumaLogger verbosity is synchronized
+    CurcumaLogger::set_verbosity(m_verbosity);
+
+    CurcumaLogger::success("Comparing two trajectories...");
+
     FileIterator file1(m_filename);
     FileIterator file2(m_second_file);
 
@@ -303,7 +403,7 @@ void RMSDTraj::CompareTrajectories()
         { "pt", 0 },
         { "silent", true },
         { "storage", 1.0 },
-        { "method", "incr" },
+        { "method", "inertia" },
         //{ "noreorder", m_noreorder },
         { "threads", 1 }
     };
@@ -324,7 +424,7 @@ void RMSDTraj::CompareTrajectories()
 
         double rmsd = m_driver->RMSD();
         m_rmsd_vector.push_back(rmsd);
-        std::cout << rmsd << std::endl;
+        CurcumaLogger::info_fmt("RMSD: {:.6f} Å", rmsd);
         delete mol1;
         delete mol2;
         if (CheckStop())
@@ -335,24 +435,63 @@ void RMSDTraj::CompareTrajectories()
 
 void RMSDTraj::PostAnalyse()
 {
+    if (m_rmsd_vector.empty()) {
+        CurcumaLogger::warn("No RMSD data available for analysis");
+        return;
+    }
+
+    // Calculate comprehensive statistics
     double rmsd_mean = Tools::mean(m_rmsd_vector);
     double rmsd_median = Tools::median(m_rmsd_vector);
     double rmsd_std = Tools::stdev(m_rmsd_vector, rmsd_mean);
     auto rmsd_hist = Tools::Histogram(m_rmsd_vector, 100);
     double rmsd_shannon = Tools::ShannonEntropy(rmsd_hist);
 
-    double energy_mean = Tools::mean(m_energy_vector);
-    double energy_median = Tools::median(m_energy_vector);
-    double energy_std = Tools::stdev(m_energy_vector, energy_mean);
-    auto energy_hist = Tools::Histogram(m_energy_vector, 100);
-    double energy_shannon = Tools::ShannonEntropy(energy_hist);
+    double energy_mean = 0.0, energy_median = 0.0, energy_std = 0.0, energy_shannon = 0.0;
+    bool has_energy_data = !m_energy_vector.empty();
 
-    m_rmsd_file << "#" << rmsd_mean << "\t" << energy_mean << std::endl;
-    m_rmsd_file << "#" << rmsd_median << "\t" << energy_median << std::endl;
-    m_rmsd_file << "#" << rmsd_std << "\t" << energy_std << std::endl;
-    m_rmsd_file << "#" << rmsd_shannon << "\t" << energy_shannon << std::endl;
+    if (has_energy_data) {
+        energy_mean = Tools::mean(m_energy_vector);
+        energy_median = Tools::median(m_energy_vector);
+        energy_std = Tools::stdev(m_energy_vector, energy_mean);
+        auto energy_hist = Tools::Histogram(m_energy_vector, 100);
+        energy_shannon = Tools::ShannonEntropy(energy_hist);
+    }
 
-    // delete driver;
+    // Display beautiful results to user
+    CurcumaLogger::header("Trajectory Analysis Results");
+    CurcumaLogger::info("");
+    CurcumaLogger::success_fmt("Analyzed {} trajectory frames", m_rmsd_vector.size());
+    CurcumaLogger::success_fmt("Unique conformers found: {}", m_stored_structures.size());
+
+    CurcumaLogger::info("");
+    CurcumaLogger::info("RMSD Statistics:");
+    CurcumaLogger::param("Mean RMSD", fmt::format("{:.4f} Å", rmsd_mean));
+    CurcumaLogger::param("Median RMSD", fmt::format("{:.4f} Å", rmsd_median));
+    CurcumaLogger::param("Std. deviation", fmt::format("{:.4f} Å", rmsd_std));
+    CurcumaLogger::param("Shannon entropy", fmt::format("{:.4f}", rmsd_shannon));
+    CurcumaLogger::param("Min RMSD", fmt::format("{:.4f} Å", *std::min_element(m_rmsd_vector.begin(), m_rmsd_vector.end())));
+    CurcumaLogger::param("Max RMSD", fmt::format("{:.4f} Å", *std::max_element(m_rmsd_vector.begin(), m_rmsd_vector.end())));
+
+    if (has_energy_data) {
+        CurcumaLogger::info("");
+        CurcumaLogger::info("Energy Statistics:");
+        CurcumaLogger::param("Mean energy", fmt::format("{:.6f} Eh", energy_mean));
+        CurcumaLogger::param("Median energy", fmt::format("{:.6f} Eh", energy_median));
+        CurcumaLogger::param("Std. deviation", fmt::format("{:.6f} Eh", energy_std));
+        CurcumaLogger::param("Shannon entropy", fmt::format("{:.4f}", energy_shannon));
+        CurcumaLogger::param("Min energy", fmt::format("{:.6f} Eh", *std::min_element(m_energy_vector.begin(), m_energy_vector.end())));
+        CurcumaLogger::param("Max energy", fmt::format("{:.6f} Eh", *std::max_element(m_energy_vector.begin(), m_energy_vector.end())));
+    }
+
+    // Write to file for further analysis (preserve original functionality)
+    if (m_rmsd_file.is_open()) {
+        m_rmsd_file << "#Mean\t" << rmsd_mean << "\t" << energy_mean << std::endl;
+        m_rmsd_file << "#Median\t" << rmsd_median << "\t" << energy_median << std::endl;
+        m_rmsd_file << "#StdDev\t" << rmsd_std << "\t" << energy_std << std::endl;
+        m_rmsd_file << "#Shannon\t" << rmsd_shannon << "\t" << energy_shannon << std::endl;
+        CurcumaLogger::info_fmt("Statistical summary written to {}", m_outfile + "_rmsd.dat");
+    }
 }
 
 void RMSDTraj::LoadControlJson()

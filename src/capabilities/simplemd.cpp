@@ -60,8 +60,8 @@ BiasThread::BiasThread(const Molecule& reference, const json& rmsdconfig, bool n
     , m_target(reference)
     , m_nocolvarfile(nocolvarfile)
     , m_nohillsfile(nohillsfile)
+    , m_driver(rmsdconfig, true)
 {
-    m_driver = RMSDDriver(rmsdconfig, true);
     m_config = rmsdconfig;
     setAutoDelete(true);
     m_current_bias = 0;

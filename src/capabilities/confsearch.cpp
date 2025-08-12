@@ -70,13 +70,18 @@ void ConfSearch::start()
     nlohmann::json md = m_defaults;
     md["unique"] = true;
     for (m_currentT = m_startT; m_currentT >= m_endT; m_currentT -= m_deltaT) {
-        std::cout << std::endl
-                  << std::endl
-                  << " *** Performing MD simulation at " << m_currentT << " K with " << m_repeat << " repetitions and " << m_in_stack.size() << " structures (" << m_repeat * m_in_stack.size() << ")" << std::endl
-                  << std::endl;
+        CurcumaLogger::header(fmt::format("MD Simulation at {} K", m_currentT));
+        CurcumaLogger::info_fmt("Repetitions: {}, Structures: {}, Total runs: {}",
+            m_repeat, m_in_stack.size(), m_repeat * m_in_stack.size());
         md["T"] = m_currentT;
         md["impuls"] = m_currentT;
-        std::cout << md << std::endl;
+
+#ifdef CURCUMA_DEBUG
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("MD Parameters:");
+            CurcumaLogger::param_table(md, "Molecular Dynamics Settings");
+        }
+#endif
         // std::vector<Molecule*> uniques;
         PerformMolecularDynamics(m_in_stack, md);
 
@@ -121,7 +126,7 @@ std::string ConfSearch::PerformMolecularDynamics(const std::vector<Molecule*>& m
 {
     CxxThreadPool* pool = new CxxThreadPool;
     int index = 0;
-    std::cout << "Filling pool" << std::endl;
+    CurcumaLogger::info("Initializing MD thread pool");
     for (int repeat = 0; repeat < m_repeat; ++repeat) {
         for (int i = 0; i < molecules.size(); ++i) {
             MDThread* thread = new MDThread(parameter);

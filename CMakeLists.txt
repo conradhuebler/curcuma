@@ -218,6 +218,9 @@ set(curcuma_core_SRC
         src/capabilities/nebdocking.cpp
         src/capabilities/pairmapper.cpp
         src/capabilities/rmsd.cpp
+        src/capabilities/rmsd/rmsd_strategies.cpp
+        src/capabilities/rmsd/rmsd_costmatrix.cpp
+        src/capabilities/rmsd/rmsd_assignment.cpp
         src/capabilities/rmsdtraj.cpp
         src/capabilities/simplemd.cpp
         src/capabilities/hessian.cpp

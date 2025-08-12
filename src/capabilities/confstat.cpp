@@ -20,6 +20,7 @@
 
 #include "src/core/energycalculator.h"
 #include "src/core/fileiterator.h"
+#include "src/global_config.h"
 
 #include "confstat.h"
 
@@ -139,16 +140,20 @@ void ConfStat::calculateStatistics()
 
 void ConfStat::printStatistics() const
 {
-    fmt::print("\nConformer Statistics Analysis\n");
-    fmt::print("===========================\n");
-    fmt::print("Parameters:\n");
-    fmt::print("  Temperature: {:.2f} K\n", m_temp);
-    fmt::print("  Energy cutoff: {:.1f} kJ/mol\n", m_cutoff);
-    fmt::print("  Method: {}\n\n", m_method);
+    // Always show critical ConfStat results - these are primary outputs
+    CurcumaLogger::success("═══ Conformer Statistics Analysis ═══");
 
-    fmt::print("Lowest energy: {:.5f} Eh\n\n", m_stats.lowest_energy);
+    // Parameters - show at level 1 as they're essential for understanding results
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::param("Temperature", fmt::format("{:.2f} K", m_temp));
+        CurcumaLogger::param("Energy cutoff", fmt::format("{:.1f} kJ/mol", m_cutoff));
+        CurcumaLogger::param("Method", m_method);
+    }
 
-    fmt::print("{:^5} | {:^15} | {:^15} | {:^12} | {:^10}\n",
+    CurcumaLogger::energy_abs(m_stats.lowest_energy, "Lowest energy");
+
+    // Conformer table - critical data, always visible at level 1
+    fmt::print("\n{:^5} | {:^15} | {:^15} | {:^12} | {:^10}\n",
         "Conf", "ΔE (kJ/mol)", "Population (%)", "Cumulative (%)", "Degeneracy");
     fmt::print("--------------------------------------------------------------\n");
 
@@ -160,17 +165,18 @@ void ConfStat::printStatistics() const
         }
         conf_number++;
     }
-    fmt::print("\nDetailed Analysis\n");
-    fmt::print("----------------\n");
-    fmt::print("Energy span: {:.2f} kJ/mol\n", m_stats.energy_span);
+
+    // Summary statistics - always visible as they are key results
+    fmt::print("\nEnergy span: {:.2f} kJ/mol\n", m_stats.energy_span);
     fmt::print("Total states (including degeneracy): {}\n", m_stats.total_states);
-    fmt::print("\nThermodynamic Contributions\n");
-    fmt::print("-------------------------\n");
     fmt::print("Free Energy: {:.2f} kJ/mol\n", m_stats.free_energy_contribution);
     fmt::print("Entropy (T*S): {:.2f} kJ/mol\n", m_stats.entropy_contribution);
 
-    printEnergyDistribution();
-    printPopulationDistribution();
+    // Detailed distributions only at higher verbosity
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        printEnergyDistribution();
+        printPopulationDistribution();
+    }
 }
 
 void ConfStat::setEnergiesWithDegeneracy(const std::vector<double>& energies,
@@ -206,19 +212,18 @@ void ConfStat::printEnergyDistribution() const
         }
     }
 
-    fmt::print("\nEnergy Distribution:\n");
+    CurcumaLogger::info("");
+    CurcumaLogger::info("Energy Distribution:");
     for (int i = 0; i < num_bins; ++i) {
         double energy_start = i * bin_width;
-        fmt::print("{:5.1f} - {:5.1f} kJ/mol: ", energy_start, energy_start + bin_width);
-        fmt::print("{:3d} states | ", histogram[i]);
-        fmt::print("{:*<{}}\n", "", histogram[i] / 2); // Simple bar chart
+        CurcumaLogger::info(fmt::format("{:5.1f} - {:5.1f} kJ/mol: {:3d} states | {:*<{}}",
+            energy_start, energy_start + bin_width, histogram[i], "", histogram[i] / 2));
     }
 }
 
 void ConfStat::printPopulationDistribution() const
 {
-    fmt::print("\nPopulation Distribution Analysis:\n");
-    fmt::print("------------------------------\n");
+    CurcumaLogger::header("Population Distribution Analysis");
 
     // Calculate population statistics
     double total_pop = 0.0;
@@ -244,19 +249,20 @@ void ConfStat::printPopulationDistribution() const
     }
 
     // Print summary
-    fmt::print("Total conformers: {}\n", m_stats.conformer_data.size());
-    fmt::print("Significant conformers (>= {:.1f}%): {}\n",
-        m_print_threshold, significant_conformers);
+    CurcumaLogger::param("Total conformers", std::to_string(m_stats.conformer_data.size()));
+    CurcumaLogger::param("Significant conformers", fmt::format(">= {:.1f}%: {}", m_print_threshold, significant_conformers));
 
     // Print population ranges
-    fmt::print("\nPopulation ranges:\n");
+    CurcumaLogger::info("");
+    CurcumaLogger::info("Population ranges:");
     for (size_t i = 0; i < ranges.size(); ++i) {
-        fmt::print("Conformers with population ≥ {:5.1f}%: {:3d}\n",
-            ranges[i], range_counts[i]);
+        CurcumaLogger::info(fmt::format("Conformers with population ≥ {:5.1f}%: {:3d}",
+            ranges[i], range_counts[i]));
     }
 
     // Print population distribution histogram
-    fmt::print("\nPopulation histogram:\n");
+    CurcumaLogger::info("");
+    CurcumaLogger::info("Population histogram:");
     const int num_bins = 10;
     std::vector<int> histogram(num_bins, 0);
 
@@ -273,9 +279,8 @@ void ConfStat::printPopulationDistribution() const
     for (int i = 0; i < num_bins; ++i) {
         double pop_start = i * 100.0 / num_bins;
         double pop_end = (i + 1) * 100.0 / num_bins;
-        fmt::print("{:4.1f}% - {:4.1f}%: {:3d} conformers | ",
-            pop_start, pop_end, histogram[i]);
-        fmt::print("{:*<{}}\n", "", histogram[i]);
+        CurcumaLogger::info(fmt::format("{:4.1f}% - {:4.1f}%: {:3d} conformers | {:*<{}}",
+            pop_start, pop_end, histogram[i], "", histogram[i]));
     }
 
     // Calculate and print statistical measures
@@ -293,7 +298,8 @@ void ConfStat::printPopulationDistribution() const
     }
     double std_dev = std::sqrt(variance / populations.size());
 
-    fmt::print("\nStatistical measures:\n");
-    fmt::print("Mean population: {:.2f}%\n", mean_pop);
-    fmt::print("Population std dev: {:.2f}%\n", std_dev);
+    CurcumaLogger::info("");
+    CurcumaLogger::info("Statistical measures:");
+    CurcumaLogger::param("Mean population", fmt::format("{:.2f}%", mean_pop));
+    CurcumaLogger::param("Population std dev", fmt::format("{:.2f}%", std_dev));
 }

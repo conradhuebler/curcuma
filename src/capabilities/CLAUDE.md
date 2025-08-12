@@ -68,6 +68,10 @@ capabilities/
 - Enhanced conformational search algorithms
 - Improved trajectory analysis tools
 - Better integration with quantum chemical methods
+- **RMSD Code Restructuring**: ✅ Phase 1 & 2 completed
+  - **Phase 1**: Extracted CostMatrixCalculator and AssignmentSolver utilities
+  - **Phase 2**: Refactored LoadControlJson() from monolithic (200+ lines) into 6 thematic methods
+  - **Phase 3**: TODO - Strategy pattern for 7 alignment methods (incr, template, hybrid, subspace, inertia, molalign, dtemplate)
 
 ### Known Issues
 - Memory usage optimization needed for large systems

@@ -105,9 +105,9 @@ int ConfScanThread::execute()
             m_reorder_rule = m_reorder_rules[i];
             if (m_verbosity >= 3) {
                 if (m_earlybreak)
-                    CURCUMA_INFO(fmt::format("Reuse: {} {} {:.6f} Early break", m_reference.Name(), m_target.Name(), m_rmsd));
+                    CurcumaLogger::info_fmt("Reuse: {} {} {:.6f} Early break", m_reference.Name(), m_target.Name(), m_rmsd);
                 else
-                    CURCUMA_INFO(fmt::format("Reuse: {} {} {:.6f}", m_reference.Name(), m_target.Name(), m_rmsd));
+                    CurcumaLogger::info_fmt("Reuse: {} {} {:.6f}", m_reference.Name(), m_target.Name(), m_rmsd);
             }
             m_driver->clear();
             return 0;
@@ -139,9 +139,9 @@ int ConfScanThread::execute()
     }
     if (m_verbosity >= 3) {
         if (m_break_pool)
-            CURCUMA_INFO(fmt::format("Permutation: {} {} {:.6f} Early break", m_reference.Name(), m_target.Name(), m_rmsd));
+            CurcumaLogger::info_fmt("Permutation: {} {} {:.6f} Early break", m_reference.Name(), m_target.Name(), m_rmsd);
         else
-            CURCUMA_INFO(fmt::format("Permutation: {} {} {:.6f}", m_reference.Name(), m_target.Name(), m_rmsd));
+            CurcumaLogger::info_fmt("Permutation: {} {} {:.6f}", m_reference.Name(), m_target.Name(), m_rmsd);
     }
 
     m_driver->clear();
@@ -203,12 +203,12 @@ void ConfScan::LoadControlJson()
     if (Json2KeyWord<bool>(m_defaults, "getrmsd")) {
         m_rmsd_threshold = -1;
         m_rmsd_set = false;
-        CURCUMA_WARN("RMSD value is not set, will obtain it from ensemble");
+        CurcumaLogger::warn("RMSD value is not set, will obtain it from ensemble");
     }
     if (m_rmsd_threshold < 0) {
         m_rmsd_set = false;
         m_rmsd_threshold = 1e5;
-        CURCUMA_WARN("RMSD value is not set, will obtain it from ensemble");
+        CurcumaLogger::warn("RMSD value is not set, will obtain it from ensemble");
     }
     m_maxrank = Json2KeyWord<double>(m_defaults, "rank");
     m_writeXYZ = Json2KeyWord<bool>(m_defaults, "writeXYZ");
@@ -220,31 +220,39 @@ void ConfScan::LoadControlJson()
     if (m_defaults["sLX"].is_string()) {
         if (Json2KeyWord<std::string>(m_defaults, "sLX") == "default") {
             if (m_verbosity >= 2)
-                CURCUMA_INFO("Using default values for the steps");
+                CurcumaLogger::info("Using default values for the steps");
             m_sLE = { 1.0, 2.0 };
             m_sLI = { 1.0, 2.0 };
             m_sLH = { 1.0, 2.0 };
+#ifdef CURCUMA_DEBUG
             if (m_verbosity >= 3)
-                CURCUMA_DEBUG_LOG(1, "Set reading multipliers to true");
+                CurcumaLogger::debug(1, "Set reading multipliers to true");
+#endif
             read_multipliers = true;
         } else {
             // this is the case for a string with comma separated values
+#ifdef CURCUMA_DEBUG
             if (m_verbosity >= 3)
-                CURCUMA_DEBUG_LOG(1, "Reading steps from vector string");
+                CurcumaLogger::debug(1, "Reading steps from vector string");
+#endif
             m_sLE = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLX"), ",");
             m_sLI = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLX"), ",");
             m_sLH = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLX"), ",");
         }
     } else if (m_defaults["sLX"].is_number()) {
+#ifdef CURCUMA_DEBUG
         if (m_verbosity >= 3)
-            CURCUMA_DEBUG_LOG(1, "Reading steps from number");
+            CurcumaLogger::debug(1, "Reading steps from number");
+#endif
         m_sLE = { Json2KeyWord<double>(m_defaults, "sLX") };
         m_sLI = { Json2KeyWord<double>(m_defaults, "sLX") };
         m_sLH = { Json2KeyWord<double>(m_defaults, "sLX") };
     }
     if (read_multipliers) {
+#ifdef CURCUMA_DEBUG
         if (m_verbosity >= 3)
-            CURCUMA_DEBUG_LOG(1, "Using read multipliers for the steps");
+            CurcumaLogger::debug(1, "Using read multipliers for the steps");
+#endif
         // if the xTX is not set, we can use the default values for the steps
         // this is done in a first step, so that we can use the default values
         // and in a second step, we can overwrite the settings
@@ -276,17 +284,17 @@ void ConfScan::LoadControlJson()
                 m_sLH = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLH"), ",");
     }
     if (m_sLE.size() != m_sLI.size() || m_sLE.size() != m_sLH.size()) {
-        CURCUMA_ERROR("Inconsistent length of steps requested, will abort now");
+        CurcumaLogger::error("Inconsistent length of steps requested, will abort now");
         exit(1);
     }
 
     if (m_verbosity >= 2) {
-        CURCUMA_INFO("Using the following steps for the thresholds:");
+        CurcumaLogger::info("Using the following steps for the thresholds:");
         for (std::size_t i = 0; i < m_sLE.size(); ++i) {
-            CURCUMA_INFO(fmt::format("sLE: {}, sLI: {}, sLH: {}",
+            CurcumaLogger::info_fmt("sLE: {}, sLI: {}, sLH: {}",
                 to_string_with_precision(m_sLE[i]),
                 to_string_with_precision(m_sLI[i]),
-                to_string_with_precision(m_sLH[i])));
+                to_string_with_precision(m_sLH[i]));
         }
     }
 
@@ -321,12 +329,12 @@ void ConfScan::LoadControlJson()
     m_RMSDmethod = Json2KeyWord<std::string>(m_defaults, "method");
 
     if (m_verbosity >= 2) {
-        CURCUMA_INFO(fmt::format("Permutation of atomic indices performed according to {}", m_RMSDmethod));
+        CurcumaLogger::info_fmt("Permutation of atomic indices performed according to {}", m_RMSDmethod);
     }
 
     if (m_RMSDmethod == "molalign") {
         if (m_verbosity >= 1) {
-            CURCUMA_CITATION("J. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187");
+            CurcumaLogger::citation("J. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187");
         }
         m_domolalign = -1;
     }
@@ -345,10 +353,10 @@ void ConfScan::LoadControlJson()
     m_earlybreak = m_defaults["earlybreak"];
     if ((m_earlybreak & 1) == 0)
         if (m_verbosity >= 2)
-            CURCUMA_INFO("Early break in reuse part is enabled");
+            CurcumaLogger::info("Early break in reuse part is enabled");
     if ((m_earlybreak & 2) == 0)
         if (m_verbosity >= 2)
-            CURCUMA_INFO("Early break in reorder part is enabled");
+            CurcumaLogger::info("Early break in reorder part is enabled");
 #pragma message("these hacks to overcome the json stuff are not nice, TODO!")
     try {
         m_rmsd_element_templates = m_defaults["RMSDElement"].get<std::string>();
@@ -364,8 +372,8 @@ void ConfScan::LoadControlJson()
         m_rmsd_element_templates.push_back(m_RMSDElement);
     }
     if (m_RMSDmethod.compare("hybrid") == 0 /* && m_rmsd_element_templates.compare("") == 0 */) {
-        CURCUMA_WARN("Reordering method hybrid has to be combined with element types. I will choose for you nitrogen and oxygen!");
-        CURCUMA_INFO("This is equivalent to adding: '-rmsdelement 7,8' to your argument list");
+        CurcumaLogger::warn("Reordering method hybrid has to be combined with element types. I will choose for you nitrogen and oxygen!");
+        CurcumaLogger::info("This is equivalent to adding: '-rmsdelement 7,8' to your argument list");
         m_rmsd_element_templates = "7,8";
     }
     m_prev_accepted = Json2KeyWord<std::string>(m_defaults, "accepted");
@@ -374,15 +382,15 @@ void ConfScan::LoadControlJson()
         m_useorders = 10;
 
     if (m_verbosity >= 2) {
-        CURCUMA_INFO("Current Configuration:");
-        CURCUMA_PARAM("Threads", m_threads);
-        CURCUMA_PARAM("Molalign Tolerance", m_molaligntol);
-        CURCUMA_PARAM("Force Reorder", m_force_reorder);
-        CURCUMA_PARAM("Verbosity", m_verbosity);
-        CURCUMA_PARAM("Write", m_write);
-        CURCUMA_PARAM("Update Rotation", m_update_rotation);
-        CURCUMA_PARAM("Split", m_split);
-        CURCUMA_PARAM("Method", m_method);
+        CurcumaLogger::info("Current Configuration:");
+        CurcumaLogger::param("Threads", m_threads);
+        CurcumaLogger::param("Molalign Tolerance", m_molaligntol);
+        CurcumaLogger::param("Force Reorder", m_force_reorder);
+        CurcumaLogger::param("Verbosity", m_verbosity);
+        CurcumaLogger::param("Write", m_write);
+        CurcumaLogger::param("Update Rotation", m_update_rotation);
+        CurcumaLogger::param("Split", m_split);
+        CurcumaLogger::param("Method", m_method);
     }
 }
 
@@ -400,12 +408,12 @@ bool ConfScan::openFile()
     // std::cout << m_looseThresh <<" "<<int((m_looseThresh & 1) == 1) << " " << int((m_looseThresh & 2) == 2) << std::endl;
 
     if (m_verbosity >= 2) {
-        CURCUMA_INFO("Calculation of descriptors:");
+        CurcumaLogger::info("Calculation of descriptors:");
         if ((m_looseThresh & 1) == 1)
-            CURCUMA_INFO("  - rotational constants");
+            CurcumaLogger::info("  - rotational constants");
         if ((m_looseThresh & 2) == 2)
-            CURCUMA_INFO("  - ripser barcodes");
-        CURCUMA_INFO("required");
+            CurcumaLogger::info("  - ripser barcodes");
+        CurcumaLogger::info("required");
     }
     while (!file.AtEnd()) {
         Molecule* mol = new Molecule(file.Next());
@@ -488,9 +496,9 @@ bool ConfScan::openFile()
     m_timing_ripser = calcH;
 
     if (m_verbosity >= 2) {
-        CURCUMA_INFO("Time for calculating descriptors:");
-        CURCUMA_INFO(fmt::format("Rotational constants: {:.3f} seconds", m_timing_rot / 1000.0));
-        CURCUMA_INFO(fmt::format("Ripser bar code: {:.3f} seconds", m_timing_ripser / 1000.0));
+        CurcumaLogger::info("Time for calculating descriptors:");
+        CurcumaLogger::info_fmt("Rotational constants: {:.3f} seconds", m_timing_rot / 1000.0);
+        CurcumaLogger::info_fmt("Ripser bar code: {:.3f} seconds", m_timing_ripser / 1000.0);
     }
 
     return true;
@@ -533,8 +541,10 @@ bool ConfScan::LoadRestartInformation()
     for (const auto& f : files) {
         std::vector<std::vector<int>> reorder_cached;
 
+#ifdef CURCUMA_DEBUG
         if (m_verbosity >= 3)
-            CURCUMA_DEBUG_LOG(1, fmt::format("Reading file {}", f));
+            CurcumaLogger::debug(1, fmt::format("Reading file {}", f));
+#endif
         std::ifstream file(f);
         json restart;
         try {
@@ -579,7 +589,7 @@ bool ConfScan::LoadRestartInformation()
     }
     m_useRestart = files.size() == 1 && error != int(files.size());
     if (m_verbosity >= 2)
-        CURCUMA_INFO(fmt::format("Starting with {} initial reorder rules", m_reorder_rules.size()));
+        CurcumaLogger::info_fmt("Starting with {} initial reorder rules", m_reorder_rules.size());
     return true;
 }
 
@@ -657,11 +667,11 @@ void ConfScan::SetUp()
     }
 
     if (m_verbosity >= 1) {
-        CURCUMA_INFO(std::string(70, '='));
-        CURCUMA_INFO(fmt::format("RMSD Calculation will be performed on {}", m_heavy ? "heavy atoms" : "all atoms"));
-        CURCUMA_INFO(fmt::format("RMSD Threshold set to: {:.6f} Angstrom", m_rmsd_threshold));
-        CURCUMA_INFO(fmt::format("Highest energy conformer allowed: {:.2f} kJ/mol", m_energy_cutoff));
-        CURCUMA_INFO("Threshold multipliers are loose / tight");
+        CurcumaLogger::info(std::string(70, '='));
+        CurcumaLogger::info_fmt("RMSD Calculation will be performed on {}", m_heavy ? "heavy atoms" : "all atoms");
+        CurcumaLogger::info_fmt("RMSD Threshold set to: {:.6f} Angstrom", m_rmsd_threshold);
+        CurcumaLogger::info_fmt("Highest energy conformer allowed: {:.2f} kJ/mol", m_energy_cutoff);
+        CurcumaLogger::info("Threshold multipliers are loose / tight");
     }
 
     auto printThresholds = [](const std::string& label, const std::vector<double>& loose, double tight) {
@@ -669,8 +679,8 @@ void ConfScan::SetUp()
         std::ostringstream loose_values;
         for (const auto& d : loose)
             loose_values << d << " ";
-        CURCUMA_INFO(fmt::format("    {} definition for loose {} and tight thresholds {}",
-            label, loose_values.str(), tight));
+        CurcumaLogger::info_fmt("    {} definition for loose {} and tight thresholds {}",
+            label, loose_values.str(), tight);
     };
 
     printThresholds("Ripser Persistence Diagrams", m_sLH, m_sTH);
@@ -679,9 +689,9 @@ void ConfScan::SetUp()
 
     // Claude Generated: Convert end separator to new logging system
     if (m_verbosity >= 1) {
-        CURCUMA_INFO("");
-        CURCUMA_INFO("''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''");
-        CURCUMA_INFO("");
+        CurcumaLogger::info("");
+        CurcumaLogger::info("''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''");
+        CurcumaLogger::info("");
     }
 }
 
@@ -693,12 +703,13 @@ void ConfScan::AcceptMolecule(Molecule* molecule)
     if (m_writeFiles && !m_reduced_file && m_current_filename.length()) {
         molecule->appendXYZFile(m_current_filename);
     }
-    // Claude Generated: Always show neutral accept info for each structure at default verbosity
-    // Debug: Check verbosity level
-    if (m_verbosity >= 0) { // Changed to 0 to show at default verbosity
-        CURCUMA_INFO(fmt::format("Accept {}", molecule->Name()));
-        std::cout << "Accept " << molecule->Name() << " (verbosity=" << m_verbosity << ")" << std::endl;
-        std::cout.flush();
+    // Claude Generated: Always show accept info for each structure at default verbosity
+    if (m_verbosity >= 1) { // Show at SMALL_PRINT level and above
+        // Ensure logger verbosity matches local verbosity for accept messages
+        int old_verbosity = CurcumaLogger::get_verbosity();
+        CurcumaLogger::set_verbosity(m_verbosity);
+        CurcumaLogger::success_fmt("Accept {}", molecule->Name());
+        CurcumaLogger::set_verbosity(old_verbosity);
     }
 }
 
@@ -706,11 +717,13 @@ void ConfScan::RejectMolecule(Molecule* molecule)
 {
     m_rejected_structures.push_back(molecule);
     m_rejected++;
-    // Claude Generated: Always show neutral reject info for each structure at default verbosity
-    if (m_verbosity >= 0) { // Changed to 0 to show at default verbosity
-        CURCUMA_INFO(fmt::format("Reject {}", molecule->Name()));
-        std::cout << "Reject " << molecule->Name() << std::endl;
-        std::cout.flush();
+    // Claude Generated: Always show reject info for each structure at default verbosity
+    if (m_verbosity >= 1) { // Show at SMALL_PRINT level and above
+        // Ensure logger verbosity matches local verbosity for reject messages
+        int old_verbosity = CurcumaLogger::get_verbosity();
+        CurcumaLogger::set_verbosity(m_verbosity);
+        CurcumaLogger::warn_fmt("Reject {}", molecule->Name());
+        CurcumaLogger::set_verbosity(old_verbosity);
     }
 }
 
@@ -727,10 +740,10 @@ void ConfScan::start()
 {
     // Level 1: Display input parameters nicely formatted - Claude Generated
     if (m_verbosity >= 1) {
-        CURCUMA_HEADER("Conformational Scanning");
+        CurcumaLogger::header("Conformational Scanning");
 
         // Display parameter comparison table showing defaults vs current settings at level 1
-        CURCUMA_PARAM_COMPARISON(m_defaults, m_controller, "ConfScan Configuration");
+        CurcumaLogger::param_comparison_table(m_defaults, m_controller, "ConfScan Configuration");
     }
 
     SetUp();
@@ -739,7 +752,7 @@ void ConfScan::start()
 
     if (!m_skipinit) {
         if (m_verbosity >= 1) {
-            CURCUMA_INFO("Initial Pass: Performing RMSD calculation without reordering");
+            CurcumaLogger::success("Initial Pass: Performing RMSD calculation without reordering");
         }
         m_current_filename = m_1st_filename;
         if (m_writeFiles && !m_reduced_file) {
@@ -775,11 +788,11 @@ void ConfScan::start()
             }
         }
         if (m_verbosity >= 1) {
-            CURCUMA_SUCCESS(fmt::format("Initial Pass finished after {:.3f} seconds", timer.Elapsed() / 1000.0));
+            CurcumaLogger::success_fmt("Initial Pass finished after {:.3f} seconds", timer.Elapsed() / 1000.0);
         }
     } else {
         if (m_verbosity >= 1) {
-            CURCUMA_INFO("Skipping initial pass - Setting thresholds to high value");
+            CurcumaLogger::info("Skipping initial pass - Setting thresholds to high value");
         }
 
         for (const auto& i : m_ordered_list)
@@ -840,7 +853,7 @@ void ConfScan::start()
             if (!CheckStop()) {
                 timer.Reset();
                 if (m_verbosity >= 1) {
-                    CURCUMA_INFO("Reorder Pass: Performing RMSD calculation with reordering");
+                    CurcumaLogger::success("Reorder Pass: Performing RMSD calculation with reordering");
                 }
                 if (m_writeFiles && !m_reduced_file) {
                     result_file.open(m_statistic_filename, std::ios_base::app);
@@ -857,7 +870,7 @@ void ConfScan::start()
                 PrintStatus("Result Reorder pass:");
 
                 if (m_verbosity >= 1) {
-                    CURCUMA_SUCCESS(fmt::format("Reorder Pass finished after {:.3f} seconds", timer.Elapsed() / 1000.0));
+                    CurcumaLogger::success_fmt("Reorder Pass finished after {:.3f} seconds", timer.Elapsed() / 1000.0);
                 }
                 timer.Reset();
                 if (m_analyse) {
@@ -901,16 +914,16 @@ void ConfScan::start()
             parameters_performed.close();
         }
     } else if (m_verbosity >= 1)
-        CURCUMA_INFO("Reorder Pass skipped");
+        CurcumaLogger::success("Reorder Pass skipped");
     if (!m_skipreuse) {
         if (!CheckStop()) {
             timer.Reset();
             m_current_filename = m_3rd_filename;
             if (m_verbosity >= 1) {
                 if (m_reset)
-                    CURCUMA_INFO("Reuse Pass: Performing RMSD calculation with stored reorder rules using all structures");
+                    CurcumaLogger::success("Reuse Pass: Performing RMSD calculation with stored reorder rules using all structures");
                 else
-                    CURCUMA_INFO("Reuse Pass: Performing RMSD calculation with stored reorder rules using previously accepted structures");
+                    CurcumaLogger::success("Reuse Pass: Performing RMSD calculation with stored reorder rules using previously accepted structures");
             }
 
             if (m_writeFiles && !m_reduced_file) {
@@ -929,7 +942,7 @@ void ConfScan::start()
             PrintStatus("Result reuse pass:");
 
             if (m_verbosity >= 1) {
-                CURCUMA_SUCCESS(fmt::format("Reuse Pass finished after {:.3f} seconds", timer.Elapsed() / 1000.0));
+                CurcumaLogger::success_fmt("Reuse Pass finished after {:.3f} seconds", timer.Elapsed() / 1000.0);
             }
             timer.Reset();
 
@@ -1144,7 +1157,7 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
     delete p;
     if (!m_rmsd_set) {
         if (m_verbosity >= 2)
-            CURCUMA_INFO(fmt::format("RMSD threshold set to {:.6f} Å", m_rmsd_threshold));
+            CurcumaLogger::info_fmt("RMSD threshold set to {:.6f} Å", m_rmsd_threshold);
         for (const auto& i : m_listThresh) {
             if (i.first > m_getrmsd_thresh)
                 break;
@@ -1166,23 +1179,21 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
 
     m_rmsd_set = true;
 
-    ConfStat stat;
-    stat.setEnergies(m_energies);
-    stat.start();
+    // ConfStat will be called once at the end in Finalise() to avoid interference with status updates
 }
 
 void ConfScan::PrintSetUp(double dLE, double dLI, double dLH)
 {
     // Claude Generated: Convert threshold display to new logging system
     if (m_verbosity >= 2) {
-        CURCUMA_INFO("```");
-        CURCUMA_INFO("* Thresholds in Delta I (averaged over Ia, Ib and Ic):");
-        CURCUMA_INFO(fmt::format("  Loose Threshold: {:.2f} MHz \t Tight Threshold: {:.2f} MHz", dLI, m_dTI));
-        CURCUMA_INFO("* Thresholds Delta H:");
-        CURCUMA_INFO(fmt::format("  Loose Threshold: {:.2f} \t Tight Threshold: {:.2f}", dLH, m_dTH));
-        CURCUMA_INFO("* Thresholds Delta E:");
-        CURCUMA_INFO(fmt::format("  Loose Threshold: {:.2f} kJ/mol \t Tight Threshold: {:.2f} kJ/mol", dLE, m_dTE));
-        CURCUMA_INFO("```");
+        CurcumaLogger::info("```");
+        CurcumaLogger::info("* Thresholds in Delta I (averaged over Ia, Ib and Ic):");
+        CurcumaLogger::info_fmt("  Loose Threshold: {:.2f} MHz \t Tight Threshold: {:.2f} MHz", dLI, m_dTI);
+        CurcumaLogger::info("* Thresholds Delta H:");
+        CurcumaLogger::info_fmt("  Loose Threshold: {:.2f} \t Tight Threshold: {:.2f}", dLH, m_dTH);
+        CurcumaLogger::info("* Thresholds Delta E:");
+        CurcumaLogger::info_fmt("  Loose Threshold: {:.2f} kJ/mol \t Tight Threshold: {:.2f} kJ/mol", dLE, m_dTE);
+        CurcumaLogger::info("```");
     }
 
     if (dLE > 0 || dLH > 0 || dLI > 0) {
@@ -1276,14 +1287,14 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
         m_dE = (m_current_energy - m_lowest_energy) * 2625.5;
         if (m_dE > m_energy_cutoff && m_energy_cutoff != -1) {
             if (m_verbosity >= 1)
-                CURCUMA_WARN(fmt::format("Energy of {} is {:.2f} kJ/mol, above cutoff of {:.2f} kJ/mol, skipping", mol1->Name(), m_current_energy, m_energy_cutoff));
+                CurcumaLogger::warn_fmt("Energy of {} is {:.2f} kJ/mol, above cutoff of {:.2f} kJ/mol, skipping", mol1->Name(), m_current_energy, m_energy_cutoff);
             break;
         }
         bool keep_molecule = true;
         bool reorder = false;
         for (int t = 0; t < threads.size(); ++t) {
             if (CheckStop()) {
-                CURCUMA_WARN("Found stop file, will end now!");
+                CurcumaLogger::warn("Found stop file, will end now!");
                 TriggerWriteRestart();
                 return;
             }
@@ -1312,7 +1323,7 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
 
                 if ((tightThresh & m_tightThresh) == m_tightThresh) {
                     if (m_verbosity >= 1)
-                        CURCUMA_INFO(fmt::format("Differences {:.3f} MHz and {:.3f} below tight threshold, reject molecule directly!", dI, dH));
+                        CurcumaLogger::info_fmt("Differences {:.3f} MHz and {:.3f} below tight threshold, reject molecule directly!", dI, dH);
                     m_lastDI = dI;
                     m_lastDH = dH;
                     writeStatisticFile(mol1, mol2, -1, false);
@@ -1397,7 +1408,7 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
                 } else { /* Only if additional molaign is invoked */
                     if ((m_domolalign > 1) && t->RMSD() < m_domolalign * m_rmsd_threshold) {
                         if (m_verbosity >= 1)
-                            CURCUMA_INFO("Starting molalign for more precise reordering...");
+                            CurcumaLogger::info("Starting molalign for more precise reordering...");
                         json molalign = rmsd;
                         molalign["method"] = "molalign";
                         molalign["verbosity"] = 0;
@@ -1423,12 +1434,14 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
                             laststring = t->Reference()->Name();
 
                             if (m_verbosity >= 2)
-                                CURCUMA_SUCCESS("... success!");
+                                CurcumaLogger::success("... success!");
                         } else if (m_verbosity >= 2)
-                            CURCUMA_WARN("... without effect!");
+                            CurcumaLogger::warn("... without effect!");
                     }
                 }
+                m_kuhn_munkres_iterations += t->getKuhnMunkresIterations();
             }
+
         } else
             m_skiped += threads.size();
 
@@ -1450,9 +1463,7 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
     p->clear();
     delete p;
 
-    ConfStat stat;
-    stat.setEnergies(m_energies);
-    stat.start();
+    // ConfStat will be called once at the end in Finalise() to avoid interference with status updates
 }
 
 ConfScanThreadNoReorder* ConfScan::addThreadNoreorder(const Molecule* reference, const json& config)
@@ -1480,11 +1491,26 @@ void ConfScan::Finalise()
     TriggerWriteRestart();
 
     if (m_verbosity >= 1) {
-        CURCUMA_INFO("Final Statistics:");
-        CURCUMA_INFO(fmt::format("Rotational constants: {} ms", m_timing_rot));
-        CURCUMA_INFO(fmt::format("Ripser bar code difference: {} ms", m_timing_ripser));
-        CURCUMA_INFO(fmt::format("Success rate: {:.2f}%", m_reorder_successfull_count / double(m_reorder_count) * 100));
-        CURCUMA_INFO(fmt::format("Efficiency: {:.3f}", m_skipped_count / double(m_reorder_successfull_count)));
+        // Ensure logger verbosity matches local verbosity for these messages
+        int old_verbosity = CurcumaLogger::get_verbosity();
+        CurcumaLogger::set_verbosity(m_verbosity);
+
+        CurcumaLogger::info("Final Statistics:");
+        CurcumaLogger::info_fmt("Rotational constants: {} ms", m_timing_rot);
+        CurcumaLogger::info_fmt("Ripser bar code difference: {} ms", m_timing_ripser);
+
+        // Calculate success rate with bounds checking
+        double success_rate = (m_reorder_count > 0) ? (m_reorder_successfull_count / double(m_reorder_count) * 100.0) : 0.0;
+        CurcumaLogger::info_fmt("Success rate: {:.2f}%", success_rate);
+
+        // Calculate efficiency with bounds checking
+        double efficiency = (m_reorder_successfull_count > 0) ? (m_skipped_count / double(m_reorder_successfull_count)) : 0.0;
+        CurcumaLogger::info_fmt("Efficiency: {:.3f}", efficiency);
+
+        CurcumaLogger::info_fmt("Kuhn-Munkres iterations: {}", m_kuhn_munkres_iterations);
+
+        // Restore original logger verbosity
+        CurcumaLogger::set_verbosity(old_verbosity);
     }
 
     int i = 0;
@@ -1534,9 +1560,15 @@ void ConfScan::Finalise()
     m_collective_content += "\"" + m_first_node + "\";\n";
     m_collective_content += content_after;
 
-    if (m_verbosity >= 1) {
-        CURCUMA_SUCCESS(fmt::format("{} structures were kept - of {} total!",
-            m_stored_structures.size(), m_molecules.size() - m_fail));
+    // Always show final result regardless of verbosity - this is critical information
+    CurcumaLogger::success_fmt("{} structures were kept - of {} total!",
+        m_stored_structures.size(), m_molecules.size() - m_fail);
+
+    // Show conformer statistics at the end - this is the final analysis
+    if (!m_energies.empty()) {
+        ConfStat stat;
+        stat.setEnergies(m_energies);
+        stat.start();
     }
 }
 
@@ -1553,14 +1585,17 @@ bool ConfScan::AddRules(const std::vector<int>& rules)
 
 void ConfScan::PrintStatus(const std::string& info)
 {
+    // Always show critical status updates for user feedback during calculations
     if (m_verbosity >= 1) {
-        CURCUMA_INFO(fmt::format("Progress: {:.1f}% done",
-            (m_stored_structures.size() + m_rejected) / double(m_maxmol) * 100));
-    }
-    // TODO Fix verbosity and formatting
-    if (m_verbosity >= 0) {
-        if (!info.empty())
-            CURCUMA_INFO(info);
+        if (!info.empty()) {
+            fmt::print("        {}\n", info);
+        }
+
+        // Show progress percentage
+        fmt::print("        Progress: {:.1f}% done\n",
+            (m_stored_structures.size() + m_rejected) / double(m_maxmol) * 100);
+
+        // Show detailed status line - this is the key information users expect to see
         std::string status = fmt::format("Accepted: {}, Rejected: {}, Reordered: {} (+{})",
             m_stored_structures.size(), m_rejected, m_reordered, m_molalign_count);
         status += fmt::format(" | Successfully: {} (+{}), Reused Results: {}",
@@ -1568,17 +1603,9 @@ void ConfScan::PrintStatus(const std::string& info)
         status += fmt::format(" | Reordering Skipped: {} (+{}), Rejected Directly: {}",
             m_skiped, m_duplicated, m_rejected_directly);
         status += fmt::format(" | Current Energy: {:.2f} kJ/mol", m_dE);
-        std::cout << status << std::endl;
-        /*
-        CURCUMA_INFO(fmt::format("Accepted: {}, Rejected: {}, Reordered: {} (+{})",
-                    m_stored_structures.size(), m_rejected, m_reordered, m_molalign_count));
-        CURCUMA_INFO(fmt::format("Successfully: {} (+{}), Reused Results: {}",
-                    m_reordered_worked, m_molalign_success, m_reordered_reused));
-        CURCUMA_INFO(fmt::format("Reordering Skipped: {} (+{}), Rejected Directly: {}",
-                    m_skiped, m_duplicated, m_rejected_directly));
-        CURCUMA_INFO(fmt::format("Current Energy: {:.2f} kJ/mol", m_dE));
-        */
-        std::cout << std::endl; // CLaude: Add this to have a new line after the info, done remove it
+        fmt::print("        {}\n", status);
+
+        std::cout << std::endl; // Force immediate flush for real-time feedback
     }
 }
 

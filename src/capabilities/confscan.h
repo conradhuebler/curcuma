@@ -175,6 +175,7 @@ public:
     }
     void setEarlyBreak(int earlybreak) { m_earlybreak = earlybreak; }
     void setVerbose(bool verbose) { m_verbose = verbose; }
+    int getKuhnMunkresIterations() { return m_driver->getKuhnMunkresIterations(); }
 
 private:
     bool m_keep_molecule = true, m_reorder_worked = false, m_reuse_only = false, m_reused_worked = false;
@@ -384,7 +385,7 @@ private:
     int m_molaligntol = 10;
     int m_timing_rot = 0, m_timing_ripser = 0;
     int m_cycles = -1;
-    int m_reorder_count = 0, m_reorder_successfull_count = 0, m_skipped_count = 0;
+    int m_reorder_count = 0, m_reorder_successfull_count = 0, m_skipped_count = 0, m_kuhn_munkres_iterations = 0;
     int m_earlybreak = 0;
     bool m_writeXYZ = false;
     bool m_check_connections = false;

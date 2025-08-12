@@ -19,7 +19,8 @@
 
 #pragma once
 
-#include "rmsd_functions.h"
+#include "rmsd/rmsd_functions.h"
+#include "rmsd/rmsd_strategies.h" // For AlignmentMethod enum
 
 #include "src/core/molecule.h"
 #include "src/core/global.h"
@@ -29,6 +30,7 @@
 #include <chrono>
 #include <functional>
 #include <map>
+#include <memory>
 #include <queue>
 
 #include <LBFGS.h>
@@ -37,6 +39,26 @@
 using json = nlohmann::json;
 
 #include "curcumamethod.h"
+
+// Claude Generated - Forward declarations for strategy pattern
+class AlignmentStrategy;
+struct AlignmentResult;
+
+// Claude Generated - AlignmentConfig needs full definition for member variable
+struct AlignmentConfig {
+    AlignmentMethod method = AlignmentMethod::INCREMENTAL; // Method identifier
+    int limit = 10; // Limit for template methods
+    int element = 7; // Element for template methods
+    std::vector<int> element_templates; // Multiple elements for templates
+    bool force_reorder = false; // Force reordering
+    bool update_rotation = false; // Update rotation optimization
+    int threads = 1; // Number of threads
+    std::string molalign_bin = "molalign"; // MolAlign binary path
+    std::string molalign_args = " -remap -fast -tol 10"; // MolAlign arguments
+    int molalign_tolerance = 10; // MolAlign tolerance
+
+    AlignmentConfig() = default;
+};
 
 struct StructComp {
     double rmsd = 0;
@@ -102,7 +124,7 @@ static const json RMSDJson = {
     { "nofree", false },
     { "limit", 10 },
     { "costmatrix", 1 },
-    { "maxtrial", 5 },
+    { "km_maxiterations", 5 },
     { "kmstat", false },
     { "km_conv", 1e-3 },
     { "molalignarg", " -remap -fast -tol 10" },
@@ -110,10 +132,26 @@ static const json RMSDJson = {
 };
 
 class RMSDDriver : public CurcumaMethod {
+    // Claude Generated - Friend classes for Strategy Pattern access to private members
+    friend class IncrementalAlignmentStrategy;
+    friend class TemplateAlignmentStrategy;
+    friend class HeavyTemplateStrategy;
+    friend class AtomTemplateStrategy;
+    friend class InertiaAlignmentStrategy;
+    friend class MolAlignStrategy;
+    friend class DistanceTemplateStrategy;
+    friend class PredefinedOrderStrategy;
+
 public:
     RMSDDriver(const json& controller = RMSDJson, bool silent = true);
 
     virtual ~RMSDDriver();
+
+    // Claude Generated - Handle move semantics due to std::unique_ptr member
+    RMSDDriver(const RMSDDriver&) = delete;
+    RMSDDriver& operator=(const RMSDDriver&) = delete;
+    RMSDDriver(RMSDDriver&&) = default;
+    RMSDDriver& operator=(RMSDDriver&&) = default;
 
     inline void setReference(const Molecule& reference) { m_reference = reference; }
     inline void setTarget(const Molecule& target)
@@ -226,6 +264,8 @@ public:
 
     double PartialRMSD(const Molecule& ref, const Molecule& tar);
 
+    int getKuhnMunkresIterations() const { return m_kuhn_munkres_iterations; }
+
     void clear();
     void reset();
 
@@ -236,9 +276,37 @@ public:
 
     Geometry Gradient() const;
 
+    // Claude Generated - Public helper methods for Strategy Pattern access
+    Geometry CenterMolecule(const Molecule& mol, int fragment) const;
+    Geometry CenterMolecule(const Geometry& geom) const;
+    std::pair<Molecule, LimitedStorage> InitialisePair();
+    std::vector<int> FillMissing(const Molecule& molecule, const std::vector<int>& order);
+    void InsertRotation(std::pair<double, Matrix>& rotation);
+    std::pair<int, int> CheckFragments();
+    std::pair<Matrix, Position> GetOperateVectors(int fragment_reference, int fragment_target);
+    std::pair<Matrix, Position> GetOperateVectors(const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms);
+    std::pair<double, Matrix> MakeCostMatrix(const Geometry& reference, const Geometry& target);
+    std::pair<double, Matrix> MakeCostMatrix(const std::vector<int>& reference, const std::vector<int>& target);
+    std::pair<double, Matrix> MakeCostMatrix(const Matrix& rotation);
+    std::pair<std::vector<int>, std::vector<int>> PrepareHeavyTemplate();
+    std::pair<std::vector<int>, std::vector<int>> PrepareAtomTemplate(const std::vector<int>& templateatom);
+
 private:
     /* Read Controller has to be implemented for all */
     void LoadControlJson() override;
+
+    // Claude Generated - Thematic parameter loading methods for better organization
+    void LoadFragmentAndThreadingParameters();
+    void LoadAlignmentMethodParameters();
+    void LoadElementTemplateParameters();
+    void LoadCostMatrixParameters();
+    void LoadAtomSelectionParameters();
+    void LoadFileOrderParameters();
+    void DisplayConfigurationSummary();
+
+    // Claude Generated - Strategy pattern methods
+    void InitializeAlignmentStrategy();
+    AlignmentConfig CreateAlignmentConfig() const;
 
     /* Lets have this for all modules */
     nlohmann::json WriteRestartInformation() override { return json(); }
@@ -251,25 +319,13 @@ private:
     /* Lets have all methods read the input/control file */
     void ReadControlFile() override {}
 
-    void ReorderIncremental();
-
-    void HeavyTemplate();
-
-    void AtomTemplate();
-
-    void TemplateFree();
-
-    void DistanceTemplate();
-
     void CheckTopology();
 
     Matrix OptimiseRotation(const Eigen::Matrix3d& rotation);
 
-    std::pair<std::vector<int>, std::vector<int>> PrepareHeavyTemplate();
     std::pair<std::vector<int>, std::vector<int>> PrepareDistanceTemplate();
 
     std::pair<std::vector<int>, std::vector<int>> PrepareAtomTemplate(int templateatom);
-    std::pair<std::vector<int>, std::vector<int>> PrepareAtomTemplate(const std::vector<int>& templateatom);
 
     void FinaliseTemplate();
 
@@ -301,31 +357,18 @@ private:
         else
             return distance * distance;
     }
-    std::vector<int> FillMissing(const Molecule& molecule, const std::vector<int>& order);
-    void InsertRotation(std::pair<double, Matrix>& rotation);
 
     void InitialiseOrder();
-    std::pair<Molecule, LimitedStorage> InitialisePair();
     /*
     int CheckConnectivitiy(const Molecule& mol1, const Molecule& mol2) const;
     int CheckConnectivitiy(const Molecule& mol1) const;
     */
-    bool TemplateReorder();
-    std::pair<int, int> CheckFragments();
-
-    Geometry CenterMolecule(const Molecule& mol, int fragment) const;
-    Geometry CenterMolecule(const Geometry& molt) const;
 
     std::pair<double, Matrix> MakeCostMatrix(const std::vector<int>& permutation);
-    std::pair<double, Matrix> MakeCostMatrix(const std::vector<int>& reference, const std::vector<int>& target);
     std::pair<double, Matrix> MakeCostMatrix(const std::pair<std::vector<int>, std::vector<int>>& pair);
-    std::pair<double, Matrix> MakeCostMatrix(const Geometry& reference, const Geometry& target /*, const std::vector<int> reference_atoms, const std::vector<int> target_atoms*/);
-    std::pair<double, Matrix> MakeCostMatrix(const Matrix& rotation);
 
     std::vector<int> SolveCostMatrix(Matrix& distance);
 
-    std::pair<Matrix, Position> GetOperateVectors(int fragment_reference, int fragment_target);
-    std::pair<Matrix, Position> GetOperateVectors(const std::vector<int>& reference_atoms, const std::vector<int>& target_atoms);
     std::pair<Matrix, Position> GetOperateVectors(const Molecule& reference, const Molecule& target);
 
     Molecule m_reference, m_target, m_target_original, m_reference_aligned, m_reference_original, m_target_aligned, m_target_reordered, m_reorder_reference, m_reorder_target, m_reference_centered, m_target_centered;
@@ -348,7 +391,8 @@ private:
     int m_molaligntol = 10;
     int m_limit = 10;
     int m_costmatrix = 1;
-    int m_maxtrial = 2;
+    int m_kuhn_munkres_max_iterations = 2;
+    int m_kuhn_munkres_iterations = 0;
     double m_cost_limit = 0, m_target_rmsd = 0.0;
     mutable int m_fragment = -1, m_fragment_reference = -1, m_fragment_target = -1;
     std::vector<int> m_initial, m_element_templates;
@@ -356,6 +400,10 @@ private:
     Eigen::Matrix3d m_rotation;
     std::string m_molalign = "molalign", m_molalignarg = " -remap -fast -tol 10";
     std::map<double, Matrix> m_prepared_cost_matrices;
+
+    // Claude Generated - Strategy pattern members
+    std::unique_ptr<AlignmentStrategy> m_alignment_strategy;
+    AlignmentConfig m_alignment_config;
 };
 
 using namespace LBFGSpp;
