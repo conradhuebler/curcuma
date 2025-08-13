@@ -241,6 +241,7 @@ set(curcuma_core_SRC
         src/core/qm_methods/ulyssesinterface.cpp
         src/core/energycalculator.cpp
         src/core/molecule.cpp
+        src/core/xyz_comment_parser.cpp
         src/core/fileiterator.cpp
         src/core/forcefieldthread.cpp
         src/core/forcefield.cpp
@@ -499,6 +500,8 @@ add_executable(cli_helper
 add_executable(parallel_scf
         src/helpers/parallel_scf.cpp)
 
+
+
 target_link_libraries(curcuma_helper fmt::fmt-header-only)
 target_link_libraries(curcuma_helper curcuma_core)
 
@@ -525,6 +528,8 @@ target_sources(Continuous
   PRIVATE
     src/core/qmdff_par.h
 )
+add_test(NAME molecule_comprehensive COMMAND test_molecule)
+
 add_test(NAME AAAbGal_dtemplate COMMAND AAAbGal dtemplate WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME AAAbGal_free COMMAND AAAbGal free WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 add_test(NAME AAAbGal_template COMMAND AAAbGal template WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
@@ -546,6 +551,7 @@ add_test(NAME confscan_sLX20Reset COMMAND confscan_test sLX20Reset WORKING_DIREC
 
 add_test(NAME confstat COMMAND confstat_tests WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 
+# Claude Generated: Comprehensive test for Molecule class before refactoring
 
 install(TARGETS curcuma RUNTIME DESTINATION bin)
 install(TARGETS curcuma_helper RUNTIME DESTINATION bin)

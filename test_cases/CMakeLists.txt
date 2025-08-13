@@ -20,9 +20,18 @@ add_executable(reorder_test
 
     add_executable(AAAbGal
             AAAbGal.cpp)
+# Claude Generated: Test executable for Molecule class
+add_executable(test_molecule
+        test_molecule.cpp)
+
 target_link_libraries(AAAbGal curcuma_core)
 target_link_libraries(reorder_test curcuma_core)
-
+target_link_libraries(test_molecule curcuma_core)
+if(USE_PCH)
+        target_precompile_headers(AAAbGal REUSE_FROM curcuma_core)
+        target_precompile_headers(reorder_test REUSE_FROM curcuma_core)
+        target_precompile_headers(test_molecule REUSE_FROM curcuma_core)
+endif()
 
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/confscan/input.xyz
         DESTINATION ${CMAKE_CURRENT_BINARY_DIR})

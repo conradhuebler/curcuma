@@ -68,6 +68,9 @@ capabilities/
 - Enhanced conformational search algorithms
 - Improved trajectory analysis tools
 - Better integration with quantum chemical methods
+- **Unit system migration**: Capabilities should migrate to centralized `CurcumaUnit` namespace
+  - Replace hardcoded constants (2625.5, 627.5, etc.) with `CurcumaUnit::Energy::*` functions
+  - Use centralized constants from `src/core/units.h` for consistency
 - **RMSD Code Restructuring**: ✅ Phase 1 & 2 completed
   - **Phase 1**: Extracted CostMatrixCalculator and AssignmentSolver utilities
   - **Phase 2**: Refactored LoadControlJson() from monolithic (200+ lines) into 6 thematic methods
