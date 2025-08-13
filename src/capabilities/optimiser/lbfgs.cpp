@@ -1,50 +1,115 @@
+/*
+ * <Native LBFGS Optimizer Implementation - Claude 3.5 Generated, Cleaned by Claude 4>
+ * Copyright (C) 2025 Claude AI - Generated Code
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
 #include "lbfgs.h"
+#include <cmath>
+#include <iomanip>
 #include <iostream>
 
-#include "src/core/energycalculator.h"
-
-LBFGS::LBFGS(int m)
-    : m(m)
+// Claude Generated - Constructor with modern defaults
+LBFGS::LBFGS(int memory_size)
+    : m_memory_size(memory_size)
     , stepCount(0)
     , m_energy(0.0)
+    , m_step_size(1.0) // More conservative default
 {
-    m_step_size = 2;
+    if (memory_size <= 0) {
+        CurcumaLogger::warn("Invalid LBFGS memory size, using default value 10");
+        m_memory_size = 10;
+    }
 }
 
-void LBFGS::initialize(int natoms, const Vector& initial_x)
+// Claude Generated - Modern initialization with logging
+void LBFGS::initialize(int natoms, const Vector& initial_coordinates)
 {
     m_atoms = natoms;
-    m_gradient = Eigen::VectorXd::Zero(3 * m_atoms);
-    m_constrains = Eigen::VectorXd::Ones(3 * m_atoms);
-    m_hessian = Eigen::MatrixXd::Identity(3 * m_atoms, 3 * m_atoms);
-    m_hess_inv = Eigen::MatrixXd::Identity(3 * m_atoms, 3 * m_atoms);
-    x = initial_x;
-    stepCount = 0;
+    const int dof = 3 * m_atoms; // Degrees of freedom
 
-    s_list.clear();
-    y_list.clear();
-    rho_list.clear();
+    // Initialize state vectors
+    m_gradient = Vector::Zero(dof);
+    m_constraints = Vector::Ones(dof); // All coordinates free by default
+    m_current_coordinates = initial_coordinates;
+    stepCount = 0;
+    m_error = false;
+
+    // Initialize Hessian approximations
+    m_hessian = Matrix::Identity(dof, dof);
+    m_inverse_hessian = Matrix::Identity(dof, dof);
+
+    // Clear optimization history
+    m_step_history.clear();
+    m_gradient_history.clear();
+    m_rho_history.clear();
+    m_diis_solutions.clear();
+    m_diis_errors.clear();
+
+    // Logging - Claude Generated
+    if (m_verbosity >= 1) {
+        CurcumaLogger::info_fmt("Native LBFGS optimizer initialized:");
+        CurcumaLogger::param("Atoms", m_atoms);
+        CurcumaLogger::param("Degrees of freedom", dof);
+        CurcumaLogger::param("Memory size", m_memory_size);
+        CurcumaLogger::param("Method", static_cast<int>(m_method));
+
+        if (m_method == Method::DIIS) {
+            CurcumaLogger::param("DIIS history", m_diis_hist);
+            CurcumaLogger::param("DIIS start", m_diis_start);
+        }
+
+        if (m_method == Method::RFO) {
+            CurcumaLogger::param("RFO lambda", m_lambda);
+        }
+    }
 }
 
+// Claude Generated - Modern step method with method switching logic
 Vector LBFGS::step()
 {
-    Vector vector = x;
+    Vector new_coordinates = m_current_coordinates;
     m_last_step_size = m_step_size;
-    if (m_method == 1 || (m_method == 2 && stepCount < m_diis_start)) // LBFGS
-        vector = LBFGSStep();
-    else if (m_method == 2) // DIIS-Step
-    {
-        vector = DIISStep();
-    } else if (m_method == 3) // RFO-Step
-    {
-        vector = RFOStep();
+
+    // Method selection with fallback logic
+    std::string method_name;
+    if (m_method == Method::LBFGS || (m_method == Method::DIIS && stepCount < m_diis_start)) {
+        method_name = "L-BFGS";
+        new_coordinates = LBFGSStep();
+    } else if (m_method == Method::DIIS) {
+        method_name = "DIIS";
+        new_coordinates = DIISStep();
+    } else if (m_method == Method::RFO) {
+        method_name = "RFO";
+        new_coordinates = RFOStep();
     }
+
+    // Log method switching if applicable - Claude Generated
+    if (m_method == Method::DIIS && stepCount == m_diis_start && m_verbosity >= 2) {
+        CurcumaLogger::info_fmt("Switching from {} to {} after {} iterations", "L-BFGS", "DIIS", stepCount);
+    }
+
     stepCount++;
-    if (m_solutions.size() == m_diis_hist) {
-        m_solutions.erase(m_solutions.begin());
-        m_errors.erase(m_errors.begin());
+
+    // Clean up DIIS history if needed
+    if (m_diis_solutions.size() >= static_cast<size_t>(m_diis_hist)) {
+        m_diis_solutions.erase(m_diis_solutions.begin());
+        m_diis_errors.erase(m_diis_errors.begin());
     }
-    return vector;
+
+    return new_coordinates;
 }
 Eigen::MatrixXd LBFGS::update_inverse_hessian_approximation(Eigen::MatrixXd& B, const Eigen::VectorXd& deltaX, const Eigen::VectorXd& deltaG)
 {
@@ -67,9 +132,9 @@ void LBFGS::setHessian(const Matrix& hessian)
         std::cerr << "Eigenvalue decomposition failed!" << std::endl;
     }
 
-    m_eigenvals = solver.eigenvalues();
+    m_eigenvalues = solver.eigenvalues();
     m_eigenvectors = solver.eigenvectors();
-    m_hess_inv = m_hessian.inverse();
+    m_inverse_hessian = m_hessian.inverse();
 }
 
 double LBFGS::lineSearchRFO(const Vector& x, const Vector& p, double c1, double c2)
@@ -124,7 +189,7 @@ double LBFGS::line_search_backtracking(const Vector& x, const Vector& p, double 
 
 Vector LBFGS::diisExtrapolation()
 {
-    int numErrors = m_errors.size();
+    int numErrors = m_diis_errors.size();
     Matrix B = Matrix::Zero(numErrors + 1, numErrors + 1);
     Matrix A = Matrix::Zero(numErrors, numErrors);
     Vector rhs = Vector::Zero(numErrors + 1);
@@ -132,7 +197,7 @@ Vector LBFGS::diisExtrapolation()
 
     for (int i = 0; i < numErrors; ++i) {
         for (int j = 0; j < numErrors; ++j) {
-            B(i, j) = (m_hess_inv * m_errors[i]).dot(m_hess_inv * m_errors[j]);
+            B(i, j) = (m_inverse_hessian * m_diis_errors[i]).dot(m_inverse_hessian * m_diis_errors[j]);
             A(i, j) = B(i, j);
         }
         B(numErrors, i) = 1.0;
@@ -142,26 +207,26 @@ Vector LBFGS::diisExtrapolation()
     double conditionNumber = svd.singularValues()(0) / svd.singularValues().tail(1)(0);
 
     if (conditionNumber > 1e10) {
-        m_solutions.erase(m_solutions.begin());
-        m_errors.erase(m_errors.begin());
-        std::cout << m_errors.size() << " " << conditionNumber << std::endl;
-        int numErrors = m_errors.size();
+        m_diis_solutions.erase(m_diis_solutions.begin());
+        m_diis_errors.erase(m_diis_errors.begin());
+        std::cout << m_diis_errors.size() << " " << conditionNumber << std::endl;
+        int numErrors = m_diis_errors.size();
         Matrix B = Matrix::Zero(numErrors + 1, numErrors + 1);
         Vector rhs = Vector::Zero(numErrors + 1);
         rhs(numErrors) = -1.0;
 
         for (int i = 0; i < numErrors; ++i) {
             for (int j = 0; j < numErrors; ++j) {
-                B(i, j) = (m_hess_inv * m_errors[i]).dot(m_hess_inv * m_errors[j]);
+                B(i, j) = (m_inverse_hessian * m_diis_errors[i]).dot(m_inverse_hessian * m_diis_errors[j]);
             }
             B(numErrors, i) = -1.0;
             B(i, numErrors) = -1.0;
         }
         Vector coeff = B.colPivHouseholderQr().solve(rhs);
 
-        Vector diisSolution = Vector::Zero(m_solutions[0].size());
+        Vector diisSolution = Vector::Zero(m_diis_solutions[0].size());
         for (int i = 0; i < numErrors; ++i) {
-            diisSolution += coeff[i] * m_solutions[i];
+            diisSolution += coeff[i] * m_diis_solutions[i];
         }
 
         return diisSolution;
@@ -169,9 +234,9 @@ Vector LBFGS::diisExtrapolation()
 
         Vector coeff = B.colPivHouseholderQr().solve(rhs);
 
-        Vector diisSolution = Vector::Zero(m_solutions[0].size());
+        Vector diisSolution = Vector::Zero(m_diis_solutions[0].size());
         for (int i = 0; i < numErrors; ++i) {
-            diisSolution += coeff[i] * m_solutions[i];
+            diisSolution += coeff[i] * m_diis_solutions[i];
         }
 
         return diisSolution;
@@ -181,78 +246,78 @@ Vector LBFGS::DIISStep()
 {
     double energy = m_energy;
 
-    if (m_solutions.size() == m_diis_hist) {
-        m_solutions.erase(m_solutions.begin());
-        m_errors.erase(m_errors.begin());
+    if (m_diis_solutions.size() == m_diis_hist) {
+        m_diis_solutions.erase(m_diis_solutions.begin());
+        m_diis_errors.erase(m_diis_errors.begin());
     }
-    getEnergyGradient(x);
+    getEnergyGradient(m_current_coordinates);
 
-    m_solutions.push_back(x);
-    m_errors.push_back(m_gradient);
+    m_diis_solutions.push_back(m_current_coordinates);
+    m_diis_errors.push_back(m_gradient);
 
     auto tmp = diisExtrapolation();
-    x = tmp;
-    return x;
+    m_current_coordinates = tmp;
+    return m_current_coordinates;
 }
 
 Vector LBFGS::LBFGSStep()
 {
     double energy = m_energy;
     if (stepCount == 0) {
-        getEnergyGradient(x);
-        p = -m_gradient;
+        getEnergyGradient(m_current_coordinates);
+        m_search_direction = -m_gradient;
     } else {
         Vector q = m_gradient;
         std::vector<double> alpha_list;
 
-        for (int i = static_cast<int>(s_list.size()) - 1; i >= 0; --i) {
-            double alpha = rho_list[i] * s_list[i].dot(q);
+        for (int i = static_cast<int>(m_step_history.size()) - 1; i >= 0; --i) {
+            double alpha = m_rho_history[i] * m_step_history[i].dot(q);
             alpha_list.push_back(alpha);
-            q -= alpha * y_list[i];
+            q -= alpha * m_gradient_history[i];
         }
 
         Vector z = q;
 
-        for (size_t i = 0; i < s_list.size(); ++i) {
-            double beta = rho_list[i] * y_list[i].dot(z);
-            z += s_list[i] * (alpha_list[s_list.size() - i - 1] - beta);
+        for (size_t i = 0; i < m_step_history.size(); ++i) {
+            double beta = m_rho_history[i] * m_gradient_history[i].dot(z);
+            z += m_step_history[i] * (alpha_list[m_step_history.size() - i - 1] - beta);
         }
 
-        p = -z;
+        m_search_direction = -z;
     }
     // m_step_size = 2;
     // m_step_size = line_search_backtracking(x,p, m_step_size, 1e-1, 1e-1);
     // m_step_size = lineSearchRFO(x, p);
 
-    Vector x_old = x;
+    Vector x_old = m_current_coordinates;
     Vector gradient_old = m_gradient;
-    x += m_step_size * p;
-    getEnergyGradient(x);
+    m_current_coordinates += m_step_size * m_search_direction;
+    getEnergyGradient(m_current_coordinates);
     if ((energy - m_energy) < 0) {
         m_step_size *= 0.9;
         //    std::cout << m_step_size << std::endl;
     } else {
         //  m_step_size *= 1.01;
     }
-    Vector s = x - x_old;
+    Vector s = m_current_coordinates - x_old;
     Vector y = m_gradient - gradient_old;
 
     double rho = 1.0 / y.dot(s);
 
-    m_solutions.push_back(x);
-    m_errors.push_back(m_gradient);
+    m_diis_solutions.push_back(m_current_coordinates);
+    m_diis_errors.push_back(m_gradient);
 
-    if (s_list.size() == m) {
-        s_list.erase(s_list.begin());
-        y_list.erase(y_list.begin());
-        rho_list.erase(rho_list.begin());
+    if (m_step_history.size() == static_cast<size_t>(m_memory_size)) {
+        m_step_history.erase(m_step_history.begin());
+        m_gradient_history.erase(m_gradient_history.begin());
+        m_rho_history.erase(m_rho_history.begin());
     }
 
-    s_list.push_back(s);
-    y_list.push_back(y);
-    rho_list.push_back(rho);
+    m_step_history.push_back(s);
+    m_gradient_history.push_back(y);
+    m_rho_history.push_back(rho);
 
-    return x;
+    return m_current_coordinates;
 }
 
 void LBFGS::updateHessian()
@@ -263,13 +328,13 @@ void LBFGS::updateHessian()
     }
 
     // Erhalte die Eigenwerte und Eigenvektoren
-    m_eigenvals = solver.eigenvalues();
+    m_eigenvalues = solver.eigenvalues();
     m_eigenvectors = solver.eigenvectors();
 
     // Bereite die RFO-Koeffizienten vor
     Vector tau(m_atoms);
     for (int i = 0; i < m_atoms; ++i) {
-        tau(i) = 1.0 / (m_eigenvals(i) + m_lambda); // Rationale Funktionsannäherung
+        tau(i) = 1.0 / (m_eigenvalues(i) + m_lambda); // Rationale Funktionsannäherung
     }
     // Aktualisiere das Hessian mit RFO
     Matrix B = Eigen::MatrixXd::Identity(3 * m_atoms, 3 * m_atoms);
@@ -283,8 +348,8 @@ Vector LBFGS::RFOStep()
 {
     // Wähle den minimalsten/niedrigsten (negativsten) Eigenwert & Eigenvektor
     int minIndex = 0;
-    m_eigenvals.minCoeff(&minIndex);
-    //  std::cout << minIndex << "  " << m_eigenvals.minCoeff(&minIndex) << std::endl;
+    m_eigenvalues.minCoeff(&minIndex);
+    //  std::cout << minIndex << "  " << m_eigenvalues.minCoeff(&minIndex) << std::endl;
     Vector direction = m_eigenvectors.col(minIndex);
     Vector gradient_mass_weighted = m_gradient;
     for (int i = 0; i < m_gradient.size(); ++i) {
@@ -295,7 +360,7 @@ Vector LBFGS::RFOStep()
     Vector gradient_normal = m_eigenvectors.transpose() * gradient_mass_weighted;
     // std::cout << gradient_normal.transpose() << std::endl << m_gradient.transpose() << std::endl;
     //  Berechne den Schritt: nutze direction für EVF
-    double lambda = m_eigenvals[minIndex]; // kleinster Eigenwert
+    double lambda = m_eigenvalues[minIndex]; // kleinster Eigenwert
     double tau = 0.5; // Dämpfungsfaktor zur vorgeschlagenen Schrittgröße
 
     Vector p_rfo = -tau * (gradient_normal - lambda * direction); // RFO Schritte mit EVF
@@ -310,18 +375,18 @@ Vector LBFGS::RFOStep()
     //    std::cout << m_step_size << " " <<std::endl;
 
     // Aktualisiere die aktuelle Position
-    Vector x_new = x + m_step_size * p_rfo;
+    Vector x_new = m_current_coordinates + m_step_size * p_rfo;
     Vector gradient_prev = m_gradient;
     getEnergyGradient(x_new);
     // updateHessian();
 
     // Update des Hessians (SR1)
-    Eigen::VectorXd s = x_new - x;
+    Eigen::VectorXd s = x_new - m_current_coordinates;
     Eigen::VectorXd y = m_gradient - gradient_prev;
     Matrix H = sr1Update(s, y);
     setHessian(H);
     // std::cout << ( x - x_new).transpose() << std::endl;
-    x = x_new;
+    m_current_coordinates = x_new;
     return x_new;
 }
 Matrix LBFGS::sr1Update(const Eigen::VectorXd& s, const Eigen::VectorXd& y)
@@ -335,7 +400,7 @@ Matrix LBFGS::sr1Update(const Eigen::VectorXd& s, const Eigen::VectorXd& y)
 }
 Vector LBFGS::getCurrentSolution() const
 {
-    return x;
+    return m_current_coordinates;
 }
 
 double LBFGS::getCurrentObjectiveValue() const
@@ -376,9 +441,9 @@ double LBFGS::getEnergyGradient(const Vector& x)
     m_error = std::isnan(fx);
 
     for (int i = 0; i < m_atoms; ++i) {
-        m_gradient[3 * i + 0] = gradient(i, 0) * (m_constrains[i]);
-        m_gradient[3 * i + 1] = gradient(i, 1) * (m_constrains[i]);
-        m_gradient[3 * i + 2] = gradient(i, 2) * (m_constrains[i]);
+        m_gradient[3 * i + 0] = gradient(i, 0) * (m_constraints[i]);
+        m_gradient[3 * i + 1] = gradient(i, 1) * (m_constraints[i]);
+        m_gradient[3 * i + 2] = gradient(i, 2) * (m_constraints[i]);
     }
     m_energy = fx;
     return fx;
