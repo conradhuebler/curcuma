@@ -151,6 +151,13 @@ public:
      */
     void printOrbitalAnalysis(int num_orbitals_around_gap = 5) const;
 
+    /**
+     * @brief Print orbital analysis using CurcumaLogger for Level 2 verbosity
+     * Structured output with HOMO/LUMO analysis and molecular properties
+     * Claude Generated
+     */
+    void printOrbitalAnalysisVerbose() const;
+
 private:
     /**
      * @brief Construct basis set from molecular geometry and atom types

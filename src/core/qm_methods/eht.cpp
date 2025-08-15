@@ -24,6 +24,8 @@
 #include "interface/abstract_interface.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
+#include "src/core/curcuma_logger.h"
+#include <fmt/format.h>
 
 #include "ParallelEigenSolver.hpp"
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
@@ -91,12 +93,16 @@ Basisset EHT::MakeBasis()
         }
     }
 
-    if (m_verbose) {
-        std::cout << "Created basis set with " << orbitals.size() << " orbitals" << std::endl;
-        std::cout << "Total number of electrons: " << m_num_electrons << std::endl;
+    // Verbosity Level 2+: Basis set information
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("EHT basis set constructed");
+        CurcumaLogger::param("total_orbitals", static_cast<int>(orbitals.size()));
+        CurcumaLogger::param("total_electrons", m_num_electrons);
+    }
 
-        // Print basis set summary
-        std::cout << "\nBasis set summary:" << std::endl;
+    // Detailed basis set summary - Level 3+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("Detailed basis set summary:");
         for (size_t i = 0; i < orbitals.size(); ++i) {
             const auto& orb = orbitals[i];
             std::string orbital_name;
@@ -118,14 +124,15 @@ Basisset EHT::MakeBasis()
                 break;
             }
 
-            std::cout << "  Orbital " << i + 1 << ": "
-                      << EHTParams::ParameterDatabase::getElementSymbol(m_atoms[orb.atom])
-                      << orb.atom + 1 << "-" << orbital_name
-                      << " (ζ=" << std::fixed << std::setprecision(3) << orb.zeta
-                      << ", VSIP=" << std::fixed << std::setprecision(2) << orb.VSIP << " eV)"
-                      << std::endl;
+            std::string orbital_info = fmt::format("{}:{}{}-{} (ζ={:.3f}, VSIP={:.2f} eV)",
+                i + 1,
+                EHTParams::ParameterDatabase::getElementSymbol(m_atoms[orb.atom]),
+                orb.atom + 1,
+                orbital_name,
+                orb.zeta,
+                orb.VSIP);
+            CurcumaLogger::param(fmt::format("Orbital_{}", i + 1), orbital_info);
         }
-        std::cout << std::endl;
     }
 
     return orbitals;
@@ -134,7 +141,7 @@ Basisset EHT::MakeBasis()
 bool EHT::InitialiseMolecule()
 {
     if (m_atoms.size() == 0) {
-        std::cerr << "Error: No atoms in molecule" << std::endl;
+        CurcumaLogger::error("No atoms in molecule");
         return false;
     }
 
@@ -160,21 +167,26 @@ double EHT::Calculation(bool gradient, bool verbose)
 
     // Validate molecule
     if (m_atoms.size() == 0) {
-        std::cerr << "Error: No molecule set for EHT calculation." << std::endl;
+        CurcumaLogger::error("No molecule set for EHT calculation");
         return 0.0;
     }
 
-    if (m_verbose) {
-        std::cout << "\\n=== Starting Extended Hückel Theory Calculation ===" << std::endl;
-        std::cout << "Number of atoms: " << m_atoms.size() << std::endl;
-        std::cout << "Molecular charge: " << m_charge << std::endl;
-        std::cout << "Spin multiplicity: " << m_spin + 1 << std::endl;
+    // Level 1+: Starting calculation
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::info("Starting Extended Hückel Theory calculation");
+    }
+    
+    // Level 2+: Molecular parameters
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::param("atoms", static_cast<int>(m_atoms.size()));
+        CurcumaLogger::param("molecular_charge", m_charge);
+        CurcumaLogger::param("spin_multiplicity", m_spin + 1);
     }
 
     try {
         // Step 1: Construct basis set
-        if (m_verbose) {
-            std::cout << "\\nStep 1: Constructing basis set..." << std::endl;
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Step 1: Constructing EHT basis set");
         }
         auto basisset = MakeBasis();
 
@@ -184,21 +196,21 @@ double EHT::Calculation(bool gradient, bool verbose)
         m_energies = Vector::Zero(basis_size);
 
         // Step 2: Construct overlap matrix
-        if (m_verbose) {
-            std::cout << "\\nStep 2: Computing overlap matrix..." << std::endl;
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Step 2: Computing overlap matrix");
         }
         Matrix S = MakeOverlap(basisset);
 
         // Step 3: Construct Hamiltonian matrix
-        if (m_verbose) {
-            std::cout << "\\nStep 3: Constructing Hamiltonian matrix..." << std::endl;
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Step 3: Constructing Hamiltonian matrix");
         }
         Matrix H = MakeH(S, basisset);
 
         // Step 4: Solve generalized eigenvalue problem
-        if (m_verbose) {
-            std::cout << "\\nStep 4: Solving generalized eigenvalue problem HC = SCE..." << std::endl;
-            std::cout << "Matrix size: " << basis_size << "x" << basis_size << std::endl;
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Step 4: Solving generalized eigenvalue problem HC = SCE");
+            CurcumaLogger::param("matrix_size", fmt::format("{}x{}", basis_size, basis_size));
         }
 
         // Use parallel eigenvalue solver for efficiency
@@ -209,7 +221,7 @@ double EHT::Calculation(bool gradient, bool verbose)
         bool success = solver.solve(S, H, m_energies, mo_coefficients, m_threads, false);
 
         if (!success) {
-            std::cerr << "Error: Eigenvalue solution failed!" << std::endl;
+            CurcumaLogger::error("Eigenvalue solution failed!");
             return 0.0;
         }
 
@@ -218,19 +230,25 @@ double EHT::Calculation(bool gradient, bool verbose)
         // Step 5: Calculate electronic energy
         double electronic_energy = calculateElectronicEnergy() / eV2Eh;
 
-        if (m_verbose) {
-            std::cout << "\\nStep 5: Calculation completed successfully!" << std::endl;
-            std::cout << "Total electronic energy: " << std::fixed << std::setprecision(6)
-                      << electronic_energy << " Eh" << std::endl;
+        // Level 1+: Final energy result
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::energy_abs(electronic_energy, "EHT Electronic Energy");
+        }
 
-            // Print detailed orbital analysis
+        // Level 2+: Orbital analysis
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            printOrbitalAnalysisVerbose();
+        }
+        
+        // Level 3+: Detailed orbital analysis (old style)
+        if (CurcumaLogger::get_verbosity() >= 3) {
             printOrbitalAnalysis();
         }
 
         return electronic_energy;
 
     } catch (const std::exception& e) {
-        std::cerr << "Error during EHT calculation: " << e.what() << std::endl;
+        CurcumaLogger::error(fmt::format("Error during EHT calculation: {}", e.what()));
         return 0.0;
     }
 }
@@ -288,9 +306,10 @@ Matrix EHT::MakeH(const Matrix& S, const Basisset& basisset)
         }
     }
 
-    if (m_verbose) {
-        std::cout << "Hamiltonian matrix constructed using Wolfsberg-Helmholz approximation" << std::endl;
-        std::cout << "K (Wolfsberg-Helmholz constant) = " << m_K << std::endl;
+    // Level 3+: Hamiltonian construction details
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("Hamiltonian matrix constructed using Wolfsberg-Helmholz approximation");
+        CurcumaLogger::param("K_constant", fmt::format("{:.4f}", m_K));
     }
 
     return H;
@@ -301,10 +320,10 @@ bool EHT::validateMolecule() const
     for (int i = 0; i < m_atoms.size(); ++i) {
         int atomic_number = m_atoms[i];
         if (!EHTParams::ParameterDatabase::hasElement(atomic_number)) {
-            std::cerr << "Error: EHT parameters not available for element Z="
-                      << atomic_number << " ("
-                      << EHTParams::ParameterDatabase::getElementSymbol(atomic_number)
-                      << ") at atom " << i + 1 << std::endl;
+            CurcumaLogger::error(fmt::format("EHT parameters not available for element Z={} ({}) at atom {}",
+                atomic_number,
+                EHTParams::ParameterDatabase::getElementSymbol(atomic_number),
+                i + 1));
             return false;
         }
     }
@@ -382,19 +401,18 @@ double EHT::getLUMOEnergy() const
 void EHT::printOrbitalAnalysis(int num_orbitals_around_gap) const
 {
     if (m_energies.size() == 0 || m_num_electrons == 0) {
-        std::cout << "No orbital energies available for analysis." << std::endl;
+        CurcumaLogger::warn("No orbital energies available for analysis");
         return;
     }
 
-    std::cout << "\\n=== Extended Hückel Theory Orbital Analysis ===" << std::endl;
-    std::cout << "Total number of electrons: " << m_num_electrons << std::endl;
-    std::cout << "Total number of orbitals: " << m_energies.size() << std::endl;
-    std::cout << "Wolfsberg-Helmholz constant K: " << m_K << std::endl;
+    CurcumaLogger::info("=== Extended Hückel Theory Orbital Analysis ===");
+    CurcumaLogger::param("total_electrons", m_num_electrons);
+    CurcumaLogger::param("total_orbitals", static_cast<int>(m_energies.size()));
+    CurcumaLogger::param("K_constant", fmt::format("{:.4f}", m_K));
 
     // Calculate electronic energy
     double electronic_energy = calculateElectronicEnergy();
-    std::cout << "Total electronic energy: " << std::fixed << std::setprecision(4)
-              << electronic_energy / eV2Eh << " Eh" << std::endl;
+    CurcumaLogger::param("electronic_energy", fmt::format("{:.4f} Eh", electronic_energy / eV2Eh));
 
     // HOMO-LUMO analysis
     int homo_index = m_num_electrons / 2 - 1;
@@ -405,19 +423,13 @@ void EHT::printOrbitalAnalysis(int num_orbitals_around_gap) const
         double lumo_energy = m_energies(lumo_index);
         double gap = lumo_energy - homo_energy;
 
-        std::cout << "\\nHOMO energy: " << std::fixed << std::setprecision(4)
-                  << homo_energy << " eV (orbital " << homo_index + 1 << ")" << std::endl;
-        std::cout << "LUMO energy: " << std::fixed << std::setprecision(4)
-                  << lumo_energy << " eV (orbital " << lumo_index + 1 << ")" << std::endl;
-        std::cout << "HOMO-LUMO gap: " << std::fixed << std::setprecision(4)
-                  << gap << " eV" << std::endl;
+        CurcumaLogger::param("HOMO", fmt::format("{:.4f} eV (orbital {})", homo_energy, homo_index + 1));
+        CurcumaLogger::param("LUMO", fmt::format("{:.4f} eV (orbital {})", lumo_energy, lumo_index + 1));
+        CurcumaLogger::param("HOMO-LUMO_gap", fmt::format("{:.4f} eV", gap));
     }
 
     // Print orbitals around HOMO-LUMO gap
-    std::cout << "\\nOrbitals around HOMO-LUMO gap:" << std::endl;
-    std::cout << std::setw(8) << "Orbital" << std::setw(12) << "Energy (eV)"
-              << std::setw(12) << "Occupation" << std::setw(8) << "Type" << std::endl;
-    std::cout << std::string(40, '-') << std::endl;
+    CurcumaLogger::info("Orbitals around HOMO-LUMO gap:");
 
     int start_orbital = std::max(0, homo_index - num_orbitals_around_gap + 1);
     int end_orbital = std::min(lumo_index + num_orbitals_around_gap - 1,
@@ -426,9 +438,9 @@ void EHT::printOrbitalAnalysis(int num_orbitals_around_gap) const
     for (int i = start_orbital; i <= end_orbital; ++i) {
         std::string type = "";
         if (i == homo_index)
-            type = "HOMO";
+            type = " HOMO";
         else if (i == lumo_index)
-            type = "LUMO";
+            type = " LUMO";
 
         int occupation = 0;
         if (i < m_num_electrons / 2)
@@ -436,20 +448,50 @@ void EHT::printOrbitalAnalysis(int num_orbitals_around_gap) const
         else if (i == m_num_electrons / 2 && m_num_electrons % 2 == 1)
             occupation = 1;
 
-        std::cout << std::setw(8) << i + 1
-                  << std::setw(12) << std::fixed << std::setprecision(4) << m_energies(i)
-                  << std::setw(12) << occupation
-                  << std::setw(8) << type << std::endl;
+        std::string orbital_info = fmt::format("{:.4f} eV (occ={}){}",
+            m_energies(i), occupation, type);
+        CurcumaLogger::param(fmt::format("Orbital_{}", i + 1), orbital_info);
     }
 
     // Print lowest and highest energy orbitals
-    std::cout << "\\nExtreme orbitals:" << std::endl;
-    std::cout << "Lowest energy orbital: " << std::fixed << std::setprecision(4)
-              << m_energies(0) << " eV (orbital 1)" << std::endl;
-    std::cout << "Highest energy orbital: " << std::fixed << std::setprecision(4)
-              << m_energies(m_energies.size() - 1) << " eV (orbital "
-              << m_energies.size() << ")" << std::endl;
+    CurcumaLogger::param("lowest_orbital", fmt::format("{:.4f} eV (orbital 1)", m_energies(0)));
+    CurcumaLogger::param("highest_orbital", fmt::format("{:.4f} eV (orbital {})", 
+        m_energies(m_energies.size() - 1), m_energies.size()));
 
-    std::cout << "==========================================\\n"
-              << std::endl;
+    CurcumaLogger::info("==========================================");
+}
+
+void EHT::printOrbitalAnalysisVerbose() const
+{
+    if (m_energies.size() == 0 || m_num_electrons == 0) {
+        CurcumaLogger::warn("No orbital energies available for EHT analysis");
+        return;
+    }
+
+    // Basic molecular orbital information
+    CurcumaLogger::param("total_electrons", m_num_electrons);
+    CurcumaLogger::param("total_orbitals", static_cast<int>(m_energies.size()));
+    CurcumaLogger::param("K_constant", fmt::format("{:.3f}", m_K));
+
+    // Calculate electronic energy
+    double electronic_energy = calculateElectronicEnergy();
+    CurcumaLogger::param("electronic_energy", fmt::format("{:.4f} Eh", electronic_energy / eV2Eh));
+
+    // HOMO-LUMO analysis
+    int homo_index = m_num_electrons / 2 - 1;
+    int lumo_index = homo_index + 1;
+
+    if (homo_index >= 0 && lumo_index < m_energies.size()) {
+        double homo_energy = m_energies(homo_index);
+        double lumo_energy = m_energies(lumo_index);
+        double gap = lumo_energy - homo_energy;
+
+        CurcumaLogger::param("HOMO", fmt::format("{:.4f} eV", homo_energy));
+        CurcumaLogger::param("LUMO", fmt::format("{:.4f} eV", lumo_energy));
+        CurcumaLogger::param("HOMO-LUMO_gap", fmt::format("{:.4f} eV ({:.2f} Eh)", gap, gap / 27.211));
+    }
+
+    // Orbital energy extremes
+    CurcumaLogger::param("lowest_orbital", fmt::format("{:.4f} eV", m_energies(0)));
+    CurcumaLogger::param("highest_orbital", fmt::format("{:.4f} eV", m_energies(m_energies.size() - 1)));
 }

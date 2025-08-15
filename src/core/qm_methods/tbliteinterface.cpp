@@ -27,6 +27,8 @@
 #endif
 
 #include "src/core/global.h"
+#include "src/core/curcuma_logger.h"
+#include <fmt/format.h>
 
 #include <iostream>
 #include <math.h>
@@ -64,15 +66,34 @@ TBLiteInterface::TBLiteInterface(const json& tblitesettings)
         m_guess = 0;
     else if (guess.compare("EEQ") == 0)
         m_guess = 1;
-    else
-        std::cout << "Dont know, ignoring ..." << std::endl;
+    else {
+        CurcumaLogger::warn("Unknown guess method, using SAD default");
+    }
 
     m_error = tblite_new_error();
     m_ctx = tblite_new_context();
     m_tblite_res = tblite_new_result();
-    tblite_set_context_verbosity(m_ctx, m_verbose);
-    if (m_verbose > 0)
-        std::cout << "Initialising tblite with accuracy " << m_acc << " and SCFmaxiter " << m_SCFmaxiter << std::endl;
+    
+    // Set TBLite verbosity based on our logging system
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        tblite_set_context_verbosity(m_ctx, 3);
+    } else if (CurcumaLogger::get_verbosity() >= 2) {
+        tblite_set_context_verbosity(m_ctx, 1);
+    } else {
+        tblite_set_context_verbosity(m_ctx, 0);
+    }
+    
+    // Verbosity Level 1+: TBLite initialization
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::info("Initializing TBLite quantum chemistry method");
+        CurcumaLogger::param("accuracy", fmt::format("{:.6f}", m_acc));
+        CurcumaLogger::param("SCF_maxiter", m_SCFmaxiter);
+        CurcumaLogger::param("temperature", fmt::format("{:.1f} K", m_Tele * 315775.326864009));
+        CurcumaLogger::param("damping", fmt::format("{:.3f}", m_damping));
+        if (m_solvent_model > 0) {
+            CurcumaLogger::param("solvation", "enabled");
+        }
+    }
 }
 
 TBLiteInterface::~TBLiteInterface()
@@ -219,76 +240,103 @@ void TBLiteInterface::clear()
 
 void TBLiteInterface::ApplySolvation()
 {
-    if (m_verbose > 0) {
-        std::cout << "Applying Solvation Model" << std::endl;
-        std::cout << "Solvent Model: " << m_solvent_model << std::endl;
+    // Level 2+: Solvation setup
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Applying solvation model");
+        CurcumaLogger::param("solvent_model", m_solvent_model);
     }
+    
     if (m_solvent_model == 0)
         return;
     else if (m_solvent_model == 1 && m_solvent_eps > -1) {
-        if (m_verbose > 0) {
-            std::cout << "Using CPCM with epsilon " << m_solvent_eps << std::endl;
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::param("solvation_method", "CPCM");
+            CurcumaLogger::param("dielectric_constant", fmt::format("{:.3f}", m_solvent_eps));
         }
         m_tb_cont = tblite_new_cpcm_solvation_epsilon(m_error, m_tblite_mol, m_solvent_eps);
         if (tblite_check_context(m_ctx)) {
             tbliteError();
             tbliteContextError();
-            std::cout << "Error during CPCM calculation, ...  Retry with increased verbosity" << std::endl;
-            tblite_set_context_verbosity(m_ctx, m_verbose + 1);
+            CurcumaLogger::warn("Error during CPCM calculation - retrying with increased verbosity");
+            tblite_set_context_verbosity(m_ctx, 3);
             tblite_delete_container(&m_tb_cont);
             m_tb_cont = tblite_new_cpcm_solvation_epsilon(m_error, m_tblite_mol, m_solvent_eps);
         }
         tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
-        //  tbliteError();
-        //   tbliteContextError();
+        
     } else if (m_solvent_model == 2 && m_solvent_eps > -1) {
-        if (m_verbose > 0) {
-            std::cout << "Using GB with epsilon " << m_solvent_eps << " and born version " << m_solvent_gb_version << " and born kernel " << m_solvent_gb_kernel << std::endl;
-            std::cout << "GB doesnt work for now" << std::endl;
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::param("solvation_method", "GB");
+            CurcumaLogger::param("dielectric_constant", fmt::format("{:.3f}", m_solvent_eps));
+            CurcumaLogger::param("gb_version", m_solvent_gb_version);
+            CurcumaLogger::param("gb_kernel", m_solvent_gb_kernel);
         }
+        CurcumaLogger::error("GB solvation model not functional");
         exit(1);
         m_tb_cont = tblite_new_gb_solvation_epsilon(m_error, m_tblite_mol, m_solvent_eps, m_solvent_gb_version, m_solvent_gb_kernel);
         if (tblite_check_context(m_ctx)) {
             tbliteError();
             tbliteContextError();
-            std::cout << "Error during ALPB calculation, ...  Retry with increased verbosity" << std::endl;
-            tblite_set_context_verbosity(m_ctx, m_verbose + 1);
+            CurcumaLogger::warn("Error during GB calculation - retrying with increased verbosity");
+            tblite_set_context_verbosity(m_ctx, 3);
             tblite_delete_container(&m_tb_cont);
             m_tb_cont = tblite_new_gb_solvation_epsilon(m_error, m_tblite_mol, m_solvent_eps, m_solvent_gb_version, m_solvent_gb_kernel);
         }
         tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
-        //  tbliteError();
-        //  tbliteContextError();
+        
     } else if (m_solvent_model == 3) {
-        if (m_verbose > 0) {
-            std::cout << "Using ALPB with solvent " << m_solvent << " and version " << m_solvent_alpb_version << " and reference " << m_solvent_alpb_reference << std::endl;
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::param("solvation_method", "ALPB");
+            CurcumaLogger::param("solvent", std::string(m_solvent));
+            CurcumaLogger::param("alpb_version", m_solvent_alpb_version);
+            CurcumaLogger::param("alpb_reference", m_solvent_alpb_reference);
         }
         m_tb_cont = tblite_new_alpb_solvation_solvent(m_error, m_tblite_mol, m_solvent, m_solvent_alpb_version, m_solvent_alpb_reference);
         if (tblite_check_context(m_ctx)) {
             tbliteError();
             tbliteContextError();
-            std::cout << "Error during ALPB calculation, ... Retry with increased verbosity" << std::endl;
-
-            tblite_set_context_verbosity(m_ctx, m_verbose + 1);
+            CurcumaLogger::warn("Error during ALPB calculation - retrying with increased verbosity");
+            
+            tblite_set_context_verbosity(m_ctx, 3);
             tblite_delete_container(&m_tb_cont);
             m_tb_cont = tblite_new_alpb_solvation_solvent(m_error, m_tblite_mol, m_solvent, m_solvent_alpb_version, m_solvent_alpb_reference);
         }
         tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
-        //  tbliteError();
-        //  tbliteContextError();
     }
 }
 
 double TBLiteInterface::Calculation(bool gradient, bool verbose)
 {
-    if (verbose)
+    // Control TBLite verbosity based on our logging system
+    if (CurcumaLogger::get_verbosity() >= 3) {
         tblite_set_context_verbosity(m_ctx, 3);
-    else
-        tblite_set_context_verbosity(m_ctx, m_verbose);
+    } else if (CurcumaLogger::get_verbosity() >= 2) {
+        tblite_set_context_verbosity(m_ctx, 1);
+    } else {
+        tblite_set_context_verbosity(m_ctx, 0);
+    }
 
     double energy = 0;
     int count = 0;
+    
+    // Setup calculator on first call
     if (!m_calculator) {
+        // Level 2+: Method setup info  
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            std::string method_name = "unknown";
+            if (m_method_switch == 0) method_name = "iPEA1";
+            else if (m_method_switch == 1) method_name = "GFN1-xTB";
+            else if (m_method_switch == 2) method_name = "GFN2-xTB";
+            
+            CurcumaLogger::info("Starting TBLite calculation");
+            CurcumaLogger::param("method", method_name);
+            CurcumaLogger::param("guess", (m_guess == 0) ? "SAD" : "EEQ");
+            if (gradient) {
+                CurcumaLogger::param("gradient", "analytical");
+            }
+        }
+        
+        // Create appropriate calculator
         if (m_method_switch == 0) {
             m_tblite_calc = tblite_new_ipea1_calculator(m_ctx, m_tblite_mol);
         } else if (m_method_switch == 1) {
@@ -296,6 +344,7 @@ double TBLiteInterface::Calculation(bool gradient, bool verbose)
         } else if (m_method_switch == 2) {
             m_tblite_calc = tblite_new_gfn2_calculator(m_ctx, m_tblite_mol);
         }
+        
         if (m_guess == 0)
             tblite_set_calculator_guess(m_ctx, m_tblite_calc, TBLITE_GUESS_SAD);
         else
@@ -310,15 +359,18 @@ double TBLiteInterface::Calculation(bool gradient, bool verbose)
     tblite_set_calculator_mixer_damping(m_ctx, m_tblite_calc, m_damping);
     tblite_set_calculator_temperature(m_ctx, m_tblite_calc, m_Tele);
     tblite_set_calculator_save_integrals(m_ctx, m_tblite_calc, 0);
+    // Perform calculation
     tblite_get_singlepoint(m_ctx, m_tblite_mol, m_tblite_calc, m_tblite_res);
     tblite_get_result_energy(m_error, m_tblite_res, &energy);
+    
+    // Handle calculation errors
     if (tblite_check_context(m_ctx)) {
         m_error_count++;
-        std::cerr << "Error during SCF Calculation, reset wavefunction ..." << std::endl;
+        CurcumaLogger::warn("Error during TBLite SCF calculation - resetting wavefunction");
         tbliteContextError();
         tbliteError();
 
-        tblite_set_context_verbosity(m_ctx, m_verbose + 1);
+        tblite_set_context_verbosity(m_ctx, 3);
         if (count == 1) {
             tblite_delete_container(&m_tb_cont);
         }
@@ -348,19 +400,92 @@ double TBLiteInterface::Calculation(bool gradient, bool verbose)
             tblite_set_calculator_guess(m_ctx, m_tblite_calc, TBLITE_GUESS_EEQ);
         ApplySolvation();
         tblite_get_singlepoint(m_ctx, m_tblite_mol, m_tblite_calc, m_tblite_res);
-        tblite_set_context_verbosity(m_ctx, m_verbose);
+        tblite_get_result_energy(m_error, m_tblite_res, &energy);
+        
+        // Reset to original verbosity
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            tblite_set_context_verbosity(m_ctx, 3);
+        } else if (CurcumaLogger::get_verbosity() >= 2) {
+            tblite_set_context_verbosity(m_ctx, 1);
+        } else {
+            tblite_set_context_verbosity(m_ctx, 0);
+        }
     }
-    // double* virial = 0;
-    // tblite_get_result_virial(m_error, m_tblite_res, &virial);
-    // std::cout << virial << std::endl;
+    
+    // Level 1+: Final energy result
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::energy_abs(energy, "TBLite Energy");
+    }
+    
+    // Level 2+: Orbital analysis and molecular properties
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        Vector orbital_energies = OrbitalEnergies();
+        Vector orbital_occupations = OrbitalOccupations();
+        
+        if (orbital_energies.size() > 0 && orbital_occupations.size() > 0) {
+            // Find HOMO/LUMO
+            int homo_index = -1;
+            for (int i = orbital_occupations.size() - 1; i >= 0; --i) {
+                if (orbital_occupations(i) > 0.5) { // Occupied orbital
+                    homo_index = i;
+                    break;
+                }
+            }
+            
+            if (homo_index >= 0 && homo_index + 1 < orbital_energies.size()) {
+                double homo = orbital_energies(homo_index);
+                double lumo = orbital_energies(homo_index + 1);
+                double gap = lumo - homo;
+                
+                CurcumaLogger::param("HOMO", fmt::format("{:.4f} Eh", homo));
+                CurcumaLogger::param("LUMO", fmt::format("{:.4f} Eh", lumo));
+                CurcumaLogger::param("HOMO-LUMO_gap", fmt::format("{:.4f} Eh ({:.2f} eV)", gap, gap * 27.211));
+            }
+        }
+        
+        // Molecular properties
+        Vector charges = Charges();
+        if (charges.size() > 0) {
+            double total_charge = charges.sum();
+            CurcumaLogger::param("total_charge", fmt::format("{:.6f}", total_charge));
+        }
+        
+        Vector dipole = Dipole();
+        if (dipole.size() >= 3) {
+            double dipole_magnitude = dipole.norm();
+            CurcumaLogger::param("dipole_moment", fmt::format("{:.4f} Debye", dipole_magnitude));
+        }
+    }
+    
+    // Level 3+: Complete orbital listing
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        Vector orbital_energies = OrbitalEnergies();
+        Vector orbital_occupations = OrbitalOccupations();
+        
+        if (orbital_energies.size() > 0) {
+            CurcumaLogger::info("Complete TBLite orbital energy listing:");
+            for (int i = 0; i < orbital_energies.size(); ++i) {
+                double occ = (i < orbital_occupations.size()) ? orbital_occupations(i) : 0.0;
+                CurcumaLogger::param(fmt::format("Orbital_{}", i + 1), 
+                                   fmt::format("{:.6f} Eh (occ={:.3f})", orbital_energies(i), occ));
+            }
+        }
+    }
+    
+    // Handle gradient calculation
     if (gradient) {
         tblite_get_result_gradient(m_error, m_tblite_res, m_gradient.data());
         m_gradient *= au;
         if (tblite_check_context(m_ctx)) {
             tbliteContextError();
-            //     return 0;
+        }
+        
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            double grad_norm = m_gradient.norm();
+            CurcumaLogger::param("gradient_norm", fmt::format("{:.6f} Eh/Bohr", grad_norm));
         }
     }
+    
     if (count == 1)
         tblite_delete_container(&m_tb_cont);
     return energy;
@@ -426,9 +551,7 @@ void TBLiteInterface::tbliteError()
 {
     char message[512];
     tblite_get_error(m_error, message, NULL);
-    std::cerr << "[Message] " << message << std::endl;
-
-    // printf("[Message] %s\n", message);
+    CurcumaLogger::error(fmt::format("TBLite Error: {}", message));
     tblite_clear_error(m_error);
 }
 
@@ -436,7 +559,6 @@ void TBLiteInterface::tbliteContextError()
 {
     char message[512];
     tblite_get_context_error(m_ctx, message, NULL);
-    std::cerr << "[Message] " << message << std::endl;
-    // printf("[Message] %s\n", message);
+    CurcumaLogger::error(fmt::format("TBLite Context Error: {}", message));
     tblite_clear_error(m_error);
 }

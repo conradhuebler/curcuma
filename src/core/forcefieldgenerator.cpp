@@ -20,12 +20,14 @@
 #include "src/core/global.h"
 #include "src/core/topology.h"
 #include "src/tools/general.h"
+#include "src/core/curcuma_logger.h"
 
 #include "src/core/forcefieldfunctions.h"
 
 #include <chrono>
 #include <fmt/chrono.h>
 #include <fmt/core.h>
+#include <fmt/format.h>
 
 #include "json.hpp"
 using json = nlohmann::json;
@@ -53,14 +55,22 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
 {
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    fmt::print("Force field parameter generation started for {} atoms using {} method\n", m_atoms, m_method);
+    // Level 1+: Parameter generation start
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::info("Starting force field parameter generation");
+        CurcumaLogger::param("atoms", m_atoms);
+        CurcumaLogger::param("method", m_method);
+    }
 
     m_coordination = std::vector<int>(m_atoms, 0);
     m_topo = Eigen::MatrixXd::Zero(m_atoms, m_atoms);
     m_distance = Eigen::MatrixXd::Zero(m_atoms, m_atoms);
 
     auto topology_start = std::chrono::high_resolution_clock::now();
-    fmt::print("  → Initializing topology and distance matrices...\n");
+    // Level 2+: Topology initialization
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Initializing topology and distance matrices");
+    }
 
     TContainer bonds;
     m_scaling = 1.4;
@@ -121,10 +131,20 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
 
     auto topology_end = std::chrono::high_resolution_clock::now();
     auto topology_duration = std::chrono::duration_cast<std::chrono::milliseconds>(topology_end - topology_start);
-    fmt::print("  → Bond detection completed: {} bonds found in {} ms\n", bonds.Storage().size(), topology_duration.count());
+    // Level 2+: Bond detection results
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success("Bond detection completed");
+        CurcumaLogger::param("bonds_found", static_cast<int>(bonds.Storage().size()));
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param("topology_time", fmt::format("{} ms", topology_duration.count()));
+        }
+    }
 
     auto atomtype_start = std::chrono::high_resolution_clock::now();
-    fmt::print("  → Assigning UFF atom types...\n");
+    // Level 2+: Atom type assignment
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Assigning UFF atom types");
+    }
     AssignUffAtomTypes();
     // if (m_rings)
     // std::cout << "Crude ring finding method ... " << std::endl;
@@ -136,10 +156,19 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
 
     auto atomtype_end = std::chrono::high_resolution_clock::now();
     auto atomtype_duration = std::chrono::duration_cast<std::chrono::milliseconds>(atomtype_end - atomtype_start);
-    fmt::print("  → Atom type assignment and ring detection completed: {} rings found in {} ms\n",
-        m_identified_rings.size(), atomtype_duration.count());
+    // Level 2+: Atom type assignment results
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success("Atom type assignment and ring detection completed");
+        CurcumaLogger::param("rings_found", static_cast<int>(m_identified_rings.size()));
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param("atomtype_time", fmt::format("{} ms", atomtype_duration.count()));
+        }
+    }
 
-    fmt::print("  → Setting up force field method: {}\n", m_method);
+    // Level 2+: Force field method setup
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("Setting up force field method: {}", m_method));
+    }
     if (m_method.compare("uff") == 0) {
         m_ff_type = 1;
     } else if (m_method.compare("uff-d3") == 0) {
@@ -163,31 +192,46 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
 
     // Generate force field parameters with timing
     auto bonds_start = std::chrono::high_resolution_clock::now();
-    fmt::print("  → Generating bond parameters...\n");
+    // Level 2+: Bond parameter generation
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Generating bond parameters");
+    }
     setBonds(bonds);
     auto bonds_end = std::chrono::high_resolution_clock::now();
     auto bonds_duration = std::chrono::duration_cast<std::chrono::milliseconds>(bonds_end - bonds_start);
 
     auto angles_start = std::chrono::high_resolution_clock::now();
-    fmt::print("  → Generating angle parameters...\n");
+    // Level 2+: Angle parameter generation
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Generating angle parameters");
+    }
     setAngles();
     auto angles_end = std::chrono::high_resolution_clock::now();
     auto angles_duration = std::chrono::duration_cast<std::chrono::milliseconds>(angles_end - angles_start);
 
     auto dihedrals_start = std::chrono::high_resolution_clock::now();
-    fmt::print("  → Generating dihedral parameters...\n");
+    // Level 2+: Dihedral parameter generation
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Generating dihedral parameters");
+    }
     setDihedrals();
     auto dihedrals_end = std::chrono::high_resolution_clock::now();
     auto dihedrals_duration = std::chrono::duration_cast<std::chrono::milliseconds>(dihedrals_end - dihedrals_start);
 
     auto inversions_start = std::chrono::high_resolution_clock::now();
-    fmt::print("  → Generating inversion parameters...\n");
+    // Level 2+: Inversion parameter generation
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Generating inversion parameters");
+    }
     setInversions();
     auto inversions_end = std::chrono::high_resolution_clock::now();
     auto inversions_duration = std::chrono::duration_cast<std::chrono::milliseconds>(inversions_end - inversions_start);
 
     auto nci_start = std::chrono::high_resolution_clock::now();
-    fmt::print("  → Generating non-covalent interaction parameters...\n");
+    // Level 2+: Non-covalent parameter generation
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Generating non-covalent interaction parameters");
+    }
     setNCI();
     auto nci_end = std::chrono::high_resolution_clock::now();
     auto nci_duration = std::chrono::duration_cast<std::chrono::milliseconds>(nci_end - nci_start);
@@ -196,12 +240,30 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
     auto total_end = std::chrono::high_resolution_clock::now();
     auto total_duration = std::chrono::duration_cast<std::chrono::milliseconds>(total_end - start_time);
 
-    fmt::print("\nForce field parameter generation completed in {} ms\n", total_duration.count());
-
-#ifdef DEBUG_ON
-    fmt::print("DEBUG: Topology setup: {} ms, Atom types: {} ms\n",
-        topology_duration.count(), atomtype_duration.count());
-#endif
+    // Level 1+: Completion summary
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::success("Force field parameter generation completed");
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::param("total_time", fmt::format("{} ms", total_duration.count()));
+            CurcumaLogger::param("bonds_generated", static_cast<int>(m_bonds.size()));
+            CurcumaLogger::param("angles_generated", static_cast<int>(m_angles.size()));
+            CurcumaLogger::param("dihedrals_generated", static_cast<int>(m_dihedrals.size()));
+            CurcumaLogger::param("inversions_generated", static_cast<int>(m_inversions.size()));
+            CurcumaLogger::param("nci_pairs_generated", static_cast<int>(m_vdws.size()));
+        }
+    }
+    
+    // Level 3+: Detailed timing breakdown
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("Detailed timing breakdown:");
+        CurcumaLogger::param("topology_time", fmt::format("{} ms", topology_duration.count()));
+        CurcumaLogger::param("atomtype_time", fmt::format("{} ms", atomtype_duration.count()));
+        CurcumaLogger::param("bonds_time", fmt::format("{} ms", bonds_duration.count()));
+        CurcumaLogger::param("angles_time", fmt::format("{} ms", angles_duration.count()));
+        CurcumaLogger::param("dihedrals_time", fmt::format("{} ms", dihedrals_duration.count()));
+        CurcumaLogger::param("inversions_time", fmt::format("{} ms", inversions_duration.count()));
+        CurcumaLogger::param("nci_time", fmt::format("{} ms", nci_duration.count()));
+    }
 }
 
 double ForceFieldGenerator::UFFBondRestLength(int i, int j, double n)

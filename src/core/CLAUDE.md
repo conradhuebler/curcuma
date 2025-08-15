@@ -7,16 +7,29 @@ Core computational engines: energy calculations, force fields, molecular data, q
 ## Key Components
 
 ### Energy Calculator (`energycalculator.cpp/h`)
-Central dispatcher routing all calculations via `SwitchMethod()`:
+**🚀 COMPLETELY REFACTORED (January 2025)** - Unified polymorphic architecture
+
+#### **New Architecture**
+- **Single Method Pointer**: `std::unique_ptr<ComputationalMethod> m_method`
+- **Polymorphic Interface**: All QM/MM methods through same `calculateEnergy()` API
+- **MethodFactory Integration**: Automatic method creation with priority fallbacks
+- **Thread-Safe**: Enhanced concurrency support maintained
+- **API Compatible**: All existing EnergyCalculator calls work unchanged
+
+#### **Method Resolution (New)**
 ```cpp
-case 9: GFNFF (cgfnff)      // Native GFN-FF
-case 6: EHT                 // Extended Hückel Theory
-case 4: DFT-D3              // Dispersion corrections
-case 3: Ulysses             // Semi-empirical methods
-case 2: XTB                 // Extended tight-binding
-case 1: TBLite              // Tight-binding DFT
-case 0: ForceField          // UFF, QMDFF, etc.
+// Old: SwitchMethod() with 10+ cases
+// New: Single polymorphic method pointer
+m_method = MethodFactory::createMethod(method_name, config);
+return m_method->calculateEnergy(gradient);
 ```
+
+#### **Benefits**
+- **Eliminates SwitchMethod()**: No more giant switch statements
+- **Automatic Fallbacks**: `gfn2` tries TBLite → Ulysses → XTB
+- **Consistent API**: Same interface for all computational methods
+- **Enhanced Error Handling**: Method-specific error reporting
+- **Universal Verbosity**: Integrated CurcumaLogger support
 
 ### Molecule Class (`molecule.cpp/h`)
 **Educational Focus**: Core molecular data structure - direct, minimal abstractions
@@ -26,9 +39,30 @@ case 0: ForceField          // UFF, QMDFF, etc.
 - **Performance Note**: Large molecules (>1000 atoms) may need memory optimization
 
 ### Force Field System
-- **ForceField**: Main engine with universal JSON parameter caching (96% speedup)
+- **ForceField**: Main engine with universal JSON parameter caching (96% speedup) + **CurcumaLogger verbosity**
+- **ForceFieldGenerator**: Parameter generation with **progress tracking and timing**
 - **ForceFieldThread**: Multi-threaded calculations for large systems
+- **Universal Verbosity**: Energy decomposition, timing analysis, silent mode support
 - **Performance Critical**: Parameter caching essential for iterative calculations
+
+### New Directory Structure
+```cpp
+core/
+├── energycalculator.cpp        # NEW: Unified polymorphic dispatcher
+├── energy_calculators/         # NEW: Polymorphic method wrappers  
+│   ├── computational_method.h  # Base interface for all methods
+│   ├── method_factory.cpp      # Priority-based method creation
+│   ├── qm_methods/            # QM method wrappers (EHT, XTB, TBLite, Ulysses)
+│   └── ff_methods/            # Force field wrappers
+├── curcuma_logger.cpp          # Universal logging system
+├── forcefield.cpp              # + verbosity integration
+├── forcefieldgenerator.cpp     # + progress tracking
+└── qm_methods/                # Native implementations + verbosity
+    ├── eht.cpp                # Extended Hückel + CurcumaLogger
+    ├── xtbinterface.cpp       # XTB + synchronized verbosity
+    ├── tbliteinterface.cpp    # TBLite + synchronized verbosity  
+    └── ulyssesinterface.cpp   # Ulysses + CurcumaLogger
+```
 
 ## Instructions Block
 
@@ -47,7 +81,15 @@ case 0: ForceField          // UFF, QMDFF, etc.
 - **Thread safety**: Use `setParameterCaching(false)` for concurrent force field access
 - **Large systems**: Optimized algorithms with bounds checking for molecules >1000 atoms
 
-### Recent Status (January 2025)
+### Major Refactoring Completed (January 2025) ✅
+- **🚀 EnergyCalculator Architecture**: Complete polymorphic refactoring - eliminates SwitchMethod  
+- **🎯 Universal Verbosity System**: All QM/MM methods support 4-level verbosity (0-3)
+- **🏗️ MethodFactory Integration**: Priority-based method resolution with automatic fallbacks
+- **🔧 Enhanced Error Handling**: Method-specific error reporting with CurcumaLogger
+- **📈 Performance Maintained**: Threading, caching, and optimization preserved
+- **✅ API Compatibility**: All existing EnergyCalculator usage works unchanged
+
+### Previous Improvements
 - **Scientific fixes**: Dipole moments now use center of mass (physically correct)
 - **Performance caching**: Distance matrices cached with automatic invalidation
 - **Centralized unit system**: All conversions moved to `CurcumaUnit` namespace in `units.h`

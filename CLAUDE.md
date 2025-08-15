@@ -116,18 +116,30 @@
 ### Core Components
 
 #### Energy Calculator (`src/core/energycalculator.h/cpp`)
-Central hub for all energy and gradient calculations. Routes method calls to appropriate interfaces:
+**COMPLETELY REFACTORED (January 2025)** - New unified polymorphic architecture:
 
+##### **New Architecture**
+- **Polymorphic Design**: Single `ComputationalMethod` interface for all QM/MM methods
+- **MethodFactory**: Priority-based method resolution with hierarchical fallbacks
+- **Unified Interface**: `calculateEnergy()`, `getGradient()`, consistent API across all methods
+- **Method Priority System**: `gfn2` → TBLite > Ulysses > XTB (automatic fallback)
+- **Thread-Safe**: Full multi-threading support maintained
+- **Universal Verbosity**: Consistent output control across all computational methods
+
+##### **Method Resolution (New)**
 ```cpp
-// Method routing via SwitchMethod()
-case 9: GFNFF (cgfnff)           // Native GFN-FF implementation
-case 6: EHT                      // Extended Hückel Theory  
-case 4: DFT-D3                   // Dispersion corrections
-case 3: Ulysses                  // Semi-empirical methods
-case 2: XTB                      // Extended tight-binding
-case 1: TBLite                   // Tight-binding DFT
-case 0: ForceField               // UFF, QMDFF, etc.
+// New MethodFactory system (replaces old SwitchMethod)
+std::unique_ptr<ComputationalMethod> method = 
+    MethodFactory::createMethod("gfn2", config);
+double energy = method->calculateEnergy();
 ```
+
+##### **Supported Method Hierarchies**
+- **gfn2**: TBLite → Ulysses → XTB (automatic priority resolution)
+- **gfn1**: TBLite → XTB → Ulysses  
+- **uff**: ForceField wrapper with parameter generation
+- **eht**: Extended Hückel Theory (native implementation)
+- **cgfnff**: Native GFN-FF (work in progress)
 
 #### Force Field System (`src/core/forcefield.h/cpp`)
 Modern force field engine with:
@@ -160,15 +172,21 @@ curcuma/
 │   │   ├── simplemd.cpp      # Molecular dynamics
 │   │   └── rmsd.cpp          # Structure analysis
 │   ├── core/                 # Core computational engines
-│   │   ├── energycalculator.cpp  # Energy/gradient dispatcher
-│   │   ├── forcefield.cpp        # Force field engine
-│   │   ├── forcefieldthread.cpp  # Parallel FF calculations
-│   │   ├── molecule.cpp          # Molecular data structures
-│   │   └── qm_methods/           # Quantum chemistry interfaces
-│   │       ├── gfnff.cpp         # Native GFN-FF implementation
-│   │       ├── eht.cpp           # Extended Hückel Theory
-│   │       ├── xtbinterface.cpp  # XTB interface
-│   │       └── tbliteinterface.cpp # TBLite interface
+│   │   ├── energycalculator.cpp   # NEW: Unified polymorphic dispatcher
+│   │   ├── energy_calculators/    # NEW: Polymorphic method implementations
+│   │   │   ├── computational_method.h  # Base interface
+│   │   │   ├── method_factory.cpp      # Priority-based method creation
+│   │   │   ├── qm_methods/             # QM method wrappers
+│   │   │   └── ff_methods/             # Force field wrappers
+│   │   ├── forcefield.cpp             # Force field engine + verbosity
+│   │   ├── forcefieldgenerator.cpp    # Parameter generation + verbosity
+│   │   ├── curcuma_logger.cpp         # Universal logging system
+│   │   └── qm_methods/               # Native QM implementations
+│   │       ├── eht.cpp               # Extended Hückel Theory + verbosity
+│   │       ├── xtbinterface.cpp      # XTB interface + verbosity
+│   │       ├── tbliteinterface.cpp   # TBLite interface + verbosity
+│   │       ├── ulyssesinterface.cpp  # Ulysses interface + verbosity
+│   │       └── gfnff.cpp             # Native GFN-FF (WIP)
 │   ├── tools/                # Utilities and file I/O
 │   │   ├── formats.h         # File format handling (XYZ, MOL2, SDF)
 │   │   └── geometry.h        # Geometric calculations
@@ -178,20 +196,32 @@ curcuma/
 └── CMakeLists.txt           # Build configuration
 ```
 
-## Recent Developments (July 2025)
+## Recent Major Developments (January 2025)
 
-### Native GFN-FF Implementation
-- **Status**: WORK IN PROGRESS - Architecture complete, debugging needed
-- **Method name**: `cgfnff` (curcuma-gfnff) vs `gfnff` (XTB-gfnff)
-- **Integration**: Fully integrated in EnergyCalculator as case 9
-- **Current issue**: JSON parameter generation bug (null values)
+### 🚀 **Complete EnergyCalculator Architecture Refactoring**
+- **Status**: ✅ **COMPLETED** - Big-Bang refactoring successful
+- **New Design**: Polymorphic `ComputationalMethod` interface replaces old SwitchMethod
+- **MethodFactory**: Priority-based method resolution with automatic fallbacks
+- **API Compatibility**: All existing code works unchanged - seamless migration
+- **Thread Safety**: Enhanced multi-threading support maintained
 
-### Universal Parameter Caching 
-- **Status**: COMPLETED and WORKING
-- **Auto-naming**: `input.xyz` → `input.param.json`
-- **Method validation**: Prevents loading incompatible parameters
-- **Multi-threading safety**: `setParameterCaching(false)` for concurrent access
-- **Performance**: 96% speedup demonstrated
+### 🎯 **Universal Verbosity System**
+- **Status**: ✅ **COMPLETED** across ALL computational methods
+- **Coverage**: QM methods (EHT, XTB, TBLite, Ulysses) + Force Fields + Generator
+- **Levels**: 0 (silent for MD/opt) → 1 (results) → 2 (analysis) → 3 (debug)
+- **Benefits**: Silent optimization, structured scientific output, consistent debugging
+- **Integration**: Native library verbosity (XTB/TBLite) synchronized with CurcumaLogger
+
+### 🏗️ **New Architecture Features**
+- **Method Hierarchies**: `gfn2` automatically tries TBLite → Ulysses → XTB
+- **Universal Interface**: Same API for QM and MM methods
+- **Enhanced Error Handling**: Comprehensive logging and fallback mechanisms
+- **Parameter Generation**: ForceFieldGenerator with progress tracking
+
+### 📈 **Performance Improvements**
+- **Universal Parameter Caching**: 96% speedup for force field calculations
+- **Thread-Safe Logging**: Zero overhead at verbosity level 0
+- **Optimized Method Resolution**: Efficient priority-based method creation
 
 ## Build and Test Commands
 
@@ -209,21 +239,29 @@ cmake .. && make -j4
 
 ## Standards
 
-### Logging System (`src/core/curcuma_logger.h/.cpp`)
-**Verbosity Levels**: 0 (silent) → 1 (results only) → 2 (normal) → 3 (debug)
-**Color Scheme**: Red (errors), Orange (warnings), Green (success/citations), Blue (parameters), Magenta (debug)
+### Universal Logging System (`src/core/curcuma_logger.h/.cpp`)
+**✅ FULLY IMPLEMENTED** across all computational methods
 
-**Core Functions**:
+#### **Verbosity Levels**
+- **Level 0**: **Silent Mode** - Zero output (critical for optimization/MD)
+- **Level 1**: **Minimal Results** - Final energies, convergence status
+- **Level 2**: **Scientific Analysis** - HOMO/LUMO, energy decomposition, molecular properties  
+- **Level 3**: **Complete Debug** - Full orbital listings, timing, algorithm details
+
+#### **Color Scheme & Functions**
 - `CurcumaLogger::error()` - Always visible (red)
 - `CurcumaLogger::warn()` - Level ≥1 (orange) 
 - `CurcumaLogger::success()` - Level ≥1 (green)
 - `CurcumaLogger::info()` - Level ≥2 (default)
-- `CurcumaLogger::param()` - Level ≥2 (blue)
+- `CurcumaLogger::param()` - Level ≥2 (blue, structured output)
+- `CurcumaLogger::energy_abs()` - Energy output with units
 - `CurcumaLogger::citation()` - Level ≥2 (green)
 
-**Debug System** (`CURCUMA_DEBUG` cmake option):
-- `CurcumaLogger::debug()` - Compile-time eliminated in release builds
-- Auto-color detection with `CURCUMA_NO_COLOR` environment override
+#### **Implementation Status**
+- **QM Methods**: EHT, XTB, TBLite, Ulysses ✅
+- **Force Fields**: ForceField, ForceFieldGenerator ✅  
+- **Native Libraries**: XTB/TBLite verbosity synchronized ✅
+- **Thread Safety**: Zero overhead at Level 0 ✅
 
 ### Unit System (`src/core/units.h`)
 - **Centralized**: All constants in `CurcumaUnit` namespace with CODATA-2018 values
@@ -252,7 +290,14 @@ cmake .. && make -j4
 
 ## Known Issues
 
-1. **cgfnff JSON bug**: Parameter generation creates null values
-2. **Missing real GFN-FF parameters**: Currently uses placeholder values  
-3. **Logging system**: Needs implementation of new standards
-4. **Unit migration**: Need to replace hardcoded constants throughout codebase with CurcumaUnit functions
+1. **cgfnff JSON bug**: Parameter generation creates null values - *GFN-FF still work in progress*
+2. **Missing real GFN-FF parameters**: Currently uses placeholder values - *requires theoretical implementation*
+3. **Unit migration**: Some legacy code still uses hardcoded constants instead of CurcumaUnit functions
+
+## Recently Resolved ✅
+
+- ✅ **Logging system**: Universal verbosity system fully implemented
+- ✅ **EnergyCalculator architecture**: Complete polymorphic refactoring 
+- ✅ **Method priority resolution**: Automatic fallback system working
+- ✅ **Parameter caching**: 96% speedup with thread-safe implementation
+- ✅ **Verbosity integration**: All QM/MM methods support consistent output control

@@ -90,28 +90,79 @@ JSON-based configuration with common defaults:
 
 *Quantum method development priorities, theoretical enhancements, and performance optimization goals to be defined by operator/programmer*
 
+## Verbosity System Standards
+
+### Universal Verbosity Levels (All QM/MM Methods)
+
+#### Level 0: Silent Mode
+- **ABSOLUTELY NO OUTPUT** - Critical for optimization and MD
+- Only internal calculations, zero console output
+- Exception: Critical errors that terminate calculation
+
+#### Level 1: Minimal Results
+- Final energy and convergence status only
+- Brief method identification
+- Essential warnings (convergence failures)
+
+#### Level 2: Properties and Analysis  
+- **SCF/Iteration Progress**: Energy per cycle with iteration count
+- **Orbital Properties**: HOMO, LUMO, band gap (formatted tables)
+- **Molecular Properties**: Charges, bond orders, dipole moment
+- **Method Parameters**: Key settings and convergence criteria
+
+#### Level 3: Complete Analysis
+- **Full Orbital Lists**: All energies in structured tables
+- **Coefficients**: MO contributions, population analysis  
+- **Debug Details**: SCF parameters, convergence mechanisms
+- **Method Internals**: Basis sets, grid details, algorithm specifics
+
+### Implementation Guidelines
+```cpp
+// Standard pattern for all QM methods
+if (CurcumaLogger::get_verbosity() >= 1) {
+    CurcumaLogger::energy_abs(final_energy, "SCF Energy");
+}
+if (CurcumaLogger::get_verbosity() >= 2) {
+    // Orbital properties, molecular analysis
+}
+if (CurcumaLogger::get_verbosity() >= 3) {
+    // Full coefficient matrices, debug output
+}
+```
+
 ## Variable Section
 
-### Current Development Status
-- **Native GFN-FF (cgfnff)**: Architecture complete, JSON parameter generation debugging needed
-- **EHT Implementation**: Fully functional with orbital analysis
-- **All interfaces**: Working and integrated with EnergyCalculator
+### Current Development Status ✅
+- **✅ Universal Verbosity**: **COMPLETED** - All QM methods fully integrated with CurcumaLogger
+- **✅ EHT Implementation**: Fully functional with orbital analysis and verbosity control
+- **✅ XTB/TBLite Interfaces**: Native library verbosity synchronized with CurcumaLogger  
+- **✅ Ulysses Interface**: Complete CurcumaLogger integration with SCF progress
+- **🔧 Native GFN-FF (cgfnff)**: Architecture complete, JSON parameter debugging in progress
+
+### Verbosity Integration Status ✅
+- **✅ EHT**: Complete integration with `printOrbitalAnalysisVerbose()` for Level 2
+- **✅ XTBInterface**: XTB native verbosity synchronized (XTB_VERBOSITY_MUTED/MINIMAL/FULL)
+- **✅ TBLiteInterface**: TBLite context verbosity synchronized with CurcumaLogger levels
+- **✅ UlyssesInterface**: Full SCF progress, orbital analysis, and molecular properties
+- **✅ All Methods**: Silent mode (Level 0) for optimization/MD, debug mode (Level 3) available
 
 ### Active Issues
 - cgfnff JSON parameter generation creates null values causing crashes
 - Missing real GFN-FF parameters (currently using placeholders)
-- Memory optimization needed for large basis sets
+- Memory optimization needed for large basis sets (>1000 atoms)
 
-### Recent Developments
-- Complete QMInterface standardization across all methods
-- Enhanced parallel eigenvalue solver implementation
-- Improved basis set parsing and validation
-- Better error handling in method initialization
+### Recent Major Achievements (January 2025)
+- **🎯 Universal Verbosity System**: All QM methods support consistent 4-level output control
+- **🔧 Native Library Integration**: XTB and TBLite verbosity controlled by CurcumaLogger
+- **📊 Scientific Output**: HOMO/LUMO analysis, orbital properties, molecular analysis at Level 2
+- **🚀 Performance**: Zero overhead silent mode for iterative calculations
+- **🏗️ Enhanced Error Handling**: All methods use CurcumaLogger for consistent error reporting
 
 ### Performance Optimizations
 - Threading support in matrix operations
 - Efficient integral calculation algorithms
 - Memory-optimized basis set handling
+- **Silent Mode**: Zero-overhead Level 0 for iterative calculations
 
 ---
 

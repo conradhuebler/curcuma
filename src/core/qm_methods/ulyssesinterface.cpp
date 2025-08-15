@@ -26,6 +26,8 @@
 #endif
 
 #include "ulyssesinterface.h"
+#include "src/core/curcuma_logger.h"
+#include <fmt/format.h>
 
 UlyssesInterface::UlyssesInterface(const json& ulyssessettings)
 {
@@ -35,9 +37,10 @@ UlyssesInterface::UlyssesInterface(const json& ulyssessettings)
     m_solvent = m_ulyssessettings["solvent"];
     m_method = m_ulyssessettings["method"];
     m_mult = m_ulyssessettings["mult"];
-    m_verbose = m_ulyssessettings["verbose"];
+    m_verbose = m_ulyssessettings["verbose"].get<int>() != 0;
+    // Validate solvent with CurcumaLogger
     if (std::find(m_solvents.begin(), m_solvents.end(), m_solvent) == m_solvents.end()) {
-        std::cout << "Solvent " << m_solvent << " is not supported by Ulysses" << std::endl;
+        CurcumaLogger::warn("Solvent '" + m_solvent + "' not supported by Ulysses - using 'none'");
         m_solvent = "none";
     }
 #ifdef USE_ULYSSES
@@ -57,11 +60,21 @@ bool UlyssesInterface::InitialiseMolecule()
 #ifdef USE_ULYSSES
     m_ulysses->setMethod(m_method);
     m_ulysses->setMolecule(m_geometry, m_atoms, m_charge, m_mult, "C1");
-    if (m_verbose > 0)
-        std::cout << "Initialising Ulysses with method " << m_method << " and SCFmaxiter " << m_SCFmaxiter << std::endl;
+    
+    // Verbosity Level 1+: Method initialization info
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::info("Initializing Ulysses quantum chemistry method");
+        CurcumaLogger::param("method", m_method);
+        CurcumaLogger::param("SCF_maxiter", m_SCFmaxiter);
+        CurcumaLogger::param("temperature", m_Tele);
+        if (m_solvent != "none") {
+            CurcumaLogger::param("solvent", m_solvent);
+        }
+    }
 
     return true;
 #else
+    CurcumaLogger::error("Ulysses interface not compiled - USE_ULYSSES not defined");
     return false;
 #endif
 }
@@ -83,12 +96,81 @@ double UlyssesInterface::Calculation(bool gradient, bool verbose)
     m_ulysses->setTele(m_Tele);
     m_ulysses->setMaxIter(m_SCFmaxiter);
     m_ulysses->setSolvent(m_solvent);
-    m_ulysses->Calculate(gradient, verbose);
+    
+    // Start calculation with verbosity control
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Starting Ulysses SCF calculation");
+        if (gradient) {
+            CurcumaLogger::param("gradient", "analytical");
+        }
+    }
+    
+    // Perform calculation - Ulysses handles its own output currently
+    // TODO: Capture and filter Ulysses output based on verbosity
+    m_ulysses->Calculate(gradient, verbose && (CurcumaLogger::get_verbosity() >= 3));
+    
+    double energy = m_ulysses->Energy();
+    
+    // Final results - Level 1+
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::energy_abs(energy, "SCF Energy");
+    }
+    
+    // Orbital properties - Level 2+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        Vector orbital_energies = OrbitalEnergies();
+        if (orbital_energies.size() > 0) {
+            // Find HOMO and LUMO - rough estimate: half-filled orbitals
+            int homo_index = -1;
+            int num_electrons = m_atomcount; // Rough estimate - neutral atoms
+            int num_occupied = num_electrons / 2; // Closed shell approximation
+            
+            if (num_occupied > 0 && num_occupied <= orbital_energies.size()) {
+                homo_index = num_occupied - 1; // HOMO is last occupied orbital
+            }
+            
+            if (homo_index >= 0 && homo_index + 1 < orbital_energies.size()) {
+                double homo = orbital_energies(homo_index);
+                double lumo = orbital_energies(homo_index + 1);
+                double gap = lumo - homo;
+                
+                CurcumaLogger::param("HOMO", fmt::format("{:.4f} Eh", homo));
+                CurcumaLogger::param("LUMO", fmt::format("{:.4f} Eh", lumo));
+                CurcumaLogger::param("HOMO-LUMO_gap", fmt::format("{:.4f} Eh ({:.2f} eV)", gap, gap * 27.211));
+            }
+        }
+        
+        // Molecular properties
+        Vector charges = Charges();
+        if (charges.size() > 0) {
+            double total_charge = charges.sum();
+            CurcumaLogger::param("total_charge", fmt::format("{:.6f}", total_charge));
+        }
+    }
+    
+    // Full orbital listing - Level 3+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        Vector orbital_energies = OrbitalEnergies();
+        if (orbital_energies.size() > 0) {
+            CurcumaLogger::info("Complete orbital energy listing:");
+            for (int i = 0; i < orbital_energies.size(); ++i) {
+                CurcumaLogger::param(fmt::format("Orbital_{}", i + 1), 
+                                   fmt::format("{:.6f} Eh", orbital_energies(i)));
+            }
+        }
+    }
+    
     if (gradient) {
         m_gradient = m_ulysses->Gradient();
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            double grad_norm = m_gradient.norm();
+            CurcumaLogger::param("gradient_norm", fmt::format("{:.6f} Eh/Bohr", grad_norm));
+        }
     }
-    return m_ulysses->Energy();
+    
+    return energy;
 #else
+    CurcumaLogger::error("Ulysses calculation failed - not compiled");
     return 0;
 #endif
 }

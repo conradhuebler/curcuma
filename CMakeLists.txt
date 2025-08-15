@@ -235,6 +235,14 @@ set(curcuma_core_SRC
         src/core/qm_methods/gfnff_advanced.cpp
         src/core/qm_methods/qm_driver.cpp
         src/core/qm_methods/ulyssesinterface.cpp
+        src/core/energy_calculators/method_factory.cpp
+        src/core/energy_calculators/qm_methods/eht_method.cpp
+        src/core/energy_calculators/qm_methods/gfnff_method.cpp
+        src/core/energy_calculators/qm_methods/xtb_method.cpp
+        src/core/energy_calculators/qm_methods/tblite_method.cpp
+        src/core/energy_calculators/qm_methods/ulysses_method.cpp
+        src/core/energy_calculators/qm_methods/dispersion_method.cpp
+        src/core/energy_calculators/ff_methods/forcefield_method.cpp
         src/core/energycalculator.cpp
         src/core/molecule.cpp
         src/core/xyz_comment_parser.cpp
