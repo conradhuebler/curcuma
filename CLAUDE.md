@@ -172,21 +172,30 @@ curcuma/
 │   │   ├── simplemd.cpp      # Molecular dynamics
 │   │   └── rmsd.cpp          # Structure analysis
 │   ├── core/                 # Core computational engines
-│   │   ├── energycalculator.cpp   # NEW: Unified polymorphic dispatcher
-│   │   ├── energy_calculators/    # NEW: Polymorphic method implementations
-│   │   │   ├── computational_method.h  # Base interface
-│   │   │   ├── method_factory.cpp      # Priority-based method creation
-│   │   │   ├── qm_methods/             # QM method wrappers
-│   │   │   └── ff_methods/             # Force field wrappers
-│   │   ├── forcefield.cpp             # Force field engine + verbosity
-│   │   ├── forcefieldgenerator.cpp    # Parameter generation + verbosity
-│   │   ├── curcuma_logger.cpp         # Universal logging system
-│   │   └── qm_methods/               # Native QM implementations
-│   │       ├── eht.cpp               # Extended Hückel Theory + verbosity
-│   │       ├── xtbinterface.cpp      # XTB interface + verbosity
-│   │       ├── tbliteinterface.cpp   # TBLite interface + verbosity
-│   │       ├── ulyssesinterface.cpp  # Ulysses interface + verbosity
-│   │       └── gfnff.cpp             # Native GFN-FF (WIP)
+│   │   ├── energycalculator.cpp      # NEW: Unified polymorphic dispatcher
+│   │   ├── molecule.cpp              # Molecular data structures
+│   │   ├── curcuma_logger.cpp        # Universal logging system
+│   │   ├── energy_calculators/       # NEW: All computational methods organized here
+│   │   │   ├── computational_method.h     # Base interface for all methods
+│   │   │   ├── method_factory.cpp         # Priority-based method creation
+│   │   │   ├── qm_methods/                # QM method implementations & wrappers
+│   │   │   │   ├── eht.cpp                # Extended Hückel Theory + verbosity
+│   │   │   │   ├── xtbinterface.cpp       # XTB interface + verbosity
+│   │   │   │   ├── tbliteinterface.cpp    # TBLite interface + verbosity
+│   │   │   │   ├── ulyssesinterface.cpp   # Ulysses interface + verbosity
+│   │   │   │   ├── gfnff.cpp              # Native GFN-FF (WIP)
+│   │   │   │   ├── orcainterface.cpp      # ORCA interface
+│   │   │   │   ├── dftd3interface.cpp     # DFT-D3 dispersion corrections
+│   │   │   │   ├── dftd4interface.cpp     # DFT-D4 dispersion corrections
+│   │   │   │   ├── *_method.cpp           # Polymorphic method wrappers
+│   │   │   │   └── interface/             # Abstract interfaces
+│   │   │   └── ff_methods/                # Force field implementations
+│   │   │       ├── forcefield.cpp         # Force field engine + verbosity  
+│   │   │       ├── forcefieldgenerator.cpp # Parameter generation + verbosity
+│   │   │       ├── forcefieldthread.cpp   # Multi-threading support
+│   │   │       ├── qmdff.cpp              # QMDFF implementation
+│   │   │       ├── eigen_uff.cpp          # UFF implementation
+│   │   │       └── *_par.h                # Parameter databases
 │   ├── tools/                # Utilities and file I/O
 │   │   ├── formats.h         # File format handling (XYZ, MOL2, SDF)
 │   │   └── geometry.h        # Geometric calculations
@@ -222,6 +231,13 @@ curcuma/
 - **Universal Parameter Caching**: 96% speedup for force field calculations
 - **Thread-Safe Logging**: Zero overhead at verbosity level 0
 - **Optimized Method Resolution**: Efficient priority-based method creation
+
+### 🗂️ **Physical Architecture Restructuring**
+- **Status**: ✅ **COMPLETED** - All computational methods now logically organized
+- **New Organization**: All QM/MM methods consolidated under `src/core/energy_calculators/`
+- **Directory Structure**: Clear separation: `qm_methods/` and `ff_methods/` subdirectories
+- **Benefits**: Matches logical polymorphic architecture, easier maintenance and development
+- **Compatibility**: All includes updated, compilation verified, no functionality changes
 
 ## Build and Test Commands
 

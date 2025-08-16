@@ -29,12 +29,12 @@
 
 #include "hbonds.h"
 #ifdef USE_D4
-#include "src/core/dftd4interface.h"
+#include "src/core/energy_calculators/qm_methods/dftd4interface.h"
 #endif
 
 #include <Eigen/Dense>
 
-#include "src/core/forcefieldderivaties.h"
+#include "forcefieldderivaties.h"
 #include "src/core/topology.h"
 
 #include "eigen_uff.h"
@@ -1717,9 +1717,9 @@ double eigenUFF::Calculate(bool grd, bool verbose)
     m_CalculateGradient = grd;
     hbonds4::atom_t geometry[m_atom_types.size()];
     for (int i = 0; i < m_atom_types.size(); ++i) {
-        geometry[i].x = m_geometry(i,0) * m_au;
-        geometry[i].y = m_geometry(i,1) * m_au;
-        geometry[i].z = m_geometry(i,2) * m_au;
+        geometry[i].x = m_geometry(i, 0) * m_au;
+        geometry[i].y = m_geometry(i, 1) * m_au;
+        geometry[i].z = m_geometry(i, 2) * m_au;
         geometry[i].e = m_atom_types[i];
         m_h4correction.GradientH4()[i].x = 0;
         m_h4correction.GradientH4()[i].y = 0;

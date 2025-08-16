@@ -22,13 +22,14 @@
 #include "src/core/curcuma_logger.h"
 
 // Method implementations
+#include "ff_methods/forcefield_method.h"
+#include "qm_methods/dispersion_method.h"
 #include "qm_methods/eht_method.h"
+#include "qm_methods/external_gfnff_method.h"
 #include "qm_methods/gfnff_method.h"
-#include "qm_methods/xtb_method.h"
 #include "qm_methods/tblite_method.h"
 #include "qm_methods/ulysses_method.h"
-#include "qm_methods/dispersion_method.h"
-#include "ff_methods/forcefield_method.h"
+#include "qm_methods/xtb_method.h"
 
 #include <iostream>
 #include <algorithm>
@@ -95,6 +96,15 @@ bool MethodFactory::hasD3() {
 #endif
 }
 
+bool MethodFactory::hasGFNFF()
+{
+#ifdef USE_GFNFF
+    return true;
+#else
+    return false;
+#endif
+}
+
 bool MethodFactory::hasD4() {
 #ifdef USE_D4
     return true;
@@ -113,34 +123,34 @@ const std::vector<MethodFactory::MethodPriority>& MethodFactory::getPriorityMeth
         {
             "gfn2",
             {
-                {"TBLite", [](const json& config) { return hasTBLite() ? std::make_unique<TBLiteMethod>("gfn2", config) : nullptr; }},
-                {"Ulysses", [](const json& config) { return hasUlysses() ? std::make_unique<UlyssesMethod>("ugfn2", config) : nullptr; }},
-                {"XTB", [](const json& config) { return hasXTB() ? std::make_unique<XTBMethod>("gfn2", config) : nullptr; }}
+                { "TBLite", [](const json& config) { return hasTBLite() ? std::make_unique<TBLiteMethod>("gfn2", config) : nullptr; } },
+                { "Ulysses", [](const json& config) { return hasUlysses() ? std::make_unique<UlyssesMethod>("ugfn2", config) : nullptr; } },
+                { "XTB", [](const json& config) { return hasXTB() ? std::make_unique<XTBMethod>("gfn2", config) : nullptr; } }
                 // TODO: Add native GFN2 when implemented
-            }
-        },
-        
+            } },
+
         // GFN1: Priority TBLite > XTB > Native (future)
         {
-            "gfn1", 
+            "gfn1",
             {
-                {"TBLite", [](const json& config) { return hasTBLite() ? std::make_unique<TBLiteMethod>("gfn1", config) : nullptr; }},
-                {"XTB", [](const json& config) { return hasXTB() ? std::make_unique<XTBMethod>("xtb-gfn1", config) : nullptr; }}
+                { "TBLite", [](const json& config) { return hasTBLite() ? std::make_unique<TBLiteMethod>("gfn1", config) : nullptr; } },
+                { "XTB", [](const json& config) { return hasXTB() ? std::make_unique<XTBMethod>("xtb-gfn1", config) : nullptr; } }
                 // TODO: Add native GFN1 when implemented
-            }
-        },
-        
+            } },
+
         // IPEA1: TBLite only
         {
             "ipea1",
-            {
-                {"TBLite", [](const json& config) { return hasTBLite() ? std::make_unique<TBLiteMethod>("ipea1", config) : nullptr; }}
-            }
-        }
-        
-        // GFN-FF handled as explicit method since it maps to different implementations
+            { { "TBLite", [](const json& config) { return hasTBLite() ? std::make_unique<TBLiteMethod>("ipea1", config) : nullptr; } } } },
+
+        // GFN-FF: Priority External GFN-FF > XTB > Native cgfnff
+        {
+            "gfnff",
+            { { "External GFN-FF", [](const json& config) { return hasGFNFF() ? std::make_unique<ExternalGFNFFMethod>(config) : nullptr; } },
+                { "XTB", [](const json& config) { return hasXTB() ? std::make_unique<XTBMethod>("gfnff", config) : nullptr; } },
+                { "Native", [](const json& config) { return std::make_unique<GFNFFMethod>(config); } } } }
     };
-    
+
     return priority_methods;
 }
 
@@ -199,11 +209,12 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
         CurcumaLogger::param("input_method", method_name);
         CurcumaLogger::param("normalized_method", method_lower);
     }
-                std::cout << hasTBLite() << " " 
-                      << hasXTB() << " " 
-                      << hasUlysses() << " "
-                      << hasD3() << " "
-                      << hasD4() << std::endl;
+    std::cout << hasTBLite() << " "
+              << hasXTB() << " "
+              << hasUlysses() << " "
+              << hasGFNFF() << " "
+              << hasD3() << " "
+              << hasD4() << std::endl;
     // 1. Check priority methods first (shared methods with fallback hierarchy)
     CurcumaLogger::info("Step 1: Checking priority methods (shared methods with fallback hierarchy)");
     for (const auto& priority_method : getPriorityMethods()) {
@@ -246,6 +257,8 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
                 if (explicit_method.compilation_flag == "USE_TBLITE") available = hasTBLite();
                 else if (explicit_method.compilation_flag == "USE_XTB") available = hasXTB();
                 else if (explicit_method.compilation_flag == "USE_ULYSSES") available = hasUlysses();
+                else if (explicit_method.compilation_flag == "USE_GFNFF")
+                    available = hasGFNFF();
                 else if (explicit_method.compilation_flag == "USE_D3") available = hasD3();
                 else if (explicit_method.compilation_flag == "USE_D4") available = hasD4();
                 
@@ -336,6 +349,8 @@ std::vector<std::string> MethodFactory::getAvailableMethods() {
             if (explicit_method.compilation_flag == "USE_TBLITE") method_available = hasTBLite();
             else if (explicit_method.compilation_flag == "USE_XTB") method_available = hasXTB();
             else if (explicit_method.compilation_flag == "USE_ULYSSES") method_available = hasUlysses();
+            else if (explicit_method.compilation_flag == "USE_GFNFF")
+                method_available = hasGFNFF();
             else if (explicit_method.compilation_flag == "USE_D3") method_available = hasD3();
             else if (explicit_method.compilation_flag == "USE_D4") method_available = hasD4();
         }
@@ -380,12 +395,7 @@ json MethodFactory::getMethodInfo(const std::string& method_name) {
             info["type"] = "explicit";
             json provider_info;
             provider_info["name"] = explicit_method.provider_name;
-            provider_info["available"] = !explicit_method.requires_compilation_flag || 
-                (explicit_method.compilation_flag == "USE_TBLITE" && hasTBLite()) ||
-                (explicit_method.compilation_flag == "USE_XTB" && hasXTB()) ||
-                (explicit_method.compilation_flag == "USE_ULYSSES" && hasUlysses()) ||
-                (explicit_method.compilation_flag == "USE_D3" && hasD3()) ||
-                (explicit_method.compilation_flag == "USE_D4" && hasD4());
+            provider_info["available"] = !explicit_method.requires_compilation_flag || (explicit_method.compilation_flag == "USE_TBLITE" && hasTBLite()) || (explicit_method.compilation_flag == "USE_XTB" && hasXTB()) || (explicit_method.compilation_flag == "USE_ULYSSES" && hasUlysses()) || (explicit_method.compilation_flag == "USE_GFNFF" && hasGFNFF()) || (explicit_method.compilation_flag == "USE_D3" && hasD3()) || (explicit_method.compilation_flag == "USE_D4" && hasD4());
             info["providers"].push_back(provider_info);
             return info;
         }
@@ -406,6 +416,7 @@ void MethodFactory::printAvailableMethods() {
     fmt::print("  - TBLite: {}\n", hasTBLite() ? "YES" : "NO");
     fmt::print("  - XTB: {}\n", hasXTB() ? "YES" : "NO");
     fmt::print("  - Ulysses: {}\n", hasUlysses() ? "YES" : "NO");
+    fmt::print("  - External GFN-FF: {}\n", hasGFNFF() ? "YES" : "NO");
     fmt::print("  - DFT-D3: {}\n", hasD3() ? "YES" : "NO");
     fmt::print("  - DFT-D4: {}\n", hasD4() ? "YES" : "NO");
     

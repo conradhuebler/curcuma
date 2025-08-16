@@ -17,12 +17,12 @@
  *
  */
 
+#include "src/core/curcuma_logger.h"
 #include "src/core/global.h"
 #include "src/core/topology.h"
 #include "src/tools/general.h"
-#include "src/core/curcuma_logger.h"
 
-#include "src/core/forcefieldfunctions.h"
+#include "forcefieldfunctions.h"
 
 #include <chrono>
 #include <fmt/chrono.h>
@@ -252,7 +252,7 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
             CurcumaLogger::param("nci_pairs_generated", static_cast<int>(m_vdws.size()));
         }
     }
-    
+
     // Level 3+: Detailed timing breakdown
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Detailed timing breakdown:");

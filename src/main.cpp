@@ -17,11 +17,11 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  */
+#include "src/core/energy_calculators/qm_methods/eht.h"
+#include "src/core/energy_calculators/qm_methods/orcainterface.h"
 #include "src/core/fileiterator.h"
-#include "src/core/molecule.h"
-#include "src/core/orcainterface.h"
-#include "src/core/qm_methods/eht.h"
 #include "src/core/imagewriter.hpp"
+#include "src/core/molecule.h"
 
 #include "src/capabilities/analysenciplot.h"
 #include "src/capabilities/confscan.h"

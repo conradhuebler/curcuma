@@ -22,9 +22,9 @@
 #include "eht.h"
 
 #include "interface/abstract_interface.h"
+#include "src/core/curcuma_logger.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
-#include "src/core/curcuma_logger.h"
 #include <fmt/format.h>
 
 #include "ParallelEigenSolver.hpp"
@@ -175,7 +175,7 @@ double EHT::Calculation(bool gradient, bool verbose)
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::info("Starting Extended Hückel Theory calculation");
     }
-    
+
     // Level 2+: Molecular parameters
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::param("atoms", static_cast<int>(m_atoms.size()));
@@ -239,7 +239,7 @@ double EHT::Calculation(bool gradient, bool verbose)
         if (CurcumaLogger::get_verbosity() >= 2) {
             printOrbitalAnalysisVerbose();
         }
-        
+
         // Level 3+: Detailed orbital analysis (old style)
         if (CurcumaLogger::get_verbosity() >= 3) {
             printOrbitalAnalysis();
@@ -455,8 +455,7 @@ void EHT::printOrbitalAnalysis(int num_orbitals_around_gap) const
 
     // Print lowest and highest energy orbitals
     CurcumaLogger::param("lowest_orbital", fmt::format("{:.4f} eV (orbital 1)", m_energies(0)));
-    CurcumaLogger::param("highest_orbital", fmt::format("{:.4f} eV (orbital {})", 
-        m_energies(m_energies.size() - 1), m_energies.size()));
+    CurcumaLogger::param("highest_orbital", fmt::format("{:.4f} eV (orbital {})", m_energies(m_energies.size() - 1), m_energies.size()));
 
     CurcumaLogger::info("==========================================");
 }

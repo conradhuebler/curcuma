@@ -17,9 +17,9 @@
  *
  */
 
-#include "src/core/forcefieldderivaties.h"
-#include "src/core/qmdff_par.h"
-#include "src/core/uff_par.h"
+#include "forcefieldderivaties.h"
+#include "qmdff_par.h"
+#include "uff_par.h"
 
 #include "forcefieldfunctions.h"
 
@@ -576,7 +576,7 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
 #pragma message("TODO: Implement proper GFN-FF bond stretching - currently using UFF geometry function")
     // TODO: GFN-FF uses harmonic + anharmonic bond stretching terms
     // Currently using UFF::BondStretching for geometry calculation only
-    
+
     double factor = m_final_factor * m_bond_scaling;
 
     for (int index = 0; index < m_gfnff_bonds.size(); ++index) {
@@ -591,9 +591,9 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
         double dr = rij - bond.r0_ij;
         double harmonic = 0.5 * bond.fc * dr * dr;
         double anharmonic = bond.exponent * dr * dr * dr; // cubic anharmonic term
-        
+
         m_bond_energy += (harmonic + anharmonic) * factor;
-        
+
         if (m_calculate_gradient) {
             double diff = (bond.fc * dr + 3.0 * bond.exponent * dr * dr) * factor;
             m_gradient.row(bond.i) += diff * derivate.row(0);
@@ -607,7 +607,7 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
 #pragma message("TODO: Verify GFN-FF angle bending functional form - currently using UFF geometry")
     // TODO: Check if GFN-FF angle bending uses same Fourier expansion as UFF
     // Using UFF::AngleBending for geometry and derivatives
-    
+
     for (int index = 0; index < m_gfnff_angles.size(); ++index) {
         const auto& angle = m_gfnff_angles[index];
         auto i = m_geometry.row(angle.i);
@@ -615,10 +615,10 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
         auto k = m_geometry.row(angle.k);
         Matrix derivate;
         double costheta = UFF::AngleBending(i, j, k, derivate, m_calculate_gradient);
-        
+
         // GFN-FF angle bending: E = k*(C0 + C1*cos(θ) + C2*cos(2θ))
         m_angle_energy += (angle.fc * (angle.C0 + angle.C1 * costheta + angle.C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling;
-        
+
         if (m_calculate_gradient) {
             double sintheta = sin(acos(costheta));
             double dEdtheta = -angle.fc * sintheta * (angle.C1 + 4 * angle.C2 * costheta) * m_final_factor * m_angle_scaling;
@@ -632,25 +632,25 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
 void ForceFieldThread::CalculateGFNFFDihedralContribution()
 {
     // GFN-FF torsion: E = V*(1 + cos(n*φ - φ0))
-    
+
     for (int index = 0; index < m_gfnff_dihedrals.size(); ++index) {
         const auto& dihedral = m_gfnff_dihedrals[index];
-        
+
         auto i = m_geometry.row(dihedral.i);
         auto j = m_geometry.row(dihedral.j);
         auto k = m_geometry.row(dihedral.k);
         auto l = m_geometry.row(dihedral.l);
-        
+
         Matrix derivate;
         double phi = UFF::Torsion(i, j, k, l, derivate, m_calculate_gradient);
-        
+
         double V = dihedral.V;
         double n = dihedral.n;
         double phi0 = dihedral.phi0;
-        
+
         double energy = V * (1 + cos(n * phi - phi0));
         m_dihedral_energy += energy * m_final_factor * m_dihedral_scaling;
-        
+
         if (m_calculate_gradient) {
             double dEdphi = -V * n * sin(n * phi - phi0) * m_final_factor * m_dihedral_scaling;
             m_gradient.row(dihedral.i) += dEdphi * derivate.row(0);
@@ -664,21 +664,21 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
 void ForceFieldThread::CalculateGFNFFInversionContribution()
 {
     // GFN-FF inversion: E = k*(C0 + C1*cos(θ) + C2*cos(2θ))
-    
+
     for (int index = 0; index < m_gfnff_inversions.size(); ++index) {
         const auto& inversion = m_gfnff_inversions[index];
-        
+
         auto i = m_geometry.row(inversion.i); // out-of-plane atom
         auto j = m_geometry.row(inversion.j); // plane atom 1
         auto k = m_geometry.row(inversion.k); // plane atom 2
         auto l = m_geometry.row(inversion.l); // central atom
-        
+
         Matrix derivate;
         double theta = UFF::OutOfPlane(i, j, k, l, derivate, m_calculate_gradient);
-        
+
         double energy = inversion.fc * (inversion.C0 + inversion.C1 * cos(theta) + inversion.C2 * cos(2 * theta));
         m_inversion_energy += energy * m_final_factor * m_inversion_scaling;
-        
+
         if (m_calculate_gradient) {
             double dEdtheta = inversion.fc * (-inversion.C1 * sin(theta) - 2 * inversion.C2 * sin(2 * theta)) * m_final_factor * m_inversion_scaling;
             m_gradient.row(inversion.i) += dEdtheta * derivate.row(0);
@@ -694,27 +694,27 @@ void ForceFieldThread::CalculateGFNFFvdWContribution()
 #pragma message("TODO: Implement proper GFN-FF dispersion with D4-like correction")
     // TODO: GFN-FF uses sophisticated dispersion correction (similar to D4)
     // This is a simplified implementation for testing
-    
+
     for (int index = 0; index < m_gfnff_vdWs.size(); ++index) {
         const auto& vdw = m_gfnff_vdWs[index];
         auto i = m_geometry.row(vdw.i);
         auto j = m_geometry.row(vdw.j);
-        
+
         Vector rij = i - j;
         double distance = rij.norm();
-        
+
         if (distance > 0) {
             // Simplified van der Waals interaction
             // TODO: Replace with proper GFN-FF dispersion calculation
             double C6 = vdw.C_ij;
             double r0 = vdw.r0_ij;
             double ratio = r0 / distance;
-            
+
             // Simple Lennard-Jones-like term (placeholder)
             double energy = -C6 * pow(ratio, 6);
-            
+
             m_vdw_energy += energy * m_final_factor * m_vdw_scaling;
-            
+
             if (m_calculate_gradient) {
                 double dEdr = 6.0 * C6 * pow(ratio, 6) / distance * m_final_factor * m_vdw_scaling;
                 Vector grad = dEdr * rij / distance;

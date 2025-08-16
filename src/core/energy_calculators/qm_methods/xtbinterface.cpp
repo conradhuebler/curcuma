@@ -18,9 +18,9 @@
  */
 #include "interface/abstract_interface.h"
 
+#include "src/core/curcuma_logger.h"
 #include "src/core/global.h"
 #include "src/tools/general.h"
-#include "src/core/curcuma_logger.h"
 #include <fmt/format.h>
 
 #include "external/xtb/include/xtb.h"
@@ -45,7 +45,7 @@ XTBInterface::XTBInterface(const json& xtbsettings)
     m_Tele = m_xtbsettings["Tele"];
     m_spin = m_xtbsettings["spin"];
     m_verbose = m_xtbsettings["verbose"];
-    
+
     // Verbosity Level 1+: XTB initialization
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::info("Initializing XTB quantum chemistry method");
@@ -207,7 +207,7 @@ void XTBInterface::setMethod(const std::string& method)
 double XTBInterface::Calculation(bool gradient, bool verbose)
 {
     double energy = 0;
-    
+
     // Setup method on first call
     if (!m_setup) {
         // Control XTB verbosity based on our logging system
@@ -218,22 +218,26 @@ double XTBInterface::Calculation(bool gradient, bool verbose)
         } else {
             xtb_setVerbosity(m_env, XTB_VERBOSITY_MUTED);
         }
-        
+
         // Level 2+: Method setup info
         if (CurcumaLogger::get_verbosity() >= 2) {
             std::string method_name = "unknown";
-            if (m_method_switch == 0) method_name = "GFN0-xTB";
-            else if (m_method_switch == 1) method_name = "GFN1-xTB";
-            else if (m_method_switch == 2) method_name = "GFN2-xTB";
-            else if (m_method_switch == 66) method_name = "GFN-FF";
-            
+            if (m_method_switch == 0)
+                method_name = "GFN0-xTB";
+            else if (m_method_switch == 1)
+                method_name = "GFN1-xTB";
+            else if (m_method_switch == 2)
+                method_name = "GFN2-xTB";
+            else if (m_method_switch == 66)
+                method_name = "GFN-FF";
+
             CurcumaLogger::info("Starting XTB calculation");
             CurcumaLogger::param("method", method_name);
             if (gradient) {
                 CurcumaLogger::param("gradient", "analytical");
             }
         }
-        
+
         // Load appropriate method
         if (m_method_switch == 0) {
             xtb_loadGFN0xTB(m_env, m_xtb_mol, m_xtb_calc, NULL);
@@ -244,16 +248,16 @@ double XTBInterface::Calculation(bool gradient, bool verbose)
         } else if (m_method_switch == 66) {
             xtb_loadGFNFF(m_env, m_xtb_mol, m_xtb_calc, NULL);
         }
-        
+
         xtb_setAccuracy(m_env, m_xtb_calc, m_accuracy);
         xtb_setMaxIter(m_env, m_xtb_calc, m_SCFmaxiter);
         xtb_setElectronicTemp(m_env, m_xtb_calc, m_Tele);
         m_setup = true;
     }
-    
+
     // Perform calculation
     xtb_singlepoint(m_env, m_xtb_mol, m_xtb_calc, m_xtb_res);
-    
+
     // Check for errors
     if (xtb_checkEnvironment(m_env)) {
         CurcumaLogger::error("XTB calculation failed - check environment");
@@ -263,17 +267,17 @@ double XTBInterface::Calculation(bool gradient, bool verbose)
 
     // Get energy result
     xtb_getEnergy(m_env, m_xtb_res, &energy);
-    
+
     // Level 1+: Final energy result
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::energy_abs(energy, "XTB Energy");
     }
-    
+
     // Level 2+: Orbital analysis and molecular properties
     if (CurcumaLogger::get_verbosity() >= 2) {
         Vector orbital_energies = OrbitalEnergies();
         Vector orbital_occupations = OrbitalOccupations();
-        
+
         if (orbital_energies.size() > 0 && orbital_occupations.size() > 0) {
             // Find HOMO/LUMO
             int homo_index = -1;
@@ -283,58 +287,58 @@ double XTBInterface::Calculation(bool gradient, bool verbose)
                     break;
                 }
             }
-            
+
             if (homo_index >= 0 && homo_index + 1 < orbital_energies.size()) {
                 double homo = orbital_energies(homo_index);
                 double lumo = orbital_energies(homo_index + 1);
                 double gap = lumo - homo;
-                
+
                 CurcumaLogger::param("HOMO", fmt::format("{:.4f} Eh", homo));
                 CurcumaLogger::param("LUMO", fmt::format("{:.4f} Eh", lumo));
                 CurcumaLogger::param("HOMO-LUMO_gap", fmt::format("{:.4f} Eh ({:.2f} eV)", gap, gap * 27.211));
             }
         }
-        
+
         // Molecular properties
         Vector charges = Charges();
         if (charges.size() > 0) {
             double total_charge = charges.sum();
             CurcumaLogger::param("total_charge", fmt::format("{:.6f}", total_charge));
         }
-        
+
         Vector dipole = Dipole();
         if (dipole.size() >= 3) {
             double dipole_magnitude = dipole.norm();
             CurcumaLogger::param("dipole_moment", fmt::format("{:.4f} Debye", dipole_magnitude));
         }
     }
-    
+
     // Level 3+: Complete orbital listing
     if (CurcumaLogger::get_verbosity() >= 3) {
         Vector orbital_energies = OrbitalEnergies();
         Vector orbital_occupations = OrbitalOccupations();
-        
+
         if (orbital_energies.size() > 0) {
             CurcumaLogger::info("Complete XTB orbital energy listing:");
             for (int i = 0; i < orbital_energies.size(); ++i) {
                 double occ = (i < orbital_occupations.size()) ? orbital_occupations(i) : 0.0;
-                CurcumaLogger::param(fmt::format("Orbital_{}", i + 1), 
-                                   fmt::format("{:.6f} Eh (occ={:.3f})", orbital_energies(i), occ));
+                CurcumaLogger::param(fmt::format("Orbital_{}", i + 1),
+                    fmt::format("{:.6f} Eh (occ={:.3f})", orbital_energies(i), occ));
             }
         }
     }
-    
+
     // Handle gradient calculation
     if (gradient) {
         xtb_getGradient(m_env, m_xtb_res, m_gradient.data());
         m_gradient *= au;
-        
+
         if (CurcumaLogger::get_verbosity() >= 2) {
             double grad_norm = m_gradient.norm();
             CurcumaLogger::param("gradient_norm", fmt::format("{:.6f} Eh/Bohr", grad_norm));
         }
     }
-    
+
     return energy;
 }
 

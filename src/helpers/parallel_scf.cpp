@@ -1,4 +1,4 @@
-#include "src/core/qm_methods/ParallelEigenSolver.hpp"
+#include "src/core/energy_calculators/qm_methods/ParallelEigenSolver.hpp"
 #include <chrono>
 #include <iostream>
 

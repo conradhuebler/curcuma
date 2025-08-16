@@ -9,16 +9,16 @@
 #include "src/core/molecule.h"
 
 static json ORCASettings{
-        { "tb_acc", 1 },
-        { "tb_max_iter", 250 },
-        { "tb_damping", 0.4 },
-        { "tb_temp", 9.500e-4 },
-        { "tb_verbose", 0 },
-        { "tb_guess", "SAD" },
-        { "cpcm_solv", "none" },
-        { "alpb_solv", "none" },
-        { "cpcm_eps", -1 },
-        { "alpb_eps", -1 }
+    { "tb_acc", 1 },
+    { "tb_max_iter", 250 },
+    { "tb_damping", 0.4 },
+    { "tb_temp", 9.500e-4 },
+    { "tb_verbose", 0 },
+    { "tb_guess", "SAD" },
+    { "cpcm_solv", "none" },
+    { "alpb_solv", "none" },
+    { "cpcm_eps", -1 },
+    { "alpb_eps", -1 }
 };
 
 class OrcaInterface {
@@ -48,4 +48,4 @@ private:
     bool executeOrcaProcess();
 };
 
-#endif //ORCAINTERFACE_H
+#endif // ORCAINTERFACE_H

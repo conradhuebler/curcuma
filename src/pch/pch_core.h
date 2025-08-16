@@ -17,8 +17,8 @@
 
 // Conditional parameter includes based on Ulysses usage
 // Include parameter headers only if Ulysses is not used to avoid conflicts
-#include "src/core/qmdff_par.h" // QMDFF parameter definitions
-#include "src/core/uff_par.h" // UFF parameter definitions
+#include "src/core/energy_calculators/ff_methods/qmdff_par.h" // QMDFF parameter definitions
+#include "src/core/energy_calculators/ff_methods/uff_par.h" // UFF parameter definitions
 
 // NOTE: When Ulysses is enabled, parameter headers must be included
 // directly in source files due to symbol conflicts (kEN, etc.)

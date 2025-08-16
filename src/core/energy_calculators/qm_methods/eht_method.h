@@ -20,7 +20,7 @@
 #pragma once
 
 #include "../computational_method.h"
-#include "src/core/qm_methods/eht.h"
+#include "eht.h"
 
 #include <memory>
 

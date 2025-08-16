@@ -25,3 +25,6 @@
 [submodule "external/plumed2"]
 	path = external/plumed2
 	url = https://github.com/plumed/plumed2
+[submodule "external/gfnff"]
+	path = external/gfnff
+	url = https://github.com/pprcht/gfnff.git

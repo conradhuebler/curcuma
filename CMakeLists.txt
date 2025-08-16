@@ -6,6 +6,9 @@ option (USE_XTB
 
 option (USE_TBLITE
     "Compile TBLITE and use as library" ON)
+
+option (USE_GFNFF
+    "Compile external GFN-FF and use as library" OFF)
  
 option(USE_ULYSSES
     "Compile Ulysses and use as library" ON)
@@ -229,12 +232,12 @@ set(curcuma_core_SRC
         src/capabilities/simplemd.cpp
         src/capabilities/hessian.cpp
         src/capabilities/qmdfffit.cpp
-        src/core/qm_methods/eht.cpp
-        src/core/qm_methods/eht_parameters.cpp
-        src/core/qm_methods/gfnff.cpp
-        src/core/qm_methods/gfnff_advanced.cpp
-        src/core/qm_methods/qm_driver.cpp
-        src/core/qm_methods/ulyssesinterface.cpp
+        src/core/energy_calculators/qm_methods/eht.cpp
+        src/core/energy_calculators/qm_methods/eht_parameters.cpp
+        src/core/energy_calculators/qm_methods/gfnff.cpp
+        src/core/energy_calculators/qm_methods/gfnff_advanced.cpp
+        src/core/energy_calculators/qm_methods/qm_driver.cpp
+        src/core/energy_calculators/qm_methods/ulyssesinterface.cpp
         src/core/energy_calculators/method_factory.cpp
         src/core/energy_calculators/qm_methods/eht_method.cpp
         src/core/energy_calculators/qm_methods/gfnff_method.cpp
@@ -247,23 +250,49 @@ set(curcuma_core_SRC
         src/core/molecule.cpp
         src/core/xyz_comment_parser.cpp
         src/core/fileiterator.cpp
-        src/core/forcefieldthread.cpp
-        src/core/forcefield.cpp
-        src/core/forcefieldfunctions.h
-        src/core/forcefieldgenerator.cpp
+        src/core/energy_calculators/ff_methods/forcefieldthread.cpp
+        src/core/energy_calculators/ff_methods/forcefield.cpp
+        src/core/energy_calculators/ff_methods/forcefieldfunctions.h
+        src/core/energy_calculators/ff_methods/forcefieldgenerator.cpp
         src/core/curcuma_logger.cpp
         src/tools/formats.h
         src/tools/geometry.h
         src/tools/general.h
-        src/core/orcainterface.h
-        src/core/orcainterface.cpp
+        src/core/energy_calculators/qm_methods/orcainterface.h
+        src/core/energy_calculators/qm_methods/orcainterface.cpp
+)
+
+set(curcuma_cap_SRC
+        src/capabilities/optimiser/lbfgs.cpp
+        src/capabilities/persistentdiagram.cpp
+        src/capabilities/analysenciplot.cpp
+        src/capabilities/curcumamethod.cpp
+        src/capabilities/curcumaopt.cpp
+        src/capabilities/confscan.cpp
+        src/capabilities/confsearch.cpp
+        src/capabilities/confstat.cpp
+        src/capabilities/docking.cpp
+        src/capabilities/analysenciplot.cpp
+        src/capabilities/nebdocking.cpp
+        src/capabilities/pairmapper.cpp
+        src/capabilities/rmsd.cpp
+        src/capabilities/rmsd/rmsd_strategies.cpp
+        src/capabilities/rmsd/rmsd_costmatrix.cpp
+        src/capabilities/rmsd/rmsd_assignment.cpp
+        src/capabilities/rmsdtraj.cpp
+        src/capabilities/simplemd.cpp
+        src/capabilities/hessian.cpp
+        src/capabilities/qmdfffit.cpp
 )
 
 add_library(curcuma_core  ${curcuma_core_SRC})
+add_library(curcuma_cap  ${curcuma_cap_SRC})
 
 # Enable precompiled headers for faster compilation
 if(USE_PCH)
     target_precompile_headers(curcuma_core PRIVATE src/pch.h)
+    target_precompile_headers(curcuma_cap PRIVATE src/pch.h)
+
     message(STATUS "Precompiled headers enabled for curcuma_core")
     
     # Additional PCH configuration for Ulysses-heavy builds
@@ -285,14 +314,14 @@ add_library(km ${km_SRC})
 if(USE_ULYSSES)
 
 set(ulysess_SRC
-    src/core/qm_methods/interface/ulysses.cpp
+    src/core/energy_calculators/qm_methods/interface/ulysses.cpp
 )
 add_executable(ulysses_helper
 src/helpers/ulysses_helper.cpp
 )
 else()
 set(ulysess_SRC
-    src/core/qm_methods/eht.cpp
+    src/core/energy_calculators/qm_methods/eht.cpp
 )
 endif(USE_ULYSSES)
 add_library(ulysses_lib ${ulysess_SRC})
@@ -321,17 +350,17 @@ add_executable(curcuma
 # Enable precompiled headers for main executable
 if(USE_PCH)
     target_precompile_headers(curcuma REUSE_FROM curcuma_core)
+    target_precompile_headers(curcuma REUSE_FROM curcuma_cap)
+
 endif()
 
 if(C17)
     set_property(TARGET curcuma_core PROPERTY CXX_STANDARD 17)
-else()
-    set_property(TARGET curcuma_core PROPERTY CXX_STANDARD 14)
-endif(C17)
-
-if(C17)
+    set_property(TARGET curcuma_cap PROPERTY CXX_STANDARD 17)
     set_property(TARGET curcuma PROPERTY CXX_STANDARD 17)
 else()
+    set_property(TARGET curcuma_core PROPERTY CXX_STANDARD 14)
+    set_property(TARGET curcuma_cap PROPERTY CXX_STANDARD 14)
     set_property(TARGET curcuma PROPERTY CXX_STANDARD 14)
 endif(C17)
 
@@ -369,7 +398,7 @@ if(USE_XTB)
     target_link_libraries(xtb_helper lib-xtb-shared pthread dl)
     endif()
     set(curcuma_xtb_SRC
-        src/core/qm_methods/xtbinterface.cpp
+        src/core/energy_calculators/qm_methods/xtbinterface.cpp
     )
     add_library(curcuma_xtb  ${curcuma_xtb_SRC})
 
@@ -411,12 +440,43 @@ if(USE_TBLITE)
     target_link_libraries(tblite_helper PUBLIC tblite-lib gfortran pthread)
     endif()
     set(curcuma_tblite_SRC
-        src/core/qm_methods/tbliteinterface.cpp
+        src/core/energy_calculators/qm_methods/tbliteinterface.cpp
     )
     add_library(curcuma_tblite  ${curcuma_tblite_SRC})
 
     target_link_libraries(curcuma_tblite PUBLIC "mctc-lib" tblite-lib gfortran)
     target_link_libraries(curcuma_core curcuma_tblite)
+endif()
+
+if(USE_GFNFF)
+    # External GFN-FF library integration
+    if(NOT TARGET gfnff-lib)
+        add_subdirectory(external/gfnff)
+        include_directories(SYSTEM ${PROJECT_SOURCE_DIR}/external/gfnff/include)
+    endif()
+    
+    if(HELPERS)
+        add_executable(gfnff_helper
+               src/helpers/gfnff_helper.cpp
+        )
+
+        target_compile_definitions(gfnff_helper PRIVATE USE_GFNFF)
+        if(C17)
+            set_property(TARGET gfnff_helper PROPERTY CXX_STANDARD 17)
+        else()
+            set_property(TARGET gfnff_helper PROPERTY CXX_STANDARD 14)
+        endif(C17)
+        target_link_libraries(gfnff_helper PUBLIC gfnff-lib gfortran pthread)
+    endif()
+    
+    set(curcuma_gfnff_SRC
+        src/core/energy_calculators/qm_methods/gfnffinterface.cpp
+        src/core/energy_calculators/qm_methods/external_gfnff_method.cpp
+    )
+    add_library(curcuma_gfnff ${curcuma_gfnff_SRC})
+
+    target_link_libraries(curcuma_gfnff PUBLIC gfnff-lib gfortran)
+    target_link_libraries(curcuma_core curcuma_gfnff)
 endif()
 
 if(USE_D3)
@@ -430,7 +490,7 @@ if(USE_D3)
     target_link_libraries(dftd3_helper PUBLIC s-dftd3 gfortran pthread) 
     endif()
     set(curcuma_D3_SRC
-           src/core/qm_methods/dftd3interface.cpp
+           src/core/energy_calculators/qm_methods/dftd3interface.cpp
     )
     add_library(curcuma_D3  ${curcuma_D3_SRC})
     target_link_libraries(curcuma_D3 s-dftd3)
@@ -464,7 +524,7 @@ if(USE_D4)
     endif()
 
     set(curcuma_d4_SRC
-        src/core/qm_methods/dftd4interface.cpp
+        src/core/energy_calculators/qm_methods/dftd4interface.cpp
     )
     add_library(curcuma_d4  ${curcuma_d4_SRC})
     if(DEFINED D4LIBS_DIR AND DEFINED D4INCLUDE_DIR)
@@ -480,6 +540,8 @@ if(USE_Plumed)
 endif()
 
 target_link_libraries(curcuma_core pthread fmt::fmt-header-only )
+target_link_libraries(curcuma_cap pthread fmt::fmt-header-only )
+
 if(USE_BLAS)
     target_link_libraries(curcuma_core blas)
 endif()
@@ -530,7 +592,7 @@ include(CTest)
 
 target_sources(Continuous
   PRIVATE
-    src/core/qmdff_par.h
+    src/core/energy_calculators/ff_methods/qmdff_par.h
 )
 add_test(NAME molecule_comprehensive COMMAND test_molecule)
 

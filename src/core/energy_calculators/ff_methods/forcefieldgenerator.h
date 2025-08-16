@@ -22,9 +22,9 @@
 
 #include <set>
 
+#include "qmdff_par.h"
 #include "src/core/molecule.h"
-#include "src/core/qmdff_par.h"
-#include "src/core/uff_par.h"
+#include "uff_par.h"
 
 #include <Eigen/Dense>
 

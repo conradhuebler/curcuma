@@ -19,8 +19,8 @@
 
 #pragma once
 
+#include "src/core/energy_calculators/ff_methods/qmdff_par.h"
 #include "src/core/molecule.h"
-#include "src/core/qmdff_par.h"
 
 #include "curcumamethod.h"
 static const json QMDFFFitJson = {

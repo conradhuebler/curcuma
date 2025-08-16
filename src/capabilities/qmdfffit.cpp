@@ -22,11 +22,11 @@
 #include "src/capabilities/curcumaopt.h"
 #include "src/capabilities/hessian.h"
 
+#include "src/core/energy_calculators/ff_methods/forcefieldgenerator.h"
+#include "src/core/energy_calculators/ff_methods/qmdff_par.h"
+#include "src/core/energy_calculators/ff_methods/uff_par.h"
 #include "src/core/energycalculator.h"
-#include "src/core/forcefieldgenerator.h"
-#include "src/core/qmdff_par.h"
 #include "src/core/topology.h"
-#include "src/core/uff_par.h"
 
 #include <filesystem>
 

@@ -26,8 +26,8 @@
 #include "tblite/solvation.h"
 #endif
 
-#include "src/core/global.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/global.h"
 #include <fmt/format.h>
 
 #include <iostream>
@@ -73,7 +73,7 @@ TBLiteInterface::TBLiteInterface(const json& tblitesettings)
     m_error = tblite_new_error();
     m_ctx = tblite_new_context();
     m_tblite_res = tblite_new_result();
-    
+
     // Set TBLite verbosity based on our logging system
     if (CurcumaLogger::get_verbosity() >= 3) {
         tblite_set_context_verbosity(m_ctx, 3);
@@ -82,12 +82,12 @@ TBLiteInterface::TBLiteInterface(const json& tblitesettings)
     } else {
         tblite_set_context_verbosity(m_ctx, 0);
     }
-    
+
     // Verbosity Level 1+: TBLite initialization
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::info("Initializing TBLite quantum chemistry method");
-        CurcumaLogger::param("accuracy", fmt::format("{:.6f}", m_acc));
-        CurcumaLogger::param("SCF_maxiter", m_SCFmaxiter);
+        CurcumaLogger::param("accuracy", fmt::format("{}", m_acc));
+        CurcumaLogger::param("SCF_maxiter", fmt::format("{}", m_SCFmaxiter));
         CurcumaLogger::param("temperature", fmt::format("{:.1f} K", m_Tele * 315775.326864009));
         CurcumaLogger::param("damping", fmt::format("{:.3f}", m_damping));
         if (m_solvent_model > 0) {
@@ -245,7 +245,7 @@ void TBLiteInterface::ApplySolvation()
         CurcumaLogger::info("Applying solvation model");
         CurcumaLogger::param("solvent_model", m_solvent_model);
     }
-    
+
     if (m_solvent_model == 0)
         return;
     else if (m_solvent_model == 1 && m_solvent_eps > -1) {
@@ -263,7 +263,7 @@ void TBLiteInterface::ApplySolvation()
             m_tb_cont = tblite_new_cpcm_solvation_epsilon(m_error, m_tblite_mol, m_solvent_eps);
         }
         tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
-        
+
     } else if (m_solvent_model == 2 && m_solvent_eps > -1) {
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::param("solvation_method", "GB");
@@ -283,7 +283,7 @@ void TBLiteInterface::ApplySolvation()
             m_tb_cont = tblite_new_gb_solvation_epsilon(m_error, m_tblite_mol, m_solvent_eps, m_solvent_gb_version, m_solvent_gb_kernel);
         }
         tblite_calculator_push_back(m_ctx, m_tblite_calc, &m_tb_cont);
-        
+
     } else if (m_solvent_model == 3) {
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::param("solvation_method", "ALPB");
@@ -296,7 +296,7 @@ void TBLiteInterface::ApplySolvation()
             tbliteError();
             tbliteContextError();
             CurcumaLogger::warn("Error during ALPB calculation - retrying with increased verbosity");
-            
+
             tblite_set_context_verbosity(m_ctx, 3);
             tblite_delete_container(&m_tb_cont);
             m_tb_cont = tblite_new_alpb_solvation_solvent(m_error, m_tblite_mol, m_solvent, m_solvent_alpb_version, m_solvent_alpb_reference);
@@ -318,16 +318,19 @@ double TBLiteInterface::Calculation(bool gradient, bool verbose)
 
     double energy = 0;
     int count = 0;
-    
+
     // Setup calculator on first call
     if (!m_calculator) {
-        // Level 2+: Method setup info  
+        // Level 2+: Method setup info
         if (CurcumaLogger::get_verbosity() >= 2) {
             std::string method_name = "unknown";
-            if (m_method_switch == 0) method_name = "iPEA1";
-            else if (m_method_switch == 1) method_name = "GFN1-xTB";
-            else if (m_method_switch == 2) method_name = "GFN2-xTB";
-            
+            if (m_method_switch == 0)
+                method_name = "iPEA1";
+            else if (m_method_switch == 1)
+                method_name = "GFN1-xTB";
+            else if (m_method_switch == 2)
+                method_name = "GFN2-xTB";
+
             CurcumaLogger::info("Starting TBLite calculation");
             CurcumaLogger::param("method", method_name);
             CurcumaLogger::param("guess", (m_guess == 0) ? "SAD" : "EEQ");
@@ -335,7 +338,7 @@ double TBLiteInterface::Calculation(bool gradient, bool verbose)
                 CurcumaLogger::param("gradient", "analytical");
             }
         }
-        
+
         // Create appropriate calculator
         if (m_method_switch == 0) {
             m_tblite_calc = tblite_new_ipea1_calculator(m_ctx, m_tblite_mol);
@@ -344,7 +347,7 @@ double TBLiteInterface::Calculation(bool gradient, bool verbose)
         } else if (m_method_switch == 2) {
             m_tblite_calc = tblite_new_gfn2_calculator(m_ctx, m_tblite_mol);
         }
-        
+
         if (m_guess == 0)
             tblite_set_calculator_guess(m_ctx, m_tblite_calc, TBLITE_GUESS_SAD);
         else
@@ -362,7 +365,7 @@ double TBLiteInterface::Calculation(bool gradient, bool verbose)
     // Perform calculation
     tblite_get_singlepoint(m_ctx, m_tblite_mol, m_tblite_calc, m_tblite_res);
     tblite_get_result_energy(m_error, m_tblite_res, &energy);
-    
+
     // Handle calculation errors
     if (tblite_check_context(m_ctx)) {
         m_error_count++;
@@ -401,7 +404,7 @@ double TBLiteInterface::Calculation(bool gradient, bool verbose)
         ApplySolvation();
         tblite_get_singlepoint(m_ctx, m_tblite_mol, m_tblite_calc, m_tblite_res);
         tblite_get_result_energy(m_error, m_tblite_res, &energy);
-        
+
         // Reset to original verbosity
         if (CurcumaLogger::get_verbosity() >= 3) {
             tblite_set_context_verbosity(m_ctx, 3);
@@ -411,17 +414,17 @@ double TBLiteInterface::Calculation(bool gradient, bool verbose)
             tblite_set_context_verbosity(m_ctx, 0);
         }
     }
-    
+
     // Level 1+: Final energy result
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::energy_abs(energy, "TBLite Energy");
     }
-    
+
     // Level 2+: Orbital analysis and molecular properties
     if (CurcumaLogger::get_verbosity() >= 2) {
         Vector orbital_energies = OrbitalEnergies();
         Vector orbital_occupations = OrbitalOccupations();
-        
+
         if (orbital_energies.size() > 0 && orbital_occupations.size() > 0) {
             // Find HOMO/LUMO
             int homo_index = -1;
@@ -431,47 +434,47 @@ double TBLiteInterface::Calculation(bool gradient, bool verbose)
                     break;
                 }
             }
-            
+
             if (homo_index >= 0 && homo_index + 1 < orbital_energies.size()) {
                 double homo = orbital_energies(homo_index);
                 double lumo = orbital_energies(homo_index + 1);
                 double gap = lumo - homo;
-                
+
                 CurcumaLogger::param("HOMO", fmt::format("{:.4f} Eh", homo));
                 CurcumaLogger::param("LUMO", fmt::format("{:.4f} Eh", lumo));
                 CurcumaLogger::param("HOMO-LUMO_gap", fmt::format("{:.4f} Eh ({:.2f} eV)", gap, gap * 27.211));
             }
         }
-        
+
         // Molecular properties
         Vector charges = Charges();
         if (charges.size() > 0) {
             double total_charge = charges.sum();
             CurcumaLogger::param("total_charge", fmt::format("{:.6f}", total_charge));
         }
-        
+
         Vector dipole = Dipole();
         if (dipole.size() >= 3) {
             double dipole_magnitude = dipole.norm();
             CurcumaLogger::param("dipole_moment", fmt::format("{:.4f} Debye", dipole_magnitude));
         }
     }
-    
+
     // Level 3+: Complete orbital listing
     if (CurcumaLogger::get_verbosity() >= 3) {
         Vector orbital_energies = OrbitalEnergies();
         Vector orbital_occupations = OrbitalOccupations();
-        
+
         if (orbital_energies.size() > 0) {
             CurcumaLogger::info("Complete TBLite orbital energy listing:");
             for (int i = 0; i < orbital_energies.size(); ++i) {
                 double occ = (i < orbital_occupations.size()) ? orbital_occupations(i) : 0.0;
-                CurcumaLogger::param(fmt::format("Orbital_{}", i + 1), 
-                                   fmt::format("{:.6f} Eh (occ={:.3f})", orbital_energies(i), occ));
+                CurcumaLogger::param(fmt::format("Orbital_{}", i + 1),
+                    fmt::format("{:.6f} Eh (occ={:.3f})", orbital_energies(i), occ));
             }
         }
     }
-    
+
     // Handle gradient calculation
     if (gradient) {
         tblite_get_result_gradient(m_error, m_tblite_res, m_gradient.data());
@@ -479,13 +482,13 @@ double TBLiteInterface::Calculation(bool gradient, bool verbose)
         if (tblite_check_context(m_ctx)) {
             tbliteContextError();
         }
-        
+
         if (CurcumaLogger::get_verbosity() >= 2) {
             double grad_norm = m_gradient.norm();
             CurcumaLogger::param("gradient_norm", fmt::format("{:.6f} Eh/Bohr", grad_norm));
         }
     }
-    
+
     if (count == 1)
         tblite_delete_container(&m_tb_cont);
     return energy;

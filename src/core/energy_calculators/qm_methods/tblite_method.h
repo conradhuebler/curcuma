@@ -22,7 +22,7 @@
 #include "../computational_method.h"
 
 #ifdef USE_TBLITE
-#include "src/core/qm_methods/tbliteinterface.h"
+#include "tbliteinterface.h"
 #endif
 
 #include <memory>

@@ -22,7 +22,7 @@
 #include "../computational_method.h"
 
 #ifdef USE_ULYSSES
-#include "src/core/qm_methods/ulyssesinterface.h"
+#include "ulyssesinterface.h"
 #endif
 
 #include <memory>

@@ -3,25 +3,29 @@
 //
 
 #include "orcainterface.h"
-#include <iostream>
-#include <fstream>
 #include <cstdlib>
+#include <fstream>
+#include <iostream>
 #include <sstream>
 
-OrcaInterface::OrcaInterface() {
+OrcaInterface::OrcaInterface()
+{
     inputFilePath = "orca.inp";
     outputFilePath = "orca.out";
 }
 
-OrcaInterface::~OrcaInterface() {
+OrcaInterface::~OrcaInterface()
+{
     // Optionale Bereinigungsoperationen
 }
 
-void OrcaInterface::setInputFile(const std::string& inputFile) {
+void OrcaInterface::setInputFile(const std::string& inputFile)
+{
     inputFilePath = inputFile;
 }
 
-bool OrcaInterface::createInputFile(const std::string& content) {
+bool OrcaInterface::createInputFile(const std::string& content)
+{
     std::ofstream outFile(inputFilePath);
     if (!outFile) {
         std::cerr << "Fehler beim Erstellen der Eingabedatei!" << std::endl;
@@ -32,17 +36,19 @@ bool OrcaInterface::createInputFile(const std::string& content) {
     return true;
 }
 
-bool OrcaInterface::executeOrcaProcess() {
+bool OrcaInterface::executeOrcaProcess()
+{
     // Hier rufen wir das ORCA-Programm über einen Systemaufruf auf
     std::stringstream command;
     command << "orca " << inputFilePath << " > " << outputFilePath;
     int result = std::system(command.str().c_str());
-    
+
     // Überprüfen, ob der ORCA-Prozess erfolgreich ausgeführt wurde
     return (result == 0);
 }
 
-bool OrcaInterface::runOrca() {
+bool OrcaInterface::runOrca()
+{
     // Starten Sie den ORCA-Prozess und warten Sie auf das Ergebnis
     std::cout << "Starte ORCA..." << std::endl;
     if (executeOrcaProcess()) {
@@ -54,13 +60,15 @@ bool OrcaInterface::runOrca() {
     }
 }
 
-void OrcaInterface::readOrcaJSON() {
+void OrcaInterface::readOrcaJSON()
+{
     // Liest die Ergebnisse aus der ORCA-Ausgabedatei
-    std::ifstream property(inputFilePath+".property.json");
+    std::ifstream property(inputFilePath + ".property.json");
     property >> OrcaJSON;
 }
 
-bool OrcaInterface::getOrcaJSON() {
+bool OrcaInterface::getOrcaJSON()
+{
     // Hier rufen wir das ORCA_2JSON-Programm über einen Systemaufruf auf
     std::stringstream command;
     command << "orca_2json " << inputFilePath << " -property >> " << outputFilePath;

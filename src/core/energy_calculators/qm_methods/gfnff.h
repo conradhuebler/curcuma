@@ -22,25 +22,25 @@
 
 #pragma once
 
-#include "src/core/global.h"
-#include "src/core/qm_methods/interface/abstract_interface.h"
-#include "src/core/forcefield.h"
+#include "interface/abstract_interface.h"
 #include "json.hpp"
+#include "src/core/energy_calculators/ff_methods/forcefield.h"
+#include "src/core/global.h"
 
 using json = nlohmann::json;
 
 /**
  * @brief GFN-FF Implementation as QM Method
- * 
+ *
  * GFN-FF combines quantum chemical accuracy with force field efficiency.
  * It provides:
  * - Automatic parametrization based on extended tight-binding (xTB)
  * - Accurate treatment of non-covalent interactions
  * - Gradients for geometry optimization and dynamics
  * - Coverage of the periodic table up to Z=86
- * 
+ *
  * References:
- * - Spicher, S.; Grimme, S. "Robust Atomistic Modeling of Materials, 
+ * - Spicher, S.; Grimme, S. "Robust Atomistic Modeling of Materials,
  *   Organometallic, and Biochemical Systems" Angew. Chem. Int. Ed. 59, 15665 (2020)
  */
 class GFNFF : public QMInterface {
@@ -322,15 +322,15 @@ private:
     EEQParameters getEEQParameters(int atom_idx, const TopologyInfo& topo_info) const;
 
 private:
-    json m_parameters;                    ///< GFN-FF parameters
-    ForceField* m_forcefield;            ///< Force field engine using modern structure
-    
-    bool m_initialized;                  ///< Initialization status
-    
-    double m_energy_total;               ///< Total energy in Hartree
-    Vector m_charges;                    ///< Atomic partial charges
-    Vector m_bond_orders;                ///< Wiberg bond orders
-    
+    json m_parameters; ///< GFN-FF parameters
+    ForceField* m_forcefield; ///< Force field engine using modern structure
+
+    bool m_initialized; ///< Initialization status
+
+    double m_energy_total; ///< Total energy in Hartree
+    Vector m_charges; ///< Atomic partial charges
+    Vector m_bond_orders; ///< Wiberg bond orders
+
     // Conversion factors
     static constexpr double HARTREE_TO_KCAL = 627.5094740631;
     static constexpr double BOHR_TO_ANGSTROM = 0.5291772105638411;

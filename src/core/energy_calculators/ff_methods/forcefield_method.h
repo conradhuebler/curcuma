@@ -20,8 +20,8 @@
 #pragma once
 
 #include "../computational_method.h"
-#include "src/core/forcefield.h"
-#include "src/core/forcefieldgenerator.h"
+#include "forcefield.h"
+#include "forcefieldgenerator.h"
 
 #include <memory>
 

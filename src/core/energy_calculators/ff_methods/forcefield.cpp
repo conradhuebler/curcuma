@@ -17,10 +17,10 @@
  *
  */
 
-#include "src/core/forcefieldderivaties.h"
-#include "src/core/qmdff_par.h"
-#include "src/core/uff_par.h"
+#include "forcefieldderivaties.h"
+#include "qmdff_par.h"
 #include "src/core/curcuma_logger.h"
+#include "uff_par.h"
 
 #include "forcefieldfunctions.h"
 
@@ -38,7 +38,7 @@ ForceField::ForceField(const json& controller)
     m_threadpool->setProgressBar(CxxThreadPool::ProgressBarType::None);
     m_threads = parameter["threads"];
     m_gradient_type = parameter["gradient"];
-    
+
     // Auto-detect parameter file based on geometry file
     if (parameter.contains("geometry_file")) {
         std::string geom_file = parameter["geometry_file"];
@@ -103,20 +103,20 @@ void ForceField::setParameter(const json& parameters)
         return;
     }
     in_setParameter = true;
-    
+
     std::string method_name = "unknown";
     if (parameters.contains("method") && !parameters["method"].is_null()) {
         method_name = parameters["method"].get<std::string>();
     }
-    
+
     // Level 2+: Force field initialization
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("Initializing force field parameters");
         CurcumaLogger::param("method", method_name);
     }
-    
+
     bool loaded_from_cache = false;
-    
+
     // Try loading cached parameters if caching enabled and same method
     if (m_enable_caching && parameters.contains("method")) {
         std::string method = parameters["method"];
@@ -125,7 +125,7 @@ void ForceField::setParameter(const json& parameters)
             CurcumaLogger::param("loaded_from_cache", loaded_from_cache ? "true" : "false");
         }
     }
-    
+
     if (!loaded_from_cache) {
         // Set new parameters (generation or explicit)
         if (parameters.contains("bonds"))
@@ -142,15 +142,15 @@ void ForceField::setParameter(const json& parameters)
         m_method = m_parameters["method"];
         if (m_parameters.contains("e0"))
             m_e0 = m_parameters["e0"];
-        
+
         AutoRanges();
-        
+
         // Auto-save new parameters (only if caching enabled)
         if (m_enable_caching) {
             autoSaveParameters();
         }
     }
-    
+
     // Set method type for ForceFieldThread (regardless of cache)
     int method_type = 1; // default UFF
     if (m_method == "qmdff" || m_method == "quff") {
@@ -161,8 +161,8 @@ void ForceField::setParameter(const json& parameters)
 
     // Claude Generated: Print parameter summary after setting parameters
     printParameterSummary();
-    
-    in_setParameter = false;  // Reset the recursive guard
+
+    in_setParameter = false; // Reset the recursive guard
 }
 
 void ForceField::setParameterFile(const std::string& file)
@@ -301,7 +301,7 @@ void ForceField::AutoRanges()
         CurcumaLogger::param("angles", static_cast<int>(m_angles.size()));
         CurcumaLogger::param("threads", m_threads);
     }
-    
+
     int free_threads = m_threads;
 #pragma message("revert")
     int d3 = false; // m_parameters["d3"];
@@ -380,7 +380,7 @@ void ForceField::AutoRanges()
         for (int j = int(i * m_EQs.size() / double(free_threads)); j < int((i + 1) * m_EQs.size() / double(free_threads)); ++j)
             thread->addEQ(m_EQs[j]);
     }
-    
+
     // Level 3+: AutoRanges completion info
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::param("created_threads", free_threads);
@@ -415,21 +415,21 @@ bool ForceField::saveParametersToFile(const std::string& filename) const
 {
     try {
         json output = exportCurrentParameters();
-        
+
         std::ofstream file(filename);
         if (!file.is_open()) {
             CurcumaLogger::error(fmt::format("Cannot open file {} for writing", filename));
             return false;
         }
-        
+
         file << output.dump(4); // Pretty print with 4 spaces
         file.close();
-        
+
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::success(fmt::format("Force field parameters saved to: {}", filename));
         }
         return true;
-        
+
     } catch (const std::exception& e) {
         CurcumaLogger::error(fmt::format("Error saving parameters: {}", e.what()));
         return false;
@@ -444,29 +444,29 @@ bool ForceField::loadParametersFromFile(const std::string& filename)
             CurcumaLogger::error(fmt::format("Cannot open file {} for reading", filename));
             return false;
         }
-        
+
         json loaded_params;
         file >> loaded_params;
         file.close();
-        
+
         // Validate that this is a force field parameter file
         if (!loaded_params.contains("method") || !loaded_params.contains("bonds")) {
             CurcumaLogger::error("Invalid force field parameter file format");
             return false;
         }
-        
+
         // Apply loaded parameters
         setParameter(loaded_params);
-        
+
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::success(fmt::format("Force field parameters loaded from: {}", filename));
             CurcumaLogger::param("method", loaded_params["method"].get<std::string>());
             CurcumaLogger::param("bonds", static_cast<int>(loaded_params["bonds"].size()));
             CurcumaLogger::param("angles", static_cast<int>(loaded_params["angles"].size()));
         }
-        
+
         return true;
-        
+
     } catch (const std::exception& e) {
         CurcumaLogger::error(fmt::format("Error loading parameters: {}", e.what()));
         return false;
@@ -476,12 +476,12 @@ bool ForceField::loadParametersFromFile(const std::string& filename)
 json ForceField::exportCurrentParameters() const
 {
     json output;
-    
+
     // Method identification
     output["method"] = m_method;
     output["natoms"] = m_natoms;
     output["e0"] = m_e0;
-    
+
     // Export bonds
     json bonds = json::array();
     for (const auto& bond : m_bonds) {
@@ -498,7 +498,7 @@ json ForceField::exportCurrentParameters() const
         bonds.push_back(b);
     }
     output["bonds"] = bonds;
-    
+
     // Export angles
     json angles = json::array();
     for (const auto& angle : m_angles) {
@@ -517,7 +517,7 @@ json ForceField::exportCurrentParameters() const
         angles.push_back(a);
     }
     output["angles"] = angles;
-    
+
     // Export dihedrals
     json dihedrals = json::array();
     for (const auto& dihedral : m_dihedrals) {
@@ -533,7 +533,7 @@ json ForceField::exportCurrentParameters() const
         dihedrals.push_back(d);
     }
     output["dihedrals"] = dihedrals;
-    
+
     // Export inversions
     json inversions = json::array();
     for (const auto& inversion : m_inversions) {
@@ -550,7 +550,7 @@ json ForceField::exportCurrentParameters() const
         inversions.push_back(inv);
     }
     output["inversions"] = inversions;
-    
+
     // Export vdW terms
     json vdws = json::array();
     for (const auto& vdw : m_vdWs) {
@@ -563,7 +563,7 @@ json ForceField::exportCurrentParameters() const
         vdws.push_back(v);
     }
     output["vdws"] = vdws;
-    
+
     // Export electrostatic terms
     json eqs = json::array();
     for (const auto& eq : m_EQs) {
@@ -577,11 +577,11 @@ json ForceField::exportCurrentParameters() const
         eqs.push_back(e);
     }
     output["electrostatics"] = eqs;
-    
+
     // Add metadata
     output["generated_by"] = "curcuma_forcefield";
     output["timestamp"] = std::chrono::system_clock::now().time_since_epoch().count();
-    
+
     return output;
 }
 
@@ -589,12 +589,12 @@ std::string ForceField::generateParameterFileName(const std::string& geometry_fi
 {
     // input.xyz -> input.param.json
     // path/to/molecule.xyz -> path/to/molecule.param.json
-    
+
     size_t last_dot = geometry_file.find_last_of('.');
     if (last_dot == std::string::npos) {
         return geometry_file + ".param.json";
     }
-    
+
     std::string base = geometry_file.substr(0, last_dot);
     return base + ".param.json";
 }
@@ -604,7 +604,7 @@ bool ForceField::tryLoadAutoParameters(const std::string& method)
     if (m_auto_param_file.empty()) {
         return false; // No auto-file detected
     }
-    
+
     // Check if parameter file exists
     std::ifstream test_file(m_auto_param_file);
     if (!test_file.good()) {
@@ -614,7 +614,7 @@ bool ForceField::tryLoadAutoParameters(const std::string& method)
         return false;
     }
     test_file.close();
-    
+
     // Try to load parameters
     if (!loadParametersFromFile(m_auto_param_file)) {
         if (CurcumaLogger::get_verbosity() >= 3) {
@@ -622,7 +622,7 @@ bool ForceField::tryLoadAutoParameters(const std::string& method)
         }
         return false;
     }
-    
+
     // Check if method matches
     if (m_parameters.contains("method") && !m_parameters["method"].is_null()) {
         std::string cached_method = m_parameters["method"].get<std::string>();
@@ -633,7 +633,7 @@ bool ForceField::tryLoadAutoParameters(const std::string& method)
             return true;
         } else {
             if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::warn(fmt::format("Method mismatch in cached parameters (found: {}, expected: {})", 
+                CurcumaLogger::warn(fmt::format("Method mismatch in cached parameters (found: {}, expected: {})",
                     cached_method, method));
             }
             m_parameters.clear();
@@ -653,7 +653,7 @@ bool ForceField::autoSaveParameters() const
     if (m_auto_param_file.empty()) {
         return false;
     }
-    
+
     bool success = saveParametersToFile(m_auto_param_file);
     if (success) {
         if (CurcumaLogger::get_verbosity() >= 2) {
@@ -671,7 +671,7 @@ double ForceField::Calculate(bool gradient, bool verbose)
         CurcumaLogger::param("gradient", gradient ? "analytical" : "none");
         CurcumaLogger::param("stored_threads", static_cast<int>(m_stored_threads.size()));
     }
-    
+
     m_gradient = Eigen::MatrixXd::Zero(m_geometry.rows(), 3);
     double energy = 0.0;
     double d4_energy = 0;
@@ -719,7 +719,7 @@ double ForceField::Calculate(bool gradient, bool verbose)
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::energy_abs(energy, "Force Field Energy");
     }
-    
+
     // Level 2+: Energy decomposition
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("Force field energy decomposition:");
@@ -743,13 +743,13 @@ double ForceField::Calculate(bool gradient, bool verbose)
         if (hh_energy != 0.0) {
             CurcumaLogger::param("HH_repulsion", fmt::format("{:.6f} Eh", hh_energy));
         }
-        
+
         if (gradient) {
             double grad_norm = m_gradient.norm();
             CurcumaLogger::param("gradient_norm", fmt::format("{:.6f} Eh/Bohr", grad_norm));
         }
     }
-    
+
     // Level 3+: Thread and calculation details
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::param("final_energy", fmt::format("{:.6f} Eh", energy));
@@ -823,14 +823,14 @@ void ForceField::printParameterSummary() const
         // Print dispersion and hydrogen bonding flags
         fmt::print("  Force field flags:\n");
         if (m_parameters.contains("d3") && m_parameters["d3"].get<double>() != 0) {
-            fmt::print("    D3 dispersion: enabled (s6={:.3f}, s8={:.3f})\n", 
+            fmt::print("    D3 dispersion: enabled (s6={:.3f}, s8={:.3f})\n",
                 m_parameters.value("d3_s6", 0.0), m_parameters.value("d3_s8", 0.0));
         }
         if (m_parameters.contains("d4") && m_parameters["d4"].get<double>() != 0) {
             fmt::print("    D4 dispersion: enabled\n");
         }
         if (m_parameters.contains("h4") && m_parameters["h4"].get<double>() != 0) {
-            fmt::print("    H4 hydrogen bonding: enabled (scaling={:.3f})\n", 
+            fmt::print("    H4 hydrogen bonding: enabled (scaling={:.3f})\n",
                 m_parameters.value("h4_scaling", 1.0));
             if (m_parameters.contains("h4_nh_o")) {
                 fmt::print("      NH···O: {:.3f}\n", m_parameters["h4_nh_o"].get<double>());

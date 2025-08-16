@@ -29,12 +29,12 @@ GFNFF::GFNFF()
     , m_energy_total(0.0)
 {
     json default_parameters = {
-        {"method", "gfnff"},
-        {"threads", 1},
-        {"gradient", 1},
-        {"dispersion", true},
-        {"hbond", true},
-        {"repulsion_scaling", 1.0}
+        { "method", "gfnff" },
+        { "threads", 1 },
+        { "gradient", 1 },
+        { "dispersion", true },
+        { "hbond", true },
+        { "repulsion_scaling", 1.0 }
     };
     m_parameters = default_parameters;
 }
@@ -45,14 +45,14 @@ GFNFF::GFNFF(const json& parameters)
     , m_energy_total(0.0)
 {
     json default_parameters = {
-        {"method", "gfnff"},
-        {"threads", 1},
-        {"gradient", 1},
-        {"dispersion", true},
-        {"hbond", true},
-        {"repulsion_scaling", 1.0}
+        { "method", "gfnff" },
+        { "threads", 1 },
+        { "gradient", 1 },
+        { "dispersion", true },
+        { "hbond", true },
+        { "repulsion_scaling", 1.0 }
     };
-    
+
     m_parameters = MergeJson(default_parameters, parameters);
 }
 
@@ -115,7 +115,7 @@ double GFNFF::Calculation(bool gradient, bool verbose)
     }
 
     double energy_kcal = m_forcefield->Calculate(gradient, verbose);
-    
+
     if (gradient) {
         Matrix grad_kcal = m_forcefield->Gradient();
         m_gradient = convertGradientToHartree(grad_kcal);
@@ -144,7 +144,7 @@ Vector GFNFF::BondOrders() const
 void GFNFF::setParameters(const json& parameters)
 {
     m_parameters = MergeJson(m_parameters, parameters);
-    
+
     if (m_forcefield && m_initialized) {
         json ff_params = generateGFNFFParameters();
         m_forcefield->setParameter(ff_params);
@@ -256,7 +256,7 @@ json GFNFF::generateGFNFFParameters()
 json GFNFF::generateGFNFFBonds() const
 {
     json bonds = json::array();
-    
+
     // GFN-FF bond detection with connectivity threshold
     double bond_threshold = 1.3; // Factor for covalent radii sum
 
@@ -267,11 +267,11 @@ json GFNFF::generateGFNFFBonds() const
             Vector ri = m_geometry.row(i);
             Vector rj = m_geometry.row(j);
             double distance = (ri - rj).norm();
-            
+
             // Get covalent radii for atoms i and j
             double rcov_i = getCovalentRadius(m_atoms[i]);
             double rcov_j = getCovalentRadius(m_atoms[j]);
-            
+
             if (distance < bond_threshold * (rcov_i + rcov_j)) {
                 // This is a bond - generate GFN-FF parameters
                 json bond;
@@ -280,19 +280,19 @@ json GFNFF::generateGFNFFBonds() const
                 bond["j"] = j;
                 bond["k"] = 0; // Not used in GFN-FF but required by ForceField
                 bond["distance"] = distance; // Current bond distance
-                
+
                 // GFN-FF bond parameters based on element types
                 auto bond_params = getGFNFFBondParameters(m_atoms[i], m_atoms[j], distance);
                 bond["fc"] = bond_params.force_constant;
                 bond["r0_ij"] = bond_params.equilibrium_distance;
                 bond["r0_ik"] = 0.0; // Not used in GFN-FF but required by ForceField
                 bond["exponent"] = bond_params.anharmonic_factor;
-                
+
                 bonds.push_back(bond);
             }
         }
     }
-    
+
     if (bonds.empty()) {
         std::cerr << "Warning: No bonds detected in GFN-FF" << std::endl;
     } else {
@@ -305,25 +305,27 @@ json GFNFF::generateGFNFFBonds() const
 json GFNFF::generateGFNFFAngles() const
 {
     json angles = json::array();
-    
+
     // First, collect all bonds for angle detection
     std::vector<std::pair<int, int>> bond_list;
     json bonds = generateGFNFFBonds();
-    
+
     for (const auto& bond : bonds) {
-        bond_list.push_back({bond["i"], bond["j"]});
+        bond_list.push_back({ bond["i"], bond["j"] });
     }
-    
+
     // Generate angles from bonded topology
     for (int center = 0; center < m_atomcount; ++center) {
         std::vector<int> neighbors;
-        
+
         // Find all atoms bonded to center
         for (const auto& bond : bond_list) {
-            if (bond.first == center) neighbors.push_back(bond.second);
-            if (bond.second == center) neighbors.push_back(bond.first);
+            if (bond.first == center)
+                neighbors.push_back(bond.second);
+            if (bond.second == center)
+                neighbors.push_back(bond.first);
         }
-        
+
         // Generate all possible angles with center as middle atom
         for (int i = 0; i < neighbors.size(); ++i) {
             for (int j = i + 1; j < neighbors.size(); ++j) {
@@ -332,30 +334,30 @@ json GFNFF::generateGFNFFAngles() const
                 angle["i"] = neighbors[i];
                 angle["j"] = center;
                 angle["k"] = neighbors[j];
-                
+
                 // Calculate current angle for reference
                 Vector ri = m_geometry.row(neighbors[i]);
                 Vector rj = m_geometry.row(center);
                 Vector rk = m_geometry.row(neighbors[j]);
-                
+
                 Vector v1 = ri - rj;
                 Vector v2 = rk - rj;
                 double current_angle = acos(v1.dot(v2) / (v1.norm() * v2.norm()));
-                
+
                 // GFN-FF angle parameters
-                auto angle_params = getGFNFFAngleParameters(m_atoms[neighbors[i]], 
-                                                          m_atoms[center], 
-                                                          m_atoms[neighbors[j]], 
-                                                          current_angle);
-                
+                auto angle_params = getGFNFFAngleParameters(m_atoms[neighbors[i]],
+                    m_atoms[center],
+                    m_atoms[neighbors[j]],
+                    current_angle);
+
                 angle["fc"] = angle_params.force_constant;
                 angle["theta0_ijk"] = angle_params.equilibrium_angle;
                 angle["r0_ij"] = (ri - rj).norm(); // Distance i-j
-                angle["r0_ik"] = (rk - rj).norm(); // Distance k-j  
+                angle["r0_ik"] = (rk - rj).norm(); // Distance k-j
                 angle["C0"] = angle_params.c0;
                 angle["C1"] = angle_params.c1;
                 angle["C2"] = angle_params.c2;
-                
+
                 angles.push_back(angle);
             }
         }
@@ -431,7 +433,7 @@ double GFNFF::getCovalentRadius(int atomic_number) const
         return covalent_radii[atomic_number - 1]; // Convert to 0-based indexing
     } else {
         // Fallback for unknown elements
-        std::cerr << "Warning: No covalent radius for element " << atomic_number 
+        std::cerr << "Warning: No covalent radius for element " << atomic_number
                   << ", using default 1.0 Å" << std::endl;
         return 1.0;
     }
@@ -522,8 +524,8 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int z1, int z2, int z3, d
 
     // Fourier coefficients for cosine expansion: E = k*(C0 + C1*cos(θ) + C2*cos(2θ))
     double cos_eq = cos(current_angle);
-    params.c0 = 1.0 - cos_eq;    // Ensures minimum at current angle
-    params.c1 = -1.0;            // Linear restoring term
+    params.c0 = 1.0 - cos_eq; // Ensures minimum at current angle
+    params.c1 = -1.0; // Linear restoring term
     params.c2 = 0.05; // Small anharmonic correction
 
     return params;

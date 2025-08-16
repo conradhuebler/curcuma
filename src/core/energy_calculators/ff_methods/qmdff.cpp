@@ -28,15 +28,15 @@
  */
 
 #include "hbonds.h"
-#include "src/core/dftd3interface.h"
-#include "src/core/dftd4interface.h"
+#include "src/core/energy_calculators/qm_methods/dftd3interface.h"
+#include "src/core/energy_calculators/qm_methods/dftd4interface.h"
 
-#include "src/core/qmdff_par.h"
+#include "qmdff_par.h"
 #include "src/core/topology.h"
 
 #include <Eigen/Dense>
 
-#include "src/core/forcefieldderivaties.h"
+#include "forcefieldderivaties.h"
 
 #include "qmdff.h"
 

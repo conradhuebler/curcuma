@@ -23,20 +23,20 @@
 
 #include "forcefieldthread.h"
 
-#include "hbonds.h"
+#include "src/core/hbonds.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #ifdef USE_D3
-#include "src/core/qm_methods/dftd3interface.h"
+#include "src/core/energy_calculators/qm_methods/dftd3interface.h"
 #endif
 
 #ifdef USE_D4
-#include "src/core/qm_methods/dftd4interface.h"
+#include "src/core/energy_calculators/qm_methods/dftd4interface.h"
 #endif
 
-#include "src/core/qmdff_par.h"
-#include "src/core/uff_par.h"
+#include "qmdff_par.h"
+#include "uff_par.h"
 
 #include <functional>
 #include <set>
@@ -78,19 +78,19 @@ public:
 
     void setParameter(const json& parameter);
     void setParameterFile(const std::string& file);
-    
+
     // Parameter caching functions for all FF methods (UFF, GFN-FF, QMDFF, etc.)
     bool saveParametersToFile(const std::string& filename) const;
     bool loadParametersFromFile(const std::string& filename);
     json exportCurrentParameters() const;
     bool hasParameters() const { return !m_parameters.empty(); }
-    
+
     // Auto-parameter file management: input.xyz -> input.param.json
     bool tryLoadAutoParameters(const std::string& method);
     bool autoSaveParameters() const;
     static std::string generateParameterFileName(const std::string& geometry_file);
     void setParameterCaching(bool enable) { m_enable_caching = enable; }
-    
+
     Eigen::MatrixXd NumGrad();
 
     // Claude Generated: Parameter analysis functionality
@@ -125,5 +125,5 @@ private:
     std::vector<EQ> m_EQs;
     json m_parameters;
     std::string m_auto_param_file; // Auto-detected parameter file path
-    bool m_enable_caching = true;  // Can be disabled for multi-threading
+    bool m_enable_caching = true; // Can be disabled for multi-threading
 };

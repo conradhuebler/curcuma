@@ -144,6 +144,7 @@ private:
     static bool hasTBLite();
     static bool hasXTB();
     static bool hasUlysses();
+    static bool hasGFNFF();
     static bool hasD3();
     static bool hasD4();
     
@@ -213,5 +214,6 @@ public:
 #define CURCUMA_HAS_TBLITE() MethodFactory::hasTBLite()
 #define CURCUMA_HAS_XTB() MethodFactory::hasXTB()  
 #define CURCUMA_HAS_ULYSSES() MethodFactory::hasUlysses()
+#define CURCUMA_HAS_GFNFF() MethodFactory::hasGFNFF()
 #define CURCUMA_HAS_D3() MethodFactory::hasD3()
 #define CURCUMA_HAS_D4() MethodFactory::hasD4()

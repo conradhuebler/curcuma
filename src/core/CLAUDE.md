@@ -45,23 +45,34 @@ return m_method->calculateEnergy(gradient);
 - **Universal Verbosity**: Energy decomposition, timing analysis, silent mode support
 - **Performance Critical**: Parameter caching essential for iterative calculations
 
-### New Directory Structure
+### Physical Directory Structure (Completed Restructuring)
 ```cpp
 core/
 ├── energycalculator.cpp        # NEW: Unified polymorphic dispatcher
-├── energy_calculators/         # NEW: Polymorphic method wrappers  
-│   ├── computational_method.h  # Base interface for all methods
-│   ├── method_factory.cpp      # Priority-based method creation
-│   ├── qm_methods/            # QM method wrappers (EHT, XTB, TBLite, Ulysses)
-│   └── ff_methods/            # Force field wrappers
+├── molecule.cpp                # Core molecular data structures
 ├── curcuma_logger.cpp          # Universal logging system
-├── forcefield.cpp              # + verbosity integration
-├── forcefieldgenerator.cpp     # + progress tracking
-└── qm_methods/                # Native implementations + verbosity
-    ├── eht.cpp                # Extended Hückel + CurcumaLogger
-    ├── xtbinterface.cpp       # XTB + synchronized verbosity
-    ├── tbliteinterface.cpp    # TBLite + synchronized verbosity  
-    └── ulyssesinterface.cpp   # Ulysses + CurcumaLogger
+├── energy_calculators/         # NEW: All computational methods consolidated here
+│   ├── computational_method.h      # Base interface for all methods
+│   ├── method_factory.cpp          # Priority-based method creation
+│   ├── qm_methods/                 # ALL QM methods (moved from src/core/qm_methods/)
+│   │   ├── eht.cpp                 # Extended Hückel + CurcumaLogger
+│   │   ├── xtbinterface.cpp        # XTB + synchronized verbosity
+│   │   ├── tbliteinterface.cpp     # TBLite + synchronized verbosity
+│   │   ├── ulyssesinterface.cpp    # Ulysses + CurcumaLogger
+│   │   ├── gfnff.cpp               # Native GFN-FF (WIP)
+│   │   ├── orcainterface.cpp       # ORCA interface
+│   │   ├── dftd3interface.cpp      # DFT-D3 dispersion
+│   │   ├── dftd4interface.cpp      # DFT-D4 dispersion
+│   │   ├── *_method.cpp            # Polymorphic method wrappers
+│   │   └── interface/              # Abstract interfaces
+│   └── ff_methods/                 # ALL force field methods (moved from src/core/)
+│       ├── forcefield.cpp          # Main FF engine + verbosity
+│       ├── forcefieldgenerator.cpp # Parameter generation + progress tracking
+│       ├── forcefieldthread.cpp    # Multi-threading support
+│       ├── qmdff.cpp               # QMDFF implementation
+│       ├── eigen_uff.cpp           # UFF implementation
+│       └── *_par.h                 # Parameter databases (UFF, QMDFF)
+└── (other core files...)           # topology.cpp, fileiterator.cpp, etc.
 ```
 
 ## Instructions Block
@@ -88,6 +99,7 @@ core/
 - **🔧 Enhanced Error Handling**: Method-specific error reporting with CurcumaLogger
 - **📈 Performance Maintained**: Threading, caching, and optimization preserved
 - **✅ API Compatibility**: All existing EnergyCalculator usage works unchanged
+- **🗂️ Physical Restructuring**: All computational methods consolidated under `energy_calculators/`
 
 ### Previous Improvements
 - **Scientific fixes**: Dipole moments now use center of mass (physically correct)

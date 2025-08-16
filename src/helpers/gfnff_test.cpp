@@ -1,4 +1,4 @@
-#include "src/core/qm_methods/gfnff.h"
+#include "src/core/energy_calculators/qm_methods/gfnff.h"
 #include "src/core/global.h"
 #include <iostream>
 

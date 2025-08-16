@@ -28,19 +28,19 @@
 
 #include "src/core/global.h"
 
-#include "hbonds.h"
+#include "src/core/hbonds.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
 
 #ifdef USE_D3
-#include "src/core/dftd3interface.h"
+#include "src/core/energy_calculators/qm_methods/dftd3interface.h"
 #endif
 
 #ifdef USE_D4
-#include "src/core/dftd4interface.h"
+#include "src/core/energy_calculators/qm_methods/dftd4interface.h"
 #endif
 
-#include "src/core/uff_par.h"
+#include "uff_par.h"
 #include <set>
 #include <vector>
 
@@ -49,8 +49,7 @@
 #include "json.hpp"
 using json = nlohmann::json;
 
-class UFFThread : public CxxThread
-{
+class UFFThread : public CxxThread {
 public:
     UFFThread(int thread, int threads)
         : m_thread(thread)

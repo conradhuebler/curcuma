@@ -26,17 +26,17 @@
  *
  */
 
+#include "qmdff_par.h"
 #include "src/core/global.h"
-#include "src/core/qmdff_par.h"
 
-#include "hbonds.h"
+#include "src/core/hbonds.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
 
-#include "src/core/dftd3interface.h"
-#include "src/core/dftd4interface.h"
+#include "src/core/energy_calculators/qm_methods/dftd3interface.h"
+#include "src/core/energy_calculators/qm_methods/dftd4interface.h"
 
-#include "src/core/uff_par.h"
+#include "uff_par.h"
 #include <set>
 #include <vector>
 

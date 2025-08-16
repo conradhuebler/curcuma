@@ -22,11 +22,11 @@
 #include "../computational_method.h"
 
 #ifdef USE_D3
-#include "src/core/qm_methods/dftd3interface.h"
+#include "dftd3interface.h"
 #endif
 
 #ifdef USE_D4
-#include "src/core/qm_methods/dftd4interface.h"
+#include "dftd4interface.h"
 #endif
 
 #include <memory>

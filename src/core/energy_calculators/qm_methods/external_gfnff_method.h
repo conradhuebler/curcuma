@@ -1,5 +1,5 @@
 /*
- * < Native GFN-FF Method Wrapper for ComputationalMethod Interface >
+ * < External GFN-FF Method Wrapper >
  * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -15,55 +15,40 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
+ * Claude Generated: ComputationalMethod wrapper for external GFN-FF interface
  */
 
 #pragma once
 
 #include "../computational_method.h"
-#include "gfnff.h"
+#include "gfnffinterface.h"
 
 #include <memory>
 
-/**
- * @brief Native GFN-FF method wrapper for ComputationalMethod interface
- * 
- * This wrapper adapts Curcuma's native GFN-FF implementation (cgfnff)
- * to the unified ComputationalMethod interface. This is the "cgfnff" 
- * method - Curcuma's own implementation of the GFN-FF force field.
- * 
- * Status: WORK IN PROGRESS - Architecture complete, parameter generation debugging needed
- * 
- * Claude Generated: Big-Bang EnergyCalculator refactoring wrapper
- */
-class GFNFFMethod : public ComputationalMethod {
+class ExternalGFNFFMethod : public ComputationalMethod {
 public:
-    explicit GFNFFMethod(const json& config = json{});
-    virtual ~GFNFFMethod() = default;
-    
+    ExternalGFNFFMethod(const json& config = json{});
+    virtual ~ExternalGFNFFMethod() = default;
+
     // ComputationalMethod interface
     bool setMolecule(const Mol& mol) override;
     bool updateGeometry(const Matrix& geometry) override;
     double calculateEnergy(bool gradient = false, bool verbose = false) override;
-    
     Matrix getGradient() const override;
     Vector getCharges() const override;
     Vector getBondOrders() const override;
     Position getDipole() const override;
     bool hasGradient() const override { return true; }
-    
-    std::string getMethodName() const override { return "cgfnff"; }
-    bool isThreadSafe() const override { return true; }
-    void setThreadCount(int threads) override;
-    
+    std::string getMethodName() const override { return "External GFN-FF"; }
+    bool isThreadSafe() const override { return false; }
+    void setThreadCount(int threads) override { (void)threads; }
     void setParameters(const json& params) override;
     json getParameters() const override;
-    bool hasError() const override;
-    void clearError() override;
-    std::string getErrorMessage() const override;
+    bool hasError() const override { return false; }
 
 private:
-    std::unique_ptr<GFNFF> m_gfnff;
-    Mol m_molecule;
-    bool m_calculation_done;
-    double m_last_energy;
+    std::unique_ptr<GFNFFInterface> m_interface;
+    json m_config;
+    bool m_initialized;
+    Mol m_current_molecule;
 };
