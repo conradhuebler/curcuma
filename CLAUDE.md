@@ -232,6 +232,13 @@ cmake .. && make -j4
 - **Educational**: Clear naming and comprehensive documentation
 - **Migration**: Replace scattered constants with centralized functions
 
+### JSON Controller System (`src/main.cpp`, CLI2Json)
+- **Consistent Parameter Passing**: All methods use `controller["methodname"]` subdocuments
+- **Examples**: `Hessian(controller["hessian"])`, `QMDFFFit(controller["qmdfffit"])`, `ModernOptimizer(..., controller["opt"])`
+- **CLI Arguments**: Automatically split into controller subdocuments via `CLI2Json()`
+- **Structure**: `controller[keyword][parameter]` - e.g. `controller["opt"]["verbosity"]`, `controller["hessian"]["MaxIter"]`
+- **Global Parameters**: `verbosity`, `threads` are additionally duplicated at top-level
+
 ## Planned Development
 
 ### Breaking Changes (Test-Driven)

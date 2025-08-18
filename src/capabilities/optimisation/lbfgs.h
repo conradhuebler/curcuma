@@ -91,6 +91,22 @@ public:
         m_diis_hist = history_size;
         m_diis_start = start_iteration;
     }
+    
+    // RFO parameter setters - Claude Generated
+    void setTrustRadius(double radius) { m_trust_radius = radius; }
+    void setTrustRadiusRange(double min_radius, double max_radius) {
+        m_trust_radius_min = min_radius;
+        m_trust_radius_max = max_radius;
+    }
+    void setEnergyThreshold(double threshold) { m_energy_threshold = threshold; }
+    void setEigenvalueShift(double shift) { m_eigenvalue_shift = shift; }
+    
+    // Configure all RFO parameters at once
+    void setRFOParameters(double trust_radius, double energy_threshold = 1e-4, double eigenvalue_shift = 1e-3) {
+        m_trust_radius = trust_radius;
+        m_energy_threshold = energy_threshold;
+        m_eigenvalue_shift = eigenvalue_shift;
+    }
     void setDIIS(int history_size, int start_iteration)
     { // Legacy compatibility - Claude Generated
         setDIISParameters(history_size, start_iteration);
@@ -137,8 +153,13 @@ private:
     int m_diis_hist = 10; // DIIS history size
     int m_diis_start = 10; // When to start DIIS
 
-    // RFO parameters
-    double m_lambda = 0.1; // RFO lambda parameter
+    // RFO parameters - Claude Generated - Configurable
+    double m_lambda = 0.1;              // RFO lambda parameter (legacy)
+    double m_trust_radius = 0.1;        // Trust radius in Bohr
+    double m_trust_radius_min = 1e-4;   // Minimum trust radius
+    double m_trust_radius_max = 0.5;    // Maximum trust radius
+    double m_energy_threshold = 1e-4;   // Energy increase threshold for line search
+    double m_eigenvalue_shift = 1e-3;   // Eigenvalue shift magnitude
 
     // Step size control
     double m_step_size = 1.0; // Current step size

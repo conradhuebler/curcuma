@@ -31,7 +31,7 @@
 // Modern optimizer system - Claude Generated (simplified)
 #include "src/capabilities/docking.h"
 #include "src/capabilities/hessian.h"
-#include "src/capabilities/modern_optimizer_simple.h"
+#include "src/capabilities/optimisation/modern_optimizer_simple.h"
 #include "src/capabilities/nebdocking.h"
 #include "src/capabilities/pairmapper.h"
 #include "src/capabilities/persistentdiagram.h"
@@ -44,6 +44,7 @@
 #include "src/tools/info.h"
 
 #include "src/capabilities/optimiser/OptimiseDipoleScaling.h"
+#include "src/capabilities/optimisation/modern_optimizer_simple.h"
 
 #include <cstring>
 #include <filesystem>
@@ -564,12 +565,62 @@ int main(int argc, char **argv) {
 
         } else if (strcmp(argv[1], "-opt") == 0) {
             if (argc < 3) {
-                std::cerr << "Please use curcuma for optimisation as follows:\ncurcuma -opt input.xyz" << std::endl;
+                // Show comprehensive help for optimization - Claude Generated
+                json safe_opt_config = controller.contains("opt") ? controller["opt"] : json{};
+                ModernOptimization::ModernOptimizerDispatcher helper(safe_opt_config, false);
+                helper.printHelp();
                 return 0;
             }
-            CurcumaOpt opt(controller, false);
-            opt.setFileName(argv[2]);
-            opt.start();
+            
+            // Parse optional -optimizer parameter - Claude Generated
+            std::string optimizer_method = "auto"; // Default to auto-selection
+            if (argc >= 5 && strcmp(argv[3], "-optimizer") == 0) {
+                optimizer_method = argv[4];
+                std::cout << "🧪 Using native Curcuma optimizer: " << optimizer_method << std::endl;
+            }
+            
+            // Check if we should use modern native optimizers
+            if (optimizer_method == "native_lbfgs" || optimizer_method == "lbfgs" || 
+                optimizer_method == "diis" || optimizer_method == "rfo" || optimizer_method == "auto") {
+                
+                // Use modern optimizer system - Claude Generated
+                try {
+                    auto molecule = std::make_unique<Molecule>(argv[2]);
+                    std::string method = controller.value("method", "uff");
+                    EnergyCalculator energy_calc(method, controller);
+                    energy_calc.setMolecule(molecule->getMolInfo());
+                    
+                    // Ensure safe JSON config handling - Claude Generated
+                    json opt_config = controller.contains("opt") ? controller["opt"] : json{};
+                    
+                    auto result = ModernOptimization::ModernOptimizerDispatcher::optimizeStructure(
+                        molecule.get(), optimizer_method, &energy_calc, opt_config);
+                        
+                    if (result.success) {
+                        std::cout << "🎉 Optimization successful!" << std::endl;
+                        std::cout << "Method: " << result.method_used << std::endl;
+                        std::cout << "Iterations: " << result.iterations_performed << std::endl;
+                        std::cout << "Time: " << result.optimization_time_seconds << " seconds" << std::endl;
+                        
+                        // Save optimized structure
+                        std::string output_name = argv[2];
+                        output_name = output_name.substr(0, output_name.find_last_of('.')) + ".opt.xyz";
+                        result.final_molecule.writeXYZFile(output_name);
+                        std::cout << "Optimized structure saved to: " << output_name << std::endl;
+                    } else {
+                        std::cerr << "Optimization failed: " << result.error_message << std::endl;
+                        return 1;
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "Error: " << e.what() << std::endl;
+                    return 1;
+                }
+            } else {
+                // Use legacy optimization system
+                CurcumaOpt opt(controller, false);
+                opt.setFileName(argv[2]);
+                opt.start();
+            }
             return 0;
 
         } else if (strcmp(argv[1], "-modern-opt") == 0) {
@@ -610,7 +661,7 @@ int main(int argc, char **argv) {
 
                 // Perform optimization using modern system
                 auto result = ModernOptimization::ModernOptimizerDispatcher::optimizeStructure(
-                    &molecule, method, &energy_calc, controller);
+                    &molecule, method, &energy_calc, controller["opt"]);
 
                 if (result.success) {
                     CurcumaLogger::success("Optimization completed successfully!");

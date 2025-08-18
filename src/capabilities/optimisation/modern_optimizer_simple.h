@@ -23,8 +23,24 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
 #include "src/core/molecule.h"
+#include "src/capabilities/curcumamethod.h"
 #include <map>
 #include <string>
+
+// Default JSON configuration for native optimizers - Claude Generated
+static const json OptimizerJson = {
+    { "verbosity", 2 },           // Standard verbosity level
+    { "MaxIter", 1000 },          // Maximum iterations
+    { "dE", 1e-6 },              // Energy convergence threshold (Eh)
+    { "GradNorm", 5e-4 },        // Gradient norm threshold (Eh/Bohr)
+    { "memory_size", 10 },        // L-BFGS memory size
+    { "diis_hist", 10 },         // DIIS history size
+    { "diis_start", 5 },         // DIIS start iteration
+    { "trust_radius", 0.05 },    // RFO trust radius (Bohr)
+    { "energy_threshold", 1e-6 }, // RFO energy threshold
+    { "eigenvalue_shift", 1e-4 }, // RFO eigenvalue shift
+    { "lambda", 0.1 }            // Legacy RFO parameter
+};
 
 using json = nlohmann::json;
 using curcuma::Molecule;
@@ -53,10 +69,24 @@ struct SimpleOptimizationResult {
 
 /**
  * @brief Modern optimizer dispatcher - Claude Generated
- * Simplified version for integration testing
+ * Simplified version for integration testing with CurcumaMethod integration
  */
-class ModernOptimizerDispatcher {
+class ModernOptimizerDispatcher : public CurcumaMethod {
 public:
+    // Constructor for CurcumaMethod integration - Claude Generated
+    ModernOptimizerDispatcher(const json& controller, bool silent = false);
+    
+    // CurcumaMethod interface implementation
+    void start() override;
+    void printHelp() const override;
+    
+    // Required pure virtual methods from CurcumaMethod - Claude Generated
+    json WriteRestartInformation() override { return json{}; }
+    bool LoadRestartInformation() override { return true; }
+    StringList MethodName() const override { return StringList{"modern_optimizer"}; }
+    void ReadControlFile() override { }
+    void LoadControlJson() override { }
+    
     /**
      * @brief Available optimizer types
      */

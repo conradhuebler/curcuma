@@ -20,7 +20,7 @@
 #include "src/capabilities/hessian.h"
 #include "src/capabilities/rmsd.h"
 
-#include "src/capabilities/optimiser/lbfgs.h"
+#include "src/capabilities/optimisation/lbfgs.h"
 
 #include "src/core/elements.h"
 #include "src/core/energycalculator.h"

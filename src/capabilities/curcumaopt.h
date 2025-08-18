@@ -21,7 +21,7 @@
 
 #include "src/core/energycalculator.h"
 
-#include "src/capabilities/optimiser/lbfgs.h"
+#include "src/capabilities/optimisation/lbfgs.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
