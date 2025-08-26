@@ -28,8 +28,10 @@
 #include "src/capabilities/confsearch.h"
 #include "src/capabilities/confstat.h"
 #include "src/capabilities/curcumaopt.h"
+// Modern optimizer system - Claude Generated (simplified)
 #include "src/capabilities/docking.h"
 #include "src/capabilities/hessian.h"
+#include "src/capabilities/optimisation/modern_optimizer_simple.h"
 #include "src/capabilities/nebdocking.h"
 #include "src/capabilities/pairmapper.h"
 #include "src/capabilities/persistentdiagram.h"
@@ -42,6 +44,7 @@
 #include "src/tools/info.h"
 
 #include "src/capabilities/optimiser/OptimiseDipoleScaling.h"
+#include "src/capabilities/optimisation/modern_optimizer_simple.h"
 
 #include <cstring>
 #include <filesystem>
@@ -562,12 +565,131 @@ int main(int argc, char **argv) {
 
         } else if (strcmp(argv[1], "-opt") == 0) {
             if (argc < 3) {
-                std::cerr << "Please use curcuma for optimisation as follows:\ncurcuma -opt input.xyz" << std::endl;
+                // Show comprehensive help for optimization - Claude Generated
+                json safe_opt_config = controller.contains("opt") ? controller["opt"] : json{};
+                ModernOptimization::ModernOptimizerDispatcher helper(safe_opt_config, false);
+                helper.printHelp();
                 return 0;
             }
-            CurcumaOpt opt(controller, false);
-            opt.setFileName(argv[2]);
-            opt.start();
+            
+            // Parse optional -optimizer parameter - Claude Generated
+            std::string optimizer_method = "auto"; // Default to auto-selection
+            if (argc >= 5 && strcmp(argv[3], "-optimizer") == 0) {
+                optimizer_method = argv[4];
+                std::cout << "🧪 Using native Curcuma optimizer: " << optimizer_method << std::endl;
+            }
+            
+            // Check if we should use modern native optimizers
+            if (optimizer_method == "native_lbfgs" || optimizer_method == "lbfgs" || 
+                optimizer_method == "diis" || optimizer_method == "rfo" || optimizer_method == "auto") {
+                
+                // Use modern optimizer system - Claude Generated
+                try {
+                    auto molecule = std::make_unique<Molecule>(argv[2]);
+                    std::string method = controller.value("method", "uff");
+                    EnergyCalculator energy_calc(method, controller);
+                    energy_calc.setMolecule(molecule->getMolInfo());
+                    
+                    // Ensure safe JSON config handling - Claude Generated
+                    json opt_config = controller.contains("opt") ? controller["opt"] : json{};
+                    
+                    auto result = ModernOptimization::ModernOptimizerDispatcher::optimizeStructure(
+                        molecule.get(), optimizer_method, &energy_calc, opt_config);
+                        
+                    if (result.success) {
+                        std::cout << "🎉 Optimization successful!" << std::endl;
+                        std::cout << "Method: " << result.method_used << std::endl;
+                        std::cout << "Iterations: " << result.iterations_performed << std::endl;
+                        std::cout << "Time: " << result.optimization_time_seconds << " seconds" << std::endl;
+                        
+                        // Save optimized structure
+                        std::string output_name = argv[2];
+                        output_name = output_name.substr(0, output_name.find_last_of('.')) + ".opt.xyz";
+                        result.final_molecule.writeXYZFile(output_name);
+                        std::cout << "Optimized structure saved to: " << output_name << std::endl;
+                    } else {
+                        std::cerr << "Optimization failed: " << result.error_message << std::endl;
+                        return 1;
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "Error: " << e.what() << std::endl;
+                    return 1;
+                }
+            } else {
+                // Use legacy optimization system
+                CurcumaOpt opt(controller, false);
+                opt.setFileName(argv[2]);
+                opt.start();
+            }
+            return 0;
+
+        } else if (strcmp(argv[1], "-modern-opt") == 0) {
+            // Claude Generated - Modern optimizer system showcase
+            if (argc < 3) {
+                std::cerr << "Please use curcuma for modern optimization as follows:\ncurcuma -modern-opt input.xyz [method]" << std::endl;
+                std::cerr << "Available methods: lbfgspp, lbfgs, diis, rfo, auto" << std::endl;
+                return 0;
+            }
+
+            try {
+                // Load molecule
+                Molecule molecule = Files::LoadFile(argv[2]);
+                CurcumaLogger::header("Modern Optimization System - Claude Generated");
+                CurcumaLogger::info_fmt("Input file: {}", argv[2]);
+                CurcumaLogger::info_fmt("Atoms: {}", molecule.AtomCount());
+
+                // Determine optimization method
+                std::string method = "lbfgspp"; // Default
+                if (argc >= 4) {
+                    method = argv[3];
+                }
+                CurcumaLogger::info_fmt("Selected method: {}", method);
+
+                // Create energy calculator (using controller settings)
+                EnergyCalculator energy_calc("uff", controller); // Use UFF as default force field
+                energy_calc.setMolecule(molecule.getMolInfo());
+
+                // Show available optimizers
+                auto available = ModernOptimization::ModernOptimizerDispatcher::getAvailableOptimizers();
+                CurcumaLogger::info("Available optimizers:");
+                for (const auto& pair : available) {
+                    CurcumaLogger::info_fmt("  {} - {}", pair.first, pair.second);
+                }
+
+                // Demonstrate modern features
+                ModernOptimization::ModernOptimizerDispatcher::demonstrateModernFeatures(molecule);
+
+                // Perform optimization using modern system
+                auto result = ModernOptimization::ModernOptimizerDispatcher::optimizeStructure(
+                    &molecule, method, &energy_calc, controller["opt"]);
+
+                if (result.success) {
+                    CurcumaLogger::success("Optimization completed successfully!");
+                    CurcumaLogger::energy_abs(result.final_energy, "Final energy");
+                    CurcumaLogger::info_fmt("Iterations: {}", result.iterations_performed);
+                    CurcumaLogger::info_fmt("Time: {:.3f} seconds", result.optimization_time_seconds);
+
+                    // Write optimized structure
+                    std::string outfile = argv[2];
+                    size_t dot_pos = outfile.find_last_of('.');
+                    if (dot_pos != std::string::npos) {
+                        outfile = outfile.substr(0, dot_pos);
+                    }
+                    outfile += ".opt.xyz";
+
+                    std::ofstream output(outfile);
+                    output << result.final_molecule.XYZString();
+                    CurcumaLogger::success_fmt("Optimized structure written to: {}", outfile);
+
+                } else {
+                    CurcumaLogger::error_fmt("Optimization failed: {}", result.error_message);
+                    return 1;
+                }
+
+            } catch (const std::exception& e) {
+                CurcumaLogger::error_fmt("Modern optimization error: {}", e.what());
+                return 1;
+            }
             return 0;
 
         } else if (strcmp(argv[1], "-sp") == 0) {
@@ -1534,7 +1656,9 @@ int main(int argc, char **argv) {
                     mol.appendXYZFile(std::string("blob.xyz"));
                 index++;
             }
-        } else {
+
+        } else if (argc >= 2) {
+            // Handle other file processing modes
             bool centered = false;
             bool hmass = true;
             for (std::size_t i = 2; i < argc; ++i) {
@@ -1572,6 +1696,41 @@ int main(int argc, char **argv) {
                 }
                 */
             }
+        } else {
+            // Claude Generated - Show help for unknown options
+            std::cout << "Curcuma - Computational Chemistry Toolkit" << std::endl;
+            std::cout << "==========================================" << std::endl;
+            std::cout << std::endl;
+            std::cout << "Usage: curcuma [option] file.xyz [parameters]" << std::endl;
+            std::cout << std::endl;
+            std::cout << "Optimization Options:" << std::endl;
+            std::cout << "  -opt file.xyz           Traditional optimization (legacy system)" << std::endl;
+            std::cout << "  -modern-opt file.xyz    Modern optimization with Strategy Pattern" << std::endl;
+            std::cout << "                          Available methods: lbfgspp, lbfgs, diis, rfo, auto" << std::endl;
+            std::cout << "                          Example: curcuma -modern-opt benzene.xyz lbfgspp" << std::endl;
+            std::cout << "  -sp file.xyz            Single point energy calculation" << std::endl;
+            std::cout << std::endl;
+            std::cout << "Analysis Options:" << std::endl;
+            std::cout << "  -confscan file.xyz      Conformational scanning" << std::endl;
+            std::cout << "  -confsearch file.xyz    Conformational searching" << std::endl;
+            std::cout << "  -confstat file.xyz      Conformational statistics" << std::endl;
+            std::cout << "  -rmsd file1.xyz file2.xyz  RMSD calculation" << std::endl;
+            std::cout << "  -rmsdtraj file.trj.xyz  Trajectory RMSD analysis" << std::endl;
+            std::cout << "  -md file.xyz            Molecular dynamics simulation" << std::endl;
+            std::cout << std::endl;
+            std::cout << "Other Options:" << std::endl;
+            std::cout << "  -fragment file.xyz      Fragment molecule" << std::endl;
+            std::cout << "  -block file.xyz N       Split trajectory into N files" << std::endl;
+            std::cout << "  -distance file.xyz i j  Calculate distance between atoms i and j" << std::endl;
+            std::cout << std::endl;
+            std::cout << "Modern Optimizer Features:" << std::endl;
+            std::cout << "  • Strategy Pattern architecture for extensible optimization methods" << std::endl;
+            std::cout << "  • Integrated CurcumaLogger with verbosity control and color output" << std::endl;
+            std::cout << "  • Unit-aware output (energies in kJ/mol, distances in Å, etc.)" << std::endl;
+            std::cout << "  • Comprehensive parameter validation and bounds checking" << std::endl;
+            std::cout << "  • Real-time progress reporting with timing analysis" << std::endl;
+            std::cout << "  • Type-safe method selection (no more magic numbers)" << std::endl;
+            std::cout << std::endl;
         }
     }
 #ifdef C17
