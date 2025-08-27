@@ -675,7 +675,7 @@ QMDFF::QMDFF(const json& controller)
 
     m_writeparam = parameter["writeparam"];
     m_writeuff = parameter["writeff"];
-    m_verbose = parameter["verbose"];
+
     m_rings = parameter["rings"];
     m_threads = parameter["threads"];
     m_const = parameter["const"];
@@ -1173,7 +1173,7 @@ Eigen::MatrixXd QMDFF::NumGrad()
     return gradient;
 }
 
-double QMDFF::Calculate(bool grd, bool verbose)
+double QMDFF::Calculate(bool grd)
 {
     m_CalculateGradient = grd;
     hbonds4::atom_t geometry[m_atom_types.size()];
@@ -1262,7 +1262,7 @@ double QMDFF::Calculate(bool grd, bool verbose)
         energy += m_final_factor * m_h4_scaling * energy_h4 + m_final_factor * m_hh_scaling * energy_hh + d3_energy;
     }
     energy = bond_energy + angle_energy + dihedral_energy + inversion_energy; // + vdw_energy;
-    if (verbose) {
+    if (CurcumaLogger::get_verbosity() >= 2) {
         std::cout << "Total energy " << energy << " Eh. Sum of " << std::endl
                   << "Bond Energy " << bond_energy << " Eh" << std::endl
                   << "Angle Energy " << angle_energy << " Eh" << std::endl

@@ -72,7 +72,7 @@ public:
     inline void UpdateGeometry(const double* coord);
     inline void UpdateGeometry(const std::vector<std::array<double, 3>>& geometry);
 
-    double Calculate(bool gradient = true, bool verbose = false);
+    double Calculate(bool gradient = true);
 
     Matrix Gradient() const { return m_gradient; }
 

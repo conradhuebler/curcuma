@@ -1,6 +1,7 @@
 /*
- * < General Calculator for the Hessian>
- * Copyright (C) 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * < General Calculator for the Hessian Matrix and Vibrational Frequencies>
+ * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Claude Generated: Enhanced with configurable finite difference parameters and modern unit system
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,6 +19,7 @@
  */
 
 #include "src/core/global.h"
+#include "src/core/units.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
@@ -45,7 +47,9 @@ static const json HessianJson = {
     { "freq_cutoff", 50 },
     { "hess", 1 },
     { "method", "uff" },
-    { "threads", 1 }
+    { "threads", 1 },
+    { "finite_diff_step", 5e-3 }, // Finite difference step size in Bohr (≈ 0.0026 Å)
+    { "verbosity", 1 } // Verbosity level: 0=silent, 1=results, 2=analysis, 3=debug
 };
 
 template <typename Vector>
@@ -107,7 +111,7 @@ private:
     int m_i, m_j, m_xi, m_xj;
     bool m_fullnumerical = true;
     double m_dd = 0;
-    double m_d = 5e-3;
+    double m_d = 5e-3; // Will be set from JSON parameter
 };
 
 class Hessian : public CurcumaMethod {
@@ -170,7 +174,9 @@ private:
     int m_threads = 1;
     int m_atom_count = 0;
     double m_freq_scale = 1, m_thermo = 298.5, m_freq_cutoff = 50;
+    double m_finite_diff_step = 5e-3; // Finite difference step size (Bohr)
     bool m_hess_calc = true, m_hess_write = false, m_hess_read = false;
     int m_hess = 1;
+    int m_verbosity = 1; // CurcumaLogger verbosity level
     std::string m_read_file = "none", m_write_file = "none", m_read_xyz = "none";
 };

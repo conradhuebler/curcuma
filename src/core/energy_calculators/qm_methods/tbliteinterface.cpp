@@ -48,7 +48,6 @@ TBLiteInterface::TBLiteInterface(const json& tblitesettings)
     // convert kelvin to atomic units
     m_Tele = m_tblitesettings["Tele"];
     m_Tele /= 315775.326864009;
-    m_verbose = m_tblitesettings["verbose"];
     m_spin = m_tblitesettings["spin"];
     std::string guess = m_tblitesettings["tb_guess"];
     m_solvent_eps = m_tblitesettings["solvent_eps"];
@@ -305,7 +304,7 @@ void TBLiteInterface::ApplySolvation()
     }
 }
 
-double TBLiteInterface::Calculation(bool gradient, bool verbose)
+double TBLiteInterface::Calculation(bool gradient)
 {
     // Control TBLite verbosity based on our logging system
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -388,7 +387,7 @@ double TBLiteInterface::Calculation(bool gradient, bool verbose)
         m_ctx = tblite_new_context();
         m_tblite_res = tblite_new_result();
 
-        tblite_set_context_verbosity(m_ctx, m_verbose);
+        // TBLite verbosity controlled by CurcumaLogger - already set in Calculation method
 
         if (m_method_switch == 0) {
             m_tblite_calc = tblite_new_ipea1_calculator(m_ctx, m_tblite_mol);

@@ -33,9 +33,10 @@ bool XTBMethod::updateGeometry(const Matrix& geometry) {
 #endif
 }
 
-double XTBMethod::calculateEnergy(bool gradient, bool verbose) {
+double XTBMethod::calculateEnergy(bool gradient)
+{
 #ifdef USE_XTB
-    m_last_energy = m_xtb->Calculation(gradient, verbose);
+    m_last_energy = m_xtb->Calculation(gradient);
     m_calculation_done = true;
     return m_last_energy;
 #else

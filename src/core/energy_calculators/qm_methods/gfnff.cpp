@@ -102,7 +102,7 @@ bool GFNFF::UpdateMolecule()
     return true;
 }
 
-double GFNFF::Calculation(bool gradient, bool verbose)
+double GFNFF::Calculation(bool gradient)
 {
     if (!m_initialized) {
         std::cerr << "Error: GFN-FF not initialized" << std::endl;
@@ -114,7 +114,7 @@ double GFNFF::Calculation(bool gradient, bool verbose)
         return 0.0;
     }
 
-    double energy_kcal = m_forcefield->Calculate(gradient, verbose);
+    double energy_kcal = m_forcefield->Calculate(gradient);
 
     if (gradient) {
         Matrix grad_kcal = m_forcefield->Gradient();
@@ -123,9 +123,9 @@ double GFNFF::Calculation(bool gradient, bool verbose)
 
     m_energy_total = convertToHartree(energy_kcal);
 
-    if (verbose) {
-        std::cout << "GFN-FF Energy: " << m_energy_total << " Hartree" << std::endl;
-        std::cout << "GFN-FF Energy: " << energy_kcal << " kcal/mol" << std::endl;
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::energy_abs(m_energy_total, "GFN-FF Energy");
+        CurcumaLogger::param("energy_kcal/mol", fmt::format("{:.6f}", energy_kcal));
     }
 
     return m_energy_total;

@@ -616,6 +616,7 @@ int main(int argc, char **argv) {
                     return 1;
                 }
             } else {
+                return 0;
                 // Use legacy optimization system
                 CurcumaOpt opt(controller, false);
                 opt.setFileName(argv[2]);
@@ -1433,7 +1434,7 @@ int main(int argc, char **argv) {
                 mol.Center(false); //sets the Centroid to the origin
                 EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb
                 interface.setMolecule(mol.getMolInfo()); // set molecule
-                interface.CalculateEnergy(false, true); // calc energy and Wave function
+                interface.CalculateEnergy(false); // calc energy and Wave function
                 mol.setPartialCharges(interface.Charges()); // calc partial Charges and set it to mol
                 mol.setDipole(interface.Dipole() * au); //calc dipole moments and set it to mol in eA
                 conformers.push_back(mol);
@@ -1516,7 +1517,7 @@ int main(int argc, char **argv) {
                 mol.Center(false); // sets the Centroid to the origin
                 EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb
                 interface.setMolecule(mol.getMolInfo()); // set molecule
-                interface.CalculateEnergy(false, true); // calc energy and Wave function
+                interface.CalculateEnergy(false); // calc energy and Wave function
                 mol.setPartialCharges(interface.Charges()); // calc partial Charges and set it to mol
                 mol.setDipole(interface.Dipole() * au); // calc dipole moments and set it to mol in eA
                 m_natoms = mol.AtomCount();
@@ -1577,7 +1578,7 @@ int main(int argc, char **argv) {
                 mol.Center(false); //sets the Centroid to the origin
                 EnergyCalculator interface("gfn2", blob); // set method to gfn2-xtb
                 interface.setMolecule(mol.getMolInfo()); // set molecule
-                interface.CalculateEnergy(false, true); // calc energy and Wave function
+                interface.CalculateEnergy(false); // calc energy and Wave function
                 mol.setPartialCharges(interface.Charges()); // calc partial Charges and set it to mol
                 mol.setDipole(interface.Dipole() * au); //calc dipole moments and set it to mol in eA
                 m_natoms = mol.AtomCount();

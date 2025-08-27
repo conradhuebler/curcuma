@@ -267,7 +267,7 @@ set(curcuma_core_SRC
 )
 
 set(curcuma_cap_SRC
-        src/capabilities/optimiser/lbfgs.cpp
+        src/capabilities/optimisation/lbfgs.cpp
         src/capabilities/persistentdiagram.cpp
         src/capabilities/analysenciplot.cpp
         src/capabilities/curcumamethod.cpp

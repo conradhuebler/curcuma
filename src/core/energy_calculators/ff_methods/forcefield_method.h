@@ -61,8 +61,8 @@ public:
     
     bool setMolecule(const Mol& mol) override;
     bool updateGeometry(const Matrix& geometry) override;
-    double calculateEnergy(bool gradient = false, bool verbose = false) override;
-    
+    double calculateEnergy(bool gradient = false) override;
+
     // Property access
     Matrix getGradient() const override;
     Vector getCharges() const override;

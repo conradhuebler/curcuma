@@ -76,10 +76,9 @@ public:
     /**
      * @brief Perform GFN-FF calculation
      * @param gradient Calculate gradients if true
-     * @param verbose Enable detailed output
      * @return Total energy in Hartree
      */
-    virtual double Calculation(bool gradient = false, bool verbose = false) override;
+    virtual double Calculation(bool gradient = false) override;
 
     /**
      * @brief Get analytical gradients

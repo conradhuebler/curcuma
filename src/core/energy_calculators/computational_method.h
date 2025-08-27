@@ -61,15 +61,14 @@ public:
      * @return true if update successful
      */
     virtual bool updateGeometry(const Matrix& geometry) = 0;
-    
+
     /**
      * @brief Perform energy and gradient calculation
      * @param gradient Calculate analytical gradients if available and requested
-     * @param verbose Enable detailed output of calculation progress
      * @return Total energy in appropriate units (typically Hartree or kcal/mol)
      */
-    virtual double calculateEnergy(bool gradient = false, bool verbose = false) = 0;
-    
+    virtual double calculateEnergy(bool gradient = false) = 0;
+
     // =================================================================================
     // Property Access
     // =================================================================================

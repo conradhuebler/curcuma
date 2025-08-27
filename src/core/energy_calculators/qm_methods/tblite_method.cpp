@@ -8,11 +8,12 @@
 #include "tblite_method.h"
 
 TBLiteMethod::TBLiteMethod(const std::string& method_name, const json& config)
-    : m_method_name(method_name), m_calculation_done(false), m_last_energy(0.0) {
-    std::cout << "before we go "   << std::endl;
-    
+    : m_method_name(method_name)
+    , m_calculation_done(false)
+    , m_last_energy(0.0)
+{
+
 #ifdef USE_TBLITE
-std::cout << "here wo go"   << std::endl;
     m_tblite = std::make_unique<TBLiteInterface>(config);
 #endif
     m_parameters = config;
@@ -36,9 +37,10 @@ bool TBLiteMethod::updateGeometry(const Matrix& geometry) {
 #endif
 }
 
-double TBLiteMethod::calculateEnergy(bool gradient, bool verbose) {
+double TBLiteMethod::calculateEnergy(bool gradient)
+{
 #ifdef USE_TBLITE
-    m_last_energy = m_tblite->Calculation(gradient, verbose);
+    m_last_energy = m_tblite->Calculation(gradient);
     m_calculation_done = true;
     return m_last_energy;
 #else

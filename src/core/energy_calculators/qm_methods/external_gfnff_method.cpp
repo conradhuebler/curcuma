@@ -74,7 +74,7 @@ bool ExternalGFNFFMethod::updateGeometry(const Matrix& geometry)
     return m_interface->InitialiseMolecule(m_current_molecule);
 }
 
-double ExternalGFNFFMethod::calculateEnergy(bool gradient, bool verbose)
+double ExternalGFNFFMethod::calculateEnergy(bool gradient)
 {
     if (!m_initialized) {
         CurcumaLogger::error("External GFN-FF method not initialized - call setMolecule() first");
@@ -87,7 +87,7 @@ double ExternalGFNFFMethod::calculateEnergy(bool gradient, bool verbose)
     }
 
     // Delegate to the underlying interface
-    double energy = m_interface->Calculation(gradient, verbose || CurcumaLogger::get_verbosity() >= 2);
+    double energy = m_interface->Calculation(gradient);
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::param("final_energy", fmt::format("{:.8f} Eh", energy));

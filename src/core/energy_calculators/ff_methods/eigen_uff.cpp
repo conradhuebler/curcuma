@@ -590,7 +590,7 @@ eigenUFF::eigenUFF(const json& controller)
 
     m_writeparam = parameter["writeparam"];
     m_writeuff = parameter["writeuff"];
-    m_verbose = parameter["verbose"];
+
     m_rings = parameter["rings"];
     m_threads = parameter["threads"];
     m_scaling = 1.4;
@@ -1140,7 +1140,7 @@ void eigenUFF::AssignUffAtomTypes()
         default:
             m_uff_atom_types[i] = 0;
         };
-        if (m_verbose) {
+        if (CurcumaLogger::get_verbosity() >= 2) {
             std::cout << i << " " << m_atom_types[i] << " " << m_stored_bonds[i].size() << " " << m_uff_atom_types[i] << std::endl;
         }
     }
@@ -1712,7 +1712,7 @@ double eigenUFF::BondRestLength(int i, int j, double n)
     return (r_0 + r_BO - r_EN) * m_au;
 }
 
-double eigenUFF::Calculate(bool grd, bool verbose)
+double eigenUFF::Calculate(bool grd)
 {
     m_CalculateGradient = grd;
     hbonds4::atom_t geometry[m_atom_types.size()];
@@ -1816,7 +1816,7 @@ double eigenUFF::Calculate(bool grd, bool verbose)
         m_gradient(i, 2) += m_final_factor * m_h4_scaling * m_h4correction.GradientH4()[i].z + m_final_factor * m_hh_scaling * m_h4correction.GradientHH()[i].z;
     }
 
-    if (verbose) {
+    if (CurcumaLogger::get_verbosity() >= 2) {
         std::cout << "Total energy " << energy << " Eh. Sum of " << std::endl
                   << "Bond Energy " << bond_energy << " Eh" << std::endl
                   << "Angle Energy " << angle_energy << " Eh" << std::endl

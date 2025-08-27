@@ -155,9 +155,8 @@ bool EHT::InitialiseMolecule()
     return true;
 }
 
-double EHT::Calculation(bool gradient, bool verbose)
+double EHT::Calculation(bool gradient)
 {
-    m_verbose = verbose;
     m_threads = 1; // EHT typically uses single thread for matrix operations
     // std::cout << m_geometry << std::endl << std::endl;
     //  Check for gradient request (not supported in EHT)

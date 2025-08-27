@@ -400,9 +400,9 @@ Eigen::MatrixXd ForceField::NumGrad()
     for (int i = 0; i < m_natoms; ++i) {
         for (int j = 0; j < 3; ++j) {
             m_geometry(i, j) += dx;
-            E1 = Calculate(false, false);
+            E1 = Calculate(false);
             m_geometry(i, j) -= 2 * dx;
-            E2 = Calculate(false, false);
+            E2 = Calculate(false);
             gradient(i, j) = (E1 - E2) / (2 * dx);
             m_geometry(i, j) += dx;
         }
@@ -663,7 +663,7 @@ bool ForceField::autoSaveParameters() const
     return success;
 }
 
-double ForceField::Calculate(bool gradient, bool verbose)
+double ForceField::Calculate(bool gradient)
 {
     // Level 3+: Calculation debug info
     if (CurcumaLogger::get_verbosity() >= 3) {

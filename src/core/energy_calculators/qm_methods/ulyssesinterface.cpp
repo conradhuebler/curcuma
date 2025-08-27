@@ -37,7 +37,6 @@ UlyssesInterface::UlyssesInterface(const json& ulyssessettings)
     m_solvent = m_ulyssessettings["solvent"];
     m_method = m_ulyssessettings["method"];
     m_mult = m_ulyssessettings["mult"];
-    m_verbose = m_ulyssessettings["verbose"].get<int>() != 0;
     // Validate solvent with CurcumaLogger
     if (std::find(m_solvents.begin(), m_solvents.end(), m_solvent) == m_solvents.end()) {
         CurcumaLogger::warn("Solvent '" + m_solvent + "' not supported by Ulysses - using 'none'");
@@ -90,7 +89,7 @@ bool UlyssesInterface::UpdateMolecule(const Geometry& geometry)
 #endif
 }
 
-double UlyssesInterface::Calculation(bool gradient, bool verbose)
+double UlyssesInterface::Calculation(bool gradient)
 {
 #ifdef USE_ULYSSES
     m_ulysses->setTele(m_Tele);
@@ -107,7 +106,7 @@ double UlyssesInterface::Calculation(bool gradient, bool verbose)
 
     // Perform calculation - Ulysses handles its own output currently
     // TODO: Capture and filter Ulysses output based on verbosity
-    m_ulysses->Calculate(gradient, verbose && (CurcumaLogger::get_verbosity() >= 3));
+    m_ulysses->Calculate(gradient, CurcumaLogger::get_verbosity() >= 3);
 
     double energy = m_ulysses->Energy();
 

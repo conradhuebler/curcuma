@@ -100,7 +100,7 @@ bool DFTD4Interface::InitialiseMolecule(const std::vector<int>& atomtype)
     return true;
 }
 
-double DFTD4Interface::Calculation(bool gradient, bool verbose)
+double DFTD4Interface::Calculation(bool gradient)
 {
     double energy = 0;
     dftd4::TCutoff cutoff;

@@ -92,10 +92,9 @@ public:
     /**
      * @brief Perform EHT calculation
      * @param gradient Currently not supported for EHT (will print warning)
-     * @param verbose Enable detailed output of calculation progress
      * @return Total electronic energy (currently returns 0, as EHT focuses on orbital energies)
      */
-    virtual double Calculation(bool gradient = false, bool verbose = false) override;
+    virtual double Calculation(bool gradient = false) override;
 
     /**
      * @brief Get molecular orbital coefficients matrix

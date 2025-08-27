@@ -198,7 +198,6 @@ private:
 
     bool m_use_d3 = false;
     bool m_use_d4 = false;
-    bool m_verbose = false;
     bool m_rings = false;
     int m_calc_gradient = 0;
 
@@ -336,7 +335,6 @@ private:
 
     bool m_use_d3 = false;
     bool m_use_d4 = false;
-    bool m_verbose = false;
     bool m_rings = false;
     double m_bond_scaling = 1, m_angle_scaling = 1, m_dihedral_scaling = 1, m_inversion_scaling = 1, m_vdw_scaling = 1, m_rep_scaling = 1, m_coulmob_scaling = 1;
     bool m_numtorsion = false;

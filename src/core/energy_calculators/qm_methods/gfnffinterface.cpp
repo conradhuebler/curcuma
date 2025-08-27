@@ -151,15 +151,12 @@ bool GFNFFInterface::InitialiseMolecule()
     return false;
 }
 
-double GFNFFInterface::Calculation(bool gradient, bool verbose)
+double GFNFFInterface::Calculation(bool gradient)
 {
-    (void)verbose; // Suppress unused parameter warning - we use internal verbosity
-
     // Level 3+: Entry point debug
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("=== GFNFFInterface::Calculation() called ===");
         CurcumaLogger::param("gradient_requested", gradient);
-        CurcumaLogger::param("verbose_parameter", verbose);
         CurcumaLogger::param("curcuma_verbosity", CurcumaLogger::get_verbosity());
     }
 

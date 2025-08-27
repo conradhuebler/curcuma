@@ -49,7 +49,7 @@ public:
 
     bool InitialiseMolecule(const std::vector<int>& atomtypes);
 
-    double Calculation(bool gradient = 0, bool verbose = false) override;
+    double Calculation(bool gradient = 0) override;
     void UpdateParameters(const json& controller);
     void UpdateParametersD3(const json& controller);
 

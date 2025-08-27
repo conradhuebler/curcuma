@@ -42,13 +42,12 @@ EHTMethod::EHTMethod(const json& config)
 
 json EHTMethod::getDefaultConfig() {
     return json{
-        {"wolfsberg_helmholz_constant", 1.75},  // Standard WH constant
-        {"verbose", false},                     // Enable detailed output
-        {"threads", 1},                         // Single-threaded by default
-        {"print_orbitals", false},             // Print orbital analysis
-        {"num_orbitals_print", 5},             // Number of orbitals around gap
-        {"save_orbitals", false},              // Save orbital data to file
-        {"orbital_threshold", 1e-6}            // Orbital coefficient threshold
+        { "wolfsberg_helmholz_constant", 1.75 }, // Standard WH constant
+        { "threads", 1 }, // Single-threaded by default
+        { "print_orbitals", false }, // Print orbital analysis
+        { "num_orbitals_print", 5 }, // Number of orbitals around gap
+        { "save_orbitals", false }, // Save orbital data to file
+        { "orbital_threshold", 1e-6 } // Orbital coefficient threshold
     };
 }
 
@@ -112,7 +111,8 @@ bool EHTMethod::updateGeometry(const Matrix& geometry) {
     }
 }
 
-double EHTMethod::calculateEnergy(bool gradient, bool verbose) {
+double EHTMethod::calculateEnergy(bool gradient)
+{
     if (!m_initialized) {
         m_has_error = true;
         m_error_message = "Method not initialized - call setMolecule first";
@@ -123,12 +123,12 @@ double EHTMethod::calculateEnergy(bool gradient, bool verbose) {
         clearError();
         
         // Warn about gradient request (EHT doesn't have analytical gradients)
-        if (gradient && verbose) {
+        if (gradient) {
             fmt::print("Warning: EHT does not provide analytical gradients\n");
         }
-        
+
         // Perform EHT calculation
-        m_last_energy = m_eht->Calculation(false, verbose);  // EHT doesn't support gradients
+        m_last_energy = m_eht->Calculation(false); // EHT doesn't support gradients
         m_calculation_done = true;
         
         // Print orbital analysis if requested

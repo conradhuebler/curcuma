@@ -45,9 +45,10 @@ bool UlyssesMethod::updateGeometry(const Matrix& geometry) {
 #endif
 }
 
-double UlyssesMethod::calculateEnergy(bool gradient, bool verbose) {
+double UlyssesMethod::calculateEnergy(bool gradient)
+{
 #ifdef USE_ULYSSES
-    m_last_energy = m_ulysses->Calculation(gradient, verbose);
+    m_last_energy = m_ulysses->Calculation(gradient);
     m_calculation_done = true;
     return m_last_energy;
 #else

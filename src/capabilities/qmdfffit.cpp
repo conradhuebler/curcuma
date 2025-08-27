@@ -70,7 +70,7 @@ void QMDFFFit::start()
         EnergyCalculator energy(method, m_defaults);
         energy.setMolecule(m_molecule.getMolInfo());
 
-        e0 = energy.CalculateEnergy(false, true);
+        e0 = energy.CalculateEnergy(false);
         m_molecule.setPartialCharges(energy.Charges());
         std::string charges = Tools::DoubleVector2String(energy.Charges());
 
@@ -140,7 +140,7 @@ void QMDFFFit::start()
     EnergyCalculator calculator("qmdff", qmdff_init);
     calculator.setMolecule(m_molecule.getMolInfo());
     calculator.setParameter(parameter);
-    calculator.CalculateEnergy(false, false);
+    calculator.CalculateEnergy(false);
     Hessian const_hessian("qmdff", qmdff_init);
     json prm = parameter;
     json bonds = parameter["bonds"];

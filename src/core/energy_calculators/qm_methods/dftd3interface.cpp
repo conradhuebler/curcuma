@@ -171,7 +171,7 @@ void DFTD3Interface::UpdateAtom(int index, double x, double y, double z)
     m_coord[3 * index + 2] = z / au;
 }
 
-double DFTD3Interface::Calculation(bool gradient, bool verbose)
+double DFTD3Interface::Calculation(bool gradient)
 {
     double energy = 0;
     double sigma[9];

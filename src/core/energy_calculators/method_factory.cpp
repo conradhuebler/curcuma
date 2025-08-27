@@ -209,12 +209,12 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
         CurcumaLogger::param("input_method", method_name);
         CurcumaLogger::param("normalized_method", method_lower);
     }
-    std::cout << hasTBLite() << " "
+    /*std::cout << hasTBLite() << " "
               << hasXTB() << " "
               << hasUlysses() << " "
               << hasGFNFF() << " "
               << hasD3() << " "
-              << hasD4() << std::endl;
+              << hasD4() << std::endl;*/
     // 1. Check priority methods first (shared methods with fallback hierarchy)
     CurcumaLogger::info("Step 1: Checking priority methods (shared methods with fallback hierarchy)");
     for (const auto& priority_method : getPriorityMethods()) {

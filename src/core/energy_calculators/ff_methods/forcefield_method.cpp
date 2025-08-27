@@ -197,7 +197,8 @@ bool ForceFieldMethod::updateGeometry(const Matrix& geometry) {
     }
 }
 
-double ForceFieldMethod::calculateEnergy(bool gradient, bool verbose) {
+double ForceFieldMethod::calculateEnergy(bool gradient)
+{
     if (!m_initialized || !m_forcefield) {
         handleForceFieldError("ForceField not initialized - call setMolecule first");
         return 0.0;
@@ -207,8 +208,8 @@ double ForceFieldMethod::calculateEnergy(bool gradient, bool verbose) {
         clearError();
         
         // Perform ForceField calculation
-        m_last_energy = m_forcefield->Calculate(gradient, verbose);
-        
+        m_last_energy = m_forcefield->Calculate(gradient);
+
         if (gradient) {
             m_last_gradient = m_forcefield->Gradient();
         }
@@ -460,13 +461,12 @@ bool ForceFieldMethod::validateMethodName(const std::string& method_name) const 
 
 json ForceFieldMethod::getDefaultConfigForMethod(const std::string& method_name) {
     json config = {
-        {"threads", ForceFieldMethodUtils::getOptimalThreadCount()},
-        {"gradient", true},
-        {"parameter_caching", true},
-        {"param_file", "none"},
-        {"verbose", false}
+        { "threads", ForceFieldMethodUtils::getOptimalThreadCount() },
+        { "gradient", true },
+        { "parameter_caching", true },
+        { "param_file", "none" },
     };
-    
+
     // Method-specific defaults
     if (method_name == "uff-d3") {
         config["d3_correction"] = true;

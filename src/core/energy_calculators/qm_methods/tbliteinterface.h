@@ -30,7 +30,6 @@ static json TBLiteSettings{
     { "SCFmaxiter", 100 },
     { "tb_damping", 0.4 },
     { "Tele", 300 },
-    { "verbose", 0 },
     { "tb_guess", "SAD" },
     { "solvent_model", 0 }, // 0 - none; 1 - CPCM; 2 - GB, 3 - ALPB
     { "solvent_eps", -1 },
@@ -59,7 +58,7 @@ public:
     bool UpdateMolecule();
 
     bool Error() override { return m_error_count >= 10; }
-    double Calculation(bool gradient = 0, bool verbose = false);
+    double Calculation(bool gradient = 0);
 
     void clear() override;
 
@@ -83,7 +82,6 @@ private:
     double m_thr = 1.0e-10;
     int m_acc = 2;
     int m_SCFmaxiter = 100;
-    int m_verbose = 0;
     int m_guess = 0;
     int m_error_count = 0;
     double m_damping = 0.5;

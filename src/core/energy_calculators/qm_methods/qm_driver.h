@@ -41,7 +41,7 @@ public:
     QMDriver();
 
     virtual bool InitialiseMolecule() override;
-    virtual double Calculation(bool gradient = false, bool verbose = false) = 0;
+    virtual double Calculation(bool gradient = false) = 0;
 
     Matrix MolecularOrbitals() const { return m_mo; }
     Vector Energies() const { return m_energies; }
@@ -67,6 +67,4 @@ protected:
     int m_threads = 4;
     Matrix m_mo;
     Vector m_energies;
-
-    bool m_verbose = false;
 };

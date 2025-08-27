@@ -28,7 +28,6 @@ static json QMInterfaceJson{
     { "solver", "eigen" },
     { "method", "none" },
     { "basis", "sto-3g" },
-    { "verbose", false },
     { "gradient", false },
     { "maxiter", 100 },
     { "scfconv", 1e-6 },
@@ -138,7 +137,7 @@ public:
         return true;
     }
     virtual bool Error() { return false; };
-    virtual double Calculation(bool gradient = false, bool verbose = false) = 0;
+    virtual double Calculation(bool gradient = false) = 0;
 
     virtual void clear() {}
 

@@ -52,46 +52,59 @@ EnergyCalculator::~EnergyCalculator() {
 }
 
 void EnergyCalculator::initializeCommon(const json& controller) {
-    CurcumaLogger::info("Initializing EnergyCalculator");
-    CurcumaLogger::param("method", m_method_name);
-    
-    if (CurcumaLogger::get_verbosity() >= 3) {
+    // Only show initialization info if verbosity is high enough
+    // This respects submodule verbosity override (e.g., Hessian can silence this)
+    if (getEffectiveVerbosity() >= 2) {
+        CurcumaLogger::info("Initializing EnergyCalculator");
+        CurcumaLogger::param("method", m_method_name);
+    }
+
+    if (getEffectiveVerbosity() >= 3) {
         CurcumaLogger::info("=== EnergyCalculator Initialization Debug ===");
         CurcumaLogger::param("method_name", m_method_name);
         CurcumaLogger::param("basename", m_basename);
+        CurcumaLogger::param("verbosity_override", m_verbosity_override);
     }
-    
+
     // Merge with default configuration
     m_controller = MergeJson(EnergyCalculatorJson, controller);
-    
-    if (CurcumaLogger::get_verbosity() >= 3) {
+
+    if (getEffectiveVerbosity() >= 3) {
         CurcumaLogger::param_comparison_table(EnergyCalculatorJson, controller, "EnergyCalculator Configuration");
     }
-    
+
     // Extract common parameters
     if (controller.contains("param_file")) {
         m_parameter["param_file"] = controller["param_file"];
-        CurcumaLogger::param("param_file", controller["param_file"].get<std::string>());
+        if (getEffectiveVerbosity() >= 2) {
+            CurcumaLogger::param("param_file", controller["param_file"].get<std::string>());
+        }
     }
     
     if (controller.contains("geometry_file")) {
         m_geometry_file = controller["geometry_file"];
-        CurcumaLogger::param("geometry_file", m_geometry_file);
+        if (getEffectiveVerbosity() >= 2) {
+            CurcumaLogger::param("geometry_file", m_geometry_file);
+        }
     }
     
     if (!m_basename.empty()) {
         m_geometry_file = m_basename + ".xyz";
-        CurcumaLogger::param("auto_geometry_file", m_geometry_file);
+        if (getEffectiveVerbosity() >= 2) {
+            CurcumaLogger::param("auto_geometry_file", m_geometry_file);
+        }
     }
     
     // Extract multiplicity and other settings
     m_mult = m_controller.value("multi", 1);
-    CurcumaLogger::param("multiplicity", m_mult);
-    
-    if (CurcumaLogger::get_verbosity() >= 3) {
+    if (getEffectiveVerbosity() >= 2) {
+        CurcumaLogger::param("multiplicity", m_mult);
+    }
+
+    if (getEffectiveVerbosity() >= 3) {
         CurcumaLogger::info("Creating computational method using MethodFactory...");
     }
-    
+
     // Create computational method using factory
     if (!createMethod(m_method_name, m_controller)) {
         m_error = true;
@@ -194,9 +207,11 @@ void EnergyCalculator::setMolecule(const Mol& mol) {
         
         m_initialized = true;
         ClearError();
-        
-        fmt::print("Molecule set: {} atoms, method: {}\n", m_atoms, m_method_name);
-        
+
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::success(fmt::format("Molecule set: {} atoms, method: {}", m_atoms, m_method_name));
+        }
+
     } catch (const std::exception& e) {
         handleMethodError(fmt::format("setMolecule: {}", e.what()));
     }
@@ -306,12 +321,14 @@ void EnergyCalculator::updateGeometry(const Eigen::VectorXd& geometry) {
 // Energy and Gradient Calculations
 // =================================================================================
 
-double EnergyCalculator::CalculateEnergy(bool gradient, bool verbose) {
-    CurcumaLogger::info("Starting energy calculation");
-    CurcumaLogger::param("gradient", gradient);
-    CurcumaLogger::param("verbose", verbose);
-    CurcumaLogger::param("method", m_method ? m_method->getMethodName() : "null");
-    
+double EnergyCalculator::CalculateEnergy(bool gradient)
+{
+    if (getEffectiveVerbosity() >= 2) {
+        CurcumaLogger::info("Starting energy calculation");
+        CurcumaLogger::param("gradient", gradient);
+        CurcumaLogger::param("method", m_method ? m_method->getMethodName() : "null");
+    }
+
     if (!m_initialized || !m_method) {
         CurcumaLogger::error("CalculateEnergy called before proper initialization");
         CurcumaLogger::param("initialized", m_initialized);
@@ -322,20 +339,32 @@ double EnergyCalculator::CalculateEnergy(bool gradient, bool verbose) {
     
     try {
         ClearError();
-        
-        if (CurcumaLogger::get_verbosity() >= 3) {
+
+        if (getEffectiveVerbosity() >= 3) {
             CurcumaLogger::info("Calling computational method calculateEnergy...");
         }
-        
+
+        // Temporarily override global verbosity for submodule calculations
+        int original_verbosity = CurcumaLogger::get_verbosity();
+        if (m_verbosity_override >= 0) {
+            CurcumaLogger::set_verbosity(m_verbosity_override);
+        }
+
         // Perform calculation using computational method
-        m_energy = m_method->calculateEnergy(gradient, verbose);
-        
+        m_energy = m_method->calculateEnergy(gradient);
+
+        // Restore original verbosity
+        CurcumaLogger::set_verbosity(original_verbosity);
+
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("Energy calculation completed");
         }
-        
-        CurcumaLogger::energy_abs(m_energy, "Total Energy");
-        
+
+        // Use effective verbosity to respect submodule silencing
+        if (getEffectiveVerbosity() >= 1) {
+            CurcumaLogger::energy_abs(m_energy, "Total Energy");
+        }
+
         // Check for method-specific errors
         if (m_method->hasError()) {
             CurcumaLogger::error("Method reported error after calculation");
@@ -356,12 +385,11 @@ double EnergyCalculator::CalculateEnergy(bool gradient, bool verbose) {
             handleMethodError("NaN values detected in calculation results");
             return 0.0;
         }
-        
-        if (verbose) {
-            fmt::print("Energy calculation completed: {:.8f} (method: {})\n", 
-                      m_energy, m_method_name);
+
+        if (getEffectiveVerbosity() >= 1) {
+            CurcumaLogger::energy_abs(m_energy, fmt::format("{} Final Energy", m_method_name));
         }
-        
+
         return m_energy;
         
     } catch (const std::exception& e) {
@@ -402,14 +430,14 @@ Eigen::MatrixXd EnergyCalculator::NumGrad() {
                 Matrix geom_forward = current_geometry;
                 geom_forward(i, j) += dx;
                 updateGeometry(geom_forward);
-                E1 = CalculateEnergy(false, false);
-                
+                E1 = CalculateEnergy(false);
+
                 // Backward step
                 Matrix geom_backward = current_geometry;
                 geom_backward(i, j) -= dx;
                 updateGeometry(geom_backward);
-                E2 = CalculateEnergy(false, false);
-                
+                E2 = CalculateEnergy(false);
+
                 // Central difference
                 gradient(i, j) = (E1 - E2) / (2 * dx);
             }
@@ -610,6 +638,25 @@ json EnergyCalculator::GetMethodInfo() const {
     }
     
     return info;
+}
+
+// =================================================================================
+// Submodule Verbosity Control (Claude Generated)
+// =================================================================================
+
+void EnergyCalculator::setVerbosity(int level)
+{
+    m_verbosity_override = level;
+}
+
+void EnergyCalculator::resetVerbosity()
+{
+    m_verbosity_override = -1;
+}
+
+int EnergyCalculator::getEffectiveVerbosity() const
+{
+    return (m_verbosity_override >= 0) ? m_verbosity_override : CurcumaLogger::get_verbosity();
 }
 
 // =================================================================================

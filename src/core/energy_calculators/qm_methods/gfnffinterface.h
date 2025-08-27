@@ -29,8 +29,7 @@
 static json GFNFFSettings{
     { "charge", 0 },
     { "printlevel", 1 },
-    { "solvent", "none" },
-    { "verbose", 0 }
+    { "solvent", "none" }
 };
 
 class GFNFFInterface : public QMInterface {
@@ -41,7 +40,7 @@ public:
     bool InitialiseMolecule(const Mol& mol) override;
     bool InitialiseMolecule(const int* attyp, const double* coord, const int natoms, const double charge, const int spin) override;
     bool InitialiseMolecule() override;
-    double Calculation(bool gradient = false, bool verbose = false) override;
+    double Calculation(bool gradient = false) override;
     void clear() override;
 
     Vector BondOrders() const override;

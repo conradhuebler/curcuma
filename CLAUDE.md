@@ -220,6 +220,7 @@ curcuma/
 - **Levels**: 0 (silent for MD/opt) → 1 (results) → 2 (analysis) → 3 (debug)
 - **Benefits**: Silent optimization, structured scientific output, consistent debugging
 - **Integration**: Native library verbosity (XTB/TBLite) synchronized with CurcumaLogger
+- **📖 Full Documentation**: See [LOGGING_SYSTEM.md](LOGGING_SYSTEM.md) for complete verbosity guidelines
 
 ### 🏗️ **New Architecture Features**
 - **Method Hierarchies**: `gfn2` automatically tries TBLite → Ulysses → XTB

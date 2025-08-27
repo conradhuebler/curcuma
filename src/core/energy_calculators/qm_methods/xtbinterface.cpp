@@ -44,7 +44,6 @@ XTBInterface::XTBInterface(const json& xtbsettings)
     m_SCFmaxiter = m_xtbsettings["SCFmaxiter"];
     m_Tele = m_xtbsettings["Tele"];
     m_spin = m_xtbsettings["spin"];
-    m_verbose = m_xtbsettings["verbose"];
 
     // Verbosity Level 1+: XTB initialization
     if (CurcumaLogger::get_verbosity() >= 1) {
@@ -204,7 +203,7 @@ void XTBInterface::setMethod(const std::string& method)
         m_method_switch = 66;
 }
 
-double XTBInterface::Calculation(bool gradient, bool verbose)
+double XTBInterface::Calculation(bool gradient)
 {
     double energy = 0;
 

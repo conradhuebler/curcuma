@@ -201,7 +201,7 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
             continue;
         auto start = std::chrono::system_clock::now();
         interface.updateGeometry(iter->Coords());
-        double energy = interface.CalculateEnergy(true, true);
+        double energy = interface.CalculateEnergy(true);
 #ifdef USE_TBLITE
         if (method.compare("gfn2") == 0) {
             auto dipole = interface.Dipole();
@@ -341,7 +341,7 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, std::string& output, Vec
     EnergyCalculator interface(method, m_controller["sp"], Basename());
     interface.setMolecule(initial->getMolInfo());
     json param = interface.Parameter();
-    double energy = interface.CalculateEnergy(false, true);
+    double energy = interface.CalculateEnergy(false);
     double store = 0;
 #ifdef USE_TBLITE
     if (method.compare("gfn2") == 0) {

@@ -40,8 +40,9 @@ bool GFNFFMethod::updateGeometry(const Matrix& geometry) {
     return m_gfnff->QMInterface::UpdateMolecule(geometry);
 }
 
-double GFNFFMethod::calculateEnergy(bool gradient, bool verbose) {
-    m_last_energy = m_gfnff->Calculation(gradient, verbose);
+double GFNFFMethod::calculateEnergy(bool gradient)
+{
+    m_last_energy = m_gfnff->Calculation(gradient);
     m_calculation_done = true;
     return m_last_energy;
 }

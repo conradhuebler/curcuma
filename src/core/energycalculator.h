@@ -121,15 +121,14 @@ public:
     // =================================================================================
     // Energy and Gradient Calculations
     // =================================================================================
-    
+
     /**
      * @brief Perform energy and gradient calculation
      * @param gradient Calculate gradients if true
-     * @param verbose Enable verbose output
      * @return Total energy in appropriate units
      */
-    double CalculateEnergy(bool gradient = false, bool verbose = false);
-    
+    double CalculateEnergy(bool gradient = false);
+
     /**
      * @brief Get calculated gradients
      * @return Gradient matrix (natoms x 3)
@@ -294,6 +293,31 @@ public:
      */
     json GetMethodInfo() const;
 
+    // =================================================================================
+    // Submodule Verbosity Control (Claude Generated)
+    // =================================================================================
+
+    /**
+     * @brief Override system verbosity for this EnergyCalculator instance
+     *
+     * This allows parent modules (like Hessian) to run sub-calculations silently
+     * while maintaining their own output level.
+     *
+     * @param level Verbosity level (0=silent, 1=results, 2=analysis, 3=debug)
+     */
+    void setVerbosity(int level);
+
+    /**
+     * @brief Reset to system-wide verbosity from CurcumaLogger
+     */
+    void resetVerbosity();
+
+    /**
+     * @brief Get current effective verbosity level
+     * @return Current verbosity (override or system level)
+     */
+    int getEffectiveVerbosity() const;
+
 private:
     // =================================================================================
     // Internal State
@@ -320,7 +344,10 @@ private:
     
     int m_atoms = 0;                                 ///< Number of atoms
     int m_mult = 1;                                  ///< Multiplicity
-    
+
+    // Verbosity control (Claude Generated)
+    int m_verbosity_override = -1; ///< Override verbosity (-1 = use system)
+
     // =================================================================================
     // Internal Methods
     // =================================================================================

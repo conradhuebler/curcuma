@@ -36,9 +36,10 @@ bool DispersionMethod::updateGeometry(const Matrix& geometry) {
     return false;
 }
 
-double DispersionMethod::calculateEnergy(bool gradient, bool verbose) {
+double DispersionMethod::calculateEnergy(bool gradient)
+{
     if (m_dispersion) {
-        m_last_energy = m_dispersion->Calculation(gradient, verbose);
+        m_last_energy = m_dispersion->Calculation(gradient);
         m_calculation_done = true;
         return m_last_energy;
     }
