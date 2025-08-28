@@ -622,6 +622,7 @@ add_test(NAME confscan_sLX20Reset COMMAND confscan_test sLX20Reset WORKING_DIREC
 add_test(NAME confstat COMMAND confstat_tests WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 
 # Claude Generated: Comprehensive test for Molecule class before refactoring
+add_test(NAME energy_methods COMMAND test_energy_methods WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
 
 install(TARGETS curcuma RUNTIME DESTINATION bin)
 install(TARGETS curcuma_helper RUNTIME DESTINATION bin)

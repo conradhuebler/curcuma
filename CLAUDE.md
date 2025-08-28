@@ -54,6 +54,7 @@
 - In case of compiler warning for deprecated functions, replace the old function call with the new one
 - Implement timing analysis for complex functions
 - Keep track of significant improvements in AIChangelog.md, one line per fact
+- **Complex Architecture Documentation**: Factory patterns, dispatchers, and multi-step workflows require comprehensive inline documentation following ARCHITECTURE_DOCUMENTATION.md standards
 
 #### Copyright and File Headers
 - **Copyright ownership**: All copyright remains with Conrad Hübler as the project owner and AI instructor

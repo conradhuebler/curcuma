@@ -50,3 +50,16 @@ add_executable(confstat_tests
 target_link_libraries(confstat_tests
         curcuma_core
 )
+
+# Claude Generated: Energy calculation test suite
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/AAA-bGal/A.xyz
+        DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+
+add_executable(test_energy_methods
+        test_energy_methods.cpp)
+
+target_link_libraries(test_energy_methods curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_energy_methods REUSE_FROM curcuma_core)
+endif()
