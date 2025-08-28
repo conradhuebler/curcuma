@@ -4,25 +4,28 @@
  */
 
 #include "ulysses_method.h"
+#include "src/core/curcuma_logger.h"
 
 UlyssesMethod::UlyssesMethod(const std::string& method_name, const json& config)
     : m_method_name(method_name), m_calculation_done(false), m_last_energy(0.0) {
-    std::cout << "[DEBUG] UlyssesMethod constructor called with method: " << method_name << std::endl;
+    CurcumaLogger::info("UlyssesMethod constructor called");
+    CurcumaLogger::param("method", method_name);
 #ifdef USE_ULYSSES
     try {
-        std::cout << "[DEBUG] Creating UlyssesInterface..." << std::endl;
-        std::cout << "[DEBUG] Config passed to UlyssesInterface: " << config.dump(2) << std::endl;
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Creating UlyssesInterface");
+            CurcumaLogger::param("config", config.dump(2));
+        }
         m_ulysses = std::make_unique<UlyssesInterface>(config);
-        std::cout << "[DEBUG] UlyssesInterface created successfully" << std::endl;
+        CurcumaLogger::success("UlyssesInterface created successfully");
     } catch (const std::exception& e) {
-        std::cout << "[ERROR] UlyssesInterface creation failed: " << e.what() << std::endl;
+        CurcumaLogger::error("UlyssesInterface creation failed: " + std::string(e.what()));
         throw;
     }
 #else
-    std::cout << "[ERROR] USE_ULYSSES not defined - Ulysses not available" << std::endl;
+    CurcumaLogger::error("USE_ULYSSES not defined - Ulysses not available");
 #endif
     m_parameters = config;
-    std::cout << "[DEBUG] UlyssesMethod constructor completed" << std::endl;
 }
 
 bool UlyssesMethod::setMolecule(const Mol& mol) {

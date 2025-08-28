@@ -113,6 +113,19 @@ SimpleOptimizationResult SimpleOptimizationResult::failed_result(const std::stri
 }
 
 // Claude Generated - ModernOptimizerDispatcher implementation
+/**
+ * @brief Parse optimizer string to enum type with alias support - Claude Generated
+ *
+ * STRING TO ALGORITHM MAPPING:
+ * - "lbfgspp", "lbfgs++", "external" → LBFGSPP (external library)
+ * - "internal", "gpt" → INTERNAL (legacy placeholder)
+ * - "native_lbfgs", "native-lbfgs", "lbfgs" → NATIVE_LBFGS (educational L-BFGS)
+ * - "native_diis", "native-diis", "diis" → NATIVE_DIIS (acceleration method)
+ * - "native_rfo", "native-rfo", "rfo" → NATIVE_RFO (eigenvector following)
+ * - "auto", "automatic" → AUTO (system-based selection)
+ *
+ * DEBUGGING: Add verbosity ≥ 2 to see which algorithm was selected
+ */
 ModernOptimizerDispatcher::OptimizerType ModernOptimizerDispatcher::parseOptimizerType(const std::string& method_name)
 {
     std::string lower_name = method_name;
@@ -149,13 +162,47 @@ std::map<std::string, std::string> ModernOptimizerDispatcher::getAvailableOptimi
     };
 }
 
+/*
+ * ARCHITECTURAL DECISION RECORD: Modern Optimization Dispatcher
+ *
+ * CONTEXT: Multiple optimization algorithms with different capabilities and performance
+ * - Native L-BFGS: Educational implementation with two-loop recursion
+ * - Native DIIS: Direct Inversion of Iterative Subspace acceleration
+ * - Native RFO: Rational Function Optimization with eigenvector following
+ * - LBFGSpp: External high-performance library for large systems
+ * - Legacy system: Backward compatibility for existing workflows
+ *
+ * DECISION: Strategy pattern with automatic algorithm selection
+ * - Priority-based selection: user choice > system characteristics > defaults
+ * - Educational focus: native algorithms directly accessible and understandable
+ * - Unified interface: same SimpleOptimizationResult for all algorithms
+ *
+ * IMPLEMENTATION CHAIN:
+ * 1. main.cpp:692 → ModernOptimizerDispatcher::optimizeStructure()
+ * 2. modern_optimizer_simple.cpp:152 → parseOptimizerType() determines algorithm
+ * 3. modern_optimizer_simple.cpp:170+ → algorithm-specific optimize*() methods
+ * 4. lbfgs.cpp:optimize() OR external LBFGSpp library execution
+ *
+ * RUNTIME BEHAVIOR:
+ * - "native_lbfgs" → optimizeWithNativeLBFGS() → lbfgs.cpp LBFGS class
+ * - "native_diis" → optimizeWithNativeDIIS() → lbfgs.cpp DIISStep() method
+ * - "native_rfo" → optimizeWithNativeRFO() → lbfgs.cpp RFOStep() method
+ * - "lbfgspp" → optimizeWithLBFGSpp() → external LBFGSpp library
+ * - "auto" → Heuristic: >200 atoms→LBFGSpp, else native_lbfgs
+ *
+ * DEBUGGING ENTRY POINTS:
+ * - Set config["verbosity"] ≥ 2 to see algorithm selection logic
+ * - Each optimizer reports convergence via CurcumaLogger at verbosity ≥ 1
+ * - Native algorithms: Check lbfgs.cpp optimize() method for iteration details
+ * - External LBFGSpp: Monitor LBFGSpp callback functions for progress
+ */
 SimpleOptimizationResult ModernOptimizerDispatcher::optimizeStructure(
     Molecule* molecule,
     const std::string& method_name,
     EnergyCalculator* energy_calculator,
     const json& config)
 {
-
+    // Parameter validation
     if (!molecule) {
         return SimpleOptimizationResult::failed_result("Null molecule provided", method_name);
     }

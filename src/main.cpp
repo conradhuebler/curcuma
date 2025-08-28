@@ -660,7 +660,40 @@ int main(int argc, char **argv) {
                 // Demonstrate modern features
                 ModernOptimization::ModernOptimizerDispatcher::demonstrateModernFeatures(molecule);
 
-                // Perform optimization using modern system
+                /*
+                 * ARCHITECTURAL DECISION RECORD: Modern Optimization Dispatcher
+                 *
+                 * CONTEXT: Multiple optimization algorithms with different capabilities
+                 * - LBFGSPP: External LBFGSpp library (working implementation)
+                 * - NATIVE_LBFGS: Native L-BFGS two-loop recursion (Claude Generated)
+                 * - NATIVE_DIIS: Native DIIS acceleration method (Claude Generated)
+                 * - NATIVE_RFO: Native RFO eigenvector following (Claude Generated)
+                 * - INTERNAL: Legacy internal LBFGS (placeholder)
+                 *
+                 * DECISION: Strategy pattern with OptimizerType enum selection
+                 * - Type-safe method selection: no magic strings, clear enum values
+                 * - Auto-selection logic: >200 atoms → LBFGSpp, otherwise native methods
+                 * - Unified SimpleOptimizationResult interface for all algorithms
+                 *
+                 * IMPLEMENTATION CHAIN:
+                 * 1. main.cpp:692 → ModernOptimizerDispatcher::optimizeStructure()
+                 * 2. modern_optimizer_simple.cpp:parseOptimizerType() → enum conversion
+                 * 3. optimizeWithLBFGSpp() / optimizeWithNativeLBFGS() method selection
+                 * 4. Individual optimizer execution with EnergyCalculator integration
+                 *
+                 * RUNTIME BEHAVIOR:
+                 * - method="lbfgspp" → External LBFGSpp library wrapper
+                 * - method="native_lbfgs" → Curcuma's native L-BFGS implementation
+                 * - method="diis" → Native DIIS acceleration (Pulay method)
+                 * - method="rfo" → Native RFO eigenvector following (Banerjee method)
+                 * - method="auto" → Automatic selection based on system size
+                 *
+                 * DEBUGGING ENTRY POINTS:
+                 * - Set verbosity ≥ 2 to see algorithm selection and mathematical progress
+                 * - Each optimizer logs literature citations and scientific parameters
+                 * - Energy calculator integration with gradient validation and step monitoring
+                 */
+                // Perform optimization using modern system with documented architecture above
                 auto result = ModernOptimization::ModernOptimizerDispatcher::optimizeStructure(
                     &molecule, method, &energy_calc, controller["opt"]);
 

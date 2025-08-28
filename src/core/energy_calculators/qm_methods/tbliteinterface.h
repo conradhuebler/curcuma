@@ -43,6 +43,11 @@ static json TBLiteSettings{
 
 class TBLiteInterface : public QMInterface {
 public:
+    enum class TBLiteMethod {
+        IPEA1 = 0,
+        GFN1 = 1,
+        GFN2 = 2
+    };
     TBLiteInterface(const json& tblitesettings = TBLiteSettings);
     ~TBLiteInterface();
 
@@ -103,4 +108,8 @@ private:
 
     bool m_initialised = false, m_calculator = false;
     json m_tblitesettings;
+
+    // Method selection - Claude Generated improvements
+    TBLiteMethod m_tblite_method = TBLiteMethod::IPEA1; // Type-safe enum
+    int m_method_switch = 0; // Legacy compatibility
 };

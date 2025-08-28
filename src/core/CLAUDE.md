@@ -106,6 +106,7 @@ core/
 - **Performance caching**: Distance matrices cached with automatic invalidation
 - **Centralized unit system**: All conversions moved to `CurcumaUnit` namespace in `units.h`
 - **Algorithm optimization**: Improved angle and distance calculations with bounds checking
+- **Complex Architecture Documentation**: Comprehensive documentation strategy for factory patterns, dispatchers, multi-step workflows (see ARCHITECTURE_DOCUMENTATION.md)
 - **Documentation**: Added scientific references and formula documentation for learning
 
 ### Unit System (`units.h`)

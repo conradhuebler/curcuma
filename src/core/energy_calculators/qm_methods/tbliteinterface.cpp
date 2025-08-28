@@ -156,10 +156,12 @@ bool TBLiteInterface::InitialiseMolecule(const int* attyp, const double* coord, 
     m_charge = charge;
     m_spin = spin;
 
+    // CRITICAL FIX: coord is already in atomic units (Bohr) - no conversion needed!
+    // Previous bug: double conversion coord/au -> m_coord/au = coord/au^2
     for (int i = 0; i < m_atomcount; ++i) {
-        m_coord[3 * i + 0] = coord[3 * i + 0] / au;
-        m_coord[3 * i + 1] = coord[3 * i + 1] / au;
-        m_coord[3 * i + 2] = coord[3 * i + 2] / au;
+        m_coord[3 * i + 0] = coord[3 * i + 0]; // Already in Bohr from previous /au
+        m_coord[3 * i + 1] = coord[3 * i + 1]; // Already in Bohr from previous /au
+        m_coord[3 * i + 2] = coord[3 * i + 2]; // Already in Bohr from previous /au
         m_attyp[i] = attyp[i];
     }
     InitialiseMolecule();
@@ -347,19 +349,49 @@ double TBLiteInterface::Calculation(bool gradient)
             m_tblite_calc = tblite_new_gfn2_calculator(m_ctx, m_tblite_mol);
         }
 
+        // CRITICAL: Configure calculator parameters for convergence
+        // Apply method-specific optimizations for GFN2 convergence issues
+        double effective_damping = m_damping;
+        int effective_maxiter = m_SCFmaxiter;
+        double effective_accuracy = m_acc;
+
+        if (m_method_switch == 2) { // GFN2-xTB needs stronger settings
+            effective_damping = std::max(0.6, m_damping); // Stronger damping for GFN2
+            effective_maxiter = std::max(150, m_SCFmaxiter); // More iterations for GFN2
+            effective_accuracy = std::min(0.5, (double)m_acc); // Higher accuracy for GFN2
+
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::info("Applying GFN2-specific convergence optimizations");
+                CurcumaLogger::param("enhanced_damping", std::to_string(effective_damping));
+                CurcumaLogger::param("enhanced_maxiter", std::to_string(effective_maxiter));
+                CurcumaLogger::param("enhanced_accuracy", std::to_string(effective_accuracy));
+            }
+        }
+
+        tblite_set_calculator_accuracy(m_ctx, m_tblite_calc, effective_accuracy);
+        tblite_set_calculator_max_iter(m_ctx, m_tblite_calc, effective_maxiter);
+        tblite_set_calculator_mixer_damping(m_ctx, m_tblite_calc, effective_damping);
+        tblite_set_calculator_temperature(m_ctx, m_tblite_calc, m_Tele);
+
         if (m_guess == 0)
             tblite_set_calculator_guess(m_ctx, m_tblite_calc, TBLITE_GUESS_SAD);
         else
             tblite_set_calculator_guess(m_ctx, m_tblite_calc, TBLITE_GUESS_EEQ);
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("TBLite Calculator configured:");
+            CurcumaLogger::param("accuracy", std::to_string(m_acc));
+            CurcumaLogger::param("max_iterations", std::to_string(m_SCFmaxiter));
+            CurcumaLogger::param("damping", std::to_string(m_damping));
+            CurcumaLogger::param("temperature", std::to_string(m_Tele));
+            CurcumaLogger::param("guess", (m_guess == 0) ? "SAD" : "EEQ");
+        }
         m_calculator = true;
     }
 
     ApplySolvation();
 
-    tblite_set_calculator_accuracy(m_ctx, m_tblite_calc, m_acc);
-    tblite_set_calculator_max_iter(m_ctx, m_tblite_calc, m_SCFmaxiter);
-    tblite_set_calculator_mixer_damping(m_ctx, m_tblite_calc, m_damping);
-    tblite_set_calculator_temperature(m_ctx, m_tblite_calc, m_Tele);
+    // Parameters already set during calculator creation - no need to repeat
     tblite_set_calculator_save_integrals(m_ctx, m_tblite_calc, 0);
     // Perform calculation
     tblite_get_singlepoint(m_ctx, m_tblite_mol, m_tblite_calc, m_tblite_res);
@@ -387,7 +419,14 @@ double TBLiteInterface::Calculation(bool gradient)
         m_ctx = tblite_new_context();
         m_tblite_res = tblite_new_result();
 
-        // TBLite verbosity controlled by CurcumaLogger - already set in Calculation method
+        // CRITICAL: Re-apply TBLite verbosity after context recreation
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            tblite_set_context_verbosity(m_ctx, 3);
+        } else if (CurcumaLogger::get_verbosity() >= 2) {
+            tblite_set_context_verbosity(m_ctx, 1);
+        } else {
+            tblite_set_context_verbosity(m_ctx, 0);
+        }
 
         if (m_method_switch == 0) {
             m_tblite_calc = tblite_new_ipea1_calculator(m_ctx, m_tblite_mol);
@@ -396,6 +435,24 @@ double TBLiteInterface::Calculation(bool gradient)
         } else if (m_method_switch == 2) {
             m_tblite_calc = tblite_new_gfn2_calculator(m_ctx, m_tblite_mol);
         }
+
+        // CRITICAL: Re-configure calculator parameters after recreation
+        // Apply same method-specific optimizations as in main calculation
+        double effective_damping = m_damping;
+        int effective_maxiter = m_SCFmaxiter;
+        double effective_accuracy = m_acc;
+
+        if (m_method_switch == 2) { // GFN2-xTB needs stronger settings
+            effective_damping = std::max(0.6, m_damping);
+            effective_maxiter = std::max(150, m_SCFmaxiter);
+            effective_accuracy = std::min(0.5, (double)m_acc);
+        }
+
+        tblite_set_calculator_accuracy(m_ctx, m_tblite_calc, effective_accuracy);
+        tblite_set_calculator_max_iter(m_ctx, m_tblite_calc, effective_maxiter);
+        tblite_set_calculator_mixer_damping(m_ctx, m_tblite_calc, effective_damping);
+        tblite_set_calculator_temperature(m_ctx, m_tblite_calc, m_Tele);
+
         if (m_guess == 0)
             tblite_set_calculator_guess(m_ctx, m_tblite_calc, TBLITE_GUESS_SAD);
         else
@@ -495,14 +552,34 @@ double TBLiteInterface::Calculation(bool gradient)
 
 void TBLiteInterface::setMethod(const std::string& method)
 {
-    QMInterface::setMethod(method);
+    CurcumaLogger::info("TBLiteInterface::setMethod called");
+    CurcumaLogger::param("requested_method", method);
 
-    if (m_method.compare("ipea1") == 0)
-        m_method_switch = 0;
-    else if (m_method.compare("gfn1") == 0)
-        m_method_switch = 1;
-    else if (m_method.compare("gfn2") == 0)
-        m_method_switch = 2;
+    QMInterface::setMethod(method);
+    CurcumaLogger::param("normalized_method", m_method);
+
+    TBLiteMethod old_method = m_tblite_method;
+    if (m_method.compare("ipea1") == 0) {
+        m_tblite_method = TBLiteMethod::IPEA1;
+        m_method_switch = static_cast<int>(TBLiteMethod::IPEA1);
+        CurcumaLogger::info("Method resolved to: iPEA1 (TBLiteMethod::IPEA1)");
+    } else if (m_method.compare("gfn1") == 0) {
+        m_tblite_method = TBLiteMethod::GFN1;
+        m_method_switch = static_cast<int>(TBLiteMethod::GFN1);
+        CurcumaLogger::info("Method resolved to: GFN1-xTB (TBLiteMethod::GFN1)");
+    } else if (m_method.compare("gfn2") == 0) {
+        m_tblite_method = TBLiteMethod::GFN2;
+        m_method_switch = static_cast<int>(TBLiteMethod::GFN2);
+        CurcumaLogger::info("Method resolved to: GFN2-xTB (TBLiteMethod::GFN2)");
+    } else {
+        CurcumaLogger::warn("Unknown TBLite method '" + method + "', keeping current method");
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param("method_old", std::to_string(static_cast<int>(old_method)));
+        CurcumaLogger::param("method_new", std::to_string(static_cast<int>(m_tblite_method)));
+        CurcumaLogger::param("m_method_switch", std::to_string(m_method_switch));
+    }
 }
 
 Vector TBLiteInterface::Charges() const

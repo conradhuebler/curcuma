@@ -195,6 +195,40 @@ const std::vector<MethodFactory::ExplicitMethod>& MethodFactory::getExplicitMeth
 // Main Factory Method
 // =================================================================================
 
+/*
+ * ARCHITECTURAL DECISION RECORD: Computational Method Factory
+ *
+ * CONTEXT: Multiple computational method providers with overlapping capabilities
+ * - TBLite: Modern, fastest GFN methods (gfn1, gfn2, ipea1)
+ * - XTB: Established, stable implementation (gfn1, gfn2, gfnff)
+ * - Ulysses: Legacy semi-empirical methods (PM3, AM1, ugfn2)
+ * - Native: Educational implementations (EHT, cgfnff)
+ * - Force Fields: UFF, QMDFF with performance optimizations
+ *
+ * DECISION: Priority-based factory with hierarchical fallbacks
+ * - Method resolution: explicit names > hierarchical priorities > error
+ * - Educational focus: clear method resolution visible in debug output
+ * - API preservation: maintains EnergyCalculator compatibility
+ *
+ * IMPLEMENTATION CHAIN:
+ * 1. src/core/energycalculator.cpp:109 → MethodFactory::create()
+ * 2. method_factory.cpp:198 → method name normalization and resolution
+ * 3. method_factory.cpp:250+ → priority-based creation (createGFN2, createGFN1)
+ * 4. qm_methods/*_method.cpp → specific method wrapper construction
+ * 5. interface/*.cpp → actual computational library initialization
+ *
+ * RUNTIME BEHAVIOR:
+ * - "gfn2" → createGFN2() tries TBLite > Ulysses > XTB fallback chain
+ * - "eht" → createEHT() → direct EHTMethod wrapper creation
+ * - "uff" → createForceField() → ForceFieldMethod with threading support
+ * - "cgfnff" → createCGFNFF() → native GFN-FF implementation
+ *
+ * DEBUGGING ENTRY POINTS:
+ * - Set verbosity ≥ 2 to see method resolution process and fallback attempts
+ * - Failed method creation logs provider availability and compilation flags
+ * - Each method wrapper reports initialization status via CurcumaLogger
+ * - Check method_factory.cpp hasTBLite()/hasXTB() etc. for compilation flag status
+ */
 std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& method_name, const json& config) {
     CurcumaLogger::info("MethodFactory::create called");
     CurcumaLogger::param("requested_method", method_name);
@@ -219,23 +253,32 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
     CurcumaLogger::info("Step 1: Checking priority methods (shared methods with fallback hierarchy)");
     for (const auto& priority_method : getPriorityMethods()) {
         if (method_lower == priority_method.method_name) {
-            CurcumaLogger::info("Found priority method: " + priority_method.method_name);
-            for (const auto& priority : priority_method.priorities) {
-                CurcumaLogger::info("Trying provider: " + priority.first);
+            CurcumaLogger::success("✓ Found priority method: " + priority_method.method_name);
+            CurcumaLogger::info("Priority resolution order: " + std::to_string(priority_method.priorities.size()) + " providers");
+
+            for (size_t i = 0; i < priority_method.priorities.size(); ++i) {
+                const auto& priority = priority_method.priorities[i];
+                CurcumaLogger::info("→ Trying provider " + std::to_string(i + 1) + "/" + std::to_string(priority_method.priorities.size()) + ": " + priority.first);
+
                 try {
                     auto method = priority.second(config);  // Try to create method
                     if (method != nullptr) {
-                        CurcumaLogger::success("Method '" + method_name + "' resolved to: " + priority.first + " (priority fallback)");
+                        CurcumaLogger::success("✓ SUCCESS: Method '" + method_name + "' resolved to: " + priority.first + " (priority " + std::to_string(i + 1) + ")");
+                        if (CurcumaLogger::get_verbosity() >= 2 && i > 0) {
+                            CurcumaLogger::warn("Note: Higher priority providers failed, using fallback #" + std::to_string(i + 1));
+                        }
                         return method;
                     } else {
-                        CurcumaLogger::warn("Provider " + priority.first + " returned nullptr");
+                        CurcumaLogger::warn("✗ Provider " + priority.first + " returned nullptr (not available/failed initialization)");
                     }
                 } catch (const std::exception& e) {
-                    CurcumaLogger::error("Provider " + priority.first + " threw exception: " + std::string(e.what()));
+                    CurcumaLogger::error("✗ Provider " + priority.first + " threw exception: " + std::string(e.what()));
                 } catch (...) {
-                    CurcumaLogger::error("Provider " + priority.first + " threw unknown exception");
+                    CurcumaLogger::error("✗ Provider " + priority.first + " threw unknown exception");
                 }
             }
+
+            CurcumaLogger::error("✗ ALL PROVIDERS FAILED for method: " + priority_method.method_name);
             // If we get here, no provider was available
             throw MethodCreationException(fmt::format(
                 "Method '{}' not available - no compiled providers (need TBLite, XTB, or Ulysses)", 
@@ -292,30 +335,30 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
     
     // Check force field methods
     if (matchesMethodList(method_lower, m_ff_methods)) {
-        fmt::print("Method '{}' resolved to: ForceField (pattern match)\n", method_name);
+        CurcumaLogger::success("Method '" + method_name + "' resolved to: ForceField (pattern match)");
         return std::make_unique<ForceFieldMethod>(method_lower, config);
     }
     
     // Check TBLite methods
     if (matchesMethodList(method_lower, m_tblite_methods) && hasTBLite()) {
-        fmt::print("Method '{}' resolved to: TBLite (pattern match)\n", method_name);
+        CurcumaLogger::success("Method '" + method_name + "' resolved to: TBLite (pattern match)");
         return std::make_unique<TBLiteMethod>(method_lower, config);
     }
     
     // Check XTB methods  
     if (matchesMethodList(method_lower, m_xtb_methods) && hasXTB()) {
-        fmt::print("Method '{}' resolved to: XTB (pattern match)\n", method_name);
+        CurcumaLogger::success("Method '" + method_name + "' resolved to: XTB (pattern match)");
         return std::make_unique<XTBMethod>(method_lower, config);
     }
     
     // Check Ulysses methods
     if (matchesMethodList(method_lower, m_ulysses_methods) && hasUlysses()) {
-        fmt::print("Method '{}' resolved to: Ulysses (pattern match)\n", method_name);
+        CurcumaLogger::success("Method '" + method_name + "' resolved to: Ulysses (pattern match)");
         return std::make_unique<UlyssesMethod>(method_lower, config);
     }
     
     // 4. Default fallback to ForceField (as in original EnergyCalculator)
-    fmt::print("Unknown method: '{}', using default ForceField\n", method_name);
+    CurcumaLogger::warn("Unknown method: '" + method_name + "', using default ForceField");
     return std::make_unique<ForceFieldMethod>("uff", config);
 }
 

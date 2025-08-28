@@ -19,9 +19,12 @@
 
 #pragma once
 
+#include <algorithm>
 #include <iostream>
 #include <map>
 #include <set>
+#include <stdexcept>
+#include <string>
 
 #include <Eigen/Dense>
 
@@ -154,134 +157,15 @@ inline void CompactTopo(const Matrix& m1)
                 std::cout << "  " << i << "   ... " << j << std::endl;
         }
 }
-/*
-inline json CLI2Json(int argc, char** argv)
-{
-    json controller;
-    json key;
-    if (argc < 2)
-        return controller;
-    std::string keyword = argv[1];
-    keyword.erase(0, 1);
-    for (int i = 2; i < argc; ++i) {
-        std::string current = argv[i];
-        std::string sub = current.substr(0, 1);
-        if ((i + 1) >= argc) {
-            current.erase(0, 1);
-            if (sub.compare("-") == 0)
-                key[current] = true;
-            else
-                key[current] = false;
-        } else {
-            if (sub.compare("-") == 0 && ((i + 1) < argc)) {
-                std::string next = argv[i + 1];
-                std::string next_sub = next.substr(0, 1);
-                bool isNumber = true;
-                bool isVector = false;
-                double number = 0.0;
-                // std::size_t found = next.find("|");
-                if (next.find("|") != std::string::npos || next.find(",") != std::string::npos || next.find(":") != std::string::npos) {
-                    isNumber = false;
-                    isVector = true;
-                } else {
-                    try {
-                        number = std::stod(next);
-                    } catch (const std::invalid_argument& error) {
-                        isNumber = false;
-                    }
-                }
-                if (isNumber) {
-                    current.erase(0, 1);
-                    key[current] = number;
-                } else {
-                    if (next_sub.compare("-") == 0 || next.compare("false") == 0) {
-                        current.erase(0, 1);
-                        key[current] = false;
-                        continue;
-                    } else if (next_sub.compare("+") == 0 || next.compare("true") == 0) {
-                        current.erase(0, 1);
-                        key[current] = true;
-                        continue;
-                    } else {
-                        current.erase(0, 1);
-                        if (isVector) {
-                            key[current] = argv[i + 1];
-                        } else {
-                            //try {
-                            //    key[current] = std::stoi(argv[i + 1]);
-                            //} catch (const std::invalid_argument& error) {
-                            try {
-                                key[current] = std::stod(argv[i + 1]);
-                            } catch (const std::invalid_argument& error) {
-                                key[current] = argv[i + 1];
-                            }
-                        }
-                        //}
 
-                        ++i;
-                    }
-                }
-            }
-        }
-    }
-    controller[keyword] = key;
-    return controller;
-}
-*/
-/* this is the 2nd github copilot version */
-/*
-inline json CLI2Json(int argc, char** argv)
-{
-    json controller;
-    json key;
-    if (argc < 2)
-        return controller;
-
-    std::string keyword = argv[1];
-    keyword.erase(0, 1);
-
-    for (int i = 2; i < argc; ++i) {
-        std::string current = argv[i];
-        std::string sub = current.substr(0, 1);
-
-        if (sub == "-") {
-            current.erase(0, 1);
-            if ((i + 1) >= argc || argv[i + 1][0] == '-' || argv[i + 1] == std::string("true") || argv[i + 1] == std::string("+")) {
-                key[current] = true;
-            } else if (argv[i + 1] == std::string("false")) {
-                key[current] = false;
-                ++i;
-            } else {
-                std::string next = argv[i + 1];
-                bool isNumber = true;
-                bool isVector = next.find("|") != std::string::npos || next.find(",") != std::string::npos || next.find(":") != std::string::npos;
-                bool isRange = next.find("-") != std::string::npos;
-
-                if (!isVector && !isRange) {
-                    try {
-                        std::stod(next);
-                    } catch (const std::invalid_argument&) {
-                        isNumber = false;
-                    }
-                }
-
-                if (isNumber) {
-                    key[current] = std::stod(next);
-                } else if (isVector || isRange) {
-                    key[current] = next;
-                } else {
-                    key[current] = next;
-                }
-                ++i;
-            }
-        }
-    }
-
-    controller[keyword] = key;
-    return controller;
-}*/
-/* this is the github copilot version */
-
+/**
+ * @brief Extract typed value from JSON controller with case-insensitive key matching - Claude Generated
+ * @template T The type to extract from JSON
+ * @param controller JSON object to search
+ * @param name Key name to search for (case-insensitive)
+ * @return Extracted value of type T
+ * @throws std::runtime_error if key not found
+ */
 template <class T>
 inline T Json2KeyWord(const json& controller, std::string name)
 {
@@ -354,7 +238,7 @@ inline int MaxThreads()
     }
     return threads;
 }
-
+/*
 // Unit Conversion Functions - Claude Generated
 inline double hartree_to_kjmol(double eh) { return eh * CURCUMA_EH_TO_KJMOL; }
 inline double hartree_to_kcalmol(double eh) { return eh * CURCUMA_EH_TO_KCALMOL; }
@@ -362,7 +246,7 @@ inline double hartree_to_ev(double eh) { return eh * CURCUMA_EH_TO_EV; }
 inline double hartree_to_wavenumber(double eh) { return eh * CURCUMA_EH_TO_WAVENUMBER; }
 inline double bohr_to_angstrom(double bohr) { return bohr * CURCUMA_BOHR_TO_ANGSTROM; }
 inline double angstrom_to_bohr(double ang) { return ang / CURCUMA_BOHR_TO_ANGSTROM; }
-
+*/
 #include <chrono>
 #include <fmt/color.h>
 #include <fmt/format.h>

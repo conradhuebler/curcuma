@@ -3,6 +3,7 @@
  * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  */
 
+#include "src/core/curcuma_logger.h"
 #include "src/tools/general.h"
 
 #include "tblite_method.h"
@@ -12,9 +13,28 @@ TBLiteMethod::TBLiteMethod(const std::string& method_name, const json& config)
     , m_calculation_done(false)
     , m_last_energy(0.0)
 {
+    CurcumaLogger::info("TBLiteMethod constructor called");
+    CurcumaLogger::param("method_name", method_name);
 
 #ifdef USE_TBLITE
-    m_tblite = std::make_unique<TBLiteInterface>(config);
+    try {
+        CurcumaLogger::info("Creating TBLiteInterface with method: " + method_name);
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param("config", config.dump(2));
+        }
+        m_tblite = std::make_unique<TBLiteInterface>(config);
+
+        // CRITICAL: Set the specific method name in TBLiteInterface
+        CurcumaLogger::info("Setting TBLite method to: " + method_name);
+        m_tblite->setMethod(method_name);
+        CurcumaLogger::success("TBLiteInterface created and configured successfully for method: " + method_name);
+    } catch (const std::exception& e) {
+        CurcumaLogger::error("TBLiteInterface creation failed for method '" + method_name + "': " + std::string(e.what()));
+        throw;
+    }
+#else
+    CurcumaLogger::error("USE_TBLITE not defined - TBLite not available for method: " + method_name);
+    throw std::runtime_error("TBLite not available in this build");
 #endif
     m_parameters = config;
 }
