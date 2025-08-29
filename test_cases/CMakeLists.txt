@@ -63,3 +63,16 @@ target_link_libraries(test_energy_methods curcuma_core)
 if(USE_PCH)
         target_precompile_headers(test_energy_methods REUSE_FROM curcuma_core)
 endif()
+
+# Claude Generated: Debug Ulysses methods test
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/../release/debug_ulysses_test.cpp
+        DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+
+add_executable(debug_ulysses_test
+        ${CMAKE_CURRENT_BINARY_DIR}/debug_ulysses_test.cpp)
+
+target_link_libraries(debug_ulysses_test curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(debug_ulysses_test REUSE_FROM curcuma_core)
+endif()

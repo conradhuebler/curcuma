@@ -55,10 +55,14 @@ private:
         // Additional methods to test (updated based on actual results)
         m_reference_energies["gfn1"] = -171.87015554;     // GFN1-xTB (TBLite) - actual result  
         m_reference_energies["ipea1"] = -190.60693157;    // iPEA1-xTB (TBLite) - actual result
-        m_reference_energies["pm3"] = -328.41882169;      // PM3 (Ulysses) - currently returns PM6
-        m_reference_energies["am1"] = 1.25494377;         // AM1 (Ulysses) - currently fallback to UFF
+        m_reference_energies["pm3"] = -323.02640796; // PM3 (Ulysses) - currently returns PM6
+        m_reference_energies["am1"] = -350.01382758; // AM1 (Ulysses) - currently fallback to UFF
         m_reference_energies["eht"] = -190.28490972;      // Extended Hückel Theory - actual result
-        
+        m_reference_energies["mndo"] = -350.83101254; // Extended Hückel Theory - actual result
+        m_reference_energies["pm3pddg"] = -327.39677073; // Extended Hückel Theory - actual result
+        m_reference_energies["mndopddg"] = -355.90805881; // Extended Hückel Theory - actual result
+        m_reference_energies["pm3bp"] = -321.39448947; // Extended Hückel Theory - actual result
+
         // Tolerances (absolute energy difference in Eh)
         m_tolerances["gfn2"] = 1e-6;      // High precision for primary method
         m_tolerances["ugfn2"] = 1e-6;     // High precision
@@ -70,6 +74,10 @@ private:
         m_tolerances["pm3"] = 1e-6;       // High precision (currently returns PM6)
         m_tolerances["am1"] = 1e-6;       // High precision (currently returns UFF)
         m_tolerances["eht"] = 1e-6;       // High precision for native method
+        m_tolerances["mndo"] = 1e-6; // High precision for Ulysses method
+        m_tolerances["pm3pddg"] = 1e-6; // High precision for Ulysses method
+        m_tolerances["mndopddg"] = 1e-6; // High precision for Ulysses method
+        m_tolerances["pm3bp"] = 1e-6; // High precision for Ulysses method
     }
     
 public:
@@ -167,18 +175,22 @@ public:
         
         // Test methods in order of reliability
         std::vector<std::string> test_methods = {
-            "gfn2",     // Primary quantum method
-            "ugfn2",    // Alternative GFN2
-            "gfnff",    // Primary force field  
-            "gfn1",     // Alternative quantum
-            "pm6",      // Semi-empirical
-            "pm3",      // Semi-empirical
-            "uff",      // Basic force field
-            "eht",      // Simple quantum
-            "ipea1",    // Specialized method
-            "am1"       // Semi-empirical
+            "gfn2", // Primary quantum method
+            "ugfn2", // Alternative GFN2
+            "gfnff", // Primary force field
+            "gfn1", // Alternative quantum
+            "pm6", // Semi-empirical
+            "pm3", // Semi-empirical
+            "uff", // Basic force field
+            "eht", // Simple quantum
+            "ipea1", // Specialized method
+            "am1" // Semi-empirical
+            "mndo", // Semi-empirical
+            "pm3pddg", // Semi-empirical
+            "mndopddg", // Semi-empirical
+            "pm3bp" // Semi-empirical
         };
-        
+
         for (const auto& method : test_methods) {
             if (m_reference_energies.find(method) != m_reference_energies.end()) {
                 testMethod(method);

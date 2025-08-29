@@ -42,6 +42,7 @@
 #include <iostream>
 #include <string>
 
+#include "src/core/curcuma_logger.h"
 #include "ulysses.h"
 
 static matrixE Geom2Matrix(const Geometry& geometry)
@@ -80,45 +81,34 @@ void UlyssesObject::Calculate(bool gradient, bool verbose)
         m_electron->setSolvent(m_solvent);
     if (m_method == "gfn2")
         m_electron->setElectronTemp(m_Tele);
-    if (m_method == "gfn2") {
-        m_electron->Calculate(int(verbose), m_SCFmaxiter);
-        m_energy = m_electron->getEnergy();
-        if (gradient) {
-            matrixE grad;
-            m_electron->AnalyticalGrad(grad);
-            m_gradient = Matrix2Geom(grad);
-        }
-    } else if (m_method == "pm6") {
-        m_electron->Calculate(int(verbose), m_SCFmaxiter);
-        m_energy = m_electron->getEnergy();
-        if (gradient) {
-            matrixE grad;
-            m_electron->AnalyticalGrad(grad);
-            m_gradient = Matrix2Geom(grad);
-        }
+    // Claude Generated: Universal calculation for all methods
+    // All Ulysses methods use the same Calculate interface
+    m_electron->Calculate(int(verbose), m_SCFmaxiter);
+    m_energy = m_electron->getEnergy();
+
+    if (gradient) {
+        matrixE grad;
+        m_electron->AnalyticalGrad(grad);
+        m_gradient = Matrix2Geom(grad);
     }
 }
 
 void UlyssesObject::setMethod(std::string& method)
 {
+    // Claude Generated: Simplified - no string parsing, just set the base method
     if (method == "ugfn2")
         m_method = "gfn2";
-    else {
-        if (method.find("d3h4x") != std::string::npos) {
-            m_method = method.replace(method.find("-d3h4x"), 6, "");
-            m_correction = "D3H4X";
-        } else if (method.find("d3h+") != std::string::npos) {
-            m_method = method.replace(method.find("-d3h+"), 5, "");
-            m_correction = "D3H+";
-        } else {
-            m_method = method;
-            m_correction = "0";
-        }
-    }
+    else
+        m_method = method;
+
+    // Correction is now set separately in setMolecule
 }
 
-void UlyssesObject::setMolecule(const Geometry& geom, const std::vector<int>& atm, int chrge, int multpl, std::string pg)
+void UlyssesObject::setMolecule(const Geometry& geom, const std::vector<int>& atm, int chrge, int multpl, std::string pg, std::string correction)
 {
+    // Claude Generated: Set correction from parameter instead of string parsing
+    m_correction = correction;
+
     Molecule mol;
     auto matrix = Geom2Matrix(geom);
     std::vector<size_t> atom_numbers;
@@ -126,23 +116,93 @@ void UlyssesObject::setMolecule(const Geometry& geom, const std::vector<int>& at
         atom_numbers.push_back(atm[i]);
     }
     mol.set2System(matrix, atom_numbers, chrge, multpl, pg);
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("Creating Ulysses BSet and Electron objects");
+        CurcumaLogger::param("method", m_method);
+        CurcumaLogger::param("correction", m_correction);
+        CurcumaLogger::param("atoms", (int)atm.size());
+        CurcumaLogger::param("charge", chrge);
+        CurcumaLogger::param("multiplicity", multpl);
+    }
+
     m_bset = new BSet(mol, m_method);
 
     if (m_method == "gfn2") {
         m_electron = new GFN2(*m_bset, mol);
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Created GFN2 electron object (no correction support)");
+        }
     } else if (m_method == "pm6") {
         m_electron = new PM6(*m_bset, mol, "0", m_correction);
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Created PM6 electron object");
+            CurcumaLogger::param("correction_applied", m_correction);
+        }
+    } else if (m_method == "am1") {
+        m_electron = new AM1(*m_bset, mol, "0", m_correction);
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Created AM1 electron object");
+            CurcumaLogger::param("correction_applied", m_correction);
+        }
+    } else if (m_method == "pm3") {
+        m_electron = new PM3(*m_bset, mol, "0", m_correction);
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Created PM3 electron object");
+            CurcumaLogger::param("correction_applied", m_correction);
+        }
+    } else if (m_method == "mndo") {
+        m_electron = new MNDO(*m_bset, mol, "0", m_correction);
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Created MNDO electron object");
+            CurcumaLogger::param("correction_applied", m_correction);
+        }
+    } else if (m_method == "mndod") {
+        m_electron = new MNDOd(*m_bset, mol, "0", m_correction);
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Created MNDOd electron object");
+            CurcumaLogger::param("correction_applied", m_correction);
+        }
+    } else if (m_method == "rm1") {
+        m_electron = new RM1(*m_bset, mol, "0", m_correction);
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Created RM1 electron object");
+            CurcumaLogger::param("correction_applied", m_correction);
+        }
+    } else if (m_method == "pm3pddg") {
+        m_electron = new PM3PDDG(*m_bset, mol, "0", m_correction);
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Created PM3PDDG electron object");
+            CurcumaLogger::param("correction_applied", m_correction);
+        }
+    } else if (m_method == "mndopddg") {
+        m_electron = new MNDOPDDG(*m_bset, mol, "0", m_correction);
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Created MNDOPDDG electron object");
+            CurcumaLogger::param("correction_applied", m_correction);
+        }
+    } else if (m_method == "pm3bp") {
+        m_electron = new PM3BP(*m_bset, mol, "0", m_correction);
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Created PM3BP electron object");
+            CurcumaLogger::param("correction_applied", m_correction);
+        }
+    } else {
+        // Fallback to PM6 for unknown methods
+        CurcumaLogger::warn("Unknown Ulysses method '" + m_method + "', falling back to PM6");
+        m_electron = new PM6(*m_bset, mol, "0", m_correction);
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Created PM6 electron object (fallback)");
+            CurcumaLogger::param("correction_applied", m_correction);
+        }
     }
 }
 
 void UlyssesObject::UpdateGeometry(const Geometry& geom)
 {
     auto matrix = Geom2Matrix(geom);
-    if (m_method == "gfn2") {
-        m_electron->setGeometry(matrix);
-    } else if (m_method == "pm6") {
-        m_electron->setGeometry(matrix);
-    }
+    // All methods use the same setGeometry interface
+    m_electron->setGeometry(matrix);
 }
 
 Vector UlyssesObject::Charges() const

@@ -61,6 +61,7 @@ private:
 
     StringList m_solvents = { "acetone", "acetone", "acetonitrile", "aniline", "benzaldehyde", "benzene", "dichloromethane", "chloroform", "carbon disulfide", "dioxane", "dmf", "dmso", "ethanol", "diethyl ether", "ethyl acetate", "furane", "hexadecane", "hexane", "methanol", "nitromethane", "octanol", "phenol", "thf", "toluene", "water", "octanol wet" };
     std::string m_solvent = "none";
+    std::string m_correction = "0"; // Claude Generated: Store correction parameter separately
 
     json m_ulyssessettings;
 };

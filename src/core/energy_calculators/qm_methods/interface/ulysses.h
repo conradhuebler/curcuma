@@ -36,7 +36,7 @@ public:
 
     void Calculate(bool gradient, bool verbose);
     void setMethod(std::string& method);
-    void setMolecule(const Geometry& geom, const std::vector<int>& atm, int chrge, int multpl, std::string pg);
+    void setMolecule(const Geometry& geom, const std::vector<int>& atm, int chrge, int multpl, std::string pg, std::string correction = "0");
     void UpdateGeometry(const Geometry& geom);
     double Energy() const { return m_energy; }
     Geometry Gradient() const { return m_gradient; }

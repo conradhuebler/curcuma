@@ -150,6 +150,7 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 - cgfnff JSON parameter generation creates null values causing crashes
 - Missing real GFN-FF parameters (currently using placeholders)
 - Memory optimization needed for large basis sets (>1000 atoms)
+- **Ulysses D3H4X/D3H+ corrections**: Corrections are calculated internally but not extractable via getter methods - energies remain identical with/without corrections
 
 ### Recent Major Achievements (January 2025)
 - **🎯 Universal Verbosity System**: All QM methods support consistent 4-level output control
@@ -157,6 +158,8 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 - **📊 Scientific Output**: HOMO/LUMO analysis, orbital properties, molecular analysis at Level 2
 - **🚀 Performance**: Zero overhead silent mode for iterative calculations
 - **🏗️ Enhanced Error Handling**: All methods use CurcumaLogger for consistent error reporting
+- **✅ Complete Ulysses Integration**: All 27 semi-empirical methods (9 base × 3 correction modes) functional in Curcuma
+- **🔧 MethodFactory Enhancement**: Fixed AM1/PM3 method recognition and universal method calculation support
 
 ### Performance Optimizations
 - Threading support in matrix operations

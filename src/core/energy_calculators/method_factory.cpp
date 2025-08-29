@@ -53,8 +53,15 @@ const std::vector<std::string> MethodFactory::m_xtb_methods = {
     "gfnff", "xtb-gfn1", "xtb-gfn2" 
 };
 
-const std::vector<std::string> MethodFactory::m_ulysses_methods = { 
-    "ugfn2", "GFN2L", "pm3", "PM3PDDG", "MNDOPDDG", "PM3BP", "RM1", "AM1", "MNDO", "MNDOd", "pm6" 
+const std::vector<std::string> MethodFactory::m_ulysses_methods = {
+    // Claude Generated: Complete Ulysses methods with correction mode support
+    "ugfn2", "pm6", "am1", "pm3", "mndo", "mndod", "rm1", "pm3pddg", "mndopddg", "pm3bp",
+    // D3H4X correction modes
+    "pm6-d3h4x", "am1-d3h4x", "pm3-d3h4x", "mndo-d3h4x", "mndod-d3h4x",
+    "rm1-d3h4x", "pm3pddg-d3h4x", "mndopddg-d3h4x", "pm3bp-d3h4x",
+    // D3H+ correction modes
+    "pm6-d3h+", "am1-d3h+", "pm3-d3h+", "mndo-d3h+", "mndod-d3h+",
+    "rm1-d3h+", "pm3pddg-d3h+", "mndopddg-d3h+", "pm3bp-d3h+"
 };
 
 const std::vector<std::string> MethodFactory::m_d3_methods = { "d3" };
@@ -157,37 +164,59 @@ const std::vector<MethodFactory::MethodPriority>& MethodFactory::getPriorityMeth
 const std::vector<MethodFactory::ExplicitMethod>& MethodFactory::getExplicitMethods() {
     static const std::vector<ExplicitMethod> explicit_methods = {
         // Native methods (always available)
-        {"eht", [](const json& config) { return std::make_unique<EHTMethod>(config); }, "Native", false, ""},
-        {"cgfnff", [](const json& config) { return std::make_unique<GFNFFMethod>(config); }, "Native", false, ""},
-        
+        { "eht", [](const json& config) { return std::make_unique<EHTMethod>(config); }, "Native", false, "" },
+        { "cgfnff", [](const json& config) { return std::make_unique<GFNFFMethod>(config); }, "Native", false, "" },
+
         // Force field methods (always available)
-        {"uff", [](const json& config) { return std::make_unique<ForceFieldMethod>("uff", config); }, "ForceField", false, ""},
-        {"uff-d3", [](const json& config) { return std::make_unique<ForceFieldMethod>("uff-d3", config); }, "ForceField", false, ""},
-        {"qmdff", [](const json& config) { return std::make_unique<ForceFieldMethod>("qmdff", config); }, "ForceField", false, ""},
-        
+        { "uff", [](const json& config) { return std::make_unique<ForceFieldMethod>("uff", config); }, "ForceField", false, "" },
+        { "uff-d3", [](const json& config) { return std::make_unique<ForceFieldMethod>("uff-d3", config); }, "ForceField", false, "" },
+        { "qmdff", [](const json& config) { return std::make_unique<ForceFieldMethod>("qmdff", config); }, "ForceField", false, "" },
+
         // XTB-specific methods
-        {"gfnff", [](const json& config) { return std::make_unique<XTBMethod>("gfnff", config); }, "XTB", true, "USE_XTB"},
-        {"xtb-gfn1", [](const json& config) { return std::make_unique<XTBMethod>("xtb-gfn1", config); }, "XTB", true, "USE_XTB"},
-        {"xtb-gfn2", [](const json& config) { return std::make_unique<XTBMethod>("xtb-gfn2", config); }, "XTB", true, "USE_XTB"},
-        
-        // Ulysses-specific methods  
-        {"ugfn2", [](const json& config) { return std::make_unique<UlyssesMethod>("ugfn2", config); }, "Ulysses", true, "USE_ULYSSES"},
-        {"GFN2L", [](const json& config) { return std::make_unique<UlyssesMethod>("GFN2L", config); }, "Ulysses", true, "USE_ULYSSES"},
-        {"pm3", [](const json& config) { return std::make_unique<UlyssesMethod>("pm3", config); }, "Ulysses", true, "USE_ULYSSES"},
-        {"PM3PDDG", [](const json& config) { return std::make_unique<UlyssesMethod>("PM3PDDG", config); }, "Ulysses", true, "USE_ULYSSES"},
-        {"MNDOPDDG", [](const json& config) { return std::make_unique<UlyssesMethod>("MNDOPDDG", config); }, "Ulysses", true, "USE_ULYSSES"},
-        {"PM3BP", [](const json& config) { return std::make_unique<UlyssesMethod>("PM3BP", config); }, "Ulysses", true, "USE_ULYSSES"},
-        {"RM1", [](const json& config) { return std::make_unique<UlyssesMethod>("RM1", config); }, "Ulysses", true, "USE_ULYSSES"},
-        {"AM1", [](const json& config) { return std::make_unique<UlyssesMethod>("AM1", config); }, "Ulysses", true, "USE_ULYSSES"},
-        {"MNDO", [](const json& config) { return std::make_unique<UlyssesMethod>("MNDO", config); }, "Ulysses", true, "USE_ULYSSES"},
-        {"MNDOd", [](const json& config) { return std::make_unique<UlyssesMethod>("MNDOd", config); }, "Ulysses", true, "USE_ULYSSES"},
-        {"pm6", [](const json& config) { return std::make_unique<UlyssesMethod>("pm6", config); }, "Ulysses", true, "USE_ULYSSES"},
-        
+        { "gfnff", [](const json& config) { return std::make_unique<XTBMethod>("gfnff", config); }, "XTB", true, "USE_XTB" },
+        { "xtb-gfn1", [](const json& config) { return std::make_unique<XTBMethod>("xtb-gfn1", config); }, "XTB", true, "USE_XTB" },
+        { "xtb-gfn2", [](const json& config) { return std::make_unique<XTBMethod>("xtb-gfn2", config); }, "XTB", true, "USE_XTB" },
+
+        // Ulysses-specific methods (27 total: 9 base methods × 3 correction modes)
+        // Base methods without corrections
+        { "ugfn2", [](const json& config) { return std::make_unique<UlyssesMethod>("ugfn2", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "pm6", [](const json& config) { return std::make_unique<UlyssesMethod>("pm6", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "am1", [](const json& config) { return std::make_unique<UlyssesMethod>("am1", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "pm3", [](const json& config) { return std::make_unique<UlyssesMethod>("pm3", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "mndo", [](const json& config) { return std::make_unique<UlyssesMethod>("mndo", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "mndod", [](const json& config) { return std::make_unique<UlyssesMethod>("mndod", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "rm1", [](const json& config) { return std::make_unique<UlyssesMethod>("rm1", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "pm3pddg", [](const json& config) { return std::make_unique<UlyssesMethod>("pm3pddg", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "mndopddg", [](const json& config) { return std::make_unique<UlyssesMethod>("mndopddg", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "pm3bp", [](const json& config) { return std::make_unique<UlyssesMethod>("pm3bp", config); }, "Ulysses", true, "USE_ULYSSES" },
+
+        // Methods with D3H4X corrections
+        { "pm6-d3h4x", [](const json& config) { return std::make_unique<UlyssesMethod>("pm6-d3h4x", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "am1-d3h4x", [](const json& config) { return std::make_unique<UlyssesMethod>("am1-d3h4x", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "pm3-d3h4x", [](const json& config) { return std::make_unique<UlyssesMethod>("pm3-d3h4x", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "mndo-d3h4x", [](const json& config) { return std::make_unique<UlyssesMethod>("mndo-d3h4x", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "mndod-d3h4x", [](const json& config) { return std::make_unique<UlyssesMethod>("mndod-d3h4x", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "rm1-d3h4x", [](const json& config) { return std::make_unique<UlyssesMethod>("rm1-d3h4x", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "pm3pddg-d3h4x", [](const json& config) { return std::make_unique<UlyssesMethod>("pm3pddg-d3h4x", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "mndopddg-d3h4x", [](const json& config) { return std::make_unique<UlyssesMethod>("mndopddg-d3h4x", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "pm3bp-d3h4x", [](const json& config) { return std::make_unique<UlyssesMethod>("pm3bp-d3h4x", config); }, "Ulysses", true, "USE_ULYSSES" },
+
+        // Methods with D3H+ corrections
+        { "pm6-d3h+", [](const json& config) { return std::make_unique<UlyssesMethod>("pm6-d3h+", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "am1-d3h+", [](const json& config) { return std::make_unique<UlyssesMethod>("am1-d3h+", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "pm3-d3h+", [](const json& config) { return std::make_unique<UlyssesMethod>("pm3-d3h+", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "mndo-d3h+", [](const json& config) { return std::make_unique<UlyssesMethod>("mndo-d3h+", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "mndod-d3h+", [](const json& config) { return std::make_unique<UlyssesMethod>("mndod-d3h+", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "rm1-d3h+", [](const json& config) { return std::make_unique<UlyssesMethod>("rm1-d3h+", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "pm3pddg-d3h+", [](const json& config) { return std::make_unique<UlyssesMethod>("pm3pddg-d3h+", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "mndopddg-d3h+", [](const json& config) { return std::make_unique<UlyssesMethod>("mndopddg-d3h+", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "pm3bp-d3h+", [](const json& config) { return std::make_unique<UlyssesMethod>("pm3bp-d3h+", config); }, "Ulysses", true, "USE_ULYSSES" },
+
         // Dispersion corrections
-        {"d3", [](const json& config) { return std::make_unique<DispersionMethod>("d3", config); }, "DFT-D3", true, "USE_D3"},
-        {"d4", [](const json& config) { return std::make_unique<DispersionMethod>("d4", config); }, "DFT-D4", true, "USE_D4"}
+        { "d3", [](const json& config) { return std::make_unique<DispersionMethod>("d3", config); }, "DFT-D3", true, "USE_D3" },
+        { "d4", [](const json& config) { return std::make_unique<DispersionMethod>("d4", config); }, "DFT-D4", true, "USE_D4" }
     };
-    
+
     return explicit_methods;
 }
 

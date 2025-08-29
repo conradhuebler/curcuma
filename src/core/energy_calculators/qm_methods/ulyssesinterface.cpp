@@ -35,8 +35,29 @@ UlyssesInterface::UlyssesInterface(const json& ulyssessettings)
     m_Tele = m_ulyssessettings["Tele"];
     m_SCFmaxiter = m_ulyssessettings["SCFmaxiter"];
     m_solvent = m_ulyssessettings["solvent"];
-    m_method = m_ulyssessettings["method"];
     m_mult = m_ulyssessettings["mult"];
+
+    // Claude Generated: Use parsed base_method and corecorrection from ulysses_method.cpp
+    if (ulyssessettings.contains("base_method") && ulyssessettings.contains("corecorrection")) {
+        m_method = ulyssessettings["base_method"];
+        m_correction = ulyssessettings["corecorrection"];
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("UlyssesInterface using parsed parameters");
+            CurcumaLogger::param("base_method", m_method);
+            CurcumaLogger::param("correction", m_correction);
+        }
+    } else {
+        // Fallback to original method for backward compatibility
+        m_method = m_ulyssessettings["method"];
+        m_correction = "0";
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("UlyssesInterface fallback mode");
+            CurcumaLogger::param("original_method", m_method);
+        }
+    }
+
     // Validate solvent with CurcumaLogger
     if (std::find(m_solvents.begin(), m_solvents.end(), m_solvent) == m_solvents.end()) {
         CurcumaLogger::warn("Solvent '" + m_solvent + "' not supported by Ulysses - using 'none'");
@@ -57,8 +78,15 @@ UlyssesInterface::~UlyssesInterface()
 bool UlyssesInterface::InitialiseMolecule()
 {
 #ifdef USE_ULYSSES
-    m_ulysses->setMethod(m_method);
-    m_ulysses->setMolecule(m_geometry, m_atoms, m_charge, m_mult, "C1");
+    // Claude Generated: Pass base method only, no string parsing needed
+    std::string base_method = m_method; // This is already the base method from parameter parsing
+    m_ulysses->setMethod(base_method);
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("UlyssesObject method setup");
+        CurcumaLogger::param("base_method_passed", base_method);
+        CurcumaLogger::param("correction_to_apply", m_correction);
+    }
 
     // Verbosity Level 1+: Method initialization info
     if (CurcumaLogger::get_verbosity() >= 1) {
@@ -66,10 +94,15 @@ bool UlyssesInterface::InitialiseMolecule()
         CurcumaLogger::param("method", m_method);
         CurcumaLogger::param("SCF_maxiter", m_SCFmaxiter);
         CurcumaLogger::param("temperature", m_Tele);
+        if (m_correction != "0") {
+            CurcumaLogger::param("correction", m_correction);
+        }
         if (m_solvent != "none") {
             CurcumaLogger::param("solvent", m_solvent);
         }
     }
+
+    m_ulysses->setMolecule(m_geometry, m_atoms, m_charge, m_mult, "C1", m_correction);
 
     return true;
 #else

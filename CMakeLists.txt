@@ -340,7 +340,7 @@ if(USE_MKL)
 endif()
 if(USE_ULYSSES)
 
-target_link_libraries(ulysses_helper PUBLIC ulysses_lib)
+target_link_libraries(ulysses_helper PUBLIC ulysses_lib curcuma_core)
 endif()
 
 
