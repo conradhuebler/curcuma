@@ -16,6 +16,7 @@
 - Only include information important for ALL subdirectories in main CLAUDE.md
 - Preserve new knowledge from conversations but keep it brief
 - Always suggest improvements to existing code
+- **Keep entries concise and focused to save tokens**
 
 ## Development Guidelines
 
