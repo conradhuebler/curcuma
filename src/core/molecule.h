@@ -137,6 +137,20 @@ class Molecule
       double CalculateDistance(int i, int j) const;
       std::pair<double, double> GyrationRadius(double hmass = 1, bool hydrogen = true, int fragment = -1);
 
+      /*! \\brief Calculate end-to-end distance for polymer chains - Claude Generated
+       * \\param fragment Fragment index to analyze (-1 for entire molecule)
+       * \\return Distance between first and last atom in chain (Angstroms)
+       * \\note For CG simulations: distance between terminal beads of polymer
+       */
+      double EndToEndDistance(int fragment = -1) const;
+
+      /*! \\brief Calculate Rout: average distance from COM to outermost bead - Claude Generated
+       * \\param fragment Fragment index to analyze (-1 for entire molecule)
+       * \\return Average distance from center of mass to outermost atom (Angstroms)
+       * \\note For CG simulations: characterizes polymer extent from center
+       */
+      double Rout(int fragment = -1) const;
+
       /*! \\brief Get geometry matrix (Nx3 coordinates)
        * \\return Eigen matrix with atomic coordinates in \u00c5
        * \\warning After using Molecule(n, q) constructor, matrix has 2n rows (n zeros + n atoms)

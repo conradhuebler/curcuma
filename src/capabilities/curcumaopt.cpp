@@ -137,6 +137,11 @@ void CurcumaOpt::LoadControlJson()
     m_ConvCount = Json2KeyWord<int>(m_defaults, "ConvCount");
 
     m_method = Json2KeyWord<std::string>(m_defaults, "method");
+    // Claude Generated: Override method from controller if provided (CLI parameter)
+    if (m_controller.contains("method")) {
+        m_method = Json2KeyWord<std::string>(m_controller, "method");
+        m_defaults["method"] = m_method; // Keep both JSON objects synchronized
+    }
     m_charge = Json2KeyWord<double>(m_defaults, "Charge");
     m_spin = Json2KeyWord<double>(m_defaults, "Spin");
     m_singlepoint = Json2KeyWord<bool>(m_defaults, "SinglePoint");
@@ -187,8 +192,10 @@ void CurcumaOpt::start()
 
 void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
 {
-    // Claude Generated: Use new constructor with basename for parameter caching
-    EnergyCalculator interface(Json2KeyWord<std::string>(m_defaults, "method"), m_controller["sp"], Basename());
+    // Claude Generated: Silent initialization to avoid confusing uff output when gfnff is requested
+    json silent_sp = m_controller["sp"];
+    silent_sp["verbosity"] = 0;  // Make early initialization silent
+    EnergyCalculator interface(Json2KeyWord<std::string>(m_defaults, "method"), silent_sp, Basename());
     std::string method = Json2KeyWord<std::string>(m_defaults, "method");
 
     auto iter = molecules.begin();
@@ -337,8 +344,10 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, std::string& output, Vec
         parameter(3 * i + 2) = geometry(i, 2);
     }
 
-    // Claude Generated: Use new constructor with basename for parameter caching
-    EnergyCalculator interface(method, m_controller["sp"], Basename());
+    // Claude Generated: Silent parameter query to avoid confusing uff output when gfnff is requested
+    json silent_sp = m_controller["sp"];
+    silent_sp["verbosity"] = 0;  // Make parameter query silent
+    EnergyCalculator interface(method, silent_sp, Basename());
     interface.setMolecule(initial->getMolInfo());
     json param = interface.Parameter();
     double energy = interface.CalculateEnergy(false);

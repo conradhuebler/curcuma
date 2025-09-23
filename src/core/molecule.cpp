@@ -984,6 +984,80 @@ std::pair<double, double> Molecule::GyrationRadius(double hmass, bool protons, i
     return std::pair<double, double>(gyr, gyr_mass);
 }
 
+// End-to-end distance calculation for polymer chains - Claude Generated
+double Molecule::EndToEndDistance(int fragment) const
+{
+    // Get indices of atoms to analyze
+    std::vector<int> indices;
+    if (fragment == -1) {
+        // Use all atoms
+        for (int i = 0; i < m_geometry.rows(); ++i) {
+            indices.push_back(i);
+        }
+    } else {
+        // Use only atoms from specified fragment
+        if (fragment < 0 || fragment >= static_cast<int>(m_fragments.size())) {
+            return 0.0; // Invalid fragment
+        }
+        indices = m_fragments[fragment];
+    }
+
+    if (indices.size() < 2) {
+        return 0.0; // Need at least 2 atoms for end-to-end distance
+    }
+
+    // Calculate distance between first and last atoms in the chain
+    int first_idx = indices.front();
+    int last_idx = indices.back();
+
+    double dx = m_geometry(last_idx, 0) - m_geometry(first_idx, 0);
+    double dy = m_geometry(last_idx, 1) - m_geometry(first_idx, 1);
+    double dz = m_geometry(last_idx, 2) - m_geometry(first_idx, 2);
+
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+// Rout calculation: average distance from COM to outermost bead - Claude Generated
+double Molecule::Rout(int fragment) const
+{
+    // Get center of mass for the specified fragment or entire molecule
+    Position com = MassCentroid(true, fragment);
+
+    // Get indices of atoms to analyze
+    std::vector<int> indices;
+    if (fragment == -1) {
+        // Use all atoms
+        for (int i = 0; i < m_geometry.rows(); ++i) {
+            indices.push_back(i);
+        }
+    } else {
+        // Use only atoms from specified fragment
+        if (fragment < 0 || fragment >= static_cast<int>(m_fragments.size())) {
+            return 0.0; // Invalid fragment
+        }
+        indices = m_fragments[fragment];
+    }
+
+    if (indices.empty()) {
+        return 0.0; // No atoms to analyze
+    }
+
+    // Find the maximum distance from COM to any atom
+    double max_distance = 0.0;
+    for (int idx : indices) {
+        double dx = m_geometry(idx, 0) - com(0);
+        double dy = m_geometry(idx, 1) - com(1);
+        double dz = m_geometry(idx, 2) - com(2);
+        double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+        if (distance > max_distance) {
+            max_distance = distance;
+        }
+    }
+
+    return max_distance;
+}
+
 std::pair<int, Position> Molecule::Atom(int i) const
 {
     return std::pair<int, Position>(m_atoms[i], { m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2) });

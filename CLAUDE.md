@@ -242,6 +242,15 @@ curcuma/
 - **Benefits**: Matches logical polymorphic architecture, easier maintenance and development
 - **Compatibility**: All includes updated, compilation verified, no functionality changes
 
+### 🔬 **Enhanced Topological Data Analysis (dMatrix Integration)**
+- **Status**: ✅ **COMPLETED** - Complete replacement for legacy -dMatrix functionality
+- **New Architecture**: TDAEngine class with comprehensive topological analysis capabilities
+- **Integration**: Seamless integration into unified analysis.cpp system
+- **Enhanced Features**: Advanced colormaps, post-processing, trajectory analysis
+- **Migration Path**: `curcuma -dMatrix file.xyz` → `curcuma -analysis file.xyz -topological.save_persistence_image true`
+- **Research Quality**: Publication-grade analysis with Nature Communications citation
+- **📖 Documentation**: See [DMATRIX_MIGRATION.md](DMATRIX_MIGRATION.md) for complete migration guide
+
 ## Build and Test Commands
 
 ```bash

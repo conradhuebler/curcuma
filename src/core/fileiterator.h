@@ -1,6 +1,6 @@
 /*
  * <Load xyz files and iterate through them.>
- * Copyright (C) 2020 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -53,9 +53,19 @@ private:
 
     int CountLines() const;
 
+    // VTF-specific methods - Claude Generated
+    int CountVTFTimesteps() const;
+    bool ParseVTFHeader();
+    bool ParseVTFTimestep();
+
     std::string m_filename, m_basename;
     std::ifstream* m_file;
     bool m_end = false, m_init = false;
     Molecule m_current;
     int m_lines = 0, m_current_mol = 0, m_mols = 0;
+
+    // VTF-specific member variables - Claude Generated
+    bool m_is_vtf_file = false;
+    Molecule m_vtf_template;
+    int m_vtf_atom_count = 0;
 };

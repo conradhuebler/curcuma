@@ -64,9 +64,14 @@ PersistentDiagram::PersistentDiagram(const json& config, bool silent)
 
 dpairs PersistentDiagram::generatePairs()
 {
+    // Claude Generated: Input validation and memory safety
+    if (m_compressed_lower_distance_matrix.empty()) {
+        return dpairs(); // Return empty pairs for invalid input
+    }
+
     coefficient_t modulus = 2;
-    std::vector<float> distance = m_compressed_lower_distance_matrix;
-    compressed_lower_distance_matrix dist(std::move(m_compressed_lower_distance_matrix));
+    std::vector<float> distance = m_compressed_lower_distance_matrix; // Keep copy for later use
+    compressed_lower_distance_matrix dist(std::move(m_compressed_lower_distance_matrix)); // Use move for ripser
 
     value_t enclosing_radius = std::numeric_limits<value_t>::infinity();
     if (m_threshold == std::numeric_limits<value_t>::max()) {
@@ -93,9 +98,18 @@ dpairs PersistentDiagram::generatePairs()
 
 triples PersistentDiagram::generateTriples()
 {
+    // Claude Generated: Input validation and memory safety for generateTriples
+    if (m_compressed_lower_distance_matrix.empty()) {
+        return triples(); // Return empty triples for invalid input
+    }
+
+    if (m_en_scaling.empty()) {
+        return triples(); // Return empty triples if EN scaling is missing
+    }
+
     coefficient_t modulus = 2;
-    std::vector<float> distance = m_compressed_lower_distance_matrix;
-    compressed_lower_distance_matrix dist(std::move(m_compressed_lower_distance_matrix));
+    std::vector<float> distance = m_compressed_lower_distance_matrix; // Keep copy for later use
+    compressed_lower_distance_matrix dist(std::move(m_compressed_lower_distance_matrix)); // Use move for ripser
 
     value_t enclosing_radius = std::numeric_limits<value_t>::infinity();
     if (m_threshold == std::numeric_limits<value_t>::max()) {
@@ -128,6 +142,11 @@ triples PersistentDiagram::generateTriples()
             {
                 bool found = false;
                 for (int i = 0; i < distance.size(); ++i) {
+                    // Claude Generated: Add bounds checking for m_en_scaling access
+                    if (i >= static_cast<int>(m_en_scaling.size())) {
+                        break; // Prevent out-of-bounds access to m_en_scaling
+                    }
+
                     if (std::abs(distance[i] - b.second) < 1e-6 && std::find(indices.begin(), indices.end(), i) == indices.end()) {
                         //    std::cout << i << " " << distance[i] << " " << m_en_scaling[i] << " " << counter++ << std::endl;
                         indices.push_back(i);

@@ -234,6 +234,10 @@ set(curcuma_core_SRC
         src/capabilities/rmsd/rmsd_assignment.cpp
         src/capabilities/rmsdtraj.cpp
         src/capabilities/simplemd.cpp
+        src/capabilities/analysis.cpp
+        src/capabilities/casino.cpp
+        src/capabilities/trajectoryanalysis.cpp
+        src/capabilities/tda_engine.cpp
         src/capabilities/hessian.cpp
         src/capabilities/qmdfffit.cpp
         src/core/energy_calculators/qm_methods/eht.cpp
@@ -264,6 +268,7 @@ set(curcuma_core_SRC
         src/tools/general.h
         src/core/energy_calculators/qm_methods/orcainterface.h
         src/core/energy_calculators/qm_methods/orcainterface.cpp
+        src/core/imagewriter.cpp
 )
 
 set(curcuma_cap_SRC
@@ -285,8 +290,13 @@ set(curcuma_cap_SRC
         src/capabilities/rmsd/rmsd_assignment.cpp
         src/capabilities/rmsdtraj.cpp
         src/capabilities/simplemd.cpp
+        src/capabilities/analysis.cpp
+        src/capabilities/casino.cpp
+        src/capabilities/trajectoryanalysis.cpp
+        src/capabilities/tda_engine.cpp
         src/capabilities/hessian.cpp
         src/capabilities/qmdfffit.cpp
+        src/core/imagewriter.cpp
 )
 
 add_library(curcuma_core  ${curcuma_core_SRC})

@@ -631,6 +631,7 @@ bool SimpleMD::Initialise()
     m_interface = new EnergyCalculator(m_method, m_controller["md"], Basename());
 
     m_interface->setMolecule(m_molecule.getMolInfo());
+    m_interface->setVerbosity(0);
     // m_interface->setGeometryFile(Basename() + ".xyz"); TODO this does not really work
     // m_interface->setBasename(Basename()); TODO this does not really work
     if (m_writeUnique) {
@@ -2849,7 +2850,7 @@ double SimpleMD::CleanEnergy()
     EnergyCalculator interface(m_method, m_defaults, Basename());
     interface.setMolecule(m_molecule.getMolInfo());
     interface.updateGeometry(m_eigen_geometry);
-
+    interface.setVerbosity(0);
     const double Energy = interface.CalculateEnergy(true);
     m_eigen_gradient = interface.Gradient();
     if (m_dipole && m_method == "gfn2") {
@@ -2861,6 +2862,8 @@ double SimpleMD::CleanEnergy()
 
 double SimpleMD::FastEnergy()
 {
+    m_interface->setVerbosity(0);
+
     m_interface->updateGeometry(m_eigen_geometry);
 
     const double Energy = m_interface->CalculateEnergy(true);

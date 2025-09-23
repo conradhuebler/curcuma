@@ -1,6 +1,6 @@
 /*
  * <Some globale definition for chemical structures.>
- * Copyright (C) 2019 - 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -47,6 +47,9 @@ const double R = 8.31446261815324;
 const double atomic_mass = 1.66053906660e-27;
 const double T_Eh = 3.1577464e5;
 const double eV2Eh = 27.211386245988; // Hartree
+
+// Coarse Graining constants - Claude Generated
+const int CG_ELEMENT = 226; // Element number for all coarse-grained particles
 
 typedef Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> Geometry;
 typedef Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> Matrix;

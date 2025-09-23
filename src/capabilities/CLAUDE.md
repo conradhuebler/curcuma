@@ -42,6 +42,7 @@ capabilities/
 ### Advanced Analysis
 - **Hessian**: Second derivative calculations for normal modes
 - **Persistent Diagrams**: Topological data analysis for molecular structures
+- **Enhanced TDA (dMatrix replacement)**: Complete topological data analysis with TDAEngine
 - **Pairmapper**: Advanced structure matching algorithms
 
 ## Development Guidelines
@@ -68,6 +69,10 @@ capabilities/
 - Enhanced conformational search algorithms
 - Improved trajectory analysis tools
 - Better integration with quantum chemical methods
+- **✅ COMPLETED: dMatrix Integration** - Legacy -dMatrix functionality fully integrated into analysis.cpp
+  - TDAEngine class provides all original features plus enhancements
+  - Migration guide available in DMATRIX_MIGRATION.md
+  - Research-grade topological data analysis maintained
 - **Unit system migration**: Capabilities should migrate to centralized `CurcumaUnit` namespace
   - Replace hardcoded constants (2625.5, 627.5, etc.) with `CurcumaUnit::Energy::*` functions
   - Use centralized constants from `src/core/units.h` for consistency
