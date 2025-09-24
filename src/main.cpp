@@ -1325,6 +1325,8 @@ int main(int argc, char **argv) {
                     std::cout << ":: " << sqrt((((cA[0] - cB[0]) * (cA[0] - cB[0])) + ((cA[1] - cB[1]) * (cA[1] - cB[1])) + ((cA[2] - cB[2]) * (cA[2] - cB[2])))) << "::" << std::endl;
                 }
             }
+        // TODO: This command is part of the legacy system and should be migrated to a modern capability handler.
+        // During migration, replace Tools::CreateList with Tools::ParseStringToVector and adjust the input string format (',' to ';', ':' to '-').
         } else if (strcmp(argv[1], "-angle") == 0) {
             if (argc < 6) {
                 std::cerr << "Please use curcuma to calculate angles as follows:\ncurcuma -angle molecule.xyz indexA indexB indexC" << std::endl;
@@ -1422,6 +1424,7 @@ int main(int argc, char **argv) {
                         sqrt((((cB[0] - cC[0]) * (cB[0] - cC[0])) + ((cB[1] - cC[1]) * (cB[1] - cC[1])) + ((cB[2] - cC[2]) * (cB[2] - cC[2])))));
                 }
             }
+        // TODO: This command is part of the legacy system and should be migrated to a modern capability handler.
         } else if (strcmp(argv[1], "-dMatrix") == 0) {
             if (argc < 3) {
                 std::cerr << "Please use curcuma to calculate a distance matrix for a molecule as follows:\ncurcuma -dMatrix molecule.xyz [options]" << std::endl;

@@ -753,6 +753,44 @@ std::string Molecule::DistanceMatrixString(bool exclude_bonds, bool print_elemen
     return matrix;
 }
 
+std::string Molecule::DistanceMatrixString(bool exclude_bonds, bool print_elements, const std::vector<int>& indices) const
+{
+    // If no indices provided, use standard method
+    if (indices.empty()) {
+        return DistanceMatrixString(exclude_bonds, print_elements);
+    }
+
+    // Validate indices and filter valid ones
+    std::vector<int> valid_indices;
+    for (int idx : indices) {
+        if (idx >= 0 && idx < AtomCount()) {
+            valid_indices.push_back(idx);
+        }
+    }
+
+    std::ostringstream stream;
+    for (size_t i = 0; i < valid_indices.size(); ++i) {
+        int atom_i = valid_indices[i];
+        if (print_elements) {
+            stream << Elements::ElementAbbr[m_atoms[atom_i]] << ":   ";
+        }
+        for (size_t j = 0; j < valid_indices.size(); ++j) {
+            int atom_j = valid_indices[j];
+            double distance = CalculateDistance(atom_i, atom_j);
+
+            if (!exclude_bonds) {
+                stream << std::to_string(distance) + ",";
+            } else if (exclude_bonds && distance >= (Elements::CovalentRadius[Atom(atom_i).first] + Elements::CovalentRadius[Atom(atom_j).first]) * m_scaling) {
+                stream << std::to_string(distance) + ",";
+            }
+        }
+        stream << std::endl;
+    }
+    std::string matrix;
+    matrix = stream.str();
+    return matrix;
+}
+
 std::string Molecule::LowerDistanceMatrix(bool exclude_bonds, bool print_elements) const
 {
     std::ostringstream stream;
@@ -775,6 +813,44 @@ std::string Molecule::LowerDistanceMatrix(bool exclude_bonds, bool print_element
     return matrix;
 }
 
+std::string Molecule::LowerDistanceMatrix(bool exclude_bonds, bool print_elements, const std::vector<int>& indices) const
+{
+    // If no indices provided, use standard method
+    if (indices.empty()) {
+        return LowerDistanceMatrix(exclude_bonds, print_elements);
+    }
+
+    // Validate indices and filter valid ones
+    std::vector<int> valid_indices;
+    for (int idx : indices) {
+        if (idx >= 0 && idx < AtomCount()) {
+            valid_indices.push_back(idx);
+        }
+    }
+
+    std::ostringstream stream;
+    for (size_t i = 0; i < valid_indices.size(); ++i) {
+        int atom_i = valid_indices[i];
+        if (print_elements) {
+            stream << Elements::ElementAbbr[m_atoms[atom_i]] << ":   ";
+        }
+        for (size_t j = 0; j <= i; ++j) {
+            int atom_j = valid_indices[j];
+            double distance = CalculateDistance(atom_i, atom_j);
+
+            if (!exclude_bonds) {
+                stream << std::to_string(distance) + ",";
+            } else if (exclude_bonds && distance >= (Elements::CovalentRadius[Atom(atom_i).first] + Elements::CovalentRadius[Atom(atom_j).first]) * m_scaling) {
+                stream << std::to_string(distance) + ",";
+            }
+        }
+        stream << std::endl;
+    }
+    std::string matrix;
+    matrix = stream.str();
+    return matrix;
+}
+
 std::vector<float> Molecule::LowerDistanceVector(bool exclude_hydrogen) const
 {
     std::vector<float> vector;
@@ -785,6 +861,33 @@ std::vector<float> Molecule::LowerDistanceVector(bool exclude_hydrogen) const
             if (exclude_hydrogen && Atom(j).first == 1)
                 continue; // skip hydrogen
             vector.push_back((CalculateDistance(i, j)));
+        }
+    }
+    return vector;
+}
+
+std::vector<float> Molecule::LowerDistanceVector(bool exclude_hydrogen, const std::vector<int>& indices) const
+{
+    // If no indices provided, use standard method
+    if (indices.empty()) {
+        return LowerDistanceVector(exclude_hydrogen);
+    }
+
+    // Validate indices and filter valid ones
+    std::vector<int> valid_indices;
+    for (int idx : indices) {
+        if (idx >= 0 && idx < AtomCount()) {
+            if (!exclude_hydrogen || Atom(idx).first != 1) {
+                valid_indices.push_back(idx);
+            }
+        }
+    }
+
+    std::vector<float> vector;
+    // Calculate distances only between selected atoms
+    for (size_t i = 0; i < valid_indices.size(); ++i) {
+        for (size_t j = 0; j < i; ++j) {
+            vector.push_back(CalculateDistance(valid_indices[i], valid_indices[j]));
         }
     }
     return vector;
@@ -1553,6 +1656,50 @@ std::pair<Matrix, Matrix> Molecule::DistanceMatrix() const
 
     m_distance_cache_valid = true;
     return std::make_pair(m_distance_matrix, m_topology_matrix);
+}
+
+std::pair<Matrix, Matrix> Molecule::DistanceMatrix(const std::vector<int>& indices) const
+{
+    // If no indices provided, use standard method
+    if (indices.empty()) {
+        return DistanceMatrix();
+    }
+
+    // Validate indices and filter valid ones
+    std::vector<int> valid_indices;
+    for (int idx : indices) {
+        if (idx >= 0 && idx < AtomCount()) {
+            valid_indices.push_back(idx);
+        }
+    }
+
+    const int nselected = valid_indices.size();
+    Matrix distance_matrix = Eigen::MatrixXd::Zero(nselected, nselected);
+    Matrix topology_matrix = Eigen::MatrixXd::Zero(nselected, nselected);
+
+    // Calculate only upper triangle, then mirror (symmetric matrices)
+    for (int i = 0; i < nselected; ++i) {
+        for (int j = i + 1; j < nselected; ++j) {
+            int atom_i = valid_indices[i];
+            int atom_j = valid_indices[j];
+
+            // Use optimized distance calculation
+            Eigen::Vector3d rij = m_geometry.row(atom_i) - m_geometry.row(atom_j);
+            double distance = rij.norm();
+
+            distance_matrix(i, j) = distance;
+            distance_matrix(j, i) = distance;
+
+            // Topology based on covalent radii + scaling factor
+            double bond_cutoff = (Elements::CovalentRadius[Atom(atom_i).first] + Elements::CovalentRadius[Atom(atom_j).first]) * m_scaling;
+            bool is_bonded = (distance <= bond_cutoff);
+
+            topology_matrix(i, j) = is_bonded;
+            topology_matrix(j, i) = is_bonded;
+        }
+    }
+
+    return std::make_pair(distance_matrix, topology_matrix);
 }
 
 std::vector<double> Molecule::GetBox() const

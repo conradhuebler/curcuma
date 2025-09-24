@@ -101,8 +101,14 @@ public:
     /*! \brief Perform complete TDA analysis on a single molecule */
     json analyzeMolecule(const Molecule& mol, int index = 0);
 
+    /*! \brief Perform TDA analysis on selected atoms only - Claude Generated */
+    json analyzeMolecule(const Molecule& mol, const std::vector<int>& indices, int index = 0);
+
     /*! \brief Process multiple molecules/trajectory with statistical analysis */
     json analyzeTrajectory(const std::vector<Molecule>& molecules);
+
+    /*! \brief Process multiple molecules with atom selection - Claude Generated */
+    json analyzeTrajectory(const std::vector<Molecule>& molecules, const std::vector<int>& indices);
 
     /*! \brief Set output file prefix for exports */
     void setOutputPrefix(const std::string& prefix) { m_output_prefix = prefix; }

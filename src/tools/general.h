@@ -90,7 +90,7 @@ inline std::vector<int> ParseStringToVector(const std::string& input)
     std::stringstream ss(input);
     std::string token;
 
-    while (std::getline(ss, token, ';')) {
+    while (std::getline(ss, token, ',')) {
         size_t dash_pos = token.find('-');
         if (dash_pos != std::string::npos) {
             int start = std::stoi(token.substr(0, dash_pos));

@@ -246,6 +246,128 @@ json UnifiedAnalysis::calculateTopologicalProperties(const Molecule& mol)
                             m_config["topological"].value("save_persistence_diagram", false) ||
                             m_config["topological"].value("save_persistence_image", false));
 
+        // Parse atom selection if provided - Claude Generated
+        std::vector<int> selected_indices;
+        if (m_config.contains("topological") && m_config["topological"].contains("atom_selection")) {
+            std::string atom_selection = m_config["topological"]["atom_selection"];
+            if (!atom_selection.empty()) {
+                try {
+                    selected_indices = Tools::ParseStringToVector(atom_selection);
+
+                    // Validate indices against molecule size - Claude Generated
+                    if (!selected_indices.empty()) {
+                        std::vector<int> valid_indices;
+                        std::vector<int> invalid_indices;
+
+                        for (int idx : selected_indices) {
+                            if (idx >= 0 && idx < mol.AtomCount()) {
+                                valid_indices.push_back(idx);
+                            } else {
+                                invalid_indices.push_back(idx);
+                            }
+                        }
+
+                        if (!invalid_indices.empty() && !m_silent) {
+                            std::string invalid_str = "";
+                            for (size_t i = 0; i < invalid_indices.size(); ++i) {
+                                if (i > 0) invalid_str += ",";
+                                invalid_str += std::to_string(invalid_indices[i]);
+                            }
+                            CurcumaLogger::warn_fmt("Ignoring invalid atom indices (molecule has {} atoms): {}",
+                                                    mol.AtomCount(), invalid_str);
+                        }
+
+                        selected_indices = valid_indices;
+
+                        if (!m_silent) {
+                            if (!selected_indices.empty()) {
+                                // Detailed selection feedback - Claude Generated
+                                std::string indices_str = "[";
+                                std::map<int, int> element_count;
+                                double min_dist = std::numeric_limits<double>::max();
+                                double max_dist = 0.0;
+
+                                // Build indices string and collect element statistics
+                                for (size_t i = 0; i < selected_indices.size(); ++i) {
+                                    if (i > 0) indices_str += ",";
+                                    int idx = selected_indices[i];
+                                    indices_str += std::to_string(idx);
+
+                                    // Count elements
+                                    int element = mol.Atom(idx).first;
+                                    element_count[element]++;
+
+                                    // Calculate spatial extent
+                                    for (size_t j = i + 1; j < selected_indices.size(); ++j) {
+                                        double dist = mol.CalculateDistance(selected_indices[i], selected_indices[j]);
+                                        min_dist = std::min(min_dist, dist);
+                                        max_dist = std::max(max_dist, dist);
+                                    }
+                                }
+                                indices_str += "]";
+
+                                // Build element composition string
+                                std::string elements_str;
+                                for (const auto& elem : element_count) {
+                                    if (!elements_str.empty()) elements_str += ", ";
+                                    std::string symbol = (elem.first > 0 && elem.first < Elements::ElementAbbr.size()) ? Elements::ElementAbbr[elem.first] : "X";
+                                    elements_str += symbol + "(" + std::to_string(elem.second) + ")";
+                                }
+
+                                // Main feedback message
+                                double percentage = (100.0 * selected_indices.size()) / mol.AtomCount();
+                                CurcumaLogger::success_fmt("✓ Atom selection: {}/{} atoms ({:.1f}%) selected: {}",
+                                                         selected_indices.size(), mol.AtomCount(), percentage, indices_str);
+
+                                // Additional details
+                                if (selected_indices.size() > 1 && max_dist > 0.0) {
+                                    CurcumaLogger::info_fmt("  Elements: {} | Spatial extent: {:.2f} Å",
+                                                          elements_str, max_dist);
+                                } else if (selected_indices.size() == 1) {
+                                    CurcumaLogger::info_fmt("  Single atom: {} at index {}",
+                                                          (mol.Atom(selected_indices[0]).first > 0 && mol.Atom(selected_indices[0]).first < Elements::ElementAbbr.size()) ? Elements::ElementAbbr[mol.Atom(selected_indices[0]).first] : "X",
+                                                          selected_indices[0]);
+                                } else {
+                                    CurcumaLogger::info_fmt("  Elements: {}", elements_str);
+                                }
+
+                                // Helpful hints
+                                if (percentage < 10.0) {
+                                    CurcumaLogger::warn("  Small selection (<10%) - consider including more atoms for meaningful topology");
+                                } else if (percentage > 90.0) {
+                                    CurcumaLogger::info("  Large selection (>90%) - consider full molecule analysis");
+                                }
+
+                                // Hydrogen exclusion info
+                                bool has_hydrogen = false;
+                                for (int idx : selected_indices) {
+                                    if (mol.Atom(idx).first == 1) {
+                                        has_hydrogen = true;
+                                        break;
+                                    }
+                                }
+                                if (has_hydrogen && m_config.contains("topological") &&
+                                    m_config["topological"].value("exclude_hydrogen", false)) {
+                                    CurcumaLogger::info("  Note: Hydrogen atoms will be excluded from distance calculations");
+                                }
+
+                            } else {
+                                CurcumaLogger::warn("No valid atom indices found - using full molecule analysis");
+                            }
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    if (!m_silent) {
+                        CurcumaLogger::error_fmt("Failed to parse atom selection '{}': {} - using full molecule analysis",
+                                                atom_selection, e.what());
+                        CurcumaLogger::info("  Syntax help: Use format \"1;5-10;15\" (semicolon-separated, dash for ranges)");
+                        CurcumaLogger::info("  Examples: \"0;2;4\" or \"1-5;10-15\" or \"0;3-7;12\"");
+                    }
+                    selected_indices.clear();
+                }
+            }
+        }
+
         if (enhanced_tda) {
             // Use comprehensive TDA Engine for full dMatrix functionality
             json tda_config = m_config["topological"];
@@ -279,7 +401,7 @@ json UnifiedAnalysis::calculateTopologicalProperties(const Molecule& mol)
                 int structure_index = 0;
                 while (!file_iter.AtEnd()) {
                     Molecule current_mol = file_iter.Next();
-                    json structure_result = tda_engine.analyzeMolecule(current_mol, structure_index);
+                    json structure_result = selected_indices.empty() ? tda_engine.analyzeMolecule(current_mol, structure_index) : tda_engine.analyzeMolecule(current_mol, selected_indices, structure_index);
                     structure_result["structure_index"] = structure_index;
                     all_structures.push_back(structure_result);
 
@@ -294,7 +416,7 @@ json UnifiedAnalysis::calculateTopologicalProperties(const Molecule& mol)
                 topology["analysis_type"] = "multi_structure_tda";
             } else {
                 // Single structure: Use existing logic
-                topology = tda_engine.analyzeMolecule(mol, 0);
+                topology = selected_indices.empty() ? tda_engine.analyzeMolecule(mol, 0) : tda_engine.analyzeMolecule(mol, selected_indices, 0);
                 topology["analysis_type"] = "single_structure_tda";
             }
 
@@ -311,7 +433,17 @@ json UnifiedAnalysis::calculateTopologicalProperties(const Molecule& mol)
         } else {
             // Basic topological analysis (original implementation)
             PersistentDiagram pd(m_config);
-            pd.setDistanceMatrix(mol.LowerDistanceVector());
+
+            // Use atom selection if provided, otherwise use all atoms
+            if (!selected_indices.empty()) {
+                bool exclude_hydrogen = m_config["topological"].value("exclude_hydrogen", false);
+                pd.setDistanceMatrix(mol.LowerDistanceVector(exclude_hydrogen, selected_indices));
+                if (!m_silent) {
+                    CurcumaLogger::info("Basic topological analysis with atom selection");
+                }
+            } else {
+                pd.setDistanceMatrix(mol.LowerDistanceVector());
+            }
 
             auto pairs = pd.generatePairs();
             topology["persistent_pairs_count"] = pairs.size();
@@ -506,6 +638,8 @@ void UnifiedAnalysis::printHelp() const
     std::cout << "              Exclude bonds from distance matrix" << std::endl;
     std::cout << "  -topological.exclude_hydrogen true|false" << std::endl;
     std::cout << "              Exclude hydrogen atoms from analysis" << std::endl;
+    std::cout << "  -topological.atom_selection \"indices\"" << std::endl;
+    std::cout << "              Analyze only selected atoms (e.g., \"1;5-10;15\")" << std::endl;
     std::cout << "  -topological.image_format png|jpg|bmp|tga" << std::endl;
     std::cout << "              Image output format (default: png)" << std::endl;
     std::cout << "  -topological.colormap grayscale|jet|hot|viridis|coolwarm" << std::endl;
@@ -530,6 +664,8 @@ void UnifiedAnalysis::printHelp() const
     std::cout << "  curcuma -analysis structure.xyz -topological.save_distance_matrix true" << std::endl;
     std::cout << "  curcuma -analysis large_mol.xyz -topological.exclude_hydrogen true \\" << std::endl;
     std::cout << "          -topological.colormap viridis -topological.resolution 1024x1024" << std::endl;
+    std::cout << "  curcuma -analysis protein.pdb -topological.atom_selection \"1;50-100;150\" \\" << std::endl;
+    std::cout << "          -topological.save_persistence_image true" << std::endl;
     std::cout << std::endl;
     std::cout << "Note: Enhanced TDA analysis provides research-grade topological data analysis" << std::endl;
     std::cout << "      equivalent to the legacy -dMatrix command with modern integration." << std::endl;

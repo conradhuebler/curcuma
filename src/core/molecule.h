@@ -164,7 +164,13 @@ class Molecule
       std::string LowerDistanceMatrix(bool exclude_bonds = false, bool print_elements = false) const;
       std::string DistanceMatrixString(bool exclude_bonds = false, bool print_elements = false) const;
 
+      /*! \brief Index-based overloads for selective atom analysis - Claude Generated */
+      std::string LowerDistanceMatrix(bool exclude_bonds, bool print_elements, const std::vector<int>& indices) const;
+      std::string DistanceMatrixString(bool exclude_bonds, bool print_elements, const std::vector<int>& indices) const;
+
       std::vector<float> LowerDistanceVector(bool exclude_hydrogen = false) const;
+      /*! \brief Index-based overload for selective atom analysis - Claude Generated */
+      std::vector<float> LowerDistanceVector(bool exclude_hydrogen, const std::vector<int>& indices) const;
       std::vector<double> DeltaEN() const;
 
       bool setGeometry(const Geometry& geometry);
@@ -324,6 +330,8 @@ class Molecule
      * \\note Cache invalidated on geometry changes
      */
     std::pair<Matrix, Matrix> DistanceMatrix() const;
+    /*! \brief Index-based distance matrix for selective atom analysis - Claude Generated */
+    std::pair<Matrix, Matrix> DistanceMatrix(const std::vector<int>& indices) const;
 
     Geometry Coords() const { return m_geometry; }
 

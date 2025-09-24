@@ -56,7 +56,8 @@ static const json UnifiedAnalysisJson = {
         { "post_processing", "none" },
         { "temperature", 2.0 },
         { "damping", 1.5 },
-        { "preserve_structure", true }
+        { "preserve_structure", true },
+        { "atom_selection", "" }     // New: Atom indices for selective analysis (e.g., "1,5:10,15")
     }}
 };
 
