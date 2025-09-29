@@ -52,6 +52,19 @@ void UnifiedAnalysis::start()
     // Check if we should analyze trajectory or single structure
     bool analyze_trajectory = Json2KeyWord<bool>(m_config, "trajectory");
 
+    // Auto-detect multi-structure files if trajectory flag not explicitly set - Claude Generated
+    if (!analyze_trajectory) {
+        FileIterator structure_detector(m_filename, true); // silent mode
+        int total_structures = structure_detector.MaxMolecules();
+
+        if (total_structures > 1) {
+            analyze_trajectory = true;
+            if (!m_silent) {
+                CurcumaLogger::info_fmt("Auto-detected multi-structure file with {} structures - processing all", total_structures);
+            }
+        }
+    }
+
     if (analyze_trajectory) {
         // Trajectory analysis - process all timesteps
         FileIterator file_iter(m_filename, m_silent);
@@ -107,11 +120,10 @@ json UnifiedAnalysis::analyzeMolecule(const Molecule& mol, int timestep)
         result["geometric"] = calculateGeometricProperties(mol);
     }
 
-    // Calculate polymer/CG properties if structure is suitable
+    // Calculate polymer/CG properties - Claude Generated
+    // User decides what's meaningful, not the system - removed paternalistic size restrictions
     if (properties == "all" || properties == "cg" || properties == "polymer") {
-        if (detectChainStructure(mol) || mol.AtomCount() > 10) {
-            result["polymer"] = calculatePolymerProperties(mol);
-        }
+        result["polymer"] = calculatePolymerProperties(mol);
     }
 
     // Calculate topological properties if requested
@@ -572,8 +584,60 @@ void UnifiedAnalysis::outputResults(const json& results)
             }
         }
 
-        // Trajectory summary
+        // Trajectory tabular output - Claude Generated
         if (results.contains("timesteps")) {
+            const auto& timesteps = results["timesteps"];
+
+            if (!timesteps.empty()) {
+                // Get constant info from first structure
+                const auto& first = timesteps[0];
+                if (first.contains("basic")) {
+                    const auto& basic = first["basic"];
+                    std::cout << "# Trajectory: " << results["filename"].get<std::string>()
+                             << " (Mass: " << std::fixed << std::setprecision(1)
+                             << basic["mass"].get<double>() << " amu, Atoms: "
+                             << basic["atom_count"].get<int>() << ")" << std::endl;
+                }
+
+                // Header line for variable metrics
+                std::cout << "# Structure  Gyr_unweight  Gyr_mass     Rout       End2End" << std::endl;
+
+                // Data lines
+                for (size_t i = 0; i < timesteps.size(); ++i) {
+                    const auto& ts = timesteps[i];
+                    std::cout << std::setw(9) << (i + 1);  // Structure number
+
+                    // Gyration radius
+                    if (ts.contains("geometric") && ts["geometric"].contains("gyration_radius")) {
+                        const auto& gyr = ts["geometric"]["gyration_radius"];
+                        std::cout << std::setw(13) << std::fixed << std::setprecision(3)
+                                 << gyr["unweighted"].get<double>()
+                                 << std::setw(11) << std::fixed << std::setprecision(3)
+                                 << gyr["mass_weighted"].get<double>();
+                    } else {
+                        std::cout << std::setw(13) << "---" << std::setw(11) << "---";
+                    }
+
+                    // Rout
+                    if (ts.contains("polymer") && ts["polymer"].contains("rout")) {
+                        std::cout << std::setw(11) << std::fixed << std::setprecision(3)
+                                 << ts["polymer"]["rout"].get<double>();
+                    } else {
+                        std::cout << std::setw(11) << "---";
+                    }
+
+                    // End-to-end distance
+                    if (ts.contains("polymer") && ts["polymer"].contains("end_to_end_distance")) {
+                        std::cout << std::setw(11) << std::fixed << std::setprecision(3)
+                                 << ts["polymer"]["end_to_end_distance"].get<double>();
+                    } else {
+                        std::cout << std::setw(11) << "---";
+                    }
+
+                    std::cout << std::endl;
+                }
+            }
+
             CurcumaLogger::info("");
             CurcumaLogger::info_fmt("Trajectory analysis completed: {} timesteps",
                                   results["total_timesteps"].get<int>());
