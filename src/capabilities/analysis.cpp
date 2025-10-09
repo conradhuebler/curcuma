@@ -22,20 +22,99 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/elements.h"
 #include "src/core/units.h"
+#include "trajectory_statistics.h"
 
 #include <algorithm>
 #include <iomanip>
+#include <sstream>
 
 UnifiedAnalysis::UnifiedAnalysis(const json& controller, bool silent)
     : CurcumaMethod(UnifiedAnalysisJson, controller, silent)
     , m_silent(silent)
 {
+    // Claude Generated 2025: Analysis needs verbosity >=2 for output
+    // If user didn't explicitly set verbosity, default to 2 (informative)
+    if (!controller.contains("verbosity") && !controller.contains("verbose") && !silent) {
+        m_verbosity = 2;
+        CurcumaLogger::set_verbosity(m_verbosity);
+    }
+
     UpdateController(controller);
     m_config = MergeJson(UnifiedAnalysisJson, controller);
+
+    // FIX: Explicitly override CLI parameters from nested controller - Claude Generated 2025
+    // CLI arguments are nested: controller["analysis"][param]
+    // MergeJson doesn't correctly override these nested values
+    if (controller.contains("analysis")) {
+        if (controller["analysis"].contains("metrics")) {
+            m_config["metrics"] = controller["analysis"]["metrics"];
+        }
+        if (controller["analysis"].contains("statistics")) {
+            m_config["statistics"] = controller["analysis"]["statistics"];
+        }
+        if (controller["analysis"].contains("window")) {
+            m_config["window"] = controller["analysis"]["window"];
+        }
+    }
 }
 
 UnifiedAnalysis::~UnifiedAnalysis()
 {
+}
+
+// Helper function: Parse comma-separated metrics list - Claude Generated 2025
+std::vector<std::string> parseMetricsList(const std::string& metrics_str)
+{
+    std::vector<std::string> metrics;
+
+    if (metrics_str == "all") {
+        return { "gyration", "rout", "end2end", "com", "mass" };
+    }
+
+    std::stringstream ss(metrics_str);
+    std::string metric;
+    while (std::getline(ss, metric, ',')) {
+        // Trim whitespace
+        metric.erase(0, metric.find_first_not_of(" \t"));
+        metric.erase(metric.find_last_not_of(" \t") + 1);
+        if (!metric.empty()) {
+            metrics.push_back(metric);
+        }
+    }
+    return metrics;
+}
+
+// Helper function: Extract metric value from JSON - Claude Generated 2025
+double extractMetricValue(const json& timestep_result, const std::string& metric, bool mass_weighted = false)
+{
+    if (metric == "gyration") {
+        if (timestep_result.contains("geometric") && timestep_result["geometric"].contains("gyration_radius")) {
+            const auto& gyr = timestep_result["geometric"]["gyration_radius"];
+            return mass_weighted ? gyr["mass_weighted"].get<double>() : gyr["unweighted"].get<double>();
+        }
+    } else if (metric == "rout") {
+        if (timestep_result.contains("polymer") && timestep_result["polymer"].contains("rout")) {
+            return timestep_result["polymer"]["rout"].get<double>();
+        }
+    } else if (metric == "end2end") {
+        if (timestep_result.contains("polymer") && timestep_result["polymer"].contains("end_to_end_distance")) {
+            return timestep_result["polymer"]["end_to_end_distance"].get<double>();
+        }
+    } else if (metric == "mass") {
+        if (timestep_result.contains("basic") && timestep_result["basic"].contains("mass")) {
+            return timestep_result["basic"]["mass"].get<double>();
+        }
+    } else if (metric == "com") {
+        // Return COM magnitude (distance from origin)
+        if (timestep_result.contains("geometric") && timestep_result["geometric"].contains("center_of_mass")) {
+            const auto& com = timestep_result["geometric"]["center_of_mass"];
+            double x = com[0].get<double>();
+            double y = com[1].get<double>();
+            double z = com[2].get<double>();
+            return std::sqrt(x * x + y * y + z * z);
+        }
+    }
+    return 0.0;
 }
 
 void UnifiedAnalysis::start()
@@ -49,55 +128,111 @@ void UnifiedAnalysis::start()
         CurcumaLogger::info_fmt("Starting unified molecular analysis of: {}", m_filename);
     }
 
-    // Check if we should analyze trajectory or single structure
-    bool analyze_trajectory = Json2KeyWord<bool>(m_config, "trajectory");
+    // Claude Generated 2025: Unified approach - ALWAYS use FileIterator
+    // FileIterator automatically stops after 1 structure for single-structure files
+    // No need for separate trajectory vs single-structure code paths
+    FileIterator file_iter(m_filename, m_silent);
 
-    // Auto-detect multi-structure files if trajectory flag not explicitly set - Claude Generated
-    if (!analyze_trajectory) {
-        FileIterator structure_detector(m_filename, true); // silent mode
-        int total_structures = structure_detector.MaxMolecules();
+    json results;
+    results["filename"] = m_filename;
+    // Note: MaxMolecules() may return 0 for some formats (XYZ), but that's OK
+    // We'll count structures as we iterate instead
+    results["total_timesteps"] = 0; // Will be updated after loop
+    results["timesteps"] = json::array();
 
-        if (total_structures > 1) {
-            analyze_trajectory = true;
-            if (!m_silent) {
-                CurcumaLogger::info_fmt("Auto-detected multi-structure file with {} structures - processing all", total_structures);
-            }
-        }
+    // Parse statistics configuration - Claude Generated 2025
+    std::string metrics_str = Json2KeyWord<std::string>(m_config, "metrics");
+    std::string statistics_mode = Json2KeyWord<std::string>(m_config, "statistics");
+    int window_size = Json2KeyWord<int>(m_config, "window");
+
+    std::vector<std::string> enabled_metrics = parseMetricsList(metrics_str);
+    bool enable_cumulative = (statistics_mode == "cumulative" || statistics_mode == "all");
+    bool enable_moving = (statistics_mode == "moving" || statistics_mode == "all");
+
+    // Create statistics tracker if needed
+    std::unique_ptr<TrajectoryStatistics> stats;
+    if (enable_cumulative || enable_moving) {
+        stats = std::make_unique<TrajectoryStatistics>(window_size);
     }
 
-    if (analyze_trajectory) {
-        // Trajectory analysis - process all timesteps
-        FileIterator file_iter(m_filename, m_silent);
-        json trajectory_results;
-        trajectory_results["filename"] = m_filename;
-        trajectory_results["total_timesteps"] = file_iter.MaxMolecules();
-        trajectory_results["timesteps"] = json::array();
+    // ALWAYS store configuration in results for output formatting
+    results["statistics_config"] = {
+        { "metrics", enabled_metrics },
+        { "mode", statistics_mode },
+        { "window", window_size },
+        { "enable_cumulative", enable_cumulative },
+        { "enable_moving", enable_moving }
+    };
 
-        int timestep = 0;
-        while (!file_iter.AtEnd()) {
-            Molecule mol = file_iter.Next();
-            json timestep_result = analyzeMolecule(mol, timestep);
-            trajectory_results["timesteps"].push_back(timestep_result);
+    // Process all structures (1 for single-structure, N for trajectory)
+    int timestep = 0;
 
-            if (!m_silent && timestep % 10 == 0) {
-                CurcumaLogger::info_fmt("Analyzed timestep {}/{}", timestep, file_iter.MaxMolecules());
+    while (!file_iter.AtEnd()) {
+        Molecule mol = file_iter.Next();
+        json timestep_result = analyzeMolecule(mol, timestep);
+
+        // Collect statistics for enabled metrics - Claude Generated 2025
+        if (stats) {
+            for (const auto& metric : enabled_metrics) {
+                if (metric == "gyration") {
+                    // Track both unweighted and mass-weighted
+                    double gyr_u = extractMetricValue(timestep_result, "gyration", false);
+                    double gyr_m = extractMetricValue(timestep_result, "gyration", true);
+                    stats->addValue("gyration_unweighted", gyr_u);
+                    stats->addValue("gyration_mass", gyr_m);
+                } else {
+                    double value = extractMetricValue(timestep_result, metric);
+                    stats->addValue(metric, value);
+                }
             }
-            timestep++;
+
+            // Add statistics to timestep result
+            timestep_result["statistics"] = json::object();
+            for (const auto& metric : enabled_metrics) {
+                if (metric == "gyration") {
+                    // Both variants
+                    for (const auto& variant : { "gyration_unweighted", "gyration_mass" }) {
+                        if (enable_cumulative) {
+                            timestep_result["statistics"][variant]["mean"] = stats->getMean(variant);
+                            timestep_result["statistics"][variant]["std"] = stats->getStdDev(variant);
+                        }
+                        if (enable_moving) {
+                            timestep_result["statistics"][variant]["moving_avg"] = stats->getMovingAverage(variant);
+                        }
+                    }
+                } else {
+                    if (enable_cumulative) {
+                        timestep_result["statistics"][metric]["mean"] = stats->getMean(metric);
+                        timestep_result["statistics"][metric]["std"] = stats->getStdDev(metric);
+                    }
+                    if (enable_moving) {
+                        timestep_result["statistics"][metric]["moving_avg"] = stats->getMovingAverage(metric);
+                    }
+                }
+            }
         }
 
-        outputResults(trajectory_results);
-    } else {
-        // Single structure analysis
-        Molecule mol = Files::LoadFile(m_filename);
-        if (mol.AtomCount() == 0) {
-            CurcumaLogger::error_fmt("Could not load molecule from file: {}", m_filename);
-            return;
-        }
+        results["timesteps"].push_back(timestep_result);
 
-        json result = analyzeMolecule(mol);
-        result["filename"] = m_filename;
-        outputResults(result);
+        if (!m_silent && timestep % 10 == 0 && timestep > 0) {
+            // Only show progress for multi-structure files
+            int total = file_iter.MaxMolecules();
+            if (total > 1) {
+                CurcumaLogger::info_fmt("Analyzed timestep {}/{}", timestep, total);
+            }
+        }
+        timestep++;
     }
+
+    // Update total count after iterating - Claude Generated 2025
+    results["total_timesteps"] = timestep;
+
+    if (!m_silent && timestep > 1) {
+        CurcumaLogger::info_fmt("Processed {} structures with {} metrics selected",
+            timestep, enabled_metrics.size());
+    }
+
+    outputResults(results);
 }
 
 json UnifiedAnalysis::analyzeMolecule(const Molecule& mol, int timestep)
@@ -108,26 +243,57 @@ json UnifiedAnalysis::analyzeMolecule(const Molecule& mol, int timestep)
         result["timestep"] = timestep;
     }
 
+    // Claude Generated 2025: Use metrics parameter for selective computation
+    // Check if metrics parameter exists, otherwise fall back to properties for backward compatibility
+    std::string metrics_str = Json2KeyWord<std::string>(m_config, "metrics");
     std::string properties = Json2KeyWord<std::string>(m_config, "properties");
 
-    // Always calculate basic properties
-    if (properties == "all" || properties == "basic") {
+    // Determine what to compute based on metrics (preferred) or properties (fallback)
+    // Claude Generated 2025: ALWAYS compute basic properties (mass, atom count, etc.)
+    bool compute_basic = true; // Basic properties are always needed
+    bool compute_geometric = false;
+    bool compute_polymer = false;
+    bool compute_topology = false;
+
+    if (!metrics_str.empty() && metrics_str != "none") {
+        // Metrics-based computation (new way) - Claude Generated 2025
+        std::vector<std::string> metrics = parseMetricsList(metrics_str);
+
+        for (const auto& metric : metrics) {
+            if (metric == "gyration" || metric == "com" || metric == "inertia") {
+                compute_geometric = true;
+            } else if (metric == "rout" || metric == "end2end") {
+                compute_polymer = true;
+            }
+            // Note: "mass" is always in basic, so no need to check for it
+        }
+
+        // If "all" was specified, compute everything
+        if (metrics_str == "all") {
+            compute_geometric = compute_polymer = true;
+        }
+    } else {
+        // Properties-based computation (old way for backward compatibility)
+        compute_geometric = (properties == "all" || properties == "geometric");
+        compute_polymer = (properties == "all" || properties == "cg" || properties == "polymer");
+        compute_topology = (properties == "all" || properties == "topology");
+    }
+
+    // Calculate only the needed properties - Claude Generated 2025
+    if (compute_basic) {
         result["basic"] = calculateBasicProperties(mol);
     }
 
-    // Calculate geometric properties
-    if (properties == "all" || properties == "geometric") {
+    if (compute_geometric) {
         result["geometric"] = calculateGeometricProperties(mol);
     }
 
-    // Calculate polymer/CG properties - Claude Generated
-    // User decides what's meaningful, not the system - removed paternalistic size restrictions
-    if (properties == "all" || properties == "cg" || properties == "polymer") {
+    if (compute_polymer) {
         result["polymer"] = calculatePolymerProperties(mol);
     }
 
     // Calculate topological properties if requested
-    if (properties == "all" || properties == "topology") {
+    if (compute_topology) {
         bool enable_ripser = Json2KeyWord<bool>(m_config, "ripser");
 
         // Also enable if any enhanced topological options are set
@@ -521,12 +687,30 @@ void UnifiedAnalysis::outputResults(const json& results)
         // Human-readable output
         CurcumaLogger::info("=== Molecular Analysis Results ===");
 
-        if (results.contains("filename")) {
-            CurcumaLogger::info_fmt("File: {}", results["filename"].get<std::string>());
+        // Claude Generated 2025: Create modifiable copy for single-structure detailed view
+        json display_results = results;
+
+        if (display_results.contains("filename")) {
+            CurcumaLogger::info_fmt("File: {}", display_results["filename"].get<std::string>());
         }
 
-        if (results.contains("basic")) {
-            const auto& basic = results["basic"];
+        // For single-structure files, extract timestep[0] for detailed view
+        // For multi-structure files (trajectories), show table instead
+        if (display_results.contains("timesteps") && display_results["timesteps"].size() == 1) {
+            const auto& timestep = display_results["timesteps"][0];
+            // Copy timestep properties to top level for detailed display below
+            if (timestep.contains("basic"))
+                display_results["basic"] = timestep["basic"];
+            if (timestep.contains("geometric"))
+                display_results["geometric"] = timestep["geometric"];
+            if (timestep.contains("polymer"))
+                display_results["polymer"] = timestep["polymer"];
+            if (timestep.contains("topology"))
+                display_results["topology"] = timestep["topology"];
+        }
+
+        if (display_results.contains("basic")) {
+            const auto& basic = display_results["basic"];
             CurcumaLogger::info("");
             CurcumaLogger::info("Basic Properties:");
             CurcumaLogger::param("atoms", fmt::format("{}", basic["atom_count"].get<int>()));
@@ -543,38 +727,38 @@ void UnifiedAnalysis::outputResults(const json& results)
             }
         }
 
-        if (results.contains("geometric")) {
-            const auto& geom = results["geometric"];
+        if (display_results.contains("geometric")) {
+            const auto& geom = display_results["geometric"];
             CurcumaLogger::info("");
             CurcumaLogger::info("Geometric Properties:");
 
             const auto& gyr = geom["gyration_radius"];
-            CurcumaLogger::param("  Gyration radius: {:.3f} Å (unweighted)",
-                                   gyr["unweighted"].get<double>());
-            CurcumaLogger::param("                   {:.3f} Å (mass-weighted)",
-                                   gyr["mass_weighted"].get<double>());
+            CurcumaLogger::info_fmt("  Gyration radius: {:.3f} Å (unweighted)",
+                gyr["unweighted"].get<double>());
+            CurcumaLogger::info_fmt("                   {:.3f} Å (mass-weighted)",
+                gyr["mass_weighted"].get<double>());
 
             const auto& com = geom["center_of_mass"];
-            CurcumaLogger::param("center_of_mass", fmt::format("({:.3f}, {:.3f}, {:.3f}) Å",
-                                   com[0].get<double>(), com[1].get<double>(), com[2].get<double>()));
+            CurcumaLogger::info_fmt("  Center of mass: ({:.3f}, {:.3f}, {:.3f}) Å",
+                com[0].get<double>(), com[1].get<double>(), com[2].get<double>());
         }
 
-        if (results.contains("polymer")) {
-            const auto& polymer = results["polymer"];
+        if (display_results.contains("polymer")) {
+            const auto& polymer = display_results["polymer"];
             CurcumaLogger::info("");
             CurcumaLogger::info("Polymer/Chain Properties:");
 
             if (polymer.contains("end_to_end_distance")) {
-                CurcumaLogger::param("  End-to-end distance: {:.3f} Å",
-                                       polymer["end_to_end_distance"].get<double>());
+                CurcumaLogger::info_fmt("  End-to-end distance: {:.3f} Å",
+                    polymer["end_to_end_distance"].get<double>());
             }
 
-            CurcumaLogger::param("  Rout (COM to outermost): {:.3f} Å",
-                                   polymer["rout"].get<double>());
+            CurcumaLogger::info_fmt("  Rout (COM to outermost): {:.3f} Å",
+                polymer["rout"].get<double>());
         }
 
-        if (results.contains("topology")) {
-            const auto& topo = results["topology"];
+        if (display_results.contains("topology")) {
+            const auto& topo = display_results["topology"];
             CurcumaLogger::info("");
             CurcumaLogger::info("Topological Properties:");
 
@@ -584,8 +768,9 @@ void UnifiedAnalysis::outputResults(const json& results)
             }
         }
 
-        // Trajectory tabular output - Claude Generated
-        if (results.contains("timesteps")) {
+        // Trajectory tabular output - Claude Generated 2025 (Dynamic columns based on metrics)
+        // Only show table for multi-structure files (trajectories)
+        if (results.contains("timesteps") && results["timesteps"].size() > 1) {
             const auto& timesteps = results["timesteps"];
 
             if (!timesteps.empty()) {
@@ -599,39 +784,201 @@ void UnifiedAnalysis::outputResults(const json& results)
                              << basic["atom_count"].get<int>() << ")" << std::endl;
                 }
 
-                // Header line for variable metrics
-                std::cout << "# Structure  Gyr_unweight  Gyr_mass     Rout       End2End" << std::endl;
+                // Get statistics configuration
+                bool has_stats = results.contains("statistics_config");
+                std::vector<std::string> enabled_metrics;
+                bool enable_cumulative = false;
+                bool enable_moving = false;
+
+                if (has_stats) {
+                    const auto& cfg = results["statistics_config"];
+                    enabled_metrics = cfg["metrics"].get<std::vector<std::string>>();
+                    enable_cumulative = cfg["enable_cumulative"].get<bool>();
+                    enable_moving = cfg["enable_moving"].get<bool>();
+                } else {
+                    // Fallback: read metrics from config - Claude Generated 2025
+                    std::string metrics_str = Json2KeyWord<std::string>(m_config, "metrics");
+                    if (metrics_str.empty() || metrics_str == "none") {
+                        metrics_str = "gyration,rout,end2end"; // Ultimate fallback
+                    }
+                    enabled_metrics = parseMetricsList(metrics_str);
+                    enable_cumulative = false;
+                    enable_moving = false;
+                }
+
+                // Build dynamic header line
+                std::cout << "# Str";
+                for (const auto& metric : enabled_metrics) {
+                    if (metric == "gyration") {
+                        // Gyration has two variants
+                        std::cout << "  Gyr_u";
+                        if (enable_cumulative)
+                            std::cout << "    Gyr_u_μ  Gyr_u_σ";
+                        if (enable_moving)
+                            std::cout << "  Gyr_u_ma";
+
+                        std::cout << "  Gyr_m";
+                        if (enable_cumulative)
+                            std::cout << "    Gyr_m_μ  Gyr_m_σ";
+                        if (enable_moving)
+                            std::cout << "  Gyr_m_ma";
+                    } else if (metric == "rout") {
+                        std::cout << "   Rout";
+                        if (enable_cumulative)
+                            std::cout << "     Rout_μ   Rout_σ";
+                        if (enable_moving)
+                            std::cout << "   Rout_ma";
+                    } else if (metric == "end2end") {
+                        std::cout << "  End2End";
+                        if (enable_cumulative)
+                            std::cout << "    E2E_μ    E2E_σ";
+                        if (enable_moving)
+                            std::cout << "    E2E_ma";
+                    } else if (metric == "mass") {
+                        std::cout << "   Mass";
+                        if (enable_cumulative)
+                            std::cout << "     Mass_μ   Mass_σ";
+                        if (enable_moving)
+                            std::cout << "   Mass_ma";
+                    } else if (metric == "com") {
+                        std::cout << "    COM";
+                        if (enable_cumulative)
+                            std::cout << "      COM_μ    COM_σ";
+                        if (enable_moving)
+                            std::cout << "    COM_ma";
+                    }
+                }
+                std::cout << std::endl;
 
                 // Data lines
                 for (size_t i = 0; i < timesteps.size(); ++i) {
                     const auto& ts = timesteps[i];
-                    std::cout << std::setw(9) << (i + 1);  // Structure number
+                    std::cout << std::setw(5) << (i + 1); // Structure number
 
-                    // Gyration radius
-                    if (ts.contains("geometric") && ts["geometric"].contains("gyration_radius")) {
-                        const auto& gyr = ts["geometric"]["gyration_radius"];
-                        std::cout << std::setw(13) << std::fixed << std::setprecision(3)
-                                 << gyr["unweighted"].get<double>()
-                                 << std::setw(11) << std::fixed << std::setprecision(3)
-                                 << gyr["mass_weighted"].get<double>();
-                    } else {
-                        std::cout << std::setw(13) << "---" << std::setw(11) << "---";
-                    }
+                    for (const auto& metric : enabled_metrics) {
+                        if (metric == "gyration") {
+                            // Unweighted gyration
+                            if (ts.contains("geometric") && ts["geometric"].contains("gyration_radius")) {
+                                const auto& gyr = ts["geometric"]["gyration_radius"];
+                                std::cout << std::setw(9) << std::fixed << std::setprecision(3)
+                                          << gyr["unweighted"].get<double>();
 
-                    // Rout
-                    if (ts.contains("polymer") && ts["polymer"].contains("rout")) {
-                        std::cout << std::setw(11) << std::fixed << std::setprecision(3)
-                                 << ts["polymer"]["rout"].get<double>();
-                    } else {
-                        std::cout << std::setw(11) << "---";
-                    }
+                                if (enable_cumulative && ts.contains("statistics")) {
+                                    std::cout << std::setw(11) << std::fixed << std::setprecision(3)
+                                              << ts["statistics"]["gyration_unweighted"]["mean"].get<double>()
+                                              << std::setw(9) << std::fixed << std::setprecision(3)
+                                              << ts["statistics"]["gyration_unweighted"]["std"].get<double>();
+                                }
+                                if (enable_moving && ts.contains("statistics")) {
+                                    std::cout << std::setw(10) << std::fixed << std::setprecision(3)
+                                              << ts["statistics"]["gyration_unweighted"]["moving_avg"].get<double>();
+                                }
 
-                    // End-to-end distance
-                    if (ts.contains("polymer") && ts["polymer"].contains("end_to_end_distance")) {
-                        std::cout << std::setw(11) << std::fixed << std::setprecision(3)
-                                 << ts["polymer"]["end_to_end_distance"].get<double>();
-                    } else {
-                        std::cout << std::setw(11) << "---";
+                                // Mass-weighted gyration
+                                std::cout << std::setw(9) << std::fixed << std::setprecision(3)
+                                          << gyr["mass_weighted"].get<double>();
+
+                                if (enable_cumulative && ts.contains("statistics")) {
+                                    std::cout << std::setw(11) << std::fixed << std::setprecision(3)
+                                              << ts["statistics"]["gyration_mass"]["mean"].get<double>()
+                                              << std::setw(9) << std::fixed << std::setprecision(3)
+                                              << ts["statistics"]["gyration_mass"]["std"].get<double>();
+                                }
+                                if (enable_moving && ts.contains("statistics")) {
+                                    std::cout << std::setw(10) << std::fixed << std::setprecision(3)
+                                              << ts["statistics"]["gyration_mass"]["moving_avg"].get<double>();
+                                }
+                            } else {
+                                int skip_cols = 2 + (enable_cumulative ? 4 : 0) + (enable_moving ? 2 : 0);
+                                for (int j = 0; j < skip_cols; ++j)
+                                    std::cout << std::setw(9) << "---";
+                            }
+                        } else if (metric == "rout") {
+                            if (ts.contains("polymer") && ts["polymer"].contains("rout")) {
+                                std::cout << std::setw(9) << std::fixed << std::setprecision(3)
+                                          << ts["polymer"]["rout"].get<double>();
+
+                                if (enable_cumulative && ts.contains("statistics")) {
+                                    std::cout << std::setw(11) << std::fixed << std::setprecision(3)
+                                              << ts["statistics"]["rout"]["mean"].get<double>()
+                                              << std::setw(9) << std::fixed << std::setprecision(3)
+                                              << ts["statistics"]["rout"]["std"].get<double>();
+                                }
+                                if (enable_moving && ts.contains("statistics")) {
+                                    std::cout << std::setw(10) << std::fixed << std::setprecision(3)
+                                              << ts["statistics"]["rout"]["moving_avg"].get<double>();
+                                }
+                            } else {
+                                int skip_cols = 1 + (enable_cumulative ? 2 : 0) + (enable_moving ? 1 : 0);
+                                for (int j = 0; j < skip_cols; ++j)
+                                    std::cout << std::setw(9) << "---";
+                            }
+                        } else if (metric == "end2end") {
+                            if (ts.contains("polymer") && ts["polymer"].contains("end_to_end_distance")) {
+                                std::cout << std::setw(9) << std::fixed << std::setprecision(3)
+                                          << ts["polymer"]["end_to_end_distance"].get<double>();
+
+                                if (enable_cumulative && ts.contains("statistics")) {
+                                    std::cout << std::setw(10) << std::fixed << std::setprecision(3)
+                                              << ts["statistics"]["end2end"]["mean"].get<double>()
+                                              << std::setw(9) << std::fixed << std::setprecision(3)
+                                              << ts["statistics"]["end2end"]["std"].get<double>();
+                                }
+                                if (enable_moving && ts.contains("statistics")) {
+                                    std::cout << std::setw(11) << std::fixed << std::setprecision(3)
+                                              << ts["statistics"]["end2end"]["moving_avg"].get<double>();
+                                }
+                            } else {
+                                int skip_cols = 1 + (enable_cumulative ? 2 : 0) + (enable_moving ? 1 : 0);
+                                for (int j = 0; j < skip_cols; ++j)
+                                    std::cout << std::setw(9) << "---";
+                            }
+                        } else if (metric == "mass") {
+                            if (ts.contains("basic") && ts["basic"].contains("mass")) {
+                                std::cout << std::setw(9) << std::fixed << std::setprecision(3)
+                                          << ts["basic"]["mass"].get<double>();
+
+                                if (enable_cumulative && ts.contains("statistics")) {
+                                    std::cout << std::setw(11) << std::fixed << std::setprecision(3)
+                                              << ts["statistics"]["mass"]["mean"].get<double>()
+                                              << std::setw(9) << std::fixed << std::setprecision(3)
+                                              << ts["statistics"]["mass"]["std"].get<double>();
+                                }
+                                if (enable_moving && ts.contains("statistics")) {
+                                    std::cout << std::setw(10) << std::fixed << std::setprecision(3)
+                                              << ts["statistics"]["mass"]["moving_avg"].get<double>();
+                                }
+                            } else {
+                                int skip_cols = 1 + (enable_cumulative ? 2 : 0) + (enable_moving ? 1 : 0);
+                                for (int j = 0; j < skip_cols; ++j)
+                                    std::cout << std::setw(9) << "---";
+                            }
+                        } else if (metric == "com") {
+                            if (ts.contains("geometric") && ts["geometric"].contains("center_of_mass")) {
+                                const auto& com = ts["geometric"]["center_of_mass"];
+                                double x = com[0].get<double>();
+                                double y = com[1].get<double>();
+                                double z = com[2].get<double>();
+                                double com_mag = std::sqrt(x * x + y * y + z * z);
+
+                                std::cout << std::setw(9) << std::fixed << std::setprecision(3) << com_mag;
+
+                                if (enable_cumulative && ts.contains("statistics")) {
+                                    std::cout << std::setw(11) << std::fixed << std::setprecision(3)
+                                              << ts["statistics"]["com"]["mean"].get<double>()
+                                              << std::setw(9) << std::fixed << std::setprecision(3)
+                                              << ts["statistics"]["com"]["std"].get<double>();
+                                }
+                                if (enable_moving && ts.contains("statistics")) {
+                                    std::cout << std::setw(10) << std::fixed << std::setprecision(3)
+                                              << ts["statistics"]["com"]["moving_avg"].get<double>();
+                                }
+                            } else {
+                                int skip_cols = 1 + (enable_cumulative ? 2 : 0) + (enable_moving ? 1 : 0);
+                                for (int j = 0; j < skip_cols; ++j)
+                                    std::cout << std::setw(9) << "---";
+                            }
+                        }
                     }
 
                     std::cout << std::endl;

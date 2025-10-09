@@ -104,6 +104,11 @@ private:
     void setInversions(const json& inversions);
     void setESPs(const json& esps);
 
+    // Claude Generated: CG parameter generation methods
+    void generateCGParameters(const json& cg_config);
+    Eigen::Vector3d getCGShapeForAtom(int atom_index, const json& config);
+    Eigen::Vector3d getCGOrientationForAtom(int atom_index, const json& config);
+
     std::vector<ForceFieldThread*> m_stored_threads;
     CxxThreadPool* m_threadpool;
     void setvdWs(const json& vdws);

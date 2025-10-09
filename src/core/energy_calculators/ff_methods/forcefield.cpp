@@ -20,8 +20,10 @@
 #include "forcefieldderivaties.h"
 #include "qmdff_par.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/global.h"
 #include "uff_par.h"
 
+#include "cg_potentials.h"
 #include "forcefieldfunctions.h"
 
 #include <fmt/core.h>
@@ -157,6 +159,12 @@ void ForceField::setParameter(const json& parameters)
         method_type = 2;
     } else if (m_method == "gfnff") {
         method_type = 3; // GFN-FF
+    } else if (m_method == "cg" || m_method == "cg-lj") {
+        method_type = 4; // CG methods
+        // Generate CG parameters if not loaded from cache
+        if (!loaded_from_cache) {
+            generateCGParameters(parameters);
+        }
     }
 
     // Claude Generated: Print parameter summary after setting parameters
@@ -170,6 +178,102 @@ void ForceField::setParameterFile(const std::string& file)
     if (!loadParametersFromFile(file)) {
         CurcumaLogger::warn(fmt::format("Failed to load parameter file: {}", file));
     }
+}
+
+// Claude Generated: CG parameter generation for sphere-based coarse graining
+// Prepared for future ellipsoid extension but currently implements spheres only
+void ForceField::generateCGParameters(const json& cg_config)
+{
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Generating CG parameters for coarse-grained simulation");
+    }
+
+    // Clear existing vdW interactions to prepare for CG pairs
+    m_vdWs.clear();
+
+    // Generate individual vdW structs for each CG atom pair
+    for (int i = 0; i < m_natoms; ++i) {
+        for (int j = i + 1; j < m_natoms; ++j) {
+
+            // Only CG-CG interactions (both atoms must be CG_ELEMENT)
+            if (m_atom_types[i] == CG_ELEMENT && m_atom_types[j] == CG_ELEMENT) {
+
+                vdW cg_pair;
+                cg_pair.type = 3; // CG type
+                cg_pair.i = i;
+                cg_pair.j = j;
+
+                // Load shape parameters - currently sphere setup (pragmatic approach)
+                cg_pair.shape_i = getCGShapeForAtom(i, cg_config);
+                cg_pair.shape_j = getCGShapeForAtom(j, cg_config);
+
+                // Orientation parameters (prepared for ellipsoids, unused for spheres)
+                cg_pair.orient_i = getCGOrientationForAtom(i, cg_config);
+                cg_pair.orient_j = getCGOrientationForAtom(j, cg_config);
+
+                // Load interaction parameters
+                cg_pair.sigma = cg_config.value("sigma", 4.0);
+                cg_pair.epsilon = cg_config.value("epsilon", 0.0);
+                cg_pair.cg_potential_type = cg_config.value("potential_type", 1);
+
+                m_vdWs.push_back(cg_pair);
+
+                if (CurcumaLogger::get_verbosity() >= 3) {
+                    CurcumaLogger::param(fmt::format("CG pair {}-{}", i, j),
+                        fmt::format("sigma={:.2f}, epsilon={:.4f}",
+                            cg_pair.sigma, cg_pair.epsilon));
+                }
+            }
+        }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success(fmt::format("Generated {} CG pair interactions", m_vdWs.size()));
+    }
+}
+
+// Claude Generated: Get CG shape parameters for specific atom (sphere setup)
+Eigen::Vector3d ForceField::getCGShapeForAtom(int atom_index, const json& config)
+{
+    // Check for per-atom parameters
+    if (config.contains("cg_per_atom")) {
+        std::string atom_key = std::to_string(atom_index);
+        if (config["cg_per_atom"].contains(atom_key)) {
+            auto& shape = config["cg_per_atom"][atom_key]["shape_vector"];
+            return Eigen::Vector3d(shape[0], shape[1], shape[2]);
+        }
+    }
+
+    // Fall back to default - pragmatic sphere setup
+    if (config.contains("cg_default")) {
+        auto& shape = config["cg_default"]["shape_vector"];
+        return Eigen::Vector3d(shape[0], shape[1], shape[2]);
+    }
+
+    // Ultimate fallback: sphere with radius 2.0
+    return Eigen::Vector3d(2.0, 2.0, 2.0);
+}
+
+// Claude Generated: Get CG orientation parameters for specific atom (prepared for ellipsoids)
+Eigen::Vector3d ForceField::getCGOrientationForAtom(int atom_index, const json& config)
+{
+    // Check for per-atom orientation parameters
+    if (config.contains("cg_per_atom")) {
+        std::string atom_key = std::to_string(atom_index);
+        if (config["cg_per_atom"].contains(atom_key) && config["cg_per_atom"][atom_key].contains("orientation")) {
+            auto& orient = config["cg_per_atom"][atom_key]["orientation"];
+            return Eigen::Vector3d(orient[0], orient[1], orient[2]);
+        }
+    }
+
+    // Fall back to default orientation
+    if (config.contains("cg_default") && config["cg_default"].contains("orientation")) {
+        auto& orient = config["cg_default"]["orientation"];
+        return Eigen::Vector3d(orient[0], orient[1], orient[2]);
+    }
+
+    // No rotation (spheres don't need orientation)
+    return Eigen::Vector3d(0.0, 0.0, 0.0);
 }
 
 void ForceField::setBonds(const json& bonds)
@@ -685,6 +789,7 @@ double ForceField::Calculate(bool gradient)
     double eq_energy = 0.0;
     double h4_energy = 0.0;
     double hh_energy = 0.0;
+    double cg_energy = 0.0; // Claude Generated: CG pair interaction energy
 
     for (int i = 0; i < m_stored_threads.size(); ++i) {
         m_stored_threads[i]->UpdateGeometry(m_geometry, gradient);
@@ -714,7 +819,40 @@ double ForceField::Calculate(bool gradient)
         m_gradient += m_stored_threads[i]->Gradient();
     }
 
-    energy = m_e0 + bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy + rep_energy + eq_energy + h4_energy + hh_energy;
+    // Claude Generated: CG pair interaction calculations (spherical implementation)
+    // Only calculated for CG methods (method type 4)
+    if (m_method == "cg" || m_method == "cg-lj") {
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Calculating CG pair interactions");
+        }
+
+        for (const auto& pair : m_vdWs) {
+            if (pair.type == 3) { // CG interaction
+                Vector3d pos_i = m_geometry.row(pair.i);
+                Vector3d pos_j = m_geometry.row(pair.j);
+
+                double pair_energy = CGPotentials::calculateCGPairEnergy(pair, pos_i, pos_j);
+                cg_energy += pair_energy;
+
+                if (CurcumaLogger::get_verbosity() >= 3) {
+                    CurcumaLogger::param(fmt::format("CG_pair_{}-{}", pair.i, pair.j),
+                        fmt::format("{:.6f} Eh", pair_energy));
+                }
+
+                // Calculate gradients if requested (numerical differentiation)
+                if (gradient) {
+                    // TODO: Implement analytical gradients for CG potentials
+                    // For now, gradients handled by numerical differentiation in EnergyCalculator
+                }
+            }
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::param("total_cg_energy", fmt::format("{:.6f} Eh", cg_energy));
+        }
+    }
+
+    energy = m_e0 + bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy + rep_energy + eq_energy + h4_energy + hh_energy + cg_energy;
     // Level 1+: Final energy result
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::energy_abs(energy, "Force Field Energy");
@@ -742,6 +880,9 @@ double ForceField::Calculate(bool gradient)
         }
         if (hh_energy != 0.0) {
             CurcumaLogger::param("HH_repulsion", fmt::format("{:.6f} Eh", hh_energy));
+        }
+        if (cg_energy != 0.0) {
+            CurcumaLogger::param("CG_interactions", fmt::format("{:.6f} Eh", cg_energy));
         }
 
         if (gradient) {

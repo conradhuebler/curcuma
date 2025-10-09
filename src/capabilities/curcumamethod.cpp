@@ -17,6 +17,7 @@
  *
  */
 
+#include "src/core/curcuma_logger.h"
 #include "src/core/global.h"
 #include "src/global_config.h"
 
@@ -44,8 +45,10 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, bool 
         m_silent = false;
         m_verbose = true;
         m_verbosity = 3; // Verbose = Informative Print
+        CurcumaLogger::set_verbosity(m_verbosity); // Claude Generated - Sync to logger
     } else {
         m_verbosity = silent ? 0 : 1; // Silent or Normal Print
+        CurcumaLogger::set_verbosity(m_verbosity); // Claude Generated - Sync to logger
     }
 
     // Check for explicit verbosity level in CLI arguments - Claude Generated
@@ -57,6 +60,7 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, bool 
             // Update legacy flags for backwards compatibility
             m_silent = (m_verbosity == 0);
             m_verbose = (m_verbosity >= 3);
+            CurcumaLogger::set_verbosity(m_verbosity); // Claude Generated - Sync to logger
         } catch (const std::exception& e) {
             // Invalid verbosity value, keep current setting
         }
@@ -89,6 +93,7 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, int v
     // Set legacy flags for backwards compatibility
     m_silent = (verbosity == 0);
     m_verbose = (verbosity >= 3);
+    CurcumaLogger::set_verbosity(m_verbosity); // Claude Generated - Sync to logger
 
     // Check for verbosity override in controller
     if (controller.count("verbosity") > 0) {
@@ -98,6 +103,7 @@ CurcumaMethod::CurcumaMethod(const json& defaults, const json& controller, int v
             m_verbosity = std::max(0, std::min(3, m_verbosity));
             m_silent = (m_verbosity == 0);
             m_verbose = (m_verbosity >= 3);
+            CurcumaLogger::set_verbosity(m_verbosity); // Claude Generated - Sync to logger
         } catch (const std::exception& e) {
             // Invalid verbosity value, keep parameter setting
         }

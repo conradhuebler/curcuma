@@ -158,6 +158,7 @@ bool FileIterator::CheckNext()
                     }
                 }
                 if (i - 1 == atoms) {
+                    mol.CalculateMass(); // Claude Generated 2025: Calculate mass after loading all atoms (fixes XYZ m_mass=0 bug)
                     m_current = mol;
                     index = 0;
                     return false;

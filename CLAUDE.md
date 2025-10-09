@@ -17,7 +17,7 @@
 - Preserve new knowledge from conversations but keep it brief
 - Always suggest improvements to existing code
 - **Keep entries concise and focused to save tokens**
-
+- **Keep git commits concise and focused**
 ## Development Guidelines
 
 ### Code Organization

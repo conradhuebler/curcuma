@@ -73,6 +73,7 @@ Molecule::Molecule(const Molecule& other)
     m_spin = other.m_spin;
     m_bonds = other.m_bonds;
     m_borders = other.m_borders;
+    m_mass = other.m_mass; // Claude Generated 2025: Copy molecular mass (fixes VTF trajectory m_mass=0 bug)
 }
 /*
 Molecule& Molecule::operator=(const Molecule& other)
@@ -123,6 +124,7 @@ Molecule::Molecule(const Mol& other)
     m_energy = other.m_energy;
     m_spin = other.m_spin;
     m_bonds = other.m_bonds;
+    CalculateMass(); // Claude Generated 2025: Initialize molecular mass from atom types
 }
 
 Molecule::Molecule(const Mol* other)
@@ -134,6 +136,7 @@ Molecule::Molecule(const Mol* other)
     m_energy = other->m_energy;
     m_spin = other->m_spin;
     m_bonds = other->m_bonds;
+    CalculateMass(); // Claude Generated 2025: Initialize molecular mass from atom types
 }
 
 Molecule::Molecule(const std::string& file)
@@ -249,6 +252,7 @@ void Molecule::Initialise(const int* attyp, const double* coord, const int natom
 
         // m_geometry.push_back({ coord[3 * i], coord[3 * i + 1], coord[3 * i + 2] });
         m_atoms.push_back(attyp[i]);
+
         m_mass += Elements::AtomicMass[attyp[i]];
     }
 }
@@ -370,10 +374,16 @@ double Molecule::CalculateMass()
     // Formula: M_total = Σ m_i where m_i are atomic masses
     // Reference: IUPAC atomic masses, typically in atomic mass units (amu)
     // Performance: O(N) - simple summation over all atoms
+    // Safety: Ensures minimum mass of 1.0 amu for unknown/CG particles
 
     double mass = 0.0;
     for (int atom_type : m_atoms) {
-        mass += Elements::AtomicMass[atom_type];
+        double atomic_mass = Elements::AtomicMass[atom_type];
+        // Defensive: Use minimum mass of 1.0 for undefined elements (e.g., placeholders)
+        if (atomic_mass < 1e-6) {
+            atomic_mass = 1.0; // Default mass for coarse-grained or undefined particles
+        }
+        mass += atomic_mass;
     }
     m_mass = mass;
     return mass;
@@ -1079,11 +1089,19 @@ std::pair<double, double> Molecule::GyrationRadius(double hmass, bool protons, i
             m = Elements::AtomicMass[m_atoms[i]] * hmass;
         else
             m = Elements::AtomicMass[m_atoms[i]];
+
         mass += m;
         gyr_mass += m * ((com(0) - m_geometry(i, 0)) * (com(0) - m_geometry(i, 0)) + (com(1) - m_geometry(i, 1)) * (com(1) - m_geometry(i, 1)) + (com(2) - m_geometry(i, 2)) * (com(2) - m_geometry(i, 2)));
     }
     gyr /= double(m_geometry.rows());
     gyr_mass /= double(mass);
+
+    // Claude Generated 2025: Apply square root for radius of gyration R = sqrt(<r²>)
+    // Previous: returned R² (mean square distance from COM)
+    // Corrected: returns R (root mean square distance from COM) - physically meaningful value
+    gyr = std::sqrt(gyr);
+    gyr_mass = std::sqrt(gyr_mass);
+
     return std::pair<double, double>(gyr, gyr_mass);
 }
 

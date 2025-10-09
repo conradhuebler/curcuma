@@ -71,9 +71,21 @@ struct Inversion {
 };
 
 struct vdW {
-    int type = 1; // 1 = UFF, 2 = QMDFF
+    // === Existing members ===
+    int type = 1; // 1 = UFF, 2 = QMDFF, 3 = CG
     int i = 0, j = 0;
     double C_ij = 0, r0_ij = 0;
+
+    // === NEW: CG-specific parameters (only used when type=3) ===
+    // Complete ellipsoid support structure (for future extensibility)
+    Eigen::Vector3d shape_i = Eigen::Vector3d(2.0, 2.0, 2.0); // (x,y,z)-radii for atom i
+    Eigen::Vector3d shape_j = Eigen::Vector3d(2.0, 2.0, 2.0); // (x,y,z)-radii for atom j
+    Eigen::Vector3d orient_i = Eigen::Vector3d(0.0, 0.0, 0.0); // Euler angles for atom i
+    Eigen::Vector3d orient_j = Eigen::Vector3d(0.0, 0.0, 0.0); // Euler angles for atom j
+
+    // CG potential parameters
+    double sigma = 4.0, epsilon = 0.0; // LJ parameters
+    int cg_potential_type = 1; // 1=LJ_1612, 2=LJ_612, 3=tabulated
 };
 
 struct EQ {
