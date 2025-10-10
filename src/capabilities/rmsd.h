@@ -39,6 +39,8 @@
 using json = nlohmann::json;
 
 #include "curcumamethod.h"
+#include "src/core/parameter_macros.h"  // Claude Generated - For PARAM macro definitions
+#include "src/core/config_manager.h"    // Claude Generated - Modern parameter access layer
 
 // Claude Generated - Forward declarations for strategy pattern
 class AlignmentStrategy;
@@ -92,44 +94,8 @@ private:
     std::function<double(const Molecule&)> m_evaluator;
 };
 
-static const json RMSDJson = {
-    { "reorder", false },
-    { "check", false },
-    { "heavy", false },
-    { "fragment", -1 },
-    { "fragment_reference", -1 },
-    { "fragment_target", -1 },
-    { "reference_atoms", "" },
-    { "target_atoms", "" },
-    { "init", -1 },
-    { "pt", 0 },
-    { "silent", false },
-    { "storage", 1.0 },
-    { "method", "free" },
-    { "noreorder", false },
-    { "threads", 1 },
-    { "Element", 7 },
-    { "DynamicCenter", false },
-    { "order", "" },
-    { "check", false },
-    { "topo", 0 },
-    { "write", 0 },
-    { "update-rotation", false },
-    { "damping", 0.8 },
-    { "split", false },
-    { "nomunkres", false },
-    { "molalignbin", "molalign" },
-    { "molaligntol", 10 },
-    { "cycles", -1 },
-    { "nofree", false },
-    { "limit", 10 },
-    { "costmatrix", 1 },
-    { "km_maxiterations", 5 },
-    { "kmstat", false },
-    { "km_conv", 1e-3 },
-    { "molalignarg", " -remap -fast -tol 10" },
-    { "target_rmsd", 0.0 }
-};
+// Claude Generated 2025: RMSDJson removed - replaced by ParameterRegistry + ConfigManager
+// Legacy static JSON object removed - all defaults now managed through Parameter Registry System
 
 class RMSDDriver : public CurcumaMethod {
     // Claude Generated - Friend classes for Strategy Pattern access to private members
@@ -143,7 +109,7 @@ class RMSDDriver : public CurcumaMethod {
     friend class PredefinedOrderStrategy;
 
 public:
-    RMSDDriver(const json& controller = RMSDJson, bool silent = true);
+    RMSDDriver(const json& controller = json(), bool silent = true);  // Claude Generated 2025: Default to empty JSON, ParameterRegistry provides defaults
 
     virtual ~RMSDDriver();
 
@@ -374,6 +340,7 @@ private:
     Molecule m_reference, m_target, m_target_original, m_reference_aligned, m_reference_original, m_target_aligned, m_target_reordered, m_reorder_reference, m_reorder_target, m_reference_centered, m_target_centered;
     Geometry m_reorder_reference_geometry;
     bool m_force_reorder = false, m_protons = true, m_print_intermediate = false, m_silent = false;
+    ConfigManager m_config;  // Claude Generated - Modern type-safe parameter access
     std::vector<std::vector<int>> m_intermediate_results;
     std::map<double, std::vector<int>> m_results, m_intermediate_cost_matrices;
     std::vector<double> m_last_rmsd;
@@ -404,6 +371,57 @@ private:
     // Claude Generated - Strategy pattern members
     std::unique_ptr<AlignmentStrategy> m_alignment_strategy;
     AlignmentConfig m_alignment_config;
+
+    // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
+    // Claude Generated - Parameter Registry Integration (October 2025)
+    BEGIN_PARAMETER_DEFINITION(rmsd)
+
+    // --- General & Threading ---
+    PARAM(threads, Int, 1, "Number of threads for parallel execution.", "Performance", {})
+    PARAM(protons, Bool, true, "Include protons in the calculation (opposite of 'heavy').", "General", {"heavy"})
+    PARAM(force_reorder, Bool, false, "Force reordering even if atom counts match.", "General", {"reorder"})
+    PARAM(no_reorder, Bool, false, "Disable all reordering logic.", "General", {"noreorder"})
+
+    // --- Alignment Method ---
+    PARAM(method, String, "incr", "Alignment method: hungarian|incr|template|hybrid|subspace|inertia|molalign|dtemplate|predefined.", "Method", {})
+    PARAM(limit, Int, 0, "Limit for subspace and dtemplate methods.", "Method", {})
+    PARAM(element, String, "7", "Element(s) for template methods (e.g., \"7,8\").", "Method", {"Element"})
+    PARAM(order_file, String, "", "Path to a file with a predefined atom order.", "Method", {"order"})
+
+    // --- Cost Matrix & Kuhn-Munkres ---
+    PARAM(cost_matrix_type, Int, 0, "Type of cost matrix to use.", "Cost Matrix", {"costmatrix"})
+    PARAM(km_cycles, Int, -1, "Number of Kuhn-Munkres cycles (-1 for auto).", "Cost Matrix", {"cycles"})
+    PARAM(km_max_iterations, Int, 1000, "Max iterations for the KM algorithm.", "Cost Matrix", {"km_maxiterations"})
+    PARAM(km_convergence, Double, 1e-6, "Convergence threshold for the KM algorithm.", "Cost Matrix", {"km_conv"})
+
+    // --- Atom Selection ---
+    PARAM(fragment, Int, -1, "Use only a specific fragment index for both molecules.", "Selection", {})
+    PARAM(fragment_reference, Int, -1, "Fragment index for the reference molecule.", "Selection", {})
+    PARAM(fragment_target, Int, -1, "Fragment index for the target molecule.", "Selection", {})
+    PARAM(reference_atoms, String, "", "Specific atom indices for the reference molecule.", "Selection", {})
+    PARAM(target_atoms, String, "", "Specific atom indices for the target molecule.", "Selection", {})
+
+    // --- MolAlign Integration ---
+    PARAM(molalign_bin, String, "molalign", "Path to the molalign binary.", "MolAlign", {"molalignbin"})
+    PARAM(molalign_args, String, "", "Additional arguments for the molalign binary.", "MolAlign", {})
+    PARAM(molalign_tolerance, Int, 100, "Tolerance for molalign.", "MolAlign", {"molaligntol"})
+
+    // --- Advanced Options ---
+    PARAM(init, Int, -1, "Initial fragment index.", "Advanced", {})
+    PARAM(pt, Int, 0, "Number of allowed proton transfers.", "Advanced", {})
+    PARAM(storage, Double, 1.0, "Intermediate storage factor.", "Advanced", {})
+    PARAM(dynamic_center, Bool, false, "Use dynamic centering.", "Advanced", {"DynamicCenter"})
+    PARAM(topo, Int, 0, "Topology comparison mode.", "Advanced", {})
+    PARAM(write, Int, 0, "Write intermediate results.", "Advanced", {})
+    PARAM(update_rotation, Bool, false, "Update rotation optimization.", "Advanced", {"update-rotation"})
+    PARAM(damping, Double, 0.8, "Damping factor for optimization.", "Advanced", {})
+    PARAM(split, Bool, false, "Split calculation into fragments.", "Advanced", {})
+    PARAM(kmstat, Bool, false, "Output Kuhn-Munkres statistics.", "Advanced", {})
+    PARAM(target_rmsd, Double, 0.0, "Target RMSD value for early stopping.", "Advanced", {})
+    PARAM(check, Bool, false, "Enable connectivity checking.", "Advanced", {})
+
+    END_PARAMETER_DEFINITION
+    // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^
 };
 
 using namespace LBFGSpp;

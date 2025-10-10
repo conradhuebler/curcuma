@@ -41,6 +41,7 @@
 #include "src/core/fileiterator.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
+#include "src/core/parameter_registry.h"  // Claude Generated 2025: For ParameterRegistry::getInstance()
 
 #include "src/tools/geometry.h"
 
@@ -680,7 +681,7 @@ bool SimpleMD::Initialise()
         }
         m_rmsd_fragment_count = m_rmsd_mtd_molecule.GetFragments().size();
 
-        json config = RMSDJson;
+        json config = ParameterRegistry::getInstance().getDefaultJson("rmsd");  // Claude Generated 2025: Use ParameterRegistry instead of RMSDJson
         config["silent"] = true;
         config["reorder"] = false;
         for (int i = 0; i < m_threads; ++i) {

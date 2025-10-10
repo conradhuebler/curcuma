@@ -19,6 +19,7 @@
 #include "rmsd/rmsd_functions.h"
 #include "src/core/global.h" // For CurcumaLogger - Claude Generated
 #include "src/global_config.h"
+#include "src/core/parameter_registry.h"  // Claude Generated - For ParameterRegistry::getInstance()
 
 // Claude Generated - New modular utilities
 #include "rmsd/rmsd_assignment.h"
@@ -153,7 +154,8 @@ int RMSDThread::execute()
 }
 
 RMSDDriver::RMSDDriver(const json& controller, bool silent)
-    : CurcumaMethod(RMSDJson, controller, silent)
+    : CurcumaMethod(ParameterRegistry::getInstance().getDefaultJson("rmsd"), controller, silent)
+    , m_config("rmsd", controller)  // Claude Generated - ConfigManager initialization
 {
     UpdateController(controller);
 }
@@ -180,83 +182,89 @@ void RMSDDriver::LoadControlJson()
 // Claude Generated - Extract fragment and threading configuration
 void RMSDDriver::LoadFragmentAndThreadingParameters()
 {
-    m_fragment_reference = Json2KeyWord<int>(m_defaults, "fragment_reference");
-    m_fragment_target = Json2KeyWord<int>(m_defaults, "fragment_target");
-    m_fragment = Json2KeyWord<int>(m_defaults, "fragment");
-    m_threads = Json2KeyWord<int>(m_defaults, "threads");
-    m_initial_fragment = Json2KeyWord<int>(m_defaults, "init");
-    m_pt = Json2KeyWord<int>(m_defaults, "pt");
-    m_molaligntol = Json2KeyWord<int>(m_defaults, "molaligntol");
+    m_fragment_reference = m_config.get<int>("fragment_reference");
+    m_fragment_target = m_config.get<int>("fragment_target");
+    m_fragment = m_config.get<int>("fragment");
+    m_threads = m_config.get<int>("threads");
+    m_initial_fragment = m_config.get<int>("init");
+    m_pt = m_config.get<int>("pt");
+    m_molaligntol = m_config.get<int>("molalign_tolerance");
 
-    m_force_reorder = Json2KeyWord<bool>(m_defaults, "reorder");
-    m_protons = !Json2KeyWord<bool>(m_defaults, "heavy");
+    m_force_reorder = m_config.get<bool>("force_reorder");
+    m_protons = m_config.get<bool>("protons");
     // Legacy silent parameter removed - using verbosity system instead - Claude Generated
-    m_intermedia_storage = Json2KeyWord<double>(m_defaults, "storage");
-    m_dynamic_center = Json2KeyWord<bool>(m_defaults, "DynamicCenter");
-    m_topo = Json2KeyWord<int>(m_defaults, "topo");
-    m_write = Json2KeyWord<int>(m_defaults, "write");
-    m_noreorder = Json2KeyWord<bool>(m_defaults, "noreorder");
-    m_update_rotation = Json2KeyWord<bool>(m_defaults, "update-rotation");
-    m_split = Json2KeyWord<bool>(m_defaults, "split");
-    m_nofree = Json2KeyWord<bool>(m_defaults, "nofree");
-    m_kuhn_munkres_max_iterations = Json2KeyWord<int>(m_defaults, "km_maxiterations");
-    m_kmstat = Json2KeyWord<bool>(m_defaults, "kmstat");
-    m_km_convergence = Json2KeyWord<double>(m_defaults, "km_conv");
-    m_target_rmsd = Json2KeyWord<double>(m_defaults, "target_rmsd");
+    m_intermedia_storage = m_config.get<double>("storage");
+    m_dynamic_center = m_config.get<bool>("dynamic_center");
+    m_topo = m_config.get<int>("topo");
+    m_write = m_config.get<int>("write");
+    m_noreorder = m_config.get<bool>("no_reorder");
+    m_update_rotation = m_config.get<bool>("update_rotation");
+    m_split = m_config.get<bool>("split");
+    m_nofree = false;  // Not in parameter definition - deprecated?
+    m_kuhn_munkres_max_iterations = m_config.get<int>("km_max_iterations");
+    m_kmstat = m_config.get<bool>("kmstat");
+    m_km_convergence = m_config.get<double>("km_convergence");
+    m_target_rmsd = m_config.get<double>("target_rmsd");
 }
 
 // Claude Generated - Extract element template parsing logic
 void RMSDDriver::LoadElementTemplateParameters()
 {
-
-#pragma message("these hacks to overcome the json stuff are not nice, TODO!")
-    try {
-        std::string element = m_defaults["Element"].get<std::string>();
-        StringList elements = Tools::SplitString(element, ",");
-        for (const std::string& str : elements) {
-            try {
-                m_element_templates.push_back(std::stod(str));
-            } catch (const std::invalid_argument& arg) {
-                continue;
-            }
+    // Claude Generated 2025: Simplified element parsing - always String, no try-catch
+    std::string element_str = m_config.get<std::string>("element");
+    StringList elements = Tools::SplitString(element_str, ",");
+    for (const std::string& str : elements) {
+        try {
+            m_element_templates.push_back(std::stoi(str));
+        } catch (const std::invalid_argument& arg) {
+            CurcumaLogger::warn_fmt("Invalid element specification: {}", str);
+            continue;
         }
-        if (m_element_templates.size())
-            m_element = m_element_templates[0];
-    } catch (const nlohmann::detail::type_error& error) {
-        m_element = Json2KeyWord<int>(m_defaults, "element");
-        m_element_templates.push_back(m_element);
     }
+    if (!m_element_templates.empty())
+        m_element = m_element_templates[0];
 
-    m_check = Json2KeyWord<bool>(m_defaults, "check");
-    m_damping = Json2KeyWord<double>(m_defaults, "damping");
-    m_molalign = Json2KeyWord<std::string>(m_defaults, "molalignbin");
+    m_check = m_config.get<bool>("check");
+    m_damping = m_config.get<double>("damping");
+    m_molalign = m_config.get<std::string>("molalign_bin");
+    m_molalignarg = m_config.get<std::string>("molalign_args", " -remap -fast -tol 10");
 }
+
+// Claude Generated 2025: String-to-Enum mapping for type-safe method selection
+static const std::map<std::string, AlignmentMethod> method_map = {
+    {"incr", AlignmentMethod::INCREMENTAL},
+    {"template", AlignmentMethod::TEMPLATE},
+    {"hybrid0", AlignmentMethod::HEAVY_TEMPLATE},
+    {"hybrid", AlignmentMethod::ATOM_TEMPLATE},
+    {"subspace", AlignmentMethod::ATOM_TEMPLATE},
+    {"free", AlignmentMethod::INERTIA},
+    {"inertia", AlignmentMethod::INERTIA},
+    {"molalign", AlignmentMethod::MOLALIGN},
+    {"dtemplate", AlignmentMethod::DISTANCE_TEMPLATE},
+    {"predefined", AlignmentMethod::PREDEFINED_ORDER}
+};
 
 // Claude Generated - Extract alignment method selection and configuration
 void RMSDDriver::LoadAlignmentMethodParameters()
 {
-
-    std::string method = Json2KeyWord<std::string>(m_defaults, "method");
+    std::string method = m_config.get<std::string>("method");
     m_munkress_cycle = 1;
     m_limit = 0;
-    if (method.compare("template") == 0)
-        m_method = 2;
-    else if (method.compare("incr") == 0)
-        m_method = 1;
-    else if (method.compare("hybrid0") == 0)
-        m_method = 3;
-    else if (method.compare("hybrid") == 0 || method.compare("subspace") == 0) {
-        m_method = 4;
-        m_limit = Json2KeyWord<int>(m_defaults, "limit");
-    } else if (method.compare("free") == 0 || (method.compare("inertia") == 0)) { // will be inertia, for compatibility
-        m_method = 5;
-    } else if (method.compare("molalign") == 0)
-        m_method = 6;
-    else if (method.compare("dtemplate") == 0) {
-        m_method = 7;
-        m_limit = Json2KeyWord<int>(m_defaults, "limit");
-    } else
-        m_method = 1;
+
+    // Claude Generated 2025: Clean enum-based method selection
+    auto it = method_map.find(method);
+    if (it != method_map.end()) {
+        m_method = static_cast<int>(it->second);
+    } else {
+        CurcumaLogger::warn_fmt("Unknown alignment method '{}', defaulting to 'incr'", method);
+        m_method = static_cast<int>(AlignmentMethod::INCREMENTAL);
+    }
+
+    // Set limit for subspace and dtemplate methods
+    if (m_method == static_cast<int>(AlignmentMethod::ATOM_TEMPLATE) ||
+        m_method == static_cast<int>(AlignmentMethod::DISTANCE_TEMPLATE)) {
+        m_limit = m_config.get<int>("limit");
+    }
 
     // Level 1: Method approach display - Claude Generated
     if (m_verbosity >= 1) {
@@ -298,8 +306,8 @@ void RMSDDriver::LoadAlignmentMethodParameters()
 // Claude Generated - Extract cost matrix configuration
 void RMSDDriver::LoadCostMatrixParameters()
 {
-    m_costmatrix = Json2KeyWord<int>(m_defaults, "costmatrix");
-    int cycles = Json2KeyWord<int>(m_defaults, "cycles");
+    m_costmatrix = m_config.get<int>("cost_matrix_type");
+    int cycles = m_config.get<int>("km_cycles");
     if (cycles != -1)
         m_munkress_cycle = cycles;
 }
@@ -307,7 +315,7 @@ void RMSDDriver::LoadCostMatrixParameters()
 // Claude Generated - Extract file order loading logic
 void RMSDDriver::LoadFileOrderParameters()
 {
-    std::string order = Json2KeyWord<std::string>(m_defaults, "order");
+    std::string order = m_config.get<std::string>("order_file");
 
     if (!order.empty() && std::filesystem::exists(order)) {
         std::ifstream file(order);
@@ -340,11 +348,11 @@ void RMSDDriver::LoadAtomSelectionParameters()
     // Reference atoms debug output - Claude Generated
 #ifdef CURCUMA_DEBUG
     if (m_verbosity >= 3) {
-        CurcumaLogger::debug(1, fmt::format("reference_atoms: {}", m_defaults["reference_atoms"].dump()));
+        CurcumaLogger::debug(1, fmt::format("reference_atoms: {}", m_config.exportConfig()["reference_atoms"].dump()));
     }
 #endif
-    std::string reference_atoms = Json2KeyWord<std::string>(m_defaults, "reference_atoms");
-    std::string target_atoms = Json2KeyWord<std::string>(m_defaults, "target_atoms");
+    std::string reference_atoms = m_config.get<std::string>("reference_atoms");
+    std::string target_atoms = m_config.get<std::string>("target_atoms");
     if (reference_atoms.size() > 0)
         m_reference_atoms = Tools::ParseStringToVector(reference_atoms);
 
@@ -428,9 +436,11 @@ AlignmentConfig RMSDDriver::CreateAlignmentConfig() const
     config.force_reorder = m_force_reorder;
     config.update_rotation = m_update_rotation;
     config.threads = m_threads;
-    config.molalign_bin = m_molalign;
-    config.molalign_args = m_molalignarg;
-    config.molalign_tolerance = m_molaligntol;
+
+    // Claude Generated 2025: Direct ConfigManager access for MolAlign parameters
+    config.molalign_bin = m_molalign;  // Already loaded from m_config in LoadElementTemplateParameters()
+    config.molalign_args = m_config.get<std::string>("molalign_args", " -remap -fast -tol 10");
+    config.molalign_tolerance = m_molaligntol;  // Already loaded from m_config
 
     return config;
 }
