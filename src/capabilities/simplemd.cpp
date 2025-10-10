@@ -154,7 +154,8 @@ std::vector<json> BiasThread::getBias() const
 }
 
 SimpleMD::SimpleMD(const json& controller, const bool silent)
-    : CurcumaMethod(CurcumaMDJson, controller, silent)
+    : CurcumaMethod(ParameterRegistry::getInstance().getDefaultJson("simplemd"), controller, silent)
+    , m_config("simplemd", controller)  // Claude Generated - ConfigManager initialization
 {
     UpdateController(controller);
 }
@@ -166,100 +167,126 @@ SimpleMD::~SimpleMD()
     // delete m_bias_pool;
 }
 
+// Claude Generated 2025: String-to-Enum mappings for type-safe selection
+static const std::map<std::string, ThermostatType> thermostat_map = {
+    {"berendsen", ThermostatType::Berendsen},
+    {"berendson", ThermostatType::Berendsen},  // Legacy typo support
+    {"anderson", ThermostatType::Anderson},
+    {"nosehover", ThermostatType::NoseHover},
+    {"csvr", ThermostatType::CSVR},
+    {"none", ThermostatType::None}
+};
+
+static const std::map<std::string, WallGeometry> wall_geometry_map = {
+    {"none", WallGeometry::None},
+    {"spheric", WallGeometry::Spheric},
+    {"rect", WallGeometry::Rect}
+};
+
+static const std::map<std::string, WallPotentialType> wall_potential_map = {
+    {"logfermi", WallPotentialType::LogFermi},
+    {"harmonic", WallPotentialType::Harmonic}
+};
+
 void SimpleMD::LoadControlJson()
 {
-    m_method = Json2KeyWord<std::string>(m_defaults, "method");
-    m_thermostat = Json2KeyWord<std::string>(m_defaults, "thermostat");
-    m_plumed = Json2KeyWord<std::string>(m_defaults, "plumed");
+    // Claude Generated 2025: Basic Parameters - ConfigManager migration
+    m_method = m_config.get<std::string>("method");
+    m_thermostat = m_config.get<std::string>("thermostat");
+    m_plumed = m_config.get<std::string>("plumed_file");
 
-    m_spin = Json2KeyWord<int>(m_defaults, "spin");
-    m_charge = Json2KeyWord<int>(m_defaults, "charge");
-    m_dT = Json2KeyWord<double>(m_defaults, "dT");
-    m_maxtime = Json2KeyWord<double>(m_defaults, "MaxTime");
-    m_T0 = Json2KeyWord<double>(m_defaults, "T");
-    m_rmrottrans = Json2KeyWord<int>(m_defaults, "rmrottrans");
-    m_nocenter = Json2KeyWord<bool>(m_defaults, "nocenter");
-    m_COM = Json2KeyWord<bool>(m_defaults, "COM");
-    m_dump = Json2KeyWord<int>(m_defaults, "dump");
-    m_print = Json2KeyWord<int>(m_defaults, "print");
-    m_max_top_diff = Json2KeyWord<int>(m_defaults, "MaxTopoDiff");
-    m_seed = Json2KeyWord<int>(m_defaults, "seed");
-    m_threads = Json2KeyWord<int>(m_defaults, "threads");
+    m_spin = m_config.get<int>("spin");
+    m_charge = m_config.get<int>("charge");
+    m_dT = m_config.get<double>("time_step");
+    m_maxtime = m_config.get<double>("max_time");
+    m_T0 = m_config.get<double>("temperature");
+    m_rmrottrans = m_config.get<int>("remove_com_mode");
+    m_nocenter = m_config.get<bool>("no_center");
+    m_COM = m_config.get<bool>("use_com");
+    m_dump = m_config.get<int>("dump_frequency");
+    m_print = m_config.get<int>("print_frequency");
+    m_max_top_diff = m_config.get<int>("MaxTopoDiff", 15);  // Not in PARAM block, using default
+    m_seed = m_config.get<int>("seed");
+    m_threads = m_config.get<int>("threads");
 
-    m_rmsd = Json2KeyWord<double>(m_defaults, "rmsd");
-    m_hmass = Json2KeyWord<int>(m_defaults, "hmass");
+    // Claude Generated 2025: System Control & Output Parameters
+    m_rmsd = m_config.get<double>("rmsd", 1.5);  // Not in PARAM block - legacy parameter
+    m_hmass = m_config.get<int>("hydrogen_mass");
 
-    m_impuls = Json2KeyWord<double>(m_defaults, "impuls");
-    m_impuls_scaling = Json2KeyWord<double>(m_defaults, "impuls_scaling");
-    m_writeUnique = Json2KeyWord<bool>(m_defaults, "unique");
-    m_opt = Json2KeyWord<bool>(m_defaults, "opt");
-    m_scale_velo = Json2KeyWord<double>(m_defaults, "velo");
-    m_rescue = Json2KeyWord<bool>(m_defaults, "rescue");
-    m_wall_render = Json2KeyWord<bool>(m_defaults, "wall_render");
-    m_coupling = Json2KeyWord<double>(m_defaults, "coupling");
-    m_anderson = Json2KeyWord<double>(m_defaults, "anderson");
+    m_impuls = m_config.get<double>("impuls", 0.0);  // Not in PARAM block - legacy
+    m_impuls_scaling = m_config.get<double>("impuls_scaling", 0.75);  // Not in PARAM block - legacy
+    m_writeUnique = m_config.get<bool>("unique", false);  // Not in PARAM block - legacy
+    m_opt = m_config.get<bool>("opt", false);  // Not in PARAM block - legacy
+    m_scale_velo = m_config.get<double>("initial_velocity_scale");
+    m_rescue = m_config.get<bool>("rescue", false);  // Not in PARAM block - legacy
+    m_wall_render = m_config.get<bool>("wall_render", false);  // Not in PARAM block - legacy
+    m_coupling = m_config.get<double>("coupling");
+    m_anderson = m_config.get<double>("anderson_probability");
 
     if (m_coupling < m_dT)
         m_coupling = m_dT;
 
-    /* RMSD Metadynamik block */
-    /* this one is used to recover https://doi.org/10.1021/acs.jctc.9b00143 */
-    m_rmsd_mtd = Json2KeyWord<bool>(m_defaults, "rmsd_mtd");
-    m_k_rmsd = Json2KeyWord<double>(m_defaults, "k_rmsd");
-    m_alpha_rmsd = Json2KeyWord<double>(m_defaults, "alpha_rmsd");
-    m_mtd_steps = Json2KeyWord<int>(m_defaults, "mtd_steps");
-    m_chain_length = Json2KeyWord<int>(m_defaults, "chainlength");
-    m_rmsd_rmsd = Json2KeyWord<double>(m_defaults, "rmsd_rmsd");
-    m_max_rmsd_N = Json2KeyWord<int>(m_defaults, "max_rmsd_N");
-    m_rmsd_econv = Json2KeyWord<double>(m_defaults, "rmsd_econv");
-    m_rmsd_DT = Json2KeyWord<double>(m_defaults, "rmsd_DT");
-    m_wtmtd = Json2KeyWord<bool>(m_defaults, "wtmtd");
-    m_rmsd_ref_file = Json2KeyWord<std::string>(m_defaults, "rmsd_ref_file");
-    m_rmsd_fix_structure = Json2KeyWord<bool>(m_defaults, "rmsd_fix_structure");
-    m_nocolvarfile = Json2KeyWord<bool>(m_defaults, "noCOLVARfile");
-    m_nohillsfile = Json2KeyWord<bool>(m_defaults, "noHILSfile");
+    // Claude Generated 2025: RMSD Metadynamics block
+    // this one is used to recover https://doi.org/10.1021/acs.jctc.9b00143
+    m_rmsd_mtd = m_config.get<bool>("rmsd_mtd");
+    m_k_rmsd = m_config.get<double>("rmsd_mtd_k");
+    m_alpha_rmsd = m_config.get<double>("rmsd_mtd_alpha");
+    m_mtd_steps = m_config.get<int>("rmsd_mtd_pace");
+    m_chain_length = m_config.get<int>("chain_length");
+    m_rmsd_rmsd = m_config.get<double>("rmsd_rmsd", 1.0);  // Not in PARAM block - legacy
+    m_max_rmsd_N = m_config.get<int>("rmsd_mtd_max_gaussians");
+    m_rmsd_econv = m_config.get<double>("rmsd_econv", 1e8);  // Not in PARAM block - legacy
+    m_rmsd_DT = m_config.get<double>("rmsd_mtd_dt");
+    m_wtmtd = m_config.get<bool>("wtmtd", false);  // Not in PARAM block - legacy
+    m_rmsd_ref_file = m_config.get<std::string>("rmsd_mtd_ref_file");
+    m_rmsd_fix_structure = m_config.get<bool>("rmsd_fix_structure", false);  // Not in PARAM block - legacy
+    m_nocolvarfile = m_config.get<bool>("noCOLVARfile", false);  // Not in PARAM block - legacy
+    m_nohillsfile = m_config.get<bool>("noHILSfile", false);  // Not in PARAM block - legacy
 
-    m_rmsd_atoms = Json2KeyWord<std::string>(m_defaults, "rmsd_atoms");
+    m_rmsd_atoms = m_config.get<std::string>("rmsd_mtd_atoms");
 
-    m_writerestart = Json2KeyWord<int>(m_defaults, "writerestart");
-    m_respa = Json2KeyWord<int>(m_defaults, "respa");
-    m_dipole = Json2KeyWord<bool>(m_defaults, "dipole");
-    m_scaling_json = Json2KeyWord<std::string>(m_defaults, "scaling_json");
+    // Claude Generated 2025: Output & Restart Parameters
+    m_writerestart = m_config.get<int>("write_restart_frequency");
+    m_respa = m_config.get<int>("respa", 1);  // Not in PARAM block - legacy
+    m_dipole = m_config.get<bool>("dipole", false);  // Not in PARAM block - legacy
+    m_scaling_json = m_config.get<std::string>("scaling_json", "none");  // Not in PARAM block - legacy
 
-    m_writeXYZ = Json2KeyWord<bool>(m_defaults, "writeXYZ");
-    m_writeinit = Json2KeyWord<bool>(m_defaults, "writeinit");
-    m_mtd = Json2KeyWord<bool>(m_defaults, "mtd");
-    m_mtd_dT = Json2KeyWord<int>(m_defaults, "mtd_dT");
+    m_writeXYZ = m_config.get<bool>("write_xyz");
+    m_writeinit = m_config.get<bool>("write_initial_state");
+    m_mtd = m_config.get<bool>("mtd");
+    m_mtd_dT = m_config.get<int>("mtd_dT", -1);  // Not in PARAM block - legacy
     if (m_mtd_dT < 0) {
         m_eval_mtd = true;
     } else {
         m_eval_mtd = false;
     }
-    m_initfile = Json2KeyWord<std::string>(m_defaults, "initfile");
-    m_norestart = Json2KeyWord<bool>(m_defaults, "norestart");
+    m_initfile = m_config.get<std::string>("restart_file");
+    m_norestart = m_config.get<bool>("no_restart");
     m_dt2 = m_dT * m_dT;
-    m_rm_COM = Json2KeyWord<double>(m_defaults, "rm_COM");
-    int rattle = Json2KeyWord<int>(m_defaults, "rattle");
 
-    m_rattle_maxiter = Json2KeyWord<int>(m_defaults, "rattle_maxiter");
-    m_rattle_dynamic_tol_iter = Json2KeyWord<int>(m_defaults, "rattle_dynamic_tol_iter");
-    m_rattle_max = Json2KeyWord<double>(m_defaults, "rattle_max");
-    m_rattle_min = Json2KeyWord<double>(m_defaults, "rattle_min");
+    // Claude Generated 2025: RATTLE Parameters
+    m_rm_COM = m_config.get<double>("remove_com_motion");
+    int rattle = m_config.get<int>("rattle");
 
-    m_rattle_dynamic_tol = Json2KeyWord<bool>(m_defaults, "rattle_dynamic_tol");
+    m_rattle_maxiter = m_config.get<int>("rattle_max_iterations");
+    m_rattle_dynamic_tol_iter = m_config.get<int>("rattle_dynamic_tol_iter", 100);  // Not in PARAM block - legacy
+    m_rattle_max = m_config.get<double>("rattle_max", 10.0);  // Not in PARAM block - legacy
+    m_rattle_min = m_config.get<double>("rattle_min", 1e-4);  // Not in PARAM block - legacy
+
+    m_rattle_dynamic_tol = m_config.get<bool>("rattle_dynamic_tol", false);  // Not in PARAM block - legacy
 
     if (rattle == 1) {
         Integrator = [=]() {
             this->Rattle();
         };
-        m_rattle_tol_12 = Json2KeyWord<double>(m_defaults, "rattle_tol_12");
-        m_rattle_tol_13 = Json2KeyWord<double>(m_defaults, "rattle_tol_13");
+        m_rattle_tol_12 = m_config.get<double>("rattle_tol_12");
+        m_rattle_tol_13 = m_config.get<double>("rattle_tol_13");
 
-        m_rattle_12 = Json2KeyWord<bool>(m_defaults, "rattle_12");
-        m_rattle_13 = Json2KeyWord<bool>(m_defaults, "rattle_13");
+        m_rattle_12 = m_config.get<bool>("rattle_12");
+        m_rattle_13 = m_config.get<bool>("rattle_13");
 
         // m_coupling = m_dT;
-        m_rattle = Json2KeyWord<int>(m_defaults, "rattle");
+        m_rattle = m_config.get<int>("rattle");
         std::cout << "Using rattle to constrain bonds!" << std::endl;
         if (m_rattle_12)
             std::cout << "Using rattle to constrain 1,2 distances!" << std::endl;
@@ -272,7 +299,8 @@ void SimpleMD::LoadControlJson()
         };
     }
 
-    if (Json2KeyWord<bool>(m_defaults, "cleanenergy")) {
+    // Claude Generated 2025: Energy Calculator Selection
+    if (m_config.get<bool>("cleanenergy", false)) {  // Not in PARAM block - legacy
         Energy = [=]() -> double {
             return this->CleanEnergy();
         };
@@ -284,48 +312,58 @@ void SimpleMD::LoadControlJson()
         std::cout << "Energy Calculator will NOT be set up for each step! Fast energy calculation! This is the default way and should not be changed unless the energy and gradient calculation are unstable (happens with GFN2 and solvation)." << std::endl;
     }
 
-    if (Json2KeyWord<std::string>(m_defaults, "wall") == "spheric") {
-        if (Json2KeyWord<std::string>(m_defaults, "wall_type") == "logfermi") {
-            m_wall_type = 1;
-            WallPotential = [=]() -> double {
-                this->m_wall_potential = this->ApplySphericLogFermiWalls();
-                return m_wall_potential;
-            };
-        } else if (Json2KeyWord<std::string>(m_defaults, "wall_type") == "harmonic") {
-            m_wall_type = 1;
-            WallPotential = [=]() -> double {
-                this->m_wall_potential = this->ApplySphericHarmonicWalls();
-                return m_wall_potential;
-            };
-        } else {
-            std::cout << "Did not understand wall potential input. Exit now!" << std::endl;
-            exit(1);
+    // Claude Generated 2025: Wall Potential Parameters - Enum-based selection
+    std::string wall_geom_str = m_config.get<std::string>("wall_type");
+    std::string wall_pot_str = m_config.get<std::string>("wall_potential");
+
+    auto geom_it = wall_geometry_map.find(wall_geom_str);
+    auto pot_it = wall_potential_map.find(wall_pot_str);
+
+    WallGeometry wall_geom = (geom_it != wall_geometry_map.end()) ? geom_it->second : WallGeometry::None;
+    WallPotentialType wall_pot = (pot_it != wall_potential_map.end()) ? pot_it->second : WallPotentialType::Harmonic;
+
+    if (wall_geom == WallGeometry::Spheric) {
+        switch (wall_pot) {
+            case WallPotentialType::LogFermi:
+                m_wall_type = 1;
+                WallPotential = [=]() -> double {
+                    this->m_wall_potential = this->ApplySphericLogFermiWalls();
+                    return m_wall_potential;
+                };
+                break;
+            case WallPotentialType::Harmonic:
+                m_wall_type = 1;
+                WallPotential = [=]() -> double {
+                    this->m_wall_potential = this->ApplySphericHarmonicWalls();
+                    return m_wall_potential;
+                };
+                break;
         }
         std::cout << "Setting up spherical potential" << std::endl;
 
-    } else if (Json2KeyWord<std::string>(m_defaults, "wall") == "rect") {
-        if (Json2KeyWord<std::string>(m_defaults, "wall_type") == "logfermi") {
-            m_wall_type = 2;
-            WallPotential = [=]() -> double {
-                this->m_wall_potential = this->ApplyRectLogFermiWalls();
-                return m_wall_potential;
-            };
-        } else if (Json2KeyWord<std::string>(m_defaults, "wall_type") == "harmonic") {
-            m_wall_type = 2;
-            WallPotential = [=]() -> double {
-                this->m_wall_potential = this->ApplyRectHarmonicWalls();
-                return m_wall_potential;
-            };
-
-        } else {
-            std::cout << "Did not understand wall potential input. Exit now!" << std::endl;
-            exit(1);
+    } else if (wall_geom == WallGeometry::Rect) {
+        switch (wall_pot) {
+            case WallPotentialType::LogFermi:
+                m_wall_type = 2;
+                WallPotential = [=]() -> double {
+                    this->m_wall_potential = this->ApplyRectLogFermiWalls();
+                    return m_wall_potential;
+                };
+                break;
+            case WallPotentialType::Harmonic:
+                m_wall_type = 2;
+                WallPotential = [=]() -> double {
+                    this->m_wall_potential = this->ApplyRectHarmonicWalls();
+                    return m_wall_potential;
+                };
+                break;
         }
         std::cout << "Setting up rectangular potential" << std::endl;
-    } else
+    } else {
         WallPotential = [=]() -> double {
             return 0;
         };
+    }
     m_rm_COM_step = static_cast<int>(m_rm_COM / m_dT);
 }
 
@@ -806,16 +844,17 @@ void SimpleMD::InitialiseWalls()
     { "wall_y_max", 0},
     { "wall_z_min", 0},
     { "wall_z_max", 0},*/
-    m_wall_spheric_radius = Json2KeyWord<double>(m_defaults, "wall_spheric_radius");
-    m_wall_temp = Json2KeyWord<double>(m_defaults, "wall_temp");
-    m_wall_beta = Json2KeyWord<double>(m_defaults, "wall_beta");
+    // Claude Generated 2025: Wall Boundary Parameters
+    m_wall_spheric_radius = m_config.get<double>("wall_radius");
+    m_wall_temp = m_config.get<double>("wall_temp");
+    m_wall_beta = m_config.get<double>("wall_beta");
 
-    m_wall_x_min = Json2KeyWord<double>(m_defaults, "wall_x_min");
-    m_wall_x_max = Json2KeyWord<double>(m_defaults, "wall_x_max");
-    m_wall_y_min = Json2KeyWord<double>(m_defaults, "wall_y_min");
-    m_wall_y_max = Json2KeyWord<double>(m_defaults, "wall_y_max");
-    m_wall_z_min = Json2KeyWord<double>(m_defaults, "wall_z_min");
-    m_wall_z_max = Json2KeyWord<double>(m_defaults, "wall_z_max");
+    m_wall_x_min = m_config.get<double>("wall_x_min");
+    m_wall_x_max = m_config.get<double>("wall_x_max");
+    m_wall_y_min = m_config.get<double>("wall_y_min");
+    m_wall_y_max = m_config.get<double>("wall_y_max");
+    m_wall_z_min = m_config.get<double>("wall_z_min");
+    m_wall_z_max = m_config.get<double>("wall_z_max");
     // Claude Generated: Intelligent auto-sizing - only when boundaries are undefined or invalid
     double radius = 0;
     bool auto_configured = false;
@@ -997,8 +1036,9 @@ void SimpleMD::InitialiseWalls()
         }
     }
     // Claude Generated: Store wall configuration info for PrintStatus() display
-    m_wall_geometry = Json2KeyWord<std::string>(m_defaults, "wall");
-    m_wall_potential_type = Json2KeyWord<std::string>(m_defaults, "wall_type");
+    // Claude Generated 2025: Wall Configuration
+    m_wall_geometry = m_config.get<std::string>("wall_type");
+    m_wall_potential_type = m_config.get<std::string>("wall_potential");
     m_wall_auto_configured = auto_configured;
 
     // Calculate molecular density within wall boundaries
@@ -1397,19 +1437,33 @@ void SimpleMD::start()
 
     std::vector<json> states;
 
-    if (m_thermostat == "csvr") {
-        fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Canonical sampling through velocity rescaling (CSVR) Thermostat\nJ. Chem. Phys. 126, 014101 (2007) - DOI: 10.1063/1.2408420\n\n");
-        ThermostatFunction = [this] { CSVR(); };
-    } else if (m_thermostat == "berendson") {
-        fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Berendson Thermostat\nJ. Chem. Phys. 81, 3684 (1984) - DOI: 10.1063/1.448118\n\n");
-        ThermostatFunction = [this] { Berendson(); };
-    } else if (m_thermostat == "anderson") {
-        fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Anderson Thermostat\n ... \n\n");
-        ThermostatFunction = [this] { Anderson(); };
-    } else if (m_thermostat == "nosehover") {
-        fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Nosé-Hoover-Chain Thermostat\n ... \n\n");
-        ThermostatFunction = [this] { NoseHover(); };
-    } else {
+    // Claude Generated 2025: Thermostat selection - Enum-based switch
+    auto thermo_it = thermostat_map.find(m_thermostat);
+    ThermostatType thermo = (thermo_it != thermostat_map.end()) ? thermo_it->second : ThermostatType::CSVR;
+
+    switch (thermo) {
+        case ThermostatType::CSVR:
+            fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Canonical sampling through velocity rescaling (CSVR) Thermostat\nJ. Chem. Phys. 126, 014101 (2007) - DOI: 10.1063/1.2408420\n\n");
+            ThermostatFunction = [this] { CSVR(); };
+            break;
+        case ThermostatType::Berendsen:
+            fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Berendsen Thermostat\nJ. Chem. Phys. 81, 3684 (1984) - DOI: 10.1063/1.448118\n\n");
+            ThermostatFunction = [this] { Berendson(); };
+            break;
+        case ThermostatType::Anderson:
+            fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Anderson Thermostat\n ... \n\n");
+            ThermostatFunction = [this] { Anderson(); };
+            break;
+        case ThermostatType::NoseHover:
+            fmt::print(fg(fmt::color::green) | fmt::emphasis::bold, "\nUsing Nosé-Hoover-Chain Thermostat\n ... \n\n");
+            ThermostatFunction = [this] { NoseHover(); };
+            break;
+        case ThermostatType::None:
+            // No thermostat
+            break;
+    }
+
+    if (thermo == ThermostatType::None) {
         ThermostatFunction = [this] { None(); };
         std::cout << "No Thermostat applied\n"
                   << std::endl;

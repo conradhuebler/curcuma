@@ -39,6 +39,8 @@
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #include "curcumamethod.h"
+#include "src/core/parameter_macros.h"  // Claude Generated - For PARAM macro definitions
+#include "src/core/config_manager.h"    // Claude Generated - Modern parameter access layer
 
 struct BiasStructure {
     Geometry geometry;
@@ -124,92 +126,34 @@ private:
     bool m_wtmtd = false, m_nocolvarfile = false, m_nohillsfile = false;
 };
 
-static json CurcumaMDJson{
-    { "writeXYZ", true },
-    { "printOutput", true },
-    { "MaxTime", 5000 },
-    { "T", 298.15 },
-    { "dt", 1 }, // single step in fs
-    { "rm_COM", 100 }, // remove translation and rotation every x fs
-    { "charge", 0 },
-    { "Spin", 0 },
-    { "rmrottrans", 0 },
-    { "nocenter", false },
-    { "COM", false },
-    { "dump", 50 },
-    { "print", 1000 },
-    { "unique", false }, // TODO unused?
-    { "rmsd", 1.5 },
-    { "opt", false },
-    { "hmass", 1 },
-    { "velo", 1 },
-    { "threads", 1 },
-    { "rescue", false },
-    { "coupling", 10 },
-    { "MaxTopoDiff", 15 },
-    { "impuls", 0 },
-    { "method", "uff" },
-    { "impuls_scaling", 0.75 },
-    { "writeinit", false },
-    { "initfile", "none" },
-    { "norestart", false },
-    { "writerestart", 1000 },
-    { "rattle", false },
-    { "rattle_12", true },
-    { "rattle_13", false },
-    { "rattle_tol_12", 1e-1 },
-    { "rattle_tol_13", 2 },
-    { "rattle_maxiter", 50 },
-    { "rattle_dynamic_tol", false },
-    { "rattle_dynamic_tol_iter", 100 },
-    { "rattle_max", 10 },
-    { "rattle_min", 1e-4 },
-    { "thermostat", "csvr" }, // can be csvr (default), berendson, none, anderson or nosehover
-    { "respa", 1 },
-    { "dipole", false },
-    { "scaling_json", "none" },
-    { "seed", 1 },
-    { "cleanenergy", false },
-    { "wall", "none" }, // can be spheric or rect
-    { "wall_type", "harmonic" }, // can be logfermi or harmonic
-    { "wall_spheric_radius", 0 },
-    { "wall_xl", 0 }, // TODO unused?
-    { "wall_yl", 0 }, // TODO unused?
-    { "wall_zl", 0 }, // TODO unused?
-    { "wall_x_min", 0 },
-    { "wall_x_max", 0 },
-    { "wall_y_min", 0 },
-    { "wall_y_max", 0 },
-    { "wall_z_min", 0 },
-    { "wall_z_max", 0 },
-    { "wall_temp", 298.15 },
-    { "wall_beta", 6 },
-    { "wall_render", false },
-    { "mtd", false },
-    { "plumed", "plumed.dat" },
-    { "mtd_dT", -1 },
-    { "rmsd_mtd", false },
-    { "k_rmsd", 0.1 },
-    { "alpha_rmsd", 10 },
-    { "rmsd_rmsd", 1 },
-    { "mtd_steps", 1 },
-    { "max_rmsd_N", -1 },
-    { "rmsd_econv", 1e8 },
-    { "rmsd_DT", 1000000 },
-    { "wtmtd", false },
-    { "rmsd_ref_file", "none" },
-    { "rmsd_fix_structure", false },
-    { "rmsd_atoms", "-1" },
-    { "chainlength", 3 },
-    { "anderson", 0.001 },
-    { "noCOLVARfile", false },
-    { "noHILSfile", false },
+// Claude Generated 2025: CurcumaMDJson removed - replaced by ParameterRegistry + ConfigManager
+// Legacy 80-line static JSON object removed - all defaults now managed through Parameter Registry System
 
+// Claude Generated 2025: Type-safe thermostat selection
+enum class ThermostatType {
+    Berendsen,
+    Anderson,
+    NoseHover,
+    CSVR,
+    None
+};
+
+// Claude Generated 2025: Type-safe wall geometry
+enum class WallGeometry {
+    None,
+    Spheric,
+    Rect
+};
+
+// Claude Generated 2025: Type-safe wall potential
+enum class WallPotentialType {
+    LogFermi,
+    Harmonic
 };
 
 class SimpleMD : public CurcumaMethod {
 public:
-    SimpleMD(const json& controller, bool silent);
+    SimpleMD(const json& controller = json(), bool silent = true);  // Claude Generated 2025: Default to empty JSON, ParameterRegistry provides defaults
     ~SimpleMD();
 
     inline void setMolecule(const Molecule& molecule)
@@ -322,6 +266,7 @@ private:
     std::vector<Position> m_curr_dipoles;
     std::vector<int> m_atomtype;
     Molecule m_molecule, m_reference, m_target, m_rmsd_mtd_molecule;
+    ConfigManager m_config;  // Claude Generated - Modern type-safe parameter access
     bool m_initialised = false, m_restart = false, m_writeUnique = true, m_opt = false, m_rescue = false, m_writeXYZ = true, m_writeinit = false, m_norestart = false;
     int m_rmrottrans = 0, m_rattle_maxiter = 100;
     bool m_nocenter = false;
@@ -412,6 +357,81 @@ private:
     int m_wall_violation_count = 0;
     int m_wall_violation_last_reported = 0;
     double m_molecular_density = 0.0; // molecules/Å³
+
+    // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
+    // Claude Generated - Parameter Registry Integration (October 2025)
+    BEGIN_PARAMETER_DEFINITION(simplemd)
+
+    // --- Basic Simulation Parameters ---
+    PARAM(method, String, "uff", "Energy calculation method (e.g., uff, gfn2).", "Basic", {})
+    PARAM(temperature, Double, 298.15, "Target temperature in Kelvin.", "Basic", {"T"})
+    PARAM(time_step, Double, 1.0, "Integration time step in femtoseconds.", "Basic", {"dt"})
+    PARAM(max_time, Double, 1000.0, "Maximum simulation time in femtoseconds.", "Basic", {"MaxTime"})
+    PARAM(charge, Int, 0, "Total charge of the system.", "Basic", {})
+    PARAM(spin, Int, 1, "Total spin multiplicity of the system.", "Basic", {"Spin"})
+    PARAM(seed, Int, -1, "Random seed (-1: time, 0: auto).", "Basic", {})
+    PARAM(threads, Int, 1, "Number of parallel threads.", "Basic", {})
+
+    // --- Thermostat ---
+    PARAM(thermostat, String, "csvr", "Thermostat type: berendsen|anderson|nosehover|csvr|none.", "Thermostat", {})
+    PARAM(coupling, Double, 10.0, "Thermostat coupling time in fs.", "Thermostat", {})
+    PARAM(anderson_probability, Double, 0.001, "Anderson thermostat collision probability.", "Thermostat", {"anderson"})
+    PARAM(chain_length, Int, 3, "Chain length for Nosé-Hoover thermostat.", "Thermostat", {"chainlength"})
+
+    // --- System Control ---
+    PARAM(remove_com_motion, Double, 100.0, "Remove translation/rotation every N fs.", "System", {"rm_COM"})
+    PARAM(remove_com_mode, Int, 3, "Removal mode (0:none, 1:trans, 2:rot, 3:both).", "System", {"rmrottrans"})
+    PARAM(no_center, Bool, false, "Disable centering of the molecule at the origin.", "System", {"nocenter"})
+    PARAM(use_com, Bool, false, "Use center of mass (otherwise geometric center).", "System", {"COM"})
+    PARAM(hydrogen_mass, Int, 1, "Hydrogen mass scaling factor for HMR.", "System", {"hmass"})
+    PARAM(initial_velocity_scale, Double, 1.0, "Initial velocity scaling factor.", "System", {"velo"})
+
+    // --- Output & Restart ---
+    PARAM(dump_frequency, Int, 50, "Save coordinates every N steps.", "Output", {"dump"})
+    PARAM(print_frequency, Int, 1000, "Print status every N steps.", "Output", {"print"})
+    PARAM(write_xyz, Bool, true, "Write trajectory to XYZ file.", "Output", {"writeXYZ"})
+    PARAM(write_initial_state, Bool, false, "Write initial conditions to a .init.json file.", "Output", {"writeinit"})
+    PARAM(restart_file, String, "none", "Restart file to load initial state from.", "Restart", {"initfile"})
+    PARAM(write_restart_frequency, Int, 1000, "Write restart file every N steps.", "Restart", {"writerestart"})
+    PARAM(no_restart, Bool, false, "Disable automatic loading from restart files.", "Restart", {"norestart"})
+
+    // --- RATTLE Constraints ---
+    PARAM(rattle, Int, 0, "RATTLE constraint algorithm (0:off, 1:on, 2:H-only).", "RATTLE", {})
+    PARAM(rattle_12, Bool, true, "Constrain 1-2 bond distances.", "RATTLE", {})
+    PARAM(rattle_13, Bool, false, "Constrain 1-3 distances (angles).", "RATTLE", {})
+    PARAM(rattle_tol_12, Double, 1e-1, "Tolerance for 1-2 constraints.", "RATTLE", {})
+    PARAM(rattle_tol_13, Double, 2.0, "Tolerance for 1-3 constraints.", "RATTLE", {})
+    PARAM(rattle_max_iterations, Int, 50, "Maximum RATTLE iterations.", "RATTLE", {"rattle_maxiter"})
+
+    // --- Wall Potentials ---
+    PARAM(wall_type, String, "none", "Wall type: none|spheric|rect.", "Walls", {"wall"})
+    PARAM(wall_potential, String, "harmonic", "Wall potential function: logfermi|harmonic.", "Walls", {"wall_type"})
+    PARAM(wall_radius, Double, 0.0, "Radius for spherical wall (Å). Auto-sized if 0.", "Walls", {"wall_spheric_radius"})
+    PARAM(wall_temp, Double, 298.15, "Wall temperature/strength in K.", "Walls", {})
+    PARAM(wall_beta, Double, 6.0, "Steepness parameter for wall potential.", "Walls", {})
+    PARAM(wall_x_min, Double, 0.0, "Min x-boundary for rectangular wall (Å).", "Walls", {})
+    PARAM(wall_x_max, Double, 0.0, "Max x-boundary for rectangular wall (Å).", "Walls", {})
+    PARAM(wall_y_min, Double, 0.0, "Min y-boundary for rectangular wall (Å).", "Walls", {})
+    PARAM(wall_y_max, Double, 0.0, "Max y-boundary for rectangular wall (Å).", "Walls", {})
+    PARAM(wall_z_min, Double, 0.0, "Min z-boundary for rectangular wall (Å).", "Walls", {})
+    PARAM(wall_z_max, Double, 0.0, "Max z-boundary for rectangular wall (Å).", "Walls", {})
+
+    // --- Metadynamics (PLUMED) ---
+    PARAM(mtd, Bool, false, "Enable PLUMED metadynamics.", "Metadynamics", {})
+    PARAM(plumed_file, String, "plumed.dat", "PLUMED input file.", "Metadynamics", {"plumed"})
+
+    // --- RMSD-based Metadynamics (Internal) ---
+    PARAM(rmsd_mtd, Bool, false, "Enable internal RMSD-based metadynamics.", "RMSD-MTD", {})
+    PARAM(rmsd_mtd_k, Double, 0.1, "Force constant for RMSD bias.", "RMSD-MTD", {"k_rmsd"})
+    PARAM(rmsd_mtd_alpha, Double, 10.0, "Width parameter for RMSD Gaussians.", "RMSD-MTD", {"alpha_rmsd"})
+    PARAM(rmsd_mtd_pace, Int, 1, "Add a new bias potential every N steps.", "RMSD-MTD", {"mtd_steps"})
+    PARAM(rmsd_mtd_max_gaussians, Int, -1, "Maximum number of stored bias structures.", "RMSD-MTD", {"max_rmsd_N"})
+    PARAM(rmsd_mtd_ref_file, String, "none", "File with reference structures for RMSD-MTD.", "RMSD-MTD", {"rmsd_ref_file"})
+    PARAM(rmsd_mtd_atoms, String, "-1", "Atom indices to use for RMSD calculation.", "RMSD-MTD", {"rmsd_atoms"})
+    PARAM(rmsd_mtd_dt, Double, 1000000.0, "RMSD-MTD bias deposition time.", "RMSD-MTD", {"rmsd_DT"})
+
+    END_PARAMETER_DEFINITION
+    // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^
 };
 
 class MDThread : public CxxThread {

@@ -6,8 +6,9 @@ Format: One line per change, newest first.
 
 ## October 2025
 
+- **SimpleMD ConfigManager Migration Complete**: 82 Json2KeyWord calls eliminated (LARGEST migration!), CurcumaMDJson removed, ~350 LOC boilerplate eliminated, 48 parameters defined, 100% backward compatible
 - **RMSD ConfigManager Migration Complete**: 33 Json2KeyWord calls eliminated, RMSDJson removed, enum-based method selection, simplified element parsing, 100% backward compatible via aliases, build successful
-- **ConfigManager Production-Ready**: Type-safe parameter access layer implemented (analysis.cpp proof-of-concept: 37 calls ’ elegant get<T>())
+- **ConfigManager Production-Ready**: Type-safe parameter access layer implemented (analysis.cpp proof-of-concept: 37 calls ï¿½ elegant get<T>())
 - **Universal Parameter Registry System Complete**: Macro-based parameter definitions, auto-generation at build time, 25 parameters in analysis module
 - **Complete Trajectory Analysis Output**: CSV implementation, bracket notation support, stream refactoring for flexible output
 - **Unified Molecular Analysis with Trajectory Statistics**: Moving averages, cumulative statistics, multi-metric tracking
