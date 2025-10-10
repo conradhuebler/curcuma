@@ -38,6 +38,17 @@ return m_method->calculateEnergy(gradient);
 - **Geometry Operations**: Distance, angle calculations, structure manipulation
 - **Performance Note**: Large molecules (>1000 atoms) may need memory optimization
 
+### Configuration Management System
+- **ConfigManager** (`config_manager.h/cpp`) - Claude Generated 2025
+  - **Purpose**: Modern type-safe parameter access, eliminates Json2KeyWord boilerplate
+  - **Architecture**: Wrapper around ParameterRegistry with hierarchical dot notation support
+  - **API**: `config.get<T>("key")` with case-insensitive lookup and default value support
+  - **Features**: Automatic default merging, hierarchical keys (`"topological.save_image"`), type safety
+  - **Status**: Production-ready, proof-of-concept in analysis.cpp (37 Json2KeyWord calls eliminated)
+- **ParameterRegistry** (`parameter_registry.h/cpp`) - Claude Generated 2025
+  - **Backend**: Stores all module parameters from build-time extraction
+  - **Used By**: ConfigManager for default values and validation
+
 ### Force Field System
 - **ForceField**: Main engine with universal JSON parameter caching (96% speedup) + **CurcumaLogger verbosity**
 - **ForceFieldGenerator**: Parameter generation with **progress tracking and timing**
@@ -51,6 +62,8 @@ core/
 ├── energycalculator.cpp        # NEW: Unified polymorphic dispatcher
 ├── molecule.cpp                # Core molecular data structures
 ├── curcuma_logger.cpp          # Universal logging system
+├── config_manager.cpp/h        # NEW: Modern parameter access layer (Oct 2025)
+├── parameter_registry.cpp/h    # Parameter registry backend (Oct 2025)
 ├── energy_calculators/         # NEW: All computational methods consolidated here
 │   ├── computational_method.h      # Base interface for all methods
 │   ├── method_factory.cpp          # Priority-based method creation

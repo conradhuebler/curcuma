@@ -234,6 +234,28 @@ curcuma/
 - **Breaking Change**: Requires **snake_case** parameter names (consistent, modern standard)
 - **Build Integration**: CMake dependency: headers → parser → generated registry → compilation
 
+### 🔧 **ConfigManager - Modern Parameter Access Layer** (October 2025)
+- **Status**: ✅ **PHASE 1 & 2 COMPLETED** - Core implementation + analysis.cpp proof-of-concept
+- **Purpose**: Eliminate JSON boilerplate, replace 395 Json2KeyWord calls across codebase
+- **Architecture**: Type-safe wrapper around ParameterRegistry with hierarchical access
+- **Key Features**:
+  - Type-safe access: `config.get<int>("max_iterations")`
+  - Hierarchical dot notation: `config.get<bool>("topological.save_image")`
+  - Case-insensitive key lookup (Json2KeyWord compatibility)
+  - Automatic default merging from ParameterRegistry
+  - Default value support: `config.get<int>("window", 10)`
+- **Migration Example**:
+  ```cpp
+  // Old (37 calls in analysis.cpp):
+  std::string format = Json2KeyWord<std::string>(m_config, "output_format");
+
+  // New (elegant, type-safe):
+  std::string format = m_config.get<std::string>("output_format");
+  ```
+- **Proof-of-Concept**: analysis.cpp successfully migrated, all 37 Json2KeyWord calls replaced
+- **Next Steps**: Migrate remaining 358 Json2KeyWord calls in 16 other modules
+- **Benefits**: Massive boilerplate reduction, better type safety, hierarchical parameter notation
+
 ### 🚀 **Complete EnergyCalculator Architecture Refactoring**
 - **Status**: ✅ **COMPLETED** - Big-Bang refactoring successful
 - **New Design**: Polymorphic `ComputationalMethod` interface replaces old SwitchMethod

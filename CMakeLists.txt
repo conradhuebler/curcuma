@@ -273,6 +273,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/orcainterface.cpp
         src/core/imagewriter.cpp
         src/core/parameter_registry.cpp
+        src/core/config_manager.cpp
 )
 
 set(curcuma_cap_SRC

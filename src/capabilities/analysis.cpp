@@ -22,6 +22,7 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/elements.h"
 #include "src/core/units.h"
+#include "src/core/parameter_registry.h"
 #include "trajectory_statistics.h"
 
 #include <algorithm>
@@ -29,7 +30,8 @@
 #include <sstream>
 
 UnifiedAnalysis::UnifiedAnalysis(const json& controller, bool silent)
-    : CurcumaMethod(UnifiedAnalysisJson, controller, silent)
+    : CurcumaMethod(ParameterRegistry::getInstance().getDefaultJson("analysis"), controller, silent)
+    , m_config("analysis", controller)  // Claude Generated 2025: ConfigManager accepts full controller
     , m_silent(silent)
 {
     // Claude Generated 2025: Analysis needs verbosity >=2 for output
@@ -40,22 +42,9 @@ UnifiedAnalysis::UnifiedAnalysis(const json& controller, bool silent)
     }
 
     UpdateController(controller);
-    m_config = MergeJson(UnifiedAnalysisJson, controller);
 
-    // FIX: Explicitly override CLI parameters from nested controller - Claude Generated 2025
-    // CLI arguments are nested: controller["analysis"][param]
-    // MergeJson doesn't correctly override these nested values
-    if (controller.contains("analysis")) {
-        if (controller["analysis"].contains("metrics")) {
-            m_config["metrics"] = controller["analysis"]["metrics"];
-        }
-        if (controller["analysis"].contains("statistics")) {
-            m_config["statistics"] = controller["analysis"]["statistics"];
-        }
-        if (controller["analysis"].contains("window")) {
-            m_config["window"] = controller["analysis"]["window"];
-        }
-    }
+    // Claude Generated 2025: Legacy JSON export for TDAEngine compatibility
+    m_config_legacy = m_config.exportConfig();
 }
 
 UnifiedAnalysis::~UnifiedAnalysis()
@@ -141,9 +130,9 @@ void UnifiedAnalysis::start()
     results["timesteps"] = json::array();
 
     // Parse statistics configuration - Claude Generated 2025
-    std::string metrics_str = Json2KeyWord<std::string>(m_config, "metrics");
-    std::string statistics_mode = Json2KeyWord<std::string>(m_config, "statistics");
-    int window_size = Json2KeyWord<int>(m_config, "window");
+    std::string metrics_str = m_config.get<std::string>("metrics");
+    std::string statistics_mode = m_config.get<std::string>("statistics");
+    int window_size = m_config.get<int>("window");
 
     std::vector<std::string> enabled_metrics = parseMetricsList(metrics_str);
     bool enable_cumulative = (statistics_mode == "cumulative" || statistics_mode == "all");
@@ -245,8 +234,8 @@ json UnifiedAnalysis::analyzeMolecule(const Molecule& mol, int timestep)
 
     // Claude Generated 2025: Use metrics parameter for selective computation
     // Check if metrics parameter exists, otherwise fall back to properties for backward compatibility
-    std::string metrics_str = Json2KeyWord<std::string>(m_config, "metrics");
-    std::string properties = Json2KeyWord<std::string>(m_config, "properties");
+    std::string metrics_str = m_config.get<std::string>("metrics");
+    std::string properties = m_config.get<std::string>("properties");
 
     // Determine what to compute based on metrics (preferred) or properties (fallback)
     // Claude Generated 2025: ALWAYS compute basic properties (mass, atom count, etc.)
@@ -276,8 +265,11 @@ json UnifiedAnalysis::analyzeMolecule(const Molecule& mol, int timestep)
         // Properties-based computation (old way for backward compatibility)
         compute_geometric = (properties == "all" || properties == "geometric");
         compute_polymer = (properties == "all" || properties == "cg" || properties == "polymer");
-        compute_topology = (properties == "all" || properties == "topology");
     }
+
+    // Topology computation is independent of metrics/properties - Claude Generated 2025
+    // Check both properties setting AND if any topological options are enabled
+    compute_topology = (properties == "all" || properties == "topology");
 
     // Calculate only the needed properties - Claude Generated 2025
     if (compute_basic) {
@@ -294,14 +286,13 @@ json UnifiedAnalysis::analyzeMolecule(const Molecule& mol, int timestep)
 
     // Calculate topological properties if requested
     if (compute_topology) {
-        bool enable_ripser = Json2KeyWord<bool>(m_config, "ripser");
+        bool enable_ripser = m_config.get<bool>("ripser");
 
-        // Also enable if any enhanced topological options are set
-        bool enhanced_tda = m_config.contains("topological") &&
-                           (m_config["topological"].value("save_distance_matrix", false) ||
-                            m_config["topological"].value("save_persistence_pairs", false) ||
-                            m_config["topological"].value("save_persistence_diagram", false) ||
-                            m_config["topological"].value("save_persistence_image", false));
+        // Also enable if any enhanced topological options are set - Claude Generated 2025
+        bool enhanced_tda = (m_config.get<bool>("topological.save_distance_matrix") ||
+                            m_config.get<bool>("topological.save_persistence_pairs") ||
+                            m_config.get<bool>("topological.save_persistence_diagram") ||
+                            m_config.get<bool>("topological.save_persistence_image"));
 
 
         if (enable_ripser || enhanced_tda) {
@@ -417,141 +408,154 @@ json UnifiedAnalysis::calculateTopologicalProperties(const Molecule& mol)
     json topology;
 
     try {
-        // Check if enhanced topological analysis is requested
-        bool enhanced_tda = m_config.contains("topological") &&
-                           (m_config["topological"].value("save_distance_matrix", false) ||
-                            m_config["topological"].value("save_persistence_pairs", false) ||
-                            m_config["topological"].value("save_persistence_diagram", false) ||
-                            m_config["topological"].value("save_persistence_image", false));
+        // Check if enhanced topological analysis is requested - Claude Generated 2025
+        bool enhanced_tda = (m_config.get<bool>("topological.save_distance_matrix") ||
+                            m_config.get<bool>("topological.save_persistence_pairs") ||
+                            m_config.get<bool>("topological.save_persistence_diagram") ||
+                            m_config.get<bool>("topological.save_persistence_image"));
 
         // Parse atom selection if provided - Claude Generated
         std::vector<int> selected_indices;
-        if (m_config.contains("topological") && m_config["topological"].contains("atom_selection")) {
-            std::string atom_selection = m_config["topological"]["atom_selection"];
-            if (!atom_selection.empty()) {
-                try {
-                    selected_indices = Tools::ParseStringToVector(atom_selection);
+        std::string atom_selection = m_config.get<std::string>("topological.atom_selection");
+        if (!atom_selection.empty()) {
+            try {
+                selected_indices = Tools::ParseStringToVector(atom_selection);
 
-                    // Validate indices against molecule size - Claude Generated
-                    if (!selected_indices.empty()) {
-                        std::vector<int> valid_indices;
-                        std::vector<int> invalid_indices;
+                // Validate indices against molecule size - Claude Generated
+                if (!selected_indices.empty()) {
+                    std::vector<int> valid_indices;
+                    std::vector<int> invalid_indices;
 
-                        for (int idx : selected_indices) {
-                            if (idx >= 0 && idx < mol.AtomCount()) {
-                                valid_indices.push_back(idx);
-                            } else {
-                                invalid_indices.push_back(idx);
-                            }
-                        }
-
-                        if (!invalid_indices.empty() && !m_silent) {
-                            std::string invalid_str = "";
-                            for (size_t i = 0; i < invalid_indices.size(); ++i) {
-                                if (i > 0) invalid_str += ",";
-                                invalid_str += std::to_string(invalid_indices[i]);
-                            }
-                            CurcumaLogger::warn_fmt("Ignoring invalid atom indices (molecule has {} atoms): {}",
-                                                    mol.AtomCount(), invalid_str);
-                        }
-
-                        selected_indices = valid_indices;
-
-                        if (!m_silent) {
-                            if (!selected_indices.empty()) {
-                                // Detailed selection feedback - Claude Generated
-                                std::string indices_str = "[";
-                                std::map<int, int> element_count;
-                                double min_dist = std::numeric_limits<double>::max();
-                                double max_dist = 0.0;
-
-                                // Build indices string and collect element statistics
-                                for (size_t i = 0; i < selected_indices.size(); ++i) {
-                                    if (i > 0) indices_str += ",";
-                                    int idx = selected_indices[i];
-                                    indices_str += std::to_string(idx);
-
-                                    // Count elements
-                                    int element = mol.Atom(idx).first;
-                                    element_count[element]++;
-
-                                    // Calculate spatial extent
-                                    for (size_t j = i + 1; j < selected_indices.size(); ++j) {
-                                        double dist = mol.CalculateDistance(selected_indices[i], selected_indices[j]);
-                                        min_dist = std::min(min_dist, dist);
-                                        max_dist = std::max(max_dist, dist);
-                                    }
-                                }
-                                indices_str += "]";
-
-                                // Build element composition string
-                                std::string elements_str;
-                                for (const auto& elem : element_count) {
-                                    if (!elements_str.empty()) elements_str += ", ";
-                                    std::string symbol = (elem.first > 0 && elem.first < Elements::ElementAbbr.size()) ? Elements::ElementAbbr[elem.first] : "X";
-                                    elements_str += symbol + "(" + std::to_string(elem.second) + ")";
-                                }
-
-                                // Main feedback message
-                                double percentage = (100.0 * selected_indices.size()) / mol.AtomCount();
-                                CurcumaLogger::success_fmt("✓ Atom selection: {}/{} atoms ({:.1f}%) selected: {}",
-                                                         selected_indices.size(), mol.AtomCount(), percentage, indices_str);
-
-                                // Additional details
-                                if (selected_indices.size() > 1 && max_dist > 0.0) {
-                                    CurcumaLogger::info_fmt("  Elements: {} | Spatial extent: {:.2f} Å",
-                                                          elements_str, max_dist);
-                                } else if (selected_indices.size() == 1) {
-                                    CurcumaLogger::info_fmt("  Single atom: {} at index {}",
-                                                          (mol.Atom(selected_indices[0]).first > 0 && mol.Atom(selected_indices[0]).first < Elements::ElementAbbr.size()) ? Elements::ElementAbbr[mol.Atom(selected_indices[0]).first] : "X",
-                                                          selected_indices[0]);
-                                } else {
-                                    CurcumaLogger::info_fmt("  Elements: {}", elements_str);
-                                }
-
-                                // Helpful hints
-                                if (percentage < 10.0) {
-                                    CurcumaLogger::warn("  Small selection (<10%) - consider including more atoms for meaningful topology");
-                                } else if (percentage > 90.0) {
-                                    CurcumaLogger::info("  Large selection (>90%) - consider full molecule analysis");
-                                }
-
-                                // Hydrogen exclusion info
-                                bool has_hydrogen = false;
-                                for (int idx : selected_indices) {
-                                    if (mol.Atom(idx).first == 1) {
-                                        has_hydrogen = true;
-                                        break;
-                                    }
-                                }
-                                if (has_hydrogen && m_config.contains("topological") &&
-                                    m_config["topological"].value("exclude_hydrogen", false)) {
-                                    CurcumaLogger::info("  Note: Hydrogen atoms will be excluded from distance calculations");
-                                }
-
-                            } else {
-                                CurcumaLogger::warn("No valid atom indices found - using full molecule analysis");
-                            }
+                    for (int idx : selected_indices) {
+                        if (idx >= 0 && idx < mol.AtomCount()) {
+                            valid_indices.push_back(idx);
+                        } else {
+                            invalid_indices.push_back(idx);
                         }
                     }
-                } catch (const std::exception& e) {
+
+                    if (!invalid_indices.empty() && !m_silent) {
+                        std::string invalid_str = "";
+                        for (size_t i = 0; i < invalid_indices.size(); ++i) {
+                            if (i > 0) invalid_str += ",";
+                            invalid_str += std::to_string(invalid_indices[i]);
+                        }
+                        CurcumaLogger::warn_fmt("Ignoring invalid atom indices (molecule has {} atoms): {}",
+                                                mol.AtomCount(), invalid_str);
+                    }
+
+                    selected_indices = valid_indices;
+
                     if (!m_silent) {
-                        CurcumaLogger::error_fmt("Failed to parse atom selection '{}': {} - using full molecule analysis",
-                                                atom_selection, e.what());
-                        CurcumaLogger::info("  Syntax help: Use format \"1;5-10;15\" (semicolon-separated, dash for ranges)");
-                        CurcumaLogger::info("  Examples: \"0;2;4\" or \"1-5;10-15\" or \"0;3-7;12\"");
+                        if (!selected_indices.empty()) {
+                            // Detailed selection feedback - Claude Generated
+                            std::string indices_str = "[";
+                            std::map<int, int> element_count;
+                            double min_dist = std::numeric_limits<double>::max();
+                            double max_dist = 0.0;
+
+                            // Build indices string and collect element statistics
+                            for (size_t i = 0; i < selected_indices.size(); ++i) {
+                                if (i > 0) indices_str += ",";
+                                int idx = selected_indices[i];
+                                indices_str += std::to_string(idx);
+
+                                // Count elements
+                                int element = mol.Atom(idx).first;
+                                element_count[element]++;
+
+                                // Calculate spatial extent
+                                for (size_t j = i + 1; j < selected_indices.size(); ++j) {
+                                    double dist = mol.CalculateDistance(selected_indices[i], selected_indices[j]);
+                                    min_dist = std::min(min_dist, dist);
+                                    max_dist = std::max(max_dist, dist);
+                                }
+                            }
+                            indices_str += "]";
+
+                            // Build element composition string
+                            std::string elements_str;
+                            for (const auto& elem : element_count) {
+                                if (!elements_str.empty()) elements_str += ", ";
+                                std::string symbol = (elem.first > 0 && elem.first < Elements::ElementAbbr.size()) ? Elements::ElementAbbr[elem.first] : "X";
+                                elements_str += symbol + "(" + std::to_string(elem.second) + ")";
+                            }
+
+                            // Main feedback message
+                            double percentage = (100.0 * selected_indices.size()) / mol.AtomCount();
+                            CurcumaLogger::success_fmt("✓ Atom selection: {}/{} atoms ({:.1f}%) selected: {}",
+                                                     selected_indices.size(), mol.AtomCount(), percentage, indices_str);
+
+                            // Additional details
+                            if (selected_indices.size() > 1 && max_dist > 0.0) {
+                                CurcumaLogger::info_fmt("  Elements: {} | Spatial extent: {:.2f} Å",
+                                                      elements_str, max_dist);
+                            } else if (selected_indices.size() == 1) {
+                                CurcumaLogger::info_fmt("  Single atom: {} at index {}",
+                                                      (mol.Atom(selected_indices[0]).first > 0 && mol.Atom(selected_indices[0]).first < Elements::ElementAbbr.size()) ? Elements::ElementAbbr[mol.Atom(selected_indices[0]).first] : "X",
+                                                      selected_indices[0]);
+                            } else {
+                                CurcumaLogger::info_fmt("  Elements: {}", elements_str);
+                            }
+
+                            // Helpful hints
+                            if (percentage < 10.0) {
+                                CurcumaLogger::warn("  Small selection (<10%) - consider including more atoms for meaningful topology");
+                            } else if (percentage > 90.0) {
+                                CurcumaLogger::info("  Large selection (>90%) - consider full molecule analysis");
+                            }
+
+                            // Hydrogen exclusion info - Claude Generated 2025
+                            bool has_hydrogen = false;
+                            for (int idx : selected_indices) {
+                                if (mol.Atom(idx).first == 1) {
+                                    has_hydrogen = true;
+                                    break;
+                                }
+                            }
+                            if (has_hydrogen && m_config.get<bool>("topological.exclude_hydrogen")) {
+                                CurcumaLogger::info("  Note: Hydrogen atoms will be excluded from distance calculations");
+                            }
+
+                        } else {
+                            CurcumaLogger::warn("No valid atom indices found - using full molecule analysis");
+                        }
                     }
-                    selected_indices.clear();
                 }
+            } catch (const std::exception& e) {
+                if (!m_silent) {
+                    CurcumaLogger::error_fmt("Failed to parse atom selection '{}': {} - using full molecule analysis",
+                                            atom_selection, e.what());
+                    CurcumaLogger::info("  Syntax help: Use format \"1;5-10;15\" (semicolon-separated, dash for ranges)");
+                    CurcumaLogger::info("  Examples: \"0;2;4\" or \"1-5;10-15\" or \"0;3-7;12\"");
+                }
+                selected_indices.clear();
             }
         }
 
         if (enhanced_tda) {
-            // Use comprehensive TDA Engine for full dMatrix functionality
-            json tda_config = m_config["topological"];
+            // Use comprehensive TDA Engine for full dMatrix functionality - Claude Generated 2025
+            // Create TDA config using ConfigManager with elegant dot notation
+            json tda_config = {
+                {"save_distance_matrix", m_config.get<bool>("topological.save_distance_matrix")},
+                {"save_persistence_pairs", m_config.get<bool>("topological.save_persistence_pairs")},
+                {"save_persistence_diagram", m_config.get<bool>("topological.save_persistence_diagram")},
+                {"save_persistence_image", m_config.get<bool>("topological.save_persistence_image")},
+                {"exclude_bonds", m_config.get<bool>("topological.exclude_bonds")},
+                {"exclude_hydrogen", m_config.get<bool>("topological.exclude_hydrogen")},
+                {"print_elements", m_config.get<bool>("topological.print_elements")},
+                {"print_energy", m_config.get<bool>("topological.print_energy")},
+                {"image_format", m_config.get<std::string>("topological.image_format")},
+                {"colormap", m_config.get<std::string>("topological.colormap")},
+                {"resolution", m_config.get<std::string>("topological.resolution")},
+                {"post_processing", m_config.get<std::string>("topological.post_processing")},
+                {"temperature", m_config.get<double>("topological.temperature")},
+                {"damping", m_config.get<double>("topological.damping")},
+                {"preserve_structure", m_config.get<bool>("topological.preserve_structure")}
+            };
 
             // Set output prefix from filename if available
-            if (!m_filename.empty() && tda_config.find("output_prefix") == tda_config.end()) {
+            if (!m_filename.empty()) {
                 std::string prefix = m_filename;
                 // Remove extension
                 size_t lastdot = prefix.find_last_of(".");
@@ -610,11 +614,11 @@ json UnifiedAnalysis::calculateTopologicalProperties(const Molecule& mol)
 
         } else {
             // Basic topological analysis (original implementation)
-            PersistentDiagram pd(m_config);
+            PersistentDiagram pd(m_config_legacy);  // Legacy uses JSON
 
-            // Use atom selection if provided, otherwise use all atoms
+            // Use atom selection if provided, otherwise use all atoms - Claude Generated 2025
             if (!selected_indices.empty()) {
-                bool exclude_hydrogen = m_config["topological"].value("exclude_hydrogen", false);
+                bool exclude_hydrogen = m_config.get<bool>("topological.exclude_hydrogen");
                 pd.setDistanceMatrix(mol.LowerDistanceVector(exclude_hydrogen, selected_indices));
                 if (!m_silent) {
                     CurcumaLogger::info("Basic topological analysis with atom selection");
@@ -702,7 +706,7 @@ void UnifiedAnalysis::outputHumanToStream(const json& results, std::ostream& out
         enable_moving = cfg["enable_moving"].get<bool>();
     } else {
         // Fallback
-        std::string metrics_str = Json2KeyWord<std::string>(m_config, "metrics");
+        std::string metrics_str = m_config.get<std::string>("metrics");
         if (metrics_str.empty() || metrics_str == "none") {
             metrics_str = "gyration,rout,end2end";
         }
@@ -911,7 +915,7 @@ void UnifiedAnalysis::outputCSVToStream(const json& results, std::ostream& out)
         enable_moving = cfg["enable_moving"].get<bool>();
     } else {
         // Fallback
-        std::string metrics_str = Json2KeyWord<std::string>(m_config, "metrics");
+        std::string metrics_str = m_config.get<std::string>("metrics");
         if (metrics_str.empty() || metrics_str == "none") {
             metrics_str = "gyration,rout,end2end";
         }
@@ -1075,8 +1079,8 @@ void UnifiedAnalysis::outputCSVToStream(const json& results, std::ostream& out)
 
 void UnifiedAnalysis::outputResults(const json& results)
 {
-    std::string output_format = Json2KeyWord<std::string>(m_config, "output_format");
-    std::string output_file = Json2KeyWord<std::string>(m_config, "output_file");
+    std::string output_format = m_config.get<std::string>("output_format");
+    std::string output_file = m_config.get<std::string>("output_file");
 
     if (!output_file.empty()) {
         outputToFile(results, output_file);
@@ -1196,7 +1200,7 @@ void UnifiedAnalysis::outputToFile(const json& results, const std::string& filen
         return;
     }
 
-    std::string output_format = Json2KeyWord<std::string>(m_config, "output_format");
+    std::string output_format = m_config.get<std::string>("output_format");
 
     // Claude Generated 2025: Full format support with stream-based output
     if (output_format == "json") {

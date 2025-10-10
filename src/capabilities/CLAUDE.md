@@ -66,26 +66,48 @@ capabilities/
 ## Variable Section
 
 ### Parameter System Migration Status (October 2025)
-**Status**: ✅ Infrastructure complete, ongoing capability migration
+**Status**: ✅ Infrastructure complete, ConfigManager layer implemented, ongoing capability migration
 **Documentation**: [docs/PARAMETER_SYSTEM.md](../../docs/PARAMETER_SYSTEM.md) + [docs/PARAMETER_MIGRATION_GUIDE.md](../../docs/PARAMETER_MIGRATION_GUIDE.md)
 
+**ConfigManager Implementation** (October 2025):
+- ✅ **Core Implementation**: `src/core/config_manager.{h,cpp}` - Type-safe parameter access layer
+- ✅ **Proof-of-Concept**: analysis.cpp - 37 Json2KeyWord calls eliminated, hierarchical dot notation working
+- 🎯 **Goal**: Replace 395 Json2KeyWord calls across 17 files with elegant `config.get<T>()` API
+
+**Migration Pattern**:
+```cpp
+// Old approach (legacy):
+std::string format = Json2KeyWord<std::string>(m_config, "output_format");
+bool flag = Json2KeyWord<bool>(m_config, "topological_save_image");
+
+// New approach (ConfigManager):
+ConfigManager m_config("module", controller);
+std::string format = m_config.get<std::string>("output_format");
+bool flag = m_config.get<bool>("topological.save_image");  // hierarchical!
+```
+
 **Migrated Modules**:
-- ✅ **analysis** (25 parameters) - Complete, tested, production-ready reference implementation
+- ✅ **analysis** (25 parameters, 37 Json2KeyWord calls) - Complete with ConfigManager, production-ready reference
 
 **Pending Migration** (Priority Order):
-- ⏳ **casino** (~14 parameters) - Monte Carlo simulation, simple structure
-- ⏳ **simplemd** (~20 parameters) - MD simulation, has shared `temperature` parameter with casino
-- ⏳ **opt** (~15 parameters) - Critical optimization module
-- ⏳ **confscan** (~12 parameters) - Conformational scanning
-- ⏳ **hessian** (~10 parameters) - Second derivatives
-- ⏳ **rmsd** (~15 parameters) - Structure comparison, complex nested options
+- ⏳ **casino** (~14 parameters, 36 Json2KeyWord calls) - Monte Carlo simulation, simple structure
+- ⏳ **simplemd** (~20 parameters, 82 Json2KeyWord calls) - MD simulation, has shared `temperature` parameter
+- ⏳ **opt** (~15 parameters, estimated 50+ calls) - Critical optimization module
+- ⏳ **rmsd** (~15 parameters, 33 Json2KeyWord calls) - Structure comparison, complex nested options
+- ⏳ **confscan** (~12 parameters, 59 calls) - Conformational scanning
+- ⏳ **hessian** (~10 parameters, 14 calls) - Second derivatives
 
 **Migration Requirements for New Capabilities**:
-1. Include `src/core/parameter_macros.h` in header
-2. Add `BEGIN_PARAMETER_DEFINITION(module)` block with PARAM entries
-3. Use **snake_case** for all parameter names (MANDATORY)
-4. Constructor uses `ParameterRegistry::getInstance().getDefaultJson("module")`
-5. Remove static JSON configuration
+1. **Parameter Definitions**: Include `src/core/parameter_macros.h` in header
+2. **PARAM Block**: Add `BEGIN_PARAMETER_DEFINITION(module)` block with PARAM entries
+3. **ConfigManager Integration** (Modern Approach):
+   - Include `src/core/config_manager.h` in header
+   - Member variable: `ConfigManager m_config;` (replaces `json m_config`)
+   - Constructor: `m_config("module", controller)` (no MergeJson needed!)
+   - Parameter access: `m_config.get<T>("parameter")` or `m_config.get<T>("nested.parameter")`
+   - Legacy JSON support: `m_config_legacy = m_config.exportConfig()` if needed for external APIs
+4. Use **snake_case** for all parameter names (MANDATORY)
+5. Remove static JSON configuration from .cpp files
 6. Build: `make GenerateParams` before compilation
 7. Verify: No validation warnings, help output correct
 8. Test: Default params + custom CLI args + aliases work

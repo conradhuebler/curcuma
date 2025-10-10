@@ -31,25 +31,7 @@
 
 #include "curcumamethod.h"
 #include "src/core/parameter_macros.h"
-
-// TODO: Remove after migration to ParameterRegistry - Claude Generated
-// Default configuration for unified analysis - Claude Generated
-static const json UnifiedAnalysisJson = {
-    { "properties", "all" }, // Which properties to calculate: "all", "basic", "cg", "topology"
-    { "output_format", "human" }, // Output format: "human", "json", "csv"
-    { "output_file", "" }, // Optional output file
-    { "fragments", true }, // Include per-fragment analysis
-    { "ripser", false }, // Include basic topological analysis
-    { "verbose", true }, // Detailed output
-    // Trajectory statistics options - Claude Generated 2025
-    { "metrics", "gyration,rout,end2end" }, // Comma-separated: gyration,rout,end2end,com,inertia,mass,all
-    { "statistics", "none" }, // none|cumulative|moving|all
-    { "window", 10 }, // Moving average window size
-    // Enhanced topological analysis options (dMatrix integration)
-    { "topological", {
-                         { "save_distance_matrix", false }, { "save_persistence_pairs", false }, { "save_persistence_diagram", false }, { "save_persistence_image", false }, { "exclude_bonds", false }, { "exclude_hydrogen", false }, { "print_elements", false }, { "print_energy", false }, { "image_format", "png" }, { "colormap", "hot" }, { "resolution", "800x800" }, { "post_processing", "none" }, { "temperature", 2.0 }, { "damping", 1.5 }, { "preserve_structure", true }, { "atom_selection", "" } // New: Atom indices for selective analysis (e.g., "1,5:10,15")
-                     } }
-};
+#include "src/core/config_manager.h"
 
 /*! \brief Unified molecular analysis for all structure types and formats - Claude Generated
  *
@@ -130,7 +112,8 @@ private:
     void outputHumanToStream(const json& results, std::ostream& out);
 
     std::string m_filename;
-    json m_config;
+    ConfigManager m_config;       // Claude Generated 2025: Modern configuration manager
+    json m_config_legacy;         // Claude Generated 2025: Legacy JSON for TDAEngine compatibility
     bool m_silent;
 
     // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
