@@ -121,6 +121,12 @@ private:
     /*! \brief Output results to file */
     void outputToFile(const json& results, const std::string& filename);
 
+    /*! \brief Output CSV format to stream - Claude Generated 2025 */
+    void outputCSVToStream(const json& results, std::ostream& out);
+
+    /*! \brief Output human-readable format to stream - Claude Generated 2025 */
+    void outputHumanToStream(const json& results, std::ostream& out);
+
     std::string m_filename;
     json m_config;
     bool m_silent;
