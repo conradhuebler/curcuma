@@ -71,6 +71,66 @@ cmake .. -DCMAKE_BUILD_TYPE=Release
 make
 ```
 
+## Modern Parameter System (October 2025)
+
+Curcuma features an **automated parameter registry system** for all molecular modeling capabilities:
+
+- **Auto-generated help** directly from source code annotations
+- **Type-safe** parameter definitions with compile-time validation
+- **JSON export/import** for reproducible computational workflows
+- **Alias support** for multiple parameter names
+- **Build-time validation** detects duplicate or conflicting parameters
+
+### For Users
+
+**Export default configuration:**
+```sh
+./curcuma -export-config analysis > my_analysis.json
+```
+
+**Modify and run with custom config:**
+```sh
+# Edit my_analysis.json with your preferred settings
+./curcuma -analysis input.xyz -import-config my_analysis.json
+```
+
+**List available modules:**
+```sh
+./curcuma -list-modules
+```
+
+### For Developers
+
+All new capabilities must use the Parameter Registry System. See:
+- **Technical Documentation**: [docs/PARAMETER_SYSTEM.md](docs/PARAMETER_SYSTEM.md)
+- **Migration Guide**: [docs/PARAMETER_MIGRATION_GUIDE.md](docs/PARAMETER_MIGRATION_GUIDE.md)
+- **Reference Implementation**: `src/capabilities/analysis.h`
+
+**Quick Start for New Capabilities:**
+```cpp
+// In your capability header:
+#include "src/core/parameter_macros.h"
+
+class MyCapability : public CurcumaMethod {
+private:
+    BEGIN_PARAMETER_DEFINITION(my_capability)
+
+    PARAM(max_iterations, Int, 100,
+          "Maximum number of iterations",
+          "Algorithm",
+          {"max_iter"})
+
+    PARAM(output_file, String, "",
+          "Optional output file path",
+          "Output",
+          {"out"})
+
+    END_PARAMETER_DEFINITION
+};
+```
+
+Build system automatically extracts parameters and generates unified registry with validation and help.
+
 # Usage
 
 ## General

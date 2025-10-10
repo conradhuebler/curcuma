@@ -48,14 +48,28 @@
 - Document new functions briefly (doxygen ready) with scientific context
 - Document existing undocumented functions if appearing regularly (briefly and doxygen ready)
 - Remove TODO Hashtags and text if done and approved
-- Implement comprehensive error handling and logging 
+- Implement comprehensive error handling and logging
 - Maintain backward compatibility where possible
-- **Always check and consider instructions blocks** in relevant CLAUDE.md files before implementing 
+- **Always check and consider instructions blocks** in relevant CLAUDE.md files before implementing
 - Reformulate and clarify task and vision entries if not already marked as CLAUDE formatted
 - In case of compiler warning for deprecated functions, replace the old function call with the new one
 - Implement timing analysis for complex functions
 - Keep track of significant improvements in AIChangelog.md, one line per fact
 - **Complex Architecture Documentation**: Factory patterns, dispatchers, and multi-step workflows require comprehensive inline documentation following ARCHITECTURE_DOCUMENTATION.md standards
+
+#### Parameter Definition Standards (MANDATORY for new capabilities)
+- **ALL new capabilities MUST use Parameter Registry System** - no static JSON configurations
+- **Definition Location**: Define parameters in capability header using PARAM macros within `BEGIN_PARAMETER_DEFINITION(module)` block
+- **Naming Convention**: Use **snake_case** exclusively (`max_iterations`, not `MaxIterations` or `maxIterations`)
+- **Include Required**: Add `#include "src/core/parameter_macros.h"` to capability header
+- **Help Text**: Provide comprehensive, user-facing descriptions for each parameter
+- **Categories**: Group parameters logically (Basic, Algorithm, Output, Advanced)
+- **Aliases**: Add old parameter names as aliases for backward compatibility during migration
+- **Type Safety**: Use correct ParamType (String, Int, Double, Bool) matching C++ type
+- **Constructor**: Use `ParameterRegistry::getInstance().getDefaultJson("module")` instead of static JSON
+- **Build Verification**: Run `make GenerateParams` and check for validation warnings
+- **Documentation**: See reference implementation in `src/capabilities/analysis.h`
+- **Migration Guide**: Follow [docs/PARAMETER_MIGRATION_GUIDE.md](docs/PARAMETER_MIGRATION_GUIDE.md) for existing capabilities
 
 #### Copyright and File Headers
 - **Copyright ownership**: All copyright remains with Conrad Hübler as the project owner and AI instructor
@@ -208,6 +222,17 @@ curcuma/
 ```
 
 ## Recent Major Developments (January 2025)
+
+### 🎯 **Universal Parameter Registry System** (October 2025)
+- **Status**: ✅ **PHASE 1 & 2 COMPLETED** - Infrastructure + Proof-of-Concept production-ready
+- **Architecture**: Macro-based parameter definitions in capability headers → build-time extraction → unified registry
+- **Auto-Generation**: `curcuma_param_parser` scans PARAM blocks in headers → `generated/parameter_registry.h`
+- **Features**: Auto-help generation, type validation, duplicate detection, alias resolution, JSON export/import
+- **Migration**: `analysis` module complete (25 parameters), `casino`/`simplemd`/`opt` pending
+- **Benefits**: Single source of truth, no manual help sync, type safety, reproducible configs
+- **📖 Documentation**: See [docs/PARAMETER_SYSTEM.md](docs/PARAMETER_SYSTEM.md) + [docs/PARAMETER_MIGRATION_GUIDE.md](docs/PARAMETER_MIGRATION_GUIDE.md)
+- **Breaking Change**: Requires **snake_case** parameter names (consistent, modern standard)
+- **Build Integration**: CMake dependency: headers → parser → generated registry → compilation
 
 ### 🚀 **Complete EnergyCalculator Architecture Refactoring**
 - **Status**: ✅ **COMPLETED** - Big-Bang refactoring successful

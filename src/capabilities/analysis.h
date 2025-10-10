@@ -30,7 +30,9 @@
 #include "tda_engine.h"
 
 #include "curcumamethod.h"
+#include "src/core/parameter_macros.h"
 
+// TODO: Remove after migration to ParameterRegistry - Claude Generated
 // Default configuration for unified analysis - Claude Generated
 static const json UnifiedAnalysisJson = {
     { "properties", "all" }, // Which properties to calculate: "all", "basic", "cg", "topology"
@@ -130,4 +132,41 @@ private:
     std::string m_filename;
     json m_config;
     bool m_silent;
+
+    // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
+    BEGIN_PARAMETER_DEFINITION(analysis)
+
+    // Analysis options - Claude Generated
+    PARAM(properties, String, "all", "Properties to calculate: all|basic|geometric|cg|topology", "Analysis", {})
+    PARAM(output_format, String, "human", "Output format: human|json|csv", "Output", { "format" })
+    PARAM(output_file, String, "", "Optional output file path", "Output", { "out" })
+    PARAM(fragments, Bool, true, "Include per-fragment analysis", "Analysis", {})
+    PARAM(ripser, Bool, false, "Include basic topological analysis", "Topology", {})
+    PARAM(verbose, Bool, true, "Detailed output", "Output", {})
+
+    // Trajectory statistics options - Claude Generated
+    PARAM(metrics, String, "gyration,rout,end2end", "Comma-separated trajectory metrics: gyration|rout|end2end|com|inertia|mass|all", "Trajectory", {})
+    PARAM(statistics, String, "none", "Statistics mode: none|cumulative|moving|all", "Trajectory", { "stats" })
+    PARAM(window, Int, 10, "Moving average window size", "Trajectory", {})
+
+    // Enhanced topological analysis options - Claude Generated
+    PARAM(topological_save_distance_matrix, Bool, false, "Save distance matrix (.dMat files)", "Topology", {})
+    PARAM(topological_save_persistence_pairs, Bool, false, "Save persistence pairs (.pairs files)", "Topology", {})
+    PARAM(topological_save_persistence_diagram, Bool, false, "Save persistence diagram (.PD files)", "Topology", {})
+    PARAM(topological_save_persistence_image, Bool, false, "Save persistence images (.PI files)", "Topology", {})
+    PARAM(topological_exclude_bonds, Bool, false, "Exclude bonds from distance matrix", "Topology", {})
+    PARAM(topological_exclude_hydrogen, Bool, false, "Exclude hydrogen atoms from analysis", "Topology", {})
+    PARAM(topological_print_elements, Bool, false, "Include element symbols in output", "Topology", {})
+    PARAM(topological_print_energy, Bool, false, "Include molecular energies in output", "Topology", {})
+    PARAM(topological_image_format, String, "png", "Image output format: png|jpg|bmp|tga", "Topology", {})
+    PARAM(topological_colormap, String, "hot", "Image colormap: grayscale|jet|hot|viridis|coolwarm", "Topology", {})
+    PARAM(topological_resolution, String, "800x800", "Image resolution (e.g., 800x800, 1024x1024)", "Topology", {})
+    PARAM(topological_post_processing, String, "none", "Post-processing: none|adaptive|ring_focused", "Topology", {})
+    PARAM(topological_temperature, Double, 2.0, "Enhancement temperature parameter", "Topology Advanced", {})
+    PARAM(topological_damping, Double, 1.5, "Damping strength for processing", "Topology Advanced", {})
+    PARAM(topological_preserve_structure, Bool, true, "Maintain original structure during processing", "Topology Advanced", {})
+    PARAM(topological_atom_selection, String, "", "Atom indices for selective analysis (e.g., 1;5-10;15)", "Topology", {})
+
+    END_PARAMETER_DEFINITION
+    // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^
 };

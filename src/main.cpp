@@ -46,6 +46,10 @@
 #include "src/tools/general.h"
 #include "src/tools/info.h"
 
+// Claude Generated: Parameter registry system
+#include "generated/parameter_registry.h"
+#include "src/core/parameter_registry.h"
+
 #include "src/capabilities/optimiser/OptimiseDipoleScaling.h"
 #include "src/capabilities/optimisation/modern_optimizer_simple.h"
 
@@ -187,8 +191,12 @@ json CLI2Json(int argc, char** argv)
     std::string keyword = argv[1];
     keyword.erase(0, 1);
 
+    // Claude Generated (October 2025): Global parameters that should be accessible
+    // both at top level (controller[param]) and module level (controller[module][param])
     std::set<std::string> global_params = {
-        "verbosity", "threads"
+        "verbosity", "threads",
+        "export_run", "export-run", // Export current run configuration
+        "import_config", "import-config" // Import custom configuration
     };
 
     for (int i = 2; i < argc; ++i) {
@@ -707,6 +715,13 @@ int main(int argc, char **argv) {
 #endif
 
     General::StartUp(argc, argv);
+
+    // Claude Generated: Initialize parameter registry early
+    initialize_generated_registry();
+    if (!ParameterRegistry::getInstance().validateRegistry()) {
+        std::cerr << "Warning: Parameter registry validation failed" << std::endl;
+    }
+
 #ifdef C17
 #ifndef _WIN32
     std::filesystem::remove("stop");
@@ -734,7 +749,117 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    // Handle parameter registry commands - Claude Generated (October 2025)
+    if (command == "list-modules") {
+        ParameterRegistry::getInstance().printAllModules();
+        return 0;
+    }
+
+    if (command == "export-config") {
+        if (argc < 3) {
+            std::cerr << "Error: -export-config requires module name" << std::endl;
+            std::cerr << "Usage: curcuma -export-config <module>" << std::endl;
+            std::cerr << "Example: curcuma -export-config analysis" << std::endl;
+            return 1;
+        }
+        std::string module = argv[2];
+        json config = ParameterRegistry::getInstance().getDefaultJson(module);
+        if (config.empty()) {
+            std::cerr << "Error: Unknown module '" << module << "'" << std::endl;
+            std::cerr << "Use: curcuma -list-modules to see available modules" << std::endl;
+            return 1;
+        }
+        std::cout << config.dump(2) << std::endl;
+        return 0;
+    }
+
+    if (command == "help-module") {
+        if (argc < 3) {
+            std::cerr << "Error: -help-module requires module name" << std::endl;
+            std::cerr << "Usage: curcuma -help-module <module>" << std::endl;
+            std::cerr << "Example: curcuma -help-module analysis" << std::endl;
+            return 1;
+        }
+        std::string module = argv[2];
+        ParameterRegistry::getInstance().printHelp(module);
+        return 0;
+    }
+
     json controller = CLI2Json(argc, argv);
+
+    // Handle config import - Claude Generated (October 2025)
+    // Now global parameter, always in controller["import_config"] if present
+    if (controller.contains("import_config")) {
+        std::string config_file = controller["import_config"];
+
+        std::ifstream file(config_file);
+        if (!file.is_open()) {
+            std::cerr << "Error: Could not open config file: " << config_file << std::endl;
+            return 1;
+        }
+
+        json imported_config;
+        try {
+            file >> imported_config;
+        } catch (const std::exception& e) {
+            std::cerr << "Error: Failed to parse JSON from " << config_file << std::endl;
+            std::cerr << "Details: " << e.what() << std::endl;
+            return 1;
+        }
+
+        // Merge imported config into controller
+        // CLI arguments have higher priority (don't overwrite existing keys)
+        for (auto it = imported_config.begin(); it != imported_config.end(); ++it) {
+            if (!controller.contains(it.key())) {
+                controller[it.key()] = it.value();
+            } else if (controller[it.key()].is_object() && it.value().is_object()) {
+                // Merge nested objects (e.g., controller["analysis"] with imported["analysis"])
+                for (auto nested_it = it.value().begin(); nested_it != it.value().end(); ++nested_it) {
+                    if (!controller[it.key()].contains(nested_it.key())) {
+                        controller[it.key()][nested_it.key()] = nested_it.value();
+                    }
+                }
+            }
+        }
+
+        std::cout << "Loaded configuration from: " << config_file << std::endl;
+    }
+
+    // Handle run export - Claude Generated (October 2025)
+    // Export current configuration AFTER all merging/importing
+    // Now global parameter, always in controller["export_run"] if present
+    if (controller.contains("export_run")) {
+        std::string export_file = controller["export_run"];
+
+        // Create export config without meta-parameters
+        json export_config = controller;
+
+        // Remove all meta-parameters (those used for I/O operations, not actual computation)
+        // Both at top level and from module sub-dictionaries
+        std::vector<std::string> meta_params = { "export_run", "export-run", "import_config", "import-config" };
+
+        for (const auto& meta : meta_params) {
+            export_config.erase(meta);
+
+            // Also remove from all module sub-dictionaries
+            for (auto it = export_config.begin(); it != export_config.end(); ++it) {
+                if (it.value().is_object()) {
+                    it.value().erase(meta);
+                }
+            }
+        }
+
+        std::ofstream outfile(export_file);
+        if (!outfile.is_open()) {
+            std::cerr << "Error: Could not write to " << export_file << std::endl;
+            return 1;
+        }
+
+        outfile << export_config.dump(2) << std::endl;
+        outfile.close();
+
+        std::cout << "Exported current run configuration to: " << export_file << std::endl;
+    }
 
     // Try structured dispatch first - Claude Generated
     auto it = CAPABILITY_REGISTRY.find(command);

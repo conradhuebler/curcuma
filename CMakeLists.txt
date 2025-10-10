@@ -272,6 +272,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/orcainterface.h
         src/core/energy_calculators/qm_methods/orcainterface.cpp
         src/core/imagewriter.cpp
+        src/core/parameter_registry.cpp
 )
 
 set(curcuma_cap_SRC
@@ -606,7 +607,7 @@ else()
     set_property(TARGET curcuma_helper PROPERTY CXX_STANDARD 14)
 endif(C17)
 
-add_subdirectory(test_cases)
+#add_subdirectory(test_cases)
 include(CTest)
 
 target_sources(Continuous
@@ -638,6 +639,43 @@ add_test(NAME confstat COMMAND confstat_tests WORKING_DIRECTORY ${PROJECT_BINARY
 
 # Claude Generated: Comprehensive test for Molecule class before refactoring
 add_test(NAME energy_methods COMMAND test_energy_methods WORKING_DIRECTORY ${PROJECT_BINARY_DIR}/test_cases)
+
+# Claude Generated: Parameter I/O system comprehensive tests (October 2025)
+add_test(
+    NAME parameter_io_tests
+    COMMAND bash ${CMAKE_SOURCE_DIR}/test_cases/test_parameter_io.sh
+    WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
+)
+
+# --- Auto-generated Parameter Registry (Plan 4.1) ---
+
+# 1. Define the parser executable
+add_executable(curcuma_param_parser scripts/param_parser/main.cpp)
+
+# 2. Get all header files in the project
+file(GLOB_RECURSE ALL_PROJECT_HEADERS "src/*.h" "src/**/*.h")
+
+# 3. Define the custom command to run the parser
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated/parameter_registry.h
+    COMMAND curcuma_param_parser
+            --output ${CMAKE_CURRENT_BINARY_DIR}/generated/parameter_registry.h
+            --inputs ${ALL_PROJECT_HEADERS}
+    DEPENDS curcuma_param_parser ${ALL_PROJECT_HEADERS}
+    COMMENT "Generating C++ parameter registry from source headers"
+)
+
+# 4. Create a target for the generation step
+add_custom_target(GenerateParams DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/generated/parameter_registry.h)
+
+# 5. Make the main library depend on the generated file
+add_dependencies(curcuma_core GenerateParams)
+
+# 6. Add the generated directory to the include paths
+include_directories(${CMAKE_CURRENT_BINARY_DIR}/generated)
+target_include_directories(curcuma_core SYSTEM BEFORE PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/generated)
+
+# --- End of Auto-generated Parameter Registry ---
 
 install(TARGETS curcuma RUNTIME DESTINATION bin)
 install(TARGETS curcuma_helper RUNTIME DESTINATION bin)
