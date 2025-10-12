@@ -1,6 +1,6 @@
 /*
  * <Abstract Curcuma Method, please try to subclass from that!>
- * Copyright (C) 2020 - 2022 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -24,7 +24,9 @@
 #include "src/tools/general.h"
 
 #include <fstream>
+#include <functional>
 #include <iostream>
+#include <sstream>
 #include <stdio.h>
 
 #ifdef C17
@@ -131,12 +133,37 @@ CurcumaMethod::~CurcumaMethod()
 {
 }
 
+// Claude Generated 2025: Enhanced restart writing with automatic checksum and version
 void CurcumaMethod::TriggerWriteRestart()
 {
     std::ofstream restart_file("curcuma_restart.json");
     nlohmann::json restart;
     try {
-        restart[MethodName()[0]] = WriteRestartInformation();
+        nlohmann::json state = WriteRestartInformation();
+
+        // Add metadata
+        state["format_version"] = "1.0";
+        state["timestamp"] = std::time(nullptr);
+
+        // Compute and add checksum for critical string fields
+        std::vector<std::string> checksum_fields;
+        for (const auto& item : state.items()) {
+            if (item.value().is_string()) {
+                const std::string& str = item.value().get<std::string>();
+                // Only checksum fields that look like data (contain '|' separator)
+                if (str.find('|') != std::string::npos) {
+                    checksum_fields.push_back(item.key());
+                }
+            }
+        }
+
+        if (!checksum_fields.empty()) {
+            size_t checksum = computeRestartChecksum(state, checksum_fields);
+            state["checksum"] = checksum;
+            state["checksum_fields"] = checksum_fields;
+        }
+
+        restart[MethodName()[0]] = state;
     } catch (nlohmann::json::type_error& e) {
     }
     try {
@@ -235,4 +262,99 @@ void CurcumaMethod::setFile(const std::string& filename)
 {
     m_filename = filename;
     getBasename(filename);
+}
+
+// Claude Generated 2025: Compute checksum over specified fields for restart validation
+size_t CurcumaMethod::computeRestartChecksum(const json& state, const std::vector<std::string>& fields) const
+{
+    std::string data_to_hash;
+    for (const auto& field : fields) {
+        if (state.contains(field) && state[field].is_string()) {
+            data_to_hash += state[field].get<std::string>();
+        }
+    }
+    return std::hash<std::string>{}(data_to_hash);
+}
+
+// Claude Generated 2025: Validate pipe-separated double strings (e.g., "1.5|2.3|3.1")
+bool CurcumaMethod::isValidDoubleString(const std::string& str) const
+{
+    if (str.empty()) return true;
+
+    std::istringstream ss(str);
+    std::string token;
+    while (std::getline(ss, token, '|')) {
+        // Trim whitespace
+        token.erase(0, token.find_first_not_of(" \t\n\r"));
+        token.erase(token.find_last_not_of(" \t\n\r") + 1);
+
+        if (token.empty()) continue;
+
+        // Check for truncated NaN/Inf patterns
+        if (token.size() < 3) {
+            if (token.find("na") != std::string::npos ||
+                token.find("in") != std::string::npos ||
+                token == "-n" || token == "-i") {
+                return false; // Likely truncated "-nan" or "-inf"
+            }
+        }
+
+        // Try to parse as double
+        try {
+            std::stod(token);
+        } catch (const std::invalid_argument&) {
+            return false;
+        } catch (const std::out_of_range&) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Claude Generated 2025: Universal restart data validation for all capabilities
+RestartValidationResult CurcumaMethod::validateRestartData(
+    const json& state,
+    const std::vector<std::string>& required_fields,
+    const std::vector<std::string>& checksum_fields) const
+{
+    // Check format version (warning only, not fatal)
+    if (state.contains("format_version")) {
+        std::string version = state["format_version"];
+        if (version != "1.0") {
+            std::cerr << "\033[1;33m[WARNING]\033[0m Restart file format version " << version
+                      << " may be incompatible with current version 1.0" << std::endl;
+        }
+    }
+
+    // Check required fields
+    for (const auto& field : required_fields) {
+        if (!state.contains(field)) {
+            return {false, "Missing required field: " + field};
+        }
+    }
+
+    // Validate checksum if present
+    if (state.contains("checksum") && state.contains("checksum_fields")) {
+        size_t stored_checksum = state["checksum"].get<size_t>();
+        std::vector<std::string> stored_fields = state["checksum_fields"].get<std::vector<std::string>>();
+
+        // Recompute checksum
+        size_t computed_checksum = computeRestartChecksum(state, stored_fields);
+
+        if (computed_checksum != stored_checksum) {
+            return {false, "Checksum mismatch - restart file may be corrupted (disk error or manual edit)"};
+        }
+    }
+
+    // Validate string fields containing doubles
+    for (const auto& field : checksum_fields) {
+        if (state.contains(field) && state[field].is_string()) {
+            std::string value = state[field];
+            if (!isValidDoubleString(value)) {
+                return {false, "Field '" + field + "' contains malformed numerical data (e.g., truncated NaN)"};
+            }
+        }
+    }
+
+    return {true, ""};
 }

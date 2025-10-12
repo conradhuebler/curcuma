@@ -405,7 +405,7 @@ private:
 
     // --- Wall Potentials ---
     PARAM(wall_type, String, "none", "Wall type: none|spheric|rect.", "Walls", {"wall"})
-    PARAM(wall_potential, String, "harmonic", "Wall potential function: logfermi|harmonic.", "Walls", {"wall_type"})
+    PARAM(wall_potential, String, "harmonic", "Wall potential function: logfermi|harmonic.", "Walls", {})
     PARAM(wall_radius, Double, 0.0, "Radius for spherical wall (Å). Auto-sized if 0.", "Walls", {"wall_spheric_radius"})
     PARAM(wall_temp, Double, 298.15, "Wall temperature/strength in K.", "Walls", {})
     PARAM(wall_beta, Double, 6.0, "Steepness parameter for wall potential.", "Walls", {})

@@ -240,7 +240,7 @@ bool ParameterRegistry::validateRegistry() const
     return valid;
 }
 
-// Claude Generated: Resolve alias to canonical name
+// Claude Generated: Resolve alias to canonical name (case-insensitive)
 std::string ParameterRegistry::resolveAlias(const std::string& module, const std::string& alias) const
 {
     auto module_it = alias_to_name_map.find(module);
@@ -248,10 +248,24 @@ std::string ParameterRegistry::resolveAlias(const std::string& module, const std
         return ""; // Module not found
     }
 
+    // Try exact match first (fast path)
     auto alias_it = module_it->second.find(alias);
-    if (alias_it == module_it->second.end()) {
-        return ""; // Alias not found
+    if (alias_it != module_it->second.end()) {
+        return alias_it->second;
     }
 
-    return alias_it->second;
+    // Try case-insensitive match (slower path for backward compatibility)
+    std::string alias_lower = alias;
+    std::transform(alias_lower.begin(), alias_lower.end(), alias_lower.begin(), ::tolower);
+
+    for (const auto& entry : module_it->second) {
+        std::string entry_key_lower = entry.first;
+        std::transform(entry_key_lower.begin(), entry_key_lower.end(), entry_key_lower.begin(), ::tolower);
+
+        if (alias_lower == entry_key_lower) {
+            return entry.second; // Return canonical name
+        }
+    }
+
+    return ""; // Alias not found
 }

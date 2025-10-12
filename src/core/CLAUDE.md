@@ -43,11 +43,17 @@ return m_method->calculateEnergy(gradient);
   - **Purpose**: Modern type-safe parameter access, eliminates Json2KeyWord boilerplate
   - **Architecture**: Wrapper around ParameterRegistry with hierarchical dot notation support
   - **API**: `config.get<T>("key")` with case-insensitive lookup and default value support
-  - **Features**: Automatic default merging, hierarchical keys (`"topological.save_image"`), type safety
+  - **Features**:
+    - Automatic default merging
+    - Hierarchical keys (`"topological.save_image"`)
+    - Type safety
+    - **Alias Resolution** (October 2025): Resolves aliases to canonical names via ParameterRegistry
+    - **Case-Insensitive**: `-MaxTime`, `-maxtime` beide akzeptiert
   - **Status**: Production-ready, proof-of-concept in analysis.cpp (37 Json2KeyWord calls eliminated)
 - **ParameterRegistry** (`parameter_registry.h/cpp`) - Claude Generated 2025
   - **Backend**: Stores all module parameters from build-time extraction
   - **Used By**: ConfigManager for default values and validation
+  - **Alias Resolution** (October 2025): Case-insensitive alias lookup via `resolveAlias()`
 
 ### Force Field System
 - **ForceField**: Main engine with universal JSON parameter caching (96% speedup) + **CurcumaLogger verbosity**

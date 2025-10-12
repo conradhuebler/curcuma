@@ -1,6 +1,6 @@
 /*
  * <Abstract Curcuma Method, please try to subclass from that!>
- * Copyright (C) 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -24,6 +24,12 @@
 #include <string>
 
 #include "json.hpp"
+
+// Claude Generated 2025: Restart file validation result
+struct RestartValidationResult {
+    bool valid;
+    std::string error_message;
+};
 
 class CurcumaMethod {
 public:
@@ -71,6 +77,13 @@ protected:
     StringList RestartFiles() const;
 
     nlohmann::json LoadControl() const;
+
+    // Claude Generated 2025: Universal restart file validation
+    size_t computeRestartChecksum(const json& state, const std::vector<std::string>& fields) const;
+    RestartValidationResult validateRestartData(const json& state,
+                                                 const std::vector<std::string>& required_fields,
+                                                 const std::vector<std::string>& checksum_fields) const;
+    bool isValidDoubleString(const std::string& str) const;
 
     json m_defaults, m_controller;
     bool m_restart = true;

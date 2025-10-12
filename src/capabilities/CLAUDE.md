@@ -137,6 +137,58 @@ bool flag = m_config.get<bool>("topological.save_image");  // hierarchical!
 - Enhanced error handling for failed optimizations
 - **ConfScan verbosity issue**: Accept/Reject messages not showing at default verbosity level - need to investigate default verbosity settings and ensure user feedback is always visible
 
+### ✅ COMPLETED - Universal Restart Validation System (October 2025)
+**ROBUSTNESS ENHANCEMENT FOR ALL CAPABILITIES**
+
+#### Implementation
+**CurcumaMethod Base Class** - Universal validation infrastructure:
+- `RestartValidationResult` struct for validation results
+- `computeRestartChecksum()` - Checksumme über angegebene Felder (Standard C++ `<functional>`)
+- `isValidDoubleString()` - Erkennt malformierte Zahlen wie "-na" statt "-nan"
+- `validateRestartData()` - Zentrale Validierung mit:
+  - Format-Version Check (mit Warning für Inkompatibilitäten)
+  - Required Fields Validation
+  - Checksummen-Validierung (erkennt Disk-Korruption, manuelle Edits)
+  - String-Validierung für pipe-separated doubles
+
+**Automatic Checksumming** in `TriggerWriteRestart()`:
+- Fügt automatisch `format_version: "1.0"` hinzu
+- Fügt `timestamp: <unix_time>` hinzu
+- Berechnet automatisch Checksumme über alle pipe-separated Felder (geometry, velocities, etc.)
+- Speichert `checksum_fields: [...]` (welche Felder gehasht wurden)
+
+**SimpleMD Integration** (Proof-of-Concept):
+```cpp
+auto validation = validateRestartData(state,
+    {"method", "geometry", "velocities"},  // required fields
+    {"geometry", "velocities", "xi", "Q"}); // validate for malformed doubles
+
+if (!validation.valid) {
+    cerr << "[ERROR] " << validation.error_message << endl;
+    return false;  // Start fresh simulation
+}
+```
+
+#### Benefits
+✅ **Keine Dependencies** - 100% Standard C++ (`<functional>`, `<sstream>`)
+✅ **Automatisch** - Alle Capabilities profitieren via `TriggerWriteRestart()`
+✅ **Früherkennung** - Validierung VOR Parsing verhindert `stod()` Crashes
+✅ **Checksumme** - Erkennt Hardware-Fehler, Disk-Korruption, manuelle Edits
+✅ **Zukunftssicher** - `format_version` erlaubt zukünftige Migrations-Logik
+✅ **Wiederverwendbar** - Jede Capability kann `validateRestartData()` aufrufen
+
+#### Testing
+- ✅ Corrupted restart files with "-na" truncated NaN: **Detected & clean error**
+- ✅ New restart files automatically include checksums and metadata
+- ✅ Case-insensitive parameter matching via ConfigManager
+
+#### Future Work
+- Extend validation to other capabilities (opt, confscan, etc.)
+- Add checksum verification UI feedback
+- Implement automatic backup of corrupted files
+
+---
+
 ### TODO - SimpleMD Wall Potential Fixes (January 2025)
 **CRITICAL CORRECTNESS ISSUES IDENTIFIED:**
 

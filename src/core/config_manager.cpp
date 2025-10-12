@@ -31,12 +31,33 @@ ConfigManager::ConfigManager(const std::string& module, const json& user_input)
     // Load defaults from ParameterRegistry
     m_config = ParameterRegistry::getInstance().getDefaultJson(module);
 
-    // Merge user input (case-insensitive, like MergeJson)
+    // DEBUG: Show what we're merging - Claude Generated
+    #ifdef DEBUG_CONFIG_MANAGER
+    std::cerr << "[ConfigManager] Module: " << module << std::endl;
+    std::cerr << "[ConfigManager] Defaults loaded: " << m_config.size() << " parameters" << std::endl;
+    std::cerr << "[ConfigManager] User input: " << user_input.dump(2) << std::endl;
+    #endif
+
+    // Merge user input (case-insensitive + alias resolution, like MergeJson)
+    auto& registry = ParameterRegistry::getInstance();
+
     for (const auto& item : user_input.items()) {
         std::string user_key = item.key();
         std::string user_key_lower = user_key;
         std::transform(user_key_lower.begin(), user_key_lower.end(),
                       user_key_lower.begin(), ::tolower);
+
+        // First, try alias resolution (case-insensitive)
+        std::string resolved_key = registry.resolveAlias(module, user_key);
+
+        // If alias resolved to a parameter name, use that
+        if (!resolved_key.empty() && m_config.contains(resolved_key)) {
+            m_config[resolved_key] = item.value();
+            #ifdef DEBUG_CONFIG_MANAGER
+            std::cerr << "[ConfigManager] Alias resolved: " << user_key << " -> " << resolved_key << " = " << item.value() << std::endl;
+            #endif
+            continue;
+        }
 
         // Try to find matching key in defaults (case-insensitive)
         bool found = false;
@@ -50,6 +71,9 @@ ConfigManager::ConfigManager(const std::string& module, const json& user_input)
                 // Override default with user value
                 m_config[def_key] = item.value();
                 found = true;
+                #ifdef DEBUG_CONFIG_MANAGER
+                std::cerr << "[ConfigManager] Merged: " << user_key << " -> " << def_key << " = " << item.value() << std::endl;
+                #endif
                 break;
             }
         }
@@ -57,8 +81,15 @@ ConfigManager::ConfigManager(const std::string& module, const json& user_input)
         // If not found in defaults, add as new key
         if (!found) {
             m_config[user_key] = item.value();
+            #ifdef DEBUG_CONFIG_MANAGER
+            std::cerr << "[ConfigManager] Added new: " << user_key << " = " << item.value() << std::endl;
+            #endif
         }
     }
+
+    #ifdef DEBUG_CONFIG_MANAGER
+    std::cerr << "[ConfigManager] Final config: " << m_config.size() << " parameters" << std::endl;
+    #endif
 }
 
 bool ConfigManager::has(const std::string& key) const
