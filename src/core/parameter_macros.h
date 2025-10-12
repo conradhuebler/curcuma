@@ -39,5 +39,5 @@
 //       They only serve as markers for the curcuma_param_parser tool.
 
 #define BEGIN_PARAMETER_DEFINITION(module)
-#define PARAM(name, type, default_value, help_text, category, aliases)
+#define PARAM(name, type, default_value, help_text, category, ...) // Variadic to support multiple aliases
 #define END_PARAMETER_DEFINITION

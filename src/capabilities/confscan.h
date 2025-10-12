@@ -32,6 +32,8 @@
 
 #include "src/core/energycalculator.h"
 #include "src/core/molecule.h"
+#include "src/core/config_manager.h"
+#include "src/core/parameter_macros.h"
 
 #include "curcumamethod.h"
 
@@ -41,73 +43,8 @@ struct dnn_input {
     Matrix dHM;
 };
 
-static const json ConfScanJson = {
-    { "noname", true },
-    { "restart", true },
-    { "heavy", false },
-    { "rmsd", 0.9 },
-    { "rank", -1 },
-    { "writeXYZ", false },
-    { "forceReorder", false },
-    { "reset", false },
-    { "noreorderpass", false },
-    { "check", false },
-    { "energy", 1.0 },
-    { "maxenergy", -1.0 },
-    { "preventreorder", false },
-    { "sLE", "default" },
-    { "sTE", 0.1 },
-    { "sLI", "default" },
-    { "sTI", 0.1 },
-    { "sLH", "default" },
-    { "sTH", 0.1 },
-    { "sLX", "default" },
-    { "skip", 0 },
-    { "allxyz", false },
-    { "update", false },
-    { "skip_orders", false },
-    { "MaxParam", -1 },
-    { "UseOrders", -1 },
-    { "method", "subspace" },
-    { "MaxHTopoDiff", -1 },
-    { "threads", 1 },
-    { "RMSDElement", 7 },
-    { "accepted", "" },
-    { "lastdE", -1 },
-    { "fewerFile", false },
-    { "skipinit", false },
-    { "skipreorder", false },
-    { "skipreuse", false },
-    { "ignoreRotation", false },
-    { "ignoreBarCode", false },
-    { "looseThresh", 7 },
-    { "tightThresh", 3 },
-    { "update-rotation", false },
-    { "damping", 0.8 },
-    { "split", false },
-    { "writefiles", false },
-    { "nomunkres", false },
-    { "molalignbin", "molalign" },
-    { "ripser_xmax", 4 },
-    { "ripser_xmin", 0 },
-    { "ripser_ymax", 4 },
-    { "ripser_ymin", 0 },
-    { "ripser_bins", 10 },
-    { "ripser_scaling", 0.1 },
-    { "ripser_stdx", 10 },
-    { "ripser_stdy", 10 },
-    { "ripser_ratio", 1 },
-    { "ripser_dimension", 2 },
-    { "domolalign", -1 },
-    { "molaligntol", 10 },
-    { "mapped", false },
-    { "analyse", false },
-    { "cycles", -1 },
-    { "earlybreak", 3 },
-    { "getrmsd", false },
-    { "getrmsd_scale", 1.1 },
-    { "getrmsd_thresh", 0.9 }
-};
+// Static JSON removed - Claude Generated 2025: Now using ParameterRegistry
+// All defaults defined in PARAM block below
 
 class ConfScanThread : public CxxThread {
 public:
@@ -255,7 +192,7 @@ private:
 
 class ConfScan : public CurcumaMethod {
 public:
-    ConfScan(const json& controller = ConfScanJson, bool silent = true);
+    ConfScan(const json& controller = json{}, bool silent = true);  // Claude Generated 2025: Default to empty JSON
     virtual ~ConfScan();
 
     void setFileName(const std::string& filename)
@@ -357,6 +294,73 @@ private:
     std::vector<std::pair<std::string, std::string>> m_exclude_list;
     StringList m_nodes_list;
     std::string m_first_node;
+
+    // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv - Claude Generated 2025
+    BEGIN_PARAMETER_DEFINITION(confscan)
+
+    // --- General Settings ---
+    PARAM(restart, Bool, true, "Enable restarting from previous scan", "General", {})
+    PARAM(noname, Bool, true, "Auto-generate structure names", "General", {})
+    PARAM(threads, Int, 1, "Number of parallel threads for ensemble processing", "Performance", {})
+    PARAM(method, String, "subspace", "Energy calculation method if not in input", "General", {})
+
+    // --- Filtering & Thresholds ---
+    PARAM(rmsd, Double, 0.9, "RMSD threshold for accepting conformer", "Filtering", {})
+    PARAM(get_rmsd, Bool, false, "Dynamically determine RMSD threshold from ensemble", "Filtering", {"getrmsd"})
+    PARAM(getrmsd_scale, Double, 1.1, "Scaling factor for dynamic RMSD threshold", "Filtering", {})
+    PARAM(getrmsd_thresh, Double, 0.9, "Initial RMSD threshold for dynamic mode", "Filtering", {})
+    PARAM(max_energy, Double, -1.0, "Maximum energy difference from lowest (kJ/mol, -1=disabled)", "Filtering", {"maxenergy"})
+    PARAM(rank, Double, -1.0, "Keep only N lowest energy conformers (-1=all)", "Filtering", {})
+    PARAM(last_de, Double, -1.0, "Final energy difference threshold (-1=disabled)", "Filtering", {"lastdE"})
+
+    // --- Descriptor Thresholds (Loose) ---
+    PARAM(slx, String, "default", "Default multiplier for all loose thresholds: 'default' or '1.0,2.0' or '1.5'", "Thresholds", {"sLX"})
+    PARAM(sle, String, "default", "Loose energy threshold multiplier", "Thresholds", {"sLE"})
+    PARAM(sli, String, "default", "Loose rotational constants threshold multiplier", "Thresholds", {"sLI"})
+    PARAM(slh, String, "default", "Loose Ripser (topology) threshold multiplier", "Thresholds", {"sLH"})
+
+    // --- Descriptor Thresholds (Tight) ---
+    PARAM(ste, Double, 0.1, "Tight energy difference threshold", "Thresholds", {"sTE"})
+    PARAM(sti, Double, 0.1, "Tight rotational constants difference threshold", "Thresholds", {"sTI"})
+    PARAM(sth, Double, 0.1, "Tight Ripser difference threshold", "Thresholds", {"sTH"})
+
+    // --- Threshold Control Flags ---
+    PARAM(loose_thresh, Int, 7, "Bit flags for loose threshold checks (1=inertia, 2=ripser, 4=energy)", "Thresholds", {"looseThresh"})
+    PARAM(tight_thresh, Int, 3, "Bit flags for tight threshold checks", "Thresholds", {"tightThresh"})
+
+    // --- Advanced Workflow Control ---
+    PARAM(check_connections, Bool, false, "Check for changes in connectivity", "Advanced", {"check"})
+    PARAM(force_reorder, Bool, false, "Force reordering of every structure", "Advanced", {"forceReorder"})
+    PARAM(skip_init, Bool, false, "Skip initial pass (no reordering)", "Advanced", {"skipinit"})
+    PARAM(skip_reorder, Bool, false, "Skip main reordering pass", "Advanced", {"skipreorder"})
+    PARAM(skip_reuse, Bool, false, "Skip final pass reusing found orders", "Advanced", {"skipreuse"})
+    PARAM(skip_orders, Bool, false, "Skip using cached reorder rules", "Advanced", {})
+
+    // --- Advanced Algorithm Parameters ---
+    PARAM(cycles, Int, -1, "Maximum cycles for iterative passes (-1=unlimited)", "Advanced", {})
+    PARAM(early_break, Int, 3, "Early break bit flags (1=reuse, 2=reorder)", "Advanced", {"earlybreak"})
+    PARAM(max_param, Int, -1, "Maximum parameter value (-1=unlimited)", "Advanced", {"MaxParam"})
+    PARAM(use_orders, Int, -1, "Number of reorder rules to use (-1=auto)", "Advanced", {"UseOrders"})
+    PARAM(skip, Int, 0, "Number of structures to skip at start", "Advanced", {})
+
+    // --- Analysis & Debug ---
+    PARAM(reset, Bool, false, "Reset state before processing", "Advanced", {})
+    PARAM(analyse, Bool, false, "Enable analysis mode", "Advanced", {})
+    PARAM(mapped, Bool, false, "Use mapped structure comparison", "Advanced", {})
+    PARAM(split, Bool, false, "Split output into separate files", "Output", {})
+    PARAM(update, Bool, false, "Update existing results", "Advanced", {})
+
+    // --- Output Control ---
+    PARAM(write_xyz, Bool, false, "Write XYZ files for accepted structures", "Output", {"writeXYZ"})
+    PARAM(write_files, Bool, false, "Write additional output files", "Output", {"writefiles"})
+    PARAM(all_xyz, Bool, false, "Write all structures to XYZ", "Output", {"allxyz"})
+    PARAM(fewer_file, Bool, false, "Reduce number of output files", "Output", {"fewerFile"})
+
+    // --- Previous Accepted Structures ---
+    PARAM(accepted, String, "", "Path to previously accepted structures file", "Input", {})
+
+    END_PARAMETER_DEFINITION
+    // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^
 #ifdef WriteMoreInfo
     std::vector<dnn_input> m_dnn_data;
 #endif
@@ -414,4 +418,6 @@ private:
     bool m_analyse = false;
     bool m_skip_orders = false;
     bool m_rmsd_set = true;
+
+    ConfigManager m_config;  // Claude Generated 2025: Multi-Module ConfigManager
 };

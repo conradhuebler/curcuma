@@ -88,13 +88,13 @@ bool flag = m_config.get<bool>("topological.save_image");  // hierarchical!
 
 **Migrated Modules**:
 - ✅ **analysis** (25 parameters, 37 Json2KeyWord calls) - Complete with ConfigManager, production-ready reference
+- ✅ **rmsd** (~15 parameters, 33 Json2KeyWord calls) - Complete with ConfigManager, enum-based method selection
+- ✅ **simplemd** (48 parameters, 82 Json2KeyWord calls) - LARGEST migration, ~350 LOC boilerplate eliminated
+- ✅ **confscan** (41 parameters, 59 Json2KeyWord calls) - Multi-Module architecture, imports RMSD parameters, sLX parsing simplified
 
 **Pending Migration** (Priority Order):
 - ⏳ **casino** (~14 parameters, 36 Json2KeyWord calls) - Monte Carlo simulation, simple structure
-- ⏳ **simplemd** (~20 parameters, 82 Json2KeyWord calls) - MD simulation, has shared `temperature` parameter
 - ⏳ **opt** (~15 parameters, estimated 50+ calls) - Critical optimization module
-- ⏳ **rmsd** (~15 parameters, 33 Json2KeyWord calls) - Structure comparison, complex nested options
-- ⏳ **confscan** (~12 parameters, 59 calls) - Conformational scanning
 - ⏳ **hessian** (~10 parameters, 14 calls) - Second derivatives
 
 **Migration Requirements for New Capabilities**:

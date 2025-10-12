@@ -31,6 +31,7 @@
 
 #include "src/core/global.h" // For CurcumaLogger - Claude Generated
 #include "src/global_config.h" // For new logging system - Claude Generated
+#include "src/core/parameter_registry.h" // For ParameterRegistry - Claude Generated 2025
 
 #include "src/capabilities/confstat.h"
 #include "src/capabilities/persistentdiagram.h"
@@ -180,9 +181,10 @@ int ConfScanThreadNoReorder::execute()
 }
 
 ConfScan::ConfScan(const json& controller, bool silent)
-    : CurcumaMethod(ConfScanJson, controller, silent)
+    : CurcumaMethod(ParameterRegistry::getInstance().getDefaultJson("confscan"), controller, silent),
+      m_config(std::vector<std::string>{"confscan", "rmsd"}, controller)  // Claude Generated 2025: Multi-Module ConfigManager
 {
-    UpdateController(controller);
+    LoadControlJson();
 }
 
 ConfScan::~ConfScan()
@@ -194,13 +196,20 @@ ConfScan::~ConfScan()
 
 void ConfScan::LoadControlJson()
 {
-    m_noname = Json2KeyWord<bool>(m_defaults, "noname");
-    m_restart = Json2KeyWord<bool>(m_defaults, "restart");
+    // Claude Generated 2025: Migrated to ConfigManager - Multi-Module architecture
 
-    m_heavy = Json2KeyWord<bool>(m_defaults, "heavy");
+    // ConfScan-specific parameters
+    m_noname = m_config.get<bool>("noname");
+    m_restart = m_config.get<bool>("restart");
 
-    m_rmsd_threshold = Json2KeyWord<double>(m_defaults, "rmsd");
-    if (Json2KeyWord<bool>(m_defaults, "getrmsd")) {
+    // RMSD parameters from rmsd module (dot notation)
+    // Note: RMSD has "protons" (include protons), ConfScan expects "heavy" (exclude protons) - inverse logic!
+    bool protons_included = m_config.get<bool>("rmsd.protons");
+    m_heavy = !protons_included;  // Invert: protons=false means heavy-only
+
+    // Filtering & thresholds
+    m_rmsd_threshold = m_config.get<double>("rmsd");
+    if (m_config.get<bool>("get_rmsd")) {
         m_rmsd_threshold = -1;
         m_rmsd_set = false;
         CurcumaLogger::warn("RMSD value is not set, will obtain it from ensemble");
@@ -210,78 +219,60 @@ void ConfScan::LoadControlJson()
         m_rmsd_threshold = 1e5;
         CurcumaLogger::warn("RMSD value is not set, will obtain it from ensemble");
     }
-    m_maxrank = Json2KeyWord<double>(m_defaults, "rank");
-    m_writeXYZ = Json2KeyWord<bool>(m_defaults, "writeXYZ");
-    m_force_reorder = Json2KeyWord<bool>(m_defaults, "forceReorder");
-    m_check_connections = Json2KeyWord<bool>(m_defaults, "check");
-    m_energy_cutoff = Json2KeyWord<double>(m_defaults, "maxenergy");
-    bool read_multipliers = false;
-    // this will be the default settings for the threshold multiplicator
-    if (m_defaults["sLX"].is_string()) {
-        if (Json2KeyWord<std::string>(m_defaults, "sLX") == "default") {
-            if (m_verbosity >= 2)
-                CurcumaLogger::info("Using default values for the steps");
-            m_sLE = { 1.0, 2.0 };
-            m_sLI = { 1.0, 2.0 };
-            m_sLH = { 1.0, 2.0 };
-#ifdef CURCUMA_DEBUG
-            if (m_verbosity >= 3)
-                CurcumaLogger::debug(1, "Set reading multipliers to true");
-#endif
-            read_multipliers = true;
-        } else {
-            // this is the case for a string with comma separated values
-#ifdef CURCUMA_DEBUG
-            if (m_verbosity >= 3)
-                CurcumaLogger::debug(1, "Reading steps from vector string");
-#endif
-            m_sLE = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLX"), ",");
-            m_sLI = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLX"), ",");
-            m_sLH = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLX"), ",");
-        }
-    } else if (m_defaults["sLX"].is_number()) {
-#ifdef CURCUMA_DEBUG
-        if (m_verbosity >= 3)
-            CurcumaLogger::debug(1, "Reading steps from number");
-#endif
-        m_sLE = { Json2KeyWord<double>(m_defaults, "sLX") };
-        m_sLI = { Json2KeyWord<double>(m_defaults, "sLX") };
-        m_sLH = { Json2KeyWord<double>(m_defaults, "sLX") };
+    m_maxrank = m_config.get<double>("rank");
+    m_writeXYZ = m_config.get<bool>("write_xyz");
+    m_force_reorder = m_config.get<bool>("force_reorder");
+    m_check_connections = m_config.get<bool>("check_connections");
+    m_energy_cutoff = m_config.get<double>("max_energy");
+
+    // Multi-type threshold parameters (simplified with ConfigManager) - Claude Generated 2025
+    // sLX can be "default", "1.5", or "1.0,2.0,3.0"
+    std::string slx = m_config.get<std::string>("slx");
+    if (slx == "default") {
+        if (m_verbosity >= 2)
+            CurcumaLogger::info("Using default values for the steps");
+        m_sLE = { 1.0, 2.0 };
+        m_sLI = { 1.0, 2.0 };
+        m_sLH = { 1.0, 2.0 };
+    } else if (slx.find(',') != std::string::npos) {
+        // CSV: "1.0,2.0,3.0"
+        m_sLE = Tools::String2DoubleVec(slx, ",");
+        m_sLI = m_sLE;
+        m_sLH = m_sLE;
+    } else {
+        // Single number: "1.5"
+        double val = std::stod(slx);
+        m_sLE = { val };
+        m_sLI = { val };
+        m_sLH = { val };
     }
-    if (read_multipliers) {
-#ifdef CURCUMA_DEBUG
-        if (m_verbosity >= 3)
-            CurcumaLogger::debug(1, "Using read multipliers for the steps");
-#endif
-        // if the xTX is not set, we can use the default values for the steps
-        // this is done in a first step, so that we can use the default values
-        // and in a second step, we can overwrite the settings
-        if (m_defaults["sLE"].is_number())
-            m_sLE = { Json2KeyWord<double>(m_defaults, "sLE") };
-        else if (m_defaults["sLE"].is_string())
-            if (Json2KeyWord<std::string>(m_defaults, "sLE") == "default") {
-                m_sLE = { 1.0, 2.0 };
-            } else
-                // this is the case for a string with comma separated values
-                m_sLE = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLE"), ",");
 
-        if (m_defaults["sLI"].is_number())
-            m_sLI = { Json2KeyWord<double>(m_defaults, "sLI") };
-        else if (m_defaults["sLI"].is_string())
-            if (Json2KeyWord<std::string>(m_defaults, "sLI") == "default") {
-                m_sLI = { 1.0, 2.0 };
-            } else
-                // this is the case for a string with comma separated values
-                m_sLI = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLI"), ",");
+    // Individual overrides (sLE, sLI, sLH can override sLX)
+    std::string sle = m_config.get<std::string>("sle");
+    if (sle != "default") {
+        if (sle.find(',') != std::string::npos) {
+            m_sLE = Tools::String2DoubleVec(sle, ",");
+        } else {
+            m_sLE = { std::stod(sle) };
+        }
+    }
 
-        if (m_defaults["sLH"].is_number())
-            m_sLH = { Json2KeyWord<double>(m_defaults, "sLH") };
-        else if (m_defaults["sLH"].is_string())
-            if (Json2KeyWord<std::string>(m_defaults, "sLH") == "default") {
-                m_sLH = { 1.0, 2.0 };
-            } else
-                // this is the case for a string with comma separated values
-                m_sLH = Tools::String2DoubleVec(Json2KeyWord<std::string>(m_defaults, "sLH"), ",");
+    std::string sli = m_config.get<std::string>("sli");
+    if (sli != "default") {
+        if (sli.find(',') != std::string::npos) {
+            m_sLI = Tools::String2DoubleVec(sli, ",");
+        } else {
+            m_sLI = { std::stod(sli) };
+        }
+    }
+
+    std::string slh = m_config.get<std::string>("slh");
+    if (slh != "default") {
+        if (slh.find(',') != std::string::npos) {
+            m_sLH = Tools::String2DoubleVec(slh, ",");
+        } else {
+            m_sLH = { std::stod(slh) };
+        }
     }
     if (m_sLE.size() != m_sLI.size() || m_sLE.size() != m_sLH.size()) {
         CurcumaLogger::error("Inconsistent length of steps requested, will abort now");
@@ -298,85 +289,108 @@ void ConfScan::LoadControlJson()
         }
     }
 
-    m_reset = Json2KeyWord<bool>(m_defaults, "reset");
-    m_analyse = Json2KeyWord<bool>(m_defaults, "analyse");
+    // Tight thresholds
+    m_sTE = m_config.get<double>("ste");
+    m_sTI = m_config.get<double>("sti");
+    m_sTH = m_config.get<double>("sth");
 
-    m_skipinit = Json2KeyWord<bool>(m_defaults, "skipinit");
-    m_skipreorder = Json2KeyWord<bool>(m_defaults, "skipreorder");
-    m_skipreuse = Json2KeyWord<bool>(m_defaults, "skipreuse");
-    m_mapped = Json2KeyWord<bool>(m_defaults, "mapped");
-    m_skip_orders = Json2KeyWord<bool>(m_defaults, "skip_orders");
+    // Workflow control
+    m_reset = m_config.get<bool>("reset");
+    m_analyse = m_config.get<bool>("analyse");
+    m_skipinit = m_config.get<bool>("skip_init");
+    m_skipreorder = m_config.get<bool>("skip_reorder");
+    m_skipreuse = m_config.get<bool>("skip_reuse");
+    m_mapped = m_config.get<bool>("mapped");
+    m_skip_orders = m_config.get<bool>("skip_orders");
 
-    m_sTE = Json2KeyWord<double>(m_defaults, "sTE");
-    m_sTI = Json2KeyWord<double>(m_defaults, "sTI");
-    m_sTH = Json2KeyWord<double>(m_defaults, "sTH");
+    // Algorithm parameters
+    m_lastdE = m_config.get<double>("last_de");
+    m_getrmsd_scale = m_config.get<double>("getrmsd_scale");
+    m_getrmsd_thresh = m_config.get<double>("getrmsd_thresh");
+    m_skip = m_config.get<int>("skip");
+    m_cycles = m_config.get<int>("cycles");
+    m_maxParam = m_config.get<int>("max_param");
+    m_useorders = m_config.get<int>("use_orders");
 
-    m_lastdE = Json2KeyWord<double>(m_defaults, "lastdE");
-    m_domolalign = Json2KeyWord<double>(m_defaults, "domolalign");
-    m_getrmsd_scale = Json2KeyWord<double>(m_defaults, "getrmsd_scale");
-    m_getrmsd_thresh = Json2KeyWord<double>(m_defaults, "getrmsd_thresh");
-    m_skip = Json2KeyWord<int>(m_defaults, "skip");
-    m_cycles = Json2KeyWord<int>(m_defaults, "cycles");
+    // Output control
+    m_allxyz = m_config.get<bool>("all_xyz");
+    m_reduced_file = m_config.get<bool>("fewer_file");
+    m_update = m_config.get<bool>("update");
+    m_split = m_config.get<bool>("split");
+    m_write = m_config.get<bool>("write_files");
 
-    m_allxyz = Json2KeyWord<bool>(m_defaults, "allxyz");
-    m_reduced_file = Json2KeyWord<bool>(m_defaults, "fewerFile");
+    // Performance
+    m_threads = m_config.get<int>("threads");  // ConfScan ensemble threads
 
-    m_update = Json2KeyWord<bool>(m_defaults, "update");
-    m_maxParam = Json2KeyWord<int>(m_defaults, "MaxParam");
-    m_useorders = Json2KeyWord<int>(m_defaults, "UseOrders");
-    m_MaxHTopoDiff = Json2KeyWord<int>(m_defaults, "MaxHTopoDiff");
-    m_threads = m_defaults["threads"].get<int>();
-    m_RMSDmethod = Json2KeyWord<std::string>(m_defaults, "method");
+    // RMSD parameters from rmsd module (dot notation) - corrected names
+    m_RMSDmethod = m_config.get<std::string>("rmsd.method");
+    m_update_rotation = m_config.get<bool>("rmsd.update_rotation");
+    m_nomunkres = m_config.get<bool>("rmsd.nomunkres", false);  // May not exist in RMSD
+    m_molalign = m_config.get<std::string>("rmsd.molalign_bin");
+    m_molaligntol = m_config.get<int>("rmsd.molalign_tolerance");
+    m_domolalign = m_config.get<double>("rmsd.do_molalign", -1.0);  // May not exist
+    m_ignoreRotation = m_config.get<bool>("rmsd.ignore_rotation", false);  // May not exist
 
-    if (m_verbosity >= 2) {
-        CurcumaLogger::info_fmt("Permutation of atomic indices performed according to {}", m_RMSDmethod);
-    }
+    // Ripser/Topology parameters
+    m_MaxHTopoDiff = m_config.get<int>("ripser.max_topo_diff", -1);  // Optional, may not be in rmsd
+    m_ignoreBarCode = m_config.get<bool>("ripser.ignore_barcode", false);  // Optional
 
-    if (m_RMSDmethod == "molalign") {
-        if (m_verbosity >= 1) {
-            CurcumaLogger::citation("J. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187");
-        }
-        m_domolalign = -1;
-    }
-    m_ignoreRotation = Json2KeyWord<bool>(m_defaults, "ignoreRotation");
-    m_ignoreBarCode = Json2KeyWord<bool>(m_defaults, "ignoreBarCode");
-    m_update_rotation = Json2KeyWord<bool>(m_defaults, "update-rotation");
-    m_split = Json2KeyWord<bool>(m_defaults, "split");
-    m_write = Json2KeyWord<bool>(m_defaults, "writefiles");
+    // Threshold bit flags
+    m_looseThresh = m_config.get<int>("loose_thresh");
+    m_tightThresh = m_config.get<int>("tight_thresh");
+    m_earlybreak = m_config.get<int>("early_break");
 
-    m_nomunkres = Json2KeyWord<bool>(m_defaults, "nomunkres");
-    m_molalign = Json2KeyWord<std::string>(m_defaults, "molalignbin");
-    m_molaligntol = Json2KeyWord<int>(m_defaults, "molaligntol");
-
-    m_looseThresh = m_defaults["looseThresh"];
-    m_tightThresh = m_defaults["tightThresh"];
-    m_earlybreak = m_defaults["earlybreak"];
+    // Early break flags logging
     if ((m_earlybreak & 1) == 0)
         if (m_verbosity >= 2)
             CurcumaLogger::info("Early break in reuse part is enabled");
     if ((m_earlybreak & 2) == 0)
         if (m_verbosity >= 2)
             CurcumaLogger::info("Early break in reorder part is enabled");
-#pragma message("these hacks to overcome the json stuff are not nice, TODO!")
-    try {
-        m_rmsd_element_templates = m_defaults["RMSDElement"].get<std::string>();
-        StringList elements = Tools::SplitString(m_rmsd_element_templates, ",");
-        for (const std::string& str : elements)
-            m_rmsd_element_templates.push_back(std::stod(str));
 
-        if (m_element_templates.size())
-            m_RMSDElement = m_element_templates[0];
+    // RMSD Element handling (simplified with ConfigManager - Claude Generated 2025)
+    // No more try-catch needed! #pragma message removed!
+    m_rmsd_element_templates = m_config.get<std::string>("rmsd.element", "7");  // Default to nitrogen
+    if (!m_rmsd_element_templates.empty() && m_rmsd_element_templates != "0") {
+        if (m_rmsd_element_templates.find(',') != std::string::npos) {
+            // CSV: "7,8"
+            StringList elements = Tools::SplitString(m_rmsd_element_templates, ",");
+            for (const std::string& str : elements)
+                m_element_templates.push_back(std::stod(str));
 
-    } catch (const nlohmann::detail::type_error& error) {
-        m_RMSDElement = Json2KeyWord<int>(m_defaults, "RMSDElement");
-        m_rmsd_element_templates.push_back(m_RMSDElement);
+            if (m_element_templates.size())
+                m_RMSDElement = m_element_templates[0];
+        } else {
+            // Single number: "7"
+            m_RMSDElement = std::stoi(m_rmsd_element_templates);
+            m_element_templates.push_back(m_RMSDElement);
+        }
     }
-    if (m_RMSDmethod.compare("hybrid") == 0 /* && m_rmsd_element_templates.compare("") == 0 */) {
+
+    // Hybrid method validation
+    if (m_RMSDmethod == "hybrid" && m_rmsd_element_templates.empty()) {
         CurcumaLogger::warn("Reordering method hybrid has to be combined with element types. I will choose for you nitrogen and oxygen!");
-        CurcumaLogger::info("This is equivalent to adding: '-rmsdelement 7,8' to your argument list");
+        CurcumaLogger::info("This is equivalent to adding: '-rmsd.element 7,8' to your argument list");
         m_rmsd_element_templates = "7,8";
+        m_element_templates = {7.0, 8.0};
+        m_RMSDElement = 7;
     }
-    m_prev_accepted = Json2KeyWord<std::string>(m_defaults, "accepted");
+
+    // Molalign citation
+    if (m_RMSDmethod == "molalign") {
+        if (m_verbosity >= 1) {
+            CurcumaLogger::citation("J. Chem. Inf. Model. 2023, 63, 4, 1157–1165 - DOI: 10.1021/acs.jcim.2c01187");
+        }
+        m_domolalign = -1;
+    }
+
+    // Previous accepted structures
+    m_prev_accepted = m_config.get<std::string>("accepted");
+
+    // RMSD method logging
+    if (m_verbosity >= 2) {
+        CurcumaLogger::info_fmt("Permutation of atomic indices performed according to {}", m_RMSDmethod);
+    }
 
     if (m_useorders == -1)
         m_useorders = 10;
@@ -401,7 +415,8 @@ bool ConfScan::openFile()
         throw 1;
 
     int molecule = 0;
-    PersistentDiagram diagram(m_defaults);
+    // Claude Generated 2025: Export flattened config for legacy PersistentDiagram API
+    PersistentDiagram diagram(m_config.exportConfig());
     FileIterator file(Filename());
     int calcH = 0;
     int calcI = 0;
@@ -743,7 +758,8 @@ void ConfScan::start()
         CurcumaLogger::header("Conformational Scanning");
 
         // Display parameter comparison table showing defaults vs current settings at level 1
-        CurcumaLogger::param_comparison_table(m_defaults, m_controller, "ConfScan Configuration");
+        // Claude Generated 2025: Use ConfigManager export for comparison table
+        CurcumaLogger::param_comparison_table(m_config.exportConfig(), m_controller, "ConfScan Configuration");
     }
 
     SetUp();
@@ -1030,14 +1046,12 @@ void ConfScan::CheckOnly(double sLE, double sLI, double sLH)
     std::string laststring;
     m_maxmol = m_ordered_list.size();
 
-    json rmsd_t = m_controller;
-    rmsd_t["silent"] = true;
-    rmsd_t["check"] = CheckConnections();
-    rmsd_t["heavy"] = m_heavy;
-    rmsd_t["noreorder"] = true;
-    json rmsd;
-    rmsd["rmsd"] = rmsd_t;
-    rmsd["verbosity"] = 0;
+    // Export RMSD config from ConfigManager - Claude Generated 2025
+    json rmsd = m_config.exportModule("rmsd");
+    rmsd["verbosity"] = 0;  // Override for thread silence
+    rmsd["silent"] = true;
+    rmsd["check"] = CheckConnections();
+    rmsd["noreorder"] = true;
 
     std::vector<ConfScanThreadNoReorder*> threads;
     std::vector<std::vector<int>> rules;
@@ -1235,14 +1249,12 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
     m_reorder_successfull_count += m_reordered_worked;
     m_skipped_count += m_skiped;
     m_rejected = 0, m_accepted = 0, m_reordered = 0, m_reordered_worked = 0, m_reordered_reused = 0, m_skiped = 0;
-    json rmsd_t = m_controller["confscan"];
-    json rmsd;
-    rmsd_t["silent"] = true;
-    rmsd_t["reorder"] = true;
-    rmsd_t["threads"] = 1;
-    rmsd_t["method"] = m_RMSDmethod;
-    rmsd["rmsd"] = rmsd_t;
-    rmsd["verbosity"] = 0;
+    // Export RMSD config from ConfigManager - Claude Generated 2025
+    json rmsd = m_config.exportModule("rmsd");
+    rmsd["verbosity"] = 0;  // Override for thread silence
+    rmsd["silent"] = true;
+    rmsd["reorder"] = true;
+    rmsd["threads"] = 1;  // Override: 1 thread per RMSD calculation
     std::vector<Molecule*> cached;
     if (reset)
         cached = m_all_structures;

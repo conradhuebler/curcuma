@@ -21,6 +21,7 @@
 
 #include "src/capabilities/confscan.h"
 #include "src/capabilities/curcumaopt.h"
+#include "src/core/parameter_registry.h"  // Claude Generated 2025
 #include "src/capabilities/optimiser/LevMarDocking.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
@@ -444,7 +445,8 @@ void Docking::CollectStructures()
 
 void Docking::FilterStructures()
 {
-    json confscan = ConfScanJson;
+    // Claude Generated 2025: Use ParameterRegistry instead of static JSON
+    json confscan = ParameterRegistry::getInstance().getDefaultJson("confscan");
     confscan["forceReorder"] = true;
     confscan["silent"] = true;
     confscan["RMSDMethod"] = m_RMSDmethod;

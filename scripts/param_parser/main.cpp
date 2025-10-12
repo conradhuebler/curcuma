@@ -60,16 +60,62 @@ std::string generate_header_content(const std::vector<Parameter>& params)
         ss << "        \"" << p.helpText << "\",\n";
         ss << "        \"" << p.category << "\",\n";
 
-        // Handle aliases - Claude Generated
+        // Handle aliases - Claude Generated (Fixed October 2025 - support multiple aliases)
         if (p.aliases.empty()) {
             ss << "        {}\n";
         } else {
-            // Split aliases by comma/semicolon
-            std::string aliases_trimmed = trim(p.aliases);
-            if (!aliases_trimmed.empty()) {
-                ss << "        {\"" << aliases_trimmed << "\"}\n";
-            } else {
+            // DON'T trim quotes here - we need them for parsing!
+            // Only trim whitespace
+            std::string aliases_str = p.aliases;
+            // Remove leading/trailing whitespace only (not quotes)
+            size_t start = aliases_str.find_first_not_of(" \t");
+            size_t end = aliases_str.find_last_not_of(" \t");
+            if (start == std::string::npos) {
                 ss << "        {}\n";
+            } else {
+                aliases_str = aliases_str.substr(start, end - start + 1);
+
+                // Parse multiple comma-separated alias strings
+                std::vector<std::string> alias_list;
+                std::string current_alias;
+                bool in_quotes = false;
+
+                for (char c : aliases_str) {
+                    if (c == '"') {
+                        in_quotes = !in_quotes;
+                        // Don't add quotes to the alias string itself
+                    } else if (c == ',' && !in_quotes) {
+                        // End of one alias, start of next
+                        std::string trimmed_alias = trim(current_alias);
+                        if (!trimmed_alias.empty()) {
+                            alias_list.push_back(trimmed_alias);
+                        }
+                        current_alias.clear();
+                    } else if (in_quotes || (c != ' ' && c != '\t')) {
+                        // Add character if inside quotes OR if it's not whitespace outside quotes
+                        current_alias += c;
+                    }
+                }
+
+                // Add last alias
+                std::string trimmed_alias = trim(current_alias);
+                if (!trimmed_alias.empty()) {
+                    alias_list.push_back(trimmed_alias);
+                }
+
+                // Generate initializer list
+                if (alias_list.empty()) {
+                    ss << "        {}\n";
+                } else {
+                    ss << "        {";
+                    for (size_t i = 0; i < alias_list.size(); ++i) {
+                        ss << "\"" << alias_list[i] << "\"";
+                        if (i + 1 < alias_list.size()) {
+                            ss << ", ";
+                        }
+                    }
+                    ss << "}\n";
+                }
             }
         }
 
@@ -166,7 +212,7 @@ int main(int argc, char* argv[])
                         trim(match[3]), // defaultValue
                         trim(match[4]), // helpText
                         trim(match[5]), // category
-                        trim(match[6]) // aliases
+                        std::string(match[6]) // aliases - DON'T trim! We need quotes for parsing
                     });
                     accumulated_line.clear();
                 } else if (accumulated_line.find("PARAM") != std::string::npos && accumulated_line.find(')') != std::string::npos && match.size() == 0) {

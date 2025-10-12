@@ -337,7 +337,8 @@ int executeRMSD(const json& controller, int argc, char** argv) {
         return 1;
     }
 
-    auto* driver = new RMSDDriver(controller, false);
+    json rmsd_config = controller.value("rmsd", json::object());
+    auto* driver = new RMSDDriver(rmsd_config, false);
     driver->setReference(molecule1);
     driver->setTarget(molecule2);
     driver->start();
@@ -473,7 +474,7 @@ int executeDocking(const json& controller, int argc, char** argv) {
 int executeSimpleMD(const json& controller, int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "Please use curcuma for molecular dynamics as follows:\ncurcuma -md input.xyz" << std::endl;
-        SimpleMD help(controller, false);
+        SimpleMD help(json::object(), true);
         help.printHelp();
         return 0;
     }
@@ -484,7 +485,8 @@ int executeSimpleMD(const json& controller, int argc, char** argv) {
         return 1;
     }
 
-    auto* md = new SimpleMD(controller, false);
+    json md_config = controller.value("md", json::object());
+    auto* md = new SimpleMD(md_config, false);
     md->setMolecule(mol);
     md->Initialise();
     md->start();
@@ -498,8 +500,8 @@ int executeCasino(const json& controller, int argc, char** argv) {
         dummy.printHelp();
         return 0;
     }
-
-    auto* casino = new Casino(controller, false);
+    json casino_config = controller.value("casino", json::object());
+    auto* casino = new Casino(casino_config, false);
     casino->setFileName(argv[2]);
     casino->start();
     delete casino;
