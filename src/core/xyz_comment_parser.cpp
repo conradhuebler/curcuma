@@ -7,6 +7,7 @@
 #include "xyz_comment_parser.h"
 #include "molecule.h"
 #include "src/tools/general.h"
+#include "src/tools/pbc_utils.h"
 
 #include <algorithm>
 #include <sstream>
@@ -22,6 +23,48 @@ bool XYZCommentParser::parseComment(const std::string& comment, Molecule& mol)
 {
     if (isWhitespaceOnly(comment)) {
         return true; // Empty comment is valid, just ignore
+    }
+
+    // Claude Generated: Check for unit cell / lattice parameters BEFORE format detection
+    // This allows PBC info to coexist with energy/charge information
+    // Supported formats: "unitcell 10.0 10.0 10.0 [90.0 90.0 90.0]"
+    //                    "lattice 10.0 10.0 10.0 [90.0 90.0 90.0]"
+    if (comment.find("unitcell") != std::string::npos || comment.find("lattice") != std::string::npos) {
+
+        std::vector<std::string> tokens = tokenize(comment);
+
+        // Find unitcell/lattice keyword position
+        size_t start_idx = 0;
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            if (tokens[i] == "unitcell" || tokens[i] == "lattice") {
+                start_idx = i + 1;
+                break;
+            }
+        }
+
+        // Need at least a, b, c (3 values after keyword)
+        if (start_idx > 0 && tokens.size() >= start_idx + 3) {
+            try {
+                double a = std::stod(tokens[start_idx]);
+                double b = std::stod(tokens[start_idx + 1]);
+                double c = std::stod(tokens[start_idx + 2]);
+
+                // Angles optional (default: 90° orthorhombic)
+                double alpha = 90.0, beta = 90.0, gamma = 90.0;
+                if (tokens.size() >= start_idx + 6) {
+                    alpha = std::stod(tokens[start_idx + 3]);
+                    beta = std::stod(tokens[start_idx + 4]);
+                    gamma = std::stod(tokens[start_idx + 5]);
+                }
+
+                // Build lattice vectors and enable PBC
+                Eigen::Matrix3d cell = PBCUtils::buildLatticeVectors(a, b, c, alpha, beta, gamma);
+                mol.setUnitCell(cell, true);
+
+            } catch (const std::invalid_argument&) {
+                // Malformed lattice parameters - ignore and continue with other parsing
+            }
+        }
     }
 
     FormatType format = detectFormat(comment);

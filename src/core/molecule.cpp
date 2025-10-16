@@ -30,6 +30,7 @@
 
 #include "src/tools/general.h"
 #include "src/tools/geometry.h"
+#include "src/tools/pbc_utils.h"
 
 #include <Eigen/Dense>
 
@@ -74,6 +75,8 @@ Molecule::Molecule(const Molecule& other)
     m_bonds = other.m_bonds;
     m_borders = other.m_borders;
     m_mass = other.m_mass; // Claude Generated 2025: Copy molecular mass (fixes VTF trajectory m_mass=0 bug)
+    m_unit_cell = other.m_unit_cell; // Claude Generated 2025: Copy PBC data
+    m_has_pbc = other.m_has_pbc;
 }
 /*
 Molecule& Molecule::operator=(const Molecule& other)
@@ -101,6 +104,8 @@ Molecule::Molecule(const Molecule* other)
     m_spin = other->m_spin;
     m_bonds = other->m_bonds;
     m_borders = other->m_borders;
+    m_unit_cell = other->m_unit_cell; // Claude Generated 2025: Copy PBC data
+    m_has_pbc = other->m_has_pbc;
 }
 /*
 Molecule& Molecule::operator=(const Molecule* other)
@@ -124,6 +129,8 @@ Molecule::Molecule(const Mol& other)
     m_energy = other.m_energy;
     m_spin = other.m_spin;
     m_bonds = other.m_bonds;
+    m_unit_cell = other.m_unit_cell; // Claude Generated 2025: Copy PBC data from Mol
+    m_has_pbc = other.m_has_pbc;
     CalculateMass(); // Claude Generated 2025: Initialize molecular mass from atom types
 }
 
@@ -136,6 +143,8 @@ Molecule::Molecule(const Mol* other)
     m_energy = other->m_energy;
     m_spin = other->m_spin;
     m_bonds = other->m_bonds;
+    m_unit_cell = other->m_unit_cell; // Claude Generated 2025: Copy PBC data from Mol
+    m_has_pbc = other->m_has_pbc;
     CalculateMass(); // Claude Generated 2025: Initialize molecular mass from atom types
 }
 
@@ -194,6 +203,8 @@ Mol Molecule::getMolInfo() const
     mol.m_bonds = m_bonds;
     mol.m_atoms = m_atoms;
     mol.m_partial_charges = m_charges;
+    mol.m_unit_cell = m_unit_cell; // Claude Generated 2025: Export PBC data
+    mol.m_has_pbc = m_has_pbc;
     return mol;
 }
 
@@ -389,6 +400,14 @@ double Molecule::CalculateMass()
     return mass;
 }
 
+// Claude Generated: Set unit cell parameters for periodic boundary conditions
+void Molecule::setUnitCell(const Eigen::Matrix3d& cell, bool has_pbc)
+{
+    m_unit_cell = cell;
+    m_has_pbc = has_pbc;
+    invalidateCaches(); // PBC affects distance calculations
+}
+
 // Claude Generated: Unified XYZ comment parser replacing 10 legacy functions
 void Molecule::setXYZComment(const std::string& comment)
 {
@@ -417,6 +436,29 @@ double Molecule::CalculateDistance(int i, int j) const
     Eigen::Vector3d rij = m_geometry.row(i) - m_geometry.row(j);
     return rij.norm(); // More efficient than manual sqrt calculation
 }
+
+// Claude Generated: PBC-aware distance calculation using Minimum Image Convention
+// Reference: Frenkel & Smit, "Understanding Molecular Simulation", Chapter 12
+// This function automatically applies periodic boundary conditions when m_has_pbc is true.
+// For non-periodic systems, it falls back to the standard distance calculation.
+double Molecule::CalculateDistancePBC(int i, int j) const
+{
+    if (i >= AtomCount() || j >= AtomCount())
+        return 0.0;
+
+    // Without PBC, fall back to regular calculation
+    if (!m_has_pbc) {
+        return CalculateDistance(i, j);
+    }
+
+    // Get atom positions
+    Eigen::Vector3d pos1 = m_geometry.row(i);
+    Eigen::Vector3d pos2 = m_geometry.row(j);
+
+    // Use PBCUtils for minimum image calculation
+    return PBCUtils::calculateDistancePBC(pos1, pos2, m_unit_cell);
+}
+
 /*
 double Molecule::DotProduct(std::array<double, 3> pos1, std::array<double, 3> pos2) const
 {
@@ -572,6 +614,8 @@ void Molecule::LoadMolecule(const Mol& molecule)
     InitialiseEmptyGeometry(AtomCount());
     m_geometry = (molecule.m_geometry);
     m_bonds = molecule.m_bonds;
+    m_unit_cell = molecule.m_unit_cell; // Claude Generated 2025: Copy PBC data
+    m_has_pbc = molecule.m_has_pbc;
 }
 
 void Molecule::LoadMolecule(const Mol* molecule)
@@ -585,6 +629,8 @@ void Molecule::LoadMolecule(const Mol* molecule)
     InitialiseEmptyGeometry(AtomCount());
     m_geometry = (molecule->m_geometry);
     m_bonds = molecule->m_bonds;
+    m_unit_cell = molecule->m_unit_cell; // Claude Generated 2025: Copy PBC data
+    m_has_pbc = molecule->m_has_pbc;
 }
 
 Molecule Molecule::getFragmentMolecule(const int fragment) const
@@ -1136,6 +1182,36 @@ double Molecule::EndToEndDistance(int fragment) const
     double dz = m_geometry(last_idx, 2) - m_geometry(first_idx, 2);
 
     return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+// Claude Generated: PBC-aware end-to-end distance for polymer chains
+// Uses Minimum Image Convention when PBC is active, otherwise falls back to standard calculation
+double Molecule::EndToEndDistancePBC(int fragment) const
+{
+    // Get indices of atoms to analyze (same logic as EndToEndDistance)
+    std::vector<int> indices;
+    if (fragment == -1) {
+        // Use all atoms
+        for (int i = 0; i < m_geometry.rows(); ++i) {
+            indices.push_back(i);
+        }
+    } else {
+        // Use only atoms from specified fragment
+        if (fragment < 0 || fragment >= static_cast<int>(m_fragments.size())) {
+            return 0.0; // Invalid fragment
+        }
+        indices = m_fragments[fragment];
+    }
+
+    if (indices.size() < 2) {
+        return 0.0; // Need at least 2 atoms for end-to-end distance
+    }
+
+    // Calculate PBC-aware distance between first and last atoms
+    int first_idx = indices.front();
+    int last_idx = indices.back();
+
+    return CalculateDistancePBC(first_idx, last_idx);
 }
 
 // Rout calculation: average distance from COM to outermost bead - Claude Generated

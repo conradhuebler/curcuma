@@ -1578,7 +1578,7 @@ void ConfScan::Finalise()
 
     // Show conformer statistics at the end - this is the final analysis
     if (!m_energies.empty()) {
-        ConfStat stat;
+        ConfStat stat(m_controller);
         stat.setEnergies(m_energies);
         stat.start();
     }

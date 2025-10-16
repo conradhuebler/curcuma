@@ -38,6 +38,7 @@
 // #include "src/core/fileiterator.h"
 
 #include "src/tools/general.h"
+#include "src/tools/pbc_utils.h"
 
 namespace Files {
 
@@ -324,11 +325,32 @@ inline Mol VTF2Mol(const std::string& filename)
         }
         else if (tokens[0] == "unitcell") {
             // unitcell <a> <b> <c> [alpha] [beta] [gamma]
-            // Store unit cell info in comment line for now
+            // Claude Generated: Parse and store lattice vectors structurally
             if (tokens.size() >= 4) {
-                molecule.m_commentline = "unitcell " + tokens[1] + " " + tokens[2] + " " + tokens[3];
-                if (tokens.size() >= 7) {
-                    molecule.m_commentline += " " + tokens[4] + " " + tokens[5] + " " + tokens[6];
+                try {
+                    double a = std::stod(tokens[1]);
+                    double b = std::stod(tokens[2]);
+                    double c = std::stod(tokens[3]);
+
+                    // Angles optional (default: 90° orthorhombic)
+                    double alpha = 90.0, beta = 90.0, gamma = 90.0;
+                    if (tokens.size() >= 7) {
+                        alpha = std::stod(tokens[4]);
+                        beta = std::stod(tokens[5]);
+                        gamma = std::stod(tokens[6]);
+                    }
+
+                    // Build lattice vectors and enable PBC
+                    molecule.m_unit_cell = PBCUtils::buildLatticeVectors(a, b, c, alpha, beta, gamma);
+                    molecule.m_has_pbc = true;
+
+                    // Keep in comment for backward compatibility
+                    molecule.m_commentline = "unitcell " + tokens[1] + " " + tokens[2] + " " + tokens[3];
+                    if (tokens.size() >= 7) {
+                        molecule.m_commentline += " " + tokens[4] + " " + tokens[5] + " " + tokens[6];
+                    }
+                } catch (const std::invalid_argument& arg) {
+                    // Malformed unitcell line - skip
                 }
             }
         }

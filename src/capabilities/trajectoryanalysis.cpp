@@ -186,9 +186,10 @@ void TrajectoryAnalysis::analyzeTimestep(const Molecule& mol, int timestep)
 
     // CG/Polymer properties
     if ((m_properties == "all" || m_properties == "cg") && isCGorPolymer(mol)) {
-        // End-to-end distance
+        // End-to-end distance (PBC-aware if available)
         if (m_end_to_end_distance) {
-            double end_to_end = mol.EndToEndDistance();
+            // Claude Generated: Use PBC-aware version when periodic boundaries are present
+            double end_to_end = mol.hasPBC() ? mol.EndToEndDistancePBC() : mol.EndToEndDistance();
             if (end_to_end > 0.0) {
                 m_end_to_end_series.push_back(end_to_end);
             }

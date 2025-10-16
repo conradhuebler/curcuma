@@ -135,6 +135,10 @@ class Molecule
       Molecule getFragmentMolecule(const std::vector<int>& atoms) const;
 
       double CalculateDistance(int i, int j) const;
+
+      // Claude Generated: PBC-aware distance calculation
+      double CalculateDistancePBC(int i, int j) const;
+
       std::pair<double, double> GyrationRadius(double hmass = 1, bool hydrogen = true, int fragment = -1);
 
       /*! \\brief Calculate end-to-end distance for polymer chains - Claude Generated
@@ -143,6 +147,13 @@ class Molecule
        * \\note For CG simulations: distance between terminal beads of polymer
        */
       double EndToEndDistance(int fragment = -1) const;
+
+      /*! \\brief Calculate PBC-aware end-to-end distance - Claude Generated
+       * \\param fragment Fragment index to analyze (-1 for entire molecule)
+       * \\return Distance using Minimum Image Convention (Angstroms)
+       * \\note Uses PBC if m_has_pbc is true, otherwise falls back to EndToEndDistance()
+       */
+      double EndToEndDistancePBC(int fragment = -1) const;
 
       /*! \\brief Calculate Rout: average distance from COM to outermost bead - Claude Generated
        * \\param fragment Fragment index to analyze (-1 for entire molecule)
@@ -289,6 +300,11 @@ class Molecule
 
       inline void setScaling(double scaling) { m_scaling = scaling; }
 
+      // Claude Generated: Periodic Boundary Conditions accessors
+      inline bool hasPBC() const { return m_has_pbc; }
+      inline Eigen::Matrix3d getUnitCell() const { return m_unit_cell; }
+      void setUnitCell(const Eigen::Matrix3d& cell, bool has_pbc = true);
+
       void MapHydrogenBonds();
       Matrix HydrogenBondMatrix(int f1, int f2);
       void writeXYZFragments(const std::string& basename) const;
@@ -404,5 +420,9 @@ private:
     std::string m_name;
     double m_energy = 0, m_Ia = 0, m_Ib = 0, m_Ic = 0, m_mass = 0, m_hbond_cutoff = 3;
     mutable double m_scaling = 1.5;
+
+    // Claude Generated: Periodic Boundary Conditions data
+    Eigen::Matrix3d m_unit_cell; // 3x3 lattice vectors matrix (Angstroms)
+    bool m_has_pbc = false; // Flag: PBC active?
 };
 } // namespace curcuma
