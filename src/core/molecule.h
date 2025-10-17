@@ -141,6 +141,15 @@ class Molecule
 
       std::pair<double, double> GyrationRadius(double hmass = 1, bool hydrogen = true, int fragment = -1);
 
+      /*! \\brief Calculate PBC-aware gyration radius - Claude Generated
+       * \\param hmass Hydrogen mass weighting factor (default 1.0)
+       * \\param protons Include hydrogen atoms (default true)
+       * \\param fragment Fragment index (-1 for entire molecule)
+       * \\return Pair of (unweighted radius, mass-weighted radius) in Angstroms
+       * \\note Uses Minimum Image Convention when m_has_pbc is true
+       */
+      std::pair<double, double> GyrationRadiusPBC(double hmass = 1.0, bool protons = true, int fragment = -1);
+
       /*! \\brief Calculate end-to-end distance for polymer chains - Claude Generated
        * \\param fragment Fragment index to analyze (-1 for entire molecule)
        * \\return Distance between first and last atom in chain (Angstroms)
@@ -161,6 +170,13 @@ class Molecule
        * \\note For CG simulations: characterizes polymer extent from center
        */
       double Rout(int fragment = -1) const;
+
+      /*! \\brief Calculate PBC-aware Rout: distance from COM to outermost atom - Claude Generated
+       * \\param fragment Fragment index to analyze (-1 for entire molecule)
+       * \\return Maximum PBC-aware distance from center of mass to any atom (Angstroms)
+       * \\note Uses Minimum Image Convention when m_has_pbc is true
+       */
+      double RoutPBC(int fragment = -1) const;
 
       /*! \\brief Get geometry matrix (Nx3 coordinates)
        * \\return Eigen matrix with atomic coordinates in \u00c5

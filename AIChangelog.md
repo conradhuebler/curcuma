@@ -6,6 +6,7 @@ Format: One line per change, newest first.
 
 ## October 2025
 
+- **ConfScan ConfigManager Migration - Multi-Module Architecture Complete**: ConfigManager extended with Multi-Module support, 59 Json2KeyWord calls eliminated, 41 parameters defined, RMSD/Ripser parameters imported via nested notation (-rmsd.method, -rmsd.threads), sLX parsing simplified from ~90 to ~50 lines, #pragma message hack removed, exportModule() API for submodule configs, DRY principle (RMSD params defined once), 100% backward compatible
 - **SimpleMD ConfigManager Migration Complete**: 82 Json2KeyWord calls eliminated (LARGEST migration!), CurcumaMDJson removed, ~350 LOC boilerplate eliminated, 48 parameters defined, 100% backward compatible
 - **RMSD ConfigManager Migration Complete**: 33 Json2KeyWord calls eliminated, RMSDJson removed, enum-based method selection, simplified element parsing, 100% backward compatible via aliases, build successful
 - **ConfigManager Production-Ready**: Type-safe parameter access layer implemented (analysis.cpp proof-of-concept: 37 calls � elegant get<T>())

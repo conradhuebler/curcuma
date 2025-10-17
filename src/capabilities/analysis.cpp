@@ -23,6 +23,7 @@
 #include "src/core/elements.h"
 #include "src/core/units.h"
 #include "src/core/parameter_registry.h"
+#include "src/tools/pbc_utils.h"
 #include "trajectory_statistics.h"
 
 #include <algorithm>
@@ -158,6 +159,19 @@ void UnifiedAnalysis::start()
 
     while (!file_iter.AtEnd()) {
         Molecule mol = file_iter.Next();
+
+        // Claude Generated 2025: Log PBC detection at verbosity level 2+ (first structure only)
+        if (timestep == 0 && mol.hasPBC() && CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Detected periodic boundary conditions");
+            auto params = PBCUtils::getLatticeParameters(mol.getUnitCell());
+            CurcumaLogger::param("lattice_a", fmt::format("{:.4f} Å", params[0]));
+            CurcumaLogger::param("lattice_b", fmt::format("{:.4f} Å", params[1]));
+            CurcumaLogger::param("lattice_c", fmt::format("{:.4f} Å", params[2]));
+            CurcumaLogger::param("lattice_alpha", fmt::format("{:.2f}°", params[3]));
+            CurcumaLogger::param("lattice_beta", fmt::format("{:.2f}°", params[4]));
+            CurcumaLogger::param("lattice_gamma", fmt::format("{:.2f}°", params[5]));
+        }
+
         json timestep_result = analyzeMolecule(mol, timestep);
 
         // Collect statistics for enabled metrics - Claude Generated 2025
@@ -334,7 +348,10 @@ json UnifiedAnalysis::calculateGeometricProperties(const Molecule& mol)
     json geometric;
 
     // Gyration radius (both mass-weighted and unweighted)
-    auto gyr = const_cast<Molecule&>(mol).GyrationRadius();
+    // Claude Generated 2025: Use PBC-aware calculation when periodic boundaries are present
+    auto gyr = mol.hasPBC()
+        ? const_cast<Molecule&>(mol).GyrationRadiusPBC()
+        : const_cast<Molecule&>(mol).GyrationRadius();
     geometric["gyration_radius"] = {
         {"unweighted", gyr.first},
         {"mass_weighted", gyr.second}
@@ -368,13 +385,16 @@ json UnifiedAnalysis::calculatePolymerProperties(const Molecule& mol)
     json polymer;
 
     // End-to-end distance (for chain structures)
-    double end_to_end = mol.EndToEndDistance();
+    // Claude Generated 2025: Use PBC-aware distance calculation when periodic boundaries are present
+    // This ensures correct end-to-end distances for chains that cross periodic boundaries
+    double end_to_end = mol.EndToEndDistancePBC();
     if (end_to_end > 0.0) {
         polymer["end_to_end_distance"] = end_to_end;
     }
 
-    // Rout - average distance from COM to outermost atom
-    double rout = mol.Rout();
+    // Rout - maximum distance from COM to outermost atom
+    // Claude Generated 2025: Use PBC-aware distance calculation when periodic boundaries are present
+    double rout = mol.hasPBC() ? mol.RoutPBC() : mol.Rout();
     polymer["rout"] = rout;
 
     // Per-fragment analysis if multiple fragments
@@ -384,15 +404,22 @@ json UnifiedAnalysis::calculatePolymerProperties(const Molecule& mol)
             json frag;
             frag["fragment_id"] = i;
 
-            auto frag_gyr = const_cast<Molecule&>(mol).GyrationRadius(1.0, true, i);
+            // Claude Generated 2025: Use PBC-aware calculation for fragments
+            auto frag_gyr = mol.hasPBC()
+                ? const_cast<Molecule&>(mol).GyrationRadiusPBC(1.0, true, i)
+                : const_cast<Molecule&>(mol).GyrationRadius(1.0, true, i);
             frag["gyration_radius"] = frag_gyr.first;
 
-            double frag_end_to_end = mol.EndToEndDistance(i);
+            // Claude Generated 2025: Use PBC-aware distance for fragment end-to-end
+            double frag_end_to_end = mol.hasPBC()
+                ? mol.EndToEndDistancePBC(i)
+                : mol.EndToEndDistance(i);
             if (frag_end_to_end > 0.0) {
                 frag["end_to_end_distance"] = frag_end_to_end;
             }
 
-            double frag_rout = mol.Rout(i);
+            // Claude Generated 2025: Use PBC-aware Rout for fragments
+            double frag_rout = mol.hasPBC() ? mol.RoutPBC(i) : mol.Rout(i);
             frag["rout"] = frag_rout;
 
             fragments.push_back(frag);

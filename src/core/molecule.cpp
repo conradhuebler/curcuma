@@ -1151,6 +1151,46 @@ std::pair<double, double> Molecule::GyrationRadius(double hmass, bool protons, i
     return std::pair<double, double>(gyr, gyr_mass);
 }
 
+// Claude Generated 2025: PBC-aware gyration radius calculation
+std::pair<double, double> Molecule::GyrationRadiusPBC(double hmass, bool protons, int fragment)
+{
+    Eigen::Vector3d com = COM(protons, fragment);
+    double gyr = 0, gyr_mass = 0;
+    double total_mass = 0;
+
+    for (int i = 0; i < m_geometry.rows(); ++i) {
+        // Calculate PBC-aware distance from COM
+        Eigen::Vector3d atom_pos = m_geometry.row(i);
+        Eigen::Vector3d r = atom_pos - com;
+
+        // Apply PBC if active
+        if (m_has_pbc) {
+            r = PBCUtils::applyMinimumImage(r, m_unit_cell);
+        }
+
+        double r_squared = r.squaredNorm();
+
+        // Unweighted contribution
+        gyr += r_squared;
+
+        // Mass-weighted contribution
+        double m = 0;
+        if (m_atoms[i] == 1)
+            m = Elements::AtomicMass[m_atoms[i]] * hmass;
+        else
+            m = Elements::AtomicMass[m_atoms[i]];
+
+        total_mass += m;
+        gyr_mass += m * r_squared;
+    }
+
+    gyr /= double(m_geometry.rows());
+    gyr_mass /= total_mass;
+
+    // Return R = sqrt(<r²>)
+    return std::pair<double, double>(std::sqrt(gyr), std::sqrt(gyr_mass));
+}
+
 // End-to-end distance calculation for polymer chains - Claude Generated
 double Molecule::EndToEndDistance(int fragment) const
 {
@@ -1246,6 +1286,53 @@ double Molecule::Rout(int fragment) const
         double dy = m_geometry(idx, 1) - com(1);
         double dz = m_geometry(idx, 2) - com(2);
         double distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+        if (distance > max_distance) {
+            max_distance = distance;
+        }
+    }
+
+    return max_distance;
+}
+
+// Claude Generated 2025: PBC-aware Rout for polymer chains
+double Molecule::RoutPBC(int fragment) const
+{
+    // Get center of mass
+    Position com = MassCentroid(true, fragment);
+
+    // Get indices of atoms to analyze
+    std::vector<int> indices;
+    if (fragment == -1) {
+        for (int i = 0; i < m_geometry.rows(); ++i) {
+            indices.push_back(i);
+        }
+    } else {
+        if (fragment < 0 || fragment >= static_cast<int>(m_fragments.size())) {
+            return 0.0;
+        }
+        indices = m_fragments[fragment];
+    }
+
+    if (indices.empty()) {
+        return 0.0;
+    }
+
+    // Find maximum PBC-aware distance from COM
+    double max_distance = 0.0;
+    for (int idx : indices) {
+        Eigen::Vector3d atom_pos = m_geometry.row(idx);
+        Eigen::Vector3d com_vec(com(0), com(1), com(2));
+
+        // Calculate PBC-aware distance
+        double distance;
+        if (m_has_pbc) {
+            Eigen::Vector3d r = atom_pos - com_vec;
+            Eigen::Vector3d r_pbc = PBCUtils::applyMinimumImage(r, m_unit_cell);
+            distance = r_pbc.norm();
+        } else {
+            distance = (atom_pos - com_vec).norm();
+        }
 
         if (distance > max_distance) {
             max_distance = distance;
