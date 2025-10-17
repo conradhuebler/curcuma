@@ -25,6 +25,8 @@
 #include "src/core/elements.h"
 #include "src/core/global.h"
 #include "src/core/molecule.h"
+#include "src/core/parameter_macros.h"
+#include "src/core/config_manager.h"
 
 #include "src/tools/general.h"
 #include "src/tools/geometry.h"
@@ -69,37 +71,49 @@ private:
     Molecule m_host, m_guest;
 };
 
-static const json DockingJson = {
-    { "Pos_X", 0.0 },
-    { "Pos_Y", 0.0 },
-    { "Pos_Z", 0.0 },
-    { "AutoPos", true },
-    { "Filter", true },
-    { "PostOpt", true },
-    { "Step_X", 10 },
-    { "Step_Y", 10 },
-    { "Step_z", 10 },
-    { "Host", "none" },
-    { "Guest", "none" },
-    { "Complex", "none" },
-    { "scaling", 1.5 },
-    { "NoOpt", false },
-    { "CentroidMaxDistance", 1e5 },
-    { "CentroidTolDis", 1e-1 },
-    { "RotationTolDis", 1e-1 },
-    { "Threads", 1 },
-    { "DockingThreads", 1 },
-    { "Charge", 0 },
-    { "Cycles", 1 },
-    { "RMSDMethod", "hybrid" },
-    { "RMSDThreads", 1 },
-    { "RMSDElement", 7 },
-    { "EnergyThreshold", 200 }
-};
+/* Claude Generated 2025: Docking Parameter Registry - replaces static DockingJson */
+BEGIN_PARAMETER_DEFINITION(docking)
+    PARAM(host, String, "", "Host molecule file.", "Input", {})
+    PARAM(guest, String, "", "Guest molecule file.", "Input", {})
+    PARAM(complex, String, "", "Pre-assembled complex file.", "Input", {"Complex"})
+    PARAM(pos_x, Double, 0.0, "X-position for docking box center.", "Grid", {"Pos_X"})
+    PARAM(pos_y, Double, 0.0, "Y-position for docking box center.", "Grid", {"Pos_Y"})
+    PARAM(pos_z, Double, 0.0, "Z-position for docking box center.", "Grid", {"Pos_Z"})
+    PARAM(step_x, Int, 10, "Number of steps in X direction.", "Grid", {"Step_X"})
+    PARAM(step_y, Int, 10, "Number of steps in Y direction.", "Grid", {"Step_Y"})
+    PARAM(step_z, Int, 10, "Number of steps in Z direction.", "Grid", {"Step_z"})
+    PARAM(auto_pos, Bool, true, "Automatically determine docking box position.", "Grid", {"AutoPos"})
+    PARAM(scaling, Double, 1.5, "Scaling factor for docking box.", "Grid", {})
+    PARAM(filter, Bool, true, "Filter docking results.", "PostProcessing", {"Filter"})
+    PARAM(post_opt, Bool, true, "Post-optimization of results.", "PostProcessing", {"PostOpt"})
+    PARAM(no_opt, Bool, false, "Skip optimization step.", "PostProcessing", {"NoOpt"})
+    PARAM(centroid_max_distance, Double, 1e5, "Maximum centroid distance.", "Algorithm", {"CentroidMaxDistance"})
+    PARAM(centroid_tol_distance, Double, 0.1, "Centroid tolerance distance.", "Algorithm", {"CentroidTolDis"})
+    PARAM(centroid_rot_distance, Double, 0.1, "Centroid rotation tolerance.", "Algorithm", {"RotationTolDis"})
+    PARAM(energy_threshold, Double, 200.0, "Energy threshold for filtering.", "Filtering", {"EnergyThreshold"})
+    PARAM(cycles, Int, 1, "Number of docking cycles.", "Execution", {"Cycles"})
+    PARAM(threads, Int, 1, "Number of threads for the main process.", "Performance", {"Threads"})
+    PARAM(docking_threads, Int, 1, "Number of threads for docking subprocesses.", "Performance", {"DockingThreads"})
+    PARAM(charge, Int, 0, "Total charge of complex.", "Molecule", {"Charge"})
+    PARAM(rmsd_method, String, "hybrid", "RMSD calculation method.", "Analysis", {"RMSDMethod"})
+    PARAM(rmsd_threads, Int, 1, "Number of RMSD threads.", "Performance", {"RMSDThreads"})
+    PARAM(rmsd_element, Int, 7, "Element type for RMSD (atomic number).", "Analysis", {"RMSDElement"})
+END_PARAMETER_DEFINITION
 
 class Docking : public CurcumaMethod {
 public:
-    Docking(const json& controller = DockingJson, bool silent = true);
+    /**
+     * @brief Constructor with JSON configuration (backward compatible)
+     * Claude Generated: Phase 4 - ConfigManager Migration
+     */
+    Docking(const json& controller, bool silent = true);
+
+    /**
+     * @brief Constructor with ConfigManager configuration (new, preferred)
+     * Claude Generated: Phase 4 - Native ConfigManager support
+     */
+    Docking(const ConfigManager& config, bool silent = true);
+
     virtual ~Docking() = default;
 
     bool Initialise() override;

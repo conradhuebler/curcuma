@@ -209,34 +209,34 @@ void HessianThread::Threaded()
 }
 
 Hessian::Hessian(const std::string& method, const json& controller, bool silent)
-    : CurcumaMethod(HessianJson, controller, silent)
+    : Hessian(method, ConfigManager("hessian", controller), silent)
 {
-    UpdateController(controller);
-    m_controller = MergeJson(m_defaults, controller);
-    m_threads = m_controller["threads"];
-    // Frequency scaling: Convert from √(Hartree/atomic_mass_unit) to cm⁻¹
-    // Reference: Computational chemistry frequency scaling factors
-    m_scale_functions = [](double eigenvalue_sqrt) -> double {
-        // Convert from atomic units to wavenumbers (cm⁻¹)
-        // Factor: 5140.4 cm⁻¹ * √(Eh/u) + empirical correction
-        return eigenvalue_sqrt * CurcumaUnit::Energy::HARTREE_TO_WAVENUMBER / std::sqrt(CurcumaUnit::Constants::AMU_TO_AU) + 47.349;
-    };
-    m_method = method;
 }
 
 Hessian::Hessian(const json& controller, bool silent)
-    : CurcumaMethod(HessianJson, controller, silent)
+    : Hessian(ConfigManager("hessian", controller), silent)
 {
-    UpdateController(controller);
-    m_controller = MergeJson(m_defaults, controller);
+}
 
+Hessian::Hessian(const std::string& method, const ConfigManager& config, bool silent)
+    : CurcumaMethod(json{}, config.exportConfig(), silent)
+{
+    UpdateController(config.exportConfig());
+    m_controller = MergeJson(m_defaults, config.exportConfig());
     m_threads = m_controller["threads"];
-
-    // Frequency scaling: Convert from √(Hartree/atomic_mass_unit) to cm⁻¹
-    // Reference: Computational chemistry frequency scaling factors
+    m_method = method;
     m_scale_functions = [](double eigenvalue_sqrt) -> double {
-        // Convert from atomic units to wavenumbers (cm⁻¹)
-        // Factor: 5140.4 cm⁻¹ * √(Eh/u) + empirical correction
+        return eigenvalue_sqrt * CurcumaUnit::Energy::HARTREE_TO_WAVENUMBER / std::sqrt(CurcumaUnit::Constants::AMU_TO_AU) + 47.349;
+    };
+}
+
+Hessian::Hessian(const ConfigManager& config, bool silent)
+    : CurcumaMethod(json{}, config.exportConfig(), silent)
+{
+    UpdateController(config.exportConfig());
+    m_controller = MergeJson(m_defaults, config.exportConfig());
+    m_threads = m_controller["threads"];
+    m_scale_functions = [](double eigenvalue_sqrt) -> double {
         return eigenvalue_sqrt * CurcumaUnit::Energy::HARTREE_TO_WAVENUMBER / std::sqrt(CurcumaUnit::Constants::AMU_TO_AU) + 47.349;
     };
 }

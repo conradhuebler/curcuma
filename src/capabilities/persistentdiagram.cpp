@@ -30,7 +30,12 @@
 using json = nlohmann::json;
 
 PersistentDiagram::PersistentDiagram(const json& config, bool silent)
-    : CurcumaMethod(RipserJson, config, silent)
+    : PersistentDiagram(ConfigManager("ripser", config), silent)
+{
+}
+
+PersistentDiagram::PersistentDiagram(const ConfigManager& config, bool silent)
+    : CurcumaMethod(json{}, config.exportConfig(), silent)
     , m_ratio(1.0)
     , m_xmax(4.0)
     , m_xmin(0.0)
@@ -43,8 +48,7 @@ PersistentDiagram::PersistentDiagram(const json& config, bool silent)
     , m_dimension(2)
     , m_epsilon(0.4)
 {
-    UpdateController(config);
-    std::cout << config << std::endl;
+    UpdateController(config.exportConfig());
 
     m_ratio = m_defaults["ripser_ratio"];
     m_xmax = m_defaults["ripser_xmax"];

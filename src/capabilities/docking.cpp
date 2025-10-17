@@ -36,9 +36,14 @@ using json = nlohmann::json;
 #include "docking.h"
 
 Docking::Docking(const json& controller, bool silent)
-    : CurcumaMethod(DockingJson, controller, silent)
+    : Docking(ConfigManager("docking", controller), silent)
 {
-    UpdateController(controller);
+}
+
+Docking::Docking(const ConfigManager& config, bool silent)
+    : CurcumaMethod(json{}, config.exportConfig(), silent)
+{
+    UpdateController(config.exportConfig());
 }
 
 void Docking::LoadControlJson()

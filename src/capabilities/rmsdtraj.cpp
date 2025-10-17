@@ -46,9 +46,14 @@ using json = nlohmann::json;
 #include "rmsdtraj.h"
 
 RMSDTraj::RMSDTraj(const json& controller, bool silent)
-    : CurcumaMethod(RMSDTrajJson, controller, silent)
+    : RMSDTraj(ConfigManager("rmsdtraj", controller), silent)
 {
-    UpdateController(controller);
+}
+
+RMSDTraj::RMSDTraj(const ConfigManager& config, bool silent)
+    : CurcumaMethod(json{}, config.exportConfig(), silent)
+{
+    UpdateController(config.exportConfig());
 }
 RMSDTraj::~RMSDTraj()
 {

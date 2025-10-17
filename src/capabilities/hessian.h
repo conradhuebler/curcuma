@@ -20,6 +20,8 @@
 
 #include "src/core/global.h"
 #include "src/core/units.h"
+#include "src/core/parameter_macros.h"
+#include "src/core/config_manager.h"
 
 #include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
@@ -34,23 +36,18 @@
 
 #pragma once
 
-/* some of the stuff might be important later, but are not used now */
-
-static const json HessianJson = {
-    { "hess_read_file", "hessian" },
-    { "hess_read_xyz", "none" },
-    { "hess_calc", true },
-    { "hess_read", false },
-    { "hess_write_file", "none" },
-    { "freq_scale", 1 },
-    { "thermo", 298.15 },
-    { "freq_cutoff", 50 },
-    { "hess", 1 },
-    { "method", "uff" },
-    { "threads", 1 },
-    { "finite_diff_step", 5e-3 }, // Finite difference step size in Bohr (≈ 0.0026 Å)
-    { "verbosity", 1 } // Verbosity level: 0=silent, 1=results, 2=analysis, 3=debug
-};
+/* Claude Generated 2025: Hessian Parameter Registry - replaces static HessianJson */
+BEGIN_PARAMETER_DEFINITION(hessian)
+    PARAM(calculate, Bool, true, "Perform Hessian calculation.", "Execution", {"hess_calc"})
+    PARAM(read, Bool, false, "Read Hessian from a file.", "Input", {"hess_read"})
+    PARAM(read_file, String, "hessian.json", "File to read Hessian from.", "Input", {"hess_read_file"})
+    PARAM(read_xyz, String, "", "XYZ file for geometry when reading Hessian.", "Input", {"hess_read_xyz"})
+    PARAM(write_file, String, "hessian.out", "File to write Hessian to.", "Output", {"hess_write_file"})
+    PARAM(finite_diff_step, Double, 0.005, "Step size for finite difference calculation (Bohr).", "Algorithm", {})
+    PARAM(freq_scale, Double, 1.0, "Scaling factor for frequencies.", "Analysis", {})
+    PARAM(thermo, Double, 298.15, "Temperature for thermodynamic properties (K).", "Analysis", {})
+    PARAM(freq_cutoff, Double, 50.0, "Cutoff for printing frequencies (cm^-1).", "Analysis", {})
+END_PARAMETER_DEFINITION
 
 template <typename Vector>
 inline auto split_vector(const Vector& v, unsigned number_lines)
@@ -116,8 +113,29 @@ private:
 
 class Hessian : public CurcumaMethod {
 public:
+    /**
+     * @brief Constructor with method and JSON configuration (backward compatible)
+     * Claude Generated: Phase 3C - ConfigManager Migration
+     */
     Hessian(const std::string& method, const json& controller, bool silent = true);
+
+    /**
+     * @brief Constructor with JSON configuration (backward compatible)
+     */
     Hessian(const json& controller, bool silent = true);
+
+    /**
+     * @brief Constructor with ConfigManager configuration (new, preferred)
+     * Claude Generated: Phase 4 - Native ConfigManager support
+     */
+    Hessian(const std::string& method, const ConfigManager& config, bool silent = true);
+
+    /**
+     * @brief Constructor with ConfigManager only (new, preferred)
+     * Claude Generated: Phase 4 - Native ConfigManager support
+     */
+    Hessian(const ConfigManager& config, bool silent = true);
+
     ~Hessian();
     void setMolecule(const Molecule& molecule);
 

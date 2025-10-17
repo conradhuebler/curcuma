@@ -21,19 +21,33 @@
 
 #include "src/core/energy_calculators/ff_methods/qmdff_par.h"
 #include "src/core/molecule.h"
+#include "src/core/parameter_macros.h"
+#include "src/core/config_manager.h"
 
 #include "curcumamethod.h"
-static const json QMDFFFitJson = {
-    { "method", "gfn2" },
-    { "hessian", "hessian.json" },
-    { "charges", "scf.json" },
-    { "potential", "uff" }, // can be uff or qmdff
-    { "threads", 1 }
-};
+
+/* Claude Generated 2025: QMDFFfit Parameter Registry - replaces static QMDFFFitJson */
+BEGIN_PARAMETER_DEFINITION(qmdfffit)
+    PARAM(method, String, "gfn2", "QM method for initial force field.", "General", {})
+    PARAM(hessian_file, String, "hessian.json", "Input Hessian file.", "Input", {"hessian"})
+    PARAM(charges_file, String, "scf.json", "Input charges file.", "Input", {"charges"})
+    PARAM(potential, String, "uff", "Potential for initial FF (uff or qmdff).", "General", {})
+    PARAM(threads, Int, 1, "Number of threads.", "Performance", {})
+END_PARAMETER_DEFINITION
 
 class QMDFFFit : public CurcumaMethod {
 public:
-    QMDFFFit(const json& controller = QMDFFFitJson, bool silent = true);
+    /**
+     * @brief Constructor with JSON configuration (backward compatible)
+     * Claude Generated: Phase 4 - ConfigManager Migration
+     */
+    QMDFFFit(const json& controller, bool silent = true);
+
+    /**
+     * @brief Constructor with ConfigManager configuration (new, preferred)
+     * Claude Generated: Phase 4 - Native ConfigManager support
+     */
+    QMDFFFit(const ConfigManager& config, bool silent = true);
     virtual ~QMDFFFit() {}
     void start() override;
 

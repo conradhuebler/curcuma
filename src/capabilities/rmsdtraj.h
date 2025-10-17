@@ -27,6 +27,8 @@
 #include <vector>
 
 #include "src/core/molecule.h"
+#include "src/core/parameter_macros.h"
+#include "src/core/config_manager.h"
 
 #include "curcumamethod.h"
 
@@ -35,27 +37,38 @@ class RMSDDriver;
 #include "json.hpp"
 using json = nlohmann::json;
 
-const json RMSDTrajJson{
-    { "writeUnique", false },
-    { "writeAligned", false },
-    { "rmsd", 1.5 },
-    { "fragment", -1 },
-    { "reference", "none" },
-    { "second", "none" },
-    { "heavy", false },
-    { "pcafile", false },
-    { "allxyz", false },
-    { "RefFirst", false },
-    { "noreorder", true },
-    { "opt", false },
-    { "filter", false },
-    { "writeRMSD", true },
-    { "offset", 0 }
-};
+/* Claude Generated 2025: RMSDTraj Parameter Registry - replaces static RMSDTrajJson */
+BEGIN_PARAMETER_DEFINITION(rmsdtraj)
+    PARAM(heavy_only, Bool, false, "Use only heavy atoms.", "RMSD", {"heavy"})
+    PARAM(rmsd_threshold, Double, 1.5, "RMSD threshold for clustering (Å).", "RMSD", {"rmsd"})
+    PARAM(reference, String, "", "Reference structure file.", "Input", {})
+    PARAM(second_trajectory, String, "", "Second trajectory file for comparison.", "Input", {"second"})
+    PARAM(write_unique, Bool, false, "Write unique conformers to file.", "Output", {"writeUnique"})
+    PARAM(write_aligned, Bool, false, "Write aligned trajectory.", "Output", {"writeAligned"})
+    PARAM(write_rmsd, Bool, true, "Write RMSD values to a file.", "Output", {"writeRMSD"})
+    PARAM(fragment, Int, -1, "Fragment for RMSD calculation (-1: all).", "RMSD", {})
+    PARAM(pca_file, Bool, false, "Generate PCA output file.", "Analysis", {"pcafile"})
+    PARAM(all_xyz, Bool, false, "Write all structures to separate files.", "Output", {"allxyz"})
+    PARAM(ref_first, Bool, false, "Use first structure as reference.", "Algorithm", {"RefFirst"})
+    PARAM(noreorder, Bool, true, "Disable atom reordering.", "Algorithm", {})
+    PARAM(optimize, Bool, false, "Optimize structures before RMSD.", "Algorithm", {"opt"})
+    PARAM(filter, Bool, false, "Apply structure filtering.", "Analysis", {})
+    PARAM(offset, Int, 0, "Skip first N frames in trajectory.", "Input", {})
+END_PARAMETER_DEFINITION
 
 class RMSDTraj : public CurcumaMethod {
 public:
-    RMSDTraj(const json& controller = RMSDTrajJson, bool silent = true);
+    /**
+     * @brief Constructor with JSON configuration (backward compatible)
+     * Claude Generated: Phase 4 - ConfigManager Migration
+     */
+    RMSDTraj(const json& controller, bool silent = true);
+
+    /**
+     * @brief Constructor with ConfigManager configuration (new, preferred)
+     * Claude Generated: Phase 4 - Native ConfigManager support
+     */
+    RMSDTraj(const ConfigManager& config, bool silent = true);
     virtual ~RMSDTraj();
 
     virtual bool Initialise() override;

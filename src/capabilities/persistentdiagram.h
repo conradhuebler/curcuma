@@ -21,6 +21,8 @@
 // #include "ripser.h"
 
 #include "src/capabilities/curcumamethod.h"
+#include "src/core/parameter_macros.h"
+#include "src/core/config_manager.h"
 
 #include "json.hpp"
 
@@ -41,27 +43,38 @@ typedef std::vector<triple> triples;
 
 using json = nlohmann::json;
 
-static const json RipserJson = {
-    { "ripser_xmax", 4 },
-    { "ripser_xmin", 0 },
-    { "ripser_ymax", 4 },
-    { "ripser_ymin", 0 },
-    { "ripser_bins", 10 },
-    { "ripser_scaling", 0.1 },
-    { "ripser_stdx", 10 },
-    { "ripser_stdy", 10 },
-    { "ripser_ratio", 1 },
-    { "ripser_dimension", 2 },
-    { "ripser_epsilon", 0.4 },
-    { "ripser_min", 0 }
-};
+/* Claude Generated 2025: PersistentDiagram Parameter Registry - replaces static RipserJson */
+BEGIN_PARAMETER_DEFINITION(ripser)
+    PARAM(x_max, Double, 4.0, "Max x-value for persistence diagram.", "Diagram", {"ripser_xmax"})
+    PARAM(x_min, Double, 0.0, "Min x-value for persistence diagram.", "Diagram", {"ripser_xmin"})
+    PARAM(y_max, Double, 4.0, "Max y-value for persistence diagram.", "Diagram", {"ripser_ymax"})
+    PARAM(y_min, Double, 0.0, "Min y-value for persistence diagram.", "Diagram", {"ripser_ymin"})
+    PARAM(bins, Int, 10, "Number of bins for persistence image.", "Image", {"ripser_bins"})
+    PARAM(scaling, Double, 0.1, "Scaling factor for persistence image.", "Image", {"ripser_scaling"})
+    PARAM(std_x, Double, 10.0, "Standard deviation for x-axis in persistence image.", "Image", {"ripser_stdx"})
+    PARAM(std_y, Double, 10.0, "Standard deviation for y-axis in persistence image.", "Image", {"ripser_stdy"})
+    PARAM(ratio, Double, 1.0, "Ratio for ripser calculation.", "Algorithm", {"ripser_ratio"})
+    PARAM(dimension, Int, 2, "Dimension for ripser calculation.", "Algorithm", {"ripser_dimension"})
+    PARAM(epsilon, Double, 0.4, "Epsilon for ripser calculation.", "Algorithm", {"ripser_epsilon"})
+    PARAM(min, Double, 0.0, "Minimum threshold.", "Algorithm", {"ripser_min"})
+END_PARAMETER_DEFINITION
 
 class PersistentDiagram : public CurcumaMethod {
     // This class generates persistent diagrams from distance matrices using ripser.
     // It can generate pairs and triples of points, and create images based on these pairs.
     // The parameters for the persistent diagram can be set through the constructor or setter methods.  {
 public:
+    /**
+     * @brief Constructor with JSON configuration (backward compatible)
+     * Claude Generated: Phase 4 - ConfigManager Migration
+     */
     PersistentDiagram(const json& config, bool silent = true);
+
+    /**
+     * @brief Constructor with ConfigManager configuration (new, preferred)
+     * Claude Generated: Phase 4 - Native ConfigManager support
+     */
+    PersistentDiagram(const ConfigManager& config, bool silent = true);
 
     void start() override
     {

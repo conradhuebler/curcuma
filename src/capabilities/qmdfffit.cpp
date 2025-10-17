@@ -23,6 +23,8 @@
 #include "src/capabilities/hessian.h"
 
 #include "src/core/energy_calculators/ff_methods/forcefieldgenerator.h"
+#include "src/core/config_manager.h"
+#include "src/core/parameter_registry.h"
 #include "src/core/energy_calculators/ff_methods/qmdff_par.h"
 #include "src/core/energy_calculators/ff_methods/uff_par.h"
 #include "src/core/energycalculator.h"
@@ -33,9 +35,14 @@
 #include "qmdfffit.h"
 
 QMDFFFit::QMDFFFit(const json& controller, bool silent)
-    : CurcumaMethod(QMDFFFitJson, controller, silent)
+    : QMDFFFit(ConfigManager("qmdfffit", controller), silent)
 {
-    UpdateController(controller);
+}
+
+QMDFFFit::QMDFFFit(const ConfigManager& config, bool silent)
+    : CurcumaMethod(json{}, config.exportConfig(), silent)
+{
+    UpdateController(config.exportConfig());
 }
 
 void QMDFFFit::LoadControlJson()
@@ -116,7 +123,9 @@ void QMDFFFit::start()
     // std::cout << m_hessian << std::endl;
     // Initialise();
     m_controller["method"] = "qmdff";
-    ForceFieldGenerator ff(m_controller);
+    // Claude Generated: Create ConfigManager for ForceFieldGenerator (Phase 3B)
+    ConfigManager ff_config("forcefield", m_controller);
+    ForceFieldGenerator ff(ff_config);
     ff.setMolecule(m_molecule.getMolInfo());
     ff.Generate();
 
@@ -133,7 +142,9 @@ void QMDFFFit::start()
     parameterfile_init << parameter;
     // std::cout << parameter << std::endl;
     parameterfile_init.close();
-    json qmdff_init = MergeJson(m_controller, QMDFFFitJson);
+    // Claude Generated: Replace static QMDFFFitJson with ParameterRegistry
+    json qmdff_init = ParameterRegistry::getInstance().getDefaultJson("qmdfffit");
+    qmdff_init = MergeJson(m_controller, qmdff_init);
     qmdff_init["threads"] = m_threads;
     qmdff_init["variable"] = false;
     qmdff_init["method"] = "qmdff";
@@ -208,7 +219,8 @@ void QMDFFFit::start()
             angles[i]["fc"] = vec(index);
             index++;
         }
-        json hc = HessianJson;
+        // Claude Generated: Replace static HessianJson with ParameterRegistry
+        json hc = ParameterRegistry::getInstance().getDefaultJson("hessian");
         hc["method"] = "qmdff";
         hc["threads"] = m_threads;
 

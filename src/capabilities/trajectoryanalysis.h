@@ -26,27 +26,30 @@
 #include "src/core/fileiterator.h"
 #include "src/core/molecule.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/parameter_macros.h"
+#include "src/core/config_manager.h"
 
 #include "curcumamethod.h"
 
-// Default configuration for trajectory analysis - Claude Generated
-static const json TrajectoryAnalysisJson = {
-    { "properties", "all" },              // Which properties to analyze: "all", "geometric", "energy", "cg"
-    { "output_format", "human" },         // Output format: "human", "json", "csv"
-    { "output_file", "" },                // Optional output file
-    { "stride", 1 },                      // Analyze every nth frame
-    { "start_frame", 0 },                 // Start analysis from this frame
-    { "end_frame", -1 },                  // End analysis at this frame (-1 = all)
-    { "moving_average", 10 },             // Window size for moving averages
-    { "correlation_analysis", true },     // Calculate autocorrelations
-    { "fluctuation_analysis", true },     // Calculate fluctuations and variances
-    { "convergence_analysis", true },     // Analyze convergence of properties
-    { "export_timeseries", false },       // Export raw time series data
-    { "center_of_mass", true },           // Track center of mass evolution
-    { "gyration_radius", true },          // Track gyration radius evolution
-    { "end_to_end_distance", true },      // Track end-to-end distance (for polymers)
-    { "verbose", true }                   // Detailed output
-};
+/* Claude Generated 2025: TrajectoryAnalysis Parameter Registry - replaces static TrajectoryAnalysisJson */
+BEGIN_PARAMETER_DEFINITION(trajectoryanalysis)
+    PARAM(properties, String, "all", "Properties to calculate: all|basic|geometric|cg.", "Analysis", {})
+    PARAM(output_format, String, "human", "Output format: human|json|csv.", "Output", {})
+    PARAM(output_file, String, "", "File to save results.", "Output", {})
+    PARAM(stride, Int, 1, "Analyze every N-th frame.", "Input", {})
+    PARAM(start_frame, Int, 0, "Frame to start analysis from.", "Input", {})
+    PARAM(end_frame, Int, -1, "Frame to end analysis at (-1 for end).", "Input", {})
+    PARAM(moving_average, Int, 10, "Window size for moving average.", "Analysis", {})
+    PARAM(correlation_analysis, Bool, true, "Calculate autocorrelations.", "Analysis", {})
+    PARAM(fluctuation_analysis, Bool, true, "Calculate fluctuations and variances.", "Analysis", {})
+    PARAM(convergence_analysis, Bool, true, "Analyze convergence of properties.", "Analysis", {})
+    PARAM(export_timeseries, Bool, false, "Export raw time series data.", "Output", {})
+    PARAM(center_of_mass, Bool, true, "Track center of mass evolution.", "Tracking", {})
+    PARAM(gyration_radius, Bool, true, "Track gyration radius evolution.", "Tracking", {})
+    PARAM(end_to_end_distance, Bool, true, "Track end-to-end distance (polymers).", "Tracking", {})
+    PARAM(recenter_structures, Bool, false, "Center structures at origin before analysis.", "Processing", {})
+    PARAM(verbose, Bool, true, "Detailed output.", "Output", {})
+END_PARAMETER_DEFINITION
 
 /*! \brief Trajectory analysis for time-series molecular data - Claude Generated
  *
@@ -67,7 +70,18 @@ static const json TrajectoryAnalysisJson = {
 class TrajectoryAnalysis : public CurcumaMethod
 {
 public:
+    /**
+     * @brief Constructor with JSON configuration (backward compatible)
+     * Claude Generated: Phase 4 - ConfigManager Migration
+     */
     TrajectoryAnalysis(const json& controller, bool silent);
+
+    /**
+     * @brief Constructor with ConfigManager configuration (new, preferred)
+     * Claude Generated: Phase 4 - Native ConfigManager support
+     */
+    TrajectoryAnalysis(const ConfigManager& config, bool silent);
+
     ~TrajectoryAnalysis();
 
     /*! \brief Start trajectory analysis */
@@ -152,7 +166,11 @@ private:
     bool m_center_of_mass;
     bool m_gyration_radius;
     bool m_end_to_end_distance;
+    bool m_recenter_structures; // Claude Generated 2025: Center structures at origin before analysis
     bool m_verbose;
+
+    // Claude Generated 2025: PBC logging state
+    bool m_pbc_used = false; // Track if PBC notification has been shown
 
     // Time series data storage
     std::vector<double> m_time_points;

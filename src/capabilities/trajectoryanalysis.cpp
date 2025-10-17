@@ -19,6 +19,7 @@
 
 #include "trajectoryanalysis.h"
 #include "src/tools/formats.h"
+#include "src/tools/pbc_utils.h"
 #include "src/core/elements.h"
 
 #include <algorithm>
@@ -27,10 +28,15 @@
 #include <iomanip>
 
 TrajectoryAnalysis::TrajectoryAnalysis(const json& controller, bool silent)
-    : CurcumaMethod(TrajectoryAnalysisJson, controller, silent)
+    : TrajectoryAnalysis(ConfigManager("trajectoryanalysis", controller), silent)
 {
-    UpdateController(controller);
-    m_config = MergeJson(TrajectoryAnalysisJson, controller);
+}
+
+TrajectoryAnalysis::TrajectoryAnalysis(const ConfigManager& config, bool silent)
+    : CurcumaMethod(json{}, config.exportConfig(), silent)
+{
+    UpdateController(config.exportConfig());
+    m_config = MergeJson(config.exportConfig(), config.exportConfig());
 
     // Extract analysis parameters
     m_properties = Json2KeyWord<std::string>(m_config, "properties");
@@ -47,6 +53,7 @@ TrajectoryAnalysis::TrajectoryAnalysis(const json& controller, bool silent)
     m_center_of_mass = Json2KeyWord<bool>(m_config, "center_of_mass");
     m_gyration_radius = Json2KeyWord<bool>(m_config, "gyration_radius");
     m_end_to_end_distance = Json2KeyWord<bool>(m_config, "end_to_end_distance");
+    m_recenter_structures = Json2KeyWord<bool>(m_config, "recenter_structures");
     m_verbose = Json2KeyWord<bool>(m_config, "verbose");
 }
 
@@ -112,12 +119,31 @@ void TrajectoryAnalysis::start()
     m_rout_series.reserve(estimated_frames);
     m_center_of_mass_series.reserve(estimated_frames);
 
+    // Claude Generated 2025: Log recentering notification
+    if (m_recenter_structures && CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Recentering all structures at origin (mass-weighted)");
+    }
+
     // Process trajectory
     int current_frame = 0;
     int analyzed_frames = 0;
+    bool pbc_logged = false; // Track if we've logged PBC parameters
 
     while (!file_iter.AtEnd() && current_frame <= m_end_frame) {
         Molecule mol = file_iter.Next();
+
+        // Claude Generated 2025: Log lattice parameters once when PBC is detected
+        if (!pbc_logged && mol.hasPBC() && CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Detected periodic boundary conditions in trajectory");
+            auto params = PBCUtils::getLatticeParameters(mol.getUnitCell());
+            CurcumaLogger::param("lattice_a", fmt::format("{:.4f} Å", params[0]));
+            CurcumaLogger::param("lattice_b", fmt::format("{:.4f} Å", params[1]));
+            CurcumaLogger::param("lattice_c", fmt::format("{:.4f} Å", params[2]));
+            CurcumaLogger::param("lattice_alpha", fmt::format("{:.2f}°", params[3]));
+            CurcumaLogger::param("lattice_beta", fmt::format("{:.2f}°", params[4]));
+            CurcumaLogger::param("lattice_gamma", fmt::format("{:.2f}°", params[5]));
+            pbc_logged = true;
+        }
 
         // Check if we should analyze this frame
         if (current_frame >= m_start_frame &&
@@ -168,41 +194,53 @@ void TrajectoryAnalysis::analyzeTimestep(const Molecule& mol, int timestep)
 {
     m_time_points.push_back(static_cast<double>(timestep));
 
+    // Claude Generated 2025: Create working copy and optionally center at origin
+    Molecule mol_analysis = mol;
+    if (m_recenter_structures) {
+        mol_analysis.Center(true); // Mass-weighted centering
+    }
+
     // Basic properties
     if (m_properties == "all" || m_properties == "geometric") {
         // Gyration radius
         if (m_gyration_radius) {
-            auto gyr = const_cast<Molecule&>(mol).GyrationRadius();
+            auto gyr = mol_analysis.GyrationRadius();
             m_gyration_radius_series.push_back(gyr.first);
             m_gyration_radius_mass_weighted_series.push_back(gyr.second);
         }
 
         // Center of mass tracking
         if (m_center_of_mass) {
-            Position com = mol.MassCentroid();
+            Position com = mol_analysis.MassCentroid();
             m_center_of_mass_series.push_back({com[0], com[1], com[2]});
         }
     }
 
     // CG/Polymer properties
-    if ((m_properties == "all" || m_properties == "cg") && isCGorPolymer(mol)) {
+    if ((m_properties == "all" || m_properties == "cg") && isCGorPolymer(mol_analysis)) {
         // End-to-end distance (PBC-aware if available)
         if (m_end_to_end_distance) {
+            // Claude Generated 2025: Log first use of PBC-aware calculations
+            if (mol_analysis.hasPBC() && !m_pbc_used && CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::info("Using PBC-aware end-to-end distance calculations");
+                m_pbc_used = true;
+            }
+
             // Claude Generated: Use PBC-aware version when periodic boundaries are present
-            double end_to_end = mol.hasPBC() ? mol.EndToEndDistancePBC() : mol.EndToEndDistance();
+            double end_to_end = mol_analysis.hasPBC() ? mol_analysis.EndToEndDistancePBC() : mol_analysis.EndToEndDistance();
             if (end_to_end > 0.0) {
                 m_end_to_end_series.push_back(end_to_end);
             }
         }
 
         // Rout (distance from COM to outermost atom)
-        double rout = mol.Rout();
+        double rout = mol_analysis.Rout();
         m_rout_series.push_back(rout);
     }
 
     // Fragment counting for stability analysis
-    m_fragment_count_series.push_back(mol.GetFragments().size());
-    m_molecular_mass_series.push_back(mol.Mass());
+    m_fragment_count_series.push_back(mol_analysis.GetFragments().size());
+    m_molecular_mass_series.push_back(mol_analysis.Mass());
 }
 
 bool TrajectoryAnalysis::isCGorPolymer(const Molecule& mol)
@@ -585,6 +623,7 @@ void TrajectoryAnalysis::printHelp() const
     std::cout << "  -gyration_radius true|false        Track gyration radius evolution" << std::endl;
     std::cout << "  -end_to_end_distance true|false    Track end-to-end distance (polymers)" << std::endl;
     std::cout << "  -center_of_mass true|false          Track center of mass motion" << std::endl;
+    std::cout << "  -recenter_structures true|false     Center all structures at origin before analysis" << std::endl;
     std::cout << std::endl;
     std::cout << "Output Options:" << std::endl;
     std::cout << "  -output_format human|json|csv" << std::endl;

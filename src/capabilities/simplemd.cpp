@@ -589,7 +589,8 @@ bool SimpleMD::Initialise()
     // m_interface->setGeometryFile(Basename() + ".xyz"); TODO this does not really work
     // m_interface->setBasename(Basename()); TODO this does not really work
     if (m_writeUnique) {
-        json rmsdtraj = RMSDTrajJson;
+        // Claude Generated: Replace static RMSDTrajJson with ParameterRegistry
+        json rmsdtraj = ParameterRegistry::getInstance().getDefaultJson("rmsdtraj");
         rmsdtraj["writeUnique"] = true;
         rmsdtraj["rmsd"] = m_rmsd;
         rmsdtraj["writeRMSD"] = false;
