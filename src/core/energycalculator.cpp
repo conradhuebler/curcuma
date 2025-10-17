@@ -21,6 +21,7 @@
 #include "energycalculator.h"
 #include "src/tools/general.h"
 #include "src/core/curcuma_logger.h"
+#include "config_manager.h"
 
 #include <iostream>
 #include <cmath>
@@ -30,20 +31,32 @@
 // Constructors and Initialization
 // =================================================================================
 
+// JSON-based constructors (backward compatible) - delegate to ConfigManager versions
 EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller)
+    : EnergyCalculator(method, ConfigManager("energycalculator", controller))
+{
+}
+
+EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller, const std::string& basename)
+    : EnergyCalculator(method, ConfigManager("energycalculator", controller), basename)
+{
+}
+
+// ConfigManager-based constructors (new, preferred) - Claude Generated: Phase 3C
+EnergyCalculator::EnergyCalculator(const std::string& method, const ConfigManager& config)
     : m_method_name(method)
     , m_basename("")
     , m_energy(0.0)
 {
-    initializeCommon(controller);
+    initializeCommonFromConfig(config);
 }
 
-EnergyCalculator::EnergyCalculator(const std::string& method, const json& controller, const std::string& basename)
+EnergyCalculator::EnergyCalculator(const std::string& method, const ConfigManager& config, const std::string& basename)
     : m_method_name(method)
     , m_basename(basename)
     , m_energy(0.0)
 {
-    initializeCommon(controller);
+    initializeCommonFromConfig(config);
 }
 
 EnergyCalculator::~EnergyCalculator() {
@@ -51,50 +64,50 @@ EnergyCalculator::~EnergyCalculator() {
     // No need for manual method cleanup
 }
 
-void EnergyCalculator::initializeCommon(const json& controller) {
+// Claude Generated: Phase 3C - ConfigManager-based initialization
+void EnergyCalculator::initializeCommonFromConfig(const ConfigManager& config) {
     // Only show initialization info if verbosity is high enough
-    // This respects submodule verbosity override (e.g., Hessian can silence this)
     if (getEffectiveVerbosity() >= 2) {
-        CurcumaLogger::info("Initializing EnergyCalculator");
+        CurcumaLogger::info("Initializing EnergyCalculator (ConfigManager)");
         CurcumaLogger::param("method", m_method_name);
     }
 
     if (getEffectiveVerbosity() >= 3) {
-        CurcumaLogger::info("=== EnergyCalculator Initialization Debug ===");
+        CurcumaLogger::info("=== EnergyCalculator Initialization Debug (ConfigManager) ===");
         CurcumaLogger::param("method_name", m_method_name);
         CurcumaLogger::param("basename", m_basename);
         CurcumaLogger::param("verbosity_override", m_verbosity_override);
     }
 
-    // Merge with default configuration
-    m_controller = MergeJson(EnergyCalculatorJson, controller);
+    // Store configuration
+    m_controller = config.exportConfig();  // Export for compatibility with existing code
 
     if (getEffectiveVerbosity() >= 3) {
-        CurcumaLogger::param_comparison_table(EnergyCalculatorJson, controller, "EnergyCalculator Configuration");
+        CurcumaLogger::param_table(m_controller, "EnergyCalculator Configuration");
     }
 
-    // Extract common parameters
-    if (controller.contains("param_file")) {
-        m_parameter["param_file"] = controller["param_file"];
+    // Extract common parameters from ConfigManager
+    if (m_controller.contains("param_file")) {
+        m_parameter["param_file"] = m_controller["param_file"];
         if (getEffectiveVerbosity() >= 2) {
-            CurcumaLogger::param("param_file", controller["param_file"].get<std::string>());
+            CurcumaLogger::param("param_file", m_controller["param_file"].get<std::string>());
         }
     }
-    
-    if (controller.contains("geometry_file")) {
-        m_geometry_file = controller["geometry_file"];
+
+    if (m_controller.contains("geometry_file")) {
+        m_geometry_file = m_controller["geometry_file"];
         if (getEffectiveVerbosity() >= 2) {
             CurcumaLogger::param("geometry_file", m_geometry_file);
         }
     }
-    
+
     if (!m_basename.empty()) {
         m_geometry_file = m_basename + ".xyz";
         if (getEffectiveVerbosity() >= 2) {
             CurcumaLogger::param("auto_geometry_file", m_geometry_file);
         }
     }
-    
+
     // Extract multiplicity and other settings
     m_mult = m_controller.value("multi", 1);
     if (getEffectiveVerbosity() >= 2) {
@@ -112,9 +125,14 @@ void EnergyCalculator::initializeCommon(const json& controller) {
         CurcumaLogger::error("Failed to create computational method: " + m_method_name);
         return;
     }
-    
+
     CurcumaLogger::success("EnergyCalculator initialized successfully");
     CurcumaLogger::param("actual_method", m_method_name);
+}
+
+// Backward compatible wrapper - delegates to ConfigManager version
+void EnergyCalculator::initializeCommon(const json& controller) {
+    initializeCommonFromConfig(ConfigManager("energycalculator", controller));
 }
 
 bool EnergyCalculator::createMethod(const std::string& method_name, const json& config) {

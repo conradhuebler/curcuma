@@ -21,23 +21,6 @@
 
 #include "src/core/global.h"
 
-static json QMInterfaceJson{
-    { "threads", 1 },
-    { "charge", 0 },
-    { "muli", 1 },
-    { "solver", "eigen" },
-    { "method", "none" },
-    { "basis", "sto-3g" },
-    { "gradient", false },
-    { "maxiter", 100 },
-    { "scfconv", 1e-6 },
-    { "scfconvgrad", 1e-6 },
-    { "scfconvenergy", 1e-6 },
-    { "scfconvdensity", 1e-6 },
-    { "scfconvgradient", 1e-6 },
-    { "scfconvenergygradient", 1e-6 }
-};
-
 class QMInterface {
 public:
     QMInterface() = default;

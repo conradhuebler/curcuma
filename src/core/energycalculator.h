@@ -22,22 +22,13 @@
 
 #include "energy_calculators/computational_method.h"
 #include "energy_calculators/method_factory.h"
+#include "config_manager.h"
 
 #include <memory>
 #include <functional>
 
 #include "json.hpp"
 using json = nlohmann::json;
-
-static json EnergyCalculatorJson{
-    { "param_file", "none" },
-    { "multi", 1 },
-    { "method", "uff" },
-    { "SCFmaxiter", 100 },
-    { "Tele", 300 },
-    { "solvent", "none" },
-    { "verbose", 0 }
-};
 
 /**
  * @brief Unified Energy and Gradient Calculator
@@ -65,20 +56,37 @@ static json EnergyCalculatorJson{
 class EnergyCalculator {
 public:
     /**
-     * @brief Constructor with method and configuration
+     * @brief Constructor with method and JSON configuration (backward compatible)
      * @param method Method name (e.g., "gfn2", "uff", "eht", "cgfnff")
      * @param controller JSON configuration
      */
     EnergyCalculator(const std::string& method, const json& controller);
-    
+
     /**
-     * @brief Constructor with basename for parameter caching
+     * @brief Constructor with basename for parameter caching (backward compatible)
      * @param method Method name
      * @param controller JSON configuration
      * @param basename Base name for parameter file generation
      */
     EnergyCalculator(const std::string& method, const json& controller, const std::string& basename);
-    
+
+    /**
+     * @brief Constructor with method and ConfigManager configuration (new, preferred)
+     * Claude Generated: Phase 3C - Native ConfigManager support
+     * @param method Method name
+     * @param config ConfigManager configuration
+     */
+    EnergyCalculator(const std::string& method, const ConfigManager& config);
+
+    /**
+     * @brief Constructor with ConfigManager and basename (new, preferred)
+     * Claude Generated: Phase 3C - Native ConfigManager support
+     * @param method Method name
+     * @param config ConfigManager configuration
+     * @param basename Base name for parameter file generation
+     */
+    EnergyCalculator(const std::string& method, const ConfigManager& config, const std::string& basename);
+
     /**
      * @brief Destructor
      */
@@ -353,7 +361,14 @@ private:
     // =================================================================================
     
     /**
-     * @brief Initialize EnergyCalculator with common settings
+     * @brief Initialize EnergyCalculator with ConfigManager settings (new, preferred)
+     * Claude Generated: Phase 3C - Native ConfigManager support
+     * @param config ConfigManager configuration
+     */
+    void initializeCommonFromConfig(const ConfigManager& config);
+
+    /**
+     * @brief Initialize EnergyCalculator with JSON settings (backward compatible)
      * @param controller Configuration JSON
      */
     void initializeCommon(const json& controller);
