@@ -20,6 +20,7 @@
 #include "forcefield_method.h"
 #include "src/tools/general.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/config_manager.h"
 
 #include <fmt/format.h>
 #include <iostream>
@@ -502,9 +503,12 @@ bool ForceFieldMethod::generateParametersIfNeeded(const Mol& mol) {
         // Create generator configuration
         json generator_config = m_parameters;
         generator_config["method"] = m_method_name;
-        
+
+        // Claude Generated: Create ConfigManager for ForceFieldGenerator (Phase 3B)
+        ConfigManager ff_config("forcefield", generator_config);
+
         // Create ForceFieldGenerator
-        ForceFieldGenerator generator(generator_config);
+        ForceFieldGenerator generator(ff_config);
         generator.setMolecule(mol);
         
         if (CurcumaLogger::get_verbosity() >= 3) {

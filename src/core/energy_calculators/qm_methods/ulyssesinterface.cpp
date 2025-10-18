@@ -29,18 +29,19 @@
 #include "ulyssesinterface.h"
 #include <fmt/format.h>
 
-UlyssesInterface::UlyssesInterface(const json& ulyssessettings)
+UlyssesInterface::UlyssesInterface(const ConfigManager& config)
+    : m_config(config)
 {
-    m_ulyssessettings = MergeJson(UlyssesSettings, ulyssessettings);
-    m_Tele = m_ulyssessettings["Tele"];
-    m_SCFmaxiter = m_ulyssessettings["SCFmaxiter"];
-    m_solvent = m_ulyssessettings["solvent"];
-    m_mult = m_ulyssessettings["mult"];
+    // Claude Generated 2025: ConfigManager migration - Phase 3B
+    m_Tele = m_config.get<double>("electronic_temperature", 300.0);
+    m_SCFmaxiter = m_config.get<int>("max_iterations", 100);
+    m_solvent = m_config.get<std::string>("solvent", "none");
+    m_mult = m_config.get<int>("multiplicity", 1);
 
     // Claude Generated: Use parsed base_method and corecorrection from ulysses_method.cpp
-    if (ulyssessettings.contains("base_method") && ulyssessettings.contains("corecorrection")) {
-        m_method = ulyssessettings["base_method"];
-        m_correction = ulyssessettings["corecorrection"];
+    if (m_config.has("base_method") && m_config.has("corecorrection")) {
+        m_method = m_config.get<std::string>("base_method");
+        m_correction = m_config.get<std::string>("corecorrection");
 
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info("UlyssesInterface using parsed parameters");
@@ -49,7 +50,7 @@ UlyssesInterface::UlyssesInterface(const json& ulyssessettings)
         }
     } else {
         // Fallback to original method for backward compatibility
-        m_method = m_ulyssessettings["method"];
+        m_method = m_config.get<std::string>("method", "GFN2");
         m_correction = "0";
 
         if (CurcumaLogger::get_verbosity() >= 3) {

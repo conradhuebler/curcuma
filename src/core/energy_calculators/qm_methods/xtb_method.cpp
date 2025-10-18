@@ -5,11 +5,14 @@
 
 #include "xtb_method.h"
 #include "src/tools/general.h"
+#include "src/core/config_manager.h"
 
 XTBMethod::XTBMethod(const std::string& method_name, const json& config)
     : m_method_name(method_name), m_calculation_done(false), m_last_energy(0.0) {
 #ifdef USE_XTB
-    m_xtb = std::make_unique<XTBInterface>(config);
+    // Claude Generated: Create ConfigManager for XTB interface (Phase 3B)
+    ConfigManager xtb_config("xtb", config);
+    m_xtb = std::make_unique<XTBInterface>(xtb_config);
 #endif
     m_parameters = config;
 }

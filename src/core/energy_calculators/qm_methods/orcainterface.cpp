@@ -8,7 +8,17 @@
 #include <iostream>
 #include <sstream>
 
+OrcaInterface::OrcaInterface(const ConfigManager& config)
+    : m_config(config)
+{
+    // Claude Generated 2025: ConfigManager migration - Phase 3B
+    // ORCA parameters can be accessed from m_config when needed
+    inputFilePath = "orca.inp";
+    outputFilePath = "orca.out";
+}
+
 OrcaInterface::OrcaInterface()
+    : m_config("orca", json{})
 {
     inputFilePath = "orca.inp";
     outputFilePath = "orca.out";

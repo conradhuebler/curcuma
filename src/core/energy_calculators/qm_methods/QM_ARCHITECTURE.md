@@ -202,29 +202,64 @@ public:
 
 ## Configuration Management
 
-### JSON-Based Configuration
-**Location**: `interface/abstract_interface.h`
+### ConfigManager & Parameter Registry System (2025)
+
+**Modern Architecture**: All QM methods now use the **ConfigManager + Parameter Registry** system for type-safe, validated parameter access.
+
+#### **Parameter Definition (in Method Headers)**
+**Example from `xtbinterface.h`**:
 
 ```cpp
-static json QMInterfaceJson{
-    { "threads", 1 },
-    { "charge", 0 },
-    { "muli", 1 },
-    { "solver", "eigen" },
-    { "method", "none" },
-    { "basis", "sto-3g" },
-    { "verbose", false },
-    { "gradient", false },
-    { "maxiter", 100 },
-    { "scfconv", 1e-6 },
-    // ... additional parameters
+#include "src/core/parameter_macros.h"
+#include "src/core/config_manager.h"
+
+// Define parameters using PARAM macros
+BEGIN_PARAMETER_DEFINITION(xtb)
+    PARAM(accuracy, Int, 2, "Accuracy level for XTB calculations (0-4).", "SCF", {"xtb_ac"})
+    PARAM(max_iterations, Int, 100, "Maximum number of SCF iterations.", "SCF", {"SCFmaxiter"})
+    PARAM(electronic_temperature, Double, 300.0, "Electronic temperature in Kelvin.", "SCF", {"Tele"})
+    PARAM(spin, Double, 0.0, "Total spin of the system (0.0 = singlet).", "Molecular", {})
+END_PARAMETER_DEFINITION
+
+class XTBInterface : public QMInterface {
+public:
+    XTBInterface(const ConfigManager& config);  // Modern constructor
+    // ...
+private:
+    mutable ConfigManager m_config;
 };
 ```
 
+#### **Type-Safe Parameter Access (in Implementation)**
+**Example from `xtbinterface.cpp`**:
+
+```cpp
+XTBInterface::XTBInterface(const ConfigManager& config)
+    : m_config(config)
+{
+    // Type-safe parameter access with defaults
+    m_accuracy = m_config.get<int>("accuracy", 2);
+    m_SCFmaxiter = m_config.get<int>("max_iterations", 100);
+    m_Tele = m_config.get<double>("electronic_temperature", 300.0);
+    m_spin = m_config.get<double>("spin", 0.0);
+}
+```
+
+#### **Build-Time Parameter Extraction**
+Parameters are automatically extracted from header files during build:
+```bash
+make GenerateParams  # Scans PARAM blocks → generates parameter_registry.h
+```
+
 **Benefits**:
-- **Consistent defaults**: All methods inherit common settings
-- **Runtime configuration**: Parameters can be modified without recompilation
-- **Method-specific overrides**: Each method can customize its configuration
+- **Type safety**: Compile-time type checking via `get<T>()`
+- **Auto-generated help**: Parameters documented in code generate user help
+- **Single source of truth**: No manual JSON/help synchronization
+- **Validation**: Build-time duplicate detection and type validation
+- **Aliases**: Backward compatibility via old parameter names
+- **Case-insensitive**: `-MaxIter` and `-maxiter` both work
+
+**See also**: `docs/PARAMETER_SYSTEM.md`, `docs/PARAMETER_MIGRATION_GUIDE.md`
 
 ## Data Flow and Lifecycle
 
@@ -287,15 +322,45 @@ QMInterface::OrbitalEnergies() → Energy eigenvalues
    };
    ```
 
-3. **Add method-specific configuration**:
-   - Extend JSON configuration
-   - Add parameter validation
-   - Document new parameters
+3. **Define method-specific parameters** (ConfigManager system):
+   ```cpp
+   // In newmethod.h
+   #include "src/core/parameter_macros.h"
+   #include "src/core/config_manager.h"
 
-4. **Integrate with build system**:
+   BEGIN_PARAMETER_DEFINITION(newmethod)
+       PARAM(max_iterations, Int, 100, "SCF iteration limit.", "SCF", {})
+       PARAM(convergence, Double, 1e-6, "Energy convergence threshold.", "SCF", {})
+       // Add all method-specific parameters here
+   END_PARAMETER_DEFINITION
+
+   class NewMethod : public QMDriver {
+   public:
+       NewMethod(const ConfigManager& config);  // Modern constructor
+   private:
+       mutable ConfigManager m_config;
+   };
+   ```
+
+4. **Implement ConfigManager-based constructor**:
+   ```cpp
+   // In newmethod.cpp
+   NewMethod::NewMethod(const ConfigManager& config)
+       : m_config(config)
+   {
+       // Type-safe parameter access
+       m_max_iter = m_config.get<int>("max_iterations", 100);
+       m_conv_thr = m_config.get<double>("convergence", 1e-6);
+   }
+   ```
+
+5. **Integrate with build system**:
+   - Run `make GenerateParams` to extract parameter definitions
    - Update CMakeLists.txt
    - Add unit tests
    - Update documentation
+
+**See also**: `docs/PARAMETER_MIGRATION_GUIDE.md` for complete migration workflow
 
 ### Best Practices
 
@@ -313,6 +378,113 @@ QMInterface::OrbitalEnergies() → Energy eigenvalues
    - Follow consistent naming conventions
    - Add comprehensive documentation
    - Write unit tests for all new functionality
+
+## ConfigManager Integration (2025)
+
+### Complete Parameter Flow Through the System
+
+**The ConfigManager system provides end-to-end type-safe parameter management** from user input to low-level QM interfaces.
+
+#### **Data Flow Chain**
+
+```
+User CLI/JSON Input
+    ↓
+Capability (e.g., Opt, ConfScan, SimpleMD)
+    ↓  Creates ConfigManager with module-specific defaults
+EnergyCalculator(method, ConfigManager&)
+    ↓  Delegates to ConfigManager constructor
+MethodFactory::create(method, json)
+    ↓  Exports JSON for backward compatibility
+Method Wrapper (e.g., XTBMethod, TBLiteMethod)
+    ↓  Creates ConfigManager("xtb", json)
+QM Interface (e.g., XTBInterface)
+    ↓  Type-safe parameter access: config.get<int>("accuracy")
+External Library (XTB, TBLite, Ulysses)
+```
+
+#### **Example: Complete Parameter Journey**
+
+**1. User Input (CLI)**:
+```bash
+curcuma -opt input.xyz -method gfn2 -max_iterations 200 -accuracy 3
+```
+
+**2. Capability Layer** (`curcumaopt.cpp`):
+```cpp
+ConfigManager opt_config("opt", controller["opt"]);
+EnergyCalculator calculator("gfn2", opt_config);
+```
+
+**3. EnergyCalculator** (`energycalculator.cpp`):
+```cpp
+EnergyCalculator::EnergyCalculator(const std::string& method, const ConfigManager& config)
+    : m_method_name(method)
+{
+    m_controller = config.exportConfig();  // For MethodFactory compatibility
+    createMethod(method_name, m_controller);
+}
+```
+
+**4. MethodFactory** (`method_factory.cpp`):
+```cpp
+std::unique_ptr<ComputationalMethod> MethodFactory::create(
+    const std::string& method_name, const json& config)
+{
+    // Priority resolution: gfn2 → TBLite > Ulysses > XTB
+    return std::make_unique<TBLiteMethod>("gfn2", config);
+}
+```
+
+**5. Method Wrapper** (`tblite_method.cpp`):
+```cpp
+TBLiteMethod::TBLiteMethod(const std::string& method_name, const json& config)
+{
+    ConfigManager tblite_config("tblite", config);  // Extract tblite-specific params
+    m_tblite = std::make_unique<TBLiteInterface>(tblite_config);
+}
+```
+
+**6. QM Interface** (`tbliteinterface.cpp`):
+```cpp
+TBLiteInterface::TBLiteInterface(const ConfigManager& config)
+    : m_config(config)
+{
+    // Type-safe parameter access with defaults from PARAM definitions
+    m_acc = m_config.get<int>("accuracy", 1);              // User: 3
+    m_SCFmaxiter = m_config.get<int>("max_iterations", 100); // User: 200
+    m_damping = m_config.get<double>("damping", 0.4);       // Default: 0.4
+}
+```
+
+**7. External Library**:
+```cpp
+tblite_set_calculator_accuracy(m_ctx, m_tblite_calc, m_acc);         // 3
+tblite_set_calculator_max_iter(m_ctx, m_tblite_calc, m_SCFmaxiter);  // 200
+```
+
+#### **Key Benefits of This Architecture**
+
+1. **Type Safety Throughout**: Every layer uses typed access (`get<int>`, `get<double>`)
+2. **Single Source of Truth**: PARAM definitions in headers generate all defaults
+3. **Automatic Validation**: Build-time parameter extraction catches errors early
+4. **Backward Compatibility**: Old JSON code still works via `exportConfig()`
+5. **Educational Clarity**: Easy to trace parameter flow from CLI to library
+6. **Zero Runtime Overhead**: ConfigManager resolves to direct member access
+
+#### **Migration Status (October 2025)**
+
+**✅ Completed**:
+- ✅ Phase 1: Parameter definitions (240 parameters across 12 modules)
+- ✅ Phase 2: Interface constructors (XTB, TBLite, Ulysses, DFT-D3/D4, GFN-FF, ForceFieldGenerator)
+- ✅ Phase 3: Method wrappers (8 wrappers updated)
+- ✅ Phase 3C: EnergyCalculator integration (delegating constructors)
+
+**🟡 Remaining TODOs**:
+- DFT-D3/D4 `UpdateParameters()` method signatures (still use JSON)
+- Native GFN-FF (cgfnff) parameter generation completeness
+
+**See Full Migration Details**: `energy_modules_migration_guide.md`
 
 ## Future Architecture Considerations
 

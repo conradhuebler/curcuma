@@ -4,17 +4,21 @@
  */
 
 #include "dispersion_method.h"
+#include "src/core/config_manager.h"
 
 DispersionMethod::DispersionMethod(const std::string& method_name, const json& config)
     : m_method_name(method_name), m_calculation_done(false), m_last_energy(0.0) {
-    
+
+    // Wrap JSON in ConfigManager for interface constructors
     if (method_name == "d3") {
 #ifdef USE_D3
-        m_dispersion = std::make_unique<DFTD3Interface>(config);
+        ConfigManager d3_config("dftd3", config);
+        m_dispersion = std::make_unique<DFTD3Interface>(d3_config);
 #endif
     } else if (method_name == "d4") {
 #ifdef USE_D4
-        m_dispersion = std::make_unique<DFTD4Interface>(config);
+        ConfigManager d4_config("dftd4", config);
+        m_dispersion = std::make_unique<DFTD4Interface>(d4_config);
 #endif
     }
     m_parameters = config;

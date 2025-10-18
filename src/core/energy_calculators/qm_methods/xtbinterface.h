@@ -22,22 +22,24 @@
 #include "interface/abstract_interface.h"
 
 #include "src/tools/general.h"
+#include "src/core/parameter_macros.h"
+#include "src/core/config_manager.h"
 
 #include "external/xtb/include/xtb.h"
 
-static json XTBSettings{
-    { "xtb_ac", 2 },
-    { "SCFmaxiter", 100 },
-    { "Tele", 300 },
-    { "spin", 0 }
-
-};
+// Claude Generated 2025: XTB Parameter Registry - replaces static XTBSettings JSON
+BEGIN_PARAMETER_DEFINITION(xtb)
+    PARAM(accuracy, Int, 2, "Accuracy level for XTB calculations (0=crude, 1=sloppy, 2=normal, 3=tight, 4=vtight).", "SCF", {"xtb_ac"})
+    PARAM(max_iterations, Int, 100, "Maximum number of SCF iterations.", "SCF", {"SCFmaxiter"})
+    PARAM(electronic_temperature, Double, 300.0, "Electronic temperature in Kelvin for Fermi smearing.", "SCF", {"Tele"})
+    PARAM(spin, Double, 0.0, "Total spin of the system (0.0 = singlet).", "Molecular", {})
+END_PARAMETER_DEFINITION
 
 class UFF;
 
 class XTBInterface : public QMInterface {
 public:
-    XTBInterface(const json& xtbsettings = XTBSettings);
+    XTBInterface(const ConfigManager& config);
     ~XTBInterface();
 
     bool InitialiseMolecule(const Mol& molecule);
@@ -80,5 +82,5 @@ private:
     xtb_TCalculator m_xtb_calc = NULL;
     xtb_TResults m_xtb_res = NULL;
     bool m_initialised = false, m_setup = false;
-    json m_xtbsettings;
+    mutable ConfigManager m_config;
 };

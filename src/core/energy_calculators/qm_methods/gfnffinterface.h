@@ -21,20 +21,28 @@
 #pragma once
 
 #include "interface/abstract_interface.h"
+#include "src/core/parameter_macros.h"
+#include "src/core/config_manager.h"
 
 #ifdef USE_GFNFF
 #include "gfnff_interface_c.h"
 #endif
 
-static json GFNFFSettings{
-    { "charge", 0 },
-    { "printlevel", 1 },
-    { "solvent", "none" }
-};
+// Claude Generated 2025: External GFN-FF Parameter Registry - replaces static GFNFFSettings JSON
+BEGIN_PARAMETER_DEFINITION(gfnff_external)
+    // Molecular Properties
+    PARAM(charge, Int, 0, "Total molecular charge.", "Molecular", {})
+
+    // Output Control
+    PARAM(print_level, Int, 1, "Verbosity level for GFN-FF output (0=silent, 1=minimal, 2=verbose).", "Output", {"printlevel"})
+
+    // Solvation
+    PARAM(solvent, String, "none", "Solvent name for implicit solvation (none, water, etc.).", "Solvation", {})
+END_PARAMETER_DEFINITION
 
 class GFNFFInterface : public QMInterface {
 public:
-    GFNFFInterface(const json& gfnffsettings = GFNFFSettings);
+    GFNFFInterface(const ConfigManager& config);
     ~GFNFFInterface();
 
     bool InitialiseMolecule(const Mol& mol) override;
@@ -55,7 +63,6 @@ private:
 #ifdef USE_GFNFF
     c_gfnff_calculator m_calculator;
 #endif
-    json m_settings;
     bool m_initialized;
     double m_energy;
     Geometry m_gradient;
@@ -67,6 +74,7 @@ private:
     std::vector<int> m_atom_types;
     std::vector<double> m_coordinates; // Current coordinates in Angstrom
     std::vector<double> m_coordinates_bohr; // Coordinates in Bohr for GFN-FF
+    mutable ConfigManager m_config;
 
     void updateVerbosity();
 };

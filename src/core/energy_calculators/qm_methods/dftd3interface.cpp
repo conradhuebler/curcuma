@@ -1,6 +1,6 @@
 /*
  * < C++ XTB and tblite Interface >
- * Copyright (C) 2020 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -30,22 +30,22 @@
 
 #include "dftd3interface.h"
 
-DFTD3Interface::DFTD3Interface(const json& controller)
+DFTD3Interface::DFTD3Interface(const ConfigManager& config)
+    : m_config(config)
 {
-    json parameter = MergeJson(DFTD3Settings, controller);
+    // Claude Generated 2025: ConfigManager migration - Phase 3B
+    m_d3_a1 = m_config.get<double>("a1", 0.0);
+    m_d3_a2 = m_config.get<double>("a2", 0.0);
+    m_d3_alp = m_config.get<double>("alpha", 14.0);
 
-    m_d3_a1 = parameter["d_a1"];
-    m_d3_a2 = parameter["d_a2"];
-    m_d3_alp = parameter["d_alp"];
+    m_d3_s6 = m_config.get<double>("s6", 1.0);
+    m_d3_s8 = m_config.get<double>("s8", 0.0);
+    m_d3_s9 = m_config.get<double>("s9", 0.0);
+    m_bet = m_config.get<double>("beta", 8.0);
 
-    m_d3_s6 = parameter["d_s6"];
-    m_d3_s8 = parameter["d_s8"];
-    m_d3_s9 = parameter["d_s9"];
-    m_bet = parameter["d_bet"];
-
-    m_atm = parameter["d_atm"];
-    m_damping = parameter["d_damping"];
-    m_functional = parameter["d_func"];
+    m_atm = m_config.get<bool>("three_body", false);
+    m_damping = m_config.get<std::string>("damping", "bj");
+    m_functional = m_config.get<std::string>("functional", "pbe0");
     CreateParameter();
 #ifdef USE_D3
     m_error = dftd3_new_error();
@@ -53,6 +53,7 @@ DFTD3Interface::DFTD3Interface(const json& controller)
 }
 
 DFTD3Interface::DFTD3Interface()
+    : m_config("dftd3", json{})
 {
 #ifdef USE_D3
     m_error = dftd3_new_error();
@@ -111,39 +112,46 @@ void DFTD3Interface::CreateParameter()
 #endif
 }
 
-void DFTD3Interface::UpdateParameters(const json& controller)
+// Claude Generated 2025: ConfigManager migration - Phase 2.1
+// ConfigManager-based parameter update (modern version)
+void DFTD3Interface::UpdateParameters(const ConfigManager& config)
 {
-#pragma message("remove and make consistent")
+    // Update parameters, keeping existing values as defaults
+    m_d3_a1 = config.get<double>("a1", m_d3_a1);
+    m_d3_a2 = config.get<double>("a2", m_d3_a2);
+    m_d3_alp = config.get<double>("alpha", m_d3_alp);
 
-    json parameter = MergeJson(DFTD3Settings, controller);
-    m_d3_a1 = parameter["d_a1"];
-    m_d3_a2 = parameter["d_a2"];
-    m_d3_alp = parameter["d_alp"];
+    m_d3_s6 = config.get<double>("s6", m_d3_s6);
+    m_d3_s8 = config.get<double>("s8", m_d3_s8);
+    m_d3_s9 = config.get<double>("s9", m_d3_s9);
 
-    m_d3_s6 = parameter["d_s6"];
-    m_d3_s8 = parameter["d_s8"];
+    m_bet = config.get<double>("beta", m_bet);
+    m_atm = config.get<bool>("three_body", m_atm);
 
-    m_d3_s9 = parameter["d_s9"];
+    // Reinitialize DFT-D3 parameter structure with new values
     CreateParameter();
-
-    // PrintParameter();
 }
 
+// Backward compatibility: JSON version delegates to ConfigManager
+void DFTD3Interface::UpdateParameters(const json& controller)
+{
+    ConfigManager param_config("dftd3", controller);
+    UpdateParameters(param_config);
+}
+
+// Claude Generated 2025: ConfigManager migration - Phase 2.1
+// D3-specific parameter update (modern version)
+void DFTD3Interface::UpdateParametersD3(const ConfigManager& config)
+{
+    // Same implementation as UpdateParameters for D3
+    UpdateParameters(config);
+}
+
+// Backward compatibility: JSON version delegates to ConfigManager
 void DFTD3Interface::UpdateParametersD3(const json& controller)
 {
-#pragma message("remove and make consistent")
-    json parameter = MergeJson(DFTD3Settings, controller);
-    m_d3_a1 = parameter["d3_a1"];
-    m_d3_a2 = parameter["d3_a2"];
-    m_d3_alp = parameter["d3_alp"];
-
-    m_d3_s6 = parameter["d3_s6"];
-    m_d3_s8 = parameter["d3_s8"];
-
-    m_d3_s9 = parameter["d3_s9"];
-    CreateParameter();
-
-    // PrintParameter();
+    ConfigManager param_config("dftd3", controller);
+    UpdateParametersD3(param_config);
 }
 
 bool DFTD3Interface::InitialiseMolecule(const std::vector<int>& atomtypes)

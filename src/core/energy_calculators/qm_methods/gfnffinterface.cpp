@@ -29,8 +29,8 @@
 #include <math.h>
 #include <stdio.h>
 
-GFNFFInterface::GFNFFInterface(const json& gfnffsettings)
-    : m_settings(MergeJson(GFNFFSettings, gfnffsettings))
+GFNFFInterface::GFNFFInterface(const ConfigManager& config)
+    : m_config(config)
     , m_initialized(false)
     , m_energy(0.0)
     , m_natoms(0)
@@ -43,10 +43,10 @@ GFNFFInterface::GFNFFInterface(const json& gfnffsettings)
     m_calculator.ptr = nullptr;
 #endif
 
-    // Extract settings
-    m_charge = m_settings["charge"];
-    m_printlevel = m_settings["printlevel"];
-    m_solvent = m_settings["solvent"];
+    // Claude Generated 2025: ConfigManager migration - Phase 3B
+    m_charge = m_config.get<int>("charge", 0);
+    m_printlevel = m_config.get<int>("print_level", 1);
+    m_solvent = m_config.get<std::string>("solvent", "none");
 
     updateVerbosity();
 
@@ -319,7 +319,4 @@ void GFNFFInterface::updateVerbosity()
     } else {
         m_printlevel = 0;
     }
-
-    // Update settings
-    m_settings["printlevel"] = m_printlevel;
 }

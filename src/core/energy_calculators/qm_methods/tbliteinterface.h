@@ -20,26 +20,34 @@
 #pragma once
 
 #include "interface/abstract_interface.h"
+#include "src/core/parameter_macros.h"
+#include "src/core/config_manager.h"
 
 #ifndef tblite_delete
 #include "tblite.h"
 #endif
 
-static json TBLiteSettings{
-    { "tb_acc", 1 },
-    { "SCFmaxiter", 100 },
-    { "tb_damping", 0.4 },
-    { "Tele", 300 },
-    { "tb_guess", "SAD" },
-    { "solvent_model", 0 }, // 0 - none; 1 - CPCM; 2 - GB, 3 - ALPB
-    { "solvent_eps", -1 },
-    { "solvent", "none" },
-    { "solvent_gb_version", 0 }, // 0 - GBSA, 1 - ALPB
-    { "solvent_gb_kernel", 1 },
-    { "solvent_alpb_version", 12 },
-    { "solvent_alpb_reference", 1 },
-    { "spin", 0 }
-};
+// Claude Generated 2025: TBLite Parameter Registry - replaces static TBLiteSettings JSON
+BEGIN_PARAMETER_DEFINITION(tblite)
+    // SCF Parameters
+    PARAM(accuracy, Int, 1, "Accuracy level for TBLite calculations (0=crude, 1=normal, 2=tight).", "SCF", {"tb_acc"})
+    PARAM(max_iterations, Int, 100, "Maximum number of SCF iterations.", "SCF", {"SCFmaxiter"})
+    PARAM(damping, Double, 0.4, "SCF damping parameter for convergence.", "SCF", {"tb_damping"})
+    PARAM(electronic_temperature, Double, 300.0, "Electronic temperature in Kelvin for Fermi smearing.", "SCF", {"Tele"})
+    PARAM(initial_guess, String, "SAD", "Initial guess method (SAD=Superposition of Atomic Densities).", "SCF", {"tb_guess"})
+
+    // Molecular Properties
+    PARAM(spin, Double, 0.0, "Total spin of the system (0.0 = singlet).", "Molecular", {})
+
+    // Solvent Model Parameters
+    PARAM(solvent_model, Int, 0, "Solvent model type (0=none, 1=CPCM, 2=GB, 3=ALPB).", "Solvation", {})
+    PARAM(solvent, String, "none", "Solvent name (e.g., 'water', 'acetone', 'none').", "Solvation", {})
+    PARAM(solvent_epsilon, Double, -1.0, "Solvent dielectric constant (epsilon). -1 = auto-detect from name.", "Solvation", {"solvent_eps"})
+    PARAM(solvent_gb_version, Int, 0, "Generalized Born model version (0=GBSA, 1=ALPB).", "Solvation", {})
+    PARAM(solvent_gb_kernel, Int, 1, "GB kernel function type.", "Solvation", {})
+    PARAM(solvent_alpb_version, Int, 12, "ALPB solvation model version.", "Solvation", {})
+    PARAM(solvent_alpb_reference, Int, 1, "ALPB reference state.", "Solvation", {})
+END_PARAMETER_DEFINITION
 
 class TBLiteInterface : public QMInterface {
 public:
@@ -48,7 +56,7 @@ public:
         GFN1 = 1,
         GFN2 = 2
     };
-    TBLiteInterface(const json& tblitesettings = TBLiteSettings);
+    TBLiteInterface(const ConfigManager& config);
     ~TBLiteInterface();
 
     bool InitialiseMolecule(const Mol& mol) override;
@@ -107,7 +115,7 @@ private:
     tblite_container m_tb_cont = NULL;
 
     bool m_initialised = false, m_calculator = false;
-    json m_tblitesettings;
+    mutable ConfigManager m_config;
 
     // Method selection - Claude Generated improvements
     TBLiteMethod m_tblite_method = TBLiteMethod::IPEA1; // Type-safe enum

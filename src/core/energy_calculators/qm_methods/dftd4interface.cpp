@@ -1,6 +1,6 @@
 /*
  * < C++ XTB and tblite Interface >
- * Copyright (C) 2020 - 2024 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2020 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -33,24 +33,28 @@
 
 #include "dftd4interface.h"
 
-DFTD4Interface::DFTD4Interface(const json& controller)
+DFTD4Interface::DFTD4Interface(const ConfigManager& config)
+    : m_config(config)
 {
-    json parameter = MergeJson(DFTD4Settings, controller);
-    m_par.a1 = parameter["d4_a1"];
-    m_par.a2 = parameter["d4_a2"];
-    m_par.alp = parameter["d4_alp"];
+    // Claude Generated 2025: ConfigManager migration - Phase 3B
+    m_par.a1 = m_config.get<double>("a1", 0.40085597);
+    m_par.a2 = m_config.get<double>("a2", 5.02928789);
+    m_par.alp = m_config.get<double>("alpha", 16.0);
 
-    m_par.s6 = parameter["d4_s6"];
-    m_par.s8 = parameter["d4_s8"];
-    m_par.s10 = parameter["d4_s10"];
+    m_par.s6 = m_config.get<double>("s6", 1.00);
+    m_par.s8 = m_config.get<double>("s8", 1.20065498);
+    m_par.s10 = m_config.get<double>("s10", 0.0);
 
-    m_par.s9 = parameter["d4_s9"];
+    m_par.s9 = m_config.get<double>("s9", 1.0);
 
-    dftd4::d4par(parameter["d4_func"], m_par, parameter["d4_atm"]);
+    std::string functional = m_config.get<std::string>("functional", "pbe0");
+    bool three_body = m_config.get<bool>("three_body", true);
+    dftd4::d4par(functional, m_par, three_body);
     PrintParameter();
 }
 
 DFTD4Interface::DFTD4Interface()
+    : m_config("dftd4", json{})
 {
 }
 
@@ -64,21 +68,34 @@ void DFTD4Interface::PrintParameter() const
     // std::cout << m_par.s8 << " " << m_par.s8 << " " << m_par.s9 << " " << m_par.s10 << " " << m_par.a1 << " " << m_par.a2 << " " << m_par.alp << std::endl;
 }
 
+// Claude Generated 2025: ConfigManager migration - Phase 2.2
+// ConfigManager-based parameter update (modern version)
+void DFTD4Interface::UpdateParameters(const ConfigManager& config)
+{
+    // Update functional and three-body settings first
+    std::string functional = config.get<std::string>("functional", "pbe0");
+    bool three_body = config.get<bool>("three_body", true);
+    dftd4::d4par(functional, m_par, three_body);
+
+    // Update damping parameters, keeping existing values as defaults
+    m_par.a1 = config.get<double>("a1", m_par.a1);
+    m_par.a2 = config.get<double>("a2", m_par.a2);
+    m_par.alp = config.get<double>("alpha", m_par.alp);
+
+    // Update scaling parameters
+    m_par.s6 = config.get<double>("s6", m_par.s6);
+    m_par.s8 = config.get<double>("s8", m_par.s8);
+    m_par.s10 = config.get<double>("s10", m_par.s10);
+    m_par.s9 = config.get<double>("s9", m_par.s9);
+
+    PrintParameter();
+}
+
+// Backward compatibility: JSON version delegates to ConfigManager
 void DFTD4Interface::UpdateParameters(const json& controller)
 {
-    json parameter = MergeJson(DFTD4Settings, controller);
-
-    dftd4::d4par(parameter["d4_func"], m_par, parameter["d4_atm"]);
-    m_par.a1 = parameter["d4_a1"];
-    m_par.a2 = parameter["d4_a2"];
-    m_par.alp = parameter["d4_alp"];
-
-    m_par.s6 = parameter["d4_s6"];
-    m_par.s8 = parameter["d4_s8"];
-    m_par.s10 = parameter["d4_s10"];
-
-    m_par.s9 = parameter["d4_s9"];
-    PrintParameter();
+    ConfigManager param_config("dftd4", controller);
+    UpdateParameters(param_config);
 }
 
 bool DFTD4Interface::InitialiseMolecule(const Mol& mol, double factor)

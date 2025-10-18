@@ -36,30 +36,29 @@
 
 #include "tbliteinterface.h"
 
-TBLiteInterface::TBLiteInterface(const json& tblitesettings)
+TBLiteInterface::TBLiteInterface(const ConfigManager& config)
+    : m_config(config)
 {
-    m_tblitesettings = MergeJson(TBLiteSettings, tblitesettings);
-    // std::cout << "Initialising TBLite Interface" << std::endl;
-    // std::cout << m_tblitesettings << std::endl;
-    m_acc = m_tblitesettings["tb_acc"];
-    m_SCFmaxiter = m_tblitesettings["SCFmaxiter"];
-    m_damping = m_tblitesettings["tb_damping"];
+    // Claude Generated: Type-safe parameter access via ConfigManager (Phase 3B)
+    m_acc = m_config.get<int>("accuracy", 1);
+    m_SCFmaxiter = m_config.get<int>("max_iterations", 100);
+    m_damping = m_config.get<double>("damping", 0.4);
 
-    // convert kelvin to atomic units
-    m_Tele = m_tblitesettings["Tele"];
+    // Convert Kelvin to atomic units
+    m_Tele = m_config.get<double>("electronic_temperature", 300.0);
     m_Tele /= 315775.326864009;
-    m_spin = m_tblitesettings["spin"];
-    std::string guess = m_tblitesettings["tb_guess"];
-    m_solvent_eps = m_tblitesettings["solvent_eps"];
-    m_solvent_model = m_tblitesettings["solvent_model"];
+    m_spin = m_config.get<double>("spin", 0.0);
+    std::string guess = m_config.get<std::string>("initial_guess", "SAD");
+    m_solvent_eps = m_config.get<double>("solvent_epsilon", -1.0);
+    m_solvent_model = m_config.get<int>("solvent_model", 0);
 
-    std::string tmp = m_tblitesettings["solvent"];
+    std::string tmp = m_config.get<std::string>("solvent", "none");
     m_solvent = new char[tmp.length() + 1];
     strcpy(m_solvent, tmp.c_str());
-    m_solvent_gb_version = m_tblitesettings["solvent_gb_version"];
-    m_solvent_gb_kernel = m_tblitesettings["solvent_gb_kernel"];
-    m_solvent_alpb_version = m_tblitesettings["solvent_alpb_version"];
-    m_solvent_alpb_reference = m_tblitesettings["solvent_alpb_reference"];
+    m_solvent_gb_version = m_config.get<int>("solvent_gb_version", 0);
+    m_solvent_gb_kernel = m_config.get<int>("solvent_gb_kernel", 1);
+    m_solvent_alpb_version = m_config.get<int>("solvent_alpb_version", 12);
+    m_solvent_alpb_reference = m_config.get<int>("solvent_alpb_reference", 1);
 
     if (guess.compare("SAD") == 0)
         m_guess = 0;

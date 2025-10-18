@@ -20,6 +20,8 @@
 #pragma once
 
 #include "src/tools/general.h"
+#include "src/core/parameter_macros.h"
+#include "src/core/config_manager.h"
 
 #include "dftd_damping.h"
 #include "dftd_dispersion.h"
@@ -30,21 +32,27 @@
 
 #include "src/core/global.h"
 
-static json DFTD4Settings{
-    { "d4_s6", 1.00 },
-    { "d4_s8", 1.20065498 },
-    { "d4_s10", 0 },
-    { "d4_s9", 1 },
-    { "d4_a1", 0.40085597 },
-    { "d4_a2", 5.02928789 },
-    { "d4_alp", 16 },
-    { "d4_func", "pbe0" },
-    { "d4_atm", true }
-};
+// Claude Generated 2025: DFT-D4 Parameter Registry - replaces static DFTD4Settings JSON
+BEGIN_PARAMETER_DEFINITION(dftd4)
+    // Scaling Parameters (C6, C8, C10 terms + 3-body)
+    PARAM(s6, Double, 1.00, "Scaling factor for C6 dispersion term.", "Scaling", {"d4_s6"})
+    PARAM(s8, Double, 1.20065498, "Scaling factor for C8 dispersion term.", "Scaling", {"d4_s8"})
+    PARAM(s9, Double, 1.0, "Scaling factor for three-body ATM dispersion term.", "Scaling", {"d4_s9"})
+    PARAM(s10, Double, 0.0, "Scaling factor for C10 dispersion term (rarely used).", "Scaling", {"d4_s10"})
+
+    // Damping Function Parameters (optimized for D4)
+    PARAM(a1, Double, 0.40085597, "Damping parameter a1 for Becke-Johnson damping.", "Damping", {"d4_a1"})
+    PARAM(a2, Double, 5.02928789, "Damping parameter a2 in Bohr for Becke-Johnson damping.", "Damping", {"d4_a2"})
+    PARAM(alpha, Double, 16.0, "Alpha parameter for damping function.", "Damping", {"d4_alp"})
+
+    // Functional and Options
+    PARAM(functional, String, "pbe0", "DFT functional name for D4 dispersion parameters (e.g., pbe0, b3lyp, wb97x).", "General", {"d4_func"})
+    PARAM(three_body, Bool, true, "Include Axilrod-Teller-Muto three-body dispersion term (recommended for D4).", "General", {"d4_atm"})
+END_PARAMETER_DEFINITION
 
 class DFTD4Interface : public QMInterface {
 public:
-    DFTD4Interface(const json& controller);
+    DFTD4Interface(const ConfigManager& config);
     DFTD4Interface();
 
     ~DFTD4Interface();
@@ -53,6 +61,11 @@ public:
     bool InitialiseMolecule(const std::vector<int>& atomtype);
 
     double Calculation(bool gradient = 0) override;
+
+    // Claude Generated 2025: ConfigManager migration - Phase 2.2
+    void UpdateParameters(const ConfigManager& config);
+
+    // Backward compatibility: JSON version delegates to ConfigManager
     void UpdateParameters(const json& controller);
 
     void clear();
@@ -81,4 +94,5 @@ private:
     dftd4::TMolecule m_mol;
     int m_charge = 0;
     int m_natoms;
+    mutable ConfigManager m_config;
 };

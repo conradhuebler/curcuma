@@ -364,14 +364,18 @@ inline Mol VTF2Mol(const std::string& filename)
         }
         else if (reading_coords && tokens.size() >= 3) {
             // Coordinate line: <x> <y> <z>
+            // Claude Generated (Oct 2025): Guard against malformed files that have extra coordinate lines
+            // If we've already read all atom coordinates, stop reading to prevent memory explosion
+            if (coord_idx >= molecule.m_atoms.size()) {
+                break; // Stop reading coordinates - we have enough
+            }
+
             try {
-                if (coord_idx < molecule.m_atoms.size()) {
-                    double x = std::stod(tokens[0]);
-                    double y = std::stod(tokens[1]);
-                    double z = std::stod(tokens[2]);
-                    molecule.m_geometry.row(coord_idx) = Eigen::Vector3d(x, y, z);
-                    coord_idx++;
-                }
+                double x = std::stod(tokens[0]);
+                double y = std::stod(tokens[1]);
+                double z = std::stod(tokens[2]);
+                molecule.m_geometry.row(coord_idx) = Eigen::Vector3d(x, y, z);
+                coord_idx++;
             } catch (const std::invalid_argument& arg) {
                 // Skip invalid coordinate lines
             }

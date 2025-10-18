@@ -20,25 +20,35 @@
 #pragma once
 
 #include "interface/abstract_interface.h"
+#include "src/core/parameter_macros.h"
+#include "src/core/config_manager.h"
 
 #include <string>
 #include <vector>
 
-static json UlyssesSettings{
-    { "Tele", 300 },
-    { "solvent", "none" },
-    { "method", "GFN2" },
-    { "SCFmaxiter", 100 },
-    { "mult", 1 }
+// Claude Generated 2025: Ulysses Parameter Registry - replaces static UlyssesSettings JSON
+BEGIN_PARAMETER_DEFINITION(ulysses)
+    // Method Selection
+    PARAM(method, String, "GFN2", "Semi-empirical method (GFN1, GFN2, iPEA1, PM3, AM1, MNDO, MNDO/D, PM6, OM2, OM3).", "Method", {})
 
-};
+    // SCF Parameters
+    PARAM(max_iterations, Int, 100, "Maximum number of SCF iterations.", "SCF", {"SCFmaxiter"})
+    PARAM(electronic_temperature, Double, 300.0, "Electronic temperature in Kelvin for Fermi smearing.", "SCF", {"Tele"})
+
+    // Molecular Properties
+    PARAM(multiplicity, Int, 1, "Spin multiplicity (1=singlet, 2=doublet, 3=triplet, etc.).", "Molecular", {"mult"})
+
+    // Solvation
+    PARAM(solvent, String, "none", "Solvent name for implicit solvation (water, acetone, dmso, none, etc.).", "Solvation", {})
+END_PARAMETER_DEFINITION
+
 #ifdef USE_ULYSSES
 class UlyssesObject;
 #endif
 
 class UlyssesInterface : public QMInterface {
 public:
-    UlyssesInterface(const json& ulyssessettings = UlyssesSettings);
+    UlyssesInterface(const ConfigManager& config);
     ~UlyssesInterface();
 
     virtual bool InitialiseMolecule() override;
@@ -63,5 +73,5 @@ private:
     std::string m_solvent = "none";
     std::string m_correction = "0"; // Claude Generated: Store correction parameter separately
 
-    json m_ulyssessettings;
+    mutable ConfigManager m_config;
 };

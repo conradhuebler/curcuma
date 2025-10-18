@@ -114,8 +114,24 @@ static const std::vector<std::string> ElementAbbr = {
     "Bi",
     "Po",
     "At",
-    "Rn"
-    // La - Block not written down here
+    "Rn",
+    // Claude Generated (Oct 2025): Extend array to support CG_ELEMENT (index 226)
+    // Placeholder abbreviations for elements 87-225 (Fr onwards, mostly synthetic)
+    "Fr", "Ra", "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", // 87-96
+    "Bk", "Cf", "Es", "Fm", "Md", "No", "Lr", "Rf", "Db", "Sg", // 97-106
+    "Bh", "Hs", "Mt", "Ds", "Rg", "Cn", "Nh", "Fl", "Mc", "Lv", // 107-116
+    "Ts", "Og", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", // 117-126
+    "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", // 127-136
+    "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", // 137-146
+    "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", // 147-156
+    "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", // 157-166
+    "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", // 167-176
+    "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", // 177-186
+    "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", // 187-196
+    "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", // 197-206
+    "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", // 207-216
+    "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", "Unk", // 217-225
+    "CG"  // Index 226: CG_ELEMENT - Coarse-Grained bead
 };
 
 static const std::vector<std::string> ElementAbbr_Low = {
@@ -205,7 +221,25 @@ static const std::vector<std::string> ElementAbbr_Low = {
     "bi",
     "po",
     "at",
-    "rn"
+    "rn",
+    // Claude Generated (Oct 2025): Extend array to support CG_ELEMENT (index 226)
+    "fr", "ra", "ac", "th", "pa", "u", "np", "pu", "am", "cm", // 87-96: Actinides
+    "bk", "cf", "es", "fm", "md", "no", "lr", "rf", "db", "sg", // 97-106
+    "bh", "hs", "mt", "ds", "rg", "cn", "nh", "fl", "mc", "lv", // 107-116
+    "ts", "og", // 117-118: Last known elements
+    // Unknown elements 119-225
+    "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", // 119-128
+    "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", // 129-138
+    "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", // 139-148
+    "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", // 149-158
+    "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", // 159-168
+    "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", // 169-178
+    "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", // 179-188
+    "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", // 189-198
+    "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", // 199-208
+    "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", // 209-218
+    "unk", "unk", "unk", "unk", "unk", "unk", "unk", "unk", // 219-225
+    "cg" // Index 226: CG_ELEMENT - Coarse-Grained bead (lowercase)
     // La - Block not written down here
 };
 
@@ -400,7 +434,23 @@ static const std::vector<double> VanDerWaalsRadius = {
     2.30, // Pb
     2.30, // Bi
     2.00, // Po
-    2.00 // At
+    2.00, // At
+    // Claude Generated (Oct 2025): Extend array to support CG_ELEMENT (index 226)
+    2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, // 86-95: Placeholder values
+    2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, // 96-105
+    2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, // 106-115
+    2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, // 116-125
+    2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, // 126-135
+    2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, // 136-145
+    2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, // 146-155
+    2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, // 156-165
+    2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, // 166-175
+    2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, // 176-185
+    2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, // 186-195
+    2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, // 196-205
+    2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, // 206-215
+    2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, 2.00, // 216-225
+    3.00 // Index 226: CG_ELEMENT - Typical van der Waals radius for coarse-grained beads (3.0 Å)
 };
 
 /*
@@ -493,7 +543,25 @@ static const std::vector<double> CovalentRadius = {
     1.47, // Pb
     1.46, // Bi
     1.46, // Po - taken from Bi
-    1.46 // At - taken from Bi
+    1.46, // At - taken from Bi
+    // Claude Generated (Oct 2025): Extend array to support CG_ELEMENT (index 226)
+    // Placeholder values for elements 86-225 (Rn onwards, mostly synthetic/unstable)
+    // Using conservative radius of 1.50 Å for unknown elements
+    1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, // 86-95
+    1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, // 96-105
+    1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, // 106-115
+    1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, // 116-125
+    1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, // 126-135
+    1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, // 136-145
+    1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, // 146-155
+    1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, // 156-165
+    1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, // 166-175
+    1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, // 176-185
+    1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, // 186-195
+    1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, // 196-205
+    1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, // 206-215
+    1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, 1.50, // 216-225
+    2.00  // Index 226: CG_ELEMENT - Typical radius for coarse-grained beads (2.0 Å)
 };
 
 static const std::vector<double> PaulingEN = {
@@ -582,7 +650,25 @@ static const std::vector<double> PaulingEN = {
     2.33, // Pb
     2.02, // Bi
     2.0, // Po - taken from Bi
-    2.2 // At - taken from Bi
+    2.2, // At - taken from Bi
+    // Claude Generated (Oct 2025): Extend array to support CG_ELEMENT (index 226)
+    // Placeholder electronegativity values for elements 86-225 (mostly unknown/synthetic)
+    // Using 0.0 for unknown elements (similar to noble gases)
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // 86-95
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // 96-105
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // 106-115
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // 116-125
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // 126-135
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // 136-145
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // 146-155
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // 156-165
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // 166-175
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // 176-185
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // 186-195
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // 196-205
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // 206-215
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // 216-225
+    0.0  // Index 226: CG_ELEMENT - Neutral coarse-grained bead (no electronegativity)
 };
 
 // The old ones

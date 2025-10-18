@@ -19,6 +19,8 @@
 
 #pragma once
 #include "src/core/global.h"
+#include "src/core/parameter_macros.h"
+#include "src/core/config_manager.h"
 
 #include <set>
 
@@ -101,48 +103,60 @@ static json EQJson{
     { "epsilon", 1 }
 };
 
-const json FFGenerator{
-    { "method", "uff" },
-    { "d3", 0 },
-    { "d4", 0 },
-    { "d3_s6", 1.0 },
-    { "d3_s8", 2.7 },
-    { "d3_s9", 1.0 },
-    { "d3_a1", 0.45 },
-    { "d3_a2", 4.0 },
-    { "d3_alp", 1 },
-    { "bond_scaling", 1 },
-    { "angle_scaling", 1 },
-    { "inversion_scaling", 1 },
-    { "vdw_scaling", 1 },
-    { "rep_scaling", 1 },
-    { "dihedral_scaling", 1 },
-    { "coulomb_scaling", 1 },
-    { "h4", 1 },
-    { "hh", 1 },
-    { "h4_oh_o", 2.32 },
-    { "h4_oh_n", 3.10 },
-    { "h4_nh_o", 1.07 },
-    { "h4_nh_n", 2.01 },
-    { "h4_wh_o", 0.42 },
-    { "h4_nh4", 3.61 },
-    { "h4_coo", 1.41 },
-    { "hh_rep_k", 0.42 },
-    { "hh_rep_e", 12.7 },
-    { "hh_rep_r0", 2.3 },
-    { "bond_force", 1.0584 / 7.25 * 1.8 },
-    { "angle_force", 1.0584 / 7.25 },
-    { "torsion_force", 1 / 627.503 },
-    { "inversion_force", 1 / 627.503 },
-    { "vdw_force", 1 / 627.503 },
-    { "h4_scaling", 0 },
-    { "hh_scaling", 0 },
-    { "e0", 0 }
-};
+// Claude Generated 2025: ForceField Generator Parameter Registry - replaces const FFGenerator JSON
+BEGIN_PARAMETER_DEFINITION(forcefield)
+    // Method Selection
+    PARAM(method, String, "uff", "Force field method (uff, uff-d3, qmdff).", "Method", {})
+
+    // Dispersion Corrections (D3/D4)
+    PARAM(d3, Int, 0, "Enable DFT-D3 dispersion correction (0=off, 1=on).", "Dispersion", {})
+    PARAM(d4, Int, 0, "Enable DFT-D4 dispersion correction (0=off, 1=on).", "Dispersion", {})
+    PARAM(d3_s6, Double, 1.0, "D3 scaling factor for C6 term.", "Dispersion", {})
+    PARAM(d3_s8, Double, 2.7, "D3 scaling factor for C8 term.", "Dispersion", {})
+    PARAM(d3_s9, Double, 1.0, "D3 scaling factor for three-body ATM term.", "Dispersion", {})
+    PARAM(d3_a1, Double, 0.45, "D3 damping parameter a1.", "Dispersion", {})
+    PARAM(d3_a2, Double, 4.0, "D3 damping parameter a2 in Bohr.", "Dispersion", {})
+    PARAM(d3_alp, Double, 1.0, "D3 alpha damping parameter.", "Dispersion", {})
+
+    // Force Field Term Scaling
+    PARAM(bond_scaling, Double, 1.0, "Scaling factor for bond stretch terms.", "Scaling", {})
+    PARAM(angle_scaling, Double, 1.0, "Scaling factor for angle bend terms.", "Scaling", {})
+    PARAM(dihedral_scaling, Double, 1.0, "Scaling factor for torsion/dihedral terms.", "Scaling", {})
+    PARAM(inversion_scaling, Double, 1.0, "Scaling factor for inversion/improper terms.", "Scaling", {})
+    PARAM(vdw_scaling, Double, 1.0, "Scaling factor for van der Waals terms.", "Scaling", {})
+    PARAM(rep_scaling, Double, 1.0, "Scaling factor for repulsion terms.", "Scaling", {})
+    PARAM(coulomb_scaling, Double, 1.0, "Scaling factor for electrostatic/Coulomb terms.", "Scaling", {})
+
+    // H4 Hydrogen Bonding Corrections
+    PARAM(h4, Int, 1, "Enable H4 hydrogen bonding correction (0=off, 1=on).", "HBond", {})
+    PARAM(hh, Int, 1, "Enable H-H repulsion correction (0=off, 1=on).", "HBond", {})
+    PARAM(h4_oh_o, Double, 2.32, "H4 correction for O-H...O hydrogen bonds (kJ/mol).", "HBond", {})
+    PARAM(h4_oh_n, Double, 3.10, "H4 correction for O-H...N hydrogen bonds (kJ/mol).", "HBond", {})
+    PARAM(h4_nh_o, Double, 1.07, "H4 correction for N-H...O hydrogen bonds (kJ/mol).", "HBond", {})
+    PARAM(h4_nh_n, Double, 2.01, "H4 correction for N-H...N hydrogen bonds (kJ/mol).", "HBond", {})
+    PARAM(h4_wh_o, Double, 0.42, "H4 correction for water H...O interactions (kJ/mol).", "HBond", {})
+    PARAM(h4_nh4, Double, 3.61, "H4 correction for NH4+ interactions (kJ/mol).", "HBond", {})
+    PARAM(h4_coo, Double, 1.41, "H4 correction for carboxylate COO- interactions (kJ/mol).", "HBond", {})
+    PARAM(hh_rep_k, Double, 0.42, "H-H repulsion force constant k.", "HBond", {})
+    PARAM(hh_rep_e, Double, 12.7, "H-H repulsion well depth epsilon (kJ/mol).", "HBond", {})
+    PARAM(hh_rep_r0, Double, 2.3, "H-H repulsion equilibrium distance r0 (Angstrom).", "HBond", {})
+    PARAM(h4_scaling, Double, 0.0, "Global scaling factor for all H4 corrections.", "HBond", {})
+    PARAM(hh_scaling, Double, 0.0, "Global scaling factor for H-H repulsion.", "HBond", {})
+
+    // Force Constants (unit conversions for UFF)
+    PARAM(bond_force, Double, 0.26306, "Bond stretch force constant (Hartree/Angstrom^2).", "ForceConstants", {})
+    PARAM(angle_force, Double, 0.14595, "Angle bend force constant (Hartree/radian^2).", "ForceConstants", {})
+    PARAM(torsion_force, Double, 0.001593, "Torsion/dihedral force constant (Hartree).", "ForceConstants", {})
+    PARAM(inversion_force, Double, 0.001593, "Inversion/improper force constant (Hartree).", "ForceConstants", {})
+    PARAM(vdw_force, Double, 0.001593, "Van der Waals force constant (Hartree).", "ForceConstants", {})
+
+    // Other Parameters
+    PARAM(energy_offset, Double, 0.0, "Constant energy offset to add to calculated energy (Hartree).", "General", {"e0"})
+END_PARAMETER_DEFINITION
 
 class ForceFieldGenerator {
 public:
-    ForceFieldGenerator(const json& controller);
+    ForceFieldGenerator(const ConfigManager& config);
 
     void setMolecule(const Mol& mol);
     void Generate(const std::vector<std::pair<int, int>>& formed_bonds = std::vector<std::pair<int, int>>());

@@ -4,6 +4,7 @@
  */
 
 #include "src/core/curcuma_logger.h"
+#include "src/core/config_manager.h"
 #include "src/tools/general.h"
 
 #include "tblite_method.h"
@@ -22,7 +23,9 @@ TBLiteMethod::TBLiteMethod(const std::string& method_name, const json& config)
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::param("config", config.dump(2));
         }
-        m_tblite = std::make_unique<TBLiteInterface>(config);
+        // Claude Generated: Create ConfigManager for TBLite interface (Phase 3B)
+        ConfigManager tblite_config("tblite", config);
+        m_tblite = std::make_unique<TBLiteInterface>(tblite_config);
 
         // CRITICAL: Set the specific method name in TBLiteInterface
         CurcumaLogger::info("Setting TBLite method to: " + method_name);

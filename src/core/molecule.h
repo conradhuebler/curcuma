@@ -438,7 +438,32 @@ private:
     mutable double m_scaling = 1.5;
 
     // Claude Generated: Periodic Boundary Conditions data
-    Eigen::Matrix3d m_unit_cell; // 3x3 lattice vectors matrix (Angstroms)
+    // Claude Generated (Oct 2025): Initialize as identity matrix to avoid garbage values
+    // in inverse() calculations - prevents bad_alloc when PBC is detected but matrix is uninitialized
+    Eigen::Matrix3d m_unit_cell = Eigen::Matrix3d::Identity(); // 3x3 lattice vectors matrix (Angstroms)
     bool m_has_pbc = false; // Flag: PBC active?
+
+    // Claude Generated (Oct 2025): Cached PBC inverse matrix for performance optimization
+    // Avoids expensive matrix inversions in bulk PBC calculations (GyrationRadiusPBC, RoutPBC, etc.)
+    // Lazy evaluation: computed on first access, invalidated when unit_cell changes
+    mutable Eigen::Matrix3d m_unit_cell_inverse = Eigen::Matrix3d::Identity();
+    mutable bool m_unit_cell_inverse_valid = false;
+
+    // Claude Generated (Oct 2025): Get cached inverse of unit cell matrix
+    // Computes inverse on first call, then caches it for subsequent calls
+    inline Eigen::Matrix3d getUnitCellInverse() const
+    {
+        if (!m_unit_cell_inverse_valid) {
+            m_unit_cell_inverse = m_unit_cell.inverse();
+            m_unit_cell_inverse_valid = true;
+        }
+        return m_unit_cell_inverse;
+    }
+
+    // Claude Generated (Oct 2025): Invalidate cached inverse when unit cell changes
+    inline void invalidateUnitCellInverseCache()
+    {
+        m_unit_cell_inverse_valid = false;
+    }
 };
 } // namespace curcuma

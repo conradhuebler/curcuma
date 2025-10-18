@@ -31,19 +31,18 @@
 
 #include "xtbinterface.h"
 
-XTBInterface::XTBInterface(const json& xtbsettings)
-    : m_xtbsettings(xtbsettings)
+XTBInterface::XTBInterface(const ConfigManager& config)
+    : m_config(config)
 {
     m_env = xtb_newEnvironment();
     m_xtb_calc = xtb_newCalculator();
     m_xtb_res = xtb_newResults();
-    m_xtbsettings = MergeJson(XTBSettings, xtbsettings);
-    // std::cout << m_xtbsettings << std::endl;
 
-    m_accuracy = m_xtbsettings["xtb_ac"];
-    m_SCFmaxiter = m_xtbsettings["SCFmaxiter"];
-    m_Tele = m_xtbsettings["Tele"];
-    m_spin = m_xtbsettings["spin"];
+    // Claude Generated: Type-safe parameter access via ConfigManager (Phase 3B)
+    m_accuracy = m_config.get<int>("accuracy", 2);
+    m_SCFmaxiter = m_config.get<int>("max_iterations", 100);
+    m_Tele = m_config.get<double>("electronic_temperature", 300.0);
+    m_spin = m_config.get<double>("spin", 0.0);
 
     // Verbosity Level 1+: XTB initialization
     if (CurcumaLogger::get_verbosity() >= 1) {

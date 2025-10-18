@@ -34,10 +34,49 @@ using json = nlohmann::json;
 
 #include "forcefieldgenerator.h"
 
-ForceFieldGenerator::ForceFieldGenerator(const json& controller)
+ForceFieldGenerator::ForceFieldGenerator(const ConfigManager& config)
 {
-    m_parameter = MergeJson(FFGenerator, controller);
-    m_method = m_parameter["method"];
+    // Claude Generated: Type-safe parameter access via ConfigManager (Phase 3B)
+    m_method = config.get<std::string>("method", "uff");
+
+    // Build parameter json from ConfigManager for backward compatibility
+    m_parameter = json();
+    m_parameter["method"] = config.get<std::string>("method", "uff");
+    m_parameter["d3"] = config.get<int>("d3", 0);
+    m_parameter["d4"] = config.get<int>("d4", 0);
+    m_parameter["d3_s6"] = config.get<double>("d3_s6", 1.0);
+    m_parameter["d3_s8"] = config.get<double>("d3_s8", 2.7);
+    m_parameter["d3_s9"] = config.get<double>("d3_s9", 1.0);
+    m_parameter["d3_a1"] = config.get<double>("d3_a1", 0.45);
+    m_parameter["d3_a2"] = config.get<double>("d3_a2", 4.0);
+    m_parameter["d3_alp"] = config.get<double>("d3_alp", 1.0);
+    m_parameter["bond_scaling"] = config.get<double>("bond_scaling", 1.0);
+    m_parameter["angle_scaling"] = config.get<double>("angle_scaling", 1.0);
+    m_parameter["dihedral_scaling"] = config.get<double>("dihedral_scaling", 1.0);
+    m_parameter["inversion_scaling"] = config.get<double>("inversion_scaling", 1.0);
+    m_parameter["vdw_scaling"] = config.get<double>("vdw_scaling", 1.0);
+    m_parameter["rep_scaling"] = config.get<double>("rep_scaling", 1.0);
+    m_parameter["coulomb_scaling"] = config.get<double>("coulomb_scaling", 1.0);
+    m_parameter["h4"] = config.get<int>("h4", 1);
+    m_parameter["hh"] = config.get<int>("hh", 1);
+    m_parameter["h4_oh_o"] = config.get<double>("h4_oh_o", 2.32);
+    m_parameter["h4_oh_n"] = config.get<double>("h4_oh_n", 3.10);
+    m_parameter["h4_nh_o"] = config.get<double>("h4_nh_o", 1.07);
+    m_parameter["h4_nh_n"] = config.get<double>("h4_nh_n", 2.01);
+    m_parameter["h4_wh_o"] = config.get<double>("h4_wh_o", 0.42);
+    m_parameter["h4_nh4"] = config.get<double>("h4_nh4", 3.61);
+    m_parameter["h4_coo"] = config.get<double>("h4_coo", 1.41);
+    m_parameter["hh_rep_k"] = config.get<double>("hh_rep_k", 0.42);
+    m_parameter["hh_rep_e"] = config.get<double>("hh_rep_e", 12.7);
+    m_parameter["hh_rep_r0"] = config.get<double>("hh_rep_r0", 2.3);
+    m_parameter["bond_force"] = config.get<double>("bond_force", 1.0584 / 7.25 * 1.8);
+    m_parameter["angle_force"] = config.get<double>("angle_force", 1.0584 / 7.25);
+    m_parameter["torsion_force"] = config.get<double>("torsion_force", 1.0 / 627.503);
+    m_parameter["inversion_force"] = config.get<double>("inversion_force", 1.0 / 627.503);
+    m_parameter["vdw_force"] = config.get<double>("vdw_force", 1.0 / 627.503);
+    m_parameter["h4_scaling"] = config.get<double>("h4_scaling", 0.0);
+    m_parameter["hh_scaling"] = config.get<double>("hh_scaling", 0.0);
+    m_parameter["e0"] = config.get<double>("energy_offset", 0.0);
 }
 
 void ForceFieldGenerator::setMolecule(const Mol& mol)

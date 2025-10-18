@@ -455,8 +455,9 @@ double Molecule::CalculateDistancePBC(int i, int j) const
     Eigen::Vector3d pos1 = m_geometry.row(i);
     Eigen::Vector3d pos2 = m_geometry.row(j);
 
-    // Use PBCUtils for minimum image calculation
-    return PBCUtils::calculateDistancePBC(pos1, pos2, m_unit_cell);
+    // Claude Generated (Oct 2025): Use cached inverse matrix to avoid expensive matrix inversions
+    // Use PBCUtils for minimum image calculation with optimized cached inverse
+    return PBCUtils::calculateDistancePBC(pos1, pos2, m_unit_cell, getUnitCellInverse());
 }
 
 /*
@@ -1158,14 +1159,21 @@ std::pair<double, double> Molecule::GyrationRadiusPBC(double hmass, bool protons
     double gyr = 0, gyr_mass = 0;
     double total_mass = 0;
 
+    // Claude Generated (Oct 2025): Cache inverse matrix for bulk PBC calculations
+    // Avoids 200+ expensive matrix inversions for 200-atom systems
+    Eigen::Matrix3d cell_inv;
+    if (m_has_pbc) {
+        cell_inv = getUnitCellInverse();
+    }
+
     for (int i = 0; i < m_geometry.rows(); ++i) {
         // Calculate PBC-aware distance from COM
         Eigen::Vector3d atom_pos = m_geometry.row(i);
         Eigen::Vector3d r = atom_pos - com;
 
-        // Apply PBC if active
+        // Apply PBC if active - Claude Generated (Oct 2025): Use cached inverse
         if (m_has_pbc) {
-            r = PBCUtils::applyMinimumImage(r, m_unit_cell);
+            r = PBCUtils::applyMinimumImage(r, m_unit_cell, cell_inv);
         }
 
         double r_squared = r.squaredNorm();
@@ -1318,17 +1326,23 @@ double Molecule::RoutPBC(int fragment) const
         return 0.0;
     }
 
+    // Claude Generated (Oct 2025): Cache inverse matrix for bulk PBC calculations
+    Eigen::Matrix3d cell_inv;
+    if (m_has_pbc) {
+        cell_inv = getUnitCellInverse();
+    }
+
     // Find maximum PBC-aware distance from COM
     double max_distance = 0.0;
     for (int idx : indices) {
         Eigen::Vector3d atom_pos = m_geometry.row(idx);
         Eigen::Vector3d com_vec(com(0), com(1), com(2));
 
-        // Calculate PBC-aware distance
+        // Calculate PBC-aware distance - Claude Generated (Oct 2025): Use cached inverse
         double distance;
         if (m_has_pbc) {
             Eigen::Vector3d r = atom_pos - com_vec;
-            Eigen::Vector3d r_pbc = PBCUtils::applyMinimumImage(r, m_unit_cell);
+            Eigen::Vector3d r_pbc = PBCUtils::applyMinimumImage(r, m_unit_cell, cell_inv);
             distance = r_pbc.norm();
         } else {
             distance = (atom_pos - com_vec).norm();
@@ -1658,7 +1672,12 @@ std::vector<std::vector<int>> Molecule::GetFragments(double scaling) const
         atoms.erase(atoms.begin());
         for (std::size_t i = 0; i < fragment.size(); ++i) {
             for (std::size_t j = 0; j < atoms.size(); ++j) {
-                double distance = CalculateDistance(fragment[i], atoms[j]);
+                // Claude Generated (Oct 2025): Use PBC-aware distance for periodic systems
+                // Critical fix: Without this, periodic polymer chains appear as 200 separate fragments
+                // causing massive memory allocation (200× GyrationRadiusPBC calls) → std::bad_alloc
+                double distance = m_has_pbc ?
+                    CalculateDistancePBC(fragment[i], atoms[j]) :
+                    CalculateDistance(fragment[i], atoms[j]);
                 //std::cout << "Fragment No: " << m_fragments.size() + 1 << " ("<< fragment.size() <<")  ##  Atom " << fragment[i] << " (Index " << i << ") and Atom " << atoms[j] << " - Distance: " << distance << " Thresh " << (Elements::CovalentRadius[Atom(fragment[i]).first] + Elements::CovalentRadius[Atom(atoms[j]).first]);
                 if (distance < (Elements::CovalentRadius[Atom(fragment[i]).first] + Elements::CovalentRadius[Atom(atoms[j]).first]) * m_scaling) {
                     //std::cout << " ... taken " << std::endl;

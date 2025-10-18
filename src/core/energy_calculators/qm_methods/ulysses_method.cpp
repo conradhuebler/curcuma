@@ -5,6 +5,7 @@
 
 #include "ulysses_method.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/config_manager.h"
 #include <algorithm>
 #include <cctype>
 
@@ -53,12 +54,13 @@ UlyssesMethod::UlyssesMethod(const std::string& method_name, const json& config)
             CurcumaLogger::param("config", config.dump(2));
         }
 
-        // Create enhanced config with parsed correction
+        // Create enhanced config with parsed correction (wrap JSON in ConfigManager)
         json enhanced_config = config;
         enhanced_config["base_method"] = base_method;
         enhanced_config["corecorrection"] = correction;
 
-        m_ulysses = std::make_unique<UlyssesInterface>(enhanced_config);
+        ConfigManager config_mgr("ulysses", enhanced_config);
+        m_ulysses = std::make_unique<UlyssesInterface>(config_mgr);
         CurcumaLogger::success("UlyssesInterface created successfully");
     } catch (const std::exception& e) {
         CurcumaLogger::error("UlyssesInterface creation failed: " + std::string(e.what()));

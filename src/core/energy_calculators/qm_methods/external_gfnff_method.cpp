@@ -20,6 +20,7 @@
 
 #include "external_gfnff_method.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/config_manager.h"
 
 #include <fmt/format.h>
 
@@ -27,8 +28,9 @@ ExternalGFNFFMethod::ExternalGFNFFMethod(const json& config)
     : m_config(config)
     , m_initialized(false)
 {
-    // Create the underlying GFN-FF interface
-    m_interface = std::make_unique<GFNFFInterface>(config);
+    // Create the underlying GFN-FF interface (wrap JSON in ConfigManager)
+    ConfigManager config_mgr("gfnff_external", config);
+    m_interface = std::make_unique<GFNFFInterface>(config_mgr);
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("ExternalGFNFFMethod wrapper initialized");
@@ -142,8 +144,9 @@ void ExternalGFNFFMethod::setParameters(const json& params)
 {
     m_config = params;
     if (m_interface) {
-        // Reinitialize interface with new parameters
-        m_interface = std::make_unique<GFNFFInterface>(m_config);
+        // Reinitialize interface with new parameters (wrap JSON in ConfigManager)
+        ConfigManager config_mgr("gfnff_external", m_config);
+        m_interface = std::make_unique<GFNFFInterface>(config_mgr);
         if (m_initialized) {
             m_interface->InitialiseMolecule(m_current_molecule);
         }
