@@ -428,10 +428,10 @@ void ForceFieldGenerator::setBonds(const TContainer& bonds)
         }
         if (m_stored_bonds[j].size() == 3) {
             json inversion = InversionJson;
-            inversion["i"] = i;
-            inversion["j"] = m_stored_bonds[i][0];
-            inversion["k"] = m_stored_bonds[i][1];
-            inversion["l"] = m_stored_bonds[i][2];
+            inversion["i"] = j;
+            inversion["j"] = m_stored_bonds[j][0];
+            inversion["k"] = m_stored_bonds[j][1];
+            inversion["l"] = m_stored_bonds[j][2];
             if (std::find(m_inversions.begin(), m_inversions.end(), inversion) == m_inversions.end()) {
                 m_inversions.push_back(inversion);
             }
