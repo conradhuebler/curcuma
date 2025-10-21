@@ -397,18 +397,21 @@ int executeOptimization(const json& controller, int argc, char** argv) {
             EnergyCalculator energy_calc(method, controller);
             energy_calc.setMolecule(molecule->getMolInfo());
 
-            // Claude Generated: Merge with default opt parameters
-            // NOTE: "opt" module not yet migrated to ParameterRegistry, use CurcumaOptJson from curcumaopt.h
-            extern json CurcumaOptJson;  // Defined in curcumaopt.h
-            json opt_config = MergeJson(CurcumaOptJson, controller.contains("opt") ? controller["opt"] : json{});
+            // Claude Generated (October 2025): Merge with default opt parameters from ParameterRegistry
+            json opt_defaults = ParameterRegistry::getInstance().getDefaultJson("opt");
+            json opt_config = MergeJson(opt_defaults, controller.contains("opt") ? controller["opt"] : json{});
 
             auto result = ModernOptimization::ModernOptimizerDispatcher::optimizeStructure(
                 molecule.get(), optimizer_method, &energy_calc, opt_config);
 
-            std::string output_file = opt_config.value("output", "optimized.xyz");
-            molecule->writeXYZFile(output_file);
-
-            return 0;
+            if (result.success) {
+                std::string output_file = opt_config.value("output", "optimized.xyz");
+                molecule->writeXYZFile(output_file);
+                return 0;
+            } else {
+                // Modern optimizer failed, fall through to legacy
+                CurcumaLogger::warn(fmt::format("Modern optimization failed: {}, using legacy optimizer", result.error_message));
+            }
         } catch (const std::exception& e) {
             // Fall through to legacy code below
             CurcumaLogger::warn(fmt::format("Modern optimization failed: {}, using legacy optimizer", e.what()));

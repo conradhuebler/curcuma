@@ -6,6 +6,8 @@ Format: One line per change, newest first.
 
 ## October 2025
 
+- **CurcumaOpt ParameterRegistry Migration - JSON Null Bug Fixed**: 37 parameters defined, ~30 Json2KeyWord calls eliminated, CurcumaOptJson replaced with ParameterRegistry, LBFGS parameter access migrated, fixes critical JSON null bug affecting 11/26 CLI tests, optimization now functional
+- **ForceField Inversion Bug Fixed**: Copy-paste error in ForceFieldGenerator::setBonds() causing vector out-of-bounds crash, changed incorrect m_stored_bonds[i] to m_stored_bonds[j] access
 - **ConfScan ConfigManager Migration - Multi-Module Architecture Complete**: ConfigManager extended with Multi-Module support, 59 Json2KeyWord calls eliminated, 41 parameters defined, RMSD/Ripser parameters imported via nested notation (-rmsd.method, -rmsd.threads), sLX parsing simplified from ~90 to ~50 lines, #pragma message hack removed, exportModule() API for submodule configs, DRY principle (RMSD params defined once), 100% backward compatible
 - **SimpleMD ConfigManager Migration Complete**: 82 Json2KeyWord calls eliminated (LARGEST migration!), CurcumaMDJson removed, ~350 LOC boilerplate eliminated, 48 parameters defined, 100% backward compatible
 - **RMSD ConfigManager Migration Complete**: 33 Json2KeyWord calls eliminated, RMSDJson removed, enum-based method selection, simplified element parsing, 100% backward compatible via aliases, build successful

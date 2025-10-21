@@ -128,38 +128,40 @@ CurcumaOpt::CurcumaOpt(const json& controller, bool silent)
 
 void CurcumaOpt::LoadControlJson()
 {
-    m_threads = Json2KeyWord<int>(m_defaults, "threads");
-    m_writeXYZ = Json2KeyWord<bool>(m_defaults, "writeXYZ");
-    m_printoutput = Json2KeyWord<bool>(m_defaults, "printOutput");
-    m_dE = Json2KeyWord<double>(m_defaults, "dE");
-    m_dRMSD = Json2KeyWord<double>(m_defaults, "dRMSD");
-    m_GradNorm = Json2KeyWord<double>(m_defaults, "GradNorm");
-    m_ConvCount = Json2KeyWord<int>(m_defaults, "ConvCount");
+    // Claude Generated (October 2025): Direct access to m_defaults with fallback values
+    // m_defaults is now populated from ParameterRegistry via CurcumaOptJson
+    m_threads = m_defaults.value("threads", 1);
+    m_writeXYZ = m_defaults.value("writeXYZ", true);
+    m_printoutput = m_defaults.value("printOutput", true);
+    m_dE = m_defaults.value("dE", 0.1);
+    m_dRMSD = m_defaults.value("dRMSD", 0.01);
+    m_GradNorm = m_defaults.value("GradNorm", 5e-4);
+    m_ConvCount = m_defaults.value("ConvCount", 11);
 
-    m_method = Json2KeyWord<std::string>(m_defaults, "method");
-    // Claude Generated: Override method from controller if provided (CLI parameter)
+    m_method = m_defaults.value("method", std::string("uff"));
+    // Override method from controller if provided (CLI parameter)
     if (m_controller.contains("method")) {
-        m_method = Json2KeyWord<std::string>(m_controller, "method");
+        m_method = m_controller.value("method", std::string("uff"));
         m_defaults["method"] = m_method; // Keep both JSON objects synchronized
     }
-    m_charge = Json2KeyWord<double>(m_defaults, "Charge");
-    m_spin = Json2KeyWord<double>(m_defaults, "Spin");
-    m_singlepoint = Json2KeyWord<bool>(m_defaults, "SinglePoint");
-    m_serial = Json2KeyWord<bool>(m_defaults, "serial");
-    m_hessian = Json2KeyWord<int>(m_defaults, "hessian");
-    m_optH = Json2KeyWord<bool>(m_defaults, "optH");
-    m_maxiter = Json2KeyWord<int>(m_defaults, "maxiter");
-    m_maxrise = Json2KeyWord<int>(m_defaults, "maxrise");
-    m_fusion = Json2KeyWord<bool>(m_defaults, "fusion");
-    m_optimethod = Json2KeyWord<int>(m_defaults, "optimethod");
-    m_inithess = Json2KeyWord<bool>(m_defaults, "inithess");
-    m_lambda = Json2KeyWord<double>(m_defaults, "lambda");
-    m_diis_hist = Json2KeyWord<int>(m_defaults, "diis_hist");
-    m_diis_start = Json2KeyWord<int>(m_defaults, "diis_start");
-    m_mo_scheme = Json2KeyWord<bool>(m_defaults, "mo_scheme");
-    m_mo_scale = Json2KeyWord<double>(m_defaults, "mo_scale");
-    m_mo_homo = Json2KeyWord<int>(m_defaults, "mo_homo");
-    m_mo_lumo = Json2KeyWord<int>(m_defaults, "mo_lumo");
+    m_charge = m_defaults.value("Charge", 0);
+    m_spin = m_defaults.value("Spin", 0);
+    m_singlepoint = m_defaults.value("SinglePoint", false);
+    m_serial = m_defaults.value("serial", false);
+    m_hessian = m_defaults.value("hessian", 0);
+    m_optH = m_defaults.value("optH", false);
+    m_maxiter = m_defaults.value("MaxIter", 5000);
+    m_maxrise = m_defaults.value("maxrise", 100);
+    m_fusion = m_defaults.value("fusion", false);
+    m_optimethod = m_defaults.value("optimethod", 0);
+    m_inithess = m_defaults.value("inithess", false);
+    m_lambda = m_defaults.value("lambda", 0.1);
+    m_diis_hist = m_defaults.value("diis_hist", 5);
+    m_diis_start = m_defaults.value("diis_start", 5);
+    m_mo_scheme = m_defaults.value("mo_scheme", false);
+    m_mo_scale = m_defaults.value("mo_scale", 1.0);
+    m_mo_homo = m_defaults.value("mo_homo", -1);
+    m_mo_lumo = m_defaults.value("mo_lumo", -1);
 
     if (m_optimethod == 0) {
         std::cout << "Using external lBFGS module" << std::endl;
@@ -195,8 +197,8 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
     // Claude Generated: Silent initialization to avoid confusing uff output when gfnff is requested
     json silent_sp = m_controller["sp"];
     silent_sp["verbosity"] = 0;  // Make early initialization silent
-    EnergyCalculator interface(Json2KeyWord<std::string>(m_defaults, "method"), silent_sp, Basename());
-    std::string method = Json2KeyWord<std::string>(m_defaults, "method");
+    EnergyCalculator interface(m_defaults.value("method", std::string("uff")), silent_sp, Basename());
+    std::string method = m_defaults.value("method", std::string("uff"));
 
     auto iter = molecules.begin();
     interface.setMolecule(iter->getMolInfo());
@@ -461,18 +463,19 @@ Molecule CurcumaOpt::LBFGSOptimise(Molecule* initial, std::string& output, std::
     initial->setEnergy(final_energy);
     initial->writeXYZFile(basename + ".t" + std::to_string(thread) + ".xyz");
     std::cout << "Initial energy " << final_energy << "Eh" << std::endl;
+    // Claude Generated (October 2025): Direct access to LBFGS parameters with fallback values
     LBFGSParam<double> param;
-    param.m = Json2KeyWord<int>(m_defaults, "LBFGS_m");
+    param.m = m_defaults.value("LBFGS_m", 2000);
 
-    param.epsilon = Json2KeyWord<double>(m_defaults, "LBFGS_eps_abs");
-    param.epsilon_rel = Json2KeyWord<double>(m_defaults, "LBFGS_eps_rel");
-    param.past = Json2KeyWord<int>(m_defaults, "LBFGS_past");
-    param.delta = Json2KeyWord<double>(m_defaults, "LBFGS_delta");
-    param.linesearch = Json2KeyWord<int>(m_defaults, "LBFGS_LST");
-    param.max_linesearch = Json2KeyWord<double>(m_defaults, "LBFGS_ls_iter");
-    param.min_step = Json2KeyWord<double>(m_defaults, "LBFGS_min_step");
-    param.ftol = Json2KeyWord<double>(m_defaults, "LBFGS_ftol");
-    param.wolfe = Json2KeyWord<double>(m_defaults, "LBFGS_wolfe");
+    param.epsilon = m_defaults.value("LBFGS_eps_abs", 1e-5);
+    param.epsilon_rel = m_defaults.value("LBFGS_eps_rel", 1e-5);
+    param.past = m_defaults.value("LBFGS_past", 0);
+    param.delta = m_defaults.value("LBFGS_delta", 0.0);
+    param.linesearch = m_defaults.value("LBFGS_LST", 3);
+    param.max_linesearch = m_defaults.value("LBFGS_ls_iter", 2);
+    param.min_step = m_defaults.value("LBFGS_min_step", 1e-4);
+    param.ftol = m_defaults.value("LBFGS_ftol", 1e-4);
+    param.wolfe = m_defaults.value("LBFGS_wolfe", 0.9);
 
     LBFGSSolver<double, LineSearchBacktracking> solver(param);
     LBFGSInterface fun(3 * initial->AtomCount());
@@ -726,18 +729,19 @@ Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vecto
     initial->setEnergy(final_energy);
     initial->writeXYZFile(basename + ".t" + std::to_string(thread) + ".xyz");
     std::cout << "Initial energy " << final_energy << "Eh" << std::endl;
+    // Claude Generated (October 2025): Direct access to LBFGS parameters with fallback values
     LBFGSParam<double> param;
-    param.m = Json2KeyWord<int>(m_defaults, "LBFGS_m");
+    param.m = m_defaults.value("LBFGS_m", 2000);
 
-    param.epsilon = Json2KeyWord<double>(m_defaults, "LBFGS_eps_abs");
-    param.epsilon_rel = Json2KeyWord<double>(m_defaults, "LBFGS_eps_rel");
-    param.past = Json2KeyWord<int>(m_defaults, "LBFGS_past");
-    param.delta = Json2KeyWord<double>(m_defaults, "LBFGS_delta");
-    param.linesearch = Json2KeyWord<int>(m_defaults, "LBFGS_LST");
-    param.max_linesearch = Json2KeyWord<double>(m_defaults, "LBFGS_ls_iter");
-    param.min_step = Json2KeyWord<double>(m_defaults, "LBFGS_min_step");
-    param.ftol = Json2KeyWord<double>(m_defaults, "LBFGS_ftol");
-    param.wolfe = Json2KeyWord<double>(m_defaults, "LBFGS_wolfe");
+    param.epsilon = m_defaults.value("LBFGS_eps_abs", 1e-5);
+    param.epsilon_rel = m_defaults.value("LBFGS_eps_rel", 1e-5);
+    param.past = m_defaults.value("LBFGS_past", 0);
+    param.delta = m_defaults.value("LBFGS_delta", 0.0);
+    param.linesearch = m_defaults.value("LBFGS_LST", 3);
+    param.max_linesearch = m_defaults.value("LBFGS_ls_iter", 2);
+    param.min_step = m_defaults.value("LBFGS_min_step", 1e-4);
+    param.ftol = m_defaults.value("LBFGS_ftol", 1e-4);
+    param.wolfe = m_defaults.value("LBFGS_wolfe", 0.9);
 
     // LBFGSSolver<double, LineSearchBacktracking> solver(param);
     // LBFGSInterface fun(3 * initial->AtomCount());
@@ -790,7 +794,7 @@ Molecule CurcumaOpt::GPTLBFGS(Molecule* initial, std::string& output, std::vecto
         mass[3 * i + 2] = Elements::AtomicMass[initial->Atom(i).first];
     }
 
-    LBFGS gptfgs(Json2KeyWord<int>(m_defaults, "LBFGS_m"));
+    LBFGS gptfgs(m_defaults.value("LBFGS_m", 2000));
     gptfgs.initialize(atoms_count, parameter);
     gptfgs.setEnergyCalculator(&interface);
     gptfgs.setOptimMethod(m_optimethod);

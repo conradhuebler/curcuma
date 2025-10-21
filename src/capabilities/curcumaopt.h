@@ -20,6 +20,8 @@
 #pragma once
 
 #include "src/core/energycalculator.h"
+#include "src/core/parameter_macros.h"
+#include "src/core/parameter_registry.h"
 
 #include "src/capabilities/optimisation/lbfgs.h"
 
@@ -32,47 +34,16 @@
 
 class CurcumaOpt;
 
-static json CurcumaOptJson{
-    { "writeXYZ", true },
-    { "printOutput", true },
-    { "dE", 0.1 },
-    { "dRMSD", 0.01 },
-    { "method", "uff" },
-    { "MaxIter", 5000 },
-    //   { "LBFGS_LS", 3},
-    { "LBFGS_m", 2000 },
-    { "LBFGS_past", 0 },
-    { "LBFGS_eps_abs", 1e-5 },
-    { "LBFGS_eps_rel", 1e-5 },
-    { "LBFGS_delta", 0 },
-    { "LBFGS_LST", 3 },
-    { "LBFGS_ls_iter", 2 },
-    { "LBFGS_min_step", 1e-4 },
-    { "LBFGS_ftol", 1e-4 },
-    { "LBFGS_wolfe", 0.9 },
-    { "SingleStep", 1 },
-    { "ConvCount", 11 },
-    { "GradNorm", 5e-4 },
-    { "threads", 1 },
-    { "Charge", 0 },
-    { "Spin", 0 },
-    { "SinglePoint", false },
-    { "optH", false },
-    { "serial", false },
-    { "hessian", 0 },
-    { "fusion", false },
-    { "maxrise", 100 },
-    { "optimethod", 0 },
-    { "inithess", false },
-    { "lambda", 0.1 },
-    { "diis_hist", 5 },
-    { "diis_start", 5 },
-    { "mo_scheme", false },
-    { "mo_scale", 1.0 },
-    { "mo_homo", -1 },
-    { "mo_lumo", -1 }
+// Claude Generated (October 2025): Replace static JSON with ParameterRegistry
+// This ensures consistency with the parameter definitions above and enables
+// automatic help generation, validation, and JSON export/import capabilities
+inline json getCurcumaOptJson() {
+    return ParameterRegistry::getInstance().getDefaultJson("opt");
+}
 
-};
+// Legacy static reference for backward compatibility - Claude Generated
+// NOTE: This creates the JSON on first access, so it's safe for initialization order
+#define CurcumaOptJson getCurcumaOptJson()
 
 const json OptJsonPrivate{
     { "writeXYZ", false },
@@ -83,6 +54,65 @@ const json OptJsonPrivate{
     { "MaxIter", 2000 },
     { "LBFGS_eps", 1e-5 }
 };
+
+// ============================================================================
+// Parameter Registry Integration - Claude Generated (October 2025)
+// ============================================================================
+namespace {
+    BEGIN_PARAMETER_DEFINITION(opt)
+
+    // Basic optimization options
+    PARAM(write_xyz, Bool, true, "Write XYZ trajectory files", "Basic", { "writeXYZ" })
+    PARAM(print_output, Bool, true, "Print optimization progress", "Basic", { "printOutput" })
+    PARAM(method, String, "uff", "Computational method for energy/gradient", "Basic", {})
+    PARAM(threads, Int, 1, "Number of parallel threads", "Basic", {})
+    PARAM(single_point, Bool, false, "Single point energy calculation only", "Basic", { "SinglePoint" })
+    PARAM(serial, Bool, false, "Force serial execution", "Basic", {})
+
+    // Convergence criteria
+    PARAM(max_iter, Int, 5000, "Maximum optimization iterations", "Convergence", { "MaxIter" })
+    PARAM(d_e, Double, 0.1, "Energy change threshold [kJ/mol]", "Convergence", { "dE" })
+    PARAM(d_rmsd, Double, 0.01, "RMSD change threshold [Angstrom]", "Convergence", { "dRMSD" })
+    PARAM(grad_norm, Double, 5e-4, "Gradient norm convergence threshold", "Convergence", { "GradNorm" })
+    PARAM(conv_count, Int, 11, "Number of consecutive converged steps", "Convergence", { "ConvCount" })
+    PARAM(single_step, Int, 1, "Single step mode", "Convergence", { "SingleStep" })
+
+    // LBFGS optimizer parameters
+    PARAM(lbfgs_m, Int, 2000, "LBFGS memory size", "LBFGS", { "LBFGS_m" })
+    PARAM(lbfgs_past, Int, 0, "LBFGS past iterations for delta convergence", "LBFGS", { "LBFGS_past" })
+    PARAM(lbfgs_eps_abs, Double, 1e-5, "LBFGS absolute epsilon", "LBFGS", { "LBFGS_eps_abs" })
+    PARAM(lbfgs_eps_rel, Double, 1e-5, "LBFGS relative epsilon", "LBFGS", { "LBFGS_eps_rel" })
+    PARAM(lbfgs_delta, Double, 0.0, "LBFGS delta for convergence", "LBFGS", { "LBFGS_delta" })
+    PARAM(lbfgs_lst, Int, 3, "LBFGS line search type", "LBFGS", { "LBFGS_LST" })
+    PARAM(lbfgs_ls_iter, Int, 2, "LBFGS line search max iterations", "LBFGS", { "LBFGS_ls_iter" })
+    PARAM(lbfgs_min_step, Double, 1e-4, "LBFGS minimum step size", "LBFGS", { "LBFGS_min_step" })
+    PARAM(lbfgs_ftol, Double, 1e-4, "LBFGS function tolerance", "LBFGS", { "LBFGS_ftol" })
+    PARAM(lbfgs_wolfe, Double, 0.9, "LBFGS Wolfe condition parameter", "LBFGS", { "LBFGS_wolfe" })
+
+    // Molecular properties
+    PARAM(charge, Int, 0, "Total molecular charge", "Molecular", { "Charge" })
+    PARAM(spin, Int, 0, "Spin multiplicity", "Molecular", { "Spin" })
+
+    // Advanced optimization options
+    PARAM(opt_h, Bool, false, "Optimize only hydrogen atoms", "Advanced", { "optH" })
+    PARAM(hessian, Int, 0, "Hessian calculation: 0=none, 1=numerical, 2=analytical", "Advanced", {})
+    PARAM(fusion, Bool, false, "Enable fusion optimization", "Advanced", {})
+    PARAM(max_rise, Int, 100, "Maximum energy rise allowed", "Advanced", { "maxrise" })
+    PARAM(opti_method, Int, 0, "Optimization method: 0=LBFGS external, 1=internal", "Advanced", { "optimethod" })
+    PARAM(init_hess, Bool, false, "Calculate initial Hessian", "Advanced", { "inithess" })
+    PARAM(lambda, Double, 0.1, "Lambda parameter for optimization", "Advanced", {})
+    PARAM(diis_hist, Int, 5, "DIIS history size", "Advanced", {})
+    PARAM(diis_start, Int, 5, "DIIS start iteration", "Advanced", {})
+
+    // Molecular orbital output
+    PARAM(mo_scheme, Bool, false, "Generate MO occupation scheme", "MO Output", {})
+    PARAM(mo_scale, Double, 1.0, "MO visualization scale factor", "MO Output", {})
+    PARAM(mo_homo, Int, -1, "HOMO orbital index for output", "MO Output", {})
+    PARAM(mo_lumo, Int, -1, "LUMO orbital index for output", "MO Output", {})
+
+    END_PARAMETER_DEFINITION
+}
+// ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^
 
 using Eigen::VectorXd;
 using namespace LBFGSpp;
