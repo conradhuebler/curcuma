@@ -143,7 +143,7 @@ bool ForceFieldMethod::setMolecule(const Mol& mol) {
         handleForceFieldError("ForceField not initialized");
         return false;
     }
-    
+
     try {
         // Validate molecule for ForceField
         if (!ForceFieldMethodUtils::isMoleculeSuitableForFF(mol)) {
@@ -151,25 +151,25 @@ bool ForceFieldMethod::setMolecule(const Mol& mol) {
             m_error_message = "Molecule is not suitable for ForceField calculations";
             return false;
         }
-        
+
         m_molecule = mol;
         m_calculation_done = false;
         clearError();
-        
+
         // Set molecule in ForceField
         m_forcefield->setMolecule(mol);
-        
+
         // Generate parameters if needed
         if (!generateParametersIfNeeded(mol)) {
             CurcumaLogger::error("Failed to generate ForceField parameters");
             handleForceFieldError("parameter generation");
             return false;
         }
-        
+
         m_initialized = true;
-        
+
         return true;
-        
+
     } catch (const std::exception& e) {
         handleForceFieldError(fmt::format("setMolecule: {}", e.what()));
         return false;
@@ -585,11 +585,11 @@ namespace ForceFieldMethodUtils {
         if (mol.m_number_atoms < 2) {
             return false;  // Need at least 2 atoms
         }
-        
+
         if (mol.m_number_atoms > 10000) {
             return false;  // Very large systems might have performance issues
         }
-        
+
         // Check for reasonable geometry (no NaN or infinite coordinates)
         for (int i = 0; i < mol.m_number_atoms; ++i) {
             for (int j = 0; j < 3; ++j) {
@@ -599,7 +599,7 @@ namespace ForceFieldMethodUtils {
                 }
             }
         }
-        
+
         return true;
     }
     

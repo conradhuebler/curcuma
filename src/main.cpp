@@ -386,8 +386,10 @@ int executeOptimization(const json& controller, int argc, char** argv) {
     }
 
     // Check if we should use modern native optimizers
-    if (optimizer_method == "native_lbfgs" || optimizer_method == "lbfgs" ||
-        optimizer_method == "diis" || optimizer_method == "rfo" || optimizer_method == "auto") {
+    bool use_modern = (optimizer_method == "native_lbfgs" || optimizer_method == "lbfgs" ||
+        optimizer_method == "diis" || optimizer_method == "rfo" || optimizer_method == "auto");
+
+    if (use_modern) {
 
         try {
             auto molecule = std::make_unique<Molecule>(argv[2]);
@@ -395,7 +397,10 @@ int executeOptimization(const json& controller, int argc, char** argv) {
             EnergyCalculator energy_calc(method, controller);
             energy_calc.setMolecule(molecule->getMolInfo());
 
-            json opt_config = controller.contains("opt") ? controller["opt"] : json{};
+            // Claude Generated: Merge with default opt parameters
+            // NOTE: "opt" module not yet migrated to ParameterRegistry, use CurcumaOptJson from curcumaopt.h
+            extern json CurcumaOptJson;  // Defined in curcumaopt.h
+            json opt_config = MergeJson(CurcumaOptJson, controller.contains("opt") ? controller["opt"] : json{});
 
             auto result = ModernOptimization::ModernOptimizerDispatcher::optimizeStructure(
                 molecule.get(), optimizer_method, &energy_calc, opt_config);
@@ -405,16 +410,16 @@ int executeOptimization(const json& controller, int argc, char** argv) {
 
             return 0;
         } catch (const std::exception& e) {
-            std::cerr << "Error during modern optimization: " << e.what() << std::endl;
-            return 1;
+            // Fall through to legacy code below
+            CurcumaLogger::warn(fmt::format("Modern optimization failed: {}, using legacy optimizer", e.what()));
         }
-    } else {
-        // Fall back to legacy optimization
-        CurcumaOpt opt(controller, false);
-        opt.setFileName(argv[2]);
-        opt.start();
-        return 0;
     }
+
+    // Legacy optimization (fallback for exceptions or non-modern methods)
+    CurcumaOpt opt(controller, false);
+    opt.setFileName(argv[2]);
+    opt.start();
+    return 0;
 }
 
 int executeConfScan(const json& controller, int argc, char** argv) {
