@@ -1,6 +1,6 @@
 /*
  * <RMSD Test application within curcuma.>
- * Copyright (C) 2019 - 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,6 +21,7 @@
 
 #include "src/capabilities/confscan.h"
 #include "src/capabilities/rmsd.h"
+#include "src/core/parameter_registry.h"  // Claude Generated - For ParameterRegistry access
 #include "src/tools/general.h"
 
 #include <iostream>
@@ -33,7 +34,8 @@ int free()
 {
     int threads = MaxThreads();
 
-    json controller = ConfScanJson;
+    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
+    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
     controller["method"] = "free";
     controller["threads"] = threads;
     controller["silent"] = true;
@@ -55,7 +57,8 @@ int subspace()
 {
     int threads = MaxThreads();
 
-    json controller = ConfScanJson;
+    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
+    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
     controller["method"] = "subspace";
     controller["threads"] = threads;
     controller["silent"] = true;
@@ -79,7 +82,8 @@ int template_method()
 {
     int threads = MaxThreads();
 
-    json controller = ConfScanJson;
+    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
+    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
     controller["method"] = "template";
     controller["threads"] = threads;
     controller["silent"] = true;
@@ -104,7 +108,8 @@ int dtemplate()
 {
     int threads = MaxThreads();
 
-    json controller = ConfScanJson;
+    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
+    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
     controller["method"] = "dtemplate";
     controller["threads"] = threads;
     controller["silent"] = true;
@@ -127,7 +132,8 @@ int molalign()
 {
     int threads = 1;
 
-    json controller = ConfScanJson;
+    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
+    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
     controller["method"] = "molalign";
     controller["threads"] = threads;
     controller["silent"] = true;
@@ -150,7 +156,8 @@ int sLX1()
 {
     int threads = MaxThreads();
 
-    json controller = ConfScanJson;
+    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
+    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
     controller["method"] = "subspace";
     controller["threads"] = threads;
     controller["silent"] = true;
@@ -174,7 +181,8 @@ int sLX2()
 {
     int threads = MaxThreads();
 
-    json controller = ConfScanJson;
+    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
+    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
     controller["method"] = "subspace";
     controller["threads"] = threads;
     controller["silent"] = true;
@@ -198,7 +206,8 @@ int sLX2Reset()
 {
     int threads = MaxThreads();
 
-    json controller = ConfScanJson;
+    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
+    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
     controller["method"] = "subspace";
     controller["threads"] = threads;
     controller["silent"] = true;
@@ -222,7 +231,8 @@ int sLX20()
 {
     int threads = MaxThreads();
 
-    json controller = ConfScanJson;
+    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
+    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
     controller["method"] = "subspace";
     controller["threads"] = threads;
     controller["silent"] = true;
@@ -245,7 +255,8 @@ int sLX20Reset()
 {
     int threads = MaxThreads();
 
-    json controller = ConfScanJson;
+    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
+    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
     controller["method"] = "subspace";
     controller["threads"] = threads;
     controller["silent"] = true;

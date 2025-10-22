@@ -1,0 +1,37 @@
+digraph graphname 
+ {
+"#16" -> "#17" [style=bold,label=0.644757];
+"#16" -> "#18" [style=bold,label=0.726882];
+"#16" -> "#1"[style=dotted,arrowhead=onormal];
+"#1" -> "#19" [style=bold,label=0.818359];
+"#1" -> "#21" [style=bold,label=0.758484];
+"#1" -> "#20"[style=dotted,arrowhead=onormal];
+"#20" -> "#22" [style=bold,label=0.760037];
+"#20" -> "#23" [style=bold,label=0.701302];
+"#20" -> "#24" [style=bold,label=0.642300];
+"#20" -> "#1"[style=dotted,arrowhead=onormal];
+"#1" -> "#25" [style=bold,label=0.691598];
+"#1" -> "#26" [style=bold,label=0.734118];
+"#1" -> "#27" [style=bold,label=0.729878];
+"#1" -> "#28" [style=bold,label=0.742763];
+"#1" -> "#20"[style=dotted,arrowhead=onormal];
+"#20" -> "#29" [style=bold,label=0.637927];
+"#20" -> "#1"[style=dotted,arrowhead=onormal];
+"#1" -> "#30" [style=bold,label=0.683479];
+"#1" -> "#31" [style=bold,label=0.684750];
+"#1" -> "#32" [style=bold,label=0.806484];
+"#1" -> "#33" [style=bold,label=0.819134];
+"#1" -> "#2"[style=dotted,arrowhead=onormal];
+"#2" -> "#35" [style=bold,label=0.622075];
+"#2" -> "#36" [style=bold,label=0.578594];
+"#2" -> "#37" [style=bold,label=0.468565];
+"#2" -> "#1"[style=dotted,arrowhead=onormal];
+"#1" -> "#39" [style=bold,label=0.856438];
+"#1" -> "#4"[style=dotted,arrowhead=onormal];
+"#4" -> "#40" [style=bold,label=0.858377];
+"#4" -> "#41" [style=bold,label=0.644201];
+"#4" -> "#42" [style=bold,label=0.762500];
+"#4" -> "#43"[style=dotted,arrowhead=onormal];
+"#43" -> "#44" [style=bold,label=0.639380];
+
+}

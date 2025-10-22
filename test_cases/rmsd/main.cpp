@@ -1,6 +1,6 @@
 /*
  * <RMSD Test application within curcuma.>
- * Copyright (C) 2019 - 2020 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,6 +20,7 @@
 #include "src/core/molecule.h"
 
 #include "src/capabilities/rmsd.h"
+#include "src/core/parameter_registry.h"  // Claude Generated - For ParameterRegistry access
 
 #include "src/tools/general.h"
 
@@ -36,7 +37,8 @@ int main(int argc, char** argv)
     Molecule m1("input_aa.xyz");
     Molecule m2("input_ab.xyz");
 
-    json controller = RMSDJson;
+    // Claude Generated - Updated for Parameter Registry System (RMSDJson removed)
+    json controller = ParameterRegistry::getInstance().getDefaultJson("rmsd");
     controller["threads"] = threads;
     controller["noreorder"] = true;
     RMSDDriver* driver = new RMSDDriver(controller, false);

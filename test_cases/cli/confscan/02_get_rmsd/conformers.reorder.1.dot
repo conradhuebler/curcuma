@@ -1,0 +1,8 @@
+digraph graphname 
+ {
+"#1" -> "#16" [style=bold,label=0.014510];
+"#1" -> "#20" [style=bold,label=0.224324];
+"#1" -> "#2"[style=dotted,arrowhead=onormal];
+"#2" -> "#38" [style=bold,label=0.085795];
+
+}

@@ -75,6 +75,10 @@ endif()
 
 #target_link_libraries(debug_ulysses_test curcuma_core)
 
-if(USE_PCH)
-        target_precompile_headers(debug_ulysses_test REUSE_FROM curcuma_core)
-endif()
+#if(USE_PCH)
+#        target_precompile_headers(debug_ulysses_test REUSE_FROM curcuma_core)
+#endif()
+
+# Claude Generated: CLI argument validation test suite (October 2025)
+# Include comprehensive Bash-based CLI tests for all capabilities
+add_subdirectory(cli)
