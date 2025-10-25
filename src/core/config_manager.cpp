@@ -345,10 +345,56 @@ json ConfigManager::findKey(const std::string& key) const
         }
     }
 
-    // Second try: Check if key uses dot notation (e.g., "topological.save_image")
-    // Try to resolve to flat notation (e.g., "topological_save_image")
+    // Second try: Check if key uses dot notation (e.g., "topological.save_image" or "rmsd.method")
     size_t dot_pos = key.find('.');
     if (dot_pos != std::string::npos) {
+        std::string prefix = key.substr(0, dot_pos);
+        std::string suffix = key.substr(dot_pos + 1);
+
+        // Claude Generated 2025: Multi-Module dot notation support
+        // If we're in multi-module mode and prefix is a known submodule, look there
+        if (!m_modules.empty()) {
+            std::string prefix_lower = prefix;
+            std::transform(prefix_lower.begin(), prefix_lower.end(),
+                          prefix_lower.begin(), ::tolower);
+
+            // Check if prefix matches any of the loaded modules (case-insensitive)
+            for (const auto& module : m_modules) {
+                std::string module_lower = module;
+                std::transform(module_lower.begin(), module_lower.end(),
+                              module_lower.begin(), ::tolower);
+
+                if (prefix_lower == module_lower) {
+                    // Found matching module! Look in its config
+                    auto it = m_module_configs.find(module);
+                    if (it != m_module_configs.end()) {
+                        const json& module_config = it->second;
+
+                        // Try to find suffix in this module's config
+                        std::string suffix_lower = suffix;
+                        std::transform(suffix_lower.begin(), suffix_lower.end(),
+                                      suffix_lower.begin(), ::tolower);
+
+                        for (const auto& config_item : module_config.items()) {
+                            std::string config_key = config_item.key();
+                            std::string config_key_lower = config_key;
+                            std::transform(config_key_lower.begin(), config_key_lower.end(),
+                                          config_key_lower.begin(), ::tolower);
+
+                            if (suffix_lower == config_key_lower) {
+                                #ifdef DEBUG_CONFIG_MANAGER
+                                std::cerr << "[ConfigManager] Found dot notation key '" << key
+                                          << "' in module '" << module << "'" << std::endl;
+                                #endif
+                                return config_item.value();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: Try to resolve dot notation to flat notation (e.g., "topological.save_image" → "topological_save_image")
         std::string flat_key = key;
         std::replace(flat_key.begin(), flat_key.end(), '.', '_');
 
@@ -368,11 +414,8 @@ json ConfigManager::findKey(const std::string& key) const
             }
         }
 
-        // Third try: Check nested JSON structure
+        // Third try: Check nested JSON structure in primary module
         // e.g., "topological.save_image" → m_config["topological"]["save_image"]
-        std::string prefix = key.substr(0, dot_pos);
-        std::string suffix = key.substr(dot_pos + 1);
-
         std::string prefix_lower = prefix;
         std::transform(prefix_lower.begin(), prefix_lower.end(),
                       prefix_lower.begin(), ::tolower);
