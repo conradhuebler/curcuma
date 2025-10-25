@@ -1,8 +1,8 @@
 #include "parameter_registry.h"
-#include "json.hpp"
 #include <algorithm>
 #include <iomanip>
 #include <iostream>
+#include "json.hpp"
 
 using json = nlohmann::json;
 

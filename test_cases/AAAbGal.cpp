@@ -30,6 +30,13 @@
 #include "json.hpp"
 using json = nlohmann::json;
 
+// Claude Generated - Initialize generated parameter registry
+#include "generated/parameter_registry.h"
+// Ensure registry is initialized before use
+struct RegistryInitializer {
+    RegistryInitializer() { initialize_generated_registry(); }
+} registry_initializer;
+
 int AAAbGal_dtemplate() // template
 {
     int threads = MaxThreads();

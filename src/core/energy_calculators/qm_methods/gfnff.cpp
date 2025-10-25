@@ -342,7 +342,20 @@ json GFNFF::generateGFNFFAngles() const
 
                 Vector v1 = ri - rj;
                 Vector v2 = rk - rj;
-                double current_angle = acos(v1.dot(v2) / (v1.norm() * v2.norm()));
+
+                // Safely calculate angle with bounds checking
+                double v1_norm = v1.norm();
+                double v2_norm = v2.norm();
+
+                // Skip if vectors are too small (linear geometry or duplicate atoms)
+                if (v1_norm < 1e-10 || v2_norm < 1e-10) {
+                    continue;
+                }
+
+                double cos_angle = v1.dot(v2) / (v1_norm * v2_norm);
+                // Clamp to valid acos range [-1, 1] to avoid NaN
+                cos_angle = std::max(-1.0, std::min(1.0, cos_angle));
+                double current_angle = acos(cos_angle);
 
                 // GFN-FF angle parameters
                 auto angle_params = getGFNFFAngleParameters(m_atoms[neighbors[i]],
