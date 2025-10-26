@@ -30,16 +30,25 @@
 #include "json.hpp"
 using json = nlohmann::json;
 
+// Claude Generated - Initialize ParameterRegistry from auto-generated definitions
+#include "generated/parameter_registry.h"
+static struct RegistryInitializer {
+    RegistryInitializer() { initialize_generated_registry(); }
+} registry_initializer;
+
 int free()
 {
     int threads = MaxThreads();
 
-    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
-    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
-    controller["method"] = "free";
-    controller["threads"] = threads;
-    controller["silent"] = true;
-    controller["restart"] = false;
+    // Claude Generated 2025: Proper Multi-Module JSON for ConfigManager
+    // ConfScan constructor expects { "confscan": {...}, "rmsd": {...} }
+    json controller;
+    controller["confscan"] = ParameterRegistry::getInstance().getDefaultJson("confscan");
+    controller["rmsd"] = ParameterRegistry::getInstance().getDefaultJson("rmsd");
+    controller["confscan"]["threads"] = threads;
+    controller["confscan"]["silent"] = true;
+    controller["confscan"]["restart"] = false;
+    controller["rmsd"]["method"] = "free";
 
     ConfScan* confscan = new ConfScan(controller);
     confscan->setFileName("input.xyz");
@@ -57,12 +66,14 @@ int subspace()
 {
     int threads = MaxThreads();
 
-    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
-    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
-    controller["method"] = "subspace";
-    controller["threads"] = threads;
-    controller["silent"] = true;
-    controller["restart"] = false;
+    // Claude Generated 2025: Correct Multi-Module JSON with overrides only
+    json controller;
+    controller["confscan"] = ParameterRegistry::getInstance().getDefaultJson("confscan");
+    controller["rmsd"] = ParameterRegistry::getInstance().getDefaultJson("rmsd");
+    controller["confscan"]["threads"] = threads;
+    controller["confscan"]["silent"] = true;
+    controller["confscan"]["restart"] = false;
+    controller["rmsd"]["method"] = "subspace";
 
     ConfScan* confscan = new ConfScan(controller);
     confscan->setFileName("input.xyz");
@@ -82,12 +93,14 @@ int template_method()
 {
     int threads = MaxThreads();
 
-    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
-    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
-    controller["method"] = "template";
-    controller["threads"] = threads;
-    controller["silent"] = true;
-    controller["restart"] = false;
+    // Claude Generated 2025: Correct Multi-Module JSON with overrides only
+    json controller;
+    controller["confscan"] = ParameterRegistry::getInstance().getDefaultJson("confscan");
+    controller["rmsd"] = ParameterRegistry::getInstance().getDefaultJson("rmsd");
+    controller["confscan"]["threads"] = threads;
+    controller["confscan"]["silent"] = true;
+    controller["confscan"]["restart"] = false;
+    controller["rmsd"]["method"] = "template";
 
     ConfScan* confscan = new ConfScan(controller);
     confscan->setFileName("input.xyz");
@@ -108,12 +121,14 @@ int dtemplate()
 {
     int threads = MaxThreads();
 
-    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
-    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
-    controller["method"] = "dtemplate";
-    controller["threads"] = threads;
-    controller["silent"] = true;
-    controller["restart"] = false;
+    // Claude Generated 2025: Correct Multi-Module JSON with overrides only
+    json controller;
+    controller["confscan"] = ParameterRegistry::getInstance().getDefaultJson("confscan");
+    controller["rmsd"] = ParameterRegistry::getInstance().getDefaultJson("rmsd");
+    controller["confscan"]["threads"] = threads;
+    controller["confscan"]["silent"] = true;
+    controller["confscan"]["restart"] = false;
+    controller["rmsd"]["method"] = "dtemplate";
 
     ConfScan* confscan = new ConfScan(controller);
     confscan->setFileName("input.xyz");
@@ -132,12 +147,14 @@ int molalign()
 {
     int threads = 1;
 
-    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
-    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
-    controller["method"] = "molalign";
-    controller["threads"] = threads;
-    controller["silent"] = true;
-    controller["restart"] = false;
+    // Claude Generated 2025: Correct Multi-Module JSON with overrides only
+    json controller;
+    controller["confscan"] = ParameterRegistry::getInstance().getDefaultJson("confscan");
+    controller["rmsd"] = ParameterRegistry::getInstance().getDefaultJson("rmsd");
+    controller["confscan"]["threads"] = threads;
+    controller["confscan"]["silent"] = true;
+    controller["confscan"]["restart"] = false;
+    controller["rmsd"]["method"] = "molalign";
 
     ConfScan* confscan = new ConfScan(controller);
     confscan->setFileName("input.xyz");
@@ -156,13 +173,15 @@ int sLX1()
 {
     int threads = MaxThreads();
 
-    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
-    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
-    controller["method"] = "subspace";
-    controller["threads"] = threads;
-    controller["silent"] = true;
-    controller["restart"] = false;
-    controller["sLX"] = "1.0";
+    // Claude Generated 2025: Correct Multi-Module JSON with overrides only
+    json controller;
+    controller["confscan"] = ParameterRegistry::getInstance().getDefaultJson("confscan");
+    controller["rmsd"] = ParameterRegistry::getInstance().getDefaultJson("rmsd");
+    controller["confscan"]["threads"] = threads;
+    controller["confscan"]["silent"] = true;
+    controller["confscan"]["restart"] = false;
+    controller["confscan"]["slx"] = "1.0";
+    controller["rmsd"]["method"] = "subspace";
 
     ConfScan* confscan = new ConfScan(controller);
     confscan->setFileName("input.xyz");
@@ -181,13 +200,15 @@ int sLX2()
 {
     int threads = MaxThreads();
 
-    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
-    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
-    controller["method"] = "subspace";
-    controller["threads"] = threads;
-    controller["silent"] = true;
-    controller["restart"] = false;
-    controller["sLX"] = "2.0";
+    // Claude Generated 2025: Correct Multi-Module JSON with overrides only
+    json controller;
+    controller["confscan"] = ParameterRegistry::getInstance().getDefaultJson("confscan");
+    controller["rmsd"] = ParameterRegistry::getInstance().getDefaultJson("rmsd");
+    controller["confscan"]["threads"] = threads;
+    controller["confscan"]["silent"] = true;
+    controller["confscan"]["restart"] = false;
+    controller["confscan"]["slx"] = "2.0";
+    controller["rmsd"]["method"] = "subspace";
 
     ConfScan* confscan = new ConfScan(controller);
     confscan->setFileName("input.xyz");
@@ -206,14 +227,16 @@ int sLX2Reset()
 {
     int threads = MaxThreads();
 
-    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
-    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
-    controller["method"] = "subspace";
-    controller["threads"] = threads;
-    controller["silent"] = true;
-    controller["restart"] = false;
-    controller["sLX"] = "2.0";
-    controller["reset"] = true;
+    // Claude Generated 2025: Correct Multi-Module JSON with overrides only
+    json controller;
+    controller["confscan"] = ParameterRegistry::getInstance().getDefaultJson("confscan");
+    controller["rmsd"] = ParameterRegistry::getInstance().getDefaultJson("rmsd");
+    controller["confscan"]["threads"] = threads;
+    controller["confscan"]["silent"] = true;
+    controller["confscan"]["restart"] = false;
+    controller["confscan"]["slx"] = "2.0";
+    controller["confscan"]["reset"] = true;
+    controller["rmsd"]["method"] = "subspace";
     ConfScan* confscan = new ConfScan(controller);
     confscan->setFileName("input.xyz");
     confscan->start();
@@ -231,13 +254,15 @@ int sLX20()
 {
     int threads = MaxThreads();
 
-    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
-    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
-    controller["method"] = "subspace";
-    controller["threads"] = threads;
-    controller["silent"] = true;
-    controller["restart"] = false;
-    controller["sLX"] = "2.0";
+    // Claude Generated 2025: Correct Multi-Module JSON with overrides only
+    json controller;
+    controller["confscan"] = ParameterRegistry::getInstance().getDefaultJson("confscan");
+    controller["rmsd"] = ParameterRegistry::getInstance().getDefaultJson("rmsd");
+    controller["confscan"]["threads"] = threads;
+    controller["confscan"]["silent"] = true;
+    controller["confscan"]["restart"] = false;
+    controller["confscan"]["slx"] = "2.0";
+    controller["rmsd"]["method"] = "subspace";
     ConfScan* confscan = new ConfScan(controller);
     confscan->setFileName("input.xyz");
     confscan->start();
@@ -255,14 +280,16 @@ int sLX20Reset()
 {
     int threads = MaxThreads();
 
-    // Claude Generated - Updated for Parameter Registry System (ConfScanJson removed)
-    json controller = ParameterRegistry::getInstance().getDefaultJson("confscan");
-    controller["method"] = "subspace";
-    controller["threads"] = threads;
-    controller["silent"] = true;
-    controller["restart"] = false;
-    controller["sLX"] = "2.0";
-    controller["reset"] = true;
+    // Claude Generated 2025: Correct Multi-Module JSON with overrides only
+    json controller;
+    controller["confscan"] = ParameterRegistry::getInstance().getDefaultJson("confscan");
+    controller["rmsd"] = ParameterRegistry::getInstance().getDefaultJson("rmsd");
+    controller["confscan"]["threads"] = threads;
+    controller["confscan"]["silent"] = true;
+    controller["confscan"]["restart"] = false;
+    controller["confscan"]["slx"] = "2.0";
+    controller["confscan"]["reset"] = true;
+    controller["rmsd"]["method"] = "subspace";
     ConfScan* confscan = new ConfScan(controller);
     confscan->setFileName("input.xyz");
     confscan->start();
