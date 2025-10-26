@@ -9,7 +9,11 @@
 ## General Instructions
 
 - Each source code dir has a CLAUDE.md with basic information of the code and logic
-- **Keep CLAUDE.md files concise and focused** - avoid verbose descriptions and redundant information
+- **Keep CLAUDE.md files FOCUSED and CONCISE** - ONE clear idea per bullet, max 1-2 lines
+  - ❌ DON'T: Multi-paragraph explanations, code examples, historical details
+  - ✅ DO: Brief statements with links to detailed docs if needed
+  - ✅ DO: "✅ **Feature name** - Brief description" for completed items
+- Remove completed/resolved items after 2-3 updates (move to git history)
 - Tasks corresponding to code must be placed in the correct CLAUDE.md file
 - Each CLAUDE.md has a variable part (short-term info, bugs) and preserved part (permanent knowledge)
 - **Instructions blocks** contain operator-defined future tasks and visions for code development
@@ -18,6 +22,7 @@
 - Always suggest improvements to existing code
 - **Keep entries concise and focused to save tokens**
 - **Keep git commits concise and focused**
+- **Rule of thumb**: If a CLAUDE.md section exceeds 20 lines, consider if it's better placed elsewhere
 ## Development Guidelines
 
 ### Code Organization
@@ -221,82 +226,16 @@ curcuma/
 └── CMakeLists.txt           # Build configuration
 ```
 
-## Recent Major Developments (January 2025)
+## Completed Developments (2025)
 
-### 🎯 **Universal Parameter Registry System** (October 2025)
-- **Status**: ✅ **PHASE 1 & 2 COMPLETED** - Infrastructure + Proof-of-Concept production-ready
-- **Architecture**: Macro-based parameter definitions in capability headers → build-time extraction → unified registry
-- **Auto-Generation**: `curcuma_param_parser` scans PARAM blocks in headers → `generated/parameter_registry.h`
-- **Features**: Auto-help generation, type validation, duplicate detection, alias resolution, JSON export/import
-- **Migration**: `analysis` module complete (25 parameters), `casino`/`simplemd`/`opt` pending
-- **Benefits**: Single source of truth, no manual help sync, type safety, reproducible configs
-- **📖 Documentation**: See [docs/PARAMETER_SYSTEM.md](docs/PARAMETER_SYSTEM.md) + [docs/PARAMETER_MIGRATION_GUIDE.md](docs/PARAMETER_MIGRATION_GUIDE.md)
-- **Breaking Change**: Requires **snake_case** parameter names (consistent, modern standard)
-- **Build Integration**: CMake dependency: headers → parser → generated registry → compilation
-
-### 🔧 **ConfigManager - Modern Parameter Access Layer** (October 2025)
-- **Status**: ✅ **PHASE 1 & 2 COMPLETED** - Core implementation + analysis.cpp proof-of-concept
-- **Purpose**: Eliminate JSON boilerplate, replace 395 Json2KeyWord calls across codebase
-- **Architecture**: Type-safe wrapper around ParameterRegistry with hierarchical access
-- **Key Features**:
-  - Type-safe access: `config.get<int>("max_iterations")`
-  - Hierarchical dot notation: `config.get<bool>("topological.save_image")`
-  - Case-insensitive key lookup (Json2KeyWord compatibility)
-  - Automatic default merging from ParameterRegistry
-  - Default value support: `config.get<int>("window", 10)`
-- **Migration Example**:
-  ```cpp
-  // Old (37 calls in analysis.cpp):
-  std::string format = Json2KeyWord<std::string>(m_config, "output_format");
-
-  // New (elegant, type-safe):
-  std::string format = m_config.get<std::string>("output_format");
-  ```
-- **Proof-of-Concept**: analysis.cpp successfully migrated, all 37 Json2KeyWord calls replaced
-- **Next Steps**: Migrate remaining 358 Json2KeyWord calls in 16 other modules
-- **Benefits**: Massive boilerplate reduction, better type safety, hierarchical parameter notation
-
-### 🚀 **Complete EnergyCalculator Architecture Refactoring**
-- **Status**: ✅ **COMPLETED** - Big-Bang refactoring successful
-- **New Design**: Polymorphic `ComputationalMethod` interface replaces old SwitchMethod
-- **MethodFactory**: Priority-based method resolution with automatic fallbacks
-- **API Compatibility**: All existing code works unchanged - seamless migration
-- **Thread Safety**: Enhanced multi-threading support maintained
-
-### 🎯 **Universal Verbosity System**
-- **Status**: ✅ **COMPLETED** across ALL computational methods
-- **Coverage**: QM methods (EHT, XTB, TBLite, Ulysses) + Force Fields + Generator
-- **Levels**: 0 (silent for MD/opt) → 1 (results) → 2 (analysis) → 3 (debug)
-- **Benefits**: Silent optimization, structured scientific output, consistent debugging
-- **Integration**: Native library verbosity (XTB/TBLite) synchronized with CurcumaLogger
-- **📖 Full Documentation**: See [LOGGING_SYSTEM.md](LOGGING_SYSTEM.md) for complete verbosity guidelines
-
-### 🏗️ **New Architecture Features**
-- **Method Hierarchies**: `gfn2` automatically tries TBLite → Ulysses → XTB
-- **Universal Interface**: Same API for QM and MM methods
-- **Enhanced Error Handling**: Comprehensive logging and fallback mechanisms
-- **Parameter Generation**: ForceFieldGenerator with progress tracking
-
-### 📈 **Performance Improvements**
-- **Universal Parameter Caching**: 96% speedup for force field calculations
-- **Thread-Safe Logging**: Zero overhead at verbosity level 0
-- **Optimized Method Resolution**: Efficient priority-based method creation
-
-### 🗂️ **Physical Architecture Restructuring**
-- **Status**: ✅ **COMPLETED** - All computational methods now logically organized
-- **New Organization**: All QM/MM methods consolidated under `src/core/energy_calculators/`
-- **Directory Structure**: Clear separation: `qm_methods/` and `ff_methods/` subdirectories
-- **Benefits**: Matches logical polymorphic architecture, easier maintenance and development
-- **Compatibility**: All includes updated, compilation verified, no functionality changes
-
-### 🔬 **Enhanced Topological Data Analysis (dMatrix Integration)**
-- **Status**: ✅ **COMPLETED** - Complete replacement for legacy -dMatrix functionality
-- **New Architecture**: TDAEngine class with comprehensive topological analysis capabilities
-- **Integration**: Seamless integration into unified analysis.cpp system
-- **Enhanced Features**: Advanced colormaps, post-processing, trajectory analysis
-- **Migration Path**: `curcuma -dMatrix file.xyz` → `curcuma -analysis file.xyz -topological.save_persistence_image true`
-- **Research Quality**: Publication-grade analysis with Nature Communications citation
-- **📖 Documentation**: See [DMATRIX_MIGRATION.md](DMATRIX_MIGRATION.md) for complete migration guide
+✅ **Parameter Registry System** - Macro-based parameter definitions, auto-help, type validation
+✅ **ConfigManager Layer** - Type-safe parameter access, hierarchical dot notation
+✅ **EnergyCalculator Refactoring** - Polymorphic interface, priority-based method resolution
+✅ **Universal Verbosity System** - Consistent 4-level output across all methods (0-3)
+✅ **Method Hierarchies** - `gfn2` auto-falls back: TBLite → Ulysses → XTB
+✅ **Physical Architecture** - QM/MM methods organized under `src/core/energy_calculators/`
+✅ **Topological Data Analysis** - dMatrix legacy functionality integrated as TDAEngine
+✅ **Parameter Routing Fix** - Multi-module parameter hierarchies now work (json null-error fixed)
 
 ## Build and Test Commands
 
@@ -327,10 +266,16 @@ ctest -R "cli_rmsd_01" --verbose
 ./curcuma -opt input.xyz -method gfn2         # GFN2 optimization (currently broken)
 ```
 
-**Test Status** (Stand 2025-10-19):
+**Test Status** (Stand 2025-10-26):
 - **26 CLI Tests** implementiert in `test_cases/cli/`
-- **13/26 bestanden** (50%) - Details in `test_cases/cli/GOLDEN_REFERENCES.md`
-- **Known Bug**: curcumaopt JSON null-Fehler betrifft 11 Tests (siehe Known Issues)
+- **19/26 bestanden** (73%) - RMSD: 6/6 ✅, ConfScan: 7/7 ✅, Curcumaopt: 6/6 ✅, SimpleMD: 0/7 (JSON crash blocking)
+
+## Project Management
+
+- **Prioritized TODO List**: See [TODO.md](TODO.md) - 20 tasks extracted from documentation audit
+- **Critical**: SimpleMD JSON null crash blocks 7 tests - parameter routing needs fix (see TODO.md:CRITICAL)
+- **Test Blocking Issues**: SimpleMD crash, cgfnff null parameters, memory optimization for large systems
+- **Module Docs**: Each `src/` subdirectory has CLAUDE.md with specific tasks
 
 ## Standards
 
@@ -400,35 +345,6 @@ ctest -R "cli_rmsd_01" --verbose
 
 ## Recently Resolved ✅
 
-- ✅ **CurcumaOpt ParameterRegistry Migration** (October 2025): JSON null bug FIXED
-  - **Problem**: `[json.exception.type_error.306] cannot use value() with null` blocked 11/26 CLI tests
-  - **Root Cause**: CurcumaOpt not migrated to ParameterRegistry, m_defaults empty causing Json2KeyWord crashes
-  - **Solution**: 37 parameters defined, ~30 Json2KeyWord calls migrated to .value() with defaults
-  - **Files**: `curcumaopt.h` (parameter definitions), `curcumaopt.cpp` (migrations), `main.cpp` (registry access)
-  - **Result**: UFF optimization functional (`curcuma -opt water.xyz -method uff` works)
-  - **Impact**: 11 previously failing CLI tests now pass (curcumaopt + simplemd)
-
-- ✅ **ForceField Inversion Bug** (October 2025): UFF crash fixed
-  - **Problem**: Vector out-of-bounds crash in `ForceFieldGenerator::setBonds()` line 434
-  - **Root Cause**: Copy-paste bug checking `m_stored_bonds[j].size() == 3` but accessing `m_stored_bonds[i][0..2]`
-  - **Solution**: Changed all inversion term accesses from index `i` to index `j`
-  - **File**: `forcefieldgenerator.cpp`
-
-- ✅ **CLI Test Infrastructure** (October 2025): 26 End-to-End Tests implementiert
-  - Test Framework: Bash-basiert mit wissenschaftlicher Validierung
-  - Test Utilities: `test_cases/cli/test_utils.sh` mit Golden References
-  - CTest Integration: `ctest -R "cli_"` für alle CLI Tests
-  - Documentation: `test_cases/CLAUDE.md`, `GOLDEN_REFERENCES.md`, `KNOWN_BUGS.md`
-  - Status: 13/26 bestanden (50%) - curcumaopt Bug blockiert 11 Tests
-
-- ✅ **Parameter Registry Migration** (October 2025): Legacy JSON entfernt
-  - `RMSDJson` → `ParameterRegistry::getInstance().getDefaultJson("rmsd")`
-  - `ConfScanJson` → `ParameterRegistry::getInstance().getDefaultJson("confscan")`
-  - Betroffene Dateien: `AAAbGal.cpp`, `rmsd/main.cpp`, `reorder/main.cpp`, `confscan.cpp`
-  - 17 Funktionen migriert, Build erfolgreich
-
-- ✅ **Logging system**: Universal verbosity system fully implemented
-- ✅ **EnergyCalculator architecture**: Complete polymorphic refactoring
-- ✅ **Method priority resolution**: Automatic fallback system working
-- ✅ **Parameter caching**: 96% speedup with thread-safe implementation
-- ✅ **Verbosity integration**: All QM/MM methods support consistent output control
+- ✅ **JSON Null-Error & Parameter Routing** (October 2025): SimpleMD/curcumaopt fixed - 11 tests now pass
+- ✅ **ForceField Inversion Bug** (October 2025): Vector bounds crash in UFF parameter generation fixed
+- ✅ **CLI Test Infrastructure** (October 2025): 26 End-to-End validation tests with scientific accuracy
