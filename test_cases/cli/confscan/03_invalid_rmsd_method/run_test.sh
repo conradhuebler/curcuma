@@ -12,7 +12,13 @@ TEST_DIR="$SCRIPT_DIR"
 
 run_test() {
     cd "$TEST_DIR"
-    $CURCUMA -confscan conformers.xyz -confscan.rmsd_method non_existent > stdout.log 2> stderr.log
+    # Claude Generated: Optimized parameters for fast execution
+    # Keep invalid method for error testing, but optimize other parameters
+    $CURCUMA -confscan conformers.xyz \
+        -rmsd.method non_existent \
+        -confscan.threads 8 \
+        -confscan.restart false \
+        > stdout.log 2> stderr.log
     local exit_code=$?
 
     TESTS_RUN=$((TESTS_RUN + 1))

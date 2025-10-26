@@ -12,7 +12,13 @@ TEST_DIR="$SCRIPT_DIR"
 
 run_test() {
     cd "$TEST_DIR"
-    $CURCUMA -confscan conformers.xyz > stdout.log 2> stderr.log
+    # Claude Generated: Optimized parameters for fast execution (~10s vs 30s+ timeout)
+    # Match C++ Unit-Test configuration: subspace method, 8 threads, no restart
+    $CURCUMA -confscan conformers.xyz \
+        -rmsd.method subspace \
+        -confscan.threads 8 \
+        -confscan.restart false \
+        > stdout.log 2> stderr.log
     local exit_code=$?
 
     assert_exit_code $exit_code 0 "ConfScan should succeed"

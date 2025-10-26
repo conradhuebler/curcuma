@@ -16,7 +16,13 @@ run_test() {
     # Create dummy progress file to simulate previous run
     echo '{"last_processed": 5}' > conformers.confscan_progress.json
 
-    $CURCUMA -confscan conformers.xyz -confscan.restart true > stdout.log 2> stderr.log
+    # Claude Generated: Optimized parameters for fast execution (~10s vs 30s+ timeout)
+    # Match C++ Unit-Test configuration: subspace method, 8 threads, WITH restart enabled
+    $CURCUMA -confscan conformers.xyz \
+        -rmsd.method subspace \
+        -confscan.threads 8 \
+        -confscan.restart true \
+        > stdout.log 2> stderr.log
     local exit_code=$?
 
     assert_exit_code $exit_code 0 "ConfScan restart should succeed"

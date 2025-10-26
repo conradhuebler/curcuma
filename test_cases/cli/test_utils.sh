@@ -33,13 +33,17 @@ if [ -z "$CURCUMA" ]; then
         exit 1
     fi
 
-    export CURCUMA="$PROJECT_ROOT/build/curcuma"
+    # Try release first (faster for CLI tests), then debug, then build
+    export CURCUMA="$PROJECT_ROOT/release/curcuma"
     if [ ! -f "$CURCUMA" ]; then
-        export CURCUMA="$PROJECT_ROOT/release/curcuma"
+        export CURCUMA="$PROJECT_ROOT/debug/curcuma"
+    fi
+    if [ ! -f "$CURCUMA" ]; then
+        export CURCUMA="$PROJECT_ROOT/build/curcuma"
     fi
     if [ ! -f "$CURCUMA" ]; then
         echo -e "${RED}ERROR: curcuma binary not found!${NC}"
-        echo "Expected at: $PROJECT_ROOT/build/curcuma or $PROJECT_ROOT/release/curcuma"
+        echo "Expected at: $PROJECT_ROOT/debug/curcuma, $PROJECT_ROOT/release/curcuma, or $PROJECT_ROOT/build/curcuma"
         exit 1
     fi
     echo -e "${BLUE}Using curcuma:${NC} $CURCUMA"
@@ -195,8 +199,9 @@ assert_numeric_match() {
 # Helper: Extract energy from XYZ comment line (line 2)
 extract_energy_from_xyz() {
     local xyzfile=$1
-    # Assumes format: "Energy = -123.456 Eh" in comment line (line 2)
-    grep -oP 'Energy = \K[-0-9.]+' "$xyzfile" | head -1
+    # Curcuma format: "** Energy =   0.000000 Eh **" in comment line (line 2)
+    # Handles variable whitespace: Energy\s*=\s*<number>
+    grep -oP 'Energy\s*=\s*\K[-0-9.]+' "$xyzfile" | head -1
 }
 
 # Helper: Extract RMSD value from stdout

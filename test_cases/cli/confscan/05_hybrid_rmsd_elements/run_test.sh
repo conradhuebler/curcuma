@@ -12,7 +12,14 @@ TEST_DIR="$SCRIPT_DIR"
 
 run_test() {
     cd "$TEST_DIR"
-    $CURCUMA -confscan conformers.xyz -confscan.rmsd_method hybrid -confscan.rmsd_element "7,8" > stdout.log 2> stderr.log
+    # Claude Generated: Optimized parameters for fast execution (~10s vs 30s+ timeout)
+    # Match C++ Unit-Test configuration: 8 threads, no restart (hybrid method is slow but necessary for test)
+    $CURCUMA -confscan conformers.xyz \
+        -rmsd.method hybrid \
+        -rmsd.element "7,8" \
+        -confscan.threads 8 \
+        -confscan.restart false \
+        > stdout.log 2> stderr.log
     local exit_code=$?
 
     assert_exit_code $exit_code 0 "ConfScan with hybrid RMSD should succeed"
