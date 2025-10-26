@@ -437,7 +437,13 @@ int executeConfScan(const json& controller, int argc, char** argv) {
         return 1;
     }
 
-    auto* scan = new ConfScan(controller);
+    // Claude Generated 2025: Add RMSD module defaults for Multi-Module ConfScan
+    json confscan_config = controller;
+    if (!confscan_config.contains("rmsd") || !confscan_config["rmsd"].is_object()) {
+        confscan_config["rmsd"] = ParameterRegistry::getInstance().getDefaultJson("rmsd");
+    }
+
+    auto* scan = new ConfScan(confscan_config);
     scan->setFileName(argv[2]);
     scan->start();
     int accepted = scan->AcceptedCount();
