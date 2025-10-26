@@ -34,7 +34,31 @@ run_test() {
 }
 
 validate_results() {
-    assert_string_in_file "RMSD" stdout.log "RMSD calculation completed"
+    # Extract RMSD value - strip ANSI color codes
+    local rmsd_line=$(grep "RMSD:" stdout.log | sed 's/\x1b\[[0-9;]*m//g' | head -1)
+
+    if [ -z "$rmsd_line" ]; then
+        echo -e "${RED}✗ FAIL${NC}: Could not extract RMSD value"
+        TESTS_RUN=$((TESTS_RUN + 1))
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        return 1
+    fi
+
+    # Extract numeric value
+    local rmsd_value=$(echo "$rmsd_line" | grep -oP 'RMSD:\s+\K[0-9.]+' | head -1)
+
+    if [ -z "$rmsd_value" ]; then
+        echo -e "${YELLOW}⚠${NC} Could not extract number, but RMSD output found"
+        TESTS_RUN=$((TESTS_RUN + 1))
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        return 0
+    fi
+
+    # Without reordering: should have NO permutation, likely much higher RMSD than with reordering
+    echo -e "${BLUE}Info:${NC} RMSD without reordering: $rmsd_value"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+
     return 0
 }
 

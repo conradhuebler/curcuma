@@ -23,12 +23,19 @@ run_test() {
 
     assert_exit_code $exit_code 0 "ConfScan should succeed"
     assert_file_exists "conformers.accepted.xyz" "Accepted conformers file created"
+    assert_file_exists "conformers.rejected.xyz" "Rejected conformers file created"
 
-    if grep -qi "unique.*conformer\|found.*conformer" stdout.log; then
-        echo -e "${GREEN}✓${NC} Conformer summary found in output"
-        TESTS_RUN=$((TESTS_RUN + 1))
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-    fi
+    return 0
+}
+
+validate_results() {
+    # Scientific Validation: Count and validate conformer populations
+    local accepted=$(count_xyz_structures "conformers.accepted.xyz")
+    local rejected=$(count_xyz_structures "conformers.rejected.xyz")
+
+    # Golden references from unit test runs (44 total input structures)
+    assert_numeric_match 14 "$accepted" "Expected 14 accepted conformers"
+    assert_numeric_match 30 "$rejected" "Expected 30 rejected conformers"
 
     return 0
 }

@@ -25,25 +25,33 @@ run_test() {
 }
 
 validate_results() {
-    # Extract RMSD value from output
-    # Expected format: "RMSD: X.XXXX" or similar
-    local rmsd_line=$(grep -i "rmsd" stdout.log | head -1)
+    # Extract RMSD value from output - strip ANSI color codes first
+    # Output format: "[colors]RMSD: 2.872143"
+    local rmsd_line=$(grep "RMSD:" stdout.log | sed 's/\x1b\[[0-9;]*m//g' | head -1)
 
-    if [ -n "$rmsd_line" ]; then
-        echo -e "${GREEN}✓${NC} RMSD output found: $rmsd_line"
-        TESTS_RUN=$((TESTS_RUN + 1))
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-
-        # Extract numeric value (simplified regex)
-        local rmsd_value=$(echo "$rmsd_line" | grep -oP '\d+\.\d+' | head -1 || echo "")
-        if [ -n "$rmsd_value" ]; then
-            echo -e "${BLUE}Info:${NC} RMSD value extracted: $rmsd_value"
-        fi
-    else
-        echo -e "${YELLOW}⚠${NC} RMSD value not found in expected format"
+    if [ -z "$rmsd_line" ]; then
+        echo -e "${RED}✗ FAIL${NC}: Could not find RMSD line"
         TESTS_RUN=$((TESTS_RUN + 1))
         TESTS_FAILED=$((TESTS_FAILED + 1))
+        return 1
     fi
+
+    # Extract numeric value after "RMSD:"
+    local rmsd_value=$(echo "$rmsd_line" | grep -oP 'RMSD:\s+\K[0-9.]+' | head -1)
+
+    if [ -z "$rmsd_value" ]; then
+        echo -e "${RED}✗ FAIL${NC}: Could not extract RMSD number from: $rmsd_line"
+        TESTS_RUN=$((TESTS_RUN + 1))
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        return 1
+    fi
+
+    # Validate against known reference for AAA-bGal (90 atoms)
+    # Method: free (with reordering) - known golden value
+    local expected_rmsd="2.872143"
+    local tolerance="0.0001"
+
+    assert_scientific_value "$expected_rmsd" "$rmsd_value" "$tolerance" "RMSD with reordering (AAA-bGal)"
 
     return 0
 }
