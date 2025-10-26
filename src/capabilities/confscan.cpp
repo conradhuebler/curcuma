@@ -322,8 +322,17 @@ void ConfScan::LoadControlJson()
     // Performance
     m_threads = m_config.get<int>("threads");  // ConfScan ensemble threads
 
-    // RMSD parameters from rmsd module (dot notation) - corrected names
-    m_RMSDmethod = m_config.get<std::string>("rmsd.method");
+    // Claude Generated (October 2025): RMSD parameters with inheritance fallback
+    // User can specify RMSD method via:
+    // 1. Explicit: -confscan -rmsd.method subspace
+    // 2. ConfScan-level: -confscan -method subspace  (inherited from parent)
+    // Try explicit rmsd.method first, fall back to confscan-level method if available
+    try {
+        m_RMSDmethod = m_config.get<std::string>("rmsd.method");
+    } catch (...) {
+        // Fallback: try to get method from confscan level (inherited)
+        m_RMSDmethod = m_config.get<std::string>("method", "subspace");
+    }
     m_update_rotation = m_config.get<bool>("rmsd.update_rotation");
     m_nomunkres = m_config.get<bool>("rmsd.nomunkres", false);  // May not exist in RMSD
     m_molalign = m_config.get<std::string>("rmsd.molalign_bin");

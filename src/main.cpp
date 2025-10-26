@@ -193,11 +193,31 @@ json CLI2Json(int argc, char** argv)
 
     // Claude Generated (October 2025): Global parameters that should be accessible
     // both at top level (controller[param]) and module level (controller[module][param])
+    // ENHANCED: Added "method" to support global energy method specification
     std::set<std::string> global_params = {
-        "verbosity", "threads",
+        "verbosity", "threads", "method",  // energy_method applies to all capabilities
         "export_run", "export-run", // Export current run configuration
         "import_config", "import-config" // Import custom configuration
     };
+
+    // Claude Generated (October 2025): CLI keyword to module name mapping
+    // Maps command-line keywords (e.g., -md) to actual module names (e.g., simplemd)
+    std::map<std::string, std::string> keyword_to_module = {
+        {"md", "simplemd"},
+        {"opt", "opt"},
+        {"sp", "opt"},  // single point also uses opt module
+        {"confscan", "confscan"},
+        {"rmsd", "rmsd"},
+        {"analysis", "analysis"},
+        {"hessian", "hessian"},
+        {"casino", "casino"}
+    };
+
+    // Get actual module name (for ConfigManager)
+    std::string module_name = keyword;
+    if (keyword_to_module.count(keyword) > 0) {
+        module_name = keyword_to_module[keyword];
+    }
 
     for (int i = 2; i < argc; ++i) {
         std::string current = argv[i];
@@ -283,7 +303,7 @@ json CLI2Json(int argc, char** argv)
         //    so param_name = "rmsd" and param_value = {"method": "subspace"}
 
         bool is_flat_dotted = param_name.find('.') != std::string::npos;
-        bool is_nested_module = param_value.is_object() && param_name != keyword;
+        bool is_nested_object = param_value.is_object();
 
         if (is_flat_dotted) {
             // Handle flat dot notation: "rmsd.method"
@@ -297,12 +317,15 @@ json CLI2Json(int argc, char** argv)
                 setNestedJsonValue(module_params[module_name], param_key, param_value);
                 keys_to_remove.push_back(param_name);
             }
-        } else if (is_nested_module) {
-            // Handle nested structure created by setNestedJsonValue
+        } else if (is_nested_object && param_name != keyword) {
+            // Handle nested structure for OTHER modules (not this command's keyword)
             // param_name = "rmsd", param_value = {"method": "subspace"}
             module_params[param_name] = param_value;
             keys_to_remove.push_back(param_name);
         }
+        // NOTE: We KEEP nested structures where param_name == keyword!
+        // E.g., key["md"] = {"max_time": 10} stays in key for backward compat
+        // It will be stored in both controller["simplemd"] and controller["md"]
     }
 
     // Remove extracted module parameters from main command params
@@ -310,19 +333,35 @@ json CLI2Json(int argc, char** argv)
         key.erase(remove_key);
     }
 
-    // Build controller with proper structure
-    controller[keyword] = key;
-
-    // Merge module-specific parameters at top level
-    for (auto& [module_name, module_config] : module_params.items()) {
-        controller[module_name] = module_config;  // Direct assignment (may contain nested structure from setNestedJsonValue)
-    }
-
-    // Ensure global parameters are always set at top level
+    // Claude Generated (October 2025): Extract global parameters for explicit access
+    json global_values;
     for (const auto& param : global_params) {
         if (key.count(param) > 0) {
-            controller[param] = key[param];
+            global_values[param] = key[param];
         }
+    }
+
+    // Build controller with proper structure using actual module name
+    // This enables ConfigManager to find parameters under the correct module name
+    controller[module_name] = key;  // Changed from keyword to module_name
+
+    // Claude Generated (October 2025): Backward compatibility - keep old keyword-based access
+    // Some tests use "-md.max_time" which creates controller["md"],
+    // but we now route to controller["simplemd"] via module_name
+    // Store under both for compatibility
+    if (module_name != keyword) {
+        controller[keyword] = key;  // Also keep the old keyword for backward compat
+    }
+
+    // Merge module-specific parameters at top level
+    for (auto& [mod_name, module_config] : module_params.items()) {
+        controller[mod_name] = module_config;  // Direct assignment (may contain nested structure from setNestedJsonValue)
+    }
+
+    // Ensure global parameters are always set at top level AND in global section
+    for (const auto& [param, value] : global_values.items()) {
+        controller[param] = value;  // Top-level access (backward compat)
+        controller["global"][param] = value;  // Explicit global namespace
     }
     return controller;
 }

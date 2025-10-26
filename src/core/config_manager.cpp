@@ -40,10 +40,50 @@ ConfigManager::ConfigManager(const std::string& module, const json& user_input)
     std::cerr << "[ConfigManager] User input: " << user_input.dump(2) << std::endl;
     #endif
 
-    // Merge user input (case-insensitive + alias resolution, like MergeJson)
+    // Claude Generated (October 2025): Multi-source resolution hierarchy
+    // 1. user_input[module] - module-specific parameters (highest priority)
+    // 2. user_input["global"] - global parameters (fallback)
+    // 3. user_input[flat keys] - backward compat for flat parameter structures
+    json to_merge = json::object();
+
+    // CRITICAL: Extract module-specific config
+    if (user_input.contains(module) && user_input[module].is_object()) {
+        to_merge = user_input[module];
+        #ifdef DEBUG_CONFIG_MANAGER
+        std::cerr << "[ConfigManager] Found module config: " << module << std::endl;
+        #endif
+    }
+
+    // FALLBACK: If parameter not in module config, check global section
+    // This enables "-method gfn2" to work even if not in module-specific section
+    if (user_input.contains("global") && user_input["global"].is_object()) {
+        for (const auto& [key, value] : user_input["global"].items()) {
+            if (!to_merge.contains(key)) {
+                to_merge[key] = value;
+                #ifdef DEBUG_CONFIG_MANAGER
+                std::cerr << "[ConfigManager] Fallback to global: " << key << " = " << value << std::endl;
+                #endif
+            }
+        }
+    }
+
+    // BACKWARD COMPAT: Also accept top-level flat keys (for old CLI2Json behavior)
+    for (const auto& [key, value] : user_input.items()) {
+        if (key != module && key != "global" && !value.is_object()) {
+            // Flat key at top level (not a module object)
+            if (!to_merge.contains(key)) {
+                to_merge[key] = value;
+                #ifdef DEBUG_CONFIG_MANAGER
+                std::cerr << "[ConfigManager] Backward compat flat key: " << key << " = " << value << std::endl;
+                #endif
+            }
+        }
+    }
+
+    // Merge resolved parameters (case-insensitive + alias resolution, like MergeJson)
     auto& registry = ParameterRegistry::getInstance();
 
-    for (const auto& item : user_input.items()) {
+    for (const auto& item : to_merge.items()) {
         std::string user_key = item.key();
         std::string user_key_lower = user_key;
         std::transform(user_key_lower.begin(), user_key_lower.end(),
@@ -190,6 +230,19 @@ ConfigManager::ConfigManager(const std::vector<std::string>& modules, const json
                     #ifdef DEBUG_CONFIG_MANAGER
                     std::cerr << "[ConfigManager] Found nested config for '" << module
                               << "' under primary '" << primary << "'" << std::endl;
+                    #endif
+                }
+            }
+        }
+
+        // Claude Generated (October 2025): Global parameter fallback for all modules
+        // If a parameter is missing but available in global section, use it
+        if (user_input.contains("global") && user_input["global"].is_object()) {
+            for (const auto& [key, value] : user_input["global"].items()) {
+                if (!module_user_input.contains(key)) {
+                    module_user_input[key] = value;
+                    #ifdef DEBUG_CONFIG_MANAGER
+                    std::cerr << "[ConfigManager] Module '" << module << "': Fallback to global: " << key << std::endl;
                     #endif
                 }
             }

@@ -582,7 +582,15 @@ bool SimpleMD::Initialise()
     // std::cout << m_eigen_masses << std::endl;
     m_molecule.setCharge(m_charge);
     m_molecule.setSpin(m_spin);
-    m_interface = new EnergyCalculator(m_method, m_controller["md"], Basename());
+    // Claude Generated (October 2025 - FIXED): Use ConfigManager-based constructor
+    // This properly handles parameter routing for both old keyword-based and new module-based access:
+    // - CLI2Json creates: controller["simplemd"] for SimpleMD params, controller["global"] for globals
+    // - ConfigManager("energycalculator", full_controller) looks for:
+    //   1. controller["energycalculator"] (explicit energy calc config)
+    //   2. controller["global"] (fallback to globals)
+    //   3. ParameterRegistry defaults
+    ConfigManager ec_config("energycalculator", m_controller);
+    m_interface = new EnergyCalculator(m_method, ec_config, Basename());
 
     m_interface->setMolecule(m_molecule.getMolInfo());
     m_interface->setVerbosity(0);
