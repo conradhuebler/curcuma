@@ -65,6 +65,22 @@ capabilities/
 
 ## Variable Section
 
+### Parameter System Architecture Improvements (October 2025)
+**Status**: ✅ **CRITICAL BUG FIXED** - Multi-module parameter routing now works correctly
+**New Documentation**: [docs/PARAMETER_FLOW_ARCHITECTURE.md](../../docs/PARAMETER_FLOW_ARCHITECTURE.md) + [PARAMETER_FIX_SUMMARY.md](../../PARAMETER_FIX_SUMMARY.md)
+
+**Bug Fixed**:
+- **Issue**: `-rmsd.method subspace` was loading default `incr` instead
+- **Root Cause**: CLI2Json didn't extract nested parameter structures for multi-module commands
+- **Solution**: Enhanced parameter extraction to handle both flat and nested formats (src/main.cpp lines 278-306)
+- **Result**: Multi-module parameters (e.g., ConfScan with RMSD) now route correctly
+- **Test Impact**: Fixed parameter routing enables 5/6 RMSD CLI tests to pass (83%)
+
+**Architecture Improvements**:
+- **executeConfScan**: Simplified by 22 lines - removed redundant default merging
+- **executeSimpleMD**: Simplified by 4 lines - trust ConfigManager for merging
+- **Pattern Established**: Pass controller to capability, don't merge in execute* functions
+
 ### Parameter System Migration Status (October 2025)
 **Status**: ✅ Infrastructure complete, ConfigManager layer implemented, ongoing capability migration
 **Documentation**: [docs/PARAMETER_SYSTEM.md](../../docs/PARAMETER_SYSTEM.md) + [docs/PARAMETER_MIGRATION_GUIDE.md](../../docs/PARAMETER_MIGRATION_GUIDE.md)

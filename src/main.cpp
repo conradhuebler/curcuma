@@ -270,10 +270,58 @@ json CLI2Json(int argc, char** argv)
         }
     }
 
+    // Claude Generated 2025: Extract module-specific parameters to top level
+    // Parameters like "rmsd.method" should be at controller["rmsd"]["method"], NOT controller["confscan"]["rmsd"]["method"]
+    json module_params;
+    std::vector<std::string> keys_to_remove;
+
+    for (auto& [param_name, param_value] : key.items()) {
+        // Claude Generated 2025: Check if this is a module-specific parameter
+        // Could be either:
+        // 1. Flat key with dots: "rmsd.method" (stored as param_name contains dot)
+        // 2. Nested structure: setNestedJsonValue already created key["rmsd"]["method"]
+        //    so param_name = "rmsd" and param_value = {"method": "subspace"}
+
+        bool is_flat_dotted = param_name.find('.') != std::string::npos;
+        bool is_nested_module = param_value.is_object() && param_name != keyword;
+
+        if (is_flat_dotted) {
+            // Handle flat dot notation: "rmsd.method"
+            size_t dot_pos = param_name.find('.');
+            std::string module_name = param_name.substr(0, dot_pos);
+            if (module_name != keyword) {
+                std::string param_key = param_name.substr(dot_pos + 1);
+                if (!module_params.contains(module_name)) {
+                    module_params[module_name] = json::object();
+                }
+                setNestedJsonValue(module_params[module_name], param_key, param_value);
+                keys_to_remove.push_back(param_name);
+            }
+        } else if (is_nested_module) {
+            // Handle nested structure created by setNestedJsonValue
+            // param_name = "rmsd", param_value = {"method": "subspace"}
+            module_params[param_name] = param_value;
+            keys_to_remove.push_back(param_name);
+        }
+    }
+
+    // Remove extracted module parameters from main command params
+    for (const auto& remove_key : keys_to_remove) {
+        key.erase(remove_key);
+    }
+
+    // Build controller with proper structure
     controller[keyword] = key;
+
+    // Merge module-specific parameters at top level
+    for (auto& [module_name, module_config] : module_params.items()) {
+        controller[module_name] = module_config;  // Direct assignment (may contain nested structure from setNestedJsonValue)
+    }
+
+    // Ensure global parameters are always set at top level
     for (const auto& param : global_params) {
         if (key.count(param) > 0) {
-            controller[param] = key[param]; // Ensure global parameters are always set in the controller
+            controller[param] = key[param];
         }
     }
     return controller;
@@ -419,7 +467,12 @@ int executeOptimization(const json& controller, int argc, char** argv) {
     }
 
     // Legacy optimization (fallback for exceptions or non-modern methods)
-    CurcumaOpt opt(controller, false);
+    // Claude Generated 2025: Apply same parameter merging as modern optimizer to fix JSON null bug
+    json legacy_controller = controller;
+    json opt_defaults = ParameterRegistry::getInstance().getDefaultJson("opt");
+    legacy_controller["opt"] = MergeJson(opt_defaults, controller.contains("opt") ? controller["opt"] : json{});
+
+    CurcumaOpt opt(legacy_controller, false);
     opt.setFileName(argv[2]);
     opt.start();
     return 0;
@@ -437,13 +490,14 @@ int executeConfScan(const json& controller, int argc, char** argv) {
         return 1;
     }
 
-    // Claude Generated 2025: Add RMSD module defaults for Multi-Module ConfScan
-    json confscan_config = controller;
-    if (!confscan_config.contains("rmsd") || !confscan_config["rmsd"].is_object()) {
-        confscan_config["rmsd"] = ParameterRegistry::getInstance().getDefaultJson("rmsd");
-    }
+    // Claude Generated 2025: Simplified - CLI2Json routes parameters, ConfigManager handles defaults
+    // ConfScan's ConfigManager (Multi-Module: "confscan", "rmsd") will:
+    // 1. Load defaults for both modules from ParameterRegistry
+    // 2. Merge user parameters from controller["confscan"] and controller["rmsd"]
+    // 3. Handle global parameters (verbosity, threads)
+    // No manual merging needed here!
 
-    auto* scan = new ConfScan(confscan_config);
+    auto* scan = new ConfScan(controller);
     scan->setFileName(argv[2]);
     scan->start();
     int accepted = scan->AcceptedCount();
@@ -499,8 +553,14 @@ int executeSimpleMD(const json& controller, int argc, char** argv) {
         return 1;
     }
 
-    json md_config = controller.value("md", json::object());
-    auto* md = new SimpleMD(md_config, false);
+    // Claude Generated 2025: Simplified - SimpleMD's ConfigManager handles defaults
+    // SimpleMD constructor uses ConfigManager("simplemd", controller) which:
+    // 1. Loads defaults from ParameterRegistry
+    // 2. Merges user parameters from controller["md"]
+    // 3. Handles alias resolution automatically
+    // No manual merging needed here!
+
+    auto* md = new SimpleMD(controller, false);
     md->setMolecule(mol);
     md->Initialise();
     md->start();
@@ -514,7 +574,10 @@ int executeCasino(const json& controller, int argc, char** argv) {
         dummy.printHelp();
         return 0;
     }
-    json casino_config = controller.value("casino", json::object());
+    // Claude Generated 2025: Apply parameter merging to fix JSON null issues
+    json casino_defaults = ParameterRegistry::getInstance().getDefaultJson("casino");
+    json casino_config = MergeJson(casino_defaults, controller.contains("casino") ? controller["casino"] : json{});
+
     auto* casino = new Casino(casino_config, false);
     casino->setFileName(argv[2]);
     casino->start();

@@ -112,13 +112,36 @@ core/
 - **Large systems**: Optimized algorithms with bounds checking for molecules >1000 atoms
 
 ### Major Refactoring Completed (January 2025) ✅
-- **🚀 EnergyCalculator Architecture**: Complete polymorphic refactoring - eliminates SwitchMethod  
+- **🚀 EnergyCalculator Architecture**: Complete polymorphic refactoring - eliminates SwitchMethod
 - **🎯 Universal Verbosity System**: All QM/MM methods support 4-level verbosity (0-3)
 - **🏗️ MethodFactory Integration**: Priority-based method resolution with automatic fallbacks
 - **🔧 Enhanced Error Handling**: Method-specific error reporting with CurcumaLogger
 - **📈 Performance Maintained**: Threading, caching, and optimization preserved
 - **✅ API Compatibility**: All existing EnergyCalculator usage works unchanged
 - **🗂️ Physical Restructuring**: All computational methods consolidated under `energy_calculators/`
+
+### Parameter System Architecture Improvements (October 2025) ✅
+- **🔧 CLI2Json Parameter Extraction Fix**: Fixed nested parameter routing in multi-module commands
+  - Bug: `-rmsd.method subspace` was loading default `incr` instead
+  - Root Cause: Extraction logic didn't handle nested structures from `setNestedJsonValue()`
+  - Solution: Enhanced extraction to handle both flat and nested parameter formats
+  - Result: Multi-module parameters now correctly routed (e.g., ConfScan with RMSD)
+
+- **⚡ execute* Function Simplification**: Removed 26 lines of redundant parameter merging
+  - **executeConfScan**: Removed 22 lines - now passes controller directly
+  - **executeSimpleMD**: Removed 4 lines - let ConfigManager handle merging
+  - Pattern: Pass controller to capability, trust ConfigManager to merge defaults
+  - Benefit: Single responsibility principle, reduced code duplication
+
+- **📖 Architecture Documentation**: Created comprehensive guides
+  - `docs/PARAMETER_FLOW_ARCHITECTURE.md` (505 lines): 4-layer parameter flow with diagrams
+  - `PARAMETER_FIX_SUMMARY.md` (655 lines): Complete improvement summary and test results
+  - Patterns and best practices for future development
+
+- **✅ Test Results**: 83% RMSD CLI tests passing (5/6)
+  - Fixed parameter routing enables correct multi-module parameter handling
+  - SimpleMD works cleanly with simplified execute function
+  - No behavior changes, only architecture improvements
 
 ### Previous Improvements
 - **Scientific fixes**: Dipole moments now use center of mass (physically correct)

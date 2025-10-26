@@ -120,6 +120,9 @@ ConfigManager::ConfigManager(const std::vector<std::string>& modules, const json
         std::cerr << "[ConfigManager] Module '" << module << "': " << module_defaults.size() << " default params" << std::endl;
         #endif
 
+        // DEBUG: Print actual defaults loaded
+        std::cerr << "[ConfigManager] Defaults for '" << module << "': " << module_defaults.dump() << std::endl;
+
         // Extract user input for this module - Claude Generated 2025: Fixed nested/flat separation
         json module_user_input;
 
