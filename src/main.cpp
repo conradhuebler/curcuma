@@ -453,8 +453,15 @@ int executeOptimization(const json& controller, int argc, char** argv) {
                 molecule.get(), optimizer_method, &energy_calc, opt_config);
 
             if (result.success) {
-                std::string output_file = opt_config.value("output", "optimized.xyz");
+                // Claude Generated: Derive output filename from input basename like Legacy CurcumaOpt
+                // Extract basename from argv[2] (e.g., "input.xyz" → "input")
+                std::string filename(argv[2]);
+                std::string basename = filename.size() >= 4 ?
+                    filename.substr(0, filename.size() - 4) : filename;  // Remove last 4 chars (.xyz)
+                std::string output_file = opt_config.value("output", basename + ".opt.xyz");
+
                 molecule->writeXYZFile(output_file);
+                CurcumaLogger::success_fmt("Optimized structure written to: {}", output_file);
                 return 0;
             } else {
                 // Modern optimizer failed, fall through to legacy
