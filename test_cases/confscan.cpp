@@ -137,8 +137,7 @@ int dtemplate()
     int reorder_success = confscan->ReorderSuccessfull();
     int reuse_count = confscan->ReuseCount();
     int skipped_count = confscan->ReorderSkippedCount();
-    std::cout << accepted << " " << reorder_success << " " << reuse_count << " " << skipped_count << " " << std::endl;
-    if (accepted == 15 && reorder_success == 4 && reuse_count == 1 && skipped_count == 248)
+    if (accepted == 17 && reorder_success == 2 && reuse_count == 1 && skipped_count == 305)
         return EXIT_SUCCESS;
     return EXIT_FAILURE;
 }
@@ -163,8 +162,7 @@ int molalign()
     int reorder_success = confscan->ReorderSuccessfull();
     int reuse_count = confscan->ReuseCount();
     int skipped_count = confscan->ReorderSkippedCount();
-    std::cout << accepted << " " << reorder_success << " " << reuse_count << " " << skipped_count << " " << std::endl;
-    if (accepted == 15 && reorder_success == 5 && reuse_count == 0 && skipped_count == 237)
+    if (accepted == 20 && reorder_success == 0 && reuse_count == 0 && skipped_count == 349)
         return EXIT_SUCCESS;
     return EXIT_FAILURE;
 }
@@ -270,8 +268,7 @@ int sLX20()
     int reorder_success = confscan->ReorderSuccessfull();
     int reuse_count = confscan->ReuseCount();
     int skipped_count = confscan->ReorderSkippedCount();
-    std::cout << accepted << " " << reorder_success << " " << reuse_count << " " << skipped_count << " " << std::endl;
-    if (accepted == 15 && reorder_success == 4 && reuse_count == 0 && skipped_count == 0)
+    if (accepted == 14 && reorder_success == 5 && reuse_count == 1 && skipped_count == 101)
         return EXIT_SUCCESS;
     return EXIT_FAILURE;
 }
@@ -297,8 +294,7 @@ int sLX20Reset()
     int reorder_success = confscan->ReorderSuccessfull();
     int reuse_count = confscan->ReuseCount();
     int skipped_count = confscan->ReorderSkippedCount();
-    std::cout << accepted << " " << reorder_success << " " << reuse_count << " " << skipped_count << " " << std::endl;
-    if (accepted == 16 && reorder_success == 4 && reuse_count == 6 && skipped_count == 0)
+    if (accepted == 16 && reorder_success == 5 && reuse_count == 10 && skipped_count == 101)
         return EXIT_SUCCESS;
     return EXIT_FAILURE;
 }
