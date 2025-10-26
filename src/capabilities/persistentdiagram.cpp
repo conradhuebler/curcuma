@@ -50,18 +50,19 @@ PersistentDiagram::PersistentDiagram(const ConfigManager& config, bool silent)
 {
     UpdateController(config.exportConfig());
 
-    m_ratio = m_defaults["ripser_ratio"];
-    m_xmax = m_defaults["ripser_xmax"];
-    m_xmin = m_defaults["ripser_xmin"];
-    m_ymax = m_defaults["ripser_ymax"];
-    m_ymin = m_defaults["ripser_ymin"];
-    m_bins = m_defaults["ripser_bins"];
-    m_scaling = m_defaults["ripser_scaling"];
-    m_std_x = m_defaults["ripser_stdx"];
-    m_std_y = m_defaults["ripser_stdy"];
-    m_dimension = m_defaults["ripser_dimension"];
-    m_epsilon = m_defaults["ripser_epsilon"];
-    m_min = m_defaults["ripser_min"];
+    // Claude Generated 2025: Updated to use new canonical parameter names from ParameterRegistry
+    m_ratio = m_defaults.value("ratio", 1.0);
+    m_xmax = m_defaults.value("x_max", 4.0);
+    m_xmin = m_defaults.value("x_min", 0.0);
+    m_ymax = m_defaults.value("y_max", 4.0);
+    m_ymin = m_defaults.value("y_min", 0.0);
+    m_bins = m_defaults.value("bins", 10);
+    m_scaling = m_defaults.value("scaling", 0.1);
+    m_std_x = m_defaults.value("std_x", 10.0);
+    m_std_y = m_defaults.value("std_y", 10.0);
+    m_dimension = m_defaults.value("dimension", 2);
+    m_epsilon = m_defaults.value("epsilon", 0.4);
+    m_min = m_defaults.value("min", 0.0);
     m_threshold = std::numeric_limits<float>::max();
     checkHelp();
 }

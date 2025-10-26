@@ -415,8 +415,9 @@ bool ConfScan::openFile()
         throw 1;
 
     int molecule = 0;
-    // Claude Generated 2025: Export flattened config for legacy PersistentDiagram API
-    PersistentDiagram diagram(m_config.exportConfig());
+    // Claude Generated 2025: Create PersistentDiagram with empty config to use built-in defaults
+    // (ripser parameters not included in ConfScan ConfigManager to maintain performance)
+    PersistentDiagram diagram(json::object());
     FileIterator file(Filename());
     int calcH = 0;
     int calcI = 0;
