@@ -40,6 +40,7 @@
 
 #include "curcumamethod.h"
 #include "src/core/parameter_macros.h"  // Claude Generated - For PARAM macro definitions
+#include "src/core/parameter_registry.h"  // Claude Generated - For ParameterRegistry in getSimpleMDJson()
 #include "src/core/config_manager.h"    // Claude Generated - Modern parameter access layer
 
 struct BiasStructure {
@@ -433,6 +434,17 @@ private:
     END_PARAMETER_DEFINITION
     // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^
 };
+
+// Claude Generated (October 2025): Replace static JSON with ParameterRegistry
+// This ensures consistency with the parameter definitions above and enables
+// automatic help generation, validation, and JSON export/import capabilities
+inline json getSimpleMDJson() {
+    return ParameterRegistry::getInstance().getDefaultJson("simplemd");
+}
+
+// Legacy static reference for backward compatibility - Claude Generated
+// NOTE: This creates the JSON on first access, so it's safe for initialization order
+#define SimpleMDJson getSimpleMDJson()
 
 class MDThread : public CxxThread {
 public:

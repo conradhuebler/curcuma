@@ -506,7 +506,7 @@ bool SimpleMD::Initialise()
     m_atom_temp = std::vector<std::vector<double>>(m_natoms);
     if(m_opt)
     {
-        json js = CurcumaOptJson;
+        json js = SimpleMDJson;  // Claude Generated: Fixed - use SimpleMDJson instead of CurcumaOptJson
         js = MergeJson(js, m_defaults);
         js["writeXYZ"] = false;
         js["method"] = m_method;
@@ -582,14 +582,27 @@ bool SimpleMD::Initialise()
     // std::cout << m_eigen_masses << std::endl;
     m_molecule.setCharge(m_charge);
     m_molecule.setSpin(m_spin);
-    // Claude Generated (October 2025 - FIXED): Use ConfigManager-based constructor
-    // This properly handles parameter routing for both old keyword-based and new module-based access:
-    // - CLI2Json creates: controller["simplemd"] for SimpleMD params, controller["global"] for globals
-    // - ConfigManager("energycalculator", full_controller) looks for:
-    //   1. controller["energycalculator"] (explicit energy calc config)
-    //   2. controller["global"] (fallback to globals)
-    //   3. ParameterRegistry defaults
-    ConfigManager ec_config("energycalculator", m_controller);
+    // Claude Generated (October 2025 - FIXED): Use controller["simplemd"] like CurcumaOpt uses controller["opt"]
+    // Also merge in global parameters and defaults from ParameterRegistry
+    json ec_config = m_controller.contains("simplemd") ? m_controller["simplemd"] : json::object();
+
+    // Merge global parameters as fallback
+    if (m_controller.contains("global") && m_controller["global"].is_object()) {
+        for (auto& [key, value] : m_controller["global"].items()) {
+            if (!ec_config.contains(key)) {
+                ec_config[key] = value;
+            }
+        }
+    }
+
+    // Ensure critical parameters exist with defaults from ParameterRegistry
+    json defaults = ParameterRegistry::getInstance().getDefaultJson("energycalculator");
+    for (auto& [key, value] : defaults.items()) {
+        if (!ec_config.contains(key) || ec_config[key].is_null()) {
+            ec_config[key] = value;
+        }
+    }
+
     m_interface = new EnergyCalculator(m_method, ec_config, Basename());
 
     m_interface->setMolecule(m_molecule.getMolInfo());
