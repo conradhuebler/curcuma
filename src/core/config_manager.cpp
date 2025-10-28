@@ -401,7 +401,58 @@ json ConfigManager::findKey(const std::string& key) const
         }
     }
 
-    // Second try: Check if key uses dot notation (e.g., "topological.save_image" or "rmsd.method")
+    // Claude Generated (October 2025 - CRITICAL FIX): Fallback for legacy/malformed JSON structures
+    // Second try: Try with module prefix (handles incorrectly structured JSON)
+    // Example: "max_time" not found → try "md.max_time" (for SimpleMD)
+    if (!m_module.empty()) {
+        std::string prefixed_key = m_module + "." + key;
+        std::string prefixed_key_lower = prefixed_key;
+        std::transform(prefixed_key_lower.begin(), prefixed_key_lower.end(),
+                      prefixed_key_lower.begin(), ::tolower);
+
+        for (const auto& item : m_config.items()) {
+            std::string config_key = item.key();
+            std::string config_key_lower = config_key;
+            std::transform(config_key_lower.begin(), config_key_lower.end(),
+                          config_key_lower.begin(), ::tolower);
+
+            if (prefixed_key_lower == config_key_lower) {
+                #ifndef DEBUG_CONFIG_MANAGER
+                std::cerr << "[ConfigManager WARNING] Parameter '" << key
+                          << "' found via prefix fallback as '" << config_key
+                          << "'. Consider using flat structure." << std::endl;
+                #endif
+                return item.value();
+            }
+        }
+    }
+
+    // Third try: Check for nested object structure (handles double-nesting bug)
+    // Example: config["md"]["max_time"] when looking for "max_time"
+    if (!m_module.empty() && m_config.contains(m_module) && m_config[m_module].is_object()) {
+        const json& nested = m_config[m_module];
+        std::string key_lower_nested = key;
+        std::transform(key_lower_nested.begin(), key_lower_nested.end(),
+                      key_lower_nested.begin(), ::tolower);
+
+        for (const auto& nested_item : nested.items()) {
+            std::string nested_key = nested_item.key();
+            std::string nested_key_lower = nested_key;
+            std::transform(nested_key_lower.begin(), nested_key_lower.end(),
+                          nested_key_lower.begin(), ::tolower);
+
+            if (key_lower_nested == nested_key_lower) {
+                #ifndef DEBUG_CONFIG_MANAGER
+                std::cerr << "[ConfigManager WARNING] Parameter '" << key
+                          << "' found in nested object config[\"" << m_module << "\"][\""
+                          << nested_key << "\"]. Consider flattening JSON structure." << std::endl;
+                #endif
+                return nested_item.value();
+            }
+        }
+    }
+
+    // Fourth try: Check if key uses dot notation (e.g., "topological.save_image" or "rmsd.method")
     size_t dot_pos = key.find('.');
     if (dot_pos != std::string::npos) {
         std::string prefix = key.substr(0, dot_pos);

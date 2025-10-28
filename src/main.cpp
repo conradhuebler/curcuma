@@ -249,6 +249,29 @@ json CLI2Json(int argc, char** argv)
                 }
             }
 
+            // Claude Generated (October 2025 - CRITICAL FIX): Strip redundant keyword prefix from dotted parameters
+            // Makes "-md.max_time 10" and "-max_time 10" synonymous within "-md" command context
+            // Fixes SimpleMD double-nesting bug: controller["simplemd"]["md"]["max_time"] → controller["simplemd"]["max_time"]
+            if (current.find('.') != std::string::npos) {
+                size_t dot_pos = current.find('.');
+                std::string param_prefix = current.substr(0, dot_pos);
+                std::string param_key = current.substr(dot_pos + 1);
+
+                // Resolve prefix to module name using keyword_to_module map (e.g., "md" → "simplemd")
+                std::string prefix_module = param_prefix;
+                if (keyword_to_module.count(param_prefix) > 0) {
+                    prefix_module = keyword_to_module[param_prefix];
+                }
+
+                // If prefix matches current command's keyword or module name, strip it
+                // Example: "-md input.xyz -md.max_time 10" → keyword="md", module_name="simplemd"
+                //          param_prefix="md" matches keyword → strip → current="max_time"
+                // Preserves cross-module routing: "-md -rmsd.method subspace" keeps "rmsd.method"
+                if (param_prefix == keyword || prefix_module == module_name) {
+                    current = param_key;  // Strip prefix: "md.max_time" → "max_time"
+                }
+            }
+
             if ((i + 1) >= argc || argv[i + 1][0] == '-' || argv[i + 1] == std::string("true") || argv[i + 1] == std::string("+")) {
                 setNestedJsonValue(key, current, true);
             } else if (argv[i + 1] == std::string("false")) {
@@ -306,15 +329,29 @@ json CLI2Json(int argc, char** argv)
         bool is_nested_object = param_value.is_object();
 
         if (is_flat_dotted) {
-            // Handle flat dot notation: "rmsd.method"
+            // Handle flat dot notation: "rmsd.method" or "-md.max_time"
             size_t dot_pos = param_name.find('.');
             std::string module_name = param_name.substr(0, dot_pos);
+            std::string param_key = param_name.substr(dot_pos + 1);
+
             if (module_name != keyword) {
-                std::string param_key = param_name.substr(dot_pos + 1);
-                if (!module_params.contains(module_name)) {
-                    module_params[module_name] = json::object();
+                // Claude Generated (October 2025 - CRITICAL FIX): Map keywords to actual module names
+                // e.g., "-md.max_time" has module_name="md" from Punkt-notation,
+                // but must be routed to module_params["simplemd"] (the actual module)
+                std::string target_module = module_name;
+                if (keyword_to_module.count(module_name) > 0) {
+                    target_module = keyword_to_module[module_name];
                 }
-                setNestedJsonValue(module_params[module_name], param_key, param_value);
+                if (!module_params.contains(target_module)) {
+                    module_params[target_module] = json::object();
+                }
+                setNestedJsonValue(module_params[target_module], param_key, param_value);
+                keys_to_remove.push_back(param_name);
+            } else {
+                // Claude Generated (October 2025 - CRITICAL FIX): Handle "-keyword.param" (e.g., "-md.max_time")
+                // These should be FLAT in controller["simplemd"], not nested as key["md"]["max_time"]
+                // Extract directly to top level to avoid double-nesting
+                setNestedJsonValue(key, param_key, param_value);
                 keys_to_remove.push_back(param_name);
             }
         } else if (is_nested_object && param_name != keyword) {
@@ -340,6 +377,11 @@ json CLI2Json(int argc, char** argv)
             global_values[param] = key[param];
         }
     }
+
+    // Claude Generated: DEBUG - Show what's in key before storing to controller
+    std::cerr << "[CLI2Json DEBUG] keyword=" << keyword << ", module_name=" << module_name << std::endl;
+    std::cerr << "[CLI2Json DEBUG] key object content:" << std::endl;
+    std::cerr << key.dump(2) << std::endl;
 
     // Build controller with proper structure using actual module name
     // This enables ConfigManager to find parameters under the correct module name
