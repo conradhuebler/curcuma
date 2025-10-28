@@ -649,6 +649,7 @@ int executeSimpleMD(const json& controller, int argc, char** argv) {
     // No manual merging needed here!
 
     auto* md = new SimpleMD(controller, false);
+    md->setFile(argv[2]);  // Claude Generated (October 2025): Set basename for trajectory file naming
     md->setMolecule(mol);
     md->Initialise();
     md->start();

@@ -1667,6 +1667,11 @@ void SimpleMD::start()
         m_currentStep += m_dT;
         m_time_step += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() - step0).count();
     } //MD Loop end here
+
+    // Claude Generated (October 2025): Write final frame to ensure at least 2 frames (t=0, t=max_time)
+    // Fixes trajectory file generation for short simulations where dump_frequency > total_steps
+    WriteGeometry();
+
     PrintStatus();
     if (m_thermostat == "csvr")
         std::cout << "Exchange with heat bath " << m_Ekin_exchange << "Eh" << std::endl;
