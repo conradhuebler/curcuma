@@ -369,7 +369,7 @@ private:
     PARAM(time_step, Double, 1.0, "Integration time step in femtoseconds.", "Basic", {"dt"})
     PARAM(max_time, Double, 1000.0, "Maximum simulation time in femtoseconds.", "Basic", {"MaxTime"})
     PARAM(charge, Int, 0, "Total charge of the system.", "Basic", {})
-    PARAM(spin, Int, 1, "Total spin multiplicity of the system.", "Basic", {"Spin"})
+    PARAM(spin, Int, 0, "Total spin multiplicity of the system (0=singlet, 1=doublet).", "Basic", {"Spin"})
     PARAM(seed, Int, -1, "Random seed (-1: time, 0: auto).", "Basic", {})
     PARAM(threads, Int, 1, "Number of parallel threads.", "Basic", {})
 
