@@ -17,20 +17,25 @@ export TESTS_FAILED=0
 
 # Find curcuma binary (auto-detect project root)
 if [ -z "$CURCUMA" ]; then
-    # Find project root by looking for CMakeLists.txt
-    SEARCH_DIR="$(pwd)"
-    PROJECT_ROOT=""
-    for i in {1..5}; do
-        if [ -f "$SEARCH_DIR/CMakeLists.txt" ] && [ -d "$SEARCH_DIR/src" ]; then
-            PROJECT_ROOT="$SEARCH_DIR"
-            break
-        fi
-        SEARCH_DIR="$(dirname "$SEARCH_DIR")"
-    done
+    # Claude Generated (Oct 28, 2025): Use CMAKE-injected PROJECT_ROOT if available
+    # Tests run from build tree, so PROJECT_ROOT is explicitly set by CMakeLists.txt
+    if [ -z "$PROJECT_ROOT" ] || [ ! -d "$PROJECT_ROOT/src" ]; then
+        # Fallback: search for project root by looking for src/ directory
+        SEARCH_DIR="$(pwd)"
+        PROJECT_ROOT=""
 
-    if [ -z "$PROJECT_ROOT" ]; then
-        echo -e "${RED}ERROR: Could not find project root!${NC}"
-        exit 1
+        for i in {1..5}; do
+            if [ -d "$SEARCH_DIR/src" ]; then
+                PROJECT_ROOT="$SEARCH_DIR"
+                break
+            fi
+            SEARCH_DIR="$(dirname "$SEARCH_DIR")"
+        done
+
+        if [ -z "$PROJECT_ROOT" ]; then
+            echo -e "${RED}ERROR: Could not find project root!${NC}"
+            exit 1
+        fi
     fi
 
     # Try release first (faster for CLI tests), then debug, then build
