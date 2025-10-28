@@ -163,6 +163,11 @@ int main(int argc, char* argv[])
     std::string current_module;
 
     for (const auto& filepath : input_files) {
+        // Claude Generated (October 2025): Skip parameter_macros.h - it contains macro definitions only, not parameter declarations
+        if (filepath.find("parameter_macros.h") != std::string::npos) {
+            continue;
+        }
+
         std::ifstream file(filepath);
         if (!file.is_open()) {
             std::cerr << "Warning: Could not open file " << filepath << "\n";

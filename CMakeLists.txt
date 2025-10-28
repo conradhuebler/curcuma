@@ -307,6 +307,33 @@ set(curcuma_cap_SRC
 )
 
 add_library(curcuma_core  ${curcuma_core_SRC})
+
+# Claude Generated (October 2025): Add feature flag compile definitions to curcuma_core target
+# These are required for method_factory.cpp #ifdef checks to work properly
+if(USE_GFNFF)
+    target_compile_definitions(curcuma_core PRIVATE USE_GFNFF)
+endif()
+
+if(USE_XTB)
+    target_compile_definitions(curcuma_core PRIVATE USE_XTB)
+endif()
+
+if(USE_TBLITE)
+    target_compile_definitions(curcuma_core PRIVATE USE_TBLITE)
+endif()
+
+if(USE_ULYSSES)
+    target_compile_definitions(curcuma_core PRIVATE USE_ULYSSES)
+endif()
+
+if(USE_D3)
+    target_compile_definitions(curcuma_core PRIVATE USE_D3)
+endif()
+
+if(USE_D4)
+    target_compile_definitions(curcuma_core PRIVATE USE_D4)
+endif()
+
 add_library(curcuma_cap  ${curcuma_cap_SRC})
 
 # Enable precompiled headers for faster compilation
@@ -347,6 +374,10 @@ set(ulysess_SRC
 endif(USE_ULYSSES)
 add_library(ulysses_lib ${ulysess_SRC})
 
+# Claude Generated (October 2025): Add USE_ULYSSES compile definition
+if(USE_ULYSSES)
+    target_compile_definitions(ulysses_lib PRIVATE USE_ULYSSES)
+endif()
 
 if(USE_BLAS)
     target_link_libraries(ulysses_lib blas)
@@ -423,6 +454,9 @@ if(USE_XTB)
     )
     add_library(curcuma_xtb  ${curcuma_xtb_SRC})
 
+    # Claude Generated (October 2025): Add USE_XTB compile definition
+    target_compile_definitions(curcuma_xtb PRIVATE USE_XTB)
+
     target_link_libraries(curcuma_xtb PUBLIC "mctc-lib" lib-xtb-shared gfortran)
     target_link_libraries(curcuma_core curcuma_xtb)
 
@@ -465,6 +499,9 @@ if(USE_TBLITE)
     )
     add_library(curcuma_tblite  ${curcuma_tblite_SRC})
 
+    # Claude Generated (October 2025): Add USE_TBLITE compile definition
+    target_compile_definitions(curcuma_tblite PRIVATE USE_TBLITE)
+
     target_link_libraries(curcuma_tblite PUBLIC "mctc-lib" tblite-lib gfortran)
     target_link_libraries(curcuma_core curcuma_tblite)
 endif()
@@ -496,6 +533,9 @@ if(USE_GFNFF)
     )
     add_library(curcuma_gfnff ${curcuma_gfnff_SRC})
 
+    # Claude Generated (October 2025): Add USE_GFNFF compile definition (CRITICAL FIX)
+    target_compile_definitions(curcuma_gfnff PRIVATE USE_GFNFF)
+
     target_link_libraries(curcuma_gfnff PUBLIC gfnff-lib gfortran)
     target_link_libraries(curcuma_core curcuma_gfnff)
 endif()
@@ -514,6 +554,10 @@ if(USE_D3)
            src/core/energy_calculators/qm_methods/dftd3interface.cpp
     )
     add_library(curcuma_D3  ${curcuma_D3_SRC})
+
+    # Claude Generated (October 2025): Add USE_D3 compile definition
+    target_compile_definitions(curcuma_D3 PRIVATE USE_D3)
+
     target_link_libraries(curcuma_D3 s-dftd3)
     target_link_libraries(curcuma_core curcuma_D3 gfortran pthread)
 endif()
@@ -548,6 +592,10 @@ if(USE_D4)
         src/core/energy_calculators/qm_methods/dftd4interface.cpp
     )
     add_library(curcuma_d4  ${curcuma_d4_SRC})
+
+    # Claude Generated (October 2025): Add USE_D4 compile definition
+    target_compile_definitions(curcuma_d4 PRIVATE USE_D4)
+
     if(DEFINED D4LIBS_DIR AND DEFINED D4INCLUDE_DIR)
 	    target_link_libraries(curcuma_d4 PUBLIC libcpp_d4 cblas lapacke )
     else()
@@ -655,6 +703,9 @@ add_executable(curcuma_param_parser scripts/param_parser/main.cpp)
 
 # 2. Get all header files in the project
 file(GLOB_RECURSE ALL_PROJECT_HEADERS "src/*.h" "src/**/*.h")
+
+# Claude Generated (October 2025): Ensure generated directory exists before writing output file
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 # 3. Define the custom command to run the parser
 add_custom_command(
