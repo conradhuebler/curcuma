@@ -608,8 +608,8 @@ else()
     set_property(TARGET curcuma_helper PROPERTY CXX_STANDARD 14)
 endif(C17)
 
-#add_subdirectory(test_cases)
 include(CTest)
+add_subdirectory(test_cases)
 
 target_sources(Continuous
   PRIVATE

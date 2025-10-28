@@ -70,7 +70,9 @@ inline std::vector<std::vector<int>> FindRings(const std::vector<std::vector<int
                     bool close_ring = false;
                     for (int atom : bonded) {
                         // std::cout << atom << " " << stash[s][stash[s].size() - 2] << std::endl;
-                        if (stash[s][stash[s].size() - 2] == atom)
+                        // Claude Fix 2025-10-19: Prevent out-of-bounds access when stash[s].size() < 2
+                        // stash[s] starts with size 1 (line 56), so size()-2 would be -1 (18446744073709551615 unsigned)
+                        if (stash[s].size() >= 2 && stash[s][stash[s].size() - 2] == atom)
                             continue;
 
                         if (stash[s][0] == atom) {

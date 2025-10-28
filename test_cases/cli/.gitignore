@@ -1,0 +1,37 @@
+# CLI Test Generated Outputs
+# Claude Generated (October 2025): Safety net for build directory isolation
+# NOTE: These files should NOT appear if build directory isolation works correctly.
+# They are only here as a safety net in case tests run from source directory.
+
+# XYZ trajectory and structure outputs
+*.trj.xyz
+*.opt.xyz
+*.accepted.xyz
+*.rejected.xyz
+*.reorder.*.xyz
+*.centered.xyz
+*.reordered.xyz
+*.thresh.xyz
+*.reuse.xyz
+*.initial.xyz
+
+# JSON configuration and state files
+curcuma_restart.json
+curcuma_final.json
+curcuma_step_*.json
+*.param.json
+input.param.json
+
+# Log files
+stdout.log
+stderr.log
+
+# Data analysis files
+*.dat
+*.pairs
+*.dot
+
+# Temporary files
+*.tmp
+*.swp
+*.swo

@@ -32,6 +32,23 @@ test_cases/
 
 ## CLI Tests (NEW - October 2025)
 
+### Build Directory Isolation (CLAUDE Generated October 28, 2025)
+
+**Architecture**: Tests execute from BUILD TREE to keep SOURCE TREE clean
+- **Source tree**: `test_cases/cli/category/test_name/` - only input files + scripts tracked
+- **Build tree**: `build/test_cases/cli/category/test_name/` - all outputs generated here
+- **CMake Pattern**: `file(COPY)` + copy-and-run macro (same as C++ unit tests)
+- **Benefit**: Clean `git status`, professional separation of concerns
+
+**How It Works**:
+```cmake
+# CMakeLists.txt macro copies entire test directory to build tree
+add_cli_test(rmsd 01_default_rmsd)
+  → Copies test_cases/cli/rmsd/01_default_rmsd/ to build/test_cases/cli/rmsd/01_default_rmsd/
+  → Copies test_utils.sh to build/test_cases/cli/rmsd/ and build/test_cases/cli/
+  → Runs test from build directory (clean source tree!)
+```
+
 ### Design Philosophy
 
 **End-to-End Testing**: Tests verwenden curcuma genau wie ein User es verwenden würde - über die Command Line.
@@ -140,24 +157,15 @@ ctest -R "cli_rmsd_" --output-on-failure
 ctest -R "cli_rmsd_01" --verbose
 ```
 
-### Current Status (Stand 2025-10-19)
+### Current Status (Stand 2025-10-26)
 
-**Tests implementiert**: 26 Tests
-**Tests bestanden**: 13/26 (50%)
-**Kategorien**:
-- RMSD: 5/6 ✅ (83%)
-- ConfScan: 6/7 ✅ (86%)
-- SimpleMD: 1/7 ❌ (14% - Optimierungs-Bug)
-- curcumaopt: 1/6 ❌ (17% - JSON null-Fehler)
+**Tests**: 26 implementiert, **19/26 bestanden (73%)**
+- RMSD: 6/6 ✅ (100%)
+- ConfScan: 7/7 ✅ (100%)
+- Curcumaopt: 6/6 ✅ (100%)
+- SimpleMD: 0/7 (no crashes, output file issue)
 
-**Bekannte Probleme**:
-- **curcumaopt JSON null-Fehler**: Betrifft 11/26 Tests (siehe KNOWN_BUGS.md)
-- **SimpleMD**: 6 Tests fehlgeschlagen wegen Optimierungs-Bug
-- **Invalid Method Tests**: 3 Tests erwarten Fehler-Codes (noch nicht implementiert)
-
-**Golden References dokumentiert**:
-- RMSD: 2.87214 Å (AAA-bGal, 90 Atome)
-- Weitere Referenzen in GOLDEN_REFERENCES.md
+**Golden References**: RMSD 2.87214 Å (AAA-bGal, 90 atoms) - see GOLDEN_REFERENCES.md
 
 ## Unit Tests (C++)
 
@@ -294,26 +302,11 @@ m_reference_energies["eht"] = -190.28490972;   // Extended Hückel
 - Verwende undokumentierte Magic Numbers
 - Überspringe Error-Cases
 
-## Known Issues (Stand 2025-10-19)
+## Known Issues
 
-### CRITICAL: curcumaopt JSON null-Fehler
-**Betrifft**: 11/26 CLI Tests (42%)
-```
-[ERROR] Optimization failed with lbfgspp:
-[json.exception.type_error.306] cannot use value() with null
-```
-
-**Impact**:
-- ❌ 5 curcumaopt Tests
-- ❌ 6 simplemd Tests
-
-**Root Cause**: Wahrscheinlich ConfigManager/ParameterRegistry Migration
-**Location**: `src/capabilities/curcumaopt.cpp` oder `optimiser/`
-**Priority**: HÖCHSTE - Blockiert 42% der Tests
-
-### Minor Issues
-- 3 "invalid_method" Tests: Expected failure scenarios noch nicht implementiert
-- SimpleMD wall potential: Ausgabedateien nicht generiert (hängt mit opt-Bug zusammen)
+- ✅ **FIXED (Oct 26, 2025)**: JSON null-Fehler bei SimpleMD/curcumaopt - parameter routing now works
+- SimpleMD output file generation: 0/7 tests generate trajectory (separate issue, no crashes)
+- Invalid method tests: Expected error scenarios not yet implemented
 
 ## Instructions Block
 

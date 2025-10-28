@@ -74,5 +74,13 @@ lib/
 # Project specific
 # Add any specific files or directories for your project
 settings.ini
-*.log
+
+# Test artifacts (CLI and unit tests) - Claude Generated October 2025
+# Build directory isolation: test outputs should be in build/test_cases/
+test_cases/**/*.trj.xyz
+test_cases/**/*.opt.xyz
+test_cases/**/*.param.json
+test_cases/**/curcuma_*.json
+test_cases/**/*.log
+test_cases/**/*.dat
 
