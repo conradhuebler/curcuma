@@ -26,6 +26,7 @@
 
 #include "persistentdiagram.h"
 #include "src/tools/general.h"
+#include "src/core/parameter_registry.h"
 
 using json = nlohmann::json;
 
@@ -224,32 +225,5 @@ Eigen::MatrixXd PersistentDiagram::generateImage(const triples& pairs)
 
 void PersistentDiagram::printHelp() const
 {
-    std::cout << "\n=== Persistent Diagram Configuration Parameters ===\n\n"
-              << "Parameter        | Default | Description\n"
-              << "----------------|---------|----------------------------------------------------\n"
-              << "ripser_xmax     | " << std::setw(7) << m_xmax << " | Maximum X value for the output image\n"
-              << "ripser_xmin     | " << std::setw(7) << m_xmin << " | Minimum X value for the output image\n"
-              << "ripser_ymax     | " << std::setw(7) << m_ymax << " | Maximum Y value for the output image\n"
-              << "ripser_ymin     | " << std::setw(7) << m_ymin << " | Minimum Y value for the output image\n"
-              << "ripser_bins     | " << std::setw(7) << m_bins << " | Number of bins in each dimension of the output image\n"
-              << "ripser_scaling  | " << std::setw(7) << m_scaling << " | Scaling factor for the Gaussian values in the image\n"
-              << "ripser_stdx     | " << std::setw(7) << m_std_x << " | Standard deviation (width) for X Gaussian kernel\n"
-              << "ripser_stdy     | " << std::setw(7) << m_std_y << " | Standard deviation (width) for Y Gaussian kernel\n"
-              << "ripser_ratio    | " << std::setw(7) << m_ratio << " | Ratio of persistence to be included\n"
-              << "ripser_dimension| " << std::setw(7) << m_dimension << " | Homology dimension (0: components, 1: loops, 2: voids)\n"
-              << "ripser_epsilon  | " << std::setw(7) << m_epsilon << " | Distance threshold for the persistent homology computation\n"
-              << "\nExample configuration in JSON:\n"
-              << "{\n"
-              << "  \"ripser_bins\": 20,\n"
-              << "  \"ripser_dimension\": 1,\n"
-              << "  \"ripser_scaling\": 0.2,\n"
-              << "  \"ripser_stdx\": 15,\n"
-              << "  \"ripser_stdy\": 15\n"
-              << "}\n\n"
-              << "How it works:\n"
-              << "1. The distance matrix is processed to extract topological features\n"
-              << "2. Features are represented as birth-death pairs in persistence diagrams\n"
-              << "3. These pairs are converted to a 2D image using Gaussian kernels\n"
-              << "4. The image can be compared across molecules for similarity\n"
-              << std::endl;
+    ParameterRegistry::getInstance().printHelp("persistentdiagram");
 }

@@ -23,9 +23,36 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/energycalculator.h"
 #include "src/core/molecule.h"
+#include "src/core/parameter_macros.h"
 #include "src/capabilities/curcumamethod.h"
 #include <map>
 #include <string>
+
+using json = nlohmann::json;
+
+/* Claude Generated 2025: Modern Optimizer Parameter Registry - replaces static OptimizerJson */
+BEGIN_PARAMETER_DEFINITION(modern_optimizer)
+    // Convergence criteria
+    PARAM(max_iter, Int, 1000, "Maximum optimization iterations", "Convergence", { "MaxIter" })
+    PARAM(d_e, Double, 1e-6, "Energy convergence threshold (Hartree)", "Convergence", { "dE" })
+    PARAM(grad_norm, Double, 5e-4, "Gradient norm convergence threshold (Hartree/Bohr)", "Convergence", { "GradNorm" })
+
+    // L-BFGS parameters
+    PARAM(memory_size, Int, 10, "L-BFGS memory size", "LBFGS", {})
+
+    // DIIS parameters
+    PARAM(diis_hist, Int, 10, "DIIS history size", "DIIS", {})
+    PARAM(diis_start, Int, 5, "DIIS start iteration", "DIIS", {})
+
+    // RFO (Rational Function Optimizer) parameters
+    PARAM(trust_radius, Double, 0.05, "RFO trust radius (Bohr)", "RFO", {})
+    PARAM(energy_threshold, Double, 1e-6, "RFO energy convergence threshold (Hartree)", "RFO", {})
+    PARAM(eigenvalue_shift, Double, 1e-4, "RFO eigenvalue shift for Hessian regularization", "RFO", {})
+    PARAM(lambda, Double, 0.1, "Legacy RFO damping parameter", "RFO", {})
+
+    // Output control
+    PARAM(verbosity, Int, 2, "Verbosity level (0-3)", "Output", {})
+END_PARAMETER_DEFINITION
 
 // Default JSON configuration for native optimizers - Claude Generated
 static const json OptimizerJson = {
@@ -41,8 +68,6 @@ static const json OptimizerJson = {
     { "eigenvalue_shift", 1e-4 }, // RFO eigenvalue shift
     { "lambda", 0.1 }            // Legacy RFO parameter
 };
-
-using json = nlohmann::json;
 using curcuma::Molecule;
 
 namespace ModernOptimization {

@@ -26,9 +26,42 @@
 #include "src/core/energycalculator.h"
 #include "src/core/molecule.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/parameter_macros.h"
 #include "scnp_parser.h"
 
 #include "curcumamethod.h"
+
+/* Claude Generated 2025: Casino Parameter Registry - replaces static CasinoJson */
+BEGIN_PARAMETER_DEFINITION(casino)
+    // Basic simulation parameters
+    PARAM(steps, Int, 10000, "Number of Monte Carlo steps", "Basic", {})
+    PARAM(temperature, Double, 300.0, "Temperature in Kelvin", "Basic", {})
+    PARAM(step_size, Double, 0.1, "Maximum displacement per move (Angstrom)", "Basic", {})
+    PARAM(method, String, "uff", "Computational method for energy/gradient", "Basic", {})
+    PARAM(seed, Int, 42, "Random seed for reproducibility", "Basic", {})
+
+    // Output options
+    PARAM(output_file, String, "casino_trajectory.xyz", "Trajectory output file", "Output", {})
+    PARAM(output_frequency, Int, 100, "Trajectory output frequency", "Output", {})
+    PARAM(energy_frequency, Int, 10, "Energy output frequency", "Output", {})
+
+    // Move configuration
+    PARAM(move_type, String, "mixed", "Move type: translation|rotation|orientational|pivot|mixed", "Algorithm", {})
+    PARAM(move_strategy, String, "single_atom", "Move strategy: all_atoms|single_atom|cg_aware|chain_segment|mixed_strategy", "Algorithm", {})
+
+    // Adaptive sampling
+    PARAM(acceptance_target, Double, 0.5, "Target acceptance ratio", "Algorithm", {})
+    PARAM(adaptive_step, Bool, true, "Adaptive step size adjustment", "Algorithm", {})
+
+    // Advanced features
+    PARAM(local_energy_updates, Bool, true, "Use local energy updates for efficiency", "Advanced", {})
+    PARAM(pivot_moves, Bool, false, "Enable pivot moves for polymer chains", "Advanced", {})
+    PARAM(orientational_moves, Bool, false, "Enable orientational moves for CG particles", "Advanced", {})
+    PARAM(bias_potential, Bool, false, "Enable bias potential", "Advanced", {})
+    PARAM(umbrella_sampling, Bool, false, "Enable umbrella sampling", "Advanced", {})
+    PARAM(metadynamics, Bool, false, "Enable metadynamics", "Advanced", {})
+    PARAM(verbose, Bool, true, "Detailed output", "Output", {})
+END_PARAMETER_DEFINITION
 
 // Enhanced move strategies for MC simulation - Claude Generated
 enum class MoveStrategy {

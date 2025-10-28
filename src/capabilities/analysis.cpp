@@ -1247,73 +1247,7 @@ void UnifiedAnalysis::outputToFile(const json& results, const std::string& filen
 
 void UnifiedAnalysis::printHelp() const
 {
-    std::cout << "Unified Molecular Analysis - Works with all molecular formats" << std::endl;
-    std::cout << "=============================================================" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Usage: curcuma -analysis file.xyz [options]" << std::endl;
-    std::cout << "       curcuma -analysis file.vtf [options]" << std::endl;
-    std::cout << "       curcuma -analysis trajectory.trj.xyz [options]" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Supported Formats: XYZ, VTF, MOL2, SDF, PDB, TRJ" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Options:" << std::endl;
-    std::cout << "  -properties all|basic|geometric|cg|topology" << std::endl;
-    std::cout << "              Which properties to calculate (default: all)" << std::endl;
-    std::cout << "  -output_format human|json|csv" << std::endl;
-    std::cout << "              Output format (default: human)" << std::endl;
-    std::cout << "  -output_file filename" << std::endl;
-    std::cout << "              Save results to file" << std::endl;
-    std::cout << "  -trajectory true|false" << std::endl;
-    std::cout << "              Analyze full trajectory vs single structure" << std::endl;
-    std::cout << "  -ripser true|false" << std::endl;
-    std::cout << "              Include basic topological analysis (default: false)" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Enhanced Topological Analysis (dMatrix integration):" << std::endl;
-    std::cout << "  -topological.save_distance_matrix true|false" << std::endl;
-    std::cout << "              Save distance matrix (.dMat files)" << std::endl;
-    std::cout << "  -topological.save_persistence_pairs true|false" << std::endl;
-    std::cout << "              Save persistence pairs (.pairs files)" << std::endl;
-    std::cout << "  -topological.save_persistence_diagram true|false" << std::endl;
-    std::cout << "              Save persistence diagram (.PD files)" << std::endl;
-    std::cout << "  -topological.save_persistence_image true|false" << std::endl;
-    std::cout << "              Save persistence images (.PI files)" << std::endl;
-    std::cout << "  -topological.exclude_bonds true|false" << std::endl;
-    std::cout << "              Exclude bonds from distance matrix" << std::endl;
-    std::cout << "  -topological.exclude_hydrogen true|false" << std::endl;
-    std::cout << "              Exclude hydrogen atoms from analysis" << std::endl;
-    std::cout << "  -topological.atom_selection \"indices\"" << std::endl;
-    std::cout << "              Analyze only selected atoms (e.g., \"1;5-10;15\")" << std::endl;
-    std::cout << "  -topological.image_format png|jpg|bmp|tga" << std::endl;
-    std::cout << "              Image output format (default: png)" << std::endl;
-    std::cout << "  -topological.colormap grayscale|jet|hot|viridis|coolwarm" << std::endl;
-    std::cout << "              Image colormap (default: hot)" << std::endl;
-    std::cout << "  -topological.resolution WIDTHxHEIGHT" << std::endl;
-    std::cout << "              Image resolution (default: 800x800)" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Available Properties:" << std::endl;
-    std::cout << "  Basic:      Atom count, mass, charge, fragments, formula" << std::endl;
-    std::cout << "  Geometric:  Gyration radius, center of mass, inertia constants" << std::endl;
-    std::cout << "  Polymer/CG: End-to-end distance, Rout (COM to outermost)" << std::endl;
-    std::cout << "  Topology:   Persistent homology analysis (ripser)" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Examples:" << std::endl;
-    std::cout << "  curcuma -analysis molecule.xyz" << std::endl;
-    std::cout << "  curcuma -analysis cg_polymer.vtf -properties cg" << std::endl;
-    std::cout << "  curcuma -analysis trajectory.vtf -trajectory true -output_file results.json" << std::endl;
-    std::cout << "  curcuma -analysis protein.pdb -ripser true" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Enhanced TDA Examples:" << std::endl;
-    std::cout << "  curcuma -analysis molecule.xyz -topological.save_persistence_image true" << std::endl;
-    std::cout << "  curcuma -analysis structure.xyz -topological.save_distance_matrix true" << std::endl;
-    std::cout << "  curcuma -analysis large_mol.xyz -topological.exclude_hydrogen true \\" << std::endl;
-    std::cout << "          -topological.colormap viridis -topological.resolution 1024x1024" << std::endl;
-    std::cout << "  curcuma -analysis protein.pdb -topological.atom_selection \"1;50-100;150\" \\" << std::endl;
-    std::cout << "          -topological.save_persistence_image true" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Note: Enhanced TDA analysis provides research-grade topological data analysis" << std::endl;
-    std::cout << "      equivalent to the legacy -dMatrix command with modern integration." << std::endl;
-    std::cout << std::endl;
-    std::cout << "For comprehensive dMatrix documentation, use: curcuma -analysis -help-tda" << std::endl;
+    ParameterRegistry::getInstance().printHelp("analysis");
 }
 
 void UnifiedAnalysis::printEnhancedTDAHelp() const

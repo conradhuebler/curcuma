@@ -6,6 +6,7 @@ Format: One line per change, newest first.
 
 ## October 2025
 
+- **Help System Migration to ParameterRegistry**: 3-tier migration complete, 300+ lines of duplicate hardcoded help text eliminated, 4 modules refactored with registry-based printHelp(), 3 modules enhanced with new printHelp() methods, 2 modules (casino, modern_optimizer) with complete PARAM definitions (29 new parameters), single source of truth for all help documentation, automatic help generation for new modules
 - **CurcumaOpt ParameterRegistry Migration - JSON Null Bug Fixed**: 37 parameters defined, ~30 Json2KeyWord calls eliminated, CurcumaOptJson replaced with ParameterRegistry, LBFGS parameter access migrated, fixes critical JSON null bug affecting 11/26 CLI tests, optimization now functional
 - **ForceField Inversion Bug Fixed**: Copy-paste error in ForceFieldGenerator::setBonds() causing vector out-of-bounds crash, changed incorrect m_stored_bonds[i] to m_stored_bonds[j] access
 - **ConfScan ConfigManager Migration - Multi-Module Architecture Complete**: ConfigManager extended with Multi-Module support, 59 Json2KeyWord calls eliminated, 41 parameters defined, RMSD/Ripser parameters imported via nested notation (-rmsd.method, -rmsd.threads), sLX parsing simplified from ~90 to ~50 lines, #pragma message hack removed, exportModule() API for submodule configs, DRY principle (RMSD params defined once), 100% backward compatible

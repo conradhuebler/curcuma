@@ -267,6 +267,12 @@ public:
     void WriteMO(int n, int m);
     void WriteMOAscii();
 
+    /*! \brief Print help information for CurcumaOpt module from ParameterRegistry */
+    void printHelp() const override
+    {
+        ParameterRegistry::getInstance().printHelp("opt");
+    }
+
 private:
     /* Lets have this for all modules */
     inline nlohmann::json WriteRestartInformation() override { return json(); }

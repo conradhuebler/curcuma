@@ -21,6 +21,7 @@
 #include "src/tools/formats.h"
 #include "src/tools/pbc_utils.h"
 #include "src/core/elements.h"
+#include "src/core/parameter_registry.h"
 
 #include <algorithm>
 #include <cmath>
@@ -597,52 +598,5 @@ void TrajectoryAnalysis::outputToFile(const std::string& filename)
 
 void TrajectoryAnalysis::printHelp() const
 {
-    std::cout << "Trajectory Analysis - Time-series analysis for molecular trajectories" << std::endl;
-    std::cout << "=====================================================================" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Usage: curcuma -traj trajectory.xyz [options]" << std::endl;
-    std::cout << "       curcuma -traj trajectory.vtf [options]" << std::endl;
-    std::cout << "       curcuma -traj md_output.trj.xyz [options]" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Supported Formats: XYZ.trj, VTF (multi-timestep), SDF trajectories" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Analysis Options:" << std::endl;
-    std::cout << "  -properties all|geometric|cg|energy" << std::endl;
-    std::cout << "              Which properties to analyze (default: all)" << std::endl;
-    std::cout << "  -stride N               Analyze every Nth frame (default: 1)" << std::endl;
-    std::cout << "  -start_frame N          Start analysis from frame N (default: 0)" << std::endl;
-    std::cout << "  -end_frame N            End analysis at frame N (default: all)" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Statistical Analysis:" << std::endl;
-    std::cout << "  -moving_average N       Moving average window size (default: 10)" << std::endl;
-    std::cout << "  -correlation_analysis true|false   Calculate autocorrelations (default: true)" << std::endl;
-    std::cout << "  -fluctuation_analysis true|false   Analyze fluctuations (default: true)" << std::endl;
-    std::cout << "  -convergence_analysis true|false   Convergence assessment (default: true)" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Property Selection:" << std::endl;
-    std::cout << "  -gyration_radius true|false        Track gyration radius evolution" << std::endl;
-    std::cout << "  -end_to_end_distance true|false    Track end-to-end distance (polymers)" << std::endl;
-    std::cout << "  -center_of_mass true|false          Track center of mass motion" << std::endl;
-    std::cout << "  -recenter_structures true|false     Center all structures at origin before analysis" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Output Options:" << std::endl;
-    std::cout << "  -output_format human|json|csv" << std::endl;
-    std::cout << "              Output format (default: human)" << std::endl;
-    std::cout << "  -output_file filename" << std::endl;
-    std::cout << "              Save results to file" << std::endl;
-    std::cout << "  -export_timeseries true|false" << std::endl;
-    std::cout << "              Export raw time series data as CSV (default: false)" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Analysis Results:" << std::endl;
-    std::cout << "  • Time-series statistics: mean, variance, min/max, range" << std::endl;
-    std::cout << "  • Convergence analysis: equilibration time, convergence assessment" << std::endl;
-    std::cout << "  • Autocorrelation functions for temporal correlations" << std::endl;
-    std::cout << "  • Moving averages for trend analysis" << std::endl;
-    std::cout << "  • Fluctuation analysis for stability assessment" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Examples:" << std::endl;
-    std::cout << "  curcuma -traj md_simulation.xyz -properties geometric" << std::endl;
-    std::cout << "  curcuma -traj cg_polymer.vtf -properties cg -export_timeseries true" << std::endl;
-    std::cout << "  curcuma -traj protein_md.trj.xyz -stride 10 -convergence_analysis true" << std::endl;
-    std::cout << "  curcuma -traj long_simulation.xyz -start_frame 1000 -end_frame 5000" << std::endl;
+    ParameterRegistry::getInstance().printHelp("trajectoryanalysis");
 }

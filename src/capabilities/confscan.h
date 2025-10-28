@@ -34,6 +34,7 @@
 #include "src/core/molecule.h"
 #include "src/core/config_manager.h"
 #include "src/core/parameter_macros.h"
+#include "src/core/parameter_registry.h"
 
 #include "curcumamethod.h"
 
@@ -228,6 +229,12 @@ public:
     inline int ReorderCount() const { return m_reorder_count; }
     inline int ReorderSkippedCount() const { return m_skipped_count; }
     inline int ReuseCount() const { return m_reordered_reused; }
+
+    /*! \brief Print help information for ConfScan module from ParameterRegistry */
+    void printHelp() const override
+    {
+        ParameterRegistry::getInstance().printHelp("confscan");
+    }
 
 private:
     void PrintSetUp(double dLE, double dLI, double dLH);

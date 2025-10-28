@@ -21,6 +21,7 @@
 #include "src/tools/formats.h"
 #include "src/core/units.h"
 #include "src/core/elements.h"
+#include "src/core/parameter_registry.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -866,104 +867,17 @@ void Casino::updateMetadynamics()
 
 void Casino::printHelp() const
 {
-    std::cout << "Casino - Monte Carlo Simulation for all molecular systems" << std::endl;
-    std::cout << "=========================================================" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Usage: curcuma -casino file.xyz [options]" << std::endl;
-    std::cout << "       curcuma -casino file.vtf [options]" << std::endl;
-    std::cout << "       curcuma -casino structure.xyz -input config.json" << std::endl;
-    std::cout << "       curcuma -casino structure.xyz -input scnp.in" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Supported Formats: XYZ, VTF, MOL2, SDF, PDB" << std::endl;
-    std::cout << "Supported Methods: All Curcuma force fields and QM methods" << std::endl;
-    std::cout << "Input Formats: JSON (Curcuma native), SCNP/molsim (auto-converted)" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Basic Options:" << std::endl;
-    std::cout << "  -steps N                Number of MC steps (default: 10000)" << std::endl;
-    std::cout << "  -temperature T          Temperature in Kelvin (default: 300.0)" << std::endl;
-    std::cout << "  -step_size S            Maximum displacement in Å (default: 0.1)" << std::endl;
-    std::cout << "  -method METHOD          Force field or QM method (default: uff)" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Move Types:" << std::endl;
-    std::cout << "  -move_type translation  Translation moves only" << std::endl;
-    std::cout << "  -move_type rotation     Rotation moves only" << std::endl;
-    std::cout << "  -move_type orientational Orientational moves for CG particles" << std::endl;
-    std::cout << "  -move_type pivot        Pivot moves for polymer chains" << std::endl;
-    std::cout << "  -move_type mixed        Combined move types (default)" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Move Strategies:" << std::endl;
-    std::cout << "  -move_strategy all_atoms      Move all atoms simultaneously (legacy)" << std::endl;
-    std::cout << "  -move_strategy single_atom    Move single random atom (default)" << std::endl;
-    std::cout << "  -move_strategy cg_aware       CG-particle specific moves" << std::endl;
-    std::cout << "  -move_strategy chain_segment  Polymer chain segment moves" << std::endl;
-    std::cout << "  -move_strategy mixed_strategy Adaptive strategy selection" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Output Options:" << std::endl;
-    std::cout << "  -output_file FILE       Trajectory output file (default: casino_trajectory.xyz)" << std::endl;
-    std::cout << "  -output_frequency N     Trajectory output frequency (default: 100)" << std::endl;
-    std::cout << "  -energy_frequency N     Energy output frequency (default: 10)" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Advanced Options:" << std::endl;
-    std::cout << "  -adaptive_step true     Adaptive step size adjustment (default)" << std::endl;
-    std::cout << "  -acceptance_target R    Target acceptance ratio (default: 0.5)" << std::endl;
-    std::cout << "  -seed N                 Random seed for reproducibility (default: 42)" << std::endl;
-    std::cout << "  -local_energy_updates true  Use local energy updates for efficiency (default)" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Input File Options:" << std::endl;
-    std::cout << "  -input FILE             Configuration file (JSON or SCNP format)" << std::endl;
-    std::cout << "                          Auto-detects format and converts SCNP to Curcuma" << std::endl;
-    std::cout << std::endl;
-    std::cout << "CG and Polymer Options:" << std::endl;
-    std::cout << "  -pivot_moves true       Enable pivot moves for polymer chains" << std::endl;
-    std::cout << "  -orientational_moves true Enable orientational moves for CG particles" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Enhanced Sampling (Experimental):" << std::endl;
-    std::cout << "  -umbrella_sampling true Enable umbrella sampling" << std::endl;
-    std::cout << "  -metadynamics true      Enable metadynamics" << std::endl;
-    std::cout << "  -bias_potential true    Enable custom bias potential" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Examples:" << std::endl;
-    std::cout << "  # Basic atomistic simulation" << std::endl;
-    std::cout << "  curcuma -casino molecule.xyz -steps 50000 -temperature 500" << std::endl;
-    std::cout << std::endl;
-    std::cout << "  # Coarse-grained polymer with pivot moves" << std::endl;
-    std::cout << "  curcuma -casino cg_polymer.vtf -method uff -move_strategy cg_aware \\" << std::endl;
-    std::cout << "          -pivot_moves true -orientational_moves true" << std::endl;
-    std::cout << std::endl;
-    std::cout << "  # High-efficiency large system simulation" << std::endl;
-    std::cout << "  curcuma -casino large_protein.pdb -method gfn2 -move_strategy single_atom \\" << std::endl;
-    std::cout << "          -local_energy_updates true -steps 100000" << std::endl;
-    std::cout << std::endl;
-    std::cout << "  # Mixed atomic/CG system" << std::endl;
-    std::cout << "  curcuma -casino mixed_system.xyz -move_strategy mixed_strategy \\" << std::endl;
-    std::cout << "          -temperature 350 -adaptive_step true" << std::endl;
-    std::cout << std::endl;
-    std::cout << "  # Using SCNP/molsim input file" << std::endl;
-    std::cout << "  curcuma -casino polymer.vtf -input scnp.in" << std::endl;
-    std::cout << "  # Automatically converts SCNP parameters with documentation" << std::endl;
-    std::cout << std::endl;
-    std::cout << "SCNP Parameter Mapping (common parameters):" << std::endl;
+    ParameterRegistry::getInstance().printHelp("casino");
+
+    std::cout << "\nSupported Input Formats:" << std::endl;
+    std::cout << "- XYZ, VTF, MOL2, SDF, PDB (molecular structures)" << std::endl;
+    std::cout << "- JSON (Curcuma native), SCNP/molsim (auto-converted)" << std::endl;
+    std::cout << "\nSCNP Parameter Mapping (common parameters):" << std::endl;
     std::cout << "  txtitle    → simulation_title  (descriptive title)" << std::endl;
     std::cout << "  temp       → temperature        (temperature in K)" << std::endl;
     std::cout << "  nstep1     → steps              (number of MC steps)" << std::endl;
-    std::cout << "  boxlen     → box_length         (box dimensions)" << std::endl;
-    std::cout << "  txensemb   → ensemble           (NVT/NPT ensemble)" << std::endl;
     std::cout << "  nfreq      → output_frequency   (trajectory output frequency)" << std::endl;
     std::cout << "  seed       → seed               (random number seed)" << std::endl;
-    std::cout << std::endl;
-    std::cout << "Output Files:" << std::endl;
-    std::cout << "  casino_trajectory.xyz       Full trajectory with energies" << std::endl;
-    std::cout << "  casino_trajectory_final.xyz Final optimized structure" << std::endl;
-    std::cout << std::endl;
-    std::cout << "SCNP Input Example:" << std::endl;
-    std::cout << "  &nmlSystem" << std::endl;
-    std::cout << "    txtitle = 'My Simulation'," << std::endl;
-    std::cout << "    txmethod = 'mc'," << std::endl;
-    std::cout << "    txensemb = 'nvt'," << std::endl;
-    std::cout << "    temp = 350.0," << std::endl;
-    std::cout << "    nstep1 = 50000," << std::endl;
-    std::cout << "    boxlen = 3*1500.0," << std::endl;
-    std::cout << "  /" << std::endl;
 }
 
 nlohmann::json Casino::WriteRestartInformation()

@@ -77,6 +77,7 @@ capabilities/
 - Improved trajectory analysis tools
 - Better integration with quantum chemical methods
 - ✅ **COMPLETED**: Parameter Registry System, dMatrix Integration, RMSD Code Restructuring
+- ✅ **COMPLETED** (Oct 29, 2025): Help System Dynamic Generation - all modules use ParameterRegistry for help
 - Pending: Unit system migration, RMSD Strategy pattern (Phase 3)
 
 ### Known Issues

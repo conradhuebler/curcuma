@@ -20,6 +20,7 @@
 #include "modern_optimizer_simple.h"
 #include "../curcumaopt.h" // For legacy LBFGS functionality
 #include "lbfgs.h" // Native LBFGS implementation - Claude Generated
+#include "src/core/parameter_registry.h"
 #include <algorithm>
 #include <chrono>
 
@@ -42,45 +43,24 @@ void ModernOptimizerDispatcher::start()
     CurcumaLogger::warn("ModernOptimizerDispatcher::start() called - use static optimizeStructure() instead");
 }
 
-void ModernOptimizerDispatcher::printHelp() const 
+void ModernOptimizerDispatcher::printHelp() const
 {
-    CurcumaLogger::header("Native Optimization Methods - Modern Computational Chemistry");
-    
-    CurcumaLogger::info("Available optimization algorithms:");
+    ParameterRegistry::getInstance().printHelp("modern_optimizer");
+
+    CurcumaLogger::info("");
+    CurcumaLogger::success("🧪 Scientific Algorithm Documentation:");
+
+    CurcumaLogger::citation("L-BFGS: Nocedal & Wright 'Numerical Optimization' (2006), Chapter 7");
+    CurcumaLogger::citation("DIIS: Pulay, P. Chem. Phys. Lett. 73, 393 (1980)");
+    CurcumaLogger::citation("RFO: Banerjee et al. J. Phys. Chem. 89, 52 (1985)");
+
+    CurcumaLogger::info("");
+    CurcumaLogger::success("Available optimization algorithms:");
     auto available = getAvailableOptimizers();
     for (const auto& pair : available) {
         CurcumaLogger::info_fmt("  {} - {}", pair.first, pair.second);
     }
-    
-    CurcumaLogger::info("");
-    CurcumaLogger::success("🧪 Scientific Algorithm Documentation:");
-    
-    CurcumaLogger::citation("L-BFGS: Nocedal & Wright 'Numerical Optimization' (2006), Chapter 7");
-    CurcumaLogger::citation("DIIS: Pulay, P. Chem. Phys. Lett. 73, 393 (1980)");
-    CurcumaLogger::citation("RFO: Banerjee et al. J. Phys. Chem. 89, 52 (1985)");
-    
-    CurcumaLogger::info("");
-    CurcumaLogger::success("Configuration Parameters:");
-    
-    CurcumaLogger::param("General Parameters", "");
-    CurcumaLogger::param("  verbosity", "0-3 (0=silent, 1=minimal, 2=standard, 3=verbose)");
-    CurcumaLogger::param("  MaxIter", "Maximum iterations (default: 1000)");
-    CurcumaLogger::param("  dE", "Energy convergence threshold in Eh (default: 1e-6)");
-    CurcumaLogger::param("  GradNorm", "Gradient norm threshold in Eh/Bohr (default: 5e-4)");
-    
-    CurcumaLogger::param("L-BFGS Specific", "");
-    CurcumaLogger::param("  memory_size", "L-BFGS memory size m (default: 10)");
-    
-    CurcumaLogger::param("DIIS Specific", "");
-    CurcumaLogger::param("  diis_hist", "DIIS history size (default: 10)");
-    CurcumaLogger::param("  diis_start", "Start DIIS after iteration (default: 5)");
-    
-    CurcumaLogger::param("RFO Specific", "");
-    CurcumaLogger::param("  trust_radius", "Trust radius in Bohr (default: 0.05)");
-    CurcumaLogger::param("  energy_threshold", "Energy threshold for line search (default: 1e-6)");
-    CurcumaLogger::param("  eigenvalue_shift", "Eigenvalue shift magnitude (default: 1e-4)");
-    CurcumaLogger::param("  lambda", "Legacy RFO parameter (default: 0.1)");
-    
+
     CurcumaLogger::info("");
     CurcumaLogger::success("Usage Examples:");
     CurcumaLogger::info("  ./curcuma -opt molecule.xyz -optimizer lbfgs -v 2");
