@@ -144,17 +144,17 @@ void CurcumaOpt::LoadControlJson()
         m_method = m_controller.value("method", std::string("uff"));
         m_defaults["method"] = m_method; // Keep both JSON objects synchronized
     }
-    m_charge = m_defaults.value("Charge", 0);
-    m_spin = m_defaults.value("Spin", 0);
-    m_singlepoint = m_defaults.value("SinglePoint", false);
+    m_charge = m_defaults.value("charge", 0);
+    m_spin = m_defaults.value("spin", 0);
+    m_singlepoint = m_defaults.value("single_point", false);
     m_serial = m_defaults.value("serial", false);
     m_hessian = m_defaults.value("hessian", 0);
-    m_optH = m_defaults.value("optH", false);
-    m_maxiter = m_defaults.value("MaxIter", 5000);
-    m_maxrise = m_defaults.value("maxrise", 100);
+    m_optH = m_defaults.value("opt_h", false);
+    m_maxiter = m_defaults.value("max_iter", 5000);
+    m_maxrise = m_defaults.value("max_rise", 100);
     m_fusion = m_defaults.value("fusion", false);
-    m_optimethod = m_defaults.value("optimethod", 0);
-    m_inithess = m_defaults.value("inithess", false);
+    m_optimethod = m_defaults.value("opti_method", 0);
+    m_inithess = m_defaults.value("init_hess", false);
     m_lambda = m_defaults.value("lambda", 0.1);
     m_diis_hist = m_defaults.value("diis_hist", 5);
     m_diis_start = m_defaults.value("diis_start", 5);

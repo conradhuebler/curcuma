@@ -488,9 +488,9 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
     }
 
     json sp_controller = controller;
-    json sp = sp_controller.contains("sp") ? sp_controller["sp"] : json{};
-    sp["SinglePoint"] = true;
-    sp_controller["sp"] = sp;
+    json opt_params = sp_controller.contains("opt") ? sp_controller["opt"] : json{};
+    opt_params["single_point"] = true;
+    sp_controller["opt"] = opt_params;
 
     CurcumaOpt opt(sp_controller, false);
     opt.setFileName(argv[2]);
