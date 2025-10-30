@@ -1,0 +1,8 @@
+atom 0 radius 2.0 name bead1 type 226
+atom 1 radius 2.0 name bead2 type 226
+bond 0:1
+unitcell 20.0 20.0 20.0 90.0 90.0 90.0
+
+timestep ordered
+0.0 0.0 0.0
+4.0 0.0 0.0

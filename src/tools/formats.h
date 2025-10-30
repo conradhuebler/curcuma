@@ -389,6 +389,132 @@ inline Mol VTF2Mol(const std::string& filename)
     return molecule;
 }
 
+// Claude Generated 2025: VTF writer for single structure output
+inline void WriteVTF(const std::string& filename, const Mol& mol)
+{
+    std::ofstream file(filename);
+    if (!file.is_open()) {
+        throw std::runtime_error(fmt::format("Cannot open VTF file for writing: {}", filename));
+    }
+
+    // Write atom block with CG markers
+    for (int i = 0; i < mol.m_number_atoms; ++i) {
+        double radius = (mol.m_atoms[i] == CG_ELEMENT) ? 2.0 : Elements::VanDerWaalsRadius[mol.m_atoms[i]];
+        file << fmt::format("atom {} radius {:.2f} name {} type {}\n",
+                           i, radius,
+                           (mol.m_atoms[i] == CG_ELEMENT) ? fmt::format("CG{}", i) : Elements::ElementAbbr[mol.m_atoms[i]],
+                           mol.m_atoms[i]);
+    }
+
+    // Write bonds if present
+    for (const auto& bond : mol.m_bonds) {
+        file << fmt::format("bond {}:{}\n", bond.first, bond.second);
+    }
+
+    // Write unit cell if periodic boundary conditions are enabled
+    if (mol.m_has_pbc) {
+        // Extract a, b, c from diagonal elements of the cell matrix (works for cubic cells)
+        // For non-cubic cells, use the norms of cell vectors
+        Eigen::Vector3d a_vec = mol.m_unit_cell.row(0);
+        Eigen::Vector3d b_vec = mol.m_unit_cell.row(1);
+        Eigen::Vector3d c_vec = mol.m_unit_cell.row(2);
+
+        double a = a_vec.norm();
+        double b = b_vec.norm();
+        double c = c_vec.norm();
+
+        // For general cells, compute angles using dot products
+        // cos(alpha) = (b·c)/(|b||c|), cos(beta) = (a·c)/(|a||c|), cos(gamma) = (a·b)/(|a||b|)
+        double alpha_rad = std::acos(std::min(1.0, std::max(-1.0, (b_vec.dot(c_vec)) / (b * c))));
+        double beta_rad = std::acos(std::min(1.0, std::max(-1.0, (a_vec.dot(c_vec)) / (a * c))));
+        double gamma_rad = std::acos(std::min(1.0, std::max(-1.0, (a_vec.dot(b_vec)) / (a * b))));
+
+        double alpha = alpha_rad * 180.0 / M_PI;
+        double beta = beta_rad * 180.0 / M_PI;
+        double gamma = gamma_rad * 180.0 / M_PI;
+
+        file << fmt::format("unitcell {:.4f} {:.4f} {:.4f} {:.2f} {:.2f} {:.2f}\n",
+                           a, b, c, alpha, beta, gamma);
+    }
+
+    // Write coordinates as timestep block
+    file << "timestep ordered\n";
+    for (int i = 0; i < mol.m_number_atoms; ++i) {
+        file << fmt::format("{:.8f} {:.8f} {:.8f}\n",
+                           mol.m_geometry(i, 0),
+                           mol.m_geometry(i, 1),
+                           mol.m_geometry(i, 2));
+    }
+
+    file.close();
+}
+
+// Claude Generated 2025: VTF writer for trajectory (multi-frame) output
+inline void WriteVTFTrajectory(const std::string& filename, const std::vector<Mol>& trajectory)
+{
+    if (trajectory.empty()) {
+        throw std::invalid_argument("Cannot write empty trajectory to VTF file");
+    }
+
+    std::ofstream file(filename);
+    if (!file.is_open()) {
+        throw std::runtime_error(fmt::format("Cannot open VTF file for writing: {}", filename));
+    }
+
+    const auto& first_mol = trajectory[0];
+
+    // Write structure block (from first frame)
+    for (int i = 0; i < first_mol.m_number_atoms; ++i) {
+        double radius = (first_mol.m_atoms[i] == CG_ELEMENT) ? 2.0 : Elements::VanDerWaalsRadius[first_mol.m_atoms[i]];
+        file << fmt::format("atom {} radius {:.2f} name {} type {}\n",
+                           i, radius,
+                           (first_mol.m_atoms[i] == CG_ELEMENT) ? fmt::format("CG{}", i) : Elements::ElementAbbr[first_mol.m_atoms[i]],
+                           first_mol.m_atoms[i]);
+    }
+
+    // Write bonds from first frame
+    for (const auto& bond : first_mol.m_bonds) {
+        file << fmt::format("bond {}:{}\n", bond.first, bond.second);
+    }
+
+    // Write unit cell if present (from first frame)
+    if (first_mol.m_has_pbc) {
+        Eigen::Vector3d a_vec = first_mol.m_unit_cell.row(0);
+        Eigen::Vector3d b_vec = first_mol.m_unit_cell.row(1);
+        Eigen::Vector3d c_vec = first_mol.m_unit_cell.row(2);
+
+        double a = a_vec.norm();
+        double b = b_vec.norm();
+        double c = c_vec.norm();
+
+        double alpha_rad = std::acos(std::min(1.0, std::max(-1.0, (b_vec.dot(c_vec)) / (b * c))));
+        double beta_rad = std::acos(std::min(1.0, std::max(-1.0, (a_vec.dot(c_vec)) / (a * c))));
+        double gamma_rad = std::acos(std::min(1.0, std::max(-1.0, (a_vec.dot(b_vec)) / (a * b))));
+
+        double alpha = alpha_rad * 180.0 / M_PI;
+        double beta = beta_rad * 180.0 / M_PI;
+        double gamma = gamma_rad * 180.0 / M_PI;
+
+        file << fmt::format("unitcell {:.4f} {:.4f} {:.4f} {:.2f} {:.2f} {:.2f}\n",
+                           a, b, c, alpha, beta, gamma);
+    }
+
+    // Write coordinate blocks for all timesteps
+    for (size_t frame = 0; frame < trajectory.size(); ++frame) {
+        const auto& mol = trajectory[frame];
+        file << "timestep ordered\n";
+
+        for (int i = 0; i < mol.m_number_atoms; ++i) {
+            file << fmt::format("{:.8f} {:.8f} {:.8f}\n",
+                               mol.m_geometry(i, 0),
+                               mol.m_geometry(i, 1),
+                               mol.m_geometry(i, 2));
+        }
+    }
+
+    file.close();
+}
+
 inline Molecule LoadFile(const std::string& filename)
 {
     if (std::string(filename).find(".xyz") != std::string::npos || std::string(filename).find(".trj") != std::string::npos)

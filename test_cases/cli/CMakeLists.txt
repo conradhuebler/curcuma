@@ -95,6 +95,12 @@ add_cli_test(simplemd 05_spheric_wall)
 add_cli_test(simplemd 06_alias_temperature)
 add_cli_test(simplemd 07_restart_simulation)
 
-message(STATUS "Added 26 CLI test scenarios with build directory isolation")
+# =============================================================================
+# CG (Coarse Graining) Tests (1 scenario)
+# =============================================================================
+
+add_cli_test(cg 01_single_point)
+
+message(STATUS "Added 27 CLI test scenarios with build directory isolation")
 message(STATUS "  - Tests execute from: ${CMAKE_CURRENT_BINARY_DIR}/category/test_name")
 message(STATUS "  - Source tree remains clean (all outputs in build directory)")

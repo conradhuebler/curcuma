@@ -40,6 +40,7 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/xyz_comment_parser.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -2025,4 +2026,41 @@ std::string Molecule::Formula() const
     }
 
     return formula.empty() ? "unknown" : formula;
+}
+
+// Claude Generated 2025: Coarse Graining detection methods
+
+bool Molecule::isCGSystem() const
+{
+    return std::any_of(m_atoms.begin(), m_atoms.end(),
+                      [](int element) { return element == CG_ELEMENT; });
+}
+
+bool Molecule::hasMixedSystem() const
+{
+    bool has_atomic = std::any_of(m_atoms.begin(), m_atoms.end(),
+                                 [](int element) { return element < CG_ELEMENT; });
+    return has_atomic && isCGSystem();
+}
+
+std::vector<int> Molecule::getCGAtoms() const
+{
+    std::vector<int> cg_atoms;
+    for (int i = 0; i < static_cast<int>(m_atoms.size()); ++i) {
+        if (m_atoms[i] == CG_ELEMENT) {
+            cg_atoms.push_back(i);
+        }
+    }
+    return cg_atoms;
+}
+
+std::vector<int> Molecule::getAtomicAtoms() const
+{
+    std::vector<int> atomic_atoms;
+    for (int i = 0; i < static_cast<int>(m_atoms.size()); ++i) {
+        if (m_atoms[i] < CG_ELEMENT) {
+            atomic_atoms.push_back(i);
+        }
+    }
+    return atomic_atoms;
 }

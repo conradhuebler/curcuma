@@ -41,6 +41,74 @@
 
 ---
 
+## 🟢 COARSE GRAINING DEVELOPMENT (NEW - CG.md)
+
+### CG Foundation - Phase 1: Molecule Helper Functions
+- **Status**: ⏳ PENDING
+- **Priority**: 🔴 HIGH - Blocks other CG work
+- **Task**: Add CG detection methods to Molecule class
+- **Betroffene Dateien**: src/core/molecule.h, src/core/molecule.cpp
+- **Aufwand**: ~30 min
+- **Details**:
+  - `bool isCGSystem() const` - Check if molecule contains CG_ELEMENT (226)
+  - `bool hasMixedSystem() const` - Check for both atomic + CG particles
+  - `std::vector<int> getCGAtoms() const` - Get all CG atom indices
+  - `std::vector<int> getAtomicAtoms() const` - Get all atomic indices
+
+### CG Foundation - Phase 2: JSON Parameter Loading
+- **Status**: ⏳ PENDING
+- **Priority**: 🔴 CRITICAL - Core functionality
+- **Task**: Complete `generateCGParameters()` in ForceField class
+- **Betroffene Dateien**: src/core/energy_calculators/ff_methods/forcefield.cpp/h
+- **Aufwand**: ~2-3 h
+- **Details**:
+  - Parse `cg_default` section from JSON config
+  - Parse `cg_per_atom` section for per-particle overrides
+  - Parse `pair_interactions` for custom pair parameters
+  - Generate vdW structures with `type=3` for CG-CG interactions
+  - Validate shape vectors and potential parameters
+
+### CG Format - Phase 3: VTF Writer Implementation
+- **Status**: ⏳ PENDING
+- **Priority**: 🟡 MEDIUM - Needed for trajectory output
+- **Task**: Implement `WriteVTF()` function for trajectory output
+- **Betroffene Dateien**: src/tools/formats.h, src/tools/vtf_handler.cpp
+- **Aufwand**: ~2-3 h
+- **Details**:
+  - Write atoms with CG markers and radii
+  - Write bonds from mol.m_bonds
+  - Write unit cell (periodic boundary conditions)
+  - Write timestep coordinates
+  - Support both single structure and trajectory writing
+
+### CG Integration - Phase 4: Testing & Validation
+- **Status**: ⏳ PENDING
+- **Priority**: 🟡 MEDIUM - Verification of functionality
+- **Task**: Create test cases and validate CG simulation workflow
+- **Betroffene Dateien**: test_cases/, test_cases/test_cg_*.cpp
+- **Aufwand**: ~2-3 h
+- **Details**:
+  - Create test_cg_mc.vtf with 2-3 CG particles
+  - Create test_cg_mc.json with CG parameters (σ, ε)
+  - Test Casino MC with CG config
+  - Validate energy calculations for spherical particles
+  - Test trajectory output and PBC wrapping
+  - Verify acceptance ratios are reasonable (0.1-0.9)
+
+### CG Potentials - Phase 5: Ellipsoidal Extensions (OPTIONAL)
+- **Status**: ⏳ LOWEST PRIORITY
+- **Priority**: 🔵 LOW - After spherical validation
+- **Task**: Implement angle-dependent energy for ellipsoidal particles
+- **Betroffene Dateien**: src/core/energy_calculators/ff_methods/cg_potentials.cpp, src/capabilities/casino.cpp
+- **Aufwand**: ~4-5 h (after phases 1-4 complete)
+- **Details**:
+  - Complete `calculateEffectiveDistance()` for ellipsoid-ellipsoid interactions
+  - Implement orientation-dependent potential in `calculateCGPairEnergy()`
+  - Add rotational moves in Casino (`rotateParticle()`)
+  - Test ellipsoidal shape calculations
+
+---
+
 ## 🟡 TESTING & VALIDATION (test_cases/CLAUDE.md:296-303)
 
 ### Scientific Validation Enhancement
@@ -180,11 +248,14 @@
 | Priority | Component | Count | Status |
 |----------|-----------|-------|--------|
 | 🔴 KRITISCH | None | 0 | ✅ ALL RESOLVED |
+| 🔴 HIGH (CG) | CG Molecule + JSON Loading | 2 | ⏳ PENDING |
+| 🟡 MEDIUM (CG) | VTF Writer + CG Testing | 2 | ⏳ PENDING |
+| 🔵 LOW (CG) | Ellipsoidal Extensions | 1 | ⏳ LOWEST PRIORITY |
 | 🟡 TESTING | Scientific validation | 4 | ⏳ PENDING |
 | 🟢 CORE | Parameter/Memory/Units | 4 | ⏳ PENDING |
 | 🔵 CAPABILITIES | Confscan/RMSD/SimpleMD Physics | 4 | ⏳ PENDING |
 | 🟣 REFACTORING | Molecule Phase 2-6 | 5 | ⏳ PLANNED |
-| **TOTAL** | | **17** | **0 ❌ + 12 ⏳ + 5 ⏳** |
+| **TOTAL** | | **22** | **0 ❌ + 21 ⏳ + 1 🔵** |
 
 ---
 
@@ -198,5 +269,5 @@
 
 ---
 
-**Last Updated**: 2025-10-28
-**Next Review**: When starting next development task (cgfnff, memory optimization, or molecule refactoring)
+**Last Updated**: 2025-10-29
+**Next Review**: When starting CG implementation (Phase 1: Molecule helpers) or cgfnff debugging

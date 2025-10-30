@@ -321,6 +321,27 @@ class Molecule
       inline Eigen::Matrix3d getUnitCell() const { return m_unit_cell; }
       void setUnitCell(const Eigen::Matrix3d& cell, bool has_pbc = true);
 
+      // Claude Generated: Coarse Graining detection methods
+      /*! \brief Check if molecule contains CG particles (element 226)
+       *  \return true if at least one CG_ELEMENT (226) present
+       */
+      bool isCGSystem() const;
+
+      /*! \brief Check if molecule contains both atomic and CG particles
+       *  \return true if contains both atomic elements and CG elements
+       */
+      bool hasMixedSystem() const;
+
+      /*! \brief Get indices of all CG particles
+       *  \return Vector of atom indices with element == CG_ELEMENT (226)
+       */
+      std::vector<int> getCGAtoms() const;
+
+      /*! \brief Get indices of all atomic particles
+       *  \return Vector of atom indices with element < CG_ELEMENT (226)
+       */
+      std::vector<int> getAtomicAtoms() const;
+
       void MapHydrogenBonds();
       Matrix HydrogenBondMatrix(int f1, int f2);
       void writeXYZFragments(const std::string& basename) const;

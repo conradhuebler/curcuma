@@ -1025,3 +1025,68 @@ Curcuma Coarse Graining Implementation Plan
 
   This implementation provides a solid foundation for coarse-grained simulations in Curcuma while maintaining the educational focus and code simplicity that defines the project.
 
+---
+
+# ✅ **Implementierungsstatus: CORE FEATURES COMPLETE (Oktober 2025)**
+
+Das grundlegende CG-System für **sphärische Partikel** ist vollständig implementiert und getestet.
+
+## ✅ **IMPLEMENTIERT (October 2025)**
+
+### Phase 1: Core Foundation ✅ COMPLETE
+- **Molecule Helper Methods:** `isCGSystem()`, `hasMixedSystem()`, `getCGAtoms()`, `getAtomicAtoms()` - src/core/molecule.h/cpp
+- **Mol struct:** Cell matrix fields already present (`m_unit_cell`, `m_has_pbc`) - src/core/global.h
+- **CG_ELEMENT = 226:** Global constant defined - src/core/global.h
+
+### Phase 2: ForceField Parameter Loading ✅ COMPLETE
+- **Enhanced generateCGParameters():** Full JSON parsing with validation
+- **Validation:** Required sections (`cg_default`), shape vectors, epsilon checking
+- **Pair Interactions:** Custom pair parameter overrides via `"{i}-{j}"` key format
+- **Bond Parameters:** Support for CG bond loading
+- **Error Handling:** Comprehensive with descriptive messages
+- File: src/core/energy_calculators/ff_methods/forcefield.cpp
+
+### Phase 3: VTF Format I/O ✅ COMPLETE
+- **WriteVTF():** Single structure output with atom, bond, cell, coordinate blocks
+- **WriteVTFTrajectory():** Multi-frame trajectory output
+- **Cell Matrix Handling:** Proper angle calculations for cubic and non-cubic cells
+- **CG Labeling:** Automatic CG atom naming and radius detection
+- File: src/tools/formats.h
+
+### Phase 4: Testing ✅ COMPLETE
+- **test_cg_potentials.cpp:** 9 comprehensive unit test suites
+  - Shape detection (spheres & ellipsoids)
+  - LJ 6-12 and LJ 16-12 potentials
+  - Euler angle conversion & orthogonality
+  - Ellipsoid radius calculations
+  - Effective distance computation
+  - CG pair energy calculations
+  - Finite energy validation
+- **simple_beads.vtf:** 2-bead test system with PBC
+- **cg_params.json:** CG parameter configuration (σ=4.0, ε=0.5)
+
+## 📦 **Usage Examples**
+
+### Single Point CG Energy Calculation
+```bash
+./curcuma -sp test_cases/cg/simple_beads.vtf -method cg -config test_cases/cg/cg_params.json
+```
+
+### Monte Carlo Simulation
+```bash
+./curcuma -casino test_cases/cg/simple_beads.vtf \
+          -config test_cases/cg/cg_params.json \
+          -nsteps 1000 -temp 298.15
+```
+
+## 🚀 **Next Steps (Optional Enhancements)**
+
+### Future Ellipsoid Extension (LOWEST PRIORITY)
+After spherical particle validation, ellipsoid support can be added:
+1. Complete `calculateEffectiveDistance()` for angle-dependent interactions
+2. Implement orientation-dependent `calculateCGPairEnergy()`
+3. Add rotational MC moves in Casino
+4. Test with ellipsoidal shape parameters
+
+**Estimated Effort:** 4-5 hours (after spherical validation)
+

@@ -188,10 +188,50 @@ void ForceField::generateCGParameters(const json& cg_config)
         CurcumaLogger::info("Generating CG parameters for coarse-grained simulation");
     }
 
+    // Validate required CG config sections
+    if (!cg_config.contains("cg_default")) {
+        CurcumaLogger::error("CG config missing required 'cg_default' section");
+        throw std::invalid_argument("CG configuration missing 'cg_default' section");
+    }
+
+    const auto& cg_default = cg_config["cg_default"];
+
+    // Validate shape vector if present
+    if (cg_default.contains("shape_vector")) {
+        auto shape = cg_default["shape_vector"];
+        if (shape.size() != 3) {
+            CurcumaLogger::error("CG shape_vector must have exactly 3 elements");
+            throw std::invalid_argument("Invalid shape_vector: expected 3 elements");
+        }
+        if (shape[0] <= 0 || shape[1] <= 0 || shape[2] <= 0) {
+            CurcumaLogger::warn("CG shape_vector contains non-positive values");
+        }
+    }
+
+    // Validate epsilon (warn if negative)
+    if (cg_default.contains("epsilon") && cg_default["epsilon"].get<double>() < 0) {
+        CurcumaLogger::warn("CG epsilon parameter is negative (unusual for attractive interaction)");
+    }
+
     // Clear existing vdW interactions to prepare for CG pairs
     m_vdWs.clear();
 
+    // Load bond parameters if present (for constraint bonds between CG particles)
+    if (cg_config.contains("bonds")) {
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Loading CG bond parameters");
+        }
+        setBonds(cg_config["bonds"]);
+    }
+
+    // Get pair interaction overrides if present
+    json pair_overrides;
+    if (cg_config.contains("pair_interactions")) {
+        pair_overrides = cg_config["pair_interactions"];
+    }
+
     // Generate individual vdW structs for each CG atom pair
+    int pair_count = 0;
     for (int i = 0; i < m_natoms; ++i) {
         for (int j = i + 1; j < m_natoms; ++j) {
 
@@ -211,24 +251,39 @@ void ForceField::generateCGParameters(const json& cg_config)
                 cg_pair.orient_i = getCGOrientationForAtom(i, cg_config);
                 cg_pair.orient_j = getCGOrientationForAtom(j, cg_config);
 
-                // Load interaction parameters
-                cg_pair.sigma = cg_config.value("sigma", 4.0);
-                cg_pair.epsilon = cg_config.value("epsilon", 0.0);
-                cg_pair.cg_potential_type = cg_config.value("potential_type", 1);
+                // Check for pair-specific interaction parameter overrides
+                std::string pair_key = fmt::format("{}-{}", i, j);
+                if (!pair_overrides.empty() && pair_overrides.contains(pair_key)) {
+                    // Load custom pair parameters
+                    const auto& pair_params = pair_overrides[pair_key];
+                    cg_pair.sigma = pair_params.value("sigma", cg_default.value("sigma", 4.0));
+                    cg_pair.epsilon = pair_params.value("epsilon", cg_default.value("epsilon", 0.0));
+                    cg_pair.cg_potential_type = pair_params.value("potential_type", cg_default.value("potential_type", 1));
+
+                    if (CurcumaLogger::get_verbosity() >= 2) {
+                        CurcumaLogger::info(fmt::format("Applied custom parameters to pair {}-{}", i, j));
+                    }
+                } else {
+                    // Use default parameters
+                    cg_pair.sigma = cg_default.value("sigma", 4.0);
+                    cg_pair.epsilon = cg_default.value("epsilon", 0.0);
+                    cg_pair.cg_potential_type = cg_default.value("potential_type", 1);
+                }
 
                 m_vdWs.push_back(cg_pair);
+                pair_count++;
 
                 if (CurcumaLogger::get_verbosity() >= 3) {
                     CurcumaLogger::param(fmt::format("CG pair {}-{}", i, j),
-                        fmt::format("sigma={:.2f}, epsilon={:.4f}",
-                            cg_pair.sigma, cg_pair.epsilon));
+                        fmt::format("sigma={:.2f}, epsilon={:.4f}, type={}",
+                            cg_pair.sigma, cg_pair.epsilon, cg_pair.cg_potential_type));
                 }
             }
         }
     }
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::success(fmt::format("Generated {} CG pair interactions", m_vdWs.size()));
+        CurcumaLogger::success(fmt::format("Generated {} CG pair interactions", pair_count));
     }
 }
 

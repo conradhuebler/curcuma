@@ -64,6 +64,19 @@ if(USE_PCH)
         target_precompile_headers(test_energy_methods REUSE_FROM curcuma_core)
 endif()
 
+# Claude Generated: CG Potentials unit test suite
+add_executable(test_cg_potentials
+        test_cg_potentials.cpp)
+
+target_link_libraries(test_cg_potentials curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_cg_potentials REUSE_FROM curcuma_core)
+endif()
+
+# Note: test_cg_forcefield_integration removed due to complex linking with curcuma_D3
+# CG functionality will be tested via CLI integration test instead
+
 # todo restore
 
 # Claude Generated: Debug Ulysses methods test
