@@ -207,6 +207,7 @@ private:
     void PrintMatrix(const double* matrix) const;
 
     bool WriteGeometry();
+    void applyPeriodicBoundaryConditions();  // Claude Generated (Oct 2025): PBC wrapping
     void Verlet();
     void Rattle();
     void ApplyRMSDMTD();
@@ -358,6 +359,12 @@ private:
     int m_wall_violation_count = 0;
     int m_wall_violation_last_reported = 0;
     double m_molecular_density = 0.0; // molecules/Å³
+
+    // Claude Generated (Oct 2025): Coarse Graining system detection and optimization
+    bool m_is_cg_system = false;           // True if molecule contains CG_ELEMENT (226)
+    bool m_has_pbc = false;                // True if periodic boundary conditions active
+    int m_cg_atom_count = 0;               // Number of CG atoms in system
+    double m_cg_timestep_factor = 1.0;     // Timestep scaling for CG systems (10x for pure CG)
 
     // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
     // Claude Generated - Parameter Registry Integration (October 2025)

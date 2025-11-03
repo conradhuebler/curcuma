@@ -470,6 +470,7 @@ private:
     mutable Eigen::Matrix3d m_unit_cell_inverse = Eigen::Matrix3d::Identity();
     mutable bool m_unit_cell_inverse_valid = false;
 
+public:
     // Claude Generated (Oct 2025): Get cached inverse of unit cell matrix
     // Computes inverse on first call, then caches it for subsequent calls
     inline Eigen::Matrix3d getUnitCellInverse() const
@@ -486,5 +487,7 @@ private:
     {
         m_unit_cell_inverse_valid = false;
     }
+
+private:
 };
 } // namespace curcuma

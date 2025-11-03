@@ -36,6 +36,9 @@ capabilities/
 
 ### Molecular Dynamics
 - **SimpleMD**: Basic molecular dynamics with various thermostats
+  - ✅ **NEW (Oct 2025)**: Coarse-graining support with automatic system detection
+  - ✅ **NEW (Oct 2025)**: PBC wrapping for periodic boundary conditions
+  - ✅ **NEW (Oct 2025)**: 10x timestep scaling for pure CG systems
 - **NEB Docking**: Nudged elastic band for transition state searches
 - **Trajectory Analysis**: Analysis tools for MD trajectories
 
@@ -78,6 +81,7 @@ capabilities/
 - Better integration with quantum chemical methods
 - ✅ **COMPLETED**: Parameter Registry System, dMatrix Integration, RMSD Code Restructuring
 - ✅ **COMPLETED** (Oct 29, 2025): Help System Dynamic Generation - all modules use ParameterRegistry for help
+- ✅ **COMPLETED** (Oct 30, 2025): SimpleMD CG Integration - System detection, PBC wrapping, timestep scaling
 - Pending: Unit system migration, RMSD Strategy pattern (Phase 3)
 
 ### Known Issues

@@ -439,6 +439,46 @@ bool SimpleMD::Initialise()
     if (m_molecule.AtomCount() == 0)
         return false;
 
+    // Claude Generated (Oct 2025): Detect CG system and PBC for optimization
+    m_is_cg_system = m_molecule.isCGSystem();
+    m_has_pbc = m_molecule.hasPBC();
+    std::vector<int> cg_atoms = m_molecule.getCGAtoms();
+    m_cg_atom_count = cg_atoms.size();
+
+    // CG systems can use larger timesteps (10x typical atomic MD)
+    if (m_is_cg_system && m_cg_atom_count == m_natoms) {
+        m_cg_timestep_factor = 10.0;
+        int verbosity = m_config.get<int>("verbosity", 0);
+        if (verbosity >= 1) {
+            CurcumaLogger::success("Pure CG system detected with "
+                                  + std::to_string(m_cg_atom_count) + " CG particles");
+            CurcumaLogger::info("Timestep factor: " + std::to_string(m_cg_timestep_factor) + "x");
+        }
+        // Apply timestep scaling after detection
+        if (m_cg_timestep_factor > 1.0) {
+            double orig_dt = m_dT;
+            m_dT *= m_cg_timestep_factor;
+            m_dt2 = m_dT * m_dT;
+            int verbosity_ts = m_config.get<int>("verbosity", 0);
+            if (verbosity_ts >= 1) {
+                CurcumaLogger::success("CG timestep scaling applied: "
+                                      + std::to_string(orig_dt) + " fs → "
+                                      + std::to_string(m_dT) + " fs");
+            }
+        }
+    }
+
+    if (m_has_pbc) {
+        int verbosity = m_config.get<int>("verbosity", 0);
+        if (verbosity >= 2) {
+            Eigen::Matrix3d cell = m_molecule.getUnitCell();
+            CurcumaLogger::param("Periodic Boundary Conditions",
+                               "enabled (box: " + std::to_string(cell(0,0)) + " x " +
+                               std::to_string(cell(1,1)) + " x " +
+                               std::to_string(cell(2,2)) + " Å³)");
+        }
+    }
+
     if (!m_restart) {
         std::ofstream result_file;
         result_file.open(Basename() + ".trj.xyz");
@@ -1732,6 +1772,37 @@ void SimpleMD::AdjustRattleTolerance()
     m_aver_rattle_Temp = 0;
 }
 
+// Claude Generated (Oct 2025): Apply Periodic Boundary Conditions
+// Wraps all atoms into the central unit cell using fractional coordinates
+void SimpleMD::applyPeriodicBoundaryConditions()
+{
+    if (!m_has_pbc) return;
+
+    // Get unit cell matrix and its inverse
+    Eigen::Matrix3d cell = m_molecule.getUnitCell();
+    Eigen::Matrix3d cell_inv = m_molecule.getUnitCellInverse();
+
+    // Wrap each atom into central cell
+    for (int i = 0; i < m_natoms; ++i) {
+        Eigen::Vector3d pos = m_eigen_geometry.row(i);
+
+        // Convert to fractional coordinates: r_frac = cell_inv * r_cart
+        Eigen::Vector3d frac = cell_inv * pos;
+
+        // Wrap to [0, 1) range
+        frac[0] -= std::floor(frac[0]);
+        frac[1] -= std::floor(frac[1]);
+        frac[2] -= std::floor(frac[2]);
+
+        // Convert back to Cartesian: r_cart = cell * r_frac
+        pos = cell * frac;
+        m_eigen_geometry.row(i) = pos;
+    }
+
+    // Update molecule geometry after PBC wrapping
+    m_molecule.setGeometry(m_eigen_geometry);
+}
+
 void SimpleMD::Verlet()
 {
     double ekin = 0;
@@ -1798,6 +1869,9 @@ void SimpleMD::Verlet()
     m_Ekin = ekin;
     ThermostatFunction();
     EKin();
+
+    // Claude Generated (Oct 2025): Apply PBC wrapping after integration step
+    applyPeriodicBoundaryConditions();
 }
 
 void SimpleMD::Rattle()
@@ -2332,6 +2406,9 @@ void SimpleMD::Rattle()
     ThermostatFunction();
     EKin();
     m_dof = dof;
+
+    // Claude Generated (Oct 2025): Apply PBC wrapping after integration step
+    applyPeriodicBoundaryConditions();
 }
 
 void SimpleMD::ApplyRMSDMTD()
