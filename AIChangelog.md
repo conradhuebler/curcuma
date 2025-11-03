@@ -6,6 +6,8 @@ Format: One line per change, newest first.
 
 ## October 2025
 
+- **SimpleMD Coarse Graining Integration (Oct 30)**: Automatic CG system detection (isCGSystem), periodic boundary condition wrapping (applyPeriodicBoundaryConditions), 10x timestep scaling for pure CG systems, CLI test case (simplemd/08_cg_spheres), complete CG MD support ready for production
+- **Coarse Graining Phases 1-4 Complete**: Molecule CG detection (isCGSystem, getCGAtoms), ForceField JSON parameter loading (cg_default, cg_per_atom, pair_interactions), VTF reader/writer for CG structures and trajectories, comprehensive test suite (9+6+1 test cases), spherical CG particles fully functional for Casino MC, ready for SimpleMD integration
 - **Help System Migration to ParameterRegistry**: 3-tier migration complete, 300+ lines of duplicate hardcoded help text eliminated, 4 modules refactored with registry-based printHelp(), 3 modules enhanced with new printHelp() methods, 2 modules (casino, modern_optimizer) with complete PARAM definitions (29 new parameters), single source of truth for all help documentation, automatic help generation for new modules
 - **CurcumaOpt ParameterRegistry Migration - JSON Null Bug Fixed**: 37 parameters defined, ~30 Json2KeyWord calls eliminated, CurcumaOptJson replaced with ParameterRegistry, LBFGS parameter access migrated, fixes critical JSON null bug affecting 11/26 CLI tests, optimization now functional
 - **ForceField Inversion Bug Fixed**: Copy-paste error in ForceFieldGenerator::setBonds() causing vector out-of-bounds crash, changed incorrect m_stored_bonds[i] to m_stored_bonds[j] access

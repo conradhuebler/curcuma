@@ -41,70 +41,70 @@
 
 ---
 
-## 🟢 COARSE GRAINING DEVELOPMENT (NEW - CG.md)
+## 🟢 COARSE GRAINING DEVELOPMENT (October 2025 - PHASES 1-4 COMPLETE)
 
-### CG Foundation - Phase 1: Molecule Helper Functions
-- **Status**: ⏳ PENDING
-- **Priority**: 🔴 HIGH - Blocks other CG work
-- **Task**: Add CG detection methods to Molecule class
-- **Betroffene Dateien**: src/core/molecule.h, src/core/molecule.cpp
-- **Aufwand**: ~30 min
-- **Details**:
-  - `bool isCGSystem() const` - Check if molecule contains CG_ELEMENT (226)
-  - `bool hasMixedSystem() const` - Check for both atomic + CG particles
-  - `std::vector<int> getCGAtoms() const` - Get all CG atom indices
-  - `std::vector<int> getAtomicAtoms() const` - Get all atomic indices
+### ✅ CG Foundation - Phase 1: Molecule Helper Functions (COMPLETE - October 2025)
+- **Status**: ✅ DONE
+- **Completion**: All methods implemented and tested in molecule.cpp:2031-2066
+- **Implemented**:
+  - `bool isCGSystem() const` - Detects CG_ELEMENT (226)
+  - `bool hasMixedSystem() const` - Detects hybrid systems
+  - `std::vector<int> getCGAtoms() const` - Returns CG atom indices
+  - `std::vector<int> getAtomicAtoms() const` - Returns atomic indices
 
-### CG Foundation - Phase 2: JSON Parameter Loading
+### ✅ CG Foundation - Phase 2: JSON Parameter Loading (COMPLETE - October 2025)
+- **Status**: ✅ DONE
+- **Completion**: Full implementation in forcefield.cpp:185-288
+- **Features**:
+  - Parse `cg_default`, `cg_per_atom`, `pair_interactions` sections
+  - Automatic validation of shape vectors and epsilon values
+  - Per-atom shape/orientation overrides
+  - Custom pair parameter support via `"{i}-{j}"` keys
+  - Comprehensive error handling with descriptive messages
+
+### ✅ CG Format - Phase 3: VTF Writer Implementation (COMPLETE - October 2025)
+- **Status**: ✅ DONE
+- **Completion**: Full reader/writer in formats.h:262-489
+- **Features**:
+  - `WriteVTF()` - Single structure output with CG metadata
+  - `WriteVTFTrajectory()` - Multi-frame trajectory output
+  - Automatic cell matrix angle calculations
+  - CG atom labeling and radius detection
+  - FileIterator integration for sequential reading
+
+### ✅ CG Integration - Phase 4: Testing & Validation (COMPLETE - October 2025)
+- **Status**: ✅ DONE (9 + 6 + 1 test suites)
+- **Completion**: Comprehensive test suite in test_cases/
+- **Test Coverage**:
+  - **Unit Tests** (test_cg_potentials.cpp): 9 suites (shape, LJ, rotation, effective distance)
+  - **ForceField Integration** (test_cg_forcefield_integration.cpp): 6 scenarios
+  - **CLI Test** (cli/cg/01_single_point): End-to-end single point energy
+  - **Integration Data**: simple_beads.vtf, mc_cg_chain/ with full documentation
+
+### 🟡 CG Integration - Phase 5: SimpleMD CG Integration (NEW - PENDING)
 - **Status**: ⏳ PENDING
-- **Priority**: 🔴 CRITICAL - Core functionality
-- **Task**: Complete `generateCGParameters()` in ForceField class
-- **Betroffene Dateien**: src/core/energy_calculators/ff_methods/forcefield.cpp/h
+- **Priority**: 🔴 HIGH - Completes CG functionality
+- **Task**: Add CG-aware features to SimpleMD for efficient MD simulations
+- **Betroffene Dateien**: src/capabilities/simplemd.cpp/h
 - **Aufwand**: ~2-3 h
 - **Details**:
-  - Parse `cg_default` section from JSON config
-  - Parse `cg_per_atom` section for per-particle overrides
-  - Parse `pair_interactions` for custom pair parameters
-  - Generate vdW structures with `type=3` for CG-CG interactions
-  - Validate shape vectors and potential parameters
+  - System type detection (CG vs atomic vs mixed)
+  - PBC wrapping for periodic boundary conditions
+  - Timestep scaling (10x larger for pure CG systems)
+  - Orientational dynamics infrastructure (for ellipsoids)
+  - CLI test: simplemd/08_cg_spheres
 
-### CG Format - Phase 3: VTF Writer Implementation
-- **Status**: ⏳ PENDING
-- **Priority**: 🟡 MEDIUM - Needed for trajectory output
-- **Task**: Implement `WriteVTF()` function for trajectory output
-- **Betroffene Dateien**: src/tools/formats.h, src/tools/vtf_handler.cpp
-- **Aufwand**: ~2-3 h
-- **Details**:
-  - Write atoms with CG markers and radii
-  - Write bonds from mol.m_bonds
-  - Write unit cell (periodic boundary conditions)
-  - Write timestep coordinates
-  - Support both single structure and trajectory writing
-
-### CG Integration - Phase 4: Testing & Validation
-- **Status**: ⏳ PENDING
-- **Priority**: 🟡 MEDIUM - Verification of functionality
-- **Task**: Create test cases and validate CG simulation workflow
-- **Betroffene Dateien**: test_cases/, test_cases/test_cg_*.cpp
-- **Aufwand**: ~2-3 h
-- **Details**:
-  - Create test_cg_mc.vtf with 2-3 CG particles
-  - Create test_cg_mc.json with CG parameters (σ, ε)
-  - Test Casino MC with CG config
-  - Validate energy calculations for spherical particles
-  - Test trajectory output and PBC wrapping
-  - Verify acceptance ratios are reasonable (0.1-0.9)
-
-### CG Potentials - Phase 5: Ellipsoidal Extensions (OPTIONAL)
-- **Status**: ⏳ LOWEST PRIORITY
-- **Priority**: 🔵 LOW - After spherical validation
+### 🔵 CG Potentials - Phase 6: Ellipsoidal Extensions (OPTIONAL - LOWEST PRIORITY)
+- **Status**: 🟡 PREPARED
+- **Priority**: 🔵 LOW - After SimpleMD integration
 - **Task**: Implement angle-dependent energy for ellipsoidal particles
 - **Betroffene Dateien**: src/core/energy_calculators/ff_methods/cg_potentials.cpp, src/capabilities/casino.cpp
-- **Aufwand**: ~4-5 h (after phases 1-4 complete)
-- **Details**:
+- **Aufwand**: ~4-5 h (after Phase 5 complete)
+- **Current Status**: All infrastructure prepared (rotation matrices, ellipsoid detection, fallback energy)
+- **Remaining**:
   - Complete `calculateEffectiveDistance()` for ellipsoid-ellipsoid interactions
   - Implement orientation-dependent potential in `calculateCGPairEnergy()`
-  - Add rotational moves in Casino (`rotateParticle()`)
+  - Activate rotational moves in Casino
   - Test ellipsoidal shape calculations
 
 ---
@@ -248,14 +248,14 @@
 | Priority | Component | Count | Status |
 |----------|-----------|-------|--------|
 | 🔴 KRITISCH | None | 0 | ✅ ALL RESOLVED |
-| 🔴 HIGH (CG) | CG Molecule + JSON Loading | 2 | ⏳ PENDING |
-| 🟡 MEDIUM (CG) | VTF Writer + CG Testing | 2 | ⏳ PENDING |
-| 🔵 LOW (CG) | Ellipsoidal Extensions | 1 | ⏳ LOWEST PRIORITY |
+| 🔴 HIGH (CG Phase 5) | SimpleMD CG Integration | 1 | ⏳ PENDING |
+| 🟢 DONE (CG Phases 1-4) | CG Core + VTF + Testing | 4 | ✅ COMPLETE |
+| 🔵 LOW (CG Phase 6) | Ellipsoidal Extensions | 1 | 🟡 PREPARED |
 | 🟡 TESTING | Scientific validation | 4 | ⏳ PENDING |
 | 🟢 CORE | Parameter/Memory/Units | 4 | ⏳ PENDING |
 | 🔵 CAPABILITIES | Confscan/RMSD/SimpleMD Physics | 4 | ⏳ PENDING |
 | 🟣 REFACTORING | Molecule Phase 2-6 | 5 | ⏳ PLANNED |
-| **TOTAL** | | **22** | **0 ❌ + 21 ⏳ + 1 🔵** |
+| **TOTAL** | | **23** | **4 ✅ + 17 ⏳ + 2 🟡** |
 
 ---
 

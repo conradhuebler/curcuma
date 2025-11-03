@@ -1027,11 +1027,11 @@ Curcuma Coarse Graining Implementation Plan
 
 ---
 
-# ✅ **Implementierungsstatus: CORE FEATURES COMPLETE (Oktober 2025)**
+# ✅ **Implementierungsstatus: CORE FEATURES COMPLETE + SimpleMD NEXT (Oktober 2025)**
 
-Das grundlegende CG-System für **sphärische Partikel** ist vollständig implementiert und getestet.
+Das grundlegende CG-System für **sphärische Partikel** ist vollständig implementiert, getestet und produktionsreif. SimpleMD-Integration ist geplant als nächster Schritt.
 
-## ✅ **IMPLEMENTIERT (October 2025)**
+## ✅ **IMPLEMENTIERT (October 2025 - Phases 1-4)**
 
 ### Phase 1: Core Foundation ✅ COMPLETE
 - **Molecule Helper Methods:** `isCGSystem()`, `hasMixedSystem()`, `getCGAtoms()`, `getAtomicAtoms()` - src/core/molecule.h/cpp
@@ -1079,14 +1079,46 @@ Das grundlegende CG-System für **sphärische Partikel** ist vollständig implem
           -nsteps 1000 -temp 298.15
 ```
 
-## 🚀 **Next Steps (Optional Enhancements)**
+## 🚀 **SimpleMD CG Integration (Phase 5 - NEXT)**
 
-### Future Ellipsoid Extension (LOWEST PRIORITY)
-After spherical particle validation, ellipsoid support can be added:
+### Overview
+Enhance SimpleMD with coarse-graining awareness for efficient CG molecular dynamics simulations with 10x larger timesteps.
+
+### Implementation Tasks
+
+#### 5.1 System Detection
+- Detect pure CG systems vs. hybrid vs. atomic-only
+- Detect Periodic Boundary Conditions from molecule.hasPBC()
+- Load lattice parameters from molecule.getUnitCell()
+
+#### 5.2 PBC Wrapping
+- Implement `applyPeriodicBoundaryConditions()` method
+- Wrap all atoms into central cell using fractional coordinates
+- Call after each integration step (Verlet, Rattle)
+
+#### 5.3 Timestep Scaling
+- Apply 10x timestep factor for pure CG systems
+- Adjustable via parameter (future enhancement)
+- Log scaling information at verbosity ≥1
+
+#### 5.4 Testing
+- Create CLI test: `test_cases/cli/simplemd/08_cg_spheres/`
+- Test with 2 CG beads, PBC box, 10-20 steps
+- Validate trajectory output and energy stability
+
+**Estimated Effort:** 2-3 hours
+**Expected Completion:** Following this phase will complete core CG functionality
+
+---
+
+## 🚀 **Future Ellipsoid Extension (Phase 6 - LOWEST PRIORITY)**
+
+After SimpleMD integration, optional ellipsoid support can be added:
 1. Complete `calculateEffectiveDistance()` for angle-dependent interactions
 2. Implement orientation-dependent `calculateCGPairEnergy()`
 3. Add rotational MC moves in Casino
 4. Test with ellipsoidal shape parameters
 
-**Estimated Effort:** 4-5 hours (after spherical validation)
+**Estimated Effort:** 4-5 hours (after Phase 5 complete)
+**Infrastructure Status:** ✅ Fully prepared (rotation matrices, shape detection, fallback energy)
 

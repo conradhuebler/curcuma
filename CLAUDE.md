@@ -23,6 +23,7 @@
 - **Keep entries concise and focused to save tokens**
 - **Keep git commits concise and focused**
 - **Rule of thumb**: If a CLAUDE.md section exceeds 20 lines, consider if it's better placed elsewhere
+- Newly added features need a precise and short documentation under docs/, a link to the documentation from claude.md and a note in the readme
 ## Development Guidelines
 
 ### Code Organization
@@ -276,6 +277,29 @@ ctest -R "cli_rmsd_01" --verbose
 - **Critical**: SimpleMD JSON null crash blocks 7 tests - parameter routing needs fix (see TODO.md:CRITICAL)
 - **Test Blocking Issues**: SimpleMD crash, cgfnff null parameters, memory optimization for large systems
 - **Module Docs**: Each `src/` subdirectory has CLAUDE.md with specific tasks
+
+## Workflow States
+- **ADD**: Features to be added
+- **WIP**: Currently being worked on
+- **ADDED**: Basically implemented
+- **TESTED**: Works (by operator feedback)
+- **APPROVED**: Move to changelog, remove from CLAUDE.md
+
+### Documentation Update Rules
+- **Replace debugging details with architecture decisions** when issues are resolved
+- **Remove unnecessary pointer addresses and crash investigation specifics**
+- **Focus on architectural clarity** rather than technical debugging information
+- **Document the "why" behind design decisions** for future reference
+- **Eliminate redundant information** that doesn't add architectural value
+- **Prioritize clean, maintainable documentation** over verbose troubleshooting history
+
+## Git Best Practices
+- **Only commit source files**: Use `git add <file>` for specific files, never `git add -A` without review
+- **Review before committing**: Always check `git diff` and `git status` to avoid accidental commits
+- **Build before commit**: Ensure `make -j4` succeeds and no compiler warnings/errors exist
+- **Commit message format**: Start with action verb (Fix, Add, Improve, Refactor), follow with brief description
+- **Include Co-Author info**: All commits include Claude contribution notes with proper attribution
+- **Test artifacts stay local**: Build outputs and temporary test files are ignored by .gitignore
 
 ## Standards
 
