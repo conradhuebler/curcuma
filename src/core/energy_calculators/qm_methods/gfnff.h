@@ -168,6 +168,19 @@ private:
     json generateGFNFFAngles() const;
 
     /**
+     * @brief Generate GFN-FF torsion parameters from topology
+     *
+     * Claude Generated (2025): Ported from Grimme Lab GFN-FF (Spicher & Grimme 2020)
+     * Reference: external/gfnff/src/gfnff_engrad.F90:1041-1122 (egtors subroutine)
+     *
+     * Implements proper and improper torsion potentials for molecular rotations.
+     * See docs/theory/GFNFF_TORSION_THEORY.md for scientific background.
+     *
+     * @return JSON array of torsion parameters
+     */
+    json generateGFNFFTorsions() const;
+
+    /**
      * @brief Get covalent radius for element
      * @param atomic_number Element atomic number
      * @return Covalent radius in Angstrom
@@ -185,6 +198,28 @@ private:
         double force_constant;
         double equilibrium_angle;
         double c0, c1, c2; // Fourier coefficients
+    };
+
+    /**
+     * @brief GFN-FF torsion parameters
+     *
+     * Claude Generated (2025): Based on GFN-FF method (Spicher & Grimme 2020)
+     *
+     * Torsion potential: E = V/2 * [1 - cos(n*(φ - φ₀))] * D(r_ij, r_jk, r_kl)
+     *
+     * Scientific background:
+     * - Describes rotation around central bond j-k in i-j-k-l sequence
+     * - Periodicity n determines symmetry (1, 2, or 3)
+     * - Barrier height V controls rotation difficulty
+     * - Distance damping D couples stretching with rotation
+     *
+     * Reference: docs/theory/GFNFF_TORSION_THEORY.md
+     */
+    struct GFNFFTorsionParams {
+        double barrier_height;     ///< V_n: Energy barrier in kcal/mol (Spicher & Grimme Eq. 8)
+        int periodicity;            ///< n: Rotational symmetry (1, 2, or 3)
+        double phase_shift;         ///< φ₀: Reference angle in radians
+        bool is_improper;          ///< True for out-of-plane/improper torsions
     };
 
     /**
@@ -211,6 +246,94 @@ private:
      * @return GFN-FF angle parameters
      */
     GFNFFAngleParams getGFNFFAngleParameters(int z1, int z2, int z3, double current_angle) const;
+
+    /**
+     * @brief Get GFN-FF torsion parameters for atom quartet
+     *
+     * Claude Generated (2025): Topology-aware parameter assignment
+     * Reference: external/gfnff/src/gfnff_ini2.f90 (torsion setup)
+     *
+     * Assigns torsion parameters based on:
+     * - Hybridization of central atoms j and k
+     * - Ring membership (strain corrections)
+     * - Conjugation status (planarity preferences)
+     *
+     * @param z_i Atomic number of first atom
+     * @param z_j Atomic number of second atom (central bond)
+     * @param z_k Atomic number of third atom (central bond)
+     * @param z_l Atomic number of fourth atom
+     * @param hyb_j Hybridization of atom j (1=sp, 2=sp2, 3=sp3)
+     * @param hyb_k Hybridization of atom k
+     * @return GFN-FF torsion parameters
+     */
+    GFNFFTorsionParams getGFNFFTorsionParameters(int z_i, int z_j, int z_k, int z_l,
+                                                  int hyb_j, int hyb_k) const;
+
+    /**
+     * @brief Calculate dihedral angle for four atoms
+     *
+     * Claude Generated (2025): Standard computational chemistry formula
+     * Reference: Allen & Tildesley "Computer Simulation of Liquids" (1987)
+     *
+     * Computes signed dihedral angle φ ∈ [-π, π] between planes i-j-k and j-k-l.
+     * Uses atan2 for proper sign handling (crucial for gradient calculation).
+     *
+     * Physical interpretation:
+     * - φ = 0°: cis/eclipsed (atoms i and l on same side)
+     * - φ = 180°: trans/anti (atoms i and l on opposite sides)
+     *
+     * @param i Index of first atom
+     * @param j Index of second atom
+     * @param k Index of third atom
+     * @param l Index of fourth atom
+     * @return Dihedral angle in radians [-π, π]
+     */
+    double calculateDihedralAngle(int i, int j, int k, int l) const;
+
+    /**
+     * @brief Calculate derivatives of dihedral angle w.r.t. atomic positions
+     *
+     * Claude Generated (2025): Analytical gradient for torsions
+     * Reference: external/gfnff/src/gfnff_engrad.F90 (dphidr subroutine)
+     *
+     * Computes ∂φ/∂x_i, ∂φ/∂x_j, ∂φ/∂x_k, ∂φ/∂x_l for chain rule in gradient.
+     * Critical for analytical force calculation in molecular dynamics.
+     *
+     * @param i Index of first atom
+     * @param j Index of second atom
+     * @param k Index of third atom
+     * @param l Index of fourth atom
+     * @param phi Current dihedral angle (from calculateDihedralAngle)
+     * @param dda Output: ∂φ/∂x_i (3D vector)
+     * @param ddb Output: ∂φ/∂x_j (3D vector)
+     * @param ddc Output: ∂φ/∂x_k (3D vector)
+     * @param ddd Output: ∂φ/∂x_l (3D vector)
+     */
+    void calculateDihedralGradient(int i, int j, int k, int l, double phi,
+                                     Vector& dda, Vector& ddb,
+                                     Vector& ddc, Vector& ddd) const;
+
+    /**
+     * @brief Calculate damping function for torsion potential
+     *
+     * Claude Generated (2025): Distance-dependent damping
+     * Reference: external/gfnff/src/gfnff_engrad.F90 (gfnffdampt function)
+     *
+     * Damping function couples bond stretching with torsional motion:
+     * D(r) = 1 / [1 + exp(-α*(r/r₀ - 1))]
+     *
+     * Physical meaning:
+     * - Stretched bonds → weaker torsion barrier (easier rotation)
+     * - Compressed bonds → stronger torsion barrier
+     *
+     * @param z1 Atomic number of first atom
+     * @param z2 Atomic number of second atom
+     * @param r_squared Squared distance r² in Bohr²
+     * @param damp Output: Damping value D(r)
+     * @param damp_deriv Output: Derivative ∂D/∂r
+     */
+    void calculateTorsionDamping(int z1, int z2, double r_squared,
+                                  double& damp, double& damp_deriv) const;
 
     // =================================================================================
     // Advanced GFN-FF Parameter Generation (for future implementation)
