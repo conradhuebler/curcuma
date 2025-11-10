@@ -181,6 +181,19 @@ private:
     json generateGFNFFTorsions() const;
 
     /**
+     * @brief Generate GFN-FF inversion/out-of-plane parameters
+     *
+     * Claude Generated (2025): Inversion term implementation
+     * Reference: external/gfnff/src/gfnff_helpers.f90:427-510 (omega, domegadr)
+     *
+     * Implements out-of-plane bending potentials for sp² centers (planarity constraints).
+     * See docs/theory/GFNFF_INVERSION_THEORY.md for scientific background.
+     *
+     * @return JSON array of inversion parameters
+     */
+    json generateGFNFFInversions() const;
+
+    /**
      * @brief Get covalent radius for element
      * @param atomic_number Element atomic number
      * @return Covalent radius in Angstrom
@@ -220,6 +233,27 @@ private:
         int periodicity;            ///< n: Rotational symmetry (1, 2, or 3)
         double phase_shift;         ///< φ₀: Reference angle in radians
         bool is_improper;          ///< True for out-of-plane/improper torsions
+    };
+
+    /**
+     * @brief GFN-FF inversion/out-of-plane parameters
+     *
+     * Claude Generated (2025): Based on GFN-FF method (Spicher & Grimme 2020)
+     *
+     * Inversion potential: E = V * [cos(ω) - cos(ω₀)]² * D(r_ij, r_jk, r_jl)
+     *
+     * Scientific background:
+     * - Describes out-of-plane bending for atom i relative to plane j-k-l
+     * - Enforces planarity at sp² centers (aromatics, C=C, C=O)
+     * - ω = out-of-plane angle ∈ [-π/2, +π/2]
+     * - Double-well potential allows ±ω₀ equivalence
+     *
+     * Reference: docs/theory/GFNFF_INVERSION_THEORY.md
+     */
+    struct GFNFFInversionParams {
+        double barrier_height;     ///< V: Energy barrier in kcal/mol
+        double reference_angle;     ///< ω₀: Reference angle in radians (usually 0 for planar)
+        int potential_type;        ///< 0: double-well [cos(ω)-cos(ω₀)]², 1: single-well [1-cos(ω)]
     };
 
     /**
@@ -334,6 +368,77 @@ private:
      */
     void calculateTorsionDamping(int z1, int z2, double r_squared,
                                   double& damp, double& damp_deriv) const;
+
+    // =================================================================================
+    // INVERSION/OUT-OF-PLANE HELPER FUNCTIONS (Phase 1.2)
+    // =================================================================================
+
+    /**
+     * @brief Calculate out-of-plane angle (omega) for atom i relative to plane j-k-l
+     *
+     * Claude Generated (2025): Inversion angle calculation
+     * Reference: external/gfnff/src/gfnff_helpers.f90:427-448 (omega function)
+     *
+     * Computes ω ∈ [-π/2, +π/2] measuring deviation from planarity:
+     *   ω = arcsin(n · v̂)
+     * where:
+     *   n = (r_ij × r_jk) / |r_ij × r_jk|  (normal to plane i-j-k)
+     *   v = r_il  (vector from i to l)
+     *
+     * Physical interpretation:
+     * - ω = 0: atom i in plane j-k-l (planar, typical for sp²)
+     * - ω = ±π/2: atom i perpendicular to plane (pyramidal)
+     *
+     * @param i Index of central atom (out-of-plane)
+     * @param j Index of first plane atom
+     * @param k Index of second plane atom
+     * @param l Index of third plane atom
+     * @return Out-of-plane angle in radians [-π/2, π/2]
+     */
+    double calculateOutOfPlaneAngle(int i, int j, int k, int l) const;
+
+    /**
+     * @brief Calculate derivatives of out-of-plane angle w.r.t. atomic positions
+     *
+     * Claude Generated (2025): Analytical gradient for inversions
+     * Reference: external/gfnff/src/gfnff_helpers.f90:450-510 (domegadr subroutine)
+     *
+     * Computes ∂ω/∂x_i, ∂ω/∂x_j, ∂ω/∂x_k, ∂ω/∂x_l for chain rule in gradient.
+     * Critical for analytical force calculation in geometry optimization.
+     *
+     * @param i Index of central atom
+     * @param j Index of first plane atom
+     * @param k Index of second plane atom
+     * @param l Index of third plane atom
+     * @param omega Current out-of-plane angle (from calculateOutOfPlaneAngle)
+     * @param grad_i Output: ∂ω/∂x_i (3D vector)
+     * @param grad_j Output: ∂ω/∂x_j (3D vector)
+     * @param grad_k Output: ∂ω/∂x_k (3D vector)
+     * @param grad_l Output: ∂ω/∂x_l (3D vector)
+     */
+    void calculateInversionGradient(int i, int j, int k, int l, double omega,
+                                     Vector& grad_i, Vector& grad_j,
+                                     Vector& grad_k, Vector& grad_l) const;
+
+    /**
+     * @brief Get GFN-FF inversion parameters for atom quartet
+     *
+     * Claude Generated (2025): Topology-aware inversion parameter assignment
+     *
+     * Assigns inversion parameters based on:
+     * - Hybridization of central atom i (sp² → needs inversion)
+     * - Element type (C, N, O, B different barriers)
+     * - Pi-system membership (aromatics → higher barriers)
+     *
+     * @param z_i Atomic number of central atom (out-of-plane)
+     * @param z_j Atomic number of plane atom j
+     * @param z_k Atomic number of plane atom k
+     * @param z_l Atomic number of plane atom l
+     * @param hyb_i Hybridization of central atom i (1=sp, 2=sp², 3=sp³)
+     * @return GFN-FF inversion parameters
+     */
+    GFNFFInversionParams getGFNFFInversionParameters(int z_i, int z_j, int z_k, int z_l,
+                                                      int hyb_i) const;
 
     // =================================================================================
     // Advanced GFN-FF Parameter Generation (for future implementation)

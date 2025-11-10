@@ -204,7 +204,7 @@ json GFNFF::generateGFNFFParameters()
         parameters["bonds"] = bonds;
         parameters["angles"] = angles;
         parameters["dihedrals"] = generateGFNFFTorsions(); // ✅ Phase 1.1 implemented
-        parameters["inversions"] = json::array(); // TODO (Phase 1.2): Advanced inversions
+        parameters["inversions"] = generateGFNFFInversions(); // ✅ Phase 1.2 implemented
         parameters["vdws"] = json::array(); // TODO (Phase 4): Advanced non-bonded
         parameters["hbonds"] = detectHydrogenBonds(topo_info.eeq_charges);
 
@@ -229,11 +229,12 @@ json GFNFF::generateGFNFFParameters()
         json bonds = generateGFNFFBonds();
         json angles = generateGFNFFAngles();
         json torsions = generateGFNFFTorsions(); // ✅ Phase 1.1 implemented
+        json inversions = generateGFNFFInversions(); // ✅ Phase 1.2 implemented
 
         parameters["bonds"] = bonds;
         parameters["angles"] = angles;
         parameters["dihedrals"] = torsions;
-        parameters["inversions"] = json::array(); // TODO (Phase 1.2): Implement inversions
+        parameters["inversions"] = inversions;
         parameters["vdws"] = json::array(); // TODO (Phase 4): Implement non-bonded
     }
 
