@@ -203,9 +203,9 @@ json GFNFF::generateGFNFFParameters()
 
         parameters["bonds"] = bonds;
         parameters["angles"] = angles;
-        parameters["dihedrals"] = json::array(); // TODO: Advanced torsions
-        parameters["inversions"] = json::array(); // TODO: Advanced inversions
-        parameters["vdws"] = json::array(); // TODO: Advanced non-bonded
+        parameters["dihedrals"] = generateGFNFFTorsions(); // ✅ Phase 1.1 implemented
+        parameters["inversions"] = json::array(); // TODO (Phase 1.2): Advanced inversions
+        parameters["vdws"] = json::array(); // TODO (Phase 4): Advanced non-bonded
         parameters["hbonds"] = detectHydrogenBonds(topo_info.eeq_charges);
 
         // Store topology information for debugging
@@ -228,12 +228,13 @@ json GFNFF::generateGFNFFParameters()
         // Generate GFN-FF bonds with real parameters
         json bonds = generateGFNFFBonds();
         json angles = generateGFNFFAngles();
+        json torsions = generateGFNFFTorsions(); // ✅ Phase 1.1 implemented
 
         parameters["bonds"] = bonds;
         parameters["angles"] = angles;
-        parameters["dihedrals"] = json::array(); // TODO: Implement torsions
-        parameters["inversions"] = json::array(); // TODO: Implement inversions
-        parameters["vdws"] = json::array(); // TODO: Implement non-bonded
+        parameters["dihedrals"] = torsions;
+        parameters["inversions"] = json::array(); // TODO (Phase 1.2): Implement inversions
+        parameters["vdws"] = json::array(); // TODO (Phase 4): Implement non-bonded
     }
 
     // Integration with existing corrections (H4, D3/D4)
