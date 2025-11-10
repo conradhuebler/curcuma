@@ -84,3 +84,11 @@ test_cases/**/curcuma_*.json
 test_cases/**/*.log
 test_cases/**/*.dat
 
+
+# Downloaded external dependencies (should be fetched via submodules/CMake)
+external/eigen-3.4.0.zip
+external/eigen-3.4.0/
+external/ulysses.zip
+external/ulysses-main/
+external/json.hpp
+external/stb_image_write.h
