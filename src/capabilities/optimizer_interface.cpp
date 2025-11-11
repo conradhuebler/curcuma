@@ -89,10 +89,12 @@ OptimizerType parseOptimizerType(const std::string& method_name)
         return OptimizerType::DIIS;
     } else if (lower_name == "rfo" || lower_name == "rational_function") {
         return OptimizerType::RFO;
+    } else if (lower_name == "ancopt" || lower_name == "anc" || lower_name == "approximate_normal") {
+        return OptimizerType::ANCOPT;
     } else if (lower_name == "auto" || lower_name == "automatic") {
         return OptimizerType::AUTO;
     } else {
-        throw std::invalid_argument("Unknown optimizer type: " + method_name + ". Valid options: lbfgspp, lbfgs, diis, rfo, auto");
+        throw std::invalid_argument("Unknown optimizer type: " + method_name + ". Valid options: lbfgspp, lbfgs, diis, rfo, ancopt, auto");
     }
 }
 
@@ -108,6 +110,8 @@ std::string optimizerTypeToString(OptimizerType type)
         return "diis";
     case OptimizerType::RFO:
         return "rfo";
+    case OptimizerType::ANCOPT:
+        return "ancopt";
     case OptimizerType::AUTO:
         return "auto";
     default:

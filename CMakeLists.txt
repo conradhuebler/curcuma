@@ -215,6 +215,12 @@ set(curcuma_core_SRC
         # Optimization algorithms - Claude Generated (Educational-First Design)
         src/capabilities/optimisation/lbfgs.cpp
         src/capabilities/optimisation/modern_optimizer_simple.cpp
+        # Modern optimizer system - Claude Generated
+        src/capabilities/optimizer_interface.cpp
+        src/capabilities/optimizer_factory.cpp
+        src/capabilities/optimizer_driver.cpp
+        src/capabilities/lbfgspp_optimizer.cpp
+        src/capabilities/ancopt_optimizer.cpp
         src/capabilities/persistentdiagram.cpp
         src/capabilities/analysenciplot.cpp
         src/capabilities/curcumamethod.cpp

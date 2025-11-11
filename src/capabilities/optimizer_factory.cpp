@@ -19,6 +19,7 @@
 
 #include "optimizer_factory.h"
 #include "lbfgspp_optimizer.h"
+#include "ancopt_optimizer.h"
 // Future includes:
 // #include "internal_lbfgs_optimizer.h"
 // #include "diis_optimizer.h"
@@ -30,6 +31,7 @@ namespace Optimization {
 const std::map<OptimizerType, OptimizerFactory::OptimizerFactoryFunction>
     OptimizerFactory::s_factory_registry = {
         { OptimizerType::LBFGSPP, &OptimizerFactory::createLBFGSpp },
+        { OptimizerType::ANCOPT, &OptimizerFactory::createANCOpt },
         // Future implementations:
         // { OptimizerType::INTERNAL_LBFGS, &OptimizerFactory::createInternalLBFGS },
         // { OptimizerType::DIIS, &OptimizerFactory::createDIIS },
@@ -38,6 +40,7 @@ const std::map<OptimizerType, OptimizerFactory::OptimizerFactoryFunction>
 
 const std::map<OptimizerType, std::string> OptimizerFactory::s_optimizer_descriptions = {
     { OptimizerType::LBFGSPP, "External LBFGSpp library - robust L-BFGS implementation" },
+    { OptimizerType::ANCOPT, "Approximate Normal Coordinate Optimizer (from XTB by Stefan Grimme)" },
     { OptimizerType::INTERNAL_LBFGS, "Internal LBFGS implementation with custom features" },
     { OptimizerType::DIIS, "Direct Inversion of Iterative Subspace method" },
     { OptimizerType::RFO, "Rational Function Optimization with Hessian updates" },
@@ -166,6 +169,11 @@ OptimizerType OptimizerFactory::selectOptimalOptimizer(const Molecule& molecule,
 std::unique_ptr<OptimizerInterface> OptimizerFactory::createLBFGSpp()
 {
     return std::make_unique<LBFGSppOptimizer>();
+}
+
+std::unique_ptr<OptimizerInterface> OptimizerFactory::createANCOpt()
+{
+    return std::make_unique<ANCOptimizer>();
 }
 
 std::unique_ptr<OptimizerInterface> OptimizerFactory::createInternalLBFGS()

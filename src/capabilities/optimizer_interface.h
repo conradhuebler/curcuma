@@ -44,6 +44,7 @@ enum class OptimizerType {
     INTERNAL_LBFGS, // "lbfgs"   - Internal LBFGS implementation
     DIIS, // "diis"    - Direct Inversion of Iterative Subspace
     RFO, // "rfo"     - Rational Function Optimization
+    ANCOPT, // "ancopt"  - Approximate Normal Coordinate Optimizer (from XTB)
     AUTO // "auto"    - Automatic selection based on system
 };
 
