@@ -4,16 +4,242 @@
 
 **Created**: 2025-11-11
 **Based on**: TBLite source code analysis, MOPAC repository structure, and existing Curcuma EHT implementation
+**Target Audience**: Theoretical chemists with broad background knowledge who need quick access to implementation-level depth
+
+---
+
+## Important Notes for Implementation
+
+### Attribution and Licensing
+
+**CRITICAL**: All original method authors must be properly attributed in the implementation.
+
+**Original Method Developers**:
+- **GFN2-xTB**: Stefan Grimme, Christoph Bannwarth, Sebastian Ehlert (University of Bonn)
+- **GFN1-xTB**: Stefan Grimme, Christoph Bannwarth, Philip Shushkov (University of Bonn)
+- **TBLite Implementation**: Sebastian Ehlert and contributors (LGPL-3.0 License)
+- **PM3**: James J. P. Stewart (1989)
+- **AM1**: Michael J. S. Dewar et al. (1985)
+- **PM6**: James J. P. Stewart (2007)
+- **MOPAC**: Original code by James J. P. Stewart, now open-source (LGPL-3.0)
+
+**Copyright and License Requirements**:
+```cpp
+/*
+ * <Native GFN2-xTB Implementation>
+ * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ *
+ * Based on the GFN2-xTB method developed by:
+ *   Stefan Grimme, Christoph Bannwarth, Sebastian Ehlert
+ *   Mulliken Center for Theoretical Chemistry, University of Bonn
+ *
+ * Reference implementation: TBLite (https://github.com/tblite/tblite)
+ *   Copyright (C) 2019-2024 Sebastian Ehlert and contributors
+ *   Licensed under LGPL-3.0-or-later
+ *
+ * Original method publication:
+ *   C. Bannwarth, S. Ehlert, S. Grimme
+ *   J. Chem. Theory Comput. 2019, 15, 1652-1671
+ *   DOI: 10.1021/acs.jctc.8b01176
+ *
+ * This implementation is an independent C++ port for educational purposes
+ * within the Curcuma framework, maintaining compatibility with the original
+ * method while following Curcuma's educational-first design principles.
+ */
+```
+
+**Parameter Attribution**:
+All parameter tables (element data, orbital exponents, coupling constants) must cite:
+1. **Primary source**: Original method publication
+2. **Implementation source**: TBLite parameter files (commit hash if applicable)
+3. **Any modifications**: Clearly documented with scientific justification
+
+### Theoretical Chemistry Accessibility
+
+**Design Principle**: This implementation prioritizes transparency for theoretical chemists with broad knowledge who need to quickly understand implementation details without deep software engineering expertise.
+
+**Documentation Standards**:
+
+1. **Every mathematical formula** must include:
+   - Physical meaning of each variable
+   - Units (eV, Hartree, Bohr, Ångström)
+   - Literature reference (equation number from original paper if possible)
+   - Numerical example for validation
+
+2. **Every parameter** must document:
+   - Physical interpretation (e.g., "Hubbard parameter U: on-site Coulomb repulsion")
+   - Typical value range (e.g., "0.1-0.5 Hartree for 2nd-period elements")
+   - Original source (paper + table/equation number)
+   - How it was determined (fitted, calculated, empirical)
+
+3. **Every algorithm step** must include:
+   - Theoretical background (which approximation/theory)
+   - Why this approach (numerical stability, physical justification)
+   - Alternative formulations (if any)
+   - Literature reference
+
+**Example of Good Documentation**:
+```cpp
+/**
+ * @brief Calculate exponential coordination number (ECP)
+ *
+ * Theoretical Background:
+ *   The coordination number CN_i represents the number of atoms bonded to atom i.
+ *   The exponential counting function provides a continuous, differentiable measure
+ *   suitable for gradient-based geometry optimization.
+ *
+ * Formula:
+ *   CN_i = ∑_{j≠i} [1 / (1 + exp(-k₁(R_cov,ij/R_ij - 1)))]^(k₂)
+ *
+ * Parameters:
+ *   k₁ = 16.0      Steepness parameter (controls transition sharpness)
+ *   k₂ = 4/3       Range parameter (controls long-range decay)
+ *   R_cov,ij       Sum of covalent radii (Å) from Pyykkö, J. Phys. Chem. A 2015
+ *   R_ij           Interatomic distance (Å)
+ *
+ * Physical Interpretation:
+ *   - CN ≈ 0 for R_ij >> R_cov (no bonding interaction)
+ *   - CN ≈ 1 for R_ij ≈ R_cov (typical single bond)
+ *   - CN smooth transition allows analytical gradients
+ *
+ * Reference:
+ *   S. Grimme et al., J. Chem. Phys. 2010, 132, 154104 (D3 paper, Eq. 9)
+ *   C. Bannwarth et al., J. Chem. Theory Comput. 2019, 15, 1652 (GFN2, Eq. 4)
+ *
+ * Implementation Notes:
+ *   - Uses std::pow(count, 4.0/3.0) instead of count^(4/3) for clarity
+ *   - Covalent radii stored in params.covalent_radius[] (in Ångström)
+ *   - Result used for Hamiltonian diagonal shift: E_ii += k_CN * CN_i
+ *
+ * @param atom Atomic number of central atom
+ * @param positions 3D coordinates of all atoms (Nx3 matrix, Ångström)
+ * @return Coordination number CN (dimensionless, typically 0-12)
+ */
+double calculateCoordinationNumber(int atom, const Matrix& positions);
+```
+
+### External Dependencies: D3/D4 Dispersion
+
+**IMPORTANT**: D3 and D4 dispersion corrections are **NOT** part of this native implementation.
+
+**Current Status**:
+- Curcuma already has `dftd3interface.h/cpp` and `dftd4interface.h/cpp`
+- These interfaces are **separate TODOs** and will be fixed independently
+- Native GFN1/GFN2/PMx implementations should use **stub functions** initially
+
+**Stub Implementation Strategy**:
+```cpp
+double GFN2::calculateDispersionEnergy() const {
+    // TODO: D4 dispersion integration (separate task)
+    // For now, return zero to allow testing of other components
+
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::warn("D4 dispersion not yet integrated - energy incomplete");
+    }
+
+    return 0.0;  // Stub: no dispersion contribution
+}
+
+Matrix GFN2::calculateDispersionGradient() const {
+    // TODO: D4 dispersion gradient (separate task)
+    return Matrix::Zero(m_natoms, 3);  // Stub: no dispersion gradient
+}
+```
+
+**Future Integration** (when D3/D4 are fixed):
+```cpp
+double GFN2::calculateDispersionEnergy() const {
+    // GFN2 uses DFT-D4 with specific parameters
+    D4Interface d4;
+    d4.setParameters(1.0, 2.7, 0.52, 5.0, 5.0);  // s6, s8, a1, a2, s9
+    d4.InitialiseMolecule(m_molecule);
+    return d4.Calculation();
+}
+```
+
+**Rationale**:
+- D3/D4 are complex standalone libraries (separate codebases)
+- Native GFN implementation focuses on tight-binding Hamiltonian
+- Dispersion can be validated separately with known reference systems
+- Allows parallel development: tight-binding core + dispersion fixes
 
 ---
 
 ## Table of Contents
 
-1. [GFN2-xTB Implementation](#gfn2-xtb-implementation)
-2. [GFN1-xTB Implementation](#gfn1-xtb-implementation)
-3. [PMx Methods Implementation](#pmx-methods-implementation)
-4. [Common Infrastructure](#common-infrastructure)
-5. [Implementation Roadmap](#implementation-roadmap)
+1. [Theoretical Background and Literature](#theoretical-background-and-literature)
+2. [GFN2-xTB Implementation](#gfn2-xtb-implementation)
+3. [GFN1-xTB Implementation](#gfn1-xtb-implementation)
+4. [PMx Methods Implementation](#pmx-methods-implementation)
+5. [Common Infrastructure](#common-infrastructure)
+6. [Implementation Roadmap](#implementation-roadmap)
+7. [References and Further Reading](#references-and-further-reading)
+
+---
+
+## Theoretical Background and Literature
+
+### Semi-Empirical Quantum Chemistry Fundamentals
+
+**For theoretical chemists**: This section provides quick access to theoretical foundations.
+
+#### Tight-Binding Approximations
+
+**GFN1/GFN2 are based on extended tight-binding (xTB) theory**:
+
+1. **Tight-Binding Hamiltonian**:
+   - Approximation to DFT Kohn-Sham Hamiltonian
+   - Minimal basis set (valence orbitals only)
+   - Parameterized matrix elements instead of explicit integration
+   - Suitable for large systems (104-106 atoms)
+
+2. **Core Approximations**:
+   - LCAO (Linear Combination of Atomic Orbitals)
+   - Minimal basis: one Slater-type orbital per valence shell
+   - Self-consistent charge (SCC) via electrostatic interactions
+   - Empirical corrections for dispersion, H-bonds, halogen bonds
+
+3. **Key References**:
+   - **Tight-Binding Theory**: D. A. Papaconstantopoulos, *Handbook of the Band Structure of Elemental Solids* (2015)
+   - **DFTB Foundations**: M. Elstner et al., *Phys. Rev. B* **1998**, 58, 7260 (SCC-DFTB)
+   - **GFN Philosophy**: S. Grimme, *WIREs Comput. Mol. Sci.* **2011**, 1, 211 (Dispersion review)
+
+#### NDDO Approximations (PMx Methods)
+
+**PM3/AM1/MNDO are based on Neglect of Diatomic Differential Overlap**:
+
+1. **NDDO Integral Approximation**:
+   - Retain: (μA νA | λB σB) — two-center, same-shell two-electron integrals
+   - Neglect: (μA νB | λC σD) — three- and four-center integrals
+   - Reduces integral count from O(N⁴) to O(N²)
+
+2. **Parameterization Philosophy**:
+   - Fit to experimental thermochemistry (ΔH_f, ionization potentials)
+   - Reproduce molecular geometries and frequencies
+   - Element-specific Gaussian core-core corrections (PM3)
+
+3. **Key References**:
+   - **MNDO**: M. J. S. Dewar, W. Thiel, *J. Am. Chem. Soc.* **1977**, 99, 4899
+   - **AM1**: M. J. S. Dewar et al., *J. Am. Chem. Soc.* **1985**, 107, 3902
+   - **PM3**: J. J. P. Stewart, *J. Comput. Chem.* **1989**, 10, 209
+   - **PM6**: J. J. P. Stewart, *J. Mol. Model.* **2007**, 13, 1173
+
+#### Comparison: xTB vs. NDDO
+
+| Aspect | GFN1/GFN2 (xTB) | PM3/AM1 (NDDO) |
+|--------|-----------------|----------------|
+| **Origin** | DFT tight-binding | Hartree-Fock NDDO |
+| **Basis** | Minimal STO | Minimal GTO |
+| **SCF** | Density-functional-like | Hartree-Fock RHF/UHF |
+| **Target** | Geometries, non-covalent | Thermochemistry, ΔH_f |
+| **Speed** | Very fast (~ms/atom) | Fast (~10 ms/atom) |
+| **Accuracy** | Excellent for structures | Good for heats of formation |
+| **Dispersion** | D3/D4 required | Implicit in parameterization |
+
+**Further Reading**:
+- J. P. Perdew, K. Schmidt, "Jacob's Ladder of DFT Approximations" (2001) — context for tight-binding
+- F. Jensen, *Introduction to Computational Chemistry*, 3rd ed. (2017) — Chapter on semi-empirical methods
+- C. J. Cramer, *Essentials of Computational Chemistry* (2004) — NDDO theory overview
 
 ---
 
@@ -1141,26 +1367,241 @@ test_cases/native_qm/
 
 ---
 
-## References
+## References and Further Reading
 
-### GFN2-xTB
-- Bannwarth, C.; Ehlert, S.; Grimme, S. *J. Chem. Theory Comput.* **2019**, 15, 1652-1671. DOI: 10.1021/acs.jctc.8b01176
-- TBLite repository: https://github.com/tblite/tblite
+### Primary Method Publications
 
-### GFN1-xTB
-- Grimme, S.; Bannwarth, C.; Shushkov, P. *J. Chem. Theory Comput.* **2017**, 13, 1989-2009. DOI: 10.1021/acs.jctc.7b00118
+#### GFN2-xTB (Extended Tight-Binding GFN2)
+**Primary Reference**:
+- **Bannwarth, C.; Ehlert, S.; Grimme, S.** "GFN2-xTB—An Accurate and Broadly Parametrized Self-Consistent Tight-Binding Quantum Chemical Method with Multipole Electrostatics and Density-Dependent Dispersion Contributions" *J. Chem. Theory Comput.* **2019**, 15 (3), 1652-1671. DOI: [10.1021/acs.jctc.8b01176](https://doi.org/10.1021/acs.jctc.8b01176)
 
-### PMx Methods
-- Stewart, J. J. P. *J. Mol. Model.* **2007**, 13, 1173-1213. (PM6)
-- Stewart, J. J. P. *J. Comput. Chem.* **1989**, 10, 209-220. (PM3)
-- Dewar, M. J. S.; et al. *J. Am. Chem. Soc.* **1985**, 107, 3902-3909. (AM1)
-- MOPAC repository: https://github.com/openmopac/mopac
+**Implementation Source**:
+- **TBLite Library**: https://github.com/tblite/tblite (LGPL-3.0)
+  - Fortran reference implementation by Sebastian Ehlert et al.
+  - Parameters: `src/tblite/param/gfn2.toml`
+  - Hamiltonian: `src/tblite/xtb/gfn2.f90`
 
-### DFT-D3/D4
-- Grimme, S.; Antony, J.; Ehrlich, S.; Krieg, H. *J. Chem. Phys.* **2010**, 132, 154104. (D3)
-- Caldeweyher, E.; et al. *J. Chem. Phys.* **2019**, 150, 154122. (D4)
+**Supporting Papers**:
+- **Pracht, P.; Caldeweyher, E.; Ehlert, S.; Grimme, S.** "A Robust Non-Self-Consistent Tight-Binding Quantum Chemistry Method for large Molecules" *ChemRxiv* **2019**. (GFN-FF, needed for comparison)
+
+#### GFN1-xTB (Extended Tight-Binding GFN1)
+**Primary Reference**:
+- **Grimme, S.; Bannwarth, C.; Shushkov, P.** "A Robust and Accurate Tight-Binding Quantum Chemical Method for Structures, Vibrational Frequencies, and Noncovalent Interactions of Large Molecular Systems Parametrized for All spd-Block Elements (Z = 1-86)" *J. Chem. Theory Comput.* **2017**, 13 (5), 1989-2009. DOI: [10.1021/acs.jctc.7b00118](https://doi.org/10.1021/acs.jctc.7b00118)
+
+**Implementation Source**:
+- **TBLite Library**: `src/tblite/xtb/gfn1.f90`
+- **XTB Program**: https://github.com/grimme-lab/xtb (LGPL-3.0)
+
+#### PMx Semi-Empirical Methods
+
+**PM3** (Parameterized Model 3):
+- **Stewart, J. J. P.** "Optimization of parameters for semiempirical methods I. Method" *J. Comput. Chem.* **1989**, 10 (2), 209-220. DOI: [10.1002/jcc.540100208](https://doi.org/10.1002/jcc.540100208)
+- **Stewart, J. J. P.** "Optimization of parameters for semiempirical methods II. Applications" *J. Comput. Chem.* **1989**, 10 (2), 221-264.
+
+**AM1** (Austin Model 1):
+- **Dewar, M. J. S.; Zoebisch, E. G.; Healy, E. F.; Stewart, J. J. P.** "Development and use of quantum mechanical molecular models. 76. AM1: a new general purpose quantum mechanical molecular model" *J. Am. Chem. Soc.* **1985**, 107 (13), 3902-3909. DOI: [10.1021/ja00299a024](https://doi.org/10.1021/ja00299a024)
+
+**PM6** (Parameterized Model 6):
+- **Stewart, J. J. P.** "Optimization of parameters for semiempirical methods V: Modification of NDDO approximations and application to 70 elements" *J. Mol. Model.* **2007**, 13 (12), 1173-1213. DOI: [10.1007/s00894-007-0233-4](https://doi.org/10.1007/s00894-007-0233-4)
+
+**MNDO** (Modified Neglect of Diatomic Overlap):
+- **Dewar, M. J. S.; Thiel, W.** "Ground states of molecules. 38. The MNDO method. Approximations and parameters" *J. Am. Chem. Soc.* **1977**, 99 (15), 4899-4907. DOI: [10.1021/ja00457a004](https://doi.org/10.1021/ja00457a004)
+
+**Implementation Source**:
+- **MOPAC**: https://github.com/openmopac/mopac (LGPL-3.0)
+  - Fortran implementation by James J. P. Stewart et al.
+  - Parameters: `src/Parameters/` directory
+
+### Dispersion Corrections
+
+**DFT-D3** (Grimme's D3 Dispersion):
+- **Grimme, S.; Antony, J.; Ehrlich, S.; Krieg, H.** "A consistent and accurate ab initio parametrization of density functional dispersion correction (DFT-D) for the 94 elements H-Pu" *J. Chem. Phys.* **2010**, 132 (15), 154104. DOI: [10.1063/1.3382344](https://doi.org/10.1063/1.3382344)
+- **Grimme, S.; Ehrlich, S.; Goerigk, L.** "Effect of the damping function in dispersion corrected density functional theory" *J. Comput. Chem.* **2011**, 32 (7), 1456-1465. (BJ damping)
+
+**DFT-D4** (Next-Generation D4):
+- **Caldeweyher, E.; Ehlert, S.; Hansen, A.; Neugebauer, H.; Spicher, S.; Bannwarth, C.; Grimme, S.** "A generally applicable atomic-charge dependent London dispersion correction" *J. Chem. Phys.* **2019**, 150 (15), 154122. DOI: [10.1063/1.5090222](https://doi.org/10.1063/1.5090222)
+
+**Implementation Sources**:
+- **simple-dftd3**: https://github.com/dftd3/simple-dftd3 (LGPL-3.0)
+- **cpp-d4**: https://github.com/dftd4/cpp-d4 (LGPL-3.0)
+
+### Theoretical Foundations
+
+#### Tight-Binding Theory
+- **Papaconstantopoulos, D. A.** *Handbook of the Band Structure of Elemental Solids: From Z=1 to Z=112*, 2nd ed.; Springer, 2015. ISBN: 978-1-4939-1647-3
+- **Harrison, W. A.** *Electronic Structure and the Properties of Solids: The Physics of the Chemical Bond*; Dover Publications, 1989. (Classical tight-binding reference)
+
+#### Density-Functional Tight-Binding (DFTB)
+- **Elstner, M.; Porezag, D.; Jungnickel, G.; Elsner, J.; Haugk, M.; Frauenheim, T.; Suhai, S.; Seifert, G.** "Self-consistent-charge density-functional tight-binding method for simulations of complex materials properties" *Phys. Rev. B* **1998**, 58 (11), 7260-7268. DOI: [10.1103/PhysRevB.58.7260](https://doi.org/10.1103/PhysRevB.58.7260)
+- **Gaus, M.; Cui, Q.; Elstner, M.** "DFTB3: Extension of the Self-Consistent-Charge Density-Functional Tight-Binding Method (SCC-DFTB)" *J. Chem. Theory Comput.* **2011**, 7 (4), 931-948. (Third-order corrections)
+
+#### NDDO and Semi-Empirical Methods
+- **Pople, J. A.; Santry, D. P.; Segal, G. A.** "Approximate Self-Consistent Molecular Orbital Theory. I. Invariant Procedures" *J. Chem. Phys.* **1965**, 43 (10), S129-S135. (NDDO foundations)
+- **Thiel, W.** "Semiempirical quantum–chemical methods" *WIREs Comput. Mol. Sci.* **2014**, 4 (2), 145-157. DOI: [10.1002/wcms.1161](https://doi.org/10.1002/wcms.1161) (Excellent modern review)
+
+### Textbooks for Theoretical Chemists
+
+#### Computational Chemistry Fundamentals
+- **Jensen, F.** *Introduction to Computational Chemistry*, 3rd ed.; Wiley, 2017. ISBN: 978-1-118-82599-0
+  - Chapter 5: Semi-empirical methods (PM3, AM1, MNDO)
+  - Chapter 6: Hartree-Fock theory (for understanding SCF)
+  - Chapter 7: DFT foundations (context for tight-binding)
+
+- **Cramer, C. J.** *Essentials of Computational Chemistry: Theories and Models*, 2nd ed.; Wiley, 2004. ISBN: 978-0-470-09182-1
+  - Chapter 8: Semi-empirical methods (detailed NDDO derivation)
+  - Chapter 9: Basis sets (STO vs. GTO)
+
+- **Szabo, A.; Ostlund, N. S.** *Modern Quantum Chemistry: Introduction to Advanced Electronic Structure Theory*; Dover, 1996. ISBN: 978-0-486-69186-2
+  - Chapter 3: Hartree-Fock theory (SCF procedure fundamentals)
+  - Appendix A: Second quantization (for understanding many-body theory)
+
+#### Advanced Topics
+- **Martin, R. M.** *Electronic Structure: Basic Theory and Practical Methods*, 2nd ed.; Cambridge University Press, 2020.
+  - Chapter 18: Tight-binding methods (comprehensive mathematical treatment)
+
+- **Koch, W.; Holthausen, M. C.** *A Chemist's Guide to Density Functional Theory*, 2nd ed.; Wiley-VCH, 2001.
+  - Context for understanding tight-binding as DFT approximation
+
+### Numerical Methods and Linear Algebra
+
+#### Eigenvalue Problems
+- **Press, W. H.; Teukolsky, S. A.; Vetterling, W. T.; Flannery, B. P.** *Numerical Recipes: The Art of Scientific Computing*, 3rd ed.; Cambridge University Press, 2007.
+  - Chapter 11: Eigensystems (for SCF eigenvalue solver)
+  - Chapter 19: Partial Differential Equations (for understanding DIIS)
+
+- **Golub, G. H.; Van Loan, C. F.** *Matrix Computations*, 4th ed.; Johns Hopkins University Press, 2013.
+  - Chapter 8: Symmetric eigenvalue problems
+  - Löwdin orthogonalization and generalized eigenvalue problems
+
+#### SCF Convergence Acceleration
+- **Pulay, P.** "Convergence acceleration of iterative sequences. The case of SCF iteration" *Chem. Phys. Lett.* **1980**, 73 (2), 393-398. (Original DIIS paper)
+- **Kudin, K. N.; Scuseria, G. E.; Cancès, E.** "A black-box self-consistent field convergence algorithm: One step closer" *J. Chem. Phys.* **2002**, 116 (19), 8255-8261. (Modern DIIS variants)
+
+### Parameter Databases and Atomic Properties
+
+#### Covalent Radii (for Coordination Numbers)
+- **Pyykkö, P.; Atsumi, M.** "Molecular Single-Bond Covalent Radii for Elements 1–118" *Chem. Eur. J.* **2009**, 15 (1), 186-197. DOI: [10.1002/chem.200800987](https://doi.org/10.1002/chem.200800987)
+- **Pyykkö, P.; Atsumi, M.** "Molecular Double-Bond Covalent Radii for Elements Li–E112" *Chem. Eur. J.* **2009**, 15 (46), 12770-12779.
+
+#### Electronegativity Scales
+- **Pauling, L.** *The Nature of the Chemical Bond*, 3rd ed.; Cornell University Press, 1960. (Classic Pauling scale)
+- **Allred, A. L.; Rochow, E. G.** "A Scale of Electronegativity Based on Electrostatic Force" *J. Inorg. Nucl. Chem.* **1958**, 5 (4), 264-268.
+
+### Implementation Resources
+
+#### Source Code Repositories
+- **TBLite** (GFN1/GFN2 reference): https://github.com/tblite/tblite
+  - Documentation: https://tblite.readthedocs.io/
+  - API: https://tblite.readthedocs.io/en/latest/api/
+
+- **XTB** (Alternative GFN implementation): https://github.com/grimme-lab/xtb
+  - Documentation: https://xtb-docs.readthedocs.io/
+  - User guide: https://xtb-docs.readthedocs.io/en/latest/contents.html
+
+- **MOPAC** (PMx reference): https://github.com/openmopac/mopac
+  - Manual: http://openmopac.net/manual/
+  - Parameters: See source code `src/Parameters/`
+
+#### C++ Linear Algebra Libraries
+- **Eigen**: https://eigen.tuxfamily.org/ (used in Curcuma)
+  - Dense matrix operations, eigenvalue solvers
+  - Documentation: https://eigen.tuxfamily.org/dox/
+
+- **LAPACK**: http://www.netlib.org/lapack/ (backend for many solvers)
+  - Generalized eigenvalue problems (DSYGV)
+
+### Related Review Articles
+
+#### Grimme Group Methods Overview
+- **Grimme, S.; Hansen, A.; Brandenburg, J. G.; Bannwarth, C.** "Dispersion-Corrected Mean-Field Electronic Structure Methods" *Chem. Rev.* **2016**, 116 (9), 5105-5154. DOI: [10.1021/acs.chemrev.5b00533](https://doi.org/10.1021/acs.chemrev.5b00533)
+  - Comprehensive review of DFT-D and semi-empirical methods
+  - Historical context and method comparison
+
+#### Semi-Empirical Method Benchmarks
+- **Christensen, A. S.; Kubař, T.; Cui, Q.; Elstner, M.** "Semiempirical Quantum Mechanical Methods for Noncovalent Interactions for Chemical and Biochemical Applications" *Chem. Rev.* **2016**, 116 (9), 5301-5337.
+  - Benchmarks for GFN, PM6, DFTB methods
+  - Accuracy assessment for different properties
+
+### Educational Resources for Quick Reference
+
+#### Online Tutorials and Lectures
+- **XTB Documentation**: https://xtb-docs.readthedocs.io/en/latest/
+  - User-friendly explanation of GFN methods
+  - Parameter meanings and settings
+
+- **DFTB+ Tutorials**: https://dftbplus.org/tutorial/
+  - Tight-binding theory explained for chemists
+  - SCF convergence strategies
+
+#### Video Lectures (if available)
+- Search YouTube for "Stefan Grimme lectures" (semi-empirical methods overview)
+- "Tight-binding methods" lectures from computational chemistry courses
+
+### Parameter Extraction Tools
+
+**For reference when implementing parameters**:
+
+1. **TBLite TOML files**:
+   - `tblite/param/gfn2.toml` — Complete GFN2 parameters
+   - `tblite/param/gfn1.toml` — Complete GFN1 parameters
+   - Format: Human-readable TOML, easy to parse
+
+2. **MOPAC Parameter Files**:
+   - `mopac/src/Parameters/PM3_parameters.F90`
+   - `mopac/src/Parameters/AM1_parameters.F90`
+   - Format: Fortran DATA statements
+
+3. **Conversion Scripts** (create if needed):
+   - Python script to convert TOML → C++ header
+   - Validation against TBLite calculations
 
 ---
 
-**Document Status**: Complete algorithm analysis and implementation guide
-**Next Steps**: Begin Phase 1 GFN2 implementation or request clarifications
+## Appendix: Quick Theoretical Lookup Tables
+
+### Common Physical Constants (CODATA 2018)
+
+```cpp
+// Already defined in src/core/units.h
+constexpr double au2Angstrom = 0.529177210903;  // Bohr to Ångström
+constexpr double au2eV = 27.21138602;           // Hartree to eV
+constexpr double au2kcal = 627.509474;          // Hartree to kcal/mol
+constexpr double eV2Hartree = 1.0 / 27.21138602;
+```
+
+### Typical Parameter Ranges (for validation)
+
+| Parameter | Physical Meaning | Typical Range | Units |
+|-----------|------------------|---------------|-------|
+| **ζ (zeta)** | Slater exponent | 1.0 – 10.0 | a.u.⁻¹ |
+| **U (Hubbard)** | On-site repulsion | 0.2 – 0.8 | Hartree |
+| **IP (VSIP)** | Ionization potential | 5 – 25 | eV |
+| **β (beta)** | Resonance integral | -20 – -5 | eV |
+| **α (alpha)** | Repulsion exponent | 1.0 – 3.0 | a.u.⁻¹ |
+| **CN** | Coordination number | 0 – 12 | dimensionless |
+
+### Equation Number Cross-Reference
+
+**GFN2 Paper (Bannwarth et al. 2019, JCTC)**:
+- Eq. 1: Total energy expression
+- Eq. 2: Electronic energy (tight-binding)
+- Eq. 4: Coordination number (exponential counting)
+- Eq. 7: Coulomb interaction (ES2)
+- Eq. 9: Third-order onsite (ES3)
+- Eq. 12: Hamiltonian matrix elements
+- Eq. 15: D4 dispersion contribution
+
+**GFN1 Paper (Grimme et al. 2017, JCTC)**:
+- Eq. 3: Total energy
+- Eq. 5: Coordination number
+- Eq. 8: Hamiltonian off-diagonal
+- Eq. 11: Halogen bond correction
+
+---
+
+**Document Status**: Complete algorithm analysis, attribution guide, and theoretical reference
+**Last Updated**: 2025-11-11
+**Next Steps**:
+1. Begin Phase 1 GFN2 implementation with proper attribution
+2. Create parameter validation suite against TBLite
+3. Implement D3/D4 stub functions for testing without dispersion
