@@ -288,7 +288,7 @@ json GFNFF::generateGFNFFBonds() const
                 bond["fc"] = bond_params.force_constant;
                 bond["r0_ij"] = bond_params.equilibrium_distance;
                 bond["r0_ik"] = 0.0; // Not used in GFN-FF but required by ForceField
-                bond["exponent"] = bond_params.anharmonic_factor;
+                bond["exponent"] = bond_params.alpha;  // Phase 1.3: store α in exponent field
 
                 bonds.push_back(bond);
             }
@@ -369,9 +369,8 @@ json GFNFF::generateGFNFFAngles() const
                 angle["theta0_ijk"] = angle_params.equilibrium_angle;
                 angle["r0_ij"] = (ri - rj).norm(); // Distance i-j
                 angle["r0_ik"] = (rk - rj).norm(); // Distance k-j
-                angle["C0"] = angle_params.c0;
-                angle["C1"] = angle_params.c1;
-                angle["C2"] = angle_params.c2;
+                // Phase 1.3: No longer using Fourier coefficients (C0/C1/C2)
+                // GFN-FF uses simple angle bending formula
 
                 angles.push_back(angle);
             }
@@ -490,11 +489,39 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int z1, int z2, double dist
     // Use geometric mean of bond parameters as force constant
     params.force_constant = std::sqrt(bond_param_1 * bond_param_2);
 
-    // Use current distance as equilibrium distance (topology-dependent)
+    // Pauling electronegativities from gfnff_param.f90 (en array)
+    static const std::vector<double> electronegativities = {
+        2.200, 3.000, 0.980, 1.570, 2.040, 2.550, 3.040, 3.440, 3.980, // H-F
+        4.500, 0.930, 1.310, 1.610, 1.900, 2.190, 2.580, 3.160, 3.500, // Ne-Ar
+        0.820, 1.000, 1.360, 1.540, 1.630, 1.660, 1.550, 1.830, 1.880, // K-Co
+        1.910, 1.900, 1.650, 1.810, 2.010, 2.180, 2.550, 2.960, 3.000, // Ni-Kr
+        0.820, 0.950, 1.220, 1.330, 1.600, 2.160, 1.900, 2.200, 2.280, // Rb-Rh
+        2.200, 1.930, 1.690, 1.780, 1.960, 2.050, 2.100, 2.660, 2.600, // Pd-Xe
+        0.79, 0.89, 1.10, 1.12, 1.13, 1.14, 1.15, 1.17, 1.18, 1.20, 1.21, 1.22, // Cs-Gd
+        1.23, 1.24, 1.25, 1.26, 1.27, 1.3, 1.5, 1.7, 1.9, 2.1, 2.2, 2.2, 2.2, // Tb-Au
+        2.00, 1.62, 2.33, 2.02, 2.0, 2.2, 2.2 // Hg-Lr
+    };
+
+    // Get electronegativities
+    double en1 = (z1 >= 1 && z1 <= static_cast<int>(electronegativities.size())) ? electronegativities[z1 - 1] : 2.0;
+    double en2 = (z2 >= 1 && z2 <= static_cast<int>(electronegativities.size())) ? electronegativities[z2 - 1] : 2.0;
+
+    // Force constant: geometric mean of bond parameters
+    // Full GFN-FF also includes: ringf * bstrength * fqq * fheavy * fpi * fxh * fcn
+    // Phase 1.3: Simplified version without topology corrections
+    params.force_constant = std::sqrt(bond_param_1 * bond_param_2);
+
+    // Equilibrium distance: use current distance (topology-dependent)
     params.equilibrium_distance = distance;
 
-    // Small anharmonic correction
-    params.anharmonic_factor = -0.1;
+    // Alpha parameter (exponential decay): Fortran vbond(2,i) = srb1*(1.0 + fsrb2*ΔEN² + srb3*bstrength)
+    // Phase 1.3: Simplified version without bond order detection
+    // Typical values: srb1 ≈ 16.0, fsrb2 ≈ 0.1
+    double srb1 = 16.0;  // Base exponential decay parameter
+    double fsrb2 = 0.1;   // Electronegativity scaling factor
+    double en_diff = en1 - en2;
+    params.alpha = srb1 * (1.0 + fsrb2 * en_diff * en_diff);
+    // NOTE: Full GFN-FF also adds srb3*bstrength term (requires Phase 2 topology)
 
     return params;
 }
@@ -531,17 +558,14 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int z1, int z2, int z3, d
     // Get angle parameter for center atom (z2)
     double angle_param = (z2 >= 1 && z2 <= static_cast<int>(angle_params.size())) ? angle_params[z2 - 1] : 0.1;
 
-    // Scale down to match UFF energy scale
-    params.force_constant = angle_param * 0.001;
+    // Phase 1.3: Simplified force constant (without full topology corrections)
+    // Full GFN-FF: k_ijk = angl(center)*angl2(i)*angl2(k) * fqq * f2 * fn * fbsmall * feta
+    // For now: use only center atom parameter
+    params.force_constant = angle_param * 0.001;  // Scale to match kcal/mol units
 
-    // Use current angle as equilibrium angle (topology-dependent)
-    params.equilibrium_angle = current_angle * 180.0 / M_PI;
-
-    // Fourier coefficients for cosine expansion: E = k*(C0 + C1*cos(θ) + C2*cos(2θ))
-    double cos_eq = cos(current_angle);
-    params.c0 = 1.0 - cos_eq; // Ensures minimum at current angle
-    params.c1 = -1.0; // Linear restoring term
-    params.c2 = 0.05; // Small anharmonic correction
+    // Use current angle as equilibrium angle
+    // NOTE: Full GFN-FF calculates θ₀ from ideal geometries (sp/sp²/sp³)
+    params.equilibrium_angle = current_angle;
 
     return params;
 }

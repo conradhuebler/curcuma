@@ -202,15 +202,16 @@ private:
 
     // GFN-FF parameter structures
     struct GFNFFBondParams {
-        double force_constant;
-        double equilibrium_distance;
-        double anharmonic_factor;
+        double force_constant;        // k_b in Fortran (energy scale)
+        double equilibrium_distance;  // r₀ reference bond length
+        double alpha;                 // α exponential decay parameter (was: anharmonic_factor)
     };
 
     struct GFNFFAngleParams {
-        double force_constant;
-        double equilibrium_angle;
-        double c0, c1, c2; // Fourier coefficients
+        double force_constant;     // k_ijk in Fortran
+        double equilibrium_angle;  // θ₀ reference angle
+        // Phase 1.3: Removed c0,c1,c2 Fourier coefficients (were dummy values)
+        // GFN-FF uses simple angle bending, not Fourier expansion
     };
 
     /**

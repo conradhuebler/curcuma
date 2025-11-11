@@ -573,9 +573,9 @@ int H4Thread::execute()
 
 void ForceFieldThread::CalculateGFNFFBondContribution()
 {
-#pragma message("TODO: Implement proper GFN-FF bond stretching - currently using UFF geometry function")
-    // TODO: GFN-FF uses harmonic + anharmonic bond stretching terms
-    // Currently using UFF::BondStretching for geometry calculation only
+    // Phase 1.3: Correct GFN-FF exponential bond potential
+    // Formula from Fortran gfnff_engrad.F90:675-721
+    // E_bond = k_b * exp(-α * (r - r₀)²)
 
     double factor = m_final_factor * m_bond_scaling;
 
@@ -587,26 +587,33 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
         Matrix derivate;
         double rij = UFF::BondStretching(i, j, derivate, m_calculate_gradient);
 
-        // GFN-FF bond stretching: E = 0.5*k*(r-r0)^2 + α*(r-r0)^3
-        double dr = rij - bond.r0_ij;
-        double harmonic = 0.5 * bond.fc * dr * dr;
-        double anharmonic = bond.exponent * dr * dr * dr; // cubic anharmonic term
+        // GFN-FF exponential bond stretching: E = k_b * exp(-α * (r-r₀)²)
+        double dr = rij - bond.r0_ij;           // r - r₀
+        double alpha = bond.exponent;            // α stored in exponent field
+        double k_b = bond.fc;                    // Force constant
+        double exp_term = std::exp(-alpha * dr * dr);
+        double energy = k_b * exp_term;
 
-        m_bond_energy += (harmonic + anharmonic) * factor;
+        m_bond_energy += energy * factor;
 
         if (m_calculate_gradient) {
-            double diff = (bond.fc * dr + 3.0 * bond.exponent * dr * dr) * factor;
-            m_gradient.row(bond.i) += diff * derivate.row(0);
-            m_gradient.row(bond.j) += diff * derivate.row(1);
+            // dE/dr = -2*α*dr*E (chain rule)
+            double dEdr = -2.0 * alpha * dr * energy;
+            m_gradient.row(bond.i) += dEdr * factor * derivate.row(0);
+            m_gradient.row(bond.j) += dEdr * factor * derivate.row(1);
         }
     }
 }
 
 void ForceFieldThread::CalculateGFNFFAngleContribution()
 {
-#pragma message("TODO: Verify GFN-FF angle bending functional form - currently using UFF geometry")
-    // TODO: Check if GFN-FF angle bending uses same Fourier expansion as UFF
-    // Using UFF::AngleBending for geometry and derivatives
+    // Phase 1.3: Correct GFN-FF angle bending potential
+    // Formula from Fortran gfnff_engrad.F90:857-892
+    // E_angle = k_ijk * (θ - θ₀)²
+    // NOTE: Full GFN-FF includes distance damping (damp_ij * damp_jk)
+    // Phase 1.3: Simplified version without damping
+
+    double factor = m_final_factor * m_angle_scaling;
 
     for (int index = 0; index < m_gfnff_angles.size(); ++index) {
         const auto& angle = m_gfnff_angles[index];
@@ -616,12 +623,17 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
         Matrix derivate;
         double costheta = UFF::AngleBending(i, j, k, derivate, m_calculate_gradient);
 
-        // GFN-FF angle bending: E = k*(C0 + C1*cos(θ) + C2*cos(2θ))
-        m_angle_energy += (angle.fc * (angle.C0 + angle.C1 * costheta + angle.C2 * (2 * costheta * costheta - 1))) * m_final_factor * m_angle_scaling;
+        // GFN-FF angle bending: E = k * (θ - θ₀)²
+        double theta = std::acos(std::max(-1.0, std::min(1.0, costheta)));  // Current angle
+        double theta0 = angle.theta0_ijk;                                    // Equilibrium angle
+        double dtheta = theta - theta0;                                      // Angle deviation
+        double energy = angle.fc * dtheta * dtheta;
+
+        m_angle_energy += energy * factor;
 
         if (m_calculate_gradient) {
-            double sintheta = sin(acos(costheta));
-            double dEdtheta = -angle.fc * sintheta * (angle.C1 + 4 * angle.C2 * costheta) * m_final_factor * m_angle_scaling;
+            // dE/dθ = 2*k*(θ - θ₀)
+            double dEdtheta = 2.0 * angle.fc * dtheta * factor;
             m_gradient.row(angle.i) += dEdtheta * derivate.row(0);
             m_gradient.row(angle.j) += dEdtheta * derivate.row(1);
             m_gradient.row(angle.k) += dEdtheta * derivate.row(2);
