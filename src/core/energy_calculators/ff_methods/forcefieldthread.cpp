@@ -55,10 +55,18 @@ int ForceFieldThread::execute()
         // CalculateUFFBondContribution();
         CalculateQMDFFAngleContribution();
     } else if (m_method == 3) {
+        // GFN-FF bonded terms
         CalculateGFNFFBondContribution();
         CalculateGFNFFAngleContribution();
         CalculateGFNFFDihedralContribution();
         CalculateGFNFFInversionContribution();
+
+        // GFN-FF non-bonded pairwise parallelizable terms (Phase 4)
+        CalculateGFNFFDispersionContribution();  // D3/D4 dispersion
+        CalculateGFNFFRepulsionContribution();   // GFN-FF repulsion
+        CalculateGFNFFCoulombContribution();     // EEQ Coulomb electrostatics
+
+        // Legacy vdW (will be replaced by pairwise terms above)
         CalculateGFNFFvdWContribution();
     }
 
@@ -141,6 +149,23 @@ void ForceFieldThread::addGFNFFInversion(const Inversion& inversions)
 void ForceFieldThread::addGFNFFvdW(const vdW& vdWs)
 {
     m_gfnff_vdWs.push_back(vdWs);
+}
+
+// Phase 4: GFN-FF pairwise non-bonded addition methods (Claude Generated 2025)
+
+void ForceFieldThread::addGFNFFDispersion(const GFNFFDispersion& dispersion)
+{
+    m_gfnff_dispersions.push_back(dispersion);
+}
+
+void ForceFieldThread::addGFNFFRepulsion(const GFNFFRepulsion& repulsion)
+{
+    m_gfnff_repulsions.push_back(repulsion);
+}
+
+void ForceFieldThread::addGFNFFCoulomb(const GFNFFCoulomb& coulomb)
+{
+    m_gfnff_coulombs.push_back(coulomb);
 }
 
 void ForceFieldThread::CalculateUFFBondContribution()
@@ -733,6 +758,160 @@ void ForceFieldThread::CalculateGFNFFvdWContribution()
                 m_gradient.row(vdw.i) += grad.transpose();
                 m_gradient.row(vdw.j) -= grad.transpose();
             }
+        }
+    }
+}
+
+// ============================================================================
+// Phase 4: GFN-FF Pairwise Non-Bonded Terms (Claude Generated 2025)
+// ============================================================================
+// These functions implement GFN-FF non-bonded interactions as pairwise
+// parallelizable terms following the UFF vdW pattern (NOT as add-on corrections).
+// Each pair (i,j) is pre-computed with full parameters and stored in vectors.
+
+void ForceFieldThread::CalculateGFNFFDispersionContribution()
+{
+    /**
+     * @brief D3/D4 Dispersion with Becke-Johnson damping (pairwise parallelizable)
+     *
+     * Reference: Grimme et al., J. Chem. Phys. 132, 154104 (2010) [D3-BJ damping]
+     * Formula: E_disp = -Σ_ij f_damp(r_ij) * (s6*C6/r^6 + s8*C8/r^8)
+     * BJ damping: f_damp = r^n / (r^n + (a1*sqrt(C8/C6) + a2)^n)
+     *
+     * Claude Generated (2025): Phase 4 pairwise non-bonded implementation
+     */
+
+    for (int index = 0; index < m_gfnff_dispersions.size(); ++index) {
+        const auto& disp = m_gfnff_dispersions[index];
+
+        Eigen::Vector3d ri = m_geometry.row(disp.i);
+        Eigen::Vector3d rj = m_geometry.row(disp.j);
+        Eigen::Vector3d rij_vec = ri - rj;
+        double rij = rij_vec.norm() * m_au;  // Convert to atomic units if needed
+
+        if (rij > disp.r_cut || rij < 1e-10) continue;  // Skip if beyond cutoff or too close
+
+        // Becke-Johnson damping function (order n=6 for C6, n=8 for C8)
+        double r_crit = disp.a1 * std::sqrt(disp.C8 / (disp.C6 + 1e-14)) + disp.a2;
+
+        // C6 term: -s6*C6/r^6 with BJ damping
+        double r6 = std::pow(rij, 6);
+        double damp6 = std::pow(r_crit, 6);
+        double f_damp6 = r6 / (r6 + damp6);
+        double E_C6 = -disp.s6 * disp.C6 * f_damp6 / r6;
+
+        // C8 term: -s8*C8/r^8 with BJ damping
+        double r8 = r6 * rij * rij;
+        double damp8 = std::pow(r_crit, 8);
+        double f_damp8 = r8 / (r8 + damp8);
+        double E_C8 = -disp.s8 * disp.C8 * f_damp8 / r8;
+
+        double energy = (E_C6 + E_C8) * m_final_factor;
+        m_dispersion_energy += energy;
+
+        if (m_calculate_gradient) {
+            // Analytical gradient: dE/dr = dE_C6/dr + dE_C8/dr
+            // d/dr[f_damp * C_n / r^n] = -n*f_damp*C_n/r^(n+1) + C_n/r^n * df_damp/dr
+
+            // C6 gradient
+            double df_damp6_dr = 6.0 * r6 * damp6 / (std::pow(r6 + damp6, 2) * rij);
+            double dE_C6_dr = -6.0 * E_C6 / rij + (-disp.s6 * disp.C6 / r6) * df_damp6_dr;
+
+            // C8 gradient
+            double df_damp8_dr = 8.0 * r8 * damp8 / (std::pow(r8 + damp8, 2) * rij);
+            double dE_C8_dr = -8.0 * E_C8 / rij + (-disp.s8 * disp.C8 / r8) * df_damp8_dr;
+
+            double dEdr = (dE_C6_dr + dE_C8_dr) * m_final_factor;
+            Eigen::Vector3d grad = dEdr * rij_vec / rij;
+
+            m_gradient.row(disp.i) += grad.transpose();
+            m_gradient.row(disp.j) -= grad.transpose();
+        }
+    }
+}
+
+void ForceFieldThread::CalculateGFNFFRepulsionContribution()
+{
+    /**
+     * @brief GFN-FF Repulsion term (pairwise parallelizable)
+     *
+     * Reference: Fortran gfnff_engrad.F90:407-439 (bonded repulsion)
+     * Formula: E_rep = repab * exp(-α*r^β) / r
+     * GFN-FF uses β=1.5 (r^1.5 exponent)
+     *
+     * Claude Generated (2025): Phase 4 pairwise non-bonded implementation
+     */
+
+    for (int index = 0; index < m_gfnff_repulsions.size(); ++index) {
+        const auto& rep = m_gfnff_repulsions[index];
+
+        Eigen::Vector3d ri = m_geometry.row(rep.i);
+        Eigen::Vector3d rj = m_geometry.row(rep.j);
+        Eigen::Vector3d rij_vec = ri - rj;
+        double rij = rij_vec.norm() * m_au;
+
+        if (rij > rep.r_cut || rij < 1e-10) continue;
+
+        // GFN-FF repulsion: E = repab * exp(-α*r^1.5) / r
+        double r_1_5 = std::pow(rij, 1.5);
+        double exp_term = std::exp(-rep.alpha * r_1_5);
+        double energy = rep.repab * exp_term / rij;
+
+        m_rep_energy += energy * m_final_factor * m_rep_scaling;
+
+        if (m_calculate_gradient) {
+            // dE/dr = repab * exp(-α*r^1.5) * (-1/r^2 - 1.5*α*r^0.5/r)
+            //       = -E/r - 1.5*α*r^0.5*E
+            double dEdr = (-energy / rij - 1.5 * rep.alpha * std::sqrt(rij) * energy) * m_final_factor * m_rep_scaling;
+            Eigen::Vector3d grad = dEdr * rij_vec / rij;
+
+            m_gradient.row(rep.i) += grad.transpose();
+            m_gradient.row(rep.j) -= grad.transpose();
+        }
+    }
+}
+
+void ForceFieldThread::CalculateGFNFFCoulombContribution()
+{
+    /**
+     * @brief EEQ-based Coulomb electrostatics with erf damping (pairwise parallelizable)
+     *
+     * Reference: Phase 3 EEQ charges + Fortran gfnff_engrad.F90:1378-1389
+     * Formula: E_coul = q_i * q_j * erf(γ_ij * r_ij) / r_ij
+     * Error function damping avoids 1/r singularity at short range
+     *
+     * Claude Generated (2025): Phase 4 pairwise non-bonded implementation
+     */
+
+    for (int index = 0; index < m_gfnff_coulombs.size(); ++index) {
+        const auto& coul = m_gfnff_coulombs[index];
+
+        Eigen::Vector3d ri = m_geometry.row(coul.i);
+        Eigen::Vector3d rj = m_geometry.row(coul.j);
+        Eigen::Vector3d rij_vec = ri - rj;
+        double rij = rij_vec.norm() * m_au;
+
+        if (rij > coul.r_cut || rij < 1e-10) continue;
+
+        // EEQ Coulomb with erf damping: E = q_i * q_j * erf(γ*r) / r
+        double gamma_r = coul.gamma_ij * rij;
+        double erf_term = std::erf(gamma_r);
+        double energy = coul.q_i * coul.q_j * erf_term / rij;
+
+        m_coulomb_energy += energy * m_final_factor;
+
+        if (m_calculate_gradient) {
+            // dE/dr = q_i*q_j * [d/dr(erf(γ*r)/r)]
+            //       = q_i*q_j * [γ*exp(-(γ*r)^2)*(2/sqrt(π))/r - erf(γ*r)/r^2]
+            const double sqrt_pi = 1.772453850905516;  // sqrt(π)
+            double exp_term = std::exp(-gamma_r * gamma_r);
+            double derf_dr = coul.gamma_ij * exp_term * (2.0 / sqrt_pi);
+            double dEdr = coul.q_i * coul.q_j * (derf_dr / rij - erf_term / (rij * rij)) * m_final_factor;
+
+            Eigen::Vector3d grad = dEdr * rij_vec / rij;
+
+            m_gradient.row(coul.i) += grad.transpose();
+            m_gradient.row(coul.j) -= grad.transpose();
         }
     }
 }

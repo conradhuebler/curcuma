@@ -94,6 +94,63 @@ struct EQ {
     double q_i = 0, q_j = 0, epsilon = 1;
 };
 
+/**
+ * @brief GFN-FF specific non-bonded interaction structures
+ *
+ * Claude Generated (2025): Phase 4 pairwise parallelizable non-bonded terms
+ * These are computed for all atom pairs and parallelized like UFF vdW terms.
+ *
+ * Design Philosophy:
+ * - NOT add-on corrections (integrated into main energy loop)
+ * - Pairwise parallelizable (like UFF vdW approach)
+ * - Each pair (i,j) stored once with full parameters
+ * - ForceFieldThread handles parallelization automatically
+ */
+
+/**
+ * @brief D3/D4 Dispersion pairwise term
+ *
+ * Reference: gfnff_engrad.F90 (D4 integration)
+ * Formula: E_disp = -Σ_ij f_damp(r_ij) * (C6_ij/r_ij^6 + C8_ij/r_ij^8 + ...)
+ */
+struct GFNFFDispersion {
+    int i = 0, j = 0;           ///< Atom pair indices
+    double C6 = 0.0;            ///< C6 dispersion coefficient
+    double C8 = 0.0;            ///< C8 dispersion coefficient (optional)
+    double r_cut = 50.0;        ///< Cutoff radius (Bohr)
+    double s6 = 1.0;            ///< Scaling factor for C6
+    double s8 = 1.0;            ///< Scaling factor for C8
+    double a1 = 0.0;            ///< BJ damping parameter 1
+    double a2 = 0.0;            ///< BJ damping parameter 2
+};
+
+/**
+ * @brief GFN-FF Repulsion pairwise term
+ *
+ * Reference: gfnff_engrad.F90:407-439 (bonded repulsion)
+ * Formula: E_rep = repab * exp(-α*r^1.5) / r
+ */
+struct GFNFFRepulsion {
+    int i = 0, j = 0;           ///< Atom pair indices
+    double alpha = 0.0;         ///< Repulsion exponent (sqrt(repa_i * repa_j))
+    double repab = 0.0;         ///< Repulsion prefactor (repz_i * repz_j * scale)
+    double r_cut = 50.0;        ///< Cutoff radius (Bohr)
+};
+
+/**
+ * @brief EEQ-based Coulomb electrostatics pairwise term
+ *
+ * Reference: Phase 3 EEQ charges
+ * Formula: E_coul = q_i * q_j * erf(γ_ij * r_ij) / r_ij
+ */
+struct GFNFFCoulomb {
+    int i = 0, j = 0;           ///< Atom pair indices
+    double q_i = 0.0;           ///< EEQ charge on atom i
+    double q_j = 0.0;           ///< EEQ charge on atom j
+    double gamma_ij = 0.0;      ///< Damping parameter (1/sqrt(α_i + α_j))
+    double r_cut = 50.0;        ///< Cutoff radius (Bohr)
+};
+
 class ForceFieldThread : public CxxThread {
 
 public:
@@ -112,6 +169,11 @@ public:
     void addGFNFFDihedral(const Dihedral& dihedrals);
     void addGFNFFInversion(const Inversion& inversions);
     void addGFNFFvdW(const vdW& vdWs);
+
+    // Phase 4: GFN-FF pairwise non-bonded addition methods (Claude Generated 2025)
+    void addGFNFFDispersion(const GFNFFDispersion& dispersion);
+    void addGFNFFRepulsion(const GFNFFRepulsion& repulsion);
+    void addGFNFFCoulomb(const GFNFFCoulomb& coulomb);
 
     inline void UpdateGeometry(const Matrix& geometry, bool gradient)
     {
@@ -139,6 +201,10 @@ public:
     double RepEnergy() { return m_rep_energy; }
     double EQEnergy() { return m_eq_energy; }
 
+    // Phase 4: GFN-FF pairwise non-bonded energy components (Claude Generated 2025)
+    double DispersionEnergy() { return m_dispersion_energy; }
+    double CoulombEnergy() { return m_coulomb_energy; }
+
     Matrix Gradient() const { return m_gradient; }
 
 private:
@@ -159,6 +225,11 @@ private:
     void CalculateGFNFFDihedralContribution();
     void CalculateGFNFFInversionContribution();
     void CalculateGFNFFvdWContribution();
+
+    // Phase 4: GFN-FF pairwise non-bonded calculation functions (Claude Generated 2025)
+    void CalculateGFNFFDispersionContribution();
+    void CalculateGFNFFRepulsionContribution();
+    void CalculateGFNFFCoulombContribution();
 
     // double HarmonicBondStretching();
 
@@ -183,11 +254,20 @@ private:
     std::vector<Angle> m_gfnff_angles;
     std::vector<Dihedral> m_gfnff_dihedrals;
     std::vector<Inversion> m_gfnff_inversions;
-    std::vector<vdW> m_gfnff_vdWs;
+    std::vector<vdW> m_gfnff_vdWs;  // Legacy (will be replaced by pairwise terms below)
+
+    // Phase 4: GFN-FF pairwise parallelizable non-bonded terms
+    std::vector<GFNFFDispersion> m_gfnff_dispersions;  // D3/D4 dispersion
+    std::vector<GFNFFRepulsion> m_gfnff_repulsions;    // GFN-FF repulsion
+    std::vector<GFNFFCoulomb> m_gfnff_coulombs;        // EEQ Coulomb electrostatics
 
 protected:
     Matrix m_geometry, m_gradient;
     double m_energy = 0, m_bond_energy = 0.0, m_angle_energy = 0.0, m_dihedral_energy = 0.0, m_inversion_energy = 0.0, m_vdw_energy = 0.0, m_rep_energy = 0.0, m_eq_energy = 0.0;
+
+    // Phase 4: Separate energy components for GFN-FF non-bonded terms
+    double m_dispersion_energy = 0.0;  // D3/D4 dispersion
+    double m_coulomb_energy = 0.0;     // EEQ Coulomb electrostatics
 
     double m_final_factor = 1;
     double m_bond_scaling = 1, m_angle_scaling = 1, m_dihedral_scaling = 1, m_inversion_scaling = 1, m_vdw_scaling = 1, m_rep_scaling = 1;
