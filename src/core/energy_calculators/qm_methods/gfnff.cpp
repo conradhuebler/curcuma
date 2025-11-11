@@ -509,21 +509,34 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int z1, int z2, double dist
     double en2 = (z2 >= 1 && z2 <= static_cast<int>(electronegativities.size())) ? electronegativities[z2 - 1] : 2.0;
 
     // Force constant: geometric mean of bond parameters
-    // Full GFN-FF also includes: ringf * bstrength * fqq * fheavy * fpi * fxh * fcn
-    // Phase 1.3: Simplified version without topology corrections
+    // Full GFN-FF: fc = bond(i)*bond(j) * ringf * bstrength * fqq * fheavy * fpi * fxh * fcn
     params.force_constant = std::sqrt(bond_param_1 * bond_param_2);
+
+    // Phase 2: Apply basic topology corrections
+    // Note: Full topology corrections (ring, pi-system) applied in generateTopologyAwareBonds()
+
+    // Heavy atom correction (elements > period 2)
+    double heavy_factor = 1.0;
+    if (z1 > 10 || z2 > 10) {
+        heavy_factor = 0.95; // Slightly weaker for heavy atoms
+    }
+    params.force_constant *= heavy_factor;
 
     // Equilibrium distance: use current distance (topology-dependent)
     params.equilibrium_distance = distance;
 
     // Alpha parameter (exponential decay): Fortran vbond(2,i) = srb1*(1.0 + fsrb2*ΔEN² + srb3*bstrength)
-    // Phase 1.3: Simplified version without bond order detection
-    // Typical values: srb1 ≈ 16.0, fsrb2 ≈ 0.1
     double srb1 = 16.0;  // Base exponential decay parameter
     double fsrb2 = 0.1;   // Electronegativity scaling factor
     double en_diff = en1 - en2;
-    params.alpha = srb1 * (1.0 + fsrb2 * en_diff * en_diff);
-    // NOTE: Full GFN-FF also adds srb3*bstrength term (requires Phase 2 topology)
+
+    // Phase 2: Add bond order correction (simplified)
+    // Double bonds: α *= 1.2, Triple bonds: α *= 1.4
+    // Will be refined with actual bond order detection
+    double srb3 = 0.5;  // Bond strength scaling
+    double bstrength = 1.0; // Assume single bond (will be improved with topology)
+
+    params.alpha = srb1 * (1.0 + fsrb2 * en_diff * en_diff + srb3 * (bstrength - 1.0));
 
     return params;
 }
@@ -914,11 +927,73 @@ json GFNFF::generateTopologyAwareBonds(const Vector& cn, const std::vector<int>&
 {
     json bonds = json::array();
 
-    // TODO: Implement topology-aware bond parameter generation
-    // This should use CN, hybridization, and ring information
-    // For now, fall back to current implementation
+    // Phase 2: Topology-aware bond parameter generation
+    // Start with basic GFN-FF bond detection
+    double bond_threshold = 1.3; // Factor for covalent radii sum
 
-    return generateGFNFFBonds();
+    for (int i = 0; i < m_atomcount; ++i) {
+        for (int j = i + 1; j < m_atomcount; ++j) {
+            Vector ri = m_geometry.row(i);
+            Vector rj = m_geometry.row(j);
+            double distance = (ri - rj).norm();
+
+            // Get covalent radii for atoms i and j
+            double rcov_i = getCovalentRadius(m_atoms[i]);
+            double rcov_j = getCovalentRadius(m_atoms[j]);
+
+            if (distance < bond_threshold * (rcov_i + rcov_j)) {
+                // This is a bond - generate topology-aware GFN-FF parameters
+                json bond;
+                bond["type"] = 3; // GFN-FF type
+                bond["i"] = i;
+                bond["j"] = j;
+                bond["k"] = 0;
+                bond["distance"] = distance;
+
+                // Get basic bond parameters
+                auto bond_params = getGFNFFBondParameters(m_atoms[i], m_atoms[j], distance);
+
+                // Phase 2: Apply topology corrections to force constant
+                double topology_factor = 1.0;
+
+                // Ring strain correction (small rings are stiffer)
+                int ring_i = rings[i];
+                int ring_j = rings[j];
+                if (ring_i > 0 && ring_j > 0) {
+                    // Both atoms in rings - assume they're in the same ring if bonded
+                    int ring_size = std::min(ring_i, ring_j);
+                    if (ring_size == 3) {
+                        topology_factor *= 1.25; // Cyclopropane +25% strain
+                    } else if (ring_size == 4) {
+                        topology_factor *= 1.15; // Cyclobutane +15% strain
+                    } else if (ring_size == 5) {
+                        topology_factor *= 1.05; // Cyclopentane slight strain
+                    }
+                    // 6+ membered rings have normal parameters
+                }
+
+                // Pi-system correction (conjugated bonds are stiffer)
+                int pi_i = static_cast<int>(cn[i]); // Using CN as proxy for pi_fragments
+                int pi_j = static_cast<int>(cn[j]);
+                if (pi_i > 0 && pi_j > 0 && (hyb[i] == 2 || hyb[i] == 1) && (hyb[j] == 2 || hyb[j] == 1)) {
+                    // Both atoms are sp2/sp and in conjugated system
+                    topology_factor *= 1.15; // Conjugated bonds +15%
+                }
+
+                // Apply topology corrections
+                bond_params.force_constant *= topology_factor;
+
+                bond["fc"] = bond_params.force_constant;
+                bond["r0_ij"] = bond_params.equilibrium_distance;
+                bond["r0_ik"] = 0.0;
+                bond["exponent"] = bond_params.alpha;
+
+                bonds.push_back(bond);
+            }
+        }
+    }
+
+    return bonds;
 }
 
 json GFNFF::generateTopologyAwareAngles(const Vector& cn, const std::vector<int>& hyb,
@@ -926,11 +1001,107 @@ json GFNFF::generateTopologyAwareAngles(const Vector& cn, const std::vector<int>
 {
     json angles = json::array();
 
-    // TODO: Implement topology-aware angle parameter generation
-    // This should use CN, hybridization, and ring information
-    // For now, fall back to current implementation
+    // Phase 2: Topology-aware angle parameter generation
+    // Build bond list first
+    std::vector<std::pair<int, int>> bond_list;
+    json bonds = generateTopologyAwareBonds(cn, hyb, charges, rings);
 
-    return generateGFNFFAngles();
+    for (const auto& bond : bonds) {
+        bond_list.push_back({ bond["i"], bond["j"] });
+    }
+
+    // Generate angles from bonded topology
+    for (int center = 0; center < m_atomcount; ++center) {
+        std::vector<int> neighbors;
+
+        // Find all atoms bonded to center
+        for (const auto& bond : bond_list) {
+            if (bond.first == center)
+                neighbors.push_back(bond.second);
+            if (bond.second == center)
+                neighbors.push_back(bond.first);
+        }
+
+        // Generate all possible angles with center as middle atom
+        for (size_t i = 0; i < neighbors.size(); ++i) {
+            for (size_t j = i + 1; j < neighbors.size(); ++j) {
+                json angle;
+                angle["type"] = 3; // GFN-FF type
+                angle["i"] = neighbors[i];
+                angle["j"] = center;
+                angle["k"] = neighbors[j];
+
+                // Calculate current angle
+                Vector ri = m_geometry.row(neighbors[i]);
+                Vector rj = m_geometry.row(center);
+                Vector rk = m_geometry.row(neighbors[j]);
+
+                Vector v1 = ri - rj;
+                Vector v2 = rk - rj;
+
+                double v1_norm = v1.norm();
+                double v2_norm = v2.norm();
+
+                // Skip if vectors are too small
+                if (v1_norm < 1e-10 || v2_norm < 1e-10) {
+                    continue;
+                }
+
+                double cos_angle = v1.dot(v2) / (v1_norm * v2_norm);
+                cos_angle = std::max(-1.0, std::min(1.0, cos_angle));
+                double current_angle = acos(cos_angle);
+
+                // Get basic angle parameters
+                auto angle_params = getGFNFFAngleParameters(m_atoms[neighbors[i]],
+                    m_atoms[center],
+                    m_atoms[neighbors[j]],
+                    current_angle);
+
+                // Phase 2: Apply topology corrections to force constant
+                double topology_factor = 1.0;
+
+                // Ring strain correction (small ring angles are stiffer)
+                int ring_center = rings[center];
+                int ring_i = rings[neighbors[i]];
+                int ring_k = rings[neighbors[j]];
+
+                // If all three atoms are in rings, assume they form a ring angle
+                if (ring_center > 0 && ring_i > 0 && ring_k > 0) {
+                    int ring_size = std::min({ring_center, ring_i, ring_k});
+                    if (ring_size == 3) {
+                        topology_factor *= 1.30; // Cyclopropane +30% angle strain
+                    } else if (ring_size == 4) {
+                        topology_factor *= 1.20; // Cyclobutane +20% angle strain
+                    } else if (ring_size == 5) {
+                        topology_factor *= 1.08; // Cyclopentane +8% strain
+                    }
+                }
+
+                // Hybridization correction (linear/planar geometries)
+                int hyb_center = hyb[center];
+                if (hyb_center == 1) {
+                    // sp center - expects linear geometry (180°)
+                    topology_factor *= 1.25; // Stiffer angle bending for sp
+                } else if (hyb_center == 2) {
+                    // sp2 center - expects planar geometry (120°)
+                    topology_factor *= 1.10; // Moderate stiffness for sp2
+                }
+                // sp3 uses default parameters
+
+                // Apply topology corrections
+                angle_params.force_constant *= topology_factor;
+
+                angle["fc"] = angle_params.force_constant;
+                angle["theta0_ijk"] = angle_params.equilibrium_angle;
+                angle["r0_ij"] = v1_norm; // Distance i-j
+                angle["r0_ik"] = v2_norm; // Distance k-j
+
+                angles.push_back(angle);
+            }
+        }
+    }
+
+    return angles;
 }
 
 json GFNFF::detectHydrogenBonds(const Vector& charges) const
