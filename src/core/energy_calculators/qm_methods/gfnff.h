@@ -258,6 +258,28 @@ private:
     };
 
     /**
+     * @brief EEQ (Electronegativity Equalization) parameters
+     *
+     * Claude Generated (2025): Phase 3 EEQ charge calculation
+     *
+     * Parameters from gfnff_param.f90 (angewChem2020 parameter set)
+     * Reference: S. Spicher, S. Grimme, Angew. Chem. Int. Ed. 2020, 59, 15665-15673
+     *
+     * Scientific background:
+     * - EEQ method solves linear system A·q = b for atomic charges
+     * - chi: atomic electronegativity (controls charge distribution)
+     * - gam: chemical hardness (resistance to charge transfer)
+     * - alp: damping parameter for Coulomb interaction
+     * - cnf: coordination number correction factor
+     */
+    struct EEQParameters {
+        double chi;  ///< Electronegativity (angewChem2020)
+        double gam;  ///< Chemical hardness (angewChem2020)
+        double alp;  ///< Damping parameter (angewChem2020)
+        double cnf;  ///< CN correction factor (angewChem2020)
+    };
+
+    /**
      * @brief Get GFN-FF bond parameters for element pair
      * @param z1 Atomic number of first atom
      * @param z2 Atomic number of second atom
@@ -271,6 +293,23 @@ private:
      * @return true if charges loaded successfully
      */
     bool loadGFNFFCharges();
+
+    /**
+     * @brief Get EEQ parameters for an element
+     *
+     * Claude Generated (2025): Phase 3 EEQ implementation
+     * Reference: gfnff_param.f90 (chi/gam/alp/cnf_angewChem2020)
+     *
+     * Returns EEQ parameters from angewChem2020 parameter set:
+     * - chi: atomic electronegativity
+     * - gam: chemical hardness
+     * - alp: damping parameter for erf(γ*r)/r Coulomb interaction
+     * - cnf: coordination number correction factor
+     *
+     * @param atomic_number Element atomic number (1-86)
+     * @return EEQ parameters structure
+     */
+    EEQParameters getEEQParameters(int atomic_number) const;
 
     /**
      * @brief Get GFN-FF angle parameters for element triplet

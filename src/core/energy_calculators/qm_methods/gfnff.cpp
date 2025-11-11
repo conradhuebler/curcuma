@@ -455,6 +455,130 @@ double GFNFF::getCovalentRadius(int atomic_number) const
     }
 }
 
+// Phase 3: EEQ (Electronegativity Equalization) parameters
+// Reference: gfnff_param.f90 chi/gam/alp/cnf_angewChem2020 arrays
+struct EEQParameters {
+    double chi;  // Electronegativity
+    double gam;  // Chemical hardness
+    double alp;  // Damping parameter
+    double cnf;  // CN correction factor
+};
+
+EEQParameters GFNFF::getEEQParameters(int atomic_number) const
+{
+    EEQParameters params;
+
+    // Phase 3: EEQ parameters from gfnff_param.f90 (angewChem2020 parameter set)
+    // Reference: S. Spicher, S. Grimme, Angew. Chem. Int. Ed. 2020, 59, 15665-15673
+
+    // chi_angewChem2020(86) - Electronegativity
+    static const std::vector<double> chi_eeq = {
+        1.227054, 1.451412, 0.813363, 1.062841, 1.186499, // H-B
+        1.311555, 1.528485, 1.691201, 1.456784, 1.231037, // C-Ne
+        0.772989, 1.199092, 1.221576, 1.245964, 1.248942, // Na-P
+        1.301708, 1.312474, 1.247701, 0.781237, 0.940834, // S-Ca
+        0.950000, 0.974455, 0.998911, 1.023366, 1.047822, // Sc-Mn
+        1.072277, 1.096733, 1.121188, 1.145644, 1.170099, // Fe-Zn
+        1.205357, 1.145447, 1.169499, 1.253293, 1.329909, // Ga-Br
+        1.116527, 0.950975, 0.964592, 0.897786, 0.932824, // Kr-Zr
+        0.967863, 1.002901, 1.037940, 1.072978, 1.108017, // Nb-Rh
+        1.143055, 1.178094, 1.213132, 1.205076, 1.075529, // Pd-Sn
+        1.206919, 1.303658, 1.332656, 1.179317, 0.789115, // Sb-Cs
+        0.798704, 1.127797, 1.127863, 1.127928, 1.127994, // Ba-Nd
+        1.128059, 1.128125, 1.128190, 1.128256, 1.128322, // Pm-Tb
+        1.128387, 1.128453, 1.128518, 1.128584, 1.128649, // Dy-Yb
+        1.128715, 1.128780, 1.129764, 1.130747, 1.131731, // Lu-Re
+        1.132714, 1.133698, 1.134681, 1.135665, 1.136648, // Os-Hg
+        1.061832, 1.053084, 1.207830, 1.236314, 1.310129, // Tl-At
+        1.157380 // Rn
+    };
+
+    // gam_angewChem2020(86) - Chemical hardness
+    static const std::vector<double> gam_eeq = {
+        -0.448428, 0.131022, 0.571431, 0.334622, -0.089208, // H-B
+        -0.025895, -0.027280, -0.031236, -0.159892, 0.074198, // C-Ne
+        0.316829, 0.326072, 0.069748, -0.120184, -0.193159, // Na-P
+        -0.182428, -0.064093, 0.061914, 0.318112, 0.189248, // S-Ca
+        -0.104172, -0.082038, -0.059903, -0.037769, -0.015635, // Sc-Mn
+        0.006500, 0.028634, 0.050768, 0.072903, 0.095037, // Fe-Zn
+        0.131140, 0.097006, -0.065744, -0.058394, 0.063307, // Ga-Br
+        0.091652, 0.386337, 0.530677, -0.030705, -0.020787, // Kr-Zr
+        -0.010869, -0.000951, 0.008967, 0.018884, 0.028802, // Nb-Rh
+        0.038720, 0.048638, 0.058556, 0.036488, 0.077711, // Pd-Sn
+        0.077025, 0.004547, 0.039909, 0.082630, 0.485375, // Sb-Cs
+        0.416264, -0.011212, -0.011046, -0.010879, -0.010713, // Ba-Nd
+        -0.010546, -0.010380, -0.010214, -0.010047, -0.009881, // Pm-Tb
+        -0.009714, -0.009548, -0.009382, -0.009215, -0.009049, // Dy-Yb
+        -0.008883, -0.008716, -0.006220, -0.003724, -0.001228, // Lu-Re
+        0.001267, 0.003763, 0.006259, 0.008755, 0.011251, // Os-Hg
+        0.020477, -0.056566, 0.051943, 0.076708, 0.000273, // Tl-At
+        -0.068929 // Rn
+    };
+
+    // alp_angewChem2020(86) - Damping parameter
+    static const std::vector<double> alp_eeq = {
+        0.585069, 0.432382, 0.628636, 0.743646, 1.167323, // H-B
+        0.903430, 1.278388, 0.905347, 1.067014, 2.941513, // C-Ne
+        0.687680, 0.792170, 1.337040, 1.251409, 1.068295, // Na-P
+        1.186476, 1.593532, 2.056749, 0.674196, 0.868052, // S-Ca
+        0.575052, 0.613424, 0.651796, 0.690169, 0.728541, // Sc-Mn
+        0.766913, 0.805285, 0.843658, 0.882030, 0.920402, // Fe-Zn
+        0.877178, 1.422350, 1.405901, 1.646860, 2.001970, // Ga-Br
+        2.301695, 1.020617, 0.634141, 0.652752, 0.668845, // Kr-Zr
+        0.684938, 0.701032, 0.717125, 0.733218, 0.749311, // Nb-Rh
+        0.765405, 0.781498, 0.797591, 1.296844, 1.534068, // Pd-Sn
+        1.727781, 1.926871, 2.175548, 2.177702, 0.977079, // Sb-Cs
+        0.770260, 0.757372, 0.757352, 0.757332, 0.757313, // Ba-Nd
+        0.757293, 0.757273, 0.757253, 0.757233, 0.757213, // Pm-Tb
+        0.757194, 0.757174, 0.757154, 0.757134, 0.757114, // Dy-Yb
+        0.757095, 0.757075, 0.756778, 0.756480, 0.756183, // Lu-Re
+        0.755886, 0.755589, 0.755291, 0.754994, 0.754697, // Os-Hg
+        0.868029, 1.684375, 2.001040, 2.067331, 2.228923, // Tl-At
+        1.874218 // Rn
+    };
+
+    // cnf_angewChem2020(86) - CN correction factor
+    static const std::vector<double> cnf_eeq = {
+        0.008904, 0.004641, 0.048324, 0.080316, -0.051990, // H-B
+        0.031779, 0.132184, 0.157353, 0.064120, 0.036540, // C-Ne
+        -0.000627, 0.005412, 0.018809, 0.016329, 0.012149, // Na-P
+        0.021484, 0.014212, 0.014939, 0.003597, 0.032921, // S-Ca
+        -0.021804, -0.022797, -0.023789, -0.024782, -0.025775, // Sc-Mn
+        -0.026767, -0.027760, -0.028753, -0.029745, -0.030738, // Fe-Zn
+        -0.004189, -0.011113, -0.021305, -0.012311, 0.049781, // Ga-Br
+        -0.040533, 0.012872, 0.021056, -0.003395, 0.000799, // Kr-Zr
+        0.004992, 0.009186, 0.013379, 0.017573, 0.021766, // Nb-Rh
+        0.025960, 0.030153, 0.034347, -0.000052, -0.039776, // Pd-Sn
+        0.006661, 0.050424, 0.068985, 0.023470, -0.024950, // Sb-Cs
+        -0.033006, 0.058973, 0.058595, 0.058217, 0.057838, // Ba-Nd
+        0.057460, 0.057082, 0.056704, 0.056326, 0.055948, // Pm-Tb
+        0.055569, 0.055191, 0.054813, 0.054435, 0.054057, // Dy-Yb
+        0.053679, 0.053300, 0.047628, 0.041955, 0.036282, // Lu-Re
+        0.030610, 0.024937, 0.019264, 0.013592, 0.007919, // Os-Hg
+        0.006383, -0.089155, -0.001293, 0.019269, 0.074803, // Tl-At
+        0.016657 // Rn
+    };
+
+    // Validate atomic number and return parameters
+    if (atomic_number >= 1 && atomic_number <= 86) {
+        int idx = atomic_number - 1;  // Convert to 0-based indexing
+        params.chi = chi_eeq[idx];
+        params.gam = gam_eeq[idx];
+        params.alp = alp_eeq[idx];
+        params.cnf = cnf_eeq[idx];
+    } else {
+        // Fallback for unknown elements (use default values)
+        std::cerr << "Warning: No EEQ parameters for element " << atomic_number
+                  << ", using default values" << std::endl;
+        params.chi = 1.0;
+        params.gam = 0.0;
+        params.alp = 1.0;
+        params.cnf = 0.0;
+    }
+
+    return params;
+}
+
 GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int z1, int z2, double distance) const
 {
     GFNFFBondParams params;
@@ -891,32 +1015,89 @@ std::vector<int> GFNFF::findSmallestRings() const
 
 Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb, const std::vector<int>& rings) const
 {
-    Vector charges = Vector::Zero(m_atomcount);
+    // Phase 3: Full EEQ (Electronegativity Equalization) implementation
+    // Reference: gfnff_engrad.F90:1274-1391 (goed_gfnff subroutine)
+    //
+    // Solves linear system: A·q = b
+    // where A = hardness matrix + Coulomb interaction + constraint
+    //       b = -electronegativity - CN corrections
+    //       q = atomic charges (unknown)
+    //
+    // Mathematical formulation:
+    // A(i,i) = γ_i + sqrt(2π)/sqrt(α_i)  (self-interaction)
+    // A(i,j) = erf(γ_ij * r_ij) / r_ij    (Coulomb interaction with damping)
+    // A(n+1, :) = 1 (charge constraint: Σq = total_charge)
+    //
+    // Literature: S. Spicher, S. Grimme, Angew. Chem. Int. Ed. 2020, 59, 15665-15673
 
-    // TODO: Implement EEQ charge calculation based on goedeckera
-    // This is the most complex part and requires:
-    // 1. Setting up EEQ parameter matrix
-    // 2. Solving linear system for charges
-    // 3. Applying fragment constraints
+    const int n = m_atomcount;
+    const int m = n + 1;  // n atoms + 1 charge constraint
 
-    // For now, use simple partial charge estimation
-    for (int i = 0; i < m_atomcount; ++i) {
-        int z = m_atoms[i];
+    // Constants
+    const double sqrt_2pi = 0.79788456080287;  // sqrt(2/π)
 
-        // Simple electronegativity-based charge estimate
-        double base_charge = 0.0;
-        if (z == 1)
-            base_charge = 0.1; // H
-        else if (z == 6)
-            base_charge = -0.1; // C
-        else if (z == 7)
-            base_charge = -0.2; // N
-        else if (z == 8)
-            base_charge = -0.3; // O
-        else if (z == 9)
-            base_charge = -0.4; // F
+    // Setup EEQ matrix A and RHS vector b
+    Matrix A = Matrix::Zero(m, m);
+    Vector b = Vector::Zero(m);
 
-        charges[i] = base_charge;
+    // Phase 3.1: Build diagonal and off-diagonal elements
+    for (int i = 0; i < n; ++i) {
+        EEQParameters params_i = getEEQParameters(m_atoms[i]);
+
+        // Diagonal: A(i,i) = gamma_i + sqrt(2π)/sqrt(alpha_i)
+        // This is the self-interaction (chemical hardness + Coulomb self-energy)
+        A(i, i) = params_i.gam + sqrt_2pi / std::sqrt(params_i.alp);
+
+        // RHS: b(i) = -chi_i - cnf_i * sqrt(CN_i)
+        // Electronegativity with CN correction
+        b(i) = -params_i.chi - params_i.cnf * std::sqrt(cn[i]);
+
+        // Off-diagonal: Coulomb interaction with error function damping
+        for (int j = 0; j < i; ++j) {
+            EEQParameters params_j = getEEQParameters(m_atoms[j]);
+
+            // Distance between atoms
+            Vector r_ij_vec = m_geometry.row(i) - m_geometry.row(j);
+            double r_ij = r_ij_vec.norm();
+
+            // Damping parameter: γ_ij = 1/sqrt(α_i + α_j)
+            double gamma_ij = 1.0 / std::sqrt(params_i.alp + params_j.alp);
+
+            // Coulomb interaction with error function damping
+            // A(i,j) = erf(γ_ij * r_ij) / r_ij
+            double erf_arg = gamma_ij * r_ij;
+            double erf_val = std::erf(erf_arg);
+            double coulomb = erf_val / r_ij;
+
+            A(i, j) = coulomb;
+            A(j, i) = coulomb;  // Symmetric matrix
+        }
+    }
+
+    // Phase 3.2: Add charge constraint (Lagrange multiplier method)
+    // Σq_i = total_charge
+    // Last row and column enforce this constraint
+    for (int i = 0; i < n; ++i) {
+        A(n, i) = 1.0;  // ∂(Σq)/∂q_i = 1
+        A(i, n) = 1.0;  // Symmetric
+    }
+    b(n) = m_charge;  // Total charge on system
+
+    // Phase 3.3: Solve linear system A·q = b
+    // Use Eigen's LDLT decomposition (symmetric indefinite solver)
+    // This handles the constraint properly via the Lagrange multiplier
+    Vector q_extended = A.ldlt().solve(b);
+
+    // Extract charges (first n elements, last element is Lagrange multiplier)
+    Vector charges = q_extended.head(n);
+
+    // Phase 3.4: Safety check - verify charge conservation
+    double total_charge_actual = charges.sum();
+    double charge_error = std::abs(total_charge_actual - m_charge);
+    if (charge_error > 1e-6) {
+        std::cerr << "Warning: EEQ charge constraint not satisfied. "
+                  << "Expected: " << m_charge << ", Got: " << total_charge_actual
+                  << ", Error: " << charge_error << std::endl;
     }
 
     return charges;
