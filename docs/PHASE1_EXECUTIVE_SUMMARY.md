@@ -66,17 +66,36 @@
 
 ## Current Limitations
 
+### ⚠️ CRITICAL: Pre-Existing Bond/Angle Issues
+
+**Validation Analysis (2025-11-11)** revealed that **existing bond/angle code** (predates Phase 1) has **incorrect energy formulas**:
+
+❌ **Bond Energy Formula**: Uses harmonic+cubic instead of exponential
+- Implemented: `E = 0.5*k*(r-r0)² + α*(r-r0)³`
+- Correct Fortran: `E = k_b * exp(-α*(r-r0)²)`
+- Impact: Wrong energies for all molecules
+
+❌ **Angle Energy Formula**: Always zero energy!
+- Parameters C0=C1=C2=0 → angle energy is zero
+- Missing all angular constraints
+- Impact: Molecules will collapse without angle forces
+
+✅ **Torsion/Inversion Formulas**: Correct (Phase 1.1/1.2)
+
+**See**: `docs/theory/GFNFF_ENERGY_FORMULA_ERRORS.md`
+
 ### Missing from Full GFN-FF
 - ❌ Ring detection (Phase 2)
 - ❌ Pi-system detection (Phase 2)
 - ❌ EEQ charges (Phase 3)
 - ❌ Non-bonded interactions (Phase 4)
+- ❌ Correct bond/angle formulas (needs fixing)
 
 ### Expected Accuracy
-- Simple alkanes: **±0.5 kcal/mol** ✅
-- Alkenes: **±1 kcal/mol** ✅
-- Aromatics: **±2 kcal/mol** ⚠️
-- Polar molecules: **±3-5 kcal/mol** ⚠️
+- **Current**: ❌ **BROKEN** - wrong bond formula, zero angle energy
+- **After fixes**: Simple alkanes ±5-10 kcal/mol (missing topology corrections)
+- **After Phase 2-3**: ±2 kcal/mol for organic molecules
+- **After Phase 4**: ±0.5 kcal/mol (full GFN-FF)
 
 ---
 
@@ -94,9 +113,11 @@ src/core/energy_calculators/qm_methods/
 ### Documentation
 ```
 docs/theory/
-├── GFNFF_TORSION_THEORY.md      (29 pages)
-├── GFNFF_INVERSION_THEORY.md    (25 pages)
-└── PHASE1_IMPLEMENTATION_REPORT.md (full details)
+├── GFNFF_TORSION_THEORY.md           (29 pages) - Phase 1.1 theory
+├── GFNFF_INVERSION_THEORY.md         (25 pages) - Phase 1.2 theory
+├── GFNFF_BOND_ANGLE_VALIDATION.md    (NEW) - Missing parameter corrections
+├── GFNFF_ENERGY_FORMULA_ERRORS.md    (NEW) - Critical formula errors
+└── PHASE1_IMPLEMENTATION_REPORT.md   (full details)
 ```
 
 ### Test Cases
@@ -118,26 +139,40 @@ test_cases/validation/
 | **8b777fd** | Phase 1.2 complete (inversions) | +1409 |
 | **4691435** | Validation molecules | +38 |
 | **e53f40f** | Gitignore cleanup | +8 |
+| **be3af21** | Bond/angle validation analysis | +462 |
+| **49e6d2b** | Energy formula error documentation | +473 |
 
-**Total**: 5 commits, +2412 lines
+**Total**: 7 commits, +3347 lines (code + validation docs)
 
 ---
 
 ## Next Steps
 
-### Immediate (Testing)
+### ⚠️ CRITICAL: Fix Energy Formulas First
+
+**Phase 1.3 (NEW) - Fix Bond/Angle Formulas** (3-5 days):
+1. 🔴 Implement exponential bond potential: `E = k_b * exp(-α*(r-r0)²)`
+2. 🔴 Implement angle bending with distance damping
+3. 🔴 Add α parameter calculation (electronegativity-based)
+4. 🔴 Remove dummy C0/C1/C2 angle parameters
+5. ⏳ Run validation tests on 5 molecules
+6. ⏳ Document results (accept ±20% error without full topology)
+
+**See**: `docs/theory/GFNFF_ENERGY_FORMULA_ERRORS.md` Section 8 for detailed plan
+
+### Immediate (After Phase 1.3)
 1. ⏳ Resolve build dependencies
 2. ⏳ Compile native GFN-FF
 3. ⏳ Run validation tests
 4. ⏳ Compare with Fortran reference
 
 ### Future (Development)
-1. 🔜 Phase 2: Topology detection (4-6 weeks)
+1. 🔜 Phase 2: Topology detection (4-6 weeks) - enables full bond/angle corrections
 2. 🔜 Phase 3: EEQ charges (2-3 weeks)
 3. 🔜 Phase 4: Non-bonded (3-4 weeks)
 4. 🔜 Phase 5-8: Optimization (4-6 weeks)
 
-**Total Timeline**: 13-19 weeks for complete GFN-FF
+**Total Timeline**: 14-20 weeks for complete GFN-FF (includes Phase 1.3)
 
 ---
 
