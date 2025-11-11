@@ -1,7 +1,7 @@
 # GFN-FF Phase 1 - Executive Summary
 
 **Date**: 2025-11-11
-**Status**: ✅ **COMPLETE**
+**Status**: ✅ **Phase 1.1 + 1.2 + 1.3 COMPLETE**
 **Branch**: `claude/advance-gfnff-implementation-011CUzoHH2su8pVRgFc74hkZ`
 
 ---
@@ -24,11 +24,20 @@
 - sp² center detection
 - Element-specific barriers
 
+### Phase 1.3: Bond/Angle Formula Fixes ✅ **NEW**
+- **+78 net lines** (3 files modified)
+- Fixed **wrong bond formula**: Exponential E = k_b·exp(-α·(r-r₀)²)
+- Fixed **broken angle formula**: Simple bending E = k·(θ-θ₀)²
+- Added **electronegativity array** (86 elements from Fortran)
+- Removed **dummy Fourier coefficients** (C0/C1/C2)
+- **Correct analytical gradients** for both
+
 ### Total Implementation
-- 📊 **2002 lines** of production code
-- 📚 **54 pages** of theory documentation
+- 📊 **2080 lines** of production code (+78 from Phase 1.3)
+- 📚 **65+ pages** of theory documentation (incl. validation reports)
 - 🔬 **9 functions** fully implemented
-- ✅ **100% Fortran-compatible** structure
+- ✅ **100% Fortran-compatible** structure (formulas)
+- ⚠️ **Simplified parameters** (await Phase 2-3 for full corrections)
 - 🎯 **3 test molecules** prepared
 
 ---
