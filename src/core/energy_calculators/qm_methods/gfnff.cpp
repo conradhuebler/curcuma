@@ -207,7 +207,13 @@ json GFNFF::generateGFNFFParameters()
         parameters["angles"] = angles;
         parameters["dihedrals"] = generateGFNFFTorsions(); // ✅ Phase 1.1 implemented
         parameters["inversions"] = generateGFNFFInversions(); // ✅ Phase 1.2 implemented
-        parameters["vdws"] = json::array(); // TODO (Phase 4): Advanced non-bonded
+
+        // Phase 4.2: Generate pairwise non-bonded parameters
+        parameters["gfnff_coulombs"] = generateGFNFFCoulombPairs();
+        parameters["gfnff_repulsions"] = generateGFNFFRepulsionPairs();
+        parameters["gfnff_dispersions"] = generateGFNFFDispersionPairs();
+
+        parameters["vdws"] = json::array(); // Legacy vdW (will be replaced by pairwise)
         parameters["hbonds"] = detectHydrogenBonds(topo_info.eeq_charges);
 
         // Store topology information for debugging
@@ -237,7 +243,13 @@ json GFNFF::generateGFNFFParameters()
         parameters["angles"] = angles;
         parameters["dihedrals"] = torsions;
         parameters["inversions"] = inversions;
-        parameters["vdws"] = json::array(); // TODO (Phase 4): Implement non-bonded
+
+        // Phase 4.2: Generate pairwise non-bonded parameters
+        parameters["gfnff_coulombs"] = generateGFNFFCoulombPairs();
+        parameters["gfnff_repulsions"] = generateGFNFFRepulsionPairs();
+        parameters["gfnff_dispersions"] = generateGFNFFDispersionPairs();
+
+        parameters["vdws"] = json::array(); // Legacy vdW (will be replaced by pairwise)
     }
 
     // Integration with existing corrections (H4, D3/D4)
@@ -1519,4 +1531,174 @@ GFNFF::EEQParameters GFNFF::getEEQParameters(int atom_idx, const TopologyInfo& t
     params.xi_corr = 0.0; // TODO: Calculate environment correction
 
     return params;
+}
+
+// ============================================================================
+// Phase 4.2: GFN-FF Pairwise Non-Bonded Parameter Generation (Claude Generated 2025)
+// ============================================================================
+
+json GFNFF::generateGFNFFCoulombPairs() const
+{
+    /**
+     * @brief Generate EEQ-based Coulomb electrostatics pairwise parameters
+     *
+     * Reference: Phase 3 EEQ charge calculation
+     * Formula: E_coul = q_i * q_j * erf(γ_ij * r_ij) / r_ij
+     *
+     * Claude Generated (2025): Phase 4.2 parameter generation
+     */
+
+    json coulomb_pairs = json::array();
+
+    // Calculate EEQ charges (Phase 3 implementation)
+    Vector cn = calculateCoordinationNumbers();
+    std::vector<int> hyb = determineHybridization();
+    std::vector<int> rings = findSmallestRings();
+    Vector charges = calculateEEQCharges(cn, hyb, rings);
+
+    // Generate all pairwise Coulomb interactions (i<j to avoid double-counting)
+    for (int i = 0; i < m_atomcount; ++i) {
+        for (int j = i + 1; j < m_atomcount; ++j) {
+            json coulomb;
+            coulomb["i"] = i;
+            coulomb["j"] = j;
+            coulomb["q_i"] = charges[i];
+            coulomb["q_j"] = charges[j];
+
+            // Calculate damping parameter: γ_ij = 1 / sqrt(α_i + α_j)
+            EEQParameters params_i = getEEQParameters(m_atoms[i]);
+            EEQParameters params_j = getEEQParameters(m_atoms[j]);
+            double gamma_ij = 1.0 / std::sqrt(params_i.alp + params_j.alp);
+            coulomb["gamma_ij"] = gamma_ij;
+
+            // Cutoff radius (50 Bohr ~ 26 Å, typical for electrostatics)
+            coulomb["r_cut"] = 50.0;
+
+            coulomb_pairs.push_back(coulomb);
+        }
+    }
+
+    return coulomb_pairs;
+}
+
+json GFNFF::generateGFNFFRepulsionPairs() const
+{
+    /**
+     * @brief Generate GFN-FF repulsion pairwise parameters
+     *
+     * Reference: Fortran gfnff_engrad.F90:407-439 (bonded repulsion)
+     * Formula: E_rep = repab * exp(-α*r^1.5) / r
+     * Parameters: alpha = sqrt(repa_i * repa_j), repab = repz_i * repz_j * scale
+     *
+     * Claude Generated (2025): Phase 4.2 parameter generation
+     */
+
+    json repulsion_pairs = json::array();
+
+    // GFN-FF repulsion parameters from gfnff_param.f90 (repa, repz)
+    // TODO: These are placeholder values - need actual GFN-FF parameters
+    static const std::vector<double> repa = {
+        2.0, 1.5, 2.5, 2.3, 2.1, // H-B (placeholder)
+        2.0, 1.9, 1.8, 1.7, 1.6  // C-Ne (placeholder)
+    };
+    static const std::vector<double> repz = {
+        1.0, 0.5, 1.5, 1.3, 1.1, // H-B (placeholder)
+        1.0, 0.9, 0.8, 0.7, 0.6  // C-Ne (placeholder)
+    };
+
+    // Generate all pairwise repulsion interactions
+    for (int i = 0; i < m_atomcount; ++i) {
+        for (int j = i + 1; j < m_atomcount; ++j) {
+            json repulsion;
+            repulsion["i"] = i;
+            repulsion["j"] = j;
+
+            // Get atomic parameters (with bounds checking)
+            int zi = m_atoms[i] - 1; // 0-indexed
+            int zj = m_atoms[j] - 1;
+
+            double repa_i = (zi >= 0 && zi < repa.size()) ? repa[zi] : 2.0;
+            double repa_j = (zj >= 0 && zj < repa.size()) ? repa[zj] : 2.0;
+            double repz_i = (zi >= 0 && zi < repz.size()) ? repz[zi] : 1.0;
+            double repz_j = (zj >= 0 && zj < repz.size()) ? repz[zj] : 1.0;
+
+            // Calculate pairwise parameters
+            repulsion["alpha"] = std::sqrt(repa_i * repa_j);
+            repulsion["repab"] = repz_i * repz_j * 0.5; // Scale factor 0.5 (typical)
+            repulsion["r_cut"] = 50.0; // Cutoff radius (Bohr)
+
+            repulsion_pairs.push_back(repulsion);
+        }
+    }
+
+    return repulsion_pairs;
+}
+
+json GFNFF::generateGFNFFDispersionPairs() const
+{
+    /**
+     * @brief Generate D3/D4 dispersion pairwise parameters with BJ damping
+     *
+     * Reference: Grimme et al., J. Chem. Phys. 132, 154104 (2010) [D3-BJ]
+     * Formula: E_disp = -Σ_ij f_damp(r) * (s6*C6/r^6 + s8*C8/r^8)
+     *
+     * NOTE: This is a simplified implementation using D3 parameters.
+     * Full GFN-FF uses D4 with geometry-dependent C6 coefficients.
+     *
+     * Claude Generated (2025): Phase 4.2 parameter generation
+     */
+
+    json dispersion_pairs = json::array();
+
+    // D3 C6 coefficients (Hartree*Bohr^6) from dftd3.f90
+    // TODO: Replace with D4 geometry-dependent coefficients
+    // For now, using simplified fixed C6 values
+    static const std::vector<double> C6_atomic = {
+        6.5,   // H  (1)
+        1.42,  // He (2)
+        1387.0, 214.0, 99.5, 99.5,  // Li-C (3-6)
+        57.0, 38.0, 24.0, 10.8,     // N-Ne (7-10)
+        // Extend to Z=86 with approximate values
+        // TODO: Use actual D3/D4 parameters
+    };
+
+    // GFN-FF specific parameters (from gfnff_param.f90)
+    const double s6 = 1.0;  // C6 scaling factor
+    const double s8 = 2.4;  // C8 scaling factor (typical GFN-FF)
+    const double a1 = 0.48; // BJ damping parameter 1
+    const double a2 = 4.80; // BJ damping parameter 2
+
+    // Generate all pairwise dispersion interactions
+    for (int i = 0; i < m_atomcount; ++i) {
+        for (int j = i + 1; j < m_atomcount; ++j) {
+            json dispersion;
+            dispersion["i"] = i;
+            dispersion["j"] = j;
+
+            // Get atomic C6 coefficients
+            int zi = m_atoms[i] - 1; // 0-indexed
+            int zj = m_atoms[j] - 1;
+
+            double C6_i = (zi >= 0 && zi < C6_atomic.size()) ? C6_atomic[zi] : 50.0;
+            double C6_j = (zj >= 0 && zj < C6_atomic.size()) ? C6_atomic[zj] : 50.0;
+
+            // Combine rule for C6_ij: geometric mean
+            double C6_ij = std::sqrt(C6_i * C6_j);
+
+            // Estimate C8 from C6 (typical ratio C8/C6 ≈ 50 Bohr^2)
+            double C8_ij = C6_ij * 50.0;
+
+            dispersion["C6"] = C6_ij;
+            dispersion["C8"] = C8_ij;
+            dispersion["s6"] = s6;
+            dispersion["s8"] = s8;
+            dispersion["a1"] = a1;
+            dispersion["a2"] = a2;
+            dispersion["r_cut"] = 50.0; // Cutoff radius (Bohr)
+
+            dispersion_pairs.push_back(dispersion);
+        }
+    }
+
+    return dispersion_pairs;
 }

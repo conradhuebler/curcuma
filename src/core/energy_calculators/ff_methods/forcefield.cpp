@@ -140,6 +140,15 @@ void ForceField::setParameter(const json& parameters)
             setInversions(parameters["inversions"]);
         if (parameters.contains("vdws"))
             setvdWs(parameters["vdws"]);
+
+        // Phase 4.2: GFN-FF pairwise non-bonded parameters (Claude Generated 2025)
+        if (parameters.contains("gfnff_dispersions"))
+            setGFNFFDispersions(parameters["gfnff_dispersions"]);
+        if (parameters.contains("gfnff_repulsions"))
+            setGFNFFRepulsions(parameters["gfnff_repulsions"]);
+        if (parameters.contains("gfnff_coulombs"))
+            setGFNFFCoulombs(parameters["gfnff_coulombs"]);
+
         m_parameters = parameters;
         m_method = m_parameters["method"];
         if (m_parameters.contains("e0"))
@@ -432,6 +441,64 @@ void ForceField::setvdWs(const json& vdws)
     }
 }
 
+// Phase 4.2: GFN-FF pairwise non-bonded parameter setters (Claude Generated 2025)
+
+void ForceField::setGFNFFDispersions(const json& dispersions)
+{
+    m_gfnff_dispersions.clear();
+    for (int i = 0; i < dispersions.size(); ++i) {
+        json disp_json = dispersions[i].get<json>();
+        GFNFFDispersion disp;
+
+        disp.i = disp_json["i"];
+        disp.j = disp_json["j"];
+        disp.C6 = disp_json["C6"];
+        disp.C8 = disp_json["C8"];
+        disp.s6 = disp_json["s6"];
+        disp.s8 = disp_json["s8"];
+        disp.a1 = disp_json["a1"];
+        disp.a2 = disp_json["a2"];
+        disp.r_cut = disp_json["r_cut"];
+
+        m_gfnff_dispersions.push_back(disp);
+    }
+}
+
+void ForceField::setGFNFFRepulsions(const json& repulsions)
+{
+    m_gfnff_repulsions.clear();
+    for (int i = 0; i < repulsions.size(); ++i) {
+        json rep_json = repulsions[i].get<json>();
+        GFNFFRepulsion rep;
+
+        rep.i = rep_json["i"];
+        rep.j = rep_json["j"];
+        rep.alpha = rep_json["alpha"];
+        rep.repab = rep_json["repab"];
+        rep.r_cut = rep_json["r_cut"];
+
+        m_gfnff_repulsions.push_back(rep);
+    }
+}
+
+void ForceField::setGFNFFCoulombs(const json& coulombs)
+{
+    m_gfnff_coulombs.clear();
+    for (int i = 0; i < coulombs.size(); ++i) {
+        json coul_json = coulombs[i].get<json>();
+        GFNFFCoulomb coul;
+
+        coul.i = coul_json["i"];
+        coul.j = coul_json["j"];
+        coul.q_i = coul_json["q_i"];
+        coul.q_j = coul_json["q_j"];
+        coul.gamma_ij = coul_json["gamma_ij"];
+        coul.r_cut = coul_json["r_cut"];
+
+        m_gfnff_coulombs.push_back(coul);
+    }
+}
+
 void ForceField::setESPs(const json& esps)
 {
     m_EQs.clear();
@@ -533,6 +600,21 @@ void ForceField::AutoRanges()
                 thread->addGFNFFvdW(m_vdWs[j]);
             } else {
                 thread->addvdW(m_vdWs[j]);
+            }
+        }
+
+        // Phase 4.2: Distribute GFN-FF pairwise non-bonded interactions (Claude Generated 2025)
+        if (m_method == "gfnff") {
+            for (int j = int(i * m_gfnff_dispersions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_dispersions.size() / double(free_threads)); ++j) {
+                thread->addGFNFFDispersion(m_gfnff_dispersions[j]);
+            }
+
+            for (int j = int(i * m_gfnff_repulsions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_repulsions.size() / double(free_threads)); ++j) {
+                thread->addGFNFFRepulsion(m_gfnff_repulsions[j]);
+            }
+
+            for (int j = int(i * m_gfnff_coulombs.size() / double(free_threads)); j < int((i + 1) * m_gfnff_coulombs.size() / double(free_threads)); ++j) {
+                thread->addGFNFFCoulomb(m_gfnff_coulombs[j]);
             }
         }
 

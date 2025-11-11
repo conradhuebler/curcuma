@@ -113,6 +113,11 @@ private:
     CxxThreadPool* m_threadpool;
     void setvdWs(const json& vdws);
 
+    // Phase 4.2: GFN-FF pairwise non-bonded parameter setters (Claude Generated 2025)
+    void setGFNFFDispersions(const json& dispersions);
+    void setGFNFFRepulsions(const json& repulsions);
+    void setGFNFFCoulombs(const json& coulombs);
+
     Matrix m_geometry, m_gradient;
     std::vector<int> m_atom_types;
     std::string m_method = "uff";
@@ -128,6 +133,11 @@ private:
     std::vector<Inversion> m_inversions;
     std::vector<vdW> m_vdWs;
     std::vector<EQ> m_EQs;
+
+    // Phase 4.2: GFN-FF pairwise non-bonded storage (Claude Generated 2025)
+    std::vector<GFNFFDispersion> m_gfnff_dispersions;
+    std::vector<GFNFFRepulsion> m_gfnff_repulsions;
+    std::vector<GFNFFCoulomb> m_gfnff_coulombs;
     json m_parameters;
     std::string m_auto_param_file; // Auto-detected parameter file path
     bool m_enable_caching = true; // Can be disabled for multi-threading

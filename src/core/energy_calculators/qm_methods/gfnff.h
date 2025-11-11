@@ -193,6 +193,29 @@ private:
      */
     json generateGFNFFInversions() const;
 
+    // Phase 4.2: GFN-FF pairwise non-bonded parameter generation (Claude Generated 2025)
+
+    /**
+     * @brief Generate EEQ-based Coulomb electrostatics pairwise parameters
+     * Formula: E_coul = q_i * q_j * erf(γ_ij * r_ij) / r_ij
+     * @return JSON array of Coulomb pair parameters
+     */
+    json generateGFNFFCoulombPairs() const;
+
+    /**
+     * @brief Generate GFN-FF repulsion pairwise parameters
+     * Formula: E_rep = repab * exp(-α*r^1.5) / r
+     * @return JSON array of repulsion pair parameters
+     */
+    json generateGFNFFRepulsionPairs() const;
+
+    /**
+     * @brief Generate D3/D4 dispersion pairwise parameters with BJ damping
+     * Formula: E_disp = -Σ_ij f_damp(r) * (s6*C6/r^6 + s8*C8/r^8)
+     * @return JSON array of dispersion pair parameters
+     */
+    json generateGFNFFDispersionPairs() const;
+
     /**
      * @brief Get covalent radius for element
      * @param atomic_number Element atomic number
