@@ -528,6 +528,23 @@ private:
     Vector calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb, const std::vector<int>& rings) const;
 
     /**
+     * @brief Calculate EEQ electrostatic energy
+     *
+     * Claude Generated (2025): Phase 3.2 EEQ energy contribution
+     * Reference: gfnff_engrad.F90:1378-1389 (EEQ energy formula)
+     *
+     * Computes electrostatic energy from EEQ charges:
+     * E_EEQ = Σ_ij q_i*q_j*γ_ij(r_ij) + Σ_i q_i*[-χ_i - cnf*√CN_i + 0.5*q_i*(γ_i + √(2π)/√α_i)]
+     *
+     * Note: Gradients use "frozen charge" approximation (∂q/∂r neglected)
+     *
+     * @param charges EEQ atomic charges from calculateEEQCharges()
+     * @param cn Coordination numbers
+     * @return EEQ electrostatic energy in Hartree
+     */
+    double calculateEEQEnergy(const Vector& charges, const Vector& cn) const;
+
+    /**
      * @brief Generate topology-aware bond parameters
      * @param cn Coordination numbers
      * @param hyb Hybridization states

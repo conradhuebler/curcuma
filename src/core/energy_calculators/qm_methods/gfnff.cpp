@@ -791,12 +791,67 @@ Vector GFNFF::calculateCoordinationNumbers(double threshold) const
 
 std::vector<Matrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, double threshold) const
 {
-    std::vector<Matrix> dcn;
+    // Phase 3.2: CN derivatives for gradient calculations
+    // Reference: gfnff_engrad.F90:802-853 (dncoord_erf subroutine)
+    //
+    // Mathematical formulation:
+    // CN_i = Σ_j f(r_ij) where f(r) = 1 / (1 + exp(-16*(r/rcov - 1)))
+    //
+    // Derivatives:
+    // ∂CN_i/∂r_ij = df/dr = 16/rcov * exp(a) / (1 + exp(a))^2
+    // where a = -16*(r/rcov - 1)
+    //
+    // Chain rule for Cartesian coordinates:
+    // ∂CN_i/∂x_k = Σ_j ∂CN_i/∂r_ij * ∂r_ij/∂x_k
+    //
+    // Tensor structure: dcn[dim][i][j] = ∂CN_i/∂coord_dim(atom_j)
 
-    // TODO: Implement CN derivatives for gradient calculations
-    // This is complex and requires careful implementation
-    for (int dim = 0; dim < 3; ++dim) {
-        dcn.push_back(Matrix::Zero(m_atomcount, m_atomcount));
+    // Initialize 3D tensor as vector of matrices
+    // dcn[0] = ∂CN/∂x, dcn[1] = ∂CN/∂y, dcn[2] = ∂CN/∂z
+    std::vector<Matrix> dcn(3, Matrix::Zero(m_atomcount, m_atomcount));
+
+    // Calculate derivatives for all atom pairs
+    for (int i = 0; i < m_atomcount; ++i) {
+        Vector ri = m_geometry.row(i);
+        double rcov_i = getCovalentRadius(m_atoms[i]);
+
+        for (int j = 0; j < m_atomcount; ++j) {
+            if (i == j) continue;
+
+            Vector rj = m_geometry.row(j);
+            double rcov_j = getCovalentRadius(m_atoms[j]);
+
+            // Distance and direction
+            Vector r_ij_vec = rj - ri;
+            double r_ij = r_ij_vec.norm();
+            double rcov_sum = rcov_i + rcov_j;
+
+            // Exponential argument: a = -16*(r/rcov - 1)
+            double exp_arg = -16.0 * (r_ij / rcov_sum - 1.0);
+
+            // Only compute if within threshold (same as CN calculation)
+            if (exp_arg > -threshold) {
+                // Derivative: dCN/dr = 16/rcov * exp(a) / (1 + exp(a))^2
+                double exp_val = std::exp(exp_arg);
+                double denom = 1.0 + exp_val;
+                double dCN_dr = (16.0 / rcov_sum) * exp_val / (denom * denom);
+
+                // Chain rule: dCN/dx_k = dCN/dr * dr/dx_k
+                // where dr/dx_k = (x_j - x_i) / r for k=j
+                //       dr/dx_k = -(x_j - x_i) / r for k=i
+                Vector grad_direction = r_ij_vec / r_ij;  // Unit vector i→j
+
+                // ∂CN_i/∂x_j (moving atom j affects CN_i)
+                for (int dim = 0; dim < 3; ++dim) {
+                    dcn[dim](i, j) += dCN_dr * grad_direction[dim];
+                }
+
+                // ∂CN_i/∂x_i (moving atom i affects CN_i)
+                for (int dim = 0; dim < 3; ++dim) {
+                    dcn[dim](i, i) -= dCN_dr * grad_direction[dim];
+                }
+            }
+        }
     }
 
     return dcn;
@@ -1101,6 +1156,56 @@ Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb,
     }
 
     return charges;
+}
+
+double GFNFF::calculateEEQEnergy(const Vector& charges, const Vector& cn) const
+{
+    // Phase 3.2: EEQ electrostatic energy calculation
+    // Reference: gfnff_engrad.F90:1378-1389 (EEQ energy in goed_gfnff)
+    //
+    // Energy formula:
+    // E_EEQ = Σ_i<j q_i*q_j*erf(γ_ij*r_ij)/r_ij
+    //       + Σ_i [-q_i*(χ_i + cnf_i*√CN_i) + 0.5*q_i²*(γ_i + √(2π)/√α_i)]
+    //
+    // This is the electrostatic energy from the EEQ method.
+    // Note: In GFN-FF, this uses "frozen charge" approximation for gradients.
+
+    const int n = m_atomcount;
+    const double sqrt_2pi = 0.79788456080287;  // sqrt(2/π)
+    double energy = 0.0;
+
+    // Pairwise Coulomb interactions: Σ_i<j q_i*q_j*γ_ij(r_ij)
+    for (int i = 0; i < n; ++i) {
+        EEQParameters params_i = getEEQParameters(m_atoms[i]);
+
+        for (int j = 0; j < i; ++j) {
+            EEQParameters params_j = getEEQParameters(m_atoms[j]);
+
+            // Distance between atoms
+            Vector r_ij_vec = m_geometry.row(i) - m_geometry.row(j);
+            double r_ij = r_ij_vec.norm();
+
+            // Damping parameter: γ_ij = 1/sqrt(α_i + α_j)
+            double gamma_ij = 1.0 / std::sqrt(params_i.alp + params_j.alp);
+
+            // Coulomb interaction with error function damping
+            double erf_arg = gamma_ij * r_ij;
+            double erf_val = std::erf(erf_arg);
+            double coulomb = erf_val / r_ij;
+
+            // Pairwise energy contribution
+            energy += charges[i] * charges[j] * coulomb;
+        }
+
+        // Self-energy and electronegativity terms for atom i
+        // E_i = -q_i*(χ_i + cnf_i*√CN_i) + 0.5*q_i²*(γ_i + √(2π)/√α_i)
+        double self_interaction = params_i.gam + sqrt_2pi / std::sqrt(params_i.alp);
+        double en_term = params_i.chi + params_i.cnf * std::sqrt(cn[i]);
+
+        energy += -charges[i] * en_term + 0.5 * charges[i] * charges[i] * self_interaction;
+    }
+
+    return energy;
 }
 
 json GFNFF::generateTopologyAwareBonds(const Vector& cn, const std::vector<int>& hyb,
