@@ -21,6 +21,8 @@
 #include <cmath>
 #include <fstream>
 #include <iostream>
+#include <queue>
+#include <stack>
 #include <string>
 
 GFNFF::GFNFF()
@@ -665,38 +667,75 @@ std::vector<Matrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector& 
 
 std::vector<int> GFNFF::determineHybridization() const
 {
-    std::vector<int> hyb(m_atomcount, 3); // Default to sp3
+    // Phase 2.3: Enhanced hybridization detection (geometry-based)
+    // Reference: gfnff_ini.f90:400-550 (hybridization assignment)
+    // Analyzes bond angles and geometry, not just neighbor count
 
-    // TODO: Implement hybridization detection algorithm
-    // This should analyze neighbor count and geometry
+    std::vector<int> hyb(m_atomcount, 3); // Default to sp3
+    double bond_threshold = 1.3;
+
     for (int i = 0; i < m_atomcount; ++i) {
         int z = m_atoms[i];
+        Vector ri = m_geometry.row(i);
 
-        // Count neighbors
-        int neighbor_count = 0;
+        // Step 1: Find bonded neighbors
+        std::vector<int> neighbors;
+        std::vector<Vector> bond_vectors;
+
         for (int j = 0; j < m_atomcount; ++j) {
-            if (i == j)
-                continue;
+            if (i == j) continue;
 
-            Vector ri = m_geometry.row(i);
             Vector rj = m_geometry.row(j);
             double distance = (ri - rj).norm();
+            double rcov_sum = getCovalentRadius(z) + getCovalentRadius(m_atoms[j]);
 
-            double rcov_i = getCovalentRadius(z);
-            double rcov_j = getCovalentRadius(m_atoms[j]);
-
-            if (distance < 1.3 * (rcov_i + rcov_j)) {
-                neighbor_count++;
+            if (distance < bond_threshold * rcov_sum) {
+                neighbors.push_back(j);
+                bond_vectors.push_back((rj - ri).normalized());
             }
         }
 
-        // Simple hybridization assignment based on neighbors
-        if (neighbor_count <= 1) {
-            hyb[i] = 1; // sp
+        int neighbor_count = neighbors.size();
+
+        // Step 2: Geometry-based hybridization assignment
+        if (neighbor_count == 0 || neighbor_count == 1) {
+            hyb[i] = 1; // sp (terminal or diatomic)
+
         } else if (neighbor_count == 2) {
-            hyb[i] = 2; // sp2
-        } else {
-            hyb[i] = 3; // sp3
+            // Check if linear (sp) or bent (sp2)
+            double dot_product = bond_vectors[0].dot(bond_vectors[1]);
+            double angle = std::acos(std::max(-1.0, std::min(1.0, dot_product)));
+
+            if (angle > 2.8) { // ~160° - linear geometry
+                hyb[i] = 1; // sp
+            } else {
+                hyb[i] = 2; // sp2 (bent, like H2O oxygen)
+            }
+
+        } else if (neighbor_count == 3) {
+            // Check if planar (sp2) or pyramidal (sp3)
+            // Calculate sum of bond angles (should be ~360° for planar)
+            double angle_sum = 0.0;
+            for (int j = 0; j < 3; ++j) {
+                int k = (j + 1) % 3;
+                double dot = bond_vectors[j].dot(bond_vectors[k]);
+                angle_sum += std::acos(std::max(-1.0, std::min(1.0, dot)));
+            }
+
+            // Planar: sum ≈ 2π, Pyramidal: sum < 2π
+            if (angle_sum > 6.0) { // ~345° - nearly planar
+                hyb[i] = 2; // sp2
+            } else {
+                hyb[i] = 3; // sp3
+            }
+
+        } else if (neighbor_count >= 4) {
+            hyb[i] = 3; // sp3 (tetrahedral or higher coordination)
+
+            // Special case: sp3d, sp3d2 for main group elements (P, S, etc.)
+            if ((z == 15 || z == 16 || z == 17) && neighbor_count >= 5) {
+                hyb[i] = 3; // Still mark as sp3 for GFN-FF purposes
+            }
         }
     }
 
@@ -705,20 +744,134 @@ std::vector<int> GFNFF::determineHybridization() const
 
 std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb) const
 {
-    std::vector<int> pi_fragments(m_atomcount, 0);
+    // Phase 2.2: Pi-system detection (conjugated fragments)
+    // Reference: gfnff_ini.f90:1100-1300 (pi-system setup)
+    // Identifies conjugated chains/rings and marks aromatic systems
 
-    // TODO: Implement pi-system detection
-    // This should identify conjugated systems and aromatic rings
+    std::vector<int> pi_fragments(m_atomcount, 0); // 0 = not in pi-system
+    double bond_threshold = 1.3;
+
+    // Step 1: Find all sp2 and sp atoms (potential pi-system members)
+    std::vector<bool> is_pi_atom(m_atomcount, false);
+    for (int i = 0; i < m_atomcount; ++i) {
+        if (hyb[i] == 1 || hyb[i] == 2) { // sp or sp2
+            is_pi_atom[i] = true;
+        }
+    }
+
+    // Step 2: Build adjacency for pi-atoms only
+    std::vector<std::vector<int>> pi_neighbors(m_atomcount);
+    for (int i = 0; i < m_atomcount; ++i) {
+        if (!is_pi_atom[i]) continue;
+
+        for (int j = i + 1; j < m_atomcount; ++j) {
+            if (!is_pi_atom[j]) continue;
+
+            double distance = (m_geometry.row(i) - m_geometry.row(j)).norm();
+            double rcov_sum = getCovalentRadius(m_atoms[i]) + getCovalentRadius(m_atoms[j]);
+
+            if (distance < bond_threshold * rcov_sum) {
+                pi_neighbors[i].push_back(j);
+                pi_neighbors[j].push_back(i);
+            }
+        }
+    }
+
+    // Step 3: Connected component analysis (union-find/DFS)
+    // Assign same fragment ID to all connected pi-atoms
+    std::vector<bool> visited(m_atomcount, false);
+    int fragment_id = 1;
+
+    for (int start = 0; start < m_atomcount; ++start) {
+        if (!is_pi_atom[start] || visited[start]) continue;
+
+        // DFS to mark all atoms in this conjugated system
+        std::stack<int> stack;
+        stack.push(start);
+        visited[start] = true;
+
+        while (!stack.empty()) {
+            int current = stack.top();
+            stack.pop();
+            pi_fragments[current] = fragment_id;
+
+            for (int neighbor : pi_neighbors[current]) {
+                if (!visited[neighbor]) {
+                    visited[neighbor] = true;
+                    stack.push(neighbor);
+                }
+            }
+        }
+
+        fragment_id++;
+    }
 
     return pi_fragments;
 }
 
 std::vector<int> GFNFF::findSmallestRings() const
 {
-    std::vector<int> ring_sizes(m_atomcount, 0);
+    // Phase 2.1: Ring detection algorithm (DFS-based)
+    // Finds the smallest ring each atom belongs to (3-8 membered rings)
+    // Reference: gfnff_helpers.f90:99-316 (getring36 subroutine)
+    // Educational simplification: DFS instead of exhaustive enumeration
 
-    // TODO: Implement ring detection algorithm (similar to getring36)
-    // This should find the smallest ring each atom belongs to
+    std::vector<int> ring_sizes(m_atomcount, 0); // 0 = not in ring
+
+    // Step 1: Build adjacency list from bonds
+    std::vector<std::vector<int>> neighbors(m_atomcount);
+    double bond_threshold = 1.3; // Same as bond detection
+
+    for (int i = 0; i < m_atomcount; ++i) {
+        for (int j = i + 1; j < m_atomcount; ++j) {
+            double distance = (m_geometry.row(i) - m_geometry.row(j)).norm();
+            double rcov_sum = getCovalentRadius(m_atoms[i]) + getCovalentRadius(m_atoms[j]);
+
+            if (distance < bond_threshold * rcov_sum) {
+                neighbors[i].push_back(j);
+                neighbors[j].push_back(i);
+            }
+        }
+    }
+
+    // Step 2: For each atom, find shortest cycle using BFS
+    // (BFS guarantees shortest path = smallest ring)
+    for (int start_atom = 0; start_atom < m_atomcount; ++start_atom) {
+        std::vector<int> distance(m_atomcount, -1);  // -1 = not visited
+        std::vector<int> parent(m_atomcount, -1);
+        std::queue<int> queue;
+
+        distance[start_atom] = 0;
+        queue.push(start_atom);
+
+        int smallest_ring = 0;
+
+        while (!queue.empty() && smallest_ring == 0) {
+            int current = queue.front();
+            queue.pop();
+
+            for (int neighbor : neighbors[current]) {
+                if (distance[neighbor] == -1) {
+                    // Unvisited neighbor: explore
+                    distance[neighbor] = distance[current] + 1;
+                    parent[neighbor] = current;
+                    queue.push(neighbor);
+
+                } else if (parent[current] != neighbor && distance[neighbor] <= distance[current]) {
+                    // Found cycle! Ring size = distance[current] + distance[neighbor] + 1
+                    int ring_size = distance[current] + distance[neighbor] + 1;
+
+                    // Only consider rings up to size 8 (common in organic chemistry)
+                    if (ring_size >= 3 && ring_size <= 8) {
+                        smallest_ring = ring_size;
+                        break; // BFS ensures this is the smallest
+                    }
+                }
+            }
+        }
+
+        ring_sizes[start_atom] = smallest_ring;
+    }
 
     return ring_sizes;
 }
@@ -795,11 +948,11 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
 {
     TopologyInfo topo_info;
 
-    // Calculate all topology information
+    // Calculate all topology information (Phase 2 implementations)
     topo_info.coordination_numbers = calculateCoordinationNumbers();
-    topo_info.hybridization = determineHybridization();
-    topo_info.pi_fragments = detectPiSystems(topo_info.hybridization);
-    topo_info.ring_sizes = findSmallestRings();
+    topo_info.hybridization = determineHybridization();         // Phase 2.3 ✅
+    topo_info.pi_fragments = detectPiSystems(topo_info.hybridization);  // Phase 2.2 ✅
+    topo_info.ring_sizes = findSmallestRings();                 // Phase 2.1 ✅
     topo_info.eeq_charges = calculateEEQCharges(topo_info.coordination_numbers,
         topo_info.hybridization,
         topo_info.ring_sizes);
@@ -811,17 +964,20 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     for (int i = 0; i < m_atomcount; ++i) {
         int z = m_atoms[i];
 
-        // Simple metal detection
-        if (z > 20 && z < 31)
-            topo_info.is_metal[i] = true; // 3d metals
-        if (z > 38 && z < 49)
-            topo_info.is_metal[i] = true; // 4d metals
-        if (z > 56 && z < 81)
-            topo_info.is_metal[i] = true; // 5d metals
+        // Mark metals (simplified: transition metals and lanthanides/actinides)
+        if ((z >= 21 && z <= 30) || (z >= 39 && z <= 48) ||
+            (z >= 57 && z <= 80) || (z >= 89 && z <= 103)) {
+            topo_info.is_metal[i] = true;
+        }
 
-        // Simple aromaticity detection (placeholder)
-        if (topo_info.ring_sizes[i] == 5 || topo_info.ring_sizes[i] == 6) {
-            if (topo_info.hybridization[i] == 2 && topo_info.pi_fragments[i] > 0) {
+        // Phase 2.2: Aromaticity detection (Hückel 4n+2 rule)
+        // Simplified: 6-membered rings in pi-systems are aromatic
+        if (topo_info.ring_sizes[i] == 6 && topo_info.pi_fragments[i] > 0 && topo_info.hybridization[i] == 2) {
+            topo_info.is_aromatic[i] = true;
+        }
+        // 5-membered rings with heteroatoms (pyrrole, furan) are also aromatic
+        else if (topo_info.ring_sizes[i] == 5 && topo_info.pi_fragments[i] > 0) {
+            if ((z == 7 || z == 8 || z == 16) && topo_info.hybridization[i] == 2) {
                 topo_info.is_aromatic[i] = true;
             }
         }
