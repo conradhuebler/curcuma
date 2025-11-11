@@ -1510,14 +1510,65 @@ GFNFF::EEQParameters GFNFF::getEEQParameters(int atom_idx, const TopologyInfo& t
         0.302229, 0.309540, 0.316851 // Es-Lr
     };
 
+    // Phase 4.3: Complete alp (polarizability) array from Fortran gfnff_param.f90
+    static const std::vector<double> alp_angewChem2020 = {
+        0.585069, 0.432382, 0.628636, 0.743646, 1.167323, // H-He, Li-B
+        0.903430, 1.278388, 0.905347, 1.067014, 2.941513, // C-Ne
+        0.687680, 0.792170, 1.337040, 1.251409, 1.068295, // Na-P
+        1.186476, 1.593532, 2.056749, 0.674196, 0.868052, // S-Ca
+        0.575052, 0.613424, 0.651796, 0.690169, 0.728541, // Sc-Mn
+        0.766913, 0.805285, 0.843658, 0.882030, 0.920402, // Fe-Zn
+        0.877178, 1.422350, 1.405901, 1.646860, 2.001970, // Ga-Br
+        2.301695, 1.020617, 0.634141, 0.652752, 0.668845, // Kr-Zr
+        0.684938, 0.701032, 0.717125, 0.733218, 0.749311, // Nb-Rh
+        0.765405, 0.781498, 0.797591, 1.296844, 1.534068, // Pd-Sn
+        1.727781, 1.926871, 2.175548, 2.177702, 0.977079, // Sb-Cs
+        0.770260, 0.757372, 0.757352, 0.757332, 0.757313, // Ba-Nd
+        0.757293, 0.757273, 0.757253, 0.757233, 0.757213, // Pm-Tb
+        0.757194, 0.757174, 0.757154, 0.757134, 0.757114, // Dy-Yb
+        0.757095, 0.757075, 0.756778, 0.756480, 0.756183, // Lu-Re
+        0.755886, 0.755589, 0.755291, 0.754994, 0.754697, // Os-Hg
+        0.868029, 1.684375, 2.001040, 2.067331, 2.228923, // Tl-At
+        1.874218, 0.977079, 0.770260, 0.757372, 0.757352, // Rn-Th (approx)
+        0.757332, 0.757313, 0.757293, 0.757273, 0.757253, // Pa-Am
+        0.757233, 0.757213, 0.757194, 0.757174, 0.757154, // Cm-Cf
+        0.757134, 0.757114, 0.757095 // Es-Lr
+    };
+
+    // Phase 4.3: Complete cnf_angewChem2020 array - CN correction factor (86 elements)
+    static const std::vector<double> cnf_angewChem2020 = {
+        0.008904, 0.004641, 0.048324, 0.080316, -0.051990, // H-B
+        0.031779, 0.132184, 0.157353, 0.064120, 0.036540, // C-Ne
+        -0.000627, 0.005412, 0.018809, 0.016329, 0.012149, // Na-P
+        0.021484, 0.014212, 0.014939, 0.003597, 0.032921, // S-Ca
+        -0.021804, -0.022797, -0.023789, -0.024782, -0.025775, // Sc-Mn
+        -0.026767, -0.027760, -0.028753, -0.029745, -0.030738, // Fe-Zn
+        -0.004189, -0.011113, -0.021305, -0.012311, 0.049781, // Ga-Br
+        -0.040533, 0.012872, 0.021056, -0.003395, 0.000799, // Kr-Zr
+        0.004992, 0.009186, 0.013379, 0.017573, 0.021766, // Nb-Rh
+        0.025960, 0.030153, 0.034347, -0.000052, -0.039776, // Pd-Sn
+        0.006661, 0.050424, 0.068985, 0.023470, -0.024950, // Sb-Cs
+        -0.033006, 0.058973, 0.058595, 0.058217, 0.057838, // Ba-Nd
+        0.057460, 0.057082, 0.056704, 0.056326, 0.055948, // Pm-Tb
+        0.055569, 0.055191, 0.054813, 0.054435, 0.054057, // Dy-Yb
+        0.053679, 0.053300, 0.047628, 0.041955, 0.036282, // Lu-Re
+        0.030610, 0.024937, 0.019264, 0.013592, 0.007919, // Os-Hg
+        0.006383, -0.089155, -0.001293, 0.019269, 0.074803, // Tl-At
+        0.016657 // Rn
+    };
+
     // Get base parameters
     if (z >= 1 && z <= static_cast<int>(chi_angewChem2020.size())) {
         params.chi = chi_angewChem2020[z - 1];
         params.gam = gam_angewChem2020[z - 1];
+        params.alp = alp_angewChem2020[z - 1];  // Phase 4.3: Real polarizability (not fixed 5.0)
+        params.cnf = cnf_angewChem2020[z - 1];  // Phase 4.3: CN correction factor
     } else {
         // Fallback values
         params.chi = 1.0;
         params.gam = 0.5;
+        params.alp = 5.0;  // Fallback for undefined elements
+        params.cnf = 0.0;
     }
 
     // TODO: Add environment-dependent corrections (dxi, dgam)
@@ -1527,7 +1578,6 @@ GFNFF::EEQParameters GFNFF::getEEQParameters(int atom_idx, const TopologyInfo& t
     // - Ring corrections
     // - Charge corrections
 
-    params.alp = 5.0; // TODO: Add polarizability parameters
     params.xi_corr = 0.0; // TODO: Calculate environment correction
 
     return params;
@@ -1595,15 +1645,42 @@ json GFNFF::generateGFNFFRepulsionPairs() const
 
     json repulsion_pairs = json::array();
 
-    // GFN-FF repulsion parameters from gfnff_param.f90 (repa, repz)
-    // TODO: These are placeholder values - need actual GFN-FF parameters
-    static const std::vector<double> repa = {
-        2.0, 1.5, 2.5, 2.3, 2.1, // H-B (placeholder)
-        2.0, 1.9, 1.8, 1.7, 1.6  // C-Ne (placeholder)
+    // Phase 4.3: Complete GFN-FF repulsion parameters from gfnff_param.f90
+    // repa_angewChem2020 - Repulsion exponent parameter (86 elements)
+    static const std::vector<double> repa_angewChem2020 = {
+        2.639785, 3.575012, 0.732142, 1.159621, 1.561585, // H-B
+        1.762895, 2.173015, 2.262269, 2.511112, 3.577220, // C-Ne
+        0.338845, 0.693023, 0.678792, 0.804784, 1.012178, // Na-P
+        1.103469, 1.209798, 1.167791, 0.326946, 0.595242, // S-Ca
+        1.447860, 1.414501, 1.381142, 1.347783, 1.314424, // Sc-Mn
+        1.281065, 1.247706, 1.214347, 1.180988, 1.147629, // Fe-Zn
+        0.700620, 0.721266, 0.741789, 0.857434, 0.875583, // Ga-Br
+        0.835876, 0.290625, 0.554446, 0.623980, 0.696005, // Kr-Zr
+        0.768030, 0.840055, 0.912081, 0.984106, 1.056131, // Nb-Rh
+        1.128156, 1.200181, 1.272206, 0.478807, 0.479759, // Pd-Sn
+        0.579840, 0.595241, 0.644458, 0.655289, 0.574626, // Sb-Cs
+        0.560506, 0.682723, 0.684824, 0.686925, 0.689026, // Ba-Nd
+        0.691127, 0.693228, 0.695329, 0.697430, 0.699531, // Pm-Tb
+        0.701631, 0.703732, 0.705833, 0.707934, 0.710035, // Dy-Yb
+        0.712136, 0.714237, 0.745751, 0.777265, 0.808779, // Lu-Re
+        0.840294, 0.871808, 0.903322, 0.934836, 0.966350, // Os-Hg
+        0.467729, 0.486102, 0.559176, 0.557520, 0.563373, // Tl-At
+        0.484713  // Rn (last element)
     };
+
+    // repz - Effective nuclear charges for repulsion (86 elements)
+    // NOTE: Fortran uses (/ /) notation, values are simply 1,2,3... for H,He,Li... with some variations
     static const std::vector<double> repz = {
-        1.0, 0.5, 1.5, 1.3, 1.1, // H-B (placeholder)
-        1.0, 0.9, 0.8, 0.7, 0.6  // C-Ne (placeholder)
+        1., 2.,                                                   // H-He
+        1., 2., 3., 4., 5., 6., 7., 8.,                          // Li-Ne
+        1., 2., 3., 4., 5., 6., 7., 8.,                          // Na-Ar
+        1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12.,       // K-Zn
+        3., 4., 5., 6., 7., 8.,                                  // Ga-Kr
+        1., 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12.,       // Rb-Cd
+        3., 4., 5., 6., 7., 8.,                                  // In-Xe
+        1., 2., 3., 3., 3., 3., 3., 3., 3., 3., 3., 3., 3., 3., 3., 3., 3.,  // Cs-Lu (lanthanides use Z=3)
+        4., 5., 6., 7., 8., 9., 10., 11., 12.,                   // Hf-Hg
+        3., 4., 5., 6., 7., 8.                                   // Tl-Rn
     };
 
     // Generate all pairwise repulsion interactions
@@ -1617,10 +1694,11 @@ json GFNFF::generateGFNFFRepulsionPairs() const
             int zi = m_atoms[i] - 1; // 0-indexed
             int zj = m_atoms[j] - 1;
 
-            double repa_i = (zi >= 0 && zi < repa.size()) ? repa[zi] : 2.0;
-            double repa_j = (zj >= 0 && zj < repa.size()) ? repa[zj] : 2.0;
-            double repz_i = (zi >= 0 && zi < repz.size()) ? repz[zi] : 1.0;
-            double repz_j = (zj >= 0 && zj < repz.size()) ? repz[zj] : 1.0;
+            // Phase 4.3: Use complete parameter arrays (86 elements)
+            double repa_i = (zi >= 0 && zi < static_cast<int>(repa_angewChem2020.size())) ? repa_angewChem2020[zi] : 2.0;
+            double repa_j = (zj >= 0 && zj < static_cast<int>(repa_angewChem2020.size())) ? repa_angewChem2020[zj] : 2.0;
+            double repz_i = (zi >= 0 && zi < static_cast<int>(repz.size())) ? repz[zi] : 1.0;
+            double repz_j = (zj >= 0 && zj < static_cast<int>(repz.size())) ? repz[zj] : 1.0;
 
             // Calculate pairwise parameters
             repulsion["alpha"] = std::sqrt(repa_i * repa_j);
@@ -1650,16 +1728,38 @@ json GFNFF::generateGFNFFDispersionPairs() const
 
     json dispersion_pairs = json::array();
 
-    // D3 C6 coefficients (Hartree*Bohr^6) from dftd3.f90
-    // TODO: Replace with D4 geometry-dependent coefficients
-    // For now, using simplified fixed C6 values
+    // Phase 4.3: Complete free-atom C6 coefficients (Hartree*Bohr^6)
+    // Approximate values based on D3/D4 references (Grimme et al.)
+    // NOTE: GFN-FF uses geometry-dependent D4 C6 (future: implement full D4 calculation)
+    // For now: simplified free-atom values for initial implementation
     static const std::vector<double> C6_atomic = {
-        6.5,   // H  (1)
-        1.42,  // He (2)
-        1387.0, 214.0, 99.5, 99.5,  // Li-C (3-6)
-        57.0, 38.0, 24.0, 10.8,     // N-Ne (7-10)
-        // Extend to Z=86 with approximate values
-        // TODO: Use actual D3/D4 parameters
+        // H-He
+        6.50, 1.42,
+        // Li-Ne
+        1387.0, 214.0, 99.5, 46.6, 24.2, 15.6, 9.52, 6.38,
+        // Na-Ar
+        1556.0, 627.0, 528.0, 305.0, 185.0, 134.0, 94.6, 64.3,
+        // K-Ca
+        3897.0, 2221.0,
+        // Sc-Zn
+        1383.0, 1044.0, 832.0, 602.0, 552.0, 482.0, 408.0, 373.0, 253.0, 284.0,
+        // Ga-Kr
+        498.0, 354.0, 246.0, 210.0, 162.0, 129.5,
+        // Rb-Sr
+        4691.0, 3170.0,
+        // Y-Cd
+        1968.0, 1677.0, 1263.0, 1028.0, 1390.0, 1029.0, 1118.0, 1251.0, 1225.0, 1225.0,
+        // In-Xe
+        2896.0, 2290.0, 1896.0, 1830.0, 1612.0, 1416.0,
+        // Cs-Ba
+        6582.0, 5727.0,
+        // La-Lu (lanthanides - approximate values)
+        3884.0, 3708.0, 3551.0, 3410.0, 3280.0, 3163.0, 3056.0, 2958.0, 2868.0, 2785.0,
+        2708.0, 2638.0, 2573.0, 2513.0, 2458.0,
+        // Hf-Hg
+        2051.0, 1877.0, 1659.0, 1529.0, 1414.0, 1305.0, 1206.0, 1118.0, 1037.0, 1185.0,
+        // Tl-Rn
+        3292.0, 3135.0, 2762.0, 2600.0, 2452.0, 2318.0
     };
 
     // GFN-FF specific parameters (from gfnff_param.f90)
