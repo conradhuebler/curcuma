@@ -17,7 +17,7 @@
  *
  */
 
-#ifndef tblite_delete
+#ifdef USE_TBLITE
 // #include "tblite.h"
 #include "tblite/container.h"
 #include "tblite/context.h"

@@ -25,7 +25,9 @@
 #include "src/core/parameter_macros.h"
 #include "src/core/config_manager.h"
 
+#ifdef USE_XTB
 #include "external/xtb/include/xtb.h"
+#endif
 
 // Claude Generated 2025: XTB Parameter Registry - replaces static XTBSettings JSON
 BEGIN_PARAMETER_DEFINITION(xtb)

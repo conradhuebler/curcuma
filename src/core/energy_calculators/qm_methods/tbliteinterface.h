@@ -23,7 +23,7 @@
 #include "src/core/parameter_macros.h"
 #include "src/core/config_manager.h"
 
-#ifndef tblite_delete
+#ifdef USE_TBLITE
 #include "tblite.h"
 #endif
 
