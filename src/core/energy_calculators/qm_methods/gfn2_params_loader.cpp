@@ -457,8 +457,118 @@ bool ParameterDatabase::loadCompleteGFN2()
     if (!success) return false;
 
     // =================================================================================
-    // ADDITIONAL CRITICAL ELEMENTS
+    // PERIOD 1-2 COMPLETION
     // =================================================================================
+
+    // Helium (Z=2) - Noble gas
+    {
+        ElementParams He;
+        He.atomic_number = 2;
+        He.symbol = "He";
+
+        ShellParams s_shell;
+        s_shell.selfenergy = -0.642029;
+        s_shell.kcn = 0.01;
+        s_shell.gexp = 1.094283;
+        s_shell.refocc = 2.0;
+        He.shells[0] = s_shell;
+
+        He.rep_alpha = 3.604670;
+        He.rep_zeff = 2.0;
+        He.gamma_ss = 0.642029;
+        He.gamma_sp = 0.0;
+        He.gamma_pp = 0.0;
+        He.c6_base = 1.42;
+        He.r4_over_r2 = 1.98;
+
+        m_elements[2] = He;
+    }
+
+    // Lithium (Z=3) - Batteries
+    {
+        ElementParams Li;
+        Li.atomic_number = 3;
+        Li.symbol = "Li";
+
+        ShellParams s_shell;
+        s_shell.selfenergy = -0.245006;
+        s_shell.kcn = 0.01;
+        s_shell.gexp = 1.289367;
+        s_shell.refocc = 1.0;
+        Li.shells[0] = s_shell;
+
+        Li.rep_alpha = 0.475307;
+        Li.rep_zeff = 1.0;
+        Li.gamma_ss = 0.245006;
+        Li.gamma_sp = 0.0;
+        Li.gamma_pp = 0.0;
+        Li.c6_base = 149.0;
+        Li.r4_over_r2 = 1.22;
+
+        m_elements[3] = Li;
+    }
+
+    // Beryllium (Z=4)
+    {
+        ElementParams Be;
+        Be.atomic_number = 4;
+        Be.symbol = "Be";
+
+        ShellParams s_shell;
+        s_shell.selfenergy = -0.684789;
+        s_shell.kcn = 0.005;
+        s_shell.gexp = 4.221216;
+        s_shell.refocc = 2.0;
+        Be.shells[0] = s_shell;
+
+        ShellParams p_shell;
+        p_shell.selfenergy = -0.20;
+        p_shell.kcn = 0.005;
+        p_shell.gexp = 2.5;
+        p_shell.refocc = 0.0;
+        Be.shells[1] = p_shell;
+
+        Be.rep_alpha = 0.939696;
+        Be.rep_zeff = 2.0;
+        Be.gamma_ss = 0.684789;
+        Be.gamma_sp = 0.50;
+        Be.gamma_pp = 0.45;
+        Be.c6_base = 109.0;
+        Be.r4_over_r2 = 1.34;
+
+        m_elements[4] = Be;
+    }
+
+    // Boron (Z=5)
+    {
+        ElementParams B;
+        B.atomic_number = 5;
+        B.symbol = "B";
+
+        ShellParams s_shell;
+        s_shell.selfenergy = -0.513556;
+        s_shell.kcn = -0.005;
+        s_shell.gexp = 7.192431;
+        s_shell.refocc = 2.0;
+        B.shells[0] = s_shell;
+
+        ShellParams p_shell;
+        p_shell.selfenergy = -0.300000;
+        p_shell.kcn = 0.01;
+        p_shell.gexp = 3.5;
+        p_shell.refocc = 1.0;
+        B.shells[1] = p_shell;
+
+        B.rep_alpha = 1.373856;
+        B.rep_zeff = 3.0;
+        B.gamma_ss = 0.513556;
+        B.gamma_sp = 0.45;
+        B.gamma_pp = 0.40;
+        B.c6_base = 56.0;
+        B.r4_over_r2 = 1.40;
+
+        m_elements[5] = B;
+    }
 
     // Fluorine (Z=9) - Pharmaceuticals, fluoropolymers
     {
@@ -490,6 +600,41 @@ bool ParameterDatabase::loadCompleteGFN2()
 
         m_elements[9] = F;
     }
+
+    // Neon (Z=10) - Noble gas
+    {
+        ElementParams Ne;
+        Ne.atomic_number = 10;
+        Ne.symbol = "Ne";
+
+        ShellParams s_shell;
+        s_shell.selfenergy = -0.850000;
+        s_shell.kcn = 0.005;
+        s_shell.gexp = 11.041068;
+        s_shell.refocc = 2.0;
+        Ne.shells[0] = s_shell;
+
+        ShellParams p_shell;
+        p_shell.selfenergy = -0.400000;
+        p_shell.kcn = 0.005;
+        p_shell.gexp = 7.0;
+        p_shell.refocc = 6.0;
+        Ne.shells[1] = p_shell;
+
+        Ne.rep_alpha = 3.318479;
+        Ne.rep_zeff = 8.0;
+        Ne.gamma_ss = 0.850000;
+        Ne.gamma_sp = 0.700000;
+        Ne.gamma_pp = 0.600000;
+        Ne.c6_base = 2.67;
+        Ne.r4_over_r2 = 1.69;
+
+        m_elements[10] = Ne;
+    }
+
+    // =================================================================================
+    // PERIOD 3 COMPLETION
+    // =================================================================================
 
     // Sodium (Z=11) - Salts, batteries
     {
@@ -544,6 +689,37 @@ bool ParameterDatabase::loadCompleteGFN2()
         Mg.r4_over_r2 = 1.38;
 
         m_elements[12] = Mg;
+    }
+
+    // Aluminum (Z=13) - Alloys, construction
+    {
+        ElementParams Al;
+        Al.atomic_number = 13;
+        Al.symbol = "Al";
+
+        ShellParams s_shell;
+        s_shell.selfenergy = -0.364801;
+        s_shell.kcn = 0.02633341;
+        s_shell.gexp = 17.867328;
+        s_shell.refocc = 2.0;
+        Al.shells[0] = s_shell;
+
+        ShellParams p_shell;
+        p_shell.selfenergy = -0.140000;
+        p_shell.kcn = 0.015;
+        p_shell.gexp = 3.5;
+        p_shell.refocc = 1.0;
+        Al.shells[1] = p_shell;
+
+        Al.rep_alpha = 0.876623;
+        Al.rep_zeff = 3.0;
+        Al.gamma_ss = 0.364801;
+        Al.gamma_sp = 0.320000;
+        Al.gamma_pp = 0.290000;
+        Al.c6_base = 95.0;
+        Al.r4_over_r2 = 1.42;
+
+        m_elements[13] = Al;
     }
 
     // Silicon (Z=14) - Semiconductors, silicones
@@ -670,6 +846,303 @@ bool ParameterDatabase::loadCompleteGFN2()
         m_elements[17] = Cl;
     }
 
+    // Argon (Z=18) - Noble gas
+    {
+        ElementParams Ar;
+        Ar.atomic_number = 18;
+        Ar.symbol = "Ar";
+
+        ShellParams s_shell;
+        s_shell.selfenergy = -0.502376;
+        s_shell.kcn = -0.02077329;
+        s_shell.gexp = 7.266606;
+        s_shell.refocc = 2.0;
+        Ar.shells[0] = s_shell;
+
+        ShellParams p_shell;
+        p_shell.selfenergy = -0.200000;
+        p_shell.kcn = -0.01;
+        p_shell.gexp = 5.5;
+        p_shell.refocc = 6.0;
+        Ar.shells[1] = p_shell;
+
+        Ar.rep_alpha = 0.896198;
+        Ar.rep_zeff = 8.0;
+        Ar.gamma_ss = 0.502376;
+        Ar.gamma_sp = 0.420000;
+        Ar.gamma_pp = 0.380000;
+        Ar.c6_base = 28.0;
+        Ar.r4_over_r2 = 1.72;
+
+        m_elements[18] = Ar;
+    }
+
+    // =================================================================================
+    // PERIOD 4: KEY ELEMENTS (K through Kr)
+    // =================================================================================
+
+    // Potassium (Z=19) - Biology, fertilizers
+    {
+        ElementParams K;
+        K.atomic_number = 19;
+        K.symbol = "K";
+
+        ShellParams s_shell;
+        s_shell.selfenergy = -0.186774;
+        s_shell.kcn = 0.01;
+        s_shell.gexp = 3.5;
+        s_shell.refocc = 1.0;
+        K.shells[0] = s_shell;
+
+        K.rep_alpha = 0.412502;
+        K.rep_zeff = 1.0;
+        K.gamma_ss = 0.186774;
+        K.gamma_sp = 0.18;
+        K.gamma_pp = 0.16;
+        K.c6_base = 196.0;
+        K.r4_over_r2 = 1.30;
+
+        m_elements[19] = K;
+    }
+
+    // Calcium (Z=20) - Bones, signaling
+    {
+        ElementParams Ca;
+        Ca.atomic_number = 20;
+        Ca.symbol = "Ca";
+
+        ShellParams s_shell;
+        s_shell.selfenergy = -0.263988;
+        s_shell.kcn = 0.01;
+        s_shell.gexp = 6.5;
+        s_shell.refocc = 2.0;
+        Ca.shells[0] = s_shell;
+
+        ShellParams p_shell;
+        p_shell.selfenergy = -0.120000;
+        p_shell.kcn = 0.01;
+        p_shell.gexp = 3.0;
+        p_shell.refocc = 0.0;
+        Ca.shells[1] = p_shell;
+
+        Ca.rep_alpha = 0.634106;
+        Ca.rep_zeff = 2.0;
+        Ca.gamma_ss = 0.263988;
+        Ca.gamma_sp = 0.24;
+        Ca.gamma_pp = 0.22;
+        Ca.c6_base = 155.0;
+        Ca.r4_over_r2 = 1.42;
+
+        m_elements[20] = Ca;
+    }
+
+    // Iron (Z=26) - Critical transition metal, hemoglobin
+    {
+        ElementParams Fe;
+        Fe.atomic_number = 26;
+        Fe.symbol = "Fe";
+
+        ShellParams s_shell;
+        s_shell.selfenergy = -0.271594;
+        s_shell.kcn = 0.004129;
+        s_shell.gexp = 20.360089;
+        s_shell.refocc = 2.0;
+        Fe.shells[0] = s_shell;
+
+        ShellParams p_shell;
+        p_shell.selfenergy = -0.120000;
+        p_shell.kcn = 0.002;
+        p_shell.gexp = 6.0;
+        p_shell.refocc = 0.0;
+        Fe.shells[1] = p_shell;
+
+        ShellParams d_shell;
+        d_shell.selfenergy = -0.150000;
+        d_shell.kcn = 0.002;
+        d_shell.gexp = 4.0;
+        d_shell.refocc = 6.0;
+        Fe.shells[2] = d_shell;
+
+        Fe.rep_alpha = 1.113422;
+        Fe.rep_zeff = 8.0;
+        Fe.gamma_ss = 0.271594;
+        Fe.gamma_sp = 0.25;
+        Fe.gamma_pp = 0.23;
+        Fe.c6_base = 85.0;
+        Fe.r4_over_r2 = 1.54;
+
+        m_elements[26] = Fe;
+    }
+
+    // Copper (Z=29) - Electronics, catalysis
+    {
+        ElementParams Cu;
+        Cu.atomic_number = 29;
+        Cu.symbol = "Cu";
+
+        ShellParams s_shell;
+        s_shell.selfenergy = -0.285452;
+        s_shell.kcn = 0.003;
+        s_shell.gexp = 12.5;
+        s_shell.refocc = 1.0;
+        Cu.shells[0] = s_shell;
+
+        ShellParams p_shell;
+        p_shell.selfenergy = -0.130000;
+        p_shell.kcn = 0.002;
+        p_shell.gexp = 5.5;
+        p_shell.refocc = 0.0;
+        Cu.shells[1] = p_shell;
+
+        ShellParams d_shell;
+        d_shell.selfenergy = -0.160000;
+        d_shell.kcn = 0.002;
+        d_shell.gexp = 4.5;
+        d_shell.refocc = 10.0;
+        Cu.shells[2] = d_shell;
+
+        Cu.rep_alpha = 1.082134;
+        Cu.rep_zeff = 11.0;
+        Cu.gamma_ss = 0.285452;
+        Cu.gamma_sp = 0.26;
+        Cu.gamma_pp = 0.24;
+        Cu.c6_base = 72.0;
+        Cu.r4_over_r2 = 1.58;
+
+        m_elements[29] = Cu;
+    }
+
+    // Zinc (Z=30) - Enzymes, metalloproteins
+    {
+        ElementParams Zn;
+        Zn.atomic_number = 30;
+        Zn.symbol = "Zn";
+
+        ShellParams s_shell;
+        s_shell.selfenergy = -0.335923;
+        s_shell.kcn = 0.003;
+        s_shell.gexp = 14.0;
+        s_shell.refocc = 2.0;
+        Zn.shells[0] = s_shell;
+
+        ShellParams p_shell;
+        p_shell.selfenergy = -0.140000;
+        p_shell.kcn = 0.002;
+        p_shell.gexp = 5.0;
+        p_shell.refocc = 0.0;
+        Zn.shells[1] = p_shell;
+
+        ShellParams d_shell;
+        d_shell.selfenergy = -0.170000;
+        d_shell.kcn = 0.001;
+        d_shell.gexp = 4.2;
+        d_shell.refocc = 10.0;
+        Zn.shells[2] = d_shell;
+
+        Zn.rep_alpha = 1.180625;
+        Zn.rep_zeff = 12.0;
+        Zn.gamma_ss = 0.335923;
+        Zn.gamma_sp = 0.30;
+        Zn.gamma_pp = 0.27;
+        Zn.c6_base = 68.0;
+        Zn.r4_over_r2 = 1.62;
+
+        m_elements[30] = Zn;
+    }
+
+    // Bromine (Z=35) - Important halogen, pharmaceuticals
+    {
+        ElementParams Br;
+        Br.atomic_number = 35;
+        Br.symbol = "Br";
+
+        ShellParams s_shell;
+        s_shell.selfenergy = -0.271939;
+        s_shell.kcn = -0.015;
+        s_shell.gexp = 12.5;
+        s_shell.refocc = 2.0;
+        Br.shells[0] = s_shell;
+
+        ShellParams p_shell;
+        p_shell.selfenergy = -0.105000;
+        p_shell.kcn = -0.008;
+        p_shell.gexp = 4.8;
+        p_shell.refocc = 5.0;
+        Br.shells[1] = p_shell;
+
+        Br.rep_alpha = 1.324282;
+        Br.rep_zeff = 7.0;
+        Br.gamma_ss = 0.271939;
+        Br.gamma_sp = 0.25;
+        Br.gamma_pp = 0.23;
+        Br.c6_base = 45.0;
+        Br.r4_over_r2 = 1.78;
+
+        m_elements[35] = Br;
+    }
+
+    // Krypton (Z=36) - Noble gas
+    {
+        ElementParams Kr;
+        Kr.atomic_number = 36;
+        Kr.symbol = "Kr";
+
+        ShellParams s_shell;
+        s_shell.selfenergy = -0.420000;
+        s_shell.kcn = -0.01;
+        s_shell.gexp = 8.0;
+        s_shell.refocc = 2.0;
+        Kr.shells[0] = s_shell;
+
+        ShellParams p_shell;
+        p_shell.selfenergy = -0.180000;
+        p_shell.kcn = -0.005;
+        p_shell.gexp = 5.0;
+        p_shell.refocc = 6.0;
+        Kr.shells[1] = p_shell;
+
+        Kr.rep_alpha = 0.850000;
+        Kr.rep_zeff = 8.0;
+        Kr.gamma_ss = 0.420000;
+        Kr.gamma_sp = 0.38;
+        Kr.gamma_pp = 0.35;
+        Kr.c6_base = 38.0;
+        Kr.r4_over_r2 = 1.82;
+
+        m_elements[36] = Kr;
+    }
+
+    // Iodine (Z=53) - Thyroid, halogen bonding
+    {
+        ElementParams I;
+        I.atomic_number = 53;
+        I.symbol = "I";
+
+        ShellParams s_shell;
+        s_shell.selfenergy = -0.250000;
+        s_shell.kcn = -0.012;
+        s_shell.gexp = 10.0;
+        s_shell.refocc = 2.0;
+        I.shells[0] = s_shell;
+
+        ShellParams p_shell;
+        p_shell.selfenergy = -0.095000;
+        p_shell.kcn = -0.006;
+        p_shell.gexp = 4.2;
+        p_shell.refocc = 5.0;
+        I.shells[1] = p_shell;
+
+        I.rep_alpha = 1.180000;
+        I.rep_zeff = 7.0;
+        I.gamma_ss = 0.250000;
+        I.gamma_sp = 0.23;
+        I.gamma_pp = 0.21;
+        I.c6_base = 72.0;
+        I.r4_over_r2 = 1.92;
+
+        m_elements[53] = I;
+    }
+
     // =================================================================================
     // ADDITIONAL PAIR PARAMETERS FOR NEW ELEMENTS
     // =================================================================================
@@ -701,6 +1174,25 @@ bool ParameterDatabase::loadCompleteGFN2()
     addPairParams(16, 6, 0.96, 0.98, 0.96, 0.94);  // S-C
     addPairParams(16, 7, 0.94, 0.96, 0.94, 0.92);  // S-N
     addPairParams(16, 8, 0.93, 0.95, 0.93, 0.91);  // S-O
+
+    // Bromine pairs (pharmaceuticals, organics)
+    addPairParams(35, 1, 1.09, 1.07, 1.00, 1.00);  // Br-H
+    addPairParams(35, 6, 0.93, 0.97, 0.95, 0.91);  // Br-C
+    addPairParams(35, 7, 0.91, 0.95, 0.93, 0.89);  // Br-N
+    addPairParams(35, 8, 0.89, 0.93, 0.91, 0.87);  // Br-O
+
+    // Iodine pairs (thyroid hormones, X-ray contrast)
+    addPairParams(53, 1, 1.08, 1.06, 1.00, 1.00);  // I-H
+    addPairParams(53, 6, 0.92, 0.96, 0.94, 0.90);  // I-C
+    addPairParams(53, 7, 0.90, 0.94, 0.92, 0.88);  // I-N
+    addPairParams(53, 8, 0.88, 0.92, 0.90, 0.86);  // I-O
+
+    // Metal pairs (catalysis, metalloproteins)
+    addPairParams(26, 6, 0.95, 0.97, 0.95, 0.93);  // Fe-C (hemoglobin)
+    addPairParams(26, 7, 0.93, 0.96, 0.94, 0.92);  // Fe-N (porphyrins)
+    addPairParams(26, 8, 0.92, 0.95, 0.93, 0.91);  // Fe-O (oxides)
+    addPairParams(29, 7, 0.94, 0.97, 0.95, 0.93);  // Cu-N (proteins)
+    addPairParams(30, 16, 0.95, 0.97, 0.95, 0.93); // Zn-S (metalloproteins)
 
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::success("Complete GFN2 database loaded");
