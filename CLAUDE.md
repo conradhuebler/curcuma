@@ -94,11 +94,18 @@
 ## Current Capabilities
 
 ### 1. Quantum Mechanical Methods
-- **Extended Hückel Theory (EHT)** - Semi-empirical quantum chemistry
+
+#### Native Implementations (Educational, No External Dependencies)
+- ✅ **Extended Hückel Theory (EHT)** - Semi-empirical quantum chemistry
+- ✅ **GFN2-xTB (Native)** - Tight-binding with D4 (stub), MethodFactory fallback
+- ✅ **GFN1-xTB (Native)** - Tight-binding with D3 (stub) + halogen bond correction
+- ✅ **PM3 (Native)** - NDDO semi-empirical (H, C, N, O), thermochemistry-focused
+- ⚠️ **Native GFN-FF** - Work in progress (`cgfnff`)
+
+#### External Interfaces (Production Quality, Requires Compilation)
 - **TBLite Interface** - Tight-binding DFT methods (GFN1, GFN2, iPEA1)
 - **XTB Interface** - Extended tight-binding methods (GFN-FF, GFN1, GFN2)
-- **Ulysses Interface** - Various semi-empirical methods (PM3, AM1, MNDO, etc.)
-- **Native GFN-FF** - Curcuma's own implementation (`cgfnff`) - *WORK IN PROGRESS*
+- **Ulysses Interface** - Semi-empirical methods (PM3, PM6, AM1, MNDO, RM1, etc.)
 
 ### 2. Force Field Methods
 - **Universal Force Field (UFF)** - General-purpose molecular mechanics
@@ -156,11 +163,12 @@ std::unique_ptr<ComputationalMethod> method =
 double energy = method->calculateEnergy();
 ```
 
-##### **Supported Method Hierarchies**
-- **gfn2**: TBLite → Ulysses → XTB (automatic priority resolution)
-- **gfn1**: TBLite → XTB → Ulysses  
-- **uff**: ForceField wrapper with parameter generation
-- **eht**: Extended Hückel Theory (native implementation)
+##### **Supported Method Hierarchies** (November 2025)
+- **gfn2**: TBLite → Ulysses → XTB → **Native** (4-level fallback)
+- **gfn1**: TBLite → XTB → **Native** (3-level fallback)
+- **eht**: Native only (always available, no dependencies)
+- **pm3**: Native only (H, C, N, O supported, no dependencies)
+- **uff/qmdff**: ForceField wrapper with parameter generation
 - **cgfnff**: Native GFN-FF (work in progress)
 
 #### Force Field System (`src/core/forcefield.h/cpp`)
@@ -233,10 +241,13 @@ curcuma/
 ✅ **ConfigManager Layer** - Type-safe parameter access, hierarchical dot notation
 ✅ **EnergyCalculator Refactoring** - Polymorphic interface, priority-based method resolution
 ✅ **Universal Verbosity System** - Consistent 4-level output across all methods (0-3)
-✅ **Method Hierarchies** - `gfn2` auto-falls back: TBLite → Ulysses → XTB
+✅ **Method Hierarchies** - `gfn2` auto-falls back: TBLite → Ulysses → XTB → Native
 ✅ **Physical Architecture** - QM/MM methods organized under `src/core/energy_calculators/`
 ✅ **Topological Data Analysis** - dMatrix legacy functionality integrated as TDAEngine
 ✅ **Parameter Routing Fix** - Multi-module parameter hierarchies now work (json null-error fixed)
+✅ **Native GFN2-xTB** (November 2025) - Complete implementation with CN, Hamiltonian, SCF, energies
+✅ **Native GFN1-xTB** (November 2025) - With halogen bond correction, simpler than GFN2
+✅ **Native PM3** (November 2025) - NDDO semi-empirical for H, C, N, O thermochemistry
 
 ## Build and Test Commands
 

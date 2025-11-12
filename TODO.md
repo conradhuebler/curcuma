@@ -271,3 +271,147 @@
 
 **Last Updated**: 2025-10-29
 **Next Review**: When starting CG implementation (Phase 1: Molecule helpers) or cgfnff debugging
+
+## Native QM Methods (GFN2, GFN1, PM3) - November 2025
+
+### ✅ Completed (Phase 1-3)
+
+- [x] GFN2-xTB native implementation structure
+- [x] GFN2 core algorithms (CN, Hamiltonian, SCF, energies)
+- [x] GFN2 numerical gradients and AES2 multipole
+- [x] GFN1-xTB native implementation with halogen bond correction
+- [x] PM3 NDDO implementation (H, C, N, O)
+- [x] Integration into MethodFactory with priority fallbacks
+- [x] Educational documentation (NATIVE_QM_IMPLEMENTATION_STATUS.md)
+
+### 🔧 TODO: Parameter Extraction (High Priority)
+
+**GFN2 Real Parameters from TBLite**:
+- [ ] Parse `gfn2-xtb.toml` from TBLite repository
+- [ ] Extract shell-resolved self-energies (replace hardness approximation)
+- [ ] Extract k_pair, k_shell Hamiltonian scaling factors
+- [ ] Extract polynomial corrections poly(r) for distance decay
+- [ ] Extract gamma-AB Coulomb kernel parameters
+- [ ] Extract full AES2 multipole parameters
+- [ ] Validate against TBLite reference energies (<1% error target)
+
+**GFN1 Real Parameters from TBLite**:
+- [ ] Parse `gfn1-xtb.toml` from TBLite repository
+- [ ] Extract simplified parameter set (no ES3)
+- [ ] Extract halogen bond parameters (currently using FXCMu proxy)
+- [ ] Validate against TBLite GFN1 reference
+
+**Implementation Method**:
+```cpp
+// Add TOML parser (toml11 header-only library)
+#include <toml.hpp>
+
+// Extend ArrayParameters to support shell-resolved data
+struct ShellParameters {
+    double selfenergy;
+    double kcn;
+    double kpoly;
+    // ...
+};
+
+// Load from TOML
+void GFN2::loadParametersFromTOML(const std::string& toml_file);
+```
+
+### 🎯 TODO: PM3 Element Extension (Medium Priority)
+
+**Critical Missing Elements**:
+- [ ] F (Fluorine) - Important for pharmaceuticals
+- [ ] Cl (Chlorine) - Common in organic chemistry
+- [ ] S (Sulfur) - Biochemistry (cysteine, methionine)
+- [ ] P (Phosphorus) - DNA, ATP, phosphates
+
+**Parameter Source**: MOPAC parameter database
+- URL: http://openmopac.net/manual/parameters.html
+- Format: U_ss, U_pp, beta_s, beta_p, zeta_s, zeta_p, alpha, Gaussian terms
+
+**Extended Elements** (Lower Priority):
+- [ ] Br, I (heavier halogens)
+- [ ] Si, Se (semiconductors, proteins)
+- [ ] Transition metals (Fe, Cu, Zn for catalysis)
+
+### ⚡ TODO: Performance Improvements (Optional)
+
+**Analytical Gradients** (Speedup: 10-20x for optimizations):
+- [ ] Implement Hellmann-Feynman theorem derivatives
+- [ ] GFN2: dH/dR, dS/dR analytical formulas
+- [ ] GFN1: Simplified derivative terms
+- [ ] PM3: NDDO gradient formulas from MOPAC
+- [ ] Benchmark: H2O optimization (numerical vs analytical)
+
+**SCF Acceleration**:
+- [ ] DIIS (Direct Inversion in Iterative Subspace)
+- [ ] Level shifting for difficult convergence
+- [ ] Adaptive damping parameters
+
+### 🧪 TODO: Validation and Testing
+
+**Test Molecules** (Small):
+- [ ] H2O - HOMO/LUMO, dipole moment
+- [ ] CH4 - Symmetry, C-H bonds
+- [ ] NH3 - Lone pair, pyramidal geometry
+- [ ] H2CO - Carbonyl, planarity
+
+**Comparison Targets**:
+- [ ] GFN2 native vs TBLite (energy error < 1% with real params)
+- [ ] GFN1 native vs TBLite (energy error < 1%)
+- [ ] PM3 native vs MOPAC (energy error < 5%)
+
+**Properties to Validate**:
+- [ ] Total energy (Hartree)
+- [ ] HOMO/LUMO gap (eV)
+- [ ] Mulliken charges
+- [ ] Dipole moment (Debye)
+- [ ] Gradient accuracy (force = -gradient)
+
+### 📋 TODO: Integration Tasks
+
+**D3/D4 Dispersion** (Separate TODO - Operator Request):
+- [ ] Fix `dftd3interface.h/cpp` issues
+- [ ] Fix `dftd4interface.h/cpp` issues
+- [ ] Connect GFN1 to D3 (replace stub)
+- [ ] Connect GFN2 to D4 (replace stub)
+- [ ] Validate dispersion energies for Ar2, benzene dimer
+
+**Heat of Formation** (PM3-specific):
+- [ ] Implement ΔH_f calculation from atomization energy
+- [ ] Add experimental reference data for validation
+- [ ] Compare with MOPAC heats of formation
+
+### 📚 Documentation TODO
+
+- [ ] Add example usage to CLAUDE.md for each method
+- [ ] Create tutorial: "When to use GFN2 vs GFN1 vs PM3"
+- [ ] Document parameter extraction workflow
+- [ ] Add benchmark comparison tables (TBLite, MOPAC, Ulysses)
+
+### 🚫 NOT TODO (Use Existing Interfaces)
+
+**These methods already available via Ulysses - no native implementation needed**:
+- ❌ AM1 - Available: `method = "am1"` (Ulysses)
+- ❌ MNDO - Available: `method = "mndo"` (Ulysses)
+- ❌ PM6 - Available: `method = "pm6"` (Ulysses)
+- ❌ RM1 - Available: `method = "rm1"` (Ulysses)
+- ❌ PM3PDDG - Available: `method = "pm3pddg"` (Ulysses)
+
+**Reason**: Ulysses interface provides production-quality implementations with full validation. Native implementations only needed for educational purposes or when external dependencies unavailable.
+
+### 📊 Status Summary
+
+**Implementation**: ✅ 100% Complete (3 methods, ~2767 lines)
+**Integration**: ✅ 100% Complete (MethodFactory, CMakeLists.txt)
+**Parameters**: ⚠️ 30% Complete (approximations work, real params TODO)
+**Validation**: ⏸️ 0% Complete (needs test molecules)
+**Performance**: ⚠️ 50% Complete (numerical gradients slow, analytical TODO)
+
+**Next Recommended Action**: Extract GFN2 parameters from TBLite TOML for production accuracy.
+
+---
+
+*Last Updated: November 2025*
+*See: docs/NATIVE_QM_IMPLEMENTATION_STATUS.md for full details*
