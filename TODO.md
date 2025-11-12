@@ -81,18 +81,22 @@
   - **CLI Test** (cli/cg/01_single_point): End-to-end single point energy
   - **Integration Data**: simple_beads.vtf, mc_cg_chain/ with full documentation
 
-### 🟡 CG Integration - Phase 5: SimpleMD CG Integration (NEW - PENDING)
-- **Status**: ⏳ PENDING
-- **Priority**: 🔴 HIGH - Completes CG functionality
-- **Task**: Add CG-aware features to SimpleMD for efficient MD simulations
-- **Betroffene Dateien**: src/capabilities/simplemd.cpp/h
-- **Aufwand**: ~2-3 h
-- **Details**:
-  - System type detection (CG vs atomic vs mixed)
-  - PBC wrapping for periodic boundary conditions
-  - Timestep scaling (10x larger for pure CG systems)
-  - Orientational dynamics infrastructure (for ellipsoids)
-  - CLI test: simplemd/08_cg_spheres
+### ✅ CG Integration - Phase 5: SimpleMD CG Integration (COMPLETE - November 2025)
+- **Status**: ✅ DONE
+- **Completion**: Full integration in simplemd.cpp/h and molecule.cpp/h
+- **Features**:
+  - ✅ System type detection (CG vs atomic vs mixed)
+  - ✅ PBC wrapping for periodic boundary conditions (already implemented)
+  - ✅ Timestep scaling (10x larger for pure CG systems)
+  - ✅ Orientational dynamics infrastructure (prepared for Phase 6 ellipsoids)
+  - ✅ VTF trajectory output for CG systems
+  - ✅ CLI test: simplemd/08_cg_spheres with enhanced validation
+- **Implementation Details**:
+  - CG Parameters: `cg_write_vtf`, `cg_timestep_scaling`, `cg_timestep_factor` in PARAM block
+  - Orientational arrays: `m_cg_orientations`, `m_cg_angular_velocities` (prepared, not activated)
+  - VTF Writer: `Molecule::appendVTFFile()` with first-frame structure definition
+  - WriteGeometry() enhanced with conditional VTF trajectory output
+  - Initialization: Orientational infrastructure allocated but not used (m_cg_enable_rotation = false)
 
 ### 🔵 CG Potentials - Phase 6: Ellipsoidal Extensions (OPTIONAL - LOWEST PRIORITY)
 - **Status**: 🟡 PREPARED
@@ -248,14 +252,14 @@
 | Priority | Component | Count | Status |
 |----------|-----------|-------|--------|
 | 🔴 KRITISCH | None | 0 | ✅ ALL RESOLVED |
-| 🔴 HIGH (CG Phase 5) | SimpleMD CG Integration | 1 | ⏳ PENDING |
+| 🟢 DONE (CG Phase 5) | SimpleMD CG Integration | 1 | ✅ COMPLETE |
 | 🟢 DONE (CG Phases 1-4) | CG Core + VTF + Testing | 4 | ✅ COMPLETE |
 | 🔵 LOW (CG Phase 6) | Ellipsoidal Extensions | 1 | 🟡 PREPARED |
 | 🟡 TESTING | Scientific validation | 4 | ⏳ PENDING |
 | 🟢 CORE | Parameter/Memory/Units | 4 | ⏳ PENDING |
 | 🔵 CAPABILITIES | Confscan/RMSD/SimpleMD Physics | 4 | ⏳ PENDING |
 | 🟣 REFACTORING | Molecule Phase 2-6 | 5 | ⏳ PLANNED |
-| **TOTAL** | | **23** | **4 ✅ + 17 ⏳ + 2 🟡** |
+| **TOTAL** | | **23** | **5 ✅ + 16 ⏳ + 2 🟡** |
 
 ---
 
