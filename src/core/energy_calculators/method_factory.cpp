@@ -26,6 +26,7 @@
 #include "qm_methods/dispersion_method.h"
 #include "qm_methods/eht_method.h"
 #include "qm_methods/external_gfnff_method.h"
+#include "qm_methods/gfn2_method.h"
 #include "qm_methods/gfnff_method.h"
 #include "qm_methods/tblite_method.h"
 #include "qm_methods/ulysses_method.h"
@@ -126,14 +127,14 @@ bool MethodFactory::hasD4() {
 
 const std::vector<MethodFactory::MethodPriority>& MethodFactory::getPriorityMethods() {
     static const std::vector<MethodPriority> priority_methods = {
-        // GFN2: Priority TBLite > Ulysses > XTB > Native (future)
+        // GFN2: Priority TBLite > Ulysses > XTB > Native
         {
             "gfn2",
             {
                 { "TBLite", [](const json& config) { return hasTBLite() ? std::make_unique<TBLiteMethod>("gfn2", config) : nullptr; } },
                 { "Ulysses", [](const json& config) { return hasUlysses() ? std::make_unique<UlyssesMethod>("ugfn2", config) : nullptr; } },
-                { "XTB", [](const json& config) { return hasXTB() ? std::make_unique<XTBMethod>("gfn2", config) : nullptr; } }
-                // TODO: Add native GFN2 when implemented
+                { "XTB", [](const json& config) { return hasXTB() ? std::make_unique<XTBMethod>("gfn2", config) : nullptr; } },
+                { "Native", [](const json& config) { return std::make_unique<GFN2Method>(config); } }
             } },
 
         // GFN1: Priority TBLite > XTB > Native (future)
