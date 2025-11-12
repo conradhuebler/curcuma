@@ -204,6 +204,123 @@ double calculateDispersionEnergy() const {
 
 ---
 
+## 🔗 Ulysses Interface - Semi-empirische Methoden
+
+**Status**: ✅ **Bereits vollständig verfügbar** - keine native Implementation notwendig!
+**Interface-Dateien**: `ulyssesinterface.h/cpp`, `ulysses_method.h/cpp`
+
+Ulysses bietet eine umfassende Bibliothek von semi-empirischen NDDO-basierten Methoden, die direkt in Curcuma nutzbar sind. Für diese Methoden ist **keine native Implementation nötig** - das Ulysses-Interface ist bereits vollständig integriert.
+
+### Verfügbare Methoden (27 Varianten)
+
+#### Base Methods (9 Methoden)
+
+| Method | Name | Features | Anwendung |
+|--------|------|----------|-----------|
+| **ugfn2** | GFN2 via Ulysses | Tight-Binding DFT | Allgemeine organische Moleküle |
+| **pm6** | Parametric Method 6 | Modern, 70+ Elemente | Breiteste Element-Abdeckung |
+| **am1** | Austin Model 1 | H-Bindungen optimiert | Organische Chemie |
+| **pm3** | Parametric Method 3 | Thermochemie-fokussiert | Heats of Formation |
+| **mndo** | Modified NDDO | Klassische NDDO-Methode | Vergleichsstudien |
+| **mndod** | MNDO/d | Mit d-Orbitalen | Metalle, Hypervalenz |
+| **rm1** | Recife Model 1 | Verbesserte Parameter | Brasilien-Parameter-Set |
+| **pm3pddg** | PM3 with PDDG | Pair-Distance Dependent Gauss | Verbesserte Genauigkeit |
+| **mndopddg** | MNDO with PDDG | PDDG-Parameter | MNDO-Erweiterung |
+| **pm3bp** | PM3 BioPolymers | Biopolymer-Parameter | Proteine, DNA |
+
+#### Correction Modes (3 Modi pro Base-Method)
+
+| Suffix | Name | Beschreibung |
+|--------|------|--------------|
+| *(none)* | Base Method | Ohne Korrekturen |
+| **-d3h4x** | D3 + H4 + X | D3-Dispersion + H4-Correction + Halogen Bonding |
+| **-d3h+** | D3 + H+ | D3-Dispersion + Enhanced Hydrogen Bonding |
+
+**Total**: 9 base methods × 3 variants = **27 Ulysses methods**
+
+### Usage Examples
+
+#### Basic Usage
+
+```cpp
+// PM6 with default settings
+auto method = MethodFactory::createMethod("pm6", json{});
+method->setMolecule(molecule);
+double energy = method->calculateEnergy();
+
+// AM1 with D3H4X corrections (dispersion + H-bonding)
+auto method_corrected = MethodFactory::createMethod("am1-d3h4x", json{});
+```
+
+#### CLI Usage
+
+```bash
+# PM6 single point calculation
+curcuma -sp molecule.xyz -method pm6
+
+# AM1 geometry optimization with corrections
+curcuma -opt molecule.xyz -method am1-d3h4x
+
+# MNDO with D3H+ (enhanced H-bonding)
+curcuma -sp water_cluster.xyz -method mndo-d3h+
+
+# PM3PDDG (improved accuracy)
+curcuma -sp aspirin.xyz -method pm3pddg
+```
+
+#### Advanced Configuration
+
+```cpp
+json config = {
+    {"scf_max_iterations", 200},
+    {"electronic_temperature", 300.0},  // Kelvin
+    {"solvent", "water"},               // Implicit solvation
+    {"multiplicity", 1}
+};
+
+auto method = MethodFactory::createMethod("pm6-d3h4x", config);
+```
+
+### Performance Characteristics
+
+| Method | Speed | Accuracy | Element Coverage |
+|--------|-------|----------|------------------|
+| **ugfn2** | Fast | High | H-Rn (86 elements) |
+| **pm6** | Fast | Good | 70+ elements |
+| **am1** | Very Fast | Good (organics) | H, C, N, O, F, P, S, Cl, Br |
+| **pm3** | Very Fast | Good (ΔHf) | H-Cl, Br, I |
+| **mndo** | Very Fast | Moderate | H-Cl |
+| **pm3pddg** | Fast | Improved | Extended |
+
+### Method Selection Guide
+
+**Use Ulysses (nicht native) für**:
+- ✅ AM1, MNDO, PM6 - etablierte Methoden mit breiter Parameterabdeckung
+- ✅ PM3PDDG, RM1 - verbesserte Parametrisierungen
+- ✅ D3H4X/D3H+ Korrekturen - nichtbindende Wechselwirkungen wichtig
+- ✅ Solvation - implizite Lösungsmittelmodelle nötig
+
+**Use Native Implementation (PM3, GFN1/GFN2) für**:
+- 📚 Educational purposes - Algorithmus-Verständnis
+- 🔬 Method development - Parameter-Experimente
+- 🐛 Debugging - Volle Kontrolle über Code
+- 📖 Teaching - Transparente Implementation
+
+### Known Limitations
+
+1. **External Dependency**: Ulysses muss kompiliert sein (`USE_ULYSSES=ON`)
+2. **Binary Dependency**: Keine vollständige Quellcode-Kontrolle wie bei nativen Methoden
+3. **Debug Access**: Begrenzte Einsicht in interne Algorithmus-Schritte
+
+### Reference Implementation
+
+Ulysses ist ein externes Projekt, das in Curcuma integriert ist:
+- **Repository**: External Ulysses library
+- **License**: Check Ulysses documentation
+- **Integration**: `src/core/energy_calculators/qm_methods/interface/ulysses.h/cpp`
+
+---
+
 ## ❌ Noch NICHT Implementierte Methoden
 
 ### AM1 (Austin Model 1)

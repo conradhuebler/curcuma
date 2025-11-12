@@ -248,6 +248,8 @@ curcuma/
 ✅ **Native GFN2-xTB** (November 2025) - Complete implementation with CN, Hamiltonian, SCF, energies
 ✅ **Native GFN1-xTB** (November 2025) - With halogen bond correction, simpler than GFN2
 ✅ **Native PM3** (November 2025) - NDDO semi-empirical for H, C, N, O thermochemistry
+✅ **GFN2 Parameter Loader** (November 2025) - Infrastructure for TBLite TOML extraction with real parameters (H, C, N, O)
+✅ **Ulysses Methods Documentation** (November 2025) - Complete guide: 27 semi-empirical methods (AM1, MNDO, PM6, RM1, etc.)
 
 ## Build and Test Commands
 

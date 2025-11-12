@@ -274,7 +274,7 @@
 
 ## Native QM Methods (GFN2, GFN1, PM3) - November 2025
 
-### ✅ Completed (Phase 1-3)
+### ✅ Completed (Phase 1-4)
 
 - [x] GFN2-xTB native implementation structure
 - [x] GFN2 core algorithms (CN, Hamiltonian, SCF, energies)
@@ -283,40 +283,37 @@
 - [x] PM3 NDDO implementation (H, C, N, O)
 - [x] Integration into MethodFactory with priority fallbacks
 - [x] Educational documentation (NATIVE_QM_IMPLEMENTATION_STATUS.md)
+- [x] **Parameter loader infrastructure** (`gfn2_params_loader.h/cpp`) with real TBLite parameters (H, C, N, O)
+- [x] **Ulysses methods documentation** - Complete guide for 27 semi-empirical methods (AM1, MNDO, PM6, etc.)
 
-### 🔧 TODO: Parameter Extraction (High Priority)
+### 🔧 TODO: Parameter Expansion (Medium Priority)
 
-**GFN2 Real Parameters from TBLite**:
-- [ ] Parse `gfn2-xtb.toml` from TBLite repository
-- [ ] Extract shell-resolved self-energies (replace hardness approximation)
-- [ ] Extract k_pair, k_shell Hamiltonian scaling factors
-- [ ] Extract polynomial corrections poly(r) for distance decay
-- [ ] Extract gamma-AB Coulomb kernel parameters
-- [ ] Extract full AES2 multipole parameters
-- [ ] Validate against TBLite reference energies (<1% error target)
+**Files**: `gfn2_params_loader.cpp`, `gfn2_params_loader.h`
+**Status**: ✅ Infrastructure complete, ⏳ Extension needed
+
+**GFN2 Real Parameters from TBLite** (Foundation ✅, Extension needed):
+- [x] ✅ Parameter loader class structure (`ParameterDatabase`)
+- [x] ✅ Shell-resolved parameter structures (`ShellParams`, `ElementParams`, `PairParams`)
+- [x] ✅ Hardcoded real parameters for H, C, N, O
+- [x] ✅ Element-pair specific Hamiltonian scaling (C-H, C-C, C-N, C-O, N-H, O-H)
+- [ ] ⏳ Full TOML parser implementation (currently: stub)
+- [ ] ⏳ Complete periodic table coverage (currently: H, C, N, O only)
+- [ ] ⏳ Extract polynomial corrections poly(r) for all pairs
+- [ ] ⏳ Extract complete gamma-AB Coulomb kernel parameters
+- [ ] ⏳ Extract full AES2 multipole parameters (quadrupoles)
+- [ ] ⏳ Validate against TBLite reference energies (<1% error target)
 
 **GFN1 Real Parameters from TBLite**:
-- [ ] Parse `gfn1-xtb.toml` from TBLite repository
+- [ ] Create `gfn1_params_loader.h/cpp` (analogous structure)
 - [ ] Extract simplified parameter set (no ES3)
-- [ ] Extract halogen bond parameters (currently using FXCMu proxy)
+- [ ] Extract halogen bond parameters for F, Cl, Br, I, At
 - [ ] Validate against TBLite GFN1 reference
 
-**Implementation Method**:
-```cpp
-// Add TOML parser (toml11 header-only library)
-#include <toml.hpp>
-
-// Extend ArrayParameters to support shell-resolved data
-struct ShellParameters {
-    double selfenergy;
-    double kcn;
-    double kpoly;
-    // ...
-};
-
-// Load from TOML
-void GFN2::loadParametersFromTOML(const std::string& toml_file);
-```
+**Implementation Notes**:
+- ✅ Foundation in place: See `gfn2_params_loader.cpp:41-318`
+- ✅ Educational transparency: Comments explain each parameter's physical meaning
+- ⏳ Next step: Implement `parseSimpleTOML()` or use external TOML library (toml11)
+- ⏳ Alternative: Continue hardcoding parameters from TBLite source for remaining elements
 
 ### 🎯 TODO: PM3 Element Extension (Medium Priority)
 
