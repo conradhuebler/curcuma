@@ -26,6 +26,7 @@
 #include "qm_methods/dispersion_method.h"
 #include "qm_methods/eht_method.h"
 #include "qm_methods/external_gfnff_method.h"
+#include "qm_methods/gfn1_method.h"
 #include "qm_methods/gfn2_method.h"
 #include "qm_methods/gfnff_method.h"
 #include "qm_methods/tblite_method.h"
@@ -137,13 +138,13 @@ const std::vector<MethodFactory::MethodPriority>& MethodFactory::getPriorityMeth
                 { "Native", [](const json& config) { return std::make_unique<GFN2Method>(config); } }
             } },
 
-        // GFN1: Priority TBLite > XTB > Native (future)
+        // GFN1: Priority TBLite > XTB > Native
         {
             "gfn1",
             {
                 { "TBLite", [](const json& config) { return hasTBLite() ? std::make_unique<TBLiteMethod>("gfn1", config) : nullptr; } },
-                { "XTB", [](const json& config) { return hasXTB() ? std::make_unique<XTBMethod>("xtb-gfn1", config) : nullptr; } }
-                // TODO: Add native GFN1 when implemented
+                { "XTB", [](const json& config) { return hasXTB() ? std::make_unique<XTBMethod>("xtb-gfn1", config) : nullptr; } },
+                { "Native", [](const json& config) { return std::make_unique<GFN1Method>(config); } }
             } },
 
         // IPEA1: TBLite only
