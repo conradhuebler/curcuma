@@ -254,6 +254,8 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/eht_method.cpp
         src/core/energy_calculators/qm_methods/gfn1_method.cpp
         src/core/energy_calculators/qm_methods/gfn2_method.cpp
+        src/core/energy_calculators/qm_methods/pm3.cpp
+        src/core/energy_calculators/qm_methods/pm3_method.cpp
         src/core/energy_calculators/qm_methods/gfnff_method.cpp
         src/core/energy_calculators/qm_methods/xtb_method.cpp
         src/core/energy_calculators/qm_methods/tblite_method.cpp
