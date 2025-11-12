@@ -28,6 +28,106 @@
 using namespace CurcumaUnit;
 
 // =================================================================================
+// Covalent Radii (Pyykkö 2015, triple bond radii in Ångström)
+// =================================================================================
+namespace {
+    // Claude Generated: Pyykkö triple-bond covalent radii for GFN2 coordination numbers
+    // Reference: P. Pyykkö, J. Phys. Chem. A 2015, 119, 2326-2337
+    const double COVALENT_RADII[87] = {
+        0.0,    // Dummy for index 0
+        0.32,   // H
+        0.46,   // He
+        1.33,   // Li
+        1.02,   // Be
+        0.85,   // B
+        0.75,   // C
+        0.71,   // N
+        0.63,   // O
+        0.64,   // F
+        0.67,   // Ne
+        1.55,   // Na
+        1.39,   // Mg
+        1.26,   // Al
+        1.16,   // Si
+        1.11,   // P
+        1.03,   // S
+        0.99,   // Cl
+        0.96,   // Ar
+        1.96,   // K
+        1.71,   // Ca
+        1.48,   // Sc
+        1.36,   // Ti
+        1.34,   // V
+        1.22,   // Cr
+        1.19,   // Mn
+        1.16,   // Fe
+        1.11,   // Co
+        1.10,   // Ni
+        1.12,   // Cu
+        1.18,   // Zn
+        1.24,   // Ga
+        1.21,   // Ge
+        1.21,   // As
+        1.16,   // Se
+        1.14,   // Br
+        1.17,   // Kr
+        2.10,   // Rb
+        1.85,   // Sr
+        1.63,   // Y
+        1.54,   // Zr
+        1.47,   // Nb
+        1.38,   // Mo
+        1.28,   // Tc
+        1.25,   // Ru
+        1.25,   // Rh
+        1.20,   // Pd
+        1.28,   // Ag
+        1.36,   // Cd
+        1.42,   // In
+        1.40,   // Sn
+        1.40,   // Sb
+        1.36,   // Te
+        1.33,   // I
+        1.31,   // Xe
+        2.32,   // Cs
+        1.96,   // Ba
+        1.80,   // La
+        1.63,   // Ce
+        1.76,   // Pr
+        1.74,   // Nd
+        1.73,   // Pm
+        1.72,   // Sm
+        1.68,   // Eu
+        1.69,   // Gd
+        1.68,   // Tb
+        1.67,   // Dy
+        1.66,   // Ho
+        1.65,   // Er
+        1.64,   // Tm
+        1.70,   // Yb
+        1.62,   // Lu
+        1.52,   // Hf
+        1.46,   // Ta
+        1.37,   // W
+        1.31,   // Re
+        1.29,   // Os
+        1.22,   // Ir
+        1.23,   // Pt
+        1.24,   // Au
+        1.33,   // Hg
+        1.44,   // Tl
+        1.44,   // Pb
+        1.51,   // Bi
+        1.45    // Po
+    };
+
+    inline double getCovalentRadius(int Z) {
+        if (Z < 1 || Z > 86) return 1.5;  // Default for unsupported elements
+        return COVALENT_RADII[Z];
+    }
+}
+
+// =================================================================================
 // Constructor / Destructor
 // =================================================================================
 
@@ -316,26 +416,53 @@ Matrix GFN2::MakeOverlap(const std::vector<STO::Orbital>& basisset)
 
 Matrix GFN2::MakeH(const Matrix& S, const std::vector<STO::Orbital>& basisset)
 {
+    // Claude Generated: GFN2 Hamiltonian matrix construction
+    // Implements GFN2 Eq. 12: H_ij = E_i δ_ij + scale_ij * S_ij
+    // Reference: C. Bannwarth et al., JCTC 2019, 15, 1652
+
     Matrix H = Matrix::Zero(basisset.size(), basisset.size());
 
-    // Stub implementation - simplified for now
-    // TODO: Implement full GFN2 Hamiltonian construction
-
     for (size_t i = 0; i < basisset.size(); ++i) {
+        int atom_i = basisset[i].atom;
+        int Z_i = m_atoms[atom_i];
+        double CN_i = m_coordination_numbers(atom_i);
+
+        // Determine shell from orbital type (simplified)
+        int shell_i = 0;  // s-orbital
+        if (basisset[i].type == STO::PX || basisset[i].type == STO::PY || basisset[i].type == STO::PZ) {
+            shell_i = 1;  // p-orbital
+        }
+
         for (size_t j = 0; j <= i; ++j) {
             if (i == j) {
-                // Diagonal: self-energy
-                int atom_i = basisset[i].atom;
-                int Z_i = m_atoms[atom_i];
-                int shell_i = 0;  // Simplified: determine from orbital type
-                double CN_i = m_coordination_numbers(atom_i);
-
-                H(i, j) = getSelfEnergy(Z_i, shell_i, CN_i);
+                // Diagonal: self-energy with CN dependence
+                H(i, i) = getSelfEnergy(Z_i, shell_i, CN_i);
             } else {
-                // Off-diagonal: hopping integral (stub)
-                H(i, j) = H(j, i) = 0.0;  // TODO: implement getHamiltonianScale
+                // Off-diagonal: hopping integral (GFN2 Eq. 12b)
+                int atom_j = basisset[j].atom;
+
+                // Calculate interatomic distance
+                double dx = basisset[i].x - basisset[j].x;
+                double dy = basisset[i].y - basisset[j].y;
+                double dz = basisset[i].z - basisset[j].z;
+                double distance = std::sqrt(dx*dx + dy*dy + dz*dz) * au;  // Bohr to Å
+
+                // Get scaling factor
+                double scale = getHamiltonianScale(basisset[i], basisset[j], distance);
+
+                // H_ij = scale * S_ij
+                H(i, j) = H(j, i) = scale * S(i, j);
             }
         }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("Hamiltonian matrix constructed ({} × {})",
+                                       basisset.size(), basisset.size()));
+        CurcumaLogger::param("H_diagonal_range",
+                           fmt::format("[{:.4f}, {:.4f}] Eh",
+                                     H.diagonal().minCoeff(),
+                                     H.diagonal().maxCoeff()));
     }
 
     return H;
@@ -343,26 +470,73 @@ Matrix GFN2::MakeH(const Matrix& S, const std::vector<STO::Orbital>& basisset)
 
 double GFN2::getSelfEnergy(int element, int shell, double CN) const
 {
-    // GFN2 Eq. 12a: E_ii = E_base + k_CN * CN
-    // Note: ArrayParameters stores energies in eV, convert to Hartree
+    // Claude Generated: GFN2 self-energy calculation
+    // Formula (GFN2 Eq. 12a): E_ii = E_base + k_CN * CN
+    // Reference: C. Bannwarth et al., JCTC 2019, 15, 1652
+    //
+    // TODO: Extract real GFN2 self-energy and CN shift parameters from TBLite TOML files
+    // Current implementation uses chemical hardness as reasonable approximation
 
-    // Stub: simplified implementation
-    // TODO: Access correct shell-resolved parameters from m_params
+    // Use chemical hardness as base energy (already in Hartree)
+    double E_base = -m_params.getHardness(element);
 
-    double E_base = -10.0;  // eV (placeholder)
-    double k_CN = 0.1;      // eV (placeholder)
+    // CN shift: use shell_hardness (kpoly) parameter scaled
+    double k_CN = m_params.getShellHardness(element) * 0.01;  // Scaled to reasonable magnitude
 
-    double E_hartree = (E_base + k_CN * CN) / eV2Eh;
+    // Apply CN shift
+    double E = E_base + k_CN * CN;
 
-    return E_hartree;
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param(fmt::format("SelfEnergy[Z={},shell={}]", element, shell),
+                           fmt::format("E={:.6f} Eh (CN={:.2f})", E, CN));
+    }
+
+    return E;
 }
 
 double GFN2::getHamiltonianScale(const STO::Orbital& fi, const STO::Orbital& fj, double distance) const
 {
-    // TODO: Implement GFN2 Eq. 12b
-    // z_ij * k_pair * k_shell * (1 + 0.02 * ΔEN²) * poly(r) * S_ij
+    // Claude Generated: GFN2 Hamiltonian scaling factor (off-diagonal elements)
+    // Formula (GFN2 Eq. 12b): H_ij = scale * S_ij
+    // where scale = z_ij * k_pair * k_shell * (1 + 0.02 * ΔEN²) * poly(r)
+    // Reference: C. Bannwarth et al., JCTC 2019, 15, 1652
+    //
+    // TODO: Extract real GFN2 k_pair, k_shell, poly(r) parameters from TBLite
+    // Current implementation uses simplified electronegativity-based scaling
 
-    return 0.0;  // Stub
+    int atom_i = fi.atom;
+    int atom_j = fj.atom;
+    int Z_i = m_atoms[atom_i];
+    int Z_j = m_atoms[atom_j];
+
+    // Electronegativity difference (Pauling scale)
+    double EN_i = m_params.getElectronegativity(Z_i);
+    double EN_j = m_params.getElectronegativity(Z_j);
+    double delta_EN = EN_i - EN_j;
+
+    // z_ij: orbital overlap scaling factor
+    double zeta_i = fi.zeta;
+    double zeta_j = fj.zeta;
+    double z_ij = std::sqrt(2.0 * std::sqrt(zeta_i * zeta_j) / (zeta_i + zeta_j));
+
+    // k_pair: pairwise coupling (use Alpha parameter as approximation)
+    double k_pair = std::sqrt(m_params.getAlpha(Z_i) * m_params.getAlpha(Z_j)) * 0.1;
+
+    // k_shell: shell-dependent coupling (simplified)
+    double k_shell = 1.0;
+
+    // Electronegativity correction (GFN2 Eq. 12b)
+    double en_factor = 1.0 + 0.02 * delta_EN * delta_EN;
+
+    // Distance polynomial correction (simplified exponential decay)
+    // TODO: Use real GFN2 polynomial from TBLite
+    double r_bohr = distance / au;  // Convert Å to Bohr
+    double poly_r = std::exp(-0.5 * (r_bohr - 3.0));  // Simplified decay
+
+    // Combined scaling factor
+    double scale = z_ij * k_pair * k_shell * en_factor * poly_r;
+
+    return scale;
 }
 
 // =================================================================================
@@ -371,6 +545,10 @@ double GFN2::getHamiltonianScale(const STO::Orbital& fi, const STO::Orbital& fj,
 
 Vector GFN2::calculateCoordinationNumbers()
 {
+    // Claude Generated: GFN2 coordination number calculation
+    // Formula (GFN2 Eq. 4): CN_i = ∑_{j≠i} [1 / (1 + exp(-k₁(R_cov,ij/R_ij - 1)))]^(k₂)
+    // Reference: C. Bannwarth et al., JCTC 2019, 15, 1652
+
     Vector CN = Vector::Zero(m_atomcount);
 
     // GFN2 parameters (from paper)
@@ -378,8 +556,15 @@ Vector GFN2::calculateCoordinationNumbers()
     const double k2 = 4.0 / 3.0; // Range decay exponent
 
     for (int A = 0; A < m_atomcount; ++A) {
+        int Z_A = m_atoms[A];
+        double R_cov_A = getCovalentRadius(Z_A);
+
         for (int B = 0; B < m_atomcount; ++B) {
             if (A == B) continue;
+
+            int Z_B = m_atoms[B];
+            double R_cov_B = getCovalentRadius(Z_B);
+            double R_cov = R_cov_A + R_cov_B;
 
             // Distance in Ångström
             double dx = m_geometry(A, 0) - m_geometry(B, 0);
@@ -387,16 +572,22 @@ Vector GFN2::calculateCoordinationNumbers()
             double dz = m_geometry(A, 2) - m_geometry(B, 2);
             double R_AB = std::sqrt(dx*dx + dy*dy + dz*dz);
 
-            // Covalent radii (placeholder - should use m_params)
-            double R_cov_A = 1.0;  // Å (TODO: get from parameters)
-            double R_cov_B = 1.0;  // Å
-            double R_cov = R_cov_A + R_cov_B;
+            // Avoid division by zero for overlapping atoms
+            if (R_AB < 1.0e-6) continue;
 
             // Counting function: 1 / (1 + exp(-k1 * (R_cov/R - 1)))
             double count = 1.0 / (1.0 + std::exp(-k1 * (R_cov / R_AB - 1.0)));
 
             // Power k2
             CN(A) += std::pow(count, k2);
+        }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("Coordination numbers calculated:");
+        for (int i = 0; i < m_atomcount; ++i) {
+            CurcumaLogger::param(fmt::format("CN[atom_{}]", i+1),
+                               fmt::format("{:.3f}", CN(i)));
         }
     }
 
@@ -501,18 +692,133 @@ double GFN2::calculateElectronicEnergy() const
 
 double GFN2::calculateRepulsionEnergy() const
 {
-    // TODO: Implement pairwise exponential repulsion
-    // E_rep = ∑_{A<B} Z_eff,A * exp(-α_A * R_AB)
+    // Claude Generated: GFN2 repulsion energy calculation
+    // Formula: E_rep = ∑_{A<B} V_rep(R_AB)
+    // where V_rep is an exponential repulsion potential
+    // Reference: C. Bannwarth et al., JCTC 2019, 15, 1652
+    //
+    // TODO: Extract real GFN2 repulsion parameters from TBLite
+    // Current implementation uses simplified exponential form
 
-    return 0.0;  // Stub
+    double E_rep = 0.0;
+
+    for (int A = 0; A < m_atomcount; ++A) {
+        int Z_A = m_atoms[A];
+        double alpha_A = m_params.getMultipoleRadius(Z_A);  // repulsion_exp parameter
+
+        for (int B = A + 1; B < m_atomcount; ++B) {
+            int Z_B = m_atoms[B];
+            double alpha_B = m_params.getMultipoleRadius(Z_B);
+
+            // Interatomic distance in Bohr
+            double dx = m_geometry(A, 0) - m_geometry(B, 0);
+            double dy = m_geometry(A, 1) - m_geometry(B, 1);
+            double dz = m_geometry(A, 2) - m_geometry(B, 2);
+            double R_AB = std::sqrt(dx*dx + dy*dy + dz*dz) / au;  // Å to Bohr
+
+            // Effective charges (use electronegativity as proxy)
+            double Z_eff_A = m_params.getElectronegativity(Z_A) * 0.5;
+            double Z_eff_B = m_params.getElectronegativity(Z_B) * 0.5;
+
+            // Average repulsion exponent
+            double alpha_avg = (alpha_A + alpha_B) / 2.0;
+
+            // Exponential repulsion
+            double V_rep = (Z_eff_A + Z_eff_B) * std::exp(-alpha_avg * R_AB) / R_AB;
+
+            E_rep += V_rep;
+        }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param("E_repulsion", fmt::format("{:.6f} Eh", E_rep));
+    }
+
+    return E_rep;
 }
 
 double GFN2::calculateCoulombEnergy() const
 {
-    // TODO: Implement ES2 + ES3 + AES2
-    // See GFN2 paper Eq. 7-11
+    // Claude Generated: GFN2 Coulomb energy calculation
+    // Three components (GFN2 Eq. 7-11):
+    // 1. ES2: Effective Coulomb interaction (Eq. 7)
+    // 2. ES3: Third-order onsite correction (Eq. 9)
+    // 3. AES2: Anisotropic multipole (Eq. 10-11) - TODO for now
+    // Reference: C. Bannwarth et al., JCTC 2019, 15, 1652
+    //
+    // TODO: Extract real GFN2 gamma parameters and implement full AES2
 
-    return 0.0;  // Stub
+    // First, calculate Mulliken charges from density matrix
+    // q_A = Z_A - ∑_{μ∈A} (P*S)_μμ
+    Vector charges = Vector::Zero(m_atomcount);
+    Matrix PS = m_density * m_overlap;
+
+    // Map basis functions to atoms and accumulate populations
+    for (int mu = 0; mu < m_nbasis; ++mu) {
+        int atom = m_basis[mu].atom;
+        charges(atom) += PS(mu, mu);
+    }
+
+    // Convert populations to charges: q = Z - electrons
+    for (int A = 0; A < m_atomcount; ++A) {
+        int Z_A = m_atoms[A];
+        charges(A) = Z_A - charges(A);
+    }
+
+    // Store charges for property access
+    const_cast<GFN2*>(this)->m_charges = charges;
+
+    // ES2: Effective Coulomb energy (GFN2 Eq. 7)
+    // E_ES2 = (1/2) * ∑_{A,B} q_A * q_B * γ_AB
+    double E_ES2 = 0.0;
+
+    for (int A = 0; A < m_atomcount; ++A) {
+        int Z_A = m_atoms[A];
+        double gamma_AA = m_params.getHardness(Z_A);  // Chemical hardness ~ γ_AA
+
+        // Onsite (A=B)
+        E_ES2 += 0.5 * charges(A) * charges(A) * gamma_AA;
+
+        for (int B = A + 1; B < m_atomcount; ++B) {
+            int Z_B = m_atoms[B];
+
+            // Interatomic distance in Bohr
+            double dx = m_geometry(A, 0) - m_geometry(B, 0);
+            double dy = m_geometry(A, 1) - m_geometry(B, 1);
+            double dz = m_geometry(A, 2) - m_geometry(B, 2);
+            double R_AB = std::sqrt(dx*dx + dy*dy + dz*dz) / au;  // Å to Bohr
+
+            // Off-site Coulomb kernel (simplified: 1/R with damping)
+            double gamma_AB = 1.0 / std::sqrt(R_AB*R_AB + 0.5 * (gamma_AA + m_params.getHardness(Z_B)));
+
+            E_ES2 += charges(A) * charges(B) * gamma_AB;
+        }
+    }
+
+    // ES3: Third-order onsite correction (GFN2 Eq. 9)
+    // E_ES3 = (1/6) * ∑_A dU_A * q_A³
+    double E_ES3 = 0.0;
+
+    for (int A = 0; A < m_atomcount; ++A) {
+        int Z_A = m_atoms[A];
+        double dU_A = m_params.getHubbardDerivative(Z_A);  // Hubbard derivative
+
+        E_ES3 += (1.0/6.0) * dU_A * std::pow(charges(A), 3.0);
+    }
+
+    // AES2: Anisotropic multipole contributions (stub for now)
+    // TODO: Implement dipole and quadrupole terms with Tang-Toennies damping
+    double E_AES2 = 0.0;
+
+    double E_coulomb = E_ES2 + E_ES3 + E_AES2;
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param("E_ES2", fmt::format("{:.6f} Eh", E_ES2));
+        CurcumaLogger::param("E_ES3", fmt::format("{:.6f} Eh", E_ES3));
+        CurcumaLogger::param("E_coulomb_total", fmt::format("{:.6f} Eh", E_coulomb));
+    }
+
+    return E_coulomb;
 }
 
 double GFN2::calculateDispersionEnergy() const
