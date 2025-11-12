@@ -29,6 +29,7 @@
 
 #include "src/core/global.h"
 #include "gfn2-xtb_param.hpp"  // Reuse parameter structure
+#include "gfn1_params_loader.h"  // GFN1 parameter database (November 2025)
 #include "qm_driver.h"
 #include "STOIntegrals.hpp"
 
@@ -111,7 +112,8 @@ private:
     Matrix calculateGradient() const;
 
     // Data members
-    ArrayParameters m_params;
+    ArrayParameters m_params;                  ///< Legacy GFN1 parameters (for compatibility)
+    GFN1Params::ParameterDatabase m_param_db;  ///< Shell-resolved parameter database (November 2025)
     std::vector<STO::Orbital> m_basis;
     int m_nbasis;
 

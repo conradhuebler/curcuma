@@ -58,10 +58,18 @@ GFN1::GFN1()
     , m_scf_damping(0.4)
     , m_scf_converged(false)
 {
+    // Load complete GFN1 parameter database (15 elements, 25 pairs)
+    // Claude Generated: Parameter database integration (November 2025)
+    if (!m_param_db.loadCompleteGFN1()) {
+        CurcumaLogger::error("Failed to load GFN1 parameter database - using legacy parameters");
+    }
+
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("Initializing native GFN1-xTB method");
         CurcumaLogger::param("method", "GFN1-xTB");
         CurcumaLogger::param("reference", "Grimme et al. JCTC 2017, 13, 1989");
+        CurcumaLogger::param("parameter_database", fmt::format("{} elements, {} pairs (with halogen bond correction)",
+                           m_param_db.getNumElements(), m_param_db.getNumPairs()));
     }
 }
 
@@ -78,8 +86,16 @@ GFN1::GFN1(const ArrayParameters& params)
     , m_scf_damping(0.4)
     , m_scf_converged(false)
 {
+    // Load complete GFN1 parameter database
+    // Claude Generated: Parameter database integration (November 2025)
+    if (!m_param_db.loadCompleteGFN1()) {
+        CurcumaLogger::error("Failed to load GFN1 parameter database - using legacy parameters");
+    }
+
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("Initializing GFN1-xTB with custom parameters");
+        CurcumaLogger::param("parameter_database", fmt::format("{} elements, {} pairs",
+                           m_param_db.getNumElements(), m_param_db.getNumPairs()));
     }
 }
 
@@ -306,18 +322,56 @@ Matrix GFN1::MakeH(const Matrix& S, const std::vector<STO::Orbital>& basisset)
 
 double GFN1::getSelfEnergy(int element, int shell, double CN) const
 {
-    // Claude Generated: GFN1 self-energy (simpler than GFN2)
-    // Uses chemical hardness as approximation
+    // Claude Generated: GFN1 self-energy with shell-resolved parameters
+    // Formula: E_ii = E_base + k_CN * CN (simpler than GFN2)
+    // Reference: S. Grimme et al., JCTC 2017, 13, 1989
+    // Updated November 2025: Uses real TBLite-derived parameters for 15 elements
 
-    double E_base = -m_params.getHardness(element);
-    double k_CN = m_params.getShellHardness(element) * 0.01;
+    double E = 0.0;
+    bool use_real_params = false;
 
-    return E_base + k_CN * CN;
+    // Try to use real shell-resolved parameters from database
+    if (m_param_db.hasElement(element)) {
+        const auto& elem_params = m_param_db.getElement(element);
+
+        // Check if this shell exists for this element
+        auto shell_it = elem_params.shells.find(shell);
+        if (shell_it != elem_params.shells.end()) {
+            const auto& shell_params = shell_it->second;
+
+            // GFN1 self-energy with real parameters
+            E = shell_params.selfenergy + shell_params.kcn * CN;
+            use_real_params = true;
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::param(fmt::format("SelfEnergy[Z={},shell={}]", element, shell),
+                                   fmt::format("E={:.6f} Eh (CN={:.2f}) [TBLite params]", E, CN));
+            }
+        }
+    }
+
+    // Fallback to legacy parameters if element/shell not in database
+    if (!use_real_params) {
+        double E_base = -m_params.getHardness(element);
+        double k_CN = m_params.getShellHardness(element) * 0.01;
+
+        E = E_base + k_CN * CN;
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param(fmt::format("SelfEnergy[Z={},shell={}]", element, shell),
+                               fmt::format("E={:.6f} Eh (CN={:.2f}) [legacy fallback]", E, CN));
+        }
+    }
+
+    return E;
 }
 
 double GFN1::getHamiltonianScale(const STO::Orbital& fi, const STO::Orbital& fj, double distance) const
 {
-    // Claude Generated: GFN1 Hamiltonian scaling (simpler than GFN2)
+    // Claude Generated: GFN1 Hamiltonian scaling with pair-specific parameters
+    // GFN1 uses simpler pair interactions than GFN2
+    // Reference: S. Grimme et al., JCTC 2017, 13, 1989
+    // Updated November 2025: Uses real TBLite pair parameters for 25 element pairs
 
     int atom_i = fi.atom;
     int atom_j = fj.atom;
@@ -332,13 +386,56 @@ double GFN1::getHamiltonianScale(const STO::Orbital& fi, const STO::Orbital& fj,
     double zeta_j = fj.zeta;
     double z_ij = std::sqrt(2.0 * std::sqrt(zeta_i * zeta_j) / (zeta_i + zeta_j));
 
-    double k_pair = std::sqrt(m_params.getAlpha(Z_i) * m_params.getAlpha(Z_j)) * 0.1;
+    // Try to use real pair-specific parameters
+    double k_pair = 1.0;
+    double k_shell = 1.0;
+    bool use_real_params = false;
+
+    if (m_param_db.hasPair(Z_i, Z_j)) {
+        const auto& pair_params = m_param_db.getPair(Z_i, Z_j);
+
+        // Use element-pair specific coupling
+        k_pair = pair_params.kpair;
+
+        // Determine shell types for k_shell coupling
+        int shell_i = 0;  // s-orbital
+        int shell_j = 0;
+        if (fi.type == STO::PX || fi.type == STO::PY || fi.type == STO::PZ) shell_i = 1;
+        if (fj.type == STO::PX || fj.type == STO::PY || fj.type == STO::PZ) shell_j = 1;
+
+        // Select shell-specific coupling
+        if (shell_i == 0 && shell_j == 0) {
+            k_shell = pair_params.kshell_ss;  // s-s coupling
+        } else if (shell_i == 1 && shell_j == 1) {
+            k_shell = pair_params.kshell_pp;  // p-p coupling
+        } else {
+            k_shell = pair_params.kshell_sp;  // s-p coupling
+        }
+
+        use_real_params = true;
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param(fmt::format("HScale[{}-{}]", Z_i, Z_j),
+                               fmt::format("k_pair={:.3f}, k_shell={:.3f} [TBLite]",
+                                         k_pair, k_shell));
+        }
+    } else {
+        // Fallback: use Alpha parameter as approximation
+        k_pair = std::sqrt(m_params.getAlpha(Z_i) * m_params.getAlpha(Z_j)) * 0.1;
+        k_shell = 1.0;
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param(fmt::format("HScale[{}-{}]", Z_i, Z_j),
+                               "using legacy approximation");
+        }
+    }
+
     double en_factor = 1.0 + 0.02 * delta_EN * delta_EN;
 
     double r_bohr = distance / au;
     double poly_r = std::exp(-0.5 * (r_bohr - 3.0));
 
-    return z_ij * k_pair * en_factor * poly_r;
+    return z_ij * k_pair * k_shell * en_factor * poly_r;
 }
 
 // =================================================================================
@@ -468,25 +565,46 @@ double GFN1::calculateElectronicEnergy() const
 
 double GFN1::calculateRepulsionEnergy() const
 {
-    // Claude Generated: GFN1 repulsion (similar to GFN2)
+    // Claude Generated: GFN1 repulsion energy with TBLite parameters
+    // Reference: S. Grimme et al., JCTC 2017, 13, 1989
+    // Updated November 2025: Uses real rep_alpha and rep_zeff parameters
 
     double E_rep = 0.0;
 
     for (int A = 0; A < m_atomcount; ++A) {
         int Z_A = m_atoms[A];
-        double alpha_A = m_params.getMultipoleRadius(Z_A);
+
+        // Try to get real repulsion parameters
+        double alpha_A, Z_eff_A;
+        if (m_param_db.hasElement(Z_A)) {
+            const auto& elem_A = m_param_db.getElement(Z_A);
+            alpha_A = elem_A.rep_alpha;
+            Z_eff_A = elem_A.rep_zeff;
+        } else {
+            // Fallback to legacy parameters
+            alpha_A = m_params.getMultipoleRadius(Z_A);
+            Z_eff_A = m_params.getElectronegativity(Z_A) * 0.5;
+        }
 
         for (int B = A + 1; B < m_atomcount; ++B) {
             int Z_B = m_atoms[B];
-            double alpha_B = m_params.getMultipoleRadius(Z_B);
+
+            // Try to get real repulsion parameters
+            double alpha_B, Z_eff_B;
+            if (m_param_db.hasElement(Z_B)) {
+                const auto& elem_B = m_param_db.getElement(Z_B);
+                alpha_B = elem_B.rep_alpha;
+                Z_eff_B = elem_B.rep_zeff;
+            } else {
+                // Fallback to legacy parameters
+                alpha_B = m_params.getMultipoleRadius(Z_B);
+                Z_eff_B = m_params.getElectronegativity(Z_B) * 0.5;
+            }
 
             double dx = m_geometry(A, 0) - m_geometry(B, 0);
             double dy = m_geometry(A, 1) - m_geometry(B, 1);
             double dz = m_geometry(A, 2) - m_geometry(B, 2);
             double R_AB = std::sqrt(dx*dx + dy*dy + dz*dz) / au;
-
-            double Z_eff_A = m_params.getElectronegativity(Z_A) * 0.5;
-            double Z_eff_B = m_params.getElectronegativity(Z_B) * 0.5;
 
             double alpha_avg = (alpha_A + alpha_B) / 2.0;
             double V_rep = (Z_eff_A + Z_eff_B) * std::exp(-alpha_avg * R_AB) / R_AB;
@@ -500,7 +618,10 @@ double GFN1::calculateRepulsionEnergy() const
 
 double GFN1::calculateCoulombEnergy() const
 {
-    // Claude Generated: GFN1 Coulomb (simpler than GFN2, no ES3)
+    // Claude Generated: GFN1 Coulomb energy with TBLite parameters
+    // GFN1 uses simpler ES2 model (no ES3 third-order correction)
+    // Reference: S. Grimme et al., JCTC 2017, 13, 1989
+    // Updated November 2025: Uses real gamma_ss parameters from TBLite
 
     Vector charges = Vector::Zero(m_atomcount);
     Matrix PS = m_density * m_overlap;
@@ -522,19 +643,36 @@ double GFN1::calculateCoulombEnergy() const
 
     for (int A = 0; A < m_atomcount; ++A) {
         int Z_A = m_atoms[A];
-        double gamma_AA = m_params.getHardness(Z_A);
+
+        // Try to get real gamma parameter (use gamma_ss for onsite)
+        double gamma_AA;
+        if (m_param_db.hasElement(Z_A)) {
+            const auto& elem_A = m_param_db.getElement(Z_A);
+            gamma_AA = elem_A.gamma_ss;  // Onsite Coulomb integral
+        } else {
+            gamma_AA = m_params.getHardness(Z_A);  // Fallback
+        }
 
         E_ES2 += 0.5 * charges(A) * charges(A) * gamma_AA;
 
         for (int B = A + 1; B < m_atomcount; ++B) {
             int Z_B = m_atoms[B];
 
+            // Get gamma for atom B
+            double gamma_BB;
+            if (m_param_db.hasElement(Z_B)) {
+                const auto& elem_B = m_param_db.getElement(Z_B);
+                gamma_BB = elem_B.gamma_ss;
+            } else {
+                gamma_BB = m_params.getHardness(Z_B);
+            }
+
             double dx = m_geometry(A, 0) - m_geometry(B, 0);
             double dy = m_geometry(A, 1) - m_geometry(B, 1);
             double dz = m_geometry(A, 2) - m_geometry(B, 2);
             double R_AB = std::sqrt(dx*dx + dy*dy + dz*dz) / au;
 
-            double gamma_AB = 1.0 / std::sqrt(R_AB*R_AB + 0.5 * (gamma_AA + m_params.getHardness(Z_B)));
+            double gamma_AB = 1.0 / std::sqrt(R_AB*R_AB + 0.5 * (gamma_AA + gamma_BB));
 
             E_ES2 += charges(A) * charges(B) * gamma_AB;
         }
@@ -555,11 +693,12 @@ double GFN1::calculateDispersionEnergy() const
 
 double GFN1::calculateHalogenBondCorrection() const
 {
-    // Claude Generated: GFN1 halogen bond correction
+    // Claude Generated: GFN1 halogen bond correction with TBLite parameters
     // Reference: Grimme et al. JCTC 2017, 13, 1989 (Section 2.5)
+    // Updated November 2025: Uses real xb_radius and xb_strength parameters
     //
     // Halogen bonding: X···A interaction (X = F, Cl, Br, I; A = N, O, S, etc.)
-    // Simplified empirical correction based on geometry and charges
+    // Empirical correction based on geometry and element-specific parameters
 
     double E_XB = 0.0;
 
@@ -567,6 +706,22 @@ double GFN1::calculateHalogenBondCorrection() const
         int Z_A = m_atoms[A];
 
         if (!isHalogen(Z_A)) continue;
+
+        // Get halogen bond parameters for this halogen
+        double xb_radius = 0.0;
+        double xb_strength = 0.0;
+        bool has_xb_params = false;
+
+        if (m_param_db.hasElement(Z_A)) {
+            const auto& elem_A = m_param_db.getElement(Z_A);
+            if (elem_A.xb_strength > 1.0e-6) {  // Has XB parameters
+                xb_radius = elem_A.xb_radius;
+                xb_strength = elem_A.xb_strength;
+                has_xb_params = true;
+            }
+        }
+
+        if (!has_xb_params) continue;  // No XB parameters for this element
 
         for (int B = 0; B < m_atomcount; ++B) {
             if (A == B) continue;
@@ -583,21 +738,29 @@ double GFN1::calculateHalogenBondCorrection() const
             double dz = m_geometry(A, 2) - m_geometry(B, 2);
             double R_AB = std::sqrt(dx*dx + dy*dy + dz*dz);
 
-            // Halogen bond correction (empirical)
-            // E_XB = -k * f(R) where f(R) is distance-dependent damping
-            double R_vdw = getCovalentRadius(Z_A) + getCovalentRadius(Z_B) + 0.5;  // vdW sum
+            // Halogen bond correction with real parameters
+            // E_XB = -strength * f(R) where f(R) is distance-dependent damping
+            double R_cutoff = xb_radius + getCovalentRadius(Z_B);
 
-            if (R_AB < R_vdw * 1.5) {
-                double k_XB = m_params.getFXCMu(Z_A) * 0.001;  // Halogen strength parameter
-                double damp = std::exp(-2.0 * (R_AB / R_vdw - 1.0));
+            if (R_AB < R_cutoff * 1.3) {
+                // Convert strength from kcal/mol to Hartree
+                double k_XB = xb_strength / 627.509;  // kcal/mol → Hartree
+
+                // Distance damping function
+                double damp = std::exp(-2.0 * (R_AB / R_cutoff - 1.0));
 
                 E_XB -= k_XB * damp;
+
+                if (CurcumaLogger::get_verbosity() >= 3) {
+                    CurcumaLogger::param(fmt::format("XB[{}-{}]", Z_A, Z_B),
+                                       fmt::format("{:.4f} Å, {:.6f} Eh", R_AB, -k_XB * damp));
+                }
             }
         }
     }
 
-    if (CurcumaLogger::get_verbosity() >= 3 && std::abs(E_XB) > 1.0e-6) {
-        CurcumaLogger::param("E_halogen_bond", fmt::format("{:.6f} Eh", E_XB));
+    if (CurcumaLogger::get_verbosity() >= 2 && std::abs(E_XB) > 1.0e-6) {
+        CurcumaLogger::param("E_halogen_bond_total", fmt::format("{:.6f} Eh", E_XB));
     }
 
     return E_XB;
