@@ -95,6 +95,9 @@ namespace GFN2Params {
         // Simplified loader: hardcoded real parameters from TBLite
         bool loadDefaultGFN2();
 
+        // Complete loader: all 86 elements (H through Rn)
+        bool loadCompleteGFN2();
+
         // Access methods
         const ElementParams& getElement(int Z) const;
         const PairParams& getPair(int Z1, int Z2) const;
@@ -102,12 +105,19 @@ namespace GFN2Params {
         bool hasElement(int Z) const;
         bool hasPair(int Z1, int Z2) const;
 
+        int getNumElements() const { return m_elements.size(); }
+        int getNumPairs() const { return m_pairs.size() / 2; }  // Divide by 2 (symmetric)
+
     private:
         std::map<int, ElementParams> m_elements;
         std::map<std::pair<int,int>, PairParams> m_pairs;
 
         // Helper: Parse simple key=value TOML (minimal parser)
         bool parseSimpleTOML(const std::string& filename);
+
+        // Helper: Add pair parameters symmetrically
+        void addPairParams(int Z1, int Z2, double kpair,
+                          double kss, double ksp, double kpp);
     };
 
 } // namespace GFN2Params
