@@ -29,6 +29,7 @@
 
 #include "src/core/global.h"
 #include "gfn2-xtb_param.hpp"
+#include "gfn2_params_loader.h"
 #include "qm_driver.h"
 #include "STOIntegrals.hpp"
 
@@ -464,7 +465,8 @@ private:
     // Data Members
     // =================================================================================
 
-    ArrayParameters m_params;                  ///< GFN2 parameter database
+    ArrayParameters m_params;                  ///< Legacy GFN2 parameters (for compatibility)
+    GFN2Params::ParameterDatabase m_param_db;  ///< Shell-resolved parameter database (November 2025)
     std::vector<STO::Orbital> m_basis;        ///< Basis set (STOs)
     int m_nbasis;                              ///< Number of basis functions
 
