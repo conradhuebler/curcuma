@@ -84,3 +84,11 @@ test_cases/**/curcuma_*.json
 test_cases/**/*.log
 test_cases/**/*.dat
 
+# External dependencies (CMake downloads) - Claude Generated November 2025
+external/eigen-3.4.0/
+external/eigen-3.4.0.zip
+external/ulysses-main/
+external/ulysses.zip
+external/json.hpp
+external/stb_image_write.h
+
