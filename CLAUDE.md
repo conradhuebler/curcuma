@@ -133,6 +133,13 @@
 - **Hessian Analysis** - Second derivative calculations
 - **Orbital Analysis** - Molecular orbital visualization and analysis
 
+### 8. Python Interface (NEW: January 2025)
+- **Complete pybind11 bindings** - All core capabilities exposed to Python
+- **Pythonic API** - NumPy integration, convenience functions, docstrings
+- **Educational examples** - Comprehensive usage examples for all features
+- **Installation**: `cd python && pip install .` (see [python/README.md](python/README.md))
+- **Documentation**: [python/PYTHON_INTERFACE.md](python/PYTHON_INTERFACE.md)
+
 ## Architecture
 
 ### Core Components
@@ -189,7 +196,7 @@ curcuma/
 ├── src/
 │   ├── capabilities/          # High-level molecular modeling tasks
 │   │   ├── confscan.cpp      # Conformational scanning
-│   │   ├── confsearch.cpp    # Conformational searching  
+│   │   ├── confsearch.cpp    # Conformational searching
 │   │   ├── curcumaopt.cpp    # Geometry optimization
 │   │   ├── simplemd.cpp      # Molecular dynamics
 │   │   └── rmsd.cpp          # Structure analysis
@@ -237,6 +244,7 @@ curcuma/
 ✅ **Physical Architecture** - QM/MM methods organized under `src/core/energy_calculators/`
 ✅ **Topological Data Analysis** - dMatrix legacy functionality integrated as TDAEngine
 ✅ **Parameter Routing Fix** - Multi-module parameter hierarchies now work (json null-error fixed)
+✅ **Python Interface** - Complete pybind11 bindings for all core capabilities (see [python/PYTHON_INTERFACE.md](python/PYTHON_INTERFACE.md))
 
 ## Build and Test Commands
 

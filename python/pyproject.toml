@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "pybind11>=2.11"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "curcuma"
+dynamic = ["version"]
+description = "Python interface to the Curcuma computational chemistry toolkit"
+readme = "../README.md"
+license = {text = "GPL-3.0"}
+authors = [
+    {name = "Conrad Hübler", email = "Conrad.Huebler@gmx.net"}
+]
+maintainers = [
+    {name = "Conrad Hübler", email = "Conrad.Huebler@gmx.net"}
+]
+keywords = [
+    "computational-chemistry",
+    "molecular-modeling",
+    "quantum-chemistry",
+    "force-fields",
+    "molecular-dynamics",
+    "geometry-optimization"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: C++",
+]
+requires-python = ">=3.7"
+dependencies = [
+    "numpy>=1.19",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov",
+    "black",
+    "flake8",
+    "mypy",
+]
+docs = [
+    "sphinx>=4.0",
+    "sphinx-rtd-theme",
+    "nbsphinx",
+]
+viz = [
+    "matplotlib>=3.3",
+    "ase>=3.22",  # Atomic Simulation Environment for visualization
+]
+
+[project.urls]
+Homepage = "https://github.com/conradhuebler/curcuma"
+Documentation = "https://github.com/conradhuebler/curcuma"
+Repository = "https://github.com/conradhuebler/curcuma"
+"Bug Tracker" = "https://github.com/conradhuebler/curcuma/issues"
+
+[project.scripts]
+curcuma-python = "curcuma.cli:main"
+
+[tool.setuptools]
+packages = ["curcuma"]
+package-dir = {"" = "python"}
+
+[tool.setuptools.dynamic]
+version = {attr = "curcuma.__version__"}
+
+[tool.black]
+line-length = 100
+target-version = ['py37', 'py38', 'py39', 'py310', 'py311']
+include = '\.pyi?$'
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --cov=curcuma --cov-report=term-missing"

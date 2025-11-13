@@ -729,5 +729,90 @@ target_include_directories(curcuma_core SYSTEM BEFORE PUBLIC ${CMAKE_CURRENT_BIN
 
 # --- End of Auto-generated Parameter Registry ---
 
+# ============================================================================
+# Python Bindings (Claude Generated: January 2025)
+# ============================================================================
+
+option(BUILD_PYTHON_BINDINGS
+    "Build Python bindings using pybind11" ON)
+
+if(BUILD_PYTHON_BINDINGS)
+    # Find Python and pybind11
+    find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+
+    # Download pybind11 if not present
+    if(NOT EXISTS ${PROJECT_SOURCE_DIR}/external/pybind11)
+        message(STATUS "Downloading pybind11...")
+        include(FetchContent)
+        FetchContent_Declare(
+            pybind11
+            GIT_REPOSITORY https://github.com/pybind/pybind11
+            GIT_TAG v2.11.1
+        )
+        FetchContent_MakeAvailable(pybind11)
+    else()
+        add_subdirectory(${PROJECT_SOURCE_DIR}/external/pybind11)
+    endif()
+
+    # Python binding source files
+    set(PYBIND_SRC
+        python/pybind/curcuma_bindings.cpp
+        python/pybind/molecule_binding.cpp
+        python/pybind/energy_calculator_binding.cpp
+        python/pybind/rmsd_binding.cpp
+        python/pybind/optimizer_binding.cpp
+        python/pybind/simplemd_binding.cpp
+        python/pybind/confscan_binding.cpp
+    )
+
+    # Create Python module
+    pybind11_add_module(curcuma_py ${PYBIND_SRC})
+
+    # Set output name to 'curcuma' (without _py suffix)
+    set_target_properties(curcuma_py PROPERTIES OUTPUT_NAME curcuma)
+
+    # Link against curcuma_core library
+    target_link_libraries(curcuma_py PRIVATE curcuma_core)
+
+    # Add compile definitions for enabled features
+    if(USE_GFNFF)
+        target_compile_definitions(curcuma_py PRIVATE USE_GFNFF)
+    endif()
+    if(USE_XTB)
+        target_compile_definitions(curcuma_py PRIVATE USE_XTB)
+    endif()
+    if(USE_TBLITE)
+        target_compile_definitions(curcuma_py PRIVATE USE_TBLITE)
+    endif()
+    if(USE_ULYSSES)
+        target_compile_definitions(curcuma_py PRIVATE USE_ULYSSES)
+    endif()
+    if(USE_D3)
+        target_compile_definitions(curcuma_py PRIVATE USE_D3)
+    endif()
+    if(USE_D4)
+        target_compile_definitions(curcuma_py PRIVATE USE_D4)
+    endif()
+
+    # Set C++ standard
+    if(C17)
+        set_property(TARGET curcuma_py PROPERTY CXX_STANDARD 17)
+    else()
+        set_property(TARGET curcuma_py PROPERTY CXX_STANDARD 14)
+    endif()
+
+    # Install Python module to Python site-packages
+    install(TARGETS curcuma_py
+            LIBRARY DESTINATION ${Python3_SITEARCH})
+
+    message(STATUS "Python bindings enabled - building curcuma Python module")
+    message(STATUS "Python version: ${Python3_VERSION}")
+    message(STATUS "Python install dir: ${Python3_SITEARCH}")
+endif()
+
+# ============================================================================
+# End Python Bindings
+# ============================================================================
+
 install(TARGETS curcuma RUNTIME DESTINATION bin)
 install(TARGETS curcuma_helper RUNTIME DESTINATION bin)
