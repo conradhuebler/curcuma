@@ -585,7 +585,7 @@ int executeConfScan(const json& controller, int argc, char** argv) {
     // 3. Handle global parameters (verbosity, threads)
     // No manual merging needed here!
 
-    auto* scan = new ConfScan(controller);
+    auto* scan = new ConfScan(controller, false);  // Claude Generated: Explicit false for default verbosity level 1
     scan->setFileName(argv[2]);
     scan->start();
     int accepted = scan->AcceptedCount();
@@ -603,7 +603,7 @@ int executeConfStat(const json& controller, int argc, char** argv) {
         return 1;
     }
 
-    auto* stat = new ConfStat(controller);
+    auto* stat = new ConfStat(controller, false);  // Claude Generated: Explicit false for default verbosity level 1
     stat->setFileName(argv[2]);
     stat->start();
     delete stat;

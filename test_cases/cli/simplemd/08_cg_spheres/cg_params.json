@@ -1,0 +1,9 @@
+{
+  "method": "cg",
+  "cg_default": {
+    "shape_vector": [2.0, 2.0, 2.0],
+    "sigma": 4.0,
+    "epsilon": 0.5,
+    "potential_type": 1
+  }
+}

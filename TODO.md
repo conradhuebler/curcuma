@@ -81,18 +81,22 @@
   - **CLI Test** (cli/cg/01_single_point): End-to-end single point energy
   - **Integration Data**: simple_beads.vtf, mc_cg_chain/ with full documentation
 
-### 🟡 CG Integration - Phase 5: SimpleMD CG Integration (NEW - PENDING)
-- **Status**: ⏳ PENDING
-- **Priority**: 🔴 HIGH - Completes CG functionality
-- **Task**: Add CG-aware features to SimpleMD for efficient MD simulations
-- **Betroffene Dateien**: src/capabilities/simplemd.cpp/h
-- **Aufwand**: ~2-3 h
-- **Details**:
-  - System type detection (CG vs atomic vs mixed)
-  - PBC wrapping for periodic boundary conditions
-  - Timestep scaling (10x larger for pure CG systems)
-  - Orientational dynamics infrastructure (for ellipsoids)
-  - CLI test: simplemd/08_cg_spheres
+### ✅ CG Integration - Phase 5: SimpleMD CG Integration (COMPLETE - November 2025)
+- **Status**: ✅ DONE
+- **Completion**: Full integration in simplemd.cpp/h and molecule.cpp/h
+- **Features**:
+  - ✅ System type detection (CG vs atomic vs mixed)
+  - ✅ PBC wrapping for periodic boundary conditions (already implemented)
+  - ✅ Timestep scaling (10x larger for pure CG systems)
+  - ✅ Orientational dynamics infrastructure (prepared for Phase 6 ellipsoids)
+  - ✅ VTF trajectory output for CG systems
+  - ✅ CLI test: simplemd/08_cg_spheres with enhanced validation
+- **Implementation Details**:
+  - CG Parameters: `cg_write_vtf`, `cg_timestep_scaling`, `cg_timestep_factor` in PARAM block
+  - Orientational arrays: `m_cg_orientations`, `m_cg_angular_velocities` (prepared, not activated)
+  - VTF Writer: `Molecule::appendVTFFile()` with first-frame structure definition
+  - WriteGeometry() enhanced with conditional VTF trajectory output
+  - Initialization: Orientational infrastructure allocated but not used (m_cg_enable_rotation = false)
 
 ### 🔵 CG Potentials - Phase 6: Ellipsoidal Extensions (OPTIONAL - LOWEST PRIORITY)
 - **Status**: 🟡 PREPARED
@@ -248,14 +252,14 @@
 | Priority | Component | Count | Status |
 |----------|-----------|-------|--------|
 | 🔴 KRITISCH | None | 0 | ✅ ALL RESOLVED |
-| 🔴 HIGH (CG Phase 5) | SimpleMD CG Integration | 1 | ⏳ PENDING |
+| 🟢 DONE (CG Phase 5) | SimpleMD CG Integration | 1 | ✅ COMPLETE |
 | 🟢 DONE (CG Phases 1-4) | CG Core + VTF + Testing | 4 | ✅ COMPLETE |
 | 🔵 LOW (CG Phase 6) | Ellipsoidal Extensions | 1 | 🟡 PREPARED |
 | 🟡 TESTING | Scientific validation | 4 | ⏳ PENDING |
 | 🟢 CORE | Parameter/Memory/Units | 4 | ⏳ PENDING |
 | 🔵 CAPABILITIES | Confscan/RMSD/SimpleMD Physics | 4 | ⏳ PENDING |
 | 🟣 REFACTORING | Molecule Phase 2-6 | 5 | ⏳ PLANNED |
-| **TOTAL** | | **23** | **4 ✅ + 17 ⏳ + 2 🟡** |
+| **TOTAL** | | **23** | **5 ✅ + 16 ⏳ + 2 🟡** |
 
 ---
 
@@ -269,5 +273,82 @@
 
 ---
 
-**Last Updated**: 2025-10-29
-**Next Review**: When starting CG implementation (Phase 1: Molecule helpers) or cgfnff debugging
+---
+
+## 🔴 BUILD SYSTEM - CONDITIONAL COMPILATION FIXES (November 2025)
+
+### Status: PARTIALLY FIXED - Build 2 Working, Others Need Deeper Fixes
+
+**Session Date**: November 2025
+**Task**: Test all 5 build configurations with different CMake options (USE_D3, USE_D4, USE_TBLITE, USE_ULYSSES, USE_XTB)
+
+### Build Test Results
+
+| Build | Config | Status | Notes |
+|-------|--------|--------|-------|
+| **Build 1** | Minimal (UFF, EHT only) | ❌ FAILED | `s-dftd3.h` not found - gfnff.cpp includes D3 unconditionally |
+| **Build 2** | Standard (TBLite, Ulysses, D3) | ✅ **SUCCESS** | ✅ Verified working: UFF & GFN2 methods tested |
+| **Build 3** | Full QM (+ XTB) | ❌ FAILED | Same D3 header chain issue |
+| **Build 4** | D4 Dispersion | ❌ FAILED | D3 dependency blocks build |
+| **Build 5** | TBLite only | ❌ FAILED | D3/D4 guard chain |
+
+### Root Cause Analysis
+
+**Problem**: Cascading `#ifdef` guards only protect headers, not implementations:
+```
+gfnff.cpp (always compiles)
+  → #include "forcefield.h"
+    → #include "forcefieldthread.h"
+      → #ifdef USE_D3 #include "dftd3interface.h" #endif
+        → #include "s-dftd3.h"  (UNGUARDED INCLUDE!)
+```
+
+When `USE_D3=OFF`, compiler skips the `#ifdef` but still tries to compile the file, causing `s-dftd3.h` not found error.
+
+### Fixes Applied ✅
+
+1. **`dftd3interface.h`** - Wrapped entire header with `#ifdef USE_D3...#endif`
+2. **`dftd4interface.h`** - Wrapped entire header with `#ifdef USE_D4...#endif`
+3. **`forcefieldthread.h`** - Wrapped `D3Thread` class definition with `#ifdef USE_D3...#endif`
+4. **`forcefieldthread.cpp`** - Wrapped D3Thread implementation with `#ifdef USE_D3...#endif`
+
+### Remaining Work (To Fix Builds 1, 3, 4, 5)
+
+**Critical files still needing protection**:
+- [ ] `gfnff.cpp` - Always compiled, needs conditional compilation or restructuring
+- [ ] `forcefield.cpp` - D3Thread instantiation (line ~470) needs `#ifdef USE_D3` guard
+- [ ] `gfnff.h` - Consider lazy-loading or factory pattern for D3/D4 dependencies
+- [ ] Add H4Thread guards (same pattern as D3Thread)
+
+### Build 2 (Standard) - PRODUCTION READY ✅
+
+**Verified Methods:**
+```bash
+./curcuma -sp water.xyz -method uff    # ✅ Works
+./curcuma -sp water.xyz -method gfn2   # ✅ Works (via TBLite)
+```
+
+**Available Methods in Build 2:**
+- UFF (universal force field) - native
+- EHT (extended Hückel theory) - native
+- GFN2 (tight-binding DFT via TBLite) - recommended
+- GFN1 (TBLite or Ulysses fallback)
+- iPEA1 (TBLite)
+- PM6, PM3, AM1, MNDO (Ulysses semi-empirical)
+
+### Recommendations
+
+**Short term**: Protect gfnff.cpp and forcefield.cpp with conditional compilation
+**Medium term**: Refactor include chain - move D3/D4/H4 threads to separate file
+**Long term**: Use CMake-level validation + CI/CD pipeline for all build configurations
+
+### Test Infrastructure
+
+Created `/home/conrad/src/curcuma/build_test/` with 5 isolated builds for regression testing.
+
+See `docs/BUILD_SYSTEM_ROADMAP.md` for detailed implementation plan.
+
+---
+
+**Last Updated**: 2025-11-08 (Build System Testing)
+**Next Review**: After implementing remaining Build 1/3/4/5 fixes or when starting CG Phase 5
