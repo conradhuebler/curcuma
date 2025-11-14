@@ -237,11 +237,16 @@ bool GFNFF::initializeForceField()
     m_forcefield = new ForceField(ff_config);
     m_forcefield->setAtomTypes(m_atoms);
 
+    // CRITICAL FIX: Set geometry in ForceField! setAtomTypes() only sets atom types, not geometry
+    // Without this, m_geometry in ForceField is empty, causing out-of-bounds access in threads
+    m_forcefield->UpdateGeometry(m_geometry);
+
     // TEMPORARY DEBUG: Disable caching to isolate the problem
     m_forcefield->setParameterCaching(false);
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success("ForceField instance created");
+        CurcumaLogger::param("geometry_set", std::to_string(m_geometry.rows()) + " atoms");
         CurcumaLogger::warn("TEMPORARY: Parameter caching disabled for debugging");
         CurcumaLogger::info("Calculating topology (bonds, angles, torsions, inversions)...");
     }
