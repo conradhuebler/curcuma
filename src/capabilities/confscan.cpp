@@ -104,11 +104,11 @@ int ConfScanThread::execute()
 
             m_input.rmsd = m_rmsd;
             m_reorder_rule = m_reorder_rules[i];
-            if (m_verbosity >= 3) {
+            if (m_verbosity >= 1) {
                 if (m_earlybreak)
-                    CurcumaLogger::info_fmt("Reuse: {} {} {:.6f} Early break", m_reference.Name(), m_target.Name(), m_rmsd);
+                    CurcumaLogger::success_fmt("Reuse: {} {} {:.6f} Early break", m_reference.Name(), m_target.Name(), m_rmsd);
                 else
-                    CurcumaLogger::info_fmt("Reuse: {} {} {:.6f}", m_reference.Name(), m_target.Name(), m_rmsd);
+                    CurcumaLogger::success_fmt("Reuse: {} {} {:.6f}", m_reference.Name(), m_target.Name(), m_rmsd);
             }
             m_driver->clear();
             return 0;
@@ -138,11 +138,11 @@ int ConfScanThread::execute()
 
         m_reorder_rule = m_driver->ReorderRules();
     }
-    if (m_verbosity >= 3) {
+    if (m_verbosity >= 1) {
         if (m_break_pool)
-            CurcumaLogger::info_fmt("Permutation: {} {} {:.6f} Early break", m_reference.Name(), m_target.Name(), m_rmsd);
+            CurcumaLogger::success_fmt("Permutation: {} {} {:.6f} Early break", m_reference.Name(), m_target.Name(), m_rmsd);
         else
-            CurcumaLogger::info_fmt("Permutation: {} {} {:.6f}", m_reference.Name(), m_target.Name(), m_rmsd);
+            CurcumaLogger::success_fmt("Permutation: {} {} {:.6f}", m_reference.Name(), m_target.Name(), m_rmsd);
     }
 
     m_driver->clear();
@@ -728,9 +728,9 @@ void ConfScan::AcceptMolecule(Molecule* molecule)
     if (m_writeFiles && !m_reduced_file && m_current_filename.length()) {
         molecule->appendXYZFile(m_current_filename);
     }
-    // Claude Generated: Always show accept info for each structure at default verbosity
-    if (m_verbosity >= 1) { // Show at SMALL_PRINT level and above
-        // Ensure logger verbosity matches local verbosity for accept messages
+    // Claude Generated: Show accept info for each structure at verbosity level 1+
+    if (m_verbosity >= 1) {
+        // Ensure logger verbosity matches local verbosity for this message
         int old_verbosity = CurcumaLogger::get_verbosity();
         CurcumaLogger::set_verbosity(m_verbosity);
         CurcumaLogger::success_fmt("Accept {}", molecule->Name());
@@ -742,12 +742,12 @@ void ConfScan::RejectMolecule(Molecule* molecule)
 {
     m_rejected_structures.push_back(molecule);
     m_rejected++;
-    // Claude Generated: Always show reject info for each structure at default verbosity
-    if (m_verbosity >= 1) { // Show at SMALL_PRINT level and above
-        // Ensure logger verbosity matches local verbosity for reject messages
+    // Claude Generated: Show reject info for each structure at verbosity level 1+
+    if (m_verbosity >= 1) {
+        // Ensure logger verbosity matches local verbosity for this message
         int old_verbosity = CurcumaLogger::get_verbosity();
         CurcumaLogger::set_verbosity(m_verbosity);
-        CurcumaLogger::warn_fmt("Reject {}", molecule->Name());
+        CurcumaLogger::result_fmt("Reject {}", molecule->Name());  // Neutral result (not a warning)
         CurcumaLogger::set_verbosity(old_verbosity);
     }
 }
@@ -1345,7 +1345,7 @@ void ConfScan::Reorder(double dLE, double dLI, double dLH, bool reuse_only, bool
 
                 if ((tightThresh & m_tightThresh) == m_tightThresh) {
                     if (m_verbosity >= 1)
-                        CurcumaLogger::info_fmt("Differences {:.3f} MHz and {:.3f} below tight threshold, reject molecule directly!", dI, dH);
+                        CurcumaLogger::warn_fmt("Differences {:.3f} MHz and {:.3f} below tight threshold, reject molecule directly!", dI, dH);
                     m_lastDI = dI;
                     m_lastDH = dH;
                     writeStatisticFile(mol1, mol2, -1, false);

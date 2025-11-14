@@ -57,6 +57,7 @@ public:
     static void error(const std::string& msg);
     static void warn(const std::string& msg);
     static void success(const std::string& msg);
+    static void result(const std::string& msg);  // Claude Generated: Neutral result reporting at level 1+
     static void info(const std::string& msg);
     static void citation(const std::string& ref);
 
@@ -108,6 +109,13 @@ public:
     {
         std::string msg = fmt::format(format_str, std::forward<Args>(args)...);
         success(msg);
+    }
+
+    template <typename... Args>
+    static void result_fmt(fmt::format_string<Args...> format_str, Args&&... args)  // Claude Generated
+    {
+        std::string msg = fmt::format(format_str, std::forward<Args>(args)...);
+        result(msg);
     }
 
     template <typename... Args>

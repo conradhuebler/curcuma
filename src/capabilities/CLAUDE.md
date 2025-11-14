@@ -39,6 +39,8 @@ capabilities/
   - ✅ **NEW (Oct 2025)**: Coarse-graining support with automatic system detection
   - ✅ **NEW (Oct 2025)**: PBC wrapping for periodic boundary conditions
   - ✅ **NEW (Oct 2025)**: 10x timestep scaling for pure CG systems
+  - ✅ **NEW (Nov 2025)**: VTF trajectory output for CG systems
+  - ✅ **NEW (Nov 2025)**: Orientational dynamics infrastructure (prepared for Phase 6 ellipsoids)
 - **NEB Docking**: Nudged elastic band for transition state searches
 - **Trajectory Analysis**: Analysis tools for MD trajectories
 
@@ -81,8 +83,9 @@ capabilities/
 - Better integration with quantum chemical methods
 - ✅ **COMPLETED**: Parameter Registry System, dMatrix Integration, RMSD Code Restructuring
 - ✅ **COMPLETED** (Oct 29, 2025): Help System Dynamic Generation - all modules use ParameterRegistry for help
-- ✅ **COMPLETED** (Oct 30, 2025): SimpleMD CG Integration - System detection, PBC wrapping, timestep scaling
-- Pending: Unit system migration, RMSD Strategy pattern (Phase 3)
+- ✅ **COMPLETED** (Oct 30, 2025): SimpleMD CG Integration Phase 1-4 - System detection, PBC wrapping, timestep scaling
+- ✅ **COMPLETED** (Nov 2025): SimpleMD CG Integration Phase 5 - VTF trajectory output, orientational dynamics infrastructure
+- Pending: Unit system migration, RMSD Strategy pattern (Phase 3), CG Phase 6 (ellipsoidal extensions)
 
 ### Known Issues
 - Memory optimization needed for large systems (>1000 atoms)

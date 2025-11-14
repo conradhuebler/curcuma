@@ -82,6 +82,14 @@ void CurcumaLogger::success(const std::string& msg)
     }
 }
 
+// Claude Generated: Neutral result reporting for non-success/failure outcomes
+void CurcumaLogger::result(const std::string& msg)
+{
+    if (m_verbosity >= 1) {
+        log_colored(fmt::color::white, "[RESULT]", msg);
+    }
+}
+
 void CurcumaLogger::info(const std::string& msg)
 {
     if (m_verbosity >= 2) {

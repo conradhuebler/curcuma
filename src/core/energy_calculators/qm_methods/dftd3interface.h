@@ -19,6 +19,8 @@
 
 #pragma once
 
+#ifdef USE_D3
+
 #include "src/tools/general.h"
 #include "src/core/parameter_macros.h"
 #include "src/core/config_manager.h"
@@ -111,3 +113,5 @@ private:
 #endif
     mutable ConfigManager m_config;
 };
+
+#endif // USE_D3

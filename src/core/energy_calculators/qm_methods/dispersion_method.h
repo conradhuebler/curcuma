@@ -21,6 +21,7 @@
 
 #include "../computational_method.h"
 
+
 #ifdef USE_D3
 #include "dftd3interface.h"
 #endif
@@ -30,6 +31,8 @@
 #endif
 
 #include <memory>
+
+class QMInterface;
 
 /**
  * @brief Dispersion correction method wrapper for ComputationalMethod interface

@@ -23,6 +23,7 @@
 #include "interface/abstract_interface.h"
 #include "src/core/parameter_macros.h"
 #include "src/core/config_manager.h"
+#include "src/global_config.h"
 
 #ifdef USE_GFNFF
 #include "gfnff_interface_c.h"

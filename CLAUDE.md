@@ -237,6 +237,8 @@ curcuma/
 
 ## Completed Developments (2025)
 
+✅ **Platform-Independent External Dependency Discovery** - Phase 2a+2b complete: Plumed2 via find_library(), D4 via find_package(LAPACK), both with fallback support, portable across Linux/macOS/Windows
+✅ **External Dependency Conditional Compilation** - Phase 1b complete: D3/D4 guards in QMDFF/UFF/ForceField, MethodFactory runtime checks, all 14 external libs properly gated
 ✅ **Parameter Registry System** - Macro-based parameter definitions, auto-help, type validation
 ✅ **ConfigManager Layer** - Type-safe parameter access, hierarchical dot notation
 ✅ **EnergyCalculator Refactoring** - Polymorphic interface, priority-based method resolution
@@ -327,8 +329,9 @@ ctest -R "cli_rmsd_01" --verbose
 
 #### **Color Scheme & Functions**
 - `CurcumaLogger::error()` - Always visible (red)
-- `CurcumaLogger::warn()` - Level ≥1 (orange) 
+- `CurcumaLogger::warn()` - Level ≥1 (orange)
 - `CurcumaLogger::success()` - Level ≥1 (green)
+- `CurcumaLogger::result()` - Level ≥1 (white, neutral reporting of scientific results)
 - `CurcumaLogger::info()` - Level ≥2 (default)
 - `CurcumaLogger::param()` - Level ≥2 (blue, structured output)
 - `CurcumaLogger::energy_abs()` - Energy output with units

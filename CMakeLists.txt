@@ -5,16 +5,16 @@ option (USE_XTB
     "Compile XTB and use as library" OFF)
 
 option (USE_TBLITE
-    "Compile TBLITE and use as library" ON)
+    "Compile TBLITE and use as library" OFF)
 
 option (USE_GFNFF
     "Compile external GFN-FF and use as library" OFF)
  
 option(USE_ULYSSES
-    "Compile Ulysses and use as library" ON)
+    "Compile Ulysses and use as library" OFF)
 
 option (USE_D3
-    "Compile cpp-D4 and use as library" ON)
+    "Compile cpp-D4 and use as library" OFF)
 
 option (USE_D4
     "Compile cpp-D4 and use as library" OFF)
@@ -570,12 +570,30 @@ if(USE_D3)
 endif()
 
 if(USE_D4)
-    if(NOT DEFINED D4LIBS_DIR AND NOT DEFINED D4INCLUDE_DIR)
-        #find_package(LAPACKE REQUIRED)
-        #find_package(CBLAS CONFIG REQUIRED)
+    # Claude Generated (November 2025): Auto-discover LAPACK/BLAS for DFT-D4
+    # First try to find system-installed libraries
+    if(NOT DEFINED D4LIBS_DIR OR NOT DEFINED D4INCLUDE_DIR)
+        find_package(LAPACK QUIET)
+        find_package(BLAS QUIET)
+
+        # Try to find LAPACKE C interface if available
+        find_library(LAPACKE_LIBRARY lapacke
+                     HINTS /usr/lib /usr/lib64 /usr/local/lib
+                           ${LAPACK_ROOT}/lib ${BLAS_ROOT}/lib)
+
+        if(LAPACK_FOUND AND BLAS_FOUND)
+            set(LAPACKE_LIBRARIES "${LAPACKE_LIBRARY}" CACHE STRING "LAPACKE library")
+            set(CBLAS_LIBRARIES "${BLAS_LIBRARIES}" CACHE STRING "CBLAS library")
+            message(STATUS "DFT-D4: Found LAPACK/BLAS - ${LAPACK_LIBRARIES}")
+            set(D4_AUTODISCOVERED TRUE)
+        else()
+            message(WARNING "DFT-D4: LAPACK/BLAS not found via find_package(). Will use manual D4LIBS_DIR/D4INCLUDE_DIR if set.")
+        endif()
     else()
-	include_directories(${INCLUDE_DIR})
-    endif(NOT DEFINED D4LIBS_DIR AND NOT DEFINED D4INCLUDE_DIR)
+        message(STATUS "DFT-D4: Using manual library paths - D4LIBS_DIR=${D4LIBS_DIR}")
+        include_directories(${D4INCLUDE_DIR})
+        set(D4_AUTODISCOVERED FALSE)
+    endif()
 
     add_subdirectory(external/cpp-d4)
     if(HELPERS)
@@ -612,7 +630,19 @@ if(USE_D4)
 endif()
 
 if(USE_Plumed)
-   target_link_libraries(curcuma_core ${PROJECT_SOURCE_DIR}/external/plumed2/src/lib/libplumed.so)
+    # Claude Generated (November 2025): Platform-independent Plumed2 discovery
+    # Try to find Plumed library with fallback to local build directory
+    find_library(PLUMED_LIBRARY plumed
+                 HINTS ${PLUMED_ROOT}/src/lib
+                       ${PROJECT_SOURCE_DIR}/external/plumed2/src/lib
+                       /usr/lib /usr/lib64 /usr/local/lib)
+
+    if(PLUMED_LIBRARY)
+        target_link_libraries(curcuma_core ${PLUMED_LIBRARY})
+        message(STATUS "Plumed2 found: ${PLUMED_LIBRARY}")
+    else()
+        message(FATAL_ERROR "Plumed2 library not found. Set PLUMED_ROOT environment variable or install plumed: apt-get install libplumed-dev")
+    endif()
 endif()
 
 target_link_libraries(curcuma_core pthread fmt::fmt-header-only )

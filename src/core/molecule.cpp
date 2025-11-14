@@ -1166,16 +1166,20 @@ std::pair<double, double> Molecule::GyrationRadiusPBC(double hmass, bool protons
     if (m_has_pbc) {
         cell_inv = getUnitCellInverse();
     }
+    std::cout << m_unit_cell << cell_inv << std::endl;
 
     for (int i = 0; i < m_geometry.rows(); ++i) {
         // Calculate PBC-aware distance from COM
         Eigen::Vector3d atom_pos = m_geometry.row(i);
-        Eigen::Vector3d r = atom_pos - com;
 
         // Apply PBC if active - Claude Generated (Oct 2025): Use cached inverse
         if (m_has_pbc) {
-            r = PBCUtils::applyMinimumImage(r, m_unit_cell, cell_inv);
+            //std::cout << "Applying PBC for atom " << i << std::endl;
+            //std::cout << "old distance: " << atom_pos.norm() << " ";
+            atom_pos = PBCUtils::applyMinimumImage(atom_pos, m_unit_cell, cell_inv);
+            //std::cout << "  --  new distance" << atom_pos.norm() << std::endl;
         }
+        Eigen::Vector3d r = atom_pos - com;
 
         double r_squared = r.squaredNorm();
 
@@ -1472,6 +1476,59 @@ void Molecule::appendDipoleFile(const std::string& filename) const
     // std::cout << output << std::endl;
     input << output;
     input.close();
+}
+
+// Claude Generated (Nov 2025): Append VTF timestep to trajectory file
+void Molecule::appendVTFFile(const std::string& filename) const
+{
+    std::ofstream file;
+    bool file_exists = std::ifstream(filename).good();
+
+    if (!file_exists) {
+        // First frame: write full VTF structure + timestep
+        file.open(filename);
+        if (!file.is_open()) {
+            throw std::runtime_error(fmt::format("Cannot open VTF file for writing: {}", filename));
+        }
+
+        // Write atom definitions
+        for (int i = 0; i < AtomCount(); ++i) {
+            double radius = (m_atoms[i] == CG_ELEMENT) ? 2.0 : Elements::VanDerWaalsRadius[m_atoms[i]];
+            file << fmt::format("atom {} radius {:.2f} name {} type {}\n",
+                               i, radius, Elements::ElementAbbr[m_atoms[i]].c_str(), m_atoms[i]);
+        }
+
+        // Write bonds
+        for (const auto& bond : m_bonds) {
+            if (bond.first < bond.second) {  // Avoid duplicates
+                file << fmt::format("bond {}:{}\n", bond.first, bond.second);
+            }
+        }
+
+        // Write unit cell if PBC active
+        if (m_has_pbc) {
+            file << fmt::format("unitcell {:.6f} {:.6f} {:.6f} {:.2f} {:.2f} {:.2f}\n",
+                               m_unit_cell(0,0), m_unit_cell(1,1), m_unit_cell(2,2),
+                               90.0, 90.0, 90.0);  // Orthorhombic cell assumption
+        }
+
+        file << "\n";
+    } else {
+        // Append mode: only write timestep
+        file.open(filename, std::ios::app);
+        if (!file.is_open()) {
+            throw std::runtime_error(fmt::format("Cannot append to VTF file: {}", filename));
+        }
+    }
+
+    // Write timestep coordinates
+    file << "timestep ordered\n";
+    for (int i = 0; i < AtomCount(); ++i) {
+        file << fmt::format("{:.8f} {:.8f} {:.8f}\n",
+                           m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2));
+    }
+
+    file.close();
 }
 
 std::string Molecule::XYZString() const

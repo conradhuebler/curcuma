@@ -19,7 +19,7 @@
  */
 
 #pragma once
-
+#include "src/global_config.h"
 #include "../computational_method.h"
 #include "gfnffinterface.h"
 

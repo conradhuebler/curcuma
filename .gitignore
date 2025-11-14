@@ -92,3 +92,7 @@ external/ulysses.zip
 external/json.hpp
 external/stb_image_write.h
 
+# CMake generated configuration - Claude Generated November 2025
+# global_config.h is auto-generated from global_config.h.in during cmake configuration
+src/global_config.h
+
