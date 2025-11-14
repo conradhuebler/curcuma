@@ -372,11 +372,46 @@ int GFN2::buildBasisSet()
         if (Z > 18) n_shells = 3;  // s, p, d shells (simplified)
 
         for (int shell = 0; shell < n_shells; ++shell) {
-            // Get parameters for this shell
-            double zeta = m_params.getYeff(Z, shell);
-            int principal_qn = static_cast<int>(m_params.getPrincipalQN(Z, shell));
+            // Get parameters for this shell from parameter database
+            // Use m_param_db (TBLite parameters) if available, else fallback to m_params
+            double zeta = 0.0;
+            int principal_qn = shell + 1;  // Default: n = l + 1
 
-            if (zeta < 1.0e-6) continue;  // Skip unparameterized shells
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("buildBasisSet: atom={}, Z={}, shell={}, n_shells={}",
+                                               i, Z, shell, n_shells));
+                CurcumaLogger::param(fmt::format("hasElement(Z={})", Z), m_param_db.hasElement(Z));
+                if (m_param_db.hasElement(Z)) {
+                    bool has_shell = m_param_db.getElement(Z).shells.count(shell) > 0;
+                    CurcumaLogger::param(fmt::format("has_shell[{}]", shell), has_shell);
+                }
+            }
+
+            if (m_param_db.hasElement(Z) && m_param_db.getElement(Z).shells.count(shell)) {
+                const auto& shell_params = m_param_db.getElement(Z).shells.at(shell);
+                zeta = shell_params.gexp;  // Use gexp (Gaussian exponent / Yeff)
+
+                if (CurcumaLogger::get_verbosity() >= 3) {
+                    CurcumaLogger::param(fmt::format("zeta[Z={},shell={}]", Z, shell),
+                                        fmt::format("{:.6f} (from param_db)", zeta));
+                }
+            } else {
+                zeta = m_params.getYeff(Z, shell);  // Legacy fallback
+                principal_qn = static_cast<int>(m_params.getPrincipalQN(Z, shell));
+
+                if (CurcumaLogger::get_verbosity() >= 3) {
+                    CurcumaLogger::param(fmt::format("zeta[Z={},shell={}]", Z, shell),
+                                        fmt::format("{:.6f} (legacy fallback)", zeta));
+                }
+            }
+
+            if (zeta < 1.0e-6) {
+                if (CurcumaLogger::get_verbosity() >= 3) {
+                    CurcumaLogger::warn(fmt::format("Skipping shell {} for Z={} (zeta too small: {})",
+                                                   shell, Z, zeta));
+                }
+                continue;  // Skip unparameterized shells
+            }
 
             // Angular momentum: shell 0 = s, shell 1 = p, shell 2 = d
             int l = shell;
@@ -738,6 +773,14 @@ Matrix GFN2::buildDensityMatrix(const Matrix& mo_coefficients, const Vector& mo_
 
     int n_occ = m_num_electrons / 2;  // Doubly occupied orbitals
 
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param("buildDensityMatrix: m_num_electrons", m_num_electrons);
+        CurcumaLogger::param("buildDensityMatrix: n_occ", n_occ);
+        CurcumaLogger::param("buildDensityMatrix: m_nbasis", m_nbasis);
+        CurcumaLogger::param("buildDensityMatrix: mo_coefficients.rows()", static_cast<int>(mo_coefficients.rows()));
+        CurcumaLogger::param("buildDensityMatrix: mo_coefficients.cols()", static_cast<int>(mo_coefficients.cols()));
+    }
+
     for (int mu = 0; mu < m_nbasis; ++mu) {
         for (int nu = 0; nu < m_nbasis; ++nu) {
             for (int i = 0; i < n_occ; ++i) {
@@ -755,18 +798,24 @@ Matrix GFN2::buildDensityMatrix(const Matrix& mo_coefficients, const Vector& mo_
 
 double GFN2::calculateElectronicEnergy() const
 {
-    // E_elec = Tr(P * (H + F)) / 2
-    // Simplified for now
+    // GFN2/xTB electronic energy: E_elec = Tr(P * H_0)
+    // where H_0 is the core Hamiltonian (NOT Fock matrix!)
+    //
+    // In GFN2 tight-binding, the electronic energy is ONLY from orbital occupations.
+    // Coulomb interactions are added separately as ES2/ES3 terms.
+    // Reference: Bannwarth et al. JCTC 2019, Eq. 1-2
+    //
+    // Corrected November 2025: Was incorrectly using (H+F)/2 (HF formula)
 
     double E = 0.0;
 
     for (int mu = 0; mu < m_nbasis; ++mu) {
         for (int nu = 0; nu < m_nbasis; ++nu) {
-            E += m_density(mu, nu) * (m_hamiltonian(mu, nu) + m_fock(mu, nu));
+            E += m_density(mu, nu) * m_hamiltonian(mu, nu);
         }
     }
 
-    return E / 2.0;
+    return E;
 }
 
 double GFN2::calculateRepulsionEnergy() const
@@ -851,17 +900,35 @@ double GFN2::calculateCoulombEnergy() const
     // Map basis functions to atoms and accumulate populations
     for (int mu = 0; mu < m_nbasis; ++mu) {
         int atom = m_basis[mu].atom;
-        charges(atom) += PS(mu, mu);
+        double pop = PS(mu, mu);
+        charges(atom) += pop;
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param(fmt::format("PS({},{})", mu, mu),
+                                fmt::format("{:.6f} e (atom {})", pop, atom));
+        }
     }
 
     // Convert populations to charges: q = Z - electrons
     for (int A = 0; A < m_atomcount; ++A) {
         int Z_A = m_atoms[A];
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param(fmt::format("pop[atom={}]", A),
+                                fmt::format("{:.6f} e (Z={})", charges(A), Z_A));
+        }
         charges(A) = Z_A - charges(A);
     }
 
     // Store charges for property access
     const_cast<GFN2*>(this)->m_charges = charges;
+
+    // Debug: Print Mulliken charges
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("Mulliken charges:");
+        for (int A = 0; A < m_atomcount; ++A) {
+            CurcumaLogger::param(fmt::format("q[{}]", A), fmt::format("{:.4f} e", charges(A)));
+        }
+    }
 
     // ES2: Effective Coulomb energy (GFN2 Eq. 7)
     // E_ES2 = (1/2) * ∑_{A,B} q_A * q_B * γ_AB

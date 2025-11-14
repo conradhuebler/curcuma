@@ -236,10 +236,20 @@ int GFN1::buildBasisSet()
         if (Z > 18) n_shells = 3;
 
         for (int shell = 0; shell < n_shells; ++shell) {
-            double zeta = m_params.getYeff(Z, shell);
-            int principal_qn = static_cast<int>(m_params.getPrincipalQN(Z, shell));
+            // Get parameters for this shell from parameter database
+            // Use m_param_db (TBLite parameters) if available, else fallback to m_params
+            double zeta = 0.0;
+            int principal_qn = shell + 1;  // Default: n = l + 1
 
-            if (zeta < 1.0e-6) continue;
+            if (m_param_db.hasElement(Z) && m_param_db.getElement(Z).shells.count(shell)) {
+                const auto& shell_params = m_param_db.getElement(Z).shells.at(shell);
+                zeta = shell_params.gexp;  // Use gexp (Gaussian exponent / Yeff)
+            } else {
+                zeta = m_params.getYeff(Z, shell);  // Legacy fallback
+                principal_qn = static_cast<int>(m_params.getPrincipalQN(Z, shell));
+            }
+
+            if (zeta < 1.0e-6) continue;  // Skip unparameterized shells
 
             int l = shell;
 
@@ -552,15 +562,24 @@ Matrix GFN1::buildDensityMatrix(const Matrix& mo_coefficients, const Vector& mo_
 
 double GFN1::calculateElectronicEnergy() const
 {
+    // GFN1/xTB electronic energy: E_elec = Tr(P * H_0)
+    // where H_0 is the core Hamiltonian (NOT Fock matrix!)
+    //
+    // In GFN1 tight-binding, electronic energy is only from orbital occupations.
+    // Coulomb interactions are added separately as ES2 term.
+    // Reference: Grimme et al. JCTC 2017, 13, 1989
+    //
+    // Corrected November 2025: Was incorrectly using (H+F)/2 (HF formula)
+
     double E = 0.0;
 
     for (int mu = 0; mu < m_nbasis; ++mu) {
         for (int nu = 0; nu < m_nbasis; ++nu) {
-            E += m_density(mu, nu) * (m_hamiltonian(mu, nu) + m_fock(mu, nu));
+            E += m_density(mu, nu) * m_hamiltonian(mu, nu);
         }
     }
 
-    return E / 2.0;
+    return E;
 }
 
 double GFN1::calculateRepulsionEnergy() const
