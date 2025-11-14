@@ -103,25 +103,25 @@ double GFNFF::calculateDihedralAngle(int i, int j, int k, int l) const
 {
     // Extract atomic positions from geometry matrix (stored in Angstrom)
     // m_geometry is Eigen::Matrix with shape (m_atomcount, 3)
-    Vector r_i = m_geometry.row(i);  // Position of atom i
-    Vector r_j = m_geometry.row(j);  // Position of atom j
-    Vector r_k = m_geometry.row(k);  // Position of atom k
-    Vector r_l = m_geometry.row(l);  // Position of atom l
+    Eigen::Vector3d r_i = m_geometry.row(i).head<3>();  // Position of atom i
+    Eigen::Vector3d r_j = m_geometry.row(j).head<3>();  // Position of atom j
+    Eigen::Vector3d r_k = m_geometry.row(k).head<3>();  // Position of atom k
+    Eigen::Vector3d r_l = m_geometry.row(l).head<3>();  // Position of atom l
 
     // Calculate bond vectors
     // v1: i→j bond vector
     // v2: j→k bond vector (central bond around which rotation occurs)
     // v3: k→l bond vector
-    Vector v1 = r_j - r_i;
-    Vector v2 = r_k - r_j;
-    Vector v3 = r_l - r_k;
+    Eigen::Vector3d v1 = r_j - r_i;
+    Eigen::Vector3d v2 = r_k - r_j;
+    Eigen::Vector3d v3 = r_l - r_k;
 
     // Calculate cross products
     // n1 = v1 × v2: normal vector to plane i-j-k
     // n2 = v2 × v3: normal vector to plane j-k-l
     // The dihedral angle is the angle between these two planes
-    Vector n1 = v1.cross(v2);
-    Vector n2 = v2.cross(v3);
+    Eigen::Vector3d n1 = v1.cross(v2);
+    Eigen::Vector3d n2 = v2.cross(v3);
 
     // Calculate magnitudes
     double n1_norm = n1.norm();
@@ -785,7 +785,7 @@ json GFNFF::generateGFNFFTorsions() const
     }
 
     if (bond_list.empty()) {
-        CurcumaLogger::warn() << "GFN-FF torsion generation: No bonds found, skipping torsions";
+        CurcumaLogger::warn("GFN-FF torsion generation: No bonds found, skipping torsions");
         return torsions;
     }
 
@@ -908,9 +908,9 @@ json GFNFF::generateGFNFFTorsions() const
     // STEP 8: Report results
     // ==========================================================================
     if (torsion_count == 0) {
-        CurcumaLogger::warn() << "GFN-FF: No torsions detected (molecule may be too small or linear)";
+        CurcumaLogger::warn("GFN-FF: No torsions detected (molecule may be too small or linear)");
     } else {
-        CurcumaLogger::info() << "GFN-FF detected " << torsion_count << " torsions";
+        CurcumaLogger::info("GFN-FF detected " + std::to_string(torsion_count) + " torsions");
 
         // Optional: Print summary by periodicity
         int n1_count = 0, n2_count = 0, n3_count = 0;
@@ -921,10 +921,9 @@ json GFNFF::generateGFNFFTorsions() const
             else if (n == 3) n3_count++;
         }
 
-        CurcumaLogger::info() << "  Periodicity distribution: "
-                              << "n=1 (" << n1_count << "), "
-                              << "n=2 (" << n2_count << "), "
-                              << "n=3 (" << n3_count << ")";
+        CurcumaLogger::info("  Periodicity distribution: n=1 (" + std::to_string(n1_count) +
+                           "), n=2 (" + std::to_string(n2_count) +
+                           "), n=3 (" + std::to_string(n3_count) + ")");
     }
 
     // ==========================================================================

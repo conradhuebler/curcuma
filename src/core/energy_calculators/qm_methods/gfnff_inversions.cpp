@@ -163,10 +163,10 @@ double GFNFF::calculateOutOfPlaneAngle(int i, int j, int k, int l) const
     // ==========================================================================
     // STEP 1: Extract atomic positions
     // ==========================================================================
-    Vector r_i = m_geometry.row(i);
-    Vector r_j = m_geometry.row(j);
-    Vector r_k = m_geometry.row(k);
-    Vector r_l = m_geometry.row(l);
+    Eigen::Vector3d r_i = m_geometry.row(i).head<3>();
+    Eigen::Vector3d r_j = m_geometry.row(j).head<3>();
+    Eigen::Vector3d r_k = m_geometry.row(k).head<3>();
+    Eigen::Vector3d r_l = m_geometry.row(l).head<3>();
 
     // ==========================================================================
     // STEP 2: Compute bond vectors (following Fortran naming convention)
@@ -175,9 +175,9 @@ double GFNFF::calculateOutOfPlaneAngle(int i, int j, int k, int l) const
     // rd = r_kj = r_k - r_j  (from j to k)
     // rv = r_il = r_l - r_i  (from i to l)
 
-    Vector re = r_i - r_j;
-    Vector rd = r_k - r_j;
-    Vector rv = r_l - r_i;
+    Eigen::Vector3d re = r_i - r_j;
+    Eigen::Vector3d rd = r_k - r_j;
+    Eigen::Vector3d rv = r_l - r_i;
 
     // ==========================================================================
     // STEP 3: Compute normal vector to plane i-j-k
@@ -185,7 +185,7 @@ double GFNFF::calculateOutOfPlaneAngle(int i, int j, int k, int l) const
     // n = re × rd = (r_i - r_j) × (r_k - r_j)
     // This gives the normal to the plane formed by atoms i, j, k.
 
-    Vector rn = re.cross(rd);
+    Eigen::Vector3d rn = re.cross(rd);
 
     // ==========================================================================
     // STEP 4: Normalize vectors
@@ -766,7 +766,7 @@ json GFNFF::generateGFNFFInversions() const
     }
 
     if (bond_list.empty()) {
-        CurcumaLogger::warn() << "GFN-FF inversion generation: No bonds found, skipping inversions";
+        CurcumaLogger::warn("GFN-FF inversion generation: No bonds found, skipping inversions");
         return inversions;
     }
 
@@ -863,9 +863,9 @@ json GFNFF::generateGFNFFInversions() const
     // STEP 8: Report results
     // ==========================================================================
     if (inversion_count == 0) {
-        CurcumaLogger::info() << "GFN-FF: No inversions detected (no sp² centers found)";
+        CurcumaLogger::info("GFN-FF: No inversions detected (no sp² centers found)");
     } else {
-        CurcumaLogger::info() << "GFN-FF detected " << inversion_count << " inversions";
+        CurcumaLogger::info("GFN-FF detected " + std::to_string(inversion_count) + " inversions");
 
         // Optional: Element distribution
         std::map<int, int> element_count;
@@ -875,7 +875,7 @@ json GFNFF::generateGFNFFInversions() const
         }
 
         for (const auto& [z, count] : element_count) {
-            CurcumaLogger::info() << "  Element Z=" << z << ": " << count << " inversions";
+            CurcumaLogger::info("  Element Z=" + std::to_string(z) + ": " + std::to_string(count) + " inversions");
         }
     }
 
