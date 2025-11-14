@@ -316,8 +316,9 @@ ctest -R "cli_rmsd_01" --verbose
 
 #### **Color Scheme & Functions**
 - `CurcumaLogger::error()` - Always visible (red)
-- `CurcumaLogger::warn()` - Level ≥1 (orange) 
+- `CurcumaLogger::warn()` - Level ≥1 (orange)
 - `CurcumaLogger::success()` - Level ≥1 (green)
+- `CurcumaLogger::result()` - Level ≥1 (white, neutral reporting of scientific results)
 - `CurcumaLogger::info()` - Level ≥2 (default)
 - `CurcumaLogger::param()` - Level ≥2 (blue, structured output)
 - `CurcumaLogger::energy_abs()` - Energy output with units

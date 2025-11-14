@@ -265,6 +265,18 @@ void SimpleMD::LoadControlJson()
     m_norestart = m_config.get<bool>("no_restart");
     m_dt2 = m_dT * m_dT;
 
+    // Claude Generated (Nov 2025): CG-specific parameters
+    m_cg_write_vtf = m_config.get<bool>("cg_write_vtf");
+    bool cg_timestep_scaling_enabled = m_config.get<bool>("cg_timestep_scaling");
+    double cg_timestep_factor_config = m_config.get<double>("cg_timestep_factor");
+
+    // Override timestep factor if user disabled scaling
+    if (!cg_timestep_scaling_enabled) {
+        m_cg_timestep_factor = 1.0;
+    } else {
+        m_cg_timestep_factor = cg_timestep_factor_config;
+    }
+
     // Claude Generated 2025: RATTLE Parameters
     m_rm_COM = m_config.get<double>("remove_com_motion");
     int rattle = m_config.get<int>("rattle");
@@ -476,6 +488,21 @@ bool SimpleMD::Initialise()
                                "enabled (box: " + std::to_string(cell(0,0)) + " x " +
                                std::to_string(cell(1,1)) + " x " +
                                std::to_string(cell(2,2)) + " Å³)");
+        }
+    }
+
+    // Claude Generated (Nov 2025): Initialize orientational dynamics infrastructure
+    if (m_is_cg_system) {
+        m_cg_orientations.resize(m_natoms, Eigen::Vector3d(1.0, 0.0, 0.0)); // Default: x-axis
+        m_cg_angular_velocities.resize(m_natoms, Eigen::Vector3d::Zero());
+
+        // Future Phase 6: Load orientations from VTF/JSON if ellipsoids detected
+        // For now, spheres don't need orientation tracking (m_cg_enable_rotation = false)
+        m_cg_enable_rotation = false;
+
+        int verbosity = m_config.get<int>("verbosity", 0);
+        if (verbosity >= 2) {
+            CurcumaLogger::info("Orientational dynamics infrastructure initialized (spheres mode)");
         }
     }
 
@@ -3024,6 +3051,13 @@ bool SimpleMD::WriteGeometry()
     }
     TriggerWriteRestart();
     m_molecule.setGeometry(geometry);
+
+    // Claude Generated (Nov 2025): Write VTF trajectory for CG systems
+    if (m_is_cg_system && m_cg_write_vtf) {
+        m_molecule.setEnergy(m_Epot);
+        m_molecule.setName(std::to_string(m_currentStep));
+        m_molecule.appendVTFFile(Basename() + ".trj.vtf");
+    }
 
     if (m_writeXYZ) {
         m_molecule.setEnergy(m_Epot);
