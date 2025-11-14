@@ -55,16 +55,20 @@ PYBIND11_MODULE(curcuma, m) {
         Curcuma - Molecular Modelling and Simulation Toolkit
         ====================================================
 
-        A Python interface to the Curcuma computational chemistry toolkit,
-        providing access to:
+        A Python interface to the Curcuma computational chemistry toolkit.
 
-        - Quantum mechanical methods (Extended Hückel, GFN1/GFN2, etc.)
-        - Force field methods (UFF, GFN-FF, QMDFF)
-        - Geometry optimization (LBFGS and other algorithms)
-        - Molecular dynamics simulations
-        - Conformational analysis and searching
-        - RMSD calculations and structural alignment
-        - Dispersion corrections (D3, D4)
+        Currently Implemented:
+        - Molecular structure manipulation (Molecule class) ✓
+        - Energy calculations (EnergyCalculator) ✓
+        - RMSD analysis and alignment ✓
+        - Quantum mechanical methods (Extended Hückel, GFN1/GFN2, etc.) ✓
+        - Force field methods (UFF, GFN-FF, QMDFF) ✓
+        - Dispersion corrections (D3, D4) ✓
+
+        In Development (CLI-only for now):
+        - Geometry optimization (use CLI: curcuma -opt)
+        - Molecular dynamics (use CLI: curcuma -md)
+        - Conformational analysis (use CLI: curcuma -confscan)
 
         Example Usage
         -------------

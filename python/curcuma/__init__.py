@@ -38,18 +38,17 @@ __license__ = "GPL-3.0"
 try:
     from . import curcuma as _curcuma_core
 
-    # Re-export all classes and functions from the C++ module
+    # Re-export fully implemented classes from the C++ module
     Molecule = _curcuma_core.Molecule
     EnergyCalculator = _curcuma_core.EnergyCalculator
     RMSD = _curcuma_core.RMSD
-    Optimizer = _curcuma_core.Optimizer
-    MolecularDynamics = _curcuma_core.MolecularDynamics
-    ConformationalScan = _curcuma_core.ConformationalScan
 
-    # Convenience functions
+    # Fully implemented convenience functions
     calculate_energy = _curcuma_core.calculate_energy
     calculate_rmsd = _curcuma_core.calculate_rmsd
     align_molecules = _curcuma_core.align_molecules
+
+    # Placeholder functions (not yet fully implemented - CLI-only)
     optimize_geometry = _curcuma_core.optimize_geometry
     run_molecular_dynamics = _curcuma_core.run_molecular_dynamics
     scan_dihedral = _curcuma_core.scan_dihedral
@@ -70,18 +69,17 @@ except ImportError as e:
 
 # Define what gets exported with "from curcuma import *"
 __all__ = [
-    # Core classes
+    # Fully implemented core classes
     "Molecule",
     "EnergyCalculator",
     "RMSD",
-    "Optimizer",
-    "MolecularDynamics",
-    "ConformationalScan",
 
-    # Convenience functions
+    # Fully implemented convenience functions
     "calculate_energy",
     "calculate_rmsd",
     "align_molecules",
+
+    # Placeholder functions (CLI-only for now)
     "optimize_geometry",
     "run_molecular_dynamics",
     "scan_dihedral",
