@@ -88,6 +88,7 @@ private:
     static std::unique_ptr<OptimizerInterface> createInternalLBFGS();
     static std::unique_ptr<OptimizerInterface> createDIIS();
     static std::unique_ptr<OptimizerInterface> createRFO();
+    static std::unique_ptr<OptimizerInterface> createANCOpt(); // Claude Generated - AncOpt optimizer
 };
 
 /**

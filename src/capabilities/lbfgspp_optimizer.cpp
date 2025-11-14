@@ -18,10 +18,30 @@
  */
 
 #include "lbfgspp_optimizer.h"
+#include "src/core/energycalculator.h"
 #include "src/tools/general.h"
 #include <stdexcept>
 
 namespace Optimization {
+
+// Claude Generated - Helper function to set Molecule geometry from flat Vector
+static void CoordinatesToMolecule(const Vector& coords, Molecule& mol) {
+    Geometry geom(mol.AtomCount(), 3);
+    for (int i = 0; i < mol.AtomCount(); ++i) {
+        geom.row(i) = coords.segment<3>(3 * i);
+    }
+    mol.setGeometry(geom);
+}
+
+// Claude Generated - Helper function to convert Molecule geometry to flat Vector
+static Vector MoleculeToCoordinates(const Molecule& mol) {
+    const auto& geom = mol.getGeometry();
+    Vector coords(3 * mol.AtomCount());
+    for (int i = 0; i < mol.AtomCount(); ++i) {
+        coords.segment<3>(3 * i) = geom.row(i);
+    }
+    return coords;
+}
 
 // Claude Generated - LBFGSpp objective function adapter
 LBFGSppObjectiveFunction::LBFGSppObjectiveFunction(EnergyCalculator* calc, Molecule* mol,
@@ -46,7 +66,7 @@ double LBFGSppObjectiveFunction::operator()(const VectorXd& x, VectorXd& grad)
 
     try {
         // Update molecule geometry
-        Tools::Coord2Mol(x, *m_molecule);
+        CoordinatesToMolecule(x, *m_molecule);
 
         // Check for NaN coordinates
         for (int i = 0; i < x.size(); ++i) {
@@ -57,7 +77,7 @@ double LBFGSppObjectiveFunction::operator()(const VectorXd& x, VectorXd& grad)
         }
 
         // Calculate energy and gradient
-        m_energy_calculator->setMolecule(*m_molecule);
+        m_energy_calculator->setMolecule(m_molecule->getMolInfo());
         double energy = m_energy_calculator->CalculateEnergy(true);
 
         if (std::isnan(energy) || std::isinf(energy)) {
@@ -116,7 +136,7 @@ bool LBFGSppOptimizer::InitializeOptimizerInternal()
             m_context.energy_calculator, &m_molecule, m_context.atom_constraints);
 
         // Initialize coordinate vector
-        m_current_coordinates = Tools::Mol2Coord(m_molecule);
+        m_current_coordinates = MoleculeToCoordinates(m_molecule);
 
         CurcumaLogger::success("LBFGSpp optimizer initialized");
         CurcumaLogger::param("Memory parameter (m)", m_lbfgs_m);
@@ -144,7 +164,7 @@ Vector LBFGSppOptimizer::CalculateOptimizationStep(const Vector& current_coordin
 
         // Use SingleStep for step-by-step control
         double energy;
-        int niter = m_solver->SingleStep(*m_objective, x, energy);
+        m_solver->SingleStep(*m_objective, x, energy);
 
         if (m_objective->hasError()) {
             CurcumaLogger::warn("LBFGSpp objective function reported error");
@@ -152,11 +172,9 @@ Vector LBFGSppOptimizer::CalculateOptimizationStep(const Vector& current_coordin
             return Vector::Zero(current_coordinates.size()); // Zero step on error
         }
 
-        // Check solver convergence
-        m_solver_converged = (niter == 0); // SingleStep returns 0 when converged
-
-        // Calculate step
+        // Calculate step and check solver convergence by step size
         Vector step = x - current_coordinates;
+        m_solver_converged = (step.norm() < m_lbfgs_eps_abs);
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info_fmt("LBFGSpp step norm: {:.6e}", step.norm());
@@ -260,7 +278,7 @@ void LBFGSppOptimizer::configureLBFGSParam()
     m_param->delta = m_lbfgs_delta;
 
     // Line search parameters
-    m_param->linesearch = static_cast<lbfgs_linesearch_t>(m_lbfgs_line_search);
+    m_param->linesearch = m_lbfgs_line_search;
     m_param->max_linesearch = m_lbfgs_max_line_search;
     m_param->min_step = m_lbfgs_min_step;
     m_param->max_step = m_lbfgs_max_step;

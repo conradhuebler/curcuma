@@ -220,7 +220,7 @@ OptimizationResult OptimizationDispatcher::optimizeStructure(
         // Configure optimizer
         json merged_config = mergeConfigurations(optimizer->GetDefaultConfiguration(), config);
         optimizer->LoadConfiguration(merged_config);
-        optimizer->setEnergyCalculator(energy_calculator);
+        // Note: Energy calculator is passed during createOptimizer and set during initialization
 
         // Initialize optimization
         if (!optimizer->InitializeOptimization(*molecule)) {

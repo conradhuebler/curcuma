@@ -31,8 +31,7 @@ using curcuma::Molecule;
 
 // Forward declarations
 class EnergyCalculator;
-typedef Eigen::VectorXd Vector;
-typedef Eigen::Matrix<double, -1, -1> Matrix;
+// Note: Vector and Matrix are already defined in src/core/global.h
 
 namespace Optimization {
 

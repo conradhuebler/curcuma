@@ -91,7 +91,7 @@ bool ANCCoordinates::generateANC(const Matrix& cartesian_hessian, const Vector& 
     // Initialize internal coordinates from Cartesian
     setCartesian(xyz);
 
-    CurcumaLogger::success("ANC generated with " + std::to_string(nvar) + " internal coordinates", 2);
+    CurcumaLogger::success("ANC generated with " + std::to_string(nvar) + " internal coordinates");
 
     return true;
 }
@@ -154,7 +154,7 @@ ANCOptimizer::ANCOptimizer()
 }
 
 bool ANCOptimizer::InitializeOptimizerInternal() {
-    CurcumaLogger::info("Initializing AncOpt optimizer", 1);
+    CurcumaLogger::info("Initializing AncOpt optimizer");
 
     // Load ANC-specific parameters from configuration
     loadANCParameters(m_configuration);
@@ -167,10 +167,10 @@ bool ANCOptimizer::InitializeOptimizerInternal() {
     bool is_linear = checkLinearMolecule(m_molecule);
 
     // Calculate number of internal coordinates
-    int nvar = 3 * m_molecule.GetAtomCount() - (is_linear ? 5 : 6);
+    int nvar = 3 * m_molecule.AtomCount() - (is_linear ? 5 : 6);
 
     // Allocate ANC structure
-    m_anc->allocate(m_molecule.GetAtomCount(), nvar, m_hlow, m_hmax);
+    m_anc->allocate(m_molecule.AtomCount(), nvar, m_hlow, m_hmax);
 
     // Generate initial model Hessian
     Matrix cart_hess = generateModelHessian(m_molecule);
@@ -191,10 +191,10 @@ bool ANCOptimizer::InitializeOptimizerInternal() {
     m_micro_current = 0;
     m_needs_anc_regeneration = false;
 
-    CurcumaLogger::param("Max displacement (ANC)", std::to_string(m_maxdispl) + " Bohr", 2);
-    CurcumaLogger::param("Frequency cutoffs", std::to_string(m_hlow) + " - " + std::to_string(m_hmax), 2);
-    CurcumaLogger::param("Micro-iterations", std::to_string(m_maxmicro), 2);
-    CurcumaLogger::param("Hessian update", m_hessian_update == BFGS ? "BFGS" : "Powell", 2);
+    CurcumaLogger::param("Max displacement (ANC)", std::to_string(m_maxdispl) + " Bohr");
+    CurcumaLogger::param("Frequency cutoffs", std::to_string(m_hlow) + " - " + std::to_string(m_hmax));
+    CurcumaLogger::param("Micro-iterations", std::to_string(m_maxmicro));
+    CurcumaLogger::param("Hessian update", m_hessian_update == BFGS ? "BFGS" : "Powell");
 
     return true;
 }
@@ -209,15 +209,15 @@ Vector ANCOptimizer::CalculateOptimizationStep(const Vector& current_coordinates
 
     // Check if we need to regenerate ANC
     if (m_needs_anc_regeneration || m_micro_current >= m_maxmicro) {
-        CurcumaLogger::info("Regenerating ANC (micro-iteration limit reached)", 2);
+        CurcumaLogger::info("Regenerating ANC (micro-iteration limit reached)");
 
         // Generate new model Hessian
         Matrix cart_hess = generateModelHessian(m_molecule);
         projectTranslationsRotations(cart_hess, m_molecule);
 
         // Regenerate ANC
-        Vector current_xyz(3 * m_molecule.GetAtomCount());
-        for (int i = 0; i < m_molecule.GetAtomCount(); ++i) {
+        Vector current_xyz(3 * m_molecule.AtomCount());
+        for (int i = 0; i < m_molecule.AtomCount(); ++i) {
             current_xyz.segment<3>(3 * i) = m_molecule.getGeometry().row(i);
         }
         m_anc->generateANC(cart_hess, current_xyz, checkLinearMolecule(m_molecule));
@@ -259,8 +259,8 @@ Vector ANCOptimizer::CalculateOptimizationStep(const Vector& current_coordinates
 
     m_micro_current++;
 
-    CurcumaLogger::param("Displacement norm (ANC)", std::to_string(m_displ.norm()), 3);
-    CurcumaLogger::param("Predicted energy change", std::to_string(m_depred) + " Eh", 3);
+    CurcumaLogger::param("Displacement norm (ANC)", std::to_string(m_displ.norm()));
+    CurcumaLogger::param("Predicted energy change", std::to_string(m_depred) + " Eh");
 
     return new_xyz;
 }
@@ -269,7 +269,7 @@ bool ANCOptimizer::CheckMethodSpecificConvergence() const {
     // AncOpt convergence: gradient norm below threshold
     bool grad_converged = m_gnorm < m_gthr;
 
-    CurcumaLogger::info("Gradient norm: " + std::to_string(m_gnorm) + " Eh/Bohr (threshold: " + std::to_string(m_gthr) + ")", 2);
+    CurcumaLogger::info("Gradient norm: " + std::to_string(m_gnorm) + " Eh/Bohr (threshold: " + std::to_string(m_gthr) + ")");
 
     return grad_converged;
 }
@@ -294,7 +294,7 @@ void ANCOptimizer::FinalizeOptimizationInternal() {
         m_anc->deallocate();
     }
 
-    CurcumaLogger::success("AncOpt optimization finalized", 1);
+    CurcumaLogger::success("AncOpt optimization finalized");
 }
 
 // ============================================================================
@@ -302,9 +302,9 @@ void ANCOptimizer::FinalizeOptimizationInternal() {
 // ============================================================================
 
 Matrix ANCOptimizer::generateModelHessian(const Molecule& mol) {
-    CurcumaLogger::info("Generating model Hessian (Lindh 2007)", 2);
+    CurcumaLogger::info("Generating model Hessian (Lindh 2007)");
 
-    int n3 = 3 * mol.GetAtomCount();
+    int n3 = 3 * mol.AtomCount();
     Matrix hessian = Matrix::Zero(n3, n3);
 
     // Simplified Lindh model Hessian
@@ -314,7 +314,7 @@ Matrix ANCOptimizer::generateModelHessian(const Molecule& mol) {
     const auto& geometry = mol.getGeometry();
 
     // Diagonal elements: simple harmonic approximation
-    for (int i = 0; i < mol.GetAtomCount(); ++i) {
+    for (int i = 0; i < mol.AtomCount(); ++i) {
         double mass = Elements::AtomicMass[mol.Atom(i).first];
         double k_diagonal = m_model_hess_params.s6 / std::sqrt(mass);
 
@@ -324,12 +324,12 @@ Matrix ANCOptimizer::generateModelHessian(const Molecule& mol) {
     }
 
     // Off-diagonal elements: bond connectivity
-    auto bonds = mol.GetBonds();
+    auto bonds = mol.Bonds();
     for (const auto& bond : bonds) {
         int i = bond.first;
         int j = bond.second;
 
-        if (i >= mol.GetAtomCount() || j >= mol.GetAtomCount())
+        if (i >= mol.AtomCount() || j >= mol.AtomCount())
             continue;
 
         double rij = (geometry.row(i) - geometry.row(j)).norm();
@@ -348,16 +348,16 @@ Matrix ANCOptimizer::generateModelHessian(const Molecule& mol) {
         }
     }
 
-    CurcumaLogger::success("Model Hessian generated", 2);
+    CurcumaLogger::success("Model Hessian generated");
 
     return hessian;
 }
 
 bool ANCOptimizer::generateANCFromHessian(const Matrix& cart_hess, const Molecule& mol) {
     // Convert Cartesian coordinates to flat vector
-    Vector xyz_flat(3 * mol.GetAtomCount());
+    Vector xyz_flat(3 * mol.AtomCount());
     const auto& geom = mol.getGeometry();
-    for (int i = 0; i < mol.GetAtomCount(); ++i) {
+    for (int i = 0; i < mol.AtomCount(); ++i) {
         xyz_flat.segment<3>(3 * i) = geom.row(i);
     }
 
@@ -424,7 +424,7 @@ Vector ANCOptimizer::calculateRationalFunctionStep(const Vector& gradient_intern
 
     Vector displacement = eigenvec.head(nvar) / last_elem;
 
-    CurcumaLogger::param("RF eigenvalue", std::to_string(eigenvalues(min_idx)), 3);
+    CurcumaLogger::param("RF eigenvalue", std::to_string(eigenvalues(min_idx)));
 
     return displacement;
 }
@@ -564,9 +564,9 @@ void ANCOptimizer::setOptimizationLevel(int level) {
         m_acc = 1.0;
     }
 
-    CurcumaLogger::param("Optimization level", std::to_string(level), 2);
-    CurcumaLogger::param("Energy threshold", std::to_string(m_ethr) + " Eh", 2);
-    CurcumaLogger::param("Gradient threshold", std::to_string(m_gthr) + " Eh/Bohr", 2);
+    CurcumaLogger::param("Optimization level", level);
+    CurcumaLogger::param("Energy threshold", std::to_string(m_ethr) + " Eh");
+    CurcumaLogger::param("Gradient threshold", std::to_string(m_gthr) + " Eh/Bohr");
 }
 
 void ANCOptimizer::loadANCParameters(const json& config) {
@@ -598,16 +598,16 @@ bool ANCOptimizer::checkLinearMolecule(const Molecule& mol) const {
     // Check if molecule is linear by computing moment of inertia
     // If smallest moment is < 1e-10, molecule is linear
 
-    if (mol.GetAtomCount() < 3) {
+    if (mol.AtomCount() < 3) {
         return true; // Atoms and diatomics are considered linear
     }
 
     // Compute center of mass
-    Vector3d com = Vector3d::Zero();
+    Eigen::Vector3d com = Eigen::Vector3d::Zero();
     double total_mass = 0.0;
     const auto& geom = mol.getGeometry();
 
-    for (int i = 0; i < mol.GetAtomCount(); ++i) {
+    for (int i = 0; i < mol.AtomCount(); ++i) {
         double mass = Elements::AtomicMass[mol.Atom(i).first];
         com += mass * geom.row(i).transpose();
         total_mass += mass;
@@ -615,10 +615,10 @@ bool ANCOptimizer::checkLinearMolecule(const Molecule& mol) const {
     com /= total_mass;
 
     // Compute inertia tensor
-    Matrix3d I = Matrix3d::Zero();
-    for (int i = 0; i < mol.GetAtomCount(); ++i) {
+    Eigen::Matrix3d I = Eigen::Matrix3d::Zero();
+    for (int i = 0; i < mol.AtomCount(); ++i) {
         double mass = Elements::AtomicMass[mol.Atom(i).first];
-        Vector3d r = geom.row(i).transpose() - com;
+        Eigen::Vector3d r = geom.row(i).transpose() - com;
 
         I(0, 0) += mass * (r(1) * r(1) + r(2) * r(2));
         I(1, 1) += mass * (r(0) * r(0) + r(2) * r(2));
@@ -632,15 +632,15 @@ bool ANCOptimizer::checkLinearMolecule(const Molecule& mol) const {
     I(2, 1) = I(1, 2);
 
     // Diagonalize
-    Eigen::SelfAdjointEigenSolver<Matrix3d> solver(I);
-    const Vector3d& eigenvalues = solver.eigenvalues();
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(I);
+    const Eigen::Vector3d& eigenvalues = solver.eigenvalues();
 
     // Check smallest eigenvalue
     double min_eigenvalue = eigenvalues.minCoeff();
     bool is_linear = (min_eigenvalue < 1e-10);
 
     if (is_linear) {
-        CurcumaLogger::info("Molecule is linear", 2);
+        CurcumaLogger::info("Molecule is linear");
     }
 
     return is_linear;

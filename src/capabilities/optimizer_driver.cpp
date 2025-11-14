@@ -18,12 +18,32 @@
  */
 
 #include "optimizer_driver.h"
+#include "src/core/energycalculator.h"
 #include "src/tools/general.h"
 #include <cmath>
 #include <fstream>
 #include <stdexcept>
 
 namespace Optimization {
+
+// Claude Generated - Helper function to convert Molecule geometry to flat Vector
+static Vector MoleculeToCoordinates(const Molecule& mol) {
+    const auto& geom = mol.getGeometry();
+    Vector coords(3 * mol.AtomCount());
+    for (int i = 0; i < mol.AtomCount(); ++i) {
+        coords.segment<3>(3 * i) = geom.row(i);
+    }
+    return coords;
+}
+
+// Claude Generated - Helper function to set Molecule geometry from flat Vector
+static void CoordinatesToMolecule(const Vector& coords, Molecule& mol) {
+    Geometry geom(mol.AtomCount(), 3);
+    for (int i = 0; i < mol.AtomCount(); ++i) {
+        geom.row(i) = coords.segment<3>(3 * i);
+    }
+    mol.setGeometry(geom);
+}
 
 // Claude Generated - OptimizationContext implementation
 bool OptimizationContext::isValid() const
@@ -161,7 +181,7 @@ bool OptimizerDriver::InitializeOptimization(const Molecule* molecule)
     m_converged = false;
 
     // Calculate initial energy and gradient
-    Vector coordinates = Tools::Mol2Coord(m_molecule);
+    Vector coordinates = MoleculeToCoordinates(m_molecule);
     if (!evaluateEnergyAndGradient(coordinates, m_current_energy, m_current_gradient)) {
         CurcumaLogger::error("Failed to calculate initial energy and gradient");
         return false;
@@ -189,7 +209,7 @@ bool OptimizerDriver::InitializeOptimization(const double* coordinates, int atom
     Molecule mol(atom_count, 0);
     for (int i = 0; i < atom_count; ++i) {
         int element = 6; // Default to carbon - should be provided in real implementation
-        Vector3 position(coordinates[3 * i], coordinates[3 * i + 1], coordinates[3 * i + 2]);
+        Position position(coordinates[3 * i], coordinates[3 * i + 1], coordinates[3 * i + 2]);
         mol.addPair({ element, position });
     }
 
@@ -199,20 +219,17 @@ bool OptimizerDriver::InitializeOptimization(const double* coordinates, int atom
 bool OptimizerDriver::UpdateGeometry(const Molecule& molecule)
 {
     m_molecule = molecule;
-    Vector coordinates = Tools::Mol2Coord(m_molecule);
+    Vector coordinates = MoleculeToCoordinates(m_molecule);
     return evaluateEnergyAndGradient(coordinates, m_current_energy, m_current_gradient);
 }
 
 bool OptimizerDriver::UpdateGeometry(const double* coordinates)
 {
     // Update molecule coordinates
-    for (int i = 0; i < m_molecule.AtomCount(); ++i) {
-        Vector3 pos(coordinates[3 * i], coordinates[3 * i + 1], coordinates[3 * i + 2]);
-        m_molecule.setAtom(i, m_molecule.Atom(i).first, pos);
-    }
+    Vector coords = Eigen::Map<const Vector>(coordinates, 3 * m_molecule.AtomCount());
+    CoordinatesToMolecule(coords, m_molecule);
 
-    return evaluateEnergyAndGradient(Vector::Map(coordinates, 3 * m_molecule.AtomCount()),
-        m_current_energy, m_current_gradient);
+    return evaluateEnergyAndGradient(coords, m_current_energy, m_current_gradient);
 }
 
 OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, bool verbose)
@@ -242,7 +259,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, bool verbose
         for (m_current_iteration = 1; m_current_iteration <= m_context.max_iterations; ++m_current_iteration) {
 
             // Calculate optimization step (method-specific)
-            Vector current_coords = Tools::Mol2Coord(m_molecule);
+            Vector current_coords = MoleculeToCoordinates(m_molecule);
             Vector step = CalculateOptimizationStep(current_coords, m_current_gradient);
 
             if (step.norm() == 0) {
@@ -269,7 +286,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, bool verbose
             }
 
             // Update molecule geometry
-            Tools::Coord2Mol(new_coords, m_molecule);
+            CoordinatesToMolecule(new_coords, m_molecule);
 
             // Calculate RMSD change
             double rmsd_change = 0.0;
@@ -329,7 +346,7 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, bool verbose
             // Write trajectory file
             std::ofstream trj_file(m_context.trajectory_filename);
             for (const auto& mol : m_trajectory) {
-                trj_file << mol.getXYZString();
+                trj_file << mol.XYZString();
             }
             CurcumaLogger::success_fmt("Trajectory written to: {}", m_context.trajectory_filename);
         }
@@ -360,8 +377,8 @@ OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, bool verbose
 bool OptimizerDriver::evaluateEnergyAndGradient(const Vector& coordinates, double& energy, Vector& gradient)
 {
     try {
-        Tools::Coord2Mol(coordinates, m_molecule);
-        m_context.energy_calculator->setMolecule(m_molecule);
+        CoordinatesToMolecule(coordinates, m_molecule);
+        m_context.energy_calculator->setMolecule(m_molecule.getMolInfo());
 
         energy = m_context.energy_calculator->CalculateEnergy(true);
         if (std::isnan(energy) || std::isinf(energy)) {
