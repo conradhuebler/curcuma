@@ -397,6 +397,7 @@ void ForceField::setBonds(const json& bonds)
 
 void ForceField::setAngles(const json& angles)
 {
+    std::cerr << "DEBUG setAngles: Processing " << angles.size() << " angles" << std::endl;
     m_angles.clear();
     for (int i = 0; i < angles.size(); ++i) {
         json angle = angles[i].get<json>();
@@ -407,14 +408,20 @@ void ForceField::setAngles(const json& angles)
         a.i = angle["i"];
         a.j = angle["j"];
         a.k = angle["k"];
-        a.C0 = angle["C0"];
-        a.C1 = angle["C1"];
-        a.C2 = angle["C2"];
+
+        // Claude Generated: Optional Fourier coefficients (not used by GFN-FF)
+        // GFN-FF uses simple angle bending, UFF/QMDFF may use Fourier expansion
+        a.C0 = angle.value("C0", 0.0);
+        a.C1 = angle.value("C1", 0.0);
+        a.C2 = angle.value("C2", 0.0);
+
         a.fc = angle["fc"];
         a.r0_ij = angle["r0_ij"];
         a.r0_ik = angle["r0_ik"];
         a.theta0_ijk = angle["theta0_ijk"];
         m_angles.push_back(a);
+
+        std::cerr << "DEBUG: Angle " << i << " added: " << a.i << "-" << a.j << "-" << a.k << std::endl;
     }
 }
 
