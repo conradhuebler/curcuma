@@ -240,6 +240,10 @@ class Molecule
       void appendXYZFile(const std::string& filename) const;
       inline void appendXYZFile() const { appendXYZFile(Name() + ".xyz"); }
 
+      // Claude Generated (Nov 2025): VTF trajectory output for CG systems
+      void appendVTFFile(const std::string& filename) const;
+      inline void appendVTFFile() const { appendVTFFile(Name() + ".trj.vtf"); }
+
       void appendDipoleFile(const std::string& filename) const;
       inline void appendDipoleFile() const { appendDipoleFile(Name() + ".dip"); }
 

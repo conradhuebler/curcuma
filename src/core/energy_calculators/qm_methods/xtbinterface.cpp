@@ -23,7 +23,9 @@
 #include "src/tools/general.h"
 #include <fmt/format.h>
 
+#ifdef USE_XTB
 #include "external/xtb/include/xtb.h"
+#endif
 
 #include <iostream>
 #include <math.h>

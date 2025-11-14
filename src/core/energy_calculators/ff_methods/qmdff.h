@@ -1,6 +1,6 @@
 /*
  * <Simple UFF implementation for Cucuma. >
- * Copyright (C) 2022 - 2023 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2022 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -33,8 +33,13 @@
 
 #include "external/CxxThreadPool/include/CxxThreadPool.h"
 
+#ifdef USE_D3
 #include "src/core/energy_calculators/qm_methods/dftd3interface.h"
+#endif
+
+#ifdef USE_D4
 #include "src/core/energy_calculators/qm_methods/dftd4interface.h"
+#endif
 
 #include "uff_par.h"
 #include <set>

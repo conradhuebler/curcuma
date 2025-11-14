@@ -3,6 +3,8 @@
  * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  */
 
+#include "src/core/energy_calculators/qm_methods/interface/abstract_interface.h"
+
 #include "dispersion_method.h"
 #include "src/core/config_manager.h"
 

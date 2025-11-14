@@ -19,6 +19,8 @@
 
 #pragma once
 
+#ifdef USE_D4
+
 #include "src/tools/general.h"
 #include "src/core/parameter_macros.h"
 #include "src/core/config_manager.h"
@@ -96,3 +98,5 @@ private:
     int m_natoms;
     mutable ConfigManager m_config;
 };
+
+#endif // USE_D4

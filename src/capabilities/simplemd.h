@@ -366,6 +366,12 @@ private:
     int m_cg_atom_count = 0;               // Number of CG atoms in system
     double m_cg_timestep_factor = 1.0;     // Timestep scaling for CG systems (10x for pure CG)
 
+    // Claude Generated (Nov 2025): Orientational dynamics infrastructure (Phase 5 - prepared for Phase 6 ellipsoids)
+    bool m_cg_enable_rotation = false;           // Future: enable orientational dynamics for ellipsoids
+    std::vector<Eigen::Vector3d> m_cg_orientations;  // Future: orientation vectors (quaternions in Phase 6)
+    std::vector<Eigen::Vector3d> m_cg_angular_velocities;  // Future: angular velocities
+    bool m_cg_write_vtf = true;                   // Write VTF trajectory for CG systems
+
     // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
     // Claude Generated - Parameter Registry Integration (October 2025)
     BEGIN_PARAMETER_DEFINITION(simplemd)
@@ -437,6 +443,11 @@ private:
     PARAM(rmsd_mtd_ref_file, String, "none", "File with reference structures for RMSD-MTD.", "RMSD-MTD", {"rmsd_ref_file"})
     PARAM(rmsd_mtd_atoms, String, "-1", "Atom indices to use for RMSD calculation.", "RMSD-MTD", {"rmsd_atoms"})
     PARAM(rmsd_mtd_dt, Double, 1000000.0, "RMSD-MTD bias deposition time.", "RMSD-MTD", {"rmsd_DT"})
+
+    // --- Coarse Graining (CG) Parameters --- Claude Generated (Nov 2025)
+    PARAM(cg_write_vtf, Bool, true, "Write VTF trajectory for CG systems.", "CG", {"write_vtf"})
+    PARAM(cg_timestep_scaling, Bool, true, "Enable automatic timestep scaling for pure CG systems.", "CG", {"cg_dt_scaling"})
+    PARAM(cg_timestep_factor, Double, 10.0, "Timestep multiplication factor for pure CG systems.", "CG", {})
 
     END_PARAMETER_DEFINITION
     // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^

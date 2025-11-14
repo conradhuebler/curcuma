@@ -1,3 +1,4 @@
+#ifdef USE_TBLITE
 #include "external/tblite/include/tblite.h"
 #include <assert.h>
 #include <iostream>
@@ -49,3 +50,10 @@ int main(int argc, char** argv)
     delete cont;
     return 0;
 }
+#else
+int main(int argc, char** argv)
+{
+    std::cerr << "TBLite support not compiled in (USE_TBLITE not defined)" << std::endl;
+    return 1;
+}
+#endif
