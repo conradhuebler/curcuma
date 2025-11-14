@@ -476,9 +476,9 @@ struct EEQParameters {
     double cnf;  // CN correction factor
 };
 
-EEQParameters GFNFF::getEEQParameters(int atomic_number) const
+GFNFF::EEQParameters GFNFF::getEEQParameters(int atomic_number) const
 {
-    EEQParameters params;
+    GFNFF::EEQParameters params;
 
     // Phase 3: EEQ parameters from gfnff_param.f90 (angewChem2020 parameter set)
     // Reference: S. Spicher, S. Grimme, Angew. Chem. Int. Ed. 2020, 59, 15665-15673

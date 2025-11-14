@@ -526,10 +526,10 @@ void GFNFF::calculateDihedralGradient(
     // ==========================================================================
     // STEP 1: Extract atomic positions
     // ==========================================================================
-    Vector r_i = m_geometry.row(i);
-    Vector r_j = m_geometry.row(j);
-    Vector r_k = m_geometry.row(k);
-    Vector r_l = m_geometry.row(l);
+    Eigen::Vector3d r_i = m_geometry.row(i).head<3>();
+    Eigen::Vector3d r_j = m_geometry.row(j).head<3>();
+    Eigen::Vector3d r_k = m_geometry.row(k).head<3>();
+    Eigen::Vector3d r_l = m_geometry.row(l).head<3>();
 
     // ==========================================================================
     // STEP 2: Compute bond vectors
@@ -539,13 +539,13 @@ void GFNFF::calculateDihedralGradient(
     //   rb = r_jk = r_k - r_j  (central bond j→k)
     //   rc = r_kl = r_l - r_k  (bond k→l)
 
-    Vector ra = r_j - r_i;
-    Vector rb = r_k - r_j;
-    Vector rc = r_l - r_k;
+    Eigen::Vector3d ra = r_j - r_i;
+    Eigen::Vector3d rb = r_k - r_j;
+    Eigen::Vector3d rc = r_l - r_k;
 
     // Composite vectors (appear frequently in derivatives)
-    Vector rapb = ra + rb;  // r_i→k via j
-    Vector rbpc = rb + rc;  // r_j→l via k
+    Eigen::Vector3d rapb = ra + rb;  // r_i→k via j
+    Eigen::Vector3d rbpc = rb + rc;  // r_j→l via k
 
     // ==========================================================================
     // STEP 3: Compute normal vectors to dihedral planes
@@ -556,8 +556,8 @@ void GFNFF::calculateDihedralGradient(
     // These are the fundamental vectors that define the dihedral angle.
     // Their magnitudes relate to the area of the triangular planes.
 
-    Vector na = ra.cross(rb);  // Called 'na' in Fortran
-    Vector nb = rb.cross(rc);  // Called 'nb' in Fortran
+    Eigen::Vector3d na = ra.cross(rb);  // Called 'na' in Fortran
+    Eigen::Vector3d nb = rb.cross(rc);  // Called 'nb' in Fortran
 
     double nan = na.norm();    // |n1|
     double nbn = nb.norm();    // |n2|
@@ -597,18 +597,18 @@ void GFNFF::calculateDihedralGradient(
     // Following Fortran naming convention for clarity and verification.
     //
     // Basic cross products with bond vectors:
-    Vector rab = na.cross(rb);   // (ra × rb) × rb = -|rb|² · ra_perp
-    Vector rba = nb.cross(ra);   // (rb × rc) × ra
-    Vector rac = na.cross(rc);   // (ra × rb) × rc
-    Vector rbb = nb.cross(rb);   // (rb × rc) × rb = -|rb|² · rc_perp
-    Vector rbc = nb.cross(rc);   // (rb × rc) × rc
-    Vector raa = na.cross(ra);   // (ra × rb) × ra = |ra|² · rb_perp
+    Eigen::Vector3d rab = na.cross(rb);   // (ra × rb) × rb = -|rb|² · ra_perp
+    Eigen::Vector3d rba = nb.cross(ra);   // (rb × rc) × ra
+    Eigen::Vector3d rac = na.cross(rc);   // (ra × rb) × rc
+    Eigen::Vector3d rbb = nb.cross(rb);   // (rb × rc) × rb = -|rb|² · rc_perp
+    Eigen::Vector3d rbc = nb.cross(rc);   // (rb × rc) × rc
+    Eigen::Vector3d raa = na.cross(ra);   // (ra × rb) × ra = |ra|² · rb_perp
 
     // Cross products with composite vectors:
-    Vector rapba = rapb.cross(na);  // (ra + rb) × (ra × rb)
-    Vector rapbb = rapb.cross(nb);  // (ra + rb) × (rb × rc)
-    Vector rbpca = rbpc.cross(na);  // (rb + rc) × (ra × rb)
-    Vector rbpcb = rbpc.cross(nb);  // (rb + rc) × (rb × rc)
+    Eigen::Vector3d rapba = rapb.cross(na);  // (ra + rb) × (ra × rb)
+    Eigen::Vector3d rapbb = rapb.cross(nb);  // (ra + rb) × (rb × rc)
+    Eigen::Vector3d rbpca = rbpc.cross(na);  // (rb + rc) × (ra × rb)
+    Eigen::Vector3d rbpcb = rbpc.cross(nb);  // (rb + rc) × (rb × rc)
 
     // ==========================================================================
     // STEP 7: Compute gradient for atom i

@@ -345,25 +345,25 @@ void GFNFF::calculateInversionGradient(
     // ==========================================================================
     // STEP 1: Extract atomic positions
     // ==========================================================================
-    Vector r_i = m_geometry.row(i);
-    Vector r_j = m_geometry.row(j);
-    Vector r_k = m_geometry.row(k);
-    Vector r_l = m_geometry.row(l);
+    Eigen::Vector3d r_i = m_geometry.row(i).head<3>();
+    Eigen::Vector3d r_j = m_geometry.row(j).head<3>();
+    Eigen::Vector3d r_k = m_geometry.row(k).head<3>();
+    Eigen::Vector3d r_l = m_geometry.row(l).head<3>();
 
     // ==========================================================================
     // STEP 2: Compute bond vectors (following Fortran naming)
     // ==========================================================================
-    Vector rv = r_l - r_i;  // r_il
-    Vector rd = r_k - r_j;  // r_kj
-    Vector re = r_i - r_j;  // r_ij
+    Eigen::Vector3d rv = r_l - r_i;  // r_il
+    Eigen::Vector3d rd = r_k - r_j;  // r_kj
+    Eigen::Vector3d re = r_i - r_j;  // r_ij
 
     // Composite vector
-    Vector rdme = rd - re;  // (r_k - r_j) - (r_i - r_j) = r_k - r_i
+    Eigen::Vector3d rdme = rd - re;  // (r_k - r_j) - (r_i - r_j) = r_k - r_i
 
     // ==========================================================================
     // STEP 3: Compute normal vector and norms
     // ==========================================================================
-    Vector rn = re.cross(rd);  // Normal to plane i-j-k
+    Eigen::Vector3d rn = re.cross(rd);  // Normal to plane i-j-k
 
     double rvn = rv.norm();  // |r_v|
     double rnn = rn.norm();  // |n|
@@ -403,12 +403,12 @@ void GFNFF::calculateInversionGradient(
     //
     // These cross products appear in the gradient expressions:
 
-    Vector rve = rv.cross(re);      // r_v × r_e
-    Vector rne = rn.cross(re);      // n × r_e
-    Vector rdv = rd.cross(rv);      // r_d × r_v
-    Vector rdn = rd.cross(rn);      // r_d × n
-    Vector rvdme = rv.cross(rdme);  // r_v × (r_d - r_e)
-    Vector rndme = rn.cross(rdme);  // n × (r_d - r_e)
+    Eigen::Vector3d rve = rv.cross(re);      // r_v × r_e
+    Eigen::Vector3d rne = rn.cross(re);      // n × r_e
+    Eigen::Vector3d rdv = rd.cross(rv);      // r_d × r_v
+    Eigen::Vector3d rdn = rd.cross(rn);      // r_d × n
+    Eigen::Vector3d rvdme = rv.cross(rdme);  // r_v × (r_d - r_e)
+    Eigen::Vector3d rndme = rn.cross(rdme);  // n × (r_d - r_e)
 
     // ==========================================================================
     // STEP 7: Compute gradient for atom i (central, out-of-plane)
