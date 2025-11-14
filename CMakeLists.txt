@@ -5,16 +5,16 @@ option (USE_XTB
     "Compile XTB and use as library" OFF)
 
 option (USE_TBLITE
-    "Compile TBLITE and use as library" ON)
+    "Compile TBLITE and use as library" OFF)
 
 option (USE_GFNFF
     "Compile external GFN-FF and use as library" OFF)
  
 option(USE_ULYSSES
-    "Compile Ulysses and use as library" ON)
+    "Compile Ulysses and use as library" OFF)
 
 option (USE_D3
-    "Compile cpp-D4 and use as library" ON)
+    "Compile cpp-D4 and use as library" OFF)
 
 option (USE_D4
     "Compile cpp-D4 and use as library" OFF)

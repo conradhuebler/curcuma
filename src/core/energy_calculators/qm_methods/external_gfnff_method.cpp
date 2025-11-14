@@ -49,7 +49,8 @@ bool ExternalGFNFFMethod::setMolecule(const Mol& mol)
 
     m_current_molecule = mol;
 
-    // Initialize the underlying interface
+    // Initialize the underlying interface    #ifdef USE_GFNFF
+
     bool success = m_interface->InitialiseMolecule(mol);
     m_initialized = success;
 
