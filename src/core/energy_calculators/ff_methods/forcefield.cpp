@@ -112,15 +112,21 @@ void ForceField::setParameter(const json& parameters)
     }
 
     // Level 2+: Force field initialization
+    // CRITICAL DEBUG: Output verbosity directly to stderr
+    std::cerr << "DEBUG ForceField::setParameter - verbosity = " << CurcumaLogger::get_verbosity() << std::endl;
+
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("Initializing force field parameters");
         CurcumaLogger::param("method", method_name);
     }
 
+    std::cerr << "DEBUG: After initializing logging" << std::endl;
+
     bool loaded_from_cache = false;
 
     // Try loading cached parameters if caching enabled and same method
     if (m_enable_caching && parameters.contains("method")) {
+        std::cerr << "DEBUG: Trying to load from cache..." << std::endl;
         std::string method = parameters["method"];
         loaded_from_cache = tryLoadAutoParameters(method);
         if (CurcumaLogger::get_verbosity() >= 3) {
@@ -128,33 +134,47 @@ void ForceField::setParameter(const json& parameters)
         }
     }
 
+    std::cerr << "DEBUG: loaded_from_cache = " << (loaded_from_cache ? "true" : "false") << std::endl;
+
     if (!loaded_from_cache) {
+        std::cerr << "DEBUG: Setting parameters..." << std::endl;
         // Set new parameters (generation or explicit)
         if (parameters.contains("bonds"))
             setBonds(parameters["bonds"]);
+        std::cerr << "DEBUG: bonds done" << std::endl;
         if (parameters.contains("angles"))
             setAngles(parameters["angles"]);
+        std::cerr << "DEBUG: angles done" << std::endl;
         if (parameters.contains("dihedrals"))
             setDihedrals(parameters["dihedrals"]);
+        std::cerr << "DEBUG: dihedrals done" << std::endl;
         if (parameters.contains("inversions"))
             setInversions(parameters["inversions"]);
+        std::cerr << "DEBUG: inversions done" << std::endl;
         if (parameters.contains("vdws"))
             setvdWs(parameters["vdws"]);
+        std::cerr << "DEBUG: vdws done" << std::endl;
 
         // Phase 4.2: GFN-FF pairwise non-bonded parameters (Claude Generated 2025)
         if (parameters.contains("gfnff_dispersions"))
             setGFNFFDispersions(parameters["gfnff_dispersions"]);
+        std::cerr << "DEBUG: gfnff_dispersions done" << std::endl;
         if (parameters.contains("gfnff_repulsions"))
             setGFNFFRepulsions(parameters["gfnff_repulsions"]);
+        std::cerr << "DEBUG: gfnff_repulsions done" << std::endl;
         if (parameters.contains("gfnff_coulombs"))
             setGFNFFCoulombs(parameters["gfnff_coulombs"]);
+        std::cerr << "DEBUG: gfnff_coulombs done" << std::endl;
 
         m_parameters = parameters;
         m_method = m_parameters["method"];
+        std::cerr << "DEBUG: method set to " << m_method << std::endl;
         if (m_parameters.contains("e0"))
             m_e0 = m_parameters["e0"];
 
+        std::cerr << "DEBUG: Calling AutoRanges()..." << std::endl;
         AutoRanges();
+        std::cerr << "DEBUG: AutoRanges() done" << std::endl;
 
         // Auto-save new parameters (only if caching enabled)
         if (m_enable_caching) {
@@ -162,6 +182,7 @@ void ForceField::setParameter(const json& parameters)
         }
     }
 
+    std::cerr << "DEBUG: Setting method type..." << std::endl;
     // Set method type for ForceFieldThread (regardless of cache)
     int method_type = 1; // default UFF
     if (m_method == "qmdff" || m_method == "quff") {
@@ -171,15 +192,28 @@ void ForceField::setParameter(const json& parameters)
     } else if (m_method == "cg" || m_method == "cg-lj") {
         method_type = 4; // CG methods
         // Generate CG parameters if not loaded from cache
-        if (!loaded_from_cache) {
+        if (m_enable_caching && !loaded_from_cache) {
             generateCGParameters(parameters);
         }
     }
+    std::cerr << "DEBUG: method_type = " << method_type << std::endl;
 
     // Claude Generated: Print parameter summary after setting parameters
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("DEBUG: About to call printParameterSummary()");
+    }
+
     printParameterSummary();
 
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("DEBUG: printParameterSummary() completed");
+    }
+
     in_setParameter = false; // Reset the recursive guard
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success("ForceField::setParameter() complete");
+    }
 }
 
 void ForceField::setParameterFile(const std::string& file)

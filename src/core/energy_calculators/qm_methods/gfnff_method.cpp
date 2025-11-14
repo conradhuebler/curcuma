@@ -19,6 +19,9 @@
 
 #include "gfnff_method.h"
 #include "src/tools/general.h"
+#include "src/core/curcuma_logger.h"
+
+#include <fmt/format.h>
 
 // Minimal stub implementation for GFN-FF method
 GFNFFMethod::GFNFFMethod(const json& config)
@@ -30,9 +33,37 @@ GFNFFMethod::GFNFFMethod(const json& config)
 }
 
 bool GFNFFMethod::setMolecule(const Mol& mol) {
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("=== GFNFFMethod::setMolecule() START ===");
+        CurcumaLogger::param("atoms", std::to_string(mol.m_number_atoms));
+        CurcumaLogger::param("charge", std::to_string(mol.m_charge));
+    }
+
     m_molecule = mol;
+
+    // CRITICAL FIX: Call base class method to set geometry/atoms, then call GFNFF::InitialiseMolecule()
+    if (!m_gfnff->QMInterface::InitialiseMolecule(mol)) {
+        CurcumaLogger::error("QMInterface::InitialiseMolecule failed");
+        return false;
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success("QMInterface::InitialiseMolecule complete");
+        CurcumaLogger::info("Calling GFNFF::InitialiseMolecule() for force field setup...");
+    }
+
+    // Now call the actual GFNFF initialization which sets up the force field
+    if (!m_gfnff->InitialiseMolecule()) {
+        CurcumaLogger::error("GFNFF::InitialiseMolecule failed");
+        return false;
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success("GFNFF::InitialiseMolecule complete");
+    }
+
     m_initialized = true;
-    return m_gfnff->QMInterface::InitialiseMolecule(mol);
+    return true;
 }
 
 bool GFNFFMethod::updateGeometry(const Matrix& geometry) {
@@ -42,8 +73,25 @@ bool GFNFFMethod::updateGeometry(const Matrix& geometry) {
 
 double GFNFFMethod::calculateEnergy(bool gradient)
 {
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("=== GFNFFMethod::calculateEnergy() START ===");
+        CurcumaLogger::param("gradient", gradient ? "true" : "false");
+        CurcumaLogger::param("initialized", m_initialized ? "true" : "false");
+    }
+
+    if (!m_initialized) {
+        CurcumaLogger::error("GFNFFMethod::calculateEnergy: Method not initialized!");
+        return 0.0;
+    }
+
     m_last_energy = m_gfnff->Calculation(gradient);
     m_calculation_done = true;
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success("GFNFFMethod::calculateEnergy complete");
+        CurcumaLogger::param("energy_hartree", fmt::format("{:.10f}", m_last_energy));
+    }
+
     return m_last_energy;
 }
 

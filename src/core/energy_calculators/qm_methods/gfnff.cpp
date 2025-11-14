@@ -17,6 +17,7 @@
  */
 
 #include "gfnff.h"
+#include "src/core/curcuma_logger.h"
 
 #include <cmath>
 #include <fstream>
@@ -24,6 +25,8 @@
 #include <queue>
 #include <stack>
 #include <string>
+
+#include <fmt/format.h>
 
 GFNFF::GFNFF()
     : m_forcefield(nullptr)
@@ -68,19 +71,40 @@ GFNFF::~GFNFF()
 
 bool GFNFF::InitialiseMolecule()
 {
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("=== GFNFF::InitialiseMolecule() START ===");
+        CurcumaLogger::param("atom_count", std::to_string(m_atomcount));
+        CurcumaLogger::param("geometry_rows", std::to_string(m_geometry.rows()));
+        CurcumaLogger::param("geometry_cols", std::to_string(m_geometry.cols()));
+    }
+
     if (m_atomcount == 0) {
-        std::cerr << "Error: No atoms in molecule for GFN-FF initialization" << std::endl;
+        CurcumaLogger::error("GFN-FF initialization failed: No atoms in molecule");
         return false;
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("Validating molecule structure...");
     }
 
     if (!validateMolecule()) {
-        std::cerr << "Error: Molecule validation failed for GFN-FF" << std::endl;
+        CurcumaLogger::error("GFN-FF initialization failed: Molecule validation failed");
         return false;
     }
 
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success("Molecule validation passed");
+        CurcumaLogger::info("Initializing force field...");
+    }
+
     if (!initializeForceField()) {
-        std::cerr << "Error: Force field initialization failed for GFN-FF" << std::endl;
+        CurcumaLogger::error("GFN-FF initialization failed: Force field initialization failed");
         return false;
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success("Force field initialization successful");
+        CurcumaLogger::info("Allocating gradient and charge arrays...");
     }
 
     m_gradient = Matrix::Zero(m_atomcount, 3);
@@ -88,6 +112,12 @@ bool GFNFF::InitialiseMolecule()
     m_bond_orders = Vector::Zero(m_atomcount * (m_atomcount - 1) / 2);
 
     m_initialized = true;
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success("GFN-FF initialization complete");
+        CurcumaLogger::param("initialized", "true");
+    }
+
     return true;
 }
 
@@ -106,21 +136,44 @@ bool GFNFF::UpdateMolecule()
 
 double GFNFF::Calculation(bool gradient)
 {
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("=== GFNFF::Calculation() START ===");
+        CurcumaLogger::param("gradient_requested", gradient ? "true" : "false");
+        CurcumaLogger::param("initialized", m_initialized ? "true" : "false");
+        CurcumaLogger::param("forcefield_ptr", m_forcefield ? "valid" : "null");
+    }
+
     if (!m_initialized) {
-        std::cerr << "Error: GFN-FF not initialized" << std::endl;
+        CurcumaLogger::error("GFN-FF calculation failed: Not initialized");
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param("atom_count", std::to_string(m_atomcount));
+            CurcumaLogger::param("geometry_size", std::to_string(m_geometry.rows()) + "x" + std::to_string(m_geometry.cols()));
+        }
         return 0.0;
     }
 
     if (!m_forcefield) {
-        std::cerr << "Error: Force field not available" << std::endl;
+        CurcumaLogger::error("GFN-FF calculation failed: Force field not available");
         return 0.0;
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("Calling ForceField::Calculate()...");
     }
 
     double energy_kcal = m_forcefield->Calculate(gradient);
 
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param("energy_kcal/mol_raw", fmt::format("{:.8f}", energy_kcal));
+    }
+
     if (gradient) {
         Matrix grad_kcal = m_forcefield->Gradient();
         m_gradient = convertGradientToHartree(grad_kcal);
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param("gradient_norm", fmt::format("{:.8f}", m_gradient.norm()));
+        }
     }
 
     m_energy_total = convertToHartree(energy_kcal);
@@ -128,6 +181,11 @@ double GFNFF::Calculation(bool gradient)
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::energy_abs(m_energy_total, "GFN-FF Energy");
         CurcumaLogger::param("energy_kcal/mol", fmt::format("{:.6f}", energy_kcal));
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success("GFN-FF calculation complete");
+        CurcumaLogger::param("energy_hartree", fmt::format("{:.10f}", m_energy_total));
     }
 
     return m_energy_total;
@@ -155,6 +213,11 @@ void GFNFF::setParameters(const json& parameters)
 
 bool GFNFF::initializeForceField()
 {
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("=== GFNFF::initializeForceField() START ===");
+        CurcumaLogger::param("forcefield_exists", m_forcefield ? "yes (will delete)" : "no");
+    }
+
     if (m_forcefield) {
         delete m_forcefield;
     }
@@ -165,15 +228,50 @@ bool GFNFF::initializeForceField()
         { "method", "gfnff" }
     };
 
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("Creating ForceField instance...");
+        CurcumaLogger::param("threads", std::to_string(m_parameters.value("threads", 1)));
+        CurcumaLogger::param("gradient", std::to_string(m_parameters.value("gradient", 1)));
+    }
+
     m_forcefield = new ForceField(ff_config);
     m_forcefield->setAtomTypes(m_atoms);
 
+    // TEMPORARY DEBUG: Disable caching to isolate the problem
+    m_forcefield->setParameterCaching(false);
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success("ForceField instance created");
+        CurcumaLogger::warn("TEMPORARY: Parameter caching disabled for debugging");
+        CurcumaLogger::info("Calculating topology (bonds, angles, torsions, inversions)...");
+    }
+
     if (!calculateTopology()) {
+        CurcumaLogger::error("Topology calculation failed");
         return false;
     }
 
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success("Topology calculation complete");
+        CurcumaLogger::info("Generating GFN-FF parameters...");
+    }
+
     json ff_params = generateGFNFFParameters();
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success("GFN-FF parameters generated");
+        CurcumaLogger::param("bonds_count", std::to_string(ff_params.value("bonds", json::array()).size()));
+        CurcumaLogger::param("angles_count", std::to_string(ff_params.value("angles", json::array()).size()));
+        CurcumaLogger::param("torsions_count", std::to_string(ff_params.value("dihedrals", json::array()).size()));
+        CurcumaLogger::param("inversions_count", std::to_string(ff_params.value("inversions", json::array()).size()));
+        CurcumaLogger::info("Setting parameters in ForceField...");
+    }
+
     m_forcefield->setParameter(ff_params);
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success("ForceField initialization complete");
+    }
 
     return true;
 }
