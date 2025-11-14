@@ -86,7 +86,7 @@ public:
 private:
     // Basis set
     int buildBasisSet();
-    Matrix MakeOverlap(const std::vector<STO::Orbital>& basisset) override;
+    Matrix MakeOverlap(std::vector<STO::Orbital>& basisset) override;
     Matrix MakeH(const Matrix& S, const std::vector<STO::Orbital>& basisset) override;
 
     // Hamiltonian construction (similar to GFN2 but simpler)
@@ -124,6 +124,8 @@ private:
     Matrix m_hamiltonian;
     Matrix m_fock;
     Matrix m_density;
+    Matrix m_mo;         ///< Molecular orbital coefficients
+    Vector m_energies;   ///< Orbital energies
 
     // Energy components
     double m_energy_electronic;

@@ -31,19 +31,16 @@ bool GFN1Method::setMolecule(const Mol& mol)
     m_molecule = mol;
     m_calculation_done = false;
 
-    // Set molecule data in GFN1
-    m_gfn1->setMolecule(mol);
-
-    // Initialize
-    return m_gfn1->InitialiseMolecule();
+    // Initialize with molecule data (explicit base class call to avoid name hiding)
+    return m_gfn1->QMInterface::InitialiseMolecule(mol);
 }
 
 bool GFN1Method::updateGeometry(const Matrix& geometry)
 {
-    m_gfn1->updateGeometry(geometry);
     m_calculation_done = false;
 
-    return m_gfn1->InitialiseMolecule();
+    // Update geometry only
+    return m_gfn1->UpdateMolecule(geometry);
 }
 
 double GFN1Method::calculateEnergy(bool gradient)

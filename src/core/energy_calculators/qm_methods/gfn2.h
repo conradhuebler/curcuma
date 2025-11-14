@@ -209,7 +209,7 @@ private:
      * @param basisset Basis function descriptors
      * @return Overlap matrix (nbasis × nbasis, symmetric, positive definite)
      */
-    Matrix MakeOverlap(const std::vector<STO::Orbital>& basisset) override;
+    Matrix MakeOverlap(std::vector<STO::Orbital>& basisset) override;
 
     // =================================================================================
     // Hamiltonian Construction
@@ -477,6 +477,8 @@ private:
     Matrix m_hamiltonian;                      ///< Core Hamiltonian H₀ (nbasis × nbasis)
     Matrix m_fock;                             ///< Fock matrix F (nbasis × nbasis)
     Matrix m_density;                          ///< Density matrix P (nbasis × nbasis)
+    Matrix m_mo;                               ///< Molecular orbital coefficients (nbasis × nbasis)
+    Vector m_energies;                         ///< Orbital energies (nbasis)
 
     // Energy components (for decomposition analysis)
     double m_energy_electronic;                ///< Electronic energy

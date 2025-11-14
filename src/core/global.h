@@ -80,7 +80,7 @@ struct Mol {
     Eigen::Matrix3d m_unit_cell; // 3x3 lattice vectors matrix (Angstroms)
     bool m_has_pbc = false; // PBC active flag
 
-    int AtomCount()
+    int AtomCount() const
     {
         return m_number_atoms;
     }

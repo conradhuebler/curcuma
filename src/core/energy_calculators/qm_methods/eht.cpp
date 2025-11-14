@@ -215,7 +215,7 @@ double EHT::Calculation(bool gradient)
         // Use parallel eigenvalue solver for efficiency
         ParallelEigenSolver solver(500, 128, 1e-10, false);
         solver.setThreadCount(m_threads);
-        Eigen::MatrixXd mo_coefficients;
+        Matrix mo_coefficients;
 
         bool success = solver.solve(S, H, m_energies, mo_coefficients, m_threads, false);
 

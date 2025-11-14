@@ -29,16 +29,16 @@ bool PM3Method::setMolecule(const Mol& mol)
     m_molecule = mol;
     m_calculation_done = false;
 
-    m_pm3->setMolecule(mol);
-    return m_pm3->InitialiseMolecule();
+    // Initialize with molecule data (explicit base class call to avoid name hiding)
+    return m_pm3->QMInterface::InitialiseMolecule(mol);
 }
 
 bool PM3Method::updateGeometry(const Matrix& geometry)
 {
-    m_pm3->updateGeometry(geometry);
     m_calculation_done = false;
 
-    return m_pm3->InitialiseMolecule();
+    // Update geometry only
+    return m_pm3->UpdateMolecule(geometry);
 }
 
 double PM3Method::calculateEnergy(bool gradient)

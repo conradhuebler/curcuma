@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "src/core/global.h"  // For Matrix type (RowMajor)
 #include <Eigen/Core>
 #include <Eigen/Eigenvalues>
 #include <algorithm>
@@ -34,8 +35,8 @@ public:
      * @param startRow Start row index (inclusive)
      * @param endRow End row index (exclusive)
      */
-    MatrixMultiplicationThread(const Eigen::MatrixXd& A, const Eigen::MatrixXd& B,
-        Eigen::MatrixXd& C, int startRow, int endRow)
+    MatrixMultiplicationThread(const Matrix& A, const Matrix& B,
+        Matrix& C, int startRow, int endRow)
         : m_A(A)
         , m_B(B)
         , m_C(C)
@@ -62,9 +63,9 @@ public:
     }
 
 private:
-    const Eigen::MatrixXd& m_A;
-    const Eigen::MatrixXd& m_B;
-    Eigen::MatrixXd& m_C;
+    const Matrix& m_A;
+    const Matrix& m_B;
+    Matrix& m_C;
     int m_startRow;
     int m_endRow;
 };
@@ -78,8 +79,8 @@ private:
  * @param debug Whether to output debug information
  * @return True on success
  */
-inline bool parallelMatrixMultiply(const Eigen::MatrixXd& A, const Eigen::MatrixXd& B,
-    Eigen::MatrixXd& C, int threadCount, bool debug = false)
+inline bool parallelMatrixMultiply(const Matrix& A, const Matrix& B,
+    Matrix& C, int threadCount, bool debug = false)
 {
     try {
         auto start = std::chrono::high_resolution_clock::now();
@@ -157,7 +158,7 @@ public:
      * @param end End index
      * @param threshold Numerical threshold
      */
-    DiagonalMatrixThread(Eigen::MatrixXd& D_1_2, const Eigen::VectorXd& D,
+    DiagonalMatrixThread(Matrix& D_1_2, const Eigen::VectorXd& D,
         int start, int end, double threshold)
         : m_D_1_2(D_1_2)
         , m_D(D)
@@ -182,7 +183,7 @@ public:
     }
 
 private:
-    Eigen::MatrixXd& m_D_1_2;
+    Matrix& m_D_1_2;
     const Eigen::VectorXd& m_D;
     int m_start;
     int m_end;
@@ -200,7 +201,7 @@ public:
      * @param startIdx Start index of the block
      * @param endIdx End index of the block
      */
-    BlockDiagonalizationThread(const Eigen::MatrixXd& matrix, int startIdx, int endIdx)
+    BlockDiagonalizationThread(const Matrix& matrix, int startIdx, int endIdx)
         : m_matrix(matrix)
         , m_startIdx(startIdx)
         , m_endIdx(endIdx)
@@ -219,9 +220,9 @@ public:
                 return -1;
             }
 
-            Eigen::MatrixXd subMatrix = m_matrix.block(m_startIdx, m_startIdx, blockSize, blockSize);
+            Matrix subMatrix = m_matrix.block(m_startIdx, m_startIdx, blockSize, blockSize);
 
-            Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(subMatrix, Eigen::ComputeEigenvectors);
+            Eigen::SelfAdjointEigenSolver<Matrix> es(subMatrix, Eigen::ComputeEigenvectors);
             if (es.info() != Eigen::Success) {
                 return -1;
             }
@@ -244,7 +245,7 @@ public:
      * @brief Get the computed eigenvectors
      * @return Eigenvectors matrix
      */
-    const Eigen::MatrixXd& getEigenvectors() const { return m_eigenvectors; }
+    const Matrix& getEigenvectors() const { return m_eigenvectors; }
 
     /**
      * @brief Get the start index of the block
@@ -259,11 +260,11 @@ public:
     int getEndIndex() const { return m_endIdx; }
 
 private:
-    const Eigen::MatrixXd& m_matrix;
+    const Matrix& m_matrix;
     int m_startIdx;
     int m_endIdx;
     Eigen::VectorXd m_eigenvalues;
-    Eigen::MatrixXd m_eigenvectors;
+    Matrix m_eigenvectors;
 };
 
 /**
@@ -280,7 +281,7 @@ public:
      */
     ResultsMergeThread(
         const std::vector<BlockDiagonalizationThread*>& threads,
-        const Eigen::MatrixXd& S_1_2,
+        const Matrix& S_1_2,
         bool transformMOs,
         int matrixSize)
         : m_threads(threads)
@@ -313,7 +314,7 @@ public:
 
             // Initialize result matrices
             m_eigenvalues = Eigen::VectorXd(m_matrixSize);
-            m_eigenvectors = Eigen::MatrixXd::Zero(m_matrixSize, m_matrixSize);
+            m_eigenvectors = Matrix::Zero(m_matrixSize, m_matrixSize);
 
             // Take the first m_matrixSize eigenvalues/eigenvectors
             int validEigenvalues = std::min(m_matrixSize, static_cast<int>(allEigenvalues.size()));
@@ -327,7 +328,7 @@ public:
                 int endIdx = m_threads[blockIdx]->getEndIndex();
                 int blockSize = endIdx - startIdx;
 
-                const Eigen::MatrixXd& blockEvecs = m_threads[blockIdx]->getEigenvectors();
+                const Matrix& blockEvecs = m_threads[blockIdx]->getEigenvectors();
 
                 // Copy block eigenvector to global eigenvector
                 for (int j = 0; j < blockSize; ++j) {
@@ -362,15 +363,15 @@ public:
      * @brief Get the computed eigenvectors
      * @return Eigenvectors matrix
      */
-    const Eigen::MatrixXd& getEigenvectors() const { return m_eigenvectors; }
+    const Matrix& getEigenvectors() const { return m_eigenvectors; }
 
 private:
     const std::vector<BlockDiagonalizationThread*>& m_threads;
-    const Eigen::MatrixXd& m_S_1_2;
+    const Matrix& m_S_1_2;
     bool m_transformMOs;
     int m_matrixSize;
     Eigen::VectorXd m_eigenvalues;
-    Eigen::MatrixXd m_eigenvectors;
+    Matrix m_eigenvectors;
 };
 
 /**
@@ -381,7 +382,9 @@ private:
  */
 class ParallelEigenSolver {
 public:
-    using Matrix = Eigen::MatrixXd;
+    // Use global Matrix type from global.h (RowMajor) instead of Matrix (ColMajor)
+    // using Matrix = Matrix;  // Old: ColMajor (caused binding errors)
+    // Matrix type is now inherited from global.h: Eigen::Matrix<double, Dynamic, Dynamic, RowMajor>
 
     /**
      * @brief Constructor for the parallel eigenvalue solver
@@ -955,14 +958,14 @@ private:
      * @param debug Whether to print debug information
      * @return True on success
      */
-    bool computeTransformedFockMatrix(const Eigen::MatrixXd& S_1_2, const Eigen::MatrixXd& H,
-        Eigen::MatrixXd& F, int threadCount, bool debug = false)
+    bool computeTransformedFockMatrix(const Matrix& S_1_2, const Matrix& H,
+        Matrix& F, int threadCount, bool debug = false)
     {
         try {
             auto start = std::chrono::high_resolution_clock::now();
 
             // Step 1: temp = H * S_1_2
-            Eigen::MatrixXd temp;
+            Matrix temp;
             if (!parallelMatrixMultiply(H, S_1_2, temp, threadCount, debug)) {
                 if (debug)
                     std::cerr << "Error: First multiplication in Fock transformation failed" << std::endl;

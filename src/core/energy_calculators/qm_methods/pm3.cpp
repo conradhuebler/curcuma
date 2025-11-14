@@ -190,7 +190,7 @@ double PM3::Calculation(bool gradient)
         // Level 1+: Results
         if (CurcumaLogger::get_verbosity() >= 1) {
             CurcumaLogger::success("PM3 calculation complete");
-            CurcumaLogger::energy_abs("PM3_total_energy", m_total_energy);
+            CurcumaLogger::energy_abs(m_total_energy, "PM3_total_energy");
         }
 
         // Level 2+: Energy decomposition
@@ -270,7 +270,7 @@ int PM3::buildBasisSet()
     return static_cast<int>(m_basis.size());
 }
 
-Matrix PM3::MakeOverlap(const std::vector<STO::Orbital>& basisset)
+Matrix PM3::MakeOverlap(std::vector<STO::Orbital>& basisset)
 {
     // PM3 uses normalized overlap integrals
     Matrix S = Matrix::Zero(basisset.size(), basisset.size());

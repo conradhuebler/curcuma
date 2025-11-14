@@ -409,7 +409,7 @@ int GFN2::buildBasisSet()
 // Overlap Matrix
 // =================================================================================
 
-Matrix GFN2::MakeOverlap(const std::vector<STO::Orbital>& basisset)
+Matrix GFN2::MakeOverlap(std::vector<STO::Orbital>& basisset)
 {
     Matrix S = Matrix::Zero(basisset.size(), basisset.size());
 

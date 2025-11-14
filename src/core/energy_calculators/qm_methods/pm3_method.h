@@ -23,10 +23,17 @@ public:
     Matrix getGradient() const override;
     Vector getCharges() const override;
     Vector getBondOrders() const override { return Vector::Zero(0); }
-    Vector getDipole() const override { return Vector::Zero(3); }
+    Position getDipole() const override { return Position::Zero(); }
 
     std::string getMethodName() const override { return "pm3"; }
     bool isThreadSafe() const override { return true; }
+
+    // Additional ComputationalMethod interface requirements
+    bool hasGradient() const override { return true; }
+    void setThreadCount(int threads) override { (void)threads; }  // PM3 uses global threads
+    void setParameters(const json& params) override { (void)params; }  // Parameters set in constructor
+    json getParameters() const override { return json{}; }
+    bool hasError() const override { return false; }
 
     json getEnergyDecomposition() const;
     bool saveToFile(const std::string& filename) const override { return false; }

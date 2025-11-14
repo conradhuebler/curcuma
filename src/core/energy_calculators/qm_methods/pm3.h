@@ -91,7 +91,7 @@ public:
 private:
     // Basis set (minimal valence only)
     int buildBasisSet();
-    Matrix MakeOverlap(const std::vector<STO::Orbital>& basisset) override;
+    Matrix MakeOverlap(std::vector<STO::Orbital>& basisset) override;
     Matrix MakeH(const Matrix& S, const std::vector<STO::Orbital>& basisset) override;
 
     // PM3 Hamiltonian construction
