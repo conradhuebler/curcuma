@@ -16,15 +16,16 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  */
+#include "src/global_config.h"
 
 #ifdef USE_TBLITE
+
 // #include "tblite.h"
 #include "tblite/container.h"
 #include "tblite/context.h"
 #include "tblite/error.h"
 #include "tblite/result.h"
 #include "tblite/solvation.h"
-#endif
 
 #include "src/core/curcuma_logger.h"
 #include "src/core/global.h"
@@ -640,3 +641,5 @@ void TBLiteInterface::tbliteContextError()
     CurcumaLogger::error(fmt::format("TBLite Context Error: {}", message));
     tblite_clear_error(m_error);
 }
+
+#endif // USE_TBLITE

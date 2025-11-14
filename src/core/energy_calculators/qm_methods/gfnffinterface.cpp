@@ -17,6 +17,7 @@
  *
  * Claude Generated: External GFN-FF interface wrapper for C library
  */
+#include "src/global_config.h"
 
 #include "gfnffinterface.h"
 

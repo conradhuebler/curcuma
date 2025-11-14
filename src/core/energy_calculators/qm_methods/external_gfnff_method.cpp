@@ -30,8 +30,9 @@ ExternalGFNFFMethod::ExternalGFNFFMethod(const json& config)
 {
     // Create the underlying GFN-FF interface (wrap JSON in ConfigManager)
     ConfigManager config_mgr("gfnff_external", config);
+    #ifdef USE_GFNFF
     m_interface = std::make_unique<GFNFFInterface>(config_mgr);
-
+    #endif
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("ExternalGFNFFMethod wrapper initialized");
         CurcumaLogger::param("method_wrapper", "External GFN-FF");

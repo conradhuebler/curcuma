@@ -18,6 +18,7 @@
  */
 
 #pragma once
+#include "src/global_config.h"
 
 #include "interface/abstract_interface.h"
 #include "src/core/parameter_macros.h"
@@ -25,7 +26,6 @@
 
 #ifdef USE_TBLITE
 #include "tblite.h"
-#endif
 
 // Claude Generated 2025: TBLite Parameter Registry - replaces static TBLiteSettings JSON
 BEGIN_PARAMETER_DEFINITION(tblite)
@@ -121,3 +121,5 @@ private:
     TBLiteMethod m_tblite_method = TBLiteMethod::IPEA1; // Type-safe enum
     int m_method_switch = 0; // Legacy compatibility
 };
+
+#endif // USE_TBLITE

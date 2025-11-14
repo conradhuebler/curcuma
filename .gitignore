@@ -84,3 +84,7 @@ test_cases/**/curcuma_*.json
 test_cases/**/*.log
 test_cases/**/*.dat
 
+# CMake generated configuration - Claude Generated November 2025
+# global_config.h is auto-generated from global_config.h.in during cmake configuration
+src/global_config.h
+
