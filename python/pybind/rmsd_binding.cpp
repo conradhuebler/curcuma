@@ -101,17 +101,20 @@ void bind_rmsd(py::module& m) {
              py::arg("molecule"),
              "Set target structure for RMSD calculation")
 
-        .def("calculate", &RMSDDriver::RMSD,
+        .def("calculate", &RMSDDriver::CalculateRMSD,
              "Calculate RMSD between reference and target structures (Ångström)")
 
-        .def("align", &RMSDDriver::AlignAndStore,
-             "Align target to reference structure")
+        .def("rmsd", &RMSDDriver::RMSD,
+             "Get calculated RMSD value (Ångström)")
 
-        .def("get_aligned_molecule", &RMSDDriver::getMolecule,
+        .def("get_aligned_target", &RMSDDriver::TargetAligned,
              "Get aligned target molecule")
 
+        .def("get_aligned_reference", &RMSDDriver::ReferenceAligned,
+             "Get aligned reference molecule")
+
         // Python-friendly helper methods
-        .def("__call__", &RMSDDriver::RMSD,
+        .def("__call__", &RMSDDriver::CalculateRMSD,
              "Calculate RMSD (callable interface)")
 
         .def("__repr__", [](const RMSDDriver&) {
@@ -123,7 +126,7 @@ void bind_rmsd(py::module& m) {
 
     // Convenience functions for simple RMSD calculations
     m.def("calculate_rmsd",
-        [](Molecule& ref, Molecule& target, bool heavy_only = false, bool reorder = false) {
+        [](const Molecule& ref, const Molecule& target, bool heavy_only = false, bool reorder = false) {
             json config;
             config["heavy"] = heavy_only;
             config["reorder"] = reorder;
@@ -132,6 +135,7 @@ void bind_rmsd(py::module& m) {
             RMSDDriver rmsd(config);
             rmsd.setReference(ref);
             rmsd.setTarget(target);
+            rmsd.CalculateRMSD();
             return rmsd.RMSD();
         },
         py::arg("reference"),
@@ -158,7 +162,7 @@ void bind_rmsd(py::module& m) {
         )pbdoc");
 
     m.def("align_molecules",
-        [](Molecule& ref, Molecule& target) {
+        [](const Molecule& ref, const Molecule& target) {
             json config;
             config["silent"] = true;
             config["reorder"] = false;
@@ -166,8 +170,8 @@ void bind_rmsd(py::module& m) {
             RMSDDriver rmsd(config);
             rmsd.setReference(ref);
             rmsd.setTarget(target);
-            rmsd.AlignAndStore();
-            return rmsd.getMolecule();
+            rmsd.CalculateRMSD();  // This performs alignment
+            return rmsd.TargetAligned();
         },
         py::arg("reference"),
         py::arg("target"),

@@ -23,6 +23,8 @@
 #include <pybind11/eigen.h>
 #include <pybind11/operators.h>
 
+#include <fmt/format.h>
+
 #include "src/core/molecule.h"
 
 namespace py = pybind11;
@@ -79,9 +81,6 @@ void bind_molecule(py::module& m) {
              "Copy constructor")
 
         // File I/O
-        .def("load_geometry", &Molecule::LoadGeometry,
-             py::arg("filename"),
-             "Load molecular geometry from file")
         .def("append_xyz", &Molecule::appendXYZFile,
              py::arg("filename"),
              "Append XYZ geometry to file")
@@ -120,18 +119,22 @@ void bind_molecule(py::module& m) {
              "Set energy value (Hartree)")
 
         // Geometry access and manipulation
-        .def("geometry", &Molecule::getGeometry,
+        .def("geometry", py::overload_cast<bool>(&Molecule::getGeometry, py::const_),
+             py::arg("protons") = true,
              "Get geometry matrix (3×N matrix of coordinates in Ångström)")
         .def("set_geometry", py::overload_cast<const Geometry&>(&Molecule::setGeometry),
              py::arg("geometry"),
              "Set geometry from 3×N matrix (Ångström)")
-        .def("get_atom", &Molecule::Atom,
+        .def("get_atom", [](const Molecule& mol, int index) {
+            auto atom_pair = mol.Atom(index);
+            return atom_pair.second;  // Return Position only
+        },
              py::arg("index"),
              "Get atom position vector (Ångström)")
-        .def("set_atom", &Molecule::setAtom,
-             py::arg("position"), py::arg("index"),
-             "Set atom position (Ångström)")
-        .def("get_element", &Molecule::Atom,
+        .def("get_element", [](const Molecule& mol, int index) {
+            auto atom_pair = mol.Atom(index);
+            return atom_pair.first;  // Return element number
+        },
              py::arg("index"),
              "Get element number (atomic number)")
 
@@ -139,18 +142,23 @@ void bind_molecule(py::module& m) {
         .def("calculate_distance", &Molecule::CalculateDistance,
              py::arg("i"), py::arg("j"),
              "Calculate distance between atoms i and j (Ångström)")
-        .def("distance_matrix", &Molecule::DistanceMatrix,
+        .def("distance_matrix", [](const Molecule& mol) {
+            auto matrices = mol.DistanceMatrix();
+            return matrices.first;  // Return distance matrix only
+        },
              "Get full distance matrix (Ångström)")
 
         // Connectivity and topology
         .def("initialise_connectivity", &Molecule::InitialiseConnectedMass,
              py::arg("scaling") = 1.3, py::arg("protons") = true,
              "Initialize bond connectivity detection")
-        .def("print_connectivity", &Molecule::printConnections,
-             "Print molecular connectivity information")
 
         // Fragment analysis
-        .def("fragment_count", &Molecule::FragmentCount,
+        .def("get_fragments", py::overload_cast<>(&Molecule::GetFragments, py::const_),
+             "Get list of fragments (each fragment is a list of atom indices)")
+        .def("fragment_count", [](const Molecule& mol) {
+            return mol.GetFragments().size();
+        },
              "Get number of molecular fragments")
         .def("fragment_masses", &Molecule::FragmentMass,
              "Get mass of each fragment")
@@ -166,9 +174,13 @@ void bind_molecule(py::module& m) {
              "Print information about specific atom")
 
         // Center of mass
-        .def("center_of_mass", &Molecule::getCentreOfMass,
+        .def("center_of_mass", [](const Molecule& mol) {
+            return mol.MassCentroid(true, -1);
+        },
              "Get center of mass coordinates (Ångström)")
-        .def("center_of_geometry", &Molecule::getCentreOfGeometry,
+        .def("center_of_geometry", [](const Molecule& mol) {
+            return mol.Centroid(true, -1);
+        },
              "Get geometric center coordinates (Ångström)")
 
         // Python special methods
