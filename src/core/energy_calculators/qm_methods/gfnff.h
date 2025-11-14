@@ -300,6 +300,7 @@ private:
         double gam;  ///< Chemical hardness (angewChem2020)
         double alp;  ///< Damping parameter (angewChem2020)
         double cnf;  ///< CN correction factor (angewChem2020)
+        double xi_corr;  ///< Environment correction (topology-dependent, optional)
     };
 
     /**
@@ -596,13 +597,7 @@ private:
      */
     json detectHydrogenBonds(const Vector& charges) const;
 
-    // Advanced parameter structures
-    struct EEQParameters {
-        double chi; // Electronegativity
-        double gam; // Chemical hardness
-        double alp; // Polarizability
-        double xi_corr; // Environment correction
-    };
+    // Advanced parameter structures (EEQParameters already defined above at line 298)
 
     struct TopologyInfo {
         Vector coordination_numbers;

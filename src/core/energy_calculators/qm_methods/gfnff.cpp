@@ -578,6 +578,7 @@ EEQParameters GFNFF::getEEQParameters(int atomic_number) const
         params.gam = gam_eeq[idx];
         params.alp = alp_eeq[idx];
         params.cnf = cnf_eeq[idx];
+        params.xi_corr = 0.0;  // No environment correction in simple version
     } else {
         // Fallback for unknown elements (use default values)
         std::cerr << "Warning: No EEQ parameters for element " << atomic_number
@@ -586,6 +587,7 @@ EEQParameters GFNFF::getEEQParameters(int atomic_number) const
         params.gam = 0.0;
         params.alp = 1.0;
         params.cnf = 0.0;
+        params.xi_corr = 0.0;
     }
 
     return params;
