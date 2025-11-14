@@ -156,7 +156,7 @@ class ForceFieldThread : public CxxThread {
 public:
     ForceFieldThread(int thread, int threads);
     virtual int execute() override;
-    virtual int Type() const { return 1; }
+    virtual int Type() const { return m_method; }  // Claude Generated (2025): Return actual method type, not hardcoded 1!
     void addBond(const Bond& bonds);
     void addAngle(const Angle& angles);
     void addDihedral(const Dihedral& dihedrals);

@@ -774,6 +774,10 @@ void ForceFieldThread::CalculateGFNFFDispersionContribution()
      * Claude Generated (2025): Phase 4 pairwise non-bonded implementation
      */
 
+    if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_dispersions.size() > 0) {
+        CurcumaLogger::info(fmt::format("Thread calculating {} dispersion pairs", m_gfnff_dispersions.size()));
+    }
+
     for (int index = 0; index < m_gfnff_dispersions.size(); ++index) {
         const auto& disp = m_gfnff_dispersions[index];
 
@@ -820,6 +824,10 @@ void ForceFieldThread::CalculateGFNFFDispersionContribution()
             m_gradient.row(disp.i) += grad.transpose();
             m_gradient.row(disp.j) -= grad.transpose();
         }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_dispersions.size() > 0) {
+        CurcumaLogger::param("thread_dispersion_energy", fmt::format("{:.6f} Eh", m_dispersion_energy));
     }
 }
 
@@ -876,6 +884,10 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
      * Claude Generated (2025): Phase 4 pairwise non-bonded implementation
      */
 
+    if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_coulombs.size() > 0) {
+        CurcumaLogger::info(fmt::format("Thread calculating {} Coulomb pairs", m_gfnff_coulombs.size()));
+    }
+
     for (int index = 0; index < m_gfnff_coulombs.size(); ++index) {
         const auto& coul = m_gfnff_coulombs[index];
 
@@ -906,5 +918,9 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
             m_gradient.row(coul.i) += grad.transpose();
             m_gradient.row(coul.j) -= grad.transpose();
         }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_coulombs.size() > 0) {
+        CurcumaLogger::param("thread_coulomb_energy", fmt::format("{:.6f} Eh", m_coulomb_energy));
     }
 }

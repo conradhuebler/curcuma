@@ -486,6 +486,10 @@ void ForceField::setvdWs(const json& vdws)
 
 void ForceField::setGFNFFDispersions(const json& dispersions)
 {
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setGFNFFDispersions: Loading {} dispersions", dispersions.size()));
+    }
+
     m_gfnff_dispersions.clear();
     for (int i = 0; i < dispersions.size(); ++i) {
         json disp_json = dispersions[i].get<json>();
@@ -503,10 +507,18 @@ void ForceField::setGFNFFDispersions(const json& dispersions)
 
         m_gfnff_dispersions.push_back(disp);
     }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF dispersion pairs", m_gfnff_dispersions.size()));
+    }
 }
 
 void ForceField::setGFNFFRepulsions(const json& repulsions)
 {
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setGFNFFRepulsions: Loading {} repulsions", repulsions.size()));
+    }
+
     m_gfnff_repulsions.clear();
     for (int i = 0; i < repulsions.size(); ++i) {
         json rep_json = repulsions[i].get<json>();
@@ -520,10 +532,18 @@ void ForceField::setGFNFFRepulsions(const json& repulsions)
 
         m_gfnff_repulsions.push_back(rep);
     }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF repulsion pairs", m_gfnff_repulsions.size()));
+    }
 }
 
 void ForceField::setGFNFFCoulombs(const json& coulombs)
 {
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setGFNFFCoulombs: Loading {} Coulomb pairs", coulombs.size()));
+    }
+
     m_gfnff_coulombs.clear();
     for (int i = 0; i < coulombs.size(); ++i) {
         json coul_json = coulombs[i].get<json>();
@@ -537,6 +557,10 @@ void ForceField::setGFNFFCoulombs(const json& coulombs)
         coul.r_cut = coul_json["r_cut"];
 
         m_gfnff_coulombs.push_back(coul);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF Coulomb pairs", m_gfnff_coulombs.size()));
     }
 }
 
@@ -971,6 +995,10 @@ double ForceField::Calculate(bool gradient)
     double hh_energy = 0.0;
     double cg_energy = 0.0; // Claude Generated: CG pair interaction energy
 
+    // Claude Generated: GFN-FF specific non-bonded energies (Phase 4.4 fix)
+    double gfnff_dispersion = 0.0;  // D3/D4 dispersion (should be negative/attractive)
+    double gfnff_coulomb = 0.0;     // EEQ Coulomb electrostatics
+
     for (int i = 0; i < m_stored_threads.size(); ++i) {
         m_stored_threads[i]->UpdateGeometry(m_geometry, gradient);
     }
@@ -986,15 +1014,35 @@ double ForceField::Calculate(bool gradient)
         angle_energy += m_stored_threads[i]->AngleEnergy();
         dihedral_energy += m_stored_threads[i]->DihedralEnergy();
         inversion_energy += m_stored_threads[i]->InversionEnergy();
-        if (m_stored_threads[i]->Type() != 3)
+
+        // Claude Generated (2025): Debug thread type
+        int thread_type = m_stored_threads[i]->Type();
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param(fmt::format("thread_{}_type", i), std::to_string(thread_type));
+        }
+
+        if (thread_type != 3) {
             vdw_energy += m_stored_threads[i]->VdWEnergy();
-        else
-            h4_energy += m_stored_threads[i]->VdWEnergy();
-        if (m_stored_threads[i]->Type() != 3)
             rep_energy += m_stored_threads[i]->RepEnergy();
-        else
+        } else {
+            // GFN-FF (Type == 3) uses different energy components
+            h4_energy += m_stored_threads[i]->VdWEnergy();
             hh_energy += m_stored_threads[i]->RepEnergy();
-        // eq_energy += m_stored_threads[i]->RepEnergy();
+
+            // CRITICAL FIX: Also collect GFN-FF dispersion and Coulomb energies!
+            double thread_disp = m_stored_threads[i]->DispersionEnergy();
+            double thread_coul = m_stored_threads[i]->CoulombEnergy();
+            gfnff_dispersion += thread_disp;
+            gfnff_coulomb += thread_coul;
+
+            // Claude Generated (2025): Debug individual energy components
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::param(fmt::format("thread_{}_dispersion", i),
+                    fmt::format("{:.6f} Eh", thread_disp));
+                CurcumaLogger::param(fmt::format("thread_{}_coulomb", i),
+                    fmt::format("{:.6f} Eh", thread_coul));
+            }
+        }
 
         m_gradient += m_stored_threads[i]->Gradient();
     }
@@ -1032,7 +1080,17 @@ double ForceField::Calculate(bool gradient)
         }
     }
 
-    energy = m_e0 + bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy + rep_energy + eq_energy + h4_energy + hh_energy + cg_energy;
+    // Claude Generated: Add GFN-FF dispersion and Coulomb energies to total
+    energy = m_e0 + bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy + rep_energy + eq_energy + h4_energy + hh_energy + cg_energy + gfnff_dispersion + gfnff_coulomb;
+
+    // Claude Generated (2025): Debug total GFN-FF energies
+    if (CurcumaLogger::get_verbosity() >= 3 && (gfnff_dispersion != 0.0 || gfnff_coulomb != 0.0)) {
+        CurcumaLogger::param("total_gfnff_dispersion", fmt::format("{:.6f} Eh", gfnff_dispersion));
+        CurcumaLogger::param("total_gfnff_coulomb", fmt::format("{:.6f} Eh", gfnff_coulomb));
+        CurcumaLogger::param("total_before_gfnff", fmt::format("{:.6f} Eh",
+            m_e0 + bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy + rep_energy + eq_energy + h4_energy + hh_energy + cg_energy));
+    }
+
     // Level 1+: Final energy result
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::energy_abs(energy, "Force Field Energy");
@@ -1060,6 +1118,12 @@ double ForceField::Calculate(bool gradient)
         }
         if (hh_energy != 0.0) {
             CurcumaLogger::param("HH_repulsion", fmt::format("{:.6f} Eh", hh_energy));
+        }
+        if (gfnff_dispersion != 0.0) {
+            CurcumaLogger::param("GFNFF_dispersion", fmt::format("{:.6f} Eh", gfnff_dispersion));
+        }
+        if (gfnff_coulomb != 0.0) {
+            CurcumaLogger::param("GFNFF_coulomb", fmt::format("{:.6f} Eh", gfnff_coulomb));
         }
         if (cg_energy != 0.0) {
             CurcumaLogger::param("CG_interactions", fmt::format("{:.6f} Eh", cg_energy));
@@ -1089,6 +1153,7 @@ void ForceField::printParameterSummary() const
     try {
         // Count different parameter types - parameters are stored as arrays
         int bonds = 0, angles = 0, dihedrals = 0, inversions = 0, vdws = 0, esps = 0;
+        int gfnff_dispersions = 0, gfnff_repulsions = 0, gfnff_coulombs = 0;
 
         if (m_parameters.contains("bonds") && m_parameters["bonds"].is_array()) {
             bonds = m_parameters["bonds"].size();
@@ -1109,6 +1174,17 @@ void ForceField::printParameterSummary() const
             esps = m_parameters["esps"].size();
         }
 
+        // Claude Generated (2025): Check for GFN-FF specific pairwise parameters
+        if (m_parameters.contains("gfnff_dispersions") && m_parameters["gfnff_dispersions"].is_array()) {
+            gfnff_dispersions = m_parameters["gfnff_dispersions"].size();
+        }
+        if (m_parameters.contains("gfnff_repulsions") && m_parameters["gfnff_repulsions"].is_array()) {
+            gfnff_repulsions = m_parameters["gfnff_repulsions"].size();
+        }
+        if (m_parameters.contains("gfnff_coulombs") && m_parameters["gfnff_coulombs"].is_array()) {
+            gfnff_coulombs = m_parameters["gfnff_coulombs"].size();
+        }
+
         // Print summary in consistent format
         fmt::print("  • {} bond terms\n", bonds);
         fmt::print("  • {} angle terms\n", angles);
@@ -1116,6 +1192,14 @@ void ForceField::printParameterSummary() const
         fmt::print("  • {} inversion terms\n", inversions);
         fmt::print("  • {} van der Waals pairs\n", vdws);
         fmt::print("  • {} electrostatic pairs\n", esps);
+
+        // Print GFN-FF specific parameters if present
+        if (gfnff_dispersions > 0 || gfnff_repulsions > 0 || gfnff_coulombs > 0) {
+            fmt::print("  GFN-FF pairwise interactions:\n");
+            if (gfnff_dispersions > 0) fmt::print("    • {} dispersion pairs\n", gfnff_dispersions);
+            if (gfnff_repulsions > 0) fmt::print("    • {} repulsion pairs\n", gfnff_repulsions);
+            if (gfnff_coulombs > 0) fmt::print("    • {} Coulomb pairs\n", gfnff_coulombs);
+        }
 
         // Print scaling factors
         fmt::print("  Scaling factors:\n");
