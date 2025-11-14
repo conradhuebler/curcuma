@@ -21,14 +21,15 @@
 
 #include "json.hpp"
 #include "src/core/curcuma_logger.h"
+#include "src/core/molecule.h"
 #include <memory>
 #include <string>
 #include <vector>
 
 using json = nlohmann::json;
+using curcuma::Molecule;
 
 // Forward declarations
-class Molecule;
 class EnergyCalculator;
 typedef Eigen::VectorXd Vector;
 typedef Eigen::Matrix<double, -1, -1> Matrix;

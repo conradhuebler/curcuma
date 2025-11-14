@@ -35,6 +35,8 @@
 #include <memory>
 #include <vector>
 
+using curcuma::Molecule;
+
 namespace Optimization {
 
 /**
