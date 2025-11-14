@@ -50,6 +50,7 @@ CMakeLists.txt.user*
 
 # Build directories
 build/
+build_*/
 debug/
 release/
 bin/
@@ -83,4 +84,21 @@ test_cases/**/*.param.json
 test_cases/**/curcuma_*.json
 test_cases/**/*.log
 test_cases/**/*.dat
+
+# External dependencies (auto-downloaded by CMake) - Claude Generated January 2025
+external/eigen-3.4.0/
+external/eigen-3.4.0.zip
+external/ulysses-main/
+external/ulysses.zip
+external/json.hpp
+external/stb_image_write.h
+
+# Python build artifacts - Claude Generated January 2025
+python/build/
+python/dist/
+python/*.egg-info/
+python/__pycache__/
+python/**/__pycache__/
+*.pyc
+*.pyo
 
