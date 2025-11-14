@@ -102,3 +102,7 @@ python/**/__pycache__/
 *.pyc
 *.pyo
 
+# CMake generated configuration - Claude Generated November 2025
+# global_config.h is auto-generated from global_config.h.in during cmake configuration
+src/global_config.h
+

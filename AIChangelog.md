@@ -4,6 +4,11 @@ This file tracks significant improvements, refactorings, and new features genera
 
 Format: One line per change, newest first.
 
+## November 2025
+
+- **Phase 2a+2b: Platform-Independent External Dependency Discovery**: Plumed2 now uses find_library() with fallbacks (local build, system libs), DFT-D4 auto-discovers LAPACK/BLAS via find_package(), both with manual override via env vars, CMake reports discovered libraries, tested and verified working on Linux, removes hardcoded .so path and manual env var requirements
+- **Phase 1b External Dependency Verification**: Verified all 14 external dependencies have proper conditional compilation guards (USE_XTB, USE_TBLITE, USE_D3, USE_D4, USE_ULYSSES, USE_Plumed), MethodFactory runtime checks functional, CMake flag propagation correct, identified 2 minor issues (Plumed2 hardcoded .so path, DFT-D4 manual config), Phase 1a+1b now production-ready with clean builds at any feature level
+
 ## October 2025
 
 - **SimpleMD Coarse Graining Integration (Oct 30)**: Automatic CG system detection (isCGSystem), periodic boundary condition wrapping (applyPeriodicBoundaryConditions), 10x timestep scaling for pure CG systems, CLI test case (simplemd/08_cg_spheres), complete CG MD support ready for production

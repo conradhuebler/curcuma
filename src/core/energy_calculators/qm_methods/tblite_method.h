@@ -20,25 +20,25 @@
 #pragma once
 
 #include "../computational_method.h"
+#include "src/global_config.h"
 
 #ifdef USE_TBLITE
-#include "tbliteinterface.h"
-#endif
 
+#include "tbliteinterface.h"
 #include <memory>
 
 /**
  * @brief TBLite method wrapper for ComputationalMethod interface
- * 
+ *
  * This wrapper adapts the existing TBLiteInterface to the unified
  * ComputationalMethod interface. TBLite provides tight-binding DFT
  * methods including GFN1, GFN2, and iPEA1.
- * 
+ *
  * Supported methods:
  * - ipea1: iPEA1 tight-binding method
  * - gfn1: GFN1-xTB tight-binding method
  * - gfn2: GFN2-xTB tight-binding method
- * 
+ *
  * Claude Generated: Big-Bang EnergyCalculator refactoring wrapper
  */
 class TBLiteMethod : public ComputationalMethod {
@@ -74,11 +74,11 @@ public:
     static std::vector<std::string> getSupportedMethods();
 
 private:
-#ifdef USE_TBLITE
     std::unique_ptr<TBLiteInterface> m_tblite;
-#endif
     std::string m_method_name;
     Mol m_molecule;
     bool m_calculation_done;
     double m_last_energy;
 };
+
+#endif // USE_TBLITE

@@ -3,6 +3,10 @@
  * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  */
 
+#include "src/global_config.h"
+
+#ifdef USE_TBLITE
+
 #include "src/core/curcuma_logger.h"
 #include "src/core/config_manager.h"
 #include "src/tools/general.h"
@@ -139,3 +143,6 @@ bool TBLiteMethod::isAvailable() {
 std::vector<std::string> TBLiteMethod::getSupportedMethods() {
     return {"ipea1", "gfn1", "gfn2"};
 }
+
+#endif // USE_TBLITE
+

@@ -488,27 +488,23 @@ void ForceFieldThread::CalculateESPContribution()
     }
 }
 
+#ifdef USE_D3
 D3Thread::D3Thread(int thread, int threads)
     : ForceFieldThread(thread, threads)
 {
     setAutoDelete(false);
     m_final_factor = 1 / 2625.15 * 4.19;
     m_d = 1e-7;
-#ifdef USE_D3
     m_d3 = new DFTD3Interface();
-#endif
 }
 
 D3Thread::~D3Thread()
 {
-#ifdef USE_D3
     delete m_d3;
-#endif
 }
 
 int D3Thread::execute()
 {
-#ifdef USE_D3
     for (int i = 0; i < m_atom_types.size(); ++i) {
         m_d3->UpdateAtom(i, m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2));
     }
@@ -523,12 +519,9 @@ int D3Thread::execute()
         }
     } else
         m_vdw_energy = m_d3->Calculation(0);
-#else
-    std::cerr << "D3 is not included, sorry for that" << std::endl;
-    exit(1);
-#endif
     return 0;
 }
+#endif
 
 H4Thread::H4Thread(int thread, int threads)
     : ForceFieldThread(thread, threads)

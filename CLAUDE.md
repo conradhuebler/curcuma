@@ -236,6 +236,8 @@ curcuma/
 
 ## Completed Developments (2025)
 
+✅ **Platform-Independent External Dependency Discovery** - Phase 2a+2b complete: Plumed2 via find_library(), D4 via find_package(LAPACK), both with fallback support, portable across Linux/macOS/Windows
+✅ **External Dependency Conditional Compilation** - Phase 1b complete: D3/D4 guards in QMDFF/UFF/ForceField, MethodFactory runtime checks, all 14 external libs properly gated
 ✅ **Parameter Registry System** - Macro-based parameter definitions, auto-help, type validation
 ✅ **ConfigManager Layer** - Type-safe parameter access, hierarchical dot notation
 ✅ **EnergyCalculator Refactoring** - Polymorphic interface, priority-based method resolution

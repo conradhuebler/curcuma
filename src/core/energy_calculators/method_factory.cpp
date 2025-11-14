@@ -27,7 +27,9 @@
 #include "qm_methods/eht_method.h"
 #include "qm_methods/external_gfnff_method.h"
 #include "qm_methods/gfnff_method.h"
+#ifdef USE_TBLITE
 #include "qm_methods/tblite_method.h"
+#endif
 #include "qm_methods/ulysses_method.h"
 #include "qm_methods/xtb_method.h"
 
@@ -130,7 +132,9 @@ const std::vector<MethodFactory::MethodPriority>& MethodFactory::getPriorityMeth
         {
             "gfn2",
             {
-                { "TBLite", [](const json& config) { return hasTBLite() ? std::make_unique<TBLiteMethod>("gfn2", config) : nullptr; } },
+#ifdef USE_TBLITE
+                { "TBLite", [](const json& config) { return std::make_unique<TBLiteMethod>("gfn2", config); } },
+#endif
                 { "Ulysses", [](const json& config) { return hasUlysses() ? std::make_unique<UlyssesMethod>("ugfn2", config) : nullptr; } },
                 { "XTB", [](const json& config) { return hasXTB() ? std::make_unique<XTBMethod>("gfn2", config) : nullptr; } }
                 // TODO: Add native GFN2 when implemented
@@ -140,7 +144,9 @@ const std::vector<MethodFactory::MethodPriority>& MethodFactory::getPriorityMeth
         {
             "gfn1",
             {
-                { "TBLite", [](const json& config) { return hasTBLite() ? std::make_unique<TBLiteMethod>("gfn1", config) : nullptr; } },
+#ifdef USE_TBLITE
+                { "TBLite", [](const json& config) { return std::make_unique<TBLiteMethod>("gfn1", config); } },
+#endif
                 { "XTB", [](const json& config) { return hasXTB() ? std::make_unique<XTBMethod>("xtb-gfn1", config) : nullptr; } }
                 // TODO: Add native GFN1 when implemented
             } },
@@ -148,12 +154,19 @@ const std::vector<MethodFactory::MethodPriority>& MethodFactory::getPriorityMeth
         // IPEA1: TBLite only
         {
             "ipea1",
-            { { "TBLite", [](const json& config) { return hasTBLite() ? std::make_unique<TBLiteMethod>("ipea1", config) : nullptr; } } } },
+            {
+#ifdef USE_TBLITE
+                { "TBLite", [](const json& config) { return std::make_unique<TBLiteMethod>("ipea1", config); } }
+#endif
+            } },
 
         // GFN-FF: Priority External GFN-FF > XTB > Native cgfnff
         {
             "gfnff",
-            { { "External GFN-FF", [](const json& config) { return hasGFNFF() ? std::make_unique<ExternalGFNFFMethod>(config) : nullptr; } },
+            { 
+               #ifdef USE_GFNFF 
+                { "External GFN-FF", [](const json& config) { return hasGFNFF() ? std::make_unique<ExternalGFNFFMethod>(config) : nullptr; } },
+                #endif
                 { "XTB", [](const json& config) { return hasXTB() ? std::make_unique<XTBMethod>("gfnff", config) : nullptr; } },
                 { "Native", [](const json& config) { return std::make_unique<GFNFFMethod>(config); } } } }
     };
@@ -369,10 +382,12 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
     }
     
     // Check TBLite methods
+#ifdef USE_TBLITE
     if (matchesMethodList(method_lower, m_tblite_methods) && hasTBLite()) {
         CurcumaLogger::success("Method '" + method_name + "' resolved to: TBLite (pattern match)");
         return std::make_unique<TBLiteMethod>(method_lower, config);
     }
+#endif
     
     // Check XTB methods  
     if (matchesMethodList(method_lower, m_xtb_methods) && hasXTB()) {
