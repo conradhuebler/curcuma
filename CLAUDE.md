@@ -140,6 +140,9 @@
 - **Hessian Analysis** - Second derivative calculations
 - **Orbital Analysis** - Molecular orbital visualization and analysis
 
+### 8. Core Computational Libraries
+- ✅ **MNDO Integrals** - Dewar-Thiel multipole expansion for semi-empirical 2e⁻ integrals, see [docs/MNDO_INTEGRALS.md](docs/MNDO_INTEGRALS.md)
+
 ## Architecture
 
 ### Core Components
@@ -252,6 +255,7 @@ curcuma/
 ✅ **Native PM3** (November 2025) - NDDO semi-empirical for H, C, N, O thermochemistry
 ✅ **GFN2 Parameter Loader** (November 2025) - Infrastructure for TBLite TOML extraction with real parameters (H, C, N, O)
 ✅ **Ulysses Methods Documentation** (November 2025) - Complete guide: 27 semi-empirical methods (AM1, MNDO, PM6, RM1, etc.)
+✅ **MNDO Integrals Library** (November 2025) - Standalone Dewar-Thiel multipole expansion, pedagogically documented, extracted from Ulysses
 
 ## Build and Test Commands
 

@@ -27,3 +27,4 @@ Format: One line per change, newest first.
 - **Universal Verbosity System**: Consistent 0-3 levels across all QM/MM methods, silent optimization support, structured scientific output
 - **Physical Architecture Restructuring**: All computational methods consolidated under src/core/energy_calculators/
 - **Enhanced Topological Data Analysis**: dMatrix integration via TDAEngine, publication-grade analysis, complete migration path
+- **MNDO Integrals Library Extraction (Nov 15)**: Standalone Dewar-Thiel multipole expansion implementation extracted from Ulysses (LGPL 2.1+), comprehensive pedagogical documentation (~700 lines), all integral types (ss, sp, pp, sd, pd, dd) with first/second derivatives, header-only library in src/core/energy_calculators/qm_methods/integrals/MNDOIntegrals.hpp, docs/MNDO_INTEGRALS.md with usage examples and theory, enables native semi-empirical method development
