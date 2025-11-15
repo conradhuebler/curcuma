@@ -74,25 +74,30 @@ OptimizationContext OptimizationContext::fromJson(const json& config, EnergyCalc
     OptimizationContext context;
     context.energy_calculator = calc;
 
-    // Load convergence criteria
+    // Load convergence criteria (Claude Nov 2025: Type-safe conversions)
     if (config.contains("energy_threshold"))
-        context.energy_threshold = config["energy_threshold"];
+        context.energy_threshold = config["energy_threshold"].get<double>();
     if (config.contains("rmsd_threshold"))
-        context.rmsd_threshold = config["rmsd_threshold"];
+        context.rmsd_threshold = config["rmsd_threshold"].get<double>();
     if (config.contains("gradient_threshold"))
-        context.gradient_threshold = config["gradient_threshold"];
+        context.gradient_threshold = config["gradient_threshold"].get<double>();
     if (config.contains("max_iterations"))
-        context.max_iterations = config["max_iterations"];
+        context.max_iterations = config["max_iterations"].get<int>();
     if (config.contains("convergence_count"))
-        context.convergence_count = config["convergence_count"];
+        context.convergence_count = config["convergence_count"].get<int>();
 
-    // Load performance settings
+    // Load performance settings (Claude Nov 2025: Type-safe conversions)
     if (config.contains("threads"))
-        context.threads = config["threads"];
-    if (config.contains("single_step_mode"))
-        context.single_step_mode = config["single_step_mode"];
+        context.threads = config["threads"].get<int>();
+    if (config.contains("single_step_mode")) {
+        // Handle both boolean and number (0/1) types
+        if (config["single_step_mode"].is_boolean())
+            context.single_step_mode = config["single_step_mode"].get<bool>();
+        else if (config["single_step_mode"].is_number())
+            context.single_step_mode = (config["single_step_mode"].get<int>() != 0);
+    }
     if (config.contains("max_energy_rise"))
-        context.max_energy_rise = config["max_energy_rise"];
+        context.max_energy_rise = config["max_energy_rise"].get<double>();
 
     // Claude Generated (Feb 21, 2026): Numerical gradient option for debugging
     if (config.contains("numgrad"))
@@ -100,30 +105,38 @@ OptimizationContext OptimizationContext::fromJson(const json& config, EnergyCalc
     if (config.contains("numerical_gradient_step"))
         context.numerical_gradient_step = config["numerical_gradient_step"];
 
-    // Load output settings
-    if (config.contains("write_trajectory"))
-        context.write_trajectory = config["write_trajectory"];
+    // Load output settings (Type-safe conversions)
+    if (config.contains("write_trajectory")) {
+        if (config["write_trajectory"].is_boolean())
+            context.write_trajectory = config["write_trajectory"].get<bool>();
+        else if (config["write_trajectory"].is_number())
+            context.write_trajectory = (config["write_trajectory"].get<int>() != 0);
+    }
 
     // Handle both legacy verbose and new verbosity parameters for backward compatibility
     if (config.contains("verbosity")) {
-        context.verbosity = config["verbosity"];
-        // Validate verbosity range
-        if (context.verbosity < 0 || context.verbosity > 3) {
-            context.verbosity = 1; // Default to minimal if out of range
-        }
+        context.verbosity = config["verbosity"].get<int>();
+        if (context.verbosity < 0 || context.verbosity > 3)
+            context.verbosity = 1;
     } else if (config.contains("verbose")) {
-        // Legacy boolean verbose parameter - convert to verbosity level
-        context.verbosity = config["verbose"] ? 3 : 1;
+        if (config["verbose"].is_boolean())
+            context.verbosity = config["verbose"].get<bool>() ? 3 : 1;
+        else if (config["verbose"].is_number())
+            context.verbosity = (config["verbose"].get<int>() != 0) ? 3 : 1;
     }
 
-    if (config.contains("print_output"))
-        context.print_output = config["print_output"];
+    if (config.contains("print_output")) {
+        if (config["print_output"].is_boolean())
+            context.print_output = config["print_output"].get<bool>();
+        else if (config["print_output"].is_number())
+            context.print_output = (config["print_output"].get<int>() != 0);
+    }
 
-    // Load molecular properties
+    // Load molecular properties (Claude Nov 2025: Type-safe conversions)
     if (config.contains("charge"))
-        context.charge = config["charge"];
+        context.charge = config["charge"].get<int>();
     if (config.contains("spin"))
-        context.spin = config["spin"];
+        context.spin = config["spin"].get<int>();
 
     return context;
 }
