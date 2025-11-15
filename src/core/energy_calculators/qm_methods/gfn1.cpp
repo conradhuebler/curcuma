@@ -255,7 +255,22 @@ int GFN1::buildBasisSet()
 
             for (int m = -l; m <= l; ++m) {
                 STO::Orbital orbital;
-                orbital.type = (l == 0) ? STO::S : ((l == 1) ? STO::PX : STO::S);
+
+                // Set orbital type based on angular momentum
+                if (l == 0) {
+                    orbital.type = STO::S;
+                } else if (l == 1) {
+                    // p-orbitals: m = -1 (py), 0 (pz), +1 (px)
+                    if (m == -1) orbital.type = STO::PY;
+                    else if (m == 0) orbital.type = STO::PZ;
+                    else orbital.type = STO::PX;
+                } else if (l == 2) {
+                    // d-orbitals: would need proper m → type mapping
+                    orbital.type = STO::S;  // Placeholder
+                } else {
+                    orbital.type = STO::S;  // Fallback
+                }
+
                 orbital.x = m_geometry(i, 0) / au;
                 orbital.y = m_geometry(i, 1) / au;
                 orbital.z = m_geometry(i, 2) / au;

@@ -419,7 +419,22 @@ int GFN2::buildBasisSet()
             // Create basis functions for this shell
             for (int m = -l; m <= l; ++m) {
                 STO::Orbital orbital;
-                orbital.type = (l == 0) ? STO::S : ((l == 1) ? STO::PX : STO::S);  // Simplified
+
+                // Set orbital type based on angular momentum
+                if (l == 0) {
+                    orbital.type = STO::S;
+                } else if (l == 1) {
+                    // p-orbitals: m = -1 (py), 0 (pz), +1 (px)
+                    if (m == -1) orbital.type = STO::PY;
+                    else if (m == 0) orbital.type = STO::PZ;
+                    else orbital.type = STO::PX;
+                } else if (l == 2) {
+                    // d-orbitals: would need proper m → type mapping
+                    orbital.type = STO::S;  // Placeholder
+                } else {
+                    orbital.type = STO::S;  // Fallback
+                }
+
                 orbital.x = m_geometry(i, 0) / au;  // Convert Å → Bohr
                 orbital.y = m_geometry(i, 1) / au;
                 orbital.z = m_geometry(i, 2) / au;
@@ -718,6 +733,39 @@ bool GFN2::runSCF()
     // TODO: Implement SAD (Superposition of Atomic Densities) guess
     m_density = Matrix::Zero(m_nbasis, m_nbasis);
 
+    // Debug: Print Hamiltonian and Overlap matrices (first iteration only)
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("Hamiltonian matrix H (full, small matrices only):");
+        if (m_nbasis <= 10) {
+            for (int i = 0; i < m_nbasis; ++i) {
+                std::stringstream ss;
+                ss << "H[" << i << "]: ";
+                for (int j = 0; j < m_nbasis; ++j) {
+                    ss << fmt::format("{:9.5f} ", m_hamiltonian(i, j));
+                }
+                CurcumaLogger::info(ss.str());
+            }
+        } else {
+            CurcumaLogger::info("(Matrix too large, showing diagonal only)");
+            for (int i = 0; i < m_nbasis; ++i) {
+                CurcumaLogger::param(fmt::format("H({},{})", i, i),
+                                    fmt::format("{:.6f} Eh", m_hamiltonian(i, i)));
+            }
+        }
+
+        CurcumaLogger::info("Overlap matrix S (full, small matrices only):");
+        if (m_nbasis <= 10) {
+            for (int i = 0; i < m_nbasis; ++i) {
+                std::stringstream ss;
+                ss << "S[" << i << "]: ";
+                for (int j = 0; j < m_nbasis; ++j) {
+                    ss << fmt::format("{:9.5f} ", m_overlap(i, j));
+                }
+                CurcumaLogger::info(ss.str());
+            }
+        }
+    }
+
     for (int iter = 0; iter < m_scf_max_iterations; ++iter) {
         // 1. Build Fock matrix
         m_fock = buildFockMatrix(m_density);
@@ -779,6 +827,23 @@ Matrix GFN2::buildDensityMatrix(const Matrix& mo_coefficients, const Vector& mo_
         CurcumaLogger::param("buildDensityMatrix: m_nbasis", m_nbasis);
         CurcumaLogger::param("buildDensityMatrix: mo_coefficients.rows()", static_cast<int>(mo_coefficients.rows()));
         CurcumaLogger::param("buildDensityMatrix: mo_coefficients.cols()", static_cast<int>(mo_coefficients.cols()));
+
+        CurcumaLogger::info("MO energies (ALL orbitals):");
+        for (int i = 0; i < m_nbasis; ++i) {
+            CurcumaLogger::param(fmt::format("E_MO[{}]", i),
+                                fmt::format("{:.6f} Eh ({:.3f} eV)",
+                                           mo_energies(i), mo_energies(i) * 27.2114));
+        }
+
+        CurcumaLogger::info("MO coefficients for occupied orbitals:");
+        for (int i = 0; i < n_occ; ++i) {
+            std::stringstream ss;
+            ss << "MO[" << i << "]: ";
+            for (int mu = 0; mu < m_nbasis; ++mu) {
+                ss << fmt::format("{:8.4f} ", mo_coefficients(mu, i));
+            }
+            CurcumaLogger::info(ss.str());
+        }
     }
 
     for (int mu = 0; mu < m_nbasis; ++mu) {
