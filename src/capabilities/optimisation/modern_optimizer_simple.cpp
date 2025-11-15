@@ -19,6 +19,7 @@
 
 #include "modern_optimizer_simple.h"
 #include "../curcumaopt.h" // For legacy LBFGS functionality
+#include "../optimizer_factory.h" // Claude Nov 2025 - New OptimizerFactory
 #include "lbfgs.h" // Native LBFGS implementation - Claude Generated
 #include "src/core/parameter_registry.h"
 #include <algorithm>
@@ -111,7 +112,11 @@ ModernOptimizerDispatcher::OptimizerType ModernOptimizerDispatcher::parseOptimiz
     std::string lower_name = method_name;
     std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
 
-    if (lower_name == "lbfgspp" || lower_name == "lbfgs++" || lower_name == "external") {
+    if (lower_name == "ancopt" || lower_name == "anc" || lower_name == "approximate_normal") {
+        return OptimizerType::ANCOPT; // Claude Nov 2025 - AncOpt from XTB
+    } else if (lower_name == "new_lbfgspp" || lower_name == "new-lbfgspp") {
+        return OptimizerType::NEW_LBFGSPP; // Claude Nov 2025 - New OptimizerFactory-based LBFGSPP
+    } else if (lower_name == "lbfgspp" || lower_name == "lbfgs++" || lower_name == "external") {
         return OptimizerType::LBFGSPP;
     } else if (lower_name == "internal" || lower_name == "gpt") {
         return OptimizerType::INTERNAL;
@@ -133,6 +138,8 @@ ModernOptimizerDispatcher::OptimizerType ModernOptimizerDispatcher::parseOptimiz
 std::map<std::string, std::string> ModernOptimizerDispatcher::getAvailableOptimizers()
 {
     return {
+        { "ancopt", "Approximate Normal Coordinate Optimizer from XTB (Stefan Grimme) - Claude Nov 2025" },
+        { "new_lbfgspp", "New OptimizerFactory-based LBFGSpp implementation - Claude Nov 2025" },
         { "lbfgspp", "External LBFGSpp library - robust L-BFGS implementation" },
         { "internal", "Internal LBFGS implementation - custom features (placeholder)" },
         { "lbfgs", "Native L-BFGS implementation (Claude 3.5 generated)" },
@@ -214,31 +221,59 @@ SimpleOptimizationResult ModernOptimizerDispatcher::optimizeStructure(
         
        
         // Log optimization start
-        // TODO -> Calculate initial energy 
-
         logOptimizationHeader(method_name, *molecule);
 
-        // Route to specific optimizer
+        // Claude Generated (November 2025): Use new OptimizerFactory for ANCOPT support
+        // Try new OptimizerFactory first for ANCOPT and modern optimizer types
         SimpleOptimizationResult result;
-        switch (type) {
-        case OptimizerType::LBFGSPP:
-            result = optimizeWithLBFGSpp(molecule, energy_calculator, config);
-            break;
-        case OptimizerType::INTERNAL:
-            result = optimizeWithInternal(molecule, energy_calculator, config);
-            break;
-        case OptimizerType::NATIVE_LBFGS:
-            result = optimizeWithNativeLBFGS(molecule, energy_calculator, config);
-            break;
-        case OptimizerType::NATIVE_DIIS:
-            result = optimizeWithNativeDIIS(molecule, energy_calculator, config);
-            break;
-        case OptimizerType::NATIVE_RFO:
-            result = optimizeWithNativeRFO(molecule, energy_calculator, config);
-            break;
-        default:
-            result = SimpleOptimizationResult::failed_result("Unknown optimizer type", method_name);
-            break;
+
+        if (type == OptimizerType::ANCOPT || type == OptimizerType::NEW_LBFGSPP) {
+            // Use new Optimization::OptimizerFactory infrastructure
+            try {
+                Optimization::OptimizerType new_opt_type;
+                if (type == OptimizerType::ANCOPT) {
+                    new_opt_type = Optimization::OptimizerType::ANCOPT;
+                } else {
+                    new_opt_type = Optimization::OptimizerType::LBFGSPP;
+                }
+
+                auto opt_result = Optimization::OptimizationDispatcher::optimizeStructure(
+                    molecule, new_opt_type, energy_calculator, config);
+
+                // Convert to SimpleOptimizationResult
+                result.success = opt_result.success;
+                result.final_molecule = opt_result.final_molecule;
+                result.final_energy = opt_result.final_energy;
+                result.method_used = Optimization::optimizerTypeToString(new_opt_type);
+                result.iterations_performed = opt_result.iterations_performed;
+                result.optimization_time_seconds = opt_result.optimization_time_seconds;
+                result.error_message = opt_result.error_message;
+            } catch (const std::exception& e) {
+                result = SimpleOptimizationResult::failed_result(
+                    fmt::format("New optimizer failed: {}", e.what()), method_name);
+            }
+        } else {
+            // Use legacy implementations
+            switch (type) {
+            case OptimizerType::LBFGSPP:
+                result = optimizeWithLBFGSpp(molecule, energy_calculator, config);
+                break;
+            case OptimizerType::INTERNAL:
+                result = optimizeWithInternal(molecule, energy_calculator, config);
+                break;
+            case OptimizerType::NATIVE_LBFGS:
+                result = optimizeWithNativeLBFGS(molecule, energy_calculator, config);
+                break;
+            case OptimizerType::NATIVE_DIIS:
+                result = optimizeWithNativeDIIS(molecule, energy_calculator, config);
+                break;
+            case OptimizerType::NATIVE_RFO:
+                result = optimizeWithNativeRFO(molecule, energy_calculator, config);
+                break;
+            default:
+                result = SimpleOptimizationResult::failed_result("Unknown optimizer type", method_name);
+                break;
+            }
         }
 
         // Log results

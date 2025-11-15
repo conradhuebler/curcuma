@@ -1438,12 +1438,13 @@ int executeOptimization(const json& controller, int argc, char** argv) {
     std::string optimizer_method = opt_config_base.value("optimizer", "auto");
 
     if (optimizer_method != "auto" && optimizer_method != "") {
-        std::cout << "🧪 Using native Curcuma optimizer: " << optimizer_method << std::endl;
+        std::cout << "Using native Curcuma optimizer: " << optimizer_method << std::endl;
     }
 
-    // Check if we should use modern native optimizers
+    // Check if we should use modern native optimizers (Claude Nov 2025: Added ancopt, new_lbfgspp)
     bool use_modern = (optimizer_method == "native_lbfgs" || optimizer_method == "lbfgs" ||
-        optimizer_method == "diis" || optimizer_method == "rfo" || optimizer_method == "auto");
+        optimizer_method == "diis" || optimizer_method == "rfo" || optimizer_method == "auto" ||
+        optimizer_method == "ancopt" || optimizer_method == "anc" || optimizer_method == "new_lbfgspp");
 
     if (use_modern) {
 
