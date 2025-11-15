@@ -139,46 +139,69 @@ void ForceField::setParameter(const json& parameters)
     if (!loaded_from_cache) {
         std::cerr << "DEBUG: Setting parameters..." << std::endl;
         // Set new parameters (generation or explicit)
-        if (parameters.contains("bonds"))
-            setBonds(parameters["bonds"]);
-        std::cerr << "DEBUG: bonds done" << std::endl;
-        if (parameters.contains("angles"))
-            setAngles(parameters["angles"]);
-        std::cerr << "DEBUG: angles done" << std::endl;
-        if (parameters.contains("dihedrals"))
-            setDihedrals(parameters["dihedrals"]);
-        std::cerr << "DEBUG: dihedrals done" << std::endl;
-        if (parameters.contains("inversions"))
-            setInversions(parameters["inversions"]);
-        std::cerr << "DEBUG: inversions done" << std::endl;
-        if (parameters.contains("vdws"))
-            setvdWs(parameters["vdws"]);
-        std::cerr << "DEBUG: vdws done" << std::endl;
 
-        // Phase 4.2: GFN-FF pairwise non-bonded parameters (Claude Generated 2025)
-        if (parameters.contains("gfnff_dispersions"))
-            setGFNFFDispersions(parameters["gfnff_dispersions"]);
-        std::cerr << "DEBUG: gfnff_dispersions done" << std::endl;
-        if (parameters.contains("gfnff_repulsions"))
-            setGFNFFRepulsions(parameters["gfnff_repulsions"]);
-        std::cerr << "DEBUG: gfnff_repulsions done" << std::endl;
-        if (parameters.contains("gfnff_coulombs"))
-            setGFNFFCoulombs(parameters["gfnff_coulombs"]);
-        std::cerr << "DEBUG: gfnff_coulombs done" << std::endl;
+        // Claude Generated (2025): Add try-catch to find crashes
+        try {
+            if (parameters.contains("bonds"))
+                setBonds(parameters["bonds"]);
+            std::cerr << "DEBUG: bonds done" << std::endl;
 
-        m_parameters = parameters;
-        m_method = m_parameters["method"];
-        std::cerr << "DEBUG: method set to " << m_method << std::endl;
-        if (m_parameters.contains("e0"))
-            m_e0 = m_parameters["e0"];
+            if (parameters.contains("angles"))
+                setAngles(parameters["angles"]);
+            std::cerr << "DEBUG: angles done" << std::endl;
 
-        std::cerr << "DEBUG: Calling AutoRanges()..." << std::endl;
-        AutoRanges();
-        std::cerr << "DEBUG: AutoRanges() done" << std::endl;
+            std::cerr << "DEBUG: Checking dihedrals... has_dihedrals=" << parameters.contains("dihedrals") << std::endl;
+            if (parameters.contains("dihedrals")) {
+                std::cerr << "DEBUG: dihedrals size=" << parameters["dihedrals"].size() << std::endl;
+                setDihedrals(parameters["dihedrals"]);
+            }
+            std::cerr << "DEBUG: dihedrals done" << std::endl;
 
-        // Auto-save new parameters (only if caching enabled)
-        if (m_enable_caching) {
-            autoSaveParameters();
+            if (parameters.contains("inversions"))
+                setInversions(parameters["inversions"]);
+            std::cerr << "DEBUG: inversions done" << std::endl;
+
+            if (parameters.contains("vdws"))
+                setvdWs(parameters["vdws"]);
+            std::cerr << "DEBUG: vdws done" << std::endl;
+
+            // Phase 4.2: GFN-FF pairwise non-bonded parameters (Claude Generated 2025)
+            if (parameters.contains("gfnff_dispersions"))
+                setGFNFFDispersions(parameters["gfnff_dispersions"]);
+            std::cerr << "DEBUG: gfnff_dispersions done" << std::endl;
+
+            if (parameters.contains("gfnff_repulsions"))
+                setGFNFFRepulsions(parameters["gfnff_repulsions"]);
+            std::cerr << "DEBUG: gfnff_repulsions done" << std::endl;
+
+            if (parameters.contains("gfnff_coulombs"))
+                setGFNFFCoulombs(parameters["gfnff_coulombs"]);
+            std::cerr << "DEBUG: gfnff_coulombs done" << std::endl;
+
+            m_parameters = parameters;
+            m_method = m_parameters["method"];
+            std::cerr << "DEBUG: method set to " << m_method << std::endl;
+            if (m_parameters.contains("e0"))
+                m_e0 = m_parameters["e0"];
+
+            std::cerr << "DEBUG: Calling AutoRanges()..." << std::endl;
+            AutoRanges();
+            std::cerr << "DEBUG: AutoRanges() done" << std::endl;
+
+            // Auto-save new parameters (only if caching enabled)
+            if (m_enable_caching) {
+                autoSaveParameters();
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "EXCEPTION in setParameter: " << e.what() << std::endl;
+            CurcumaLogger::error(std::string("Exception in setParameter: ") + e.what());
+            in_setParameter = false;
+            throw;
+        } catch (...) {
+            std::cerr << "UNKNOWN EXCEPTION in setParameter" << std::endl;
+            CurcumaLogger::error("Unknown exception in setParameter");
+            in_setParameter = false;
+            throw;
         }
     }
 
@@ -437,9 +460,13 @@ void ForceField::setDihedrals(const json& dihedrals)
         d.j = dihedral["j"];
         d.k = dihedral["k"];
         d.l = dihedral["l"];
-        d.V = dihedral["V"];
-        d.n = dihedral["n"];
-        d.phi0 = dihedral["phi0"];
+
+        // Claude Generated (2025): Make parameters optional (can be null for GFN-FF)
+        // GFN-FF uses different torsion formulas that may not use all these fields
+        d.V = dihedral.value("V", 0.0);
+        d.n = dihedral.value("n", 0.0);
+        d.phi0 = dihedral.value("phi0", 0.0);
+
         m_dihedrals.push_back(d);
     }
 }
@@ -456,10 +483,13 @@ void ForceField::setInversions(const json& inversions)
         inv.j = inversion["j"];
         inv.k = inversion["k"];
         inv.l = inversion["l"];
-        inv.fc = inversion["fc"];
-        inv.C0 = inversion["C0"];
-        inv.C1 = inversion["C1"];
-        inv.C2 = inversion["C2"];
+
+        // Claude Generated (2025): Make parameters optional (can be null for GFN-FF)
+        // Same issue as angles/dihedrals - GFN-FF may use different inversion formulas
+        inv.fc = inversion.value("fc", 0.0);
+        inv.C0 = inversion.value("C0", 0.0);
+        inv.C1 = inversion.value("C1", 0.0);
+        inv.C2 = inversion.value("C2", 0.0);
 
         m_inversions.push_back(inv);
     }
