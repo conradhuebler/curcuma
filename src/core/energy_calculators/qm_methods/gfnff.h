@@ -510,10 +510,10 @@ private:
 
     /**
      * @brief Calculate coordination numbers for all atoms
-     * @param threshold Coordination number threshold
+     * @param threshold Minimum contribution to count (default 1e-6)
      * @return Vector of coordination numbers
      */
-    Vector calculateCoordinationNumbers(double threshold = 40.0) const;
+    Vector calculateCoordinationNumbers(double threshold = 1e-6) const;
 
     /**
      * @brief Calculate coordination number derivatives for gradients

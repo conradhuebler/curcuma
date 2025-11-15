@@ -877,10 +877,19 @@ bool GFNFF::loadGFNFFCharges()
 
 Vector GFNFF::calculateCoordinationNumbers(double threshold) const
 {
-    Vector cn = Vector::Zero(m_atomcount);
+    /**
+     * @brief Calculate coordination numbers using counting function
+     *
+     * Reference: Fortran gfnff_dlogcoord (gfnff_param.f90)
+     * Formula: CN_i = Σ_j f(r_ij)
+     *          f(r) = 1 / (1 + exp(-k*(rcov/r - 1)))
+     *
+     * Claude Generated (2025): Fixed formula - was (r/rcov - 1), should be (rcov/r - 1)!
+     */
 
-    // TODO: Implement coordination number calculation based on gfnff_dlogcoord
-    // For now, use simple distance-based approach
+    Vector cn = Vector::Zero(m_atomcount);
+    const double k = 16.0;  // Steepness parameter for counting function
+
     for (int i = 0; i < m_atomcount; ++i) {
         double cn_i = 0.0;
         for (int j = 0; j < m_atomcount; ++j) {
@@ -893,12 +902,21 @@ Vector GFNFF::calculateCoordinationNumbers(double threshold) const
 
             double rcov_i = getCovalentRadius(m_atoms[i]);
             double rcov_j = getCovalentRadius(m_atoms[j]);
-
-            // Coordination number contribution with exponential decay
             double r_cov = rcov_i + rcov_j;
-            double exp_arg = -16.0 * (distance / r_cov - 1.0);
-            if (exp_arg > -threshold) {
-                cn_i += 1.0 / (1.0 + exp(exp_arg));
+
+            // CRITICAL FIX: Correct counting function formula!
+            // OLD (WRONG): exp_arg = -k * (distance / r_cov - 1.0)  → CN always increases with distance!
+            // NEW (CORRECT): exp_arg = -k * (r_cov / distance - 1.0)  → CN decreases with distance
+            //
+            // When distance << r_cov: r_cov/distance > 1 → exp_arg < 0 → contrib ≈ 1 ✓ (bonded)
+            // When distance >> r_cov: r_cov/distance < 1 → exp_arg > 0 → contrib ≈ 0 ✓ (not bonded)
+            //
+            double exp_arg = -k * (r_cov / distance - 1.0);
+            double contrib = 1.0 / (1.0 + exp(exp_arg));
+
+            // Only count contributions above threshold (avoid numerical noise from distant atoms)
+            if (contrib > threshold) {
+                cn_i += contrib;
             }
         }
         cn[i] = cn_i;
@@ -909,26 +927,28 @@ Vector GFNFF::calculateCoordinationNumbers(double threshold) const
 
 std::vector<Matrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, double threshold) const
 {
-    // Phase 3.2: CN derivatives for gradient calculations
-    // Reference: gfnff_engrad.F90:802-853 (dncoord_erf subroutine)
-    //
-    // Mathematical formulation:
-    // CN_i = Σ_j f(r_ij) where f(r) = 1 / (1 + exp(-16*(r/rcov - 1)))
-    //
-    // Derivatives:
-    // ∂CN_i/∂r_ij = df/dr = 16/rcov * exp(a) / (1 + exp(a))^2
-    // where a = -16*(r/rcov - 1)
-    //
-    // Chain rule for Cartesian coordinates:
-    // ∂CN_i/∂x_k = Σ_j ∂CN_i/∂r_ij * ∂r_ij/∂x_k
-    //
-    // Tensor structure: dcn[dim][i][j] = ∂CN_i/∂coord_dim(atom_j)
+    /**
+     * @brief Calculate coordination number derivatives for gradient calculations
+     *
+     * Reference: Fortran gfnff_engrad.F90:802-853 (dncoord_erf subroutine)
+     * Mathematical formulation:
+     * CN_i = Σ_j f(r_ij) where f(r) = 1 / (1 + exp(-k*(rcov/r - 1)))
+     *
+     * Derivatives:
+     * ∂CN_i/∂r_ij = df/dr = k*rcov/r² * exp(a) / (1 + exp(a))²
+     * where a = -k*(rcov/r - 1)
+     *
+     * Chain rule for Cartesian coordinates:
+     * ∂CN_i/∂x_k = Σ_j ∂CN_i/∂r_ij * ∂r_ij/∂x_k
+     *
+     * Tensor structure: dcn[dim][i][j] = ∂CN_i/∂coord_dim(atom_j)
+     *
+     * Claude Generated (2025): Fixed formula to match calculateCoordinationNumbers()
+     */
 
-    // Initialize 3D tensor as vector of matrices
-    // dcn[0] = ∂CN/∂x, dcn[1] = ∂CN/∂y, dcn[2] = ∂CN/∂z
+    const double k = 16.0;  // Steepness parameter
     std::vector<Matrix> dcn(3, Matrix::Zero(m_atomcount, m_atomcount));
 
-    // Calculate derivatives for all atom pairs
     for (int i = 0; i < m_atomcount; ++i) {
         Vector ri = m_geometry.row(i);
         double rcov_i = getCovalentRadius(m_atoms[i]);
@@ -939,24 +959,22 @@ std::vector<Matrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector& 
             Vector rj = m_geometry.row(j);
             double rcov_j = getCovalentRadius(m_atoms[j]);
 
-            // Distance and direction
             Vector r_ij_vec = rj - ri;
             double r_ij = r_ij_vec.norm();
             double rcov_sum = rcov_i + rcov_j;
 
-            // Exponential argument: a = -16*(r/rcov - 1)
-            double exp_arg = -16.0 * (r_ij / rcov_sum - 1.0);
+            // CRITICAL FIX: Correct counting function formula (same as calculateCoordinationNumbers)
+            double exp_arg = -k * (rcov_sum / r_ij - 1.0);
+            double contrib = 1.0 / (1.0 + exp(exp_arg));
 
-            // Only compute if within threshold (same as CN calculation)
-            if (exp_arg > -threshold) {
-                // Derivative: dCN/dr = 16/rcov * exp(a) / (1 + exp(a))^2
+            // Only compute if contribution is significant
+            if (contrib > threshold) {
+                // Derivative: dCN/dr = k*rcov/r² * exp(a) / (1 + exp(a))²
                 double exp_val = std::exp(exp_arg);
                 double denom = 1.0 + exp_val;
-                double dCN_dr = (16.0 / rcov_sum) * exp_val / (denom * denom);
+                double dCN_dr = (k * rcov_sum / (r_ij * r_ij)) * exp_val / (denom * denom);
 
                 // Chain rule: dCN/dx_k = dCN/dr * dr/dx_k
-                // where dr/dx_k = (x_j - x_i) / r for k=j
-                //       dr/dx_k = -(x_j - x_i) / r for k=i
                 Vector grad_direction = r_ij_vec / r_ij;  // Unit vector i→j
 
                 // ∂CN_i/∂x_j (moving atom j affects CN_i)
