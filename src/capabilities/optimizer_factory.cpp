@@ -68,10 +68,10 @@ std::unique_ptr<OptimizerInterface> OptimizerFactory::createOptimizer(
     // Create optimizer
     auto optimizer = it->second();
 
-    // Set energy calculator if provided
+    // Set energy calculator if provided (Claude Generated - critical for optimization)
     if (energy_calculator && optimizer) {
+        optimizer->setEnergyCalculator(energy_calculator);
         optimizer->LoadConfiguration(optimizer->GetDefaultConfiguration());
-        // Note: Energy calculator will be set during initialization
     }
 
     return optimizer;

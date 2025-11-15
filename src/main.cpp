@@ -507,16 +507,17 @@ int executeOptimization(const json& controller, int argc, char** argv) {
         return 0;
     }
 
-    // Parse optional -optimizer parameter
+    // Parse optimizer method from JSON config (Claude Nov 2025: Use JSON instead of argv parsing)
     std::string optimizer_method = "auto";
-    if (argc >= 5 && strcmp(argv[3], "-optimizer") == 0) {
-        optimizer_method = argv[4];
-        std::cout << "🧪 Using native Curcuma optimizer: " << optimizer_method << std::endl;
+    if (controller.contains("opt") && controller["opt"].contains("optimizer")) {
+        optimizer_method = controller["opt"]["optimizer"];
+        std::cout << "🧪 Using Curcuma optimizer: " << optimizer_method << std::endl;
     }
 
-    // Check if we should use modern native optimizers
+    // Check if we should use modern native optimizers (Claude Nov 2025: Added ancopt, new_lbfgspp)
     bool use_modern = (optimizer_method == "native_lbfgs" || optimizer_method == "lbfgs" ||
-        optimizer_method == "diis" || optimizer_method == "rfo" || optimizer_method == "auto");
+        optimizer_method == "diis" || optimizer_method == "rfo" || optimizer_method == "auto" ||
+        optimizer_method == "ancopt" || optimizer_method == "anc" || optimizer_method == "new_lbfgspp");
 
     if (use_modern) {
 

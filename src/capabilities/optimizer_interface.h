@@ -121,6 +121,9 @@ public:
     virtual json GetDefaultConfiguration() const = 0;
     virtual json GetCurrentConfiguration() const = 0;
 
+    // Energy calculator management - Claude Generated
+    virtual void setEnergyCalculator(EnergyCalculator* calc) = 0;
+
     // Method identification
     virtual std::string getName() const = 0;
     virtual OptimizerType getType() const = 0;
