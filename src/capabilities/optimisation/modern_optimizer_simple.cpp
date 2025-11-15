@@ -299,9 +299,11 @@ SimpleOptimizationResult ModernOptimizerDispatcher::optimizeWithLBFGSpp(Molecule
 
     try {
         // Create legacy optimizer to do the actual work
-        json legacy_config = config;
-        legacy_config["optimethod"] = 0; // Force LBFGSpp mode
-        legacy_config["SinglePoint"] = false;
+        // Claude Generated: CurcumaOpt expects nested config structure with "opt" key
+        json legacy_config;
+        legacy_config["opt"] = config.is_null() ? json{} : config;
+        legacy_config["opt"]["optimethod"] = 0; // Force LBFGSpp mode
+        legacy_config["opt"]["SinglePoint"] = false;
 
         CurcumaOpt legacy_opt(legacy_config, true); // Silent mode
 
@@ -342,9 +344,11 @@ SimpleOptimizationResult ModernOptimizerDispatcher::optimizeWithInternal(Molecul
 
     try {
         // Create legacy optimizer to do the actual work
-        json legacy_config = config;
-        legacy_config["optimethod"] = 1; // Force internal LBFGS mode
-        legacy_config["SinglePoint"] = false;
+        // Claude Generated: CurcumaOpt expects nested config structure with "opt" key
+        json legacy_config;
+        legacy_config["opt"] = config.is_null() ? json{} : config;
+        legacy_config["opt"]["optimethod"] = 1; // Force internal LBFGS mode
+        legacy_config["opt"]["SinglePoint"] = false;
 
         CurcumaOpt legacy_opt(legacy_config, true); // Silent mode
 
