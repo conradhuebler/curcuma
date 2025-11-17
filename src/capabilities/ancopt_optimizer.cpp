@@ -35,7 +35,9 @@ void ANCCoordinates::allocate(int natoms, int num_vars, double h_low, double h_m
 
     B = Matrix::Zero(n3, nvar);
     coord = Vector::Zero(nvar);
+    coord_reference = Vector::Zero(nvar); // Claude Nov 2025: Initialize coord reference
     xyz_flat = Vector::Zero(n3);
+    xyz_reference = Vector::Zero(n3); // Claude Nov 2025: Initialize xyz reference
     hess = Matrix::Zero(nvar, nvar);
 
     initialized = true;
@@ -97,16 +99,29 @@ bool ANCCoordinates::generateANC(const Matrix& cartesian_hessian, const Vector& 
 }
 
 void ANCCoordinates::getCartesian(Vector& xyz_out) const {
-    // Transform internal coordinates back to Cartesian
-    // xyz = B * coord
-    xyz_out = B * coord;
+    // Claude Nov 2025: FIX - Transform displacement in internal coords back to Cartesian
+    // The correct transformation is:
+    //   delta_coord = coord - coord_reference  (accumulated displacement in internal space)
+    //   delta_xyz = B * delta_coord  (transform displacement to Cartesian)
+    //   xyz_new = xyz_reference + delta_xyz  (add to reference geometry)
+    //
+    // This fixes the bug where we were doing xyz = B * coord (which is completely wrong!)
+
+    Vector delta_coord = coord - coord_reference;
+    Vector delta_xyz = B * delta_coord;
+    xyz_out = xyz_reference + delta_xyz;
 }
 
 void ANCCoordinates::setCartesian(const Vector& xyz_in) {
-    // Transform Cartesian to internal coordinates
-    // coord = B^T * xyz (pseudo-inverse if B is not square)
+    // Claude Nov 2025: FIX - Set reference point and calculate internal coords
+    // Store the reference geometry
+    xyz_reference = xyz_in;
     xyz_flat = xyz_in;
-    coord = B.transpose() * xyz_in;
+
+    // Calculate reference internal coordinates
+    // coord_ref = B^T * xyz (project Cartesian onto internal space)
+    coord_reference = B.transpose() * xyz_in;
+    coord = coord_reference;  // Initialize coord to reference
 }
 
 Vector ANCCoordinates::transformGradientToInternal(const Vector& cartesian_gradient) const {
@@ -156,18 +171,45 @@ ANCOptimizer::ANCOptimizer()
 bool ANCOptimizer::InitializeOptimizerInternal() {
     CurcumaLogger::info("Initializing AncOpt optimizer");
 
+    // Claude Nov 2025: BUG FIX - Check molecule is valid before proceeding
+    int atom_count = m_molecule.AtomCount();
+    std::cerr << "[DEBUG ANCOptimizer::InitializeOptimizerInternal] m_molecule.AtomCount() = " << atom_count << std::endl;
+
+    if (atom_count == 0) {
+        CurcumaLogger::error_fmt("Cannot initialize ANC optimizer with empty molecule (AtomCount={})", atom_count);
+        return false;
+    }
+    if (atom_count < 2) {
+        CurcumaLogger::error_fmt("ANC optimizer requires at least 2 atoms (AtomCount={})", atom_count);
+        return false;
+    }
+
+    CurcumaLogger::info_fmt("Molecule: {} atoms, charge {}", atom_count, m_molecule.Charge());
+
     // Load ANC-specific parameters from configuration
+    std::cerr << "[DEBUG] About to loadANCParameters" << std::endl;
     loadANCParameters(m_configuration);
+    std::cerr << "[DEBUG] Done loadANCParameters" << std::endl;
 
     // Set optimization level (affects thresholds)
     int opt_level = m_configuration.value("optimization_level", 0); // 0 = normal
     setOptimizationLevel(opt_level);
 
     // Check if molecule is linear
+    std::cerr << "[DEBUG] About to checkLinearMolecule" << std::endl;
     bool is_linear = checkLinearMolecule(m_molecule);
+    std::cerr << "[DEBUG] is_linear = " << is_linear << std::endl;
 
     // Calculate number of internal coordinates
     int nvar = 3 * m_molecule.AtomCount() - (is_linear ? 5 : 6);
+
+    // Claude Nov 2025: BUG FIX - Ensure nvar is positive
+    if (nvar <= 0) {
+        CurcumaLogger::error_fmt("Invalid number of internal coordinates: nvar={}", nvar);
+        return false;
+    }
+
+    CurcumaLogger::info_fmt("Internal coordinates: {} (is_linear={})", nvar, is_linear);
 
     // Allocate ANC structure
     m_anc->allocate(m_molecule.AtomCount(), nvar, m_hlow, m_hmax);

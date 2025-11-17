@@ -52,7 +52,9 @@ struct ANCCoordinates {
 
     Matrix B; // Transformation matrix B (n3 x nvar)
     Vector coord; // Current internal coordinates
+    Vector coord_reference; // Reference internal coordinates (Claude Nov 2025: Fix for ANC transform bug)
     Vector xyz_flat; // Current Cartesian coordinates (flattened)
+    Vector xyz_reference; // Reference Cartesian coordinates (Claude Nov 2025: Fix for ANC transform bug)
 
     Matrix hess; // Hessian in internal coordinates (packed format)
 
