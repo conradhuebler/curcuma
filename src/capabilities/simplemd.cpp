@@ -89,7 +89,7 @@ int BiasThread::execute()
         m_target.setGeometry(m_biased_structures[i].geometry);
         m_driver.setTarget(m_target);
         double rmsd = m_driver.BestFitRMSD();
-        double expr = exp(-rmsd * rmsd * m_alpha);
+        double expr = exp(-rmsd * rmsd * m_alpha);  // Claude Generated - Precompute for efficiency
         double bias_energy = expr * m_dT;
         factor = m_biased_structures[i].factor;
 
@@ -97,14 +97,25 @@ int BiasThread::execute()
             factor = m_biased_structures[i].counter;
         else
             factor += (exp(-(m_biased_structures[i].energy) / kb_Eh / m_DT));
+
+        // Claude Generated - XTB-inspired ramping function for newest structure
+        if (i == m_biased_structures.size() - 1 && m_use_ramping) {
+            double ramp = (2.0 / (1.0 + exp(-m_ramp_factor * m_metatime)) - 1.0);
+            factor *= ramp;
+        }
+
         m_biased_structures[i].factor = factor;
         if (i == 0) {
             m_rmsd_reference = rmsd;
         }
-        if (expr * m_rmsd_econv > 1 * m_biased_structures.size()) {
+
+        // Claude Generated - Improved energy convergence criterion (clearer logic)
+        double relative_contribution = expr / m_biased_structures.size();
+        if (relative_contribution > m_rmsd_econv) {
             m_biased_structures[i].counter++;
             m_biased_structures[i].energy += bias_energy;
         }
+
         bias_energy *= factor * m_k;
 
         m_current_bias += bias_energy;
@@ -128,7 +139,8 @@ int BiasThread::execute()
         }
         */
 
-        double dEdR = -2 * m_alpha * m_k / m_atoms * exp(-rmsd * rmsd * m_alpha) * factor * m_dT;
+        // Claude Generated - Optimized gradient calculation (reuse expr, no redundant exp())
+        double dEdR = -2 * m_alpha * m_k / m_atoms * expr * factor * m_dT;
 
         m_gradient += m_driver.Gradient() * dEdR;
         m_counter += m_biased_structures[i].counter;
@@ -245,6 +257,8 @@ void SimpleMD::LoadControlJson()
     m_nohillsfile = m_config.get<bool>("noHILSfile", false);  // Not in PARAM block - legacy
 
     m_rmsd_atoms = m_config.get<std::string>("rmsd_mtd_atoms");
+    m_rmsd_mtd_ramping = m_config.get<bool>("rmsd_mtd_ramping");  // Claude Generated - XTB-inspired ramping
+    m_rmsd_mtd_ramp_factor = m_config.get<double>("rmsd_mtd_ramp_factor");  // Claude Generated - Ramping speed
 
     // Claude Generated 2025: Output & Restart Parameters
     m_writerestart = m_config.get<int>("write_restart_frequency");
@@ -733,6 +747,8 @@ bool SimpleMD::Initialise()
             thread->setalpha(m_alpha_rmsd);
             thread->setEnergyConv(m_rmsd_econv);
             thread->setWTMTD(m_wtmtd);
+            thread->setRamping(m_rmsd_mtd_ramping);  // Claude Generated - XTB-inspired ramping
+            thread->setRampFactor(m_rmsd_mtd_ramp_factor);  // Claude Generated - Ramping speed
             m_bias_threads.push_back(thread);
             m_bias_pool->addThread(thread);
         }
@@ -2444,6 +2460,11 @@ void SimpleMD::ApplyRMSDMTD()
     m_start = std::chrono::system_clock::now();
     m_colvar_incr = 0;
 
+    // Claude Generated - Increment metatime for ramping function (XTB-inspired)
+    for (auto& thread : m_bias_threads) {
+        thread->incrementMetatime(1.0);
+    }
+
     Geometry current_geometry = m_rmsd_mtd_molecule.getGeometry();
     for (int i = 0; i < m_rmsd_indicies.size(); ++i) {
         current_geometry(i, 0) = m_eigen_geometry.data()[3 * m_rmsd_indicies[i] + 0];
@@ -2455,7 +2476,21 @@ void SimpleMD::ApplyRMSDMTD()
     double rmsd_reference = 0;
 
     if (m_bias_structure_count == 0) {
-        m_bias_threads[0]->addGeometry(current_geometry, 0, m_currentStep, 0);
+        // Claude Generated - XTB-inspired initial perturbation for numerical stability
+        // Add small random displacement (1e-6 Å) to avoid RMSD=0 singularities
+        Geometry perturbed_geometry = current_geometry;
+        std::default_random_engine generator(std::chrono::system_clock::now().time_since_epoch().count());
+        std::uniform_real_distribution<double> distribution(-1.0, 1.0);
+
+        for (int i = 0; i < perturbed_geometry.rows(); ++i) {
+            Eigen::Vector3d random_dir(distribution(generator),
+                                        distribution(generator),
+                                        distribution(generator));
+            random_dir.normalize();
+            perturbed_geometry.row(i) += random_dir.transpose() * 1.0e-6;  // 1e-6 Å perturbation
+        }
+
+        m_bias_threads[0]->addGeometry(perturbed_geometry, 0, m_currentStep, 0);
         m_bias_structure_count++;
         m_rmsd_mtd_molecule.writeXYZFile(Basename() + ".mtd.xyz");
         if (m_nocolvarfile == false) {
@@ -2529,10 +2564,33 @@ void SimpleMD::ApplyRMSDMTD()
 
     if (current_bias * m_rmsd_econv < m_bias_structure_count && m_rmsd_fix_structure == false) {
         int thread_index = m_bias_structure_count % m_bias_threads.size();
-        m_bias_threads[thread_index]->addGeometry(current_geometry, rmsd_reference, m_currentStep, m_bias_structure_count);
-        m_bias_structure_count++;
+
+        // Claude Generated - XTB-inspired Rolling Buffer for bounded memory
+        // If max_gaussians > 0 and limit reached: remove oldest structure
+        // If max_gaussians = -1: unlimited growth (for thermodynamics)
+        if (m_max_rmsd_N > 0 && m_bias_structure_count >= m_max_rmsd_N) {
+            // Rolling buffer mode: remove oldest structure from each thread
+            for (auto& thread : m_bias_threads) {
+                thread->removeOldestStructure();
+            }
+            // Add new structure (replaces oldest)
+            m_bias_threads[thread_index]->addGeometry(current_geometry, rmsd_reference,
+                                                       m_currentStep, m_bias_structure_count);
+            std::cout << "Rolling buffer: " << m_max_rmsd_N << " structures (oldest replaced)" << std::endl;
+        } else {
+            // Unlimited mode: continuously add structures
+            m_bias_threads[thread_index]->addGeometry(current_geometry, rmsd_reference,
+                                                       m_currentStep, m_bias_structure_count);
+            m_bias_structure_count++;
+            std::cout << m_bias_structure_count << " stored structures currently" << std::endl;
+        }
+
+        // Claude Generated - Reset metatime for ramping function (new structure starts fresh)
+        for (auto& thread : m_bias_threads) {
+            thread->resetMetatime();
+        }
+
         m_rmsd_mtd_molecule.appendXYZFile(Basename() + ".mtd.xyz");
-        std::cout << m_bias_structure_count << " stored structures currently" << std::endl;
     }
     m_end = std::chrono::system_clock::now();
     int m_time = std::chrono::duration_cast<std::chrono::milliseconds>(m_end - m_start).count();

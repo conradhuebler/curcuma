@@ -112,6 +112,15 @@ public:
 
     inline void setEnergyConv(double rmsd_econv) { m_rmsd_econv = rmsd_econv; }
     inline void setWTMTD(bool wtmtd) { m_wtmtd = wtmtd; }
+    inline void setRamping(bool use_ramping) { m_use_ramping = use_ramping; }  // Claude Generated - Enable/disable ramping
+    inline void setRampFactor(double ramp_factor) { m_ramp_factor = ramp_factor; }  // Claude Generated - Control ramping speed
+    inline void incrementMetatime(double dt = 1.0) { m_metatime += dt; }  // Claude Generated - Increment ramping timer
+    inline void resetMetatime() { m_metatime = 0.0; }  // Claude Generated - Reset timer when new structure added
+    inline void removeOldestStructure() {  // Claude Generated - Rolling buffer support
+        if (!m_biased_structures.empty()) {
+            m_biased_structures.erase(m_biased_structures.begin());
+        }
+    }
     inline int Counter() const { return m_counter; }
     std::vector<BiasStructure> getBiasStructure() const { return m_biased_structures; }
     std::vector<json> getBias() const;
@@ -123,8 +132,10 @@ private:
     Molecule m_reference, m_target;
     Geometry m_gradient;
     double m_k, m_alpha, m_DT, m_currentStep, m_rmsd_reference, m_current_bias, m_rmsd_econv, m_dT = 1;
+    double m_metatime = 0.0, m_ramp_factor = 0.1;  // Claude Generated - Ramping parameters
     int m_counter = 0, m_atoms = 0;
     bool m_wtmtd = false, m_nocolvarfile = false, m_nohillsfile = false;
+    bool m_use_ramping = true;  // Claude Generated - Enable ramping by default
 };
 
 // Claude Generated 2025: CurcumaMDJson removed - replaced by ParameterRegistry + ConfigManager
@@ -306,6 +317,8 @@ private:
     double m_rmsd_rmsd = 1;
     double m_rmsd_econv = 1e8;
     double m_rmsd_DT = 1000000;
+    double m_rmsd_mtd_ramp_factor = 0.1;  // Claude Generated - Ramping speed parameter
+    bool m_rmsd_mtd_ramping = true;  // Claude Generated - Enable ramping
     double m_rattle_max = 10;
     double m_rattle_min = 1e-4;
     int m_max_rmsd_N = -1;
@@ -443,6 +456,8 @@ private:
     PARAM(rmsd_mtd_ref_file, String, "none", "File with reference structures for RMSD-MTD.", "RMSD-MTD", {"rmsd_ref_file"})
     PARAM(rmsd_mtd_atoms, String, "-1", "Atom indices to use for RMSD calculation.", "RMSD-MTD", {"rmsd_atoms"})
     PARAM(rmsd_mtd_dt, Double, 1000000.0, "RMSD-MTD bias deposition time.", "RMSD-MTD", {"rmsd_DT"})
+    PARAM(rmsd_mtd_ramping, Bool, true, "Enable ramping function for smooth bias buildup (XTB-inspired).", "RMSD-MTD", {})  // Claude Generated
+    PARAM(rmsd_mtd_ramp_factor, Double, 0.1, "Ramping speed parameter (sigmoid steepness, higher = faster).", "RMSD-MTD", {})  // Claude Generated
 
     // --- Coarse Graining (CG) Parameters --- Claude Generated (Nov 2025)
     PARAM(cg_write_vtf, Bool, true, "Write VTF trajectory for CG systems.", "CG", {"write_vtf"})
