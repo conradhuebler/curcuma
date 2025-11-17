@@ -30,6 +30,7 @@
 #include "qm_methods/gfn2_method.h"
 #include "qm_methods/gfnff_method.h"
 #include "qm_methods/pm3_method.h"
+#include "qm_methods/mndo_method.h"
 #ifdef USE_TBLITE
 #include "qm_methods/tblite_method.h"
 #endif
@@ -182,6 +183,7 @@ const std::vector<MethodFactory::ExplicitMethod>& MethodFactory::getExplicitMeth
         // Native methods (always available)
         { "eht", [](const json& config) { return std::make_unique<EHTMethod>(config); }, "Native", false, "" },
         { "pm3", [](const json& config) { return std::make_unique<PM3Method>(config); }, "Native", false, "" },
+        { "mndo", [](const json& config) { return std::make_unique<MNDOMethod>(); }, "Native", false, "" },
         { "cgfnff", [](const json& config) { return std::make_unique<GFNFFMethod>(config); }, "Native", false, "" },
 
         // Force field methods (always available)
