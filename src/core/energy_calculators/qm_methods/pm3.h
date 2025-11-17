@@ -123,6 +123,10 @@ private:
         double zeta_s;  // Slater exponent (s)
         double zeta_p;  // Slater exponent (p)
         double alpha;  // Core repulsion parameter
+        double D1;    // Dipole expansion parameter (for MNDO multipole integrals)
+        double D2;    // Quadrupole expansion parameter (for d-orbitals, =0 for sp)
+        double rho_s; // Orbital exponent for s-type ERIs (ρ_s)
+        double rho_p; // Orbital exponent for p-type ERIs (ρ_p)
         std::vector<double> gauss_a;  // Gaussian expansion coefficients
         std::vector<double> gauss_b;  // Gaussian expansion exponents
         std::vector<double> gauss_c;  // Gaussian expansion widths
