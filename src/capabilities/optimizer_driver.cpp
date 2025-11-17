@@ -38,8 +38,16 @@ static Vector MoleculeToCoordinates(const Molecule& mol) {
 
 // Claude Generated - Helper function to set Molecule geometry from flat Vector
 static void CoordinatesToMolecule(const Vector& coords, Molecule& mol) {
-    Geometry geom(mol.AtomCount(), 3);
-    for (int i = 0; i < mol.AtomCount(); ++i) {
+    // Claude Nov 2025: DEBUG - Check molecule integrity
+    int natoms = mol.AtomCount();
+    if (coords.size() != 3 * natoms) {
+        CurcumaLogger::error_fmt("CoordinatesToMolecule: coords size mismatch! coords.size()={}, expected={}",
+            coords.size(), 3 * natoms);
+        return;
+    }
+
+    Geometry geom(natoms, 3);
+    for (int i = 0; i < natoms; ++i) {
         geom.row(i) = coords.segment<3>(3 * i);
     }
     mol.setGeometry(geom);

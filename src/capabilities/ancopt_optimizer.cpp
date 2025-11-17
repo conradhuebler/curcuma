@@ -173,7 +173,6 @@ bool ANCOptimizer::InitializeOptimizerInternal() {
 
     // Claude Nov 2025: BUG FIX - Check molecule is valid before proceeding
     int atom_count = m_molecule.AtomCount();
-    std::cerr << "[DEBUG ANCOptimizer::InitializeOptimizerInternal] m_molecule.AtomCount() = " << atom_count << std::endl;
 
     if (atom_count == 0) {
         CurcumaLogger::error_fmt("Cannot initialize ANC optimizer with empty molecule (AtomCount={})", atom_count);
@@ -187,18 +186,14 @@ bool ANCOptimizer::InitializeOptimizerInternal() {
     CurcumaLogger::info_fmt("Molecule: {} atoms, charge {}", atom_count, m_molecule.Charge());
 
     // Load ANC-specific parameters from configuration
-    std::cerr << "[DEBUG] About to loadANCParameters" << std::endl;
     loadANCParameters(m_configuration);
-    std::cerr << "[DEBUG] Done loadANCParameters" << std::endl;
 
     // Set optimization level (affects thresholds)
     int opt_level = m_configuration.value("optimization_level", 0); // 0 = normal
     setOptimizationLevel(opt_level);
 
     // Check if molecule is linear
-    std::cerr << "[DEBUG] About to checkLinearMolecule" << std::endl;
     bool is_linear = checkLinearMolecule(m_molecule);
-    std::cerr << "[DEBUG] is_linear = " << is_linear << std::endl;
 
     // Calculate number of internal coordinates
     int nvar = 3 * m_molecule.AtomCount() - (is_linear ? 5 : 6);
