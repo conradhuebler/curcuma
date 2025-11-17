@@ -25,6 +25,32 @@
 
 namespace Optimization {
 
+// Claude Generated - Helper function to convert Molecule geometry to flat Vector
+static Vector MoleculeToCoordinates(const Molecule& mol) {
+    const auto& geom = mol.getGeometry();
+    Vector coords(3 * mol.AtomCount());
+    for (int i = 0; i < mol.AtomCount(); ++i) {
+        coords.segment<3>(3 * i) = geom.row(i);
+    }
+    return coords;
+}
+
+// Claude Generated - Helper function to set Molecule geometry from flat Vector
+static void CoordinatesToMolecule(const Vector& coords, Molecule& mol) {
+    int natoms = mol.AtomCount();
+    if (coords.size() != 3 * natoms) {
+        CurcumaLogger::error_fmt("CoordinatesToMolecule: coords size mismatch! coords.size()={}, expected={}",
+            coords.size(), 3 * natoms);
+        return;
+    }
+
+    Geometry geom(natoms, 3);
+    for (int i = 0; i < natoms; ++i) {
+        geom.row(i) = coords.segment<3>(3 * i);
+    }
+    mol.setGeometry(geom);
+}
+
 // Claude Generated - OptimizationContext implementation
 bool OptimizationContext::isValid() const
 {
