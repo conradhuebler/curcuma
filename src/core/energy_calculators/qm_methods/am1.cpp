@@ -53,10 +53,14 @@ void AM1::initializeAM1Parameters()
     // Reference: J. Am. Chem. Soc. 1985, 107, 3902-3909
     // DOI: 10.1021/ja00299a024
 
+    // CRITICAL: Parameters stored in eV, must convert to Hartree
+    // Reference: Ulysses MNDO.hpp line 6597: "return ulx/au2eV"
+    const double eV2Hartree = 27.211386245988;
+
     // Hydrogen (Z=1)
     // Claude Generated: AM1 parameters extended with MNDO integral parameters
     AM1Params H;
-    H.U_ss = -11.396427;  // eV
+    H.U_ss = -11.396427;
     H.zeta_s = 1.188078;
     H.beta_s = -6.173787;
     H.alpha = 2.882324;
@@ -698,24 +702,39 @@ double AM1::calculateCoreRepulsionEnergy() const
             double dz = m_geometry(A, 2) - m_geometry(B, 2);
             double R_AB = std::sqrt(dx*dx + dy*dy + dz*dz);
 
-            // Core repulsion uses (ss|ss) two-electron integral γ_ss, NOT simple 1/R Coulomb
-            // This is fundamental to NDDO-based semi-empirical methods
+            // Core repulsion uses (ss|ss) two-electron integral γ_ss
+            // Ulysses MNDO.hpp line 5960: enuc += chgA*chgB*intn*factorA + factorB + chgA*chgB*factorC
             double gamma_ss = getGammaAB(Z_A, Z_B, R_AB);
-            double V_coul = double(Z_A * Z_B) * gamma_ss;
 
-            // Gaussian corrections: V_gauss = Z_A * Z_B * γ_ss * ∑_k a_k * exp(-b_k * (R - c_k)²)
-            // Simplified: use element-averaged parameters (real AM1 uses element-pair specific)
-            double V_gauss = 0.0;
+            // factorA: Exponential damping (Ulysses line 5936-5956)
+            // factorA = 1.0 + gA*exp(-alphaA*R) + gB*exp(-alphaB*R)
+            double gA = 1.0;
+            double gB = 1.0;
+            if ((Z_B == 1) && ((Z_A == 7) || (Z_A == 8))) {  // N-H or O-H
+                gA = R_AB;
+            }
+            if ((Z_A == 1) && ((Z_B == 7) || (Z_B == 8))) {  // H-N or H-O
+                gB = R_AB;
+            }
+            double factorA = 1.0;
+            factorA += gA * std::exp(-params_A.alpha * R_AB);
+            factorA += gB * std::exp(-params_B.alpha * R_AB);
+
+            double factorB = 0.0;
+
+            // factorC: Gaussian corrections (AM1 style)
+            // Ulysses PM6.hpp line 47: AM1factor = K*exp(-L*(R-M)²)/RAB
+            double factorC = 0.0;
             for (size_t k = 0; k < params_A.gauss_a.size() && k < params_B.gauss_a.size(); ++k) {
                 double a_k = (params_A.gauss_a[k] + params_B.gauss_a[k]) / 2.0;
                 double b_k = (params_A.gauss_b[k] + params_B.gauss_b[k]) / 2.0;
                 double c_k = (params_A.gauss_c[k] + params_B.gauss_c[k]) / 2.0;
 
-                V_gauss += a_k * std::exp(-b_k * std::pow(R_AB - c_k, 2.0));
+                factorC += a_k * std::exp(-b_k * std::pow(R_AB - c_k, 2.0)) / R_AB;
             }
 
-            // Total core repulsion: E_core = Z_A * Z_B * γ_ss * (1 + Gaussian terms)
-            E_rep += V_coul + V_gauss;
+            // Total core repulsion (Ulysses MNDO.hpp line 5960)
+            E_rep += double(Z_A * Z_B) * gamma_ss * factorA + factorB + double(Z_A * Z_B) * factorC;
         }
     }
 

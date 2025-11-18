@@ -52,6 +52,10 @@ void MNDO::initializeMNDOParameters()
     // Reference: M. J. S. Dewar, W. Thiel, J. Am. Chem. Soc. 1977, 99, 4899
     // Note: MNDO does NOT use Gaussian expansions (unlike PM3/AM1)
 
+    // CRITICAL: Parameters stored in eV, must convert to Hartree
+    // Reference: Ulysses MNDO.hpp line 6597: "return ulx/au2eV"
+    const double eV2Hartree = 27.211386245988;
+
     // Hydrogen (Z=1)
     MNDOParams H;
     H.U_ss = -12.848;  // eV (MNDO original)
@@ -583,16 +587,27 @@ double MNDO::calculateCoreRepulsionEnergy() const
                 D_params
             );
 
-            // MNDO formula: V_AB = Z_A * Z_B * γ_ss
-            // Plus additional MNDO core-core term (simplified)
-            double V_core = double(Z_A * Z_B) * gamma_ss;
+            // Ulysses MNDO.hpp line 5960: enuc += chgA*chgB*intn*factorA + factorB
+            // MNDO: No Gaussian corrections (factorC = 0)
 
-            // MNDO core correction (alpha parameter)
-            double alpha_A = params_A.alpha;
-            double alpha_B = params_B.alpha;
-            double V_correction = std::exp(-alpha_A * R_AB) + std::exp(-alpha_B * R_AB);
+            // factorA: Exponential damping (Ulysses line 5936-5956)
+            // factorA = 1.0 + gA*exp(-alphaA*R) + gB*exp(-alphaB*R)
+            double gA = 1.0;
+            double gB = 1.0;
+            if ((Z_B == 1) && ((Z_A == 7) || (Z_A == 8))) {  // N-H or O-H
+                gA = R_AB;
+            }
+            if ((Z_A == 1) && ((Z_B == 7) || (Z_B == 8))) {  // H-N or H-O
+                gB = R_AB;
+            }
+            double factorA = 1.0;
+            factorA += gA * std::exp(-params_A.alpha * R_AB);
+            factorA += gB * std::exp(-params_B.alpha * R_AB);
 
-            E_rep += V_core + V_correction;
+            double factorB = 0.0;
+
+            // MNDO core repulsion: E_core = Z_A * Z_B * γ_ss * factorA + factorB
+            E_rep += double(Z_A * Z_B) * gamma_ss * factorA + factorB;
         }
     }
 
