@@ -248,6 +248,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/gfnff_advanced.cpp
         src/core/energy_calculators/qm_methods/gfnff_torsions.cpp
         src/core/energy_calculators/qm_methods/gfnff_inversions.cpp
+        src/core/energy_calculators/qm_methods/gbsa.cpp
         src/core/energy_calculators/qm_methods/qm_driver.cpp
         src/core/energy_calculators/qm_methods/ulyssesinterface.cpp
         src/core/energy_calculators/method_factory.cpp
