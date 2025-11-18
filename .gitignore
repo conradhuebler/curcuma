@@ -88,3 +88,11 @@ test_cases/**/*.dat
 # global_config.h is auto-generated from global_config.h.in during cmake configuration
 src/global_config.h
 
+# External dependencies - Claude Generated November 2025
+# These are downloaded by CMake during build and should not be committed
+external/eigen-*/
+external/*.zip
+external/ulysses-*/
+external/json.hpp
+external/stb_image_write.h
+
