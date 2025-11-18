@@ -235,6 +235,74 @@ double PM6::Calculation(bool gradient)
             CurcumaLogger::param("HOMO-LUMO_gap", fmt::format("{:.4f} eV", gap));
         }
 
+        // Level 3+: Complete algorithm details
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("=== PM6 Algorithm Details (Level 3) ===");
+
+            // System information
+            CurcumaLogger::param("basis_functions", m_nbasis);
+            CurcumaLogger::param("electrons", m_num_electrons);
+            CurcumaLogger::param("occupied_orbitals", m_num_electrons / 2);
+
+            // Orbital energies (all)
+            CurcumaLogger::info("All orbital energies:");
+            for (int i = 0; i < std::min(m_nbasis, 10); ++i) {
+                std::string occ_str = (i < m_num_electrons / 2) ? "occ" : "virt";
+                CurcumaLogger::param(fmt::format("  MO[{}] ({})", i, occ_str),
+                                    fmt::format("{:.4f} eV", m_energies(i) * eV2Eh));
+            }
+            if (m_nbasis > 10) {
+                CurcumaLogger::info(fmt::format("  ... ({} more orbitals)", m_nbasis - 10));
+            }
+
+            // Hamiltonian matrix elements (sample)
+            CurcumaLogger::info("Sample Hamiltonian matrix elements:");
+            for (int i = 0; i < std::min(3, m_nbasis); ++i) {
+                for (int j = 0; j < std::min(3, m_nbasis); ++j) {
+                    CurcumaLogger::param(fmt::format("  H[{},{}]", i, j),
+                                        fmt::format("{:.6f} Eh", m_hamiltonian(i, j)));
+                }
+            }
+
+            // Density matrix trace
+            double trace_P = m_density.trace();
+            CurcumaLogger::param("density_matrix_trace", fmt::format("{:.6f}", trace_P));
+
+            // Electronic energy breakdown
+            double E_core_term = 0.0;
+            double E_fock_term = 0.0;
+            for (int mu = 0; mu < m_nbasis; ++mu) {
+                for (int nu = 0; nu < m_nbasis; ++nu) {
+                    E_core_term += m_density(mu, nu) * m_hamiltonian(mu, nu);
+                    E_fock_term += m_density(mu, nu) * m_fock(mu, nu);
+                }
+            }
+            CurcumaLogger::param("Tr(P*H)", fmt::format("{:.6f} Eh", E_core_term));
+            CurcumaLogger::param("Tr(P*F)", fmt::format("{:.6f} Eh", E_fock_term));
+            CurcumaLogger::param("Tr(P*(H+F))/2", fmt::format("{:.6f} Eh", (E_core_term + E_fock_term) / 2.0));
+
+            // Core repulsion details
+            CurcumaLogger::info("Core repulsion contributions:");
+            double E_rep_check = 0.0;
+            for (int A = 0; A < m_atomcount; ++A) {
+                for (int B = A + 1; B < m_atomcount; ++B) {
+                    int Z_A = m_atoms[A];
+                    int Z_B = m_atoms[B];
+                    double dx = m_geometry(A, 0) - m_geometry(B, 0);
+                    double dy = m_geometry(A, 1) - m_geometry(B, 1);
+                    double dz = m_geometry(A, 2) - m_geometry(B, 2);
+                    double R_AB = std::sqrt(dx*dx + dy*dy + dz*dz);
+                    double gamma_ss = getGammaAB(Z_A, Z_B, R_AB);
+
+                    CurcumaLogger::param(fmt::format("  V[{}-{}]", A, B),
+                                        fmt::format("R={:.4f} Å, γ_ss={:.4f} Eh",
+                                                   R_AB, gamma_ss));
+                }
+            }
+
+            CurcumaLogger::info("=== End PM6 Details ===");
+        }
+
         // Gradient calculation (if requested)
         if (gradient) {
             m_gradient = calculateGradient();
@@ -421,8 +489,17 @@ bool PM6::runSCF()
         double delta_P = (density_new - m_density).norm();
 
         if (CurcumaLogger::get_verbosity() >= 3) {
+            // Calculate current electronic energy for monitoring
+            double E_elec_iter = 0.0;
+            for (int mu = 0; mu < m_nbasis; ++mu) {
+                for (int nu = 0; nu < m_nbasis; ++nu) {
+                    E_elec_iter += density_new(mu, nu) * (m_hamiltonian(mu, nu) + m_fock(mu, nu));
+                }
+            }
+            E_elec_iter /= 2.0;
+
             CurcumaLogger::param(fmt::format("SCF_iter_{}", iter+1),
-                               fmt::format("ΔP = {:.6e}", delta_P));
+                               fmt::format("ΔP = {:.6e}, E_elec = {:.6f} Eh", delta_P, E_elec_iter));
         }
 
         if (delta_P < m_scf_threshold) {
