@@ -367,6 +367,165 @@ Grid acceleration provides **O(1)** bias evaluation instead of O(N_gaussians) fo
 
 ---
 
+## FES Reconstruction (November 2025 - Claude Generated)
+
+The **Free Energy Surface (FES)** is automatically reconstructed at the end of the simulation from the deposited Gaussians.
+
+### Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `cv_mtd_write_fes` | Bool | true | Write FES at end of simulation |
+| `cv_mtd_fes_file` | String | "fes.dat" | FES output filename |
+| `cv_mtd_fes_bins` | Int | 200 | Grid resolution (bins per CV) |
+
+### FES File Format
+
+**1D FES** (`fes.dat`):
+```
+# 1D Free Energy Surface
+# CV: Distance (atoms 0-5)
+# Well-tempered: yes
+# Delta_T: 3000.0 K
+# Gaussians: 1250
+# Columns: cv1  F(cv1) [kJ/mol]
+1.20  15.3
+1.21  14.8
+1.22  14.2
+...
+```
+
+**2D FES** (gnuplot `pm3d` format):
+```
+# 2D Free Energy Surface
+# CV1: Dihedral φ (atoms 4-6-8-14)
+# CV2: Dihedral ψ (atoms 6-8-14-16)
+# Well-tempered: yes
+# Columns: cv1  cv2  F(cv1,cv2) [kJ/mol]
+-180.0  -180.0  12.5
+-180.0  -175.0  11.8
+...
+-175.0  -180.0  13.2
+-175.0  -175.0  12.1
+...
+
+```
+(Blank lines separate rows for `pm3d` plotting)
+
+### Plotting FES
+
+**1D FES with gnuplot**:
+```bash
+gnuplot << EOF
+set xlabel "Distance [Angstrom]"
+set ylabel "Free Energy [kJ/mol]"
+plot "fes.dat" with lines lw 2 title "FES"
+pause -1
+EOF
+```
+
+**2D FES with gnuplot (heatmap)**:
+```bash
+gnuplot << EOF
+set xlabel "φ [degrees]"
+set ylabel "ψ [degrees]"
+set cblabel "Free Energy [kJ/mol]"
+set pm3d map
+set palette defined (0 "blue", 10 "green", 20 "yellow", 30 "red")
+splot "fes.dat" with pm3d
+pause -1
+EOF
+```
+
+**Python visualization (1D)**:
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Load FES
+data = np.loadtxt("fes.dat")
+cv1 = data[:, 0]
+fes = data[:, 1]
+
+# Plot
+plt.plot(cv1, fes, linewidth=2)
+plt.xlabel("CV [units]")
+plt.ylabel("Free Energy [kJ/mol]")
+plt.grid(True)
+plt.savefig("fes_1d.png", dpi=300)
+plt.show()
+```
+
+**Python visualization (2D)**:
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Load FES (skip header lines starting with #)
+data = np.loadtxt("fes.dat")
+cv1 = data[:, 0]
+cv2 = data[:, 1]
+fes = data[:, 2]
+
+# Reshape to 2D grid
+n_bins = int(np.sqrt(len(cv1)))
+cv1_grid = cv1.reshape(n_bins, n_bins)
+cv2_grid = cv2.reshape(n_bins, n_bins)
+fes_grid = fes.reshape(n_bins, n_bins)
+
+# Contour plot
+plt.contourf(cv1_grid, cv2_grid, fes_grid, levels=20, cmap='viridis')
+plt.colorbar(label="Free Energy [kJ/mol]")
+plt.xlabel("CV1")
+plt.ylabel("CV2")
+plt.savefig("fes_2d.png", dpi=300)
+plt.show()
+```
+
+### Well-Tempered Transformation
+
+For well-tempered metadynamics, the FES is related to the bias potential by:
+
+```
+F(s) = -(T + ΔT)/ΔT × V(s, t→∞)
+```
+
+where:
+- `T` is simulation temperature (K)
+- `ΔT` is bias temperature (K) = `T × (bias_factor - 1)`
+- `V(s, t→∞)` is the converged bias potential
+
+**Note**: Current implementation uses simplified transformation `F(s) ≈ -V(s)` for visualization. For quantitative free energies, apply proper scaling factor.
+
+### Example: Complete 2D FES Workflow
+
+```bash
+# Run 2D metadynamics (alanine dipeptide)
+./curcuma -md ala_dipeptide.xyz \
+  -method gfn2 \
+  -temperature 300 \
+  -max_time 100000 \
+  -cv_mtd true \
+  -cv1_type dihedral -cv1_atoms "4,6,8,14" -cv1_sigma 10.0 \
+  -cv2_type dihedral -cv2_atoms "6,8,14,16" -cv2_sigma 10.0 \
+  -cv_mtd_pace 500 \
+  -cv_mtd_height 1.0 \
+  -cv_mtd_fes_bins 180  # 180×180 grid for 2° resolution
+
+# Plot with gnuplot
+gnuplot << EOF
+set pm3d map
+set palette defined (0 "blue", 5 "cyan", 10 "green", 20 "yellow", 40 "red")
+set xlabel "φ [degrees]"
+set ylabel "ψ [degrees]"
+set cblabel "F [kJ/mol]"
+set cbrange [0:40]
+splot "fes.dat"
+EOF
+```
+
+---
+
 ## Tips and Best Practices
 
 ### 1. Start with 1D

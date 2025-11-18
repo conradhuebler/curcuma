@@ -1912,6 +1912,31 @@ void SimpleMD::start()
             }
         }
     }
+
+    /* Write Free Energy Surface (FES) for CV-MTD - Claude Generated (November 2025) */
+    if (m_cv_mtd_enabled) {
+        bool write_fes = m_config.get<bool>("cv_mtd_write_fes");
+        if (write_fes && m_cv_bias_engine) {
+            std::string fes_file = m_config.get<std::string>("cv_mtd_fes_file");
+            int fes_bins = m_config.get<int>("cv_mtd_fes_bins");
+            int verbosity = m_config.get<int>("verbosity", 0);
+
+            if (verbosity >= 1) {
+                CurcumaLogger::info("Writing Free Energy Surface to " + fes_file);
+                CurcumaLogger::info("FES resolution: " + std::to_string(fes_bins) + " bins per CV");
+            }
+
+            try {
+                m_cv_bias_engine->reconstructFES(fes_file, fes_bins);
+                if (verbosity >= 1) {
+                    CurcumaLogger::success("FES written successfully: " + fes_file);
+                }
+            } catch (const std::exception& e) {
+                CurcumaLogger::error("Failed to write FES: " + std::string(e.what()));
+            }
+        }
+    }
+
     std::ofstream restart_file("curcuma_final.json");
     nlohmann::json restart;
     restart[MethodName()[0]] = WriteRestartInformation();

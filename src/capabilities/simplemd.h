@@ -486,6 +486,12 @@ private:
     PARAM(cv_mtd_grid_threshold, Int, 500, "Gaussian count to trigger grid acceleration (typical: 100-500).", "CV-MTD Grid", {"cv_grid_thresh"})
     PARAM(cv_mtd_grid_bins, Int, 100, "Grid bins per CV dimension. Memory: 1D=~1KB, 2D=~80KB, 3D=~8MB for 100 bins.", "CV-MTD Grid", {"cv_grid_bins"})
 
+    // FES Reconstruction (November 2025 - Claude Generated)
+    // Reconstruct Free Energy Surface from deposited Gaussians at end of simulation
+    PARAM(cv_mtd_write_fes, Bool, true, "Write Free Energy Surface (FES) at end of simulation.", "CV-MTD FES", {"cv_write_fes"})
+    PARAM(cv_mtd_fes_file, String, "fes.dat", "FES output filename (gnuplot format).", "CV-MTD FES", {"cv_fes_file"})
+    PARAM(cv_mtd_fes_bins, Int, 200, "FES grid resolution (bins per CV dimension).", "CV-MTD FES", {"cv_fes_bins"})
+
     // CV1 Definition
     PARAM(cv1_type, String, "none", "First CV type: distance|angle|dihedral|gyration|coordination|none.", "CV-MTD", {})
     PARAM(cv1_atoms, String, "", "Atom indices for CV1 (comma-separated, e.g., '0,5' for distance).", "CV-MTD", {})
