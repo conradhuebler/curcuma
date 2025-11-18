@@ -126,7 +126,9 @@
 #pragma once
 
 #include "collective_variable.h"
+#include "src/core/elements.h"  // For Elements::AtomicMass
 #include <cmath>
+#include <numeric>  // For std::iota
 
 namespace CV {
 
@@ -187,7 +189,7 @@ public:
 
         for (int idx : m_atoms) {
             Eigen::Vector3d r_i = mol.getGeometry().row(idx);
-            double mass_i = m_mass_weighted ? mol.Mass(idx) : 1.0;
+            double mass_i = m_mass_weighted ? Elements::AtomicMass[mol.Atom(idx).first] : 1.0;
 
             Eigen::Vector3d dr = r_i - center;
             rg_squared += mass_i * dr.squaredNorm();
@@ -230,13 +232,13 @@ public:
         // Compute total mass
         double total_mass = 0.0;
         for (int idx : m_atoms) {
-            total_mass += m_mass_weighted ? mol.Mass(idx) : 1.0;
+            total_mass += m_mass_weighted ? Elements::AtomicMass[mol.Atom(idx).first] : 1.0;
         }
 
         // Compute gradient for each atom
         for (int idx : m_atoms) {
             Eigen::Vector3d r_i = mol.getGeometry().row(idx);
-            double mass_i = m_mass_weighted ? mol.Mass(idx) : 1.0;
+            double mass_i = m_mass_weighted ? Elements::AtomicMass[mol.Atom(idx).first] : 1.0;
 
             // ∂R_g/∂r_i = (m_i / (M * R_g)) * (r_i - r_COM) * (1 - m_i/M)
             double prefactor = (mass_i / (total_mass * rg)) * (1.0 - mass_i / total_mass);
@@ -287,7 +289,7 @@ private:
 
         for (int idx : m_atoms) {
             Eigen::Vector3d r_i = mol.getGeometry().row(idx);
-            double mass_i = m_mass_weighted ? mol.Mass(idx) : 1.0;
+            double mass_i = m_mass_weighted ? Elements::AtomicMass[mol.Atom(idx).first] : 1.0;
 
             center += mass_i * r_i;
             total_mass += mass_i;

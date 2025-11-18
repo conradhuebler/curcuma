@@ -453,9 +453,11 @@ private:
         Eigen::Vector3d r_ij = r_j - r_i;
 
         // Apply PBC if requested
-        if (m_use_pbc && mol.hasPeriodicBoundary()) {
-            r_ij = applyMinimumImage(r_ij, mol.getBoxSize());
-        }
+        // TODO: Enable when Molecule class supports PBC (hasPeriodicBoundary(), getBoxSize())
+        // if (m_use_pbc && mol.hasPeriodicBoundary()) {
+        //     r_ij = applyMinimumImage(r_ij, mol.getBoxSize());
+        // }
+        (void)m_use_pbc;  // Suppress unused variable warning
 
         return r_ij;
     }

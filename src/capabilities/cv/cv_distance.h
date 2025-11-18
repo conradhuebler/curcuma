@@ -144,9 +144,11 @@ public:
         Eigen::Vector3d r_ij = r_j - r_i;
 
         // Apply PBC if requested
-        if (m_use_pbc && mol.hasPeriodicBoundary()) {
-            r_ij = applyMinimumImage(r_ij, mol.getBoxSize());
-        }
+        // TODO: Enable when Molecule class supports PBC (hasPeriodicBoundary(), getBoxSize())
+        // if (m_use_pbc && mol.hasPeriodicBoundary()) {
+        //     r_ij = applyMinimumImage(r_ij, mol.getBoxSize());
+        // }
+        (void)m_use_pbc;  // Suppress unused variable warning
 
         // Compute distance
         return r_ij.norm();
@@ -185,9 +187,11 @@ public:
         Eigen::Vector3d r_ij = r_j - r_i;
 
         // Apply PBC if requested
-        if (m_use_pbc && mol.hasPeriodicBoundary()) {
-            r_ij = applyMinimumImage(r_ij, mol.getBoxSize());
-        }
+        // TODO: Enable when Molecule class supports PBC (hasPeriodicBoundary(), getBoxSize())
+        // if (m_use_pbc && mol.hasPeriodicBoundary()) {
+        //     r_ij = applyMinimumImage(r_ij, mol.getBoxSize());
+        // }
+        (void)m_use_pbc;  // Suppress unused variable warning
 
         // Compute distance
         double d = r_ij.norm();
@@ -204,7 +208,7 @@ public:
         grad.row(i) = -grad_unit;
 
         // ∂d/∂r_j = +grad_unit
-        grad.row(j) = +grad_unit;
+        grad.row(j) = grad_unit;
 
         return grad;
     }
