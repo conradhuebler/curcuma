@@ -103,9 +103,9 @@
 - ⚠️ **Native GFN-FF** - Work in progress (`cgfnff`)
 
 #### External Interfaces (Production Quality, Requires Compilation)
-- **TBLite Interface** - Tight-binding DFT methods (GFN1, GFN2, iPEA1)
+- **TBLite Interface** - Tight-binding DFT methods (GFN1, GFN2, iPEA1) + **Solvation** (CPCM, GB, ALPB)
 - **XTB Interface** - Extended tight-binding methods (GFN-FF, GFN1, GFN2)
-- **Ulysses Interface** - Semi-empirical methods (PM3, PM6, AM1, MNDO, RM1, etc.)
+- **Ulysses Interface** - Semi-empirical methods (PM3, PM6, AM1, MNDO, RM1, etc.) + **Solvation** (GBSA)
 
 ### 2. Force Field Methods
 - **Universal Force Field (UFF)** - General-purpose molecular mechanics
@@ -113,34 +113,41 @@
 - **QMDFF** - Quantum Mechanically Derived Force Fields
 - **Universal Parameter Caching** - Automatic save/load for all FF methods
 
-### 3. Dispersion and Non-Covalent Corrections
+### 3. Solvation Models (Implicit Solvent)
+- ✅ **TBLite Solvation** - CPCM, GB (Generalized Born), ALPB for GFN methods
+- ✅ **Ulysses Solvation** - GBSA (Generalized Born + SA) for GFN/MNDO methods
+- **25+ Solvents** - water, methanol, DMSO, acetone, benzene, etc.
+- **Auto-Activation** - Specify `-solvent water` to enable
+- **Documentation** - See [docs/SOLVATION.md](docs/SOLVATION.md) for details
+
+### 4. Dispersion and Non-Covalent Corrections
 - **DFT-D3** - Grimme's D3 dispersion correction
-- **DFT-D4** - Next-generation D4 dispersion correction  
+- **DFT-D4** - Next-generation D4 dispersion correction
 - **H4 Correction** - Hydrogen bonding and halogen bonding corrections
 
-### 4. Geometry Optimization
+### 5. Geometry Optimization
 - **LBFGS Optimizer** - Limited-memory Broyden-Fletcher-Goldfarb-Shanno
 - **Multiple Convergence Criteria** - Energy, gradient, RMSD-based
 - **Constrained Optimization** - Distance, angle, and dihedral constraints
 
-### 5. Conformational Analysis
+### 6. Conformational Analysis
 - **ConfSearch** - Systematic conformational searching
 - **ConfScan** - Conformational scanning along reaction coordinates
 - **RMSD Analysis** - Structure comparison and alignment
 - **Energy-based Filtering** - Automatic conformer ranking
 
-### 6. Molecular Dynamics
+### 7. Molecular Dynamics
 - **SimpleMD** - Basic molecular dynamics simulation
 - **NEB Docking** - Nudged elastic band for transition states
 - **Trajectory Analysis** - Analysis of MD trajectories
 
-### 7. Analysis Tools
+### 8. Analysis Tools
 - **RMSD Calculations** - Root-mean-square deviation analysis
 - **Persistent Diagram** - Topological data analysis
 - **Hessian Analysis** - Second derivative calculations
 - **Orbital Analysis** - Molecular orbital visualization and analysis
 
-### 8. Core Computational Libraries
+### 9. Core Computational Libraries
 - ✅ **MNDO Integrals** - Dewar-Thiel multipole expansion for semi-empirical 2e⁻ integrals, see [docs/MNDO_INTEGRALS.md](docs/MNDO_INTEGRALS.md)
 
 ## Architecture
