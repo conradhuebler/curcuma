@@ -883,10 +883,22 @@ bool SimpleMD::Initialise()
             throw std::runtime_error("CV-MTD requires at least one CV (cv1_type must be set)");
         }
 
+        // Configure grid acceleration (November 2025 - Claude Generated)
+        bool grid_auto = m_config.get<bool>("cv_mtd_grid_auto");
+        int grid_threshold = m_config.get<int>("cv_mtd_grid_threshold");
+        int grid_bins = m_config.get<int>("cv_mtd_grid_bins");
+        m_cv_bias_engine->enableGridAcceleration(grid_bins, grid_auto, grid_threshold);
+
         if (verbosity >= 1) {
             CurcumaLogger::success("Multi-CV Metadynamics initialized with "
                                   + std::to_string(m_cv_bias_engine->getNumCVs()) + " CVs");
             CurcumaLogger::info("Gaussian deposition every " + std::to_string(m_cv_mtd_pace) + " steps");
+            if (grid_auto) {
+                CurcumaLogger::info("Grid acceleration: auto-enable at " + std::to_string(grid_threshold)
+                                   + " Gaussians (" + std::to_string(grid_bins) + " bins/dim)");
+            } else {
+                CurcumaLogger::info("Grid acceleration: enabled (" + std::to_string(grid_bins) + " bins/dim)");
+            }
         }
 
         m_cv_mtd_step_counter = 0;

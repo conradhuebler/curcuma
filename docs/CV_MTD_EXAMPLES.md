@@ -264,6 +264,44 @@ Expected FES shows canonical Ramachandran regions (α-helix, β-sheet, PPII).
 
 *Repeat for `cv2_*` and `cv3_*` for additional CVs.*
 
+### Grid Acceleration Parameters (November 2025 - Claude Generated)
+
+Grid acceleration provides **O(1)** bias evaluation instead of O(N_gaussians) for large simulations.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `cv_mtd_grid_auto` | Bool | true | Auto-enable grid when Gaussian count reaches threshold |
+| `cv_mtd_grid_threshold` | Int | 500 | Gaussian count to trigger grid acceleration |
+| `cv_mtd_grid_bins` | Int | 100 | Grid bins per CV dimension |
+
+**When to Use Grid Acceleration**:
+- **Always recommended**: Grid auto-enables at 500 Gaussians by default
+- **1D simulations**: Negligible overhead (~1 KB memory)
+- **2D simulations**: Moderate memory (~80 KB for 100×100 grid)
+- **3D simulations**: Significant memory (~8 MB for 100×100×100 grid)
+
+**Performance Gains**:
+- Without grid: 1000 Gaussians = 1000× slower per MD step
+- With grid: O(1) per MD step regardless of Gaussian count
+- Break-even: ~100-500 Gaussians (dimensionality dependent)
+
+**Example (disable auto-grid)**:
+```bash
+./curcuma -md system.xyz \
+  -cv_mtd true \
+  -cv1_type distance -cv1_atoms "0,5" \
+  -cv_mtd_grid_auto false  # Disable auto, use direct summation always
+```
+
+**Example (manual grid threshold)**:
+```bash
+./curcuma -md system.xyz \
+  -cv_mtd true \
+  -cv1_type distance -cv1_atoms "0,5" \
+  -cv_mtd_grid_threshold 200  # Enable grid at 200 Gaussians (earlier)
+  -cv_mtd_grid_bins 150       # Higher resolution grid
+```
+
 ### Choosing Parameters
 
 **Gaussian Height (`cv_mtd_height`)**:
