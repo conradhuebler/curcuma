@@ -628,21 +628,34 @@ double PM3::calculateTwoElectronIntegral(int mu, int nu, int lambda, int sigma) 
 
 double PM3::getGammaAB(int Z_A, int Z_B, double R_AB) const
 {
-    // Two-center Coulomb integral (simplified Mataga-Nishimoto formula)
-    // Real PM3 uses multipole expansion
+    // CRITICAL FIX: Use full MNDO multipole expansion for (ss|ss) integral
+    // NOT simplified Mataga-Nishimoto approximation!
 
     const PM3Params& params_A = m_pm3_params.at(Z_A);
     const PM3Params& params_B = m_pm3_params.at(Z_B);
 
-    double gamma_AA = params_A.U_ss / eV2Eh;
-    double gamma_BB = params_B.U_ss / eV2Eh;
+    double R_AB_bohr = R_AB / au;  // Convert Å → Bohr
 
-    double R_AB_bohr = R_AB / au;
+    // Prepare D-parameter vector for MNDO multipole expansion
+    std::vector<double> D_params = {
+        params_A.D1 / au,  // Convert Å → Bohr
+        params_A.D2 / au,
+        params_B.D1 / au,
+        params_B.D2 / au
+    };
 
-    // Mataga-Nishimoto approximation
-    double gamma_AB = 1.0 / std::sqrt(R_AB_bohr*R_AB_bohr + 4.0 / (gamma_AA + gamma_BB));
+    double rho_sum = params_A.rho_s + params_B.rho_s;
 
-    return gamma_AB;
+    // (ss|ss) integral using full MNDO multipole expansion
+    double gamma_ss = curcuma::mndo::mndo_multipole_integral(
+        0, 0,  // s-orbital on A (l=0, m=0)
+        0, 0,  // s-orbital on B (l=0, m=0)
+        R_AB_bohr,
+        rho_sum,
+        D_params
+    );
+
+    return gamma_ss;
 }
 
 // =================================================================================
@@ -685,10 +698,13 @@ double PM3::calculateCoreRepulsionEnergy() const
             double dz = m_geometry(A, 2) - m_geometry(B, 2);
             double R_AB = std::sqrt(dx*dx + dy*dy + dz*dz);
 
-            // Basic Coulomb term
-            double V_coul = double(Z_A * Z_B) / (R_AB / au);
+            // Core repulsion uses (ss|ss) two-electron integral γ_ss, NOT simple 1/R Coulomb
+            // This is fundamental to NDDO-based semi-empirical methods
+            double gamma_ss = getGammaAB(Z_A, Z_B, R_AB);
+            double V_coul = double(Z_A * Z_B) * gamma_ss;
 
-            // Gaussian corrections (simplified - real PM3 has element-pair specific)
+            // Gaussian corrections: V_gauss = Z_A * Z_B * γ_ss * ∑_k a_k * exp(-b_k * (R - c_k)²)
+            // Simplified: use element-averaged parameters (real PM3 uses element-pair specific)
             double V_gauss = 0.0;
             for (size_t k = 0; k < params_A.gauss_a.size() && k < params_B.gauss_a.size(); ++k) {
                 double a_k = (params_A.gauss_a[k] + params_B.gauss_a[k]) / 2.0;
@@ -698,6 +714,7 @@ double PM3::calculateCoreRepulsionEnergy() const
                 V_gauss += a_k * std::exp(-b_k * std::pow(R_AB - c_k, 2.0));
             }
 
+            // Total core repulsion: E_core = Z_A * Z_B * γ_ss * (1 + Gaussian terms)
             E_rep += V_coul + V_gauss;
         }
     }
