@@ -260,6 +260,10 @@ void SimpleMD::LoadControlJson()
     m_rmsd_mtd_ramping = m_config.get<bool>("rmsd_mtd_ramping");  // Claude Generated - XTB-inspired ramping
     m_rmsd_mtd_ramp_factor = m_config.get<double>("rmsd_mtd_ramp_factor");  // Claude Generated - Ramping speed
 
+    // Claude Generated (November 2025): Multi-CV Metadynamics parameters
+    m_cv_mtd_enabled = m_config.get<bool>("cv_mtd");
+    m_cv_mtd_pace = m_config.get<int>("cv_mtd_pace");
+
     // Claude Generated 2025: Output & Restart Parameters
     m_writerestart = m_config.get<int>("write_restart_frequency");
     m_respa = m_config.get<int>("respa", 1);  // Not in PARAM block - legacy
@@ -781,6 +785,111 @@ bool SimpleMD::Initialise()
                 m_bias_structure_count = index;
             }
         }
+    }
+
+    /* Initialising Multi-CV Metadynamics - Claude Generated (November 2025) */
+    if (m_cv_mtd_enabled) {
+        int verbosity = m_config.get<int>("verbosity", 0);
+
+        // Create BiasEngine
+        m_cv_bias_engine = std::make_unique<CV::BiasEngine>();
+
+        // Configure well-tempered parameters
+        bool well_tempered = m_config.get<bool>("cv_mtd_well_tempered");
+        double bias_factor = m_config.get<double>("cv_mtd_bias_factor");
+        double delta_T = m_T0 * (bias_factor - 1.0);  // ΔT = T * (γ - 1)
+        m_cv_bias_engine->setWellTempered(well_tempered, delta_T);
+
+        // Helper lambda to parse atom indices from comma-separated string
+        auto parseAtomIndices = [](const std::string& str) -> std::vector<int> {
+            std::vector<int> indices;
+            if (str.empty()) return indices;
+
+            std::stringstream ss(str);
+            std::string token;
+            while (std::getline(ss, token, ',')) {
+                try {
+                    indices.push_back(std::stoi(token));
+                } catch (...) {
+                    throw std::runtime_error("Invalid atom index: " + token);
+                }
+            }
+            return indices;
+        };
+
+        // Add CV1 if specified
+        std::string cv1_type = m_config.get<std::string>("cv1_type");
+        if (cv1_type != "none") {
+            std::vector<int> cv1_atoms = parseAtomIndices(m_config.get<std::string>("cv1_atoms"));
+            double cv1_sigma = m_config.get<double>("cv1_sigma");
+
+            try {
+                auto cv1 = CV::CVFactory::create(cv1_type, cv1_atoms);
+                cv1->setName("CV1");
+                m_cv_bias_engine->addCV(std::move(cv1), cv1_sigma);
+
+                if (verbosity >= 1) {
+                    CurcumaLogger::success("CV1 initialized: " + cv1_type + " (sigma=" + std::to_string(cv1_sigma) + ")");
+                }
+            } catch (const std::exception& e) {
+                CurcumaLogger::error("Failed to create CV1: " + std::string(e.what()));
+                throw;
+            }
+        }
+
+        // Add CV2 if specified
+        std::string cv2_type = m_config.get<std::string>("cv2_type");
+        if (cv2_type != "none") {
+            std::vector<int> cv2_atoms = parseAtomIndices(m_config.get<std::string>("cv2_atoms"));
+            double cv2_sigma = m_config.get<double>("cv2_sigma");
+
+            try {
+                auto cv2 = CV::CVFactory::create(cv2_type, cv2_atoms);
+                cv2->setName("CV2");
+                m_cv_bias_engine->addCV(std::move(cv2), cv2_sigma);
+
+                if (verbosity >= 1) {
+                    CurcumaLogger::success("CV2 initialized: " + cv2_type + " (sigma=" + std::to_string(cv2_sigma) + ")");
+                }
+            } catch (const std::exception& e) {
+                CurcumaLogger::error("Failed to create CV2: " + std::string(e.what()));
+                throw;
+            }
+        }
+
+        // Add CV3 if specified
+        std::string cv3_type = m_config.get<std::string>("cv3_type");
+        if (cv3_type != "none") {
+            std::vector<int> cv3_atoms = parseAtomIndices(m_config.get<std::string>("cv3_atoms"));
+            double cv3_sigma = m_config.get<double>("cv3_sigma");
+
+            try {
+                auto cv3 = CV::CVFactory::create(cv3_type, cv3_atoms);
+                cv3->setName("CV3");
+                m_cv_bias_engine->addCV(std::move(cv3), cv3_sigma);
+
+                if (verbosity >= 1) {
+                    CurcumaLogger::success("CV3 initialized: " + cv3_type + " (sigma=" + std::to_string(cv3_sigma) + ")");
+                }
+            } catch (const std::exception& e) {
+                CurcumaLogger::error("Failed to create CV3: " + std::string(e.what()));
+                throw;
+            }
+        }
+
+        // Verify at least one CV was added
+        if (m_cv_bias_engine->getNumCVs() == 0) {
+            CurcumaLogger::error("CV-MTD enabled but no collective variables defined!");
+            throw std::runtime_error("CV-MTD requires at least one CV (cv1_type must be set)");
+        }
+
+        if (verbosity >= 1) {
+            CurcumaLogger::success("Multi-CV Metadynamics initialized with "
+                                  + std::to_string(m_cv_bias_engine->getNumCVs()) + " CVs");
+            CurcumaLogger::info("Gaussian deposition every " + std::to_string(m_cv_mtd_pace) + " steps");
+        }
+
+        m_cv_mtd_step_counter = 0;
     }
 
     m_initialised = true;
@@ -1870,6 +1979,11 @@ void SimpleMD::Verlet()
             ApplyRMSDMTD();
         }
     }
+
+    // Claude Generated (November 2025): Apply multi-CV metadynamics bias
+    if (m_cv_mtd_enabled) {
+        ApplyCVBias();
+    }
 #ifdef USE_Plumed
     if (m_mtd) {
         plumed_cmd(m_plumedmain, "setStep", &m_step);
@@ -2283,6 +2397,11 @@ void SimpleMD::Rattle()
         if (m_step % m_mtd_steps == 0) {
             ApplyRMSDMTD();
         }
+    }
+
+    // Claude Generated (November 2025): Apply multi-CV metadynamics bias
+    if (m_cv_mtd_enabled) {
+        ApplyCVBias();
     }
 #ifdef USE_Plumed
     if (m_mtd) {
@@ -3211,4 +3330,76 @@ void SimpleMD::NoseHover()
         m_xi[j] += 0.5 * m_dT * (m_Q[j - 1] * m_xi[j - 1] * m_xi[j - 1] - m_T0 * kb_Eh) / m_Q[j];
     }
     m_xi[0] += 0.5 * m_dT * (2.0 * kinetic_energy - m_dof * m_T0 * kb_Eh) / m_Q[0];
+}
+/**
+ * @brief Apply multi-CV metadynamics bias forces
+ *
+ * Claude Generated (November 2025)
+ *
+ * This method applies bias forces from the BiasEngine to accelerate sampling
+ * along user-defined collective variables (CVs). Based on well-tempered
+ * metadynamics algorithm (Barducci et al. 2008).
+ *
+ * ALGORITHM:
+ * ----------
+ * 1. Update molecule geometry from current MD state
+ * 2. Compute bias potential V_bias and forces F_bias = -∇V_bias
+ * 3. Add bias forces to gradient (F_total = F_MD + F_bias)
+ * 4. Every cv_mtd_pace steps: deposit new Gaussian
+ * 5. Write COLVAR/HILLS output for post-analysis
+ *
+ * REFERENCES:
+ * ----------
+ * [1] Barducci, A. et al. (2008). Well-tempered metadynamics: A smoothly
+ *     converging and tunable free-energy method. Phys. Rev. Lett. 100, 020603.
+ *     DOI: 10.1103/PhysRevLett.100.020603
+ *
+ * [2] Laio, A. & Parrinello, M. (2002). Escaping free-energy minima.
+ *     Proc. Natl. Acad. Sci. USA 99, 12562-12566.
+ *     DOI: 10.1073/pnas.202427399
+ */
+void SimpleMD::ApplyCVBias()
+{
+    if (!m_cv_bias_engine) {
+        throw std::runtime_error("ApplyCVBias called but BiasEngine not initialized");
+    }
+
+    // Update molecule with current geometry
+    m_molecule.setGeometry(m_eigen_geometry);
+
+    // Compute bias potential and forces
+    // Returns: (bias_energy, bias_gradient)
+    auto [bias_energy, bias_gradient] = m_cv_bias_engine->computeBias(m_molecule);
+
+    // Add bias forces to gradient (F = -∇V, so gradient is negative of force)
+    // BiasEngine returns forces, SimpleMD uses gradients, so we subtract
+    m_eigen_gradient -= bias_gradient;
+
+    // Track total bias energy
+    m_bias_energy += bias_energy;
+
+    // Deposit new Gaussian every cv_mtd_pace steps
+    m_cv_mtd_step_counter++;
+    if (m_cv_mtd_step_counter >= m_cv_mtd_pace) {
+        double height = m_config.get<double>("cv_mtd_height");
+        m_cv_bias_engine->depositGaussian(m_molecule, height, m_currentStep * m_dT);
+
+        int verbosity = m_config.get<int>("verbosity", 0);
+        if (verbosity >= 2) {
+            CurcumaLogger::info("Deposited Gaussian #" + std::to_string(m_cv_bias_engine->getNumGaussians())
+                              + " at step " + std::to_string(static_cast<int>(m_currentStep)));
+        }
+
+        m_cv_mtd_step_counter = 0;
+    }
+
+    // Write COLVAR/HILLS output (every stride steps)
+    int write_stride = m_config.get<int>("cv_mtd_write_stride");
+    if (static_cast<int>(m_currentStep) % write_stride == 0) {
+        // Write COLVAR (CV values and bias energy at each timestep)
+        m_cv_bias_engine->writeCOLVAR("COLVAR", m_currentStep * m_dT, m_molecule, true);
+
+        // Write HILLS (deposited Gaussians for restarting/post-processing)
+        m_cv_bias_engine->writeHILLS("HILLS", true);
+    }
 }

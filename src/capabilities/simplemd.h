@@ -43,6 +43,10 @@
 #include "src/core/parameter_registry.h"  // Claude Generated - For ParameterRegistry in getSimpleMDJson()
 #include "src/core/config_manager.h"    // Claude Generated - Modern parameter access layer
 
+// Claude Generated (November 2025): Multi-CV Metadynamics Framework
+#include "src/capabilities/cv/bias_engine.h"     // BiasEngine for multi-CV metadynamics
+#include "src/capabilities/cv/cv_factory.h"       // CVFactory for creating CVs from config
+
 struct BiasStructure {
     Geometry geometry;
     double time = 0;
@@ -222,6 +226,7 @@ private:
     void Verlet();
     void Rattle();
     void ApplyRMSDMTD();
+    void ApplyCVBias();  // Claude Generated (November 2025): Apply multi-CV metadynamics bias
 
     void Rattle_Verlet_First(double* coord, double* grad);
     void Rattle_Constrain_First(double* coord, double* grad);
@@ -297,6 +302,12 @@ private:
     std::vector<Geometry> m_bias_structures;
     std::vector<BiasStructure> m_biased_structures;
     std::vector<BiasThread*> m_bias_threads;
+
+    // Claude Generated (November 2025): Multi-CV Metadynamics
+    std::unique_ptr<CV::BiasEngine> m_cv_bias_engine;  // BiasEngine for multi-CV metadynamics
+    bool m_cv_mtd_enabled = false;  // Flag for CV-MTD mode
+    int m_cv_mtd_pace = 500;        // Steps between Gaussian depositions
+    int m_cv_mtd_step_counter = 0;  // Counter for CV-MTD pace
     json m_bias_json;
     CxxThreadPool* m_bias_pool;
     int m_unix_started = 0, m_prev_index = 0, m_max_rescue = 10, m_current_rescue = 0, m_currentTime = 0, m_max_top_diff = 15, m_step = 0;
@@ -458,6 +469,37 @@ private:
     PARAM(rmsd_mtd_dt, Double, 1000000.0, "RMSD-MTD bias deposition time.", "RMSD-MTD", {"rmsd_DT"})
     PARAM(rmsd_mtd_ramping, Bool, true, "Enable ramping function for smooth bias buildup (XTB-inspired).", "RMSD-MTD", {})  // Claude Generated
     PARAM(rmsd_mtd_ramp_factor, Double, 0.1, "Ramping speed parameter (sigmoid steepness, higher = faster).", "RMSD-MTD", {})  // Claude Generated
+
+    // --- Collective Variable Metadynamics (CV-MTD) --- Claude Generated (November 2025)
+    // Multi-dimensional metadynamics using arbitrary collective variables (distance, angle, dihedral, etc.)
+    // Based on PLUMED architecture - see docs/MULTI_CV_METADYNAMICS.md for theory and examples
+    PARAM(cv_mtd, Bool, false, "Enable multi-CV metadynamics using BiasEngine.", "CV-MTD", {})
+    PARAM(cv_mtd_pace, Int, 500, "Deposit Gaussian every N MD steps.", "CV-MTD", {"cv_pace"})
+    PARAM(cv_mtd_height, Double, 1.0, "Initial Gaussian height in kJ/mol.", "CV-MTD", {"cv_height"})
+    PARAM(cv_mtd_well_tempered, Bool, true, "Enable well-tempered metadynamics (adaptive heights).", "CV-MTD", {"cv_wt"})
+    PARAM(cv_mtd_bias_factor, Double, 10.0, "Well-tempered bias factor (DeltaT/T).", "CV-MTD", {"cv_biasfactor"})
+    PARAM(cv_mtd_write_stride, Int, 1, "Write COLVAR/HILLS every N steps.", "CV-MTD", {"cv_stride"})
+
+    // CV1 Definition
+    PARAM(cv1_type, String, "none", "First CV type: distance|angle|dihedral|gyration|coordination|none.", "CV-MTD", {})
+    PARAM(cv1_atoms, String, "", "Atom indices for CV1 (comma-separated, e.g., '0,5' for distance).", "CV-MTD", {})
+    PARAM(cv1_sigma, Double, 0.1, "Gaussian width for CV1 (units depend on CV type).", "CV-MTD", {})
+    PARAM(cv1_periodic, Bool, false, "Enable periodicity for CV1 (dihedral: -180 to +180 deg).", "CV-MTD", {})
+    PARAM(cv1_period, Double, 360.0, "Period for CV1 if periodic (degrees for dihedrals).", "CV-MTD", {})
+
+    // CV2 Definition (optional)
+    PARAM(cv2_type, String, "none", "Second CV type: distance|angle|dihedral|gyration|coordination|none.", "CV-MTD", {})
+    PARAM(cv2_atoms, String, "", "Atom indices for CV2 (comma-separated).", "CV-MTD", {})
+    PARAM(cv2_sigma, Double, 0.1, "Gaussian width for CV2.", "CV-MTD", {})
+    PARAM(cv2_periodic, Bool, false, "Enable periodicity for CV2.", "CV-MTD", {})
+    PARAM(cv2_period, Double, 360.0, "Period for CV2 if periodic.", "CV-MTD", {})
+
+    // CV3 Definition (optional)
+    PARAM(cv3_type, String, "none", "Third CV type: distance|angle|dihedral|gyration|coordination|none.", "CV-MTD", {})
+    PARAM(cv3_atoms, String, "", "Atom indices for CV3 (comma-separated).", "CV-MTD", {})
+    PARAM(cv3_sigma, Double, 0.1, "Gaussian width for CV3.", "CV-MTD", {})
+    PARAM(cv3_periodic, Bool, false, "Enable periodicity for CV3.", "CV-MTD", {})
+    PARAM(cv3_period, Double, 360.0, "Period for CV3 if periodic.", "CV-MTD", {})
 
     // --- Coarse Graining (CG) Parameters --- Claude Generated (Nov 2025)
     PARAM(cg_write_vtf, Bool, true, "Write VTF trajectory for CG systems.", "CG", {"write_vtf"})
