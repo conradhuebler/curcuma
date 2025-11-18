@@ -30,8 +30,11 @@
 
 GFNFF::GFNFF()
     : m_forcefield(nullptr)
+    , m_gbsa(nullptr)
     , m_initialized(false)
+    , m_use_solvation(false)
     , m_energy_total(0.0)
+    , m_energy_solvation(0.0)
 {
     json default_parameters = {
         { "method", "gfnff" },
@@ -39,15 +42,20 @@ GFNFF::GFNFF()
         { "gradient", 1 },
         { "dispersion", true },
         { "hbond", true },
-        { "repulsion_scaling", 1.0 }
+        { "repulsion_scaling", 1.0 },
+        { "solvation", false },
+        { "solvent", "water" }
     };
     m_parameters = default_parameters;
 }
 
 GFNFF::GFNFF(const json& parameters)
     : m_forcefield(nullptr)
+    , m_gbsa(nullptr)
     , m_initialized(false)
+    , m_use_solvation(false)
     , m_energy_total(0.0)
+    , m_energy_solvation(0.0)
 {
     json default_parameters = {
         { "method", "gfnff" },
@@ -55,7 +63,9 @@ GFNFF::GFNFF(const json& parameters)
         { "gradient", 1 },
         { "dispersion", true },
         { "hbond", true },
-        { "repulsion_scaling", 1.0 }
+        { "repulsion_scaling", 1.0 },
+        { "solvation", false },
+        { "solvent", "water" }
     };
 
     m_parameters = MergeJson(default_parameters, parameters);
@@ -66,6 +76,11 @@ GFNFF::~GFNFF()
     if (m_forcefield) {
         delete m_forcefield;
         m_forcefield = nullptr;
+    }
+
+    if (m_gbsa) {
+        delete m_gbsa;
+        m_gbsa = nullptr;
     }
 }
 
@@ -131,6 +146,11 @@ bool GFNFF::UpdateMolecule()
         m_forcefield->UpdateGeometry(m_geometry);
     }
 
+    // Update GBSA geometry if solvation is enabled (Claude Generated 2025)
+    if (m_use_solvation && m_gbsa) {
+        m_gbsa->updateGeometry(m_geometry);
+    }
+
     return true;
 }
 
@@ -178,8 +198,36 @@ double GFNFF::Calculation(bool gradient)
 
     m_energy_total = convertToHartree(energy_kcal);
 
+    // Calculate GBSA solvation energy if enabled (Claude Generated 2025)
+    m_energy_solvation = 0.0;
+    if (m_use_solvation && m_gbsa) {
+        // Update GBSA geometry in case it changed
+        m_gbsa->updateGeometry(m_geometry);
+
+        // Calculate solvation energy using EEQ charges
+        m_energy_solvation = m_gbsa->calculateEnergy(m_charges, gradient);
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::energy_abs(m_energy_solvation, "GBSA Solvation");
+
+            // Get energy components
+            double e_born, e_sasa, e_hb, e_shift;
+            m_gbsa->getEnergyComponents(e_born, e_sasa, e_hb, e_shift);
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::param("E_Born", fmt::format("{:.8f} Eh", e_born));
+                CurcumaLogger::param("E_SASA", fmt::format("{:.8f} Eh", e_sasa));
+                CurcumaLogger::param("E_HB", fmt::format("{:.8f} Eh", e_hb));
+                CurcumaLogger::param("E_shift", fmt::format("{:.8f} Eh", e_shift));
+            }
+        }
+
+        // Add solvation energy to total
+        m_energy_total += m_energy_solvation;
+    }
+
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::energy_abs(m_energy_total, "GFN-FF Energy");
+        CurcumaLogger::energy_abs(m_energy_total, m_use_solvation ? "GFN-FF Total (gas + solv)" : "GFN-FF Energy");
         CurcumaLogger::param("energy_kcal/mol", fmt::format("{:.6f}", energy_kcal));
     }
 
@@ -276,6 +324,32 @@ bool GFNFF::initializeForceField()
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success("ForceField initialization complete");
+    }
+
+    // Initialize GBSA solvation if enabled (Claude Generated 2025)
+    m_use_solvation = m_parameters.value("solvation", false);
+    if (m_use_solvation) {
+        std::string solvent = m_parameters.value("solvent", "water");
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Initializing GBSA solvation model");
+            CurcumaLogger::param("solvent", solvent);
+        }
+
+        if (m_gbsa) {
+            delete m_gbsa;
+        }
+
+        m_gbsa = new GBSA::GBSASolvation(m_atomcount, m_atoms, m_geometry, solvent);
+
+        // Enable hydrogen bonding correction if requested
+        bool use_hbond = m_parameters.value("hbond", true);
+        m_gbsa->setHydrogenBondingCorrection(use_hbond);
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::success("GBSA solvation initialized");
+            CurcumaLogger::param("hbond_correction", use_hbond ? "enabled" : "disabled");
+        }
     }
 
     return true;

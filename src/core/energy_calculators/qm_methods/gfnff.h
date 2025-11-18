@@ -25,6 +25,7 @@
 #include "interface/abstract_interface.h"
 #include "json.hpp"
 #include "src/core/energy_calculators/ff_methods/forcefield.h"
+#include "src/core/energy_calculators/qm_methods/gbsa.h"
 #include "src/core/global.h"
 
 using json = nlohmann::json;
@@ -626,10 +627,13 @@ private:
 private:
     json m_parameters; ///< GFN-FF parameters
     ForceField* m_forcefield; ///< Force field engine using modern structure
+    GBSA::GBSASolvation* m_gbsa; ///< GBSA solvation model (optional)
 
     bool m_initialized; ///< Initialization status
+    bool m_use_solvation; ///< Enable GBSA solvation
 
     double m_energy_total; ///< Total energy in Hartree
+    double m_energy_solvation; ///< Solvation energy in Hartree
     Vector m_charges; ///< Atomic partial charges
     Vector m_bond_orders; ///< Wiberg bond orders
 
