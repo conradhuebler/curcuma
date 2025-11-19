@@ -141,6 +141,9 @@ GFN2::GFN2()
     , m_energy_repulsion(0.0)
     , m_energy_coulomb(0.0)
     , m_energy_dispersion(0.0)
+    , m_energy_solvation(0.0)
+    , m_solvation(nullptr)
+    , m_solvent("none")
     , m_scf_max_iterations(100)
     , m_scf_threshold(1.0e-6)
     , m_scf_damping(0.4)
@@ -168,6 +171,9 @@ GFN2::GFN2(const ArrayParameters& params)
     , m_energy_repulsion(0.0)
     , m_energy_coulomb(0.0)
     , m_energy_dispersion(0.0)
+    , m_energy_solvation(0.0)
+    , m_solvation(nullptr)
+    , m_solvent("none")
     , m_scf_max_iterations(100)
     , m_scf_threshold(1.0e-6)
     , m_scf_damping(0.4)
@@ -305,8 +311,31 @@ double GFN2::Calculation(bool gradient)
         m_energy_coulomb = calculateCoulombEnergy();
         m_energy_dispersion = calculateDispersionEnergy();  // Stub: returns 0
 
+        // Step 5: Calculate solvation energy (if enabled)
+        m_energy_solvation = 0.0;
+        if (m_solvation && m_solvent != "none") {
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info("Step 5: Calculating GBSA solvation energy");
+            }
+
+            // Prepare atomic positions in std::vector<std::array<double, 3>> format
+            std::vector<std::array<double, 3>> positions(m_atomcount);
+            for (int i = 0; i < m_atomcount; ++i) {
+                positions[i] = {m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2)};
+            }
+
+            // Convert charges to std::vector
+            std::vector<double> charges(m_atomcount);
+            for (int i = 0; i < m_atomcount; ++i) {
+                charges[i] = m_charges(i);
+            }
+
+            // Calculate GBSA energy
+            m_energy_solvation = m_solvation->calculateEnergy(m_atoms, positions, charges);
+        }
+
         m_total_energy = m_energy_electronic + m_energy_repulsion +
-                        m_energy_coulomb + m_energy_dispersion;
+                        m_energy_coulomb + m_energy_dispersion + m_energy_solvation;
 
         // Level 1+: Final results
         if (CurcumaLogger::get_verbosity() >= 1) {
@@ -319,6 +348,12 @@ double GFN2::Calculation(bool gradient)
             CurcumaLogger::param("repulsion", fmt::format("{:.6f} Eh", m_energy_repulsion));
             CurcumaLogger::param("coulomb", fmt::format("{:.6f} Eh", m_energy_coulomb));
             CurcumaLogger::param("dispersion", fmt::format("{:.6f} Eh (stub)", m_energy_dispersion));
+            if (m_solvation && m_solvent != "none") {
+                CurcumaLogger::param("solvation", fmt::format("{:.6f} Eh (GBSA native)", m_energy_solvation));
+                CurcumaLogger::param("solvent", m_solvent);
+                CurcumaLogger::param("GB_energy", fmt::format("{:.6f} Eh", m_solvation->getGBEnergy()));
+                CurcumaLogger::param("SA_energy", fmt::format("{:.6f} Eh", m_solvation->getSAEnergy()));
+            }
 
             // Orbital energies
             double homo = getHOMOEnergy();

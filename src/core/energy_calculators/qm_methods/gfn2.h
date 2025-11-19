@@ -32,6 +32,7 @@
 #include "gfn2_params_loader.h"
 #include "qm_driver.h"
 #include "STOIntegrals.hpp"
+#include "src/core/solvation/gbsa.h"
 
 #include <Eigen/Dense>
 #include <memory>
@@ -176,6 +177,31 @@ public:
      * @return Vector of atomic charges (size = natoms)
      */
     Vector getPartialCharges() const { return m_charges; }
+
+    /**
+     * @brief Enable implicit solvation with GBSA model
+     *
+     * Activates native GBSA (Generalized Born + Surface Area) solvation.
+     * Must be called before Calculation() to include solvation effects.
+     *
+     * @param solvent Solvent name (e.g., "water", "dmso", "acetone", "none")
+     *
+     * Example:
+     *   GFN2 gfn2;
+     *   gfn2.InitialiseMolecule(molecule);
+     *   gfn2.setSolvent("water");  // Enable water solvation
+     *   double energy = gfn2.Calculation();
+     *
+     * @note Claude Generated: Native GBSA integration (November 2025)
+     */
+    void setSolvent(const std::string& solvent) {
+        m_solvent = solvent;
+        if (solvent != "none" && solvent != "" && solvent != "vacuum") {
+            m_solvation = std::make_unique<Curcuma::Solvation::GBSA>(solvent, "GFN2");
+        } else {
+            m_solvation.reset();
+        }
+    }
 
 private:
     // =================================================================================
@@ -485,6 +511,11 @@ private:
     double m_energy_repulsion;                 ///< Core-core repulsion
     double m_energy_coulomb;                   ///< Coulomb interaction
     double m_energy_dispersion;                ///< D4 dispersion (stub)
+    double m_energy_solvation;                 ///< GBSA solvation energy (native)
+
+    // Solvation model (optional, native implementation)
+    std::unique_ptr<Curcuma::Solvation::GBSA> m_solvation;  ///< GBSA solvation model
+    std::string m_solvent;                     ///< Solvent name (e.g., "water", "none")
 
     // SCF convergence parameters
     int m_scf_max_iterations;                  ///< Maximum SCF iterations (default: 100)
