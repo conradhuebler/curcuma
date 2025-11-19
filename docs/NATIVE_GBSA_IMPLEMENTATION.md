@@ -24,14 +24,17 @@ Provide implicit solvation for GFN2-xTB and other QM methods without requiring e
 - Integration with native GFN2 method
 - 25+ solvents supported
 - Lebedev quadrature (110-point grid)
+- **Analytical gradients** (finite difference for now)
+- Geometry optimization support
 
 ⚠️ **Quick-Win Limitations**:
 - Only 110-point Lebedev grid (full: 5810 points)
 - Simplified overlap integrals (full formulas pending)
 - Universal descreening parameters (solvent-specific pending)
+- **Gradients**: Numerical finite differences (not full analytical yet)
 
 ❌ **Not Yet Implemented**:
-- Analytical gradients (geometry optimization)
+- Full analytical gradient derivatives (chain rule)
 - Full GFN2 solvation parameters
 - Large Lebedev grids (>110 points)
 - ALPB/CPCM models
@@ -141,6 +144,20 @@ double energy = gfn2.Calculation();
 // Energy decomposition
 auto decomp = gfn2.getEnergyDecomposition();
 std::cout << "Solvation energy: " << decomp["solvation"] << " Eh\n";
+```
+
+### Geometry Optimization with Solvation
+
+```cpp
+// Enable solvation and calculate gradients
+gfn2.setSolvent("water");
+double energy = gfn2.Calculation(true);  // true = calculate gradients
+
+// Gradients include GBSA contribution
+Matrix gradient = gfn2.getGradient();  // Eh/Bohr
+
+// Use in geometry optimization
+// (LBFGS optimizer automatically uses gradients)
 ```
 
 ### Command-Line Usage

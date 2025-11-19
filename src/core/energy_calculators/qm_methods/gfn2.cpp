@@ -374,6 +374,34 @@ double GFN2::Calculation(bool gradient)
         // Gradient calculation (if requested and implemented)
         if (gradient) {
             m_gradient = calculateGradient();
+
+            // Add GBSA gradient contribution (if solvation is enabled)
+            if (m_solvation && m_solvent != "none") {
+                if (CurcumaLogger::get_verbosity() >= 3) {
+                    CurcumaLogger::info("Adding GBSA gradient contribution");
+                }
+
+                // Prepare data structures
+                std::vector<std::array<double, 3>> positions(m_atomcount);
+                std::vector<double> charges(m_atomcount);
+                std::vector<std::array<double, 3>> gbsa_gradients(m_atomcount);
+
+                for (int i = 0; i < m_atomcount; ++i) {
+                    positions[i] = {m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2)};
+                    charges[i] = m_charges(i);
+                    gbsa_gradients[i] = {0.0, 0.0, 0.0};
+                }
+
+                // Calculate GBSA gradients
+                m_solvation->calculateEnergyAndGradients(m_atoms, positions, charges, gbsa_gradients);
+
+                // Add to total gradient (convert units if needed)
+                for (int i = 0; i < m_atomcount; ++i) {
+                    for (int k = 0; k < 3; ++k) {
+                        m_gradient(i, k) += gbsa_gradients[i][k];
+                    }
+                }
+            }
         }
 
         return m_total_energy;

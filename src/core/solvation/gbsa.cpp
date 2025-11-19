@@ -338,5 +338,235 @@ double GBSA::integralOverlap(double r_AB, double rho, double vdW_radius) const {
     return 0.5 * delta / (rho * rho * rho);
 }
 
+// =================================================================================
+// Gradient Calculations (Claude Generated: November 2025)
+// =================================================================================
+
+double GBSA::calculateEnergyAndGradients(
+    const std::vector<int>& atomic_numbers,
+    const std::vector<std::array<double, 3>>& positions,
+    const std::vector<double>& charges,
+    std::vector<std::array<double, 3>>& gradients
+) {
+    const size_t natoms = atomic_numbers.size();
+
+    if (positions.size() != natoms || charges.size() != natoms) {
+        throw std::invalid_argument("GBSA::calculateEnergyAndGradients: Inconsistent array sizes");
+    }
+
+    // Ensure gradients array is properly sized
+    if (gradients.size() != natoms) {
+        gradients.resize(natoms);
+    }
+
+    // Initialize result arrays
+    m_born_radii.resize(natoms);
+    m_sasa.resize(natoms);
+    m_born_radii_gradients.resize(natoms);
+    m_sasa_gradients.resize(natoms);
+
+    // Clear gradient caches
+    for (size_t i = 0; i < natoms; ++i) {
+        m_born_radii_gradients[i] = {0.0, 0.0, 0.0};
+        m_sasa_gradients[i] = {0.0, 0.0, 0.0};
+    }
+
+    // Step 1: Calculate Born radii with gradients
+    calculateBornRadiiWithGradients(atomic_numbers, positions);
+
+    // Step 2: Calculate SASA with gradients
+    calculateSASAWithGradients(atomic_numbers, positions);
+
+    // Step 3: Calculate GB energy and gradients
+    m_energy_gb = calculateBornEnergyWithGradients(charges, positions, gradients);
+
+    // Step 4: Calculate SA energy and gradients
+    // ∂E_SA/∂r = γ · ∂SASA/∂r
+    double total_sasa = 0.0;
+    for (size_t i = 0; i < natoms; ++i) {
+        total_sasa += m_sasa[i];
+
+        // Add SASA gradient contribution
+        for (int k = 0; k < 3; ++k) {
+            gradients[i][k] += m_surface_tension * m_sasa_gradients[i][k] * KCAL_TO_HARTREE;
+        }
+    }
+    m_energy_sa = m_surface_tension * total_sasa * KCAL_TO_HARTREE;
+
+    // Total solvation energy
+    return m_energy_gb + m_energy_sa;
+}
+
+void GBSA::calculateBornRadiiWithGradients(
+    const std::vector<int>& atomic_numbers,
+    const std::vector<std::array<double, 3>>& positions
+) {
+    // Simplified gradient calculation for Born radii
+    // Full implementation would require derivatives of all integrals
+    // Quick-win: Finite difference approximation for now
+
+    const size_t natoms = atomic_numbers.size();
+    const double h = 1.0e-5;  // Finite difference step (Angstrom)
+
+    // First, calculate Born radii at current positions
+    calculateBornRadii(atomic_numbers, positions);
+    std::vector<double> R0 = m_born_radii;
+
+    // Calculate numerical derivatives using finite differences
+    // ∂R_i/∂x_j ≈ (R_i(x_j + h) - R_i(x_j - h)) / (2h)
+    for (size_t j = 0; j < natoms; ++j) {
+        for (int coord = 0; coord < 3; ++coord) {
+            // Perturb coordinate
+            std::vector<std::array<double, 3>> pos_plus = positions;
+            std::vector<std::array<double, 3>> pos_minus = positions;
+            pos_plus[j][coord] += h;
+            pos_minus[j][coord] -= h;
+
+            // Calculate Born radii at perturbed positions
+            calculateBornRadii(atomic_numbers, pos_plus);
+            std::vector<double> R_plus = m_born_radii;
+
+            calculateBornRadii(atomic_numbers, pos_minus);
+            std::vector<double> R_minus = m_born_radii;
+
+            // Numerical derivative for all atoms
+            for (size_t i = 0; i < natoms; ++i) {
+                double dR_dr = (R_plus[i] - R_minus[i]) / (2.0 * h);
+                m_born_radii_gradients[i][coord] += dR_dr;
+            }
+        }
+    }
+
+    // Restore original Born radii
+    m_born_radii = R0;
+}
+
+void GBSA::calculateSASAWithGradients(
+    const std::vector<int>& atomic_numbers,
+    const std::vector<std::array<double, 3>>& positions
+) {
+    // Simplified SASA gradient calculation
+    // Quick-win: Finite difference approximation
+
+    const size_t natoms = atomic_numbers.size();
+    const double h = 1.0e-5;  // Finite difference step (Angstrom)
+
+    // Calculate SASA at current positions
+    calculateSASA(atomic_numbers, positions);
+    std::vector<double> A0 = m_sasa;
+
+    // Calculate numerical derivatives
+    for (size_t j = 0; j < natoms; ++j) {
+        for (int coord = 0; coord < 3; ++coord) {
+            // Perturb coordinate
+            std::vector<std::array<double, 3>> pos_plus = positions;
+            std::vector<std::array<double, 3>> pos_minus = positions;
+            pos_plus[j][coord] += h;
+            pos_minus[j][coord] -= h;
+
+            // Calculate SASA at perturbed positions
+            calculateSASA(atomic_numbers, pos_plus);
+            std::vector<double> A_plus = m_sasa;
+
+            calculateSASA(atomic_numbers, pos_minus);
+            std::vector<double> A_minus = m_sasa;
+
+            // Numerical derivative for all atoms
+            for (size_t i = 0; i < natoms; ++i) {
+                double dA_dr = (A_plus[i] - A_minus[i]) / (2.0 * h);
+                m_sasa_gradients[i][coord] += dA_dr;
+            }
+        }
+    }
+
+    // Restore original SASA
+    m_sasa = A0;
+}
+
+double GBSA::calculateBornEnergyWithGradients(
+    const std::vector<double>& charges,
+    const std::vector<std::array<double, 3>>& positions,
+    std::vector<std::array<double, 3>>& gradients
+) {
+    const size_t natoms = charges.size();
+
+    // Prefactor: -½ · (1/ε_in - 1/ε_out)
+    const double epsilon_factor = -0.5 * (1.0 - 1.0 / m_epsilon);
+    const double cc = 4.0;  // Still et al. parameter
+
+    double energy = 0.0;
+
+    // Self-energy terms and gradients
+    for (size_t i = 0; i < natoms; ++i) {
+        const double q_i = charges[i];
+        const double R_i = m_born_radii[i];
+
+        // Self-energy: q_i² / R_i
+        energy += q_i * q_i / R_i;
+
+        // Self-energy gradient: -q_i² / R_i² · ∂R_i/∂r
+        const double dE_dR = -q_i * q_i / (R_i * R_i);
+        for (int k = 0; k < 3; ++k) {
+            gradients[i][k] += epsilon_factor * dE_dR * m_born_radii_gradients[i][k]
+                             * (1.0 / ANGSTROM_TO_BOHR);
+        }
+    }
+
+    // Pairwise interaction terms and gradients
+    for (size_t i = 0; i < natoms; ++i) {
+        const double q_i = charges[i];
+        const double R_i = m_born_radii[i];
+
+        for (size_t j = 0; j < i; ++j) {
+            const double q_j = charges[j];
+            const double R_j = m_born_radii[j];
+
+            // Distance and direction
+            std::array<double, 3> r_ij;
+            double r_ij_sq = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                r_ij[k] = positions[i][k] - positions[j][k];
+                r_ij_sq += r_ij[k] * r_ij[k];
+            }
+            const double r = std::sqrt(r_ij_sq);
+
+            // Effective Coulomb operator
+            const double R_prod = R_i * R_j;
+            const double exp_arg = -r_ij_sq / (cc * R_prod);
+            const double exp_term = std::exp(exp_arg);
+            const double f_GB = std::sqrt(r_ij_sq + R_prod * exp_term);
+
+            // Interaction energy
+            const double E_pair = 2.0 * q_i * q_j / f_GB;
+            energy += E_pair;
+
+            // Gradient w.r.t. distance: ∂E/∂r_ij
+            const double df_dr = (r - R_prod * exp_term * r / (cc * R_prod)) / f_GB;
+            const double dE_dr = -E_pair * df_dr / f_GB;
+
+            // Add distance-dependent gradient contribution
+            for (int k = 0; k < 3; ++k) {
+                const double grad_component = dE_dr * r_ij[k] / r;
+                gradients[i][k] += epsilon_factor * grad_component * (1.0 / ANGSTROM_TO_BOHR);
+                gradients[j][k] -= epsilon_factor * grad_component * (1.0 / ANGSTROM_TO_BOHR);
+            }
+
+            // Gradient w.r.t. Born radii: ∂E/∂R_i and ∂E/∂R_j
+            const double dE_dRi = -E_pair * R_j * exp_term * (1.0 - r_ij_sq / (cc * R_prod)) / (2.0 * f_GB * f_GB);
+            const double dE_dRj = -E_pair * R_i * exp_term * (1.0 - r_ij_sq / (cc * R_prod)) / (2.0 * f_GB * f_GB);
+
+            for (int k = 0; k < 3; ++k) {
+                gradients[i][k] += epsilon_factor * dE_dRi * m_born_radii_gradients[i][k]
+                                 * (1.0 / ANGSTROM_TO_BOHR);
+                gradients[j][k] += epsilon_factor * dE_dRj * m_born_radii_gradients[j][k]
+                                 * (1.0 / ANGSTROM_TO_BOHR);
+            }
+        }
+    }
+
+    // Apply prefactor and convert to Hartree
+    return epsilon_factor * energy * (1.0 / ANGSTROM_TO_BOHR);
+}
+
 } // namespace Solvation
 } // namespace Curcuma

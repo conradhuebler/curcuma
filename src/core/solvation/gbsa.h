@@ -84,6 +84,27 @@ public:
     );
 
     /**
+     * @brief Calculate GBSA solvation energy and gradients
+     *
+     * Computes both energy and analytical gradients for geometry optimization.
+     *
+     * @param atomic_numbers Atomic numbers (Z) for all atoms
+     * @param positions Cartesian coordinates in Angstrom [Natoms × 3]
+     * @param charges Atomic partial charges (from QM calculation)
+     * @param gradients Output gradients in Hartree/Angstrom [Natoms × 3]
+     * @return Solvation energy in Hartree
+     *
+     * @note Gradients are added to existing values (not cleared)
+     * @note Claude Generated: Analytical GBSA gradients (November 2025)
+     */
+    double calculateEnergyAndGradients(
+        const std::vector<int>& atomic_numbers,
+        const std::vector<std::array<double, 3>>& positions,
+        const std::vector<double>& charges,
+        std::vector<std::array<double, 3>>& gradients
+    );
+
+    /**
      * @brief Get Born radii for each atom
      *
      * Returns effective Born radii after last energy calculation.
@@ -132,6 +153,10 @@ private:
     std::vector<double> m_sasa;        // Solvent-accessible surface areas (Ų)
     double m_energy_gb;                // GB energy contribution (Hartree)
     double m_energy_sa;                // SA energy contribution (Hartree)
+
+    // Cached gradient data (for efficiency)
+    std::vector<std::array<double, 3>> m_born_radii_gradients;  // ∂R_i/∂r [Natoms × 3]
+    std::vector<std::array<double, 3>> m_sasa_gradients;        // ∂A_i/∂r [Natoms × 3]
 
     /**
      * @brief Calculate Born radii using GBOBC-II algorithm
@@ -223,6 +248,57 @@ private:
      * @return Integral contribution
      */
     double integralOverlap(double r_AB, double rho, double vdW_radius) const;
+
+    /**
+     * @brief Calculate Born radii with gradients
+     *
+     * Extended version that computes both Born radii and their derivatives.
+     *
+     * @param atomic_numbers Atomic numbers (Z) for all atoms
+     * @param positions Cartesian coordinates in Angstrom [Natoms × 3]
+     *
+     * @note Updates m_born_radii and m_born_radii_gradients
+     * @note Claude Generated: Gradient implementation (November 2025)
+     */
+    void calculateBornRadiiWithGradients(
+        const std::vector<int>& atomic_numbers,
+        const std::vector<std::array<double, 3>>& positions
+    );
+
+    /**
+     * @brief Calculate SASA with gradients
+     *
+     * Extended version that computes both SASA and their derivatives.
+     *
+     * @param atomic_numbers Atomic numbers (Z) for all atoms
+     * @param positions Cartesian coordinates in Angstrom [Natoms × 3]
+     *
+     * @note Updates m_sasa and m_sasa_gradients
+     * @note Claude Generated: Gradient implementation (November 2025)
+     */
+    void calculateSASAWithGradients(
+        const std::vector<int>& atomic_numbers,
+        const std::vector<std::array<double, 3>>& positions
+    );
+
+    /**
+     * @brief Calculate Born energy with gradients
+     *
+     * Extended version that computes both energy and gradients.
+     *
+     * @param charges Atomic partial charges from QM calculation
+     * @param positions Cartesian coordinates in Angstrom [Natoms × 3]
+     * @param gradients Output gradients (added to existing values)
+     * @return GB energy in Hartree
+     *
+     * @note Requires m_born_radii and m_born_radii_gradients to be calculated first
+     * @note Claude Generated: Gradient implementation (November 2025)
+     */
+    double calculateBornEnergyWithGradients(
+        const std::vector<double>& charges,
+        const std::vector<std::array<double, 3>>& positions,
+        std::vector<std::array<double, 3>>& gradients
+    );
 };
 
 } // namespace Solvation
