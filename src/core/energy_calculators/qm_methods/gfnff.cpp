@@ -2534,6 +2534,49 @@ json GFNFF::generateGFNFFRepulsionPairs() const
         3., 4., 5., 6., 7., 8.                                   // Tl-Rn
     };
 
+    // Scaling factors from Fortran gfnff_param.f90:373-374
+    // Claude Generated (Nov 2025): Apply bonded/non-bonded repulsion scaling
+    static const double REPSCALB = 1.7583;  // Bonded repulsion scaling
+    static const double REPSCALN = 0.4270;  // Non-bonded repulsion scaling
+
+    // Build set of bonded pairs for identification
+    std::set<std::pair<int, int>> bonded_pairs;
+
+    // Detect bonded pairs using distance-based criterion (bond detection threshold)
+    // A pair (i,j) is bonded if their distance is < sum_of_covalent_radii * 1.3
+    static const std::vector<double> covalent_radii = {
+        0.31, 0.28, 1.28, 0.96, 0.84, 0.76, 0.71, 0.66, 0.57, 0.58,  // H-Ne
+        1.66, 1.41, 1.21, 1.11, 1.07, 1.05, 1.02, 1.06, 2.03, 1.76,  // Na-Ca
+        1.70, 1.60, 1.53, 1.39, 1.39, 1.32, 1.50, 1.24, 1.32, 1.22,  // Sc-Zn
+        1.22, 1.20, 1.19, 1.20, 1.20, 1.20, 2.20, 1.95, 1.90, 1.87,  // Ga-Zr
+        1.75, 1.71, 1.63, 1.46, 1.42, 1.38, 1.44, 1.44, 1.40, 1.44,  // Nb-Sn
+        1.41, 1.40, 1.40, 2.44, 2.15, 2.07, 2.04, 2.03, 2.01, 1.99,  // Sb-Nd
+        1.98, 1.98, 1.96, 1.94, 1.92, 1.92, 1.89, 1.90, 1.87, 1.87,  // Pm-Yb
+        1.75, 1.87, 1.75, 1.75, 1.75, 1.75  // Lu-Rn
+    };
+
+    // Build bonded pairs from geometry
+    const double bonded_threshold = 1.3;  // Multiplier for covalent radii sum
+    for (int i = 0; i < m_atomcount; ++i) {
+        for (int j = i + 1; j < m_atomcount; ++j) {
+            Eigen::Vector3d ri = m_geometry.row(i);
+            Eigen::Vector3d rj = m_geometry.row(j);
+            double distance_bohr = (ri - rj).norm();
+            double distance_angstrom = distance_bohr * BOHR_TO_ANGSTROM;  // Convert to Angstrom for comparison
+
+            int zi = m_atoms[i] - 1;
+            int zj = m_atoms[j] - 1;
+
+            double rad_i = (zi >= 0 && zi < static_cast<int>(covalent_radii.size())) ? covalent_radii[zi] : 1.5;
+            double rad_j = (zj >= 0 && zj < static_cast<int>(covalent_radii.size())) ? covalent_radii[zj] : 1.5;
+            double sum_radii = (rad_i + rad_j) * bonded_threshold;
+
+            if (distance_angstrom < sum_radii) {
+                bonded_pairs.insert({i, j});
+            }
+        }
+    }
+
     // Generate all pairwise repulsion interactions
     for (int i = 0; i < m_atomcount; ++i) {
         for (int j = i + 1; j < m_atomcount; ++j) {
@@ -2552,9 +2595,19 @@ json GFNFF::generateGFNFFRepulsionPairs() const
             double repz_j = (zj >= 0 && zj < static_cast<int>(repz.size())) ? repz[zj] : 1.0;
 
             // Calculate pairwise parameters (match Fortran reference gfnff_engrad.F90:407-439)
+            // Claude Generated (Nov 2025): Apply bonded/non-bonded repulsion scaling
+            bool is_bonded = (bonded_pairs.count({i, j}) > 0);
+            double repulsion_scale = is_bonded ? REPSCALB : REPSCALN;
+
             repulsion["alpha"] = std::sqrt(repa_i * repa_j);
-            repulsion["repab"] = repz_i * repz_j; // No scaling factor (matches Fortran reference)
+            repulsion["repab"] = repz_i * repz_j * repulsion_scale;  // Apply scaling based on bonded status
             repulsion["r_cut"] = 50.0; // Cutoff radius (Bohr)
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::param(fmt::format("repulsion_{}-{}", i, j),
+                    fmt::format("bonded=%s, repab=%.6f, alpha=%.6f",
+                    is_bonded ? "true" : "false", repulsion["repab"].get<double>(), repulsion["alpha"].get<double>()));
+            }
 
             repulsion_pairs.push_back(repulsion);
         }
