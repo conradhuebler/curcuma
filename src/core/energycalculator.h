@@ -190,6 +190,64 @@ public:
     int NumElectrons() const;
 
     // =================================================================================
+    // Force Field Energy Component Access (Claude Generated November 2025)
+    // =================================================================================
+
+    /**
+     * @brief Get bond energy component (FF methods only)
+     * @return Bond stretching energy
+     */
+    double getBondEnergy() const;
+
+    /**
+     * @brief Get angle energy component (FF methods only)
+     * @return Angle bending energy
+     */
+    double getAngleEnergy() const;
+
+    /**
+     * @brief Get dihedral energy component (FF methods only)
+     * @return Dihedral torsion energy
+     */
+    double getDihedralEnergy() const;
+
+    /**
+     * @brief Get inversion energy component (FF methods only)
+     * @return Inversion/out-of-plane energy
+     */
+    double getInversionEnergy() const;
+
+    /**
+     * @brief Get van der Waals energy component (FF methods only)
+     * @return Van der Waals interaction energy
+     */
+    double getVdWEnergy() const;
+
+    /**
+     * @brief Get repulsion energy component (FF methods only)
+     * @return Core-core repulsion energy
+     */
+    double getRepulsionEnergy() const;
+
+    /**
+     * @brief Get dispersion energy component (FF methods only)
+     * @return Dispersion correction energy
+     */
+    double getDispersionEnergy() const;
+
+    /**
+     * @brief Get Coulomb electrostatic energy component (FF methods only)
+     * @return Electrostatic energy
+     */
+    double getCoulombEnergy() const;
+
+    /**
+     * @brief Get total non-bonded energy (vdW + repulsion)
+     * @return Non-bonded interaction energy
+     */
+    double getNonBondedEnergy() const;
+
+    // =================================================================================
     // Error Handling and Status
     // =================================================================================
     

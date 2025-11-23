@@ -179,7 +179,59 @@ public:
      * @return Total number of electrons or 0 if not applicable
      */
     virtual int getNumElectrons() const { return 0; }
-    
+
+    // =================================================================================
+    // Force Field Energy Component Access (Claude Generated November 2025)
+    // =================================================================================
+
+    /**
+     * @brief Get bond energy component (Force field methods only)
+     * @return Bond stretching energy or 0 if not applicable
+     */
+    virtual double getBondEnergy() const { return 0.0; }
+
+    /**
+     * @brief Get angle energy component (Force field methods only)
+     * @return Angle bending energy or 0 if not applicable
+     */
+    virtual double getAngleEnergy() const { return 0.0; }
+
+    /**
+     * @brief Get dihedral energy component (Force field methods only)
+     * @return Dihedral torsion energy or 0 if not applicable
+     */
+    virtual double getDihedralEnergy() const { return 0.0; }
+
+    /**
+     * @brief Get inversion energy component (Force field methods only)
+     * @return Inversion/out-of-plane energy or 0 if not applicable
+     */
+    virtual double getInversionEnergy() const { return 0.0; }
+
+    /**
+     * @brief Get van der Waals energy component (Force field methods only)
+     * @return Van der Waals interaction energy or 0 if not applicable
+     */
+    virtual double getVdWEnergy() const { return 0.0; }
+
+    /**
+     * @brief Get repulsion energy component (Force field methods only)
+     * @return Core-core repulsion energy or 0 if not applicable
+     */
+    virtual double getRepulsionEnergy() const { return 0.0; }
+
+    /**
+     * @brief Get dispersion energy component (Force field methods only)
+     * @return Dispersion correction energy or 0 if not applicable
+     */
+    virtual double getDispersionEnergy() const { return 0.0; }
+
+    /**
+     * @brief Get Coulomb electrostatic energy component (Force field methods only)
+     * @return Electrostatic energy or 0 if not applicable
+     */
+    virtual double getCoulombEnergy() const { return 0.0; }
+
     /**
      * @brief Save method-specific data to file
      * @param filename Output file name

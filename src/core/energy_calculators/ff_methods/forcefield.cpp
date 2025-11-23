@@ -984,20 +984,24 @@ double ForceField::Calculate(bool gradient)
     double energy = 0.0;
     double d4_energy = 0;
     double d3_energy = 0;
-    double bond_energy = 0.0;
-    double angle_energy = 0.0;
-    double dihedral_energy = 0.0;
-    double inversion_energy = 0.0;
-    double vdw_energy = 0.0;
-    double rep_energy = 0.0;
-    double eq_energy = 0.0;
+    // Claude Generated: Reset all energy components for regression testing (Nov 2025)
+    m_bond_energy = 0.0;
+    m_angle_energy = 0.0;
+    m_dihedral_energy = 0.0;
+    m_inversion_energy = 0.0;
+    m_vdw_energy = 0.0;
+    m_rep_energy = 0.0;
+    m_eq_energy = 0.0;
+    m_dispersion_energy = 0.0;
+    m_coulomb_energy = 0.0;
+
     double h4_energy = 0.0;
     double hh_energy = 0.0;
     double cg_energy = 0.0; // Claude Generated: CG pair interaction energy
 
     // Claude Generated: GFN-FF specific non-bonded energies (Phase 4.4 fix)
-    double gfnff_dispersion = 0.0;  // D3/D4 dispersion (should be negative/attractive)
-    double gfnff_coulomb = 0.0;     // EEQ Coulomb electrostatics
+    // NOTE: These are now accumulated into member variables m_dispersion_energy and m_coulomb_energy
+    // (local variables removed - using m_dispersion_energy and m_coulomb_energy member variables)
 
     for (int i = 0; i < m_stored_threads.size(); ++i) {
         m_stored_threads[i]->UpdateGeometry(m_geometry, gradient);
@@ -1010,10 +1014,10 @@ double ForceField::Calculate(bool gradient)
     // m_threadpool->setWakeUp(m_threadpool->WakeUp() / 2);
 
     for (int i = 0; i < m_stored_threads.size(); ++i) {
-        bond_energy += m_stored_threads[i]->BondEnergy();
-        angle_energy += m_stored_threads[i]->AngleEnergy();
-        dihedral_energy += m_stored_threads[i]->DihedralEnergy();
-        inversion_energy += m_stored_threads[i]->InversionEnergy();
+        m_bond_energy += m_stored_threads[i]->BondEnergy();
+        m_angle_energy += m_stored_threads[i]->AngleEnergy();
+        m_dihedral_energy += m_stored_threads[i]->DihedralEnergy();
+        m_inversion_energy += m_stored_threads[i]->InversionEnergy();
 
         // Claude Generated (2025): Debug thread type
         int thread_type = m_stored_threads[i]->Type();
@@ -1022,18 +1026,20 @@ double ForceField::Calculate(bool gradient)
         }
 
         if (thread_type != 3) {
-            vdw_energy += m_stored_threads[i]->VdWEnergy();
-            rep_energy += m_stored_threads[i]->RepEnergy();
+            m_vdw_energy += m_stored_threads[i]->VdWEnergy();
+            m_rep_energy += m_stored_threads[i]->RepEnergy();
         } else {
             // GFN-FF (Type == 3) uses different energy components
+            // Claude Generated: Store GFN-FF energies in both old and new variables for API compatibility
             h4_energy += m_stored_threads[i]->VdWEnergy();
             hh_energy += m_stored_threads[i]->RepEnergy();
+            m_rep_energy += m_stored_threads[i]->RepEnergy();  // Claude Generated: Also store in m_rep_energy for API compatibility
 
             // CRITICAL FIX: Also collect GFN-FF dispersion and Coulomb energies!
             double thread_disp = m_stored_threads[i]->DispersionEnergy();
             double thread_coul = m_stored_threads[i]->CoulombEnergy();
-            gfnff_dispersion += thread_disp;
-            gfnff_coulomb += thread_coul;
+            m_dispersion_energy += thread_disp;
+            m_coulomb_energy += thread_coul;
 
             // Claude Generated (2025): Debug individual energy components
             if (CurcumaLogger::get_verbosity() >= 3) {
@@ -1081,14 +1087,14 @@ double ForceField::Calculate(bool gradient)
     }
 
     // Claude Generated: Add GFN-FF dispersion and Coulomb energies to total
-    energy = m_e0 + bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy + rep_energy + eq_energy + h4_energy + hh_energy + cg_energy + gfnff_dispersion + gfnff_coulomb;
+    energy = m_e0 + m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy + m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + hh_energy + cg_energy + m_dispersion_energy + m_coulomb_energy;
 
     // Claude Generated (2025): Debug total GFN-FF energies
-    if (CurcumaLogger::get_verbosity() >= 3 && (gfnff_dispersion != 0.0 || gfnff_coulomb != 0.0)) {
-        CurcumaLogger::param("total_gfnff_dispersion", fmt::format("{:.6f} Eh", gfnff_dispersion));
-        CurcumaLogger::param("total_gfnff_coulomb", fmt::format("{:.6f} Eh", gfnff_coulomb));
+    if (CurcumaLogger::get_verbosity() >= 3 && (m_dispersion_energy != 0.0 || m_coulomb_energy != 0.0)) {
+        CurcumaLogger::param("total_gfnff_dispersion", fmt::format("{:.6f} Eh", m_dispersion_energy));
+        CurcumaLogger::param("total_gfnff_coulomb", fmt::format("{:.6f} Eh", m_coulomb_energy));
         CurcumaLogger::param("total_before_gfnff", fmt::format("{:.6f} Eh",
-            m_e0 + bond_energy + angle_energy + dihedral_energy + inversion_energy + vdw_energy + rep_energy + eq_energy + h4_energy + hh_energy + cg_energy));
+            m_e0 + m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy + m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + hh_energy + cg_energy));
     }
 
     // Level 1+: Final energy result
@@ -1102,11 +1108,11 @@ double ForceField::Calculate(bool gradient)
         if (m_e0 != 0.0) {
             CurcumaLogger::param("E0_baseline", fmt::format("{:.6f} Eh", m_e0));
         }
-        CurcumaLogger::param("bond_energy", fmt::format("{:.6f} Eh", bond_energy));
-        CurcumaLogger::param("angle_energy", fmt::format("{:.6f} Eh", angle_energy));
-        CurcumaLogger::param("dihedral_energy", fmt::format("{:.6f} Eh", dihedral_energy));
-        CurcumaLogger::param("inversion_energy", fmt::format("{:.6f} Eh", inversion_energy));
-        CurcumaLogger::param("nonbonded_energy", fmt::format("{:.6f} Eh", vdw_energy + rep_energy));
+        CurcumaLogger::param("bond_energy", fmt::format("{:.6f} Eh", m_bond_energy));
+        CurcumaLogger::param("angle_energy", fmt::format("{:.6f} Eh", m_angle_energy));
+        CurcumaLogger::param("dihedral_energy", fmt::format("{:.6f} Eh", m_dihedral_energy));
+        CurcumaLogger::param("inversion_energy", fmt::format("{:.6f} Eh", m_inversion_energy));
+        CurcumaLogger::param("nonbonded_energy", fmt::format("{:.6f} Eh", m_vdw_energy + m_rep_energy));
         if (d3_energy != 0.0) {
             CurcumaLogger::param("D3_energy", fmt::format("{:.6f} Eh", d3_energy));
         }
@@ -1119,11 +1125,11 @@ double ForceField::Calculate(bool gradient)
         if (hh_energy != 0.0) {
             CurcumaLogger::param("HH_repulsion", fmt::format("{:.6f} Eh", hh_energy));
         }
-        if (gfnff_dispersion != 0.0) {
-            CurcumaLogger::param("GFNFF_dispersion", fmt::format("{:.6f} Eh", gfnff_dispersion));
+        if (m_dispersion_energy != 0.0) {
+            CurcumaLogger::param("GFNFF_dispersion", fmt::format("{:.6f} Eh", m_dispersion_energy));
         }
-        if (gfnff_coulomb != 0.0) {
-            CurcumaLogger::param("GFNFF_coulomb", fmt::format("{:.6f} Eh", gfnff_coulomb));
+        if (m_coulomb_energy != 0.0) {
+            CurcumaLogger::param("GFNFF_coulomb", fmt::format("{:.6f} Eh", m_coulomb_energy));
         }
         if (cg_energy != 0.0) {
             CurcumaLogger::param("CG_interactions", fmt::format("{:.6f} Eh", cg_energy));

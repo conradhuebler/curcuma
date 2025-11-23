@@ -606,16 +606,57 @@ namespace ForceFieldMethodUtils {
     double estimateMemoryUsage(const Mol& mol, int threads) {
         // Rough estimate of memory usage in MB
         int natoms = mol.m_number_atoms;
-        
+
         // Base memory for molecule data
         double base_memory = natoms * 0.001;  // ~1 KB per atom
-        
+
         // Threading overhead
         double thread_memory = threads * 0.1;  // ~100 KB per thread
-        
+
         // Force field matrices and parameters
         double ff_memory = natoms * natoms * 0.00001;  // Distance matrices etc.
-        
+
         return base_memory + thread_memory + ff_memory;
     }
+}
+
+// Claude Generated: Energy component getter methods (Nov 2025)
+double ForceFieldMethod::getBondEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->BondEnergy();
+}
+
+double ForceFieldMethod::getAngleEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->AngleEnergy();
+}
+
+double ForceFieldMethod::getDihedralEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->DihedralEnergy();
+}
+
+double ForceFieldMethod::getInversionEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->InversionEnergy();
+}
+
+double ForceFieldMethod::getVdWEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->VdWEnergy();
+}
+
+double ForceFieldMethod::getRepulsionEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->RepulsionEnergy();
+}
+
+double ForceFieldMethod::getDispersionEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->DispersionEnergy();
+}
+
+double ForceFieldMethod::getCoulombEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->CoulombEnergy();
 }

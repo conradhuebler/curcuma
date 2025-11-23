@@ -138,3 +138,36 @@ void GFNFFMethod::clearError() {
 std::string GFNFFMethod::getErrorMessage() const {
     return m_error_message;
 }
+
+// Claude Generated: Energy component getter methods (Nov 2025)
+double GFNFFMethod::getBondEnergy() const {
+    return m_gfnff ? m_gfnff->BondEnergy() : 0.0;
+}
+
+double GFNFFMethod::getAngleEnergy() const {
+    return m_gfnff ? m_gfnff->AngleEnergy() : 0.0;
+}
+
+double GFNFFMethod::getDihedralEnergy() const {
+    return m_gfnff ? m_gfnff->DihedralEnergy() : 0.0;
+}
+
+double GFNFFMethod::getInversionEnergy() const {
+    return m_gfnff ? m_gfnff->InversionEnergy() : 0.0;
+}
+
+double GFNFFMethod::getVdWEnergy() const {
+    return m_gfnff ? m_gfnff->VdWEnergy() : 0.0;
+}
+
+double GFNFFMethod::getRepulsionEnergy() const {
+    return m_gfnff ? m_gfnff->RepulsionEnergy() : 0.0;
+}
+
+double GFNFFMethod::getDispersionEnergy() const {
+    return m_gfnff ? m_gfnff->DispersionEnergy() : 0.0;
+}
+
+double GFNFFMethod::getCoulombEnergy() const {
+    return m_gfnff ? m_gfnff->CoulombEnergy() : 0.0;
+}

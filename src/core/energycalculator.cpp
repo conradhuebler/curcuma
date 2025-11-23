@@ -19,6 +19,7 @@
  */
 
 #include "energycalculator.h"
+#include "energy_calculators/ff_methods/forcefield_method.h"
 #include "src/tools/general.h"
 #include "src/core/curcuma_logger.h"
 #include "config_manager.h"
@@ -728,4 +729,42 @@ void EnergyCalculator::convertCoordinates(const Eigen::VectorXd& coord, Matrix& 
         geometry(i, 1) = coord[3 * i + 1];
         geometry(i, 2) = coord[3 * i + 2];
     }
+}
+
+// Claude Generated: Energy component getter methods for regression testing (Nov 2025)
+// These delegate to the ComputationalMethod interface (which now has virtual methods)
+double EnergyCalculator::getBondEnergy() const {
+    return m_method ? m_method->getBondEnergy() : 0.0;
+}
+
+double EnergyCalculator::getAngleEnergy() const {
+    return m_method ? m_method->getAngleEnergy() : 0.0;
+}
+
+double EnergyCalculator::getDihedralEnergy() const {
+    return m_method ? m_method->getDihedralEnergy() : 0.0;
+}
+
+double EnergyCalculator::getInversionEnergy() const {
+    return m_method ? m_method->getInversionEnergy() : 0.0;
+}
+
+double EnergyCalculator::getVdWEnergy() const {
+    return m_method ? m_method->getVdWEnergy() : 0.0;
+}
+
+double EnergyCalculator::getRepulsionEnergy() const {
+    return m_method ? m_method->getRepulsionEnergy() : 0.0;
+}
+
+double EnergyCalculator::getDispersionEnergy() const {
+    return m_method ? m_method->getDispersionEnergy() : 0.0;
+}
+
+double EnergyCalculator::getCoulombEnergy() const {
+    return m_method ? m_method->getCoulombEnergy() : 0.0;
+}
+
+double EnergyCalculator::getNonBondedEnergy() const {
+    return getVdWEnergy() + getRepulsionEnergy();
 }

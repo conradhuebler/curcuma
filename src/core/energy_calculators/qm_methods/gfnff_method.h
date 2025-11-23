@@ -61,6 +61,16 @@ public:
     void clearError() override;
     std::string getErrorMessage() const override;
 
+    // Force field energy component access (Nov 2025)
+    double getBondEnergy() const override;
+    double getAngleEnergy() const override;
+    double getDihedralEnergy() const override;
+    double getInversionEnergy() const override;
+    double getVdWEnergy() const override;
+    double getRepulsionEnergy() const override;
+    double getDispersionEnergy() const override;
+    double getCoulombEnergy() const override;
+
 private:
     std::unique_ptr<GFNFF> m_gfnff;
     Mol m_molecule;

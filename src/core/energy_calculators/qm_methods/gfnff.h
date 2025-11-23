@@ -638,6 +638,59 @@ private:
      */
     EEQParameters getEEQParameters(int atom_idx, const TopologyInfo& topo_info) const;
 
+public:
+    // =================================================================================
+    // Energy Component Access (Claude Generated November 2025)
+    // =================================================================================
+
+    /**
+     * @brief Get bond energy component
+     * @return Bond stretching energy or 0 if not calculated
+     */
+    double BondEnergy() const;
+
+    /**
+     * @brief Get angle energy component
+     * @return Angle bending energy or 0 if not calculated
+     */
+    double AngleEnergy() const;
+
+    /**
+     * @brief Get dihedral energy component
+     * @return Dihedral torsion energy or 0 if not calculated
+     */
+    double DihedralEnergy() const;
+
+    /**
+     * @brief Get inversion energy component
+     * @return Inversion/out-of-plane energy or 0 if not calculated
+     */
+    double InversionEnergy() const;
+
+    /**
+     * @brief Get van der Waals energy component
+     * @return Van der Waals interaction energy or 0 if not calculated
+     */
+    double VdWEnergy() const;
+
+    /**
+     * @brief Get repulsion energy component
+     * @return Core-core repulsion energy or 0 if not calculated
+     */
+    double RepulsionEnergy() const;
+
+    /**
+     * @brief Get dispersion energy component
+     * @return Dispersion correction energy or 0 if not calculated
+     */
+    double DispersionEnergy() const;
+
+    /**
+     * @brief Get Coulomb electrostatic energy component
+     * @return Electrostatic energy or 0 if not calculated
+     */
+    double CoulombEnergy() const;
+
 private:
     json m_parameters; ///< GFN-FF parameters
     ForceField* m_forcefield; ///< Force field engine using modern structure

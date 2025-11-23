@@ -76,6 +76,17 @@ public:
 
     Matrix Gradient() const { return m_gradient; }
 
+    // Claude Generated: Energy component getters for regression testing (Nov 2025)
+    inline double BondEnergy() const { return m_bond_energy; }
+    inline double AngleEnergy() const { return m_angle_energy; }
+    inline double DihedralEnergy() const { return m_dihedral_energy; }
+    inline double InversionEnergy() const { return m_inversion_energy; }
+    inline double VdWEnergy() const { return m_vdw_energy; }
+    inline double RepulsionEnergy() const { return m_rep_energy; }
+    inline double DispersionEnergy() const { return m_dispersion_energy; }
+    inline double CoulombEnergy() const { return m_coulomb_energy; }
+    inline double ElectrostatEnergy() const { return m_eq_energy; }
+
     void setParameter(const json& parameter);
     void setParameterFile(const std::string& file);
 
@@ -117,6 +128,17 @@ private:
     void setGFNFFDispersions(const json& dispersions);
     void setGFNFFRepulsions(const json& repulsions);
     void setGFNFFCoulombs(const json& coulombs);
+
+    // Claude Generated: Energy component storage for regression testing (Nov 2025)
+    double m_bond_energy = 0.0;
+    double m_angle_energy = 0.0;
+    double m_dihedral_energy = 0.0;
+    double m_inversion_energy = 0.0;
+    double m_vdw_energy = 0.0;
+    double m_rep_energy = 0.0;
+    double m_eq_energy = 0.0;
+    double m_dispersion_energy = 0.0;
+    double m_coulomb_energy = 0.0;
 
     Matrix m_geometry, m_gradient;
     std::vector<int> m_atom_types;

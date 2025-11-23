@@ -2666,3 +2666,44 @@ json GFNFF::generateGFNFFDispersionPairs() const
 
     return dispersion_pairs;
 }
+
+// Claude Generated: Energy component getter methods for regression testing (Nov 2025)
+double GFNFF::BondEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->BondEnergy();
+}
+
+double GFNFF::AngleEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->AngleEnergy();
+}
+
+double GFNFF::DihedralEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->DihedralEnergy();
+}
+
+double GFNFF::InversionEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->InversionEnergy();
+}
+
+double GFNFF::VdWEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->VdWEnergy();
+}
+
+double GFNFF::RepulsionEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->RepulsionEnergy();
+}
+
+double GFNFF::DispersionEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->DispersionEnergy();
+}
+
+double GFNFF::CoulombEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->CoulombEnergy();
+}

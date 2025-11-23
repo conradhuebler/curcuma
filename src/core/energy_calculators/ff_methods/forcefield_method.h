@@ -170,13 +170,65 @@ public:
      * @return Vector of supported method names
      */
     static std::vector<std::string> getSupportedMethods();
-    
+
     /**
      * @brief Check if method is supported by ForceField
      * @param method_name Method to check
      * @return True if method is supported
      */
     static bool isMethodSupported(const std::string& method_name);
+
+    // =================================================================================
+    // Energy Component Access (Claude Generated November 2025)
+    // =================================================================================
+
+    /**
+     * @brief Get bond energy component
+     * @return Bond stretching energy
+     */
+    double getBondEnergy() const;
+
+    /**
+     * @brief Get angle energy component
+     * @return Angle bending energy
+     */
+    double getAngleEnergy() const;
+
+    /**
+     * @brief Get dihedral energy component
+     * @return Dihedral torsion energy
+     */
+    double getDihedralEnergy() const;
+
+    /**
+     * @brief Get inversion energy component
+     * @return Inversion/out-of-plane energy
+     */
+    double getInversionEnergy() const;
+
+    /**
+     * @brief Get van der Waals energy component
+     * @return Van der Waals interaction energy
+     */
+    double getVdWEnergy() const;
+
+    /**
+     * @brief Get repulsion energy component
+     * @return Core-core repulsion energy
+     */
+    double getRepulsionEnergy() const;
+
+    /**
+     * @brief Get dispersion energy component
+     * @return Dispersion correction energy
+     */
+    double getDispersionEnergy() const;
+
+    /**
+     * @brief Get Coulomb energy component
+     * @return Electrostatic energy
+     */
+    double getCoulombEnergy() const;
     
 private:
     std::unique_ptr<ForceField> m_forcefield;      ///< Wrapped ForceField implementation
