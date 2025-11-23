@@ -749,11 +749,8 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 
     // Original GFN-FF bond force constant parameters (bond_angewChem2020 array)
     // Used for force constant calculation: k = bond(i) * bond(j) * corrections
-    // NOTE: These are dimensionless scaling factors (0.03-0.42 range).
-    // They must be multiplied by a global base energy scale to get Hartree.
-    // Empirical calibration from benchmark molecules (H-H, O-H, H-Cl, H2O):
-    // Required scale factor: ~1479 Eh (to match XTB bond energies)
-    static const double GFNFF_KB_SCALE = 1479.0;  // Base energy scale for force constants
+    // TODO: Bond energy is ~1479x too small - root cause unknown
+    // Hypothesis: Missing initialization factor or unit conversion in parameter generation
     static const std::vector<double> bond_params = {
         0.417997, 0.258490, 0.113608, 0.195935, 0.231217, // H-B
         0.385248, 0.379257, 0.339249, 0.330706, 0.120319, // C-Ne
@@ -936,11 +933,29 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     double en_diff = std::abs(en1 - en2);
     double ff = 1.0 - k1 * en_diff - k2 * en_diff * en_diff;
 
-    // Step 4: Phase 2 - Final equilibrium distance
-    // Fortran gfnff_rab.f90:153: rab(k) = (ra + rb + rab(k)) * ff
-    // NOTE: Fortran adds rab(k) shift parameter (bond-specific shift from gfnff_ini)
-    //       For Phase 2, we omit the shift (will be added in Phase 9)
-    double rabshift = 0.0;  // Placeholder (will be from vbond(1,i) in Phase 9)
+    // Step 4: Phase 2 - Final equilibrium distance with shift correction
+    // Fortran gfnff_ini.f90:1235 & 1248: rab(k) = (ra + rb + shift) * ff, then r0 = rab(k)*0.529167
+    //
+    // Shift calculation (Fortran gfnff_ini.f90:1063-1231):
+    //   1. Base shift: gen%rabshift = -0.110 (general shift in Bohr)
+    //   2. XH correction: if(ia.eq.1 or ja.eq.1) shift += gen%rabshifth = -0.050
+    //   3. Hypervalent: if(bbtyp==4) shift = gen%hyper_shift
+    //   4. Ring effects: if X-sp3 in ring, shift -= 0.022
+    //   5. Heavy atom effects (Z>36): shift += gen%hshift5
+    //
+    // For now: implement basic rabshift + XH correction
+    // Full ring/hypervalent/heavy atom corrections will be added in Phase 10
+    double gen_rabshift = -0.110;    // Fortran: gen%rabshift
+    double gen_rabshifth = -0.050;   // Fortran: gen%rabshifth (XH bonds)
+
+    double shift = 0.0;
+    // XH bond correction
+    if (z1 == 1 || z2 == 1) {
+        shift = gen_rabshifth;  // XH uses special shift
+    }
+    // Additional shifts (hypervalent, heavy atoms, rings) - TODO Phase 10
+
+    double rabshift = gen_rabshift + shift;  // Total shift in Bohr
     // NOTE: Result is in Bohr (ra, rb are in Bohr) - NO conversion needed since we use m_geometry_bohr
     params.equilibrium_distance = (ra + rb + rabshift) * ff;
 
@@ -1013,20 +1028,32 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     int hyb1_fortran = (hyb1 >= 1 && hyb1 <= 3) ? hyb1 : 3;
     int hyb2_fortran = (hyb2 >= 1 && hyb2 <= 3) ? hyb2 : 3;
 
-    // Get bond strength from hybridization matrix (Fortran gfnff_ini.f90:1127-1133)
+    // Get hybridization indices for lookup (needed for both H and non-H bonds)
     int hybi = std::max(hyb1_fortran, hyb2_fortran);  // Max hyb index
     int hybj = std::min(hyb1_fortran, hyb2_fortran);  // Min hyb index
 
+    // CRITICAL FIX (Phase 11): Special handling for hydrogen bonds!
+    // Fortran gfnff_param.f90 has bsmat(1,1)=1.98 for sp-sp (triple bond)
+    // But Fortran gfnff_ini.f90:1069 sets bbtyp=3 for ANY sp-X bond!
+    // For H-H (both atoms Z=1), this incorrectly uses triple bond strength
+    // Solution: H-H and H-X bonds should be SINGLE BONDS (bstrength=1.0)
     double bstrength;
-    if (hybi == 5 || hybj == 5) {
-        // Hypervalent atoms
-        bstrength = bstren[4];  // 1.22
+
+    if (z1 == 1 || z2 == 1) {
+        // Hydrogen bonds are always single bonds in GFN-FF
+        bstrength = bstren[1];  // 1.00 (single bond)
     } else {
-        // Normal hybridization: lookup in bsmat
-        // Since Curcuma uses 1-3, and bsmat is indexed 0-3, we need to map:
-        // Curcuma hyb=1,2,3 → bsmat indices 1,2,3 (Fortran hyb=1,2,3)
-        // But bsmat also has index 0 for unknown → use hyb=3 for unknown
-        bstrength = bsmat[hybi][hybj];
+        // Get bond strength from hybridization matrix (Fortran gfnff_ini.f90:1127-1133)
+        if (hybi == 5 || hybj == 5) {
+            // Hypervalent atoms
+            bstrength = bstren[4];  // 1.22
+        } else {
+            // Normal hybridization: lookup in bsmat
+            // Since Curcuma uses 1-3, and bsmat is indexed 0-3, we need to map:
+            // Curcuma hyb=1,2,3 → bsmat indices 1,2,3 (Fortran hyb=1,2,3)
+            // But bsmat also has index 0 for unknown → use hyb=3 for unknown
+            bstrength = bsmat[hybi][hybj];
+        }
     }
 
     // Phase 3: Special cases (Fortran gfnff_ini.f90:1134-1142)
@@ -1244,17 +1271,19 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     int group1 = (z1 >= 1 && z1 <= 86) ? periodic_group[z1 - 1] : 0;
     int group2 = (z2 >= 1 && z2 <= 86) ? periodic_group[z2 - 1] : 0;
 
-    // Metal type classification (Fortran gfnff_ini.f90:1199-1208)
+    // Metal type classification (Fortran gfnff_ini.f90:1158-1167)
+    // CRITICAL: H must not be treated as alkali metal even though it's in group 1!
     int mtyp1 = 0;  // 0=non-metal, 1=Group1, 2=Group2, 3=main group metal, 4=TM
     int mtyp2 = 0;
 
-    if (group1 == 1) mtyp1 = 1;  // Li, Na, K, Rb, Cs
-    else if (group1 == 2) mtyp1 = 2;  // Be, Mg, Ca, Sr, Ba
+    // Hydrogen is explicitly non-metal (Z=1 → mtyp=0)
+    if (z1 > 1 && group1 == 1) mtyp1 = 1;  // Li, Na, K, Rb, Cs (NOT hydrogen!)
+    else if (z1 > 1 && group1 == 2) mtyp1 = 2;  // Be, Mg, Ca, Sr, Ba
     else if (group1 > 2 && imetal1 == 1) mtyp1 = 3;  // Al, Ga, In, Sn, Pb, Bi, Po
     else if (imetal1 == 2) mtyp1 = 4;  // Transition metals
 
-    if (group2 == 1) mtyp2 = 1;
-    else if (group2 == 2) mtyp2 = 2;
+    if (z2 > 1 && group2 == 1) mtyp2 = 1;  // Li, Na, K, Rb, Cs (NOT hydrogen!)
+    else if (z2 > 1 && group2 == 2) mtyp2 = 2;
     else if (group2 > 2 && imetal2 == 1) mtyp2 = 3;
     else if (imetal2 == 2) mtyp2 = 4;
 
@@ -1362,21 +1391,23 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // Phase 7 completes this formula with fheavy and updated fxh/fcn
     params.force_constant = -(bond_param_1 * bond_param_2 * bstrength * fqq * ringf * fheavy * fpi * fxh * fcn);
 
-    // Step 11: Alpha parameter with metal-specific sign flip (Fortran gfnff_ini.f90:1260-1264)
-    double srb1 = 16.0;   // Base decay parameter
-    double fsrb2;
-    double srb3 = 0.5;    // Bond strength scaling
+    // Step 11: Alpha parameter with metal-specific sign flip (Fortran gfnff_param.f90:642-644, gfnff_ini.f90:1240)
+    // CRITICAL PARAMETERS FROM FORTRAN (these were WRONG in earlier implementation!)
+    double srb1 = 0.3731;   // Fortran: gen%srb1
+    double srb2 = 0.3171;   // Fortran: gen%srb2
+    double srb3 = 0.2538;   // Fortran: gen%srb3
 
-    // CRITICAL: Alpha parameter EN-dependence SIGN FLIPS for transition metals!
+    // EN-dependence scaling with metal-specific SIGN FLIP (Fortran gfnff_ini.f90:1227-1234)
+    double fsrb2;
     if (mtyp1 == 4 || mtyp2 == 4) {
-        // Transition metals: INVERSE EN dependence
-        fsrb2 = -0.1 * 0.22;  // Negative! (Fortran: -gen.srb2*0.22)
+        // Transition metals: INVERSE EN dependence (negative sign!)
+        fsrb2 = -srb2 * 0.22;  // Fortran: -gen.srb2*0.22
     } else if (mtyp1 > 0 || mtyp2 > 0) {
         // Other metals: normal but scaled EN dependence
-        fsrb2 = 0.1 * 0.28;   // Fortran: gen.srb2*0.28
+        fsrb2 = srb2 * 0.28;   // Fortran: gen.srb2*0.28
     } else {
-        // Non-metals: standard EN dependence
-        fsrb2 = 0.1;
+        // Non-metals: standard EN dependence (Fortran gfnff_ini.f90:1233)
+        fsrb2 = srb2;  // Just srb2 directly
     }
 
     params.alpha = srb1 * (1.0 + fsrb2 * en_diff * en_diff + srb3 * (bstrength - 1.0));
@@ -1384,6 +1415,11 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success(fmt::format("  FINAL: fc={:.4f}, r_eq={:.4f} Bohr, alpha={:.4f} (fsrb2={:.4f})",
                                             params.force_constant, params.equilibrium_distance, params.alpha, fsrb2));
+        // Detailed factor breakdown for debugging
+        CurcumaLogger::info(fmt::format("  Force Constant Factors: bond_i={:.4f}, bond_j={:.4f}, bstrength={:.4f}",
+                                        bond_param_1, bond_param_2, bstrength));
+        CurcumaLogger::info(fmt::format("  Corrections: fqq={:.4f}, ringf={:.4f}, fheavy={:.4f}, fpi={:.4f}, fxh={:.4f}, fcn={:.4f}",
+                                        fqq, ringf, fheavy, fpi, fxh, fcn));
     }
 
     return params;
