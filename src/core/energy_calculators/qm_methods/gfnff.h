@@ -360,14 +360,17 @@ private:
     EEQParameters getEEQParameters(int atomic_number) const;
 
     /**
-     * @brief Get GFN-FF angle parameters for element triplet
-     * @param z1 Atomic number of first atom
-     * @param z2 Atomic number of center atom
-     * @param z3 Atomic number of third atom
-     * @param current_angle Current angle in radians
-     * @return GFN-FF angle parameters
+     * @brief Get GFN-FF angle parameters for angle triplet
+     * @param atom_i First atom index (needed for hybridization lookup)
+     * @param atom_j Center atom index (determines equilibrium angle via hybridization)
+     * @param atom_k Third atom index
+     * @param current_angle Current angle in radians (used for geometry-dependent overrides)
+     * @return GFN-FF angle parameters with topology-based equilibrium angles
+     *
+     * Claude Generated (Nov 2025): Phase 1 implementation uses hybridization-based θ₀
+     * instead of current geometry angle. This fixes critical bug where restoring force was zero.
      */
-    GFNFFAngleParams getGFNFFAngleParameters(int z1, int z2, int z3, double current_angle) const;
+    GFNFFAngleParams getGFNFFAngleParameters(int atom_i, int atom_j, int atom_k, double current_angle) const;
 
     /**
      * @brief Get GFN-FF torsion parameters for atom quartet

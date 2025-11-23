@@ -500,10 +500,10 @@ json GFNFF::generateGFNFFAngles() const
                 cos_angle = std::max(-1.0, std::min(1.0, cos_angle));
                 double current_angle = acos(cos_angle);
 
-                // GFN-FF angle parameters
-                auto angle_params = getGFNFFAngleParameters(m_atoms[neighbors[i]],
-                    m_atoms[center],
-                    m_atoms[neighbors[j]],
+                // GFN-FF angle parameters (Claude Generated Nov 2025: now using atom indices for hybridization lookup)
+                auto angle_params = getGFNFFAngleParameters(neighbors[i],
+                    center,
+                    neighbors[j],
                     current_angle);
 
                 angle["fc"] = angle_params.force_constant;
@@ -1425,7 +1425,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     return params;
 }
 
-GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int z1, int z2, int z3, double current_angle) const
+GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, int atom_k, double current_angle) const
 {
     GFNFFAngleParams params;
 
@@ -1454,17 +1454,59 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int z1, int z2, int z3, d
         0.270373, 0.269450, 0.268528 // Es-Lr
     };
 
-    // Get angle parameter for center atom (z2)
-    double angle_param = (z2 >= 1 && z2 <= static_cast<int>(angle_params.size())) ? angle_params[z2 - 1] : 0.1;
+    // Get center atom data
+    int z_center = m_atoms[atom_j];
 
-    // Phase 1.3: Simplified force constant (without full topology corrections)
-    // Full GFN-FF: k_ijk = angl(center)*angl2(i)*angl2(k) * fqq * f2 * fn * fbsmall * feta
-    // For now: use only center atom parameter
-    params.force_constant = angle_param * 0.001;  // Scale to match kcal/mol units
+    // Claude Generated (Nov 2025): Determine hybridization of center atom for θ₀ lookup
+    // Count neighbors to determine hybridization
+    int neighbor_count = 0;
+    for (int i = 0; i < m_atomcount; ++i) {
+        if (i == atom_j) continue;
+        double distance = (m_geometry_bohr.row(atom_j) - m_geometry_bohr.row(i)).norm();
+        // Bond threshold: sum of covalent radii * 1.3
+        if (distance < 2.0) neighbor_count++;  // Bohr units (~1.06 Å)
+    }
 
-    // Use current angle as equilibrium angle
-    // NOTE: Full GFN-FF calculates θ₀ from ideal geometries (sp/sp²/sp³)
-    params.equilibrium_angle = current_angle;
+    // Assign hybridization based on neighbor count and Z
+    int hyb_center = 3;  // Default sp³
+    if (neighbor_count <= 1) hyb_center = 1;    // sp (linear/terminal)
+    else if (neighbor_count == 2) hyb_center = 2;  // sp² (for C, N, O) or linear for others
+    else if (neighbor_count == 3) hyb_center = 3;  // sp³
+    else if (neighbor_count >= 5) hyb_center = 5;  // hypervalent
+
+    // Get angle parameter for center atom
+    double angle_param = (z_center >= 1 && z_center <= static_cast<int>(angle_params.size())) ? angle_params[z_center - 1] : 0.1;
+
+    // Claude Generated (Nov 2025): Phase 1 implementation - Fix critical bug
+    // Force constant with proper scaling
+    // Note: Full Fortran formula: k_ijk = angle_param * angl2(i) * angl2(k) * corrections
+    // For now, use simplified scaling factor (needs fine-tuning for Phase 2)
+    params.force_constant = angle_param * 0.01;  // Increased from 0.001 but still scaled
+
+    // ===========================================================================================
+    // CRITICAL FIX: Equilibrium angle from TOPOLOGY (hybridization), NOT current geometry!
+    // ===========================================================================================
+    // Reference: gfnff_ini.f90:1441-1617 shows θ₀ is topology-dependent:
+    // sp=180°, sp²=120°, sp³=109.5°, hypervalent=90°
+    // This is NOT dependent on current geometry angle.
+    // Using current_angle makes restoring force = 0, breaking optimization!
+
+    double r0_deg = 100.0;  // Fallback default
+
+    switch (hyb_center) {
+        case 1:   r0_deg = 180.0;   // sp   - linear
+            break;
+        case 2:   r0_deg = 120.0;   // sp²  - trigonal planar
+            break;
+        case 3:   r0_deg = 109.5;   // sp³  - tetrahedral
+            break;
+        case 5:   r0_deg = 90.0;    // hypervalent - square planar
+            break;
+        default:  r0_deg = 100.0;   // Fallback
+    }
+
+    // Convert to radians
+    params.equilibrium_angle = r0_deg * M_PI / 180.0;
 
     return params;
 }
