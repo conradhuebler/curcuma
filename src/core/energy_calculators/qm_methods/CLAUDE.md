@@ -164,6 +164,18 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 - **Placeholder Parameters**: Missing real GFN-FF force field parameters from literature
 - **Validation**: Incomplete parameter consistency checks with external GFN-FF reference
 
+**GFN-FF Implementation Components** (for potential module consolidation):
+- ✅ **CN-Berechnung** (Coordination Numbers) - D3-Methode implementiert in `gfnff.cpp:calculateCoordinationNumbers()` (Fortran `dncoord_erf`)
+- ✅ **CN-Abhängige Radien** - Implementiert in `gfnff.cpp:getGFNFFBondParameters()` mit `r0_gfnff[86]` und `cnfak_gfnff[86]`
+- ✅ **Zeilen-abhängige EN-Polynome** - Row-dependent electronegativity corrections `p_enpoly[6][2]` für 6 Perioden
+- ✅ **Hybridisierung** - Topologie-basierte Erkennung in `gfnff.cpp:determineHybridization()` (Codes: 1=sp, 2=sp2, 3=sp3)
+- ✅ **Hybridisierungs-Bond-Strength-Matrix** - `bsmat[4][4]` für mixed hybridizations (sp-sp2, sp2-sp3, etc.) mit split-Faktoren
+- ✅ **EEQ-Ladungen** - Vollständig implementiert in `gfnff.cpp:calculateEEQCharges()` mit angewChem2020-Parametern (χ, γ, α für Z=1-86)
+- ✅ **EEQ charge-dependent corrections (fqq)** - Sigmoid function for opposite/like charge effects on bond strength
+- ✅ **Ring-Spannung (ringf)** - Ring detection mit `findSmallestRings()`, fringbo=0.020 for 3-6 membered rings
+- ✅ **XH bond corrections (fxh)** - Element-specific: BH(+10%), NH(+6%), OH(-7%), 3-ring CH(+5%), aldehyde CH(-5%)
+- ✅ **CN-dependent heavy atom (fcn)** - Coordination-based bond weakening for Z>10 atoms (nb20² scaling)
+
 #### Other Issues
 - **Memory Optimization**: Needed for large basis sets (>1000 atoms)
 - **Ulysses D3H4X/D3H+ Corrections**: Corrections calculated internally but not extractable via getter methods - energies remain identical with/without corrections

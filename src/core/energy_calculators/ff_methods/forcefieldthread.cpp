@@ -45,7 +45,7 @@ int ForceFieldThread::execute()
     m_dihedral_energy = 0;
     m_angle_energy = 0;
     m_bond_energy = 0.0;
-
+    std::cout << "Forcefield threads" << std::endl;
     if (m_method == 1) {
         CalculateUFFBondContribution();
         CalculateUFFAngleContribution();
@@ -55,6 +55,7 @@ int ForceFieldThread::execute()
         // CalculateUFFBondContribution();
         CalculateQMDFFAngleContribution();
     } else if (m_method == 3) {
+        std::cout << "GFN-FF Energy Calculation Started in Thread " << m_thread << std::endl;
         // GFN-FF bonded terms
         CalculateGFNFFBondContribution();
         CalculateGFNFFAngleContribution();
@@ -594,7 +595,7 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
     // Phase 1.3: Correct GFN-FF exponential bond potential
     // Formula from Fortran gfnff_engrad.F90:675-721
     // E_bond = k_b * exp(-α * (r - r₀)²)
-
+    
     double factor = m_final_factor * m_bond_scaling;
 
     for (int index = 0; index < m_gfnff_bonds.size(); ++index) {
@@ -606,12 +607,17 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
         double rij = UFF::BondStretching(i, j, derivate, m_calculate_gradient);
 
         // GFN-FF exponential bond stretching: E = k_b * exp(-α * (r-r₀)²)
+        // Note: k_b is stored as NEGATIVE in gfnff.cpp:1358 for attractive bonds
         double dr = rij - bond.r0_ij;           // r - r₀
         double alpha = bond.exponent;            // α stored in exponent field
-        double k_b = bond.fc;                    // Force constant
+        double k_b = bond.fc;                    // Force constant (already negative!)
         double exp_term = std::exp(-alpha * dr * dr);
-        double energy = k_b * exp_term;
-
+        double energy = k_b * exp_term;          // k_b already contains sign
+        std::cout << "Bond " << bond.i << "-" << bond.j << ": "
+                  << "k_b=" << k_b << ", alpha=" << alpha << ", "
+                  << "r=" << rij << ", r0=" << bond.r0_ij << ", "
+                  << "dr=" << dr << ", exp=" << exp_term << ", "
+                  << "E=" << energy << ", factor=" << factor << std::endl;
         m_bond_energy += energy * factor;
 
         if (m_calculate_gradient) {
@@ -625,13 +631,25 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
 
 void ForceFieldThread::CalculateGFNFFAngleContribution()
 {
-    // Phase 1.3: Correct GFN-FF angle bending potential
-    // Formula from Fortran gfnff_engrad.F90:857-892
-    // E_angle = k_ijk * (θ - θ₀)²
+    // Phase 1: Correct GFN-FF angle bending potential
+    // Formula from Fortran gfnff_engrad.F90:857-916 (subroutine egbend)
+    //
+    // IMPORTANT: GFN-FF uses cosine-based potential, NOT harmonic in θ!
+    //
+    // For normal angles (θ₀ != π):
+    //   E = k * (cosθ - cosθ₀)²
+    //   dE/dθ = 2*k*sinθ*(cosθ₀ - cosθ)
+    //
+    // For linear angles (θ₀ ≈ π):
+    //   E = k * (θ - θ₀)²
+    //   dE/dθ = 2*k*(θ - θ₀)
+    //
     // NOTE: Full GFN-FF includes distance damping (damp_ij * damp_jk)
-    // Phase 1.3: Simplified version without damping
+    //       Current implementation: Simplified version without damping
 
-    double factor = m_final_factor * m_angle_scaling;
+    const double factor = m_final_factor * m_angle_scaling;
+    const double pi = 3.14159265358979323846;
+    const double linear_threshold = 1.0e-6;  // Fortran: pi-c0 .lt. 1.d-6
 
     for (int index = 0; index < m_gfnff_angles.size(); ++index) {
         const auto& angle = m_gfnff_angles[index];
@@ -641,20 +659,44 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
         Matrix derivate;
         double costheta = UFF::AngleBending(i, j, k, derivate, m_calculate_gradient);
 
-        // GFN-FF angle bending: E = k * (θ - θ₀)²
-        double theta = std::acos(std::max(-1.0, std::min(1.0, costheta)));  // Current angle
-        double theta0 = angle.theta0_ijk;                                    // Equilibrium angle
-        double dtheta = theta - theta0;                                      // Angle deviation
-        double energy = angle.fc * dtheta * dtheta;
+        // Clamp cosine to valid range [-1, 1] for numerical stability
+        costheta = std::max(-1.0, std::min(1.0, costheta));
+
+        double theta = std::acos(costheta);    // Current angle [0, π]
+        double theta0 = angle.theta0_ijk;      // Equilibrium angle [0, π]
+        double k_ijk = angle.fc;               // Force constant
+
+        double energy, dedtheta;
+
+        // Check if equilibrium angle is linear (θ₀ ≈ π)
+        if (std::abs(pi - theta0) < linear_threshold) {
+            // Linear case: E = k*(θ - θ₀)² (harmonic in θ)
+            // Fortran gfnff_engrad.F90:895-897
+            double dtheta = theta - theta0;
+            energy = k_ijk * dtheta * dtheta;
+            dedtheta = 2.0 * k_ijk * dtheta;
+        } else {
+            // Normal case: E = k*(cosθ - cosθ₀)² (cosine-based)
+            // Fortran gfnff_engrad.F90:899-900
+            double costheta0 = std::cos(theta0);
+            double dcostheta = costheta - costheta0;
+            energy = k_ijk * dcostheta * dcostheta;
+
+            // dE/dθ = dE/d(cosθ) * d(cosθ)/dθ
+            //       = 2*k*(cosθ - cosθ₀) * (-sinθ)
+            //       = 2*k*sinθ*(cosθ₀ - cosθ)
+            double sintheta = std::sin(theta);
+            dedtheta = 2.0 * k_ijk * sintheta * (costheta0 - costheta);
+        }
 
         m_angle_energy += energy * factor;
 
         if (m_calculate_gradient) {
-            // dE/dθ = 2*k*(θ - θ₀)
-            double dEdtheta = 2.0 * angle.fc * dtheta * factor;
-            m_gradient.row(angle.i) += dEdtheta * derivate.row(0);
-            m_gradient.row(angle.j) += dEdtheta * derivate.row(1);
-            m_gradient.row(angle.k) += dEdtheta * derivate.row(2);
+            // Apply chain rule: dE/dx = (dE/dθ) * (dθ/dx)
+            // UFF::AngleBending returns dθ/dx in derivate matrix
+            m_gradient.row(angle.i) += dedtheta * factor * derivate.row(0);
+            m_gradient.row(angle.j) += dedtheta * factor * derivate.row(1);
+            m_gradient.row(angle.k) += dedtheta * factor * derivate.row(2);
         }
     }
 }
@@ -836,12 +878,25 @@ void ForceFieldThread::CalculateGFNFFRepulsionContribution()
     /**
      * @brief GFN-FF Repulsion term (pairwise parallelizable)
      *
-     * Reference: Fortran gfnff_engrad.F90:407-439 (bonded repulsion)
+     * Reference: Fortran gfnff_engrad.F90:407-439 (bonded repulsion with repscalb=1.7583)
+     *                      gfnff_engrad.F90:228 (non-bonded repulsion with repscaln=0.4270)
      * Formula: E_rep = repab * exp(-α*r^β) / r
      * GFN-FF uses β=1.5 (r^1.5 exponent)
      *
      * Claude Generated (2025): Phase 4 pairwise non-bonded implementation
+     * Feb 2025: Added bonded/non-bonded scaling factors from Fortran gfnff_param.f90:373-374
      */
+
+    // Scaling factors from Fortran (gfnff_param.f90:373-374)
+    static const double REPSCALB = 1.7583;  // Bonded repulsion scaling
+    static const double REPSCALN = 0.4270;  // Non-bonded repulsion scaling
+
+    // Build set of bonded pairs for fast lookup
+    std::set<std::pair<int, int>> bonded_pairs;
+    for (const auto& bond : m_gfnff_bonds) {
+        bonded_pairs.insert({bond.i, bond.j});
+        bonded_pairs.insert({bond.j, bond.i});  // symmetric
+    }
 
     for (int index = 0; index < m_gfnff_repulsions.size(); ++index) {
         const auto& rep = m_gfnff_repulsions[index];
@@ -853,10 +908,14 @@ void ForceFieldThread::CalculateGFNFFRepulsionContribution()
 
         if (rij > rep.r_cut || rij < 1e-10) continue;
 
-        // GFN-FF repulsion: E = repab * exp(-α*r^1.5) / r
+        // Check if this is a bonded or non-bonded pair
+        bool is_bonded = bonded_pairs.count({rep.i, rep.j}) > 0;
+        double scale = is_bonded ? REPSCALB : REPSCALN;
+
+        // GFN-FF repulsion: E = repab * scale * exp(-α*r^1.5) / r
         double r_1_5 = std::pow(rij, 1.5);
         double exp_term = std::exp(-rep.alpha * r_1_5);
-        double energy = rep.repab * exp_term / rij;
+        double energy = rep.repab * scale * exp_term / rij;
 
         m_rep_energy += energy * m_final_factor * m_rep_scaling;
 

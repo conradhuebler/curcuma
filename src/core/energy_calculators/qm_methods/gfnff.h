@@ -46,6 +46,19 @@ using json = nlohmann::json;
 class GFNFF : public QMInterface {
 public:
     /**
+     * @brief Phase 9: Topology information structure (moved here for use in function signatures)
+     */
+    struct TopologyInfo {
+        Vector coordination_numbers;
+        std::vector<int> hybridization;
+        std::vector<int> pi_fragments;
+        std::vector<int> ring_sizes;
+        Vector eeq_charges;
+        std::vector<bool> is_metal;
+        std::vector<bool> is_aromatic;
+    };
+
+    /**
      * @brief Default constructor
      */
     GFNFF();
@@ -310,7 +323,18 @@ private:
      * @param distance Current bond distance
      * @return GFN-FF bond parameters
      */
-    GFNFFBondParams getGFNFFBondParameters(int z1, int z2, double distance) const;
+    /**
+     * @brief Get GFN-FF bond parameters with full topology corrections (Phase 9)
+     * @param atom1 First atom index
+     * @param atom2 Second atom index
+     * @param z1 Atomic number of first atom
+     * @param z2 Atomic number of second atom
+     * @param distance Current bond distance
+     * @param topo Topology information (CN, hyb, charges, rings)
+     * @return GFN-FF bond parameters with all corrections
+     */
+    GFNFFBondParams getGFNFFBondParameters(int atom1, int atom2, int z1, int z2,
+                                            double distance, const TopologyInfo& topo) const;
 
     /**
      * @brief Load atomic charges from reference GFN-FF calculation
@@ -598,16 +622,7 @@ private:
     json detectHydrogenBonds(const Vector& charges) const;
 
     // Advanced parameter structures (EEQParameters already defined above at line 298)
-
-    struct TopologyInfo {
-        Vector coordination_numbers;
-        std::vector<int> hybridization;
-        std::vector<int> pi_fragments;
-        std::vector<int> ring_sizes;
-        Vector eeq_charges;
-        std::vector<bool> is_metal;
-        std::vector<bool> is_aromatic;
-    };
+    // TopologyInfo now defined at line 51 (public section) for use in function signatures
 
     /**
      * @brief Calculate full topology information for advanced parametrization
@@ -626,6 +641,7 @@ private:
 private:
     json m_parameters; ///< GFN-FF parameters
     ForceField* m_forcefield; ///< Force field engine using modern structure
+    Matrix m_geometry_bohr; ///< Geometry in Bohr (GFN-FF parameters are in Bohr)
 
     bool m_initialized; ///< Initialization status
 
