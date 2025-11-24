@@ -243,19 +243,23 @@ double GFNFFInterface::Calculation(bool gradient)
         return 0.0;
     }
 
-    m_energy = energy;
+    // Convert returned energy from kcal/mol to Hartree
+    const double kcal_to_hartree = 1.0 / 627.5095; // 1 Hartree = 627.5095 kcal/mol
+    m_energy = energy * kcal_to_hartree;
 
     // Level 1+: Final energy result
     if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::energy_abs(energy, "External GFN-FF Energy");
+    CurcumaLogger::energy_abs(m_energy, "External GFN-FF Energy");
     }
 
     // Handle gradient
     if (gradient && grad_ptr != nullptr) {
+        // Convert gradient from kcal/(mol Å) to Hartree/Bohr
+        const double conv = 0.52917721092 / 627.5095; // ≈ 0.000843431
         for (int i = 0; i < m_natoms; ++i) {
-            m_gradient(i, 0) = grad_data[3 * i + 0] * au; // Convert back to Angstrom
-            m_gradient(i, 1) = grad_data[3 * i + 1] * au;
-            m_gradient(i, 2) = grad_data[3 * i + 2] * au;
+            m_gradient(i, 0) = grad_data[3 * i + 0] * conv;
+            m_gradient(i, 1) = grad_data[3 * i + 1] * conv;
+            m_gradient(i, 2) = grad_data[3 * i + 2] * conv;
         }
 
         if (CurcumaLogger::get_verbosity() >= 2) {
@@ -272,7 +276,7 @@ double GFNFFInterface::Calculation(bool gradient)
         }
     }
 
-    return energy;
+    return m_energy;
 #else
     CurcumaLogger::error("External GFN-FF not available - USE_GFNFF not compiled");
     return 0.0;

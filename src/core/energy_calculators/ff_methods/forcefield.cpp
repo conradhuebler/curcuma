@@ -621,6 +621,7 @@ void ForceField::AutoRanges()
     for (int i = 0; i < free_threads; ++i) {
         ForceFieldThread* thread = new ForceFieldThread(i, free_threads);
         thread->setGeometry(m_geometry, false);
+        thread->Initialise(m_atom_types);  // Phase 3: Initialize atom types for covalent radius calculations
         m_threadpool->addThread(thread);
         m_stored_threads.push_back(thread);
         if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) {

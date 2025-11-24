@@ -175,6 +175,12 @@ public:
     void addGFNFFRepulsion(const GFNFFRepulsion& repulsion);
     void addGFNFFCoulomb(const GFNFFCoulomb& coulomb);
 
+    // Phase 3: Initialize atom types for covalent radius calculations in GFN-FF
+    void Initialise(const std::vector<int>& atom_types)
+    {
+        m_atom_types = atom_types;
+    }
+
     inline void UpdateGeometry(const Matrix& geometry, bool gradient)
     {
         m_geometry = geometry;
@@ -276,6 +282,9 @@ protected:
     int m_calc_gradient = 1;
     int m_thread = 0, m_threads = 0, m_method = 1;
     bool m_calculate_gradient = true;
+
+    // Phase 3: Atom types for covalent radius calculations in GFN-FF
+    std::vector<int> m_atom_types;
 };
 
 #ifdef USE_D3

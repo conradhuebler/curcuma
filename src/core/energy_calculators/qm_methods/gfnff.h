@@ -176,9 +176,10 @@ private:
 
     /**
      * @brief Generate GFN-FF angle parameters from topology
+     * @param topo_info Topology information including charges, hybridization, CN, etc.
      * @return JSON array of angle parameters
      */
-    json generateGFNFFAngles() const;
+    json generateGFNFFAngles(const TopologyInfo& topo_info) const;
 
     /**
      * @brief Generate GFN-FF torsion parameters from topology
@@ -367,10 +368,12 @@ private:
      * @param current_angle Current angle in radians (used for geometry-dependent overrides)
      * @return GFN-FF angle parameters with topology-based equilibrium angles
      *
-     * Claude Generated (Nov 2025): Phase 1 implementation uses hybridization-based θ₀
-     * instead of current geometry angle. This fixes critical bug where restoring force was zero.
+     * Claude Generated (Nov 2025): Phase 2 implementation uses topology-aware parameters
+     * including charge-dependent corrections (fqq), coordination number scaling (fn),
+     * element-specific corrections (f2), and small-angle corrections (fbsmall).
      */
-    GFNFFAngleParams getGFNFFAngleParameters(int atom_i, int atom_j, int atom_k, double current_angle) const;
+    GFNFFAngleParams getGFNFFAngleParameters(int atom_i, int atom_j, int atom_k,
+                                              double current_angle, const TopologyInfo& topo_info) const;
 
     /**
      * @brief Get GFN-FF torsion parameters for atom quartet

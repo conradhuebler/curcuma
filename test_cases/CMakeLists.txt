@@ -77,6 +77,28 @@ endif()
 # Note: test_cg_forcefield_integration removed due to complex linking with curcuma_D3
 # CG functionality will be tested via CLI integration test instead
 
+# Claude Generated: GFN-FF Regression Test Suite
+# Tests native cgfnff against XTB 6.6.1 reference data (Nov 2025)
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/molecules/dimers/HH.xyz
+          ${CMAKE_CURRENT_SOURCE_DIR}/molecules/dimers/HH.opt.xyz
+          ${CMAKE_CURRENT_SOURCE_DIR}/molecules/dimers/OH.xyz
+          DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/molecules/dimers/)
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/molecules/trimers/water.xyz
+          DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/molecules/trimers/)
+
+add_executable(test_gfnff_regression
+        test_gfnff_regression.cpp)
+
+target_link_libraries(test_gfnff_regression curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_regression REUSE_FROM curcuma_core)
+endif()
+
+# Register with CTest
+add_test(NAME test_gfnff_regression
+         COMMAND test_gfnff_regression ${CMAKE_CURRENT_BINARY_DIR})
+
 # todo restore
 
 # Claude Generated: Debug Ulysses methods test

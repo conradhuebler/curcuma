@@ -6,6 +6,15 @@
 
 **Educational Purpose**: Teaching and research platform prioritizing pedagogical clarity over complex software engineering. Goal: learn, understand, and implement computational chemistry methods without getting lost in C++ abstractions.
 
+## Very General Instructions for AI Coding
+- Avoid flattery, compliments, or positive language. Be clear and concise. Do not use agreeable language to deceive.
+- Do comprehensive verification before claiming completion
+- Show me proof of completion, don’t just assert it
+- Prioritize thoroughness over speed
+- If I correct you, adapt your method for the rest of the task
+- No completion claims until you can demonstrate zero remaining instances
+- Dont use git -A to blindly add files
+
 ## General Instructions
 
 - Each source code dir has a CLAUDE.md with basic information of the code and logic
