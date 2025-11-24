@@ -95,6 +95,15 @@ void ForceField::UpdateGeometry(const std::vector<std::array<double, 3>>& geomet
     }
 }
 
+void ForceField::distributeEEQCharges(const Vector& charges)
+{
+    // Phase 5A: Distribute EEQ charges to all threads for fqq calculation
+    // Claude Generated (Nov 2025)
+    for (int i = 0; i < m_stored_threads.size(); ++i) {
+        m_stored_threads[i]->setEEQCharges(charges);
+    }
+}
+
 void ForceField::setParameter(const json& parameters)
 {
     static bool in_setParameter = false;

@@ -666,6 +666,35 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
         double theta0 = angle.theta0_ijk;      // Equilibrium angle [0, π]
         double k_ijk = angle.fc;               // Force constant
 
+        // ===== PHASE 5A: fqq charge-dependent angle correction =====
+        // Reference: Fortran gfnff_ini.f90:1426-1430
+        // Formula: fqq = 1.0 - (qa_j*qa_i + qa_j*qa_k) * qfacBEN
+        // Parameter: qfacBEN = -0.54 (gfnff_param.f90:741)
+        // Claude Generated (Nov 2025)
+        const double qfacBEN = -0.54;
+        double fqq = 1.0;  // Default (no correction)
+
+        if (angle.i < m_eeq_charges.size() &&
+            angle.j < m_eeq_charges.size() &&
+            angle.k < m_eeq_charges.size()) {
+
+            double qa_j = m_eeq_charges[angle.j];  // Center atom
+            double qa_i = m_eeq_charges[angle.i];
+            double qa_k = m_eeq_charges[angle.k];
+
+            // Safety check: charges should be reasonable ([-1, 1] range)
+            if (std::abs(qa_j) < 1.0 && std::abs(qa_i) < 1.0 && std::abs(qa_k) < 1.0) {
+                double charge_product = qa_j * qa_i + qa_j * qa_k;
+                fqq = 1.0 - charge_product * qfacBEN;
+
+                // TODO Phase 5B: Metal case uses 2.5x stronger correction
+                // Requires is_metal[] to be passed to threads
+            }
+        }
+
+        // Apply fqq correction to force constant
+        k_ijk *= fqq;
+
         double energy, dedtheta;
 
         // Check if equilibrium angle is linear (θ₀ ≈ π)

@@ -102,6 +102,9 @@ public:
     static std::string generateParameterFileName(const std::string& geometry_file);
     void setParameterCaching(bool enable) { m_enable_caching = enable; }
 
+    // Phase 5A: Distribute EEQ charges to all threads for fqq calculation (Claude Generated Nov 2025)
+    void distributeEEQCharges(const Vector& charges);
+
     Eigen::MatrixXd NumGrad();
 
     // Claude Generated: Parameter analysis functionality

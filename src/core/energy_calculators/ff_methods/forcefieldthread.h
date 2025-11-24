@@ -181,6 +181,12 @@ public:
         m_atom_types = atom_types;
     }
 
+    // Phase 5A: Set EEQ charges for fqq calculation (Claude Generated Nov 2025)
+    void setEEQCharges(const Vector& charges)
+    {
+        m_eeq_charges = charges;
+    }
+
     inline void UpdateGeometry(const Matrix& geometry, bool gradient)
     {
         m_geometry = geometry;
@@ -285,6 +291,9 @@ protected:
 
     // Phase 3: Atom types for covalent radius calculations in GFN-FF
     std::vector<int> m_atom_types;
+
+    // Phase 5A: EEQ charges for fqq angle correction (Claude Generated Nov 2025)
+    Vector m_eeq_charges;
 };
 
 #ifdef USE_D3

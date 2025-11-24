@@ -286,6 +286,16 @@ bool GFNFF::initializeForceField()
 
     m_forcefield->setParameter(ff_params);
 
+    // Phase 5A: Distribute EEQ charges to all ForceFieldThreads for fqq calculation
+    // Claude Generated (Nov 2025)
+    if (!m_charges.isZero()) {
+        m_forcefield->distributeEEQCharges(m_charges);
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("EEQ charges distributed to ForceFieldThreads");
+            CurcumaLogger::param("charge_count", std::to_string(m_charges.size()));
+        }
+    }
+
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success("ForceField initialization complete");
     }
@@ -710,7 +720,8 @@ GFNFF::EEQParameters GFNFF::getEEQParameters(int atomic_number) const
         int idx = atomic_number - 1;  // Convert to 0-based indexing
         params.chi = chi_eeq[idx];
         params.gam = gam_eeq[idx];
-        params.alp = alp_eeq[idx];
+        // CRITICAL FIX (Nov 2025): alp must be SQUARED (gfnff_ini.f90:420)
+        params.alp = alp_eeq[idx] * alp_eeq[idx];  // Fortran: topo%alpeeq(i) = param%alp(ati)**2
         params.cnf = cnf_eeq[idx];
         params.xi_corr = 0.0;  // No environment correction in simple version
     } else {
@@ -719,7 +730,7 @@ GFNFF::EEQParameters GFNFF::getEEQParameters(int atomic_number) const
                   << ", using default values" << std::endl;
         params.chi = 1.0;
         params.gam = 0.0;
-        params.alp = 1.0;
+        params.alp = 1.0 * 1.0;  // SQUARED!
         params.cnf = 0.0;
         params.xi_corr = 0.0;
     }
@@ -1537,18 +1548,33 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     // TODO Phase 2b: Proper fijk with angl2 logic from gfnff_param.f90:1359
 
     // Factor 2: fqq = charge-dependent correction for angles
-    // TODO Phase 2b: Re-enable and test fqq after getting fn + fijk working
-    // For now: fqq = 1.0 to test other factors first
-    double fqq = 1.0;
-    // if (atom_i < static_cast<int>(topo_info.eeq_charges.size()) &&
-    //     atom_j < static_cast<int>(topo_info.eeq_charges.size()) &&
-    //     atom_k < static_cast<int>(topo_info.eeq_charges.size())) {
-    //     double q_center = topo_info.eeq_charges[atom_j];
-    //     double q_i = topo_info.eeq_charges[atom_i];
-    //     double q_k = topo_info.eeq_charges[atom_k];
-    //     double qfacBEN = 0.002;
-    //     fqq = 1.0 - (q_center * q_i + q_center * q_k) * qfacBEN;
-    // }
+    // PHASE 5A: Implement from Fortran gfnff_ini.f90:1426-1430
+    // Formula: fqq = 1.0 - (qa_center*qa_j + qa_center*qa_k) * qfacBEN
+    // Parameter: qfacBEN = -0.54 (gfnff_param.f90:741)
+    // Metal case: multiply by 2.5 (stronger correction)
+    const double qfacBEN = -0.54;
+    double fqq = 1.0;  // Default
+
+    // Apply fqq if charges are available and reasonable
+    if (atom_i < topo_info.eeq_charges.size() &&
+        atom_j < topo_info.eeq_charges.size() &&
+        atom_k < topo_info.eeq_charges.size()) {
+
+        double qa_center = topo_info.eeq_charges[atom_j];
+        double qa_i = topo_info.eeq_charges[atom_i];
+        double qa_k = topo_info.eeq_charges[atom_k];
+
+        // Check if charges are in reasonable range (-1 to +1)
+        if (std::abs(qa_center) < 1.0 && std::abs(qa_i) < 1.0 && std::abs(qa_k) < 1.0) {
+            double charge_product = qa_center * qa_i + qa_center * qa_k;
+            bool has_metal = (topo_info.is_metal[atom_i] ||
+                             topo_info.is_metal[atom_j] ||
+                             topo_info.is_metal[atom_k]);
+
+            double factor = has_metal ? 2.5 : 1.0;
+            fqq = 1.0 - charge_product * qfacBEN * factor;
+        }
+    }
 
     // Factor 3: f2 = element-specific correction factor
     // PHASE 4: Implement element-specific f2 for water (gfnff_ini.f90:1486-1491)
@@ -2586,13 +2612,15 @@ GFNFF::EEQParameters GFNFF::getEEQParameters(int atom_idx, const TopologyInfo& t
     if (z >= 1 && z <= static_cast<int>(chi_angewChem2020.size())) {
         params.chi = chi_angewChem2020[z - 1];
         params.gam = gam_angewChem2020[z - 1];
-        params.alp = alp_angewChem2020[z - 1];  // Phase 4.3: Real polarizability (not fixed 5.0)
+        // CRITICAL FIX (Nov 2025): alp must be SQUARED (gfnff_ini.f90:420)
+        double alp_raw = alp_angewChem2020[z - 1];
+        params.alp = alp_raw * alp_raw;  // Fortran: topo%alpeeq(i) = param%alp(ati)**2
         params.cnf = cnf_angewChem2020[z - 1];  // Phase 4.3: CN correction factor
     } else {
         // Fallback values
         params.chi = 1.0;
         params.gam = 0.5;
-        params.alp = 5.0;  // Fallback for undefined elements
+        params.alp = 5.0 * 5.0;  // SQUARED! Fallback for undefined elements
         params.cnf = 0.0;
     }
 
