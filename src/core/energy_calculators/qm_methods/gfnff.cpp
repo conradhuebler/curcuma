@@ -135,11 +135,48 @@ bool GFNFF::UpdateMolecule()
     // Update Bohr geometry for GFN-FF
     m_geometry_bohr = m_geometry * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
 
+    // Invalidate cached topology and bond list because geometry changed
+    m_cached_topology.reset();
+    m_cached_bond_list.reset();
+
     if (m_forcefield) {
         m_forcefield->UpdateGeometry(m_geometry_bohr);  // Pass Bohr geometry
     }
 
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Cached topology helpers
+// ---------------------------------------------------------------------------
+
+const GFNFF::TopologyInfo& GFNFF::getCachedTopology() const {
+    if (!m_cached_topology) {
+        m_cached_topology = calculateTopologyInfo();
+    }
+    return *m_cached_topology;
+}
+
+const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
+    if (!m_cached_bond_list) {
+        // Populate bond list using same detection logic as generateGFNFFBonds but without parameters
+        std::vector<std::pair<int,int>> bonds;
+        double bond_threshold = 1.3;
+        for (int i = 0; i < m_atomcount; ++i) {
+            for (int j = i + 1; j < m_atomcount; ++j) {
+                Vector ri = m_geometry_bohr.row(i);
+                Vector rj = m_geometry_bohr.row(j);
+                double distance = (ri - rj).norm();
+                double rcov_i = getCovalentRadius(m_atoms[i]);
+                double rcov_j = getCovalentRadius(m_atoms[j]);
+                if (distance < bond_threshold * (rcov_i + rcov_j)) {
+                    bonds.emplace_back(i, j);
+                }
+            }
+        }
+        m_cached_bond_list = std::move(bonds);
+    }
+    return *m_cached_bond_list;
 }
 
 double GFNFF::Calculation(bool gradient)
@@ -315,8 +352,8 @@ json GFNFF::generateGFNFFParameters()
     if (use_advanced) {
         std::cout << "Using advanced GFN-FF parametrization (experimental)" << std::endl;
 
-        // Calculate topology information for advanced parametrization
-        TopologyInfo topo_info = calculateTopologyInfo();
+        // Retrieve cached topology information for advanced parametrization
+        const TopologyInfo& topo_info = getCachedTopology();
 
         // Generate advanced parameters
         json bonds = generateTopologyAwareBonds(topo_info.coordination_numbers,
@@ -355,8 +392,8 @@ json GFNFF::generateGFNFFParameters()
     } else {
         std::cout << "Using basic GFN-FF parametrization" << std::endl;
 
-        // Calculate topology information for Phase 2 angle parametrization
-        TopologyInfo topo_info = calculateTopologyInfo();
+        // Retrieve cached topology information for basic parametrization
+        const TopologyInfo& topo_info = getCachedTopology();
 
         // Generate GFN-FF bonds with real parameters
         json bonds = generateGFNFFBonds();
@@ -401,8 +438,8 @@ json GFNFF::generateGFNFFBonds() const
 {
     json bonds = json::array();
 
-    // Phase 9: Calculate topology information for complete bond parameters
-    TopologyInfo topo_info = calculateTopologyInfo();
+    // Use cached topology information to avoid redundant calculations
+    const TopologyInfo& topo_info = getCachedTopology();
 
     // GFN-FF bond detection with connectivity threshold
     double bond_threshold = 1.3; // Factor for covalent radii sum
@@ -462,13 +499,8 @@ json GFNFF::generateGFNFFAngles(const TopologyInfo& topo_info) const
 {
     json angles = json::array();
 
-    // First, collect all bonds for angle detection
-    std::vector<std::pair<int, int>> bond_list;
-    json bonds = generateGFNFFBonds();
-
-    for (const auto& bond : bonds) {
-        bond_list.push_back({ bond["i"], bond["j"] });
-    }
+    // Retrieve cached bond list to avoid recomputing bonds
+    const std::vector<std::pair<int,int>>& bond_list = getCachedBondList();
 
     // Generate angles from bonded topology
     for (int center = 0; center < m_atomcount; ++center) {
@@ -2649,6 +2681,7 @@ json GFNFF::generateGFNFFCoulombPairs() const
      * Formula: E_coul = q_i * q_j * erf(γ_ij * r_ij) / r_ij
      *
      * Claude Generated (2025): Phase 4.2 parameter generation
+     * Phase 9 cache migration: Uses getCachedTopology() to avoid redundant CN/hyb/ring/charge calculations
      */
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -2658,11 +2691,9 @@ json GFNFF::generateGFNFFCoulombPairs() const
 
     json coulomb_pairs = json::array();
 
-    // Calculate EEQ charges (Phase 3 implementation)
-    Vector cn = calculateCoordinationNumbers();
-    std::vector<int> hyb = determineHybridization();
-    std::vector<int> rings = findSmallestRings();
-    Vector charges = calculateEEQCharges(cn, hyb, rings);
+    // Use cached topology information (Phase 9 cache migration)
+    const TopologyInfo& topo_info = getCachedTopology();
+    const Vector& charges = topo_info.eeq_charges;
 
     // Generate all pairwise Coulomb interactions (i<j to avoid double-counting)
     for (int i = 0; i < m_atomcount; ++i) {
@@ -2708,6 +2739,7 @@ json GFNFF::generateGFNFFRepulsionPairs() const
      * Parameters: alpha = sqrt(repa_i * repa_j), repab = repz_i * repz_j * scale
      *
      * Claude Generated (2025): Phase 4.2 parameter generation
+     * Phase 9 cache migration: Uses getCachedBondList() to avoid redundant bond detection
      */
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -2760,16 +2792,12 @@ json GFNFF::generateGFNFFRepulsionPairs() const
     static const double REPSCALB = 1.7583;  // Bonded repulsion scaling
     static const double REPSCALN = 0.4270;  // Non-bonded repulsion scaling
 
-    // Reuse existing bond topology (same pattern as generateGFNFFAngles)
-    // Claude Generated (Nov 2025): Fix duplicate bond detection - use existing topology
-    std::set<std::pair<int, int>> bonded_pairs;
-    json bonds = generateGFNFFBonds();  // Get already-detected bonds (consistent with rest of GFN-FF)
+    // Use cached bond list (Phase 9 cache migration)
+    // Claude Generated (Nov 2025): Avoids redundant bond detection - uses getCachedBondList()
+    const std::vector<std::pair<int,int>>& cached_bonds = getCachedBondList();
 
-    for (const auto& bond : bonds) {
-        int i = bond["i"];
-        int j = bond["j"];
-        bonded_pairs.insert({i, j});
-    }
+    // Build bonded pairs set for fast lookup
+    std::set<std::pair<int, int>> bonded_pairs(cached_bonds.begin(), cached_bonds.end());
 
     // Generate all pairwise repulsion interactions
     for (int i = 0; i < m_atomcount; ++i) {
