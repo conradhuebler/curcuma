@@ -221,6 +221,10 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
         m_ff_type = 2;
         m_parameter["d3"] = 1;
         m_parameter["vdw_scaling"] = 0;
+    } else if (m_method.compare("cgfnff") == 0) {
+        m_ff_type = 4;  // GFN-FF type (Phase 3 integration)
+        // GFN-FF uses built-in dispersion/repulsion instead of D3/D4
+        m_parameter["vdw_scaling"] = 0;
     }
 
     m_uff_bond_force = m_parameter["bond_force"];
