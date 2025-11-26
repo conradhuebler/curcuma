@@ -41,19 +41,8 @@ bool GFNFFMethod::setMolecule(const Mol& mol) {
 
     m_molecule = mol;
 
-    // CRITICAL FIX: Call base class method to set geometry/atoms, then call GFNFF::InitialiseMolecule()
-    if (!m_gfnff->QMInterface::InitialiseMolecule(mol)) {
-        CurcumaLogger::error("QMInterface::InitialiseMolecule failed");
-        return false;
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::success("QMInterface::InitialiseMolecule complete");
-        CurcumaLogger::info("Calling GFNFF::InitialiseMolecule() for force field setup...");
-    }
-
-    // Now call the actual GFNFF initialization which sets up the force field
-    if (!m_gfnff->InitialiseMolecule()) {
+    // Single call - GFNFF::InitialiseMolecule(mol) sets members + initializes
+    if (!m_gfnff->InitialiseMolecule(mol)) {
         CurcumaLogger::error("GFNFF::InitialiseMolecule failed");
         return false;
     }
@@ -68,7 +57,7 @@ bool GFNFFMethod::setMolecule(const Mol& mol) {
 
 bool GFNFFMethod::updateGeometry(const Matrix& geometry) {
     m_molecule.m_geometry = geometry;
-    return m_gfnff->QMInterface::UpdateMolecule(geometry);
+    return m_gfnff->UpdateMolecule(geometry);
 }
 
 double GFNFFMethod::calculateEnergy(bool gradient)

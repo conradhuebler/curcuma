@@ -22,15 +22,17 @@
 
 #pragma once
 
-#include "interface/abstract_interface.h"
 #include "json.hpp"
 #include "src/core/energy_calculators/ff_methods/forcefield.h"
 #include "src/core/global.h"
+#include <utility>
+#include <optional>
+#include <vector>
 
 using json = nlohmann::json;
 
 /**
- * @brief GFN-FF Implementation as QM Method
+ * @brief GFN-FF Implementation as Standalone Force Field
  *
  * GFN-FF combines quantum chemical accuracy with force field efficiency.
  * It provides:
@@ -42,8 +44,12 @@ using json = nlohmann::json;
  * References:
  * - Spicher, S.; Grimme, S. "Robust Atomistic Modeling of Materials,
  *   Organometallic, and Biochemical Systems" Angew. Chem. Int. Ed. 59, 15665 (2020)
+ *
+ * Note: GFNFF is semantically a force field, not a quantum method.
+ * It was previously inheriting from QMInterface but has been refactored
+ * to standalone class for semantic correctness (Phase 2, November 2025).
  */
-class GFNFF : public QMInterface {
+class GFNFF {
 public:
     /**
      * @brief Phase 9: Topology information structure (moved here for use in function signatures)
@@ -75,47 +81,61 @@ public:
     virtual ~GFNFF();
 
     /**
-     * @brief Initialize molecule for GFN-FF calculation
+     * @brief Initialize molecule for GFN-FF calculation from Mol object
+     * @param molecule Molecule to initialize
      * @return true if initialization successful
      */
-    virtual bool InitialiseMolecule() override;
+    bool InitialiseMolecule(const Mol& molecule);
+
+    /**
+     * @brief Initialize molecule for GFN-FF calculation (parameterless)
+     * @return true if initialization successful
+     */
+    bool InitialiseMolecule();
 
     /**
      * @brief Update molecular geometry
+     * @param geometry New geometry matrix
      * @return true if update successful
      */
-    virtual bool UpdateMolecule() override;
+    bool UpdateMolecule(const Matrix& geometry);
+
+    /**
+     * @brief Update molecular geometry (parameterless)
+     * @return true if update successful
+     */
+    bool UpdateMolecule();
 
     /**
      * @brief Perform GFN-FF calculation
      * @param gradient Calculate gradients if true
      * @return Total energy in Hartree
      */
-    virtual double Calculation(bool gradient = false) override;
+    double Calculation(bool gradient = false);
 
     /**
      * @brief Get analytical gradients
      * @return Gradient matrix (N_atoms x 3) in Hartree/Bohr
      */
-    virtual Geometry Gradient() const override { return m_gradient; }
+    Geometry Gradient() const { return m_gradient; }
 
     /**
      * @brief Check if gradients are available
      * @return true (GFN-FF always provides gradients)
      */
-    virtual bool hasGradient() const override { return true; }
+    bool hasGradient() const { return true; }
 
     /**
      * @brief Get atomic partial charges
      * @return Vector of atomic charges
      */
-    virtual Vector Charges() const override;
+    Vector Charges() const;
 
     /**
      * @brief Get bond orders (Wiberg bond orders)
      * @return Vector of bond orders
      */
-    virtual Vector BondOrders() const override;
+    Vector BondOrders() const;
 
     /**
      * @brief Set calculation parameters
@@ -147,6 +167,16 @@ private:
      * @return true if successful
      */
     bool calculateTopology();
+
+    /**
+     * @brief Retrieve cached topology information, computing it once if needed
+     */
+    const TopologyInfo& getCachedTopology() const;
+
+    /**
+     * @brief Retrieve cached bond list, computing it once if needed
+     */
+    const std::vector<std::pair<int,int>>& getCachedBondList() const;
 
     /**
      * @brief Validate molecular structure for GFN-FF
@@ -698,6 +728,15 @@ public:
     double CoulombEnergy() const;
 
 private:
+    // Molecular structure (formerly from QMInterface base class)
+    int m_atomcount = 0; ///< Number of atoms
+    Matrix m_geometry; ///< Molecular geometry in Angström
+    Matrix m_gradient; ///< Gradient in Hartree/Bohr
+    std::vector<int> m_atoms; ///< Atomic numbers (Z values)
+    int m_charge = 0; ///< Total molecular charge
+    int m_spin = 0; ///< Spin multiplicity
+
+    // GFN-FF specific
     json m_parameters; ///< GFN-FF parameters
     ForceField* m_forcefield; ///< Force field engine using modern structure
     Matrix m_geometry_bohr; ///< Geometry in Bohr (GFN-FF parameters are in Bohr)
@@ -707,6 +746,10 @@ private:
     double m_energy_total; ///< Total energy in Hartree
     Vector m_charges; ///< Atomic partial charges
     Vector m_bond_orders; ///< Wiberg bond orders
+
+    // Cached topology and bond detection to avoid redundant calculations
+    mutable std::optional<TopologyInfo> m_cached_topology;
+    mutable std::optional<std::vector<std::pair<int,int>>> m_cached_bond_list;
 
     // Conversion factors
     static constexpr double HARTREE_TO_KCAL = 627.5094740631;

@@ -70,6 +70,20 @@ GFNFF::~GFNFF()
     }
 }
 
+bool GFNFF::InitialiseMolecule(const Mol& molecule)
+{
+    // Set member variables from Mol (was QMInterface base class responsibility)
+    m_atomcount = molecule.m_number_atoms;
+    m_geometry = molecule.m_geometry;
+    m_spin = molecule.m_spin;
+    m_charge = molecule.m_charge;
+    m_atoms = molecule.m_atoms;
+    m_gradient = Matrix::Zero(m_atomcount, 3);
+
+    // Call existing initialization logic
+    return InitialiseMolecule();
+}
+
 bool GFNFF::InitialiseMolecule()
 {
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -125,6 +139,13 @@ bool GFNFF::InitialiseMolecule()
     }
 
     return true;
+}
+
+bool GFNFF::UpdateMolecule(const Matrix& geometry)
+{
+    // Set new geometry and call UpdateMolecule()
+    m_geometry = geometry;
+    return UpdateMolecule();
 }
 
 bool GFNFF::UpdateMolecule()
