@@ -164,17 +164,29 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 - **Placeholder Parameters**: Missing real GFN-FF force field parameters from literature
 - **Validation**: Incomplete parameter consistency checks with external GFN-FF reference
 
-**GFN-FF Implementation Components** (for potential module consolidation):
-- ✅ **CN-Berechnung** (Coordination Numbers) - D3-Methode implementiert in `gfnff.cpp:calculateCoordinationNumbers()` (Fortran `dncoord_erf`)
-- ✅ **CN-Abhängige Radien** - Implementiert in `gfnff.cpp:getGFNFFBondParameters()` mit `r0_gfnff[86]` und `cnfak_gfnff[86]`
-- ✅ **Zeilen-abhängige EN-Polynome** - Row-dependent electronegativity corrections `p_enpoly[6][2]` für 6 Perioden
-- ✅ **Hybridisierung** - Topologie-basierte Erkennung in `gfnff.cpp:determineHybridization()` (Codes: 1=sp, 2=sp2, 3=sp3)
-- ✅ **Hybridisierungs-Bond-Strength-Matrix** - `bsmat[4][4]` für mixed hybridizations (sp-sp2, sp2-sp3, etc.) mit split-Faktoren
-- ✅ **EEQ-Ladungen** - Vollständig implementiert in `gfnff.cpp:calculateEEQCharges()` mit angewChem2020-Parametern (χ, γ, α für Z=1-86)
-- ✅ **EEQ charge-dependent corrections (fqq)** - Sigmoid function for opposite/like charge effects on bond strength
-- ✅ **Ring-Spannung (ringf)** - Ring detection mit `findSmallestRings()`, fringbo=0.020 for 3-6 membered rings
-- ✅ **XH bond corrections (fxh)** - Element-specific: BH(+10%), NH(+6%), OH(-7%), 3-ring CH(+5%), aldehyde CH(-5%)
-- ✅ **CN-dependent heavy atom (fcn)** - Coordination-based bond weakening for Z>10 atoms (nb20² scaling)
+**GFN-FF Implementation Architecture** (for complete checklist see `../ff_methods/CLAUDE.md`):
+
+- ✅ **Parameter Generation** (GFNFF class in gfnff.cpp)
+  - CN-dependent radii, EEQ charges, topology detection, hybridization
+  - Methods: generateTopologyAwareBonds(), generateGFNFFDispersionPairs(), etc.
+
+- ✅ **Term Calculation** (ForceFieldThread in ../ff_methods/forcefieldthread.cpp)
+  - Multi-threaded energy/gradient calculations
+  - Methods: CalculateGFNFFBondContribution(), CalculateGFNFFDispersionContribution(), etc.
+
+- ✅ **All 7 Terms Implemented**: Bond, Angle, Torsion, Inversion, Dispersion, Repulsion, Coulomb
+
+**GFN-FF Components** (topology-aware parameter generation):
+- ✅ CN-Berechnung (Coordination Numbers) - D3 method in `gfnff.cpp:calculateCoordinationNumbers()`
+- ✅ CN-dependent radii - `r0_gfnff[86]` and `cnfak_gfnff[86]` in `gfnff.cpp`
+- ✅ Row-dependent electronegativity - `p_enpoly[6][2]` for 6 periods
+- ✅ Hybridization detection - Topology-based in `gfnff.cpp:determineHybridization()`
+- ✅ Hybridization bond-strength matrix - `bsmat[4][4]` for mixed hybridizations
+- ✅ EEQ charges - `gfnff.cpp:calculateEEQCharges()` with angewChem2020 parameters
+- ✅ EEQ charge-dependent corrections (fqq) - Sigmoid function for bond strength
+- ✅ Ring strain (ringf) - `findSmallestRings()`, fringbo=0.020 for 3-6 membered rings
+- ✅ XH bond corrections (fxh) - Element-specific: BH(+10%), NH(+6%), OH(-7%)
+- ✅ CN-dependent heavy atom (fcn) - Coordination-based bond weakening for Z>10
 
 #### Other Issues
 - **Memory Optimization**: Needed for large basis sets (>1000 atoms)

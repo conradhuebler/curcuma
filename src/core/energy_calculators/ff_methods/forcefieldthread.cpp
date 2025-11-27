@@ -687,7 +687,7 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
                 double charge_product = qa_j * qa_i + qa_j * qa_k;
                 fqq = 1.0 - charge_product * qfacBEN;
 
-                // TODO Phase 5B: Metal case uses 2.5x stronger correction
+                // TODO Phase 5B (LOW PRIORITY): Metal case uses 2.5x stronger correction
                 // Requires is_metal[] to be passed to threads
             }
         }
@@ -770,16 +770,58 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
         double damp_jk = 1.0 / (1.0 + rr_jk);
         double damp = damp_ij * damp_jk;
 
+        // ===== PHASE 6: Damping derivatives for gradient =====
+        // Claude Generated (Nov 2025): Complete angle gradients with damping derivatives
+        // Reference: Fortran gfnff_engrad.F90:890-892, 911-915, 1223-1232
+        //
+        // Damping derivative: ∂damp/∂(r²) = -4*rr / (r² * (1 + rr)²)
+        // where rr = (r²/rcut²)²
+        //
+        // Formula (Fortran gfnff_engrad.F90:1231):
+        //   ddamp = -2.d0*2*rr/(r2*(1.0d0+rr)**2)
+        double damp2ij = -2.0 * 2.0 * rr_ij / (r_ij_sq * (1.0 + rr_ij) * (1.0 + rr_ij));
+        double damp2jk = -2.0 * 2.0 * rr_jk / (r_jk_sq * (1.0 + rr_jk) * (1.0 + rr_jk));
+
         // Phase 3: Apply distance-dependent damping to energy
         // Fortran formula: e = ea*damp where damp = damp_ij*damp_jk
         m_angle_energy += energy * damp * factor;
 
         if (m_calculate_gradient) {
-            // Apply chain rule with damping: dE/dx = (dE/dθ) * damp * (dθ/dx)
-            // Note: Full gradient would require derivative of damp, but for now we use simplified version
-            m_gradient.row(angle.i) += dedtheta * damp * factor * derivate.row(0);
-            m_gradient.row(angle.j) += dedtheta * damp * factor * derivate.row(1);
-            m_gradient.row(angle.k) += dedtheta * damp * factor * derivate.row(2);
+            // ===== COMPLETE GRADIENT WITH DAMPING DERIVATIVES =====
+            // Claude Generated (Nov 2025): Full GFN-FF angle gradients
+            // Reference: Fortran gfnff_engrad.F90:904-915
+            //
+            // Complete gradient formula:
+            //   ∂E/∂x = (∂E/∂θ * damp) * (∂θ/∂x) + (∂E/∂damp) * (∂damp/∂x)
+            //         = dedθ * damp * derivate + ea * (∂damp/∂x)
+            //
+            // where ∂damp/∂x has contributions from both damp_ij and damp_jk
+
+            // Distance vectors (NOT normalized - Fortran lines 880-881)
+            // vab = xyz(:,i) - xyz(:,j)  →  vector from j to i
+            // vcb = xyz(:,k) - xyz(:,j)  →  vector from j to k
+            Vector vab = i - j;
+            Vector vcb = k - j;
+
+            // Damping gradient contributions (Fortran lines 911-912)
+            // term1 = ea * damp2ij * dampjk * vab
+            // term2 = ea * damp2jk * dampij * vcb
+            Vector term1 = energy * damp2ij * damp_jk * vab;
+            Vector term2 = energy * damp2jk * damp_ij * vcb;
+
+            // Angle gradient contributions (already computed by UFF::AngleBending)
+            // Note: derivate matrix contains ∂θ/∂x for all 3 atoms
+            Vector grad_angle_i = dedtheta * damp * factor * derivate.row(0);
+            Vector grad_angle_j = dedtheta * damp * factor * derivate.row(1);
+            Vector grad_angle_k = dedtheta * damp * factor * derivate.row(2);
+
+            // Complete gradients with damping terms (Fortran lines 913-915)
+            // g(:,1) = -dedb*damp - term1 - term2  (Atom i: negative signs!)
+            // g(:,2) =  deda*damp + term1          (Atom j: center)
+            // g(:,3) =  dedc*damp + term2          (Atom k)
+            m_gradient.row(angle.i) += grad_angle_i - term1 - term2;
+            m_gradient.row(angle.j) += grad_angle_j + term1;
+            m_gradient.row(angle.k) += grad_angle_k + term2;
         }
     }
 }
@@ -844,9 +886,12 @@ void ForceFieldThread::CalculateGFNFFInversionContribution()
     }
 }
 
+// DEPRECATED: Legacy vdW calculation replaced by Phase 4 pairwise terms
+// (CalculateGFNFFDispersionContribution + CalculateGFNFFRepulsionContribution)
+// TODO: Remove after verifying all tests pass without this
 void ForceFieldThread::CalculateGFNFFvdWContribution()
 {
-#pragma message("TODO: Implement proper GFN-FF dispersion with D4-like correction")
+#pragma message("TODO (DEPRECATED - use Phase 4 pairwise): Implement proper GFN-FF dispersion with D4-like correction")
     // TODO: GFN-FF uses sophisticated dispersion correction (similar to D4)
     // This is a simplified implementation for testing
 
@@ -860,7 +905,7 @@ void ForceFieldThread::CalculateGFNFFvdWContribution()
 
         if (distance > 0) {
             // Simplified van der Waals interaction
-            // TODO: Replace with proper GFN-FF dispersion calculation
+            // TODO (DEPRECATED): Replace with proper GFN-FF dispersion calculation (use Phase 4 pairwise instead)
             double C6 = vdw.C_ij;
             double r0 = vdw.r0_ij;
             double ratio = r0 / distance;

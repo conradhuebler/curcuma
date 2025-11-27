@@ -757,3 +757,28 @@ private:
     static constexpr double KCAL_TO_HARTREE = 1.0 / 627.5094740631;
     static constexpr double ANGSTROM_TO_BOHR = 1.0 / 0.5291772105638411;
 };
+
+/**
+ * @brief GFN-FF Architecture: Two-Phase Implementation
+ *
+ * PARAMETER GENERATION (this class):
+ * - generateTopologyAwareBonds()     → JSON["bonds"]
+ * - generateTopologyAwareAngles()    → JSON["angles"]
+ * - generateGFNFFTorsions()          → JSON["dihedrals"]
+ * - generateGFNFFInversions()        → JSON["inversions"]
+ * - generateGFNFFDispersionPairs()   → JSON["gfnff_dispersions"]
+ * - generateGFNFFRepulsionPairs()    → JSON["gfnff_repulsions"]
+ * - generateGFNFFCoulombPairs()      → JSON["gfnff_coulombs"]
+ *
+ * TERM CALCULATION (ForceFieldThread):
+ * - CalculateGFNFFBondContribution()
+ * - CalculateGFNFFAngleContribution()
+ * - CalculateGFNFFDihedralContribution()
+ * - CalculateGFNFFInversionContribution()
+ * - CalculateGFNFFDispersionContribution()
+ * - CalculateGFNFFRepulsionContribution()
+ * - CalculateGFNFFCoulombContribution()
+ *
+ * To add new terms: Modify BOTH this class (generation) AND ForceFieldThread (calculation)
+ * See: src/core/energy_calculators/ff_methods/CLAUDE.md for detailed checklist
+ */

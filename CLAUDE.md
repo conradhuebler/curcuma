@@ -111,7 +111,9 @@
 
 ### 2. Force Field Methods
 - **Universal Force Field (UFF)** - General-purpose molecular mechanics
-- **GFN-FF** - Geometry/Frequency/Noncovalent Force Field (via XTB and native)
+- **GFN-FF** - Geometry/Frequency/Noncovalent Force Field (native `cgfnff`)
+  - **Architecture**: Two-phase (Parameter generation in GFNFF, calculations in ForceFieldThread)
+  - **See**: `src/core/energy_calculators/ff_methods/CLAUDE.md` for implementation details
 - **QMDFF** - Quantum Mechanically Derived Force Fields
 - **Universal Parameter Caching** - Automatic save/load for all FF methods
 
