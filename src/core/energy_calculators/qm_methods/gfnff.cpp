@@ -1908,13 +1908,14 @@ Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb,
     //
     // Solves linear system: A·q = b
     // where A = hardness matrix + Coulomb interaction + constraint
-    //       b = -electronegativity - CN corrections
+    //       b = +electronegativity + CN corrections (POSITIVE!)
     //       q = atomic charges (unknown)
     //
     // Mathematical formulation:
     // A(i,i) = γ_i + sqrt(2π)/sqrt(α_i)  (self-interaction)
     // A(i,j) = erf(γ_ij * r_ij) / r_ij    (Coulomb interaction with damping)
     // A(n+1, :) = 1 (charge constraint: Σq = total_charge)
+    // b(i)    = +χ_i + cnf_i*√(CN_i)     (from ∂E/∂q = J*q - χ = 0)
     //
     // Literature: S. Spicher, S. Grimme, Angew. Chem. Int. Ed. 2020, 59, 15665-15673
 
@@ -1936,9 +1937,10 @@ Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb,
         // This is the self-interaction (chemical hardness + Coulomb self-energy)
         A(i, i) = params_i.gam + sqrt_2pi / std::sqrt(params_i.alp);
 
-        // RHS: b(i) = -chi_i - cnf_i * sqrt(CN_i)
+        // RHS: b(i) = +chi_i + cnf_i * sqrt(CN_i)
         // Electronegativity with CN correction
-        b(i) = -params_i.chi - params_i.cnf * std::sqrt(cn[i]);
+        // CRITICAL: Positive sign! (from ∂E/∂q = J*q - χ = 0 → J*q = +χ)
+        b(i) = params_i.chi + params_i.cnf * std::sqrt(cn[i]);
 
         // Off-diagonal: Coulomb interaction with error function damping
         for (int j = 0; j < i; ++j) {

@@ -829,22 +829,26 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
 void ForceFieldThread::CalculateGFNFFDihedralContribution()
 {
     // GFN-FF torsion: E = V*(1 + cos(n*φ - φ0))
+    // Claude Generated (2025): Now using correct GFNFF_Geometry::calculateDihedralAngle
 
     for (int index = 0; index < m_gfnff_dihedrals.size(); ++index) {
         const auto& dihedral = m_gfnff_dihedrals[index];
 
-        auto i = m_geometry.row(dihedral.i);
-        auto j = m_geometry.row(dihedral.j);
-        auto k = m_geometry.row(dihedral.k);
-        auto l = m_geometry.row(dihedral.l);
+        // Extract atom positions as Eigen::Vector3d
+        Eigen::Vector3d r_i = m_geometry.row(dihedral.i).head<3>();
+        Eigen::Vector3d r_j = m_geometry.row(dihedral.j).head<3>();
+        Eigen::Vector3d r_k = m_geometry.row(dihedral.k).head<3>();
+        Eigen::Vector3d r_l = m_geometry.row(dihedral.l).head<3>();
 
+        // Use GFN-FF dihedral angle calculation (not UFF!)
         Matrix derivate;
-        double phi = UFF::Torsion(i, j, k, l, derivate, m_calculate_gradient);
+        double phi = GFNFF_Geometry::calculateDihedralAngle(r_i, r_j, r_k, r_l, derivate, m_calculate_gradient);
 
         double V = dihedral.V;
         double n = dihedral.n;
         double phi0 = dihedral.phi0;
 
+        // GFN-FF energy formula
         double energy = V * (1 + cos(n * phi - phi0));
         m_dihedral_energy += energy * m_final_factor * m_dihedral_scaling;
 
@@ -861,18 +865,22 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
 void ForceFieldThread::CalculateGFNFFInversionContribution()
 {
     // GFN-FF inversion: E = k*(C0 + C1*cos(θ) + C2*cos(2θ))
+    // Claude Generated (2025): Now using correct GFNFF_Geometry::calculateOutOfPlaneAngle
 
     for (int index = 0; index < m_gfnff_inversions.size(); ++index) {
         const auto& inversion = m_gfnff_inversions[index];
 
-        auto i = m_geometry.row(inversion.i); // out-of-plane atom
-        auto j = m_geometry.row(inversion.j); // plane atom 1
-        auto k = m_geometry.row(inversion.k); // plane atom 2
-        auto l = m_geometry.row(inversion.l); // central atom
+        // Extract atom positions as Eigen::Vector3d
+        Eigen::Vector3d r_i = m_geometry.row(inversion.i).head<3>();  // out-of-plane atom
+        Eigen::Vector3d r_j = m_geometry.row(inversion.j).head<3>();  // plane atom 1
+        Eigen::Vector3d r_k = m_geometry.row(inversion.k).head<3>();  // plane atom 2
+        Eigen::Vector3d r_l = m_geometry.row(inversion.l).head<3>();  // central atom
 
+        // Use GFN-FF out-of-plane angle calculation (not UFF!)
         Matrix derivate;
-        double theta = UFF::OutOfPlane(i, j, k, l, derivate, m_calculate_gradient);
+        double theta = GFNFF_Geometry::calculateOutOfPlaneAngle(r_i, r_j, r_k, r_l, derivate, m_calculate_gradient);
 
+        // GFN-FF inversion energy formula
         double energy = inversion.fc * (inversion.C0 + inversion.C1 * cos(theta) + inversion.C2 * cos(2 * theta));
         m_inversion_energy += energy * m_final_factor * m_inversion_scaling;
 

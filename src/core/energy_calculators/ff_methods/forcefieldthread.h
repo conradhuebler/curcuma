@@ -35,6 +35,7 @@
 
 #include "qmdff_par.h"
 #include "uff_par.h"
+#include "gfnff_geometry.h"  // Claude Generated (2025): GFN-FF geometry functions
 
 #include <functional>
 #include <set>
