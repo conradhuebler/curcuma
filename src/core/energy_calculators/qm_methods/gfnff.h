@@ -570,18 +570,18 @@ private:
 
     /**
      * @brief Calculate coordination numbers for all atoms
-     * @param threshold Coordination number threshold
+     * @param threshold Coordination number threshold (squared distance in Bohr²)
      * @return Vector of coordination numbers
      */
-    Vector calculateCoordinationNumbers(double threshold = 40.0) const;
+    Vector calculateCoordinationNumbers(double threshold = 1600.0) const;  // 40.0² = 1600 (squared)
 
     /**
      * @brief Calculate coordination number derivatives for gradients
      * @param cn Coordination numbers
-     * @param threshold Coordination number threshold
+     * @param threshold Coordination number threshold (squared distance in Bohr²)
      * @return 3D tensor of CN derivatives (3 x natoms x natoms)
      */
-    std::vector<Matrix> calculateCoordinationNumberDerivatives(const Vector& cn, double threshold = 40.0) const;
+    std::vector<Matrix> calculateCoordinationNumberDerivatives(const Vector& cn, double threshold = 1600.0) const;  // 40.0² = 1600 (squared)
 
     /**
      * @brief Determine hybridization states for all atoms
@@ -657,6 +657,14 @@ private:
      */
     json detectHydrogenBonds(const Vector& charges) const;
 
+    /**
+     * @brief Detect halogen bond (XB) interactions
+     * @param charges EEQ charges for charge-based criteria
+     * @return JSON with halogen bond parameters
+     * Claude Generated (2025): Phase 2.2 - XB Detection
+     */
+    json detectHalogenBonds(const Vector& charges) const;
+
     // Advanced parameter structures (EEQParameters already defined above at line 298)
     // TopologyInfo now defined at line 51 (public section) for use in function signatures
 
@@ -726,6 +734,26 @@ public:
      * @return Electrostatic energy or 0 if not calculated
      */
     double CoulombEnergy() const;
+
+    // =================================================================================
+    // vbond Parameter Access for Verification (Claude Generated November 2025)
+    // =================================================================================
+
+    /**
+     * @brief Get vbond parameters for verification against reference implementation
+     * @param bond_index Index of bond (0-based)
+     * @param shift Output: vbond(1,i) - equilibrium distance shift parameter
+     * @param alpha Output: vbond(2,i) - exponential decay parameter
+     * @param force_constant Output: vbond(3,i) - force constant parameter
+     * @return true if parameters were successfully retrieved
+     */
+    bool getVBondParameters(int bond_index, double& shift, double& alpha, double& force_constant) const;
+
+    /**
+     * @brief Get number of bonds in the system
+     * @return Number of bonds
+     */
+    int getBondCount() const;
 
 private:
     // Molecular structure (formerly from QMInterface base class)
