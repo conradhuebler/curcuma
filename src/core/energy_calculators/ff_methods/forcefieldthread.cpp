@@ -20,6 +20,7 @@
 #include "forcefieldderivaties.h"
 #include "qmdff_par.h"
 #include "uff_par.h"
+#include "gfnff_par.h"
 
 #include "forcefieldfunctions.h"
 
@@ -66,6 +67,10 @@ int ForceFieldThread::execute()
         CalculateGFNFFDispersionContribution();  // D3/D4 dispersion
         CalculateGFNFFRepulsionContribution();   // GFN-FF repulsion
         CalculateGFNFFCoulombContribution();     // EEQ Coulomb electrostatics
+
+        // GFN-FF hydrogen bond and halogen bond terms (Phase 5)
+        CalculateGFNFFHydrogenBondContribution();  // HB three-body terms
+        CalculateGFNFFHalogenBondContribution();   // XB three-body terms
 
         // Legacy vdW (will be replaced by pairwise terms above)
         CalculateGFNFFvdWContribution();
@@ -167,6 +172,18 @@ void ForceFieldThread::addGFNFFRepulsion(const GFNFFRepulsion& repulsion)
 void ForceFieldThread::addGFNFFCoulomb(const GFNFFCoulomb& coulomb)
 {
     m_gfnff_coulombs.push_back(coulomb);
+}
+
+// Phase 4: GFN-FF hydrogen bond and halogen bond addition methods (Claude Generated 2025)
+
+void ForceFieldThread::addGFNFFHydrogenBond(const GFNFFHydrogenBond& hbond)
+{
+    m_gfnff_hbonds.push_back(hbond);
+}
+
+void ForceFieldThread::addGFNFFHalogenBond(const GFNFFHalogenBond& xbond)
+{
+    m_gfnff_xbonds.push_back(xbond);
 }
 
 void ForceFieldThread::CalculateUFFBondContribution()
@@ -1120,5 +1137,390 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
 
     if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_coulombs.size() > 0) {
         CurcumaLogger::param("thread_coulomb_energy", fmt::format("{:.6f} Eh", m_coulomb_energy));
+    }
+}
+
+// ============================================================================
+// Phase 5: GFN-FF HB/XB Damping Helper Functions
+// ============================================================================
+// Claude Generated (2025): Direct translation from gfnff_engrad.F90
+// Reference: abhgfnff_eg1(), rbxgfnff_eg()
+
+/**
+ * @brief Out-of-line damping for HB/XB geometry
+ *
+ * Penalizes non-linear A-H...B or A-X...B geometries
+ * Formula: outl = 2 / (1 + exp(bacut/r_AB × (r_AH + r_HB)/r_AB - 1))
+ *
+ * @param r_AH Distance A-H (or A-X) in Bohr
+ * @param r_HB Distance H-B (or X-B) in Bohr
+ * @param r_AB Distance A-B in Bohr
+ * @param bacut Angle cut-off parameter (HB_BACUT or XB_BACUT)
+ */
+inline double damping_out_of_line(double r_AH, double r_HB, double r_AB, double bacut)
+{
+    double ratio = (r_AH + r_HB) / r_AB;
+    double exponent = bacut / r_AB * (ratio - 1.0);
+    return 2.0 / (1.0 + std::exp(exponent));
+}
+
+/**
+ * @brief Short-range damping for HB/XB
+ *
+ * Prevents unphysical close-contact overbinding
+ * Formula: damp_s = 1 / (1 + (scut × r_vdw / r²)^alp)
+ *
+ * @param r Distance between atoms in Bohr
+ * @param r_vdw Combined van der Waals radius in Bohr
+ * @param scut Short-range cut-off parameter (HB_SCUT or XB_SCUT)
+ * @param alp Damping exponent (HB_ALP)
+ */
+inline double damping_short_range(double r, double r_vdw, double scut, double alp)
+{
+    double ratio = scut * r_vdw / (r * r);
+    return 1.0 / (1.0 + std::pow(ratio, alp));
+}
+
+/**
+ * @brief Long-range damping for HB/XB
+ *
+ * Smooth cut-off at large distances
+ * Formula: damp_l = 1 / (1 + (r² / longcut)^alp)
+ *
+ * @param r Distance between atoms in Bohr
+ * @param longcut Long-range cut-off (HB_LONGCUT or HB_LONGCUT_XB)
+ * @param alp Damping exponent (HB_ALP)
+ */
+inline double damping_long_range(double r, double longcut, double alp)
+{
+    double r_sq = r * r;
+    return 1.0 / (1.0 + std::pow(r_sq / longcut, alp));
+}
+
+/**
+ * @brief Charge-dependent scaling factor
+ *
+ * EEQ charge modulation for HB/XB strength
+ * Formula: Q = exp(st × q) / (exp(st × q) + sf)
+ *
+ * @param q EEQ charge on atom
+ * @param st Scaling strength (HB_ST or XB_ST)
+ * @param sf Scaling offset (HB_SF or XB_SF)
+ */
+inline double charge_scaling(double q, double st, double sf)
+{
+    double exp_term = std::exp(st * q);
+    return exp_term / (exp_term + sf);
+}
+
+// ============================================================================
+// Phase 5: GFN-FF HB/XB Energy Calculation Methods
+// ============================================================================
+
+void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
+{
+    /**
+     * @brief Calculate GFN-FF hydrogen bond energy contribution
+     *
+     * Reference: gfnff_engrad.F90 - abhgfnff_eg1() (Case 1) and abhgfnff_eg2new() (Case 2)
+     * Formula: E_HB = B_AH × C_AH × C_B × (-C_acidity × R_damp × Q_H^outl)
+     *
+     * Claude Generated (2025): Direct translation from Fortran implementation
+     */
+
+    using namespace GFNFFParameters;
+
+    if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_hbonds.size() > 0) {
+        CurcumaLogger::info(fmt::format("Thread {} calculating {} hydrogen bonds", m_thread, m_gfnff_hbonds.size()));
+    }
+
+    for (const auto& hb : m_gfnff_hbonds) {
+        // Get atom positions
+        Eigen::Vector3d pos_A = m_geometry.row(hb.i).transpose();
+        Eigen::Vector3d pos_H = m_geometry.row(hb.j).transpose();
+        Eigen::Vector3d pos_B = m_geometry.row(hb.k).transpose();
+
+        // Calculate distance vectors
+        Eigen::Vector3d r_AH_vec = pos_H - pos_A;
+        Eigen::Vector3d r_HB_vec = pos_B - pos_H;
+        Eigen::Vector3d r_AB_vec = pos_B - pos_A;
+
+        // Calculate distances (convert to Bohr via m_au)
+        double r_AH = r_AH_vec.norm() * m_au;
+        double r_HB = r_HB_vec.norm() * m_au;
+        double r_AB = r_AB_vec.norm() * m_au;
+
+        // Distance cutoff check
+        if (r_AB > hb.r_cut) continue;
+
+        // --- Donor-Acceptor Strength Term B_AH ---
+        // Reference: gfnff_engrad.F90:1445-1448
+        // B = (C_A × r_AH^4 + C_B × r_HB^4) / (r_AH^4 + r_HB^4)
+        double r_AH_4 = r_AH * r_AH * r_AH * r_AH;
+        double r_HB_4 = r_HB * r_HB * r_HB * r_HB;
+        double B_AH = (hb.basicity_A * r_AH_4 + hb.basicity_B * r_HB_4) / (r_AH_4 + r_HB_4);
+
+        // --- Charge Scaling Factors ---
+        double Q_H = charge_scaling(hb.q_H, HB_ST, HB_SF);
+        double Q_A = charge_scaling(hb.q_A, HB_ST, HB_SF);
+        double Q_B = charge_scaling(hb.q_B, HB_ST, HB_SF);
+
+        // --- Combined Damping R_damp ---
+        // Use covalent radii as approximation for vdW radius
+        double r_vdw_AB = covalent_radii[hb.i] + covalent_radii[hb.k];  // Angström -> need conversion
+        r_vdw_AB *= 1.88973;  // Convert Å to Bohr
+
+        double damp_short = damping_short_range(r_AB, r_vdw_AB, HB_SCUT, HB_ALP);
+        double damp_long = damping_long_range(r_AB, HB_LONGCUT, HB_ALP);
+        double damp_outl = damping_out_of_line(r_AH, r_HB, r_AB, HB_BACUT);
+
+        double R_damp = damp_short * damp_long * damp_outl / (r_AB * r_AB * r_AB);
+
+        // --- Acidity Term C_acidity ---
+        // Reference: hbonds() subroutine - complex mixing of basicity/acidity
+        double C_acidity = hb.acidity_A;  // Simplified for Case 1
+
+        // --- Total HB Energy ---
+        // Note: Negative sign convention from Fortran
+        double E_HB = B_AH * Q_A * Q_B * (-C_acidity) * R_damp * Q_H;
+
+        m_energy_hbond += E_HB * m_final_factor;
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format(
+                "  HB({}-{}-{}): r_AB={:.3f} Bohr, E={:.6f} Eh",
+                hb.i, hb.j, hb.k, r_AB, E_HB * m_final_factor));
+        }
+
+        // ========== ANALYTICAL GRADIENT CALCULATION ==========
+        // Reference: gfnff_engrad.F90 - abhgfnff_eg1() lines 1501-1557
+        // Claude Generated (2025): Phase 6 - HB analytical gradients
+        if (m_calculate_gradient) {
+            // --- 1. Compute Energy Derivative Components ---
+
+            // ∂B_AH/∂r_AH and ∂B_AH/∂r_HB (donor-acceptor mixing term derivatives)
+            double r_AH_3 = r_AH * r_AH * r_AH;
+            double r_HB_3 = r_HB * r_HB * r_HB;
+            double denominator = r_AH_4 + r_HB_4;
+            double denominator_sq = denominator * denominator;
+
+            double dB_drAH = 4.0 * r_AH_3 * (hb.basicity_A * r_HB_4 - hb.basicity_B * r_AH_4) / denominator_sq;
+            double dB_drHB = 4.0 * r_HB_3 * (hb.basicity_B * r_AH_4 - hb.basicity_A * r_HB_4) / denominator_sq;
+
+            // ∂(damping)/∂r derivatives
+            // Short-range damping: damp_s = 1 / (1 + (scut × r_vdw / r²)^alp)
+            double ratio_short = HB_SCUT * r_vdw_AB / (r_AB * r_AB);
+            double damp_short_term = std::pow(ratio_short, HB_ALP);
+            double ddamp_short_dr = -2.0 * HB_ALP * damp_short * damp_short_term / (r_AB * (1.0 + damp_short_term));
+
+            // Long-range damping: damp_l = 1 / (1 + (r² / longcut)^alp)
+            double ratio_long = (r_AB * r_AB) / HB_LONGCUT;
+            double damp_long_term = std::pow(ratio_long, HB_ALP);
+            double ddamp_long_dr = -2.0 * HB_ALP * r_AB * damp_long * damp_long_term / (HB_LONGCUT * (1.0 + damp_long_term));
+
+            // Out-of-line damping: outl = 2 / (1 + exp(bacut/r_AB × (r_AH + r_HB)/r_AB - 1))
+            double ratio = (r_AH + r_HB) / r_AB;
+            double exponent = HB_BACUT / r_AB * (ratio - 1.0);
+            double exp_term = std::exp(exponent);
+            double denom_outl = 1.0 + exp_term;
+
+            // Derivatives of out-of-line damping w.r.t. each distance
+            double ddamp_outl_drAH = -2.0 * exp_term * HB_BACUT / (r_AB * r_AB * denom_outl * denom_outl);
+            double ddamp_outl_drHB = ddamp_outl_drAH;  // Same formula
+            double ddamp_outl_drAB = 2.0 * exp_term * HB_BACUT * (r_AH + r_HB) / (r_AB * r_AB * r_AB * denom_outl * denom_outl);
+
+            // Combined damping derivative: R_damp = damp_short * damp_long * damp_outl / r_AB³
+            double R_damp_no_r3 = damp_short * damp_long * damp_outl;
+
+            double dRdamp_drAB = (ddamp_short_dr * damp_long * damp_outl +
+                                  damp_short * ddamp_long_dr * damp_outl +
+                                  damp_short * damp_long * ddamp_outl_drAB) / (r_AB * r_AB * r_AB)
+                                - 3.0 * R_damp / r_AB;
+
+            double dRdamp_drAH = damp_short * damp_long * ddamp_outl_drAH / (r_AB * r_AB * r_AB);
+            double dRdamp_drHB = damp_short * damp_long * ddamp_outl_drHB / (r_AB * r_AB * r_AB);
+
+            // --- 2. Energy Derivatives w.r.t. Distances ---
+            // E_HB = B_AH × Q_A × Q_B × (-C_acidity) × R_damp × Q_H
+            double E_prefactor = Q_A * Q_B * (-C_acidity) * Q_H;
+
+            double dE_drAH = E_prefactor * (dB_drAH * R_damp + B_AH * dRdamp_drAH);
+            double dE_drHB = E_prefactor * (dB_drHB * R_damp + B_AH * dRdamp_drHB);
+            double dE_drAB = E_prefactor * B_AH * dRdamp_drAB;
+
+            // --- 3. Chain Rule: Position Vector Derivatives ---
+            // ∇_atom r_ij = (r_j - r_i) / |r_j - r_i|
+            Eigen::Vector3d grad_rAH_unit = r_AH_vec / r_AH;  // Direction A → H
+            Eigen::Vector3d grad_rHB_unit = r_HB_vec / r_HB;  // Direction H → B
+            Eigen::Vector3d grad_rAB_unit = r_AB_vec / r_AB;  // Direction A → B
+
+            // --- 4. Accumulate Gradients on Each Atom ---
+            // Atom A: influenced by r_AH (negative direction) and r_AB (negative direction)
+            Eigen::Vector3d grad_A = (-dE_drAH * grad_rAH_unit - dE_drAB * grad_rAB_unit) * m_final_factor;
+            m_gradient.row(hb.i) += grad_A.transpose();
+
+            // Atom H: influenced by r_AH (positive direction) and r_HB (negative direction)
+            Eigen::Vector3d grad_H = (dE_drAH * grad_rAH_unit - dE_drHB * grad_rHB_unit) * m_final_factor;
+            m_gradient.row(hb.j) += grad_H.transpose();
+
+            // Atom B: influenced by r_HB (positive direction) and r_AB (positive direction)
+            Eigen::Vector3d grad_B = (dE_drHB * grad_rHB_unit + dE_drAB * grad_rAB_unit) * m_final_factor;
+            m_gradient.row(hb.k) += grad_B.transpose();
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format(
+                    "    HB Gradient: |∇A|={:.4f} |∇H|={:.4f} |∇B|={:.4f} Eh/Bohr",
+                    grad_A.norm(), grad_H.norm(), grad_B.norm()));
+            }
+        }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_hbonds.size() > 0) {
+        CurcumaLogger::param("thread_hbond_energy", fmt::format("{:.6f} Eh", m_energy_hbond));
+    }
+}
+
+void ForceFieldThread::CalculateGFNFFHalogenBondContribution()
+{
+    /**
+     * @brief Calculate GFN-FF halogen bond energy contribution
+     *
+     * Reference: gfnff_engrad.F90 - rbxgfnff_eg() (lines 2928-3043)
+     * Formula: E_XB = -R_damp × Q_outl × C_B × Q_B × C_X × Q_X
+     *
+     * Claude Generated (2025): XB uses different damping parameters than HB
+     */
+
+    using namespace GFNFFParameters;
+
+    if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_xbonds.size() > 0) {
+        CurcumaLogger::info(fmt::format("Thread {} calculating {} halogen bonds", m_thread, m_gfnff_xbonds.size()));
+    }
+
+    for (const auto& xb : m_gfnff_xbonds) {
+        // Get atom positions
+        Eigen::Vector3d pos_A = m_geometry.row(xb.i).transpose();
+        Eigen::Vector3d pos_X = m_geometry.row(xb.j).transpose();
+        Eigen::Vector3d pos_B = m_geometry.row(xb.k).transpose();
+
+        // Calculate distance vectors
+        Eigen::Vector3d r_AX_vec = pos_X - pos_A;
+        Eigen::Vector3d r_XB_vec = pos_B - pos_X;
+        Eigen::Vector3d r_AB_vec = pos_B - pos_A;
+
+        // Calculate distances (convert to Bohr via m_au)
+        double r_AX = r_AX_vec.norm() * m_au;
+        double r_XB = r_XB_vec.norm() * m_au;
+        double r_AB = r_AB_vec.norm() * m_au;
+
+        // Distance cutoff check
+        if (r_XB > xb.r_cut) continue;
+
+        // --- Charge Scaling Factors ---
+        // XB uses different parameters: XB_ST=15, XB_SF=0.03 (much weaker offset)
+        double Q_X = charge_scaling(xb.q_X, XB_ST, XB_SF);
+        double Q_B = charge_scaling(xb.q_B, XB_ST, XB_SF);
+
+        // --- Combined Damping R_damp ---
+        double r_vdw_XB = covalent_radii[xb.j] + covalent_radii[xb.k];  // Angström
+        r_vdw_XB *= 1.88973;  // Convert Å to Bohr
+
+        // XB uses different cutoff parameters
+        double damp_short = damping_short_range(r_XB, r_vdw_XB, XB_SCUT, HB_ALP);
+        double damp_long = damping_long_range(r_XB, HB_LONGCUT_XB, HB_ALP);
+        double damp_outl = damping_out_of_line(r_AX, r_XB, r_AB, XB_BACUT);
+
+        double R_damp = damp_short * damp_long * damp_outl / (r_XB * r_XB * r_XB);
+
+        // --- Total XB Energy ---
+        // C_B = 1.0 (fixed), C_X = xbaci parameter
+        double C_B = 1.0;
+        double C_X = xb.acidity_X;
+
+        double E_XB = -R_damp * C_B * Q_B * C_X * Q_X;
+
+        m_energy_xbond += E_XB * m_final_factor;
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format(
+                "  XB({}-{}-{}): r_XB={:.3f} Bohr, E={:.6f} Eh",
+                xb.i, xb.j, xb.k, r_XB, E_XB * m_final_factor));
+        }
+
+        // ========== ANALYTICAL GRADIENT CALCULATION ==========
+        // Reference: gfnff_engrad.F90 - rbxgfnff_eg() gradient section
+        // Claude Generated (2025): Phase 6 - XB analytical gradients
+        if (m_calculate_gradient) {
+            // XB gradients are simpler than HB (no donor-acceptor mixing term)
+
+            // --- 1. Compute Damping Derivatives ---
+            // Short-range damping: damp_s = 1 / (1 + (scut × r_vdw / r²)^alp)
+            double ratio_short = XB_SCUT * r_vdw_XB / (r_XB * r_XB);
+            double damp_short_term = std::pow(ratio_short, HB_ALP);
+            double ddamp_short_dr = -2.0 * HB_ALP * damp_short * damp_short_term / (r_XB * (1.0 + damp_short_term));
+
+            // Long-range damping: damp_l = 1 / (1 + (r² / longcut)^alp)
+            double ratio_long = (r_XB * r_XB) / HB_LONGCUT_XB;
+            double damp_long_term = std::pow(ratio_long, HB_ALP);
+            double ddamp_long_dr = -2.0 * HB_ALP * r_XB * damp_long * damp_long_term / (HB_LONGCUT_XB * (1.0 + damp_long_term));
+
+            // Out-of-line damping derivatives
+            double ratio = (r_AX + r_XB) / r_AB;
+            double exponent = XB_BACUT / r_AB * (ratio - 1.0);
+            double exp_term = std::exp(exponent);
+            double denom_outl = 1.0 + exp_term;
+
+            // Derivatives of out-of-line damping w.r.t. each distance
+            double ddamp_outl_drAX = -2.0 * exp_term * XB_BACUT / (r_AB * r_AB * denom_outl * denom_outl);
+            double ddamp_outl_drXB = ddamp_outl_drAX;  // Same formula
+            double ddamp_outl_drAB = 2.0 * exp_term * XB_BACUT * (r_AX + r_XB) / (r_AB * r_AB * r_AB * denom_outl * denom_outl);
+
+            // Combined damping derivative: R_damp = damp_short * damp_long * damp_outl / r_XB³
+            // Note: For XB, primary distance is r_XB, not r_AB as in HB
+
+            double dRdamp_drXB = (ddamp_short_dr * damp_long * damp_outl +
+                                  damp_short * ddamp_long_dr * damp_outl +
+                                  damp_short * damp_long * ddamp_outl_drXB) / (r_XB * r_XB * r_XB)
+                                - 3.0 * R_damp / r_XB;
+
+            double dRdamp_drAX = damp_short * damp_long * ddamp_outl_drAX / (r_XB * r_XB * r_XB);
+            double dRdamp_drAB = damp_short * damp_long * ddamp_outl_drAB / (r_XB * r_XB * r_XB);
+
+            // --- 2. Energy Derivatives w.r.t. Distances ---
+            // E_XB = -R_damp × C_B × Q_B × C_X × Q_X
+            double E_prefactor = -C_B * Q_B * C_X * Q_X;
+
+            double dE_drXB = E_prefactor * dRdamp_drXB;
+            double dE_drAX = E_prefactor * dRdamp_drAX;
+            double dE_drAB = E_prefactor * dRdamp_drAB;
+
+            // --- 3. Chain Rule: Position Vector Derivatives ---
+            Eigen::Vector3d grad_rAX_unit = r_AX_vec / r_AX;  // Direction A → X
+            Eigen::Vector3d grad_rXB_unit = r_XB_vec / r_XB;  // Direction X → B
+            Eigen::Vector3d grad_rAB_unit = r_AB_vec / r_AB;  // Direction A → B
+
+            // --- 4. Accumulate Gradients on Each Atom ---
+            // Atom A: influenced by r_AX (negative direction) and r_AB (negative direction)
+            Eigen::Vector3d grad_A = (-dE_drAX * grad_rAX_unit - dE_drAB * grad_rAB_unit) * m_final_factor;
+            m_gradient.row(xb.i) += grad_A.transpose();
+
+            // Atom X: influenced by r_AX (positive direction) and r_XB (negative direction)
+            Eigen::Vector3d grad_X = (dE_drAX * grad_rAX_unit - dE_drXB * grad_rXB_unit) * m_final_factor;
+            m_gradient.row(xb.j) += grad_X.transpose();
+
+            // Atom B: influenced by r_XB (positive direction) and r_AB (positive direction)
+            Eigen::Vector3d grad_B = (dE_drXB * grad_rXB_unit + dE_drAB * grad_rAB_unit) * m_final_factor;
+            m_gradient.row(xb.k) += grad_B.transpose();
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format(
+                    "    XB Gradient: |∇A|={:.4f} |∇X|={:.4f} |∇B|={:.4f} Eh/Bohr",
+                    grad_A.norm(), grad_X.norm(), grad_B.norm()));
+            }
+        }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_xbonds.size() > 0) {
+        CurcumaLogger::param("thread_xbond_energy", fmt::format("{:.6f} Eh", m_energy_xbond));
     }
 }

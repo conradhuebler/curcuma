@@ -85,6 +85,8 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/molecules/dimers/HH.xyz
           DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/molecules/dimers/)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/molecules/trimers/water.xyz
           DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/molecules/trimers/)
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/CH4.xyz
+          DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/)
 
 add_executable(test_gfnff_regression
         test_gfnff_regression.cpp)
@@ -95,9 +97,42 @@ if(USE_PCH)
         target_precompile_headers(test_gfnff_regression REUSE_FROM curcuma_core)
 endif()
 
+# Claude Generated: GFN-FF vbond Parameter Verification Test
+# Tests that Curcuma's native cgfnff implementation generates correct vbond parameters (Nov 2025)
+add_executable(test_gfnff_vbond
+        test_gfnff_vbond.cpp)
+
+target_link_libraries(test_gfnff_vbond curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_vbond REUSE_FROM curcuma_core)
+endif()
+
+# Claude Generated: Direct GFN-FF Parameter Generation Test
+# Tests GFNFF class parameter generation directly with debug output (Nov 2025)
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/molecules/dimers/HH.xyz
+          ${CMAKE_CURRENT_SOURCE_DIR}/molecules/dimers/OH.xyz
+          ${CMAKE_CURRENT_SOURCE_DIR}/molecules/dimers/HCl.xyz
+          DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/molecules/dimers/)
+
+add_executable(test_gfnff_params_direct
+        test_gfnff_params_direct.cpp)
+
+target_link_libraries(test_gfnff_params_direct curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_params_direct REUSE_FROM curcuma_core)
+endif()
+
 # Register with CTest
 add_test(NAME test_gfnff_regression
          COMMAND test_gfnff_regression ${CMAKE_CURRENT_BINARY_DIR})
+
+add_test(NAME test_gfnff_vbond
+         COMMAND test_gfnff_vbond ${CMAKE_CURRENT_BINARY_DIR})
+
+add_test(NAME test_gfnff_params_direct
+         COMMAND test_gfnff_params_direct)
 
 # todo restore
 

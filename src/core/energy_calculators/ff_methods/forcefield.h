@@ -86,6 +86,8 @@ public:
     inline double DispersionEnergy() const { return m_dispersion_energy; }
     inline double CoulombEnergy() const { return m_coulomb_energy; }
     inline double ElectrostatEnergy() const { return m_eq_energy; }
+    inline double HydrogenBondEnergy() const { return m_energy_hbond; }   // Claude Generated (2025): Phase 5
+    inline double HalogenBondEnergy() const { return m_energy_xbond; }    // Claude Generated (2025): Phase 5
 
     void setParameter(const json& parameter);
     void setParameterFile(const std::string& file);
@@ -132,6 +134,10 @@ private:
     void setGFNFFRepulsions(const json& repulsions);
     void setGFNFFCoulombs(const json& coulombs);
 
+    // Phase 3: GFN-FF hydrogen bond and halogen bond parameter setters (Claude Generated 2025)
+    void setGFNFFHydrogenBonds(const json& hbonds);
+    void setGFNFFHalogenBonds(const json& xbonds);
+
     // Claude Generated: Energy component storage for regression testing (Nov 2025)
     double m_bond_energy = 0.0;
     double m_angle_energy = 0.0;
@@ -142,6 +148,8 @@ private:
     double m_eq_energy = 0.0;
     double m_dispersion_energy = 0.0;
     double m_coulomb_energy = 0.0;
+    double m_energy_hbond = 0.0;    // Claude Generated (2025): Phase 5 - Hydrogen bond energy
+    double m_energy_xbond = 0.0;    // Claude Generated (2025): Phase 5 - Halogen bond energy
 
     Matrix m_geometry, m_gradient;
     std::vector<int> m_atom_types;
@@ -163,6 +171,11 @@ private:
     std::vector<GFNFFDispersion> m_gfnff_dispersions;
     std::vector<GFNFFRepulsion> m_gfnff_repulsions;
     std::vector<GFNFFCoulomb> m_gfnff_coulombs;
+
+    // Phase 3: GFN-FF hydrogen bond and halogen bond storage (Claude Generated 2025)
+    std::vector<GFNFFHydrogenBond> m_gfnff_hbonds;
+    std::vector<GFNFFHalogenBond> m_gfnff_xbonds;
+
     json m_parameters;
     std::string m_auto_param_file; // Auto-detected parameter file path
     bool m_enable_caching = true; // Can be disabled for multi-threading

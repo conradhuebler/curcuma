@@ -152,6 +152,71 @@ struct GFNFFCoulomb {
     double r_cut = 50.0;        ///< Cutoff radius (Bohr)
 };
 
+/**
+ * @brief GFN-FF Hydrogen Bond (HB) three-body term
+ *
+ * Reference: gfnff_engrad.F90 - abhgfnff_eg1() and abhgfnff_eg2new()
+ * Structure: A-H...B (donor A, hydrogen H, acceptor B)
+ *
+ * Case 1: Simple A...H...B geometry
+ * Case 2: A-H...B with neighbor orientation damping
+ *
+ * Formula: E_HB = B_AH × C_AH × C_B × (-C_acidity × R_damp × Q_H^outl)
+ * Damping: Combined short-range, long-range, and out-of-line damping
+ *
+ * Claude Generated (2025): Phase 1 - HB/XB Implementation
+ */
+struct GFNFFHydrogenBond {
+    int i = 0;              ///< Donor atom A index (bonded to H)
+    int j = 0;              ///< Hydrogen atom H index
+    int k = 0;              ///< Acceptor atom B index
+
+    // Parameter storage
+    double basicity_A = 0.0;    ///< HB basicity of atom A (xhbas[A])
+    double basicity_B = 0.0;    ///< HB basicity of atom B (xhbas[B])
+    double acidity_A = 0.0;     ///< HB acidity of atom A (xhaci[A])
+
+    // Pre-computed charge factors (calculated once from EEQ charges)
+    double q_H = 0.0;           ///< EEQ charge on H
+    double q_A = 0.0;           ///< EEQ charge on A
+    double q_B = 0.0;           ///< EEQ charge on B
+
+    // Geometry thresholds
+    double r_cut = 50.0;        ///< Distance cutoff (Bohr)
+
+    // Case 2 specific (neighbor orientation)
+    int case_type = 1;          ///< 1 = simple, 2 = with orientation
+    std::vector<int> neighbors_B;  ///< Neighbor indices of B (for Case 2)
+};
+
+/**
+ * @brief GFN-FF Halogen Bond (XB) three-body term
+ *
+ * Reference: gfnff_engrad.F90 - rbxgfnff_eg()
+ * Structure: A-X...B (donor A, halogen X, acceptor B)
+ *
+ * Formula: E_XB = -R_damp × Q_outl × C_B × Q_B × C_X × Q_X
+ * Damping: Uses XB-specific parameters (XB_BACUT, XB_SCUT, XB_LONGCUT)
+ *
+ * Claude Generated (2025): Phase 1 - HB/XB Implementation
+ */
+struct GFNFFHalogenBond {
+    int i = 0;              ///< Donor atom A index (bonded to X)
+    int j = 0;              ///< Halogen atom X index
+    int k = 0;              ///< Acceptor atom B index
+
+    // Parameter storage
+    double basicity_B = 0.0;    ///< XB basicity of B (xhbas[B])
+    double acidity_X = 0.0;     ///< XB acidity of X (xbaci[X])
+
+    // Pre-computed charge factors
+    double q_X = 0.0;           ///< EEQ charge on X
+    double q_B = 0.0;           ///< EEQ charge on B
+
+    // Geometry thresholds
+    double r_cut = 50.0;        ///< Distance cutoff (Bohr)
+};
+
 class ForceFieldThread : public CxxThread {
 
 public:
@@ -175,6 +240,10 @@ public:
     void addGFNFFDispersion(const GFNFFDispersion& dispersion);
     void addGFNFFRepulsion(const GFNFFRepulsion& repulsion);
     void addGFNFFCoulomb(const GFNFFCoulomb& coulomb);
+
+    // Phase 1.2: GFN-FF hydrogen bond and halogen bond addition methods (Claude Generated 2025)
+    void addGFNFFHydrogenBond(const GFNFFHydrogenBond& hbond);
+    void addGFNFFHalogenBond(const GFNFFHalogenBond& xbond);
 
     // Phase 3: Initialize atom types for covalent radius calculations in GFN-FF
     void Initialise(const std::vector<int>& atom_types)
@@ -218,6 +287,10 @@ public:
     double DispersionEnergy() { return m_dispersion_energy; }
     double CoulombEnergy() { return m_coulomb_energy; }
 
+    // Phase 1.2: HB/XB energy components (Claude Generated 2025)
+    double HydrogenBondEnergy() { return m_energy_hbond; }
+    double HalogenBondEnergy() { return m_energy_xbond; }
+
     Matrix Gradient() const { return m_gradient; }
 
 private:
@@ -243,6 +316,10 @@ private:
     void CalculateGFNFFDispersionContribution();
     void CalculateGFNFFRepulsionContribution();
     void CalculateGFNFFCoulombContribution();
+
+    // Phase 5: GFN-FF hydrogen bond and halogen bond calculation functions (Claude Generated 2025)
+    void CalculateGFNFFHydrogenBondContribution();
+    void CalculateGFNFFHalogenBondContribution();
 
     // double HarmonicBondStretching();
 
@@ -274,6 +351,10 @@ private:
     std::vector<GFNFFRepulsion> m_gfnff_repulsions;    // GFN-FF repulsion
     std::vector<GFNFFCoulomb> m_gfnff_coulombs;        // EEQ Coulomb electrostatics
 
+    // Phase 1.2: GFN-FF hydrogen bond and halogen bond terms (Claude Generated 2025)
+    std::vector<GFNFFHydrogenBond> m_gfnff_hbonds;     // Hydrogen bonds (HB)
+    std::vector<GFNFFHalogenBond> m_gfnff_xbonds;      // Halogen bonds (XB)
+
 protected:
     Matrix m_geometry, m_gradient;
     double m_energy = 0, m_bond_energy = 0.0, m_angle_energy = 0.0, m_dihedral_energy = 0.0, m_inversion_energy = 0.0, m_vdw_energy = 0.0, m_rep_energy = 0.0, m_eq_energy = 0.0;
@@ -281,6 +362,10 @@ protected:
     // Phase 4: Separate energy components for GFN-FF non-bonded terms
     double m_dispersion_energy = 0.0;  // D3/D4 dispersion
     double m_coulomb_energy = 0.0;     // EEQ Coulomb electrostatics
+
+    // Phase 1.2: HB/XB energy components (Claude Generated 2025)
+    double m_energy_hbond = 0.0;       // Hydrogen bond energy
+    double m_energy_xbond = 0.0;       // Halogen bond energy
 
     double m_final_factor = 1;
     double m_bond_scaling = 1, m_angle_scaling = 1, m_dihedral_scaling = 1, m_inversion_scaling = 1, m_vdw_scaling = 1, m_rep_scaling = 1;

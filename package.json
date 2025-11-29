@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@nanocollective/nanocoder": "^1.17.2"
+  }
+}

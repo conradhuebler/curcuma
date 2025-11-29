@@ -196,26 +196,19 @@ static const std::vector<double> cnfak_gfnff = {
 };
 
 // GFN-FF electronegativities (NOT Pauling!) - dimensionless
-// Reference: gfnff_rab.f90:95
+// Reference: gfnff_param.f90:290-298 in XTB 6.6.1
+// CRITICAL BUG FIX (Nov 2025): Replaced with correct Fortran values
 static const std::vector<double> en_gfnff = {
-    2.30085633, 2.78445145, 1.52956084, 1.51714704, 2.20568300, // H-B
-    2.49640820, 2.81007174, 4.51078438, 4.67476223, 3.29383610, // C-Ne
-    2.84505365, 2.20047950, 2.31739628, 2.03636974, 1.97558064, // Na-P
-    2.13446570, 2.91638164, 1.54098156, 2.91656301, 2.26312147, // S-Ca
-    2.25621439, 1.32628677, 2.27050569, 1.86790977, 2.44759456, // Sc-Mn
-    2.49480042, 2.91545568, 3.25897750, 2.68723778, 1.86132251, // Fe-Zn
-    2.01200832, 1.97030722, 1.95495427, 2.68920990, 2.84503857, // Ga-Br
-    2.61591858, 2.64188286, 2.28442252, 1.33011187, 1.19809388, // Kr-Zr
-    1.89181390, 2.40186898, 1.89282464, 3.09963488, 2.50677823, // Nb-Rh
-    2.61196704, 2.09943450, 2.66930105, 1.78349472, 2.09634533, // Pd-Sn
-    2.00028974, 1.99869908, 2.59072029, 2.54497829, 2.52387890, // Sb-Cs
-    2.30204667, 1.60119300, 2.00000000, 2.00000000, 2.00000000, // Ba-Nd
-    2.00000000, 2.00000000, 2.00000000, 2.00000000, 2.00000000, // Pm-Tb
-    2.00000000, 2.00000000, 2.00000000, 2.00000000, 2.00000000, // Dy-Yb
-    2.00000000, 2.30089349, 1.75039077, 1.51785130, 2.62972945, // Lu-Re
-    2.75372921, 2.62540906, 2.55860939, 3.32492356, 2.65140898, // Os-Hg
-    1.52014458, 2.54984804, 1.72021963, 2.69303422, 1.81031095, // Tl-At
-    2.34224386 // Rn
+    2.200, 3.000, 0.980, 1.570, 2.040, 2.550, 3.040, 3.440, 3.980, // H-F
+    4.500, 0.930, 1.310, 1.610, 1.900, 2.190, 2.580, 3.160, 3.500, // Ne-Ar
+    0.820, 1.000, 1.360, 1.540, 1.630, 1.660, 1.550, 1.830, 1.880, // K-Co
+    1.910, 1.900, 1.650, 1.810, 2.010, 2.180, 2.550, 2.960, 3.000, // Ni-Kr
+    0.820, 0.950, 1.220, 1.330, 1.600, 2.160, 1.900, 2.200, 2.280, // Rb-Tc
+    2.200, 1.930, 1.690, 1.780, 1.960, 2.050, 2.100, 2.660, 2.600, // Ru-Xe
+    0.79, 0.89, 1.10, 1.12, 1.13, 1.14, 1.15, 1.17, 1.18, 1.20,  // Cs-Dy
+    1.21, 1.22, 1.23, 1.24, 1.25, 1.26, 1.27, 1.3, 1.5, 1.7,      // Ho-W
+    1.9, 2.1, 2.2, 2.2, 2.2, 2.0, 1.62, 2.33, 2.02, 2.0,          // Re-Rn
+    2.2, 2.2                                                        // Fr-Ra (placeholder)
 };
 
 // Row-dependent EN polynomial coefficients (scaled by 10^-3 in Fortran)
@@ -454,5 +447,114 @@ static constexpr double s6 = 1.0;   // C6 scaling
 static constexpr double s8 = 2.4;   // C8 scaling
 static constexpr double a1 = 0.48;  // BJ damping a1
 static constexpr double a2 = 4.80;  // BJ damping a2
+
+// ============================================================================
+// SECTION 8: Hydrogen Bond and Halogen Bond Parameters
+// ============================================================================
+// Reference: gfnff_param.f90:468-522 (angewChem2020 parameter set)
+// Claude Generated (2025): Direct extraction from Fortran reference
+
+// --- Global HB/XB Damping Parameters ---
+
+static constexpr double HB_BACUT = 49.0;        // HB angle cut-off
+static constexpr double HB_SCUT = 22.0;         // HB short-range cut-off
+static constexpr double XB_BACUT = 70.0;        // XB angle cut-off
+static constexpr double XB_SCUT = 5.0;          // XB short-range cut-off
+static constexpr double HB_ALP = 6.0;           // Damping exponent (HB/XB)
+static constexpr double HB_LONGCUT = 85.0;      // HB long-range cut-off (Bohr²)
+static constexpr double HB_LONGCUT_XB = 70.0;   // XB long-range cut-off (Bohr²)
+static constexpr double HB_ST = 15.0;           // Charge scaling strength (HB)
+static constexpr double HB_SF = 1.0;            // Charge scaling offset (HB)
+static constexpr double XB_ST = 15.0;           // Charge scaling strength (XB)
+static constexpr double XB_SF = 0.03;           // Charge scaling offset (XB)
+static constexpr double HB_ABMIX = 0.80;        // A-B mixing parameter
+static constexpr double HB_NBCUT = 11.20;       // Neighbor angle cut-off (Case 2)
+static constexpr double TORS_HB = 0.94;         // NCI torsion term shift
+static constexpr double BEND_HB = 0.20;         // NCI bending term shift
+
+// Global acidity parameters
+static constexpr double XHACI_GLOBABH = 0.268;  // A-H...B general scaling
+static constexpr double XHACI_COH = 0.350;      // A-H...O=C scaling
+static constexpr double XHACI_GLOB = 1.50;      // Baseline acidity
+
+// --- Element-Specific Basicity (xhbas) ---
+// For both HB and XB - acceptor atom B
+// Index: atomic number (0-based, index 0 unused)
+// Reference: gfnff_param.f90:488-502
+static const std::vector<double> hb_basicity = {
+    0.0,    // Z=0 (placeholder)
+    0.0,    // H (1)
+    0.0,    // He (2)
+    0.0, 0.0, 0.0,                              // Li, Be, B (3-5)
+    0.80,   // C (6)
+    1.68,   // N (7)
+    0.67,   // O (8)
+    0.52,   // F (9)
+    0.0,    // Ne (10)
+    0.0, 0.0, 0.0,                              // Na, Mg, Al (11-13)
+    4.0,    // Si (14)
+    3.5,    // P (15)
+    2.0,    // S (16)
+    1.5,    // Cl (17)
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  // Ar-As (18-32)
+    3.5,    // As (33) = param%xhbas(15)
+    2.0,    // Se (34) = param%xhbas(16)
+    1.5,    // Br (35)
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  // Kr-Sn (36-50)
+    3.5,    // Sb (51) = param%xhbas(15)
+    2.0,    // Te (52) = param%xhbas(16)
+    1.9,    // I (53)
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // Xe-At (54-85)
+    0.0     // Rn (86)
+};
+
+// --- Element-Specific HB Acidity (xhaci) ---
+// For hydrogen bond donor atom (bonded to H)
+// Reference: gfnff_param.f90:503-512
+static const std::vector<double> hb_acidity = {
+    0.0,    // Z=0 (placeholder)
+    0.0,    // H (1)
+    0.0,    // He (2)
+    0.0, 0.0, 0.0,                                      // Li, Be, B (3-5)
+    0.75,                                                // C (6) - weaker
+    XHACI_GLOB + 0.1,                                   // N (7) = 1.60
+    XHACI_GLOB,                                         // O (8) = 1.50
+    XHACI_GLOB,                                         // F (9) = 1.50
+    0.0, 0.0, 0.0, 0.0, 0.0,                            // Ne-Al (10-14)
+    XHACI_GLOB,                                         // P (15) = 1.50
+    XHACI_GLOB,                                         // S (16) = 1.50
+    XHACI_GLOB + 1.0,                                   // Cl (17) = 2.50
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  // Ar-As (18-32)
+    XHACI_GLOB,                                         // As (33) = 1.50 (via pattern)
+    XHACI_GLOB,                                         // Se (34) = 1.50
+    XHACI_GLOB + 1.0,                                   // Br (35) = 2.50
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  // Kr-Sn (36-50)
+    XHACI_GLOB,                                         // Sb (51) = 1.50
+    XHACI_GLOB,                                         // Te (52) = 1.50
+    XHACI_GLOB + 1.0,                                   // I (53) = 2.50
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // Xe-At (54-85)
+    0.0     // Rn (86)
+};
+
+// --- Element-Specific XB Acidity (xbaci) ---
+// For halogen atom X in X...B interaction
+// Reference: gfnff_param.f90:513-522
+static const std::vector<double> xb_acidity = {
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  // Z=0-9
+    0.0, 0.0, 0.0, 0.0, 0.0,                            // Z=10-14
+    1.0,    // P (15)
+    1.0,    // S (16)
+    0.5,    // Cl (17)
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  // Ar-As (18-32)
+    1.2,    // As (33)
+    1.2,    // Se (34)
+    0.9,    // Br (35)
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  // Kr-Sn (36-50)
+    1.2,    // Sb (51)
+    1.2,    // Te (52)
+    1.2,    // I (53)
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // Xe-At (54-85)
+    0.0     // Rn (86)
+};
 
 } // namespace GFNFFParameters

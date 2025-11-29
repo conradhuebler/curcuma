@@ -175,6 +175,13 @@ void ForceField::setParameter(const json& parameters)
             setGFNFFCoulombs(parameters["gfnff_coulombs"]);
         std::cerr << "DEBUG: gfnff_coulombs done" << std::endl;
 
+        // Phase 3: GFN-FF hydrogen bond and halogen bond setters (Claude Generated 2025)
+        if (parameters.contains("gfnff_hbonds"))
+            setGFNFFHydrogenBonds(parameters["gfnff_hbonds"]);
+        if (parameters.contains("gfnff_xbonds"))
+            setGFNFFHalogenBonds(parameters["gfnff_xbonds"]);
+        std::cerr << "DEBUG: gfnff_hbonds and gfnff_xbonds done" << std::endl;
+
         m_parameters = parameters;
         m_method = m_parameters["method"];
         std::cerr << "DEBUG: method set to " << m_method << std::endl;
@@ -570,6 +577,72 @@ void ForceField::setGFNFFCoulombs(const json& coulombs)
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success(fmt::format("Loaded {} GFN-FF Coulomb pairs", m_gfnff_coulombs.size()));
+    }
+}
+
+void ForceField::setGFNFFHydrogenBonds(const json& hbonds)
+{
+    // Claude Generated (2025): Phase 3 - HB Parameter Setter
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setGFNFFHydrogenBonds: Loading {} hydrogen bonds", hbonds.size()));
+    }
+
+    m_gfnff_hbonds.clear();
+    for (const auto& hb : hbonds) {
+        GFNFFHydrogenBond bond;
+
+        bond.i = hb["i"];  // Donor atom A
+        bond.j = hb["j"];  // Hydrogen
+        bond.k = hb["k"];  // Acceptor atom B
+
+        bond.basicity_A = hb["basicity_A"];
+        bond.basicity_B = hb["basicity_B"];
+        bond.acidity_A = hb["acidity_A"];
+
+        bond.q_H = hb["q_H"];
+        bond.q_A = hb["q_A"];
+        bond.q_B = hb["q_B"];
+
+        bond.case_type = hb.value("case", 1);
+
+        if (bond.case_type == 2 && hb.contains("neighbors_B")) {
+            bond.neighbors_B = hb["neighbors_B"].get<std::vector<int>>();
+        }
+
+        m_gfnff_hbonds.push_back(bond);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF hydrogen bonds", hbonds.size()));
+    }
+}
+
+void ForceField::setGFNFFHalogenBonds(const json& xbonds)
+{
+    // Claude Generated (2025): Phase 3 - XB Parameter Setter
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setGFNFFHalogenBonds: Loading {} halogen bonds", xbonds.size()));
+    }
+
+    m_gfnff_xbonds.clear();
+    for (const auto& xb : xbonds) {
+        GFNFFHalogenBond bond;
+
+        bond.i = xb["i"];  // Donor atom A
+        bond.j = xb["j"];  // Halogen X
+        bond.k = xb["k"];  // Acceptor atom B
+
+        bond.basicity_B = xb["basicity_B"];
+        bond.acidity_X = xb["acidity_X"];
+
+        bond.q_X = xb["q_X"];
+        bond.q_B = xb["q_B"];
+
+        m_gfnff_xbonds.push_back(bond);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF halogen bonds", xbonds.size()));
     }
 }
 
@@ -1004,6 +1077,8 @@ double ForceField::Calculate(bool gradient)
     m_eq_energy = 0.0;
     m_dispersion_energy = 0.0;
     m_coulomb_energy = 0.0;
+    m_energy_hbond = 0.0;    // Claude Generated (2025): Phase 5 - Reset HB energy
+    m_energy_xbond = 0.0;    // Claude Generated (2025): Phase 5 - Reset XB energy
 
     double h4_energy = 0.0;
     double hh_energy = 0.0;
@@ -1051,12 +1126,26 @@ double ForceField::Calculate(bool gradient)
             m_dispersion_energy += thread_disp;
             m_coulomb_energy += thread_coul;
 
+            // Claude Generated (2025): Phase 5 - Collect HB/XB energies
+            double thread_hb = m_stored_threads[i]->HydrogenBondEnergy();
+            double thread_xb = m_stored_threads[i]->HalogenBondEnergy();
+            m_energy_hbond += thread_hb;
+            m_energy_xbond += thread_xb;
+
             // Claude Generated (2025): Debug individual energy components
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::param(fmt::format("thread_{}_dispersion", i),
                     fmt::format("{:.6f} Eh", thread_disp));
                 CurcumaLogger::param(fmt::format("thread_{}_coulomb", i),
                     fmt::format("{:.6f} Eh", thread_coul));
+                if (thread_hb != 0.0) {
+                    CurcumaLogger::param(fmt::format("thread_{}_hbond", i),
+                        fmt::format("{:.6f} Eh", thread_hb));
+                }
+                if (thread_xb != 0.0) {
+                    CurcumaLogger::param(fmt::format("thread_{}_xbond", i),
+                        fmt::format("{:.6f} Eh", thread_xb));
+                }
             }
         }
 
@@ -1096,8 +1185,8 @@ double ForceField::Calculate(bool gradient)
         }
     }
 
-    // Claude Generated: Add GFN-FF dispersion and Coulomb energies to total
-    energy = m_e0 + m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy + m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + hh_energy + cg_energy + m_dispersion_energy + m_coulomb_energy;
+    // Claude Generated: Add GFN-FF dispersion, Coulomb, HB, and XB energies to total
+    energy = m_e0 + m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy + m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + hh_energy + cg_energy + m_dispersion_energy + m_coulomb_energy + m_energy_hbond + m_energy_xbond;
 
     // Claude Generated (2025): Debug total GFN-FF energies
     if (CurcumaLogger::get_verbosity() >= 3 && (m_dispersion_energy != 0.0 || m_coulomb_energy != 0.0)) {
@@ -1140,6 +1229,12 @@ double ForceField::Calculate(bool gradient)
         }
         if (m_coulomb_energy != 0.0) {
             CurcumaLogger::param("GFNFF_coulomb", fmt::format("{:.6f} Eh", m_coulomb_energy));
+        }
+        if (m_energy_hbond != 0.0) {
+            CurcumaLogger::param("GFNFF_hydrogen_bond", fmt::format("{:.6f} Eh", m_energy_hbond));
+        }
+        if (m_energy_xbond != 0.0) {
+            CurcumaLogger::param("GFNFF_halogen_bond", fmt::format("{:.6f} Eh", m_energy_xbond));
         }
         if (cg_energy != 0.0) {
             CurcumaLogger::param("CG_interactions", fmt::format("{:.6f} Eh", cg_energy));
