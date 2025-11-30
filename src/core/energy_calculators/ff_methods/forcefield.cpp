@@ -1118,7 +1118,10 @@ double ForceField::Calculate(bool gradient)
             // Claude Generated: Store GFN-FF energies in both old and new variables for API compatibility
             h4_energy += m_stored_threads[i]->VdWEnergy();
             hh_energy += m_stored_threads[i]->RepEnergy();
-            m_rep_energy += m_stored_threads[i]->RepEnergy();  // Claude Generated: Also store in m_rep_energy for API compatibility
+            // CRITICAL FIX (Nov 2025): Do NOT also add to m_rep_energy for GFN-FF!
+            // For GFN-FF (method==3), repulsion goes ONLY into hh_energy, not m_rep_energy
+            // This was causing double-counting: H2 showed 0.266 Eh instead of 0.050 Eh
+            // m_rep_energy is for UFF/QMDFF only (method != 3)
 
             // CRITICAL FIX: Also collect GFN-FF dispersion and Coulomb energies!
             double thread_disp = m_stored_threads[i]->DispersionEnergy();

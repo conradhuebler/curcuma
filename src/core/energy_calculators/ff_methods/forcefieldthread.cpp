@@ -46,6 +46,16 @@ int ForceFieldThread::execute()
     m_dihedral_energy = 0;
     m_angle_energy = 0;
     m_bond_energy = 0.0;
+
+    // CRITICAL FIX (Nov 2025): Reset GFN-FF pairwise energy terms
+    // These were missing, causing energy accumulation across Calculate() calls
+    // Business Impact: 100K € - GFN-FF must match XTB 6.6.1 reference exactly
+    m_dispersion_energy = 0.0;
+    m_coulomb_energy = 0.0;
+    m_energy_hbond = 0.0;
+    m_energy_xbond = 0.0;
+    m_eq_energy = 0.0;  // Also reset EQ energy for consistency
+
     std::cout << "Forcefield threads" << std::endl;
     if (m_method == 1) {
         CalculateUFFBondContribution();

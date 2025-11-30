@@ -19,6 +19,7 @@
 #include "gfnff.h"
 #include "src/core/energy_calculators/ff_methods/gfnff_par.h"
 #include "src/core/curcuma_logger.h"
+#include "src/core/elements.h"
 #include "src/core/units.h"
 #include <cmath>
 #include <fstream>
@@ -811,9 +812,9 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     double ra = r0_1 + cnfak_1 * cn1;  // CN-dependent radius A
     double rb = r0_2 + cnfak_2 * cn2;  // CN-dependent radius B
 
-    std::cout << fmt::format("RAB_TRANSFORM: r0[Z1={}]={:.8f}, cnfak[Z1]={:.8f}, CN1={:.2f} -> ra={:.8f} Bohr\n",
+    std::cout << fmt::format("RAB_TRANSFORM: r0[Z1={}]={:.8f}, cnfak[Z1]={:.8f}, CN1={:.10f} -> ra={:.8f} Bohr\n",
                              z1, r0_1, cnfak_1, cn1, ra);
-    std::cout << fmt::format("RAB_TRANSFORM: r0[Z2={}]={:.8f}, cnfak[Z2]={:.8f}, CN2={:.2f} -> rb={:.8f} Bohr\n",
+    std::cout << fmt::format("RAB_TRANSFORM: r0[Z2={}]={:.8f}, cnfak[Z2]={:.8f}, CN2={:.10f} -> rb={:.8f} Bohr\n",
                              z2, r0_2, cnfak_2, cn2, rb);
 
     // Step 3: Phase 2 - Row-dependent EN correction
@@ -865,13 +866,20 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     }
 
     double rabshift = gen_rabshift + shift;  // Total shift in Bohr
-    // NOTE: Result is in Bohr (ra, rb are in Bohr) - NO conversion needed since we use m_geometry_bohr
-    params.equilibrium_distance = (ra + rb + rabshift) * ff;
+
+    // CRITICAL FIX (Nov 2025): Implement gfnffrab algorithm exactly
+    // Reference: external/gfnff/src/gfnff_rab.f90 lines 170-177
+    // Order of operations: Apply ff FIRST (geometric EN correction), THEN add shift
+    // Formula: r0 = (ra + rb) * ff + rabshift (NOT (ra + rb + rabshift) * ff)
+    double rtmp = (ra + rb) * ff;  // Slater-Koster based distance with EN correction
+    params.equilibrium_distance = rtmp + rabshift;  // Add shift as additive offset
 
     std::cout << fmt::format("RAB_TRANSFORM: gen_rabshift={:.8f}, shift={:.8f}, rabshift={:.8f}\n",
                              gen_rabshift, shift, rabshift);
-    std::cout << fmt::format("RAB_TRANSFORM: r_eq = ({:.8f} + {:.8f} + {:.8f}) * {:.8f} = {:.8f} Bohr\n",
-                             ra, rb, rabshift, ff, params.equilibrium_distance);
+    std::cout << fmt::format("RAB_TRANSFORM: rtmp = ({:.8f} + {:.8f}) * {:.8f} = {:.8f} Bohr\n",
+                             ra, rb, ff, rtmp);
+    std::cout << fmt::format("RAB_TRANSFORM: r_eq = {:.8f} + {:.8f} = {:.8f} Bohr\n",
+                             rtmp, rabshift, params.equilibrium_distance);
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info(fmt::format("  Equilibrium Distance: r_A={:.3f}, r_B={:.3f}, EN_corr={:.3f} -> r_eq={:.3f} Bohr",
@@ -1633,13 +1641,17 @@ Vector GFNFF::calculateCoordinationNumbers(double threshold) const
 
             double distance = std::sqrt(distance_sq);
 
-            // CRITICAL FIX: Use r0_gfnff (already in Bohr), NOT covalent_radii (Angström)
-            // r0_gfnff is CN-independent base covalent radius from Fortran gfnff_rab.f90:82-102
-            using namespace GFNFFParameters;
-            double rcov_i = (m_atoms[i] >= 1 && m_atoms[i] <= static_cast<int>(r0_gfnff.size()))
-                            ? r0_gfnff[m_atoms[i] - 1] : 2.0;
-            double rcov_j = (m_atoms[j] >= 1 && m_atoms[j] <= static_cast<int>(r0_gfnff.size()))
-                            ? r0_gfnff[m_atoms[j] - 1] : 2.0;
+            // CRITICAL FIX (Nov 2025): Use CovalentRadius (D3 radii from elements.h), NOT r0_gfnff!
+            // The Fortran code uses param%rcov (covalentRadD3) for CN calculation (gfnff_cn.f90)
+            // but uses r0 (from gfnff_rab.f90) for rab calculation
+            // Reference: external/gfnff/src/gfnff_cn.f90:69-70 and gfnff_param.f90:569
+            double rcov_i_angstrom = (m_atoms[i] >= 1 && m_atoms[i] < static_cast<int>(Elements::CovalentRadius.size()))
+                                   ? Elements::CovalentRadius[m_atoms[i]] : 0.7;  // CovalentRadius has -1 at index 0
+            double rcov_j_angstrom = (m_atoms[j] >= 1 && m_atoms[j] < static_cast<int>(Elements::CovalentRadius.size()))
+                                   ? Elements::CovalentRadius[m_atoms[j]] : 0.7;
+            // Convert to Bohr (1 Angstrom = 1.8897259886 Bohr)
+            double rcov_i = rcov_i_angstrom * 1.8897259886;
+            double rcov_j = rcov_j_angstrom * 1.8897259886;
             double r_cov = rcov_i + rcov_j;
 
             // D3-style error function CN contribution
