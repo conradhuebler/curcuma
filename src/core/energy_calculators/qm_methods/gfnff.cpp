@@ -1326,14 +1326,17 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 
     // Debug output for alpha calculation (always on for CH4 debugging)
     if (z1 == 6 && z2 == 1) {  // C-H bond
-        std::cout << fmt::format("DEBUG ALPHA (C-H): srb1={:.10f}, fsrb2={:.10f}, en_diff={:.10f}, en_diff²={:.10f}\n",
-                                 srb1, fsrb2, en_diff, en_diff * en_diff);
-        std::cout << fmt::format("DEBUG ALPHA: term1={:.10f}, term2={:.10f}, sum={:.10f}, alpha={:.10f}\n",
-                                 alpha_term1, alpha_term2, alpha_sum, params.alpha);
-        std::cout << fmt::format("DEBUG ALPHA: srb2={:.10f}, srb3={:.10f}, bstrength={:.10f}, mtyp1={}, mtyp2={}\n",
-                                 srb2, srb3, bstrength, mtyp1, mtyp2);
-        std::cout << fmt::format("DEBUG ALPHA EXPECTED: 0.482285756225, GOT: {:.10f}, DIFF: {:.10f}\n",
-                                 params.alpha, 0.482285756225 - params.alpha);
+        const bool DEBUG_ALPHA_VERBOSE = false;  // Set to true for detailed alpha debugging
+        if (DEBUG_ALPHA_VERBOSE) {
+            std::cout << fmt::format("DEBUG ALPHA (C-H): srb1={:.10f}, fsrb2={:.10f}, en_diff={:.10f}, en_diff²={:.10f}\n",
+                                     srb1, fsrb2, en_diff, en_diff * en_diff);
+            std::cout << fmt::format("DEBUG ALPHA: term1={:.10f}, term2={:.10f}, sum={:.10f}, alpha={:.10f}\n",
+                                     alpha_term1, alpha_term2, alpha_sum, params.alpha);
+            std::cout << fmt::format("DEBUG ALPHA: srb2={:.10f}, srb3={:.10f}, bstrength={:.10f}, mtyp1={}, mtyp2={}\n",
+                                     srb2, srb3, bstrength, mtyp1, mtyp2);
+            std::cout << fmt::format("DEBUG ALPHA EXPECTED: 0.482285756225, GOT: {:.10f}, DIFF: {:.10f}\n",
+                                     params.alpha, 0.482285756225 - params.alpha);
+        }
     }
 
     // Debug output for force constant calculation (always on for HH/CH4)
@@ -1383,8 +1386,10 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     for (int i = 0; i < m_atomcount; ++i) {
         if (i == atom_j) continue;
         double distance = (m_geometry_bohr.row(atom_j) - m_geometry_bohr.row(i)).norm();
-        // Bond threshold: sum of covalent radii * 1.3
-        if (distance < 2.0) neighbor_count++;  // Bohr units (~1.06 Å)
+        // Bond threshold: 2.5 Bohr (~1.32 Å) to catch C-H bonds at ~2.05 Bohr
+        // Claude Generated Fix (2025-11-30): Previous threshold 2.0 Bohr missed C-H bonds!
+        // C-H bond: ~1.09 Å = 2.06 Bohr → need threshold > 2.06
+        if (distance < 2.5) neighbor_count++;  // Bohr units
     }
 
     // Assign hybridization based on neighbor count and Z
@@ -3006,9 +3011,9 @@ json GFNFF::generateGFNFFDispersionPairs() const
 
     // GFN-FF specific parameters (from gfnff_param.f90)
     const double s6 = 1.0;  // C6 scaling factor
-    const double s8 = 2.4;  // C8 scaling factor (typical GFN-FF)
-    const double a1 = 0.48; // BJ damping parameter 1
-    const double a2 = 4.80; // BJ damping parameter 2
+    const double s8 = 2.0;  // C8 scaling factor (CRITICAL: fixed at 2.0 per Fortran gfnff_param.f90:491 comment "s8 fixed = 2")
+    const double a1 = 0.58; // BJ damping parameter 1 (Fortran gfnff_param.f90:491)
+    const double a2 = 4.80; // BJ damping parameter 2 (Fortran gfnff_param.f90:492)
 
     // Generate all pairwise dispersion interactions
     for (int i = 0; i < m_atomcount; ++i) {

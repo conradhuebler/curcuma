@@ -890,9 +890,12 @@ json GFNFF::generateGFNFFTorsions() const
                 torsion["j"] = j;
                 torsion["k"] = k;
                 torsion["l"] = l;
-                torsion["periodicity"] = params.periodicity;
-                torsion["barrier"] = params.barrier_height; // kcal/mol
-                torsion["phase"] = params.phase_shift;      // radians
+                // Claude Generated Fix (2025-11-30): Renamed JSON keys to match forcefield.cpp loader
+                // Previous keys: "periodicity", "barrier", "phase" → caused ALL torsion energies = 0
+                // Loader expects: "n", "V", "phi0" (from Dihedral struct in forcefield.cpp:444-461)
+                torsion["n"] = params.periodicity;          // Periodicity (was "periodicity")
+                torsion["V"] = params.barrier_height;       // Barrier height in kcal/mol (was "barrier")
+                torsion["phi0"] = params.phase_shift;       // Phase shift in radians (was "phase")
                 torsion["is_improper"] = params.is_improper;
 
                 // Store current dihedral angle for reference
@@ -915,7 +918,7 @@ json GFNFF::generateGFNFFTorsions() const
         // Optional: Print summary by periodicity
         int n1_count = 0, n2_count = 0, n3_count = 0;
         for (const auto& torsion : torsions) {
-            int n = torsion["periodicity"];
+            int n = torsion["n"];  // Claude Generated Fix (2025-11-30): Changed from "periodicity" to "n"
             if (n == 1) n1_count++;
             else if (n == 2) n2_count++;
             else if (n == 3) n3_count++;

@@ -689,6 +689,9 @@ void ForceField::AutoRanges()
         m_stored_threads.push_back(thread);
     }
     #endif
+    // TEMPORARILY DISABLED - H4Thread has build errors
+    // Claude Generated Comment - 2025-11-30
+    /*
     int h4 = false; // m_parameters["h4"];
     if (h4) {
         if (free_threads > 1)
@@ -700,6 +703,7 @@ void ForceField::AutoRanges()
         m_threadpool->addThread(thread);
         m_stored_threads.push_back(thread);
     }
+    */
     for (int i = 0; i < free_threads; ++i) {
         ForceFieldThread* thread = new ForceFieldThread(i, free_threads);
         thread->setGeometry(m_geometry, false);
