@@ -1246,19 +1246,28 @@ void ForceFieldThread::CalculateGFNFFRepulsionContribution()
 void ForceFieldThread::CalculateGFNFFCoulombContribution()
 {
     /**
-     * @brief EEQ-based Coulomb electrostatics with erf damping (pairwise parallelizable)
+     * @brief Complete EEQ-based Coulomb electrostatics with THREE terms
      *
-     * Reference: Phase 3 EEQ charges + Fortran gfnff_engrad.F90:1378-1389
-     * Formula: E_coul = q_i * q_j * erf(γ_ij * r_ij) / r_ij
-     * Error function damping avoids 1/r singularity at short range
+     * Reference: Fortran gfnff_engrad.F90:1378-1389 and gfnff_ini.f90
      *
-     * Claude Generated (2025): Phase 4 pairwise non-bonded implementation
+     * Complete formula (THREE TERMS):
+     * E_coul = E_pairwise + E_self_energy + E_self_interaction
+     *
+     * 1. Pairwise: Σ(i<j) [q_i*q_j*erf(γ_ij*r_ij) / r_ij²]
+     * 2. Self-energy: -Σ_i [q_i*χ_i]
+     * 3. Self-interaction: Σ_i [0.5*q_i²*(γ_i + √(2/π)/√(α_i))]
+     *    where γ_i = 1/√(α_i)
+     *
+     * Claude Generated (2025-12-05): Phase 4.3 - Complete implementation
      */
 
     if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_coulombs.size() > 0) {
         CurcumaLogger::info(fmt::format("Thread calculating {} Coulomb pairs", m_gfnff_coulombs.size()));
     }
 
+    // =========================================================================
+    // TERM 1: Pairwise Coulomb interactions (distance-dependent)
+    // =========================================================================
     for (int index = 0; index < m_gfnff_coulombs.size(); ++index) {
         const auto& coul = m_gfnff_coulombs[index];
 
@@ -1269,28 +1278,85 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
 
         if (rij > coul.r_cut || rij < 1e-10) continue;
 
-        // EEQ Coulomb with erf damping: E = q_i * q_j * erf(γ*r) / r²
-        // NOTE: Denominator is r² (not r) - this is CRITICAL for correct energy
-        // Reference: Fortran gfnff_engrad.F90:1385 and gfnff_ini.f90
-        // TODO: Add missing self-energy term (-q_i*chi_i) and self-interaction term
+        // Pairwise: E_pair = q_i * q_j * erf(γ_ij*r) / r²
         double gamma_r = coul.gamma_ij * rij;
         double erf_term = std::erf(gamma_r);
-        double energy = coul.q_i * coul.q_j * erf_term / (rij * rij);
+        double energy_pair = coul.q_i * coul.q_j * erf_term / (rij * rij);
 
-        m_coulomb_energy += energy * m_final_factor;
+        m_coulomb_energy += energy_pair * m_final_factor;
 
         if (m_calculate_gradient) {
-            // dE/dr = q_i*q_j * [d/dr(erf(γ*r)/r)]
-            //       = q_i*q_j * [γ*exp(-(γ*r)^2)*(2/sqrt(π))/r - erf(γ*r)/r^2]
-            const double sqrt_pi = 1.772453850905516;  // sqrt(π)
+            // dE_pair/dr = q_i*q_j * [d/dr(erf(γ*r)/r²)]
+            //            = q_i*q_j * [γ*exp(-(γ*r)²)*(2/√π)/r² - 2*erf(γ*r)/r³]
+            const double sqrt_pi = 1.772453850905516;  // √π
             double exp_term = std::exp(-gamma_r * gamma_r);
             double derf_dr = coul.gamma_ij * exp_term * (2.0 / sqrt_pi);
-            double dEdr = coul.q_i * coul.q_j * (derf_dr / rij - erf_term / (rij * rij)) * m_final_factor;
+            double dEdr_pair = coul.q_i * coul.q_j *
+                (derf_dr / (rij * rij) - 2.0 * erf_term / (rij * rij * rij)) * m_final_factor;
 
-            Eigen::Vector3d grad = dEdr * rij_vec / rij;
+            Eigen::Vector3d grad = dEdr_pair * rij_vec / rij;
 
             m_gradient.row(coul.i) += grad.transpose();
             m_gradient.row(coul.j) -= grad.transpose();
+        }
+    }
+
+    // =========================================================================
+    // TERM 2 & 3: Self-energy and Self-interaction (per-atom, distance-independent)
+    // =========================================================================
+    // These terms must be calculated once per atom, not per pair
+    // Track which atoms have been processed to avoid double-counting
+    std::set<int> processed_atoms;
+
+    for (const auto& coul : m_gfnff_coulombs) {
+        // Process atom i
+        if (processed_atoms.find(coul.i) == processed_atoms.end()) {
+            processed_atoms.insert(coul.i);
+
+            // TERM 2: Self-energy for atom i
+            // E_self_i = -q_i * χ_i
+            double energy_self_i = -coul.q_i * coul.chi_i;
+
+            // TERM 3: Self-interaction for atom i
+            // E_selfint_i = 0.5 * q_i² * (gam_i + √(2/π)/√(α_i))
+            // where gam_i is chemical hardness (from EEQ parameters)
+            const double sqrt_2_over_pi = 0.797884560802865;  // √(2/π)
+            double selfint_term = coul.gam_i + sqrt_2_over_pi / std::sqrt(coul.alp_i);
+            double energy_selfint_i = 0.5 * coul.q_i * coul.q_i * selfint_term;
+
+            // Add both self-terms for atom i
+            double energy_atom_i = energy_self_i + energy_selfint_i;
+            m_coulomb_energy += energy_atom_i * m_final_factor;
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::param(fmt::format("coulomb_self_atom_{}", coul.i),
+                    fmt::format("E_self={:.6f}, E_selfint={:.6f}, total={:.6f} Eh",
+                        energy_self_i, energy_selfint_i, energy_atom_i));
+            }
+        }
+
+        // Process atom j
+        if (processed_atoms.find(coul.j) == processed_atoms.end()) {
+            processed_atoms.insert(coul.j);
+
+            // TERM 2: Self-energy for atom j
+            double energy_self_j = -coul.q_j * coul.chi_j;
+
+            // TERM 3: Self-interaction for atom j
+            // E_selfint_j = 0.5 * q_j² * (gam_j + √(2/π)/√(α_j))
+            const double sqrt_2_over_pi = 0.797884560802865;
+            double selfint_term_j = coul.gam_j + sqrt_2_over_pi / std::sqrt(coul.alp_j);
+            double energy_selfint_j = 0.5 * coul.q_j * coul.q_j * selfint_term_j;
+
+            // Add both self-terms for atom j
+            double energy_atom_j = energy_self_j + energy_selfint_j;
+            m_coulomb_energy += energy_atom_j * m_final_factor;
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::param(fmt::format("coulomb_self_atom_{}", coul.j),
+                    fmt::format("E_self={:.6f}, E_selfint={:.6f}, total={:.6f} Eh",
+                        energy_self_j, energy_selfint_j, energy_atom_j));
+            }
         }
     }
 

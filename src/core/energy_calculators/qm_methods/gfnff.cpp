@@ -2898,14 +2898,17 @@ json GFNFF::generateGFNFFCoulombPairs() const
             double gamma_ij = 1.0 / std::sqrt(params_i.alp + params_j.alp);
             coulomb["gamma_ij"] = gamma_ij;
 
-            // Store chi and alp for self-energy and self-interaction terms
+            // Store chi, gam, and alp for self-energy and self-interaction terms
             // Reference: Fortran gfnff_engrad.F90:1378-1389
             // Formula includes THREE terms:
             // 1. Pairwise: E_pair = q_i * q_j * erf(γ_ij * r_ij) / r_ij²
             // 2. Self-energy: E_self = -q_i*chi_i - q_j*chi_j
-            // 3. Self-interaction: E_selfint = 0.5*q_i²*(γ_i + sqrt(2/π)/sqrt(α_i)) + similar for j
+            // 3. Self-interaction: E_selfint = 0.5*q_i²*(gam_i + sqrt(2/π)/sqrt(α_i)) + similar for j
+            //    where gam_i is chemical hardness (NOT 1/sqrt(alpha))
             coulomb["chi_i"] = params_i.chi;
             coulomb["chi_j"] = params_j.chi;
+            coulomb["gam_i"] = params_i.gam;  // Chemical hardness
+            coulomb["gam_j"] = params_j.gam;  // Chemical hardness
             coulomb["alp_i"] = params_i.alp;
             coulomb["alp_j"] = params_j.alp;
 

@@ -572,6 +572,8 @@ void ForceField::setGFNFFCoulombs(const json& coulombs)
         coul.gamma_ij = coul_json["gamma_ij"];
         coul.chi_i = coul_json.value("chi_i", 0.0);      // Default to 0 if missing (backward compat)
         coul.chi_j = coul_json.value("chi_j", 0.0);
+        coul.gam_i = coul_json.value("gam_i", 0.0);      // Chemical hardness
+        coul.gam_j = coul_json.value("gam_j", 0.0);
         coul.alp_i = coul_json.value("alp_i", 0.0);
         coul.alp_j = coul_json.value("alp_j", 0.0);
         coul.r_cut = coul_json.value("r_cut", 50.0);

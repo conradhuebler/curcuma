@@ -151,6 +151,8 @@ struct GFNFFCoulomb {
     double gamma_ij = 0.0;      ///< Damping parameter (1/sqrt(α_i + α_j))
     double chi_i = 0.0;         ///< Electronegativity of atom i (for self-energy term)
     double chi_j = 0.0;         ///< Electronegativity of atom j (for self-energy term)
+    double gam_i = 0.0;         ///< Chemical hardness γ_i (for self-interaction term)
+    double gam_j = 0.0;         ///< Chemical hardness γ_j (for self-interaction term)
     double alp_i = 0.0;         ///< Chemical softness α_i (for self-interaction term)
     double alp_j = 0.0;         ///< Chemical softness α_j (for self-interaction term)
     double r_cut = 50.0;        ///< Cutoff radius (Bohr)
