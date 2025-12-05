@@ -570,7 +570,11 @@ void ForceField::setGFNFFCoulombs(const json& coulombs)
         coul.q_i = coul_json["q_i"];
         coul.q_j = coul_json["q_j"];
         coul.gamma_ij = coul_json["gamma_ij"];
-        coul.r_cut = coul_json["r_cut"];
+        coul.chi_i = coul_json.value("chi_i", 0.0);      // Default to 0 if missing (backward compat)
+        coul.chi_j = coul_json.value("chi_j", 0.0);
+        coul.alp_i = coul_json.value("alp_i", 0.0);
+        coul.alp_j = coul_json.value("alp_j", 0.0);
+        coul.r_cut = coul_json.value("r_cut", 50.0);
 
         m_gfnff_coulombs.push_back(coul);
     }

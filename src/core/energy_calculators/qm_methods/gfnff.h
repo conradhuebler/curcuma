@@ -425,7 +425,9 @@ private:
      * @return GFN-FF torsion parameters
      */
     GFNFFTorsionParams getGFNFFTorsionParameters(int z_i, int z_j, int z_k, int z_l,
-                                                  int hyb_j, int hyb_k) const;
+                                                  int hyb_j, int hyb_k,
+                                                  double qa_j = 0.0, double qa_k = 0.0,
+                                                  double cn_i = 2.0, double cn_l = 2.0) const;
 
     /**
      * @brief Calculate dihedral angle for four atoms

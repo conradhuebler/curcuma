@@ -883,8 +883,14 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
 
 void ForceFieldThread::CalculateGFNFFDihedralContribution()
 {
-    // GFN-FF torsion: E = V*(1 + cos(n*φ - φ0))
-    // Claude Generated (2025): Now using correct GFNFF_Geometry::calculateDihedralAngle
+    // GFN-FF torsion with distance-based damping
+    // Reference: gfnff_engrad.F90:1153-1234 (egtors subroutine)
+    // Energy: E = V * (1 + cos(n*φ - φ₀)) * damp_ij * damp_jk * damp_kl
+    //
+    // Damping function (gfnff_engrad.F90:1346-1355):
+    //   rcut = atcutt * (rcov[i] + rcov[j])²
+    //   rr = (r²/rcut)²
+    //   damp = 1 / (1 + rr)
 
     for (int index = 0; index < m_gfnff_dihedrals.size(); ++index) {
         const auto& dihedral = m_gfnff_dihedrals[index];
@@ -895,27 +901,107 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         Eigen::Vector3d r_k = m_geometry.row(dihedral.k).head<3>();
         Eigen::Vector3d r_l = m_geometry.row(dihedral.l).head<3>();
 
-        // Use GFN-FF dihedral angle calculation (not UFF!)
+        // Calculate dihedral angle
         Matrix derivate;
         double phi = GFNFF_Geometry::calculateDihedralAngle(r_i, r_j, r_k, r_l, derivate, m_calculate_gradient);
 
-        // Claude Generated Fix (2025-11-30): Convert barrier height from kcal/mol to Hartree
-        // V is stored in kcal/mol in JSON, but GFN-FF calculations need Hartree
-        // Conversion: 1 kcal/mol = 1/627.51 Hartree
-        double V = dihedral.V / 627.51;  // Convert kcal/mol → Hartree
-        double n = dihedral.n;
-        double phi0 = dihedral.phi0;
+        // =====================================================================
+        // Distance-based damping (gfnff_engrad.F90:1180-1183, 1199)
+        // =====================================================================
+        // Need 3 damping factors: damp_ij, damp_jk, damp_kl
 
-        // GFN-FF energy formula
-        double energy = V * (1 + cos(n * phi - phi0));
+        // Get atomic numbers (1-indexed in parameters, 0-indexed in atom_types)
+        int Z_i = m_atom_types[dihedral.i];  // Atomic number
+        int Z_j = m_atom_types[dihedral.j];
+        int Z_k = m_atom_types[dihedral.k];
+        int Z_l = m_atom_types[dihedral.l];
+
+        // Bounds check
+        if (Z_i < 1 || Z_i > 86 || Z_j < 1 || Z_j > 86 ||
+            Z_k < 1 || Z_k > 86 || Z_l < 1 || Z_l > 86) {
+            continue;  // Skip invalid atomic numbers
+        }
+
+        // Calculate squared distances
+        Eigen::Vector3d r_ij = r_j - r_i;
+        Eigen::Vector3d r_jk = r_k - r_j;
+        Eigen::Vector3d r_kl = r_l - r_k;
+
+        double rij2 = r_ij.squaredNorm();  // r_ij² in Bohr²
+        double rjk2 = r_jk.squaredNorm();  // r_jk² in Bohr²
+        double rkl2 = r_kl.squaredNorm();  // r_kl² in Bohr²
+
+        // Damping function (gfnff_engrad.F90:1346-1355, gfnffdampt subroutine)
+        auto calculate_damping = [](double r2, double rcov_i, double rcov_j) -> double {
+            const double atcutt = GFNFFParameters::atcutt;  // 0.505
+            double rcut = atcutt * (rcov_i + rcov_j) * (rcov_i + rcov_j);  // rcut = atcutt*(rcov_i+rcov_j)²
+            double rr = (r2 / rcut) * (r2 / rcut);  // rr = (r²/rcut)²
+            return 1.0 / (1.0 + rr);  // damp = 1/(1+rr)
+        };
+
+        // Get covalent radii (already in Bohr, 0-indexed)
+        double rcov_i = GFNFFParameters::rcov_bohr[Z_i - 1];
+        double rcov_j = GFNFFParameters::rcov_bohr[Z_j - 1];
+        double rcov_k = GFNFFParameters::rcov_bohr[Z_k - 1];
+        double rcov_l = GFNFFParameters::rcov_bohr[Z_l - 1];
+
+        // Calculate 3 damping factors
+        double damp_ij = calculate_damping(rij2, rcov_i, rcov_j);
+        double damp_jk = calculate_damping(rjk2, rcov_j, rcov_k);
+        double damp_kl = calculate_damping(rkl2, rcov_k, rcov_l);
+
+        // Total damping (product of 3 factors, gfnff_engrad.F90:1183)
+        double damp = damp_ij * damp_jk * damp_kl;
+
+        // =====================================================================
+        // Energy calculation
+        // =====================================================================
+        double V = dihedral.V;  // Force constant in Hartree (from gfnff_torsions.cpp)
+        double n = dihedral.n;  // Periodicity
+        double phi0 = dihedral.phi0;  // Phase shift
+
+        // GFN-FF energy formula with damping (gfnff_engrad.F90:1190, 1199)
+        // E = V * (1 + cos(n*φ - φ₀)) * damp
+        double et = V * (1 + cos(n * phi - phi0));
+        double energy = et * damp;
+
+        // DEBUG OUTPUT (December 2025) - First torsion only
+        static bool first_torsion_printed = false;
+        if (!first_torsion_printed && index == 0) {
+            std::cout << fmt::format("\nTORSION GEOMETRY DEBUG (Atom {}-{}-{}-{}):\n",
+                                     dihedral.i, dihedral.j, dihedral.k, dihedral.l);
+            std::cout << fmt::format("  phi_actual = {:.2f}° ({:.4f} rad)\n",
+                                     phi * 180.0 / M_PI, phi);
+            std::cout << fmt::format("  phi0 = {:.2f}° ({:.4f} rad)\n",
+                                     phi0 * 180.0 / M_PI, phi0);
+            std::cout << fmt::format("  n = {:.0f}\n", n);
+            std::cout << fmt::format("  V = {:.6f} Eh\n", V);
+            std::cout << fmt::format("  n*phi - phi0 = {:.2f}°\n",
+                                     (n * phi - phi0) * 180.0 / M_PI);
+            std::cout << fmt::format("  cos(n*phi - phi0) = {:.4f}\n",
+                                     cos(n * phi - phi0));
+            std::cout << fmt::format("  (1 + cos(n*phi - phi0)) = {:.4f}\n",
+                                     1 + cos(n * phi - phi0));
+            std::cout << fmt::format("  damp = {:.6f}\n", damp);
+            std::cout << fmt::format("  Energy = {:.6f} Eh (before scaling)\n\n", energy);
+            first_torsion_printed = true;
+        }
+
         m_dihedral_energy += energy * m_final_factor * m_dihedral_scaling;
 
         if (m_calculate_gradient) {
-            double dEdphi = -V * n * sin(n * phi - phi0) * m_final_factor * m_dihedral_scaling;
+            // Gradient of energy w.r.t. angle (simplified - damping gradient omitted)
+            // Full implementation would need ∂damp/∂r terms (gfnff_engrad.F90:1192-1198)
+            double dEdphi = -V * n * sin(n * phi - phi0) * damp * m_final_factor * m_dihedral_scaling;
             m_gradient.row(dihedral.i) += dEdphi * derivate.row(0);
             m_gradient.row(dihedral.j) += dEdphi * derivate.row(1);
             m_gradient.row(dihedral.k) += dEdphi * derivate.row(2);
             m_gradient.row(dihedral.l) += dEdphi * derivate.row(3);
+
+            // TODO: Add damping gradient terms for full analytical gradient
+            // term1 = et * ∂damp_ij/∂r_ij * r_ij
+            // term2 = et * ∂damp_jk/∂r_jk * r_jk
+            // term3 = et * ∂damp_kl/∂r_kl * r_kl
         }
     }
 }
@@ -1183,10 +1269,13 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
 
         if (rij > coul.r_cut || rij < 1e-10) continue;
 
-        // EEQ Coulomb with erf damping: E = q_i * q_j * erf(γ*r) / r
+        // EEQ Coulomb with erf damping: E = q_i * q_j * erf(γ*r) / r²
+        // NOTE: Denominator is r² (not r) - this is CRITICAL for correct energy
+        // Reference: Fortran gfnff_engrad.F90:1385 and gfnff_ini.f90
+        // TODO: Add missing self-energy term (-q_i*chi_i) and self-interaction term
         double gamma_r = coul.gamma_ij * rij;
         double erf_term = std::erf(gamma_r);
-        double energy = coul.q_i * coul.q_j * erf_term / rij;
+        double energy = coul.q_i * coul.q_j * erf_term / (rij * rij);
 
         m_coulomb_energy += energy * m_final_factor;
 
