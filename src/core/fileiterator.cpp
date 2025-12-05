@@ -104,7 +104,7 @@ Molecule FileIterator::Next()
 
 bool FileIterator::AtEnd()
 {
-    return m_end || m_init;
+    return m_end;
 }
 Molecule FileIterator::Current() const
 {

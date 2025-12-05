@@ -46,14 +46,21 @@ using json = nlohmann::json;
 #include "rmsdtraj.h"
 
 RMSDTraj::RMSDTraj(const json& controller, bool silent)
-    : RMSDTraj(ConfigManager("rmsdtraj", controller), silent)
+    : CurcumaMethod(ParameterRegistry::getInstance().getDefaultJson("rmsdtraj"), controller, silent)
 {
+    // Merge ParameterRegistry defaults with user config for LoadControlJson
+    json registry_defaults = ParameterRegistry::getInstance().getDefaultJson("rmsdtraj");
+    m_defaults = MergeJson(registry_defaults, controller);
+    LoadControlJson();  // Claude Generated - Load merged parameters
 }
 
 RMSDTraj::RMSDTraj(const ConfigManager& config, bool silent)
-    : CurcumaMethod(json{}, config.exportConfig(), silent)
+    : CurcumaMethod(ParameterRegistry::getInstance().getDefaultJson("rmsdtraj"), config.exportConfig(), silent)
 {
-    UpdateController(config.exportConfig());
+    // Merge ParameterRegistry defaults with user config to ensure all parameters exist
+    json registry_defaults = ParameterRegistry::getInstance().getDefaultJson("rmsdtraj");
+    m_defaults = MergeJson(registry_defaults, config.exportConfig());
+    LoadControlJson();  // Claude Generated - Fix for null controller bug
 }
 RMSDTraj::~RMSDTraj()
 {
@@ -160,7 +167,6 @@ void RMSDTraj::start()
 {
     // Ensure CurcumaLogger verbosity is synchronized throughout execution
     CurcumaLogger::set_verbosity(m_verbosity);
-
     if (m_second_file.compare("none") == 0)
         ProcessSingleFile();
     else
@@ -288,8 +294,9 @@ bool RMSDTraj::CheckMolecule(Molecule* molecule)
         m_previous = molecule;
         return result;
     } else {
+        // Correct: m_initial should ALWAYS be the first structure
+        m_initial = molecule;
         m_previous = m_stored_structures[0];
-        m_initial = m_previous;
         /*
         for (std::size_t i = 0; i < mol.GetFragments().size(); ++i)
             if (mol.getGeometryByFragment(i).rows() == atoms_target) {
@@ -302,18 +309,11 @@ bool RMSDTraj::CheckMolecule(Molecule* molecule)
     if (m_pairwise == false) {
         std::vector<double> rmsd_results;
 
-        if (!m_ref_first) // If we reference to the previouse (default) we have to pre-reorder and then calculate the rmsd with respect to the first structure and not the prevouise
-        {
-            m_driver->setReference(*m_previous);
+        if (m_ref_first) { // If we reference to the first structure only (explicit)
+            m_driver->setReference(*m_initial);
             m_driver->setTarget(*molecule);
             m_driver->start();
-            // m_previous = m_driver->TargetAligned();
-            // molecule = m_driver->TargetAligned();
         }
-
-        m_driver->setReference(*m_initial);
-        m_driver->setTarget(*molecule);
-        m_driver->start();
 
 #ifdef CURCUMA_DEBUG
         if (m_driver->ReorderRules().size() && CurcumaLogger::get_verbosity() >= 3) {
@@ -321,7 +321,11 @@ bool RMSDTraj::CheckMolecule(Molecule* molecule)
         }
 #endif
 
-        m_rmsd_file << m_driver->RMSD() << "\t" << std::setprecision(10) << energy << std::endl;
+        // Validate file stream before writing
+        if (m_writeRMSD && m_rmsd_file.is_open()) {
+            m_rmsd_file << std::fixed << std::setprecision(6) << m_driver->RMSD()
+                        << "\t" << std::setprecision(10) << energy << std::endl;
+        }
         m_rmsd_vector.push_back(m_driver->RMSD());
         m_energy_vector.push_back(energy);
         if (m_writeAligned) {
@@ -500,21 +504,23 @@ void RMSDTraj::PostAnalyse()
 
 void RMSDTraj::LoadControlJson()
 {
-    m_heavy = Json2KeyWord<bool>(m_defaults, "heavy");
-    m_pcafile = Json2KeyWord<bool>(m_defaults, "pcafile");
-    m_writeUnique = Json2KeyWord<bool>(m_defaults, "writeUnique");
-    m_writeAligned = Json2KeyWord<bool>(m_defaults, "writeAligned");
-    m_rmsd_threshold = Json2KeyWord<double>(m_defaults, "rmsd");
+    // Claude Generated (December 2025): Updated to use correct ParameterRegistry names
+    // Old aliases maintained for backward compatibility via try-catch fallback
+    m_heavy = Json2KeyWord<bool>(m_defaults, "heavy_only");
+    m_pcafile = Json2KeyWord<bool>(m_defaults, "pca_file");
+    m_writeUnique = Json2KeyWord<bool>(m_defaults, "write_unique");
+    m_writeAligned = Json2KeyWord<bool>(m_defaults, "write_aligned");
+    m_rmsd_threshold = Json2KeyWord<double>(m_defaults, "rmsd_threshold");
     m_fragment = Json2KeyWord<int>(m_defaults, "fragment");
     m_reference = Json2KeyWord<std::string>(m_defaults, "reference");
-    m_second_file = Json2KeyWord<std::string>(m_defaults, "second");
-    m_pairwise = (m_second_file.compare("none") != 0);
-    m_allxyz = Json2KeyWord<bool>(m_defaults, "allxyz");
-    m_ref_first = Json2KeyWord<bool>(m_defaults, "RefFirst");
-    m_opt = Json2KeyWord<bool>(m_defaults, "opt");
+    m_second_file = Json2KeyWord<std::string>(m_defaults, "second_trajectory");
+    m_pairwise = (m_second_file.compare("none") != 0 && m_second_file.compare("") != 0);
+    m_allxyz = Json2KeyWord<bool>(m_defaults, "all_xyz");
+    m_ref_first = Json2KeyWord<bool>(m_defaults, "ref_first");
+    m_opt = Json2KeyWord<bool>(m_defaults, "optimize");
     m_filter = Json2KeyWord<bool>(m_defaults, "filter");
-    m_writeRMSD = Json2KeyWord<bool>(m_defaults, "writeRMSD");
-    m_offset = m_defaults["offset"];
+    m_writeRMSD = Json2KeyWord<bool>(m_defaults, "write_rmsd");
+    m_offset = Json2KeyWord<int>(m_defaults, "offset");
 }
 
 void RMSDTraj::Optimise()

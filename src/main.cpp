@@ -688,12 +688,41 @@ int executeTrajectoryAnalysis(const json& controller, int argc, char** argv) {
     return 0;
 }
 
+// Claude Generated - RMSDTraj execution function
+int executeRMSDTraj(const json& controller, int argc, char** argv) {
+    if (argc < 3) {
+        std::cerr << "Please use curcuma for rmsd analysis of trajectories as follows:\ncurcuma -rmsdtraj input.xyz" << std::endl;
+        std::cerr << "Additional arguments are:" << std::endl;
+        std::cerr << "-write        **** Write unique conformers!" << std::endl;
+        std::cerr << "-rmsd d       **** Set rmsd threshold to d ( default = 1.0)!" << std::endl;
+        std::cerr << "-fragment n   **** Set fragment to n." << std::endl;
+        std::cerr << "-reference    **** Add different xyz structure as reference." << std::endl;
+        std::cerr << "-second       **** Add second trajectory." << std::endl;
+        std::cerr << "-heavy        **** Check only heavy atoms. Do not use with -write." << std::endl;
+        return 0;
+    }
+
+    // Use ParameterRegistry defaults and merge with controller["rmsdtraj"] if it exists
+    json rmsdtraj_config = ParameterRegistry::getInstance().getDefaultJson("rmsdtraj");
+    if (controller.contains("rmsdtraj") && !controller["rmsdtraj"].is_null()) {
+        rmsdtraj_config = MergeJson(rmsdtraj_config, controller["rmsdtraj"]);
+    }
+
+    RMSDTraj traj(rmsdtraj_config, false);
+    traj.setFile(argv[2]);
+    traj.Initialise();
+    traj.start();
+    return 0;
+}
+
 // Capability registry - Claude Generated
 const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
     {"analysis", {"Unified molecular analysis (all formats, all properties)", "analysis",
                   {"XYZ", "VTF", "MOL2", "SDF", "PDB"}, executeAnalysis}},
     {"rmsd", {"RMSD calculation between structures", "analysis",
               {"XYZ", "VTF", "MOL2", "SDF"}, executeRMSD}},
+    {"rmsdtraj", {"Trajectory RMSD analysis and conformer filtering", "analysis",
+                  {"XYZ", "TRJ"}, executeRMSDTraj}},
     {"sp", {"Single point energy calculation", "calculation",
             {"XYZ", "VTF", "MOL2", "SDF"}, executeSinglePoint}},
     {"opt", {"Geometry optimization with various algorithms", "optimization",
