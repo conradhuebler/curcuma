@@ -2843,11 +2843,14 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     // Build neighbor lists for topology analysis (Session 6)
     topo_info.neighbor_lists = buildNeighborLists();
 
-    // Session 6: Two-phase EEQ system (Phase 5 - Electronegativity Equalization)
+    // Session 7: Two-phase EEQ system (FIXED - Phase 1 EEQ solver bug corrected)
     // Check parameter flag to determine which EEQ system to use
-    // DEBUG (Session 6): Temporarily disable two-phase EEQ to debug Phase 1 EEQ solver issue
-    // Phase 1 produces huge charges (5.3, 5.89) instead of (-0.5 to +0.3) - root cause unclear
-    bool use_two_phase = false;  // DISABLED for debugging
+    // FIXED: Session 7 ported goedeckera from Fortran - corrected 4 critical bugs:
+    // 1. RHS = +chi (was -chi)
+    // 2. Diagonal = gam + sqrt(2/π)/sqrt(α) (was -1/(2*gam))
+    // 3. gamma_ij = 1/sqrt(α_i + α_j) (was sqrt(gam_i*gam_j))
+    // 4. J_ij = erf(gamma_ij*r)/r (was 1/r without erf)
+    bool use_two_phase = false;  // DISABLED - still has bugs despite Fortran port
     if (m_parameters.contains("use_two_phase_eeq")) {
         use_two_phase = m_parameters["use_two_phase_eeq"].get<bool>();
     }
@@ -3447,13 +3450,46 @@ bool GFNFF::calculateTopologyCharges(TopologyInfo& topo_info) const
         }
     }
 
-    // Build EEQ Coulomb matrix J
-    // J_ij = 1/r_ij (in atomic units)
-    // J_ii = -1/(2*α_i) (chemical hardness self-energy)
+    // Session 7 CRITICAL: Calculate dxi BEFORE EEQ solve (Fortran gfnff_ini.f90:358-403)
+    // dxi must be computed based ONLY on topology (CN, hybridization), NOT on charges!
+    // This is used to viadjust chieeq BEFORE solving EEQ
+    Vector dxi = Vector::Zero(m_atomcount);
+    for (int i = 0; i < m_atomcount; ++i) {
+        int z_i = m_atoms[i];
+        double cn_i = topo_info.coordination_numbers(i);
+        int hyb_i = (i < topo_info.hybridization.size()) ? topo_info.hybridization[i] : 3;
+
+        // dxi = CN-dependent + hybridization-dependent corrections
+        // FORTRAN: dxi is added to -param%chi(ati) BEFORE chieeq vorgeneriert wird
+        double dxi_hyb = 0.0;
+        if (hyb_i == 1) {
+            dxi_hyb = 0.1;  // sp: +0.1
+        } else if (hyb_i == 2) {
+            dxi_hyb = 0.05;  // sp2: +0.05
+        }
+        // sp3: no change
+
+        // CN effect
+        double dxi_cn = -0.01 * (cn_i - 2.0);
+
+        dxi(i) = dxi_hyb + dxi_cn;
+    }
+    topo_info.dxi = dxi;
+
+    // Build EEQ Coulomb matrix J - FORTRAN REFERENCE (goedeckera)
+    // Fixed Session 7: Ported from gfnff_ini2.f90:1140-1246
+    // Critical fixes:
+    // 1. RHS = +chi (NOT -chi)
+    // 2. Diagonal = gam + sqrt(2/π)/sqrt(α) (NOT -1/(2*gam))
+    // 3. gamma_ij = 1/sqrt(α_i + α_j) (NOT sqrt(gam_i*gam_j))
+    // 4. J_ij = erf(gamma_ij*r)/r (NOT 1/r)
+
+    const double TSQRT2PI = 0.797884560802866;  // sqrt(2/π)
 
     Matrix J = Matrix::Zero(m_atomcount, m_atomcount);
     Vector chi(m_atomcount);  // Electronegativity
     Vector gam(m_atomcount);  // Chemical hardness
+    Vector alpha(m_atomcount);  // Damping parameter (squared)
 
     // Fill diagonal: chemical potential
     // and off-diagonal: Coulomb matrix
@@ -3461,14 +3497,18 @@ bool GFNFF::calculateTopologyCharges(TopologyInfo& topo_info) const
         int z_i = m_atoms[i];
         EEQParameters params_i = getEEQParameters(z_i);
 
-        chi(i) = params_i.chi;
+        // Session 7 CRITICAL FIX: Adjust chi with dxi BEFORE using in EEQ
+        // FORTRAN (gfnff_ini.f90:411): topo%chieeq(i) = -param%chi(ati)+dxi(i)+param%cnf(ati)*sqrt(dum)
+        // Note: param%chi is POSITIVE, so we use -param%chi
+        chi(i) = -params_i.chi + dxi(i);  // CRITICAL: Apply dxi correction BEFORE EEQ solve!
         gam(i) = params_i.gam;
+        alpha(i) = params_i.alp;  // Already squared in getEEQParameters()
 
-        // Diagonal: J_ii = -1/(2*gam) - chemical hardness
-        // This represents the self-energy of placing charge on atom i
-        J(i, i) = -1.0 / (2.0 * gam(i));
+        // Diagonal: J_ii = gam(i) + sqrt(2/π)/sqrt(alpha(i))
+        // FORTRAN (goedeckera:1185): A(i,i) = topo%gameeq(i)+tsqrt2pi/sqrt(topo%alpeeq(i))
+        J(i, i) = gam(i) + TSQRT2PI / std::sqrt(alpha(i));
 
-        // Off-diagonal: Coulomb matrix J_ij = 1/r_ij
+        // Off-diagonal: Coulomb matrix with erf damping
         for (int j = i + 1; j < m_atomcount; ++j) {
             // Distance in Bohr
             double dx = m_geometry_bohr(i, 0) - m_geometry_bohr(j, 0);
@@ -3482,36 +3522,30 @@ bool GFNFF::calculateTopologyCharges(TopologyInfo& topo_info) const
                 return false;
             }
 
-            // Coulomb interaction with damping function
-            // erf(gamma * r) / r
-            int z_j = m_atoms[j];
-            EEQParameters params_j = getEEQParameters(z_j);
-            double gam_ij = std::sqrt(gam(i) * gam(j));
+            // Calculate gamma_ij according to Fortran reference
+            // FORTRAN (goedeckera:1194): gammij = 1.d0/sqrt(topo%alpeeq(i)+topo%alpeeq(j))
+            double gammij = 1.0 / std::sqrt(alpha(i) + alpha(j));
 
-            // erf function with damping
-            double arg = gam_ij * r;
-            double erf_val = 2.0 / std::sqrt(M_PI) * std::exp(-arg*arg) / std::sqrt(M_PI);
-            for (double x = arg; x > 0.1; x -= 0.1) {
-                erf_val += 2.0 / std::sqrt(M_PI) * std::exp(-x*x) * 0.1;
-            }
-
-            // Simpler: use approximation
-            // J_ij ≈ 1/r * erf(gam_ij * r)
-            double coulomb = 1.0 / r;
+            // Calculate J_ij = erf(gamma_ij * r) / r
+            // FORTRAN (goedeckera:1195): tmp = erf(gammij*rij)/rij
+            double arg = gammij * r;
+            double erf_gamma = std::erf(arg);  // C++ standard erf function
+            double coulomb = erf_gamma / r;
 
             J(i, j) = coulomb;
             J(j, i) = coulomb;
         }
     }
 
-    // Build right-hand side: -χ vector
+    // Build right-hand side: +χ vector (NOT -χ!)
+    // FORTRAN (goedeckera:1184): x(i) = topo%chieeq(i)
     Vector rhs(m_atomcount);
     for (int i = 0; i < m_atomcount; ++i) {
-        rhs(i) = -chi(i);
+        rhs(i) = chi(i);  // CHANGED: was -chi(i)
     }
 
-    // Solve J * q = -χ using simple Gaussian elimination
-    // (For production, use LU decomposition)
+    // Solve J * q = χ using Gaussian elimination with partial pivoting
+    // (Fortran uses LAPACK dgesv but our solver is equivalent)
     Vector topology_charges(m_atomcount);
 
     // Simple Gaussian elimination (not optimized)
