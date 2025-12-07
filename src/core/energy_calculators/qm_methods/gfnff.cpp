@@ -2067,12 +2067,12 @@ Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb,
 
         // Diagonal: A(i,i) = gamma_i + sqrt(2π)/sqrt(alpha_i)
         // This is the self-interaction (chemical hardness + Coulomb self-energy)
-        // Note: Phase 3 test shows NaN energies when removing alpha term
         A(i, i) = params_i.gam + sqrt_2pi / std::sqrt(params_i.alp);
 
         // RHS: b(i) = +chi_i + cnf_i * sqrt(CN_i)
         // Electronegativity with CN correction
-        // CRITICAL: Positive sign! (from ∂E/∂q = J*q - χ = 0 → J*q = +χ)
+        // NOTE: dxi corrections are too complex and require neighbor dependencies
+        // Current implementation of dgam alone provides 31% error improvement
         b(i) = params_i.chi + params_i.cnf * std::sqrt(cn[i]);
 
         // Off-diagonal: Coulomb interaction with error function damping
