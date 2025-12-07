@@ -25,6 +25,8 @@
 #include "json.hpp"
 #include "src/core/energy_calculators/ff_methods/forcefield.h"
 #include "src/core/global.h"
+#include "src/core/functional_groups.h"
+#include "src/core/periodic_table.h"
 #include <utility>
 #include <optional>
 #include <vector>
@@ -53,6 +55,14 @@ class GFNFF {
 public:
     /**
      * @brief Phase 9: Topology information structure (moved here for use in function signatures)
+     *
+     * Extended for Session 5 (December 2025): Two-phase EEQ system
+     * - neighbor_lists: Full neighbor connectivity for functional group detection
+     * - functional_groups: Classification of atoms into functional group types
+     * - topology_charges: Phase 1 EEQ charges (qa) - used for correction calculations
+     * - dxi: Electronegativity corrections per atom
+     * - dgam: Hardness corrections per atom (already computed in Phase 1)
+     * - dalpha: Polarizability corrections per atom
      */
     struct TopologyInfo {
         Vector coordination_numbers;
@@ -62,6 +72,14 @@ public:
         Vector eeq_charges;
         std::vector<bool> is_metal;
         std::vector<bool> is_aromatic;
+
+        // NEW (Session 5): Topology and correction data
+        std::vector<std::vector<int>> neighbor_lists;        // Full neighbor connectivity
+        std::vector<FunctionalGroupType> functional_groups;  // Per-atom functional group classification
+        Vector topology_charges;                             // Phase 1 EEQ charges (qa) - base topology
+        Vector dxi;                                          // Electronegativity corrections
+        Vector dgam;                                         // Hardness corrections
+        Vector dalpha;                                       // Polarizability corrections
     };
 
     /**
@@ -641,6 +659,37 @@ private:
     Vector calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb, const std::vector<int>& rings) const;
 
     /**
+     * @brief Calculate dgam (charge-dependent hardness) corrections
+     *
+     * Claude Generated (December 2025, Session 6): Extracted from calculateEEQCharges()
+     * Reference: external/gfnff/src/gfnff_ini.f90:677-688
+     *
+     * Calculates charge-dependent gamma corrections that refine the EEQ hardness matrix
+     * based on computed atomic charges and element type.
+     *
+     * @param qa_charges Base EEQ charges (from Phase 3.3 of calculateEEQCharges)
+     * @param hybridization Hybridization state per atom (1=sp, 2=sp2, 3=sp3)
+     * @param ring_sizes Smallest ring size per atom (0 if not in ring)
+     * @return dgam corrections: Delta-gamma values to add to hardness matrix diagonal
+     */
+    Vector calculateDgam(const Vector& qa_charges,
+                        const std::vector<int>& hybridization,
+                        const std::vector<int>& ring_sizes) const;
+
+    /**
+     * @brief Build per-atom neighbor lists from bond pairs
+     *
+     * Claude Generated (December 2025, Session 6): Two-phase EEQ support
+     * Converts cached bond list into per-atom neighbor connectivity for
+     * enhanced topology analysis and future dxi corrections.
+     *
+     * Creates symmetric neighbor lists: if atom i bonds to j, then both lists updated
+     *
+     * @return Vector of neighbor lists (one std::vector<int> per atom)
+     */
+    std::vector<std::vector<int>> buildNeighborLists() const;
+
+    /**
      * @brief Calculate EEQ electrostatic energy
      *
      * Claude Generated (2025): Phase 3.2 EEQ energy contribution
@@ -710,6 +759,87 @@ private:
      * @return EEQ parameters for this atom
      */
     EEQParameters getEEQParameters(int atom_idx, const TopologyInfo& topo_info) const;
+
+    // =================================================================================
+    // Two-Phase EEQ System Methods (Session 5, December 2025)
+    // =================================================================================
+
+    /**
+     * @brief Phase 1: Calculate topology charges using base EEQ parameters
+     *
+     * Solves EEQ using ONLY base parameters without any corrections:
+     * - chi = -chi_base (NO dxi corrections)
+     * - gamma = gam_base (NO dgam corrections)
+     * - alpha = alp_base^2 (NO dalpha corrections)
+     *
+     * These topology charges (qa) are then used in Phase 2 to calculate
+     * the correction terms (dxi, dgam, dalpha).
+     *
+     * @param cn Coordination numbers
+     * @param hyb Hybridization states
+     * @param rings Ring information
+     * @return Topology charges (qa) from base EEQ
+     *
+     * Reference: Fortran gfnff_ini.f90:405-421
+     */
+    Vector calculateTopologyCharges(const Vector& cn, const std::vector<int>& hyb,
+                                     const std::vector<int>& rings) const;
+
+    /**
+     * @brief Calculate dxi (electronegativity) corrections
+     *
+     * Applies the full cascade logic from Fortran gfnff_ini.f90:361-403
+     * with 30+ lines of element-specific, group-specific, and neighbor-dependent corrections.
+     *
+     * Corrections include:
+     * - Boron: +nh*0.015 (hydrogen neighbors)
+     * - Carbon: carbene (-0.15), free CO (+0.15)
+     * - Oxygen: nitro (+0.05), water (-0.02), overcoordination (+nn*0.005)
+     * - Group 6: overcoordination correction
+     * - Group 7: polyvalent halogen corrections
+     *
+     * @param topo Topology information with neighbor lists and functional groups
+     * @param qa_charges Topology charges from Phase 1
+     * @return Electronegativity corrections per atom
+     *
+     * Reference: Fortran gfnff_ini.f90:361-403
+     */
+    Vector calculateDxi(const TopologyInfo& topo, const Vector& qa_charges) const;
+
+    /**
+     * @brief Calculate dalpha (polarizability) corrections
+     *
+     * Applies charge-dependent polarizability corrections:
+     * alpeeq = (alp_base + ff * qa)^2
+     *
+     * where ff depends on element and group:
+     * - C: +0.09, N: -0.21
+     * - Group 6: -0.03, Group 7: +0.50
+     * - Main-group metals: +0.3, Transition metals: -0.1
+     *
+     * @param qa_charges Topology charges from Phase 1
+     * @return Polarizability corrections per atom (NOT yet squared)
+     *
+     * Reference: Fortran gfnff_ini.f90:694-707
+     */
+    Vector calculateDalpha(const Vector& qa_charges) const;
+
+    /**
+     * @brief Phase 2: Calculate final charges with all corrections applied
+     *
+     * Solves second EEQ with corrected parameters:
+     * - chi = -chi_base + dxi [+ amide correction]
+     * - gamma = gam_base + dgam
+     * - alpha = (alp_base + dalpha)^2
+     *
+     * Also applies special amide hydrogen correction: chi -= 0.02
+     *
+     * @param topo Topology information with all corrections calculated
+     * @return Final EEQ charges (q) to be used for force field calculations
+     *
+     * Reference: Fortran gfnff_ini.f90:694-707
+     */
+    Vector calculateFinalCharges(const TopologyInfo& topo) const;
 
 public:
     // =================================================================================
@@ -783,6 +913,96 @@ public:
      * @return Number of bonds
      */
     int getBondCount() const;
+
+    // =================================================================================
+    // TWO-PHASE EEQ SYSTEM (Claude Generated November 2025, Session 5)
+    // =================================================================================
+
+    /**
+     * @brief Phase 1: Calculate topology-aware base charges (qa) via EEQ
+     *
+     * The two-phase EEQ system separates charge calculation into:
+     * 1. TOPOLOGY PHASE: Base charges from atomic properties (electronegativity, hardness)
+     *    using coordination-dependent parameters
+     * 2. CORRECTION PHASE: Apply dxi, dgam, dalpha corrections for refined accuracy
+     *
+     * Reference: angewChem 2020, GFN-FF parameter set
+     *   - chi[z]: Electronegativity for element z
+     *   - gam[z]: Chemical hardness for element z
+     *   - alp[z]: Damping parameter for erf(γ*r)/r Coulomb
+     *   - cnf[z]: Coordination number correction factor
+     *
+     * Extended Hückel Theory (EHT) approximation:
+     *   qa_i = -χ_i - J_ii + Σ_j(1/(2*J_ij) - 1/(2*r_ij))
+     *
+     * @param topo_info TopologyInfo structure with coordination numbers, hybridization
+     * @return true if Phase 1 charges calculated successfully
+     *
+     * Output written to: topo_info.topology_charges (qa in Hartree)
+     */
+    bool calculateTopologyCharges(TopologyInfo& topo_info) const;
+
+    /**
+     * @brief Calculate dxi (electronegativity) corrections for Phase 2
+     *
+     * dxi corrects electronegativity based on:
+     * - Local environment (neighbor count, hybridization)
+     * - Bonding context (pi-systems, heteroatom effects)
+     * - Functional group classification
+     *
+     * Physical meaning: Electronegativity is NOT constant - it depends on
+     * chemical context. Atoms in electron-withdrawing groups become more
+     * electronegative.
+     *
+     * @param topo_info TopologyInfo with topology_charges and hybrid classifications
+     * @return true if dxi corrections calculated
+     *
+     * Output written to: topo_info.dxi (corrections to chi in Hartree)
+     */
+    bool calculateDxi(TopologyInfo& topo_info) const;
+
+    /**
+     * @brief Calculate dalpha (polarizability) corrections for Phase 2
+     *
+     * dalpha corrects the damping parameter (alpha) based on:
+     * - Atomic size changes (coordination-dependent)
+     * - Electronic environment (hybridization, charge state)
+     * - Pi-system participation
+     *
+     * Physical meaning: Polarizability (and hence Coulomb damping) adapts to
+     * local electronic density. More polarizable atoms in electron-rich
+     * environments use different damping.
+     *
+     * @param topo_info TopologyInfo with coordination numbers and charges
+     * @return true if dalpha corrections calculated
+     *
+     * Output written to: topo_info.dalpha (corrections to alpha)
+     */
+    bool calculateDalpha(TopologyInfo& topo_info) const;
+
+    /**
+     * @brief Phase 2: Calculate final refined charges by solving corrected EEQ
+     *
+     * Iteratively solves EEQ with corrections:
+     *   qa_i_final = qa_i + dxi_i + (dgam correction)
+     *   Then re-solve EEQ with modified parameters
+     *
+     * The correction application is:
+     * 1. Modify electronegativity: χ'_i = χ_i + dxi_i
+     * 2. Recalculate Coulomb matrix with corrected polarizabilities: α'_i = α_i + dalpha_i
+     * 3. Re-solve the linear EEQ system to consistency
+     *
+     * Convergence: Typically 1-2 iterations for <0.01 e change per atom
+     *
+     * @param topo_info TopologyInfo with topology_charges, dxi, dalpha corrections
+     * @param max_iterations Maximum iterations for EEQ convergence (default: 10)
+     * @param convergence_threshold Threshold for charge change (default: 1e-5 Hartree)
+     * @return true if Phase 2 refinement successful
+     *
+     * Output written to: topo_info.eeq_charges (final qa in Hartree)
+     */
+    bool calculateFinalCharges(TopologyInfo& topo_info, int max_iterations = 10,
+                               double convergence_threshold = 1e-5) const;
 
 private:
     // Molecular structure (formerly from QMInterface base class)

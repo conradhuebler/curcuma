@@ -276,6 +276,8 @@ set(curcuma_core_SRC
         src/core/imagewriter.cpp
         src/core/parameter_registry.cpp
         src/core/config_manager.cpp
+        src/core/periodic_table.cpp
+        src/core/functional_groups.cpp
 )
 
 set(curcuma_cap_SRC

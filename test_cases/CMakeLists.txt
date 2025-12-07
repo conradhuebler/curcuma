@@ -152,6 +152,33 @@ endif()
 add_test(NAME test_gfnff_ch3oh
          COMMAND test_gfnff_ch3oh)
 
+# Claude Generated (Session 5): Periodic Table utility tests
+add_executable(test_periodic_table
+        test_periodic_table.cpp)
+
+target_link_libraries(test_periodic_table curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_periodic_table REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_periodic_table
+         COMMAND test_periodic_table)
+
+# Claude Generated (Session 5): Two-Phase EEQ System Tests
+# Tests Phase 1 topology charges and Phase 2 environment corrections
+add_executable(test_eeq_two_phase
+        test_eeq_two_phase.cpp)
+
+target_link_libraries(test_eeq_two_phase curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_eeq_two_phase REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_eeq_two_phase
+         COMMAND test_eeq_two_phase)
+
 # todo restore
 
 # Claude Generated: Debug Ulysses methods test
