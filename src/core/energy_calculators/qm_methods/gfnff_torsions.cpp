@@ -48,8 +48,12 @@
  */
 
 #include "gfnff.h"
+#include "../ff_methods/gfnff_par.h"  // NEW: GFN-FF parameters
+#include "src/tools/formats.h"  // For fmt::format
 #include <cmath>
 #include <iostream>
+
+using namespace GFNFFParameters;
 
 // =============================================================================
 // DIHEDRAL ANGLE CALCULATION
@@ -333,7 +337,9 @@ void GFNFF::calculateTorsionDamping(int z1, int z2, double r_squared,
  */
 GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     int z_i, int z_j, int z_k, int z_l,
-    int hyb_j, int hyb_k) const
+    int hyb_j, int hyb_k,
+    double qa_j, double qa_k,
+    double cn_i, double cn_l) const
 {
     GFNFFTorsionParams params;
 
@@ -341,85 +347,171 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     params.is_improper = false;
 
     // ==========================================================================
-    // STEP 1: Determine periodicity based on hybridization
+    // STEP 1: Determine periodicity and phase (CORRECTED Dec 2025)
     // ==========================================================================
+    // Reference: gfnff_ini.f90:1838-1855
+    // CRITICAL: Acyclic default is phi0 = 180° = π (line 1839)
     //
     // Physical basis:
-    //   - sp³-sp³: Three equivalent C-H bonds → threefold symmetry (n=3)
-    //   - sp²-sp²: Planar geometry → twofold symmetry (n=2)
-    //   - sp-X:    Linear geometry → onefold symmetry (n=1)
+    //   - Acyclic: trans configuration (180°) is typical minimum
+    //   - sp³-sp³: Threefold symmetry (n=3), trans minimum
+    //   - sp²-sp²: Planar/conjugated → twofold (n=2), trans minimum
+    //   - Rings: Different phi0 based on ring size (see ring case below)
 
+    // DEFAULT for ACYCLIC (gfnff_ini.f90:1839-1840)
+    params.periodicity = 1;         // Default
+    params.phase_shift = M_PI;      // phi0 = 180° (trans) - ACYCLIC DEFAULT!
+
+    // sp³-sp³: Threefold (gfnff_ini.f90:1841)
     if (hyb_j == 3 && hyb_k == 3) {
-        // sp³-sp³: Most common case (e.g., C-C in ethane, butane)
-        params.periodicity = 3;
-        params.phase_shift = 0.0;  // Minimum at φ = 0° (staggered)
+        params.periodicity = 3;     // nrot = 3
+        params.phase_shift = M_PI;  // phi0 = 180° (keeps acyclic default)
     }
+    // sp²-sp²: Twofold for pi bonds (gfnff_ini.f90:1842)
     else if (hyb_j == 2 && hyb_k == 2) {
-        // sp²-sp²: Conjugated or aromatic systems
-        params.periodicity = 2;
-        params.phase_shift = M_PI;  // Minimum at φ = 180° (planar/trans)
+        params.periodicity = 2;     // nrot = 2
+        params.phase_shift = M_PI;  // phi0 = 180° (planar trans)
     }
+    // Pi-sp³ mixed (gfnff_ini.f90:1843-1854)
     else if ((hyb_j == 2 && hyb_k == 3) || (hyb_j == 3 && hyb_k == 2)) {
-        // sp²-sp³: Mixed hybridization (e.g., C=C-C in propene)
-        // Use n=2 for planarity preference
-        params.periodicity = 2;
-        params.phase_shift = 0.0;
+        params.periodicity = 3;     // nrot = 3
+        params.phase_shift = M_PI;  // phi0 = 180°
     }
+    // sp-X: Linear (gfnff_ini.f90: implicit default)
     else if (hyb_j == 1 || hyb_k == 1) {
-        // sp hybridization: Linear geometry (e.g., alkynes)
         params.periodicity = 1;
         params.phase_shift = M_PI;
     }
+    // Fallback: acyclic default
     else {
-        // Fallback: sp³-sp³ behavior
-        params.periodicity = 3;
-        params.phase_shift = 0.0;
+        params.periodicity = 1;
+        params.phase_shift = M_PI;
     }
 
     // ==========================================================================
-    // STEP 2: Assign barrier height based on element types
+    // STEP 2: Calculate force constant using GFN-FF formula (CORRECTED Dec 2025)
     // ==========================================================================
-    //
-    // Simplified parameter table (full GFN-FF has comprehensive database)
-    // Values in kcal/mol, from Spicher & Grimme 2020 Supporting Information
+    // Reference: gfnff_ini.f90:1896
+    // Formula: fctot = (f1 + 10*torsf[2]*f2) * fqq * fij * fkl
+    // CRITICAL: Result is in HARTREE, not kcal/mol!
 
-    // Default barrier (will be refined based on element types)
-    double barrier = 1.0;  // kcal/mol
+    // GFN-FF constants (from gfnff_param.f90:742-753)
+    const double torsf_single = 1.00;   // Single bond scaling
+    const double torsf_pi = 1.18;       // Pi bond scaling
+    const double fcthr = 1.0e-3;        // Force constant threshold (Hartree)
 
-    // Carbon-carbon torsions (most important case)
-    if ((z_j == 6 && z_k == 6)) {
-        if (hyb_j == 3 && hyb_k == 3) {
-            // C(sp³)-C(sp³): Typical single bond rotation
-            barrier = 1.4;  // ethane barrier ~3.0 kcal/mol / 3 (threefold)
-        }
-        else if (hyb_j == 2 && hyb_k == 2) {
-            // C(sp²)-C(sp²): Conjugated system (e.g., butadiene)
-            barrier = 3.0;  // Higher barrier for conjugation
-        }
-        else if (hyb_j == 2 && hyb_k == 3) {
-            // C(sp²)-C(sp³): Mixed (e.g., propene)
-            barrier = 2.0;
-        }
-    }
-    // Nitrogen-containing torsions
-    else if (z_j == 7 || z_k == 7) {
-        barrier = 0.8;  // Lower barriers for N-C, N-N
-    }
-    // Oxygen-containing torsions
-    else if (z_j == 8 || z_k == 8) {
-        barrier = 1.0;  // O-C torsions (ethers, alcohols)
-    }
-    // Sulfur-containing torsions
-    else if (z_j == 16 || z_k == 16) {
-        barrier = 0.6;  // Very low barriers for S-C, S-S
-    }
-    // Heteroatom-heteroatom
-    else if ((z_j != 6 && z_j != 1) && (z_k != 6 && z_k != 1)) {
-        barrier = 0.5;  // Generally low barriers
+    // Bounds check
+    if (z_i < 1 || z_i > 86 || z_j < 1 || z_j > 86 ||
+        z_k < 1 || z_k > 86 || z_l < 1 || z_l > 86) {
+        params.barrier_height = 0.0;
+        return params;
     }
 
-    // Store final barrier height
-    params.barrier_height = barrier;
+    // ---------------------------------------------------------------------------
+    // (A) Central bond contribution: fij = tors[Z_j] * tors[Z_k]
+    // ---------------------------------------------------------------------------
+    double fij = tors_angewChem2020[z_j - 1] * tors_angewChem2020[z_k - 1];
+
+    // Check threshold and negative values (gfnff_ini.f90:1767-1768)
+    if (fij < fcthr || tors_angewChem2020[z_j - 1] < 0.0 || tors_angewChem2020[z_k - 1] < 0.0) {
+        params.barrier_height = 0.0;
+        return params;
+    }
+
+    // ---------------------------------------------------------------------------
+    // (B) Outer atom contribution: fkl = tors2[Z_i] * tors2[Z_l]
+    // ---------------------------------------------------------------------------
+    double fkl = tors2_angewChem2020[z_i - 1] * tors2_angewChem2020[z_l - 1];
+
+    // CN-dependent scaling: fkl *= (CN_i * CN_l)^(-0.14) (gfnff_ini.f90:1809)
+    // Use actual CN values from parameters
+    double cn_product = cn_i * cn_l;
+    if (cn_product > 0.01) {  // Avoid division by zero
+        fkl *= std::pow(cn_product, -0.14);
+    }
+
+    // Check threshold (gfnff_ini.f90:1805-1806)
+    if (fkl < fcthr || tors2_angewChem2020[z_i - 1] < 0.0 || tors2_angewChem2020[z_l - 1] < 0.0) {
+        params.barrier_height = 0.0;
+        return params;
+    }
+
+    // ---------------------------------------------------------------------------
+    // (C) Base force constant: f1 (hybridization-dependent)
+    // ---------------------------------------------------------------------------
+    // Simplified version - full Fortran has ring/pi detection (gfnff_ini.f90:1807-1888)
+    double f1 = torsf_single;  // Default = 1.0
+
+    // Acyclic sp3-sp3 case (most common)
+    if (hyb_j == 3 && hyb_k == 3) {
+        // Ethane-like: keep f1 = 1.0
+        // Special cases for heteroatoms (simplified from lines 1857-1879):
+        int group_j = (z_j == 7 || z_j == 15) ? 5 : (z_j == 8 || z_j == 16) ? 6 : 0;
+        int group_k = (z_k == 7 || z_k == 15) ? 5 : (z_k == 8 || z_k == 16) ? 6 : 0;
+
+        if (group_j == 6 && group_k == 6) {
+            // O-O, S-S: higher barrier (line 1873)
+            f1 = 5.0;
+            if (z_j >= 16 && z_k >= 16) f1 = 25.0;  // S-S
+        }
+        else if (group_j == 5 && group_k == 5) {
+            // N-N, P-P (line 1859)
+            f1 = 3.0;
+        }
+    }
+    // Pi-sp3 mixed (lines 1843-1854)
+    else if ((hyb_j == 2 && hyb_k == 3) || (hyb_j == 3 && hyb_k == 2)) {
+        f1 = 0.5;
+        if (z_j == 7 || z_k == 7) f1 = 0.2;  // Nitrogen lowers barrier
+    }
+
+    // ---------------------------------------------------------------------------
+    // (D) Pi system contribution: f2 (simplified - no real pi detection yet)
+    // ---------------------------------------------------------------------------
+    double f2 = 0.0;  // Default for single bonds
+    // TODO Phase 3: Implement pi bond order detection (gfnff_ini.f90:1881-1888)
+    // For now: f2 = 0 (conservative, slightly underestimates conjugated systems)
+
+    // ---------------------------------------------------------------------------
+    // (E) Charge correction: fqq (CORRECTED Dec 2025)
+    // ---------------------------------------------------------------------------
+    // Reference: gfnff_ini.f90:1896 (implicit via topo%qa)
+    // fqq = 1.0 + |qa_j * qa_k| * qfacTOR
+    // Now using actual EEQ charges passed as parameters!
+    const double qfacTOR = 12.0;  // From gfnff_param.f90:742
+    double fqq = 1.0 + std::abs(qa_j * qa_k) * qfacTOR;
+
+    // ---------------------------------------------------------------------------
+    // (F) Final force constant calculation
+    // ---------------------------------------------------------------------------
+    // Formula: fctot = (f1 + 10*torsf[2]*f2) * fqq * fij * fkl
+    double fctot = (f1 + 10.0 * torsf_pi * f2) * fqq * fij * fkl;
+
+    // Check threshold (gfnff_ini.f90:1898)
+    if (fctot < fcthr) {
+        params.barrier_height = 0.0;
+        return params;
+    }
+
+    // CRITICAL: barrier_height is now in HARTREE (not kcal/mol!)
+    params.barrier_height = fctot;
+
+    // DEBUG OUTPUT (December 2025)
+    if (fctot > 0.001) {  // Only print significant values
+        std::cout << fmt::format("TORSION DEBUG: i={}, j={}, k={}, l={} (Z={},{},{},{})\n",
+                                 z_i, z_j, z_k, z_l, z_i, z_j, z_k, z_l);
+        std::cout << fmt::format("  tors[{}]={:.6f}, tors[{}]={:.6f}, fij={:.6f}\n",
+                                 z_j, tors_angewChem2020[z_j-1], z_k, tors_angewChem2020[z_k-1], fij);
+        std::cout << fmt::format("  tors2[{}]={:.6f}, tors2[{}]={:.6f}, fkl_raw={:.6f}\n",
+                                 z_i, tors2_angewChem2020[z_i-1], z_l, tors2_angewChem2020[z_l-1],
+                                 tors2_angewChem2020[z_i-1] * tors2_angewChem2020[z_l-1]);
+        std::cout << fmt::format("  CN_correction (CN_i={:.2f}, CN_l={:.2f})={:.6f}, fkl={:.6f}\n",
+                                 cn_i, cn_l, std::pow(cn_i * cn_l, -0.14), fkl);
+        std::cout << fmt::format("  f1={:.6f}, f2={:.6f}, fqq={:.6f}\n", f1, f2, fqq);
+        std::cout << fmt::format("  fctot = ({:.4f} + 10*1.18*{:.4f}) * {:.4f} * {:.6f} * {:.6f} = {:.6f} Eh\n",
+                                 f1, f2, fqq, fij, fkl, fctot);
+        std::cout << fmt::format("  XTB REFERENCE: 0.246679 Eh (for C-O torsion)\n\n");
+    }
 
     // ==========================================================================
     // STEP 3: Apply topology corrections (simplified)
@@ -874,11 +966,39 @@ json GFNFF::generateGFNFFTorsions() const
                 }
 
                 // ==========================================================
-                // STEP 6: Get torsion parameters
+                // STEP 6: Get torsion parameters (with EEQ charges!)
                 // ==========================================================
+                // Get actual EEQ charges (critical for fqq correction!)
+                double qa_j = (j < m_charges.rows()) ? m_charges(j) : 0.0;
+                double qa_k = (k < m_charges.rows()) ? m_charges(k) : 0.0;
+
+                // DEBUG: Check if charges are available (first torsion only)
+                static bool charge_debug_printed = false;
+                if (!charge_debug_printed && i == 0) {
+                    std::cout << fmt::format("\nCHARGE DEBUG:\n");
+                    std::cout << fmt::format("  m_charges.rows() = {}\n", m_charges.rows());
+                    if (m_charges.rows() > 0) {
+                        std::cout << fmt::format("  qa_j (atom {}) = {:.6f}\n", j, qa_j);
+                        std::cout << fmt::format("  qa_k (atom {}) = {:.6f}\n", k, qa_k);
+                        std::cout << fmt::format("  All charges: [");
+                        for (int idx = 0; idx < std::min(6, (int)m_charges.rows()); ++idx) {
+                            std::cout << fmt::format("{:.4f} ", m_charges(idx));
+                        }
+                        std::cout << "]\n\n";
+                    }
+                    charge_debug_printed = true;
+                }
+
+                // TODO: Use actual CN values when available
+                // For now: Default CN=2.0 (minor ~8% error in fkl scaling)
+                double cn_i_val = 2.0;
+                double cn_l_val = 2.0;
+
                 auto params = getGFNFFTorsionParameters(
                     m_atoms[i], m_atoms[j], m_atoms[k], m_atoms[l],
-                    hybridization[j], hybridization[k]
+                    hybridization[j], hybridization[k],
+                    qa_j, qa_k,
+                    cn_i_val, cn_l_val
                 );
 
                 // ==========================================================

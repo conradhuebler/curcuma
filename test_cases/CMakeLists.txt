@@ -134,6 +134,24 @@ add_test(NAME test_gfnff_vbond
 add_test(NAME test_gfnff_params_direct
          COMMAND test_gfnff_params_direct)
 
+# Claude Generated: GFN-FF CH3OH Comprehensive Validation Test (Dec 2025)
+# Validates Curcuma native GFN-FF against XTB 6.6.1 Fortran reference
+# Tests: Coordination Numbers, EEQ charges, Total energy
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/CH3OH.xyz
+          DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/)
+
+add_executable(test_gfnff_ch3oh
+        test_gfnff_ch3oh.cpp)
+
+target_link_libraries(test_gfnff_ch3oh curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_ch3oh REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_gfnff_ch3oh
+         COMMAND test_gfnff_ch3oh)
+
 # todo restore
 
 # Claude Generated: Debug Ulysses methods test

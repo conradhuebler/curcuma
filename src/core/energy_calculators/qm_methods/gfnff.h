@@ -605,6 +605,33 @@ private:
     std::vector<int> findSmallestRings() const;
 
     /**
+     * @brief Calculate topology-dependent electronegativity corrections (dxi)
+     *
+     * Claude Generated (2025): Element-specific topology corrections for EEQ
+     * Reference: gfnff_ini.f90:247-297 (dxicalc subroutine)
+     *
+     * Implements the missing dxi topology corrections that significantly
+     * improve EEQ charge accuracy, especially for heteroatoms.
+     *
+     * dxi corrections include:
+     * - Boron hydrogen-dependent corrections
+     * - Carbene carbon corrections
+     * - Oxygen nitro group and water corrections
+     * - Group 6 (S, Se, etc.) overcoordination corrections
+     * - Group 7 (Cl, Br, I) metal-dependent corrections
+     *
+     * @param atoms Atomic numbers
+     * @param coordination_numbers Coordination numbers
+     * @param neighbor_list Bond connectivity information
+     * @param topo_info Topology information (pi-systems, etc.)
+     * @return Vector of dxi corrections for each atom
+     */
+    Vector calculateDXI(const std::vector<int>& atoms,
+                        const Vector& coordination_numbers,
+                        const std::vector<std::vector<int>>& neighbor_list,
+                        const TopologyInfo& topo_info) const;
+
+    /**
      * @brief Calculate EEQ charges using extended electronegativity equalization
      * @param cn Coordination numbers
      * @param hyb Hybridization states

@@ -1,0 +1,116 @@
+{
+  "HH.xyz": {
+    "total": {
+      "reference": 0.05046985,
+      "curcuma": 0.050430938205159925,
+      "error_abs": -3.8911794840071345e-05,
+      "error_pct": 0.07709908953577502
+    },
+    "bond": {
+      "reference": -0.164952020372,
+      "curcuma": -0.165008,
+      "error_abs": -5.5979627999996895e-05,
+      "error_pct": 0.03393691563992461
+    },
+    "angle": {
+      "reference": 0.0,
+      "curcuma": 0.0,
+      "error_abs": 0.0,
+      "error_pct": 0.0
+    },
+    "repulsion": {
+      "reference": 0.21546903337,
+      "curcuma": 0.215469,
+      "error_abs": -3.3370000013244194e-08,
+      "error_pct": 1.5487144250534487e-05
+    },
+    "dispersion": {
+      "reference": -4.7159971e-05,
+      "curcuma": -3e-05,
+      "error_abs": 1.7159971000000002e-05,
+      "error_pct": 36.38672933026189
+    },
+    "electrostatic": {
+      "reference": 0.0,
+      "curcuma": -0.0,
+      "error_abs": -0.0,
+      "error_pct": 0.0
+    }
+  },
+  "HCl.xyz": {
+    "total": {
+      "reference": -0.0120384,
+      "curcuma": 0.0016623574415318794,
+      "error_abs": 0.013700757441531878,
+      "error_pct": 113.80879054967336
+    },
+    "bond": {
+      "reference": -0.084310493115,
+      "curcuma": -0.085206,
+      "error_abs": -0.0008955068850000081,
+      "error_pct": 1.0621535373758655
+    },
+    "angle": {
+      "reference": 0.0,
+      "curcuma": 0.0,
+      "error_abs": 0.0,
+      "error_pct": 0.0
+    },
+    "repulsion": {
+      "reference": 0.080505742402,
+      "curcuma": 0.080506,
+      "error_abs": 2.5759800000024757e-07,
+      "error_pct": 0.0003199746903940707
+    },
+    "dispersion": {
+      "reference": -0.00014046688,
+      "curcuma": -0.000113,
+      "error_abs": 2.746687999999999e-05,
+      "error_pct": 19.553990235990145
+    },
+    "electrostatic": {
+      "reference": -0.008093183855,
+      "curcuma": 0.006475,
+      "error_abs": 0.014568183855,
+      "error_pct": 180.00559626480893
+    }
+  },
+  "OH.xyz": {
+    "total": {
+      "reference": -0.23390793,
+      "curcuma": 0.05920251218792093,
+      "error_abs": 0.2931104421879209,
+      "error_pct": 125.31017746509106
+    },
+    "bond": {
+      "reference": -0.170910719346,
+      "curcuma": -0.086893,
+      "error_abs": 0.084017719346,
+      "error_pct": 49.15883548293447
+    },
+    "angle": {
+      "reference": 0.0,
+      "curcuma": 0.0,
+      "error_abs": 0.0,
+      "error_pct": 0.0
+    },
+    "repulsion": {
+      "reference": 0.013572992439,
+      "curcuma": 0.013573,
+      "error_abs": 7.560999999711715e-09,
+      "error_pct": 5.570621241920309e-05
+    },
+    "dispersion": {
+      "reference": -5.8590773e-05,
+      "curcuma": -4.6e-05,
+      "error_abs": 1.2590773000000001e-05,
+      "error_pct": 21.489344405816254
+    },
+    "electrostatic": {
+      "reference": -0.076511607391,
+      "curcuma": 0.132569,
+      "error_abs": 0.20908060739099998,
+      "error_pct": 273.2665206241556
+    }
+  }
+}

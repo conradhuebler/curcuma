@@ -76,13 +76,13 @@
    J. Seibert, P. Shushkov, S. Spicher, M. Stahn, M. Steiner, T. Strunk,
    J. Stückrath, T. Rose, and J. Unsleber
    
- * started run on 2025/11/23 at 21:55:09.947     
+ * started run on 2025/12/01 at 17:53:06.411     
 
            -------------------------------------------------
           |                Calculation Setup                |
            -------------------------------------------------
 
-          program call               : /home/conrad/Downloads/xtb-6.6.1/bin/xtb CH3OH.xyz --gfnff
+          program call               : /home/conrad/Downloads/xtb-6.6.1/bin/xtb CH3OH.xyz --gfnff --wrtopo nb,bpair,alist,blist,tlist,vtors,vbond,vangl
           coordinate file            : CH3OH.xyz
           omp threads                :                    16
 
@@ -148,17 +148,17 @@
           Number of HB bonds (unbound hydrogen)   0
           Number of XB bonds                      0
 
- E+G (total)                   0 d,  0 h,  0 min,  0.002 sec
- distance/D3 list               ...        0 min,  0.000 sec (  0.054%)
- non bonded repulsion           ...        0 min,  0.000 sec ( 12.419%)
- dCN                            ...        0 min,  0.000 sec (  0.175%)
- EEQ energy and q               ...        0 min,  0.000 sec (  7.387%)
- D3                             ...        0 min,  0.000 sec ( 10.320%)
- EEQ gradient                   ...        0 min,  0.000 sec ( 12.863%)
- bonds                          ...        0 min,  0.000 sec ( 20.829%)
- bend and torsion               ...        0 min,  0.000 sec ( 23.143%)
- bonded ATM                     ...        0 min,  0.000 sec ( 10.953%)
- HB/XB (incl list setup)        ...        0 min,  0.000 sec (  0.807%)
+ E+G (total)                   0 d,  0 h,  0 min,  0.001 sec
+ distance/D3 list               ...        0 min,  0.000 sec (  0.263%)
+ non bonded repulsion           ...        0 min,  0.000 sec (  8.377%)
+ dCN                            ...        0 min,  0.000 sec (  0.548%)
+ EEQ energy and q               ...        0 min,  0.000 sec ( 15.263%)
+ D3                             ...        0 min,  0.000 sec ( 10.855%)
+ EEQ gradient                   ...        0 min,  0.000 sec (  9.386%)
+ bonds                          ...        0 min,  0.000 sec ( 17.127%)
+ bend and torsion               ...        0 min,  0.000 sec ( 17.193%)
+ bonded ATM                     ...        0 min,  0.000 sec ( 16.382%)
+ HB/XB (incl list setup)        ...        0 min,  0.000 sec (  1.382%)
 
          :::::::::::::::::::::::::::::::::::::::::::::::::::::
          ::                     SUMMARY                     ::
@@ -194,14 +194,14 @@
 ########################################################################
 
 ------------------------------------------------------------------------
- * finished run on 2025/11/23 at 21:55:09.958     
+ * finished run on 2025/12/01 at 17:53:06.421     
 ------------------------------------------------------------------------
  total:
- * wall-time:     0 d,  0 h,  0 min,  0.011 sec
- *  cpu-time:     0 d,  0 h,  0 min,  0.078 sec
- * ratio c/w:     6.824 speedup
+ * wall-time:     0 d,  0 h,  0 min,  0.009 sec
+ *  cpu-time:     0 d,  0 h,  0 min,  0.087 sec
+ * ratio c/w:     9.409 speedup
  SCF:
- * wall-time:     0 d,  0 h,  0 min,  0.003 sec
- *  cpu-time:     0 d,  0 h,  0 min,  0.034 sec
- * ratio c/w:    12.416 speedup
+ * wall-time:     0 d,  0 h,  0 min,  0.001 sec
+ *  cpu-time:     0 d,  0 h,  0 min,  0.018 sec
+ * ratio c/w:    14.181 speedup
 
