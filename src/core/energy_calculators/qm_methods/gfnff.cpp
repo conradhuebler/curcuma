@@ -2067,6 +2067,7 @@ Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb,
 
         // Diagonal: A(i,i) = gamma_i + sqrt(2π)/sqrt(alpha_i)
         // This is the self-interaction (chemical hardness + Coulomb self-energy)
+        // Note: Phase 3 test shows NaN energies when removing alpha term
         A(i, i) = params_i.gam + sqrt_2pi / std::sqrt(params_i.alp);
 
         // RHS: b(i) = +chi_i + cnf_i * sqrt(CN_i)

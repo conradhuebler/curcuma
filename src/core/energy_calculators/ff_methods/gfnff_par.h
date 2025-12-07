@@ -232,6 +232,10 @@ static const double p_enpoly[6][2] = {
     {  5.60000000, -1.30000000 }   // Row 6: Cs-Rn (extrapolated)
 };
 
+// GFN-FF base covalent radii - Bohr (alias for r0_gfnff)
+// Used in torsion calculations
+static const std::vector<double> rcov_bohr = r0_gfnff;
+
 // Standard covalent radii - Angström
 // Used for bond detection threshold (× 1.3)
 static const std::vector<double> covalent_radii = {
@@ -413,6 +417,14 @@ static constexpr double REPSCALB = 1.7583;
 // Reference: gfnff_param.f90:374
 static constexpr double REPSCALN = 0.4270;
 
+// Torsion angle damping parameter
+// Reference: gfnff_param.f90:464
+static constexpr double atcutt = 0.505;
+
+// Torsion angle damping parameter for NCI HB term
+// Reference: gfnff_param.f90:466
+static constexpr double atcutt_nci = 0.305;
+
 // ============================================================================
 // SECTION 7: Dispersion Parameters (29 lines)
 // ============================================================================
@@ -456,6 +468,58 @@ static constexpr double s6 = 1.0;   // C6 scaling
 static constexpr double s8 = 2.4;   // C8 scaling
 static constexpr double a1 = 0.48;  // BJ damping a1
 static constexpr double a2 = 4.80;  // BJ damping a2
+
+// ============================================================================
+// SECTION 7.5: Torsion Parameters (56 lines)
+// ============================================================================
+// Reference: gfnff_param.f90:267-305 (tors_angewChem2020 and tors2_angewChem2020)
+// Claude Generated (2025): Extracted from Fortran to fix blocking issue in gfnff_torsions.cpp
+
+// Torsion angle parameter 1 - phase/barrier information
+// Reference: gfnff_param.f90:267-285
+static const std::vector<double> tors_angewChem2020 = {
+    0.100000, 0.100000, 0.100000, 0.000000, 0.121170, // H-B
+    0.260028, 0.222546, 0.250620, 0.256328, 0.400000, // C-Ne
+    0.115000, 0.000000, 0.103731, 0.069103, 0.104280, // Na-P
+    0.226131, 0.300000, 0.400000, 0.124098, 0.000000, // S-Ca
+    0.105007, 0.107267, 0.109526, 0.111786, 0.114046, // Sc-Mn
+    0.116305, 0.118565, 0.120825, 0.123084, 0.125344, // Fe-Zn
+    0.395722, 0.349100, 0.147808, 0.259811, 0.400000, // Ga-Br
+    0.400000, 0.112206, -0.004549, 0.198713, 0.179472, // Kr-Zr
+    0.160232, 0.140991, 0.121751, 0.102510, 0.083270, // Nb-Rh
+    0.064029, 0.044789, 0.025548, 0.202245, 0.278223, // Pd-Sn
+    0.280596, 0.229057, 0.300000, 0.423199, 0.090741, // Sb-Cs
+    0.076783, 0.310896, 0.309131, 0.307367, 0.305602, // Ba-Nd
+    0.303838, 0.302073, 0.300309, 0.298544, 0.296779, // Pm-Tb
+    0.295015, 0.293250, 0.291486, 0.289721, 0.287957, // Dy-Yb
+    0.286192, 0.284427, 0.257959, 0.231490, 0.205022, // Lu-Re
+    0.178553, 0.152085, 0.125616, 0.099147, 0.072679, // Os-Hg
+    0.203077, 0.169346, 0.090568, 0.144762, 0.231884, // Tl-At
+    0.400000 // Rn
+};
+
+// Torsion angle parameter 2 - additional barrier modulation
+// Reference: gfnff_param.f90:287-305
+static const std::vector<double> tors2_angewChem2020 = {
+    1.618678, 1.000000, 0.064677, 0.000000, 0.965814, // H-B
+    1.324709, 1.079334, 1.478599, 0.304844, 0.500000, // C-Ne
+    0.029210, 0.000000, 0.417423, 0.334275, 0.817008, // Na-P
+    0.922181, 0.356367, 0.684881, 0.029210, 0.000000, // S-Ca
+    0.035902, 0.090952, 0.146002, 0.201052, 0.256103, // Sc-Mn
+    0.311153, 0.366203, 0.421253, 0.476303, 0.531353, // Fe-Zn
+    0.482963, 1.415893, 1.146581, 1.338448, 0.376801, // Ga-Br
+    0.500000, 0.027213, -0.004549, 0.003820, 0.093011, // Kr-Zr
+    0.182202, 0.271393, 0.360584, 0.449775, 0.538965, // Nb-Rh
+    0.628156, 0.717347, 0.806538, 0.077000, 0.185110, // Pd-Sn
+    0.432427, 0.887811, 0.267721, 0.571662, 0.000000, // Sb-Cs
+    0.000000, 0.122336, 0.131176, 0.140015, 0.148855, // Ba-Nd
+    0.157695, 0.166534, 0.175374, 0.184214, 0.193053, // Pm-Tb
+    0.201893, 0.210733, 0.219572, 0.228412, 0.237252, // Dy-Yb
+    0.246091, 0.254931, 0.387526, 0.520121, 0.652716, // Lu-Re
+    0.785311, 0.917906, 1.050500, 1.183095, 1.315690, // Os-Hg
+    0.219729, 0.344830, 0.331862, 0.767979, 0.536799, // Tl-At
+    0.500000 // Rn
+};
 
 // ============================================================================
 // SECTION 8: Hydrogen Bond and Halogen Bond Parameters

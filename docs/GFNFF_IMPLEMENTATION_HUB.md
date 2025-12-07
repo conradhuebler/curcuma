@@ -54,24 +54,39 @@
 - **Root Cause**: Neighbor detection threshold 2.0 → 2.5 Bohr (missed C-H bonds)
 - **Result**: Angle energy: 0.296 Eh → **0.000 Eh** (correct)
 
-### Current Issue: EEQ Charge Underestimation (December 2025)
+### Current Issue: EEQ Diagonal Matrix Element Bug (December 2025)
 
-**IMPORTANT UPDATE (Dec 7, 2025)**: Code audit was INCORRECT - EEQ self-energy term is NOT missing!
+**SESSION 3 PROGRESS (Dec 7, 2025)**:
 
-**VERIFIED FINDING**: All 3 EEQ terms confirmed implemented and executed:
-1. ✅ Pairwise Coulomb: `q_i*q_j*erf(γ*r)/r²` (forcefieldthread.cpp:1271-1302)
-2. ✅ Self-energy: `-q_i*χ_i` (forcefieldthread.cpp:1318) - **CONFIRMED in output**
-3. ✅ Self-interaction: `0.5*q_i²*(γ_i + √(2/π)/√(α_i))` (lines 1323-1325) - **CONFIRMED in output**
+**✅ BLOCKING ISSUES FIXED**:
+1. ✅ **Missing torsion arrays added** (`tors_angewChem2020`, `tors2_angewChem2020`) to gfnff_par.h
+   - Source: `external/gfnff/src/gfnff_param.f90:267-305`
+   - 86 elements each, properly formatted for C++
 
-**Actual Root Cause**: EEQ Charge Calculation Underestimation
-- CH3OH verbosity 3 test shows charges are **systematically too small**:
-  - C: calculated 0.0329 vs reference 0.048 (32% error)
-  - O: calculated -0.2344 vs reference -0.432 (46% error)
-- This causes **wrong sign** in Coulomb energy: `+0.144 Eh` instead of `-0.061 Eh`
+2. ✅ **Pre-existing parameter definitions added**:
+   - `rcov_bohr` - Covalent radii alias (uses r0_gfnff)
+   - `atcutt` - Torsion damping parameter (0.505)
+   - `atcutt_nci` - NCI torsion damping (0.305)
 
-**Root Cause Suspect**: EEQ charge calculation algorithm or chi/gam/alp parameter values in gfnff_par.h are incorrect
+3. ✅ **Build system fixed** - Project compiles successfully with `make -j4`
 
-**Next Investigation**: Debug charge calculation matrix solution or parameter tables
+**ROOT CAUSE ANALYSIS (Dec 7)**:
+The EEQ charge calculation issue remains under investigation. Two hypotheses tested:
+- **Phase 1**: Replace gamma values with raw Fortran negatives → FAILED (74.5% error, worse than original)
+- **Phase 3**: Remove alpha term from diagonal → Causes NaN energies (reveals deeper issue)
+
+**Conclusion**: The problem is NOT simply double-counting of alpha term. The issue is more complex and requires deeper investigation.
+
+**CRITICAL FINDING**: Phase 3 fix (removing alpha term) produces NaN energies, indicating:
+- The gamma value transformation is incomplete
+- May require examining the entire EEQ system architecture
+- Possibility that gamma values need adjustment in ADDITION to solver changes, not INSTEAD OF
+
+**NEXT SESSION ACTION**:
+1. Investigate why Phase 3 produces NaN energies
+2. Consider hybrid approach: Phase 1 gamma values + Phase 3 solver modification
+3. Run detailed verbosity analysis to trace NaN source
+4. Consult original Fortran gfnff_ini.f90 for exact EEQ initialization
 
 ---
 
