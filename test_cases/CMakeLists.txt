@@ -126,16 +126,6 @@ if(USE_PCH)
         target_precompile_headers(test_gfnff_params_direct REUSE_FROM curcuma_core)
 endif()
 
-# Register with CTest
-add_test(NAME test_gfnff_regression
-         COMMAND test_gfnff_regression ${CMAKE_CURRENT_BINARY_DIR})
-
-add_test(NAME test_gfnff_vbond
-         COMMAND test_gfnff_vbond ${CMAKE_CURRENT_BINARY_DIR})
-
-add_test(NAME test_gfnff_params_direct
-         COMMAND test_gfnff_params_direct)
-
 # Claude Generated: GFN-FF CH3OH Comprehensive Validation Test (Dec 2025)
 # Validates Curcuma native GFN-FF against XTB 6.6.1 Fortran reference
 # Tests: Coordination Numbers, EEQ charges, Total energy
@@ -151,8 +141,24 @@ if(USE_PCH)
         target_precompile_headers(test_gfnff_ch3oh REUSE_FROM curcuma_core)
 endif()
 
+# Register with CTest
+add_test(NAME test_gfnff_regression
+         COMMAND test_gfnff_regression ${CMAKE_CURRENT_BINARY_DIR})
+
+add_test(NAME test_gfnff_vbond
+         COMMAND test_gfnff_vbond ${CMAKE_CURRENT_BINARY_DIR})
+
+add_test(NAME test_gfnff_params_direct
+         COMMAND test_gfnff_params_direct)
+
 add_test(NAME test_gfnff_ch3oh
          COMMAND test_gfnff_ch3oh)
+
+# Configure test timeouts and grouping
+set_tests_properties(test_gfnff_regression PROPERTIES TIMEOUT 30 LABELS "gfnff")
+set_tests_properties(test_gfnff_vbond PROPERTIES TIMEOUT 30 LABELS "gfnff")
+set_tests_properties(test_gfnff_params_direct PROPERTIES TIMEOUT 30 LABELS "gfnff")
+set_tests_properties(test_gfnff_ch3oh PROPERTIES TIMEOUT 30 LABELS "gfnff")
 
 # Claude Generated (Session 5): Periodic Table utility tests
 add_executable(test_periodic_table

@@ -23,6 +23,7 @@
 #include "src/core/units.h"
 #include <cmath>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <queue>
 #include <stack>
@@ -2096,6 +2097,93 @@ std::vector<int> GFNFF::findSmallestRings() const
     }
 
     return ring_sizes;
+}
+
+bool GFNFF::areAtomsInSameRing(int i, int j, int& ring_size) const
+{
+    // Check if two atoms are in the same ring
+    // Reference: Based on ring detection algorithm
+    //
+    // Approach: Use existing ring information from topology
+    // If either atom is not in a ring, return false
+    // If both are in rings, check if they share the same ring
+
+    // Get cached topology information
+    const TopologyInfo& topo = getCachedTopology();
+
+    // Check bounds
+    if (i < 0 || i >= m_atomcount || j < 0 || j >= m_atomcount) {
+        ring_size = 0;
+        return false;
+    }
+
+    // Check if either atom is not in a ring
+    int ring_i = (topo.ring_sizes.size() > i) ? topo.ring_sizes[i] : 0;
+    int ring_j = (topo.ring_sizes.size() > j) ? topo.ring_sizes[j] : 0;
+
+    if (ring_i == 0 || ring_j == 0) {
+        ring_size = 0;
+        return false;  // One or both atoms not in any ring
+    }
+
+    // If both atoms are in rings of the same size, they might be in the same ring
+    // Need to check ring membership more precisely
+
+    // Build adjacency list for ring analysis
+    std::vector<std::vector<int>> neighbors(m_atomcount);
+    double bond_threshold = 1.3;
+
+    for (int k = 0; k < m_atomcount; ++k) {
+        for (int l = k + 1; l < m_atomcount; ++l) {
+            double distance = (m_geometry_bohr.row(k) - m_geometry_bohr.row(l)).norm();
+            double rcov_sum = getCovalentRadius(m_atoms[k]) + getCovalentRadius(m_atoms[l]);
+
+            if (distance < bond_threshold * rcov_sum) {
+                neighbors[k].push_back(l);
+                neighbors[l].push_back(k);
+            }
+        }
+    }
+
+    // BFS from atom i to see if we can reach atom j within ring_i steps
+    // and return to i forming a cycle of ring_i atoms
+    std::vector<bool> visited(m_atomcount, false);
+    std::vector<int> path;
+
+    std::function<bool(int, int, int)> findRingPath = [&](int current, int target, int depth) -> bool {
+        if (depth > ring_i) return false;
+        if (current == target && depth == ring_i) return true;
+        if (current == target && depth > 0) return false;
+
+        visited[current] = true;
+        path.push_back(current);
+
+        for (int neighbor : neighbors[current]) {
+            if (!visited[neighbor] || (neighbor == target && depth == ring_i - 1)) {
+                if (findRingPath(neighbor, target, depth + 1)) {
+                    return true;
+                }
+            }
+        }
+
+        path.pop_back();
+        visited[current] = false;
+        return false;
+    };
+
+    // Check if atoms i and j are connected in a ring of ring_i atoms
+    path.clear();
+    std::fill(visited.begin(), visited.end(), false);
+
+    bool in_same_ring = findRingPath(i, j, 0);
+
+    if (in_same_ring) {
+        ring_size = ring_i;
+    } else {
+        ring_size = 0;
+    }
+
+    return in_same_ring;
 }
 
 Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb, const std::vector<int>& rings) const

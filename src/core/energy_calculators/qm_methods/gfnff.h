@@ -445,7 +445,9 @@ private:
     GFNFFTorsionParams getGFNFFTorsionParameters(int z_i, int z_j, int z_k, int z_l,
                                                   int hyb_j, int hyb_k,
                                                   double qa_j = 0.0, double qa_k = 0.0,
-                                                  double cn_i = 2.0, double cn_l = 2.0) const;
+                                                  double cn_i = 2.0, double cn_l = 2.0,
+                                                  bool in_ring = false, int ring_size = 0,
+                                                  int j_atom_idx = -1, int k_atom_idx = -1) const;
 
     /**
      * @brief Calculate dihedral angle for four atoms
@@ -621,6 +623,15 @@ private:
      * @return Vector of smallest ring sizes (0 = not in ring)
      */
     std::vector<int> findSmallestRings() const;
+
+    /**
+     * @brief Check if two atoms are in the same ring
+     * @param i First atom index
+     * @param j Second atom index
+     * @param ring_size Output: size of the ring they share (0 if not in same ring)
+     * @return true if atoms are in the same ring
+     */
+    bool areAtomsInSameRing(int i, int j, int& ring_size) const;
 
     /**
      * @brief Calculate topology-dependent electronegativity corrections (dxi)

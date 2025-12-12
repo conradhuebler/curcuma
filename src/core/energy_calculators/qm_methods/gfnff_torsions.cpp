@@ -339,7 +339,9 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     int z_i, int z_j, int z_k, int z_l,
     int hyb_j, int hyb_k,
     double qa_j, double qa_k,
-    double cn_i, double cn_l) const
+    double cn_i, double cn_l,
+    bool in_ring, int ring_size,
+    int j_atom_idx, int k_atom_idx) const
 {
     GFNFFTorsionParams params;
 
@@ -473,7 +475,82 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     // For now: f2 = 0 (conservative, slightly underestimates conjugated systems)
 
     // ---------------------------------------------------------------------------
-    // (E) Charge correction: fqq (CORRECTED Dec 2025)
+    // (E) Hydrogen count refinement (NEW - from reference: gfnff_ini.f90:1778-1786)
+    // ---------------------------------------------------------------------------
+    // f1 = f1 * (nhi * nhj)^0.07 where nhi/nhj are H atoms attached to j/k
+    // This accounts for H-substitution effects on torsion barriers
+    int nhi = 1, nhj = 1;  // Default: central atoms themselves
+
+    if (j_atom_idx >= 0 && k_atom_idx >= 0 && j_atom_idx < m_atomcount && k_atom_idx < m_atomcount) {
+        // Count H atoms attached to central atoms
+        const TopologyInfo& topo = getCachedTopology();
+        if (topo.neighbor_lists.size() > j_atom_idx) {
+            for (int neighbor : topo.neighbor_lists[j_atom_idx]) {
+                if (neighbor < m_atoms.size() && m_atoms[neighbor] == 1) {  // H atom
+                    nhi++;
+                }
+            }
+        }
+        if (topo.neighbor_lists.size() > k_atom_idx) {
+            for (int neighbor : topo.neighbor_lists[k_atom_idx]) {
+                if (neighbor < m_atoms.size() && m_atoms[neighbor] == 1) {  // H atom
+                    nhj++;
+                }
+            }
+        }
+
+        // Apply H-count correction (gfnff_ini.f90:1786)
+        fij *= std::pow(double(nhi) * double(nhj), 0.07);
+    }
+
+    // ---------------------------------------------------------------------------
+    // (F) Metal classification checks (NEW - from reference: gfnff_ini.f90:1751-1752)
+    // ---------------------------------------------------------------------------
+    // Skip high-coordinate metals: no HC metals with >4 neighbors
+    if (j_atom_idx >= 0 && j_atom_idx < m_atoms.size()) {
+        const TopologyInfo& topo = getCachedTopology();
+        if (j_atom_idx < topo.neighbor_lists.size() && j_atom_idx < topo.is_metal.size()) {
+            int coord_j = topo.neighbor_lists[j_atom_idx].size();
+            if (topo.is_metal[j_atom_idx] && coord_j > 4) {
+                params.barrier_height = 0.0;
+                return params;  // Skip HC metals
+            }
+        }
+    }
+    if (k_atom_idx >= 0 && k_atom_idx < m_atoms.size()) {
+        const TopologyInfo& topo = getCachedTopology();
+        if (k_atom_idx < topo.neighbor_lists.size() && k_atom_idx < topo.is_metal.size()) {
+            int coord_k = topo.neighbor_lists[k_atom_idx].size();
+            if (topo.is_metal[k_atom_idx] && coord_k > 4) {
+                params.barrier_height = 0.0;
+                return params;  // Skip HC metals
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // (G) Ring corrections (NEW - from reference: gfnff_ini.f90:1772-1775)
+    // ---------------------------------------------------------------------------
+    // Reduce torsion barriers in small rings (strain effects)
+    if (in_ring && ring_size >= 3 && ring_size <= 6) {
+        // Ring strain factor: smaller rings → smaller torsion barriers
+        double ring_factor = 1.0;
+        switch (ring_size) {
+            case 3: ring_factor = 0.1; break;  // 3-membered rings: 90% reduction
+            case 4: ring_factor = 0.3; break;  // 4-membered rings: 70% reduction
+            case 5: ring_factor = 0.6; break;  // 5-membered rings: 40% reduction
+            case 6: ring_factor = 0.8; break;  // 6-membered rings: 20% reduction
+        }
+        fij *= ring_factor;
+
+        // Ring phase adjustment: planar equilibria in small rings
+        if (ring_size <= 4) {
+            params.phase_shift = 0.0;  // Planar for very small rings
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // (H) Charge correction: fqq (CORRECTED Dec 2025)
     // ---------------------------------------------------------------------------
     // Reference: gfnff_ini.f90:1896 (implicit via topo%qa)
     // fqq = 1.0 + |qa_j * qa_k| * qfacTOR
@@ -966,8 +1043,34 @@ json GFNFF::generateGFNFFTorsions() const
                 }
 
                 // ==========================================================
-                // STEP 6: Get torsion parameters (with EEQ charges!)
+                // STEP 6: Get topology information for torsion calculation
                 // ==========================================================
+                // Get topology information for torsion calculation
+                const TopologyInfo& topo = getCachedTopology();
+                bool in_ring = false;
+                int ring_size = 0;
+                double cn_i_val = 2.0, cn_l_val = 2.0;
+                double cn_j = 2.0, cn_k = 2.0;
+
+                // Check if atoms j and k are in the same ring
+                if (j < topo.ring_sizes.size() && k < topo.ring_sizes.size()) {
+                    in_ring = areAtomsInSameRing(j, k, ring_size);
+                }
+
+                // Use actual CN values from topology if available
+                if (j < topo.coordination_numbers.rows()) {
+                    cn_j = topo.coordination_numbers(j);
+                }
+                if (k < topo.coordination_numbers.rows()) {
+                    cn_k = topo.coordination_numbers(k);
+                }
+                if (i < topo.coordination_numbers.rows()) {
+                    cn_i_val = topo.coordination_numbers(i);
+                }
+                if (l < topo.coordination_numbers.rows()) {
+                    cn_l_val = topo.coordination_numbers(l);
+                }
+
                 // Get actual EEQ charges (critical for fqq correction!)
                 double qa_j = (j < m_charges.rows()) ? m_charges(j) : 0.0;
                 double qa_k = (k < m_charges.rows()) ? m_charges(k) : 0.0;
@@ -989,16 +1092,12 @@ json GFNFF::generateGFNFFTorsions() const
                     charge_debug_printed = true;
                 }
 
-                // TODO: Use actual CN values when available
-                // For now: Default CN=2.0 (minor ~8% error in fkl scaling)
-                double cn_i_val = 2.0;
-                double cn_l_val = 2.0;
-
                 auto params = getGFNFFTorsionParameters(
                     m_atoms[i], m_atoms[j], m_atoms[k], m_atoms[l],
                     hybridization[j], hybridization[k],
                     qa_j, qa_k,
-                    cn_i_val, cn_l_val
+                    cn_i_val, cn_l_val,
+                    in_ring, ring_size, j, k
                 );
 
                 // ==========================================================

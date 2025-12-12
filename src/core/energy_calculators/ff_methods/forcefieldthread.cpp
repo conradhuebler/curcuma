@@ -630,8 +630,8 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
     // Phase 1.3: Correct GFN-FF exponential bond potential
     // Formula from Fortran gfnff_engrad.F90:675-721
     // E_bond = k_b * exp(-α * (r - r₀)²)
-    
-    double factor = m_final_factor * m_bond_scaling;
+
+    double factor = m_bond_scaling;
 
     for (int index = 0; index < m_gfnff_bonds.size(); ++index) {
         const auto& bond = m_gfnff_bonds[index];
@@ -648,11 +648,6 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
         double k_b = bond.fc;                    // Force constant (already negative!)
         double exp_term = std::exp(-alpha * dr * dr);
         double energy = k_b * exp_term;          // k_b already contains sign
-        std::cout << "Bond " << bond.i << "-" << bond.j << ": "
-                  << "k_b=" << k_b << ", alpha=" << alpha << ", "
-                  << "r=" << rij << ", r0=" << bond.r0_ij << ", "
-                  << "dr=" << dr << ", exp=" << exp_term << ", "
-                  << "E=" << energy << ", factor=" << factor << std::endl;
         m_bond_energy += energy * factor;
 
         if (m_calculate_gradient) {
@@ -681,7 +676,7 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
     // For linear angles (θ₀ ≈ π):
     //   E = k * (θ - θ₀)² * damp_ij * damp_jk (harmonic in θ)
 
-    const double factor = m_final_factor * m_angle_scaling;
+    const double factor = m_angle_scaling;
     const double pi = 3.14159265358979323846;
     const double linear_threshold = 1.0e-6;  // Fortran: pi-c0 .lt. 1.d-6
     const double atcuta = 0.595;  // GFN-FF angle damping parameter (gfnff_param.f90:463)
@@ -734,17 +729,17 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
 
         // Check if equilibrium angle is linear (θ₀ ≈ π)
         if (std::abs(pi - theta0) < linear_threshold) {
-            // Linear case: E = k*(θ - θ₀)² (harmonic in θ)
+            // Linear case: E = 0.5 * k*(θ - θ₀)² (harmonic in θ)
             // Fortran gfnff_engrad.F90:895-897
             double dtheta = theta - theta0;
-            energy = k_ijk * dtheta * dtheta;
+            energy = 0.5 * k_ijk * dtheta * dtheta;
             dedtheta = 2.0 * k_ijk * dtheta;
         } else {
-            // Normal case: E = k*(cosθ - cosθ₀)² (cosine-based)
+            // Normal case: E = 0.5 * k*(cosθ - cosθ₀)² (cosine-based)
             // Fortran gfnff_engrad.F90:899-900
             double costheta0 = std::cos(theta0);
             double dcostheta = costheta - costheta0;
-            energy = k_ijk * dcostheta * dcostheta;
+            energy = 0.5 * k_ijk * dcostheta * dcostheta;
 
             // dE/dθ = dE/d(cosθ) * d(cosθ)/dθ
             //       = 2*k*(cosθ - cosθ₀) * (-sinθ)
@@ -961,7 +956,7 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         double phi0 = dihedral.phi0;  // Phase shift
 
         // GFN-FF energy formula with damping (gfnff_engrad.F90:1190, 1199)
-        // E = V * (1 + cos(n*φ - φ₀)) * damp
+        // E = V * (1 + cos(n*φ - φ₀)) * damp (V already in Hartree)
         double et = V * (1 + cos(n * phi - phi0));
         double energy = et * damp;
 
@@ -987,12 +982,12 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
             first_torsion_printed = true;
         }
 
-        m_dihedral_energy += energy * m_final_factor * m_dihedral_scaling;
+        m_dihedral_energy += energy * m_dihedral_scaling;
 
         if (m_calculate_gradient) {
             // Gradient of energy w.r.t. angle (simplified - damping gradient omitted)
             // Full implementation would need ∂damp/∂r terms (gfnff_engrad.F90:1192-1198)
-            double dEdphi = -V * n * sin(n * phi - phi0) * damp * m_final_factor * m_dihedral_scaling;
+            double dEdphi = -V * n * sin(n * phi - phi0) * damp * m_dihedral_scaling;
             m_gradient.row(dihedral.i) += dEdphi * derivate.row(0);
             m_gradient.row(dihedral.j) += dEdphi * derivate.row(1);
             m_gradient.row(dihedral.k) += dEdphi * derivate.row(2);
@@ -1260,7 +1255,12 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
      *
      * Claude Generated (2025-12-05): Phase 4.3 - Complete implementation
      * Claude Generated (2025-12-12, Session 9): CRITICAL FIX - Corrected /r² to /r in pairwise term!
+     * Claude Generated (Session 10): CRITICAL FIX - Add kJ/mol → Eh conversion for all Coulomb terms
      */
+
+    // Claude Generated (Session 10): Convert kJ/mol to Eh for all Coulomb contributions
+    // EEQ quantities (charges, chi, gamma, alpha) are in kJ/mol units
+    const double kJmol_to_Eh = 1.0 / 2625.15 * 4.19;  // ≈ 0.001595
 
     if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_coulombs.size() > 0) {
         CurcumaLogger::info(fmt::format("Thread calculating {} Coulomb pairs", m_gfnff_coulombs.size()));
@@ -1285,7 +1285,9 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
         double erf_term = std::erf(gamma_r);
         double energy_pair = coul.q_i * coul.q_j * erf_term / rij;  // FIX: /r not /r²
 
-        m_coulomb_energy += energy_pair * m_final_factor;
+        // Claude Generated (Session 10): CRITICAL FIX - Add kJ/mol → Eh conversion for Coulomb terms
+        // EEQ quantities are in kJ/mol but need to be converted to Eh for total energy
+        m_coulomb_energy += energy_pair * kJmol_to_Eh;
 
         if (m_calculate_gradient) {
             // Claude Generated (Dec 2025, Session 9): CRITICAL FIX - Gradient for erf(γ*r)/r NOT erf(γ*r)/r²!
@@ -1295,7 +1297,7 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
             double exp_term = std::exp(-gamma_r * gamma_r);
             double derf_dr = coul.gamma_ij * exp_term * (2.0 / sqrt_pi);
             double dEdr_pair = coul.q_i * coul.q_j *
-                (derf_dr / rij - erf_term / (rij * rij)) * m_final_factor;  // FIX: Correct derivative
+                (derf_dr / rij - erf_term / (rij * rij)) * kJmol_to_Eh;  // FIX: Correct derivative + conversion
 
             Eigen::Vector3d grad = dEdr_pair * rij_vec / rij;
 
@@ -1329,7 +1331,7 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
 
             // Add both self-terms for atom i
             double energy_atom_i = energy_self_i + energy_selfint_i;
-            m_coulomb_energy += energy_atom_i * m_final_factor;
+            m_coulomb_energy += energy_atom_i * kJmol_to_Eh;
 
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::param(fmt::format("coulomb_self_atom_{}", coul.i),
@@ -1353,7 +1355,7 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
 
             // Add both self-terms for atom j
             double energy_atom_j = energy_self_j + energy_selfint_j;
-            m_coulomb_energy += energy_atom_j * m_final_factor;
+            m_coulomb_energy += energy_atom_j * kJmol_to_Eh;
 
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::param(fmt::format("coulomb_self_atom_{}", coul.j),
