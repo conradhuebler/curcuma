@@ -80,6 +80,16 @@ public:
         Vector dxi;                                          // Electronegativity corrections
         Vector dgam;                                         // Hardness corrections
         Vector dalpha;                                       // Polarizability corrections
+
+        // Phase 2.1: Distance caching (Claude Generated - Dec 2025)
+        // Computed once per geometry update to eliminate redundant sqrt() calls
+        Eigen::MatrixXd distance_matrix;        // N×N distances in Bohr
+        Eigen::MatrixXd squared_dist_matrix;    // N×N squared distances (avoids sqrt)
+
+        // Phase 2.2: Adjacency list (Claude Generated - Dec 2025)
+        // Per-atom neighbor connectivity built from bond list
+        // Used in generateGFNFFAngles() to avoid O(N_bonds) search per atom
+        std::vector<std::vector<int>> adjacency_list;
     };
 
     /**

@@ -386,6 +386,11 @@ protected:
 
     // Phase 5A: EEQ charges for fqq angle correction (Claude Generated Nov 2025)
     Vector m_eeq_charges;
+
+    // Phase 1.2: Cached bonded pairs for fast lookup in repulsion calculation (Claude Generated - Dec 2025)
+    // Built once in execute() to avoid O(N_bonds × log(N_bonds)) overhead per energy call
+    std::set<std::pair<int, int>> m_bonded_pairs;
+    bool m_bonded_pairs_cached = false;
 };
 
 #ifdef USE_D3

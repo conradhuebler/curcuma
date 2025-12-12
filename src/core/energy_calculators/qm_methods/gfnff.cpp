@@ -602,20 +602,16 @@ json GFNFF::generateGFNFFAngles(const TopologyInfo& topo_info) const
 {
     json angles = json::array();
 
-    // Retrieve cached bond list to avoid recomputing bonds
-    const std::vector<std::pair<int,int>>& bond_list = getCachedBondList();
+    // Phase 2.3: Use adjacency list from topology (Claude Generated - Dec 2025)
+    // OPTIMIZATION: O(N_atoms × N_bonds) → O(N_atoms + N_bonds)
+    // Instead of searching bond_list for each atom, use pre-built adjacency list
 
     // Generate angles from bonded topology
     for (int center = 0; center < m_atomcount; ++center) {
-        std::vector<int> neighbors;
-
-        // Find all atoms bonded to center
-        for (const auto& bond : bond_list) {
-            if (bond.first == center)
-                neighbors.push_back(bond.second);
-            if (bond.second == center)
-                neighbors.push_back(bond.first);
-        }
+        // Phase 2.3: Direct access to neighbors via adjacency list (O(1) lookup)
+        // OLD: for (const auto& bond : bond_list) - O(N_bonds) search per atom
+        // NEW: topo_info.adjacency_list[center] - O(1) access
+        const std::vector<int>& neighbors = topo_info.adjacency_list[center];
 
         // Generate all possible angles with center as middle atom
         for (int i = 0; i < neighbors.size(); ++i) {
@@ -667,7 +663,10 @@ json GFNFF::generateGFNFFAngles(const TopologyInfo& topo_info) const
         }
     }
 
-    std::cout << "GFN-FF detected " << angles.size() << " angles" << std::endl;
+    // Phase 1.1: Guard debug output (Claude Generated - Dec 2025)
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success(fmt::format("Generated {} GFN-FF angles", angles.size()));
+    }
 
     return angles;
 }
@@ -3045,6 +3044,43 @@ json GFNFF::detectHalogenBonds(const Vector& charges) const
 GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
 {
     TopologyInfo topo_info;
+
+    // Phase 2.1: Build distance matrices FIRST (Claude Generated - Dec 2025)
+    // All N×N distances computed once to eliminate redundant sqrt() calls
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("Phase 2.1: Computing distance matrices");
+    }
+    topo_info.distance_matrix = Eigen::MatrixXd::Zero(m_atomcount, m_atomcount);
+    topo_info.squared_dist_matrix = Eigen::MatrixXd::Zero(m_atomcount, m_atomcount);
+
+    for (int i = 0; i < m_atomcount; ++i) {
+        for (int j = i + 1; j < m_atomcount; ++j) {
+            Vector rij = m_geometry_bohr.row(i) - m_geometry_bohr.row(j);
+            double dist_sq = rij.squaredNorm();
+            double dist = std::sqrt(dist_sq);
+
+            // Symmetric matrices
+            topo_info.distance_matrix(i, j) = topo_info.distance_matrix(j, i) = dist;
+            topo_info.squared_dist_matrix(i, j) = topo_info.squared_dist_matrix(j, i) = dist_sq;
+        }
+    }
+
+    // Phase 2.2: Build adjacency list from cached bond list (Claude Generated - Dec 2025)
+    // Used in generateGFNFFAngles() to avoid O(N_bonds) search per atom
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("Phase 2.2: Building adjacency list");
+    }
+    const auto& bond_list = getCachedBondList();
+    topo_info.adjacency_list.resize(m_atomcount);
+    for (const auto& [atom_i, atom_j] : bond_list) {
+        topo_info.adjacency_list[atom_i].push_back(atom_j);
+        topo_info.adjacency_list[atom_j].push_back(atom_i);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success(fmt::format("Built adjacency list with {} bonds for {} atoms",
+                                           bond_list.size(), m_atomcount));
+    }
 
     // Calculate all topology information (Phase 2 implementations)
     topo_info.coordination_numbers = calculateCoordinationNumbers();
