@@ -2174,10 +2174,69 @@ Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb,
     // Phase 3.3: Solve linear system A·q = b
     // Use Eigen's LDLT decomposition (symmetric indefinite solver)
     // This handles the constraint properly via the Lagrange multiplier
+
+    // Claude Generated (December 2025, Session 9): EEQ Matrix Diagnostics
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("=== EEQ Matrix Diagnostics ===");
+
+        // Compute eigenvalues to check for singularity
+        Eigen::SelfAdjointEigenSolver<Matrix> eigensolver(A);
+        Vector eigenvalues = eigensolver.eigenvalues();
+
+        // Condition number = max(eigenvalue) / min(eigenvalue)
+        double max_eigenvalue = eigenvalues.maxCoeff();
+        double min_eigenvalue = eigenvalues.minCoeff();
+        double condition_number = std::abs(max_eigenvalue / min_eigenvalue);
+
+        CurcumaLogger::param("matrix_size", fmt::format("{}x{}", m, m));
+        CurcumaLogger::param("max_eigenvalue", fmt::format("{:.6e}", max_eigenvalue));
+        CurcumaLogger::param("min_eigenvalue", fmt::format("{:.6e}", min_eigenvalue));
+        CurcumaLogger::param("condition_number", fmt::format("{:.6e}", condition_number));
+
+        // Warn if matrix is ill-conditioned
+        if (condition_number > 1e12) {
+            CurcumaLogger::warn(fmt::format("EEQ matrix is ill-conditioned (cond={:.2e}) - may produce NaN charges!", condition_number));
+        } else if (condition_number > 1e8) {
+            CurcumaLogger::warn(fmt::format("EEQ matrix is poorly conditioned (cond={:.2e})", condition_number));
+        } else {
+            CurcumaLogger::success(fmt::format("EEQ matrix is well-conditioned (cond={:.2e})", condition_number));
+        }
+
+        // Show first 5 and last 5 eigenvalues
+        CurcumaLogger::info("Eigenvalue spectrum:");
+        int n_show = std::min(5, (int)eigenvalues.size());
+        for (int i = 0; i < n_show; ++i) {
+            CurcumaLogger::param(fmt::format("λ[{}]", i), fmt::format("{:.6e}", eigenvalues[i]));
+        }
+        if (eigenvalues.size() > 10) {
+            CurcumaLogger::param("...", fmt::format("({} more eigenvalues)", eigenvalues.size() - 10));
+        }
+        for (int i = std::max(n_show, (int)eigenvalues.size() - 5); i < eigenvalues.size(); ++i) {
+            CurcumaLogger::param(fmt::format("λ[{}]", i), fmt::format("{:.6e}", eigenvalues[i]));
+        }
+    }
+
     Vector q_extended = A.ldlt().solve(b);
 
     // Extract charges (first n elements, last element is Lagrange multiplier)
     Vector charges = q_extended.head(n);
+
+    // Claude Generated (December 2025, Session 9): Check for NaN/Inf immediately after solve
+    bool has_invalid_charges = false;
+    for (int i = 0; i < n; ++i) {
+        if (std::isnan(charges[i]) || std::isinf(charges[i])) {
+            has_invalid_charges = true;
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::error(fmt::format("CRITICAL: Charge[{}] = {} (atom Z={})", i, charges[i], m_atoms[i]));
+            }
+        }
+    }
+
+    if (has_invalid_charges && CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::error("EEQ solver produced NaN or Inf charges!");
+        CurcumaLogger::error("This indicates numerical instability in the EEQ matrix.");
+        CurcumaLogger::error("Possible causes: ill-conditioned matrix, singular matrix, or numerical precision loss.");
+    }
 
     // Phase 3.4: Apply charge-dependent gamma corrections (dgam) - CRITICAL FIX (Dec 2025)
     // Fortran: topo%gameeq(i) = param%gam(at(i)) + dgam(i)
@@ -3190,12 +3249,18 @@ json GFNFF::generateGFNFFCoulombPairs() const
             // Store chi, gam, and alp for self-energy and self-interaction terms
             // Reference: Fortran gfnff_engrad.F90:1378-1389
             // Formula includes THREE terms:
-            // 1. Pairwise: E_pair = q_i * q_j * erf(γ_ij * r_ij) / r_ij²
-            // 2. Self-energy: E_self = -q_i*chi_i - q_j*chi_j
+            // 1. Pairwise: E_pair = q_i * q_j * erf(γ_ij * r_ij) / r_ij
+            // 2. Self-energy: E_self = -q_i*chi_i - q_j*chi_j  (where chi is NEGATIVE in EEQ!)
             // 3. Self-interaction: E_selfint = 0.5*q_i²*(gam_i + sqrt(2/π)/sqrt(α_i)) + similar for j
             //    where gam_i is chemical hardness (NOT 1/sqrt(alpha))
-            coulomb["chi_i"] = params_i.chi;
-            coulomb["chi_j"] = params_j.chi;
+            //
+            // Claude Generated (Dec 2025, Session 9): CRITICAL FIX - chi must be NEGATIVE!
+            // In EEQ solver, chi is stored as: chi(i) = -params_i.chi + dxi_total
+            // So we must also negate it here and add dxi correction!
+            double dxi_i = (i < topo_info.dxi.size()) ? topo_info.dxi(i) : 0.0;
+            double dxi_j = (j < topo_info.dxi.size()) ? topo_info.dxi(j) : 0.0;
+            coulomb["chi_i"] = -params_i.chi + dxi_i;  // NEGATIVE chi + dxi correction
+            coulomb["chi_j"] = -params_j.chi + dxi_j;  // NEGATIVE chi + dxi correction
             coulomb["gam_i"] = params_i.gam;  // Chemical hardness
             coulomb["gam_j"] = params_j.gam;  // Chemical hardness
             coulomb["alp_i"] = params_i.alp;
@@ -3408,7 +3473,9 @@ double GFNFF::VdWEnergy() const {
 
 double GFNFF::RepulsionEnergy() const {
     if (!m_forcefield) return 0.0;
-    return m_forcefield->RepulsionEnergy();
+    // Claude Generated (Dec 2025, Session 9): GFN-FF stores repulsion in HHEnergy(), not RepulsionEnergy()
+    // RepulsionEnergy() is for UFF/QMDFF only
+    return m_forcefield->HHEnergy();
 }
 
 double GFNFF::DispersionEnergy() const {
@@ -3603,11 +3670,68 @@ bool GFNFF::calculateTopologyCharges(TopologyInfo& topo_info) const
     // 4. Solve augmented system using symmetric LU decomposition
     // FORTRAN uses sytrf/sytrs (symmetric Bunch-Kaufman decomposition)
     // We use PartialPivLU as an equivalent for symmetric matrices
+
+    // Claude Generated (December 2025, Session 9): Phase 1 EEQ Matrix Diagnostics
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("=== Phase 1 EEQ Matrix Diagnostics (Topology Charges) ===");
+
+        // Compute eigenvalues to check for singularity
+        Eigen::SelfAdjointEigenSolver<Matrix> eigensolver(A);
+        Vector eigenvalues = eigensolver.eigenvalues();
+
+        // Condition number = max(eigenvalue) / min(eigenvalue)
+        double max_eigenvalue = eigenvalues.maxCoeff();
+        double min_eigenvalue = eigenvalues.minCoeff();
+        double condition_number = std::abs(max_eigenvalue / min_eigenvalue);
+
+        CurcumaLogger::param("matrix_size", fmt::format("{}x{} (augmented with {} fragment constraint)", m, m, nfrag));
+        CurcumaLogger::param("max_eigenvalue", fmt::format("{:.6e}", max_eigenvalue));
+        CurcumaLogger::param("min_eigenvalue", fmt::format("{:.6e}", min_eigenvalue));
+        CurcumaLogger::param("condition_number", fmt::format("{:.6e}", condition_number));
+
+        // Warn if matrix is ill-conditioned
+        if (condition_number > 1e12) {
+            CurcumaLogger::warn(fmt::format("Phase 1 EEQ matrix is ill-conditioned (cond={:.2e}) - may produce NaN charges!", condition_number));
+        } else if (condition_number > 1e8) {
+            CurcumaLogger::warn(fmt::format("Phase 1 EEQ matrix is poorly conditioned (cond={:.2e})", condition_number));
+        } else {
+            CurcumaLogger::success(fmt::format("Phase 1 EEQ matrix is well-conditioned (cond={:.2e})", condition_number));
+        }
+
+        // Show eigenvalue spectrum
+        CurcumaLogger::info("Eigenvalue spectrum:");
+        int n_show = std::min(5, (int)eigenvalues.size());
+        for (int i = 0; i < n_show; ++i) {
+            CurcumaLogger::param(fmt::format("λ[{}]", i), fmt::format("{:.6e}", eigenvalues[i]));
+        }
+        if (eigenvalues.size() > 10) {
+            CurcumaLogger::param("...", fmt::format("({} more eigenvalues)", eigenvalues.size() - 10));
+        }
+        for (int i = std::max(n_show, (int)eigenvalues.size() - 5); i < eigenvalues.size(); ++i) {
+            CurcumaLogger::param(fmt::format("λ[{}]", i), fmt::format("{:.6e}", eigenvalues[i]));
+        }
+    }
+
     Eigen::PartialPivLU<Matrix> lu(A);
     Vector solution = lu.solve(x);
 
     // Extract atomic charges from solution (Fortran line 1227: q(1:n) = x(1:n))
     Vector topology_charges = solution.segment(0, m_atomcount);
+
+    // Claude Generated (December 2025, Session 9): Check for NaN/Inf immediately after solve
+    bool has_invalid_charges = false;
+    for (int i = 0; i < m_atomcount; ++i) {
+        if (std::isnan(topology_charges[i]) || std::isinf(topology_charges[i])) {
+            has_invalid_charges = true;
+            CurcumaLogger::error(fmt::format("CRITICAL Phase 1: Charge[{}] = {} (atom Z={})", i, topology_charges[i], m_atoms[i]));
+        }
+    }
+
+    if (has_invalid_charges) {
+        CurcumaLogger::error("Phase 1 EEQ solver produced NaN or Inf charges!");
+        CurcumaLogger::error("This indicates numerical instability in the Phase 1 EEQ matrix.");
+        return false;
+    }
 
     // Store charges in topology_info
     topo_info.topology_charges = topology_charges;
@@ -3858,11 +3982,57 @@ bool GFNFF::calculateFinalCharges(TopologyInfo& topo_info, int max_iterations,
         }
 
         // 4. Solve augmented system using PartialPivLU (same as Phase 1)
+
+        // Claude Generated (December 2025, Session 9): Phase 2 EEQ Matrix Diagnostics
+        if (iter == 0 && CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("=== Phase 2 EEQ Matrix Diagnostics (Final Charges, Iteration {}) ===", iter));
+
+            // Compute eigenvalues to check for singularity
+            Eigen::SelfAdjointEigenSolver<Matrix> eigensolver(A);
+            Vector eigenvalues = eigensolver.eigenvalues();
+
+            // Condition number = max(eigenvalue) / min(eigenvalue)
+            double max_eigenvalue = eigenvalues.maxCoeff();
+            double min_eigenvalue = eigenvalues.minCoeff();
+            double condition_number = std::abs(max_eigenvalue / min_eigenvalue);
+
+            CurcumaLogger::param("matrix_size", fmt::format("{}x{} (augmented)", m, m));
+            CurcumaLogger::param("max_eigenvalue", fmt::format("{:.6e}", max_eigenvalue));
+            CurcumaLogger::param("min_eigenvalue", fmt::format("{:.6e}", min_eigenvalue));
+            CurcumaLogger::param("condition_number", fmt::format("{:.6e}", condition_number));
+
+            // Warn if matrix is ill-conditioned
+            if (condition_number > 1e12) {
+                CurcumaLogger::warn(fmt::format("Phase 2 EEQ matrix is ill-conditioned (cond={:.2e}) - may produce NaN charges!", condition_number));
+            } else if (condition_number > 1e8) {
+                CurcumaLogger::warn(fmt::format("Phase 2 EEQ matrix is poorly conditioned (cond={:.2e})", condition_number));
+            } else {
+                CurcumaLogger::success(fmt::format("Phase 2 EEQ matrix is well-conditioned (cond={:.2e})", condition_number));
+            }
+        }
+
         Eigen::PartialPivLU<Matrix> lu(A);
         Vector solution = lu.solve(x);
 
         // Extract charges from solution (first n elements)
         Vector final_charges_new = solution.segment(0, n);
+
+        // Claude Generated (December 2025, Session 9): Check for NaN/Inf after Phase 2 solve
+        if (iter == 0) {
+            bool has_invalid_charges = false;
+            for (int i = 0; i < n; ++i) {
+                if (std::isnan(final_charges_new[i]) || std::isinf(final_charges_new[i])) {
+                    has_invalid_charges = true;
+                    CurcumaLogger::error(fmt::format("CRITICAL Phase 2: Charge[{}] = {} (atom Z={})", i, final_charges_new[i], m_atoms[i]));
+                }
+            }
+
+            if (has_invalid_charges) {
+                CurcumaLogger::error("Phase 2 EEQ solver produced NaN or Inf charges!");
+                CurcumaLogger::error("This indicates numerical instability in the Phase 2 EEQ matrix.");
+                return false;
+            }
+        }
 
         // Check convergence
         double max_change = 0.0;

@@ -1253,12 +1253,13 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
      * Complete formula (THREE TERMS):
      * E_coul = E_pairwise + E_self_energy + E_self_interaction
      *
-     * 1. Pairwise: Σ(i<j) [q_i*q_j*erf(γ_ij*r_ij) / r_ij²]
+     * 1. Pairwise: Σ(i<j) [q_i*q_j*erf(γ_ij*r_ij) / r_ij]  // Claude Generated (Session 9): FIXED - was /r_ij² (WRONG!)
      * 2. Self-energy: -Σ_i [q_i*χ_i]
      * 3. Self-interaction: Σ_i [0.5*q_i²*(γ_i + √(2/π)/√(α_i))]
      *    where γ_i = 1/√(α_i)
      *
      * Claude Generated (2025-12-05): Phase 4.3 - Complete implementation
+     * Claude Generated (2025-12-12, Session 9): CRITICAL FIX - Corrected /r² to /r in pairwise term!
      */
 
     if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_coulombs.size() > 0) {
@@ -1278,21 +1279,23 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
 
         if (rij > coul.r_cut || rij < 1e-10) continue;
 
-        // Pairwise: E_pair = q_i * q_j * erf(γ_ij*r) / r²
+        // Claude Generated (Dec 2025, Session 9): CRITICAL FIX - Coulomb is erf(γ*r)/r NOT erf(γ*r)/r²!
+        // Pairwise: E_pair = q_i * q_j * erf(γ_ij*r) / r (NOT r²!)
         double gamma_r = coul.gamma_ij * rij;
         double erf_term = std::erf(gamma_r);
-        double energy_pair = coul.q_i * coul.q_j * erf_term / (rij * rij);
+        double energy_pair = coul.q_i * coul.q_j * erf_term / rij;  // FIX: /r not /r²
 
         m_coulomb_energy += energy_pair * m_final_factor;
 
         if (m_calculate_gradient) {
-            // dE_pair/dr = q_i*q_j * [d/dr(erf(γ*r)/r²)]
-            //            = q_i*q_j * [γ*exp(-(γ*r)²)*(2/√π)/r² - 2*erf(γ*r)/r³]
+            // Claude Generated (Dec 2025, Session 9): CRITICAL FIX - Gradient for erf(γ*r)/r NOT erf(γ*r)/r²!
+            // dE_pair/dr = q_i*q_j * [d/dr(erf(γ*r)/r)]
+            //            = q_i*q_j * [γ*exp(-(γ*r)²)*(2/√π)/r - erf(γ*r)/r²]
             const double sqrt_pi = 1.772453850905516;  // √π
             double exp_term = std::exp(-gamma_r * gamma_r);
             double derf_dr = coul.gamma_ij * exp_term * (2.0 / sqrt_pi);
             double dEdr_pair = coul.q_i * coul.q_j *
-                (derf_dr / (rij * rij) - 2.0 * erf_term / (rij * rij * rij)) * m_final_factor;
+                (derf_dr / rij - erf_term / (rij * rij)) * m_final_factor;  // FIX: Correct derivative
 
             Eigen::Vector3d grad = dEdr_pair * rij_vec / rij;
 

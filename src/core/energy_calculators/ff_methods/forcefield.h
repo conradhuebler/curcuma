@@ -83,6 +83,7 @@ public:
     inline double InversionEnergy() const { return m_inversion_energy; }
     inline double VdWEnergy() const { return m_vdw_energy; }
     inline double RepulsionEnergy() const { return m_rep_energy; }
+    inline double HHEnergy() const { return m_hh_energy; }  // Claude Generated (Dec 2025, Session 9): GFN-FF HH repulsion
     inline double DispersionEnergy() const { return m_dispersion_energy; }
     inline double CoulombEnergy() const { return m_coulomb_energy; }
     inline double ElectrostatEnergy() const { return m_eq_energy; }
@@ -145,6 +146,7 @@ private:
     double m_inversion_energy = 0.0;
     double m_vdw_energy = 0.0;
     double m_rep_energy = 0.0;
+    double m_hh_energy = 0.0;      // Claude Generated (Dec 2025, Session 9): GFN-FF HH repulsion energy
     double m_eq_energy = 0.0;
     double m_dispersion_energy = 0.0;
     double m_coulomb_energy = 0.0;

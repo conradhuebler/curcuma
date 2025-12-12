@@ -1126,9 +1126,9 @@ double ForceField::Calculate(bool gradient)
     m_coulomb_energy = 0.0;
     m_energy_hbond = 0.0;    // Claude Generated (2025): Phase 5 - Reset HB energy
     m_energy_xbond = 0.0;    // Claude Generated (2025): Phase 5 - Reset XB energy
+    m_hh_energy = 0.0;       // Claude Generated (Dec 2025, Session 9): Reset GFN-FF HH repulsion
 
     double h4_energy = 0.0;
-    double hh_energy = 0.0;
     double cg_energy = 0.0; // Claude Generated: CG pair interaction energy
 
     // Claude Generated: GFN-FF specific non-bonded energies (Phase 4.4 fix)
@@ -1164,9 +1164,9 @@ double ForceField::Calculate(bool gradient)
             // GFN-FF (Type == 3) uses different energy components
             // Claude Generated: Store GFN-FF energies in both old and new variables for API compatibility
             h4_energy += m_stored_threads[i]->VdWEnergy();
-            hh_energy += m_stored_threads[i]->RepEnergy();
+            m_hh_energy += m_stored_threads[i]->RepEnergy();  // Claude Generated (Session 9): Use member variable
             // CRITICAL FIX (Nov 2025): Do NOT also add to m_rep_energy for GFN-FF!
-            // For GFN-FF (method==3), repulsion goes ONLY into hh_energy, not m_rep_energy
+            // For GFN-FF (method==3), repulsion goes ONLY into m_hh_energy, not m_rep_energy
             // This was causing double-counting: H2 showed 0.266 Eh instead of 0.050 Eh
             // m_rep_energy is for UFF/QMDFF only (method != 3)
 
@@ -1236,14 +1236,14 @@ double ForceField::Calculate(bool gradient)
     }
 
     // Claude Generated: Add GFN-FF dispersion, Coulomb, HB, and XB energies to total
-    energy = m_e0 + m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy + m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + hh_energy + cg_energy + m_dispersion_energy + m_coulomb_energy + m_energy_hbond + m_energy_xbond;
+    energy = m_e0 + m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy + m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + m_hh_energy + cg_energy + m_dispersion_energy + m_coulomb_energy + m_energy_hbond + m_energy_xbond;  // Claude Generated (Session 9): Use m_hh_energy
 
     // Claude Generated (2025): Debug total GFN-FF energies
     if (CurcumaLogger::get_verbosity() >= 3 && (m_dispersion_energy != 0.0 || m_coulomb_energy != 0.0)) {
         CurcumaLogger::param("total_gfnff_dispersion", fmt::format("{:.6f} Eh", m_dispersion_energy));
         CurcumaLogger::param("total_gfnff_coulomb", fmt::format("{:.6f} Eh", m_coulomb_energy));
         CurcumaLogger::param("total_before_gfnff", fmt::format("{:.6f} Eh",
-            m_e0 + m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy + m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + hh_energy + cg_energy));
+            m_e0 + m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy + m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + m_hh_energy + cg_energy));  // Claude Generated (Session 9): Use m_hh_energy
     }
 
     // Level 1+: Final energy result
@@ -1271,8 +1271,8 @@ double ForceField::Calculate(bool gradient)
         if (h4_energy != 0.0) {
             CurcumaLogger::param("HBond_correction", fmt::format("{:.6f} Eh", h4_energy));
         }
-        if (hh_energy != 0.0) {
-            CurcumaLogger::param("HH_repulsion", fmt::format("{:.6f} Eh", hh_energy));
+        if (m_hh_energy != 0.0) {  // Claude Generated (Session 9): Use m_hh_energy
+            CurcumaLogger::param("HH_repulsion", fmt::format("{:.6f} Eh", m_hh_energy));
         }
         if (m_dispersion_energy != 0.0) {
             CurcumaLogger::param("GFNFF_dispersion", fmt::format("{:.6f} Eh", m_dispersion_energy));
