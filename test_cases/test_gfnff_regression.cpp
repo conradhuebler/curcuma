@@ -125,6 +125,25 @@ private:
             -0.000139355416,       // dispersion energy
             1e-6                   // tolerance
         });
+
+        // CH3OCH3 (dimethyl ether) - 9 atoms: C2H6O
+        // File: test_cases/molecules/larger/CH3OCH3.log
+        // Reference: XTB 6.6.1 GFN-FF calculation
+        // CRITICAL: Torsion energy is BUGGY (0.000023) due to dihedral distribution bug!
+        // 132 dihedral terms detected but not distributed to threads
+        // Expected torsion energy after fix: ~0.25 Eh
+        m_references.push_back({
+            "molecules/larger/CH3OCH3.xyz",
+            "molecules/larger/CH3OCH3.log",
+            -1.209209221569,       // total energy (sum of all components)
+            -1.216443941819,       // bond energy (8 bonds: 6 C-H + 2 C-O)
+            0.001779533537,        // angle energy (C-O-C + H-C-H angles)
+            0.000023390598,        // torsion energy ← BUGGY! (132 terms not distributed)
+            0.053864662977,        // repulsion energy
+            -0.045886388029,       // electrostat energy (EEQ charges)
+            -0.002404080505,       // dispersion energy (D3)
+            1e-6                   // tolerance (strict)
+        });
     }
 
     bool fileExists(const std::string& path) {

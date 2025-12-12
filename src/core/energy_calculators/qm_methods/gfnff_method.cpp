@@ -42,16 +42,28 @@ bool GFNFFMethod::setMolecule(const Mol& mol) {
     m_molecule = mol;
 
     // Single call - GFNFF::InitialiseMolecule(mol) sets members + initializes
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("About to call GFNFF::InitialiseMolecule()...");
+    }
+
     if (!m_gfnff->InitialiseMolecule(mol)) {
         CurcumaLogger::error("GFNFF::InitialiseMolecule failed");
+        CurcumaLogger::param("will_set_m_initialized", "FALSE");
+        m_initialized = false;  // Explicitly set to false on failure
         return false;
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::success("GFNFF::InitialiseMolecule complete");
+        CurcumaLogger::success("GFNFF::InitialiseMolecule completed successfully");
     }
 
     m_initialized = true;
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param("m_initialized", "true");
+        CurcumaLogger::success("GFNFFMethod::setMolecule() complete");
+    }
+
     return true;
 }
 

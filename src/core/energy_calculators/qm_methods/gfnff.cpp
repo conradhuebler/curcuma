@@ -100,6 +100,7 @@ bool GFNFF::InitialiseMolecule()
     }
 
     // Convert geometry from Angström to Bohr (GFN-FF parameters are in Bohr)
+    // CRITICAL: Must happen BEFORE validateMolecule() since validation checks m_geometry_bohr.rows()
     // TODO: Alternative approach (Option B) would convert parameters to Angström instead.
     // See documentation block at parameter arrays for details on parameter conversion.
     m_geometry_bohr = m_geometry * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
@@ -330,22 +331,34 @@ bool GFNFF::initializeForceField()
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::success("Topology calculation complete");
-        CurcumaLogger::info("Generating GFN-FF parameters...");
+        CurcumaLogger::success("Topology calculation complete (stub - always returns true)");
+        CurcumaLogger::info("About to call generateGFNFFParameters()...");
     }
 
-    json ff_params = generateGFNFFParameters();
+    json ff_params;
+    try {
+        ff_params = generateGFNFFParameters();
+    } catch (const std::exception& e) {
+        CurcumaLogger::error(std::string("GFN-FF parameter generation failed: ") + e.what());
+        return false;
+    }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::success("GFN-FF parameters generated");
+        CurcumaLogger::success("GFN-FF parameters generated successfully");
+        CurcumaLogger::param("ff_params_size", std::to_string(ff_params.size()));
+        CurcumaLogger::param("has_bonds", ff_params.contains("bonds") ? "yes" : "no");
         CurcumaLogger::param("bonds_count", std::to_string(ff_params.value("bonds", json::array()).size()));
         CurcumaLogger::param("angles_count", std::to_string(ff_params.value("angles", json::array()).size()));
         CurcumaLogger::param("torsions_count", std::to_string(ff_params.value("dihedrals", json::array()).size()));
         CurcumaLogger::param("inversions_count", std::to_string(ff_params.value("inversions", json::array()).size()));
-        CurcumaLogger::info("Setting parameters in ForceField...");
+        CurcumaLogger::info("About to call m_forcefield->setParameter()...");
     }
 
     m_forcefield->setParameter(ff_params);
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success("m_forcefield->setParameter() completed successfully");
+    }
 
     // Phase 5A: Distribute EEQ charges to all ForceFieldThreads for fqq calculation
     // Claude Generated (Nov 2025)
@@ -376,8 +389,34 @@ json GFNFF::generateGFNFFParameters()
     if (use_advanced) {
         std::cout << "Using advanced GFN-FF parametrization (experimental)" << std::endl;
 
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("About to call getCachedTopology() [advanced mode]...");
+            CurcumaLogger::param("use_advanced", "true");
+        }
+
         // Retrieve cached topology information for advanced parametrization
         const TopologyInfo& topo_info = getCachedTopology();
+
+        // CRITICAL: Validate topology charges (always, not just at verbosity 3)
+        bool has_nan = false;
+        for (int i = 0; i < topo_info.eeq_charges.size(); ++i) {
+            if (std::isnan(topo_info.eeq_charges[i]) || std::isinf(topo_info.eeq_charges[i])) {
+                has_nan = true;
+                CurcumaLogger::error(fmt::format("INVALID CHARGE at index {}: {}", i, topo_info.eeq_charges[i]));
+                break;
+            }
+        }
+        if (has_nan) {
+            throw std::runtime_error("Invalid topology: NaN or Inf detected in EEQ charges - this usually indicates "
+                                     "a numerically unstable EEQ matrix for this molecule");
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::success("getCachedTopology() returned [advanced mode]");
+            CurcumaLogger::param("cn_size", std::to_string(topo_info.coordination_numbers.size()));
+            CurcumaLogger::param("charges_size", std::to_string(topo_info.eeq_charges.size()));
+            CurcumaLogger::param("has_invalid_charges", "no - validated");
+        }
 
         // Generate advanced parameters
         json bonds = generateTopologyAwareBonds(topo_info.coordination_numbers,
@@ -423,8 +462,34 @@ json GFNFF::generateGFNFFParameters()
     } else {
         std::cout << "Using basic GFN-FF parametrization" << std::endl;
 
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("About to call getCachedTopology() [basic mode]...");
+            CurcumaLogger::param("use_advanced", "false");
+        }
+
         // Retrieve cached topology information for basic parametrization
         const TopologyInfo& topo_info = getCachedTopology();
+
+        // CRITICAL: Validate topology charges (always, not just at verbosity 3)
+        bool has_nan = false;
+        for (int i = 0; i < topo_info.eeq_charges.size(); ++i) {
+            if (std::isnan(topo_info.eeq_charges[i]) || std::isinf(topo_info.eeq_charges[i])) {
+                has_nan = true;
+                CurcumaLogger::error(fmt::format("INVALID CHARGE at index {}: {}", i, topo_info.eeq_charges[i]));
+                break;
+            }
+        }
+        if (has_nan) {
+            throw std::runtime_error("Invalid topology: NaN or Inf detected in EEQ charges - this usually indicates "
+                                     "a numerically unstable EEQ matrix for this molecule");
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::success("getCachedTopology() returned [basic mode]");
+            CurcumaLogger::param("cn_size", std::to_string(topo_info.coordination_numbers.size()));
+            CurcumaLogger::param("charges_size", std::to_string(topo_info.eeq_charges.size()));
+            CurcumaLogger::param("has_invalid_charges", "no - validated");
+        }
 
         // Generate GFN-FF bonds with real parameters
         json bonds = generateGFNFFBonds();
@@ -2863,7 +2928,8 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         // Phase 1: Calculate base topology-aware charges
         if (!calculateTopologyCharges(topo_info)) {
             CurcumaLogger::error("calculateTopologyInfo: Phase 1 EEQ (topology charges) failed");
-            return topo_info;
+            throw std::runtime_error("GFN-FF initialization failed: EEQ charge calculation (Phase 1) failed for this molecule. "
+                                     "This typically occurs with larger or complex molecules where the EEQ linear system becomes ill-conditioned.");
         }
 
         // Calculate dgam (charge-dependent hardness) corrections
@@ -2874,19 +2940,19 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         // Calculate dxi (electronegativity) corrections
         if (!calculateDxi(topo_info)) {
             CurcumaLogger::error("calculateTopologyInfo: dxi correction calculation failed");
-            return topo_info;
+            throw std::runtime_error("GFN-FF initialization failed: dxi (electronegativity) correction calculation failed");
         }
 
         // Calculate dalpha (polarizability) corrections
         if (!calculateDalpha(topo_info)) {
             CurcumaLogger::error("calculateTopologyInfo: dalpha correction calculation failed");
-            return topo_info;
+            throw std::runtime_error("GFN-FF initialization failed: dalpha (polarizability) correction calculation failed");
         }
 
         // Phase 2: Calculate final refined charges with all corrections
         if (!calculateFinalCharges(topo_info)) {
             CurcumaLogger::error("calculateTopologyInfo: Phase 2 EEQ (final charges) failed");
-            return topo_info;
+            throw std::runtime_error("GFN-FF initialization failed: EEQ final charge calculation (Phase 2) failed");
         }
 
         // Validate charge conservation

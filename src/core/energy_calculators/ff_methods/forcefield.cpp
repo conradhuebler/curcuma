@@ -154,11 +154,17 @@ void ForceField::setParameter(const json& parameters)
         if (parameters.contains("angles"))
             setAngles(parameters["angles"]);
         std::cerr << "DEBUG: angles done" << std::endl;
-        if (parameters.contains("dihedrals"))
+        if (parameters.contains("dihedrals")) {
+            std::cerr << "DEBUG: About to call setDihedrals()..." << std::endl;
             setDihedrals(parameters["dihedrals"]);
+            std::cerr << "DEBUG: setDihedrals() returned" << std::endl;
+        }
         std::cerr << "DEBUG: dihedrals done" << std::endl;
-        if (parameters.contains("inversions"))
+        if (parameters.contains("inversions")) {
+            std::cerr << "DEBUG: About to call setInversions()..." << std::endl;
             setInversions(parameters["inversions"]);
+            std::cerr << "DEBUG: setInversions() returned" << std::endl;
+        }
         std::cerr << "DEBUG: inversions done" << std::endl;
         if (parameters.contains("vdws"))
             setvdWs(parameters["vdws"]);
@@ -203,7 +209,7 @@ void ForceField::setParameter(const json& parameters)
     int method_type = 1; // default UFF
     if (m_method == "qmdff" || m_method == "quff") {
         method_type = 2;
-    } else if (m_method == "gfnff") {
+    } else if (m_method == "gfnff" || m_method == "cgfnff") {  // Claude Generated (Dec 2025): Accept both gfnff and cgfnff
         method_type = 3; // GFN-FF
     } else if (m_method == "cg" || m_method == "cg-lj") {
         method_type = 4; // CG methods
@@ -443,6 +449,7 @@ void ForceField::setAngles(const json& angles)
 
 void ForceField::setDihedrals(const json& dihedrals)
 {
+    std::cerr << "DEBUG setDihedrals: Processing " << dihedrals.size() << " dihedrals" << std::endl;
     m_dihedrals.clear();
     for (int i = 0; i < dihedrals.size(); ++i) {
         json dihedral = dihedrals[i].get<json>();
@@ -457,28 +464,58 @@ void ForceField::setDihedrals(const json& dihedrals)
         d.n = dihedral["n"];
         d.phi0 = dihedral["phi0"];
         m_dihedrals.push_back(d);
+
+        if (i < 5 || i >= dihedrals.size() - 2) {
+            std::cerr << "DEBUG: Dihedral " << i << " added: " << d.i << "-" << d.j << "-" << d.k << "-" << d.l << std::endl;
+        }
+        if (i == 5 && dihedrals.size() > 10) {
+            std::cerr << "DEBUG: ... (" << (dihedrals.size() - 7) << " more dihedrals)" << std::endl;
+        }
     }
+    std::cerr << "DEBUG setDihedrals: All " << dihedrals.size() << " dihedrals processed successfully" << std::endl;
 }
 
 void ForceField::setInversions(const json& inversions)
 {
+    std::cerr << "DEBUG setInversions: Processing " << inversions.size() << " inversions" << std::endl;
+    std::cerr << "DEBUG setInversions: Full JSON: " << inversions.dump(2) << std::endl;
     m_inversions.clear();
     for (int i = 0; i < inversions.size(); ++i) {
+        std::cerr << "DEBUG setInversions: Processing inversion " << i << std::endl;
         json inversion = inversions[i].get<json>();
+        std::cerr << "DEBUG setInversions: Got json for inversion " << i << std::endl;
+        std::cerr << "DEBUG setInversions: Inversion JSON: " << inversion.dump() << std::endl;
         Inversion inv;
         inv.type = inversion["type"];
+        std::cerr << "DEBUG setInversions: type = " << inv.type << std::endl;
 
         inv.i = inversion["i"];
         inv.j = inversion["j"];
         inv.k = inversion["k"];
         inv.l = inversion["l"];
-        inv.fc = inversion["fc"];
-        inv.C0 = inversion["C0"];
-        inv.C1 = inversion["C1"];
-        inv.C2 = inversion["C2"];
+        std::cerr << "DEBUG setInversions: atoms = " << inv.i << "-" << inv.j << "-" << inv.k << "-" << inv.l << std::endl;
+
+        // GFN-FF uses different inversion parameters (barrier, omega0) vs UFF (fc, C0, C1, C2)
+        if (inversion.contains("barrier")) {
+            // GFN-FF style: use barrier and omega0
+            inv.fc = inversion["barrier"];
+            inv.C0 = inversion.value("omega0", 0.0);
+            inv.C1 = 0.0;
+            inv.C2 = 0.0;
+            std::cerr << "DEBUG setInversions: GFN-FF format - barrier=" << inv.fc << ", omega0=" << inv.C0 << std::endl;
+        } else {
+            // UFF/QMDFF style: use Fourier coefficients
+            inv.fc = inversion["fc"];
+            inv.C0 = inversion["C0"];
+            inv.C1 = inversion["C1"];
+            inv.C2 = inversion["C2"];
+            std::cerr << "DEBUG setInversions: UFF format - fc=" << inv.fc << std::endl;
+        }
 
         m_inversions.push_back(inv);
+        std::cerr << "DEBUG setInversions: Inversion " << i << " added successfully" << std::endl;
     }
+    std::cerr << "DEBUG setInversions: All " << inversions.size() << " inversions processed successfully" << std::endl;
 }
 
 void ForceField::setvdWs(const json& vdws)
@@ -732,7 +769,7 @@ void ForceField::AutoRanges()
         }
 
         for (int j = int(i * m_angles.size() / double(free_threads)); j < int((i + 1) * m_angles.size() / double(free_threads)); ++j) {
-            if (m_method == "gfnff") {
+            if (m_method == "gfnff" || m_method == "cgfnff") {
                 thread->addGFNFFAngle(m_angles[j]);
             } else {
                 thread->addAngle(m_angles[j]);
@@ -740,7 +777,7 @@ void ForceField::AutoRanges()
         }
 
         for (int j = int(i * m_dihedrals.size() / double(free_threads)); j < int((i + 1) * m_dihedrals.size() / double(free_threads)); ++j) {
-            if (m_method == "gfnff") {
+            if (m_method == "gfnff" || m_method == "cgfnff") {
                 thread->addGFNFFDihedral(m_dihedrals[j]);
             } else {
                 thread->addDihedral(m_dihedrals[j]);
@@ -748,7 +785,7 @@ void ForceField::AutoRanges()
         }
 
         for (int j = int(i * m_inversions.size() / double(free_threads)); j < int((i + 1) * m_inversions.size() / double(free_threads)); ++j) {
-            if (m_method == "gfnff") {
+            if (m_method == "gfnff" || m_method == "cgfnff") {
                 thread->addGFNFFInversion(m_inversions[j]);
             } else {
                 thread->addInversion(m_inversions[j]);
@@ -756,7 +793,7 @@ void ForceField::AutoRanges()
         }
 
         for (int j = int(i * m_vdWs.size() / double(free_threads)); j < int((i + 1) * m_vdWs.size() / double(free_threads)); ++j) {
-            if (m_method == "gfnff") {
+            if (m_method == "gfnff" || m_method == "cgfnff") {
                 thread->addGFNFFvdW(m_vdWs[j]);
             } else {
                 thread->addvdW(m_vdWs[j]);
