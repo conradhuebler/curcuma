@@ -3,13 +3,16 @@
 **Status**: ✅ **FULLY RESTORED AND OPERATIONAL** - Complete 4329-line implementation moved to ff_methods
 **Current Phase**: ✅ ARCHITECTURE COMPLETE - All critical issues resolved
 
+> **📊 Quick Status**: See **[GFNFF_STATUS.md](GFNFF_STATUS.md)** for concise implementation status summary
+
 ---
 
 ## Quick Navigation
 
 | Topic | Document | Purpose |
 |-------|----------|---------|
-| **Implementation Status** | [Implementation Status](#implementation-status) | Current state and phase progress |
+| **Quick Status** | **[GFNFF_STATUS.md](GFNFF_STATUS.md)** | **Concise status summary (start here!)** |
+| **Implementation Details** | [Implementation Status](#implementation-status) | Detailed phase progress and validation |
 | **Architecture Overview** | [Architecture Overview](#architecture-overview) | Two-phase design and component interaction |
 | **Technical Details** | [Technical Implementation](#technical-implementation) | Energy formulas and parameter calculations |
 | **Performance Analysis** | [Performance Analysis](#performance-analysis) | Benchmarks and optimization studies |
