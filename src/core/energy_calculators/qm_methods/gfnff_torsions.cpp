@@ -577,19 +577,21 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
 
     // DEBUG OUTPUT (December 2025)
     if (fctot > 0.001) {  // Only print significant values
-        std::cout << fmt::format("TORSION DEBUG: i={}, j={}, k={}, l={} (Z={},{},{},{})\n",
-                                 z_i, z_j, z_k, z_l, z_i, z_j, z_k, z_l);
-        std::cout << fmt::format("  tors[{}]={:.6f}, tors[{}]={:.6f}, fij={:.6f}\n",
-                                 z_j, tors_angewChem2020[z_j-1], z_k, tors_angewChem2020[z_k-1], fij);
-        std::cout << fmt::format("  tors2[{}]={:.6f}, tors2[{}]={:.6f}, fkl_raw={:.6f}\n",
-                                 z_i, tors2_angewChem2020[z_i-1], z_l, tors2_angewChem2020[z_l-1],
-                                 tors2_angewChem2020[z_i-1] * tors2_angewChem2020[z_l-1]);
-        std::cout << fmt::format("  CN_correction (CN_i={:.2f}, CN_l={:.2f})={:.6f}, fkl={:.6f}\n",
-                                 cn_i, cn_l, std::pow(cn_i * cn_l, -0.14), fkl);
-        std::cout << fmt::format("  f1={:.6f}, f2={:.6f}, fqq={:.6f}\n", f1, f2, fqq);
-        std::cout << fmt::format("  fctot = ({:.4f} + 10*1.18*{:.4f}) * {:.4f} * {:.6f} * {:.6f} = {:.6f} Eh\n",
-                                 f1, f2, fqq, fij, fkl, fctot);
-        std::cout << fmt::format("  XTB REFERENCE: 0.246679 Eh (for C-O torsion)\n\n");
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("TORSION DEBUG: i={}, j={}, k={}, l={} (Z={},{},{},{})",
+                                             z_i, z_j, z_k, z_l, z_i, z_j, z_k, z_l));
+            CurcumaLogger::info(fmt::format("  tors[{}]={:.6f}, tors[{}]={:.6f}, fij={:.6f}",
+                                             z_j, tors_angewChem2020[z_j-1], z_k, tors_angewChem2020[z_k-1], fij));
+            CurcumaLogger::info(fmt::format("  tors2[{}]={:.6f}, tors2[{}]={:.6f}, fkl_raw={:.6f}",
+                                             z_i, tors2_angewChem2020[z_i-1], z_l, tors2_angewChem2020[z_l-1],
+                                             tors2_angewChem2020[z_i-1] * tors2_angewChem2020[z_l-1]));
+            CurcumaLogger::info(fmt::format("  CN_correction (CN_i={:.2f}, CN_l={:.2f})={:.6f}, fkl={:.6f}",
+                                             cn_i, cn_l, std::pow(cn_i * cn_l, -0.14), fkl));
+            CurcumaLogger::info(fmt::format("  f1={:.6f}, f2={:.6f}, fqq={:.6f}", f1, f2, fqq));
+            CurcumaLogger::info(fmt::format("  fctot = ({:.4f} + 10*1.18*{:.4f}) * {:.4f} * {:.6f} * {:.6f} = {:.6f} Eh",
+                                             f1, f2, fqq, fij, fkl, fctot));
+            CurcumaLogger::info(fmt::format("  XTB REFERENCE: 0.246679 Eh (for C-O torsion)"));
+        }
     }
 
     // ==========================================================================
@@ -1115,16 +1117,18 @@ json GFNFF::generateGFNFFTorsions() const
                 // DEBUG: Check if charges are available (first torsion only)
                 static bool charge_debug_printed = false;
                 if (!charge_debug_printed && i == 0) {
-                    std::cout << fmt::format("\nCHARGE DEBUG:\n");
-                    std::cout << fmt::format("  m_charges.rows() = {}\n", m_charges.rows());
-                    if (m_charges.rows() > 0) {
-                        std::cout << fmt::format("  qa_j (atom {}) = {:.6f}\n", j, qa_j);
-                        std::cout << fmt::format("  qa_k (atom {}) = {:.6f}\n", k, qa_k);
-                        std::cout << fmt::format("  All charges: [");
-                        for (int idx = 0; idx < std::min(6, (int)m_charges.rows()); ++idx) {
-                            std::cout << fmt::format("{:.4f} ", m_charges(idx));
+                    if (CurcumaLogger::get_verbosity() >= 3) {
+                        CurcumaLogger::info("\nCHARGE DEBUG:");
+                        CurcumaLogger::info(fmt::format("  m_charges.rows() = {}", m_charges.rows()));
+                        if (m_charges.rows() > 0) {
+                            CurcumaLogger::info(fmt::format("  qa_j (atom {}) = {:.6f}", j, qa_j));
+                            CurcumaLogger::info(fmt::format("  qa_k (atom {}) = {:.6f}", k, qa_k));
+                            std::string charges_str = "  All charges: [";
+                            for (int idx = 0; idx < std::min(6, (int)m_charges.rows()); ++idx) {
+                                charges_str += fmt::format("{:.4f} ", m_charges(idx));
+                            }
+                            CurcumaLogger::info(charges_str + "]");
                         }
-                        std::cout << "]\n\n";
                     }
                     charge_debug_printed = true;
                 }
@@ -1177,11 +1181,13 @@ json GFNFF::generateGFNFFTorsions() const
         CurcumaLogger::info("GFN-FF detected " + std::to_string(torsion_count) + " torsions");
 
         // Debug output for analysis
-        std::cout << "DEBUG: Total iterations: " << total_iterations << ", Unique torsions: " << generated_torsions.size() << std::endl;
-        std::cout << "DEBUG: All generated torsions:" << std::endl;
-        int torsion_index = 0;
-        for (const auto& torsion : generated_torsions) {
-            std::cout << "  " << torsion_index++ << ": [" << torsion[0] << ", " << torsion[1] << ", " << torsion[2] << ", " << torsion[3] << "]" << std::endl;
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("DEBUG: Total iterations: {}, Unique torsions: {}", total_iterations, generated_torsions.size()));
+            CurcumaLogger::info("DEBUG: All generated torsions:");
+            int torsion_index = 0;
+            for (const auto& torsion : generated_torsions) {
+                CurcumaLogger::info(fmt::format("  {} : [{}, {}, {}, {}]", torsion_index++, torsion[0], torsion[1], torsion[2], torsion[3]));
+            }
         }
 
         // Optional: Print summary by periodicity

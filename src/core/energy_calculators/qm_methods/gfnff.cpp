@@ -398,7 +398,7 @@ json GFNFF::generateGFNFFParameters()
     bool use_advanced = m_parameters.value("use_advanced_parametrization", true);
 
     if (use_advanced) {
-        std::cout << "Using advanced GFN-FF parametrization (experimental)" << std::endl;
+        CurcumaLogger::info("Using advanced GFN-FF parametrization (experimental)");
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("About to call getCachedTopology() [advanced mode]...");
@@ -502,7 +502,7 @@ json GFNFF::generateGFNFFParameters()
         }
 
     } else {
-        std::cout << "Using basic GFN-FF parametrization" << std::endl;
+        CurcumaLogger::info("Using basic GFN-FF parametrization");
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("About to call getCachedTopology() [basic mode]...");
@@ -599,13 +599,10 @@ json GFNFF::generateGFNFFBonds() const
     double bond_threshold = 1.3; // Factor for covalent radii sum
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info(fmt::format("GFN-FF bond detection: {} atoms, threshold {:.2f}",
-                                         m_atomcount, bond_threshold));
-    } else {
-        std::cout << "GFN-FF bond detection: " << m_atomcount << " atoms, threshold " << bond_threshold << std::endl;
-    }
+            CurcumaLogger::info(fmt::format("GFN-FF bond detection: {} atoms, threshold {:.2f}", m_atomcount, bond_threshold));
+        }
 
-    for (int i = 0; i < m_atomcount; ++i) {
+        for (int i = 0; i < m_atomcount; ++i) {
         for (int j = i + 1; j < m_atomcount; ++j) {
             Vector ri = m_geometry_bohr.row(i);
             Vector rj = m_geometry_bohr.row(j);
@@ -639,11 +636,9 @@ json GFNFF::generateGFNFFBonds() const
     if (bonds.empty()) {
         CurcumaLogger::warn("No bonds detected in GFN-FF");
     } else {
-        if (CurcumaLogger::get_verbosity() >= 1) {
-            CurcumaLogger::success(fmt::format("GFN-FF detected {} bonds", bonds.size()));
-        } else {
-            std::cout << "GFN-FF detected " << bonds.size() << " bonds" << std::endl;
-        }
+        if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::info(fmt::format("GFN-FF detected {} bonds", bonds.size()));
+            }
     }
 
     return bonds;
@@ -741,14 +736,14 @@ bool GFNFF::validateMolecule() const
     // Check if all atoms are supported by GFN-FF (Z <= 86)
     for (int atom : m_atoms) {
         if (atom < 1 || atom > 86) {
-            std::cerr << "Error: Atom type " << atom << " not supported by GFN-FF" << std::endl;
+            CurcumaLogger::error(fmt::format("Atom type {} not supported by GFN-FF", atom));
             return false;
         }
     }
 
     // Check for reasonable geometry
     if (m_geometry_bohr.rows() != m_atomcount || m_geometry.cols() != 3) {
-        std::cerr << "Error: Invalid geometry dimensions for GFN-FF" << std::endl;
+        CurcumaLogger::error("Invalid geometry dimensions for GFN-FF");
         return false;
     }
 
@@ -776,8 +771,7 @@ double GFNFF::getCovalentRadius(int atomic_number) const
         return covalent_radii[atomic_number - 1] * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
     } else {
         // Fallback for unknown elements (convert to Bohr)
-        std::cerr << "Warning: No covalent radius for element " << atomic_number
-                  << ", using default 1.0 Å → Bohr" << std::endl;
+        CurcumaLogger::warn(fmt::format("No covalent radius for element {}, using default 1.0 Å → Bohr", atomic_number));
         return 1.0 * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
     }
 }
@@ -810,8 +804,7 @@ GFNFF::EEQParameters GFNFF::getEEQParameters(int atomic_number) const
         params.xi_corr = 0.0;  // No environment correction in simple version
     } else {
         // Fallback for unknown elements (use default values)
-        std::cerr << "Warning: No EEQ parameters for element " << atomic_number
-                  << ", using default values" << std::endl;
+        CurcumaLogger::warn(fmt::format("No EEQ parameters for element {}, using default values", atomic_number));
         params.chi = 1.0;
         params.gam = 0.0;
         params.alp = 1.0 * 1.0;  // SQUARED!
@@ -928,10 +921,12 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     double ra = r0_1 + cnfak_1 * cn1;  // CN-dependent radius A
     double rb = r0_2 + cnfak_2 * cn2;  // CN-dependent radius B
 
-    std::cout << fmt::format("RAB_TRANSFORM: r0[Z1={}]={:.8f}, cnfak[Z1]={:.8f}, CN1={:.10f} -> ra={:.8f} Bohr\n",
-                             z1, r0_1, cnfak_1, cn1, ra);
-    std::cout << fmt::format("RAB_TRANSFORM: r0[Z2={}]={:.8f}, cnfak[Z2]={:.8f}, CN2={:.10f} -> rb={:.8f} Bohr\n",
-                             z2, r0_2, cnfak_2, cn2, rb);
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("RAB_TRANSFORM: r0[Z1={}]={:.8f}, cnfak[Z1]={:.8f}, CN1={:.10f} -> ra={:.8f} Bohr",
+                                         z1, r0_1, cnfak_1, cn1, ra));
+        CurcumaLogger::info(fmt::format("RAB_TRANSFORM: r0[Z2={}]={:.8f}, cnfak[Z2]={:.8f}, CN2={:.10f} -> rb={:.8f} Bohr",
+                                         z2, r0_2, cnfak_2, cn2, rb));
+    }
 
     // Step 3: Phase 2 - Row-dependent EN correction
     // Fortran gfnff_rab.f90:144-152
@@ -950,8 +945,10 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     double en_diff = std::abs(en1 - en2);
     double ff = 1.0 - k1 * en_diff - k2 * en_diff * en_diff;
 
-    std::cout << fmt::format("RAB_TRANSFORM: EN1={:.8f}, EN2={:.8f}, |ΔEN|={:.8f}\n", en1, en2, en_diff);
-    std::cout << fmt::format("RAB_TRANSFORM: k1={:.8f}, k2={:.8f}, ff={:.8f}\n", k1, k2, ff);
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("RAB_TRANSFORM: EN1={:.8f}, EN2={:.8f}, |ΔEN|={:.8f}", en1, en2, en_diff));
+        CurcumaLogger::info(fmt::format("RAB_TRANSFORM: k1={:.8f}, k2={:.8f}, ff={:.8f}", k1, k2, ff));
+    }
 
     // Step 4: Phase 2 - Final equilibrium distance with shift correction
     // Fortran gfnff_ini.f90:1235 & 1248: rab(k) = (ra + rb + shift) * ff, then r0 = rab(k)*0.529167
@@ -993,10 +990,12 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     double rtmp = (ra + rb + rabshift) * ff;  // Shift BEFORE ff multiplication (matches Fortran)
     params.equilibrium_distance = rtmp;
 
-    std::cout << fmt::format("RAB_TRANSFORM: gen_rabshift={:.8f}, shift={:.8f}, rabshift={:.8f}\n",
-                             gen_rabshift, shift, rabshift);
-    std::cout << fmt::format("RAB_TRANSFORM: r_eq = ({:.8f} + {:.8f} + {:.8f}) * {:.8f} = {:.8f} Bohr\n",
-                             ra, rb, rabshift, ff, params.equilibrium_distance);
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("RAB_TRANSFORM: gen_rabshift={:.8f}, shift={:.8f}, rabshift={:.8f}",
+                                         gen_rabshift, shift, rabshift));
+        CurcumaLogger::info(fmt::format("RAB_TRANSFORM: r_eq = ({:.8f} + {:.8f} + {:.8f}) * {:.8f} = {:.8f} Bohr",
+                                         ra, rb, rabshift, ff, params.equilibrium_distance));
+    }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info(fmt::format("  Equilibrium Distance: r_A={:.3f}, r_B={:.3f}, EN_corr={:.3f} -> r_eq={:.3f} Bohr",
@@ -1079,11 +1078,17 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
             // Hypervalent atoms
             bstrength = bstren[4];  // 1.22
         } else {
-            // Normal hybridization: lookup in bsmat
-            // Since Curcuma uses 1-3, and bsmat is indexed 0-3, we need to map:
-            // Curcuma hyb=1,2,3 → bsmat indices 1,2,3 (Fortran hyb=1,2,3)
-            // But bsmat also has index 0 for unknown → use hyb=3 for unknown
-            bstrength = bsmat[hybi][hybj];
+            // CRITICAL FIX (Dec 2025): Correct hydrogen hybridization handling
+            // Hydrogen atoms have hyb=0 but should use sp3 geometry for bond strength
+            // Other atoms: hyb=1,2,3 → matrix indices 1,2,3
+            int matrix_i = (hybi == 0) ? 3 : hybi;  // H (0) → sp3 (3), others use direct mapping
+            int matrix_j = (hybj == 0) ? 3 : hybj;  // H (0) → sp3 (3), others use direct mapping
+
+            // Ensure valid indices (fallback to sp3 if invalid)
+            matrix_i = (matrix_i < 0 || matrix_i > 3) ? 3 : matrix_i;
+            matrix_j = (matrix_j < 0 || matrix_j > 3) ? 3 : matrix_j;
+
+            bstrength = bsmat[matrix_i][matrix_j];
         }
     }
 
@@ -1445,23 +1450,27 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 
     // Debug output for alpha calculation (always on for H-containing bonds)
     if (z1 == 1 || z2 == 1) {  // H-containing bonds
-        std::cout << fmt::format("DEBUG ALPHA (H-bond Z1={} Z2={}): srb1={:.10f}, fsrb2={:.10f}, en_diff={:.10f}, en_diff²={:.10f}\n",
-                                 z1, z2, srb1, fsrb2, en_diff, en_diff * en_diff);
-        std::cout << fmt::format("DEBUG ALPHA: term1={:.10f}, term2={:.10f}, sum={:.10f}, alpha={:.10f}\n",
-                                 alpha_term1, alpha_term2, alpha_sum, params.alpha);
-        std::cout << fmt::format("DEBUG ALPHA: srb2={:.10f}, srb3={:.10f}, bstrength={:.10f}\n",
-                                 srb2, srb3, bstrength);
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("DEBUG ALPHA (H-bond Z1={} Z2={}): srb1={:.10f}, fsrb2={:.10f}, en_diff={:.10f}, en_diff²={:.10f}",
+                                             z1, z2, srb1, fsrb2, en_diff, en_diff * en_diff));
+            CurcumaLogger::info(fmt::format("DEBUG ALPHA: term1={:.10f}, term2={:.10f}, sum={:.10f}, alpha={:.10f}",
+                                             alpha_term1, alpha_term2, alpha_sum, params.alpha));
+            CurcumaLogger::info(fmt::format("DEBUG ALPHA: srb2={:.10f}, srb3={:.10f}, bstrength={:.10f}",
+                                             srb2, srb3, bstrength));
+        }
     }
 
     // Debug output for force constant calculation (always on for HH/CH4)
     if (z1 == 1 || z2 == 1) {  // H-containing bonds
-        std::cout << fmt::format("DEBUG FC (H-bond Z1={} Z2={}): bond_i={:.10f}, bond_j={:.10f}, bstrength={:.10f}\n",
-                                 z1, z2, bond_param_1, bond_param_2, bstrength);
-        std::cout << fmt::format("DEBUG FC: fqq={:.10f}, ringf={:.10f}, fheavy={:.10f}, fpi={:.10f}, fxh={:.10f}, fcn={:.10f}\n",
-                                 fqq, ringf, fheavy, fpi, fxh, fcn);
-        double product = bond_param_1 * bond_param_2 * bstrength * fqq * ringf * fheavy * fpi * fxh * fcn;
-        std::cout << fmt::format("DEBUG FC: product={:.10f}, neg_product={:.10f}, fc_calculated={:.10f}\n",
-                                 product, -product, params.force_constant);
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("DEBUG FC (H-bond Z1={} Z2={}): bond_i={:.10f}, bond_j={:.10f}, bstrength={:.10f}",
+                                             z1, z2, bond_param_1, bond_param_2, bstrength));
+            CurcumaLogger::info(fmt::format("DEBUG FC: fqq={:.10f}, ringf={:.10f}, fheavy={:.10f}, fpi={:.10f}, fxh={:.10f}, fcn={:.10f}",
+                                             fqq, ringf, fheavy, fpi, fxh, fcn));
+            double product = bond_param_1 * bond_param_2 * bstrength * fqq * ringf * fheavy * fpi * fxh * fcn;
+            CurcumaLogger::info(fmt::format("DEBUG FC: product={:.10f}, neg_product={:.10f}, fc_calculated={:.10f}",
+                                             product, -product, params.force_constant));
+        }
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -1713,7 +1722,7 @@ bool GFNFF::loadGFNFFCharges()
     std::ifstream file(charges_file);
 
     if (!file.is_open()) {
-        std::cerr << "Warning: Could not open " << charges_file << " for reading charges" << std::endl;
+        CurcumaLogger::warn(fmt::format("Could not open {} for reading charges", charges_file));
         return false;
     }
 
@@ -1733,7 +1742,7 @@ bool GFNFF::loadGFNFFCharges()
                 m_charges[atom_idx] = charge;
                 atom_idx++;
             } catch (const std::exception& e) {
-                std::cerr << "Error parsing charge on line " << atom_idx + 1 << ": " << e.what() << std::endl;
+                CurcumaLogger::error(fmt::format("Error parsing charge on line {}: {}", atom_idx + 1, e.what()));
                 return false;
             }
         }
@@ -1742,11 +1751,13 @@ bool GFNFF::loadGFNFFCharges()
     file.close();
 
     if (atom_idx != m_atomcount) {
-        std::cerr << "Warning: Expected " << m_atomcount << " charges, got " << atom_idx << std::endl;
+        CurcumaLogger::warn(fmt::format("Expected {} charges, got {}", m_atomcount, atom_idx));
         return false;
     }
 
-    std::cout << "Loaded " << atom_idx << " GFN-FF charges from " << charges_file << std::endl;
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF charges from {}", atom_idx, charges_file));
+    }
     return true;
 }
 
@@ -1829,10 +1840,12 @@ Vector GFNFF::calculateCoordinationNumbers(double threshold) const
 
         // DEBUG: Print raw CN for Carbon atom (Z=6)
         if (i == 0 && m_atoms[0] == 6) {
-            std::cout << fmt::format("DEBUG CN(C): raw CN = {:.3f}, logCN will be = {:.3f}\n",
-                                     cn_i, std::log(1.0 + std::exp(cnmax)) - std::log(1.0 + std::exp(cnmax - cn_i)));
-            // Expected: CH3OH carbon should have CN ~3.5-4.0 for C-H-H-H-O neighbors
-            std::cout << fmt::format("  Using D3 rcov: C=0.75 Å, H=0.32 Å, O=0.63 Å\n");
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("DEBUG CN(C): raw CN = {:.3f}, logCN will be = {:.3f}",
+                                                 cn_i, std::log(1.0 + std::exp(cnmax)) - std::log(1.0 + std::exp(cnmax - cn_i))));
+                // Expected: CH3OH carbon should have CN ~3.5-4.0 for C-H-H-H-O neighbors
+                CurcumaLogger::info("  Using D3 rcov: C=0.75 Å, H=0.32 Å, O=0.63 Å");
+            }
         }
 
         // Step 2: Apply logarithmic transformation (Fortran create_logCN)
@@ -2462,9 +2475,8 @@ Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb,
     double total_charge_actual = charges.sum();
     double charge_error = std::abs(total_charge_actual - m_charge);
     if (charge_error > 1e-6) {
-        std::cerr << "Warning: EEQ charge constraint not satisfied. "
-                  << "Expected: " << m_charge << ", Got: " << total_charge_actual
-                  << ", Error: " << charge_error << std::endl;
+        CurcumaLogger::warn(fmt::format("EEQ charge constraint not satisfied. Expected: {}, Got: {}, Error: {:.2e}",
+                                         m_charge, total_charge_actual, charge_error));
     }
 
     // Claude Generated (2025): Debug EEQ charges
@@ -3453,6 +3465,27 @@ json GFNFF::generateGFNFFCoulombPairs() const
     // Use cached topology information (Phase 9 cache migration)
     const TopologyInfo& topo_info = getCachedTopology();
     const Vector& charges = topo_info.eeq_charges;
+
+    // CRITICAL DEBUG: Print EEQ charges before Coulomb parameter generation
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::info("=== CRITICAL DEBUG: EEQ Charges Before Coulomb Generation ===");
+        for (int i = 0; i < charges.size(); ++i) {
+            CurcumaLogger::param(fmt::format("q_atom_{}(Z={})", i, m_atoms[i]),
+                                fmt::format("{:.8f}", charges[i]));
+        }
+        bool all_zero = true;
+        for (int i = 0; i < charges.size(); ++i) {
+            if (std::abs(charges[i]) > 1e-10) {
+                all_zero = false;
+                break;
+            }
+        }
+        if (all_zero) {
+            CurcumaLogger::error("🚨 CRITICAL ISSUE: All EEQ charges are ZERO! This explains zero electrostatic energies.");
+        } else {
+            CurcumaLogger::success("✅ EEQ charges are non-zero - electrostatics should work");
+        }
+    }
 
     // Generate all pairwise Coulomb interactions (i<j to avoid double-counting)
     for (int i = 0; i < m_atomcount; ++i) {

@@ -984,22 +984,24 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         // DEBUG OUTPUT (December 2025) - First torsion only
         static bool first_torsion_printed = false;
         if (!first_torsion_printed && index == 0) {
-            std::cout << fmt::format("\nTORSION GEOMETRY DEBUG (Atom {}-{}-{}-{}):\n",
-                                     dihedral.i, dihedral.j, dihedral.k, dihedral.l);
-            std::cout << fmt::format("  phi_actual = {:.2f}° ({:.4f} rad)\n",
-                                     phi * 180.0 / M_PI, phi);
-            std::cout << fmt::format("  phi0 = {:.2f}° ({:.4f} rad)\n",
-                                     phi0 * 180.0 / M_PI, phi0);
-            std::cout << fmt::format("  n = {:.0f}\n", n);
-            std::cout << fmt::format("  V = {:.6f} Eh\n", V);
-            std::cout << fmt::format("  n*phi - phi0 = {:.2f}°\n",
-                                     (n * phi - phi0) * 180.0 / M_PI);
-            std::cout << fmt::format("  cos(n*phi - phi0) = {:.4f}\n",
-                                     cos(n * phi - phi0));
-            std::cout << fmt::format("  (1 + cos(n*phi - phi0)) = {:.4f}\n",
-                                     1 + cos(n * phi - phi0));
-            std::cout << fmt::format("  damp = {:.6f}\n", damp);
-            std::cout << fmt::format("  Energy = {:.6f} Eh (before scaling)\n\n", energy);
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("\nTORSION GEOMETRY DEBUG (Atom {}-{}-{}-{}):",
+                                                 dihedral.i, dihedral.j, dihedral.k, dihedral.l));
+                CurcumaLogger::info(fmt::format("  phi_actual = {:.2f}° ({:.4f} rad)",
+                                                 phi * 180.0 / M_PI, phi));
+                CurcumaLogger::info(fmt::format("  phi0 = {:.2f}° ({:.4f} rad)",
+                                                 phi0 * 180.0 / M_PI, phi0));
+                CurcumaLogger::info(fmt::format("  n = {:.0f}", n));
+                CurcumaLogger::info(fmt::format("  V = {:.6f} Eh", V));
+                CurcumaLogger::info(fmt::format("  n*phi - phi0 = {:.2f}°",
+                                                 (n * phi - phi0) * 180.0 / M_PI));
+                CurcumaLogger::info(fmt::format("  cos(n*phi - phi0) = {:.4f}",
+                                                 cos(n * phi - phi0)));
+                CurcumaLogger::info(fmt::format("  (1 + cos(n*phi - phi0)) = {:.4f}",
+                                                 1 + cos(n * phi - phi0)));
+                CurcumaLogger::info(fmt::format("  damp = {:.6f}", damp));
+                CurcumaLogger::info(fmt::format("  Energy = {:.6f} Eh (before scaling)\n", energy));
+            }
             first_torsion_printed = true;
         }
 
@@ -1286,9 +1288,35 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
      * Claude Generated (Session 10): CRITICAL FIX - Add kJ/mol → Eh conversion for all Coulomb terms
      */
 
-    // Claude Generated (Session 10): Convert kJ/mol to Eh for all Coulomb contributions
-    // EEQ quantities (charges, chi, gamma, alpha) are in kJ/mol units
-    const double kJmol_to_Eh = 1.0 / 2625.15 * 4.19;  // ≈ 0.001595
+    // CRITICAL FIX (Dec 2025): EEQ parameters are already in Hartree units!
+    // The kJ/mol conversion factor was incorrect - all quantities should be in Hartree
+    // Reference: gfnff_par.h chi_gam_alp_cnf_angewChem2020 arrays are in Hartree
+
+    // CRITICAL DEBUG: Check EEQ charges before Coulomb energy calculation
+    if (CurcumaLogger::get_verbosity() >= 1 && m_gfnff_coulombs.size() > 0) {
+        CurcumaLogger::info("=== CRITICAL DEBUG: Coulomb Energy Calculation - Charge Values ===");
+        for (int idx = 0; idx < std::min((int)m_gfnff_coulombs.size(), 10); ++idx) {
+            const auto& coul = m_gfnff_coulombs[idx];
+            CurcumaLogger::param(fmt::format("Coulomb[{}] q_i(atom{}), q_j(atom{})",
+                                             idx, coul.i, coul.j),
+                                 fmt::format("{:.8f}, {:.8f}", coul.q_i, coul.q_j));
+        }
+        if (m_gfnff_coulombs.size() > 10) {
+            CurcumaLogger::param("...", fmt::format("{} more coulomb pairs", m_gfnff_coulombs.size() - 10));
+        }
+
+        double max_charge = 0.0;
+        for (const auto& coul : m_gfnff_coulombs) {
+            max_charge = std::max({max_charge, std::abs(coul.q_i), std::abs(coul.q_j)});
+        }
+        CurcumaLogger::param("max_absolute_charge", fmt::format("{:.8e}", max_charge));
+
+        if (max_charge < 1e-10) {
+            CurcumaLogger::error("🚨 CRITICAL ISSUE: All Coulomb charges are ZERO! Energy will be ZERO!");
+        } else {
+            CurcumaLogger::success(fmt::format("✅ Charges up to {:.2e} found - Coulomb energy should be non-zero", max_charge));
+        }
+    }
 
     if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_coulombs.size() > 0) {
         CurcumaLogger::info(fmt::format("Thread calculating {} Coulomb pairs", m_gfnff_coulombs.size()));
@@ -1315,7 +1343,7 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
 
         // Claude Generated (Session 10): CRITICAL FIX - Add kJ/mol → Eh conversion for Coulomb terms
         // EEQ quantities are in kJ/mol but need to be converted to Eh for total energy
-        m_coulomb_energy += energy_pair * kJmol_to_Eh;
+        m_coulomb_energy += energy_pair;
 
         if (m_calculate_gradient) {
             // Claude Generated (Dec 2025, Session 9): CRITICAL FIX - Gradient for erf(γ*r)/r NOT erf(γ*r)/r²!
@@ -1325,7 +1353,7 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
             double exp_term = std::exp(-gamma_r * gamma_r);
             double derf_dr = coul.gamma_ij * exp_term * (2.0 / sqrt_pi);
             double dEdr_pair = coul.q_i * coul.q_j *
-                (derf_dr / rij - erf_term / (rij * rij)) * kJmol_to_Eh;  // FIX: Correct derivative + conversion
+                (derf_dr / rij - erf_term / (rij * rij));  // FIX: Correct derivative, no conversion
 
             Eigen::Vector3d grad = dEdr_pair * rij_vec / rij;
 
@@ -1359,7 +1387,7 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
 
             // Add both self-terms for atom i
             double energy_atom_i = energy_self_i + energy_selfint_i;
-            m_coulomb_energy += energy_atom_i * kJmol_to_Eh;
+            m_coulomb_energy += energy_atom_i;
 
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::param(fmt::format("coulomb_self_atom_{}", coul.i),
@@ -1383,7 +1411,7 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
 
             // Add both self-terms for atom j
             double energy_atom_j = energy_self_j + energy_selfint_j;
-            m_coulomb_energy += energy_atom_j * kJmol_to_Eh;
+            m_coulomb_energy += energy_atom_j;
 
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::param(fmt::format("coulomb_self_atom_{}", coul.j),
