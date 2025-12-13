@@ -777,12 +777,12 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
         double r_ij_sq = (i - j).squaredNorm();  // r_ij²
         double r_jk_sq = (k - j).squaredNorm();  // r_jk²
 
-        // DEBUG LOGGING - Claude Generated 2025-11-30
+        // Angle geometry logging - Claude Generated 2025-11-30
         if (index < 2 && CurcumaLogger::get_verbosity() >= 3) {
             double r_ij = std::sqrt(r_ij_sq);
             double r_jk = std::sqrt(r_jk_sq);
             CurcumaLogger::info(fmt::format(
-                "ANGLE DEBUG #{}: atoms {}-{}-{} | theta={:.6f} rad ({:.2f}°), theta0={:.6f} rad ({:.2f}°) | "
+                "Angle calculation #{}: atoms {}-{}-{} | theta={:.6f} rad ({:.2f}°), theta0={:.6f} rad ({:.2f}°) | "
                 "k_ijk={:.6f}, fqq={:.6f} | r_ij={:.6f}, r_jk={:.6f}",
                 index, angle.i, angle.j, angle.k, theta, theta*180.0/pi, theta0, theta0*180.0/pi,
                 k_ijk, fqq, r_ij, r_jk));
@@ -981,11 +981,11 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         double et = V * (1 + cos(n * phi - phi0));
         double energy = et * damp;
 
-        // DEBUG OUTPUT (December 2025) - First torsion only
+        // Torsion geometry analysis (December 2025) - First torsion only
         static bool first_torsion_printed = false;
         if (!first_torsion_printed && index == 0) {
             if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format("\nTORSION GEOMETRY DEBUG (Atom {}-{}-{}-{}):",
+                CurcumaLogger::info(fmt::format("\nTorsion geometry analysis (Atom {}-{}-{}-{}):",
                                                  dihedral.i, dihedral.j, dihedral.k, dihedral.l));
                 CurcumaLogger::info(fmt::format("  phi_actual = {:.2f}° ({:.4f} rad)",
                                                  phi * 180.0 / M_PI, phi));
@@ -1292,9 +1292,9 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
     // The kJ/mol conversion factor was incorrect - all quantities should be in Hartree
     // Reference: gfnff_par.h chi_gam_alp_cnf_angewChem2020 arrays are in Hartree
 
-    // CRITICAL DEBUG: Check EEQ charges before Coulomb energy calculation
+    // Verify EEQ charges before Coulomb energy calculation (Nov 2025)
     if (CurcumaLogger::get_verbosity() >= 1 && m_gfnff_coulombs.size() > 0) {
-        CurcumaLogger::info("=== CRITICAL DEBUG: Coulomb Energy Calculation - Charge Values ===");
+        CurcumaLogger::info("=== Coulomb Energy Calculation: EEQ Charge Verification ===");
         for (int idx = 0; idx < std::min((int)m_gfnff_coulombs.size(), 10); ++idx) {
             const auto& coul = m_gfnff_coulombs[idx];
             CurcumaLogger::param(fmt::format("Coulomb[{}] q_i(atom{}), q_j(atom{})",

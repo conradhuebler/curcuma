@@ -120,83 +120,76 @@ void ForceField::setParameter(const json& parameters)
         method_name = parameters["method"].get<std::string>();
     }
 
-    // Level 2+: Force field initialization
-    // CRITICAL DEBUG: Output verbosity directly to stderr
-    std::cerr << "DEBUG ForceField::setParameter - verbosity = " << CurcumaLogger::get_verbosity() << std::endl;
-
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("Initializing force field parameters");
         CurcumaLogger::param("method", method_name);
     }
 
-    std::cerr << "DEBUG: After initializing logging" << std::endl;
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("Force field setup: parameters validated");
+    }
 
     bool loaded_from_cache = false;
 
     // Try loading cached parameters if caching enabled and same method
     if (m_enable_caching && parameters.contains("method")) {
-        std::cerr << "DEBUG: Trying to load from cache..." << std::endl;
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Attempting to load cached parameters");
+        }
         std::string method = parameters["method"];
         loaded_from_cache = tryLoadAutoParameters(method);
-        if (CurcumaLogger::get_verbosity() >= 3) {
+        if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::param("loaded_from_cache", loaded_from_cache ? "true" : "false");
         }
     }
 
-    std::cerr << "DEBUG: loaded_from_cache = " << (loaded_from_cache ? "true" : "false") << std::endl;
-
     if (!loaded_from_cache) {
-        std::cerr << "DEBUG: Setting parameters..." << std::endl;
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Cache miss - generating new force field parameters");
+        }
+
         // Set new parameters (generation or explicit)
         if (parameters.contains("bonds"))
             setBonds(parameters["bonds"]);
-        std::cerr << "DEBUG: bonds done" << std::endl;
         if (parameters.contains("angles"))
             setAngles(parameters["angles"]);
-        std::cerr << "DEBUG: angles done" << std::endl;
-        if (parameters.contains("dihedrals")) {
-            std::cerr << "DEBUG: About to call setDihedrals()..." << std::endl;
+        if (parameters.contains("dihedrals"))
             setDihedrals(parameters["dihedrals"]);
-            std::cerr << "DEBUG: setDihedrals() returned" << std::endl;
-        }
-        std::cerr << "DEBUG: dihedrals done" << std::endl;
-        if (parameters.contains("inversions")) {
-            std::cerr << "DEBUG: About to call setInversions()..." << std::endl;
+        if (parameters.contains("inversions"))
             setInversions(parameters["inversions"]);
-            std::cerr << "DEBUG: setInversions() returned" << std::endl;
-        }
-        std::cerr << "DEBUG: inversions done" << std::endl;
         if (parameters.contains("vdws"))
             setvdWs(parameters["vdws"]);
-        std::cerr << "DEBUG: vdws done" << std::endl;
 
         // Phase 4.2: GFN-FF pairwise non-bonded parameters (Claude Generated 2025)
         if (parameters.contains("gfnff_dispersions"))
             setGFNFFDispersions(parameters["gfnff_dispersions"]);
-        std::cerr << "DEBUG: gfnff_dispersions done" << std::endl;
         if (parameters.contains("gfnff_repulsions"))
             setGFNFFRepulsions(parameters["gfnff_repulsions"]);
-        std::cerr << "DEBUG: gfnff_repulsions done" << std::endl;
         if (parameters.contains("gfnff_coulombs"))
             setGFNFFCoulombs(parameters["gfnff_coulombs"]);
-        std::cerr << "DEBUG: gfnff_coulombs done" << std::endl;
 
         // Phase 3: GFN-FF hydrogen bond and halogen bond setters (Claude Generated 2025)
         if (parameters.contains("gfnff_hbonds"))
             setGFNFFHydrogenBonds(parameters["gfnff_hbonds"]);
         if (parameters.contains("gfnff_xbonds"))
             setGFNFFHalogenBonds(parameters["gfnff_xbonds"]);
-        std::cerr << "DEBUG: gfnff_hbonds and gfnff_xbonds done" << std::endl;
 
         m_parameters = parameters;
         m_method = m_parameters["method"];
-        std::cerr << "DEBUG: method set to " << m_method << std::endl;
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param("method_selected", m_method);
+        }
         if (m_parameters.contains("e0"))
             m_e0 = m_parameters["e0"];
 
-        std::cerr << "DEBUG: Calling AutoRanges()..." << std::endl;
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Calculating parameter ranges");
+        }
         AutoRanges();
-        std::cerr << "DEBUG: AutoRanges() done" << std::endl;
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Parameter generation complete");
+        }
 
         // Auto-save new parameters (only if caching enabled)
         if (m_enable_caching) {
@@ -204,7 +197,6 @@ void ForceField::setParameter(const json& parameters)
         }
     }
 
-    std::cerr << "DEBUG: Setting method type..." << std::endl;
     // Set method type for ForceFieldThread (regardless of cache)
     int method_type = 1; // default UFF
     if (m_method == "qmdff" || m_method == "quff") {
@@ -218,17 +210,24 @@ void ForceField::setParameter(const json& parameters)
             generateCGParameters(parameters);
         }
     }
-    std::cerr << "DEBUG: method_type = " << method_type << std::endl;
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        std::string method_name = "UFF"; // default
+        if (method_type == 2) method_name = "QMDFF";
+        else if (method_type == 3) method_name = "GFN-FF";
+        else if (method_type == 4) method_name = "CG";
+        CurcumaLogger::param("method_type", fmt::format("{} ({})", method_type, method_name));
+    }
 
     // Claude Generated: Print parameter summary after setting parameters
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("DEBUG: About to call printParameterSummary()");
+        CurcumaLogger::info("Generating parameter summary");
     }
 
     printParameterSummary();
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("DEBUG: printParameterSummary() completed");
+        CurcumaLogger::info("Parameter summary completed");
     }
 
     in_setParameter = false; // Reset the recursive guard
@@ -419,7 +418,9 @@ void ForceField::setBonds(const json& bonds)
 
 void ForceField::setAngles(const json& angles)
 {
-    std::cerr << "DEBUG setAngles: Processing " << angles.size() << " angles" << std::endl;
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param("angles_processing", fmt::format("Processing {} angle parameters", angles.size()));
+    }
     m_angles.clear();
     for (int i = 0; i < angles.size(); ++i) {
         json angle = angles[i].get<json>();
@@ -442,14 +443,18 @@ void ForceField::setAngles(const json& angles)
         a.r0_ik = angle["r0_ik"];
         a.theta0_ijk = angle["theta0_ijk"];
         m_angles.push_back(a);
+    }
 
-        std::cerr << "DEBUG: Angle " << i << " added: " << a.i << "-" << a.j << "-" << a.k << std::endl;
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::param("angles_processed", fmt::format("{}", m_angles.size()));
     }
 }
 
 void ForceField::setDihedrals(const json& dihedrals)
 {
-    std::cerr << "DEBUG setDihedrals: Processing " << dihedrals.size() << " dihedrals" << std::endl;
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param("dihedrals_processing", fmt::format("Processing {} dihedral parameters", dihedrals.size()));
+    }
     m_dihedrals.clear();
     for (int i = 0; i < dihedrals.size(); ++i) {
         json dihedral = dihedrals[i].get<json>();
@@ -464,36 +469,28 @@ void ForceField::setDihedrals(const json& dihedrals)
         d.n = dihedral["n"];
         d.phi0 = dihedral["phi0"];
         m_dihedrals.push_back(d);
-
-        if (i < 5 || i >= dihedrals.size() - 2) {
-            std::cerr << "DEBUG: Dihedral " << i << " added: " << d.i << "-" << d.j << "-" << d.k << "-" << d.l << std::endl;
-        }
-        if (i == 5 && dihedrals.size() > 10) {
-            std::cerr << "DEBUG: ... (" << (dihedrals.size() - 7) << " more dihedrals)" << std::endl;
-        }
     }
-    std::cerr << "DEBUG setDihedrals: All " << dihedrals.size() << " dihedrals processed successfully" << std::endl;
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::param("dihedrals_processed", fmt::format("{}", m_dihedrals.size()));
+    }
 }
 
 void ForceField::setInversions(const json& inversions)
 {
-    std::cerr << "DEBUG setInversions: Processing " << inversions.size() << " inversions" << std::endl;
-    std::cerr << "DEBUG setInversions: Full JSON: " << inversions.dump(2) << std::endl;
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param("inversions_processing", fmt::format("Processing {} inversion parameters", inversions.size()));
+    }
     m_inversions.clear();
     for (int i = 0; i < inversions.size(); ++i) {
-        std::cerr << "DEBUG setInversions: Processing inversion " << i << std::endl;
         json inversion = inversions[i].get<json>();
-        std::cerr << "DEBUG setInversions: Got json for inversion " << i << std::endl;
-        std::cerr << "DEBUG setInversions: Inversion JSON: " << inversion.dump() << std::endl;
         Inversion inv;
         inv.type = inversion["type"];
-        std::cerr << "DEBUG setInversions: type = " << inv.type << std::endl;
 
         inv.i = inversion["i"];
         inv.j = inversion["j"];
         inv.k = inversion["k"];
         inv.l = inversion["l"];
-        std::cerr << "DEBUG setInversions: atoms = " << inv.i << "-" << inv.j << "-" << inv.k << "-" << inv.l << std::endl;
 
         // GFN-FF uses different inversion parameters (barrier, omega0) vs UFF (fc, C0, C1, C2)
         if (inversion.contains("barrier")) {
@@ -502,20 +499,26 @@ void ForceField::setInversions(const json& inversions)
             inv.C0 = inversion.value("omega0", 0.0);
             inv.C1 = 0.0;
             inv.C2 = 0.0;
-            std::cerr << "DEBUG setInversions: GFN-FF format - barrier=" << inv.fc << ", omega0=" << inv.C0 << std::endl;
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::param("inversion_format", "GFN-FF (barrier/omega0)");
+            }
         } else {
             // UFF/QMDFF style: use Fourier coefficients
             inv.fc = inversion["fc"];
             inv.C0 = inversion["C0"];
             inv.C1 = inversion["C1"];
             inv.C2 = inversion["C2"];
-            std::cerr << "DEBUG setInversions: UFF format - fc=" << inv.fc << std::endl;
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::param("inversion_format", "UFF (Fourier)");
+            }
         }
 
         m_inversions.push_back(inv);
-        std::cerr << "DEBUG setInversions: Inversion " << i << " added successfully" << std::endl;
     }
-    std::cerr << "DEBUG setInversions: All " << inversions.size() << " inversions processed successfully" << std::endl;
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::param("inversions_processed", fmt::format("{}", m_inversions.size()));
+    }
 }
 
 void ForceField::setvdWs(const json& vdws)
@@ -1356,67 +1359,73 @@ void ForceField::printParameterSummary() const
             gfnff_coulombs = m_parameters["gfnff_coulombs"].size();
         }
 
-        // Print summary in consistent format
-        fmt::print("  • {} bond terms\n", bonds);
-        fmt::print("  • {} angle terms\n", angles);
-        fmt::print("  • {} dihedral terms\n", dihedrals);
-        fmt::print("  • {} inversion terms\n", inversions);
-        fmt::print("  • {} van der Waals pairs\n", vdws);
-        fmt::print("  • {} electrostatic pairs\n", esps);
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            // Basic force field topology
+            CurcumaLogger::info("Force field topology summary:");
+            if (bonds > 0) CurcumaLogger::param(fmt::format("bonds_count", bonds), fmt::format("{} bond terms", bonds));
+            if (angles > 0) CurcumaLogger::param(fmt::format("angles_count", angles), fmt::format("{} angle terms", angles));
+            if (dihedrals > 0) CurcumaLogger::param(fmt::format("dihedrals_count", dihedrals), fmt::format("{} dihedral terms", dihedrals));
+            if (inversions > 0) CurcumaLogger::param(fmt::format("inversions_count", inversions), fmt::format("{} inversion terms", inversions));
+            if (vdws > 0) CurcumaLogger::param(fmt::format("vdw_count", vdws), fmt::format("{} van der Waals pairs", vdws));
+            if (esps > 0) CurcumaLogger::param(fmt::format("electrostatic_count", esps), fmt::format("{} electrostatic pairs", esps));
 
-        // Print GFN-FF specific parameters if present
-        if (gfnff_dispersions > 0 || gfnff_repulsions > 0 || gfnff_coulombs > 0) {
-            fmt::print("  GFN-FF pairwise interactions:\n");
-            if (gfnff_dispersions > 0) fmt::print("    • {} dispersion pairs\n", gfnff_dispersions);
-            if (gfnff_repulsions > 0) fmt::print("    • {} repulsion pairs\n", gfnff_repulsions);
-            if (gfnff_coulombs > 0) fmt::print("    • {} Coulomb pairs\n", gfnff_coulombs);
-        }
-
-        // Print scaling factors
-        fmt::print("  Scaling factors:\n");
-        if (m_parameters.contains("vdw_scaling")) {
-            fmt::print("    vdW: {:.3f}\n", m_parameters["vdw_scaling"].get<double>());
-        }
-        if (m_parameters.contains("bond_scaling")) {
-            fmt::print("    bond: {:.3f}\n", m_parameters["bond_scaling"].get<double>());
-        }
-        if (m_parameters.contains("angle_scaling")) {
-            fmt::print("    angle: {:.3f}\n", m_parameters["angle_scaling"].get<double>());
-        }
-        if (m_parameters.contains("dihedral_scaling")) {
-            fmt::print("    dihedral: {:.3f}\n", m_parameters["dihedral_scaling"].get<double>());
-        }
-        if (m_parameters.contains("inversion_scaling")) {
-            fmt::print("    inversion: {:.3f}\n", m_parameters["inversion_scaling"].get<double>());
-        }
-        if (m_parameters.contains("coulomb_scaling")) {
-            fmt::print("    coulomb: {:.3f}\n", m_parameters["coulomb_scaling"].get<double>());
-        }
-        if (m_parameters.contains("rep_scaling")) {
-            fmt::print("    repulsion: {:.3f}\n", m_parameters["rep_scaling"].get<double>());
-        }
-
-        // Print dispersion and hydrogen bonding flags
-        fmt::print("  Force field flags:\n");
-        if (m_parameters.contains("d3") && m_parameters["d3"].get<double>() != 0) {
-            fmt::print("    D3 dispersion: enabled (s6={:.3f}, s8={:.3f})\n",
-                m_parameters.value("d3_s6", 0.0), m_parameters.value("d3_s8", 0.0));
-        }
-        if (m_parameters.contains("d4") && m_parameters["d4"].get<double>() != 0) {
-            fmt::print("    D4 dispersion: enabled\n");
-        }
-        if (m_parameters.contains("h4") && m_parameters["h4"].get<double>() != 0) {
-            fmt::print("    H4 hydrogen bonding: enabled (scaling={:.3f})\n",
-                m_parameters.value("h4_scaling", 1.0));
-            if (m_parameters.contains("h4_nh_o")) {
-                fmt::print("      NH···O: {:.3f}\n", m_parameters["h4_nh_o"].get<double>());
+            // Print GFN-FF specific parameters if present
+            if (gfnff_dispersions > 0 || gfnff_repulsions > 0 || gfnff_coulombs > 0) {
+                CurcumaLogger::info("GFN-FF pairwise interactions:");
+                if (gfnff_dispersions > 0) CurcumaLogger::param("dispersion_pairs", fmt::format("{}", gfnff_dispersions));
+                if (gfnff_repulsions > 0) CurcumaLogger::param("repulsion_pairs", fmt::format("{}", gfnff_repulsions));
+                if (gfnff_coulombs > 0) CurcumaLogger::param("coulomb_pairs", fmt::format("{}", gfnff_coulombs));
             }
-            if (m_parameters.contains("h4_oh_n")) {
-                fmt::print("      OH···N: {:.3f}\n", m_parameters["h4_oh_n"].get<double>());
+
+            // Print scaling factors
+            CurcumaLogger::info("Scaling factors:");
+            if (m_parameters.contains("vdw_scaling")) {
+                CurcumaLogger::param("vdw_scaling", fmt::format("{:.3f}", m_parameters["vdw_scaling"].get<double>()));
+            }
+            if (m_parameters.contains("bond_scaling")) {
+                CurcumaLogger::param("bond_scaling", fmt::format("{:.3f}", m_parameters["bond_scaling"].get<double>()));
+            }
+            if (m_parameters.contains("angle_scaling")) {
+                CurcumaLogger::param("angle_scaling", fmt::format("{:.3f}", m_parameters["angle_scaling"].get<double>()));
+            }
+            if (m_parameters.contains("dihedral_scaling")) {
+                CurcumaLogger::param("dihedral_scaling", fmt::format("{:.3f}", m_parameters["dihedral_scaling"].get<double>()));
+            }
+            if (m_parameters.contains("inversion_scaling")) {
+                CurcumaLogger::param("inversion_scaling", fmt::format("{:.3f}", m_parameters["inversion_scaling"].get<double>()));
+            }
+            if (m_parameters.contains("coulomb_scaling")) {
+                CurcumaLogger::param("coulomb_scaling", fmt::format("{:.3f}", m_parameters["coulomb_scaling"].get<double>()));
+            }
+            if (m_parameters.contains("rep_scaling")) {
+                CurcumaLogger::param("repulsion_scaling", fmt::format("{:.3f}", m_parameters["rep_scaling"].get<double>()));
+            }
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            // Print dispersion and hydrogen bonding flags
+            CurcumaLogger::info("Force field flags:");
+            if (m_parameters.contains("d3") && m_parameters["d3"].get<double>() != 0) {
+                CurcumaLogger::info("D3 dispersion enabled");
+                CurcumaLogger::param("d3_s6", fmt::format("{:.3f}", m_parameters.value("d3_s6", 0.0)));
+                CurcumaLogger::param("d3_s8", fmt::format("{:.3f}", m_parameters.value("d3_s8", 0.0)));
+            }
+            if (m_parameters.contains("d4") && m_parameters["d4"].get<double>() != 0) {
+                CurcumaLogger::info("D4 dispersion enabled");
+            }
+            if (m_parameters.contains("h4") && m_parameters["h4"].get<double>() != 0) {
+                CurcumaLogger::info("H4 hydrogen bonding enabled");
+                CurcumaLogger::param("h4_scaling", fmt::format("{:.3f}", m_parameters.value("h4_scaling", 1.0)));
+                if (m_parameters.contains("h4_nh_o")) {
+                    CurcumaLogger::param("h4_nh_o_scaling", fmt::format("{:.3f}", m_parameters["h4_nh_o"].get<double>()));
+                }
+                if (m_parameters.contains("h4_oh_n")) {
+                    CurcumaLogger::param("h4_oh_n_scaling", fmt::format("{:.3f}", m_parameters["h4_oh_n"].get<double>()));
+                }
             }
         }
 
     } catch (const std::exception& e) {
-        fmt::print("Warning: Could not display parameter summary: {}\n", e.what());
+        CurcumaLogger::warn(fmt::format("Could not display parameter summary: {}", e.what()));
     }
 }
