@@ -111,10 +111,7 @@
 
 ### 2. Force Field Methods
 - **Universal Force Field (UFF)** - General-purpose molecular mechanics
-- **GFN-FF** - Geometry/Frequency/Noncovalent Force Field (native `cgfnff`)
-  - **Architecture**: Two-phase (Parameter generation in GFNFF, calculations in ForceFieldThread)
-  - **Implementation**: Complete 4329-line implementation in `ff_methods/gfnff_method.cpp`
-  - **Status**: ✅ **FULLY IMPLEMENTED** - Architecture corrected, tests passing
+- **GFN-FF** (`cgfnff`) - ✅ **FULLY IMPLEMENTED** - See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
 - **QMDFF** - Quantum Mechanically Derived Force Fields
 - **Universal Parameter Caching** - Automatic save/load for all FF methods
 
@@ -256,7 +253,7 @@ curcuma/
 ✅ **Physical Architecture** - QM/MM methods organized under `src/core/energy_calculators/`
 ✅ **Topological Data Analysis** - dMatrix legacy functionality integrated as TDAEngine
 ✅ **Parameter Routing Fix** - Multi-module parameter hierarchies now work (json null-error fixed)
-✅ **GFN-FF Architecture Correction** - Native gfN-FF fully implemented in ff_methods (4329 lines)
+✅ **GFN-FF Implementation** - Complete and operational in ff_methods/ - See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
 
 ## Build and Test Commands
 
@@ -295,8 +292,9 @@ ctest -R "cli_rmsd_01" --verbose
 
 - **Prioritized TODO List**: See [TODO.md](TODO.md) - 20 tasks extracted from documentation audit
 - **Critical**: SimpleMD JSON null crash blocks 7 tests - parameter routing needs fix (see TODO.md:CRITICAL)
-- **Test Blocking Issues**: SimpleMD crash, cgfnff null parameters, memory optimization for large systems
+- **Test Blocking Issues**: Memory optimization for large systems
 - **Module Docs**: Each `src/` subdirectory has CLAUDE.md with specific tasks
+- **GFN-FF Status**: See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md) for implementation details
 
 ## Workflow States
 - **ADD**: Features to be added
@@ -382,15 +380,13 @@ ctest -R "cli_rmsd_01" --verbose
 
 ## Known Issues
 
-1. **GFN-FF Parameter Migration**: Still uses JSON in some areas - could benefit from full ConfigManager migration (low priority)
+1. **GFN-FF Limitations**: See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md#known-limitations) for details (D4 dispersion, EEQ integration, metal parameters)
 
-2. **Missing real GFN-FF parameters**: Currently uses placeholder parameters for some elements - theoretical implementation needed
-
-3. **Unit migration**: Some legacy code still uses hardcoded constants instead of CurcumaUnit functions
+2. **Unit migration**: Some legacy code still uses hardcoded constants instead of CurcumaUnit functions
 
 ## Recently Resolved ✅
 
 - ✅ **JSON Null-Error & Parameter Routing** (October 2025): SimpleMD/curcumaopt fixed - 11 tests now pass
 - ✅ **ForceField Inversion Bug** (October 2025): Vector bounds crash in UFF parameter generation fixed
 - ✅ **CLI Test Infrastructure** (October 2025): 26 End-to-End validation tests with scientific accuracy
-- ✅ **GFN-FF Architecture Complete** (December 2025): Native implementation restored to ff_methods (4329 lines)
+- ✅ **GFN-FF Architecture** (December 2025): Implementation complete and tests passing - [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
