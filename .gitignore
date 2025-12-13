@@ -77,12 +77,21 @@ settings.ini
 
 # Test artifacts (CLI and unit tests) - Claude Generated October 2025
 # Build directory isolation: test outputs should be in build/test_cases/
+# Exceptions for legitimate test fixtures
+!test_cases/optimisation/makrocyclic/input.opt.xyz
+!test_cases/optimisation/makrocyclic/input.trj.xyz
+
+# Test output files (generated during test runs)
 test_cases/**/*.trj.xyz
 test_cases/**/*.opt.xyz
 test_cases/**/*.param.json
 test_cases/**/curcuma_*.json
 test_cases/**/*.log
 test_cases/**/*.dat
+
+# Root-level output files (optimization and trajectory outputs)
+*.opt.xyz
+*.trj.xyz
 
 
 # Downloaded external dependencies (should be fetched via submodules/CMake)
