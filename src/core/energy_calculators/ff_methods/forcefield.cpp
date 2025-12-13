@@ -762,6 +762,18 @@ void ForceField::AutoRanges()
             thread->setMethod(2);
         } else if (m_method == "gfnff" || m_method == "cgfnff") { // Claude Generated (2025-12-13): Support both method names
             thread->setMethod(3); // GFN-FF
+
+            // Phase 2: Configure GFN-FF parameter flags (Claude Generated Dec 2025)
+            // These control which energy terms are calculated to save CPU time
+            bool dispersion = m_parameters.value("dispersion", true);
+            bool hbond = m_parameters.value("hbond", true);
+            bool repulsion = m_parameters.value("repulsion", true);
+            bool coulomb = m_parameters.value("coulomb", true);
+
+            thread->setDispersionEnabled(dispersion);
+            thread->setHydrogenBondEnabled(hbond);
+            thread->setRepulsionEnabled(repulsion);
+            thread->setCoulombEnabled(coulomb);
         }
         for (int j = int(i * m_bonds.size() / double(free_threads)); j < int((i + 1) * m_bonds.size() / double(free_threads)); ++j) {
             if (m_method == "gfnff" || m_method == "cgfnff") { // Claude Generated (2025-12-13): Support both method names

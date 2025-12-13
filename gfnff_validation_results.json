@@ -2,9 +2,9 @@
   "HH.xyz": {
     "total": {
       "reference": 0.05046985,
-      "curcuma": 0.050430938205159925,
-      "error_abs": -3.8911794840071345e-05,
-      "error_pct": 0.07709908953577502
+      "curcuma": 0.05043093820516013,
+      "error_abs": -3.891179483987012e-05,
+      "error_pct": 0.07709908953537631
     },
     "bond": {
       "reference": -0.164952020372,
@@ -32,23 +32,23 @@
     },
     "electrostatic": {
       "reference": 0.0,
-      "curcuma": -0.0,
-      "error_abs": -0.0,
+      "curcuma": 0.0,
+      "error_abs": 0.0,
       "error_pct": 0.0
     }
   },
   "HCl.xyz": {
     "total": {
       "reference": -0.0120384,
-      "curcuma": 0.0016623574415318794,
-      "error_abs": 0.013700757441531878,
-      "error_pct": 113.80879054967336
+      "curcuma": -0.007768450758427606,
+      "error_abs": 0.0042699492415723935,
+      "error_pct": 35.4694082400684
     },
     "bond": {
       "reference": -0.084310493115,
-      "curcuma": -0.085206,
-      "error_abs": -0.0008955068850000081,
-      "error_pct": 1.0621535373758655
+      "curcuma": -0.088158,
+      "error_abs": -0.0038475068850000044,
+      "error_pct": 4.563497072365575
     },
     "angle": {
       "reference": 0.0,
@@ -70,23 +70,23 @@
     },
     "electrostatic": {
       "reference": -0.008093183855,
-      "curcuma": 0.006475,
-      "error_abs": 0.014568183855,
-      "error_pct": 180.00559626480893
+      "curcuma": -3e-06,
+      "error_abs": 0.008090183855,
+      "error_pct": 99.96293177007036
     }
   },
   "OH.xyz": {
     "total": {
       "reference": -0.23390793,
-      "curcuma": 0.05920251218792093,
-      "error_abs": 0.2931104421879209,
-      "error_pct": 125.31017746509106
+      "curcuma": -0.1255045473537754,
+      "error_abs": 0.1084033826462246,
+      "error_pct": 46.34446666524927
     },
     "bond": {
       "reference": -0.170910719346,
-      "curcuma": -0.086893,
-      "error_abs": 0.084017719346,
-      "error_pct": 49.15883548293447
+      "curcuma": -0.138983,
+      "error_abs": 0.031927719346,
+      "error_pct": 18.68093438970552
     },
     "angle": {
       "reference": 0.0,
@@ -108,9 +108,9 @@
     },
     "electrostatic": {
       "reference": -0.076511607391,
-      "curcuma": 0.132569,
-      "error_abs": 0.20908060739099998,
-      "error_pct": 273.2665206241556
+      "curcuma": -4.8e-05,
+      "error_abs": 0.076463607391,
+      "error_pct": 99.93726442086792
     }
   }
 }

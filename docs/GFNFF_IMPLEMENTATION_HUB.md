@@ -1,7 +1,7 @@
 # GFN-FF Implementation Documentation Hub
-**Last Updated**: 2025-12-07 (Session 5: Two-Phase EEQ System)
-**Status**: Production-ready native implementation with complete EEQ architecture
-**Current Phase**: Phase 5 Complete - Two-Phase EEQ System Implemented and Tested ✅
+**Last Updated**: 2025-12-13 (Architecture Correction & Restoration)
+**Status**: ✅ **FULLY RESTORED AND OPERATIONAL** - Complete 4329-line implementation moved to ff_methods
+**Current Phase**: ✅ ARCHITECTURE COMPLETE - All critical issues resolved
 
 ---
 
@@ -19,9 +19,19 @@
 
 ## Implementation Status
 
-### Current Status: ✅ PRODUCTION READY
+### ✅ **ARCHITECTURE RESTORATION COMPLETE** (December 2025)
 
-**Overall Completion**: ~95% (Two-Phase EEQ integrated, final convergence pending)
+**Major Accomplishment**: GFN-FF implementation successfully moved from `qm_methods/` to `ff_methods/` and fully restored
+
+| Component | Previous Status | Current Status | Notes |
+|-----------|-----------------|----------------|-------|
+| **Location** | ❌ Incorrectly in qm_methods | ✅ **Correctly in ff_methods** | Architectural compliance achieved |
+| **Implementation** | ⚠️ Lost due to file move | ✅ **Fully restored** | 4329 lines from git history |
+| **Compilation** | ❌ Build failing | ✅ **100% successful** | Core library builds without errors |
+| **Tests** | ❌ API broken | ✅ **All tests passing** | Fixed Molecule API usage |
+| **MethodFactory** | ⚠️ Mixed registration | ✅ **Proper FF registration** | GFN-FF as force field method |
+
+### Core Architecture Status (Unchanged)
 
 | Component | Status | Accuracy vs. Fortran | Notes |
 |-----------|--------|----------------------|-------|

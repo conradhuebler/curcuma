@@ -95,16 +95,22 @@ int ForceFieldThread::execute()
         CalculateGFNFFInversionContribution();
 
         // GFN-FF non-bonded pairwise parallelizable terms (Phase 4)
-        CalculateGFNFFDispersionContribution();  // D3/D4 dispersion
-        CalculateGFNFFRepulsionContribution();   // GFN-FF repulsion
-        CalculateGFNFFCoulombContribution();     // EEQ Coulomb electrostatics
+        if (m_dispersion_enabled) {
+            CalculateGFNFFDispersionContribution();  // D3/D4 dispersion
+        }
+        if (m_repulsion_enabled) {
+            CalculateGFNFFRepulsionContribution();   // GFN-FF repulsion
+        }
+        if (m_coulomb_enabled) {
+            CalculateGFNFFCoulombContribution();     // EEQ Coulomb electrostatics
+        }
 
         // GFN-FF hydrogen bond and halogen bond terms (Phase 5)
-        CalculateGFNFFHydrogenBondContribution();  // HB three-body terms
-        CalculateGFNFFHalogenBondContribution();   // XB three-body terms
+        if (m_hbond_enabled) {
+            CalculateGFNFFHydrogenBondContribution();  // HB three-body terms
+            CalculateGFNFFHalogenBondContribution();   // XB three-body terms
+        }
 
-        // Legacy vdW (will be replaced by pairwise terms above)
-        CalculateGFNFFvdWContribution();
     }
 
     if (m_method != 3) {
@@ -1058,42 +1064,6 @@ void ForceFieldThread::CalculateGFNFFInversionContribution()
 
 // DEPRECATED: Legacy vdW calculation replaced by Phase 4 pairwise terms
 // (CalculateGFNFFDispersionContribution + CalculateGFNFFRepulsionContribution)
-// TODO: Remove after verifying all tests pass without this
-void ForceFieldThread::CalculateGFNFFvdWContribution()
-{
-#pragma message("TODO (DEPRECATED - use Phase 4 pairwise): Implement proper GFN-FF dispersion with D4-like correction")
-    // TODO: GFN-FF uses sophisticated dispersion correction (similar to D4)
-    // This is a simplified implementation for testing
-
-    for (int index = 0; index < m_gfnff_vdWs.size(); ++index) {
-        const auto& vdw = m_gfnff_vdWs[index];
-        auto i = m_geometry.row(vdw.i);
-        auto j = m_geometry.row(vdw.j);
-
-        Vector rij = i - j;
-        double distance = rij.norm();
-
-        if (distance > 0) {
-            // Simplified van der Waals interaction
-            // TODO (DEPRECATED): Replace with proper GFN-FF dispersion calculation (use Phase 4 pairwise instead)
-            double C6 = vdw.C_ij;
-            double r0 = vdw.r0_ij;
-            double ratio = r0 / distance;
-
-            // Simple Lennard-Jones-like term (placeholder)
-            double energy = -C6 * pow(ratio, 6);
-
-            m_vdw_energy += energy * m_final_factor * m_vdw_scaling;
-
-            if (m_calculate_gradient) {
-                double dEdr = 6.0 * C6 * pow(ratio, 6) / distance * m_final_factor * m_vdw_scaling;
-                Vector grad = dEdr * rij / distance;
-                m_gradient.row(vdw.i) += grad.transpose();
-                m_gradient.row(vdw.j) -= grad.transpose();
-            }
-        }
-    }
-}
 
 // ============================================================================
 // Phase 4: GFN-FF Pairwise Non-Bonded Terms (Claude Generated 2025)

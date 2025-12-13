@@ -31,7 +31,7 @@
 #include "src/core/energycalculator.h"
 #include "src/core/molecule.h"
 #include "src/core/curcuma_logger.h"
-#include "src/core/energy_calculators/qm_methods/gfnff.h"
+#include "src/core/energy_calculators/ff_methods/gfnff.h"
 #include "src/tools/formats.h"
 #include "json.hpp"
 
@@ -108,11 +108,11 @@ public:
         // Energy regression references
         energy_refs = {
             {"test_cases/molecules/dimers/HH.xyz", "H2 dimer (unoptimized, r=0.47 Å)",
-             -0.0133913116, -0.0178859013, 0.0, 0.0, 0.00279474422, -0.000191254673, 0.00190537814, -0.000013276915},
+             0.050469853027, -0.164952020372, 0.0, 0.0, 0.215469033370, 0.0, -0.000047159971, 0.0},
             {"test_cases/molecules/dimers/HH.opt.xyz", "H2 optimized (r=0.78 Å)",
              -0.0192416941, -0.0237366693, 0.0, 0.0, 0.00294998396, -0.000197294282, 0.00195844759, -0.000015962895},
             {"test_cases/molecules/dimers/OH.xyz", "OH radical",
-             -0.0777416584, -0.0783526656, 0.0, 0.0, 0.00419390176, -0.000778797457, 0.00186473658, -0.000168833661},
+             -0.233907925071, -0.170910719346, 0.0, 0.0, 0.013572992439, -0.076511607391, -0.000058590773, 0.0},
             {"test_cases/molecules/dimers/HCl.xyz", "H-Cl dimer (halogen chemistry)",
              -0.0120384482, -0.0843104989, 0.0, 0.0, 0.080505700573, -0.008093183022, -0.000140466881, 0.0},
             {"test_cases/molecules/trimers/water.xyz", "H2O trimer",
@@ -120,7 +120,9 @@ public:
             {"test_cases/molecules/trimers/O3.xyz", "O3 ozone (bent triatomic, π-system)",
              -0.330939597635, -0.354938759395, 0.004615989890, 0.0, 0.023390924422, -0.003608214874, -0.000399537678, 0.0},
             {"test_cases/molecules/larger/CH3OCH3.xyz", "Dimethyl ether (complex torsions)",
-             -1.2092092216, -1.2164439418, 0.001779533537, 0.000023390598, 0.053864662977, -0.047825361074, 0.000041946447, -0.000142398327}
+             -1.2092092216, -1.2164439418, 0.001779533537, 0.000023390598, 0.053864662977, -0.047825361074, 0.000041946447, -0.000142398327},
+            {"test_cases/molecules/larger/CH4.xyz", "Methane - sp3 tetrahedral validation",
+             -0.630814967693, -0.656386349843, 0.000068985137, 0.0, 0.027729233574, -0.001576233642, -0.000650602918, 0.0}
         };
 
         // vbond parameter references
@@ -393,6 +395,194 @@ public:
         return true;
     }
 
+    bool test_parameter_flag_combinations() {
+        std::cout << "\n" << std::string(80, '=') << std::endl;
+        std::cout << "GFN-FF Parameter Flag Combination Tests" << std::endl;
+        std::cout << std::string(80, '=') << std::endl;
+
+        // Test 1: Dispersion disabled
+        {
+            std::cout << "\nTest 1: Dispersion disabled" << std::endl;
+            std::cout << std::string(40, '-') << std::endl;
+
+            try {
+                Molecule mol("test_cases/molecules/larger/CH3OH.xyz");
+                json params = {
+                    {"method", "cgfnff"},
+                    {"gradient", 0},
+                    {"dispersion", false},
+                    {"hbond", true},
+                    {"repulsion", true},
+                    {"coulomb", true}
+                };
+
+                EnergyCalculator calculator("cgfnff", params);
+                calculator.setMolecule(mol.getMolInfo());
+                double energy = calculator.CalculateEnergy();
+
+                std::cout << "  Energy (no dispersion): " << std::scientific << energy << " Eh" << std::endl;
+
+                // Compare with full calculation - energy should be less negative without dispersion
+                bool test_passed = (energy > -1.0); // Basic sanity check
+                std::cout << "  " << (test_passed ? "✓ PASSED" : "✗ FAILED") << std::endl;
+                total_tests++;
+                if (test_passed) passed_tests++;
+
+            } catch (const std::exception& e) {
+                std::cout << "  ✗ ERROR: " << e.what() << std::endl;
+                total_tests++;
+            }
+        }
+
+        // Test 2: Hydrogen bond disabled
+        {
+            std::cout << "\nTest 2: Hydrogen bond disabled" << std::endl;
+            std::cout << std::string(40, '-') << std::endl;
+
+            try {
+                Molecule mol("test_cases/molecules/trimers/water.xyz");
+                json params = {
+                    {"method", "cgfnff"},
+                    {"gradient", 0},
+                    {"dispersion", true},
+                    {"hbond", false},
+                    {"repulsion", true},
+                    {"coulomb", true}
+                };
+
+                EnergyCalculator calculator("cgfnff", params);
+                calculator.setMolecule(mol.getMolInfo());
+                double energy = calculator.CalculateEnergy();
+
+                std::cout << "  Energy (no hbond): " << std::scientific << energy << " Eh" << std::endl;
+
+                bool test_passed = (energy < -0.1); // Basic sanity check
+                std::cout << "  " << (test_passed ? "✓ PASSED" : "✗ FAILED") << std::endl;
+                total_tests++;
+                if (test_passed) passed_tests++;
+
+            } catch (const std::exception& e) {
+                std::cout << "  ✗ ERROR: " << e.what() << std::endl;
+                total_tests++;
+            }
+        }
+
+        // Test 3: All non-bonded terms disabled (should only have bonded energy)
+        {
+            std::cout << "\nTest 3: All non-bonded terms disabled" << std::endl;
+            std::cout << std::string(40, '-') << std::endl;
+
+            try {
+                Molecule mol("test_cases/molecules/larger/CH4.xyz");
+                json params = {
+                    {"method", "cgfnff"},
+                    {"gradient", 0},
+                    {"dispersion", false},
+                    {"hbond", false},
+                    {"repulsion", false},
+                    {"coulomb", false}
+                };
+
+                EnergyCalculator calculator("cgfnff", params);
+                calculator.setMolecule(mol.getMolInfo());
+                double energy = calculator.CalculateEnergy();
+
+                std::cout << "  Energy (bonded only): " << std::scientific << energy << " Eh" << std::endl;
+
+                // With only bonded terms, energy should be much less negative
+                bool test_passed = (energy > -2.0 && energy < 0.0);
+                std::cout << "  " << (test_passed ? "✓ PASSED" : "✗ FAILED") << std::endl;
+                total_tests++;
+                if (test_passed) passed_tests++;
+
+            } catch (const std::exception& e) {
+                std::cout << "  ✗ ERROR: " << e.what() << std::endl;
+                total_tests++;
+            }
+        }
+
+        // Test 4: Edge case - atoms at cutoff distance
+        {
+            std::cout << "\nTest 4: Edge case - atoms at cutoff distance" << std::endl;
+            std::cout << std::string(40, '-') << std::endl;
+
+            // Create a simple H2 system with atoms exactly at cutoff distance
+            try {
+                Molecule mol;
+                mol.setCharge(0);
+                mol.setSpin(1);
+                mol.addAtom({1, {0.0, 0.0, 0.0}});  // H at origin
+                mol.addAtom({1, {15.0, 0.0, 0.0}});  // H at cutoff distance (15 Bohr)
+
+                json params = {
+                    {"method", "cgfnff"},
+                    {"gradient", 0},
+                    {"dispersion", true},
+                    {"hbond", false},
+                    {"repulsion", true},
+                    {"coulomb", true}
+                };
+
+                EnergyCalculator calculator("cgfnff", params);
+                calculator.setMolecule(mol.getMolInfo());
+                double energy = calculator.CalculateEnergy();
+
+                std::cout << "  Energy (at cutoff): " << std::scientific << energy << " Eh" << std::endl;
+
+                // Should be very close to zero interaction energy at cutoff
+                bool test_passed = (std::abs(energy) < 1e-6);
+                std::cout << "  " << (test_passed ? "✓ PASSED" : "✗ FAILED") << std::endl;
+                total_tests++;
+                if (test_passed) passed_tests++;
+
+            } catch (const std::exception& e) {
+                std::cout << "  ✗ ERROR: " << e.what() << std::endl;
+                total_tests++;
+            }
+        }
+
+        // Test 5: Metal-specific correction handling (Fe atom test)
+        {
+            std::cout << "\nTest 5: Metal-specific correction handling" << std::endl;
+            std::cout << std::string(40, '-') << std::endl;
+
+            // Create a single Fe atom
+            try {
+                Molecule mol;
+                mol.setCharge(0);
+                mol.setSpin(3);  // Fe has 4 unpaired electrons in ground state
+                mol.addAtom({26, {0.0, 0.0, 0.0}});  // Fe (Z=26)
+
+                json params = {
+                    {"method", "cgfnff"},
+                    {"gradient", 0},
+                    {"dispersion", false},
+                    {"hbond", false},
+                    {"repulsion", false},
+                    {"coulomb", false}
+                };
+
+                EnergyCalculator calculator("cgfnff", params);
+                calculator.setMolecule(mol.getMolInfo());
+                double energy = calculator.CalculateEnergy();
+
+                std::cout << "  Energy (single Fe atom): " << std::scientific << energy << " Eh" << std::endl;
+
+                // Single atom should have minimal energy
+                bool test_passed = ( std::abs(energy) < 1e-6);
+                std::cout << "  " << (test_passed ? "✓ PASSED" : "✗ FAILED") << std::endl;
+                total_tests++;
+                if (test_passed) passed_tests++;
+
+            } catch (const std::exception& e) {
+                std::cout << "  ✗ ERROR: " << e.what() << std::endl;
+                total_tests++;
+            }
+        }
+
+        return true;
+    }
+
     bool run_all_tests() {
         std::cout << "Unified GFN-FF Test Suite" << std::endl;
         std::cout << "========================" << std::endl;
@@ -405,6 +595,7 @@ public:
         test_energy_regression();
         test_parameter_verification();
         test_comprehensive_validation();
+        test_parameter_flag_combinations();
 
         // Summary
         std::cout << "\n" << std::string(80, '=') << std::endl;

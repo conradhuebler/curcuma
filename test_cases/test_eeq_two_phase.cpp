@@ -8,7 +8,7 @@
  */
 
 #include <iostream>
-#include "../src/core/energy_calculators/qm_methods/gfnff.h"
+#include "../src/core/energy_calculators/ff_methods/gfnff.h"
 
 int main()
 {

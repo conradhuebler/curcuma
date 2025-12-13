@@ -23,6 +23,7 @@
 
 // Method implementations
 #include "ff_methods/forcefield_method.h"
+#include "ff_methods/gfnff_method.h"
 #include "qm_methods/dispersion_method.h"
 #include "qm_methods/eht_method.h"
 #include "qm_methods/external_gfnff_method.h"
@@ -168,7 +169,7 @@ const std::vector<MethodFactory::MethodPriority>& MethodFactory::getPriorityMeth
                 { "External GFN-FF", [](const json& config) { return hasGFNFF() ? std::make_unique<ExternalGFNFFMethod>(config) : nullptr; } },
                 #endif
                 { "XTB", [](const json& config) { return hasXTB() ? std::make_unique<XTBMethod>("gfnff", config) : nullptr; } },
-                { "Native", [](const json& config) { return std::make_unique<GFNFFMethod>(config); } } } }
+                { "Native", [](const json& config) { return std::make_unique<GFNFFComputationalMethod>("cgfnff", config); } } } }
     };
 
     return priority_methods;
@@ -178,7 +179,7 @@ const std::vector<MethodFactory::ExplicitMethod>& MethodFactory::getExplicitMeth
     static const std::vector<ExplicitMethod> explicit_methods = {
         // Native methods (always available)
         { "eht", [](const json& config) { return std::make_unique<EHTMethod>(config); }, "Native", false, "" },
-        { "cgfnff", [](const json& config) { return std::make_unique<GFNFFMethod>(config); }, "Native", false, "" },
+        { "cgfnff", [](const json& config) { return std::make_unique<GFNFFComputationalMethod>("cgfnff", config); }, "Native", false, "" },
 
         // Force field methods (always available)
         { "uff", [](const json& config) { return std::make_unique<ForceFieldMethod>("uff", config); }, "ForceField", false, "" },
@@ -203,27 +204,14 @@ const std::vector<MethodFactory::ExplicitMethod>& MethodFactory::getExplicitMeth
         { "mndopddg", [](const json& config) { return std::make_unique<UlyssesMethod>("mndopddg", config); }, "Ulysses", true, "USE_ULYSSES" },
         { "pm3bp", [](const json& config) { return std::make_unique<UlyssesMethod>("pm3bp", config); }, "Ulysses", true, "USE_ULYSSES" },
 
-        // Methods with D3H4X corrections
-        { "pm6-d3h4x", [](const json& config) { return std::make_unique<UlyssesMethod>("pm6-d3h4x", config); }, "Ulysses", true, "USE_ULYSSES" },
-        { "am1-d3h4x", [](const json& config) { return std::make_unique<UlyssesMethod>("am1-d3h4x", config); }, "Ulysses", true, "USE_ULYSSES" },
-        { "pm3-d3h4x", [](const json& config) { return std::make_unique<UlyssesMethod>("pm3-d3h4x", config); }, "Ulysses", true, "USE_ULYSSES" },
-        { "mndo-d3h4x", [](const json& config) { return std::make_unique<UlyssesMethod>("mndo-d3h4x", config); }, "Ulysses", true, "USE_ULYSSES" },
-        { "mndod-d3h4x", [](const json& config) { return std::make_unique<UlyssesMethod>("mndod-d3h4x", config); }, "Ulysses", true, "USE_ULYSSES" },
-        { "rm1-d3h4x", [](const json& config) { return std::make_unique<UlyssesMethod>("rm1-d3h4x", config); }, "Ulysses", true, "USE_ULYSSES" },
-        { "pm3pddg-d3h4x", [](const json& config) { return std::make_unique<UlyssesMethod>("pm3pddg-d3h4x", config); }, "Ulysses", true, "USE_ULYSSES" },
-        { "mndopddg-d3h4x", [](const json& config) { return std::make_unique<UlyssesMethod>("mndopddg-d3h4x", config); }, "Ulysses", true, "USE_ULYSSES" },
-        { "pm3bp-d3h4x", [](const json& config) { return std::make_unique<UlyssesMethod>("pm3bp-d3h4x", config); }, "Ulysses", true, "USE_ULYSSES" },
+        // Semi-empirical methods with corrections
+        { "pm6", [](const json& config) { return std::make_unique<UlyssesMethod>("pm6", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "am1", [](const json& config) { return std::make_unique<UlyssesMethod>("am1", config); }, "Ulysses", true, "USE_ULYSSES" },
+        { "pm3", [](const json& config) { return std::make_unique<UlyssesMethod>("pm3", config); }, "Ulysses", true, "USE_ULYSSES" },
 
-        // Methods with D3H+ corrections
-        { "pm6-d3h+", [](const json& config) { return std::make_unique<UlyssesMethod>("pm6-d3h+", config); }, "Ulysses", true, "USE_ULYSSES" },
-        { "am1-d3h+", [](const json& config) { return std::make_unique<UlyssesMethod>("am1-d3h+", config); }, "Ulysses", true, "USE_ULYSSES" },
-        { "pm3-d3h+", [](const json& config) { return std::make_unique<UlyssesMethod>("pm3-d3h+", config); }, "Ulysses", true, "USE_ULYSSES" },
-        { "mndo-d3h+", [](const json& config) { return std::make_unique<UlyssesMethod>("mndo-d3h+", config); }, "Ulysses", true, "USE_ULYSSES" },
-        { "mndod-d3h+", [](const json& config) { return std::make_unique<UlyssesMethod>("mndod-d3h+", config); }, "Ulysses", true, "USE_ULYSSES" },
-        { "rm1-d3h+", [](const json& config) { return std::make_unique<UlyssesMethod>("rm1-d3h+", config); }, "Ulysses", true, "USE_ULYSSES" },
-        { "pm3pddg-d3h+", [](const json& config) { return std::make_unique<UlyssesMethod>("pm3pddg-d3h+", config); }, "Ulysses", true, "USE_ULYSSES" },
-        { "mndopddg-d3h+", [](const json& config) { return std::make_unique<UlyssesMethod>("mndopddg-d3h+", config); }, "Ulysses", true, "USE_ULYSSES" },
-        { "pm3bp-d3h+", [](const json& config) { return std::make_unique<UlyssesMethod>("pm3bp-d3h+", config); }, "Ulysses", true, "USE_ULYSSES" },
+        // Native methods
+        { "eht", [](const json& config) { return std::make_unique<EHTMethod>(config); }, "EHT", true, "USE_EHT" },
+        { "cgfnff", [](const json& config) { return std::make_unique<GFNFFComputationalMethod>("cgfnff", config); }, "GFN-FF", true, "USE_GFNFF" },
 
         // Dispersion corrections
         { "d3", [](const json& config) { return std::make_unique<DispersionMethod>("d3", config); }, "DFT-D3", true, "USE_D3" },

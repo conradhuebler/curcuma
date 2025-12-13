@@ -1,5 +1,5 @@
 /*
- * < Native GFN-FF Method Wrapper for ComputationalMethod Interface >
+ * < GFN-FF Computational Method Wrapper >
  * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -20,60 +20,48 @@
 #pragma once
 
 #include "../computational_method.h"
-#include "gfnff.h"
+#include "../ff_methods/gfnff.h"
 
 #include <memory>
 
 /**
- * @brief Native GFN-FF method wrapper for ComputationalMethod interface
- * 
- * This wrapper adapts Curcuma's native GFN-FF implementation (cgfnff)
- * to the unified ComputationalMethod interface. This is the "cgfnff" 
- * method - Curcuma's own implementation of the GFN-FF force field.
- * 
- * Status: WORK IN PROGRESS - Architecture complete, parameter generation debugging needed
- * 
- * Claude Generated: Big-Bang EnergyCalculator refactoring wrapper
+ * @brief ComputationalMethod adapter for GFN-FF
+ *
+ * This wrapper provides the ComputationalMethod interface for the native
+ * GFN-FF implementation, allowing it to be used through the EnergyCalculator
+ * polymorphic system.
  */
-class GFNFFMethod : public ComputationalMethod {
+class GFNFFComputationalMethod : public ComputationalMethod {
 public:
-    explicit GFNFFMethod(const json& config = json{});
-    virtual ~GFNFFMethod() = default;
-    
+    GFNFFComputationalMethod(const std::string& method_name, const json& config);
+    ~GFNFFComputationalMethod() = default;
+
     // ComputationalMethod interface
     bool setMolecule(const Mol& mol) override;
-    bool updateGeometry(const Matrix& geometry) override;
     double calculateEnergy(bool gradient = false) override;
-
     Matrix getGradient() const override;
     Vector getCharges() const override;
     Vector getBondOrders() const override;
     Position getDipole() const override;
+    bool updateGeometry(const Matrix& geometry) override;
     bool hasGradient() const override { return true; }
-    
+    bool isThreadSafe() const override { return false; }
     std::string getMethodName() const override { return "cgfnff"; }
-    bool isThreadSafe() const override { return true; }
+
+    // Configuration
     void setThreadCount(int threads) override;
-    
     void setParameters(const json& params) override;
     json getParameters() const override;
+
+    // Error handling
     bool hasError() const override;
     void clearError() override;
     std::string getErrorMessage() const override;
 
-    // Force field energy component access (Nov 2025)
-    double getBondEnergy() const override;
-    double getAngleEnergy() const override;
-    double getDihedralEnergy() const override;
-    double getInversionEnergy() const override;
-    double getVdWEnergy() const override;
-    double getRepulsionEnergy() const override;
-    double getDispersionEnergy() const override;
-    double getCoulombEnergy() const override;
-
 private:
     std::unique_ptr<GFNFF> m_gfnff;
-    Mol m_molecule;
-    bool m_calculation_done;
-    double m_last_energy;
+    json m_parameters;
+    bool m_has_error = false;
+    std::string m_error_message;
+    double m_last_energy = 0.0;
 };

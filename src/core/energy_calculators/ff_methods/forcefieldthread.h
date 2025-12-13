@@ -297,6 +297,12 @@ public:
     double HydrogenBondEnergy() { return m_energy_hbond; }
     double HalogenBondEnergy() { return m_energy_xbond; }
 
+    // Phase 2: GFN-FF parameter flag setters (Claude Generated Dec 2025)
+    void setDispersionEnabled(bool enabled) { m_dispersion_enabled = enabled; }
+    void setHydrogenBondEnabled(bool enabled) { m_hbond_enabled = enabled; }
+    void setRepulsionEnabled(bool enabled) { m_repulsion_enabled = enabled; }
+    void setCoulombEnabled(bool enabled) { m_coulomb_enabled = enabled; }
+
     Matrix Gradient() const { return m_gradient; }
 
 private:
@@ -391,6 +397,13 @@ protected:
     // Built once in execute() to avoid O(N_bonds × log(N_bonds)) overhead per energy call
     std::set<std::pair<int, int>> m_bonded_pairs;
     bool m_bonded_pairs_cached = false;
+
+    // Phase 2: Parameter flags for GFN-FF term control (Claude Generated Dec 2025)
+    // These control which energy terms are calculated - saves CPU time for disabled terms
+    bool m_dispersion_enabled = true;
+    bool m_hbond_enabled = true;
+    bool m_repulsion_enabled = true;
+    bool m_coulomb_enabled = true;
 };
 
 #ifdef USE_D3

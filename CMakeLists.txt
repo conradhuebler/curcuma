@@ -244,15 +244,15 @@ set(curcuma_core_SRC
         src/capabilities/qmdfffit.cpp
         src/core/energy_calculators/qm_methods/eht.cpp
         src/core/energy_calculators/qm_methods/eht_parameters.cpp
-        src/core/energy_calculators/qm_methods/gfnff.cpp
-        src/core/energy_calculators/qm_methods/gfnff_advanced.cpp
-        src/core/energy_calculators/qm_methods/gfnff_torsions.cpp
-        src/core/energy_calculators/qm_methods/gfnff_inversions.cpp
+        src/core/energy_calculators/qm_methods/gfnff_method.cpp
+        src/core/energy_calculators/ff_methods/gfnff_method.cpp
+        src/core/energy_calculators/ff_methods/gfnff_advanced.cpp
+        src/core/energy_calculators/ff_methods/gfnff_torsions.cpp
+        src/core/energy_calculators/ff_methods/gfnff_inversions.cpp
         src/core/energy_calculators/qm_methods/qm_driver.cpp
         src/core/energy_calculators/qm_methods/ulyssesinterface.cpp
         src/core/energy_calculators/method_factory.cpp
         src/core/energy_calculators/qm_methods/eht_method.cpp
-        src/core/energy_calculators/qm_methods/gfnff_method.cpp
         src/core/energy_calculators/qm_methods/xtb_method.cpp
         src/core/energy_calculators/qm_methods/tblite_method.cpp
         src/core/energy_calculators/qm_methods/ulysses_method.cpp
