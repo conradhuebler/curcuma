@@ -107,34 +107,34 @@ public:
     void setup_reference_data() {
         // Energy regression references
         energy_refs = {
-            {"molecules/dimers/HH.xyz", "H2 dimer (unoptimized, r=0.47 Å)",
+            {"test_cases/molecules/dimers/HH.xyz", "H2 dimer (unoptimized, r=0.47 Å)",
              -0.0133913116, -0.0178859013, 0.0, 0.0, 0.00279474422, -0.000191254673, 0.00190537814, -0.000013276915},
-            {"molecules/dimers/HH.opt.xyz", "H2 optimized (r=0.78 Å)",
+            {"test_cases/molecules/dimers/HH.opt.xyz", "H2 optimized (r=0.78 Å)",
              -0.0192416941, -0.0237366693, 0.0, 0.0, 0.00294998396, -0.000197294282, 0.00195844759, -0.000015962895},
-            {"molecules/dimers/OH.xyz", "OH radical",
+            {"test_cases/molecules/dimers/OH.xyz", "OH radical",
              -0.0777416584, -0.0783526656, 0.0, 0.0, 0.00419390176, -0.000778797457, 0.00186473658, -0.000168833661},
-            {"molecules/dimers/HCl.xyz", "H-Cl dimer (halogen chemistry)",
+            {"test_cases/molecules/dimers/HCl.xyz", "H-Cl dimer (halogen chemistry)",
              -0.0120384482, -0.0843104989, 0.0, 0.0, 0.080505700573, -0.008093183022, -0.000140466881, 0.0},
-            {"molecules/trimers/water.xyz", "H2O trimer",
+            {"test_cases/molecules/trimers/water.xyz", "H2O trimer",
              -0.2130633276, -0.2159236329, 0.00123926595, 0.0, 0.00702065869, -0.00139899241, 0.00480579676, -0.000806423657},
-            {"molecules/trimers/O3.xyz", "O3 ozone (bent triatomic, π-system)",
+            {"test_cases/molecules/trimers/O3.xyz", "O3 ozone (bent triatomic, π-system)",
              -0.330939597635, -0.354938759395, 0.004615989890, 0.0, 0.023390924422, -0.003608214874, -0.000399537678, 0.0},
-            {"molecules/larger/CH3OCH3.xyz", "Dimethyl ether (complex torsions)",
+            {"test_cases/molecules/larger/CH3OCH3.xyz", "Dimethyl ether (complex torsions)",
              -1.2092092216, -1.2164439418, 0.001779533537, 0.000023390598, 0.053864662977, -0.047825361074, 0.000041946447, -0.000142398327}
         };
 
         // vbond parameter references
         vbond_refs = {
-            {"molecules/dimers/HH.xyz", 0, "H-H bond", 0.0, 1.889726124565, 0.020104827311},
-            {"molecules/dimers/HH.opt.xyz", 0, "H-H bond (optimized)", 0.0, 1.889726124565, 0.020104827311},
-            {"molecules/dimers/OH.xyz", 0, "O-H bond", 0.0, 2.101777932193, 0.037073626719},
-            {"molecules/larger/CH4.xyz", 0, "C-H bond", 0.0, 1.879923356919, 0.009696223926},
-            {"molecules/larger/CH4.xyz", 1, "C-H bond (equivalent)", 0.0, 1.879923356919, 0.009696223926}
+            {"test_cases/molecules/dimers/HH.xyz", 0, "H-H bond", 0.0, 1.889726124565, 0.020104827311},
+            {"test_cases/molecules/dimers/HH.opt.xyz", 0, "H-H bond (optimized)", 0.0, 1.889726124565, 0.020104827311},
+            {"test_cases/molecules/dimers/OH.xyz", 0, "O-H bond", 0.0, 2.101777932193, 0.037073626719},
+            {"test_cases/molecules/larger/CH4.xyz", 0, "C-H bond", 0.0, 1.879923356919, 0.009696223926},
+            {"test_cases/molecules/larger/CH4.xyz", 1, "C-H bond (equivalent)", 0.0, 1.879923356919, 0.009696223926}
         };
 
         // Comprehensive validation references
         comprehensive_refs = {
-            {"molecules/larger/CH3OH.xyz", "Methanol - comprehensive validation",
+            {"test_cases/molecules/larger/CH3OH.xyz", "Methanol - comprehensive validation",
              {
                  {"C", 3.48}, {"O", 1.91},
                  {"H_methyl", 0.050}, {"H_hydroxyl", 0.050}
@@ -181,21 +181,45 @@ public:
 
                 Mol mol_info = mol.getMolInfo();
 
-                // Calculate energy components via EnergyCalculator
-                nlohmann::json controller;
-                controller["method"] = "cgfnff";
-                controller["cgfnff"]["verbosity"] = 0;
+                // PHASE 1 FIX: Direct GFNFF instantiation for component access
+                // (Claude Generated 2025-12-13)
+                GFNFF gfnff;
+                bool init_success = gfnff.InitialiseMolecule(mol_info);
+                if (!init_success) {
+                    std::cout << "  ✗ ERROR: GFNFF initialization failed" << std::endl;
+                    total_tests++;
+                    continue;
+                }
 
-                EnergyCalculator calculator("cgfnff", controller);
-                calculator.setMolecule(mol_info);
-                double energy = calculator.CalculateEnergy();
+                double energy = gfnff.Calculation(false);  // false = no gradient
 
-                // Get detailed energy breakdown directly from GFNFF method
-                // This requires access to the method instance
-                std::map<std::string, double> components;
+                // NOW we can access all energy components!
+                double E_bond = gfnff.BondEnergy();
+                double E_angle = gfnff.AngleEnergy();
+                double E_torsion = gfnff.DihedralEnergy();
+                double E_repulsion = gfnff.RepulsionEnergy();
+                double E_coulomb = gfnff.CoulombEnergy();
+                double E_dispersion = gfnff.DispersionEnergy();
+
+                // Store in map for later validation (Phase 2)
+                std::map<std::string, double> components = {
+                    {"bond", E_bond},
+                    {"angle", E_angle},
+                    {"torsion", E_torsion},
+                    {"repulsion", E_repulsion},
+                    {"coulomb", E_coulomb},
+                    {"dispersion", E_dispersion}
+                };
 
                 if (config.verbosity >= 2) {
                     std::cout << "  Total energy: " << std::fixed << std::setprecision(8) << energy << " Hartree" << std::endl;
+                    std::cout << "  Energy components:" << std::endl;
+                    std::cout << "    Bond:       " << std::setw(12) << E_bond << " Eh" << std::endl;
+                    std::cout << "    Angle:      " << std::setw(12) << E_angle << " Eh" << std::endl;
+                    std::cout << "    Torsion:    " << std::setw(12) << E_torsion << " Eh" << std::endl;
+                    std::cout << "    Repulsion:  " << std::setw(12) << E_repulsion << " Eh" << std::endl;
+                    std::cout << "    Coulomb:    " << std::setw(12) << E_coulomb << " Eh" << std::endl;
+                    std::cout << "    Dispersion: " << std::setw(12) << E_dispersion << " Eh" << std::endl;
                 }
 
                 // Validate total energy
@@ -207,6 +231,33 @@ public:
                     std::cout << "  ✗ Total energy: error = " << std::scientific << energy_error << " Hartree (expected " << std::fixed << std::setprecision(8) << ref.total_energy << ")" << std::endl;
                 }
                 total_tests++;
+
+                // Validate individual energy components
+                std::map<std::string, double> ref_components = {
+                    {"bond", ref.bond_energy},
+                    {"angle", ref.angle_energy},
+                    {"torsion", ref.torsion_energy},
+                    {"repulsion", ref.repulsion_energy},
+                    {"coulomb", ref.electrostat_energy},
+                    {"dispersion", ref.dispersion_energy}
+                };
+
+                for (const auto& [name, value] : components) {
+                    double reference = ref_components[name];
+                    double error = std::abs(value - reference);
+
+                    if (error < config.component_tolerance) {
+                        std::cout << "  ✓ " << name << " energy: error = "
+                                  << std::scientific << error << " Eh" << std::endl;
+                        passed_tests++;
+                    } else {
+                        std::cout << "  ✗ " << name << " energy: error = "
+                                  << std::scientific << error
+                                  << " Eh (got " << std::fixed << std::setprecision(8) << value
+                                  << ", expected " << reference << ")" << std::endl;
+                    }
+                    total_tests++;
+                }
 
             } catch (const std::exception& e) {
                 std::cout << "  ✗ ERROR: " << e.what() << std::endl;
