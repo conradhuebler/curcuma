@@ -757,11 +757,11 @@ void ForceField::AutoRanges()
             thread->setMethod(1);
         } else if (std::find(m_qmdff_methods.begin(), m_qmdff_methods.end(), m_method) != m_qmdff_methods.end()) {
             thread->setMethod(2);
-        } else if (m_method == "gfnff") {
+        } else if (m_method == "gfnff" || m_method == "cgfnff") { // Claude Generated (2025-12-13): Support both method names
             thread->setMethod(3); // GFN-FF
         }
         for (int j = int(i * m_bonds.size() / double(free_threads)); j < int((i + 1) * m_bonds.size() / double(free_threads)); ++j) {
-            if (m_method == "gfnff") {
+            if (m_method == "gfnff" || m_method == "cgfnff") { // Claude Generated (2025-12-13): Support both method names
                 thread->addGFNFFBond(m_bonds[j]);
             } else {
                 thread->addBond(m_bonds[j]);
@@ -801,7 +801,7 @@ void ForceField::AutoRanges()
         }
 
         // Phase 4.2: Distribute GFN-FF pairwise non-bonded interactions (Claude Generated 2025)
-        if (m_method == "gfnff") {
+        if (m_method == "gfnff" || m_method == "cgfnff") { // Claude Generated (2025-12-13): Support both method names
             for (int j = int(i * m_gfnff_dispersions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_dispersions.size() / double(free_threads)); ++j) {
                 thread->addGFNFFDispersion(m_gfnff_dispersions[j]);
             }
@@ -1103,6 +1103,16 @@ bool ForceField::autoSaveParameters() const
 
 double ForceField::Calculate(bool gradient)
 {
+    // Claude Generated (2025-12-13): Check for uninitialized ForceField
+    if (m_stored_threads.empty()) {
+        CurcumaLogger::error("ForceField::Calculate() - ForceField not initialized! No threads available.");
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("This usually means setParameter() was not called or AutoRanges() failed.");
+            CurcumaLogger::info("Check if parameter generation succeeded and produced valid JSON arrays.");
+        }
+        return 0.0;
+    }
+
     // Level 3+: Calculation debug info
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Starting force field calculation");

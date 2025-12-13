@@ -37,6 +37,13 @@ bool GFNFFMethod::setMolecule(const Mol& mol) {
         CurcumaLogger::info("=== GFNFFMethod::setMolecule() START ===");
         CurcumaLogger::param("atoms", std::to_string(mol.m_number_atoms));
         CurcumaLogger::param("charge", std::to_string(mol.m_charge));
+        CurcumaLogger::param("global_verbosity", std::to_string(CurcumaLogger::get_verbosity()));
+        CurcumaLogger::param("m_gfnff", m_gfnff ? "exists" : "NULLPTR!");
+    }
+
+    if (!m_gfnff) {
+        CurcumaLogger::error("GFNFFMethod: m_gfnff is nullptr!");
+        return false;
     }
 
     m_molecule = mol;
@@ -47,14 +54,17 @@ bool GFNFFMethod::setMolecule(const Mol& mol) {
     }
 
     if (!m_gfnff->InitialiseMolecule(mol)) {
-        CurcumaLogger::error("GFNFF::InitialiseMolecule failed");
-        CurcumaLogger::param("will_set_m_initialized", "FALSE");
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::error("GFNFF::InitialiseMolecule failed - returning false");
+            CurcumaLogger::param("will_set_m_initialized", "FALSE");
+        }
         m_initialized = false;  // Explicitly set to false on failure
         return false;
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success("GFNFF::InitialiseMolecule completed successfully");
+        CurcumaLogger::info("About to set m_initialized = true");
     }
 
     m_initialized = true;

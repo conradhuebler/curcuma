@@ -52,6 +52,8 @@
 #include "src/tools/formats.h"  // For fmt::format
 #include <cmath>
 #include <iostream>
+#include <array>
+#include <set>
 
 using namespace GFNFFParameters;
 
@@ -944,10 +946,14 @@ json GFNFF::generateGFNFFTorsions() const
 
     for (int i = 0; i < m_atomcount; ++i) {
         for (int j = i + 1; j < m_atomcount; ++j) {
-            double distance = (m_geometry.row(i) - m_geometry.row(j)).norm();
+            // m_geometry is in Angstrom, but getCovalentRadius returns Bohr
+            // Convert distance to Bohr to match covalent radii units
+            double distance_angstrom = (m_geometry.row(i) - m_geometry.row(j)).norm();
+            double distance_bohr = distance_angstrom * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
             double rcov_sum = getCovalentRadius(m_atoms[i]) + getCovalentRadius(m_atoms[j]);
+            double threshold = bond_threshold * rcov_sum;
 
-            if (distance < bond_threshold * rcov_sum) {
+            if (distance_bohr < threshold) {
                 bond_list.push_back({i, j});
             }
         }
@@ -973,29 +979,11 @@ json GFNFF::generateGFNFFTorsions() const
     // ==========================================================================
     // STEP 3: Detect hybridization for all atoms
     // ==========================================================================
-    // Simplified hybridization based on neighbor count:
-    //   - 2 neighbors: sp  (linear)
-    //   - 3 neighbors: sp² (trigonal planar)
-    //   - 4 neighbors: sp³ (tetrahedral)
-    //
-    // TODO (Phase 2): Geometry-based hybridization (angle analysis)
-    // TODO (Phase 2): Pi-system detection for conjugated systems
+    // Use topology-based hybridization from determineHybridization() for consistency
+    // This ensures the oxygen hybridization fix is applied to torsions as well
 
-    std::vector<int> hybridization(m_atomcount, 3); // Default: sp³
-
-    for (int i = 0; i < m_atomcount; ++i) {
-        int n_neighbors = neighbors[i].size();
-
-        if (n_neighbors <= 1) {
-            hybridization[i] = 1; // Terminal or isolated atom → sp (conservative)
-        } else if (n_neighbors == 2) {
-            hybridization[i] = 1; // Linear → sp
-        } else if (n_neighbors == 3) {
-            hybridization[i] = 2; // Trigonal → sp²
-        } else {
-            hybridization[i] = 3; // Tetrahedral or higher → sp³
-        }
-    }
+    const TopologyInfo& topo = getCachedTopology();
+    const std::vector<int>& hybridization = topo.hybridization;
 
     // ==========================================================================
     // STEP 4: Generate all i-j-k-l torsion sequences
@@ -1007,9 +995,33 @@ json GFNFF::generateGFNFFTorsions() const
 
     int torsion_count = 0;
 
+    // Claude Generated Fix (2025-12-12): Add duplicate tracking to prevent torsion explosion
+    // Problem: Dimethyl ether (CH3OCH3) generates 132 torsions instead of ~15 due to duplicates
+    // Solution: Track generated torsions in a set with canonical ordering
+    // Enhanced Fix (2025-12-13): Improved canonicalization to handle all symmetry cases
+    std::set<std::array<int, 4>> generated_torsions;
+
+    // Debug counter for total iterations
+    int total_iterations = 0;
+    int bond_count = 0;
+
     for (const auto& central_bond : bond_list) {
         int j = central_bond.first;
         int k = central_bond.second;
+
+        bond_count++;
+
+        // Only process each bond once to avoid duplication
+        // We only process bonds where j < k
+        if (j >= k) {
+            continue;
+        }
+
+        // Only consider bonds where both atoms have at least 2 neighbors as potential central bonds
+        // This prevents terminal bonds (like C-H in ethane) from being central bonds
+        if (neighbors[j].size() < 2 || neighbors[k].size() < 2) {
+            continue;
+        }
 
         // Special case: Skip if either central atom is sp (linear)
         // Physical reason: Linear atoms have no torsional barrier
@@ -1027,6 +1039,31 @@ json GFNFF::generateGFNFFTorsions() const
 
                 // Skip if i == l (4-membered ring edge case)
                 if (i == l) continue;
+
+                total_iterations++;
+
+                // ==========================================================
+                // STEP 4.5: Check for duplicates using improved canonical ordering
+                // ==========================================================
+                // Enhanced Fix (2025-12-13): More robust duplicate detection
+                // Problem: Previous canonicalization only considered i < l but didn't account
+                // for all possible symmetries in molecular structures
+                // Solution: Create a fully canonical representation that accounts for:
+                //   1. Both forward (i-j-k-l) and reverse (l-k-j-i) representations
+                //   2. Proper lexicographic ordering of the torsion indices
+
+                // Create both possible representations of the same torsion
+                std::array<int, 4> forward_key = {i, j, k, l};
+                std::array<int, 4> reverse_key = {l, k, j, i};
+
+                // Choose the lexicographically smaller representation as the canonical form
+                std::array<int, 4> torsion_key = (forward_key < reverse_key) ? forward_key : reverse_key;
+
+                // Skip if this torsion was already generated
+                if (generated_torsions.count(torsion_key) > 0) {
+                    continue;
+                }
+                generated_torsions.insert(torsion_key);
 
                 // ==========================================================
                 // STEP 5: Check for linear geometry
@@ -1100,6 +1137,11 @@ json GFNFF::generateGFNFFTorsions() const
                     in_ring, ring_size, j, k
                 );
 
+                // Skip torsions with zero barrier height
+                if (std::abs(params.barrier_height) < 1e-10) {
+                    continue;
+                }
+
                 // ==========================================================
                 // STEP 7: Store in JSON format
                 // ==========================================================
@@ -1134,9 +1176,17 @@ json GFNFF::generateGFNFFTorsions() const
     } else {
         CurcumaLogger::info("GFN-FF detected " + std::to_string(torsion_count) + " torsions");
 
+        // Debug output for analysis
+        std::cout << "DEBUG: Total iterations: " << total_iterations << ", Unique torsions: " << generated_torsions.size() << std::endl;
+        std::cout << "DEBUG: All generated torsions:" << std::endl;
+        int torsion_index = 0;
+        for (const auto& torsion : generated_torsions) {
+            std::cout << "  " << torsion_index++ << ": [" << torsion[0] << ", " << torsion[1] << ", " << torsion[2] << ", " << torsion[3] << "]" << std::endl;
+        }
+
         // Optional: Print summary by periodicity
         int n1_count = 0, n2_count = 0, n3_count = 0;
-        for (const auto& torsion : torsions) {
+        for (const auto& torsion : torsions) { // Claude Generated Fix (2025-12-13): Changed from torsions["dihedrals"] to torsions
             int n = torsion["n"];  // Claude Generated Fix (2025-11-30): Changed from "periodicity" to "n"
             if (n == 1) n1_count++;
             else if (n == 2) n2_count++;

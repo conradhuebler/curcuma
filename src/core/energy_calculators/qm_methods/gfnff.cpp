@@ -355,14 +355,21 @@ bool GFNFF::initializeForceField()
         CurcumaLogger::info("About to call m_forcefield->setParameter()...");
     }
 
-    m_forcefield->setParameter(ff_params);
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::success("m_forcefield->setParameter() completed successfully");
+    try {
+        m_forcefield->setParameter(ff_params);
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::success("m_forcefield->setParameter() completed successfully");
+        }
+    } catch (const std::exception& e) {
+        CurcumaLogger::error(std::string("m_forcefield->setParameter() failed: ") + e.what());
+        return false;
     }
 
-    // Phase 5A: Distribute EEQ charges to all ForceFieldThreads for fqq calculation
-    // Claude Generated (Nov 2025)
+    // Phase 5A: Distribute EEQ charges - DISABLED (Session 10, Dec 2025)
+    // Claude Generated: This code was moved to generateGFNFFParameters() where charges are actually calculated
+    // Running this here would distribute EMPTY charges (m_charges is still Zero at this point)
+    // and overwrite the correct charges distributed in generateGFNFFParameters()
+    /*
     if (!m_charges.isZero()) {
         m_forcefield->distributeEEQCharges(m_charges);
         if (CurcumaLogger::get_verbosity() >= 3) {
@@ -370,6 +377,7 @@ bool GFNFF::initializeForceField()
             CurcumaLogger::param("charge_count", std::to_string(m_charges.size()));
         }
     }
+    */
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success("ForceField initialization complete");
@@ -385,7 +393,9 @@ json GFNFF::generateGFNFFParameters()
     parameters["e0"] = 0.0;
 
     // Check if advanced parametrization is enabled
-    bool use_advanced = m_parameters.value("use_advanced_parametrization", false);
+    // ACTIVATED (Session 10, Dec 2025): Two-Phase EEQ System now default
+    // Claude Generated: Enable advanced parametrization (Two-Phase EEQ) by default
+    bool use_advanced = m_parameters.value("use_advanced_parametrization", true);
 
     if (use_advanced) {
         std::cout << "Using advanced GFN-FF parametrization (experimental)" << std::endl;
@@ -439,6 +449,27 @@ json GFNFF::generateGFNFFParameters()
         parameters["gfnff_repulsions"] = generateGFNFFRepulsionPairs();
         parameters["gfnff_dispersions"] = generateGFNFFDispersionPairs();
 
+        // Claude Generated (2025-12-13): Validation logging for parameter generation
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param("Generated bonds", static_cast<int>(parameters["bonds"].size()));
+            CurcumaLogger::param("Generated angles", static_cast<int>(parameters["angles"].size()));
+            CurcumaLogger::param("Generated dihedrals", static_cast<int>(parameters["dihedrals"].size()));
+            CurcumaLogger::param("Generated inversions", static_cast<int>(parameters["inversions"].size()));
+            CurcumaLogger::param("Generated coulombs", static_cast<int>(parameters["gfnff_coulombs"].size()));
+            CurcumaLogger::param("Generated repulsions", static_cast<int>(parameters["gfnff_repulsions"].size()));
+            CurcumaLogger::param("Generated dispersions", static_cast<int>(parameters["gfnff_dispersions"].size()));
+
+            // Verify correct structure
+            if (!parameters["bonds"].is_array())
+                CurcumaLogger::error("bonds is not an array!");
+            if (!parameters["angles"].is_array())
+                CurcumaLogger::error("angles is not an array!");
+            if (!parameters["dihedrals"].is_array())
+                CurcumaLogger::error("dihedrals is not an array!");
+            if (!parameters["inversions"].is_array())
+                CurcumaLogger::error("inversions is not an array!");
+        }
+
         parameters["vdws"] = json::array(); // Legacy vdW (will be replaced by pairwise)
 
         // Phase 2.3: HB/XB Detection (Claude Generated 2025)
@@ -459,6 +490,16 @@ json GFNFF::generateGFNFFParameters()
 
         // Use calculated charges instead of loading from file
         m_charges = topo_info.eeq_charges;
+
+        // CRITICAL FIX (Session 10, Dec 2025): Distribute Two-Phase EEQ charges to ForceFieldThreads
+        // Claude Generated: This enables charge-dependent fqq corrections in bond energy
+        if (m_forcefield && !m_charges.isZero()) {
+            m_forcefield->distributeEEQCharges(m_charges);
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info("Two-Phase EEQ charges distributed to ForceFieldThreads [advanced mode]");
+                CurcumaLogger::param("charge_count", std::to_string(m_charges.size()));
+            }
+        }
 
     } else {
         std::cout << "Using basic GFN-FF parametrization" << std::endl;
@@ -505,6 +546,16 @@ json GFNFF::generateGFNFFParameters()
 
         // Store topology charges for use in other functions
         m_charges = topo_info.eeq_charges;
+
+        // CRITICAL FIX (Session 10, Dec 2025): Distribute EEQ charges to ForceFieldThreads
+        // Claude Generated: This enables charge-dependent fqq corrections in bond energy
+        if (m_forcefield && !m_charges.isZero()) {
+            m_forcefield->distributeEEQCharges(m_charges);
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info("EEQ charges distributed to ForceFieldThreads [basic mode]");
+                CurcumaLogger::param("charge_count", std::to_string(m_charges.size()));
+            }
+        }
 
         // Phase 4.2: Generate pairwise non-bonded parameters
         parameters["gfnff_coulombs"] = generateGFNFFCoulombPairs();
@@ -884,8 +935,10 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 
     // Step 3: Phase 2 - Row-dependent EN correction
     // Fortran gfnff_rab.f90:144-152
-    double en1 = (z1 >= 1 && z1 <= static_cast<int>(en_gfnff.size())) ? en_gfnff[z1 - 1] : 2.0;
-    double en2 = (z2 >= 1 && z2 <= static_cast<int>(en_gfnff.size())) ? en_gfnff[z2 - 1] : 2.0;
+    // CRITICAL FIX: Use Pauling electronegativity values for bond calculation
+    // Reference implementation uses Pauling EN values, not GFN-FF Chi values
+    double en1 = (z1 >= 1 && z1 <= static_cast<int>(Elements::PaulingEN.size())) ? Elements::PaulingEN[z1] : 2.2;
+    double en2 = (z2 >= 1 && z2 <= static_cast<int>(Elements::PaulingEN.size())) ? Elements::PaulingEN[z2] : 2.2;
 
     int row1 = getPeriodicTableRow(z1);
     int row2 = getPeriodicTableRow(z2);
@@ -1015,8 +1068,10 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // Solution: H-H and H-X bonds should be SINGLE BONDS (bstrength=1.0)
     double bstrength;
 
-    if (z1 == 1 || z2 == 1) {
-        // Hydrogen bonds are always single bonds in GFN-FF
+    // Special case for H-H bonds (both atoms Z=1)
+    // For H-H, this would incorrectly use triple bond strength (bsmat[0][0] = 1.000)
+    // which actually happens to be correct for single bonds, but let's be explicit
+    if (z1 == 1 && z2 == 1) {
         bstrength = bstren[1];  // 1.00 (single bond)
     } else {
         // Get bond strength from hybridization matrix (Fortran gfnff_ini.f90:1127-1133)
@@ -1388,19 +1443,14 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     double alpha_sum = 1.0 + alpha_term1 + alpha_term2;
     params.alpha = srb1 * alpha_sum;
 
-    // Debug output for alpha calculation (always on for CH4 debugging)
-    if (z1 == 6 && z2 == 1) {  // C-H bond
-        const bool DEBUG_ALPHA_VERBOSE = false;  // Set to true for detailed alpha debugging
-        if (DEBUG_ALPHA_VERBOSE) {
-            std::cout << fmt::format("DEBUG ALPHA (C-H): srb1={:.10f}, fsrb2={:.10f}, en_diff={:.10f}, en_diff²={:.10f}\n",
-                                     srb1, fsrb2, en_diff, en_diff * en_diff);
-            std::cout << fmt::format("DEBUG ALPHA: term1={:.10f}, term2={:.10f}, sum={:.10f}, alpha={:.10f}\n",
-                                     alpha_term1, alpha_term2, alpha_sum, params.alpha);
-            std::cout << fmt::format("DEBUG ALPHA: srb2={:.10f}, srb3={:.10f}, bstrength={:.10f}, mtyp1={}, mtyp2={}\n",
-                                     srb2, srb3, bstrength, mtyp1, mtyp2);
-            std::cout << fmt::format("DEBUG ALPHA EXPECTED: 0.482285756225, GOT: {:.10f}, DIFF: {:.10f}\n",
-                                     params.alpha, 0.482285756225 - params.alpha);
-        }
+    // Debug output for alpha calculation (always on for H-containing bonds)
+    if (z1 == 1 || z2 == 1) {  // H-containing bonds
+        std::cout << fmt::format("DEBUG ALPHA (H-bond Z1={} Z2={}): srb1={:.10f}, fsrb2={:.10f}, en_diff={:.10f}, en_diff²={:.10f}\n",
+                                 z1, z2, srb1, fsrb2, en_diff, en_diff * en_diff);
+        std::cout << fmt::format("DEBUG ALPHA: term1={:.10f}, term2={:.10f}, sum={:.10f}, alpha={:.10f}\n",
+                                 alpha_term1, alpha_term2, alpha_sum, params.alpha);
+        std::cout << fmt::format("DEBUG ALPHA: srb2={:.10f}, srb3={:.10f}, bstrength={:.10f}\n",
+                                 srb2, srb3, bstrength);
     }
 
     // Debug output for force constant calculation (always on for HH/CH4)
@@ -1444,24 +1494,12 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     // Get center atom data
     int z_center = m_atoms[atom_j];
 
-    // Claude Generated (Nov 2025): Determine hybridization of center atom for θ₀ lookup
-    // Count neighbors to determine hybridization
-    int neighbor_count = 0;
-    for (int i = 0; i < m_atomcount; ++i) {
-        if (i == atom_j) continue;
-        double distance = (m_geometry_bohr.row(atom_j) - m_geometry_bohr.row(i)).norm();
-        // Bond threshold: 2.5 Bohr (~1.32 Å) to catch C-H bonds at ~2.05 Bohr
-        // Claude Generated Fix (2025-11-30): Previous threshold 2.0 Bohr missed C-H bonds!
-        // C-H bond: ~1.09 Å = 2.06 Bohr → need threshold > 2.06
-        if (distance < 2.5) neighbor_count++;  // Bohr units
+    // Claude Generated (Dec 2025): Use topology-based hybridization from determineHybridization()
+    // This ensures consistency with the oxygen hybridization fix and other topology-aware calculations
+    int hyb_center = 3; // Default sp³
+    if (atom_j < topo_info.hybridization.size()) {
+        hyb_center = topo_info.hybridization[atom_j];
     }
-
-    // Assign hybridization based on neighbor count and Z
-    int hyb_center = 3;  // Default sp³
-    if (neighbor_count <= 1) hyb_center = 1;    // sp (linear/terminal)
-    else if (neighbor_count == 2) hyb_center = 2;  // sp² (for C, N, O) or linear for others
-    else if (neighbor_count == 3) hyb_center = 3;  // sp³
-    else if (neighbor_count >= 5) hyb_center = 5;  // hypervalent
 
     // Get angle parameters for center atom and neighbors
     int z_i = m_atoms[atom_i];
@@ -1612,12 +1650,55 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
         default:  r0_deg = 100.0;   // Fallback
     }
 
-    // TODO (Phase 2+): Element-specific corrections
+    // Phase 2+: Element-specific corrections
     // Reference: gfnff_ini.f90:1486-1599
     // - Water: θ₀=100°, f2=1.20 for H-O-H
     // - Aromatic: θ₀=120° for aromatic C and Si
     // - Ring corrections: 3-ring=82°, 4-ring=96°, etc.
     // - Metal coordination: Special cases for transition metals
+
+    // Phase 2+: Element-specific corrections
+    // Reference: gfnff_ini.f90:1486-1599
+    // - Water: θ₀=100°, f2=1.20 for H-O-H
+    // - Aromatic: θ₀=120° for aromatic C and Si
+    // - Ring corrections: 3-ring=82°, 4-ring=96°, etc.
+    // - Metal coordination: Special cases for transition metals
+
+    // Calculate neighbors of central atom for element-specific corrections
+    std::vector<int> neighbors;
+    for (int i = 0; i < m_atomcount; ++i) {
+        if (i == atom_j) continue;
+        double distance = (m_geometry_bohr.row(atom_j) - m_geometry_bohr.row(i)).norm();
+        if (distance < 2.5) {  // Bond threshold in Bohr
+            neighbors.push_back(i);
+        }
+    }
+
+    // Oxygen corrections: More accurate angle values based on Fortran reference
+    // Reference: gfnff_ini.f90:1560-1575
+    if (m_atoms[atom_j] == 8) {  // Central atom is oxygen
+        // Default O with 2 neighbors: 104.5°
+        if (neighbors.size() == 2) {
+            r0_deg = 104.5;
+
+            // H2O case: both neighbors are hydrogen
+            int nh_count = 0;
+            if (m_atoms[atom_i] == 1) nh_count++;
+            if (m_atoms[atom_k] == 1) nh_count++;
+            if (nh_count == 2) {
+                r0_deg = 100.0;  // H-O-H equilibrium angle
+            }
+        }
+    }
+
+    // Nitrogen corrections: More accurate angle values based on Fortran reference
+    // Reference: gfnff_ini.f90:1577-1585
+    if (m_atoms[atom_j] == 7) {  // Central atom is nitrogen
+        // Default N with 2 neighbors: 115°
+        if (neighbors.size() == 2) {
+            r0_deg = 115.0;
+        }
+    }
 
     // Convert to radians
     params.equilibrium_angle = r0_deg * M_PI / 180.0;
@@ -1920,8 +2001,15 @@ std::vector<int> GFNFF::determineHybridization() const
         int neighbor_count = neighbors.size();
 
         // Step 2: Geometry-based hybridization assignment
-        if (neighbor_count == 0 || neighbor_count == 1) {
-            hyb[i] = 1; // sp (terminal or diatomic)
+        if (neighbor_count == 0) {
+            hyb[i] = 3; // sp3 (isolated atom)
+        } else if (neighbor_count == 1) {
+            // Special case for hydrogen and halogens: always sp3
+            if (z == 1 || (z >= 9 && z <= 17)) {  // H or halogens (F, Cl, Br, I)
+                hyb[i] = 0; // sp3 for hydrogen and halogens (matches reference implementation)
+            } else {
+                hyb[i] = 1; // sp (terminal non-hydrogen/halogen atom)
+            }
 
         } else if (neighbor_count == 2) {
             // Check if linear (sp) or bent (sp2)
@@ -2690,9 +2778,20 @@ json GFNFF::generateTopologyAwareAngles(const Vector& cn, const std::vector<int>
                 topo_compat.coordination_numbers = cn;  // Use provided CN
                 topo_compat.hybridization = hyb;  // Use provided hybridization
 
-                auto angle_params = getGFNFFAngleParameters(m_atoms[neighbors[i]],
-                    m_atoms[center],
-                    m_atoms[neighbors[j]],
+                // Initialize metal flags (needed for angle parameter calculation)
+                topo_compat.is_metal.resize(m_atomcount, false);
+                for (int i = 0; i < m_atomcount; ++i) {
+                    int z = m_atoms[i];
+                    // Mark metals (simplified: transition metals and lanthanides/actinides)
+                    if ((z >= 21 && z <= 30) || (z >= 39 && z <= 48) ||
+                        (z >= 57 && z <= 80) || (z >= 89 && z <= 103)) {
+                        topo_compat.is_metal[i] = true;
+                    }
+                }
+
+                auto angle_params = getGFNFFAngleParameters(neighbors[i],
+                    center,
+                    neighbors[j],
                     current_angle,
                     topo_compat);
 

@@ -77,88 +77,39 @@ endif()
 # Note: test_cg_forcefield_integration removed due to complex linking with curcuma_D3
 # CG functionality will be tested via CLI integration test instead
 
-# Claude Generated: GFN-FF Regression Test Suite
-# Tests native cgfnff against XTB 6.6.1 reference data (Nov 2025)
+# Claude Generated: Unified GFN-FF Test Suite
+# Combines regression, parameter, and comprehensive validation tests (Dec 2025)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/molecules/dimers/HH.xyz
           ${CMAKE_CURRENT_SOURCE_DIR}/molecules/dimers/HH.opt.xyz
           ${CMAKE_CURRENT_SOURCE_DIR}/molecules/dimers/OH.xyz
+          ${CMAKE_CURRENT_SOURCE_DIR}/molecules/dimers/HCl.xyz
           DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/molecules/dimers/)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/molecules/trimers/water.xyz
+          ${CMAKE_CURRENT_SOURCE_DIR}/molecules/trimers/O3.xyz
+          ${CMAKE_CURRENT_SOURCE_DIR}/molecules/trimers/HCN.xyz
           DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/molecules/trimers/)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/CH4.xyz
           ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/CH3OCH3.xyz
+          ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/CH3OH.xyz
           ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/CH3OCH3.log
           DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/)
 
-add_executable(test_gfnff_regression
-        test_gfnff_regression.cpp)
+add_executable(test_gfnff_unified
+        test_gfnff_unified.cpp)
 
-target_link_libraries(test_gfnff_regression curcuma_core)
-
-if(USE_PCH)
-        target_precompile_headers(test_gfnff_regression REUSE_FROM curcuma_core)
-endif()
-
-# Claude Generated: GFN-FF vbond Parameter Verification Test
-# Tests that Curcuma's native cgfnff implementation generates correct vbond parameters (Nov 2025)
-add_executable(test_gfnff_vbond
-        test_gfnff_vbond.cpp)
-
-target_link_libraries(test_gfnff_vbond curcuma_core)
+target_link_libraries(test_gfnff_unified curcuma_core)
 
 if(USE_PCH)
-        target_precompile_headers(test_gfnff_vbond REUSE_FROM curcuma_core)
-endif()
-
-# Claude Generated: Direct GFN-FF Parameter Generation Test
-# Tests GFNFF class parameter generation directly with debug output (Nov 2025)
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/molecules/dimers/HH.xyz
-          ${CMAKE_CURRENT_SOURCE_DIR}/molecules/dimers/OH.xyz
-          ${CMAKE_CURRENT_SOURCE_DIR}/molecules/dimers/HCl.xyz
-          DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/molecules/dimers/)
-
-add_executable(test_gfnff_params_direct
-        test_gfnff_params_direct.cpp)
-
-target_link_libraries(test_gfnff_params_direct curcuma_core)
-
-if(USE_PCH)
-        target_precompile_headers(test_gfnff_params_direct REUSE_FROM curcuma_core)
-endif()
-
-# Claude Generated: GFN-FF CH3OH Comprehensive Validation Test (Dec 2025)
-# Validates Curcuma native GFN-FF against XTB 6.6.1 Fortran reference
-# Tests: Coordination Numbers, EEQ charges, Total energy
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/CH3OH.xyz
-          DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/)
-
-add_executable(test_gfnff_ch3oh
-        test_gfnff_ch3oh.cpp)
-
-target_link_libraries(test_gfnff_ch3oh curcuma_core)
-
-if(USE_PCH)
-        target_precompile_headers(test_gfnff_ch3oh REUSE_FROM curcuma_core)
+        target_precompile_headers(test_gfnff_unified REUSE_FROM curcuma_core)
 endif()
 
 # Register with CTest
-add_test(NAME test_gfnff_regression
-         COMMAND test_gfnff_regression ${CMAKE_CURRENT_BINARY_DIR})
+add_test(NAME test_gfnff_unified
+         COMMAND test_gfnff_unified
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test_cases)
 
-add_test(NAME test_gfnff_vbond
-         COMMAND test_gfnff_vbond ${CMAKE_CURRENT_BINARY_DIR})
-
-add_test(NAME test_gfnff_params_direct
-         COMMAND test_gfnff_params_direct)
-
-add_test(NAME test_gfnff_ch3oh
-         COMMAND test_gfnff_ch3oh)
-
-# Configure test timeouts and grouping
-set_tests_properties(test_gfnff_regression PROPERTIES TIMEOUT 30 LABELS "gfnff")
-set_tests_properties(test_gfnff_vbond PROPERTIES TIMEOUT 30 LABELS "gfnff")
-set_tests_properties(test_gfnff_params_direct PROPERTIES TIMEOUT 30 LABELS "gfnff")
-set_tests_properties(test_gfnff_ch3oh PROPERTIES TIMEOUT 30 LABELS "gfnff")
+# Configure test timeout and grouping
+set_tests_properties(test_gfnff_unified PROPERTIES TIMEOUT 60 LABELS "gfnff")
 
 # Claude Generated (Session 5): Periodic Table utility tests
 add_executable(test_periodic_table
@@ -205,3 +156,13 @@ add_test(NAME test_eeq_two_phase
 # Claude Generated: CLI argument validation test suite (October 2025)
 # Include comprehensive Bash-based CLI tests for all capabilities
 add_subdirectory(cli)
+
+# Add debug executable
+add_executable(debug_molecule
+        ../debug_molecule.cpp)
+
+target_link_libraries(debug_molecule curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(debug_molecule REUSE_FROM curcuma_core)
+endif()
