@@ -93,6 +93,15 @@ test_cases/**/*.dat
 *.opt.xyz
 *.trj.xyz
 
+# Debug executables and analysis scripts - Claude Generated December 2025
+debug_*
+*_analysis.py
+*_analysis.md
+test_fix.py
+Testing/
+FINAL_COMMIT_MESSAGE.md
+COMMIT_MESSAGE_*.md
+
 
 # Downloaded external dependencies (should be fetched via submodules/CMake)
 external/eigen-3.4.0.zip
