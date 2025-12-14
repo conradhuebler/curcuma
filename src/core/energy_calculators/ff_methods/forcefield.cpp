@@ -828,6 +828,22 @@ void ForceField::AutoRanges()
             for (int j = int(i * m_gfnff_coulombs.size() / double(free_threads)); j < int((i + 1) * m_gfnff_coulombs.size() / double(free_threads)); ++j) {
                 thread->addGFNFFCoulomb(m_gfnff_coulombs[j]);
             }
+
+            // Phase 6: Distribute atoms for self-energy calculation (Claude Generated Dec 2025)
+            // CRITICAL: Each atom assigned to EXACTLY ONE thread to avoid duplicate self-energy
+            // Distribute all atoms (0 to natoms-1) across threads
+            int start_atom = int(i * m_natoms / double(free_threads));
+            int end_atom = int((i + 1) * m_natoms / double(free_threads));
+            std::vector<int> assigned_atoms;
+            for (int atom_id = start_atom; atom_id < end_atom; ++atom_id) {
+                assigned_atoms.push_back(atom_id);
+            }
+            thread->assignAtomsForSelfEnergy(assigned_atoms);
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::param(fmt::format("thread_{}_atoms_for_self_energy", i),
+                    fmt::format("[{}, {}) = {} atoms", start_atom, end_atom, assigned_atoms.size()));
+            }
         }
 
         for (int j = int(i * m_EQs.size() / double(free_threads)); j < int((i + 1) * m_EQs.size() / double(free_threads)); ++j)

@@ -247,9 +247,17 @@ public:
     void addGFNFFRepulsion(const GFNFFRepulsion& repulsion);
     void addGFNFFCoulomb(const GFNFFCoulomb& coulomb);
 
+    // D3/D4 parameter integration methods
+    void addD3Dispersion(const GFNFFDispersion& d3_dispersion);
+    void addD4Dispersion(const GFNFFDispersion& d4_dispersion);
+
     // Phase 1.2: GFN-FF hydrogen bond and halogen bond addition methods (Claude Generated 2025)
     void addGFNFFHydrogenBond(const GFNFFHydrogenBond& hbond);
     void addGFNFFHalogenBond(const GFNFFHalogenBond& xbond);
+
+    // Phase 6: Assign atoms for self-energy calculation (Claude Generated Dec 2025)
+    // Thread-safe: Each thread calculates self-energy only for its assigned atoms
+    void assignAtomsForSelfEnergy(const std::vector<int>& atom_indices);
 
     // Phase 3: Initialize atom types for covalent radius calculations in GFN-FF
     void Initialise(const std::vector<int>& atom_types)
@@ -292,6 +300,10 @@ public:
     // Phase 4: GFN-FF pairwise non-bonded energy components (Claude Generated 2025)
     double DispersionEnergy() { return m_dispersion_energy; }
     double CoulombEnergy() { return m_coulomb_energy; }
+
+    // Claude Generated 2025: Native D3/D4 energy components
+    double D3Energy() { return m_d3_energy; }
+    double D4Energy() { return m_d4_energy; }
 
     // Phase 1.2: HB/XB energy components (Claude Generated 2025)
     double HydrogenBondEnergy() { return m_energy_hbond; }
@@ -363,6 +375,15 @@ private:
     std::vector<GFNFFRepulsion> m_gfnff_repulsions;    // GFN-FF repulsion
     std::vector<GFNFFCoulomb> m_gfnff_coulombs;        // EEQ Coulomb electrostatics
 
+    // Phase 6: Atom assignment for self-energy calculation (Claude Generated Dec 2025)
+    // Each thread gets a subset of atoms to calculate self-energy terms
+    // This prevents duplicate self-energy when same atom appears in multiple threads
+    std::vector<int> m_assigned_atoms_for_self_energy;
+
+    // D3/D4 native dispersion pairs
+    std::vector<GFNFFDispersion> m_d3_dispersions;  // Native D3 parameters
+    std::vector<GFNFFDispersion> m_d4_dispersions;  // Native D4 parameters
+
     // Phase 1.2: GFN-FF hydrogen bond and halogen bond terms (Claude Generated 2025)
     std::vector<GFNFFHydrogenBond> m_gfnff_hbonds;     // Hydrogen bonds (HB)
     std::vector<GFNFFHalogenBond> m_gfnff_xbonds;      // Halogen bonds (XB)
@@ -374,6 +395,8 @@ protected:
     // Phase 4: Separate energy components for GFN-FF non-bonded terms
     double m_dispersion_energy = 0.0;  // D3/D4 dispersion
     double m_coulomb_energy = 0.0;     // EEQ Coulomb electrostatics
+    double m_d3_energy = 0.0;          // Native D3 dispersion
+    double m_d4_energy = 0.0;          // Native D4 dispersion
 
     // Phase 1.2: HB/XB energy components (Claude Generated 2025)
     double m_energy_hbond = 0.0;       // Hydrogen bond energy
