@@ -22,8 +22,13 @@
 #include "src/core/config_manager.h"
 #include "src/core/units.h"
 
+// Native D3/D4 dispersion via ForceField system
+#include "src/core/energy_calculators/ff_methods/forcefield.h"
+#include "src/core/energy_calculators/ff_methods/forcefieldgenerator.h"
+
 #ifdef USE_D3
 #include "src/core/energy_calculators/qm_methods/dftd3interface.h"
+#include "src/core/energy_calculators/ff_methods/d3param_generator.h"
 #endif
 
 #ifdef USE_D4
@@ -33,7 +38,6 @@
 #include "json.hpp"
 
 using json = nlohmann::json;
-using curcuma::Molecule;
 
 // ============================================================================
 // CONSTANTS
@@ -557,19 +561,6 @@ void DispersionTester::setupReferences() {
 // ============================================================================
 
 bool DispersionTester::testD3(const DispersionReference& ref) {
-#ifndef USE_D3
-    TestResult result;
-    result.test_id = generateTestID(ref);
-    result.molecule_name = ref.molecule_name;
-    result.method = "D3";
-    result.functional = ref.functional;
-    result.skipped = true;
-    result.error_message = "D3 not compiled (USE_D3=OFF)";
-    m_results.push_back(result);
-    skipped_tests++;
-    total_tests++;
-    return true;
-#else
     TestResult result;
     result.test_id = generateTestID(ref);
     result.molecule_name = ref.molecule_name;
@@ -580,7 +571,7 @@ bool DispersionTester::testD3(const DispersionReference& ref) {
 
     try {
         // Load molecule
-        Molecule mol(ref.molecule_file);
+        curcuma::Molecule mol(ref.molecule_file);
 
         // Validate atom count
         if (mol.AtomCount() != ref.n_atoms) {
@@ -591,42 +582,52 @@ bool DispersionTester::testD3(const DispersionReference& ref) {
             return false;
         }
 
-        // Create D3 configuration
-        json d3_config = {
-            {"functional", ref.functional},
-            {"damping", ref.damping},
-            {"three_body", ref.three_body}
-        };
-
-        // Override parameters if custom values provided
-        if (ref.s6 > 0.0) d3_config["s6"] = ref.s6;
-        if (ref.s8 > 0.0) d3_config["s8"] = ref.s8;
-        if (ref.s9 > 0.0) d3_config["s9"] = ref.s9;
-
-        ConfigManager config("dftd3", d3_config);
-
-        // Initialize D3 interface
         auto start = std::chrono::high_resolution_clock::now();
 
-        DFTD3Interface d3(config);
-        std::vector<int> atomtypes;
-        for (int i = 0; i < mol.AtomCount(); ++i) {
-            atomtypes.push_back(mol.Atom(i).first);
-        }
-        d3.InitialiseMolecule(atomtypes);
+        // Create configuration with D3 parameters (JSON for ForceField)
+        // NOTE: Using UFF as base method, which will generate bonds/angles/etc and also D3 dispersion
+        json ff_config = {
+            {"method", "uff"},                      // Use UFF method for base calculation + D3 dispersion
+            {"d3method", "d3"},                     // Enable native D3
+            {"d3_functional", ref.functional},      // Functional: pbe0, b3lyp, etc.
+            {"d3_damping", ref.damping},            // Damping: bj, zero, etc.
+            {"d3_s6", ref.s6 > 0.0 ? ref.s6 : 1.0},
+            {"d3_s8", ref.s8 > 0.0 ? ref.s8 : 1.0},
+            {"d3_s9", ref.s9 > 0.0 ? ref.s9 : (ref.three_body ? 1.0 : 0.0)},
+            {"d3_a1", 0.4},                         // BJ damping a1
+            {"d3_a2", 4.0},                         // BJ damping a2 (Bohr)
+            {"d3_alp", 14.0},                       // Alpha parameter
+            {"threads", 1},                         // Single thread for tests
+            {"verbosity", 0}                        // Silent mode for tests
+        };
 
-        // Update geometry (convert Angstrom to Bohr)
-        std::vector<double> coords_bohr;
-        for (int i = 0; i < mol.AtomCount(); ++i) {
-            auto pos = mol.Atom(i).second;
-            coords_bohr.push_back(CurcumaUnit::Length::angstrom_to_bohr(pos(0)));
-            coords_bohr.push_back(CurcumaUnit::Length::angstrom_to_bohr(pos(1)));
-            coords_bohr.push_back(CurcumaUnit::Length::angstrom_to_bohr(pos(2)));
-        }
-        d3.UpdateGeometry(coords_bohr.data());
+        // Convert curcuma::Molecule to Mol struct for ForceField compatibility
+        Mol mol_struct;
+        mol_struct.m_geometry = mol.getGeometry();
+        mol_struct.m_atoms = mol.Atoms();
+        mol_struct.m_number_atoms = mol.AtomCount();
+        mol_struct.m_partial_charges = mol.getPartialCharges();
+        mol_struct.m_charge = mol.Charge();
+        mol_struct.m_energy = 0.0;
+        mol_struct.m_spin = 0.0;
 
-        // Calculate dispersion energy (no gradient)
-        result.calculated_energy = d3.Calculation(false);
+        // Use D3ParameterGenerator to calculate D3 dispersion energy
+        ConfigManager d3_config("d3param", ff_config);
+        D3ParameterGenerator d3_gen(d3_config);
+        d3_gen.GenerateParameters(mol_struct.m_atoms, mol_struct.m_geometry);
+        json d3_params = d3_gen.getParameters();
+
+        // Calculate D3 energy by summing all dispersion pair energies
+        double d3_energy = 0.0;
+        if (d3_params.contains("d3_dispersion_pairs") && d3_params["d3_dispersion_pairs"].is_array()) {
+            const auto& pairs = d3_params["d3_dispersion_pairs"];
+            for (const auto& pair : pairs) {
+                if (pair.contains("energy") && pair["energy"].is_number()) {
+                    d3_energy += pair["energy"].get<double>();
+                }
+            }
+        }
+        result.calculated_energy = d3_energy;
 
         auto end = std::chrono::high_resolution_clock::now();
         result.time_seconds = std::chrono::duration<double>(end - start).count();
@@ -658,7 +659,6 @@ bool DispersionTester::testD3(const DispersionReference& ref) {
     if (result.passed && !result.skipped) passed_tests++;
 
     return result.passed;
-#endif
 }
 
 bool DispersionTester::testD4(const DispersionReference& ref) {
@@ -685,7 +685,7 @@ bool DispersionTester::testD4(const DispersionReference& ref) {
 
     try {
         // Load molecule
-        Molecule mol(ref.molecule_file);
+        curcuma::Molecule mol(ref.molecule_file);
 
         // Validate atom count
         if (mol.AtomCount() != ref.n_atoms) {

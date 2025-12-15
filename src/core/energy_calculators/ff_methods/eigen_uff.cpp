@@ -1384,9 +1384,20 @@ void eigenUFF::readUFF(const json& parameters)
 
     // Claude Generated (December 2025): UFF D3/D4 dispersion integration - Phase 4.3
     // Generate dispersion pairs using the new integrated approach
+    bool enable_dispersion = false;
+
+    // UFF enables dispersion through the d3 parameter
+    if (parameter.contains("d3") && parameter["d3"].get<int>() > 0) {
+        enable_dispersion = true;
+    }
+    // Also support the explicit use_dispersion flag for consistency
     if (parameter.contains("use_dispersion") && parameter["use_dispersion"].get<bool>()) {
+        enable_dispersion = true;
+    }
+
+    if (enable_dispersion) {
         if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::info("Generating UFF dispersion pairs via integrated parameter generation");
+            CurcumaLogger::info("Generating UFF dispersion pairs via integrated D3/D4 parameter generation");
         }
 
         json dispersion_pairs = generateDispersionPairs();
@@ -1397,10 +1408,14 @@ void eigenUFF::readUFF(const json& parameters)
 
         // Store dispersion pairs in parameters for ForceFieldThread to use
         parameter["uff_dispersion_pairs"] = dispersion_pairs;
+
+        // Mark that dispersion is enabled
+        parameter["use_dispersion"] = true;
     } else {
         if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::info("UFF dispersion disabled by user configuration");
+            CurcumaLogger::info("UFF dispersion disabled - no d3 parameter found");
         }
+        parameter["use_dispersion"] = false;
     }
 
     m_d = parameter["differential"].get<double>();
@@ -1927,7 +1942,6 @@ json eigenUFF::generateDispersionPairs() const
 
     // Step 4: Try D3 (fallback from D4)
     if (method == "d3") {
-#ifdef USE_D3
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info("Using D3ParameterGenerator for UFF dispersion");
         }
@@ -1936,24 +1950,29 @@ json eigenUFF::generateDispersionPairs() const
             ConfigManager d3_config = extractDispersionConfig("d3");
             D3ParameterGenerator d3_gen(d3_config);
 
-            // NOTE: D3 needs geometry, but current generator interface doesn't support it
-            // This will fallback to free-atom since D3ParameterGenerator::GenerateParameters() is not fully implemented
-            if (CurcumaLogger::get_verbosity() >= 2) {
-                CurcumaLogger::warn("D3ParameterGenerator not yet fully implemented, using free-atom approximation");
+            // Generate D3 parameters with full geometry support
+            d3_gen.GenerateParameters(m_mol.m_atoms, m_geometry);
+            json d3_params = d3_gen.getParameters();
+
+            if (!d3_params.contains("d3_dispersion_pairs")) {
+                if (CurcumaLogger::get_verbosity() >= 1) {
+                    CurcumaLogger::error("D3 parameter generation failed (no d3_dispersion_pairs)");
+                }
+                return generateFreeAtomDispersion();  // Fallback if generation failed
             }
-            return generateFreeAtomDispersion();  // Fallback
+
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::info("D3 parameters generated successfully: {} dispersion pairs",
+                    d3_params["d3_dispersion_pairs"].size());
+            }
+
+            return d3_params["d3_dispersion_pairs"];  // Return actual D3 parameters
         } catch (const std::exception& e) {
             if (CurcumaLogger::get_verbosity() >= 1) {
-                CurcumaLogger::error("D3 generation failed: {}, using free-atom approximation", e.what());
+                CurcumaLogger::error("D3 generation exception: {}, using free-atom approximation", e.what());
             }
             return generateFreeAtomDispersion();  // Fallback
         }
-#else
-        if (CurcumaLogger::get_verbosity() >= 1) {
-            CurcumaLogger::warn("D3 not compiled (USE_D3 not defined), using free-atom approximation");
-        }
-        return generateFreeAtomDispersion();  // Fallback
-#endif
     }
 
     // Step 5: Final fallback (always works)

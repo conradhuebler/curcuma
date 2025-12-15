@@ -161,8 +161,12 @@ void ForceField::setParameter(const json& parameters)
             setvdWs(parameters["vdws"]);
 
         // Phase 4.2: GFN-FF pairwise non-bonded parameters (Claude Generated 2025)
+        // Support both "gfnff_dispersions" (from GFNFF) and "d3_dispersion_pairs" (from D3ParameterGenerator)
         if (parameters.contains("gfnff_dispersions"))
             setGFNFFDispersions(parameters["gfnff_dispersions"]);
+        else if (parameters.contains("d3_dispersion_pairs"))
+            setGFNFFDispersions(parameters["d3_dispersion_pairs"]);
+
         if (parameters.contains("gfnff_repulsions"))
             setGFNFFRepulsions(parameters["gfnff_repulsions"]);
         if (parameters.contains("gfnff_coulombs"))
