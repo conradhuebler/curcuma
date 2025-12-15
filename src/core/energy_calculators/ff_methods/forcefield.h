@@ -181,4 +181,5 @@ private:
     json m_parameters;
     std::string m_auto_param_file; // Auto-detected parameter file path
     bool m_enable_caching = true; // Can be disabled for multi-threading
+    bool m_in_setParameter = false; // Claude Generated: Recursive guard for setParameter()
 };

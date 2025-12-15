@@ -106,14 +106,18 @@ void ForceField::distributeEEQCharges(const Vector& charges)
 
 void ForceField::setParameter(const json& parameters)
 {
-    static bool in_setParameter = false;
-    if (in_setParameter) {
+    // Claude Generated: Fix recursive guard - use member variable, not static
+    if (m_in_setParameter) {
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::warn("Recursive setParameter call detected - preventing infinite loop");
         }
+        std::cout << "DEBUG: setParameter() RECURSION - returning early!" << std::endl;
         return;
     }
-    in_setParameter = true;
+    m_in_setParameter = true;
+
+    // Claude Generated: Debug - always log setParameter entry
+    // std::cout << "DEBUG: ForceField::setParameter() ENTRY (set in_setParameter=true)" << std::endl;
 
     std::string method_name = "unknown";
     if (parameters.contains("method") && !parameters["method"].is_null()) {
@@ -189,7 +193,9 @@ void ForceField::setParameter(const json& parameters)
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("Calculating parameter ranges");
         }
+        std::cout << "DEBUG: About to call AutoRanges()..." << std::endl;
         AutoRanges();
+        std::cout << "DEBUG: AutoRanges() completed" << std::endl;
 
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info("Parameter generation complete");
@@ -234,7 +240,7 @@ void ForceField::setParameter(const json& parameters)
         CurcumaLogger::info("Parameter summary completed");
     }
 
-    in_setParameter = false; // Reset the recursive guard
+    m_in_setParameter = false; // Reset the recursive guard - FIX: use member variable
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success("ForceField::setParameter() complete");
@@ -716,13 +722,25 @@ void ForceField::setESPs(const json& esps)
 
 void ForceField::AutoRanges()
 {
-    // Level 3+: AutoRanges debug info
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("Setting up force field calculation ranges");
-        CurcumaLogger::param("method", m_method);
-        CurcumaLogger::param("bonds", static_cast<int>(m_bonds.size()));
-        CurcumaLogger::param("angles", static_cast<int>(m_angles.size()));
-        CurcumaLogger::param("threads", m_threads);
+        // Level 3+: AutoRanges debug info
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Setting up force field calculation ranges");
+            CurcumaLogger::param("method", m_method);
+            CurcumaLogger::param("bonds", static_cast<int>(m_bonds.size()));
+            CurcumaLogger::param("angles", static_cast<int>(m_angles.size()));
+            CurcumaLogger::param("threads", m_threads);
+        }
+
+    // Claude Generated: Clear stored threads before creating new ones
+    // This prevents thread accumulation in AutoRanges() if called multiple times
+    if (!m_stored_threads.empty()) {
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::warn("Clearing " + std::to_string(m_stored_threads.size()) + " existing threads before creating new ones");
+        }
+        for (auto t : m_stored_threads) {
+            delete t;
+        }
+        m_stored_threads.clear();
     }
 
     int free_threads = m_threads;
@@ -754,12 +772,21 @@ void ForceField::AutoRanges()
         m_stored_threads.push_back(thread);
     }
     */
-    for (int i = 0; i < free_threads; ++i) {
-        ForceFieldThread* thread = new ForceFieldThread(i, free_threads);
+
+    // Claude Generated: Ensure at least 1 thread is created for energy calculations
+    // (free_threads could be 0 if all threads are reserved for D3/H4 corrections)
+    int thread_count = (free_threads > 0) ? free_threads : 1;
+
+    for (int i = 0; i < thread_count; ++i) {
+        ForceFieldThread* thread = new ForceFieldThread(i, thread_count);
         thread->setGeometry(m_geometry, false);
         thread->Initialise(m_atom_types);  // Phase 3: Initialize atom types for covalent radius calculations
         m_threadpool->addThread(thread);
         m_stored_threads.push_back(thread);
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param("created_thread", i);
+        }
         if (std::find(m_uff_methods.begin(), m_uff_methods.end(), m_method) != m_uff_methods.end()) {
             thread->setMethod(1);
         } else if (std::find(m_qmdff_methods.begin(), m_qmdff_methods.end(), m_method) != m_qmdff_methods.end()) {
@@ -856,7 +883,7 @@ void ForceField::AutoRanges()
 
     // Level 3+: AutoRanges completion info
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::param("created_threads", free_threads);
+        CurcumaLogger::param("created_threads", thread_count);
         CurcumaLogger::param("total_stored_threads", static_cast<int>(m_stored_threads.size()));
         CurcumaLogger::info("Force field calculation ranges setup completed");
     }
