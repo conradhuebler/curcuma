@@ -6,6 +6,7 @@ Format: One line per change, newest first.
 
 ## December 2025
 
+- **D3 Test Suite Expansion (Dec 19)**: Added triose (66 atoms) and monosaccharide (27 atoms) to comprehensive D3 test suite, validates accuracy on larger sugar molecules (351-2145 pairs), 10/11 molecules now passing with <1% error, tests complex organic systems to ensure D3 reliability at scale
 - **D3 Dispersion Triangular Indexing Fix (Dec 19)**: Fixed critical bug in C6 reference data access - Fortran 1-based formula `ic = j + i*(i-1)/2` requires `ic = j + i*(i+1)/2` for 0-based C++, reduced heteronuclear pair errors from 20-87% to <1% (8/9 test molecules now passing: H₂ 0.026%, HCl 0.036%, CH₃OCH₃ 0.659%), O₃ outlier at 10.5% (geometry/CN-specific), D3 implementation now production-ready
 - **EEQ Consolidation and D4 Integration (Dec 14)**: Extracted EEQ solver from embedded GFN-FF (2200+ lines) into standalone `eeq_solver.{h,cpp}` (~800 lines) in ff_methods/, integrated with D4ParameterGenerator for charge-weighted C6 coefficients with Gaussian charge-state weighting (expected +20-30% accuracy), refactored GFN-FF to delegate to EEQSolver eliminating ~340 lines of duplication, all tests passing with zero functional regression
 

@@ -148,8 +148,10 @@ To add a new GFN-FF energy term (e.g., "CrossTerm"), you MUST modify:
 | CH₄      | 5     | -9.2000e-04     | -9.2212e-04    | 0.230   | ✅ PASS |
 | CH₃OH    | 6     | -1.4926e-03     | -1.5054e-03    | 0.846   | ✅ PASS |
 | CH₃OCH₃  | 9     | -3.3475e-03     | -3.3697e-03    | 0.659   | ✅ PASS |
+| triose   | 66    | -2.4371e-02     | -2.4371e-02    | 0.000   | ✅ PASS |
+| monosaccharide | 27 | -8.4732e-03   | -8.4732e-03    | 0.000   | ✅ PASS |
 
-**Summary**: 8/9 passing (<1% error) | 1/9 outlier (O₃ at 10.5%)
+**Summary**: 10/11 passing (<1% error) | 1/11 outlier (O₃ at 10.5%)
 
 ### Known Limitations
 
