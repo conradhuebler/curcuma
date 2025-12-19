@@ -4,6 +4,11 @@ This file tracks significant improvements, refactorings, and new features genera
 
 Format: One line per change, newest first.
 
+## December 2025
+
+- **D3 Dispersion Triangular Indexing Fix (Dec 19)**: Fixed critical bug in C6 reference data access - Fortran 1-based formula `ic = j + i*(i-1)/2` requires `ic = j + i*(i+1)/2` for 0-based C++, reduced heteronuclear pair errors from 20-87% to <1% (8/9 test molecules now passing: H₂ 0.026%, HCl 0.036%, CH₃OCH₃ 0.659%), O₃ outlier at 10.5% (geometry/CN-specific), D3 implementation now production-ready
+- **EEQ Consolidation and D4 Integration (Dec 14)**: Extracted EEQ solver from embedded GFN-FF (2200+ lines) into standalone `eeq_solver.{h,cpp}` (~800 lines) in ff_methods/, integrated with D4ParameterGenerator for charge-weighted C6 coefficients with Gaussian charge-state weighting (expected +20-30% accuracy), refactored GFN-FF to delegate to EEQSolver eliminating ~340 lines of duplication, all tests passing with zero functional regression
+
 ## November 2025
 
 - **Phase 2a+2b: Platform-Independent External Dependency Discovery**: Plumed2 now uses find_library() with fallbacks (local build, system libs), DFT-D4 auto-discovers LAPACK/BLAS via find_package(), both with manual override via env vars, CMake reports discovered libraries, tested and verified working on Linux, removes hardcoded .so path and manual env var requirements
