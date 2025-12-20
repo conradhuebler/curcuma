@@ -19,9 +19,11 @@
  */
 
 #include "d3param_generator.h"
+#include "cn_calculator.h"
 #include "src/core/curcuma_logger.h"
 
 // Complete s-dftd3reference data (MAX_REF=7 - fixes 1.48x energy error)
+// Defined in: test_cases/reference_data/d3_reference_data_complete_full_clean.cpp
 extern std::vector<double> reference_cn_data_complete;
 extern std::vector<double> reference_c6_data_complete;
 
@@ -394,83 +396,9 @@ double D3ParameterGenerator::getReferenceCN(int atom, int ref_index) const
 
 std::vector<double> D3ParameterGenerator::calculateCoordinationNumbers(const std::vector<int>& atoms, const Eigen::MatrixXd& geometry) const
 {
-    // Calculate D3 coordination numbers using exponential counting function
-    // Formula: CN_i = sum_{j≠i} 1 / (1 + exp(-k1 * (k2 * (R_cov_i + R_cov_j) / R_ij - 1)))
-    // Reference: Grimme et al., J. Chem. Phys. 132, 154104 (2010)
-
-    const double k1 = 16.0;  // Steepness parameter
-    const double k2 = 4.0/3.0;  // Scaling factor
-
-    // Covalent radii from simple-dftd3 (Angstrom)
-    // Data source: s-dftd3 atomic radii output
-    static const std::vector<double> covalent_radii = {
-        0.4267, // 1 H
-        0.6133, // 2 He
-        1.6000, // 3 Li
-        1.2533, // 4 Be
-        1.0267, // 5 B
-        1.0000, // 6 C
-        0.9467, // 7 N
-        0.8400, // 8 O
-        0.8533, // 9 F
-        0.8933, // 10 Ne
-        1.8667, // 11 Na
-        1.6667, // 12 Mg
-        1.5067, // 13 Al
-        1.3867, // 14 Si
-        1.4667, // 15 P
-        1.3600, // 16 S
-        1.3200, // 17 Cl
-        1.2800, // 18 Ar
-        // Add more elements as needed
-    };
-
-    std::vector<double> cn_values(atoms.size(), 0.0);
-
-    for (size_t i = 0; i < atoms.size(); ++i) {
-        int elem_i = atoms[i] - 1;  // Convert to 0-based
-
-        if (elem_i < 0 || elem_i >= static_cast<int>(covalent_radii.size())) {
-            if (CurcumaLogger::get_verbosity() >= 2) {
-                CurcumaLogger::warn("calculateCN: Element " + std::to_string(atoms[i]) + " out of range, using CN=0");
-            }
-            continue;
-        }
-
-        double rcov_i = covalent_radii[elem_i];
-        double cn = 0.0;
-
-        for (size_t j = 0; j < atoms.size(); ++j) {
-            if (i == j) continue;
-
-            int elem_j = atoms[j] - 1;
-            if (elem_j < 0 || elem_j >= static_cast<int>(covalent_radii.size())) {
-                continue;
-            }
-
-            double rcov_j = covalent_radii[elem_j];
-
-            // Calculate distance (geometry is in Angstrom)
-            Eigen::Vector3d pos_i = geometry.row(i);
-            Eigen::Vector3d pos_j = geometry.row(j);
-            double r_ij = (pos_i - pos_j).norm();
-
-            // D3 counting function
-            double r_cov_sum = rcov_i + rcov_j;
-            double arg = -k1 * (k2 * r_cov_sum / r_ij - 1.0);
-            double count = 1.0 / (1.0 + std::exp(arg));
-
-            cn += count;
-        }
-
-        cn_values[i] = cn;
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("CN[" + std::to_string(i) + "] (Z=" + std::to_string(atoms[i]) + "): " + std::to_string(cn));
-        }
-    }
-
-    return cn_values;
+    // Delegate to shared CNCalculator utility
+    // Claude Generated (December 20, 2025): Consolidated CN calculation
+    return CNCalculator::calculateD3CN(atoms, geometry);
 }
 
 double D3ParameterGenerator::interpolateC6(int elem_i, int elem_j, double cn_i, double cn_j) const
