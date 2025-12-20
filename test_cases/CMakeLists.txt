@@ -10,6 +10,16 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/AAA-bGal/A.xyz
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/AAA-bGal/B.xyz
             DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 
+# Claude Generated: Test Molecule Registry - Central hardcoded molecule database
+# Provides zero-dependency molecule access for all test cases
+add_library(test_molecule_registry core/test_molecule_registry.cpp)
+
+target_link_libraries(test_molecule_registry curcuma_core)
+
+if(USE_PCH)
+    target_precompile_headers(test_molecule_registry REUSE_FROM curcuma_core)
+endif()
+
 add_executable(rmsd_test
         rmsd/main.cpp)
 
@@ -206,17 +216,6 @@ endif()
 add_test(NAME test_d3_diagnostic
          COMMAND test_d3_diagnostic
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
-
-# Claude Generated (December 2025): GFN-FF D3 Reference Generator
-# Temporary utility to generate reference energies for test_gfnff_d3.cpp
-add_executable(generate_gfnff_d3_refs
-        generate_gfnff_d3_refs.cpp)
-
-target_link_libraries(generate_gfnff_d3_refs curcuma_core)
-
-if(USE_PCH)
-    target_precompile_headers(generate_gfnff_d3_refs REUSE_FROM curcuma_core)
-endif()
 
 # Claude Generated (December 2025): GFN-FF D3 Integration Validation Test
 # Verifies that GFN-FF correctly uses the native D3 implementation
