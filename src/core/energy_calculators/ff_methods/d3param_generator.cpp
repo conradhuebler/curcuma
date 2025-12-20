@@ -22,10 +22,12 @@
 #include "cn_calculator.h"
 #include "src/core/curcuma_logger.h"
 
-// Complete s-dftd3reference data (MAX_REF=7 - fixes 1.48x energy error)
-// Defined in: test_cases/reference_data/d3_reference_data_complete_full_clean.cpp
-extern std::vector<double> reference_cn_data_complete;
-extern std::vector<double> reference_c6_data_complete;
+// Complete s-dftd3 reference data (MAX_REF=7 - fixes 1.48x energy error)
+// Data split across:
+// - test_cases/reference_data/d3_reference_cn.cpp (721 CN values)
+// - test_cases/reference_data/d3_reference_c6.cpp (262,444 C6 values)
+// Include declarations for automatic linking
+#include "../../../test_cases/reference_data/d3_reference_data.h"
 
 #include <algorithm>
 #include <cmath>
