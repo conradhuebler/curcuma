@@ -24,6 +24,8 @@
 
 #include <set>
 
+#include "d3param_generator.h"
+#include "d4param_generator.h"
 #include "qmdff_par.h"
 #include "src/core/molecule.h"
 #include "uff_par.h"
@@ -161,6 +163,13 @@ public:
     void setMolecule(const Mol& mol);
     void Generate(const std::vector<std::pair<int, int>>& formed_bonds = std::vector<std::pair<int, int>>());
     json getParameter();
+
+    // D3/D4 parameter generation
+    void GenerateD3Parameters();
+    void GenerateD4Parameters();
+
+    // Claude Generated (December 19, 2025): UFF-D3 hybrid method
+    json GenerateUFFD3Parameters();
 
 private:
     double UFFBondRestLength(int i, int j, double order);

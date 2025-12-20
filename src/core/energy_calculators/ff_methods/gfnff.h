@@ -25,12 +25,14 @@
 #include "json.hpp"
 #include "src/core/config_manager.h"
 #include "src/core/energy_calculators/ff_methods/forcefield.h"
+#include "src/core/energy_calculators/ff_methods/eeq_solver.h"  // EEQ charge calculation (Dec 2025 - Phase 3)
 #include "src/core/global.h"
 #include "src/core/functional_groups.h"
 #include "src/core/periodic_table.h"
 #include <utility>
 #include <optional>
 #include <vector>
+#include <memory>
 
 using json = nlohmann::json;
 
@@ -1066,6 +1068,9 @@ private:
     json m_parameters; ///< GFN-FF parameters
     ForceField* m_forcefield; ///< Force field engine using modern structure
     Matrix m_geometry_bohr; ///< Geometry in Bohr (GFN-FF parameters are in Bohr)
+
+    // EEQ charge calculation (Dec 2025 - Phase 3: Extraction and delegation)
+    std::unique_ptr<EEQSolver> m_eeq_solver; ///< Standalone EEQ solver (replaces embedded EEQ code)
 
     bool m_initialized; ///< Initialization status
 

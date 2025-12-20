@@ -50,11 +50,15 @@ public:
     ~D3ParameterGenerator() = default;
 
     // Main parameter generation interface
-    void GenerateParameters(const std::vector<int>& atoms);
+    void GenerateParameters(const std::vector<int>& atoms, const Eigen::MatrixXd& geometry);
     json getParameters() const { return m_parameters; }
 
+    // Energy calculation
+    double getTotalEnergy() const;  // Returns total D3 dispersion energy (Eh)
+
     // Individual parameter accessors
-    double getC6(int atom_i, int atom_j, int ref_i = 0, int ref_j = 0) const;
+    // NOTE: Default ref indices use first valid reference (not 0,0 which is empty)
+    double getC6(int atom_i, int atom_j, int ref_i = 0, int ref_j = 1) const;
     double getR6(int atom_i, int atom_j) const;
     double getReferenceCN(int atom, int ref_index) const;
     int getNumberofReferences(int atom) const;
@@ -64,17 +68,33 @@ private:
     void copyReferenceData();
     double calculateR6(int atom_i, int atom_j) const;
 
-    // Reference data from GFN-FF Fortran implementation
-    static const int MAX_ELEM = 94;
-    static const int MAX_REF = 5;
+    // Geometry-dependent methods (NOT YET IMPLEMENTED)
+    // TODO (Consolidation): Consider sharing CN calculation with GFN-FF/EEQ
+    // - GFN-FF likely has CN calculation for dispersion terms
+    // - EEQSolver may have geometry-dependent CN calculation
+    // - Investigate creating shared CNCalculator utility class
+    std::vector<double> calculateCoordinationNumbers(const std::vector<int>& atoms, const Eigen::MatrixXd& geometry) const;
+    double interpolateC6(int elem_i, int elem_j, double cn_i, double cn_j) const;
+    double calculateDistance(int i, int j, const Eigen::MatrixXd& geometry) const;
 
-    std::vector<std::vector<std::vector<double>>> m_reference_c6;
+    // Reference data lookup methods
+    double getC6Coefficient(int elem1, int elem2, double cn1, double cn2) const;
+    int getElementPairIndex(int elem1, int elem2) const;
+
+    // Reference data from s-dftd3 (COMPLETE MAX_REF=7)
+    static const int MAX_ELEM = 103;  // Updated to match s-dftd3 (103 vs 94)
+    static const int MAX_REF = 7;     // CRITICAL FIX: s-dftd3 uses 7 references
+
+    std::vector<std::vector<std::vector<double>>> m_reference_c6;  // Legacy structure
+    std::vector<double> m_reference_c6_flat;  // Flat storage for 2375 extracted values
     std::vector<int> m_number_of_references;
     std::vector<std::vector<double>> m_reference_cn;
     std::vector<double> m_vdw_rad;
+    std::vector<double> m_sqrt_z_r4_over_r2;  // Transformed R8/R6 data from simple-dftd3
 
     ConfigManager m_config;
     json m_parameters;
     std::vector<int> m_atoms;
+    Eigen::MatrixXd m_geometry;  // Store geometry for distance calculations
     bool m_data_initialized = false;
 };

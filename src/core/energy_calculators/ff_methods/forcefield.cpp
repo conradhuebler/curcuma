@@ -847,6 +847,7 @@ void ForceField::AutoRanges()
         }
 
         // Phase 4.2: Distribute GFN-FF pairwise non-bonded interactions (Claude Generated 2025)
+        // Phase 2.2 (December 19, 2025): Extended for UFF-D3 native dispersion
         if (m_method == "gfnff" || m_method == "cgfnff") { // Claude Generated (2025-12-13): Support both method names
             for (int j = int(i * m_gfnff_dispersions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_dispersions.size() / double(free_threads)); ++j) {
                 thread->addGFNFFDispersion(m_gfnff_dispersions[j]);
@@ -874,6 +875,19 @@ void ForceField::AutoRanges()
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::param(fmt::format("thread_{}_atoms_for_self_energy", i),
                     fmt::format("[{}, {}) = {} atoms", start_atom, end_atom, assigned_atoms.size()));
+            }
+        }
+
+        // Claude Generated (December 19, 2025): UFF-D3 native D3 dispersion distribution
+        // Distribute D3 dispersion pairs to threads for parallel calculation
+        if (m_method == "uff-d3" && !m_gfnff_dispersions.empty()) {
+            for (int j = int(i * m_gfnff_dispersions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_dispersions.size() / double(free_threads)); ++j) {
+                thread->addD3Dispersion(m_gfnff_dispersions[j]);
+            }
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                int d3_count = int((i + 1) * m_gfnff_dispersions.size() / double(free_threads)) - int(i * m_gfnff_dispersions.size() / double(free_threads));
+                CurcumaLogger::param(fmt::format("thread_{}_d3_pairs", i), d3_count);
             }
         }
 

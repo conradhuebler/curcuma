@@ -138,6 +138,116 @@ endif()
 add_test(NAME test_eeq_two_phase
          COMMAND test_eeq_two_phase)
 
+# Claude Generated (December 2025): DFT-D3/D4 Dispersion Energy Test Suite
+# Tests dispersion corrections with various functionals and parameter combinations
+
+# Copy test molecules to build directory
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/validation/HH.xyz
+          ${CMAKE_CURRENT_SOURCE_DIR}/validation/benzene.xyz
+          ${CMAKE_CURRENT_SOURCE_DIR}/validation/ethene.xyz
+          ${CMAKE_CURRENT_SOURCE_DIR}/validation/butane.xyz
+          ${CMAKE_CURRENT_SOURCE_DIR}/validation/HCl.xyz
+          ${CMAKE_CURRENT_SOURCE_DIR}/validation/OH.xyz
+     DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/test_cases/validation/)
+
+# Create test executable
+add_executable(test_dispersion
+        test_dispersion.cpp)
+
+# Link against core library
+target_link_libraries(test_dispersion curcuma_core)
+
+# Precompiled headers (performance optimization)
+if(USE_PCH)
+    target_precompile_headers(test_dispersion REUSE_FROM curcuma_core)
+endif()
+
+# Register with CTest
+add_test(NAME test_dispersion
+         COMMAND test_dispersion
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+# Configure test properties
+set_tests_properties(test_dispersion PROPERTIES
+    TIMEOUT 120          # 2 minutes (36 tests)
+    LABELS "dispersion;D3;D4")
+
+# Conditional test execution (skip if neither D3 nor D4 compiled)
+if(NOT USE_D3 AND NOT USE_D4)
+    set_tests_properties(test_dispersion PROPERTIES DISABLED TRUE)
+endif()
+
+# Claude Generated (December 2025): D3 Debug Test
+# Simple test for debugging D3 parameter generation
+add_executable(test_d3_debug
+        test_d3_debug.cpp)
+
+target_link_libraries(test_d3_debug curcuma_core)
+
+if(USE_PCH)
+    target_precompile_headers(test_d3_debug REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_d3_debug
+         COMMAND test_d3_debug
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+# Claude Generated (December 2025): D3 Diagnostic Test
+# Compares Curcuma D3 implementation against validated formula
+add_executable(test_d3_diagnostic
+        test_d3_diagnostic.cpp)
+
+target_link_libraries(test_d3_diagnostic curcuma_core)
+
+if(USE_PCH)
+    target_precompile_headers(test_d3_diagnostic REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_d3_diagnostic
+         COMMAND test_d3_diagnostic
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+# Claude Generated (December 2025): GFN-FF D3 Reference Generator
+# Temporary utility to generate reference energies for test_gfnff_d3.cpp
+add_executable(generate_gfnff_d3_refs
+        generate_gfnff_d3_refs.cpp)
+
+target_link_libraries(generate_gfnff_d3_refs curcuma_core)
+
+if(USE_PCH)
+    target_precompile_headers(generate_gfnff_d3_refs REUSE_FROM curcuma_core)
+endif()
+
+# Claude Generated (December 2025): GFN-FF D3 Integration Validation Test
+# Verifies that GFN-FF correctly uses the native D3 implementation
+# Tests standalone D3 vs GFN-FF integrated D3 consistency
+
+# Note: Test molecules already copied by test_gfnff_unified (lines 82-95)
+# Molecules needed: dimers/HH.xyz, dimers/HCl.xyz, dimers/OH.xyz,
+#                   larger/CH4.xyz, larger/CH3OH.xyz, larger/CH3OCH3.xyz
+
+# Create test executable
+add_executable(test_gfnff_d3
+        test_gfnff_d3.cpp)
+
+# Link against core library
+target_link_libraries(test_gfnff_d3 curcuma_core)
+
+# Precompiled headers (performance optimization)
+if(USE_PCH)
+    target_precompile_headers(test_gfnff_d3 REUSE_FROM curcuma_core)
+endif()
+
+# Register with CTest
+add_test(NAME test_gfnff_d3
+         COMMAND test_gfnff_d3
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+# Configure test properties
+set_tests_properties(test_gfnff_d3 PROPERTIES
+    TIMEOUT 60           # 1 minute (6 molecules, 3 tests each)
+    LABELS "gfnff;D3;dispersion")
+
 # todo restore
 
 # Claude Generated: Debug Ulysses methods test
@@ -158,11 +268,11 @@ add_test(NAME test_eeq_two_phase
 add_subdirectory(cli)
 
 # Add debug executable
-add_executable(debug_molecule
-        ../debug_molecule.cpp)
+#add_executable(debug_molecule
+#        ../debug_molecule.cpp)
 
-target_link_libraries(debug_molecule curcuma_core)
+#target_link_libraries(debug_molecule curcuma_core)
 
-if(USE_PCH)
-        target_precompile_headers(debug_molecule REUSE_FROM curcuma_core)
-endif()
+#if(USE_PCH)
+#        target_precompile_headers(debug_molecule REUSE_FROM curcuma_core)
+#endif()

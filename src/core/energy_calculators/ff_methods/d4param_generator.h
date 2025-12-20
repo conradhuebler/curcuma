@@ -23,8 +23,10 @@
 #include "src/core/global.h"
 #include "src/core/parameter_macros.h"
 #include "src/core/config_manager.h"
+#include "eeq_solver.h"  // EEQ charge calculation for D4
 
 #include <Eigen/Dense>
+#include <memory>
 
 #include "json.hpp"
 using json = nlohmann::json;
@@ -50,7 +52,7 @@ public:
     ~D4ParameterGenerator() = default;
 
     // Main parameter generation interface
-    void GenerateParameters(const std::vector<int>& atoms);
+    void GenerateParameters(const std::vector<int>& atoms, const Matrix& geometry_bohr);
     json getParameters() const { return m_parameters; }
 
     // Individual parameter accessors
@@ -62,7 +64,12 @@ public:
 private:
     void initializeReferenceData();
     void calculateFrequencyDependentPolarizabilities();
+
+    // OLD: Crude neutral-atom approximation (deprecated)
     double getEffectiveC6(int atom_i, int atom_j) const;
+
+    // NEW: Charge-weighted C6 using EEQ charges and Gaussian weighting (Dec 2025)
+    double getChargeWeightedC6(int Zi, int Zj, double qi, double qj) const;
 
     // Reference data from GFN-FF Fortran implementation
     static const int MAX_ELEM = 118;
@@ -70,21 +77,26 @@ private:
     static const int N_FREQ = 23;  // Frequency grid points
     static const int N_REFQ = 17;  // Reference charge states
 
-    // Atomic properties from GFN-FF
+    // D4 reference data from external/gfnff/src/dftd4param.f90
+    std::vector<int> m_refn;    // Number of reference systems per element
+    std::vector<std::vector<double>> m_refq, m_refh;  // Reference charges and hydrogen counts
+    std::vector<std::vector<double>> m_refcn;   // Reference coordination numbers
+    std::vector<std::vector<double>> m_ascale; // Atomic scaling factors
+
+    // Legacy placeholders (deprecated - replaced with real data)
     std::vector<double> m_r4_over_r2;
     std::vector<double> m_sqrt_z_r4_r2;
-
-    // Frequency-dependent polarizability data
     std::vector<std::vector<std::vector<double>>> m_alpha_iw;
     std::vector<std::vector<double>> m_integrated_alpha;
-    std::vector<int> m_refn;    // Number of reference systems
-    std::vector<std::vector<double>> m_refq, m_refh, m_refcn;  // Reference charges/hardness/CN
-    std::vector<std::vector<double>> m_ascale;  // Atomic scaling factors
 
     ConfigManager m_config;
     json m_parameters;
     std::vector<int> m_atoms;
     bool m_data_initialized = false;
+
+    // EEQ charge calculation (Dec 2025 - Phase 2 D4 integration)
+    std::unique_ptr<EEQSolver> m_eeq_solver;
+    Vector m_eeq_charges;  // Cached EEQ charges for current geometry
 
     // Mathematical constants
     static constexpr double PI = 3.14159265358979323846;

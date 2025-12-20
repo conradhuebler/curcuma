@@ -126,6 +126,70 @@ private:
         return id;
     }
 
+    // Helper to create molecules directly in code (avoids file I/O issues)
+    curcuma::Molecule createMolecule(const std::string& name) const {
+        curcuma::Molecule mol;
+
+        if (name == "HH") {
+            // H2 dimer
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(-0.092881, 0.361653, -0.249341)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(0.000000, 0.763239, -0.477047)));
+        }
+        else if (name == "HCl") {
+            // HCl molecule
+            mol.addPair(std::make_pair(17, Eigen::Vector3d(0.000000, 0.000000, 0.119262)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(0.000000, 0.763239, -0.477047)));
+        }
+        else if (name == "OH") {
+            // OH radical
+            mol.addPair(std::make_pair(8, Eigen::Vector3d(0.000000, 0.000000, 0.108301)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(0.000000, 0.763239, -0.433203)));
+        }
+        else if (name == "Ethene") {
+            // C2H4
+            mol.addPair(std::make_pair(6, Eigen::Vector3d(0.000000, 0.000000, 0.665757)));
+            mol.addPair(std::make_pair(6, Eigen::Vector3d(0.000000, 0.000000, -0.665757)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(0.000000, 0.922329, 1.232431)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(0.000000, -0.922329, 1.232431)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(0.000000, 0.922329, -1.232431)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(0.000000, -0.922329, -1.232431)));
+        }
+        else if (name == "Benzene") {
+            // C6H6 (aromatic)
+            mol.addPair(std::make_pair(6, Eigen::Vector3d(1.396, 0.000, 0.000)));
+            mol.addPair(std::make_pair(6, Eigen::Vector3d(0.698, 1.209, 0.000)));
+            mol.addPair(std::make_pair(6, Eigen::Vector3d(-0.698, 1.209, 0.000)));
+            mol.addPair(std::make_pair(6, Eigen::Vector3d(-1.396, 0.000, 0.000)));
+            mol.addPair(std::make_pair(6, Eigen::Vector3d(-0.698, -1.209, 0.000)));
+            mol.addPair(std::make_pair(6, Eigen::Vector3d(0.698, -1.209, 0.000)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(2.481, 0.000, 0.000)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(1.240, 2.148, 0.000)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(-1.240, 2.148, 0.000)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(-2.481, 0.000, 0.000)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(-1.240, -2.148, 0.000)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(1.240, -2.148, 0.000)));
+        }
+        else if (name == "Butane") {
+            // C4H10 (anti conformation)
+            mol.addPair(std::make_pair(6, Eigen::Vector3d(1.950, -0.119, 0.000)));
+            mol.addPair(std::make_pair(6, Eigen::Vector3d(0.650, 0.667, 0.000)));
+            mol.addPair(std::make_pair(6, Eigen::Vector3d(-0.650, -0.167, 0.000)));
+            mol.addPair(std::make_pair(6, Eigen::Vector3d(-1.950, 0.619, 0.000)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(2.820, 0.535, 0.000)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(2.000, -0.745, 0.890)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(2.000, -0.745, -0.890)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(0.650, 1.293, -0.890)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(0.650, 1.293, 0.890)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(-0.650, -0.793, 0.890)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(-0.650, -0.793, -0.890)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(-2.820, -0.035, 0.000)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(-2.000, 1.245, -0.890)));
+            mol.addPair(std::make_pair(1, Eigen::Vector3d(-2.000, 1.245, 0.890)));
+        }
+
+        return mol;
+    }
+
 public:
     DispersionTester(const DispersionTesterConfig& cfg = DispersionTesterConfig()) : m_config(cfg) {
         setupReferences();
@@ -570,13 +634,14 @@ bool DispersionTester::testD3(const DispersionReference& ref) {
     result.tolerance = ref.tolerance;
 
     try {
-        // Load molecule
-        curcuma::Molecule mol(ref.molecule_file);
+        // Create molecule directly in code (avoids file I/O issues)
+        curcuma::Molecule mol = createMolecule(ref.molecule_name);
 
         // Validate atom count
         if (mol.AtomCount() != ref.n_atoms) {
             result.passed = false;
-            result.error_message = "Atom count mismatch";
+            result.error_message = "Atom count mismatch: expected " + std::to_string(ref.n_atoms) +
+                                  ", got " + std::to_string(mol.AtomCount());
             m_results.push_back(result);
             total_tests++;
             return false;
@@ -586,16 +651,31 @@ bool DispersionTester::testD3(const DispersionReference& ref) {
 
         // Create configuration with D3 parameters (JSON for ForceField)
         // NOTE: Using UFF as base method, which will generate bonds/angles/etc and also D3 dispersion
+
+        // Get functional-specific BJ damping parameters (from simple-dftd3)
+        double d3_s8 = 1.0, d3_a1 = 0.4, d3_a2 = 4.0;
+        if (ref.functional == "pbe0") {
+            d3_s8 = 1.2177;
+            d3_a1 = 0.4145;
+            d3_a2 = 4.8593;
+        } else if (ref.functional == "b3lyp") {
+            d3_s8 = 1.9889;
+            d3_a1 = 0.3981;
+            d3_a2 = 4.4211;
+        }
+        // Override with explicit ref values if provided
+        if (ref.s8 > 0.0) d3_s8 = ref.s8;
+
         json ff_config = {
             {"method", "uff"},                      // Use UFF method for base calculation + D3 dispersion
             {"d3method", "d3"},                     // Enable native D3
             {"d3_functional", ref.functional},      // Functional: pbe0, b3lyp, etc.
             {"d3_damping", ref.damping},            // Damping: bj, zero, etc.
             {"d3_s6", ref.s6 > 0.0 ? ref.s6 : 1.0},
-            {"d3_s8", ref.s8 > 0.0 ? ref.s8 : 1.0},
+            {"d3_s8", d3_s8},                       // Functional-specific s8
             {"d3_s9", ref.s9 > 0.0 ? ref.s9 : (ref.three_body ? 1.0 : 0.0)},
-            {"d3_a1", 0.4},                         // BJ damping a1
-            {"d3_a2", 4.0},                         // BJ damping a2 (Bohr)
+            {"d3_a1", d3_a1},                       // Functional-specific BJ damping a1
+            {"d3_a2", d3_a2},                       // Functional-specific BJ damping a2 (Bohr)
             {"d3_alp", 14.0},                       // Alpha parameter
             {"threads", 1},                         // Single thread for tests
             {"verbosity", 0}                        // Silent mode for tests
@@ -615,19 +695,9 @@ bool DispersionTester::testD3(const DispersionReference& ref) {
         ConfigManager d3_config("d3param", ff_config);
         D3ParameterGenerator d3_gen(d3_config);
         d3_gen.GenerateParameters(mol_struct.m_atoms, mol_struct.m_geometry);
-        json d3_params = d3_gen.getParameters();
 
-        // Calculate D3 energy by summing all dispersion pair energies
-        double d3_energy = 0.0;
-        if (d3_params.contains("d3_dispersion_pairs") && d3_params["d3_dispersion_pairs"].is_array()) {
-            const auto& pairs = d3_params["d3_dispersion_pairs"];
-            for (const auto& pair : pairs) {
-                if (pair.contains("energy") && pair["energy"].is_number()) {
-                    d3_energy += pair["energy"].get<double>();
-                }
-            }
-        }
-        result.calculated_energy = d3_energy;
+        // Calculate total D3 energy using native method
+        result.calculated_energy = d3_gen.getTotalEnergy();
 
         auto end = std::chrono::high_resolution_clock::now();
         result.time_seconds = std::chrono::duration<double>(end - start).count();
@@ -684,13 +754,14 @@ bool DispersionTester::testD4(const DispersionReference& ref) {
     result.tolerance = ref.tolerance;
 
     try {
-        // Load molecule
-        curcuma::Molecule mol(ref.molecule_file);
+        // Create molecule directly in code (avoids file I/O issues)
+        curcuma::Molecule mol = createMolecule(ref.molecule_name);
 
         // Validate atom count
         if (mol.AtomCount() != ref.n_atoms) {
             result.passed = false;
-            result.error_message = "Atom count mismatch";
+            result.error_message = "Atom count mismatch: expected " + std::to_string(ref.n_atoms) +
+                                  ", got " + std::to_string(mol.AtomCount());
             m_results.push_back(result);
             total_tests++;
             return false;

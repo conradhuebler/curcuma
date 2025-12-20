@@ -27,6 +27,7 @@
 #include <iostream>
 #include <math.h>
 #include <stdio.h>
+#include <cstring>
 
 #include "dftd3interface.h"
 
@@ -156,6 +157,7 @@ void DFTD3Interface::UpdateParametersD3(const json& controller)
 
 bool DFTD3Interface::InitialiseMolecule(const std::vector<int>& atomtypes)
 {
+    m_natoms = atomtypes.size();
     m_attyp = new int[atomtypes.size()];
     m_coord = new double[3 * atomtypes.size()];
     for (int i = 0; i < atomtypes.size(); ++i) {
@@ -177,6 +179,14 @@ void DFTD3Interface::UpdateAtom(int index, double x, double y, double z)
     m_coord[3 * index + 0] = x / au;
     m_coord[3 * index + 1] = y / au;
     m_coord[3 * index + 2] = z / au;
+}
+
+void DFTD3Interface::UpdateGeometry(const double* coord)
+{
+    // Copy all coordinates (assumed to be in Bohr already)
+    if (m_coord && m_natoms > 0) {
+        std::memcpy(m_coord, coord, 3 * m_natoms * sizeof(double));
+    }
 }
 
 double DFTD3Interface::Calculation(bool gradient)

@@ -341,6 +341,9 @@ private:
     void CalculateGFNFFRepulsionContribution();
     void CalculateGFNFFCoulombContribution();
 
+    // Claude Generated (December 19, 2025): Native D3 dispersion calculation for UFF-D3
+    void CalculateD3DispersionContribution();
+
     // Phase 5: GFN-FF hydrogen bond and halogen bond calculation functions (Claude Generated 2025)
     void CalculateGFNFFHydrogenBondContribution();
     void CalculateGFNFFHalogenBondContribution();

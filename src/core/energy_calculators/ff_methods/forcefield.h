@@ -156,7 +156,7 @@ private:
     Matrix m_geometry, m_gradient;
     std::vector<int> m_atom_types;
     std::string m_method = "uff";
-    StringList m_uff_methods = { "uff", "uff-d3" };
+    StringList m_uff_methods = { "uff", "uff-d3" };  // Claude Generated (December 19, 2025): uff-d3 already included
     StringList m_qmdff_methods = { "qmdff", "quff" };
     double m_e0 = 0;
     int m_natoms = 0;
