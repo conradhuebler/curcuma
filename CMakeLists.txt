@@ -269,8 +269,6 @@ set(curcuma_core_SRC
         src/core/energy_calculators/ff_methods/forcefieldgenerator.cpp
         src/core/energy_calculators/ff_methods/d3param_generator.cpp
         src/core/energy_calculators/ff_methods/d4param_generator.cpp
-        d3_c6_gfnff_complete.cpp
-        d3_reference_data_complete_new.cpp
         src/core/energy_calculators/ff_methods/cg_potentials.cpp
         src/core/curcuma_logger.cpp
         src/tools/formats.h
