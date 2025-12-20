@@ -22,6 +22,9 @@
 #include "cn_calculator.h"
 #include "src/core/curcuma_logger.h"
 
+#include <stdexcept>
+#include <cctype>
+
 // Complete s-dftd3 reference data (MAX_REF=7 - fixes 1.48x energy error)
 // Data split across:
 // - test_cases/reference_data/d3_reference_cn.cpp (721 CN values)
@@ -35,6 +38,38 @@
 D3ParameterGenerator::D3ParameterGenerator(const ConfigManager& config)
     : m_config(config)
 {
+    // Phase 3.2: Parameter validation (Claude Generated)
+    double s6 = m_config.get<double>("d3_s6", 1.0);
+    double s8 = m_config.get<double>("d3_s8", 1.0);
+    double a1 = m_config.get<double>("d3_a1", 0.4);
+    double a2 = m_config.get<double>("d3_a2", 4.0);
+
+    // Validate scaling factors (must be non-negative)
+    if (s6 < 0.0 || s8 < 0.0) {
+        throw std::invalid_argument(
+            "D3 scaling factors must be non-negative: s6=" + std::to_string(s6) +
+            ", s8=" + std::to_string(s8)
+        );
+    }
+
+    // Warn on unusual parameters
+    if (s6 > 2.0 || s8 > 5.0) {
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::warn(
+                "Unusual D3 scaling factors: s6=" + std::to_string(s6) +
+                " (typical 0.75-1.5), s8=" + std::to_string(s8) + " (typical 0.5-3.0)"
+            );
+        }
+    }
+
+    // Validate damping parameters
+    if (a1 < 0.0 || a2 < 0.0) {
+        throw std::invalid_argument(
+            "D3 damping parameters must be non-negative: a1=" + std::to_string(a1) +
+            ", a2=" + std::to_string(a2)
+        );
+    }
+
     initializeReferenceData();
     copyReferenceData();
 }
@@ -502,6 +537,63 @@ int D3ParameterGenerator::getNumberofReferences(int atom) const
     --atom; // Convert to 0-based for array indexing
 
     return m_number_of_references[atom];
+}
+
+// Claude Generated Phase 3.1: Factory Methods
+// Provide convenient creation with standard D3 parameter sets
+
+D3ParameterGenerator D3ParameterGenerator::createForGFNFF()
+{
+    // GFN-FF D3-BJ parameters (Spicher & Grimme, J. Chem. Theory Comput. 2020)
+    json config_json;
+    config_json["d3_s6"] = 1.0;
+    config_json["d3_s8"] = 2.85;
+    config_json["d3_a1"] = 0.80;
+    config_json["d3_a2"] = 4.60;
+    config_json["d3_alp"] = 14.0;
+
+    ConfigManager config("d3param", config_json);
+    return D3ParameterGenerator(config);
+}
+
+D3ParameterGenerator D3ParameterGenerator::createForUFFD3()
+{
+    // PBE0-D3-BJ parameters (UFF bonded + D3 dispersion)
+    json config_json;
+    config_json["d3_s6"] = 1.0;
+    config_json["d3_s8"] = 1.2177;
+    config_json["d3_a1"] = 0.4145;
+    config_json["d3_a2"] = 4.8593;
+    config_json["d3_alp"] = 14.0;
+
+    ConfigManager config("d3param", config_json);
+    return D3ParameterGenerator(config);
+}
+
+D3ParameterGenerator D3ParameterGenerator::createForPBE0()
+{
+    // Standard PBE0-D3-BJ parameters
+    // Same as UFF-D3 (PBE0 functional with D3-BJ damping)
+    return createForUFFD3();
+}
+
+D3ParameterGenerator D3ParameterGenerator::createForMethod(const std::string& method)
+{
+    std::string lower_method = method;
+    std::transform(lower_method.begin(), lower_method.end(), lower_method.begin(), ::tolower);
+
+    if (lower_method == "gfnff") {
+        return createForGFNFF();
+    } else if (lower_method == "uff-d3" || lower_method == "uffd3") {
+        return createForUFFD3();
+    } else if (lower_method == "pbe0") {
+        return createForPBE0();
+    } else {
+        throw std::invalid_argument(
+            "Unknown D3 method: " + method +
+            ". Supported: 'gfnff', 'uff-d3', 'pbe0'"
+        );
+    }
 }
 
 double D3ParameterGenerator::getTotalEnergy() const

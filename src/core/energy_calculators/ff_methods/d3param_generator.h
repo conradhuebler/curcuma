@@ -49,6 +49,35 @@ public:
     D3ParameterGenerator(const ConfigManager& config);
     ~D3ParameterGenerator() = default;
 
+    // Factory methods for standard D3 parameter sets (Claude Generated Phase 3.1)
+    /**
+     * Create D3ParameterGenerator with GFN-FF parameters
+     * Parameters: s6=1.0, s8=2.85, a1=0.80, a2=4.60 (Bohr)
+     * Reference: Spicher & Grimme, J. Chem. Theory Comput. 2020
+     */
+    static D3ParameterGenerator createForGFNFF();
+
+    /**
+     * Create D3ParameterGenerator with UFF-D3 (PBE0/BJ) parameters
+     * Parameters: s6=1.0, s8=1.2177, a1=0.4145, a2=4.8593 (Bohr)
+     * Ideal for hybrid UFF bonded + D3 dispersion
+     */
+    static D3ParameterGenerator createForUFFD3();
+
+    /**
+     * Create D3ParameterGenerator with PBE0-D3-BJ parameters
+     * Parameters: s6=1.0, s8=1.2177, a1=0.4145, a2=4.8593 (Bohr)
+     * Standard PBE0 functional with D3-BJ damping
+     */
+    static D3ParameterGenerator createForPBE0();
+
+    /**
+     * Create D3ParameterGenerator with method-specific parameters
+     * Supported methods: "gfnff", "uff-d3", "pbe0", "custom"
+     * Throws std::invalid_argument if method is unknown
+     */
+    static D3ParameterGenerator createForMethod(const std::string& method);
+
     // Main parameter generation interface
     void GenerateParameters(const std::vector<int>& atoms, const Eigen::MatrixXd& geometry);
     json getParameters() const { return m_parameters; }
