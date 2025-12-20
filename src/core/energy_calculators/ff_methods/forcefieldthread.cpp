@@ -608,41 +608,6 @@ void ForceFieldThread::CalculateESPContribution()
     }
 }
 
-#ifdef USE_D3
-D3Thread::D3Thread(int thread, int threads)
-    : ForceFieldThread(thread, threads)
-{
-    setAutoDelete(false);
-    m_final_factor = 1 / 2625.15 * 4.19;
-    m_d = 1e-7;
-    m_d3 = new DFTD3Interface();
-}
-
-D3Thread::~D3Thread()
-{
-    delete m_d3;
-}
-
-int D3Thread::execute()
-{
-    for (int i = 0; i < m_atom_types.size(); ++i) {
-        m_d3->UpdateAtom(i, m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2));
-    }
-
-    if (m_calculate_gradient) {
-        double grad[3 * m_atom_types.size()];
-        m_vdw_energy = m_d3->Calculation(grad);
-        for (int i = 0; i < m_atom_types.size(); ++i) {
-            m_gradient(i, 0) += grad[3 * i + 0] * au;
-            m_gradient(i, 1) += grad[3 * i + 1] * au;
-            m_gradient(i, 2) += grad[3 * i + 2] * au;
-        }
-    } else
-        m_vdw_energy = m_d3->Calculation(0);
-    return 0;
-}
-#endif
-
 // TEMPORARILY DISABLED - H4Thread has build errors (type conversion geometry → geometry.data())
 // Not needed for GFN-FF validation. Will re-enable after GFN-FF bugs are fixed.
 // Claude Generated Comment - 2025-11-30

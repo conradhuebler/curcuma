@@ -18,7 +18,6 @@
 // Element pairs: Triangular indexing for 103 elements = 5,356 unique pairs
 // References: 7×7 combinations per pair (MAX_REF=7 from s-dftd3)
 std::vector<double> reference_c6_data_complete = {
-std::vector<double> reference_c6_data_complete = {
     3.0267000, 4.7379000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 4.7379000,
     7.5916000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000,
     0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000, 0.0000000,

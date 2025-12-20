@@ -16,8 +16,7 @@
 // Elements: 1-103 (H through Lr)
 // References: 0-6 (up to 7 per element, padding with zeros for unused refs)
 std::vector<double> reference_cn_data_complete = {
-std::vector<double> reference_cn_data_complete = {
-    
+
 0.9118000, 
 -1.0000000, 
 -1.0000000, 
@@ -809,11 +808,6 @@ std::vector<double> reference_cn_data_complete = {
 -1.0000000, 
 -1.0000000, 
 0.9802000, 
-    
+
 5.5939000
-};
-
-// Extracting C6 reference data (this may take a moment)...
-
-// C6 coefficients for reference state combinations
 };

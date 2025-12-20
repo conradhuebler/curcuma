@@ -432,32 +432,6 @@ protected:
     bool m_coulomb_enabled = true;
 };
 
-#ifdef USE_D3
-class D3Thread : public ForceFieldThread {
-
-public:
-    D3Thread(int thread, int threads);
-    ~D3Thread();
-    virtual int Type() const { return 2; }
-
-    void setParamater(const json& parameter)
-    {
-        m_d3->UpdateParametersD3(parameter);
-    }
-
-    void Initialise(const std::vector<int>& atom_types)
-    {
-        m_atom_types = atom_types;
-        m_d3->InitialiseMolecule(m_atom_types);
-    }
-    virtual int execute() override;
-
-private:
-    DFTD3Interface* m_d3;
-    std::vector<int> m_atom_types;
-};
-#endif
-
 class H4Thread : public ForceFieldThread {
 
 public:

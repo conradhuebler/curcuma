@@ -744,19 +744,6 @@ void ForceField::AutoRanges()
     }
 
     int free_threads = m_threads;
-#pragma message("revert")
-    int d3 = false; // m_parameters["d3"];
-    #ifdef USE_D3
-    if (d3) {
-        if (free_threads > 1)
-            free_threads--;
-        D3Thread* thread = new D3Thread(m_threads - 1, free_threads);
-        thread->setParamater(m_parameters);
-        thread->Initialise(m_atom_types);
-        m_threadpool->addThread(thread);
-        m_stored_threads.push_back(thread);
-    }
-    #endif
     // TEMPORARILY DISABLED - H4Thread has build errors
     // Claude Generated Comment - 2025-11-30
     /*
