@@ -112,14 +112,10 @@ BEGIN_PARAMETER_DEFINITION(forcefield)
     PARAM(d3_preset, String, "pbe0", "D3 functional preset for d3-only method (pbe0, blyp, b3lyp, tpss, pbe, bp86, gfnff).", "D3-Only", {})
 
     // Dispersion Corrections (D3/D4)
+    // NOTE (Claude Generated December 21, 2025): D3 parameters removed - UFF-D3 uses D3ParameterGenerator directly
+    // D3ParameterGenerator has factory methods with correct parameter sets for all functionals
     PARAM(d3, Int, 0, "Enable DFT-D3 dispersion correction (0=off, 1=on).", "Dispersion", {})
     PARAM(d4, Int, 0, "Enable DFT-D4 dispersion correction (0=off, 1=on).", "Dispersion", {})
-    PARAM(d3_s6, Double, 1.0, "D3 scaling factor for C6 term.", "Dispersion", {})
-    PARAM(d3_s8, Double, 2.7, "D3 scaling factor for C8 term.", "Dispersion", {})
-    PARAM(d3_s9, Double, 1.0, "D3 scaling factor for three-body ATM term.", "Dispersion", {})
-    PARAM(d3_a1, Double, 0.45, "D3 damping parameter a1.", "Dispersion", {})
-    PARAM(d3_a2, Double, 4.0, "D3 damping parameter a2 in Bohr.", "Dispersion", {})
-    PARAM(d3_alp, Double, 1.0, "D3 alpha damping parameter.", "Dispersion", {})
 
     // Force Field Term Scaling
     PARAM(bond_scaling, Double, 1.0, "Scaling factor for bond stretch terms.", "Scaling", {})

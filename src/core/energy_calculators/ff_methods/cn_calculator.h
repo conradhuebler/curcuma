@@ -50,6 +50,32 @@ public:
     );
 
     /**
+     * Calculate GFN-FF coordination numbers
+     *
+     * Purpose: EEQ parameter corrections and topology classification
+     * Formula: Error function with logarithmic transformation
+     *   CN_erf = 0.5 * (1 + erf(kn * (r_cov/r_ij - 1)))
+     *   CN_log = log(1 + e^cnmax) - log(1 + e^(cnmax - CN_erf))
+     *
+     * @param atoms Atomic numbers (1-based: H=1, C=6, O=8, etc.)
+     * @param geometry_bohr Molecular geometry in Bohr
+     * @param threshold Distance cutoff in Bohr² (default: 1600.0)
+     * @param kn Steepness parameter (default: -7.5)
+     * @param cnmax Max CN for log compression (default: 4.4)
+     * @return Vector of coordination numbers (one per atom, max 4.4)
+     *
+     * Reference: gfnff_cn.f90:66-126, Spicher & Grimme, J. Chem. Theory Comput. 2020
+     * Claude Generated - December 21, 2025
+     */
+    static std::vector<double> calculateGFNFFCN(
+        const std::vector<int>& atoms,
+        const Eigen::MatrixXd& geometry_bohr,
+        double threshold = 1600.0,
+        double kn = -7.5,
+        double cnmax = 4.4
+    );
+
+    /**
      * Get covalent radius for an element
      *
      * @param atomic_number 1-based atomic number (H=1, C=6, etc.)

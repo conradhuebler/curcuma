@@ -100,19 +100,6 @@ std::vector<int> detectPiSystems(int natoms, const std::vector<int>& atoms,
     const std::vector<std::vector<int>>& neighbors);
 
 /**
- * @brief Calculate coordination numbers with exponential decay
- * @param natoms Number of atoms
- * @param atoms Atomic numbers
- * @param geometry Geometry matrix
- * @param covalent_radii Covalent radii
- * @param threshold Cutoff threshold
- * @return Coordination numbers
- */
-Vector calculateCoordinationNumbers(int natoms, const std::vector<int>& atoms,
-    const Matrix& geometry, const Vector& covalent_radii,
-    double threshold = 40.0);
-
-/**
  * @brief Build neighbor list from geometry
  * @param natoms Number of atoms
  * @param atoms Atomic numbers

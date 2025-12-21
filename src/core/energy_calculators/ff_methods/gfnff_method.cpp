@@ -25,6 +25,7 @@
 // Claude Generated (December 2025): D3/D4 dispersion integration
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
 #include "src/core/energy_calculators/ff_methods/d4param_generator.h"
+#include "src/core/energy_calculators/ff_methods/cn_calculator.h"
 #include "src/core/config_manager.h"
 #include <cmath>
 #include <fstream>
@@ -1626,7 +1627,9 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     // where nn = topo%nb(20,i) = Coordination number of central atom
     // Reference: gfnff_ini.f90:1377,1612
     const double threshold_cn_squared = 40.0 * 40.0;  // ~40 Bohr cutoff (standard GFN-FF)
-    Vector coord_numbers = calculateCoordinationNumbers(threshold_cn_squared);
+    // Phase 2C: Migrate to shared CNCalculator for GFN-FF CN calculation
+    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, threshold_cn_squared);
+    Vector coord_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
     double nn = static_cast<int>(std::round(coord_numbers[atom_j]));  // Central atom coordination number
     nn = std::max(1.0, nn);  // Ensure nn >= 1
     double fn = 1.0 - 2.36 / (nn * nn);
@@ -1794,98 +1797,6 @@ bool GFNFF::loadGFNFFCharges()
 // =================================================================================
 // Advanced GFN-FF Parameter Generation (Placeholder implementations)
 // =================================================================================
-
-Vector GFNFF::calculateCoordinationNumbers(double threshold) const
-{
-    // GFN-FF Coordination Number Calculation using D3-style Error Function
-    // Reference: external/gfnff/src/gfnff_cn.f90:66-126
-    //
-    // This implements the create_erfCN and create_logCN functions from Fortran:
-    // 1. Calculate raw CN using error function: erfCN = 0.5 * (1 + erf(kn * dr))
-    // 2. Apply logarithmic transformation: logCN = log(1+e^cnmax) - log(1+e^(cnmax-cn))
-    //
-    // NOTE: This replaces the old create_expCN(16.0) formula that was commented out
-    // in the Fortran reference (gfnff_cn.f90:88)
-
-    // D3 coordination number parameters (gfnff_cn.f90:66, gfnff_param.f90:462)
-    const double kn = -7.5;      // Error function steepness parameter
-    const double cnmax = 4.4;    // Maximum coordination number cutoff
-
-    Vector cn = Vector::Zero(m_atomcount);
-
-    // Step 1: Calculate raw coordination numbers using error function
-    for (int i = 0; i < m_atomcount; ++i) {
-        double cn_i = 0.0;
-        for (int j = 0; j < m_atomcount; ++j) {
-            if (i == j)
-                continue;
-
-            Vector ri = m_geometry_bohr.row(i);
-            Vector rj = m_geometry_bohr.row(j);
-            double distance_sq = (ri - rj).squaredNorm();  // Use squared distance (more efficient)
-
-            // Distance threshold check (Fortran: thr = sqrt(thr2), typically ~40 Bohr)
-            // CRITICAL FIX: threshold is already squared (e.g., 40.0*40.0 = 1600)
-            // Must compare squared distances with squared threshold
-            if (distance_sq > threshold)
-                continue;
-
-            double distance = std::sqrt(distance_sq);
-
-            // CRITICAL FIX (Dec 2025): Use D3 covalent radii from gfnff_param.f90:515-525
-            // The Fortran code uses param%rcov (covalentRadD3) for CN calculation (gfnff_cn.f90)
-            // Reference: external/gfnff/src/gfnff_cn.f90:69-70 and gfnff_param.f90:569
-            //
-            // D3 covalent radii in Angstrom (NOT Elements::CovalentRadius which has wrong values!)
-            // covalentRadD3 from gfnff_param.f90:515-525
-            static const std::vector<double> rcov_d3_angstrom = {
-                0.32, 0.46,  // H, He
-                1.20, 0.94, 0.77, 0.75, 0.71, 0.63, 0.64, 0.67,  // Li-Ne (C=0.75, O=0.63!)
-                1.40, 1.25, 1.13, 1.04, 1.10, 1.02, 0.99, 0.96,  // Na-Ar
-                // ... (86 elements total, abbreviated for now)
-            };
-
-            // Get D3 covalent radii (fallback to Elements::CovalentRadius if out of range)
-            double rcov_i_angstrom = (m_atoms[i] >= 1 && m_atoms[i] <= 18)
-                                   ? rcov_d3_angstrom[m_atoms[i] - 1]
-                                   : ((m_atoms[i] >= 1 && m_atoms[i] < static_cast<int>(Elements::CovalentRadius.size()))
-                                      ? Elements::CovalentRadius[m_atoms[i]] : 0.7);
-            double rcov_j_angstrom = (m_atoms[j] >= 1 && m_atoms[j] <= 18)
-                                   ? rcov_d3_angstrom[m_atoms[j] - 1]
-                                   : ((m_atoms[j] >= 1 && m_atoms[j] < static_cast<int>(Elements::CovalentRadius.size()))
-                                      ? Elements::CovalentRadius[m_atoms[j]] : 0.7);
-            // Convert to Bohr (1 Angstrom = 1.8897259886 Bohr)
-            double rcov_i = rcov_i_angstrom * 1.8897259886;
-            double rcov_j = rcov_j_angstrom * 1.8897259886;
-            double r_cov = rcov_i + rcov_j;
-
-            // D3-style error function CN contribution
-            // Formula: erfCN = 0.5 * (1 + erf(kn * dr))
-            // where dr = (r - r0) / r0
-            double dr = (distance - r_cov) / r_cov;
-            double erfCN = 0.5 * (1.0 + std::erf(kn * dr));
-
-            cn_i += erfCN;
-        }
-
-        // DEBUG: Print raw CN for Carbon atom (Z=6)
-        if (i == 0 && m_atoms[0] == 6) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format("DEBUG CN(C): raw CN = {:.3f}, logCN will be = {:.3f}",
-                                                 cn_i, std::log(1.0 + std::exp(cnmax)) - std::log(1.0 + std::exp(cnmax - cn_i))));
-                // Expected: CH3OH carbon should have CN ~3.5-4.0 for C-H-H-H-O neighbors
-                CurcumaLogger::info("  Using D3 rcov: C=0.75 Å, H=0.32 Å, O=0.63 Å");
-            }
-        }
-
-        // Step 2: Apply logarithmic transformation (Fortran create_logCN)
-        // logCN = log(1 + e^cnmax) - log(1 + e^(cnmax - cn))
-        // This smoothly caps CN at cnmax and provides better numerical behavior
-        cn[i] = std::log(1.0 + std::exp(cnmax)) - std::log(1.0 + std::exp(cnmax - cn_i));
-    }
-
-    return cn;
-}
 
 std::vector<Matrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, double threshold) const
 {
@@ -3224,7 +3135,9 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     }
 
     // Calculate all topology information (Phase 2 implementations)
-    topo_info.coordination_numbers = calculateCoordinationNumbers();
+    // Phase 2C: Migrate to shared CNCalculator for GFN-FF CN calculation
+    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+    topo_info.coordination_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
     topo_info.hybridization = determineHybridization();         // Phase 2.3 ✅
     topo_info.pi_fragments = detectPiSystems(topo_info.hybridization);  // Phase 2.2 ✅
     topo_info.ring_sizes = findSmallestRings();                 // Phase 2.1 ✅
@@ -3733,100 +3646,8 @@ json GFNFF::generateGFNFFDispersionPairs() const
 
     // Step 4: Use native D3 (always available - part of curcuma core) - December 19, 2025
     if (method == "d3") {
-        if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::info("Using native D3ParameterGenerator (validated 10/11 <1% error)");
-        }
-
-        try {
-            // Extract D3 configuration (GFN-FF defaults: s6=1.0, s8=2.85, a1=0.80, a2=4.60)
-            ConfigManager d3_config = extractDispersionConfig("d3");
-            D3ParameterGenerator d3_gen(d3_config);
-
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info("🔍 GFN-FF calling D3ParameterGenerator with geometry");
-                CurcumaLogger::param("atoms_count", static_cast<int>(m_atoms.size()));
-                CurcumaLogger::param("geometry_rows", static_cast<int>(m_geometry.rows()));
-            }
-
-            // Generate D3 parameters with geometry-dependent CN calculation
-            d3_gen.GenerateParameters(m_atoms, m_geometry);
-
-            // Get D3 pairwise parameters
-            json d3_params = d3_gen.getParameters();
-
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::success("✅ D3ParameterGenerator returned parameters");
-                CurcumaLogger::param("d3_params_size", static_cast<int>(d3_params.size()));
-            }
-
-            // Convert D3 output to GFN-FF dispersion pair format
-            if (!d3_params.contains("d3_dispersion_pairs")) {
-                if (CurcumaLogger::get_verbosity() >= 1) {
-                    CurcumaLogger::warn("D3 generated no dispersion pairs, falling back to free-atom");
-                }
-                return generateFreeAtomDispersion();
-            }
-
-            const auto& d3_pairs = d3_params["d3_dispersion_pairs"];
-            json gfnff_dispersions = json::array();
-
-            // Get damping parameters and scaling factors from D3 config
-            double s6 = d3_config.get<double>("d3_s6", 1.0);
-            double s8 = d3_config.get<double>("d3_s8", 2.85);  // GFN-FF default
-            double a1 = d3_config.get<double>("d3_a1", 0.80);
-            double a2 = d3_config.get<double>("d3_a2", 4.60);  // GFN-FF default (Bohr)
-
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info("📊 D3 Damping Parameters (GFN-FF):");
-                CurcumaLogger::param("s6", s6);
-                CurcumaLogger::param("s8", s8);
-                CurcumaLogger::param("a1", a1);
-                CurcumaLogger::param("a2 (Bohr)", a2);
-            }
-
-            // Convert each D3 pair to GFN-FF format
-            int pair_count = 0;
-            for (const auto& d3_pair : d3_pairs) {
-                json gfnff_pair;
-                gfnff_pair["i"] = d3_pair["i"];
-                gfnff_pair["j"] = d3_pair["j"];
-                gfnff_pair["C6"] = d3_pair["c6"];  // Raw C6 (s6 applied in energy calculation)
-                gfnff_pair["C8"] = d3_pair["c8"];  // Raw C8 (s8 applied in energy calculation)
-                gfnff_pair["s6"] = s6;
-                gfnff_pair["s8"] = s8;
-                gfnff_pair["a1"] = a1;
-                gfnff_pair["a2"] = a2;
-                gfnff_pair["r_cut"] = 100.0;  // Cutoff radius (Bohr)
-
-                // Show first 3 pairs at verbosity 3
-                if (CurcumaLogger::get_verbosity() >= 3 && pair_count < 3) {
-                    CurcumaLogger::info(fmt::format("  D3 pair {}: [{},{}] C6={:.6f} C8={:.6f} CN_i={:.3f} CN_j={:.3f}",
-                        pair_count,
-                        d3_pair["i"].get<int>(),
-                        d3_pair["j"].get<int>(),
-                        d3_pair["c6"].get<double>(),
-                        d3_pair["c8"].get<double>(),
-                        d3_pair["cn_i"].get<double>(),
-                        d3_pair["cn_j"].get<double>()));
-                }
-                pair_count++;
-
-                gfnff_dispersions.push_back(gfnff_pair);
-            }
-
-            if (CurcumaLogger::get_verbosity() >= 2) {
-                CurcumaLogger::success(fmt::format("D3 dispersion: {} pairs generated (validated accuracy)",
-                                                    gfnff_dispersions.size()));
-            }
-
-            return gfnff_dispersions;
-
-        } catch (const std::exception& e) {
-            if (CurcumaLogger::get_verbosity() >= 1) {
-                CurcumaLogger::error(fmt::format("D3 generation failed: {}, falling back to free-atom", e.what()));
-            }
-            return generateFreeAtomDispersion();
-        }
+        // Phase 3: Refactored to use factory method (generateD3Dispersion)
+        return generateD3Dispersion();
     }
 
     // Step 5: Final fallback (always works)
@@ -3839,6 +3660,122 @@ json GFNFF::generateGFNFFDispersionPairs() const
 // ============================================================================
 // Claude Generated (December 2025): D3/D4 Dispersion Integration - Helper Methods
 // ============================================================================
+
+json GFNFF::generateD3Dispersion() const
+{
+    /**
+     * @brief Factory method for D3 dispersion parameter generation
+     *
+     * Claude Generated (December 2025): Phase 3 - Factory method refactoring
+     *
+     * This method encapsulates all D3-specific dispersion parameter generation.
+     * It creates a D3ParameterGenerator, runs it with the current geometry,
+     * and converts the output to GFN-FF dispersion pair format.
+     *
+     * Features:
+     * - Uses validated D3ParameterGenerator (10/11 molecules <1% error)
+     * - Geometry-dependent CN calculation with Gaussian weighting
+     * - Converts D3 output to GFN-FF format
+     * - Handles exceptions with fallback to free-atom C6
+     *
+     * Reference: Grimme et al., J. Chem. Phys. 132, 154104 (2010)
+     */
+
+    try {
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Using native D3ParameterGenerator (validated 10/11 <1% error)");
+        }
+
+        // Extract D3 configuration (GFN-FF defaults: s6=1.0, s8=2.85, a1=0.80, a2=4.60)
+        ConfigManager d3_config = extractDispersionConfig("d3");
+        D3ParameterGenerator d3_gen(d3_config);
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("🔍 GFN-FF calling D3ParameterGenerator with geometry");
+            CurcumaLogger::param("atoms_count", static_cast<int>(m_atoms.size()));
+            CurcumaLogger::param("geometry_rows", static_cast<int>(m_geometry.rows()));
+        }
+
+        // Generate D3 parameters with geometry-dependent CN calculation
+        d3_gen.GenerateParameters(m_atoms, m_geometry);
+
+        // Get D3 pairwise parameters
+        json d3_params = d3_gen.getParameters();
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::success("✅ D3ParameterGenerator returned parameters");
+            CurcumaLogger::param("d3_params_size", static_cast<int>(d3_params.size()));
+        }
+
+        // Convert D3 output to GFN-FF dispersion pair format
+        if (!d3_params.contains("d3_dispersion_pairs")) {
+            if (CurcumaLogger::get_verbosity() >= 1) {
+                CurcumaLogger::warn("D3 generated no dispersion pairs, falling back to free-atom");
+            }
+            return generateFreeAtomDispersion();
+        }
+
+        const auto& d3_pairs = d3_params["d3_dispersion_pairs"];
+        json gfnff_dispersions = json::array();
+
+        // Get damping parameters and scaling factors from D3 config
+        double s6 = d3_config.get<double>("d3_s6", 1.0);
+        double s8 = d3_config.get<double>("d3_s8", 2.85);  // GFN-FF default
+        double a1 = d3_config.get<double>("d3_a1", 0.80);
+        double a2 = d3_config.get<double>("d3_a2", 4.60);  // GFN-FF default (Bohr)
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("📊 D3 Damping Parameters (GFN-FF):");
+            CurcumaLogger::param("s6", s6);
+            CurcumaLogger::param("s8", s8);
+            CurcumaLogger::param("a1", a1);
+            CurcumaLogger::param("a2 (Bohr)", a2);
+        }
+
+        // Convert each D3 pair to GFN-FF format
+        int pair_count = 0;
+        for (const auto& d3_pair : d3_pairs) {
+            json gfnff_pair;
+            gfnff_pair["i"] = d3_pair["i"];
+            gfnff_pair["j"] = d3_pair["j"];
+            gfnff_pair["C6"] = d3_pair["c6"];  // Raw C6 (s6 applied in energy calculation)
+            gfnff_pair["C8"] = d3_pair["c8"];  // Raw C8 (s8 applied in energy calculation)
+            gfnff_pair["s6"] = s6;
+            gfnff_pair["s8"] = s8;
+            gfnff_pair["a1"] = a1;
+            gfnff_pair["a2"] = a2;
+            gfnff_pair["r_cut"] = 100.0;  // Cutoff radius (Bohr)
+
+            // Show first 3 pairs at verbosity 3
+            if (CurcumaLogger::get_verbosity() >= 3 && pair_count < 3) {
+                CurcumaLogger::info(fmt::format("  D3 pair {}: [{},{}] C6={:.6f} C8={:.6f} CN_i={:.3f} CN_j={:.3f}",
+                    pair_count,
+                    d3_pair["i"].get<int>(),
+                    d3_pair["j"].get<int>(),
+                    d3_pair["c6"].get<double>(),
+                    d3_pair["c8"].get<double>(),
+                    d3_pair["cn_i"].get<double>(),
+                    d3_pair["cn_j"].get<double>()));
+            }
+            pair_count++;
+
+            gfnff_dispersions.push_back(gfnff_pair);
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::success(fmt::format("D3 dispersion: {} pairs generated (validated accuracy)",
+                                                gfnff_dispersions.size()));
+        }
+
+        return gfnff_dispersions;
+
+    } catch (const std::exception& e) {
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::error(fmt::format("D3 generation failed: {}, falling back to free-atom", e.what()));
+        }
+        return generateFreeAtomDispersion();
+    }
+}
 
 json GFNFF::generateFreeAtomDispersion() const
 {
@@ -4098,7 +4035,9 @@ bool GFNFF::calculateTopologyCharges(TopologyInfo& topo_info) const
 
     // Initialize coordination numbers if not already present
     if (topo_info.coordination_numbers.size() != m_atomcount) {
-        topo_info.coordination_numbers = calculateCoordinationNumbers(1600.0);
+        // Phase 2C: Migrate to shared CNCalculator for GFN-FF CN calculation
+        auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+        topo_info.coordination_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
         if (topo_info.coordination_numbers.size() != m_atomcount) {
             CurcumaLogger::error("calculateTopologyCharges: Failed to calculate CN");
             return false;

@@ -95,6 +95,81 @@ std::vector<double> CNCalculator::calculateD3CN(
     return cn_values;
 }
 
+std::vector<double> CNCalculator::calculateGFNFFCN(
+    const std::vector<int>& atoms,
+    const Eigen::MatrixXd& geometry_bohr,
+    double threshold,
+    double kn,
+    double cnmax)
+{
+    // Calculate GFN-FF coordination numbers using error function with log transformation
+    // Formula: erfCN = 0.5 * (1 + erf(kn * (r - rcov) / rcov))
+    //          CN_final = log(1 + e^cnmax) - log(1 + e^(cnmax - CN_raw))
+    // Reference: gfnff_cn.f90:66-126, Spicher & Grimme, J. Chem. Theory Comput. 2020
+    // Claude Generated - December 21, 2025
+
+    const double ANG2BOHR = 1.8897259886;  // 1 Angstrom = 1.8897259886 Bohr
+
+    std::vector<double> cn_values(atoms.size(), 0.0);
+
+    for (size_t i = 0; i < atoms.size(); ++i) {
+        int elem_i = atoms[i] - 1;  // Convert to 0-based
+
+        if (elem_i < 0 || elem_i >= static_cast<int>(COVALENT_RADII.size())) {
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::warn("calculateGFNFFCN: Element " + std::to_string(atoms[i]) +
+                                   " out of range, using CN=0");
+            }
+            continue;
+        }
+
+        double rcov_i_ang = COVALENT_RADII[elem_i];
+        double rcov_i_bohr = rcov_i_ang * ANG2BOHR;
+        double cn_raw = 0.0;
+
+        for (size_t j = 0; j < atoms.size(); ++j) {
+            if (i == j) continue;
+
+            int elem_j = atoms[j] - 1;
+            if (elem_j < 0 || elem_j >= static_cast<int>(COVALENT_RADII.size())) {
+                continue;
+            }
+
+            double rcov_j_ang = COVALENT_RADII[elem_j];
+            double rcov_j_bohr = rcov_j_ang * ANG2BOHR;
+            double rcov_ij = rcov_i_bohr + rcov_j_bohr;
+
+            // Calculate distance in Bohr (geometry is in Bohr)
+            Eigen::Vector3d pos_i = geometry_bohr.row(i);
+            Eigen::Vector3d pos_j = geometry_bohr.row(j);
+            double distance_sq = (pos_i - pos_j).squaredNorm();
+
+            if (distance_sq > threshold) continue;
+
+            double distance = std::sqrt(distance_sq);
+
+            // GFN-FF error function coordination number
+            // dr = (r - rcov) / rcov
+            double dr = (distance - rcov_ij) / rcov_ij;
+            double erfCN = 0.5 * (1.0 + std::erf(kn * dr));
+
+            cn_raw += erfCN;
+        }
+
+        // Apply logarithmic transformation for numerical stability
+        // CN_final = log(1 + e^cnmax) - log(1 + e^(cnmax - CN_raw))
+        // This keeps CN in range [0, cnmax]
+        cn_values[i] = std::log(1.0 + std::exp(cnmax)) - std::log(1.0 + std::exp(cnmax - cn_raw));
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("GFNFF_CN[" + std::to_string(i) + "] (Z=" + std::to_string(atoms[i]) +
+                               "): raw=" + std::to_string(cn_raw) + " final=" + std::to_string(cn_values[i]));
+        }
+    }
+
+    return cn_values;
+}
+
 double CNCalculator::getCovalentRadius(int atomic_number)
 {
     int idx = atomic_number - 1;  // Convert to 0-based

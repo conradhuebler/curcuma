@@ -308,6 +308,18 @@ private:
     json generateFreeAtomDispersion() const;
 
     /**
+     * @brief Factory method to generate D3 dispersion parameters
+     * @return JSON array of D3 dispersion pair parameters
+     *
+     * Claude Generated (December 2025): Phase 3 - Factory method
+     * Encapsulates all D3-specific generation logic with fallback handling.
+     * Creates D3ParameterGenerator, runs GenerateParameters(), and converts
+     * output to GFN-FF dispersion pair format.
+     * Handles exceptions and falls back to free-atom C6 if D3 fails.
+     */
+    json generateD3Dispersion() const;
+
+    /**
      * @brief Extract D3/D4 configuration from main GFN-FF config
      * @param method Dispersion method: "d3" or "d4"
      * @return ConfigManager for D3/D4 parameter generator
@@ -629,13 +641,6 @@ private:
     // =================================================================================
     // Advanced GFN-FF Parameter Generation (for future implementation)
     // =================================================================================
-
-    /**
-     * @brief Calculate coordination numbers for all atoms
-     * @param threshold Coordination number threshold (squared distance in Bohr²)
-     * @return Vector of coordination numbers
-     */
-    Vector calculateCoordinationNumbers(double threshold = 1600.0) const;  // 40.0² = 1600 (squared)
 
     /**
      * @brief Calculate coordination number derivatives for gradients

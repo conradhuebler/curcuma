@@ -27,6 +27,7 @@
 
 #include "eeq_solver.h"
 #include "gfnff_par.h"  // EEQ parameters (chi_eeq, gam_eeq, alpha_eeq, cnf_eeq)
+#include "cn_calculator.h"  // Shared CN calculation utility
 
 #include "src/core/curcuma_logger.h"
 #include "src/core/elements.h"
@@ -577,59 +578,12 @@ Vector EEQSolver::calculateCoordinationNumbers(
     const std::vector<int>& atoms,
     const Matrix& geometry_bohr) const
 {
-    const int natoms = atoms.size();
-    const double kn = -7.5;       // Error function steepness
-    const double cnmax = 4.4;     // Maximum CN cutoff
-    const double threshold = 1600.0;  // Distance threshold (Bohr²)
+    // Delegate to shared CNCalculator utility
+    // Claude Generated - December 21, 2025 (consolidated duplicate CN calculation)
+    std::vector<double> cn_double = CNCalculator::calculateGFNFFCN(atoms, geometry_bohr);
 
-    // D3 covalent radii (Angstrom) - first 18 elements
-    static const std::vector<double> rcov_d3_angstrom = {
-        0.32, 0.46,  // H, He
-        1.20, 0.94, 0.77, 0.75, 0.71, 0.63, 0.64, 0.67,  // Li-Ne
-        1.40, 1.25, 1.13, 1.04, 1.10, 1.02, 0.99, 0.96   // Na-Ar
-    };
-
-    Vector cn = Vector::Zero(natoms);
-
-    // Calculate raw CN using error function
-    for (int i = 0; i < natoms; ++i) {
-        double cn_i = 0.0;
-        for (int j = 0; j < natoms; ++j) {
-            if (i == j) continue;
-
-            Vector ri = geometry_bohr.row(i);
-            Vector rj = geometry_bohr.row(j);
-            double distance_sq = (ri - rj).squaredNorm();
-
-            if (distance_sq > threshold) continue;
-
-            double distance = std::sqrt(distance_sq);
-
-            // Get D3 covalent radii (fallback to Elements::CovalentRadius)
-            double rcov_i_angstrom = (atoms[i] >= 1 && atoms[i] <= 18)
-                                   ? rcov_d3_angstrom[atoms[i] - 1]
-                                   : ((atoms[i] >= 1 && atoms[i] < static_cast<int>(Elements::CovalentRadius.size()))
-                                      ? Elements::CovalentRadius[atoms[i]] : 0.7);
-            double rcov_j_angstrom = (atoms[j] >= 1 && atoms[j] <= 18)
-                                   ? rcov_d3_angstrom[atoms[j] - 1]
-                                   : ((atoms[j] >= 1 && atoms[j] < static_cast<int>(Elements::CovalentRadius.size()))
-                                      ? Elements::CovalentRadius[atoms[j]] : 0.7);
-
-            // Convert to Bohr (1 Angstrom = 1.8897259886 Bohr)
-            double rcov_i_bohr = rcov_i_angstrom * 1.8897259886;
-            double rcov_j_bohr = rcov_j_angstrom * 1.8897259886;
-            double rcov_ij = rcov_i_bohr + rcov_j_bohr;
-
-            // Error function coordination number
-            double dr = (distance - rcov_ij) / rcov_ij;
-            double erfCN = 0.5 * (1.0 + std::erf(kn * dr));
-
-            cn_i += erfCN;
-        }
-
-        // Apply logarithmic transformation
-        cn(i) = std::log(1.0 + std::exp(cnmax)) - std::log(1.0 + std::exp(cnmax - cn_i));
-    }
+    // Convert std::vector<double> to Eigen::Vector for API compatibility
+    Vector cn = Vector::Map(cn_double.data(), cn_double.size());
 
     return cn;
 }
