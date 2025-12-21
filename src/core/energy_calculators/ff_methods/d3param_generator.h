@@ -72,8 +72,43 @@ public:
     static D3ParameterGenerator createForPBE0();
 
     /**
+     * Create D3ParameterGenerator with BLYP-D3-BJ parameters
+     * Parameters: s6=1.0, s8=2.6996, a1=0.4298, a2=4.2359 (Bohr)
+     * Reference: Grimme et al., J. Chem. Phys. 132, 154104 (2010), Table II
+     */
+    static D3ParameterGenerator createForBLYP();
+
+    /**
+     * Create D3ParameterGenerator with B3LYP-D3-BJ parameters
+     * Parameters: s6=1.0, s8=1.9889, a1=0.3981, a2=4.4211 (Bohr)
+     * Reference: Grimme et al., J. Chem. Phys. 132, 154104 (2010), Table II
+     */
+    static D3ParameterGenerator createForB3LYP();
+
+    /**
+     * Create D3ParameterGenerator with TPSS-D3-BJ parameters
+     * Parameters: s6=1.0, s8=1.9435, a1=0.4535, a2=4.4752 (Bohr)
+     * Reference: Grimme et al., J. Chem. Phys. 132, 154104 (2010), Table II
+     */
+    static D3ParameterGenerator createForTPSS();
+
+    /**
+     * Create D3ParameterGenerator with PBE-D3-BJ parameters
+     * Parameters: s6=1.0, s8=0.7875, a1=0.4289, a2=4.4407 (Bohr)
+     * Reference: Grimme et al., J. Chem. Phys. 132, 154104 (2010), Table II
+     */
+    static D3ParameterGenerator createForPBE();
+
+    /**
+     * Create D3ParameterGenerator with BP86-D3-BJ parameters
+     * Parameters: s6=1.0, s8=3.2822, a1=0.3946, a2=4.8516 (Bohr)
+     * Reference: Grimme et al., J. Chem. Phys. 132, 154104 (2010), Table II
+     */
+    static D3ParameterGenerator createForBP86();
+
+    /**
      * Create D3ParameterGenerator with method-specific parameters
-     * Supported methods: "gfnff", "uff-d3", "pbe0", "custom"
+     * Supported methods: "pbe0", "blyp", "b3lyp", "tpss", "pbe", "bp86", "gfnff", "uff-d3"
      * Throws std::invalid_argument if method is unknown
      */
     static D3ParameterGenerator createForMethod(const std::string& method);

@@ -235,6 +235,28 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
         m_ff_type = 4;  // GFN-FF type (Phase 3 integration)
         // GFN-FF uses built-in dispersion/repulsion instead of D3/D4
         m_parameter["vdw_scaling"] = 0;
+    } else if (m_method.compare("d3") == 0) {
+        m_ff_type = 5;  // D3-only type (Claude Generated December 21, 2025)
+        m_parameter["d3"] = 1;
+        m_parameter["vdw_scaling"] = 0;
+
+        // D3-only: Skip ALL bonded terms
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::info("D3-only method: skipping bonded term generation");
+        }
+
+        // Get preset from m_parameter (default: pbe0)
+        std::string preset = m_parameter.value("d3_preset", "pbe0");
+
+        // Generate D3 parameters only
+        json d3_only_params = GenerateD3OnlyParameters(preset);
+        m_parameter = MergeJson(m_parameter, d3_only_params);
+
+        // Early return - no bonded terms needed
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::success("D3-only parameter generation complete");
+        }
+        return;  // Skip bonds, angles, dihedrals, inversions
     }
 
     m_uff_bond_force = m_parameter["bond_force"];
@@ -1112,56 +1134,49 @@ json ForceFieldGenerator::GenerateUFFD3Parameters()
     json uff_params = getParameter();
 
     // Step 3: Add D3 dispersion correction
-    #ifdef USE_D3
-        if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::info("Adding native D3 dispersion correction");
-        }
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Adding native D3 dispersion correction");
+    }
 
-        try {
-            // D3 configuration with PBE0/BJ parameters (recommended for UFF-D3)
-            json d3_config_json = {
-                {"d3_a1", 0.4145},   // PBE0/BJ damping parameter 1
-                {"d3_a2", 4.8593},   // PBE0/BJ damping parameter 2 (Bohr)
-                {"d3_alp", 14.0},    // Alpha parameter
-                {"d3_s6", 1.0},      // C6 scaling factor
-                {"d3_s8", 1.2177}    // C8 scaling factor (PBE0)
-            };
+    try {
+        // D3 configuration with PBE0/BJ parameters (recommended for UFF-D3)
+        json d3_config_json = {
+            {"d3_a1", 0.4145},   // PBE0/BJ damping parameter 1
+            {"d3_a2", 4.8593},   // PBE0/BJ damping parameter 2 (Bohr)
+            {"d3_alp", 14.0},    // Alpha parameter
+            {"d3_s6", 1.0},      // C6 scaling factor
+            {"d3_s8", 1.2177}    // C8 scaling factor (PBE0)
+        };
 
-            ConfigManager d3_config("d3param", d3_config_json);
-            D3ParameterGenerator d3_gen(d3_config);
+        ConfigManager d3_config("d3param", d3_config_json);
+        D3ParameterGenerator d3_gen(d3_config);
 
-            // Generate D3 parameters with geometry-dependent CN calculation
-            d3_gen.GenerateParameters(m_mol.m_atoms, m_geometry);
-            json d3_params = d3_gen.getParameters();
+        // Generate D3 parameters with geometry-dependent CN calculation
+        d3_gen.GenerateParameters(m_mol.m_atoms, m_geometry);
+        json d3_params = d3_gen.getParameters();
 
-            // Merge D3 parameters into UFF parameter set
-            if (d3_params.contains("d3_dispersion_pairs")) {
-                uff_params["d3_dispersion_pairs"] = d3_params["d3_dispersion_pairs"];
-                uff_params["d3_damping"] = d3_params["d3_damping"];
-                uff_params["d3_enabled"] = true;
+        // Merge D3 parameters into UFF parameter set
+        if (d3_params.contains("d3_dispersion_pairs")) {
+            uff_params["d3_dispersion_pairs"] = d3_params["d3_dispersion_pairs"];
+            uff_params["d3_damping"] = d3_params["d3_damping"];
+            uff_params["d3_enabled"] = true;
 
-                if (CurcumaLogger::get_verbosity() >= 2) {
-                    CurcumaLogger::param("d3_pairs", static_cast<int>(d3_params["d3_dispersion_pairs"].size()));
-                }
-            } else {
-                if (CurcumaLogger::get_verbosity() >= 1) {
-                    CurcumaLogger::warn("D3 generated no dispersion pairs");
-                }
-                uff_params["d3_enabled"] = false;
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::param("d3_pairs", static_cast<int>(d3_params["d3_dispersion_pairs"].size()));
             }
-
-        } catch (const std::exception& e) {
+        } else {
             if (CurcumaLogger::get_verbosity() >= 1) {
-                CurcumaLogger::error(fmt::format("D3 parameter generation failed: {}", e.what()));
+                CurcumaLogger::warn("D3 generated no dispersion pairs");
             }
             uff_params["d3_enabled"] = false;
         }
-    #else
+
+    } catch (const std::exception& e) {
         if (CurcumaLogger::get_verbosity() >= 1) {
-            CurcumaLogger::warn("D3 not compiled (USE_D3 not defined), UFF-D3 = UFF only");
+            CurcumaLogger::error(fmt::format("D3 parameter generation failed: {}", e.what()));
         }
         uff_params["d3_enabled"] = false;
-    #endif
+    }
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
@@ -1174,4 +1189,72 @@ json ForceFieldGenerator::GenerateUFFD3Parameters()
     }
 
     return uff_params;
+}
+
+json ForceFieldGenerator::GenerateD3OnlyParameters(const std::string& preset)
+{
+    /**
+     * @brief Generate pure D3 dispersion parameters without bonded terms
+     *
+     * Supports 7 functional presets:
+     * - pbe0 (default), blyp, b3lyp, tpss, pbe, bp86, gfnff
+     *
+     * Returns JSON with ONLY:
+     * - d3_dispersion_pairs
+     * - d3_damping
+     * - d3_enabled = true
+     *
+     * NO bonded terms (bonds, angles, dihedrals, inversions, vdw)
+     *
+     * Claude Generated: December 21, 2025
+     */
+
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::info("Generating D3-only dispersion parameters");
+        CurcumaLogger::param("preset", preset);
+        CurcumaLogger::param("atoms", m_atoms);
+    }
+
+    json d3_params;
+
+    try {
+        // Create D3ParameterGenerator with preset
+        D3ParameterGenerator d3_gen = D3ParameterGenerator::createForMethod(preset);
+
+        // Generate D3 parameters
+        d3_gen.GenerateParameters(m_mol.m_atoms, m_geometry);
+        json generated = d3_gen.getParameters();
+
+        // Extract ONLY D3 data
+        if (generated.contains("d3_dispersion_pairs")) {
+            d3_params["d3_dispersion_pairs"] = generated["d3_dispersion_pairs"];
+            d3_params["d3_damping"] = generated["d3_damping"];
+            d3_params["d3_enabled"] = true;
+
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::param("d3_pairs", static_cast<int>(generated["d3_dispersion_pairs"].size()));
+            }
+        } else {
+            CurcumaLogger::warn("D3 generated no dispersion pairs");
+            d3_params["d3_enabled"] = false;
+        }
+
+    } catch (const std::exception& e) {
+        CurcumaLogger::error(fmt::format("D3 generation failed: {}", e.what()));
+        d3_params["d3_enabled"] = false;
+    }
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::success("D3-only parameter generation completed");
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param("total_time", fmt::format("{} ms", duration.count()));
+        }
+    }
+
+    return d3_params;
 }

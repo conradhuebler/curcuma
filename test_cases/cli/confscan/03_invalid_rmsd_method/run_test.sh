@@ -1,4 +1,6 @@
 #!/bin/bash
+export PROJECT_ROOT='/home/conrad/src/claude_curcuma/curcuma/test_cases/cli/../..'
+
 # Test: ConfScan with Invalid RMSD Method
 # Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
 # Claude Generated

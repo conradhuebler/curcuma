@@ -419,7 +419,7 @@ void ForceFieldMethod::setParameterFile(const std::string& filename) {
 // =================================================================================
 
 std::vector<std::string> ForceFieldMethod::getSupportedMethods() {
-    return {"uff", "uff-d3", "qmdff", "cgfnff"};
+    return {"uff", "uff-d3", "d3", "qmdff", "cgfnff"};
 }
 
 bool ForceFieldMethod::isMethodSupported(const std::string& method_name) {
@@ -476,8 +476,10 @@ json ForceFieldMethod::getDefaultConfigForMethod(const std::string& method_name)
         config["parameter_caching"] = false;  // cgfnff has parameter issues
     } else if (method_name == "qmdff") {
         config["qmdff_version"] = "latest";
+    } else if (method_name == "d3") {
+        config["d3_preset"] = "pbe0";  // Default preset for D3-only method
     }
-    
+
     return config;
 }
 

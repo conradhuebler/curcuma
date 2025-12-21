@@ -4,7 +4,7 @@
  */
 
 #include "d4param_generator.h"
-#include "d4_reference_data_fixed.cpp"  // Import complete D4 reference data
+// #include "d4_reference_data_fixed.cpp"  // WIP: D4 reference data (not yet integrated)
 #include "src/core/curcuma_logger.h"
 
 #include <algorithm>
@@ -23,17 +23,24 @@ D4ParameterGenerator::D4ParameterGenerator(const ConfigManager& config)
 
 void D4ParameterGenerator::initializeReferenceData()
 {
-    // Use imported D4 reference data from external/gfnff/src/dftd4param.f90
-    // Contains complete data for 118 elements extracted via extract_d4_data.py
+    // WIP: D4 reference data integration (not yet complete)
+    // External file d4_reference_data_fixed.cpp would contain:
+    // - D4 reference data from external/gfnff/src/dftd4param.f90
+    // - 118 elements with 7 reference states each
+    // - Extracted via extract_d4_data.py
 
-    // Import number of reference systems per element (118 elements)
-    m_refn = ::d4_refn;
+    // Initialize with placeholder data (WIP - Phase 2)
+    // When D4 reference data is complete, import from d4_reference_data_fixed.cpp:
+    // m_refn = ::d4_refn;
+    // m_refq = ::d4_refq;
+    // m_refh = ::d4_refh;
 
-    // Import reference charges (118 elements × 7 references)
-    m_refq = ::d4_refq;
+    // Temporary: Initialize with reasonable defaults
+    m_refn.resize(MAX_ELEM, 1);  // At least 1 reference state per element
 
-    // Import reference hydrogen counts (118 elements × 7 references)
-    m_refh = ::d4_refh;
+    // Initialize 2D vectors for reference charges and hydrogen counts
+    m_refq.resize(MAX_ELEM, std::vector<double>(MAX_REF, 0.0));
+    m_refh.resize(MAX_ELEM, std::vector<double>(MAX_REF, 0.0));
 
     // Initialize reference coordination numbers (placeholder - implement extraction)
     m_refcn.resize(MAX_ELEM, std::vector<double>(MAX_REF, 0.0));
@@ -75,26 +82,21 @@ void D4ParameterGenerator::initializeReferenceData()
 
 void D4ParameterGenerator::calculateFrequencyDependentPolarizabilities()
 {
-    // Pre-calculate integrated frequency-dependent polarizabilities
+    // WIP: Frequency-dependent polarizability calculation (D4 Phase 2)
+    // Currently placeholder - will be implemented when D4 reference data is available
+
     m_integrated_alpha.resize(MAX_ELEM, std::vector<double>(MAX_REF, 0.0));
 
-    // Simple trapezoidal integration frequency weights
-    std::vector<double> freq_weights(N_FREQ, 1.0);
-    freq_weights[0] = 0.5; freq_weights[N_FREQ-1] = 0.5; // End points
-    double freq_spacing = 0.5 / PI;
-
-    for (size_t elem = 0; elem < m_alpha_iw.size() && elem < MAX_ELEM; ++elem) {
-        for (size_t ref = 0; ref < m_alpha_iw[elem].size() && ref < MAX_REF; ++ref) {
-            double integrated = 0.0;
-            for (int freq = 0; freq < N_FREQ; ++freq) {
-                integrated += freq_weights[freq] * m_alpha_iw[elem][ref][freq];
-            }
-            m_integrated_alpha[elem][ref] = integrated * freq_spacing;
+    // Placeholder: Initialize with default values
+    // When D4 implementation is complete, integrate actual frequency-dependent data
+    for (int elem = 0; elem < MAX_ELEM; ++elem) {
+        for (int ref = 0; ref < MAX_REF; ++ref) {
+            m_integrated_alpha[elem][ref] = 1.0;  // Placeholder
         }
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("D4 frequency-dependent polarizabilities calculated");
+        CurcumaLogger::warn("D4: Frequency-dependent polarizabilities using placeholder values (WIP)");
     }
 }
 

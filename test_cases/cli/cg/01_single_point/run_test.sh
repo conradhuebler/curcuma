@@ -1,4 +1,6 @@
 #!/bin/bash
+export PROJECT_ROOT='/home/conrad/src/claude_curcuma/curcuma/test_cases/cli/../..'
+
 
 # Test: CG Single Point Energy Calculation
 # Tests ForceField with method="cg" for simple 2-bead system

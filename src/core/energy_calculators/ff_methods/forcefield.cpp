@@ -193,9 +193,7 @@ void ForceField::setParameter(const json& parameters)
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("Calculating parameter ranges");
         }
-        std::cout << "DEBUG: About to call AutoRanges()..." << std::endl;
         AutoRanges();
-        std::cout << "DEBUG: AutoRanges() completed" << std::endl;
 
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info("Parameter generation complete");
@@ -219,6 +217,8 @@ void ForceField::setParameter(const json& parameters)
         if (m_enable_caching && !loaded_from_cache) {
             generateCGParameters(parameters);
         }
+    } else if (m_method == "d3") {
+        method_type = 1; // D3 uses UFF method type
     }
 
     if (CurcumaLogger::get_verbosity() >= 2) {
@@ -792,6 +792,8 @@ void ForceField::AutoRanges()
             thread->setHydrogenBondEnabled(hbond);
             thread->setRepulsionEnabled(repulsion);
             thread->setCoulombEnabled(coulomb);
+        } else if (m_method == "d3") {  // Claude Generated (December 21, 2025)
+            thread->setMethod(5); // D3-only method
         }
         for (int j = int(i * m_bonds.size() / double(free_threads)); j < int((i + 1) * m_bonds.size() / double(free_threads)); ++j) {
             if (m_method == "gfnff" || m_method == "cgfnff") { // Claude Generated (2025-12-13): Support both method names
@@ -835,7 +837,10 @@ void ForceField::AutoRanges()
 
         // Phase 4.2: Distribute GFN-FF pairwise non-bonded interactions (Claude Generated 2025)
         // Phase 2.2 (December 19, 2025): Extended for UFF-D3 native dispersion
-        if (m_method == "gfnff" || m_method == "cgfnff") { // Claude Generated (2025-12-13): Support both method names
+        if (m_method == "gfnff" || m_method == "cgfnff" || m_method == "d3") { // Claude Generated (2025-12-13): Support both method names and D3 method
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("Distributing {} GFN-FF dispersion pairs to thread {}", m_gfnff_dispersions.size(), i));
+            }
             for (int j = int(i * m_gfnff_dispersions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_dispersions.size() / double(free_threads)); ++j) {
                 thread->addGFNFFDispersion(m_gfnff_dispersions[j]);
             }
@@ -1079,6 +1084,17 @@ json ForceField::exportCurrentParameters() const
     }
     output["electrostatics"] = eqs;
 
+    // Claude Generated: Export D3 dispersion parameters if they exist
+    if (m_parameters.contains("d3_dispersion_pairs")) {
+        output["d3_dispersion_pairs"] = m_parameters["d3_dispersion_pairs"];
+    }
+    if (m_parameters.contains("d3_damping")) {
+        output["d3_damping"] = m_parameters["d3_damping"];
+    }
+    if (m_parameters.contains("d3_enabled")) {
+        output["d3_enabled"] = m_parameters["d3_enabled"];
+    }
+
     // Add metadata
     output["generated_by"] = "curcuma_forcefield";
     output["timestamp"] = std::chrono::system_clock::now().time_since_epoch().count();
@@ -1230,20 +1246,27 @@ double ForceField::Calculate(bool gradient)
             CurcumaLogger::param(fmt::format("thread_{}_type", i), std::to_string(thread_type));
         }
 
-        if (thread_type != 3) {
+        // Collect D3 and D4 energies from all threads
+        d3_energy += m_stored_threads[i]->D3Energy();
+        d4_energy += m_stored_threads[i]->D4Energy();
+
+        if (thread_type != 3 && thread_type != 5) {
             m_vdw_energy += m_stored_threads[i]->VdWEnergy();
             m_rep_energy += m_stored_threads[i]->RepEnergy();
-        } else {
-            // GFN-FF (Type == 3) uses different energy components
+        } else if (thread_type == 3 || thread_type == 5) {
+            // GFN-FF (Type == 3) and D3-only (Type == 5) use dispersion energies
             // Claude Generated: Store GFN-FF energies in both old and new variables for API compatibility
-            h4_energy += m_stored_threads[i]->VdWEnergy();
-            m_hh_energy += m_stored_threads[i]->RepEnergy();  // Claude Generated (Session 9): Use member variable
-            // CRITICAL FIX (Nov 2025): Do NOT also add to m_rep_energy for GFN-FF!
-            // For GFN-FF (method==3), repulsion goes ONLY into m_hh_energy, not m_rep_energy
-            // This was causing double-counting: H2 showed 0.266 Eh instead of 0.050 Eh
-            // m_rep_energy is for UFF/QMDFF only (method != 3)
-
-            // CRITICAL FIX: Also collect GFN-FF dispersion and Coulomb energies!
+            // Claude Generated (December 21, 2025): Extend to also handle D3-only (Type == 5)
+            if (thread_type == 3) {
+                // GFN-FF specific components
+                h4_energy += m_stored_threads[i]->VdWEnergy();
+                m_hh_energy += m_stored_threads[i]->RepEnergy();  // Claude Generated (Session 9): Use member variable
+                // CRITICAL FIX (Nov 2025): Do NOT also add to m_rep_energy for GFN-FF!
+                // For GFN-FF (method==3), repulsion goes ONLY into m_hh_energy, not m_rep_energy
+                // This was causing double-counting: H2 showed 0.266 Eh instead of 0.050 Eh
+                // m_rep_energy is for UFF/QMDFF only (method != 3)
+            }
+            // Collect dispersion and Coulomb energies for both GFN-FF and D3-only
             double thread_disp = m_stored_threads[i]->DispersionEnergy();
             double thread_coul = m_stored_threads[i]->CoulombEnergy();
             m_dispersion_energy += thread_disp;
@@ -1309,7 +1332,7 @@ double ForceField::Calculate(bool gradient)
     }
 
     // Claude Generated: Add GFN-FF dispersion, Coulomb, HB, and XB energies to total
-    energy = m_e0 + m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy + m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + m_hh_energy + cg_energy + m_dispersion_energy + m_coulomb_energy + m_energy_hbond + m_energy_xbond;  // Claude Generated (Session 9): Use m_hh_energy
+    energy = m_e0 + m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy + m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + m_hh_energy + cg_energy + m_dispersion_energy + m_coulomb_energy + m_energy_hbond + m_energy_xbond + d3_energy + d4_energy;  // Claude Generated (Session 9): Use m_hh_energy
 
     // Claude Generated (2025): Debug total GFN-FF energies
     if (CurcumaLogger::get_verbosity() >= 3 && (m_dispersion_energy != 0.0 || m_coulomb_energy != 0.0)) {

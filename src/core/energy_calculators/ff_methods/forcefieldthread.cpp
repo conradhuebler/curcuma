@@ -121,6 +121,9 @@ int ForceFieldThread::execute()
         // Note: GFN-FF uses its own dispersion (CalculateGFNFFDispersionContribution above)
         // D3/D4 are additional corrections that can be enabled separately
         if (m_d3_dispersions.size() > 0) {
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("Thread {} calculating {} D3 dispersion pairs", m_thread, m_d3_dispersions.size()));
+            }
             CalculateD3DispersionContribution();
         }
 
@@ -139,11 +142,23 @@ int ForceFieldThread::execute()
         // Claude Generated (December 19, 2025): UFF-D3 native dispersion correction
         // Add D3 dispersion to UFF if available (UFF-D3 hybrid method)
         if (m_d3_dispersions.size() > 0) {
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("Thread {} calculating {} D3 dispersion pairs for UFF-D3", m_thread, m_d3_dispersions.size()));
+            }
             CalculateD3DispersionContribution();
+        }
+    } else if (m_method == 5) {  // Claude Generated (December 21, 2025)
+        // D3-only method: pure dispersion correction without bonded terms
+        if (m_gfnff_dispersions.size() > 0) {
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("Thread {} calculating {} D3-only dispersion pairs",
+                                                 m_thread, m_gfnff_dispersions.size()));
+            }
+            CalculateGFNFFDispersionContribution();  // D3 pairs stored in gfnff_dispersions
         }
     }
 
-    if (m_method != 3 && m_method != 1) {
+    if (m_method != 3 && m_method != 1 && m_method != 5) {
         // QMDFF or other methods
         CalculateUFFDihedralContribution();
         CalculateUFFInversionContribution();
@@ -229,6 +244,9 @@ void ForceFieldThread::addGFNFFvdW(const vdW& vdWs)
 
 void ForceFieldThread::addGFNFFDispersion(const GFNFFDispersion& dispersion)
 {
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("Thread {} adding GFNFF dispersion pair {}-{}", m_thread, dispersion.i, dispersion.j));
+    }
     m_gfnff_dispersions.push_back(dispersion);
 }
 

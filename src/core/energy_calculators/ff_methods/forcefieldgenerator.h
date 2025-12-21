@@ -108,7 +108,8 @@ static json EQJson{
 // Claude Generated 2025: ForceField Generator Parameter Registry - replaces const FFGenerator JSON
 BEGIN_PARAMETER_DEFINITION(forcefield)
     // Method Selection
-    PARAM(method, String, "uff", "Force field method (uff, uff-d3, qmdff).", "Method", {})
+    PARAM(method, String, "uff", "Force field method (uff, uff-d3, d3, qmdff).", "Method", {})
+    PARAM(d3_preset, String, "pbe0", "D3 functional preset for d3-only method (pbe0, blyp, b3lyp, tpss, pbe, bp86, gfnff).", "D3-Only", {})
 
     // Dispersion Corrections (D3/D4)
     PARAM(d3, Int, 0, "Enable DFT-D3 dispersion correction (0=off, 1=on).", "Dispersion", {})
@@ -170,6 +171,9 @@ public:
 
     // Claude Generated (December 19, 2025): UFF-D3 hybrid method
     json GenerateUFFD3Parameters();
+
+    // Claude Generated (December 21, 2025): D3-only dispersion method
+    json GenerateD3OnlyParameters(const std::string& preset = "pbe0");
 
 private:
     double UFFBondRestLength(int i, int j, double order);

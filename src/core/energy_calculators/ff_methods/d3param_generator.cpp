@@ -215,6 +215,12 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     // Generate dispersion parameters for all atom pairs
     json dispersion_pairs = json::array();
 
+    // Get global scaling factors from config
+    double s6 = m_config.get<double>("d3_s6", 1.0);
+    double s8 = m_config.get<double>("d3_s8", 1.0);
+    double a1 = m_config.get<double>("d3_a1", 0.4);
+    double a2 = m_config.get<double>("d3_a2", 4.0);
+
     for (size_t i = 0; i < m_atoms.size(); ++i) {
         for (size_t j = i + 1; j < m_atoms.size(); ++j) {
             int atom_i = m_atoms[i];
@@ -246,6 +252,16 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
                 // Add van der Waals radius for distance cutoff
                 pair["vdw_radius"] = getR6(atom_i, atom_j); // Use r6 as fallback
+
+                // Add missing fields expected by setGFNFFDispersions
+                pair["C6"] = c6;  // Duplicate for compatibility
+                pair["C8"] = c6 * c8_over_c6;  // Duplicate for compatibility
+                pair["s6"] = s6;
+                pair["s8"] = s8;
+                pair["a1"] = a1;
+                pair["a2"] = a2;
+                // Use a reasonable default for r_cut (100 Bohr = ~52.9 Å)
+                pair["r_cut"] = 100.0;
 
                 dispersion_pairs.push_back(pair);
             } else {
@@ -577,6 +593,76 @@ D3ParameterGenerator D3ParameterGenerator::createForPBE0()
     return createForUFFD3();
 }
 
+D3ParameterGenerator D3ParameterGenerator::createForBLYP()
+{
+    // BLYP-D3-BJ parameters (Grimme et al., J. Chem. Phys. 132, 154104 2010, Table II)
+    json config_json;
+    config_json["d3_s6"] = 1.0;
+    config_json["d3_s8"] = 2.6996;
+    config_json["d3_a1"] = 0.4298;
+    config_json["d3_a2"] = 4.2359;
+    config_json["d3_alp"] = 14.0;
+
+    ConfigManager config("d3param", config_json);
+    return D3ParameterGenerator(config);
+}
+
+D3ParameterGenerator D3ParameterGenerator::createForB3LYP()
+{
+    // B3LYP-D3-BJ parameters (Grimme et al., J. Chem. Phys. 132, 154104 2010, Table II)
+    json config_json;
+    config_json["d3_s6"] = 1.0;
+    config_json["d3_s8"] = 1.9889;
+    config_json["d3_a1"] = 0.3981;
+    config_json["d3_a2"] = 4.4211;
+    config_json["d3_alp"] = 14.0;
+
+    ConfigManager config("d3param", config_json);
+    return D3ParameterGenerator(config);
+}
+
+D3ParameterGenerator D3ParameterGenerator::createForTPSS()
+{
+    // TPSS-D3-BJ parameters (Grimme et al., J. Chem. Phys. 132, 154104 2010, Table II)
+    json config_json;
+    config_json["d3_s6"] = 1.0;
+    config_json["d3_s8"] = 1.9435;
+    config_json["d3_a1"] = 0.4535;
+    config_json["d3_a2"] = 4.4752;
+    config_json["d3_alp"] = 14.0;
+
+    ConfigManager config("d3param", config_json);
+    return D3ParameterGenerator(config);
+}
+
+D3ParameterGenerator D3ParameterGenerator::createForPBE()
+{
+    // PBE-D3-BJ parameters (Grimme et al., J. Chem. Phys. 132, 154104 2010, Table II)
+    json config_json;
+    config_json["d3_s6"] = 1.0;
+    config_json["d3_s8"] = 0.7875;
+    config_json["d3_a1"] = 0.4289;
+    config_json["d3_a2"] = 4.4407;
+    config_json["d3_alp"] = 14.0;
+
+    ConfigManager config("d3param", config_json);
+    return D3ParameterGenerator(config);
+}
+
+D3ParameterGenerator D3ParameterGenerator::createForBP86()
+{
+    // BP86-D3-BJ parameters (Grimme et al., J. Chem. Phys. 132, 154104 2010, Table II)
+    json config_json;
+    config_json["d3_s6"] = 1.0;
+    config_json["d3_s8"] = 3.2822;
+    config_json["d3_a1"] = 0.3946;
+    config_json["d3_a2"] = 4.8516;
+    config_json["d3_alp"] = 14.0;
+
+    ConfigManager config("d3param", config_json);
+    return D3ParameterGenerator(config);
+}
+
 D3ParameterGenerator D3ParameterGenerator::createForMethod(const std::string& method)
 {
     std::string lower_method = method;
@@ -588,10 +674,20 @@ D3ParameterGenerator D3ParameterGenerator::createForMethod(const std::string& me
         return createForUFFD3();
     } else if (lower_method == "pbe0") {
         return createForPBE0();
+    } else if (lower_method == "blyp") {
+        return createForBLYP();
+    } else if (lower_method == "b3lyp") {
+        return createForB3LYP();
+    } else if (lower_method == "tpss") {
+        return createForTPSS();
+    } else if (lower_method == "pbe") {
+        return createForPBE();
+    } else if (lower_method == "bp86") {
+        return createForBP86();
     } else {
         throw std::invalid_argument(
-            "Unknown D3 method: " + method +
-            ". Supported: 'gfnff', 'uff-d3', 'pbe0'"
+            "Unknown D3 preset: " + method +
+            ". Supported: pbe0, blyp, b3lyp, tpss, pbe, bp86, gfnff, uff-d3"
         );
     }
 }

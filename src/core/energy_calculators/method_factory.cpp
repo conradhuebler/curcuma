@@ -44,8 +44,8 @@ using namespace std;
 // Method Lists (from original EnergyCalculator)
 // =================================================================================
 
-const std::vector<std::string> MethodFactory::m_ff_methods = { 
-    "uff", "uff-d3", "qmdff", "cgfnff" 
+const std::vector<std::string> MethodFactory::m_ff_methods = {
+    "uff", "uff-d3", "d3", "qmdff", "cgfnff"
 };
 
 const std::vector<std::string> MethodFactory::m_tblite_methods = { 
@@ -184,6 +184,7 @@ const std::vector<MethodFactory::ExplicitMethod>& MethodFactory::getExplicitMeth
         // Force field methods (always available)
         { "uff", [](const json& config) { return std::make_unique<ForceFieldMethod>("uff", config); }, "ForceField", false, "" },
         { "uff-d3", [](const json& config) { return std::make_unique<ForceFieldMethod>("uff-d3", config); }, "ForceField", false, "" },
+        { "d3", [](const json& config) { return std::make_unique<ForceFieldMethod>("d3", config); }, "ForceField", false, "" },  // D3-only dispersion (Claude Generated Dec 21, 2025)
         { "qmdff", [](const json& config) { return std::make_unique<ForceFieldMethod>("qmdff", config); }, "ForceField", false, "" },
 
         // XTB-specific methods
@@ -214,7 +215,6 @@ const std::vector<MethodFactory::ExplicitMethod>& MethodFactory::getExplicitMeth
         { "cgfnff", [](const json& config) { return std::make_unique<GFNFFComputationalMethod>("cgfnff", config); }, "GFN-FF", true, "USE_GFNFF" },
 
         // Dispersion corrections
-        { "d3", [](const json& config) { return std::make_unique<DispersionMethod>("d3", config); }, "DFT-D3", true, "USE_D3" },
         { "d4", [](const json& config) { return std::make_unique<DispersionMethod>("d4", config); }, "DFT-D4", true, "USE_D4" }
     };
 
