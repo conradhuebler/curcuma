@@ -41,6 +41,7 @@
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
 #include "src/capabilities/simplemd.h"
+#include "src/capabilities/trajectory_statistics.h"
 #include "src/capabilities/trajectoryanalysis.h"
 
 #include "src/tools/general.h"
@@ -53,9 +54,11 @@
 #include "src/capabilities/optimiser/OptimiseDipoleScaling.h"
 #include "src/capabilities/optimisation/modern_optimizer_simple.h"
 
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 
@@ -144,6 +147,426 @@ void Distance(const Molecule &mol, char **argv)
     std::cout << std::endl
               << "Hydrogen Bond Angle: " << mol.CalculateAngle(donor - 1, proton - 1, acceptor - 1) << std::endl;
     std::cout << "Hydrogen bond length " << mol.CalculateDistance(proton - 1, acceptor - 1) << std::endl;
+}
+
+// Claude Generated: Geometry calculation helper functions
+std::string getFormatArg(int argc, char** argv, const std::string& default_format = "human")
+{
+    for (int i = 2; i < argc - 1; ++i) {
+        std::string arg = argv[i];
+        if (arg == "-format" || arg == "-fmt") {
+            return argv[i + 1];
+        }
+    }
+    return default_format;
+}
+
+std::string getUnitArg(int argc, char** argv, const std::string& default_unit = "degrees")
+{
+    for (int i = 2; i < argc - 1; ++i) {
+        std::string arg = argv[i];
+        if (arg == "-unit" || arg == "-u") {
+            return argv[i + 1];
+        }
+    }
+    return default_unit;
+}
+
+int executeBond(const json& controller, int argc, char** argv)
+{
+    // Claude Generated: Extended to support trajectories (single and multi-frame)
+    if (argc < 4) {
+        std::cerr << "Usage: curcuma -bond <input_file> <atom1> <atom2> [-format human|json|csv]" << std::endl;
+        std::cerr << "Example: curcuma -bond molecule.xyz 0 1" << std::endl;
+        std::cerr << "Example: curcuma -bond md_traj.xyz 0 1 -format csv" << std::endl;
+        return 1;
+    }
+
+    // Parse arguments
+    std::string filename = argv[2];
+    int atom1 = std::stoi(argv[3]);
+    int atom2 = std::stoi(argv[4]);
+    std::string format = getFormatArg(argc, argv, "human");
+
+    // Load molecules (single or trajectory)
+    if (!std::filesystem::exists(filename)) {
+        std::cerr << "Error: File not found: " << filename << std::endl;
+        return 1;
+    }
+
+    FileIterator file_iter(filename, true);
+    if (file_iter.AtEnd()) {
+        std::cerr << "Error: Could not read molecules from " << filename << std::endl;
+        return 1;
+    }
+
+    // Read first molecule to validate atom indices
+    Molecule first_mol = file_iter.Next();
+    if (atom1 < 0 || atom1 >= first_mol.AtomCount() || atom2 < 0 || atom2 >= first_mol.AtomCount()) {
+        std::cerr << "Error: Atom indices out of range (molecule has " << first_mol.AtomCount() << " atoms)" << std::endl;
+        return 1;
+    }
+
+    // Collect distances from all frames
+    std::vector<double> distances;
+    distances.push_back(first_mol.CalculateDistance(atom1, atom2));
+
+    // Read remaining frames if trajectory
+    while (!file_iter.AtEnd()) {
+        Molecule mol = file_iter.Next();
+        distances.push_back(mol.CalculateDistance(atom1, atom2));
+    }
+
+    // Calculate statistics
+    TrajectoryStatistics stats(10);  // window_size = 10
+    for (size_t i = 0; i < distances.size(); ++i) {
+        stats.addValue("bond_length", distances[i]);
+    }
+
+    // Output results
+    if (distances.size() == 1) {
+        // Single frame - simple output
+        if (format == "json") {
+            json result;
+            result["calculation"] = "bond_length";
+            result["atoms"] = json::array({atom1, atom2});
+            result["distance_angstrom"] = distances[0];
+            std::cout << result.dump(2) << std::endl;
+        } else if (format == "csv") {
+            std::cout << "atom1,atom2,distance_angstrom" << std::endl;
+            std::cout << atom1 << "," << atom2 << "," << distances[0] << std::endl;
+        } else { // human
+            std::cout << "Bond Length Calculation:" << std::endl;
+            std::cout << "  Atoms: " << atom1 << "-" << atom2 << std::endl;
+            std::cout << "  Distance: " << std::fixed << std::setprecision(6) << distances[0] << " Å" << std::endl;
+        }
+    } else {
+        // Multiple frames - trajectory output
+        if (format == "json") {
+            json result;
+            result["calculation"] = "bond_length_trajectory";
+            result["atoms"] = json::array({atom1, atom2});
+            result["num_frames"] = static_cast<int>(distances.size());
+            result["frames"] = distances;
+            result["statistics"] = {
+                {"mean", stats.getMean("bond_length")},
+                {"std_dev", stats.getStdDev("bond_length")},
+                {"min", *std::min_element(distances.begin(), distances.end())},
+                {"max", *std::max_element(distances.begin(), distances.end())}
+            };
+            std::cout << result.dump(2) << std::endl;
+        } else if (format == "csv") {
+            std::cout << "frame,bond_length,<bond_length>,σ(bond_length)" << std::endl;
+            double mean = stats.getMean("bond_length");
+            double std_dev = stats.getStdDev("bond_length");
+            for (size_t i = 0; i < distances.size(); ++i) {
+                std::cout << i << "," << std::fixed << std::setprecision(6) << distances[i]
+                         << "," << mean << "," << std_dev << std::endl;
+            }
+        } else { // human
+            std::cout << "Bond Length Trajectory:" << std::endl;
+            std::cout << "  Atoms: " << atom1 << "-" << atom2 << std::endl;
+            std::cout << "  Frames: " << distances.size() << std::endl << std::endl;
+
+            // Header
+            std::cout << std::setw(8) << "# Frame" << std::setw(15) << "bond_length"
+                     << std::setw(15) << "<bond_length>" << std::setw(15) << "σ(bond_length)" << std::endl;
+
+            // Data rows
+            double mean = stats.getMean("bond_length");
+            double std_dev = stats.getStdDev("bond_length");
+            for (size_t i = 0; i < distances.size(); ++i) {
+                std::cout << std::setw(8) << i << std::fixed << std::setprecision(6)
+                         << std::setw(15) << distances[i]
+                         << std::setw(15) << mean
+                         << std::setw(15) << std_dev << std::endl;
+            }
+
+            // Statistics footer
+            std::cout << std::endl << "Statistics:" << std::endl;
+            std::cout << "  Mean: " << std::fixed << std::setprecision(6) << mean << " Å" << std::endl;
+            std::cout << "  StdDev: " << std_dev << " Å" << std::endl;
+            std::cout << "  Min: " << *std::min_element(distances.begin(), distances.end()) << " Å" << std::endl;
+            std::cout << "  Max: " << *std::max_element(distances.begin(), distances.end()) << " Å" << std::endl;
+        }
+    }
+
+    return 0;
+}
+
+// Claude Generated helper: Convert angles from radians based on unit
+double convertAngle(double radians, const std::string& unit)
+{
+    if (unit == "degrees" || unit == "deg" || unit == "°") {
+        return radians * 180.0 / M_PI;
+    }
+    return radians;  // Return radians
+}
+
+// Claude Generated helper: Get angle unit string
+std::string getAngleUnitString(const std::string& unit)
+{
+    if (unit == "degrees" || unit == "deg" || unit == "°") {
+        return "degrees";
+    }
+    return "radians";
+}
+
+int executeAngle(const json& controller, int argc, char** argv)
+{
+    // Claude Generated: Extended to support trajectories (single and multi-frame)
+    if (argc < 5) {
+        std::cerr << "Usage: curcuma -angle <input_file> <atom1> <atom2> <atom3> [-format human|json|csv] [-unit degrees|radians]" << std::endl;
+        std::cerr << "Example: curcuma -angle molecule.xyz 0 1 2" << std::endl;
+        std::cerr << "Example: curcuma -angle md_traj.xyz 0 1 2 -format csv -unit degrees" << std::endl;
+        return 1;
+    }
+
+    // Parse arguments
+    std::string filename = argv[2];
+    int atom1 = std::stoi(argv[3]);
+    int atom2 = std::stoi(argv[4]);
+    int atom3 = std::stoi(argv[5]);
+    std::string format = getFormatArg(argc, argv, "human");
+    std::string unit = getUnitArg(argc, argv, "degrees");
+    std::string angle_unit = getAngleUnitString(unit);
+
+    // Load molecules (single or trajectory)
+    if (!std::filesystem::exists(filename)) {
+        std::cerr << "Error: File not found: " << filename << std::endl;
+        return 1;
+    }
+
+    FileIterator file_iter(filename, true);
+    if (file_iter.AtEnd()) {
+        std::cerr << "Error: Could not read molecules from " << filename << std::endl;
+        return 1;
+    }
+
+    // Read first molecule to validate atom indices
+    Molecule first_mol = file_iter.Next();
+    if (atom1 < 0 || atom1 >= first_mol.AtomCount() || atom2 < 0 || atom2 >= first_mol.AtomCount() ||
+        atom3 < 0 || atom3 >= first_mol.AtomCount()) {
+        std::cerr << "Error: Atom indices out of range (molecule has " << first_mol.AtomCount() << " atoms)" << std::endl;
+        return 1;
+    }
+
+    // Collect angles from all frames
+    std::vector<double> angles;
+    angles.push_back(convertAngle(first_mol.CalculateAngle(atom1, atom2, atom3), unit));
+
+    // Read remaining frames if trajectory
+    while (!file_iter.AtEnd()) {
+        Molecule mol = file_iter.Next();
+        angles.push_back(convertAngle(mol.CalculateAngle(atom1, atom2, atom3), unit));
+    }
+
+    // Calculate statistics
+    TrajectoryStatistics stats(10);  // window_size = 10
+    for (size_t i = 0; i < angles.size(); ++i) {
+        stats.addValue("bond_angle", angles[i]);
+    }
+
+    // Output results
+    if (angles.size() == 1) {
+        // Single frame - simple output
+        if (format == "json") {
+            json result;
+            result["calculation"] = "bond_angle";
+            result["atoms"] = json::array({atom1, atom2, atom3});
+            result["angle"] = angles[0];
+            result["unit"] = angle_unit;
+            std::cout << result.dump(2) << std::endl;
+        } else if (format == "csv") {
+            std::cout << "atom1,atom2,atom3,angle_" << angle_unit << std::endl;
+            std::cout << atom1 << "," << atom2 << "," << atom3 << "," << angles[0] << std::endl;
+        } else { // human
+            std::cout << "Bond Angle Calculation:" << std::endl;
+            std::cout << "  Atoms: " << atom1 << "-" << atom2 << "-" << atom3 << std::endl;
+            std::cout << "  Angle: " << std::fixed << std::setprecision(6) << angles[0] << " " << angle_unit << std::endl;
+        }
+    } else {
+        // Multiple frames - trajectory output
+        if (format == "json") {
+            json result;
+            result["calculation"] = "bond_angle_trajectory";
+            result["atoms"] = json::array({atom1, atom2, atom3});
+            result["num_frames"] = static_cast<int>(angles.size());
+            result["frames"] = angles;
+            result["unit"] = angle_unit;
+            result["statistics"] = {
+                {"mean", stats.getMean("bond_angle")},
+                {"std_dev", stats.getStdDev("bond_angle")},
+                {"min", *std::min_element(angles.begin(), angles.end())},
+                {"max", *std::max_element(angles.begin(), angles.end())}
+            };
+            std::cout << result.dump(2) << std::endl;
+        } else if (format == "csv") {
+            std::cout << "frame,bond_angle,<bond_angle>,σ(bond_angle)" << std::endl;
+            double mean = stats.getMean("bond_angle");
+            double std_dev = stats.getStdDev("bond_angle");
+            for (size_t i = 0; i < angles.size(); ++i) {
+                std::cout << i << "," << std::fixed << std::setprecision(6) << angles[i]
+                         << "," << mean << "," << std_dev << std::endl;
+            }
+        } else { // human
+            std::cout << "Bond Angle Trajectory:" << std::endl;
+            std::cout << "  Atoms: " << atom1 << "-" << atom2 << "-" << atom3 << std::endl;
+            std::cout << "  Frames: " << angles.size() << std::endl << std::endl;
+
+            // Header
+            std::cout << std::setw(8) << "# Frame" << std::setw(15) << "bond_angle"
+                     << std::setw(15) << "<bond_angle>" << std::setw(15) << "σ(bond_angle)" << std::endl;
+
+            // Data rows
+            double mean = stats.getMean("bond_angle");
+            double std_dev = stats.getStdDev("bond_angle");
+            for (size_t i = 0; i < angles.size(); ++i) {
+                std::cout << std::setw(8) << i << std::fixed << std::setprecision(6)
+                         << std::setw(15) << angles[i]
+                         << std::setw(15) << mean
+                         << std::setw(15) << std_dev << std::endl;
+            }
+
+            // Statistics footer
+            std::cout << std::endl << "Statistics:" << std::endl;
+            std::cout << "  Mean: " << std::fixed << std::setprecision(6) << mean << " " << angle_unit << std::endl;
+            std::cout << "  StdDev: " << std_dev << " " << angle_unit << std::endl;
+            std::cout << "  Min: " << *std::min_element(angles.begin(), angles.end()) << " " << angle_unit << std::endl;
+            std::cout << "  Max: " << *std::max_element(angles.begin(), angles.end()) << " " << angle_unit << std::endl;
+        }
+    }
+
+    return 0;
+}
+
+int executeTorsion(const json& controller, int argc, char** argv)
+{
+    // Claude Generated: Extended to support trajectories (single and multi-frame)
+    if (argc < 6) {
+        std::cerr << "Usage: curcuma -torsion <input_file> <atom1> <atom2> <atom3> <atom4> [-format human|json|csv] [-unit degrees|radians]" << std::endl;
+        std::cerr << "Example: curcuma -torsion molecule.xyz 0 1 2 3" << std::endl;
+        std::cerr << "Example: curcuma -torsion md_traj.xyz 0 1 2 3 -format csv -unit degrees" << std::endl;
+        return 1;
+    }
+
+    // Parse arguments
+    std::string filename = argv[2];
+    int atom1 = std::stoi(argv[3]);
+    int atom2 = std::stoi(argv[4]);
+    int atom3 = std::stoi(argv[5]);
+    int atom4 = std::stoi(argv[6]);
+    std::string format = getFormatArg(argc, argv, "human");
+    std::string unit = getUnitArg(argc, argv, "degrees");
+    std::string dihedral_unit = getAngleUnitString(unit);
+
+    // Load molecules (single or trajectory)
+    if (!std::filesystem::exists(filename)) {
+        std::cerr << "Error: File not found: " << filename << std::endl;
+        return 1;
+    }
+
+    FileIterator file_iter(filename, true);
+    if (file_iter.AtEnd()) {
+        std::cerr << "Error: Could not read molecules from " << filename << std::endl;
+        return 1;
+    }
+
+    // Read first molecule to validate atom indices
+    Molecule first_mol = file_iter.Next();
+    if (atom1 < 0 || atom1 >= first_mol.AtomCount() || atom2 < 0 || atom2 >= first_mol.AtomCount() ||
+        atom3 < 0 || atom3 >= first_mol.AtomCount() || atom4 < 0 || atom4 >= first_mol.AtomCount()) {
+        std::cerr << "Error: Atom indices out of range (molecule has " << first_mol.AtomCount() << " atoms)" << std::endl;
+        return 1;
+    }
+
+    // Collect dihedrals from all frames
+    std::vector<double> dihedrals;
+    dihedrals.push_back(convertAngle(first_mol.CalculateDihedral(atom1, atom2, atom3, atom4), unit));
+
+    // Read remaining frames if trajectory
+    while (!file_iter.AtEnd()) {
+        Molecule mol = file_iter.Next();
+        dihedrals.push_back(convertAngle(mol.CalculateDihedral(atom1, atom2, atom3, atom4), unit));
+    }
+
+    // Calculate statistics
+    TrajectoryStatistics stats(10);  // window_size = 10
+    for (size_t i = 0; i < dihedrals.size(); ++i) {
+        stats.addValue("dihedral", dihedrals[i]);
+    }
+
+    // Output results
+    if (dihedrals.size() == 1) {
+        // Single frame - simple output
+        if (format == "json") {
+            json result;
+            result["calculation"] = "dihedral_angle";
+            result["atoms"] = json::array({atom1, atom2, atom3, atom4});
+            result["dihedral"] = dihedrals[0];
+            result["unit"] = dihedral_unit;
+            std::cout << result.dump(2) << std::endl;
+        } else if (format == "csv") {
+            std::cout << "atom1,atom2,atom3,atom4,dihedral_" << dihedral_unit << std::endl;
+            std::cout << atom1 << "," << atom2 << "," << atom3 << "," << atom4 << "," << dihedrals[0] << std::endl;
+        } else { // human
+            std::cout << "Dihedral/Torsion Angle Calculation:" << std::endl;
+            std::cout << "  Atoms: " << atom1 << "-" << atom2 << "-" << atom3 << "-" << atom4 << std::endl;
+            std::cout << "  Dihedral: " << std::fixed << std::setprecision(6) << dihedrals[0] << " " << dihedral_unit << std::endl;
+        }
+    } else {
+        // Multiple frames - trajectory output
+        if (format == "json") {
+            json result;
+            result["calculation"] = "dihedral_angle_trajectory";
+            result["atoms"] = json::array({atom1, atom2, atom3, atom4});
+            result["num_frames"] = static_cast<int>(dihedrals.size());
+            result["frames"] = dihedrals;
+            result["unit"] = dihedral_unit;
+            result["statistics"] = {
+                {"mean", stats.getMean("dihedral")},
+                {"std_dev", stats.getStdDev("dihedral")},
+                {"min", *std::min_element(dihedrals.begin(), dihedrals.end())},
+                {"max", *std::max_element(dihedrals.begin(), dihedrals.end())}
+            };
+            std::cout << result.dump(2) << std::endl;
+        } else if (format == "csv") {
+            std::cout << "frame,dihedral,<dihedral>,σ(dihedral)" << std::endl;
+            double mean = stats.getMean("dihedral");
+            double std_dev = stats.getStdDev("dihedral");
+            for (size_t i = 0; i < dihedrals.size(); ++i) {
+                std::cout << i << "," << std::fixed << std::setprecision(6) << dihedrals[i]
+                         << "," << mean << "," << std_dev << std::endl;
+            }
+        } else { // human
+            std::cout << "Dihedral/Torsion Angle Trajectory:" << std::endl;
+            std::cout << "  Atoms: " << atom1 << "-" << atom2 << "-" << atom3 << "-" << atom4 << std::endl;
+            std::cout << "  Frames: " << dihedrals.size() << std::endl << std::endl;
+
+            // Header
+            std::cout << std::setw(8) << "# Frame" << std::setw(15) << "dihedral"
+                     << std::setw(15) << "<dihedral>" << std::setw(15) << "σ(dihedral)" << std::endl;
+
+            // Data rows
+            double mean = stats.getMean("dihedral");
+            double std_dev = stats.getStdDev("dihedral");
+            for (size_t i = 0; i < dihedrals.size(); ++i) {
+                std::cout << std::setw(8) << i << std::fixed << std::setprecision(6)
+                         << std::setw(15) << dihedrals[i]
+                         << std::setw(15) << mean
+                         << std::setw(15) << std_dev << std::endl;
+            }
+
+            // Statistics footer
+            std::cout << std::endl << "Statistics:" << std::endl;
+            std::cout << "  Mean: " << std::fixed << std::setprecision(6) << mean << " " << dihedral_unit << std::endl;
+            std::cout << "  StdDev: " << std_dev << " " << dihedral_unit << std::endl;
+            std::cout << "  Min: " << *std::min_element(dihedrals.begin(), dihedrals.end()) << " " << dihedral_unit << std::endl;
+            std::cout << "  Max: " << *std::max_element(dihedrals.begin(), dihedrals.end()) << " " << dihedral_unit << std::endl;
+        }
+    }
+
+    return 0;
 }
 
 double DotProduct(const Eigen::Vector3d& pos1, const Eigen::Vector3d& pos2)
@@ -739,6 +1162,12 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
                 {"XYZ", "VTF", "MOL2", "SDF", "PDB"}, executeCasino}},
     {"traj", {"Time-series analysis for molecular trajectories", "analysis",
               {"XYZ.trj", "VTF", "SDF"}, executeTrajectoryAnalysis}},
+    {"bond", {"Calculate bond length between two atoms", "analysis",
+              {"XYZ", "MOL2", "PDB", "SDF"}, executeBond}},
+    {"angle", {"Calculate bond angle between three atoms", "analysis",
+               {"XYZ", "MOL2", "PDB", "SDF"}, executeAngle}},
+    {"torsion", {"Calculate dihedral/torsion angle between four atoms", "analysis",
+                 {"XYZ", "MOL2", "PDB", "SDF"}, executeTorsion}},
     // TODO: Add more capabilities here as they are converted
 };
 

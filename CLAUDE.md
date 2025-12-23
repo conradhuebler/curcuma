@@ -346,6 +346,25 @@ ctest -R "cli_rmsd_01" --verbose
 
 ## Planned Development
 
+### 🔄 TRAJECTORY ANALYSIS CONSOLIDATION (NEW - December 2025)
+**Status**: ✅ Plan documented (see [docs/ANALYSIS_CONSOLIDATION_PLAN.md](docs/ANALYSIS_CONSOLIDATION_PLAN.md))
+**Effort**: 6 iterations, ~18 hours
+**Priority**: MEDIUM (maintenance + extensibility)
+
+- **Problem**: ~800 lines of duplicate output/statistics code across 4+ modules
+- **Solution**: Unified framework with TrajectoryWriter + extended TrajectoryStatistics + optional ProgressTracker
+- **Phases**:
+  1. ✏️ TrajectoryWriter Foundation (`src/tools/trajectory_writer.h/cpp`) - HOCH priority
+  2. ✏️ Migrate `analysis.cpp` to use TrajectoryWriter
+  3. ✏️ Extend `TrajectoryStatistics` class (Min, Max, Median)
+  4. ✏️ Migrate `trajectoryanalysis.cpp` + `rmsdtraj.cpp`
+  5. ✏️ Cleanup geometry commands in `main.cpp` (optional)
+  6. ✏️ Add ProgressTracker utility (optional)
+
+**Benefits**: Single point of change for output formats, consistent user experience, 600+ lines removed
+
+---
+
 ### Breaking Changes (Test-Driven)
 - **Molecule data structure refactoring**: Hybrid SOA/AOS design for better performance
   - **PHASE 1**: ✅ Comprehensive test suite with refactoring-specific validation
@@ -356,7 +375,7 @@ ctest -R "cli_rmsd_01" --verbose
   - **PHASE 2**: XYZ Comment Parser unification (eliminate 10 duplicate functions)
     - **CRITICAL**: Production comment formats must not break (ORCA, XTB, simple energy)
     - See `XYZ_COMMENT_FORMATS.md` for required format compatibility
-  - **PHASE 3**: Granular cache system (replace single m_dirty flag)  
+  - **PHASE 3**: Granular cache system (replace single m_dirty flag)
   - **PHASE 4**: Fragment system O(1) lookups (replace std::map)
   - **PHASE 5**: Type-safe ElementType enum (replace int elements)
   - **PHASE 6**: Unified atom structure with zero-copy geometry access

@@ -498,6 +498,53 @@ double Molecule::CalculateAngle(int i, int j, int k) const
     return std::acos(costheta); // Return angle in radians
 }
 
+double Molecule::CalculateDihedral(int i, int j, int k, int l) const
+{
+    // Claude Generated: Dihedral angle calculation for atoms i-j-k-l
+    // Formula: phi = pi + sign * arccos((n_ijk · n_jkl) / (|n_ijk| * |n_jkl|))
+    // where n_ijk = (j-i) × (j-k) and n_jkl = (j-k) × (k-l)
+    // Reference: Molecular geometry and dihedral angles in biochemistry
+
+    if (i >= AtomCount() || j >= AtomCount() || k >= AtomCount() || l >= AtomCount()) {
+        return 0.0; // Bounds checking
+    }
+
+    // Get atomic positions
+    Eigen::Vector3d pos_i = m_geometry.row(i);
+    Eigen::Vector3d pos_j = m_geometry.row(j);
+    Eigen::Vector3d pos_k = m_geometry.row(k);
+    Eigen::Vector3d pos_l = m_geometry.row(l);
+
+    // Calculate vectors
+    Eigen::Vector3d vec_ij = pos_j - pos_i;
+    Eigen::Vector3d vec_jk = pos_k - pos_j;
+    Eigen::Vector3d vec_kl = pos_l - pos_k;
+
+    // Calculate normal vectors to the two planes
+    Eigen::Vector3d n_ijk = vec_ij.cross(vec_jk);
+    Eigen::Vector3d n_jkl = vec_jk.cross(vec_kl);
+
+    double norm_ijk = n_ijk.norm();
+    double norm_jkl = n_jkl.norm();
+
+    if (norm_ijk < 1e-10 || norm_jkl < 1e-10) {
+        return 0.0; // Degenerate case (linear atoms)
+    }
+
+    // Calculate angle between normal vectors
+    double dotpr = n_ijk.dot(n_jkl);
+    dotpr = std::max(-1.0, std::min(1.0, dotpr)); // Clamp to valid range
+
+    // Determine sign based on chirality
+    double sign = (-1.0 * vec_ij).dot(n_jkl) < 0 ? -1.0 : 1.0;
+
+    // Calculate dihedral angle
+    const double pi = M_PI;
+    double phi = pi + sign * std::acos(dotpr / (norm_ijk * norm_jkl));
+
+    return phi; // Return angle in radians
+}
+
 void Molecule::ParseString(const std::string& internal, std::vector<std::string>& elements)
 {
     std::string element;
