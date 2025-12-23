@@ -468,8 +468,26 @@ Energy validation against XTB revealed systematic discrepancies requiring immedi
 | Data | Location | Molecules | Status | Purpose |
 |------|----------|-----------|--------|---------|
 | **D3 References** | `d3_reference_energies.json` | H₂, HCl, OH, HCN, O₃, H₂O, CH₄, CH₃OH, CH₃OCH₃ | ✅ Complete | Validate D3 dispersion accuracy |
+| **D4 References** | `test_cases/reference_data/d4_reference_data_fixed.cpp` | 118 elements (H-Og) | ✅ Complete | D4 charge-weighted C6/C8 |
 | **XTB GFN-FF Refs** | Manual extraction | butane, benzene, triose | ✅ Extracted Dec 21 | Energy validation |
 | **GFN-FF References** | (planned) `gfnff_reference_energies.json` | Extended test suite | 📋 Phase 4 | Consolidated golden references |
+
+### Reference Data Extraction & Validation Scripts
+
+Location: `test_cases/reference_data/` - Retained for future D3/D4 parameter extractions
+
+**Note**: These scripts become obsolete once D3/D4 implementations are fully validated and stabilized (December 2025).
+
+| Script | Purpose | Usage | Status |
+|--------|---------|-------|--------|
+| `extract_d3_data.py` | Extract D3 C6 tensor from Fortran source | `python3 extract_d3_data.py` | ✅ Phase 1 |
+| `extract_d3_reference_data.py` | Extract D3 reference parameters | `python3 extract_d3_reference_data.py` | ✅ Phase 1 |
+| `extract_d4_data.py` | Extract D4 reference data (118 elements) | `python3 extract_d4_data.py` | ✅ Phase 2.1 |
+| `validate_d3_math.py` | Validate D3 C6/C8 calculations | `python3 validate_d3_math.py` | ✅ Phase 1 |
+| `validate_d3_math_multi.py` | Multi-molecule D3 validation | `python3 validate_d3_math_multi.py` | ✅ Phase 1 |
+| `validate_d3_homodimers.py` | Validate homodimer D3 dispersion | `python3 validate_d3_homodimers.py` | ✅ Phase 1 |
+| `analyze_c6_references.py` | Analyze C6 reference patterns | `python3 analyze_c6_references.py` | ✅ Debug |
+| `generate_d3_references.py` | Generate C++ reference data files | `python3 generate_d3_references.py` | ✅ Phase 1 |
 
 ### Verification Checklist
 
