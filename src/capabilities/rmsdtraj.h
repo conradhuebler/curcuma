@@ -30,6 +30,8 @@
 #include "src/core/parameter_macros.h"
 #include "src/core/config_manager.h"
 #include "src/core/parameter_registry.h"
+#include "src/tools/trajectory_writer.h"
+#include "src/capabilities/trajectory_statistics.h"
 
 #include "curcumamethod.h"
 
@@ -135,6 +137,11 @@ private:
     std::vector<Molecule*> m_stored_structures;
     Molecule *m_initial, *m_previous;
     RMSDDriver* m_driver;
+
+    // Claude Generated 2025: Unified statistics and output
+    TrajectoryWriter m_writer;
+    TrajectoryStatistics m_rmsd_stats;
+    TrajectoryStatistics m_energy_stats;
     std::vector<double> m_rmsd_vector, m_energy_vector;
     int m_fragment = -1;
     int m_currentIndex = 0;

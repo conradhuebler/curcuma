@@ -235,7 +235,6 @@ static inline double calculateSPOverlap(double zeta1, double zeta2, double R,
 
     // Parameter berechnen
     double rho = 2.0 * sqrt(zeta1 * zeta2) / (zeta1 + zeta2);
-    double rho_R = rho * R;
 
     // Formeln nach Mulliken/Franzblau (normalisierte Slater-Orbitale)
     double exp_term = exp(-zeta_reduced * R);

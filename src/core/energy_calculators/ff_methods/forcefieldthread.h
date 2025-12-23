@@ -229,7 +229,7 @@ class H4Thread : public ForceFieldThread {
 public:
     H4Thread(int thread, int threads);
     ~H4Thread();
-    virtual int Type() const { return 3; }
+    virtual int Type() const override { return 3; }
 
     void setParamater(const json& parameter)
     {

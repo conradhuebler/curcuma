@@ -27,6 +27,7 @@
 #include "src/core/fileiterator.h"
 #include "src/core/molecule.h"
 #include "src/tools/formats.h"
+#include "src/tools/trajectory_writer.h"
 #include "tda_engine.h"
 
 #include "curcumamethod.h"
@@ -104,12 +105,6 @@ private:
 
     /*! \brief Output results to file */
     void outputToFile(const json& results, const std::string& filename);
-
-    /*! \brief Output CSV format to stream - Claude Generated 2025 */
-    void outputCSVToStream(const json& results, std::ostream& out);
-
-    /*! \brief Output human-readable format to stream - Claude Generated 2025 */
-    void outputHumanToStream(const json& results, std::ostream& out);
 
     std::string m_filename;
     ConfigManager m_config;       // Claude Generated 2025: Modern configuration manager

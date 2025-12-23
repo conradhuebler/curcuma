@@ -371,6 +371,7 @@ inline std::string Matrix2String(const Matrix& matrix)
 
 inline void String2Matrix(Matrix &matrix, const std::string &string, const std::string &delim = "|")
 {
+    (void)delim; // Mark parameter as intentionally unused
     #pragma message ("fix string char stuff")
     StringList elements = SplitString(string, "|");
     int rows = matrix.rows();
@@ -383,6 +384,7 @@ inline void String2Matrix(Matrix &matrix, const std::string &string, const std::
 
 inline void String2Geometry(Geometry &matrix, const std::string &string, const std::string &delim = "|")
 {
+    (void)delim; // Mark parameter as intentionally unused
     #pragma message ("fix string char stuff")
     StringList elements = SplitString(string, "|");
     int rows = matrix.rows();

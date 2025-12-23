@@ -28,6 +28,8 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/parameter_macros.h"
 #include "src/core/config_manager.h"
+#include "src/tools/trajectory_writer.h"
+#include "src/capabilities/trajectory_statistics.h"
 
 #include "curcumamethod.h"
 
@@ -183,28 +185,18 @@ private:
     std::vector<int> m_fragment_count_series;
     std::vector<double> m_molecular_mass_series;
 
-    // Statistics
-    struct TimeSeriesStats {
-        double mean = 0.0;
-        double variance = 0.0;
-        double std_dev = 0.0;
-        double min_value = 0.0;
-        double max_value = 0.0;
-        double range = 0.0;
-        std::vector<double> moving_average;
-        std::vector<double> autocorrelation;
-        double equilibration_time = 0.0;
-        bool is_converged = false;
-    };
+    // Statistics - Claude Generated 2025: Use unified TrajectoryStatistics
+    TrajectoryStatistics m_gyration_stats;
+    TrajectoryStatistics m_end_to_end_stats;
+    TrajectoryStatistics m_rout_stats;
+    TrajectoryStatistics m_com_displacement_stats;
+    TrajectoryStatistics m_energy_stats;
 
-    TimeSeriesStats m_gyration_stats;
-    TimeSeriesStats m_end_to_end_stats;
-    TimeSeriesStats m_rout_stats;
-    TimeSeriesStats m_com_displacement_stats;
-    TimeSeriesStats m_energy_stats;
+    // Claude Generated 2025: Unified output system
+    TrajectoryWriter m_writer;
 
     // Analysis helper functions
-    TimeSeriesStats calculateTimeSeriesStats(const std::vector<double>& series, const std::string& name);
+    void calculateTimeSeriesStats(const std::vector<double>& series, TrajectoryStatistics& stats, const std::string& name, int window_size = 10);
     std::vector<double> calculateMovingAverage(const std::vector<double>& series, int window);
     std::vector<double> calculateAutocorrelation(const std::vector<double>& series, int max_lag = 100);
     double calculateEquilibrationTime(const std::vector<double>& series);

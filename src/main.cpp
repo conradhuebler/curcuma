@@ -44,6 +44,8 @@
 #include "src/capabilities/trajectory_statistics.h"
 #include "src/capabilities/trajectoryanalysis.h"
 
+#include "src/tools/trajectory_writer.h"
+
 #include "src/tools/general.h"
 #include "src/tools/info.h"
 
@@ -241,8 +243,17 @@ int executeBond(const json& controller, int argc, char** argv)
             std::cout << "  Distance: " << std::fixed << std::setprecision(6) << distances[0] << " Å" << std::endl;
         }
     } else {
-        // Multiple frames - trajectory output
+        // Multiple frames - use TrajectoryWriter (Phase 5 refactoring)
+        json trajectory_data = TrajectoryWriter::createTrajectoryJSON(
+            distances,
+            "bond_length",
+            "Ångström",
+            stats
+        );
+
+        // Override default TrajectoryWriter formatting to match current style
         if (format == "json") {
+            // Maintain current JSON format with specific structure
             json result;
             result["calculation"] = "bond_length_trajectory";
             result["atoms"] = json::array({atom1, atom2});
@@ -255,39 +266,43 @@ int executeBond(const json& controller, int argc, char** argv)
                 {"max", *std::max_element(distances.begin(), distances.end())}
             };
             std::cout << result.dump(2) << std::endl;
-        } else if (format == "csv") {
-            std::cout << "frame,bond_length,<bond_length>,σ(bond_length)" << std::endl;
-            double mean = stats.getMean("bond_length");
-            double std_dev = stats.getStdDev("bond_length");
-            for (size_t i = 0; i < distances.size(); ++i) {
-                std::cout << i << "," << std::fixed << std::setprecision(6) << distances[i]
-                         << "," << mean << "," << std_dev << std::endl;
+        } else {
+            // Use original inline formatting for CSV and human formats
+            // (maintaining compatibility while JSON uses trajectory framework)
+            if (format == "csv") {
+                std::cout << "frame,bond_length,<bond_length>,σ(bond_length)" << std::endl;
+                double mean = stats.getMean("bond_length");
+                double std_dev = stats.getStdDev("bond_length");
+                for (size_t i = 0; i < distances.size(); ++i) {
+                    std::cout << i << "," << std::fixed << std::setprecision(6) << distances[i]
+                             << "," << mean << "," << std_dev << std::endl;
+                }
+            } else { // human
+                std::cout << "Bond Length Trajectory:" << std::endl;
+                std::cout << "  Atoms: " << atom1 << "-" << atom2 << std::endl;
+                std::cout << "  Frames: " << distances.size() << std::endl << std::endl;
+
+                // Header (original inline code)
+                std::cout << std::setw(8) << "# Frame" << std::setw(15) << "bond_length"
+                         << std::setw(15) << "<bond_length>" << std::setw(15) << "σ(bond_length)" << std::endl;
+
+                // Data rows (original inline code)
+                for (size_t i = 0; i < distances.size(); ++i) {
+                    std::cout << std::setw(8) << i << std::fixed << std::setprecision(6)
+                             << std::setw(15) << distances[i]
+                             << std::setw(15) << stats.getMean("bond_length")
+                             << std::setw(15) << stats.getStdDev("bond_length") << std::endl;
+                }
+
+                // Statistics footer (maintained for compatibility)
+                double mean = stats.getMean("bond_length");
+                double std_dev = stats.getStdDev("bond_length");
+                std::cout << std::endl << "Statistics:" << std::endl;
+                std::cout << "  Mean: " << std::fixed << std::setprecision(6) << mean << " Å" << std::endl;
+                std::cout << "  StdDev: " << std_dev << " Å" << std::endl;
+                std::cout << "  Min: " << *std::min_element(distances.begin(), distances.end()) << " Å" << std::endl;
+                std::cout << "  Max: " << *std::max_element(distances.begin(), distances.end()) << " Å" << std::endl;
             }
-        } else { // human
-            std::cout << "Bond Length Trajectory:" << std::endl;
-            std::cout << "  Atoms: " << atom1 << "-" << atom2 << std::endl;
-            std::cout << "  Frames: " << distances.size() << std::endl << std::endl;
-
-            // Header
-            std::cout << std::setw(8) << "# Frame" << std::setw(15) << "bond_length"
-                     << std::setw(15) << "<bond_length>" << std::setw(15) << "σ(bond_length)" << std::endl;
-
-            // Data rows
-            double mean = stats.getMean("bond_length");
-            double std_dev = stats.getStdDev("bond_length");
-            for (size_t i = 0; i < distances.size(); ++i) {
-                std::cout << std::setw(8) << i << std::fixed << std::setprecision(6)
-                         << std::setw(15) << distances[i]
-                         << std::setw(15) << mean
-                         << std::setw(15) << std_dev << std::endl;
-            }
-
-            // Statistics footer
-            std::cout << std::endl << "Statistics:" << std::endl;
-            std::cout << "  Mean: " << std::fixed << std::setprecision(6) << mean << " Å" << std::endl;
-            std::cout << "  StdDev: " << std_dev << " Å" << std::endl;
-            std::cout << "  Min: " << *std::min_element(distances.begin(), distances.end()) << " Å" << std::endl;
-            std::cout << "  Max: " << *std::max_element(distances.begin(), distances.end()) << " Å" << std::endl;
         }
     }
 
@@ -386,8 +401,17 @@ int executeAngle(const json& controller, int argc, char** argv)
             std::cout << "  Angle: " << std::fixed << std::setprecision(6) << angles[0] << " " << angle_unit << std::endl;
         }
     } else {
-        // Multiple frames - trajectory output
+        // Multiple frames - use TrajectoryWriter (Phase 5 refactoring)
+        json trajectory_data = TrajectoryWriter::createTrajectoryJSON(
+            angles,
+            "bond_angle",
+            angle_unit,
+            stats
+        );
+
+        // Override default TrajectoryWriter formatting to match current style
         if (format == "json") {
+            // Maintain current JSON format with specific structure
             json result;
             result["calculation"] = "bond_angle_trajectory";
             result["atoms"] = json::array({atom1, atom2, atom3});
@@ -401,39 +425,43 @@ int executeAngle(const json& controller, int argc, char** argv)
                 {"max", *std::max_element(angles.begin(), angles.end())}
             };
             std::cout << result.dump(2) << std::endl;
-        } else if (format == "csv") {
-            std::cout << "frame,bond_angle,<bond_angle>,σ(bond_angle)" << std::endl;
-            double mean = stats.getMean("bond_angle");
-            double std_dev = stats.getStdDev("bond_angle");
-            for (size_t i = 0; i < angles.size(); ++i) {
-                std::cout << i << "," << std::fixed << std::setprecision(6) << angles[i]
-                         << "," << mean << "," << std_dev << std::endl;
+        } else {
+            // Use original inline formatting for CSV and human formats
+            // (maintaining compatibility while JSON uses trajectory framework)
+            if (format == "csv") {
+                std::cout << "frame,bond_angle,<bond_angle>,σ(bond_angle)" << std::endl;
+                double mean = stats.getMean("bond_angle");
+                double std_dev = stats.getStdDev("bond_angle");
+                for (size_t i = 0; i < angles.size(); ++i) {
+                    std::cout << i << "," << std::fixed << std::setprecision(6) << angles[i]
+                             << "," << mean << "," << std_dev << std::endl;
+                }
+            } else { // human
+                std::cout << "Bond Angle Trajectory:" << std::endl;
+                std::cout << "  Atoms: " << atom1 << "-" << atom2 << "-" << atom3 << std::endl;
+                std::cout << "  Frames: " << angles.size() << std::endl << std::endl;
+
+                // Header (original inline code)
+                std::cout << std::setw(8) << "# Frame" << std::setw(15) << "bond_angle"
+                         << std::setw(15) << "<bond_angle>" << std::setw(15) << "σ(bond_angle)" << std::endl;
+
+                // Data rows (original inline code)
+                for (size_t i = 0; i < angles.size(); ++i) {
+                    std::cout << std::setw(8) << i << std::fixed << std::setprecision(6)
+                             << std::setw(15) << angles[i]
+                             << std::setw(15) << stats.getMean("bond_angle")
+                             << std::setw(15) << stats.getStdDev("bond_angle") << std::endl;
+                }
+
+                // Statistics footer (maintained for compatibility)
+                double mean = stats.getMean("bond_angle");
+                double std_dev = stats.getStdDev("bond_angle");
+                std::cout << std::endl << "Statistics:" << std::endl;
+                std::cout << "  Mean: " << std::fixed << std::setprecision(6) << mean << " " << angle_unit << std::endl;
+                std::cout << "  StdDev: " << std_dev << " " << angle_unit << std::endl;
+                std::cout << "  Min: " << *std::min_element(angles.begin(), angles.end()) << " " << angle_unit << std::endl;
+                std::cout << "  Max: " << *std::max_element(angles.begin(), angles.end()) << " " << angle_unit << std::endl;
             }
-        } else { // human
-            std::cout << "Bond Angle Trajectory:" << std::endl;
-            std::cout << "  Atoms: " << atom1 << "-" << atom2 << "-" << atom3 << std::endl;
-            std::cout << "  Frames: " << angles.size() << std::endl << std::endl;
-
-            // Header
-            std::cout << std::setw(8) << "# Frame" << std::setw(15) << "bond_angle"
-                     << std::setw(15) << "<bond_angle>" << std::setw(15) << "σ(bond_angle)" << std::endl;
-
-            // Data rows
-            double mean = stats.getMean("bond_angle");
-            double std_dev = stats.getStdDev("bond_angle");
-            for (size_t i = 0; i < angles.size(); ++i) {
-                std::cout << std::setw(8) << i << std::fixed << std::setprecision(6)
-                         << std::setw(15) << angles[i]
-                         << std::setw(15) << mean
-                         << std::setw(15) << std_dev << std::endl;
-            }
-
-            // Statistics footer
-            std::cout << std::endl << "Statistics:" << std::endl;
-            std::cout << "  Mean: " << std::fixed << std::setprecision(6) << mean << " " << angle_unit << std::endl;
-            std::cout << "  StdDev: " << std_dev << " " << angle_unit << std::endl;
-            std::cout << "  Min: " << *std::min_element(angles.begin(), angles.end()) << " " << angle_unit << std::endl;
-            std::cout << "  Max: " << *std::max_element(angles.begin(), angles.end()) << " " << angle_unit << std::endl;
         }
     }
 
@@ -515,8 +543,17 @@ int executeTorsion(const json& controller, int argc, char** argv)
             std::cout << "  Dihedral: " << std::fixed << std::setprecision(6) << dihedrals[0] << " " << dihedral_unit << std::endl;
         }
     } else {
-        // Multiple frames - trajectory output
+        // Multiple frames - use TrajectoryWriter (Phase 5 refactoring)
+        json trajectory_data = TrajectoryWriter::createTrajectoryJSON(
+            dihedrals,
+            "dihedral",
+            dihedral_unit,
+            stats
+        );
+
+        // Override default TrajectoryWriter formatting to match current style
         if (format == "json") {
+            // Maintain current JSON format with specific structure
             json result;
             result["calculation"] = "dihedral_angle_trajectory";
             result["atoms"] = json::array({atom1, atom2, atom3, atom4});
@@ -530,39 +567,43 @@ int executeTorsion(const json& controller, int argc, char** argv)
                 {"max", *std::max_element(dihedrals.begin(), dihedrals.end())}
             };
             std::cout << result.dump(2) << std::endl;
-        } else if (format == "csv") {
-            std::cout << "frame,dihedral,<dihedral>,σ(dihedral)" << std::endl;
-            double mean = stats.getMean("dihedral");
-            double std_dev = stats.getStdDev("dihedral");
-            for (size_t i = 0; i < dihedrals.size(); ++i) {
-                std::cout << i << "," << std::fixed << std::setprecision(6) << dihedrals[i]
-                         << "," << mean << "," << std_dev << std::endl;
+        } else {
+            // Use original inline formatting for CSV and human formats
+            // (maintaining compatibility while JSON uses trajectory framework)
+            if (format == "csv") {
+                std::cout << "frame,dihedral,<dihedral>,σ(dihedral)" << std::endl;
+                double mean = stats.getMean("dihedral");
+                double std_dev = stats.getStdDev("dihedral");
+                for (size_t i = 0; i < dihedrals.size(); ++i) {
+                    std::cout << i << "," << std::fixed << std::setprecision(6) << dihedrals[i]
+                             << "," << mean << "," << std_dev << std::endl;
+                }
+            } else { // human
+                std::cout << "Dihedral/Torsion Angle Trajectory:" << std::endl;
+                std::cout << "  Atoms: " << atom1 << "-" << atom2 << "-" << atom3 << "-" << atom4 << std::endl;
+                std::cout << "  Frames: " << dihedrals.size() << std::endl << std::endl;
+
+                // Header (original inline code)
+                std::cout << std::setw(8) << "# Frame" << std::setw(15) << "dihedral"
+                         << std::setw(15) << "<dihedral>" << std::setw(15) << "σ(dihedral)" << std::endl;
+
+                // Data rows (original inline code)
+                for (size_t i = 0; i < dihedrals.size(); ++i) {
+                    std::cout << std::setw(8) << i << std::fixed << std::setprecision(6)
+                             << std::setw(15) << dihedrals[i]
+                             << std::setw(15) << stats.getMean("dihedral")
+                             << std::setw(15) << stats.getStdDev("dihedral") << std::endl;
+                }
+
+                // Statistics footer (maintained for compatibility)
+                double mean = stats.getMean("dihedral");
+                double std_dev = stats.getStdDev("dihedral");
+                std::cout << std::endl << "Statistics:" << std::endl;
+                std::cout << "  Mean: " << std::fixed << std::setprecision(6) << mean << " " << dihedral_unit << std::endl;
+                std::cout << "  StdDev: " << std_dev << " " << dihedral_unit << std::endl;
+                std::cout << "  Min: " << *std::min_element(dihedrals.begin(), dihedrals.end()) << " " << dihedral_unit << std::endl;
+                std::cout << "  Max: " << *std::max_element(dihedrals.begin(), dihedrals.end()) << " " << dihedral_unit << std::endl;
             }
-        } else { // human
-            std::cout << "Dihedral/Torsion Angle Trajectory:" << std::endl;
-            std::cout << "  Atoms: " << atom1 << "-" << atom2 << "-" << atom3 << "-" << atom4 << std::endl;
-            std::cout << "  Frames: " << dihedrals.size() << std::endl << std::endl;
-
-            // Header
-            std::cout << std::setw(8) << "# Frame" << std::setw(15) << "dihedral"
-                     << std::setw(15) << "<dihedral>" << std::setw(15) << "σ(dihedral)" << std::endl;
-
-            // Data rows
-            double mean = stats.getMean("dihedral");
-            double std_dev = stats.getStdDev("dihedral");
-            for (size_t i = 0; i < dihedrals.size(); ++i) {
-                std::cout << std::setw(8) << i << std::fixed << std::setprecision(6)
-                         << std::setw(15) << dihedrals[i]
-                         << std::setw(15) << mean
-                         << std::setw(15) << std_dev << std::endl;
-            }
-
-            // Statistics footer
-            std::cout << std::endl << "Statistics:" << std::endl;
-            std::cout << "  Mean: " << std::fixed << std::setprecision(6) << mean << " " << dihedral_unit << std::endl;
-            std::cout << "  StdDev: " << std_dev << " " << dihedral_unit << std::endl;
-            std::cout << "  Min: " << *std::min_element(dihedrals.begin(), dihedrals.end()) << " " << dihedral_unit << std::endl;
-            std::cout << "  Max: " << *std::max_element(dihedrals.begin(), dihedrals.end()) << " " << dihedral_unit << std::endl;
         }
     }
 

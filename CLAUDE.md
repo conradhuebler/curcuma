@@ -116,11 +116,12 @@
 - **Multiple Convergence Criteria** - Energy, gradient, RMSD-based
 - **Constrained Optimization** - Distance, angle, and dihedral constraints
 
-### 5. Conformational Analysis
-- **ConfSearch** - Systematic conformational searching
+### 5. Conformational Analysis ✅ REFACTORED 2025
+- **ConfSearch** - Systematic conformational searching (unified trajectory framework)
 - **ConfScan** - Conformational scanning along reaction coordinates
 - **RMSD Analysis** - Structure comparison and alignment
 - **Energy-based Filtering** - Automatic conformer ranking
+- **Refactored Geometry Commands** - TrajectoryWriter for JSON format (Phase 5)
 
 ### 6. Molecular Dynamics
 - **SimpleMD** - Basic molecular dynamics simulation
@@ -128,6 +129,7 @@
 - **Trajectory Analysis** - Analysis of MD trajectories
 
 ### 7. Analysis Tools
+- **✅ TrajectoryWriter** - Unified output system for Human/CSV/JSON/DAT formats
 - **RMSD Calculations** - Root-mean-square deviation analysis
 - **Persistent Diagram** - Topological data analysis
 - **Hessian Analysis** - Second derivative calculations

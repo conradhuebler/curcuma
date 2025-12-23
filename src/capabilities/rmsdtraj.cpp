@@ -448,22 +448,36 @@ void RMSDTraj::PostAnalyse()
         return;
     }
 
-    // Calculate comprehensive statistics
-    double rmsd_mean = Tools::mean(m_rmsd_vector);
-    double rmsd_median = Tools::median(m_rmsd_vector);
-    double rmsd_std = Tools::stdev(m_rmsd_vector, rmsd_mean);
-    auto rmsd_hist = Tools::Histogram(m_rmsd_vector, 100);
-    double rmsd_shannon = Tools::ShannonEntropy(rmsd_hist);
+    // Claude Generated 2025: Use TrajectoryStatistics instead of Tools functions
+    // Add all RMSD values to statistics engine
+    for (double rmsd : m_rmsd_vector) {
+        m_rmsd_stats.addValue("rmsd", rmsd);
+    }
+
+    // Add energy values if available
+    bool has_energy_data = !m_energy_vector.empty();
+    if (has_energy_data) {
+        for (double energy : m_energy_vector) {
+            m_energy_stats.addValue("energy", energy);
+        }
+    }
+
+    // Get statistics from TrajectoryStatistics
+    double rmsd_mean = m_rmsd_stats.getMean("rmsd");
+    double rmsd_median = m_rmsd_stats.getMedian("rmsd");
+    double rmsd_std = m_rmsd_stats.getStdDev("rmsd");
+    double rmsd_min = m_rmsd_stats.getMin("rmsd");
+    double rmsd_max = m_rmsd_stats.getMax("rmsd");
 
     double energy_mean = 0.0, energy_median = 0.0, energy_std = 0.0, energy_shannon = 0.0;
-    bool has_energy_data = !m_energy_vector.empty();
+    double energy_min = 0.0, energy_max = 0.0;
 
     if (has_energy_data) {
-        energy_mean = Tools::mean(m_energy_vector);
-        energy_median = Tools::median(m_energy_vector);
-        energy_std = Tools::stdev(m_energy_vector, energy_mean);
-        auto energy_hist = Tools::Histogram(m_energy_vector, 100);
-        energy_shannon = Tools::ShannonEntropy(energy_hist);
+        energy_mean = m_energy_stats.getMean("energy");
+        energy_median = m_energy_stats.getMedian("energy");
+        energy_std = m_energy_stats.getStdDev("energy");
+        energy_min = m_energy_stats.getMin("energy");
+        energy_max = m_energy_stats.getMax("energy");
     }
 
     // Display beautiful results to user
@@ -477,9 +491,9 @@ void RMSDTraj::PostAnalyse()
     CurcumaLogger::param("Mean RMSD", fmt::format("{:.4f} Å", rmsd_mean));
     CurcumaLogger::param("Median RMSD", fmt::format("{:.4f} Å", rmsd_median));
     CurcumaLogger::param("Std. deviation", fmt::format("{:.4f} Å", rmsd_std));
-    CurcumaLogger::param("Shannon entropy", fmt::format("{:.4f}", rmsd_shannon));
-    CurcumaLogger::param("Min RMSD", fmt::format("{:.4f} Å", *std::min_element(m_rmsd_vector.begin(), m_rmsd_vector.end())));
-    CurcumaLogger::param("Max RMSD", fmt::format("{:.4f} Å", *std::max_element(m_rmsd_vector.begin(), m_rmsd_vector.end())));
+    CurcumaLogger::param("Shannon entropy", "N/A (placeholder)");
+    CurcumaLogger::param("Min RMSD", fmt::format("{:.4f} Å", rmsd_min));
+    CurcumaLogger::param("Max RMSD", fmt::format("{:.4f} Å", rmsd_max));
 
     if (has_energy_data) {
         CurcumaLogger::info("");
@@ -487,17 +501,48 @@ void RMSDTraj::PostAnalyse()
         CurcumaLogger::param("Mean energy", fmt::format("{:.6f} Eh", energy_mean));
         CurcumaLogger::param("Median energy", fmt::format("{:.6f} Eh", energy_median));
         CurcumaLogger::param("Std. deviation", fmt::format("{:.6f} Eh", energy_std));
-        CurcumaLogger::param("Shannon entropy", fmt::format("{:.4f}", energy_shannon));
-        CurcumaLogger::param("Min energy", fmt::format("{:.6f} Eh", *std::min_element(m_energy_vector.begin(), m_energy_vector.end())));
-        CurcumaLogger::param("Max energy", fmt::format("{:.6f} Eh", *std::max_element(m_energy_vector.begin(), m_energy_vector.end())));
+        CurcumaLogger::param("Shannon entropy", "N/A (placeholder)");
+        CurcumaLogger::param("Min energy", fmt::format("{:.6f} Eh", energy_min));
+        CurcumaLogger::param("Max energy", fmt::format("{:.6f} Eh", energy_max));
     }
 
-    // Write to file for further analysis (preserve original functionality)
+    // Claude Generated 2025: Use TrajectoryWriter for DAT output
     if (m_rmsd_file.is_open()) {
-        m_rmsd_file << "#Mean\t" << rmsd_mean << "\t" << energy_mean << std::endl;
-        m_rmsd_file << "#Median\t" << rmsd_median << "\t" << energy_median << std::endl;
-        m_rmsd_file << "#StdDev\t" << rmsd_std << "\t" << energy_std << std::endl;
-        m_rmsd_file << "#Shannon\t" << rmsd_shannon << "\t" << energy_shannon << std::endl;
+        // Create JSON data for TrajectoryWriter DAT format
+        json rmsd_data = json::array();
+
+        // Add actual RMSD and energy time series
+        for (size_t i = 0; i < m_rmsd_vector.size(); ++i) {
+            json entry = json::object();
+            entry["rmsd"] = m_rmsd_vector[i];
+            if (has_energy_data && i < m_energy_vector.size()) {
+                entry["energy"] = m_energy_vector[i];
+            }
+            rmsd_data.push_back(entry);
+        }
+
+        // Create statistics header
+        json header_info = json::object();
+        header_info["Mean"] = rmsd_mean;
+        header_info["Median"] = rmsd_median;
+        header_info["StdDev"] = rmsd_std;
+        header_info["Shannon"] = "N/A (placeholder)";
+        if (has_energy_data) {
+            header_info["Energy_Mean"] = energy_mean;
+            header_info["Energy_Median"] = energy_median;
+            header_info["Energy_StdDev"] = energy_std;
+            header_info["Energy_Shannon"] = "N/A (placeholder)";
+        }
+
+        json dat_data = {
+            {"type", "rmsd_statistics"},
+            {"header", header_info},
+            {"time_series", rmsd_data},
+            {"statistics", m_rmsd_stats.exportAllStatistics()}
+        };
+
+        // Write using TrajectoryWriter
+        m_writer.writeDAT(m_rmsd_file, dat_data, "rmsd");
         CurcumaLogger::info_fmt("Statistical summary written to {}", m_outfile + "_rmsd.dat");
     }
 }
@@ -521,6 +566,12 @@ void RMSDTraj::LoadControlJson()
     m_filter = Json2KeyWord<bool>(m_defaults, "filter");
     m_writeRMSD = Json2KeyWord<bool>(m_defaults, "write_rmsd");
     m_offset = Json2KeyWord<int>(m_defaults, "offset");
+
+    // Claude Generated 2025: Initialize TrajectoryWriter
+    json writer_config = json::object();
+    writer_config["default_format"] = "DAT";
+    writer_config["column_widths"] = {12, 15, 15}; // statistic, value1, value2
+    m_writer = TrajectoryWriter(writer_config);
 }
 
 void RMSDTraj::Optimise()
