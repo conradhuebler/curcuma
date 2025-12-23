@@ -45,7 +45,7 @@ using namespace std;
 // =================================================================================
 
 const std::vector<std::string> MethodFactory::m_ff_methods = {
-    "uff", "uff-d3", "d3", "qmdff", "cgfnff"
+    "uff", "uff-d3", "d3", "qmdff", "cgfnff", "cgfnff-d3"  // Phase 2.1: Added cgfnff-d3
 };
 
 const std::vector<std::string> MethodFactory::m_tblite_methods = { 
@@ -180,6 +180,7 @@ const std::vector<MethodFactory::ExplicitMethod>& MethodFactory::getExplicitMeth
         // Native methods (always available)
         { "eht", [](const json& config) { return std::make_unique<EHTMethod>(config); }, "Native", false, "" },
         { "cgfnff", [](const json& config) { return std::make_unique<GFNFFComputationalMethod>("cgfnff", config); }, "Native", false, "" },
+        { "cgfnff-d3", [](const json& config) { return std::make_unique<GFNFFComputationalMethod>("cgfnff-d3", config); }, "Native", false, "" },  // Phase 2.1: D3 explicit
 
         // Force field methods (always available)
         { "uff", [](const json& config) { return std::make_unique<ForceFieldMethod>("uff", config); }, "ForceField", false, "" },

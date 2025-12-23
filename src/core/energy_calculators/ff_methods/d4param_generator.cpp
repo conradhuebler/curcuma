@@ -1,10 +1,12 @@
 /*
  * DFT-D4 Parameter Generator for Curcuma - Complete Data Integration
  * Integrates 118 elements of D4 reference data from GFN-FF Fortran implementation
+ *
+ * Claude Generated (December 2025): Phase 2.1 - D4 Reference Data Integration
  */
 
 #include "d4param_generator.h"
-// #include "d4_reference_data_fixed.cpp"  // WIP: D4 reference data (not yet integrated)
+#include "../../../../test_cases/reference_data/d4_reference_data_fixed.cpp"  // D4 reference data (365 lines)
 #include "src/core/curcuma_logger.h"
 
 #include <algorithm>
@@ -23,35 +25,47 @@ D4ParameterGenerator::D4ParameterGenerator(const ConfigManager& config)
 
 void D4ParameterGenerator::initializeReferenceData()
 {
-    // WIP: D4 reference data integration (not yet complete)
-    // External file d4_reference_data_fixed.cpp would contain:
-    // - D4 reference data from external/gfnff/src/dftd4param.f90
-    // - 118 elements with 7 reference states each
-    // - Extracted via extract_d4_data.py
+    // Phase 2.1 (December 2025): D4 reference data integration
+    // Import complete D4 reference data from d4_reference_data_fixed.cpp (365 lines)
+    // - 118 elements (H through Og)
+    // - Extracted from external/gfnff/src/dftd4param.f90 via extract_d4_data.py
 
-    // Initialize with placeholder data (WIP - Phase 2)
-    // When D4 reference data is complete, import from d4_reference_data_fixed.cpp:
-    // m_refn = ::d4_refn;
-    // m_refq = ::d4_refq;
-    // m_refh = ::d4_refh;
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("=== D4ParameterGenerator::initializeReferenceData() ===");
+    }
 
-    // Temporary: Initialize with reasonable defaults
-    m_refn.resize(MAX_ELEM, 1);  // At least 1 reference state per element
+    // Load reference data from d4_reference_data_fixed.cpp
+    m_refn = ::d4_refn;  // Number of reference states per element (118 elements)
+    m_refq = ::d4_refq;  // Reference charges (118 × 7)
+    m_refh = ::d4_refh;  // Reference hydrogen counts (118 × 7)
 
-    // Initialize 2D vectors for reference charges and hydrogen counts
-    m_refq.resize(MAX_ELEM, std::vector<double>(MAX_REF, 0.0));
-    m_refh.resize(MAX_ELEM, std::vector<double>(MAX_REF, 0.0));
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success(fmt::format("D4: Loaded {} elements from reference data", m_refn.size()));
 
-    // Initialize reference coordination numbers (placeholder - implement extraction)
-    m_refcn.resize(MAX_ELEM, std::vector<double>(MAX_REF, 0.0));
-    for (int i = 0; i < MAX_ELEM; ++i) {
-        for (int j = 0; j < m_refn[i] && j < MAX_REF; ++j) {
-            m_refcn[i][j] = 1.0;  // Placeholder - should extract refcovcn data
+        // Print first 5 elements as validation
+        CurcumaLogger::info("First 5 elements validation:");
+        for (int i = 0; i < 5 && i < static_cast<int>(m_refn.size()); ++i) {
+            CurcumaLogger::result(fmt::format("  Element {} (Z={}): {} reference states, q[0]={:.6f}",
+                                              i+1, i+1, m_refn[i], m_refq[i][0]));
         }
     }
 
-    // Initialize atomic scaling factors (placeholder)
+    // Initialize reference coordination numbers (WIP - Phase 2.2)
+    // TODO: Extract refcovcn data from Fortran dftd4param.f90
+    m_refcn.resize(MAX_ELEM, std::vector<double>(MAX_REF, 0.0));
+    for (int i = 0; i < MAX_ELEM; ++i) {
+        for (int j = 0; j < m_refn[i] && j < MAX_REF; ++j) {
+            m_refcn[i][j] = 1.0;  // Placeholder - will be extracted in Phase 2.2
+        }
+    }
+
+    // Initialize atomic scaling factors (WIP - Phase 2.2)
+    // TODO: Extract ascale data from Fortran dftd4param.f90
     m_ascale.resize(MAX_ELEM, std::vector<double>(MAX_REF, 1.0));
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::warn("D4: Using placeholder refcn and ascale (Phase 2.2 pending)");
+    }
 
     // Legacy data (retained for compatibility during transition)
     m_r4_over_r2.resize(MAX_ELEM, 0.0);
@@ -82,21 +96,91 @@ void D4ParameterGenerator::initializeReferenceData()
 
 void D4ParameterGenerator::calculateFrequencyDependentPolarizabilities()
 {
-    // WIP: Frequency-dependent polarizability calculation (D4 Phase 2)
-    // Currently placeholder - will be implemented when D4 reference data is available
+    // Phase 2.1 (December 2025): Frequency-dependent polarizability calculation
+    // Implements Casimir-Polder integration over 23-point frequency grid
+    // Reference: Caldeweyher et al., J. Chem. Phys. 150, 154122 (2019)
 
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("=== D4: Calculating frequency-dependent polarizabilities ===");
+    }
+
+    // 23-point imaginary frequency grid (from GFN-FF Fortran dftd4param.f90)
+    // Used for Casimir-Polder integration: α_static = (3/2π) ∫ α(iω) dω
+    const std::vector<double> frequency_grid = {
+        0.000001, 0.050000, 0.100000, 0.200000, 0.300000, 0.400000,
+        0.500000, 0.600000, 0.700000, 0.800000, 0.900000, 1.000000,
+        1.200000, 1.400000, 1.600000, 1.800000, 2.000000, 2.500000,
+        3.000000, 4.000000, 5.000000, 7.500000, 10.000000
+    };
+
+    // Initialize 3D array: m_alpha_iw[element][reference][frequency]
+    m_alpha_iw.resize(MAX_ELEM, std::vector<std::vector<double>>(MAX_REF, std::vector<double>(N_FREQ, 0.0)));
     m_integrated_alpha.resize(MAX_ELEM, std::vector<double>(MAX_REF, 0.0));
 
-    // Placeholder: Initialize with default values
-    // When D4 implementation is complete, integrate actual frequency-dependent data
+    // Simplified approach for Phase 2.1: Use approximate alpha_iw for key elements
+    // Full extraction from Fortran dftd4param.f90 deferred to Phase 2.2
+
+    // Hydrogen (Z=1) - 2 reference states (from Fortran secaiw data for H2)
+    if (m_refn.size() > 0 && m_refn[0] >= 2) {
+        std::vector<double> h_alpha = {
+            5.4415160, 5.3912720, 5.2466780, 4.7462570, 4.1122050, 3.4827990,
+            2.9256260, 2.4586020, 2.0763900, 1.7660350, 1.5138980, 1.3080740,
+            0.9987770, 0.7833600, 0.6286810, 0.5145050, 0.4281480, 0.2867670,
+            0.2047270, 0.1187560, 0.0772270, 0.0349350, 0.0197880
+        };
+        for (int ref = 0; ref < m_refn[0] && ref < MAX_REF; ++ref) {
+            for (int iw = 0; iw < N_FREQ; ++iw) {
+                m_alpha_iw[0][ref][iw] = h_alpha[iw];
+            }
+        }
+    }
+
+    // Carbon (Z=6) - 7 reference states (from Fortran secaiw data for C6H6)
+    if (m_refn.size() > 5 && m_refn[5] >= 6) {
+        std::vector<double> c_alpha = {
+            68.5832590, 67.5115260, 64.6123080, 56.1286650, 47.4318310, 39.9459190,
+            33.7814890, 28.7553020, 24.6561470, 21.2992860, 18.5340330, 16.2406480,
+            12.7133690, 10.1832050, 8.3194640, 6.9133790, 5.8298100, 4.0106600,
+            2.9230920, 1.7494800, 1.1654830, 0.5523060, 0.3242020
+        };
+        for (int ref = 0; ref < m_refn[5] && ref < MAX_REF; ++ref) {
+            for (int iw = 0; iw < N_FREQ; ++iw) {
+                m_alpha_iw[5][ref][iw] = c_alpha[iw];
+            }
+        }
+    }
+
+    // Integrate α(iω) over frequency grid using trapezoidal rule
+    // Static polarizability: α_0 = (3/2π) ∫ α(iω) dω
+    const double prefactor = THREE_OVER_PI;  // 3/(2π) with extra 1/2 absorbed
+
     for (int elem = 0; elem < MAX_ELEM; ++elem) {
         for (int ref = 0; ref < MAX_REF; ++ref) {
-            m_integrated_alpha[elem][ref] = 1.0;  // Placeholder
+            double integral = 0.0;
+
+            // Trapezoidal integration
+            for (int iw = 0; iw < N_FREQ - 1; ++iw) {
+                double dw = frequency_grid[iw + 1] - frequency_grid[iw];
+                double avg_alpha = 0.5 * (m_alpha_iw[elem][ref][iw] + m_alpha_iw[elem][ref][iw + 1]);
+                integral += avg_alpha * dw;
+            }
+
+            m_integrated_alpha[elem][ref] = prefactor * integral;
         }
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::warn("D4: Frequency-dependent polarizabilities using placeholder values (WIP)");
+        CurcumaLogger::success("D4: Frequency-dependent polarizabilities calculated");
+
+        // Print validation for H and C
+        if (m_refn.size() > 0) {
+            CurcumaLogger::result(fmt::format("  H (Z=1) α_0[0] = {:.4f}", m_integrated_alpha[0][0]));
+        }
+        if (m_refn.size() > 5) {
+            CurcumaLogger::result(fmt::format("  C (Z=6) α_0[0] = {:.4f}", m_integrated_alpha[5][0]));
+        }
+
+        CurcumaLogger::warn("D4: Using simplified alpha_iw for H and C only (Phase 2.2: full extraction)");
     }
 }
 
@@ -156,10 +240,21 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
                 double c10 = 5.0 * c6 * r4r2 * r4r2;
                 double c12 = 7.0 * c6 * r4r2 * r4r2 * r4r2;
 
-                pair["c6"] = c6 * m_config.get<double>("d4_s6", 1.0);
-                pair["c8"] = c8 * m_config.get<double>("d4_s8", 1.0);
-                pair["c10"] = c10 * m_config.get<double>("d4_s10", 1.0);
-                pair["c12"] = c12 * m_config.get<double>("d4_s12", 1.0);
+                // Get D4 damping parameters from config (GFN-FF defaults)
+                double s6 = m_config.get<double>("d4_s6", 1.0);
+                double s8 = m_config.get<double>("d4_s8", 1.0);
+                double a1 = m_config.get<double>("d4_a1", 0.63);  // D4 GFN2-XTB value
+                double a2 = m_config.get<double>("d4_a2", 5.0);   // D4 GFN2-XTB value (Bohr)
+
+                // CRITICAL FIX (Dec 2025): Match D3 JSON format for ForceField compatibility
+                // Use uppercase C6/C8 and include s6/s8/a1/a2/r_cut fields
+                pair["C6"] = c6;  // Raw C6 (s6 applied in energy calculation)
+                pair["C8"] = c8;  // Raw C8 (s8 applied in energy calculation)
+                pair["s6"] = s6;
+                pair["s8"] = s8;
+                pair["a1"] = a1;
+                pair["a2"] = a2;
+                pair["r_cut"] = 100.0;  // Cutoff radius (Bohr)
 
                 dispersion_pairs.push_back(pair);
             } else {
@@ -269,8 +364,13 @@ double D4ParameterGenerator::getAtomicPolarizability(int atom, int frequency_ind
  */
 double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, double qi, double qj) const
 {
-    // Gaussian width parameter (from D4 paper)
-    const double alpha = 4.0;
+    // Phase 2.1 (December 2025): Gaussian charge-state weighting for C6 coefficients
+    // Reference: E. Caldeweyher et al., J. Chem. Phys. 2019, 150, 154122 (D4 method)
+    //
+    // Formula: C6(qi,qj) = Σ_refi Σ_refj w(qi,refi) * w(qj,refj) * C6_ref(refi,refj)
+    // where: w(q,ref) = exp(-wf * (q - q_ref)²) / norm
+
+    constexpr double wf = 4.0;  // Gaussian width parameter (from D4 paper)
 
     // Convert to 0-based indexing
     int elem_i = Zi - 1;
@@ -278,42 +378,71 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, double qi, doub
 
     // Validate element range
     if (elem_i < 0 || elem_i >= MAX_ELEM || elem_j < 0 || elem_j >= MAX_ELEM) {
-        CurcumaLogger::warn(fmt::format("D4: Invalid elements Zi={} Zj={}", Zi, Zj));
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::warn(fmt::format("D4: Invalid elements Zi={} Zj={}", Zi, Zj));
+        }
         return 0.0;
     }
 
-    // For now, use simplified neutral-atom C6 as fallback
-    // TODO: Implement full reference charge-state interpolation when D4 reference data is complete
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::warn(fmt::format("D4: Using simplified C6 for Zi={} Zj={} (qi={:.4f} qj={:.4f})",
-                                        Zi, Zj, qi, qj));
+    // Get number of reference states for each element
+    int nref_i = (elem_i < static_cast<int>(m_refn.size())) ? m_refn[elem_i] : 1;
+    int nref_j = (elem_j < static_cast<int>(m_refn.size())) ? m_refn[elem_j] : 1;
+
+    // Gaussian charge-state weighting
+    double c6_weighted = 0.0;
+    double norm_i = 0.0;
+    double norm_j = 0.0;
+
+    // Calculate normalization factors
+    for (int refi = 0; refi < nref_i && refi < MAX_REF; ++refi) {
+        double qi_ref = m_refq[elem_i][refi];
+        double wi = std::exp(-wf * (qi - qi_ref) * (qi - qi_ref));
+        norm_i += wi;
     }
 
-    // Simplified London dispersion formula with charge correction
-    // This is a placeholder until full D4 reference data is integrated
-    double alpha_i = (elem_i < static_cast<int>(m_integrated_alpha.size()))
-                   ? m_integrated_alpha[elem_i][0]
-                   : 1.0;
-    double alpha_j = (elem_j < static_cast<int>(m_integrated_alpha.size()))
-                   ? m_integrated_alpha[elem_j][0]
-                   : 1.0;
+    for (int refj = 0; refj < nref_j && refj < MAX_REF; ++refj) {
+        double qj_ref = m_refq[elem_j][refj];
+        double wj = std::exp(-wf * (qj - qj_ref) * (qj - qj_ref));
+        norm_j += wj;
+    }
 
-    // Weight factor accounting for atomic number differences
-    double weight_factor = 2.0 * std::sqrt(static_cast<double>(Zi * Zj)) / (Zi + Zj);
+    // Avoid division by zero
+    if (norm_i < 1e-10 || norm_j < 1e-10) {
+        norm_i = std::max(norm_i, 1e-10);
+        norm_j = std::max(norm_j, 1e-10);
+    }
 
-    // Base C6 from polarizabilities
-    double c6_base = weight_factor * 1.5 * alpha_i * alpha_j;
+    // Weighted sum over reference states
+    for (int refi = 0; refi < nref_i && refi < MAX_REF; ++refi) {
+        double qi_ref = m_refq[elem_i][refi];
+        double wi = std::exp(-wf * (qi - qi_ref) * (qi - qi_ref)) / norm_i;
 
-    // Charge-dependent scaling factor (simple empirical correction)
-    // Charges make atoms less polarizable → reduce C6
-    double charge_factor = 1.0 - 0.1 * std::abs(qi) - 0.1 * std::abs(qj);
-    charge_factor = std::max(0.5, std::min(1.5, charge_factor));  // Clamp to reasonable range
+        for (int refj = 0; refj < nref_j && refj < MAX_REF; ++refj) {
+            double qj_ref = m_refq[elem_j][refj];
+            double wj = std::exp(-wf * (qj - qj_ref) * (qj - qj_ref)) / norm_j;
 
-    double c6_weighted = c6_base * charge_factor;
+            // Calculate C6_ref for this reference state pair
+            // Using integrated polarizabilities: C6 ~ α_i * α_j
+            double alpha_i = (elem_i < static_cast<int>(m_integrated_alpha.size()) && refi < static_cast<int>(m_integrated_alpha[elem_i].size()))
+                           ? m_integrated_alpha[elem_i][refi]
+                           : 1.0;
+            double alpha_j = (elem_j < static_cast<int>(m_integrated_alpha.size()) && refj < static_cast<int>(m_integrated_alpha[elem_j].size()))
+                           ? m_integrated_alpha[elem_j][refj]
+                           : 1.0;
+
+            // London dispersion formula: C6 = (3/2) * (α_i * α_j * I_i * I_j) / (I_i + I_j)
+            // Simplified using geometric mean for ionization potentials
+            double weight_factor = 2.0 * std::sqrt(static_cast<double>(Zi * Zj)) / (Zi + Zj);
+            double c6_ref = weight_factor * 1.5 * alpha_i * alpha_j;
+
+            // Add weighted contribution
+            c6_weighted += wi * wj * c6_ref;
+        }
+    }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::result(fmt::format("D4 C6: Zi={} Zj={} qi={:.4f} qj={:.4f} → C6={:.4f} (base={:.4f}, factor={:.4f})",
-                                          Zi, Zj, qi, qj, c6_weighted, c6_base, charge_factor));
+        CurcumaLogger::result(fmt::format("D4 C6 (Gaussian): Zi={} Zj={} qi={:.4f} qj={:.4f} → C6={:.4f} (nref_i={}, nref_j={})",
+                                          Zi, Zj, qi, qj, c6_weighted, nref_i, nref_j));
     }
 
     return c6_weighted;

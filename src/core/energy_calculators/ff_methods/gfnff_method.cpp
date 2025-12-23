@@ -3585,8 +3585,7 @@ json GFNFF::generateGFNFFDispersionPairs() const
      * - Eliminates ~200 lines of duplicate dispersion code
      * - Consistent D3 implementation across all methods (GFN-FF, UFF-D3)
      *
-     * Fallback chain: D3 (validated) → free-atom C6 (legacy)
-     * Note: D4 support pending (will integrate when D4ParameterGenerator is completed)
+     * Fallback chain: D4 (preferred) → D3 (validated) → free-atom C6 (legacy)
      */
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -3603,45 +3602,57 @@ json GFNFF::generateGFNFFDispersionPairs() const
         return json::array();  // Empty array = no dispersion pairs
     }
 
-    // Step 2: Determine dispersion method
-    std::string method = m_parameters.value("dispersion_method", "d4");  // Default: D4
+    // Step 2: Determine dispersion method from method name
+    // Phase 2.1 (December 2025): Method-based D3/D4 selection
+    // - "cgfnff" or "gfnff" → D4 (default, preferred)
+    // - "cgfnff-d3" or "gfnff-d3" → D3 (explicit)
+    std::string method_name = m_parameters.value("method", "gfnff");
+    std::string method = "d4";  // Default to D4
 
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info(fmt::format("Dispersion method: {}", method));
+    // Check if method name explicitly requests D3
+    if (method_name.find("-d3") != std::string::npos) {
+        method = "d3";
     }
 
-    // Step 3: Try D4 (preferred)
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("GFN-FF method: {} → Dispersion: {}", method_name, method));
+    }
+
+    // Step 3: Try D4 (preferred) - Phase 2.1 (December 2025): D4 activated
     if (method == "d4") {
-        #ifdef USE_D4
-            if (CurcumaLogger::get_verbosity() >= 2) {
-                CurcumaLogger::info("Using D4ParameterGenerator (geometry-dependent)");
-            }
+        // D4 is always available (part of curcuma core, no external dependency)
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Using D4ParameterGenerator (charge-weighted C6)");
+        }
 
-            try {
-                ConfigManager d4_config = extractDispersionConfig("d4");
-                D4ParameterGenerator d4_gen(d4_config);
+        try {
+            ConfigManager d4_config = extractDispersionConfig("d4");
+            D4ParameterGenerator d4_gen(d4_config);
 
-                // NOTE (December 2025): D4 needs geometry!
-                // Current D4ParameterGenerator::GenerateParameters() signature needs extension
-                // TODO: Add geometry parameter when D4ParameterGenerator is completed
-                // For now: D4 will fallback to D3 (implementation pending)
+            // Generate D4 parameters with geometry (charge-dependent)
+            // Use existing m_geometry_bohr (already converted in InitialiseMolecule)
+            d4_gen.GenerateParameters(m_atoms, m_geometry_bohr);
 
+            json d4_params = d4_gen.getParameters();
+
+            if (d4_params.contains("d4_dispersion_pairs")) {
                 if (CurcumaLogger::get_verbosity() >= 2) {
-                    CurcumaLogger::warn("D4ParameterGenerator not yet fully implemented, falling back to D3");
+                    CurcumaLogger::success(fmt::format("D4: Generated {} dispersion pairs",
+                        d4_params["d4_dispersion_pairs"].size()));
                 }
-                method = "d3";  // Fallback
-            } catch (const std::exception& e) {
+                return d4_params["d4_dispersion_pairs"];
+            } else {
                 if (CurcumaLogger::get_verbosity() >= 1) {
-                    CurcumaLogger::error(fmt::format("D4 generation failed: {}", e.what()));
+                    CurcumaLogger::warn("D4: No pairs generated, falling back to D3");
                 }
                 method = "d3";  // Fallback
             }
-        #else
+        } catch (const std::exception& e) {
             if (CurcumaLogger::get_verbosity() >= 1) {
-                CurcumaLogger::warn("D4 not compiled (USE_D4 not defined), falling back to D3");
+                CurcumaLogger::error(fmt::format("D4 generation failed: {}", e.what()));
             }
             method = "d3";  // Fallback
-        #endif
+        }
     }
 
     // Step 4: Use native D3 (always available - part of curcuma core) - December 19, 2025

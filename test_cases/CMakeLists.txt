@@ -266,6 +266,11 @@ set_tests_properties(test_gfnff_d3 PROPERTIES
 # Include comprehensive Bash-based CLI tests for all capabilities
 add_subdirectory(cli)
 
+# D4 Reference Data Integration Test (Claude Generated December 2025 - Phase 2.1)
+add_executable(test_d4_refdata test_d4_refdata.cpp)
+target_link_libraries(test_d4_refdata curcuma_core ${LIBS})
+add_test(NAME test_d4_refdata COMMAND test_d4_refdata)
+
 # Add debug executable
 #add_executable(debug_molecule
 #        ../debug_molecule.cpp)
