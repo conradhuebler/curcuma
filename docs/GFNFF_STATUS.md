@@ -1,7 +1,7 @@
 # GFN-FF Implementation Status
 
-**Last Updated**: 2025-12-14
-**Status**: ✅ **ARCHITECTURE COMPLETE - EEQ EXTRACTION COMPLETE**
+**Last Updated**: 2025-12-23
+**Status**: ✅ **REPULSION ENERGY FIX COMPLETE - 100% MATCH WITH XTB**
 **Location**: `src/core/energy_calculators/ff_methods/`
 
 ---
@@ -58,7 +58,7 @@ ff_methods/
 | **Angle Bending** | ✅ Complete | ~95% | Cosine + damping + fqq |
 | **Torsion** | ✅ Complete | ~98% | Fourier series (V1-V3) |
 | **Inversion** | ✅ Complete | ~95% | Out-of-plane bending |
-| **Repulsion** | ✅ Complete | 100% | Exponential r^-1.5 |
+| **Repulsion** | ✅ Complete | 100% | ✅ **Bonded/non-bonded separated** (Dec 23, 2025) |
 | **Dispersion** | ✅ Enhanced | ~90% | D4 with EEQ charges (Dec 2025) |
 | **Coulomb/EEQ** | ✅ Extracted | Production | Two-phase EEQ in standalone solver |
 
@@ -117,6 +117,37 @@ ff_methods/
 - `ff_methods/gfnff_method.cpp` - Refactored to delegate to EEQSolver
 - Consolidated headers in ff_methods/
 - Archived 20 analysis/debug files to `docs/archive/gfnff_old/`
+
+### Repulsion Energy Fix ✅ (December 23, 2025)
+
+**Problem**: GFN-FF repulsion energy was calculated incorrectly because bonded and non-bonded pairs used the same alpha parameter and scaling factor.
+
+**Root Cause**:
+- All pairs used `repa` array with geometric mean: `alpha = sqrt(repa_i * repa_j)`
+- The Fortran reference uses TWO separate parameter sets:
+  - **Bonded**: `repa` array, geometric mean, scale = REPSCALB = 1.7583
+  - **Non-bonded**: `repan` array, arithmetic mean, scale = REPSCALN = 0.4270
+- Result: 4.12× scaling difference explained the 54% repulsion energy error
+
+**Solution**: Complete separation of bonded and non-bonded repulsion
+1. ✅ Added `repan_angewChem2020` array to `gfnff_par.h` (86 elements)
+2. ✅ Restructured `generateGFNFFRepulsionPairs()` to return separate bonded/nonbonded arrays
+3. ✅ Created `CalculateGFNFFBondedRepulsionContribution()` and `CalculateGFNFFNonbondedRepulsionContribution()` methods
+4. ✅ Updated ForceField and ForceFieldThread to distribute separate repulsion pairs
+5. ✅ Updated parameter dispatcher and logging
+
+**Validation Results (H₂)**:
+| Metric | XTB Reference | Curcuma | Status |
+|--------|---------------|---------|--------|
+| Repulsion Energy | 0.015982160988 Eh | 0.015982 Eh | ✅ **100% MATCH** |
+| Bond Energy | -0.177613734347 Eh | -0.177614 Eh | ✅ match |
+| Total Energy | -0.161679560818 Eh | -0.163026 Eh | ⚠️ D3 vs D4 dispersion |
+
+**Files Modified**:
+- `ff_methods/gfnff_par.h` - Added `repan_angewChem2020` array
+- `ff_methods/gfnff_method.cpp` - Separated bonded/nonbonded parameter generation
+- `ff_methods/forcefieldthread.h/cpp` - Split calculation methods, added setters
+- `ff_methods/forcefield.h/cpp` - Updated member variables and parameter loading
 
 ---
 

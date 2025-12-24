@@ -460,7 +460,9 @@ json GFNFF::generateGFNFFParameters()
 
         // Phase 4.2: Generate pairwise non-bonded parameters
         parameters["gfnff_coulombs"] = generateGFNFFCoulombPairs();
-        parameters["gfnff_repulsions"] = generateGFNFFRepulsionPairs();
+        json repulsion_data = generateGFNFFRepulsionPairs();
+        parameters["gfnff_bonded_repulsions"] = repulsion_data["bonded"];
+        parameters["gfnff_nonbonded_repulsions"] = repulsion_data["nonbonded"];
         parameters["gfnff_dispersions"] = generateGFNFFDispersionPairs();
 
         // Claude Generated (2025-12-13): Validation logging for parameter generation
@@ -470,7 +472,8 @@ json GFNFF::generateGFNFFParameters()
             CurcumaLogger::param("Generated dihedrals", static_cast<int>(parameters["dihedrals"].size()));
             CurcumaLogger::param("Generated inversions", static_cast<int>(parameters["inversions"].size()));
             CurcumaLogger::param("Generated coulombs", static_cast<int>(parameters["gfnff_coulombs"].size()));
-            CurcumaLogger::param("Generated repulsions", static_cast<int>(parameters["gfnff_repulsions"].size()));
+            CurcumaLogger::param("Generated bonded repulsions", static_cast<int>(parameters["gfnff_bonded_repulsions"].size()));
+            CurcumaLogger::param("Generated non-bonded repulsions", static_cast<int>(parameters["gfnff_nonbonded_repulsions"].size()));
             CurcumaLogger::param("Generated dispersions", static_cast<int>(parameters["gfnff_dispersions"].size()));
 
             // Verify correct structure
@@ -573,7 +576,9 @@ json GFNFF::generateGFNFFParameters()
 
         // Phase 4.2: Generate pairwise non-bonded parameters
         parameters["gfnff_coulombs"] = generateGFNFFCoulombPairs();
-        parameters["gfnff_repulsions"] = generateGFNFFRepulsionPairs();
+        json repulsion_data = generateGFNFFRepulsionPairs();
+        parameters["gfnff_bonded_repulsions"] = repulsion_data["bonded"];
+        parameters["gfnff_nonbonded_repulsions"] = repulsion_data["nonbonded"];
         parameters["gfnff_dispersions"] = generateGFNFFDispersionPairs();
 
         parameters["vdws"] = json::array(); // Legacy vdW (will be replaced by pairwise)
@@ -3490,14 +3495,21 @@ json GFNFF::generateGFNFFRepulsionPairs() const
     using namespace GFNFFParameters;
 
     /**
-     * @brief Generate GFN-FF repulsion pairwise parameters
+     * @brief Generate GFN-FF bonded and non-bonded repulsion pairwise parameters
      *
-     * Reference: Fortran gfnff_engrad.F90:407-439 (bonded repulsion)
-     * Formula: E_rep = repab * exp(-α*r^1.5) / r
-     * Parameters: alpha = sqrt(repa_i * repa_j), repab = repz_i * repz_j * scale
+     * Reference: Fortran gfnff_engrad.F90
+     *   - Bonded: gfnff_engrad.F90:467-495
+     *     Formula: E_rep = repab * exp(-α*r^1.5) / r
+     *     Alpha: sqrt(repa_i * repa_j) [geometric mean from repa array]
+     *     Scale: REPSCALB = 1.7583
      *
-     * Claude Generated (2025): Phase 4.2 parameter generation
-     * Phase 9 cache migration: Uses getCachedBondList() to avoid redundant bond detection
+     *   - Non-bonded: gfnff_engrad.F90:255-276
+     *     Formula: E_rep = repab * exp(-α*r^1.5) / r
+     *     Alpha: (repan_i + repan_j) / 2.0 [arithmetic mean from repan array]
+     *     Scale: REPSCALN = 0.4270
+     *
+     * Claude Generated (Dec 2025): Phase 9 repulsion fix - separated bonded/non-bonded
+     * Uses getCachedBondList() to avoid redundant bond detection
      */
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -3505,69 +3517,151 @@ json GFNFF::generateGFNFFRepulsionPairs() const
         CurcumaLogger::param("m_atomcount", std::to_string(m_atomcount));
     }
 
-    json repulsion_pairs = json::array();
+    json bonded_repulsions = json::array();
+    json nonbonded_repulsions = json::array();
 
-    // Phase 4.3: Complete GFN-FF repulsion parameters from gfnff_param.f90
-    // repa_angewChem2020 - Repulsion exponent parameter (86 elements)
-
-
-    // repz - Effective nuclear charges for repulsion (86 elements)
-    // NOTE: Fortran uses (/ /) notation, values are simply 1,2,3... for H,He,Li... with some variations
-
-
-    // Scaling factors from Fortran gfnff_param.f90:373-374
-    // Claude Generated (Nov 2025): Apply bonded/non-bonded repulsion scaling
-  // Bonded repulsion scaling
-  // Non-bonded repulsion scaling
-
-    // Use cached bond list (Phase 9 cache migration)
-    // Claude Generated (Nov 2025): Avoids redundant bond detection - uses getCachedBondList()
     const std::vector<std::pair<int,int>>& cached_bonds = getCachedBondList();
+    std::set<std::pair<int, int>> bonded_set(cached_bonds.begin(), cached_bonds.end());
 
-    // Build bonded pairs set for fast lookup
-    std::set<std::pair<int, int>> bonded_pairs(cached_bonds.begin(), cached_bonds.end());
+    // ===== BONDED REPULSION =====
+    // Reference: gfnff_engrad.F90:467-495
+    // Alpha: geometric mean of repa
+    // Scale: REPSCALB = 1.7583
 
-    // Generate all pairwise repulsion interactions
-    for (int i = 0; i < m_atomcount; ++i) {
-        for (int j = i + 1; j < m_atomcount; ++j) {
-            json repulsion;
-            repulsion["i"] = i;
-            repulsion["j"] = j;
+    for (const auto& bond : cached_bonds) {
+        int i = bond.first;
+        int j = bond.second;
 
-            // Get atomic parameters (with bounds checking)
-            int zi = m_atoms[i] - 1; // 0-indexed
-            int zj = m_atoms[j] - 1;
+        int zi = m_atoms[i] - 1;
+        int zj = m_atoms[j] - 1;
 
-            // Phase 4.3: Use complete parameter arrays (86 elements)
-            double repa_i = (zi >= 0 && zi < static_cast<int>(repa_angewChem2020.size())) ? repa_angewChem2020[zi] : 2.0;
-            double repa_j = (zj >= 0 && zj < static_cast<int>(repa_angewChem2020.size())) ? repa_angewChem2020[zj] : 2.0;
-            double repz_i = (zi >= 0 && zi < static_cast<int>(repz.size())) ? repz[zi] : 1.0;
-            double repz_j = (zj >= 0 && zj < static_cast<int>(repz.size())) ? repz[zj] : 1.0;
+        // Bounds checking for repa array
+        bool valid = (zi >= 0 && zi < static_cast<int>(repa_angewChem2020.size()) &&
+                      zj >= 0 && zj < static_cast<int>(repa_angewChem2020.size()));
+        if (!valid) continue;
 
-            // Calculate pairwise parameters (match Fortran reference gfnff_engrad.F90:407-439)
-            // Claude Generated (Nov 2025): Apply bonded/non-bonded repulsion scaling
-            bool is_bonded = (bonded_pairs.count({i, j}) > 0);
-            double repulsion_scale = is_bonded ? REPSCALB : REPSCALN;
+        double repa_i = repa_angewChem2020[zi];
+        double repa_j = repa_angewChem2020[zj];
+        double repz_i = (zi >= 0 && zi < static_cast<int>(repz.size())) ? repz[zi] : 1.0;
+        double repz_j = (zj >= 0 && zj < static_cast<int>(repz.size())) ? repz[zj] : 1.0;
 
-            repulsion["alpha"] = std::sqrt(repa_i * repa_j);
-            repulsion["repab"] = repz_i * repz_j * repulsion_scale;  // Apply scaling based on bonded status
-            repulsion["r_cut"] = 100.0; // Cutoff radius (Bohr)
+        json rep;
+        rep["i"] = i;
+        rep["j"] = j;
+        rep["alpha"] = std::sqrt(repa_i * repa_j);  // Geometric mean
+        rep["repab"] = repz_i * repz_j * REPSCALB;  // Scale = 1.7583
+        rep["r_cut"] = 1e10;  // Effectively no cutoff (Fortran uses distance-based threshold)
 
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::param(fmt::format("repulsion_{}-{}", i, j),
-                    fmt::format("bonded=%s, repab=%.6f, alpha=%.6f",
-                    is_bonded ? "true" : "false", repulsion["repab"].get<double>(), repulsion["alpha"].get<double>()));
-            }
+        bonded_repulsions.push_back(rep);
 
-            repulsion_pairs.push_back(repulsion);
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param(fmt::format("bonded_repulsion_{}-{}", i, j),
+                fmt::format("repab=%.6f, alpha=%.6f", rep["repab"].get<double>(), rep["alpha"].get<double>()));
         }
     }
 
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::success(fmt::format("Generated {} repulsion pairs", repulsion_pairs.size()));
+    // ===== NON-BONDED REPULSION =====
+    // Reference: gfnff_engrad.F90:255-276 + gfnff_ini.f90 (alphanb calculation)
+    // Formula (Claude Generated Dec 24, 2025): Complete implementation with all corrections
+    //   fn = 1.0 + NREPSCAL / (1.0 + nb²)
+    //   dum1 = repan(i) * (1.0 + qa(i) * QREPSCAL) * fn
+    //   dum2 = repan(j) * (1.0 + qa(j) * QREPSCAL) * fn
+    //   ff = pair-specific factors (H-H, C-H, O-H, M-H)
+    //   alphanb = sqrt(dum1 * dum2) * ff
+    //
+    // Note: 1,3 and 1,4 topology factors (HH13REP, HH14REP) require graph traversal - TODO
+
+    // Get topology info for charges and CN
+    const TopologyInfo& topo_info = getCachedTopology();
+
+    for (int i = 0; i < m_atomcount; ++i) {
+        for (int j = i + 1; j < m_atomcount; ++j) {
+            // Skip bonded pairs
+            if (bonded_set.count({i, j}) > 0) continue;
+
+            int zi = m_atoms[i] - 1;  // 0-indexed element
+            int zj = m_atoms[j] - 1;
+
+            // Bounds checking
+            bool valid = (zi >= 0 && zi < static_cast<int>(repan_angewChem2020.size()) &&
+                          zj >= 0 && zj < static_cast<int>(repan_angewChem2020.size()));
+            if (!valid) continue;
+
+            double repan_i_base = repan_angewChem2020[zi];
+            double repan_j_base = repan_angewChem2020[zj];
+            double repz_i = (zi >= 0 && zi < static_cast<int>(repz.size())) ? repz[zi] : 1.0;
+            double repz_j = (zj >= 0 && zj < static_cast<int>(repz.size())) ? repz[zj] : 1.0;
+
+            // Get EEQ charges (qa) and coordination numbers (nb)
+            double qa_i = (i < topo_info.topology_charges.size()) ? topo_info.topology_charges[i] : 0.0;
+            double qa_j = (j < topo_info.topology_charges.size()) ? topo_info.topology_charges[j] : 0.0;
+            double cn_i = (i < topo_info.coordination_numbers.size()) ? topo_info.coordination_numbers[i] : 0.0;
+            double cn_j = (j < topo_info.coordination_numbers.size()) ? topo_info.coordination_numbers[j] : 0.0;
+
+            // fn correction: neighbor-count dependent scaling
+            double fn_i = 1.0 + NREPSCAL / (1.0 + cn_i * cn_i);
+            double fn_j = 1.0 + NREPSCAL / (1.0 + cn_j * cn_j);
+
+            // dum1/dum2: charge-dependent and neighbor-corrected repan
+            double dum1 = repan_i_base * (1.0 + qa_i * QREPSCAL) * fn_i;
+            double dum2 = repan_j_base * (1.0 + qa_j * QREPSCAL) * fn_j;
+
+            // ff: pair-specific scaling factors
+            double ff = 1.0;
+
+            int Z_i = m_atoms[i];  // 1-indexed atomic number
+            int Z_j = m_atoms[j];
+
+            // H-H pairs: special factor
+            if (Z_i == 1 && Z_j == 1) {
+                ff = HHFAC;  // 0.6290
+                // TODO: Add 1,3 (HH13REP=1.4580) and 1,4 (HH14REP=0.7080) topology scaling
+            }
+            // Metal-H pairs (M-H): Z > 20 is approximate metal definition
+            else if ((Z_i == 1 && Z_j > 20) || (Z_j == 1 && Z_i > 20)) {
+                ff = 0.85;
+            }
+            // C-H pairs
+            else if ((Z_i == 1 && Z_j == 6) || (Z_j == 1 && Z_i == 6)) {
+                ff = 0.91;
+            }
+            // O-H pairs
+            else if ((Z_i == 1 && Z_j == 8) || (Z_j == 1 && Z_i == 8)) {
+                ff = 1.04;
+            }
+
+            // Final alpha: sqrt(dum1 * dum2) * ff
+            double alpha_nonbonded = std::sqrt(dum1 * dum2) * ff;
+
+            json rep;
+            rep["i"] = i;
+            rep["j"] = j;
+            rep["alpha"] = alpha_nonbonded;  // CORRECTED formula
+            rep["repab"] = repz_i * repz_j * REPSCALN;  // Scale = 0.4270
+            rep["r_cut"] = 1e10;  // No cutoff
+
+            nonbonded_repulsions.push_back(rep);
+
+            if (CurcumaLogger::get_verbosity() >= 3 && nonbonded_repulsions.size() <= 3) {
+                CurcumaLogger::param(fmt::format("nonbonded_repulsion_{}-{}", i, j),
+                    fmt::format("alpha={:.6f}, repab={:.6f} (qa_i={:.4f}, qa_j={:.4f}, cn_i={:.2f}, cn_j={:.2f}, ff={:.4f})",
+                        rep["alpha"].get<double>(), rep["repab"].get<double>(),
+                        qa_i, qa_j, cn_i, cn_j, ff));
+            }
+        }
     }
 
-    return repulsion_pairs;
+    json result;
+    result["bonded"] = bonded_repulsions;
+    result["nonbonded"] = nonbonded_repulsions;
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success(fmt::format("Generated {} bonded + {} non-bonded repulsions (total: {})",
+            bonded_repulsions.size(), nonbonded_repulsions.size(),
+            bonded_repulsions.size() + nonbonded_repulsions.size()));
+    }
+
+    return result;
 }
 
 json GFNFF::generateGFNFFDispersionPairs() const

@@ -132,7 +132,8 @@ private:
 
     // Phase 4.2: GFN-FF pairwise non-bonded parameter setters (Claude Generated 2025)
     void setGFNFFDispersions(const json& dispersions);
-    void setGFNFFRepulsions(const json& repulsions);
+    void setGFNFFBondedRepulsions(const json& repulsions);
+    void setGFNFFNonbondedRepulsions(const json& repulsions);
     void setGFNFFCoulombs(const json& coulombs);
 
     // Phase 3: GFN-FF hydrogen bond and halogen bond parameter setters (Claude Generated 2025)
@@ -171,7 +172,8 @@ private:
 
     // Phase 4.2: GFN-FF pairwise non-bonded storage (Claude Generated 2025)
     std::vector<GFNFFDispersion> m_gfnff_dispersions;
-    std::vector<GFNFFRepulsion> m_gfnff_repulsions;
+    std::vector<GFNFFRepulsion> m_gfnff_bonded_repulsions;
+    std::vector<GFNFFRepulsion> m_gfnff_nonbonded_repulsions;
     std::vector<GFNFFCoulomb> m_gfnff_coulombs;
 
     // Phase 3: GFN-FF hydrogen bond and halogen bond storage (Claude Generated 2025)

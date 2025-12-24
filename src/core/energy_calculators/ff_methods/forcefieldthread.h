@@ -244,7 +244,8 @@ public:
 
     // Phase 4: GFN-FF pairwise non-bonded addition methods (Claude Generated 2025)
     void addGFNFFDispersion(const GFNFFDispersion& dispersion);
-    void addGFNFFRepulsion(const GFNFFRepulsion& repulsion);
+    void addGFNFFBondedRepulsion(const GFNFFRepulsion& repulsion);
+    void addGFNFFNonbondedRepulsion(const GFNFFRepulsion& repulsion);
     void addGFNFFCoulomb(const GFNFFCoulomb& coulomb);
 
     // D3/D4 parameter integration methods
@@ -338,7 +339,8 @@ private:
 
     // Phase 4: GFN-FF pairwise non-bonded calculation functions (Claude Generated 2025)
     void CalculateGFNFFDispersionContribution();
-    void CalculateGFNFFRepulsionContribution();
+    void CalculateGFNFFBondedRepulsionContribution();
+    void CalculateGFNFFNonbondedRepulsionContribution();
     void CalculateGFNFFCoulombContribution();
 
     // Claude Generated (December 19, 2025): Native D3 dispersion calculation for UFF-D3
@@ -374,9 +376,10 @@ private:
     std::vector<vdW> m_gfnff_vdWs;  // Legacy (will be replaced by pairwise terms below)
 
     // Phase 4: GFN-FF pairwise parallelizable non-bonded terms
-    std::vector<GFNFFDispersion> m_gfnff_dispersions;  // D3/D4 dispersion
-    std::vector<GFNFFRepulsion> m_gfnff_repulsions;    // GFN-FF repulsion
-    std::vector<GFNFFCoulomb> m_gfnff_coulombs;        // EEQ Coulomb electrostatics
+    std::vector<GFNFFDispersion> m_gfnff_dispersions;     // D3/D4 dispersion
+    std::vector<GFNFFRepulsion> m_gfnff_bonded_repulsions;    // GFN-FF bonded repulsion
+    std::vector<GFNFFRepulsion> m_gfnff_nonbonded_repulsions; // GFN-FF non-bonded repulsion
+    std::vector<GFNFFCoulomb> m_gfnff_coulombs;         // EEQ Coulomb electrostatics
 
     // Phase 6: Atom assignment for self-energy calculation (Claude Generated Dec 2025)
     // Each thread gets a subset of atoms to calculate self-energy terms

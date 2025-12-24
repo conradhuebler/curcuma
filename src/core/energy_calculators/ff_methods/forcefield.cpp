@@ -171,8 +171,15 @@ void ForceField::setParameter(const json& parameters)
         else if (parameters.contains("d3_dispersion_pairs"))
             setGFNFFDispersions(parameters["d3_dispersion_pairs"]);
 
-        if (parameters.contains("gfnff_repulsions"))
-            setGFNFFRepulsions(parameters["gfnff_repulsions"]);
+        if (parameters.contains("gfnff_bonded_repulsions"))
+            setGFNFFBondedRepulsions(parameters["gfnff_bonded_repulsions"]);
+        if (parameters.contains("gfnff_nonbonded_repulsions"))
+            setGFNFFNonbondedRepulsions(parameters["gfnff_nonbonded_repulsions"]);
+
+        // Backward compatibility warning
+        if (parameters.contains("gfnff_repulsions")) {
+            CurcumaLogger::warn("Deprecated 'gfnff_repulsions' key - update to separate bonded/nonbonded keys");
+        }
         if (parameters.contains("gfnff_coulombs"))
             setGFNFFCoulombs(parameters["gfnff_coulombs"]);
 
@@ -579,13 +586,13 @@ void ForceField::setGFNFFDispersions(const json& dispersions)
     }
 }
 
-void ForceField::setGFNFFRepulsions(const json& repulsions)
+void ForceField::setGFNFFBondedRepulsions(const json& repulsions)
 {
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("setGFNFFRepulsions: Loading {} repulsions", repulsions.size()));
+        CurcumaLogger::info(fmt::format("setGFNFFBondedRepulsions: Loading {} bonded repulsions", repulsions.size()));
     }
 
-    m_gfnff_repulsions.clear();
+    m_gfnff_bonded_repulsions.clear();
     for (int i = 0; i < repulsions.size(); ++i) {
         json rep_json = repulsions[i].get<json>();
         GFNFFRepulsion rep;
@@ -596,11 +603,36 @@ void ForceField::setGFNFFRepulsions(const json& repulsions)
         rep.repab = rep_json["repab"];
         rep.r_cut = rep_json["r_cut"];
 
-        m_gfnff_repulsions.push_back(rep);
+        m_gfnff_bonded_repulsions.push_back(rep);
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF repulsion pairs", m_gfnff_repulsions.size()));
+        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF bonded repulsion pairs", m_gfnff_bonded_repulsions.size()));
+    }
+}
+
+void ForceField::setGFNFFNonbondedRepulsions(const json& repulsions)
+{
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setGFNFFNonbondedRepulsions: Loading {} non-bonded repulsions", repulsions.size()));
+    }
+
+    m_gfnff_nonbonded_repulsions.clear();
+    for (int i = 0; i < repulsions.size(); ++i) {
+        json rep_json = repulsions[i].get<json>();
+        GFNFFRepulsion rep;
+
+        rep.i = rep_json["i"];
+        rep.j = rep_json["j"];
+        rep.alpha = rep_json["alpha"];
+        rep.repab = rep_json["repab"];
+        rep.r_cut = rep_json["r_cut"];
+
+        m_gfnff_nonbonded_repulsions.push_back(rep);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF non-bonded repulsion pairs", m_gfnff_nonbonded_repulsions.size()));
     }
 }
 
@@ -845,8 +877,14 @@ void ForceField::AutoRanges()
                 thread->addGFNFFDispersion(m_gfnff_dispersions[j]);
             }
 
-            for (int j = int(i * m_gfnff_repulsions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_repulsions.size() / double(free_threads)); ++j) {
-                thread->addGFNFFRepulsion(m_gfnff_repulsions[j]);
+            // Distribute bonded repulsion pairs
+            for (int j = int(i * m_gfnff_bonded_repulsions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_bonded_repulsions.size() / double(free_threads)); ++j) {
+                thread->addGFNFFBondedRepulsion(m_gfnff_bonded_repulsions[j]);
+            }
+
+            // Distribute non-bonded repulsion pairs
+            for (int j = int(i * m_gfnff_nonbonded_repulsions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_nonbonded_repulsions.size() / double(free_threads)); ++j) {
+                thread->addGFNFFNonbondedRepulsion(m_gfnff_nonbonded_repulsions[j]);
             }
 
             for (int j = int(i * m_gfnff_coulombs.size() / double(free_threads)); j < int((i + 1) * m_gfnff_coulombs.size() / double(free_threads)); ++j) {
@@ -1410,7 +1448,7 @@ void ForceField::printParameterSummary() const
     try {
         // Count different parameter types - parameters are stored as arrays
         int bonds = 0, angles = 0, dihedrals = 0, inversions = 0, vdws = 0, esps = 0;
-        int gfnff_dispersions = 0, gfnff_repulsions = 0, gfnff_coulombs = 0;
+        int gfnff_dispersions = 0, gfnff_bonded_repulsions = 0, gfnff_nonbonded_repulsions = 0, gfnff_coulombs = 0;
 
         if (m_parameters.contains("bonds") && m_parameters["bonds"].is_array()) {
             bonds = m_parameters["bonds"].size();
@@ -1435,8 +1473,11 @@ void ForceField::printParameterSummary() const
         if (m_parameters.contains("gfnff_dispersions") && m_parameters["gfnff_dispersions"].is_array()) {
             gfnff_dispersions = m_parameters["gfnff_dispersions"].size();
         }
-        if (m_parameters.contains("gfnff_repulsions") && m_parameters["gfnff_repulsions"].is_array()) {
-            gfnff_repulsions = m_parameters["gfnff_repulsions"].size();
+        if (m_parameters.contains("gfnff_bonded_repulsions") && m_parameters["gfnff_bonded_repulsions"].is_array()) {
+            gfnff_bonded_repulsions = m_parameters["gfnff_bonded_repulsions"].size();
+        }
+        if (m_parameters.contains("gfnff_nonbonded_repulsions") && m_parameters["gfnff_nonbonded_repulsions"].is_array()) {
+            gfnff_nonbonded_repulsions = m_parameters["gfnff_nonbonded_repulsions"].size();
         }
         if (m_parameters.contains("gfnff_coulombs") && m_parameters["gfnff_coulombs"].is_array()) {
             gfnff_coulombs = m_parameters["gfnff_coulombs"].size();
@@ -1453,10 +1494,11 @@ void ForceField::printParameterSummary() const
             if (esps > 0) CurcumaLogger::param(fmt::format("electrostatic_count", esps), fmt::format("{} electrostatic pairs", esps));
 
             // Print GFN-FF specific parameters if present
-            if (gfnff_dispersions > 0 || gfnff_repulsions > 0 || gfnff_coulombs > 0) {
+            if (gfnff_dispersions > 0 || gfnff_bonded_repulsions > 0 || gfnff_nonbonded_repulsions > 0 || gfnff_coulombs > 0) {
                 CurcumaLogger::info("GFN-FF pairwise interactions:");
                 if (gfnff_dispersions > 0) CurcumaLogger::param("dispersion_pairs", fmt::format("{}", gfnff_dispersions));
-                if (gfnff_repulsions > 0) CurcumaLogger::param("repulsion_pairs", fmt::format("{}", gfnff_repulsions));
+                if (gfnff_bonded_repulsions > 0) CurcumaLogger::param("bonded_repulsion_pairs", fmt::format("{}", gfnff_bonded_repulsions));
+                if (gfnff_nonbonded_repulsions > 0) CurcumaLogger::param("nonbonded_repulsion_pairs", fmt::format("{}", gfnff_nonbonded_repulsions));
                 if (gfnff_coulombs > 0) CurcumaLogger::param("coulomb_pairs", fmt::format("{}", gfnff_coulombs));
             }
 

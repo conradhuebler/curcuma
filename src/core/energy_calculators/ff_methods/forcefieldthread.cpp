@@ -105,7 +105,8 @@ int ForceFieldThread::execute()
             CalculateGFNFFDispersionContribution();  // D3/D4 dispersion
         }
         if (m_repulsion_enabled) {
-            CalculateGFNFFRepulsionContribution();   // GFN-FF repulsion
+            CalculateGFNFFBondedRepulsionContribution();
+            CalculateGFNFFNonbondedRepulsionContribution();
         }
         if (m_coulomb_enabled) {
             CalculateGFNFFCoulombContribution();     // EEQ Coulomb electrostatics
@@ -250,9 +251,14 @@ void ForceFieldThread::addGFNFFDispersion(const GFNFFDispersion& dispersion)
     m_gfnff_dispersions.push_back(dispersion);
 }
 
-void ForceFieldThread::addGFNFFRepulsion(const GFNFFRepulsion& repulsion)
+void ForceFieldThread::addGFNFFBondedRepulsion(const GFNFFRepulsion& repulsion)
 {
-    m_gfnff_repulsions.push_back(repulsion);
+    m_gfnff_bonded_repulsions.push_back(repulsion);
+}
+
+void ForceFieldThread::addGFNFFNonbondedRepulsion(const GFNFFRepulsion& repulsion)
+{
+    m_gfnff_nonbonded_repulsions.push_back(repulsion);
 }
 
 void ForceFieldThread::addGFNFFCoulomb(const GFNFFCoulomb& coulomb)
@@ -1167,45 +1173,32 @@ void ForceFieldThread::CalculateGFNFFDispersionContribution()
     }
 }
 
-void ForceFieldThread::CalculateGFNFFRepulsionContribution()
+void ForceFieldThread::CalculateGFNFFBondedRepulsionContribution()
 {
     /**
-     * @brief GFN-FF Repulsion term (pairwise parallelizable)
+     * @brief GFN-FF Bonded Repulsion term (pairwise parallelizable)
      *
-     * Reference: Fortran gfnff_engrad.F90:407-439 (bonded repulsion with repscalb=1.7583)
-     *                      gfnff_engrad.F90:228 (non-bonded repulsion with repscaln=0.4270)
-     * Formula: E_rep = repab * exp(-α*r^β) / r
-     * GFN-FF uses β=1.5 (r^1.5 exponent)
+     * Reference: Fortran gfnff_engrad.F90:467-495
+     * Formula: E_rep = repab * exp(-α*r^1.5) / r
+     * Alpha: sqrt(repa_i * repa_j) [geometric mean from repa array]
+     * Scale: REPSCALB = 1.7583 [embedded in repab during parameter generation]
      *
-     * Claude Generated (2025): Phase 4 pairwise non-bonded implementation
-     * Feb 2025: Added bonded/non-bonded scaling factors from Fortran gfnff_param.f90:373-374
+     * Claude Generated (Dec 2025): Phase 9 repulsion fix - separated bonded/non-bonded
      */
 
-    // CRITICAL DEBUG (Nov 2025): Check if repulsion pairs exist
-    if (CurcumaLogger::get_verbosity() >= 2 && m_gfnff_repulsions.size() > 0) {
-        CurcumaLogger::info(fmt::format("Thread {} calculating {} repulsion pairs", m_thread, m_gfnff_repulsions.size()));
+    if (CurcumaLogger::get_verbosity() >= 2 && m_gfnff_bonded_repulsions.size() > 0) {
+        CurcumaLogger::info(fmt::format("Thread {} calculating {} bonded repulsion pairs", m_thread, m_gfnff_bonded_repulsions.size()));
     }
 
-    if (m_gfnff_repulsions.size() == 0) {
-        if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::warn("No GFN-FF repulsion pairs to calculate!");
-        }
-        return;  // Early exit if no pairs
+    if (m_gfnff_bonded_repulsions.size() == 0) {
+        return;  // Early exit if no bonded pairs
     }
 
-    // Scaling factors from Fortran (gfnff_param.f90:373-374) - unused but kept for reference
-    // static const double REPSCALB = 1.7583;  // Bonded repulsion scaling
-    // static const double REPSCALN = 0.4270;  // Non-bonded repulsion scaling
-
-    // Phase 1.2: Use cached bonded pairs instead of rebuilding every call (Claude Generated - Dec 2025)
-    // OPTIMIZATION: Was O(N_bonds × log(N_bonds)) per call, now O(1) lookup from cache
-    // Built once in execute() when m_gfnff_bonds is populated
-
-    double total_rep_energy = 0.0;  // Track contribution from this thread
+    double total_rep_energy = 0.0;
     int pairs_calculated = 0;
 
-    for (int index = 0; index < m_gfnff_repulsions.size(); ++index) {
-        const auto& rep = m_gfnff_repulsions[index];
+    for (int index = 0; index < m_gfnff_bonded_repulsions.size(); ++index) {
+        const auto& rep = m_gfnff_bonded_repulsions[index];
 
         Eigen::Vector3d ri = m_geometry.row(rep.i);
         Eigen::Vector3d rj = m_geometry.row(rep.j);
@@ -1214,36 +1207,26 @@ void ForceFieldThread::CalculateGFNFFRepulsionContribution()
 
         if (rij > rep.r_cut || rij < 1e-10) continue;
 
-        // Phase 1.2: Use cached bonded pairs for bonded status check (Claude Generated - Dec 2025)
-        // Determine bonded status (used only for reference; scaling already embedded in repab)
-        bool is_bonded = m_bonded_pairs.find({rep.i, rep.j}) != m_bonded_pairs.end();
-        (void)is_bonded; // May be used for debugging or future scaling differentiation
-
-        // Phase 1.4: Optimize power calculation (Claude Generated - Dec 2025)
-        // Base GFN‑FF repulsion energy (without additional scaling factors)
-        // E = repab * exp(-α * r^1.5) / r
-        // OPTIMIZATION: r^1.5 = r * sqrt(r) avoids std::pow()
-        double r_1_5 = rij * std::sqrt(rij);  // r^1.5 = r * r^0.5
+        // Bonded repulsion formula: E = repab * exp(-α * r^1.5) / r
+        // r^1.5 = r * sqrt(r) avoids std::pow()
+        double r_1_5 = rij * std::sqrt(rij);
         double exp_term = std::exp(-rep.alpha * r_1_5);
         double base_energy = rep.repab * exp_term / rij;
 
-        // Apply global energy scaling and final factor
         double scaled_energy = base_energy * m_final_factor * m_rep_scaling;
         m_rep_energy += scaled_energy;
         total_rep_energy += scaled_energy;
         pairs_calculated++;
 
-        // DEBUG: Print first pair details
         if (CurcumaLogger::get_verbosity() >= 3 && index == 0) {
-            CurcumaLogger::info(fmt::format("Repulsion pair {}-{}: r={:.6f}, repab={:.6f}, alpha={:.6f}, exp_term={:.6f}, E_rep={:.6f} Eh",
-                rep.i, rep.j, rij, rep.repab, rep.alpha, exp_term, scaled_energy));
+            CurcumaLogger::param(fmt::format("bonded_repulsion_{}-{}", rep.i, rep.j),
+                fmt::format("r={:.6f}, repab={:.6f}, alpha={:.6f}, E={:.6f}",
+                rij, rep.repab, rep.alpha, scaled_energy));
         }
 
         if (m_calculate_gradient) {
-            // Derivative of base_energy with respect to r
             // dE/dr = -base_energy / r - 1.5 * α * sqrt(r) * base_energy
             double dEdr = (-base_energy / rij - 1.5 * rep.alpha * std::sqrt(rij) * base_energy);
-            // Include the same scaling factors as used for the energy
             dEdr *= m_final_factor * m_rep_scaling;
 
             Eigen::Vector3d grad = dEdr * rij_vec / rij;
@@ -1252,9 +1235,75 @@ void ForceFieldThread::CalculateGFNFFRepulsionContribution()
         }
     }
 
-    // CRITICAL DEBUG (Nov 2025): Report repulsion energy
     if (CurcumaLogger::get_verbosity() >= 2 && pairs_calculated > 0) {
-        CurcumaLogger::param("thread_repulsion_energy", fmt::format("{:.6f} Eh ({} pairs)", total_rep_energy, pairs_calculated));
+        CurcumaLogger::param("thread_bonded_repulsion_energy", fmt::format("{:.6f} Eh ({} pairs)", total_rep_energy, pairs_calculated));
+    }
+}
+
+void ForceFieldThread::CalculateGFNFFNonbondedRepulsionContribution()
+{
+    /**
+     * @brief GFN-FF Non-bonded Repulsion term (pairwise parallelizable)
+     *
+     * Reference: Fortran gfnff_engrad.F90:255-276
+     * Formula: E_rep = repab * exp(-α*r^1.5) / r
+     * Alpha: (repan_i + repan_j) / 2.0 [arithmetic mean from repan array]
+     * Scale: REPSCALN = 0.4270 [embedded in repab during parameter generation]
+     *
+     * Claude Generated (Dec 2025): Phase 9 repulsion fix - separated bonded/non-bonded
+     */
+
+    if (CurcumaLogger::get_verbosity() >= 2 && m_gfnff_nonbonded_repulsions.size() > 0) {
+        CurcumaLogger::info(fmt::format("Thread {} calculating {} non-bonded repulsion pairs", m_thread, m_gfnff_nonbonded_repulsions.size()));
+    }
+
+    if (m_gfnff_nonbonded_repulsions.size() == 0) {
+        return;  // Early exit if no non-bonded pairs
+    }
+
+    double total_rep_energy = 0.0;
+    int pairs_calculated = 0;
+
+    for (int index = 0; index < m_gfnff_nonbonded_repulsions.size(); ++index) {
+        const auto& rep = m_gfnff_nonbonded_repulsions[index];
+
+        Eigen::Vector3d ri = m_geometry.row(rep.i);
+        Eigen::Vector3d rj = m_geometry.row(rep.j);
+        Eigen::Vector3d rij_vec = ri - rj;
+        double rij = rij_vec.norm() * m_au;
+
+        if (rij > rep.r_cut || rij < 1e-10) continue;
+
+        // Non-bonded repulsion formula: E = repab * exp(-α * r^1.5) / r
+        // r^1.5 = r * sqrt(r) avoids std::pow()
+        double r_1_5 = rij * std::sqrt(rij);
+        double exp_term = std::exp(-rep.alpha * r_1_5);
+        double base_energy = rep.repab * exp_term / rij;
+
+        double scaled_energy = base_energy * m_final_factor * m_rep_scaling;
+        m_rep_energy += scaled_energy;
+        total_rep_energy += scaled_energy;
+        pairs_calculated++;
+
+        if (CurcumaLogger::get_verbosity() >= 3 && index == 0) {
+            CurcumaLogger::param(fmt::format("nonbonded_repulsion_{}-{}", rep.i, rep.j),
+                fmt::format("r={:.6f}, repab={:.6f}, alpha={:.6f}, E={:.6f}",
+                rij, rep.repab, rep.alpha, scaled_energy));
+        }
+
+        if (m_calculate_gradient) {
+            // dE/dr = -base_energy / r - 1.5 * α * sqrt(r) * base_energy
+            double dEdr = (-base_energy / rij - 1.5 * rep.alpha * std::sqrt(rij) * base_energy);
+            dEdr *= m_final_factor * m_rep_scaling;
+
+            Eigen::Vector3d grad = dEdr * rij_vec / rij;
+            m_gradient.row(rep.i) += grad.transpose();
+            m_gradient.row(rep.j) -= grad.transpose();
+        }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2 && pairs_calculated > 0) {
+        CurcumaLogger::param("thread_nonbonded_repulsion_energy", fmt::format("{:.6f} Eh ({} pairs)", total_rep_energy, pairs_calculated));
     }
 }
 

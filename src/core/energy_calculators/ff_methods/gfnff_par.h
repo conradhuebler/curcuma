@@ -417,6 +417,55 @@ static constexpr double REPSCALB = 1.7583;
 // Reference: gfnff_param.f90:374
 static constexpr double REPSCALN = 0.4270;
 
+// Non-bonded repulsion: charge-dependent scaling (Claude Generated Dec 24, 2025)
+// Reference: gfnff_param.f90 gen%qrepscal
+// Used in: alphanb = repan * (1.0 + qa * QREPSCAL)
+static constexpr double QREPSCAL = 0.3482;
+
+// Non-bonded repulsion: neighbor-count scaling (Claude Generated Dec 24, 2025)
+// Reference: gfnff_param.f90 gen%nrepscal
+// Used in: fn = 1.0 + NREPSCAL / (1.0 + nb²)
+static constexpr double NREPSCAL = -0.1270;
+
+// H-H pair special scaling factor (Claude Generated Dec 24, 2025)
+// Reference: gfnff_param.f90 gen%hhfac
+// Applied to all H-H non-bonded pairs
+static constexpr double HHFAC = 0.6290;
+
+// H-H 1,3-pair scaling factor (Claude Generated Dec 24, 2025)
+// Reference: gfnff_param.f90 gen%hh13rep
+// Additional scaling for 1,3 H-H pairs
+static constexpr double HH13REP = 1.4580;
+
+// H-H 1,4-pair scaling factor (Claude Generated Dec 24, 2025)
+// Reference: gfnff_param.f90 gen%hh14rep
+// Additional scaling for 1,4 H-H pairs
+static constexpr double HH14REP = 0.7080;
+
+// Non-bonded repulsion exponent parameter - dimensionless
+// Reference: gfnff_param.f90:207-225 (repan_angewChem2020)
+// Used ONLY for non-bonded pairs with arithmetic mean combining rule
+static const std::vector<double> repan_angewChem2020 = {
+    1.071395, 1.072699, 1.416847, 1.156187, 0.682382, // H-B
+    0.556380, 0.746785, 0.847242, 0.997252, 0.873051, // C-Ne
+    0.322503, 0.415554, 0.423946, 0.415776, 0.486773, // Na-P
+    0.494532, 0.705274, 0.706778, 0.311178, 0.399439, // S-Ca
+    0.440983, 0.475582, 0.510180, 0.544779, 0.579377, // Sc-Mn
+    0.613976, 0.648574, 0.683173, 0.717772, 0.752370, // Fe-Zn
+    0.429944, 0.420053, 0.384743, 0.443762, 0.538680, // Ga-Br
+    0.472196, 0.423850, 0.385815, 0.249213, 0.285604, // Kr-Zr
+    0.321995, 0.358387, 0.394778, 0.431169, 0.467560, // Nb-Rh
+    0.503952, 0.540343, 0.576734, 0.333476, 0.348734, // Pd-Sn
+    0.358194, 0.351053, 0.404536, 0.389847, 0.302575, // Sb-Cs
+    0.163290, 0.187645, 0.190821, 0.193998, 0.197174, // Ba-Nd
+    0.200351, 0.203527, 0.206703, 0.209880, 0.213056, // Pm-Tb
+    0.216233, 0.219409, 0.222585, 0.225762, 0.228938, // Dy-Yb
+    0.232115, 0.235291, 0.282937, 0.330583, 0.378229, // Lu-Re
+    0.425876, 0.473522, 0.521168, 0.568814, 0.616460, // Os-Hg
+    0.242521, 0.293680, 0.320931, 0.322666, 0.333641, // Tl-At
+    0.434163  // Rn
+};
+
 // Torsion angle damping parameter
 // Reference: gfnff_param.f90:464
 static constexpr double atcutt = 0.505;
