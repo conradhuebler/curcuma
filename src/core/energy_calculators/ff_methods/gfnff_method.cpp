@@ -31,7 +31,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
-#include <queue>
+#include <queue>  // Claude Generated (Dec 24, 2025): BFS for topology distances
 #include <stack>
 #include <string>
 
@@ -3098,6 +3098,76 @@ json GFNFF::detectHalogenBonds(const Vector& charges) const
     return xbonds;
 }
 
+std::vector<std::vector<int>> GFNFF::calculateTopologyDistances(const std::vector<std::vector<int>>& adjacency_list) const
+{
+    /**
+     * @brief Calculate topological distances (bond counts) between all atom pairs using BFS
+     *
+     * Claude Generated (Dec 24, 2025): Breadth-First Search for shortest paths
+     * Reference: NEXT_SESSION_TOPOLOGY_FACTORS.md Phase 1
+     *
+     * Algorithm: BFS from each atom to find shortest path (minimum bond count) to all others
+     * Complexity: O(N² × M) where N = atoms, M = average bonds per atom
+     *
+     * Output: N×N matrix where distances[i][j] = number of bonds in shortest path
+     *   0 = same atom
+     *   1 = directly bonded
+     *   2 = separated by 1 bond (e.g., A-B-C: distance(A,C) = 2)
+     *   3 = 1,3-pair (e.g., H-C-H in methane)
+     *   4 = 1,4-pair (e.g., H-C-C-H in ethane)
+     *   999 = not connected (different fragments)
+     */
+
+    const int N = m_atomcount;
+    std::vector<std::vector<int>> distances(N, std::vector<int>(N, 999));
+
+    // Distance to self = 0
+    for (int i = 0; i < N; ++i) {
+        distances[i][i] = 0;
+    }
+
+    // BFS from each atom
+    for (int start = 0; start < N; ++start) {
+        std::queue<int> queue;
+        std::vector<bool> visited(N, false);
+
+        queue.push(start);
+        visited[start] = true;
+
+        while (!queue.empty()) {
+            int current = queue.front();
+            queue.pop();
+
+            // Visit all neighbors of current atom
+            for (int neighbor : adjacency_list[current]) {
+                if (!visited[neighbor]) {
+                    visited[neighbor] = true;
+                    distances[start][neighbor] = distances[start][current] + 1;
+                    queue.push(neighbor);
+                }
+            }
+        }
+    }
+
+    // Debug output for first molecule (Level 3)
+    if (CurcumaLogger::get_verbosity() >= 3 && N <= 10) {
+        CurcumaLogger::info(fmt::format("Topological distances for {} atoms:", N));
+        for (int i = 0; i < std::min(N, 5); ++i) {
+            std::string row = fmt::format("  Atom {}: ", i);
+            for (int j = 0; j < N; ++j) {
+                if (distances[i][j] == 999) {
+                    row += "∞ ";
+                } else {
+                    row += fmt::format("{} ", distances[i][j]);
+                }
+            }
+            CurcumaLogger::info(row);
+        }
+    }
+
+    return distances;
+}
+
 GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
 {
     TopologyInfo topo_info;
@@ -3252,6 +3322,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             }
         }
     }
+
+    // Phase 9B: Calculate topological distances for 1,3/1,4 factors (Claude Generated - Dec 24, 2025)
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("Phase 9B: Calculating topological distances (BFS)");
+    }
+    topo_info.topo_distances = calculateTopologyDistances(topo_info.adjacency_list);
 
     return topo_info;
 }
@@ -3612,10 +3688,25 @@ json GFNFF::generateGFNFFRepulsionPairs() const
             int Z_i = m_atoms[i];  // 1-indexed atomic number
             int Z_j = m_atoms[j];
 
-            // H-H pairs: special factor
+            // H-H pairs: special factor + topology-dependent scaling
             if (Z_i == 1 && Z_j == 1) {
                 ff = HHFAC;  // 0.6290
-                // TODO: Add 1,3 (HH13REP=1.4580) and 1,4 (HH14REP=0.7080) topology scaling
+
+                // Apply topology factors (Claude Generated Dec 24, 2025)
+                // Reference: gfnff_ini.f90 lines with bpair and hh13rep/hh14rep
+                // CRITICAL: topo_dist = bond count, NOT position count!
+                //   topo_dist=2 → 1,3-pair (positions 1-2-3, 2 bonds: H-C-H)
+                //   topo_dist=3 → 1,4-pair (positions 1-2-3-4, 3 bonds: H-C-C-H)
+                int topo_dist = topo_info.topo_distances[i][j];
+                if (topo_dist == 2) {
+                    // 1,3-pair (e.g., H-C-H in methane): multiply by HH13REP
+                    ff *= HH13REP;  // 0.6290 * 1.4580 = 0.9167
+                } else if (topo_dist == 3) {
+                    // 1,4-pair (e.g., H-C-C-H in ethane): multiply by HH14REP
+                    ff *= HH14REP;  // 0.6290 * 0.7080 = 0.4453
+                }
+                // topo_dist==1 means bonded (already skipped above)
+                // topo_dist>=4 means more distant pairs (ff stays at HHFAC)
             }
             // Metal-H pairs (M-H): Z > 20 is approximate metal definition
             else if ((Z_i == 1 && Z_j > 20) || (Z_j == 1 && Z_i > 20)) {

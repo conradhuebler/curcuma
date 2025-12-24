@@ -93,6 +93,13 @@ public:
         // Per-atom neighbor connectivity built from bond list
         // Used in generateGFNFFAngles() to avoid O(N_bonds) search per atom
         std::vector<std::vector<int>> adjacency_list;
+
+        // Phase 9B: Topological distances (Claude Generated - Dec 24, 2025)
+        // N×N matrix of bond counts (shortest path) between atom pairs
+        // Used for 1,3 and 1,4 topology factors in non-bonded repulsion
+        // topo_distances[i][j] = number of bonds in shortest path between i and j
+        //   0 = same atom, 1 = bonded, 2 = separated by 1 bond, 3 = 1,3-pair, 4 = 1,4-pair, etc.
+        std::vector<std::vector<int>> topo_distances;
     };
 
     /**
@@ -208,6 +215,15 @@ private:
      * @brief Retrieve cached bond list, computing it once if needed
      */
     const std::vector<std::pair<int,int>>& getCachedBondList() const;
+
+    /**
+     * @brief Calculate topological distances (bond counts) between all atom pairs using BFS
+     * @param adjacency_list Per-atom neighbor connectivity
+     * @return N×N matrix of shortest path lengths (0=same, 1=bonded, 3=1,3-pair, 4=1,4-pair)
+     *
+     * Claude Generated (Dec 24, 2025): Breadth-First Search for 1,3/1,4 topology factors
+     */
+    std::vector<std::vector<int>> calculateTopologyDistances(const std::vector<std::vector<int>>& adjacency_list) const;
 
     /**
      * @brief Validate molecular structure for GFN-FF
