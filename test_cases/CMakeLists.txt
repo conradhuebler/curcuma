@@ -230,7 +230,7 @@ add_executable(test_gfnff_d3
         test_gfnff_d3.cpp)
 
 # Link against core library
-target_link_libraries(test_gfnff_d3 curcuma_core)
+target_link_libraries(test_gfnff_d3 curcuma_core test_molecule_registry)
 
 # Precompiled headers (performance optimization)
 if(USE_PCH)

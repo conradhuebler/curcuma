@@ -29,6 +29,9 @@
 #include "src/core/units.h"
 #include "src/tools/formats.h"
 
+// Test utilities
+#include "core/test_molecule_registry.h"
+
 // GFN-FF and D3
 #include "src/core/energy_calculators/ff_methods/gfnff.h"
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
@@ -336,133 +339,10 @@ TestResult testGFNFFD3Integration(const GFNFFDispersionReference& ref) {
     result.expected_d3 = ref.expected_d3_energy;
 
     try {
-        // Create molecule directly (avoid registry complications)
-        Molecule mol;
-
-        if (ref.molecule_file == "H2") {
-            mol.addAtom({1, Eigen::Vector3d(-0.092881, 0.361653, -0.249341)});
-            mol.addAtom({1, Eigen::Vector3d(0.000000, 0.763239, -0.477047)});
-        } else if (ref.molecule_file == "HCl") {
-            mol.addAtom({17, Eigen::Vector3d(0.000000, 0.000000, 0.119262)});
-            mol.addAtom({1, Eigen::Vector3d(0.000000, 0.763239, -0.477047)});
-        } else if (ref.molecule_file == "OH") {
-            mol.addAtom({8, Eigen::Vector3d(0.000000, 0.000000, 0.119262)});
-            mol.addAtom({1, Eigen::Vector3d(0.000000, 0.763239, -0.477047)});
-        } else if (ref.molecule_file == "CH4") {
-            mol.addAtom({6, Eigen::Vector3d(-6.52745801014127, 1.22559601369319, 0.00000199477487)});
-            mol.addAtom({1, Eigen::Vector3d(-5.71833882788279, 0.97438995382583, 0.67333841923947)});
-            mol.addAtom({1, Eigen::Vector3d(-6.20118058043256, 1.99864435246030, -0.68344482547359)});
-            mol.addAtom({1, Eigen::Vector3d(-6.81600263252576, 0.34633873760782, -0.56107634994743)});
-            mol.addAtom({1, Eigen::Vector3d(-7.37430994901762, 1.58301094241287, 0.57119076140667)});
-        } else if (ref.molecule_file == "CH3OH") {
-            mol.addAtom({6, Eigen::Vector3d(-4.39019608206338, 1.80749146124850, -0.05236110118918)});
-            mol.addAtom({1, Eigen::Vector3d(-3.55446893679818, 1.51846523808356, 0.59390888890703)});
-            mol.addAtom({1, Eigen::Vector3d(-4.04190865425030, 2.55246475669577, -0.77579148135144)});
-            mol.addAtom({1, Eigen::Vector3d(-4.74205299752436, 0.92930974600559, -0.59009212821488)});
-            mol.addAtom({8, Eigen::Vector3d(-5.48388747837165, 2.28133056625900, 0.69456006621008)});
-            mol.addAtom({1, Eigen::Vector3d(-5.21119853581715, 3.06238366739865, 1.18714027466186)});
-        } else if (ref.molecule_file == "CH3OCH3") {
-            mol.addAtom({6, Eigen::Vector3d(-5.165738, 2.528991, 1.023522)});
-            mol.addAtom({6, Eigen::Vector3d(-6.279554, 3.753698, 2.690779)});
-            mol.addAtom({1, Eigen::Vector3d(-5.335950, 4.211291, 3.003347)});
-            mol.addAtom({1, Eigen::Vector3d(-7.086297, 4.475849, 2.844576)});
-            mol.addAtom({1, Eigen::Vector3d(-6.486329, 2.865617, 3.295613)});
-            mol.addAtom({8, Eigen::Vector3d(-6.239979, 3.413269, 1.311751)});
-            mol.addAtom({1, Eigen::Vector3d(-5.216886, 2.257417, -0.034507)});
-            mol.addAtom({1, Eigen::Vector3d(-4.206669, 3.022649, 1.210811)});
-            mol.addAtom({1, Eigen::Vector3d(-5.243572, 1.617382, 1.623040)});
-        } else if (ref.molecule_file == "monosaccharide") {
-            // Monosaccharide (27 atoms) from test_cases/molecules/larger/monosaccharide.xyz
-            mol.addAtom({6, Eigen::Vector3d(8.4619, 0.5247, 2.3476)});
-            mol.addAtom({6, Eigen::Vector3d(8.5166, 0.9908, 0.8903)});
-            mol.addAtom({6, Eigen::Vector3d(7.3308, -0.0039, 0.2922)});
-            mol.addAtom({6, Eigen::Vector3d(5.9981, 0.5256, 0.5865)});
-            mol.addAtom({8, Eigen::Vector3d(5.8705, 0.3831, 2.0064)});
-            mol.addAtom({6, Eigen::Vector3d(7.0922, 1.0128, 2.6226)});
-            mol.addAtom({1, Eigen::Vector3d(9.4238, 0.2076, 2.6873)});
-            mol.addAtom({1, Eigen::Vector3d(9.4904, 0.7443, 0.5180)});
-            mol.addAtom({1, Eigen::Vector3d(8.4391, 2.0686, 0.7817)});
-            mol.addAtom({1, Eigen::Vector3d(7.3649, -1.0779, 0.5751)});
-            mol.addAtom({1, Eigen::Vector3d(7.3962, -0.0008, -0.8070)});
-            mol.addAtom({1, Eigen::Vector3d(5.1784, 0.1605, 0.0880)});
-            mol.addAtom({1, Eigen::Vector3d(5.9356, 1.5947, 0.3356)});
-            mol.addAtom({1, Eigen::Vector3d(7.1075, 1.0118, 3.7216)});
-            mol.addAtom({1, Eigen::Vector3d(6.9981, 2.0867, 2.3689)});
-            mol.addAtom({8, Eigen::Vector3d(5.0006, 0.0160, 2.5476)});
-            mol.addAtom({1, Eigen::Vector3d(4.1753, 0.3191, 2.2380)});
-            mol.addAtom({8, Eigen::Vector3d(9.7564, 0.4319, 0.2365)});
-            mol.addAtom({1, Eigen::Vector3d(10.5563, 0.6844, 0.6789)});
-            mol.addAtom({8, Eigen::Vector3d(7.3649, 0.1821, 3.1157)});
-            mol.addAtom({1, Eigen::Vector3d(7.4289, -0.6872, 2.7733)});
-            mol.addAtom({8, Eigen::Vector3d(-1.2365, 0.5487, 0.0814)});
-            mol.addAtom({1, Eigen::Vector3d(-1.6845, 1.0657, -0.6046)});
-            mol.addAtom({1, Eigen::Vector3d(-0.3124, 0.7698, -0.1247)});
-            mol.addAtom({6, Eigen::Vector3d(4.8876, -0.3914, 3.8748)});
-            mol.addAtom({1, Eigen::Vector3d(4.1198, 0.0162, 4.4782)});
-            mol.addAtom({1, Eigen::Vector3d(5.8376, -0.2397, 4.3756)});
-            mol.addAtom({1, Eigen::Vector3d(4.6732, -1.4474, 3.8748)});
-        } else if (ref.molecule_file == "triose") {
-            // Triose (66 atoms) from test_cases/molecules/larger/triose.xyz
-            mol.addAtom({6, Eigen::Vector3d(0.2631, -1.5698, 0.2476)});
-            mol.addAtom({6, Eigen::Vector3d(-1.0698, -0.8944, 0.6042)});
-            mol.addAtom({6, Eigen::Vector3d(-2.3266, -1.5883, 0.1526)});
-            mol.addAtom({1, Eigen::Vector3d(1.1436, -1.2093, 0.7104)});
-            mol.addAtom({1, Eigen::Vector3d(0.3759, -2.6545, 0.4063)});
-            mol.addAtom({1, Eigen::Vector3d(0.1897, -1.4808, -0.8433)});
-            mol.addAtom({1, Eigen::Vector3d(-0.9877, 0.1804, 0.3751)});
-            mol.addAtom({1, Eigen::Vector3d(-1.1821, -0.8994, 1.6987)});
-            mol.addAtom({1, Eigen::Vector3d(-3.2091, -1.2279, 0.6154)});
-            mol.addAtom({1, Eigen::Vector3d(-2.4090, -2.6730, 0.3113)});
-            mol.addAtom({6, Eigen::Vector3d(-2.1792, -1.4949, -1.3544)});
-            mol.addAtom({8, Eigen::Vector3d(-3.3529, -1.9663, -2.0544)});
-            mol.addAtom({1, Eigen::Vector3d(-3.2103, -1.8632, -3.0055)});
-            mol.addAtom({6, Eigen::Vector3d(-1.9545, -0.0544, -1.7970)});
-            mol.addAtom({1, Eigen::Vector3d(-2.9006, 0.4568, -1.6833)});
-            mol.addAtom({1, Eigen::Vector3d(-1.2246, 0.4389, -1.1979)});
-            mol.addAtom({1, Eigen::Vector3d(-1.6768, -0.0173, -2.8635)});
-            mol.addAtom({8, Eigen::Vector3d(-1.0113, -1.9950, -1.9260)});
-            mol.addAtom({1, Eigen::Vector3d(-0.2644, -1.6319, -1.4524)});
-            mol.addAtom({8, Eigen::Vector3d(0.4532, -0.5624, 2.5298)});
-            mol.addAtom({1, Eigen::Vector3d(-0.2994, -0.6512, 3.0648)});
-            mol.addAtom({1, Eigen::Vector3d(1.1824, -0.9978, 2.9741)});
-            mol.addAtom({6, Eigen::Vector3d(0.3988, -0.6352, 1.1073)});
-            mol.addAtom({8, Eigen::Vector3d(1.6447, -0.1648, 0.5945)});
-            mol.addAtom({1, Eigen::Vector3d(2.3633, -0.5305, 1.0968)});
-            mol.addAtom({6, Eigen::Vector3d(-4.6088, -1.4186, -1.5906)});
-            mol.addAtom({1, Eigen::Vector3d(-5.4181, -1.7763, -2.2013)});
-            mol.addAtom({1, Eigen::Vector3d(-4.7363, -0.3384, -1.4851)});
-            mol.addAtom({1, Eigen::Vector3d(-4.6436, -1.8341, -0.5771)});
-            mol.addAtom({6, Eigen::Vector3d(0.2331, 0.8176, -2.0761)});
-            mol.addAtom({6, Eigen::Vector3d(1.2938, 0.5648, -2.6533)});
-            mol.addAtom({8, Eigen::Vector3d(2.0813, -0.1903, -2.2177)});
-            mol.addAtom({1, Eigen::Vector3d(1.5589, 1.0904, -3.5752)});
-            mol.addAtom({6, Eigen::Vector3d(-0.1997, 1.8653, -2.8253)});
-            mol.addAtom({1, Eigen::Vector3d(-0.6313, 2.6769, -2.2546)});
-            mol.addAtom({1, Eigen::Vector3d(-0.9821, 1.4695, -3.4726)});
-            mol.addAtom({1, Eigen::Vector3d(0.6688, 2.1897, -3.4208)});
-            mol.addAtom({8, Eigen::Vector3d(-0.4389, 0.3833, -0.7971)});
-            mol.addAtom({6, Eigen::Vector3d(3.4028, 0.1244, -2.7846)});
-            mol.addAtom({1, Eigen::Vector3d(3.6709, -0.8893, -2.4884)});
-            mol.addAtom({1, Eigen::Vector3d(3.4641, 0.1568, -3.8785)});
-            mol.addAtom({1, Eigen::Vector3d(4.0891, 0.8654, -2.4211)});
-            mol.addAtom({6, Eigen::Vector3d(-1.5763, -0.1604, -1.2344)});
-            mol.addAtom({1, Eigen::Vector3d(-2.3184, 0.3879, -0.6854)});
-            mol.addAtom({1, Eigen::Vector3d(-1.4285, -1.1708, -0.8742)});
-            mol.addAtom({1, Eigen::Vector3d(-1.8564, -0.2173, -2.2805)});
-            mol.addAtom({1, Eigen::Vector3d(0.0456, 0.5887, -1.0564)});
-            mol.addAtom({8, Eigen::Vector3d(2.3468, 1.4875, 1.2351)});
-            mol.addAtom({1, Eigen::Vector3d(2.7643, 1.3214, 2.0896)});
-            mol.addAtom({1, Eigen::Vector3d(2.9176, 2.1084, 0.7836)});
-            mol.addAtom({6, Eigen::Vector3d(1.2785, 2.1598, 1.4562)});
-            mol.addAtom({1, Eigen::Vector3d(1.0154, 2.1753, 2.5139)});
-            mol.addAtom({1, Eigen::Vector3d(1.5847, 3.1758, 1.1548)});
-            mol.addAtom({6, Eigen::Vector3d(0.0763, 1.8243, 0.5988)});
-            mol.addAtom({1, Eigen::Vector3d(-0.8478, 2.2689, 0.9721)});
-            mol.addAtom({1, Eigen::Vector3d(-0.1143, 0.7451, 0.6918)});
-        } else {
-            result.error_message = "Unknown molecule: " + ref.molecule_file;
-            return result;
-        }
+        // Create molecule using TestMoleculeRegistry (self-contained, no file dependencies)
+        // Claude Generated Dec 24, 2025 - Refactoring to use shared molecule library
+        using namespace TestMolecules;
+        Molecule mol = TestMoleculeRegistry::createMolecule(ref.molecule_file, false);
 
         if (mol.AtomCount() == 0) {
             result.error_message = "Failed to create molecule: " + ref.molecule_file;

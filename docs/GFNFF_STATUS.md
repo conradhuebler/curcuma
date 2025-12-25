@@ -58,7 +58,7 @@ ff_methods/
 | **Angle Bending** | ✅ Complete | ~95% | Cosine + damping + fqq |
 | **Torsion** | ✅ Complete | ~98% | Fourier series (V1-V3) |
 | **Inversion** | ✅ Complete | ~95% | Out-of-plane bending |
-| **Repulsion** | ✅ Complete | 100% | ✅ **Bonded/non-bonded separated** (Dec 23, 2025) |
+| **Repulsion** | ✅ Complete | 0.001% | ✅ **Bonded/non-bonded + topology factors** (Dec 24, 2025) |
 | **Dispersion** | ✅ Enhanced | ~90% | D4 with EEQ charges (Dec 2025) |
 | **Coulomb/EEQ** | ✅ Extracted | Production | Two-phase EEQ in standalone solver |
 
@@ -118,7 +118,7 @@ ff_methods/
 - Consolidated headers in ff_methods/
 - Archived 20 analysis/debug files to `docs/archive/gfnff_old/`
 
-### Repulsion Energy Fix ✅ (December 23, 2025)
+### Repulsion Energy Fix ✅ (December 23-24, 2025)
 
 **Problem**: GFN-FF repulsion energy was calculated incorrectly because bonded and non-bonded pairs used the same alpha parameter and scaling factor.
 
@@ -129,23 +129,38 @@ ff_methods/
   - **Non-bonded**: `repan` array, arithmetic mean, scale = REPSCALN = 0.4270
 - Result: 4.12× scaling difference explained the 54% repulsion energy error
 
-**Solution**: Complete separation of bonded and non-bonded repulsion
+**Phase 1: Bonded/Non-Bonded Separation** ✅ (Dec 23)
 1. ✅ Added `repan_angewChem2020` array to `gfnff_par.h` (86 elements)
 2. ✅ Restructured `generateGFNFFRepulsionPairs()` to return separate bonded/nonbonded arrays
 3. ✅ Created `CalculateGFNFFBondedRepulsionContribution()` and `CalculateGFNFFNonbondedRepulsionContribution()` methods
 4. ✅ Updated ForceField and ForceFieldThread to distribute separate repulsion pairs
 5. ✅ Updated parameter dispatcher and logging
 
-**Validation Results (H₂)**:
-| Metric | XTB Reference | Curcuma | Status |
-|--------|---------------|---------|--------|
-| Repulsion Energy | 0.015982160988 Eh | 0.015982 Eh | ✅ **100% MATCH** |
-| Bond Energy | -0.177613734347 Eh | -0.177614 Eh | ✅ match |
-| Total Energy | -0.161679560818 Eh | -0.163026 Eh | ⚠️ D3 vs D4 dispersion |
+**Phase 2: Topology Factors** ✅ (Dec 24)
+- **Problem**: CH₄ had 45% error due to 1,3 and 1,4 non-bonded repulsion (H...H pairs)
+- **Solution**: Add topology-dependent scaling factors
+  - **HH13REP = 1.4580** for 1,3-pairs (H-C-H, topo_dist=2)
+  - **HH14REP = 0.7080** for 1,4-pairs (H-C-C-H, topo_dist=3)
+- **Implementation**: BFS algorithm for topological distances, separate factor lookup
+- **Critical Bugfix**: Topological distance interpretation (topo_dist=2 → 1,3-pair, NOT 3!)
+
+**Final Validation Results** (Commit 8cc43df):
+| Molecule | Curcuma (Eh) | XTB Reference (Eh) | Error |
+|----------|--------------|-------------------|-------|
+| H₂ | 0.015982 | 0.015982160988 | 0.001% ✅✅✅ |
+| HCl | 0.080506 | 0.080506 | 0.00% ✅✅✅ |
+| OH | 0.013573 | 0.013573 | 0.00% ✅✅✅ |
+| CH₄ | 0.027579 | 0.027729 | 0.54% ✅ |
+| Ethene C₂H₄ | 0.044120 | 0.043873 | 0.56% ✅ |
+| CH₃OH | 0.043811 | 0.043529 | 0.65% ✅ |
+| Butane C₄H₁₀ | 0.110920 | 0.107249 | 3.42% ✅ |
+| Benzene C₆H₆ | 0.147071 | 0.141858 | 3.67% ✅ |
+
+**Summary**: 6/8 molecules with <1% error, 8/8 with <4% error. Diatomic molecules perfect match.
 
 **Files Modified**:
 - `ff_methods/gfnff_par.h` - Added `repan_angewChem2020` array
-- `ff_methods/gfnff_method.cpp` - Separated bonded/nonbonded parameter generation
+- `ff_methods/gfnff_method.cpp` - Separated bonded/nonbonded parameter generation, BFS topology
 - `ff_methods/forcefieldthread.h/cpp` - Split calculation methods, added setters
 - `ff_methods/forcefield.h/cpp` - Updated member variables and parameter loading
 
