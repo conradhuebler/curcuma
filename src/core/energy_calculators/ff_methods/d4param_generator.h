@@ -24,6 +24,7 @@
 #include "src/core/parameter_macros.h"
 #include "src/core/config_manager.h"
 #include "eeq_solver.h"  // EEQ charge calculation for D4
+#include "cn_calculator.h"  // CN calculation for D4 (Claude Generated - December 2025)
 
 #include <Eigen/Dense>
 #include <memory>
@@ -38,8 +39,8 @@ BEGIN_PARAMETER_DEFINITION(d4param)
     PARAM(d4_s8, Double, 1.0, "D4 global scaling factor for C8 term.", "Scaling", {})
     PARAM(d4_s10, Double, 1.0, "D4 global scaling factor for C10 term.", "Scaling", {})
     PARAM(d4_s12, Double, 1.0, "D4 global scaling factor for C12 term.", "Scaling", {})
-    PARAM(d4_a1, Double, 0.43, "D4 damping parameter a1.", "Damping", {})
-    PARAM(d4_a2, Double, 4.0, "D4 damping parameter a2 (Bohr).", "Damping", {})
+    PARAM(d4_a1, Double, 0.44, "D4 damping parameter a1 (GFN-FF: 0.44, GFN2-xTB: 0.63).", "Damping", {})
+    PARAM(d4_a2, Double, 4.60, "D4 damping parameter a2 (Bohr) - GFN-FF: 4.60, GFN2-xTB: 5.0.", "Damping", {})
     PARAM(d4_alp, Double, 14.0, "D4 alpha damping parameter.", "Damping", {})
 
     // D4 atomic polarizability data
@@ -69,7 +70,8 @@ private:
     double getEffectiveC6(int atom_i, int atom_j) const;
 
     // NEW: Charge-weighted C6 using EEQ charges and Gaussian weighting (Dec 2025)
-    double getChargeWeightedC6(int Zi, int Zj, double qi, double qj) const;
+    // Phase 2.2 (December 2025): CN+charge combined weighting
+    double getChargeWeightedC6(int Zi, int Zj, int atom_i, int atom_j) const;
 
     // Reference data from GFN-FF Fortran implementation
     static const int MAX_ELEM = 118;
@@ -80,7 +82,7 @@ private:
     // D4 reference data from external/gfnff/src/dftd4param.f90
     std::vector<int> m_refn;    // Number of reference systems per element
     std::vector<std::vector<double>> m_refq, m_refh;  // Reference charges and hydrogen counts
-    std::vector<std::vector<double>> m_refcn;   // Reference coordination numbers
+    std::vector<std::vector<double>> m_refcn;   // Reference coordination numbers (cpp-d4)
     std::vector<std::vector<double>> m_ascale; // Atomic scaling factors
 
     // Legacy placeholders (deprecated - replaced with real data)
@@ -97,6 +99,9 @@ private:
     // EEQ charge calculation (Dec 2025 - Phase 2 D4 integration)
     std::unique_ptr<EEQSolver> m_eeq_solver;
     Vector m_eeq_charges;  // Cached EEQ charges for current geometry
+
+    // Molecular CN calculation (December 2025 Phase 2 - CN+Charge weighting)
+    std::vector<double> m_cn_values;  // Cached GFNFFCN values for current geometry
 
     // Mathematical constants
     static constexpr double PI = 3.14159265358979323846;

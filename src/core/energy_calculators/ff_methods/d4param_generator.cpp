@@ -295,23 +295,24 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
                 // D4 C6 coefficient is already charge-weighted via calculateChargeWeightedC6()
                 // with Casimir-Polder integration over frequency-dependent polarizabilities
-                // C8, C10: Used for Three-Body corrections (not implemented yet)
-                // r4r2 values are for DAMPING, not coefficient derivation
 
-                // FIX (Dec 25, 2025): C8/C10 NOT calculated from C6*r4r2
-                // r₄/r₂ is atomic moment ratio (∑Z/Z⁴), independent of interatomic distance
-                // C8/C10 require separate Casimir-Polder integrals with moment derivatives
-                // For pairwise D4 (no three-body), only C6 is needed
+                // FIX (Dec 25, 2025): C8 IS used in pairwise D4!
+                // BJ damping formula: E = -s6·C6/(r⁶+R0⁶) - s8·C8/(r⁸+R0⁸)
+                // C8 = 3 * C6 * sqrt(Q_i * Q_j) where Q = <r⁴>/<r²> (atomic moment ratio)
+                double sqrt_q_i = getSqrtZr4r2(atom_i);
+                double sqrt_q_j = getSqrtZr4r2(atom_j);
+                double c8 = 3.0 * c6 * sqrt_q_i * sqrt_q_j;
 
-                double c8 = 0.0;  // C8 not used in pairwise D4 (requires three-body)
-                double c10 = 0.0; // C10 not used in pairwise D4
-                double c12 = 0.0; // C12 not used in pairwise D4
+                // C10: Only needed for three-body corrections (not implemented yet)
+                double c10 = 0.0;
+                double c12 = 0.0;
 
                 // Get D4 damping parameters from config (GFN-FF defaults)
+                // Reference: Spicher/Grimme, Angew. Chem. Int. Ed. 2020, DOI: 10.1002/anie.202004239
                 double s6 = m_config.get<double>("d4_s6", 1.0);
                 double s8 = m_config.get<double>("d4_s8", 1.0);
-                double a1 = m_config.get<double>("d4_a1", 0.63);  // D4 GFN2-XTB value
-                double a2 = m_config.get<double>("d4_a2", 5.0);   // D4 GFN2-XTB value (Bohr)
+                double a1 = m_config.get<double>("d4_a1", 0.44);  // GFN-FF D4 value
+                double a2 = m_config.get<double>("d4_a2", 4.60);  // GFN-FF D4 value (Bohr)
 
                 // CRITICAL FIX (Dec 2025): Match D3 JSON format for ForceField compatibility
                 // Use uppercase C6/C8 and include s6/s8/a1/a2/r_cut fields
@@ -342,8 +343,8 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
     m_parameters["d4_dispersion_pairs"] = dispersion_pairs;
     m_parameters["d4_damping"] = {
-        {"a1", m_config.get<double>("d4_a1", 0.43)},
-        {"a2", m_config.get<double>("d4_a2", 4.0)},
+        {"a1", m_config.get<double>("d4_a1", 0.44)},  // GFN-FF D4 (Spicher/Grimme 2020)
+        {"a2", m_config.get<double>("d4_a2", 4.60)},  // GFN-FF D4 (Bohr)
         {"alp", m_config.get<double>("d4_alp", 14.0)}
     };
     m_parameters["d4_enabled"] = true;

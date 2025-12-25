@@ -481,6 +481,15 @@ json GFNFF::generateGFNFFParameters()
 
         // Claude Generated - Dec 25, 2025: Store D4 as "d4_dispersion_pairs" to route to CalculateD4DispersionContribution()
         // Check what type of dispersion was generated (D4 or D3 or fallback)
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param("dispersions.size() ", static_cast<int>(dispersions.size()));
+            if (dispersions.size() > 0) {
+                CurcumaLogger::param("dispersions[0] contains dispersion_method", dispersions[0].contains("dispersion_method"));
+                if (dispersions[0].contains("dispersion_method"))
+                    CurcumaLogger::param("dispersions[0][dispersion_method]", std::string(dispersions[0]["dispersion_method"]));
+            }
+        }
+
         if (dispersions.size() > 0 && dispersions[0].contains("dispersion_method") &&
             dispersions[0]["dispersion_method"] == "d4") {
             parameters["d4_dispersion_pairs"] = dispersions;  // Native D4 charge-weighted C6
@@ -497,7 +506,12 @@ json GFNFF::generateGFNFFParameters()
             CurcumaLogger::param("Generated coulombs", static_cast<int>(parameters["gfnff_coulombs"].size()));
             CurcumaLogger::param("Generated bonded repulsions", static_cast<int>(parameters["gfnff_bonded_repulsions"].size()));
             CurcumaLogger::param("Generated non-bonded repulsions", static_cast<int>(parameters["gfnff_nonbonded_repulsions"].size()));
-            CurcumaLogger::param("Generated dispersions", static_cast<int>(parameters["gfnff_dispersions"].size()));
+
+            // Check both gfnff_dispersions and d4_dispersion_pairs (D4 route)
+            if (parameters.contains("gfnff_dispersions"))
+                CurcumaLogger::param("Generated dispersions (gfnff)", static_cast<int>(parameters["gfnff_dispersions"].size()));
+            else if (parameters.contains("d4_dispersion_pairs"))
+                CurcumaLogger::param("Generated dispersions (D4)", static_cast<int>(parameters["d4_dispersion_pairs"].size()));
 
             // Verify correct structure
             if (!parameters["bonds"].is_array())
@@ -4112,9 +4126,9 @@ ConfigManager GFNFF::extractDispersionConfig(const std::string& method) const
     } else if (method == "d4") {
         // D4 parameters with GFN-FF defaults
         disp_config["d4_s6"] = m_parameters.value("d4_s6", 1.0);
-        disp_config["d4_s8"] = m_parameters.value("d4_s8", 1.2);  // GFN-FF D4 default
-        disp_config["d4_a1"] = m_parameters.value("d4_a1", 0.43);
-        disp_config["d4_a2"] = m_parameters.value("d4_a2", 4.0);
+        disp_config["d4_s8"] = m_parameters.value("d4_s8", 1.0);  // GFN-FF D4 (Spicher/Grimme 2020)
+        disp_config["d4_a1"] = m_parameters.value("d4_a1", 0.44); // GFN-FF D4
+        disp_config["d4_a2"] = m_parameters.value("d4_a2", 4.60); // GFN-FF D4 (Bohr)
         disp_config["d4_alp"] = m_parameters.value("d4_alp", 14.0);
         disp_config["d4_s10"] = m_parameters.value("d4_s10", 0.0);  // Higher-order terms typically off
         disp_config["d4_s12"] = m_parameters.value("d4_s12", 0.0);

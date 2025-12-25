@@ -165,14 +165,14 @@ void ForceField::setParameter(const json& parameters)
             setvdWs(parameters["vdws"]);
 
         // Phase 4.2: GFN-FF pairwise non-bonded parameters (Claude Generated 2025)
+        // Support "d4_dispersion_pairs"优先 (Native D4 - Dec 25, 2025)
         // Support both "gfnff_dispersions" (from GFNFF) and "d3_dispersion_pairs" (from D3ParameterGenerator)
-        // Support "d4_dispersion_pairs" (from D4ParameterGenerator - Dec 25, 2025)
-        if (parameters.contains("gfnff_dispersions"))
+        if (parameters.contains("d4_dispersion_pairs"))
+            setD4Dispersions(parameters["d4_dispersion_pairs"]);  // Claude Generated - Dec 25, 2025: Native D4 dispersion
+        else if (parameters.contains("gfnff_dispersions"))
             setGFNFFDispersions(parameters["gfnff_dispersions"]);
         else if (parameters.contains("d3_dispersion_pairs"))
             setGFNFFDispersions(parameters["d3_dispersion_pairs"]);
-        else if (parameters.contains("d4_dispersion_pairs"))
-            setD4Dispersions(parameters["d4_dispersion_pairs"]);  // Claude Generated - Dec 25, 2025: Native D4 dispersion
 
         if (parameters.contains("gfnff_bonded_repulsions"))
             setGFNFFBondedRepulsions(parameters["gfnff_bonded_repulsions"]);
