@@ -477,7 +477,16 @@ json GFNFF::generateGFNFFParameters()
         json repulsion_data = generateGFNFFRepulsionPairs();
         parameters["gfnff_bonded_repulsions"] = repulsion_data["bonded"];
         parameters["gfnff_nonbonded_repulsions"] = repulsion_data["nonbonded"];
-        parameters["gfnff_dispersions"] = generateGFNFFDispersionPairs();
+        json dispersions = generateGFNFFDispersionPairs();
+
+        // Claude Generated - Dec 25, 2025: Store D4 as "d4_dispersion_pairs" to route to CalculateD4DispersionContribution()
+        // Check what type of dispersion was generated (D4 or D3 or fallback)
+        if (dispersions.size() > 0 && dispersions[0].contains("dispersion_method") &&
+            dispersions[0]["dispersion_method"] == "d4") {
+            parameters["d4_dispersion_pairs"] = dispersions;  // Native D4 charge-weighted C6
+        } else {
+            parameters["gfnff_dispersions"] = dispersions;  // Native GFN-FF or D3 fallback
+        }
 
         // Claude Generated (2025-12-13): Validation logging for parameter generation
         if (CurcumaLogger::get_verbosity() >= 3) {
@@ -593,7 +602,16 @@ json GFNFF::generateGFNFFParameters()
         json repulsion_data = generateGFNFFRepulsionPairs();
         parameters["gfnff_bonded_repulsions"] = repulsion_data["bonded"];
         parameters["gfnff_nonbonded_repulsions"] = repulsion_data["nonbonded"];
-        parameters["gfnff_dispersions"] = generateGFNFFDispersionPairs();
+        json dispersions = generateGFNFFDispersionPairs();
+
+        // Claude Generated - Dec 25, 2025: Store D4 as "d4_dispersion_pairs" to route to CalculateD4DispersionContribution()
+        // Check what type of dispersion was generated (D4 or D3 or fallback)
+        if (dispersions.size() > 0 && dispersions[0].contains("dispersion_method") &&
+            dispersions[0]["dispersion_method"] == "d4") {
+            parameters["d4_dispersion_pairs"] = dispersions;  // Native D4 charge-weighted C6
+        } else {
+            parameters["gfnff_dispersions"] = dispersions;  // Native GFN-FF or D3 fallback
+        }
 
         parameters["vdws"] = json::array(); // Legacy vdW (will be replaced by pairwise)
 

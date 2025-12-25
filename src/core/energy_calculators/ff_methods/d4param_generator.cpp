@@ -8,12 +8,16 @@
 
 #include "d4param_generator.h"
 #include "../../../../test_cases/reference_data/d4_reference_data_fixed.cpp"  // D4 reference data (365 lines)
+#include "../../../../test_cases/reference_data/d4_reference_cn.cpp"          // D4 reference CN data (cpp-d4 - December 2025 Phase 1)
 #include "../../../../test_cases/reference_data/d4_alphaiw_data.cpp"         // D4 alphaiw data (269 reference states)
 #include "../../../../test_cases/reference_data/d4_corrections_data.cpp"     // D4 correction factors
 #include "src/core/curcuma_logger.h"
 
 #include <algorithm>
 #include <cmath>
+
+// External declarations from d4_reference_cn.cpp (cpp-d4 CN data - December 2025 Phase 1)
+extern const std::vector<std::vector<double>> D4ReferenceData::refcn_cppd4;
 
 // External declarations from d4_alphaiw_data.cpp
 extern std::vector<std::vector<std::vector<double>>> d4_alphaiw_data;
@@ -75,13 +79,29 @@ void D4ParameterGenerator::initializeReferenceData()
         }
     }
 
-    // Initialize reference coordination numbers (WIP - Phase 2.2)
-    // TODO: Extract refcovcn data from Fortran dftd4param.f90
-    m_refcn.resize(MAX_ELEM, std::vector<double>(MAX_REF, 0.0));
-    for (int i = 0; i < MAX_ELEM; ++i) {
-        for (int j = 0; j < m_refn[i] && j < MAX_REF; ++j) {
-            m_refcn[i][j] = 1.0;  // Placeholder - will be extracted in Phase 2.2
+    // Load reference coordination numbers (December 2025 Phase 2 - CN integration)
+    // Use cpp-d4 data for consistency with CNCalculator (GFNFFCN)
+    if (D4ReferenceData::refcn_cppd4.size() >= 7) {
+        // cpp-d4 format: refcn[charge_state][element_number]
+        // Transpose to our format: m_refcn[element_number][charge_state]
+        m_refcn.resize(MAX_ELEM, std::vector<double>(MAX_REF, 0.0));
+        for (int elem = 0; elem < MAX_ELEM && elem < 118; ++elem) {
+            for (int charge_state = 0; charge_state < MAX_REF && charge_state < 7; ++charge_state) {
+                // cpp-d4 has charge_state dimension first, then element
+                if (charge_state < static_cast<int>(D4ReferenceData::refcn_cppd4.size()) &&
+                    elem < static_cast<int>(D4ReferenceData::refcn_cppd4[charge_state].size())) {
+                    m_refcn[elem][charge_state] = D4ReferenceData::refcn_cppd4[charge_state][elem];
+                }
+            }
         }
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::success("D4: Loaded reference CN data from cpp-d4 (86/118 elements)");
+        }
+    } else {
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::warn("D4: cpp-d4 CN data unavailable, using placeholders");
+        }
+        m_refcn.resize(MAX_ELEM, std::vector<double>(MAX_REF, 0.0));
     }
 
     // Initialize atomic scaling factors (WIP - Phase 2.2)
@@ -236,7 +256,26 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
         }
     }
 
-    // STEP 2: Generate C6 pairs with charge-weighted C6 coefficients
+    // STEP 1.b: Calculate molecular coordination numbers (December 2025 Phase 2)
+    // Use GFNFFCN for consistency with cpp-d4 reference data
+    m_cn_values = CNCalculator::calculateGFNFFCN(m_atoms, geometry_bohr);
+
+    if (m_cn_values.size() != m_atoms.size()) {
+        CurcumaLogger::error("D4: CN calculation failed");
+        return;
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success("D4: Molecular CN calculated (GFNFFCN)");
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            for (size_t i = 0; i < std::min(size_t(5), m_atoms.size()); ++i) {
+                CurcumaLogger::result(fmt::format("  Atom {} (Z={}) CN = {:.4f}",
+                                                  i, m_atoms[i], m_cn_values[i]));
+            }
+        }
+    }
+
+    // STEP 2: Generate C6 pairs with CN+charge weighted C6 coefficients
     json dispersion_pairs = json::array();
 
     for (size_t i = 0; i < m_atoms.size(); ++i) {
@@ -251,19 +290,22 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
                 pair["element_i"] = atom_i;
                 pair["element_j"] = atom_j;
 
-                // NEW: Charge-weighted C6 using EEQ charges (Dec 2025 - Phase 2)
-                double qi = m_eeq_charges(i);
-                double qj = m_eeq_charges(j);
-                double c6 = getChargeWeightedC6(atom_i, atom_j, qi, qj);
+                // NEW: CN+charge weighted C6 using EEQ charges and GFNFFCN (Dec 2025 Phase 2.2)
+                double c6 = getChargeWeightedC6(atom_i, atom_j, static_cast<int>(i), static_cast<int>(j));
 
-                // D4 uses atomic moments for higher-order coefficients
-                double r4r2_i = getR4OverR2(atom_i);
-                double r4r2_j = getR4OverR2(atom_j);
-                double r4r2 = std::sqrt(r4r2_i * r4r2_j);
+                // D4 C6 coefficient is already charge-weighted via calculateChargeWeightedC6()
+                // with Casimir-Polder integration over frequency-dependent polarizabilities
+                // C8, C10: Used for Three-Body corrections (not implemented yet)
+                // r4r2 values are for DAMPING, not coefficient derivation
 
-                double c8 = 3.0 * c6 * r4r2;
-                double c10 = 5.0 * c6 * r4r2 * r4r2;
-                double c12 = 7.0 * c6 * r4r2 * r4r2 * r4r2;
+                // FIX (Dec 25, 2025): C8/C10 NOT calculated from C6*r4r2
+                // r₄/r₂ is atomic moment ratio (∑Z/Z⁴), independent of interatomic distance
+                // C8/C10 require separate Casimir-Polder integrals with moment derivatives
+                // For pairwise D4 (no three-body), only C6 is needed
+
+                double c8 = 0.0;  // C8 not used in pairwise D4 (requires three-body)
+                double c10 = 0.0; // C10 not used in pairwise D4
+                double c12 = 0.0; // C12 not used in pairwise D4
 
                 // Get D4 damping parameters from config (GFN-FF defaults)
                 double s6 = m_config.get<double>("d4_s6", 1.0);
@@ -273,6 +315,8 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
                 // CRITICAL FIX (Dec 2025): Match D3 JSON format for ForceField compatibility
                 // Use uppercase C6/C8 and include s6/s8/a1/a2/r_cut fields
+                // Claude Generated - Dec 25, 2025: Add dispersion_method tag to route to CalculateD4DispersionContribution()
+                pair["dispersion_method"] = "d4";  // Route to native D4 in ForceFieldThread
                 pair["C6"] = c6;  // Raw C6 (s6 applied in energy calculation)
                 pair["C8"] = c8;  // Raw C8 (s8 applied in energy calculation)
                 pair["s6"] = s6;
@@ -387,15 +431,34 @@ double D4ParameterGenerator::getAtomicPolarizability(int atom, int frequency_ind
  * @param qj EEQ charge of atom j
  * @return Charge-weighted C6 coefficient (Hartree * Bohr^6)
  */
-double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, double qi, double qj) const
+double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, int atom_i, int atom_j) const
 {
-    // Phase 2.1 (December 2025): Gaussian charge-state weighting for C6 coefficients
+    // Phase 2.2 (December 2025): Gaussian CN+charge-state weighting for C6 coefficients
     // Reference: E. Caldeweyher et al., J. Chem. Phys. 2019, 150, 154122 (D4 method)
+    // cpp-d4 reference: dftd_model.h weight_cn() function
     //
-    // Formula: C6(qi,qj) = Σ_refi Σ_refj w(qi,refi) * w(qj,refj) * C6_ref(refi,refj)
-    // where: w(q,ref) = exp(-wf * (q - q_ref)²) / norm
+    // Formula: C6(qi,qj,cni,cnj) = Σ_refi Σ_refj w(qi,cni,refi) * w(qj,cnj,refj) * C6_ref(refi,refj)
+    // where: w(q,cn,ref) = exp(-wf * ((q - q_ref)² + (cn - cn_ref)²)) / norm
+    //
+    // Key change from charge-only (Phase 2.1): Added CN-dependent Gaussian term
 
-    constexpr double wf = 4.0;  // Gaussian width parameter (from D4 paper)
+    // Validate indices
+    if (atom_i < 0 || atom_i >= static_cast<int>(m_eeq_charges.size()) ||
+        atom_j < 0 || atom_j >= static_cast<int>(m_eeq_charges.size()) ||
+        atom_i < 0 || atom_i >= static_cast<int>(m_cn_values.size()) ||
+        atom_j < 0 || atom_j >= static_cast<int>(m_cn_values.size())) {
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::warn(fmt::format("D4: Invalid atom indices i={} j={}", atom_i, atom_j));
+        }
+        return 0.0;
+    }
+
+    double qi = m_eeq_charges(atom_i);
+    double qj = m_eeq_charges(atom_j);
+    double cni = m_cn_values[atom_i];
+    double cnj = m_cn_values[atom_j];
+
+    constexpr double wf = 4.0;  // Gaussian width parameter (from D4 cpp-d4)
 
     // Convert to 0-based indexing
     int elem_i = Zi - 1;
@@ -413,21 +476,29 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, double qi, doub
     int nref_i = (elem_i < static_cast<int>(m_refn.size())) ? m_refn[elem_i] : 1;
     int nref_j = (elem_j < static_cast<int>(m_refn.size())) ? m_refn[elem_j] : 1;
 
-    // Gaussian charge-state weighting
+    // Gaussian CN+charge-state weighting
     double c6_weighted = 0.0;
     double norm_i = 0.0;
     double norm_j = 0.0;
 
-    // Calculate normalization factors
+    // Calculate normalization factors with CN+charge combined weighting
     for (int refi = 0; refi < nref_i && refi < MAX_REF; ++refi) {
         double qi_ref = m_refq[elem_i][refi];
-        double wi = std::exp(-wf * (qi - qi_ref) * (qi - qi_ref));
+        double cni_ref = (elem_i < static_cast<int>(m_refcn.size()) && refi < static_cast<int>(m_refcn[elem_i].size()))
+                        ? m_refcn[elem_i][refi] : 0.0;
+
+        // KEY CHANGE: Combined CN+charge Gaussian weighting (December 2025 Phase 2.2)
+        double wi = std::exp(-wf * ((qi - qi_ref) * (qi - qi_ref) + (cni - cni_ref) * (cni - cni_ref)));
         norm_i += wi;
     }
 
     for (int refj = 0; refj < nref_j && refj < MAX_REF; ++refj) {
         double qj_ref = m_refq[elem_j][refj];
-        double wj = std::exp(-wf * (qj - qj_ref) * (qj - qj_ref));
+        double cnj_ref = (elem_j < static_cast<int>(m_refcn.size()) && refj < static_cast<int>(m_refcn[elem_j].size()))
+                        ? m_refcn[elem_j][refj] : 0.0;
+
+        // KEY CHANGE: Combined CN+charge Gaussian weighting (December 2025 Phase 2.2)
+        double wj = std::exp(-wf * ((qj - qj_ref) * (qj - qj_ref) + (cnj - cnj_ref) * (cnj - cnj_ref)));
         norm_j += wj;
     }
 
@@ -448,11 +519,19 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, double qi, doub
     // Weighted sum over reference states
     for (int refi = 0; refi < nref_i && refi < MAX_REF; ++refi) {
         double qi_ref = m_refq[elem_i][refi];
-        double wi = std::exp(-wf * (qi - qi_ref) * (qi - qi_ref)) / norm_i;
+        double cni_ref = (elem_i < static_cast<int>(m_refcn.size()) && refi < static_cast<int>(m_refcn[elem_i].size()))
+                        ? m_refcn[elem_i][refi] : 0.0;
+
+        // KEY CHANGE: Combined CN+charge Gaussian weighting (December 2025 Phase 2.2)
+        double wi = std::exp(-wf * ((qi - qi_ref) * (qi - qi_ref) + (cni - cni_ref) * (cni - cni_ref))) / norm_i;
 
         for (int refj = 0; refj < nref_j && refj < MAX_REF; ++refj) {
             double qj_ref = m_refq[elem_j][refj];
-            double wj = std::exp(-wf * (qj - qj_ref) * (qj - qj_ref)) / norm_j;
+            double cnj_ref = (elem_j < static_cast<int>(m_refcn.size()) && refj < static_cast<int>(m_refcn[elem_j].size()))
+                            ? m_refcn[elem_j][refj] : 0.0;
+
+            // KEY CHANGE: Combined CN+charge Gaussian weighting (December 2025 Phase 2.2)
+            double wj = std::exp(-wf * ((qj - qj_ref) * (qj - qj_ref) + (cnj - cnj_ref) * (cnj - cnj_ref))) / norm_j;
 
             // CRITICAL FIX (Dec 25, 2025): Correct C6 calculation from Casimir-Polder integration
             // Reference: XTB dftd4.F90 lines ~500: c6 = thopi * trapzd(alpha_i * alpha_j)
@@ -549,8 +628,8 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, double qi, doub
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::result(fmt::format("D4 C6 (Gaussian): Zi={} Zj={} qi={:.4f} qj={:.4f} → C6={:.4f} (nref_i={}, nref_j={})",
-                                          Zi, Zj, qi, qj, c6_weighted, nref_i, nref_j));
+        CurcumaLogger::result(fmt::format("D4 C6 (CN+charge): Zi={} Zj={} qi={:.4f} qj={:.4f} cni={:.4f} cnj={:.4f} → C6={:.4f} (nref_i={}, nref_j={})",
+                                          Zi, Zj, qi, qj, cni, cnj, c6_weighted, nref_i, nref_j));
     }
 
     return c6_weighted;

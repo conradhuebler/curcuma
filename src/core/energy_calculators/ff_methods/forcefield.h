@@ -132,6 +132,7 @@ private:
 
     // Phase 4.2: GFN-FF pairwise non-bonded parameter setters (Claude Generated 2025)
     void setGFNFFDispersions(const json& dispersions);
+    void setD4Dispersions(const json& dispersions);  // Claude Generated - Dec 25, 2025: Native D4 dispersion
     void setGFNFFBondedRepulsions(const json& repulsions);
     void setGFNFFNonbondedRepulsions(const json& repulsions);
     void setGFNFFCoulombs(const json& coulombs);
@@ -172,6 +173,7 @@ private:
 
     // Phase 4.2: GFN-FF pairwise non-bonded storage (Claude Generated 2025)
     std::vector<GFNFFDispersion> m_gfnff_dispersions;
+    std::vector<GFNFFDispersion> m_d4_dispersions;  // Claude Generated - Dec 25, 2025: Native D4 dispersion pairs
     std::vector<GFNFFRepulsion> m_gfnff_bonded_repulsions;
     std::vector<GFNFFRepulsion> m_gfnff_nonbonded_repulsions;
     std::vector<GFNFFCoulomb> m_gfnff_coulombs;

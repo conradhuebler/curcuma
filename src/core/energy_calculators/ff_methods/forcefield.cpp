@@ -166,10 +166,13 @@ void ForceField::setParameter(const json& parameters)
 
         // Phase 4.2: GFN-FF pairwise non-bonded parameters (Claude Generated 2025)
         // Support both "gfnff_dispersions" (from GFNFF) and "d3_dispersion_pairs" (from D3ParameterGenerator)
+        // Support "d4_dispersion_pairs" (from D4ParameterGenerator - Dec 25, 2025)
         if (parameters.contains("gfnff_dispersions"))
             setGFNFFDispersions(parameters["gfnff_dispersions"]);
         else if (parameters.contains("d3_dispersion_pairs"))
             setGFNFFDispersions(parameters["d3_dispersion_pairs"]);
+        else if (parameters.contains("d4_dispersion_pairs"))
+            setD4Dispersions(parameters["d4_dispersion_pairs"]);  // Claude Generated - Dec 25, 2025: Native D4 dispersion
 
         if (parameters.contains("gfnff_bonded_repulsions"))
             setGFNFFBondedRepulsions(parameters["gfnff_bonded_repulsions"]);
@@ -586,6 +589,36 @@ void ForceField::setGFNFFDispersions(const json& dispersions)
     }
 }
 
+// Claude Generated 2025: Native D4 dispersion (separate storage from GFNFF native dispersion)
+void ForceField::setD4Dispersions(const json& dispersions)
+{
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setD4Dispersions: Loading {} D4 dispersions", dispersions.size()));
+    }
+
+    m_d4_dispersions.clear();
+    for (int i = 0; i < dispersions.size(); ++i) {
+        json disp_json = dispersions[i].get<json>();
+        GFNFFDispersion disp;
+
+        disp.i = disp_json["i"];
+        disp.j = disp_json["j"];
+        disp.C6 = disp_json["C6"];
+        disp.C8 = disp_json["C8"];
+        disp.s6 = disp_json["s6"];
+        disp.s8 = disp_json["s8"];
+        disp.a1 = disp_json["a1"];
+        disp.a2 = disp_json["a2"];
+        disp.r_cut = disp_json["r_cut"];
+
+        m_d4_dispersions.push_back(disp);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success(fmt::format("Loaded {} D4 dispersion pairs", m_d4_dispersions.size()));
+    }
+}
+
 void ForceField::setGFNFFBondedRepulsions(const json& repulsions)
 {
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -918,6 +951,19 @@ void ForceField::AutoRanges()
             if (CurcumaLogger::get_verbosity() >= 3) {
                 int d3_count = int((i + 1) * m_gfnff_dispersions.size() / double(free_threads)) - int(i * m_gfnff_dispersions.size() / double(free_threads));
                 CurcumaLogger::param(fmt::format("thread_{}_d3_pairs", i), d3_count);
+            }
+        }
+
+        // Claude Generated (December 25, 2025): GFN-FF Native D4 dispersion distribution
+        // Distribute D4 dispersion pairs to threads for parallel calculation
+        if (!m_d4_dispersions.empty()) {
+            for (int j = int(i * m_d4_dispersions.size() / double(free_threads)); j < int((i + 1) * m_d4_dispersions.size() / double(free_threads)); ++j) {
+                thread->addD4Dispersion(m_d4_dispersions[j]);
+            }
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                int d4_count = int((i + 1) * m_d4_dispersions.size() / double(free_threads)) - int(i * m_d4_dispersions.size() / double(free_threads));
+                CurcumaLogger::param(fmt::format("thread_{}_d4_pairs", i), d4_count);
             }
         }
 

@@ -251,6 +251,8 @@ public:
     // D3/D4 parameter integration methods
     void addD3Dispersion(const GFNFFDispersion& d3_dispersion);
     void addD4Dispersion(const GFNFFDispersion& d4_dispersion);
+    void CalculateD3DispersionContribution();
+    void CalculateD4DispersionContribution();  // Claude Generated - Dec 25, 2025
 
     // Phase 1.2: GFN-FF hydrogen bond and halogen bond addition methods (Claude Generated 2025)
     void addGFNFFHydrogenBond(const GFNFFHydrogenBond& hbond);
@@ -342,9 +344,6 @@ private:
     void CalculateGFNFFBondedRepulsionContribution();
     void CalculateGFNFFNonbondedRepulsionContribution();
     void CalculateGFNFFCoulombContribution();
-
-    // Claude Generated (December 19, 2025): Native D3 dispersion calculation for UFF-D3
-    void CalculateD3DispersionContribution();
 
     // Phase 5: GFN-FF hydrogen bond and halogen bond calculation functions (Claude Generated 2025)
     void CalculateGFNFFHydrogenBondContribution();
