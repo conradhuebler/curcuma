@@ -17,6 +17,11 @@
  * - CH3OH (methanol) - All energy terms including torsion
  * - CH4 (methane) - Multiple equivalent bonds
  * - CH3OCH3 (dimethyl ether) - Complex torsion terms
+ * - C6H6 (benzene) - Aromatic π-system, sp² carbons (D4 dispersion test)
+ * - C4H10 (butane) - Flexible alkane chain (D4 dispersion test)
+ *
+ * Claude Generated - December 25, 2025
+ * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  */
 
 #include <cassert>
@@ -122,7 +127,11 @@ public:
             {"test_cases/molecules/larger/CH3OCH3.xyz", "Dimethyl ether (complex torsions)",
              -1.2092092216, -1.2164439418, 0.001779533537, 0.000023390598, 0.053864662977, -0.047825361074, 0.000041946447, -0.000142398327},
             {"test_cases/molecules/larger/CH4.xyz", "Methane - sp3 tetrahedral validation",
-             -0.630814967693, -0.656386349843, 0.000068985137, 0.0, 0.027729233574, -0.001576233642, -0.000650602918, 0.0}
+             -0.630814967693, -0.656386349843, 0.000068985137, 0.0, 0.027729233574, -0.001576233642, -0.000650602918, 0.0},
+            {"test_cases/molecules/larger/C6H6.xyz", "Benzene - aromatic π-system, sp² carbons",
+             -2.364775496871, -2.508166283882, 0.000000000758, 0.000000729656, 0.158023153244, -0.004339043253, -0.006294467601, -0.003999585793},
+            {"test_cases/validation/butane.xyz", "Butane - flexible alkane chain",
+             -1.950514159158, -2.051987951695, 0.000390623328, 0.004144855655, 0.107248927516, -0.004233455377, -0.005848570553, -0.000228588030}
         };
 
         // vbond parameter references

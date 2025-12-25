@@ -3,14 +3,28 @@
  * Integrates 118 elements of D4 reference data from GFN-FF Fortran implementation
  *
  * Claude Generated (December 2025): Phase 2.1 - D4 Reference Data Integration
+ * December 25, 2025: Complete alphaiw (polarizability) data integration
  */
 
 #include "d4param_generator.h"
 #include "../../../../test_cases/reference_data/d4_reference_data_fixed.cpp"  // D4 reference data (365 lines)
+#include "../../../../test_cases/reference_data/d4_alphaiw_data.cpp"         // D4 alphaiw data (269 reference states)
+#include "../../../../test_cases/reference_data/d4_corrections_data.cpp"     // D4 correction factors
 #include "src/core/curcuma_logger.h"
 
 #include <algorithm>
 #include <cmath>
+
+// External declarations from d4_alphaiw_data.cpp
+extern std::vector<std::vector<std::vector<double>>> d4_alphaiw_data;
+extern void initialize_d4_alphaiw();
+
+// External declarations from d4_corrections_data.cpp
+extern std::vector<std::vector<double>> d4_ascale_data;
+extern std::map<int, double> d4_sscale_data;
+extern std::map<int, std::vector<double>> d4_secaiw_data;
+extern std::vector<std::vector<int>> d4_refsys_data;
+extern void initialize_d4_corrections();
 
 D4ParameterGenerator::D4ParameterGenerator(const ConfigManager& config)
     : m_config(config)
@@ -20,7 +34,18 @@ D4ParameterGenerator::D4ParameterGenerator(const ConfigManager& config)
     m_eeq_solver = std::make_unique<EEQSolver>(eeq_config);
 
     initializeReferenceData();
-    calculateFrequencyDependentPolarizabilities();
+
+    // Initialize complete alphaiw data (Dec 25, 2025 - Phase 2.3)
+    // 269 reference states with frequency-dependent polarizabilities
+    initialize_d4_alphaiw();
+
+    // Initialize correction factors (Dec 25, 2025 - Phase 2.4)
+    // ascale, sscale, secaiw, refsys for accurate polarizability corrections
+    initialize_d4_corrections();
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success("D4: Complete data loaded (alphaiw + corrections)");
+    }
 }
 
 void D4ParameterGenerator::initializeReferenceData()
@@ -412,6 +437,14 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, double qi, doub
         norm_j = std::max(norm_j, 1e-10);
     }
 
+    // Frequency grid for Casimir-Polder integration (same as calculateFrequencyDependentPolarizabilities)
+    const std::vector<double> frequency_grid = {
+        0.000001, 0.050000, 0.100000, 0.200000, 0.300000, 0.400000,
+        0.500000, 0.600000, 0.700000, 0.800000, 0.900000, 1.000000,
+        1.200000, 1.400000, 1.600000, 1.800000, 2.000000, 2.500000,
+        3.000000, 4.000000, 5.000000, 7.500000, 10.000000
+    };
+
     // Weighted sum over reference states
     for (int refi = 0; refi < nref_i && refi < MAX_REF; ++refi) {
         double qi_ref = m_refq[elem_i][refi];
@@ -421,19 +454,94 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, double qi, doub
             double qj_ref = m_refq[elem_j][refj];
             double wj = std::exp(-wf * (qj - qj_ref) * (qj - qj_ref)) / norm_j;
 
-            // Calculate C6_ref for this reference state pair
-            // Using integrated polarizabilities: C6 ~ α_i * α_j
-            double alpha_i = (elem_i < static_cast<int>(m_integrated_alpha.size()) && refi < static_cast<int>(m_integrated_alpha[elem_i].size()))
-                           ? m_integrated_alpha[elem_i][refi]
-                           : 1.0;
-            double alpha_j = (elem_j < static_cast<int>(m_integrated_alpha.size()) && refj < static_cast<int>(m_integrated_alpha[elem_j].size()))
-                           ? m_integrated_alpha[elem_j][refj]
-                           : 1.0;
+            // CRITICAL FIX (Dec 25, 2025): Correct C6 calculation from Casimir-Polder integration
+            // Reference: XTB dftd4.F90 lines ~500: c6 = thopi * trapzd(alpha_i * alpha_j)
+            //
+            // Formula: C6_ij = (3/π) ∫ α_i(iω) * α_j(iω) dω
+            // NOT: C6 = α_i * α_j (this was the 100x error bug!)
 
-            // London dispersion formula: C6 = (3/2) * (α_i * α_j * I_i * I_j) / (I_i + I_j)
-            // Simplified using geometric mean for ionization potentials
-            double weight_factor = 2.0 * std::sqrt(static_cast<double>(Zi * Zj)) / (Zi + Zj);
-            double c6_ref = weight_factor * 1.5 * alpha_i * alpha_j;
+            double c6_ref = 0.0;
+
+            // Check if we have frequency-dependent polarizabilities for both elements
+            // Use d4_alphaiw_data (complete data from Fortran extraction - Dec 25, 2025)
+            if (elem_i < static_cast<int>(d4_alphaiw_data.size()) &&
+                elem_j < static_cast<int>(d4_alphaiw_data.size()) &&
+                refi < static_cast<int>(d4_alphaiw_data[elem_i].size()) &&
+                refj < static_cast<int>(d4_alphaiw_data[elem_j].size())) {
+
+                // Get correction factors for reference states (Dec 25, 2025 - Phase 2.4)
+                double ascale_i = (elem_i < static_cast<int>(d4_ascale_data.size()) && refi < static_cast<int>(d4_ascale_data[elem_i].size()))
+                                ? d4_ascale_data[elem_i][refi] : 1.0;
+                double ascale_j = (elem_j < static_cast<int>(d4_ascale_data.size()) && refj < static_cast<int>(d4_ascale_data[elem_j].size()))
+                                ? d4_ascale_data[elem_j][refj] : 1.0;
+
+                double hcount_i = (elem_i < static_cast<int>(m_refh.size()) && refi < static_cast<int>(m_refh[elem_i].size()))
+                                ? m_refh[elem_i][refi] : 0.0;
+                double hcount_j = (elem_j < static_cast<int>(m_refh.size()) && refj < static_cast<int>(m_refh[elem_j].size()))
+                                ? m_refh[elem_j][refj] : 0.0;
+
+                int refsys_i = (elem_i < static_cast<int>(d4_refsys_data.size()) && refi < static_cast<int>(d4_refsys_data[elem_i].size()))
+                             ? d4_refsys_data[elem_i][refi] : 0;
+                int refsys_j = (elem_j < static_cast<int>(d4_refsys_data.size()) && refj < static_cast<int>(d4_refsys_data[elem_j].size()))
+                             ? d4_refsys_data[elem_j][refj] : 0;
+
+                double sscale_i = (d4_sscale_data.find(refsys_i) != d4_sscale_data.end()) ? d4_sscale_data.at(refsys_i) : 0.0;
+                double sscale_j = (d4_sscale_data.find(refsys_j) != d4_sscale_data.end()) ? d4_sscale_data.at(refsys_j) : 0.0;
+
+                // Integrate product of CORRECTED polarizabilities using trapezoidal rule
+                // Correction formula: α_corrected = ascale * (αᵢⱼw - hcount * sscale * secaiw)
+                for (int iw = 0; iw < N_FREQ - 1; ++iw) {
+                    // Get raw alphaiw values
+                    double alphaiw_i_iw = d4_alphaiw_data[elem_i][refi][iw];
+                    double alphaiw_i_next = d4_alphaiw_data[elem_i][refi][iw + 1];
+                    double alphaiw_j_iw = d4_alphaiw_data[elem_j][refj][iw];
+                    double alphaiw_j_next = d4_alphaiw_data[elem_j][refj][iw + 1];
+
+                    // Get secaiw reference polarizabilities (if available)
+                    double secaiw_i_iw = 0.0, secaiw_i_next = 0.0;
+                    double secaiw_j_iw = 0.0, secaiw_j_next = 0.0;
+
+                    if (d4_secaiw_data.find(refsys_i) != d4_secaiw_data.end() && iw < static_cast<int>(d4_secaiw_data.at(refsys_i).size())) {
+                        secaiw_i_iw = d4_secaiw_data.at(refsys_i)[iw];
+                        secaiw_i_next = d4_secaiw_data.at(refsys_i)[iw + 1];
+                    }
+                    if (d4_secaiw_data.find(refsys_j) != d4_secaiw_data.end() && iw < static_cast<int>(d4_secaiw_data.at(refsys_j).size())) {
+                        secaiw_j_iw = d4_secaiw_data.at(refsys_j)[iw];
+                        secaiw_j_next = d4_secaiw_data.at(refsys_j)[iw + 1];
+                    }
+
+                    // Apply correction formula
+                    double alpha_i_iw = ascale_i * (alphaiw_i_iw - hcount_i * sscale_i * secaiw_i_iw);
+                    double alpha_i_next = ascale_i * (alphaiw_i_next - hcount_i * sscale_i * secaiw_i_next);
+                    double alpha_j_iw = ascale_j * (alphaiw_j_iw - hcount_j * sscale_j * secaiw_j_iw);
+                    double alpha_j_next = ascale_j * (alphaiw_j_next - hcount_j * sscale_j * secaiw_j_next);
+
+                    // Ensure non-negative (as per Fortran: max(correction, 0.0))
+                    alpha_i_iw = std::max(alpha_i_iw, 0.0);
+                    alpha_i_next = std::max(alpha_i_next, 0.0);
+                    alpha_j_iw = std::max(alpha_j_iw, 0.0);
+                    alpha_j_next = std::max(alpha_j_next, 0.0);
+
+                    // Product at current and next frequency points
+                    double product_iw = alpha_i_iw * alpha_j_iw;
+                    double product_next = alpha_i_next * alpha_j_next;
+
+                    // Trapezoidal rule: ∫ f(x) dx ≈ Σ (f_i + f_{i+1})/2 * Δx
+                    double dw = frequency_grid[iw + 1] - frequency_grid[iw];
+                    c6_ref += 0.5 * (product_iw + product_next) * dw;
+                }
+
+                // Apply prefactor: 3/π (matches XTB's thopi constant)
+                c6_ref *= THREE_OVER_PI;
+
+            } else {
+                // Fallback for elements without polarizability data
+                // Use simple geometric estimate (will be inaccurate)
+                if (CurcumaLogger::get_verbosity() >= 3) {
+                    CurcumaLogger::warn(fmt::format("D4: No alpha_iw data for Zi={} Zj={}, using fallback", Zi, Zj));
+                }
+                c6_ref = 1.0;  // Minimal fallback value
+            }
 
             // Add weighted contribution
             c6_weighted += wi * wj * c6_ref;
