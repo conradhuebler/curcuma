@@ -53,7 +53,14 @@ GFNFF::GFNFF()
     m_parameters = default_parameters;
 
     // Initialize EEQ solver (Dec 2025 - Phase 3)
-    ConfigManager eeq_config("eeq_solver", m_parameters);
+    // CRITICAL FIX (Dec 25, 2025): Pass global CurcumaLogger verbosity to EEQSolver
+    json eeq_params = m_parameters;
+    if (!eeq_params.contains("eeq_solver")) {
+        eeq_params["eeq_solver"] = json::object();
+    }
+    // Use global CurcumaLogger verbosity
+    eeq_params["eeq_solver"]["verbosity"] = CurcumaLogger::get_verbosity();
+    ConfigManager eeq_config("eeq_solver", eeq_params);
     m_eeq_solver = std::make_unique<EEQSolver>(eeq_config);
 }
 
@@ -74,7 +81,14 @@ GFNFF::GFNFF(const json& parameters)
     m_parameters = MergeJson(default_parameters, parameters);
 
     // Initialize EEQ solver (Dec 2025 - Phase 3)
-    ConfigManager eeq_config("eeq_solver", m_parameters);
+    // CRITICAL FIX (Dec 25, 2025): Pass global CurcumaLogger verbosity to EEQSolver
+    json eeq_params = m_parameters;
+    if (!eeq_params.contains("eeq_solver")) {
+        eeq_params["eeq_solver"] = json::object();
+    }
+    // Use global CurcumaLogger verbosity
+    eeq_params["eeq_solver"]["verbosity"] = CurcumaLogger::get_verbosity();
+    ConfigManager eeq_config("eeq_solver", eeq_params);
     m_eeq_solver = std::make_unique<EEQSolver>(eeq_config);
 }
 

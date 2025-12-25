@@ -271,6 +271,11 @@ add_executable(test_d4_refdata test_d4_refdata.cpp)
 target_link_libraries(test_d4_refdata curcuma_core ${LIBS})
 add_test(NAME test_d4_refdata COMMAND test_d4_refdata)
 
+# EEQSolver Debugging Test (Claude Generated - Dec 25, 2025)
+add_executable(test_eeq_solver_debug test_eeq_solver_debug.cpp)
+target_link_libraries(test_eeq_solver_debug curcuma_core ${LIBS})
+add_test(NAME test_eeq_solver_debug COMMAND test_eeq_solver_debug)
+
 # Add debug executable
 #add_executable(debug_molecule
 #        ../debug_molecule.cpp)
