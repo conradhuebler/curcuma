@@ -223,6 +223,41 @@ struct GFNFFHalogenBond {
     double r_cut = 50.0;        ///< Distance cutoff (Bohr)
 };
 
+/**
+ * @brief ATM (Axilrod-Teller-Muto) three-body dispersion term
+ *
+ * Reference: external/cpp-d4/src/damping/atm.cpp
+ * Formula: E_ATM = sum_{i<j<k} ang * fdmp * C9 / 3 * triple_scale
+ *
+ * Used by both D3 and D4 (same formula, different C6 sources)
+ * - D3: C6 from CN-weighted interpolation (D3ParameterGenerator)
+ * - D4: C6 from CN+charge-weighted Casimir-Polder (D4ParameterGenerator)
+ *
+ * Claude Generated (2025): ATM three-body dispersion
+ */
+struct ATMTriple {
+    int i = 0;              ///< First atom index
+    int j = 0;              ///< Second atom index (i < j)
+    int k = 0;              ///< Third atom index (j < k)
+
+    // Pre-computed C6 coefficients (from D3/D4 generator)
+    double C6_ij = 0.0;     ///< Pairwise C6 coefficient (i,j)
+    double C6_ik = 0.0;     ///< Pairwise C6 coefficient (i,k)
+    double C6_jk = 0.0;     ///< Pairwise C6 coefficient (j,k)
+
+    // Damping parameters
+    double s9 = 1.0;        ///< Global scaling factor for C9
+    double a1 = 0.0;        ///< BJ damping parameter a1
+    double a2 = 0.0;        ///< BJ damping parameter a2 (Bohr)
+    double alp = 14.0;      ///< Damping exponent
+
+    // Method identifier
+    std::string atm_method = "d3";  ///< "d3" or "d4"
+
+    // Symmetry factor (pre-computed during generation)
+    double triple_scale = 1.0;  ///< 1.0 (ijk), 0.5 (iij/ijj), 1/6 (iii)
+};
+
 class ForceFieldThread : public CxxThread {
 
 public:
@@ -257,6 +292,9 @@ public:
     // Phase 1.2: GFN-FF hydrogen bond and halogen bond addition methods (Claude Generated 2025)
     void addGFNFFHydrogenBond(const GFNFFHydrogenBond& hbond);
     void addGFNFFHalogenBond(const GFNFFHalogenBond& xbond);
+
+    // ATM three-body dispersion (D3/D4)
+    void addATMTriple(const ATMTriple& triple);
 
     // Phase 6: Assign atoms for self-energy calculation (Claude Generated Dec 2025)
     // Thread-safe: Each thread calculates self-energy only for its assigned atoms
@@ -349,6 +387,9 @@ private:
     void CalculateGFNFFHydrogenBondContribution();
     void CalculateGFNFFHalogenBondContribution();
 
+    // ATM three-body dispersion calculation function (Claude Generated 2025)
+    void CalculateATMContribution();
+
     // double HarmonicBondStretching();
 
     // double LJBondStretching();
@@ -392,6 +433,9 @@ private:
     // Phase 1.2: GFN-FF hydrogen bond and halogen bond terms (Claude Generated 2025)
     std::vector<GFNFFHydrogenBond> m_gfnff_hbonds;     // Hydrogen bonds (HB)
     std::vector<GFNFFHalogenBond> m_gfnff_xbonds;      // Halogen bonds (XB)
+
+    // ATM three-body dispersion (D3/D4)
+    std::vector<ATMTriple> m_atm_triples;  // ATM three-body terms
 
 protected:
     Matrix m_geometry, m_gradient;

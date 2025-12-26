@@ -78,6 +78,7 @@ ForceFieldGenerator::ForceFieldGenerator(const ConfigManager& config)
     m_parameter["h4_scaling"] = config.get<double>("h4_scaling", 0.0);
     m_parameter["hh_scaling"] = config.get<double>("hh_scaling", 0.0);
     m_parameter["e0"] = config.get<double>("energy_offset", 0.0);
+    m_parameter["verbosity"] = config.get<int>("verbosity", 0);  // Claude Generated (2025): Store verbosity for ForceFieldGenerator logging
 }
 
 void ForceFieldGenerator::setMolecule(const Mol& mol)
@@ -1026,8 +1027,17 @@ void ForceFieldGenerator::GenerateD3Parameters()
         CurcumaLogger::info("Generating D3 dispersion parameters");
     }
 
-    // Create D3 parameter generator with force field configuration
-    ConfigManager d3_config("d3param", m_parameter);
+    // Claude Generated (2025): Ensure d3_s9=1.0 for ATM generation
+    double d3_s9 = m_parameter.value("d3_s9", 1.0);
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param("d3_s9_in_config", d3_s9);
+    }
+
+    // Create D3 parameter generator with force field configuration + explicit s9=1.0
+    json d3_config_json = m_parameter;
+    d3_config_json["d3_s9"] = d3_s9;  // Claude Generated (2025): Force ATM generation
+
+    ConfigManager d3_config("d3param", d3_config_json);
     D3ParameterGenerator d3_gen(d3_config);
 
     // Extract atom types from molecule
@@ -1042,6 +1052,14 @@ void ForceFieldGenerator::GenerateD3Parameters()
         m_parameter["d3_dispersion_pairs"] = d3_params["d3_dispersion_pairs"];
         m_parameter["d3_damping"] = d3_params["d3_damping"];
         m_parameter["d3_enabled"] = true;
+
+        // Claude Generated (2025): Extract ATM triples for three-body dispersion
+        if (d3_params.contains("atm_triples") && !d3_params["atm_triples"].is_null()) {
+            m_parameter["atm_triples"] = d3_params["atm_triples"];
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::param("atm_triples", static_cast<int>(d3_params["atm_triples"].size()));
+            }
+        }
     }
 
     auto end_time = std::chrono::high_resolution_clock::now();
@@ -1083,6 +1101,14 @@ void ForceFieldGenerator::GenerateD4Parameters()
         m_parameter["d4_dispersion_pairs"] = d4_params["d4_dispersion_pairs"];
         m_parameter["d4_damping"] = d4_params["d4_damping"];
         m_parameter["d4_enabled"] = true;
+
+        // Claude Generated (2025): Extract ATM triples for three-body dispersion
+        if (d4_params.contains("atm_triples") && !d4_params["atm_triples"].is_null()) {
+            m_parameter["atm_triples"] = d4_params["atm_triples"];
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::param("atm_triples", static_cast<int>(d4_params["atm_triples"].size()));
+            }
+        }
     }
 
     auto end_time = std::chrono::high_resolution_clock::now();
@@ -1145,7 +1171,8 @@ json ForceFieldGenerator::GenerateUFFD3Parameters()
             {"d3_a2", 4.8593},   // PBE0/BJ damping parameter 2 (Bohr)
             {"d3_alp", 14.0},    // Alpha parameter
             {"d3_s6", 1.0},      // C6 scaling factor
-            {"d3_s8", 1.2177}    // C8 scaling factor (PBE0)
+            {"d3_s8", 1.2177},    // C8 scaling factor (PBE0)
+            {"d3_s9", 1.0}       // ATM three-body scaling factor
         };
 
         ConfigManager d3_config("d3param", d3_config_json);
@@ -1160,6 +1187,14 @@ json ForceFieldGenerator::GenerateUFFD3Parameters()
             uff_params["d3_dispersion_pairs"] = d3_params["d3_dispersion_pairs"];
             uff_params["d3_damping"] = d3_params["d3_damping"];
             uff_params["d3_enabled"] = true;
+
+            // Claude Generated (2025): Add ATM triples for three-body dispersion
+            if (d3_params.contains("atm_triples") && !d3_params["atm_triples"].is_null()) {
+                uff_params["atm_triples"] = d3_params["atm_triples"];
+                if (CurcumaLogger::get_verbosity() >= 2) {
+                    CurcumaLogger::param("atm_triples", static_cast<int>(d3_params["atm_triples"].size()));
+                }
+            }
 
             if (CurcumaLogger::get_verbosity() >= 2) {
                 CurcumaLogger::param("d3_pairs", static_cast<int>(d3_params["d3_dispersion_pairs"].size()));
@@ -1232,6 +1267,14 @@ json ForceFieldGenerator::GenerateD3OnlyParameters(const std::string& preset)
             d3_params["d3_dispersion_pairs"] = generated["d3_dispersion_pairs"];
             d3_params["d3_damping"] = generated["d3_damping"];
             d3_params["d3_enabled"] = true;
+
+            // Claude Generated (2025): Extract ATM triples for three-body dispersion
+            if (generated.contains("atm_triples") && !generated["atm_triples"].is_null()) {
+                d3_params["atm_triples"] = generated["atm_triples"];
+                if (CurcumaLogger::get_verbosity() >= 2) {
+                    CurcumaLogger::param("atm_triples", static_cast<int>(generated["atm_triples"].size()));
+                }
+            }
 
             if (CurcumaLogger::get_verbosity() >= 2) {
                 CurcumaLogger::param("d3_pairs", static_cast<int>(generated["d3_dispersion_pairs"].size()));

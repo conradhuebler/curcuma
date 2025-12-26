@@ -45,6 +45,13 @@ ForceField::ForceField(const json& controller)
     if (parameter.contains("geometry_file")) {
         std::string geom_file = parameter["geometry_file"];
         m_auto_param_file = generateParameterFileName(geom_file);
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::param("auto_param_file", m_auto_param_file);
+        }
+    } else {
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::warn("No geometry_file in ForceField parameter - automatic caching disabled");
+        }
     }
 }
 
@@ -106,23 +113,52 @@ void ForceField::distributeEEQCharges(const Vector& charges)
 
 void ForceField::setParameter(const json& parameters)
 {
-    // Claude Generated: Fix recursive guard - use member variable, not static
-    if (m_in_setParameter) {
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::warn("Recursive setParameter call detected - preventing infinite loop");
-        }
-        std::cout << "DEBUG: setParameter() RECURSION - returning early!" << std::endl;
-        return;
-    }
-    m_in_setParameter = true;
-
-    // Claude Generated: Debug - always log setParameter entry
-    // std::cout << "DEBUG: ForceField::setParameter() ENTRY (set in_setParameter=true)" << std::endl;
-
     std::string method_name = "unknown";
     if (parameters.contains("method") && !parameters["method"].is_null()) {
         method_name = parameters["method"].get<std::string>();
     }
+
+    bool loaded_from_cache = false;
+
+    // Claude Generated (December 2025): Prevent infinite recursion during cache loading
+    // Skip cache loading if we're already being called from within loadParametersFromFile
+    static thread_local bool loading_from_cache = false;
+
+    if (!loading_from_cache && !m_in_setParameter && m_enable_caching && parameters.contains("method")) {
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Attempting to load cached parameters");
+        }
+        std::string method = parameters["method"];
+        loading_from_cache = true;
+        loaded_from_cache = tryLoadAutoParameters(method);
+        loading_from_cache = false;
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::param("loaded_from_cache", loaded_from_cache ? "true" : "false");
+        }
+
+        // If we loaded from cache successfully, we're done (tryLoadAutoParameters already called setParameter recursively)
+        if (loaded_from_cache) {
+            return;
+        }
+    } else {
+        // Claude Generated (Dec 2025): Diagnostic warnings for caching issues
+        if (!m_enable_caching && CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::warn("Parameter caching is disabled - parameters will be regenerated");
+        }
+        if (m_auto_param_file.empty() && m_enable_caching && CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::warn("No geometry_file provided - automatic caching disabled");
+        }
+    }
+
+    // Claude Generated: Recursion guard - prevents infinite loops from nested setParameter calls
+    if (m_in_setParameter) {
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::warn("Recursive setParameter call detected - preventing infinite loop");
+        }
+        return;
+    }
+    m_in_setParameter = true;
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("Initializing force field parameters");
@@ -131,20 +167,6 @@ void ForceField::setParameter(const json& parameters)
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Force field setup: parameters validated");
-    }
-
-    bool loaded_from_cache = false;
-
-    // Try loading cached parameters if caching enabled and same method
-    if (m_enable_caching && parameters.contains("method")) {
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("Attempting to load cached parameters");
-        }
-        std::string method = parameters["method"];
-        loaded_from_cache = tryLoadAutoParameters(method);
-        if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::param("loaded_from_cache", loaded_from_cache ? "true" : "false");
-        }
     }
 
     if (!loaded_from_cache) {
@@ -191,6 +213,10 @@ void ForceField::setParameter(const json& parameters)
             setGFNFFHydrogenBonds(parameters["gfnff_hbonds"]);
         if (parameters.contains("gfnff_xbonds"))
             setGFNFFHalogenBonds(parameters["gfnff_xbonds"]);
+
+        // ATM three-body dispersion (D3/D4)
+        if (parameters.contains("atm_triples"))
+            setATMTriples(parameters["atm_triples"]);
 
         m_parameters = parameters;
         m_method = m_parameters["method"];
@@ -767,6 +793,41 @@ void ForceField::setGFNFFHalogenBonds(const json& xbonds)
     }
 }
 
+void ForceField::setATMTriples(const json& triples)
+{
+    // Claude Generated (2025): ATM three-body dispersion parameter loader
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setATMTriples: Loading {} ATM triples", triples.size()));
+    }
+
+    m_atm_triples.clear();
+    for (const auto& t : triples) {
+        ATMTriple triple;
+
+        triple.i = t["i"];
+        triple.j = t["j"];
+        triple.k = t["k"];
+
+        triple.C6_ij = t["C6_ij"];
+        triple.C6_ik = t["C6_ik"];
+        triple.C6_jk = t["C6_jk"];
+
+        triple.s9 = t["s9"];
+        triple.a1 = t["a1"];
+        triple.a2 = t["a2"];
+        triple.alp = t["alp"];
+
+        triple.atm_method = t["atm_method"];
+        triple.triple_scale = t["triple_scale"];
+
+        m_atm_triples.push_back(triple);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success(fmt::format("Loaded {} ATM three-body triples", triples.size()));
+    }
+}
+
 void ForceField::setESPs(const json& esps)
 {
     m_EQs.clear();
@@ -967,6 +1028,28 @@ void ForceField::AutoRanges()
             }
         }
 
+        // ATM three-body dispersion (D3/D4)
+        // Distribute ATM triples to threads for parallel calculation
+        if (!m_atm_triples.empty()) {
+            // Use sum-based distribution for triples (similar to HB/XB pattern)
+            for (const auto& triple : m_atm_triples) {
+                int thread_id = (triple.i + triple.j + triple.k) % thread_count;
+                if (thread_id == i) {
+                    thread->addATMTriple(triple);
+                }
+            }
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                int atm_count = 0;
+                for (const auto& triple : m_atm_triples) {
+                    if ((triple.i + triple.j + triple.k) % thread_count == i) {
+                        atm_count++;
+                    }
+                }
+                CurcumaLogger::param(fmt::format("thread_{}_atm_triples", i), atm_count);
+            }
+        }
+
         for (int j = int(i * m_EQs.size() / double(free_threads)); j < int((i + 1) * m_EQs.size() / double(free_threads)); ++j)
             thread->addEQ(m_EQs[j]);
     }
@@ -1053,6 +1136,39 @@ bool ForceField::loadParametersFromFile(const std::string& filename)
             CurcumaLogger::param("method", loaded_params["method"].get<std::string>());
             CurcumaLogger::param("bonds", static_cast<int>(loaded_params["bonds"].size()));
             CurcumaLogger::param("angles", static_cast<int>(loaded_params["angles"].size()));
+
+            // Claude Generated (December 2025): Additional validation for GFN-FF/D4 parameters
+            std::string method = loaded_params["method"].get<std::string>();
+            if (method == "cgfnff" || method == "gfnff") {
+                if (loaded_params.contains("gfnff_dispersions")) {
+                    CurcumaLogger::param("gfnff_dispersions", static_cast<int>(loaded_params["gfnff_dispersions"].size()));
+                }
+                if (loaded_params.contains("gfnff_coulombs")) {
+                    CurcumaLogger::param("gfnff_coulombs", static_cast<int>(loaded_params["gfnff_coulombs"].size()));
+                }
+                if (loaded_params.contains("gfnff_bonded_repulsions")) {
+                    CurcumaLogger::param("gfnff_bonded_repulsions", static_cast<int>(loaded_params["gfnff_bonded_repulsions"].size()));
+                }
+                if (loaded_params.contains("gfnff_nonbonded_repulsions")) {
+                    CurcumaLogger::param("gfnff_nonbonded_repulsions", static_cast<int>(loaded_params["gfnff_nonbonded_repulsions"].size()));
+                }
+                if (loaded_params.contains("gfnff_hbonds")) {
+                    CurcumaLogger::param("gfnff_hbonds", static_cast<int>(loaded_params["gfnff_hbonds"].size()));
+                }
+                if (loaded_params.contains("gfnff_xbonds")) {
+                    CurcumaLogger::param("gfnff_xbonds", static_cast<int>(loaded_params["gfnff_xbonds"].size()));
+                }
+            }
+
+            // D4 dispersion parameter info
+            if (loaded_params.contains("d4_dispersion_pairs")) {
+                CurcumaLogger::param("d4_dispersion_pairs", static_cast<int>(loaded_params["d4_dispersion_pairs"].size()));
+            }
+
+            // ATM triple info (universal)
+            if (loaded_params.contains("atm_triples")) {
+                CurcumaLogger::param("atm_triples", static_cast<int>(loaded_params["atm_triples"].size()));
+            }
         }
 
         return true;
@@ -1179,6 +1295,157 @@ json ForceField::exportCurrentParameters() const
         output["d3_enabled"] = m_parameters["d3_enabled"];
     }
 
+    // Claude Generated (December 2025): Export GFN-FF specific parameters if present
+    if (!m_gfnff_dispersions.empty()) {
+        json gfnff_disp = json::array();
+        for (const auto& disp : m_gfnff_dispersions) {
+            json d;
+            d["i"] = disp.i;
+            d["j"] = disp.j;
+            d["C6"] = disp.C6;
+            d["C8"] = disp.C8;
+            d["r_cut"] = disp.r_cut;
+            d["s6"] = disp.s6;
+            d["s8"] = disp.s8;
+            d["a1"] = disp.a1;
+            d["a2"] = disp.a2;
+            gfnff_disp.push_back(d);
+        }
+        output["gfnff_dispersions"] = gfnff_disp;
+    }
+
+    // Claude Generated (December 2025): Export GFN-FF repulsions
+    if (!m_gfnff_bonded_repulsions.empty()) {
+        json bonded_rep = json::array();
+        for (const auto& rep : m_gfnff_bonded_repulsions) {
+            json r;
+            r["i"] = rep.i;
+            r["j"] = rep.j;
+            r["alpha"] = rep.alpha;
+            r["repab"] = rep.repab;
+            r["r_cut"] = rep.r_cut;
+            bonded_rep.push_back(r);
+        }
+        output["gfnff_bonded_repulsions"] = bonded_rep;
+    }
+
+    if (!m_gfnff_nonbonded_repulsions.empty()) {
+        json nonbonded_rep = json::array();
+        for (const auto& rep : m_gfnff_nonbonded_repulsions) {
+            json r;
+            r["i"] = rep.i;
+            r["j"] = rep.j;
+            r["alpha"] = rep.alpha;
+            r["repab"] = rep.repab;
+            r["r_cut"] = rep.r_cut;
+            nonbonded_rep.push_back(r);
+        }
+        output["gfnff_nonbonded_repulsions"] = nonbonded_rep;
+    }
+
+    // Claude Generated (December 2025): Export GFN-FF Coulomb parameters
+    if (!m_gfnff_coulombs.empty()) {
+        json coulombs = json::array();
+        for (const auto& coul : m_gfnff_coulombs) {
+            json c;
+            c["i"] = coul.i;
+            c["j"] = coul.j;
+            c["q_i"] = coul.q_i;
+            c["q_j"] = coul.q_j;
+            c["gamma_ij"] = coul.gamma_ij;
+            c["chi_i"] = coul.chi_i;
+            c["chi_j"] = coul.chi_j;
+            c["gam_i"] = coul.gam_i;
+            c["gam_j"] = coul.gam_j;
+            c["alp_i"] = coul.alp_i;
+            c["alp_j"] = coul.alp_j;
+            c["r_cut"] = coul.r_cut;
+            coulombs.push_back(c);
+        }
+        output["gfnff_coulombs"] = coulombs;
+    }
+
+    // Claude Generated (December 2025): Export GFN-FF hydrogen bonds
+    if (!m_gfnff_hbonds.empty()) {
+        json hbonds = json::array();
+        for (const auto& hb : m_gfnff_hbonds) {
+            json h;
+            h["i"] = hb.i;
+            h["j"] = hb.j;
+            h["k"] = hb.k;
+            h["basicity_A"] = hb.basicity_A;
+            h["basicity_B"] = hb.basicity_B;
+            h["acidity_A"] = hb.acidity_A;
+            h["q_H"] = hb.q_H;
+            h["q_A"] = hb.q_A;
+            h["q_B"] = hb.q_B;
+            h["r_cut"] = hb.r_cut;
+            h["case_type"] = hb.case_type;
+            h["neighbors_B"] = hb.neighbors_B;
+            hbonds.push_back(h);
+        }
+        output["gfnff_hbonds"] = hbonds;
+    }
+
+    // Claude Generated (December 2025): Export GFN-FF halogen bonds
+    if (!m_gfnff_xbonds.empty()) {
+        json xbonds = json::array();
+        for (const auto& xb : m_gfnff_xbonds) {
+            json x;
+            x["i"] = xb.i;
+            x["j"] = xb.j;
+            x["k"] = xb.k;
+            x["basicity_B"] = xb.basicity_B;
+            x["acidity_X"] = xb.acidity_X;
+            x["q_X"] = xb.q_X;
+            x["q_B"] = xb.q_B;
+            x["r_cut"] = xb.r_cut;
+            xbonds.push_back(x);
+        }
+        output["gfnff_xbonds"] = xbonds;
+    }
+
+    // Claude Generated (December 2025): Export D4 dispersion parameters
+    if (!m_d4_dispersions.empty()) {
+        json d4_disp = json::array();
+        for (const auto& disp : m_d4_dispersions) {
+            json d;
+            d["i"] = disp.i;
+            d["j"] = disp.j;
+            d["C6"] = disp.C6;
+            d["C8"] = disp.C8;
+            d["r_cut"] = disp.r_cut;
+            d["s6"] = disp.s6;
+            d["s8"] = disp.s8;
+            d["a1"] = disp.a1;
+            d["a2"] = disp.a2;
+            d4_disp.push_back(d);
+        }
+        output["d4_dispersion_pairs"] = d4_disp;
+    }
+
+    // Claude Generated (December 2025): Export ATM triples (universal for D3 and D4)
+    if (!m_atm_triples.empty()) {
+        json atm = json::array();
+        for (const auto& triple : m_atm_triples) {
+            json t;
+            t["i"] = triple.i;
+            t["j"] = triple.j;
+            t["k"] = triple.k;
+            t["C6_ij"] = triple.C6_ij;
+            t["C6_ik"] = triple.C6_ik;
+            t["C6_jk"] = triple.C6_jk;
+            t["s9"] = triple.s9;
+            t["a1"] = triple.a1;
+            t["a2"] = triple.a2;
+            t["alp"] = triple.alp;
+            t["atm_method"] = triple.atm_method;
+            t["triple_scale"] = triple.triple_scale;
+            atm.push_back(t);
+        }
+        output["atm_triples"] = atm;
+    }
+
     // Add metadata
     output["generated_by"] = "curcuma_forcefield";
     output["timestamp"] = std::chrono::system_clock::now().time_since_epoch().count();
@@ -1228,7 +1495,8 @@ bool ForceField::tryLoadAutoParameters(const std::string& method)
     if (m_parameters.contains("method") && !m_parameters["method"].is_null()) {
         std::string cached_method = m_parameters["method"].get<std::string>();
         if (cached_method == method) {
-            if (CurcumaLogger::get_verbosity() >= 2) {
+            // Claude Generated (Dec 2025): Show cache success at verbosity ≥1 (important user info)
+            if (CurcumaLogger::get_verbosity() >= 1) {
                 CurcumaLogger::success(fmt::format("Loaded cached {} parameters from: {}", method, m_auto_param_file));
             }
             return true;

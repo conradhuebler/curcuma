@@ -141,6 +141,9 @@ private:
     double interpolateC6(int elem_i, int elem_j, double cn_i, double cn_j) const;
     double calculateDistance(int i, int j, const Eigen::MatrixXd& geometry) const;
 
+    // ATM three-body helper (Claude Generated 2025)
+    double calculateTripleScale(int i, int j, int k) const;
+
     // Reference data lookup methods
     double getC6Coefficient(int elem1, int elem2, double cn1, double cn2) const;
     int getElementPairIndex(int elem1, int elem2) const;

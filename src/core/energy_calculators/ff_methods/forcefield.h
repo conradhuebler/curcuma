@@ -141,6 +141,9 @@ private:
     void setGFNFFHydrogenBonds(const json& hbonds);
     void setGFNFFHalogenBonds(const json& xbonds);
 
+    // ATM three-body dispersion parameter setter (Claude Generated 2025)
+    void setATMTriples(const json& triples);
+
     // Claude Generated: Energy component storage for regression testing (Nov 2025)
     double m_bond_energy = 0.0;
     double m_angle_energy = 0.0;
@@ -181,6 +184,9 @@ private:
     // Phase 3: GFN-FF hydrogen bond and halogen bond storage (Claude Generated 2025)
     std::vector<GFNFFHydrogenBond> m_gfnff_hbonds;
     std::vector<GFNFFHalogenBond> m_gfnff_xbonds;
+
+    // ATM three-body dispersion storage (D3/D4)
+    std::vector<ATMTriple> m_atm_triples;
 
     json m_parameters;
     std::string m_auto_param_file; // Auto-detected parameter file path

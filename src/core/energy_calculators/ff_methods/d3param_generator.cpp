@@ -291,6 +291,69 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     m_parameters["d3_enabled"] = true;
     m_parameters["d3_reference"] = m_config.get<int>("d3_ref", 0);
 
+    // Phase 2.3 (December 2025): ATM three-body dispersion
+    // Reference: external/cpp-d4/src/damping/atm.cpp:70-138
+    json atm_triples = json::array();
+
+    if (m_config.get<double>("d3_s9", 0.0) > 1e-10) {
+        double s9 = m_config.get<double>("d3_s9", 1.0);
+        double a1 = m_config.get<double>("d3_a1", 0.40);
+        double a2 = m_config.get<double>("d3_a2", 4.20);
+        double alp = m_config.get<double>("d3_alp", 14.0);
+
+        int n_atoms = static_cast<int>(m_atoms.size());
+
+        for (int i = 0; i < n_atoms; ++i) {
+            for (int j = 0; j < i; ++j) {
+                for (int k = 0; k < j; ++k) {
+                    json triple;
+                    triple["i"] = i;
+                    triple["j"] = j;
+                    triple["k"] = k;
+
+                    // C6 from pairwise D3 coefficients (already computed)
+                    // Need to look up from the generated dispersion pairs
+                    double c6_ij = 0.0, c6_ik = 0.0, c6_jk = 0.0;
+
+                    // Extract C6 values from generated dispersion pairs
+                    for (const auto& pair : dispersion_pairs) {
+                        int pi = pair["i"];
+                        int pj = pair["j"];
+                        double c6 = pair["c6"];
+
+                        if ((pi == i && pj == j) || (pi == j && pj == i)) {
+                            c6_ij = c6;
+                        } else if ((pi == i && pj == k) || (pi == k && pj == i)) {
+                            c6_ik = c6;
+                        } else if ((pi == j && pj == k) || (pi == k && pj == j)) {
+                            c6_jk = c6;
+                        }
+                    }
+
+                    triple["C6_ij"] = c6_ij;
+                    triple["C6_ik"] = c6_ik;
+                    triple["C6_jk"] = c6_jk;
+                    triple["s9"] = s9;
+                    triple["a1"] = a1;
+                    triple["a2"] = a2;
+                    triple["alp"] = alp;
+                    triple["atm_method"] = "d3";
+
+                    // Symmetry factor
+                    triple["triple_scale"] = calculateTripleScale(i, j, k);
+
+                    atm_triples.push_back(triple);
+                }
+            }
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param("Generated D3 ATM triples", static_cast<int>(atm_triples.size()));
+        }
+    }
+
+    m_parameters["atm_triples"] = atm_triples;
+
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success("D3 parameter generation completed");
     }
@@ -763,3 +826,13 @@ double D3ParameterGenerator::getTotalEnergy() const
     return energy;
 }
 
+// Claude Generated (2025): ATM three-body symmetry factor calculation
+double D3ParameterGenerator::calculateTripleScale(int i, int j, int k) const
+{
+    // Reference: external/cpp-d4/src/damping/atm.cpp:291-313
+    if (i == j) {
+        return (i == k) ? 1.0/6.0 : 0.5;  // iii: 1/6, iij: 1/2
+    } else {
+        return (i != k && j != k) ? 1.0 : 0.5;  // ijk: 1, ijj/iji: 1/2
+    }
+}

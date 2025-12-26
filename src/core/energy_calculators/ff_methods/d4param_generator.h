@@ -39,6 +39,7 @@ BEGIN_PARAMETER_DEFINITION(d4param)
     PARAM(d4_s8, Double, 1.0, "D4 global scaling factor for C8 term.", "Scaling", {})
     PARAM(d4_s10, Double, 1.0, "D4 global scaling factor for C10 term.", "Scaling", {})
     PARAM(d4_s12, Double, 1.0, "D4 global scaling factor for C12 term.", "Scaling", {})
+    PARAM(d4_s9, Double, 1.0, "D4 scaling for three-body ATM term (default: enabled).", "Scaling", {})
     PARAM(d4_a1, Double, 0.44, "D4 damping parameter a1 (GFN-FF: 0.44, GFN2-xTB: 0.63).", "Damping", {})
     PARAM(d4_a2, Double, 4.60, "D4 damping parameter a2 (Bohr) - GFN-FF: 4.60, GFN2-xTB: 5.0.", "Damping", {})
     PARAM(d4_alp, Double, 14.0, "D4 alpha damping parameter.", "Damping", {})
@@ -72,6 +73,9 @@ private:
     // NEW: Charge-weighted C6 using EEQ charges and Gaussian weighting (Dec 2025)
     // Phase 2.2 (December 2025): CN+charge combined weighting
     double getChargeWeightedC6(int Zi, int Zj, int atom_i, int atom_j) const;
+
+    // ATM three-body helper (Claude Generated 2025)
+    double calculateTripleScale(int i, int j, int k) const;
 
     // Reference data from GFN-FF Fortran implementation
     static const int MAX_ELEM = 118;

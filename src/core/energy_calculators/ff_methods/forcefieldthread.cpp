@@ -135,6 +135,14 @@ int ForceFieldThread::execute()
             CalculateD4DispersionContribution();  // Claude Generated - Dec 25, 2025: Native D4 energy calculation
         }
 
+        // ATM three-body dispersion (D3/D4)
+        if (!m_atm_triples.empty()) {
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("Thread {} calculating {} ATM triples", m_thread, m_atm_triples.size()));
+            }
+            CalculateATMContribution();
+        }
+
     } else if (m_method == 1) {
         // UFF bonded terms calculated above (bonds, angles)
         // Now add UFF non-bonded terms
@@ -284,6 +292,11 @@ void ForceFieldThread::addGFNFFHydrogenBond(const GFNFFHydrogenBond& hbond)
 void ForceFieldThread::addGFNFFHalogenBond(const GFNFFHalogenBond& xbond)
 {
     m_gfnff_xbonds.push_back(xbond);
+}
+
+void ForceFieldThread::addATMTriple(const ATMTriple& triple)
+{
+    m_atm_triples.push_back(triple);
 }
 
 void ForceFieldThread::CalculateUFFBondContribution()
@@ -2041,4 +2054,104 @@ void ForceFieldThread::addD3Dispersion(const GFNFFDispersion& d3_dispersion)
 void ForceFieldThread::addD4Dispersion(const GFNFFDispersion& d4_dispersion)
 {
     m_d4_dispersions.push_back(d4_dispersion);
+}
+
+// ============================================================================
+// Claude Generated (2025): ATM Three-Body Dispersion Calculation
+// ============================================================================
+
+void ForceFieldThread::CalculateATMContribution()
+{
+    /**
+     * @brief Calculate ATM (Axilrod-Teller-Muto) three-body dispersion
+     *
+     * Reference: external/cpp-d4/src/damping/atm.cpp:70-138
+     * Formula: E_ATM = sum_{i<j<k} ang * fdmp * C9 / 3 * triple_scale
+     *
+     * C9 = s9 * sqrt(|C6_ij * C6_ik * C6_jk|)
+     * fdmp = 1 / (1 + 6 * (r0_ijk / r_ijk)^(alp/3))
+     * ang = (0.375 * A * B * C / r²_ijk + 1) / r³_ijk
+     *
+     * Shared by D3 and D4 (only C6 source differs)
+     *
+     * Claude Generated (2025): ATM three-body dispersion
+     */
+
+    using namespace GFNFFParameters;
+
+    if (CurcumaLogger::get_verbosity() >= 3 && m_atm_triples.size() > 0) {
+        CurcumaLogger::info(fmt::format("Thread {} calculating {} ATM triples",
+                                        m_thread, m_atm_triples.size()));
+    }
+
+    double total_atm_energy = 0.0;
+
+    for (const auto& triple : m_atm_triples) {
+        // Get atom positions
+        Eigen::Vector3d pos_i = m_geometry.row(triple.i).transpose();
+        Eigen::Vector3d pos_j = m_geometry.row(triple.j).transpose();
+        Eigen::Vector3d pos_k = m_geometry.row(triple.k).transpose();
+
+        // Calculate distances
+        double rij = (pos_i - pos_j).norm();
+        double rik = (pos_i - pos_k).norm();
+        double rjk = (pos_j - pos_k).norm();
+
+        double r2ij = rij * rij;
+        double r2ik = rik * rik;
+        double r2jk = rjk * rjk;
+
+        // C9 coefficient: s9 * sqrt(|C6_ij * C6_ik * C6_jk|)
+        double c9 = triple.s9 * std::sqrt(std::fabs(triple.C6_ij * triple.C6_ik * triple.C6_jk));
+
+        // Get atomic numbers and covalent radii
+        int zi = m_atom_types[triple.i];
+        int zj = m_atom_types[triple.j];
+        int zk = m_atom_types[triple.k];
+
+        // r0 cutoff radii (BJ damping formula)
+        // r0_xy = a1 * sqrt(3 * R_cov[X] * R_cov[Y]) + a2
+        // Use rcov_bohr from GFNFFParameters namespace (0-indexed)
+        double r_cov_i = (zi > 0 && zi <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zi - 1] : 1.0;
+        double r_cov_j = (zj > 0 && zj <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zj - 1] : 1.0;
+        double r_cov_k = (zk > 0 && zk <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zk - 1] : 1.0;
+
+        double r0ij = triple.a1 * std::sqrt(3.0 * r_cov_i * r_cov_j) + triple.a2;
+        double r0ik = triple.a1 * std::sqrt(3.0 * r_cov_i * r_cov_k) + triple.a2;
+        double r0jk = triple.a1 * std::sqrt(3.0 * r_cov_j * r_cov_k) + triple.a2;
+        double r0ijk = r0ij * r0ik * r0jk;
+
+        // Distance products
+        double rijk = rij * rik * rjk;
+        double r2ijk = r2ij * r2ik * r2jk;
+        double r3ijk = rijk * r2ijk;
+
+        // BJ damping function
+        double fdmp = 1.0 / (1.0 + 6.0 * std::pow(r0ijk / rijk, triple.alp / 3.0));
+
+        // Angular term
+        // ang = (0.375 * (r²_ij + r²_jk - r²_ik) * (r²_ij + r²_ik - r²_jk) *
+        //                (r²_ik + r²_jk - r²_ij) / r²_ijk + 1) / r³_ijk
+        double A = (r2ij + r2jk - r2ik);
+        double B = (r2ij + r2ik - r2jk);
+        double C = (r2ik + r2jk - r2ij);
+        double ang = (0.375 * A * B * C / r2ijk + 1.0) / r3ijk;
+
+        // Energy contribution
+        double e_atm = ang * fdmp * c9 / 3.0 * triple.triple_scale;
+
+        // Distribute energy equally among three atoms
+        total_atm_energy += e_atm;
+        m_energy += e_atm / 3.0;
+
+        if (CurcumaLogger::get_verbosity() >= 4) {
+            CurcumaLogger::info(fmt::format(
+                "ATM({},{},{}): rij={:.4f} rik={:.4f} rjk={:.4f} C9={:.6f} E={:.6e} Eh",
+                triple.i, triple.j, triple.k, rij, rik, rjk, c9, e_atm));
+        }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3 && m_atm_triples.size() > 0) {
+        CurcumaLogger::param("thread_atm_energy", fmt::format("{:.6f} Eh", total_atm_energy));
+    }
 }

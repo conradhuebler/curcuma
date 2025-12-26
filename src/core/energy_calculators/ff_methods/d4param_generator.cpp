@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 // External declarations from d4_reference_cn.cpp (cpp-d4 CN data - December 2025 Phase 1)
 extern const std::vector<std::vector<double>> D4ReferenceData::refcn_cppd4;
@@ -341,6 +342,35 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
         CurcumaLogger::param("Generated D4 pairs", static_cast<int>(dispersion_pairs.size()));
     }
 
+    // Summary of C6 distribution (verbosity 2) - Fix 2
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        double c6_min = std::numeric_limits<double>::max();
+        double c6_max = 0.0;
+        double c6_avg = 0.0;
+        int zero_count = 0;
+
+        for (const auto& pair : dispersion_pairs) {
+            double c6 = pair["C6"];
+            if (c6 < 1e-10) {
+                zero_count++;
+                if (CurcumaLogger::get_verbosity() >= 3) {
+                    CurcumaLogger::warn(fmt::format("Zero C6 for pair [{},{}] (Zi={} Zj={})",
+                        static_cast<int>(pair["i"]), static_cast<int>(pair["j"]),
+                        static_cast<int>(pair["element_i"]), static_cast<int>(pair["element_j"])));
+                }
+            }
+            c6_min = std::min(c6_min, c6);
+            c6_max = std::max(c6_max, c6);
+            c6_avg += c6;
+        }
+
+        if (!dispersion_pairs.empty()) {
+            c6_avg /= dispersion_pairs.size();
+            CurcumaLogger::success(fmt::format("D4 C6: {:.0f} pairs, avg={:.4f}, min={:.4f}, max={:.4f}, zeros={}",
+                dispersion_pairs.size(), c6_avg, c6_min, c6_max, zero_count));
+        }
+    }
+
     m_parameters["d4_dispersion_pairs"] = dispersion_pairs;
     m_parameters["d4_damping"] = {
         {"a1", m_config.get<double>("d4_a1", 0.44)},  // GFN-FF D4 (Spicher/Grimme 2020)
@@ -350,6 +380,59 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     m_parameters["d4_enabled"] = true;
     m_parameters["d4_refq"] = m_config.get<int>("d4_refq", 2); // Hirshfeld charges default
     m_parameters["d4_r4r2_model"] = m_config.get<int>("d4_r4r2_model", 1);
+
+    // Phase 2.4 (December 2025): D4 ATM three-body dispersion
+    // Same formula as D3, but uses charge-weighted C6 coefficients
+    json atm_triples = json::array();
+
+    if (m_config.get<double>("d4_s9", 0.0) > 1e-10) {
+        double s9 = m_config.get<double>("d4_s9", 1.0);
+        double a1 = m_config.get<double>("d4_a1", 0.44);
+        double a2 = m_config.get<double>("d4_a2", 4.60);
+        double alp = m_config.get<double>("d4_alp", 14.0);
+
+        int n_atoms = static_cast<int>(m_atoms.size());
+
+        for (int i = 0; i < n_atoms; ++i) {
+            for (int j = 0; j < i; ++j) {
+                for (int k = 0; k < j; ++k) {
+                    json triple;
+                    triple["i"] = i;
+                    triple["j"] = j;
+                    triple["k"] = k;
+
+                    // C6 from charge-weighted D4 coefficients
+                    int Zi = m_atoms[i];
+                    int Zj = m_atoms[j];
+                    int Zk = m_atoms[k];
+
+                    double c6_ij = getChargeWeightedC6(Zi, Zj, i, j);
+                    double c6_ik = getChargeWeightedC6(Zi, Zk, i, k);
+                    double c6_jk = getChargeWeightedC6(Zj, Zk, j, k);
+
+                    triple["C6_ij"] = c6_ij;
+                    triple["C6_ik"] = c6_ik;
+                    triple["C6_jk"] = c6_jk;
+                    triple["s9"] = s9;
+                    triple["a1"] = a1;
+                    triple["a2"] = a2;
+                    triple["alp"] = alp;
+                    triple["atm_method"] = "d4";
+
+                    // Symmetry factor (same as D3)
+                    triple["triple_scale"] = calculateTripleScale(i, j, k);
+
+                    atm_triples.push_back(triple);
+                }
+            }
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param("Generated D4 ATM triples", static_cast<int>(atm_triples.size()));
+        }
+    }
+
+    m_parameters["atm_triples"] = atm_triples;
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success("D4 parameter generation completed");
@@ -542,6 +625,9 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, int atom_i, int
 
             double c6_ref = 0.0;
 
+            // Debug: Track negative corrections for this reference state pair (Fix 3)
+            bool negative_detected = false;
+
             // Check if we have frequency-dependent polarizabilities for both elements
             // Use d4_alphaiw_data (complete data from Fortran extraction - Dec 25, 2025)
             if (elem_i < static_cast<int>(d4_alphaiw_data.size()) &&
@@ -596,6 +682,11 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, int atom_i, int
                     double alpha_j_iw = ascale_j * (alphaiw_j_iw - hcount_j * sscale_j * secaiw_j_iw);
                     double alpha_j_next = ascale_j * (alphaiw_j_next - hcount_j * sscale_j * secaiw_j_next);
 
+                    // DEBUG: Detect negative corrections before clamping (Fix 3)
+                    if (alpha_i_iw < 0 || alpha_i_next < 0 || alpha_j_iw < 0 || alpha_j_next < 0) {
+                        negative_detected = true;
+                    }
+
                     // Ensure non-negative (as per Fortran: max(correction, 0.0))
                     alpha_i_iw = std::max(alpha_i_iw, 0.0);
                     alpha_i_next = std::max(alpha_i_next, 0.0);
@@ -625,13 +716,31 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, int atom_i, int
 
             // Add weighted contribution
             c6_weighted += wi * wj * c6_ref;
+
+            // Warning for negative correction clamping (Fix 3)
+            if (CurcumaLogger::get_verbosity() >= 3 && negative_detected) {
+                CurcumaLogger::warn(fmt::format("Negative correction clamped: Zi={} Zj={}, refi={}, refj={}, c6={:.4f}",
+                                                 Zi, Zj, refi, refj, c6_ref));
+            }
         }
     }
 
+    // Fix 1: Simplified debug output at level 3 (using info which has threshold >= 2)
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::result(fmt::format("D4 C6 (CN+charge): Zi={} Zj={} qi={:.4f} qj={:.4f} cni={:.4f} cnj={:.4f} → C6={:.4f} (nref_i={}, nref_j={})",
-                                          Zi, Zj, qi, qj, cni, cnj, c6_weighted, nref_i, nref_j));
+        CurcumaLogger::info(fmt::format("D4 C6[{}][{}]: Zi={} Zj={} → C6={:.4f}",
+                                         atom_i, atom_j, Zi, Zj, c6_weighted));
     }
 
     return c6_weighted;
+}
+
+// Claude Generated (2025): ATM three-body symmetry factor calculation
+double D4ParameterGenerator::calculateTripleScale(int i, int j, int k) const
+{
+    // Reference: external/cpp-d4/src/damping/atm.cpp:291-313
+    if (i == j) {
+        return (i == k) ? 1.0/6.0 : 0.5;  // iii: 1/6, iij: 1/2
+    } else {
+        return (i != k && j != k) ? 1.0 : 0.5;  // ijk: 1, ijj/iji: 1/2
+    }
 }
