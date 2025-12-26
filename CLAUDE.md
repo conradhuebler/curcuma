@@ -50,6 +50,7 @@
 - **Documentation focus**: Emphasize *what* the code does scientifically, not just *how* it's structured
 - **Learning-oriented comments**: Include references to equations, papers, and theoretical background in code comments
 - **Method implementation clarity**: Each computational method should have a clear entry point with minimal indirection
+- **Accuracy:** 100 % with respect to referenz implementation for any scientific method
 
 #### Code Organization for Learning
 - **Flat over hierarchical**: Prefer simple, direct implementations over complex class hierarchies
