@@ -184,6 +184,9 @@ void CurcumaOpt::start()
             mol.setSpin(m_spin);
             m_molecules.push_back(mol);
         }
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::param("molecules_loaded", std::to_string(m_molecules.size()));
+        }
     }
     if (!m_serial)
         ProcessMolecules(m_molecules);
@@ -252,6 +255,11 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
 
 void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
 {
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::param("molecules_to_process", std::to_string(molecules.size()));
+        CurcumaLogger::param("single_point_mode", m_singlepoint ? "true" : "false");
+    }
+
     int threads = m_threads;
 
     CxxThreadPool* pool = new CxxThreadPool;
@@ -346,10 +354,15 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, std::string& output, Vec
         parameter(3 * i + 2) = geometry(i, 2);
     }
 
-    // Claude Generated: Silent parameter query to avoid confusing uff output when gfnff is requested
-    json silent_sp = m_controller["sp"];
-    silent_sp["verbosity"] = 0;  // Make parameter query silent
-    EnergyCalculator interface(method, silent_sp, Basename());
+    // Claude Generated (December 2025): Use actual verbosity for single point calculations
+    // For optimization, we set verbosity=0 in the iterative calculations
+    // But for single point, we want to show the energy
+    json sp_config = m_controller.contains("opt") ? m_controller["opt"] : m_controller;
+    if (!sp_config.contains("verbosity")) {
+        sp_config["verbosity"] = CurcumaLogger::get_verbosity();
+    }
+
+    EnergyCalculator interface(method, sp_config, Basename());
     interface.setMolecule(initial->getMolInfo());
     json param = interface.Parameter();
     double energy = interface.CalculateEnergy(false);

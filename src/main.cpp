@@ -490,6 +490,12 @@ int executeSinglePoint(const json& controller, int argc, char** argv) {
     json sp_controller = controller;
     json opt_params = sp_controller.contains("opt") ? sp_controller["opt"] : json{};
     opt_params["single_point"] = true;
+
+    // Claude Generated (December 2025): Set geometry_file for automatic parameter caching
+    std::string geometry_file(argv[2]);
+    opt_params["geometry_file"] = geometry_file;
+    sp_controller["geometry_file"] = geometry_file;  // Also set at top level for EnergyCalculator
+
     sp_controller["opt"] = opt_params;
 
     CurcumaOpt opt(sp_controller, false);
@@ -523,7 +529,12 @@ int executeOptimization(const json& controller, int argc, char** argv) {
         try {
             auto molecule = std::make_unique<Molecule>(argv[2]);
             std::string method = controller.value("method", "uff");
-            EnergyCalculator energy_calc(method, controller);
+
+            // Claude Generated (December 2025): Set geometry_file for automatic parameter caching
+            json energy_controller = controller;
+            energy_controller["geometry_file"] = std::string(argv[2]);
+
+            EnergyCalculator energy_calc(method, energy_controller);
             energy_calc.setMolecule(molecule->getMolInfo());
 
             // Claude Generated (October 2025): Merge with default opt parameters from ParameterRegistry
@@ -558,7 +569,14 @@ int executeOptimization(const json& controller, int argc, char** argv) {
     // Claude Generated 2025: Apply same parameter merging as modern optimizer to fix JSON null bug
     json legacy_controller = controller;
     json opt_defaults = ParameterRegistry::getInstance().getDefaultJson("opt");
-    legacy_controller["opt"] = MergeJson(opt_defaults, controller.contains("opt") ? controller["opt"] : json{});
+    json opt_params = MergeJson(opt_defaults, controller.contains("opt") ? controller["opt"] : json{});
+
+    // Claude Generated (December 2025): Set geometry_file for automatic parameter caching
+    std::string geometry_file(argv[2]);
+    opt_params["geometry_file"] = geometry_file;
+    legacy_controller["geometry_file"] = geometry_file;  // Also set at top level for EnergyCalculator
+
+    legacy_controller["opt"] = opt_params;
 
     CurcumaOpt opt(legacy_controller, false);
     opt.setFileName(argv[2]);
@@ -585,7 +603,11 @@ int executeConfScan(const json& controller, int argc, char** argv) {
     // 3. Handle global parameters (verbosity, threads)
     // No manual merging needed here!
 
-    auto* scan = new ConfScan(controller, false);  // Claude Generated: Explicit false for default verbosity level 1
+    // Claude Generated (December 2025): Set geometry_file for automatic parameter caching
+    json scan_controller = controller;
+    scan_controller["geometry_file"] = std::string(argv[2]);
+
+    auto* scan = new ConfScan(scan_controller, false);  // Claude Generated: Explicit false for default verbosity level 1
     scan->setFileName(argv[2]);
     scan->start();
     int accepted = scan->AcceptedCount();
@@ -603,7 +625,11 @@ int executeConfStat(const json& controller, int argc, char** argv) {
         return 1;
     }
 
-    auto* stat = new ConfStat(controller, false);  // Claude Generated: Explicit false for default verbosity level 1
+    // Claude Generated (December 2025): Set geometry_file for automatic parameter caching
+    json stat_controller = controller;
+    stat_controller["geometry_file"] = std::string(argv[2]);
+
+    auto* stat = new ConfStat(stat_controller, false);  // Claude Generated: Explicit false for default verbosity level 1
     stat->setFileName(argv[2]);
     stat->start();
     delete stat;
@@ -648,7 +674,11 @@ int executeSimpleMD(const json& controller, int argc, char** argv) {
     // 3. Handles alias resolution automatically
     // No manual merging needed here!
 
-    auto* md = new SimpleMD(controller, false);
+    // Claude Generated (December 2025): Set geometry_file for automatic parameter caching
+    json md_controller = controller;
+    md_controller["geometry_file"] = std::string(argv[2]);
+
+    auto* md = new SimpleMD(md_controller, false);
     md->setFile(argv[2]);  // Claude Generated (October 2025): Set basename for trajectory file naming
     md->setMolecule(mol);
     md->Initialise();
