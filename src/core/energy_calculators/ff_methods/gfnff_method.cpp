@@ -329,6 +329,14 @@ bool GFNFF::initializeForceField()
         { "method", "cgfnff" }  // Phase 3 LITE: Use "cgfnff" for caching
     };
 
+    // Claude Generated (December 2025): Add geometry_file for automatic parameter caching
+    if (m_parameters.contains("geometry_file")) {
+        ff_config["geometry_file"] = m_parameters["geometry_file"];
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param("geometry_file (for caching)", m_parameters["geometry_file"].get<std::string>());
+        }
+    }
+
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Creating ForceField instance...");
         CurcumaLogger::param("threads", std::to_string(m_parameters.value("threads", 1)));
@@ -351,7 +359,19 @@ bool GFNFF::initializeForceField()
         CurcumaLogger::success("ForceField instance created");
         CurcumaLogger::param("geometry_set", std::to_string(m_geometry_bohr.rows()) + " atoms");
         CurcumaLogger::warn("TEMPORARY: Parameter caching disabled for debugging");
-        CurcumaLogger::info("Calculating topology (bonds, angles, torsions, inversions)...");
+    }
+
+    // Claude Generated (Dec 26, 2025): Try loading from cache BEFORE expensive EEQ/topology calculation
+    // Note: Cache file stores method as "gfnff" regardless of wrapper (cgfnff/gfnff)
+    if (m_forcefield && m_forcefield->tryLoadAutoParameters("gfnff")) {
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::success("Loaded from cache - skipping EEQ/topology calculation");
+        }
+        return true;
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("Cache miss - calculating topology (bonds, angles, torsions, inversions)...");
     }
 
     if (!calculateTopology()) {
@@ -4484,4 +4504,3 @@ bool GFNFF::calculateFinalCharges(TopologyInfo& topo_info, int max_iterations,
 // DEPRECATED (Dec 2025 - Phase 3): Old calculateFinalCharges implementation (170 lines)
 // removed and replaced with delegation to EEQSolver above.
 // See eeq_solver.cpp for the extracted implementation.
-

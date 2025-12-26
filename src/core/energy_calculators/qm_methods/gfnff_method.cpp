@@ -33,6 +33,9 @@ bool GFNFFComputationalMethod::setMolecule(const Mol& mol) {
         return false;
     }
 
+    // Cache check is now done inside GFNFF::initializeForceField()
+    // where it has access to the ForceField instance
+
     if (!m_gfnff->InitialiseMolecule(mol)) {
         CurcumaLogger::error("GFNFFComputationalMethod: InitialiseMolecule failed");
         return false;
