@@ -16,6 +16,7 @@
 #include "src/core/molecule.h"
 #include "src/core/config_manager.h"
 #include "src/core/global.h"
+#include "src/core/curcuma_logger.h"
 #include "src/tools/formats.h"
 #include "core/test_molecule_registry.h"
 
@@ -31,7 +32,7 @@ using namespace TestMolecules;
 // ============================================================================
 
 const double GRADIENT_TOLERANCE = 1e-6;  // Hartree/Bohr - analytical vs numerical
-const double FINITE_DIFF_STEP = 1e-5;   // Bohr - finite difference step size
+const double FINITE_DIFF_STEP = 1e-6;   // Bohr - finite difference step size (reduced from 1e-5 for better accuracy)
 
 // ============================================================================
 // Numerical Gradient Calculation
@@ -85,10 +86,17 @@ bool testATMGradients_HCl() {
 
     std::cout << "  Atoms: " << atoms.size() << std::endl;
 
-    // Generate D3-ATM parameters
+    // Generate D3-ATM parameters with s9 enabled
     std::cout << "Generating D3-ATM parameters..." << std::endl;
 
-    ConfigManager d3_config("d3_dispersion", json{});
+    json d3_params_json = {
+        {"d3_s9", 1.0},      // Enable ATM 3-body correction
+        {"d3_a1", 0.4145},   // PBE0/BJ damping parameters
+        {"d3_a2", 4.8593},
+        {"d3_s8", 1.2177},
+        {"d3_s6", 1.0}
+    };
+    ConfigManager d3_config("d3param", d3_params_json);
     D3ParameterGenerator d3_gen(d3_config);
     d3_gen.GenerateParameters(atoms, geometry_bohr);
 
@@ -108,10 +116,11 @@ bool testATMGradients_HCl() {
     // Create ForceField with ATM parameters only (no other terms to isolate ATM)
     json ff_params = json{};
     ff_params["natoms"] = natoms;
-    ff_params["method"] = 3;  // GFN-FF method
+    ff_params["method"] = "cgfnff";  // GFN-FF method (string, not int!)
     ff_params["atm_triples"] = d3_params["atm_triples"];
 
     ForceField ff(ff_params);
+    ff.setParameterCaching(false);  // Disable caching for isolated ATM testing
     ff.setAtomTypes(atoms);
     ff.UpdateGeometry(geometry_bohr);
     ff.setParameter(ff_params);
@@ -192,10 +201,17 @@ bool testATMGradients_Methane() {
     int natoms = atoms.size();
     std::cout << "  Atoms: " << natoms << std::endl;
 
-    // Generate D3-ATM parameters
+    // Generate D3-ATM parameters with s9 enabled
     std::cout << "Generating D3-ATM parameters..." << std::endl;
 
-    ConfigManager d3_config("d3_dispersion", json{});
+    json d3_params_json = {
+        {"d3_s9", 1.0},      // Enable ATM 3-body correction
+        {"d3_a1", 0.4145},   // PBE0/BJ damping parameters
+        {"d3_a2", 4.8593},
+        {"d3_s8", 1.2177},
+        {"d3_s6", 1.0}
+    };
+    ConfigManager d3_config("d3param", d3_params_json);
     D3ParameterGenerator d3_gen(d3_config);
     d3_gen.GenerateParameters(atoms, geometry_bohr);
 
@@ -209,10 +225,11 @@ bool testATMGradients_Methane() {
     // Create ForceField with ATM parameters
     json ff_params = json{};
     ff_params["natoms"] = natoms;
-    ff_params["method"] = 3;  // GFN-FF method
+    ff_params["method"] = "gfnff";  // GFN-FF method (string, not int!)
     ff_params["atm_triples"] = d3_params["atm_triples"];
 
     ForceField ff(ff_params);
+    ff.setParameterCaching(false);  // Disable caching for isolated ATM testing
     ff.setAtomTypes(atoms);
     ff.UpdateGeometry(geometry_bohr);
     ff.setParameter(ff_params);
@@ -261,11 +278,129 @@ bool testATMGradients_Methane() {
     return passed && (translation_error < 1e-10);
 }
 
+bool testATMGradients_Monosaccharide() {
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "Test: Monosaccharide ATM Gradient Validation" << std::endl;
+    std::cout << "========================================" << std::endl;
+
+    // Get molecule from registry
+    Molecule mol = TestMoleculeRegistry::createMolecule("monosaccharide", false);  // Angstrom
+    std::vector<int> atoms = mol.Atoms();
+    Matrix geometry_bohr = mol.getGeometry() * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
+
+    int natoms = atoms.size();
+    std::cout << "  Atoms: " << natoms << std::endl;
+
+    // Generate D3-ATM parameters with s9 enabled
+    std::cout << "Generating D3-ATM parameters..." << std::endl;
+
+    json d3_params_json = {
+        {"d3_s9", 1.0},      // Enable ATM 3-body correction
+        {"d3_a1", 0.4145},   // PBE0/BJ damping parameters
+        {"d3_a2", 4.8593},
+        {"d3_s8", 1.2177},
+        {"d3_s6", 1.0}
+    };
+    ConfigManager d3_config("d3param", d3_params_json);
+    D3ParameterGenerator d3_gen(d3_config);
+    d3_gen.GenerateParameters(atoms, geometry_bohr);
+
+    json d3_params = d3_gen.getParameters();
+
+    int num_triples = d3_params["atm_triples"].size();
+    int expected_triples = (natoms * (natoms - 1) * (natoms - 2)) / 6;  // C(n,3)
+    std::cout << "  ATM triples generated: " << num_triples << std::endl;
+    std::cout << "  Expected: " << expected_triples << " (for " << natoms << " atoms: C(" << natoms << ",3))" << std::endl;
+
+    // Verify triple count
+    if (num_triples != expected_triples) {
+        std::cerr << "ERROR: Triple count mismatch!" << std::endl;
+        return false;
+    }
+
+    // Create ForceField with ATM parameters
+    json ff_params = json{};
+    ff_params["natoms"] = natoms;
+    ff_params["method"] = "gfnff";  // GFN-FF method (string, not int!)
+    ff_params["atm_triples"] = d3_params["atm_triples"];
+
+    ForceField ff(ff_params);
+    ff.setParameterCaching(false);  // Disable caching for isolated ATM testing
+    ff.setAtomTypes(atoms);
+    ff.UpdateGeometry(geometry_bohr);
+    ff.setParameter(ff_params);
+
+    std::cout << "\nCalculating analytical ATM gradient..." << std::endl;
+    double E_analytical = ff.Calculate(true);
+    Matrix analytical_gradient = ff.Gradient();
+
+    std::cout << "  ATM Energy: " << std::scientific << std::setprecision(10)
+              << E_analytical << " Eh" << std::endl;
+
+    std::cout << "\nCalculating numerical gradient (finite differences)..." << std::endl;
+    std::cout << "  This will take ~2-5 minutes (163 Calculate() calls, 2925 triples each)..." << std::endl;
+    Matrix numerical_gradient = calculateNumericalGradient(ff, geometry_bohr);
+
+    // Compare gradients
+    std::cout << "\nGradient Comparison:" << std::endl;
+    double max_error = 0.0;
+    bool all_passed = true;
+
+    for (int i = 0; i < natoms; ++i) {
+        for (int coord = 0; coord < 3; ++coord) {
+            double analytical = analytical_gradient(i, coord);
+            double numerical = numerical_gradient(i, coord);
+            double diff = std::abs(analytical - numerical);
+
+            max_error = std::max(max_error, diff);
+
+            if (diff >= GRADIENT_TOLERANCE) {
+                all_passed = false;
+            }
+        }
+    }
+
+    std::cout << "  Maximum error: " << std::scientific << max_error << " Eh/Bohr" << std::endl;
+    std::cout << "  Tolerance: " << GRADIENT_TOLERANCE << " Eh/Bohr" << std::endl;
+    std::cout << "  Gradient accuracy: " << (all_passed ? "✓ PASS" : "✗ FAIL") << std::endl;
+
+    // Translational invariance check (sum of gradients should be zero)
+    Vector gradient_sum = analytical_gradient.colwise().sum();
+    double translation_error = gradient_sum.norm();
+
+    std::cout << "\nTranslational Invariance:" << std::endl;
+    std::cout << "  Sum of gradients: (" << std::scientific << std::setprecision(6)
+              << gradient_sum(0) << ", " << gradient_sum(1) << ", " << gradient_sum(2) << ")" << std::endl;
+    std::cout << "  Norm: " << translation_error << " Eh/Bohr" << std::endl;
+    std::cout << "  " << (translation_error < 1e-10 ? "✓ PASS" : "✗ FAIL") << std::endl;
+
+    std::cout << "\n========================================" << std::endl;
+    if (all_passed && translation_error < 1e-10) {
+        std::cout << "✓ Monosaccharide ATM Gradient Test PASSED" << std::endl;
+    } else {
+        std::cout << "✗ Monosaccharide ATM Gradient Test FAILED" << std::endl;
+        if (!all_passed) {
+            std::cout << "  Reason: Gradient accuracy below tolerance" << std::endl;
+        }
+        if (translation_error >= 1e-10) {
+            std::cout << "  Reason: Translational invariance violated" << std::endl;
+        }
+    }
+    std::cout << "========================================" << std::endl;
+
+    return all_passed && (translation_error < 1e-10);
+}
+
 // ============================================================================
 // Main
 // ============================================================================
 
 int main(int argc, char* argv[]) {
+    // Initialize CurcumaLogger with environment variable or default to 0
+    const char* env_verbosity = std::getenv("CUR_VERBOSITY");
+    int verbosity = env_verbosity ? std::atoi(env_verbosity) : 0;
+    CurcumaLogger::set_verbosity(verbosity);
+
     std::cout << "========================================" << std::endl;
     std::cout << "ATM 3-Body Dispersion Gradient Tests" << std::endl;
     std::cout << "========================================" << std::endl;
@@ -280,6 +415,9 @@ int main(int argc, char* argv[]) {
 
     // Test 2: Methane (5 atoms, 10 triples)
     all_passed = testATMGradients_Methane() && all_passed;
+
+    // Test 3: Monosaccharide (27 atoms, 2925 triples - large molecule test)
+    all_passed = testATMGradients_Monosaccharide() && all_passed;
 
     std::cout << "\n========================================" << std::endl;
     std::cout << "FINAL RESULT" << std::endl;

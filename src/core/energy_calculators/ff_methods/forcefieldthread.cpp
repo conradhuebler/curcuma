@@ -61,6 +61,7 @@ int ForceFieldThread::execute()
     // Claude Generated 2025: Reset native D3/D4 dispersion energy terms
     m_d3_energy = 0.0;
     m_d4_energy = 0.0;
+    m_atm_energy = 0.0;  // Claude Generated (Dec 2025): Reset ATM three-body dispersion
 
     // Phase 1.1: Guard debug output with verbosity check (Claude Generated - Dec 2025)
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -2145,9 +2146,9 @@ void ForceFieldThread::CalculateATMContribution()
         // Energy contribution
         double e_atm = ang * fdmp * c9 / 3.0 * triple.triple_scale;
 
-        // Distribute energy equally among three atoms
+        // Accumulate ATM energy
         total_atm_energy += e_atm;
-        m_energy += e_atm / 3.0;
+        m_atm_energy += e_atm;  // Claude Generated (Dec 2025): Store in dedicated member variable
 
         if (CurcumaLogger::get_verbosity() >= 4) {
             CurcumaLogger::info(fmt::format(
@@ -2157,7 +2158,7 @@ void ForceFieldThread::CalculateATMContribution()
     }
 
     if (CurcumaLogger::get_verbosity() >= 3 && m_atm_triples.size() > 0) {
-        CurcumaLogger::param("thread_atm_energy", fmt::format("{:.6f} Eh", total_atm_energy));
+        CurcumaLogger::param("thread_atm_energy", fmt::format("{:.6e} Eh", m_atm_energy));  // Claude Generated (Dec 2025): Use scientific notation
     }
 }
 
@@ -2210,8 +2211,9 @@ void ForceFieldThread::CalculateATMGradient()
         double r2ik = rik * rik;
         double r2jk = rjk * rjk;
 
-        // C9 coefficient: s9 * sqrt(|C6_ij * C6_ik * C6_jk|)
-        double c9 = triple.s9 * std::sqrt(std::fabs(triple.C6_ij * triple.C6_ik * triple.C6_jk));
+        // C9 coefficient: NEGATIVE for gradients! (cpp-d4:202, simple-dftd3:atm.f90:282)
+        // Energy uses +c9, gradient uses -c9 (dispersion is attractive)
+        double c9 = -triple.s9 * std::sqrt(std::fabs(triple.C6_ij * triple.C6_ik * triple.C6_jk));
 
         // Get atomic numbers and covalent radii
         int zi = m_atom_types[triple.i];
@@ -2237,7 +2239,7 @@ void ForceFieldThread::CalculateATMGradient()
         // BJ damping function and derivative
         double tmp = std::pow(r0ijk / rijk, triple.alp / 3.0);
         double fdmp = 1.0 / (1.0 + 6.0 * tmp);
-        double dfdmp = -2.0 * triple.alp * tmp * fdmp * fdmp / (3.0 * rijk);
+        double dfdmp = -2.0 * triple.alp * tmp * fdmp * fdmp;  // Match cpp-d4:232 - NO /(3*rijk)!
 
         // Angular term
         double A = (r2ij + r2jk - r2ik);
