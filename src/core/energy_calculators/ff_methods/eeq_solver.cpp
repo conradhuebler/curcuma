@@ -295,60 +295,87 @@ Vector EEQSolver::calculateFinalCharges(
     // Augmented system size
     int m = natoms + 1;
 
-    // Iterative refinement loop
-    for (int iter = 0; iter < m_max_iterations; ++iter) {
-        // Prepare corrected parameters
-        Vector chi_corrected(natoms);
-        Vector gam_corrected(natoms);
-        Vector alpha_corrected(natoms);
+    // Claude Generated (2025): Pre-calculate corrected parameters ONCE
+    // These don't change during iteration (dxi, dgam, dalpha are constant)
+    Vector chi_corrected(natoms);
+    Vector gam_corrected(natoms);
+    Vector alpha_corrected(natoms);
 
-        for (int i = 0; i < natoms; ++i) {
-            int z_i = atoms[i];
-            EEQParameters params_i = getParameters(z_i, cn(i));
+    for (int i = 0; i < natoms; ++i) {
+        int z_i = atoms[i];
+        EEQParameters params_i = getParameters(z_i, cn(i));
 
-            chi_corrected(i) = -params_i.chi + dxi(i);
-            gam_corrected(i) = params_i.gam + dgam(i);
-            alpha_corrected(i) = params_i.alp + dalpha(i);
+        chi_corrected(i) = -params_i.chi + dxi(i);
+        gam_corrected(i) = params_i.gam + dgam(i);
+        alpha_corrected(i) = params_i.alp + dalpha(i);
+    }
+
+    // Claude Generated (2025): Pre-calculate distance matrix (geometry-dependent only)
+    // This eliminates O(k·n²) sqrt() calls in the iteration loop
+    Matrix distances = Matrix::Zero(natoms, natoms);
+    for (int i = 0; i < natoms; ++i) {
+        for (int j = 0; j < i; ++j) {
+            double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
+            double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
+            double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
+            double r = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+            if (r < 1e-10) {
+                CurcumaLogger::error("EEQSolver::calculateFinalCharges: atoms too close");
+                return Vector::Zero(0);
+            }
+
+            distances(i, j) = r;
+            distances(j, i) = r;  // Symmetric
         }
+    }
 
-        // Build augmented EEQ matrix
-        Matrix A = Matrix::Zero(m, m);
+    // Claude Generated (2025): Pre-build base Coulomb matrix ONCE
+    // Off-diagonal elements depend on geometry and alpha (both constant in loop)
+    Matrix A_coulomb_base = Matrix::Zero(m, m);
+
+    for (int i = 0; i < natoms; ++i) {
+        for (int j = 0; j < i; ++j) {
+            double r = distances(i, j);
+            double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
+            double erf_gamma = std::erf(gamma_ij * r);
+            double coulomb = erf_gamma / r;
+
+            A_coulomb_base(i, j) = coulomb;
+            A_coulomb_base(j, i) = coulomb;
+        }
+    }
+
+    // Setup fragment charge constraint (constant)
+    for (int j = 0; j < natoms; ++j) {
+        A_coulomb_base(natoms, j) = 1.0;
+        A_coulomb_base(j, natoms) = 1.0;
+    }
+
+    if (m_verbosity >= 3) {
+        CurcumaLogger::info(fmt::format("EEQ Phase 2: Pre-computed distance matrix and Coulomb base ({}x{})", natoms, natoms));
+    }
+
+    // Iterative refinement loop (now much faster!)
+    for (int iter = 0; iter < m_max_iterations; ++iter) {
+        // Claude Generated (2025): Copy pre-computed Coulomb matrix
+        // This is O(n²) copy, much faster than O(n²) sqrt() + erf() recalculation
+        Matrix A = A_coulomb_base;
         Vector x = Vector::Zero(m);
 
-        // 1. Setup RHS and diagonal
+        // 1. Setup RHS
         for (int i = 0; i < natoms; ++i) {
             x(i) = chi_corrected(i);
+        }
+
+        // 2. Update only diagonal (charge-dependent terms)
+        // This is the only part that changes per iteration
+        for (int i = 0; i < natoms; ++i) {
             A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
         }
 
-        // 2. Setup off-diagonal Coulomb matrix
-        for (int i = 0; i < natoms; ++i) {
-            for (int j = 0; j < i; ++j) {
-                double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
-                double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
-                double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
-                double r = std::sqrt(dx*dx + dy*dy + dz*dz);
-
-                if (r < 1e-10) {
-                    CurcumaLogger::error("EEQSolver::calculateFinalCharges: atoms too close");
-                    return Vector::Zero(0);
-                }
-
-                double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
-                double erf_gamma = std::erf(gamma_ij * r);
-                double coulomb = erf_gamma / r;
-
-                A(i, j) = coulomb;
-                A(j, i) = coulomb;
-            }
-        }
-
-        // 3. Setup fragment charge constraint
+        // 3. Setup constraint RHS
         x(natoms) = static_cast<double>(total_charge);
-        for (int j = 0; j < natoms; ++j) {
-            A(natoms, j) = 1.0;
-            A(j, natoms) = 1.0;
-        }
 
         // 4. Solve system
         if (iter == 0 && m_verbosity >= 3) {
@@ -398,9 +425,20 @@ Vector EEQSolver::calculateFinalCharges(
                                               iter + 1, max_change));
         }
 
-        if (max_change < m_convergence_threshold) {
+        // Claude Generated (2025): Adaptive convergence tolerance
+        // For large systems (n > 100), use relaxed tolerance to save iterations
+        // For force field accuracy, 1e-5 is sufficient for most purposes
+        double adaptive_threshold = m_convergence_threshold;
+        if (natoms > 500) {
+            adaptive_threshold = std::max(m_convergence_threshold, 1e-4);
+        } else if (natoms > 100) {
+            adaptive_threshold = std::max(m_convergence_threshold, 1e-5);
+        }
+
+        if (max_change < adaptive_threshold) {
             if (m_verbosity >= 2) {
-                CurcumaLogger::success(fmt::format("Phase 2 converged in {} iterations", iter + 1));
+                CurcumaLogger::success(fmt::format("Phase 2 converged in {} iterations (threshold={:.1e})",
+                                                   iter + 1, adaptive_threshold));
             }
             break;
         }

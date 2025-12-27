@@ -141,6 +141,11 @@ int ForceFieldThread::execute()
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} ATM triples", m_thread, m_atm_triples.size()));
             }
             CalculateATMContribution();
+
+            // Claude Generated (2025): Calculate analytical ATM gradients
+            if (m_calculate_gradient) {
+                CalculateATMGradient();
+            }
         }
 
     } else if (m_method == 1) {
@@ -2153,5 +2158,137 @@ void ForceFieldThread::CalculateATMContribution()
 
     if (CurcumaLogger::get_verbosity() >= 3 && m_atm_triples.size() > 0) {
         CurcumaLogger::param("thread_atm_energy", fmt::format("{:.6f} Eh", total_atm_energy));
+    }
+}
+
+// Claude Generated (2025): ATM Three-Body Dispersion Gradient Calculation
+// ============================================================================
+
+void ForceFieldThread::CalculateATMGradient()
+{
+    /**
+     * @brief Calculate analytical gradients for ATM (Axilrod-Teller-Muto) three-body dispersion
+     *
+     * Reference: external/cpp-d4/src/damping/atm.cpp:141-289
+     *
+     * Analytical gradient formulas:
+     * 1. Damping derivative: dfdmp/drijk = -2·alp·(r0/r)^(alp/3)·fdmp²/(3·rijk)
+     * 2. Angular derivatives: d(ang)/drij, d(ang)/drik, d(ang)/drjk (complex polynomials)
+     * 3. Chain rule: dgradient_ij = c9·(-dang·fdmp + ang·dfdmp)/r²_ij·rij_vec
+     * 4. Atom gradients: gradient(i) += -(dgij + dgik), gradient(j) += +(dgij - dgjk), etc.
+     *
+     * Sign convention: Negative gradient = attractive force
+     * Symmetry: triple_scale factor applied (1.0, 0.5, 1/6)
+     *
+     * Claude Generated (2025): Analytical ATM gradients for geometry optimization/MD
+     */
+
+    using namespace GFNFFParameters;
+
+    if (CurcumaLogger::get_verbosity() >= 3 && m_atm_triples.size() > 0) {
+        CurcumaLogger::info(fmt::format("Thread {} calculating ATM gradients for {} triples",
+                                        m_thread, m_atm_triples.size()));
+    }
+
+    for (const auto& triple : m_atm_triples) {
+        // Get atom positions
+        Eigen::Vector3d pos_i = m_geometry.row(triple.i).transpose();
+        Eigen::Vector3d pos_j = m_geometry.row(triple.j).transpose();
+        Eigen::Vector3d pos_k = m_geometry.row(triple.k).transpose();
+
+        // Calculate distance vectors (r_ij = pos_j - pos_i, etc.)
+        Eigen::Vector3d rij_vec = pos_j - pos_i;
+        Eigen::Vector3d rik_vec = pos_k - pos_i;
+        Eigen::Vector3d rjk_vec = pos_k - pos_j;
+
+        // Calculate distances
+        double rij = rij_vec.norm();
+        double rik = rik_vec.norm();
+        double rjk = rjk_vec.norm();
+
+        double r2ij = rij * rij;
+        double r2ik = rik * rik;
+        double r2jk = rjk * rjk;
+
+        // C9 coefficient: s9 * sqrt(|C6_ij * C6_ik * C6_jk|)
+        double c9 = triple.s9 * std::sqrt(std::fabs(triple.C6_ij * triple.C6_ik * triple.C6_jk));
+
+        // Get atomic numbers and covalent radii
+        int zi = m_atom_types[triple.i];
+        int zj = m_atom_types[triple.j];
+        int zk = m_atom_types[triple.k];
+
+        // r0 cutoff radii (BJ damping formula)
+        double r_cov_i = (zi > 0 && zi <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zi - 1] : 1.0;
+        double r_cov_j = (zj > 0 && zj <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zj - 1] : 1.0;
+        double r_cov_k = (zk > 0 && zk <= static_cast<int>(rcov_bohr.size())) ? rcov_bohr[zk - 1] : 1.0;
+
+        double r0ij = triple.a1 * std::sqrt(3.0 * r_cov_i * r_cov_j) + triple.a2;
+        double r0ik = triple.a1 * std::sqrt(3.0 * r_cov_i * r_cov_k) + triple.a2;
+        double r0jk = triple.a1 * std::sqrt(3.0 * r_cov_j * r_cov_k) + triple.a2;
+        double r0ijk = r0ij * r0ik * r0jk;
+
+        // Distance products
+        double rijk = rij * rik * rjk;
+        double r2ijk = r2ij * r2ik * r2jk;
+        double r3ijk = rijk * r2ijk;
+        double r5ijk = r2ijk * r3ijk;
+
+        // BJ damping function and derivative
+        double tmp = std::pow(r0ijk / rijk, triple.alp / 3.0);
+        double fdmp = 1.0 / (1.0 + 6.0 * tmp);
+        double dfdmp = -2.0 * triple.alp * tmp * fdmp * fdmp / (3.0 * rijk);
+
+        // Angular term
+        double A = (r2ij + r2jk - r2ik);
+        double B = (r2ij + r2ik - r2jk);
+        double C = (r2ik + r2jk - r2ij);
+        double ang = (0.375 * A * B * C / r2ijk + 1.0) / r3ijk;
+
+        // Energy (for reference, already calculated in CalculateATMContribution)
+        // double e_atm = ang * fdmp * c9 / 3.0 * triple.triple_scale;
+
+        // ========================================
+        // Analytical Gradient Calculation
+        // ========================================
+
+        // Angular derivative d/drij (from cpp-d4 reference, lines 234-241)
+        double dang_ij = -0.375 * (std::pow(r2ij, 3) + std::pow(r2ij, 2) * (r2jk + r2ik)
+                          + r2ij * (3.0 * std::pow(r2jk, 2) + 2.0 * r2jk * r2ik + 3.0 * std::pow(r2ik, 2))
+                          - 5.0 * std::pow((r2jk - r2ik), 2) * (r2jk + r2ik)) / r5ijk;
+
+        // Angular derivative d/drik (from cpp-d4 reference, lines 243-250)
+        double dang_ik = -0.375 * (std::pow(r2ik, 3) + std::pow(r2ik, 2) * (r2jk + r2ij)
+                          + r2ik * (3.0 * std::pow(r2jk, 2) + 2.0 * r2jk * r2ij + 3.0 * std::pow(r2ij, 2))
+                          - 5.0 * std::pow((r2jk - r2ij), 2) * (r2jk + r2ij)) / r5ijk;
+
+        // Angular derivative d/drjk (from cpp-d4 reference, lines 252-259)
+        double dang_jk = -0.375 * (std::pow(r2jk, 3) + std::pow(r2jk, 2) * (r2ik + r2ij)
+                          + r2jk * (3.0 * std::pow(r2ik, 2) + 2.0 * r2ik * r2ij + 3.0 * std::pow(r2ij, 2))
+                          - 5.0 * std::pow((r2ik - r2ij), 2) * (r2ik + r2ij)) / r5ijk;
+
+        // Gradient components (chain rule: dE/dr_ij = c9·(-dang·fdmp + ang·dfdmp)/r²_ij · r_ij)
+        // Apply triple_scale factor (same as energy)
+        double prefactor = c9 * triple.triple_scale / 3.0;
+
+        Eigen::Vector3d dgij = prefactor * (-dang_ij * fdmp + ang * dfdmp) / r2ij * rij_vec;
+        Eigen::Vector3d dgik = prefactor * (-dang_ik * fdmp + ang * dfdmp) / r2ik * rik_vec;
+        Eigen::Vector3d dgjk = prefactor * (-dang_jk * fdmp + ang * dfdmp) / r2jk * rjk_vec;
+
+        // Accumulate gradients to atoms (from cpp-d4 reference, lines 261-269)
+        // Sign convention: negative sign because dispersion is attractive
+        m_gradient.row(triple.i) += -(dgij + dgik);
+        m_gradient.row(triple.j) += (dgij - dgjk);
+        m_gradient.row(triple.k) += (dgik + dgjk);
+
+        if (CurcumaLogger::get_verbosity() >= 4) {
+            CurcumaLogger::info(fmt::format(
+                "ATM_grad({},{},{}): |dgij|={:.6e} |dgik|={:.6e} |dgjk|={:.6e}",
+                triple.i, triple.j, triple.k, dgij.norm(), dgik.norm(), dgjk.norm()));
+        }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3 && m_atm_triples.size() > 0) {
+        CurcumaLogger::info(fmt::format("Thread {} ATM gradient calculation complete", m_thread));
     }
 }

@@ -237,6 +237,26 @@ if(USE_PCH)
     target_precompile_headers(test_gfnff_d3 REUSE_FROM curcuma_core)
 endif()
 
+# Claude Generated (December 2025): ATM 3-Body Dispersion Gradient Test
+# Validates analytical ATM gradients against numerical finite differences
+# Tests ForceFieldThread::CalculateATMGradient() implementation
+add_executable(test_atm_gradients
+        test_atm_gradients.cpp)
+
+target_link_libraries(test_atm_gradients curcuma_core test_molecule_registry)
+
+if(USE_PCH)
+    target_precompile_headers(test_atm_gradients REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_atm_gradients
+         COMMAND test_atm_gradients
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+set_tests_properties(test_atm_gradients PROPERTIES
+    LABELS "atm;gradients;dispersion"
+    TIMEOUT 30)
+
 # Register with CTest
 add_test(NAME test_gfnff_d3
          COMMAND test_gfnff_d3

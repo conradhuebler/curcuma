@@ -387,8 +387,9 @@ private:
     void CalculateGFNFFHydrogenBondContribution();
     void CalculateGFNFFHalogenBondContribution();
 
-    // ATM three-body dispersion calculation function (Claude Generated 2025)
+    // ATM three-body dispersion calculation functions (Claude Generated 2025)
     void CalculateATMContribution();
+    void CalculateATMGradient();  // Claude Generated (2025): Analytical ATM gradients
 
     // double HarmonicBondStretching();
 

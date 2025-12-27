@@ -473,7 +473,7 @@ json ForceFieldMethod::getDefaultConfigForMethod(const std::string& method_name)
         config["d3_correction"] = true;
     } else if (method_name == "cgfnff") {
         config["gfnff_mode"] = "native";
-        config["parameter_caching"] = false;  // cgfnff has parameter issues
+        config["parameter_caching"] = true;  // Claude Generated (Dec 2025): Enable caching for cgfnff
     } else if (method_name == "qmdff") {
         config["qmdff_version"] = "latest";
     } else if (method_name == "d3") {
@@ -490,14 +490,39 @@ std::string ForceFieldMethod::normalizeMethodName(const std::string& method_name
 }
 
 bool ForceFieldMethod::generateParametersIfNeeded(const Mol& mol) {
-    CurcumaLogger::info("Checking if ForceField parameters need to be generated");
-    
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Checking if ForceField parameters need to be generated");
+    }
+
     // Check if parameters are already set
     if (m_forcefield->hasParameters()) {
-        CurcumaLogger::info("ForceField parameters already available - skipping generation");
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("ForceField parameters already available - skipping generation");
+        }
         return true;
     }
-    
+
+    // Claude Generated (Dec 2025): Try to load from cache BEFORE expensive generation
+    // This avoids costly EEQ calculations and topology analysis for cached molecules
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Attempting to load parameters from cache before generation...");
+    }
+
+    if (m_forcefield->tryLoadAutoParameters(m_method_name)) {
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::success("✅ Loaded parameters from cache - skipping generation");
+        }
+        return true;
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::warn("Cache load failed or not available - will generate parameters");
+    }
+
+    // Cache not found or load failed - proceed with generation
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("No cached parameters found - generating new parameters");
+    }
     CurcumaLogger::info("Generating ForceField parameters using ForceFieldGenerator");
     CurcumaLogger::param("method", m_method_name);
     

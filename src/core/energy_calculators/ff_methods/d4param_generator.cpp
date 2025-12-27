@@ -239,26 +239,8 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
         CurcumaLogger::param("Number of atoms", static_cast<int>(m_atoms.size()));
     }
 
-    // STEP 1: Calculate EEQ charges from geometry (Dec 2025 - Phase 2)
-    m_eeq_charges = m_eeq_solver->calculateCharges(m_atoms, geometry_bohr, 0);
-
-    if (m_eeq_charges.size() != m_atoms.size()) {
-        CurcumaLogger::error("D4: EEQ charge calculation failed");
-        return;
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::success("D4: EEQ charges calculated");
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            for (size_t i = 0; i < std::min(size_t(5), m_atoms.size()); ++i) {
-                CurcumaLogger::result(fmt::format("  Atom {} (Z={}) q = {:.6f}",
-                                                  i, m_atoms[i], m_eeq_charges(i)));
-            }
-        }
-    }
-
-    // STEP 1.b: Calculate molecular coordination numbers (December 2025 Phase 2)
-    // Use GFNFFCN for consistency with cpp-d4 reference data
+    // Claude Generated (2025): Calculate CN FIRST, then pass to EEQ to avoid duplicate calculation
+    // This eliminates redundant O(n²) CN computation inside EEQ solver
     m_cn_values = CNCalculator::calculateGFNFFCN(m_atoms, geometry_bohr);
 
     if (m_cn_values.size() != m_atoms.size()) {
@@ -272,6 +254,27 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
             for (size_t i = 0; i < std::min(size_t(5), m_atoms.size()); ++i) {
                 CurcumaLogger::result(fmt::format("  Atom {} (Z={}) CN = {:.4f}",
                                                   i, m_atoms[i], m_cn_values[i]));
+            }
+        }
+    }
+
+    // STEP 1: Calculate EEQ charges from geometry (Dec 2025 - Phase 2)
+    // Pass pre-calculated CN to avoid duplicate calculation
+    // Convert std::vector<double> to Eigen::Vector for EEQ solver
+    Vector cn_eigen = Eigen::Map<const Vector>(m_cn_values.data(), m_cn_values.size());
+    m_eeq_charges = m_eeq_solver->calculateCharges(m_atoms, geometry_bohr, 0, &cn_eigen);
+
+    if (m_eeq_charges.size() != m_atoms.size()) {
+        CurcumaLogger::error("D4: EEQ charge calculation failed");
+        return;
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success("D4: EEQ charges calculated");
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            for (size_t i = 0; i < std::min(size_t(5), m_atoms.size()); ++i) {
+                CurcumaLogger::result(fmt::format("  Atom {} (Z={}) q = {:.6f}",
+                                                  i, m_atoms[i], m_eeq_charges(i)));
             }
         }
     }
