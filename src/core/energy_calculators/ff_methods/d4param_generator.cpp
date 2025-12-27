@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <limits>
 
 // External declarations from d4_reference_cn.cpp (cpp-d4 CN data - December 2025 Phase 1)
@@ -51,6 +52,11 @@ D4ParameterGenerator::D4ParameterGenerator(const ConfigManager& config)
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success("D4: Complete data loaded (alphaiw + corrections)");
     }
+
+    // Claude Generated (Dec 27, 2025): Pre-compute C6 reference matrix
+    // This is done ONCE at initialization, independent of molecular geometry
+    // Expected to eliminate ~98% of D4 parameter generation time for large molecules
+    precomputeC6ReferenceMatrix();
 }
 
 void D4ParameterGenerator::initializeReferenceData()
@@ -232,6 +238,8 @@ void D4ParameterGenerator::calculateFrequencyDependentPolarizabilities()
 
 void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, const Matrix& geometry_bohr)
 {
+    auto t_start_total = std::chrono::high_resolution_clock::now();
+
     m_atoms = atoms;
 
     if (CurcumaLogger::get_verbosity() >= 2) {
@@ -241,7 +249,10 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
     // Claude Generated (2025): Calculate CN FIRST, then pass to EEQ to avoid duplicate calculation
     // This eliminates redundant O(n²) CN computation inside EEQ solver
+    auto t_cn_start = std::chrono::high_resolution_clock::now();
     m_cn_values = CNCalculator::calculateGFNFFCN(m_atoms, geometry_bohr);
+    auto t_cn_end = std::chrono::high_resolution_clock::now();
+    double t_cn_ms = std::chrono::duration<double, std::milli>(t_cn_end - t_cn_start).count();
 
     if (m_cn_values.size() != m_atoms.size()) {
         CurcumaLogger::error("D4: CN calculation failed");
@@ -249,7 +260,7 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     }
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::success("D4: Molecular CN calculated (GFNFFCN)");
+        CurcumaLogger::success(fmt::format("D4: Molecular CN calculated in {:.2f} ms", t_cn_ms));
         if (CurcumaLogger::get_verbosity() >= 3) {
             for (size_t i = 0; i < std::min(size_t(5), m_atoms.size()); ++i) {
                 CurcumaLogger::result(fmt::format("  Atom {} (Z={}) CN = {:.4f}",
@@ -261,8 +272,11 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     // STEP 1: Calculate EEQ charges from geometry (Dec 2025 - Phase 2)
     // Pass pre-calculated CN to avoid duplicate calculation
     // Convert std::vector<double> to Eigen::Vector for EEQ solver
+    auto t_eeq_start = std::chrono::high_resolution_clock::now();
     Vector cn_eigen = Eigen::Map<const Vector>(m_cn_values.data(), m_cn_values.size());
     m_eeq_charges = m_eeq_solver->calculateCharges(m_atoms, geometry_bohr, 0, &cn_eigen);
+    auto t_eeq_end = std::chrono::high_resolution_clock::now();
+    double t_eeq_ms = std::chrono::duration<double, std::milli>(t_eeq_end - t_eeq_start).count();
 
     if (m_eeq_charges.size() != m_atoms.size()) {
         CurcumaLogger::error("D4: EEQ charge calculation failed");
@@ -270,7 +284,7 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     }
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::success("D4: EEQ charges calculated");
+        CurcumaLogger::success(fmt::format("D4: EEQ charges calculated in {:.2f} ms", t_eeq_ms));
         if (CurcumaLogger::get_verbosity() >= 3) {
             for (size_t i = 0; i < std::min(size_t(5), m_atoms.size()); ++i) {
                 CurcumaLogger::result(fmt::format("  Atom {} (Z={}) q = {:.6f}",
@@ -279,8 +293,23 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
         }
     }
 
+    // Claude Generated (Dec 27, 2025): Pre-compute Gaussian weights ONCE for all atoms
+    // This eliminates redundant exp() calls in getChargeWeightedC6()
+    // Performance: O(N×M) instead of O(N²×M) exp() calculations
+    auto t_weights_start = std::chrono::high_resolution_clock::now();
+    precomputeGaussianWeights();
+    auto t_weights_end = std::chrono::high_resolution_clock::now();
+    double t_weights_ms = std::chrono::duration<double, std::milli>(t_weights_end - t_weights_start).count();
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("D4: Weight pre-computation took {:.2f} ms ({} atoms × avg {} refs)",
+            t_weights_ms, m_atoms.size(), m_gaussian_weights.empty() ? 0 : m_gaussian_weights[0].size()));
+    }
+
     // STEP 2: Generate C6 pairs with CN+charge weighted C6 coefficients
+    auto t_pairs_start = std::chrono::high_resolution_clock::now();
     json dispersion_pairs = json::array();
+    int num_pairs = 0;
 
     for (size_t i = 0; i < m_atoms.size(); ++i) {
         for (size_t j = i + 1; j < m_atoms.size(); ++j) {
@@ -295,7 +324,8 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
                 pair["element_j"] = atom_j;
 
                 // NEW: CN+charge weighted C6 using EEQ charges and GFNFFCN (Dec 2025 Phase 2.2)
-                double c6 = getChargeWeightedC6(atom_i, atom_j, static_cast<int>(i), static_cast<int>(j));
+                // Claude Generated (Dec 27, 2025): Now uses cached weights for performance
+                double c6 = getChargeWeightedC6(atom_i, atom_j, i, j);
 
                 // D4 C6 coefficient is already charge-weighted via calculateChargeWeightedC6()
                 // with Casimir-Polder integration over frequency-dependent polarizabilities
@@ -331,6 +361,7 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
                 pair["r_cut"] = 100.0;  // Cutoff radius (Bohr)
 
                 dispersion_pairs.push_back(pair);
+                num_pairs++;
             } else {
                 if (CurcumaLogger::get_verbosity() >= 2) {
                     CurcumaLogger::warn("D4: Elements out of range - i=" +
@@ -339,6 +370,14 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
                 }
             }
         }
+    }
+
+    auto t_pairs_end = std::chrono::high_resolution_clock::now();
+    double t_pairs_ms = std::chrono::duration<double, std::milli>(t_pairs_end - t_pairs_start).count();
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("D4: C6 interpolation for {} pairs took {:.2f} ms ({:.4f} ms/pair)",
+            num_pairs, t_pairs_ms, num_pairs > 0 ? t_pairs_ms / num_pairs : 0.0));
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -369,7 +408,7 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
         if (!dispersion_pairs.empty()) {
             c6_avg /= dispersion_pairs.size();
-            CurcumaLogger::success(fmt::format("D4 C6: {:.0f} pairs, avg={:.4f}, min={:.4f}, max={:.4f}, zeros={}",
+            CurcumaLogger::success(fmt::format("D4 C6: {} pairs, avg={:.4f}, min={:.4f}, max={:.4f}, zeros={}",
                 dispersion_pairs.size(), c6_avg, c6_min, c6_max, zero_count));
         }
     }
@@ -437,8 +476,13 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
     m_parameters["atm_triples"] = atm_triples;
 
+    auto t_end_total = std::chrono::high_resolution_clock::now();
+    double t_total_ms = std::chrono::duration<double, std::milli>(t_end_total - t_start_total).count();
+
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::success("D4 parameter generation completed");
+        CurcumaLogger::success(fmt::format("D4 parameter generation completed in {:.2f} ms", t_total_ms));
+        CurcumaLogger::info(fmt::format("  └─ Breakdown: CN={:.1f}ms, EEQ={:.1f}ms, Weights={:.1f}ms, C6Interp={:.1f}ms",
+            t_cn_ms, t_eeq_ms, t_weights_ms, t_pairs_ms));
     }
 }
 
@@ -499,6 +543,255 @@ double D4ParameterGenerator::getAtomicPolarizability(int atom, int frequency_ind
     return 1.0; // Default value
 }
 
+void D4ParameterGenerator::precomputeC6ReferenceMatrix()
+{
+    // Claude Generated (Dec 27, 2025): Pre-compute C6 reference values via Casimir-Polder integration
+    // Reference: XTB dftd4.F90 lines ~500: c6 = thopi * trapzd(alpha_i * alpha_j)
+    //
+    // Performance optimization: Eliminates redundant Casimir-Polder integrations
+    // - Old approach: O(N²×M²×F) integrations (for every atom pair × ref states × frequencies)
+    // - New approach: O(E²×M²×F) integrations (once per element-pair combination)
+    // For triose (66 atoms): 2145 pairs × 49 ref combinations = 105,000 → ~1000 unique combinations
+    // Expected speedup: 50-100x for large molecules
+
+    auto t_start = std::chrono::high_resolution_clock::now();
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("=== D4 C6 Reference Matrix Pre-computation ===");
+    }
+
+    // Frequency grid for Casimir-Polder integration
+    const std::vector<double> frequency_grid = {
+        0.000001, 0.050000, 0.100000, 0.200000, 0.300000, 0.400000,
+        0.500000, 0.600000, 0.700000, 0.800000, 0.900000, 1.000000,
+        1.200000, 1.400000, 1.600000, 1.800000, 2.000000, 2.500000,
+        3.000000, 4.000000, 5.000000, 7.500000, 10.000000
+    };
+
+    int computed_count = 0;
+
+    // Pre-compute C6 for all element-pair combinations that have alphaiw data
+    for (int elem_i = 0; elem_i < MAX_ELEM && elem_i < static_cast<int>(d4_alphaiw_data.size()); ++elem_i) {
+        int nref_i = (elem_i < static_cast<int>(m_refn.size())) ? m_refn[elem_i] : 0;
+        if (nref_i == 0 || elem_i >= static_cast<int>(d4_alphaiw_data.size())) continue;
+
+        for (int elem_j = 0; elem_j <= elem_i; ++elem_j) {  // Symmetric, only compute lower triangle
+            int nref_j = (elem_j < static_cast<int>(m_refn.size())) ? m_refn[elem_j] : 0;
+            if (nref_j == 0 || elem_j >= static_cast<int>(d4_alphaiw_data.size())) continue;
+
+            // Compute C6 for all reference state combinations
+            for (int ref_i = 0; ref_i < nref_i && ref_i < MAX_REF; ++ref_i) {
+                if (ref_i >= static_cast<int>(d4_alphaiw_data[elem_i].size())) continue;
+
+                for (int ref_j = 0; ref_j < nref_j && ref_j < MAX_REF; ++ref_j) {
+                    if (ref_j >= static_cast<int>(d4_alphaiw_data[elem_j].size())) continue;
+
+                    double c6 = computeC6Reference(elem_i, elem_j, ref_i, ref_j);
+
+                    // Store in cache (symmetric storage)
+                    uint32_t key_ij = c6CacheKey(elem_i, elem_j, ref_i, ref_j);
+                    uint32_t key_ji = c6CacheKey(elem_j, elem_i, ref_j, ref_i);
+                    m_c6_reference_cache[key_ij] = c6;
+                    if (elem_i != elem_j || ref_i != ref_j) {
+                        m_c6_reference_cache[key_ji] = c6;
+                    }
+
+                    computed_count++;
+                }
+            }
+        }
+    }
+
+    m_c6_reference_cached = true;
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double t_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success(fmt::format("D4: Pre-computed {} C6 reference values in {:.2f} ms",
+            computed_count, t_ms));
+        CurcumaLogger::info(fmt::format("  Cache size: {} entries (symmetric storage)",
+            m_c6_reference_cache.size()));
+    }
+}
+
+double D4ParameterGenerator::computeC6Reference(int elem_i, int elem_j, int ref_i, int ref_j) const
+{
+    // Claude Generated (Dec 27, 2025): Casimir-Polder integration for a single element-pair × ref-state combination
+    // Reference: XTB dftd4.F90 lines ~500: c6 = thopi * trapzd(alpha_i * alpha_j)
+    //
+    // Formula: C6_ij = (3/π) ∫ α_i(iω) * α_j(iω) dω
+
+    // Frequency grid for Casimir-Polder integration
+    const std::vector<double> frequency_grid = {
+        0.000001, 0.050000, 0.100000, 0.200000, 0.300000, 0.400000,
+        0.500000, 0.600000, 0.700000, 0.800000, 0.900000, 1.000000,
+        1.200000, 1.400000, 1.600000, 1.800000, 2.000000, 2.500000,
+        3.000000, 4.000000, 5.000000, 7.500000, 10.000000
+    };
+
+    double c6_ref = 0.0;
+
+    // Check if we have frequency-dependent polarizabilities for both elements
+    if (elem_i >= static_cast<int>(d4_alphaiw_data.size()) ||
+        elem_j >= static_cast<int>(d4_alphaiw_data.size()) ||
+        ref_i >= static_cast<int>(d4_alphaiw_data[elem_i].size()) ||
+        ref_j >= static_cast<int>(d4_alphaiw_data[elem_j].size())) {
+        return 1.0;  // Fallback for elements without polarizability data
+    }
+
+    // Get correction factors for reference states
+    double ascale_i = (elem_i < static_cast<int>(d4_ascale_data.size()) && ref_i < static_cast<int>(d4_ascale_data[elem_i].size()))
+                    ? d4_ascale_data[elem_i][ref_i] : 1.0;
+    double ascale_j = (elem_j < static_cast<int>(d4_ascale_data.size()) && ref_j < static_cast<int>(d4_ascale_data[elem_j].size()))
+                    ? d4_ascale_data[elem_j][ref_j] : 1.0;
+
+    double hcount_i = (elem_i < static_cast<int>(m_refh.size()) && ref_i < static_cast<int>(m_refh[elem_i].size()))
+                    ? m_refh[elem_i][ref_i] : 0.0;
+    double hcount_j = (elem_j < static_cast<int>(m_refh.size()) && ref_j < static_cast<int>(m_refh[elem_j].size()))
+                    ? m_refh[elem_j][ref_j] : 0.0;
+
+    int refsys_i = (elem_i < static_cast<int>(d4_refsys_data.size()) && ref_i < static_cast<int>(d4_refsys_data[elem_i].size()))
+                 ? d4_refsys_data[elem_i][ref_i] : 0;
+    int refsys_j = (elem_j < static_cast<int>(d4_refsys_data.size()) && ref_j < static_cast<int>(d4_refsys_data[elem_j].size()))
+                 ? d4_refsys_data[elem_j][ref_j] : 0;
+
+    double sscale_i = (d4_sscale_data.find(refsys_i) != d4_sscale_data.end()) ? d4_sscale_data.at(refsys_i) : 0.0;
+    double sscale_j = (d4_sscale_data.find(refsys_j) != d4_sscale_data.end()) ? d4_sscale_data.at(refsys_j) : 0.0;
+
+    // Integrate product of CORRECTED polarizabilities using trapezoidal rule
+    // Correction formula: α_corrected = ascale * (αᵢⱼw - hcount * sscale * secaiw)
+    for (int iw = 0; iw < N_FREQ - 1; ++iw) {
+        // Get raw alphaiw values
+        double alphaiw_i_iw = d4_alphaiw_data[elem_i][ref_i][iw];
+        double alphaiw_i_next = d4_alphaiw_data[elem_i][ref_i][iw + 1];
+        double alphaiw_j_iw = d4_alphaiw_data[elem_j][ref_j][iw];
+        double alphaiw_j_next = d4_alphaiw_data[elem_j][ref_j][iw + 1];
+
+        // Get secaiw reference polarizabilities (if available)
+        double secaiw_i_iw = 0.0, secaiw_i_next = 0.0;
+        double secaiw_j_iw = 0.0, secaiw_j_next = 0.0;
+
+        if (d4_secaiw_data.find(refsys_i) != d4_secaiw_data.end() && iw < static_cast<int>(d4_secaiw_data.at(refsys_i).size())) {
+            secaiw_i_iw = d4_secaiw_data.at(refsys_i)[iw];
+            secaiw_i_next = d4_secaiw_data.at(refsys_i)[iw + 1];
+        }
+        if (d4_secaiw_data.find(refsys_j) != d4_secaiw_data.end() && iw < static_cast<int>(d4_secaiw_data.at(refsys_j).size())) {
+            secaiw_j_iw = d4_secaiw_data.at(refsys_j)[iw];
+            secaiw_j_next = d4_secaiw_data.at(refsys_j)[iw + 1];
+        }
+
+        // Apply correction formula
+        double alpha_i_iw = ascale_i * (alphaiw_i_iw - hcount_i * sscale_i * secaiw_i_iw);
+        double alpha_i_next = ascale_i * (alphaiw_i_next - hcount_i * sscale_i * secaiw_i_next);
+        double alpha_j_iw = ascale_j * (alphaiw_j_iw - hcount_j * sscale_j * secaiw_j_iw);
+        double alpha_j_next = ascale_j * (alphaiw_j_next - hcount_j * sscale_j * secaiw_j_next);
+
+        // Ensure non-negative (as per Fortran: max(correction, 0.0))
+        alpha_i_iw = std::max(alpha_i_iw, 0.0);
+        alpha_i_next = std::max(alpha_i_next, 0.0);
+        alpha_j_iw = std::max(alpha_j_iw, 0.0);
+        alpha_j_next = std::max(alpha_j_next, 0.0);
+
+        // Product at current and next frequency points
+        double product_iw = alpha_i_iw * alpha_j_iw;
+        double product_next = alpha_i_next * alpha_j_next;
+
+        // Trapezoidal rule: ∫ f(x) dx ≈ Σ (f_i + f_{i+1})/2 * Δx
+        double dw = frequency_grid[iw + 1] - frequency_grid[iw];
+        c6_ref += 0.5 * (product_iw + product_next) * dw;
+    }
+
+    // Apply prefactor: 3/π (matches XTB's thopi constant)
+    c6_ref *= THREE_OVER_PI;
+
+    return c6_ref;
+}
+
+void D4ParameterGenerator::precomputeGaussianWeights()
+{
+    // Claude Generated (Dec 27, 2025): Pre-compute CN+charge Gaussian weights once per atom
+    // Reference: cpp-d4 dftd_model.h weight_cn() function
+    //
+    // Performance optimization: Eliminates redundant exp() calls in getChargeWeightedC6()
+    // - Old approach: O(N²×M) exp() calls (compute weights for every atom pair)
+    // - New approach: O(N×M) exp() calls (compute weights once per atom)
+    // Expected speedup: 5-10x for molecules with 100+ atoms
+
+    constexpr double wf = 4.0;  // Gaussian width parameter (from D4 cpp-d4)
+
+    m_gaussian_weights.resize(m_atoms.size());
+
+    for (size_t i = 0; i < m_atoms.size(); ++i) {
+        int Zi = m_atoms[i];
+        int elem_i = Zi - 1;  // Convert to 0-based
+
+        // Validate element range
+        if (elem_i < 0 || elem_i >= MAX_ELEM) {
+            m_gaussian_weights[i].clear();
+            continue;
+        }
+
+        // Get number of reference states for this element
+        int nref = (elem_i < static_cast<int>(m_refn.size())) ? m_refn[elem_i] : 1;
+
+        if (nref == 0) {
+            m_gaussian_weights[i].clear();
+            continue;
+        }
+
+        // Get atom properties
+        double qi = m_eeq_charges(i);
+        double cni = m_cn_values[i];
+
+        // Compute Gaussian weights for all reference states of this atom
+        std::vector<double> weights(nref, 0.0);
+        double sum_weights = 0.0;
+
+        for (int ref = 0; ref < nref && ref < MAX_REF; ++ref) {
+            double qi_ref = m_refq[elem_i][ref];
+            double cni_ref = (elem_i < static_cast<int>(m_refcn.size()) &&
+                             ref < static_cast<int>(m_refcn[elem_i].size()))
+                            ? m_refcn[elem_i][ref] : 0.0;
+
+            // KEY: CN+charge combined Gaussian weighting (COMPUTED ONCE PER ATOM)
+            double diff_q = qi - qi_ref;
+            double diff_cn = cni - cni_ref;
+            weights[ref] = std::exp(-wf * (diff_q * diff_q + diff_cn * diff_cn));
+            sum_weights += weights[ref];
+        }
+
+        // Normalize weights
+        if (sum_weights > 1e-10) {
+            for (int ref = 0; ref < nref; ++ref) {
+                weights[ref] /= sum_weights;
+            }
+        } else {
+            // Exceptional case: set first reference to 1.0 (neutral state fallback)
+            std::fill(weights.begin(), weights.end(), 0.0);
+            weights[0] = 1.0;
+        }
+
+        m_gaussian_weights[i] = std::move(weights);
+    }
+
+    m_weights_cached = true;
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("=== D4 Gaussian Weights Pre-computed ===");
+        CurcumaLogger::param("Atoms processed", static_cast<int>(m_atoms.size()));
+        for (size_t i = 0; i < std::min<size_t>(m_atoms.size(), 5); ++i) {
+            std::string weights_str = "";
+            for (size_t ref = 0; ref < m_gaussian_weights[i].size(); ++ref) {
+                weights_str += fmt::format("{:.6f}", m_gaussian_weights[i][ref]);
+                if (ref < m_gaussian_weights[i].size() - 1) weights_str += ", ";
+            }
+            CurcumaLogger::info(fmt::format("  Atom {} (Z={}, q={:.4f}, CN={:.4f}): weights=[{}]",
+                i, m_atoms[i], m_eeq_charges(i), m_cn_values[i], weights_str));
+        }
+    }
+}
+
 /**
  * @brief Calculate charge-weighted C6 coefficient using Gaussian charge-state weighting
  *
@@ -511,41 +804,44 @@ double D4ParameterGenerator::getAtomicPolarizability(int atom, int frequency_ind
  *          C6 = Σ_k w_k * C6_ref_k
  *
  * Claude Generated - December 2025 (Phase 2: D4-EEQ Integration)
+ * Claude Generated - December 27, 2025: Optimized to use cached weights
  *
  * @param Zi Atomic number of atom i
  * @param Zj Atomic number of atom j
- * @param qi EEQ charge of atom i
- * @param qj EEQ charge of atom j
+ * @param atom_i Atom index i (for weight lookup)
+ * @param atom_j Atom index j (for weight lookup)
  * @return Charge-weighted C6 coefficient (Hartree * Bohr^6)
  */
-double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, int atom_i, int atom_j) const
+double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, size_t atom_i, size_t atom_j) const
 {
-    // Phase 2.2 (December 2025): Gaussian CN+charge-state weighting for C6 coefficients
-    // Reference: E. Caldeweyher et al., J. Chem. Phys. 2019, 150, 154122 (D4 method)
-    // cpp-d4 reference: dftd_model.h weight_cn() function
+    // Claude Generated (Dec 27, 2025): Optimized C6 interpolation using pre-computed weights AND C6 matrix
+    // Reference: cpp-d4 dftd_model.h weight_cn() function
     //
-    // Formula: C6(qi,qj,cni,cnj) = Σ_refi Σ_refj w(qi,cni,refi) * w(qj,cnj,refj) * C6_ref(refi,refj)
-    // where: w(q,cn,ref) = exp(-wf * ((q - q_ref)² + (cn - cn_ref)²)) / norm
-    //
-    // Key change from charge-only (Phase 2.1): Added CN-dependent Gaussian term
+    // Performance: NO EXP() CALLS, NO CASIMIR-POLDER INTEGRATIONS
+    // - Uses cached Gaussian weights from precomputeGaussianWeights()
+    // - Uses cached C6 reference matrix from precomputeC6ReferenceMatrix()
+    // Expected speedup: 50-100x for large molecules
 
-    // Validate indices
-    if (atom_i < 0 || atom_i >= static_cast<int>(m_eeq_charges.size()) ||
-        atom_j < 0 || atom_j >= static_cast<int>(m_eeq_charges.size()) ||
-        atom_i < 0 || atom_i >= static_cast<int>(m_cn_values.size()) ||
-        atom_j < 0 || atom_j >= static_cast<int>(m_cn_values.size())) {
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::warn(fmt::format("D4: Invalid atom indices i={} j={}", atom_i, atom_j));
-        }
+    if (!m_weights_cached) {
+        CurcumaLogger::error("D4: Weights not cached! Call precomputeGaussianWeights() first.");
         return 0.0;
     }
 
-    double qi = m_eeq_charges(atom_i);
-    double qj = m_eeq_charges(atom_j);
-    double cni = m_cn_values[atom_i];
-    double cnj = m_cn_values[atom_j];
+    if (!m_c6_reference_cached) {
+        CurcumaLogger::error("D4: C6 reference not cached! Call precomputeC6ReferenceMatrix() first.");
+        return 0.0;
+    }
 
-    constexpr double wf = 4.0;  // Gaussian width parameter (from D4 cpp-d4)
+    // Lookup pre-computed weights (NO COMPUTATION, only array access)
+    const auto& weights_i = m_gaussian_weights[atom_i];
+    const auto& weights_j = m_gaussian_weights[atom_j];
+
+    if (weights_i.empty() || weights_j.empty()) {
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::warn(fmt::format("D4: Empty weights for atoms {} {}", atom_i, atom_j));
+        }
+        return 0.0;
+    }
 
     // Convert to 0-based indexing
     int elem_i = Zi - 1;
@@ -559,172 +855,23 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, int atom_i, int
         return 0.0;
     }
 
-    // Get number of reference states for each element
-    int nref_i = (elem_i < static_cast<int>(m_refn.size())) ? m_refn[elem_i] : 1;
-    int nref_j = (elem_j < static_cast<int>(m_refn.size())) ? m_refn[elem_j] : 1;
-
-    // Gaussian CN+charge-state weighting
+    // Weighted sum over reference states (ONLY lookups and multiplications, NO integrations!)
     double c6_weighted = 0.0;
-    double norm_i = 0.0;
-    double norm_j = 0.0;
 
-    // Calculate normalization factors with CN+charge combined weighting
-    for (int refi = 0; refi < nref_i && refi < MAX_REF; ++refi) {
-        double qi_ref = m_refq[elem_i][refi];
-        double cni_ref = (elem_i < static_cast<int>(m_refcn.size()) && refi < static_cast<int>(m_refcn[elem_i].size()))
-                        ? m_refcn[elem_i][refi] : 0.0;
+    for (size_t refi = 0; refi < weights_i.size(); ++refi) {
+        double wi = weights_i[refi];  // LOOKUP from Gaussian weight cache
 
-        // KEY CHANGE: Combined CN+charge Gaussian weighting (December 2025 Phase 2.2)
-        double wi = std::exp(-wf * ((qi - qi_ref) * (qi - qi_ref) + (cni - cni_ref) * (cni - cni_ref)));
-        norm_i += wi;
-    }
+        for (size_t refj = 0; refj < weights_j.size(); ++refj) {
+            double wj = weights_j[refj];  // LOOKUP from Gaussian weight cache
 
-    for (int refj = 0; refj < nref_j && refj < MAX_REF; ++refj) {
-        double qj_ref = m_refq[elem_j][refj];
-        double cnj_ref = (elem_j < static_cast<int>(m_refcn.size()) && refj < static_cast<int>(m_refcn[elem_j].size()))
-                        ? m_refcn[elem_j][refj] : 0.0;
+            // LOOKUP C6 reference value from pre-computed cache (NO INTEGRATION!)
+            uint32_t key = c6CacheKey(elem_i, elem_j, refi, refj);
+            auto it = m_c6_reference_cache.find(key);
 
-        // KEY CHANGE: Combined CN+charge Gaussian weighting (December 2025 Phase 2.2)
-        double wj = std::exp(-wf * ((qj - qj_ref) * (qj - qj_ref) + (cnj - cnj_ref) * (cnj - cnj_ref)));
-        norm_j += wj;
-    }
+            double c6_ref = (it != m_c6_reference_cache.end()) ? it->second : 1.0;  // Cache hit or fallback
 
-    // Avoid division by zero
-    if (norm_i < 1e-10 || norm_j < 1e-10) {
-        norm_i = std::max(norm_i, 1e-10);
-        norm_j = std::max(norm_j, 1e-10);
-    }
-
-    // Frequency grid for Casimir-Polder integration (same as calculateFrequencyDependentPolarizabilities)
-    const std::vector<double> frequency_grid = {
-        0.000001, 0.050000, 0.100000, 0.200000, 0.300000, 0.400000,
-        0.500000, 0.600000, 0.700000, 0.800000, 0.900000, 1.000000,
-        1.200000, 1.400000, 1.600000, 1.800000, 2.000000, 2.500000,
-        3.000000, 4.000000, 5.000000, 7.500000, 10.000000
-    };
-
-    // Weighted sum over reference states
-    for (int refi = 0; refi < nref_i && refi < MAX_REF; ++refi) {
-        double qi_ref = m_refq[elem_i][refi];
-        double cni_ref = (elem_i < static_cast<int>(m_refcn.size()) && refi < static_cast<int>(m_refcn[elem_i].size()))
-                        ? m_refcn[elem_i][refi] : 0.0;
-
-        // KEY CHANGE: Combined CN+charge Gaussian weighting (December 2025 Phase 2.2)
-        double wi = std::exp(-wf * ((qi - qi_ref) * (qi - qi_ref) + (cni - cni_ref) * (cni - cni_ref))) / norm_i;
-
-        for (int refj = 0; refj < nref_j && refj < MAX_REF; ++refj) {
-            double qj_ref = m_refq[elem_j][refj];
-            double cnj_ref = (elem_j < static_cast<int>(m_refcn.size()) && refj < static_cast<int>(m_refcn[elem_j].size()))
-                            ? m_refcn[elem_j][refj] : 0.0;
-
-            // KEY CHANGE: Combined CN+charge Gaussian weighting (December 2025 Phase 2.2)
-            double wj = std::exp(-wf * ((qj - qj_ref) * (qj - qj_ref) + (cnj - cnj_ref) * (cnj - cnj_ref))) / norm_j;
-
-            // CRITICAL FIX (Dec 25, 2025): Correct C6 calculation from Casimir-Polder integration
-            // Reference: XTB dftd4.F90 lines ~500: c6 = thopi * trapzd(alpha_i * alpha_j)
-            //
-            // Formula: C6_ij = (3/π) ∫ α_i(iω) * α_j(iω) dω
-            // NOT: C6 = α_i * α_j (this was the 100x error bug!)
-
-            double c6_ref = 0.0;
-
-            // Debug: Track negative corrections for this reference state pair (Fix 3)
-            bool negative_detected = false;
-
-            // Check if we have frequency-dependent polarizabilities for both elements
-            // Use d4_alphaiw_data (complete data from Fortran extraction - Dec 25, 2025)
-            if (elem_i < static_cast<int>(d4_alphaiw_data.size()) &&
-                elem_j < static_cast<int>(d4_alphaiw_data.size()) &&
-                refi < static_cast<int>(d4_alphaiw_data[elem_i].size()) &&
-                refj < static_cast<int>(d4_alphaiw_data[elem_j].size())) {
-
-                // Get correction factors for reference states (Dec 25, 2025 - Phase 2.4)
-                double ascale_i = (elem_i < static_cast<int>(d4_ascale_data.size()) && refi < static_cast<int>(d4_ascale_data[elem_i].size()))
-                                ? d4_ascale_data[elem_i][refi] : 1.0;
-                double ascale_j = (elem_j < static_cast<int>(d4_ascale_data.size()) && refj < static_cast<int>(d4_ascale_data[elem_j].size()))
-                                ? d4_ascale_data[elem_j][refj] : 1.0;
-
-                double hcount_i = (elem_i < static_cast<int>(m_refh.size()) && refi < static_cast<int>(m_refh[elem_i].size()))
-                                ? m_refh[elem_i][refi] : 0.0;
-                double hcount_j = (elem_j < static_cast<int>(m_refh.size()) && refj < static_cast<int>(m_refh[elem_j].size()))
-                                ? m_refh[elem_j][refj] : 0.0;
-
-                int refsys_i = (elem_i < static_cast<int>(d4_refsys_data.size()) && refi < static_cast<int>(d4_refsys_data[elem_i].size()))
-                             ? d4_refsys_data[elem_i][refi] : 0;
-                int refsys_j = (elem_j < static_cast<int>(d4_refsys_data.size()) && refj < static_cast<int>(d4_refsys_data[elem_j].size()))
-                             ? d4_refsys_data[elem_j][refj] : 0;
-
-                double sscale_i = (d4_sscale_data.find(refsys_i) != d4_sscale_data.end()) ? d4_sscale_data.at(refsys_i) : 0.0;
-                double sscale_j = (d4_sscale_data.find(refsys_j) != d4_sscale_data.end()) ? d4_sscale_data.at(refsys_j) : 0.0;
-
-                // Integrate product of CORRECTED polarizabilities using trapezoidal rule
-                // Correction formula: α_corrected = ascale * (αᵢⱼw - hcount * sscale * secaiw)
-                for (int iw = 0; iw < N_FREQ - 1; ++iw) {
-                    // Get raw alphaiw values
-                    double alphaiw_i_iw = d4_alphaiw_data[elem_i][refi][iw];
-                    double alphaiw_i_next = d4_alphaiw_data[elem_i][refi][iw + 1];
-                    double alphaiw_j_iw = d4_alphaiw_data[elem_j][refj][iw];
-                    double alphaiw_j_next = d4_alphaiw_data[elem_j][refj][iw + 1];
-
-                    // Get secaiw reference polarizabilities (if available)
-                    double secaiw_i_iw = 0.0, secaiw_i_next = 0.0;
-                    double secaiw_j_iw = 0.0, secaiw_j_next = 0.0;
-
-                    if (d4_secaiw_data.find(refsys_i) != d4_secaiw_data.end() && iw < static_cast<int>(d4_secaiw_data.at(refsys_i).size())) {
-                        secaiw_i_iw = d4_secaiw_data.at(refsys_i)[iw];
-                        secaiw_i_next = d4_secaiw_data.at(refsys_i)[iw + 1];
-                    }
-                    if (d4_secaiw_data.find(refsys_j) != d4_secaiw_data.end() && iw < static_cast<int>(d4_secaiw_data.at(refsys_j).size())) {
-                        secaiw_j_iw = d4_secaiw_data.at(refsys_j)[iw];
-                        secaiw_j_next = d4_secaiw_data.at(refsys_j)[iw + 1];
-                    }
-
-                    // Apply correction formula
-                    double alpha_i_iw = ascale_i * (alphaiw_i_iw - hcount_i * sscale_i * secaiw_i_iw);
-                    double alpha_i_next = ascale_i * (alphaiw_i_next - hcount_i * sscale_i * secaiw_i_next);
-                    double alpha_j_iw = ascale_j * (alphaiw_j_iw - hcount_j * sscale_j * secaiw_j_iw);
-                    double alpha_j_next = ascale_j * (alphaiw_j_next - hcount_j * sscale_j * secaiw_j_next);
-
-                    // DEBUG: Detect negative corrections before clamping (Fix 3)
-                    if (alpha_i_iw < 0 || alpha_i_next < 0 || alpha_j_iw < 0 || alpha_j_next < 0) {
-                        negative_detected = true;
-                    }
-
-                    // Ensure non-negative (as per Fortran: max(correction, 0.0))
-                    alpha_i_iw = std::max(alpha_i_iw, 0.0);
-                    alpha_i_next = std::max(alpha_i_next, 0.0);
-                    alpha_j_iw = std::max(alpha_j_iw, 0.0);
-                    alpha_j_next = std::max(alpha_j_next, 0.0);
-
-                    // Product at current and next frequency points
-                    double product_iw = alpha_i_iw * alpha_j_iw;
-                    double product_next = alpha_i_next * alpha_j_next;
-
-                    // Trapezoidal rule: ∫ f(x) dx ≈ Σ (f_i + f_{i+1})/2 * Δx
-                    double dw = frequency_grid[iw + 1] - frequency_grid[iw];
-                    c6_ref += 0.5 * (product_iw + product_next) * dw;
-                }
-
-                // Apply prefactor: 3/π (matches XTB's thopi constant)
-                c6_ref *= THREE_OVER_PI;
-
-            } else {
-                // Fallback for elements without polarizability data
-                // Use simple geometric estimate (will be inaccurate)
-                if (CurcumaLogger::get_verbosity() >= 3) {
-                    CurcumaLogger::warn(fmt::format("D4: No alpha_iw data for Zi={} Zj={}, using fallback", Zi, Zj));
-                }
-                c6_ref = 1.0;  // Minimal fallback value
-            }
-
-            // Add weighted contribution
+            // Add weighted contribution (simple multiplication, NO integration!)
             c6_weighted += wi * wj * c6_ref;
-
-            // Warning for negative correction clamping (Fix 3)
-            if (CurcumaLogger::get_verbosity() >= 3 && negative_detected) {
-                CurcumaLogger::warn(fmt::format("Negative correction clamped: Zi={} Zj={}, refi={}, refj={}, c6={:.4f}",
-                                                 Zi, Zj, refi, refj, c6_ref));
-            }
         }
     }
 

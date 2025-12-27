@@ -182,6 +182,19 @@ set_tests_properties(test_dispersion PROPERTIES
     TIMEOUT 120          # 2 minutes (36 tests)
     LABELS "dispersion;D3;D4")
 
+# Claude Generated (Dec 27, 2025): D3 weight caching optimization validation
+add_executable(test_d3_weight_caching test_d3_weight_caching.cpp)
+target_link_libraries(test_d3_weight_caching curcuma_core)
+if(USE_PCH)
+    target_precompile_headers(test_d3_weight_caching REUSE_FROM curcuma_core)
+endif()
+add_test(NAME test_d3_weight_caching
+         COMMAND test_d3_weight_caching
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(test_d3_weight_caching PROPERTIES
+    TIMEOUT 30
+    LABELS "dispersion;D3;optimization")
+
 # Conditional test execution (skip if neither D3 nor D4 compiled)
 if(NOT USE_D3 AND NOT USE_D4)
     set_tests_properties(test_dispersion PROPERTIES DISABLED TRUE)

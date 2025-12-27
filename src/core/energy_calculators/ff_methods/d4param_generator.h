@@ -28,6 +28,7 @@
 
 #include <Eigen/Dense>
 #include <memory>
+#include <unordered_map>
 
 #include "json.hpp"
 using json = nlohmann::json;
@@ -70,9 +71,17 @@ private:
     // OLD: Crude neutral-atom approximation (deprecated)
     double getEffectiveC6(int atom_i, int atom_j) const;
 
+    // Claude Generated (Dec 27, 2025): Weight caching optimization
+    void precomputeGaussianWeights();
+
+    // Claude Generated (Dec 27, 2025): C6 reference matrix pre-computation
+    void precomputeC6ReferenceMatrix();
+    double computeC6Reference(int elem_i, int elem_j, int ref_i, int ref_j) const;
+
     // NEW: Charge-weighted C6 using EEQ charges and Gaussian weighting (Dec 2025)
     // Phase 2.2 (December 2025): CN+charge combined weighting
-    double getChargeWeightedC6(int Zi, int Zj, int atom_i, int atom_j) const;
+    // Claude Generated (Dec 27, 2025): Now uses cached weights and C6 reference for performance
+    double getChargeWeightedC6(int Zi, int Zj, size_t atom_i, size_t atom_j) const;
 
     // ATM three-body helper (Claude Generated 2025)
     double calculateTripleScale(int i, int j, int k) const;
@@ -106,6 +115,27 @@ private:
 
     // Molecular CN calculation (December 2025 Phase 2 - CN+Charge weighting)
     std::vector<double> m_cn_values;  // Cached GFNFFCN values for current geometry
+
+    // Claude Generated (Dec 27, 2025): Cached Gaussian weights for C6 interpolation
+    // Performance optimization: Pre-compute CN+charge weights once per atom instead of per pair
+    // Expected speedup: 5-10x for molecules with 100+ atoms (same as D3)
+    std::vector<std::vector<double>> m_gaussian_weights;  // [atom_idx][ref_idx]
+    bool m_weights_cached = false;
+
+    // Claude Generated (Dec 27, 2025): Cached C6 reference matrix
+    // Performance optimization: Pre-compute Casimir-Polder integration ONCE per element-pair combination
+    // Key: (elem_i << 24) | (elem_j << 16) | (ref_i << 8) | ref_j
+    // Expected speedup: 50-100x for large molecules (eliminates ~340,000 integration operations)
+    std::unordered_map<uint32_t, double> m_c6_reference_cache;
+    bool m_c6_reference_cached = false;
+
+    // Helper to generate cache key
+    inline uint32_t c6CacheKey(int elem_i, int elem_j, int ref_i, int ref_j) const {
+        return (static_cast<uint32_t>(elem_i) << 24) |
+               (static_cast<uint32_t>(elem_j) << 16) |
+               (static_cast<uint32_t>(ref_i) << 8) |
+               static_cast<uint32_t>(ref_j);
+    }
 
     // Mathematical constants
     static constexpr double PI = 3.14159265358979323846;

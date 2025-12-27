@@ -200,19 +200,42 @@ void D3ParameterGenerator::copyReferenceData()
 
 void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, const Eigen::MatrixXd& geometry)
 {
+    auto t_start_total = std::chrono::high_resolution_clock::now();
+
     m_atoms = atoms;
     m_geometry = geometry;
     m_parameters.clear();
 
-    if (CurcumaLogger::get_verbosity() >= 3) {
+    if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("=== D3ParameterGenerator::GenerateParameters() START ===");
         CurcumaLogger::param("Number of atoms", static_cast<int>(m_atoms.size()));
     }
 
     // Calculate geometry-dependent coordination numbers
+    auto t_cn_start = std::chrono::high_resolution_clock::now();
     std::vector<double> coordination_numbers = calculateCoordinationNumbers(m_atoms, m_geometry);
+    auto t_cn_end = std::chrono::high_resolution_clock::now();
+    double t_cn_ms = std::chrono::duration<double, std::milli>(t_cn_end - t_cn_start).count();
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("D3: CN calculation took {:.2f} ms", t_cn_ms));
+    }
+
+    // Claude Generated (Dec 2025): Pre-compute Gaussian weights ONCE for all atoms
+    // This eliminates redundant exp() calls in interpolateC6()
+    // Performance: O(N×M) instead of O(N²×M) exp() calculations
+    auto t_weights_start = std::chrono::high_resolution_clock::now();
+    precomputeGaussianWeights(m_atoms, coordination_numbers);
+    auto t_weights_end = std::chrono::high_resolution_clock::now();
+    double t_weights_ms = std::chrono::duration<double, std::milli>(t_weights_end - t_weights_start).count();
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("D3: Weight pre-computation took {:.2f} ms ({} atoms × avg {} refs)",
+            t_weights_ms, m_atoms.size(), m_gaussian_weights.empty() ? 0 : m_gaussian_weights[0].size()));
+    }
 
     // Generate dispersion parameters for all atom pairs
+    auto t_pairs_start = std::chrono::high_resolution_clock::now();
     json dispersion_pairs = json::array();
 
     // Get global scaling factors from config
@@ -221,6 +244,7 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     double a1 = m_config.get<double>("d3_a1", 0.4);
     double a2 = m_config.get<double>("d3_a2", 4.0);
 
+    int num_pairs = 0;
     for (size_t i = 0; i < m_atoms.size(); ++i) {
         for (size_t j = i + 1; j < m_atoms.size(); ++j) {
             int atom_i = m_atoms[i];
@@ -235,14 +259,11 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
                 pair["element_j"] = atom_j;
 
                 // Get C6 coefficient with CN-dependent interpolation
-                double cn_i = coordination_numbers[i];
-                double cn_j = coordination_numbers[j];
-                // Calculate C6 coefficient from interpolation
-                // Claude Generated (December 2025): CRITICAL FIX - s6 applied in energy, not here!
-                double c6 = interpolateC6(atom_i, atom_j, cn_i, cn_j);
+                // Claude Generated (Dec 2025): Use cached weights - pass atom indices, not CN values
+                double c6 = interpolateC6(atom_i, atom_j, i, j);  // Pass atom indices for weight lookup
                 pair["c6"] = c6;  // Store raw C6, s6 applied in energy calculation
-                pair["cn_i"] = cn_i;  // Store CN for debugging
-                pair["cn_j"] = cn_j;
+                pair["cn_i"] = coordination_numbers[i];  // Store CN for debugging
+                pair["cn_j"] = coordination_numbers[j];
 
                 // Calculate C8 coefficient using C8/C6 ratio
                 // Claude Generated (December 2025): CRITICAL FIX - s8 applied in energy, not here!
@@ -264,6 +285,7 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
                 pair["r_cut"] = 100.0;
 
                 dispersion_pairs.push_back(pair);
+                num_pairs++;
             } else {
                 if (CurcumaLogger::get_verbosity() >= 2) {
                     CurcumaLogger::warn("D3: Elements out of range - i=" +
@@ -272,6 +294,14 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
                 }
             }
         }
+    }
+
+    auto t_pairs_end = std::chrono::high_resolution_clock::now();
+    double t_pairs_ms = std::chrono::duration<double, std::milli>(t_pairs_end - t_pairs_start).count();
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("D3: C6 interpolation for {} pairs took {:.2f} ms ({:.4f} ms/pair)",
+            num_pairs, t_pairs_ms, num_pairs > 0 ? t_pairs_ms / num_pairs : 0.0));
     }
 
     // Output parameter summary
@@ -354,8 +384,13 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
     m_parameters["atm_triples"] = atm_triples;
 
+    auto t_end_total = std::chrono::high_resolution_clock::now();
+    double t_total_ms = std::chrono::duration<double, std::milli>(t_end_total - t_start_total).count();
+
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::success("D3 parameter generation completed");
+        CurcumaLogger::success(fmt::format("D3 parameter generation completed in {:.2f} ms", t_total_ms));
+        CurcumaLogger::info(fmt::format("  └─ Breakdown: CN={:.1f}ms, Weights={:.1f}ms, C6Interp={:.1f}ms",
+            t_cn_ms, t_weights_ms, t_pairs_ms));
     }
 }
 
@@ -517,70 +552,113 @@ std::vector<double> D3ParameterGenerator::calculateCoordinationNumbers(const std
     return CNCalculator::calculateD3CN(atoms, geometry);
 }
 
-double D3ParameterGenerator::interpolateC6(int elem_i, int elem_j, double cn_i, double cn_j) const
+void D3ParameterGenerator::precomputeGaussianWeights(
+    const std::vector<int>& atoms,
+    const std::vector<double>& coordination_numbers)
 {
-    // Interpolate C6 coefficient based on coordination numbers
-    // Uses Gaussian weighting: w_i = exp(-4*(CN - CN_ref)^2) / sum(exp(...))
-    // Reference: Grimme et al., J. Chem. Phys. 132, 154104 (2010)
+    // Claude Generated (Dec 2025): Pre-compute Gaussian weights once per atom
+    // Reference: simple-dftd3/src/dftd3/model.f90:147-235 (weight_references)
+    //
+    // Performance optimization: Eliminates redundant exp() calls in interpolateC6()
+    // - Old approach: O(N²×M) exp() calls (compute weights for every atom pair)
+    // - New approach: O(N×M) exp() calls (compute weights once per atom)
+    // Expected speedup: 5-10x for molecules with 100+ atoms
 
-    const double k = 4.0;  // Gaussian width parameter
+    const double k = 4.0;  // Gaussian width parameter (matches simple-dftd3)
+    m_gaussian_weights.resize(atoms.size());
+    m_cached_cn = coordination_numbers;
 
-    // Get number of references for both elements
-    int nref_i = getNumberofReferences(elem_i);
-    int nref_j = getNumberofReferences(elem_j);
+    for (size_t i = 0; i < atoms.size(); ++i) {
+        int elem = atoms[i];
+        int nref = getNumberofReferences(elem);
 
-    if (nref_i == 0 || nref_j == 0) {
+        if (nref == 0) {
+            m_gaussian_weights[i].clear();
+            continue;
+        }
+
+        // Compute Gaussian weights for all reference states of this atom
+        std::vector<double> weights(nref, 0.0);
+        double sum_weights = 0.0;
+
+        for (int ref = 0; ref < nref; ++ref) {
+            double cn_ref = getReferenceCN(elem, ref);
+            double diff = coordination_numbers[i] - cn_ref;
+            weights[ref] = std::exp(-k * diff * diff);  // COMPUTED ONCE PER ATOM
+            sum_weights += weights[ref];
+        }
+
+        // Normalize weights
+        if (sum_weights > 1e-10) {
+            for (int ref = 0; ref < nref; ++ref) {
+                weights[ref] /= sum_weights;
+            }
+        } else {
+            // Exceptional case: all weights negligible
+            // Set highest CN reference to 1.0 (matches Fortran behavior)
+            double max_cn_ref = -1.0;
+            int max_ref_idx = 0;
+            for (int ref = 0; ref < nref; ++ref) {
+                double cn_ref = getReferenceCN(elem, ref);
+                if (cn_ref > max_cn_ref) {
+                    max_cn_ref = cn_ref;
+                    max_ref_idx = ref;
+                }
+            }
+            std::fill(weights.begin(), weights.end(), 0.0);
+            weights[max_ref_idx] = 1.0;
+        }
+
+        m_gaussian_weights[i] = std::move(weights);
+    }
+
+    m_weights_cached = true;
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("=== D3 Gaussian Weights Pre-computed ===");
+        CurcumaLogger::param("Atoms processed", static_cast<int>(atoms.size()));
+        for (size_t i = 0; i < atoms.size(); ++i) {
+            std::string weights_str = "";
+            for (size_t ref = 0; ref < m_gaussian_weights[i].size(); ++ref) {
+                weights_str += std::to_string(m_gaussian_weights[i][ref]);
+                if (ref < m_gaussian_weights[i].size() - 1) weights_str += ", ";
+            }
+            CurcumaLogger::info("  Atom " + std::to_string(i) + " (elem=" + std::to_string(atoms[i]) +
+                               ", CN=" + std::to_string(coordination_numbers[i]) +
+                               "): weights=[" + weights_str + "]");
+        }
+    }
+}
+
+double D3ParameterGenerator::interpolateC6(int elem_i, int elem_j, size_t atom_idx_i, size_t atom_idx_j) const
+{
+    // Claude Generated (Dec 2025): Optimized C6 interpolation using pre-computed weights
+    // Reference: simple-dftd3/src/dftd3/model.f90:248-324 (get_atomic_c6)
+    //
+    // Performance: NO EXP() CALLS - uses cached Gaussian weights from precomputeGaussianWeights()
+    // This function is called O(N²) times, but exp() is only computed O(N) times total
+
+    if (!m_weights_cached) {
+        CurcumaLogger::error("interpolateC6: Weights not cached! Call precomputeGaussianWeights() first.");
+        return 0.0;
+    }
+
+    // Lookup pre-computed weights (NO COMPUTATION, only array access)
+    const auto& weights_i = m_gaussian_weights[atom_idx_i];
+    const auto& weights_j = m_gaussian_weights[atom_idx_j];
+
+    if (weights_i.empty() || weights_j.empty()) {
         if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::warn("interpolateC6: No references for elements " +
-                               std::to_string(elem_i) + "," + std::to_string(elem_j));
+            CurcumaLogger::warn("interpolateC6: Empty weights for atoms " +
+                               std::to_string(atom_idx_i) + "," + std::to_string(atom_idx_j));
         }
         return 0.0;
     }
 
-    // Calculate Gaussian weights for element i
-    std::vector<double> weights_i(nref_i, 0.0);
-    double sum_weights_i = 0.0;
-    for (int ref = 0; ref < nref_i; ++ref) {
-        double cn_ref = getReferenceCN(elem_i, ref);
-        // Note: CN=0.0 is a valid reference (e.g., H in isolated state), not empty
-        double diff = cn_i - cn_ref;
-        weights_i[ref] = std::exp(-k * diff * diff);
-        sum_weights_i += weights_i[ref];
-    }
-
-    // Normalize weights for element i
-    if (sum_weights_i > 1e-10) {
-        for (int ref = 0; ref < nref_i; ++ref) {
-            weights_i[ref] /= sum_weights_i;
-        }
-    }
-
-    // Calculate Gaussian weights for element j
-    std::vector<double> weights_j(nref_j, 0.0);
-    double sum_weights_j = 0.0;
-    for (int ref = 0; ref < nref_j; ++ref) {
-        double cn_ref = getReferenceCN(elem_j, ref);
-        // Note: CN=0.0 is a valid reference (e.g., H in isolated state), not empty
-        double diff = cn_j - cn_ref;
-        weights_j[ref] = std::exp(-k * diff * diff);
-        sum_weights_j += weights_j[ref];
-    }
-
-    // Normalize weights for element j
-    if (sum_weights_j > 1e-10) {
-        for (int ref = 0; ref < nref_j; ++ref) {
-            weights_j[ref] /= sum_weights_j;
-        }
-    }
-
-    // Interpolate C6 with weighted sum over all reference combinations
-    // NOTE: CN=0 is VALID (isolated atom state), not empty!
+    // Weighted sum over reference combinations (NO EXP CALLS, only multiplications)
     double c6_interpolated = 0.0;
-    for (int ref_i = 0; ref_i < nref_i; ++ref_i) {
-        for (int ref_j = 0; ref_j < nref_j; ++ref_j) {
-            // Claude Generated (December 2025): CRITICAL FIX - Remove +1 offset
-            // getC6() already expects 0-based reference indices (0-6 for MAX_REF=7)
-            // The +1 offset was incorrect and caused wrong C6 selection
+    for (size_t ref_i = 0; ref_i < weights_i.size(); ++ref_i) {
+        for (size_t ref_j = 0; ref_j < weights_j.size(); ++ref_j) {
             double c6_ref = getC6(elem_i, elem_j, ref_i, ref_j);
             double contrib = weights_i[ref_i] * weights_j[ref_j] * c6_ref;
             c6_interpolated += contrib;
@@ -594,13 +672,10 @@ double D3ParameterGenerator::interpolateC6(int elem_i, int elem_j, double cn_i, 
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("interpolateC6(" + std::to_string(elem_i) + "," + std::to_string(elem_j) +
-                           "): CN=(" + std::to_string(cn_i) + "," + std::to_string(cn_j) +
+                           "): atoms=(" + std::to_string(atom_idx_i) + "," + std::to_string(atom_idx_j) +
+                           "), CN=(" + std::to_string(m_cached_cn[atom_idx_i]) + "," +
+                           std::to_string(m_cached_cn[atom_idx_j]) +
                            ") → C6=" + std::to_string(c6_interpolated));
-        CurcumaLogger::info("  nref_i=" + std::to_string(nref_i) + " nref_j=" + std::to_string(nref_j));
-        for (int ref = 0; ref < nref_i; ++ref) {
-            CurcumaLogger::info("    weight_i[" + std::to_string(ref) + "]=" + std::to_string(weights_i[ref]) +
-                               " CN_ref=" + std::to_string(getReferenceCN(elem_i, ref)));
-        }
     }
 
     return c6_interpolated;

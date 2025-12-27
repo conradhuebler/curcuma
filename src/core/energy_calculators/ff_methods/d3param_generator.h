@@ -138,7 +138,11 @@ private:
     // - EEQSolver may have geometry-dependent CN calculation
     // - Investigate creating shared CNCalculator utility class
     std::vector<double> calculateCoordinationNumbers(const std::vector<int>& atoms, const Eigen::MatrixXd& geometry) const;
-    double interpolateC6(int elem_i, int elem_j, double cn_i, double cn_j) const;
+
+    // Claude Generated (Dec 2025): Weight caching optimization
+    void precomputeGaussianWeights(const std::vector<int>& atoms, const std::vector<double>& coordination_numbers);
+    double interpolateC6(int elem_i, int elem_j, size_t atom_idx_i, size_t atom_idx_j) const;  // Updated signature: uses atom indices instead of CN values
+
     double calculateDistance(int i, int j, const Eigen::MatrixXd& geometry) const;
 
     // ATM three-body helper (Claude Generated 2025)
@@ -164,4 +168,11 @@ private:
     std::vector<int> m_atoms;
     Eigen::MatrixXd m_geometry;  // Store geometry for distance calculations
     bool m_data_initialized = false;
+
+    // Claude Generated (Dec 2025): Cached Gaussian weights for C6 interpolation
+    // Performance optimization: Pre-compute weights once per atom instead of per pair
+    // Expected speedup: 5-10x for molecules with 100+ atoms
+    std::vector<std::vector<double>> m_gaussian_weights;  // [atom_idx][ref_idx]
+    std::vector<double> m_cached_cn;  // Coordination numbers
+    bool m_weights_cached = false;
 };
