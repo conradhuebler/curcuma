@@ -225,7 +225,8 @@ private:
     Vector calculateDxi(
         const std::vector<int>& atoms,
         const Matrix& geometry_bohr,
-        const Vector& cn
+        const Vector& cn,
+        const std::optional<TopologyInput>& topology = std::nullopt
     );
 
     /**

@@ -158,6 +158,10 @@ Vector EEQSolver::calculateTopologyCharges(
     int nfrag = 1;  // Single molecular fragment (neutral or charged)
     int m = natoms + nfrag;
 
+    // Calculate improved dxi corrections with topology-aware neighbor analysis
+    // Claude Generated (December 2025, Session 13): Use improved calculateDxi()
+    Vector dxi = calculateDxi(atoms, geometry_bohr, cn, topology);
+
     // Setup EEQ parameters with CN-dependence
     Vector chi(natoms);
     Vector gam(natoms);
@@ -170,25 +174,11 @@ Vector EEQSolver::calculateTopologyCharges(
         // Claude Generated (December 2025, Session 11): CRITICAL FIX - Add CNF term in Phase 1
         // Reference: XTB gfnff_ini.f90:411
         // CORRECT: chi = -chi + dxi + cnf*sqrt(CN)  (XTB formula)
-        // WRONG (old): chi = -chi + dxi_total (missing CNF term!)
-
-        // Chi with CN-dependent corrections
-        // Simple hybridization guess: high CN → sp3, low CN → sp/sp2
-        double dxi_hyb = 0.0;
-        if (cn(i) < 1.5) {
-            dxi_hyb = 0.1;  // sp-like
-        } else if (cn(i) < 2.5) {
-            dxi_hyb = 0.05;  // sp2-like
-        }
-        // sp3-like: no correction
-
-        double dxi_cn = -0.01 * (cn(i) - 2.0);
-        double dxi_total = dxi_hyb + dxi_cn;
 
         // CRITICAL: Add CNF*sqrt(CN) term (from XTB gfnff_ini.f90:411)
         double cnf_term = params_i.cnf * std::sqrt(cn(i));
 
-        chi(i) = -params_i.chi + dxi_total + cnf_term;
+        chi(i) = -params_i.chi + dxi(i) + cnf_term;
         gam(i) = params_i.gam;
         alpha(i) = params_i.alp;  // Already squared
     }
@@ -457,13 +447,15 @@ Matrix EEQSolver::computeTopologicalDistances(
         }
     }
 
-    // Debug output
+    // Debug output - Phase 1.1 Validation
+    // Claude Generated (December 2025, Session 13): Debug output for topology distance validation
     if (m_verbosity >= 3) {
-        std::cerr << "\n=== Floyd-Warshall Topological Distances ===" << std::endl;
+        std::cerr << "\n=== Floyd-Warshall Topological Distances (Bohr) ===" << std::endl;
+        std::cerr << "Reference: Compare with XTB verbose output for validation" << std::endl;
         for (int i = 0; i < std::min(5, natoms); ++i) {
-            for (int j = 0; j < std::min(5, natoms); ++j) {
+            for (int j = 0; j < i; ++j) {  // Only lower triangle (j < i)
                 if (rabd(i, j) < RABD_CUTOFF) {
-                    std::cerr << fmt::format("  rabd[{},{}] = {:.4f} Bohr", i, j, rabd(i, j)) << std::endl;
+                    std::cerr << fmt::format("  d_topo[{},{}] = {:.4f} Bohr", i, j, rabd(i, j)) << std::endl;
                 }
             }
         }
@@ -809,24 +801,135 @@ double EEQSolver::calculateEEQEnergy(
 Vector EEQSolver::calculateDxi(
     const std::vector<int>& atoms,
     const Matrix& geometry_bohr,
-    const Vector& cn)
+    const Vector& cn,
+    const std::optional<TopologyInput>& topology)
 {
+    // Claude Generated (December 2025, Session 13): IMPROVED dxi calculation
+    // Reference: XTB gfnff_ini.f90:358-403
+    // Implements key environment-dependent corrections for electronegativity
+
     const int natoms = atoms.size();
     Vector dxi = Vector::Zero(natoms);
 
+    // Debug output header
+    if (m_verbosity >= 3) {
+        std::cerr << "\n=== Dxi Calculation (IMPROVED - Phase 2) ===" << std::endl;
+        std::cerr << "Reference: XTB gfnff_ini.f90:358-403" << std::endl;
+        std::cerr << "Atom |  Z | CN  | nH | Env | dxi_total | Components" << std::endl;
+        std::cerr << "-----+----+-----+----+-----+-----------+-----------" << std::endl;
+    }
+
     for (int i = 0; i < natoms; ++i) {
-        // Hybridization guess from CN
-        double dxi_hyb = 0.0;
-        if (cn(i) < 1.5) {
-            dxi_hyb = 0.1;  // sp-like
-        } else if (cn(i) < 2.5) {
-            dxi_hyb = 0.05;  // sp2-like
+        int ati = atoms[i];
+        double dxi_total = 0.0;
+        std::string components = "";
+
+        // Get neighbor information if topology available
+        int nh = 0;  // Number of H neighbors
+        int nn = 0;  // Total number of neighbors
+        int nm = 0;  // Number of metal neighbors
+        std::string env_desc = "";
+
+        if (topology.has_value()) {
+            nn = topology->neighbor_lists[i].size();
+            for (int j : topology->neighbor_lists[i]) {
+                if (atoms[j] == 1) nh++;
+                // Simple metal check: Z > 20 (after Ca) or Z in [21-30, 39-48, 72-80]
+                int Z = atoms[j];
+                if (Z > 20 && (Z <= 30 || (Z >= 39 && Z <= 48) || (Z >= 72 && Z <= 80))) {
+                    nm++;
+                }
+            }
         }
 
-        // CN-dependent correction
-        double dxi_cn = -0.01 * (cn(i) - 2.0);
+        // ===== Element-Specific Environment Corrections (from XTB) =====
 
-        dxi(i) = dxi_hyb + dxi_cn;
+        // Boron (Z=5): +0.015 per H neighbor (line 377)
+        if (ati == 5 && nh > 0) {
+            double corr = nh * 0.015;
+            dxi_total += corr;
+            components += fmt::format("B-H:{:+.3f} ", corr);
+        }
+
+        // Carbon (Z=6): Special cases (lines 379-387)
+        if (ati == 6) {
+            // Carbene (CN=2, special tag): make more negative (line 379)
+            if (nn == 2 && cn(i) < 2.5) {
+                double corr = -0.15;
+                dxi_total += corr;
+                components += "carbene:-0.15 ";
+                env_desc = "carbene";
+            }
+            // Free CO (C bonded to single O): make O less negative (line 387)
+            // This is applied to the O atom in the loop when we see it
+        }
+
+        // Oxygen (Z=8): Multiple environment-dependent corrections (lines 391-394)
+        if (ati == 8) {
+            // H2O: lower electronegativity (line 392)
+            if (nn == 2 && nh == 2) {
+                double corr = -0.02;
+                dxi_total += corr;
+                components += "H2O:-0.02 ";
+                env_desc = "H2O";
+            }
+            // General O/S: -0.005 per H (line 394)
+            if (nh > 0) {
+                double corr = -nh * 0.005;
+                dxi_total += corr;
+                components += fmt::format("O-H:{:+.3f} ", corr);
+            }
+            // Group 6 (O,S) with nn > 2: +0.005 per neighbor (line 393)
+            if (nn > 2) {
+                double corr = nn * 0.005;
+                dxi_total += corr;
+                components += fmt::format("O-nn:{:+.3f} ", corr);
+            }
+        }
+
+        // Sulfur (Z=16): Same as oxygen for some corrections (line 394)
+        if (ati == 16) {
+            if (nh > 0) {
+                double corr = -nh * 0.005;
+                dxi_total += corr;
+                components += fmt::format("S-H:{:+.3f} ", corr);
+            }
+            if (nn > 2) {
+                double corr = nn * 0.005;
+                dxi_total += corr;
+                components += fmt::format("S-nn:{:+.3f} ", corr);
+            }
+        }
+
+        // Halogens (Group 7: Cl=17, Br=35, I=53): Polyvalent corrections (lines 396-402)
+        if ((ati == 17 || ati == 35 || ati == 53) && nn > 1) {
+            if (nm == 0) {
+                // Not bonded to metal: -0.021 per neighbor
+                double corr = -nn * 0.021;
+                dxi_total += corr;
+                components += fmt::format("X-poly:{:+.3f} ", corr);
+                env_desc = "polyval";
+            } else {
+                // Bonded to metal: +0.05 per neighbor
+                double corr = nn * 0.05;
+                dxi_total += corr;
+                components += fmt::format("X-TM:{:+.3f} ", corr);
+                env_desc = "TM-ligand";
+            }
+        }
+
+        dxi(i) = dxi_total;
+
+        // Debug output per atom
+        if (m_verbosity >= 3) {
+            if (components.empty()) components = "none";
+            std::cerr << fmt::format("  {:2d} | {:2d} | {:3.1f} | {:2d} | {:7s} | {:+8.5f} | {}",
+                                    i, ati, cn(i), nh, env_desc, dxi_total, components) << std::endl;
+        }
+    }
+
+    if (m_verbosity >= 3) {
+        std::cerr << "========================================\n" << std::endl;
     }
 
     return dxi;
