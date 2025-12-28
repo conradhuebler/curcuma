@@ -91,18 +91,26 @@ public:
      * @param total_charge Total molecular charge (default 0)
      * @param cn_hint Optional pre-calculated coordination numbers (nullptr to calculate internally)
      * @param hyb_hint Optional pre-calculated hybridization states (nullptr to use defaults)
+     * @param topology Optional topology information for Floyd-Warshall topological distances
+     *                 If provided, uses topological distances (more accurate, matches XTB)
+     *                 If omitted, falls back to geometric distances (deprecated)
      * @return Vector of atomic partial charges in elementary charge units (e)
      *
      * Automatically uses two-phase algorithm for better accuracy:
      * - Phase 1: Solve augmented EEQ system for topology charges
      * - Phase 2: Iterative refinement with dxi, dgam, dalpha corrections
+     *
+     * @note CRITICAL FIX (Dec 28, 2025): Added topology parameter to enable Floyd-Warshall
+     *       topological distances in Phase 1, matching XTB reference implementation.
+     *       Without topology, geometric distances produce charges 4-5× too large!
      */
     Vector calculateCharges(
         const std::vector<int>& atoms,
         const Matrix& geometry_bohr,
         int total_charge = 0,
         const Vector* cn_hint = nullptr,
-        const std::vector<int>* hyb_hint = nullptr
+        const std::vector<int>* hyb_hint = nullptr,
+        const std::optional<TopologyInput>& topology = std::nullopt
     );
 
     // ===== Advanced API (two-phase workflow) =====

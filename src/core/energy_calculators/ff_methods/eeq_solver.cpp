@@ -65,7 +65,8 @@ Vector EEQSolver::calculateCharges(
     const Matrix& geometry_bohr,
     int total_charge,
     const Vector* cn_hint,
-    const std::vector<int>* hyb_hint)
+    const std::vector<int>* hyb_hint,
+    const std::optional<TopologyInput>& topology)
 {
     const int natoms = atoms.size();
 
@@ -112,7 +113,8 @@ Vector EEQSolver::calculateCharges(
     }
 
     // Step 3: Phase 1 - Calculate topology charges
-    Vector topology_charges = calculateTopologyCharges(atoms, geometry_bohr, total_charge, cn);
+    // CRITICAL FIX (Dec 28, 2025): Pass topology parameter to enable Floyd-Warshall
+    Vector topology_charges = calculateTopologyCharges(atoms, geometry_bohr, total_charge, cn, topology);
 
     if (topology_charges.size() != natoms) {
         CurcumaLogger::error("EEQSolver::calculateCharges: Phase 1 failed");
@@ -296,8 +298,11 @@ Vector EEQSolver::calculateTopologyCharges(
             }
         }
     } else {
-        // Fallback to geometric distances (old behavior, deprecated)
-        CurcumaLogger::warn("EEQSolver: Using geometric distances (Floyd-Warshall disabled)");
+        // Fallback to geometric distances (old behavior, acceptable for non-GFN-FF uses like D4)
+        // Only warn at high verbosity since this is expected for universal EEQ usage
+        if (m_verbosity >= 3) {
+            CurcumaLogger::warn("EEQSolver: Using geometric distances (Floyd-Warshall topological distances not available)");
+        }
         for (int i = 0; i < natoms; ++i) {
             for (int j = 0; j < i; ++j) {
                 double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
@@ -500,47 +505,14 @@ Vector EEQSolver::calculateFinalCharges(
     // Augmented system size
     int m = natoms + 1;
 
-    // Claude Generated (2025): Pre-calculate corrected parameters ONCE
-    // Note: dxi and dgam are constant, but alpha is charge-dependent (calculated inline)
+    // Claude Generated (December 2025, Session 12): Pre-calculate CONSTANT corrected parameters
+    // CRITICAL: Only chi and gam are constant - alpha is CHARGE-DEPENDENT and must be updated per iteration!
     Vector chi_corrected(natoms);
     Vector gam_corrected(natoms);
-    Vector alpha_corrected(natoms);
 
     for (int i = 0; i < natoms; ++i) {
         int z_i = atoms[i];
         EEQParameters params_i = getParameters(z_i, cn(i));
-
-        // Claude Generated (December 2025, Session 11): CRITICAL FIX - Correct alpha formula from XTB
-        // Reference: Fortran gfnff_ini.f90:699-706
-        // CORRECT: alpha = (alpha_base + ff*qa)²  (charge-dependent, NOT CN-dependent!)
-        // WRONG (old): alpha = alpha_base² + dalpha (CN-dependent)
-
-        // Get base alpha (UNSQUARED) from gfnff_par.h
-        double alpha_base = (z_i >= 1 && z_i <= 86) ? alpha_eeq[z_i - 1] : 0.903430;
-
-        // Calculate charge-dependent ff factor (from XTB gfnff_ini.f90:699-705)
-        double ff = 0.0;
-        if (z_i == 6) {  // Carbon
-            ff = 0.09;
-        } else if (z_i == 7) {  // Nitrogen
-            ff = -0.21;
-        } else if (z_i > 10 && z_i <= 86) {  // Heavy atoms only
-            int group = periodic_group[z_i - 1];
-            int imetal_val = metal_type[z_i - 1];
-
-            if (group == 6) {  // Chalcogens (O, S, Se, Te, Po)
-                ff = -0.03;
-            } else if (group == 7) {  // Halogens (F, Cl, Br, I, At)
-                ff = 0.50;
-            } else if (imetal_val == 1) {  // Main group metals
-                ff = 0.3;
-            } else if (imetal_val == 2) {  // Transition metals
-                ff = -0.1;
-            }
-        }
-
-        // Apply CORRECT formula: alpha = (alpha_base + ff*qa)²
-        alpha_corrected(i) = std::pow(alpha_base + ff * topology_charges(i), 2);
 
         // CRITICAL FIX (Session 11 - CORRECTED): chi_corrected WITHOUT CNF!
         // Reference: XTB gfnff_ini.f90:696 (Phase 2)
@@ -548,6 +520,8 @@ Vector EEQSolver::calculateFinalCharges(
         // Then RHS adds CNF once: x = chieeq + CNF·√CN = -χ + dxi + CNF·√CN
         chi_corrected(i) = -params_i.chi + dxi(i);  // WITHOUT CNF!
         gam_corrected(i) = params_i.gam + dgam(i);
+
+        // ❌ DON'T calculate alpha_corrected here - it's charge-dependent and must be updated per iteration!
     }
 
     // Claude Generated (2025): Pre-calculate distance matrix (geometry-dependent only)
@@ -570,52 +544,113 @@ Vector EEQSolver::calculateFinalCharges(
         }
     }
 
-    // Claude Generated (2025): Pre-build base Coulomb matrix ONCE
-    // Off-diagonal elements depend on geometry and alpha (both constant in loop)
-    Matrix A_coulomb_base = Matrix::Zero(m, m);
-
-    for (int i = 0; i < natoms; ++i) {
-        for (int j = 0; j < i; ++j) {
-            double r = distances(i, j);
-            double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
-            double erf_gamma = std::erf(gamma_ij * r);
-            double coulomb = erf_gamma / r;
-
-            A_coulomb_base(i, j) = coulomb;
-            A_coulomb_base(j, i) = coulomb;
-        }
-    }
-
-    // Setup fragment charge constraint (constant)
-    for (int j = 0; j < natoms; ++j) {
-        A_coulomb_base(natoms, j) = 1.0;
-        A_coulomb_base(j, natoms) = 1.0;
-    }
+    // Claude Generated (December 2025, Session 12): REMOVED pre-build of A_coulomb_base
+    // CRITICAL BUG FIX: Coulomb matrix must be rebuilt EVERY iteration with updated alpha!
+    // alpha is charge-dependent: alpha(i) = (alpha_base + ff*q(i))²
+    // Therefore A(i,j) = erf(gamma_ij*r)/r with gamma_ij = 1/sqrt(alpha(i)+alpha(j)) changes per iteration!
 
     if (m_verbosity >= 3) {
-        CurcumaLogger::info(fmt::format("EEQ Phase 2: Pre-computed distance matrix and Coulomb base ({}x{})", natoms, natoms));
+        CurcumaLogger::info(fmt::format("EEQ Phase 2: Pre-computed distance matrix ({}x{})", natoms, natoms));
+        CurcumaLogger::info("Coulomb matrix will be rebuilt each iteration with updated alpha");
+    }
+
+    // Claude Generated (December 2025, Session 12): Debug output for constant parameters
+    // Note: alpha_corrected is now calculated per iteration, not here!
+    if (m_verbosity >= 3) {
+        std::cerr << "\n=== EEQ Phase 2: Constant Corrected Parameters ===" << std::endl;
+        for (int i = 0; i < std::min(3, natoms); ++i) {
+            int z_i = atoms[i];
+            EEQParameters params_i = getParameters(z_i, cn(i));
+
+            std::cerr << "Atom " << i << " (Z=" << z_i << "):" << std::endl;
+            std::cerr << "  chi_base = " << params_i.chi << std::endl;
+            std::cerr << "  gam_base = " << params_i.gam << std::endl;
+            std::cerr << "  CN = " << cn(i) << std::endl;
+            std::cerr << "  dxi = " << dxi(i) << std::endl;
+            std::cerr << "  dgam = " << dgam(i) << std::endl;
+            std::cerr << "  chieeq = " << chi_corrected(i) << " (WITHOUT CNF)" << std::endl;
+            std::cerr << "  gameeq = " << gam_corrected(i) << std::endl;
+            std::cerr << "  (alpha will be calculated per iteration with updated charges)" << std::endl;
+        }
+        std::cerr << "===========================================================\n" << std::endl;
     }
 
     // Iterative refinement loop (now much faster!)
     for (int iter = 0; iter < m_max_iterations; ++iter) {
-        // Claude Generated (2025): Copy pre-computed Coulomb matrix
-        // This is O(n²) copy, much faster than O(n²) sqrt() + erf() recalculation
-        Matrix A = A_coulomb_base;
+        // Claude Generated (December 2025, Session 12): CRITICAL BUG FIX
+        // Rebuild entire Coulomb matrix EVERY iteration with updated alpha!
+        Matrix A = Matrix::Zero(m, m);
         Vector x = Vector::Zero(m);
+        Vector alpha_corrected(natoms);
 
-        // 1. Setup RHS with CNF*sqrt(CN) term (critical!)
-        // Reference: XTB gfnff_engrad.F90:1504
+        // 1. Calculate charge-dependent alpha (MUST be updated per iteration!)
+        // Reference: XTB gfnff_ini.f90:699-706
+        // topo%alpeeq(i) = (param%alp(at(i)) + ff*topo%qa(i))**2
+        for (int i = 0; i < natoms; ++i) {
+            int z_i = atoms[i];
+
+            // Get base alpha (UNSQUARED) from gfnff_par.h
+            double alpha_base = (z_i >= 1 && z_i <= 86) ? alpha_eeq[z_i - 1] : 0.903430;
+
+            // Calculate charge-dependent ff factor (from XTB gfnff_ini.f90:699-705)
+            double ff = 0.0;
+            if (z_i == 6) {  // Carbon
+                ff = 0.09;
+            } else if (z_i == 7) {  // Nitrogen
+                ff = -0.21;
+            } else if (z_i > 10 && z_i <= 86) {  // Heavy atoms only
+                int group = periodic_group[z_i - 1];
+                int imetal_val = metal_type[z_i - 1];
+
+                if (group == 6) {  // Chalcogens (O, S, Se, Te, Po)
+                    ff = -0.03;
+                } else if (group == 7) {  // Halogens (F, Cl, Br, I, At)
+                    ff = 0.50;
+                } else if (imetal_val == 1) {  // Main group metals
+                    ff = 0.3;
+                } else if (imetal_val == 2) {  // Transition metals
+                    ff = -0.1;
+                }
+            }
+
+            // Apply CORRECT formula: alpha = (alpha_base + ff*qa)²
+            // Use CURRENT charges from previous iteration, not topology_charges!
+            alpha_corrected(i) = std::pow(alpha_base + ff * final_charges(i), 2);
+        }
+
+        // 2. Build Coulomb off-diagonal elements with UPDATED alpha
+        // gamma_ij depends on alpha, which depends on charges, so this MUST be recalculated!
+        for (int i = 0; i < natoms; ++i) {
+            for (int j = 0; j < i; ++j) {
+                double r = distances(i, j);
+                double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
+                double erf_gamma = std::erf(gamma_ij * r);
+                double coulomb = erf_gamma / r;
+
+                A(i, j) = coulomb;
+                A(j, i) = coulomb;
+            }
+        }
+
+        // 3. Build diagonal elements with UPDATED alpha
+        for (int i = 0; i < natoms; ++i) {
+            A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
+        }
+
+        // 4. Setup fragment charge constraint
+        for (int j = 0; j < natoms; ++j) {
+            A(natoms, j) = 1.0;
+            A(j, natoms) = 1.0;
+        }
+
+        // 5. Setup RHS with CNF*sqrt(CN) term
+        // Reference: XTB gfnff_engrad.F90:1504 (used during gradient calculation)
         // x(i) = topo%chieeq(i) + param%cnf(at(i))*sqrt(cn(i))
+        // where chieeq = -chi + dxi (from gfnff_ini.f90:696 for Phase 2)
         for (int i = 0; i < natoms; ++i) {
             int z_i = atoms[i];
             EEQParameters params_i = getParameters(z_i, cn(i));
             x(i) = chi_corrected(i) + params_i.cnf * std::sqrt(cn(i));
-        }
-
-        // 2. Update only diagonal (charge-dependent terms)
-        // This is the only part that changes per iteration
-        for (int i = 0; i < natoms; ++i) {
-            A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
         }
 
         // DEBUG: Print matrix details on first iteration
@@ -623,14 +658,12 @@ Vector EEQSolver::calculateFinalCharges(
             std::cerr << "\n=== EEQ Phase 2 DEBUG (iteration 0) ===" << std::endl;
             for (int i = 0; i < std::min(3, natoms); ++i) {
                 int z_i = atoms[i];
-                EEQParameters params_i = getParameters(z_i, cn(i));
                 std::cerr << "Atom " << i << " (Z=" << z_i << "):" << std::endl;
                 std::cerr << "  CN = " << cn(i) << std::endl;
                 std::cerr << "  chi_corrected = " << chi_corrected(i) << std::endl;
                 std::cerr << "  gam_corrected = " << gam_corrected(i) << std::endl;
                 std::cerr << "  alpha_corrected = " << alpha_corrected(i) << std::endl;
-                std::cerr << "  cnf*sqrt(CN) = " << (params_i.cnf * std::sqrt(cn(i))) << std::endl;
-                std::cerr << "  x(RHS) = " << x(i) << std::endl;
+                std::cerr << "  x(RHS) = chi_corrected (NO CNF term!) = " << x(i) << std::endl;
                 std::cerr << "  A(i,i) diagonal = " << A(i, i) << std::endl;
             }
             std::cerr << "  x(constraint) = " << x(natoms) << std::endl;
