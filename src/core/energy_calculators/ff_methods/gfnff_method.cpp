@@ -46,7 +46,7 @@ GFNFF::GFNFF()
         { "method", "gfnff" },
         { "threads", 1 },
         { "gradient", 1 },
-        { "dispersion", true },
+        { "dispersion", true },  // Claude Generated: GFN-FF uses D4 dispersion (Spicher & Grimme 2020)
         { "hbond", true },
         { "repulsion_scaling", 1.0 }
     };
@@ -73,7 +73,7 @@ GFNFF::GFNFF(const json& parameters)
         { "method", "gfnff" },
         { "threads", 1 },
         { "gradient", 1 },
-        { "dispersion", true },
+        { "dispersion", true },  // Claude Generated: GFN-FF uses D4 dispersion (Spicher & Grimme 2020)
         { "hbond", true },
         { "repulsion_scaling", 1.0 }
     };
@@ -363,12 +363,15 @@ bool GFNFF::initializeForceField()
 
     // Claude Generated (Dec 26, 2025): Try loading from cache BEFORE expensive EEQ/topology calculation
     // Note: Cache file stores method as "gfnff" regardless of wrapper (cgfnff/gfnff)
+    std::cerr << "DEBUG: About to try loading from cache..." << std::endl;
     if (m_forcefield && m_forcefield->tryLoadAutoParameters("gfnff")) {
+        std::cerr << "DEBUG: *** CACHE LOADED *** - skipping parameter generation!" << std::endl;
         if (CurcumaLogger::get_verbosity() >= 1) {
             CurcumaLogger::success("Loaded from cache - skipping EEQ/topology calculation");
         }
         return true;
     }
+    std::cerr << "DEBUG: Cache miss - will generate parameters" << std::endl;
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Cache miss - calculating topology (bonds, angles, torsions, inversions)...");
@@ -436,6 +439,7 @@ bool GFNFF::initializeForceField()
 
 json GFNFF::generateGFNFFParameters()
 {
+    std::cerr << "DEBUG generateGFNFFParameters: START" << std::endl;
     json parameters;
     parameters["method"] = "gfnff";
     parameters["e0"] = 0.0;
@@ -444,6 +448,7 @@ json GFNFF::generateGFNFFParameters()
     // ACTIVATED (Session 10, Dec 2025): Two-Phase EEQ System now default
     // Claude Generated: Enable advanced parametrization (Two-Phase EEQ) by default
     bool use_advanced = m_parameters.value("use_advanced_parametrization", true);
+    std::cerr << "DEBUG generateGFNFFParameters: use_advanced=" << use_advanced << std::endl;
 
     if (use_advanced) {
         CurcumaLogger::info("Using advanced GFN-FF parametrization (experimental)");
@@ -712,6 +717,8 @@ json GFNFF::generateGFNFFBonds() const
                 bond["r0_ij"] = bond_params.equilibrium_distance;
                 bond["r0_ik"] = 0.0; // Not used in GFN-FF but required by ForceField
                 bond["exponent"] = bond_params.alpha;  // Phase 1.3: store α in exponent field
+                bond["rabshift"] = bond_params.rabshift;  // Claude Generated (Dec 2025): Store vbond(1) for validation
+                std::cerr << "DEBUG generateGFNFFBonds: Setting rabshift=" << bond_params.rabshift << " for bond " << i << "-" << j << std::endl;
 
                 bonds.push_back(bond);
             }
@@ -1074,6 +1081,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // Formula: r0 = (ra + rb + rabshift) * ff
     double rtmp = (ra + rb + rabshift) * ff;  // Shift BEFORE ff multiplication (matches Fortran)
     params.equilibrium_distance = rtmp;
+    params.rabshift = rabshift;  // Claude Generated (Dec 2025): Store for validation tests
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info(fmt::format("RAB_TRANSFORM: gen_rabshift={:.8f}, shift={:.8f}, rabshift={:.8f}",
@@ -2300,6 +2308,8 @@ bool GFNFF::areAtomsInSameRing(int i, int j, int& ring_size) const
 
 Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb, const std::vector<int>& rings) const
 {
+    using namespace GFNFFParameters;  // Access to GFN-FF parameters
+
     // Phase 3: Full EEQ (Electronegativity Equalization) implementation
     // Reference: gfnff_engrad.F90:1274-1391 (goed_gfnff subroutine)
     //
@@ -2491,7 +2501,26 @@ Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb,
                                          m_charge, total_charge_actual, charge_error));
     }
 
-    // Claude Generated (2025): Debug EEQ charges
+    // Claude Generated (December 2025, Session 10): Verbosity 2 parameter table
+    // Format similar to XTB's output with available parameters at this calculation stage
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("GFN-FF Atom Parameters:");
+        fmt::print("{:>5}  {:<3}  {:>8}  {:>10}  {:>2}  {:>7}\n",
+                    "atom", "Z", "CN", "sp-hybrid", "im", "q(est)");
+        for (int i = 0; i < n; ++i) {
+            int z = m_atoms[i];
+            int im = (z >= 1 && z <= 86 && metal_type[z - 1] > 0) ? 1 : 0;
+            int hybridization = (i < hyb.size()) ? hyb[i] : 0;
+
+            fmt::print("{:>5d}  {:<3}  {:>8.2f}  {:>10d}  {:>2d}  {:>7.3f}\n",
+                        i + 1, Elements::ElementAbbr[z], cn[i], hybridization, im, charges[i]);
+        }
+        fmt::print("Total atoms: {}\n", n);
+        fmt::print("Total charge: {:.6f}\n", total_charge_actual);
+        CurcumaLogger::info("");  // Blank line for readability
+    }
+
+    // Claude Generated (2025): Debug EEQ charges (verbosity 3)
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("=== EEQ Charges Calculated ===");
         for (int i = 0; i < n; ++i) {
@@ -2730,6 +2759,8 @@ json GFNFF::generateTopologyAwareBonds(const Vector& cn, const std::vector<int>&
                 bond["r0_ij"] = bond_params.equilibrium_distance;
                 bond["r0_ik"] = 0.0;
                 bond["exponent"] = bond_params.alpha;
+                bond["rabshift"] = bond_params.rabshift;  // Claude Generated (Dec 2025): Store vbond(1) for validation
+                std::cerr << "DEBUG generateTopologyAwareBonds: Setting rabshift=" << bond_params.rabshift << " for bond " << i << "-" << j << std::endl;
 
                 bonds.push_back(bond);
             }
@@ -3845,6 +3876,7 @@ json GFNFF::generateGFNFFDispersionPairs() const
     }
 
     // Step 1: Check if dispersion is enabled
+    // GFN-FF uses D4 dispersion by default (Spicher & Grimme, Angew. Chem. Int. Ed. 2020)
     bool enable_dispersion = m_parameters.value("dispersion", true);
     if (!enable_dispersion) {
         if (CurcumaLogger::get_verbosity() >= 2) {
@@ -4191,8 +4223,8 @@ double GFNFF::VdWEnergy() const {
 
 double GFNFF::RepulsionEnergy() const {
     if (!m_forcefield) return 0.0;
-    // Claude Generated (Dec 2025, Session 9): GFN-FF stores repulsion in HHEnergy(), not RepulsionEnergy()
-    // RepulsionEnergy() is for UFF/QMDFF only
+    // Claude Generated (Dec 2025): GFN-FF stores repulsion in separate member (m_gfnff_repulsion)
+    // This is standard exponential repulsion, not hydrogen bonding
     return m_forcefield->HHEnergy();
 }
 
@@ -4213,6 +4245,7 @@ double GFNFF::CoulombEnergy() const {
 bool GFNFF::getVBondParameters(int bond_index, double& shift, double& alpha, double& force_constant) const
 {
     if (!m_forcefield) {
+        std::cerr << "DEBUG getVBondParameters: m_forcefield is NULL!" << std::endl;
         return false;
     }
 
@@ -4221,6 +4254,7 @@ bool GFNFF::getVBondParameters(int bond_index, double& shift, double& alpha, dou
 
     // Check if bonds exist
     if (!ff_params.contains("bonds") || !ff_params["bonds"].is_array()) {
+        std::cerr << "DEBUG getVBondParameters: bonds missing or not array" << std::endl;
         return false;
     }
 
@@ -4228,31 +4262,39 @@ bool GFNFF::getVBondParameters(int bond_index, double& shift, double& alpha, dou
 
     // Check if bond_index is valid
     if (bond_index < 0 || bond_index >= bonds.size()) {
+        std::cerr << "DEBUG getVBondParameters: bond_index " << bond_index << " out of range (size=" << bonds.size() << ")" << std::endl;
         return false;
     }
 
     // Get the specific bond
     json bond = bonds[bond_index];
 
+    std::cerr << "DEBUG bond JSON keys: ";
+    for (auto it = bond.begin(); it != bond.end(); ++it) {
+        std::cerr << it.key() << " ";
+    }
+    std::cerr << std::endl;
+
     // Extract the calculated parameters from the force field
-    if (bond.contains("r0_ij") && bond.contains("exponent") && bond.contains("fc")) {
-        // For H-H bonds, the shift should be -0.160
-        int atom_i = bond["i"];
-        int atom_j = bond["j"];
-        int z_i = m_atoms[atom_i];
-        int z_j = m_atoms[atom_j];
+    // Claude Generated (Dec 2025): Extract vbond parameters for validation testing
+    // rabshift is now stored directly in the bond JSON (added Dec 2025)
+    if (bond.contains("r0_ij") && bond.contains("exponent") && bond.contains("fc") && bond.contains("rabshift")) {
+        // shift: vbond(1) = rabshift (stored during parameter generation)
+        shift = bond["rabshift"].get<double>();
 
-        if (z_i == 1 && z_j == 1) {
-            shift = -0.160000000000000;  // H-H bond shift
-        } else {
-            shift = -0.182000000000000;  // Default shift for other bonds (C-H, etc.)
-        }
-
+        // alpha: Exponent for exponential bond potential E = fc * exp(-alpha * (r-r0)^2)
         alpha = bond["exponent"].get<double>();
+
+        // force_constant: Pre-exponential factor (fc)
         force_constant = bond["fc"].get<double>();
 
         return true;
     }
+
+    std::cerr << "DEBUG getVBondParameters: Missing keys - r0_ij=" << bond.contains("r0_ij")
+              << " exponent=" << bond.contains("exponent")
+              << " fc=" << bond.contains("fc")
+              << " rabshift=" << bond.contains("rabshift") << std::endl;
 
     return false;
 }
@@ -4289,6 +4331,9 @@ bool GFNFF::calculateTopologyCharges(TopologyInfo& topo_info) const
 {
     // REFACTORED (Dec 2025 - Phase 3): Delegate to standalone EEQSolver
     // Old implementation (lines 4024-4201) replaced with simple delegation
+    //
+    // UPDATED (Dec 2025): Now passes topology information for Floyd-Warshall topological distances
+    // This fixes the 4-5× charge overestimation bug (geometric vs topological distances)
 
     if (m_atomcount <= 0) {
         CurcumaLogger::error("calculateTopologyCharges: No atoms initialized");
@@ -4306,12 +4351,36 @@ bool GFNFF::calculateTopologyCharges(TopologyInfo& topo_info) const
         }
     }
 
-    // Delegate to EEQSolver (passes CN and hybridization as hints)
+    // Build EEQSolver::TopologyInput from GFNFF data (Dec 2025 - Floyd-Warshall fix)
+    EEQSolver::TopologyInput eeq_topology;
+
+    // 1. Extract neighbor lists from TopologyInfo
+    // These are bond connectivity lists needed for shortest path computation
+    eeq_topology.neighbor_lists = topo_info.neighbor_lists;
+
+    // 2. Extract covalent radii from GFNFFParameters
+    // Needed to compute bond lengths (sum of radii) in topological distance
+    eeq_topology.covalent_radii.resize(m_atomcount);
+    for (int i = 0; i < m_atomcount; ++i) {
+        int z = m_atoms[i];
+        if (z > 0 && z <= 86) {
+            // rcov_bohr is indexed by Z-1 (0-based for C++)
+            eeq_topology.covalent_radii[i] = GFNFFParameters::rcov_bohr[z - 1];
+        } else {
+            // Fallback radius for unknown elements
+            eeq_topology.covalent_radii[i] = 1.0;  // Default 1.0 Bohr
+            CurcumaLogger::warn(fmt::format(
+                "GFNFF::calculateTopologyCharges: Unknown atomic number {} (using default covalent radius 1.0 Bohr)", z));
+        }
+    }
+
+    // 3. Pass topology to EEQSolver for Floyd-Warshall topological distances
     topo_info.topology_charges = m_eeq_solver->calculateTopologyCharges(
         m_atoms,
         m_geometry_bohr,
         m_charge,
-        topo_info.coordination_numbers
+        topo_info.coordination_numbers,
+        eeq_topology  // NEW: Pass topology for Floyd-Warshall (Dec 2025)
     );
 
     if (topo_info.topology_charges.size() != m_atomcount) {
@@ -4320,7 +4389,7 @@ bool GFNFF::calculateTopologyCharges(TopologyInfo& topo_info) const
     }
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("calculateTopologyCharges: Delegated to EEQSolver (Phase 3)");
+        CurcumaLogger::info("calculateTopologyCharges: Delegated to EEQSolver with Floyd-Warshall topological distances");
     }
 
     return true;

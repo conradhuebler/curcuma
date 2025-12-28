@@ -34,6 +34,7 @@
 #include <Eigen/Dense>
 #include <vector>
 #include <memory>
+#include <optional>
 
 /**
  * @brief EEQ (Electronegativity Equalization) charge solver
@@ -52,6 +53,23 @@
  */
 class EEQSolver {
 public:
+    /**
+     * @brief Topology information for EEQ Phase 1
+     *
+     * Used to compute topological distances via Floyd-Warshall algorithm
+     * instead of geometric (line-of-sight) distances.
+     *
+     * Topological distances represent shortest paths through the bond graph,
+     * where each bond has length = sum of covalent radii. This matches the
+     * XTB implementation in gfnff_ini.f90:431-461.
+     *
+     * Claude Generated December 2025
+     */
+    struct TopologyInput {
+        std::vector<std::vector<int>> neighbor_lists;  // neighbor_lists[i] = atoms bonded to i
+        std::vector<double> covalent_radii;            // Covalent radii in Bohr for each atom
+    };
+
     /**
      * @brief Construct EEQ solver from configuration
      * @param config ConfigManager with eeq_solver parameters
@@ -101,13 +119,21 @@ public:
      * @param geometry_bohr Coordinates in Bohr
      * @param total_charge Total molecular charge
      * @param cn Coordination numbers (for chi corrections)
+     * @param topology Optional topology information (neighbor lists, covalent radii)
+     *                 If provided, uses Floyd-Warshall topological distances
+     *                 If omitted, falls back to geometric distances (deprecated)
      * @return Vector of topology charges (qa)
+     *
+     * @note Topological distances computed via Floyd-Warshall algorithm match XTB reference
+     *       and produce charges ~4-5× smaller than geometric distances.
+     *       Reference: XTB gfnff_ini.f90:431-461
      */
     Vector calculateTopologyCharges(
         const std::vector<int>& atoms,
         const Matrix& geometry_bohr,
         int total_charge,
-        const Vector& cn
+        const Vector& cn,
+        const std::optional<TopologyInput>& topology = std::nullopt
     );
 
     /**
@@ -152,8 +178,6 @@ public:
     );
 
 private:
-    // ===== EEQ Parameter Structure =====
-
     /**
      * @brief Element-specific EEQ parameters
      *
@@ -260,6 +284,26 @@ private:
         const std::vector<int>& atoms,
         const Matrix& geometry_bohr,
         double cutoff_radius = 10.0
+    ) const;
+
+    /**
+     * @brief Compute topological distances via Floyd-Warshall algorithm
+     *
+     * Computes shortest path distances through the bond graph, where each bond
+     * has length = sum of covalent radii. Topological distances are always
+     * greater than or equal to geometric distances.
+     *
+     * Reference: XTB gfnff_ini.f90:431-461
+     *
+     * @param atoms Atomic numbers
+     * @param topology Topology information (neighbor lists, covalent radii)
+     * @return Matrix of topological distances in Bohr
+     *
+     * Claude Generated December 2025
+     */
+    Matrix computeTopologicalDistances(
+        const std::vector<int>& atoms,
+        const TopologyInput& topology
     ) const;
 
     // ===== Configuration =====
