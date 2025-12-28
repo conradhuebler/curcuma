@@ -164,6 +164,11 @@ Vector EEQSolver::calculateTopologyCharges(
         int z_i = atoms[i];
         EEQParameters params_i = getParameters(z_i, cn(i));
 
+        // Claude Generated (December 2025, Session 11): CRITICAL FIX - Add CNF term in Phase 1
+        // Reference: XTB gfnff_ini.f90:411
+        // CORRECT: chi = -chi + dxi + cnf*sqrt(CN)  (XTB formula)
+        // WRONG (old): chi = -chi + dxi_total (missing CNF term!)
+
         // Chi with CN-dependent corrections
         // Simple hybridization guess: high CN → sp3, low CN → sp/sp2
         double dxi_hyb = 0.0;
@@ -177,7 +182,10 @@ Vector EEQSolver::calculateTopologyCharges(
         double dxi_cn = -0.01 * (cn(i) - 2.0);
         double dxi_total = dxi_hyb + dxi_cn;
 
-        chi(i) = -params_i.chi + dxi_total;
+        // CRITICAL: Add CNF*sqrt(CN) term (from XTB gfnff_ini.f90:411)
+        double cnf_term = params_i.cnf * std::sqrt(cn(i));
+
+        chi(i) = -params_i.chi + dxi_total + cnf_term;
         gam(i) = params_i.gam;
         alpha(i) = params_i.alp;  // Already squared
     }
@@ -186,13 +194,79 @@ Vector EEQSolver::calculateTopologyCharges(
     Matrix A = Matrix::Zero(m, m);
     Vector x = Vector::Zero(m);
 
+    // DEBUG: Print Phase 1 parameters for first 3 atoms
+    if (m_verbosity >= 3 && natoms >= 1) {
+        std::cerr << "\n=== Phase 1 EEQ Parameter Breakdown (Topology Charges) ===" << std::endl;
+        for (int i = 0; i < std::min(3, natoms); ++i) {
+            int z_i = atoms[i];
+            EEQParameters params_raw = getParameters(z_i, 0.0);  // Without CN correction
+            EEQParameters params_cn = getParameters(z_i, cn(i)); // With CN correction
+
+            // dxi calculation (same as above)
+            double dxi_hyb = 0.0;
+            if (cn(i) < 1.5) dxi_hyb = 0.1;
+            else if (cn(i) < 2.5) dxi_hyb = 0.05;
+            double dxi_cn_corr = -0.01 * (cn(i) - 2.0);
+            double dxi_total = dxi_hyb + dxi_cn_corr;
+            double cnf_term = params_cn.cnf * std::sqrt(cn(i));
+
+            std::cerr << "Atom " << i << " (Z=" << z_i << "):" << std::endl;
+            std::cerr << "  CN = " << cn(i) << std::endl;
+            std::cerr << "  chi_base = " << params_raw.chi << std::endl;
+            std::cerr << "  gam_base = " << params_raw.gam << std::endl;
+            std::cerr << "  alpha_base = " << std::sqrt(params_raw.alp) << " (squared: " << params_raw.alp << ")" << std::endl;
+            std::cerr << "  cnf = " << params_raw.cnf << std::endl;
+            std::cerr << "  dxi_hyb = " << dxi_hyb << ", dxi_cn = " << dxi_cn_corr << ", dxi_total = " << dxi_total << std::endl;
+            std::cerr << "  cnf_term = cnf*sqrt(CN) = " << cnf_term << std::endl;
+            std::cerr << "  chi_corrected = -chi + dxi + cnf*sqrt(CN) = " << chi(i) << std::endl;
+            std::cerr << "  NOTE: XTB adds CNF term TWICE in Phase 1!" << std::endl;
+        }
+        std::cerr << "========================================\n" << std::endl;
+    }
+
     // 1. Setup RHS and diagonal
     for (int i = 0; i < natoms; ++i) {
-        x(i) = chi(i);
+        // CRITICAL FIX (Dec 28, 2025): XTB adds CNF term TWICE in Phase 1!
+        // gfnff_ini.f90:411: topo%chieeq = -chi + dxi + CNF*√CN
+        // gfnff_engrad.F90:1504: x(i) = topo%chieeq + CNF*√CN
+        // Total: x = -chi + dxi + 2×CNF*√CN
+        //
+        // Our chi(i) already includes CNF term once (line 188), so add it again:
+        int z_i = atoms[i];
+        EEQParameters params_i = getParameters(z_i, cn(i));
+        double cnf_term = params_i.cnf * std::sqrt(cn(i));
+
+        x(i) = chi(i) + cnf_term;  // chi already has 1×CNF, add 2nd term
         A(i, i) = gam(i) + TSQRT2PI / std::sqrt(alpha(i));
     }
 
+    // DEBUG: Print final RHS values with 2×CNF
+    if (m_verbosity >= 3 && natoms >= 1) {
+        std::cerr << "\n=== Phase 1 Final RHS (with 2×CNF fix) ===" << std::endl;
+        for (int i = 0; i < std::min(3, natoms); ++i) {
+            std::cerr << "  x(" << i << ") = " << x(i) << " (was " << chi(i) << " before 2nd CNF)" << std::endl;
+        }
+        std::cerr << "========================================\n" << std::endl;
+    }
+
     // 2. Setup off-diagonal Coulomb matrix
+    //
+    // CRITICAL TODO (Dec 28, 2025): XTB uses TOPOLOGICAL distances, NOT geometric!
+    // Reference: gfnff_ini.f90:431-461 (Floyd-Warshall shortest-path algorithm)
+    //
+    // XTB Algorithm:
+    //   1. Build bond distance matrix from topology (covalent radii)
+    //   2. Floyd-Warshall to compute shortest topological paths
+    //   3. Scale by gen%rfgoed1 (typically 1.0-1.2)
+    //   4. Use scaled topological distances in EEQ matrix
+    //
+    // Current Implementation: Uses geometric distances (WRONG!)
+    // Impact: Topology charges ~4-5× too large
+    //
+    // Geometric distances are SHORTER than topological (direct line vs through bonds)
+    // → Larger Coulomb terms → Larger charges → Wrong dispersion
+    //
+    // TODO: Implement Floyd-Warshall for topological distance matrix
     for (int i = 0; i < natoms; ++i) {
         for (int j = 0; j < i; ++j) {
             double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
@@ -262,6 +336,17 @@ Vector EEQSolver::calculateTopologyCharges(
         }
     }
 
+    // DEBUG: Print resulting topology charges
+    if (m_verbosity >= 3 && natoms >= 1) {
+        std::cerr << "\n=== Phase 1 Topology Charges (qa) ===" << std::endl;
+        for (int i = 0; i < std::min(5, natoms); ++i) {
+            std::cerr << "  qa[" << i << "] (Z=" << atoms[i] << ") = " << topology_charges(i) << std::endl;
+        }
+        double total_charge = topology_charges.sum();
+        std::cerr << "  Total charge = " << total_charge << " (expected: " << total_charge << ")" << std::endl;
+        std::cerr << "========================================\n" << std::endl;
+    }
+
     if (m_verbosity >= 2) {
         CurcumaLogger::info("Phase 1 EEQ: Topology charges calculated");
         for (int i = 0; i < std::min(5, natoms); ++i) {
@@ -285,10 +370,19 @@ Vector EEQSolver::calculateFinalCharges(
     const int natoms = atoms.size();
     const double TSQRT2PI = 0.797884560802866;  // sqrt(2/π)
 
-    // Calculate correction terms
+    // Calculate correction terms (dxi and dgam only - alpha calculated inline)
     Vector dxi = calculateDxi(atoms, geometry_bohr, cn);
     Vector dgam = calculateDgam(atoms, topology_charges, hybridization);
-    Vector dalpha = calculateDalpha(atoms, geometry_bohr, cn);
+
+    // DEBUG: Print topology charges used for dgam
+    if (m_verbosity >= 3) {
+        std::cerr << "\n=== Phase 2 Topology Charges (used for dgam) ===" << std::endl;
+        for (int i = 0; i < std::min(3, natoms); ++i) {
+            std::cerr << "Atom " << i << " (Z=" << atoms[i] << "): qa = " << topology_charges(i)
+                      << ", dgam = " << dgam(i) << std::endl;
+        }
+        std::cerr << "================================================\n" << std::endl;
+    }
 
     Vector final_charges = topology_charges;
 
@@ -296,7 +390,7 @@ Vector EEQSolver::calculateFinalCharges(
     int m = natoms + 1;
 
     // Claude Generated (2025): Pre-calculate corrected parameters ONCE
-    // These don't change during iteration (dxi, dgam, dalpha are constant)
+    // Note: dxi and dgam are constant, but alpha is charge-dependent (calculated inline)
     Vector chi_corrected(natoms);
     Vector gam_corrected(natoms);
     Vector alpha_corrected(natoms);
@@ -305,9 +399,44 @@ Vector EEQSolver::calculateFinalCharges(
         int z_i = atoms[i];
         EEQParameters params_i = getParameters(z_i, cn(i));
 
-        chi_corrected(i) = -params_i.chi + dxi(i);
+        // Claude Generated (December 2025, Session 11): CRITICAL FIX - Correct alpha formula from XTB
+        // Reference: Fortran gfnff_ini.f90:699-706
+        // CORRECT: alpha = (alpha_base + ff*qa)²  (charge-dependent, NOT CN-dependent!)
+        // WRONG (old): alpha = alpha_base² + dalpha (CN-dependent)
+
+        // Get base alpha (UNSQUARED) from gfnff_par.h
+        double alpha_base = (z_i >= 1 && z_i <= 86) ? alpha_eeq[z_i - 1] : 0.903430;
+
+        // Calculate charge-dependent ff factor (from XTB gfnff_ini.f90:699-705)
+        double ff = 0.0;
+        if (z_i == 6) {  // Carbon
+            ff = 0.09;
+        } else if (z_i == 7) {  // Nitrogen
+            ff = -0.21;
+        } else if (z_i > 10 && z_i <= 86) {  // Heavy atoms only
+            int group = periodic_group[z_i - 1];
+            int imetal_val = metal_type[z_i - 1];
+
+            if (group == 6) {  // Chalcogens (O, S, Se, Te, Po)
+                ff = -0.03;
+            } else if (group == 7) {  // Halogens (F, Cl, Br, I, At)
+                ff = 0.50;
+            } else if (imetal_val == 1) {  // Main group metals
+                ff = 0.3;
+            } else if (imetal_val == 2) {  // Transition metals
+                ff = -0.1;
+            }
+        }
+
+        // Apply CORRECT formula: alpha = (alpha_base + ff*qa)²
+        alpha_corrected(i) = std::pow(alpha_base + ff * topology_charges(i), 2);
+
+        // CRITICAL FIX (Session 11 - CORRECTED): chi_corrected WITHOUT CNF!
+        // Reference: XTB gfnff_ini.f90:696 (Phase 2)
+        // chieeq = -χ + dxi (OHNE CNF!)
+        // Then RHS adds CNF once: x = chieeq + CNF·√CN = -χ + dxi + CNF·√CN
+        chi_corrected(i) = -params_i.chi + dxi(i);  // WITHOUT CNF!
         gam_corrected(i) = params_i.gam + dgam(i);
-        alpha_corrected(i) = params_i.alp + dalpha(i);
     }
 
     // Claude Generated (2025): Pre-calculate distance matrix (geometry-dependent only)
@@ -363,15 +492,38 @@ Vector EEQSolver::calculateFinalCharges(
         Matrix A = A_coulomb_base;
         Vector x = Vector::Zero(m);
 
-        // 1. Setup RHS
+        // 1. Setup RHS with CNF*sqrt(CN) term (critical!)
+        // Reference: XTB gfnff_engrad.F90:1504
+        // x(i) = topo%chieeq(i) + param%cnf(at(i))*sqrt(cn(i))
         for (int i = 0; i < natoms; ++i) {
-            x(i) = chi_corrected(i);
+            int z_i = atoms[i];
+            EEQParameters params_i = getParameters(z_i, cn(i));
+            x(i) = chi_corrected(i) + params_i.cnf * std::sqrt(cn(i));
         }
 
         // 2. Update only diagonal (charge-dependent terms)
         // This is the only part that changes per iteration
         for (int i = 0; i < natoms; ++i) {
             A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
+        }
+
+        // DEBUG: Print matrix details on first iteration
+        if (iter == 0 && m_verbosity >= 3) {
+            std::cerr << "\n=== EEQ Phase 2 DEBUG (iteration 0) ===" << std::endl;
+            for (int i = 0; i < std::min(3, natoms); ++i) {
+                int z_i = atoms[i];
+                EEQParameters params_i = getParameters(z_i, cn(i));
+                std::cerr << "Atom " << i << " (Z=" << z_i << "):" << std::endl;
+                std::cerr << "  CN = " << cn(i) << std::endl;
+                std::cerr << "  chi_corrected = " << chi_corrected(i) << std::endl;
+                std::cerr << "  gam_corrected = " << gam_corrected(i) << std::endl;
+                std::cerr << "  alpha_corrected = " << alpha_corrected(i) << std::endl;
+                std::cerr << "  cnf*sqrt(CN) = " << (params_i.cnf * std::sqrt(cn(i))) << std::endl;
+                std::cerr << "  x(RHS) = " << x(i) << std::endl;
+                std::cerr << "  A(i,i) diagonal = " << A(i, i) << std::endl;
+            }
+            std::cerr << "  x(constraint) = " << x(natoms) << std::endl;
+            std::cerr << "==========================================\n" << std::endl;
         }
 
         // 3. Setup constraint RHS
@@ -451,6 +603,9 @@ Vector EEQSolver::calculateFinalCharges(
                                         total, total_charge));
     }
 
+    // Store dxi for later use in energy calculation
+    m_dxi_stored = dxi;
+
     return final_charges;
 }
 
@@ -491,7 +646,11 @@ double EEQSolver::calculateEEQEnergy(
     for (int i = 0; i < natoms; ++i) {
         EEQParameters params_i = getParameters(atoms[i], cn(i));
 
-        double chi_i = -params_i.chi + params_i.cnf * std::sqrt(cn(i));
+        // CRITICAL FIX (Session 11): chi_i must include dxi term!
+        // Reference: XTB gfnff_engrad.F90:1581
+        // chi = -χ + dxi + CNF·√CN (NOT just -χ + CNF·√CN!)
+        double dxi_i = (m_dxi_stored.size() > i) ? m_dxi_stored(i) : 0.0;
+        double chi_i = -params_i.chi + dxi_i + params_i.cnf * std::sqrt(cn(i));
         double self_energy = -charges(i) * chi_i
                            + 0.5 * charges(i) * charges(i) * (params_i.gam + TSQRT2PI / std::sqrt(params_i.alp));
 
@@ -540,20 +699,52 @@ Vector EEQSolver::calculateDgam(
     for (int i = 0; i < natoms; ++i) {
         int Z = atoms[i];
         double qa = charges(i);
-        double ff = -0.04;  // Base default
 
-        // Element-specific factors (from Fortran gfnff_ini.f90:677-688)
-        if (!hybridization.empty() && i < hybridization.size()) {
-            if (hybridization[i] < 3) {
-                ff = -0.08;  // Unsaturated
+        // Claude Generated (December 2025, Session 11): EXACT XTB ff values
+        // Reference: Fortran gfnff_ini.f90:665-690
+        double ff = 0.0;  // Default: do nothing
+
+        if (Z == 1) {
+            ff = -0.08;  // H
+        } else if (Z == 5) {
+            ff = -0.05;  // B
+        } else if (Z == 6) {  // C
+            ff = -0.27;  // sp3
+            if (!hybridization.empty() && i < hybridization.size()) {
+                if (hybridization[i] < 3) ff = -0.45;  // sp2 or lower
+                if (hybridization[i] < 2) ff = -0.34;  // sp
+            }
+        } else if (Z == 7) {  // N
+            ff = -0.13;  // Base N
+            // TODO: pi-system (-0.14) and amide (-0.16) detection requires piadr/amide functions
+        } else if (Z == 8) {  // O
+            ff = -0.15;  // sp3
+            if (!hybridization.empty() && i < hybridization.size()) {
+                if (hybridization[i] < 3) ff = -0.08;  // unsaturated
+            }
+        } else if (Z == 9) {
+            ff = 0.10;   // F
+        } else if (Z > 10) {
+            ff = -0.02;  // Heavy atoms default
+
+            // Specific heavy atom overrides
+            if (Z == 17) ff = -0.02;  // Cl
+            if (Z == 35) ff = -0.11;  // Br
+            if (Z == 53) ff = -0.07;  // I
+
+            // Metal corrections (requires metal_type array)
+            if (Z >= 1 && Z <= 86) {
+                int imetal_val = metal_type[Z - 1];
+                if (imetal_val == 1) ff = -0.08;   // Main group metals
+                if (imetal_val == 2) ff = -0.9;    // Transition metals (XTB comment: "too large")
+            }
+
+            // Noble gases (Group 8)
+            if (Z >= 1 && Z <= 86) {
+                int group = periodic_group[Z - 1];
+                if (group == 8) ff = 0.0;  // Noble gases
             }
         }
-
-        if (Z == 9) ff = 0.10;   // Fluorine
-        if (Z > 10) ff = -0.02;  // Heavy atoms
-        if (Z == 17) ff = -0.02; // Chlorine
-        if (Z == 35) ff = -0.11; // Bromine
-        if (Z == 53) ff = -0.07; // Iodine
 
         dgam(i) = qa * ff;
     }
@@ -561,33 +752,8 @@ Vector EEQSolver::calculateDgam(
     return dgam;
 }
 
-Vector EEQSolver::calculateDalpha(
-    const std::vector<int>& atoms,
-    const Matrix& geometry_bohr,
-    const Vector& cn)
-{
-    const int natoms = atoms.size();
-    Vector dalpha = Vector::Zero(natoms);
-
-    for (int i = 0; i < natoms; ++i) {
-        // CN-dependent correction
-        double dalpha_cn = -0.02 * (cn(i) - 2.0);
-
-        // Simple hybridization guess from CN
-        double dalpha_hyb = 0.0;
-        if (cn(i) < 1.5) {
-            dalpha_hyb = 0.05;  // sp-like
-        } else if (cn(i) < 2.5) {
-            dalpha_hyb = 0.02;  // sp2-like
-        }
-
-        dalpha(i) = dalpha_cn + dalpha_hyb;
-    }
-
-    return dalpha;
-}
-
 // ===== Parameter Lookup =====
+// NOTE: calculateDalpha() removed - alpha now calculated with charge-dependent formula (alpha_base + ff*qa)²
 
 EEQSolver::EEQParameters EEQSolver::getParameters(int Z, double cn) const
 {

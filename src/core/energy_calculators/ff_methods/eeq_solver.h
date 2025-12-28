@@ -214,21 +214,7 @@ private:
         const std::vector<int>& hybridization
     );
 
-    /**
-     * @brief Calculate polarizability corrections (dalpha)
-     *
-     * Environment-dependent alpha corrections based on neighbor CN.
-     *
-     * @param atoms Atomic numbers
-     * @param geometry_bohr Coordinates in Bohr
-     * @param cn Coordination numbers
-     * @return Vector of dalpha corrections (Bohr^-2)
-     */
-    Vector calculateDalpha(
-        const std::vector<int>& atoms,
-        const Matrix& geometry_bohr,
-        const Vector& cn
-    );
+    // NOTE: calculateDalpha() removed - alpha now calculated inline with charge-dependent formula
 
     // ===== Helper Functions =====
 
@@ -283,6 +269,10 @@ private:
     double m_convergence_threshold;   ///< Convergence threshold for charge changes (e)
     int m_verbosity;                  ///< Verbosity level (0-3)
     bool m_calculate_cn;              ///< Auto-calculate CN if not provided
+
+    // ===== Cached Data for Energy Calculation =====
+
+    mutable Vector m_dxi_stored;      ///< Stored dxi corrections from last calculateCharges() call
 };
 
 // ===== Parameter Definitions =====
