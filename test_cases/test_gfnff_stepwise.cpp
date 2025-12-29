@@ -188,6 +188,22 @@ public:
         CurcumaLogger::set_verbosity(config.verbosity);
     }
 
+    // Find a calculated bond by atom pair indices
+    // Returns the bond from calc_bonds that matches the given atom indices
+    // Returns empty json if not found
+    json find_bond_by_atoms(const json& calc_bonds, int atom_i, int atom_j) const {
+        for (const auto& bond : calc_bonds) {
+            int calc_i = bond["i"];
+            int calc_j = bond["j"];
+            // Match either direction (i-j or j-i)
+            if ((calc_i == atom_i && calc_j == atom_j) ||
+                (calc_i == atom_j && calc_j == atom_i)) {
+                return bond;
+            }
+        }
+        return json::object();  // Return empty if not found
+    }
+
     // Print structure information before running tests
     bool print_structure_info(const std::string& mol_name) const {
         try {
@@ -630,9 +646,9 @@ public:
             }
 
             // Compare bond parameters
-            std::cout << "\n  Bond Parameter Comparison:" << std::endl;
+            std::cout << "\n  Bond Parameter Comparison (matched by atom pairs):" << std::endl;
             std::cout << "  " << std::string(120, '-') << std::endl;
-            std::cout << "  Bond | Atoms  | r0(calc) | r0(ref) | Δr0     | alp(calc)| alp(ref)| Δalp    | fqq(calc)| fqq(ref)| Δfqq    " << std::endl;
+            std::cout << "  Bond | Ref Atoms | Calc Atoms | r0(calc) | r0(ref) | Δr0     | alp(calc)| alp(ref)| Δalp    | fqq(calc)| fqq(ref)| Δfqq    " << std::endl;
             std::cout << "  " << std::string(120, '-') << std::endl;
 
             // Unit system: GFN-FF generates parameters in Bohr
@@ -646,11 +662,30 @@ public:
             double fqq_tolerance = 0.01;  // 0.01 tolerance for fqq
 
             int bonds_ok = 0;
+            int bonds_matched = 0;
+            int bonds_not_found = 0;
             double rms_r0 = 0.0, rms_k = 0.0, rms_fqq = 0.0;
 
             for (size_t i = 0; i < ref_bonds.size(); ++i) {
-                auto calc = calc_bonds[i];
                 auto ref = ref_bonds[i];
+
+                // Extract atom indices from reference (1-indexed in reference, convert to 0-indexed)
+                int ref_atom_i = ref["atoms"][0].get<int>() - 1;
+                int ref_atom_j = ref["atoms"][1].get<int>() - 1;
+
+                // Find matching calculated bond by atom pair
+                auto calc = find_bond_by_atoms(calc_bonds, ref_atom_i, ref_atom_j);
+
+                if (calc.empty()) {
+                    std::cout << "  ✗ Bond " << std::setw(2) << (i+1)
+                              << " | " << ref_atom_i << "-" << ref_atom_j << " | NOT FOUND" << std::endl;
+                    bonds_not_found++;
+                    continue;
+                }
+
+                bonds_matched++;
+                int calc_i = calc["i"];
+                int calc_j = calc["j"];
 
                 // Convert r0_ij from Bohr to Ångström for comparison
                 double r0_calc_bohr = calc["r0_ij"];  // In Bohr (from parameter generation)
@@ -675,8 +710,9 @@ public:
                 if (passed) bonds_ok++;
 
                 std::cout << "  " << std::setw(4) << (i+1)
-                          << " | " << calc["i"] << "-" << calc["j"]
-                          << "    | " << std::setw(8) << std::fixed << std::setprecision(4) << r0_calc << "Å"
+                          << " | " << ref_atom_i << "-" << ref_atom_j
+                          << "       | " << calc_i << "-" << calc_j
+                          << "       | " << std::setw(8) << std::fixed << std::setprecision(4) << r0_calc << "Å"
                           << " | " << std::setw(5) << r0_ref << "Å"
                           << " | " << std::setw(7) << std::scientific << std::setprecision(2) << r0_error
                           << " | " << std::setw(8) << std::fixed << std::setprecision(4) << k_calc
@@ -695,14 +731,22 @@ public:
             rms_fqq = std::sqrt(rms_fqq / ref_bonds.size());
 
             std::cout << "\n  Bond Parameter Error Statistics:" << std::endl;
+            std::cout << "    Bonds matched:  " << bonds_matched << "/" << ref_bonds.size() << std::endl;
+            if (bonds_not_found > 0) {
+                std::cout << "    Bonds NOT found: " << bonds_not_found << " (ERROR!)" << std::endl;
+            }
+            std::cout << "    Bonds OK:       " << bonds_ok << "/" << bonds_matched << " (within tolerance)" << std::endl;
             std::cout << "    RMS r0 error:   " << std::scientific << std::setprecision(4) << rms_r0 << " Å" << std::endl;
-            std::cout << "    RMS k error:    " << rms_k << std::endl;
+            std::cout << "    RMS k error:    " << std::fixed << rms_k << std::endl;
             std::cout << "    RMS fqq error:  " << rms_fqq << std::endl;
-            std::cout << "    Bonds OK:       " << bonds_ok << "/" << ref_bonds.size() << std::endl;
 
-            bool bonds_acceptable = (bonds_ok >= static_cast<int>(ref_bonds.size() * 0.9));  // 90% pass rate
+            bool bonds_acceptable = (bonds_matched == static_cast<int>(ref_bonds.size())) &&
+                                   (bonds_ok >= static_cast<int>(ref_bonds.size() * 0.9));  // 90% pass rate, all found
 
-            if (bonds_acceptable) {
+            if (bonds_not_found > 0) {
+                std::cout << "  ✗ ERROR: Some bonds could not be matched by atom pairs!" << std::endl;
+                bonds_acceptable = false;
+            } else if (bonds_acceptable) {
                 std::cout << "  ✓ Bond parameters match XTB reference (≥90% within tolerance)" << std::endl;
                 passed_tests++;
             } else {
