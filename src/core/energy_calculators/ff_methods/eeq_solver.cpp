@@ -867,12 +867,12 @@ Vector EEQSolver::calculateDxi(
         }
     }
 
-    // Debug output header
+    // Debug output header (Claude Generated Dec 29, 2025 - Fixed debug visibility)
     if (m_verbosity >= 3) {
-        std::cerr << "\n=== Dxi Calculation (FULL - Phase 2.7) ===" << std::endl;
-        std::cerr << "Reference: XTB gfnff_ini.f90:358-403 + pi-system + neighbor EN" << std::endl;
-        std::cerr << "Atom |  Z | CN  | Hyb | Pi | EN_avg | dxi_total | Components" << std::endl;
-        std::cerr << "-----+----+-----+-----+----+--------+-----------+-----------" << std::endl;
+        CurcumaLogger::info("\n=== Dxi Calculation (FULL - Phase 2.7) ===");
+        CurcumaLogger::info("Reference: XTB gfnff_ini.f90:358-403 + pi-system + neighbor EN");
+        CurcumaLogger::info("Atom |  Z | CN  | Hyb | Pi | EN_avg | dxi_total | Components");
+        CurcumaLogger::info("-----+----+-----+-----+----+--------+-----------+-----------");
     }
 
     for (int i = 0; i < natoms; ++i) {
@@ -1031,18 +1031,18 @@ Vector EEQSolver::calculateDxi(
 
         dxi(i) = dxi_total;
 
-        // Debug output per atom
+        // Debug output per atom (Claude Generated Dec 29, 2025 - Fixed debug visibility)
         if (m_verbosity >= 3) {
             if (components.empty()) components = "none";
             std::string hyb_str = (hyb[i] == 1) ? "sp" : (hyb[i] == 2) ? "sp2" : "sp3";
             std::string pi_str = is_pi_atom[i] ? "Y" : "N";
-            std::cerr << fmt::format("  {:2d} | {:2d} | {:3.1f} | {:3s} | {:2s} | {:6.2f} | {:+9.5f} | {}",
-                                    i, ati, cn(i), hyb_str, pi_str, en_avg, dxi_total, components) << std::endl;
+            CurcumaLogger::info(fmt::format("  {:2d} | {:2d} | {:3.1f} | {:3s} | {:2s} | {:6.2f} | {:+9.5f} | {}",
+                                    i, ati, cn(i), hyb_str, pi_str, en_avg, dxi_total, components));
         }
     }
 
     if (m_verbosity >= 3) {
-        std::cerr << "========================================\n" << std::endl;
+        CurcumaLogger::info("========================================");
     }
 
     return dxi;

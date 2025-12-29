@@ -142,17 +142,17 @@ private:
         ref.molecule_file = "CH3OCH3";  // Registry name instead of path
         ref.description = "CH3OCH3 (dimethyl ether) - Stepwise validation";
 
-        // XTB reference charges (q_est) - from CH3OCH3.log line 133-142
+        // XTB 6.6.1 reference charges (from gfnff_charges file) - Claude Generated Dec 29, 2025
         ref.ref_charges = {
-            0.040,  // Atom 1 (C)
-            0.040,  // Atom 2 (C)
-            0.045,  // Atom 3 (H)
-            0.045,  // Atom 4 (H)
-            0.045,  // Atom 5 (H)
-           -0.348,  // Atom 6 (O)
-            0.045,  // Atom 7 (H)
-            0.045,  // Atom 8 (H)
-            0.045   // Atom 9 (H)
+            0.02055261,  // Atom 1 (C)
+            0.02053202,  // Atom 2 (C)
+            0.04900542,  // Atom 3 (H)
+            0.06258671,  // Atom 4 (H)
+            0.05025488,  // Atom 5 (H)
+           -0.36475672,  // Atom 6 (O)
+            0.06257459,  // Atom 7 (H)
+            0.05025181,  // Atom 8 (H)
+            0.04899868   // Atom 9 (H)
         };
 
         // XTB coordination numbers (erfCN) - from CH3OCH3.log
@@ -1003,6 +1003,10 @@ int main(int argc, char** argv) {
             return 0;
         }
     }
+
+    // Claude Generated (Dec 2025): Clean up any existing cache files for reproducible testing
+    // This ensures tests run with fresh parameter generation, not cached values
+    std::system("rm -f *.param.json gfnff_params.json 2>/dev/null");
 
     GFNFFStepwiseTest test_suite(config);
     bool success = test_suite.run_all_tests();

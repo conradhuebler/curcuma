@@ -106,6 +106,16 @@ To add a new GFN-FF energy term (e.g., "CrossTerm"), you MUST modify:
 - **ConfigManager Integration**: EEQSolver parameters (max_iterations, convergence_threshold, verbosity, calculate_cn)
 - **Status**: All tests passing, architectural consolidation complete
 
+### ⚠️ EEQ Charge Accuracy Status (December 29, 2025)
+**Current Performance**: RMS error 0.0077 e vs XTB 6.6.1 reference (CH₃OCH₃)
+- **Test Status**: ✅ PASSING (6/9 atoms within tolerance, RMS < 0.01 e)
+- **Remaining Discrepancy**: C atoms ~33% too high (+0.0067 e absolute), O ~6% too high
+- **CN Validation**: ✅ Perfect match with XTB (<0.3% error) - CN is NOT the cause
+- **dxi Analysis**: ✅ Neighbor EN corrections are ~0.001-0.004 e (too small to explain 33% error)
+- **Root Cause (suspected)**: EEQ parameter differences (chi/gam/alp/cnf) - requires validation against XTB source
+- **Decision**: Deferred further dxi optimization - current accuracy acceptable for production use
+- **Next Steps**: Parameter validation if higher precision needed (Phase 2: Compare chi/gam/alp/cnf with XTB)
+
 ### ✅ Parameter Management (Phase 2 - December 2025)
 - **ConfigManager Integration**: Type-safe parameter access with validation
 - **Parameter Flags**: Selective term calculation (dispersion, hbond, repulsion, coulomb enabled/disable)
