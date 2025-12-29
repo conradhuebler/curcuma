@@ -1,0 +1,884 @@
+/**
+ * GFN-FF Stepwise Validation Test
+ * Purpose: Isolate energy calculation errors from EEQ charge calculation errors
+ *
+ * Strategy:
+ * 1. Inject XTB reference charges into Curcuma GFN-FF
+ * 2. Calculate energy components with known-correct charges
+ * 3. Compare against XTB reference to determine error source:
+ *    - If components match → EEQ is the problem
+ *    - If components differ → Energy calculation has issues
+ *
+ * Reference Data: XTB 6.6.1 output for CH3OCH3 (dimethyl ether)
+ *
+ * Claude Generated - December 29, 2025
+ * Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ */
+
+#include <cassert>
+#include <cmath>
+#include <iomanip>
+#include <iostream>
+#include <map>
+#include <string>
+#include <vector>
+
+#include "src/core/energycalculator.h"
+#include "src/core/molecule.h"
+#include "src/core/curcuma_logger.h"
+#include "src/core/energy_calculators/ff_methods/gfnff.h"
+#include "src/core/energy_calculators/ff_methods/cn_calculator.h"
+#include "src/tools/formats.h"
+#include "json.hpp"
+#include "core/test_molecule_registry.h"
+#include <fstream>
+
+using json = nlohmann::json;
+using curcuma::Molecule;
+using namespace TestMolecules;
+
+// Test configuration
+struct TestConfig {
+    double energy_tolerance = 1e-6;     // Total energy tolerance (Hartree)
+    double component_tolerance = 1e-6; // Individual component tolerance
+    double charge_tolerance = 0.005;    // EEQ charge tolerance
+    int verbosity = 1;                  // Output level (0=silent, 1=results, 2=details)
+};
+
+// Reference data from XTB 6.6.1 for CH3OCH3
+struct ReferenceData {
+    std::string molecule_file;
+    std::string description;
+
+    // XTB reference charges (q_est from topology table)
+    std::vector<double> ref_charges;
+
+    // XTB coordination numbers (erfCN from topology table)
+    std::vector<double> ref_cn;
+
+    // XTB reference energies (Hartree)
+    std::map<std::string, double> ref_energies;
+};
+
+class GFNFFStepwiseTest {
+private:
+    TestConfig config;
+    int total_tests = 0;
+    int passed_tests = 0;
+
+    // Load complete reference data from JSON
+    json load_reference_json(const std::string& json_file = "test_cases/reference_data/ch3och3_reference.json") {
+        std::ifstream file(json_file);
+        if (!file.is_open()) {
+            throw std::runtime_error("Failed to open reference JSON: " + json_file);
+        }
+        json ref_data;
+        file >> ref_data;
+        return ref_data;
+    }
+
+    ReferenceData setup_ch3och3_reference() {
+        ReferenceData ref;
+        ref.molecule_file = "CH3OCH3";  // Registry name instead of path
+        ref.description = "CH3OCH3 (dimethyl ether) - Stepwise validation";
+
+        // XTB reference charges (q_est) - from CH3OCH3.log line 133-142
+        ref.ref_charges = {
+            0.040,  // Atom 1 (C)
+            0.040,  // Atom 2 (C)
+            0.045,  // Atom 3 (H)
+            0.045,  // Atom 4 (H)
+            0.045,  // Atom 5 (H)
+           -0.348,  // Atom 6 (O)
+            0.045,  // Atom 7 (H)
+            0.045,  // Atom 8 (H)
+            0.045   // Atom 9 (H)
+        };
+
+        // XTB coordination numbers (erfCN) - from CH3OCH3.log
+        ref.ref_cn = {
+            3.50,  // C1
+            3.50,  // C2
+            0.97,  // H3
+            0.97,  // H4
+            0.97,  // H5
+            1.91,  // O6
+            0.97,  // H7
+            0.97,  // H8
+            0.97   // H9
+        };
+
+        // XTB reference energies (Hartree) - from CH3OCH3.log and unified test
+        ref.ref_energies = {
+            {"E_total",      -1.2092092216},
+            {"E_bond",       -1.216443941819},
+            {"E_angle",       0.001779533537},
+            {"E_torsion",     0.000023390598},
+            {"E_repulsion",   0.053864662977},
+            {"E_coulomb",    -0.047825361074},  // From unified test
+            {"E_dispersion", -0.000041946447},  // D3 with BJ damping
+            {"E_batm",       -0.000142398327}   // Bonded ATM 3-body
+        };
+
+        return ref;
+    }
+
+public:
+    GFNFFStepwiseTest(const TestConfig& cfg = TestConfig()) : config(cfg) {
+        CurcumaLogger::set_verbosity(config.verbosity);
+    }
+
+    // Test 1: Verify charge injection mechanism
+    bool test_charge_injection() {
+        std::cout << "\n" << std::string(80, '=') << std::endl;
+        std::cout << "Test 1: Charge Injection Validation" << std::endl;
+        std::cout << std::string(80, '=') << std::endl;
+
+        try {
+            ReferenceData ref = setup_ch3och3_reference();
+
+            // Use MoleculeRegistry instead of file path
+            Molecule mol = TestMoleculeRegistry::createMolecule(ref.molecule_file, false);
+            mol.setCharge(0);
+            mol.setSpin(0);
+            Mol mol_info = mol.getMolInfo();
+
+            if (config.verbosity >= 2) {
+                std::cout << "  Loaded molecule: " << mol.AtomCount() << " atoms" << std::endl;
+            }
+
+            // Initialize GFNFF
+            GFNFF gfnff;
+            bool init_success = gfnff.InitialiseMolecule(mol_info);
+            if (!init_success) {
+                std::cout << "  ✗ GFNFF initialization failed" << std::endl;
+                total_tests++;
+                return false;
+            }
+
+            // Inject reference charges
+            Vector ref_charge_vec(ref.ref_charges.size());
+            for (size_t i = 0; i < ref.ref_charges.size(); ++i) {
+                ref_charge_vec[i] = ref.ref_charges[i];
+            }
+
+            gfnff.setCharges(ref_charge_vec);
+
+            // Verify charges were set correctly
+            Vector retrieved_charges = gfnff.Charges();
+            bool charges_match = true;
+
+            for (size_t i = 0; i < ref.ref_charges.size(); ++i) {
+                double error = std::abs(retrieved_charges[i] - ref.ref_charges[i]);
+                if (error > 1e-9) {  // Strict tolerance for exact retrieval
+                    std::cout << "  ✗ Charge mismatch for atom " << (i+1)
+                              << ": got " << retrieved_charges[i]
+                              << ", expected " << ref.ref_charges[i] << std::endl;
+                    charges_match = false;
+                }
+            }
+
+            if (charges_match) {
+                std::cout << "  ✓ Charge injection successful - all charges stored correctly" << std::endl;
+                passed_tests++;
+            } else {
+                std::cout << "  ✗ Charge injection failed - charge mismatch" << std::endl;
+            }
+            total_tests++;
+
+            return charges_match;
+
+        } catch (const std::exception& e) {
+            std::cout << "  ✗ ERROR: " << e.what() << std::endl;
+            total_tests++;
+            return false;
+        }
+    }
+
+    // Test 2: Energy calculation with reference charges (CORE TEST)
+    bool test_energy_with_reference_charges() {
+        std::cout << "\n" << std::string(80, '=') << std::endl;
+        std::cout << "Test 2: Energy Calculation with Reference Charges (CRITICAL)" << std::endl;
+        std::cout << std::string(80, '=') << std::endl;
+
+        try {
+            ReferenceData ref = setup_ch3och3_reference();
+
+            // Use MoleculeRegistry instead of file path
+            Molecule mol = TestMoleculeRegistry::createMolecule(ref.molecule_file, false);
+            mol.setCharge(0);
+            mol.setSpin(0);
+            Mol mol_info = mol.getMolInfo();
+
+            // Initialize GFNFF
+            GFNFF gfnff;
+            gfnff.InitialiseMolecule(mol_info);
+
+            // Inject XTB reference charges
+            Vector ref_charge_vec(ref.ref_charges.size());
+            for (size_t i = 0; i < ref.ref_charges.size(); ++i) {
+                ref_charge_vec[i] = ref.ref_charges[i];
+            }
+            gfnff.setCharges(ref_charge_vec);
+
+            // CRITICAL FIX: Regenerate parameters with injected charges!
+            if (!gfnff.regenerateParametersWithCurrentCharges()) {
+                std::cout << "  ✗ ERROR: Parameter regeneration failed" << std::endl;
+                total_tests++;
+                return false;
+            }
+
+            if (config.verbosity >= 2) {
+                std::cout << "  Injected XTB reference charges and regenerated parameters" << std::endl;
+            }
+
+            // Calculate energy with regenerated parameters matching injected charges
+            double total_energy = gfnff.Calculation(false);  // false = no gradient
+
+            // Extract individual components
+            double E_bond = gfnff.BondEnergy();
+            double E_angle = gfnff.AngleEnergy();
+            double E_torsion = gfnff.DihedralEnergy();
+            double E_repulsion = gfnff.RepulsionEnergy();
+            double E_coulomb = gfnff.CoulombEnergy();
+            double E_dispersion = gfnff.DispersionEnergy();
+
+            std::map<std::string, double> calculated_energies = {
+                {"E_bond", E_bond},
+                {"E_angle", E_angle},
+                {"E_torsion", E_torsion},
+                {"E_repulsion", E_repulsion},
+                {"E_coulomb", E_coulomb},
+                {"E_dispersion", E_dispersion}
+            };
+
+            // Print detailed comparison table
+            std::cout << "\n  Energy Component Comparison:" << std::endl;
+            std::cout << "  " << std::string(76, '-') << std::endl;
+            std::cout << "  Component      | Curcuma (Eh)  | XTB Ref (Eh)  | Error (Eh)    | Error (%)" << std::endl;
+            std::cout << "  " << std::string(76, '-') << std::endl;
+
+            int components_passed = 0;
+            int components_total = 0;
+
+            for (const auto& [name, ref_value] : ref.ref_energies) {
+                // Skip total and batm for now (not directly accessible)
+                if (name == "E_total" || name == "E_batm") continue;
+
+                components_total++;
+                std::string component_name = name.substr(2);  // Remove "E_" prefix
+
+                double calc_value = calculated_energies[name];
+                double error_abs = std::abs(calc_value - ref_value);
+                double error_pct = ref_value != 0.0 ? (error_abs / std::abs(ref_value)) * 100.0 : 0.0;
+
+                bool passed = error_abs < config.component_tolerance;
+                if (passed) components_passed++;
+
+                std::cout << "  " << std::setw(14) << std::left << component_name
+                          << " | " << std::setw(13) << std::right << std::fixed << std::setprecision(8) << calc_value
+                          << " | " << std::setw(13) << ref_value
+                          << " | " << std::setw(13) << std::scientific << std::setprecision(6) << error_abs
+                          << " | " << std::setw(8) << std::fixed << std::setprecision(3) << error_pct
+                          << (passed ? " ✓" : " ✗") << std::endl;
+            }
+
+            std::cout << "  " << std::string(76, '-') << std::endl;
+
+            // Validate total energy
+            double total_error = std::abs(total_energy - ref.ref_energies["E_total"]);
+            std::cout << "\n  Total Energy:" << std::endl;
+            std::cout << "    Calculated: " << std::fixed << std::setprecision(10) << total_energy << " Eh" << std::endl;
+            std::cout << "    Reference:  " << ref.ref_energies["E_total"] << " Eh" << std::endl;
+            std::cout << "    Error:      " << std::scientific << total_error << " Eh" << std::endl;
+
+            bool total_passed = total_error < config.energy_tolerance;
+
+            std::cout << "\n  Summary: " << components_passed << "/" << components_total
+                      << " components passed" << std::endl;
+
+            if (components_passed == components_total && total_passed) {
+                std::cout << "  ✓ ALL ENERGY COMPONENTS MATCH → EEQ is the error source!" << std::endl;
+                passed_tests += components_total + 1;
+            } else {
+                std::cout << "  ✗ SOME ENERGY COMPONENTS DIFFER → Energy calculation has errors" << std::endl;
+                passed_tests += components_passed;
+            }
+
+            total_tests += components_total + 1;
+
+            return (components_passed == components_total && total_passed);
+
+        } catch (const std::exception& e) {
+            std::cout << "  ✗ ERROR: " << e.what() << std::endl;
+            total_tests++;
+            return false;
+        }
+    }
+
+    // Test 3: EEQ charge accuracy measurement
+    bool test_eeq_charge_accuracy() {
+        std::cout << "\n" << std::string(80, '=') << std::endl;
+        std::cout << "Test 3: EEQ Charge Accuracy Measurement" << std::endl;
+        std::cout << std::string(80, '=') << std::endl;
+
+        try {
+            ReferenceData ref = setup_ch3och3_reference();
+
+            // Use MoleculeRegistry instead of file path
+            Molecule mol = TestMoleculeRegistry::createMolecule(ref.molecule_file, false);
+            mol.setCharge(0);
+            mol.setSpin(0);
+            Mol mol_info = mol.getMolInfo();
+
+            // Initialize GFNFF with normal EEQ calculation
+            GFNFF gfnff;
+            gfnff.InitialiseMolecule(mol_info);
+
+            // Calculate energy (triggers EEQ)
+            gfnff.Calculation(false);
+
+            // Extract calculated charges
+            Vector calculated_charges = gfnff.Charges();
+
+            // Compare against XTB reference
+            std::cout << "\n  Charge Comparison:" << std::endl;
+            std::cout << "  " << std::string(60, '-') << std::endl;
+            std::cout << "  Atom | Element | Curcuma EEQ | XTB Ref  | Error (e)" << std::endl;
+            std::cout << "  " << std::string(60, '-') << std::endl;
+
+            double rms_error = 0.0;
+            double max_error = 0.0;
+            int charges_ok = 0;
+
+            for (size_t i = 0; i < ref.ref_charges.size(); ++i) {
+                double calc_charge = calculated_charges[i];
+                double ref_charge = ref.ref_charges[i];
+                double error = std::abs(calc_charge - ref_charge);
+
+                rms_error += error * error;
+                if (error > max_error) max_error = error;
+                if (error < config.charge_tolerance) charges_ok++;
+
+                // Get element symbol for display
+                int atomic_number = mol_info.m_atoms[i];
+                std::string element = (atomic_number == 1) ? "H" :
+                                    (atomic_number == 6) ? "C" :
+                                    (atomic_number == 8) ? "O" : "?";
+
+                std::cout << "  " << std::setw(4) << (i+1)
+                          << " | " << std::setw(7) << element
+                          << " | " << std::setw(11) << std::fixed << std::setprecision(6) << calc_charge
+                          << " | " << std::setw(8) << ref_charge
+                          << " | " << std::setw(10) << std::scientific << std::setprecision(6) << error
+                          << (error < config.charge_tolerance ? " ✓" : " ✗") << std::endl;
+            }
+
+            std::cout << "  " << std::string(60, '-') << std::endl;
+
+            rms_error = std::sqrt(rms_error / ref.ref_charges.size());
+
+            std::cout << "\n  Charge Error Statistics:" << std::endl;
+            std::cout << "    RMS error:     " << std::scientific << rms_error << " e" << std::endl;
+            std::cout << "    Max error:     " << max_error << " e" << std::endl;
+            std::cout << "    Charges OK:    " << charges_ok << "/" << ref.ref_charges.size() << std::endl;
+
+            bool charges_acceptable = (rms_error < config.charge_tolerance * 2.0);
+
+            if (charges_acceptable) {
+                std::cout << "  ✓ EEQ charges within acceptable range" << std::endl;
+                passed_tests++;
+            } else {
+                std::cout << "  ✗ EEQ charges have significant errors (RMS > "
+                          << (config.charge_tolerance * 2.0) << ")" << std::endl;
+            }
+            total_tests++;
+
+            return charges_acceptable;
+
+        } catch (const std::exception& e) {
+            std::cout << "  ✗ ERROR: " << e.what() << std::endl;
+            total_tests++;
+            return false;
+        }
+    }
+
+    // Test 4: Coordination Number Validation (Layer 1)
+    bool test_coordination_numbers() {
+        std::cout << "\n" << std::string(80, '=') << std::endl;
+        std::cout << "Test 4: Coordination Number Validation (Layer 1)" << std::endl;
+        std::cout << std::string(80, '=') << std::endl;
+
+        try {
+            // Load reference data from JSON
+            json ref_data = load_reference_json();
+            std::vector<double> ref_cn = ref_data["topology"]["coordination_numbers"];
+
+            // Load molecule
+            ReferenceData ref = setup_ch3och3_reference();
+            Molecule mol = TestMoleculeRegistry::createMolecule(ref.molecule_file, false);
+            Mol mol_info = mol.getMolInfo();
+
+            if (config.verbosity >= 2) {
+                std::cout << "  Loaded molecule: " << mol.AtomCount() << " atoms" << std::endl;
+                std::cout << "  Reference CN values: " << ref_cn.size() << " atoms" << std::endl;
+            }
+
+            // Get geometry in Bohr for CN calculation
+            Eigen::MatrixXd geometry_bohr = mol_info.m_geometry;  // Already in Bohr
+
+            // Calculate CN using Curcuma's CNCalculator
+            std::vector<double> calc_cn = CNCalculator::calculateGFNFFCN(
+                mol_info.m_atoms,
+                geometry_bohr
+            );
+
+            if (calc_cn.size() != ref_cn.size()) {
+                std::cout << "  ✗ ERROR: CN vector size mismatch ("
+                          << calc_cn.size() << " vs " << ref_cn.size() << ")" << std::endl;
+                total_tests++;
+                return false;
+            }
+
+            // Compare CNs
+            std::cout << "\n  Coordination Number Comparison:" << std::endl;
+            std::cout << "  " << std::string(70, '-') << std::endl;
+            std::cout << "  Atom | Element | Curcuma CN | XTB Ref CN | Error     | Status" << std::endl;
+            std::cout << "  " << std::string(70, '-') << std::endl;
+
+            double cn_tolerance = 0.01;  // 1% tolerance for CN
+            double rms_error = 0.0;
+            double max_error = 0.0;
+            int cn_ok = 0;
+
+            for (size_t i = 0; i < ref_cn.size(); ++i) {
+                double calc_value = calc_cn[i];
+                double ref_value = ref_cn[i];
+                double error = std::abs(calc_value - ref_value);
+
+                rms_error += error * error;
+                max_error = std::max(max_error, error);
+
+                bool passed = (error < cn_tolerance);
+                if (passed) cn_ok++;
+
+                // Get element symbol
+                int atomic_number = mol_info.m_atoms[i];
+                std::string element = (atomic_number == 1) ? "H" :
+                                    (atomic_number == 6) ? "C" :
+                                    (atomic_number == 8) ? "O" : "?";
+
+                std::cout << "  " << std::setw(4) << (i+1)
+                          << " | " << std::setw(7) << element
+                          << " | " << std::setw(10) << std::fixed << std::setprecision(4) << calc_value
+                          << " | " << std::setw(10) << ref_value
+                          << " | " << std::setw(9) << std::scientific << std::setprecision(4) << error
+                          << " | " << (passed ? "✓" : "✗") << std::endl;
+            }
+
+            std::cout << "  " << std::string(70, '-') << std::endl;
+
+            rms_error = std::sqrt(rms_error / ref_cn.size());
+
+            std::cout << "\n  CN Error Statistics:" << std::endl;
+            std::cout << "    RMS error:     " << std::scientific << std::setprecision(4) << rms_error << std::endl;
+            std::cout << "    Max error:     " << max_error << std::endl;
+            std::cout << "    CNs OK:        " << cn_ok << "/" << ref_cn.size() << std::endl;
+
+            bool cn_acceptable = (rms_error < cn_tolerance);
+
+            if (cn_acceptable) {
+                std::cout << "  ✓ Coordination numbers match XTB reference (<"
+                          << cn_tolerance << " error)" << std::endl;
+                passed_tests++;
+            } else {
+                std::cout << "  ✗ Coordination numbers have significant errors (RMS > "
+                          << cn_tolerance << ")" << std::endl;
+            }
+            total_tests++;
+
+            return cn_acceptable;
+
+        } catch (const std::exception& e) {
+            std::cout << "  ✗ ERROR: " << e.what() << std::endl;
+            total_tests++;
+            return false;
+        }
+    }
+
+    // Test 5: Bond Parameter Validation (Layer 3)
+    bool test_bond_parameters() {
+        std::cout << "\n" << std::string(80, '=') << std::endl;
+        std::cout << "Test 5: Bond Parameter Validation (Layer 3)" << std::endl;
+        std::cout << std::string(80, '=') << std::endl;
+
+        try {
+            // Load reference data
+            json ref_data = load_reference_json();
+            std::vector<double> ref_charges = ref_data["topology"]["charges"];
+            auto ref_bonds = ref_data["bonds"];
+
+            // Load molecule
+            ReferenceData ref = setup_ch3och3_reference();
+            Molecule mol = TestMoleculeRegistry::createMolecule(ref.molecule_file, false);
+            mol.setCharge(0);
+            mol.setSpin(0);
+            Mol mol_info = mol.getMolInfo();
+
+            // Initialize GFNFF
+            GFNFF gfnff;
+            gfnff.InitialiseMolecule(mol_info);
+
+            // Inject reference charges
+            Vector ref_charge_vec(ref_charges.size());
+            for (size_t i = 0; i < ref_charges.size(); ++i) {
+                ref_charge_vec[i] = ref_charges[i];
+            }
+            gfnff.setCharges(ref_charge_vec);
+
+            // Regenerate parameters with correct charges
+            if (!gfnff.regenerateParametersWithCurrentCharges()) {
+                std::cout << "  ✗ ERROR: Parameter regeneration failed" << std::endl;
+                total_tests++;
+                return false;
+            }
+
+            // Get generated bond parameters using Phase 3 infrastructure
+            json calc_bonds = gfnff.getBondParameters();
+
+            if (calc_bonds.size() != ref_bonds.size()) {
+                std::cout << "  ✗ ERROR: Bond count mismatch ("
+                          << calc_bonds.size() << " vs " << ref_bonds.size() << ")" << std::endl;
+                total_tests++;
+                return false;
+            }
+
+            // Compare bond parameters
+            std::cout << "\n  Bond Parameter Comparison:" << std::endl;
+            std::cout << "  " << std::string(120, '-') << std::endl;
+            std::cout << "  Bond | Atoms  | r0(calc) | r0(ref) | Δr0     | alp(calc)| alp(ref)| Δalp    | fqq(calc)| fqq(ref)| Δfqq    " << std::endl;
+            std::cout << "  " << std::string(120, '-') << std::endl;
+
+            // Unit system: GFN-FF generates parameters in Bohr
+            // ForceField uses Ångström, so we convert for comparison
+            const double BOHR_TO_ANGSTROM = 0.529167;
+
+            std::cout << "  Note: r0_ij values are in Bohr, converted to Ångström for comparison\n" << std::endl;
+
+            double r0_tolerance = 0.01;   // 0.01 Å tolerance for r0 (after Bohr→Å conversion)
+            double k_tolerance = 0.01;    // 0.01 tolerance for force constant
+            double fqq_tolerance = 0.01;  // 0.01 tolerance for fqq
+
+            int bonds_ok = 0;
+            double rms_r0 = 0.0, rms_k = 0.0, rms_fqq = 0.0;
+
+            for (size_t i = 0; i < ref_bonds.size(); ++i) {
+                auto calc = calc_bonds[i];
+                auto ref = ref_bonds[i];
+
+                // Convert r0_ij from Bohr to Ångström for comparison
+                double r0_calc_bohr = calc["r0_ij"];  // In Bohr (from parameter generation)
+                double r0_calc = r0_calc_bohr * BOHR_TO_ANGSTROM;  // Convert to Ångström
+                double r0_ref = ref["R0"];  // Already in Ångström
+                double r0_error = std::abs(r0_calc - r0_ref);
+
+                double k_calc = calc["exponent"];  // Called "alp" in XTB
+                double k_ref = ref["alp"];
+                double k_error = std::abs(k_calc - k_ref);
+
+                // fqq might not be in calc_bonds, default to 1.0
+                double fqq_calc = calc.value("fqq", 1.0);
+                double fqq_ref = ref["fqq"];
+                double fqq_error = std::abs(fqq_calc - fqq_ref);
+
+                rms_r0 += r0_error * r0_error;
+                rms_k += k_error * k_error;
+                rms_fqq += fqq_error * fqq_error;
+
+                bool passed = (r0_error < r0_tolerance && k_error < k_tolerance && fqq_error < fqq_tolerance);
+                if (passed) bonds_ok++;
+
+                std::cout << "  " << std::setw(4) << (i+1)
+                          << " | " << calc["i"] << "-" << calc["j"]
+                          << "    | " << std::setw(8) << std::fixed << std::setprecision(4) << r0_calc << "Å"
+                          << " | " << std::setw(5) << r0_ref << "Å"
+                          << " | " << std::setw(7) << std::scientific << std::setprecision(2) << r0_error
+                          << " | " << std::setw(8) << std::fixed << std::setprecision(4) << k_calc
+                          << " | " << std::setw(7) << k_ref
+                          << " | " << std::setw(7) << std::scientific << std::setprecision(2) << k_error
+                          << " | " << std::setw(8) << std::fixed << std::setprecision(4) << fqq_calc
+                          << " | " << std::setw(7) << fqq_ref
+                          << " | " << std::setw(7) << std::scientific << std::setprecision(2) << fqq_error
+                          << std::endl;
+            }
+
+            std::cout << "  " << std::string(120, '-') << std::endl;
+
+            rms_r0 = std::sqrt(rms_r0 / ref_bonds.size());
+            rms_k = std::sqrt(rms_k / ref_bonds.size());
+            rms_fqq = std::sqrt(rms_fqq / ref_bonds.size());
+
+            std::cout << "\n  Bond Parameter Error Statistics:" << std::endl;
+            std::cout << "    RMS r0 error:   " << std::scientific << std::setprecision(4) << rms_r0 << " Å" << std::endl;
+            std::cout << "    RMS k error:    " << rms_k << std::endl;
+            std::cout << "    RMS fqq error:  " << rms_fqq << std::endl;
+            std::cout << "    Bonds OK:       " << bonds_ok << "/" << ref_bonds.size() << std::endl;
+
+            bool bonds_acceptable = (bonds_ok >= static_cast<int>(ref_bonds.size() * 0.9));  // 90% pass rate
+
+            if (bonds_acceptable) {
+                std::cout << "  ✓ Bond parameters match XTB reference (≥90% within tolerance)" << std::endl;
+                passed_tests++;
+            } else {
+                std::cout << "  ✗ Bond parameters have significant mismatches (<90% within tolerance)" << std::endl;
+            }
+            total_tests++;
+
+            return bonds_acceptable;
+
+        } catch (const std::exception& e) {
+            std::cout << "  ✗ ERROR: " << e.what() << std::endl;
+            total_tests++;
+            return false;
+        }
+    }
+
+    // Test 6: Angle Parameter Validation (Layer 4)
+    bool test_angle_parameters() {
+        std::cout << "\n" << std::string(80, '=') << std::endl;
+        std::cout << "Test 6: Angle Parameter Validation (Layer 4)" << std::endl;
+        std::cout << std::string(80, '=') << std::endl;
+
+        try {
+            json ref_data = load_reference_json();
+            std::vector<double> ref_charges = ref_data["topology"]["charges"];
+            auto ref_angles = ref_data["angles"];
+
+            // Load molecule
+            ReferenceData ref = setup_ch3och3_reference();
+            Molecule mol = TestMoleculeRegistry::createMolecule(ref.molecule_file, false);
+            mol.setCharge(0);
+            mol.setSpin(0);
+            Mol mol_info = mol.getMolInfo();
+
+            GFNFF gfnff;
+            gfnff.InitialiseMolecule(mol_info);
+
+            // Inject reference charges
+            Vector ref_charge_vec(ref_charges.size());
+            for (size_t i = 0; i < ref_charges.size(); ++i) {
+                ref_charge_vec[i] = ref_charges[i];
+            }
+            gfnff.setCharges(ref_charge_vec);
+            gfnff.regenerateParametersWithCurrentCharges();
+
+            // Get generated angle parameters
+            json calc_angles = gfnff.getAngleParameters();
+
+            std::cout << "\n  Angle Parameter Summary:" << std::endl;
+            std::cout << "    Reference angles: " << ref_angles.size() << std::endl;
+            std::cout << "    Calculated angles: " << calc_angles.size() << std::endl;
+            std::cout << "    Note: Detailed validation available but log only has 1 example angle" << std::endl;
+
+            // Since we only have 1 reference angle in the log, just report status
+            std::cout << "  ⚠ Limited reference data - full validation requires complete angle parameters" << std::endl;
+            total_tests++;
+
+            return true;
+
+        } catch (const std::exception& e) {
+            std::cout << "  ✗ ERROR: " << e.what() << std::endl;
+            total_tests++;
+            return false;
+        }
+    }
+
+    // Test 7: Torsion Parameter Validation (Layer 5)
+    bool test_torsion_parameters() {
+        std::cout << "\n" << std::string(80, '=') << std::endl;
+        std::cout << "Test 7: Torsion Parameter Validation (Layer 5)" << std::endl;
+        std::cout << std::string(80, '=') << std::endl;
+
+        std::cout << "  ⚠ Skipped - reference log only contains 1 example torsion" << std::endl;
+        std::cout << "  Note: Full torsion validation requires complete reference data" << std::endl;
+        total_tests++;
+
+        return true;
+    }
+
+    // Test 8: Energy Calculation with Reference Parameters (CRITICAL)
+    bool test_energy_with_reference_parameters() {
+        std::cout << "\n" << std::string(80, '=') << std::endl;
+        std::cout << "Test 8: Energy Calculation with Reference Parameters (CRITICAL)" << std::endl;
+        std::cout << std::string(80, '=') << std::endl;
+
+        try {
+            json ref_data = load_reference_json();
+            std::vector<double> ref_charges = ref_data["topology"]["charges"];
+            auto ref_bonds = ref_data["bonds"];
+            auto ref_energies = ref_data["energies"];
+
+            // Load molecule
+            ReferenceData ref = setup_ch3och3_reference();
+            Molecule mol = TestMoleculeRegistry::createMolecule(ref.molecule_file, false);
+            mol.setCharge(0);
+            mol.setSpin(0);
+            Mol mol_info = mol.getMolInfo();
+
+            GFNFF gfnff;
+            gfnff.InitialiseMolecule(mol_info);
+
+            // Inject reference charges
+            Vector ref_charge_vec(ref_charges.size());
+            for (size_t i = 0; i < ref_charges.size(); ++i) {
+                ref_charge_vec[i] = ref_charges[i];
+            }
+            gfnff.setCharges(ref_charge_vec);
+
+            // Inject reference bond parameters from XTB log
+            // Convert reference bonds to ForceField format
+            json ref_bond_params = json::array();
+            for (const auto& ref_bond : ref_bonds) {
+                json bond_param;
+                bond_param["i"] = ref_bond["atoms"][0].get<int>() - 1;  // Convert to 0-indexed
+                bond_param["j"] = ref_bond["atoms"][1].get<int>() - 1;
+                bond_param["type"] = ref_bond["type"];
+                bond_param["distance"] = ref_bond["R0"];  // Use XTB reference r0
+                bond_param["k"] = 0.0;  // Not used in current implementation
+                bond_param["exponent"] = ref_bond["alp"];  // Use XTB reference k
+                bond_param["fc"] = ref_bond["kbond"];  // Energy prefactor
+                bond_param["r0_ij"] = ref_bond["R0"];
+                bond_param["r0_ik"] = ref_bond["R0"];
+                bond_param["rabshift"] = 0.0;
+
+                ref_bond_params.push_back(bond_param);
+            }
+
+            // Inject reference parameters
+            gfnff.setBondParametersForTesting(ref_bond_params);
+
+            if (config.verbosity >= 2) {
+                std::cout << "  Injected " << ref_bond_params.size() << " reference bond parameters" << std::endl;
+            }
+
+            // Calculate energy with reference parameters
+            double total_energy = gfnff.Calculation(false);
+
+            std::cout << "\n  Energy Comparison (with XTB reference parameters):" << std::endl;
+            std::cout << "  " << std::string(70, '-') << std::endl;
+            std::cout << "  Component  | Curcuma (Eh) | XTB Ref (Eh) | Error (%)" << std::endl;
+            std::cout << "  " << std::string(70, '-') << std::endl;
+
+            double E_bond = gfnff.BondEnergy();
+            double E_angle = gfnff.AngleEnergy();
+            double E_total_ref = ref_energies["E_total"];
+            double E_bond_ref = ref_energies["E_bond"];
+
+            double bond_error_pct = std::abs(E_bond - E_bond_ref) / std::abs(E_bond_ref) * 100.0;
+
+            std::cout << "  Bond       | " << std::setw(12) << std::fixed << std::setprecision(8) << E_bond
+                      << " | " << std::setw(12) << E_bond_ref
+                      << " | " << std::setw(8) << std::setprecision(2) << bond_error_pct << std::endl;
+
+            std::cout << "  " << std::string(70, '-') << std::endl;
+
+            std::cout << "\n  Test Purpose: Isolate energy calculation formula errors" << std::endl;
+            std::cout << "  - If energy matches: Parameter generation is the problem" << std::endl;
+            std::cout << "  - If energy differs: Energy calculation formulas are wrong" << std::endl;
+
+            bool energy_acceptable = (bond_error_pct < 5.0);  // 5% tolerance
+
+            if (energy_acceptable) {
+                std::cout << "\n  ✓ Energy calculation correct with reference parameters" << std::endl;
+                std::cout << "  → Problem is in PARAMETER GENERATION, not energy formulas" << std::endl;
+                passed_tests++;
+            } else {
+                std::cout << "\n  ✗ Energy still wrong even with reference parameters" << std::endl;
+                std::cout << "  → Problem is in ENERGY CALCULATION FORMULAS" << std::endl;
+            }
+            total_tests++;
+
+            return energy_acceptable;
+
+        } catch (const std::exception& e) {
+            std::cout << "  ✗ ERROR: " << e.what() << std::endl;
+            total_tests++;
+            return false;
+        }
+    }
+
+    // Run all tests
+    bool run_all_tests() {
+        std::cout << "\nGFN-FF Stepwise Validation Test Suite" << std::endl;
+        std::cout << "======================================" << std::endl;
+        std::cout << "Molecule: CH3OCH3 (dimethyl ether)" << std::endl;
+        std::cout << "Reference: XTB 6.6.1 GFN-FF calculation" << std::endl;
+        std::cout << "Strategy: Layer-by-layer parameter validation" << std::endl;
+
+        // Test 1: Charge injection mechanism
+        test_charge_injection();
+
+        // Test 2: Energy calculation with reference charges (CRITICAL)
+        test_energy_with_reference_charges();
+
+        // Test 3: EEQ charge accuracy
+        test_eeq_charge_accuracy();
+
+        // Test 4: Coordination number validation (Layer 1)
+        test_coordination_numbers();
+
+        // Test 5: Bond parameter validation (Layer 3)
+        test_bond_parameters();
+
+        // Test 6: Angle parameter validation (Layer 4)
+        test_angle_parameters();
+
+        // Test 7: Torsion parameter validation (Layer 5)
+        test_torsion_parameters();
+
+        // Test 8: Energy calculation with reference parameters (CRITICAL)
+        test_energy_with_reference_parameters();
+
+        // Summary
+        std::cout << "\n" << std::string(80, '=') << std::endl;
+        std::cout << "STEPWISE TEST SUMMARY" << std::endl;
+        std::cout << std::string(80, '=') << std::endl;
+        std::cout << "Total tests: " << total_tests << std::endl;
+        std::cout << "Passed: " << passed_tests << std::endl;
+        std::cout << "Failed: " << (total_tests - passed_tests) << std::endl;
+        std::cout << "Success rate: " << std::fixed << std::setprecision(1)
+                  << (100.0 * passed_tests / total_tests) << "%" << std::endl;
+
+        return (passed_tests == total_tests);
+    }
+
+    int get_total_tests() const { return total_tests; }
+    int get_passed_tests() const { return passed_tests; }
+};
+
+int main(int argc, char** argv) {
+    TestConfig config;
+
+    // Parse command line arguments
+    for (int i = 1; i < argc; ++i) {
+        std::string arg(argv[i]);
+        if (arg == "--verbose" || arg == "-v") {
+            config.verbosity = 2;
+        } else if (arg == "--quiet" || arg == "-q") {
+            config.verbosity = 0;
+        } else if (arg == "--help" || arg == "-h") {
+            std::cout << "GFN-FF Stepwise Validation Test\n";
+            std::cout << "Usage: " << argv[0] << " [options]\n";
+            std::cout << "Options:\n";
+            std::cout << "  -v, --verbose     Enable verbose output\n";
+            std::cout << "  -q, --quiet       Silent mode (minimal output)\n";
+            std::cout << "  -h, --help        Show this help\n";
+            return 0;
+        }
+    }
+
+    GFNFFStepwiseTest test_suite(config);
+    bool success = test_suite.run_all_tests();
+
+    return success ? 0 : 1;
+}
