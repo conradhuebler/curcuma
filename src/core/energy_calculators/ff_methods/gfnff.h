@@ -358,6 +358,7 @@ private:
         double force_constant;        // k_b in Fortran (energy scale)
         double equilibrium_distance;  // r₀ reference bond length
         double alpha;                 // α exponential decay parameter (was: anharmonic_factor)
+        double rabshift;              // Claude Generated (Dec 2025): vbond(1) = gen%rabshift + shift
     };
 
     struct GFNFFAngleParams {
@@ -1095,6 +1096,76 @@ public:
      */
     bool calculateFinalCharges(TopologyInfo& topo_info, int max_iterations = 10,
                                double convergence_threshold = 1e-5) const;
+
+    /**
+     * @brief Set external charges (for testing/validation)
+     * @param charges Atomic partial charges to use instead of EEQ-calculated charges
+     *
+     * Claude Generated (December 2025): Testing utility for charge-dependent validation
+     * Bypasses EEQ calculation and uses provided reference charges directly.
+     * Call AFTER InitialiseMolecule() but BEFORE Calculation().
+     * This method is intended for validation purposes to isolate energy calculation
+     * errors from EEQ charge calculation errors.
+     */
+    void setCharges(const Vector& charges);
+
+    /**
+     * @brief Regenerate GFN-FF parameters using current charges (for testing/validation)
+     *
+     * Claude Generated (January 2025): Testing utility for charge-dependent validation
+     * Regenerates all charge-dependent parameters (bonds, angles, dihedrals, inversions)
+     * using the current m_charges (set via setCharges()).
+     *
+     * Call AFTER setCharges() but BEFORE Calculation() to ensure parameter-charge consistency.
+     *
+     * This is required because GFN-FF parameters depend on charges:
+     * - Bond force constants depend on fqq (charge-dependent correction)
+     * - Angle force constants have charge-dependent terms
+     * - Electrostatic parameters depend on charge distribution
+     *
+     * @return true if parameter regeneration successful
+     */
+    bool regenerateParametersWithCurrentCharges();
+
+    /**
+     * @brief Get current bond parameters (for validation)
+     *
+     * Claude Generated (December 2025): Phase 3 - Parameter validation infrastructure
+     * Returns the current bond parameters as JSON for systematic validation.
+     * Used by Test 5 to compare generated parameters against XTB reference.
+     *
+     * @return JSON array of bond parameters with fields: i, j, distance, k, fc, etc.
+     */
+    json getBondParameters() const;
+
+    /**
+     * @brief Get current angle parameters (for validation)
+     *
+     * Claude Generated (December 2025): Phase 3 - Parameter validation infrastructure
+     *
+     * @return JSON array of angle parameters
+     */
+    json getAngleParameters() const;
+
+    /**
+     * @brief Set bond parameters for testing (bypasses generation)
+     *
+     * Claude Generated (December 2025): Phase 3 - Parameter injection for Test 8
+     * Allows injection of exact reference parameters to isolate energy calculation
+     * errors from parameter generation errors.
+     *
+     * @param bond_params JSON array of bond parameters in ForceField format
+     */
+    void setBondParametersForTesting(const json& bond_params);
+
+    /**
+     * @brief Set angle parameters for testing (bypasses generation)
+     *
+     * Claude Generated (December 2025): Phase 3 - Parameter injection for Test 8
+     *
+     * @param angle_params JSON array of angle parameters in ForceField format
+     */
+    void setAngleParametersForTesting(const json& angle_params);
 
 private:
     // Molecular structure (formerly from QMInterface base class)

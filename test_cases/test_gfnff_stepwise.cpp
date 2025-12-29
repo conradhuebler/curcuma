@@ -516,8 +516,9 @@ public:
                 std::cout << "  Reference CN values: " << ref_cn.size() << " atoms" << std::endl;
             }
 
-            // Get geometry in Bohr for CN calculation
-            Eigen::MatrixXd geometry_bohr = mol_info.m_geometry;  // Already in Bohr
+            // Get geometry in Angstrom (Molecule default storage) and convert to Bohr
+            const double ANG2BOHR = 1.8897259886;  // CurcumaUnit::Length::ANGSTROM_TO_BOHR
+            Eigen::MatrixXd geometry_bohr = mol_info.m_geometry * ANG2BOHR;
 
             // Calculate CN using Curcuma's CNCalculator
             std::vector<double> calc_cn = CNCalculator::calculateGFNFFCN(
