@@ -77,6 +77,66 @@ private:
         return ref_data;
     }
 
+    // Print atom mapping information for debugging bond assignments
+    void print_atom_mapping(const Mol& mol) const {
+        std::cout << "\n  Atom Mapping (0-indexed):" << std::endl;
+        std::cout << "  " << std::string(60, '-') << std::endl;
+        std::cout << "  Index | Element | Description" << std::endl;
+        std::cout << "  " << std::string(60, '-') << std::endl;
+
+        std::map<std::string, int> atom_type_count;
+        for (size_t i = 0; i < static_cast<size_t>(mol.m_number_atoms); ++i) {
+            std::string elem = Elements::ElementAbbr[mol.m_atoms[i]];
+            atom_type_count[elem]++;
+            std::string description = elem;
+
+            // Add context for key atoms
+            if (elem == "C") {
+                // Count H neighbors by checking bonds
+                int h_neighbors = 0;
+                for (const auto& bond : mol.m_bonds) {
+                    if (bond.first == static_cast<int>(i)) {
+                        if (Elements::ElementAbbr[mol.m_atoms[bond.second]] == "H") h_neighbors++;
+                    } else if (bond.second == static_cast<int>(i)) {
+                        if (Elements::ElementAbbr[mol.m_atoms[bond.first]] == "H") h_neighbors++;
+                    }
+                }
+                description += " (CH" + std::to_string(h_neighbors) + ")";
+            } else if (elem == "O") {
+                description += " (ether oxygen)";
+            }
+
+            std::cout << "    " << std::setw(2) << i << "   | "
+                      << std::setw(7) << elem << " | " << description << std::endl;
+        }
+        std::cout << "  " << std::string(60, '-') << std::endl;
+        std::cout << "  Summary: C=" << atom_type_count["C"]
+                  << " O=" << atom_type_count["O"]
+                  << " H=" << atom_type_count["H"] << std::endl << std::endl;
+    }
+
+    // Print bond mapping for debugging atom pair matching
+    void print_bond_mapping(const Mol& mol) const {
+        std::cout << "\n  Detected Bonds:" << std::endl;
+        std::cout << "  " << std::string(70, '-') << std::endl;
+        std::cout << "  Bond | Atoms | Type" << std::endl;
+        std::cout << "  " << std::string(70, '-') << std::endl;
+
+        int bond_count = 0;
+        for (const auto& bond : mol.m_bonds) {
+            bond_count++;
+            int i = bond.first;
+            int j = bond.second;
+            std::string elem_i = Elements::ElementAbbr[mol.m_atoms[i]];
+            std::string elem_j = Elements::ElementAbbr[mol.m_atoms[j]];
+            std::cout << "    " << std::setw(2) << bond_count << "   | "
+                      << std::setw(2) << i << "-" << std::setw(1) << j << "   | "
+                      << elem_i << "-" << elem_j << std::endl;
+        }
+        std::cout << "  " << std::string(70, '-') << std::endl;
+        std::cout << "  Total bonds: " << bond_count << std::endl << std::endl;
+    }
+
     ReferenceData setup_ch3och3_reference() {
         ReferenceData ref;
         ref.molecule_file = "CH3OCH3";  // Registry name instead of path
@@ -126,6 +186,22 @@ private:
 public:
     GFNFFStepwiseTest(const TestConfig& cfg = TestConfig()) : config(cfg) {
         CurcumaLogger::set_verbosity(config.verbosity);
+    }
+
+    // Print structure information before running tests
+    bool print_structure_info(const std::string& mol_name) const {
+        try {
+            Molecule mol = TestMoleculeRegistry::createMolecule(mol_name, false);
+            mol.setCharge(0);
+            mol.setSpin(0);
+            Mol mol_info = mol.getMolInfo();
+
+            print_atom_mapping(mol_info);
+            print_bond_mapping(mol_info);
+            return true;
+        } catch (...) {
+            return false;
+        }
     }
 
     // Test 1: Verify charge injection mechanism
@@ -814,6 +890,12 @@ public:
         std::cout << "Molecule: CH3OCH3 (dimethyl ether)" << std::endl;
         std::cout << "Reference: XTB 6.6.1 GFN-FF calculation" << std::endl;
         std::cout << "Strategy: Layer-by-layer parameter validation" << std::endl;
+
+        // Print structure information before tests
+        std::cout << "\n" << std::string(80, '=') << std::endl;
+        std::cout << "MOLECULAR STRUCTURE (for debugging atom/bond assignments)" << std::endl;
+        std::cout << std::string(80, '=') << std::endl;
+        print_structure_info("CH3OCH3");
 
         // Test 1: Charge injection mechanism
         test_charge_injection();
