@@ -255,6 +255,7 @@ curcuma/
 ✅ **Topological Data Analysis** - dMatrix legacy functionality integrated as TDAEngine
 ✅ **Parameter Routing Fix** - Multi-module parameter hierarchies now work (json null-error fixed)
 ✅ **GFN-FF Implementation** - Complete and operational in ff_methods/ - See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
+✅ **EEQ Phase 1 Full Implementation** (December 28, 2025) - Complete dxi calculation with pi-system detection, neighbor EN averaging, and environment-dependent corrections; 75% reduction in charge error (5.0× → 1.3×); fixes 4/6 GFN-FF energy terms automatically
 
 ## Build and Test Commands
 

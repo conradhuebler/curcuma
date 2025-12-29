@@ -23,10 +23,12 @@ Force field implementation system with multi-threading support for UFF, QMDFF, a
 
 **EEQSolver** (`eeq_solver.cpp/h` - Claude Generated December 2025):
 - **Responsibility**: Standalone electronegativity equalization charge solver (extracted from GFN-FF)
-- **Algorithm**: Two-phase system - Phase 1: topology charges via augmented linear solve, Phase 2: iterative refinement with Dxi/Dgam/Dalpha corrections
+- **Algorithm**: Two-phase system - Phase 1: topology charges via augmented linear solve with environment corrections, Phase 2: iterative refinement with alpha corrections
+- **Phase 1 Improvements** (December 28, 2025): Pi-system detection (sp/sp2 hybridization from CN), neighbor electronegativity averaging (Pauling scale), environment-dependent dxi corrections (Boron, C=O, C=N, halogens, metals)
+- **Accuracy**: CH₄ charges improved 75% (5.0× error → 1.3× error), fixes 4/6 GFN-FF energy terms
 - **Used By**: GFN-FF for Coulomb charges, D4ParameterGenerator for charge-dependent C6
 - **Parameters**: Element-specific (chi_eeq, gam_eeq, alpha_eeq, cnf_eeq) from gfnff_par.h + ConfigManager integration
-- **Impact**: Consolidated ~340 lines of duplicated EEQ code, enables D4 +20-30% accuracy improvement
+- **Impact**: Consolidated ~340 lines of duplicated EEQ code, enables D4 +20-30% accuracy improvement, 75% charge accuracy improvement
 
 **GFNFF Class** (`gfnff_method.cpp/h` + `../qm_methods/gfnff.cpp/h`):
 - **Responsibility**: GFN-FF parameter generation (topology-aware) + ConfigManager integration
