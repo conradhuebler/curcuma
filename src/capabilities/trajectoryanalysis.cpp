@@ -55,7 +55,23 @@ TrajectoryAnalysis::TrajectoryAnalysis(const ConfigManager& config, bool silent)
     m_gyration_radius = Json2KeyWord<bool>(m_config, "gyration_radius");
     m_end_to_end_distance = Json2KeyWord<bool>(m_config, "end_to_end_distance");
     m_recenter_structures = Json2KeyWord<bool>(m_config, "recenter_structures");
-    m_verbose = Json2KeyWord<bool>(m_config, "verbose");
+
+    // Handle both legacy verbose and new verbosity parameters for backward compatibility
+    if (m_config.contains("verbosity")) {
+        m_verbosity = Json2KeyWord<int>(m_config, "verbosity");
+        // Validate verbosity range
+        if (m_verbosity < 0 || m_verbosity > 3) {
+            m_verbosity = 2; // Default to scientific if out of range
+        }
+    } else if (m_config.contains("verbose")) {
+        // Legacy boolean verbose parameter - convert to verbosity level
+        m_verbosity = Json2KeyWord<bool>(m_config, "verbose") ? 3 : 1;
+    } else {
+        m_verbosity = 2; // Default to scientific
+    }
+
+    // Set CurcumaLogger verbosity to match
+    CurcumaLogger::set_verbosity(m_verbosity);
 }
 
 TrajectoryAnalysis::~TrajectoryAnalysis()

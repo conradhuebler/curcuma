@@ -49,6 +49,7 @@ BEGIN_PARAMETER_DEFINITION(trajectoryanalysis)
     PARAM(end_to_end_distance, Bool, true, "Track end-to-end distance (polymers).", "Tracking", {})
     PARAM(recenter_structures, Bool, false, "Center structures at origin before analysis.", "Processing", {})
     PARAM(verbose, Bool, true, "Detailed output.", "Output", {})
+    PARAM(verbosity, Int, 2, "Verbosity level (0-3)", "Output", {})
 END_PARAMETER_DEFINITION
 
 /*! \brief Trajectory analysis for time-series molecular data - Claude Generated
@@ -167,7 +168,7 @@ private:
     bool m_gyration_radius;
     bool m_end_to_end_distance;
     bool m_recenter_structures; // Claude Generated 2025: Center structures at origin before analysis
-    bool m_verbose;
+    int m_verbosity; // Verbosity level (0-3)
 
     // Claude Generated 2025: PBC logging state
     bool m_pbc_used = false; // Track if PBC notification has been shown

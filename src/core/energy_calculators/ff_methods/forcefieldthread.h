@@ -50,6 +50,7 @@ struct Bond {
     int type = 1; // 1 = UFF, 2 = QMDFF
     int i = 0, j = 0, k = 0, distance = 0;
     double fc = 0, exponent = 0, r0_ij = 0, r0_ik = 0;
+    double rabshift = 0.0;  // Claude Generated (Dec 2025): GFN-FF rabshift (vbond(1)) for validation
 };
 
 struct Angle {
@@ -350,6 +351,9 @@ public:
     double HydrogenBondEnergy() { return m_energy_hbond; }
     double HalogenBondEnergy() { return m_energy_xbond; }
 
+    // Claude Generated (December 2025): ATM three-body dispersion energy
+    double ATMEnergy() { return m_atm_energy; }
+
     // Phase 2: GFN-FF parameter flag setters (Claude Generated Dec 2025)
     void setDispersionEnabled(bool enabled) { m_dispersion_enabled = enabled; }
     void setHydrogenBondEnabled(bool enabled) { m_hbond_enabled = enabled; }
@@ -451,6 +455,7 @@ protected:
     // Phase 1.2: HB/XB energy components (Claude Generated 2025)
     double m_energy_hbond = 0.0;       // Hydrogen bond energy
     double m_energy_xbond = 0.0;       // Halogen bond energy
+    double m_atm_energy = 0.0;         // ATM three-body dispersion energy (Claude Generated December 2025)
 
     double m_final_factor = 1;
     double m_bond_scaling = 1, m_angle_scaling = 1, m_dihedral_scaling = 1, m_inversion_scaling = 1, m_vdw_scaling = 1, m_rep_scaling = 1;

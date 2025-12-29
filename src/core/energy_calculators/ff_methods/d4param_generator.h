@@ -96,7 +96,6 @@ private:
     std::vector<int> m_refn;    // Number of reference systems per element
     std::vector<std::vector<double>> m_refq, m_refh;  // Reference charges and hydrogen counts
     std::vector<std::vector<double>> m_refcn;   // Reference coordination numbers (cpp-d4)
-    std::vector<std::vector<double>> m_ascale; // Atomic scaling factors
 
     // Legacy placeholders (deprecated - replaced with real data)
     std::vector<double> m_r4_over_r2;

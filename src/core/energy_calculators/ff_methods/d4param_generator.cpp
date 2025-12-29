@@ -9,8 +9,6 @@
 #include "d4param_generator.h"
 #include "../../../../test_cases/reference_data/d4_reference_data_fixed.cpp"  // D4 reference data (365 lines)
 #include "../../../../test_cases/reference_data/d4_reference_cn.cpp"          // D4 reference CN data (cpp-d4 - December 2025 Phase 1)
-#include "../../../../test_cases/reference_data/d4_alphaiw_data.cpp"         // D4 alphaiw data (269 reference states)
-#include "../../../../test_cases/reference_data/d4_corrections_data.cpp"     // D4 correction factors
 #include "src/core/curcuma_logger.h"
 
 #include <algorithm>
@@ -109,14 +107,6 @@ void D4ParameterGenerator::initializeReferenceData()
             CurcumaLogger::warn("D4: cpp-d4 CN data unavailable, using placeholders");
         }
         m_refcn.resize(MAX_ELEM, std::vector<double>(MAX_REF, 0.0));
-    }
-
-    // Initialize atomic scaling factors (WIP - Phase 2.2)
-    // TODO: Extract ascale data from Fortran dftd4param.f90
-    m_ascale.resize(MAX_ELEM, std::vector<double>(MAX_REF, 1.0));
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::warn("D4: Using placeholder refcn and ascale (Phase 2.2 pending)");
     }
 
     // Legacy data (retained for compatibility during transition)
@@ -261,11 +251,14 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success(fmt::format("D4: Molecular CN calculated in {:.2f} ms", t_cn_ms));
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            for (size_t i = 0; i < std::min(size_t(5), m_atoms.size()); ++i) {
-                CurcumaLogger::result(fmt::format("  Atom {} (Z={}) CN = {:.4f}",
-                                                  i, m_atoms[i], m_cn_values[i]));
-            }
+    }
+
+    // Phase B debug output: Complete CN values for all atoms (Dec 2025)
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("=== D4 Coordination Numbers ===");
+        for (size_t i = 0; i < m_atoms.size(); ++i) {
+            CurcumaLogger::param(fmt::format("Atom {} (Z={})", i, m_atoms[i]),
+                                 fmt::format("CN={:.4f}", m_cn_values[i]));
         }
     }
 
@@ -285,11 +278,14 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success(fmt::format("D4: EEQ charges calculated in {:.2f} ms", t_eeq_ms));
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            for (size_t i = 0; i < std::min(size_t(5), m_atoms.size()); ++i) {
-                CurcumaLogger::result(fmt::format("  Atom {} (Z={}) q = {:.6f}",
-                                                  i, m_atoms[i], m_eeq_charges(i)));
-            }
+    }
+
+    // Phase B debug output: Complete EEQ charges for all atoms (Dec 2025)
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("=== D4 EEQ Charges ===");
+        for (size_t i = 0; i < m_atoms.size(); ++i) {
+            CurcumaLogger::param(fmt::format("Atom {} (Z={})", i, m_atoms[i]),
+                                 fmt::format("q={:.6f}", m_eeq_charges(i)));
         }
     }
 
@@ -659,6 +655,12 @@ double D4ParameterGenerator::computeC6Reference(int elem_i, int elem_j, int ref_
     double sscale_i = (d4_sscale_data.find(refsys_i) != d4_sscale_data.end()) ? d4_sscale_data.at(refsys_i) : 0.0;
     double sscale_j = (d4_sscale_data.find(refsys_j) != d4_sscale_data.end()) ? d4_sscale_data.at(refsys_j) : 0.0;
 
+    // Debug output for ascale verification (Phase A - Dec 2025)
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("D4 ascale: elem_i={} ref_i={} ascale={:.4f}, elem_j={} ref_j={} ascale={:.4f}",
+                                         elem_i, ref_i, ascale_i, elem_j, ref_j, ascale_j));
+    }
+
     // Integrate product of CORRECTED polarizabilities using trapezoidal rule
     // Correction formula: α_corrected = ascale * (αᵢⱼw - hcount * sscale * secaiw)
     for (int iw = 0; iw < N_FREQ - 1; ++iw) {
@@ -875,10 +877,30 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, size_t atom_i, 
         }
     }
 
-    // Fix 1: Simplified debug output at level 3 (using info which has threshold >= 2)
+    // Phase B debug: Reference state selection for C-O pair (Dec 2025)
+    if (CurcumaLogger::get_verbosity() >= 3 && atom_i == 0 && atom_j == 5) {
+        CurcumaLogger::info(fmt::format("D4: C6[0][5] reference weights (elem_i={}, elem_j={})", elem_i, elem_j));
+        for (size_t refi = 0; refi < weights_i.size(); ++refi) {
+            for (size_t refj = 0; refj < weights_j.size(); ++refj) {
+                double weight = weights_i[refi] * weights_j[refj];
+                if (weight > 1e-6) {  // Only significant weights
+                    uint32_t key = c6CacheKey(elem_i, elem_j, refi, refj);
+                    auto it = m_c6_reference_cache.find(key);
+                    double c6_ref = (it != m_c6_reference_cache.end()) ? it->second : 1.0;
+                    CurcumaLogger::param(fmt::format("  ref_i={} ref_j={}", refi, refj),
+                                         fmt::format("weight={:.6f} C6_ref={:.4f}", weight, c6_ref));
+                }
+            }
+        }
+    }
+
+    // Phase B enhanced output: Include CN and charges for debugging (Dec 2025)
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("D4 C6[{}][{}]: Zi={} Zj={} → C6={:.4f}",
-                                         atom_i, atom_j, Zi, Zj, c6_weighted));
+        CurcumaLogger::info(fmt::format("D4 C6[{}][{}]: Zi={} Zj={} CN_i={:.3f} CN_j={:.3f} q_i={:.4f} q_j={:.4f} → C6={:.4f}",
+                                         atom_i, atom_j, Zi, Zj,
+                                         m_cn_values[atom_i], m_cn_values[atom_j],
+                                         m_eeq_charges(atom_i), m_eeq_charges(atom_j),
+                                         c6_weighted));
     }
 
     return c6_weighted;

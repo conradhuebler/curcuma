@@ -97,8 +97,19 @@ OptimizationContext OptimizationContext::fromJson(const json& config, EnergyCalc
     // Load output settings
     if (config.contains("write_trajectory"))
         context.write_trajectory = config["write_trajectory"];
-    if (config.contains("verbose"))
-        context.verbose = config["verbose"];
+
+    // Handle both legacy verbose and new verbosity parameters for backward compatibility
+    if (config.contains("verbosity")) {
+        context.verbosity = config["verbosity"];
+        // Validate verbosity range
+        if (context.verbosity < 0 || context.verbosity > 3) {
+            context.verbosity = 1; // Default to minimal if out of range
+        }
+    } else if (config.contains("verbose")) {
+        // Legacy boolean verbose parameter - convert to verbosity level
+        context.verbosity = config["verbose"] ? 3 : 1;
+    }
+
     if (config.contains("print_output"))
         context.print_output = config["print_output"];
 
@@ -215,12 +226,17 @@ bool OptimizerDriver::UpdateGeometry(const double* coordinates)
         m_current_energy, m_current_gradient);
 }
 
-OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, bool verbose)
+OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosity)
 {
-    // Synchronize verbosity settings (analog to recent RMSDTraj fixes)
-    CurcumaLogger::set_verbosity(verbose ? 3 : 2);
+    // Synchronize verbosity settings using the new integer parameter
+    // Validate verbosity range
+    if (verbosity < 0 || verbosity > 3) {
+        verbosity = 1; // Default to minimal if out of range
+    }
+
+    CurcumaLogger::set_verbosity(verbosity);
     m_context.write_trajectory = write_trajectory;
-    m_context.verbose = verbose;
+    m_context.verbosity = verbosity;
 
     m_start_time = std::chrono::high_resolution_clock::now();
 

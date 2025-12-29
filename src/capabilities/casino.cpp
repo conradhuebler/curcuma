@@ -54,7 +54,25 @@ Casino::Casino(const json& controller, bool silent)
     m_move_strategy = Json2KeyWord<std::string>(m_config, "move_strategy");
     m_acceptance_target = Json2KeyWord<double>(m_config, "acceptance_target");
     m_adaptive_step = Json2KeyWord<bool>(m_config, "adaptive_step");
-    m_verbose = Json2KeyWord<bool>(m_config, "verbose");
+
+    // Handle both legacy verbose and new verbosity parameters for backward compatibility
+    if (m_config.contains("verbosity")) {
+        m_verbosity = Json2KeyWord<int>(m_config, "verbosity");
+        // Validate verbosity range
+        if (m_verbosity < 0 || m_verbosity > 3) {
+            m_verbosity = 2; // Default to scientific if out of range
+        }
+    } else if (m_config.contains("verbose")) {
+        // Legacy boolean verbose parameter - convert to verbosity level
+        m_verbose = Json2KeyWord<bool>(m_config, "verbose");
+        m_verbosity = m_verbose ? 3 : 1;
+    } else {
+        m_verbosity = 2; // Default to scientific
+        m_verbose = true; // Default for legacy compatibility
+    }
+
+    // Set CurcumaLogger verbosity to match
+    CurcumaLogger::set_verbosity(m_verbosity);
 
     // Enhanced MC parameters - Claude Generated
     m_pivot_moves = Json2KeyWord<bool>(m_config, "pivot_moves");
@@ -426,7 +444,25 @@ void Casino::updateParametersFromConfig()
     m_move_strategy = Json2KeyWord<std::string>(m_config, "move_strategy");
     m_acceptance_target = Json2KeyWord<double>(m_config, "acceptance_target");
     m_adaptive_step = Json2KeyWord<bool>(m_config, "adaptive_step");
-    m_verbose = Json2KeyWord<bool>(m_config, "verbose");
+
+    // Handle both legacy verbose and new verbosity parameters for backward compatibility
+    if (m_config.contains("verbosity")) {
+        m_verbosity = Json2KeyWord<int>(m_config, "verbosity");
+        // Validate verbosity range
+        if (m_verbosity < 0 || m_verbosity > 3) {
+            m_verbosity = 2; // Default to scientific if out of range
+        }
+    } else if (m_config.contains("verbose")) {
+        // Legacy boolean verbose parameter - convert to verbosity level
+        m_verbose = Json2KeyWord<bool>(m_config, "verbose");
+        m_verbosity = m_verbose ? 3 : 1;
+    } else {
+        m_verbosity = 2; // Default to scientific
+        m_verbose = true; // Default for legacy compatibility
+    }
+
+    // Set CurcumaLogger verbosity to match
+    CurcumaLogger::set_verbosity(m_verbosity);
 
     // Enhanced MC parameters
     m_pivot_moves = Json2KeyWord<bool>(m_config, "pivot_moves");
@@ -806,7 +842,7 @@ void Casino::updateStepSize()
     m_single_atom_step_size = std::max(0.001, std::min(m_single_atom_step_size, 1.0));
     m_orientational_step_size = std::max(0.001, std::min(m_orientational_step_size, 0.5)); // Radians
 
-    if (m_verbose) {
+    if (m_verbosity >= 3) {  // Debug level output
         CurcumaLogger::info_fmt("Step {} | Acceptance: {:.3f} | Translation: {:.3f} Å | Orientation: {:.3f} rad",
                               m_current_step, current_acceptance, m_single_atom_step_size, m_orientational_step_size);
     }
@@ -842,7 +878,7 @@ void Casino::writeTrajectoryFrame(int step)
 
 void Casino::outputStatistics(int step)
 {
-    if (m_verbose && step % (m_energy_frequency * 10) == 0) {
+    if (m_verbosity >= 3 && step % (m_energy_frequency * 10) == 0) {  // Debug level output
         double acceptance = getAcceptanceRatio();
         CurcumaLogger::param("step_info", fmt::format("Step: {} | Energy: {:.6f} kJ/mol | Acceptance: {:.3f}",
                                 step, m_current_energy, acceptance));

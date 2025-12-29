@@ -121,6 +121,62 @@ add_test(NAME test_gfnff_unified
 # Configure test timeout and grouping
 set_tests_properties(test_gfnff_unified PROPERTIES TIMEOUT 60 LABELS "gfnff")
 
+# Claude Generated (December 2025): GFN-FF Stepwise Validation Test
+# Purpose: Isolate EEQ charge errors from energy calculation errors
+# Uses XTB reference charges to bypass EEQ and validate energy components
+add_executable(test_gfnff_stepwise
+        test_gfnff_stepwise.cpp)
+
+target_link_libraries(test_gfnff_stepwise curcuma_core test_molecule_registry)
+
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_stepwise REUSE_FROM curcuma_core)
+endif()
+
+# Register with CTest
+add_test(NAME test_gfnff_stepwise
+         COMMAND test_gfnff_stepwise
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test_cases)
+
+# Configure test timeout and grouping
+set_tests_properties(test_gfnff_stepwise PROPERTIES TIMEOUT 60 LABELS "gfnff;validation")
+
+# Claude Generated (December 2025): CN Unit Conversion Fix Test
+# Purpose: Quick validation of Angstrom->Bohr conversion for CN calculation
+add_executable(test_cn_fix
+        test_cn_fix.cpp)
+
+target_link_libraries(test_cn_fix curcuma_core test_molecule_registry)
+
+if(USE_PCH)
+        target_precompile_headers(test_cn_fix REUSE_FROM curcuma_core)
+endif()
+
+# Register with CTest
+add_test(NAME test_cn_fix
+         COMMAND test_cn_fix
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test_cases)
+
+set_tests_properties(test_cn_fix PROPERTIES TIMEOUT 10 LABELS "gfnff;cn")
+
+# Claude Generated (December 2025): C-O Bond Fix Test
+# Purpose: Validate that CN unit conversion fixes C-O bond distances
+add_executable(test_cobond_fix
+        test_cobond_fix.cpp)
+
+target_link_libraries(test_cobond_fix curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_cobond_fix REUSE_FROM curcuma_core)
+endif()
+
+# Register with CTest
+add_test(NAME test_cobond_fix
+         COMMAND test_cobond_fix
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test_cases)
+
+set_tests_properties(test_cobond_fix PROPERTIES TIMEOUT 10 LABELS "gfnff;bond")
+
 # Claude Generated (Session 5): Periodic Table utility tests
 add_executable(test_periodic_table
         test_periodic_table.cpp)

@@ -1372,7 +1372,7 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
         CurcumaLogger::param("max_absolute_charge", fmt::format("{:.8e}", max_charge));
 
         if (max_charge < 1e-10) {
-            CurcumaLogger::error("🚨 CRITICAL ISSUE: All Coulomb charges are ZERO! Energy will be ZERO!");
+            CurcumaLogger::info("ℹ️  All EEQ partial charges near zero (typical for homonuclear molecules like H₂, Cl₂)");
         } else {
             CurcumaLogger::success(fmt::format("✅ Charges up to {:.2e} found - Coulomb energy should be non-zero", max_charge));
         }
