@@ -108,6 +108,9 @@ public:
     // Phase 5A: Distribute EEQ charges to all threads for fqq calculation (Claude Generated Nov 2025)
     void distributeEEQCharges(const Vector& charges);
 
+    // Get cached EEQ charges for GFN-FF cache restoration (Claude Generated Dec 2025)
+    const Vector& getCachedEEQCharges() const { return m_eeq_charges; }
+
     Eigen::MatrixXd NumGrad();
 
     // Claude Generated: Parameter analysis functionality
@@ -188,6 +191,9 @@ private:
 
     // ATM three-body dispersion storage (D3/D4)
     std::vector<ATMTriple> m_atm_triples;
+
+    // EEQ charges for GFN-FF (cached with parameters - Claude Generated Dec 2025)
+    Vector m_eeq_charges;
 
     json m_parameters;
     std::string m_auto_param_file; // Auto-detected parameter file path

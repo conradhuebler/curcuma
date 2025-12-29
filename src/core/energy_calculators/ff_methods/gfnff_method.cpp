@@ -145,6 +145,17 @@ bool GFNFF::InitialiseMolecule()
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success("Molecule validation passed");
+        CurcumaLogger::info("Allocating gradient and charge arrays...");
+    }
+
+    // CRITICAL FIX (Claude Generated Dec 2025): Initialize arrays BEFORE initializeForceField()
+    // initializeForceField() will populate m_charges with EEQ values,
+    // so we must NOT zero them after that!
+    m_gradient = Matrix::Zero(m_atomcount, 3);
+    m_charges = Vector::Zero(m_atomcount);
+    m_bond_orders = Vector::Zero(m_atomcount * (m_atomcount - 1) / 2);
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Initializing force field...");
     }
 
@@ -155,12 +166,7 @@ bool GFNFF::InitialiseMolecule()
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success("Force field initialization successful");
-        CurcumaLogger::info("Allocating gradient and charge arrays...");
     }
-
-    m_gradient = Matrix::Zero(m_atomcount, 3);
-    m_charges = Vector::Zero(m_atomcount);
-    m_bond_orders = Vector::Zero(m_atomcount * (m_atomcount - 1) / 2);
 
     m_initialized = true;
 
@@ -369,6 +375,17 @@ bool GFNFF::initializeForceField()
         if (CurcumaLogger::get_verbosity() >= 1) {
             CurcumaLogger::success("Loaded from cache - skipping EEQ/topology calculation");
         }
+
+        // CRITICAL FIX (Claude Generated Dec 2025): Restore cached charges to m_charges
+        // Cache contains EEQ charges computed during parameter generation
+        m_charges = m_forcefield->getCachedEEQCharges();
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Restored EEQ charges from cache");
+            CurcumaLogger::param("charge_count", std::to_string(m_charges.size()));
+            CurcumaLogger::param("charge_sum", fmt::format("{:.6f}", m_charges.sum()));
+        }
+
         return true;
     }
     std::cerr << "DEBUG: Cache miss - will generate parameters" << std::endl;
@@ -416,19 +433,16 @@ bool GFNFF::initializeForceField()
         return false;
     }
 
-    // Phase 5A: Distribute EEQ charges - DISABLED (Session 10, Dec 2025)
-    // Claude Generated: This code was moved to generateGFNFFParameters() where charges are actually calculated
-    // Running this here would distribute EMPTY charges (m_charges is still Zero at this point)
-    // and overwrite the correct charges distributed in generateGFNFFParameters()
-    /*
+    // CRITICAL FIX (Claude Generated Dec 2025): Distribute EEQ charges AFTER setParameter()
+    // setParameter() creates threads via AutoRanges(), so we must distribute charges AFTER
+    // Previously this was called in generateGFNFFParameters() but threads didn't exist yet
     if (!m_charges.isZero()) {
         m_forcefield->distributeEEQCharges(m_charges);
         if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("EEQ charges distributed to ForceFieldThreads");
+            CurcumaLogger::info("EEQ charges distributed to ForceFieldThreads after initialization");
             CurcumaLogger::param("charge_count", std::to_string(m_charges.size()));
         }
     }
-    */
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success("ForceField initialization complete");
@@ -570,15 +584,8 @@ json GFNFF::generateGFNFFParameters()
         // Use calculated charges instead of loading from file
         m_charges = topo_info.eeq_charges;
 
-        // CRITICAL FIX (Session 10, Dec 2025): Distribute Two-Phase EEQ charges to ForceFieldThreads
-        // Claude Generated: This enables charge-dependent fqq corrections in bond energy
-        if (m_forcefield && !m_charges.isZero()) {
-            m_forcefield->distributeEEQCharges(m_charges);
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info("Two-Phase EEQ charges distributed to ForceFieldThreads [advanced mode]");
-                CurcumaLogger::param("charge_count", std::to_string(m_charges.size()));
-            }
-        }
+        // NOTE (Claude Generated Dec 2025): Charge distribution happens in initializeForceField()
+        // AFTER setParameter() creates threads (threads don't exist yet at this point)
 
     } else {
         CurcumaLogger::info("Using basic GFN-FF parametrization");

@@ -104,6 +104,9 @@ void ForceField::UpdateGeometry(const std::vector<std::array<double, 3>>& geomet
 
 void ForceField::distributeEEQCharges(const Vector& charges)
 {
+    // Store charges for caching (Claude Generated Dec 2025)
+    m_eeq_charges = charges;
+
     // Phase 5A: Distribute EEQ charges to all threads for fqq calculation
     // Claude Generated (Nov 2025)
     for (int i = 0; i < m_stored_threads.size(); ++i) {
@@ -1173,6 +1176,21 @@ bool ForceField::loadParametersFromFile(const std::string& filename)
             if (loaded_params.contains("atm_triples")) {
                 CurcumaLogger::param("atm_triples", static_cast<int>(loaded_params["atm_triples"].size()));
             }
+
+            // EEQ charges info (GFN-FF)
+            if (loaded_params.contains("eeq_charges")) {
+                CurcumaLogger::param("eeq_charges", static_cast<int>(loaded_params["eeq_charges"].size()));
+            }
+        }
+
+        // Claude Generated (December 2025): Restore EEQ charges from cache
+        if (loaded_params.contains("eeq_charges") && !loaded_params["eeq_charges"].is_null()) {
+            std::vector<double> charge_vec = loaded_params["eeq_charges"].get<std::vector<double>>();
+            m_eeq_charges = Eigen::Map<Vector>(charge_vec.data(), charge_vec.size());
+
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::param("eeq_charges_restored", static_cast<int>(m_eeq_charges.size()));
+            }
         }
 
         return true;
@@ -1449,6 +1467,15 @@ json ForceField::exportCurrentParameters() const
             atm.push_back(t);
         }
         output["atm_triples"] = atm;
+    }
+
+    // Claude Generated (December 2025): Export EEQ charges if available
+    if (m_eeq_charges.size() > 0) {
+        json charges = json::array();
+        for (int i = 0; i < m_eeq_charges.size(); ++i) {
+            charges.push_back(m_eeq_charges[i]);
+        }
+        output["eeq_charges"] = charges;
     }
 
     // Add metadata
