@@ -89,14 +89,32 @@ To add a new GFN-FF energy term (e.g., "CrossTerm"), you MUST modify:
 
 ## Current Implementation Status
 
+### Energy Component Verification (December 31, 2025)
+
+**Test**: `test_cases/test_gfnff_stepwise --verbose` (CH₃OCH₃ vs XTB 6.6.1)
+
+| Component | Curcuma (Eh) | XTB Ref (Eh) | Error % | Status |
+|-----------|--------------|--------------|---------|--------|
+| **Bond**      | -1.302254    | -1.216444    | **+7.05**   | ⚠️ Slightly too large |
+| **Angle**     | 0.001325     | 0.001780     | **-25.55**  | ⚠️ Too small (fijk refinement needed) |
+| **Torsion**   | 0.000073     | 0.000023     | **+211.42** | ⚠️ Too large (phase factor?) |
+| **Repulsion** | 0.054074     | 0.053865     | **+0.39**   | ✅ **EXCELLENT!** |
+| **Coulomb**   | -0.100566    | -0.047825    | **+110.28** | ❌ **CRITICAL: 2× too large** |
+| **Dispersion**| 0.000000*    | -0.000042    | N/A         | ⚠️ Test setup issue |
+| **TOTAL**     | **-1.349245**| **-1.209209**| **+11.58**  | - |
+
+*D4 dispersion works in CLI (`-0.000870 Eh` for CH₃OH), test calls `DispersionEnergy()` before `Calculate()`
+
+**Summary**: 1/6 components excellent (Repulsion 0.4% error), 5/6 need attention
+
 ### ✅ Fully Implemented Terms
-- Bond stretching (exponential potential)
-- Angle bending (cosine + damping + fqq correction Phase 5A)
-- Dihedral torsion (cosine series)
-- Inversion (out-of-plane)
-- Dispersion (D3/D4 Becke-Johnson damping with charge-weighted C6 - December 2025)
-- Repulsion (exponential r^-1.5 - Phase 4 Pairwise)
-- Coulomb (EEQ with standalone solver - December 2025)
+- Bond stretching (exponential potential) - **VERIFIED: 93% accuracy (+7% error)**
+- Angle bending (cosine + damping + fqq correction Phase 5A) - **VERIFIED: 74% accuracy, needs fijk Phase 2b**
+- Dihedral torsion (cosine series) - **VERIFIED: Issue found (+211% error, small absolute value)**
+- Inversion (out-of-plane) - Not tested in CH₃OCH₃ (acyclic)
+- Dispersion (D3/D4 Becke-Johnson damping with charge-weighted C6 - December 2025) - **VERIFIED: Working in CLI**
+- Repulsion (exponential r^-1.5 - Phase 4 Pairwise) - **VERIFIED: 99.6% accuracy ✅ EXCELLENT!**
+- Coulomb (EEQ with standalone solver - December 2025) - **VERIFIED: CRITICAL ISSUE - 2× too large**
 
 ### ✅ EEQ Consolidation and D4 Integration (December 2025)
 - **EEQSolver Extraction**: Standalone utility in `eeq_solver.{h,cpp}` (~800 lines) with complete two-phase algorithm
@@ -119,12 +137,21 @@ To add a new GFN-FF energy term (e.g., "CrossTerm"), you MUST modify:
 - **Implementation**: Lines 41-523 in eeq_solver.cpp (483 lines total)
 - **Status**: ✅ **COMPLETE** - All XTB element-specific rules implemented and tested
 
-### ⚠️ EEQ Charge Accuracy Status (December 29, 2025)
-**Current Performance**: RMS error 0.0077 e vs XTB 6.6.1 reference (CH₃OCH₃)
-- **Test Status**: ✅ PASSING (6/9 atoms within tolerance, RMS < 0.01 e)
-- **Hybridization**: ✅ **UPGRADED** (Dec 30) - now uses complete XTB element-specific rules
+### ✅ EEQ Charge Accuracy Status (VERIFIED December 31, 2025)
+**Current Performance**: RMS error 2.96e-03 e vs XTB 6.6.1 reference (CH₃OCH₃)
+- **Test**: `test_cases/test_gfnff_stepwise --verbose`
+- **Test Status**: ✅ **EXCELLENT** (8/9 atoms within tolerance, RMS < 0.003 e)
+- **Max Error**: 8.09e-03 e (on O atom)
+- **Hybridization**: ✅ Complete XTB element-specific rules (Dec 30)
 - **CN Validation**: ✅ Perfect match with XTB (<0.3% error)
-- **Next Steps**: Charge accuracy improvements if needed (EEQ parameter validation)
+- **Verdict**: **EEQ charges are production-ready** - very good accuracy achieved
+
+### ❌ CRITICAL ISSUE: Coulomb Energy Error (December 31, 2025)
+**Problem**: Despite excellent EEQ charges, Coulomb energy is **110% too large** (2× expected value)
+- **Test**: CH₃OCH₃: Curcuma -0.101 Eh vs XTB -0.048 Eh
+- **Possible Causes**: Damping function, screening cutoff, unit conversion, double-counting
+- **Priority**: **CRITICAL** - blocks accurate total energy despite good charges
+- **Investigation Needed**: Coulomb energy calculation in ForceFieldThread
 
 ### ✅ Parameter Management (Phase 2 - December 2025)
 - **ConfigManager Integration**: Type-safe parameter access with validation
@@ -136,8 +163,22 @@ To add a new GFN-FF energy term (e.g., "CrossTerm"), you MUST modify:
   - Edge case (atoms at cutoff distance)
   - Metal-specific correction handling (Fe atom)
 
+### 🔴 CRITICAL TODOs (December 31, 2025)
+1. **Coulomb Energy 110% Error** - Despite excellent EEQ charges (RMS 2.96e-03), Coulomb energy is 2× too large
+   - Investigate damping function, screening, unit conversions, double-counting
+   - Blocks accurate total energy calculation
+
+2. **Torsion Energy 211% Error** - Small absolute magnitude but 3× too large
+   - Investigate phase factors, force constant scaling
+
+3. **Angle fijk Refinement (Phase 2b)** - VERIFIED: 25.55% too small
+   - Implement angl2 topology logic from `gfnff_param.f90:1359`
+
 ### 🟡 Lower Priority TODOs
 - Phase 5B: Metal-specific fqq correction (2.5x factor)
+- Pi-system/amide detection for nitrogen dgam (enhancement, current EEQ already good)
+- Ring detection algorithm (for aromatic systems)
+- Fragment-constrained EEQ charges
 
 ## Performance
 

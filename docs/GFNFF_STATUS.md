@@ -1,8 +1,59 @@
 # GFN-FF Implementation Status
 
-**Last Updated**: 2025-12-30
-**Status**: ✅ **EEQ PHASE 1 & 2 COMPLETE - 62% CHARGE ERROR REDUCTION**
+**Last Updated**: 2025-12-31
+**Status**: ✅ **VERIFIED VIA test_gfnff_stepwise - ENERGY COMPONENT ANALYSIS COMPLETE**
 **Location**: `src/core/energy_calculators/ff_methods/`
+
+---
+
+## Latest Verification (December 31, 2025)
+
+**Test**: `test_cases/test_gfnff_stepwise --verbose` (CH₃OCH₃ vs XTB 6.6.1)
+
+### Energy Component Accuracy
+
+| Component | Curcuma (Eh) | XTB Ref (Eh) | Error % | Status |
+|-----------|--------------|--------------|---------|--------|
+| **Bond**      | -1.302254    | -1.216444    | **+7.05**   | ⚠️ Slightly too large |
+| **Angle**     | 0.001325     | 0.001780     | **-25.55**  | ⚠️ Too small (fijk refinement needed) |
+| **Torsion**   | 0.000073     | 0.000023     | **+211.42** | ⚠️ Too large (phase factor?) |
+| **Repulsion** | 0.054074     | 0.053865     | **+0.39**   | ✅ **EXCELLENT!** |
+| **Coulomb**   | -0.100566    | -0.047825    | **+110.28** | ❌ **2× too large** (critical) |
+| **Dispersion**| 0.000000*    | -0.000042    | N/A         | ⚠️ Test setup issue |
+| **TOTAL**     | **-1.349245**| **-1.209209**| **+11.58**  | - |
+
+*D4 dispersion works in CLI (`-0.000870 Eh` for CH₃OH), test calls `DispersionEnergy()` before `Calculate()`
+
+### EEQ Charge Accuracy ✅
+
+**RMS Error**: 2.96e-03 e (very good!)
+**Max Error**: 8.09e-03 e (on O atom)
+**Atoms OK**: 8/9 within tolerance
+
+```
+Atom | Element | Curcuma EEQ | XTB Ref  | Error (e)  | Status
+   1 |       C |    0.022916 | 0.020553 | 2.364e-03  | ✓
+   2 |       C |    0.022895 | 0.020532 | 2.363e-03  | ✓
+   6 |       O |   -0.372847 | -0.364757 | 8.090e-03  | ✗ (max error)
+```
+
+### Key Findings
+
+1. **✅ RESOLVED**: "Bond energy 1479× too small" claim was **FALSE**
+   - Actual error: **+7.05%** (slightly too large, not 1479× too small)
+   - Corrected in `gfnff_method.cpp:959`
+
+2. **❌ NEW CRITICAL ISSUE**: Coulomb energy **110% too large** despite good EEQ charges
+   - Possible causes: damping function, screening, unit conversion, double-counting
+
+3. **⚠️ NEW ISSUE**: Torsion energy **211% too large** (small absolute error)
+   - Possible causes: phase factor, force constant scaling
+
+4. **✅ VERIFIED**: Angle energy **25.55% too small** confirms fijk refinement needed (Phase 2b)
+
+5. **✅ EXCELLENT**: Repulsion energy **0.39% error** - nearly perfect!
+
+6. **✅ WORKING**: D4 dispersion functional in CLI, test setup issue only
 
 ---
 
@@ -50,17 +101,19 @@ ff_methods/
 
 ---
 
-## Energy Terms Status
+## Energy Terms Status (UPDATED Dec 31, 2025)
 
-| Term | Implementation | Accuracy | Notes |
+| Term | Implementation | Accuracy (CH₃OCH₃) | Notes |
 |------|----------------|----------|-------|
-| **Bond Stretching** | ✅ Complete | 99.97% (H₂) | Exponential potential |
-| **Angle Bending** | ✅ Complete | ~95% | Cosine + damping + fqq |
-| **Torsion** | ✅ Complete | ~98% | Fourier series (V1-V3) |
+| **Bond Stretching** | ✅ Complete | 93% (+7% error) | Exponential potential - slightly too large |
+| **Angle Bending** | ⚠️ Needs fijk | 74% (-26% error) | Phase 2b needed: angl2 topology logic |
+| **Torsion** | ⚠️ Needs Review | -211% (+211% error) | Small absolute value, phase factor issue? |
 | **Inversion** | ✅ Complete | ~95% | Out-of-plane bending |
-| **Repulsion** | ✅ Complete | 0.001% | ✅ Bonded/non-bonded + topology factors (Dec 24) |
-| **Dispersion** | ✅ Enhanced | ~90% | D4 with EEQ charges (Dec 2025) |
-| **Coulomb/EEQ** | ✅ Complete | **75% improved** | ✅ **Full dxi with pi-system + EN averaging** (Dec 28) |
+| **Repulsion** | ✅ **EXCELLENT** | **99.6% (+0.4%)** | ✅ Nearly perfect! Bonded/non-bonded complete |
+| **Dispersion** | ✅ Working | ✅ Functional | D4 with EEQ charges - test setup issue only |
+| **Coulomb/EEQ** | ❌ **CRITICAL** | -110% (+110%) | **2× too large despite good charges** |
+
+**Overall Accuracy**: 88.4% (11.6% total energy error for CH₃OCH₃)
 
 ---
 
