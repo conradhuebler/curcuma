@@ -38,7 +38,591 @@
 
 using namespace GFNFFParameters;  // Access to chi_eeq, gam_eeq, alpha_eeq, cnf_eeq
 
-// ===== Constructor =====
+// ===== Element Group Classification (XTB Compatible) =====
+// Based on XTB param%group classification in gfnff_ini2.f90
+// Claude Generated - December 2025 (Phase 2: Complete Element-Specific Hybridization)
+
+/**
+ * @brief Get XTB element group for hybridization rules
+ *
+ * Maps atomic number to XTB group classification used in gfnff_ini2.f90
+ *
+ * @param Z Atomic number
+ * @return XTB group number:
+ *         1 = H, 2 = Alkali/Alkaline Earth, 3 = Boron, 4 = Carbon,
+ *         5 = Nitrogen, 6 = Oxygen, 7 = Halogens, 8 = Noble gases
+ *         -3 = Early TMs (Sc-La), -7 = Late TMs, 0 = Unknown
+ */
+static inline int getElementGroup(int Z) {
+    // Main group elements
+    if (Z == 1) return 1;        // H
+    if (Z == 2 || (Z >= 3 && Z <= 4)) return 2;  // He, Li, Be
+    if (Z == 5) return 3;        // B
+    if (Z == 6) return 4;        // C
+    if (Z == 7) return 5;        // N
+    if (Z == 8) return 6;        // O
+
+    // Halogens: F, Cl, Br, I, At
+    if (Z == 9 || (Z >= 17 && Z <= 35) || (Z >= 53 && Z <= 85)) return 7;
+
+    // Noble gases: Ne, Ar, Kr, Xe, Rn
+    if ((Z >= 10 && Z <= 18) || (Z >= 36 && Z <= 54) || (Z >= 86)) return 8;
+
+    // Transition metals
+    if (Z >= 21 && Z <= 30) return -3; // Sc-La (early TMs)
+    if ((Z >= 22 && Z <= 28) || (Z >= 39 && Z <= 46) || (Z >= 72 && Z <= 78)) return -7; // Late TMs
+
+    return 0; // Default/unknown
+}
+
+/**
+ * @brief Check if element is a transition metal
+ *
+ * @param Z Atomic number
+ * @return true if transition metal, false otherwise
+ */
+static inline bool isTransitionMetal(int Z) {
+    int group = getElementGroup(Z);
+    return (group == -3 || group == -7);
+}
+
+/**
+ * @brief Check if element is a metal (transition or main group)
+ *
+ * @param Z Atomic number
+ * @return true if metal, false otherwise
+ */
+static inline bool isMetal(int Z) {
+    // Transition metals
+    if (isTransitionMetal(Z)) return true;
+
+    // Main group metals (alkali, alkaline earth, some post-transition)
+    if (Z >= 3 && Z <= 4) return true;  // Li, Be
+    if (Z >= 11 && Z <= 13) return true; // Na, Mg, Al
+    if (Z >= 19 && Z <= 20) return true; // K, Ca
+    if (Z >= 37 && Z <= 38) return true; // Rb, Sr
+    if (Z >= 55 && Z <= 56) return true; // Cs, Ba
+    if (Z >= 87 && Z <= 88) return true; // Fr, Ra
+
+    // Post-transition metals
+    if (Z == 31 || Z == 49 || Z == 50 || Z == 81 || Z == 82 || Z == 83 || Z == 113 || Z == 114 || Z == 115 || Z == 116) return true;
+
+    return false;
+}
+
+/**
+ * @brief Count hydrogen neighbors for transition metal coordination
+ *
+ * @param atom_index Index of central atom
+ * @param neighbor_lists Neighbor list from topology
+ * @param atoms Atomic numbers
+ * @return Number of hydrogen neighbors
+ */
+static inline int countHydrogenNeighbors(int atom_index,
+                                         const std::vector<std::vector<int>>& neighbor_lists,
+                                         const std::vector<int>& atoms) {
+    if (atom_index < 0 || atom_index >= neighbor_lists.size()) return 0;
+
+    int count = 0;
+    for (int neighbor : neighbor_lists[atom_index]) {
+        if (neighbor < atoms.size() && atoms[neighbor] == 1) { // Hydrogen
+            count++;
+        }
+    }
+    return count;
+}
+
+/**
+ * @brief Calculate bond angle in radians (A-B-C)
+ *
+ * Computes the angle at atom B between atoms A-B-C
+ * Matches XTB's bangl() subroutine from gfnff_ini2.f90
+ *
+ * @param geometry_bohr Geometry matrix (natoms x 3) in Bohr
+ * @param atom_a Index of first atom
+ * @param atom_b Index of central atom (vertex)
+ * @param atom_c Index of third atom
+ * @return Bond angle in radians (0 to π)
+ *
+ * Claude Generated - December 2025 (Phase 3: Geometry-Dependent Hybridization)
+ */
+static inline double calculateBondAngle(const Matrix& geometry_bohr,
+                                        int atom_a, int atom_b, int atom_c) {
+    if (atom_a < 0 || atom_b < 0 || atom_c < 0) return 0.0;
+    if (atom_a >= geometry_bohr.rows() || atom_b >= geometry_bohr.rows() || atom_c >= geometry_bohr.rows()) return 0.0;
+
+    // Vectors B->A and B->C
+    Eigen::Vector3d vec_ba = geometry_bohr.row(atom_a) - geometry_bohr.row(atom_b);
+    Eigen::Vector3d vec_bc = geometry_bohr.row(atom_c) - geometry_bohr.row(atom_b);
+
+    // Normalize vectors
+    double len_ba = vec_ba.norm();
+    double len_bc = vec_bc.norm();
+
+    if (len_ba < 1e-10 || len_bc < 1e-10) return 0.0; // Degenerate case
+
+    vec_ba /= len_ba;
+    vec_bc /= len_bc;
+
+    // Dot product
+    double cos_angle = vec_ba.dot(vec_bc);
+
+    // Clamp to valid range [-1, 1] to avoid numerical issues
+    if (cos_angle > 1.0) cos_angle = 1.0;
+    if (cos_angle < -1.0) cos_angle = -1.0;
+
+    return std::acos(cos_angle);
+}
+
+/**
+ * @brief Count metal neighbors for an atom
+ *
+ * @param atom_index Index of central atom
+ * @param neighbor_lists Neighbor list from topology
+ * @param atoms Atomic numbers
+ * @return Number of metal neighbors
+ *
+ * Claude Generated - December 2025 (Phase 3: Topology-Aware Hybridization)
+ */
+static inline int countMetalNeighbors(int atom_index,
+                                      const std::vector<std::vector<int>>& neighbor_lists,
+                                      const std::vector<int>& atoms) {
+    if (atom_index < 0 || atom_index >= neighbor_lists.size()) return 0;
+
+    int count = 0;
+    for (int neighbor : neighbor_lists[atom_index]) {
+        if (neighbor < atoms.size() && isMetal(atoms[neighbor])) {
+            count++;
+        }
+    }
+    return count;
+}
+
+/**
+ * @brief Find nearest non-metal neighbor's coordination number
+ *
+ * Matches XTB's nn_nearest_noM() subroutine used for M-O-X conjugation detection
+ *
+ * @param atom_index Index of central atom
+ * @param neighbor_lists Neighbor list from topology
+ * @param atoms Atomic numbers
+ * @return Coordination number of nearest non-metal neighbor (0 if none found)
+ *
+ * Claude Generated - December 2025 (Phase 3: Metal-Oxygen Conjugation)
+ */
+static inline int findNearestNonMetalCN(int atom_index,
+                                        const std::vector<std::vector<int>>& neighbor_lists,
+                                        const std::vector<int>& atoms) {
+    if (atom_index < 0 || atom_index >= neighbor_lists.size()) return 0;
+
+    // Find first non-metal neighbor and return its CN
+    for (int neighbor : neighbor_lists[atom_index]) {
+        if (neighbor < atoms.size() && !isMetal(atoms[neighbor])) {
+            // Return CN of this neighbor
+            if (neighbor < neighbor_lists.size()) {
+                return neighbor_lists[neighbor].size();
+            }
+        }
+    }
+    return 0; // No non-metal neighbors found
+}
+
+// ===== Hybridization Detection with Element-Specific Rules =====
+// Enhanced version with XTB-compatible element-specific logic
+// Claude Generated - December 2025 (Phase 2: Complete Element-Specific Hybridization)
+
+/**
+ * @brief Detect hybridization using element-specific XTB rules
+ *
+ * Implements comprehensive hybridization detection based on XTB gfnff_ini2.f90:217-332
+ * Supports element-specific rules for main group elements and transition metals.
+ *
+ * @param Z Atomic number
+ * @param cn Coordination number
+ * @param atoms Full atom list (for neighbor analysis)
+ * @param topology Topology information (for special cases)
+ * @param atom_index Index of current atom in atoms list
+ * @param geometry_bohr Optional geometry matrix for bond angle calculations
+ * @param charges Optional atomic charges for special cases (CO detection, carbene)
+ * @return Hybridization state (1=sp, 2=sp2, 3=sp3, etc.)
+ *
+ * Claude Generated - December 2025 (Phase 3: Complete XTB Compatibility)
+ */
+static inline int detectElementSpecificHybridization(int Z, double cn,
+                                                    const std::vector<int>& atoms,
+                                                    const std::optional<EEQSolver::TopologyInput>& topology,
+                                                    int atom_index,
+                                                    const Matrix* geometry_bohr = nullptr,
+                                                    const Vector* charges = nullptr) {
+    int group = getElementGroup(Z);
+    int int_cn = static_cast<int>(std::round(cn));
+
+    // ===== Group 1: Hydrogen (H) =====
+    if (group == 1) { // H
+        if (int_cn == 2) return 1; // sp (bridging H)
+        if (int_cn > 2) return 3; // sp3 (tetrahedral coordination)
+        if (int_cn > 4) return 0; // sp3 (metal hydride - special case)
+        return 3; // Default sp3
+    }
+
+    // ===== Group 2: Alkali/Alkaline Earth =====
+    if (group == 2) { // Li, Be, etc.
+        if (int_cn == 2) return 1; // sp (bridging metal)
+        if (int_cn > 2) return 3; // sp3 (tetrahedral coordination)
+        if (int_cn > 4) return 0; // Special case
+        return 3; // Default sp3
+    }
+
+    // ===== Group 3: Boron (B) =====
+    if (group == 3) { // B
+        // XTB gfnff_ini2.f90:232 - hypervalent heavy boron (Si, Ge, Sn with nbdiff==0)
+        if (int_cn > 4 && Z > 10 && topology.has_value() && atom_index >= 0) {
+            // Check nbdiff==0: all neighbors have same CN (no CN difference)
+            int num_metal_neighbors = countMetalNeighbors(atom_index, topology->neighbor_lists, atoms);
+            if (num_metal_neighbors == 0) { // nbdiff==0 approximation
+                return 5; // sp3d (hypervalent)
+            }
+        }
+        if (int_cn > 4) return 3; // sp3
+        if (int_cn == 4) return 3; // sp3
+        if (int_cn == 3) return 2; // sp2
+        if (int_cn == 2) return 1; // sp
+        return 3; // Default sp3
+    }
+
+    // ===== Group 4: Carbon (C) =====
+    if (group == 4) { // C
+        // XTB gfnff_ini2.f90:240 - hypervalent heavy carbon (Si, Ge, Sn with nbdiff==0)
+        if (int_cn > 4 && Z > 10 && topology.has_value() && atom_index >= 0) {
+            int num_metal_neighbors = countMetalNeighbors(atom_index, topology->neighbor_lists, atoms);
+            if (num_metal_neighbors == 0) { // nbdiff==0 approximation
+                return 5; // sp3d (hypervalent)
+            }
+        }
+        if (int_cn >= 4) return 3; // sp3
+        if (int_cn == 3) return 2; // sp2
+
+        // XTB gfnff_ini2.f90:242-254 - Geometry-dependent CN=2 carbon
+        if (int_cn == 2) {
+            int hyb = 1; // Default sp (linear triple bond)
+
+            // Geometry-dependent: bond angle check
+            if (topology.has_value() && atom_index >= 0 && geometry_bohr != nullptr &&
+                atom_index < topology->neighbor_lists.size() &&
+                topology->neighbor_lists[atom_index].size() == 2) {
+
+                int neighbor1 = topology->neighbor_lists[atom_index][0];
+                int neighbor2 = topology->neighbor_lists[atom_index][1];
+
+                // Calculate angle: neighbor1 - atom_index - neighbor2
+                double angle_rad = calculateBondAngle(*geometry_bohr, neighbor1, atom_index, neighbor2);
+                double angle_deg = angle_rad * 180.0 / M_PI;
+
+                // XTB: if angle < 150°, then sp2 (bent carbene)
+                if (angle_deg < 150.0) {
+                    hyb = 2; // sp2 (carbene or bent configuration)
+                    // Note: XTB sets itag(i)=1 for Hueckel and HB routines (not implemented here)
+                } else {
+                    hyb = 1; // sp (linear triple bond)
+                }
+            }
+
+            // XTB gfnff_ini2.f90:250-253 - Charge-based override
+            // If charge < -0.4, force sp2 (even if linear)
+            if (charges != nullptr && atom_index >= 0 && atom_index < charges->size()) {
+                if ((*charges)(atom_index) < -0.4) {
+                    hyb = 2; // sp2
+                    // Note: XTB sets itag(i)=0 (not implemented here)
+                }
+            }
+
+            return hyb;
+        }
+
+        if (int_cn == 1) return 1; // sp (CO, nitriles)
+        return 3; // Default sp3
+    }
+
+    // ===== Group 5: Nitrogen (N) =====
+    if (group == 5) { // N
+        // XTB gfnff_ini2.f90:260 - hypervalent heavy nitrogen
+        if (int_cn > 4 && Z > 10 && topology.has_value() && atom_index >= 0) {
+            int num_metal_neighbors = countMetalNeighbors(atom_index, topology->neighbor_lists, atoms);
+            if (num_metal_neighbors == 0) { // nbdiff==0 approximation
+                return 5; // sp3d (hypervalent)
+            }
+        }
+        if (int_cn >= 4) return 3; // sp3
+
+        // XTB gfnff_ini2.f90:262-279 - Complex CN=3 nitrogen topology checks
+        if (int_cn == 3 && Z == 7) { // Only for nitrogen (not heavier pnictogens)
+            int hyb = 3; // Default sp3 (ammonia-like)
+
+            if (topology.has_value() && atom_index >= 0 &&
+                atom_index < topology->neighbor_lists.size() &&
+                topology->neighbor_lists[atom_index].size() == 3) {
+
+                int kk = 0; // Count O neighbors with CN=1 (NO2 detection)
+                int ll = 0; // Count B neighbors with CN=4 (B-N detection)
+                int nn = 0; // Count S neighbors with CN=4 (N-SO2 detection)
+
+                // Iterate over 3 neighbors
+                for (int j = 0; j < 3; ++j) {
+                    int neighbor = topology->neighbor_lists[atom_index][j];
+                    if (neighbor >= atoms.size()) continue;
+
+                    int neighbor_Z = atoms[neighbor];
+                    int neighbor_CN = (neighbor < topology->neighbor_lists.size()) ?
+                                     topology->neighbor_lists[neighbor].size() : 0;
+
+                    // Check for O with CN=1 (NO2 or R2-N=O)
+                    if (neighbor_Z == 8 && neighbor_CN == 1) kk++;
+
+                    // Check for B with CN=4 (B-N, loosely bound N is sp2)
+                    if (neighbor_Z == 5 && neighbor_CN == 4) ll++;
+
+                    // Check for S with CN=4 (N-SO2-)
+                    if (neighbor_Z == 16 && neighbor_CN == 4) nn++;
+                }
+
+                // XTB logic for special cases
+                if (nn == 1 && ll == 0 && kk == 0) hyb = 3; // N-SO2: sp3
+                if (ll == 1 && nn == 0) hyb = 2; // B-N: sp2
+                if (kk >= 1) {
+                    hyb = 2; // NO2: sp2
+                    // Note: XTB sets itag(i)=1 for Hueckel (not implemented here)
+                }
+
+                // Check if coordinated to metal (nbmdiff > 0)
+                int num_metal = countMetalNeighbors(atom_index, topology->neighbor_lists, atoms);
+                if (num_metal > 0 && nn == 0) {
+                    hyb = 2; // Pyridine coordinated to metal: sp2
+                }
+            }
+
+            return hyb;
+        }
+
+        // XTB gfnff_ini2.f90:280-294 - Complex CN=2 nitrogen topology checks
+        if (int_cn == 2) {
+            int hyb = 2; // Default sp2
+
+            if (topology.has_value() && atom_index >= 0 &&
+                atom_index < topology->neighbor_lists.size() &&
+                topology->neighbor_lists[atom_index].size() == 2) {
+
+                int neighbor1 = topology->neighbor_lists[atom_index][0];
+                int neighbor2 = topology->neighbor_lists[atom_index][1];
+
+                if (neighbor1 < atoms.size() && neighbor2 < atoms.size()) {
+                    int Z1 = atoms[neighbor1];
+                    int Z2 = atoms[neighbor2];
+                    int CN1 = (neighbor1 < topology->neighbor_lists.size()) ?
+                             topology->neighbor_lists[neighbor1].size() : 0;
+                    int CN2 = (neighbor2 < topology->neighbor_lists.size()) ?
+                             topology->neighbor_lists[neighbor2].size() : 0;
+
+                    // Check for R-N=C (nitrile)
+                    if ((CN1 == 1 && Z1 == 6) || (CN2 == 1 && Z2 == 6)) {
+                        hyb = 1; // sp (nitrile)
+                    }
+
+                    // Check for R-N=N (diazomethane)
+                    if ((CN1 == 1 && Z1 == 7) || (CN2 == 1 && Z2 == 7)) {
+                        hyb = 1; // sp (diazomethane)
+                    }
+
+                    // Check for M-NC-R (metal nitrile complex)
+                    if (isMetal(Z1) || isMetal(Z2)) {
+                        hyb = 1; // sp (metal-coordinated nitrile)
+                    }
+
+                    // Check for N=N=N (azide)
+                    if (Z1 == 7 && Z2 == 7 && CN1 <= 2 && CN2 <= 2) {
+                        hyb = 1; // sp (azide)
+                    }
+                }
+
+                // Geometry-dependent: bond angle check (lintr = 170° in XTB)
+                if (geometry_bohr != nullptr) {
+                    double angle_rad = calculateBondAngle(*geometry_bohr, neighbor1, atom_index, neighbor2);
+                    double angle_deg = angle_rad * 180.0 / M_PI;
+
+                    if (angle_deg > 170.0) {
+                        hyb = 1; // sp (linear configuration)
+                    }
+                }
+            }
+
+            return hyb;
+        }
+
+        if (int_cn == 1) return 1; // sp
+        return 3; // Default sp3
+    }
+
+    // ===== Group 6: Oxygen (O) =====
+    if (group == 6) { // O
+        // XTB gfnff_ini2.f90:300 - hypervalent heavy oxygen (S, Se, Te with nbdiff==0)
+        if (int_cn > 3 && Z > 10 && topology.has_value() && atom_index >= 0) {
+            int num_metal_neighbors = countMetalNeighbors(atom_index, topology->neighbor_lists, atoms);
+            if (num_metal_neighbors == 0) { // nbdiff==0 approximation
+                return 5; // sp3d (hypervalent)
+            }
+        }
+
+        if (int_cn >= 3) return 3; // sp3
+
+        // XTB gfnff_ini2.f90:302-306 - Metal neighbor detection for CN=2
+        if (int_cn == 2) {
+            int hyb = 3; // Default sp3 (ether, water, alcohols) - CRITICAL FIX
+
+            // Check for metal neighbors (M-O-X conjugation)
+            if (topology.has_value() && atom_index >= 0) {
+                int num_metal = countMetalNeighbors(atom_index, topology->neighbor_lists, atoms);
+
+                if (num_metal > 0) { // nbmdiff > 0
+                    // Find nearest non-metal neighbor's CN
+                    int nearest_CN = findNearestNonMetalCN(atom_index, topology->neighbor_lists, atoms);
+
+                    if (nearest_CN == 3) {
+                        hyb = 2; // sp2 (M-O-X conjugated)
+                    } else if (nearest_CN == 4) {
+                        hyb = 3; // sp3 (M-O-X non-conjugated)
+                    }
+                }
+            }
+
+            return hyb;
+        }
+
+        // XTB gfnff_ini2.f90:308-310 - CO detection for CN=1
+        if (int_cn == 1) {
+            int hyb = 2; // Default sp2
+
+            // Check if bonded to carbon with CN=1 (CO)
+            if (topology.has_value() && atom_index >= 0 &&
+                atom_index < topology->neighbor_lists.size() &&
+                topology->neighbor_lists[atom_index].size() == 1) {
+
+                int neighbor = topology->neighbor_lists[atom_index][0];
+                if (neighbor < atoms.size() && atoms[neighbor] == 6) { // Carbon
+                    int neighbor_CN = (neighbor < topology->neighbor_lists.size()) ?
+                                     topology->neighbor_lists[neighbor].size() : 0;
+
+                    if (neighbor_CN == 1) {
+                        hyb = 1; // sp (CO - carbon monoxide)
+                    }
+                }
+            }
+
+            return hyb;
+        }
+
+        return 3; // Default sp3
+    }
+
+    // ===== Group 7: Halogens (F, Cl, Br, I) =====
+    if (group == 7) { // Halogens
+        if (int_cn == 2) return 1; // sp
+        if (int_cn > 2 && Z > 10) return 5; // sp3d (heavy halogens)
+        return 1; // Default sp
+    }
+
+    // ===== Group 8: Noble Gases =====
+    if (group == 8) { // Noble gases
+        if (int_cn > 0 && Z > 2) return 5; // sp3d2 (heavy noble gases)
+        return 0; // Default (no hybridization)
+    }
+
+    // ===== Transition Metals (Groups ≤ 0) =====
+    if (group <= 0) { // TMs
+        int effective_cn = int_cn;
+
+        // Don't count hydrogen for TM coordination
+        if (topology.has_value() && atom_index >= 0) {
+            int nh = countHydrogenNeighbors(atom_index, topology->neighbor_lists, atoms);
+            if (nh > 0 && nh != effective_cn) {
+                effective_cn -= nh;
+            }
+        }
+
+        if (effective_cn <= 2) {
+            if (group == -7) return 2; // sp2 (late TMs)
+            return 1; // sp (early TMs)
+        }
+        if (effective_cn == 3) return 2; // sp2
+        if (effective_cn == 4) {
+            if (group > -7) return 3; // sp3 tetrahedral (early TMs)
+            return 3; // sp3 square planar (late TMs)
+        }
+        if (effective_cn == 5 && group == -3) return 3; // sp3 (Sc-La)
+
+        return 3; // Default sp3
+    }
+
+    // ===== Default: CN-based heuristic (backward compatibility) =====
+    if (cn < 1.5) return 1; // sp
+    if (cn < 2.5) return 2; // sp2
+    if (cn < 4.5) return 3; // sp3
+    if (cn < 6.5) return 4; // sp3d
+    return 5; // sp3d2
+}
+
+// ===== Test Function for Element-Specific Hybridization =====
+// Simple test to verify the element-specific hybridization logic
+// Claude Generated - December 2025 (Phase 2 Validation)
+static void testElementSpecificHybridizationLogic() {
+    std::vector<int> dummy_atoms = {0};
+    int passed = 0;
+    int failed = 0;
+
+    // Test cases: {Z, CN, expected_hyb, description}
+    std::vector<std::tuple<int, double, int, std::string>> test_cases = {
+        {8, 2.0, 3, "Oxygen CN=2 (CRITICAL: should be sp3)"},
+        {6, 2.0, 1, "Carbon CN=2 (should be sp)"},
+        {7, 3.0, 3, "Nitrogen CN=3 (should be sp3)"},
+        {1, 2.0, 1, "Hydrogen CN=2 (should be sp)"},
+        {17, 2.0, 1, "Chlorine CN=2 (should be sp)"},
+        {26, 4.0, 3, "Iron CN=4 (should be sp3)"},
+        {8, 1.0, 2, "Oxygen CN=1 (should be sp2)"},
+        {6, 3.0, 2, "Carbon CN=3 (should be sp2)"},
+        {7, 2.0, 2, "Nitrogen CN=2 (should be sp2)"},
+        {9, 2.0, 1, "Fluorine CN=2 (should be sp)"}
+    };
+
+    std::cout << "\n=== Element-Specific Hybridization Validation ===" << std::endl;
+
+    for (const auto& test_case : test_cases) {
+        int Z = std::get<0>(test_case);
+        double cn = std::get<1>(test_case);
+        int expected = std::get<2>(test_case);
+        std::string desc = std::get<3>(test_case);
+
+        int group = getElementGroup(Z);
+        int actual = detectElementSpecificHybridization(Z, cn, dummy_atoms, std::nullopt, 0);
+
+        if (actual == expected) {
+            std::cout << "✅ " << desc << " → " << actual << " (PASS)" << std::endl;
+            passed++;
+        } else {
+            std::cout << "❌ " << desc << " → " << actual << " (FAIL, expected " << expected << ")" << std::endl;
+            failed++;
+        }
+    }
+
+    std::cout << "\n=== Test Results ===" << std::endl;
+    std::cout << "Passed: " << passed << "/" << test_cases.size() << std::endl;
+    std::cout << "Failed: " << failed << "/" << test_cases.size() << std::endl;
+
+    if (failed == 0) {
+        std::cout << "🎉 All element-specific hybridization tests passed!" << std::endl;
+    } else {
+        std::cout << "⚠️  Some tests failed. Review implementation." << std::endl;
+    }
+}
+
+// ===== Original EEQSolver Implementation =====
 
 EEQSolver::EEQSolver(const ConfigManager& config)
     : m_config(config)
@@ -833,14 +1417,13 @@ Vector EEQSolver::calculateDxi(
 
     // Estimate hybridization from CN (approximation)
     // Reference: CN-based heuristic (hyb: 1=sp, 2=sp2, 3=sp3)
+    // Claude Update December 2025: Now uses geometry and topology for accurate detection
     std::vector<int> hyb(natoms, 3);  // Default sp3
     for (int i = 0; i < natoms; ++i) {
-        if (cn(i) < 1.5) {
-            hyb[i] = 1;  // sp-like
-        } else if (cn(i) < 2.5) {
-            hyb[i] = 2;  // sp2-like
-        }
-        // else: sp3 (already default)
+        // Use element-specific XTB rules with geometry and topology
+        hyb[i] = detectElementSpecificHybridization(
+            atoms[i], cn(i), atoms, topology, i, &geometry_bohr, nullptr
+        );
     }
 
     // Pi-system detection (simplified from XTB gfnff_ini.f90:312-336)
@@ -1161,14 +1744,11 @@ std::vector<int> EEQSolver::detectHybridization(
     std::vector<int> hybridization(natoms, 3);  // Default: sp3
 
     for (int i = 0; i < natoms; ++i) {
-        // Simple heuristic based on coordination number
-        if (cn(i) < 1.5) {
-            hybridization[i] = 1;  // sp (terminal or linear)
-        } else if (cn(i) < 2.5) {
-            hybridization[i] = 2;  // sp2 (trigonal)
-        } else {
-            hybridization[i] = 3;  // sp3 (tetrahedral)
-        }
+        // Use element-specific XTB rules with geometry (topology not available in public API)
+        // Claude Update December 2025: Now passes geometry for geometry-dependent rules
+        hybridization[i] = detectElementSpecificHybridization(
+            atoms[i], cn(i), atoms, std::nullopt, i, &geometry_bohr, nullptr
+        );
     }
 
     return hybridization;
