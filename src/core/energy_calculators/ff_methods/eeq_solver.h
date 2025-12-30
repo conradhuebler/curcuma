@@ -145,20 +145,23 @@ public:
     );
 
     /**
-     * @brief Phase 2: Refine charges with environmental corrections
+     * @brief Phase 2: Calculate final EEQ charges with environmental corrections
      *
-     * Iteratively solves EEQ with corrected parameters:
+     * Single linear solve (matches XTB gfnff_ini.f90:699-706) with corrected parameters:
      * - chi' = chi + dxi(environment)
-     * - gam' = gam + dgam(charge-dependent)
-     * - alpha' = alpha + dalpha(environment)
+     * - gam' = gam + dgam(charge-dependent, uses topology_charges)
+     * - alpha' = (alpha_base + ff*topology_charges)² (calculated ONCE, not iteratively)
+     *
+     * Alpha is calculated using Phase-1 topology charges (qa), making this a
+     * LINEAR problem instead of non-linear iterative SCF.
      *
      * @param atoms Atomic numbers
      * @param geometry_bohr Coordinates in Bohr
      * @param total_charge Total molecular charge
-     * @param topology_charges Initial charges from Phase 1
+     * @param topology_charges Phase-1 charges (qa) used for alpha calculation
      * @param cn Coordination numbers
      * @param hybridization Hybridization states (1=sp, 2=sp2, 3=sp3)
-     * @return Vector of final refined charges
+     * @return Vector of final EEQ charges
      */
     Vector calculateFinalCharges(
         const std::vector<int>& atoms,

@@ -796,32 +796,29 @@ Vector EEQSolver::calculateTopologyCharges(
             std::cerr << "  dxi_hyb = " << dxi_hyb << ", dxi_cn = " << dxi_cn_corr << ", dxi_total = " << dxi_total << std::endl;
             std::cerr << "  cnf_term = cnf*sqrt(CN) = " << cnf_term << std::endl;
             std::cerr << "  chi_corrected = -chi + dxi + cnf*sqrt(CN) = " << chi(i) << std::endl;
-            std::cerr << "  NOTE: XTB adds CNF term TWICE in Phase 1!" << std::endl;
+            std::cerr << "  NOTE: CNF term included ONCE (XTB gfnff_ini2.f90:1184)" << std::endl;
         }
         std::cerr << "========================================\n" << std::endl;
     }
 
     // 1. Setup RHS and diagonal
     for (int i = 0; i < natoms; ++i) {
-        // CRITICAL FIX (Dec 28, 2025): XTB adds CNF term TWICE in Phase 1!
-        // gfnff_ini.f90:411: topo%chieeq = -chi + dxi + CNF*√CN
-        // gfnff_engrad.F90:1504: x(i) = topo%chieeq + CNF*√CN
-        // Total: x = -chi + dxi + 2×CNF*√CN
+        // CRITICAL FIX (Dec 30, 2025, Session 13): CNF term added ONCE, not twice!
+        // XTB Phase 1 reference: gfnff_ini2.f90:1184 (goedeckera subroutine)
+        // gfnff_ini.f90:411: topo%chieeq = -chi + dxi + CNF*√CN (stored in topo%chieeq)
+        // gfnff_ini2.f90:1184: x(i) = topo%chieeq (NO additional CNF!)
+        // Total: x = -chi + dxi + CNF*√CN (1× CNF, not 2×!)
         //
-        // Our chi(i) already includes CNF term once (line 188), so add it again:
-        int z_i = atoms[i];
-        EEQParameters params_i = getParameters(z_i, cn(i));
-        double cnf_term = params_i.cnf * std::sqrt(cn(i));
-
-        x(i) = chi(i) + cnf_term;  // chi already has 1×CNF, add 2nd term
+        // Our chi(i) already includes CNF term once (line 765), so just use it directly:
+        x(i) = chi(i);  // ✅ FIXED: chi already includes CNF from line 765
         A(i, i) = gam(i) + TSQRT2PI / std::sqrt(alpha(i));
     }
 
-    // DEBUG: Print final RHS values with 2×CNF
+    // DEBUG: Print final RHS values
     if (m_verbosity >= 3 && natoms >= 1) {
-        std::cerr << "\n=== Phase 1 Final RHS (with 2×CNF fix) ===" << std::endl;
+        std::cerr << "\n=== Phase 1 Final RHS (1×CNF) ===" << std::endl;
         for (int i = 0; i < std::min(3, natoms); ++i) {
-            std::cerr << "  x(" << i << ") = " << x(i) << " (was " << chi(i) << " before 2nd CNF)" << std::endl;
+            std::cerr << "  x(" << i << ") = " << x(i) << " = chi(i) = -chi + dxi + CNF*√CN" << std::endl;
         }
         std::cerr << "========================================\n" << std::endl;
     }
@@ -1076,13 +1073,14 @@ Vector EEQSolver::calculateFinalCharges(
         std::cerr << "================================================\n" << std::endl;
     }
 
-    Vector final_charges = topology_charges;
+    // Initialize final_charges variable (will be overwritten by solve)
+    Vector final_charges;
 
     // Augmented system size
     int m = natoms + 1;
 
-    // Claude Generated (December 2025, Session 12): Pre-calculate CONSTANT corrected parameters
-    // CRITICAL: Only chi and gam are constant - alpha is CHARGE-DEPENDENT and must be updated per iteration!
+    // Claude Generated (December 2025, Session 13): Pre-calculate CONSTANT corrected parameters
+    // chi and gam are constant. Alpha is calculated ONCE using topology_charges (Phase 1).
     Vector chi_corrected(natoms);
     Vector gam_corrected(natoms);
 
@@ -1096,12 +1094,10 @@ Vector EEQSolver::calculateFinalCharges(
         // Then RHS adds CNF once: x = chieeq + CNF·√CN = -χ + dxi + CNF·√CN
         chi_corrected(i) = -params_i.chi + dxi(i);  // WITHOUT CNF!
         gam_corrected(i) = params_i.gam + dgam(i);
-
-        // ❌ DON'T calculate alpha_corrected here - it's charge-dependent and must be updated per iteration!
     }
 
     // Claude Generated (2025): Pre-calculate distance matrix (geometry-dependent only)
-    // This eliminates O(k·n²) sqrt() calls in the iteration loop
+    // This eliminates O(n²) sqrt() calls during matrix building
     Matrix distances = Matrix::Zero(natoms, natoms);
     for (int i = 0; i < natoms; ++i) {
         for (int j = 0; j < i; ++j) {
@@ -1120,18 +1116,14 @@ Vector EEQSolver::calculateFinalCharges(
         }
     }
 
-    // Claude Generated (December 2025, Session 12): REMOVED pre-build of A_coulomb_base
-    // CRITICAL BUG FIX: Coulomb matrix must be rebuilt EVERY iteration with updated alpha!
-    // alpha is charge-dependent: alpha(i) = (alpha_base + ff*q(i))²
-    // Therefore A(i,j) = erf(gamma_ij*r)/r with gamma_ij = 1/sqrt(alpha(i)+alpha(j)) changes per iteration!
-
+    // Claude Generated (December 2025, Session 13): Distance matrix pre-calculation
+    // Coulomb matrix A will be built once with alpha based on topology_charges (qa)
     if (m_verbosity >= 3) {
         CurcumaLogger::info(fmt::format("EEQ Phase 2: Pre-computed distance matrix ({}x{})", natoms, natoms));
-        CurcumaLogger::info("Coulomb matrix will be rebuilt each iteration with updated alpha");
+        CurcumaLogger::info("Alpha calculated once using topology charges (Phase 1)");
     }
 
-    // Claude Generated (December 2025, Session 12): Debug output for constant parameters
-    // Note: alpha_corrected is now calculated per iteration, not here!
+    // Claude Generated (December 2025, Session 13): Debug output for constant parameters
     if (m_verbosity >= 3) {
         std::cerr << "\n=== EEQ Phase 2: Constant Corrected Parameters ===" << std::endl;
         for (int i = 0; i < std::min(3, natoms); ++i) {
@@ -1146,174 +1138,141 @@ Vector EEQSolver::calculateFinalCharges(
             std::cerr << "  dgam = " << dgam(i) << std::endl;
             std::cerr << "  chieeq = " << chi_corrected(i) << " (WITHOUT CNF)" << std::endl;
             std::cerr << "  gameeq = " << gam_corrected(i) << std::endl;
-            std::cerr << "  (alpha will be calculated per iteration with updated charges)" << std::endl;
         }
         std::cerr << "===========================================================\n" << std::endl;
     }
 
-    // Iterative refinement loop (now much faster!)
-    for (int iter = 0; iter < m_max_iterations; ++iter) {
-        // Claude Generated (December 2025, Session 12): CRITICAL BUG FIX
-        // Rebuild entire Coulomb matrix EVERY iteration with updated alpha!
-        Matrix A = Matrix::Zero(m, m);
-        Vector x = Vector::Zero(m);
-        Vector alpha_corrected(natoms);
+    // ===== Calculate Alpha ONCE Using Topology Charges =====
+    // Claude Generated (December 2025, Session 13): CRITICAL FIX
+    // Reference: XTB gfnff_ini.f90:699-706
+    // topo%alpeeq(i) = (param%alp(at(i)) + ff*topo%qa(i))**2
+    // Uses Phase-1 topology charges (qa), NOT iteratively refined charges!
+    Vector alpha_corrected(natoms);
+    for (int i = 0; i < natoms; ++i) {
+        int z_i = atoms[i];
 
-        // 1. Calculate charge-dependent alpha (MUST be updated per iteration!)
-        // Reference: XTB gfnff_ini.f90:699-706
-        // topo%alpeeq(i) = (param%alp(at(i)) + ff*topo%qa(i))**2
-        for (int i = 0; i < natoms; ++i) {
+        // Get base alpha (UNSQUARED) from gfnff_par.h
+        double alpha_base = (z_i >= 1 && z_i <= 86) ? alpha_eeq[z_i - 1] : 0.903430;
+
+        // Calculate charge-dependent ff factor (from XTB gfnff_ini.f90:699-705)
+        double ff = 0.0;
+        if (z_i == 6) {  // Carbon
+            ff = 0.09;
+        } else if (z_i == 7) {  // Nitrogen
+            ff = -0.21;
+        } else if (z_i > 10 && z_i <= 86) {  // Heavy atoms only
+            int group = periodic_group[z_i - 1];
+            int imetal_val = metal_type[z_i - 1];
+
+            if (group == 6) {  // Chalcogens (O, S, Se, Te, Po)
+                ff = -0.03;
+            } else if (group == 7) {  // Halogens (F, Cl, Br, I, At)
+                ff = 0.50;
+            } else if (imetal_val == 1) {  // Main group metals
+                ff = 0.3;
+            } else if (imetal_val == 2) {  // Transition metals
+                ff = -0.1;
+            }
+        }
+
+        // ✅ CRITICAL FIX: Use topology_charges (qa from Phase 1), NOT final_charges!
+        // This makes the problem LINEAR instead of non-linear iterative SCF
+        alpha_corrected(i) = std::pow(alpha_base + ff * topology_charges(i), 2);
+    }
+
+    // ===== Build A Matrix ONCE with FIXED Alpha =====
+    // Claude Generated (December 2025, Session 13): Single linear solve
+    // No iteration - matches XTB reference implementation
+    Matrix A = Matrix::Zero(m, m);
+    Vector x = Vector::Zero(m);
+
+    // 1. Build Coulomb off-diagonal elements with FIXED alpha
+    for (int i = 0; i < natoms; ++i) {
+        for (int j = 0; j < i; ++j) {
+            double r = distances(i, j);
+            double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
+            double erf_gamma = std::erf(gamma_ij * r);
+            double coulomb = erf_gamma / r;
+
+            A(i, j) = coulomb;
+            A(j, i) = coulomb;
+        }
+    }
+
+    // 2. Build diagonal elements
+    for (int i = 0; i < natoms; ++i) {
+        A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
+    }
+
+    // 3. Setup fragment charge constraint
+    for (int j = 0; j < natoms; ++j) {
+        A(natoms, j) = 1.0;
+        A(j, natoms) = 1.0;
+    }
+
+    // 4. Setup RHS with CNF*sqrt(CN) term
+    // Reference: XTB gfnff_engrad.F90:1504 (used during gradient calculation)
+    // x(i) = topo%chieeq(i) + param%cnf(at(i))*sqrt(cn(i))
+    // where chieeq = -chi + dxi (from gfnff_ini.f90:696 for Phase 2)
+    for (int i = 0; i < natoms; ++i) {
+        int z_i = atoms[i];
+        EEQParameters params_i = getParameters(z_i, cn(i));
+        x(i) = chi_corrected(i) + params_i.cnf * std::sqrt(cn(i));
+    }
+    x(natoms) = static_cast<double>(total_charge);
+
+    // DEBUG: Print matrix details
+    if (m_verbosity >= 3) {
+        std::cerr << "\n=== EEQ Phase 2 DEBUG (single solve) ===" << std::endl;
+        for (int i = 0; i < std::min(3, natoms); ++i) {
             int z_i = atoms[i];
-
-            // Get base alpha (UNSQUARED) from gfnff_par.h
-            double alpha_base = (z_i >= 1 && z_i <= 86) ? alpha_eeq[z_i - 1] : 0.903430;
-
-            // Calculate charge-dependent ff factor (from XTB gfnff_ini.f90:699-705)
-            double ff = 0.0;
-            if (z_i == 6) {  // Carbon
-                ff = 0.09;
-            } else if (z_i == 7) {  // Nitrogen
-                ff = -0.21;
-            } else if (z_i > 10 && z_i <= 86) {  // Heavy atoms only
-                int group = periodic_group[z_i - 1];
-                int imetal_val = metal_type[z_i - 1];
-
-                if (group == 6) {  // Chalcogens (O, S, Se, Te, Po)
-                    ff = -0.03;
-                } else if (group == 7) {  // Halogens (F, Cl, Br, I, At)
-                    ff = 0.50;
-                } else if (imetal_val == 1) {  // Main group metals
-                    ff = 0.3;
-                } else if (imetal_val == 2) {  // Transition metals
-                    ff = -0.1;
-                }
-            }
-
-            // Apply CORRECT formula: alpha = (alpha_base + ff*qa)²
-            // Use CURRENT charges from previous iteration, not topology_charges!
-            alpha_corrected(i) = std::pow(alpha_base + ff * final_charges(i), 2);
+            std::cerr << "Atom " << i << " (Z=" << z_i << "):" << std::endl;
+            std::cerr << "  CN = " << cn(i) << std::endl;
+            std::cerr << "  topology_charge (qa) = " << topology_charges(i) << std::endl;
+            std::cerr << "  chi_corrected = " << chi_corrected(i) << std::endl;
+            std::cerr << "  gam_corrected = " << gam_corrected(i) << std::endl;
+            std::cerr << "  alpha_corrected = " << alpha_corrected(i) << std::endl;
+            std::cerr << "  x(RHS) = " << x(i) << std::endl;
+            std::cerr << "  A(i,i) diagonal = " << A(i, i) << std::endl;
         }
+        std::cerr << "  x(constraint) = " << x(natoms) << std::endl;
+        std::cerr << "==========================================\n" << std::endl;
+    }
 
-        // 2. Build Coulomb off-diagonal elements with UPDATED alpha
-        // gamma_ij depends on alpha, which depends on charges, so this MUST be recalculated!
-        for (int i = 0; i < natoms; ++i) {
-            for (int j = 0; j < i; ++j) {
-                double r = distances(i, j);
-                double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
-                double erf_gamma = std::erf(gamma_ij * r);
-                double coulomb = erf_gamma / r;
+    // 5. Matrix diagnostics
+    if (m_verbosity >= 3) {
+        CurcumaLogger::info("=== Phase 2 EEQ Matrix Diagnostics ===");
 
-                A(i, j) = coulomb;
-                A(j, i) = coulomb;
-            }
+        Eigen::SelfAdjointEigenSolver<Matrix> eigensolver(A);
+        Vector eigenvalues = eigensolver.eigenvalues();
+
+        double max_eigenvalue = eigenvalues.maxCoeff();
+        double min_eigenvalue = eigenvalues.minCoeff();
+        double condition_number = std::abs(max_eigenvalue / min_eigenvalue);
+
+        CurcumaLogger::param("condition_number", fmt::format("{:.6e}", condition_number));
+
+        if (condition_number > 1e12) {
+            CurcumaLogger::warn(fmt::format("Phase 2 EEQ matrix ill-conditioned (cond={:.2e})", condition_number));
         }
+    }
 
-        // 3. Build diagonal elements with UPDATED alpha
-        for (int i = 0; i < natoms; ++i) {
-            A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
+    // 6. Solve system ONCE
+    Eigen::PartialPivLU<Matrix> lu(A);
+    Vector solution = lu.solve(x);
+    final_charges = solution.segment(0, natoms);
+
+    // 7. Validate solution
+    for (int i = 0; i < natoms; ++i) {
+        if (std::isnan(final_charges[i]) || std::isinf(final_charges[i])) {
+            CurcumaLogger::error(fmt::format("Phase 2 EEQ: Invalid charge[{}] = {} (Z={})",
+                                             i, final_charges[i], atoms[i]));
+            return Vector::Zero(0);
         }
+    }
 
-        // 4. Setup fragment charge constraint
-        for (int j = 0; j < natoms; ++j) {
-            A(natoms, j) = 1.0;
-            A(j, natoms) = 1.0;
-        }
-
-        // 5. Setup RHS with CNF*sqrt(CN) term
-        // Reference: XTB gfnff_engrad.F90:1504 (used during gradient calculation)
-        // x(i) = topo%chieeq(i) + param%cnf(at(i))*sqrt(cn(i))
-        // where chieeq = -chi + dxi (from gfnff_ini.f90:696 for Phase 2)
-        for (int i = 0; i < natoms; ++i) {
-            int z_i = atoms[i];
-            EEQParameters params_i = getParameters(z_i, cn(i));
-            x(i) = chi_corrected(i) + params_i.cnf * std::sqrt(cn(i));
-        }
-
-        // DEBUG: Print matrix details on first iteration
-        if (iter == 0 && m_verbosity >= 3) {
-            std::cerr << "\n=== EEQ Phase 2 DEBUG (iteration 0) ===" << std::endl;
-            for (int i = 0; i < std::min(3, natoms); ++i) {
-                int z_i = atoms[i];
-                std::cerr << "Atom " << i << " (Z=" << z_i << "):" << std::endl;
-                std::cerr << "  CN = " << cn(i) << std::endl;
-                std::cerr << "  chi_corrected = " << chi_corrected(i) << std::endl;
-                std::cerr << "  gam_corrected = " << gam_corrected(i) << std::endl;
-                std::cerr << "  alpha_corrected = " << alpha_corrected(i) << std::endl;
-                std::cerr << "  x(RHS) = chi_corrected (NO CNF term!) = " << x(i) << std::endl;
-                std::cerr << "  A(i,i) diagonal = " << A(i, i) << std::endl;
-            }
-            std::cerr << "  x(constraint) = " << x(natoms) << std::endl;
-            std::cerr << "==========================================\n" << std::endl;
-        }
-
-        // 3. Setup constraint RHS
-        x(natoms) = static_cast<double>(total_charge);
-
-        // 4. Solve system
-        if (iter == 0 && m_verbosity >= 3) {
-            CurcumaLogger::info("=== Phase 2 EEQ Matrix Diagnostics ===");
-
-            Eigen::SelfAdjointEigenSolver<Matrix> eigensolver(A);
-            Vector eigenvalues = eigensolver.eigenvalues();
-
-            double max_eigenvalue = eigenvalues.maxCoeff();
-            double min_eigenvalue = eigenvalues.minCoeff();
-            double condition_number = std::abs(max_eigenvalue / min_eigenvalue);
-
-            CurcumaLogger::param("condition_number", fmt::format("{:.6e}", condition_number));
-
-            if (condition_number > 1e12) {
-                CurcumaLogger::warn(fmt::format("Phase 2 EEQ matrix ill-conditioned (cond={:.2e})", condition_number));
-            }
-        }
-
-        Eigen::PartialPivLU<Matrix> lu(A);
-        Vector solution = lu.solve(x);
-
-        Vector final_charges_new = solution.segment(0, natoms);
-
-        // Check for NaN/Inf on first iteration
-        if (iter == 0) {
-            for (int i = 0; i < natoms; ++i) {
-                if (std::isnan(final_charges_new[i]) || std::isinf(final_charges_new[i])) {
-                    CurcumaLogger::error(fmt::format("Phase 2 EEQ: Invalid charge[{}] = {} (Z={})",
-                                                     i, final_charges_new[i], atoms[i]));
-                    return Vector::Zero(0);
-                }
-            }
-        }
-
-        // Check convergence
-        double max_change = 0.0;
-        for (int i = 0; i < natoms; ++i) {
-            double change = std::abs(final_charges_new(i) - final_charges(i));
-            max_change = std::max(max_change, change);
-        }
-
-        final_charges = final_charges_new;
-
-        if (m_verbosity >= 3) {
-            CurcumaLogger::result(fmt::format("EEQ Phase 2 iter {}: max_change = {:.2e}",
-                                              iter + 1, max_change));
-        }
-
-        // Claude Generated (2025): Adaptive convergence tolerance
-        // For large systems (n > 100), use relaxed tolerance to save iterations
-        // For force field accuracy, 1e-5 is sufficient for most purposes
-        double adaptive_threshold = m_convergence_threshold;
-        if (natoms > 500) {
-            adaptive_threshold = std::max(m_convergence_threshold, 1e-4);
-        } else if (natoms > 100) {
-            adaptive_threshold = std::max(m_convergence_threshold, 1e-5);
-        }
-
-        if (max_change < adaptive_threshold) {
-            if (m_verbosity >= 2) {
-                CurcumaLogger::success(fmt::format("Phase 2 converged in {} iterations (threshold={:.1e})",
-                                                   iter + 1, adaptive_threshold));
-            }
-            break;
-        }
+    if (m_verbosity >= 2) {
+        CurcumaLogger::success("EEQ Phase 2: Linear solve complete (one-time calculation)");
     }
 
     // Validate charge conservation
