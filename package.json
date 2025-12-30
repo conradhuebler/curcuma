@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "@musistudio/claude-code-router": "^1.0.58",
     "@nanocollective/nanocoder": "^1.17.2"
   }
 }
