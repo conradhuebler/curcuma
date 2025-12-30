@@ -453,7 +453,6 @@ bool GFNFF::initializeForceField()
 
 json GFNFF::generateGFNFFParameters()
 {
-    std::cerr << "DEBUG generateGFNFFParameters: START" << std::endl;
     json parameters;
     parameters["method"] = "gfnff";
     parameters["e0"] = 0.0;
@@ -462,7 +461,6 @@ json GFNFF::generateGFNFFParameters()
     // ACTIVATED (Session 10, Dec 2025): Two-Phase EEQ System now default
     // Claude Generated: Enable advanced parametrization (Two-Phase EEQ) by default
     bool use_advanced = m_parameters.value("use_advanced_parametrization", true);
-    std::cerr << "DEBUG generateGFNFFParameters: use_advanced=" << use_advanced << std::endl;
 
     if (use_advanced) {
         CurcumaLogger::info("Using advanced GFN-FF parametrization (experimental)");
@@ -534,6 +532,15 @@ json GFNFF::generateGFNFFParameters()
             parameters["d4_dispersion_pairs"] = dispersions;  // Native D4 charge-weighted C6
         } else {
             parameters["gfnff_dispersions"] = dispersions;  // Native GFN-FF or D3 fallback
+        }
+
+        // Add ATM triples if generated from D3/D4 (Claude Generated Jan 2025)
+        if (!m_atm_triples.is_null() && m_atm_triples.is_array() && !m_atm_triples.empty()) {
+            parameters["atm_triples"] = m_atm_triples;
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::param("ATM triples added to parameters",
+                                     static_cast<int>(m_atm_triples.size()));
+            }
         }
 
         // Claude Generated (2025-12-13): Validation logging for parameter generation
@@ -657,6 +664,15 @@ json GFNFF::generateGFNFFParameters()
             parameters["d4_dispersion_pairs"] = dispersions;  // Native D4 charge-weighted C6
         } else {
             parameters["gfnff_dispersions"] = dispersions;  // Native GFN-FF or D3 fallback
+        }
+
+        // Add ATM triples if generated from D3/D4 (Claude Generated Jan 2025)
+        if (!m_atm_triples.is_null() && m_atm_triples.is_array() && !m_atm_triples.empty()) {
+            parameters["atm_triples"] = m_atm_triples;
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::param("ATM triples added to parameters",
+                                     static_cast<int>(m_atm_triples.size()));
+            }
         }
 
         parameters["vdws"] = json::array(); // Legacy vdW (will be replaced by pairwise)
@@ -3928,9 +3944,19 @@ json GFNFF::generateGFNFFDispersionPairs() const
             json d4_params = d4_gen.getParameters();
 
             if (d4_params.contains("d4_dispersion_pairs")) {
-                if (CurcumaLogger::get_verbosity() >= 2) {
-                    CurcumaLogger::success(fmt::format("D4: Generated {} dispersion pairs",
-                        d4_params["d4_dispersion_pairs"].size()));
+                // Extract ATM triples from D4 (Claude Generated Jan 2025)
+                if (d4_params.contains("atm_triples") && !d4_params["atm_triples"].is_null()) {
+                    m_atm_triples = d4_params["atm_triples"];
+                    if (CurcumaLogger::get_verbosity() >= 2) {
+                        CurcumaLogger::success(fmt::format("D4: Generated {} dispersion pairs, {} ATM triples",
+                            d4_params["d4_dispersion_pairs"].size(),
+                            m_atm_triples.size()));
+                    }
+                } else {
+                    if (CurcumaLogger::get_verbosity() >= 2) {
+                        CurcumaLogger::success(fmt::format("D4: Generated {} dispersion pairs",
+                            d4_params["d4_dispersion_pairs"].size()));
+                    }
                 }
                 return d4_params["d4_dispersion_pairs"];
             } else {
@@ -4008,6 +4034,14 @@ json GFNFF::generateD3Dispersion() const
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::success("✅ D3ParameterGenerator returned parameters");
             CurcumaLogger::param("d3_params_size", static_cast<int>(d3_params.size()));
+        }
+
+        // Extract ATM triples from D3 (Claude Generated Jan 2025)
+        if (d3_params.contains("atm_triples") && !d3_params["atm_triples"].is_null()) {
+            m_atm_triples = d3_params["atm_triples"];
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::param("D3 ATM triples", static_cast<int>(m_atm_triples.size()));
+            }
         }
 
         // Convert D3 output to GFN-FF dispersion pair format

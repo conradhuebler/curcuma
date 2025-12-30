@@ -1184,6 +1184,9 @@ private:
     // EEQ charge calculation (Dec 2025 - Phase 3: Extraction and delegation)
     std::unique_ptr<EEQSolver> m_eeq_solver; ///< Standalone EEQ solver (replaces embedded EEQ code)
 
+    // ATM three-body dispersion terms (extracted from D3/D4 - Claude Generated Jan 2025)
+    mutable json m_atm_triples; ///< Bonded ATM triples from D3/D4 parameter generators
+
     bool m_initialized; ///< Initialization status
 
     double m_energy_total; ///< Total energy in Hartree
