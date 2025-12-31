@@ -1774,51 +1774,23 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     double fn = 1.0 - 2.36 / (nn * nn);
     fn = std::max(0.05, fn);  // Ensure fn stays positive
 
-    // Factor 5: fbsmall = small-angle correction
-    // PHASE 4: Implement small-angle correction from gfnff_ini.f90:1618
-    // Formula: fbsmall = 1.0 - fbs1 * exp(-0.64*(theta - π)²)
-    // where theta is the equilibrium angle in RADIANS, fbs1 is a parameter
-    // Reference: gfnff_param.f90:754 gen%fbs1 = 0.50
-    const double pi = 3.14159265358979323846;
-    const double fbs1 = 0.50;  // GFN-FF parameter from gfnff_param.f90:754
-    double theta_eq_rad = params.equilibrium_angle;  // Already in radians from topology
-    double fbsmall = 1.0 - fbs1 * std::exp(-0.64 * (theta_eq_rad - pi) * (theta_eq_rad - pi));
+    // Claude Generated (Dec 31, 2025): CRITICAL BUG FIX!
+    // Factor 5 (fbsmall) REMOVED FROM HERE - was using UNINITIALIZED params.equilibrium_angle!
+    // This bug caused 89.9% angle energy error (factor of 10× too small)
+    // fbsmall calculation moved to line ~1900 AFTER equilibrium angle is properly set
+    //
+    // The original code at line 1784 used: params.equilibrium_angle (UNINITIALIZED!)
+    // But params.equilibrium_angle is only set at line 1894 (110 lines later!)
+    // Result: fbsmall was calculated with garbage data, breaking angle force constants
 
     // Factor 6: feta = metal eta-coordination correction
     // TODO Phase 2.5: Implement feta correction for metals
     double feta = 1.0;
 
-    // PHASE 2D: Test hypothesis - angl2 is only for FILTERING, not force constant!
-    // Discovery: angl2 may only be used for threshold check (skip angles)
-    // The force constant is purely from angle_param with 0.01 scaling + correction factors
-
-    double fijk = fijk_calc;  // Only for threshold check: angle_param * angl2_i * angl2_k
-
-    // Check threshold: if fijk is too small, skip this angle
-    static const double THRESHOLD = 0.001;  // gen%fcthr in Fortran
-    if (fijk < THRESHOLD) {
-        // Skip angles with too small fijk - this matches Fortran filtering!
-        params.force_constant = 0.0;
-    } else {
-        // PHASE 4: CORRECT Force Constant Formula from gfnff_ini.f90:1621
-        // Previous WRONG: base_k = angle_param * 0.01; corrected_k = base_k * corrections
-        // CORRECT: fc = fijk * fqq * f2 * fn * fbsmall * feta
-        // where fijk = angle_param * angl2_i * angl2_k
-        params.force_constant = fijk * fqq * f2 * fn * fbsmall * feta;
-
-        // PHASE 2B (Dec 31, 2025): Hydrogen count correction (fixed -25% angle energy error)
-        // Reference: XTB gfnff_ini.f90:1617 - f_hydrogen = (nhi * nhj)^0.07
-        double f_hydrogen = calculateHydrogenCountCorrection(atom_i, atom_k);
-        params.force_constant *= f_hydrogen;
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param("f_hydrogen", fmt::format("{:.4f}", f_hydrogen));
-        }
-    }
-
     // ===========================================================================================
-    // CRITICAL FIX: Equilibrium angle from TOPOLOGY (hybridization), NOT current geometry!
+    // STEP 1: Calculate equilibrium angle FIRST (needed for fbsmall calculation)
     // ===========================================================================================
+    // Claude Generated (Dec 31, 2025): CRITICAL FIX - Calculate equilibrium angle BEFORE fbsmall!
     // Reference: gfnff_ini.f90:1441-1617 shows θ₀ is topology-dependent:
     // sp=180°, sp²=120°, sp³=109.5°, hypervalent=90°
     // This is NOT dependent on current geometry angle.
@@ -1892,6 +1864,48 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
 
     // Convert to radians
     params.equilibrium_angle = r0_deg * M_PI / 180.0;
+
+    // ===========================================================================================
+    // STEP 2: Now calculate fbsmall with INITIALIZED equilibrium angle
+    // ===========================================================================================
+    // Claude Generated (Dec 31, 2025): CRITICAL BUG FIX!
+    // Factor 5: fbsmall = small-angle correction
+    // MOVED HERE from line ~1780 where it was using UNINITIALIZED params.equilibrium_angle
+    // Formula: fbsmall = 1.0 - fbs1 * exp(-0.64*(theta - π)²)
+    // Reference: gfnff_param.f90:754 gen%fbs1 = 0.50, gfnff_ini.f90:1618
+    const double pi = M_PI;
+    const double fbs1 = 0.50;  // GFN-FF parameter from gfnff_param.f90:754
+    double fbsmall = 1.0 - fbs1 * std::exp(-0.64 * (params.equilibrium_angle - pi) * (params.equilibrium_angle - pi));
+
+    // ===========================================================================================
+    // STEP 3: Calculate final force constant with all factors
+    // ===========================================================================================
+    double fijk = fijk_calc;  // angle_param * angl2_i * angl2_k
+
+    // Check threshold: if fijk is too small, skip this angle
+    static const double THRESHOLD = 0.001;  // gen%fcthr in Fortran
+    if (fijk < THRESHOLD) {
+        // Skip angles with too small fijk - this matches Fortran filtering!
+        params.force_constant = 0.0;
+    } else {
+        // PHASE 4: CORRECT Force Constant Formula from gfnff_ini.f90:1621
+        // Formula: fc = fijk * fqq * f2 * fn * fbsmall * feta
+        // where fijk = angle_param * angl2_i * angl2_k
+        params.force_constant = fijk * fqq * f2 * fn * fbsmall * feta;
+
+        // PHASE 2B (Dec 31, 2025): Hydrogen count correction
+        // Reference: XTB gfnff_ini.f90:1617 - f_hydrogen = (nhi * nhj)^0.07
+        double f_hydrogen = calculateHydrogenCountCorrection(atom_i, atom_k);
+        params.force_constant *= f_hydrogen;
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param(fmt::format("angle_{}-{}-{}_fbsmall", atom_i, atom_j, atom_k),
+                fmt::format("{:.6f}", fbsmall));
+            CurcumaLogger::param(fmt::format("angle_{}-{}-{}_fc_final", atom_i, atom_j, atom_k),
+                fmt::format("{:.6f} (fijk={:.3f}, fqq={:.3f}, f2={:.3f}, fn={:.3f}, fbsmall={:.3f}, feta={:.3f}, fH={:.3f})",
+                    params.force_constant, fijk, fqq, f2, fn, fbsmall, feta, f_hydrogen));
+        }
+    }
 
     return params;
 }
