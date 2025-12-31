@@ -197,14 +197,14 @@ static const std::vector<double> cnfak_gfnff = {
     0.04800662 // Rn (86)
 };
 
-// GFN-FF electronegativities - CHI_EEQ values from EEQ theory (NOT Pauling!)
-// CRITICAL FIX (Nov 2025): Must use CHI_EEQ for gfnffrab r0 calculation
-// These MUST match gfnff_rab.f90:14-30 EXACTLY for correct ff factor
-// Reference: external/gfnff/src/gfnff_rab.f90 lines 14-30
-// CRITICAL FIX (Dec 31, 2025): Correct electronegativity values for ALPHA calculation
-// Reference: external/gfnff/src/gfnff_param.f90 line 154-161 (param%en array)
-// Previous values were from gfnff_rab.f90 (RAB-specific EN), NOT for alpha!
-// This fix corrects the 74% error in C-O bond alpha parameters
+// CRITICAL FIX (Dec 31, 2025): XTB uses TWO different EN arrays!
+// 1. param%en (gfnff_param.f90:154-161) - for ALPHA calculation
+// 2. en (gfnffrab.f90:63-82) - for R0 calculation (ff factor)
+//
+// Using param%en for both caused trade-off: alpha improved 14×, r0 degraded 180×
+
+// EN values for ALPHA calculation (param%en from gfnff_param.f90:154-161)
+// Used in: alpha = srb1*(1 + fsrb2*ΔEN² + srb3*bstrength)
 static const std::vector<double> en_gfnff = {
     2.200, 3.000, 0.980, 1.570, 2.040, 2.550, 3.040, 3.440, 3.980, // H-F (Z=1-9)
     4.500, 0.930, 1.310, 1.610, 1.900, 2.190, 2.580, 3.160, 3.500, // Ne-Ar (Z=10-18)
@@ -215,7 +215,30 @@ static const std::vector<double> en_gfnff = {
     0.790, 0.890, 1.100, 1.120, 1.130, 1.140, 1.150, 1.170, 1.180, // Cs-Tb (Z=55-63)
     1.200, 1.210, 1.220, 1.230, 1.240, 1.250, 1.260, 1.270, 1.300, // Dy-Hf (Z=64-72)
     1.500, 1.700, 1.900, 2.100, 2.200, 2.200, 2.200, 2.000, 1.620, // Ta-Hg (Z=73-80)
-    2.330, 2.020, 2.000, 2.200, 2.200  // Tl-Rn (Z=81-86) (note: W-Au modified)
+    2.330, 2.020, 2.000, 2.200, 2.200  // Tl-Rn (Z=81-86)
+};
+
+// EN values for R0 calculation (en from gfnffrab.f90:63-82)
+// Used in: ff = 1.0 - k1*ΔEN - k2*ΔEN², then r0 = (ra + rb + shift) * ff
+static const std::vector<double> en_rab_gfnff = {
+    2.30085633, 2.78445145, 1.52956084, 1.51714704, 2.20568300, // H-B (Z=1-5)
+    2.49640820, 2.81007174, 4.51078438, 4.67476223, 3.29383610, // C-Ne (Z=6-10)
+    2.84505365, 2.20047950, 2.31739628, 2.03636974, 1.97558064, // Na-P (Z=11-15)
+    2.13446570, 2.91638164, 1.54098156, 2.91656301, 2.26312147, // S-Ca (Z=16-20)
+    2.25621439, 1.32628677, 2.27050569, 1.86790977, 2.44759456, // Sc-Mn (Z=21-25)
+    2.49480042, 2.91545568, 3.25897750, 2.68723778, 1.86132251, // Fe-Zn (Z=26-30)
+    2.01200832, 1.97030722, 1.95495427, 2.68920990, 2.84503857, // Ga-Br (Z=31-35)
+    2.61591858, 2.64188286, 2.28442252, 1.33011187, 1.19809388, // Kr-Zr (Z=36-40)
+    1.89181390, 2.40186898, 1.89282464, 3.09963488, 2.50677823, // Nb-Rh (Z=41-45)
+    2.61196704, 2.09943450, 2.66930105, 1.78349472, 2.09634533, // Pd-Sn (Z=46-50)
+    2.00028974, 1.99869908, 2.59072029, 2.54497829, 2.52387890, // Sb-Cs (Z=51-55)
+    2.30204667, 1.60119300, 2.00000000, 2.00000000, 2.00000000, // Ba-Nd (Z=56-60)
+    2.00000000, 2.00000000, 2.00000000, 2.00000000, 2.00000000, // Pm-Tb (Z=61-65)
+    2.00000000, 2.00000000, 2.00000000, 2.00000000, 2.00000000, // Dy-Yb (Z=66-70)
+    2.00000000, 2.30089349, 1.75039077, 1.51785130, 2.62972945, // Lu-Re (Z=71-75)
+    2.75372921, 2.62540906, 2.55860939, 3.32492356, 2.65140898, // Os-Hg (Z=76-80)
+    1.52014458, 2.54984804, 1.72021963, 2.69303422, 1.81031095, // Tl-At (Z=81-85)
+    2.34224386  // Rn (Z=86)
 };
 
 // Row-dependent EN polynomial coefficients (scaled by 10^-3 in Fortran)

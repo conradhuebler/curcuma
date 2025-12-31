@@ -1047,11 +1047,13 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 
     // Step 3: Phase 2 - Row-dependent EN correction
     // Fortran gfnff_rab.f90:144-152
-    // CRITICAL FIX (Dec 2025): Use GFN-FF electronegativity values, NOT Pauling!
-    // Reference: gfnff_rab.f90 line 63-82 defines special EN values for GFN-FF
-    // Using Pauling EN causes 5.5% error in C-O bonds; using en_gfnff fixes to <0.1%
-    double en1 = (z1 >= 1 && z1 <= static_cast<int>(en_gfnff.size())) ? en_gfnff[z1 - 1] : 2.2;
-    double en2 = (z2 >= 1 && z2 <= static_cast<int>(en_gfnff.size())) ? en_gfnff[z2 - 1] : 2.2;
+    // CRITICAL FIX (Dec 31, 2025): Use RAB-specific EN values for r0 calculation!
+    // Reference: gfnffrab.f90 line 63-82 (en array, NOT param%en)
+    // XTB uses TWO different EN arrays:
+    //   - en_gfnff (param%en) for ALPHA calculation
+    //   - en_rab_gfnff (gfnffrab.f90) for R0 calculation
+    double en1 = (z1 >= 1 && z1 <= static_cast<int>(en_rab_gfnff.size())) ? en_rab_gfnff[z1 - 1] : 2.2;
+    double en2 = (z2 >= 1 && z2 <= static_cast<int>(en_rab_gfnff.size())) ? en_rab_gfnff[z2 - 1] : 2.2;
 
     int row1 = getPeriodicTableRow(z1);
     int row2 = getPeriodicTableRow(z2);
@@ -1064,7 +1066,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     double ff = 1.0 - k1 * en_diff - k2 * en_diff * en_diff;
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("RAB_TRANSFORM: EN1={:.8f}, EN2={:.8f}, |ΔEN|={:.8f}", en1, en2, en_diff));
+        CurcumaLogger::info(fmt::format("RAB_TRANSFORM: EN1(rab)={:.8f}, EN2(rab)={:.8f}, |ΔEN|={:.8f}", en1, en2, en_diff));
         CurcumaLogger::info(fmt::format("RAB_TRANSFORM: k1={:.8f}, k2={:.8f}, ff={:.8f}", k1, k2, ff));
     }
 
@@ -1579,24 +1581,38 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     }
 
     // Alpha calculation with high precision debug
-    // CRITICAL FIX (Dec 31, 2025): Formula is srb3*(bstrength-1), NOT srb3*bstrength
-    // Reference: Comment line 945 and Fortran gfnff_ini.f90
-    // For single bonds (bstrength=1.0), this term should be ZERO!
-    double alpha_term1 = fsrb2 * en_diff * en_diff;
-    double alpha_term2 = srb3 * (bstrength - 1.0);  // FIX: (bstrength - 1), not just bstrength
+    // CRITICAL FIX (Dec 31, 2025): Use param%en values for alpha calculation!
+    // XTB uses en_gfnff (param%en) for alpha, NOT en_rab_gfnff
+    double en_alpha1 = (z1 >= 1 && z1 <= static_cast<int>(en_gfnff.size())) ? en_gfnff[z1 - 1] : 2.2;
+    double en_alpha2 = (z2 >= 1 && z2 <= static_cast<int>(en_gfnff.size())) ? en_gfnff[z2 - 1] : 2.2;
+    double en_diff_alpha = std::abs(en_alpha1 - en_alpha2);
+
+    double alpha_term1 = fsrb2 * en_diff_alpha * en_diff_alpha;
+    double alpha_term2 = srb3 * bstrength;  // Original formula
     double alpha_sum = 1.0 + alpha_term1 + alpha_term2;
     params.alpha = srb1 * alpha_sum;
 
-    // Debug output for alpha calculation (always on for H-containing bonds)
-    if (z1 == 1 || z2 == 1) {  // H-containing bonds
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info(fmt::format("DEBUG ALPHA (H-bond Z1={} Z2={}): srb1={:.10f}, fsrb2={:.10f}, en_diff={:.10f}, en_diff²={:.10f}",
-                                             z1, z2, srb1, fsrb2, en_diff, en_diff * en_diff));
-            CurcumaLogger::info(fmt::format("DEBUG ALPHA: term1={:.10f}, term2={:.10f}, sum={:.10f}, alpha={:.10f}",
-                                             alpha_term1, alpha_term2, alpha_sum, params.alpha));
-            CurcumaLogger::info(fmt::format("DEBUG ALPHA: srb2={:.10f}, srb3={:.10f}, bstrength={:.10f}",
-                                             srb2, srb3, bstrength));
-        }
+    // Debug output for alpha calculation - EXPANDED to include C-O bonds
+    bool is_CO_bond = ((z1 == 6 && z2 == 8) || (z1 == 8 && z2 == 6));
+    bool is_H_bond = (z1 == 1 || z2 == 1);
+
+    if ((is_H_bond || is_CO_bond) && CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("=== ALPHA DEBUG: Bond {}-{} (Z{}={}, Z{}={}) ===",
+                                         atom1, atom2, atom1, z1, atom2, z2));
+        CurcumaLogger::info(fmt::format("  EN (param%en): en_alpha1={:.8f}, en_alpha2={:.8f}, |ΔEN|={:.8f}",
+                                         en_alpha1, en_alpha2, en_diff_alpha));
+        CurcumaLogger::info(fmt::format("  Constants: srb1={:.10f}, srb2={:.10f}, srb3={:.10f}",
+                                         srb1, srb2, srb3));
+        CurcumaLogger::info(fmt::format("  Scaling: fsrb2={:.10f} (srb2={:.10f}, mtyp1={}, mtyp2={})",
+                                         fsrb2, srb2, mtyp1, mtyp2));
+        CurcumaLogger::info(fmt::format("  Bstrength: {:.10f} (hyb1={}, hyb2={})",
+                                         bstrength, hyb1, hyb2));
+        CurcumaLogger::info(fmt::format("  Terms: term1=fsrb2*ΔEN²={:.10f}, term2=srb3*bstr={:.10f}",
+                                         alpha_term1, alpha_term2));
+        CurcumaLogger::info(fmt::format("  Sum: 1.0 + {:.10f} + {:.10f} = {:.10f}",
+                                         alpha_term1, alpha_term2, alpha_sum));
+        CurcumaLogger::info(fmt::format("  FINAL: alpha = srb1*sum = {:.10f} * {:.10f} = {:.10f}",
+                                         srb1, alpha_sum, params.alpha));
     }
 
     // Debug output for force constant calculation (always on for HH/CH4)
@@ -1870,21 +1886,31 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
 // Formula: f_hydrogen = (nhi * nhj)^0.07
 // Physical meaning: Angles with more H neighbors are stiffer
 double GFNFF::calculateHydrogenCountCorrection(int atom_i, int atom_k) const {
+    // TODO (Dec 31, 2025): This function is incomplete - needs adjacency list access
+    // Placeholder: Return 1.0 (no correction) until topology is properly integrated
+    // Proper implementation requires m_cached_topology.adjacency_list
+    return 1.0;
+
+    /* DISABLED UNTIL ADJACENCY LIST IS AVAILABLE
     // Count hydrogen neighbors for atom i
     int nhi = 1;  // Start at 1 (Fortran convention)
-    for (size_t n = 0; n < m_topology_input.adjacency_list[atom_i].size(); ++n) {
-        int neighbor = m_topology_input.adjacency_list[atom_i][n];
-        if (m_atoms[neighbor] == 1) {  // Hydrogen
-            nhi++;
+    if (m_cached_topology && !m_cached_topology->adjacency_list.empty()) {
+        for (size_t n = 0; n < m_cached_topology->adjacency_list[atom_i].size(); ++n) {
+            int neighbor = m_cached_topology->adjacency_list[atom_i][n];
+            if (m_atoms[neighbor] == 1) {  // Hydrogen
+                nhi++;
+            }
         }
     }
 
     // Count hydrogen neighbors for atom k
     int nhj = 1;  // Start at 1 (Fortran convention)
-    for (size_t n = 0; n < m_topology_input.adjacency_list[atom_k].size(); ++n) {
-        int neighbor = m_topology_input.adjacency_list[atom_k][n];
-        if (m_atoms[neighbor] == 1) {  // Hydrogen
-            nhj++;
+    if (m_cached_topology && !m_cached_topology->adjacency_list.empty()) {
+        for (size_t n = 0; n < m_cached_topology->adjacency_list[atom_k].size(); ++n) {
+            int neighbor = m_cached_topology->adjacency_list[atom_k][n];
+            if (m_atoms[neighbor] == 1) {  // Hydrogen
+                nhj++;
+            }
         }
     }
 
@@ -1898,6 +1924,7 @@ double GFNFF::calculateHydrogenCountCorrection(int atom_i, int atom_k) const {
     }
 
     return f_hydrogen;
+    */  // END DISABLED CODE
 }
 
 bool GFNFF::loadGFNFFCharges()

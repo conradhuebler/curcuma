@@ -151,17 +151,18 @@ set_tests_properties(test_gfnff_stepwise PROPERTIES TIMEOUT 60 LABELS "gfnff;val
 
 # Claude Generated (December 31, 2025): Charge Injection Verification Test
 # Purpose: Verify that injected XTB charges lead to correct intermediate parameters
-add_executable(verify_charge_injection
-        verify_charge_injection.cpp)
-
-target_link_libraries(verify_charge_injection curcuma_core test_molecule_registry)
-
-if(USE_PCH)
-        target_precompile_headers(verify_charge_injection REUSE_FROM curcuma_core)
-endif()
-
-# Not a CTest - manual execution only for debugging
-# Run from release/test_cases/ directory
+# DISABLED: Source file not yet created
+# add_executable(verify_charge_injection
+#         verify_charge_injection.cpp)
+#
+# target_link_libraries(verify_charge_injection curcuma_core test_molecule_registry)
+#
+# if(USE_PCH)
+#         target_precompile_headers(verify_charge_injection REUSE_FROM curcuma_core)
+# endif()
+#
+# # Not a CTest - manual execution only for debugging
+# # Run from release/test_cases/ directory
 
 # Claude Generated (December 2025): CN Unit Conversion Fix Test
 # Purpose: Quick validation of Angstrom->Bohr conversion for CN calculation
