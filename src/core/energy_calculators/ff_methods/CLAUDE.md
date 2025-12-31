@@ -107,7 +107,7 @@ To add a new GFN-FF energy term (e.g., "CrossTerm"), you MUST modify:
 
 **Summary**: 4/6 components excellent (<1% error), significant overall improvement from 11.6% → 0.6% total energy error
 
-### ✅ FIXED: Coulomb CN-Dependent Chi Term (December 31, 2025)
+### ✅ FIXED: Coulomb CN-Dependent Chi Term (December 31, 2025) - MAJOR SUCCESS
 
 **Root Cause**: Missing `+ cnf*sqrt(CN)` term in Coulomb parameter generation
 
@@ -126,12 +126,40 @@ coulomb["chi_i"] = -params_i.chi + dxi_i + params_i.cnf * std::sqrt(cn_i);
 **Impact**:
 - Coulomb energy: 110% error → 8.3% error ✅ **13× improvement**
 - Total energy: 11.6% error → 0.6% error ✅ **19× improvement**
-- 4/11 test molecules now <10% Coulomb error
+- Bond energy: 7.05% error → 0.71% error ✅ **10× improvement** (side effect)
+- 4/6 energy components now <1% error ✅
 
 **Reference**:
 - Fortran: `external/gfnff/src/gfnff_engrad.F90:1581`
 - EEQ Solver: `src/core/energy_calculators/ff_methods/eeq_solver.cpp:1332`
 - Commit: 03ef23c "fix(gfnff): Add missing CN-dependent term to Coulomb chi parameter"
+
+### 🔄 REFACTORED: Angle fbsmall Calculation Order (December 31, 2025)
+
+**Architecture Bug**: fbsmall calculated with UNINITIALIZED params.equilibrium_angle
+
+**Location**: `src/core/energy_calculators/ff_methods/gfnff_method.cpp:1777-1910`
+
+**Fix Applied**:
+```cpp
+// BEFORE (WRONG): Line 1784
+double theta_eq_rad = params.equilibrium_angle;  // UNINITIALIZED!
+double fbsmall = 1.0 - fbs1 * exp(-0.64 * (theta_eq_rad - pi)²);
+// ... 110 lines later ...
+params.equilibrium_angle = r0_deg * M_PI / 180.0;  // NOW it's set!
+
+// AFTER (CORRECT): Line 1878
+params.equilibrium_angle = r0_deg * M_PI / 180.0;  // Set FIRST
+double fbsmall = 1.0 - fbs1 * exp(-0.64 * (params.equilibrium_angle - pi)²);
+```
+
+**Impact**:
+- Architecture: Fixed undefined behavior (using uninitialized variable)
+- Code quality: Force constant calculation now in logical order
+- **Revealed**: Angles are systematically ~10× too small (deeper issue exposed)
+- Commit: fcc00ca "refactor(gfnff): Fix angle fbsmall calculation order"
+
+**Status**: Refactor complete, but angle energy still 92% error - investigation ongoing
 
 ### ✅ Fully Implemented Terms
 - Bond stretching (exponential potential) - **VERIFIED: 93% accuracy (+7% error)**
@@ -191,11 +219,30 @@ coulomb["chi_i"] = -params_i.chi + dxi_i + params_i.cnf * std::sqrt(cn_i);
 
 ### 🔴 REMAINING TODOs (December 31, 2025)
 
-1. **Angle Energy 89.9% Error** - VERIFIED: Too small, needs angl2 topology correction
-   - **Location**: `forcefieldthread.cpp:800-803` (current fqq correction only)
-   - **Reference**: `gfnff_param.f90:1359` (angl2 topology logic)
-   - **Priority**: HIGH - systematically underestimates angle energy
-   - **Impact**: Would fix remaining 0.6% total energy error
+1. **Angle Energy 92% Error** - CRITICAL INVESTIGATION ONGOING
+   - **Status**: Fixed fbsmall calculation order bug (commit fcc00ca), but revealed deeper issue
+   - **Location**: `gfnff_method.cpp:1660-1910` - getGFNFFAngleParameters()
+   - **Problem**: Force constants systematically ~10× too small
+   - **Architecture Fix**: fbsmall now calculated AFTER equilibrium angle (was using uninitialized value)
+   - **Revealed Issue**: Correct calculation shows angles are fundamentally too weak
+
+   **Investigation Steps Completed**:
+   - ✅ Fixed fbsmall using uninitialized params.equilibrium_angle
+   - ✅ Verified angl/angl2 parameters match Fortran arrays exactly
+   - ✅ Confirmed formula: fc = fijk * fqq * f2 * fn * fbsmall * feta
+   - ✅ All individual factors calculated per Fortran reference
+
+   **Remaining Hypotheses**:
+   - ❓ Unit conversion issue (kcal/mol vs Hartree vs atomic units)?
+   - ❓ Missing scaling factor (base parameters in wrong units)?
+   - ❓ Energy calculation formula in forcefieldthread.cpp has error?
+   - ❓ Hybridization detection causing wrong equilibrium angles?
+
+   **Next Steps**:
+   - Compare step-by-step with XTB verbose output for same molecule
+   - Check units of angle_params and angl2_neighbors arrays
+   - Verify energy calculation formula in forcefieldthread.cpp:736-960
+   - Test with simple molecule (H2O) where all values are known
 
 2. **Torsion Energy 215% Error** - Small absolute magnitude (7.4e-5 vs 2.3e-5 Eh) but 3× too large
    - **Priority**: MEDIUM - small absolute error, low overall impact
