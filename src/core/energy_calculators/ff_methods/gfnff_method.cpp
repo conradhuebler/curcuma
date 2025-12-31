@@ -2145,14 +2145,22 @@ std::vector<int> GFNFF::determineHybridization() const
             }
 
         } else if (neighbor_count == 2) {
-            // Check if linear (sp) or bent (sp2)
-            double dot_product = bond_vectors[0].dot(bond_vectors[1]);
-            double angle = std::acos(std::max(-1.0, std::min(1.0, dot_product)));
-
-            if (angle > 2.8) { // ~160° - linear geometry
-                hyb[i] = 1; // sp
+            // CRITICAL FIX (Dec 31, 2025): Element-specific rules for oxygen!
+            // Oxygen with CN=2 is ALWAYS sp3 (2 bonds + 2 lone pairs = 4 electron pairs)
+            // Examples: H2O, R-O-R (ether), R-OH (alcohol)
+            // XTB reference: gfnff_ini2.f90 uses element-specific hybridization
+            if (z == 8) {
+                hyb[i] = 3; // sp3 for oxygen (accounts for lone pairs)
             } else {
-                hyb[i] = 2; // sp2 (bent, like H2O oxygen)
+                // For other elements: Check if linear (sp) or bent (sp2)
+                double dot_product = bond_vectors[0].dot(bond_vectors[1]);
+                double angle = std::acos(std::max(-1.0, std::min(1.0, dot_product)));
+
+                if (angle > 2.8) { // ~160° - linear geometry
+                    hyb[i] = 1; // sp
+                } else {
+                    hyb[i] = 2; // sp2 (bent)
+                }
             }
 
         } else if (neighbor_count == 3) {
