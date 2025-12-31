@@ -3759,8 +3759,14 @@ json GFNFF::generateGFNFFCoulombPairs() const
             // So we must also negate it here and add dxi correction!
             double dxi_i = (i < topo_info.dxi.size()) ? topo_info.dxi(i) : 0.0;
             double dxi_j = (j < topo_info.dxi.size()) ? topo_info.dxi(j) : 0.0;
-            coulomb["chi_i"] = -params_i.chi + dxi_i;  // NEGATIVE chi + dxi correction
-            coulomb["chi_j"] = -params_j.chi + dxi_j;  // NEGATIVE chi + dxi correction
+
+            // Claude Generated (Dec 2025, Session 11): CRITICAL FIX - Add CN-dependent term!
+            // Reference: Fortran gfnff_engrad.F90:1581 and eeq_solver.cpp:1332
+            // Formula: chi(i) = -chi + dxi + cnf*sqrt(CN)
+            double cn_i = topo_info.coordination_numbers(i);
+            double cn_j = topo_info.coordination_numbers(j);
+            coulomb["chi_i"] = -params_i.chi + dxi_i + params_i.cnf * std::sqrt(cn_i);
+            coulomb["chi_j"] = -params_j.chi + dxi_j + params_j.cnf * std::sqrt(cn_j);
             coulomb["gam_i"] = params_i.gam;  // Chemical hardness
             coulomb["gam_j"] = params_j.gam;  // Chemical hardness
             coulomb["alp_i"] = params_i.alp;
