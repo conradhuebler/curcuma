@@ -423,7 +423,7 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     // Same formula as D3, but uses charge-weighted C6 coefficients
     json atm_triples = json::array();
 
-    if (m_config.get<double>("d4_s9", 0.0) > 1e-10) {
+    if (m_config.get<double>("d4_s9", 1.0) > 1e-10) {  // Claude Generated: Use PARAM default (1.0) not 0.0
         double s9 = m_config.get<double>("d4_s9", 1.0);
         double a1 = m_config.get<double>("d4_a1", 0.44);
         double a2 = m_config.get<double>("d4_a2", 4.60);
@@ -431,42 +431,111 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
         int n_atoms = static_cast<int>(m_atoms.size());
 
+        // Claude Generated (January 2025): Bonded triplet filtering for D4 (like XTB)
+        // This optimization was reverted and is now being restored.
+        // It reduces the number of triplets from O(N^3) to roughly O(N*<neighbors>^2),
+        // which is a massive performance improvement for larger systems.
+        std::vector<std::pair<int, int>> bonded_pairs;
+        std::vector<std::vector<int>> adjacency(n_atoms);
+
+        // Covalent radii in Angstrom (from GFN-FF method) for bond detection
+        const double ANGSTROM_TO_BOHR = 1.8897261246257702;
+        static const std::vector<double> rcov_angstrom = {
+            0.32, 0.37, 1.30, 0.99, 0.84, 0.75, 0.71, 0.64, 0.60, 0.62, // H-Ne
+            1.60, 1.40, 1.24, 1.14, 1.09, 1.04, 1.00, 1.01, // Na-Ar
+            2.00, 1.74, 1.59, 1.48, 1.44, 1.30, 1.29, 1.24, 1.18, 1.17, 1.22, 1.20, // K-Zn
+            1.23, 1.20, 1.20, 1.18, 1.17, 1.16, 2.15, 1.90, 1.76, 1.64, 1.56, 1.46, // Rb-Tc
+            1.38, 1.36, 1.34, 1.30, 1.36, 1.40, 1.42, 1.40, 1.40, 1.37, 1.36, 1.36, // Ru-Xe
+            2.38, 2.06, 1.94, 1.84, 1.90, 1.88, 1.86, 1.85, 1.83, 1.82, 1.81, 1.80, // Cs-Er
+            1.79, 1.77, 1.77, 1.78, 1.74, 1.64, 1.58, 1.50, 1.41, 1.36, 1.32, 1.30, // Tm-Au
+            1.30, 1.32, 1.44, 1.45, 1.50, 1.42, 1.48, 1.46 // Hg-Rn
+        };
+
         for (int i = 0; i < n_atoms; ++i) {
-            for (int j = 0; j < i; ++j) {
-                for (int k = 0; k < j; ++k) {
-                    json triple;
-                    triple["i"] = i;
-                    triple["j"] = j;
-                    triple["k"] = k;
+            int Zi = m_atoms[i];
+            double rcov_i = (Zi > 0 && Zi < rcov_angstrom.size()) ? rcov_angstrom[Zi-1] : 1.5;
 
-                    // C6 from charge-weighted D4 coefficients
-                    int Zi = m_atoms[i];
-                    int Zj = m_atoms[j];
-                    int Zk = m_atoms[k];
+            for (int j = i + 1; j < n_atoms; ++j) {
+                int Zj = m_atoms[j];
+                double rcov_j = (Zj > 0 && Zj < rcov_angstrom.size()) ? rcov_angstrom[Zj-1] : 1.5;
 
-                    double c6_ij = getChargeWeightedC6(Zi, Zj, i, j);
-                    double c6_ik = getChargeWeightedC6(Zi, Zk, i, k);
-                    double c6_jk = getChargeWeightedC6(Zj, Zk, j, k);
+                double distance_bohr = (geometry_bohr.row(i) - geometry_bohr.row(j)).norm();
+                // Bond threshold is defined in Angstrom, so compare in Angstrom
+                double distance_angstrom = distance_bohr / ANGSTROM_TO_BOHR;
+                double bond_threshold = 1.3 * (rcov_i + rcov_j);
 
-                    triple["C6_ij"] = c6_ij;
-                    triple["C6_ik"] = c6_ik;
-                    triple["C6_jk"] = c6_jk;
-                    triple["s9"] = s9;
-                    triple["a1"] = a1;
-                    triple["a2"] = a2;
-                    triple["alp"] = alp;
-                    triple["atm_method"] = "d4";
-
-                    // Symmetry factor (same as D3)
-                    triple["triple_scale"] = calculateTripleScale(i, j, k);
-
-                    atm_triples.push_back(triple);
+                if (distance_angstrom < bond_threshold) {
+                    bonded_pairs.push_back({i, j});
+                    adjacency[i].push_back(j);
+                    adjacency[j].push_back(i);
                 }
             }
         }
+        
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param("D4 ATM bonded pairs identified", static_cast<int>(bonded_pairs.size()));
+        }
+
+        std::set<std::tuple<int, int, int>> unique_triplets;
+
+        // Second pass: generate only bonded triplets
+        for (const auto& bond : bonded_pairs) {
+            int i = bond.first;
+            int j = bond.second;
+
+            // Find all neighbors k of i or j, forming a connected triplet
+            std::set<int> neighbors_of_i_and_j;
+            for (int k : adjacency[i]) {
+                if (k != j) neighbors_of_i_and_j.insert(k);
+            }
+            for (int k : adjacency[j]) {
+                if (k != i) neighbors_of_i_and_j.insert(k);
+            }
+
+            for (int k : neighbors_of_i_and_j) {
+                // Ensure unique triplet ordering: i < j < k
+                std::array<int, 3> t_sorted = {i, j, k};
+                std::sort(t_sorted.begin(), t_sorted.end());
+                unique_triplets.insert({t_sorted[0], t_sorted[1], t_sorted[2]});
+            }
+        }
+        
+        for (const auto& t : unique_triplets) {
+            int i = std::get<0>(t);
+            int j = std::get<1>(t);
+            int k = std::get<2>(t);
+            
+            json triple;
+            triple["i"] = i;
+            triple["j"] = j;
+            triple["k"] = k;
+
+            // C6 from charge-weighted D4 coefficients
+            int Zi = m_atoms[i];
+            int Zj = m_atoms[j];
+            int Zk = m_atoms[k];
+
+            double c6_ij = getChargeWeightedC6(Zi, Zj, i, j);
+            double c6_ik = getChargeWeightedC6(Zi, Zk, i, k);
+            double c6_jk = getChargeWeightedC6(Zj, Zk, j, k);
+
+            triple["C6_ij"] = c6_ij;
+            triple["C6_ik"] = c6_ik;
+            triple["C6_jk"] = c6_jk;
+            triple["s9"] = s9;
+            triple["a1"] = a1;
+            triple["a2"] = a2;
+            triple["alp"] = alp;
+            triple["atm_method"] = "d4";
+
+            // Symmetry factor (same as D3)
+            triple["triple_scale"] = calculateTripleScale(i, j, k);
+
+            atm_triples.push_back(triple);
+        }
 
         if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param("Generated D4 ATM triples", static_cast<int>(atm_triples.size()));
+            CurcumaLogger::param("Generated D4 ATM triples (bonded)", static_cast<int>(atm_triples.size()));
         }
     }
 
