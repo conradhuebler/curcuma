@@ -1111,11 +1111,26 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     params.equilibrium_distance = rtmp;
     params.rabshift = rabshift;  // Claude Generated (Dec 2025): Store for validation tests
 
+    // CRITICAL DEBUG (Dec 31, 2025): Trace C-H r0 calculation
+    bool is_CH_bond = ((z1 == 1 && z2 == 6) || (z1 == 6 && z2 == 1));
+    if (is_CH_bond && CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("=== C-H r0 DEBUG: Bond {}-{} ===", atom1, atom2));
+        CurcumaLogger::info(fmt::format("  CN: cn1={:.6f}, cn2={:.6f}", cn1, cn2));
+        CurcumaLogger::info(fmt::format("  Base r0: r0_1={:.6f}, r0_2={:.6f}", r0_1, r0_2));
+        CurcumaLogger::info(fmt::format("  CN-corrected: ra={:.6f}, rb={:.6f}", ra, rb));
+        CurcumaLogger::info(fmt::format("  EN: en1={:.6f}, en2={:.6f}, diff={:.6f}", en1, en2, en_diff));
+        CurcumaLogger::info(fmt::format("  FF factor: k1={:.6f}, k2={:.6f}, ff={:.6f}", k1, k2, ff));
+        CurcumaLogger::info(fmt::format("  Shift: gen_rabshift={:.6f}, shift={:.6f}, total={:.6f}", gen_rabshift, shift, rabshift));
+        CurcumaLogger::info(fmt::format("  Hyb: hyb1={}, hyb2={}", hyb1_value, hyb2_value));
+        CurcumaLogger::info(fmt::format("  Formula: r0 = ({:.6f} + {:.6f} + {:.6f}) * {:.6f}", ra, rb, rabshift, ff));
+        CurcumaLogger::info(fmt::format("  Result: r0_bohr={:.6f}, r0_angstrom={:.6f}", rtmp, rtmp * 0.529177));
+    }
+
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info(fmt::format("RAB_TRANSFORM: gen_rabshift={:.8f}, shift={:.8f}, rabshift={:.8f}",
                                          gen_rabshift, shift, rabshift));
-        CurcumaLogger::info(fmt::format("RAB_TRANSFORM: r_eq = ({:.8f} + {:.8f}) * {:.8f} + {:.8f} = {:.8f} Bohr",
-                                         ra, rb, ff, rabshift, params.equilibrium_distance));
+        CurcumaLogger::info(fmt::format("RAB_TRANSFORM: r_eq = ({:.8f} + {:.8f} + {:.8f}) * {:.8f} = {:.8f} Bohr",
+                                         ra, rb, rabshift, ff, params.equilibrium_distance));
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
