@@ -803,17 +803,19 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
 
         // Check if equilibrium angle is linear (θ₀ ≈ π)
         if (std::abs(pi - theta0) < linear_threshold) {
-            // Linear case: E = 0.5 * k*(θ - θ₀)² (harmonic in θ)
-            // Fortran gfnff_engrad.F90:895-897
+            // Claude Generated (Dec 31, 2025): CRITICAL BUG FIX - Remove incorrect 0.5 factor!
+            // Linear case: E = k*(θ - θ₀)² (NO 0.5 factor!)
+            // Fortran gfnff_engrad.F90:895-897: ea = kijk*dt**2 (NO 0.5!)
             double dtheta = theta - theta0;
-            energy = 0.5 * k_ijk * dtheta * dtheta;
+            energy = k_ijk * dtheta * dtheta;  // FIX: Removed 0.5
             dedtheta = 2.0 * k_ijk * dtheta;
         } else {
-            // Normal case: E = 0.5 * k*(cosθ - cosθ₀)² (cosine-based)
-            // Fortran gfnff_engrad.F90:899-900
+            // Claude Generated (Dec 31, 2025): CRITICAL BUG FIX - Remove incorrect 0.5 factor!
+            // Normal case: E = k*(cosθ - cosθ₀)² (NO 0.5 factor!)
+            // Fortran gfnff_engrad.F90:899-900: ea = kijk*(cosa-cos(c0))**2 (NO 0.5!)
             double costheta0 = std::cos(theta0);
             double dcostheta = costheta - costheta0;
-            energy = 0.5 * k_ijk * dcostheta * dcostheta;
+            energy = k_ijk * dcostheta * dcostheta;  // FIX: Removed 0.5
 
             // dE/dθ = dE/d(cosθ) * d(cosθ)/dθ
             //       = 2*k*(cosθ - cosθ₀) * (-sinθ)
