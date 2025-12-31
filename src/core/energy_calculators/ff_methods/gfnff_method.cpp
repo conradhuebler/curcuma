@@ -1659,6 +1659,18 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, int atom_k,
                                                         double current_angle, const TopologyInfo& topo_info) const
 {
+    static int call_count = 0;
+    call_count++;
+    if (call_count <= 15) {
+        std::cout << fmt::format("getGFNFFAngleParameters() call #{}: atoms {}-{}-{}\n",
+                                 call_count, atom_i, atom_j, atom_k);
+    }
+
+    // DEBUG: Check atom_j immediately (Claude Generated Dec 31, 2025)
+    if (atom_j == 5) {
+        std::cout << "DEBUG: Processing O-centered angle!\n";
+    }
+
     using namespace GFNFFParameters;
     GFNFFAngleParams params;
 
@@ -1766,13 +1778,58 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     // where nn = topo%nb(20,i) = Coordination number of central atom
     // Reference: gfnff_ini.f90:1377,1612
     const double threshold_cn_squared = 40.0 * 40.0;  // ~40 Bohr cutoff (standard GFN-FF)
+
+    // DEBUG: Before CNCalculator (Claude Generated Dec 31, 2025)
+    if (atom_j == 5) {
+        std::cout << "DEBUG: About to call CNCalculator...\n";
+    }
+
     // Phase 2C: Migrate to shared CNCalculator for GFN-FF CN calculation
     auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, threshold_cn_squared);
     Vector coord_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
+
+    // DEBUG: After CNCalculator (Claude Generated Dec 31, 2025)
+    if (atom_j == 5) {
+        std::cout << "DEBUG: CNCalculator returned successfully\n";
+    }
+
     double nn = static_cast<int>(std::round(coord_numbers[atom_j]));  // Central atom coordination number
     nn = std::max(1.0, nn);  // Ensure nn >= 1
     double fn = 1.0 - 2.36 / (nn * nn);
     fn = std::max(0.05, fn);  // Ensure fn stays positive
+
+    // DEBUG: Before final debug block (Claude Generated Dec 31, 2025)
+    if (atom_j == 5) {
+        std::cout << "DEBUG: Reached final debug block, atom_j=" << atom_j << "\n";
+    }
+
+    // DEBUG: Log all factors for O-centered angles (Claude Generated Dec 31, 2025)
+    if (atom_j == 5) {  // O atom (index 5 in CH3OCH3)
+        std::cout << "\n=== ANGLE FORCE CONSTANT DEBUG (Atom " << atom_j << " = O) ===\n";
+        std::cout << "Angle: " << atom_i << "-" << atom_j << "-" << atom_k << "\n";
+        std::cout << "Elements: " << m_atoms[atom_i] << "-" << m_atoms[atom_j] << "-" << m_atoms[atom_k] << "\n\n";
+
+        std::cout << "FACTOR 1 (fijk_calc):\n";
+        std::cout << "  angle_param (center=" << z_center << ") = " << angle_param << "\n";
+        std::cout << "  angl2_i (Z=" << z_i << ") = " << angl2_i << "\n";
+        std::cout << "  angl2_k (Z=" << z_k << ") = " << angl2_k << "\n";
+        std::cout << "  fijk_calc = " << angle_param << " × " << angl2_i << " × " << angl2_k
+                  << " = " << fijk_calc << "\n\n";
+
+        std::cout << "FACTOR 2 (fqq - charge correction):\n";
+        std::cout << "  qa_center = " << topo_info.eeq_charges[atom_j] << "\n";
+        std::cout << "  qa_i = " << topo_info.eeq_charges[atom_i] << "\n";
+        std::cout << "  qa_k = " << topo_info.eeq_charges[atom_k] << "\n";
+        std::cout << "  fqq = " << fqq << "\n\n";
+
+        std::cout << "FACTOR 3 (f2 - element correction):\n";
+        std::cout << "  f2 = " << f2 << "\n\n";
+
+        std::cout << "FACTOR 4 (fn - coordination number):\n";
+        std::cout << "  D3_CN = " << coord_numbers[atom_j] << "\n";
+        std::cout << "  nn (rounded) = " << nn << "\n";
+        std::cout << "  fn = 1.0 - 2.36/" << nn << "² = " << fn << "\n\n";
+    }
 
     // Claude Generated (Dec 31, 2025): CRITICAL BUG FIX!
     // Factor 5 (fbsmall) REMOVED FROM HERE - was using UNINITIALIZED params.equilibrium_angle!
@@ -1827,18 +1884,35 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     // - Metal coordination: Special cases for transition metals
 
     // Calculate neighbors of central atom for element-specific corrections
-    std::vector<int> neighbors;
-    for (int i = 0; i < m_atomcount; ++i) {
-        if (i == atom_j) continue;
-        double distance = (m_geometry_bohr.row(atom_j) - m_geometry_bohr.row(i)).norm();
-        if (distance < 2.5) {  // Bond threshold in Bohr
-            neighbors.push_back(i);
+    // Claude Generated (Dec 31, 2025): CRITICAL FIX - Use adjacency list from topology!
+    // This is the exact bond list that was used to generate angles
+    // Reference: adjacency_list is populated in calculateTopologyInfo() from bond list
+
+    // DEBUG: Check if adjacency_list is populated (Dec 31, 2025)
+    if (atom_j == 5) {
+        std::cout << "DEBUG: topo_info.adjacency_list.size() = " << topo_info.adjacency_list.size() << "\n";
+        if (!topo_info.adjacency_list.empty() && atom_j < topo_info.adjacency_list.size()) {
+            std::cout << "DEBUG: topo_info.adjacency_list[" << atom_j << "].size() = "
+                      << topo_info.adjacency_list[atom_j].size() << "\n";
         }
+    }
+
+    // Get neighbors directly from topology adjacency list
+    // This is already calculated and contains the actual bonded neighbors
+    std::vector<int> neighbors;
+    if (!topo_info.adjacency_list.empty() && atom_j < topo_info.adjacency_list.size()) {
+        neighbors = topo_info.adjacency_list[atom_j];
     }
 
     // Oxygen corrections: More accurate angle values based on Fortran reference
     // Reference: gfnff_ini.f90:1560-1575
     if (m_atoms[atom_j] == 8) {  // Central atom is oxygen
+        // DEBUG: Check neighbors (Claude Generated Dec 31, 2025)
+        if (atom_j == 5) {
+            std::cout << "DEBUG O-angle: neighbors.size() = " << neighbors.size() << "\n";
+            std::cout << "DEBUG O-angle: r0_deg before correction = " << r0_deg << "\n";
+        }
+
         // Default O with 2 neighbors: 104.5°
         if (neighbors.size() == 2) {
             r0_deg = 104.5;
@@ -1850,6 +1924,11 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
             if (nh_count == 2) {
                 r0_deg = 100.0;  // H-O-H equilibrium angle
             }
+        }
+
+        // DEBUG: Check final r0_deg (Claude Generated Dec 31, 2025)
+        if (atom_j == 5) {
+            std::cout << "DEBUG O-angle: r0_deg after correction = " << r0_deg << "\n";
         }
     }
 
@@ -1896,7 +1975,34 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
         // PHASE 2B (Dec 31, 2025): Hydrogen count correction
         // Reference: XTB gfnff_ini.f90:1617 - f_hydrogen = (nhi * nhj)^0.07
         double f_hydrogen = calculateHydrogenCountCorrection(atom_i, atom_k);
+        double fc_before_fH = params.force_constant;  // Store before f_hydrogen
         params.force_constant *= f_hydrogen;
+
+        // DEBUG: Complete factor breakdown for O-centered angle (Claude Generated Dec 31, 2025)
+        if (atom_j == 5) {
+            std::cout << "FACTOR 5 (fbsmall - linear angle correction):\n";
+            std::cout << "  theta0 = " << params.equilibrium_angle << " rad = "
+                      << (params.equilibrium_angle * 180.0 / pi) << "°\n";
+            std::cout << "  fbsmall = 1.0 - 0.5 × exp(-0.64×(θ0-π)²) = " << fbsmall << "\n\n";
+
+            std::cout << "FACTOR 6 (feta - metal correction):\n";
+            std::cout << "  feta = " << feta << " (no metals)\n\n";
+
+            std::cout << "FACTOR 7 (f_hydrogen - H count correction):\n";
+            std::cout << "  f_hydrogen = " << f_hydrogen << "\n\n";
+
+            std::cout << "FINAL FORCE CONSTANT:\n";
+            std::cout << "  fc = fijk × fqq × f2 × fn × fbsmall × feta × fH\n";
+            std::cout << "  fc = " << fijk << " × " << fqq << " × " << f2 << " × "
+                      << fn << " × " << fbsmall << " × " << feta << " × " << f_hydrogen << "\n";
+            std::cout << "  fc = " << params.force_constant << " Eh\n\n";
+
+            std::cout << "COMPARISON:\n";
+            std::cout << "  Curcuma fc = " << params.force_constant << " Eh\n";
+            std::cout << "  XTB ref fc ≈ 0.407 Eh (from param file)\n";
+            std::cout << "  Ratio = " << params.force_constant / 0.407 << "×\n";
+            std::cout << "=========================================================\n\n";
+        }
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::param(fmt::format("angle_{}-{}-{}_fbsmall", atom_i, atom_j, atom_k),
@@ -2921,6 +3027,14 @@ json GFNFF::generateTopologyAwareAngles(const Vector& cn, const std::vector<int>
         bond_list.push_back({ bond["i"], bond["j"] });
     }
 
+    // Build complete adjacency list from bond_list for topology-aware parameter generation
+    // This is needed by getGFNFFAngleParameters() for element-specific angle corrections
+    std::vector<std::vector<int>> adjacency_list(m_atomcount);
+    for (const auto& [atom_i, atom_j] : bond_list) {
+        adjacency_list[atom_i].push_back(atom_j);
+        adjacency_list[atom_j].push_back(atom_i);
+    }
+
     // Generate angles from bonded topology
     for (int center = 0; center < m_atomcount; ++center) {
         std::vector<int> neighbors;
@@ -2969,6 +3083,7 @@ json GFNFF::generateTopologyAwareAngles(const Vector& cn, const std::vector<int>
                 topo_compat.eeq_charges = charges;  // Use provided charges
                 topo_compat.coordination_numbers = cn;  // Use provided CN
                 topo_compat.hybridization = hyb;  // Use provided hybridization
+                topo_compat.adjacency_list = adjacency_list;  // Use pre-built adjacency list
 
                 // Initialize metal flags (needed for angle parameter calculation)
                 topo_compat.is_metal.resize(m_atomcount, false);
