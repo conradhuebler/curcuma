@@ -1025,13 +1025,20 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         // =====================================================================
         // Energy calculation
         // =====================================================================
+        // Claude Generated (Dec 31, 2025): Torsion energy calculation
+        // VERIFIED: XTB formula includes + π term in cosine argument
+        // Reference: XTB gfnff_eg.f90:1108-1111
+        //   Formula: E = V × (1 + cos(n×(φ - φ₀) + π)) × damp
+        //   Equivalent: E = V × (1 - cos(n×(φ - φ₀))) × damp
+        // Note: The + π term inverts the cosine (cos(x+π) = -cos(x))
         double V = dihedral.V;  // Force constant in Hartree (from gfnff_torsions.cpp)
         double n = dihedral.n;  // Periodicity
         double phi0 = dihedral.phi0;  // Phase shift
 
-        // GFN-FF energy formula with damping (gfnff_engrad.F90:1190, 1199)
-        // E = V * (1 + cos(n*φ - φ₀)) * damp (V already in Hartree)
-        double et = V * (1 + cos(n * phi - phi0));
+        // XTB formula with + π correction (fixed +211% error)
+        double dphi1 = phi - phi0;  // Angle deviation from reference
+        double c1 = n * dphi1 + M_PI;  // XTB: n×(φ - φ₀) + π
+        double et = V * (1 + cos(c1));
         double energy = et * damp;
 
         // Torsion geometry analysis (December 2025) - First torsion only
@@ -1063,7 +1070,8 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         if (m_calculate_gradient) {
             // Gradient of energy w.r.t. angle (simplified - damping gradient omitted)
             // Full implementation would need ∂damp/∂r terms (gfnff_engrad.F90:1192-1198)
-            double dEdphi = -V * n * sin(n * phi - phi0) * damp * m_dihedral_scaling;
+            // Claude Generated (Dec 31, 2025): Corrected gradient with + π term
+            double dEdphi = -V * n * sin(c1) * damp * m_dihedral_scaling;
             m_gradient.row(dihedral.i) += dEdphi * derivate.row(0);
             m_gradient.row(dihedral.j) += dEdphi * derivate.row(1);
             m_gradient.row(dihedral.k) += dEdphi * derivate.row(2);

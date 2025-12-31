@@ -898,6 +898,17 @@ private:
     Vector calculateDalpha(const Vector& qa_charges) const;
 
     /**
+     * @brief Calculate hydrogen count correction for angle force constant
+     * @param atom_i First neighbor atom index
+     * @param atom_k Second neighbor atom index
+     * @return f_hydrogen correction factor (typically 1.0-1.2)
+     *
+     * Claude Generated (Dec 31, 2025)
+     * Reference: XTB gfnff_ini.f90:1617
+     */
+    double calculateHydrogenCountCorrection(int atom_i, int atom_k) const;
+
+    /**
      * @brief Phase 2: Calculate final charges with all corrections applied
      *
      * Solves second EEQ with corrected parameters:
