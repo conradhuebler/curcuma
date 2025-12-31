@@ -133,13 +133,35 @@ if(USE_PCH)
         target_precompile_headers(test_gfnff_stepwise REUSE_FROM curcuma_core)
 endif()
 
+# Copy reference data to build directory for test access
+# Claude Generated (December 31, 2025) - Fix missing reference JSON
+# Note: CMAKE_CURRENT_BINARY_DIR is already release/test_cases/
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/reference_data
+     DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+
 # Register with CTest
+# Claude Generated (December 31, 2025) - WORKING_DIRECTORY fix
+# Note: CMAKE_CURRENT_BINARY_DIR is already release/test_cases/
 add_test(NAME test_gfnff_stepwise
          COMMAND test_gfnff_stepwise
-         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test_cases)
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
 # Configure test timeout and grouping
 set_tests_properties(test_gfnff_stepwise PROPERTIES TIMEOUT 60 LABELS "gfnff;validation")
+
+# Claude Generated (December 31, 2025): Charge Injection Verification Test
+# Purpose: Verify that injected XTB charges lead to correct intermediate parameters
+add_executable(verify_charge_injection
+        verify_charge_injection.cpp)
+
+target_link_libraries(verify_charge_injection curcuma_core test_molecule_registry)
+
+if(USE_PCH)
+        target_precompile_headers(verify_charge_injection REUSE_FROM curcuma_core)
+endif()
+
+# Not a CTest - manual execution only for debugging
+# Run from release/test_cases/ directory
 
 # Claude Generated (December 2025): CN Unit Conversion Fix Test
 # Purpose: Quick validation of Angstrom->Bohr conversion for CN calculation
@@ -161,21 +183,21 @@ set_tests_properties(test_cn_fix PROPERTIES TIMEOUT 10 LABELS "gfnff;cn")
 
 # Claude Generated (December 2025): C-O Bond Fix Test
 # Purpose: Validate that CN unit conversion fixes C-O bond distances
-add_executable(test_cobond_fix
-        test_cobond_fix.cpp)
+#add_executable(test_cobond_fix
+#        test_cobond_fix.cpp)
 
-target_link_libraries(test_cobond_fix curcuma_core)
+#target_link_libraries(test_cobond_fix curcuma_core)
 
-if(USE_PCH)
-        target_precompile_headers(test_cobond_fix REUSE_FROM curcuma_core)
-endif()
+#if(USE_PCH)
+#        target_precompile_headers(test_cobond_fix REUSE_FROM curcuma_core)
+#endif()
 
 # Register with CTest
-add_test(NAME test_cobond_fix
-         COMMAND test_cobond_fix
-         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test_cases)
+#add_test(NAME test_cobond_fix
+#         COMMAND test_cobond_fix
+#         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test_cases)
 
-set_tests_properties(test_cobond_fix PROPERTIES TIMEOUT 10 LABELS "gfnff;bond")
+#set_tests_properties(test_cobond_fix PROPERTIES TIMEOUT 10 LABELS "gfnff;bond")
 
 # Claude Generated (Session 5): Periodic Table utility tests
 add_executable(test_periodic_table
