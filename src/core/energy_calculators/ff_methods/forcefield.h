@@ -85,6 +85,8 @@ public:
     inline double RepulsionEnergy() const { return m_rep_energy; }
     inline double HHEnergy() const { return m_gfnff_repulsion; }  // Claude Generated (Dec 2025): GFN-FF repulsion energy
     inline double DispersionEnergy() const { return m_dispersion_energy; }
+    inline double D3Energy() const { return m_d3_energy; }  // Claude Generated (Jan 2, 2026): D3 dispersion energy
+    inline double D4Energy() const { return m_d4_energy; }  // Claude Generated (Jan 2, 2026): D4 dispersion energy
     inline double CoulombEnergy() const { return m_coulomb_energy; }
     inline double ElectrostatEnergy() const { return m_eq_energy; }
     inline double HydrogenBondEnergy() const { return m_energy_hbond; }   // Claude Generated (2025): Phase 5
@@ -161,6 +163,8 @@ private:
     double m_energy_hbond = 0.0;    // Claude Generated (2025): Phase 5 - Hydrogen bond energy
     double m_energy_xbond = 0.0;    // Claude Generated (2025): Phase 5 - Halogen bond energy
     double m_atm_energy = 0.0;      // Claude Generated (December 2025): ATM three-body dispersion energy
+    double m_d3_energy = 0.0;       // Claude Generated (Jan 2, 2026): D3 dispersion energy (for UFF-D3 and GFN-FF)
+    double m_d4_energy = 0.0;       // Claude Generated (Jan 2, 2026): D4 dispersion energy (for GFN-FF)
 
     Matrix m_geometry, m_gradient;
     std::vector<int> m_atom_types;

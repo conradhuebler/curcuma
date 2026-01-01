@@ -1518,14 +1518,17 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     }
 
     // Metal-specific equilibrium distance shifts (Fortran gfnff_ini.f90:1246-1253)
-    if (imetal1 == 2) metal_shift += 0.15;  // TM shift (metal2_shift)
-    if (imetal2 == 2) metal_shift += 0.15;
+    // Claude Updated (January 2026): Use named constants from gfnff_par.h
+    using namespace GFNFFParameters;
 
-    if (imetal1 == 1 && group1 <= 2) metal_shift += 0.20;  // Group 1+2 shift (metal1_shift)
-    if (imetal2 == 1 && group2 <= 2) metal_shift += 0.20;
+    if (imetal1 == 2) metal_shift += METAL2_SHIFT;  // Transition metal shift
+    if (imetal2 == 2) metal_shift += METAL2_SHIFT;
 
-    if (mtyp1 == 3) metal_shift += 0.05;  // Main group metal shift (metal3_shift)
-    if (mtyp2 == 3) metal_shift += 0.05;
+    if (imetal1 == 1 && group1 <= 2) metal_shift += METAL1_SHIFT;  // Group 1+2 (Li, Na, Mg, Ca)
+    if (imetal2 == 1 && group2 <= 2) metal_shift += METAL1_SHIFT;
+
+    if (mtyp1 == 3) metal_shift += METAL3_SHIFT;  // Main group metal (Al, Ga, In, Sn, Pb)
+    if (mtyp2 == 3) metal_shift += METAL3_SHIFT;
 
     // Apply metal shift to equilibrium distance (metal_shift is already in Bohr)
     params.equilibrium_distance += metal_shift;
@@ -1840,9 +1843,57 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     // But params.equilibrium_angle is only set at line 1894 (110 lines later!)
     // Result: fbsmall was calculated with garbage data, breaking angle force constants
 
-    // Factor 6: feta = metal eta-coordination correction
-    // TODO Phase 2.5: Implement feta correction for metals
-    double feta = 1.0;
+    // Factor 6: feta = metal η-coordination correction
+    // Claude Generated (January 2026): Implement feta correction for transition metals
+    // Reference: Fortran gfnff_ini.f90:1469-1471
+    //
+    // Educational Documentation:
+    // ==========================
+    // feta reduces angle force constants when transition metals coordinate to π-systems
+    // (e.g., ferrocene Fe-C₆H₆, metal-alkene complexes, metal-arene sandwich compounds)
+    //
+    // Physical meaning: π-coordination (η bonding) is more flexible than σ-bonding
+    // Metal-π bonds use diffuse orbitals with softer angular potentials
+    //
+    // Formula:
+    //   feta = 1.0  (default: no correction)
+    //   feta = 0.3  (transition metal + one π-bonded neighbor: 70% reduction)
+    //   feta = 0.09 (transition metal + both neighbors π-bonded: 91% reduction)
+    //
+    // π-bonded atoms: sp or sp² hybridization (hyb=1 or 2) capable of π-overlap
+    //
+    // Literature: Spicher, S.; Grimme, S. Angew. Chem. Int. Ed. 2020
+    // ============================================================================
+
+    double feta = 1.0;  // Default: no metal-π correction
+
+    // Check if central atom is a transition metal (metal_type==2)
+    // Note: z_center already declared above at line 1689
+    bool is_tm_center = (z_center >= 1 && z_center <= 86) && (metal_type[z_center - 1] == 2);
+
+    if (is_tm_center) {
+        // Check if neighbors are π-bonded (sp or sp² hybridization)
+        int hyb_i = topo_info.hybridization[atom_i];
+        int hyb_k = topo_info.hybridization[atom_k];
+
+        bool is_pi_i = (hyb_i == 1 || hyb_i == 2);  // sp or sp² → π-capable
+        bool is_pi_k = (hyb_k == 1 || hyb_k == 2);
+
+        // Apply η-coordination corrections
+        if (is_pi_i) feta *= 0.3;  // First neighbor π-bonded: 70% reduction
+        if (is_pi_k) feta *= 0.3;  // Second neighbor π-bonded: additional 70% reduction
+
+        // Result:
+        //   Both π-bonded: feta = 1.0 × 0.3 × 0.3 = 0.09 (91% weaker angles)
+        //   One π-bonded:  feta = 1.0 × 0.3 = 0.3 (70% weaker angles)
+        //   None π-bonded: feta = 1.0 (standard angles)
+
+        if (CurcumaLogger::get_verbosity() >= 3 && (is_pi_i || is_pi_k)) {
+            CurcumaLogger::info(fmt::format(
+                "  Metal η-coordination: TM atom {} with π-neighbors: i={} (hyb={}), k={} (hyb={}) → feta={:.3f}",
+                atom_j, is_pi_i, hyb_i, is_pi_k, hyb_k, feta));
+        }
+    }
 
     // ===========================================================================================
     // STEP 1: Calculate equilibrium angle FIRST (needed for fbsmall calculation)
@@ -4512,6 +4563,17 @@ double GFNFF::DispersionEnergy() const {
 double GFNFF::CoulombEnergy() const {
     if (!m_forcefield) return 0.0;
     return m_forcefield->CoulombEnergy();
+}
+
+// Claude Generated (Jan 2, 2026): D3 and D4 dispersion energy accessors
+double GFNFF::D3Energy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->D3Energy();
+}
+
+double GFNFF::D4Energy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->D4Energy();
 }
 
 // =================================================================================

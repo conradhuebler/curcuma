@@ -978,6 +978,20 @@ public:
      */
     double CoulombEnergy() const;
 
+    /**
+     * @brief Get D3 dispersion energy component
+     * @return D3 dispersion energy or 0 if not calculated
+     * Claude Generated (Jan 2, 2026): D3 dispersion energy accessor
+     */
+    double D3Energy() const;
+
+    /**
+     * @brief Get D4 dispersion energy component
+     * @return D4 dispersion energy or 0 if not calculated
+     * Claude Generated (Jan 2, 2026): D4 dispersion energy accessor
+     */
+    double D4Energy() const;
+
     // =================================================================================
     // vbond Parameter Access for Verification (Claude Generated November 2025)
     // =================================================================================

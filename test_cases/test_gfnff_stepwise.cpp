@@ -344,7 +344,9 @@ public:
             double E_torsion = gfnff.DihedralEnergy();
             double E_repulsion = gfnff.RepulsionEnergy();
             double E_coulomb = gfnff.CoulombEnergy();
-            double E_dispersion = gfnff.DispersionEnergy();
+            // Claude Generated (Jan 2, 2026): Use D4Energy() instead of DispersionEnergy() for GFN-FF
+            double E_dispersion = gfnff.D4Energy();  // D4 is used for GFN-FF, not generic DispersionEnergy()
+            double E_total = total_energy;
 
             std::map<std::string, double> calculated_energies = {
                 {"E_bond", E_bond},
@@ -352,7 +354,8 @@ public:
                 {"E_torsion", E_torsion},
                 {"E_repulsion", E_repulsion},
                 {"E_coulomb", E_coulomb},
-                {"E_dispersion", E_dispersion}
+                {"E_dispersion", E_dispersion},
+                {"E_total", E_total}  // Claude Generated (Jan 2, 2026): Add total energy
             };
 
             // Print detailed comparison table
