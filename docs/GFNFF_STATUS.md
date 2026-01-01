@@ -1,22 +1,22 @@
 # GFN-FF Implementation Status
 
-**Last Updated**: 2025-12-31
+**Last Updated**: 2026-01-01
 **Status**: ✅ **VERIFIED VIA test_gfnff_stepwise - ENERGY COMPONENT ANALYSIS COMPLETE**
 **Location**: `src/core/energy_calculators/ff_methods/`
 
 ---
 
-## Latest Verification (December 31, 2025)
+## Latest Verification (January 1, 2026)
 
 **Test**: `test_cases/test_gfnff_stepwise --verbose` (CH₃OCH₃ vs XTB 6.6.1)
 
-### Energy Component Accuracy
+### Energy Component Accuracy (WITH Extra SP3-SP3 Torsions)
 
 | Component | Curcuma (Eh) | XTB Ref (Eh) | Error % | Status |
 |-----------|--------------|--------------|---------|--------|
 | **Bond**      | -1.302254    | -1.216444    | **+7.05**   | ⚠️ Slightly too large |
 | **Angle**     | 0.001325     | 0.001780     | **-25.55**  | ⚠️ Too small (fijk refinement needed) |
-| **Torsion**   | 0.000073     | 0.000023     | **+211.42** | ⚠️ Too large (phase factor?) |
+| **Torsion**   | -0.000104    | +0.000023    | **-542%**   | ⚠️ **Overcompensating** (extra torsions too strong) |
 | **Repulsion** | 0.054074     | 0.053865     | **+0.39**   | ✅ **EXCELLENT!** |
 | **Coulomb**   | -0.100566    | -0.047825    | **+110.28** | ❌ **2× too large** (critical) |
 | **Dispersion**| 0.000000*    | -0.000042    | N/A         | ⚠️ Test setup issue |
@@ -46,8 +46,12 @@ Atom | Element | Curcuma EEQ | XTB Ref  | Error (e)  | Status
 2. **❌ NEW CRITICAL ISSUE**: Coulomb energy **110% too large** despite good EEQ charges
    - Possible causes: damping function, screening, unit conversion, double-counting
 
-3. **⚠️ NEW ISSUE**: Torsion energy **211% too large** (small absolute error)
-   - Possible causes: phase factor, force constant scaling
+3. **🔧 PARTIALLY IMPLEMENTED**: Extra SP3-SP3 Torsions (January 1, 2026)
+   - ✅ **Implementation complete**: 6 extra n=1 torsions generated for CH₃OCH₃
+   - ✅ **Sign change confirmed**: Torsion energy changed from +0.000073 Eh → -0.000104 Eh
+   - ⚠️ **Overcompensating**: Error went from +211% → -542% (wrong direction)
+   - 🔧 **Needs calibration**: ff=-2.00 (oxygen) too strong, or too many extra torsions generated
+   - See "Extra SP3-SP3 Torsions" section below for details
 
 4. **✅ VERIFIED**: Angle energy **25.55% too small** confirms fijk refinement needed (Phase 2b)
 
@@ -101,19 +105,78 @@ ff_methods/
 
 ---
 
-## Energy Terms Status (UPDATED Dec 31, 2025)
+## Energy Terms Status (UPDATED Jan 1, 2026)
 
 | Term | Implementation | Accuracy (CH₃OCH₃) | Notes |
 |------|----------------|----------|-------|
 | **Bond Stretching** | ✅ Complete | 93% (+7% error) | Exponential potential - slightly too large |
 | **Angle Bending** | ⚠️ Needs fijk | 74% (-26% error) | Phase 2b needed: angl2 topology logic |
-| **Torsion** | ⚠️ Needs Review | -211% (+211% error) | Small absolute value, phase factor issue? |
+| **Torsion** | 🔧 **Partial** | **-542%** | Extra sp3-sp3 implemented but **overcompensating** |
 | **Inversion** | ✅ Complete | ~95% | Out-of-plane bending |
 | **Repulsion** | ✅ **EXCELLENT** | **99.6% (+0.4%)** | ✅ Nearly perfect! Bonded/non-bonded complete |
 | **Dispersion** | ✅ Working | ✅ Functional | D4 with EEQ charges - test setup issue only |
 | **Coulomb/EEQ** | ❌ **CRITICAL** | -110% (+110%) | **2× too large despite good charges** |
 
 **Overall Accuracy**: 88.4% (11.6% total energy error for CH₃OCH₃)
+
+---
+
+### Extra SP3-SP3 Torsions (January 1, 2026) 🔧
+
+**Status**: ✅ **Implementation Complete** | ⚠️ **Needs Calibration**
+
+**Reference**: Fortran GFN-FF `gfnff_ini.f90:1952-2002` - "extra rot=1 torsion potential for sp3-sp3 to get gauche conf energies well"
+
+#### Implementation Details
+
+**Location**: `src/core/energy_calculators/ff_methods/gfnff_torsions.cpp:1181-1392`
+
+Fortran GFN-FF generates **TWO separate torsion terms** for sp³-sp³ bonds:
+
+1. **Primary n=3 torsion** (✅ already implemented):
+   - Formula: `fctot = (f1 + 10*torsf_pi*f2) * fqq * fij * fkl`
+   - Periodicity: n=3 (prevents eclipsing, staggered preference)
+   - Phase: φ₀ = 180°
+
+2. **Extra n=1 torsion** (✅ NOW implemented):
+   - Formula: `ff * fij * fkl * fqq` (NO f1/f2 terms!)
+   - Periodicity: n=1 (gauche vs anti fine-tuning)
+   - Phase: φ₀ = 180°
+   - Heteroatom-specific force constants:
+     - `ff = -0.90` for C-C bonds (moderate gauche preference)
+     - `ff = +0.70` for C-N bonds (slight anti preference)
+     - `ff = -2.00` for C-O bonds (strong gauche preference) ← **CH₃OCH₃**
+
+#### Current Performance
+
+**CH₃OCH₃ Results**:
+- **Before**: +0.000073 Eh (215% too large, too positive)
+- **After**: -0.000104 Eh (542% error, too negative) ⚠️
+- **Reference**: +0.000023 Eh
+- **Extra torsions generated**: 6 (n=1, ff=-2.00)
+
+**Physical Meaning**: Oxygen's large `-2.00` factor reflects lone pair interactions favoring gauche conformations
+
+#### Known Issues & TODO
+
+🔧 **Calibration Needed**:
+1. **Overcompensating**: Extra torsions too strong (sign flipped from + to -)
+2. **Possible causes**:
+   - ff=-2.00 oxygen factor too large
+   - Too many extra torsions generated (should only apply to specific quartets?)
+   - Missing ring/conjugation filters
+   - Different Fortran evaluation formula
+
+🔍 **Investigation Required**:
+- [ ] Compare extra torsion count: Curcuma (6) vs XTB 6.6.1 verbose output
+- [ ] Verify heteroatom factor selection logic (Central atoms O: should use -2.00)
+- [ ] Check if extra torsions should exclude ring systems
+- [ ] Verify n=1 energy evaluation matches Fortran
+
+📝 **Future Work**:
+- Empirically tune ff factors based on multiple test molecules
+- Add ring system filters (extra torsions should be acyclic only - already implemented)
+- Add conjugation detection (avoid extra torsions for π-systems)
 
 ---
 

@@ -244,15 +244,61 @@ double fbsmall = 1.0 - fbs1 * exp(-0.64 * (params.equilibrium_angle - pi)²);
    - Verify energy calculation formula in forcefieldthread.cpp:736-960
    - Test with simple molecule (H2O) where all values are known
 
-2. **Torsion Energy 215% Error** - Small absolute magnitude (7.4e-5 vs 2.3e-5 Eh) but 3× too large
-   - **Priority**: MEDIUM - small absolute error, low overall impact
-   - **Investigate**: Phase factors, force constant scaling in torsion calculation
+2. **Torsion Energy Calibration** (January 1, 2026) - 🔧 **Extra SP3-SP3 Torsions Implemented**
+   - **Status**: ✅ Implementation complete | ⚠️ **Overcompensating** (error -542%)
+   - **Before**: +0.000073 Eh (215% too large)
+   - **After**: -0.000104 Eh (542% error in opposite direction)
+   - **Reference**: +0.000023 Eh
+   - **Implementation**: `gfnff_torsions.cpp:1181-1392` - Extra n=1 torsions for sp3-sp3 bonds
+   - **Mechanism**: 6 extra torsions generated with ff=-2.00 (oxygen factor)
+   - **Next Steps**:
+     - [ ] Calibrate ff=-2.00 factor (too strong)
+     - [ ] Verify extra torsion count matches XTB 6.6.1 verbose output
+     - [ ] Check if extra torsions should only apply to specific quartet geometries
+     - [ ] Test with multiple molecules (ethane, methylamine) to verify heteroatom factors
 
 ### 🟡 Lower Priority TODOs
-- Phase 5B: Metal-specific fqq correction (2.5x factor)
-- Pi-system/amide detection for nitrogen dgam (enhancement, current EEQ already good)
-- Ring detection algorithm (for aromatic systems)
-- Fragment-constrained EEQ charges
+
+#### Topology-Specific Corrections (Not Yet Implemented)
+
+**Angle Bending Corrections**:
+- [ ] **Ring strain factors** - Small rings (3-, 4-membered) need reduced force constants
+- [ ] **Metal coordination** - feta metal correction factor (currently =1.0 for all)
+- [ ] **fijk refinement** (Phase 2b) - angl2 topology logic for neighbor type corrections
+
+**Torsion Corrections**:
+- [ ] **Ring torsions** - Different phase angles and barriers for cyclic vs acyclic
+- [ ] **Conjugation detection** - Increase barriers for π-conjugated systems
+- [ ] **Hyperconjugation** - Subtle barrier modulation (documented but not implemented)
+- [ ] **Extra torsion calibration** - Current ff=-2.00 (O) factor overcompensates
+
+**Charge (EEQ) Corrections**:
+- [ ] Phase 5B: Metal-specific fqq correction (2.5× factor in charge-dependent terms)
+- [ ] Pi-system/amide detection for nitrogen dgam (enhancement, current EEQ already good)
+- [ ] Fragment-constrained EEQ charges (for multi-fragment systems)
+
+**Dispersion Corrections**:
+- [ ] **Metal-specific C6 parameters** - Transition metals may need special handling
+- [ ] **Aromatic system detection** - Ring detection algorithm for enhanced dispersion
+
+#### Implementation Priority
+
+**CRITICAL** (blocks accuracy):
+1. Torsion calibration (extra sp3-sp3 factor tuning)
+2. Coulomb energy fix (currently 110% too large)
+3. Angle fijk refinement (Phase 2b - 25% error)
+
+**HIGH** (improves accuracy):
+4. Ring strain factors for angles
+5. Metal coordination corrections (feta, fqq)
+
+**MEDIUM** (niche cases):
+6. Conjugation detection for torsions
+7. Aromatic ring detection for dispersion
+
+**LOW** (refinements):
+8. Hyperconjugation effects
+9. Fragment-constrained EEQ
 
 ## Performance
 

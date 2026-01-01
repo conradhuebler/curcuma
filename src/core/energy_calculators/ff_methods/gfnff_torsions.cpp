@@ -404,6 +404,12 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     const double torsf_pi = 1.18;       // Pi bond scaling
     const double fcthr = 1.0e-3;        // Force constant threshold (Hartree)
 
+    // Extra sp3-sp3 torsion factors for gauche conformations
+    // Reference: gfnff_param.f90:795-797
+    const double torsf_extra_C = -0.90;  // Carbon sp3-sp3
+    const double torsf_extra_N =  0.70;  // Nitrogen sp3-sp3
+    const double torsf_extra_O = -2.00;  // Oxygen sp3-sp3 (strong gauche)
+
     // Bounds check
     if (z_i < 1 || z_i > 86 || z_j < 1 || z_j > 86 ||
         z_k < 1 || z_k > 86 || z_l < 1 || z_l > 86) {
@@ -1170,6 +1176,236 @@ json GFNFF::generateGFNFFTorsions() const
                 torsion_count++;
             }
         }
+    }
+
+    // ==========================================================================
+    // STEP 7B: Generate Extra SP3-SP3 Torsions (n=1 for Gauche Conformations)
+    // ==========================================================================
+    // Reference: gfnff_ini.f90:1952-2002
+    // "extra rot=1 torsion potential for sp3-sp3 to get gauche conf energies well"
+    //
+    // Physical meaning: Fine-tune gauche vs anti energy differences for sp3-sp3 bonds
+    // These torsions use a DIFFERENT formula and contribute separately from primary n=3 torsions
+
+    int extra_torsion_count = 0;
+    const double qfacTOR = 12.0;  // From gfnff_param.f90:742
+
+    // Extra sp3-sp3 torsion factors for gauche conformations
+    // Reference: gfnff_param.f90:795-797
+    const double torsf_extra_C = -0.90;  // Carbon sp3-sp3
+    const double torsf_extra_N =  0.70;  // Nitrogen sp3-sp3
+    const double torsf_extra_O = -2.00;  // Oxygen sp3-sp3 (strong gauche)
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format(
+            "EXTRA TORSION DEBUG: Checking {} primary torsions for sp3-sp3 candidates",
+            generated_torsions.size()
+        ));
+    }
+
+    for (const auto& tors_array : generated_torsions) {
+        int i = tors_array[0];
+        int j = tors_array[1];
+        int k = tors_array[2];
+        int l = tors_array[3];
+
+        // ======================================================================
+        // Condition 1: Central atoms must be sp3, outer atoms sp3 or H
+        // ======================================================================
+        // Reference: gfnff_ini.f90:1953-1954
+        // sp3kl = hyb(kk) .eq. 3.and.hyb(ll) .eq. 3  (outer atoms)
+        // sp3ij = ...                                 (central atoms)
+        // Fortran uses: ll-ii-jj-kk ordering
+        // Curcuma uses: i-j-k-l ordering (from generateGFNFFTorsions)
+        //
+        // NOTE: Hydrogen atoms (Z=1) have hyb=0 in Curcuma but are acceptable
+        // as outer atoms for extra torsions
+
+        bool sp3_ij = (hybridization[j] == 3) && (hybridization[k] == 3);  // Central atoms MUST be sp3
+
+        // Outer atoms: sp3 OR hydrogen
+        bool sp3_i = (hybridization[i] == 3) || (m_atoms[i] == 1);
+        bool sp3_l = (hybridization[l] == 3) || (m_atoms[l] == 1);
+        bool sp3_kl = sp3_i && sp3_l;
+
+        if (!sp3_ij || !sp3_kl) {
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format(
+                    "  Torsion {}-{}-{}-{}: Not sp3-sp3 (hyb={},{},{},{}, Z={},{},{},{})",
+                    i, j, k, l, hybridization[i], hybridization[j], hybridization[k], hybridization[l],
+                    m_atoms[i], m_atoms[j], m_atoms[k], m_atoms[l]
+                ));
+            }
+            continue;
+        }
+
+        // ======================================================================
+        // Condition 2: Central bond (j-k) must be acyclic
+        // ======================================================================
+        int ring_size;
+        if (areAtomsInSameRing(j, k, ring_size)) {
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format(
+                    "  Torsion {}-{}-{}-{}: In ring (size={})", i, j, k, l, ring_size
+                ));
+            }
+            continue;  // Skip ring torsions
+        }
+
+        // ======================================================================
+        // Condition 3: Bounds check for atomic numbers
+        // ======================================================================
+        if (m_atoms[i] < 1 || m_atoms[i] > 86 ||
+            m_atoms[j] < 1 || m_atoms[j] > 86 ||
+            m_atoms[k] < 1 || m_atoms[k] > 86 ||
+            m_atoms[l] < 1 || m_atoms[l] > 86) {
+            continue;  // Skip invalid atomic numbers
+        }
+
+        // ======================================================================
+        // Select heteroatom-specific force constant
+        // ======================================================================
+        // Reference: gfnff_ini.f90:1961-1963
+        // Priority: O > N > C (if both O and N, O wins)
+
+        double ff = torsf_extra_C;  // Default: Carbon
+
+        // Check CENTRAL atoms only (j and k)
+        if (m_atoms[j] == 7 || m_atoms[k] == 7) {
+            ff = torsf_extra_N;  // Nitrogen
+        }
+        if (m_atoms[j] == 8 || m_atoms[k] == 8) {
+            ff = torsf_extra_O;  // Oxygen (overrides nitrogen)
+        }
+
+        // ======================================================================
+        // Calculate barrier height (DIFFERENT formula - no f1/f2!)
+        // ======================================================================
+        // Reference: gfnff_ini.f90:1970
+        // vtors(2) = ff * fij * fkl * fqq
+
+        // Calculate fij (central bond contribution)
+        double fij = tors_angewChem2020[m_atoms[j] - 1] * tors_angewChem2020[m_atoms[k] - 1];
+
+        // Check threshold (like primary torsions)
+        const double fcthr = 1.0e-3;
+        if (fij < fcthr || tors_angewChem2020[m_atoms[j] - 1] < 0.0 || tors_angewChem2020[m_atoms[k] - 1] < 0.0) {
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format(
+                    "  Torsion {}-{}-{}-{}: fij threshold (fij={:.6f}, tors[{}]={:.6f}, tors[{}]={:.6f})",
+                    i, j, k, l, fij, m_atoms[j], tors_angewChem2020[m_atoms[j] - 1],
+                    m_atoms[k], tors_angewChem2020[m_atoms[k] - 1]
+                ));
+            }
+            continue;  // Skip if fij too small or negative
+        }
+
+        // Calculate fkl (outer atom contribution)
+        double fkl = tors2_angewChem2020[m_atoms[i] - 1] * tors2_angewChem2020[m_atoms[l] - 1];
+
+        // Check threshold
+        if (fkl < fcthr || tors2_angewChem2020[m_atoms[i] - 1] < 0.0 || tors2_angewChem2020[m_atoms[l] - 1] < 0.0) {
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format(
+                    "  Torsion {}-{}-{}-{}: fkl threshold (fkl={:.6f}, tors2[{}]={:.6f}, tors2[{}]={:.6f})",
+                    i, j, k, l, fkl, m_atoms[i], tors2_angewChem2020[m_atoms[i] - 1],
+                    m_atoms[l], tors2_angewChem2020[m_atoms[l] - 1]
+                ));
+            }
+            continue;  // Skip if fkl too small or negative
+        }
+
+        // Calculate fqq (charge correction)
+        double qa_j = (j < m_charges.rows()) ? m_charges(j) : 0.0;
+        double qa_k = (k < m_charges.rows()) ? m_charges(k) : 0.0;
+        double fqq = 1.0 + std::abs(qa_j * qa_k) * qfacTOR;
+
+        // Final barrier (DIFFERENT from primary torsion formula!)
+        double barrier = ff * fij * fkl * fqq;
+
+        // Validate barrier is not NaN or inf
+        if (std::isnan(barrier) || std::isinf(barrier)) {
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::warn(fmt::format(
+                    "  Warning: Invalid barrier for torsion {}-{}-{}-{}, skipping (barrier={}, ff={}, fij={}, fkl={}, fqq={})",
+                    i, j, k, l, barrier, ff, fij, fkl, fqq
+                ));
+            }
+            continue;
+        }
+
+        // Check final barrier threshold
+        if (std::abs(barrier) < fcthr) {
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format(
+                    "  Torsion {}-{}-{}-{}: barrier too small (barrier={:.6f}, threshold={:.6f})",
+                    i, j, k, l, barrier, fcthr
+                ));
+            }
+            continue;  // Skip negligible barriers
+        }
+
+        // SUCCESS - this torsion will be added!
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format(
+                "  ✓ Torsion {}-{}-{}-{}: ACCEPTED (barrier={:.6f} Eh, ff={:.2f})",
+                i, j, k, l, barrier, ff
+            ));
+        }
+
+        // ======================================================================
+        // Store extra torsion with n=1 periodicity
+        // ======================================================================
+        json extra_torsion;
+        extra_torsion["type"] = 3;           // GFN-FF type (same as primary)
+        extra_torsion["i"] = i;
+        extra_torsion["j"] = j;
+        extra_torsion["k"] = k;
+        extra_torsion["l"] = l;
+        extra_torsion["n"] = 1;              // Periodicity = 1 (NOT 3!)
+        extra_torsion["V"] = barrier;        // Barrier in Hartree (same as primary torsions)
+        extra_torsion["phi0"] = M_PI;        // Phase = 180° (pi radians)
+        extra_torsion["is_improper"] = false;
+
+        // Store current dihedral angle
+        double phi = calculateDihedralAngle(i, j, k, l);
+
+        // Validate phi is not NaN or inf
+        if (std::isnan(phi) || std::isinf(phi)) {
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::warn(fmt::format(
+                    "  Warning: Invalid phi angle for torsion {}-{}-{}-{}, skipping",
+                    i, j, k, l
+                ));
+            }
+            continue;
+        }
+
+        extra_torsion["current_angle"] = phi;
+
+        torsions.push_back(extra_torsion);
+        extra_torsion_count++;
+
+        // ======================================================================
+        // Debug output
+        // ======================================================================
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format(
+                "EXTRA SP3-SP3 TORSION: {}-{}-{}-{} (Z={},{},{},{})",
+                i, j, k, l, m_atoms[i], m_atoms[j], m_atoms[k], m_atoms[l]
+            ));
+            CurcumaLogger::info(fmt::format(
+                "  ff={:.2f} (heteroatom factor), barrier={:.6f} Eh (n=1)",
+                ff, barrier
+            ));
+        }
+    }
+
+    if (extra_torsion_count > 0) {
+        CurcumaLogger::info(fmt::format(
+            "GFN-FF detected {} extra sp3-sp3 torsions (n=1 gauche terms)",
+            extra_torsion_count
+        ));
     }
 
     // ==========================================================================

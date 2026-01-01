@@ -507,6 +507,7 @@ void ForceField::setDihedrals(const json& dihedrals)
     }
     m_dihedrals.clear();
     for (int i = 0; i < dihedrals.size(); ++i) {
+        //CRITICAL: Does it work for GFNFF dihedrals and its different parameter types
         json dihedral = dihedrals[i].get<json>();
         Dihedral d;
         d.type = dihedral["type"];

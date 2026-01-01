@@ -790,7 +790,7 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
             if (std::abs(qa_j) < 1.0 && std::abs(qa_i) < 1.0 && std::abs(qa_k) < 1.0) {
                 double charge_product = qa_j * qa_i + qa_j * qa_k;
                 fqq = 1.0 - charge_product * qfacBEN;
-
+                //CRITICAL: Implement for metal cases
                 // TODO Phase 5B (LOW PRIORITY): Metal case uses 2.5x stronger correction
                 // Requires is_metal[] to be passed to threads
             }
@@ -848,6 +848,7 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
         // Reference: gfnff_param.f90:381-404 (covalentRadD3 array)
         // Format: Angström values pre-converted to Bohr with factor aatoau * 4.0 / 3.0
         // where aatoau = 1.8897261246257702 (Angström to Bohr)
+        // CRITICAL -> why is this here and not in the parameter generator or some header file, do we need it any ways?
         static const std::vector<double> gfnff_d3_cov_radii_bohr = {
             0.32*1.88972612462*4.0/3.0, 0.46*1.88972612462*4.0/3.0,  // H,He
             1.20*1.88972612462*4.0/3.0, 0.94*1.88972612462*4.0/3.0, 0.77*1.88972612462*4.0/3.0, 0.75*1.88972612462*4.0/3.0, 0.71*1.88972612462*4.0/3.0, 0.63*1.88972612462*4.0/3.0, 0.64*1.88972612462*4.0/3.0, 0.67*1.88972612462*4.0/3.0,  // Li-Ne
@@ -1070,6 +1071,7 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         m_dihedral_energy += energy * m_dihedral_scaling;
 
         if (m_calculate_gradient) {
+            //CRITICAL: Complete torsion gradient with damping terms
             // Gradient of energy w.r.t. angle (simplified - damping gradient omitted)
             // Full implementation would need ∂damp/∂r terms (gfnff_engrad.F90:1192-1198)
             // Claude Generated (Dec 31, 2025): Corrected gradient with + π term
