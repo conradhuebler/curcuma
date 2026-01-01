@@ -1466,10 +1466,12 @@ json GFNFF::generateGFNFFTorsions() const
     }
 
     if (extra_torsion_count > 0) {
-        CurcumaLogger::info(fmt::format(
-            "GFN-FF detected {} extra sp3-sp3 torsions (n=1 gauche terms)",
-            extra_torsion_count
-        ));
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format(
+                "GFN-FF detected {} extra sp3-sp3 torsions (n=1 gauche terms)",
+                extra_torsion_count
+            ));
+        }
     }
 
     // ==========================================================================
@@ -1478,7 +1480,16 @@ json GFNFF::generateGFNFFTorsions() const
     if (torsion_count == 0) {
         CurcumaLogger::warn("GFN-FF: No torsions detected (molecule may be too small or linear)");
     } else {
-        CurcumaLogger::info("GFN-FF detected " + std::to_string(torsion_count) + " torsions");
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("GFN-FF detected " + std::to_string(torsion_count) + " torsions");
+        }
+
+        // Claude Generated (Jan 2, 2026): Verbosity 2 output for torsion summary
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            int primary_count = torsion_count;
+            CurcumaLogger::result(fmt::format("GFN-FF torsions: {} primary (n=2,3), {} extra sp3-sp3 (n=1)",
+                                               primary_count, extra_torsion_count));
+        }
 
         // Debug output for analysis
         if (CurcumaLogger::get_verbosity() >= 3) {

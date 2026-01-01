@@ -1100,11 +1100,11 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         }
     }
 
-    // Claude Generated (Jan 2, 2026): Add primary torsion energy to total and output debug
+    // Claude Generated (Jan 2, 2026): Add primary torsion energy to total and output at verbosity 2
     m_dihedral_energy += primary_torsion_energy;
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("Primary torsions: {} terms, energy = {:.6e} Eh",
-                                         m_gfnff_dihedrals.size(), primary_torsion_energy));
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::result(fmt::format("Primary torsions: {} terms, energy = {:.6e} Eh",
+                                           m_gfnff_dihedrals.size(), primary_torsion_energy));
     }
 }
 
@@ -1195,12 +1195,12 @@ void ForceFieldThread::CalculateGFNFFExtraTorsionContribution()
         }
     }
 
-    // Claude Generated (Jan 2, 2026): Add extra torsion energy to total and output debug
+    // Claude Generated (Jan 2, 2026): Add extra torsion energy to total and output at verbosity 2
     m_dihedral_energy += extra_torsion_energy;
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("Extra torsions: {} terms, energy = {:.6e} Eh",
-                                         m_gfnff_extra_torsions.size(), extra_torsion_energy));
-        CurcumaLogger::info(fmt::format("Total dihedral energy: {:.6e} Eh", m_dihedral_energy));
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::result(fmt::format("Extra sp3-sp3 torsions: {} terms, energy = {:.6e} Eh",
+                                           m_gfnff_extra_torsions.size(), extra_torsion_energy));
+        CurcumaLogger::result(fmt::format("Total dihedral energy: {:.6e} Eh (primary + extra)", m_dihedral_energy));
     }
 }
 
