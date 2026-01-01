@@ -173,7 +173,8 @@ private:
     int m_gradient_type = 1;
     std::vector<Bond> m_bonds;
     std::vector<Angle> m_angles;
-    std::vector<Dihedral> m_dihedrals;
+    std::vector<Dihedral> m_dihedrals;        // Primary torsions (n=3, n=2, etc.)
+    std::vector<Dihedral> m_extra_dihedrals;   // Extra sp3-sp3 gauche torsions (n=1) - Claude Generated (Jan 2, 2026)
     std::vector<Inversion> m_inversions;
     std::vector<vdW> m_vdWs;
     std::vector<EQ> m_EQs;

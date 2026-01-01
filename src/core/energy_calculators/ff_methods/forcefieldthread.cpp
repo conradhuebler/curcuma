@@ -99,6 +99,7 @@ int ForceFieldThread::execute()
         CalculateGFNFFBondContribution();
         CalculateGFNFFAngleContribution();
         CalculateGFNFFDihedralContribution();
+        CalculateGFNFFExtraTorsionContribution();  // Claude Generated (Jan 2, 2026): Extra sp3-sp3 gauche torsions
         CalculateGFNFFInversionContribution();
 
         // GFN-FF non-bonded pairwise parallelizable terms (Phase 4)
@@ -245,6 +246,12 @@ void ForceFieldThread::addGFNFFAngle(const Angle& angles)
 void ForceFieldThread::addGFNFFDihedral(const Dihedral& dihedrals)
 {
     m_gfnff_dihedrals.push_back(dihedrals);
+}
+
+// Claude Generated (Jan 2, 2026): Extra sp3-sp3 gauche torsions separated from primary torsions
+void ForceFieldThread::addGFNFFExtraTorsion(const Dihedral& extra_torsion)
+{
+    m_gfnff_extra_torsions.push_back(extra_torsion);
 }
 
 void ForceFieldThread::addGFNFFInversion(const Inversion& inversions)
@@ -964,6 +971,8 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
     //   rr = (r²/rcut)²
     //   damp = 1 / (1 + rr)
 
+    double primary_torsion_energy = 0.0;  // Claude Generated (Jan 2, 2026): Track primary energy
+
     for (int index = 0; index < m_gfnff_dihedrals.size(); ++index) {
         const auto& dihedral = m_gfnff_dihedrals[index];
 
@@ -1029,20 +1038,22 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         // Energy calculation
         // =====================================================================
         // Claude Generated (Dec 31, 2025): Torsion energy calculation
-        // VERIFIED: XTB formula includes + π term in cosine argument
         // Reference: XTB gfnff_eg.f90:1108-1111
-        //   Formula: E = V × (1 + cos(n×(φ - φ₀) + π)) × damp
-        //   Equivalent: E = V × (1 - cos(n×(φ - φ₀))) × damp
+        //   Primary formula: E = V × (1 + cos(n×(φ - φ₀) + π)) × damp
+        //   Extra formula: E = V × (1 + cos(n×(φ - φ₀))) × damp (NO +π)
         // Note: The + π term inverts the cosine (cos(x+π) = -cos(x))
         double V = dihedral.V;  // Force constant in Hartree (from gfnff_torsions.cpp)
         double n = dihedral.n;  // Periodicity
         double phi0 = dihedral.phi0;  // Phase shift
 
-        // XTB formula with + π correction (fixed +211% error)
+        // Claude Generated (Jan 2, 2026): Primary torsions ALWAYS use +π term
+        // (Extra torsions are calculated separately in CalculateGFNFFExtraTorsionContribution)
         double dphi1 = phi - phi0;  // Angle deviation from reference
-        double c1 = n * dphi1 + M_PI;  // XTB: n×(φ - φ₀) + π
+        double c1 = n * dphi1 + M_PI;  // XTB formula: always add +π for primary torsions
         double et = V * (1 + cos(c1));
         double energy = et * damp;
+
+        primary_torsion_energy += energy * m_dihedral_scaling;  // Claude Generated (Jan 2, 2026): Accumulate primary
 
         // Torsion geometry analysis (December 2025) - First torsion only
         static bool first_torsion_printed = false;
@@ -1068,7 +1079,8 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
             first_torsion_printed = true;
         }
 
-        m_dihedral_energy += energy * m_dihedral_scaling;
+        // NO accumulation here - already done above at line 1056
+        // m_dihedral_energy += energy * m_dihedral_scaling;  // Claude Generated (Jan 2, 2026): REMOVED - moved above
 
         if (m_calculate_gradient) {
             //CRITICAL: Complete torsion gradient with damping terms
@@ -1086,6 +1098,109 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
             // term2 = et * ∂damp_jk/∂r_jk * r_jk
             // term3 = et * ∂damp_kl/∂r_kl * r_kl
         }
+    }
+
+    // Claude Generated (Jan 2, 2026): Add primary torsion energy to total and output debug
+    m_dihedral_energy += primary_torsion_energy;
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("Primary torsions: {} terms, energy = {:.6e} Eh",
+                                         m_gfnff_dihedrals.size(), primary_torsion_energy));
+    }
+}
+
+// Claude Generated (Jan 2, 2026): Extra sp3-sp3 gauche torsions (separate from primary torsions)
+void ForceFieldThread::CalculateGFNFFExtraTorsionContribution()
+{
+    // GFN-FF extra torsion with distance-based damping
+    // Same calculation as primary torsions BUT:
+    // - Periodicity n=1 (gauche effect)
+    // - NO +π term in energy formula
+    // - Separate energy accumulation to prevent double-counting
+
+    double extra_torsion_energy = 0.0;  // Claude Generated (Jan 2, 2026): Track extra energy
+
+    for (int index = 0; index < m_gfnff_extra_torsions.size(); ++index) {
+        const auto& torsion = m_gfnff_extra_torsions[index];
+
+        // Extract atom positions as Eigen::Vector3d
+        Eigen::Vector3d r_i = m_geometry.row(torsion.i).head<3>();
+        Eigen::Vector3d r_j = m_geometry.row(torsion.j).head<3>();
+        Eigen::Vector3d r_k = m_geometry.row(torsion.k).head<3>();
+        Eigen::Vector3d r_l = m_geometry.row(torsion.l).head<3>();
+
+        // Calculate dihedral angle
+        Matrix derivate;
+        double phi = GFNFF_Geometry::calculateDihedralAngle(r_i, r_j, r_k, r_l, derivate, m_calculate_gradient);
+
+        // Get atomic numbers
+        int Z_i = m_atom_types[torsion.i];
+        int Z_j = m_atom_types[torsion.j];
+        int Z_k = m_atom_types[torsion.k];
+        int Z_l = m_atom_types[torsion.l];
+
+        // Bounds check
+        if (Z_i < 1 || Z_i > 86 || Z_j < 1 || Z_j > 86 ||
+            Z_k < 1 || Z_k > 86 || Z_l < 1 || Z_l > 86) {
+            continue;
+        }
+
+        // Calculate squared distances
+        Eigen::Vector3d r_ij = r_j - r_i;
+        Eigen::Vector3d r_jk = r_k - r_j;
+        Eigen::Vector3d r_kl = r_l - r_k;
+
+        double rij2 = r_ij.squaredNorm();
+        double rjk2 = r_jk.squaredNorm();
+        double rkl2 = r_kl.squaredNorm();
+
+        // Damping function
+        auto calculate_damping = [](double r2, double rcov_i, double rcov_j) -> double {
+            const double atcutt = GFNFFParameters::atcutt;
+            double rcut = atcutt * (rcov_i + rcov_j) * (rcov_i + rcov_j);
+            double rr = (r2 / rcut) * (r2 / rcut);
+            return 1.0 / (1.0 + rr);
+        };
+
+        // Get covalent radii
+        double rcov_i = GFNFFParameters::rcov_bohr[Z_i - 1];
+        double rcov_j = GFNFFParameters::rcov_bohr[Z_j - 1];
+        double rcov_k = GFNFFParameters::rcov_bohr[Z_k - 1];
+        double rcov_l = GFNFFParameters::rcov_bohr[Z_l - 1];
+
+        // Calculate damping factors
+        double damp_ij = calculate_damping(rij2, rcov_i, rcov_j);
+        double damp_jk = calculate_damping(rjk2, rcov_j, rcov_k);
+        double damp_kl = calculate_damping(rkl2, rcov_k, rcov_l);
+        double damp = damp_ij * damp_jk * damp_kl;
+
+        // Energy calculation for EXTRA torsions (NO +π term)
+        double V = torsion.V;
+        double n = torsion.n;  // Should be 1 for extra torsions
+        double phi0 = torsion.phi0;
+
+        double dphi1 = phi - phi0;
+        double c1 = n * dphi1;  // NO +π term for extra torsions
+        double et = V * (1 + cos(c1));
+        double energy = et * damp;
+
+        // Accumulate extra torsion energy separately
+        extra_torsion_energy += energy * m_dihedral_scaling;
+
+        if (m_calculate_gradient) {
+            double dEdphi = -V * n * sin(c1) * damp * m_dihedral_scaling;
+            m_gradient.row(torsion.i) += dEdphi * derivate.row(0);
+            m_gradient.row(torsion.j) += dEdphi * derivate.row(1);
+            m_gradient.row(torsion.k) += dEdphi * derivate.row(2);
+            m_gradient.row(torsion.l) += dEdphi * derivate.row(3);
+        }
+    }
+
+    // Claude Generated (Jan 2, 2026): Add extra torsion energy to total and output debug
+    m_dihedral_energy += extra_torsion_energy;
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("Extra torsions: {} terms, energy = {:.6e} Eh",
+                                         m_gfnff_extra_torsions.size(), extra_torsion_energy));
+        CurcumaLogger::info(fmt::format("Total dihedral energy: {:.6e} Eh", m_dihedral_energy));
     }
 }
 

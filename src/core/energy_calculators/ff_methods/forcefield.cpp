@@ -506,6 +506,8 @@ void ForceField::setDihedrals(const json& dihedrals)
         CurcumaLogger::param("dihedrals_processing", fmt::format("Processing {} dihedral parameters", dihedrals.size()));
     }
     m_dihedrals.clear();
+    m_extra_dihedrals.clear();  // Claude Generated (Jan 2, 2026): Clear extra torsions
+
     for (int i = 0; i < dihedrals.size(); ++i) {
         //CRITICAL: Does it work for GFNFF dihedrals and its different parameter types
         json dihedral = dihedrals[i].get<json>();
@@ -519,11 +521,18 @@ void ForceField::setDihedrals(const json& dihedrals)
         d.V = dihedral["V"];
         d.n = dihedral["n"];
         d.phi0 = dihedral["phi0"];
-        m_dihedrals.push_back(d);
+        d.is_extra = dihedral.value("is_extra", false);  // Claude Generated (Jan 1, 2026): Read extra torsion flag
+
+        // Claude Generated (Jan 2, 2026): Separate primary and extra torsions
+        if (d.is_extra) {
+            m_extra_dihedrals.push_back(d);
+        } else {
+            m_dihedrals.push_back(d);
+        }
     }
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::param("dihedrals_processed", fmt::format("{}", m_dihedrals.size()));
+        CurcumaLogger::param("dihedrals_processed", fmt::format("{} primary, {} extra", m_dihedrals.size(), m_extra_dihedrals.size()));
     }
 }
 
@@ -948,6 +957,13 @@ void ForceField::AutoRanges()
                 thread->addGFNFFDihedral(m_dihedrals[j]);
             } else {
                 thread->addDihedral(m_dihedrals[j]);
+            }
+        }
+
+        // Claude Generated (Jan 2, 2026): Distribute extra sp3-sp3 gauche torsions
+        for (int j = int(i * m_extra_dihedrals.size() / double(free_threads)); j < int((i + 1) * m_extra_dihedrals.size() / double(free_threads)); ++j) {
+            if (m_method == "gfnff" || m_method == "cgfnff") {
+                thread->addGFNFFExtraTorsion(m_extra_dihedrals[j]);
             }
         }
 

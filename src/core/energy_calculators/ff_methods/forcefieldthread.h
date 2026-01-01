@@ -64,6 +64,7 @@ struct Dihedral {
     int type = 1; // 1 = UFF, 2 = QMDFF
     int i = 0, j = 0, k = 0, l = 0;
     double V = 0, n = 0, phi0 = 0;
+    bool is_extra = false;  // Claude Generated (Jan 1, 2026): GFN-FF extra sp3-sp3 torsion flag
 };
 
 struct Inversion {
@@ -275,6 +276,7 @@ public:
     void addGFNFFBond(const Bond& bonds);
     void addGFNFFAngle(const Angle& angles);
     void addGFNFFDihedral(const Dihedral& dihedrals);
+    void addGFNFFExtraTorsion(const Dihedral& extra_torsion);  // Claude Generated (Jan 2, 2026): Extra sp3-sp3 gauche torsions
     void addGFNFFInversion(const Inversion& inversions);
     void addGFNFFvdW(const vdW& vdWs);
 
@@ -378,6 +380,7 @@ private:
     void CalculateGFNFFBondContribution();
     void CalculateGFNFFAngleContribution();
     void CalculateGFNFFDihedralContribution();
+    void CalculateGFNFFExtraTorsionContribution();  // Claude Generated (Jan 2, 2026): Extra sp3-sp3 gauche torsions
     void CalculateGFNFFInversionContribution();
     void CalculateGFNFFvdWContribution();
 
@@ -416,7 +419,8 @@ private:
 
     std::vector<Bond> m_gfnff_bonds;
     std::vector<Angle> m_gfnff_angles;
-    std::vector<Dihedral> m_gfnff_dihedrals;
+    std::vector<Dihedral> m_gfnff_dihedrals;        // Primary torsions (n=3, n=2, etc.)
+    std::vector<Dihedral> m_gfnff_extra_torsions;   // Extra sp3-sp3 gauche torsions (n=1) - Claude Generated (Jan 2, 2026)
     std::vector<Inversion> m_gfnff_inversions;
     std::vector<vdW> m_gfnff_vdWs;  // Legacy (will be replaced by pairwise terms below)
 

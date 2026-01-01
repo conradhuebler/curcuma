@@ -537,23 +537,77 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     }
 
     // ---------------------------------------------------------------------------
-    // (G) Ring corrections (NEW - from reference: gfnff_ini.f90:1772-1775)
+    // (G) Ring-specific torsion corrections (Claude Updated - January 2026)
     // ---------------------------------------------------------------------------
-    // Reduce torsion barriers in small rings (strain effects)
-    if (in_ring && ring_size >= 3 && ring_size <= 6) {
-        // Ring strain factor: smaller rings → smaller torsion barriers
-        double ring_factor = 1.0;
-        switch (ring_size) {
-            case 3: ring_factor = 0.1; break;  // 3-membered rings: 90% reduction
-            case 4: ring_factor = 0.3; break;  // 4-membered rings: 70% reduction
-            case 5: ring_factor = 0.6; break;  // 5-membered rings: 40% reduction
-            case 6: ring_factor = 0.8; break;  // 6-membered rings: 20% reduction
-        }
-        fij *= ring_factor;
+    // Reference: XTB gfnff_ini.f90:1814-1835, gfnff_param.f90:787-790
+    //
+    // Educational Documentation:
+    // ==========================
+    // Ring torsions have COMPLETELY DIFFERENT conformational preferences than acyclic bonds!
+    //
+    // Physical basis:
+    // - 3-ring (cyclopropane): Nearly planar, highly strained (n=1, φ₀=0°, barrier=FR3)
+    // - 4-ring (cyclobutane): Butterfly puckering (n=6, φ₀=30°, barrier=FR4)
+    // - 5-ring (cyclopentane): Envelope/twist puckering (n=6, φ₀=30°, barrier=FR5)
+    // - 6-ring (cyclohexane): STRONG chair/boat preference (n=3, φ₀=60°, barrier=FR6)
+    //
+    // These override ALL acyclic parameters when all 4 atoms are in the same ring!
+    //
+    // Literature: Spicher, S.; Grimme, S. Angew. Chem. Int. Ed. 2020
+    // ---------------------------------------------------------------------------
 
-        // Ring phase adjustment: planar equilibria in small rings
-        if (ring_size <= 4) {
-            params.phase_shift = 0.0;  // Planar for very small rings
+    using namespace GFNFFParameters;
+
+    if (in_ring && ring_size >= 3 && ring_size <= 6) {
+        // CRITICAL: Check if all 4 atoms are in the SAME ring (not just bonded atoms)
+        // This matches Fortran check: ringl == rings4 (lines 1819, 1824, 1828)
+        // We need to verify that the entire i-j-k-l quartet is in this ring
+
+        // For now, assume in_ring means central bond j-k is in ring
+        // TODO Phase 2: Add quartet ring membership check (requires path finding)
+        bool all_in_same_ring = in_ring;  // Simplified assumption
+
+        // Additional check: Skip if pi-conjugated system (notpicon = false in Fortran)
+        // Pi bonds have different torsional preferences even in rings
+        bool notpicon = !(hyb_j == 2 && hyb_k == 2);  // NOT sp2-sp2 (conjugated)
+
+        if (all_in_same_ring && notpicon) {
+            // Override periodicity, phase, and barrier based on ring size
+            switch (ring_size) {
+                case 3:
+                    // 3-ring: Nearly planar (cyclopropane)
+                    params.periodicity = 1;
+                    params.phase_shift = 0.0;     // Planar equilibrium (φ₀=0°)
+                    f1 = FR3;                      // 0.3 (flexible, small barrier)
+                    break;
+
+                case 4:
+                    // 4-ring: Puckered (cyclobutane butterfly)
+                    params.periodicity = 6;
+                    params.phase_shift = 30.0 * M_PI / 180.0;  // φ₀=30° puckering
+                    f1 = FR4;                      // 1.0 (moderate barrier)
+                    break;
+
+                case 5:
+                    // 5-ring: Envelope conformation (cyclopentane)
+                    params.periodicity = 6;
+                    params.phase_shift = 30.0 * M_PI / 180.0;  // φ₀=30° envelope
+                    f1 = FR5;                      // 1.5 (intermediate barrier)
+                    break;
+
+                case 6:
+                    // 6-ring: Chair preference (cyclohexane)
+                    params.periodicity = 3;
+                    params.phase_shift = 60.0 * M_PI / 180.0;  // φ₀=60° chair
+                    f1 = FR6;                      // 5.7 (STRONG chair/boat barrier!)
+                    break;
+            }
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format(
+                    "  Ring torsion override: {}-ring → n={}, φ₀={:.1f}°, f1={:.2f}",
+                    ring_size, params.periodicity, params.phase_shift * 180.0 / M_PI, f1));
+            }
         }
     }
 
@@ -1192,9 +1246,18 @@ json GFNFF::generateGFNFFTorsions() const
 
     // Extra sp3-sp3 torsion factors for gauche conformations
     // Reference: gfnff_param.f90:795-797
-    const double torsf_extra_C = -0.90;  // Carbon sp3-sp3
-    const double torsf_extra_N =  0.70;  // Nitrogen sp3-sp3
-    const double torsf_extra_O = -2.00;  // Oxygen sp3-sp3 (strong gauche)
+    // NOTE (Jan 2, 2026): Original GFN-FF parametrization values restored
+    //
+    // HISTORICAL NOTE: If torsion energy shows wrong sign/magnitude in future:
+    //   The fix is NOT to change these factors, but to ensure proper architectural separation:
+    //   1. Primary torsions (n=3, n=2) calculated in CalculateGFNFFDihedralContribution()
+    //   2. Extra torsions (n=1) calculated in CalculateGFNFFExtraTorsionContribution()
+    //   3. Both stored in separate vectors (m_gfnff_dihedrals vs m_gfnff_extra_torsions)
+    //   4. Energy accumulated separately to prevent double-counting
+    //   The root cause was mixing both in same vector, NOT wrong force constants.
+    const double torsf_extra_C = -0.90;  // Carbon sp3-sp3 (GFN-FF original)
+    const double torsf_extra_N =  0.70;  // Nitrogen sp3-sp3 (GFN-FF original)
+    const double torsf_extra_O = -2.00;  // Oxygen sp3-sp3 (GFN-FF original)
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info(fmt::format(
@@ -1366,6 +1429,7 @@ json GFNFF::generateGFNFFTorsions() const
         extra_torsion["V"] = barrier;        // Barrier in Hartree (same as primary torsions)
         extra_torsion["phi0"] = M_PI;        // Phase = 180° (pi radians)
         extra_torsion["is_improper"] = false;
+        extra_torsion["is_extra"] = true;    // Claude Generated (Jan 1, 2026): Mark as extra torsion
 
         // Store current dihedral angle
         double phi = calculateDihedralAngle(i, j, k, l);
