@@ -1008,9 +1008,13 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         Eigen::Vector3d r_jk = r_k - r_j;
         Eigen::Vector3d r_kl = r_l - r_k;
 
-        double rij2 = r_ij.squaredNorm();  // r_ij² in Bohr²
-        double rjk2 = r_jk.squaredNorm();  // r_jk² in Bohr²
-        double rkl2 = r_kl.squaredNorm();  // r_kl² in Bohr²
+        // Claude Generated (Jan 2, 2026): NO unit conversion needed!
+        // For GFN-FF: m_geometry is ALREADY in Bohr (converted by gfnff_method.cpp:135)
+        // For UFF/QMDFF: m_geometry is in Angstrom, but they use rcov in Angstrom too
+        // This is method-dependent - GFN-FF passes Bohr geometry to ForceField
+        double rij2 = r_ij.squaredNorm();  // in Bohr² for GFN-FF, Angstrom² for UFF/QMDFF
+        double rjk2 = r_jk.squaredNorm();  // in Bohr² for GFN-FF, Angstrom² for UFF/QMDFF
+        double rkl2 = r_kl.squaredNorm();  // in Bohr² for GFN-FF, Angstrom² for UFF/QMDFF
 
         // Damping function (gfnff_engrad.F90:1346-1355, gfnffdampt subroutine)
         auto calculate_damping = [](double r2, double rcov_i, double rcov_j) -> double {
@@ -1173,13 +1177,17 @@ void ForceFieldThread::CalculateGFNFFExtraTorsionContribution()
         double damp_kl = calculate_damping(rkl2, rcov_k, rcov_l);
         double damp = damp_ij * damp_jk * damp_kl;
 
-        // Energy calculation for EXTRA torsions (NO +π term)
+        // Energy calculation for EXTRA torsions
+        // Reference: Fortran gfnff_engrad.F90:1268-1272
+        // CRITICAL: ALL torsions (primary and extra) use c1 = n*(phi - phi0) + π
+        // Formula: E = V * (1 + cos(n*(φ - φ₀) + π)) * damp
         double V = torsion.V;
         double n = torsion.n;  // Should be 1 for extra torsions
         double phi0 = torsion.phi0;
 
         double dphi1 = phi - phi0;
-        double c1 = n * dphi1;  // NO +π term for extra torsions
+        const double pi = M_PI;
+        double c1 = n * dphi1 + pi;  // Claude Generated (Jan 2, 2026): Added missing +π term (matches Fortran line 1269)
         double et = V * (1 + cos(c1));
         double energy = et * damp;
 
@@ -1187,6 +1195,7 @@ void ForceFieldThread::CalculateGFNFFExtraTorsionContribution()
         extra_torsion_energy += energy * m_dihedral_scaling;
 
         if (m_calculate_gradient) {
+            // Gradient: dE/dφ = -V * n * sin(c1) * damp (c1 includes +π term)
             double dEdphi = -V * n * sin(c1) * damp * m_dihedral_scaling;
             m_gradient.row(torsion.i) += dEdphi * derivate.row(0);
             m_gradient.row(torsion.j) += dEdphi * derivate.row(1);

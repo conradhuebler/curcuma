@@ -701,4 +701,63 @@ static const std::vector<double> xb_acidity = {
     0.0     // Rn (86)
 };
 
+// ============================================================================
+// Metal Bond Shift Factors (Claude Generated - January 2026)
+// ============================================================================
+// Reference: XTB gfnff_param.f90:807-810
+// Applied to bond equilibrium distances (r0) when metals are present
+//
+// Educational Documentation:
+// - metal1_shift: Group 1+2 metals (Li, Na, Mg, Ca, ...)
+//   Bonds involving alkali/alkaline earth metals need longer equilibrium distances
+//
+// - metal2_shift: Transition metals (Fe, Cu, Zn, ...)
+//   TM-ligand bonds typically have characteristic metal coordination distances
+//
+// - metal3_shift: Main group metals (Al, Ga, In, Sn, Pb, ...)
+//   Post-transition metals have intermediate bond length corrections
+//
+// - eta_shift: η-coordinated ligands (π-bonding to metals)
+//   Multiply by coordination number (CN) for multi-hapto coordination
+//   Example: Ferrocene Fe-C₆H₆ has η⁶ coordination (6 carbon neighbors)
+//
+// Literature: Spicher, S.; Grimme, S. Angew. Chem. Int. Ed. 2020
+// ============================================================================
+
+constexpr double METAL1_SHIFT = 0.2;   // Group 1+2 metals (Li, Na, Mg, Ca, ...) in Bohr
+constexpr double METAL2_SHIFT = 0.15;  // Transition metals (Fe, Cu, Zn, ...) in Bohr
+constexpr double METAL3_SHIFT = 0.05;  // Main group metals (Al, Ga, In, ...) in Bohr
+constexpr double ETA_SHIFT = 0.040;    // η-coordination (per neighbor) in Bohr
+
+// ============================================================================
+// Ring Torsion Barrier Factors (Claude Generated - January 2026)
+// ============================================================================
+// Reference: XTB gfnff_param.f90:787-790, gfnff_ini.f90:1814-1835
+// Applied to torsional barriers when all four atoms are in the same ring
+//
+// Educational Documentation:
+// - Ring torsions have different conformational preferences than acyclic bonds
+// - Small rings (3-, 4-membered) are constrained and prefer specific puckering
+// - 6-membered rings have strong preference for chair conformation
+//
+// Ring-specific barriers (relative to acyclic baseline):
+// - FR3: 3-ring torsions are very flexible (planar preference, n=1, φ₀=0°)
+// - FR4: 4-ring torsions have moderate barriers (puckered, n=6, φ₀=30°)
+// - FR5: 5-ring torsions have intermediate barriers (envelope, n=6, φ₀=30°)
+// - FR6: 6-ring torsions have STRONG barriers (chair preference, n=3, φ₀=60°)
+//
+// Examples:
+// - Cyclohexane: FR6=5.7 gives strong chair/boat energy difference (~7 kcal/mol)
+// - Cyclopentane: FR5=1.5 gives envelope puckering
+// - Cyclobutane: FR4=1.0 gives butterfly conformation
+// - Cyclopropane: FR3=0.3 nearly planar, highly strained
+//
+// Literature: Spicher, S.; Grimme, S. Angew. Chem. Int. Ed. 2020
+// ============================================================================
+
+constexpr double FR3 = 0.3;  // 3-ring torsion barrier factor (planar)
+constexpr double FR4 = 1.0;  // 4-ring torsion barrier factor (butterfly)
+constexpr double FR5 = 1.5;  // 5-ring torsion barrier factor (envelope)
+constexpr double FR6 = 5.7;  // 6-ring torsion barrier factor (chair preference)
+
 } // namespace GFNFFParameters

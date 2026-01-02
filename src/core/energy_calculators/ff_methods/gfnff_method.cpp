@@ -494,6 +494,10 @@ json GFNFF::generateGFNFFParameters()
             CurcumaLogger::param("has_invalid_charges", "no - validated");
         }
 
+        // CRITICAL FIX (Claude Generated Jan 2, 2026): Set charges BEFORE generating torsions!
+        // Torsions need m_charges for fqq correction factor
+        m_charges = topo_info.eeq_charges;
+
         // Generate advanced parameters
         json bonds = generateTopologyAwareBonds(topo_info.coordination_numbers,
             topo_info.hybridization,
@@ -588,8 +592,27 @@ json GFNFF::generateGFNFFParameters()
             { "eeq_charges", std::vector<double>(topo_info.eeq_charges.data(), topo_info.eeq_charges.data() + topo_info.eeq_charges.size()) }
         };
 
+        // CRITICAL FIX (Claude Generated Jan 2, 2026): Store charges at top-level for cache loading
+        // ForceField.tryLoadAutoParameters() expects charges at parameters["eeq_charges"]
+        // Not nested inside topology_info!
+        parameters["eeq_charges"] = std::vector<double>(topo_info.eeq_charges.data(),
+                                                         topo_info.eeq_charges.data() + topo_info.eeq_charges.size());
+
         // Use calculated charges instead of loading from file
-        m_charges = topo_info.eeq_charges;
+        // DEBUG (Claude Generated Jan 2, 2026): Check if charges are actually calculated
+        std::cerr << "\n=== CHARGE ASSIGNMENT DEBUG ===" << std::endl;
+        std::cerr << "topo_info.eeq_charges.size() = " << topo_info.eeq_charges.size() << std::endl;
+        if (topo_info.eeq_charges.size() > 0) {
+            std::cerr << "First 5 EEQ charges: ";
+            for (int idx = 0; idx < std::min(5, (int)topo_info.eeq_charges.size()); ++idx) {
+                std::cerr << topo_info.eeq_charges(idx) << " ";
+            }
+            std::cerr << std::endl;
+        }
+        std::cerr << "================================\n" << std::endl;
+
+        // NOTE: m_charges already set at line 499 BEFORE torsion generation!
+        // (Claude Generated Jan 2, 2026): This was the bug - charges were set AFTER torsions
 
         // NOTE (Claude Generated Dec 2025): Charge distribution happens in initializeForceField()
         // AFTER setParameter() creates threads (threads don't exist yet at this point)
@@ -626,19 +649,20 @@ json GFNFF::generateGFNFFParameters()
             CurcumaLogger::param("has_invalid_charges", "no - validated");
         }
 
+        // CRITICAL FIX (Claude Generated Jan 2, 2026): Set charges BEFORE generating torsions
+        // Torsions need m_charges for fqq correction factor!
+        m_charges = topo_info.eeq_charges;
+
         // Generate GFN-FF bonds with real parameters
         json bonds = generateGFNFFBonds();
         json angles = generateGFNFFAngles(topo_info);
-        json torsions = generateGFNFFTorsions(); // ✅ Phase 1.1 implemented
+        json torsions = generateGFNFFTorsions(); // ✅ Phase 1.1 implemented (needs m_charges!)
         json inversions = generateGFNFFInversions(); // ✅ Phase 1.2 implemented
 
         parameters["bonds"] = bonds;
         parameters["angles"] = angles;
         parameters["dihedrals"] = torsions;
         parameters["inversions"] = inversions;
-
-        // Store topology charges for use in other functions
-        m_charges = topo_info.eeq_charges;
 
         // CRITICAL FIX (Session 10, Dec 2025): Distribute EEQ charges to ForceFieldThreads
         // Claude Generated: This enables charge-dependent fqq corrections in bond energy
@@ -844,6 +868,83 @@ bool GFNFF::calculateTopology()
 
     // For now, return true - actual implementation would go here
     return true;
+}
+
+int GFNFF::classifyBondType(int atom_i, int atom_j, int hyb_i, int hyb_j,
+                             bool is_metal_i, bool is_metal_j) const
+{
+    /**
+     * Bond type classification following Fortran gfnff_ini.f90:1131-1148
+     *
+     * Claude Generated (Jan 2, 2026): GFN-FF bond type assignment
+     *
+     * btyp = 1: Single bond (default)
+     * btyp = 2: Pi bond (sp2-sp2 or N-sp2)
+     * btyp = 3: Sp bond (linear, no torsion)
+     * btyp = 4: Hypervalent
+     * btyp = 5: Metal-containing bond
+     * btyp = 6: Eta-complex (special metal)
+     * btyp = 7: TM metal-metal bond
+     *
+     * Reference: external/gfnff/src/gfnff_ini.f90:1131-1148
+     */
+
+    int btyp = 1; // Default: single bond
+
+    // Check for pi bonds (sp2-sp2 or N-sp2)
+    // hyb: 0=sp3, 1=sp, 2=sp2, 3=terminal, 5=hypervalent
+    if (hyb_i == 2 && hyb_j == 2) {
+        btyp = 2; // sp2-sp2 = pi bond
+    }
+
+    // Special case: N-sp2 bonds
+    int elem_i = m_atoms[atom_i];
+    int elem_j = m_atoms[atom_j];
+    if ((hyb_i == 3 && hyb_j == 2 && elem_i == 7) ||  // N(sp3)-X(sp2)
+        (hyb_j == 3 && hyb_i == 2 && elem_j == 7)) {  // X(sp2)-N(sp3)
+        btyp = 2;
+    }
+
+    // Linear/sp bonds (no torsion)
+    if (hyb_i == 1 || hyb_j == 1) {
+        btyp = 3; // sp-X i.e. no torsion
+    }
+
+    // Linear halogens (no torsion)
+    // Group 7 = halogens (F, Cl, Br, I, At)
+    // Elements: H=1, F=9, Cl=17, Br=35, I=53, At=85
+    bool is_halogen_i = (elem_i == 9 || elem_i == 17 || elem_i == 35 || elem_i == 53 || elem_i == 85);
+    bool is_halogen_j = (elem_j == 9 || elem_j == 17 || elem_j == 35 || elem_j == 53 || elem_j == 85);
+
+    if ((is_halogen_i || elem_i == 1) && hyb_i == 1) {
+        btyp = 3; // Linear halogen/hydrogen
+    }
+    if ((is_halogen_j || elem_j == 1) && hyb_j == 1) {
+        btyp = 3; // Linear halogen/hydrogen
+    }
+
+    // Hypervalent bonds
+    if (hyb_i == 5 || hyb_j == 5) {
+        btyp = 4;
+    }
+
+    // Metal-containing bonds
+    if (is_metal_i || is_metal_j) {
+        btyp = 5; // Metal bond
+    }
+
+    // TM metal-metal bonds (both are transition metals)
+    // Simplified: If both are metals, assume TM-TM
+    // Full implementation would check imetal == 2 (transition metal flag)
+    if (is_metal_i && is_metal_j) {
+        btyp = 7; // TM metal-metal
+    }
+
+    // Eta-complexes (special metal coordination)
+    // Full implementation needs itag and piadr from topology
+    // Skipped for now (btyp = 6) - rare case
+
+    return btyp;
 }
 
 bool GFNFF::validateMolecule() const
@@ -3721,6 +3822,41 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
                 topo_info.is_aromatic[i] = true;
             }
         }
+    }
+
+    // Bond type classification (Claude Generated - Jan 2, 2026)
+    // Classify each bond according to GFN-FF topology rules (btyp)
+    // Reference: Fortran gfnff_ini.f90:1131-1148
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("Classifying bond types for extra torsion filtering");
+    }
+    topo_info.bond_types.resize(bond_list.size());
+    for (size_t bond_idx = 0; bond_idx < bond_list.size(); ++bond_idx) {
+        const auto& [atom_i, atom_j] = bond_list[bond_idx];
+        int hyb_i = topo_info.hybridization[atom_i];
+        int hyb_j = topo_info.hybridization[atom_j];
+        bool is_metal_i = topo_info.is_metal[atom_i];
+        bool is_metal_j = topo_info.is_metal[atom_j];
+
+        topo_info.bond_types[bond_idx] = classifyBondType(atom_i, atom_j,
+                                                            hyb_i, hyb_j,
+                                                            is_metal_i, is_metal_j);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        // Count bond types for diagnostic output
+        int n_single = 0, n_pi = 0, n_sp = 0, n_hyper = 0, n_metal = 0, n_eta = 0, n_tm = 0;
+        for (int btyp : topo_info.bond_types) {
+            if (btyp == 1) n_single++;
+            else if (btyp == 2) n_pi++;
+            else if (btyp == 3) n_sp++;
+            else if (btyp == 4) n_hyper++;
+            else if (btyp == 5) n_metal++;
+            else if (btyp == 6) n_eta++;
+            else if (btyp == 7) n_tm++;
+        }
+        CurcumaLogger::info(fmt::format("Bond types: {} single, {} pi, {} sp, {} hyper, {} metal, {} eta, {} TM-TM",
+                                        n_single, n_pi, n_sp, n_hyper, n_metal, n_eta, n_tm));
     }
 
     // Phase 9B: Calculate topological distances for 1,3/1,4 factors (Claude Generated - Dec 24, 2025)

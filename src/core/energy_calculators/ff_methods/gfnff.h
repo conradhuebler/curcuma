@@ -100,6 +100,17 @@ public:
         // topo_distances[i][j] = number of bonds in shortest path between i and j
         //   0 = same atom, 1 = bonded, 2 = separated by 1 bond, 3 = 1,3-pair, 4 = 1,4-pair, etc.
         std::vector<std::vector<int>> topo_distances;
+
+        // Bond type classification (Claude Generated - Jan 2, 2026)
+        // Per-bond type following Fortran gfnff_ini.f90:1131-1148
+        // btyp = 1: Single bond (default)
+        // btyp = 2: Pi bond (sp2-sp2)
+        // btyp = 3: Sp bond (linear, no torsion)
+        // btyp = 4: Hypervalent
+        // btyp = 5: Metal-containing bond
+        // btyp = 6: Eta-complex (special metal)
+        // btyp = 7: TM metal-metal bond
+        std::vector<int> bond_types;
     };
 
     /**
@@ -224,6 +235,22 @@ private:
      * Claude Generated (Dec 24, 2025): Breadth-First Search for 1,3/1,4 topology factors
      */
     std::vector<std::vector<int>> calculateTopologyDistances(const std::vector<std::vector<int>>& adjacency_list) const;
+
+    /**
+     * @brief Classify bond type according to GFN-FF topology rules
+     * @param atom_i First atom index
+     * @param atom_j Second atom index
+     * @param hyb_i Hybridization of atom i (0=sp3, 1=sp, 2=sp2, 3=terminal, 5=hypervalent)
+     * @param hyb_j Hybridization of atom j
+     * @param is_metal_i True if atom i is a metal
+     * @param is_metal_j True if atom j is a metal
+     * @return Bond type (btyp): 1=single, 2=pi, 3=sp/linear, 4=hypervalent, 5=metal, 6=eta, 7=TM-TM
+     *
+     * Claude Generated (Jan 2, 2026): Ported from Fortran gfnff_ini.f90:1131-1148
+     * Used for extra torsion filtering (btyp < 5 excludes metal bonds)
+     */
+    int classifyBondType(int atom_i, int atom_j, int hyb_i, int hyb_j,
+                         bool is_metal_i, bool is_metal_j) const;
 
     /**
      * @brief Validate molecular structure for GFN-FF
