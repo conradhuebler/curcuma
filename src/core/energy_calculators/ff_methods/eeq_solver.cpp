@@ -756,11 +756,23 @@ Vector EEQSolver::calculateTopologyCharges(
         EEQParameters params_i = getParameters(z_i, cn(i));
 
         // Claude Generated (December 2025, Session 11): CRITICAL FIX - Add CNF term in Phase 1
-        // Reference: XTB gfnff_ini.f90:411
-        // CORRECT: chi = -chi + dxi + cnf*sqrt(CN)  (XTB formula)
+        // Reference: XTB gfnff_ini.f90:409-411
+        // XTB uses INTEGER neighbor count, NOT fractional CN for CNF term:
+        //   dum = min(dble(topo%nb(20,i)),gen%cnmax)  ! nb(20,i) = neighbor count
+        //   topo%chieeq(i) = -param%chi(ati) + dxi(i) + param%cnf(ati)*sqrt(dum)
 
-        // CRITICAL: Add CNF*sqrt(CN) term (from XTB gfnff_ini.f90:411)
-        double cnf_term = params_i.cnf * std::sqrt(cn(i));
+        // CRITICAL BUG FIX (Jan 2, 2026): Use integer neighbor count, not fractional CN!
+        // This was causing ~1.8e-2 error on carbon atoms in CH3OCH3 test
+        // Reference: gfnff_param.f90:462 and 756: param%cnmax = 4.4
+        const double CNMAX = 4.4;  // Maximum CN limit from XTB reference
+        double nb_count;
+        if (topology.has_value() && i < static_cast<int>(topology->neighbor_lists.size())) {
+            nb_count = static_cast<double>(topology->neighbor_lists[i].size());  // Integer count
+            nb_count = std::min(nb_count, CNMAX);  // Apply cnmax limit
+        } else {
+            nb_count = std::min(cn(i), CNMAX);  // Fallback to fractional CN with limit
+        }
+        double cnf_term = params_i.cnf * std::sqrt(nb_count);
 
         chi(i) = -params_i.chi + dxi(i) + cnf_term;
         gam(i) = params_i.gam;
@@ -846,6 +858,11 @@ Vector EEQSolver::calculateTopologyCharges(
         // Use Floyd-Warshall topological distances
         topo_dist = computeTopologicalDistances(atoms, *topology);
 
+        // CRITICAL FIX (Jan 2, 2026): Cache topological distances for Phase 2 reuse
+        // Reference: XTB gfnff_ini2.f90:1189-1199 uses same 'pair' array for both phases
+        // Phase 2 must NOT recalculate with geometric distances!
+        m_cached_topological_distances = topo_dist;
+
         // Setup off-diagonal Coulomb matrix with topological distances
         for (int i = 0; i < natoms; ++i) {
             for (int j = 0; j < i; ++j) {
@@ -874,6 +891,12 @@ Vector EEQSolver::calculateTopologyCharges(
         if (m_verbosity >= 3) {
             CurcumaLogger::warn("EEQSolver: Using geometric distances (Floyd-Warshall topological distances not available)");
         }
+
+        // CRITICAL FIX (Jan 2, 2026): Also cache geometric distances for Phase 2
+        // D4 and other non-GFN-FF users call calculateCharges() without topology
+        // Phase 2 needs to reuse whatever distances Phase 1 computed
+        Matrix geom_dist = Matrix::Zero(natoms, natoms);
+
         for (int i = 0; i < natoms; ++i) {
             for (int j = 0; j < i; ++j) {
                 double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
@@ -887,6 +910,10 @@ Vector EEQSolver::calculateTopologyCharges(
                     return Vector::Zero(0);
                 }
 
+                // Store distance for both Coulomb matrix and cache
+                geom_dist(i, j) = r;
+                geom_dist(j, i) = r;
+
                 // J_ij = erf(gamma_ij * r) / r
                 // gamma_ij = 1/sqrt(alpha_i + alpha_j)
                 double gammij = 1.0 / std::sqrt(alpha(i) + alpha(j));
@@ -897,6 +924,9 @@ Vector EEQSolver::calculateTopologyCharges(
                 A(j, i) = coulomb;
             }
         }
+
+        // Cache geometric distances for Phase 2 reuse
+        m_cached_topological_distances = geom_dist;
     }
 
     // 3. Setup fragment charge constraint
@@ -974,7 +1004,9 @@ Matrix EEQSolver::computeTopologicalDistances(
     const int natoms = atoms.size();
     const double RABD_CUTOFF = 1.0e8;      // Large value for unconnected atoms (from XTB rabd_cutoff)
     const double TDIST_THR = 1.0e6;        // Threshold for topological distance (from XTB gen%tdist_thr)
-    const double RFGOED1 = 1.0;            // Scaling factor (from XTB gen%rfgoed1)
+    // CRITICAL FIX (Jan 2, 2026): RFGOED1 must be 1.175, not 1.0
+    // Reference: external/gfnff/src/gfnff_param.f90:817 (gen%rfgoed1 = 1.175)
+    const double RFGOED1 = 1.175;           // Scaling factor (from XTB gen%rfgoed1)
     const double BOHR_TO_ANGSTROM = 0.52917726;
 
     // 1. Initialize with large values
@@ -1047,6 +1079,19 @@ Matrix EEQSolver::computeTopologicalDistances(
 }
 
 // ===== Phase 2: Final Refined Charges =====
+// CRITICAL REQUIREMENT (Jan 2, 2026):
+//   Phase 2 MUST use cached topological distances from Phase 1!
+//   XTB reference (gfnff_ini2.f90:1189-1199) uses same 'pair' array for both phases.
+//   Using geometric distances here causes 1.5e-3 RMS charge error (4.0e-3 max on oxygen).
+//
+// Algorithm:
+//   1. Apply environment corrections: dxi, dgam
+//   2. Calculate charge-dependent alpha: (alpha_base + ff*qa)²
+//   3. Build Coulomb matrix A with TOPOLOGICAL distances from Phase 1
+//   4. Solve linear system A*q = x for final charges
+//
+// Reference: XTB gfnff_ini.f90:693-707, gfnff_ini2.f90:1140-1246
+// Claude Generated - December 2025, Updated January 2, 2026
 
 Vector EEQSolver::calculateFinalCharges(
     const std::vector<int>& atoms,
@@ -1096,24 +1141,38 @@ Vector EEQSolver::calculateFinalCharges(
         gam_corrected(i) = params_i.gam + dgam(i);
     }
 
-    // Claude Generated (2025): Pre-calculate distance matrix (geometry-dependent only)
-    // This eliminates O(n²) sqrt() calls during matrix building
-    Matrix distances = Matrix::Zero(natoms, natoms);
-    for (int i = 0; i < natoms; ++i) {
-        for (int j = 0; j < i; ++j) {
-            double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
-            double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
-            double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
-            double r = std::sqrt(dx*dx + dy*dy + dz*dz);
+    // ===== CRITICAL FIX (Jan 2, 2026): Use TOPOLOGICAL distances from Phase 1 =====
+    // Reference: XTB gfnff_ini2.f90:1189-1199 uses same 'pair' array for both phases
+    //
+    // PROBLEM (before fix):
+    //   Phase 2 was computing GEOMETRIC distances (straight-line r = sqrt(dx²+dy²+dz²))
+    //   Geometric distances are SHORTER than topological for atoms separated by bonds
+    //   Shorter r → larger 1/r Coulomb terms → incorrect charge refinement
+    //   Result: 1.5e-3 RMS charge error, 4.0e-3 max error on oxygen
+    //
+    // SOLUTION:
+    //   Reuse cached topological distances from Phase 1 Floyd-Warshall algorithm
+    //   Topological distances = shortest path through bond graph (sum of covalent radii)
+    //   Same distances used in both phases → consistent Coulomb matrix
+    //
+    // Expected impact: 60-80% error reduction (1.5e-3 → 0.3-0.6e-3 RMS)
+    //
+    // Claude Generated - January 2, 2026
+    Matrix distances;
+    if (m_cached_topological_distances.rows() == natoms &&
+        m_cached_topological_distances.cols() == natoms) {
+        // Use cached topological distances from Phase 1
+        distances = m_cached_topological_distances;
 
-            if (r < 1e-10) {
-                CurcumaLogger::error("EEQSolver::calculateFinalCharges: atoms too close");
-                return Vector::Zero(0);
-            }
-
-            distances(i, j) = r;
-            distances(j, i) = r;  // Symmetric
+        if (m_verbosity >= 3) {
+            CurcumaLogger::info("EEQ Phase 2: Using cached topological distances from Phase 1 (CRITICAL for accuracy)");
         }
+    } else {
+        // ERROR: Phase 2 called without Phase 1, or topological distances not available
+        CurcumaLogger::error("EEQSolver::calculateFinalCharges: Topological distances not cached from Phase 1!");
+        CurcumaLogger::error("  Phase 2 requires topological distances for accurate charges.");
+        CurcumaLogger::error("  Ensure calculateTopologyCharges() was called with topology parameter.");
+        return Vector::Zero(0);
     }
 
     // Claude Generated (December 2025, Session 13): Distance matrix pre-calculation

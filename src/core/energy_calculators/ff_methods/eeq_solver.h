@@ -329,6 +329,7 @@ private:
     // ===== Cached Data for Energy Calculation =====
 
     mutable Vector m_dxi_stored;      ///< Stored dxi corrections from last calculateCharges() call
+    mutable Matrix m_cached_topological_distances;  ///< Cached topological distances from Phase 1 for Phase 2 reuse (Jan 2, 2026)
 };
 
 // ===== Parameter Definitions =====
