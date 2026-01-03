@@ -288,15 +288,20 @@ private:
     /**
      * @brief Solve augmented EEQ linear system with corrected parameters
      *
-     * Sets up RHS: x(i) = -chi + dxi + CNF*sqrt(nb)
+     * Sets up RHS: x(i) = -chi + dxi [+ CNF*sqrt(nb) if use_cnf_term=true]
      * Solves the augmented system: A*[q; lambda] = [x; total_charge]
+     *
+     * CRITICAL (Jan 4, 2026): CNF term ONLY in Phase 1 (topology charges)!
+     * Phase 2 (final charges with dgam) does NOT use CNF term!
+     * Reference: XTB gfnff_ini.f90 lines 563-570 vs 696-707
      *
      * @param A Augmented EEQ matrix from buildCorrectedEEQMatrix()
      * @param atoms Atomic numbers
      * @param cn Coordination numbers
-     * @param dxi Electronegativity corrections (WITHOUT CNF)
+     * @param dxi Electronegativity corrections
      * @param total_charge Total molecular charge
      * @param topology Optional topology for integer neighbor counts in CNF
+     * @param use_cnf_term If true, adds CNF*sqrt(nb) to RHS (Phase 1 only!)
      * @return Vector of atomic charges (natoms elements)
      */
     Vector solveEEQ(
@@ -305,7 +310,8 @@ private:
         const Vector& cn,
         const Vector& dxi,
         int total_charge,
-        const std::optional<TopologyInput>& topology
+        const std::optional<TopologyInput>& topology,
+        bool use_cnf_term = true  // Default true for backward compatibility
     );
 
     // ===== Helper Functions =====

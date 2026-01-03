@@ -710,47 +710,73 @@ Vector EEQSolver::calculateCharges(
     // This allows dgam/alpha corrections to have FULL impact on solution matrix,
     // not just as a perturbation after Phase 1.
 
-    Vector current_charges = Vector::Zero(natoms);
-    Vector prev_charges = Vector::Zero(natoms);
-    const int MAX_ITERATIONS = 3;
-    const double CONVERGENCE_THRESHOLD = 1e-4;
+    // ===== NEW STRATEGY (Jan 4, 2026): Hybrid Two-Phase + Iterative Refinement =====
+    // Problem with pure iteration from qa=0: dgam=0 in first iteration, so weak correction
+    // Solution: Do Phase 1 first (base params), then iterate with dgam corrections
 
-    for (int iter = 0; iter < MAX_ITERATIONS; ++iter) {
-        // Step 1: Calculate dxi and dgam based on CURRENT charges
+    Vector current_charges;
+    Vector prev_charges;
+
+    // PHASE 1: Initial solve with base parameters (no dgam)
+    {
         Vector dxi = calculateDxi(atoms, geometry_bohr, cn, topology);
-        Vector dgam = calculateDgam(atoms, current_charges, hybridization);
+        Vector dgam_base = Vector::Zero(natoms);  // No dgam in Phase 1
 
-        // Step 2: Build EEQ matrix with ALL corrections
-        Matrix A = buildCorrectedEEQMatrix(atoms, geometry_bohr, cn, current_charges,
-                                          dxi, dgam, hybridization, topology);
+        Matrix A_phase1 = buildCorrectedEEQMatrix(atoms, geometry_bohr, cn, Vector::Zero(natoms),
+                                                   dxi, dgam_base, hybridization, topology);
+        current_charges = solveEEQ(A_phase1, atoms, cn, dxi, total_charge, topology, true);  // Phase 1: use CNF term
 
-        // Step 3: Solve linear system ONCE with corrected parameters
-        current_charges = solveEEQ(A, atoms, cn, dxi, total_charge, topology);
-
-        if (current_charges.size() != natoms) {
-            CurcumaLogger::error(fmt::format("EEQSolver::calculateCharges: Single-solve iteration {} failed", iter));
-            return (iter > 0) ? prev_charges : Vector::Zero(natoms);  // Return best result
+        if (m_verbosity >= 1) {
+            CurcumaLogger::info("EEQSolver: Phase 1 base solve complete");
         }
+    }
 
-        // Step 4: Check convergence
-        if (iter > 0) {
+    // PHASE 2: Iterative refinement with dgam corrections
+    {
+        const int MAX_ITERATIONS = 3;
+        const double CONVERGENCE_THRESHOLD = 1e-5;
+
+        for (int iter = 0; iter < MAX_ITERATIONS; ++iter) {
+            prev_charges = current_charges;
+
+            // Calculate dxi and dgam based on CURRENT charges from previous iteration
+            Vector dxi = calculateDxi(atoms, geometry_bohr, cn, topology);
+            Vector dgam = calculateDgam(atoms, current_charges, hybridization);
+
+            if (m_verbosity >= 2) {
+                CurcumaLogger::info(fmt::format(
+                    "EEQSolver: Refinement iter {} dgam range=[{:.2e}, {:.2e}]",
+                    iter, dgam.minCoeff(), dgam.maxCoeff()));
+            }
+
+            // Build matrix with dgam corrections based on current charges
+            Matrix A = buildCorrectedEEQMatrix(atoms, geometry_bohr, cn, current_charges,
+                                              dxi, dgam, hybridization, topology);
+
+            // Solve with corrected parameters (Phase 2: NO CNF term!)
+            current_charges = solveEEQ(A, atoms, cn, dxi, total_charge, topology, false);
+
+            if (current_charges.size() != natoms) {
+                CurcumaLogger::error(fmt::format("EEQSolver::calculateCharges: Refinement iter {} failed", iter));
+                return prev_charges;  // Return best result so far
+            }
+
+            // Check convergence
             double max_change = (current_charges - prev_charges).cwiseAbs().maxCoeff();
 
-            if (m_verbosity >= 3) {
+            if (m_verbosity >= 2) {
                 CurcumaLogger::info(fmt::format(
-                    "EEQSolver iteration {}: max charge change = {:.2e}", iter, max_change));
+                    "EEQSolver: Refinement iter {}: max charge change = {:.2e}", iter, max_change));
             }
 
             if (max_change < CONVERGENCE_THRESHOLD) {
-                if (m_verbosity >= 2) {
+                if (m_verbosity >= 1) {
                     CurcumaLogger::success(fmt::format(
-                        "EEQSolver: Single-solve converged in {} iterations", iter + 1));
+                        "EEQSolver: Charges converged after {} refinement iterations", iter + 1));
                 }
                 break;  // Converged
             }
         }
-
-        prev_charges = current_charges;
     }
 
     if (m_verbosity >= 1) {
@@ -899,33 +925,40 @@ Vector EEQSolver::solveEEQ(
     const Vector& cn,
     const Vector& dxi,
     int total_charge,
-    const std::optional<TopologyInput>& topology)
+    const std::optional<TopologyInput>& topology,
+    bool use_cnf_term)  // NEW: Controls whether CNF term is added to RHS
 {
     const int natoms = atoms.size();
     int m = natoms + 1;
     Vector x = Vector::Zero(m);
 
-    // Setup RHS: chi_corrected + CNF*sqrt(nb)
+    // Setup RHS
+    // CRITICAL FIX (Jan 4, 2026): CNF term ONLY in Phase 1 (topology charges)!
+    // Phase 2 (final charges) does NOT use CNF term!
+    // Reference: XTB gfnff_ini.f90 lines 563-570 (Phase 1 with CNF) vs 696-707 (Phase 2 without CNF)
     const double CNMAX = 4.4;
     for (int i = 0; i < natoms; ++i) {
         int z_i = atoms[i];
         EEQParameters params_i = getParameters(z_i, cn(i));
 
-        // Use integer neighbor count (preferred when topology available)
-        double nb_count;
-        if (topology.has_value() && i < static_cast<int>(topology->neighbor_lists.size())) {
-            nb_count = static_cast<double>(topology->neighbor_lists[i].size());
-            nb_count = std::min(nb_count, CNMAX);
-        } else {
-            // Fallback to fractional CN approximation
-            nb_count = std::min(std::round(cn(i)), CNMAX);
-        }
-
-        // chi_corrected = -chi + dxi
+        // chi_corrected = -chi + dxi (always included)
         double chi_corrected = -params_i.chi + dxi(i);
-        double cnf_term = params_i.cnf * std::sqrt(nb_count);
 
-        x(i) = chi_corrected + cnf_term;
+        if (use_cnf_term) {
+            // Phase 1: Add CNF term for topology charges
+            double nb_count;
+            if (topology.has_value() && i < static_cast<int>(topology->neighbor_lists.size())) {
+                nb_count = static_cast<double>(topology->neighbor_lists[i].size());
+                nb_count = std::min(nb_count, CNMAX);
+            } else {
+                nb_count = std::min(std::round(cn(i)), CNMAX);
+            }
+            double cnf_term = params_i.cnf * std::sqrt(nb_count);
+            x(i) = chi_corrected + cnf_term;
+        } else {
+            // Phase 2: NO CNF term for final charges!
+            x(i) = chi_corrected;
+        }
     }
     x(natoms) = static_cast<double>(total_charge);
 
