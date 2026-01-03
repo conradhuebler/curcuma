@@ -161,6 +161,7 @@ public:
      * @param topology_charges Phase-1 charges (qa) used for alpha calculation
      * @param cn Coordination numbers
      * @param hybridization Hybridization states (1=sp, 2=sp2, 3=sp3)
+     * @param topology Optional topology information for integer neighbor counts in CNF calculation
      * @return Vector of final EEQ charges
      */
     Vector calculateFinalCharges(
@@ -169,7 +170,8 @@ public:
         int total_charge,
         const Vector& topology_charges,
         const Vector& cn,
-        const std::vector<int>& hybridization
+        const std::vector<int>& hybridization,
+        const std::optional<TopologyInput>& topology = std::nullopt
     );
 
     /**
@@ -251,6 +253,60 @@ private:
     );
 
     // NOTE: calculateDalpha() removed - alpha now calculated inline with charge-dependent formula
+
+    // ===== NEW Single-Solve Helper Functions (Jan 4, 2026) =====
+
+    /**
+     * @brief Build EEQ Coulomb matrix with ALL charge-dependent corrections
+     *
+     * Constructs the augmented EEQ matrix with:
+     * - Diagonal: gam_corrected + sqrt(2/π)/sqrt(alpha_corrected)
+     * - Off-diagonal: Coulomb terms with corrected alpha
+     * - Constraint row/column for charge conservation
+     *
+     * @param atoms Atomic numbers
+     * @param geometry_bohr Coordinates in Bohr
+     * @param cn Coordination numbers
+     * @param current_charges Current charge estimate (used for charge-dependent dgam/alpha)
+     * @param dxi Electronegativity corrections
+     * @param dgam Hardness corrections (gam - qa*ff)
+     * @param hybridization Hybridization states
+     * @param topology Optional topology for topological distances
+     * @return Augmented EEQ matrix (natoms+1)×(natoms+1)
+     */
+    Matrix buildCorrectedEEQMatrix(
+        const std::vector<int>& atoms,
+        const Matrix& geometry_bohr,
+        const Vector& cn,
+        const Vector& current_charges,
+        const Vector& dxi,
+        const Vector& dgam,
+        const std::vector<int>& hybridization,
+        const std::optional<TopologyInput>& topology
+    );
+
+    /**
+     * @brief Solve augmented EEQ linear system with corrected parameters
+     *
+     * Sets up RHS: x(i) = -chi + dxi + CNF*sqrt(nb)
+     * Solves the augmented system: A*[q; lambda] = [x; total_charge]
+     *
+     * @param A Augmented EEQ matrix from buildCorrectedEEQMatrix()
+     * @param atoms Atomic numbers
+     * @param cn Coordination numbers
+     * @param dxi Electronegativity corrections (WITHOUT CNF)
+     * @param total_charge Total molecular charge
+     * @param topology Optional topology for integer neighbor counts in CNF
+     * @return Vector of atomic charges (natoms elements)
+     */
+    Vector solveEEQ(
+        const Matrix& A,
+        const std::vector<int>& atoms,
+        const Vector& cn,
+        const Vector& dxi,
+        int total_charge,
+        const std::optional<TopologyInput>& topology
+    );
 
     // ===== Helper Functions =====
 

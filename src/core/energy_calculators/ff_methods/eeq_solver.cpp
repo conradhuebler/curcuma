@@ -695,37 +695,249 @@ Vector EEQSolver::calculateCharges(
         }
     }
 
-    // Step 3: Phase 1 - Calculate topology charges
-    // CRITICAL FIX (Dec 28, 2025): Pass topology parameter to enable Floyd-Warshall
-    Vector topology_charges = calculateTopologyCharges(atoms, geometry_bohr, total_charge, cn, topology);
+    // ===== CRITICAL REFACTORING (Jan 4, 2026): Single-Solve with Iterative Refinement =====
+    // Reference: XTB does ONE goedeckera() solve with corrected parameters (dgam, alpha)
+    // not TWO separate solves. This matches gfnff_ini.f90:696-707 exactly.
+    //
+    // Instead of:
+    //   Phase 1: Solve with base params → qa
+    //   Phase 2: Solve with corrected params (gam+dgam, alpha(qa))
+    //
+    // New approach: ITERATIVE refinement in SINGLE solve
+    //   Iteration 0: dgam(qa=0), alpha(qa=0) → Solve → new qa
+    //   Iteration 1: dgam(qa_new), alpha(qa_new) → Solve → final qa
+    //
+    // This allows dgam/alpha corrections to have FULL impact on solution matrix,
+    // not just as a perturbation after Phase 1.
 
-    if (topology_charges.size() != natoms) {
-        CurcumaLogger::error("EEQSolver::calculateCharges: Phase 1 failed");
-        return Vector::Zero(natoms);
-    }
+    Vector current_charges = Vector::Zero(natoms);
+    Vector prev_charges = Vector::Zero(natoms);
+    const int MAX_ITERATIONS = 3;
+    const double CONVERGENCE_THRESHOLD = 1e-4;
 
-    // Step 4: Phase 2 - Refine charges with environmental corrections
-    Vector final_charges = calculateFinalCharges(atoms, geometry_bohr, total_charge,
-                                                  topology_charges, cn, hybridization, topology);
+    for (int iter = 0; iter < MAX_ITERATIONS; ++iter) {
+        // Step 1: Calculate dxi and dgam based on CURRENT charges
+        Vector dxi = calculateDxi(atoms, geometry_bohr, cn, topology);
+        Vector dgam = calculateDgam(atoms, current_charges, hybridization);
 
-    if (final_charges.size() != natoms) {
-        CurcumaLogger::error("EEQSolver::calculateCharges: Phase 2 failed");
-        return topology_charges;  // Return Phase 1 charges as fallback
+        // Step 2: Build EEQ matrix with ALL corrections
+        Matrix A = buildCorrectedEEQMatrix(atoms, geometry_bohr, cn, current_charges,
+                                          dxi, dgam, hybridization, topology);
+
+        // Step 3: Solve linear system ONCE with corrected parameters
+        current_charges = solveEEQ(A, atoms, cn, dxi, total_charge, topology);
+
+        if (current_charges.size() != natoms) {
+            CurcumaLogger::error(fmt::format("EEQSolver::calculateCharges: Single-solve iteration {} failed", iter));
+            return (iter > 0) ? prev_charges : Vector::Zero(natoms);  // Return best result
+        }
+
+        // Step 4: Check convergence
+        if (iter > 0) {
+            double max_change = (current_charges - prev_charges).cwiseAbs().maxCoeff();
+
+            if (m_verbosity >= 3) {
+                CurcumaLogger::info(fmt::format(
+                    "EEQSolver iteration {}: max charge change = {:.2e}", iter, max_change));
+            }
+
+            if (max_change < CONVERGENCE_THRESHOLD) {
+                if (m_verbosity >= 2) {
+                    CurcumaLogger::success(fmt::format(
+                        "EEQSolver: Single-solve converged in {} iterations", iter + 1));
+                }
+                break;  // Converged
+            }
+        }
+
+        prev_charges = current_charges;
     }
 
     if (m_verbosity >= 1) {
-        CurcumaLogger::success(fmt::format("EEQSolver: Two-phase EEQ completed for {} atoms", natoms));
+        CurcumaLogger::success(fmt::format("EEQSolver: Single-solve EEQ completed for {} atoms", natoms));
         if (m_verbosity >= 2) {
             for (int i = 0; i < std::min(5, natoms); ++i) {
-                CurcumaLogger::result(fmt::format("Atom {} (Z={}) q = {:.6f}", i, atoms[i], final_charges(i)));
+                CurcumaLogger::result(fmt::format("Atom {} (Z={}) q = {:.6f}", i, atoms[i], current_charges(i)));
             }
         }
     }
 
-    return final_charges;
+    return current_charges;
 }
 
-// ===== Phase 1: Topology Charges =====
+// ===== New Helper Functions for Single-Solve Architecture =====
+
+/**
+ * @brief Build EEQ Coulomb matrix with ALL charge-dependent corrections
+ * @param current_charges Current charge estimate (used for dgam and charge-dependent alpha)
+ * @return Augmented EEQ matrix (natoms+1) × (natoms+1)
+ *
+ * Matrix structure:
+ * - A(i,i) = gam_corrected + sqrt(2/π)/sqrt(alpha_corrected)
+ * - A(i,j) = erf(gamma_ij * r) / r  [Coulomb interaction with corrected alpha]
+ * - A(natoms, j) = 1.0  [Charge constraint row]
+ *
+ * Key: Using CURRENT charges for dgam and alpha means corrections have FULL impact,
+ * not just perturbation-level effects like in two-phase approach.
+ *
+ * Claude Generated - January 4, 2026
+ */
+Matrix EEQSolver::buildCorrectedEEQMatrix(
+    const std::vector<int>& atoms,
+    const Matrix& geometry_bohr,
+    const Vector& cn,
+    const Vector& current_charges,
+    const Vector& dxi,
+    const Vector& dgam,
+    const std::vector<int>& hybridization,
+    const std::optional<TopologyInput>& topology)
+{
+    const int natoms = atoms.size();
+    int m = natoms + 1;
+    Matrix A = Matrix::Zero(m, m);
+
+    // Step 1: Calculate charge-dependent alpha
+    Vector alpha_corrected(natoms);
+    for (int i = 0; i < natoms; ++i) {
+        int z_i = atoms[i];
+        double alpha_base = (z_i >= 1 && z_i <= 86) ? alpha_eeq[z_i - 1] : 0.903430;
+
+        // Charge-dependent ff factor (from XTB gfnff_ini.f90:699-705)
+        double ff = 0.0;
+        if (z_i == 6) {  // Carbon
+            ff = 0.09;
+        } else if (z_i == 7) {  // Nitrogen
+            ff = -0.21;
+        } else if (z_i > 10 && z_i <= 86) {  // Heavy atoms
+            int group = periodic_group[z_i - 1];
+            if (group == 6) ff = -0.03;  // Chalcogens (O, S, Se, Te, Po)
+            else if (group == 7) ff = 0.50;  // Halogens (F, Cl, Br, I, At)
+            else {
+                int imetal_val = metal_type[z_i - 1];
+                if (imetal_val == 1) ff = 0.3;  // Main group metals
+                else if (imetal_val == 2) ff = -0.1;  // Transition metals
+            }
+        }
+
+        alpha_corrected(i) = std::pow(alpha_base + ff * current_charges(i), 2);
+    }
+
+    // Step 2: Get topological or geometric distances
+    Matrix distances;
+    if (topology.has_value()) {
+        distances = computeTopologicalDistances(atoms, *topology);
+    } else {
+        // Fallback: compute geometric distances
+        distances = Matrix::Zero(natoms, natoms);
+        for (int i = 0; i < natoms; ++i) {
+            for (int j = 0; j < natoms; ++j) {
+                if (i != j) {
+                    distances(i, j) = (geometry_bohr.row(i) - geometry_bohr.row(j)).norm();
+                }
+            }
+        }
+    }
+
+    // Step 3: Build off-diagonal Coulomb matrix with corrected alpha
+    const double TSQRT2PI = 0.797884560802866;
+    for (int i = 0; i < natoms; ++i) {
+        for (int j = 0; j < i; ++j) {
+            double r = distances(i, j);
+
+            if (r > 1e6) {
+                // Unconnected atoms - skip Coulomb term
+                A(i, j) = 0.0;
+                A(j, i) = 0.0;
+            } else {
+                // J_ij = erf(gamma_ij * r) / r
+                double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
+                double erf_gamma = std::erf(gamma_ij * r);
+                double coulomb = erf_gamma / r;
+
+                A(i, j) = coulomb;
+                A(j, i) = coulomb;
+            }
+        }
+    }
+
+    // Step 4: Build diagonal with gam + dgam and sqrt(2/π)/sqrt(alpha_corrected)
+    for (int i = 0; i < natoms; ++i) {
+        int z_i = atoms[i];
+        EEQParameters params_i = getParameters(z_i, cn(i));
+
+        double gam_corrected = params_i.gam + dgam(i);
+        A(i, i) = gam_corrected + TSQRT2PI / std::sqrt(alpha_corrected(i));
+    }
+
+    // Step 5: Charge constraint row and column
+    for (int j = 0; j < natoms; ++j) {
+        A(natoms, j) = 1.0;
+        A(j, natoms) = 1.0;
+    }
+    A(natoms, natoms) = 0.0;
+
+    return A;
+}
+
+/**
+ * @brief Solve augmented EEQ linear system with corrected parameters
+ * @param A Augmented EEQ matrix (natoms+1) × (natoms+1)
+ * @param atoms Atomic numbers
+ * @param cn Coordination numbers
+ * @param dxi Electronegativity corrections (WITHOUT CNF)
+ * @param total_charge Total molecular charge
+ * @param topology Optional topology for integer neighbor count in CNF term
+ * @return Vector of atomic charges (natoms elements)
+ *
+ * RHS setup: x(i) = -chi + dxi + CNF*sqrt(nb)
+ *
+ * Claude Generated - January 4, 2026
+ */
+Vector EEQSolver::solveEEQ(
+    const Matrix& A,
+    const std::vector<int>& atoms,
+    const Vector& cn,
+    const Vector& dxi,
+    int total_charge,
+    const std::optional<TopologyInput>& topology)
+{
+    const int natoms = atoms.size();
+    int m = natoms + 1;
+    Vector x = Vector::Zero(m);
+
+    // Setup RHS: chi_corrected + CNF*sqrt(nb)
+    const double CNMAX = 4.4;
+    for (int i = 0; i < natoms; ++i) {
+        int z_i = atoms[i];
+        EEQParameters params_i = getParameters(z_i, cn(i));
+
+        // Use integer neighbor count (preferred when topology available)
+        double nb_count;
+        if (topology.has_value() && i < static_cast<int>(topology->neighbor_lists.size())) {
+            nb_count = static_cast<double>(topology->neighbor_lists[i].size());
+            nb_count = std::min(nb_count, CNMAX);
+        } else {
+            // Fallback to fractional CN approximation
+            nb_count = std::min(std::round(cn(i)), CNMAX);
+        }
+
+        // chi_corrected = -chi + dxi
+        double chi_corrected = -params_i.chi + dxi(i);
+        double cnf_term = params_i.cnf * std::sqrt(nb_count);
+
+        x(i) = chi_corrected + cnf_term;
+    }
+    x(natoms) = static_cast<double>(total_charge);
+
+    // Solve Ax = b using partial pivoting LU decomposition
+    Eigen::PartialPivLU<Matrix> lu(A);
+    Vector solution = lu.solve(x);
+
+    // Extract natoms elements (skip constraint multiplier at position natoms)
+    return solution.segment(0, natoms);
+}
+
+// ===== Phase 1: Topology Charges ===== (DEPRECATED - use single-solve instead)
 
 Vector EEQSolver::calculateTopologyCharges(
     const std::vector<int>& atoms,
