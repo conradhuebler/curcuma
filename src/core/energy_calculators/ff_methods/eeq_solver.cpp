@@ -599,7 +599,6 @@ static void testElementSpecificHybridizationLogic() {
         int expected = std::get<2>(test_case);
         std::string desc = std::get<3>(test_case);
 
-        int group = getElementGroup(Z);
         int actual = detectElementSpecificHybridization(Z, cn, dummy_atoms, std::nullopt, 0);
 
         if (actual == expected) {
@@ -707,7 +706,7 @@ Vector EEQSolver::calculateCharges(
 
     // Step 4: Phase 2 - Refine charges with environmental corrections
     Vector final_charges = calculateFinalCharges(atoms, geometry_bohr, total_charge,
-                                                  topology_charges, cn, hybridization);
+                                                  topology_charges, cn, hybridization, topology);
 
     if (final_charges.size() != natoms) {
         CurcumaLogger::error("EEQSolver::calculateCharges: Phase 2 failed");
@@ -1099,13 +1098,14 @@ Vector EEQSolver::calculateFinalCharges(
     int total_charge,
     const Vector& topology_charges,
     const Vector& cn,
-    const std::vector<int>& hybridization)
+    const std::vector<int>& hybridization,
+    const std::optional<TopologyInput>& topology)
 {
     const int natoms = atoms.size();
     const double TSQRT2PI = 0.797884560802866;  // sqrt(2/π)
 
     // Calculate correction terms (dxi and dgam only - alpha calculated inline)
-    Vector dxi = calculateDxi(atoms, geometry_bohr, cn);
+    Vector dxi = calculateDxi(atoms, geometry_bohr, cn, topology);
     Vector dgam = calculateDgam(atoms, topology_charges, hybridization);
 
     // DEBUG: Print topology charges used for dgam
