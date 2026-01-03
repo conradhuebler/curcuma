@@ -134,6 +134,10 @@ bool GFNFF::InitialiseMolecule()
     // See documentation block at parameter arrays for details on parameter conversion.
     m_geometry_bohr = m_geometry * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
 
+    // Invalidate cached topology and bond list because geometry changed
+    m_cached_topology.reset();
+    m_cached_bond_list.reset();
+
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Validating molecule structure...");
     }
@@ -217,10 +221,28 @@ const GFNFF::TopologyInfo& GFNFF::getCachedTopology() const {
 }
 
 const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
+    // Debug output to see if function is being called
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::info("=== getCachedBondList() CALLED ===");
+    }
+
     if (!m_cached_bond_list) {
+        // Debug output to see if we're calculating bonds
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::info("=== Calculating new bond list ===");
+        }
+
         // Populate bond list using same detection logic as generateGFNFFBonds but without parameters
         std::vector<std::pair<int,int>> bonds;
         double bond_threshold = 1.3;
+
+        // Debug output for bond detection
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::info("=== Bond Detection Debug ===");
+            CurcumaLogger::info(fmt::format("Atom count: {}", m_atomcount));
+            CurcumaLogger::info(fmt::format("Geometry rows: {}, cols: {}", m_geometry_bohr.rows(), m_geometry_bohr.cols()));
+        }
+
         for (int i = 0; i < m_atomcount; ++i) {
             for (int j = i + 1; j < m_atomcount; ++j) {
                 Vector ri = m_geometry_bohr.row(i);
@@ -228,11 +250,26 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
                 double distance = (ri - rj).norm();
                 double rcov_i = getCovalentRadius(m_atoms[i]);
                 double rcov_j = getCovalentRadius(m_atoms[j]);
+
+                // Debug output for each pair
+                if (CurcumaLogger::get_verbosity() >= 1) {
+                    CurcumaLogger::info(fmt::format("Pair {}-{}: dist={:.3f}, rcov_i={:.3f}, rcov_j={:.3f}, sum={:.3f}, threshold_sum={:.3f}",
+                                          i, j, distance, rcov_i, rcov_j, rcov_i + rcov_j, bond_threshold * (rcov_i + rcov_j)));
+                }
+
                 if (distance < bond_threshold * (rcov_i + rcov_j)) {
                     bonds.emplace_back(i, j);
+                    if (CurcumaLogger::get_verbosity() >= 1) {
+                        CurcumaLogger::info(fmt::format("  -> BONDED"));
+                    }
                 }
             }
         }
+
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::info(fmt::format("Total bonds detected: {}", bonds.size()));
+        }
+
         m_cached_bond_list = std::move(bonds);
     }
     return *m_cached_bond_list;
@@ -3762,7 +3799,24 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             throw std::runtime_error("GFN-FF initialization failed: dalpha (polarizability) correction calculation failed");
         }
 
-        // Phase 2: Calculate final refined charges with all corrections
+        // CRITICAL FIX (Jan 4, 2026): XTB uses TWO goedeckera() calls, NOT one!
+        // Reference: external/gfnff/src/gfnff_ini.f90
+        //
+        // Phase 1 (Line 570): Calculate topology charges (qa)
+        //   - chieeq = -chi + dxi + CNF*sqrt(nb)  [WITH CNF]
+        //   - gameeq = gam
+        //   - alpeeq = alpha²
+        //   → Call goedeckera() → topo%qa (topology charges)
+        //
+        // Phase 2 (Lines 696-706): Calculate final refined charges
+        //   - chieeq = -chi + dxi  [WITHOUT CNF!]
+        //   - gameeq = gam + dgam  [WITH dgam correction]
+        //   - alpeeq = (alpha + ff*qa)²  [WITH charge-dependent correction]
+        //   → Call goedeckera() again → final charges
+        //
+        // Curcuma's two-phase design CORRECTLY matches XTB's two goedeckera calls.
+        // Previous comment claiming "adding CNF twice" was INCORRECT - Phase 2 does NOT include CNF.
+
         if (!calculateFinalCharges(topo_info)) {
             CurcumaLogger::error("calculateTopologyInfo: Phase 2 EEQ (final charges) failed");
             throw std::runtime_error("GFN-FF initialization failed: EEQ final charge calculation (Phase 2) failed");
@@ -3776,17 +3830,17 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
                 static_cast<double>(m_charge), total_charge));
         }
 
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("Two-Phase EEQ Charges Summary (first 5 atoms):");
-            for (int i = 0; i < std::min(5, m_atomcount); ++i) {
-                CurcumaLogger::result(fmt::format(
-                    "  Atom {} (Z={:2d}): qa={:+.6f} → q_final={:+.6f} (Δqa={:+.6f}, dxi={:+.6f})",
-                    i, m_atoms[i],
-                    topo_info.topology_charges(i),
-                    topo_info.eeq_charges(i),
-                    topo_info.eeq_charges(i) - topo_info.topology_charges(i),
-                    (i < topo_info.dxi.size()) ? topo_info.dxi(i) : 0.0));
-            }
+        // ALWAYS print Phase 2 comparison (no verbosity check) - DEBUG
+        CurcumaLogger::info("=== Two-Phase EEQ Charges Comparison (Phase 2 vs Phase 1) ===");
+        for (int i = 0; i < m_atomcount; ++i) {
+            double qa = topo_info.topology_charges(i);
+            double q_final = topo_info.eeq_charges(i);
+            double delta = q_final - qa;
+            double delta_pct = (std::abs(qa) > 1e-6) ? (delta / qa * 100.0) : 0.0;
+
+            CurcumaLogger::result(fmt::format(
+                "  Atom {:2d} (Z={:2d}): qa={:+.6f} → q_final={:+.6f} (Δ={:+.6f}, {:.1f}%)",
+                i, m_atoms[i], qa, q_final, delta, delta_pct));
         }
     } else {
         // Legacy single-phase EEQ system (fallback)
@@ -4332,14 +4386,14 @@ json GFNFF::generateGFNFFDispersionPairs() const
 
     // Step 2: Determine dispersion method from method name
     // Phase 2.1 (December 2025): Method-based D3/D4 selection
-    // - "cgfnff" or "gfnff" → D4 (default, preferred)
-    // - "cgfnff-d3" or "gfnff-d3" → D3 (explicit)
+    // - "cgfnff" or "gfnff" → D3 (default, matches original GFN-FF D3(BJ) implementation)
+    // - "cgfnff-d4" or "gfnff-d4" → D4 (explicit request for D4)
     std::string method_name = m_parameters.value("method", "gfnff");
-    std::string method = "d4";  // Default to D4
+    std::string method = "d3";  // Default to D3 to match original GFN-FF implementation
 
-    // Check if method name explicitly requests D3
-    if (method_name.find("-d3") != std::string::npos) {
-        method = "d3";
+    // Check if method name explicitly requests D4
+    if (method_name.find("-d4") != std::string::npos) {
+        method = "d4";
     }
 
     if (CurcumaLogger::get_verbosity() >= 2) {
@@ -5235,6 +5289,26 @@ bool GFNFF::calculateFinalCharges(TopologyInfo& topo_info, int max_iterations,
         return false;
     }
 
+    // Build EEQSolver::TopologyInput from GFNFF data for Phase 2
+    // This enables integer neighbor count usage in CNF calculation (Jan 2026 fix)
+    EEQSolver::TopologyInput eeq_topology;
+
+    // 1. Extract neighbor lists from TopologyInfo (already computed)
+    eeq_topology.neighbor_lists = topo_info.neighbor_lists;
+
+    // 2. Extract covalent radii from GFNFFParameters (needed for topological distances)
+    eeq_topology.covalent_radii.resize(m_atomcount);
+    for (int i = 0; i < m_atomcount; ++i) {
+        int z = m_atoms[i];
+        if (z >= 1 && z <= 86) {
+            eeq_topology.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];
+        } else {
+            // Fallback covalent radius for unknown elements
+            eeq_topology.covalent_radii[i] = 1.0; // Bohr
+            CurcumaLogger::warn(fmt::format("calculateFinalCharges: Unknown atomic number {} (using default covalent radius 1.0 Bohr)", z));
+        }
+    }
+
 
     // Delegate to EEQSolver for Phase 2 refinement
     topo_info.eeq_charges = m_eeq_solver->calculateFinalCharges(
@@ -5243,7 +5317,8 @@ bool GFNFF::calculateFinalCharges(TopologyInfo& topo_info, int max_iterations,
         m_charge,
         topo_info.topology_charges,
         topo_info.coordination_numbers,
-        topo_info.hybridization
+        topo_info.hybridization,
+        eeq_topology
     );
 
     if (topo_info.eeq_charges.size() != m_atomcount) {
