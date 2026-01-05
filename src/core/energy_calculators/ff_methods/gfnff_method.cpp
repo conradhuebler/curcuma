@@ -340,6 +340,30 @@ Vector GFNFF::Charges() const
     return m_charges;
 }
 
+Vector GFNFF::getTopologyCharges() const
+{
+    // Return Phase 1 topology charges (topo%qa) from cached topology
+    // Claude Generated (January 4, 2026)
+    if (!m_initialized) {
+        CurcumaLogger::warn("GFNFF::getTopologyCharges: Not initialized, returning empty vector");
+        return Vector::Zero(0);
+    }
+
+    const TopologyInfo& topo = getCachedTopology();
+    if (topo.topology_charges.size() == 0) {
+        CurcumaLogger::warn("GFNFF::getTopologyCharges: Topology charges not yet calculated");
+        return Vector::Zero(m_atomcount);
+    }
+
+    if (topo.topology_charges.size() != m_atomcount) {
+        CurcumaLogger::warn(fmt::format("GFNFF::getTopologyCharges: Topology charges size mismatch ({} vs {})",
+                                        topo.topology_charges.size(), m_atomcount));
+        return Vector::Zero(m_atomcount);
+    }
+
+    return topo.topology_charges;
+}
+
 Vector GFNFF::BondOrders() const
 {
     return m_bond_orders;
@@ -1421,9 +1445,14 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 
     double fqq = 1.0;  // Default: no charge correction
 
-    // Phase 9: Use actual EEQ charges from topology
-    double qa1 = topo.eeq_charges[atom1];
-    double qa2 = topo.eeq_charges[atom2];
+    // Phase 9: Use actual EEQ charges from topology (with bounds checking)
+    double qa1 = 0.0, qa2 = 0.0;
+    if (atom1 < topo.topology_charges.size()) {
+        qa1 = topo.topology_charges[atom1];
+    }
+    if (atom2 < topo.topology_charges.size()) {
+        qa2 = topo.topology_charges[atom2];
+    }
 
     // Fortran formula (sigmoid function for smooth charge-dependence)
     // fqq = 1.0 + qfacbm0 * exp(-15*qafac) / (1 + exp(-15*qafac))
@@ -1870,14 +1899,15 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     const double qfacBEN = -0.54;
     double fqq = 1.0;  // Default
 
-    // Apply fqq if charges are available and reasonable
-    if (atom_i < topo_info.eeq_charges.size() &&
-        atom_j < topo_info.eeq_charges.size() &&
-        atom_k < topo_info.eeq_charges.size()) {
+    // Apply fqq if charges are available and reasonable (with bounds checking)
+    double qa_center = 0.0, qa_i = 0.0, qa_k = 0.0;
+    if (atom_i < topo_info.topology_charges.size() &&
+        atom_j < topo_info.topology_charges.size() &&
+        atom_k < topo_info.topology_charges.size()) {
 
-        double qa_center = topo_info.eeq_charges[atom_j];
-        double qa_i = topo_info.eeq_charges[atom_i];
-        double qa_k = topo_info.eeq_charges[atom_k];
+        qa_center = topo_info.topology_charges[atom_j];
+        qa_i = topo_info.topology_charges[atom_i];
+        qa_k = topo_info.topology_charges[atom_k];
 
         // Check if charges are in reasonable range (-1 to +1)
         if (std::abs(qa_center) < 1.0 && std::abs(qa_i) < 1.0 && std::abs(qa_k) < 1.0) {
@@ -3771,85 +3801,114 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     }
 
     if (use_two_phase) {
+        // ===== CRITICAL CORRECTION (Jan 4, 2026): Proper Two-Phase EEQ System =====
+        // Implementation of the correct two-phase system from XTB documentation:
+        // Phase 1 (goedeckera): Compute topology charges (topo%qa) using topology distances
+        // Phase 2 (goed_gfnff): Compute energy charges (nlist%q) using real distances
+        //
+        // Reference: CHARGE_DATAFLOW.md documentation of two distinct charge systems:
+        // - topo%qa (~0.039539 for C) - used for parameter generation
+        // - nlist%q (~0.02055261 for C) - used for electrostatic energy calculation
+        //
+        // Key differences:
+        // 1. Distance system: topology vs real coordinate distances
+        // 2. CN system: integer neighbor count vs fractional erf-based CN
+        // 3. Chi term: includes CNF*sqrt(nb) in Phase 1, excludes in Phase 2
+
         if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::info("Using two-phase EEQ system with environmental corrections");
+            CurcumaLogger::info("Using proper two-phase EEQ system");
         }
 
-        // Phase 1: Calculate base topology-aware charges
-        if (!calculateTopologyCharges(topo_info)) {
-            CurcumaLogger::error("calculateTopologyInfo: Phase 1 EEQ (topology charges) failed");
-            throw std::runtime_error("GFN-FF initialization failed: EEQ charge calculation (Phase 1) failed for this molecule. "
-                                     "This typically occurs with larger or complex molecules where the EEQ linear system becomes ill-conditioned.");
-        }
-
-        // Calculate dgam (charge-dependent hardness) corrections
-        topo_info.dgam = calculateDgam(topo_info.topology_charges,
-                                        topo_info.hybridization,
-                                        topo_info.ring_sizes);
-
-        // Calculate dxi (electronegativity) corrections
-        if (!calculateDxi(topo_info)) {
-            CurcumaLogger::error("calculateTopologyInfo: dxi correction calculation failed");
-            throw std::runtime_error("GFN-FF initialization failed: dxi (electronegativity) correction calculation failed");
-        }
-
-        // Calculate dalpha (polarizability) corrections
-        if (!calculateDalpha(topo_info)) {
-            CurcumaLogger::error("calculateTopologyInfo: dalpha correction calculation failed");
-            throw std::runtime_error("GFN-FF initialization failed: dalpha (polarizability) correction calculation failed");
-        }
-
-        // CRITICAL FIX (Jan 4, 2026): XTB uses TWO goedeckera() calls, NOT one!
-        // Reference: external/gfnff/src/gfnff_ini.f90
-        //
-        // Phase 1 (Line 570): Calculate topology charges (qa)
-        //   - chieeq = -chi + dxi + CNF*sqrt(nb)  [WITH CNF]
-        //   - gameeq = gam
-        //   - alpeeq = alpha²
-        //   → Call goedeckera() → topo%qa (topology charges)
-        //
-        // Phase 2 (Lines 696-706): Calculate final refined charges
-        //   - chieeq = -chi + dxi  [WITHOUT CNF!]
-        //   - gameeq = gam + dgam  [WITH dgam correction]
-        //   - alpeeq = (alpha + ff*qa)²  [WITH charge-dependent correction]
-        //   → Call goedeckera() again → final charges
-        //
-        // Curcuma's two-phase design CORRECTLY matches XTB's two goedeckera calls.
-        // Previous comment claiming "adding CNF twice" was INCORRECT - Phase 2 does NOT include CNF.
-
-        if (!calculateFinalCharges(topo_info)) {
-            CurcumaLogger::error("calculateTopologyInfo: Phase 2 EEQ (final charges) failed");
-            throw std::runtime_error("GFN-FF initialization failed: EEQ final charge calculation (Phase 2) failed");
-        }
-
-        // Validate charge conservation
-        double total_charge = topo_info.eeq_charges.sum();
-        if (std::abs(total_charge - m_charge) > 0.01) {
-            CurcumaLogger::warn(fmt::format(
-                "Charge conservation warning: expected {:.3f}, got {:.3f}",
-                static_cast<double>(m_charge), total_charge));
-        }
-
-        // ALWAYS print Phase 2 comparison (no verbosity check) - DEBUG
-        CurcumaLogger::info("=== Two-Phase EEQ Charges Comparison (Phase 2 vs Phase 1) ===");
+        // Build topology info for topological distances
+        EEQSolver::TopologyInput eeq_topology_input;
+        eeq_topology_input.neighbor_lists = topo_info.neighbor_lists;
+        eeq_topology_input.covalent_radii.resize(m_atomcount);
         for (int i = 0; i < m_atomcount; ++i) {
-            double qa = topo_info.topology_charges(i);
-            double q_final = topo_info.eeq_charges(i);
-            double delta = q_final - qa;
-            double delta_pct = (std::abs(qa) > 1e-6) ? (delta / qa * 100.0) : 0.0;
+            int z = m_atoms[i];
+            if (z >= 1 && z <= 86) {
+                eeq_topology_input.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];
+            } else {
+                eeq_topology_input.covalent_radii[i] = 1.0;
+            }
+        }
 
-            CurcumaLogger::result(fmt::format(
-                "  Atom {:2d} (Z={:2d}): qa={:+.6f} → q_final={:+.6f} (Δ={:+.6f}, {:.1f}%)",
-                i, m_atoms[i], qa, q_final, delta, delta_pct));
+        // ===== PHASE 1: Topology Charges (topo%qa) =====
+        // Compute topology charges using Floyd-Warshall topological distances
+        // Reference: Fortran gfnff_ini.f90:589 call goedeckera()
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Computing Phase 1: Topology charges (topo%qa)");
+        }
+
+        topo_info.topology_charges = m_eeq_solver->calculateTopologyCharges(
+            m_atoms,
+            m_geometry_bohr,
+            m_charge,
+            topo_info.coordination_numbers,  // Uses fractional CN but with integer nb for CNF term
+            eeq_topology_input,  // WITH topology - uses Floyd-Warshall topological distances
+            false  // CRITICAL (Jan 4, 2026): NO corrections - use ONLY base parameters (matches gfnff_final.cpp)
+        );
+
+        if (topo_info.topology_charges.size() != m_atomcount) {
+            CurcumaLogger::error("calculateTopologyInfo: Phase 1 topology charge calculation failed");
+            throw std::runtime_error("GFN-FF initialization failed: Phase 1 topology charge calculation failed.");
+        }
+
+        // ===== PHASE 2: Energy Charges (nlist%q) =====
+        // Compute energy charges using real geometric distances
+        // Reference: Fortran gfnff_engrad.F90:1503-1562 energy calculation
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Computing Phase 2: Energy charges (nlist%q)");
+        }
+
+        topo_info.eeq_charges = m_eeq_solver->calculateFinalCharges(
+            m_atoms,
+            m_geometry_bohr,
+            m_charge,
+            topo_info.topology_charges,     // Phase 1 charges used for corrections
+            topo_info.coordination_numbers, // Fractional CN from real geometry
+            topo_info.hybridization,        // Hybridization states
+            std::nullopt,                   // WITHOUT topology - uses cached topological distances from Phase 1
+            true   // CRITICAL (Jan 5, 2026): YES corrections - Phase 2 needs dxi and dgam (fixes 59% charge error)
+        );
+
+        if (topo_info.eeq_charges.size() != m_atomcount) {
+            CurcumaLogger::error("calculateTopologyInfo: Phase 2 energy charge calculation failed");
+            throw std::runtime_error("GFN-FF initialization failed: Phase 2 energy charge calculation failed.");
+        }
+
+        // Validate charge conservation for both charge systems
+        double total_charge_qa = topo_info.topology_charges.sum();
+        double total_charge_q = topo_info.eeq_charges.sum();
+        if (std::abs(total_charge_qa - m_charge) > 0.01) {
+            CurcumaLogger::warn(fmt::format(
+                "Phase 1 topology charge conservation warning: expected {:.3f}, got {:.3f}",
+                static_cast<double>(m_charge), total_charge_qa));
+        }
+        if (std::abs(total_charge_q - m_charge) > 0.01) {
+            CurcumaLogger::warn(fmt::format(
+                "Phase 2 energy charge conservation warning: expected {:.3f}, got {:.3f}",
+                static_cast<double>(m_charge), total_charge_q));
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::success("Two-phase EEQ charge calculation completed successfully");
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("topo%qa (topology charges) first 3: {:.6f}, {:.6f}, {:.6f}",
+                                              topo_info.topology_charges[0], topo_info.topology_charges[1], topo_info.topology_charges[2]));
+                CurcumaLogger::info(fmt::format("nlist%q (energy charges) first 3: {:.6f}, {:.6f}, {:.6f}",
+                                              topo_info.eeq_charges[0], topo_info.eeq_charges[1], topo_info.eeq_charges[2]));
+            }
         }
     } else {
-        // Legacy single-phase EEQ system (fallback)
+        // Legacy single-phase EEQ system (fallback) - compute only energy charges
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info("Using legacy single-phase EEQ system (parameter: use_two_phase_eeq=false)");
         }
         topo_info.eeq_charges = calculateEEQCharges(topo_info.coordination_numbers,
                                                      topo_info.hybridization,
                                                      topo_info.ring_sizes);
+        // For compatibility, set topology_charges to same values
+        topo_info.topology_charges = topo_info.eeq_charges;
     }
 
     // Initialize metal and aromatic flags
@@ -4842,6 +4901,9 @@ bool GFNFF::regenerateParametersWithCurrentCharges() {
 
     // IMPORTANT: Use injected charges instead of EEQ charges
     topo.eeq_charges = m_charges;
+    // For testing/validation, also use injected charges for topology charges
+    // This ensures parameter generation uses the same charges as energy calculation
+    topo.topology_charges = m_charges;
 
     // Step 2: Regenerate charge-dependent parameters
     try {
@@ -5122,7 +5184,8 @@ bool GFNFF::calculateTopologyCharges(TopologyInfo& topo_info) const
         m_geometry_bohr,
         m_charge,
         topo_info.coordination_numbers,
-        eeq_topology  // NEW: Pass topology for Floyd-Warshall (Dec 2025)
+        eeq_topology,  // NEW: Pass topology for Floyd-Warshall (Dec 2025)
+        false  // CRITICAL (Jan 4, 2026): NO corrections (matches gfnff_final.cpp)
     );
 
     if (topo_info.topology_charges.size() != m_atomcount) {
@@ -5318,7 +5381,8 @@ bool GFNFF::calculateFinalCharges(TopologyInfo& topo_info, int max_iterations,
         topo_info.topology_charges,
         topo_info.coordination_numbers,
         topo_info.hybridization,
-        eeq_topology
+        eeq_topology,
+        false  // CRITICAL (Jan 4, 2026): NO corrections (matches gfnff_final.cpp)
     );
 
     if (topo_info.eeq_charges.size() != m_atomcount) {

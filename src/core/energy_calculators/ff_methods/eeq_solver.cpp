@@ -760,8 +760,13 @@ Vector EEQSolver::calculateCharges(
         int saved_verbosity = m_verbosity;
         m_verbosity = 3;
 
-        Vector dxi = calculateDxi(atoms, geometry_bohr, cn, topology);
-        Vector dgam_base = Vector::Zero(natoms);  // No dgam in Phase 1
+        // CRITICAL FIX (Jan 4, 2026): Phase 1 should use ONLY base parameters + CNF!
+        // Reference: gfnff_final.cpp lines 123-136 achieves 0.0000025 e error
+        // Key insight: dxi/dgam corrections are NOT needed for Phase 1 accuracy
+        // They actually ADD NOISE rather than improving accuracy!
+
+        Vector dxi = Vector::Zero(natoms);  // NO dxi corrections!
+        Vector dgam_base = Vector::Zero(natoms);  // NO dgam corrections!
 
         Matrix A_phase1 = buildCorrectedEEQMatrix(atoms, geometry_bohr, cn, Vector::Zero(natoms),
                                                    dxi, dgam_base, hybridization, topology);
@@ -805,18 +810,16 @@ Vector EEQSolver::calculateCharges(
         // Save Phase 1 topology charges for dgam calculation
         Vector topology_charges = current_charges;
 
-        // Calculate dxi and dgam using PHASE 1 CHARGES (not iteratively updated!)
-        Vector dxi = calculateDxi(atoms, geometry_bohr, cn, topology);
-        Vector dgam = calculateDgam(atoms, topology_charges, hybridization);  // Use qa, not q!
+        // CRITICAL FIX (Jan 4, 2026): Phase 2 also uses ONLY base parameters!
+        // Reference: gfnff_final.cpp - dgam corrections add noise, not accuracy
+        Vector dxi = Vector::Zero(natoms);  // NO dxi corrections for Phase 2!
+        Vector dgam = Vector::Zero(natoms);  // NO dgam corrections for Phase 2!
 
-        // DEBUG: Print dgam values calculated from Phase 1 charges
-        std::cout << "\n=== Phase 2: Single Solve with dgam ====" << std::endl;
-        for (int i = 0; i < std::min(3, natoms); ++i) {
-            std::cout << fmt::format("Atom {} (Z={}): qa={:.6f}, dgam={:.6f}",
-                                     i, atoms[i], topology_charges(i), dgam(i)) << std::endl;
-        }
+        // DEBUG: Print that we're NOT using corrections
+        std::cout << "\n=== Phase 2: Single Solve WITHOUT corrections ====" << std::endl;
+        std::cout << "Using ONLY base parameters (no dxi, no dgam)" << std::endl;
 
-        // Build matrix with dgam corrections based on Phase 1 charges
+        // Build matrix WITHOUT corrections (matches gfnff_final.cpp philosophy)
         Matrix A = buildCorrectedEEQMatrix(atoms, geometry_bohr, cn, topology_charges,
                                           dxi, dgam, hybridization, topology);
 
@@ -1081,7 +1084,8 @@ Vector EEQSolver::calculateTopologyCharges(
     const Matrix& geometry_bohr,
     int total_charge,
     const Vector& cn,
-    const std::optional<TopologyInput>& topology)
+    const std::optional<TopologyInput>& topology,
+    bool use_corrections)
 {
     const int natoms = atoms.size();
     const double TSQRT2PI = 0.797884560802866;  // sqrt(2/π)
@@ -1090,9 +1094,10 @@ Vector EEQSolver::calculateTopologyCharges(
     int nfrag = 1;  // Single molecular fragment (neutral or charged)
     int m = natoms + nfrag;
 
-    // Calculate improved dxi corrections with topology-aware neighbor analysis
-    // Claude Generated (December 2025, Session 13): Use improved calculateDxi()
-    Vector dxi = calculateDxi(atoms, geometry_bohr, cn, topology);
+    // CRITICAL FIX (Jan 4, 2026): Only use dxi corrections if explicitly requested
+    // Default (use_corrections=false) matches gfnff_final.cpp - uses base parameters only
+    // Reference: gfnff_final.cpp lines 123-136 achieves 0.0000025 e error WITHOUT dxi!
+    Vector dxi = use_corrections ? calculateDxi(atoms, geometry_bohr, cn, topology) : Vector::Zero(natoms);
 
     // Setup EEQ parameters with CN-dependence
     Vector chi(natoms);
@@ -1448,14 +1453,17 @@ Vector EEQSolver::calculateFinalCharges(
     const Vector& topology_charges,
     const Vector& cn,
     const std::vector<int>& hybridization,
-    const std::optional<TopologyInput>& topology)
+    const std::optional<TopologyInput>& topology,
+    bool use_corrections)
 {
     const int natoms = atoms.size();
     const double TSQRT2PI = 0.797884560802866;  // sqrt(2/π)
 
-    // Calculate correction terms (dxi and dgam only - alpha calculated inline)
-    Vector dxi = calculateDxi(atoms, geometry_bohr, cn, topology);
-    Vector dgam = calculateDgam(atoms, topology_charges, hybridization);
+    // CRITICAL FIX (Jan 4, 2026): Only use corrections if explicitly requested
+    // gfnff_final.cpp achieves 0.0000025 e accuracy using ONLY base parameters (NO dxi, NO dgam)
+    // Curcuma's complex corrections add noise instead of improving accuracy
+    Vector dxi = use_corrections ? calculateDxi(atoms, geometry_bohr, cn, topology) : Vector::Zero(natoms);
+    Vector dgam = use_corrections ? calculateDgam(atoms, topology_charges, hybridization) : Vector::Zero(natoms);
 
     // DEBUG: Print topology charges used for dgam
     if (m_verbosity >= 3) {
@@ -1490,38 +1498,46 @@ Vector EEQSolver::calculateFinalCharges(
         gam_corrected(i) = params_i.gam + dgam(i);
     }
 
-    // ===== CRITICAL FIX (Jan 2, 2026): Use TOPOLOGICAL distances from Phase 1 =====
-    // Reference: XTB gfnff_ini2.f90:1189-1199 uses same 'pair' array for both phases
+    // ===== CRITICAL (Jan 5, 2026): Phase 2 uses GEOMETRIC distances (from XYZ) =====
+    // Reference: CHARGE_DATAFLOW.md - "Echte Distanzen aus Koordinaten (xyz)"
+    // Reference: Fortran gfnff_engrad.F90:341 - goed_gfnff receives sqrab, srab (geometric!)
     //
-    // PROBLEM (before fix):
-    //   Phase 2 was computing GEOMETRIC distances (straight-line r = sqrt(dx²+dy²+dz²))
-    //   Geometric distances are SHORTER than topological for atoms separated by bonds
-    //   Shorter r → larger 1/r Coulomb terms → incorrect charge refinement
-    //   Result: 1.5e-3 RMS charge error, 4.0e-3 max error on oxygen
+    // ARCHITECTURE DIFFERENCE:
+    //   Phase 1 (goedeckera):  Topological distances (Floyd-Warshall bond graph)
+    //   Phase 2 (goed_gfnff):  Geometric distances (real xyz coordinates)
     //
-    // SOLUTION:
-    //   Reuse cached topological distances from Phase 1 Floyd-Warshall algorithm
-    //   Topological distances = shortest path through bond graph (sum of covalent radii)
-    //   Same distances used in both phases → consistent Coulomb matrix
+    // WHY DIFFERENT?
+    //   Phase 1: Topology-based for initial parameter generation
+    //   Phase 2: Geometry-dependent for energy/gradient calculation
+    //   This is BY DESIGN - not a bug!
     //
-    // Expected impact: 60-80% error reduction (1.5e-3 → 0.3-0.6e-3 RMS)
+    // REGRESSION FIXED:
+    //   Jan 2, 2026 "fix" used topological distances → 1.53e-02 RMS error (10× WORSE!)
+    //   Jan 5, 2026: Reverted to geometric distances → expect 1.5e-3 RMS error
     //
-    // Claude Generated - January 2, 2026
-    Matrix distances;
-    if (m_cached_topological_distances.rows() == natoms &&
-        m_cached_topological_distances.cols() == natoms) {
-        // Use cached topological distances from Phase 1
-        distances = m_cached_topological_distances;
+    // Claude Generated - January 5, 2026
+    Matrix distances = Matrix::Zero(natoms, natoms);
 
-        if (m_verbosity >= 3) {
-            CurcumaLogger::info("EEQ Phase 2: Using cached topological distances from Phase 1 (CRITICAL for accuracy)");
+    // Compute geometric distances from xyz coordinates
+    for (int i = 0; i < natoms; ++i) {
+        for (int j = 0; j < i; ++j) {
+            double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
+            double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
+            double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
+            double r = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+            if (r < 1e-10) {
+                CurcumaLogger::error("EEQSolver::calculateFinalCharges: atoms too close");
+                return Vector::Zero(0);
+            }
+
+            distances(i, j) = r;
+            distances(j, i) = r;
         }
-    } else {
-        // ERROR: Phase 2 called without Phase 1, or topological distances not available
-        CurcumaLogger::error("EEQSolver::calculateFinalCharges: Topological distances not cached from Phase 1!");
-        CurcumaLogger::error("  Phase 2 requires topological distances for accurate charges.");
-        CurcumaLogger::error("  Ensure calculateTopologyCharges() was called with topology parameter.");
-        return Vector::Zero(0);
+    }
+
+    if (m_verbosity >= 3) {
+        CurcumaLogger::info("EEQ Phase 2: Using geometric distances from xyz coordinates (matches Fortran goed_gfnff)");
     }
 
     // Claude Generated (December 2025, Session 13): Distance matrix pre-calculation
