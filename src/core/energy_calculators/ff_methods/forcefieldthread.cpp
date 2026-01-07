@@ -272,6 +272,7 @@ void ForceFieldThread::addGFNFFDispersion(const GFNFFDispersion& dispersion)
         CurcumaLogger::info(fmt::format("Thread {} adding GFNFF dispersion pair {}-{}", m_thread, dispersion.i, dispersion.j));
     }
     m_gfnff_dispersions.push_back(dispersion);
+    m_dispersion_enabled = true;  // CRITICAL (Jan 7, 2026): Enable dispersion calculation
 }
 
 void ForceFieldThread::addGFNFFBondedRepulsion(const GFNFFRepulsion& repulsion)
@@ -1054,7 +1055,12 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         // (Extra torsions are calculated separately in CalculateGFNFFExtraTorsionContribution)
         double dphi1 = phi - phi0;  // Angle deviation from reference
         double c1 = n * dphi1 + M_PI;  // XTB formula: always add +π for primary torsions
-        double et = V * (1 + cos(c1));
+
+        // CRITICAL (Jan 7, 2026): Torsion formula requires 0.5 factor
+        // Reference: XTB gfnff_engrad.F90:1108-1111
+        // Formula: E = V/2 * [1 - cos(n*(φ - φ₀))] * damp
+        // Using cos(x+π) = -cos(x): E = V/2 * (1 + cos(n*(φ - φ₀) + π)) * damp
+        double et = 0.5 * V * (1 + cos(c1));
         double energy = et * damp;
 
         primary_torsion_energy += energy * m_dihedral_scaling;  // Claude Generated (Jan 2, 2026): Accumulate primary
@@ -1188,7 +1194,9 @@ void ForceFieldThread::CalculateGFNFFExtraTorsionContribution()
         double dphi1 = phi - phi0;
         const double pi = M_PI;
         double c1 = n * dphi1 + pi;  // Claude Generated (Jan 2, 2026): Added missing +π term (matches Fortran line 1269)
-        double et = V * (1 + cos(c1));
+
+        // CRITICAL (Jan 7, 2026): Extra torsions also need 0.5 factor (same as primary)
+        double et = 0.5 * V * (1 + cos(c1));
         double energy = et * damp;
 
         // Accumulate extra torsion energy separately
@@ -1304,6 +1312,7 @@ void ForceFieldThread::CalculateGFNFFDispersionContribution()
 
         double energy = (E_C6 + E_C8) * m_final_factor;
         m_dispersion_energy += energy;
+        m_d4_energy += energy;  // CRITICAL (Jan 7, 2026): GFN-FF dispersion reports as D4 energy
 
         if (m_calculate_gradient) {
             // Analytical gradient: dE/dr = dE_C6/dr + dE_C8/dr
