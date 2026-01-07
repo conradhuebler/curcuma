@@ -1606,27 +1606,6 @@ Vector EEQSolver::calculateFinalCharges(
                 alpha_base = 0.915779;  // Phase 2: (0.915779)² = 0.838652
             }
 
-            // Calculate charge-dependent ff factor (from XTB gfnff_ini.f90:699-705)
-            double ff = 0.0;
-            if (z_i == 6) {  // Carbon
-                ff = 0.09;
-            } else if (z_i == 7) {  // Nitrogen
-                ff = -0.21;
-            } else if (z_i > 10 && z_i <= 86) {  // Heavy atoms only
-                int group = periodic_group[z_i - 1];
-                int imetal_val = metal_type[z_i - 1];
-
-                if (group == 6) {  // Chalcogens (O, S, Se, Te, Po)
-                    ff = -0.03;
-                } else if (group == 7) {  // Halogens (F, Cl, Br, I, At)
-                    ff = 0.50;
-                } else if (imetal_val == 1) {  // Main group metals
-                    ff = 0.3;
-                } else if (imetal_val == 2) {  // Transition metals
-                    ff = -0.1;
-                }
-            }
-
             // CRITICAL (Jan 7, 2026): Phase 2 alpha parameters
             // Unlike dxi/dgam, alpha is NOT charge-corrected in Phase 2 energy calculation
             // Reference: XTB gfnff_engrad.F90:1507-1520 uses topo%alpeeq unchanged

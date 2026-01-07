@@ -430,9 +430,7 @@ bool GFNFF::initializeForceField()
 
     // Claude Generated (Dec 26, 2025): Try loading from cache BEFORE expensive EEQ/topology calculation
     // Note: Cache file stores method as "gfnff" regardless of wrapper (cgfnff/gfnff)
-    std::cerr << "DEBUG: About to try loading from cache..." << std::endl;
     if (m_forcefield && m_forcefield->tryLoadAutoParameters("gfnff")) {
-        std::cerr << "DEBUG: *** CACHE LOADED *** - skipping parameter generation!" << std::endl;
         if (CurcumaLogger::get_verbosity() >= 1) {
             CurcumaLogger::success("Loaded from cache - skipping EEQ/topology calculation");
         }
@@ -449,7 +447,6 @@ bool GFNFF::initializeForceField()
 
         return true;
     }
-    std::cerr << "DEBUG: Cache miss - will generate parameters" << std::endl;
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Cache miss - calculating topology (bonds, angles, torsions, inversions)...");
@@ -660,18 +657,6 @@ json GFNFF::generateGFNFFParameters()
                                                          topo_info.eeq_charges.data() + topo_info.eeq_charges.size());
 
         // Use calculated charges instead of loading from file
-        // DEBUG (Claude Generated Jan 2, 2026): Check if charges are actually calculated
-        std::cerr << "\n=== CHARGE ASSIGNMENT DEBUG ===" << std::endl;
-        std::cerr << "topo_info.eeq_charges.size() = " << topo_info.eeq_charges.size() << std::endl;
-        if (topo_info.eeq_charges.size() > 0) {
-            std::cerr << "First 5 EEQ charges: ";
-            for (int idx = 0; idx < std::min(5, (int)topo_info.eeq_charges.size()); ++idx) {
-                std::cerr << topo_info.eeq_charges(idx) << " ";
-            }
-            std::cerr << std::endl;
-        }
-        std::cerr << "================================\n" << std::endl;
-
         // NOTE: m_charges already set at line 499 BEFORE torsion generation!
         // (Claude Generated Jan 2, 2026): This was the bug - charges were set AFTER torsions
 
@@ -827,7 +812,6 @@ json GFNFF::generateGFNFFBonds() const
                 bond["exponent"] = bond_params.alpha;  // Phase 1.3: store α in exponent field
                 bond["rabshift"] = bond_params.rabshift;  // Claude Generated (Dec 2025): Store vbond(1) for validation
                 bond["fqq"] = bond_params.fqq;  // Claude Generated (Jan 7, 2026): Store charge-dependent factor
-                std::cerr << "DEBUG generateGFNFFBonds: Setting rabshift=" << bond_params.rabshift << " for bond " << i << "-" << j << std::endl;
 
                 bonds.push_back(bond);
             }
@@ -3238,7 +3222,6 @@ json GFNFF::generateTopologyAwareBonds(const Vector& cn, const std::vector<int>&
                 bond["exponent"] = bond_params.alpha;
                 bond["rabshift"] = bond_params.rabshift;  // Claude Generated (Dec 2025): Store vbond(1) for validation
                 bond["fqq"] = bond_params.fqq;  // Claude Generated (Jan 7, 2026): Store charge-dependent factor
-                std::cerr << "DEBUG generateTopologyAwareBonds: Setting rabshift=" << bond_params.rabshift << " for bond " << i << "-" << j << std::endl;
 
                 bonds.push_back(bond);
             }
@@ -5070,7 +5053,6 @@ void GFNFF::setAngleParametersForTesting(const json& angle_params) {
 bool GFNFF::getVBondParameters(int bond_index, double& shift, double& alpha, double& force_constant) const
 {
     if (!m_forcefield) {
-        std::cerr << "DEBUG getVBondParameters: m_forcefield is NULL!" << std::endl;
         return false;
     }
 
@@ -5079,7 +5061,6 @@ bool GFNFF::getVBondParameters(int bond_index, double& shift, double& alpha, dou
 
     // Check if bonds exist
     if (!ff_params.contains("bonds") || !ff_params["bonds"].is_array()) {
-        std::cerr << "DEBUG getVBondParameters: bonds missing or not array" << std::endl;
         return false;
     }
 
@@ -5087,18 +5068,11 @@ bool GFNFF::getVBondParameters(int bond_index, double& shift, double& alpha, dou
 
     // Check if bond_index is valid
     if (bond_index < 0 || bond_index >= bonds.size()) {
-        std::cerr << "DEBUG getVBondParameters: bond_index " << bond_index << " out of range (size=" << bonds.size() << ")" << std::endl;
         return false;
     }
 
     // Get the specific bond
     json bond = bonds[bond_index];
-
-    std::cerr << "DEBUG bond JSON keys: ";
-    for (auto it = bond.begin(); it != bond.end(); ++it) {
-        std::cerr << it.key() << " ";
-    }
-    std::cerr << std::endl;
 
     // Extract the calculated parameters from the force field
     // Claude Generated (Dec 2025): Extract vbond parameters for validation testing
@@ -5115,11 +5089,6 @@ bool GFNFF::getVBondParameters(int bond_index, double& shift, double& alpha, dou
 
         return true;
     }
-
-    std::cerr << "DEBUG getVBondParameters: Missing keys - r0_ij=" << bond.contains("r0_ij")
-              << " exponent=" << bond.contains("exponent")
-              << " fc=" << bond.contains("fc")
-              << " rabshift=" << bond.contains("rabshift") << std::endl;
 
     return false;
 }

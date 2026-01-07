@@ -626,30 +626,6 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     // Formula: fctot = (f1 + 10*torsf[2]*f2) * fqq * fij * fkl
     double fctot = (f1 + 10.0 * torsf_pi * f2) * fqq * fij * fkl;
 
-    // DEBUG: Print detailed breakdown for ALL torsions (Claude Generated Jan 2, 2026)
-    static int debug_torsion_count = 0;
-    if (debug_torsion_count < 3) {  // Print first 3 torsions
-        std::cerr << "\n=== TORSION PARAMETER DEBUG #" << debug_torsion_count << ": "
-                  << z_i << "-" << z_j << "-" << z_k << "-" << z_l << " ===" << std::endl;
-        debug_torsion_count++;
-        std::cerr << "  f1 = " << f1 << " (base)" << std::endl;
-        std::cerr << "  f2 = " << f2 << " (pi factor)" << std::endl;
-        std::cerr << "  torsf_pi = " << torsf_pi << " (pi scaling)" << std::endl;
-        std::cerr << "  fqq = " << fqq << " (charge correction)" << std::endl;
-        std::cerr << "    qa_j = " << qa_j << ", qa_k = " << qa_k << std::endl;
-        std::cerr << "    |qa_j * qa_k| = " << std::abs(qa_j * qa_k) << std::endl;
-        std::cerr << "    qfacTOR = " << qfacTOR << std::endl;
-        std::cerr << "  fij = " << fij << " (tors[" << z_j << "] * tors[" << z_k << "])" << std::endl;
-        std::cerr << "    tors[" << z_j << "] = " << tors_angewChem2020[z_j-1] << std::endl;
-        std::cerr << "    tors[" << z_k << "] = " << tors_angewChem2020[z_k-1] << std::endl;
-        std::cerr << "  fkl = " << fkl << " (tors2 product with CN correction)" << std::endl;
-        std::cerr << "    tors2[" << z_i << "] = " << tors2_angewChem2020[z_i-1] << std::endl;
-        std::cerr << "    tors2[" << z_l << "] = " << tors2_angewChem2020[z_l-1] << std::endl;
-        std::cerr << "    CN_i = " << cn_i << ", CN_l = " << cn_l << std::endl;
-        std::cerr << "  fctot = " << fctot << " Eh (XTB reference: 0.147739)" << std::endl;
-        std::cerr << "=========================================\n" << std::endl;
-    }
-
     // Check threshold (gfnff_ini.f90:1898)
     if (fctot < fcthr) {
         params.barrier_height = 0.0;
@@ -1019,18 +995,7 @@ void GFNFF::calculateDihedralGradient(
  */
 json GFNFF::generateGFNFFTorsions() const
 {
-    std::cerr << "============================================================" << std::endl;
-    std::cerr << "generateGFNFFTorsions() CALLED - Starting torsion generation" << std::endl;
-    std::cerr << "m_charges.rows() = " << m_charges.rows() << std::endl;
-    if (m_charges.rows() > 0) {
-        std::cerr << "First 5 charges: ";
-        for (int idx = 0; idx < std::min(5, (int)m_charges.rows()); ++idx) {
-            std::cerr << m_charges(idx) << " ";
-        }
-        std::cerr << std::endl;
-    }
-    std::cerr << "============================================================" << std::endl;
-
+    const TopologyInfo& topo = getCachedTopology();
     json torsions = json::array();
 
     // ==========================================================================
@@ -1038,7 +1003,6 @@ json GFNFF::generateGFNFFTorsions() const
     // ==========================================================================
     // Claude Generated (Jan 2, 2026): Use cached bond list for bond type access
     // This allows btyp < 5 filtering for extra torsions
-    const TopologyInfo& topo = getCachedTopology();
     const std::vector<std::pair<int, int>>& bond_list = getCachedBondList();
     const std::vector<int>& bond_types = topo.bond_types;
 
@@ -1189,22 +1153,22 @@ json GFNFF::generateGFNFFTorsions() const
                     cn_l_val = topo.coordination_numbers(l);
                 }
 
-                // Get actual EEQ charges (critical for fqq correction!)
-                double qa_j = (j < m_charges.rows()) ? m_charges(j) : 0.0;
-                double qa_k = (k < m_charges.rows()) ? m_charges(k) : 0.0;
+                // Get actual topology charges (critical for fqq correction!)
+                double qa_j = (j < topo.topology_charges.rows()) ? topo.topology_charges(j) : 0.0;
+                double qa_k = (k < topo.topology_charges.rows()) ? topo.topology_charges(k) : 0.0;
 
                 // DEBUG: Check if charges are available (first torsion only)
                 static bool charge_debug_printed = false;
                 if (!charge_debug_printed && i == 0) {
                     if (CurcumaLogger::get_verbosity() >= 3) {
                         CurcumaLogger::info("\nCHARGE DEBUG:");
-                        CurcumaLogger::info(fmt::format("  m_charges.rows() = {}", m_charges.rows()));
-                        if (m_charges.rows() > 0) {
+                        CurcumaLogger::info(fmt::format("  topo.topology_charges.rows() = {}", topo.topology_charges.rows()));
+                        if (topo.topology_charges.rows() > 0) {
                             CurcumaLogger::info(fmt::format("  qa_j (atom {}) = {:.6f}", j, qa_j));
                             CurcumaLogger::info(fmt::format("  qa_k (atom {}) = {:.6f}", k, qa_k));
-                            std::string charges_str = "  All charges: [";
-                            for (int idx = 0; idx < std::min(6, (int)m_charges.rows()); ++idx) {
-                                charges_str += fmt::format("{:.4f} ", m_charges(idx));
+                            std::string charges_str = "  All topology charges: [";
+                            for (int idx = 0; idx < std::min(6, (int)topo.topology_charges.rows()); ++idx) {
+                                charges_str += fmt::format("{:.4f} ", topo.topology_charges(idx));
                             }
                             CurcumaLogger::info(charges_str + "]");
                         }
@@ -1278,25 +1242,11 @@ json GFNFF::generateGFNFFTorsions() const
     const double torsf_extra_N =  0.70;  // Nitrogen sp3-sp3 (GFN-FF original)
     const double torsf_extra_O = -2.00;  // Oxygen sp3-sp3 (GFN-FF original)
 
-    // ALWAYS print this for debugging (Claude Generated Jan 2, 2026)
-    std::cerr << "========================================" << std::endl;
-    std::cerr << "EXTRA TORSION DEBUG: Checking " << generated_torsions.size() << " primary torsions for sp3-sp3 candidates" << std::endl;
-    std::cerr << "========================================" << std::endl;
-
     for (const auto& tors_array : generated_torsions) {
         int i = tors_array[0];
         int j = tors_array[1];
         int k = tors_array[2];
         int l = tors_array[3];
-
-        // DEBUG: Always print for first few torsions (Claude Generated Jan 2, 2026)
-        static int debug_count = 0;
-        bool debug_this = (debug_count < 10);
-        if (debug_this) {
-            std::cerr << "EXTRA DEBUG #" << debug_count << ": Checking torsion "
-                      << i << "-" << j << "-" << k << "-" << l << std::endl;
-            debug_count++;
-        }
 
         // ======================================================================
         // Condition 1: ALL atoms (central AND outer) must be sp3 (hyb==3)
@@ -1317,19 +1267,7 @@ json GFNFF::generateGFNFFTorsions() const
         bool sp3_l = (hybridization[l] == 3);  // NOT || m_atoms[l] == 1
         bool sp3_kl = sp3_i && sp3_l;
 
-        if (debug_this) {
-            std::cerr << "  Hybridizations: i=" << hybridization[i] << " j=" << hybridization[j]
-                      << " k=" << hybridization[k] << " l=" << hybridization[l]
-                      << " | Z: i=" << m_atoms[i] << " j=" << m_atoms[j]
-                      << " k=" << m_atoms[k] << " l=" << m_atoms[l] << std::endl;
-            std::cerr << "  sp3_ij=" << sp3_ij << " sp3_i=" << sp3_i
-                      << " sp3_l=" << sp3_l << " sp3_kl=" << sp3_kl << std::endl;
-        }
-
         if (!sp3_ij || !sp3_kl) {
-            if (debug_this) {
-                std::cerr << "  → FAILED Condition 1 (not sp3-sp3)" << std::endl;
-            }
             continue;
         }
 
@@ -1338,14 +1276,7 @@ json GFNFF::generateGFNFFTorsions() const
         // ======================================================================
         int ring_size;
         if (areAtomsInSameRing(j, k, ring_size)) {
-            if (debug_this) {
-                std::cerr << "  → FAILED Condition 2 (in ring, size=" << ring_size << ")" << std::endl;
-            }
             continue;  // Skip ring torsions
-        }
-
-        if (debug_this) {
-            std::cerr << "  ✓ PASSED Condition 2 (acyclic)" << std::endl;
         }
 
         // ======================================================================
@@ -1369,22 +1300,12 @@ json GFNFF::generateGFNFFTorsions() const
         }
 
         if (central_bond_idx == -1) {
-            if (debug_this) {
-                std::cerr << "  → ERROR: Could not find bond " << j << "-" << k << " in bond list" << std::endl;
-            }
             continue;
         }
 
         int btyp = bond_types[central_bond_idx];
         if (btyp >= 5) {
-            if (debug_this) {
-                std::cerr << "  → FAILED Condition 3 (btyp=" << btyp << " >= 5, metal bond)" << std::endl;
-            }
             continue;  // Skip metal-containing bonds
-        }
-
-        if (debug_this) {
-            std::cerr << "  ✓ PASSED Condition 3 (btyp=" << btyp << " < 5, non-metal)" << std::endl;
         }
 
         // ======================================================================
@@ -1451,8 +1372,8 @@ json GFNFF::generateGFNFFTorsions() const
         }
 
         // Calculate fqq (charge correction)
-        double qa_j = (j < m_charges.rows()) ? m_charges(j) : 0.0;
-        double qa_k = (k < m_charges.rows()) ? m_charges(k) : 0.0;
+        double qa_j = (j < topo.topology_charges.rows()) ? topo.topology_charges(j) : 0.0;
+        double qa_k = (k < topo.topology_charges.rows()) ? topo.topology_charges(k) : 0.0;
         double fqq = 1.0 + std::abs(qa_j * qa_k) * qfacTOR;
 
         // Final barrier (DIFFERENT from primary torsion formula!)
