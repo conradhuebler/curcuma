@@ -141,7 +141,8 @@ public:
         const Matrix& geometry_bohr,
         int total_charge,
         const Vector& cn,
-        const std::optional<TopologyInput>& topology = std::nullopt
+        const std::optional<TopologyInput>& topology = std::nullopt,
+        bool use_corrections = false  // CRITICAL FIX (Jan 4, 2026): default false to match gfnff_final.cpp
     );
 
     /**
@@ -150,15 +151,17 @@ public:
      * Single linear solve (matches XTB gfnff_ini.f90:699-706) with corrected parameters:
      * - chi' = chi + dxi(environment)
      * - gam' = gam + dgam(charge-dependent, uses topology_charges)
-     * - alpha' = (alpha_base + ff*topology_charges)² (calculated ONCE, not iteratively)
+     * - alpha' = alpha_base² (BASE VALUE, NOT charge-corrected!)
      *
-     * Alpha is calculated using Phase-1 topology charges (qa), making this a
-     * LINEAR problem instead of non-linear iterative SCF.
+     * CRITICAL (Jan 7, 2026): Alpha uses BASE values in Phase 2, unlike Phase 1c which
+     * applies alpha' = (alpha_base + ff*qa)². This is the key difference between topology
+     * and energy charge calculations. The dxi/dgam corrections are applied, but alpha
+     * remains constant to maintain numerical stability.
      *
      * @param atoms Atomic numbers
      * @param geometry_bohr Coordinates in Bohr
      * @param total_charge Total molecular charge
-     * @param topology_charges Phase-1 charges (qa) used for alpha calculation
+     * @param topology_charges Phase-1 charges (qa) used for dgam calculation (NOT for alpha!)
      * @param cn Coordination numbers
      * @param hybridization Hybridization states (1=sp, 2=sp2, 3=sp3)
      * @param topology Optional topology information for integer neighbor counts in CNF calculation
@@ -171,7 +174,8 @@ public:
         const Vector& topology_charges,
         const Vector& cn,
         const std::vector<int>& hybridization,
-        const std::optional<TopologyInput>& topology = std::nullopt
+        const std::optional<TopologyInput>& topology = std::nullopt,
+        bool use_corrections = false  // CRITICAL FIX (Jan 4, 2026): default false to match gfnff_final.cpp
     );
 
     /**
@@ -405,4 +409,6 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "Verbosity level (0=silent, 1=basic, 2=detailed, 3=debug)", "Output", {})
     PARAM(calculate_cn, Bool, true,
           "Auto-calculate coordination numbers if not provided", "Algorithm", {})
+    PARAM(use_iterative_refinement, Bool, false,
+          "Use iterative refinement for EEQ Phase 2", "Algorithm", {})
 END_PARAMETER_DEFINITION
