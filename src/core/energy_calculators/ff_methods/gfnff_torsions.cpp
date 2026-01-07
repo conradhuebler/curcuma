@@ -428,6 +428,9 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
         return params;
     }
 
+    // NOTE (Jan 8, 2026): Hydrogen count correction is applied later at line ~526
+    // using proper neighbor list counting (section E: "Hydrogen count refinement")
+
     // ---------------------------------------------------------------------------
     // (B) Outer atom contribution: fkl = tors2[Z_i] * tors2[Z_l]
     // ---------------------------------------------------------------------------
@@ -483,32 +486,48 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     // For now: f2 = 0 (conservative, slightly underestimates conjugated systems)
 
     // ---------------------------------------------------------------------------
-    // (E) Hydrogen count refinement (NEW - from reference: gfnff_ini.f90:1778-1786)
+    // (E) Hydrogen count refinement (FIXED Jan 8, 2026 - from reference: gfnff_ini.f90:1778-1786)
     // ---------------------------------------------------------------------------
-    // f1 = f1 * (nhi * nhj)^0.07 where nhi/nhj are H atoms attached to j/k
-    // This accounts for H-substitution effects on torsion barriers
-    int nhi = 1, nhj = 1;  // Default: central atoms themselves
+    // fij = fij * (nhi * nhj)^0.07 where nhi/nhj = 1 + number of H atoms attached to j/k
+    // This accounts for H-substitution effects on torsion barriers (steric/hyperconjugation)
+    //
+    // CRITICAL FIX: Use bond list instead of neighbor_lists
+    // Previous implementation relied on getCachedTopology().neighbor_lists which wasn't
+    // populated at parameter generation time, causing f_hydrogen to always be 1.0
+    //
+    // Reference: Fortran gfnff_ini.f90:1805
+    //   nhi = 1
+    //   do ineig = 1,topo%nb(20,ii)
+    //     if (at(topo%nb(ineig,ii)) .eq. 1) nhi = nhi+1
+    //   end do
+    //   fij = fij*(dble(nhi)*dble(nhj))**0.07
+
+    int nhi = 1, nhj = 1;  // Default: 1 (Fortran convention - central atom counts as 1)
 
     if (j_atom_idx >= 0 && k_atom_idx >= 0 && j_atom_idx < m_atomcount && k_atom_idx < m_atomcount) {
-        // Count H atoms attached to central atoms
-        const TopologyInfo& topo = getCachedTopology();
-        if (topo.neighbor_lists.size() > j_atom_idx) {
-            for (int neighbor : topo.neighbor_lists[j_atom_idx]) {
-                if (neighbor < m_atoms.size() && m_atoms[neighbor] == 1) {  // H atom
-                    nhi++;
-                }
+        // Count H neighbors using bond list (always available, doesn't depend on topology cache)
+        const auto& bond_list = getCachedBondList();
+        for (const auto& bond : bond_list) {
+            // Check if bond connects j_atom to an H
+            if ((bond.first == j_atom_idx && bond.second < m_atoms.size() && m_atoms[bond.second] == 1) ||
+                (bond.second == j_atom_idx && bond.first < m_atoms.size() && m_atoms[bond.first] == 1)) {
+                nhi++;
             }
-        }
-        if (topo.neighbor_lists.size() > k_atom_idx) {
-            for (int neighbor : topo.neighbor_lists[k_atom_idx]) {
-                if (neighbor < m_atoms.size() && m_atoms[neighbor] == 1) {  // H atom
-                    nhj++;
-                }
+            // Check if bond connects k_atom to an H
+            if ((bond.first == k_atom_idx && bond.second < m_atoms.size() && m_atoms[bond.second] == 1) ||
+                (bond.second == k_atom_idx && bond.first < m_atoms.size() && m_atoms[bond.first] == 1)) {
+                nhj++;
             }
         }
 
-        // Apply H-count correction (gfnff_ini.f90:1786)
-        fij *= std::pow(double(nhi) * double(nhj), 0.07);
+        // Apply H-count correction (gfnff_ini.f90:1805)
+        double h_scaling = std::pow(static_cast<double>(nhi * nhj), 0.07);
+        fij *= h_scaling;
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("  H-count correction: atom j={} (nhi={}), atom k={} (nhj={}), scaling={:.4f}",
+                                             j_atom_idx, nhi, k_atom_idx, nhj, h_scaling));
+        }
     }
 
     // ---------------------------------------------------------------------------
@@ -638,10 +657,11 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     // DEBUG OUTPUT (December 2025)
     if (fctot > 0.001) {  // Only print significant values
         if (CurcumaLogger::get_verbosity() >= 3) {
+            double fij_base = tors_angewChem2020[z_j-1] * tors_angewChem2020[z_k-1];  // Base value BEFORE H-correction
             CurcumaLogger::info(fmt::format("TORSION DEBUG: i={}, j={}, k={}, l={} (Z={},{},{},{})",
                                              z_i, z_j, z_k, z_l, z_i, z_j, z_k, z_l));
-            CurcumaLogger::info(fmt::format("  tors[{}]={:.6f}, tors[{}]={:.6f}, fij={:.6f}",
-                                             z_j, tors_angewChem2020[z_j-1], z_k, tors_angewChem2020[z_k-1], fij));
+            CurcumaLogger::info(fmt::format("  tors[{}]={:.6f}, tors[{}]={:.6f}, fij_base={:.6f}, fij_corrected={:.6f}",
+                                             z_j, tors_angewChem2020[z_j-1], z_k, tors_angewChem2020[z_k-1], fij_base, fij));
             CurcumaLogger::info(fmt::format("  tors2[{}]={:.6f}, tors2[{}]={:.6f}, fkl_raw={:.6f}",
                                              z_i, tors2_angewChem2020[z_i-1], z_l, tors2_angewChem2020[z_l-1],
                                              tors2_angewChem2020[z_i-1] * tors2_angewChem2020[z_l-1]));
@@ -1202,7 +1222,7 @@ json GFNFF::generateGFNFFTorsions() const
                 // Previous keys: "periodicity", "barrier", "phase" → caused ALL torsion energies = 0
                 // Loader expects: "n", "V", "phi0" (from Dihedral struct in forcefield.cpp:444-461)
                 torsion["n"] = params.periodicity;          // Periodicity (was "periodicity")
-                torsion["V"] = params.barrier_height;       // Barrier height in kcal/mol (was "barrier")
+                torsion["V"] = params.barrier_height;       // Barrier height in Hartree (corrected Jan 8, 2026)
                 torsion["phi0"] = params.phase_shift;       // Phase shift in radians (was "phase")
                 torsion["is_improper"] = params.is_improper;
 
