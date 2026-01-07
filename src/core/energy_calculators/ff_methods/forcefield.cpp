@@ -462,6 +462,7 @@ void ForceField::setBonds(const json& bonds)
 
         b.fc = bond["fc"];
         b.rabshift = bond.value("rabshift", 0.0);  // Claude Generated (Dec 2025): Load vbond(1) with default 0.0
+        b.fqq = bond.value("fqq", 1.0);  // Claude Generated (Jan 7, 2026): Load charge-dependent factor with default 1.0
         m_bonds.push_back(b);
     }
 }
@@ -1241,6 +1242,7 @@ json ForceField::exportCurrentParameters() const
         b["r0_ij"] = bond.r0_ij;
         b["r0_ik"] = bond.r0_ik;
         b["rabshift"] = bond.rabshift;  // Claude Generated (Dec 2025): Store vbond(1) for validation
+        b["fqq"] = bond.fqq;  // Claude Generated (Jan 7, 2026): Store charge-dependent factor for validation
         bonds.push_back(b);
     }
     output["bonds"] = bonds;

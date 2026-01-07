@@ -826,6 +826,7 @@ json GFNFF::generateGFNFFBonds() const
                 bond["r0_ik"] = 0.0; // Not used in GFN-FF but required by ForceField
                 bond["exponent"] = bond_params.alpha;  // Phase 1.3: store α in exponent field
                 bond["rabshift"] = bond_params.rabshift;  // Claude Generated (Dec 2025): Store vbond(1) for validation
+                bond["fqq"] = bond_params.fqq;  // Claude Generated (Jan 7, 2026): Store charge-dependent factor
                 std::cerr << "DEBUG generateGFNFFBonds: Setting rabshift=" << bond_params.rabshift << " for bond " << i << "-" << j << std::endl;
 
                 bonds.push_back(bond);
@@ -996,13 +997,15 @@ int GFNFF::classifyBondType(int atom_i, int atom_j, int hyb_i, int hyb_j,
 
     // TM metal-metal bonds (both are transition metals)
     // Simplified: If both are metals, assume TM-TM
+    // TODO: Check reference implementation for imetal flag
     // Full implementation would check imetal == 2 (transition metal flag)
     if (is_metal_i && is_metal_j) {
         btyp = 7; // TM metal-metal
     }
 
+    // TODO implement eta-complex detection
     // Eta-complexes (special metal coordination)
-    // Full implementation needs itag and piadr from topology
+    // Full implementation needs itag and piadr from topology 
     // Skipped for now (btyp = 6) - rare case
 
     return btyp;
@@ -1253,27 +1256,33 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     }
 
     // X-sp3 hybridization correction (Fortran gfnff_ini.f90:1146-1147)
-    // CRITICAL FIX (Nov 2025): When one atom is sp (hyb=1) and the other is sp3 (hyb=3)
+    // CRITICAL FIX (Jan 7, 2026): When one atom is sp/H (hyb=0) and the other is sp3 (hyb=3)
     // This correction applies to C-H bonds and similar sp3-sp configurations
-    // Note: Curcuma uses hyb=1 for sp (not hyb=0 like Fortran)
+    // Reference: XTB uses hyb=0 for H/sp atoms
     int hyb1_value = topo.hybridization[atom1];
     int hyb2_value = topo.hybridization[atom2];
-    if ((hyb1_value == 3 && hyb2_value == 1) || (hyb1_value == 1 && hyb2_value == 3)) {
+    if ((hyb1_value == 3 && hyb2_value == 0) || (hyb1_value == 0 && hyb2_value == 3)) {
         shift -= 0.022;  // sp3-sp bond correction
     }
 
     double rabshift = gen_rabshift + shift;  // Total shift in Bohr
 
-    // VERIFIED (Dec 31, 2025): Correct shift application order
-    // Reference: external/xtb/src/gfnff/gfnff_rab.f90:141
-    //   Formula: rab(k) = (ra + rb + shift) * ff
-    //   Shift is applied BEFORE ff multiplication (not after)
-    // Claude Generated (Dec 31, 2025): Fixed +7.05% bond energy error
-    double rtmp = (ra + rb + rabshift) * ff;  // Shift BEFORE ff multiplication (matches XTB reference)
-    params.equilibrium_distance = rtmp;
+    // CRITICAL FIX (Jan 7, 2026): Shift application order corrected
+    // Reference: XTB CH3OCH3.log output shows:
+    //   r0 = (rtmp(ij) + topo%vbond(1,i)) * 0.529167
+    //   rtmp(ij) = (ra + rb) * ff  (WITHOUT shift)
+    //   topo%vbond(1,i) = rabshift
+    //   Result is in ANGSTROM after * 0.529167
+    // But we need to store in Bohr for GFN-FF internal use
+    //
+    // Formula: r0_bohr = (ra + rb) * ff + rabshift
+    // NOT: r0_bohr = (ra + rb + rabshift) * ff  (old, incorrect)
+    double rtmp = (ra + rb) * ff;  // Calculate BEFORE applying shift
+    double r0_bohr = rtmp + rabshift;  // Add shift AFTER ff multiplication
+    params.equilibrium_distance = r0_bohr;  // Store in Bohr
     params.rabshift = rabshift;  // Claude Generated (Dec 2025): Store for validation tests
 
-    // CRITICAL DEBUG (Dec 31, 2025): Trace C-H r0 calculation
+    // CRITICAL DEBUG (Jan 7, 2026): Trace C-H r0 calculation with corrected formula
     bool is_CH_bond = ((z1 == 1 && z2 == 6) || (z1 == 6 && z2 == 1));
     if (is_CH_bond && CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format("=== C-H r0 DEBUG: Bond {}-{} ===", atom1, atom2));
@@ -1284,8 +1293,9 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         CurcumaLogger::info(fmt::format("  FF factor: k1={:.6f}, k2={:.6f}, ff={:.6f}", k1, k2, ff));
         CurcumaLogger::info(fmt::format("  Shift: gen_rabshift={:.6f}, shift={:.6f}, total={:.6f}", gen_rabshift, shift, rabshift));
         CurcumaLogger::info(fmt::format("  Hyb: hyb1={}, hyb2={}", hyb1_value, hyb2_value));
-        CurcumaLogger::info(fmt::format("  Formula: r0 = ({:.6f} + {:.6f} + {:.6f}) * {:.6f}", ra, rb, rabshift, ff));
-        CurcumaLogger::info(fmt::format("  Result: r0_bohr={:.6f}, r0_angstrom={:.6f}", rtmp, rtmp * 0.529177));
+        CurcumaLogger::info(fmt::format("  Formula: rtmp = ({:.6f} + {:.6f}) * {:.6f} = {:.6f}", ra, rb, ff, rtmp));
+        CurcumaLogger::info(fmt::format("           r0 = rtmp + rabshift = {:.6f} + {:.6f} = {:.6f} Bohr", rtmp, rabshift, r0_bohr));
+        CurcumaLogger::info(fmt::format("  Result: r0_bohr={:.6f}, r0_angstrom={:.6f}", r0_bohr, r0_bohr * 0.529177));
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -1445,13 +1455,15 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 
     double fqq = 1.0;  // Default: no charge correction
 
-    // Phase 9: Use actual EEQ charges from topology (with bounds checking)
+    // CRITICAL FIX (Jan 7, 2026): Use m_charges for fqq correction
+    // m_charges holds CURRENT charges (auto-calculated OR injected via setCharges)
+    // topo.eeq_charges is stale after setCharges() call - don't use!
     double qa1 = 0.0, qa2 = 0.0;
-    if (atom1 < topo.topology_charges.size()) {
-        qa1 = topo.topology_charges[atom1];
+    if (atom1 < m_charges.size()) {
+        qa1 = m_charges[atom1];
     }
-    if (atom2 < topo.topology_charges.size()) {
-        qa2 = topo.topology_charges[atom2];
+    if (atom2 < m_charges.size()) {
+        qa2 = m_charges[atom2];
     }
 
     // Fortran formula (sigmoid function for smooth charge-dependence)
@@ -1822,6 +1834,9 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         CurcumaLogger::info(fmt::format("  Corrections: fqq={:.4f}, ringf={:.4f}, fheavy={:.4f}, fpi={:.4f}, fxh={:.4f}, fcn={:.4f}",
                                         fqq, ringf, fheavy, fpi, fxh, fcn));
     }
+
+    // CRITICAL FIX (Jan 7, 2026): Store fqq in params for validation/testing
+    params.fqq = fqq;
 
     return params;
 }
@@ -3222,6 +3237,7 @@ json GFNFF::generateTopologyAwareBonds(const Vector& cn, const std::vector<int>&
                 bond["r0_ik"] = 0.0;
                 bond["exponent"] = bond_params.alpha;
                 bond["rabshift"] = bond_params.rabshift;  // Claude Generated (Dec 2025): Store vbond(1) for validation
+                bond["fqq"] = bond_params.fqq;  // Claude Generated (Jan 7, 2026): Store charge-dependent factor
                 std::cerr << "DEBUG generateTopologyAwareBonds: Setting rabshift=" << bond_params.rabshift << " for bond " << i << "-" << j << std::endl;
 
                 bonds.push_back(bond);
@@ -4525,6 +4541,7 @@ json GFNFF::generateGFNFFDispersionPairs() const
 
 json GFNFF::generateD3Dispersion() const
 {
+    // TODO Might me obsolete once D3 and D4 Params are fully integrated
     /**
      * @brief Factory method for D3 dispersion parameter generation
      *
@@ -4649,6 +4666,8 @@ json GFNFF::generateD3Dispersion() const
 
 json GFNFF::generateFreeAtomDispersion() const
 {
+    // TODO Might me obsolete once D3 and D4 Params are fully integrated
+
     /**
      * @brief Fallback dispersion generation using free-atom C6 approximation
      *
@@ -4722,6 +4741,8 @@ json GFNFF::generateFreeAtomDispersion() const
 
 ConfigManager GFNFF::extractDispersionConfig(const std::string& method) const
 {
+    // TODO Might me obsolete once D3 and D4 Params are fully integrated, or check method validity
+
     /**
      * @brief Extract D3/D4 configuration parameters from main GFN-FF config
      *

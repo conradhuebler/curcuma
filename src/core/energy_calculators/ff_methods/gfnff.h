@@ -175,10 +175,36 @@ public:
     bool hasGradient() const { return true; }
 
     /**
-     * @brief Get atomic partial charges
-     * @return Vector of atomic charges
+     * @brief Get atomic partial charges (Phase 2 energy charges - nlist%q)
+     * @return Vector of atomic charges (final energy charges)
+     *
+     * Returns Phase 2 EEQ charges used for energy calculation.
+     * These are the charges used in gradient calculations and for Coulomb energy.
      */
     Vector Charges() const;
+
+    /**
+     * @brief Get topology charges (Phase 1 - topo%qa)
+     * @return Vector of topology charges
+     *
+     * Returns Phase 1 EEQ topology charges used for parameter generation.
+     * These charges use integer neighbor count and are used to compute
+     * corrections for bonds, angles, and other topological terms.
+     *
+     * Claude Generated (January 4, 2026)
+     */
+    Vector getTopologyCharges() const;
+
+    /**
+     * @brief Get energy charges (Phase 2 - nlist%q)
+     * @return Vector of energy charges
+     *
+     * Alias for Charges() - returns Phase 2 EEQ charges.
+     * Provided for clarity when comparing both charge types.
+     *
+     * Claude Generated (January 4, 2026)
+     */
+    Vector getEnergyCharges() const { return Charges(); }
 
     /**
      * @brief Get bond orders (Wiberg bond orders)
@@ -386,6 +412,7 @@ private:
         double equilibrium_distance;  // r₀ reference bond length
         double alpha;                 // α exponential decay parameter (was: anharmonic_factor)
         double rabshift;              // Claude Generated (Dec 2025): vbond(1) = gen%rabshift + shift
+        double fqq;                   // Claude Generated (Jan 7, 2026): charge-dependent force constant factor
     };
 
     struct GFNFFAngleParams {

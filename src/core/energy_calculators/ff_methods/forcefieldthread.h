@@ -51,6 +51,7 @@ struct Bond {
     int i = 0, j = 0, k = 0, distance = 0;
     double fc = 0, exponent = 0, r0_ij = 0, r0_ik = 0;
     double rabshift = 0.0;  // Claude Generated (Dec 2025): GFN-FF rabshift (vbond(1)) for validation
+    double fqq = 1.0;       // Claude Generated (Jan 7, 2026): GFN-FF charge-dependent force constant factor
 };
 
 struct Angle {
