@@ -100,6 +100,12 @@ private:
     /*! \brief Detect if molecule has chain/polymer structure */
     bool detectChainStructure(const Molecule& mol);
 
+    /*! \brief Calculate scattering properties P(q) and S(q) - Claude Generated 2025 */
+    json calculateScatteringProperties(const Molecule& mol);
+
+    /*! \brief Calculate radial distribution function g(r) - Claude Generated 2025 */
+    json calculatePairDistribution(const Molecule& mol);
+
     /*! \brief Output results in requested format */
     void outputResults(const json& results);
 
@@ -127,6 +133,12 @@ private:
     PARAM(statistics, String, "none", "Statistics mode: none|cumulative|moving|all", "Trajectory", { "stats" })
     PARAM(window, Int, 10, "Moving average window size", "Trajectory", {})
 
+    // Frame selection and stride options - Claude Generated 2026
+    PARAM(frames, String, "", "Frame selection (e.g., '1:5,8,10:12', 'last' or '1:-1'=all, 'N:N'=single)", "Trajectory", {})
+    PARAM(stride, Int, 1, "Analyze every N-th frame from selection", "Trajectory", {})
+    PARAM(frame_range_start, Int, 0, "Alternative: Start frame (used if 'frames' empty)", "Trajectory", {"start_frame"})
+    PARAM(frame_range_end, Int, -1, "Alternative: End frame, -1=last (used if 'frames' empty)", "Trajectory", {"end_frame"})
+
     // Enhanced topological analysis options - Claude Generated
     PARAM(topological_save_distance_matrix, Bool, false, "Save distance matrix (.dMat files)", "Topology", {})
     PARAM(topological_save_persistence_pairs, Bool, false, "Save persistence pairs (.pairs files)", "Topology", {})
@@ -144,6 +156,32 @@ private:
     PARAM(topological_damping, Double, 1.5, "Damping strength for processing", "Topology Advanced", {})
     PARAM(topological_preserve_structure, Bool, true, "Maintain original structure during processing", "Topology Advanced", {})
     PARAM(topological_atom_selection, String, "", "Atom indices for selective analysis (e.g., 1;5-10;15)", "Topology", {})
+
+    // Scattering analysis options - Claude Generated 2025
+    PARAM(scattering_enable, Bool, false, "Enable P(q)/S(q) scattering analysis", "Scattering", {})
+    PARAM(scattering_q_min, Double, 0.01, "Minimum q value (Å⁻¹)", "Scattering", {"qmin"})
+    PARAM(scattering_q_max, Double, 2.0, "Maximum q value (Å⁻¹)", "Scattering", {"qmax"})
+    PARAM(scattering_q_steps, Int, 100, "Number of q points", "Scattering", {"qsteps"})
+    PARAM(scattering_form_factor, String, "auto", "Form factor type: auto|cromer_mann|cg_sphere", "Scattering", {"ff"})
+    PARAM(scattering_cg_radius, Double, 3.0, "CG bead radius for sphere form factor (Å)", "Scattering Advanced", {})
+    PARAM(scattering_angular_samples, Int, 50, "Angular samples for S(q) spherical averaging", "Scattering Advanced", {})
+
+    // Per-frame scattering file output options - Claude Generated 2026
+    PARAM(scattering_per_frame_files, Bool, false, "Generate separate CSV files for each frame", "Scattering", {})
+    PARAM(scattering_q_values, String, "", "Comma-separated q-values to export (e.g., 0.0,0.1,0.5,1.0,2.0)", "Scattering", {})
+    PARAM(scattering_output_directory, String, ".", "Directory for per-frame files", "Scattering", {})
+    PARAM(scattering_file_prefix, String, "scattering_frame", "Prefix for generated files", "Scattering", {})
+
+    // Radial distribution function options - Claude Generated 2025
+    PARAM(rdf_enable, Bool, false, "Enable g(r) radial distribution function calculation", "RDF", {})
+    PARAM(rdf_r_max, Double, 15.0, "Maximum r for g(r) (Å)", "RDF", {"rmax"})
+    PARAM(rdf_bin_width, Double, 0.05, "Histogram bin width (Å)", "RDF", {"dr"})
+    PARAM(rdf_coordination_shells, Bool, false, "Calculate running coordination number n(r)", "RDF", {})
+
+    // Shape descriptor options - Claude Generated 2025
+    PARAM(shape_asphericity, Bool, false, "Calculate asphericity descriptor (b = λ₃ - 0.5(λ₁+λ₂))", "Shape", {})
+    PARAM(shape_acylindricity, Bool, false, "Calculate acylindricity descriptor (c = λ₂ - λ₁)", "Shape", {})
+    PARAM(shape_anisotropy, Bool, false, "Calculate relative shape anisotropy (κ²)", "Shape", {})
 
     END_PARAMETER_DEFINITION
     // ^^^^^^^^^^^^ PARAMETER DEFINITION BLOCK ^^^^^^^^^^^^

@@ -50,6 +50,16 @@ public:
     void writeToFile(const std::string& filename, Format format, const json& data) const;
     void writeMultipleFiles(const std::string& base_filename, const json& data) const;
 
+    // Scattering per-frame file output helpers - Claude Generated 2026
+    bool writeScatteringPerFrameFiles(const json& timestep_data,
+                                     const std::string& output_directory,
+                                     const std::string& file_prefix) const;
+
+    // Cross-frame scattering statistics aggregation - Claude Generated 2026
+    bool writeScatteringStatistics(const json& trajectory_data,
+                                   const std::string& output_directory,
+                                   const std::string& file_prefix) const;
+
     // Configuration methods
     void setDefaultFormat(Format format) { m_default_format = format; }
     void setPrecision(int decimal_places);
@@ -78,6 +88,17 @@ public:
         const std::vector<int>& frame_numbers = {});
 
 private:
+    // Helper struct for per-q-point statistics - Claude Generated 2026
+    struct QPointStatistics {
+        std::vector<double> P_q_values;  // Store all frames for median
+        std::vector<double> S_q_values;  // Store all frames for median
+        double P_q_sum = 0.0;            // For mean calculation
+        double S_q_sum = 0.0;
+        double P_q_M2 = 0.0;             // For std dev (Welford)
+        double S_q_M2 = 0.0;
+        int count = 0;                   // Number of frames
+    };
+
     json m_config;
     Format m_default_format;
     int m_precision;
@@ -99,6 +120,33 @@ private:
     std::string formatValueCSV(double value) const;
     std::string getMetricDisplayName(const std::string& metric) const;
     std::vector<int> getMetricColumnCount(const std::vector<std::string>& metrics) const;
+
+    // Safe JSON handling helpers
+    double safeGetDouble(const json& j, double default_value = 0.0) const;
+    double safeGetNestedDouble(const json& j, const std::string& key, double default_value = 0.0) const;
+    bool isValidNumber(const json& j) const;
+    bool isValidNestedNumber(const json& j, const std::string& key) const;
+
+    // Scattering-specific helper functions
+    double safeGetScatteringValue(const json& scattering, const std::string& key, double default_value = 0.0) const;
+    std::vector<double> extractArrayValues(const json& array, const std::vector<int>& indices) const;
+    std::vector<double> extractSampledArrayValues(const json& array, int sampling_rate) const;
+    std::string formatArrayForHuman(const std::vector<double>& values, int width = 9, int precision = 6) const;
+    std::string formatArrayForCSV(const std::vector<double>& values, int precision = 6) const;
+
+    // Scattering per-frame file output helpers - Claude Generated 2026
+    std::vector<int> mapQValuesToIndices(const std::vector<double>& user_q_values,
+                                        const json& q_values_array) const;
+    std::vector<std::pair<double, double>> extractScatteringDataAtIndices(
+                                        const json& scattering_data,
+                                        const std::vector<int>& indices,
+                                        const std::string& data_type) const;
+    std::vector<double> parseQValueString(const std::string& q_value_str) const;
+
+    // Array statistics helpers
+    double calculateMean(const json& array) const;
+    double calculateMin(const json& array) const;
+    double calculateMax(const json& array) const;
 
     // Statistics helpers
     bool metricAvailable(const json& timestep, const std::string& metric) const;
