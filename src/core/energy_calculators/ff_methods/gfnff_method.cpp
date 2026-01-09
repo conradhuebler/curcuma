@@ -21,6 +21,7 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/elements.h"
 #include "src/core/units.h"
+#include "src/core/functional_groups.h"  // Claude Generated (January 10, 2026): Amide detection
 
 // Claude Generated (December 2025): D3/D4 dispersion integration
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
@@ -2246,22 +2247,31 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
         else if (hyb == 3) {
             // Check if nitrogen is in π-system
             if (npi > 0) {
-                // TODO: Amide detection requires functional group analysis
-                // For now, use simplified logic based on pi-neighbors
+                // Phase 2C Complete: Amide detection (January 10, 2026)
+                // Reference: gfnff_ini.f90:1616-1622
+                // Uses FunctionalGroupDetector for exact Fortran amide() port
+                FunctionalGroupDetector detector(m_atomcount, m_atoms,
+                                                topo_info.neighbor_lists,
+                                                topo_info.hybridization,
+                                                topo_info.pi_fragments);
 
-                // If we can detect amide (C=O bonded to N), use special parameters
-                // Simplified: assume non-amide for now
-                r0_deg = 113.0;
+                bool is_amide = detector.isAmideNitrogen(atom_j);
 
-                // TODO: Full implementation needs π-bond order sum: sumppi = pbo(N-i) + pbo(N-k)
-                // f2 = 1.0 - sumppi*0.7
-                // For now, use base f2=1.0 (no pi bond order data available yet)
-                f2 = 1.0;
+                if (is_amide) {
+                    // Amide nitrogen (peptide bond): N(sp³) bonded to C(π) with C=O
+                    r0_deg = 115.0;  // Wider angle for amide planarity
+                    f2 = 1.2;        // Stronger force constant for amide resonance
+                } else {
+                    // Non-amide π-conjugated nitrogen (aniline, pyrrole, etc.)
+                    r0_deg = 113.0;
 
-                // NOTE: Complete amide detection would check:
-                // - Is nitrogen bonded to sp² carbon?
-                // - Does that carbon have C=O double bond?
-                // If yes: r0=115°, f2=1.2
+                    // TODO (Phase 2C Future): π-bond order sum for precise f2
+                    // Full formula: sumppi = pbo(lin(atom_j,atom_i)) + pbo(lin(atom_j,atom_k))
+                    //               f2 = 1.0 - sumppi*0.7
+                    // Requires: Hückel calculation for π-bond orders (~200 lines)
+                    // Decision: Defer unless required for >1% accuracy gain
+                    f2 = 1.0;  // Simplified: no π-bond order data available
+                }
             }
             else {
                 // Saturated pyramidal nitrogen (NH3, NR3)
