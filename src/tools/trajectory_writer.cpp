@@ -1566,7 +1566,8 @@ bool TrajectoryWriter::writeScatteringPerFrameFiles(const json& timestep_data,
 // Cross-frame scattering statistics aggregation - Claude Generated 2026
 bool TrajectoryWriter::writeScatteringStatistics(const json& trajectory_data,
                                                 const std::string& output_directory,
-                                                const std::string& file_prefix) const
+                                                const std::string& file_prefix,
+                                                bool include_median) const
 {
     if (!trajectory_data.contains("timesteps") || !trajectory_data["timesteps"].is_array()) {
         return false;
@@ -1628,9 +1629,11 @@ bool TrajectoryWriter::writeScatteringStatistics(const json& trajectory_data,
 
             auto& stats = q_stats[i];
 
-            // Store for median calculation
-            stats.P_q_values.push_back(p_val);
-            stats.S_q_values.push_back(s_val);
+            // Store for median calculation (only if memory-efficient mode disabled)
+            if (include_median) {
+                stats.P_q_values.push_back(p_val);
+                stats.S_q_values.push_back(s_val);
+            }
 
             // Welford's online algorithm for mean and variance
             stats.count++;
@@ -1653,11 +1656,13 @@ bool TrajectoryWriter::writeScatteringStatistics(const json& trajectory_data,
         return false;  // No valid frames
     }
 
-    // Step 4: Calculate median by sorting (requires full series)
-    for (auto& stats : q_stats) {
-        if (!stats.P_q_values.empty()) {
-            std::sort(stats.P_q_values.begin(), stats.P_q_values.end());
-            std::sort(stats.S_q_values.begin(), stats.S_q_values.end());
+    // Step 4: Calculate median by sorting (requires full series) - only if enabled
+    if (include_median) {
+        for (auto& stats : q_stats) {
+            if (!stats.P_q_values.empty()) {
+                std::sort(stats.P_q_values.begin(), stats.P_q_values.end());
+                std::sort(stats.S_q_values.begin(), stats.S_q_values.end());
+            }
         }
     }
 
@@ -1670,8 +1675,13 @@ bool TrajectoryWriter::writeScatteringStatistics(const json& trajectory_data,
     }
 
     // Header
-    stats_file << "# Cross-frame scattering statistics (N=" << frame_count << " frames)\n";
-    stats_file << "# q (Å⁻¹),P_avg,P_std,P_median,S_avg,S_std,S_median\n";
+    std::string mode_note = include_median ? "" : " (memory-efficient, no median)";
+    stats_file << "# Cross-frame scattering statistics (N=" << frame_count << " frames)" << mode_note << "\n";
+    if (include_median) {
+        stats_file << "# q (Å⁻¹),P_avg,P_std,P_median,S_avg,S_std,S_median\n";
+    } else {
+        stats_file << "# q (Å⁻¹),P_avg,P_std,S_avg,S_std\n";
+    }
 
     // Data rows
     for (int i = 0; i < n_qpoints; ++i) {
@@ -1687,29 +1697,42 @@ bool TrajectoryWriter::writeScatteringStatistics(const json& trajectory_data,
         double P_std = (stats.count > 1) ? std::sqrt(stats.P_q_M2 / (stats.count - 1)) : 0.0;
         double S_std = (stats.count > 1) ? std::sqrt(stats.S_q_M2 / (stats.count - 1)) : 0.0;
 
-        // Median
-        double P_median = 0.0;
-        double S_median = 0.0;
-        if (!stats.P_q_values.empty()) {
-            int mid = stats.P_q_values.size() / 2;
-            if (stats.P_q_values.size() % 2 == 0) {
-                P_median = (stats.P_q_values[mid - 1] + stats.P_q_values[mid]) / 2.0;
-                S_median = (stats.S_q_values[mid - 1] + stats.S_q_values[mid]) / 2.0;
-            } else {
-                P_median = stats.P_q_values[mid];
-                S_median = stats.S_q_values[mid];
+        // Write CSV row
+        stats_file << std::fixed << std::setprecision(6) << common_q_values[i] << "," << P_mean << "," << P_std;
+
+        if (include_median) {
+            // Median
+            double P_median = 0.0;
+            double S_median = 0.0;
+            if (!stats.P_q_values.empty()) {
+                int mid = stats.P_q_values.size() / 2;
+                if (stats.P_q_values.size() % 2 == 0) {
+                    P_median = (stats.P_q_values[mid - 1] + stats.P_q_values[mid]) / 2.0;
+                    S_median = (stats.S_q_values[mid - 1] + stats.S_q_values[mid]) / 2.0;
+                } else {
+                    P_median = stats.P_q_values[mid];
+                    S_median = stats.S_q_values[mid];
+                }
             }
+            stats_file << "," << P_median;
         }
 
-        // Write CSV row
-        stats_file << std::fixed << std::setprecision(6)
-                  << common_q_values[i] << ","
-                  << P_mean << ","
-                  << P_std << ","
-                  << P_median << ","
-                  << S_mean << ","
-                  << S_std << ","
-                  << S_median << "\n";
+        stats_file << "," << S_mean << "," << S_std;
+
+        if (include_median) {
+            double S_median = 0.0;
+            if (!stats.S_q_values.empty()) {
+                int mid = stats.S_q_values.size() / 2;
+                if (stats.S_q_values.size() % 2 == 0) {
+                    S_median = (stats.S_q_values[mid - 1] + stats.S_q_values[mid]) / 2.0;
+                } else {
+                    S_median = stats.S_q_values[mid];
+                }
+            }
+            stats_file << "," << S_median;
+        }
+
+        stats_file << "\n";
     }
 
     stats_file.close();

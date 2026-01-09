@@ -1165,10 +1165,12 @@ void UnifiedAnalysis::outputResults(const json& results)
             // Use same configuration as per-frame files
             std::string output_directory = ".";
             std::string file_prefix = "scattering_frame";
+            bool include_median = true;  // Default: include median
 
             try {
                 output_directory = m_config.get<std::string>("scattering_output_directory");
                 file_prefix = m_config.get<std::string>("scattering_file_prefix");
+                include_median = m_config.get<bool>("scattering_stats_include_median");
             } catch (...) {}
 
             json writer_config;
@@ -1176,7 +1178,7 @@ void UnifiedAnalysis::outputResults(const json& results)
             writer_config["precision"] = 3;
 
             TrajectoryWriter writer(writer_config);
-            bool success = writer.writeScatteringStatistics(results, output_directory, file_prefix);
+            bool success = writer.writeScatteringStatistics(results, output_directory, file_prefix, include_median);
             if (success) {
                 CurcumaLogger::success_fmt("Cross-frame scattering statistics saved to: {}/{}_statistics.csv",
                                           output_directory, file_prefix);
@@ -1221,12 +1223,14 @@ void UnifiedAnalysis::outputToFile(const json& results, const std::string& filen
     std::string q_values_str = "";
     std::string output_directory = ".";
     std::string file_prefix = "scattering_frame";
+    bool include_median = true;  // Default: include median - Claude Generated 2026
 
     try {
         per_frame_files = m_config.get<bool>("scattering_per_frame_files");
         q_values_str = m_config.get<std::string>("scattering_q_values");
         output_directory = m_config.get<std::string>("scattering_output_directory");
         file_prefix = m_config.get<std::string>("scattering_file_prefix");
+        include_median = m_config.get<bool>("scattering_stats_include_median");
     } catch (...) {
         per_frame_files = false;
     }
@@ -1259,7 +1263,7 @@ void UnifiedAnalysis::outputToFile(const json& results, const std::string& filen
         }
 
         if (has_scattering) {
-            bool success = writer.writeScatteringStatistics(results, output_directory, file_prefix);
+            bool success = writer.writeScatteringStatistics(results, output_directory, file_prefix, include_median);
             if (success) {
                 CurcumaLogger::success_fmt("Cross-frame scattering statistics saved to: {}/{}_statistics.csv",
                                           output_directory, file_prefix);

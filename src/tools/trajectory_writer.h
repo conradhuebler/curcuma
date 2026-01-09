@@ -58,7 +58,8 @@ public:
     // Cross-frame scattering statistics aggregation - Claude Generated 2026
     bool writeScatteringStatistics(const json& trajectory_data,
                                    const std::string& output_directory,
-                                   const std::string& file_prefix) const;
+                                   const std::string& file_prefix,
+                                   bool include_median = true) const;
 
     // Configuration methods
     void setDefaultFormat(Format format) { m_default_format = format; }

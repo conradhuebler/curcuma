@@ -172,6 +172,9 @@ private:
     PARAM(scattering_output_directory, String, ".", "Directory for per-frame files", "Scattering", {})
     PARAM(scattering_file_prefix, String, "scattering_frame", "Prefix for generated files", "Scattering", {})
 
+    // Cross-frame statistics options - Claude Generated 2026
+    PARAM(scattering_stats_include_median, Bool, true, "Include median in cross-frame statistics (disable for memory efficiency)", "Scattering", {})
+
     // Radial distribution function options - Claude Generated 2025
     PARAM(rdf_enable, Bool, false, "Enable g(r) radial distribution function calculation", "RDF", {})
     PARAM(rdf_r_max, Double, 15.0, "Maximum r for g(r) (Å)", "RDF", {"rmax"})
