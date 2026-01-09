@@ -1921,17 +1921,52 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     }
 
     // Factor 3: f2 = element-specific correction factor
-    // PHASE 4: Implement element-specific f2 for water (gfnff_ini.f90:1486-1491)
-    // Water with 2 hydrogens: f2 = 1.20
-    // TODO: Complete all element-specific corrections from gfnff_ini.f90:1463-1599
-    double f2 = 1.0;  // Default
-    // Water case: O with H-O-H angle and both neighbors are H
-    if (m_atoms[atom_j] == 8) {  // Central atom is oxygen
-        int nh = 0;  // Count hydrogens
-        if (m_atoms[atom_i] == 1) nh++;
-        if (m_atoms[atom_k] == 1) nh++;
-        if (nh == 2) f2 = 1.20;  // H2O specific: f2 = 1.20 (gfnff_ini.f90:1491)
+    // Claude Generated (January 10, 2026): Phase 2A-2B Implementation
+    // Reference: XTB gfnff_ini.f90:1486-1599 (115 lines of element-specific logic)
+    // Physical meaning: Element and environment corrections for angle stiffness
+
+    double f2 = 1.0;  // Default value
+
+    // Count neighbor element types for atom_i and atom_k
+    int nh = 0;   // Hydrogen neighbors
+    int no = 0;   // Oxygen neighbors
+    int nc = 0;   // Carbon neighbors
+    int nnn = 0;  // Nitrogen neighbors (avoiding collision with nn = coordination number)
+    int nsi = 0;  // Silicon neighbors
+    int nmet = 0; // Metal neighbors
+    int npi = 0;  // Pi-system neighbors
+
+    // Count neighbors on atom_i
+    if (m_atoms[atom_i] == 1) nh++;
+    if (m_atoms[atom_i] == 6) nc++;
+    if (m_atoms[atom_i] == 7) nnn++;
+    if (m_atoms[atom_i] == 8) no++;
+    if (m_atoms[atom_i] == 14) nsi++;
+    if (!topo_info.is_metal.empty() && atom_i < topo_info.is_metal.size() && topo_info.is_metal[atom_i]) nmet++;
+    if (!topo_info.pi_fragments.empty() && atom_i < topo_info.pi_fragments.size() && topo_info.pi_fragments[atom_i] != 0) npi++;
+
+    // Count neighbors on atom_k
+    if (m_atoms[atom_k] == 1) nh++;
+    if (m_atoms[atom_k] == 6) nc++;
+    if (m_atoms[atom_k] == 7) nnn++;
+    if (m_atoms[atom_k] == 8) no++;
+    if (m_atoms[atom_k] == 14) nsi++;
+    if (!topo_info.is_metal.empty() && atom_k < topo_info.is_metal.size() && topo_info.is_metal[atom_k]) nmet++;
+    if (!topo_info.pi_fragments.empty() && atom_k < topo_info.pi_fragments.size() && topo_info.pi_fragments[atom_k] != 0) npi++;
+
+    // Get central atom properties (z_center already declared at line 1855)
+    // Add bounds checking to prevent crashes
+    int hyb = 3;  // Default sp³
+    if (!topo_info.hybridization.empty() && atom_j < topo_info.hybridization.size()) {
+        hyb = topo_info.hybridization[atom_j];  // 1=sp, 2=sp2, 3=sp3, 5=sp3d
     }
+
+    int nn_center = 0;
+    if (topo_info.coordination_numbers.size() > 0 && atom_j < topo_info.coordination_numbers.size()) {
+        nn_center = static_cast<int>(std::round(topo_info.coordination_numbers[atom_j]));
+    }
+
+    // Element-specific f2 corrections (equilibrium angle r0 will be set later)
 
     // Factor 4: fn = coordination number dependence
     // Reference: gfnff_ini.f90:1612
@@ -2087,19 +2122,233 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
         default:  r0_deg = 100.0;   // Fallback
     }
 
-    // Phase 2+: Element-specific corrections
+    // Phase 2A-2B: Element-specific corrections (Claude Generated January 10, 2026)
     // Reference: gfnff_ini.f90:1486-1599
-    // - Water: θ₀=100°, f2=1.20 for H-O-H
-    // - Aromatic: θ₀=120° for aromatic C and Si
-    // - Ring corrections: 3-ring=82°, 4-ring=96°, etc.
-    // - Metal coordination: Special cases for transition metals
+    //
+    // Hypervalent sp3d coordination (e.g., SF6, PCl5)
+    if (hyb == 5) {
+        // r0_deg already set to 90.0 in switch above
+        f2 = 0.11;  // Small force constant - not very important for structure
+        // Check if geometry is actually linear (GEODEP)
+        double current_angle_deg = current_angle * 180.0 / M_PI;
+        const double linear_threshold = 160.0;  // gen%linthr from Fortran
+        if (current_angle_deg > linear_threshold) {
+            r0_deg = 180.0;
+        }
+    }
 
-    // Phase 2+: Element-specific corrections
-    // Reference: gfnff_ini.f90:1486-1599
-    // - Water: θ₀=100°, f2=1.20 for H-O-H
-    // - Aromatic: θ₀=120° for aromatic C and Si
-    // - Ring corrections: 3-ring=82°, 4-ring=96°, etc.
-    // - Metal coordination: Special cases for transition metals
+    // Boron (Z=5): Simple planar/tetrahedral cases
+    // Reference: gfnff_ini.f90:1559-1562
+    else if (z_center == 5) {
+        if (hyb == 3 || hyb == 2) {
+            r0_deg = 115.0;
+            // Keep f2 = 1.0 default
+        }
+    }
+
+    // Carbon (Z=6): Extensive hybridization-dependent cases
+    // Reference: gfnff_ini.f90:1566-1578
+    else if (z_center == 6) {
+        if (hyb == 3) {
+            // sp3 carbon
+            if (nh == 2) {
+                r0_deg = 108.6;  // CHH angles (slightly compressed)
+            }
+            if (no == 1) {
+                r0_deg = 108.5;  // COR angles (ether/alcohol-like)
+            }
+            // Hypervalent coordination (rare, but handle it)
+            if (nn_center > 4) {
+                double current_angle_deg = current_angle * 180.0 / M_PI;
+                const double linear_threshold = 160.0;
+                if (current_angle_deg > linear_threshold) {
+                    r0_deg = 180.0;
+                }
+            }
+        } else if (hyb == 2) {
+            // sp2 carbon
+            if (no == 2) {
+                r0_deg = 122.0;  // COO angles (carboxylate-like)
+            }
+            if (no == 1) {
+                f2 = 0.7;  // C=O weakening (carbonyl)
+            }
+        } else if (hyb == 1) {
+            // sp carbon
+            if (no == 2) {
+                f2 = 2.0;  // CO2 special case - very stiff linear molecule
+            }
+        }
+    }
+
+    // NOTE: Oxygen corrections applied below in existing block
+    // Nitrogen Phase 2C: Complete implementation here
+
+    // Nitrogen (Z=7): Extensive CN and hybridization-dependent cases
+    // Reference: gfnff_ini.f90:1602-1631
+    else if (z_center == 7) {
+        // Get ring membership for nitrogen center
+        int rings_center = 0;
+        if (!topo_info.ring_sizes.empty() && atom_j < topo_info.ring_sizes.size()) {
+            rings_center = topo_info.ring_sizes[atom_j];
+        }
+
+        // CN=2 cases (imines, nitriles, azo compounds)
+        // Reference: gfnff_ini.f90:1602-1611
+        if (nn_center == 2) {
+            f2 = 1.4;       // Base force constant multiplier
+            r0_deg = 115.0; // Base angle
+
+            // In rings: tighter angle
+            if (rings_center != 0) {
+                r0_deg = 105.0;
+            }
+
+            // With oxygen neighbor: even tighter
+            if (no >= 1) {
+                r0_deg = 103.0;
+            }
+
+            // With fluorine neighbor: tightest
+            int nf = 0;
+            if (m_atoms[atom_i] == 9) nf++;
+            if (m_atoms[atom_k] == 9) nf++;
+            if (nf >= 1) {
+                r0_deg = 102.0;
+            }
+
+            // sp linear nitrogen (NC, NNN)
+            if (hyb == 1) {
+                r0_deg = 180.0;
+            }
+
+            // Metal-coordinated linear NN (e.g., N-N on transition metal)
+            // Check if either neighbor is a transition metal AND we have N-N bond
+            bool has_tm_neighbor = false;
+            if (!topo_info.is_metal.empty()) {
+                if (atom_i < topo_info.is_metal.size() && topo_info.is_metal[atom_i]) {
+                    int metal_type_i = (m_atoms[atom_i] >= 1 && m_atoms[atom_i] <= 86) ? metal_type[m_atoms[atom_i]-1] : 0;
+                    if (metal_type_i == 2) has_tm_neighbor = true;
+                }
+                if (atom_k < topo_info.is_metal.size() && topo_info.is_metal[atom_k]) {
+                    int metal_type_k = (m_atoms[atom_k] >= 1 && m_atoms[atom_k] <= 86) ? metal_type[m_atoms[atom_k]-1] : 0;
+                    if (metal_type_k == 2) has_tm_neighbor = true;
+                }
+            }
+
+            if (has_tm_neighbor && hyb == 1 && nnn >= 1) {
+                r0_deg = 135.0;  // M-N≡N coordination
+            }
+        }
+
+        // NR3 cases (sp³ nitrogen)
+        // Reference: gfnff_ini.f90:1613-1631
+        else if (hyb == 3) {
+            // Check if nitrogen is in π-system
+            if (npi > 0) {
+                // TODO: Amide detection requires functional group analysis
+                // For now, use simplified logic based on pi-neighbors
+
+                // If we can detect amide (C=O bonded to N), use special parameters
+                // Simplified: assume non-amide for now
+                r0_deg = 113.0;
+
+                // TODO: Full implementation needs π-bond order sum: sumppi = pbo(N-i) + pbo(N-k)
+                // f2 = 1.0 - sumppi*0.7
+                // For now, use base f2=1.0 (no pi bond order data available yet)
+                f2 = 1.0;
+
+                // NOTE: Complete amide detection would check:
+                // - Is nitrogen bonded to sp² carbon?
+                // - Does that carbon have C=O double bond?
+                // If yes: r0=115°, f2=1.2
+            }
+            else {
+                // Saturated pyramidal nitrogen (NH3, NR3)
+                r0_deg = 104.0;  // Base steep around 106°
+                f2 = 0.40;       // Base force constant (1.0 is better for NH3)
+
+                // Corrections based on substituents
+                f2 += nh * 0.19;  // H neighbors strengthen
+                f2 += no * 0.25;  // O neighbors strengthen more
+                f2 += nc * 0.01;  // C neighbors strengthen slightly
+            }
+        }
+    }
+
+    // Phase 2D: Ring strain corrections (ALL elements)
+    // Reference: gfnff_ini.f90:1635-1649
+    // These override hybridization-based angles for small rings
+
+    int rings_center = 0;
+    if (!topo_info.ring_sizes.empty() && atom_j < topo_info.ring_sizes.size()) {
+        rings_center = topo_info.ring_sizes[atom_j];
+    }
+
+    if (rings_center == 3) {
+        r0_deg = 82.0;  // 3-membered rings: severe strain (60° gives too little)
+    }
+    else if (rings_center == 4) {
+        r0_deg = 96.0;  // 4-membered rings: moderate strain
+    }
+    else if (rings_center == 5 && z_center == 6) {
+        r0_deg = 109.0; // 5-membered rings with carbon center
+    }
+
+    // Special case: R-X in 3-rings (e.g., cyclopropene)
+    // If central atom NOT in ring, but neighbors ARE in 3-rings together
+    // Reference: gfnff_ini.f90:1642-1649
+    if (rings_center == 0) {
+        // Check if neighbors are in rings
+        int rings_i = 0, rings_k = 0;
+        if (!topo_info.ring_sizes.empty()) {
+            if (atom_i < topo_info.ring_sizes.size()) rings_i = topo_info.ring_sizes[atom_i];
+            if (atom_k < topo_info.ring_sizes.size()) rings_k = topo_info.ring_sizes[atom_k];
+        }
+
+        // If both neighbors in 3-rings (e.g., X outside cyclopropene)
+        if (rings_i == 3 && rings_k == 3) {
+            r0_deg += 4.0;  // Widen angle by 4° for ring strain relief
+        }
+    }
+
+    // Triple bond corrections (applies to all elements)
+    // Reference: gfnff_ini.f90:1652-1659
+    bool triple = (hyb == 1);  // sp hybridization indicates triple bond
+
+    if (triple) {
+        f2 = 0.60;  // Base weakening for triple bonds
+
+        // Exception: with nitrogen neighbors, keep strong
+        if (nnn >= 1) {
+            f2 = 1.00;
+        }
+
+        // Metal-alkyne complexes: much stronger
+        // Check if neighbors are transition metals and geometry is linear
+        bool has_tm_carbon_bond = false;
+        if (!topo_info.is_metal.empty()) {
+            // Check if we have M-C≡C or M-C≡N coordination
+            if ((m_atoms[atom_i] == 6 || m_atoms[atom_k] == 6) && z_center == 6) {
+                // Carbon center with carbon neighbor
+                if (atom_i < topo_info.is_metal.size() && topo_info.is_metal[atom_i]) has_tm_carbon_bond = true;
+                if (atom_k < topo_info.is_metal.size() && topo_info.is_metal[atom_k]) has_tm_carbon_bond = true;
+            }
+            if ((m_atoms[atom_i] == 7 || m_atoms[atom_k] == 7) && z_center == 6) {
+                // Carbon center with nitrogen neighbor (M-CN)
+                if (atom_i < topo_info.is_metal.size() && topo_info.is_metal[atom_i]) has_tm_carbon_bond = true;
+                if (atom_k < topo_info.is_metal.size() && topo_info.is_metal[atom_k]) has_tm_carbon_bond = true;
+            }
+        }
+
+        // Check if angle is nearly linear (geometry-dependent)
+        double current_angle_deg = current_angle * 180.0 / M_PI;
+        const double linear_threshold = 160.0;
+
+        if (has_tm_carbon_bond && current_angle_deg > linear_threshold) {
+            f2 = 3.0;  // Very stiff for metal-alkyne/cyanide coordination
+        }
+    }
 
     // Calculate neighbors of central atom for element-specific corrections
     // Claude Generated (Dec 31, 2025): CRITICAL FIX - Use adjacency list from topology!
@@ -2123,7 +2372,8 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     }
 
     // Oxygen corrections: More accurate angle values based on Fortran reference
-    // Reference: gfnff_ini.f90:1560-1575
+    // Reference: gfnff_ini.f90:1582-1598
+    // Phase 2B Extensions (January 10, 2026): Si/metal widening, aromatic ethers
     if (m_atoms[atom_j] == 8) {  // Central atom is oxygen
         // DEBUG: Check neighbors (Claude Generated Dec 31, 2025)
         if (atom_j == 5) {
@@ -2136,28 +2386,42 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
             r0_deg = 104.5;
 
             // H2O case: both neighbors are hydrogen
-            int nh_count = 0;
-            if (m_atoms[atom_i] == 1) nh_count++;
-            if (m_atoms[atom_k] == 1) nh_count++;
-            if (nh_count == 2) {
+            if (nh == 2) {
                 r0_deg = 100.0;  // H-O-H equilibrium angle
+                f2 = 1.20;       // H2O is better with 1.2-1.3
+            }
+
+            // Phase 2B: O-Si widening
+            r0_deg = r0_deg + 7.0 * nsi;  // Oxygen angles widen with Si attached
+
+            // Phase 2B: O-Metal widening
+            r0_deg = r0_deg + 14.0 * nmet;  // Oxygen angles widen even more with M attached
+
+            // Phase 2B: Aromatic ethers (Ph-O-Ph)
+            if (npi == 2) {
+                r0_deg = 109.0;  // More open angle for aromatic substituents
+            }
+
+            // Phase 2B: Metal coordination (M-O-X can be linear)
+            if (nmet > 0) {
+                double current_angle_deg = current_angle * 180.0 / M_PI;
+                const double linear_threshold = 160.0;
+                if (current_angle_deg > linear_threshold) {
+                    r0_deg = 180.0;  // Metal coordination can be linear (GEODEP)
+                    f2 = 0.3;        // Much weaker force constant
+                }
             }
         }
 
         // DEBUG: Check final r0_deg (Claude Generated Dec 31, 2025)
         if (atom_j == 5) {
             std::cout << "DEBUG O-angle: r0_deg after correction = " << r0_deg << "\n";
+            std::cout << "DEBUG O-angle: f2 = " << f2 << "\n";
         }
     }
 
-    // Nitrogen corrections: More accurate angle values based on Fortran reference
-    // Reference: gfnff_ini.f90:1577-1585
-    if (m_atoms[atom_j] == 7) {  // Central atom is nitrogen
-        // Default N with 2 neighbors: 115°
-        if (neighbors.size() == 2) {
-            r0_deg = 115.0;
-        }
-    }
+    // NOTE: Nitrogen corrections now handled comprehensively in Phase 2C above (lines 2187-2277)
+    // No additional nitrogen corrections needed here
 
     // Convert to radians
     params.equilibrium_angle = r0_deg * M_PI / 180.0;
@@ -2190,12 +2454,6 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
         // where fijk = angle_param * angl2_i * angl2_k
         params.force_constant = fijk * fqq * f2 * fn * fbsmall * feta;
 
-        // PHASE 2B (Dec 31, 2025): Hydrogen count correction
-        // Reference: XTB gfnff_ini.f90:1617 - f_hydrogen = (nhi * nhj)^0.07
-        double f_hydrogen = calculateHydrogenCountCorrection(atom_i, atom_k);
-        double fc_before_fH = params.force_constant;  // Store before f_hydrogen
-        params.force_constant *= f_hydrogen;
-
         // DEBUG: Complete factor breakdown for O-centered angle (Claude Generated Dec 31, 2025)
         if (atom_j == 5) {
             std::cout << "FACTOR 5 (fbsmall - linear angle correction):\n";
@@ -2206,13 +2464,10 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
             std::cout << "FACTOR 6 (feta - metal correction):\n";
             std::cout << "  feta = " << feta << " (no metals)\n\n";
 
-            std::cout << "FACTOR 7 (f_hydrogen - H count correction):\n";
-            std::cout << "  f_hydrogen = " << f_hydrogen << "\n\n";
-
             std::cout << "FINAL FORCE CONSTANT:\n";
-            std::cout << "  fc = fijk × fqq × f2 × fn × fbsmall × feta × fH\n";
+            std::cout << "  fc = fijk × fqq × f2 × fn × fbsmall × feta\n";
             std::cout << "  fc = " << fijk << " × " << fqq << " × " << f2 << " × "
-                      << fn << " × " << fbsmall << " × " << feta << " × " << f_hydrogen << "\n";
+                      << fn << " × " << fbsmall << " × " << feta << "\n";
             std::cout << "  fc = " << params.force_constant << " Eh\n\n";
 
             std::cout << "COMPARISON:\n";
@@ -2226,58 +2481,12 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
             CurcumaLogger::param(fmt::format("angle_{}-{}-{}_fbsmall", atom_i, atom_j, atom_k),
                 fmt::format("{:.6f}", fbsmall));
             CurcumaLogger::param(fmt::format("angle_{}-{}-{}_fc_final", atom_i, atom_j, atom_k),
-                fmt::format("{:.6f} (fijk={:.3f}, fqq={:.3f}, f2={:.3f}, fn={:.3f}, fbsmall={:.3f}, feta={:.3f}, fH={:.3f})",
-                    params.force_constant, fijk, fqq, f2, fn, fbsmall, feta, f_hydrogen));
+                fmt::format("{:.6f} (fijk={:.3f}, fqq={:.3f}, f2={:.3f}, fn={:.3f}, fbsmall={:.3f}, feta={:.3f})",
+                    params.force_constant, fijk, fqq, f2, fn, fbsmall, feta));
         }
     }
 
     return params;
-}
-
-// Claude Generated (Dec 31, 2025): Hydrogen count correction (Phase 2b)
-// Reference: XTB gfnff_ini.f90:1610-1617
-// Formula: f_hydrogen = (nhi * nhj)^0.07
-// Physical meaning: Angles with more H neighbors are stiffer
-double GFNFF::calculateHydrogenCountCorrection(int atom_i, int atom_k) const {
-    // TODO (Dec 31, 2025): This function is incomplete - needs adjacency list access
-    // Placeholder: Return 1.0 (no correction) until topology is properly integrated
-    // Proper implementation requires m_cached_topology.adjacency_list
-    return 1.0;
-
-    /* DISABLED UNTIL ADJACENCY LIST IS AVAILABLE
-    // Count hydrogen neighbors for atom i
-    int nhi = 1;  // Start at 1 (Fortran convention)
-    if (m_cached_topology && !m_cached_topology->adjacency_list.empty()) {
-        for (size_t n = 0; n < m_cached_topology->adjacency_list[atom_i].size(); ++n) {
-            int neighbor = m_cached_topology->adjacency_list[atom_i][n];
-            if (m_atoms[neighbor] == 1) {  // Hydrogen
-                nhi++;
-            }
-        }
-    }
-
-    // Count hydrogen neighbors for atom k
-    int nhj = 1;  // Start at 1 (Fortran convention)
-    if (m_cached_topology && !m_cached_topology->adjacency_list.empty()) {
-        for (size_t n = 0; n < m_cached_topology->adjacency_list[atom_k].size(); ++n) {
-            int neighbor = m_cached_topology->adjacency_list[atom_k][n];
-            if (m_atoms[neighbor] == 1) {  // Hydrogen
-                nhj++;
-            }
-        }
-    }
-
-    // Calculate correction factor: (nhi * nhj)^0.07
-    double f_hydrogen = std::pow(static_cast<double>(nhi * nhj), 0.07);
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format(
-            "H-count correction: nhi={}, nhj={}, f_hydrogen={:.4f}",
-            nhi, nhj, f_hydrogen));
-    }
-
-    return f_hydrogen;
-    */  // END DISABLED CODE
 }
 
 bool GFNFF::loadGFNFFCharges()
