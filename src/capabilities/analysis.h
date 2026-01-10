@@ -112,10 +112,60 @@ private:
     /*! \brief Output results to file */
     void outputToFile(const json& results, const std::string& filename);
 
+public:  // Configuration class needs to be public for AnalysisOutputDispatcher - Claude Generated 2026
+    /*! \brief Configuration state for analysis run - Claude Generated 2026
+     *
+     * Centralizes all parameter reading to eliminate 20+ try-catch blocks.
+     * Loads configuration once during construction, provides validated state.
+     */
+    class AnalysisConfig {
+    public:
+        // Frame selection
+        std::string frames_str;
+        int stride;
+        int start_frame;
+        int end_frame;
+
+        // Scattering configuration
+        bool scattering_enabled;
+        bool scattering_per_frame_files;
+        std::string scattering_q_values;
+        std::string scattering_output_directory;
+        std::string scattering_file_prefix;
+        bool scattering_stats_include_median;
+
+        // RDF configuration
+        bool rdf_enabled;
+        double rdf_r_max;
+        double rdf_bin_width;
+        bool rdf_coordination_shells;
+
+        // Output configuration
+        std::string output_format;
+        std::string output_file;
+        std::string metrics;
+        std::string statistics_mode;
+        int window_size;
+
+        // Constructor loads all parameters from ConfigManager
+        explicit AnalysisConfig(const ConfigManager& config);
+
+        // Query methods
+        bool hasScatteringOutput() const;
+        bool hasPerFrameFiles() const;
+        bool hasRDFOutput() const;
+        json toJSON() const;  // For results["config"]
+
+    private:
+        void validateConfiguration();
+    };
+
+private:  // Private member variables - Claude Generated 2026
     std::string m_filename;
     ConfigManager m_config;       // Claude Generated 2025: Modern configuration manager
     json m_config_legacy;         // Claude Generated 2025: Legacy JSON for TDAEngine compatibility
     bool m_silent;
+    AnalysisConfig m_analysis_config;  // Claude Generated 2026: Centralized configuration state
 
     // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
     BEGIN_PARAMETER_DEFINITION(analysis)

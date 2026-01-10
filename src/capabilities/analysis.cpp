@@ -18,6 +18,7 @@
  */
 
 #include "analysis.h"
+#include "analysis_output.h"  // Claude Generated 2026: Output dispatcher
 #include "persistentdiagram.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/elements.h"
@@ -36,6 +37,7 @@ UnifiedAnalysis::UnifiedAnalysis(const json& controller, bool silent)
     : CurcumaMethod(ParameterRegistry::getInstance().getDefaultJson("analysis"), controller, silent)
     , m_config("analysis", controller)  // Claude Generated 2025: ConfigManager accepts full controller
     , m_silent(silent)
+    , m_analysis_config(m_config)  // Claude Generated 2026: Initialize configuration state
 {
     // Claude Generated 2025: Analysis needs verbosity >=2 for output
     // If user didn't explicitly set verbosity, default to 2 (informative)
@@ -52,6 +54,114 @@ UnifiedAnalysis::UnifiedAnalysis(const json& controller, bool silent)
 
 UnifiedAnalysis::~UnifiedAnalysis()
 {
+}
+
+// AnalysisConfig implementation - Claude Generated 2026
+UnifiedAnalysis::AnalysisConfig::AnalysisConfig(const ConfigManager& config)
+{
+    // Frame selection parameters
+    frames_str = config.get<std::string>("frames", "");
+    stride = config.get<int>("stride", 1);
+    start_frame = config.get<int>("frame_range_start", 0);
+    end_frame = config.get<int>("frame_range_end", -1);
+
+    // Scattering parameters
+    scattering_enabled = config.get<bool>("scattering_enable", false);
+    scattering_per_frame_files = config.get<bool>("scattering_per_frame_files", false);
+    scattering_q_values = config.get<std::string>("scattering_q_values", "");
+    scattering_output_directory = config.get<std::string>("scattering_output_directory", ".");
+    scattering_file_prefix = config.get<std::string>("scattering_file_prefix", "scattering_frame");
+    scattering_stats_include_median = config.get<bool>("scattering_stats_include_median", true);
+
+    // RDF parameters
+    rdf_enabled = config.get<bool>("rdf_enable", false);
+    rdf_r_max = config.get<double>("rdf_r_max", 15.0);
+    rdf_bin_width = config.get<double>("rdf_bin_width", 0.05);
+    rdf_coordination_shells = config.get<bool>("rdf_coordination_shells", false);
+
+    // Output parameters
+    output_format = config.get<std::string>("output_format", "human");
+    output_file = config.get<std::string>("output_file", "");
+    metrics = config.get<std::string>("metrics", "gyration,rout,end2end");
+    statistics_mode = config.get<std::string>("statistics", "none");
+    window_size = config.get<int>("window", 10);
+
+    // Validate configuration
+    validateConfiguration();
+}
+
+void UnifiedAnalysis::AnalysisConfig::validateConfiguration()
+{
+    // Positive stride
+    if (stride <= 0) {
+        CurcumaLogger::warn("stride must be positive, using 1");
+        stride = 1;
+    }
+
+    // Dependency check: per_frame_files requires scattering
+    if (scattering_per_frame_files && !scattering_enabled) {
+        CurcumaLogger::warn("scattering_per_frame_files requires scattering_enable=true, disabling per_frame_files");
+        scattering_per_frame_files = false;
+    }
+
+    // Window size for moving statistics
+    if (window_size < 2 && statistics_mode.find("moving") != std::string::npos) {
+        CurcumaLogger::warn("window size must be >= 2 for moving statistics, using 10");
+        window_size = 10;
+    }
+}
+
+bool UnifiedAnalysis::AnalysisConfig::hasScatteringOutput() const
+{
+    return scattering_enabled;
+}
+
+bool UnifiedAnalysis::AnalysisConfig::hasPerFrameFiles() const
+{
+    return scattering_enabled && scattering_per_frame_files;
+}
+
+bool UnifiedAnalysis::AnalysisConfig::hasRDFOutput() const
+{
+    return rdf_enabled;
+}
+
+json UnifiedAnalysis::AnalysisConfig::toJSON() const
+{
+    json config_json;
+
+    // Frame selection
+    config_json["frames"] = frames_str;
+    config_json["stride"] = stride;
+    config_json["frame_range_start"] = start_frame;
+    config_json["frame_range_end"] = end_frame;
+
+    // Scattering
+    if (scattering_enabled) {
+        config_json["scattering_enable"] = true;
+        config_json["scattering_per_frame_files"] = scattering_per_frame_files;
+        config_json["scattering_q_values"] = scattering_q_values;
+        config_json["scattering_output_directory"] = scattering_output_directory;
+        config_json["scattering_file_prefix"] = scattering_file_prefix;
+        config_json["scattering_stats_include_median"] = scattering_stats_include_median;
+    }
+
+    // RDF
+    if (rdf_enabled) {
+        config_json["rdf_enable"] = true;
+        config_json["rdf_r_max"] = rdf_r_max;
+        config_json["rdf_bin_width"] = rdf_bin_width;
+        config_json["rdf_coordination_shells"] = rdf_coordination_shells;
+    }
+
+    // Output
+    config_json["output_format"] = output_format;
+    config_json["output_file"] = output_file;
+    config_json["metrics"] = metrics;
+    config_json["statistics"] = statistics_mode;
+    config_json["window"] = window_size;
+
+    return config_json;
 }
 
 // Helper function: Parse comma-separated metrics list - Claude Generated 2025
@@ -132,68 +242,33 @@ void UnifiedAnalysis::start()
     results["total_timesteps"] = 0; // Will be updated after loop
     results["timesteps"] = json::array();
 
-    // Parse statistics configuration - Claude Generated 2025
-    std::string metrics_str = m_config.get<std::string>("metrics");
-    std::string statistics_mode = m_config.get<std::string>("statistics");
-    int window_size = m_config.get<int>("window");
-
-    std::vector<std::string> enabled_metrics = parseMetricsList(metrics_str);
-    bool enable_cumulative = (statistics_mode == "cumulative" || statistics_mode == "all");
-    bool enable_moving = (statistics_mode == "moving" || statistics_mode == "all");
+    // Parse statistics configuration - Claude Generated 2026 (Refactored to use AnalysisConfig)
+    std::vector<std::string> enabled_metrics = parseMetricsList(m_analysis_config.metrics);
+    bool enable_cumulative = (m_analysis_config.statistics_mode == "cumulative" || m_analysis_config.statistics_mode == "all");
+    bool enable_moving = (m_analysis_config.statistics_mode == "moving" || m_analysis_config.statistics_mode == "all");
 
     // Create statistics tracker if needed
     std::unique_ptr<TrajectoryStatistics> stats;
     if (enable_cumulative || enable_moving) {
-        stats = std::make_unique<TrajectoryStatistics>(window_size);
+        stats = std::make_unique<TrajectoryStatistics>(m_analysis_config.window_size);
     }
 
     // ALWAYS store configuration in results for output formatting
     results["statistics_config"] = {
         { "metrics", enabled_metrics },
-        { "mode", statistics_mode },
-        { "window", window_size },
+        { "mode", m_analysis_config.statistics_mode },
+        { "window", m_analysis_config.window_size },
         { "enable_cumulative", enable_cumulative },
         { "enable_moving", enable_moving }
     };
 
-    // Store scattering configuration for per-frame file output - Claude Generated 2026
-    bool per_frame_files = false;
-    std::string q_values_str = "";
-    try {
-        per_frame_files = m_config.get<bool>("scattering_per_frame_files");
-        q_values_str = m_config.get<std::string>("scattering_q_values");
-    } catch (...) {
-        per_frame_files = false;
-    }
-
-    if (per_frame_files) {
+    // Store scattering configuration for per-frame file output - Claude Generated 2026 (Refactored)
+    if (m_analysis_config.hasPerFrameFiles()) {
         results["config"] = {
-            { "scattering_per_frame_files", per_frame_files },
-            { "scattering_q_values", q_values_str }
+            { "scattering_per_frame_files", m_analysis_config.scattering_per_frame_files },
+            { "scattering_q_values", m_analysis_config.scattering_q_values }
         };
     }
-
-    // Parse frame selection parameters - Claude Generated 2026
-    std::string frames_str = "";
-    int stride = 1;
-    int start_frame = 0;
-    int end_frame = -1;
-
-    try {
-        frames_str = m_config.get<std::string>("frames");
-    } catch (...) {}
-
-    try {
-        stride = m_config.get<int>("stride");
-    } catch (...) {}
-
-    try {
-        start_frame = m_config.get<int>("frame_range_start");
-    } catch (...) {}
-
-    try {
-        end_frame = m_config.get<int>("frame_range_end");
-    } catch (...) {}
 
     std::vector<int> selected_frames;
     bool use_frame_list = false;
@@ -208,16 +283,22 @@ void UnifiedAnalysis::start()
         }
     }
 
-    // Resolve frame selection - Claude Generated 2026
-    if (!frames_str.empty()) {
+    // Resolve end_frame for range-based selection - Claude Generated 2026
+    int end_frame = m_analysis_config.end_frame;
+    if (end_frame == -1) {
+        end_frame = total_frames;
+    }
+
+    // Resolve frame selection - Claude Generated 2026 (Refactored to use AnalysisConfig)
+    if (!m_analysis_config.frames_str.empty()) {
         use_frame_list = true;
 
         // Special cases: "-1" or "last" alone means only the last frame
-        if (frames_str == "-1" || frames_str == "last") {
+        if (m_analysis_config.frames_str == "-1" || m_analysis_config.frames_str == "last") {
             selected_frames.push_back(total_frames - 1); // 0-based
         } else {
             // Replace -1 with actual last frame number (1-based for user) in ranges
-            std::string resolved_frames = frames_str;
+            std::string resolved_frames = m_analysis_config.frames_str;
             if (resolved_frames.find("-1") != std::string::npos) {
                 size_t pos = 0;
                 std::string from = "-1";
@@ -235,12 +316,6 @@ void UnifiedAnalysis::start()
             for (auto& frame : selected_frames) {
                 frame -= 1;
             }
-        }
-
-    } else {
-        // Use simple range approach
-        if (end_frame == -1) {
-            end_frame = total_frames;
         }
     }
 
@@ -270,12 +345,12 @@ void UnifiedAnalysis::start()
             if (it != selected_frames.end()) {
                 // Apply stride filter to the list index
                 int list_index = std::distance(selected_frames.begin(), it);
-                should_analyze = (list_index % stride == 0);
+                should_analyze = (list_index % m_analysis_config.stride == 0);
             }
         } else {
-            // Simple range check with stride
-            if (current_frame >= start_frame && current_frame < end_frame) {
-                should_analyze = ((current_frame - start_frame) % stride == 0);
+            // Simple range check with stride (using local end_frame from line 316)
+            if (current_frame >= m_analysis_config.start_frame && current_frame < end_frame) {
+                should_analyze = ((current_frame - m_analysis_config.start_frame) % m_analysis_config.stride == 0);
             }
         }
         if(!should_analyze){
@@ -1114,77 +1189,15 @@ void UnifiedAnalysis::outputResults(const json& results)
         }
     }
 
-    // Check if per-frame scattering file output is enabled - Claude Generated 2026
-    bool per_frame_files = false;
-    std::string q_values_str = "";
-    std::string output_directory = ".";
-    std::string file_prefix = "scattering_frame";
+    // Analysis-specific output dispatch - Claude Generated 2026 (Refactored)
+    // Replaces 70 lines of duplicate scattering code with unified dispatcher
+    json writer_config;
+    writer_config["default_format"] = "HumanTable";
+    writer_config["precision"] = 3;
+    TrajectoryWriter writer(writer_config);
 
-    try {
-        per_frame_files = m_config.get<bool>("scattering_per_frame_files");
-        q_values_str = m_config.get<std::string>("scattering_q_values");
-        output_directory = m_config.get<std::string>("scattering_output_directory");
-        file_prefix = m_config.get<std::string>("scattering_file_prefix");
-    } catch (...) {
-        per_frame_files = false;
-    }
-
-    // Generate per-frame files if enabled and we have scattering data - Claude Generated 2026
-    if (per_frame_files && results.contains("timesteps") && results["timesteps"].size() >= 1) {
-        json writer_config;
-        writer_config["default_format"] = "HumanTable";
-        writer_config["precision"] = 3;
-
-        TrajectoryWriter writer(writer_config);
-        bool success = writer.writeScatteringPerFrameFiles(results, output_directory, file_prefix);
-        if (success) {
-            CurcumaLogger::success_fmt("Per-frame scattering files generated in: {}", output_directory);
-        } else {
-            CurcumaLogger::error("Failed to generate per-frame scattering files");
-        }
-    }
-
-    // Generate cross-frame statistics file - Claude Generated 2026
-    // Trigger: Any time we have scattering data
-    bool scattering_stats_enabled = false;
-    try {
-        scattering_stats_enabled = m_config.get<bool>("scattering_enable");
-    } catch (...) {}
-
-    if (scattering_stats_enabled && results.contains("timesteps") && results["timesteps"].size() >= 1) {
-        // Check if at least one frame has scattering data
-        bool has_scattering = false;
-        for (const auto& ts : results["timesteps"]) {
-            if (ts.contains("scattering")) {
-                has_scattering = true;
-                break;
-            }
-        }
-
-        if (has_scattering) {
-            // Use same configuration as per-frame files
-            std::string output_directory = ".";
-            std::string file_prefix = "scattering_frame";
-            bool include_median = true;  // Default: include median
-
-            try {
-                output_directory = m_config.get<std::string>("scattering_output_directory");
-                file_prefix = m_config.get<std::string>("scattering_file_prefix");
-                include_median = m_config.get<bool>("scattering_stats_include_median");
-            } catch (...) {}
-
-            json writer_config;
-            writer_config["default_format"] = "HumanTable";
-            writer_config["precision"] = 3;
-
-            TrajectoryWriter writer(writer_config);
-            bool success = writer.writeScatteringStatistics(results, output_directory, file_prefix, include_median);
-            if (success) {
-                CurcumaLogger::success_fmt("Cross-frame scattering statistics saved to: {}/{}_statistics.csv",
-                                          output_directory, file_prefix);
-            }
-        }
-    }
+    AnalysisOutputDispatcher dispatcher(m_analysis_config, writer);
+    dispatcher.dispatch(results, std::cout);
 }
 
 void UnifiedAnalysis::outputToFile(const json& results, const std::string& filename)
@@ -1218,58 +1231,10 @@ void UnifiedAnalysis::outputToFile(const json& results, const std::string& filen
     writer.writeToFile(filename, format, results);
     CurcumaLogger::success_fmt("Analysis results saved to: {} (format: {})", filename, output_format);
 
-    // Check if per-frame scattering file output is enabled - Claude Generated 2026
-    bool per_frame_files = false;
-    std::string q_values_str = "";
-    std::string output_directory = ".";
-    std::string file_prefix = "scattering_frame";
-    bool include_median = true;  // Default: include median - Claude Generated 2026
-
-    try {
-        per_frame_files = m_config.get<bool>("scattering_per_frame_files");
-        q_values_str = m_config.get<std::string>("scattering_q_values");
-        output_directory = m_config.get<std::string>("scattering_output_directory");
-        file_prefix = m_config.get<std::string>("scattering_file_prefix");
-        include_median = m_config.get<bool>("scattering_stats_include_median");
-    } catch (...) {
-        per_frame_files = false;
-    }
-
-    // Generate per-frame files if enabled and we have scattering data - Claude Generated 2026
-    if (per_frame_files && results.contains("timesteps") && results["timesteps"].size() >= 1) {
-        bool success = writer.writeScatteringPerFrameFiles(results, output_directory, file_prefix);
-        if (success) {
-            CurcumaLogger::success_fmt("Per-frame scattering files generated in: {}", output_directory);
-        } else {
-            CurcumaLogger::error("Failed to generate per-frame scattering files");
-        }
-    }
-
-    // Generate cross-frame statistics file - Claude Generated 2026
-    // Trigger: Any time we have scattering data
-    bool scattering_stats_enabled = false;
-    try {
-        scattering_stats_enabled = m_config.get<bool>("scattering_enable");
-    } catch (...) {}
-
-    if (scattering_stats_enabled && results.contains("timesteps") && results["timesteps"].size() >= 1) {
-        // Check if at least one frame has scattering data
-        bool has_scattering = false;
-        for (const auto& ts : results["timesteps"]) {
-            if (ts.contains("scattering")) {
-                has_scattering = true;
-                break;
-            }
-        }
-
-        if (has_scattering) {
-            bool success = writer.writeScatteringStatistics(results, output_directory, file_prefix, include_median);
-            if (success) {
-                CurcumaLogger::success_fmt("Cross-frame scattering statistics saved to: {}/{}_statistics.csv",
-                                          output_directory, file_prefix);
-            }
-        }
-    }
+    // Analysis-specific output dispatch - Claude Generated 2026 (Refactored)
+    // Replaces 52 lines of duplicate scattering code with unified dispatcher
+    AnalysisOutputDispatcher dispatcher(m_analysis_config, writer);
+    dispatcher.dispatchToFile(results, filename);
 }
 
 void UnifiedAnalysis::printHelp() const

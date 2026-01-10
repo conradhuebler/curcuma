@@ -235,6 +235,7 @@ set(curcuma_core_SRC
         src/capabilities/rmsdtraj.cpp
         src/capabilities/simplemd.cpp
         src/capabilities/analysis.cpp
+        src/capabilities/analysis_output.cpp
         src/capabilities/trajectory_statistics.cpp
         src/capabilities/casino.cpp
         src/capabilities/scnp_parser.cpp
@@ -297,6 +298,7 @@ set(curcuma_cap_SRC
         src/capabilities/rmsdtraj.cpp
         src/capabilities/simplemd.cpp
         src/capabilities/analysis.cpp
+        src/capabilities/analysis_output.cpp
         src/capabilities/trajectory_statistics.cpp
         src/capabilities/casino.cpp
         src/capabilities/scnp_parser.cpp
