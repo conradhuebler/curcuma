@@ -24,6 +24,7 @@
 
 #include <stdexcept>
 #include <cctype>
+#include <map>
 
 // Complete s-dftd3 reference data (MAX_REF=7 - fixes 1.48x energy error)
 // Data split across:
@@ -324,6 +325,7 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     // Phase 2.3 (December 2025): ATM three-body dispersion
     // Reference: external/cpp-d4/src/damping/atm.cpp:70-138
     json atm_triples = json::array();
+    double t_atm_triples_ms = 0.0;  // Initialize for scope (used in final breakdown)
 
     if (m_config.get<double>("d3_s9", 0.0) > 1e-10) {
         double s9 = m_config.get<double>("d3_s9", 1.0);
@@ -333,6 +335,26 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
         int n_atoms = static_cast<int>(m_atoms.size());
 
+        // Claude Generated (January 2026): Build O(log N) C6 lookup map for ATM triples
+        // Replaces O(N²) linear search per triple, improving performance from O(N⁶) to O(N³ log N)
+        std::map<std::pair<int,int>, double> c6_lookup;
+
+        for (const auto& pair : dispersion_pairs) {
+            int i = pair["i"];
+            int j = pair["j"];
+            double c6 = pair["c6"];
+
+            // Store both (i,j) and (j,i) for O(1) symmetric lookup
+            c6_lookup[{i, j}] = c6;
+            c6_lookup[{j, i}] = c6;
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::param("C6 lookup map size", static_cast<int>(c6_lookup.size()));
+        }
+
+        auto t_atm_triples_start = std::chrono::high_resolution_clock::now();
+
         for (int i = 0; i < n_atoms; ++i) {
             for (int j = 0; j < i; ++j) {
                 for (int k = 0; k < j; ++k) {
@@ -341,24 +363,11 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
                     triple["j"] = j;
                     triple["k"] = k;
 
-                    // C6 from pairwise D3 coefficients (already computed)
-                    // Need to look up from the generated dispersion pairs
-                    double c6_ij = 0.0, c6_ik = 0.0, c6_jk = 0.0;
-
-                    // Extract C6 values from generated dispersion pairs
-                    for (const auto& pair : dispersion_pairs) {
-                        int pi = pair["i"];
-                        int pj = pair["j"];
-                        double c6 = pair["c6"];
-
-                        if ((pi == i && pj == j) || (pi == j && pj == i)) {
-                            c6_ij = c6;
-                        } else if ((pi == i && pj == k) || (pi == k && pj == i)) {
-                            c6_ik = c6;
-                        } else if ((pi == j && pj == k) || (pi == k && pj == j)) {
-                            c6_jk = c6;
-                        }
-                    }
+                    // Claude Generated (January 2026): O(log N) C6 lookup from pre-built map
+                    // Extract C6 values from lookup map (fast vs. O(N²) linear search)
+                    double c6_ij = c6_lookup[{i, j}];
+                    double c6_ik = c6_lookup[{i, k}];
+                    double c6_jk = c6_lookup[{j, k}];
 
                     triple["C6_ij"] = c6_ij;
                     triple["C6_ik"] = c6_ik;
@@ -380,6 +389,14 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::param("Generated D3 ATM triples", static_cast<int>(atm_triples.size()));
         }
+
+        auto t_atm_triples_end = std::chrono::high_resolution_clock::now();
+        double t_atm_triples_ms = std::chrono::duration<double, std::milli>(t_atm_triples_end - t_atm_triples_start).count();
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info(fmt::format("D3: ATM triple generation took {:.2f} ms ({} triples)",
+                t_atm_triples_ms, static_cast<int>(atm_triples.size())));
+        }
     }
 
     m_parameters["atm_triples"] = atm_triples;
@@ -389,8 +406,8 @@ void D3ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success(fmt::format("D3 parameter generation completed in {:.2f} ms", t_total_ms));
-        CurcumaLogger::info(fmt::format("  └─ Breakdown: CN={:.1f}ms, Weights={:.1f}ms, C6Interp={:.1f}ms",
-            t_cn_ms, t_weights_ms, t_pairs_ms));
+        CurcumaLogger::info(fmt::format("  └─ Breakdown: CN={:.1f}ms, Weights={:.1f}ms, C6Interp={:.1f}ms, ATM={:.1f}ms",
+            t_cn_ms, t_weights_ms, t_pairs_ms, t_atm_triples_ms));
     }
 }
 
