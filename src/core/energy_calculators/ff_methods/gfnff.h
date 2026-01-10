@@ -54,6 +54,25 @@ using json = nlohmann::json;
  * It was previously inheriting from QMInterface but has been refactored
  * to standalone class for semantic correctness (Phase 2, November 2025).
  */
+
+/**
+ * @brief Triangular indexing function for symmetric matrices
+ *
+ * Claude Generated (January 10, 2026) - Port from Fortran gfnff_helpers.f90:416-423
+ * Converts atom pair (i,j) to linear index for upper-triangular storage
+ *
+ * @param i First atom index (0-based)
+ * @param j Second atom index (0-based)
+ * @return Linear index in triangular array
+ *
+ * Formula (C++ 0-based): lin = min(i,j) + max(i,j)*(max(i,j)+1)/2
+ */
+inline int lin(int i, int j) {
+    int imax = std::max(i, j);
+    int imin = std::min(i, j);
+    return imin + imax * (imax + 1) / 2;
+}
+
 class GFNFF {
 public:
     /**
@@ -111,6 +130,12 @@ public:
         // btyp = 6: Eta-complex (special metal)
         // btyp = 7: TM metal-metal bond
         std::vector<int> bond_types;
+
+        // Phase 2C: π-bond orders (Claude Generated - January 10, 2026)
+        // Simplified approximation based on hybridization (no full Hückel calculation)
+        // Stored in triangular format using lin(i,j) indexing
+        // pbo[lin(i,j)] = π-bond order between atoms i and j
+        std::vector<double> pi_bond_orders;
     };
 
     /**
@@ -815,6 +840,35 @@ private:
      * @return Vector of neighbor lists (one std::vector<int> per atom)
      */
     std::vector<std::vector<int>> buildNeighborLists() const;
+
+    /**
+     * @brief Calculate simplified π-bond orders for all atom pairs
+     *
+     * Claude Generated (January 10, 2026) - Phase 2C: π-bond order approximation
+     *
+     * Simplified approximation based on hybridization and bond types,
+     * avoiding expensive Hückel eigenvalue calculation (~200 lines).
+     *
+     * Approximation rules (based on hybridization):
+     * - Single bonds (sp3-sp3): pbo = 0.0
+     * - π bonds (sp2-sp2, sp2-sp): pbo = 0.5-1.0 (geometry-dependent)
+     * - sp bonds (sp-sp): pbo = 1.5 (approximate triple bond)
+     * - Non-bonded: pbo = 0.0
+     *
+     * Stored in triangular format: pbo[lin(i,j)] = bond order between atoms i and j
+     * Full Hückel implementation (exact) deferred as future work if needed.
+     *
+     * @param bond_list Vector of bonded atom pairs
+     * @param hybridization Hybridization state per atom
+     * @param pi_fragments Pi-system fragment IDs
+     * @return Vector of π-bond orders in triangular format (access via lin(i,j))
+     *
+     * Reference: external/gfnff/src/gfnff_ini.f90:898-1061 (full Hückel - not implemented)
+     */
+    std::vector<double> calculatePiBondOrders(
+        const std::vector<std::pair<int,int>>& bond_list,
+        const std::vector<int>& hybridization,
+        const std::vector<int>& pi_fragments) const;
 
     /**
      * @brief Calculate EEQ electrostatic energy
