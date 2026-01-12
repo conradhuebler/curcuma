@@ -101,6 +101,8 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/molecules/trimers/water.xyz
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/CH4.xyz
           ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/CH3OCH3.xyz
           ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/CH3OH.xyz
+          ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/C6H6.xyz
+          ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/monosaccharide.xyz
           ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/CH3OCH3.log
           DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/)
 
@@ -419,3 +421,4 @@ add_test(NAME test_eeq_solver_debug COMMAND test_eeq_solver_debug)
 #          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 #
 # set_tests_properties(test_extended_registry PROPERTIES TIMEOUT 30 LABELS "test_molecule_registry")
+
