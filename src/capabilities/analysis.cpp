@@ -1061,10 +1061,25 @@ void UnifiedAnalysis::outputResults(const json& results)
     std::string output_format = m_config.get<std::string>("output_format");
     std::string output_file = m_config.get<std::string>("output_file");
 
+    // Phase 4: ALWAYS write files (derive basename from output_file OR input filename)
+    std::string basename;
     if (!output_file.empty()) {
-        outputToFile(results, output_file);
-        return;
+        // Use explicit output_file as basename
+        basename = output_file;
+    } else {
+        // Derive basename from input filename: "input.xyz" → "input"
+        basename = m_filename;
+        size_t last_dot = basename.find_last_of(".");
+        if (last_dot != std::string::npos) {
+            basename = basename.substr(0, last_dot);
+        }
     }
+
+    // ALWAYS dispatch to file handlers (write specialized files)
+    outputToFile(results, basename);
+
+    // Continue with console output for immediate feedback
+    // (no more early return - console output ADDITIONAL to files)
 
     if (output_format == "json") {
         std::cout << std::setw(2) << results << std::endl;
@@ -1189,52 +1204,27 @@ void UnifiedAnalysis::outputResults(const json& results)
         }
     }
 
-    // Analysis-specific output dispatch - Claude Generated 2026 (Refactored)
-    // Replaces 70 lines of duplicate scattering code with unified dispatcher
-    json writer_config;
-    writer_config["default_format"] = "HumanTable";
-    writer_config["precision"] = 3;
-    TrajectoryWriter writer(writer_config);
-
-    AnalysisOutputDispatcher dispatcher(m_analysis_config, writer);
-    dispatcher.dispatch(results, std::cout);
+    // Phase 4: File output already handled by outputToFile() call above
+    // No need for separate dispatcher call - handlers write directly to files
 }
 
-void UnifiedAnalysis::outputToFile(const json& results, const std::string& filename)
+void UnifiedAnalysis::outputToFile(const json& results, const std::string& basename)
 {
-    std::string output_format = m_config.get<std::string>("output_format");
+    // Phase 4: Only dispatch to handlers - no main file write
+    // Each handler creates its own specialized CSV file (general, scattering, rdf, etc.)
 
-    // Create TrajectoryWriter with appropriate config
+    // Create TrajectoryWriter with CSV config for handler use
     json writer_config;
-    writer_config["default_format"] = (output_format == "csv" ? "CSV" : output_format == "json" ? "JSON" : "HumanTable");
+    writer_config["default_format"] = "CSV";
     writer_config["precision"] = 3;
-
-    // Configure statistics for trajectory data
-    if (results.contains("statistics_config")) {
-        writer_config["enable_cumulative"] = results["statistics_config"]["enable_cumulative"];
-        writer_config["enable_moving"] = results["statistics_config"]["enable_moving"];
-    }
-
     TrajectoryWriter writer(writer_config);
 
-    // Map format strings to TrajectoryWriter::Format
-    TrajectoryWriter::Format format = TrajectoryWriter::Format::HumanTable; // default
-    if (output_format == "csv") {
-        format = TrajectoryWriter::Format::CSV;
-    } else if (output_format == "json") {
-        format = TrajectoryWriter::Format::JSON;
-    } else if (output_format == "dat") {
-        format = TrajectoryWriter::Format::DAT;
-    }
-
-    // Output using TrajectoryWriter
-    writer.writeToFile(filename, format, results);
-    CurcumaLogger::success_fmt("Analysis results saved to: {} (format: {})", filename, output_format);
-
-    // Analysis-specific output dispatch - Claude Generated 2026 (Refactored)
-    // Replaces 52 lines of duplicate scattering code with unified dispatcher
+    // Dispatch to all registered handlers
+    // Each handler writes its own file: basename.type.csv or basename.NNN.type.csv
     AnalysisOutputDispatcher dispatcher(m_analysis_config, writer);
-    dispatcher.dispatchToFile(results, filename);
+    dispatcher.dispatchToFile(results, basename);
+
+    // Handlers log their own success messages
 }
 
 void UnifiedAnalysis::printHelp() const
