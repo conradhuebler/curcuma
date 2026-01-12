@@ -19,22 +19,38 @@
 
 #pragma once
 
+#include <memory>
+#include <vector>
 #include "json.hpp"
 #include "src/tools/trajectory_writer.h"
 #include "analysis.h"
+#include "analysis_output_handler.h"
 
 using json = nlohmann::json;
 
 /*! \brief Unified output dispatcher for analysis results - Claude Generated 2026
  *
- * Eliminates ~160 lines of duplicate code between outputResults() and outputToFile().
- * Centralizes all analysis-specific output handlers (Scattering, RDF, Topology).
+ * **Phase 2 (DEPRECATED):** Eliminates ~160 lines of duplicate code between outputResults() and outputToFile().
+ *
+ * **Phase 3 (CURRENT):** Registry-based handler dispatch enables pluggable analysis outputs.
+ * - Maintains dispatcher role (main output routing)
+ * - Delegates analysis-specific output to registered handlers
+ * - Allows new analysis types without modifying dispatcher code
+ *
+ * **Architecture:**
+ * 1. dispatch() routes main output (JSON/CSV/Human)
+ * 2. Handler loop iterates registered IAnalysisOutputHandler instances
+ * 3. Each handler checks: isEnabled() && hasData() → handleOutput()
+ * 4. Adding new analysis: Create handler + register in constructor (zero dispatcher changes)
  */
 class AnalysisOutputDispatcher {
 public:
     /*! \brief Constructor takes configuration and writer
      *  @param config Analysis configuration state
      *  @param writer TrajectoryWriter for main output
+     *
+     * During construction, all available handlers are registered
+     * (Scattering, RDF, Topology, etc.)
      */
     AnalysisOutputDispatcher(const UnifiedAnalysis::AnalysisConfig& config,
                             const TrajectoryWriter& writer);
@@ -54,21 +70,13 @@ public:
 private:
     const UnifiedAnalysis::AnalysisConfig& m_config;
     TrajectoryWriter m_writer;
+    std::vector<std::unique_ptr<IAnalysisOutputHandler>> m_handlers;
 
-    /*! \brief Handle scattering-specific output (per-frame files + statistics)
-     *  Replaces duplicate code from lines 1117-1187 and 1221-1272
+    /*! \brief Register a handler for analysis-specific output
+     *  @param handler Unique pointer to handler instance
+     *
+     * Called during construction to register all available handlers.
+     * Each handler will be invoked if isEnabled() && hasData() are true.
      */
-    void handleScatteringOutput(const json& results);
-
-    /*! \brief Handle RDF-specific output (placeholder for future)
-     */
-    void handleRDFOutput(const json& results);
-
-    /*! \brief Handle topology-specific output (placeholder for future)
-     */
-    void handleTopologyOutput(const json& results);
-
-    /*! \brief Check if results contain scattering data
-     */
-    bool hasScatteringData(const json& results) const;
+    void registerHandler(std::unique_ptr<IAnalysisOutputHandler> handler);
 };

@@ -19,6 +19,10 @@
 
 #include "analysis_output.h"
 #include "src/core/curcuma_logger.h"
+#include "handlers/general_properties_handler.h"
+#include "handlers/scattering_handler.h"
+#include "handlers/rdf_handler.h"
+#include "handlers/topology_handler.h"
 
 AnalysisOutputDispatcher::AnalysisOutputDispatcher(
     const UnifiedAnalysis::AnalysisConfig& config,
@@ -26,108 +30,47 @@ AnalysisOutputDispatcher::AnalysisOutputDispatcher(
     : m_config(config)
     , m_writer(writer)
 {
+    // Register all available handlers - Claude Generated 2026 (Phase 3+4)
+    // IMPORTANT: GeneralPropertiesHandler FIRST - baseline analysis for all runs
+    // Adding new analysis types: just add registerHandler() call here
+    registerHandler(std::make_unique<GeneralPropertiesHandler>());
+    registerHandler(std::make_unique<ScatteringOutputHandler>());
+    registerHandler(std::make_unique<RDFOutputHandler>());
+    registerHandler(std::make_unique<TopologyOutputHandler>());
+}
+
+void AnalysisOutputDispatcher::registerHandler(std::unique_ptr<IAnalysisOutputHandler> handler)
+{
+    m_handlers.push_back(std::move(handler));
 }
 
 void AnalysisOutputDispatcher::dispatch(const json& results, std::ostream& out)
 {
-    // Main output routing based on format
-    if (m_config.output_format == "json") {
-        m_writer.writeJSON(out, results);
-    } else if (m_config.output_format == "csv") {
-        m_writer.writeCSV(out, results);
-    } else {
-        // Default: human-readable table
-        m_writer.writeHumanTable(out, results);
-    }
+    // NOTE: Main output is already written by outputResults() before calling this method
+    // This method only handles analysis-specific auxiliary files (scattering, RDF, etc.)
+    // DO NOT write main output here to avoid duplication!
 
-    // Analysis-specific outputs (replaces duplicate code)
-    handleScatteringOutput(results);
-    handleRDFOutput(results);
-    handleTopologyOutput(results);
+    // Registry-based handler dispatch - Claude Generated 2026 (Phase 3)
+    // NO HARDCODED CALLS - handlers checked and invoked via registry loop
+    for (const auto& handler : m_handlers) {
+        if (handler->isEnabled(m_config) && handler->hasData(results)) {
+            handler->handleOutput(results, m_config, m_writer);
+        }
+    }
 }
 
 void AnalysisOutputDispatcher::dispatchToFile(const json& results, const std::string& filename)
 {
-    // Determine format from filename or config
-    TrajectoryWriter::Format format = TrajectoryWriter::Format::HumanTable;
+    // NOTE: Main output file is already written by outputToFile() before calling this method
+    // This method only handles analysis-specific auxiliary files (scattering, RDF, etc.)
+    // DO NOT write main output file here to avoid duplication!
 
-    bool has_json_ext = (filename.size() >= 5 && filename.substr(filename.size() - 5) == ".json");
-    bool has_csv_ext = (filename.size() >= 4 && filename.substr(filename.size() - 4) == ".csv");
-
-    if (m_config.output_format == "json" || has_json_ext) {
-        format = TrajectoryWriter::Format::JSON;
-    } else if (m_config.output_format == "csv" || has_csv_ext) {
-        format = TrajectoryWriter::Format::CSV;
-    }
-
-    // Write main output file
-    m_writer.writeToFile(filename, format, results);
-
-    // Analysis-specific outputs (replaces duplicate code)
-    handleScatteringOutput(results);
-    handleRDFOutput(results);
-    handleTopologyOutput(results);
-}
-
-void AnalysisOutputDispatcher::handleScatteringOutput(const json& results)
-{
-    // Early exit if scattering not enabled or no data
-    if (!m_config.hasScatteringOutput()) return;
-    if (!hasScatteringData(results)) return;
-
-    std::string output_dir = m_config.scattering_output_directory;
-    std::string file_prefix = m_config.scattering_file_prefix;
-
-    // Per-frame files (replaces lines 1117-1145 and 1221-1246)
-    if (m_config.hasPerFrameFiles()) {
-        bool success = m_writer.writeScatteringPerFrameFiles(results, output_dir, file_prefix);
-        if (success) {
-            CurcumaLogger::success_fmt("Per-frame scattering files generated in: {}", output_dir);
-        } else {
-            CurcumaLogger::error("Failed to generate per-frame scattering files");
+    // Registry-based handler dispatch - Claude Generated 2026 (Phase 3)
+    // NO HARDCODED CALLS - handlers checked and invoked via registry loop
+    // Pass filename to handlers so they can derive auxiliary file names from it
+    for (const auto& handler : m_handlers) {
+        if (handler->isEnabled(m_config) && handler->hasData(results)) {
+            handler->handleOutput(results, m_config, m_writer, filename);
         }
     }
-
-    // Cross-frame statistics (replaces lines 1147-1187 and 1248-1272)
-    bool success = m_writer.writeScatteringStatistics(
-        results, output_dir, file_prefix,
-        m_config.scattering_stats_include_median);
-
-    if (success) {
-        CurcumaLogger::success_fmt("Cross-frame scattering statistics saved to: {}/{}_statistics.csv",
-                                   output_dir, file_prefix);
-    }
-}
-
-void AnalysisOutputDispatcher::handleRDFOutput(const json& results)
-{
-    // Placeholder for RDF output
-    // TODO: Implement RDF-specific output logic here
-    if (!m_config.hasRDFOutput()) return;
-
-    // Future implementation will go here
-}
-
-void AnalysisOutputDispatcher::handleTopologyOutput(const json& results)
-{
-    // Placeholder for topology output
-    // TODO: Implement topology-specific output logic here
-
-    // Future implementation will go here
-}
-
-bool AnalysisOutputDispatcher::hasScatteringData(const json& results) const
-{
-    if (!results.contains("timesteps") || !results["timesteps"].is_array()) {
-        return false;
-    }
-
-    // Check if at least one timestep has scattering data
-    for (const auto& timestep : results["timesteps"]) {
-        if (timestep.contains("scattering")) {
-            return true;
-        }
-    }
-
-    return false;
 }
