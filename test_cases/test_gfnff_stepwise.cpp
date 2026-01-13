@@ -980,17 +980,162 @@ public:
         }
     }
 
-    // Test 7: Torsion Parameter Validation (Layer 5)
+    // Test 7: Torsion Count Validation (Layer 5)
+    // Claude Generated (Jan 12, 2026): Validate torsion generation against XTB reference
     bool test_torsion_parameters() {
         std::cout << "\n" << std::string(80, '=') << std::endl;
-        std::cout << "Test 7: Torsion Parameter Validation (Layer 5)" << std::endl;
+        std::cout << "Test 7: Torsion Count Validation (Layer 5)" << std::endl;
         std::cout << std::string(80, '=') << std::endl;
 
-        std::cout << "  ⚠ Skipped - reference log only contains 1 example torsion" << std::endl;
-        std::cout << "  Note: Full torsion validation requires complete reference data" << std::endl;
-        total_tests++;
+        try {
+            // Load reference data
+            json ref_data = load_reference_json();
+            std::vector<double> ref_charges = ref_data["topology"]["charges"];
 
-        return true;
+            // XTB reference: 6 primary torsions for CH3OCH3
+            // Source: external/gfnff/CH3OCH3_new.log, line 816: "#tors : 6"
+            const int XTB_TORSION_COUNT = 6;
+
+            // Load molecule
+            ReferenceData ref = setup_ch3och3_reference();
+            Molecule mol = TestMoleculeRegistry::createMolecule(ref.molecule_file, false);
+            mol.setCharge(0);
+            mol.setSpin(0);
+            Mol mol_info = mol.getMolInfo();
+
+            // Initialize GFNFF
+            GFNFF gfnff;
+            gfnff.InitialiseMolecule(mol_info);
+
+            // Inject reference charges (torsion generation depends on charges)
+            Vector ref_charge_vec(ref_charges.size());
+            for (size_t i = 0; i < ref_charges.size(); ++i) {
+                ref_charge_vec[i] = ref_charges[i];
+            }
+            gfnff.setCharges(ref_charge_vec);
+
+            // Regenerate parameters with correct charges
+            if (!gfnff.regenerateParametersWithCurrentCharges()) {
+                std::cout << "  ✗ ERROR: Failed to regenerate parameters with charges" << std::endl;
+                total_tests++;
+                return false;
+            }
+
+            // Get all generated parameters (includes torsions)
+            // Claude Generated Fix (Jan 12, 2026): Use getForceFieldParameters() instead of getParameters()
+            // getParameters() returns INPUT JSON, not the GENERATED force field parameters!
+            // We need the ForceField's exported parameters which include the regenerated torsions
+            std::cout << "\n  Extracting torsions from generated parameters..." << std::endl;
+            json all_params = gfnff.getForceFieldParameters();
+
+            // Torsions are stored under "dihedrals" key
+            json torsions = all_params.value("dihedrals", json::array());
+
+            // Count torsions
+            int total_count = torsions.size();
+
+            // Separate primary (n>1) from extra (n=1) by checking periodicity
+            int primary_count = 0;
+            int extra_count = 0;
+            for (const auto& tor : torsions) {
+                int n = tor.value("n", 0);
+                if (n > 1) {
+                    primary_count++;
+                } else if (n == 1) {
+                    extra_count++;
+                }
+            }
+
+            // Display results
+            std::cout << "\n  Torsion Count Comparison:" << std::endl;
+            std::cout << "  " << std::string(70, '-') << std::endl;
+            std::cout << "  Torsion Type           | Curcuma | XTB Ref | Status" << std::endl;
+            std::cout << "  " << std::string(70, '-') << std::endl;
+            std::cout << "  Primary torsions (n>1) | " << std::setw(7) << primary_count
+                      << " | " << std::setw(7) << XTB_TORSION_COUNT
+                      << " | " << (primary_count == XTB_TORSION_COUNT ? "✓" : "✗") << std::endl;
+            std::cout << "  Extra SP3-SP3 (n=1)    | " << std::setw(7) << extra_count
+                      << " | " << std::setw(7) << "?"
+                      << " | " << (extra_count == XTB_TORSION_COUNT ? "✓" : "?") << std::endl;
+            std::cout << "  TOTAL                  | " << std::setw(7) << total_count
+                      << " | " << std::setw(7) << (2 * XTB_TORSION_COUNT)
+                      << " | " << (total_count == 2 * XTB_TORSION_COUNT ? "✓" : "?") << std::endl;
+            std::cout << "  " << std::string(70, '-') << std::endl;
+
+            // Detailed output if count mismatch
+            if (primary_count != XTB_TORSION_COUNT && config.verbosity >= 1) {
+                std::cout << "\n  ⚠️ TORSION COUNT MISMATCH DETECTED!" << std::endl;
+
+                if (primary_count > XTB_TORSION_COUNT) {
+                    int extra_torsions_found = primary_count - XTB_TORSION_COUNT;
+                    std::cout << "  Curcuma generates " << extra_torsions_found
+                              << " MORE torsions than XTB" << std::endl;
+                    std::cout << "  → Possible overcounting issue (duplicate torsions)" << std::endl;
+                } else {
+                    int missing_torsions = XTB_TORSION_COUNT - primary_count;
+                    std::cout << "  Curcuma generates " << missing_torsions
+                              << " FEWER torsions than XTB" << std::endl;
+                    std::cout << "  → Possible undercounting issue (missing torsions)" << std::endl;
+                }
+
+                // Print generated torsions for debugging
+                if (primary_count > 0 && primary_count <= 20) {
+                    std::cout << "\n  Generated Torsions (Primary):" << std::endl;
+                    std::cout << "  " << std::string(70, '-') << std::endl;
+                    std::cout << "  Idx |  i  j  k  l | n | V (Eh)      | Atoms" << std::endl;
+                    std::cout << "  " << std::string(70, '-') << std::endl;
+
+                    for (size_t idx = 0; idx < static_cast<size_t>(primary_count); ++idx) {
+                        const auto& tor = torsions[idx];
+                        int i = tor["i"], j = tor["j"], k = tor["k"], l = tor["l"];
+                        int n = tor["n"];
+                        double V = tor["V"];
+
+                        // Get element symbols
+                        std::string elem_i = (mol_info.m_atoms[i] == 1) ? "H" :
+                                           (mol_info.m_atoms[i] == 6) ? "C" : "O";
+                        std::string elem_j = (mol_info.m_atoms[j] == 1) ? "H" :
+                                           (mol_info.m_atoms[j] == 6) ? "C" : "O";
+                        std::string elem_k = (mol_info.m_atoms[k] == 1) ? "H" :
+                                           (mol_info.m_atoms[k] == 6) ? "C" : "O";
+                        std::string elem_l = (mol_info.m_atoms[l] == 1) ? "H" :
+                                           (mol_info.m_atoms[l] == 6) ? "C" : "O";
+
+                        std::cout << "  " << std::setw(3) << idx
+                                  << " | " << std::setw(2) << i << " "
+                                  << std::setw(2) << j << " "
+                                  << std::setw(2) << k << " "
+                                  << std::setw(2) << l
+                                  << " | " << n
+                                  << " | " << std::scientific << std::setprecision(5) << V
+                                  << " | " << elem_i << "-" << elem_j << "-"
+                                  << elem_k << "-" << elem_l << std::endl;
+                    }
+                    std::cout << "  " << std::string(70, '-') << std::endl;
+                }
+            }
+
+            // Verdict
+            bool passed = (primary_count == XTB_TORSION_COUNT);
+
+            if (passed) {
+                std::cout << "\n  ✓ Torsion count matches XTB reference ("
+                          << XTB_TORSION_COUNT << " primary torsions)" << std::endl;
+                passed_tests++;
+            } else {
+                std::cout << "\n  ✗ Torsion count mismatch: " << primary_count
+                          << " generated, " << XTB_TORSION_COUNT << " expected" << std::endl;
+                std::cout << "  → This explains torsion energy errors!" << std::endl;
+            }
+
+            total_tests++;
+            return passed;
+
+        } catch (const std::exception& e) {
+            std::cout << "  ✗ ERROR: " << e.what() << std::endl;
+            total_tests++;
+            return false;
+        }
     }
 
     // Test 8: Energy Calculation with Reference Parameters (CRITICAL)

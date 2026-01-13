@@ -284,6 +284,168 @@ void GFNFF::calculateTorsionDamping(int z1, int z2, double r_squared,
 }
 
 // =============================================================================
+// TOPOLOGY-SPECIFIC HELPER FUNCTIONS (Claude Generated - January 8, 2026)
+// =============================================================================
+
+/**
+ * @brief Detect C=O alpha carbon configuration
+ *
+ * Reference: gfnff_ini2.f90:alphaCO
+ * Detects if torsion involves C(=O)-C bond (peptide backbone, esters, ketones)
+ *
+ * Fortran Logic:
+ * ```fortran
+ * logical function alphaCO(n,at,hyb,nb,pi,a,b)
+ *     alphaCO = .false.
+ *     if (pi(a) .ne. 0.and.hyb(b) .eq. 3.and.at(a) .eq. 6.and.at(b) .eq. 6) then
+ *       no = 0
+ *       do i = 1,nb(20,a)
+ *         j = nb(i,a)
+ *         if (at(j) .eq. 8.and.pi(j) .ne. 0.and.nb(20,j) .eq. 1) no = no+1
+ *       end do
+ *       if (no .eq. 1) alphaCO = .true.
+ *     end if
+ * end function
+ * ```
+ *
+ * Physical Meaning:
+ * - Detects C=O alpha carbon (e.g., in acetone, esters, peptide bonds)
+ * - Atom a (j in torsion): Carbon with pi system (sp or sp2)
+ * - Atom b (k in torsion): sp3 carbon
+ * - Check: Does atom a have exactly 1 terminal oxygen (pi-bonded, CN=1)?
+ * - If yes: This is C=O alpha carbon → multiply fij by 1.3
+ *
+ * @param atom_idx Atom to check (carbon with pi system)
+ * @param other_idx Other atom in central bond (should be sp3 carbon)
+ * @param atoms Atomic numbers
+ * @param hybridization Hybridization states (1=sp, 2=sp2, 3=sp3)
+ * @param bond_list Bond connectivity
+ * @return true if C=O alpha carbon detected
+ */
+static bool isAlphaCO(int atom_idx, int other_idx,
+                      const std::vector<int>& atoms,
+                      const std::vector<int>& hybridization,
+                      const std::vector<std::pair<int,int>>& bond_list)
+{
+    // Bounds check
+    if (atom_idx < 0 || atom_idx >= atoms.size() || other_idx < 0 || other_idx >= atoms.size()) {
+        return false;
+    }
+
+    // Atom must be carbon with pi system (sp or sp2)
+    if (atoms[atom_idx] != 6 || (hybridization[atom_idx] != 1 && hybridization[atom_idx] != 2)) {
+        return false;
+    }
+
+    // Other atom must be sp3 carbon
+    if (atoms[other_idx] != 6 || hybridization[other_idx] != 3) {
+        return false;
+    }
+
+    // Check if atom_idx has exactly 1 terminal pi-bonded oxygen (C=O)
+    int terminal_oxygen_count = 0;
+
+    for (const auto& bond : bond_list) {
+        int neighbor = -1;
+        if (bond.first == atom_idx) neighbor = bond.second;
+        else if (bond.second == atom_idx) neighbor = bond.first;
+        else continue;
+
+        // Bounds check for neighbor
+        if (neighbor < 0 || neighbor >= atoms.size()) continue;
+
+        // Check if neighbor is oxygen
+        if (atoms[neighbor] == 8) {
+            // Count coordination number of this oxygen
+            int oxygen_cn = 0;
+            for (const auto& b : bond_list) {
+                if (b.first == neighbor || b.second == neighbor) {
+                    oxygen_cn++;
+                }
+            }
+
+            // Terminal oxygen: CN=1 (only bonded to the carbon)
+            if (oxygen_cn == 1) {
+                terminal_oxygen_count++;
+            }
+        }
+    }
+
+    // Exactly 1 terminal C=O → alpha carbon
+    return (terminal_oxygen_count == 1);
+}
+
+/**
+ * @brief Detect amide nitrogen configuration
+ *
+ * Reference: gfnff_ini2.f90:amide
+ * Detects sp2 nitrogen bonded to exactly 1 pi-bonded carbon (peptide bond)
+ *
+ * Fortran Logic:
+ * ```fortran
+ * logical function amide(n,at,hyb,nb,pi,a)
+ *     amide = .false.
+ *     if (at(a) .eq. 7.and.hyb(a) .eq. 2) then  ! sp2 nitrogen
+ *       nc = 0
+ *       do i = 1,nb(20,a)
+ *         j = nb(i,a)
+ *         if (at(j) .eq. 6.and.pi(j) .ne. 0) nc = nc+1
+ *       end do
+ *       if (nc .eq. 1) amide = .true.
+ *     end if
+ * end function
+ * ```
+ *
+ * Physical Meaning:
+ * - Detects amide nitrogen (peptide bonds, amides)
+ * - Atom must be sp2 nitrogen
+ * - Check: Does it have exactly 1 pi-bonded carbon neighbor?
+ * - If yes: This is amide → multiply fij by 1.3
+ *
+ * @param atom_idx Atom to check
+ * @param atoms Atomic numbers
+ * @param hybridization Hybridization states (1=sp, 2=sp2, 3=sp3)
+ * @param bond_list Bond connectivity
+ * @return true if amide nitrogen detected
+ */
+static bool isAmide(int atom_idx,
+                    const std::vector<int>& atoms,
+                    const std::vector<int>& hybridization,
+                    const std::vector<std::pair<int,int>>& bond_list)
+{
+    // Bounds check
+    if (atom_idx < 0 || atom_idx >= atoms.size()) {
+        return false;
+    }
+
+    // Must be sp2 nitrogen
+    if (atoms[atom_idx] != 7 || hybridization[atom_idx] != 2) {
+        return false;
+    }
+
+    // Count pi-bonded carbons (sp or sp2)
+    int pi_carbon_count = 0;
+
+    for (const auto& bond : bond_list) {
+        int neighbor = -1;
+        if (bond.first == atom_idx) neighbor = bond.second;
+        else if (bond.second == atom_idx) neighbor = bond.first;
+        else continue;
+
+        // Bounds check for neighbor
+        if (neighbor < 0 || neighbor >= atoms.size()) continue;
+
+        // Check if neighbor is carbon with pi system (sp=1 or sp2=2)
+        if (atoms[neighbor] == 6 && (hybridization[neighbor] == 1 || hybridization[neighbor] == 2)) {
+            pi_carbon_count++;
+        }
+    }
+
+    // Exactly 1 pi-bonded carbon → amide
+    return (pi_carbon_count == 1);
+}
+
+// =============================================================================
 // TORSION PARAMETER LOOKUP
 // =============================================================================
 
@@ -380,6 +542,20 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     else if ((hyb_j == 2 && hyb_k == 3) || (hyb_j == 3 && hyb_k == 2)) {
         params.periodicity = 3;     // nrot = 3
         params.phase_shift = M_PI;  // phi0 = 180°
+
+        // Claude Generated (Jan 9, 2026): Debug hybridization for sp2-sp3 detection
+        static bool hybridization_debug_printed = false;
+        if (!hybridization_debug_printed && CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::warn("=== Torsion Hybridization DEBUG: sp2-sp3 detected ===");
+            CurcumaLogger::warn(fmt::format("  hyb_j={} (Z={}), hyb_k={} (Z={})",
+                                             hyb_j, z_j, hyb_k, z_k));
+            CurcumaLogger::warn("  Expected for C-O in CH3OCH3: hyb_j=3 (C), hyb_k=3 (O)");
+            CurcumaLogger::warn("  If O is hyb=2, check CN calculation (should be CN=2→sp3)");
+            CurcumaLogger::warn("  NOTE: CN values will be shown in full torsion debug below");
+            hybridization_debug_printed = true;
+        }
+
+        // Set f1 = 0.5 for sp2-sp3 mixed (will be set later in force constant calculation)
     }
     // sp-X: Linear (gfnff_ini.f90: implicit default)
     else if (hyb_j == 1 || hyb_k == 1) {
@@ -528,6 +704,84 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
             CurcumaLogger::info(fmt::format("  H-count correction: atom j={} (nhi={}), atom k={} (nhj={}), scaling={:.4f}",
                                              j_atom_idx, nhi, k_atom_idx, nhj, h_scaling));
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // (E2) Topology-specific fij corrections (NEW - Claude Generated Jan 8, 2026)
+    // ---------------------------------------------------------------------------
+    // Reference: Fortran gfnff_ini.f90:1807-1811
+    // These corrections account for conjugation and resonance effects in specific
+    // functional groups (peptides, carbonyls) that modulate torsion barriers
+    //
+    // Fortran reference:
+    //   ! amides and alpha carbons in peptides/proteins
+    //   if (alphaCO(nat,at,hyb,topo%nb,piadr,ii,jj)) fij = fij*1.3d0
+    //   if (amide(nat,at,hyb,topo%nb,piadr,ii).and.hyb(jj) .eq. 3.and.at(jj) .eq. 6) fij = fij*1.3d0
+    //   if (amide(nat,at,hyb,topo%nb,piadr,jj).and.hyb(ii) .eq. 3.and.at(ii) .eq. 6) fij = fij*1.3d0
+    //
+    // Physical basis:
+    // - alphaCO: C=O alpha carbon has partial double bond character → stiffer rotation
+    // - amide: Peptide N-C(=O) bond has resonance → restricted rotation
+    //
+    // Expected impact:
+    // - Increases V parameters by ~1.3× for affected bonds
+    // - Brings V from 0.151 Eh → ~0.20 Eh (combined with other corrections)
+    // - Enables removal of 0.5 factor workaround when all corrections complete
+
+    if (j_atom_idx >= 0 && k_atom_idx >= 0 &&
+        j_atom_idx < m_atomcount && k_atom_idx < m_atomcount) {
+
+        // Get cached data for topology checks
+        const auto& bond_list = getCachedBondList();
+        const TopologyInfo& topo = getCachedTopology();
+
+        // Hybridization bounds check
+        if (j_atom_idx < topo.hybridization.size() && k_atom_idx < topo.hybridization.size()) {
+            int hyb_j = topo.hybridization[j_atom_idx];
+            int hyb_k = topo.hybridization[k_atom_idx];
+
+            // 1. alphaCO correction: C=O alpha carbon (fij *= 1.3)
+            //    Detects C(=O)-C bonds in ketones, esters, peptide backbones
+            if (isAlphaCO(j_atom_idx, k_atom_idx, m_atoms, topo.hybridization, bond_list)) {
+                fij *= 1.3;
+                if (CurcumaLogger::get_verbosity() >= 3) {
+                    CurcumaLogger::info("  alphaCO correction: fij *= 1.3 (C=O alpha carbon detected)");
+                }
+            }
+            else if (isAlphaCO(k_atom_idx, j_atom_idx, m_atoms, topo.hybridization, bond_list)) {
+                fij *= 1.3;
+                if (CurcumaLogger::get_verbosity() >= 3) {
+                    CurcumaLogger::info("  alphaCO correction: fij *= 1.3 (C=O alpha carbon detected)");
+                }
+            }
+
+            // 2. Amide corrections: peptide bonds (fij *= 1.3)
+            //    Detects N-C(=O) resonance structures in peptides and amides
+            //
+            // Check if j is amide nitrogen and k is sp3 carbon
+            if (isAmide(j_atom_idx, m_atoms, topo.hybridization, bond_list) &&
+                z_k == 6 && hyb_k == 3) {
+                fij *= 1.3;
+                if (CurcumaLogger::get_verbosity() >= 3) {
+                    CurcumaLogger::info("  amide correction (j→k): fij *= 1.3 (peptide bond detected)");
+                }
+            }
+
+            // Check if k is amide nitrogen and j is sp3 carbon
+            if (isAmide(k_atom_idx, m_atoms, topo.hybridization, bond_list) &&
+                z_j == 6 && hyb_j == 3) {
+                fij *= 1.3;
+                if (CurcumaLogger::get_verbosity() >= 3) {
+                    CurcumaLogger::info("  amide correction (k→j): fij *= 1.3 (peptide bond detected)");
+                }
+            }
+        }
+
+        // 3. Hypervalent bond correction (btyp == 4): fij *= 0.2
+        //    Reference: gfnff_ini.f90:1811 "if (btyp(m) .eq. 4) fij = fij*0.2d0"
+        //    Note: Bond type detection not yet fully implemented
+        //    TODO Phase 2D: Implement full bond type classification system
+        //    For now: Deferred (low impact - rare in organic molecules)
     }
 
     // ---------------------------------------------------------------------------
@@ -1026,6 +1280,11 @@ json GFNFF::generateGFNFFTorsions() const
     const std::vector<std::pair<int, int>>& bond_list = getCachedBondList();
     const std::vector<int>& bond_types = topo.bond_types;
 
+    // Claude Generated Debug (Jan 12, 2026): Add logging to debug why no torsions are generated
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::info(fmt::format("generateGFNFFTorsions: Bond list size = {}", bond_list.size()));
+    }
+
     if (bond_list.empty()) {
         CurcumaLogger::warn("GFN-FF torsion generation: No bonds found, skipping torsions");
         return torsions;
@@ -1041,6 +1300,14 @@ json GFNFF::generateGFNFFTorsions() const
     for (const auto& bond : bond_list) {
         neighbors[bond.first].push_back(bond.second);
         neighbors[bond.second].push_back(bond.first);
+    }
+
+    // Debug: Print neighbor counts
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::info("Neighbor counts:");
+        for (size_t i = 0; i < neighbors.size(); ++i) {
+            CurcumaLogger::info(fmt::format("  Atom {}: {} neighbors", i, neighbors[i].size()));
+        }
     }
 
     // ==========================================================================
@@ -1174,8 +1441,28 @@ json GFNFF::generateGFNFFTorsions() const
                 }
 
                 // Get actual topology charges (critical for fqq correction!)
-                double qa_j = (j < topo.topology_charges.rows()) ? topo.topology_charges(j) : 0.0;
-                double qa_k = (k < topo.topology_charges.rows()) ? topo.topology_charges(k) : 0.0;
+                // Claude Generated (Jan 9, 2026): Use m_charges directly instead of topo.topology_charges
+                // Fix: topo.topology_charges may be empty or 0.0 in some cases, use pre-calculated m_charges
+                double qa_j = 0.0, qa_k = 0.0;
+                if (j < m_atoms.size() && k < m_atoms.size()) {
+                    // First try: Use TopologyInfo charges (filled by calculateTopologyInfo)
+                    if (topo.topology_charges.rows() > 0) {
+                        qa_j = (j < topo.topology_charges.rows()) ? topo.topology_charges(j) : 0.0;
+                        qa_k = (k < topo.topology_charges.rows()) ? topo.topology_charges(k) : 0.0;
+                        // Fallback: If topology charges are zero, use pre-calculated EEQ charges
+                        if (std::abs(qa_j) < 1e-10 && std::abs(qa_k) < 1e-10) {
+                            if (m_charges.size() > 0) {
+                                qa_j = m_charges(j);
+                                qa_k = m_charges(k);
+                            }
+                        }
+                    }
+                    // Second try: Use pre-calculated EEQ charges (m_charges in gfnff_method.h)
+                    else if (m_charges.size() > 0) {
+                        qa_j = (j < m_charges.size()) ? m_charges(j) : 0.0;
+                        qa_k = (k < m_charges.size()) ? m_charges(k) : 0.0;
+                    }
+                }
 
                 // DEBUG: Check if charges are available (first torsion only)
                 static bool charge_debug_printed = false;
@@ -1225,6 +1512,16 @@ json GFNFF::generateGFNFFTorsions() const
                 torsion["V"] = params.barrier_height;       // Barrier height in Hartree (corrected Jan 8, 2026)
                 torsion["phi0"] = params.phase_shift;       // Phase shift in radians (was "phase")
                 torsion["is_improper"] = params.is_improper;
+
+                // Claude Generated (Jan 9, 2026): Store hybridization for debugging
+                torsion["hyb_j"] = hybridization[j];
+                torsion["hyb_k"] = hybridization[k];
+                if (j < topo.coordination_numbers.rows()) {
+                    torsion["cn_j"] = topo.coordination_numbers(j);
+                }
+                if (k < topo.coordination_numbers.rows()) {
+                    torsion["cn_k"] = topo.coordination_numbers(k);
+                }
 
                 // Store current dihedral angle for reference
                 torsion["current_angle"] = phi; // radians
@@ -1392,8 +1689,28 @@ json GFNFF::generateGFNFFTorsions() const
         }
 
         // Calculate fqq (charge correction)
-        double qa_j = (j < topo.topology_charges.rows()) ? topo.topology_charges(j) : 0.0;
-        double qa_k = (k < topo.topology_charges.rows()) ? topo.topology_charges(k) : 0.0;
+        // Claude Generated (Jan 9, 2026): Use m_charges directly instead of topo.topology_charges
+        // Fix: topo.topology_charges may be empty or 0.0 in some cases, use pre-calculated m_charges
+        double qa_j = 0.0, qa_k = 0.0;
+        if (j < m_atoms.size() && k < m_atoms.size()) {
+            // First try: Use TopologyInfo charges (filled by calculateTopologyInfo)
+            if (topo.topology_charges.rows() > 0) {
+                qa_j = (j < topo.topology_charges.rows()) ? topo.topology_charges(j) : 0.0;
+                qa_k = (k < topo.topology_charges.rows()) ? topo.topology_charges(k) : 0.0;
+                // Fallback: If topology charges are zero, use pre-calculated EEQ charges
+                if (std::abs(qa_j) < 1e-10 && std::abs(qa_k) < 1e-10) {
+                    if (m_charges.size() > 0) {
+                        qa_j = m_charges(j);
+                        qa_k = m_charges(k);
+                    }
+                }
+            }
+            // Second try: Use pre-calculated EEQ charges (m_charges in gfnff_method.h)
+            else if (m_charges.size() > 0) {
+                qa_j = (j < m_charges.size()) ? m_charges(j) : 0.0;
+                qa_k = (k < m_charges.size()) ? m_charges(k) : 0.0;
+            }
+        }
         double fqq = 1.0 + std::abs(qa_j * qa_k) * qfacTOR;
 
         // Final barrier (DIFFERENT from primary torsion formula!)
