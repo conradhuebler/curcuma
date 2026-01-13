@@ -66,6 +66,7 @@ struct Dihedral {
     int i = 0, j = 0, k = 0, l = 0;
     double V = 0, n = 0, phi0 = 0;
     bool is_extra = false;  // Claude Generated (Jan 1, 2026): GFN-FF extra sp3-sp3 torsion flag
+    bool is_nci = false;   // Claude Generated (Jan 13, 2026): NCI (Non-Covalent Interaction) torsion flag
 };
 
 struct Inversion {

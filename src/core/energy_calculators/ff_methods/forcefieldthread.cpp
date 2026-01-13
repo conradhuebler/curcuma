@@ -1018,11 +1018,12 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         double rkl2 = r_kl.squaredNorm();  // in Bohr² for GFN-FF, Angstrom² for UFF/QMDFF
 
         // Damping function (gfnff_engrad.F90:1346-1355, gfnffdampt subroutine)
-        auto calculate_damping = [](double r2, double rcov_i, double rcov_j) -> double {
-            const double atcutt = GFNFFParameters::atcutt;  // 0.505
-            double rcut = atcutt * (rcov_i + rcov_j) * (rcov_i + rcov_j);  // rcut = atcutt*(rcov_i+rcov_j)²
-            double rr = (r2 / rcut) * (r2 / rcut);  // rr = (r²/rcut)²
-            return 1.0 / (1.0 + rr);  // damp = 1/(1+rr)
+        // Claude Generated (Jan 13, 2026): Extended to support NCI damping with atcutt_nci
+        auto calculate_damping = [&](double r2, double rcov_i, double rcov_j, bool use_nci = false) -> double {
+            const double atcutt = use_nci ? GFNFFParameters::atcutt_nci : GFNFFParameters::atcutt;
+            double rcut = atcutt * (rcov_i + rcov_j) * (rcov_i + rcov_j);
+            double rr = (r2 / rcut) * (r2 / rcut);
+            return 1.0 / (1.0 + rr);
         };
 
         // Get covalent radii (already in Bohr, 0-indexed)
@@ -1038,6 +1039,30 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
 
         // Total damping (product of 3 factors, gfnff_engrad.F90:1183)
         double damp = damp_ij * damp_jk * damp_kl;
+
+        // DEBUG: Print damping details for first primary torsion (Jan 8, 2026)
+        static bool primary_damp_debug_printed = false;
+        if (!primary_damp_debug_printed && index == 0 && CurcumaLogger::get_verbosity() >= 3) {
+            const double atcutt = use_nci ? GFNFFParameters::atcutt_nci : GFNFFParameters::atcutt;
+            CurcumaLogger::info(fmt::format("\n=== PRIMARY TORSION DAMPING DEBUG (Torsion {}-{}-{}-{}) ===",
+                                             dihedral.i, dihedral.j, dihedral.k, dihedral.l));
+            CurcumaLogger::info(fmt::format("  r_ij² = {:.6f}, r_ij = {:.6f} Bohr", rij2, std::sqrt(rij2)));
+            CurcumaLogger::info(fmt::format("  r_jk² = {:.6f}, r_jk = {:.6f} Bohr", rjk2, std::sqrt(rjk2)));
+            CurcumaLogger::info(fmt::format("  r_kl² = {:.6f}, r_kl = {:.6f} Bohr", rkl2, std::sqrt(rkl2)));
+            CurcumaLogger::info(fmt::format("  rcov[{}] = {:.6f} Bohr", Z_i, rcov_i));
+            CurcumaLogger::info(fmt::format("  rcov[{}] = {:.6f} Bohr", Z_j, rcov_j));
+            CurcumaLogger::info(fmt::format("  rcov[{}] = {:.6f} Bohr", Z_k, rcov_k));
+            CurcumaLogger::info(fmt::format("  rcov[{}] = {:.6f} Bohr", Z_l, rcov_l));
+            CurcumaLogger::info(fmt::format("  {} = {:.6f}", use_nci ? "atcutt_nci" : "atcutt", atcutt));
+            CurcumaLogger::info(fmt::format("  damp_ij = {:.8f}", damp_ij));
+            CurcumaLogger::info(fmt::format("  damp_jk = {:.8f}", damp_jk));
+            CurcumaLogger::info(fmt::format("  damp_kl = {:.8f}", damp_kl));
+            CurcumaLogger::info(fmt::format("  damp (total) = {:.8f}", damp));
+            if (use_nci) {
+                CurcumaLogger::info("  NCI torsion: Using atcutt_nci damping parameters");
+            }
+            primary_damp_debug_printed = true;
+        }
 
         // =====================================================================
         // Energy calculation
@@ -1068,19 +1093,59 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         //    - Hypervalent bond type corrections
         //    - These account for additional 1.48× missing factor
         //
-        // CURRENT STATUS:
-        // - V parameters now 1.10× larger due to H-count fix (0.151 Eh)
-        // - Still need 1.48× more to reach expected 0.247 Eh
-        // - Total missing factor: 1.48× (partially compensated by 0.5 workaround)
+        // TORSION ENERGY CALCULATION (Jan 8, 2026 Investigation)
         //
-        // TODO (CRITICAL): Implement topology-specific fij corrections
-        // - alphaCO detection (requires pi system tracking)
-        // - amide detection (requires neighbor analysis)
-        // - Once ALL corrections implemented, REMOVE this 0.5 factor
+        // Fortran reference (gfnff_engrad.F90:1268-1272):
+        //   c1 = rn*dphi1 + pi     ! dphi1 = phi - phi0, rn = periodicity
+        //   x1cos = cos(c1)
+        //   et = (1 + x1cos) * topo%vtors(2,m)
         //
-        // WORKAROUND: Keep 0.5 factor until ALL fij corrections are implemented
-        // With 0.5: 83.6% error (acceptable) | Without 0.5: 267% error (unacceptable)
-        double et = 0.5 * V * (1 + cos(c1));
+        // Our implementation (line 1057): c1 = n * dphi1 + M_PI ✓ (matches Fortran)
+        // Formula: et = (1 + cos(c1)) * V ✓ (matches Fortran)
+        //
+        // VERIFIED (Jan 8, 2026) via external/gfnff/build/test/gfnff-gfnff_analyze-test:
+        //   - V parameter generation: fctot = 0.14774 Eh (XTB) vs 0.151 Eh (Curcuma) → 2.2% diff ✓
+        //   - Formula matches Fortran exactly ✓
+        //   - Damping formula: damp = dampij * dampjk * dampkl ✓ (matches Fortran)
+        //   - Geometries identical ✓ (verified by user)
+        //   - ALL components verified, yet energy is 1.84× too large!
+        //
+        // MYSTERIOUS EMPIRICAL FACTOR (Jan 8, 2026):
+        // After exhaustive source code analysis, NO hidden factor found in XTB gfnff_engrad.F90.
+        // However, exact matching requires factor of 3/11 = 0.272727 (not 0.5):
+        //
+        //   Test results (CH₃OCH₃):
+        //   - Curcuma (no factor):  0.0000858 Eh
+        //   - Curcuma (factor 0.5): 0.0000429 Eh (83.6% error)
+        //   - XTB reference:        0.0000234 Eh
+        //   - Required factor:      0.0000234/0.0000858 = 0.272727 = 3/11 EXACTLY
+        //
+        // The factor 3/11 is TOO SPECIFIC to be coincidence, suggesting:
+        //   1. There exists a hidden 3/11 factor in XTB that wasn't found in source analysis
+        //   2. Torsions should be counted/averaged differently (related to 11?)
+        //   3. Some systematic symmetry or degeneracy factor of 11/3
+        //   4. Bug in our implementation that multiplies by 11/3 somewhere
+        //
+        // TODO (CRITICAL): Investigate why 3/11 factor is needed:
+        //   - Search XTB source for any division by 11 or multiplication by 3
+        //   - Check if torsions are averaged over symmetry-equivalent configurations
+        //   - Verify torsion counting logic (are we counting some torsions multiple times?)
+        //   - Compare XTB's gfnff_topo file with our parameter generation in detail
+        //   - Test with other molecules to verify 3/11 factor is universal
+        //
+        // Claude Generated (Jan 9, 2026): EMPIRICAL FACTOR REMOVAL
+        // Previous factor 3/11 = 0.272727 was compensating for incorrect V parameters
+        // V parameters from GFN-FF generation should now be correct
+        // No scaling factor needed - use pure V from parameter generation
+        //
+        // Claude Generated (Jan 13, 2026): CRITICAL - TORSION ENERGY CALCULATION BUG
+        // Investigation revealed the 3/11 factor is NOT UNIVERSAL:
+        // - CH₃OCH₃: 0.000086 Eh vs XTB 0.000023 Eh (3.7× too large)
+        // - Monosaccharide: 0.000322 Eh vs XTB 0.012888 Eh (40× too small!)
+        // The error direction is OPPOSITE for different molecules!
+        // Root cause: Likely in barrier height V calculation or parameter generation
+        // TODO: Investigate why torsion energies have molecule-dependent errors
+        double et = V * (1.0 + cos(c1));
         double energy = et * damp;
 
         primary_torsion_energy += energy * m_dihedral_scaling;  // Claude Generated (Jan 2, 2026): Accumulate primary
@@ -1113,21 +1178,203 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         // m_dihedral_energy += energy * m_dihedral_scaling;  // Claude Generated (Jan 2, 2026): REMOVED - moved above
 
         if (m_calculate_gradient) {
-            // Claude Generated (Jan 8, 2026): Torsion gradient WITHOUT 0.5 compensation
-            // Gradient of energy w.r.t. angle (simplified - damping gradient omitted)
-            // Full implementation would need ∂damp/∂r terms (gfnff_engrad.F90:1273)
-            // Formula: dE/dφ = -V * n * sin(n*(φ - φ₀) + π) * damp
-            // Reference: Fortran line 1273: dij = -rn*x1sin*topo%vtors(2,m)*damp
-            double dEdphi = -V * n * sin(c1) * damp * m_dihedral_scaling;
-            m_gradient.row(dihedral.i) += dEdphi * derivate.row(0);
-            m_gradient.row(dihedral.j) += dEdphi * derivate.row(1);
-            m_gradient.row(dihedral.k) += dEdphi * derivate.row(2);
-            m_gradient.row(dihedral.l) += dEdphi * derivate.row(3);
+            // Claude Generated (Jan 13, 2026): COMPLETE Torsion gradient with damping derivatives
+            // Reference: Fortran gfnff_engrad.F90:1273-1280
+            //
+            // Complete gradient formula:
+            //   ∂E/∂r = (∂E/∂φ * damp) * ∂φ/∂r + E * ∂damp/∂r
+            //         = dEdphi * damp * derivate + et * (∂damp/∂r)
+            //
+            // Decomposed into:
+            //   - Angle gradient term: dij * dda/ ddb/ ddc/ ddd (already in derivate)
+            //   - Damping gradient terms: term1, term2, term3 (see below)
+            //
+            // Fortran reference:
+            //   dij = -rn*x1sin*topo%vtors(2,m)*damp        ! ∂E/∂φ * damp
+            //   term1 = et*damp2ij*dampjk*dampkl*vab        ! E * ∂damp_ij/∂r_ij * r_ij
+            //   term2 = et*damp2jk*dampij*dampkl*vcb        ! E * ∂damp_jk/∂r_jk * r_jk
+            //   term3 = et*damp2kl*dampij*dampjk*vdc        ! E * ∂damp_kl/∂r_kl * r_kl
+            //   g(:,1) = dij*dda + term1                    ! atom i gradient
+            //   g(:,2) = dij*ddb - term1 + term2            ! atom j gradient (center)
+            //   g(:,3) = dij*ddc + term3 - term2            ! atom k gradient
+            //   g(:,4) = dij*ddd - term3                    ! atom l gradient
 
-            // TODO: Add damping gradient terms for full analytical gradient
-            // term1 = et * ∂damp_ij/∂r_ij * r_ij
-            // term2 = et * ∂damp_jk/∂r_jk * r_jk
-            // term3 = et * ∂damp_kl/∂r_kl * r_kl
+            // =====================================================================
+            // PART 1: Angle gradient term (∂E/∂φ contribution)
+            // =====================================================================
+            // dE/dφ = -V * n * sin(n*(φ - φ₀) + π) * damp
+            double dEdphi = -V * n * sin(c1) * damp * m_dihedral_scaling;
+
+            // =====================================================================
+            // PART 2: Damping derivative calculation (∂damp/∂r)
+            // =====================================================================
+            // Damping function: damp = 1 / (1 + rr) where rr = (r²/rcut)²
+            //
+            // Derivative calculation (Fortran gfnff_engrad.F90:1428-1436):
+            //   ddamp = -2*2*rr / (r² * (1+rr)²) = -4*rr / (r² * (1+rr)²)
+            //
+            // Note: ddamp = ∂damp/∂r² (derivative w.r.t. squared distance)
+            //       We need ∂damp/∂r = 2*r * ddamp
+            //
+            // Reference: gfnff_engrad.F90:1428-1436 (gfnffdampt subroutine)
+            //   rcut = atcutt*(rcov_i+rcov_j)²
+            //   rr = (r²/rcut)²
+            //   damp = 1.0/(1.0+rr)
+            //   ddamp = -2*2*rr/(r²*(1.0d0+rr)²)  ! ∂damp/∂r²
+
+            // Helper lambda to calculate damping derivative ∂damp/∂r_vector
+            auto calc_damping_gradient = [&](double r2, double damping, double damping_derivative_wrt_r2) -> Vector {
+                // ∂damp/∂r_vector = ∂damp/∂r² * ∂r²/∂r_vector = ddamp * 2 * r_vector
+                const Vector& r_vec = (r2 == rij2) ? r_ij : (r2 == rjk2) ? r_jk : r_kl;
+                return damping_derivative_wrt_r2 * 2.0 * r_vec;
+            };
+
+            // Calculate all damping derivatives
+            // damp = damp_ij * damp_jk * damp_kl
+            // ∂damp/∂r_ij = damp_jk * damp_kl * ∂damp_ij/∂r
+            // ∂damp/∂r_jk = damp_ij * damp_kl * ∂damp_jk/∂r
+            // ∂damp/∂r_kl = damp_ij * damp_jk * ∂damp_kl/∂r
+
+            // First, compute ddamp/∂r² for each bond
+            // Formula: ddamp = -4*rr / (r² * (1+rr)²)
+            auto calc_ddamp = [&](double r2, double rcut) -> double {
+                double rr = (r2 / rcut) * (r2 / rcut);  // (r²/rcut)²
+                double one_plus_rr = 1.0 + rr;
+                return -4.0 * rr / (r2 * one_plus_rr * one_plus_rr);  // ∂damp/∂r²
+            };
+
+            // Calculate rcut values (same as energy calculation - NCI-aware)
+            double atcutt_value = use_nci ? GFNFFParameters::atcutt_nci : GFNFFParameters::atcutt;
+            double rcut_ij = atcutt_value * (rcov_i + rcov_j) * (rcov_i + rcov_j);
+            double rcut_jk = atcutt_value * (rcov_j + rcov_k) * (rcov_j + rcov_k);
+            double rcut_kl = atcutt_value * (rcov_k + rcov_l) * (rcov_k + rcov_l);
+
+            // Calculate damping derivatives w.r.t. squared distances
+            double ddamp_drij2 = calc_ddamp(rij2, rcut_ij);
+            double ddamp_drjk2 = calc_ddamp(rjk2, rcut_jk);
+            double ddamp_drkl2 = calc_ddamp(rkl2, rcut_kl);
+
+            // Calculate damping gradient vectors for each bond
+            // ∂damp_ij/∂r_ij = ddamp_drij2 * 2 * r_ij
+            // ∂damp_jk/∂r_jk = ddamp_drjk2 * 2 * r_jk
+            // ∂damp_kl/∂r_kl = ddamp_drkl2 * 2 * r_kl
+            Vector damp_grad_ij = ddamp_drij2 * 2.0 * r_ij;
+            Vector damp_grad_jk = ddamp_drjk2 * 2.0 * r_jk;
+            Vector damp_grad_kl = ddamp_drkl2 * 2.0 * r_kl;
+
+            // =====================================================================
+            // PART 3: Damping gradient terms (et multiplied by damping derivatives)
+            // =====================================================================
+            // et * ∂damp/∂r = et * (∂damp/∂r_ij + ∂damp/∂r_jk + ∂damp/∂r_kl)
+            //
+            // For each atom, we need to add the contribution from bonds it participates in:
+            //
+            // atom i: only r_ij connects i→j
+            //   contribution = et * damp_jk * damp_kl * ∂damp_ij/∂r_ij
+            //
+            // atom j: both r_ij (i→j) and r_jk (j→k) connect to j
+            //   contribution from r_ij = et * (-damp_jk * damp_kl * ∂damp_ij/∂r_ij)  ! negative because r_ij = r_j - r_i
+            //   contribution from r_jk = et * (damp_ij * damp_kl * ∂damp_jk/∂r_jk)  ! positive because r_jk = r_k - r_j
+            //
+            // atom k: both r_jk (j→k) and r_kl (k→l) connect to k
+            //   contribution from r_jk = et * (-damp_ij * damp_kl * ∂damp_jk/∂r_jk)  ! negative because r_jk = r_k - r_j
+            //   contribution from r_kl = et * (damp_ij * damp_jk * ∂damp_kl/∂r_kl)  ! positive because r_kl = r_l - k
+            //
+            // atom l: only r_kl connects k→l
+            //   contribution = et * (-damp_ij * damp_jk * ∂damp_kl/∂r_kl)  ! negative because r_kl = r_l - r_k
+
+            // Calculate partial damping terms (following Fortran pattern)
+            // term1 = et * damp2ij * dampjk * dampkl * vab
+            // term2 = et * damp2jk * dampij * dampkl * vcb
+            // term3 = et * damp2kl * dampij * dampjk * vdc
+            //
+            // IMPORTANT: damp2ij = ddamp_drij2, but term1 uses vab, not damp_grad_ij
+            // The relationship is: damp_grad_ij = 2 * r_ij * ddamp_drij2
+            // So: et * damp2ij * dampjk * dampkl * vab = et * ddamp_drij2 * dampjk * dampkl * vab
+            //                                           = et * damp_grad_ij * dampjk * dampkl / (2*vab) * vab
+            //                                           = et * damp_grad_ij * dampjk * dampkl / 2
+            // This is WRONG - let me recalculate from Fortran reference...
+            //
+            // Looking at Fortran gfnff_engrad.F90:1277-1280:
+            //   term1(1:3) = et*damp2ij*dampjk*dampkl*vab
+            //   term2(1:3) = et*damp2jk*dampij*dampkl*vcb
+            //   term3(1:3) = et*damp2kl*dampij*dampjk*vdc
+            //
+            // Where vab = xyz(1:3,j) - xyz(1:3,i)  [vector from i to j]
+            //       vcb = xyz(1:3,j) - xyz(1:3,k)  [vector from k to j]
+            //       vdc = xyz(1:3,j) - xyz(1:3,l)  [vector from l to k]
+            //
+            // Looking at Fortran gfnff_engrad.F90:1428-1436:
+            //   ddamp = -2*2*rr/(r²*(1.0d0+rr)²)
+            //
+            // Wait, I need to understand the structure better. Let me re-read the reference...
+            //
+            // Actually, looking more carefully at gfnff_engrad.F90:1344-1346:
+            //   rij = vab(1)*vab(1)+vab(2)*vab(2)+vab(3)*vab(3)  ! vab is squared magnitude
+            //
+            // So vab is NOT the vector, it's the scalar distance squared!
+            // But term1 uses vab(1:3) which would be a vector...
+            //
+            // Let me check lines 1283-1285:
+            //   vab(1:3) = xyz(1:3,j)-xyz(1:3,i)
+            //   vcb(1:3) = xyz(1:3,j)-xyz(1:3,k)
+            //   vdc(1:3) = xyz(1:3,j)-xyz(1:3,l)
+            //
+            // OK, so vab is REUSED as a vector! First it's the distance squared (line 1286),
+            // then it's reassigned as the vector (line 1283).
+            //
+            // So term1, term2, term3 are indeed vector quantities:
+            //   term1 = et * ddamp_drij2 * dampjk * dampkl * (r_j - r_i)
+            //   term2 = et * ddamp_drjk2 * dampij * dampkl * (r_j - r_k)
+            //   term3 = et * ddamp_drkl2 * dampij * dampjk * (r_j - r_l)
+            //
+            // Now the signs in the gradient accumulation make sense (lines 1277-1280):
+            //   g(:,1) = dij*dda + term1                    ! atom i: add term1
+            //   g(:,2) = dij*ddb - term1 + term2            ! atom j: subtract term1, add term2
+            //   g(:,3) = dij*ddc + term3 - term2            ! atom k: add term3, subtract term2
+            //   g(:,4) = dij*ddd - term3                    ! atom l: subtract term3
+
+            Vector term1 = et * damp_jk * damp_kl * ddamp_drij2 * r_ij;
+            Vector term2 = et * damp_ij * damp_kl * ddamp_drjk2 * r_jk;
+            Vector term3 = et * damp_ij * damp_jk * ddamp_drkl2 * r_kl;
+
+            // =====================================================================
+            // PART 4: Combine angle gradient and damping gradient terms
+            // =====================================================================
+            // Following Fortran gfnff_engrad.F90:1277-1280:
+            //   g(:,1) = dij*dda + term1
+            //   g(:,2) = dij*ddb - term1 + term2
+            //   g(:,3) = dij*ddc + term3 - term2
+            //   g(:,4) = dij*ddd - term3
+
+            // Gradient contribution from angle (∂E/∂φ)
+            // derivate contains ∂φ/∂r for each atom: row(0)=∂φ/∂r_i, row(1)=∂φ/∂r_j, row(2)=∂φ/∂r_k, row(3)=∂φ/∂r_l
+            Vector grad_angle_i = dEdphi * derivate.row(0);
+            Vector grad_angle_j = dEdphi * derivate.row(1);
+            Vector grad_angle_k = dEdphi * derivate.row(2);
+            Vector grad_angle_l = dEdphi * derivate.row(3);
+
+            // Total gradients (angle + damping)
+            m_gradient.row(dihedral.i) += grad_angle_i + term1;
+            m_gradient.row(dihedral.j) += grad_angle_j - term1 + term2;
+            m_gradient.row(dihedral.k) += grad_angle_k + term3 - term2;
+            m_gradient.row(dihedral.l) += grad_angle_l - term3;
+
+            // DEBUG: Print gradient details for first torsion
+            static bool gradient_debug_printed = false;
+            if (!gradient_debug_printed && index == 0 && CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("\n=== TORSION GRADIENT DEBUG (Torsion {}-{}-{}-{}) ===",
+                                                 dihedral.i, dihedral.j, dihedral.k, dihedral.l));
+                CurcumaLogger::info(fmt::format("  dEdphi = {:.6e} Eh/rad", dEdphi));
+                CurcumaLogger::info(fmt::format("  et = energy = {:.6e} Eh", et));
+                CurcumaLogger::info(fmt::format("  damp = {:.8f}", damp));
+                CurcumaLogger::info(fmt::format("  |grad_angle_i| = {:.6e}", grad_angle_i.norm()));
+                CurcumaLogger::info(fmt::format("  |term1| = {:.6e}", term1.norm()));
+                CurcumaLogger::info(fmt::format("  |term2| = {:.6e}", term2.norm()));
+                CurcumaLogger::info(fmt::format("  |term3| = {:.6e}", term3.norm()));
+                CurcumaLogger::info("=======================================================\n");
+                gradient_debug_printed = true;
+            }
         }
     }
 
@@ -1185,8 +1432,9 @@ void ForceFieldThread::CalculateGFNFFExtraTorsionContribution()
         double rkl2 = r_kl.squaredNorm();
 
         // Damping function
-        auto calculate_damping = [](double r2, double rcov_i, double rcov_j) -> double {
-            const double atcutt = GFNFFParameters::atcutt;
+        // Claude Generated (Jan 13, 2026): Extended to support NCI damping with atcutt_nci
+        auto calculate_damping = [&](double r2, double rcov_i, double rcov_j, bool use_nci = false) -> double {
+            const double atcutt = use_nci ? GFNFFParameters::atcutt_nci : GFNFFParameters::atcutt;
             double rcut = atcutt * (rcov_i + rcov_j) * (rcov_i + rcov_j);
             double rr = (r2 / rcut) * (r2 / rcut);
             return 1.0 / (1.0 + rr);
@@ -1198,11 +1446,36 @@ void ForceFieldThread::CalculateGFNFFExtraTorsionContribution()
         double rcov_k = GFNFFParameters::rcov_bohr[Z_k - 1];
         double rcov_l = GFNFFParameters::rcov_bohr[Z_l - 1];
 
-        // Calculate damping factors
-        double damp_ij = calculate_damping(rij2, rcov_i, rcov_j);
-        double damp_jk = calculate_damping(rjk2, rcov_j, rcov_k);
-        double damp_kl = calculate_damping(rkl2, rcov_k, rcov_l);
+        // Calculate damping factors (NCI-aware)
+        bool use_nci = torsion.is_nci;  // NCI torsions use different atcutt
+        double damp_ij = calculate_damping(rij2, rcov_i, rcov_j, use_nci);
+        double damp_jk = calculate_damping(rjk2, rcov_j, rcov_k, use_nci);
+        double damp_kl = calculate_damping(rkl2, rcov_k, rcov_l, use_nci);
         double damp = damp_ij * damp_jk * damp_kl;
+
+        // DEBUG: Print damping details for first torsion
+        static bool damp_debug_printed = false;
+        if (!damp_debug_printed && index == 0 && CurcumaLogger::get_verbosity() >= 3) {
+            const double atcutt = use_nci ? GFNFFParameters::atcutt_nci : GFNFFParameters::atcutt;
+            CurcumaLogger::info(fmt::format("\n=== EXTRA TORSION DAMPING DEBUG (Torsion {}-{}-{}-{}) ===",
+                                             torsion.i, torsion.j, torsion.k, torsion.l));
+            CurcumaLogger::info(fmt::format("  r_ij² = {:.6f}, r_ij = {:.6f} Bohr", rij2, std::sqrt(rij2)));
+            CurcumaLogger::info(fmt::format("  r_jk² = {:.6f}, r_jk = {:.6f} Bohr", rjk2, std::sqrt(rjk2)));
+            CurcumaLogger::info(fmt::format("  r_kl² = {:.6f}, r_kl = {:.6f} Bohr", rkl2, std::sqrt(rkl2)));
+            CurcumaLogger::info(fmt::format("  rcov[{}] = {:.6f} Bohr", Z_i, rcov_i));
+            CurcumaLogger::info(fmt::format("  rcov[{}] = {:.6f} Bohr", Z_j, rcov_j));
+            CurcumaLogger::info(fmt::format("  rcov[{}] = {:.6f} Bohr", Z_k, rcov_k));
+            CurcumaLogger::info(fmt::format("  rcov[{}] = {:.6f} Bohr", Z_l, rcov_l));
+            CurcumaLogger::info(fmt::format("  {} = {:.6f}", use_nci ? "atcutt_nci" : "atcutt", atcutt));
+            CurcumaLogger::info(fmt::format("  damp_ij = {:.8f}", damp_ij));
+            CurcumaLogger::info(fmt::format("  damp_jk = {:.8f}", damp_jk));
+            CurcumaLogger::info(fmt::format("  damp_kl = {:.8f}", damp_kl));
+            CurcumaLogger::info(fmt::format("  damp (total) = {:.8f}", damp));
+            if (use_nci) {
+                CurcumaLogger::info("  NCI torsion: Using atcutt_nci damping parameters");
+            }
+            damp_debug_printed = true;
+        }
 
         // Energy calculation for EXTRA torsions
         // Reference: Fortran gfnff_engrad.F90:1268-1272
@@ -1216,22 +1489,93 @@ void ForceFieldThread::CalculateGFNFFExtraTorsionContribution()
         const double pi = M_PI;
         double c1 = n * dphi1 + pi;  // Claude Generated (Jan 2, 2026): Added missing +π term (matches Fortran line 1269)
 
-        // Claude Generated (Jan 8, 2026): TEMPORARY 0.5 factor (same workaround as primary torsions)
-        // See primary torsion comment above for full explanation
-        // TODO: Remove once H-count correction is fixed
-        double et = 0.5 * V * (1 + cos(c1));
+        // Claude Generated (Jan 13, 2026): Extra torsions use SAME formula as primary torsions
+        // Reference: Fortran gfnff_engrad.F90:1268-1281 (egtors subroutine)
+        // Formula: E = V * (1 + cos(n*(φ - φ₀) + π)) * damp
+        // NO empirical factor - energy formula is identical to primary torsions!
+        double et = V * (1.0 + cos(c1));  // Same as primary torsions
         double energy = et * damp;
 
         // Accumulate extra torsion energy separately
         extra_torsion_energy += energy * m_dihedral_scaling;
 
         if (m_calculate_gradient) {
-            // Gradient: dE/dφ = -V * n * sin(c1) * damp (c1 includes +π term)
+            // Claude Generated (Jan 13, 2026): COMPLETE Extra Torsion gradient with damping derivatives
+            // Same implementation as primary torsions, following Fortran gfnff_engrad.F90:1273-1280
+            //
+            // Complete gradient formula:
+            //   ∂E/∂r = (∂E/∂φ * damp) * ∂φ/∂r + E * ∂damp/∂r
+            //
+            // Decomposed into:
+            //   - Angle gradient term: dEdphi * derivate
+            //   - Damping gradient terms: term1, term2, term3
+
+            // =====================================================================
+            // PART 1: Angle gradient term (∂E/∂φ contribution)
+            // =====================================================================
             double dEdphi = -V * n * sin(c1) * damp * m_dihedral_scaling;
-            m_gradient.row(torsion.i) += dEdphi * derivate.row(0);
-            m_gradient.row(torsion.j) += dEdphi * derivate.row(1);
-            m_gradient.row(torsion.k) += dEdphi * derivate.row(2);
-            m_gradient.row(torsion.l) += dEdphi * derivate.row(3);
+
+            // =====================================================================
+            // PART 2: Damping derivative calculation (∂damp/∂r)
+            // =====================================================================
+            // Same as primary torsions - calculate damping derivatives
+
+            // Calculate ddamp/∂r² for each bond
+            auto calc_ddamp = [&](double r2, double rcut) -> double {
+                double rr = (r2 / rcut) * (r2 / rcut);  // (r²/rcut)²
+                double one_plus_rr = 1.0 + rr;
+                return -4.0 * rr / (r2 * one_plus_rr * one_plus_rr);  // ∂damp/∂r²
+            };
+
+            // Calculate rcut values (NCI-aware)
+            double atcutt_value = use_nci ? GFNFFParameters::atcutt_nci : GFNFFParameters::atcutt;
+            double rcut_ij = atcutt_value * (rcov_i + rcov_j) * (rcov_i + rcov_j);
+            double rcut_jk = atcutt_value * (rcov_j + rcov_k) * (rcov_j + rcov_k);
+            double rcut_kl = atcutt_value * (rcov_k + rcov_l) * (rcov_k + rcov_l);
+
+            // Calculate damping derivatives w.r.t. squared distances
+            double ddamp_drij2 = calc_ddamp(rij2, rcut_ij);
+            double ddamp_drjk2 = calc_ddamp(rjk2, rcut_jk);
+            double ddamp_drkl2 = calc_ddamp(rkl2, rcut_kl);
+
+            // Calculate damping gradient terms (follow Fortran gfnff_engrad.F90:1277-1280)
+            // term1 = et * ddamp_drij2 * dampjk * dampkl * r_ij
+            // term2 = et * ddamp_drjk2 * dampij * dampkl * r_jk
+            // term3 = et * ddamp_drkl2 * dampij * dampjk * r_kl
+            Vector term1 = et * damp_jk * damp_kl * ddamp_drij2 * r_ij;
+            Vector term2 = et * damp_ij * damp_kl * ddamp_drjk2 * r_jk;
+            Vector term3 = et * damp_ij * damp_jk * ddamp_drkl2 * r_kl;
+
+            // =====================================================================
+            // PART 3: Combine angle gradient and damping gradient terms
+            // =====================================================================
+            // Gradient contribution from angle (∂E/∂φ)
+            Vector grad_angle_i = dEdphi * derivate.row(0);
+            Vector grad_angle_j = dEdphi * derivate.row(1);
+            Vector grad_angle_k = dEdphi * derivate.row(2);
+            Vector grad_angle_l = dEdphi * derivate.row(3);
+
+            // Total gradients (angle + damping) - same pattern as primary torsions
+            m_gradient.row(torsion.i) += grad_angle_i + term1;
+            m_gradient.row(torsion.j) += grad_angle_j - term1 + term2;
+            m_gradient.row(torsion.k) += grad_angle_k + term3 - term2;
+            m_gradient.row(torsion.l) += grad_angle_l - term3;
+
+            // DEBUG: Print extra torsion gradient details for first torsion
+            static bool extra_gradient_debug_printed = false;
+            if (!extra_gradient_debug_printed && index == 0 && CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("\n=== EXTRA TORSION GRADIENT DEBUG (Torsion {}-{}-{}-{}) ===",
+                                                 torsion.i, torsion.j, torsion.k, torsion.l));
+                CurcumaLogger::info(fmt::format("  dEdphi = {:.6e} Eh/rad", dEdphi));
+                CurcumaLogger::info(fmt::format("  et = energy = {:.6e} Eh", et));
+                CurcumaLogger::info(fmt::format("  damp = {:.8f}", damp));
+                CurcumaLogger::info(fmt::format("  |grad_angle_i| = {:.6e}", grad_angle_i.norm()));
+                CurcumaLogger::info(fmt::format("  |term1| = {:.6e}", term1.norm()));
+                CurcumaLogger::info(fmt::format("  |term2| = {:.6e}", term2.norm()));
+                CurcumaLogger::info(fmt::format("  |term3| = {:.6e}", term3.norm()));
+                CurcumaLogger::info("=========================================================\n");
+                extra_gradient_debug_printed = true;
+            }
         }
     }
 
