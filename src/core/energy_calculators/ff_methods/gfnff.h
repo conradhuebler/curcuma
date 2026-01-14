@@ -88,6 +88,7 @@ public:
      */
     struct TopologyInfo {
         Vector coordination_numbers;
+        Vector neighbor_counts;  // Simple neighbor counts for XTB-compatible torsion CN correction
         std::vector<int> hybridization;
         std::vector<int> pi_fragments;
         std::vector<int> ring_sizes;

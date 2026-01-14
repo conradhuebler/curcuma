@@ -4124,6 +4124,14 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     // Build neighbor lists for topology analysis (Session 6)
     topo_info.neighbor_lists = buildNeighborLists();
 
+    // Calculate simple neighbor counts for XTB compatibility in torsions
+    // XTB uses raw neighbor count (topo%nb(20,i)) rather than effective CN for torsion correction
+    std::vector<double> neighbor_counts(m_atomcount, 0.0);
+    for (int i = 0; i < m_atomcount; ++i) {
+        neighbor_counts[i] = static_cast<double>(topo_info.adjacency_list[i].size());
+    }
+    topo_info.neighbor_counts = Eigen::Map<Vector>(neighbor_counts.data(), neighbor_counts.size());
+
     // Phase 2C: Calculate π-bond orders for angle parameter refinement (January 10, 2026)
     // Used in nitrogen angle f2 calculation: f2 = 1.0 - sumppi*0.7
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -5332,8 +5340,8 @@ bool GFNFF::regenerateParametersWithCurrentCharges() {
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::success(fmt::format("Parameters regenerated with {} charges",
                                              m_charges.size()));
-            CurcumaLogger::info(fmt::format("Bonds: {}, Angles: {}, Torsions: {} (charge-dependent terms regenerated)",
-                                            bonds.size(), angles.size(), torsions.size()));
+            CurcumaLogger::info(fmt::format("Bonds: {}, Angles: {} (charge-dependent terms regenerated, torsions kept from cache)",
+                                            bonds.size(), angles.size()));
         }
 
         return true;

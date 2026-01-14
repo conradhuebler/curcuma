@@ -1433,11 +1433,13 @@ json GFNFF::generateGFNFFTorsions() const
                 if (k < topo.coordination_numbers.rows()) {
                     cn_k = topo.coordination_numbers(k);
                 }
-                if (i < topo.coordination_numbers.rows()) {
-                    cn_i_val = topo.coordination_numbers(i);
+                // For torsion CN correction, use simple neighbor counts to match XTB behavior
+                // XTB uses raw neighbor count (topo%nb(20,i)) rather than effective CN
+                if (i < topo.neighbor_counts.rows()) {
+                    cn_i_val = topo.neighbor_counts(i);
                 }
-                if (l < topo.coordination_numbers.rows()) {
-                    cn_l_val = topo.coordination_numbers(l);
+                if (l < topo.neighbor_counts.rows()) {
+                    cn_l_val = topo.neighbor_counts(l);
                 }
 
                 // Get actual topology charges (critical for fqq correction!)
