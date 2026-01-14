@@ -63,6 +63,11 @@ GFNFF::GFNFF()
     eeq_params["eeq_solver"]["verbosity"] = CurcumaLogger::get_verbosity();
     ConfigManager eeq_config("eeq_solver", eeq_params);
     m_eeq_solver = std::make_unique<EEQSolver>(eeq_config);
+
+    // Initialize Hückel solver (Jan 2026 - Phase 1: Full Hückel implementation)
+    m_huckel_solver = std::make_unique<HuckelSolver>();
+    m_huckel_solver->setVerbosity(CurcumaLogger::get_verbosity());
+    m_use_full_huckel = true;  // Default: use full Hückel calculation
 }
 
 GFNFF::GFNFF(const json& parameters)
@@ -91,6 +96,12 @@ GFNFF::GFNFF(const json& parameters)
     eeq_params["eeq_solver"]["verbosity"] = CurcumaLogger::get_verbosity();
     ConfigManager eeq_config("eeq_solver", eeq_params);
     m_eeq_solver = std::make_unique<EEQSolver>(eeq_config);
+
+    // Initialize Hückel solver (Jan 2026 - Phase 1: Full Hückel implementation)
+    m_huckel_solver = std::make_unique<HuckelSolver>();
+    m_huckel_solver->setVerbosity(CurcumaLogger::get_verbosity());
+    // Check if user wants to use simplified approximation instead
+    m_use_full_huckel = !m_parameters.value("use_simplified_pbo", false);
 }
 
 GFNFF::~GFNFF()
@@ -252,13 +263,16 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
                 double rcov_i = getCovalentRadius(m_atoms[i]);
                 double rcov_j = getCovalentRadius(m_atoms[j]);
 
+                // Phase 3: Apply element-specific fat scaling factors (Claude Generated Jan 2026)
+                double threshold = bond_threshold * (rcov_i + rcov_j) * fat[m_atoms[i]] * fat[m_atoms[j]];
+
                 // Debug output for each pair
                 if (CurcumaLogger::get_verbosity() >= 1) {
-                    CurcumaLogger::info(fmt::format("Pair {}-{}: dist={:.3f}, rcov_i={:.3f}, rcov_j={:.3f}, sum={:.3f}, threshold_sum={:.3f}",
-                                          i, j, distance, rcov_i, rcov_j, rcov_i + rcov_j, bond_threshold * (rcov_i + rcov_j)));
+                    CurcumaLogger::info(fmt::format("Pair {}-{}: dist={:.3f}, rcov_i={:.3f}, rcov_j={:.3f}, fat_i={:.3f}, fat_j={:.3f}, threshold={:.3f}",
+                                          i, j, distance, rcov_i, rcov_j, fat[m_atoms[i]], fat[m_atoms[j]], threshold));
                 }
 
-                if (distance < bond_threshold * (rcov_i + rcov_j)) {
+                if (distance < threshold) {
                     bonds.emplace_back(i, j);
                     if (CurcumaLogger::get_verbosity() >= 1) {
                         CurcumaLogger::info(fmt::format("  -> BONDED"));
@@ -783,7 +797,7 @@ json GFNFF::generateGFNFFBonds() const
     double bond_threshold = 1.3; // Factor for covalent radii sum
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::info(fmt::format("GFN-FF bond detection: {} atoms, threshold {:.2f}", m_atomcount, bond_threshold));
+            CurcumaLogger::info(fmt::format("GFN-FF bond detection: {} atoms, base threshold {:.2f}", m_atomcount, bond_threshold));
         }
 
         for (int i = 0; i < m_atomcount; ++i) {
@@ -796,7 +810,11 @@ json GFNFF::generateGFNFFBonds() const
             double rcov_i = getCovalentRadius(m_atoms[i]);
             double rcov_j = getCovalentRadius(m_atoms[j]);
 
-            if (distance < bond_threshold * (rcov_i + rcov_j)) {
+            // Phase 3: Apply element-specific fat scaling factors (Claude Generated Jan 2026)
+            // Reference: gfnff_ini2.f90:76-97
+            double threshold = bond_threshold * (rcov_i + rcov_j) * fat[m_atoms[i]] * fat[m_atoms[j]];
+
+            if (distance < threshold) {
                 // This is a bond - generate GFN-FF parameters
                 json bond;
                 bond["type"] = 3; // GFN-FF type
@@ -1549,11 +1567,18 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 
     double fcn = 1.0;  // Default: no CN correction
 
-    // Phase 9: Use actual coordination numbers as approximation for nb20
-    // TODO: Implement exact nb20 (neighbors within 20 Bohr cutoff) for precision
-    // For now, use CN as reasonable approximation
-    int nb20_1 = static_cast<int>(std::round(cn1));
-    int nb20_2 = static_cast<int>(std::round(cn2));
+    // Phase 2 (January 14, 2026): Use exact nb20 (neighbors within 20 Bohr cutoff)
+    // Port from gfnff_ini2.f90 - replaces CN approximation with exact count
+    int nb20_1, nb20_2;
+    if (topo.distance_matrix.size() > 0) {
+        // Use exact 20 Bohr cutoff count
+        nb20_1 = countNeighborsWithin20Bohr(atom1, topo.distance_matrix);
+        nb20_2 = countNeighborsWithin20Bohr(atom2, topo.distance_matrix);
+    } else {
+        // Fallback to CN approximation if no distance matrix available
+        nb20_1 = static_cast<int>(std::round(cn1));
+        nb20_2 = static_cast<int>(std::round(cn2));
+    }
 
     // Only apply to heavy atoms (Z > 10, i.e., beyond neon)
     // Fortran gfnff_ini.f90:1181-1184
@@ -2522,6 +2547,24 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
         }
     }
 
+    // Phase 5: Ring-strain corrections (Claude Generated January 2026)
+    // Reference: gfnff_ini.f90 - small rings require reduced force constants
+    // 3-membered rings: 30% reduction, 4-membered rings: 15% reduction
+    if (!topo_info.ring_sizes.empty() && atom_j < topo_info.ring_sizes.size()) {
+        int ring_size = topo_info.ring_sizes[atom_j];
+        if (ring_size == 3) {
+            params.force_constant *= 0.7;  // 30% reduction for 3-ring
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("Ring-strain correction: 3-ring at atom {}, fc *= 0.7", atom_j));
+            }
+        } else if (ring_size == 4) {
+            params.force_constant *= 0.85;  // 15% reduction for 4-ring
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("Ring-strain correction: 4-ring at atom {}, fc *= 0.85", atom_j));
+            }
+        }
+    }
+
     return params;
 }
 
@@ -3342,41 +3385,109 @@ std::vector<std::vector<int>> GFNFF::buildNeighborLists() const
     return neighbors;
 }
 
+int GFNFF::countNeighborsWithin20Bohr(int atom_index, const Eigen::MatrixXd& distance_matrix) const
+{
+    /**
+     * Claude Generated (January 14, 2026) - Phase 2: Exact nb20 implementation
+     *
+     * Port from gfnff_ini2.f90 neighbor list generation.
+     * Counts atoms within 20 Bohr cutoff for bond fcn correction.
+     *
+     * Reference: external/gfnff/src/gfnff_ini2.f90 - getnb() subroutine
+     */
+
+    static constexpr double NB20_CUTOFF = 20.0;  // Bohr
+
+    int count = 0;
+    int natoms = static_cast<int>(distance_matrix.rows());
+
+    for (int j = 0; j < natoms; j++) {
+        if (j != atom_index) {
+            if (distance_matrix(atom_index, j) < NB20_CUTOFF) {
+                count++;
+            }
+        }
+    }
+
+    return count;
+}
+
 std::vector<double> GFNFF::calculatePiBondOrders(
     const std::vector<std::pair<int,int>>& bond_list,
     const std::vector<int>& hybridization,
-    const std::vector<int>& pi_fragments) const
+    const std::vector<int>& pi_fragments,
+    const std::vector<double>& charges,
+    const Eigen::MatrixXd& distances) const
 {
     /**
-     * Claude Generated (January 10, 2026) - Phase 2C: Simplified π-bond order approximation
+     * Claude Generated (January 14, 2026) - Updated for Phase 1: Full Hückel implementation
      *
-     * Calculates approximate π-bond orders based on hybridization, avoiding
-     * the expensive Hückel eigenvalue calculation (~200 lines in Fortran).
+     * Calculates π-bond orders using one of two methods:
      *
-     * Approximation Strategy:
-     * - Identify π-bonds from hybridization (sp2-sp2, sp-sp, sp-sp2)
-     * - Estimate bond order based on bond type:
-     *   - Single bonds (sp3-sp3): pbo = 0.0
-     *   - Conjugated π-bonds (sp2-sp2 in same π-fragment): pbo = 0.7
-     *   - Isolated π-bonds (sp2-sp2, different fragments): pbo = 0.5
-     *   - Triple bonds (sp-sp): pbo = 1.5
-     *   - sp-sp2 bonds: pbo = 1.0
+     * 1. Full Hückel (m_use_full_huckel=true, default):
+     *    Self-consistent iterative Hückel calculation from gfnff_ini.f90:928-1062
+     *    - P-dependent off-diagonal coupling
+     *    - Charge-dependent diagonal elements
+     *    - Fermi smearing for biradical handling
+     *    - Exact π-bond orders from density matrix
      *
-     * Accuracy: Expected 80-90% vs full Hückel (~1.0-1.2 vs exact 1.0-1.1 for sp2-sp2)
-     *
-     * Reference (full implementation, not used):
-     * - external/gfnff/src/gfnff_ini.f90:898-1061 - Hückel matrix builder
-     * - Formula: pbo[lin(i,j)] = Api(ja,ia) from density matrix
+     * 2. Simplified approximation (m_use_full_huckel=false):
+     *    Based on hybridization and bond types
+     *    - 80-90% accuracy vs full Hückel
+     *    - Much faster (no eigenvalue calculation)
      */
 
     // Calculate size needed for triangular storage
-    // Maximum lin(i,j) = lin(N-1, N-1) = (N-1) + (N-1)*(N)/2 = N*(N-1)/2 + N-1 = (N²-N)/2 + N-1
     int max_index = m_atomcount * (m_atomcount + 1) / 2;
-    std::vector<double> pi_bond_orders(max_index, 0.0);  // Initialize all to 0.0
 
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("Calculating π-bond orders for {} bonds", bond_list.size()));
+    // ========================================================================
+    // Full Hückel calculation (default mode)
+    // ========================================================================
+    if (m_use_full_huckel && m_huckel_solver && !charges.empty() && distances.size() > 0) {
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Using full iterative Hückel calculation for π-bond orders");
+        }
+
+        // Create itag vector (empty for now - can be extended for carbene/NO2 detection)
+        std::vector<int> itag(m_atomcount, 0);
+
+        // Call the HuckelSolver
+        std::vector<double> pi_bond_orders = m_huckel_solver->calculatePiBondOrders(
+            m_atoms,
+            hybridization,
+            pi_fragments,
+            charges,
+            bond_list,
+            distances,
+            itag
+        );
+
+        // Ensure correct size
+        if (pi_bond_orders.size() < static_cast<size_t>(max_index)) {
+            pi_bond_orders.resize(max_index, 0.0);
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            int nonzero = 0;
+            for (double pbo : pi_bond_orders) {
+                if (std::abs(pbo) > 0.01) nonzero++;
+            }
+            CurcumaLogger::success(fmt::format(
+                "Full Hückel: {}/{} non-zero π-bond orders",
+                nonzero, bond_list.size()));
+        }
+
+        return pi_bond_orders;
     }
+
+    // ========================================================================
+    // Simplified approximation (fallback mode)
+    // ========================================================================
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Using simplified approximation for π-bond orders");
+    }
+
+    std::vector<double> pi_bond_orders(max_index, 0.0);
 
     // Iterate through all bonds and estimate π-bond orders
     for (const auto& [atom_i, atom_j] : bond_list) {
@@ -3427,7 +3538,7 @@ std::vector<double> GFNFF::calculatePiBondOrders(
             if (pbo > 0.0) nonzero++;
         }
         CurcumaLogger::success(fmt::format(
-            "Calculated π-bond orders: {}/{} non-zero entries",
+            "Simplified approx: {}/{} non-zero π-bond orders",
             nonzero, pi_bond_orders.size()));
     }
 
@@ -4132,16 +4243,9 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     }
     topo_info.neighbor_counts = Eigen::Map<Vector>(neighbor_counts.data(), neighbor_counts.size());
 
-    // Phase 2C: Calculate π-bond orders for angle parameter refinement (January 10, 2026)
-    // Used in nitrogen angle f2 calculation: f2 = 1.0 - sumppi*0.7
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("Phase 2C: Calculating π-bond orders");
-    }
-    topo_info.pi_bond_orders = calculatePiBondOrders(
-        bond_list,
-        topo_info.hybridization,
-        topo_info.pi_fragments
-    );
+    // NOTE: π-bond order calculation moved AFTER EEQ charge calculation
+    // The full Hückel solver requires charges for diagonal element correction.
+    // See below after "Phase 2: Energy Charges" section.
 
     // Session 7: Two-phase EEQ system (FIXED - Phase 1 EEQ solver bug corrected)
     // Check parameter flag to determine which EEQ system to use
@@ -4265,6 +4369,26 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         // For compatibility, set topology_charges to same values
         topo_info.topology_charges = topo_info.eeq_charges;
     }
+
+    // Phase 2C: Calculate π-bond orders for angle parameter refinement
+    // Claude Generated (January 14, 2026) - Updated: Now uses full Hückel by default
+    // MOVED HERE: Requires EEQ charges for charge-dependent diagonal elements
+    // Used in nitrogen angle f2 calculation: f2 = 1.0 - sumppi*0.7
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("Phase 2C: Calculating π-bond orders (full Hückel)");
+    }
+
+    // Convert charges to std::vector for HuckelSolver interface
+    std::vector<double> charges_vec(topo_info.topology_charges.data(),
+                                    topo_info.topology_charges.data() + topo_info.topology_charges.size());
+
+    topo_info.pi_bond_orders = calculatePiBondOrders(
+        bond_list,
+        topo_info.hybridization,
+        topo_info.pi_fragments,
+        charges_vec,
+        topo_info.distance_matrix
+    );
 
     // Initialize metal and aromatic flags
     topo_info.is_metal.resize(m_atomcount, false);

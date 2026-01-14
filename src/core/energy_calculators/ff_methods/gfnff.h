@@ -26,6 +26,7 @@
 #include "src/core/config_manager.h"
 #include "src/core/energy_calculators/ff_methods/forcefield.h"
 #include "src/core/energy_calculators/ff_methods/eeq_solver.h"  // EEQ charge calculation (Dec 2025 - Phase 3)
+#include "src/core/energy_calculators/ff_methods/huckel_solver.h"  // Full Hückel calculation (Jan 2026 - Phase 1)
 #include "src/core/global.h"
 #include "src/core/functional_groups.h"
 #include "src/core/periodic_table.h"
@@ -71,6 +72,24 @@ inline int lin(int i, int j) {
     int imax = std::max(i, j);
     int imin = std::min(i, j);
     return imin + imax * (imax + 1) / 2;
+}
+
+/**
+ * @brief Check if an atom is classified as a metal
+ *
+ * Claude Generated (January 2026) - Phase 4: Metal scaling
+ * Reference: gfnff_method.cpp:4382-4386
+ *
+ * @param atomic_number Atomic number (Z)
+ * @return true if atom is a transition metal or lanthanide/actinide
+ *
+ * Metal classification: Transition metals (Sc-Zn, Y-Cd, La-Hg) + Lanthanides/Actinides
+ */
+inline bool isMetalAtom(int atomic_number) {
+    return (atomic_number >= 21 && atomic_number <= 30) ||   // Sc-Zn
+           (atomic_number >= 39 && atomic_number <= 48) ||   // Y-Cd
+           (atomic_number >= 57 && atomic_number <= 80) ||   // La-Hg
+           (atomic_number >= 89 && atomic_number <= 103);    // Ac-Lr
 }
 
 class GFNFF {
@@ -843,33 +862,55 @@ private:
     std::vector<std::vector<int>> buildNeighborLists() const;
 
     /**
+     * @brief Count neighbors within 20 Bohr cutoff (nb20)
+     *
+     * Claude Generated (January 14, 2026) - Phase 2: Exact nb20 implementation
+     * Port from gfnff_ini2.f90 neighbor list generation.
+     *
+     * Returns the number of atoms within 20 Bohr (≈10.58 Å) of the given atom.
+     * This is used for bond fcn correction factors in GFN-FF.
+     *
+     * @param atom_index Index of atom to count neighbors for
+     * @param distance_matrix N×N distance matrix in Bohr
+     * @return Number of neighbors within 20 Bohr cutoff
+     */
+    int countNeighborsWithin20Bohr(int atom_index, const Eigen::MatrixXd& distance_matrix) const;
+
+    /**
      * @brief Calculate simplified π-bond orders for all atom pairs
      *
      * Claude Generated (January 10, 2026) - Phase 2C: π-bond order approximation
      *
-     * Simplified approximation based on hybridization and bond types,
-     * avoiding expensive Hückel eigenvalue calculation (~200 lines).
+     * Claude Generated (January 14, 2026) - Updated for Phase 1: Full Hückel implementation
      *
-     * Approximation rules (based on hybridization):
+     * Two modes available (controlled by m_use_full_huckel):
+     *
+     * **Full Hückel mode (default, m_use_full_huckel=true)**:
+     * Uses iterative self-consistent Hückel method from gfnff_ini.f90:928-1062.
+     * - P-dependent off-diagonal coupling (prevents over-delocalization)
+     * - Charge-dependent diagonal elements
+     * - Fermi smearing at 4000K for biradical handling
+     * - Exact π-bond orders from density matrix elements
+     *
+     * **Simplified mode (m_use_full_huckel=false)**:
+     * Approximation based on hybridization and bond types:
      * - Single bonds (sp3-sp3): pbo = 0.0
-     * - π bonds (sp2-sp2, sp2-sp): pbo = 0.5-1.0 (geometry-dependent)
-     * - sp bonds (sp-sp): pbo = 1.5 (approximate triple bond)
-     * - Non-bonded: pbo = 0.0
-     *
-     * Stored in triangular format: pbo[lin(i,j)] = bond order between atoms i and j
-     * Full Hückel implementation (exact) deferred as future work if needed.
+     * - π bonds (sp2-sp2, sp2-sp): pbo = 0.5-1.0
+     * - sp bonds (sp-sp): pbo = 1.5
      *
      * @param bond_list Vector of bonded atom pairs
      * @param hybridization Hybridization state per atom
      * @param pi_fragments Pi-system fragment IDs
+     * @param charges EEQ atomic charges (needed for full Hückel)
+     * @param distances N×N distance matrix in Bohr (needed for full Hückel)
      * @return Vector of π-bond orders in triangular format (access via lin(i,j))
-     *
-     * Reference: external/gfnff/src/gfnff_ini.f90:898-1061 (full Hückel - not implemented)
      */
     std::vector<double> calculatePiBondOrders(
         const std::vector<std::pair<int,int>>& bond_list,
         const std::vector<int>& hybridization,
-        const std::vector<int>& pi_fragments) const;
+        const std::vector<int>& pi_fragments,
+        const std::vector<double>& charges = {},
+        const Eigen::MatrixXd& distances = Eigen::MatrixXd()) const;
 
     /**
      * @brief Calculate EEQ electrostatic energy
@@ -1307,6 +1348,10 @@ private:
     // EEQ charge calculation (Dec 2025 - Phase 3: Extraction and delegation)
     std::unique_ptr<EEQSolver> m_eeq_solver; ///< Standalone EEQ solver (replaces embedded EEQ code)
 
+    // Hückel solver for π-bond orders (Jan 2026 - Phase 1: Full Hückel implementation)
+    std::unique_ptr<HuckelSolver> m_huckel_solver; ///< Full iterative Hückel solver
+    bool m_use_full_huckel = true; ///< Use full Hückel calculation (default: true, set to false for simplified approximation)
+
     // ATM three-body dispersion terms (extracted from D3/D4 - Claude Generated Jan 2025)
     mutable json m_atm_triples; ///< Bonded ATM triples from D3/D4 parameter generators
 
@@ -1325,6 +1370,57 @@ private:
     static constexpr double BOHR_TO_ANGSTROM = 0.5291772105638411;
     static constexpr double KCAL_TO_HARTREE = 1.0 / 627.5094740631;
     static constexpr double ANGSTROM_TO_BOHR = 1.0 / 0.5291772105638411;
+
+    /**
+     * @brief Element-specific radius scaling factors (fat array from gfnff_ini2.f90:76-97)
+     *
+     * Claude Generated (January 2026) - Phase 3: Element-specific neighbor detection
+     * Applied in bond detection: threshold = 1.3 * (rcov_i + rcov_j) * fat[Z_i] * fat[Z_j]
+     *
+     * Default: 1.0 for all elements
+     * Special adjustments for specific elements to improve bond detection accuracy
+     */
+    static constexpr double fat[87] = {
+        0.0,   // 0: placeholder (atom numbers start at 1)
+        1.02,  // 1: H
+        1.00,  // 2: He
+        1.00,  // 3: Li
+        1.03,  // 4: Be
+        1.02,  // 5: B
+        1.00,  // 6: C
+        1.00,  // 7: N
+        1.02,  // 8: O
+        1.05,  // 9: F
+        1.10,  // 10: Ne
+        1.01,  // 11: Na
+        1.02,  // 12: Mg
+        1.00,  // 13: Al
+        1.00,  // 14: Si
+        0.97,  // 15: P
+        1.00,  // 16: S
+        1.00,  // 17: Cl
+        1.10,  // 18: Ar
+        1.02,  // 19: K
+        1.02,  // 20: Ca
+        1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00,  // 21-30: Sc-Zn
+        1.00, 1.00, 1.00, 0.99,  // 31-34: Ga-Se (34: Se = 0.99)
+        1.00, 1.00, 1.00,        // 35-37: Br-Rb
+        1.02,  // 38: Sr
+        1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00,  // 39-49: Y-In
+        1.01,  // 50: Sn
+        0.99,  // 51: Sb
+        0.95,  // 52: Te
+        0.98,  // 53: I
+        1.00, 1.00,  // 54-55: Xe-Cs
+        1.02,  // 56: Ba
+        1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00,  // 57-66: La-Dy
+        1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00,        // 67-75: Ho-Re
+        1.02,  // 76: Os
+        1.00, 1.00, 1.00, 1.00, 1.00,  // 77-81: Ir-Tl
+        1.06,  // 82: Pb
+        0.95,  // 83: Bi
+        1.00, 1.00, 1.00   // 84-86: Po-Rn
+    };
 };
 
 /**
