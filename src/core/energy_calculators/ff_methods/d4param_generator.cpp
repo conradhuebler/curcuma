@@ -307,6 +307,12 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     json dispersion_pairs = json::array();
     int num_pairs = 0;
 
+    // Claude Generated (Jan 3, 2026): Debug pair generation
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("D4: Generating pairs for {} atoms (expect {} pairs)",
+            m_atoms.size(), (m_atoms.size() * (m_atoms.size() - 1)) / 2));
+    }
+
     for (size_t i = 0; i < m_atoms.size(); ++i) {
         for (size_t j = i + 1; j < m_atoms.size(); ++j) {
             int atom_i = m_atoms[i];

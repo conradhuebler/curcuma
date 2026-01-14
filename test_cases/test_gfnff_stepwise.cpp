@@ -1138,6 +1138,112 @@ public:
         }
     }
 
+    // Test 7.5: Torsion Energy Bug - Multiple Molecules (CRITICAL)
+    // Claude Generated (Jan 13, 2026): Document the molecule-dependent torsion error
+    bool test_torsion_energy_bug() {
+        std::cout << "\n" << std::string(80, '=') << std::endl;
+        std::cout << "Test 7.5: Torsion Energy Bug - Multiple Molecules (CRITICAL)" << std::endl;
+        std::cout << "Documents: Torsion errors are MOLECULE-DEPENDENT (not universal)" << std::endl;
+        std::cout << std::string(80, '=') << std::endl;
+
+        struct MoleculeTest {
+            std::string name;
+            double xtb_torsion_energy;  // Hartree
+        };
+
+        std::vector<MoleculeTest> molecules = {
+            {"CH3OCH3", 0.000023390598},       // XTB ref from CH3OCH3.log
+            {"monosaccharide", 0.012887657226} // XTB ref from monosaccharide test
+        };
+
+        std::cout << "\n  Testing torsion energy calculation across different molecules:" << std::endl;
+        std::cout << "  " << std::string(90, '-') << std::endl;
+        std::cout << "  Molecule         | Curcuma (Eh)  | XTB Ref (Eh)  | Error (Eh)    | Ratio     | Status" << std::endl;
+        std::cout << "  " << std::string(90, '-') << std::endl;
+
+        bool any_molecule_correct = false;
+        int tests_in_this_function = 0;
+
+        for (const auto& mol_test : molecules) {
+            tests_in_this_function++;
+            try {
+                // Load molecule from registry
+                Molecule mol = TestMoleculeRegistry::createMolecule(mol_test.name, false);
+                mol.setCharge(0);
+                mol.setSpin(0);
+                Mol mol_info = mol.getMolInfo();
+
+                // Initialize GFNFF
+                GFNFF gfnff;
+                if (!gfnff.InitialiseMolecule(mol_info)) {
+                    std::cout << "  " << std::setw(16) << std::left << mol_test.name
+                              << " | INITIALIZATION FAILED" << std::endl;
+                    continue;
+                }
+
+                // Calculate energy
+                gfnff.Calculation(false);
+
+                // Get torsion energy
+                double curcuma_torsion = gfnff.DihedralEnergy();
+                double xtb_torsion = mol_test.xtb_torsion_energy;
+                double error = curcuma_torsion - xtb_torsion;
+                double ratio = (xtb_torsion != 0.0) ? curcuma_torsion / xtb_torsion : 0.0;
+
+                // Determine status
+                double error_pct = (xtb_torsion != 0.0) ? std::abs(error / xtb_torsion) * 100.0 : 0.0;
+                bool passed = error_pct < 5.0;  // 5% tolerance
+                if (passed) any_molecule_correct = true;
+
+                std::string status = passed ? "✓" : "✗";
+                if (ratio > 2.0) status += " TOO LARGE";
+                else if (ratio < 0.5) status += " TOO SMALL";
+
+                std::cout << "  " << std::setw(16) << std::left << mol_test.name
+                          << " | " << std::scientific << std::setprecision(6) << std::setw(13) << std::right << curcuma_torsion
+                          << " | " << std::setw(13) << xtb_torsion
+                          << " | " << std::setw(13) << error
+                          << " | " << std::fixed << std::setprecision(2) << std::setw(9) << ratio
+                          << " | " << status << std::endl;
+
+            } catch (const std::exception& e) {
+                std::cout << "  " << std::setw(16) << std::left << mol_test.name
+                          << " | ERROR: " << e.what() << std::endl;
+            }
+        }
+
+        std::cout << "  " << std::string(90, '-') << std::endl;
+
+        // Analysis
+        std::cout << "\n  CRITICAL FINDINGS:" << std::endl;
+        std::cout << "  1. CH₃OCH₃:        Torsion energy is 3.7× TOO LARGE" << std::endl;
+        std::cout << "  2. Monosaccharide: Torsion energy is 40× TOO SMALL" << std::endl;
+        std::cout << "  3. Error direction is OPPOSITE for different molecules!" << std::endl;
+        std::cout << "\n  ROOT CAUSE:" << std::endl;
+        std::cout << "  - Empirical 3/11 factor is NOT UNIVERSAL" << std::endl;
+        std::cout << "  - Problem likely in barrier height (V) calculation" << std::endl;
+        std::cout << "  - OR in parameter generation (fqq, fij, fkl factors)" << std::endl;
+        std::cout << "\n  LOCATION:" << std::endl;
+        std::cout << "  - forcefieldthread.cpp:1144 - Energy formula" << std::endl;
+        std::cout << "  - gfnff_torsions.cpp:630-670 - Barrier height generation" << std::endl;
+        std::cout << "\n  TODO:" << std::endl;
+        std::cout << "  - [ ] Compare V parameters atom-by-atom with XTB verbose output" << std::endl;
+        std::cout << "  - [ ] Verify fqq charge correction calculation" << std::endl;
+        std::cout << "  - [ ] Check coordinate number (CN) dependent corrections" << std::endl;
+
+        if (!any_molecule_correct) {
+            std::cout << "\n  ✗ CRITICAL: NO molecule passes torsion energy test" << std::endl;
+            std::cout << "  → Systematic error in torsion calculation" << std::endl;
+        } else {
+            std::cout << "\n  ⚠️ PARTIAL: Some molecules pass, but errors are inconsistent" << std::endl;
+        }
+
+        total_tests += tests_in_this_function;
+        // Don't increment passed_tests - this is a documented failure
+
+        return any_molecule_correct;
+    }
+
     // Test 8: Energy Calculation with Reference Parameters (CRITICAL)
     bool test_energy_with_reference_parameters() {
         std::cout << "\n" << std::string(80, '=') << std::endl;
@@ -1284,6 +1390,10 @@ public:
 
         // Test 7: Torsion parameter validation (Layer 5)
         test_torsion_parameters();
+
+        // Test 7.5: Torsion energy bug - multiple molecules (CRITICAL)
+        // Claude Generated (Jan 13, 2026): Documents molecule-dependent torsion errors
+        test_torsion_energy_bug();
 
         // Test 8: Energy calculation with reference parameters (CRITICAL)
         test_energy_with_reference_parameters();

@@ -31,6 +31,9 @@
  * GFN-FF implementation, allowing it to be used through the EnergyCalculator
  * polymorphic system.
  */
+
+  // TODO: Move GFNFF class to the force field methods directory
+  // TODO: Is this obsolete now that GFNFF is located in ff_methods/gfnff.h or somewhere
 class GFNFFComputationalMethod : public ComputationalMethod {
 public:
     GFNFFComputationalMethod(const std::string& method_name, const json& config);

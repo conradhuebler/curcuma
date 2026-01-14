@@ -1043,6 +1043,7 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         // DEBUG: Print damping details for first primary torsion (Jan 8, 2026)
         static bool primary_damp_debug_printed = false;
         if (!primary_damp_debug_printed && index == 0 && CurcumaLogger::get_verbosity() >= 3) {
+            bool use_nci = dihedral.is_nci;  // Define use_nci from dihedral flag
             const double atcutt = use_nci ? GFNFFParameters::atcutt_nci : GFNFFParameters::atcutt;
             CurcumaLogger::info(fmt::format("\n=== PRIMARY TORSION DAMPING DEBUG (Torsion {}-{}-{}-{}) ===",
                                              dihedral.i, dihedral.j, dihedral.k, dihedral.l));
@@ -1234,6 +1235,9 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
             // ∂damp/∂r_ij = damp_jk * damp_kl * ∂damp_ij/∂r
             // ∂damp/∂r_jk = damp_ij * damp_kl * ∂damp_jk/∂r
             // ∂damp/∂r_kl = damp_ij * damp_jk * ∂damp_kl/∂r
+
+            // Get NCI flag for damping calculation
+            bool use_nci = dihedral.is_nci;
 
             // First, compute ddamp/∂r² for each bond
             // Formula: ddamp = -4*rr / (r² * (1+rr)²)

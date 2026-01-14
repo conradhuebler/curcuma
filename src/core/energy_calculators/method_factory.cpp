@@ -177,6 +177,8 @@ const std::vector<MethodFactory::MethodPriority>& MethodFactory::getPriorityMeth
 
 const std::vector<MethodFactory::ExplicitMethod>& MethodFactory::getExplicitMethods() {
     static const std::vector<ExplicitMethod> explicit_methods = {
+
+        // TODO merge GFNFF method with ForceFieldMethod later
         // Native methods (always available)
         { "eht", [](const json& config) { return std::make_unique<EHTMethod>(config); }, "Native", false, "" },
         { "cgfnff", [](const json& config) { return std::make_unique<GFNFFComputationalMethod>("cgfnff", config); }, "Native", false, "" },

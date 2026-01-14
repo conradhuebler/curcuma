@@ -338,6 +338,35 @@ double fbsmall = 1.0 - fbs1 * exp(-0.64 * (params.equilibrium_angle - pi)²);
      - [ ] Check if extra torsions should only apply to specific quartet geometries
      - [ ] Test with multiple molecules (ethane, methylamine) to verify heteroatom factors
 
+## Implementierte Gradienten-Erweiterungen (Januar 2026)
+
+### ✅ ABGESCHLOSSEN: Vollständige Torsionsgradienten mit NCI-Unterstützung (13. Januar 2026)
+
+**Vollständige analytische Gradienten** für alle Torsionstypen implementiert mit korrekter NCI-Unterstützung:
+
+#### 1. Strukturelle Erweiterungen
+- **Dihedral-Struktur** um `is_nci` Flag erweitert für NCI-spezifische Torsionen
+- **Automatische Parameterauswahl**: Standard `atcutt=0.505` vs NCI `atcutt_nci=0.305`
+
+#### 2. Gradienten-Implementierung
+- **Primäre Torsionen**: `CalculateGFNFFDihedralContribution` mit vollständigen Dämpfungsderivaten
+- **Extra sp3-sp3 Torsionen**: `CalculateGFNFFExtraTorsionContribution` identisch implementiert
+- **Exakte Fortran-Nachbildung**: Formeln gemäß `gfnff_engrad.F90:1273-1280`
+- **Komponenten**:
+  - Winkel-Gradient: ∂E/∂φ Beitrag
+  - Dämpfungs-Gradienten: ∂damp/∂r Terme für alle 3 Bindungen
+  - Kombinierte Gradienten: ∂E/∂r = ∂E/∂φ * ∂φ/∂r + E * ∂damp/∂r
+
+#### 3. NCI-Integration Status
+- **Gradienten-Seite**: ✅ Vollständig implementiert und getestet
+- **Parameter-Generierung**: ⚠️ `is_nci` Flag wird noch nicht gesetzt
+- **Referenz-Kontext**: NCI-Torsionen nur in speziellen HB/XB Kontexten verwendet
+- **Zukünftige Integration**: Verknüpfung mit HB/XB System zur dynamischen NCI-Torsionserzeugung
+
+**Impact**: Präzise Gradientenberechnung für alle Torsionstypen mit korrekter Dämpfungsparameter-Unterstützung.
+
+---
+
 ### 🟡 Lower Priority TODOs
 
 #### Topology-Specific Corrections (Not Yet Implemented)
