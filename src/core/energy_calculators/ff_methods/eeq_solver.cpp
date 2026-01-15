@@ -632,6 +632,9 @@ EEQSolver::EEQSolver(const ConfigManager& config)
     m_verbosity = m_config.get<int>("verbosity", 0);
     m_calculate_cn = m_config.get<bool>("calculate_cn", true);
 
+    // Initialize EEQ caching system
+    m_eeq_cache = std::make_unique<EEQSolverCache>();
+
     if (m_verbosity >= 2) {
         CurcumaLogger::info("EEQSolver initialized with parameters:");
         CurcumaLogger::param("max_iterations", std::to_string(m_max_iterations));
@@ -981,6 +984,41 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
         A(j, natoms) = 1.0;
     }
     A(natoms, natoms) = 0.0;
+
+    return A;
+}
+
+// Enhanced EEQ matrix construction with intelligent caching
+Matrix EEQSolver::buildSmartEEQMatrix(
+    const std::vector<int>& atoms,
+    const Matrix& geometry_bohr,
+    const Vector& cn,
+    const Vector& current_charges,
+    const Vector& dxi,
+    const Vector& dgam,
+    const std::vector<int>& hybridization,
+    const std::optional<TopologyInput>& topology)
+{
+    // Check if we can reuse cached computation
+    if (m_eeq_cache && !m_eeq_cache->isGeometryChanged(geometry_bohr)) {
+        if (m_verbosity >= 2) {
+            CurcumaLogger::info("EEQSolver: Using cached EEQ matrix (geometry unchanged)");
+        }
+        // For identical geometries, return cached matrix with possible adjustments
+        return m_eeq_cache->getCachedAMatrix();
+    }
+
+    if (m_verbosity >= 3) {
+        CurcumaLogger::info("EEQSolver: Building EEQ matrix from scratch");
+    }
+
+    // Build matrix using existing logic
+    Matrix A = buildCorrectedEEQMatrix(atoms, geometry_bohr, cn, current_charges, dxi, dgam, hybridization, topology);
+
+    // Cache the result for future use
+    if (m_eeq_cache) {
+        m_eeq_cache->cacheResults(geometry_bohr, A, Vector::Zero(atoms.size())); // Charges cached separately
+    }
 
     return A;
 }
@@ -1470,7 +1508,8 @@ Vector EEQSolver::calculateFinalCharges(
     const Vector& cn,
     const std::vector<int>& hybridization,
     const std::optional<TopologyInput>& topology,
-    bool use_corrections)
+    bool use_corrections,
+    const std::optional<Vector>& alpeeq)
 {
     const int natoms = atoms.size();
     const double TSQRT2PI = 0.797884560802866;  // sqrt(2/π)
@@ -1603,31 +1642,49 @@ Vector EEQSolver::calculateFinalCharges(
 
     do {
         // ===== Calculate Alpha using Current Charges =====
-        // Reference: XTB gfnff_ini.f90:699-706
-        // topo%alpeeq(i) = (param%alp(at(i)) + ff*topo%qa(i))**2
-        // For iterative case: alpeeq(i) = (param%alp(at(i)) + ff*current_charges(i))**2
+        // Reference: XTB gfnff_ini.f90:699-706, gfnff_ini.f90:718-725
         Vector alpha_corrected(natoms);
-        for (int i = 0; i < natoms; ++i) {
-            int z_i = atoms[i];
 
-            // Get base alpha (UNSQUARED) from gfnff_par.h
-            double alpha_base = (z_i >= 1 && z_i <= 86) ? alpha_eeq[z_i - 1] : 0.903430;
+        // Claude Generated (January 2026): Use pre-computed charge-dependent alpha if available
+        if (alpeeq.has_value() && alpeeq->size() == natoms) {
+            // Use pre-computed charge-dependent alpha from Phase 1B
+            // Formula: alpeeq(i) = (alpha_base + ff*qa(i))²
+            // Reference: Fortran gfnff_ini.f90:718-725
+            // These values are SQUARED and charge-corrected, used UNCHANGED
+            alpha_corrected = *alpeeq;
 
-            // CRITICAL FIX (Jan 7, 2026): Phase 2-specific alpha corrections
-            // Fortran goed_gfnff uses different alpha values than goedeckera (Phase 1)
-            // Reference: PHASE2_CHARGE_ANALYSIS.md - extracted from Fortran debug output
-            if (z_i == 6) {  // Carbon
-                alpha_base = 0.906988;  // Phase 2: (0.906988)² = 0.822628
-            } else if (z_i == 8) {  // Oxygen
-                alpha_base = 0.915779;  // Phase 2: (0.915779)² = 0.838652
+            if (m_verbosity >= 3 && iteration == 0) {
+                CurcumaLogger::info("EEQ Phase 2: Using pre-computed charge-dependent alpha (alpeeq)");
+            }
+        } else {
+            // Fallback: Calculate alpha from base parameters (backward compatibility)
+            // CRITICAL: This is the OLD behavior - retained for backward compatibility only
+            for (int i = 0; i < natoms; ++i) {
+                int z_i = atoms[i];
+
+                // Get base alpha (UNSQUARED) from gfnff_par.h
+                double alpha_base = (z_i >= 1 && z_i <= 86) ? alpha_eeq[z_i - 1] : 0.903430;
+
+                // CRITICAL FIX (Jan 7, 2026): Phase 2-specific alpha corrections
+                // Fortran goed_gfnff uses different alpha values than goedeckera (Phase 1)
+                // Reference: PHASE2_CHARGE_ANALYSIS.md - extracted from Fortran debug output
+                if (z_i == 6) {  // Carbon
+                    alpha_base = 0.906988;  // Phase 2: (0.906988)² = 0.822628
+                } else if (z_i == 8) {  // Oxygen
+                    alpha_base = 0.915779;  // Phase 2: (0.915779)² = 0.838652
+                }
+
+                // CRITICAL (Jan 7, 2026): Phase 2 alpha parameters
+                // Unlike dxi/dgam, alpha is NOT charge-corrected in Phase 2 energy calculation
+                // Reference: XTB gfnff_engrad.F90:1507-1520 uses topo%alpeeq unchanged
+                // The (alpha_base + ff*qa)² correction is ONLY for Phase 1c (gfnff_ini.f90:712-726)
+                // Phase 2 uses BASE alpha values: alpha_eeq[Z-1]² with NO qa modification
+                alpha_corrected(i) = alpha_base * alpha_base;
             }
 
-            // CRITICAL (Jan 7, 2026): Phase 2 alpha parameters
-            // Unlike dxi/dgam, alpha is NOT charge-corrected in Phase 2 energy calculation
-            // Reference: XTB gfnff_engrad.F90:1507-1520 uses topo%alpeeq unchanged
-            // The (alpha_base + ff*qa)² correction is ONLY for Phase 1c (gfnff_ini.f90:712-726)
-            // Phase 2 uses BASE alpha values: alpha_eeq[Z-1]² with NO qa modification
-            alpha_corrected(i) = alpha_base * alpha_base;
+            if (m_verbosity >= 3 && iteration == 0) {
+                CurcumaLogger::warn("EEQ Phase 2: No alpeeq provided - using base alpha (backward compat)");
+            }
         }
 
         // ===== Build A Matrix with Current Alpha =====

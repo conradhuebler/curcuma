@@ -165,6 +165,10 @@ public:
      * @param cn Coordination numbers
      * @param hybridization Hybridization states (1=sp, 2=sp2, 3=sp3)
      * @param topology Optional topology information for integer neighbor counts in CNF calculation
+     * @param alpeeq Optional charge-dependent alpha values (squared) from Phase 1
+     *               If provided, these pre-computed alpeeq values are used instead of base alpha
+     *               Formula: alpeeq(i) = (alpha_base + ff*qa(i))²
+     *               Reference: Fortran gfnff_ini.f90:718-725
      * @return Vector of final EEQ charges
      */
     Vector calculateFinalCharges(
@@ -175,7 +179,8 @@ public:
         const Vector& cn,
         const std::vector<int>& hybridization,
         const std::optional<TopologyInput>& topology = std::nullopt,
-        bool use_corrections = false  // CRITICAL FIX (Jan 4, 2026): default false to match gfnff_final.cpp
+        bool use_corrections = false,  // CRITICAL FIX (Jan 4, 2026): default false to match gfnff_final.cpp
+        const std::optional<Vector>& alpeeq = std::nullopt  // Claude Generated (January 2026): Charge-dependent alpha
     );
 
     /**
@@ -279,6 +284,35 @@ private:
      * @return Augmented EEQ matrix (natoms+1)×(natoms+1)
      */
     Matrix buildCorrectedEEQMatrix(
+        const std::vector<int>& atoms,
+        const Matrix& geometry_bohr,
+        const Vector& cn,
+        const Vector& current_charges,
+        const Vector& dxi,
+        const Vector& dgam,
+        const std::vector<int>& hybridization,
+        const std::optional<TopologyInput>& topology
+    );
+
+    /**
+     * @brief Build EEQ matrix with intelligent caching for performance optimization
+     *
+     * Enhanced version of buildCorrectedEEQMatrix that uses intelligent caching
+     * to avoid expensive matrix reconstruction when geometry changes are insignificant.
+     *
+     * @param atoms Atomic numbers
+     * @param geometry_bohr Coordinates in Bohr
+     * @param cn Coordination numbers
+     * @param current_charges Current charge estimate (used for charge-dependent dgam/alpha)
+     * @param dxi Electronegativity corrections
+     * @param dgam Hardness corrections (gam - qa*ff)
+     * @param hybridization Hybridization states
+     * @param topology Optional topology for topological distances
+     * @return Augmented EEQ matrix (natoms+1)×(natoms+1) with caching
+     *
+     * Claude Generated - Performance Optimization Implementation
+     */
+    Matrix buildSmartEEQMatrix(
         const std::vector<int>& atoms,
         const Matrix& geometry_bohr,
         const Vector& cn,
@@ -394,8 +428,49 @@ private:
 
     // ===== Cached Data for Energy Calculation =====
 
+    // EEQ Solver intelligent caching for performance optimization
+    class EEQSolverCache {
+    private:
+        Matrix m_last_geometry;
+        Matrix m_last_A_matrix;
+        Vector m_last_charges;
+        bool m_cache_valid = false;
+        double m_change_threshold = 1e-6;
+
+    public:
+        bool isGeometryChanged(const Matrix& current_geometry) const {
+            if (!m_cache_valid) return true;
+            if (m_last_geometry.rows() != current_geometry.rows() ||
+                m_last_geometry.cols() != current_geometry.cols()) {
+                return true;
+            }
+            return (m_last_geometry - current_geometry).array().abs().maxCoeff() > m_change_threshold;
+        }
+
+        void cacheResults(const Matrix& geometry, const Matrix& A, const Vector& charges) {
+            m_last_geometry = geometry;
+            m_last_A_matrix = A;
+            m_last_charges = charges;
+            m_cache_valid = true;
+        }
+
+        Matrix getCachedAMatrix() const { return m_last_A_matrix; }
+        Vector getCachedCharges() const { return m_last_charges; }
+        bool isValid() const { return m_cache_valid; }
+
+        void reset() {
+            m_cache_valid = false;
+            m_last_geometry = Matrix();
+            m_last_A_matrix = Matrix();
+            m_last_charges = Vector();
+        }
+    };
+
     mutable Vector m_dxi_stored;      ///< Stored dxi corrections from last calculateCharges() call
     mutable Matrix m_cached_topological_distances;  ///< Cached topological distances from Phase 1 for Phase 2 reuse (Jan 2, 2026)
+
+    // Intelligent EEQ matrix caching for performance
+    mutable std::unique_ptr<EEQSolverCache> m_eeq_cache;
 };
 
 // ===== Parameter Definitions =====

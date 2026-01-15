@@ -38,6 +38,15 @@
 
 #include <fmt/format.h>
 
+// Claude Generated (January 2026): Helper function for transition metal detection
+static inline bool is_transition_metal(int Z) {
+    // Transition metal series: d-block elements
+    // Sc-Zn (Z=21-30), Y-Cd (Z=39-48), Hf-Hg (Z=72-80)
+    return (Z >= 21 && Z <= 30) ||  // 3d series
+           (Z >= 39 && Z <= 48) ||  // 4d series
+           (Z >= 72 && Z <= 80);    // 5d series
+}
+
 GFNFF::GFNFF()
     : m_forcefield(nullptr)
     , m_initialized(false)
@@ -210,10 +219,11 @@ bool GFNFF::UpdateMolecule()
     // Update Bohr geometry for GFN-FF
     m_geometry_bohr = m_geometry * CurcumaUnit::Length::ANGSTROM_TO_BOHR;
 
-    // Invalidate cached topology and bond list because geometry changed
-    m_cached_topology.reset();
-    m_cached_bond_list.reset();
+    // NOTE: We no longer aggressively reset caches here because our smart caching
+    // will handle cache invalidation based on geometry change thresholds.
+    // The existing cached results will be used if geometry change is insignificant.
 
+    // Update geometry in forcefield
     if (m_forcefield) {
         m_forcefield->UpdateGeometry(m_geometry_bohr);  // Pass Bohr geometry
     }
@@ -226,19 +236,26 @@ bool GFNFF::UpdateMolecule()
 // ---------------------------------------------------------------------------
 
 const GFNFF::TopologyInfo& GFNFF::getCachedTopology() const {
-    if (!m_cached_topology) {
+    // Only recalculate if geometry has meaningfully changed
+    if (!m_cached_topology || m_geometry_tracker.geometryChanged(m_geometry_bohr)) {
+        if (m_cached_topology && CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("GFNFF: Recalculating topology due to significant geometry change");
+        }
         m_cached_topology = calculateTopologyInfo();
+        m_geometry_tracker.updateGeometry(m_geometry_bohr);
+    } else if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("GFNFF: Using cached topology (geometry unchanged)");
     }
     return *m_cached_topology;
 }
 
 const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
-    // Debug output to see if function is being called
-    if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::info("=== getCachedBondList() CALLED ===");
-    }
+    // Only recalculate if geometry has meaningfully changed
+    if (!m_cached_bond_list || m_geometry_tracker.geometryChanged(m_geometry_bohr)) {
+        if (m_cached_bond_list && CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("GFNFF: Recalculating bond list due to geometry change");
+        }
 
-    if (!m_cached_bond_list) {
         // Debug output to see if we're calculating bonds
         if (CurcumaLogger::get_verbosity() >= 1) {
             CurcumaLogger::info("=== Calculating new bond list ===");
@@ -286,6 +303,9 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
         }
 
         m_cached_bond_list = std::move(bonds);
+        m_geometry_tracker.updateGeometry(m_geometry_bohr);
+    } else if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("GFNFF: Using cached bond list ({} bonds)", m_cached_bond_list->size()));
     }
     return *m_cached_bond_list;
 }
@@ -1913,8 +1933,9 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     // Real formula: fijk = angl(center) * angl2(i) * angl2(k)
     double fijk_calc = angle_param * angl2_i * angl2_k;
 
-    // Factor 1: fijk calculation (DEFERRED - needs deeper Fortran analysis)
-    // TODO Phase 2b: Proper fijk with angl2 logic from gfnff_param.f90:1359
+    // ✅ Factor 1: fijk calculation COMPLETE (January 2026)
+    // Exact match with Fortran gfnff_ini.f90:1717 formula
+    // fijk = param%angl(ati) * param%angl2(atj) * param%angl2(atk)
 
     // Factor 2: fqq = charge-dependent correction for angles
     // PHASE 5A: Implement from Fortran gfnff_ini.f90:1426-1430
@@ -4352,6 +4373,21 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             throw std::runtime_error("GFN-FF initialization failed: Phase 1 topology charge calculation failed.");
         }
 
+        // ===== PHASE 1B: Charge-Dependent Alpha (alpeeq) =====
+        // Claude Generated (January 2026)
+        // Calculate charge-dependent alpha values using Phase 1 charges
+        // Reference: Fortran gfnff_ini.f90:718-725
+        // Formula: alpeeq(i) = (alpha_base + ff*qa(i))²
+        // These values are stored and used UNCHANGED in all subsequent EEQ calculations
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Computing Phase 1B: Charge-dependent alpha (alpeeq)");
+        }
+
+        if (!calculateAlpeeq(topo_info)) {
+            CurcumaLogger::error("calculateTopologyInfo: Phase 1B alpeeq calculation failed");
+            throw std::runtime_error("GFN-FF initialization failed: Phase 1B alpeeq calculation failed.");
+        }
+
         // ===== PHASE 2: Energy Charges (nlist%q) =====
         // Compute energy charges using real geometric distances
         // Reference: Fortran gfnff_engrad.F90:1503-1562 energy calculation
@@ -4367,7 +4403,8 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             topo_info.coordination_numbers, // Fractional CN from real geometry
             topo_info.hybridization,        // Hybridization states
             std::nullopt,                   // WITHOUT topology - uses cached topological distances from Phase 1
-            true   // CRITICAL (Jan 5, 2026): YES corrections - Phase 2 needs dxi and dgam (fixes 59% charge error)
+            true,  // CRITICAL (Jan 5, 2026): YES corrections - Phase 2 needs dxi and dgam (fixes 59% charge error)
+            topo_info.alpeeq  // Claude Generated (January 2026): Charge-dependent alpha from Phase 1B
         );
 
         if (topo_info.eeq_charges.size() != m_atomcount) {
@@ -5827,6 +5864,109 @@ bool GFNFF::calculateDalpha(TopologyInfo& topo_info) const
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("calculateDalpha: Polarizability corrections calculated");
+    }
+
+    return true;
+}
+
+/**
+ * @brief Calculate charge-dependent alpha (alpeeq) for EEQ
+ *
+ * Claude Generated (January 2026)
+ *
+ * Computes charge-dependent alpha values used in EEQ matrix construction.
+ * This implements the formula from Fortran gfnff_ini.f90:718-725:
+ *
+ *   alpeeq(i) = (alpha_base + ff*qa(i))²
+ *
+ * where ff is element-specific:
+ *   - Carbon (Z=6): ff = 0.09
+ *   - Nitrogen (Z=7): ff = -0.21
+ *   - Group 6 (O,S,Se): ff = -0.03
+ *   - Group 7 (Halogens): ff = 0.50
+ *   - Main group metals: ff = 0.3
+ *   - Transition metals: ff = -0.1
+ *
+ * Physical meaning: Charge state modifies atomic polarizability (Gaussian width).
+ * Positive charges increase alpha (softer, more diffuse) for C/main-group metals,
+ * negative charges increase alpha for N/halogens/transition metals.
+ *
+ * CRITICAL: This must be called AFTER topology_charges are computed,
+ * and the resulting alpeeq values are used UNCHANGED in all subsequent
+ * EEQ calculations (no iteration).
+ *
+ * Reference: Fortran gfnff_ini.f90:718-725, gfnff_data_types.f90:128
+ */
+bool GFNFF::calculateAlpeeq(TopologyInfo& topo_info) const
+{
+    if (m_atomcount <= 0) {
+        CurcumaLogger::error("calculateAlpeeq: No atoms initialized");
+        return false;
+    }
+
+    if (topo_info.topology_charges.size() != m_atomcount) {
+        CurcumaLogger::error("calculateAlpeeq: topology_charges not yet calculated");
+        return false;
+    }
+
+    topo_info.alpeeq = Vector::Zero(m_atomcount);
+
+    // Element-specific ff factors for charge-dependent alpha
+    // Reference: Fortran gfnff_ini.f90:718-724
+    for (int i = 0; i < m_atomcount; ++i) {
+        int z_i = m_atoms[i];
+        double qa = topo_info.topology_charges(i);
+
+        // Get base alpha (UNSQUARED) from gfnff_par.h
+        double alpha_base = (z_i >= 1 && z_i <= 86) ? GFNFFParameters::alpha_eeq[z_i - 1] : 0.903430;
+
+        // Element-specific ff factor
+        double ff = 0.0;
+
+        if (z_i == 6) {
+            // Carbon
+            ff = 0.09;
+        } else if (z_i == 7) {
+            // Nitrogen
+            ff = -0.21;
+        } else if (z_i > 10 && z_i <= 86) {
+            // Heavy elements: check group and metal type
+            int group = GFNFFParameters::periodic_group[z_i - 1];
+
+            if (group == 6) {
+                // Group 6: O, S, Se, Te, Po
+                ff = -0.03;
+            } else if (group == 7) {
+                // Group 7: F, Cl, Br, I, At
+                ff = 0.50;
+            } else if (i < topo_info.is_metal.size() && topo_info.is_metal[i]) {
+                // Metal elements
+                if (is_transition_metal(z_i)) {
+                    // Transition metals
+                    ff = -0.1;
+                } else {
+                    // Main group metals
+                    ff = 0.3;
+                }
+            }
+        }
+
+        // FINAL: Charge-dependent alpha (SQUARED)
+        // Fortran: topo%alpeeq(i) = (param%alp(at(i)) + ff*topo%qa(i))**2
+        topo_info.alpeeq(i) = std::pow(alpha_base + ff * qa, 2);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("calculateAlpeeq: Charge-dependent alpha calculated");
+
+        // Print first few values for debugging
+        std::cout << "  First 3 alpeeq values:" << std::endl;
+        for (int i = 0; i < std::min(3, m_atomcount); ++i) {
+            int z_i = m_atoms[i];
+            double qa = topo_info.topology_charges(i);
+            std::cout << fmt::format("    Atom {} (Z={}): qa={:.6f}, alpeeq={:.6f}",
+                                    i, z_i, qa, topo_info.alpeeq(i)) << std::endl;
+        }
     }
 
     return true;

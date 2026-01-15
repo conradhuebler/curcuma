@@ -16,6 +16,7 @@ test_cases/
 │   ├── rmsd/                    # RMSD CLI tests (6 tests)
 │   ├── confscan/                # ConfScan CLI tests (7 tests)
 │   ├── simplemd/                # SimpleMD CLI tests (7 tests)
+│   ├── gfnff/                   # GFN-FF CLI tests (1 test)
 │   ├── test_utils.sh            # Shared test utilities
 │   ├── CMakeLists.txt           # CTest integration
 │   ├── README.md                # CLI test documentation
@@ -157,12 +158,13 @@ ctest -R "cli_rmsd_" --output-on-failure
 ctest -R "cli_rmsd_01" --verbose
 ```
 
-### Current Status (Stand 2025-10-26)
+### Current Status (Stand 2026-01-15)
 
-**Tests**: 26 implementiert, **19/26 bestanden (73%)**
+**Tests**: 28 implementiert, **20/28 bestanden (71%)**
 - RMSD: 6/6 ✅ (100%)
 - ConfScan: 7/7 ✅ (100%)
 - Curcumaopt: 6/6 ✅ (100%)
+- GFN-FF: 1/1 ✅ (100%)
 - SimpleMD: 0/7 (no crashes, output file issue)
 
 **Golden References**: RMSD 2.87214 Å (AAA-bGal, 90 atoms) - see GOLDEN_REFERENCES.md

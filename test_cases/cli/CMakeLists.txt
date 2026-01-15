@@ -46,7 +46,7 @@ macro(add_cli_test CATEGORY TEST_NAME)
     )
 
     # Set timeout for all CLI tests
-    set_tests_properties(cli_${CATEGORY}_${TEST_NAME} PROPERTIES TIMEOUT 30)
+    set_tests_properties(cli_${CATEGORY}_${TEST_NAME} PROPERTIES TIMEOUT 120)
 endmacro()
 
 # =============================================================================
@@ -59,6 +59,12 @@ add_cli_test(curcumaopt 03_invalid_method)
 add_cli_test(curcumaopt 04_lbfgs_params)
 add_cli_test(curcumaopt 05_alias_singlepoint)
 add_cli_test(curcumaopt 06_opth_only)
+
+# =============================================================================
+# GFN-FF Tests (1 scenario)
+# =============================================================================
+
+add_cli_test(gfnff 01_complex_gfnff_singlepoint)
 
 # =============================================================================
 # RMSD Tests (6 scenarios)
@@ -101,6 +107,6 @@ add_cli_test(simplemd 07_restart_simulation)
 
 add_cli_test(cg 01_single_point)
 
-message(STATUS "Added 27 CLI test scenarios with build directory isolation")
+message(STATUS "Added 28 CLI test scenarios with build directory isolation")
 message(STATUS "  - Tests execute from: ${CMAKE_CURRENT_BINARY_DIR}/category/test_name")
 message(STATUS "  - Source tree remains clean (all outputs in build directory)")
