@@ -1021,12 +1021,28 @@ Vector EEQSolver::solveEEQ(
     // Curcuma implements Phase 1+2 only (no separate Phase 3 goed_gfnff call).
     // Phase 2 here mimics Parameter Preparation + implicit goed_gfnff solve.
     const double CNMAX = 4.4;
+    const double MCHISHIFT = -0.09;  // Metal chi-shift from gfnff_param.f90:800
+
     for (int i = 0; i < natoms; ++i) {
         int z_i = atoms[i];
         EEQParameters params_i = getParameters(z_i, cn(i));
 
         // chi_corrected = -chi + dxi (always included)
         double chi_corrected = -params_i.chi + dxi(i);
+
+        // Metal Charge Shift Correction (Phase 2.8 - January 15, 2026)
+        // Reference: gfnff_ini.f90:413-418
+        // Formula: chieeq(i) = chieeq(i) - mchishift (for transition metals only)
+        // Effect: Makes transition metals more electronegative
+        // Claude Generated: Metal identification based on Z value
+        bool is_transition_metal = false;
+        if (z_i >= 21 && z_i <= 30) is_transition_metal = true;  // Sc-Zn
+        else if (z_i >= 39 && z_i <= 48) is_transition_metal = true;  // Y-Cd
+        else if (z_i >= 72 && z_i <= 80) is_transition_metal = true;  // Hf-Hg
+
+        if (is_transition_metal) {
+            chi_corrected -= MCHISHIFT;  // Subtracts -0.09, effectively adds +0.09
+        }
 
         if (use_cnf_term) {
             // Phase 1: Add CNF term for topology charges

@@ -1537,6 +1537,7 @@ json GFNFF::generateGFNFFTorsions() const
     // ==========================================================================
     // STEP 7B: Generate Extra SP3-SP3 Torsions (n=1 for Gauche Conformations)
     // ==========================================================================
+    // DISABLED (January 15, 2026): Investigation phase - these terms overcompensate
     // Reference: gfnff_ini.f90:1952-2002
     // "extra rot=1 torsion potential for sp3-sp3 to get gauche conf energies well"
     //

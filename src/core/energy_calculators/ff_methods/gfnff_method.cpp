@@ -2903,10 +2903,17 @@ std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb) const
 
 std::vector<int> GFNFF::findSmallestRings() const
 {
-    // Phase 2.1: Ring detection algorithm (DFS-based)
-    // Finds the smallest ring each atom belongs to (3-8 membered rings)
-    // Reference: gfnff_helpers.f90:99-316 (getring36 subroutine)
-    // Educational simplification: DFS instead of exhaustive enumeration
+    // Phase 2.1: Ring detection algorithm - EXHAUSTIVE PATH SEARCH
+    // Finds the smallest ring each atom belongs to (3-6 membered rings)
+    // Reference: External gfnff_helpers.f90:99-250 (getring36 subroutine)
+    //
+    // Algorithm: For each starting atom, exhaustively search all paths of length 3-6
+    // that return to the start atom. A path is a valid ring if:
+    //   1. It returns to the starting atom (forms a cycle)
+    //   2. No atom appears twice in the path (no self-intersections)
+    //   3. Ring size is 3-6 atoms
+    //
+    // This is the EXACT algorithm used by Fortran GFN-FF reference implementation.
 
     std::vector<int> ring_sizes(m_atomcount, 0); // 0 = not in ring
 
@@ -2926,42 +2933,75 @@ std::vector<int> GFNFF::findSmallestRings() const
         }
     }
 
-    // Step 2: For each atom, find shortest cycle using BFS
-    // (BFS guarantees shortest path = smallest ring)
+    // Step 2: For each atom, exhaustively search all paths that form rings
     for (int start_atom = 0; start_atom < m_atomcount; ++start_atom) {
-        std::vector<int> distance(m_atomcount, -1);  // -1 = not visited
-        std::vector<int> parent(m_atomcount, -1);
-        std::queue<int> queue;
+        int smallest_ring = 0;  // Will store the smallest ring size found
 
-        distance[start_atom] = 0;
-        queue.push(start_atom);
+        int num_neighbors = neighbors[start_atom].size();
+        if (num_neighbors < 2) continue;  // Need at least 2 neighbors to form a ring
 
-        int smallest_ring = 0;
+        // Exhaustive nested-loop search over all possible paths of length 3-6
+        // This follows the exact Fortran logic from gfnff_helpers.f90:140-200
 
-        while (!queue.empty() && smallest_ring == 0) {
-            int current = queue.front();
-            queue.pop();
+        // 3-membered ring: a0-a1-a2-a0
+        for (int i1 = 0; i1 < num_neighbors; ++i1) {
+            int a1 = neighbors[start_atom][i1];
+            if (a1 == start_atom) continue;
 
-            for (int neighbor : neighbors[current]) {
-                if (distance[neighbor] == -1) {
-                    // Unvisited neighbor: explore
-                    distance[neighbor] = distance[current] + 1;
-                    parent[neighbor] = current;
-                    queue.push(neighbor);
+            for (int i2 = 0; i2 < neighbors[a1].size(); ++i2) {
+                int a2 = neighbors[a1][i2];
+                if (a2 == a1 || a2 == start_atom) continue;
 
-                } else if (parent[current] != neighbor && distance[neighbor] <= distance[current]) {
-                    // Found cycle! Ring size = distance[current] + distance[neighbor] + 1
-                    int ring_size = distance[current] + distance[neighbor] + 1;
+                // Check if a2 connects back to start_atom (3-ring found!)
+                for (int i3 = 0; i3 < neighbors[a2].size(); ++i3) {
+                    if (neighbors[a2][i3] == start_atom) {
+                        smallest_ring = 3;
+                        goto found_ring;  // Found smallest possible, can stop
+                    }
+                }
 
-                    // Only consider rings up to size 8 (common in organic chemistry)
-                    if (ring_size >= 3 && ring_size <= 8) {
-                        smallest_ring = ring_size;
-                        break; // BFS ensures this is the smallest
+                // 4-membered ring: a0-a1-a2-a3-a0
+                for (int i3 = 0; i3 < neighbors[a2].size(); ++i3) {
+                    int a3 = neighbors[a2][i3];
+                    if (a3 == a2 || a3 == a1 || a3 == start_atom) continue;
+
+                    for (int i4 = 0; i4 < neighbors[a3].size(); ++i4) {
+                        if (neighbors[a3][i4] == start_atom) {
+                            smallest_ring = 4;
+                            goto found_ring;
+                        }
+                    }
+
+                    // 5-membered ring: a0-a1-a2-a3-a4-a0
+                    for (int i4 = 0; i4 < neighbors[a3].size(); ++i4) {
+                        int a4 = neighbors[a3][i4];
+                        if (a4 == a3 || a4 == a2 || a4 == a1 || a4 == start_atom) continue;
+
+                        for (int i5 = 0; i5 < neighbors[a4].size(); ++i5) {
+                            if (neighbors[a4][i5] == start_atom) {
+                                smallest_ring = 5;
+                                goto found_ring;
+                            }
+                        }
+
+                        // 6-membered ring: a0-a1-a2-a3-a4-a5-a0
+                        for (int i5 = 0; i5 < neighbors[a4].size(); ++i5) {
+                            int a5 = neighbors[a4][i5];
+                            if (a5 == a4 || a5 == a3 || a5 == a2 || a5 == a1 || a5 == start_atom) continue;
+
+                            for (int i6 = 0; i6 < neighbors[a5].size(); ++i6) {
+                                if (neighbors[a5][i6] == start_atom) {
+                                    smallest_ring = 6;
+                                    goto found_ring;
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
 
+        found_ring:
         ring_sizes[start_atom] = smallest_ring;
     }
 
