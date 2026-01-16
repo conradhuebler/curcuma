@@ -48,10 +48,8 @@
  */
 
 #include "gfnff.h"
-#include "../ff_methods/gfnff_par.h"  // NEW: GFN-FF parameters
-#include "src/tools/formats.h"  // For fmt::format
+#include "gfnff_par.h"
 #include <cmath>
-#include <iostream>
 #include <array>
 #include <set>
 
@@ -1562,33 +1560,45 @@ json GFNFF::generateGFNFFTorsions() const
     const double torsf_extra_N =  0.70;  // Nitrogen sp3-sp3 (GFN-FF original)
     const double torsf_extra_O = -2.00;  // Oxygen sp3-sp3 (GFN-FF original)
 
+    // Debug counters (Claude Generated Jan 16, 2026)
+    int debug_total_checked = 0;
+    int debug_failed_sp3 = 0;
+    int debug_failed_ring = 0;
+    int debug_failed_btyp = 0;
+    int debug_failed_bounds = 0;
+
     for (const auto& tors_array : generated_torsions) {
+        debug_total_checked++;
         int i = tors_array[0];
         int j = tors_array[1];
         int k = tors_array[2];
         int l = tors_array[3];
 
         // ======================================================================
-        // Condition 1: ALL atoms (central AND outer) must be sp3 (hyb==3)
+        // Condition 1: ONLY central atoms (j,k) must be sp3 (hyb==3)
         // ======================================================================
         // Reference: gfnff_ini.f90:1953-1954
-        // sp3kl = hyb(kk) .eq. 3.and.hyb(ll) .eq. 3  (outer atoms MUST be sp3)
         // sp3ij = hyb(ii) .eq. 3.and.hyb(jj) .eq. 3  (central atoms MUST be sp3)
+        //
+        // CRITICAL FIX (Claude Generated Jan 16, 2026): XTB reference shows outer atoms CAN be H!
+        // - XTB generates 36 extra torsions for complex.xyz with H-C(sp³)-C(sp³)-H/C structures
+        // - Central atoms (j,k): MUST be sp³ (hyb==3)
+        // - Outer atoms (i,l): Can be ANY hybridization (including H with hyb==0)
+        //
+        // WRONG INTERPRETATION (Jan 2): Required ALL 4 atoms to be sp³ → generated 0 extra torsions
+        // CORRECT: Only central bond must be sp³-sp³, outer atoms unrestricted
+        //
         // Fortran uses: ll-ii-jj-kk ordering
         // Curcuma uses: i-j-k-l ordering (from generateGFNFFTorsions)
-        //
-        // CRITICAL FIX (Claude Generated Jan 2, 2026): Fortran requires hyb==3 for ALL atoms!
-        // Hydrogen (Z=1, hyb=0) is NOT acceptable - this was the bug!
 
         bool sp3_ij = (hybridization[j] == 3) && (hybridization[k] == 3);  // Central atoms MUST be sp3
 
-        // FIXED: Outer atoms MUST also be sp3 (hyb==3) - no hydrogen exception!
-        bool sp3_i = (hybridization[i] == 3);  // NOT || m_atoms[i] == 1
-        bool sp3_l = (hybridization[l] == 3);  // NOT || m_atoms[l] == 1
-        bool sp3_kl = sp3_i && sp3_l;
+        // Outer atoms (i,l) can be ANY hybridization - no restriction!
+        // This allows H-C-C-H, H-C-C-C, C-C-C-H, C-C-C-C quartets
 
-        if (!sp3_ij || !sp3_kl) {
-            continue;
+        if (!sp3_ij) {
+            debug_failed_sp3++;
+            continue;  // Only check central atoms
         }
 
         // ======================================================================
@@ -1596,6 +1606,7 @@ json GFNFF::generateGFNFFTorsions() const
         // ======================================================================
         int ring_size;
         if (areAtomsInSameRing(j, k, ring_size)) {
+            debug_failed_ring++;
             continue;  // Skip ring torsions
         }
 
@@ -1625,6 +1636,7 @@ json GFNFF::generateGFNFFTorsions() const
 
         int btyp = bond_types[central_bond_idx];
         if (btyp >= 5) {
+            debug_failed_btyp++;
             continue;  // Skip metal-containing bonds
         }
 
@@ -1635,6 +1647,7 @@ json GFNFF::generateGFNFFTorsions() const
             m_atoms[j] < 1 || m_atoms[j] > 86 ||
             m_atoms[k] < 1 || m_atoms[k] > 86 ||
             m_atoms[l] < 1 || m_atoms[l] > 86) {
+            debug_failed_bounds++;
             continue;  // Skip invalid atomic numbers
         }
 
@@ -1805,6 +1818,17 @@ json GFNFF::generateGFNFFTorsions() const
                 extra_torsion_count
             ));
         }
+    }
+
+    // Debug statistics (Claude Generated Jan 16, 2026)
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("EXTRA TORSION DEBUG:"));
+        CurcumaLogger::info(fmt::format("  Total torsions checked: {}", debug_total_checked));
+        CurcumaLogger::info(fmt::format("  Failed sp3 check: {}", debug_failed_sp3));
+        CurcumaLogger::info(fmt::format("  Failed ring check: {}", debug_failed_ring));
+        CurcumaLogger::info(fmt::format("  Failed btyp check: {}", debug_failed_btyp));
+        CurcumaLogger::info(fmt::format("  Failed bounds check: {}", debug_failed_bounds));
+        CurcumaLogger::info(fmt::format("  Passed all checks (extra torsions): {}", extra_torsion_count));
     }
 
     // ==========================================================================

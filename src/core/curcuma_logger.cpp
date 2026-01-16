@@ -134,7 +134,7 @@ void CurcumaLogger::param(const std::string& key, bool value)
 
 void CurcumaLogger::param_table(const json& parameters, const std::string& title)
 {
-    if (m_verbosity >= 1) {
+    if (m_verbosity >= 2) {
         if (!parameters.empty()) {
             log_colored(fmt::color::cyan, "[TABLE] ", title);
             std::string separator(title.length() + 8, '-');

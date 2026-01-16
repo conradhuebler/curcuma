@@ -22,6 +22,7 @@
 #include "src/core/elements.h"
 #include "src/core/units.h"
 #include "src/core/functional_groups.h"  // Claude Generated (January 10, 2026): Amide detection
+#include <chrono>
 
 // Claude Generated (December 2025): D3/D4 dispersion integration
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
@@ -546,6 +547,8 @@ bool GFNFF::initializeForceField()
 
 json GFNFF::generateGFNFFParameters()
 {
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     json parameters;
     parameters["method"] = "gfnff";
     parameters["e0"] = 0.0;
@@ -592,10 +595,8 @@ json GFNFF::generateGFNFFParameters()
         m_charges = topo_info.eeq_charges;
 
         // Generate advanced parameters
-        json bonds = generateTopologyAwareBonds(topo_info.coordination_numbers,
-            topo_info.hybridization,
-            topo_info.eeq_charges,
-            topo_info.ring_sizes);
+        // CRITICAL FIX (Claude Generated Jan 15, 2026): Pass full topo_info to include pi_bond_orders!
+        json bonds = generateTopologyAwareBonds(topo_info);
         json angles = generateTopologyAwareAngles(topo_info.coordination_numbers,
             topo_info.hybridization,
             topo_info.eeq_charges,
@@ -803,11 +804,17 @@ json GFNFF::generateGFNFFParameters()
     // GFN-FF specific settings
     parameters["repulsion_scaling"] = m_parameters.value("repulsion_scaling", 1.0);
 
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    CurcumaLogger::result_fmt("GFN-FF parameter generation: {} ms", duration.count());
+
     return parameters;
 }
 
 json GFNFF::generateGFNFFBonds() const
 {
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     json bonds = json::array();
 
     // Use cached topology information to avoid redundant calculations
@@ -865,11 +872,17 @@ json GFNFF::generateGFNFFBonds() const
             }
     }
 
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    CurcumaLogger::result_fmt("GFN-FF bond generation: {} ms", duration.count());
+
     return bonds;
 }
 
 json GFNFF::generateGFNFFAngles(const TopologyInfo& topo_info) const
 {
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     json angles = json::array();
 
     // Phase 2.3: Use adjacency list from topology (Claude Generated - Dec 2025)
@@ -937,6 +950,10 @@ json GFNFF::generateGFNFFAngles(const TopologyInfo& topo_info) const
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success(fmt::format("Generated {} GFN-FF angles", angles.size()));
     }
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    CurcumaLogger::result_fmt("GFN-FF angle generation: {} ms", duration.count());
 
     return angles;
 }
@@ -1644,8 +1661,91 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 
 
     double fheavy = 1.0;  // Default: no metal-ligand correction
-    double fpi = 1.0;     // Default: no pi-bond order correction (Phase 4 will override)
+    double fpi = 1.0;     // Default: no pi-bond order correction
     double metal_shift = 0.0;  // Additional equilibrium distance shift for metals
+    double pi_shift = 0.0;  // Pi-bond order shift correction
+
+    // ========================================================================
+    // PHASE 1.1 (January 15, 2026): Pi-bond order corrections from Hückel solver
+    // Reference: Fortran gfnff_ini.f90:1217-1224
+    // ========================================================================
+    // Port from Fortran:
+    //   if (pibo(i) .gt. 0) then
+    //     shift = gen%hueckelp*(gen%bzref-pibo(i))  ! R0 shift correction
+    //     fpi = 1.0d0-gen%hueckelp2*(gen%bzref2-pibo(i))  ! Force constant deepness
+    //   end if
+    //
+    // Parameters from gfnff_param.f90:836-838:
+    //   hueckelp  = 0.340  (shift correction factor)
+    //   bzref     = 0.370  (reference P value for shift)
+    //   hueckelp2 = 1.00   (force constant correction factor)
+    //   bzref2    = 0.315  (reference P value for force constant)
+    //
+    // Physical meaning:
+    // - pibo = π-bond order from Hückel calculation (0-1, benzene ~0.67)
+    // - For aromatic bonds (pibo ~0.67), corrections are minimal (benzene reference)
+    // - For stronger π-bonds (pibo > 0.67), shorter equilibrium distance, deeper well
+    // - For weaker π-bonds (pibo < 0.67), longer equilibrium distance, shallower well
+    // ========================================================================
+
+    constexpr double hueckelp = 0.340;   // Shift correction factor
+    constexpr double bzref = 0.370;      // Reference P value for R0 shift
+    constexpr double hueckelp2 = 1.00;   // Force constant correction factor
+    constexpr double bzref2 = 0.315;     // Reference P value for force constant
+
+    // Get pi-bond order for this bond from Hückel calculation
+    double pibo = 0.0;
+
+    // DEBUG: Check pibo access (Claude Generated Jan 15, 2026)
+    static bool debug_once = false;
+    if (!debug_once && CurcumaLogger::get_verbosity() >= 1) {
+        debug_once = true;
+        CurcumaLogger::info("=== getGFNFFBondParameters() pibo Debug (first call) ===");
+        CurcumaLogger::param("pi_bond_orders.size()", std::to_string(topo.pi_bond_orders.size()));
+        CurcumaLogger::param("m_atomcount", std::to_string(m_atomcount));
+        CurcumaLogger::param("expected_size", std::to_string(m_atomcount * (m_atomcount + 1) / 2));
+    }
+
+    if (!topo.pi_bond_orders.empty()) {
+        int pibo_idx = lin(atom1, atom2);
+        if (pibo_idx >= 0 && pibo_idx < static_cast<int>(topo.pi_bond_orders.size())) {
+            pibo = topo.pi_bond_orders[pibo_idx];
+
+            // DEBUG: Show pibo values for first few bonds with pi-character
+            static int debug_count = 0;
+            if (debug_count < 5 && CurcumaLogger::get_verbosity() >= 1 && pibo > 1e-6) {
+                debug_count++;
+                CurcumaLogger::info(fmt::format("  Bond {}-{}: lin({},{}) = {}, pibo = {:.6f}",
+                    atom1, atom2, atom1, atom2, pibo_idx, pibo));
+            }
+        }
+    }
+
+    // Apply pi-bond order corrections if this is a pi-bond
+    if (pibo > 0.0) {
+        // R0 shift correction: shorter bonds for stronger pi-bonds
+        // When pibo > bzref (0.370), shift becomes negative → shorter bond
+        // When pibo < bzref, shift becomes positive → longer bond
+        pi_shift = hueckelp * (bzref - pibo);
+
+        // Force constant correction: deeper well for stronger pi-bonds
+        // When pibo > bzref2 (0.315), fpi > 1 → stronger bond
+        // When pibo < bzref2, fpi < 1 → weaker bond
+        fpi = 1.0 - hueckelp2 * (bzref2 - pibo);
+
+        // Update bstrength to double-bond if significant pi-character (pibo > 0.1)
+        // Reference: Fortran gfnff_ini.f90:1219-1222
+        // This overrides the hybridization-based bstrength for aromatic/conjugated bonds
+        if (pibo > 0.1 && hybi != 2 && hybj != 2) {  // bbtyp != 3 check
+            // Change to double-bond character
+            bstrength = 1.240;  // bstren[2] = double bond value
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("  Pi-bond correction: pibo={:.4f}, pi_shift={:.4f}, fpi={:.4f}",
+                                             pibo, pi_shift, fpi));
+        }
+    }
 
     // Get metal types for both atoms
     int imetal1 = (z1 >= 1 && z1 <= 86) ? metal_type[z1 - 1] : 0;
@@ -1739,8 +1839,10 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     if (mtyp1 == 3) metal_shift += METAL3_SHIFT;  // Main group metal (Al, Ga, In, Sn, Pb)
     if (mtyp2 == 3) metal_shift += METAL3_SHIFT;
 
-    // Apply metal shift to equilibrium distance (metal_shift is already in Bohr)
-    params.equilibrium_distance += metal_shift;
+    // Apply metal shift and pi-bond shift to equilibrium distance
+    // Both shifts are in Bohr units
+    // Reference: Fortran gfnff_ini.f90:1218 (pi_shift) and 1246-1253 (metal_shift)
+    params.equilibrium_distance += metal_shift + pi_shift;
 
     // Metal-specific fcn corrections (Fortran gfnff_ini.f90:1254-1259)
     // Different CN-dependence for metals vs. non-metals
@@ -1761,11 +1863,15 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("  Correction Factors: fqq={:.3f}, ringf={:.3f}, fxh={:.3f}, fcn={:.3f}, fheavy={:.3f}, fpi={:.3f}",
-                                         fqq, ringf, fxh, fcn, fheavy, fpi));
+        CurcumaLogger::info(fmt::format("  Correction Factors: fqq={:.3f}, ringf={:.3f}, fxh={:.3f}, fcn={:.3f}, fheavy={:.3f}, fpi={:.3f}, pibo={:.4f}",
+                                         fqq, ringf, fxh, fcn, fheavy, fpi, pibo));
         if (mtyp1 > 0 || mtyp2 > 0) {
             CurcumaLogger::info(fmt::format("  Metal Types: mtyp1={} (imetal={}), mtyp2={} (imetal={}), metal_shift={:.3f}",
                                              mtyp1, imetal1, mtyp2, imetal2, metal_shift));
+        }
+        if (std::abs(pi_shift) > 1e-6) {
+            CurcumaLogger::info(fmt::format("  Pi-bond shift: pi_shift={:.4f} Bohr, fpi={:.4f}",
+                                             pi_shift, fpi));
         }
     }
 
@@ -1874,17 +1980,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, int atom_k,
                                                         double current_angle, const TopologyInfo& topo_info) const
 {
-    static int call_count = 0;
-    call_count++;
-    if (call_count <= 15) {
-        std::cout << fmt::format("getGFNFFAngleParameters() call #{}: atoms {}-{}-{}\n",
-                                 call_count, atom_i, atom_j, atom_k);
-    }
-
-    // DEBUG: Check atom_j immediately (Claude Generated Dec 31, 2025)
-    if (atom_j == 5) {
-        std::cout << "DEBUG: Processing O-centered angle!\n";
-    }
+    // Removed "getGFNFFAngleParameters() call #" debug output for verbosity level 1
 
     using namespace GFNFFParameters;
     GFNFFAngleParams params;
@@ -2032,8 +2128,8 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     const double threshold_cn_squared = 40.0 * 40.0;  // ~40 Bohr cutoff (standard GFN-FF)
 
     // DEBUG: Before CNCalculator (Claude Generated Dec 31, 2025)
-    if (atom_j == 5) {
-        std::cout << "DEBUG: About to call CNCalculator...\n";
+    if (atom_j == 5 && CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("About to call CNCalculator...");
     }
 
     // Phase 2C: Migrate to shared CNCalculator for GFN-FF CN calculation
@@ -2041,47 +2137,14 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     Vector coord_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
 
     // DEBUG: After CNCalculator (Claude Generated Dec 31, 2025)
-    if (atom_j == 5) {
-        std::cout << "DEBUG: CNCalculator returned successfully\n";
+    if (atom_j == 5 && CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("CNCalculator returned successfully");
     }
 
     double nn = static_cast<int>(std::round(coord_numbers[atom_j]));  // Central atom coordination number
     nn = std::max(1.0, nn);  // Ensure nn >= 1
     double fn = 1.0 - 2.36 / (nn * nn);
     fn = std::max(0.05, fn);  // Ensure fn stays positive
-
-    // DEBUG: Before final debug block (Claude Generated Dec 31, 2025)
-    if (atom_j == 5) {
-        std::cout << "DEBUG: Reached final debug block, atom_j=" << atom_j << "\n";
-    }
-
-    // DEBUG: Log all factors for O-centered angles (Claude Generated Dec 31, 2025)
-    if (atom_j == 5) {  // O atom (index 5 in CH3OCH3)
-        std::cout << "\n=== ANGLE FORCE CONSTANT DEBUG (Atom " << atom_j << " = O) ===\n";
-        std::cout << "Angle: " << atom_i << "-" << atom_j << "-" << atom_k << "\n";
-        std::cout << "Elements: " << m_atoms[atom_i] << "-" << m_atoms[atom_j] << "-" << m_atoms[atom_k] << "\n\n";
-
-        std::cout << "FACTOR 1 (fijk_calc):\n";
-        std::cout << "  angle_param (center=" << z_center << ") = " << angle_param << "\n";
-        std::cout << "  angl2_i (Z=" << z_i << ") = " << angl2_i << "\n";
-        std::cout << "  angl2_k (Z=" << z_k << ") = " << angl2_k << "\n";
-        std::cout << "  fijk_calc = " << angle_param << " × " << angl2_i << " × " << angl2_k
-                  << " = " << fijk_calc << "\n\n";
-
-        std::cout << "FACTOR 2 (fqq - charge correction):\n";
-        std::cout << "  qa_center = " << topo_info.eeq_charges[atom_j] << "\n";
-        std::cout << "  qa_i = " << topo_info.eeq_charges[atom_i] << "\n";
-        std::cout << "  qa_k = " << topo_info.eeq_charges[atom_k] << "\n";
-        std::cout << "  fqq = " << fqq << "\n\n";
-
-        std::cout << "FACTOR 3 (f2 - element correction):\n";
-        std::cout << "  f2 = " << f2 << "\n\n";
-
-        std::cout << "FACTOR 4 (fn - coordination number):\n";
-        std::cout << "  D3_CN = " << coord_numbers[atom_j] << "\n";
-        std::cout << "  nn (rounded) = " << nn << "\n";
-        std::cout << "  fn = 1.0 - 2.36/" << nn << "² = " << fn << "\n\n";
-    }
 
     // Claude Generated (Dec 31, 2025): CRITICAL BUG FIX!
     // Factor 5 (fbsmall) REMOVED FROM HERE - was using UNINITIALIZED params.equilibrium_angle!
@@ -2438,11 +2501,13 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     // Reference: adjacency_list is populated in calculateTopologyInfo() from bond list
 
     // DEBUG: Check if adjacency_list is populated (Dec 31, 2025)
-    if (atom_j == 5) {
-        std::cout << "DEBUG: topo_info.adjacency_list.size() = " << topo_info.adjacency_list.size() << "\n";
+    if (atom_j == 5 && CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("topo_info.adjacency_list.size() = {}",
+                     topo_info.adjacency_list.size()));
         if (!topo_info.adjacency_list.empty() && atom_j < topo_info.adjacency_list.size()) {
-            std::cout << "DEBUG: topo_info.adjacency_list[" << atom_j << "].size() = "
-                      << topo_info.adjacency_list[atom_j].size() << "\n";
+            CurcumaLogger::info(fmt::format("topo_info.adjacency_list[{}].size() = {}",
+                         atom_j,
+                         topo_info.adjacency_list[atom_j].size()));
         }
     }
 
@@ -2457,12 +2522,6 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     // Reference: gfnff_ini.f90:1582-1598
     // Phase 2B Extensions (January 10, 2026): Si/metal widening, aromatic ethers
     if (m_atoms[atom_j] == 8) {  // Central atom is oxygen
-        // DEBUG: Check neighbors (Claude Generated Dec 31, 2025)
-        if (atom_j == 5) {
-            std::cout << "DEBUG O-angle: neighbors.size() = " << neighbors.size() << "\n";
-            std::cout << "DEBUG O-angle: r0_deg before correction = " << r0_deg << "\n";
-        }
-
         // Default O with 2 neighbors: 104.5°
         if (neighbors.size() == 2) {
             r0_deg = 104.5;
@@ -2493,12 +2552,6 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
                     f2 = 0.3;        // Much weaker force constant
                 }
             }
-        }
-
-        // DEBUG: Check final r0_deg (Claude Generated Dec 31, 2025)
-        if (atom_j == 5) {
-            std::cout << "DEBUG O-angle: r0_deg after correction = " << r0_deg << "\n";
-            std::cout << "DEBUG O-angle: f2 = " << f2 << "\n";
         }
     }
 
@@ -2537,51 +2590,31 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
         params.force_constant = fijk * fqq * f2 * fn * fbsmall * feta;
 
         // DEBUG: Complete factor breakdown for O-centered angle (Claude Generated Dec 31, 2025)
-        if (atom_j == 5) {
-            std::cout << "FACTOR 5 (fbsmall - linear angle correction):\n";
-            std::cout << "  theta0 = " << params.equilibrium_angle << " rad = "
-                      << (params.equilibrium_angle * 180.0 / pi) << "°\n";
-            std::cout << "  fbsmall = 1.0 - 0.5 × exp(-0.64×(θ0-π)²) = " << fbsmall << "\n\n";
-
-            std::cout << "FACTOR 6 (feta - metal correction):\n";
-            std::cout << "  feta = " << feta << " (no metals)\n\n";
-
-            std::cout << "FINAL FORCE CONSTANT:\n";
-            std::cout << "  fc = fijk × fqq × f2 × fn × fbsmall × feta\n";
-            std::cout << "  fc = " << fijk << " × " << fqq << " × " << f2 << " × "
-                      << fn << " × " << fbsmall << " × " << feta << "\n";
-            std::cout << "  fc = " << params.force_constant << " Eh\n\n";
-
-            std::cout << "COMPARISON:\n";
-            std::cout << "  Curcuma fc = " << params.force_constant << " Eh\n";
-            std::cout << "  XTB ref fc ≈ 0.407 Eh (from param file)\n";
-            std::cout << "  Ratio = " << params.force_constant / 0.407 << "×\n";
-            std::cout << "=========================================================\n\n";
-        }
-
+        // Removed DEBUG output for verbosity level 1 as requested - this information only at higher levels
+        // or should be removed entirely as they are mainly for internal debugging purposes
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::param(fmt::format("angle_{}-{}-{}_fbsmall", atom_i, atom_j, atom_k),
                 fmt::format("{:.6f}", fbsmall));
             CurcumaLogger::param(fmt::format("angle_{}-{}-{}_fc_final", atom_i, atom_j, atom_k),
                 fmt::format("{:.6f} (fijk={:.3f}, fqq={:.3f}, f2={:.3f}, fn={:.3f}, fbsmall={:.3f}, feta={:.3f})",
-                    params.force_constant, fijk, fqq, f2, fn, fbsmall, feta));
+                        params.force_constant, fijk, fqq, f2, fn, fbsmall, feta));
         }
-    }
 
-    // Phase 5: Ring-strain corrections (Claude Generated January 2026)
-    // Reference: gfnff_ini.f90 - small rings require reduced force constants
-    // 3-membered rings: 30% reduction, 4-membered rings: 15% reduction
-    if (!topo_info.ring_sizes.empty() && atom_j < topo_info.ring_sizes.size()) {
-        int ring_size = topo_info.ring_sizes[atom_j];
-        if (ring_size == 3) {
-            params.force_constant *= 0.7;  // 30% reduction for 3-ring
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format("Ring-strain correction: 3-ring at atom {}, fc *= 0.7", atom_j));
-            }
-        } else if (ring_size == 4) {
-            params.force_constant *= 0.85;  // 15% reduction for 4-ring
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format("Ring-strain correction: 4-ring at atom {}, fc *= 0.85", atom_j));
+        // Phase 5: Ring-strain corrections (Claude Generated January 2026)
+        // Reference: gfnff_ini.f90 - small rings require reduced force constants
+        // 3-membered rings: 30% reduction, 4-membered rings: 15% reduction
+        if (!topo_info.ring_sizes.empty() && atom_j < topo_info.ring_sizes.size()) {
+            int ring_size = topo_info.ring_sizes[atom_j];
+            if (ring_size == 3) {
+                params.force_constant *= 0.7;  // 30% reduction for 3-ring
+                if (CurcumaLogger::get_verbosity() >= 3) {
+                    CurcumaLogger::info(fmt::format("Ring-strain correction: 3-ring at atom {}, fc *= 0.7", atom_j));
+                }
+            } else if (ring_size == 4) {
+                params.force_constant *= 0.85;  // 15% reduction for 4-ring
+                if (CurcumaLogger::get_verbosity() >= 3) {
+                    CurcumaLogger::info(fmt::format("Ring-strain correction: 4-ring at atom {}, fc *= 0.85", atom_j));
+                }
             }
         }
     }
@@ -3501,6 +3534,16 @@ std::vector<double> GFNFF::calculatePiBondOrders(
     // Calculate size needed for triangular storage
     int max_index = m_atomcount * (m_atomcount + 1) / 2;
 
+    // DEBUG: Check which path we're taking (Claude Generated Jan 15, 2026)
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::info("=== calculatePiBondOrders() Debug ===");
+        CurcumaLogger::param("m_use_full_huckel", m_use_full_huckel ? "true" : "false");
+        CurcumaLogger::param("m_huckel_solver", m_huckel_solver ? "exists" : "null");
+        CurcumaLogger::param("charges.empty()", charges.empty() ? "true" : "false");
+        CurcumaLogger::param("distances.size()", std::to_string(distances.size()));
+        CurcumaLogger::param("max_index", std::to_string(max_index));
+    }
+
     // ========================================================================
     // Full Hückel calculation (default mode)
     // ========================================================================
@@ -3536,6 +3579,16 @@ std::vector<double> GFNFF::calculatePiBondOrders(
             CurcumaLogger::success(fmt::format(
                 "Full Hückel: {}/{} non-zero π-bond orders",
                 nonzero, bond_list.size()));
+        }
+
+        // DEBUG: Show first few pibo values (Claude Generated Jan 15, 2026)
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::info("=== Full Hückel: First 10 pibo values ===");
+            for (size_t k = 0; k < std::min(size_t(10), pi_bond_orders.size()); k++) {
+                if (std::abs(pi_bond_orders[k]) > 1e-6) {
+                    CurcumaLogger::info(fmt::format("  pibo[{}] = {:.6f}", k, pi_bond_orders[k]));
+                }
+            }
         }
 
         return pi_bond_orders;
@@ -3656,18 +3709,10 @@ double GFNFF::calculateEEQEnergy(const Vector& charges, const Vector& cn) const
     return energy;
 }
 
-json GFNFF::generateTopologyAwareBonds(const Vector& cn, const std::vector<int>& hyb,
-    const Vector& charges, const std::vector<int>& rings) const
+// OVERLOAD 1: New signature (Claude Generated Jan 15, 2026) - accepts full TopologyInfo with pi_bond_orders
+json GFNFF::generateTopologyAwareBonds(const TopologyInfo& topo_info) const
 {
     json bonds = json::array();
-
-    // Phase 9: Create TopologyInfo structure from separate parameters
-    TopologyInfo topo_info;
-    topo_info.coordination_numbers = cn;
-    topo_info.hybridization = hyb;
-    topo_info.eeq_charges = charges;
-    topo_info.ring_sizes = rings;
-    // pi_fragments, is_metal, is_aromatic not used in getGFNFFBondParameters
 
     // Phase 2: Topology-aware bond parameter generation
     // Start with basic GFN-FF bond detection
@@ -3699,8 +3744,8 @@ json GFNFF::generateTopologyAwareBonds(const Vector& cn, const std::vector<int>&
                 double topology_factor = 1.0;
 
                 // Ring strain correction (small rings are stiffer)
-                int ring_i = rings[i];
-                int ring_j = rings[j];
+                int ring_i = topo_info.ring_sizes[i];
+                int ring_j = topo_info.ring_sizes[j];
                 if (ring_i > 0 && ring_j > 0) {
                     // Both atoms in rings - assume they're in the same ring if bonded
                     int ring_size = std::min(ring_i, ring_j);
@@ -3715,9 +3760,9 @@ json GFNFF::generateTopologyAwareBonds(const Vector& cn, const std::vector<int>&
                 }
 
                 // Pi-system correction (conjugated bonds are stiffer)
-                int pi_i = static_cast<int>(cn[i]); // Using CN as proxy for pi_fragments
-                int pi_j = static_cast<int>(cn[j]);
-                if (pi_i > 0 && pi_j > 0 && (hyb[i] == 2 || hyb[i] == 1) && (hyb[j] == 2 || hyb[j] == 1)) {
+                int pi_i = static_cast<int>(topo_info.coordination_numbers[i]); // Using CN as proxy for pi_fragments
+                int pi_j = static_cast<int>(topo_info.coordination_numbers[j]);
+                if (pi_i > 0 && pi_j > 0 && (topo_info.hybridization[i] == 2 || topo_info.hybridization[i] == 1) && (topo_info.hybridization[j] == 2 || topo_info.hybridization[j] == 1)) {
                     // Both atoms are sp2/sp and in conjugated system
                     topology_factor *= 1.15; // Conjugated bonds +15%
                 }
@@ -3738,6 +3783,22 @@ json GFNFF::generateTopologyAwareBonds(const Vector& cn, const std::vector<int>&
     }
 
     return bonds;
+}
+
+// OVERLOAD 2: Legacy signature (Claude Generated Jan 15, 2026) - for backward compatibility
+json GFNFF::generateTopologyAwareBonds(const Vector& cn, const std::vector<int>& hyb,
+    const Vector& charges, const std::vector<int>& rings) const
+{
+    // Create TopologyInfo from separate parameters (without pi_bond_orders)
+    TopologyInfo topo_info;
+    topo_info.coordination_numbers = cn;
+    topo_info.hybridization = hyb;
+    topo_info.eeq_charges = charges;
+    topo_info.ring_sizes = rings;
+    // pi_bond_orders will be empty - legacy callers don't have them
+
+    // Call new overload
+    return generateTopologyAwareBonds(topo_info);
 }
 
 json GFNFF::generateTopologyAwareAngles(const Vector& cn, const std::vector<int>& hyb,
@@ -4673,6 +4734,8 @@ GFNFF::EEQParameters GFNFF::getEEQParameters(int atom_idx, const TopologyInfo& t
 
 json GFNFF::generateGFNFFCoulombPairs() const
 {
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     /**
      * @brief Generate EEQ-based Coulomb electrostatics pairwise parameters
      *
@@ -4774,11 +4837,17 @@ json GFNFF::generateGFNFFCoulombPairs() const
         CurcumaLogger::success(fmt::format("Generated {} Coulomb pairs", coulomb_pairs.size()));
     }
 
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    CurcumaLogger::result_fmt("GFN-FF Coulomb pair generation: {} ms", duration.count());
+
     return coulomb_pairs;
 }
 
 json GFNFF::generateGFNFFRepulsionPairs() const
 {
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     using namespace GFNFFParameters;
 
     /**
@@ -4963,11 +5032,17 @@ json GFNFF::generateGFNFFRepulsionPairs() const
             bonded_repulsions.size() + nonbonded_repulsions.size()));
     }
 
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    CurcumaLogger::result_fmt("GFN-FF repulsion pair generation: {} ms", duration.count());
+
     return result;
 }
 
 json GFNFF::generateGFNFFDispersionPairs() const
 {
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     /**
      * @brief Generate D3/D4 dispersion pairwise parameters with BJ damping
      *
@@ -5069,6 +5144,10 @@ json GFNFF::generateGFNFFDispersionPairs() const
     }
 
     // Step 5: Final fallback (always works)
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    CurcumaLogger::result_fmt("GFN-FF dispersion pair generation: {} ms", duration.count());
+
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::warn("No valid dispersion method, using free-atom approximation");
     }
@@ -5081,6 +5160,8 @@ json GFNFF::generateGFNFFDispersionPairs() const
 
 json GFNFF::generateD3Dispersion() const
 {
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     // TODO Might me obsolete once D3 and D4 Params are fully integrated
     /**
      * @brief Factory method for D3 dispersion parameter generation
@@ -5194,9 +5275,17 @@ json GFNFF::generateD3Dispersion() const
                                                 gfnff_dispersions.size()));
         }
 
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+        CurcumaLogger::result_fmt("GFN-FF D3 dispersion generation: {} ms", duration.count());
+
         return gfnff_dispersions;
 
     } catch (const std::exception& e) {
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+        CurcumaLogger::result_fmt("GFN-FF D3 dispersion generation (failed): {} ms", duration.count());
+
         if (CurcumaLogger::get_verbosity() >= 1) {
             CurcumaLogger::error(fmt::format("D3 generation failed: {}, falling back to free-atom", e.what()));
         }
@@ -5206,6 +5295,8 @@ json GFNFF::generateD3Dispersion() const
 
 json GFNFF::generateFreeAtomDispersion() const
 {
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     // TODO Might me obsolete once D3 and D4 Params are fully integrated
 
     /**
@@ -5275,6 +5366,10 @@ json GFNFF::generateFreeAtomDispersion() const
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::warn(fmt::format("Free-atom approximation: {} pairs (consider compiling with USE_D3 or USE_D4 for better accuracy)", dispersion_pairs.size()));
     }
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    CurcumaLogger::result_fmt("GFN-FF free-atom dispersion generation: {} ms", duration.count());
 
     return dispersion_pairs;
 }

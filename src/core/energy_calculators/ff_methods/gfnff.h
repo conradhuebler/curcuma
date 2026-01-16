@@ -947,6 +947,13 @@ private:
         const Vector& charges, const std::vector<int>& rings) const;
 
     /**
+     * Claude Generated (Jan 15, 2026): New overload accepting full TopologyInfo with pi_bond_orders
+     * @param topo_info Complete topology information including pi_bond_orders
+     * @return JSON with advanced bond parameters
+     */
+    json generateTopologyAwareBonds(const TopologyInfo& topo_info) const;
+
+    /**
      * @brief Generate topology-aware angle parameters
      * @param cn Coordination numbers
      * @param hyb Hybridization states
