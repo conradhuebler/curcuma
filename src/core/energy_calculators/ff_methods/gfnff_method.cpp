@@ -3983,6 +3983,56 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
     const TopologyInfo& topo = getCachedTopology();
     const auto& bonds = getCachedBondList();
 
+    // Step 0: Pre-calculate atom-specific basicity and acidity with overrides
+    // Reference: gfnff_ini.f90:815-842
+    std::vector<double> current_basicity(m_atomcount);
+    std::vector<double> current_acidity(m_atomcount);
+
+    FunctionalGroupDetector detector(m_atomcount, m_atoms,
+                                    topo.neighbor_lists,
+                                    topo.hybridization,
+                                    topo.pi_fragments);
+
+    for (int i = 0; i < m_atomcount; ++i) {
+        current_basicity[i] = hb_basicity[m_atoms[i]];
+        current_acidity[i] = hb_acidity[m_atoms[i]];
+
+        // Overrides for basicity
+        if (m_atoms[i] == 8) { // Oxygen
+            if (detector.isCarbonylOxygen(i)) {
+                current_basicity[i] = 0.68;
+            } else if (detector.isNitroOxygen(i)) {
+                current_basicity[i] = 0.47;
+            }
+        } else if (m_atoms[i] == 6 && topo.neighbor_lists[i].size() == 2) { // Carbene candidate
+            // Detect carbene: angle < 150° and charge > -0.4
+            int n1 = topo.neighbor_lists[i][0];
+            int n2 = topo.neighbor_lists[i][1];
+
+            Vector r_i = m_geometry_bohr.row(i);
+            Vector r_n1 = m_geometry_bohr.row(n1);
+            Vector r_n2 = m_geometry_bohr.row(n2);
+
+            Vector v1 = r_n1 - r_i;
+            Vector v2 = r_n2 - r_i;
+
+            double cos_phi = v1.dot(v2) / (v1.norm() * v2.norm());
+            double phi_deg = std::acos(std::clamp(cos_phi, -1.0, 1.0)) * 180.0 / M_PI;
+
+            if (phi_deg < 150.0 && charges[i] > -0.4) {
+                current_basicity[i] = 1.46;
+            }
+        }
+    }
+
+    // Overrides for acidity (amide scaling)
+    for (int i = 0; i < m_atomcount; ++i) {
+        if (detector.isAmideHydrogen(i)) {
+            int nitrogen = topo.neighbor_lists[i][0];
+            current_acidity[nitrogen] *= 0.80;
+        }
+    }
+
     // Step 1: Identify HB-capable hydrogen atoms
     // Reference: gfnff_ini.f90:806-820
     std::vector<int> hb_hydrogens;
@@ -4046,8 +4096,8 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
             if (charges[i] >= q_thresh_AB || charges[j] >= q_thresh_AB) continue;
 
             // HB strength criterion (non-zero basicity/acidity product)
-            double strength_ij = hb_basicity[m_atoms[i]] * hb_acidity[m_atoms[j]];
-            double strength_ji = hb_basicity[m_atoms[j]] * hb_acidity[m_atoms[i]];
+            double strength_ij = current_basicity[i] * current_acidity[j];
+            double strength_ji = current_basicity[j] * current_acidity[i];
 
             if (strength_ij < 1e-6 && strength_ji < 1e-6) continue;
 
@@ -4112,15 +4162,18 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
             hb["j"] = H;  // Hydrogen
             hb["k"] = B;  // Acceptor atom
 
-            // Store element-specific parameters from GFNFFParameters
-            hb["basicity_A"] = hb_basicity[m_atoms[A]];
-            hb["basicity_B"] = hb_basicity[m_atoms[B]];
-            hb["acidity_A"] = hb_acidity[m_atoms[A]];
+            hb["basicity_A"] = current_basicity[A];
+            hb["basicity_B"] = current_basicity[B];
+            hb["acidity_A"] = current_acidity[A];
 
             // Pre-computed charge factors (for performance)
             hb["q_H"] = charges[H];
             hb["q_A"] = charges[A];
             hb["q_B"] = charges[B];
+
+            // Cutoff radius for HB energy calculation (Claude Generated - January 17, 2026)
+            // Use detection threshold (7.5 Bohr) + safety margin
+            hb["r_cut"] = 10.0;  // Bohr (conservative cutoff for energy calculation)
 
             if (case_type == 2) {
                 hb["neighbors_B"] = neighbors_B;
@@ -4161,6 +4214,46 @@ json GFNFF::detectHalogenBonds(const Vector& charges) const
     const TopologyInfo& topo = getCachedTopology();
     const auto& bonds = getCachedBondList();
 
+    // Step 0: Pre-calculate atom-specific basicity with overrides (shared logic with HB)
+    // Reference: gfnff_ini.f90:815-826
+    std::vector<double> current_basicity(m_atomcount);
+
+    FunctionalGroupDetector detector(m_atomcount, m_atoms,
+                                    topo.neighbor_lists,
+                                    topo.hybridization,
+                                    topo.pi_fragments);
+
+    for (int i = 0; i < m_atomcount; ++i) {
+        current_basicity[i] = hb_basicity[m_atoms[i]];
+
+        // Overrides for basicity
+        if (m_atoms[i] == 8) { // Oxygen
+            if (detector.isCarbonylOxygen(i)) {
+                current_basicity[i] = 0.68;
+            } else if (detector.isNitroOxygen(i)) {
+                current_basicity[i] = 0.47;
+            }
+        } else if (m_atoms[i] == 6 && topo.neighbor_lists[i].size() == 2) { // Carbene candidate
+            // Detect carbene: angle < 150° and charge > -0.4
+            int n1 = topo.neighbor_lists[i][0];
+            int n2 = topo.neighbor_lists[i][1];
+
+            Vector r_i = m_geometry_bohr.row(i);
+            Vector r_n1 = m_geometry_bohr.row(n1);
+            Vector r_n2 = m_geometry_bohr.row(n2);
+
+            Vector v1 = r_n1 - r_i;
+            Vector v2 = r_n2 - r_i;
+
+            double cos_phi = v1.dot(v2) / (v1.norm() * v2.norm());
+            double phi_deg = std::acos(std::clamp(cos_phi, -1.0, 1.0)) * 180.0 / M_PI;
+
+            if (phi_deg < 150.0 && charges[i] > -0.4) {
+                current_basicity[i] = 1.46;
+            }
+        }
+    }
+
     // Step 1: Identify halogen atoms (xatom function)
     // Reference: gfnff_ini2.f90:1404-1410
     auto is_halogen = [](int Z) -> bool {
@@ -4185,6 +4278,10 @@ json GFNFF::detectHalogenBonds(const Vector& charges) const
         }
 
         if (X != -1) {
+            // Additional check: Sulfur must have at most 2 neighbors (no sulfoxides etc.)
+            // Reference: gfnff_ini.f90:891
+            if (m_atoms[X] == 16 && topo.neighbor_lists[X].size() > 2) continue;
+
             ax_pairs.push_back({A, X});
         }
     }
@@ -4201,15 +4298,20 @@ json GFNFF::detectHalogenBonds(const Vector& charges) const
         for (int B = 0; B < m_atomcount; ++B) {
             if (B == A || B == X) continue;
 
-            // Basicity requirement
-            if (hb_basicity[m_atoms[B]] < 1e-6) continue;
+            // Basicity requirement (filtering)
+            // Reference: gfnff_ini.f90:895
+            if (current_basicity[B] < 1e-6) continue;
 
             // Pi-base or charge criterion
-            // If B is pi-atom, must have low charge
-            bool is_pi_atom = (topo.pi_fragments[B] > 0);
-            bool acceptable_charge = (charges[B] < 0.05);
-
-            if (is_pi_atom && !acceptable_charge) continue;
+            // Reference: gfnff_ini.f90:896-898
+            if (m_atoms[B] == 6) { // Group 4 base
+                bool is_pi_atom = (topo.pi_fragments[B] > 0);
+                bool acceptable_charge = (charges[B] < 0.05);
+                if (!is_pi_atom || !acceptable_charge) continue;
+            } else {
+                // For other bases, just check charge
+                if (charges[B] > 0.05) continue;
+            }
 
             // Non-bonded requirement (A-X...B, not A-X-B)
             bool x_bonded_to_b = false;
@@ -4238,12 +4340,17 @@ json GFNFF::detectHalogenBonds(const Vector& charges) const
             xb["k"] = B;  // Acceptor atom
 
             // Store element-specific parameters from GFNFFParameters
-            xb["basicity_B"] = hb_basicity[m_atoms[B]];
+            // Reference: gfnff_engrad.F90:3172-3173
+            xb["basicity_B"] = 1.0;  // Hardcoded to 1.0 in Fortran reference
             xb["acidity_X"] = xb_acidity[m_atoms[X]];
 
             // Pre-computed charge factors (for performance)
             xb["q_X"] = charges[X];
             xb["q_B"] = charges[B];
+
+            // Cutoff radius for XB energy calculation (Claude Generated - January 17, 2026)
+            // Use detection threshold (10.0 Bohr) + safety margin
+            xb["r_cut"] = 12.0;  // Bohr (conservative cutoff for energy calculation)
 
             xbonds.push_back(xb);
 

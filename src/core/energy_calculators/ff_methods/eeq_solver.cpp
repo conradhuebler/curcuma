@@ -806,30 +806,48 @@ Vector EEQSolver::calculateCharges(
         m_verbosity = saved_verbosity;
     }
 
-    // PHASE 2: Single solve with dgam corrections (NOT iterative!)
-    // CRITICAL FIX (Jan 4, 2026): Phase 2 uses FIXED dgam based on Phase 1 charges (qa)
-    // Reference: XTB gfnff_ini.f90:693-707 - ONE solve, not SCF iteration
+    // PHASE 2: Final energy charges with ALL corrections (matching Fortran reference)
+    // Reference: XTB gfnff_ini.f90:693-707 - ONE solve with dxi, dgam, and alpha corrections
+    // Restored (Jan 17, 2026): Activate corrections to match GFN-FF Fortran reference
     {
         // Save Phase 1 topology charges for dgam calculation
         Vector topology_charges = current_charges;
 
-        // CRITICAL FIX (Jan 4, 2026): Phase 2 also uses ONLY base parameters!
-        // Reference: gfnff_final.cpp - dgam corrections add noise, not accuracy
-        Vector dxi = Vector::Zero(natoms);  // NO dxi corrections for Phase 2!
-        Vector dgam = Vector::Zero(natoms);  // NO dgam corrections for Phase 2!
+        // RESTORED (Jan 17, 2026): Phase 2 uses ALL corrections (matching Fortran gfnff_ini.f90:713-726)
+        // Reference: external/gfnff/src/gfnff_ini.f90:713-726
+        //
+        // topo%chieeq(i) = -param%chi(at(i))+dxi(i)     // chi correction
+        // topo%gameeq(i) = param%gam(at(i))+dgam(i)     // hardness correction
+        // topo%alpeeq(i) = (param%alp(at(i))+ff*qa(i))**2  // charge-dependent alpha
+        Vector dxi = calculateDxi(atoms, geometry_bohr, cn, topology);
 
-        // DEBUG: Print that we're NOT using corrections
-        std::cout << "\n=== Phase 2: Single Solve WITHOUT corrections ====" << std::endl;
-        std::cout << "Using ONLY base parameters (no dxi, no dgam)" << std::endl;
+        // Claude Generated (January 17, 2026): Detect pi-system and amide nitrogens for dgam refinements
+        std::vector<bool> is_pi_atom = detectPiSystem(atoms, hybridization, topology);
+        std::vector<bool> is_amide = detectAmideNitrogens(atoms, hybridization, is_pi_atom, topology, cn);
+        Vector dgam = calculateDgam(atoms, topology_charges, hybridization, is_pi_atom, is_amide);
 
-        // Build matrix WITHOUT corrections (matches gfnff_final.cpp philosophy)
+        // DEBUG: Print correction values
+        std::cout << "\n=== Phase 2: Single Solve WITH corrections (matching Fortran) ===" << std::endl;
+        for (int i = 0; i < std::min(3, natoms); ++i) {
+            std::cout << fmt::format("Atom {} (Z={}): dxi = {:.6f}, dgam = {:.6f}",
+                                    i, atoms[i], dxi(i), dgam(i)) << std::endl;
+        }
+
+        // Build matrix WITH corrections (matching Fortran gfnff_ini.f90:693-707)
+        // CRITICAL FIX (January 17, 2026): Phase 2 uses GEOMETRIC distances (r(ij) from xyz),
+        // NOT topological distances (pair(ij) from Floyd-Warshall)!
+        // Reference: Fortran goed_gfnff uses r(ij), while goedeckera uses pair(ij)
         Matrix A = buildCorrectedEEQMatrix(atoms, geometry_bohr, cn, topology_charges,
-                                          dxi, dgam, hybridization, topology);
+                                          dxi, dgam, hybridization, topology,
+                                          EEQDistanceMode::Geometric);
 
-        // Solve ONCE with corrected parameters (Phase 2: NO CNF term!)
-        // CRITICAL FIX (Jan 4, 2026): Fortran Phase 2 preparation (gfnff_ini.f90:715)
-        // overwrites chieeq WITHOUT CNF term. Only Phase 1 (line 411) includes CNF.
-        current_charges = solveEEQ(A, atoms, cn, dxi, total_charge, topology, false);
+        // Solve ONCE with corrected parameters (Phase 2: CNF term REQUIRED!)
+        // CRITICAL FIX (Jan 17, 2026): Fortran Phase 2 (gfnff_engrad.F90:1504-1507)
+        // uses CNF term in both phases! Reference document:
+        // external/gfnff/docs/GEOMETRISCHE_LADUNGSBERECHNUNG.md section 3.2:
+        //   x(i) = topo%chieqq(i) + param%cnf(at(i)) * sqrt(cn(i))
+        // CNF term is PRESENT in Phase 2 (geometric charges), not only Phase 1!
+        current_charges = solveEEQ(A, atoms, cn, dxi, total_charge, topology, true);
 
         if (current_charges.size() != natoms) {
             CurcumaLogger::error("EEQSolver::calculateCharges: Phase 2 solve failed");
@@ -837,7 +855,7 @@ Vector EEQSolver::calculateCharges(
         }
 
         if (m_verbosity >= 1) {
-            CurcumaLogger::success("EEQSolver: Phase 2 single-solve completed");
+            CurcumaLogger::success("EEQSolver: Phase 2 single-solve completed with dxi/dgam corrections");
         }
     }
 
@@ -885,7 +903,8 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
     const Vector& dxi,
     const Vector& dgam,
     const std::vector<int>& hybridization,
-    const std::optional<TopologyInput>& topology)
+    const std::optional<TopologyInput>& topology,
+    EEQDistanceMode distance_mode)
 {
     const int natoms = atoms.size();
     int m = natoms + 1;
@@ -903,11 +922,11 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
             ff = 0.09;
         } else if (z_i == 7) {  // Nitrogen
             ff = -0.21;
-        } else if (z_i > 10 && z_i <= 86) {  // Heavy atoms
+        } else if (z_i >= 1 && z_i <= 86) {
             int group = periodic_group[z_i - 1];
             if (group == 6) ff = -0.03;  // Chalcogens (O, S, Se, Te, Po)
             else if (group == 7) ff = 0.50;  // Halogens (F, Cl, Br, I, At)
-            else {
+            else if (z_i > 10) {
                 int imetal_val = metal_type[z_i - 1];
                 if (imetal_val == 1) ff = 0.3;  // Main group metals
                 else if (imetal_val == 2) ff = -0.1;  // Transition metals
@@ -917,14 +936,18 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
         alpha_corrected(i) = std::pow(alpha_base + ff * current_charges(i), 2);
     }
 
-    // Step 2: Get topological or geometric distances
+    // Step 2: Get distances based on explicit mode
+    // CRITICAL FIX (January 17, 2026): Fortran uses DIFFERENT distance modes for Phase 1 vs Phase 2:
+    // - Phase 1 (goedeckera): Topological distances (Floyd-Warshall bond paths)
+    // - Phase 2 (goed_gfnff): Geometric distances (Euclidean xyz)
+    // Reference: XTB gfnff_ini.f90 - pair(ij) vs r(ij)
     Matrix distances;
-    if (topology.has_value()) {
+    if (distance_mode == EEQDistanceMode::Topological && topology.has_value()) {
         distances = computeTopologicalDistances(atoms, *topology);
 
         // DEBUG: Print first few topological distances
         if (m_verbosity >= 3 && natoms >= 2) {
-            std::cout << "\n=== TOPOLOGICAL DISTANCES (Bohr) ===" << std::endl;
+            std::cout << "\n=== TOPOLOGICAL DISTANCES (Bohr) - Phase 1 Mode ===" << std::endl;
             for (int i = 0; i < std::min(3, natoms); ++i) {
                 for (int j = 0; j < std::min(6, natoms); ++j) {
                     if (i != j && distances(i,j) < 1e6) {
@@ -936,7 +959,7 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
             std::cout << std::endl;
         }
     } else {
-        // Fallback: compute geometric distances
+        // Geometric distances from xyz coordinates (Phase 2 mode, or fallback if no topology)
         distances = Matrix::Zero(natoms, natoms);
         for (int i = 0; i < natoms; ++i) {
             for (int j = 0; j < natoms; ++j) {
@@ -944,6 +967,20 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
                     distances(i, j) = (geometry_bohr.row(i) - geometry_bohr.row(j)).norm();
                 }
             }
+        }
+
+        // DEBUG: Print first few geometric distances
+        if (m_verbosity >= 3 && natoms >= 2 && distance_mode == EEQDistanceMode::Geometric) {
+            std::cout << "\n=== GEOMETRIC DISTANCES (Bohr) - Phase 2 Mode ===" << std::endl;
+            for (int i = 0; i < std::min(3, natoms); ++i) {
+                for (int j = 0; j < std::min(6, natoms); ++j) {
+                    if (i != j) {
+                        std::cout << fmt::format("d({},{}) = {:.4f}", i, j, distances(i,j)) << " ";
+                    }
+                }
+                std::cout << std::endl;
+            }
+            std::cout << std::endl;
         }
     }
 
@@ -997,7 +1034,8 @@ Matrix EEQSolver::buildSmartEEQMatrix(
     const Vector& dxi,
     const Vector& dgam,
     const std::vector<int>& hybridization,
-    const std::optional<TopologyInput>& topology)
+    const std::optional<TopologyInput>& topology,
+    EEQDistanceMode distance_mode)
 {
     // Check if we can reuse cached computation
     if (m_eeq_cache && !m_eeq_cache->isGeometryChanged(geometry_bohr)) {
@@ -1012,8 +1050,8 @@ Matrix EEQSolver::buildSmartEEQMatrix(
         CurcumaLogger::info("EEQSolver: Building EEQ matrix from scratch");
     }
 
-    // Build matrix using existing logic
-    Matrix A = buildCorrectedEEQMatrix(atoms, geometry_bohr, cn, current_charges, dxi, dgam, hybridization, topology);
+    // Build matrix using existing logic, passing through distance mode
+    Matrix A = buildCorrectedEEQMatrix(atoms, geometry_bohr, cn, current_charges, dxi, dgam, hybridization, topology, distance_mode);
 
     // Cache the result for future use
     if (m_eeq_cache) {
@@ -1080,6 +1118,21 @@ Vector EEQSolver::solveEEQ(
 
         if (is_transition_metal) {
             chi_corrected -= MCHISHIFT;  // Subtracts -0.09, effectively adds +0.09
+        }
+
+        // Amide Hydrogen Electronegativity Shift (Phase 2.9 - January 17, 2026)
+        // Reference: gfnff_ini.f90:717
+        // Formula: chieeq(ji) = chieeq(ji) - 0.02 (for Hydrogen bonded to pi-system Nitrogen)
+        if (z_i == 1 && topology.has_value()) {
+            for (int neighbor : topology->neighbor_lists[i]) {
+                if (atoms[neighbor] == 7) { // Bonded to Nitrogen
+                    int hyb_n = detectElementSpecificHybridization(atoms[neighbor], cn(neighbor), atoms, topology, neighbor);
+                    if (hyb_n == 1 || hyb_n == 2) {
+                        chi_corrected -= 0.02;
+                        break;
+                    }
+                }
+            }
         }
 
         if (use_cnf_term) {
@@ -1518,7 +1571,12 @@ Vector EEQSolver::calculateFinalCharges(
     // gfnff_final.cpp achieves 0.0000025 e accuracy using ONLY base parameters (NO dxi, NO dgam)
     // Curcuma's complex corrections add noise instead of improving accuracy
     Vector dxi = use_corrections ? calculateDxi(atoms, geometry_bohr, cn, topology) : Vector::Zero(natoms);
-    Vector dgam = use_corrections ? calculateDgam(atoms, topology_charges, hybridization) : Vector::Zero(natoms);
+
+    // Claude Generated (January 17, 2026): Detect pi-system and amide nitrogens for dgam
+    std::vector<bool> is_pi_atom = use_corrections ? detectPiSystem(atoms, hybridization, topology) : std::vector<bool>(natoms, false);
+    std::vector<bool> is_amide = use_corrections ? detectAmideNitrogens(atoms, hybridization, is_pi_atom, topology, cn) : std::vector<bool>(natoms, false);
+
+    Vector dgam = use_corrections ? calculateDgam(atoms, topology_charges, hybridization, is_pi_atom, is_amide) : Vector::Zero(natoms);
 
     // DEBUG: Print topology charges used for dgam
     if (m_verbosity >= 3) {
@@ -1722,7 +1780,22 @@ Vector EEQSolver::calculateFinalCharges(
         for (int i = 0; i < natoms; ++i) {
             int z_i = atoms[i];
             EEQParameters params_i = getParameters(z_i, cn(i));
-            x(i) = chi_corrected(i) + params_i.cnf * std::sqrt(cn(i));
+            double chi_corrected_val = chi_corrected(i);
+
+            // Amide Hydrogen Electronegativity Shift (Phase 2.9 - January 17, 2026)
+            if (z_i == 1 && topology.has_value()) {
+                for (int neighbor : topology->neighbor_lists[i]) {
+                    if (atoms[neighbor] == 7) {
+                        int hyb_n = detectElementSpecificHybridization(atoms[neighbor], cn(neighbor), atoms, topology, neighbor);
+                        if (hyb_n == 1 || hyb_n == 2) {
+                            chi_corrected_val -= 0.02;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            x(i) = chi_corrected_val + params_i.cnf * std::sqrt(cn(i));
         }
         x(natoms) = static_cast<double>(total_charge);
 
@@ -1917,37 +1990,15 @@ Vector EEQSolver::calculateDxi(
     // Estimate hybridization from CN (approximation)
     // Reference: CN-based heuristic (hyb: 1=sp, 2=sp2, 3=sp3)
     // Claude Update December 2025: Now uses geometry and topology for accurate detection
-    std::vector<int> hyb(natoms, 3);  // Default sp3
-    for (int i = 0; i < natoms; ++i) {
-        // Use element-specific XTB rules with geometry and topology
-        hyb[i] = detectElementSpecificHybridization(
-            atoms[i], cn(i), atoms, topology, i, &geometry_bohr, nullptr
-        );
-    }
+    std::vector<int> hyb = detectHybridization(atoms, geometry_bohr, cn, topology);
 
     // Pi-system detection (simplified from XTB gfnff_ini.f90:312-336)
     // Reference: XTB defines pi atoms as (sp or sp2) AND (C,N,O,F,S)
-    std::vector<bool> is_pi_atom(natoms, false);
-    auto is_pi_element = [](int Z) {
-        return (Z == 6 || Z == 7 || Z == 8 || Z == 9 || Z == 16);  // C, N, O, F, S
-    };
+    std::vector<bool> is_pi_atom = detectPiSystem(atoms, hyb, topology);
 
-    for (int i = 0; i < natoms; ++i) {
-        if ((hyb[i] == 1 || hyb[i] == 2) && is_pi_element(atoms[i])) {
-            is_pi_atom[i] = true;
-        }
-        // Special case: N,O,F (sp3) bonded to sp2 atom (picon in XTB)
-        if (hyb[i] == 3 && (atoms[i] == 7 || atoms[i] == 8 || atoms[i] == 9)) {
-            if (topology.has_value()) {
-                for (int j : topology->neighbor_lists[i]) {
-                    if (hyb[j] == 1 || hyb[j] == 2) {
-                        is_pi_atom[i] = true;
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    // Amide detection for dxi refinements (Claude Generated Jan 2026)
+    std::vector<bool> is_amide = detectAmideNitrogens(atoms, hyb, is_pi_atom, topology, cn);
+    std::vector<bool> is_amide_h = detectAmideHydrogens(atoms, hyb, is_amide, topology);
 
     // Debug output header (Claude Generated Dec 29, 2025 - Fixed debug visibility)
     if (m_verbosity >= 3) {
@@ -1988,21 +2039,15 @@ Vector EEQSolver::calculateDxi(
             }
         }
 
-        // ===== Neighbor Electronegativity Correction (NEW - Phase 2.7) =====
-        // Lower EN neighbors → make atom more electronegative (negative dxi)
-        // Higher EN neighbors → make atom less electronegative (positive dxi)
-        double en_self = (ati < static_cast<int>(pauling_en.size())) ? pauling_en[ati] : 0.0;
-        if (nn > 0 && en_self > 0.0 && en_avg > 0.0) {
-            // Scale factor: 0.01 per 1.0 EN unit difference
-            double en_diff = en_avg - en_self;
-            double en_corr = 0.01 * en_diff * nn / 4.0;  // Normalize by typical CN=4
-            dxi_total += en_corr;
-            if (std::abs(en_corr) > 0.001) {
-                components += fmt::format("EN_avg:{:+.3f} ", en_corr);
-            }
-        }
-
         // ===== Element-Specific Environment Corrections (from XTB) =====
+
+        // Amide Hydrogen (Z=1 bonded to Amide N with exactly one sp3 Carbon neighbor)
+        if (ati == 1 && is_amide_h[i]) {
+            double corr = -0.02;
+            dxi_total += corr;
+            components += "amideH:-0.02 ";
+            env_desc = "amideH";
+        }
 
         // Boron (Z=5): +0.015 per H neighbor (line 377)
         if (ati == 5 && nh > 0) {
@@ -2094,8 +2139,9 @@ Vector EEQSolver::calculateDxi(
             }
         }
 
-        // Halogens (Group 7: Cl=17, Br=35, I=53): Polyvalent corrections (lines 396-402)
-        if ((ati == 17 || ati == 35 || ati == 53) && nn > 1) {
+        // Halogens (Group 7: Cl=17, Br=35, I=53, At=85): Polyvalent corrections (lines 396-402)
+        int group_i = GFNFFParameters::periodic_group[ati - 1];
+        if (ati > 9 && group_i == 7 && nn > 1) {
             if (nm == 0) {
                 // Not bonded to metal: -0.021 per neighbor
                 double corr = -nn * 0.021;
@@ -2133,7 +2179,9 @@ Vector EEQSolver::calculateDxi(
 Vector EEQSolver::calculateDgam(
     const std::vector<int>& atoms,
     const Vector& charges,
-    const std::vector<int>& hybridization)
+    const std::vector<int>& hybridization,
+    const std::vector<bool>& is_pi_atom,
+    const std::vector<bool>& is_amide)
 {
     const int natoms = atoms.size();
     Vector dgam = Vector::Zero(natoms);
@@ -2142,8 +2190,8 @@ Vector EEQSolver::calculateDgam(
         int Z = atoms[i];
         double qa = charges(i);
 
-        // Claude Generated (December 2025, Session 11): EXACT XTB ff values
-        // Reference: Fortran gfnff_ini.f90:665-690
+        // Claude Generated (December 2025/January 2026): EXACT XTB ff values
+        // Reference: Fortran gfnff_ini.f90:665-690 + refined N factors
         double ff = 0.0;  // Default: do nothing
 
         if (Z == 1) {
@@ -2158,7 +2206,12 @@ Vector EEQSolver::calculateDgam(
             }
         } else if (Z == 7) {  // N
             ff = -0.13;  // Base N
-            // TODO: pi-system (-0.14) and amide (-0.16) detection requires piadr/amide functions
+            if (!is_pi_atom.empty() && i < is_pi_atom.size() && is_pi_atom[i]) {
+                ff = -0.14;  // pi-system N
+            }
+            if (!is_amide.empty() && i < is_amide.size() && is_amide[i]) {
+                ff = -0.16;  // amide N
+            }
         } else if (Z == 8) {  // O
             ff = -0.15;  // sp3
             if (!hybridization.empty() && i < hybridization.size()) {
@@ -2237,20 +2290,124 @@ Vector EEQSolver::calculateCoordinationNumbers(
 std::vector<int> EEQSolver::detectHybridization(
     const std::vector<int>& atoms,
     const Matrix& geometry_bohr,
-    const Vector& cn) const
+    const Vector& cn,
+    const std::optional<TopologyInput>& topology) const
 {
     const int natoms = atoms.size();
     std::vector<int> hybridization(natoms, 3);  // Default: sp3
 
     for (int i = 0; i < natoms; ++i) {
-        // Use element-specific XTB rules with geometry (topology not available in public API)
-        // Claude Update December 2025: Now passes geometry for geometry-dependent rules
+        // Use element-specific XTB rules with geometry and optional topology
         hybridization[i] = detectElementSpecificHybridization(
-            atoms[i], cn(i), atoms, std::nullopt, i, &geometry_bohr, nullptr
+            atoms[i], cn(i), atoms, topology, i, &geometry_bohr, nullptr
         );
     }
 
     return hybridization;
+}
+
+std::vector<bool> EEQSolver::detectPiSystem(
+    const std::vector<int>& atoms,
+    const std::vector<int>& hybridization,
+    const std::optional<TopologyInput>& topology) const
+{
+    const int natoms = atoms.size();
+    std::vector<bool> is_pi_atom(natoms, false);
+
+    auto is_pi_element = [](int Z) {
+        return (Z == 6 || Z == 7 || Z == 8 || Z == 9 || Z == 16);  // C, N, O, F, S
+    };
+
+    for (int i = 0; i < natoms; ++i) {
+        if (i >= static_cast<int>(hybridization.size())) continue;
+
+        if ((hybridization[i] == 1 || hybridization[i] == 2) && is_pi_element(atoms[i])) {
+            is_pi_atom[i] = true;
+        }
+        // Special case: N,O,F (sp3) bonded to sp2/sp1 atom (picon in XTB)
+        if (hybridization[i] == 3 && (atoms[i] == 7 || atoms[i] == 8 || atoms[i] == 9)) {
+            if (topology.has_value()) {
+                for (int j : topology->neighbor_lists[i]) {
+                    if (j < static_cast<int>(hybridization.size())) {
+                        if (hybridization[j] == 1 || hybridization[j] == 2) {
+                            is_pi_atom[i] = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return is_pi_atom;
+}
+
+std::vector<bool> EEQSolver::detectAmideNitrogens(
+    const std::vector<int>& atoms,
+    const std::vector<int>& hybridization,
+    const std::vector<bool>& is_pi_atom,
+    const std::optional<TopologyInput>& topology,
+    const Vector& cn) const
+{
+    const int natoms = atoms.size();
+    std::vector<bool> is_amide(natoms, false);
+
+    if (!topology.has_value()) return is_amide;
+
+    for (int i = 0; i < natoms; ++i) {
+        if (atoms[i] == 7 && is_pi_atom[i]) { // Nitrogen in pi-system
+            // Check neighbors for pi-bonded Carbon which has C=O
+            for (int neighbor : topology->neighbor_lists[i]) {
+                if (atoms[neighbor] == 6 && is_pi_atom[neighbor]) { // C in pi-system
+                    // Check if this Carbon has a Carbonyl Oxygen (O in pi-system with CN=1)
+                    for (int n2 : topology->neighbor_lists[neighbor]) {
+                        if (atoms[n2] == 8 && is_pi_atom[n2]) {
+                            // coordination check (use fractional CN or integer neighbor count)
+                            double cn_o = cn(n2);
+                            if (cn_o < 1.5) { // Terminal oxygen
+                                is_amide[i] = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (is_amide[i]) break;
+            }
+        }
+    }
+    return is_amide;
+}
+
+std::vector<bool> EEQSolver::detectAmideHydrogens(
+    const std::vector<int>& atoms,
+    const std::vector<int>& hybridization,
+    const std::vector<bool>& is_amide,
+    const std::optional<TopologyInput>& topology) const
+{
+    const int natoms = atoms.size();
+    std::vector<bool> is_amide_h(natoms, false);
+
+    if (!topology.has_value()) return is_amide_h;
+
+    for (int i = 0; i < natoms; ++i) {
+        if (atoms[i] == 1) { // Hydrogen
+            for (int neighbor : topology->neighbor_lists[i]) {
+                if (atoms[neighbor] == 7 && is_amide[neighbor]) { // Amide Nitrogen
+                    // Requirement: Amide Nitrogen must have exactly ONE sp3 Carbon neighbor
+                    int sp3_c_count = 0;
+                    for (int n2 : topology->neighbor_lists[neighbor]) {
+                        if (atoms[n2] == 6 && hybridization[n2] == 3) {
+                            sp3_c_count++;
+                        }
+                    }
+                    if (sp3_c_count == 1) {
+                        is_amide_h[i] = true;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    return is_amide_h;
 }
 
 std::vector<std::vector<int>> EEQSolver::buildNeighborLists(

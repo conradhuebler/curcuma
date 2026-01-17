@@ -1150,6 +1150,50 @@ void ForceField::AutoRanges()
             }
         }
 
+        // GFN-FF Hydrogen Bond (HB) Distribution - Claude Generated (January 17, 2026)
+        // Distribute HB three-body terms (A-H...B) to threads for parallel calculation
+        if (!m_gfnff_hbonds.empty()) {
+            // Use sum-based distribution for triples (similar to ATM/BATM/XB pattern)
+            for (const auto& hb : m_gfnff_hbonds) {
+                int thread_id = (hb.i + hb.j + hb.k) % thread_count;
+                if (thread_id == i) {
+                    thread->addGFNFFHydrogenBond(hb);
+                }
+            }
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                int hb_count = 0;
+                for (const auto& hb : m_gfnff_hbonds) {
+                    if ((hb.i + hb.j + hb.k) % thread_count == i) {
+                        hb_count++;
+                    }
+                }
+                CurcumaLogger::param(fmt::format("thread_{}_hbonds", i), hb_count);
+            }
+        }
+
+        // GFN-FF Halogen Bond (XB) Distribution - Claude Generated (January 17, 2026)
+        // Distribute XB three-body terms (A-X...B) to threads for parallel calculation
+        if (!m_gfnff_xbonds.empty()) {
+            // Use sum-based distribution for triples (similar to ATM/BATM/HB pattern)
+            for (const auto& xb : m_gfnff_xbonds) {
+                int thread_id = (xb.i + xb.j + xb.k) % thread_count;
+                if (thread_id == i) {
+                    thread->addGFNFFHalogenBond(xb);
+                }
+            }
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                int xb_count = 0;
+                for (const auto& xb : m_gfnff_xbonds) {
+                    if ((xb.i + xb.j + xb.k) % thread_count == i) {
+                        xb_count++;
+                    }
+                }
+                CurcumaLogger::param(fmt::format("thread_{}_xbonds", i), xb_count);
+            }
+        }
+
         for (int j = int(i * m_EQs.size() / double(free_threads)); j < int((i + 1) * m_EQs.size() / double(free_threads)); ++j)
             thread->addEQ(m_EQs[j]);
     }

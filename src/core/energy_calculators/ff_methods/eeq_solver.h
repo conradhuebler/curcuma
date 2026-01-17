@@ -37,6 +37,25 @@
 #include <optional>
 
 /**
+ * @brief Distance mode for EEQ matrix construction
+ *
+ * Controls which type of interatomic distances are used in the EEQ Coulomb matrix:
+ * - Topological: Floyd-Warshall bond path distances (for Phase 1 topology charges)
+ * - Geometric: Euclidean xyz distances (for Phase 2 energy charges)
+ *
+ * CRITICAL FIX (January 17, 2026): The Fortran reference uses DIFFERENT distance modes
+ * for Phase 1 vs Phase 2:
+ * - Phase 1 (goedeckera): Topological distances (`pair(ij)` from Floyd-Warshall)
+ * - Phase 2 (goed_gfnff): Geometric distances (`r(ij)` from xyz coordinates)
+ *
+ * Claude Generated - January 17, 2026
+ */
+enum class EEQDistanceMode {
+    Topological,  ///< Phase 1: Floyd-Warshall bond path distances
+    Geometric     ///< Phase 2: Euclidean xyz distances
+};
+
+/**
  * @brief EEQ (Electronegativity Equalization) charge solver
  *
  * Standalone utility for calculating atomic partial charges using the EEQ method.
@@ -258,7 +277,9 @@ private:
     Vector calculateDgam(
         const std::vector<int>& atoms,
         const Vector& charges,
-        const std::vector<int>& hybridization
+        const std::vector<int>& hybridization,
+        const std::vector<bool>& is_pi_atom = {},
+        const std::vector<bool>& is_amide = {}
     );
 
     // NOTE: calculateDalpha() removed - alpha now calculated inline with charge-dependent formula
@@ -281,6 +302,9 @@ private:
      * @param dgam Hardness corrections (gam - qa*ff)
      * @param hybridization Hybridization states
      * @param topology Optional topology for topological distances
+     * @param distance_mode Distance calculation mode (Topological for Phase 1, Geometric for Phase 2)
+     *                      CRITICAL (Jan 17, 2026): Fortran uses topological for Phase 1 (goedeckera),
+     *                      geometric for Phase 2 (goed_gfnff). Default=Topological for backward compat.
      * @return Augmented EEQ matrix (natoms+1)×(natoms+1)
      */
     Matrix buildCorrectedEEQMatrix(
@@ -291,7 +315,8 @@ private:
         const Vector& dxi,
         const Vector& dgam,
         const std::vector<int>& hybridization,
-        const std::optional<TopologyInput>& topology
+        const std::optional<TopologyInput>& topology,
+        EEQDistanceMode distance_mode = EEQDistanceMode::Topological
     );
 
     /**
@@ -308,6 +333,7 @@ private:
      * @param dgam Hardness corrections (gam - qa*ff)
      * @param hybridization Hybridization states
      * @param topology Optional topology for topological distances
+     * @param distance_mode Distance calculation mode (Topological for Phase 1, Geometric for Phase 2)
      * @return Augmented EEQ matrix (natoms+1)×(natoms+1) with caching
      *
      * Claude Generated - Performance Optimization Implementation
@@ -320,7 +346,8 @@ private:
         const Vector& dxi,
         const Vector& dgam,
         const std::vector<int>& hybridization,
-        const std::optional<TopologyInput>& topology
+        const std::optional<TopologyInput>& topology,
+        EEQDistanceMode distance_mode = EEQDistanceMode::Topological
     );
 
     /**
@@ -381,7 +408,61 @@ private:
     std::vector<int> detectHybridization(
         const std::vector<int>& atoms,
         const Matrix& geometry_bohr,
+        const Vector& cn,
+        const std::optional<TopologyInput>& topology = std::nullopt
+    ) const;
+
+    /**
+     * @brief Detect atoms in pi-systems
+     *
+     * Simplified detection for EEQ corrections: (sp or sp2) AND (C,N,O,F,S)
+     * plus picon (sp3 N,O,F bonded to sp/sp2 atom).
+     *
+     * @param atoms Atomic numbers
+     * @param hybridization Hybridization states
+     * @param topology Topology information
+     * @return Vector of pi-system membership flags
+     */
+    std::vector<bool> detectPiSystem(
+        const std::vector<int>& atoms,
+        const std::vector<int>& hybridization,
+        const std::optional<TopologyInput>& topology
+    ) const;
+
+    /**
+     * @brief Detect amide nitrogens
+     *
+     * @param atoms Atomic numbers
+     * @param hybridization Hybridization states
+     * @param is_pi_atom Pi-system membership flags
+     * @param topology Topology information
+     * @param cn Coordination numbers
+     * @return Vector of amide nitrogen flags
+     */
+    std::vector<bool> detectAmideNitrogens(
+        const std::vector<int>& atoms,
+        const std::vector<int>& hybridization,
+        const std::vector<bool>& is_pi_atom,
+        const std::optional<TopologyInput>& topology,
         const Vector& cn
+    ) const;
+
+    /**
+     * @brief Detect amide hydrogens
+     *
+     * @param atoms Atomic numbers
+     * @param hybridization Hybridization states
+     * @param is_amide Vector of amide nitrogen flags
+     * @param topology Topology information
+     * @return Vector of amide hydrogen flags
+     *
+     * Claude Generated January 2026 - Ported from Fortran gfnff_ini2.f90:1566
+     */
+    std::vector<bool> detectAmideHydrogens(
+        const std::vector<int>& atoms,
+        const std::vector<int>& hybridization,
+        const std::vector<bool>& is_amide,
+        const std::optional<TopologyInput>& topology
     ) const;
 
     /**

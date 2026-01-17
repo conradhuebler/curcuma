@@ -388,6 +388,9 @@ ctest -R "cli_rmsd_01" --verbose
 
 ## Recently Resolved ✅
 
+- ✅ **EEQ Charge Fine-Tuning** (Jan 17, 2026): Aligned parameters with Fortran reference; 82% Coulomb energy error reduction (8.3% → 1.5%)
+- ✅ **GFN-FF HB/XB Refinement** (Jan 17, 2026): Implemented context-dependent basicity/acidity overrides for non-covalent interactions
+- ✅ **D4 Dispersion Weighting Fix** (Jan 17, 2026): Corrected to CN-only weighting for GFN-FF hybrid model; D4 set as default
 - ✅ **JSON Null-Error & Parameter Routing** (October 2025): SimpleMD/curcumaopt fixed - 11 tests now pass
 - ✅ **ForceField Inversion Bug** (October 2025): Vector bounds crash in UFF parameter generation fixed
 - ✅ **CLI Test Infrastructure** (October 2025): 26 End-to-End validation tests with scientific accuracy

@@ -2147,13 +2147,18 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
         double B_AH = (hb.basicity_A * r_AH_4 + hb.basicity_B * r_HB_4) / (r_AH_4 + r_HB_4);
 
         // --- Charge Scaling Factors ---
-        double Q_H = charge_scaling(hb.q_H, HB_ST, HB_SF);
-        double Q_A = charge_scaling(hb.q_A, HB_ST, HB_SF);
-        double Q_B = charge_scaling(hb.q_B, HB_ST, HB_SF);
+        // CRITICAL FIX (January 17, 2026): A and B use NEGATIVE charge (Fortran: exp(-hbst*q))
+        // Reference: gfnff_engrad.F90:1693-1699
+        double Q_H = charge_scaling(hb.q_H, HB_ST, HB_SF);    // exp(+st*q_H)
+        double Q_A = charge_scaling(-hb.q_A, HB_ST, HB_SF);   // exp(-st*q_A) ← NEGATIVE!
+        double Q_B = charge_scaling(-hb.q_B, HB_ST, HB_SF);   // exp(-st*q_B) ← NEGATIVE!
 
         // --- Combined Damping R_damp ---
         // Use covalent radii as approximation for vdW radius
-        double r_vdw_AB = covalent_radii[hb.i] + covalent_radii[hb.k];  // Angström -> need conversion
+        // CRITICAL FIX (January 17, 2026): covalent_radii is 0-indexed, so element_number - 1!
+        int elem_A = m_atom_types[hb.i];
+        int elem_B = m_atom_types[hb.k];
+        double r_vdw_AB = covalent_radii[elem_A - 1] + covalent_radii[elem_B - 1];  // Angström
         r_vdw_AB *= 1.88973;  // Convert Å to Bohr
 
         double damp_short = damping_short_range(r_AB, r_vdw_AB, HB_SCUT, HB_ALP);
@@ -2161,6 +2166,12 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
         double damp_outl = damping_out_of_line(r_AH, r_HB, r_AB, HB_BACUT);
 
         double R_damp = damp_short * damp_long * damp_outl / (r_AB * r_AB * r_AB);
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format(
+                "    DAMPING: damp_short={:.6f}, damp_long={:.6f}, damp_outl={:.6f}, r_vdw_AB={:.3f} Bohr",
+                damp_short, damp_long, damp_outl, r_vdw_AB));
+        }
 
         // --- Acidity Term C_acidity ---
         // Reference: hbonds() subroutine - complex mixing of basicity/acidity
@@ -2176,6 +2187,9 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
             CurcumaLogger::info(fmt::format(
                 "  HB({}-{}-{}): r_AB={:.3f} Bohr, E={:.6f} Eh",
                 hb.i, hb.j, hb.k, r_AB, E_HB * m_final_factor));
+            CurcumaLogger::info(fmt::format(
+                "    DEBUG: B_AH={:.6f}, Q_A={:.6f}, Q_B={:.6f}, C_acidity={:.6f}, R_damp={:.6e}, Q_H={:.6f}",
+                B_AH, Q_A, Q_B, C_acidity, R_damp, Q_H));
         }
 
         // ========== ANALYTICAL GRADIENT CALCULATION ==========
@@ -2303,12 +2317,17 @@ void ForceFieldThread::CalculateGFNFFHalogenBondContribution()
         if (r_XB > xb.r_cut) continue;
 
         // --- Charge Scaling Factors ---
+        // CRITICAL FIX (January 17, 2026): B uses NEGATIVE charge (Fortran: exp(-xbst*q))
+        // Reference: gfnff_engrad.F90:3210-3218
         // XB uses different parameters: XB_ST=15, XB_SF=0.03 (much weaker offset)
-        double Q_X = charge_scaling(xb.q_X, XB_ST, XB_SF);
-        double Q_B = charge_scaling(xb.q_B, XB_ST, XB_SF);
+        double Q_X = charge_scaling(xb.q_X, XB_ST, XB_SF);    // exp(+st*q_X)
+        double Q_B = charge_scaling(-xb.q_B, XB_ST, XB_SF);   // exp(-st*q_B) ← NEGATIVE!
 
         // --- Combined Damping R_damp ---
-        double r_vdw_XB = covalent_radii[xb.j] + covalent_radii[xb.k];  // Angström
+        // CRITICAL FIX (January 17, 2026): covalent_radii is 0-indexed, so element_number - 1!
+        int elem_X = m_atom_types[xb.j];
+        int elem_B_xb = m_atom_types[xb.k];
+        double r_vdw_XB = covalent_radii[elem_X - 1] + covalent_radii[elem_B_xb - 1];  // Angström
         r_vdw_XB *= 1.88973;  // Convert Å to Bohr
 
         // XB uses different cutoff parameters

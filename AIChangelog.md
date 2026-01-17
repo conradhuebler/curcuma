@@ -4,6 +4,14 @@ This file tracks significant improvements, refactorings, and new features genera
 
 Format: One line per change, newest first.
 
+## January 2026
+
+- **GFN-FF HB/XB Parameter Refinement (Jan 17)**: Implemented context-dependent basicity and acidity overrides for Hydrogen and Halogen bonds, added detector for carbenes, carbonyls, nitro groups, and amides, hardcoded XB acceptor basicity to 1.0 per Fortran reference, added sulfur neighbor filter and group 4 base charge criterion for XB detection, significantly improving non-covalent interaction accuracy
+- **GFN-FF EEQ Charge Fine-Tuning (Jan 17)**: Aligned EEQ implementation with GFN-FF Fortran reference, removed non-standard neighbor electronegativity correction, added Group 6 (O, S) and Group 7 (Halogens) charge-dependent polarizability (alpeeq) corrections, implemented amide hydrogen electronegativity shift (-0.02 Eh) for H bonded to pi-system nitrogen, refined nitrogen hardness corrections with pi-system (ff=-0.14) and amide (ff=-0.16) factors, added detectPiSystem and detectAmideNitrogens helpers to EEQSolver, improved Coulomb energy accuracy for CH3OCH3 by 82% (8.3% error -> 1.5% error)
+- **D4 Dispersion Weighting Fix (Jan 17)**: Corrected D4 weighting formula to use CN-only weighting instead of CN+charge combined, aligned with GFN-FF hybrid dispersion model and Fortran reference gfnff_gdisp0.f90:405, changed default dispersion method to D4
+- **GFN-FF Angle Parameter Refinement (Jan 9-10)**: Implemented complete port of element-specific angle corrections from Fortran GFN-FF, added amide detection via FunctionalGroupDetector, implemented pi-bond order approximation for nitrogen angle force constant scaling, achieving 86% angle energy error reduction (9.4% -> 1.3%)
+- **Torsion Gradient and NCI Support (Jan 13)**: Implemented full analytical gradients for all torsion types including NCI-specific damping derivatives, matching Fortran engrad formulas exactly
+
 ## December 2025
 
 - **UFF-D3 and GFN-FF Native D3 Integration (Dec 19)**: Implemented UFF-D3 hybrid method combining UFF bonded terms with validated native D3 dispersion (10/11 molecules <1% error), replaced GFN-FF's generateGFNFFDispersionPairs() with direct D3ParameterGenerator integration eliminating ~200 lines of duplicate dispersion code, added GenerateUFFD3Parameters() to ForceFieldGenerator, implemented CalculateD3DispersionContribution() in ForceFieldThread with multi-threaded parallelization, both UFF-D3 and GFN-FF now use identical validated D3 infrastructure (PBE0/BJ parameters for UFF-D3: a1=0.4145, a2=4.8593, s8=1.2177), code consolidation achieved with single D3 implementation shared across all force field methods, method routing configured for "uff-d3" command
