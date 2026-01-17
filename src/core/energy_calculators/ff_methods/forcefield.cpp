@@ -221,6 +221,11 @@ void ForceField::setParameter(const json& parameters)
         if (parameters.contains("atm_triples"))
             setATMTriples(parameters["atm_triples"]);
 
+        // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
+        // GFN-FF bonded ATM (batm) parameters for 1,4-pairs
+        if (parameters.contains("gfnff_batms"))
+            setGFNFFBatms(parameters["gfnff_batms"]);
+
         m_parameters = parameters;
         m_method = m_parameters["method"];
         if (CurcumaLogger::get_verbosity() >= 3) {
@@ -228,6 +233,18 @@ void ForceField::setParameter(const json& parameters)
         }
         if (m_parameters.contains("e0"))
             m_e0 = m_parameters["e0"];
+
+        // Claude Generated (Jan 17, 2026): Extract EEQ charges from input parameters (fresh generation path)
+        // This ensures charges are available for batm calculation and for caching
+        // Note: loadParametersFromFile() has equivalent code at line 1273 for cache loading path
+        if (parameters.contains("eeq_charges") && !parameters["eeq_charges"].is_null()) {
+            std::vector<double> charge_vec = parameters["eeq_charges"].get<std::vector<double>>();
+            m_eeq_charges = Eigen::Map<Vector>(charge_vec.data(), charge_vec.size());
+
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::param("eeq_charges_loaded", static_cast<int>(m_eeq_charges.size()));
+            }
+        }
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("Calculating parameter ranges");
@@ -280,6 +297,17 @@ void ForceField::setParameter(const json& parameters)
     }
 
     m_in_setParameter = false; // Reset the recursive guard - FIX: use member variable
+
+    // Claude Generated (January 2026): CRITICAL - Distribute EEQ charges to threads at END of setParameter()
+    // This ensures batm calculation has access to charges regardless of how parameters were loaded
+    // (from cache or fresh generation). Must be AFTER AutoRanges() creates threads.
+    if (m_eeq_charges.size() > 0) {
+        distributeEEQCharges(m_eeq_charges);
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("EEQ charges ({} atoms) distributed to {} threads for batm calculation",
+                                          m_eeq_charges.size(), m_stored_threads.size()));
+        }
+    }
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success("ForceField::setParameter() complete");
@@ -843,6 +871,33 @@ void ForceField::setATMTriples(const json& triples)
     }
 }
 
+// BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
+void ForceField::setGFNFFBatms(const json& batms)
+{
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setGFNFFBatms: Loading {} batm triples", batms.size()));
+    }
+
+    m_gfnff_batms.clear();
+    for (const auto& batm_json : batms) {
+        GFNFFBatmTriple batm;
+
+        batm.i = batm_json["i"];
+        batm.j = batm_json["j"];
+        batm.k = batm_json["k"];
+
+        batm.zb3atm_i = batm_json["zb3atm_i"];
+        batm.zb3atm_j = batm_json["zb3atm_j"];
+        batm.zb3atm_k = batm_json["zb3atm_k"];
+
+        m_gfnff_batms.push_back(batm);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF batm triples", batms.size()));
+    }
+}
+
 void ForceField::setESPs(const json& esps)
 {
     m_EQs.clear();
@@ -1073,6 +1128,28 @@ void ForceField::AutoRanges()
             }
         }
 
+        // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
+        // Distribute batm triples to threads for parallel calculation
+        if (!m_gfnff_batms.empty()) {
+            // Use sum-based distribution for triples (similar to ATM/HB/XB pattern)
+            for (const auto& batm : m_gfnff_batms) {
+                int thread_id = (batm.i + batm.j + batm.k) % thread_count;
+                if (thread_id == i) {
+                    thread->addGFNFFBatmTriple(batm);
+                }
+            }
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                int batm_count = 0;
+                for (const auto& batm : m_gfnff_batms) {
+                    if ((batm.i + batm.j + batm.k) % thread_count == i) {
+                        batm_count++;
+                    }
+                }
+                CurcumaLogger::param(fmt::format("thread_{}_batm_triples", i), batm_count);
+            }
+        }
+
         for (int j = int(i * m_EQs.size() / double(free_threads)); j < int((i + 1) * m_EQs.size() / double(free_threads)); ++j)
             thread->addEQ(m_EQs[j]);
     }
@@ -1202,6 +1279,7 @@ bool ForceField::loadParametersFromFile(const std::string& filename)
         }
 
         // Claude Generated (December 2025): Restore EEQ charges from cache
+        // Distribution to threads happens at end of setParameter() - no need to do it here
         if (loaded_params.contains("eeq_charges") && !loaded_params["eeq_charges"].is_null()) {
             std::vector<double> charge_vec = loaded_params["eeq_charges"].get<std::vector<double>>();
             m_eeq_charges = Eigen::Map<Vector>(charge_vec.data(), charge_vec.size());
@@ -1488,6 +1566,22 @@ json ForceField::exportCurrentParameters() const
         output["atm_triples"] = atm;
     }
 
+    // Claude Generated (January 2026): Export GFN-FF batm (bonded ATM) triples for 1,4-pairs
+    if (!m_gfnff_batms.empty()) {
+        json batms = json::array();
+        for (const auto& batm : m_gfnff_batms) {
+            json b;
+            b["i"] = batm.i;
+            b["j"] = batm.j;
+            b["k"] = batm.k;
+            b["zb3atm_i"] = batm.zb3atm_i;
+            b["zb3atm_j"] = batm.zb3atm_j;
+            b["zb3atm_k"] = batm.zb3atm_k;
+            batms.push_back(b);
+        }
+        output["gfnff_batms"] = batms;
+    }
+
     // Claude Generated (December 2025): Export EEQ charges if available
     if (m_eeq_charges.size() > 0) {
         json charges = json::array();
@@ -1621,6 +1715,7 @@ double ForceField::Calculate(bool gradient)
     m_atm_energy = 0.0;      // Claude Generated (December 2025): Reset ATM three-body dispersion
     m_d3_energy = 0.0;       // Claude Generated (Jan 2, 2026): Reset D3 dispersion energy
     m_d4_energy = 0.0;       // Claude Generated (Jan 2, 2026): Reset D4 dispersion energy
+    m_batm_energy = 0.0;     // Claude Generated (Jan 17, 2026): Reset batm three-body energy - CRITICAL FIX
 
     double h4_energy = 0.0;
     double cg_energy = 0.0; // Claude Generated: CG pair interaction energy
@@ -1704,6 +1799,11 @@ double ForceField::Calculate(bool gradient)
             double thread_atm = m_stored_threads[i]->ATMEnergy();
             m_atm_energy += thread_atm;
 
+            // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
+            // Collect GFN-FF batm energy for 1,4-pairs
+            double thread_batm = m_stored_threads[i]->BatmEnergy();
+            m_batm_energy += thread_batm;
+
             // Claude Generated (2025): Debug individual energy components
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::param(fmt::format("thread_{}_dispersion", i),
@@ -1757,8 +1857,8 @@ double ForceField::Calculate(bool gradient)
         }
     }
 
-    // Claude Generated: Add GFN-FF dispersion, Coulomb, HB, XB, and ATM energies to total
-    energy = m_e0 + m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy + m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + m_gfnff_repulsion + cg_energy + m_dispersion_energy + m_coulomb_energy + m_energy_hbond + m_energy_xbond + m_atm_energy + m_d3_energy + m_d4_energy;  // Claude Generated (Jan 2, 2026): Use member variables for D3/D4
+    // Claude Generated: Add GFN-FF dispersion, Coulomb, HB, XB, ATM, and batm energies to total
+    energy = m_e0 + m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy + m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + m_gfnff_repulsion + cg_energy + m_dispersion_energy + m_coulomb_energy + m_energy_hbond + m_energy_xbond + m_atm_energy + m_batm_energy + m_d3_energy + m_d4_energy;  // Claude Generated (Jan 2, 2026): Use member variables for D3/D4; (Jan 17, 2026): Add m_batm_energy
 
     // Claude Generated (2025): Debug total GFN-FF energies
     if (CurcumaLogger::get_verbosity() >= 3 && (m_dispersion_energy != 0.0 || m_coulomb_energy != 0.0)) {
@@ -1810,6 +1910,9 @@ double ForceField::Calculate(bool gradient)
         }
         if (m_atm_energy != 0.0) {  // Claude Generated (December 2025): ATM three-body dispersion
             CurcumaLogger::param("ATM_three_body", fmt::format("{:.6e} Eh", m_atm_energy));  // Use scientific notation for small values
+        }
+        if (m_batm_energy != 0.0) {  // Claude Generated (January 2026): GFN-FF bonded ATM three-body
+            CurcumaLogger::param("GFNFF_batm", fmt::format("{:.6e} Eh", m_batm_energy));  // Use scientific notation for small values
         }
         if (cg_energy != 0.0) {
             CurcumaLogger::param("CG_interactions", fmt::format("{:.6f} Eh", cg_energy));

@@ -26,6 +26,11 @@
 
 #include "forcefield.h"
 
+// Claude Generated (Jan 17, 2026): Required for diagnostic logging in batm calculation
+#include "src/core/curcuma_logger.h"
+#include <fmt/core.h>
+#include <fmt/format.h>
+
 #include <unordered_map>  // Claude Generated (Dec 2025): For atom_to_params lookup in Coulomb self-energy
 
 ForceFieldThread::ForceFieldThread(int thread, int threads)
@@ -62,6 +67,7 @@ int ForceFieldThread::execute()
     m_d3_energy = 0.0;
     m_d4_energy = 0.0;
     m_atm_energy = 0.0;  // Claude Generated (Dec 2025): Reset ATM three-body dispersion
+    m_batm_energy = 0.0;  // Claude Generated (Jan 17, 2026): Reset batm three-body energy - CRITICAL FIX
 
     // Phase 1.1: Guard debug output with verbosity check (Claude Generated - Dec 2025)
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -148,6 +154,15 @@ int ForceFieldThread::execute()
             if (m_calculate_gradient) {
                 CalculateATMGradient();
             }
+        }
+
+        // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
+        // GFN-FF bonded ATM (batm) calculation for 1,4-pairs
+        if (!m_gfnff_batms.empty()) {
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("Thread {} calculating {} batm triples", m_thread, m_gfnff_batms.size()));
+            }
+            CalculateGFNFFBatmContribution();
         }
 
     } else if (m_method == 1) {
@@ -311,6 +326,12 @@ void ForceFieldThread::addGFNFFHalogenBond(const GFNFFHalogenBond& xbond)
 void ForceFieldThread::addATMTriple(const ATMTriple& triple)
 {
     m_atm_triples.push_back(triple);
+}
+
+// BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
+void ForceFieldThread::addGFNFFBatmTriple(const GFNFFBatmTriple& batm_triple)
+{
+    m_gfnff_batms.push_back(batm_triple);
 }
 
 void ForceFieldThread::CalculateUFFBondContribution()
@@ -2808,5 +2829,119 @@ void ForceFieldThread::CalculateATMGradient()
 
     if (CurcumaLogger::get_verbosity() >= 3 && m_atm_triples.size() > 0) {
         CurcumaLogger::info(fmt::format("Thread {} ATM gradient calculation complete", m_thread));
+    }
+}
+
+// BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
+// Calculate bonded ATM (batm) energy and gradients for 1,4-pairs
+// Reference: external/gfnff/src/gfnff_engrad.F90:3267-3334 (batmgfnff_eg subroutine)
+// Formula: E_batm = c9 * (ang + 1.0) / rav3
+// where c9 = ff * zb3atm_i * zb3atm_j * zb3atm_k and ff = (1 - 3*q_i)*(1 - 3*q_j)*(1 - 3*q_k)
+void ForceFieldThread::CalculateGFNFFBatmContribution()
+{
+    m_batm_energy = 0.0;
+
+    if (m_gfnff_batms.empty()) {
+        return;
+    }
+
+    // Clamp to [-4, 4] to prevent runaway (matches Fortran gfnff_engrad.F90:3282-3287)
+    const double fqq = 3.0;
+
+    for (const auto& batm : m_gfnff_batms) {
+        // Get atom positions
+        Vector i_pos = m_geometry.row(batm.i);
+        Vector j_pos = m_geometry.row(batm.j);
+        Vector k_pos = m_geometry.row(batm.k);
+
+        // Calculate distance vectors
+        Eigen::Vector3d rij_vec = j_pos - i_pos;
+        Eigen::Vector3d rik_vec = k_pos - i_pos;
+        Eigen::Vector3d rjk_vec = k_pos - j_pos;
+
+        // Squared distances
+        double r2ij = rij_vec.squaredNorm();
+        double r2jk = rjk_vec.squaredNorm();
+        double r2ik = rik_vec.squaredNorm();
+
+        // Distances
+        double rij = std::sqrt(r2ij);
+        double rjk = std::sqrt(r2jk);
+        double rik = std::sqrt(r2ik);
+
+        // Angular term: ang = 0.375 * (r_ik*r_jk - r_ij^2) * (r_ij*r_ik - r_jk^2) * (r_ij*r_jk - r_ik^2) / r_ijk^3
+        // where r_ijk^3 = (r_ij*r_jk*r_ik)^2 = r2ij * r2jk * r2ik
+        double rijk3 = r2ij * r2jk * r2ik;
+
+        // mijk = -r_ij^2 + r_jk^2 + r_ik^2
+        double mijk = -r2ij + r2jk + r2ik;
+        // imjk = r_ij^2 - r_jk^2 + r_ik^2
+        double imjk = r2ij - r2jk + r2ik;
+        // ijmk = r_ij^2 + r_jk^2 - r_ik^2
+        double ijmk = r2ij + r2jk - r2ik;
+
+        // Angular term
+        double ang = 0.375 * ijmk * imjk * mijk / rijk3;
+
+        // rav3 = (r_ij*r_jk*r_ik)^1.5
+        double rav3 = std::pow(rijk3, 1.5);  // This is r^9
+
+        // Combined angular term
+        double angr9 = (ang + 1.0) / rav3;
+
+        // Charge factor: ff = (1 - 3*q_i) * (1 - 3*q_j) * (1 - 3*q_k)
+        // Note: m_eeq_charges are the Phase 2 energy charges
+        double fi = (1.0 - fqq * m_eeq_charges(batm.i));
+        fi = std::min(std::max(fi, -4.0), 4.0);
+
+        double fj = (1.0 - fqq * m_eeq_charges(batm.j));
+        fj = std::min(std::max(fj, -4.0), 4.0);
+
+        double fk = (1.0 - fqq * m_eeq_charges(batm.k));
+        fk = std::min(std::max(fk, -4.0), 4.0);
+
+        double ff = fi * fj * fk;
+
+        // Strength: c9 = ff * zb3atm_i * zb3atm_j * zb3atm_k
+        double c9 = ff * batm.zb3atm_i * batm.zb3atm_j * batm.zb3atm_k;
+
+        // Energy
+        double energy = c9 * angr9;
+        m_batm_energy += energy;
+
+        // ============================
+        // Analytical Gradient Calculation
+        // ============================
+
+        if (m_calculate_gradient) {
+            // Angular derivatives (from Fortran gfnff_engrad.F90:3308-3322)
+            double dang_ij = -0.375 * (std::pow(r2ij, 3) + std::pow(r2ij, 2) * (r2jk + r2ik)
+                                  + r2ij * (3.0 * std::pow(r2jk, 2) + 2.0 * r2jk * r2ik + 3.0 * std::pow(r2ik, 2))
+                                  - 5.0 * std::pow((r2jk - r2ik), 2) * (r2jk + r2ik))
+                                  / (rij * rijk3 * rav3);
+
+            double dang_jk = -0.375 * (std::pow(r2jk, 3) + std::pow(r2jk, 2) * (r2ik + r2ij)
+                                  + r2jk * (3.0 * std::pow(r2ik, 2) + 2.0 * r2ik * r2ij + 3.0 * std::pow(r2ij, 2))
+                                  - 5.0 * std::pow((r2ik - r2ij), 2) * (r2ik + r2ij))
+                                  / (rjk * rijk3 * rav3);
+
+            double dang_ik = -0.375 * (std::pow(r2ik, 3) + std::pow(r2ik, 2) * (r2jk + r2ij)
+                                  + r2ik * (3.0 * std::pow(r2jk, 2) + 2.0 * r2jk * r2ij + 3.0 * std::pow(r2ij, 2))
+                                  - 5.0 * std::pow((r2jk - r2ij), 2) * (r2jk + r2ij))
+                                  / (rik * rijk3 * rav3);
+
+            // Gradient components
+            Eigen::Vector3d dgij = -dang_ij * c9 * (rij_vec / rij);
+            Eigen::Vector3d dgjk = -dang_jk * c9 * (rjk_vec / rjk);
+            Eigen::Vector3d dgik = -dang_ik * c9 * (rik_vec / rik);
+
+            // Accumulate gradients (from Fortran gfnff_engrad.F90:3324-3332)
+            // Atom j (index 0 in g3tmp): -dg_ij + dg_jk
+            m_gradient.row(batm.j) += dgij + dgjk;
+            // Atom k (index 2 in g3tmp): -dg_ik - dg_jk
+            m_gradient.row(batm.k) += dgik - dgjk;
+            // Atom i (index 1 in g3tmp): dg_ij + dg_ik
+            m_gradient.row(batm.i) += dgij + dgik;
+        }
     }
 }

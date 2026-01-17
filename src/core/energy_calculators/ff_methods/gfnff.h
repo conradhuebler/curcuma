@@ -162,6 +162,22 @@ public:
         // Stored in triangular format using lin(i,j) indexing
         // pbo[lin(i,j)] = π-bond order between atoms i and j
         std::vector<double> pi_bond_orders;
+
+        // PERFORMANCE OPTIMIZATION (Claude Generated - January 17, 2026)
+        // Pre-cached EEQ parameters per atom to avoid repeated lookups in O(N²) loops
+        // Individual vectors instead of struct array (struct defined later in class)
+        // Populated once during topology initialization, indexed by atom index
+        std::vector<double> eeq_chi;  // Electronegativity per atom
+        std::vector<double> eeq_gam;  // Chemical hardness per atom
+        std::vector<double> eeq_alp;  // Damping parameter (squared) per atom
+        std::vector<double> eeq_cnf;  // CN correction factor per atom
+
+        // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
+        // GFN-FF bonded ATM (batm) terms - D3-like 3-body dispersion for 1,4-pairs only
+        // Reference: external/gfnff/src/gfnff_ini.f90:745-779, gfnff_engrad.F90:562-603
+        std::vector<std::vector<int>> bpair;  // N×N topological distance matrix (bonds between atoms)
+        std::vector<std::tuple<int,int,int>> b3list;  // Batm triples (i,j,k) for 1,4-pairs
+        int nbatm = 0;  // Number of batm triples
     };
 
     /**
@@ -1143,6 +1159,13 @@ public:
      * Claude Generated (Jan 2, 2026): D4 dispersion energy accessor
      */
     double D4Energy() const;
+
+    /**
+     * @brief Get batm (bonded ATM) energy component
+     * @return Batm energy or 0 if not calculated
+     * Claude Generated (Jan 17, 2026): Batm energy accessor for 1,4-pairs
+     */
+    double BatmEnergy() const;
 
     // =================================================================================
     // vbond Parameter Access for Verification (Claude Generated November 2025)

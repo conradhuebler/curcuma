@@ -262,6 +262,33 @@ struct ATMTriple {
     double triple_scale = 1.0;  ///< 1.0 (ijk), 0.5 (iij/ijj), 1/6 (iii)
 };
 
+/**
+ * @brief GFN-FF Bonded ATM (batm) three-body term
+ *
+ * Reference: external/gfnff/src/gfnff_ini.f90:745-779, gfnff_engrad.F90:562-603, batmgfnff_eg:3267-3334
+ * Formula: E_batm = sum_{1,4-pairs} c9 * (ang + 1.0) / rav3
+ * where:
+ *   c9 = ff * zb3atm_i * zb3atm_j * zb3atm_k
+ *   ff = (1 - fqq*q_i) * (1 - fqq*q_j) * (1 - fqq*q_k) with fqq=3.0
+ *   ang = 0.375 * (r_ik*r_jk - r_ij^2) * (r_ij*r_ik - r_jk^2) * (r_ij*r_jk - r_ik^2) / r_ijk^3
+ *   rav3 = (r_ij*r_jk*r_ik)^1.5
+ *
+ * CLAUDE GENERATED (January 17, 2026): GFN-FF bonded ATM implementation
+ * Key difference from general ATM: Only for 1,4-pairs (bpair==3)
+ * - batm: O(N_bonds) terms - restricted topology
+ * - D3/D4 ATM: O(N³) terms - general all-atom combinations
+ */
+struct GFNFFBatmTriple {
+    int i = 0;              ///< 1,4-pair first atom index
+    int j = 0;              ///< 1,4-pair second atom index (bpair[i][j] == 3)
+    int k = 0;              ///< Center atom neighbor (either neighbor of i or j)
+
+    // Pre-computed element parameters
+    double zb3atm_i = 0.0;  ///< zb3atm parameter for atom i
+    double zb3atm_j = 0.0;  ///< zb3atm parameter for atom j
+    double zb3atm_k = 0.0;  ///< zb3atm parameter for atom k
+};
+
 class ForceFieldThread : public CxxThread {
 
 public:
@@ -300,6 +327,11 @@ public:
 
     // ATM three-body dispersion (D3/D4)
     void addATMTriple(const ATMTriple& triple);
+
+    // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
+    // GFN-FF bonded ATM (batm) three-body terms for 1,4-pairs
+    void addGFNFFBatmTriple(const GFNFFBatmTriple& batm_triple);
+    void CalculateGFNFFBatmContribution();
 
     // Phase 6: Assign atoms for self-energy calculation (Claude Generated Dec 2025)
     // Thread-safe: Each thread calculates self-energy only for its assigned atoms
@@ -357,6 +389,9 @@ public:
 
     // Claude Generated (December 2025): ATM three-body dispersion energy
     double ATMEnergy() { return m_atm_energy; }
+
+    // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
+    double BatmEnergy() { return m_batm_energy; }
 
     // Phase 2: GFN-FF parameter flag setters (Claude Generated Dec 2025)
     void setDispersionEnabled(bool enabled) { m_dispersion_enabled = enabled; }
@@ -448,6 +483,10 @@ private:
     // ATM three-body dispersion (D3/D4)
     std::vector<ATMTriple> m_atm_triples;  // ATM three-body terms
 
+    // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
+    // GFN-FF bonded ATM (batm) three-body terms for 1,4-pairs
+    std::vector<GFNFFBatmTriple> m_gfnff_batms;  // Batm triples
+
 protected:
     Matrix m_geometry, m_gradient;
     double m_energy = 0, m_bond_energy = 0.0, m_angle_energy = 0.0, m_dihedral_energy = 0.0, m_inversion_energy = 0.0, m_vdw_energy = 0.0, m_rep_energy = 0.0, m_eq_energy = 0.0;
@@ -462,6 +501,9 @@ protected:
     double m_energy_hbond = 0.0;       // Hydrogen bond energy
     double m_energy_xbond = 0.0;       // Halogen bond energy
     double m_atm_energy = 0.0;         // ATM three-body dispersion energy (Claude Generated December 2025)
+
+    // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
+    double m_batm_energy = 0.0;        // Batm three-body dispersion energy
 
     double m_final_factor = 1;
     double m_bond_scaling = 1, m_angle_scaling = 1, m_dihedral_scaling = 1, m_inversion_scaling = 1, m_vdw_scaling = 1, m_rep_scaling = 1;

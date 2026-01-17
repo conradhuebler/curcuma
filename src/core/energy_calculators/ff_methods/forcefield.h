@@ -91,6 +91,8 @@ public:
     inline double ElectrostatEnergy() const { return m_eq_energy; }
     inline double HydrogenBondEnergy() const { return m_energy_hbond; }   // Claude Generated (2025): Phase 5
     inline double HalogenBondEnergy() const { return m_energy_xbond; }    // Claude Generated (2025): Phase 5
+    inline double ATMEnergy() const { return m_atm_energy; }        // Claude Generated (December 2025): ATM energy
+    inline double BatmEnergy() const { return m_batm_energy; }       // Claude Generated (Jan 17, 2026): Batm energy
 
     void setParameter(const json& parameter);
     void setParameterFile(const std::string& file);
@@ -149,6 +151,10 @@ private:
     // ATM three-body dispersion parameter setter (Claude Generated 2025)
     void setATMTriples(const json& triples);
 
+    // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
+    // GFN-FF bonded ATM (batm) parameter setter for 1,4-pairs
+    void setGFNFFBatms(const json& batms);
+
     // Claude Generated: Energy component storage for regression testing (Nov 2025)
     double m_bond_energy = 0.0;
     double m_angle_energy = 0.0;
@@ -163,6 +169,7 @@ private:
     double m_energy_hbond = 0.0;    // Claude Generated (2025): Phase 5 - Hydrogen bond energy
     double m_energy_xbond = 0.0;    // Claude Generated (2025): Phase 5 - Halogen bond energy
     double m_atm_energy = 0.0;      // Claude Generated (December 2025): ATM three-body dispersion energy
+    double m_batm_energy = 0.0;     // Claude Generated (January 17, 2026): Batm three-body dispersion energy
     double m_d3_energy = 0.0;       // Claude Generated (Jan 2, 2026): D3 dispersion energy (for UFF-D3 and GFN-FF)
     double m_d4_energy = 0.0;       // Claude Generated (Jan 2, 2026): D4 dispersion energy (for GFN-FF)
 
@@ -196,6 +203,10 @@ private:
 
     // ATM three-body dispersion storage (D3/D4)
     std::vector<ATMTriple> m_atm_triples;
+
+    // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
+    // GFN-FF bonded ATM (batm) parameters for 1,4-pairs
+    std::vector<GFNFFBatmTriple> m_gfnff_batms;
 
     // EEQ charges for GFN-FF (cached with parameters - Claude Generated Dec 2025)
     Vector m_eeq_charges;
