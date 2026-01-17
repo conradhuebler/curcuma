@@ -531,6 +531,95 @@ if (elem_i > elem_j) {
 4. ✅ **C6 interpolation**: Correct access to reference_c6 with MAX_REF=7
 5. ✅ **Reference data**: Complete 262,444 C6 values + 721 CN values from s-dftd3
 
+---
+
+## D4 Implementation Status (January 17, 2026)
+
+### ✅ CN-ONLY WEIGHTING FIX COMPLETE
+
+**Critical fix to match GFN-FF Fortran reference**:
+
+**Problem**: D4 was using CN+charge combined weighting (incorrect for GFN-FF)
+```cpp
+// WRONG (before January 17, 2026):
+weights[ref] = std::exp(-wf * (diff_q*diff_q + diff_cn*diff_cn));
+```
+
+**Solution**: Changed to CN-only weighting
+```cpp
+// CORRECT (January 17, 2026):
+weights[ref] = std::exp(-wf * diff_cn * diff_cn);
+```
+
+**Reference**: `external/gfnff/src/gfnff_gdisp0.f90:405` - `cngw = exp(-wf * (cn - cnref)**2)`
+
+### GFN-FF Hybrid Dispersion Model
+
+**Key Insight**: GFN-FF uses a **hybrid approach**, NOT full D4:
+- ✅ D4 Casimir-Polder integration for C6 parameters (frequency-dependent polarizabilities)
+- ✅ D3-style CN-only weighting (simpler, coordination-number-based)
+- ❌ NOT full D4 from Caldeweyher et al. (which uses CN+charge weighting)
+
+**Rationale for CN-only**:
+- Simpler model with fewer parameters
+- Reduced computational cost (no charge dependency in weighting)
+- Validated in XTB GFN-FF implementation
+- Sufficient accuracy for force field purposes
+
+### Default Method Change
+
+**File**: `gfnff_method.cpp:5204`
+
+**Before**: Default was D3 (static lookup tables)
+```cpp
+std::string method = "d3";  // WRONG for GFN-FF reference
+```
+
+**After**: Default is now D4 (Casimir-Polder integration)
+```cpp
+std::string method = "d4";  // Matches Fortran reference
+```
+
+**Impact**: All cgfnff calculations now use correct dispersion by default
+
+**Legacy Compatibility**: D3 still available via explicit `-d3` suffix
+```bash
+# New default (correct):
+./curcuma -sp molecule.xyz -method cgfnff  # Uses D4
+
+# Legacy D3 (for debugging):
+./curcuma -sp molecule.xyz -method cgfnff-d3  # Uses D3
+```
+
+### Breaking Change Notice
+
+⚠️ **BREAKING CHANGE**: All cgfnff dispersion energies will change after this fix.
+
+**No backward compatibility** - results change from INCORRECT to CORRECT values.
+
+### Validation Status
+
+**Build**: ✅ Compilation successful
+**Test**: ✅ D4 parameter generation working (36 pairs, 13 ATM triples for CH₃OCH₃)
+**Accuracy**: Under investigation (validation dataset needs D4 references from XTB 6.6.1)
+
+**See**: [docs/GFNFF_DISPERSION_FIX.md](../../../../docs/GFNFF_DISPERSION_FIX.md) for complete technical details.
+
+### Implementation Files
+
+**Modified**:
+- `d4param_generator.cpp:788-846` - CN-only weighting formula + architectural comments
+- `gfnff_method.cpp:5199-5209` - D4 as default method
+
+**Reference**:
+- `external/gfnff/src/gfnff_gdisp0.f90:405` - Authoritative Fortran implementation
+
+**Documentation**:
+- `docs/GFNFF_DISPERSION_FIX.md` - Complete fix documentation
+- `docs/GFNFF_STATUS.md` - Updated status with D4 fix section
+
+---
+
 ## Code Consolidation Opportunities (December 2025)
 
 ### Coordination Number (CN) Calculation

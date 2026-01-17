@@ -787,8 +787,13 @@ double D4ParameterGenerator::computeC6Reference(int elem_i, int elem_j, int ref_
 
 void D4ParameterGenerator::precomputeGaussianWeights()
 {
-    // Claude Generated (Dec 27, 2025): Pre-compute CN+charge Gaussian weights once per atom
-    // Reference: cpp-d4 dftd_model.h weight_cn() function
+    // Claude Generated (Dec 27, 2025): Pre-compute CN-only Gaussian weights once per atom
+    // Reference: external/gfnff/src/gfnff_gdisp0.f90:405 weight_cn() function
+    //
+    // ARCHITECTURAL NOTE:
+    // GFN-FF uses D4 Casimir-Polder integration with D3-style CN-only weighting.
+    // This is NOT full D4 (which uses CN+charge weighting), but a hybrid model.
+    // See Spicher & Grimme, Angew. Chem. Int. Ed. 2020, DOI: 10.1002/anie.202004239
     //
     // Performance optimization: Eliminates redundant exp() calls in getChargeWeightedC6()
     // - Old approach: O(N²×M) exp() calls (compute weights for every atom pair)
@@ -818,6 +823,8 @@ void D4ParameterGenerator::precomputeGaussianWeights()
         }
 
         // Get atom properties
+        // EEQ charges calculated but NOT used in GFN-FF weighting (CN-only model)
+        // Charges remain available for potential future full D4 implementation
         double qi = m_eeq_charges(i);
         double cni = m_cn_values[i];
 
@@ -831,10 +838,10 @@ void D4ParameterGenerator::precomputeGaussianWeights()
                              ref < static_cast<int>(m_refcn[elem_i].size()))
                             ? m_refcn[elem_i][ref] : 0.0;
 
-            // KEY: CN+charge combined Gaussian weighting (COMPUTED ONCE PER ATOM)
-            double diff_q = qi - qi_ref;
+            // KEY: CN-only Gaussian weighting (matches GFN-FF hybrid model)
+            // Reference: external/gfnff/src/gfnff_gdisp0.f90:405 - cngw = exp(-wf * (cn - cnref)**2)
             double diff_cn = cni - cni_ref;
-            weights[ref] = std::exp(-wf * (diff_q * diff_q + diff_cn * diff_cn));
+            weights[ref] = std::exp(-wf * diff_cn * diff_cn);
             sum_weights += weights[ref];
         }
 

@@ -5197,15 +5197,15 @@ json GFNFF::generateGFNFFDispersionPairs() const
     }
 
     // Step 2: Determine dispersion method from method name
-    // Phase 2.1 (December 2025): Method-based D3/D4 selection
-    // - "cgfnff" or "gfnff" → D3 (default, matches original GFN-FF D3(BJ) implementation)
-    // - "cgfnff-d4" or "gfnff-d4" → D4 (explicit request for D4)
+    // Phase 2.1 (January 2026): D4 as default with CN-only weighting
+    // - "cgfnff" or "gfnff" → D4 (Casimir-Polder integration, matches Fortran reference)
+    // - "cgfnff-d3" or "gfnff-d3" → D3 (static lookup tables, legacy compatibility)
     std::string method_name = m_parameters.value("method", "gfnff");
-    std::string method = "d3";  // Default to D3 to match original GFN-FF implementation
+    std::string method = "d4";  // Default to D4 (matches GFN-FF reference with Casimir-Polder integration)
 
-    // Check if method name explicitly requests D4
-    if (method_name.find("-d4") != std::string::npos) {
-        method = "d4";
+    // Check if method name explicitly requests D3
+    if (method_name.find("-d3") != std::string::npos) {
+        method = "d3";
     }
 
     if (CurcumaLogger::get_verbosity() >= 2) {

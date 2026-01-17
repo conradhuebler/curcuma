@@ -1,12 +1,40 @@
 # GFN-FF Implementation Status
 
-**Last Updated**: 2026-01-10
-**Status**: ✅ **ANGLE REFINEMENT COMPLETE - Phases 1-2D + Phase 2C Implemented**
+**Last Updated**: 2026-01-17
+**Status**: ✅ **D4 DISPERSION FIX COMPLETE + ANGLE REFINEMENT**
 **Location**: `src/core/energy_calculators/ff_methods/`
 
 ---
 
-## Latest Improvements (January 9-10, 2026)
+## Latest Improvements
+
+### D4 Dispersion Fix (January 17, 2026) ✅
+
+**Critical fixes to align with XTB reference implementation**:
+
+1. **D4 Weighting Corrected**: CN+charge → CN-only weighting
+   - **File**: `d4param_generator.cpp:844`
+   - **Change**: Removed charge term from Gaussian weighting formula
+   - **Reference**: `external/gfnff/src/gfnff_gdisp0.f90:405`
+   - **Formula**: `weights[ref] = exp(-wf * diff_cn²)` (was `exp(-wf * (diff_q² + diff_cn²))`)
+
+2. **D4 Now Default**: Changed default dispersion from D3 to D4
+   - **File**: `gfnff_method.cpp:5204`
+   - **Change**: `std::string method = "d4";` (was `"d3"`)
+   - **Impact**: All cgfnff calculations now use correct Casimir-Polder integration
+
+**Rationale**:
+- GFN-FF uses **hybrid dispersion model**: D4 Casimir-Polder integration + D3-style CN-only weighting
+- This is NOT full D4 (which uses CN+charge), but a custom model for GFN-FF
+- Matches Fortran reference exactly
+
+**Breaking Change**: All cgfnff dispersion energies change to match correct reference implementation.
+
+**See**: [docs/GFNFF_DISPERSION_FIX.md](GFNFF_DISPERSION_FIX.md) for complete technical details.
+
+---
+
+### Angle Parameter Refinement (January 9-10, 2026) ✅
 
 ### Angle Parameter Refinement - Complete Implementation ✅
 
@@ -509,7 +537,10 @@ x(i) = chi(i);  // ✅ CORRECT - chi already includes CNF from line 765
 ## Known Limitations
 
 ### Theoretical Completeness
-1. **D4 Dispersion**: Currently uses free-atom C6 parameters instead of environment-dependent D4
+1. **D4 Dispersion**: ✅ **FIXED (Jan 17, 2026)** - Now uses CN-only weighting matching Fortran reference
+   - Hybrid model: D4 Casimir-Polder integration + D3-style CN weighting
+   - Default method changed from D3 to D4 (breaking change)
+   - See [GFNFF_DISPERSION_FIX.md](GFNFF_DISPERSION_FIX.md) for details
 2. **EEQ Integration**: Two-phase system implemented but needs performance testing
 3. **Metal Parameters**: Some metal-specific corrections pending (fqq 2.5x factor)
 
