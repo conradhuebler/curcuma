@@ -22,6 +22,7 @@
 #include "src/core/curcuma_logger.h"
 #include "src/core/global.h"
 #include "uff_par.h"
+#include "cn_calculator.h"  // Claude Generated (Jan 18, 2026): D3 CN calculation for dynamic r0
 
 #include "cg_potentials.h"
 #include "forcefieldfunctions.h"
@@ -114,6 +115,19 @@ void ForceField::distributeEEQCharges(const Vector& charges)
     }
 }
 
+// Claude Generated (Jan 18, 2026): Distribute D3 coordination numbers to all threads
+// Reference: Fortran gfnff_engrad.F90:432 - CN recalculated at each energy evaluation
+void ForceField::distributeD3CN(const Vector& d3_cn)
+{
+    // Store CN for caching
+    m_d3_cn = d3_cn;
+
+    // Distribute to all threads for dynamic r0 calculation
+    for (int i = 0; i < m_stored_threads.size(); ++i) {
+        m_stored_threads[i]->setD3CN(d3_cn);
+    }
+}
+
 void ForceField::setParameter(const json& parameters)
 {
     std::string method_name = "unknown";
@@ -168,8 +182,8 @@ void ForceField::setParameter(const json& parameters)
         CurcumaLogger::param("method", method_name);
     }
 
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("Force field setup: parameters validated");
+    for (auto it = parameters.begin(); it != parameters.end(); ++it) {
+        CurcumaLogger::error(fmt::format("DEBUG setParameter: Key '{}'", it.key()));
     }
 
     if (!loaded_from_cache) {
@@ -491,6 +505,17 @@ void ForceField::setBonds(const json& bonds)
         b.fc = bond["fc"];
         b.rabshift = bond.value("rabshift", 0.0);  // Claude Generated (Dec 2025): Load vbond(1) with default 0.0
         b.fqq = bond.value("fqq", 1.0);  // Claude Generated (Jan 7, 2026): Load charge-dependent factor with default 1.0
+
+        // Claude Generated (Jan 18, 2026): Dynamic r0 calculation parameters
+        // These are used for GFN-FF to recalculate r0 from current CN at each Calculate()
+        b.z_i = bond.value("z_i", 0);
+        b.z_j = bond.value("z_j", 0);
+        b.r0_base_i = bond.value("r0_base_i", 0.0);
+        b.r0_base_j = bond.value("r0_base_j", 0.0);
+        b.cnfak_i = bond.value("cnfak_i", 0.0);
+        b.cnfak_j = bond.value("cnfak_j", 0.0);
+        b.ff = bond.value("ff", 1.0);
+
         m_bonds.push_back(b);
     }
 }
@@ -778,6 +803,7 @@ void ForceField::setGFNFFHydrogenBonds(const json& hbonds)
     }
 
     m_gfnff_hbonds.clear();
+    CurcumaLogger::error(fmt::format("DEBUG setGFNFFHydrogenBonds: count={}", hbonds.size()));
     for (const auto& hb : hbonds) {
         GFNFFHydrogenBond bond;
 
@@ -788,6 +814,7 @@ void ForceField::setGFNFFHydrogenBonds(const json& hbonds)
         bond.basicity_A = hb["basicity_A"];
         bond.basicity_B = hb["basicity_B"];
         bond.acidity_A = hb["acidity_A"];
+        bond.acidity_B = hb["acidity_B"];
 
         bond.q_H = hb["q_H"];
         bond.q_A = hb["q_A"];
@@ -795,8 +822,14 @@ void ForceField::setGFNFFHydrogenBonds(const json& hbonds)
 
         bond.case_type = hb.value("case", 1);
 
-        if (bond.case_type == 2 && hb.contains("neighbors_B")) {
+        if (hb.contains("neighbors_A")) {
+            bond.neighbors_A = hb["neighbors_A"].get<std::vector<int>>();
+        }
+        if (hb.contains("neighbors_B")) {
             bond.neighbors_B = hb["neighbors_B"].get<std::vector<int>>();
+        }
+        if (hb.contains("acceptor_parent")) {
+            bond.acceptor_parent_index = hb["acceptor_parent"];
         }
 
         m_gfnff_hbonds.push_back(bond);
@@ -1168,9 +1201,9 @@ void ForceField::AutoRanges()
                         hb_count++;
                     }
                 }
-                CurcumaLogger::param(fmt::format("thread_{}_hbonds", i), hb_count);
-            }
+            CurcumaLogger::error(fmt::format("thread_{}_hbonds: count={}", i, hb_count));
         }
+    }
 
         // GFN-FF Halogen Bond (XB) Distribution - Claude Generated (January 17, 2026)
         // Distribute XB three-body terms (A-X...B) to threads for parallel calculation
@@ -1365,6 +1398,16 @@ json ForceField::exportCurrentParameters() const
         b["r0_ik"] = bond.r0_ik;
         b["rabshift"] = bond.rabshift;  // Claude Generated (Dec 2025): Store vbond(1) for validation
         b["fqq"] = bond.fqq;  // Claude Generated (Jan 7, 2026): Store charge-dependent factor for validation
+
+        // Claude Generated (Jan 18, 2026): Dynamic r0 calculation parameters for GFN-FF
+        b["z_i"] = bond.z_i;
+        b["z_j"] = bond.z_j;
+        b["r0_base_i"] = bond.r0_base_i;
+        b["r0_base_j"] = bond.r0_base_j;
+        b["cnfak_i"] = bond.cnfak_i;
+        b["cnfak_j"] = bond.cnfak_j;
+        b["ff"] = bond.ff;
+
         bonds.push_back(b);
     }
     output["bonds"] = bonds;
@@ -1780,6 +1823,22 @@ double ForceField::Calculate(bool gradient)
         m_stored_threads[i]->UpdateGeometry(m_geometry, gradient);
     }
 
+    // Claude Generated (Jan 18, 2026): Recalculate GFN-FF CN for dynamic r0
+    // Reference: Fortran gfnff_engrad.F90:432 - CN recalculated at each energy evaluation
+    // This is CRITICAL for accurate bond energies - r0 depends on current CN
+    if (m_method == "cgfnff" || m_method == "gfnff") {
+        // Calculate GFN-FF CN from current geometry (Bohr)
+        // Note: GFN-FF uses specific coordination numbers for radii recalculation
+        std::vector<double> gfn_cn = CNCalculator::calculateGFNFFCN(m_atom_types, m_geometry);
+
+        // Convert to Eigen vector and distribute to threads
+        Vector cn_vector(gfn_cn.size());
+        for (size_t i = 0; i < gfn_cn.size(); ++i) {
+            cn_vector(i) = gfn_cn[i];
+        }
+        distributeD3CN(cn_vector); // We use the same distribution mechanism
+    }
+
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("DEBUG: All thread pointers are valid");
         CurcumaLogger::info(fmt::format("DEBUG Calculate: Using {} threads", m_stored_threads.size()));
@@ -1986,7 +2045,7 @@ void ForceField::printParameterSummary() const
     try {
         // Count different parameter types - parameters are stored as arrays
         int bonds = 0, angles = 0, dihedrals = 0, inversions = 0, vdws = 0, esps = 0;
-        int gfnff_dispersions = 0, gfnff_bonded_repulsions = 0, gfnff_nonbonded_repulsions = 0, gfnff_coulombs = 0;
+        int gfnff_dispersions = 0, gfnff_bonded_repulsions = 0, gfnff_nonbonded_repulsions = 0, gfnff_coulombs = 0, gfnff_hbonds = 0, gfnff_xbonds = 0;
 
         if (m_parameters.contains("bonds") && m_parameters["bonds"].is_array()) {
             bonds = m_parameters["bonds"].size();
@@ -2020,6 +2079,12 @@ void ForceField::printParameterSummary() const
         if (m_parameters.contains("gfnff_coulombs") && m_parameters["gfnff_coulombs"].is_array()) {
             gfnff_coulombs = m_parameters["gfnff_coulombs"].size();
         }
+        if (m_parameters.contains("gfnff_hbonds") && m_parameters["gfnff_hbonds"].is_array()) {
+            gfnff_hbonds = m_parameters["gfnff_hbonds"].size();
+        }
+        if (m_parameters.contains("gfnff_xbonds") && m_parameters["gfnff_xbonds"].is_array()) {
+            gfnff_xbonds = m_parameters["gfnff_xbonds"].size();
+        }
 
         if (CurcumaLogger::get_verbosity() >= 2) {
             // Basic force field topology
@@ -2032,12 +2097,14 @@ void ForceField::printParameterSummary() const
             if (esps > 0) CurcumaLogger::param(fmt::format("electrostatic_count", esps), fmt::format("{} electrostatic pairs", esps));
 
             // Print GFN-FF specific parameters if present
-            if (gfnff_dispersions > 0 || gfnff_bonded_repulsions > 0 || gfnff_nonbonded_repulsions > 0 || gfnff_coulombs > 0) {
+            if (gfnff_dispersions > 0 || gfnff_bonded_repulsions > 0 || gfnff_nonbonded_repulsions > 0 || gfnff_coulombs > 0 || gfnff_hbonds > 0 || gfnff_xbonds > 0) {
                 CurcumaLogger::info("GFN-FF pairwise interactions:");
                 if (gfnff_dispersions > 0) CurcumaLogger::param("dispersion_pairs", fmt::format("{}", gfnff_dispersions));
                 if (gfnff_bonded_repulsions > 0) CurcumaLogger::param("bonded_repulsion_pairs", fmt::format("{}", gfnff_bonded_repulsions));
                 if (gfnff_nonbonded_repulsions > 0) CurcumaLogger::param("nonbonded_repulsion_pairs", fmt::format("{}", gfnff_nonbonded_repulsions));
                 if (gfnff_coulombs > 0) CurcumaLogger::param("coulomb_pairs", fmt::format("{}", gfnff_coulombs));
+                if (gfnff_hbonds > 0) CurcumaLogger::param("hydrogen_bonds", fmt::format("{}", gfnff_hbonds));
+                if (gfnff_xbonds > 0) CurcumaLogger::param("halogen_bonds", fmt::format("{}", gfnff_xbonds));
             }
 
             // Print scaling factors

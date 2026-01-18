@@ -653,11 +653,63 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     }
 
     // ---------------------------------------------------------------------------
-    // (D) Pi system contribution: f2 (simplified - no real pi detection yet)
+    // (D) Pi system contribution: f2 (IMPLEMENTED Jan 18, 2026)
     // ---------------------------------------------------------------------------
-    double f2 = 0.0;  // Default for single bonds
-    // TODO Phase 3: Implement pi bond order detection (gfnff_ini.f90:1881-1888)
-    // For now: f2 = 0 (conservative, slightly underestimates conjugated systems)
+    // Reference: gfnff_ini.f90:1900-1907
+    //   if (pibo(m) .gt. 0) then
+    //     f2 = pibo(m)*exp(-2.5d0*(1.24d0-pibo(m))**14)  ! decrease to very small values for P < 0.3
+    //     if (piadr(kk) .eq. 0.and.at(kk) .gt. 10) f2 = f2*1.3  ! heavy non-pi outer atoms
+    //     if (piadr(ll) .eq. 0.and.at(ll) .gt. 10) f2 = f2*1.3
+    //     f1 = f1*0.55  ! CRITICAL: scale f1 down when pi-bond present!
+    //   end if
+    //
+    // Physical meaning:
+    // - pibo = pi bond order from Hückel calculation (0-1, benzene ~0.67)
+    // - For aromatic/conjugated systems, the pi contribution (f2) adds significantly to the barrier
+    // - The exponential cutoff ensures low-pibo bonds (< 0.3) don't contribute
+    // - Heavy outer atoms increase the pi effect (1.3× scaling each)
+    // - When pi-system exists, f1 is scaled by 0.55 to balance the large f2 contribution
+
+    double f2 = 0.0;  // Default for single bonds (no pi character)
+
+    // Get pi bond order from cached topology
+    if (j_atom_idx >= 0 && k_atom_idx >= 0 && j_atom_idx < m_atomcount && k_atom_idx < m_atomcount) {
+        const TopologyInfo& topo = getCachedTopology();
+
+        if (!topo.pi_bond_orders.empty()) {
+            int pibo_idx = lin(j_atom_idx, k_atom_idx);
+
+            if (pibo_idx >= 0 && pibo_idx < static_cast<int>(topo.pi_bond_orders.size())) {
+                double pibo = topo.pi_bond_orders[pibo_idx];
+
+                if (pibo > 0.0) {
+                    // Calculate f2 using exponential cutoff formula
+                    // This decreases to very small values for pibo < 0.3
+                    double diff = 1.24 - pibo;
+                    double exp_term = std::exp(-2.5 * std::pow(diff, 14));
+                    f2 = pibo * exp_term;
+
+                    // Heavy atom correction: if outer atoms are NOT in pi system but are heavy (Z > 10),
+                    // the pi bond order becomes more significant → scale f2 by 1.3 for each
+                    // Note: We don't have piadr for outer atoms i,l in this function signature,
+                    // so we use z_i, z_l directly (simplified version)
+                    // Reference: gfnff_ini.f90:1904-1905 uses piadr(kk)==0 && at(kk)>10
+                    // Here kk,ll in Fortran are outer atoms i,l in our notation
+                    if (z_i > 10) f2 *= 1.3;  // Heavy outer atom i
+                    if (z_l > 10) f2 *= 1.3;  // Heavy outer atom l
+
+                    // CRITICAL: Scale f1 when pi-system is present! (gfnff_ini.f90:1906)
+                    // This balances the large f2 contribution
+                    f1 *= 0.55;
+
+                    if (CurcumaLogger::get_verbosity() >= 3) {
+                        CurcumaLogger::info(fmt::format("  Pi-bond correction: pibo={:.4f}, f2={:.6f}, f1 scaled to {:.4f}",
+                                                         pibo, f2, f1));
+                    }
+                }
+            }
+        }
+    }
 
     // ---------------------------------------------------------------------------
     // (E) Hydrogen count refinement (FIXED Jan 8, 2026 - from reference: gfnff_ini.f90:1778-1786)

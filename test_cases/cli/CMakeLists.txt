@@ -61,10 +61,11 @@ add_cli_test(curcumaopt 05_alias_singlepoint)
 add_cli_test(curcumaopt 06_opth_only)
 
 # =============================================================================
-# GFN-FF Tests (1 scenario)
+# GFN-FF Tests (2 scenarios)
 # =============================================================================
 
 add_cli_test(gfnff 01_complex_gfnff_singlepoint)
+add_cli_test(gfnff 02_caffeine_gfnff_energy_components)
 
 # =============================================================================
 # RMSD Tests (6 scenarios)
@@ -107,6 +108,6 @@ add_cli_test(simplemd 07_restart_simulation)
 
 add_cli_test(cg 01_single_point)
 
-message(STATUS "Added 28 CLI test scenarios with build directory isolation")
+message(STATUS "Added 29 CLI test scenarios with build directory isolation")
 message(STATUS "  - Tests execute from: ${CMAKE_CURRENT_BINARY_DIR}/category/test_name")
 message(STATUS "  - Source tree remains clean (all outputs in build directory)")

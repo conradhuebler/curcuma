@@ -12,27 +12,27 @@
 #include <algorithm>
 
 // Covalent radii from simple-dftd3 (Angstrom)
-// Updated for elements H through Ar (18 elements)
-// Data source: s-dftd3 atomic radii output
+// Reference: standard covalent radii, UNSCALED (common D3 implementations)
+// Note: previous versions used 4/3 scaled values here which caused redundant scaling
 const std::vector<double> CNCalculator::COVALENT_RADII = {
-    0.4267,  // 1 H
-    0.6133,  // 2 He
-    1.6000,  // 3 Li
-    1.2533,  // 4 Be
-    1.0267,  // 5 B
-    1.0000,  // 6 C
-    0.9467,  // 7 N
-    0.8400,  // 8 O
-    0.8533,  // 9 F
-    0.8933,  // 10 Ne
-    1.8667,  // 11 Na
-    1.6667,  // 12 Mg
-    1.5067,  // 13 Al
-    1.3867,  // 14 Si
-    1.4667,  // 15 P
-    1.3600,  // 16 S
-    1.3200,  // 17 Cl
-    1.2800   // 18 Ar
+    0.32,  // 1 H
+    0.46,  // 2 He
+    1.20,  // 3 Li
+    0.94,  // 4 Be
+    0.77,  // 5 B
+    0.75,  // 6 C
+    0.71,  // 7 N
+    0.63,  // 8 O
+    0.64,  // 9 F
+    0.67,  // 10 Ne
+    1.40,  // 11 Na
+    1.25,  // 12 Mg
+    1.13,  // 13 Al
+    1.04,  // 14 Si
+    1.10,  // 15 P
+    1.02,  // 16 S
+    0.99,  // 17 Cl
+    0.96   // 18 Ar
 };
 
 std::vector<double> CNCalculator::calculateD3CN(
@@ -127,6 +127,10 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
         double rcov_i_bohr = rcov_i_ang * ANG2BOHR;
         double cn_raw = 0.0;
 
+        // GFN-FF CN scaling factor (Reference: gfnff_param.f90:381-404)
+        // Usually 4/3 * standard covalent radius
+        const double k_scaled = 4.0 / 3.0;
+
         for (size_t j = 0; j < atoms.size(); ++j) {
             if (i == j) continue;
 
@@ -137,7 +141,7 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
 
             double rcov_j_ang = COVALENT_RADII[elem_j];
             double rcov_j_bohr = rcov_j_ang * ANG2BOHR;
-            double rcov_ij = rcov_i_bohr + rcov_j_bohr;
+            double rcov_ij = k_scaled * (rcov_i_bohr + rcov_j_bohr);
 
             // Calculate distance in Bohr (geometry is in Bohr)
             Eigen::Vector3d pos_i = geometry_bohr.row(i);

@@ -480,6 +480,16 @@ private:
         double alpha;                 // α exponential decay parameter (was: anharmonic_factor)
         double rabshift;              // Claude Generated (Dec 2025): vbond(1) = gen%rabshift + shift
         double fqq;                   // Claude Generated (Jan 7, 2026): charge-dependent force constant factor
+
+        // Claude Generated (Jan 18, 2026): Dynamic r0 calculation parameters
+        // Reference: Fortran gfnff_rab.f90:147-153 - r0 recalculated at each Calculate()
+        // Formula: r0 = (r0_base_i + cnfak_i*cn_i + r0_base_j + cnfak_j*cn_j + rabshift) * ff
+        int z_i = 0, z_j = 0;           // Atomic numbers for parameter lookup
+        double r0_base_i = 0.0;          // r0_gfnff[z_i-1] (Bohr)
+        double r0_base_j = 0.0;          // r0_gfnff[z_j-1] (Bohr)
+        double cnfak_i = 0.0;            // cnfak_gfnff[z_i-1]
+        double cnfak_j = 0.0;            // cnfak_gfnff[z_j-1]
+        double ff = 1.0;                 // EN-correction: 1 - k1*|ΔEN| - k2*ΔEN²
     };
 
     struct GFNFFAngleParams {

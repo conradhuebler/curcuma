@@ -52,6 +52,16 @@ struct Bond {
     double fc = 0, exponent = 0, r0_ij = 0, r0_ik = 0;
     double rabshift = 0.0;  // Claude Generated (Dec 2025): GFN-FF rabshift (vbond(1)) for validation
     double fqq = 1.0;       // Claude Generated (Jan 7, 2026): GFN-FF charge-dependent force constant factor
+
+    // Claude Generated (Jan 18, 2026): Dynamic r0 calculation parameters
+    // Reference: Fortran gfnff_rab.f90:147-153 - r0 recalculated at each Calculate()
+    // Formula: r0 = (r0_base_i + cnfak_i*cn_i + r0_base_j + cnfak_j*cn_j + rabshift) * ff
+    int z_i = 0, z_j = 0;           // Atomic numbers for parameter lookup
+    double r0_base_i = 0.0;          // r0_gfnff[z_i-1] (Bohr)
+    double r0_base_j = 0.0;          // r0_gfnff[z_j-1] (Bohr)
+    double cnfak_i = 0.0;            // cnfak_gfnff[z_i-1]
+    double cnfak_j = 0.0;            // cnfak_gfnff[z_j-1]
+    double ff = 1.0;                 // EN-correction: 1 - k1*|ΔEN| - k2*ΔEN²
 };
 
 struct Angle {
@@ -185,6 +195,7 @@ struct GFNFFHydrogenBond {
     double basicity_A = 0.0;    ///< HB basicity of atom A (xhbas[A])
     double basicity_B = 0.0;    ///< HB basicity of atom B (xhbas[B])
     double acidity_A = 0.0;     ///< HB acidity of atom A (xhaci[A])
+    double acidity_B = 0.0;     ///< HB acidity of atom B (xhaci[B])
 
     // Pre-computed charge factors (calculated once from EEQ charges)
     double q_H = 0.0;           ///< EEQ charge on H
@@ -194,9 +205,11 @@ struct GFNFFHydrogenBond {
     // Geometry thresholds
     double r_cut = 50.0;        ///< Distance cutoff (Bohr)
 
-    // Case 2 specific (neighbor orientation)
-    int case_type = 1;          ///< 1 = simple, 2 = with orientation
-    std::vector<int> neighbors_B;  ///< Neighbor indices of B (for Case 2)
+    // Case 2/3 specific (neighbor orientation)
+    int case_type = 1;          ///< 1 = simple, 2 = case 2 (oriented), 3 = case 3 (carbonyl/nitro)
+    std::vector<int> neighbors_A;  ///< Neighbor indices of donor A (for Case 2/3)
+    std::vector<int> neighbors_B;  ///< Neighbor indices of acceptor B (for Case 2/3)
+    int acceptor_parent_index = -1; ///< Parent of acceptor (e.g., C in C=O) for Case 3
 };
 
 /**
@@ -347,6 +360,13 @@ public:
     void setEEQCharges(const Vector& charges)
     {
         m_eeq_charges = charges;
+    }
+
+    // Claude Generated (Jan 18, 2026): Set D3 coordination numbers for dynamic r0 calculation
+    // Reference: Fortran gfnff_engrad.F90:432 - CN recalculated at each energy evaluation
+    void setD3CN(const Vector& d3_cn)
+    {
+        m_d3_cn = d3_cn;
     }
 
     inline void UpdateGeometry(const Matrix& geometry, bool gradient)
@@ -518,6 +538,10 @@ protected:
 
     // Phase 5A: EEQ charges for fqq angle correction (Claude Generated Nov 2025)
     Vector m_eeq_charges;
+
+    // Claude Generated (Jan 18, 2026): D3 coordination numbers for dynamic r0 calculation
+    // These are recalculated from current geometry at each Calculate() call
+    Vector m_d3_cn;
 
     // Phase 1.2: Cached bonded pairs for fast lookup in repulsion calculation (Claude Generated - Dec 2025)
     // Built once in execute() to avoid O(N_bonds × log(N_bonds)) overhead per energy call

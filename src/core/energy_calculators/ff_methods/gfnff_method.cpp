@@ -456,7 +456,7 @@ bool GFNFF::initializeForceField()
 
     // Phase 3 LITE: Enable parameter caching for 96% speedup on repeated calculations
     // Caches parameters to molecule.cgfnff.json file for instant loading on next run
-    m_forcefield->setParameterCaching(true);
+    m_forcefield->setParameterCaching(false);
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success("ForceField instance created");
@@ -652,7 +652,8 @@ json GFNFF::generateGFNFFParameters()
             // Calculate zb3atm parameters
             // Reference: external/gfnff/src/gfnff_param.f90:528-535
             // zb3atm(z) = -z * batmscal^(1/3)  (except Z=1 uses 0.25 instead of 1.0)
-            const double batmscal = 0.05;  // bfscal/3.0 from Fortran (batmscal ≈ 0.05)
+            // Reference: external/gfnff/src/gfnff_param.f90:799
+            const double batmscal = 0.30;  // bonded ATM scal (Fortran: 0.30)
             const double batmscal_cuberoot = std::pow(batmscal, 1.0/3.0);
 
             std::vector<double> zb3atm(87, 0.0);  // Z=1..86
@@ -904,6 +905,20 @@ json GFNFF::generateGFNFFBonds() const
                 bond["exponent"] = bond_params.alpha;  // Phase 1.3: store α in exponent field
                 bond["rabshift"] = bond_params.rabshift;  // Claude Generated (Dec 2025): Store vbond(1) for validation
                 bond["fqq"] = bond_params.fqq;  // Claude Generated (Jan 7, 2026): Store charge-dependent factor
+
+                // Claude Generated (Jan 18, 2026): Dynamic r0 calculation parameters
+                bond["z_i"] = bond_params.z_i;
+                bond["z_j"] = bond_params.z_j;
+                bond["r0_base_i"] = bond_params.r0_base_i;
+                bond["r0_base_j"] = bond_params.r0_base_j;
+                bond["cnfak_i"] = bond_params.cnfak_i;
+                bond["cnfak_j"] = bond_params.cnfak_j;
+                bond["ff"] = bond_params.ff;
+
+                if (CurcumaLogger::get_verbosity() >= 3 && bonds.size() < 5) {
+                    CurcumaLogger::info(fmt::format("  Bond {}-{}: fc={:.6f}, r0={:.6f}, alpha={:.6f}",
+                                          i, j, bond_params.force_constant, bond_params.equilibrium_distance, bond_params.alpha));
+                }
 
                 bonds.push_back(bond);
             }
@@ -1361,10 +1376,9 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     //   Result is in ANGSTROM after * 0.529167
     // But we need to store in Bohr for GFN-FF internal use
     //
-    // Formula: r0_bohr = (ra + rb) * ff + rabshift
-    // NOT: r0_bohr = (ra + rb + rabshift) * ff  (old, incorrect)
-    double rtmp = (ra + rb) * ff;  // Calculate BEFORE applying shift
-    double r0_bohr = rtmp + rabshift;  // Add shift AFTER ff multiplication
+    // Formula: r0_bohr = (ra + rb + rabshift) * ff
+    // Reference: Fortran gfnff_rab.f90:153
+    double r0_bohr = (ra + rb + rabshift) * ff;
     params.equilibrium_distance = r0_bohr;  // Store in Bohr
     params.rabshift = rabshift;  // Claude Generated (Dec 2025): Store for validation tests
 
@@ -1379,8 +1393,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         CurcumaLogger::info(fmt::format("  FF factor: k1={:.6f}, k2={:.6f}, ff={:.6f}", k1, k2, ff));
         CurcumaLogger::info(fmt::format("  Shift: gen_rabshift={:.6f}, shift={:.6f}, total={:.6f}", gen_rabshift, shift, rabshift));
         CurcumaLogger::info(fmt::format("  Hyb: hyb1={}, hyb2={}", hyb1_value, hyb2_value));
-        CurcumaLogger::info(fmt::format("  Formula: rtmp = ({:.6f} + {:.6f}) * {:.6f} = {:.6f}", ra, rb, ff, rtmp));
-        CurcumaLogger::info(fmt::format("           r0 = rtmp + rabshift = {:.6f} + {:.6f} = {:.6f} Bohr", rtmp, rabshift, r0_bohr));
+        CurcumaLogger::info(fmt::format("  Formula: r0 = ({:.6f} + {:.6f} + {:.6f}) * {:.6f} = {:.6f} Bohr", ra, rb, rabshift, ff, r0_bohr));
         CurcumaLogger::info(fmt::format("  Result: r0_bohr={:.6f}, r0_angstrom={:.6f}", r0_bohr, r0_bohr * 0.529177));
     }
 
@@ -1444,26 +1457,16 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     int hyb1 = topo.hybridization[atom1];
     int hyb2 = topo.hybridization[atom2];
 
-    // Map Curcuma hybridization (1,2,3) to Fortran hybridization (2,1,3) then to array indices (2,1,3)
-    // Curcuma: 1=sp, 2=sp2, 3=sp3 → Fortran: 2=sp, 1=sp2, 3=sp3 → Array indices: 2=sp, 1=sp2, 3=sp3
-    // Note: Fortran hybridization indexing is different from Curcuma!
-    // In Fortran: 1=sp2, 2=sp, 3=sp3
-    int hyb1_fortran = 0; // Default to sp3 (index 3 in matrix, but we'll use 3 directly)
-    int hyb2_fortran = 0; // Default to sp3 (index 3 in matrix, but we'll use 3 directly)
-
-    if (hyb1 == 1) hyb1_fortran = 2;      // Curcuma sp → Fortran sp (2)
-    else if (hyb1 == 2) hyb1_fortran = 1; // Curcuma sp2 → Fortran sp2 (1)
-    else if (hyb1 == 3) hyb1_fortran = 3; // Curcuma sp3 → Fortran sp3 (3)
-    else hyb1_fortran = 3;                // Default to sp3
-
-    if (hyb2 == 1) hyb2_fortran = 2;      // Curcuma sp → Fortran sp (2)
-    else if (hyb2 == 2) hyb2_fortran = 1; // Curcuma sp2 → Fortran sp2 (1)
-    else if (hyb2 == 3) hyb2_fortran = 3; // Curcuma sp3 → Fortran sp3 (3)
-    else hyb2_fortran = 3;                // Default to sp3
+    // Map Curcuma hybridization (1,2,3) to bsmat indices (1,2,3)
+    // Curcuma: 1=sp, 2=sp2, 3=sp3
+    // bsmat: Index 1=sp (1.98), Index 2=sp2 (1.24), Index 3=sp3 (1.00)
+    // Reference: gfnff_par.h lines 300-304
+    int matrix_i = (hyb1 < 1 || hyb1 > 3) ? 3 : hyb1;
+    int matrix_j = (hyb2 < 1 || hyb2 > 3) ? 3 : hyb2;
 
     // Get hybridization indices for lookup (needed for both H and non-H bonds)
-    int hybi = std::max(hyb1_fortran, hyb2_fortran);  // Max hyb index
-    int hybj = std::min(hyb1_fortran, hyb2_fortran);  // Min hyb index
+    int hybi = std::max(matrix_i, matrix_j);
+    int hybj = std::min(matrix_i, matrix_j);
 
     // CRITICAL FIX (Phase 11): Special handling for hydrogen bonds!
     // Fortran gfnff_param.f90 has bsmat(1,1)=1.98 for sp-sp (triple bond)
@@ -1473,8 +1476,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     double bstrength;
 
     // Special case for H-H bonds (both atoms Z=1)
-    // For H-H, this would incorrectly use triple bond strength (bsmat[0][0] = 1.000)
-    // which actually happens to be correct for single bonds, but let's be explicit
+    // For H-H, this would incorrectly use triple bond strength (bsmat[1][1] = 1.98)
     if (z1 == 1 && z2 == 1) {
         bstrength = bstren[1];  // 1.00 (single bond)
     } else {
@@ -1484,22 +1486,15 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
             bstrength = bstren[4];  // 1.22
         } else {
             // Get bond strength from hybridization matrix (Fortran gfnff_ini.f90:1127-1133)
-            // Note: hybi and hybj are already Fortran hybridization values (1=sp2, 2=sp, 3=sp3)
-            // bsmat is indexed as bsmat[hybi][hybj] where indices are 0-3
-            // 0=unknown/sp3, 1=sp2, 2=sp, 3=sp3
-
-            // Ensure valid indices (fallback to sp3 if invalid)
-            int matrix_i = (hybi < 0 || hybi > 3) ? 3 : hybi;
-            int matrix_j = (hybj < 0 || hybj > 3) ? 3 : hybj;
-
-            bstrength = bsmat[matrix_i][matrix_j];
+            bstrength = bsmat[hybi][hybj];
         }
     }
 
     // Phase 3: Special cases (Fortran gfnff_ini.f90:1134-1142)
-    // N-sp2 correction: if one atom is sp3 (hyb=3) and other is sp2 (hyb=1) and it's nitrogen
-    if ((hybi == 3 && hybj == 1 && z1 == 7) || (hybi == 3 && hybj == 1 && z2 == 7)) {
-        bstrength = bstren[2] * 1.04;  // N-sp2: 1.24 * 1.04 = 1.2896
+    // N-sp2 correction: if one atom is sp3 (hyb=3) and other is sp2 (hyb=2) and it's nitrogen
+    if ((hybi == 3 && hybj == 2 && z1 == 7) || (hybi == 3 && hybj == 2 && z2 == 7)) {
+        // Removed override to bstren[2]*1.04 which was incorrectly using double bond strength
+        // for saturated methyl-Nitrogen bonds.
     }
 
     // Bridging atoms (will be detected in Phase 6)
@@ -2019,6 +2014,24 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 
     // CRITICAL FIX (Jan 7, 2026): Store fqq in params for validation/testing
     params.fqq = fqq;
+
+    // Claude Generated (Jan 18, 2026): Store dynamic r0 calculation parameters
+    // Reference: Fortran gfnff_rab.f90:147-153 - r0 recalculated from CN at each Calculate()
+    // Formula: r0 = (r0_base_i + cnfak_i*cn_i + r0_base_j + cnfak_j*cn_j + rabshift) * ff
+    // Wait - the Fortran formula is actually:
+    //   ra = r0(ati) + cnfak(ati) * cn(i)
+    //   rb = r0(atj) + cnfak(atj) * cn(j)
+    //   rab(k) = (ra + rb + rab(k)) * ff
+    // Where rab(k) on the RHS is the shift. But our current formula is:
+    //   r0_bohr = (ra + rb) * ff + rabshift
+    // These are slightly different orderings. Let me use the exact Fortran formula.
+    params.z_i = z1;
+    params.z_j = z2;
+    params.r0_base_i = r0_1;
+    params.r0_base_j = r0_2;
+    params.cnfak_i = cnfak_1;
+    params.cnfak_j = cnfak_2;
+    params.ff = ff;
 
     return params;
 }
@@ -2903,7 +2916,6 @@ std::vector<int> GFNFF::determineHybridization() const
                     hyb[i] = 2; // sp2 (bent)
                 }
             }
-
         } else if (neighbor_count == 3) {
             // Check if planar (sp2) or pyramidal (sp3)
             // Calculate sum of bond angles (should be ~360° for planar)
@@ -3806,6 +3818,15 @@ json GFNFF::generateTopologyAwareBonds(const TopologyInfo& topo_info) const
                 bond["rabshift"] = bond_params.rabshift;  // Claude Generated (Dec 2025): Store vbond(1) for validation
                 bond["fqq"] = bond_params.fqq;  // Claude Generated (Jan 7, 2026): Store charge-dependent factor
 
+                // Claude Generated (Jan 18, 2026): Dynamic r0 calculation parameters
+                bond["z_i"] = bond_params.z_i;
+                bond["z_j"] = bond_params.z_j;
+                bond["r0_base_i"] = bond_params.r0_base_i;
+                bond["r0_base_j"] = bond_params.r0_base_j;
+                bond["cnfak_i"] = bond_params.cnfak_i;
+                bond["cnfak_j"] = bond_params.cnfak_j;
+                bond["ff"] = bond_params.ff;
+
                 bonds.push_back(bond);
             }
         }
@@ -3975,12 +3996,8 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
     // Claude Generated (2025): Phase 2.1 - Hydrogen Bond Detection
     // Reference: gfnff_ini.f90:806-839 and gfnff_ini2.f90:1063-1113
 
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("=== detectHydrogenBonds() START ===");
-    }
-
-    // Get cached topology for hybridization
-    const TopologyInfo& topo = getCachedTopology();
+    // Retrieve cached topology information for advanced parametrization
+    const TopologyInfo& topo_info = getCachedTopology();
     const auto& bonds = getCachedBondList();
 
     // Step 0: Pre-calculate atom-specific basicity and acidity with overrides
@@ -3989,9 +4006,9 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
     std::vector<double> current_acidity(m_atomcount);
 
     FunctionalGroupDetector detector(m_atomcount, m_atoms,
-                                    topo.neighbor_lists,
-                                    topo.hybridization,
-                                    topo.pi_fragments);
+                                    topo_info.neighbor_lists,
+                                    topo_info.hybridization,
+                                    topo_info.pi_fragments);
 
     for (int i = 0; i < m_atomcount; ++i) {
         current_basicity[i] = hb_basicity[m_atoms[i]];
@@ -4004,10 +4021,10 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
             } else if (detector.isNitroOxygen(i)) {
                 current_basicity[i] = 0.47;
             }
-        } else if (m_atoms[i] == 6 && topo.neighbor_lists[i].size() == 2) { // Carbene candidate
+        } else if (m_atoms[i] == 6 && topo_info.neighbor_lists[i].size() == 2) { // Carbene candidate
             // Detect carbene: angle < 150° and charge > -0.4
-            int n1 = topo.neighbor_lists[i][0];
-            int n2 = topo.neighbor_lists[i][1];
+            int n1 = topo_info.neighbor_lists[i][0];
+            int n2 = topo_info.neighbor_lists[i][1];
 
             Vector r_i = m_geometry_bohr.row(i);
             Vector r_n1 = m_geometry_bohr.row(n1);
@@ -4028,7 +4045,7 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
     // Overrides for acidity (amide scaling)
     for (int i = 0; i < m_atomcount; ++i) {
         if (detector.isAmideHydrogen(i)) {
-            int nitrogen = topo.neighbor_lists[i][0];
+            int nitrogen = topo_info.neighbor_lists[i][0];
             current_acidity[nitrogen] *= 0.80;
         }
     }
@@ -4041,7 +4058,7 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
         if (m_atoms[h] != 1) continue;  // Only hydrogens (Z=1)
 
         // Exclude bridging H (hybridization == 1 means sp)
-        if (topo.hybridization[h] == 1) continue;
+        if (topo_info.hybridization[h] == 1) continue;
 
         // Find bonded heavy atom A
         int atom_A = -1;
@@ -4058,7 +4075,7 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
         double q_threshold = 0.05;  // hqabthr baseline
 
         if (m_atoms[atom_A] > 10) q_threshold -= 0.20;  // Heavy atoms
-        if (topo.hybridization[atom_A] == 3 && m_atoms[atom_A] == 6) {
+        if (topo_info.hybridization[atom_A] == 3 && m_atoms[atom_A] == 6) {
             q_threshold += 0.05;  // sp3 carbon
         }
 
@@ -4067,125 +4084,109 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
         }
     }
 
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("Found {} HB hydrogens", hb_hydrogens.size()));
-    }
+    CurcumaLogger::info(fmt::format("Found {} HB hydrogens", hb_hydrogens.size()));
 
-    // Step 2: Identify potential acceptor-donor pairs (A-B)
+    // Step 2 & 3: Identify potential acceptor-donor pairs (A-B) and actual contacts
     // Reference: gfnff_ini.f90:822-839
-    std::vector<std::pair<int,int>> ab_pairs;
+    const double hbthr1 = 7.5 * 7.5;  // Squared distance threshold (Bohr²)
 
-    for (int i = 0; i < m_atomcount; ++i) {
-        for (int j = i+1; j < m_atomcount; ++j) {
+    for (int A = 0; A < m_atomcount; ++A) {
+        for (int B = 0; B < m_atomcount; ++B) {
+            if (A == B) continue;
+            // CurcumaLogger::error(fmt::format("DEBUG: Checking A={} (Z={}) B={} (Z={})", A, m_atoms[A], B, m_atoms[B]));
+
             // Skip if either is sp/sp2 carbon with pi system
-            // Check if atom is in a pi fragment (pi_fragments[i] > 0)
-            bool i_is_pi_carbon = (m_atoms[i] == 6 &&
-                                   (topo.hybridization[i] == 1 || topo.hybridization[i] == 2) &&
-                                   topo.pi_fragments[i] > 0);
-            bool j_is_pi_carbon = (m_atoms[j] == 6 &&
-                                   (topo.hybridization[j] == 1 || topo.hybridization[j] == 2) &&
-                                   topo.pi_fragments[j] > 0);
+            bool A_is_pi_carbon = (m_atoms[A] == 6 &&
+                                   (topo_info.hybridization[A] == 1 || topo_info.hybridization[A] == 2) &&
+                                   topo_info.pi_fragments[A] > 0);
+            bool B_is_pi_carbon = (m_atoms[B] == 6 &&
+                                   (topo_info.hybridization[B] == 1 || topo_info.hybridization[B] == 2) &&
+                                   topo_info.pi_fragments[B] > 0);
 
-            if (i_is_pi_carbon || j_is_pi_carbon) continue;
+            if (A_is_pi_carbon || B_is_pi_carbon) continue;
 
             // Charge criterion for acceptor/donor atoms
             double q_thresh_AB = -0.2;  // qabthr baseline
-            if (m_atoms[i] > 10) q_thresh_AB += 0.2;
-            if (m_atoms[j] > 10) q_thresh_AB += 0.2;
+            if (m_atoms[A] > 10) q_thresh_AB += 0.2;
+            if (m_atoms[B] > 10) q_thresh_AB += 0.2;
 
-            if (charges[i] >= q_thresh_AB || charges[j] >= q_thresh_AB) continue;
+            if (charges[A] >= q_thresh_AB || charges[B] >= q_thresh_AB) continue;
 
-            // HB strength criterion (non-zero basicity/acidity product)
-            double strength_ij = current_basicity[i] * current_acidity[j];
-            double strength_ji = current_basicity[j] * current_acidity[i];
+            // HB strength criterion
+            if (current_basicity[B] * current_acidity[A] < 1e-6) continue;
 
-            if (strength_ij < 1e-6 && strength_ji < 1e-6) continue;
-
-            ab_pairs.push_back({i, j});
-        }
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("Found {} potential A-B pairs", ab_pairs.size()));
-    }
-
-    // Step 3: Detect actual A-H...B contacts with distance criterion
-    // Reference: gfnff_hbset0 (gfnff_ini2.f90:1063-1113)
-    const double hbthr1 = 7.5 * 7.5;  // Squared distance threshold (Bohr²)
-
-    for (const auto& [A, B] : ab_pairs) {
-        for (int H : hb_hydrogens) {
-            // Check if H is bonded to A
-            bool h_bonded_to_a = false;
-            for (const auto& bond : bonds) {
-                if ((bond.first == A && bond.second == H) ||
-                    (bond.first == H && bond.second == A)) {
-                    h_bonded_to_a = true;
-                    break;
-                }
-            }
-
-            if (!h_bonded_to_a) continue;
-
-            // Check if A and B are not bonded (non-bonded HB)
-            bool a_bonded_to_b = false;
-            for (const auto& bond : bonds) {
-                if ((bond.first == A && bond.second == B) ||
-                    (bond.first == B && bond.second == A)) {
-                    a_bonded_to_b = true;
-                    break;
-                }
-            }
-
-            if (a_bonded_to_b) continue;  // Skip bonded A-B
-
-            // Distance criterion
+            // Distance criterion (Donor-Acceptor)
             Vector r_A = m_geometry_bohr.row(A);
             Vector r_B = m_geometry_bohr.row(B);
             double r_AB_sq = (r_A - r_B).squaredNorm();
+            if (r_AB_sq >= hbthr1) continue;
 
-            if (r_AB_sq >= hbthr1) continue;  // Too far
+            // Check for bonded H on A
+            for (int H : hb_hydrogens) {
+                bool h_bonded_to_a = false;
+                for (const auto& bond : bonds) {
+                    if ((bond.first == A && bond.second == H) ||
+                        (bond.first == H && bond.second == A)) {
+                        h_bonded_to_a = true;
+                        break;
+                    }
+                }
+                if (!h_bonded_to_a) continue;
 
-            // Determine case type (1 = simple, 2 = with orientation)
-            // For now, use Case 1 for all (Case 2 requires neighbor analysis)
-            int case_type = 1;
-            std::vector<int> neighbors_B;
+                // Check if A and B are not bonded
+                bool a_bonded_to_b = false;
+                for (const auto& bond : bonds) {
+                    if ((bond.first == A && bond.second == B) ||
+                        (bond.first == B && bond.second == A)) {
+                        a_bonded_to_b = true;
+                        break;
+                    }
+                }
+                if (a_bonded_to_b) continue;
 
-            // TODO: Implement Case 2 detection (requires neighbor list)
-            // For now, all HB are Case 1
+                // Determine case type (1 = simple, 2 = case 2 orientational, 3 = case 3 carbonyl/nitro)
+                int case_type = 2;
+                std::vector<int> neighbors_A;
+                for (int nb : topo_info.neighbor_lists[A]) {
+                    if (nb != H) neighbors_A.push_back(nb);
+                }
+                std::vector<int> neighbors_B = topo_info.neighbor_lists[B];
+                int acceptor_parent = -1;
 
-            // Create HB parameter JSON
-            json hb;
-            hb["type"] = "hydrogen_bond";
-            hb["case"] = case_type;
-            hb["i"] = A;  // Donor atom (bonded to H)
-            hb["j"] = H;  // Hydrogen
-            hb["k"] = B;  // Acceptor atom
+                // Case 3 detection: Terminal Oxygen (CN=1) bonded to Carbon or Nitrogen
+                if (m_atoms[B] == 8 && topo_info.neighbor_lists[B].size() == 1) {
+                    int parent = topo_info.neighbor_lists[B][0];
+                    if (m_atoms[parent] == 6 || m_atoms[parent] == 7) {
+                        case_type = 3;
+                        acceptor_parent = parent;
+                    }
+                }
 
-            hb["basicity_A"] = current_basicity[A];
-            hb["basicity_B"] = current_basicity[B];
-            hb["acidity_A"] = current_acidity[A];
-
-            // Pre-computed charge factors (for performance)
-            hb["q_H"] = charges[H];
-            hb["q_A"] = charges[A];
-            hb["q_B"] = charges[B];
-
-            // Cutoff radius for HB energy calculation (Claude Generated - January 17, 2026)
-            // Use detection threshold (7.5 Bohr) + safety margin
-            hb["r_cut"] = 10.0;  // Bohr (conservative cutoff for energy calculation)
-
-            if (case_type == 2) {
+                // Create HB parameter JSON
+                json hb;
+                hb["type"] = "hydrogen_bond";
+                hb["case"] = case_type;
+                hb["i"] = A;
+                hb["j"] = H;
+                hb["k"] = B;
+                hb["basicity_A"] = current_basicity[A];
+                hb["basicity_B"] = current_basicity[B];
+                hb["acidity_A"] = current_acidity[A];
+                hb["acidity_B"] = current_acidity[B];
+                hb["q_H"] = charges[H];
+                hb["q_A"] = charges[A];
+                hb["q_B"] = charges[B];
+                hb["r_cut"] = 10.0;
+                hb["neighbors_A"] = neighbors_A;
                 hb["neighbors_B"] = neighbors_B;
-            }
+                if (case_type == 3) hb["acceptor_parent"] = acceptor_parent;
 
-            hbonds.push_back(hb);
+                hbonds.push_back(hb);
 
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format(
-                    "  HB detected: A={} ({}) H={} B={} ({}) r_AB={:.3f} Bohr",
+                CurcumaLogger::error(fmt::format(
+                    "DEBUG: HB detected: A={} ({}) H={} B={} ({}) r_AB={:.3f} Bohr, Case={}",
                     A, Elements::ElementAbbr[m_atoms[A]], H, B,
-                    Elements::ElementAbbr[m_atoms[B]], std::sqrt(r_AB_sq)));
+                    Elements::ElementAbbr[m_atoms[B]], std::sqrt(r_AB_sq), case_type));
             }
         }
     }
@@ -4211,7 +4212,7 @@ json GFNFF::detectHalogenBonds(const Vector& charges) const
     }
 
     // Get cached topology
-    const TopologyInfo& topo = getCachedTopology();
+    const TopologyInfo& topo_info = getCachedTopology();
     const auto& bonds = getCachedBondList();
 
     // Step 0: Pre-calculate atom-specific basicity with overrides (shared logic with HB)
@@ -4219,9 +4220,9 @@ json GFNFF::detectHalogenBonds(const Vector& charges) const
     std::vector<double> current_basicity(m_atomcount);
 
     FunctionalGroupDetector detector(m_atomcount, m_atoms,
-                                    topo.neighbor_lists,
-                                    topo.hybridization,
-                                    topo.pi_fragments);
+                                    topo_info.neighbor_lists,
+                                    topo_info.hybridization,
+                                    topo_info.pi_fragments);
 
     for (int i = 0; i < m_atomcount; ++i) {
         current_basicity[i] = hb_basicity[m_atoms[i]];
@@ -4233,10 +4234,10 @@ json GFNFF::detectHalogenBonds(const Vector& charges) const
             } else if (detector.isNitroOxygen(i)) {
                 current_basicity[i] = 0.47;
             }
-        } else if (m_atoms[i] == 6 && topo.neighbor_lists[i].size() == 2) { // Carbene candidate
+        } else if (m_atoms[i] == 6 && topo_info.neighbor_lists[i].size() == 2) { // Carbene candidate
             // Detect carbene: angle < 150° and charge > -0.4
-            int n1 = topo.neighbor_lists[i][0];
-            int n2 = topo.neighbor_lists[i][1];
+            int n1 = topo_info.neighbor_lists[i][0];
+            int n2 = topo_info.neighbor_lists[i][1];
 
             Vector r_i = m_geometry_bohr.row(i);
             Vector r_n1 = m_geometry_bohr.row(n1);
@@ -4280,7 +4281,7 @@ json GFNFF::detectHalogenBonds(const Vector& charges) const
         if (X != -1) {
             // Additional check: Sulfur must have at most 2 neighbors (no sulfoxides etc.)
             // Reference: gfnff_ini.f90:891
-            if (m_atoms[X] == 16 && topo.neighbor_lists[X].size() > 2) continue;
+            if (m_atoms[X] == 16 && topo_info.neighbor_lists[X].size() > 2) continue;
 
             ax_pairs.push_back({A, X});
         }
@@ -4305,7 +4306,7 @@ json GFNFF::detectHalogenBonds(const Vector& charges) const
             // Pi-base or charge criterion
             // Reference: gfnff_ini.f90:896-898
             if (m_atoms[B] == 6) { // Group 4 base
-                bool is_pi_atom = (topo.pi_fragments[B] > 0);
+                bool is_pi_atom = (topo_info.pi_fragments[B] > 0);
                 bool acceptable_charge = (charges[B] < 0.05);
                 if (!is_pi_atom || !acceptable_charge) continue;
             } else {
@@ -4453,6 +4454,18 @@ std::vector<std::vector<int>> GFNFF::calculateTopologyDistances(const std::vecto
 GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
 {
     TopologyInfo topo_info;
+
+    // Phase 2.0: Initialize metadata flags (Claude Generated - Jan 2026)
+    // CRITICAL: is_metal must be populated BEFORE calculateAlpeeq is called
+    // Reference: PHASE2_CHARGE_ACCURACY_FIX
+    topo_info.is_metal.assign(m_atomcount, false);
+    topo_info.is_aromatic.assign(m_atomcount, false);
+    for (int i = 0; i < m_atomcount; ++i) {
+        int z = m_atoms[i];
+        if (z >= 1 && z <= 86) {
+            topo_info.is_metal[i] = (GFNFFParameters::metal_type[z - 1] > 0);
+        }
+    }
 
     // Phase 2.1: Build distance matrices FIRST (Claude Generated - Dec 2025)
     // All N×N distances computed once to eliminate redundant sqrt() calls
@@ -4626,7 +4639,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             topo_info.topology_charges,     // Phase 1 charges used for corrections
             topo_info.coordination_numbers, // Fractional CN from real geometry
             topo_info.hybridization,        // Hybridization states
-            std::nullopt,                   // WITHOUT topology - uses cached topological distances from Phase 1
+            eeq_topology_input,             // WITH topology - uses neighbors for environmental corrections (dxi)
             true,  // CRITICAL (Jan 5, 2026): YES corrections - Phase 2 needs dxi and dgam (fixes 59% charge error)
             topo_info.alpeeq  // Claude Generated (January 2026): Charge-dependent alpha from Phase 1B
         );
@@ -6253,6 +6266,7 @@ bool GFNFF::calculateAlpeeq(TopologyInfo& topo_info) const
         double alpha_base = (z_i >= 1 && z_i <= 86) ? GFNFFParameters::alpha_eeq[z_i - 1] : 0.903430;
 
         // Element-specific ff factor
+        // Reference: Fortran gfnff_ini.f90:718-724
         double ff = 0.0;
 
         if (z_i == 6) {
@@ -6261,7 +6275,7 @@ bool GFNFF::calculateAlpeeq(TopologyInfo& topo_info) const
         } else if (z_i == 7) {
             // Nitrogen
             ff = -0.21;
-        } else if (z_i > 10 && z_i <= 86) {
+        } else if (z_i >= 1 && z_i <= 86) {
             // Heavy elements: check group and metal type
             int group = GFNFFParameters::periodic_group[z_i - 1];
 
@@ -6271,12 +6285,13 @@ bool GFNFF::calculateAlpeeq(TopologyInfo& topo_info) const
             } else if (group == 7) {
                 // Group 7: F, Cl, Br, I, At
                 ff = 0.50;
-            } else if (i < topo_info.is_metal.size() && topo_info.is_metal[i]) {
+            } else if (topo_info.is_metal[i]) {
                 // Metal elements
-                if (is_transition_metal(z_i)) {
+                int imetal_val = GFNFFParameters::metal_type[z_i - 1];
+                if (imetal_val == 2) {
                     // Transition metals
                     ff = -0.1;
-                } else {
+                } else if (imetal_val == 1) {
                     // Main group metals
                     ff = 0.3;
                 }

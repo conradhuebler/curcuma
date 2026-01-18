@@ -924,12 +924,18 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
             ff = -0.21;
         } else if (z_i >= 1 && z_i <= 86) {
             int group = periodic_group[z_i - 1];
-            if (group == 6) ff = -0.03;  // Chalcogens (O, S, Se, Te, Po)
-            else if (group == 7) ff = 0.50;  // Halogens (F, Cl, Br, I, At)
-            else if (z_i > 10) {
+            if (group == 6) {
+                ff = -0.03;  // Chalcogens (O, S, Se, Te, Po)
+            } else if (group == 7) {
+                ff = 0.50;  // Halogens (F, Cl, Br, I, At)
+            } else {
+                // Metal elements
                 int imetal_val = metal_type[z_i - 1];
-                if (imetal_val == 1) ff = 0.3;  // Main group metals
-                else if (imetal_val == 2) ff = -0.1;  // Transition metals
+                if (imetal_val == 1) {
+                    ff = 0.3;  // Main group metals (Li, Be, Na, Mg, etc.)
+                } else if (imetal_val == 2) {
+                    ff = -0.1;  // Transition metals
+                }
             }
         }
 

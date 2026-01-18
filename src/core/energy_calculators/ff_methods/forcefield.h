@@ -115,6 +115,13 @@ public:
     // Get cached EEQ charges for GFN-FF cache restoration (Claude Generated Dec 2025)
     const Vector& getCachedEEQCharges() const { return m_eeq_charges; }
 
+    // Claude Generated (Jan 18, 2026): Distribute D3 CN to all threads for dynamic r0 calculation
+    // Reference: Fortran gfnff_engrad.F90:432 - CN recalculated at each energy evaluation
+    void distributeD3CN(const Vector& d3_cn);
+
+    // Get cached D3 CN for validation (Claude Generated Jan 18, 2026)
+    const Vector& getCachedD3CN() const { return m_d3_cn; }
+
     Eigen::MatrixXd NumGrad();
 
     // Claude Generated: Parameter analysis functionality
@@ -210,6 +217,10 @@ private:
 
     // EEQ charges for GFN-FF (cached with parameters - Claude Generated Dec 2025)
     Vector m_eeq_charges;
+
+    // Claude Generated (Jan 18, 2026): D3 coordination numbers for dynamic r0 calculation
+    // Recalculated from current geometry at each Calculate() call for cgfnff
+    Vector m_d3_cn;
 
     json m_parameters;
     std::string m_auto_param_file; // Auto-detected parameter file path
