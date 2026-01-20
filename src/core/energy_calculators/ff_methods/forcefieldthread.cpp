@@ -1098,11 +1098,16 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
             return 1.0 / (1.0 + rr);
         };
 
-        // Get covalent radii (already in Bohr, 0-indexed)
-        double rcov_i = GFNFFParameters::rcov_bohr[Z_i - 1];
-        double rcov_j = GFNFFParameters::rcov_bohr[Z_j - 1];
-        double rcov_k = GFNFFParameters::rcov_bohr[Z_k - 1];
-        double rcov_l = GFNFFParameters::rcov_bohr[Z_l - 1];
+        // Get covalent radii for damping (already in Bohr, 0-indexed)
+        // Claude Generated (Jan 19, 2026): CRITICAL FIX - Use D3 covalent radii for torsion damping
+        // Reference: XTB covalentradd3.f90 - D3 radii scaled by 4/3
+        // Previous bug: Used r0_gfnff (0.983 Bohr for C) → too small → overdamping (0.046)
+        // Correct: Use covalent_rad_d3 (1.889 Bohr for C) → proper damping (~0.15-0.3)
+        // This fixes 5× torsion energy underestimation
+        double rcov_i = GFNFFParameters::covalent_rad_d3[Z_i - 1];
+        double rcov_j = GFNFFParameters::covalent_rad_d3[Z_j - 1];
+        double rcov_k = GFNFFParameters::covalent_rad_d3[Z_k - 1];
+        double rcov_l = GFNFFParameters::covalent_rad_d3[Z_l - 1];
 
         // Calculate 3 damping factors
         double damp_ij = calculate_damping(rij2, rcov_i, rcov_j);
@@ -1516,11 +1521,12 @@ void ForceFieldThread::CalculateGFNFFExtraTorsionContribution()
             return 1.0 / (1.0 + rr);
         };
 
-        // Get covalent radii
-        double rcov_i = GFNFFParameters::rcov_bohr[Z_i - 1];
-        double rcov_j = GFNFFParameters::rcov_bohr[Z_j - 1];
-        double rcov_k = GFNFFParameters::rcov_bohr[Z_k - 1];
-        double rcov_l = GFNFFParameters::rcov_bohr[Z_l - 1];
+        // Get covalent radii for damping
+        // Claude Generated (Jan 19, 2026): Use D3 covalent radii for proper damping
+        double rcov_i = GFNFFParameters::covalent_rad_d3[Z_i - 1];
+        double rcov_j = GFNFFParameters::covalent_rad_d3[Z_j - 1];
+        double rcov_k = GFNFFParameters::covalent_rad_d3[Z_k - 1];
+        double rcov_l = GFNFFParameters::covalent_rad_d3[Z_l - 1];
 
         // Calculate damping factors (NCI-aware)
         bool use_nci = torsion.is_nci;  // NCI torsions use different atcutt

@@ -2413,17 +2413,33 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
         // NR3 cases (sp³ nitrogen)
         // Reference: gfnff_ini.f90:1613-1631
         else if (hyb == 3) {
-            // Check if nitrogen is in π-system
-            if (npi > 0) {
+            // Claude Generated (Jan 19, 2026): Enhanced π-conjugation detection
+            // Check if nitrogen is connected to π-system via sp2 neighbors
+            // This is critical for methylated N in aromatic rings (e.g., caffeine)
+            // XTB marks these as sp3 but with pi=1 (π-connected)
+            //
+            // Detection methods:
+            // 1. npi > 0: neighbors are in pi_fragments
+            // 2. Neighbors have hyb=2 (sp2) indicating aromatic connection
+            int hyb_i = (atom_i < topo_info.hybridization.size()) ? topo_info.hybridization[atom_i] : 3;
+            int hyb_k = (atom_k < topo_info.hybridization.size()) ? topo_info.hybridization[atom_k] : 3;
+            bool has_sp2_neighbor = (hyb_i == 1 || hyb_i == 2 || hyb_k == 1 || hyb_k == 2);
+
+            // Use π-conjugated path if either detection method finds π-character
+            if (npi > 0 || has_sp2_neighbor) {
                 // Phase 2C Complete: Amide detection (January 10, 2026)
                 // Reference: gfnff_ini.f90:1616-1622
                 // Uses FunctionalGroupDetector for exact Fortran amide() port
-                FunctionalGroupDetector detector(m_atomcount, m_atoms,
-                                                topo_info.neighbor_lists,
-                                                topo_info.hybridization,
-                                                topo_info.pi_fragments);
 
-                bool is_amide = detector.isAmideNitrogen(atom_j);
+                // Safety check: only use FunctionalGroupDetector if neighbor_lists is populated
+                bool is_amide = false;
+                if (!topo_info.neighbor_lists.empty() && atom_j < static_cast<int>(topo_info.neighbor_lists.size())) {
+                    FunctionalGroupDetector detector(m_atomcount, m_atoms,
+                                                    topo_info.neighbor_lists,
+                                                    topo_info.hybridization,
+                                                    topo_info.pi_fragments);
+                    is_amide = detector.isAmideNitrogen(atom_j);
+                }
 
                 if (is_amide) {
                     // Amide nitrogen (peptide bond): N(sp³) bonded to C(π) with C=O
@@ -2917,20 +2933,38 @@ std::vector<int> GFNFF::determineHybridization() const
                 }
             }
         } else if (neighbor_count == 3) {
-            // Check if planar (sp2) or pyramidal (sp3)
-            // Calculate sum of bond angles (should be ~360° for planar)
-            double angle_sum = 0.0;
-            for (int j = 0; j < 3; ++j) {
-                int k = (j + 1) % 3;
-                double dot = bond_vectors[j].dot(bond_vectors[k]);
-                angle_sum += std::acos(std::max(-1.0, std::min(1.0, dot)));
-            }
+            // Claude Generated (Jan 19, 2026): Element-specific hybridization for 3-coordinate atoms
+            // Reference: XTB 6.6.1 assigns sp3 to N with 3 neighbors (including methylated ring N)
+            // This is critical for correct bstrength calculation: bsmat[3][3]=1.00 vs bsmat[3][2]=1.079
+            //
+            // Rules derived from XTB caffeine output:
+            //   - N with 3 neighbors (methylated N in ring) → sp3 (hyb=3)
+            //   - C with 3 neighbors in planar geometry → sp2 (hyb=2)
+            //   - C with 3 neighbors in pyramidal geometry → sp3 (hyb=3)
+            //
+            // Physical reasoning: Methylated N in aromatic rings has 3 sigma bonds + 1 lone pair
+            // in a tetrahedral arrangement, making it effectively sp3 despite ring participation.
 
-            // Planar: sum ≈ 2π, Pyramidal: sum < 2π
-            if (angle_sum > 6.0) { // ~345° - nearly planar
-                hyb[i] = 2; // sp2
+            if (z == 7) {
+                // Nitrogen with 3 neighbors: always sp3 (matches XTB)
+                // This covers: N-R3 (tertiary amine), N-CH3 in aromatic rings
+                hyb[i] = 3;
             } else {
-                hyb[i] = 3; // sp3
+                // For other elements (C, etc.): use geometry-based detection
+                // Calculate sum of bond angles (should be ~360° for planar)
+                double angle_sum = 0.0;
+                for (int j = 0; j < 3; ++j) {
+                    int k = (j + 1) % 3;
+                    double dot = bond_vectors[j].dot(bond_vectors[k]);
+                    angle_sum += std::acos(std::max(-1.0, std::min(1.0, dot)));
+                }
+
+                // Planar: sum ≈ 2π, Pyramidal: sum < 2π
+                if (angle_sum > 6.0) { // ~345° - nearly planar
+                    hyb[i] = 2; // sp2
+                } else {
+                    hyb[i] = 3; // sp3
+                }
             }
 
         } else if (neighbor_count >= 4) {
@@ -5190,11 +5224,14 @@ json GFNFF::generateGFNFFRepulsionPairs() const
             double repz_i = (zi >= 0 && zi < static_cast<int>(repz.size())) ? repz[zi] : 1.0;
             double repz_j = (zj >= 0 && zj < static_cast<int>(repz.size())) ? repz[zj] : 1.0;
 
-            // Get EEQ charges (qa) and coordination numbers (nb)
+            // Get EEQ charges (qa) and INTEGER neighbor counts (nb)
+            // CRITICAL: Use neighbor_counts (integer), NOT coordination_numbers (fractional)
+            // XTB reference: fn = 1.0 + nrepscal/(1.0 + dble(topo%nb(20,i))**2)
+            // where nb(20,i) is the INTEGER neighbor count from topology
             double qa_i = (i < topo_info.topology_charges.size()) ? topo_info.topology_charges[i] : 0.0;
             double qa_j = (j < topo_info.topology_charges.size()) ? topo_info.topology_charges[j] : 0.0;
-            double cn_i = (i < topo_info.coordination_numbers.size()) ? topo_info.coordination_numbers[i] : 0.0;
-            double cn_j = (j < topo_info.coordination_numbers.size()) ? topo_info.coordination_numbers[j] : 0.0;
+            double cn_i = (i < topo_info.neighbor_counts.size()) ? topo_info.neighbor_counts[i] : 0.0;
+            double cn_j = (j < topo_info.neighbor_counts.size()) ? topo_info.neighbor_counts[j] : 0.0;
 
             // fn correction: neighbor-count dependent scaling
             double fn_i = 1.0 + NREPSCAL / (1.0 + cn_i * cn_i);
