@@ -1730,18 +1730,61 @@ json GFNFF::generateGFNFFTorsions() const
         // Reference: gfnff_ini.f90:1953-1954
         // sp3ij = hyb(ii) .eq. 3.and.hyb(jj) .eq. 3  (central atoms MUST be sp3)
         //
-        // CRITICAL FIX (Claude Generated Jan 16, 2026): XTB reference shows outer atoms CAN be H!
-        // - XTB generates 36 extra torsions for complex.xyz with H-C(sp³)-C(sp³)-H/C structures
-        // - Central atoms (j,k): MUST be sp³ (hyb==3)
-        // - Outer atoms (i,l): Can be ANY hybridization (including H with hyb==0)
+        // CRITICAL FIX (Claude Generated Jan 21, 2026): Use EFFECTIVE hybridization!
+        // Same as primary torsions - atoms in pi-system should be treated as sp2.
+        // This prevents generating extra torsions for CH3-N(aromatic) bonds where
+        // N is part of an aromatic system but has CN~3.
         //
-        // WRONG INTERPRETATION (Jan 2): Required ALL 4 atoms to be sp³ → generated 0 extra torsions
-        // CORRECT: Only central bond must be sp³-sp³, outer atoms unrestricted
+        // Fortran uses: piadr(ii) > 0 to exclude pi-system atoms from sp3 check
         //
-        // Fortran uses: ll-ii-jj-kk ordering
-        // Curcuma uses: i-j-k-l ordering (from generateGFNFFTorsions)
+        // Lambda to check if atom is in pi-system (same as primary torsions)
+        auto is_in_pi_system_extra = [&](int atom_idx, int z_atom) -> bool {
+            // Condition 1: Has bonds with significant pi-character
+            if (!topo.pi_bond_orders.empty()) {
+                for (int other = 0; other < m_atomcount; other++) {
+                    if (other == atom_idx) continue;
+                    int pibo_idx = lin(atom_idx, other);
+                    if (pibo_idx >= 0 && pibo_idx < static_cast<int>(topo.pi_bond_orders.size())) {
+                        if (topo.pi_bond_orders[pibo_idx] > 0.1) {
+                            return true;
+                        }
+                    }
+                }
+            }
 
-        bool sp3_ij = (hybridization[j] == 3) && (hybridization[k] == 3);  // Central atoms MUST be sp3
+            // Condition 2: Is N/O/F/S adjacent to sp2 atoms ("picon" case)
+            if (z_atom == 7 || z_atom == 8 || z_atom == 9 || z_atom == 16) {
+                const auto& bond_list = getCachedBondList();
+                for (const auto& bond : bond_list) {
+                    int neighbor = -1;
+                    if (bond.first == atom_idx) neighbor = bond.second;
+                    else if (bond.second == atom_idx) neighbor = bond.first;
+                    else continue;
+
+                    if (neighbor >= 0 && neighbor < static_cast<int>(hybridization.size())) {
+                        int neighbor_hyb = hybridization[neighbor];
+                        if (neighbor_hyb == 1 || neighbor_hyb == 2) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        };
+
+        // Get effective hybridization for central atoms
+        int eff_hyb_j = hybridization[j];
+        int eff_hyb_k = hybridization[k];
+
+        if (is_in_pi_system_extra(j, m_atoms[j]) && eff_hyb_j == 3) {
+            eff_hyb_j = 2;  // Treat as sp2
+        }
+        if (is_in_pi_system_extra(k, m_atoms[k]) && eff_hyb_k == 3) {
+            eff_hyb_k = 2;  // Treat as sp2
+        }
+
+        // Now check sp3-sp3 using EFFECTIVE hybridization
+        bool sp3_ij = (eff_hyb_j == 3) && (eff_hyb_k == 3);
 
         // Outer atoms (i,l) can be ANY hybridization - no restriction!
         // This allows H-C-C-H, H-C-C-C, C-C-C-H, C-C-C-C quartets

@@ -1578,6 +1578,7 @@ void ForceFieldThread::CalculateGFNFFExtraTorsionContribution()
         double et = V * (1.0 + cos(c1));  // Same as primary torsions
         double energy = et * damp;
 
+
         // Accumulate extra torsion energy separately
         extra_torsion_energy += energy * m_dihedral_scaling;
 
