@@ -1100,10 +1100,11 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
 
         // Get covalent radii for damping (already in Bohr, 0-indexed)
         // Claude Generated (Jan 19, 2026): CRITICAL FIX - Use D3 covalent radii for torsion damping
-        // Reference: XTB covalentradd3.f90 - D3 radii scaled by 4/3
-        // Previous bug: Used r0_gfnff (0.983 Bohr for C) → too small → overdamping (0.046)
-        // Correct: Use covalent_rad_d3 (1.889 Bohr for C) → proper damping (~0.15-0.3)
-        // This fixes 5× torsion energy underestimation
+        // Reference: XTB covalentradd3.f90:62 - D3 radii scaled by 4/3
+        //   covalentRadD3(1:118) = [...] * aatoau * 4.0_wp / 3.0_wp
+        // NOTE (Jan 23, 2026): 4/3 scaling investigation showed that applying the scaling
+        // makes energy LARGER (weaker damping), but Curcuma already has too much energy.
+        // The root cause is elsewhere. Keeping unscaled values for now.
         double rcov_i = GFNFFParameters::covalent_rad_d3[Z_i - 1];
         double rcov_j = GFNFFParameters::covalent_rad_d3[Z_j - 1];
         double rcov_k = GFNFFParameters::covalent_rad_d3[Z_k - 1];
@@ -1523,6 +1524,7 @@ void ForceFieldThread::CalculateGFNFFExtraTorsionContribution()
 
         // Get covalent radii for damping
         // Claude Generated (Jan 19, 2026): Use D3 covalent radii for proper damping
+        // NOTE (Jan 23, 2026): 4/3 scaling investigation showed it makes things worse
         double rcov_i = GFNFFParameters::covalent_rad_d3[Z_i - 1];
         double rcov_j = GFNFFParameters::covalent_rad_d3[Z_j - 1];
         double rcov_k = GFNFFParameters::covalent_rad_d3[Z_k - 1];

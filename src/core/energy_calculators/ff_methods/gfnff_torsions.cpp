@@ -52,6 +52,7 @@
 #include <cmath>
 #include <array>
 #include <set>
+#include <map>
 
 using namespace GFNFFParameters;
 
@@ -574,15 +575,8 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     // CRITICAL: Result is in HARTREE, not kcal/mol!
 
     // GFN-FF constants (from gfnff_param.f90:742-753)
-    const double torsf_single = 1.00;   // Single bond scaling
     const double torsf_pi = 1.18;       // Pi bond scaling
     const double fcthr = 1.0e-3;        // Force constant threshold (Hartree)
-
-    // Extra sp3-sp3 torsion factors for gauche conformations
-    // Reference: gfnff_param.f90:795-797
-    const double torsf_extra_C = -0.90;  // Carbon sp3-sp3
-    const double torsf_extra_N =  0.70;  // Nitrogen sp3-sp3
-    const double torsf_extra_O = -2.00;  // Oxygen sp3-sp3 (strong gauche)
 
     // Bounds check
     if (z_i < 1 || z_i > 86 || z_j < 1 || z_j > 86 ||
@@ -1485,7 +1479,8 @@ json GFNFF::generateGFNFFTorsions() const
     int total_iterations = 0;
     int bond_count = 0;
 
-    for (const auto& central_bond : bond_list) {
+    for (size_t bond_idx = 0; bond_idx < bond_list.size(); ++bond_idx) {
+        const auto& central_bond = bond_list[bond_idx];
         int j = central_bond.first;
         int k = central_bond.second;
 
@@ -1507,6 +1502,17 @@ json GFNFF::generateGFNFFTorsions() const
         // Physical reason: Linear atoms have no torsional barrier
         if (hybridization[j] == 1 || hybridization[k] == 1) {
             continue;
+        }
+
+        // Claude Generated (Jan 23, 2026): Skip bond types that have no torsion potential
+        // Reference: XTB gfnff_ini.f90:1765 "if(btyp(m).eq.3.or.btyp(m).eq.6) cycle"
+        // btyp == 3: sp-X (linear/triple) bonds → no torsional barrier
+        // btyp == 6: metal eta (η-bonding) → no standard torsion
+        if (bond_idx < bond_types.size()) {
+            int btyp = bond_types[bond_idx];
+            if (btyp == 3 || btyp == 6) {
+                continue;
+            }
         }
 
         // Iterate over all neighbors of j (these will be atom i)
@@ -1567,7 +1573,7 @@ json GFNFF::generateGFNFFTorsions() const
                 bool in_ring = false;
                 int ring_size = 0;
                 double cn_i_val = 2.0, cn_l_val = 2.0;
-                double cn_j = 2.0, cn_k = 2.0;
+                double cn_j = 2.0, cn_k = 2.0;  // Coordination numbers for central atoms
 
                 // Check if atoms j and k are in the same ring
                 if (j < topo.ring_sizes.size() && k < topo.ring_sizes.size()) {
@@ -1575,10 +1581,10 @@ json GFNFF::generateGFNFFTorsions() const
                 }
 
                 // Use actual CN values from topology if available
-                if (j < topo.coordination_numbers.rows()) {
+                if (j < static_cast<int>(topo.coordination_numbers.rows())) {
                     cn_j = topo.coordination_numbers(j);
                 }
-                if (k < topo.coordination_numbers.rows()) {
+                if (k < static_cast<int>(topo.coordination_numbers.rows())) {
                     cn_k = topo.coordination_numbers(k);
                 }
                 // For torsion CN correction, use simple neighbor counts to match XTB behavior
@@ -1641,8 +1647,12 @@ json GFNFF::generateGFNFFTorsions() const
                     in_ring, ring_size, j, k
                 );
 
-                // Skip torsions with zero barrier height
-                if (std::abs(params.barrier_height) < 1e-10) {
+                // Skip torsions with barrier below threshold
+                // Claude Generated (Jan 23, 2026): Use fcthr = 1e-3 to match XTB
+                // XTB: gfnff_param.f90:632 "gen%fcthr = 1.d-3 ! skip torsion if potential is small"
+                // Previous: 1e-10 (too permissive) → generated 732 torsions vs XTB's 569
+                constexpr double fcthr = 1.0e-3;  // Force constant threshold (Hartree)
+                if (std::abs(params.barrier_height) < fcthr) {
                     continue;
                 }
 
@@ -1680,6 +1690,76 @@ json GFNFF::generateGFNFFTorsions() const
                 torsion_count++;
             }
         }
+    }
+
+    // ==========================================================================
+    // Claude Generated (Jan 24, 2026): NORMALIZATION REMOVED
+    // ==========================================================================
+    // CRITICAL: The Fortran reference (external/gfnff/src/gfnff_engrad.F90:525-542)
+    // uses SIMPLE SUMMATION for primary torsions - NO per-bond averaging, NO 0.5 factor!
+    //
+    // The previous "fix" with 0.5 factor and per-bond averaging was INCORRECT.
+    // Reference verification:
+    //   - Primary torsions (line 539): etors = etors + etmp (simple sum)
+    //   - NCI Type 2/3 ONLY (line 2793): etors = etors / ntors (NOT primary!)
+    //   - Energy formula (line 1272): et = (1+cos)*vtors(2) with range [0, 2V] INTENTIONALLY
+    //
+    // If energy is ~10× too large, the error is in FORCE CONSTANT GENERATION (vtors(2,m)),
+    // not in energy accumulation. Investigate:
+    //   1. H-count correction: (nH_j * nH_k)^0.07
+    //   2. CN/charge corrections in fijk factors
+    //   3. Hybridization-based parameter selection
+    //
+    // Diagnostic output below helps identify the real source of error.
+    // ==========================================================================
+
+    // Diagnostic: Per-torsion parameter summary
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("\n=== PRIMARY TORSION PARAMETER DIAGNOSTICS ===");
+        CurcumaLogger::info(fmt::format("Total primary torsions generated: {}", torsion_count));
+
+        // Aggregate statistics
+        double total_V = 0.0;
+        double max_V = 0.0;
+        double min_V = 1e10;
+        for (const auto& t : torsions) {
+            double V = t["V"];
+            total_V += V;
+            max_V = std::max(max_V, V);
+            min_V = std::min(min_V, V);
+        }
+
+        CurcumaLogger::info(fmt::format("Sum of all V (barrier heights): {:.6f} Eh", total_V));
+        CurcumaLogger::info(fmt::format("V range: [{:.6f}, {:.6f}] Eh", min_V, max_V));
+        CurcumaLogger::info(fmt::format("Average V: {:.6f} Eh", total_V / std::max(1, torsion_count)));
+
+        // Per-bond quartet counts (for reference only, not used for normalization)
+        std::map<std::pair<int, int>, int> quartets_per_bond;
+        for (const auto& t : torsions) {
+            int tj = t["j"];
+            int tk = t["k"];
+            std::pair<int, int> bond_key = (tj < tk) ? std::make_pair(tj, tk) : std::make_pair(tk, tj);
+            quartets_per_bond[bond_key]++;
+        }
+        CurcumaLogger::info(fmt::format("Number of central bonds with torsions: {}", quartets_per_bond.size()));
+
+        // Detailed per-torsion output at verbosity 3
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("\nPer-torsion details (first 20):");
+            int count = 0;
+            for (const auto& t : torsions) {
+                if (count >= 20) break;
+                int ti = t["i"], tj = t["j"], tk = t["k"], tl = t["l"];
+                double V = t["V"];
+                double n = t["n"];
+                double phi0 = t["phi0"];
+                CurcumaLogger::info(fmt::format(
+                    "  Torsion {}-{}-{}-{}: V={:.6f} Eh, n={:.0f}, phi0={:.2f}°",
+                    ti, tj, tk, tl, V, n, phi0 * 180.0 / M_PI));
+                count++;
+            }
+        }
+        CurcumaLogger::info("=== END TORSION DIAGNOSTICS ===\n");
     }
 
     // ==========================================================================
@@ -1784,14 +1864,18 @@ json GFNFF::generateGFNFFTorsions() const
         }
 
         // Now check sp3-sp3 using EFFECTIVE hybridization
-        bool sp3_ij = (eff_hyb_j == 3) && (eff_hyb_k == 3);
+        // Claude Generated Fix (Jan 23, 2026): XTB requires ALL FOUR atoms to be sp3!
+        // Reference: gfnff_ini.f90:1952-1954
+        //   sp3kl = topo%hyb(kk).eq.3.and.topo%hyb(ll).eq.3  ! Outer atoms
+        //   sp3ij = topo%hyb(ii).eq.3.and.topo%hyb(jj).eq.3  ! Central atoms
+        //   if(sp3kl.and.sp3ij...) then
+        // Previous bug: Only checked central atoms → generated too many extra torsions (243 vs ~50)
+        bool sp3_ij = (eff_hyb_j == 3) && (eff_hyb_k == 3);  // Central atoms j,k
+        bool sp3_il = (hybridization[i] == 3) && (hybridization[l] == 3);  // Outer atoms i,l
 
-        // Outer atoms (i,l) can be ANY hybridization - no restriction!
-        // This allows H-C-C-H, H-C-C-C, C-C-C-H, C-C-C-C quartets
-
-        if (!sp3_ij) {
+        if (!sp3_ij || !sp3_il) {
             debug_failed_sp3++;
-            continue;  // Only check central atoms
+            continue;  // ALL FOUR atoms must be sp3
         }
 
         // ======================================================================

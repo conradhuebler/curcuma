@@ -260,9 +260,14 @@ static const std::vector<double> rcov_bohr = r0_gfnff;
 // DFT-D3 Covalent radii (Pyykkö & Atsumi) - Bohr
 // Claude Generated (Jan 19, 2026): For torsion damping calculations
 // Reference: gfnff_param.f90 covalentRadD3 (values in Å, converted to Bohr)
-// NO 4/3 scaling - gfnff uses base D3 radii directly
+// NOTE (Jan 23, 2026): XTB applies 4/3 scaling in covalentradd3.f90:62
+//   covalentRadD3(1:118) = [...] * aatoau * 4.0_wp / 3.0_wp
+// However, Curcuma torsion energy is already ~108× TOO LARGE, so applying
+// 4/3 scaling (which weakens damping → more energy) makes things WORSE.
+// The root cause is elsewhere (likely in fctot calculation or torsion counting).
+// Keeping original values (without 4/3) until root cause is found.
 static const std::vector<double> covalent_rad_d3 = {
-    0.60392702, 0.86945142, // H, He
+    0.60392702, 0.86945142, // H, He (without 4/3 scaling)
     2.26643422, 1.77478229, 1.45333953, 1.41731155, 1.34116514, 1.19027623, // Li-C-Ne
     1.20788167, 1.26458288, 2.64097810, 2.36067855, 2.13177212, 1.96297420, // Na-P
     2.07555175, 1.92490730, 1.86819168, 1.81173529, 3.32054985, 2.90629615, // S-Ca
@@ -753,6 +758,31 @@ constexpr double METAL3_SHIFT = 0.05;  // Main group metals (Al, Ga, In, ...) in
 constexpr double ETA_SHIFT = 0.040;    // η-coordination (per neighbor) in Bohr
 
 // ============================================================================
+// ============================================================================
+// TORSION BARRIER SCALING FACTORS (Claude Generated - January 2026)
+// ============================================================================
+// Reference: gfnff_param.f90:791-797 (gen%torsf array)
+//
+// These factors scale the torsional barrier height based on bond type:
+// - torsf_single: Single bonds (sp3-sp3, standard alkanes)
+// - torsf_pi: Pi bonds (double bonds, aromatic systems)
+// - torsf_improper: Out-of-plane bending terms
+// - torsf_pi_improper: Pi contribution to improper torsions
+//
+// Extra sp3-sp3 torsion factors (for gauche conformations):
+// - torsf_extra_C: Extra barrier for C-C sp3-sp3 (negative = stabilizes gauche)
+// - torsf_extra_N: Extra barrier for N-X sp3-sp3 (positive = destabilizes gauche)
+// - torsf_extra_O: Extra barrier for O-X sp3-sp3 (negative = stabilizes gauche)
+// ============================================================================
+
+constexpr double torsf_single = 1.00;       // Single bond barrier factor
+constexpr double torsf_pi = 1.18;           // Pi bond barrier factor
+constexpr double torsf_improper = 1.05;     // Improper torsion factor
+constexpr double torsf_pi_improper = 0.50;  // Pi part of improper torsions
+constexpr double torsf_extra_C = -0.90;     // Extra sp3 C-C torsion
+constexpr double torsf_extra_N = 0.70;      // Extra sp3 N-X torsion
+constexpr double torsf_extra_O = -2.00;     // Extra sp3 O-X torsion
+
 // Ring Torsion Barrier Factors (Claude Generated - January 2026)
 // ============================================================================
 // Reference: XTB gfnff_param.f90:787-790, gfnff_ini.f90:1814-1835

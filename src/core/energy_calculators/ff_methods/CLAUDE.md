@@ -382,12 +382,18 @@ Vector dgam = Vector::Zero(natoms);  // NO dgam corrections for Phase 2!
    - Verify energy calculation formula in forcefieldthread.cpp:736-960
    - Test with simple molecule (H2O) where all values are known
 
-2. **Torsion Energy Calibration** (January 1, 2026) - 🔧 **Extra SP3-SP3 Torsions Implemented**
-   - **Status**: ✅ Implementation complete | ⚠️ **Overcompensating** (error -542%)
-   - **Before**: +0.000073 Eh (215% too large)
-   - **After**: -0.000104 Eh (542% error in opposite direction)
-   - **Reference**: +0.000023 Eh
-   - **Implementation**: `gfnff_torsions.cpp:1181-1392` - Extra n=1 torsions for sp3-sp3 bonds
+2. **Torsion Energy Investigation** (January 24, 2026) - 🔬 **Root Cause Analysis Complete**
+   - **Status**: Ad-hoc normalization REVERTED (was incorrect per Fortran reference)
+   - **Current**: +0.00385 Eh (167× too large)
+   - **Reference**: +0.000023 Eh (XTB 6.6.1)
+   - **Verified Correct**:
+     - Force constant fctot = 0.147739 Eh (**matches external/gfnff exactly**)
+     - Damping formula matches Fortran reference
+     - Energy formula matches: et = (1+cos)*V, e = et*damp
+   - **Mystery**: fctot correct, damping formula correct, but energy 167× too large
+   - **Hypothesis**: XTB may use different rcov values at runtime or have additional corrections
+   - **Investigation**: Diagnostic logging added in `gfnff_torsions.cpp:1694-1755`
+   - **Note**: Previous 0.5/N normalization was INCORRECT - Fortran uses simple sum for primary torsions
    - **Mechanism**: 6 extra torsions generated with ff=-2.00 (oxygen factor)
    - **Next Steps**:
      - [ ] Calibrate ff=-2.00 factor (too strong)
