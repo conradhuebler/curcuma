@@ -504,7 +504,7 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     double qa_j, double qa_k,
     double cn_i, double cn_l,
     bool in_ring, int ring_size,
-    int j_atom_idx, int k_atom_idx) const
+    int i_atom_idx, int j_atom_idx, int k_atom_idx, int l_atom_idx) const
 {
     GFNFFTorsionParams params;
 
@@ -527,8 +527,23 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     params.periodicity = 1;         // Default
     params.phase_shift = M_PI;      // phi0 = 180° (trans) - ACYCLIC DEFAULT!
 
+    // Claude Generated (Jan 25, 2026): Use pi-fragment data to determine periodicity
+    // This ensures ring bonds in aromatic systems (like Caffeine N-C) use n=2
+    // despite local CN=3 (sp3) markings.
+    const TopologyInfo& t_info = getCachedTopology();
+    bool j_is_pi = false, k_is_pi = false;
+    if (j_atom_idx >= 0 && k_atom_idx >= 0 && !t_info.pi_fragments.empty()) {
+        j_is_pi = t_info.pi_fragments[j_atom_idx] > 0;
+        k_is_pi = t_info.pi_fragments[k_atom_idx] > 0;
+    }
+
+    // Pi-conjugated central bond (n=2, most important for aromatic accurate energies)
+    if (j_is_pi && k_is_pi) {
+        params.periodicity = 2;
+        params.phase_shift = M_PI;
+    }
     // sp³-sp³: Threefold (gfnff_ini.f90:1841)
-    if (hyb_j == 3 && hyb_k == 3) {
+    else if (hyb_j == 3 && hyb_k == 3) {
         params.periodicity = 3;     // nrot = 3
         params.phase_shift = M_PI;  // phi0 = 180° (keeps acyclic default)
     }
@@ -541,20 +556,6 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     else if ((hyb_j == 2 && hyb_k == 3) || (hyb_j == 3 && hyb_k == 2)) {
         params.periodicity = 3;     // nrot = 3
         params.phase_shift = M_PI;  // phi0 = 180°
-
-        // Claude Generated (Jan 9, 2026): Debug hybridization for sp2-sp3 detection
-        static bool hybridization_debug_printed = false;
-        if (!hybridization_debug_printed && CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::warn("=== Torsion Hybridization DEBUG: sp2-sp3 detected ===");
-            CurcumaLogger::warn(fmt::format("  hyb_j={} (Z={}), hyb_k={} (Z={})",
-                                             hyb_j, z_j, hyb_k, z_k));
-            CurcumaLogger::warn("  Expected for C-O in CH3OCH3: hyb_j=3 (C), hyb_k=3 (O)");
-            CurcumaLogger::warn("  If O is hyb=2, check CN calculation (should be CN=2→sp3)");
-            CurcumaLogger::warn("  NOTE: CN values will be shown in full torsion debug below");
-            hybridization_debug_printed = true;
-        }
-
-        // Set f1 = 0.5 for sp2-sp3 mixed (will be set later in force constant calculation)
     }
     // sp-X: Linear (gfnff_ini.f90: implicit default)
     else if (hyb_j == 1 || hyb_k == 1) {
@@ -637,83 +638,39 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     double f1 = torsf_single;  // Default = 1.0
 
     // Get effective hybridization (considering pi-system participation)
+    const TopologyInfo& topo = getCachedTopology();
+    const auto& bond_list = getCachedBondList();
+
+    auto is_in_pi_fr = [&](int atom_idx, int z_atom) -> bool {
+        if (atom_idx < 0 || atom_idx >= m_atomcount) return false;
+        // Condition 1: Direct bonds with significant pi-character (pibo > 0.1)
+        if (!topo.pi_bond_orders.empty()) {
+            for (int other = 0; other < m_atomcount; other++) {
+                if (other == atom_idx) continue;
+                int pibo_idx = lin(atom_idx, other);
+                if (pibo_idx >= 0 && pibo_idx < static_cast<int>(topo.pi_bond_orders.size())) {
+                    if (topo.pi_bond_orders[pibo_idx] > 0.1) return true;
+                }
+            }
+        }
+        // Condition 2: N/O/F/S (sp3) adjacent to sp or sp2 atoms ("picon" case)
+        if (z_atom == 7 || z_atom == 8 || z_atom == 9 || z_atom == 16) {
+            for (const auto& bond : bond_list) {
+                int neighbor = (bond.first == atom_idx) ? bond.second : (bond.second == atom_idx) ? bond.first : -1;
+                if (neighbor >= 0 && neighbor < static_cast<int>(topo.hybridization.size())) {
+                    int neighbor_hyb = topo.hybridization[neighbor];
+                    if (neighbor_hyb == 1 || neighbor_hyb == 2) return true;
+                }
+            }
+        }
+        return false;
+    };
+
     int eff_hyb_j = hyb_j;
     int eff_hyb_k = hyb_k;
 
-    // Check if either atom j or k is in a pi-system
-    // Claude Generated (Jan 21, 2026): CRITICAL FIX for f1 calculation
-    //
-    // Reference: gfnff_ini.f90:1757-1772 (piadr assignment)
-    // An atom is "in a pi-system" (gets piadr > 0) if EITHER:
-    //   1. It has direct bonds with significant pi-character (pibo > threshold), OR
-    //   2. It is N/O/F/S (sp3) and has at least one neighbor with hyb=sp2 ("picon" case)
-    //
-    // The second condition is CRITICAL for atoms like N1 in caffeine:
-    // - N1 is bonded to methyl (sp3) and aromatic carbons (sp2)
-    // - N1 itself might have CN=3 → sp3 hybridization
-    // - But N1's bonds to aromatic C don't have high pibo (resonance in ring core)
-    // - However, N1 IS adjacent to sp2 atoms → should be treated as pi-system member
-    //
-    // Impact: f1 = 0.2 instead of 1.0 for N-adjacent sp2-sp3 torsions (5× reduction)
-
-    if (j_atom_idx >= 0 && k_atom_idx >= 0 && j_atom_idx < m_atomcount && k_atom_idx < m_atomcount) {
-        const TopologyInfo& topo = getCachedTopology();
-        const auto& bond_list = getCachedBondList();
-
-        bool j_in_pi_system = false;
-        bool k_in_pi_system = false;
-
-        // Lambda to check if atom is in pi-system
-        auto is_in_pi_system = [&](int atom_idx, int z_atom) -> bool {
-            // Condition 1: Has bonds with significant pi-character
-            if (!topo.pi_bond_orders.empty()) {
-                for (int other = 0; other < m_atomcount; other++) {
-                    if (other == atom_idx) continue;
-                    int pibo_idx = lin(atom_idx, other);
-                    if (pibo_idx >= 0 && pibo_idx < static_cast<int>(topo.pi_bond_orders.size())) {
-                        if (topo.pi_bond_orders[pibo_idx] > 0.1) {
-                            return true;
-                        }
-                    }
-                }
-            }
-
-            // Condition 2: Is N/O/F/S (sp3) adjacent to sp2 atoms ("picon" case)
-            // Reference: gfnff_ini.f90:1762-1764
-            //   picon = kk .gt. 0.and.nofs(at(i))
-            // where kk counts neighbors with hyb=sp or sp2
-            if (z_atom == 7 || z_atom == 8 || z_atom == 9 || z_atom == 16) {  // N, O, F, S
-                // Check if any neighbor has sp2 hybridization
-                for (const auto& bond : bond_list) {
-                    int neighbor = -1;
-                    if (bond.first == atom_idx) neighbor = bond.second;
-                    else if (bond.second == atom_idx) neighbor = bond.first;
-                    else continue;
-
-                    if (neighbor >= 0 && neighbor < static_cast<int>(topo.hybridization.size())) {
-                        int neighbor_hyb = topo.hybridization[neighbor];
-                        if (neighbor_hyb == 1 || neighbor_hyb == 2) {  // sp or sp2
-                            return true;
-                        }
-                    }
-                }
-            }
-
-            return false;
-        };
-
-        j_in_pi_system = is_in_pi_system(j_atom_idx, z_j);
-        k_in_pi_system = is_in_pi_system(k_atom_idx, z_k);
-
-        // If an atom is in a pi-system and was marked sp3, correct to sp2
-        if (j_in_pi_system && eff_hyb_j == 3) {
-            eff_hyb_j = 2;
-        }
-        if (k_in_pi_system && eff_hyb_k == 3) {
-            eff_hyb_k = 2;
-        }
-
-    }
+    if (is_in_pi_fr(j_atom_idx, z_j) && eff_hyb_j == 3) eff_hyb_j = 2;
+    if (is_in_pi_fr(k_atom_idx, z_k) && eff_hyb_k == 3) eff_hyb_k = 2;
 
     // Acyclic sp3-sp3 case (most common)
     if (eff_hyb_j == 3 && eff_hyb_k == 3) {
@@ -984,7 +941,9 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
 
         // Additional check: Skip if pi-conjugated system (notpicon = false in Fortran)
         // Pi bonds have different torsional preferences even in rings
-        bool notpicon = !(hyb_j == 2 && hyb_k == 2);  // NOT sp2-sp2 (conjugated)
+        // Claude Generated (Jan 25, 2026): Include outer atoms in pi-system address check
+        bool notpicon = !(is_in_pi_fr(i_atom_idx, z_i) || is_in_pi_fr(l_atom_idx, z_l) ||
+                          is_in_pi_fr(j_atom_idx, z_j) || is_in_pi_fr(k_atom_idx, z_k));
 
         if (all_in_same_ring && notpicon) {
             // Override periodicity, phase, and barrier based on ring size
@@ -1552,18 +1511,40 @@ json GFNFF::generateGFNFFTorsions() const
                 generated_torsions.insert(torsion_key);
 
                 // ==========================================================
-                // STEP 5: Check for linear geometry
+                // STEP 5: Check for linear geometry (chktors)
                 // ==========================================================
-                // Skip torsions where dihedral angle is undefined (near 180°)
+                // Reference: GFN-FF only skips torsions if the central bond
+                // angles are linear (making the dihedral undefined).
+                // Fortran: gfnff_ini2.f90:680-696 (chktors)
+
+                // Calculate bond angles: angle(j,i,k) and angle(i,j,l)
+                // Note: central atoms are j,k. Terminal atoms are i,l.
+                // 1-based Fortran indices for atoms in valijklff(nat,xyz,i,j,k,l) are:
+                // l-i-j-k in GFN-FF notation where i-j is central.
+                // In Curcuma we use i-j-k-l where j-k is central.
+                // Mapping: Fortran_i=j, Fortran_j=i (wrong!), wait.
+                // Let's look at valijklff call: phi = valijklff(nat,xyz,ll,ii,jj,kk)
+                // ii, jj are central. ll, kk are terminal.
+                // call bangl(xyz,jj,ii,kk,phi)  ! angle at ii (central 1)
+                // call bangl(xyz,ii,jj,ll,phi)  ! angle at jj (central 2)
+
+                auto calculate_bond_angle = [&](int a, int b, int c) {
+                    Eigen::Vector3d v_ba = (m_geometry.row(a).head<3>() - m_geometry.row(b).head<3>()).normalized();
+                    Eigen::Vector3d v_bc = (m_geometry.row(c).head<3>() - m_geometry.row(b).head<3>()).normalized();
+                    return std::acos(std::max(-1.0, std::min(1.0, v_ba.dot(v_bc))));
+                };
+
+                double angle_ijk = calculate_bond_angle(i, j, k); // Angle at j (central 1)
+                double angle_jkl = calculate_bond_angle(j, k, l); // Angle at k (central 2)
+
+                // GFN-FF threshold: 170 degrees (gfnff_ini2.f90:689, 692)
+                constexpr double angle_threshold = 170.0 * M_PI / 180.0;
+                if (angle_ijk > angle_threshold || angle_jkl > angle_threshold) {
+                    continue; // Skip ill-defined dihedrals
+                }
 
                 double phi = calculateDihedralAngle(i, j, k, l);
 
-                // Check if geometry is nearly linear (sin(φ) ≈ 0)
-                // This happens at φ ≈ 0° or φ ≈ 180°
-                constexpr double linear_threshold = 0.1; // ~6 degrees
-                if (std::abs(std::sin(phi)) < linear_threshold) {
-                    continue; // Skip linear/anti-linear geometries
-                }
 
                 // ==========================================================
                 // STEP 6: Get topology information for torsion calculation
@@ -1644,7 +1625,7 @@ json GFNFF::generateGFNFFTorsions() const
                     hybridization[j], hybridization[k],
                     qa_j, qa_k,
                     cn_i_val, cn_l_val,
-                    in_ring, ring_size, j, k
+                    in_ring, ring_size, i, j, k, l
                 );
 
                 // Skip torsions with barrier below threshold
@@ -1775,6 +1756,12 @@ json GFNFF::generateGFNFFTorsions() const
     int extra_torsion_count = 0;
     const double qfacTOR = 12.0;  // From gfnff_param.f90:742
 
+    // DIAGNOSTIC (Jan 25, 2026)
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("=== EXTRA TORSION GENERATION START ==="));
+        CurcumaLogger::info(fmt::format("  Primary torsions generated: {}", generated_torsions.size()));
+    }
+
     // Extra sp3-sp3 torsion factors for gauche conformations
     // Reference: gfnff_param.f90:795-797
     // NOTE (Jan 2, 2026): Original GFN-FF parametrization values restored
@@ -1870,8 +1857,33 @@ json GFNFF::generateGFNFFTorsions() const
         //   sp3ij = topo%hyb(ii).eq.3.and.topo%hyb(jj).eq.3  ! Central atoms
         //   if(sp3kl.and.sp3ij...) then
         // Previous bug: Only checked central atoms → generated too many extra torsions (243 vs ~50)
+
+        // CRITICAL FIX (Jan 25, 2026): Use EFFECTIVE hybridization for ALL atoms, not just central!
+        // Hydrogen has hyb=0 (not 3!), so sp3_il will be false for H-C-O-C quartets
+        int eff_hyb_i = hybridization[i];
+        int eff_hyb_l = hybridization[l];
+
+        // Pi-system detection for outer atoms (same logic as central atoms)
+        if (is_in_pi_system_extra(i, m_atoms[i]) && eff_hyb_i == 3) {
+            eff_hyb_i = 2;  // Treat as sp2
+        }
+        if (is_in_pi_system_extra(l, m_atoms[l]) && eff_hyb_l == 3) {
+            eff_hyb_l = 2;  // Treat as sp2
+        }
+
         bool sp3_ij = (eff_hyb_j == 3) && (eff_hyb_k == 3);  // Central atoms j,k
-        bool sp3_il = (hybridization[i] == 3) && (hybridization[l] == 3);  // Outer atoms i,l
+        bool sp3_il = (eff_hyb_i == 3) && (eff_hyb_l == 3);  // Outer atoms i,l (NOW with effective hyb!)
+
+        // DIAGNOSTIC (Jan 25, 2026): Debug hydrogen hybridization
+        if (CurcumaLogger::get_verbosity() >= 3 && (m_atoms[i] == 1 || m_atoms[l] == 1)) {
+            CurcumaLogger::info(fmt::format(
+                "EXTRA TORSION CHECK: {}-{}-{}-{} (Z={},{},{},{}): hyb=({},{},{},{}), eff_hyb=({},{},{},{}), sp3_ij={}, sp3_il={}",
+                i, j, k, l, m_atoms[i], m_atoms[j], m_atoms[k], m_atoms[l],
+                hybridization[i], hybridization[j], hybridization[k], hybridization[l],
+                eff_hyb_i, eff_hyb_j, eff_hyb_k, eff_hyb_l,
+                sp3_ij, sp3_il
+            ));
+        }
 
         if (!sp3_ij || !sp3_il) {
             debug_failed_sp3++;

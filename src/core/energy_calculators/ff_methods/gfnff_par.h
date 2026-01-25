@@ -644,6 +644,13 @@ static constexpr double HB_NBCUT = 11.20;       // Neighbor angle cut-off (Case 
 static constexpr double TORS_HB = 0.94;         // NCI torsion term shift
 static constexpr double BEND_HB = 0.20;         // NCI bending term shift
 
+// Bond energy HB scaling (egbond_hb)
+// Reference: gfnff_param.f90:484
+// Scales the bond exponent for X-H bonds participating in hydrogen bridges
+// Formula: alpha_modified = (1.0 - (1.0 - VBOND_SCALE) * hb_cn_H) * alpha
+// For hb_cn_H = 1: alpha_modified = 0.9 * alpha (10% reduction)
+static constexpr double VBOND_SCALE = 0.9;
+
 // Global acidity parameters
 static constexpr double XHACI_GLOBABH = 0.268;  // A-H...B general scaling
 static constexpr double XHACI_COH = 0.350;      // A-H...O=C scaling

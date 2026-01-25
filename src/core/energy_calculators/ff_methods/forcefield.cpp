@@ -516,6 +516,11 @@ void ForceField::setBonds(const json& bonds)
         b.cnfak_j = bond.value("cnfak_j", 0.0);
         b.ff = bond.value("ff", 1.0);
 
+        // Claude Generated (Jan 24, 2026): Hydrogen bridge bond modulation (egbond_hb)
+        // Reference: Fortran gfnff_engrad.F90:449-453, 919-994
+        b.nr_hb = bond.value("nr_hb", 0);
+        b.hb_cn_H = bond.value("hb_cn_H", 0.0);
+
         m_bonds.push_back(b);
     }
 }
@@ -1408,6 +1413,10 @@ json ForceField::exportCurrentParameters() const
         b["cnfak_j"] = bond.cnfak_j;
         b["ff"] = bond.ff;
 
+        // Claude Generated (Jan 24, 2026): Hydrogen bridge bond modulation (egbond_hb)
+        b["nr_hb"] = bond.nr_hb;
+        b["hb_cn_H"] = bond.hb_cn_H;
+
         bonds.push_back(b);
     }
     output["bonds"] = bonds;
@@ -1866,9 +1875,14 @@ double ForceField::Calculate(bool gradient)
             CurcumaLogger::param(fmt::format("thread_{}_type", i), std::to_string(thread_type));
         }
 
-        // Collect D3 and D4 energies from all threads
+        // Collect D3 and D4 energies from all threads for reporting
         m_d3_energy += m_stored_threads[i]->D3Energy();
         m_d4_energy += m_stored_threads[i]->D4Energy();
+
+        // ALWAYS collect dispersion energy from all threads for the final sum
+        // (Ensures hybrid methods like uff-d3 are correctly summed via m_dispersion_energy)
+        double thread_disp = m_stored_threads[i]->DispersionEnergy();
+        m_dispersion_energy += thread_disp;
 
         if (thread_type != 3 && thread_type != 5) {
             m_vdw_energy += m_stored_threads[i]->VdWEnergy();
@@ -1886,10 +1900,9 @@ double ForceField::Calculate(bool gradient)
                 // This was causing double-counting: H2 showed 0.266 Eh instead of 0.050 Eh
                 // m_rep_energy is for UFF/QMDFF only (method != 3)
             }
-            // Collect dispersion and Coulomb energies for both GFN-FF and D3-only
-            double thread_disp = m_stored_threads[i]->DispersionEnergy();
+            // Collect Coulomb energies for both GFN-FF and D3-only
+            // (Dispersion already collected for all threads above)
             double thread_coul = m_stored_threads[i]->CoulombEnergy();
-            m_dispersion_energy += thread_disp;
             m_coulomb_energy += thread_coul;
 
             // Claude Generated (2025): Phase 5 - Collect HB/XB energies
@@ -1960,8 +1973,13 @@ double ForceField::Calculate(bool gradient)
         }
     }
 
-    // Claude Generated: Add GFN-FF dispersion, Coulomb, HB, XB, ATM, and batm energies to total
-    energy = m_e0 + m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy + m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + m_gfnff_repulsion + cg_energy + m_dispersion_energy + m_coulomb_energy + m_energy_hbond + m_energy_xbond + m_atm_energy + m_batm_energy + m_d3_energy + m_d4_energy;  // Claude Generated (Jan 2, 2026): Use member variables for D3/D4; (Jan 17, 2026): Add m_batm_energy
+    // Claude Generated (Jan 25, 2026): Total energy calculation
+    // CRITICAL FIX: Removed m_d3_energy and m_d4_energy from total sum because they are already accumulated in m_dispersion_energy
+    // in ForceFieldThread to avoid double counting for GFN-FF method.
+    energy = m_e0 + m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy +
+             m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + m_gfnff_repulsion +
+             cg_energy + m_dispersion_energy + m_coulomb_energy + m_energy_hbond +
+             m_energy_xbond + m_atm_energy + m_batm_energy;
 
     // Claude Generated (2025): Debug total GFN-FF energies
     if (CurcumaLogger::get_verbosity() >= 3 && (m_dispersion_energy != 0.0 || m_coulomb_energy != 0.0)) {

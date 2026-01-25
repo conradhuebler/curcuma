@@ -2903,6 +2903,11 @@ std::vector<int> GFNFF::determineHybridization() const
 
         int neighbor_count = neighbors.size();
 
+        // 🤖 DEBUG: Hybridization assignment (Jan 25, 2026)
+        if (CurcumaLogger::get_verbosity() >= 3 || (m_atomcount == 24 && CurcumaLogger::get_verbosity() >= 2)) {
+             // We print for caffeine specifically at v2
+        }
+
         // Step 2: Geometry-based hybridization assignment
         if (neighbor_count == 0) {
             hyb[i] = 3; // sp3 (isolated atom)
@@ -2910,6 +2915,31 @@ std::vector<int> GFNFF::determineHybridization() const
             // Special case for hydrogen and halogens: always sp3
             if (z == 1 || (z >= 9 && z <= 17)) {  // H or halogens (F, Cl, Br, I)
                 hyb[i] = 0; // sp3 for hydrogen and halogens (matches reference implementation)
+            } else if (z == 8) {
+                // CRITICAL FIX (Jan 25, 2026): Oxygen with 1 neighbor
+                // Reference: gfnff_ini2.f90:307-310
+                // Default: sp2 (carbonyl oxygen in ketones, aldehydes, amides)
+                // Exception: sp ONLY if bonded to C with 1 neighbor (CO molecule)
+                int neighbor_idx = neighbors[0];
+                int neighbor_CN = 0;
+                for (int j = 0; j < m_atomcount; ++j) {
+                    if (j == neighbor_idx) continue;
+                    Vector rn = m_geometry_bohr.row(neighbor_idx);
+                    Vector rj = m_geometry_bohr.row(j);
+                    double dist = (rn - rj).norm();
+                    double rcov_n = getCovalentRadius(m_atoms[neighbor_idx]) + getCovalentRadius(m_atoms[j]);
+                    if (dist < bond_threshold * rcov_n) {
+                        neighbor_CN++;
+                    }
+                }
+                // neighbor_CN doesn't include oxygen itself, so add 1
+                neighbor_CN += 1;
+
+                if (m_atoms[neighbor_idx] == 6 && neighbor_CN == 1) {
+                    hyb[i] = 1; // sp (CO - carbon monoxide only)
+                } else {
+                    hyb[i] = 2; // sp2 (carbonyl oxygen in organic molecules)
+                }
             } else {
                 hyb[i] = 1; // sp (terminal non-hydrogen/halogen atom)
             }
@@ -2989,41 +3019,64 @@ std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb) const
     std::vector<int> pi_fragments(m_atomcount, 0); // 0 = not in pi-system
     double bond_threshold = 1.3;
 
-    // Step 1: Find all sp2 and sp atoms (potential pi-system members)
-    std::vector<bool> is_pi_atom(m_atomcount, false);
+    // Step 1: Identify all potential pi-system members
+    // Robust detection: include sp, sp2, and picon candidates (N/O/F/S with lone pair conjugation)
+    std::vector<bool> is_pi_candidate(m_atomcount, false);
     for (int i = 0; i < m_atomcount; ++i) {
-        if (hyb[i] == 1 || hyb[i] == 2) { // sp or sp2
-            is_pi_atom[i] = true;
+        int z = m_atoms[i];
+        if (hyb[i] == 1 || hyb[i] == 2) {
+            is_pi_candidate[i] = true;
+        }
+        // "Picon" candidates: atoms like N in pyrrole or caffeine ring that are CN=3 (sp3)
+        // locally but their lone pair participates in the ring pi-system.
+        else if (z == 7 || z == 8 || z == 16) {
+            // These atoms will join a pi-system if they have a neighbor that is sp/sp2
+            is_pi_candidate[i] = true;
         }
     }
 
-    // Step 2: Build adjacency for pi-atoms only
+    // Step 2: Build adjacency for pi-candidates only
     std::vector<std::vector<int>> pi_neighbors(m_atomcount);
     for (int i = 0; i < m_atomcount; ++i) {
-        if (!is_pi_atom[i]) continue;
+        if (!is_pi_candidate[i]) continue;
 
         for (int j = i + 1; j < m_atomcount; ++j) {
-            if (!is_pi_atom[j]) continue;
+            if (!is_pi_candidate[j]) continue;
 
             double distance = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
             double rcov_sum = getCovalentRadius(m_atoms[i]) + getCovalentRadius(m_atoms[j]);
 
             if (distance < bond_threshold * rcov_sum) {
-                pi_neighbors[i].push_back(j);
-                pi_neighbors[j].push_back(i);
+                // Verify bond has pi-character or potential for conjugation
+                bool is_pi_bond = false;
+
+                // Case 1: Both are true pi-atoms (sp/sp2)
+                if ((hyb[i] == 1 || hyb[i] == 2) && (hyb[j] == 1 || hyb[j] == 2)) {
+                    is_pi_bond = true;
+                }
+                // Case 2: One is sp/sp2 and other is N/O/S with lone pair
+                else if ((hyb[i] == 1 || hyb[i] == 2) && (m_atoms[j] == 7 || m_atoms[j] == 8 || m_atoms[j] == 16)) {
+                    is_pi_bond = true;
+                }
+                else if ((hyb[j] == 1 || hyb[j] == 2) && (m_atoms[i] == 7 || m_atoms[i] == 8 || m_atoms[i] == 16)) {
+                    is_pi_bond = true;
+                }
+
+                if (is_pi_bond) {
+                    pi_neighbors[i].push_back(j);
+                    pi_neighbors[j].push_back(i);
+                }
             }
         }
     }
 
-    // Step 3: Connected component analysis (union-find/DFS)
-    // Assign same fragment ID to all connected pi-atoms
+    // Step 3: Connected component analysis
     std::vector<bool> visited(m_atomcount, false);
     int fragment_id = 1;
 
     for (int start = 0; start < m_atomcount; ++start) {
-        if (!is_pi_atom[start] || visited[start]) continue;
+        if (pi_neighbors[start].empty() || visited[start]) continue;
 
-        // DFS to mark all atoms in this conjugated system
         std::stack<int> stack;
         stack.push(start);
         visited[start] = true;
@@ -3040,7 +3093,6 @@ std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb) const
                 }
             }
         }
-
         fragment_id++;
     }
 

@@ -100,8 +100,13 @@ inline double calculateDihedralAngle(
     Eigen::Vector3d n2_normalized = n2 / n2_norm;
 
     // Calculate dihedral angle using atan2 for proper sign
+    // Reference: standard atan2 definition for dihedrals
+    // CRITICAL FIX (Jan 25, 2026): Correct sin_phi normalization.
+    // Standard sin_phi = (v1 x v2) . (v2 x v3) x v2 / (|v1 x v2| * |v2 x v3| * |v2|)
+    // In terms of normals: sin_phi = (n1 x n2) . v2_unit / (|n1| * |n2|)
+    // Formula below: v2_norm * (n1 . v3) / (|n1| * |n2|) is equivalent.
     double cos_phi = n1_normalized.dot(n2_normalized);
-    double sin_phi = v2_norm * n1_normalized.dot(v3);
+    double sin_phi = (v2_norm * n1_normalized.dot(v3)) / n2_norm;
 
     // Use atan2 for correct quadrant (returns angle in [-π, π])
     double phi = atan2(sin_phi, cos_phi);

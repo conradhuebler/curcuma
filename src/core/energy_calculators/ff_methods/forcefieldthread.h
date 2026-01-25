@@ -62,6 +62,12 @@ struct Bond {
     double cnfak_i = 0.0;            // cnfak_gfnff[z_i-1]
     double cnfak_j = 0.0;            // cnfak_gfnff[z_j-1]
     double ff = 1.0;                 // EN-correction: 1 - k1*|ΔEN| - k2*ΔEN²
+
+    // Claude Generated (Jan 24, 2026): Hydrogen bridge bond modulation (egbond_hb)
+    // Reference: Fortran gfnff_engrad.F90:449-453, 919-994
+    // For X-H bonds participating in HB: alpha_modified = (1 - 0.1*hb_cn_H) * alpha
+    int nr_hb = 0;           // Number of HB interactions this bond participates in
+    double hb_cn_H = 0.0;    // HB coordination number for hydrogen atom (used if nr_hb >= 1)
 };
 
 struct Angle {

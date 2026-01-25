@@ -258,19 +258,24 @@ static inline int detectElementSpecificHybridization(int Z, double cn,
     int int_cn = static_cast<int>(std::round(cn));
 
     // ===== Group 1: Hydrogen (H) =====
+    // Reference: gfnff_ini2.f90:218-222
+    // CRITICAL FIX (January 25, 2026): Normal hydrogen (CN=1) has hyb=0 (unknown), NOT sp3!
+    // This prevents generation of spurious extra torsions for H-C-X-Y quartets
     if (group == 1) { // H
         if (int_cn == 2) return 1; // sp (bridging H)
-        if (int_cn > 2) return 3; // sp3 (tetrahedral coordination)
-        if (int_cn > 4) return 0; // sp3 (metal hydride - special case)
-        return 3; // Default sp3
+        if (int_cn > 2) return 3; // sp3 (M+ tetrahedral coordination)
+        if (int_cn > 4) return 0; // M+ HC (metal hydride coordination)
+        return 0; // Default: hyb=0 (unknown) - matches XTB default at line 207
     }
 
     // ===== Group 2: Alkali/Alkaline Earth =====
+    // Reference: gfnff_ini2.f90:224-228
+    // CRITICAL FIX (January 25, 2026): Same as hydrogen - default is hyb=0
     if (group == 2) { // Li, Be, etc.
         if (int_cn == 2) return 1; // sp (bridging metal)
-        if (int_cn > 2) return 3; // sp3 (tetrahedral coordination)
+        if (int_cn > 2) return 3; // sp3 (M+ tetrahedral coordination)
         if (int_cn > 4) return 0; // Special case
-        return 3; // Default sp3
+        return 0; // Default: hyb=0 (unknown) - matches XTB default
     }
 
     // ===== Group 3: Boron (B) =====

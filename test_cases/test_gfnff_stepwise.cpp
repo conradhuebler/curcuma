@@ -259,6 +259,10 @@ public:
 
             // Initialize GFNFF
             GFNFF gfnff;
+            // Force D3 dispersion to match XTB 6.6.1 reference log
+            json gfnff_config;
+            gfnff_config["method"] = "cgfnff-d3";
+            gfnff.setParameters(gfnff_config);
             bool init_success = gfnff.InitialiseMolecule(mol_info);
             if (!init_success) {
                 std::cout << "  ✗ GFNFF initialization failed" << std::endl;

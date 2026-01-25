@@ -647,7 +647,8 @@ private:
                                                   double qa_j = 0.0, double qa_k = 0.0,
                                                   double cn_i = 2.0, double cn_l = 2.0,
                                                   bool in_ring = false, int ring_size = 0,
-                                                  int j_atom_idx = -1, int k_atom_idx = -1) const;
+                                                  int i_atom_idx = -1, int j_atom_idx = -1,
+                                                  int k_atom_idx = -1, int l_atom_idx = -1) const;
 
     /**
      * @brief Calculate dihedral angle for four atoms
