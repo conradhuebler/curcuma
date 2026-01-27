@@ -130,6 +130,7 @@
 
 ### 7. Analysis Tools
 - **✅ TrajectoryWriter** - Unified output system for Human/CSV/JSON/DAT formats
+- **✅ Scattering Analysis** - P(q)/S(q) with logarithmic q-spacing and automatic gnuplot visualization (2026)
 - **RMSD Calculations** - Root-mean-square deviation analysis
 - **Persistent Diagram** - Topological data analysis
 - **Hessian Analysis** - Second derivative calculations
@@ -241,6 +242,7 @@ curcuma/
 ✅ **Physical Architecture** - QM/MM methods organized under `src/core/energy_calculators/`
 ✅ **Topological Data Analysis** - dMatrix legacy functionality integrated as TDAEngine
 ✅ **Parameter Routing Fix** - Multi-module parameter hierarchies now work (json null-error fixed)
+✅ **Scattering Analysis Enhancements** (January 2026) - Logarithmic q-spacing (default), automatic gnuplot script generation with 4-panel plots, CSV separator fix
 
 ## Build and Test Commands
 
@@ -396,3 +398,4 @@ ctest -R "cli_rmsd_01" --verbose
 - ✅ **JSON Null-Error & Parameter Routing** (October 2025): SimpleMD/curcumaopt fixed - 11 tests now pass
 - ✅ **ForceField Inversion Bug** (October 2025): Vector bounds crash in UFF parameter generation fixed
 - ✅ **CLI Test Infrastructure** (October 2025): 26 End-to-End validation tests with scientific accuracy
+- ✅ **Analysis Output Refactoring** (January 2026): Unified handler architecture with registry pattern, eliminating ~800 lines of duplicate code

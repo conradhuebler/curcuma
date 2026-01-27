@@ -47,4 +47,9 @@ public:
 
     /*! \brief Identifier for this handler */
     std::string name() const override { return "Scattering"; }
+
+private:
+    /*! \brief Generate gnuplot script for scattering visualization - Claude Generated 2026 */
+    void generateGnuplotScript(const std::string& output_dir,
+                              const std::string& file_prefix) const;
 };

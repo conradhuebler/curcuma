@@ -1420,11 +1420,43 @@ json UnifiedAnalysis::calculateScatteringProperties(const Molecule& mol)
         scattering["cg_radius"] = cg_radius;
     }
 
-    // Build q-vector array
+    // Claude Generated 2026: Build q-vector with log or linear spacing
     std::vector<double> q_values;
-    double q_step = (q_max - q_min) / std::max(1, q_steps - 1);
-    for (int i = 0; i < q_steps; ++i) {
-        q_values.push_back(q_min + i * q_step);
+    std::string q_spacing = m_config.get<std::string>("scattering_q_spacing");
+
+    if (q_spacing == "log" || q_spacing == "logarithmic") {
+        // Logarithmic spacing: q[i] = q_min * (q_max/q_min)^(i/(N-1))
+        // Provides better resolution at low q (Guinier region)
+
+        if (q_min <= 0.0 || q_max <= 0.0) {
+            CurcumaLogger::error("Logarithmic q-spacing requires q_min > 0 and q_max > 0");
+            CurcumaLogger::warn("Falling back to linear spacing");
+            q_spacing = "linear";
+        } else if (q_max <= q_min) {
+            CurcumaLogger::error_fmt("Invalid q-range: q_max ({}) must be > q_min ({})", q_max, q_min);
+            return scattering;  // Empty result
+        } else {
+            double log_ratio = std::log(q_max / q_min);
+            for (int i = 0; i < q_steps; ++i) {
+                double exponent = static_cast<double>(i) / std::max(1, q_steps - 1);
+                q_values.push_back(q_min * std::exp(exponent * log_ratio));
+            }
+            CurcumaLogger::info_fmt("Using logarithmic q-spacing ({} points from {} to {} Å⁻¹)",
+                                    q_steps, q_min, q_max);
+        }
+    }
+
+    if (q_spacing == "linear" || q_values.empty()) {
+        // Linear spacing: q[i] = q_min + i * (q_max - q_min) / (N-1)
+        double q_step = (q_max - q_min) / std::max(1, q_steps - 1);
+        q_values.clear();
+        for (int i = 0; i < q_steps; ++i) {
+            q_values.push_back(q_min + i * q_step);
+        }
+        if (q_spacing == "linear") {
+            CurcumaLogger::info_fmt("Using linear q-spacing ({} points from {} to {} Å⁻¹)",
+                                    q_steps, q_min, q_max);
+        }
     }
 
     scattering["q_min"] = q_min;

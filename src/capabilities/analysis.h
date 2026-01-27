@@ -212,6 +212,7 @@ private:  // Private member variables - Claude Generated 2026
     PARAM(scattering_q_min, Double, 0.01, "Minimum q value (Å⁻¹)", "Scattering", {"qmin"})
     PARAM(scattering_q_max, Double, 2.0, "Maximum q value (Å⁻¹)", "Scattering", {"qmax"})
     PARAM(scattering_q_steps, Int, 100, "Number of q points", "Scattering", {"qsteps"})
+    PARAM(scattering_q_spacing, String, "log", "Q-spacing mode: log|linear", "Scattering", {"qspacing"})
     PARAM(scattering_form_factor, String, "auto", "Form factor type: auto|cromer_mann|cg_sphere", "Scattering", {"ff"})
     PARAM(scattering_cg_radius, Double, 3.0, "CG bead radius for sphere form factor (Å)", "Scattering Advanced", {})
     PARAM(scattering_angular_samples, Int, 50, "Angular samples for S(q) spherical averaging", "Scattering Advanced", {})
