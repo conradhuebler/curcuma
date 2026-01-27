@@ -8,7 +8,6 @@
 #include "../capabilities/trajectory_statistics.h"
 #include <iomanip>
 #include <algorithm>
-#include <chrono>
 #include "../core/curcuma_logger.h"
 
 using namespace nlohmann;
@@ -149,6 +148,94 @@ void TrajectoryWriter::writeDAT(std::ostream& out, const json& data, const std::
                     out << std::fixed << std::setprecision(6) << timestep["rmsd"].get<double>() << std::endl;
                 }
             }
+        }
+    }
+}
+
+// Claude Generated 2026: Statistics summary output for consistent Human-readable format
+void TrajectoryWriter::writeStatisticsSummary(std::ostream& out, const json& summary_data) const
+{
+    // Header/title
+    if (summary_data.contains("title")) {
+        out << "=== " << summary_data["title"].get<std::string>() << " ===" << std::endl;
+        out << std::endl;
+    }
+
+    // Metadata section
+    if (summary_data.contains("metadata")) {
+        for (auto& [key, value] : summary_data["metadata"].items()) {
+            out << std::setw(20) << std::left << key << ": ";
+            if (value.is_string()) {
+                out << value.get<std::string>();
+            } else if (value.is_number_integer()) {
+                out << value.get<int>();
+            } else if (value.is_number_float()) {
+                out << std::fixed << std::setprecision(m_precision) << value.get<double>();
+            } else {
+                out << value.dump();
+            }
+            out << std::endl;
+        }
+        out << std::endl;
+    }
+
+    // Sections with statistics
+    if (summary_data.contains("sections")) {
+        for (const auto& section : summary_data["sections"]) {
+            // Check if section is enabled (default true)
+            if (!section.value("enabled", true)) continue;
+
+            std::string name = section.value("name", "Unknown");
+            std::string unit = section.value("unit", "");
+
+            out << name << " Statistics:" << std::endl;
+
+            if (section.contains("statistics")) {
+                const auto& stats = section["statistics"];
+
+                // Mean ± StdDev
+                if (stats.contains("mean")) {
+                    out << "  Mean";
+                    if (stats.contains("std_dev")) {
+                        out << " ± StdDev:    ";
+                        out << std::fixed << std::setprecision(m_precision)
+                            << stats["mean"].get<double>() << " ± "
+                            << stats["std_dev"].get<double>();
+                    } else {
+                        out << ":            ";
+                        out << std::fixed << std::setprecision(m_precision)
+                            << stats["mean"].get<double>();
+                    }
+                    if (!unit.empty()) out << " " << unit;
+                    out << std::endl;
+                }
+
+                // Range (Min - Max)
+                if (stats.contains("min") && stats.contains("max")) {
+                    out << "  Range:           "
+                        << std::fixed << std::setprecision(m_precision)
+                        << stats["min"].get<double>() << " - "
+                        << stats["max"].get<double>();
+                    if (!unit.empty()) out << " " << unit;
+                    out << std::endl;
+                }
+
+                // Median
+                if (stats.contains("median")) {
+                    out << "  Median:          "
+                        << std::fixed << std::setprecision(m_precision)
+                        << stats["median"].get<double>();
+                    if (!unit.empty()) out << " " << unit;
+                    out << std::endl;
+                }
+
+                // Count
+                if (stats.contains("count")) {
+                    out << "  Count:           " << stats["count"].get<int>() << std::endl;
+                }
+            }
+
+            out << std::endl;
         }
     }
 }
@@ -1008,50 +1095,6 @@ std::vector<double> TrajectoryWriter::extractArrayValues(const json& array, cons
     return result;
 }
 
-// Helper function to extract sampled values from JSON array (every Nth element)
-std::vector<double> TrajectoryWriter::extractSampledArrayValues(const json& array, int sampling_rate) const
-{
-    std::vector<double> result;
-    if (!array.is_array() || sampling_rate <= 0) {
-        return result;
-    }
-
-    for (size_t i = 0; i < array.size(); i += sampling_rate) {
-        if (array[i].is_number() && !array[i].is_null()) {
-            result.push_back(array[i].get<double>());
-        } else {
-            result.push_back(0.0); // Default value for invalid values
-        }
-    }
-    return result;
-}
-
-// Helper function to format array values for human-readable output
-std::string TrajectoryWriter::formatArrayForHuman(const std::vector<double>& values, int width, int precision) const
-{
-    std::ostringstream oss;
-    for (size_t i = 0; i < values.size(); ++i) {
-        if (i > 0) {
-            oss << " ";
-        }
-        oss << std::fixed << std::setprecision(precision) << std::setw(width) << values[i];
-    }
-    return oss.str();
-}
-
-// Helper function to format array values for CSV output
-std::string TrajectoryWriter::formatArrayForCSV(const std::vector<double>& values, int precision) const
-{
-    std::ostringstream oss;
-    for (size_t i = 0; i < values.size(); ++i) {
-        if (i > 0) {
-            oss << ",";
-        }
-        oss << std::fixed << std::setprecision(precision) << values[i];
-    }
-    return oss.str();
-}
-
 std::string TrajectoryWriter::formatValueCSV(double value) const
 {
     std::ostringstream oss;
@@ -1167,97 +1210,16 @@ json TrajectoryWriter::getStatisticsValue(const json& timestep, const std::strin
     return nullptr;
 }
 
-// ---------- ProgressTracker Implementation ----------
+// ---------- ProgressTracker Implementation - Simplified KISS version (Claude Generated 2026) ----------
 
-ProgressTracker::ProgressTracker(int report_interval)
-    : m_report_interval(report_interval), m_auto_timing(false)
+void ProgressTracker::report(int current, int total, const std::string& label)
 {
-    m_start_time = std::chrono::steady_clock::now();
-}
-
-void ProgressTracker::reportProgress(int current, int total, const std::string& custom_message)
-{
-    if (current <= 0 || total <= 0) return;
-
-    int current_percent = int((double(current) / total) * 100);
-
-    // Initialize progress tracking vector if needed
-    if (m_progress_reported.empty()) {
-        initializeProgressVector(total);
+    int percent = (total > 0) ? (current * 100 / total) : 0;
+    if (percent != m_last_percent) {
+        fmt::print("\r{}: {}%", label, percent);
+        std::fflush(stdout);
+        m_last_percent = percent;
     }
-
-    int progress_step = current_percent / m_report_interval;
-
-    if (!m_progress_reported[progress_step] && current_percent >= m_report_interval) {
-        internalReport(current, total);
-        m_progress_reported[progress_step] = true;
-    }
-}
-
-void ProgressTracker::initializeProgressVector(int total)
-{
-    size_t vector_size = (100 / m_report_interval) + 1;
-    m_progress_reported.assign(vector_size, false);
-    m_start_time = std::chrono::steady_clock::now();
-}
-
-bool ProgressTracker::shouldReport(int current_percent)
-{
-    return current_percent >= m_report_interval && (current_percent % m_report_interval == 0);
-}
-
-void ProgressTracker::internalReport(int current, int total)
-{
-    std::string message = m_message;
-
-    if (m_auto_timing) {
-        double elapsed = getElapsedTime();
-        double eta = getEstimatedTimeRemaining(current, total);
-        message += fmt::format(" (Elapsed: {}, ETA: {})", formatTime(elapsed), formatTime(eta));
-    }
-
-    if (m_callback) {
-        m_callback(current, total, message);
-    } else {
-        CurcumaLogger::progress(current, total, message);
-    }
-}
-
-double ProgressTracker::getElapsedTime() const
-{
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_start_time);
-    return elapsed.count();
-}
-
-double ProgressTracker::getEstimatedTimeRemaining(int current, int total) const
-{
-    int processed = current;
-    if (processed == 0) return 0.0;
-
-    double elapsed = getElapsedTime();
-    return (elapsed * (total - processed)) / processed;
-}
-
-std::string ProgressTracker::formatTime(double seconds) const
-{
-    if (seconds < 60) {
-        return fmt::format("{:.0f}s", seconds);
-    } else if (seconds < 3600) {
-        int minutes = int(seconds / 60);
-        int secs = int(seconds) % 60;
-        return fmt::format("{}m{:02d}s", minutes, secs);
-    } else {
-        int hours = int(seconds / 3600);
-        int minutes = int((int(seconds) % 3600) / 60);
-        return fmt::format("{}h{:02d}m", hours, minutes);
-    }
-}
-
-void ProgressTracker::reset()
-{
-    m_progress_reported.clear();
-    m_start_time = std::chrono::steady_clock::now();
 }
 
 // ---------- JSON Schema Converter Helper Functions ----------

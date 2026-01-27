@@ -11,7 +11,6 @@
 #include <fstream>
 #include <string>
 #include <vector>
-#include <functional>
 #include "json.hpp"
 
 // Forward declaration
@@ -49,6 +48,19 @@ public:
     // Convenience methods
     void writeToFile(const std::string& filename, Format format, const json& data) const;
     void writeMultipleFiles(const std::string& base_filename, const json& data) const;
+
+    // Statistics summary output - Claude Generated 2026
+    // Writes aggregated statistics summaries in a consistent format
+    // JSON schema for summary_data:
+    // {
+    //   "title": "Analysis Results",
+    //   "metadata": {"file": "input.xyz", "frames": 100},
+    //   "sections": [
+    //     {"name": "Gyration", "unit": "Å", "enabled": true,
+    //      "statistics": {"mean": 5.1, "std_dev": 0.04, "min": 4.9, "max": 5.3, "median": 5.1}}
+    //   ]
+    // }
+    void writeStatisticsSummary(std::ostream& out, const json& summary_data) const;
 
     // Scattering per-frame file output helpers - Claude Generated 2026
     bool writeScatteringPerFrameFiles(const json& timestep_data,
@@ -131,9 +143,6 @@ private:
     // Scattering-specific helper functions
     double safeGetScatteringValue(const json& scattering, const std::string& key, double default_value = 0.0) const;
     std::vector<double> extractArrayValues(const json& array, const std::vector<int>& indices) const;
-    std::vector<double> extractSampledArrayValues(const json& array, int sampling_rate) const;
-    std::string formatArrayForHuman(const std::vector<double>& values, int width = 9, int precision = 6) const;
-    std::string formatArrayForCSV(const std::vector<double>& values, int precision = 6) const;
 
     // Scattering per-frame file output helpers - Claude Generated 2026
     std::vector<int> mapQValuesToIndices(const std::vector<double>& user_q_values,
@@ -155,37 +164,12 @@ private:
     json getStatisticsValue(const json& timestep, const std::string& metric, const std::string& stat_type) const;
 };
 
-// Progress tracking utility
+// Progress tracking utility - simplified KISS version (Claude Generated 2026)
 class ProgressTracker {
 public:
-    explicit ProgressTracker(int report_interval = 5);
-    ~ProgressTracker() = default;
-
-    void setReportInterval(int percent_interval) { m_report_interval = percent_interval; }
-    void setMessage(const std::string& message) { m_message = message; }
-    void setAutoTiming(bool enable) { m_auto_timing = enable; }
-    void setCallback(std::function<void(int, int, const std::string&)> callback) { m_callback = callback; }
-
-    void reportProgress(int current, int total, const std::string& custom_message = "");
-    void reset();
-
-    // Timing information
-    double getElapsedTime() const;
-    double getEstimatedTimeRemaining(int current, int total) const;
-    std::string formatTime(double seconds) const;
-
+    void report(int current, int total, const std::string& label = "Progress");
 private:
-    int m_report_interval;
-    std::string m_message;
-    bool m_auto_timing;
-    std::function<void(int, int, const std::string&)> m_callback;
-    std::vector<bool> m_progress_reported;
-    std::chrono::steady_clock::time_point m_start_time;
-    std::chrono::steady_clock::time_point m_last_report_time;
-
-    void initializeProgressVector(int total);
-    bool shouldReport(int current_percent);
-    void internalReport(int current, int total);
+    int m_last_percent = -1;  // Prevents spam at same percent
 };
 
 #endif // TRAJECTORY_WRITER_H
