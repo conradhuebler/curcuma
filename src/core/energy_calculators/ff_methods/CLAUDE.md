@@ -93,7 +93,24 @@ To add a new GFN-FF energy term (e.g., "CrossTerm"), you MUST modify:
 
 ## Current Implementation Status
 
-### Latest Improvements (January 9-10, 2026) ✅
+### Latest Improvements (January 25, 2026) ✅
+
+**Dispersion Formula Fix - Critical**:
+- ✅ **GFN-FF Modified BJ Damping**: Fixed dispersion to match XTB 6.6.1 reference
+  - **Root Cause**: Curcuma used standard D3/D4 BJ formula, but GFN-FF uses a modified formula
+  - **Fortran Reference**: `gfnff_gdisp0.f90:365-377`, `gfnff_param.f90:531-532`
+  - **Key Changes**:
+    - R0 computed from `sqrtZr4r2` (NOT from C8/C6 ratio)
+    - C8 implicit via `2*r4r2ij*t8` factor (NOT separate C8*t8 term)
+    - 0.5 factor for pair counting
+  - **Impact**: Caffeine dispersion error reduced 6.6× (26 mEh → 3.9 mEh)
+  - **Files Modified**:
+    - `forcefieldthread.h` - GFNFFDispersion struct (added r4r2ij, r0_squared)
+    - `d4param_generator.cpp` - Parameter generation with GFN-FF formula
+    - `forcefieldthread.cpp` - CalculateD4DispersionContribution() rewritten
+    - `forcefield.cpp` - setD4Dispersions(), setGFNFFDispersions() updated
+
+### Previous Improvements (January 9-10, 2026) ✅
 
 **Angle Parameter Refinement - Complete**:
 - ✅ **Phase 1-2D**: Element-specific angle corrections (commit f9338c5)
@@ -345,6 +362,29 @@ Vector dgam = Vector::Zero(natoms);  // NO dgam corrections for Phase 2!
 - **Result**: CH₃OCH₃ Coulomb improved from -0.101 Eh (110% error) to -0.044 Eh (8.3% error)
 - **Impact**: Total energy improved from 11.6% error to 0.6% error ✅
 
+### ⚠️ INVESTIGATED: Coulomb Alpha Parameter (January 27, 2026)
+**Analysis**: Investigated whether using charge-dependent alpha (alpeeq) vs base alpha affects accuracy
+- **Hypothesis**: Fortran gfnff_engrad.F90:1528 uses `topo%alpeeq` (charge-corrected), suggesting a potential fix
+- **Experiment**: Tested both `eeq_alp` (base α²) and `alpeeq` ((α + ff*qa)²) for gamma_ij calculation
+- **Results**:
+  - Base alpha (`eeq_alp`): Coulomb = -0.048652 Eh, Total = -1.209575 Eh (error: **-0.37 mEh**)
+  - Charge-dependent (`alpeeq`): Coulomb = -0.049320 Eh, Total = -1.210244 Eh (error: **-1.04 mEh**)
+- **Current Decision**: **Keep base alpha** - gives 3× better total energy accuracy
+- **Reason**: Differences in charge calculation (our Phase 1/2 vs Fortran) compensate for alpha choice
+- **dgam corrections**: Also tested, made things worse - **keep disabled** per experimental findings
+
+**IMPORTANT: Further Investigation Needed**
+- The discrepancy between Fortran reference (uses `alpeeq`) and our optimal results (uses base `eeq_alp`) indicates a deeper architectural difference
+- Possible causes:
+  1. **Charge calculation differences**: Our two-phase EEQ vs Fortran single-phase may produce systematically different charges
+  2. **Phase timing**: Fortran computes alpeeq AFTER Phase 1 charges; we compute it BEFORE Phase 2 charges
+  3. **Compensating errors**: Our higher charges in Phase 2 may require lower alpha to match XTB results
+- **Recommended Follow-up**:
+  - Compare exact charge values from our Phase 1/2 vs Fortran reference (qa vs q)
+  - Investigate timing and sequence of alpha/charge calculation in both implementations
+  - Test with reference Fortran gfnff_analyze to understand parameter flow
+  - Consider implementing Fortran's exact sequence if charge differences are root cause
+
 ### ✅ Parameter Management (Phase 2 - December 2025)
 - **ConfigManager Integration**: Type-safe parameter access with validation
 - **Parameter Flags**: Selective term calculation (dispersion, hbond, repulsion, coulomb enabled/disable)
@@ -539,9 +579,39 @@ if (elem_i > elem_j) {
 
 ---
 
-## D4 Implementation Status (January 17, 2026)
+## D4 Implementation Status (January 25, 2026)
 
-### ✅ CN-ONLY WEIGHTING FIX COMPLETE
+### ✅ BJ DAMPING FORMULA FIX (January 25, 2026)
+
+**Critical fix: GFN-FF uses a MODIFIED BJ damping formula, NOT standard D3/D4**
+
+**Problem**: Curcuma used standard BJ damping with R0 computed from C8/C6 ratio:
+```cpp
+// WRONG (standard D3/D4 BJ):
+r_crit = a1 * sqrt(C8/C6) + a2;
+E = -s6*C6/(r^6+R0^6) - s8*C8/(r^8+R0^8);
+```
+
+**Solution**: Implement GFN-FF modified formula from `gfnff_gdisp0.f90:365-377`:
+```cpp
+// CORRECT (GFN-FF modified BJ):
+r4r2ij = 3 * sqrtZr4r2_i * sqrtZr4r2_j;  // Implicit C8/C6 factor
+r0_squared = (a1*sqrt(r4r2ij) + a2)^2;    // Pre-computed from sqrtZr4r2
+t6 = 1/(r^6 + R0^6);
+t8 = 1/(r^8 + R0^8);
+E = -0.5 * C6 * (t6 + 2*r4r2ij*t8);       // 0.5 for pair counting
+```
+
+**Key Differences from Standard BJ**:
+1. R0 computed from `sqrtZr4r2` product (NOT from C8/C6 ratio)
+2. C8 implicit via `2*r4r2ij*t8` factor (NOT separate C8*t8 term)
+3. 0.5 factor for pair counting (each pair counted once)
+
+**Impact**: Caffeine dispersion error reduced **6.6×** (26 mEh → 3.9 mEh)
+
+**Reference**: `gfnff_gdisp0.f90:365-377`, `gfnff_param.f90:531-532`
+
+### ✅ CN-ONLY WEIGHTING FIX (January 17, 2026)
 
 **Critical fix to match GFN-FF Fortran reference**:
 
