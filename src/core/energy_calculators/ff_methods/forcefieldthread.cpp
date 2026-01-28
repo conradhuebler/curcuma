@@ -815,6 +815,14 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
         double energy = k_b * exp_term;          // k_b already contains sign
         m_bond_energy += energy * factor;
 
+        // Claude Generated (Jan 26, 2026): Temporary debug output for 1e-6 accuracy analysis
+        if (CurcumaLogger::get_verbosity() >= 3 && index < 10) {
+            CurcumaLogger::info(fmt::format("Bond {:2d}: atoms {}-{}, rij={:.6f}, r0={:.6f}, dr={:.6f}, "
+                                             "k_b={:.6f}, alpha={:.6f}, E={:.9f} Eh",
+                                             index, bond.i, bond.j, rij, r0_ij, dr,
+                                             k_b, alpha, energy * factor));
+        }
+
         if (m_calculate_gradient) {
             // dE/dr = -2*α*dr*E (chain rule)
             // Note: For fully accurate gradients, we'd also need dr0/dCN * dCN/dx terms
@@ -1575,17 +1583,28 @@ void ForceFieldThread::CalculateGFNFFInversionContribution()
 void ForceFieldThread::CalculateGFNFFDispersionContribution()
 {
     /**
-     * @brief D3/D4 Dispersion with Becke-Johnson damping (pairwise parallelizable)
+     * @brief GFN-FF Dispersion with MODIFIED Becke-Johnson damping (pairwise parallelizable)
      *
-     * Reference: Grimme et al., J. Chem. Phys. 132, 154104 (2010) [D3-BJ damping]
-     * Formula: E_disp = -Σ_ij f_damp(r_ij) * (s6*C6/r^6 + s8*C8/r^8)
-     * BJ damping: f_damp = r^n / (r^n + (a1*sqrt(C8/C6) + a2)^n)
+     * CLAUDE GENERATED (January 25, 2026): Fix to match XTB 6.6.1 reference
      *
-     * Claude Generated (2025): Phase 4 pairwise non-bonded implementation
+     * Reference: gfnff_gdisp0.f90:365-377
+     *
+     * GFN-FF uses a MODIFIED BJ damping formula (NOT standard D3/D4):
+     *   E = -0.5 * C6 * (t6 + 2*r4r2ij*t8)
+     * where:
+     *   t6 = 1/(r^6 + R0^6)
+     *   t8 = 1/(r^8 + R0^8)
+     *   r4r2ij = 3 * sqrtZr4r2_i * sqrtZr4r2_j  (implicit C8/C6 ratio)
+     *   R0^2 = (a1*sqrt(r4r2ij) + a2)^2 with a1=0.58, a2=4.80
+     *
+     * Key differences from standard BJ damping:
+     * 1. R0 computed from sqrtZr4r2 product (NOT from C8/C6 ratio)
+     * 2. C8 is implicit: factor 2*r4r2ij*t8 instead of separate C8*t8
+     * 3. 0.5 factor for pair counting (each pair counted once)
      */
 
     if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_dispersions.size() > 0) {
-        CurcumaLogger::info(fmt::format("Thread calculating {} dispersion pairs", m_gfnff_dispersions.size()));
+        CurcumaLogger::info(fmt::format("Thread calculating {} GFN-FF dispersion pairs", m_gfnff_dispersions.size()));
     }
 
     for (int index = 0; index < m_gfnff_dispersions.size(); ++index) {
@@ -1598,44 +1617,72 @@ void ForceFieldThread::CalculateGFNFFDispersionContribution()
 
         if (rij > disp.r_cut || rij < 1e-10) continue;  // Skip if beyond cutoff or too close
 
-        // Becke-Johnson damping function (order n=6 for C6, n=8 for C8)
-        double r_crit = disp.a1 * std::sqrt(disp.C8 / (disp.C6 + 1e-14)) + disp.a2;
+        // GFN-FF modified BJ damping (NOT standard D3/D4!)
+        // Reference: gfnff_gdisp0.f90:365-377
+        //
+        // r0 = radii(lin(ati, atj))  // This is R0^2 (pre-computed)
+        // t6 = 1._wp/(r2**3+r0**3)   // 1/(r^6 + R0^6)
+        // t8 = 1._wp/(r2**4+r0**4)   // 1/(r^8 + R0^8)
 
-        // Phase 1.4: Optimize power calculations (Claude Generated - Dec 2025)
-        // OPTIMIZATION: r^6 = (r^2)^3, r^8 = (r^2)^4 avoids expensive std::pow()
-        // Benchmark: 3-5% speedup in dispersion contribution
+        // Optimized power calculations: r^6 = (r^2)^3, r^8 = (r^2)^4
         double r2 = rij * rij;
-        double r6 = r2 * r2 * r2;  // (r^2)^3
-        double r_crit2 = r_crit * r_crit;
-        double damp6 = r_crit2 * r_crit2 * r_crit2;  // (r_crit^2)^3
+        double r6 = r2 * r2 * r2;     // (r^2)^3 = r^6
 
-        // C6 term: -s6*C6/r^6 with BJ damping
-        double f_damp6 = r6 / (r6 + damp6);
-        double E_C6 = -disp.s6 * disp.C6 * f_damp6 / r6;
+        // R0^6 = (R0^2)^3 where r0_squared is pre-computed as (a1*sqrt(r4r2ij)+a2)^2
+        double r0_6 = disp.r0_squared * disp.r0_squared * disp.r0_squared;
 
-        // C8 term: -s8*C8/r^8 with BJ damping
-        double r8 = r2 * r2 * r2 * r2;  // (r^2)^4
-        double damp8 = damp6 * r_crit2;  // r_crit^8 = r_crit^6 * r_crit^2
-        double f_damp8 = r8 / (r8 + damp8);
-        double E_C8 = -disp.s8 * disp.C8 * f_damp8 / r8;
+        // t6 = 1/(r^6 + R0^6)
+        double t6 = 1.0 / (r6 + r0_6);
 
-        double energy = (E_C6 + E_C8) * m_final_factor;
+        // t8 = 1/(r^8 + R0^8)
+        double r8 = r6 * r2;          // r^8 = r^6 * r^2
+        double r0_8 = r0_6 * disp.r0_squared;  // R0^8 = R0^6 * R0^2
+        double t8 = 1.0 / (r8 + r0_8);
+
+        // GFN-FF dispersion formula: disp = (t6 + 2*r4r2ij*t8)
+        // Energy: dE = -c6 * disp * 0.5  (0.5 for pair counting)
+        // Reference: gfnff_gdisp0.f90:374,377
+        double disp_sum = t6 + 2.0 * disp.r4r2ij * t8;
+        double energy = -0.5 * disp.C6 * disp_sum * m_final_factor;
+
         m_dispersion_energy += energy;
-        m_d4_energy += energy;  // CRITICAL (Jan 7, 2026): GFN-FF dispersion reports as D4 energy
+        m_d4_energy += energy;  // GFN-FF dispersion reports as D4 energy
+
+        // DEBUG: Per-pair D4 dispersion breakdown for 1e-6 accuracy (Claude Generated Jan 26, 2026)
+        if (index < 5 && CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("D4 disp pair {}: i={}, j={}, rij={:.6f} Bohr, C6={:.6e}, "
+                                             "r0_squared={:.6f}, r4r2ij={:.6f}, t6={:.6e}, t8={:.6e}, "
+                                             "disp_sum={:.6e}, E_pair={:.9e} Eh",
+                                             index, disp.i, disp.j, rij, disp.C6,
+                                             disp.r0_squared, disp.r4r2ij, t6, t8,
+                                             disp_sum, energy));
+        }
 
         if (m_calculate_gradient) {
-            // Analytical gradient: dE/dr = dE_C6/dr + dE_C8/dr
-            // d/dr[f_damp * C_n / r^n] = -n*f_damp*C_n/r^(n+1) + C_n/r^n * df_damp/dr
+            // Analytical gradient for GFN-FF dispersion formula
+            // d/dr[E] = d/dr[-0.5 * C6 * (t6 + 2*r4r2ij*t8)]
+            //
+            // Reference: gfnff_gdisp0.f90:371-372
+            // d6 = -6*r2**2*t6**2  -> derivative of t6 w.r.t. r
+            // d8 = -8*r2**3*t8**2  -> derivative of t8 w.r.t. r
+            //
+            // Chain rule: dt6/dr = dt6/d(r^2) * d(r^2)/dr = dt6/d(r^2) * 2*r
+            //             dt6/d(r^2) = -3*(r^2)^2 / (r^6 + R0^6)^2 = -3*r^4 * t6^2
+            //             dt6/dr = -6*r^5 * t6^2 / r = -6*r^4 * t6^2 (per Fortran: -6*r2**2*t6**2)
 
-            // C6 gradient
-            double df_damp6_dr = 6.0 * r6 * damp6 / (std::pow(r6 + damp6, 2) * rij);
-            double dE_C6_dr = -6.0 * E_C6 / rij + (-disp.s6 * disp.C6 / r6) * df_damp6_dr;
+            double d6 = -6.0 * r2 * r2 * t6 * t6;  // d(t6)/d(r^2) scaled appropriately
+            double d8 = -8.0 * r2 * r2 * r2 * t8 * t8;  // d(t8)/d(r^2) scaled appropriately
 
-            // C8 gradient
-            double df_damp8_dr = 8.0 * r8 * damp8 / (std::pow(r8 + damp8, 2) * rij);
-            double dE_C8_dr = -8.0 * E_C8 / rij + (-disp.s8 * disp.C8 / r8) * df_damp8_dr;
+            // ddisp/d(r^2) = d6 + 2*r4r2ij*d8
+            double ddisp_dr2 = d6 + 2.0 * disp.r4r2ij * d8;
 
-            double dEdr = (dE_C6_dr + dE_C8_dr) * m_final_factor;
+            // dE/dr = -0.5 * C6 * ddisp/d(r^2) * d(r^2)/dr = -0.5 * C6 * ddisp_dr2 * 2*r
+            //       = -C6 * ddisp_dr2 * r
+            // Gradient direction: dE/dr * (rij_vec/rij)
+            double dEdr = -disp.C6 * ddisp_dr2 * rij * m_final_factor;
+
+            // Note: ddisp_dr2 is negative (d6, d8 are negative), so dEdr is positive
+            // This means repulsion-like gradient contribution at short range (expected)
             Eigen::Vector3d grad = dEdr * rij_vec / rij;
 
             m_gradient.row(disp.i) += grad.transpose();
@@ -1837,6 +1884,18 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
     }
 
     // =========================================================================
+    // COULOMB ENERGY DEBUG: Track three components separately for comparison
+    // Reference: Fortran gfnff_engrad.F90:1378-1389
+    //   - Interaction Energy: -0.020102844599 Eh (pairwise)
+    //   - Electronegativity: -0.086143530128 Eh (-q*chi)
+    //   - Self-Energy:        0.060747726300 Eh (0.5*q²*(gam+sqrt(2/π)/sqrt(α)))
+    //   - Total:             -0.045886388029 Eh
+    // =========================================================================
+    double E_interaction = 0.0;  // Pairwise: Σ q_i*q_j*erf(γ*r)/r
+    double E_electronegativity = 0.0;  // EN term: -Σ q_i*χ_i
+    double E_self_hardness = 0.0;  // Self: Σ 0.5*q_i²*(γ_i + √(2/π)/√α_i)
+
+    // =========================================================================
     // TERM 1: Pairwise Coulomb interactions (distance-dependent)
     // =========================================================================
     for (int index = 0; index < m_gfnff_coulombs.size(); ++index) {
@@ -1855,9 +1914,16 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
         double erf_term = std::erf(gamma_r);
         double energy_pair = coul.q_i * coul.q_j * erf_term / rij;  // FIX: /r not /r²
 
-        // Claude Generated (Session 10): CRITICAL FIX - Add kJ/mol → Eh conversion for Coulomb terms
-        // EEQ quantities are in kJ/mol but need to be converted to Eh for total energy
+        E_interaction += energy_pair;
         m_coulomb_energy += energy_pair;
+
+        // DEBUG: Per-pair Coulomb breakdown for 1e-6 accuracy (Claude Generated Jan 26, 2026)
+        if (index < 5 && CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("Coulomb pair {}: i={}, j={}, rij={:.6f} Bohr, gamma_ij={:.6f}, "
+                                             "q_i={:.6f}, q_j={:.6f}, erf={:.6f}, E_pair={:.9f} Eh",
+                                             index, coul.i, coul.j, rij, coul.gamma_ij,
+                                             coul.q_i, coul.q_j, erf_term, energy_pair));
+        }
 
         if (m_calculate_gradient) {
             // Claude Generated (Dec 2025, Session 9): CRITICAL FIX - Gradient for erf(γ*r)/r NOT erf(γ*r)/r²!
@@ -1879,14 +1945,6 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
     // =========================================================================
     // TERM 2 & 3: Self-energy and Self-interaction (per-atom, distance-independent)
     // =========================================================================
-    // CRITICAL FIX (Dec 2025): Calculate self-energy only for ASSIGNED atoms
-    // Each thread gets a subset of atoms to avoid duplicate self-energy calculation
-    //
-    // Thread-safe distribution:
-    // - AutoRanges() distributes atoms across threads (e.g., 100 atoms, 4 threads)
-    // - Thread 0: atoms [0, 25), Thread 1: atoms [25, 50), etc.
-    // - Each atom's self-energy calculated EXACTLY ONCE across all threads
-    //
     // Build atom-to-parameters map from Coulomb pairs for fast lookup
     std::unordered_map<int, const GFNFFCoulomb*> atom_to_params;
     for (const auto& coul : m_gfnff_coulombs) {
@@ -1920,26 +1978,90 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
             alp = params->alp_j;
         }
 
-        // TERM 2: Self-energy for this atom
-        double energy_self = -q * chi;
+        // TERM 2: Electronegativity energy for this atom
+        double energy_en = -q * chi;
+        E_electronegativity += energy_en;
 
-        // TERM 3: Self-interaction for this atom
+        // TERM 3: Self-interaction (hardness) for this atom
         double selfint_term = gam + sqrt_2_over_pi / std::sqrt(alp);
         double energy_selfint = 0.5 * q * q * selfint_term;
+        E_self_hardness += energy_selfint;
 
-        // Add both self-terms
-        double energy_atom = energy_self + energy_selfint;
+        // Add both self-terms to total
+        double energy_atom = energy_en + energy_selfint;
         m_coulomb_energy += energy_atom;
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::param(fmt::format("coulomb_self_atom_{}", atom_id),
-                fmt::format("E_self={:.6f}, E_selfint={:.6f}, total={:.6f} Eh",
-                    energy_self, energy_selfint, energy_atom));
+                fmt::format("q={:.6f}, chi={:.6f}, gam={:.6f}, alp={:.6f}, E_en={:.6f}, E_self={:.6f} Eh",
+                    q, chi, gam, alp, energy_en, energy_selfint));
         }
     }
 
+    // =========================================================================
+    // COULOMB DEBUG SUMMARY: Compare three components with Fortran reference
+    // =========================================================================
     if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_coulombs.size() > 0) {
-        CurcumaLogger::param("thread_coulomb_energy", fmt::format("{:.6f} Eh", m_coulomb_energy));
+        std::cout << "\n=== COULOMB ENERGY DEBUG (vs Fortran CH3OCH3 reference) ===" << std::endl;
+        std::cout << fmt::format("  Interaction Energy:      {:+.12f} Eh (Fortran: -0.020102844599)", E_interaction) << std::endl;
+        std::cout << fmt::format("  Electronegativity:       {:+.12f} Eh (Fortran: -0.086143530128)", E_electronegativity) << std::endl;
+        std::cout << fmt::format("  Self-Energy (hardness):  {:+.12f} Eh (Fortran: +0.060747726300)", E_self_hardness) << std::endl;
+        std::cout << fmt::format("  Total Coulomb:           {:+.12f} Eh (Fortran: -0.045886388029)", m_coulomb_energy) << std::endl;
+        std::cout << fmt::format("  Difference from Fortran: {:+.12f} Eh ({:.2f} mEh)",
+            m_coulomb_energy - (-0.045886388029), (m_coulomb_energy - (-0.045886388029)) * 1000.0) << std::endl;
+
+        // DEBUG: Print per-atom parameters for comparison with Fortran
+        // Fortran reference charges for CH3OCH3 (goed_gfnff output):
+        //   C1,C2: 0.039539, H: 0.044778, O: -0.347747
+        std::cout << "\n--- Per-Atom Charges: Curcuma vs Fortran ---" << std::endl;
+        std::cout << "Atom |   q_Curcuma  |  q_Fortran | q_Diff  |    chi     |    gam    |    alp    " << std::endl;
+        std::cout << "-----|--------------|------------|---------|------------|-----------|----------" << std::endl;
+
+        // Rebuild atom_to_params map for debug output
+        std::unordered_map<int, const GFNFFCoulomb*> debug_atom_to_params;
+        for (const auto& coul : m_gfnff_coulombs) {
+            if (debug_atom_to_params.find(coul.i) == debug_atom_to_params.end()) {
+                debug_atom_to_params[coul.i] = &coul;
+            }
+            if (debug_atom_to_params.find(coul.j) == debug_atom_to_params.end()) {
+                debug_atom_to_params[coul.j] = &coul;
+            }
+        }
+
+        // Print charge comparison table
+        for (int atom_id : m_assigned_atoms_for_self_energy) {
+            auto it = debug_atom_to_params.find(atom_id);
+            if (it == debug_atom_to_params.end()) continue;
+            const GFNFFCoulomb* params = it->second;
+            double q, chi, gam, alp;
+            if (params->i == atom_id) {
+                q = params->q_i; chi = params->chi_i; gam = params->gam_i; alp = params->alp_i;
+            } else {
+                q = params->q_j; chi = params->chi_j; gam = params->gam_j; alp = params->alp_j;
+            }
+            // Fortran reference charges (C1=0,C2=1, H3-5=2-4, O=5, H7-9=6-8)
+            double q_fort = 0.0;
+            if (atom_id < 2) q_fort = 0.039539;  // C
+            else if (atom_id == 5) q_fort = -0.347747;  // O
+            else q_fort = 0.044778;  // H
+            double q_diff = q - q_fort;
+            std::cout << "ATOM_DATA: " << atom_id << " " << q << " " << q_fort << " " << q_diff << " " << chi << " " << gam << " " << alp << std::endl;
+        }
+
+        // Sum of charges check
+        double sum_q_cur = 0.0, sum_q_fort = 0.0;
+        for (int atom_id : m_assigned_atoms_for_self_energy) {
+            auto it = debug_atom_to_params.find(atom_id);
+            if (it == debug_atom_to_params.end()) continue;
+            const GFNFFCoulomb* params = it->second;
+            double q = (params->i == atom_id) ? params->q_i : params->q_j;
+            sum_q_cur += q;
+            if (atom_id < 2) sum_q_fort += 0.039539;
+            else if (atom_id == 5) sum_q_fort += -0.347747;
+            else sum_q_fort += 0.044778;
+        }
+        std::cout << fmt::format("Sum: Curcuma={:+.8f}, Fortran={:+.8f}", sum_q_cur, sum_q_fort) << std::endl;
+        std::cout << "============================================================\n" << std::endl;
     }
 }
 
@@ -2535,28 +2657,33 @@ void ForceFieldThread::CalculateD3DispersionContribution()
     }
 }
 
-// Claude Generated 2025: Native D4 Dispersion with Becke-Johnson damping
+// Claude Generated 2025: Native D4/GFN-FF Dispersion with MODIFIED Becke-Johnson damping
+// UPDATED (January 25, 2026): Fix to match XTB 6.6.1 reference
 void ForceFieldThread::CalculateD4DispersionContribution()
 {
     /**
-     * @brief Native D4 Dispersion with Becke-Johnson damping for GFN-FF
+     * @brief GFN-FF Dispersion with MODIFIED Becke-Johnson damping
      *
-     * This method calculates D4 dispersion correction using charge-weighted C6 coefficients
-     * from D4ParameterGenerator (Casimir-Polder integration).
+     * CLAUDE GENERATED (January 25, 2026): Fix to match XTB 6.6.1 reference
      *
-     * Reference: Caldeweyher et al., J. Chem. Phys. 147, 034112 (2017) [D4-BJ]
-     * Formula: E_disp = -Σ_ij f_damp(r_ij) * (s6*C6/r^6 + s8*C8/r^8)
+     * Reference: gfnff_gdisp0.f90:365-377
      *
-     * Key Differences from D3:
-     * - C6 coefficients charge-weighted via calculateChargeWeightedC6()
-     * - Frequency-dependent polarizabilities (alpha_iw)
-     * - CN-dependent Gaussian weighting in C6 calculation
+     * GFN-FF uses a MODIFIED BJ damping formula (NOT standard D3/D4):
+     *   E = -0.5 * C6 * (t6 + 2*r4r2ij*t8)
+     * where:
+     *   t6 = 1/(r^6 + R0^6)
+     *   t8 = 1/(r^8 + R0^8)
+     *   r4r2ij = 3 * sqrtZr4r2_i * sqrtZr4r2_j  (implicit C8/C6 ratio)
+     *   R0^2 = (a1*sqrt(r4r2ij) + a2)^2 with a1=0.58, a2=4.80
      *
-     * Claude Generated: December 25, 2025
+     * Key differences from standard BJ damping:
+     * 1. R0 computed from sqrtZr4r2 product (NOT from C8/C6 ratio)
+     * 2. C8 is implicit: factor 2*r4r2ij*t8 instead of separate C8*t8
+     * 3. 0.5 factor for pair counting (each pair counted once)
      */
 
     if (CurcumaLogger::get_verbosity() >= 3 && m_d4_dispersions.size() > 0) {
-        CurcumaLogger::info(fmt::format("Thread {} calculating {} D4 dispersion pairs",
+        CurcumaLogger::info(fmt::format("Thread {} calculating {} GFN-FF/D4 dispersion pairs",
                                         m_thread, m_d4_dispersions.size()));
     }
 
@@ -2570,51 +2697,58 @@ void ForceFieldThread::CalculateD4DispersionContribution()
 
         if (rij > disp.r_cut || rij < 1e-10) continue;  // Skip if beyond cutoff or too close
 
-        // Becke-Johnson damping (D4 uses same formula as D3)
-        double r_crit = disp.a1 * std::sqrt(disp.C8 / (disp.C6 + 1e-14)) + disp.a2;
-
-        // Optimize power calculations: r^6 = (r^2)^3, r^8 = (r^2)^4
+        // GFN-FF modified BJ damping (NOT standard D3/D4!)
+        // Reference: gfnff_gdisp0.f90:365-377
+        //
+        // Optimized power calculations: r^6 = (r^2)^3, r^8 = (r^2)^4
         double r2 = rij * rij;
-        double r6 = r2 * r2 * r2;  // (r^2)^3
-        double r_crit2 = r_crit * r_crit;
-        double damp6 = r_crit2 * r_crit2 * r_crit2;  // (r_crit^2)^3
+        double r6 = r2 * r2 * r2;     // (r^2)^3 = r^6
 
-        // C6 term: -s6*C6/r^6 with BJ damping (D4 uses charge-weighted C6)
-        double f_damp6 = r6 / (r6 + damp6);
-        double E_C6 = -disp.s6 * disp.C6 * f_damp6 / r6;
+        // R0^6 = (R0^2)^3 where r0_squared is pre-computed as (a1*sqrt(r4r2ij)+a2)^2
+        double r0_6 = disp.r0_squared * disp.r0_squared * disp.r0_squared;
 
-        // C8 term: -s8*C8/r^8 with BJ damping
-        double r8 = r2 * r2 * r2 * r2;  // (r^2)^4
-        double damp8 = damp6 * r_crit2;  // r_crit^8 = r_crit^6 * r_crit^2
-        double f_damp8 = r8 / (r8 + damp8);
-        double E_C8 = -disp.s8 * disp.C8 * f_damp8 / r8;
+        // t6 = 1/(r^6 + R0^6)
+        double t6 = 1.0 / (r6 + r0_6);
 
-        double pair_energy = (E_C6 + E_C8) * m_final_factor;
+        // t8 = 1/(r^8 + R0^8)
+        double r8 = r6 * r2;          // r^8 = r^6 * r^2
+        double r0_8 = r0_6 * disp.r0_squared;  // R0^8 = R0^6 * R0^2
+        double t8 = 1.0 / (r8 + r0_8);
+
+        // GFN-FF dispersion formula: disp = (t6 + 2*r4r2ij*t8)
+        // Energy: dE = -c6 * disp * 0.5  (0.5 for pair counting)
+        // Reference: gfnff_gdisp0.f90:374,377
+        double disp_sum = t6 + 2.0 * disp.r4r2ij * t8;
+        double pair_energy = -0.5 * disp.C6 * disp_sum * m_final_factor;
+
         m_d4_energy += pair_energy;
 
-        // Verbosity 3: Detailed debug output for each pair
-        if (CurcumaLogger::get_verbosity() >= 3) {
+        // Verbosity 2: Detailed debug output for first pair
+        if (CurcumaLogger::get_verbosity() >= 2 && index == 0) {
             CurcumaLogger::info(fmt::format(
-                "D4 Pair i={} j={} r={:.4f} C6={:.4f} C8={:.4f} E={:.6e} Eh",
-                disp.i, disp.j, rij, disp.C6, disp.C8, pair_energy
+                "GFN-FF D4 DEBUG: i={} j={} r={:.4f} C6={:.4f} r4r2ij={:.4f} R0²={:.4f} E={:.6e} Eh",
+                disp.i, disp.j, rij, disp.C6, disp.r4r2ij, disp.r0_squared, pair_energy
             ));
-            CurcumaLogger::info(fmt::format("  s6={:.4f} s8={:.4f} a1={:.4f} a2={:.4f}", disp.s6, disp.s8, disp.a1, disp.a2));
-            CurcumaLogger::info(fmt::format("  R0={:.4f} f_damp6={:.4f} f_damp8={:.4f}", r_crit, f_damp6, f_damp8));
         }
 
         if (m_calculate_gradient) {
-            // Analytical gradient: dE/dr = dE_C6/dr + dE_C8/dr
-            // d/dr[f_damp * C_n / r^n] = -n*f_damp*C_n/r^(n+1) + C_n/r^n * df_damp/dr
+            // Analytical gradient for GFN-FF dispersion formula
+            // d/dr[E] = d/dr[-0.5 * C6 * (t6 + 2*r4r2ij*t8)]
+            //
+            // Reference: gfnff_gdisp0.f90:371-372
+            // d6 = -6*r2**2*t6**2  -> derivative of t6 w.r.t. r
+            // d8 = -8*r2**3*t8**2  -> derivative of t8 w.r.t. r
 
-            // C6 gradient
-            double df_damp6_dr = 6.0 * r6 * damp6 / (std::pow(r6 + damp6, 2) * rij);
-            double dE_C6_dr = -6.0 * E_C6 / rij + (-disp.s6 * disp.C6 / r6) * df_damp6_dr;
+            double d6 = -6.0 * r2 * r2 * t6 * t6;  // d(t6)/d(r^2) scaled appropriately
+            double d8 = -8.0 * r2 * r2 * r2 * t8 * t8;  // d(t8)/d(r^2) scaled appropriately
 
-            // C8 gradient
-            double df_damp8_dr = 8.0 * r8 * damp8 / (std::pow(r8 + damp8, 2) * rij);
-            double dE_C8_dr = -8.0 * E_C8 / rij + (-disp.s8 * disp.C8 / r8) * df_damp8_dr;
+            // ddisp/d(r^2) = d6 + 2*r4r2ij*d8
+            double ddisp_dr2 = d6 + 2.0 * disp.r4r2ij * d8;
 
-            double dEdr = (dE_C6_dr + dE_C8_dr) * m_final_factor;
+            // dE/dr = -0.5 * C6 * ddisp/d(r^2) * d(r^2)/dr = -0.5 * C6 * ddisp_dr2 * 2*r
+            //       = -C6 * ddisp_dr2 * r
+            double dEdr = -disp.C6 * ddisp_dr2 * rij * m_final_factor;
+
             Eigen::Vector3d grad = dEdr * rij_vec / rij;
 
             m_gradient.row(disp.i) += grad.transpose();
@@ -2627,7 +2761,7 @@ void ForceFieldThread::CalculateD4DispersionContribution()
     }
 
     if (CurcumaLogger::get_verbosity() >= 2 && m_d4_dispersions.size() > 0) {
-        CurcumaLogger::result(fmt::format("D4 Dispersion Energy: {:.6e} Eh", m_d4_energy));
+        CurcumaLogger::result(fmt::format("GFN-FF D4 Dispersion Energy: {:.6e} Eh", m_d4_energy));
     }
 }
 

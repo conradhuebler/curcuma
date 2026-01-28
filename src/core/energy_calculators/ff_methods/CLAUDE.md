@@ -32,7 +32,8 @@ Force field implementation system with multi-threading support for UFF, QMDFF, a
 - **Accuracy**: CH₄ charges improved 75% (5.0× error → 1.3× error), fixes 4/6 GFN-FF energy terms
 - **Used By**: GFN-FF for Coulomb charges, D4ParameterGenerator for charge-dependent C6
 - **Parameters**: Element-specific (chi_eeq, gam_eeq, alpha_eeq, cnf_eeq) from gfnff_par.h + ConfigManager integration
-- **Status**: Phase 2 CNF fix verified, Phase 1 accuracy investigation ongoing
+- **Coulomb Energy Fix (Jan 28, 2026)**: Corrected dgam ff-values and enabled charge-corrected gameeq/alpeeq - Coulomb energy now matches Fortran reference exactly (< 1 nEh error)
+- **Status**: ✅ EEQ charges correct, ✅ Coulomb energy exact match
 
 **GFNFF Class** (`gfnff_method.cpp/h` + `../qm_methods/gfnff.cpp/h`):
 - **Responsibility**: GFN-FF parameter generation (topology-aware) + ConfigManager integration

@@ -607,6 +607,10 @@ json GFNFF::generateGFNFFParameters()
         parameters["dihedrals"] = generateGFNFFTorsions(); // ✅ Phase 1.1 implemented
         parameters["inversions"] = generateGFNFFInversions(); // ✅ Phase 1.2 implemented
 
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info(fmt::format("DEBUG: generateGFNFFParameters returning {} bonds", parameters["bonds"].size()));
+        }
+
         // Phase 4.2: Generate pairwise non-bonded parameters
         parameters["gfnff_coulombs"] = generateGFNFFCoulombPairs();
         json repulsion_data = generateGFNFFRepulsionPairs();
@@ -1377,10 +1381,18 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // But we need to store in Bohr for GFN-FF internal use
     //
     // Formula: r0_bohr = (ra + rb + rabshift) * ff
-    // Reference: Fortran gfnff_rab.f90:153
+    // Reference: Fortran gfnff_rab.f90:153 (gfnffdrab subroutine)
+    // NOTE: Shift is added to ra+rb BEFORE multiplying by EN factor ff
     double r0_bohr = (ra + rb + rabshift) * ff;
     params.equilibrium_distance = r0_bohr;  // Store in Bohr
     params.rabshift = rabshift;  // Claude Generated (Dec 2025): Store for validation tests
+
+    if (atom1 == 0 && atom2 == 1 && CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("=== N-C r0 DEBUG: Bond {}-{} ===", atom1, atom2));
+        CurcumaLogger::info(fmt::format("  ra={:.6f}, rb={:.6f}, ff={:.6f}, rabshift={:.6f}", ra, rb, ff, rabshift));
+        CurcumaLogger::info(fmt::format("  Formula: r0 = ({:.6f} + {:.6f} + {:.6f}) * {:.6f} = {:.6f} Bohr",
+                          ra, rb, rabshift, ff, r0_bohr));
+    }
 
     // CRITICAL DEBUG (Jan 7, 2026): Trace C-H r0 calculation with corrected formula
     bool is_CH_bond = ((z1 == 1 && z2 == 6) || (z1 == 6 && z2 == 1));
@@ -1393,7 +1405,8 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         CurcumaLogger::info(fmt::format("  FF factor: k1={:.6f}, k2={:.6f}, ff={:.6f}", k1, k2, ff));
         CurcumaLogger::info(fmt::format("  Shift: gen_rabshift={:.6f}, shift={:.6f}, total={:.6f}", gen_rabshift, shift, rabshift));
         CurcumaLogger::info(fmt::format("  Hyb: hyb1={}, hyb2={}", hyb1_value, hyb2_value));
-        CurcumaLogger::info(fmt::format("  Formula: r0 = ({:.6f} + {:.6f} + {:.6f}) * {:.6f} = {:.6f} Bohr", ra, rb, rabshift, ff, r0_bohr));
+        CurcumaLogger::info(fmt::format("  Formula: r0 = ({:.6f} + {:.6f}) * {:.6f} + {:.6f} = {:.6f} Bohr",
+                          ra, rb, ff, rabshift, r0_bohr));
         CurcumaLogger::info(fmt::format("  Result: r0_bohr={:.6f}, r0_angstrom={:.6f}", r0_bohr, r0_bohr * 0.529177));
     }
 
@@ -1490,11 +1503,12 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         }
     }
 
-    // Phase 3: Special cases (Fortran gfnff_ini.f90:1134-1142)
-    // N-sp2 correction: if one atom is sp3 (hyb=3) and other is sp2 (hyb=2) and it's nitrogen
-    if ((hybi == 3 && hybj == 2 && z1 == 7) || (hybi == 3 && hybj == 2 && z2 == 7)) {
-        // Removed override to bstren[2]*1.04 which was incorrectly using double bond strength
-        // for saturated methyl-Nitrogen bonds.
+    // Phase 3: Special cases (Fortran gfnff_ini.f90:1178-1179)
+    // N-sp2 correction: if one atom is sp3 (hyb=3) and other is sp2 (hyb=2) and at least one is nitrogen
+    // Reference says: if (hybi.eq.3 .and. hybj.eq.2 .and. (ia.eq.7 .or. ja.eq.7)) bstrength = gen%bstren(2)*1.04
+    // NOTE: C-N bond in caffeine rings where N is methylated (sp3) and C is aromatic (sp2)
+    if (hybi == 3 && hybj == 2 && (z1 == 7 || z2 == 7)) {
+        bstrength = bstren[2] * 1.04;  // treat as stronger due to conjugation/charge
     }
 
     // Bridging atoms (will be detected in Phase 6)
@@ -1536,15 +1550,16 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 
     double fqq = 1.0;  // Default: no charge correction
 
-    // CRITICAL FIX (Jan 7, 2026): Use m_charges for fqq correction
-    // m_charges holds CURRENT charges (auto-calculated OR injected via setCharges)
-    // topo.eeq_charges is stale after setCharges() call - don't use!
+    // CRITICAL FIX (Phase 2 Charge Routing - January 26, 2026):
+    // Force constant scaling (fqq) MUST use topological charges (qa), NOT energy charges (q).
+    // Reference: CHARGE_DATAFLOW.md and gfnff_ini.f90:1185
+    // Topological charges provide the consistent electronic environment for parameter generation.
     double qa1 = 0.0, qa2 = 0.0;
-    if (atom1 < m_charges.size()) {
-        qa1 = m_charges[atom1];
+    if (atom1 < static_cast<int>(topo.topology_charges.size())) {
+        qa1 = topo.topology_charges[atom1];
     }
-    if (atom2 < m_charges.size()) {
-        qa2 = m_charges[atom2];
+    if (atom2 < static_cast<int>(topo.topology_charges.size())) {
+        qa2 = topo.topology_charges[atom2];
     }
 
     // Fortran formula (sigmoid function for smooth charge-dependence)
@@ -1580,13 +1595,16 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // Phase 9: Ring strain correction with actual topology data
     double ringf = 1.0;  // Default: no ring strain
 
-    // Use ring size from topology (smallest ring containing either atom)
-    int ring_size = std::max(topo.ring_sizes[atom1], topo.ring_sizes[atom2]);
-
-    if (ring_size > 0) {
-        // Fortran gfnff_ini.f90:1279
+    // Use actual bond ring membership from topology (Session 11 Fix)
+    // Formula: ringf = 1 + fringbo * (6 - ring_size)²
+    // Only applied if the bond itself is part of a ring.
+    int ring_size = 0;
+    if (areAtomsInSameRing(atom1, atom2, ring_size)) {
+        // Fortran gfnff_ini.f90:1323
         double fringbo = 0.020;  // Fortran gfnff_param.f90:800
         ringf = 1.0 + fringbo * std::pow(6.0 - ring_size, 2);
+    } else {
+        ringf = 1.0;
     }
     // Examples:
     //   3-ring: ringf = 1.0 + 0.020*(6-3)² = 1.180 (18% stronger)
@@ -1932,6 +1950,30 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // With k_b < 0, bond energy becomes negative (attractive) at equilibrium
     // REMOVED: Hardcoded correction factor that was causing 2.3% discrepancy
     params.force_constant = -(bond_param_1 * bond_param_2 * bstrength * fqq * ringf * fheavy * fpi * fxh * fcn);
+
+    // DEBUG: Complete bond parameter breakdown for 1e-6 accuracy analysis (Claude Generated Jan 26, 2026)
+    static int bond_count = 0;
+    if (bond_count < 10 && CurcumaLogger::get_verbosity() >= 3) {
+        double base_product = bond_param_1 * bond_param_2;
+        double full_product = base_product * bstrength * fqq * ringf * fheavy * fpi * fxh * fcn;
+
+        CurcumaLogger::info(fmt::format("=== BOND {} COMPLETE BREAKDOWN: {}-{} (Z{}-Z{}) ===",
+                                         bond_count, atom1, atom2, z1, z2));
+        CurcumaLogger::info(fmt::format("  bond_param_1 = {:.6f}", bond_param_1));
+        CurcumaLogger::info(fmt::format("  bond_param_2 = {:.6f}", bond_param_2));
+        CurcumaLogger::info(fmt::format("  base_product = {:.6f}", base_product));
+        CurcumaLogger::info(fmt::format("  bstrength    = {:.6f}", bstrength));
+        CurcumaLogger::info(fmt::format("  fqq          = {:.6f} (charge correction)", fqq));
+        CurcumaLogger::info(fmt::format("  ringf        = {:.6f} (ring strain)", ringf));
+        CurcumaLogger::info(fmt::format("  fheavy       = {:.6f} (heavy atom)", fheavy));
+        CurcumaLogger::info(fmt::format("  fpi          = {:.6f} (pi-bond)", fpi));
+        CurcumaLogger::info(fmt::format("  fxh          = {:.6f} (X-H special)", fxh));
+        CurcumaLogger::info(fmt::format("  fcn          = {:.6f} (CN correction)", fcn));
+        CurcumaLogger::info(fmt::format("  full_product = {:.6f}", full_product));
+        CurcumaLogger::info(fmt::format("  k_b (final)  = {:.6f} Eh (negative sign applied)", params.force_constant));
+        CurcumaLogger::info(fmt::format("  r0           = {:.6f} Bohr", params.equilibrium_distance));
+        bond_count++;
+    }
 
     // Step 11: Alpha parameter with metal-specific sign flip (Fortran gfnff_param.f90:642-644, gfnff_ini.f90:1240)
     // CRITICAL PARAMETERS FROM FORTRAN
@@ -3096,6 +3138,15 @@ std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb) const
         fragment_id++;
     }
 
+    // DEBUG: Log pi-fragment assignments for first few atoms
+    if (m_atomcount > 5) {
+        CurcumaLogger::info("Pi-fragment assignments:");
+        for (int i = 0; i < std::min(m_atomcount, 10); ++i) {
+            CurcumaLogger::info(fmt::format("  Atom {} (Z={}, hyb={}): fragment {}",
+                              i, m_atoms[i], hyb[i], pi_fragments[i]));
+        }
+    }
+
     return pi_fragments;
 }
 
@@ -3527,38 +3578,61 @@ Vector GFNFF::calculateDgam(const Vector& qa_charges,
     const int n = m_atomcount;
     Vector dgam = Vector::Zero(n);
 
-    // Calculate dgam for each atom - EXACTLY matches Fortran gfnff_ini.f90:677-688
+    // Calculate dgam for each atom - CORRECTED (Jan 28, 2026) to match Fortran gfnff_ini.f90:683-710
+    // Reference: gfnff_ini.f90 lines 683-710 show ff values for each element
     for (int i = 0; i < n; ++i) {
         int Z = m_atoms[i];
         double qa = qa_charges(i);
-        double ff = -0.04;  // Base default from Fortran gfnff_ini.f90:677
+        double ff = 0.0;  // Default: do nothing
+        int hyb = (!hybridization.empty() && i < static_cast<int>(hybridization.size())) ? hybridization[i] : 3;
 
-        // Apply charge-dependent gamma corrections - CASCADE of if-statements
-        // This EXACTLY matches Fortran gfnff_ini.f90:677-688 logic
-        if (!hybridization.empty() && i < hybridization.size()) {
-            if (hybridization[i] < 3) {
-                ff = -0.08;  // Unsaturated (line 678)
-            }
+        // Element-specific ff values from Fortran gfnff_ini.f90:683-710
+        // CASCADE of if-statements - order matters!
+        if (Z == 1) {
+            ff = -0.08;  // H
+        }
+        else if (Z == 5) {
+            ff = -0.05;  // B
+        }
+        else if (Z == 6) {
+            ff = -0.27;  // C (sp3)
+            if (hyb < 3) ff = -0.45;  // C unsaturated (sp2)
+            if (hyb < 2) ff = -0.34;  // C sp
+        }
+        else if (Z == 7) {
+            ff = -0.13;  // N
+            // TODO: Add pi-system and amide checks for -0.14 and -0.16
+        }
+        else if (Z == 8) {
+            ff = -0.15;  // O (sp3)
+            if (hyb < 3) ff = -0.08;  // O unsaturated (sp2/sp)
+        }
+        else if (Z == 9) {
+            ff = 0.10;  // F
+        }
+        else if (Z > 10) {
+            ff = -0.02;  // Heavy atoms default
         }
 
-        if (Z == 9) {
-            ff = 0.10;  // Fluorine (line 682)
-        }
-        if (Z > 10) {
-            ff = -0.02;  // Heavy atoms (line 683)
-        }
+        // Override for specific heavy elements
         if (Z == 17) {
-            ff = -0.02;  // Chlorine (line 684)
+            ff = -0.02;  // Cl
         }
-        if (Z == 35) {
-            ff = -0.11;  // Bromine (line 685)
+        else if (Z == 35) {
+            ff = -0.11;  // Br
         }
-        if (Z == 53) {
-            ff = -0.07;  // Iodine (line 686)
+        else if (Z == 53) {
+            ff = -0.07;  // I
         }
-        // Note: Metal corrections (lines 687-688) not needed for standard test molecules
-        // if (metal_type[Z-1] == 1) ff = -0.08;  // M main group
-        // if (metal_type[Z-1] == 2) ff = -0.9;   // M transition metal
+
+        // Metal corrections (check is_metal if available)
+        // TODO: Add proper metal detection
+        // if (imetal[i] == 1) ff = -0.08;  // Main group metal
+        // if (imetal[i] == 2) ff = -0.9;   // Transition metal
+
+        // Noble gas (group 8) -> ff = 0
+        int group = (Z >= 1 && Z <= 86) ? GFNFFParameters::periodic_group[Z - 1] : 0;
+        if (group == 18) ff = 0.0;  // Noble gas
 
         dgam(i) = qa * ff;  // Correction = charge × element-specific factor
     }
@@ -4682,13 +4756,16 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             CurcumaLogger::info("Computing Phase 1: Topology charges (topo%qa)");
         }
 
+        // CRITICAL FIX (Phase 1 Charge Synchronization - January 26, 2026):
+        // Passed 'true' for use_corrections to enable dxi electronegativity corrections
+        // in Phase 1 (topological mode). This matches Fortran gfnff_ini.f90:411.
         topo_info.topology_charges = m_eeq_solver->calculateTopologyCharges(
             m_atoms,
             m_geometry_bohr,
             m_charge,
             topo_info.coordination_numbers,  // Uses fractional CN but with integer nb for CNF term
             eeq_topology_input,  // WITH topology - uses Floyd-Warshall topological distances
-            false  // CRITICAL (Jan 4, 2026): NO corrections - use ONLY base parameters (matches gfnff_final.cpp)
+            true  // Phase 1 Charge Sync: enable dxi corrections
         );
 
         if (topo_info.topology_charges.size() != m_atomcount) {
@@ -4709,6 +4786,22 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         if (!calculateAlpeeq(topo_info)) {
             CurcumaLogger::error("calculateTopologyInfo: Phase 1B alpeeq calculation failed");
             throw std::runtime_error("GFN-FF initialization failed: Phase 1B alpeeq calculation failed.");
+        }
+
+        // ===== PHASE 1C: Calculate dgam corrections =====
+        // FIX (Jan 28, 2026): Store dgam in topo_info for Coulomb energy calculation
+        // Reference: Fortran gfnff_ini.f90:714 topo%gameeq(i) = param%gam(at(i)) + dgam(i)
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Computing Phase 1C: Hardness corrections (dgam)");
+        }
+        topo_info.dgam = calculateDgam(topo_info.topology_charges, topo_info.hybridization, topo_info.ring_sizes);
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            std::cout << "  First 3 dgam values:" << std::endl;
+            for (int i = 0; i < std::min(3, m_atomcount); ++i) {
+                std::cout << fmt::format("    Atom {} (Z={}): qa={:.6f}, dgam={:.6f}",
+                                        i, m_atoms[i], topo_info.topology_charges(i), topo_info.dgam(i)) << std::endl;
+            }
         }
 
         // ===== PHASE 2: Energy Charges (nlist%q) =====
@@ -5111,11 +5204,17 @@ json GFNFF::generateGFNFFCoulombPairs() const
             coulomb["q_i"] = charges[i];
             coulomb["q_j"] = charges[j];
 
-            // PERFORMANCE OPTIMIZATION (Jan 17, 2026): Use pre-cached EEQ parameters
-            // instead of calling getEEQParameters() for each pair in O(N²) loop
-            double alp_i = topo_info.eeq_alp[i];
-            double alp_j = topo_info.eeq_alp[j];
-            double gamma_ij = 1.0 / std::sqrt(alp_i + alp_j);
+            // FIX (Jan 28, 2026): Use charge-corrected alpeeq for gamma_ij calculation
+            // Reference: Fortran gfnff_engrad.F90:1528 uses topo%alpeeq
+            // Formula: gamma_ij = 1/sqrt(alpeeq(i) + alpeeq(j))
+            double alp_i_for_gamma = topo_info.eeq_alp[i];  // Base alpha (squared)
+            double alp_j_for_gamma = topo_info.eeq_alp[j];
+            if (topo_info.alpeeq.size() == m_atomcount) {
+                alp_i_for_gamma = topo_info.alpeeq(i);  // Charge-corrected alpha²
+                alp_j_for_gamma = topo_info.alpeeq(j);
+            }
+            double gamma_ij = 1.0 / std::sqrt(alp_i_for_gamma + alp_j_for_gamma);
+
             coulomb["gamma_ij"] = gamma_ij;
 
             // Store chi, gam, and alp for self-energy and self-interaction terms
@@ -5132,21 +5231,40 @@ json GFNFF::generateGFNFFCoulombPairs() const
             double dxi_i = (i < topo_info.dxi.size()) ? topo_info.dxi(i) : 0.0;
             double dxi_j = (j < topo_info.dxi.size()) ? topo_info.dxi(j) : 0.0;
 
-            // Claude Generated (Dec 2025, Session 11): CRITICAL FIX - Add CN-dependent term!
-            // Reference: Fortran gfnff_engrad.F90:1581 and eeq_solver.cpp:1332
-            // Formula: chi(i) = -chi + dxi + cnf*sqrt(CN)
-            double cn_i = topo_info.coordination_numbers(i);
-            double cn_j = topo_info.coordination_numbers(j);
+            // CORRECT (Jan 27, 2026): Chi for energy = chieeq + cnf*sqrt(cn)
+            // Reference: Fortran gfnff_engrad.F90:1599 shows:
+            //   es = es-q(i)*(topo%chieeq(i)+param%cnf(at(i))*sqrt(cn(i)))
+            // where topo%chieeq was set to -chi+dxi (without CNF) at gfnff_ini.f90:716
+            // So effective chi = -chi + dxi + cnf*sqrt(cn) - same as our original formula
             double chi_i = topo_info.eeq_chi[i];
             double chi_j = topo_info.eeq_chi[j];
             double cnf_i = topo_info.eeq_cnf[i];
             double cnf_j = topo_info.eeq_cnf[j];
-            coulomb["chi_i"] = -chi_i + dxi_i + cnf_i * std::sqrt(cn_i);
-            coulomb["chi_j"] = -chi_j + dxi_j + cnf_j * std::sqrt(cn_j);
-            coulomb["gam_i"] = topo_info.eeq_gam[i];  // Chemical hardness
-            coulomb["gam_j"] = topo_info.eeq_gam[j];  // Chemical hardness
-            coulomb["alp_i"] = alp_i;
-            coulomb["alp_j"] = alp_j;
+            double cn_i = topo_info.coordination_numbers(i);
+            double cn_j = topo_info.coordination_numbers(j);
+            double chi_eff_i = -chi_i + dxi_i + cnf_i * std::sqrt(cn_i);
+            double chi_eff_j = -chi_j + dxi_j + cnf_j * std::sqrt(cn_j);
+            coulomb["chi_i"] = chi_eff_i;
+            coulomb["chi_j"] = chi_eff_j;
+
+            // FIX (Jan 28, 2026): Use charge-corrected gameeq and alpeeq
+            // Reference: Fortran gfnff_ini.f90:714-725:
+            //   topo%gameeq(i) = param%gam(at(i)) + dgam(i)
+            //   topo%alpeeq(i) = (param%alp(at(i)) + ff*qa(i))²
+            // Previous "disabled for accuracy" was masking charge errors now fixed
+            double gam_i = topo_info.eeq_gam[i];
+            double gam_j = topo_info.eeq_gam[j];
+            if (topo_info.dgam.size() == m_atomcount) {
+                gam_i += topo_info.dgam(i);  // Add dgam correction
+                gam_j += topo_info.dgam(j);
+            }
+            coulomb["gam_i"] = gam_i;
+            coulomb["gam_j"] = gam_j;
+
+            // Use the same charge-corrected alpha for self-interaction term
+            // (already computed above for gamma_ij)
+            coulomb["alp_i"] = alp_i_for_gamma;
+            coulomb["alp_j"] = alp_j_for_gamma;
 
             // Cutoff radius (50 Bohr ~ 26 Å, typical for electrostatics)
             coulomb["r_cut"] = 100.0;
@@ -5429,7 +5547,17 @@ json GFNFF::generateGFNFFDispersionPairs() const
         }
 
         try {
-            ConfigManager d4_config = extractDispersionConfig("d4");
+            json d4_input = m_parameters.value("d4param", json::object());
+
+            // CRITICAL OVERRIDE (Jan 25, 2026): Force GFN-FF specific D4 parameters
+            // This ensures we use the correct GFN-FF specific damping values (a1=0.58, a2=4.80, s8=2.0)
+            d4_input["d4_a1"] = 0.58;
+            d4_input["d4_a2"] = 4.80;
+            d4_input["d4_s8"] = 2.00;
+            d4_input["d4_s6"] = 1.00;
+            d4_input["d4_s9"] = 1.00;
+
+            ConfigManager d4_config("d4param", d4_input);
             D4ParameterGenerator d4_gen(d4_config);
 
             // Generate D4 parameters with geometry (charge-dependent)
@@ -5558,10 +5686,11 @@ json GFNFF::generateD3Dispersion() const
         json gfnff_dispersions = json::array();
 
         // Get damping parameters and scaling factors from D3 config
-        double s6 = d3_config.get<double>("d3_s6", 1.0);
-        double s8 = d3_config.get<double>("d3_s8", 2.85);  // GFN-FF default
-        double a1 = d3_config.get<double>("d3_a1", 0.80);
-        double a2 = d3_config.get<double>("d3_a2", 4.60);  // GFN-FF default (Bohr)
+        // CRITICAL FIX (Jan 25, 2026): Synced with GFN-FF Fortran source defaults
+        double s6 = d3_config.get<double>("d3_s6", GFNFFParameters::s6);
+        double s8 = d3_config.get<double>("d3_s8", GFNFFParameters::s8);  // GFN-FF default (now 2.0)
+        double a1 = d3_config.get<double>("d3_a1", GFNFFParameters::a1);  // GFN-FF default (now 0.58)
+        double a2 = d3_config.get<double>("d3_a2", GFNFFParameters::a2);  // GFN-FF default (now 4.80 Bohr)
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("📊 D3 Damping Parameters (GFN-FF):");

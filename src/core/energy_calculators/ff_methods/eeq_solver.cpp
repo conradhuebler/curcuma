@@ -35,6 +35,7 @@
 #include <Eigen/Dense>
 #include <cmath>
 #include <algorithm>
+#include <fmt/format.h>
 
 using namespace GFNFFParameters;  // Access to chi_eeq, gam_eeq, alpha_eeq, cnf_eeq
 
@@ -403,6 +404,56 @@ static inline int detectElementSpecificHybridization(int Z, double cn,
                 if (num_metal > 0 && nn == 0) {
                     hyb = 2; // Pyridine coordinated to metal: sp2
                 }
+
+                // Geometry-dependent aromatic nitrogen detection (Claude Generated Jan 2026)
+                // For CN=3 nitrogen not caught by special cases above, check planarity
+                // Planar nitrogen (sum of angles ≈ 360°) → sp2 (aromatic)
+                // Tetrahedral nitrogen (sum of angles < 350°) → sp3 (aliphatic)
+                if (hyb == 3 && geometry_bohr != nullptr) {
+                    const auto& neighbors = topology->neighbor_lists[atom_index];
+                    if (neighbors.size() == 3) {
+                        // Calculate all three N-X-Y bond angles
+                        double angle_sum = 0.0;
+
+                        // Angle 1: neighbor0 - N - neighbor1
+                        double angle1 = calculateBondAngle(*geometry_bohr,
+                                                          neighbors[0], atom_index, neighbors[1]);
+                        angle_sum += angle1;
+
+                        // Angle 2: neighbor1 - N - neighbor2
+                        double angle2 = calculateBondAngle(*geometry_bohr,
+                                                          neighbors[1], atom_index, neighbors[2]);
+                        angle_sum += angle2;
+
+                        // Angle 3: neighbor2 - N - neighbor0
+                        double angle3 = calculateBondAngle(*geometry_bohr,
+                                                          neighbors[2], atom_index, neighbors[0]);
+                        angle_sum += angle3;
+
+                        // Convert to degrees and check planarity
+                        double angle_sum_deg = angle_sum * 180.0 / M_PI;
+
+                        // DEBUG: Log angle sum for first few nitrogen atoms
+                        if (atom_index < 5) {
+                            CurcumaLogger::info(fmt::format("  N atom {}: angle_sum = {:.2f}° (neighbors: {}, {}, {})",
+                                              atom_index, angle_sum_deg,
+                                              neighbors[0], neighbors[1], neighbors[2]));
+                        }
+
+                        // Planar nitrogen: sum ≈ 360° (allowing ±5° tolerance for ring strain)
+                        // Tetrahedral nitrogen: sum ≈ 328° (3 × 109.5°)
+                        if (angle_sum_deg > 355.0) {
+                            hyb = 2; // sp2 (aromatic/planar)
+                            if (atom_index < 5) {
+                                CurcumaLogger::info(fmt::format("    → sp2 (aromatic/planar)"));
+                            }
+                        } else {
+                            if (atom_index < 5) {
+                                CurcumaLogger::info(fmt::format("    → sp3 (tetrahedral)"));
+                            }
+                        }
+                    }
+                }
             }
 
             return hyb;
@@ -760,48 +811,29 @@ Vector EEQSolver::calculateCharges(
     // Solution: Do Phase 1 first (base params), then iterate with dgam corrections
 
     Vector current_charges;
-    Vector prev_charges;
+    Vector topology_charges; // To be populated in Phase 1
 
-    // PHASE 1: Initial solve with base parameters (no dgam)
+    // PHASE 1: Initial solve for topology charges (qa)
     {
         // TEMPORARY DEBUG: Force verbosity to 3 for investigation
         int saved_verbosity = m_verbosity;
         m_verbosity = 3;
 
-        // CRITICAL FIX (Jan 4, 2026): Phase 1 should use ONLY base parameters + CNF!
-        // Reference: gfnff_final.cpp lines 123-136 achieves 0.0000025 e error
-        // Key insight: dxi/dgam corrections are NOT needed for Phase 1 accuracy
-        // They actually ADD NOISE rather than improving accuracy!
+        // CRITICAL FIX (Phase 1 Charge Synchronization - January 26, 2026):
+        // Reference: XTB gfnff_ini.f90:589 (call goedeckera) and 411 (topo%chieeq)
+        // Phase 1 (topological solve) MUST include dxi electronegativity corrections
+        // to provide a precise enough starting point (qa) for the GFN-FF parameters.
+        // Even small errors in qa propagate to ALL bonded energy terms.
 
-        Vector dxi = Vector::Zero(natoms);  // NO dxi corrections!
-        Vector dgam_base = Vector::Zero(natoms);  // NO dgam corrections!
+        Vector dxi = calculateDxi(atoms, geometry_bohr, cn, topology);
+        Vector dgam_base = Vector::Zero(natoms);  // NO dgam corrections in Phase 1
 
+        // Use buildCorrectedEEQMatrix with EXPLICIT Topological distance mode
         Matrix A_phase1 = buildCorrectedEEQMatrix(atoms, geometry_bohr, cn, Vector::Zero(natoms),
-                                                   dxi, dgam_base, hybridization, topology);
-        current_charges = solveEEQ(A_phase1, atoms, cn, dxi, total_charge, topology, true);  // Phase 1: use CNF term
-
-        // DEBUG: Phase 1 matrix analysis
-        if (true) {  // Always show debug for now
-            std::cout << "=== PHASE 1 DEBUG: Matrix Analysis ===" << std::endl;
-            for (int i = 0; i < std::min(3, natoms); ++i) {
-                int z_i = atoms[i];
-                EEQParameters params_i = getParameters(z_i, cn(i));
-                std::cout << fmt::format(
-                    "Atom {} (Z={}): A({},{}) = {:.6f}, chi={:.6f}, gam={:.6f}, dxi={:.6f}",
-                    i, z_i, i, i, A_phase1(i, i), params_i.chi, params_i.gam, dxi(i)
-                ) << std::endl;
-            }
-            if (natoms >= 2) {
-                std::cout << fmt::format("A(0,1) = {:.6f} (Coulomb term)", A_phase1(0, 1)) << std::endl;
-            }
-        }
-
-        // DEBUG: Print Phase 1 charges
-        std::cout << "\n=== PHASE 1 CHARGES (First 6 atoms) ===" << std::endl;
-        for (int i = 0; i < std::min(6, natoms); ++i) {
-            std::cout << fmt::format("Atom {} (Z={}): q = {:.8f}", i, atoms[i], current_charges(i)) << std::endl;
-        }
-        std::cout << std::endl;
+                                                   dxi, dgam_base, hybridization, topology,
+                                                   EEQDistanceMode::Topological);
+        current_charges = solveEEQ(A_phase1, atoms, cn, dxi, total_charge, topology, true, true);  // Phase 1: use integer nb
+        topology_charges = current_charges;  // Store for Phase 2 use
 
         if (m_verbosity >= 1) {
             CurcumaLogger::info("EEQSolver: Phase 1 base solve complete");
@@ -815,9 +847,6 @@ Vector EEQSolver::calculateCharges(
     // Reference: XTB gfnff_ini.f90:693-707 - ONE solve with dxi, dgam, and alpha corrections
     // Restored (Jan 17, 2026): Activate corrections to match GFN-FF Fortran reference
     {
-        // Save Phase 1 topology charges for dgam calculation
-        Vector topology_charges = current_charges;
-
         // RESTORED (Jan 17, 2026): Phase 2 uses ALL corrections (matching Fortran gfnff_ini.f90:713-726)
         // Reference: external/gfnff/src/gfnff_ini.f90:713-726
         //
@@ -847,12 +876,9 @@ Vector EEQSolver::calculateCharges(
                                           EEQDistanceMode::Geometric);
 
         // Solve ONCE with corrected parameters (Phase 2: CNF term REQUIRED!)
-        // CRITICAL FIX (Jan 17, 2026): Fortran Phase 2 (gfnff_engrad.F90:1504-1507)
-        // uses CNF term in both phases! Reference document:
-        // external/gfnff/docs/GEOMETRISCHE_LADUNGSBERECHNUNG.md section 3.2:
-        //   x(i) = topo%chieqq(i) + param%cnf(at(i)) * sqrt(cn(i))
-        // CNF term is PRESENT in Phase 2 (geometric charges), not only Phase 1!
-        current_charges = solveEEQ(A, atoms, cn, dxi, total_charge, topology, true);
+        // CRITICAL FIX (Jan 26, 2026 - synchronization): use_integer_nb MUST be false for Phase 2
+        // to correctly use fractional cn instead of integer nb for energy charges (nlist%q).
+        current_charges = solveEEQ(A, atoms, cn, dxi, total_charge, topology, true, false);
 
         if (current_charges.size() != natoms) {
             CurcumaLogger::error("EEQSolver::calculateCharges: Phase 2 solve failed");
@@ -864,20 +890,8 @@ Vector EEQSolver::calculateCharges(
         }
     }
 
-    // DEBUG: Print final charges after Phase 2
-    std::cout << "\n=== FINAL CHARGES (After Phase 2, First 6 atoms) ===" << std::endl;
-    for (int i = 0; i < std::min(6, natoms); ++i) {
-        std::cout << fmt::format("Atom {} (Z={}): q = {:.8f}", i, atoms[i], current_charges(i)) << std::endl;
-    }
-    std::cout << std::endl;
-
     if (m_verbosity >= 1) {
         CurcumaLogger::success(fmt::format("EEQSolver: Single-solve EEQ completed for {} atoms", natoms));
-        if (m_verbosity >= 2) {
-            for (int i = 0; i < std::min(5, natoms); ++i) {
-                CurcumaLogger::result(fmt::format("Atom {} (Z={}) q = {:.6f}", i, atoms[i], current_charges(i)));
-            }
-        }
     }
 
     return current_charges;
@@ -1093,7 +1107,8 @@ Vector EEQSolver::solveEEQ(
     const Vector& dxi,
     int total_charge,
     const std::optional<TopologyInput>& topology,
-    bool use_cnf_term)  // NEW: Controls whether CNF term is added to RHS
+    bool use_cnf_term,
+    bool use_integer_nb)  // NEW: Controls whether integer nb or fractional cn is used for CNF
 {
     const int natoms = atoms.size();
     int m = natoms + 1;
@@ -1147,13 +1162,17 @@ Vector EEQSolver::solveEEQ(
         }
 
         if (use_cnf_term) {
-            // Phase 1: Add CNF term for topology charges
+            // Phase 1: Add CNF term for topology charges using INTEGER nb
+            // Phase 2: Add CNF term using FRACTIONAL coordination number (cn)
+            // Reference: CHARGE_DATAFLOW.md and gfnff_engrad.F90:1504
             double nb_count;
-            if (topology.has_value() && i < static_cast<int>(topology->neighbor_lists.size())) {
+
+            if (use_integer_nb && topology.has_value() && i < static_cast<int>(topology->neighbor_lists.size())) {
                 nb_count = static_cast<double>(topology->neighbor_lists[i].size());
                 nb_count = std::min(nb_count, CNMAX);
             } else {
-                nb_count = std::min(std::round(cn(i)), CNMAX);
+                // Use fractional CN for energy charges (Phase 2/ goed_gfnff)
+                nb_count = std::min(cn(i), CNMAX);
             }
             double cnf_term = params_i.cnf * std::sqrt(nb_count);
             x(i) = chi_corrected + cnf_term;
