@@ -489,7 +489,7 @@ Vector dgam = Vector::Zero(natoms);  // NO dgam corrections for Phase 2!
 **Charge (EEQ) Corrections**:
 - [ ] Phase 5B: Metal-specific fqq correction (2.5× factor in charge-dependent terms)
 - [ ] Pi-system/amide detection for nitrogen dgam (enhancement, current EEQ already good)
-- [ ] Fragment-constrained EEQ charges (for multi-fragment systems)
+- ✅ Fragment-constrained EEQ charges (for multi-fragment systems)
 
 **Dispersion Corrections**:
 - [ ] **Metal-specific C6 parameters** - Transition metals may need special handling

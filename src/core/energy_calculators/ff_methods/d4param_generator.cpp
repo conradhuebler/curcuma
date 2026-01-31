@@ -7,6 +7,7 @@
  */
 
 #include "d4param_generator.h"
+#include "gfnff_par.h"
 #include "../../../../test_cases/reference_data/d4_reference_data_fixed.cpp"  // D4 reference data (365 lines)
 #include "../../../../test_cases/reference_data/d4_reference_cn.cpp"          // D4 reference CN data (cpp-d4 - December 2025 Phase 1)
 #include "src/core/curcuma_logger.h"
@@ -113,20 +114,24 @@ void D4ParameterGenerator::initializeReferenceData()
     m_r4_over_r2.resize(MAX_ELEM, 0.0);
     m_sqrt_z_r4_r2.resize(MAX_ELEM, 0.0);
 
-    // Basic atomic r4/r2 ratios from D4 reference (first few elements for now)
-    if (MAX_ELEM >= 20) {
-        m_r4_over_r2[0] = 5.1917362;  // H
-        m_r4_over_r2[1] = 1.6325801;  // He
-        m_r4_over_r2[5] = 32.6290215; // C
-        m_r4_over_r2[6] = 24.9150620; // N
-        m_r4_over_r2[7] = 20.0948582; // O
-        m_r4_over_r2[10] = 90.3494164; // Na
-        m_r4_over_r2[11] = 85.4616254; // Mg
-        m_r4_over_r2[19] = 33.4697314; // Ca
-    }
+    // GFN-FF Moment Ratios (r4Overr2) from dftd4param.f90:134-157
+    // These are essential for correct damping radii R0 in GFN-FF
+    m_r4_over_r2 = {
+        8.0589, 3.4698,  // H-He
+        29.0974, 14.8517, 11.8799, 7.8715, 5.5588, 4.7566, 3.8025, 3.1036,  // Li-Ne
+        26.1552, 17.2304, 17.7210, 12.7442, 9.5361, 8.1652, 6.7463, 5.6004,  // Na-Ar
+        29.2012, 22.3934, // K-Ca
+        19.0598, 16.8590, 15.4023, 12.5589, 13.4788, // Sc-Mn
+        12.2309, 11.2809, 10.5569, 10.1428, 9.4907,  // Fe-Zn
+        13.4606, 10.8544, 8.9386, 8.1350, 7.1251, 6.1971 // Ga-Kr
+    };
+    if (m_r4_over_r2.size() < MAX_ELEM) m_r4_over_r2.resize(MAX_ELEM, 10.0);
 
     for (int i = 0; i < MAX_ELEM; ++i) {
-        m_sqrt_z_r4_r2[i] = std::sqrt((i + 1) * m_r4_over_r2[i]);
+        // Reference formula for sqrtZr4r2 (gfnff_param.f90:376 and dftd4param.f90:160):
+        // sqrtZr4r2 = sqrt(0.5 * r4Overr2 * sqrt(Z))
+        double Z = static_cast<double>(i + 1);
+        m_sqrt_z_r4_r2[i] = std::sqrt(0.5 * m_r4_over_r2[i] * std::sqrt(Z));
     }
 
     m_data_initialized = true;
@@ -325,39 +330,48 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
                 pair["element_i"] = atom_i;
                 pair["element_j"] = atom_j;
 
-                // NEW: CN+charge weighted C6 using EEQ charges and GFNFFCN (Dec 2025 Phase 2.2)
-                // Claude Generated (Dec 27, 2025): Now uses cached weights for performance
+                // CLAUDE GENERATED (January 25, 2026): GFN-FF modified dispersion formula
+                // Reference: gfnff_gdisp0.f90:365-377, gfnff_param.f90:531-532
+                //
+                // GFN-FF uses a MODIFIED BJ damping formula (NOT standard D3/D4):
+                //   E = -0.5 * C6 * (t6 + 2*r4r2ij*t8)
+                // where:
+                //   t6 = 1/(r^6 + R0^6)
+                //   t8 = 1/(r^8 + R0^8)
+                //   r4r2ij = 3 * sqrtZr4r2_i * sqrtZr4r2_j (implicit C8/C6 ratio)
+                //   R0^2 = (a1*sqrt(r4r2ij) + a2)^2 with a1=0.58, a2=4.80
+                //   sqrtZr4r2 = sqrt(0.5 * r4Overr2 * sqrt(Z)) [pre-computed in m_sqrt_z_r4_r2]
+
+                // CN-weighted C6 using Casimir-Polder integration (Dec 2025 Phase 2.2)
                 double c6 = getChargeWeightedC6(atom_i, atom_j, i, j);
 
-                // D4 C6 coefficient is already charge-weighted via calculateChargeWeightedC6()
-                // with Casimir-Polder integration over frequency-dependent polarizabilities
+                // GFN-FF specific parameters (NOT standard D3/D4!)
+                // sqrtZr4r2 values from pre-computed m_sqrt_z_r4_r2 array
+                double sqrt_zr4r2_i = getSqrtZr4r2(atom_i);
+                double sqrt_zr4r2_j = getSqrtZr4r2(atom_j);
 
-                // FIX (Dec 25, 2025): C8 IS used in pairwise D4!
-                // BJ damping formula: E = -s6·C6/(r⁶+R0⁶) - s8·C8/(r⁸+R0⁸)
-                // C8 = 3 * C6 * sqrt(Q_i * Q_j) where Q = <r⁴>/<r²> (atomic moment ratio)
-                double sqrt_q_i = getSqrtZr4r2(atom_i);
-                double sqrt_q_j = getSqrtZr4r2(atom_j);
-                double c8 = 3.0 * c6 * sqrt_q_i * sqrt_q_j;
+                // r4r2ij = 3 * sqrtZr4r2_i * sqrtZr4r2_j (Fortran: gfnff_gdisp0.f90:365)
+                double r4r2ij = 3.0 * sqrt_zr4r2_i * sqrt_zr4r2_j;
 
-                // C10: Only needed for three-body corrections (not implemented yet)
-                double c10 = 0.0;
-                double c12 = 0.0;
+                // R0^2 = (a1*sqrt(r4r2ij) + a2)^2 (Fortran: gfnff_param.f90:532)
+                // GFN-FF constants: a1=0.58, a2=4.80 (from gfnff_param.f90:841-842)
+                double a1 = m_config.get<double>("d4_a1", 0.58);
+                double a2 = m_config.get<double>("d4_a2", 4.80);
+                double r0_squared = std::pow(a1 * std::sqrt(r4r2ij) + a2, 2);
 
-                // Get D4 damping parameters from config (GFN-FF defaults)
-                // Reference: Spicher/Grimme, Angew. Chem. Int. Ed. 2020, DOI: 10.1002/anie.202004239
-                double s6 = m_config.get<double>("d4_s6", 1.0);
-                double s8 = m_config.get<double>("d4_s8", 1.0);
-                double a1 = m_config.get<double>("d4_a1", 0.44);  // GFN-FF D4 value
-                double a2 = m_config.get<double>("d4_a2", 4.60);  // GFN-FF D4 value (Bohr)
+                // Legacy C8 calculation (for backward compatibility, NOT used in GFN-FF formula)
+                double c8 = 3.0 * c6 * sqrt_zr4r2_i * sqrt_zr4r2_j;
 
-                // CRITICAL FIX (Dec 2025): Match D3 JSON format for ForceField compatibility
-                // Use uppercase C6/C8 and include s6/s8/a1/a2/r_cut fields
-                // Claude Generated - Dec 25, 2025: Add dispersion_method tag to route to CalculateD4DispersionContribution()
-                pair["dispersion_method"] = "d4";  // Route to native D4 in ForceFieldThread
-                pair["C6"] = c6;  // Raw C6 (s6 applied in energy calculation)
-                pair["C8"] = c8;  // Raw C8 (s8 applied in energy calculation)
-                pair["s6"] = s6;
-                pair["s8"] = s8;
+                // GFN-FF dispersion pair parameters
+                pair["dispersion_method"] = "d4";  // Route to native GFN-FF in ForceFieldThread
+                pair["C6"] = c6;              // CN-weighted C6 from Casimir-Polder
+                pair["r4r2ij"] = r4r2ij;      // GFN-FF: implicit C8/C6 factor
+                pair["r0_squared"] = r0_squared;  // GFN-FF: pre-computed (a1*sqrt(r4r2ij)+a2)^2
+
+                // Legacy fields (for backward compatibility with standard D3/D4)
+                pair["C8"] = c8;
+                pair["s6"] = m_config.get<double>("d4_s6", 1.0);
+                pair["s8"] = m_config.get<double>("d4_s8", 2.0);
                 pair["a1"] = a1;
                 pair["a2"] = a2;
                 pair["r_cut"] = 100.0;  // Cutoff radius (Bohr)

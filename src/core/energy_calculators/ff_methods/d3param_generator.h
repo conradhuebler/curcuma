@@ -33,14 +33,14 @@ BEGIN_PARAMETER_DEFINITION(d3param)
     // D3 Reference selection and scaling
     PARAM(d3_ref, Int, 0, "D3 reference coordination number set (0=standard).", "Reference", {})
     PARAM(d3_s6, Double, 1.0, "D3 global scaling factor for C6 term.", "Scaling", {})
-    PARAM(d3_s8, Double, 1.0, "D3 global scaling factor for C8 term.", "Scaling", {})
+    PARAM(d3_s8, Double, 2.0, "D3 global scaling factor for C8 term.", "Scaling", {})
     PARAM(d3_rs6, Double, 1.0, "D3 scaling for C6 damping function.", "Scaling", {})
     PARAM(d3_rs8, Double, 1.0, "D3 scaling for C8 damping function.", "Scaling", {})
     PARAM(d3_s9, Double, 1.0, "D3 scaling for three-body ATM term.", "Scaling", {})
 
     // D3 damping parameters (Becke-Johnson)
-    PARAM(d3_a1, Double, 0.4, "D3 BJ damping parameter a1.", "Damping", {})
-    PARAM(d3_a2, Double, 4.0, "D3 BJ damping parameter a2 (Bohr).", "Damping", {})
+    PARAM(d3_a1, Double, 0.58, "D3 BJ damping parameter a1.", "Damping", {})
+    PARAM(d3_a2, Double, 4.80, "D3 BJ damping parameter a2 (Bohr).", "Damping", {})
     PARAM(d3_alp, Double, 14.0, "D3 BJ alpha parameter.", "Damping", {})
 END_PARAMETER_DEFINITION
 

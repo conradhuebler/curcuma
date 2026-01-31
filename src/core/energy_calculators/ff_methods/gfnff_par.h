@@ -561,12 +561,14 @@ static const std::vector<double> C6_atomic = {
 };
 
 // BJ damping parameters for D3/D4 integration
-// Reference: Beckert-Johnson damping function
-// From gfnff_data_types.f90: initGFFDispersion subroutine
+// Reference: Becke-Johnson damping function (GFN-FF specific values)
+// CRITICAL FIX (Jan 25, 2026): Synced with GFN-FF Fortran source gfnff_param.f90
+// gen%d3a1 = 0.58, gen%d3a2 = 4.80, s8 fixed = 2.0
 static constexpr double s6 = 1.0;    // C6 scaling
-static constexpr double s8 = 2.85;   // C8 scaling (was 2.4)
-static constexpr double a1 = 0.80;   // BJ damping a1 (was 0.48)
-static constexpr double a2 = 4.60;   // BJ damping a2 (was 4.80)
+static constexpr double s8 = 2.00;   // C8 scaling (matches 2.0 factor in gfnff_gdisp0.f90)
+static constexpr double a1 = 0.58;   // BJ damping a1
+static constexpr double a2 = 4.80;   // BJ damping a2 (Bohr)
+static constexpr double wf = 4.0;    // Weighting factor for C6 interpolation (gfnff_engrad.F90:352)
 
 // ============================================================================
 // SECTION 7.5: Torsion Parameters (56 lines)

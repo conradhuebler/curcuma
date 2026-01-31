@@ -926,7 +926,8 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
     EEQDistanceMode distance_mode)
 {
     const int natoms = atoms.size();
-    int m = natoms + 1;
+    int nfrag = topology.has_value() ? topology->nfrag : 1;
+    int m = natoms + nfrag;
     Matrix A = Matrix::Zero(m, m);
 
     // Step 1: Calculate charge-dependent alpha
@@ -1041,11 +1042,22 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
     }
 
     // Step 5: Charge constraint row and column
-    for (int j = 0; j < natoms; ++j) {
-        A(natoms, j) = 1.0;
-        A(j, natoms) = 1.0;
+    for (int f = 0; f < nfrag; ++f) {
+        int row = natoms + f;
+        for (int j = 0; j < natoms; ++j) {
+            bool in_fragment = false;
+            if (topology.has_value() && j < static_cast<int>(topology->fraglist.size())) {
+                in_fragment = (topology->fraglist[j] == f + 1); // 1-indexed
+            } else {
+                in_fragment = (f == 0); // Default all atoms to first fragment
+            }
+
+            if (in_fragment) {
+                A(row, j) = 1.0;
+                A(j, row) = 1.0;
+            }
+        }
     }
-    A(natoms, natoms) = 0.0;
 
     return A;
 }
@@ -1111,7 +1123,8 @@ Vector EEQSolver::solveEEQ(
     bool use_integer_nb)  // NEW: Controls whether integer nb or fractional cn is used for CNF
 {
     const int natoms = atoms.size();
-    int m = natoms + 1;
+    int nfrag = topology.has_value() ? topology->nfrag : 1;
+    int m = natoms + nfrag;
     Vector x = Vector::Zero(m);
 
     // Setup RHS
@@ -1189,11 +1202,25 @@ Vector EEQSolver::solveEEQ(
             x(i) = chi_corrected;
         }
     }
-    x(natoms) = static_cast<double>(total_charge);
 
-    // Solve Ax = b using partial pivoting LU decomposition
-    Eigen::PartialPivLU<Matrix> lu(A);
-    Vector solution = lu.solve(x);
+    for (int f = 0; f < nfrag; ++f) {
+        int row = natoms + f;
+        double q_target = (topology.has_value() && f < static_cast<int>(topology->qfrag.size()))
+                         ? topology->qfrag[f]
+                         : (f == 0 ? static_cast<double>(total_charge) : 0.0);
+        x(row) = q_target;
+    }
+
+    // Solve Ax = b using column-pivoted QR decomposition (more stable than LU for large systems)
+    // Claude Generated: Replaced PartialPivLU with ColPivHouseholderQR for numerical stability
+    Eigen::ColPivHouseholderQR<Matrix> qr(A);
+    Vector solution = qr.solve(x);
+
+    // Iterative refinement for improved accuracy on large systems
+    // Single refinement step typically sufficient for EEQ matrices
+    Vector residual = A * solution - x;
+    Vector correction = qr.solve(residual);
+    solution -= correction;
 
     // DEBUG: Verify linear solve accuracy
     if (m_verbosity >= 3) {
@@ -1227,13 +1254,14 @@ Vector EEQSolver::calculateTopologyCharges(
     const int natoms = atoms.size();
     const double TSQRT2PI = 0.797884560802866;  // sqrt(2/π)
 
-    // Augmented system size: n atoms + 1 constraint
-    int nfrag = 1;  // Single molecular fragment (neutral or charged)
+    // Augmented system size: n atoms + n fragments
+    int nfrag = topology.has_value() ? topology->nfrag : 1;
     int m = natoms + nfrag;
 
-    // CRITICAL FIX (Jan 4, 2026): Only use dxi corrections if explicitly requested
-    // Default (use_corrections=false) matches gfnff_final.cpp - uses base parameters only
-    // Reference: gfnff_final.cpp lines 123-136 achieves 0.0000025 e error WITHOUT dxi!
+    // CRITICAL FIX (Jan 29, 2026): Enable dxi corrections to match Fortran goedeckera
+    // Reference: Fortran gfnff_ini.f90:377-402 applies dxi corrections BEFORE Phase 1 EEQ solve
+    // - use_corrections=true for Phase 1 topology charges (matching Fortran)
+    // - use_corrections=false was incorrect and caused 0.0025 e error per hydroxyl oxygen
     Vector dxi = use_corrections ? calculateDxi(atoms, geometry_bohr, cn, topology) : Vector::Zero(natoms);
 
     // Setup EEQ parameters with CN-dependence
@@ -1316,11 +1344,13 @@ Vector EEQSolver::calculateTopologyCharges(
         A(i, i) = gam(i) + TSQRT2PI / std::sqrt(alpha(i));
     }
 
-    // DEBUG: Print final RHS values
+    // DEBUG: Print final RHS values (verbosity 3 only)
     if (m_verbosity >= 3 && natoms >= 1) {
-        std::cerr << "\n=== Phase 1 Final RHS (1×CNF) ===" << std::endl;
-        for (int i = 0; i < std::min(3, natoms); ++i) {
-            std::cerr << "  x(" << i << ") = " << x(i) << " = chi(i) = -chi + dxi + CNF*√CN" << std::endl;
+        std::cerr << "\n=== Phase 1 Final RHS (comparing ether vs hydroxyl O) ===" << std::endl;
+        for (int i = 0; i < std::min(10, natoms); ++i) {
+            if (atoms[i] == 8) {  // Only print oxygens
+                std::cerr << fmt::format("  x({}) (Z=8) = {:.6f}", i, x(i)) << std::endl;
+            }
         }
         std::cerr << "========================================\n" << std::endl;
     }
@@ -1419,11 +1449,28 @@ Vector EEQSolver::calculateTopologyCharges(
         m_cached_topological_distances = geom_dist;
     }
 
-    // 3. Setup fragment charge constraint
-    x(natoms) = static_cast<double>(total_charge);
-    for (int j = 0; j < natoms; ++j) {
-        A(natoms, j) = 1.0;
-        A(j, natoms) = 1.0;
+    // 3. Setup fragment charge constraints
+    for (int f = 0; f < nfrag; ++f) {
+        int row = natoms + f;
+        double q_target = (topology.has_value() && f < static_cast<int>(topology->qfrag.size()))
+                         ? topology->qfrag[f]
+                         : (f == 0 ? static_cast<double>(total_charge) : 0.0);
+
+        x(row) = q_target;
+
+        for (int j = 0; j < natoms; ++j) {
+            bool in_fragment = false;
+            if (topology.has_value() && j < static_cast<int>(topology->fraglist.size())) {
+                in_fragment = (topology->fraglist[j] == f + 1); // 1-indexed
+            } else {
+                in_fragment = (f == 0); // Default all atoms to first fragment
+            }
+
+            if (in_fragment) {
+                A(row, j) = 1.0;
+                A(j, row) = 1.0;
+            }
+        }
     }
 
     // 4. Solve augmented system
@@ -1449,8 +1496,14 @@ Vector EEQSolver::calculateTopologyCharges(
         }
     }
 
-    Eigen::PartialPivLU<Matrix> lu(A);
-    Vector solution = lu.solve(x);
+    // Claude Generated: Replaced PartialPivLU with ColPivHouseholderQR for numerical stability on large systems
+    Eigen::ColPivHouseholderQR<Matrix> qr(A);
+    Vector solution = qr.solve(x);
+
+    // Iterative refinement for improved accuracy
+    Vector residual = A * solution - x;
+    Vector correction = qr.solve(residual);
+    solution -= correction;
 
     // Extract atomic charges
     Vector topology_charges = solution.segment(0, natoms);
@@ -1464,22 +1517,23 @@ Vector EEQSolver::calculateTopologyCharges(
         }
     }
 
-    // DEBUG: Print resulting topology charges
-    if (m_verbosity >= 3 && natoms >= 1) {
-        std::cerr << "\n=== Phase 1 Topology Charges (qa) ===" << std::endl;
-        for (int i = 0; i < std::min(5, natoms); ++i) {
-            std::cerr << "  qa[" << i << "] (Z=" << atoms[i] << ") = " << topology_charges(i) << std::endl;
-        }
-        double total_charge = topology_charges.sum();
-        std::cerr << "  Total charge = " << total_charge << " (expected: " << total_charge << ")" << std::endl;
-        std::cerr << "========================================\n" << std::endl;
-    }
-
+    // Verbosity 2: Basic summary
     if (m_verbosity >= 2) {
         CurcumaLogger::info("Phase 1 EEQ: Topology charges calculated");
         for (int i = 0; i < std::min(5, natoms); ++i) {
             CurcumaLogger::result(fmt::format("Atom {} qa = {:.6f}", i, topology_charges(i)));
         }
+    }
+
+    // Verbosity 3: Detailed ether vs hydroxyl comparison (for oxygen-containing molecules)
+    if (m_verbosity >= 3 && natoms > 5) {
+        std::cerr << "\n=== Phase 1 Topology Charges (qa) ===" << std::endl;
+        for (int i = 0; i < std::min(16, natoms); ++i) {
+            if (atoms[i] == 8) {
+                std::cerr << "    qa[" << i << "] = " << topology_charges(i) << std::endl;
+            }
+        }
+        std::cerr << "========================================\n" << std::endl;
     }
 
     return topology_charges;
@@ -1506,6 +1560,20 @@ Matrix EEQSolver::computeTopologicalDistances(
     // 2. Set diagonal to zero (distance to self)
     for (int i = 0; i < natoms; ++i) {
         rabd(i, i) = 0.0;
+    }
+
+    // Debug: Verify covalent radii are in Angstrom (expected: C≈0.75, H≈0.32, O≈0.64)
+    // Claude Generated (Jan 2026): Diagnostic for EEQ unit verification
+    if (m_verbosity >= 3) {
+        std::cerr << "\n=== Covalent Radii Verification (expected: Angstrom) ===" << std::endl;
+        for (int i = 0; i < std::min(natoms, 9); ++i) {
+            int z = atoms[i];
+            std::cerr << fmt::format("  Atom {} (Z={}): r_cov = {:.4f} (expected Å)",
+                i, z, topology.covalent_radii[i]) << std::endl;
+        }
+        std::cerr << "Expected: C≈0.75, H≈0.32, O≈0.64 (Angstrom)" << std::endl;
+        std::cerr << "If values are ~2x larger, radii are incorrectly in Bohr!" << std::endl;
+        std::cerr << "=========================================\n" << std::endl;
     }
 
     // 3. Set bonded distances (sum of covalent radii)
@@ -1621,8 +1689,9 @@ Vector EEQSolver::calculateFinalCharges(
     // Initialize final_charges variable (will be overwritten by solve)
     Vector final_charges;
 
-    // Augmented system size
-    int m = natoms + 1;
+    // Augmented system size: n atoms + n fragments
+    int nfrag = topology.has_value() ? topology->nfrag : 1;
+    int m = natoms + nfrag;
 
     // Claude Generated (December 2025, Session 13): Pre-calculate CONSTANT corrected parameters
     // chi and gam are constant. Alpha is calculated ONCE using topology_charges (Phase 1).
@@ -1797,10 +1866,22 @@ Vector EEQSolver::calculateFinalCharges(
             A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
         }
 
-        // 3. Setup fragment charge constraint
-        for (int j = 0; j < natoms; ++j) {
-            A(natoms, j) = 1.0;
-            A(j, natoms) = 1.0;
+        // 3. Setup fragment charge constraints
+        for (int f = 0; f < nfrag; ++f) {
+            int row = natoms + f;
+            for (int j = 0; j < natoms; ++j) {
+                bool in_fragment = false;
+                if (topology.has_value() && j < static_cast<int>(topology->fraglist.size())) {
+                    in_fragment = (topology->fraglist[j] == f + 1); // 1-indexed
+                } else {
+                    in_fragment = (f == 0); // Default all atoms to first fragment
+                }
+
+                if (in_fragment) {
+                    A(row, j) = 1.0;
+                    A(j, row) = 1.0;
+                }
+            }
         }
 
         // 4. Setup RHS with CNF*sqrt(CN) term
@@ -1827,7 +1908,13 @@ Vector EEQSolver::calculateFinalCharges(
 
             x(i) = chi_corrected_val + params_i.cnf * std::sqrt(cn(i));
         }
-        x(natoms) = static_cast<double>(total_charge);
+        for (int f = 0; f < nfrag; ++f) {
+            int row = natoms + f;
+            double q_target = (topology.has_value() && f < static_cast<int>(topology->qfrag.size()))
+                             ? topology->qfrag[f]
+                             : (f == 0 ? static_cast<double>(total_charge) : 0.0);
+            x(row) = q_target;
+        }
 
         // DEBUG: Print matrix details for first iteration
         if (m_verbosity >= 3 && iteration == 0) {
@@ -1866,8 +1953,15 @@ Vector EEQSolver::calculateFinalCharges(
         }
 
         // 6. Solve system
-        Eigen::PartialPivLU<Matrix> lu(A);
-        Vector solution = lu.solve(x);
+        // Claude Generated: Replaced PartialPivLU with ColPivHouseholderQR for numerical stability on large systems
+        Eigen::ColPivHouseholderQR<Matrix> qr(A);
+        Vector solution = qr.solve(x);
+
+        // Iterative refinement for improved accuracy
+        Vector residual = A * solution - x;
+        Vector correction = qr.solve(residual);
+        solution -= correction;
+
         Vector new_charges = solution.segment(0, natoms);
 
         // 7. Validate solution

@@ -248,7 +248,7 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
             scffile << scfjson;
         }
         auto end = std::chrono::system_clock::now();
-        std::cout << fmt::format("Single Point Energy = {0} Eh ({1} secs)\n", energy, std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
+        CurcumaLogger::result(fmt::format("Single Point Energy = {0} Eh ({1} secs)", energy, std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0));
         ++iter;
     }
 }
@@ -298,11 +298,15 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
     for (auto t : pool->getFinishedThreads()) {
         const SPThread* thread = static_cast<const SPThread*>(t);
         if (!thread->isFinished()) {
-            std::cout << " not finished " << thread->getMolecule().Energy() << std::endl;
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                std::cout << " not finished " << thread->getMolecule().Energy() << std::endl;
+            }
             continue;
         }
         // if (m_threads > 1)
-        std::cout << thread->Output();
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            std::cout << thread->Output();
+        }
 
         Molecule* mol2 = new Molecule(thread->getMolecule());
         if (m_hessian) {

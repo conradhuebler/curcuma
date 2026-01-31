@@ -382,12 +382,16 @@ ctest -R "cli_rmsd_01" --verbose
 
 ## Known Issues
 
-1. **GFN-FF Limitations**: See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md#known-limitations) for details (D4 dispersion, EEQ integration, metal parameters)
+1. **GFN-FF Large Molecule Coulomb Deviations**: While small systems match Fortran exactly, larger systems show non-proportional deviations (e.g., Triose +26 mEh, Complex +6.5 mEh). See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md).
 
-2. **Unit migration**: Some legacy code still uses hardcoded constants instead of CurcumaUnit functions
+2. **GFN-FF Limitations**: See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md#known-limitations) for details (D4 dispersion, EEQ integration, metal parameters)
+
+3. **Unit migration**: Some legacy code still uses hardcoded constants instead of CurcumaUnit functions
 
 ## Recently Resolved ✅
 
+- ✅ **EEQ Solver Numerical Stability** (Jan 29, 2026): Replaced PartialPivLU with ColPivHouseholderQR + iterative refinement for better numerical stability on large systems. Investigation confirmed triose deviation is parameter-related, not numerical.
+- ✅ **GFN-FF Coulomb Exact Match** (Jan 29, 2026): Fixed dgam correction factors and enabled charge-corrected parameters (gameeq, alpeeq); Coulomb energy now matches Fortran reference within < 1 nEh (0.0001% error) for small systems.
 - ✅ **EEQ Charge Fine-Tuning** (Jan 17, 2026): Aligned parameters with Fortran reference; 82% Coulomb energy error reduction (8.3% → 1.5%)
 - ✅ **GFN-FF HB/XB Refinement** (Jan 17, 2026): Implemented context-dependent basicity/acidity overrides for non-covalent interactions
 - ✅ **D4 Dispersion Weighting Fix** (Jan 17, 2026): Corrected to CN-only weighting for GFN-FF hybrid model; D4 set as default

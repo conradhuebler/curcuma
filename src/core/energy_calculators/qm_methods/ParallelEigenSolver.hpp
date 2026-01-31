@@ -780,7 +780,9 @@ private:
                     D_1_2, eigenvalues, i, end, m_threshold));
             }
             diagonalPool.StartAndWait();
-            std::cout << "Diagonal computation completed" << std::endl;
+            if (m_debug) {
+                std::cout << "Diagonal computation completed" << std::endl;
+            }
             // Step 3: Calculate S^(-1/2) = U * D^(-1/2) * U^T
             // S_1_2 = eigenvectors * D_1_2 * eigenvectors.transpose();
             Matrix temp;

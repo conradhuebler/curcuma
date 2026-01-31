@@ -86,7 +86,10 @@ public:
      */
     struct TopologyInput {
         std::vector<std::vector<int>> neighbor_lists;  // neighbor_lists[i] = atoms bonded to i
-        std::vector<double> covalent_radii;            // Covalent radii in Bohr for each atom
+        std::vector<double> covalent_radii;            // Covalent radii in ANGSTROM (NOT Bohr!)
+        int nfrag = 1;                                 // Number of molecular fragments
+        std::vector<int> fraglist;                     // fraglist[i] = fragment ID for atom i (1-indexed)
+        std::vector<double> qfrag;                     // qfrag[f] = target charge for fragment f
     };
 
     /**
@@ -376,7 +379,8 @@ private:
         const Vector& dxi,
         int total_charge,
         const std::optional<TopologyInput>& topology,
-        bool use_cnf_term = true  // Default true for backward compatibility
+        bool use_cnf_term = true,  // Default true for backward compatibility
+        bool use_integer_nb = true // Phase 1 uses integer nb, Phase 2 uses fractional cn
     );
 
     // ===== Helper Functions =====

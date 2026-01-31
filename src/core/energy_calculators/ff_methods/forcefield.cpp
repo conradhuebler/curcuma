@@ -673,12 +673,38 @@ void ForceField::setGFNFFDispersions(const json& dispersions)
         disp.i = disp_json["i"];
         disp.j = disp_json["j"];
         disp.C6 = disp_json["C6"];
-        disp.C8 = disp_json["C8"];
-        disp.s6 = disp_json["s6"];
-        disp.s8 = disp_json["s8"];
-        disp.a1 = disp_json["a1"];
-        disp.a2 = disp_json["a2"];
         disp.r_cut = disp_json["r_cut"];
+
+        // CLAUDE GENERATED (January 25, 2026): GFN-FF specific dispersion parameters
+        // Reference: gfnff_gdisp0.f90:365-377
+        // r4r2ij = 3 * sqrtZr4r2_i * sqrtZr4r2_j (implicit C8/C6 factor)
+        // r0_squared = (a1*sqrt(r4r2ij) + a2)^2 with a1=0.58, a2=4.80
+        if (disp_json.contains("r4r2ij") && disp_json.contains("r0_squared")) {
+            disp.r4r2ij = disp_json["r4r2ij"];
+            disp.r0_squared = disp_json["r0_squared"];
+        } else {
+            // Fallback for legacy parameter sets: compute from sqrtZr4r2 approximation
+            // This maintains backward compatibility with older cached parameters
+            double a1 = disp_json.contains("a1") ? disp_json["a1"].get<double>() : 0.58;
+            double a2 = disp_json.contains("a2") ? disp_json["a2"].get<double>() : 4.80;
+
+            // If C8 is available, estimate r4r2ij from C8/C6 relationship
+            // r4r2ij ≈ 3*sqrt(C8/(3*C6)) for legacy data
+            if (disp_json.contains("C8") && disp.C6 > 1e-10) {
+                double c8 = disp_json["C8"].get<double>();
+                disp.r4r2ij = c8 / disp.C6;  // Approximate: C8 ≈ r4r2ij * C6
+            } else {
+                disp.r4r2ij = 1.0;  // Fallback default
+            }
+            disp.r0_squared = std::pow(a1 * std::sqrt(disp.r4r2ij) + a2, 2);
+        }
+
+        // Legacy fields (for backward compatibility, not used in GFN-FF energy formula)
+        disp.C8 = disp_json.contains("C8") ? disp_json["C8"].get<double>() : 0.0;
+        disp.s6 = disp_json.contains("s6") ? disp_json["s6"].get<double>() : 1.0;
+        disp.s8 = disp_json.contains("s8") ? disp_json["s8"].get<double>() : 2.0;
+        disp.a1 = disp_json.contains("a1") ? disp_json["a1"].get<double>() : 0.58;
+        disp.a2 = disp_json.contains("a2") ? disp_json["a2"].get<double>() : 4.80;
 
         m_gfnff_dispersions.push_back(disp);
     }
@@ -689,6 +715,7 @@ void ForceField::setGFNFFDispersions(const json& dispersions)
 }
 
 // Claude Generated 2025: Native D4 dispersion (separate storage from GFNFF native dispersion)
+// Updated (January 25, 2026): Support GFN-FF modified dispersion formula
 void ForceField::setD4Dispersions(const json& dispersions)
 {
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -703,12 +730,31 @@ void ForceField::setD4Dispersions(const json& dispersions)
         disp.i = disp_json["i"];
         disp.j = disp_json["j"];
         disp.C6 = disp_json["C6"];
-        disp.C8 = disp_json["C8"];
-        disp.s6 = disp_json["s6"];
-        disp.s8 = disp_json["s8"];
-        disp.a1 = disp_json["a1"];
-        disp.a2 = disp_json["a2"];
         disp.r_cut = disp_json["r_cut"];
+
+        // CLAUDE GENERATED (January 25, 2026): GFN-FF specific dispersion parameters
+        if (disp_json.contains("r4r2ij") && disp_json.contains("r0_squared")) {
+            disp.r4r2ij = disp_json["r4r2ij"];
+            disp.r0_squared = disp_json["r0_squared"];
+        } else {
+            // Fallback for legacy parameter sets
+            double a1 = disp_json.contains("a1") ? disp_json["a1"].get<double>() : 0.58;
+            double a2 = disp_json.contains("a2") ? disp_json["a2"].get<double>() : 4.80;
+            if (disp_json.contains("C8") && disp.C6 > 1e-10) {
+                double c8 = disp_json["C8"].get<double>();
+                disp.r4r2ij = c8 / disp.C6;
+            } else {
+                disp.r4r2ij = 1.0;
+            }
+            disp.r0_squared = std::pow(a1 * std::sqrt(disp.r4r2ij) + a2, 2);
+        }
+
+        // Legacy fields
+        disp.C8 = disp_json.contains("C8") ? disp_json["C8"].get<double>() : 0.0;
+        disp.s6 = disp_json.contains("s6") ? disp_json["s6"].get<double>() : 1.0;
+        disp.s8 = disp_json.contains("s8") ? disp_json["s8"].get<double>() : 2.0;
+        disp.a1 = disp_json.contains("a1") ? disp_json["a1"].get<double>() : 0.58;
+        disp.a2 = disp_json.contains("a2") ? disp_json["a2"].get<double>() : 4.80;
 
         m_d4_dispersions.push_back(disp);
     }
@@ -1511,7 +1557,8 @@ json ForceField::exportCurrentParameters() const
         output["d3_enabled"] = m_parameters["d3_enabled"];
     }
 
-    // Claude Generated (December 2025): Export GFN-FF specific parameters if present
+    // Claude Generated (December 2025, Updated January 25, 2026): Export GFN-FF specific parameters
+    // Now includes r4r2ij and r0_squared for GFN-FF modified dispersion formula
     if (!m_gfnff_dispersions.empty()) {
         json gfnff_disp = json::array();
         for (const auto& disp : m_gfnff_dispersions) {
@@ -1519,8 +1566,11 @@ json ForceField::exportCurrentParameters() const
             d["i"] = disp.i;
             d["j"] = disp.j;
             d["C6"] = disp.C6;
-            d["C8"] = disp.C8;
+            d["r4r2ij"] = disp.r4r2ij;      // GFN-FF specific: 3*sqrtZr4r2_i*sqrtZr4r2_j
+            d["r0_squared"] = disp.r0_squared;  // GFN-FF specific: (a1*sqrt(r4r2ij)+a2)^2
             d["r_cut"] = disp.r_cut;
+            // Legacy fields (for backward compatibility)
+            d["C8"] = disp.C8;
             d["s6"] = disp.s6;
             d["s8"] = disp.s8;
             d["a1"] = disp.a1;
@@ -1621,7 +1671,8 @@ json ForceField::exportCurrentParameters() const
         output["gfnff_xbonds"] = xbonds;
     }
 
-    // Claude Generated (December 2025): Export D4 dispersion parameters
+    // Claude Generated (December 2025, Updated January 25, 2026): Export D4 dispersion parameters
+    // Now includes r4r2ij and r0_squared for GFN-FF modified dispersion formula
     if (!m_d4_dispersions.empty()) {
         json d4_disp = json::array();
         for (const auto& disp : m_d4_dispersions) {
@@ -1629,8 +1680,11 @@ json ForceField::exportCurrentParameters() const
             d["i"] = disp.i;
             d["j"] = disp.j;
             d["C6"] = disp.C6;
-            d["C8"] = disp.C8;
+            d["r4r2ij"] = disp.r4r2ij;      // GFN-FF specific: 3*sqrtZr4r2_i*sqrtZr4r2_j
+            d["r0_squared"] = disp.r0_squared;  // GFN-FF specific: (a1*sqrt(r4r2ij)+a2)^2
             d["r_cut"] = disp.r_cut;
+            // Legacy fields (for backward compatibility)
+            d["C8"] = disp.C8;
             d["s6"] = disp.s6;
             d["s8"] = disp.s8;
             d["a1"] = disp.a1;
@@ -1992,6 +2046,11 @@ double ForceField::Calculate(bool gradient)
     // Level 1+: Final energy result
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::energy_abs(energy, "Force Field Energy");
+
+        // GFN-FF Coulomb energy (always show for validation)
+        if (m_coulomb_energy != 0.0) {
+            std::cout << fmt::format("  → Coulomb: {:.12f} Eh", m_coulomb_energy) << std::endl;
+        }
     }
 
     // Level 2+: Energy decomposition

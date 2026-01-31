@@ -154,7 +154,7 @@ bool EnergyCalculator::createMethod(const std::string& method_name, const json& 
             method_config["basename"] = m_basename;
         }
         
-        if (CurcumaLogger::get_verbosity() >= 3) {
+        if (getEffectiveVerbosity() >= 3) {
             CurcumaLogger::info("Method configuration prepared:");
             CurcumaLogger::param_table(method_config, "Method Configuration");
         }
@@ -213,7 +213,7 @@ void EnergyCalculator::setMolecule(const Mol& mol) {
         // Initialize gradient matrix
         m_gradient = Matrix::Zero(m_atoms, 3);
         
-        if (CurcumaLogger::get_verbosity() >= 3) {
+        if (getEffectiveVerbosity() >= 3) {
             CurcumaLogger::info("Calling computational method setMolecule...");
         }
         
@@ -227,7 +227,7 @@ void EnergyCalculator::setMolecule(const Mol& mol) {
         m_initialized = true;
         ClearError();
 
-        if (CurcumaLogger::get_verbosity() >= 1) {
+        if (getEffectiveVerbosity() >= 1) {
             CurcumaLogger::success(fmt::format("Molecule set: {} atoms, method: {}", m_atoms, m_method_name));
         }
 
@@ -375,7 +375,7 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
         // Restore original verbosity
         CurcumaLogger::set_verbosity(original_verbosity);
 
-        if (CurcumaLogger::get_verbosity() >= 3) {
+        if (getEffectiveVerbosity() >= 3) {
             CurcumaLogger::info("Energy calculation completed");
         }
 

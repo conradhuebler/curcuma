@@ -178,6 +178,12 @@ public:
         std::vector<std::vector<int>> bpair;  // N×N topological distance matrix (bonds between atoms)
         std::vector<std::tuple<int,int,int>> b3list;  // Batm triples (i,j,k) for 1,4-pairs
         int nbatm = 0;  // Number of batm triples
+
+        // Phase 10: Molecular fragments (Claude Generated - Jan 31, 2026)
+        // Used for fragment-constrained EEQ charges
+        int nfrag = 1;                       // Number of molecular fragments
+        std::vector<int> fraglist;           // Fragment ID per atom (1-indexed)
+        std::vector<double> qfrag;           // Target charge per fragment
     };
 
     /**
@@ -328,6 +334,15 @@ private:
      * Claude Generated (Dec 24, 2025): Breadth-First Search for 1,3/1,4 topology factors
      */
     std::vector<std::vector<int>> calculateTopologyDistances(const std::vector<std::vector<int>>& adjacency_list) const;
+
+    /**
+     * @brief Detect molecular fragments (connected components)
+     * @param adjacency_list Per-atom neighbor connectivity
+     * @return Pair of (nfrag, fraglist)
+     *
+     * Claude Generated (Jan 31, 2026) - Ported from Fortran gfnff_helpers.f90:49-78 (mrecgff)
+     */
+    std::pair<int, std::vector<int>> detectMolecularFragments(const std::vector<std::vector<int>>& adjacency_list) const;
 
     /**
      * @brief Classify bond type according to GFN-FF topology rules

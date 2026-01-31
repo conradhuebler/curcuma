@@ -129,20 +129,34 @@ struct EQ {
  */
 
 /**
- * @brief D3/D4 Dispersion pairwise term
+ * @brief D3/D4 Dispersion pairwise term (GFN-FF modified formula)
  *
- * Reference: gfnff_engrad.F90 (D4 integration)
- * Formula: E_disp = -Σ_ij f_damp(r_ij) * (C6_ij/r_ij^6 + C8_ij/r_ij^8 + ...)
+ * Reference: gfnff_gdisp0.f90:365-377
+ *
+ * GFN-FF uses a MODIFIED BJ damping formula (NOT standard D3/D4):
+ *   E = -0.5 * C6 * (t6 + 2*r4r2ij*t8)
+ * where:
+ *   t6 = 1/(r^6 + R0^6)
+ *   t8 = 1/(r^8 + R0^8)
+ *   r4r2ij = 3 * sqrtZr4r2_i * sqrtZr4r2_j  (implicit C8/C6 ratio)
+ *   R0^2 = (a1*sqrt(r4r2ij) + a2)^2 with a1=0.58, a2=4.80
+ *   sqrtZr4r2 = sqrt(0.5 * r4Overr2 * sqrt(Z))
+ *
+ * CLAUDE GENERATED (January 25, 2026): Fix dispersion to match XTB 6.6.1
  */
 struct GFNFFDispersion {
     int i = 0, j = 0;           ///< Atom pair indices
-    double C6 = 0.0;            ///< C6 dispersion coefficient
-    double C8 = 0.0;            ///< C8 dispersion coefficient (optional)
+    double C6 = 0.0;            ///< C6 dispersion coefficient (CN-weighted)
+    double r4r2ij = 0.0;        ///< Product: 3 * sqrtZr4r2_i * sqrtZr4r2_j (implicit C8/C6 factor)
+    double r0_squared = 0.0;    ///< Pre-computed R0^2 = (a1*sqrt(r4r2ij) + a2)^2
     double r_cut = 50.0;        ///< Cutoff radius (Bohr)
-    double s6 = 1.0;            ///< Scaling factor for C6
-    double s8 = 1.0;            ///< Scaling factor for C8
-    double a1 = 0.0;            ///< BJ damping parameter 1
-    double a2 = 0.0;            ///< BJ damping parameter 2
+
+    // Legacy fields (for backward compatibility with D3, not used in GFN-FF)
+    double C8 = 0.0;            ///< C8 dispersion coefficient (NOT used in GFN-FF formula)
+    double s6 = 1.0;            ///< Scaling factor for C6 (NOT used in GFN-FF formula)
+    double s8 = 1.0;            ///< Scaling factor for C8 (NOT used in GFN-FF formula)
+    double a1 = 0.0;            ///< BJ damping parameter 1 (legacy, r0_squared is pre-computed)
+    double a2 = 0.0;            ///< BJ damping parameter 2 (legacy, r0_squared is pre-computed)
 };
 
 /**

@@ -1999,69 +1999,17 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
     }
 
     // =========================================================================
-    // COULOMB DEBUG SUMMARY: Compare three components with Fortran reference
+    // COULOMB DEBUG SUMMARY: Show energy components
     // =========================================================================
-    if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_coulombs.size() > 0) {
-        std::cout << "\n=== COULOMB ENERGY DEBUG (vs Fortran CH3OCH3 reference) ===" << std::endl;
-        std::cout << fmt::format("  Interaction Energy:      {:+.12f} Eh (Fortran: -0.020102844599)", E_interaction) << std::endl;
-        std::cout << fmt::format("  Electronegativity:       {:+.12f} Eh (Fortran: -0.086143530128)", E_electronegativity) << std::endl;
-        std::cout << fmt::format("  Self-Energy (hardness):  {:+.12f} Eh (Fortran: +0.060747726300)", E_self_hardness) << std::endl;
-        std::cout << fmt::format("  Total Coulomb:           {:+.12f} Eh (Fortran: -0.045886388029)", m_coulomb_energy) << std::endl;
-        std::cout << fmt::format("  Difference from Fortran: {:+.12f} Eh ({:.2f} mEh)",
-            m_coulomb_energy - (-0.045886388029), (m_coulomb_energy - (-0.045886388029)) * 1000.0) << std::endl;
+    if (CurcumaLogger::get_verbosity() >= 1 && m_gfnff_coulombs.size() > 0) {
+        CurcumaLogger::info(fmt::format("  Coulomb Energy: {:+.12f} Eh", m_coulomb_energy));
 
-        // DEBUG: Print per-atom parameters for comparison with Fortran
-        // Fortran reference charges for CH3OCH3 (goed_gfnff output):
-        //   C1,C2: 0.039539, H: 0.044778, O: -0.347747
-        std::cout << "\n--- Per-Atom Charges: Curcuma vs Fortran ---" << std::endl;
-        std::cout << "Atom |   q_Curcuma  |  q_Fortran | q_Diff  |    chi     |    gam    |    alp    " << std::endl;
-        std::cout << "-----|--------------|------------|---------|------------|-----------|----------" << std::endl;
-
-        // Rebuild atom_to_params map for debug output
-        std::unordered_map<int, const GFNFFCoulomb*> debug_atom_to_params;
-        for (const auto& coul : m_gfnff_coulombs) {
-            if (debug_atom_to_params.find(coul.i) == debug_atom_to_params.end()) {
-                debug_atom_to_params[coul.i] = &coul;
-            }
-            if (debug_atom_to_params.find(coul.j) == debug_atom_to_params.end()) {
-                debug_atom_to_params[coul.j] = &coul;
-            }
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("  Components:");
+            CurcumaLogger::info(fmt::format("    Interaction:       {:+.12f} Eh", E_interaction));
+            CurcumaLogger::info(fmt::format("    Electronegativity: {:+.12f} Eh", E_electronegativity));
+            CurcumaLogger::info(fmt::format("    Self (hardness):   {:+.12f} Eh", E_self_hardness));
         }
-
-        // Print charge comparison table
-        for (int atom_id : m_assigned_atoms_for_self_energy) {
-            auto it = debug_atom_to_params.find(atom_id);
-            if (it == debug_atom_to_params.end()) continue;
-            const GFNFFCoulomb* params = it->second;
-            double q, chi, gam, alp;
-            if (params->i == atom_id) {
-                q = params->q_i; chi = params->chi_i; gam = params->gam_i; alp = params->alp_i;
-            } else {
-                q = params->q_j; chi = params->chi_j; gam = params->gam_j; alp = params->alp_j;
-            }
-            // Fortran reference charges (C1=0,C2=1, H3-5=2-4, O=5, H7-9=6-8)
-            double q_fort = 0.0;
-            if (atom_id < 2) q_fort = 0.039539;  // C
-            else if (atom_id == 5) q_fort = -0.347747;  // O
-            else q_fort = 0.044778;  // H
-            double q_diff = q - q_fort;
-            std::cout << "ATOM_DATA: " << atom_id << " " << q << " " << q_fort << " " << q_diff << " " << chi << " " << gam << " " << alp << std::endl;
-        }
-
-        // Sum of charges check
-        double sum_q_cur = 0.0, sum_q_fort = 0.0;
-        for (int atom_id : m_assigned_atoms_for_self_energy) {
-            auto it = debug_atom_to_params.find(atom_id);
-            if (it == debug_atom_to_params.end()) continue;
-            const GFNFFCoulomb* params = it->second;
-            double q = (params->i == atom_id) ? params->q_i : params->q_j;
-            sum_q_cur += q;
-            if (atom_id < 2) sum_q_fort += 0.039539;
-            else if (atom_id == 5) sum_q_fort += -0.347747;
-            else sum_q_fort += 0.044778;
-        }
-        std::cout << fmt::format("Sum: Curcuma={:+.8f}, Fortran={:+.8f}", sum_q_cur, sum_q_fort) << std::endl;
-        std::cout << "============================================================\n" << std::endl;
     }
 }
 
