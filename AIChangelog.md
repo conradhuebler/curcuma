@@ -4,6 +4,10 @@ This file tracks significant improvements, refactorings, and new features genera
 
 Format: One line per change, newest first.
 
+## February 2026
+
+- **GFN-FF Bond Energy Systematic Error Fix (Feb 1)**: Removed redundant topology_factor scaling in generateTopologyAwareBonds() that applied ring/pi corrections on top of already-computed corrections in getGFNFFBondParameters(), fixing +3% bond energy error, Complex (231 atoms): -38.16 Eh → -37.03 Eh (ref: -37.025 Eh), error reduced from 3.06% to 0.007% (456× improvement)
+
 ## January 2026
 
 - **GFN-FF Fragment-Constrained EEQ Charges (Jan 31)**: Implemented molecular fragment detection (BFS) and per-fragment charge constraints in the EEQ solver, expanding the augmented matrix size to `natoms + nfrag`, correcting charge redistribution in multi-fragment systems and reducing Coulomb energy error for a 231-atom complex from 6.5 mEh to 0.65 mEh (10× improvement)

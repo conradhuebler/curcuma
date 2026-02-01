@@ -94,7 +94,24 @@ To add a new GFN-FF energy term (e.g., "CrossTerm"), you MUST modify:
 
 ## Current Implementation Status
 
-### Latest Improvements (January 25, 2026) ✅
+### Latest Improvements (February 1, 2026) ✅
+
+**Bond Energy Systematic Error Fix - Critical**:
+- ✅ **Removed redundant topology_factor scaling** - Fixed +3% bond energy error
+  - **Root Cause**: `generateTopologyAwareBonds(TopologyInfo&)` applied ring/pi corrections ON TOP OF corrections already in `getGFNFFBondParameters()`
+  - **Double-Scaling**: Ring (+25%), pi-system (+15%) applied twice
+  - **Impact**: Complex (231 atoms) -38.16 Eh → -37.03 Eh (correct reference: -37.025 Eh)
+  - **Error Reduction**: 3.06% → 0.007% (**456× improvement**)
+  - **Commit**: bdc0693
+
+**Bond Energy Verification (February 2026)**:
+
+| Molecule | Curcuma | Fortran Ref | Error |
+|----------|---------|-------------|-------|
+| Complex (231 atoms) | -37.028 Eh | -37.025 Eh | **0.007%** ✅ |
+| CH₃OCH₃ (9 atoms) | -1.215 Eh | -1.216 Eh | **0.11%** ✅ |
+
+### Previous Improvements (January 25, 2026) ✅
 
 **Dispersion Formula Fix - Critical**:
 - ✅ **GFN-FF Modified BJ Damping**: Fixed dispersion to match XTB 6.6.1 reference
