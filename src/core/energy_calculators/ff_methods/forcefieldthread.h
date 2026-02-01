@@ -150,6 +150,7 @@ struct GFNFFDispersion {
     double r4r2ij = 0.0;        ///< Product: 3 * sqrtZr4r2_i * sqrtZr4r2_j (implicit C8/C6 factor)
     double r0_squared = 0.0;    ///< Pre-computed R0^2 = (a1*sqrt(r4r2ij) + a2)^2
     double r_cut = 50.0;        ///< Cutoff radius (Bohr)
+    double zetac6 = 1.0;        ///< Zeta charge scaling: zeta(Zi,qi)*zeta(Zj,qj) (Claude Jan 31, 2026)
 
     // Legacy fields (for backward compatibility with D3, not used in GFN-FF)
     double C8 = 0.0;            ///< C8 dispersion coefficient (NOT used in GFN-FF formula)
@@ -406,6 +407,13 @@ public:
     inline void setMethod(int method)
     {
         m_method = method;
+        // Claude Generated (Feb 1, 2026): Update distance multiplier when method changes
+        // Method 3 (GFN-FF) and 5 (D3-only) use Bohr coordinates internally
+        if (m_method == 3 || m_method == 5) {
+            m_au = 1.0;
+        } else {
+            m_au = 1.889726125; // Angstrom to Bohr for UFF-based non-bonded terms
+        }
     }
     double BondEnergy() { return m_bond_energy; }
     double AngleEnergy() { return m_angle_energy; }

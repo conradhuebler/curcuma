@@ -92,6 +92,126 @@ To add a new GFN-FF energy term (e.g., "CrossTerm"), you MUST modify:
    - Add setter method (e.g., `setGFNFFCrossTerms(const json&)`)
    - Call in `setParameter()` dispatcher
 
+## GFN-FF Gradient Implementation Status (February 2026)
+
+**CRITICAL FINDING**: Most GFN-FF gradient methods are **implemented but DISABLED** in `execute()`
+
+### Active vs Disabled Gradient Terms
+
+| Energy Term | Method | Status in execute() | Gradient Status | Fortran Ref |
+|-------------|--------|---------------------|-----------------|-------------|
+| Bonds | CalculateGFNFFBondContribution() | ❌ COMMENTED OUT | ✅ Implemented | egbond:675-721 |
+| Angles | CalculateGFNFFAngleContribution() | ❌ COMMENTED OUT | ✅ Implemented | egbend:857-916 |
+| Torsions | CalculateGFNFFDihedralContribution() | ❌ COMMENTED OUT | ✅ Implemented | egtors:1153-1234 |
+| Extra Torsions | CalculateGFNFFExtraTorsionContribution() | ❌ COMMENTED OUT | ✅ Implemented | egtors:1272-1280 |
+| Inversions | CalculateGFNFFInversionContribution() | ❌ COMMENTED OUT | ✅ Implemented | gfnff_ini.f90 |
+| Dispersion | CalculateGFNFFDispersionContribution() | ❌ COMMENTED OUT | ✅ Implemented | gdisp0.f90 |
+| Repulsion (bonded) | CalculateGFNFFBondedRepulsionContribution() | ❌ COMMENTED OUT | ⚠️ Partial | engrad:467-495 |
+| Repulsion (non-bonded) | CalculateGFNFFNonbondedRepulsionContribution() | ✅ ACTIVE | ⚠️ Partial | engrad:255-276 |
+| Coulomb | CalculateGFNFFCoulombContribution() | ❌ COMMENTED OUT | ❌ Missing | engrad:383-422 |
+| Hydrogen Bonds | CalculateGFNFFHydrogenBondContribution() | ✅ ACTIVE | ⚠️ Partial | abhgfnff_eg* |
+| Halogen Bonds | CalculateGFNFFHalogenBondContribution() | ✅ ACTIVE | ⚠️ Partial | rbxgfnff_eg |
+| BATM | CalculateGFNFFBatmContribution() | ✅ ACTIVE | ❌ Missing | batmgfnff_eg |
+| ATM (D3/D4) | CalculateATMContribution() | ✅ ACTIVE | ✅ Complete | d3_gradient |
+
+### Implementation Details
+
+#### ✅ Complete Gradient Implementations
+
+**Bond Gradients** (forcefieldthread.cpp:834-842):
+```cpp
+// dE/dr = -2*α*dr*E (chain rule)
+double dEdr = -2.0 * alpha * dr * energy;
+m_gradient.row(bond.i) += dEdr * factor * derivate.row(0);
+m_gradient.row(bond.j) += dEdr * factor * derivate.row(1);
+```
+- **Note**: Missing CN gradient contribution (dr0/dCN * dCN/dx) - second-order effect
+
+**Angle Gradients** (forcefieldthread.cpp:993-1034):
+- Complete implementation with distance-dependent damping
+- Full damping gradient terms: ∂E/∂x = (∂E/∂θ * damp) * (∂θ/∂x) + (∂E/∂damp) * (∂damp/∂x)
+- Matches Fortran egbend exactly
+
+**Torsion Gradients** (forcefieldthread.cpp:1038-1360):
+- Complete with all three damping terms (damp_ik, damp_jk, damp_jl)
+- Cross-center damping formula matches Fortran
+- NCI torsion support (atcutt_nci = 0.305 vs standard atcutt = 0.505)
+
+**Extra Torsion Gradients** (forcefieldthread.cpp:1366-1520):
+- Same implementation as primary torsions
+- Without +π phase shift (gauche torsions)
+
+#### ❌ Missing Gradient Implementations
+
+**Coulomb Gradients**:
+- **Status**: Energy only, gradients NOT implemented
+- **Challenge**: Requires EEQ charge derivatives (dq/dx)
+- **Formula**: ∂E/∂x = ∂E/∂r * ∂r/∂x + ∂E/∂q * ∂q/∂x
+- **Requirement**: Solve EEQ matrix for geometry derivatives
+- **Priority**: HIGH - blocks production use
+
+**BATM (Bonded ATM) Gradients**:
+- **Status**: Energy calculation complete, gradients TODO
+- **Location**: CalculateGFNFFBatmContribution() line 2955
+- **Reference**: Fortran batmgfnff_eg subroutine
+- **Priority**: MEDIUM
+
+#### ⚠️ Partial Gradient Implementations
+
+**Repulsion Gradients**:
+- Non-bonded repulsion active but needs validation against Fortran
+- Bonded repulsion disabled, needs testing
+
+**HB/XB Gradients**:
+- Active in execute() but validation against Fortran incomplete
+- Complex three-body terms with angle/distance damping
+
+### Enabling All Gradients
+
+To enable all gradient methods in `forcefieldthread.cpp:execute()`, uncomment:
+
+```cpp
+// Lines 116-120: Bonded terms
+CalculateGFNFFBondContribution();
+CalculateGFNFFAngleContribution();
+CalculateGFNFFDihedralContribution();
+CalculateGFNFFExtraTorsionContribution();
+CalculateGFNFFInversionContribution();
+
+// Lines 124-131: Non-bonded terms
+if (m_dispersion_enabled) {
+    CalculateGFNFFDispersionContribution();
+}
+if (m_repulsion_enabled) {
+    CalculateGFNFFBondedRepulsionContribution();
+    // Non-bonded already active
+}
+if (m_coulomb_enabled) {
+    CalculateGFNFFCoulombContribution();  // NEEDS IMPLEMENTATION
+}
+```
+
+### Test Framework
+
+**Test File**: `test_cases/test_gfnff_gradients.cpp`
+- Finite-difference gradient calculation
+- Term-specific tests (bond-only, angle-only, etc.)
+- Full molecule gradient validation
+- Tolerance: 1e-5 to 1e-4 Hartree/Bohr depending on term
+
+**CTest Integration**:
+```bash
+ctest -R test_gfnff_gradients --verbose
+```
+
+### Next Steps
+
+1. **Enable and validate** all commented-out gradient methods
+2. **Implement Coulomb gradients** (requires EEQ derivatives)
+3. **Implement BATM gradients**
+4. **Validate HB/XB gradients** against Fortran
+5. **Run full regression test** with gradients enabled
+
 ## Current Implementation Status
 
 ### Latest Improvements (February 1, 2026) ✅

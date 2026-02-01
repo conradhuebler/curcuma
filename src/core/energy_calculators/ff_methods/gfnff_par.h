@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <cmath>
 #include <vector>
 
 namespace GFNFFParameters {
@@ -821,5 +822,114 @@ constexpr double FR3 = 0.3;  // 3-ring torsion barrier factor (planar)
 constexpr double FR4 = 1.0;  // 4-ring torsion barrier factor (butterfly)
 constexpr double FR5 = 1.5;  // 5-ring torsion barrier factor (envelope)
 constexpr double FR6 = 5.7;  // 6-ring torsion barrier factor (chair preference)
+
+// ============================================================================
+// SECTION 8: D4 Zeta Charge Scaling Parameters (Claude Generated - January 31, 2026)
+// ============================================================================
+// Reference: gfnff_ini.f90:2187-2234
+//
+// The zeta function provides charge-dependent scaling for D4 dispersion:
+//   zetac6_ij = zeta(Z_i, q_i) * zeta(Z_j, q_j)
+//   E_disp = -0.5 * C6 * (t6 + 2*r4r2ij*t8) * zetac6 * dispscale
+//
+// The zeta function:
+//   qmod = zeff[Z] + q
+//   zeta = exp(3.0 * (1 - exp(c[Z] * (1 - zeff[Z]/qmod))))
+//
+// Where:
+//   zeff = effective nuclear charges (chemical screening)
+//   c = chemical hardness parameters (from Ghosh & Islam 2009)
+//
+// This scaling adjusts dispersion based on atomic charges:
+//   - Positive charges (q > 0): smaller zeta → weaker dispersion
+//   - Negative charges (q < 0): larger zeta → stronger dispersion
+//   - Neutral atoms (q ≈ 0): zeta ≈ 1
+// ============================================================================
+
+// Effective nuclear charges (zeff) for dispersion zeta scaling
+// Reference: gfnff_ini.f90:2193-2200
+// Note: Different from Slater effective charges; these are optimized for dispersion
+static const std::vector<double> zeta_zeff = {
+    // H-He (Z=1-2)
+    1, 2,
+    // Li-Ne (Z=3-10)
+    3, 4, 5, 6, 7, 8, 9, 10,
+    // Na-Ar (Z=11-18)
+    11, 12, 13, 14, 15, 16, 17, 18,
+    // K-Kr (Z=19-36)
+    19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36,
+    // Rb-Xe (Z=37-54): Note shift at Rb (reset to 9)
+    9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+    // Cs-Lu (Z=55-71)
+    9, 10, 11, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43,
+    // Hf-Rn (Z=72-86)
+    12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26
+};
+
+// Chemical hardness parameters (c) for dispersion zeta scaling
+// Reference: gfnff_ini.f90:2209-2224
+// Source: Ghosh & Islam, DOI: 10.1002/qua.22202 (values × 2)
+static const std::vector<double> zeta_c = {
+    // H-C (Z=1-6)
+    0.47259288, 0.92203391, 0.17452888, 0.25700733, 0.33949086, 0.42195412,
+    // N-Mg (Z=7-12)
+    0.50438193, 0.58691863, 0.66931351, 0.75191607, 0.17964105, 0.22157276,
+    // Al-Ar (Z=13-18)
+    0.26348578, 0.30539645, 0.34734014, 0.38924725, 0.43115670, 0.47308269,
+    // K-Zn (Z=19-30)
+    0.17105469, 0.20276244, 0.21007322, 0.21739647, 0.22471039, 0.23201501,
+    0.23933969, 0.24665638, 0.25398255, 0.26128863, 0.26859476, 0.27592565,
+    // Ga-Kr (Z=31-36)
+    0.30762999, 0.33931580, 0.37235985, 0.40273549, 0.43445776, 0.46611708,
+    // Rb-Cd (Z=37-48)
+    0.15585079, 0.18649324, 0.19356210, 0.20063311, 0.20770522, 0.21477254,
+    0.22184614, 0.22891872, 0.23598621, 0.24305612, 0.25013018, 0.25719937,
+    // In-Xe (Z=49-54)
+    0.28784780, 0.31848673, 0.34912431, 0.37976593, 0.41040808, 0.44105777,
+    // Cs-Dy (Z=55-66)
+    0.05019332, 0.06762570, 0.08504445, 0.10247736, 0.11991105, 0.13732772,
+    0.15476297, 0.17218265, 0.18961288, 0.20704760, 0.22446752, 0.24189645,
+    // Ho-Hf (Z=67-72)
+    0.25932503, 0.27676094, 0.29418231, 0.31159587, 0.32902274, 0.34592298,
+    // Ta-Pt (Z=73-78)
+    0.36388048, 0.38130586, 0.39877476, 0.41614298, 0.43364510, 0.45104014,
+    // Au-Rn (Z=79-86)
+    0.46848986, 0.48584550, 0.12526730, 0.14268677, 0.16011615, 0.17755889,
+    0.19497557, 0.21240778
+};
+
+/**
+ * @brief Calculate zeta charge scaling factor for D4 dispersion
+ *
+ * Reference: gfnff_ini.f90:2187-2234
+ *
+ * @param Z Atomic number (1-based)
+ * @param q Atomic partial charge (Hartree)
+ * @return Zeta scaling factor (dimensionless)
+ *
+ * Claude Generated (January 31, 2026): GFN-FF zeta charge scaling
+ */
+inline double zetaChargeScale(int Z, double q) {
+    // Validate element range (1-86)
+    if (Z < 1 || Z > 86) {
+        return 1.0;  // No scaling for unsupported elements
+    }
+
+    // Use 0-based indexing
+    int idx = Z - 1;
+    double zeff_val = zeta_zeff[idx];
+    double c_val = zeta_c[idx];
+
+    // qmod = zeff + q
+    double qmod = zeff_val + q;
+
+    // Handle negative qmod (highly anionic)
+    if (qmod < 0.0) {
+        return std::exp(3.0);  // Maximum zeta value
+    }
+
+    // zeta = exp(3.0 * (1 - exp(c * (1 - zeff/qmod))))
+    return std::exp(3.0 * (1.0 - std::exp(c_val * (1.0 - zeff_val / qmod))));
+}
 
 } // namespace GFNFFParameters

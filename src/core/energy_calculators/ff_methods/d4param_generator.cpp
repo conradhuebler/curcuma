@@ -9,7 +9,7 @@
 #include "d4param_generator.h"
 #include "gfnff_par.h"
 #include "../../../../test_cases/reference_data/d4_reference_data_fixed.cpp"  // D4 reference data (365 lines)
-#include "../../../../test_cases/reference_data/d4_reference_cn.cpp"          // D4 reference CN data (cpp-d4 - December 2025 Phase 1)
+#include "../../../../test_cases/reference_data/d4_reference_cn_fortran.cpp"  // D4 reference CN data (Fortran dftd3param.f90 - January 2026)
 #include "src/core/curcuma_logger.h"
 
 #include <algorithm>
@@ -17,8 +17,10 @@
 #include <chrono>
 #include <limits>
 
-// External declarations from d4_reference_cn.cpp (cpp-d4 CN data - December 2025 Phase 1)
-extern const std::vector<std::vector<double>> D4ReferenceData::refcn_cppd4;
+// External declarations from d4_reference_cn_fortran.cpp (Fortran dftd3param.f90 - January 2026)
+// CRITICAL FIX: Use Fortran reference CN data (matches dftd3param.f90) instead of cpp-d4 data
+// This fixes ~20 mEh dispersion error caused by wrong CN weighting
+extern const std::vector<std::vector<double>> D4ReferenceData::refcn_fortran;
 
 // External declarations from d4_alphaiw_data.cpp
 extern std::vector<std::vector<std::vector<double>>> d4_alphaiw_data;
@@ -85,27 +87,28 @@ void D4ParameterGenerator::initializeReferenceData()
         }
     }
 
-    // Load reference coordination numbers (December 2025 Phase 2 - CN integration)
-    // Use cpp-d4 data for consistency with CNCalculator (GFNFFCN)
-    if (D4ReferenceData::refcn_cppd4.size() >= 7) {
-        // cpp-d4 format: refcn[charge_state][element_number]
+    // Load reference coordination numbers (January 2026 - Fortran dftd3param.f90 data)
+    // CRITICAL FIX: Use Fortran reference CN data (matches dftd3param.f90) instead of cpp-d4 data
+    // This fixes ~20 mEh dispersion error caused by wrong CN weighting
+    if (D4ReferenceData::refcn_fortran.size() >= 7) {
+        // Fortran format: refcn[charge_state][element_number]
         // Transpose to our format: m_refcn[element_number][charge_state]
         m_refcn.resize(MAX_ELEM, std::vector<double>(MAX_REF, 0.0));
         for (int elem = 0; elem < MAX_ELEM && elem < 118; ++elem) {
             for (int charge_state = 0; charge_state < MAX_REF && charge_state < 7; ++charge_state) {
-                // cpp-d4 has charge_state dimension first, then element
-                if (charge_state < static_cast<int>(D4ReferenceData::refcn_cppd4.size()) &&
-                    elem < static_cast<int>(D4ReferenceData::refcn_cppd4[charge_state].size())) {
-                    m_refcn[elem][charge_state] = D4ReferenceData::refcn_cppd4[charge_state][elem];
+                // Fortran data has charge_state dimension first, then element
+                if (charge_state < static_cast<int>(D4ReferenceData::refcn_fortran.size()) &&
+                    elem < static_cast<int>(D4ReferenceData::refcn_fortran[charge_state].size())) {
+                    m_refcn[elem][charge_state] = D4ReferenceData::refcn_fortran[charge_state][elem];
                 }
             }
         }
         if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::success("D4: Loaded reference CN data from cpp-d4 (86/118 elements)");
+            CurcumaLogger::success("D4: Loaded reference CN data from Fortran dftd3param.f90");
         }
     } else {
         if (CurcumaLogger::get_verbosity() >= 2) {
-            CurcumaLogger::warn("D4: cpp-d4 CN data unavailable, using placeholders");
+            CurcumaLogger::warn("D4: Fortran CN data unavailable, using placeholders");
         }
         m_refcn.resize(MAX_ELEM, std::vector<double>(MAX_REF, 0.0));
     }
@@ -362,11 +365,42 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
                 // Legacy C8 calculation (for backward compatibility, NOT used in GFN-FF formula)
                 double c8 = 3.0 * c6 * sqrt_zr4r2_i * sqrt_zr4r2_j;
 
+                // Claude Generated (Jan 31, 2026): GFN-FF zeta charge scaling
+                // Reference: gfnff_ini.f90:789-806, gfnff_gdisp0.f90:374
+                // The zeta function provides charge-dependent C6 scaling:
+                //   zetac6_ij = zeta(Z_i, q_i) * zeta(Z_j, q_j)
+                //
+                // CRITICAL FIX (Jan 31, 2026): Use TOPOLOGY charges (topo%qa) for zeta scaling
+                // Reference: Fortran gfnff_ini.f90:789 - f1 = zeta(ati, topo%qa(i))
+                // GFN-FF computes zetac6 ONCE during initialization using topology charges,
+                // which are calculated with INTEGER neighbor counts (neighbor_count),
+                // NOT the fractional CN from geometry-dependent EEQ.
+                double q_i, q_j;
+                if (m_topology_charges.size() > 0) {
+                    // Use topology charges (topo%qa equivalent) for zeta scaling
+                    q_i = (i < static_cast<size_t>(m_topology_charges.size())) ? m_topology_charges(i) : 0.0;
+                    q_j = (j < static_cast<size_t>(m_topology_charges.size())) ? m_topology_charges(j) : 0.0;
+                    if (CurcumaLogger::get_verbosity() >= 3 && i == 0 && j == 1) {
+                        CurcumaLogger::info("Zeta scaling: Using topology charges (topo%qa)");
+                    }
+                } else {
+                    // Fallback to EEQ charges (geometry-dependent, less accurate for GFN-FF)
+                    q_i = (i < static_cast<size_t>(m_eeq_charges.size())) ? m_eeq_charges(i) : 0.0;
+                    q_j = (j < static_cast<size_t>(m_eeq_charges.size())) ? m_eeq_charges(j) : 0.0;
+                    if (CurcumaLogger::get_verbosity() >= 3 && i == 0 && j == 1) {
+                        CurcumaLogger::warn("Zeta scaling: Falling back to EEQ charges (no topology charges)");
+                    }
+                }
+                double zeta_i = GFNFFParameters::zetaChargeScale(atom_i, q_i);
+                double zeta_j = GFNFFParameters::zetaChargeScale(atom_j, q_j);
+                double zetac6 = zeta_i * zeta_j;
+
                 // GFN-FF dispersion pair parameters
                 pair["dispersion_method"] = "d4";  // Route to native GFN-FF in ForceFieldThread
                 pair["C6"] = c6;              // CN-weighted C6 from Casimir-Polder
                 pair["r4r2ij"] = r4r2ij;      // GFN-FF: implicit C8/C6 factor
                 pair["r0_squared"] = r0_squared;  // GFN-FF: pre-computed (a1*sqrt(r4r2ij)+a2)^2
+                pair["zetac6"] = zetac6;      // GFN-FF: charge-dependent zeta scaling (Jan 31, 2026)
 
                 // Legacy fields (for backward compatibility with standard D3/D4)
                 pair["C8"] = c8;
@@ -855,6 +889,9 @@ void D4ParameterGenerator::precomputeGaussianWeights()
             // KEY: CN-only Gaussian weighting (matches GFN-FF hybrid model)
             // Reference: external/gfnff/src/gfnff_gdisp0.f90:405 - cngw = exp(-wf * (cn - cnref)**2)
             double diff_cn = cni - cni_ref;
+            if (i == 0 && CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::info(fmt::format("DEBUG: i=0 ref={} cni={:.4f} cni_ref={:.4f} diff={:.4f}", ref, cni, cni_ref, diff_cn));
+            }
             weights[ref] = std::exp(-wf * diff_cn * diff_cn);
             sum_weights += weights[ref];
         }
@@ -878,7 +915,7 @@ void D4ParameterGenerator::precomputeGaussianWeights()
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("=== D4 Gaussian Weights Pre-computed ===");
         CurcumaLogger::param("Atoms processed", static_cast<int>(m_atoms.size()));
-        for (size_t i = 0; i < std::min<size_t>(m_atoms.size(), 5); ++i) {
+        for (size_t i = 0; i < std::min<size_t>(m_atoms.size(), 231); ++i) {
             std::string weights_str = "";
             for (size_t ref = 0; ref < m_gaussian_weights[i].size(); ++ref) {
                 weights_str += fmt::format("{:.6f}", m_gaussian_weights[i][ref]);

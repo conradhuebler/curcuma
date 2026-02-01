@@ -749,6 +749,10 @@ void ForceField::setD4Dispersions(const json& dispersions)
             disp.r0_squared = std::pow(a1 * std::sqrt(disp.r4r2ij) + a2, 2);
         }
 
+        // Claude Generated (Jan 31, 2026): Zeta charge scaling for GFN-FF dispersion
+        // Reference: gfnff_ini.f90:789-806, gfnff_gdisp0.f90:374
+        disp.zetac6 = disp_json.contains("zetac6") ? disp_json["zetac6"].get<double>() : 1.0;
+
         // Legacy fields
         disp.C8 = disp_json.contains("C8") ? disp_json["C8"].get<double>() : 0.0;
         disp.s6 = disp_json.contains("s6") ? disp_json["s6"].get<double>() : 1.0;

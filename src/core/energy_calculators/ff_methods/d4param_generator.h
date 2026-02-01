@@ -64,6 +64,12 @@ public:
     double getSqrtZr4r2(int atom) const;
     double getAtomicPolarizability(int atom, int frequency_index = 1) const;
 
+    // Claude Generated (Jan 31, 2026): Set topology charges for zeta scaling
+    // Reference: Fortran gfnff_ini.f90:789 - f1 = zeta(ati, topo%qa(i))
+    // GFN-FF computes zetac6 ONCE during initialization using topology charges (topo%qa),
+    // which are calculated with INTEGER neighbor counts, NOT fractional CN from geometry.
+    void setTopologyCharges(const Vector& charges) { m_topology_charges = charges; }
+
 private:
     void initializeReferenceData();
     void calculateFrequencyDependentPolarizabilities();
@@ -111,6 +117,11 @@ private:
     // EEQ charge calculation (Dec 2025 - Phase 2 D4 integration)
     std::unique_ptr<EEQSolver> m_eeq_solver;
     Vector m_eeq_charges;  // Cached EEQ charges for current geometry
+
+    // Claude Generated (Jan 31, 2026): Topology charges for zeta scaling
+    // Reference: Fortran gfnff_ini.f90:789 - f1 = zeta(ati, topo%qa(i))
+    // GFN-FF uses topology-based charges (topo%qa) for zetac6 scaling, NOT geometry-dependent EEQ
+    Vector m_topology_charges;  // Phase 1 topology charges from GFNFF::TopologyInfo
 
     // Molecular CN calculation (December 2025 Phase 2 - CN+Charge weighting)
     std::vector<double> m_cn_values;  // Cached GFNFFCN values for current geometry

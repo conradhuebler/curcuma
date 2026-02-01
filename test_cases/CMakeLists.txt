@@ -351,6 +351,25 @@ set_tests_properties(test_atm_gradients PROPERTIES
     LABELS "atm;gradients;dispersion"
     TIMEOUT 30)
 
+# Claude Generated (February 2026): GFN-FF Gradient Validation Test
+# Validates all GFN-FF analytical gradients against numerical finite differences
+add_executable(test_gfnff_gradients
+        test_gfnff_gradients.cpp)
+
+target_link_libraries(test_gfnff_gradients curcuma_core)
+
+if(USE_PCH)
+    target_precompile_headers(test_gfnff_gradients REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_gfnff_gradients
+         COMMAND test_gfnff_gradients
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+set_tests_properties(test_gfnff_gradients PROPERTIES
+    LABELS "gfnff;gradients;validation"
+    TIMEOUT 60)
+
 # Register with CTest
 add_test(NAME test_gfnff_d3
          COMMAND test_gfnff_d3
