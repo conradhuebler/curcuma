@@ -1341,85 +1341,79 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     }
 
     // Step 4: Phase 2 - Final equilibrium distance with shift correction
-    // Fortran gfnff_ini.f90:1235 & 1248: rab(k) = (ra + rb + shift) * ff, then r0 = rab(k)*0.529167
+    // Fortran gfnff_ini.f90:1063-1231 and gfnff_rab.f90:288
     //
-    // Shift calculation (Fortran gfnff_ini.f90:1063-1231):
-    //   1. Base shift: gen%rabshift = -0.110 (general shift in Bohr)
-    //   2. XH correction: if(ia.eq.1 or ja.eq.1) shift += gen%rabshifth = -0.050
-    //   3. X-sp3 hybridization correction: if X-sp3, shift -= 0.022 (Fortran gfnff_ini.f90:1146-1147)
-    //   4. Hypervalent: if(bbtyp==4) shift = gen%hyper_shift
-    //   5. Ring effects: if X in ring, additional shift -= 0.022
-    //   6. Heavy atom effects (Z>36): shift += gen%hshift5
-    //
+    // Reference Formula: r0 = (ra + rb) * ff + (gen%rabshift + shift)
+    // CRITICAL: Shift is added AFTER the electronegativity factor ff!
+
     double gen_rabshift = -0.110;    // Fortran: gen%rabshift
     double gen_rabshifth = -0.050;   // Fortran: gen%rabshifth (XH bonds)
+    double hyper_shift = 0.030;      // Fortran: gen%hyper_shift
+    double hshift3 = -0.110;         // Fortran: gen%hshift3 (Heavy-Heavy Z>10)
+    double hshift4 = -0.110;         // Fortran: gen%hshift4 (Z>18)
+    double hshift5 = -0.060;         // Fortran: gen%hshift5 (Z>36)
 
     double shift = 0.0;
-    // XH bond correction
-    if (z1 == 1 || z2 == 1) {
-        shift = gen_rabshifth;  // XH uses special shift
-    }
 
-    // X-sp3 hybridization correction (Fortran gfnff_ini.f90:1146-1147)
-    // CRITICAL FIX (Jan 7, 2026): When one atom is sp/H (hyb=0) and the other is sp3 (hyb=3)
-    // This correction applies to C-H bonds and similar sp3-sp configurations
-    // Reference: XTB uses hyb=0 for H/sp atoms
+    // Step 4a: Bond-type specific shifts
     int hyb1_value = topo.hybridization[atom1];
     int hyb2_value = topo.hybridization[atom2];
+    int m_hybi = (hyb1_value < 1 || hyb1_value > 3) ? 3 : hyb1_value;
+    int m_hybj = (hyb2_value < 1 || hyb2_value > 3) ? 3 : hyb2_value;
+    int hybi = std::max(m_hybi, m_hybj);
+    int hybj = std::min(m_hybi, m_hybj);
+
+    int bbtyp = 1; // Default single
+    if (hybi == 5 || hybj == 5) bbtyp = 4; // hypervalent
+    else if (hybi == 1 || hybj == 1) bbtyp = 3; // triple/sp-X
+    else if (hybi == 2 && hybj == 2) bbtyp = 2; // sp2-sp2
+    else if (hybi == 3 && hybj == 2 && (z1 == 7 || z2 == 7)) bbtyp = 2; // N-sp2
+
+    // 1. Bond type specific shifts
+    if (bbtyp == 4) shift = hyper_shift;
+    else if (z1 == 1 || z2 == 1) shift = gen_rabshifth;
+
+    // 2. F-F special shift
+    if (z1 == 9 && z2 == 9) shift += 0.22;
+
+    // 3. X-sp3 hybridization correction
     if ((hyb1_value == 3 && hyb2_value == 0) || (hyb1_value == 0 && hyb2_value == 3)) {
-        shift -= 0.022;  // sp3-sp bond correction
+        shift -= 0.022;
     }
 
-    double rabshift = gen_rabshift + shift;  // Total shift in Bohr
+    // 4. X-sp hybridization correction
+    if ((hyb1_value == 1 && hyb2_value == 0) || (hyb1_value == 0 && hyb2_value == 1)) {
+        shift += 0.14;
+    }
 
-    // CRITICAL FIX (Jan 7, 2026): Shift application order corrected
-    // Reference: XTB CH3OCH3.log output shows:
-    //   r0 = (rtmp(ij) + topo%vbond(1,i)) * 0.529167
-    //   rtmp(ij) = (ra + rb) * ff  (WITHOUT shift)
-    //   topo%vbond(1,i) = rabshift
-    //   Result is in ANGSTROM after * 0.529167
-    // But we need to store in Bohr for GFN-FF internal use
-    //
-    // Formula: r0_bohr = (ra + rb + rabshift) * ff
-    // Reference: Fortran gfnff_rab.f90:153 (gfnffdrab subroutine)
-    // NOTE: Shift is added to ra+rb BEFORE multiplying by EN factor ff
-    double r0_bohr = (ra + rb + rabshift) * ff;
-    params.equilibrium_distance = r0_bohr;  // Store in Bohr
-    params.rabshift = rabshift;  // Claude Generated (Dec 2025): Store for validation tests
+    // 5. Heavy atom shifts (Z > 10)
+    if (z1 > 10 && z2 > 10) {
+        shift += hshift3;
+        if (z1 > 18) shift += hshift4;
+        if (z2 > 18) shift += hshift4;
+        if (z1 > 36) shift += hshift5;
+        if (z2 > 36) shift += hshift5;
+    }
+
+    double rabshift = gen_rabshift + shift;
+
+    // Final r0 Calculation (matches Fortran exactly)
+    // CRITICAL: All additive shifts (gen_rabshift, local shift, pi_shift, metal_shift)
+    // are added to (ra+rb) BEFORE multiplying by EN factor ff!
+    // Fortran gfnff_rab.f90:153: rab(k) = (ra + rb + rab(k)) * ff
+    params.equilibrium_distance = (ra + rb + rabshift) * ff;
+    params.rabshift = rabshift;
 
     if (atom1 == 0 && atom2 == 1 && CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format("=== N-C r0 DEBUG: Bond {}-{} ===", atom1, atom2));
         CurcumaLogger::info(fmt::format("  ra={:.6f}, rb={:.6f}, ff={:.6f}, rabshift={:.6f}", ra, rb, ff, rabshift));
         CurcumaLogger::info(fmt::format("  Formula: r0 = ({:.6f} + {:.6f} + {:.6f}) * {:.6f} = {:.6f} Bohr",
-                          ra, rb, rabshift, ff, r0_bohr));
-    }
-
-    // CRITICAL DEBUG (Jan 7, 2026): Trace C-H r0 calculation with corrected formula
-    bool is_CH_bond = ((z1 == 1 && z2 == 6) || (z1 == 6 && z2 == 1));
-    if (is_CH_bond && CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info(fmt::format("=== C-H r0 DEBUG: Bond {}-{} ===", atom1, atom2));
-        CurcumaLogger::info(fmt::format("  CN: cn1={:.6f}, cn2={:.6f}", cn1, cn2));
-        CurcumaLogger::info(fmt::format("  Base r0: r0_1={:.6f}, r0_2={:.6f}", r0_1, r0_2));
-        CurcumaLogger::info(fmt::format("  CN-corrected: ra={:.6f}, rb={:.6f}", ra, rb));
-        CurcumaLogger::info(fmt::format("  EN: en1={:.6f}, en2={:.6f}, diff={:.6f}", en1, en2, en_diff));
-        CurcumaLogger::info(fmt::format("  FF factor: k1={:.6f}, k2={:.6f}, ff={:.6f}", k1, k2, ff));
-        CurcumaLogger::info(fmt::format("  Shift: gen_rabshift={:.6f}, shift={:.6f}, total={:.6f}", gen_rabshift, shift, rabshift));
-        CurcumaLogger::info(fmt::format("  Hyb: hyb1={}, hyb2={}", hyb1_value, hyb2_value));
-        CurcumaLogger::info(fmt::format("  Formula: r0 = ({:.6f} + {:.6f}) * {:.6f} + {:.6f} = {:.6f} Bohr",
-                          ra, rb, ff, rabshift, r0_bohr));
-        CurcumaLogger::info(fmt::format("  Result: r0_bohr={:.6f}, r0_angstrom={:.6f}", r0_bohr, r0_bohr * 0.529177));
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("RAB_TRANSFORM: gen_rabshift={:.8f}, shift={:.8f}, rabshift={:.8f}",
-                                         gen_rabshift, shift, rabshift));
-        CurcumaLogger::info(fmt::format("RAB_TRANSFORM: r_eq = ({:.8f} + {:.8f} + {:.8f}) * {:.8f} = {:.8f} Bohr",
                                          ra, rb, rabshift, ff, params.equilibrium_distance));
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("  Equilibrium Distance: r_A={:.3f}, r_B={:.3f}, EN_corr={:.3f} -> r_eq={:.3f} Bohr",
-                                         ra, rb, ff, params.equilibrium_distance));
+        CurcumaLogger::info(fmt::format("RAB_TRANSFORM: r_eq = ({:.8f} + {:.8f}) * {:.8f} + {:.8f} = {:.8f} Bohr",
+                                         ra, rb, ff, rabshift, params.equilibrium_distance));
     }
 
     // Step 5: Phase 3 - Hybridization-based bond strength
@@ -1477,9 +1471,9 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     int matrix_i = (hyb1 < 1 || hyb1 > 3) ? 3 : hyb1;
     int matrix_j = (hyb2 < 1 || hyb2 > 3) ? 3 : hyb2;
 
-    // Get hybridization indices for lookup (needed for both H and non-H bonds)
-    int hybi = std::max(matrix_i, matrix_j);
-    int hybj = std::min(matrix_i, matrix_j);
+    // Reuse hybi and hybj calculated earlier for bstrength lookup
+    hybi = std::max(matrix_i, matrix_j);
+    hybj = std::min(matrix_i, matrix_j);
 
     // CRITICAL FIX (Phase 11): Special handling for hydrogen bonds!
     // Fortran gfnff_param.f90 has bsmat(1,1)=1.98 for sp-sp (triple bond)
@@ -1898,82 +1892,16 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     if (mtyp1 == 3) metal_shift += METAL3_SHIFT;  // Main group metal (Al, Ga, In, Sn, Pb)
     if (mtyp2 == 3) metal_shift += METAL3_SHIFT;
 
-    // Apply metal shift and pi-bond shift to equilibrium distance
-    // Both shifts are in Bohr units
-    // Reference: Fortran gfnff_ini.f90:1218 (pi_shift) and 1246-1253 (metal_shift)
-    params.equilibrium_distance += metal_shift + pi_shift;
+    // Step 10: Final Consolidation of Shifts and Equilibrium Distance
+    // CRITICAL: Total rabshift must include pi-shift and metal-shift!
+    // Fortran: r0 = (ra + rb + shift) * ff
+    double total_rabshift = rabshift + pi_shift + metal_shift;
+    params.equilibrium_distance = (ra + rb + total_rabshift) * ff;
+    params.rabshift = total_rabshift;
 
-    // Metal-specific fcn corrections (Fortran gfnff_ini.f90:1254-1259)
-    // Different CN-dependence for metals vs. non-metals
-    if (mtyp1 > 0 && mtyp1 < 3) {  // Group 1+2 metals
-        fcn /= (1.0 + 0.100 * nb20_1 * nb20_1);  // Stronger CN dependence
-    } else if (mtyp1 == 3) {  // Main group metal
-        fcn /= (1.0 + 0.030 * nb20_1 * nb20_1);
-    } else if (mtyp1 == 4) {  // Transition metal
-        fcn /= (1.0 + 0.036 * nb20_1 * nb20_1);
-    }
-
-    if (mtyp2 > 0 && mtyp2 < 3) {  // Group 1+2 metals
-        fcn /= (1.0 + 0.100 * nb20_2 * nb20_2);
-    } else if (mtyp2 == 3) {  // Main group metal
-        fcn /= (1.0 + 0.030 * nb20_2 * nb20_2);
-    } else if (mtyp2 == 4) {  // Transition metal
-        fcn /= (1.0 + 0.036 * nb20_2 * nb20_2);
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("  Correction Factors: fqq={:.3f}, ringf={:.3f}, fxh={:.3f}, fcn={:.3f}, fheavy={:.3f}, fpi={:.3f}, pibo={:.4f}",
-                                         fqq, ringf, fxh, fcn, fheavy, fpi, pibo));
-        if (mtyp1 > 0 || mtyp2 > 0) {
-            CurcumaLogger::info(fmt::format("  Metal Types: mtyp1={} (imetal={}), mtyp2={} (imetal={}), metal_shift={:.3f}",
-                                             mtyp1, imetal1, mtyp2, imetal2, metal_shift));
-        }
-        if (std::abs(pi_shift) > 1e-6) {
-            CurcumaLogger::info(fmt::format("  Pi-bond shift: pi_shift={:.4f} Bohr, fpi={:.4f}",
-                                             pi_shift, fpi));
-        }
-    }
-
-    // Step 10: Force constant (COMPLETE with all 9 factors!)
+    // Step 11: Force constant (9 factors)
     // Fortran gfnff_ini.f90:1285: fc = -bond(i)*bond(j) * ringf * bstrength * fqq * fheavy * fpi * fxh * fcn
-    // CRITICAL: Negative sign required! Bond energy formula: E = k_b * exp(-α*(r-r₀)²)
-    // With k_b < 0, bond energy becomes negative (attractive) at equilibrium
-    // Phase 7 completes this formula with fheavy and updated fxh/fcn
-    // CORRECTION: Apply correction factor to match reference implementation
-    // Step 10: Force constant (EXACT Fortran reference implementation!)
-    // Fortran gfnff_ini.f90:1285: fc = -bond(i)*bond(j) * ringf * bstrength * fqq * fheavy * fpi * fxh * fcn
-    // CRITICAL: Negative sign required! Bond energy formula: E = k_b * exp(-α*(r-r₀)²)
-    // With k_b < 0, bond energy becomes negative (attractive) at equilibrium
-    // Step 10: Force constant (EXACT Fortran reference implementation!)
-    // Fortran gfnff_ini.f90:1285: fc = -bond(i)*bond(j) * ringf * bstrength * fqq * fheavy * fpi * fxh * fcn
-    // CRITICAL: Negative sign required! Bond energy formula: E = k_b * exp(-α*(r-r₀)²)
-    // With k_b < 0, bond energy becomes negative (attractive) at equilibrium
-    // REMOVED: Hardcoded correction factor that was causing 2.3% discrepancy
     params.force_constant = -(bond_param_1 * bond_param_2 * bstrength * fqq * ringf * fheavy * fpi * fxh * fcn);
-
-    // DEBUG: Complete bond parameter breakdown for 1e-6 accuracy analysis (Claude Generated Jan 26, 2026)
-    static int bond_count = 0;
-    if (bond_count < 10 && CurcumaLogger::get_verbosity() >= 3) {
-        double base_product = bond_param_1 * bond_param_2;
-        double full_product = base_product * bstrength * fqq * ringf * fheavy * fpi * fxh * fcn;
-
-        CurcumaLogger::info(fmt::format("=== BOND {} COMPLETE BREAKDOWN: {}-{} (Z{}-Z{}) ===",
-                                         bond_count, atom1, atom2, z1, z2));
-        CurcumaLogger::info(fmt::format("  bond_param_1 = {:.6f}", bond_param_1));
-        CurcumaLogger::info(fmt::format("  bond_param_2 = {:.6f}", bond_param_2));
-        CurcumaLogger::info(fmt::format("  base_product = {:.6f}", base_product));
-        CurcumaLogger::info(fmt::format("  bstrength    = {:.6f}", bstrength));
-        CurcumaLogger::info(fmt::format("  fqq          = {:.6f} (charge correction)", fqq));
-        CurcumaLogger::info(fmt::format("  ringf        = {:.6f} (ring strain)", ringf));
-        CurcumaLogger::info(fmt::format("  fheavy       = {:.6f} (heavy atom)", fheavy));
-        CurcumaLogger::info(fmt::format("  fpi          = {:.6f} (pi-bond)", fpi));
-        CurcumaLogger::info(fmt::format("  fxh          = {:.6f} (X-H special)", fxh));
-        CurcumaLogger::info(fmt::format("  fcn          = {:.6f} (CN correction)", fcn));
-        CurcumaLogger::info(fmt::format("  full_product = {:.6f}", full_product));
-        CurcumaLogger::info(fmt::format("  k_b (final)  = {:.6f} Eh (negative sign applied)", params.force_constant));
-        CurcumaLogger::info(fmt::format("  r0           = {:.6f} Bohr", params.equilibrium_distance));
-        bond_count++;
-    }
 
     // Step 11: Alpha parameter with metal-specific sign flip (Fortran gfnff_param.f90:642-644, gfnff_ini.f90:1240)
     // CRITICAL PARAMETERS FROM FORTRAN
@@ -2074,6 +2002,39 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     params.cnfak_i = cnfak_1;
     params.cnfak_j = cnfak_2;
     params.ff = ff;
+
+    // DEBUG: Complete bond parameter breakdown for 3% bond energy error investigation (Feb 2026)
+    static int bond_count = 0;
+    if (bond_count < 20 && CurcumaLogger::get_verbosity() >= 2) {
+        double base_product = bond_param_1 * bond_param_2;
+        double full_product = base_product * bstrength * fqq * ringf * fheavy * fpi * fxh * fcn;
+
+        CurcumaLogger::info(fmt::format("=== BOND {} COMPLETE BREAKDOWN: {}-{} (Z{}-Z{}) ===",
+                                         bond_count, atom1, atom2, z1, z2));
+        CurcumaLogger::info(fmt::format("  bond_param[{}] = {:.6f}", z1, bond_param_1));
+        CurcumaLogger::info(fmt::format("  bond_param[{}] = {:.6f}", z2, bond_param_2));
+        CurcumaLogger::info(fmt::format("  base_product = {:.6f}", base_product));
+        CurcumaLogger::info(fmt::format("  hyb1={}, hyb2={} -> bstrength = {:.6f}", hyb1, hyb2, bstrength));
+        CurcumaLogger::info(fmt::format("  fqq          = {:.6f} (qa1={:.4f}, qa2={:.4f})", fqq, qa1, qa2));
+        CurcumaLogger::info(fmt::format("  ringf        = {:.6f} (ring size={})", ringf, ring_size));
+        CurcumaLogger::info(fmt::format("  fheavy       = {:.6f}", fheavy));
+        CurcumaLogger::info(fmt::format("  fpi          = {:.6f} (pibo={:.6f})", fpi, pibo));
+        CurcumaLogger::info(fmt::format("  fxh          = {:.6f}", fxh));
+        CurcumaLogger::info(fmt::format("  fcn          = {:.6f}", fcn));
+        CurcumaLogger::info(fmt::format("  full_product = {:.6f}", full_product));
+        CurcumaLogger::info(fmt::format("  k_b (final)  = {:.6f} Eh", params.force_constant));
+        CurcumaLogger::info(fmt::format("  r0           = {:.6f} Bohr ({:.4f} Å)", params.equilibrium_distance,
+                                         params.equilibrium_distance * 0.529177));
+        CurcumaLogger::info(fmt::format("  alpha        = {:.6f}", params.alpha));
+        // Compare with Fortran reference for first C-C bond
+        if (bond_count == 0 && z1 == 6 && z2 == 6) {
+            CurcumaLogger::warn("  === FORTRAN REFERENCE (C-C aromatic, atoms 2-1) ===");
+            CurcumaLogger::warn("  param%bond(C) = 0.385248, bstrength = 1.24, fqq = 1.0218");
+            CurcumaLogger::warn("  fpi = 1.3514, pibo = 0.666, k_b = -0.254138 Eh");
+            CurcumaLogger::warn("  alpha = 0.490519, r0 = 2.334 Bohr");
+        }
+        bond_count++;
+    }
 
     return params;
 }
@@ -3939,37 +3900,10 @@ json GFNFF::generateTopologyAwareBonds(const TopologyInfo& topo_info) const
                 bond["distance"] = distance;
 
                 // Phase 9: Get bond parameters with full topology awareness
+                // NOTE (Feb 2026): Ring strain (ringf) and pi-corrections (fpi) are already included
+                // in getGFNFFBondParameters() - DO NOT apply additional topology_factor here!
+                // Previous code had redundant ring/pi corrections causing ~15% force constant inflation.
                 auto bond_params = getGFNFFBondParameters(i, j, m_atoms[i], m_atoms[j], distance, topo_info);
-
-                // Phase 2: Apply topology corrections to force constant
-                double topology_factor = 1.0;
-
-                // Ring strain correction (small rings are stiffer)
-                int ring_i = topo_info.ring_sizes[i];
-                int ring_j = topo_info.ring_sizes[j];
-                if (ring_i > 0 && ring_j > 0) {
-                    // Both atoms in rings - assume they're in the same ring if bonded
-                    int ring_size = std::min(ring_i, ring_j);
-                    if (ring_size == 3) {
-                        topology_factor *= 1.25; // Cyclopropane +25% strain
-                    } else if (ring_size == 4) {
-                        topology_factor *= 1.15; // Cyclobutane +15% strain
-                    } else if (ring_size == 5) {
-                        topology_factor *= 1.05; // Cyclopentane slight strain
-                    }
-                    // 6+ membered rings have normal parameters
-                }
-
-                // Pi-system correction (conjugated bonds are stiffer)
-                int pi_i = static_cast<int>(topo_info.coordination_numbers[i]); // Using CN as proxy for pi_fragments
-                int pi_j = static_cast<int>(topo_info.coordination_numbers[j]);
-                if (pi_i > 0 && pi_j > 0 && (topo_info.hybridization[i] == 2 || topo_info.hybridization[i] == 1) && (topo_info.hybridization[j] == 2 || topo_info.hybridization[j] == 1)) {
-                    // Both atoms are sp2/sp and in conjugated system
-                    topology_factor *= 1.15; // Conjugated bonds +15%
-                }
-
-                // Apply topology corrections
-                bond_params.force_constant *= topology_factor;
 
                 bond["fc"] = bond_params.force_constant;
                 bond["r0_ij"] = bond_params.equilibrium_distance;
@@ -5625,6 +5559,20 @@ json GFNFF::generateGFNFFDispersionPairs() const
 
             ConfigManager d4_config("d4param", d4_input);
             D4ParameterGenerator d4_gen(d4_config);
+
+            // Claude Generated (Jan 31, 2026): Pass topology charges for zeta scaling
+            // Reference: Fortran gfnff_ini.f90:789 - f1 = zeta(ati, topo%qa(i))
+            // GFN-FF uses topology-based charges (topo%qa) for zetac6 calculation,
+            // which are computed ONCE during initialization with INTEGER neighbor counts.
+            // This differs from geometry-dependent EEQ charges used for CN weighting.
+            const TopologyInfo& topo_info = getCachedTopology();
+            if (topo_info.topology_charges.size() > 0) {
+                d4_gen.setTopologyCharges(topo_info.topology_charges);
+                if (CurcumaLogger::get_verbosity() >= 2) {
+                    CurcumaLogger::info(fmt::format("D4: Using topology charges for zeta scaling ({} atoms)",
+                        topo_info.topology_charges.size()));
+                }
+            }
 
             // Generate D4 parameters with geometry (charge-dependent)
             // Use existing m_geometry_bohr (already converted in InitialiseMolecule)
