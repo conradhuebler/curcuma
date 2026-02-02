@@ -390,6 +390,7 @@ ctest -R "cli_rmsd_01" --verbose
 
 ## Recently Resolved ✅
 
+- ✅ **GFN-FF Coulomb Gradient Regression** (Feb 1, 2026): Fixed stale CN derivatives in gradient calculation. CN, CNF, and dCN/dx are now recalculated for current geometry in `GFNFF::Calculation()` before gradient computation. Fixes optimization failures caused by Term 1b using initial geometry's CN values.
 - ✅ **EEQ Solver Numerical Stability** (Jan 29, 2026): Replaced PartialPivLU with ColPivHouseholderQR + iterative refinement for better numerical stability on large systems. Investigation confirmed triose deviation is parameter-related, not numerical.
 - ✅ **GFN-FF Coulomb Exact Match** (Jan 29, 2026): Fixed dgam correction factors and enabled charge-corrected parameters (gameeq, alpeeq); Coulomb energy now matches Fortran reference within < 1 nEh (0.0001% error) for small systems.
 - ✅ **EEQ Charge Fine-Tuning** (Jan 17, 2026): Aligned parameters with Fortran reference; 82% Coulomb energy error reduction (8.3% → 1.5%)

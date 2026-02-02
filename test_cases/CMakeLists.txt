@@ -366,6 +366,21 @@ add_test(NAME test_gfnff_gradients
          COMMAND test_gfnff_gradients
          WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
+# Claude Generated (February 2026): Benzene Gradient Decomposition Test
+# Diagnostic tool to identify which GFN-FF term causes sign flip in benzene gradients
+add_executable(test_benzene_gradient_decomposition
+        test_benzene_gradient_decomposition.cpp)
+
+target_link_libraries(test_benzene_gradient_decomposition curcuma_core)
+
+if(USE_PCH)
+    target_precompile_headers(test_benzene_gradient_decomposition REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_benzene_gradient_decomposition
+         COMMAND test_benzene_gradient_decomposition
+         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
 set_tests_properties(test_gfnff_gradients PROPERTIES
     LABELS "gfnff;gradients;validation"
     TIMEOUT 60)

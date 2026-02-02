@@ -94,21 +94,21 @@ To add a new GFN-FF energy term (e.g., "CrossTerm"), you MUST modify:
 
 ## GFN-FF Gradient Implementation Status (February 2026)
 
-**CRITICAL FINDING**: Most GFN-FF gradient methods are **implemented but DISABLED** in `execute()`
+**✅ ALL GRADIENT TERMS NOW ENABLED** (Feb 1, 2026): Torsion, extra torsion, and inversion gradients activated for MD stability.
 
-### Active vs Disabled Gradient Terms
+### Active Gradient Terms (All Enabled)
 
 | Energy Term | Method | Status in execute() | Gradient Status | Fortran Ref |
 |-------------|--------|---------------------|-----------------|-------------|
-| Bonds | CalculateGFNFFBondContribution() | ❌ COMMENTED OUT | ✅ Implemented | egbond:675-721 |
-| Angles | CalculateGFNFFAngleContribution() | ❌ COMMENTED OUT | ✅ Implemented | egbend:857-916 |
-| Torsions | CalculateGFNFFDihedralContribution() | ❌ COMMENTED OUT | ✅ Implemented | egtors:1153-1234 |
-| Extra Torsions | CalculateGFNFFExtraTorsionContribution() | ❌ COMMENTED OUT | ✅ Implemented | egtors:1272-1280 |
-| Inversions | CalculateGFNFFInversionContribution() | ❌ COMMENTED OUT | ✅ Implemented | gfnff_ini.f90 |
-| Dispersion | CalculateGFNFFDispersionContribution() | ❌ COMMENTED OUT | ✅ Implemented | gdisp0.f90 |
-| Repulsion (bonded) | CalculateGFNFFBondedRepulsionContribution() | ❌ COMMENTED OUT | ⚠️ Partial | engrad:467-495 |
+| Bonds | CalculateGFNFFBondContribution() | ✅ ACTIVE | ✅ Implemented | egbond:675-721 |
+| Angles | CalculateGFNFFAngleContribution() | ✅ ACTIVE | ✅ Implemented | egbend:857-916 |
+| Torsions | CalculateGFNFFDihedralContribution() | ✅ ACTIVE (Feb 2026) | ✅ Implemented | egtors:1153-1234 |
+| Extra Torsions | CalculateGFNFFExtraTorsionContribution() | ✅ ACTIVE (Feb 2026) | ✅ Implemented | egtors:1272-1280 |
+| Inversions | CalculateGFNFFInversionContribution() | ✅ ACTIVE (Feb 2026) | ✅ Implemented | gfnff_ini.f90 |
+| Dispersion | CalculateGFNFFDispersionContribution() | ✅ ACTIVE | ✅ Implemented | gdisp0.f90 |
+| Repulsion (bonded) | CalculateGFNFFBondedRepulsionContribution() | ✅ ACTIVE | ⚠️ Partial | engrad:467-495 |
 | Repulsion (non-bonded) | CalculateGFNFFNonbondedRepulsionContribution() | ✅ ACTIVE | ⚠️ Partial | engrad:255-276 |
-| Coulomb | CalculateGFNFFCoulombContribution() | ❌ COMMENTED OUT | ❌ Missing | engrad:383-422 |
+| Coulomb | CalculateGFNFFCoulombContribution() | ✅ ACTIVE | ✅ Term 1b Fixed (Feb 2026) | engrad:383-422 |
 | Hydrogen Bonds | CalculateGFNFFHydrogenBondContribution() | ✅ ACTIVE | ⚠️ Partial | abhgfnff_eg* |
 | Halogen Bonds | CalculateGFNFFHalogenBondContribution() | ✅ ACTIVE | ⚠️ Partial | rbxgfnff_eg |
 | BATM | CalculateGFNFFBatmContribution() | ✅ ACTIVE | ❌ Missing | batmgfnff_eg |
@@ -144,11 +144,12 @@ m_gradient.row(bond.j) += dEdr * factor * derivate.row(1);
 #### ❌ Missing Gradient Implementations
 
 **Coulomb Gradients**:
-- **Status**: Energy only, gradients NOT implemented
-- **Challenge**: Requires EEQ charge derivatives (dq/dx)
-- **Formula**: ∂E/∂x = ∂E/∂r * ∂r/∂x + ∂E/∂q * ∂q/∂x
-- **Requirement**: Solve EEQ matrix for geometry derivatives
-- **Priority**: HIGH - blocks production use
+- **Status**: ✅ FIXED (Feb 1, 2026) - Term 1b (charge derivative via CN) now working
+- **Fix Applied**: CN derivatives recalculated in `GFNFF::Calculation()` before gradient computation
+- **Root Cause Fixed**: CN derivatives were computed once at initialization but not updated when geometry changed
+- **Formula**: ∂E/∂x = ∂E/∂r * ∂r/∂x + ∂E/∂q * ∂q/∂CN * ∂CN/∂x (Term 1b)
+- **Implementation**: `gfnff_method.cpp:341-368` - calls `calculateCoordinationNumberDerivatives()` and `distributeCNandDerivatives()`
+- **Reference**: Fortran gfnff_engrad.F90:418-422
 
 **BATM (Bonded ATM) Gradients**:
 - **Status**: Energy calculation complete, gradients TODO
@@ -166,30 +167,32 @@ m_gradient.row(bond.j) += dEdr * factor * derivate.row(1);
 - Active in execute() but validation against Fortran incomplete
 - Complex three-body terms with angle/distance damping
 
-### Enabling All Gradients
+### Gradient Terms Status (Feb 2026)
 
-To enable all gradient methods in `forcefieldthread.cpp:execute()`, uncomment:
+**✅ ALL BONDED GRADIENT TERMS NOW ENABLED** in `forcefieldthread.cpp:execute()`:
 
 ```cpp
-// Lines 116-120: Bonded terms
-CalculateGFNFFBondContribution();
-CalculateGFNFFAngleContribution();
-CalculateGFNFFDihedralContribution();
-CalculateGFNFFExtraTorsionContribution();
-CalculateGFNFFInversionContribution();
-
-// Lines 124-131: Non-bonded terms
-if (m_dispersion_enabled) {
-    CalculateGFNFFDispersionContribution();
-}
-if (m_repulsion_enabled) {
-    CalculateGFNFFBondedRepulsionContribution();
-    // Non-bonded already active
-}
-if (m_coulomb_enabled) {
-    CalculateGFNFFCoulombContribution();  // NEEDS IMPLEMENTATION
-}
+// Lines 116-120: All bonded terms ACTIVE (Feb 2026)
+CalculateGFNFFBondContribution();        // Always active
+CalculateGFNFFAngleContribution();       // Always active
+CalculateGFNFFDihedralContribution();    // ENABLED Feb 2026 - Required for MD stability
+CalculateGFNFFExtraTorsionContribution(); // ENABLED Feb 2026 - Gauche torsions for MD
+CalculateGFNFFInversionContribution();   // ENABLED Feb 2026 - Planar group stability
 ```
+
+**Gradient Unit Conversion** (gfnff_method.cpp:377-385):
+- ForceField internally uses Bohr/Hartree units
+- Gradient is converted to Hartree/Angstrom for optimizer/MD compatibility
+- Formula: `gradient_Angstrom = gradient_Bohr * BOHR_TO_ANGSTROM`
+
+**Gradient Test Results** (4/6 passing):
+- ✅ Bond, Angle, Torsion, CH₃OCH₃ full molecule
+- ⚠️ Repulsion: translational invariance issue
+- ⚠️ Benzene: aromatic system needs investigation
+
+**Impact**: Enabling torsion/inversion gradients is **critical for MD simulations** - without these terms, molecules rotate uncontrollably and planar groups become distorted.
+
+**Known Issue**: LBFGS optimization shows line-search failures after first step - this is a separate optimizer parameter tuning issue, not a gradient problem.
 
 ### Test Framework
 

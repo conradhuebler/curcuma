@@ -121,11 +121,10 @@ Matrix calculateNumericalGradient(GFNFF& gfnff, const Matrix& geometry) {
         }
     }
 
-    // CRITICAL FIX (Feb 2026): NO unit conversion needed!
-    // Numerical gradient is computed in Hartree/Bohr (step is in Bohr)
-    // GFNFF::Gradient() also returns Hartree/Bohr (no conversion in gfnff_method.cpp)
-    // Both gradients are in same units → direct comparison possible
-    return numerical_gradient;
+    // CRITICAL FIX (Feb 2026): Correct unit conversion for numerical gradients
+    // Numerical gradient computed as dE/d(Bohr) since FINITE_DIFF_STEP is in Bohr
+    // Convert to Hartree/Angstrom to match GFNFF::Gradient()
+    return numerical_gradient / CurcumaUnit::Length::BOHR_TO_ANGSTROM;
 }
 
 // ============================================================================
@@ -472,7 +471,7 @@ bool testGFNFFGradients_CH3OCH3() {
     json gfnff_params = {
         {"method", "cgfnff"},
         {"verbosity", 3},  // DEBUG: Set to 3 to see bond calculation details
-        {"threads", 1}
+        {"threads", 4}
     };
 
     GFNFF gfnff(gfnff_params);

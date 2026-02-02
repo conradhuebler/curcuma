@@ -2002,7 +2002,8 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
         for (int dim = 0; dim < 3; ++dim) {
             if (dim >= static_cast<int>(m_dcn.size())) continue;
 
-            for (int i = 0; i < natoms; ++i) {
+            // Corrected Loop: Only process atoms assigned to this thread to ensure thread-safety
+            for (int i : m_assigned_atoms_for_self_energy) {
                 double grad_contrib = 0.0;
                 for (int j = 0; j < natoms; ++j) {
                     grad_contrib -= m_dcn[dim](i, j) * qtmp(j);
