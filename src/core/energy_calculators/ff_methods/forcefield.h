@@ -122,6 +122,11 @@ public:
     // Get cached D3 CN for validation (Claude Generated Jan 18, 2026)
     const Vector& getCachedD3CN() const { return m_d3_cn; }
 
+    // Claude Generated (Feb 1, 2026): Distribute CN, CNF, and CN derivatives for Coulomb gradients
+    // Reference: Fortran gfnff_engrad.F90:418-422 - charge derivative via CN
+    void distributeCNandDerivatives(const Vector& cn, const Vector& cnf,
+                                     const std::vector<Matrix>& dcn);
+
     Eigen::MatrixXd NumGrad();
 
     // Claude Generated: Parameter analysis functionality
@@ -221,6 +226,12 @@ private:
     // Claude Generated (Jan 18, 2026): D3 coordination numbers for dynamic r0 calculation
     // Recalculated from current geometry at each Calculate() call for cgfnff
     Vector m_d3_cn;
+
+    // Claude Generated (Feb 1, 2026): CN, CNF, and CN derivatives for Coulomb charge derivative gradients
+    // Reference: Fortran gfnff_engrad.F90:418-422 - qtmp(i) = q(i)*cnf(i)/(2*sqrt(cn(i)))
+    Vector m_cn;                    // Coordination numbers per atom
+    Vector m_cnf;                   // CNF parameters per atom (for qtmp calculation)
+    std::vector<Matrix> m_dcn;      // CN derivatives: dcn[dim](i,j) = dCN(j)/dr(i,dim)
 
     json m_parameters;
     std::string m_auto_param_file; // Auto-detected parameter file path

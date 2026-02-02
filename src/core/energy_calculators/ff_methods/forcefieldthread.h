@@ -390,6 +390,26 @@ public:
         m_d3_cn = d3_cn;
     }
 
+    // Claude Generated (Feb 1, 2026): Set CN and CNF for Coulomb charge derivative gradients
+    // Reference: Fortran gfnff_engrad.F90:418-422 - qtmp(i) = q(i)*cnf(i)/(2*sqrt(cn(i)))
+    void setCN(const Vector& cn)
+    {
+        m_cn = cn;
+    }
+
+    void setCNF(const Vector& cnf)
+    {
+        m_cnf = cnf;
+    }
+
+    // Claude Generated (Feb 1, 2026): Set CN derivatives for Coulomb charge derivative gradients
+    // dcn[dim](i,j) = dCN(j)/dr(i,dim) - how atom i's position affects atom j's CN
+    // Reference: Fortran gfnff_engrad.F90:422 - call gemv(dcn,qtmp,g,alpha=-1.0,beta=1.0)
+    void setCNDerivatives(const std::vector<Matrix>& dcn)
+    {
+        m_dcn = dcn;
+    }
+
     inline void UpdateGeometry(const Matrix& geometry, bool gradient)
     {
         m_geometry = geometry;
@@ -570,6 +590,12 @@ protected:
     // Claude Generated (Jan 18, 2026): D3 coordination numbers for dynamic r0 calculation
     // These are recalculated from current geometry at each Calculate() call
     Vector m_d3_cn;
+
+    // Claude Generated (Feb 1, 2026): CN, CNF, and CN derivatives for Coulomb charge derivative gradients
+    // Reference: Fortran gfnff_engrad.F90:418-422 - charge derivative via CN
+    Vector m_cn;                              // Coordination numbers per atom
+    Vector m_cnf;                             // CNF parameters per atom (cnf_eeq from gfnff_par.h)
+    std::vector<Matrix> m_dcn;                // CN derivatives: dcn[dim](i,j) = dCN(j)/dr(i,dim)
 
     // Phase 1.2: Cached bonded pairs for fast lookup in repulsion calculation (Claude Generated - Dec 2025)
     // Built once in execute() to avoid O(N_bonds × log(N_bonds)) overhead per energy call

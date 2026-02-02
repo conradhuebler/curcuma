@@ -128,6 +128,24 @@ void ForceField::distributeD3CN(const Vector& d3_cn)
     }
 }
 
+// Claude Generated (Feb 1, 2026): Distribute CN, CNF, and CN derivatives for Coulomb gradients
+// Reference: Fortran gfnff_engrad.F90:418-422 - charge derivative via CN
+void ForceField::distributeCNandDerivatives(const Vector& cn, const Vector& cnf,
+                                             const std::vector<Matrix>& dcn)
+{
+    // Store for caching
+    m_cn = cn;
+    m_cnf = cnf;
+    m_dcn = dcn;
+
+    // Distribute to all threads for Coulomb charge derivative gradients
+    for (int i = 0; i < m_stored_threads.size(); ++i) {
+        m_stored_threads[i]->setCN(cn);
+        m_stored_threads[i]->setCNF(cnf);
+        m_stored_threads[i]->setCNDerivatives(dcn);
+    }
+}
+
 void ForceField::setParameter(const json& parameters)
 {
     std::string method_name = "unknown";

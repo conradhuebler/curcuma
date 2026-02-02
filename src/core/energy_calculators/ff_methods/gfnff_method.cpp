@@ -338,6 +338,35 @@ double GFNFF::Calculation(bool gradient)
         CurcumaLogger::info("Calling ForceField::Calculate()...");
     }
 
+    // CRITICAL FIX (Claude Generated Feb 1, 2026): Recalculate CN derivatives for current geometry
+    // Reference: Fortran gfnff_engrad.F90:418-422
+    //
+    // CN derivatives are geometry-dependent and must be updated before gradient calculation.
+    // During optimization, the geometry changes each step, but CN derivatives were only
+    // computed during initializeForceField(). This caused the Coulomb charge derivative
+    // gradient (Term 1b: dE/dq * dq/dCN * dCN/dx) to use stale CN values, producing
+    // incorrect gradients and optimization failures.
+    //
+    // This fix follows the same pattern as D3 CN recalculation (via distributeD3CN).
+    if (gradient && m_forcefield) {
+        auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+        Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
+
+        Vector cnf(m_atoms.size());
+        for (size_t i = 0; i < m_atoms.size(); ++i) {
+            int z = m_atoms[i];
+            cnf(i) = (z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
+                        ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
+        }
+
+        std::vector<Matrix> dcn = calculateCoordinationNumberDerivatives(cn);
+        m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("CN derivatives recalculated for current geometry");
+        }
+    }
+
     // ForceField returns energy in Hartree (m_final_factor = 1)
     double energy_hartree = m_forcefield->Calculate(gradient);
 
@@ -346,7 +375,12 @@ double GFNFF::Calculation(bool gradient)
     }
 
     if (gradient) {
+        // CRITICAL FIX (Feb 2026): NO unit conversion needed!
         // ForceField returns gradient in Hartree/Bohr (m_final_factor = 1)
+        // Optimizer/MD also use Bohr internally for gradient calculations
+        // Previous multiplication by BOHR_TO_ANGSTROM was incorrect and amplified gradients
+        // Previous division by BOHR_TO_ANGSTROM was also incorrect and reduced gradients
+        // Correct approach: Use gradient directly as returned by ForceField
         Matrix grad_hartree = m_forcefield->Gradient();
         m_gradient = grad_hartree;  // No conversion needed
 
@@ -481,6 +515,21 @@ bool GFNFF::initializeForceField()
             CurcumaLogger::param("charge_sum", fmt::format("{:.6f}", m_charges.sum()));
         }
 
+        // Claude Generated (Feb 1, 2026): Calculate and distribute CN, CNF, and CN derivatives (CACHE PATH)
+        // Reference: Fortran gfnff_engrad.F90:418-422 - for Coulomb charge derivative gradients
+        {
+            auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+            Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
+            Vector cnf(m_atoms.size());
+            for (size_t i = 0; i < m_atoms.size(); ++i) {
+                int z = m_atoms[i];
+                cnf(i) = (z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
+                            ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
+            }
+            std::vector<Matrix> dcn = calculateCoordinationNumberDerivatives(cn);
+            m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
+        }
+
         return true;
     }
 
@@ -535,6 +584,34 @@ bool GFNFF::initializeForceField()
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("EEQ charges distributed to ForceFieldThreads after initialization");
             CurcumaLogger::param("charge_count", std::to_string(m_charges.size()));
+        }
+    }
+
+    // Claude Generated (Feb 1, 2026): Calculate and distribute CN, CNF, and CN derivatives
+    // Reference: Fortran gfnff_engrad.F90:418-422 - for Coulomb charge derivative gradients
+    // These are needed for the second term in Coulomb gradient: dE/dq * dq/dCN * dCN/dx
+    {
+        // Calculate coordination numbers
+        auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+        Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
+
+        // Build CNF vector from element-specific parameters
+        Vector cnf(m_atoms.size());
+        for (size_t i = 0; i < m_atoms.size(); ++i) {
+            int z = m_atoms[i];
+            cnf(i) = (z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
+                        ? GFNFFParameters::cnf_eeq[z - 1]
+                        : 0.0;
+        }
+
+        // Calculate CN derivatives for gradient calculation
+        std::vector<Matrix> dcn = calculateCoordinationNumberDerivatives(cn);
+
+        // Distribute to ForceField threads
+        m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("CN, CNF, and CN derivatives calculated and distributed for Coulomb gradients");
         }
     }
 

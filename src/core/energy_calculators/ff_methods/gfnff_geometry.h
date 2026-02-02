@@ -108,6 +108,10 @@ inline double calculateDihedralAngle(
     double cos_phi = n1_normalized.dot(n2_normalized);
     double sin_phi = (v2_norm * n1_normalized.dot(v3)) / n2_norm;
 
+    // CRITICAL FIX (Feb 2026): Clamp sin_phi to [-1, 1] to avoid numerical edge cases
+    // Prevents NaN in gradient calculations if sin_phi slightly exceeds bounds
+    sin_phi = std::max(-1.0, std::min(1.0, sin_phi));
+
     // Use atan2 for correct quadrant (returns angle in [-π, π])
     double phi = atan2(sin_phi, cos_phi);
 
@@ -128,8 +132,15 @@ inline double calculateDihedralAngle(
     gradient = Matrix::Zero(4, 3);
 
     double sin_phi_val = sin(phi);
-    if (std::abs(sin_phi_val) < epsilon) {
-        // At extrema (φ = 0 or π), derivatives are zero
+    // CRITICAL FIX (Feb 2026): Stricter threshold for aromatic systems
+    // Planar rings (benzene) have φ ≈ 180° → sin_phi ≈ 0
+    // Previous 1e-6 too close to numerical noise, raised to 1e-4
+    if (std::abs(sin_phi_val) < 1e-4) {
+        // At extrema (φ ≈ 0 or π), gradient is zero by symmetry
+        // Explicitly set gradient to zero to prevent stale values
+        if (calculate_gradient) {
+            gradient.setZero();
+        }
         return phi;
     }
 
@@ -256,6 +267,20 @@ inline double calculateOutOfPlaneAngle(
     double cos_omega = cos(omega);
     if (std::abs(cos_omega) < epsilon) {
         // At extrema (ω = ±π/2), derivatives are zero
+        if (calculate_gradient) {
+            gradient.setZero();
+        }
+        return omega;
+    }
+
+    // CRITICAL FIX (Feb 2026): Stricter threshold for aromatic systems
+    // Planar sp² carbons (benzene) have ω ≈ 0 → division risks
+    // Raised from 1e-8 to 1e-6 for safety margin
+    if (r_il_norm < 1e-6) {
+        // r_il too small for stable gradient calculation
+        if (calculate_gradient) {
+            gradient.setZero();
+        }
         return omega;
     }
 
@@ -263,6 +288,16 @@ inline double calculateOutOfPlaneAngle(
     // ∂ω/∂r = (1/cosω) * d(sinω)/dr
 
     double factor = 1.0 / cos_omega;
+
+    // CRITICAL FIX (Feb 2026): Guard against planar configurations
+    // n_norm ≈ 0 when i-j-k-l are coplanar → division by zero risk
+    if (n_norm < 1e-6) {
+        // Planar configuration: gradient undefined/zero
+        if (calculate_gradient) {
+            gradient.setZero();
+        }
+        return omega;
+    }
 
     // Cross product derivatives
     // ∂n/∂r_j = r_ik × I  (where I is 3×3 identity applied as cross product)

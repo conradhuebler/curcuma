@@ -18,6 +18,7 @@
  *
  */
 
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <functional>
@@ -1832,6 +1833,18 @@ void SimpleMD::applyPeriodicBoundaryConditions()
 
 void SimpleMD::Verlet()
 {
+    // CRITICAL FIX (Feb 2026): Check gradient for NaN/Inf BEFORE integration
+    // Aromatic systems (benzene) can produce gradient singularities at φ=180° or ω=0
+    // Early detection prevents NaN propagation through velocity/position updates
+    for (int i = 0; i < 3 * m_natoms; ++i) {
+        if (!std::isfinite(m_eigen_gradient.data()[i])) {
+            CurcumaLogger::error("NaN/Inf gradient at coordinate " + std::to_string(i) +
+                               " (atom " + std::to_string(i/3) + ") before integration");
+            m_unstable = true;
+            return;
+        }
+    }
+
     double ekin = 0;
     //std::cout << m_eigen_inv_masses << std::endl;
     for (int i = 0; i < m_natoms; ++i) {
@@ -1843,6 +1856,17 @@ void SimpleMD::Verlet()
         m_eigen_velocities.data()[3 * i + 1] = m_eigen_velocities.data()[3 * i + 1] - 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 1] * m_eigen_inv_masses.data()[3 * i + 1];
         m_eigen_velocities.data()[3 * i + 2] = m_eigen_velocities.data()[3 * i + 2] - 0.5 * m_dT * m_eigen_gradient.data()[3 * i + 2] * m_eigen_inv_masses.data()[3 * i + 2];
         ekin += m_eigen_masses.data()[i] * (m_eigen_velocities.data()[3 * i] * m_eigen_velocities.data()[3 * i] + m_eigen_velocities.data()[3 * i + 1] * m_eigen_velocities.data()[3 * i + 1] + m_eigen_velocities.data()[3 * i + 2] * m_eigen_velocities.data()[3 * i + 2]);
+    }
+
+    // CRITICAL FIX (Feb 2026): Check velocities AFTER integration
+    // Catch NaN/Inf that may result from extreme gradient values
+    for (int i = 0; i < 3 * m_natoms; ++i) {
+        if (!std::isfinite(m_eigen_velocities.data()[i])) {
+            CurcumaLogger::error("NaN/Inf velocity at coordinate " + std::to_string(i) +
+                               " (atom " + std::to_string(i/3) + ") after integration");
+            m_unstable = true;
+            return;
+        }
     }
     ekin *= 0.5;
     m_T = 2.0 * ekin / (kb_Eh * m_dof);
@@ -3008,6 +3032,15 @@ double SimpleMD::FastEnergy()
 
     const double Energy = m_interface->CalculateEnergy(true);
     m_eigen_gradient = m_interface->Gradient();
+
+    // Claude Generated (Feb 2026): Gradient sanity check for MD stability
+    for (int i = 0; i < 3 * m_natoms; ++i) {
+        if (!std::isfinite(m_eigen_gradient.data()[i])) {
+            CurcumaLogger::error("NaN/Inf gradient detected in MD step - simulation unstable");
+            m_unstable = true;
+            return Energy;
+        }
+    }
 
     if (m_dipole && m_method == "gfn2") {
         m_molecule.setDipole(m_interface->Dipole()*au);// in eA

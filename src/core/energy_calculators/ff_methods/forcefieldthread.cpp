@@ -115,9 +115,9 @@ int ForceFieldThread::execute()
         // GFN-FF bonded terms
         CalculateGFNFFBondContribution();  // Phase 4a: ENABLED for gradient validation
         CalculateGFNFFAngleContribution();  // Phase 4b: ENABLED for gradient validation
-        // CalculateGFNFFDihedralContribution();
-        // CalculateGFNFFExtraTorsionContribution();  // Claude Generated (Jan 2, 2026): Extra sp3-sp3 gauche torsions
-        // CalculateGFNFFInversionContribution();
+        CalculateGFNFFDihedralContribution();  // ENABLED (Feb 2026): Required for MD stability
+        CalculateGFNFFExtraTorsionContribution();  // Claude Generated (Jan 2, 2026): Extra sp3-sp3 gauche torsions - ENABLED for MD
+        CalculateGFNFFInversionContribution();  // ENABLED (Feb 2026): Required for planar group stability
 
         // GFN-FF non-bonded pairwise parallelizable terms (Phase 4)
         if (m_dispersion_enabled) {
@@ -128,7 +128,7 @@ int ForceFieldThread::execute()
             CalculateGFNFFNonbondedRepulsionContribution();
         }
         if (m_coulomb_enabled) {
-            // CalculateGFNFFCoulombContribution();     // EEQ Coulomb electrostatics - DISABLED: gradients not implemented
+            CalculateGFNFFCoulombContribution();     // EEQ Coulomb electrostatics - ENABLED with full gradients (Feb 2026)
         }
 
         // GFN-FF hydrogen bond and halogen bond terms (Phase 5)
@@ -832,16 +832,21 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
         }
 
         if (m_calculate_gradient) {
-            // dE/dr = -2*α*dr*E (chain rule)
+            // CRITICAL FIX (Feb 2026): Correct sign for bond gradient
+            // dE/dr = -2α * dr * E (exact chain rule formula)
+            //
+            // Physics verification:
+            //   E = k_b * exp(-α*dr²) where k_b < 0 (attractive)
+            //   dE/dr = k_b * (-2α*dr) * exp(-α*dr²) = -2α * dr * E
+            //
+            // When dr > 0 (stretched): dE/dr = -2α * (+dr) * (negative E) = positive (repulsive) ✓
+            // When dr < 0 (compressed): dE/dr = -2α * (-dr) * (negative E) = negative (attractive) ✓
+            //
+            // Previous code had +2.0 instead of -2.0, causing forces to point UPHILL!
+            // This was a misunderstanding of the derivate matrix sign convention.
+            //
             // Note: For fully accurate gradients, we'd also need dr0/dCN * dCN/dx terms
-            // This is an approximation that ignores the CN gradient contribution
-            // Note: For egbond_hb, gradients would also include dhb_cn/dx terms (not implemented)
-            // dE/dr = -2α * dr * E (chain rule formula)
-            // Since E = k_b * exp(-α*dr²) and k_b < 0, E < 0
-            // When dr > 0 (stretched): -2α * dr * E = -2α * (+) * (-) = positive ✓
-            // But the numerical gradient shows we need the opposite sign.
-            // This is because the derivate matrix has opposite sign convention.
-            double dEdr = 2.0 * alpha * dr * energy;  // Sign flipped to match numerical
+            double dEdr = -2.0 * alpha * dr * energy;  // Correct sign
             // DEBUG: Print first bond gradient details
             if (index == 0 && CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::info(fmt::format(
@@ -993,8 +998,10 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
         //
         // Formula (Fortran gfnff_engrad.F90:1231):
         //   ddamp = -2.d0*2*rr/(r2*(1.0d0+rr)**2)
-        double damp2ij = -2.0 * 2.0 * rr_ij / (r_ij_sq * (1.0 + rr_ij) * (1.0 + rr_ij));
-        double damp2jk = -2.0 * 2.0 * rr_jk / (r_jk_sq * (1.0 + rr_jk) * (1.0 + rr_jk));
+        //
+        // CRITICAL FIX (Feb 2026): Guard against division by near-zero squared distances
+        double damp2ij = (r_ij_sq > 1e-8) ? -2.0 * 2.0 * rr_ij / (r_ij_sq * (1.0 + rr_ij) * (1.0 + rr_ij)) : 0.0;
+        double damp2jk = (r_jk_sq > 1e-8) ? -2.0 * 2.0 * rr_jk / (r_jk_sq * (1.0 + rr_jk) * (1.0 + rr_jk)) : 0.0;
 
         // Phase 3: Apply distance-dependent damping to energy
         // Fortran formula: e = ea*damp where damp = damp_ij*damp_jk
@@ -1263,6 +1270,15 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         // m_dihedral_energy += energy * m_dihedral_scaling;  // Claude Generated (Jan 2, 2026): REMOVED - moved above
 
         if (m_calculate_gradient) {
+            // CRITICAL FIX (Feb 2026): Stricter threshold for aromatic systems
+            // Small V parameters combined with numerical noise can amplify errors
+            // Raised from 1e-10 to 1e-6 for aromatic stability
+            if (std::abs(V) < 1e-6) {
+                // V too small → gradient negligible, skip calculation
+                // This prevents numerical noise amplification in benzene-like systems
+                continue;
+            }
+
             // Claude Generated (Jan 13, 2026): COMPLETE Torsion gradient with damping derivatives
             // Reference: Fortran gfnff_engrad.F90:1273-1280
             //
@@ -1309,7 +1325,12 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
 
             // First, compute ddamp/∂r² for each bond
             // Formula: ddamp = -4*rr / (r² * (1+rr)²)
+            // CRITICAL FIX (Feb 2026): Guard against division by near-zero r2_val
             auto calc_ddamp = [&](double r2_val, double rcut_val) -> double {
+                // Prevent division by zero when atoms are extremely close
+                if (r2_val < 1e-8) {
+                    return 0.0;
+                }
                 double rr_val = (r2_val / rcut_val) * (r2_val / rcut_val);  // (r²/rcut)²
                 double one_plus_rr_val = 1.0 + rr_val;
                 return -4.0 * rr_val / (r2_val * one_plus_rr_val * one_plus_rr_val);  // ∂damp/∂r²
@@ -1480,7 +1501,12 @@ void ForceFieldThread::CalculateGFNFFExtraTorsionContribution()
             // Analytical gradient for crossed sequence i-k-j-l
             double dEdphi = -V * n * sin(c1) * damp * m_dihedral_scaling;
 
+            // CRITICAL FIX (Feb 2026): Same guard as primary torsions
             auto calc_ddamp = [&](double r2_v, double rcut_v) -> double {
+                // Prevent division by zero when atoms are extremely close
+                if (r2_v < 1e-8) {
+                    return 0.0;
+                }
                 double rr_v = (r2_v / rcut_v) * (r2_v / rcut_v);
                 double one_plus_rr_v = 1.0 + rr_v;
                 return -4.0 * rr_v / (r2_v * one_plus_rr_v * one_plus_rr_v);
@@ -1610,7 +1636,9 @@ void ForceFieldThread::CalculateGFNFFDispersionContribution()
         Eigen::Vector3d rij_vec = ri - rj;
         double rij = rij_vec.norm() * m_au;  // Convert to atomic units if needed
 
-        if (rij > disp.r_cut || rij < 1e-10) continue;  // Skip if beyond cutoff or too close
+        // HIGH PRIORITY FIX (Feb 2026): Reduce epsilon threshold for gradient robustness
+        // Gradient has division by rij → strengthen guard from 1e-10 to 1e-8
+        if (rij > disp.r_cut || rij < 1e-8) continue;  // Skip if beyond cutoff or too close
 
         // GFN-FF modified BJ damping (NOT standard D3/D4!)
         // Reference: gfnff_gdisp0.f90:365-377
@@ -1725,7 +1753,9 @@ void ForceFieldThread::CalculateGFNFFBondedRepulsionContribution()
         Eigen::Vector3d rij_vec = ri - rj;
         double rij = rij_vec.norm() * m_au;
 
-        if (rij > rep.r_cut || rij < 1e-10) continue;
+        // HIGH PRIORITY FIX (Feb 2026): Strengthen distance check to prevent gradient Inf/NaN
+        // Previous threshold 1e-10 too small, gradient division by rij needs robustness
+        if (rij > rep.r_cut || rij < 1e-8) continue;
 
         // Bonded repulsion formula: E = repab * exp(-α * r^1.5) / r
         // r^1.5 = r * sqrt(r) avoids std::pow()
@@ -1792,7 +1822,9 @@ void ForceFieldThread::CalculateGFNFFNonbondedRepulsionContribution()
         Eigen::Vector3d rij_vec = ri - rj;
         double rij = rij_vec.norm() * m_au;
 
-        if (rij > rep.r_cut || rij < 1e-10) continue;
+        // HIGH PRIORITY FIX (Feb 2026): Strengthen distance check to prevent gradient Inf/NaN
+        // Previous threshold 1e-10 too small, gradient division by rij needs robustness
+        if (rij > rep.r_cut || rij < 1e-8) continue;
 
         // Non-bonded repulsion formula: E = repab * exp(-α * r^1.5) / r
         // r^1.5 = r * sqrt(r) avoids std::pow()
@@ -1937,6 +1969,50 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
 
             m_gradient.row(coul.i) += grad.transpose();
             m_gradient.row(coul.j) -= grad.transpose();
+        }
+    }
+
+    // =========================================================================
+    // TERM 1b: Charge derivative contribution via CN (geometry-dependent)
+    // =========================================================================
+    // Claude Generated (Feb 1, 2026): Coulomb charge derivative gradient
+    // Reference: Fortran gfnff_engrad.F90:418-422
+    // Formula: qtmp(i) = q(i) * cnf(i) / (2*sqrt(cn(i)))
+    //          g -= dcn^T * qtmp
+    // where dcn[dim](i,j) = dCN(j)/dr(i,dim)
+    //
+    // This term accounts for the geometry dependence of EEQ charges through CN.
+    // Without this term, the gradient is incomplete for charged/polar systems.
+    //
+    // Re-enabled (Feb 1, 2026): Issue was not in Term 1b
+    if (m_calculate_gradient && !m_dcn.empty() && m_cn.size() > 0 && m_cnf.size() > 0) {
+        int natoms = m_cn.size();
+
+        // Compute qtmp(i) = q(i) * cnf(i) / (2*sqrt(cn(i)))
+        Vector qtmp = Vector::Zero(natoms);
+        for (int i = 0; i < natoms; ++i) {
+            if (m_cn(i) > 1e-10) {  // Avoid division by zero
+                qtmp(i) = m_eeq_charges(i) * m_cnf(i) / (2.0 * std::sqrt(m_cn(i)));
+            }
+        }
+
+        // Apply gemv-like operation: g(i,dim) -= sum_j dcn[dim](i,j) * qtmp(j)
+        // Note: dcn[dim] is stored as (natoms x natoms) matrix where
+        // dcn[dim](i,j) = dCN(j)/dr(i,dim)
+        for (int dim = 0; dim < 3; ++dim) {
+            if (dim >= static_cast<int>(m_dcn.size())) continue;
+
+            for (int i = 0; i < natoms; ++i) {
+                double grad_contrib = 0.0;
+                for (int j = 0; j < natoms; ++j) {
+                    grad_contrib -= m_dcn[dim](i, j) * qtmp(j);
+                }
+                m_gradient(i, dim) += grad_contrib;
+            }
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Coulomb charge derivative gradient applied (Term 1b)");
         }
     }
 
