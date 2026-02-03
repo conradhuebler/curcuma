@@ -22,6 +22,8 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "src/core/fileiterator.h"
@@ -177,7 +179,7 @@ public:  // Configuration class needs to be public for AnalysisOutputDispatcher 
     public:
         AnalysisThread(
             const std::vector<int>& selected_frames,
-            const std::vector<Molecule>& frames,
+            const std::unordered_map<int, Molecule>& frames,
             int start_idx,
             int end_idx,
             const std::vector<std::string>& metrics,
@@ -195,7 +197,7 @@ public:  // Configuration class needs to be public for AnalysisOutputDispatcher 
 
     private:
         const std::vector<int>& m_selected_frames;
-        const std::vector<Molecule>& m_frames;
+        const std::unordered_map<int, Molecule>& m_frames;
         int m_start_idx;
         int m_end_idx;
         std::vector<std::string> m_metrics;

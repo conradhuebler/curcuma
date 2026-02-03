@@ -338,40 +338,51 @@ void UnifiedAnalysis::start()
     }
 
     // ========================================================================
-    // Claude Generated 2026: Frame Pre-Loading for Parallel/Sequential Analysis
+    // Claude Generated 2026: Selective Frame Pre-Loading
+    // Nur die Frames laden, die in selected_frames sind — übrige überspringen.
+    // FileIterator ist sequentiell ohne reset(), daher einmaliger Durchlauf.
     // ========================================================================
 
-    // Step 1: Load all frames sequentially (FileIterator is not thread-safe)
-    // Note: FileIterator has no reset(), so we load frames in the main loop
-    std::vector<Molecule> frames;
-    frames.reserve(total_frames);
+    std::unordered_set<int> selected_set(selected_frames.begin(), selected_frames.end());
+    std::unordered_map<int, Molecule> frames;
+    frames.reserve(selected_frames.size());
 
     if (!m_silent) {
-        CurcumaLogger::info_fmt("Loading {} frames for analysis...", total_frames);
+        CurcumaLogger::info_fmt("Loading {}/{} frames for analysis...",
+                                selected_frames.size(), total_frames);
     }
 
-    // Load all frames into memory
-    while (!file_iter.AtEnd()) {
-        frames.push_back(file_iter.Next());
+    {
+        int current_frame = 0;
+        while (!file_iter.AtEnd()) {
+            if (selected_set.count(current_frame)) {
+                frames.emplace(current_frame, file_iter.Next());
+            } else {
+                file_iter.Next();  // Advance iterator, discard frame
+            }
+            ++current_frame;
+        }
     }
 
-    // Verify we loaded all frames
-    if (static_cast<int>(frames.size()) != total_frames) {
-        CurcumaLogger::error_fmt("Frame loading failed: expected {} frames, got {}",
-                                 total_frames, frames.size());
+    if (frames.size() != selected_frames.size()) {
+        CurcumaLogger::error_fmt("Frame loading failed: expected {} frames, loaded {}",
+                                 selected_frames.size(), frames.size());
         return;
     }
 
-    // Log PBC detection at verbosity level 2+ (first frame only)
-    if (!frames.empty() && frames[0].hasPBC() && CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("Detected periodic boundary conditions");
-        auto params = PBCUtils::getLatticeParameters(frames[0].getUnitCell());
-        CurcumaLogger::param("lattice_a", fmt::format("{:.4f} Å", params[0]));
-        CurcumaLogger::param("lattice_b", fmt::format("{:.4f} Å", params[1]));
-        CurcumaLogger::param("lattice_c", fmt::format("{:.4f} Å", params[2]));
-        CurcumaLogger::param("lattice_alpha", fmt::format("{:.2f}°", params[3]));
-        CurcumaLogger::param("lattice_beta", fmt::format("{:.2f}°", params[4]));
-        CurcumaLogger::param("lattice_gamma", fmt::format("{:.2f}°", params[5]));
+    // Log PBC detection at verbosity level 2+ (first selected frame)
+    {
+        auto it = frames.find(selected_frames[0]);
+        if (it != frames.end() && it->second.hasPBC() && CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Detected periodic boundary conditions");
+            auto params = PBCUtils::getLatticeParameters(it->second.getUnitCell());
+            CurcumaLogger::param("lattice_a", fmt::format("{:.4f} Å", params[0]));
+            CurcumaLogger::param("lattice_b", fmt::format("{:.4f} Å", params[1]));
+            CurcumaLogger::param("lattice_c", fmt::format("{:.4f} Å", params[2]));
+            CurcumaLogger::param("lattice_alpha", fmt::format("{:.2f}°", params[3]));
+            CurcumaLogger::param("lattice_beta", fmt::format("{:.2f}°", params[4]));
+            CurcumaLogger::param("lattice_gamma", fmt::format("{:.2f}°", params[5]));
+        }
     }
 
     // Step 2: Determine threading strategy
@@ -535,7 +546,7 @@ void UnifiedAnalysis::start()
         }
 
         for (int frame_idx : selected_frames) {
-            Molecule mol = frames[frame_idx];
+            Molecule mol = frames.at(frame_idx);
 
             json timestep_result = analyzeMolecule(mol, frame_idx);
             timestep_result["frame_index"] = frame_idx;
@@ -1930,7 +1941,7 @@ json UnifiedAnalysis::calculatePairDistribution(const Molecule& mol)
  */
 UnifiedAnalysis::AnalysisThread::AnalysisThread(
     const std::vector<int>& selected_frames,
-    const std::vector<Molecule>& frames,
+    const std::unordered_map<int, Molecule>& frames,
     int start_idx,
     int end_idx,
     const std::vector<std::string>& metrics,
@@ -1970,7 +1981,7 @@ int UnifiedAnalysis::AnalysisThread::execute() {
             int frame_idx = m_selected_frames[i];
 
             // Deep copy Molecule for thread-local cache isolation
-            Molecule mol_copy = m_frames[frame_idx];
+            Molecule mol_copy = m_frames.at(frame_idx);
 
             // Analyze frame (100% independent, no shared state)
             json result = m_parent->analyzeMolecule(mol_copy, frame_idx);
