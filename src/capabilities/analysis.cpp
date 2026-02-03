@@ -317,13 +317,16 @@ void UnifiedAnalysis::start()
                 frame -= 1;
             }
         }
+    } else {
+        // Default behavior: analyze all frames in range - Claude Generated 2026
+        for (int i = m_analysis_config.start_frame; i < end_frame; ++i) {
+            selected_frames.push_back(i);
+        }
     }
 
-    // Main analysis loop with frame filtering - Claude Generated 2026
-    int current_frame = 0;
+    // Frame selection validation - Claude Generated 2026
     int analyzed_frames = 0;
-    bool first_analyzed = true; // Track first analyzed frame for PBC logging
-    
+
     std::cout << "Selected frames for analysis: ";
     for (const auto i : selected_frames) {
         std::cout << i << " ";
@@ -334,49 +337,211 @@ void UnifiedAnalysis::start()
         }
     }
 
+    // ========================================================================
+    // Claude Generated 2026: Frame Pre-Loading for Parallel/Sequential Analysis
+    // ========================================================================
+
+    // Step 1: Load all frames sequentially (FileIterator is not thread-safe)
+    // Note: FileIterator has no reset(), so we load frames in the main loop
+    std::vector<Molecule> frames;
+    frames.reserve(total_frames);
+
+    if (!m_silent) {
+        CurcumaLogger::info_fmt("Loading {} frames for analysis...", total_frames);
+    }
+
+    // Load all frames into memory
     while (!file_iter.AtEnd()) {
-        Molecule mol = file_iter.Next();
+        frames.push_back(file_iter.Next());
+    }
 
-        bool should_analyze = false;
+    // Verify we loaded all frames
+    if (static_cast<int>(frames.size()) != total_frames) {
+        CurcumaLogger::error_fmt("Frame loading failed: expected {} frames, got {}",
+                                 total_frames, frames.size());
+        return;
+    }
 
-        if (use_frame_list) {
-            // Check if current frame is in selected list
-            auto it = std::find(selected_frames.begin(), selected_frames.end(), current_frame);
-            if (it != selected_frames.end()) {
-                // Apply stride filter to the list index
-                int list_index = std::distance(selected_frames.begin(), it);
-                should_analyze = (list_index % m_analysis_config.stride == 0);
-            }
-        } else {
-            // Simple range check with stride (using local end_frame from line 316)
-            if (current_frame >= m_analysis_config.start_frame && current_frame < end_frame) {
-                should_analyze = ((current_frame - m_analysis_config.start_frame) % m_analysis_config.stride == 0);
+    // Log PBC detection at verbosity level 2+ (first frame only)
+    if (!frames.empty() && frames[0].hasPBC() && CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Detected periodic boundary conditions");
+        auto params = PBCUtils::getLatticeParameters(frames[0].getUnitCell());
+        CurcumaLogger::param("lattice_a", fmt::format("{:.4f} Å", params[0]));
+        CurcumaLogger::param("lattice_b", fmt::format("{:.4f} Å", params[1]));
+        CurcumaLogger::param("lattice_c", fmt::format("{:.4f} Å", params[2]));
+        CurcumaLogger::param("lattice_alpha", fmt::format("{:.2f}°", params[3]));
+        CurcumaLogger::param("lattice_beta", fmt::format("{:.2f}°", params[4]));
+        CurcumaLogger::param("lattice_gamma", fmt::format("{:.2f}°", params[5]));
+    }
+
+    // Step 2: Determine threading strategy
+    int num_threads = m_config.get<int>("threads", 4);
+    int selected_frame_count = selected_frames.size();
+    bool use_threading = (selected_frame_count > 1 && num_threads > 1);
+
+    // Fallback to sequential for single-frame files
+    if (selected_frame_count == 1) {
+        use_threading = false;
+        if (!m_silent) {
+            CurcumaLogger::info("Single frame detected, using sequential processing");
+        }
+    }
+
+    if (use_threading) {
+        // ========================================================================
+        // PARALLEL PATH - Frame-level parallelization with CxxThreadPool
+        // ========================================================================
+
+        // Create thread pool
+        m_threadpool = new CxxThreadPool();
+        m_threadpool->setProgressBar(CxxThreadPool::ProgressBarType::None);
+        m_threadpool->setActiveThreadCount(num_threads);
+
+        // Calculate optimal batch size
+        int frames_per_thread = (selected_frame_count + num_threads - 1) / num_threads;
+
+        // Create and configure threads
+        std::vector<AnalysisThread*> threads;
+        threads.reserve(num_threads);
+
+        for (int t = 0; t < num_threads; ++t) {
+            int start_idx = t * frames_per_thread;
+            int end_idx = std::min(start_idx + frames_per_thread, selected_frame_count);
+
+            if (start_idx >= selected_frame_count) break;
+
+            auto* thread = new AnalysisThread(
+                selected_frames,
+                frames,
+                start_idx,
+                end_idx,
+                enabled_metrics,
+                m_config_legacy,
+                m_analysis_config,
+                this
+            );
+
+            threads.push_back(thread);
+            m_threadpool->addThread(thread);
+        }
+
+        // Execute all threads (blocks until complete)
+        if (!m_silent) {
+            CurcumaLogger::info_fmt("Analyzing {} frames with {} threads...",
+                                   selected_frame_count, threads.size());
+        }
+
+        auto start_time = std::chrono::high_resolution_clock::now();
+        m_threadpool->StartAndWait();
+        auto end_time = std::chrono::high_resolution_clock::now();
+
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            end_time - start_time).count();
+
+        if (!m_silent) {
+            CurcumaLogger::info_fmt("Parallel analysis completed in {:.2f} seconds",
+                                   duration / 1000.0);
+        }
+
+        // Step 3: Aggregate results (sequential, no races)
+        std::vector<std::pair<int, json>> indexed_results;
+        for (auto* thread : threads) {
+            for (const auto& result : thread->getResults()) {
+                int frame_idx = result["frame_index"];
+                indexed_results.push_back({frame_idx, result});
             }
         }
-        if(!should_analyze){
-            current_frame++;
-            continue;
+
+        // Sort by frame index to preserve temporal order
+        std::sort(indexed_results.begin(), indexed_results.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+
+        // Add to results array in order
+        for (const auto& [idx, result] : indexed_results) {
+            results["timesteps"].push_back(result);
         }
-        if (should_analyze) {
-            // Claude Generated 2025: Log PBC detection at verbosity level 2+ (first analyzed frame only)
-            if (first_analyzed && mol.hasPBC() && CurcumaLogger::get_verbosity() >= 2) {
-                CurcumaLogger::info("Detected periodic boundary conditions");
-                auto params = PBCUtils::getLatticeParameters(mol.getUnitCell());
-                CurcumaLogger::param("lattice_a", fmt::format("{:.4f} Å", params[0]));
-                CurcumaLogger::param("lattice_b", fmt::format("{:.4f} Å", params[1]));
-                CurcumaLogger::param("lattice_c", fmt::format("{:.4f} Å", params[2]));
-                CurcumaLogger::param("lattice_alpha", fmt::format("{:.2f}°", params[3]));
-                CurcumaLogger::param("lattice_beta", fmt::format("{:.2f}°", params[4]));
-                CurcumaLogger::param("lattice_gamma", fmt::format("{:.2f}°", params[5]));
-                first_analyzed = false;
+
+        analyzed_frames = indexed_results.size();
+
+        // Step 4: Merge statistics from all threads
+        if (stats) {
+            for (auto* thread : threads) {
+                const auto& local_stats = thread->getStatistics();
+
+                for (const auto& metric : enabled_metrics) {
+                    if (metric == "gyration") {
+                        // Both variants
+                        for (const auto& variant : { "gyration_unweighted", "gyration_mass" }) {
+                            auto series = local_stats.getSeries(variant);
+                            for (double value : series) {
+                                stats->addValue(variant, value);
+                            }
+                        }
+                    } else {
+                        // Get full series from thread-local statistics
+                        auto series = local_stats.getSeries(metric);
+                        for (double value : series) {
+                            stats->addValue(metric, value);
+                        }
+                    }
+                }
             }
 
-            json timestep_result = analyzeMolecule(mol, current_frame);
+            // Add final statistics to last timestep result
+            if (!results["timesteps"].empty()) {
+                json final_stats = json::object();
+                for (const auto& metric : enabled_metrics) {
+                    if (metric == "gyration") {
+                        // Both variants
+                        for (const auto& variant : { "gyration_unweighted", "gyration_mass" }) {
+                            if (enable_cumulative) {
+                                final_stats[variant]["mean"] = stats->getMean(variant);
+                                final_stats[variant]["std"] = stats->getStdDev(variant);
+                            }
+                            if (enable_moving) {
+                                final_stats[variant]["moving_avg"] = stats->getMovingAverage(variant);
+                            }
+                        }
+                    } else {
+                        if (enable_cumulative) {
+                            final_stats[metric]["mean"] = stats->getMean(metric);
+                            final_stats[metric]["std"] = stats->getStdDev(metric);
+                        }
+                        if (enable_moving) {
+                            final_stats[metric]["moving_avg"] = stats->getMovingAverage(metric);
+                        }
+                    }
+                }
+                // Store in global results
+                results["statistics"] = final_stats;
+            }
+        }
 
-            // Store actual frame index in result for traceability
-            timestep_result["frame_index"] = current_frame;
+        // Cleanup: Pool zuerst löschen (iteriert noch über m_finished),
+        // dann die Threads (autoDelete=false, also nicht vom Pool gelöscht)
+        delete m_threadpool;
+        m_threadpool = nullptr;
+        for (auto* thread : threads) {
+            delete thread;
+        }
 
-            // Collect statistics for enabled metrics - Claude Generated 2025
+    } else {
+        // ========================================================================
+        // SEQUENTIAL PATH (single-frame or threads=1)
+        // ========================================================================
+
+        if (!m_silent) {
+            CurcumaLogger::info_fmt("Analyzing {} frames sequentially...", selected_frame_count);
+        }
+
+        for (int frame_idx : selected_frames) {
+            Molecule mol = frames[frame_idx];
+
+            json timestep_result = analyzeMolecule(mol, frame_idx);
+            timestep_result["frame_index"] = frame_idx;
+            results["timesteps"].push_back(timestep_result);
+
+            // Collect statistics for enabled metrics
             if (stats) {
                 for (const auto& metric : enabled_metrics) {
                     if (metric == "gyration") {
@@ -390,49 +555,43 @@ void UnifiedAnalysis::start()
                         stats->addValue(metric, value);
                     }
                 }
-
-                // Add statistics to timestep result
-                timestep_result["statistics"] = json::object();
-                for (const auto& metric : enabled_metrics) {
-                    if (metric == "gyration") {
-                        // Both variants
-                        for (const auto& variant : { "gyration_unweighted", "gyration_mass" }) {
-                            if (enable_cumulative) {
-                                timestep_result["statistics"][variant]["mean"] = stats->getMean(variant);
-                                timestep_result["statistics"][variant]["std"] = stats->getStdDev(variant);
-                            }
-                            if (enable_moving) {
-                                timestep_result["statistics"][variant]["moving_avg"] = stats->getMovingAverage(variant);
-                            }
-                        }
-                    } else {
-                        if (enable_cumulative) {
-                            timestep_result["statistics"][metric]["mean"] = stats->getMean(metric);
-                            timestep_result["statistics"][metric]["std"] = stats->getStdDev(metric);
-                        }
-                        if (enable_moving) {
-                            timestep_result["statistics"][metric]["moving_avg"] = stats->getMovingAverage(metric);
-                        }
-                    }
-                }
             }
 
-            results["timesteps"].push_back(timestep_result);
             analyzed_frames++;
 
-            // Progress reporting (every 10 analyzed frames) - Claude Generated 2026
+            // Progress reporting (every 10 frames)
             if (!m_silent && analyzed_frames % 10 == 0 && analyzed_frames > 0) {
-                if (use_frame_list) {
-                    CurcumaLogger::info_fmt("Analyzed {} frames (current: {}/{})",
-                                           analyzed_frames, current_frame + 1, total_frames);
-                } else if (total_frames > 1) {
-                    CurcumaLogger::info_fmt("Analyzed frame {}/{}",
-                                           current_frame + 1, total_frames);
-                }
+                CurcumaLogger::info_fmt("Analyzed {}/{} frames", analyzed_frames, selected_frame_count);
             }
         }
 
-        current_frame++;
+        // Add final statistics to results
+        if (stats && !results["timesteps"].empty()) {
+            json final_stats = json::object();
+            for (const auto& metric : enabled_metrics) {
+                if (metric == "gyration") {
+                    // Both variants
+                    for (const auto& variant : { "gyration_unweighted", "gyration_mass" }) {
+                        if (enable_cumulative) {
+                            final_stats[variant]["mean"] = stats->getMean(variant);
+                            final_stats[variant]["std"] = stats->getStdDev(variant);
+                        }
+                        if (enable_moving) {
+                            final_stats[variant]["moving_avg"] = stats->getMovingAverage(variant);
+                        }
+                    }
+                } else {
+                    if (enable_cumulative) {
+                        final_stats[metric]["mean"] = stats->getMean(metric);
+                        final_stats[metric]["std"] = stats->getStdDev(metric);
+                    }
+                    if (enable_moving) {
+                        final_stats[metric]["moving_avg"] = stats->getMovingAverage(metric);
+                    }
+                }
+            }
+            results["statistics"] = final_stats;
+        }
     }
 
     // Update total counts - Claude Generated 2026
@@ -1759,4 +1918,176 @@ json UnifiedAnalysis::calculatePairDistribution(const Molecule& mol)
     rdf["first_peak_height"] = max_gr;
 
     return rdf;
+}
+// ========================================================================
+// Claude Generated 2026: Parallel Analysis Thread Implementation
+// ========================================================================
+
+/*! \brief Constructor for analysis worker thread - Claude Generated 2026
+ *
+ * Initializes thread with frame range and analysis configuration.
+ * Sets up thread-local statistics with same window size as parent.
+ */
+UnifiedAnalysis::AnalysisThread::AnalysisThread(
+    const std::vector<int>& selected_frames,
+    const std::vector<Molecule>& frames,
+    int start_idx,
+    int end_idx,
+    const std::vector<std::string>& metrics,
+    const json& controller,
+    const UnifiedAnalysis::AnalysisConfig& config,
+    UnifiedAnalysis* parent)
+    : m_selected_frames(selected_frames)
+    , m_frames(frames)
+    , m_start_idx(start_idx)
+    , m_end_idx(end_idx)
+    , m_metrics(metrics)
+    , m_controller(controller)
+    , m_config(config)
+    , m_parent(parent)
+    , m_local_stats(config.window_size)
+{
+    setAutoDelete(false);  // Manual cleanup to collect results
+
+    // Enable full series storage for thread merging - Claude Generated 2026
+    m_local_stats.setStoreFullSeries(true);
+}
+
+/*! \brief Execute thread - analyze assigned frame range - Claude Generated 2026
+ *
+ * Key thread-safety measures:
+ * - Deep copy Molecule for thread-local cache isolation
+ * - Verbosity=0 to avoid logger race conditions
+ * - Thread-local result/statistics storage (lock-free)
+ */
+int UnifiedAnalysis::AnalysisThread::execute() {
+    // CRITICAL: Suppress logging in worker threads (avoid race conditions)
+    int saved_verbosity = CurcumaLogger::get_verbosity();
+    CurcumaLogger::set_verbosity(0);
+
+    try {
+        for (int i = m_start_idx; i < m_end_idx; ++i) {
+            int frame_idx = m_selected_frames[i];
+
+            // Deep copy Molecule for thread-local cache isolation
+            Molecule mol_copy = m_frames[frame_idx];
+
+            // Analyze frame (100% independent, no shared state)
+            json result = m_parent->analyzeMolecule(mol_copy, frame_idx);
+
+            // Store result in thread-local vector (lock-free)
+            result["frame_index"] = frame_idx;
+            m_results.push_back(result);
+
+            // Accumulate statistics thread-locally (lock-free)
+            for (const auto& metric : m_metrics) {
+                if (metric == "gyration") {
+                    // Track both unweighted and mass-weighted
+                    double gyr_u = m_parent->extractMetricValue(result, "gyration", false);
+                    double gyr_m = m_parent->extractMetricValue(result, "gyration", true);
+                    m_local_stats.addValue("gyration_unweighted", gyr_u);
+                    m_local_stats.addValue("gyration_mass", gyr_m);
+                } else {
+                    double value = m_parent->extractMetricValue(result, metric);
+                    m_local_stats.addValue(metric, value);
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        CurcumaLogger::error_fmt("Thread exception: {}", e.what());
+        CurcumaLogger::set_verbosity(saved_verbosity);
+        return -1;
+    }
+
+    // Restore verbosity on exit
+    CurcumaLogger::set_verbosity(saved_verbosity);
+    return 0;
+}
+
+/*! \brief Extract metric value from JSON result - Claude Generated 2026
+ *
+ * Supports nested keys (e.g., "gyration.radius") and special handling
+ * for mass-weighted vs unweighted variants.
+ *
+ * \param result JSON result from analyzeMolecule()
+ * \param metric Metric name to extract
+ * \param mass_weighted For gyration: extract mass-weighted variant
+ * \return Extracted numeric value or 0.0 if not found
+ */
+double UnifiedAnalysis::extractMetricValue(const json& result, const std::string& metric, bool mass_weighted) const {
+    // Special handling for gyration (has both unweighted and mass-weighted)
+    if (metric == "gyration") {
+        if (result.contains("geometric") && result["geometric"].contains("gyration_radius")) {
+            const auto& gyr = result["geometric"]["gyration_radius"];
+            if (mass_weighted && gyr.contains("mass_weighted")) {
+                return gyr["mass_weighted"].get<double>();
+            } else if (!mass_weighted && gyr.contains("unweighted")) {
+                return gyr["unweighted"].get<double>();
+            }
+        }
+        return 0.0;
+    }
+
+    // Handle nested keys (e.g., "rout" from "polymer.rout")
+    if (metric == "rout" && result.contains("polymer")) {
+        return result["polymer"].value("rout", 0.0);
+    }
+
+    if (metric == "end2end" && result.contains("polymer")) {
+        return result["polymer"].value("end_to_end_distance", 0.0);
+    }
+
+    if (metric == "com") {
+        // COM is a vector, return magnitude
+        if (result.contains("geometric") && result["geometric"].contains("center_of_mass")) {
+            const auto& com = result["geometric"]["center_of_mass"];
+            if (com.is_array() && com.size() == 3) {
+                double x = com[0].get<double>();
+                double y = com[1].get<double>();
+                double z = com[2].get<double>();
+                return std::sqrt(x*x + y*y + z*z);
+            }
+        }
+        return 0.0;
+    }
+
+    if (metric == "inertia") {
+        // Return average of principal moments
+        if (result.contains("geometric") && result["geometric"].contains("inertia")) {
+            const auto& inertia = result["geometric"]["inertia"];
+            if (inertia.is_array() && inertia.size() == 3) {
+                double sum = 0.0;
+                for (const auto& val : inertia) {
+                    sum += val.get<double>();
+                }
+                return sum / 3.0;
+            }
+        }
+        return 0.0;
+    }
+
+    if (metric == "mass") {
+        if (result.contains("basic")) {
+            return result["basic"].value("mass", 0.0);
+        }
+        return 0.0;
+    }
+
+    // Generic nested key handling (e.g., "key.subkey")
+    size_t dot_pos = metric.find('.');
+    if (dot_pos != std::string::npos) {
+        std::string parent = metric.substr(0, dot_pos);
+        std::string child = metric.substr(dot_pos + 1);
+
+        if (result.contains(parent) && result[parent].contains(child)) {
+            return result[parent][child].get<double>();
+        }
+    }
+
+    // Handle direct keys
+    if (result.contains(metric)) {
+        return result[metric].get<double>();
+    }
+
+    return 0.0;
 }

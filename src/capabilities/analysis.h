@@ -29,10 +29,13 @@
 #include "src/tools/formats.h"
 #include "src/tools/trajectory_writer.h"
 #include "tda_engine.h"
+#include "trajectory_statistics.h"
 
 #include "curcumamethod.h"
 #include "src/core/parameter_macros.h"
 #include "src/core/config_manager.h"
+
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 /*! \brief Unified molecular analysis for all structure types and formats - Claude Generated
  *
@@ -160,12 +163,66 @@ public:  // Configuration class needs to be public for AnalysisOutputDispatcher 
         void validateConfiguration();
     };
 
+    // Claude Generated 2026: Thread for parallel frame analysis
+    /*! \brief Worker thread for analyzing frames in parallel
+     *
+     * Each AnalysisThread processes a subset of frames independently.
+     * Key features:
+     * - Deep copy of Molecule for thread-local cache isolation
+     * - Verbosity=0 to avoid logger race conditions
+     * - Thread-local storage for results and statistics (lock-free)
+     * - Manual cleanup (setAutoDelete(false)) to collect results
+     */
+    class AnalysisThread : public CxxThread {
+    public:
+        AnalysisThread(
+            const std::vector<int>& selected_frames,
+            const std::vector<Molecule>& frames,
+            int start_idx,
+            int end_idx,
+            const std::vector<std::string>& metrics,
+            const json& controller,
+            const AnalysisConfig& config,
+            UnifiedAnalysis* parent);
+
+        virtual ~AnalysisThread() = default;
+
+        int execute() override;
+
+        // Result getters (called after StartAndWait)
+        const std::vector<json>& getResults() const { return m_results; }
+        const TrajectoryStatistics& getStatistics() const { return m_local_stats; }
+
+    private:
+        const std::vector<int>& m_selected_frames;
+        const std::vector<Molecule>& m_frames;
+        int m_start_idx;
+        int m_end_idx;
+        std::vector<std::string> m_metrics;
+        json m_controller;
+        AnalysisConfig m_config;
+        UnifiedAnalysis* m_parent;
+
+        // Thread-local storage (NO synchronization needed)
+        std::vector<json> m_results;
+        TrajectoryStatistics m_local_stats;
+    };
+
 private:  // Private member variables - Claude Generated 2026
     std::string m_filename;
     ConfigManager m_config;       // Claude Generated 2025: Modern configuration manager
     json m_config_legacy;         // Claude Generated 2025: Legacy JSON for TDAEngine compatibility
     bool m_silent;
     AnalysisConfig m_analysis_config;  // Claude Generated 2026: Centralized configuration state
+    CxxThreadPool* m_threadpool = nullptr;  // Claude Generated 2026: Thread pool for parallel analysis
+
+    /*! \brief Extract metric value from JSON result for statistics collection - Claude Generated 2026
+     * \param result JSON result from analyzeMolecule()
+     * \param metric Metric name (supports nested keys like "gyration.radius")
+     * \param mass_weighted For gyration: extract mass-weighted variant (default: unweighted)
+     * \return Extracted numeric value or 0.0 if not found
+     */
+    double extractMetricValue(const json& result, const std::string& metric, bool mass_weighted = false) const;
 
     // vvvvvvvvvvvv PARAMETER DEFINITION BLOCK vvvvvvvvvvvv
     BEGIN_PARAMETER_DEFINITION(analysis)
@@ -182,6 +239,9 @@ private:  // Private member variables - Claude Generated 2026
     PARAM(metrics, String, "gyration,rout,end2end", "Comma-separated trajectory metrics: gyration|rout|end2end|com|inertia|mass|all", "Trajectory", {})
     PARAM(statistics, String, "none", "Statistics mode: none|cumulative|moving|all", "Trajectory", { "stats" })
     PARAM(window, Int, 10, "Moving average window size", "Trajectory", {})
+
+    // Parallelization options - Claude Generated 2026
+    PARAM(threads, Int, 4, "Number of threads for parallel frame analysis (1=sequential, 2-16=parallel). Higher values speed up trajectory analysis but require more memory.", "Performance", {})
 
     // Frame selection and stride options - Claude Generated 2026
     PARAM(frames, String, "", "Frame selection (e.g., '1:5,8,10:12', 'last' or '1:-1'=all, 'N:N'=single)", "Trajectory", {})
