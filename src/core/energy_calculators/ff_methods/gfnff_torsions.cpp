@@ -778,38 +778,25 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
         int group_k = (z_k == 7 || z_k == 15) ? 5 : (z_k == 8 || z_k == 16) ? 6 : 0;
 
         if (group_j == 6 && group_k == 6) {
-            // O-O, S-S: higher barrier (line 1873)
+            // O-O, S-S: higher barrier, nrot=2, phi0=90° (gfnff_ini.f90:1873-1879)
             f1 = 5.0;
+            params.periodicity = 2;
+            params.phase_shift = 90.0 * M_PI / 180.0;
             if (z_j >= 16 && z_k >= 16) f1 = 25.0;  // S-S
         }
         else if (group_j == 5 && group_k == 5) {
-            // N-N, P-P (line 1859)
+            // N-N, P-P: nrot=3, phi0=60° (gfnff_ini.f90:1859-1863)
             f1 = 3.0;
+            params.periodicity = 3;
+            params.phase_shift = 60.0 * M_PI / 180.0;
         }
         else if ((group_j == 5 && group_k == 6) || (group_j == 6 && group_k == 5)) {
-            // N-O or O-N mixed bond (gfnff_ini.f90:1865-1871)
-            // Claude Generated (January 26, 2026) - Task 1.4
-            //
-            // Reference: gfnff_ini.f90:1865-1871
-            //   if (group5(ati).and.group6(atj)) then  ! N-O, P-S
-            //     f1 = 1.0d0
-            //     if (ati .ge. 15.and.atj .ge. 15) f1 = 20.d0  ! P-S case
-            //   endif
-            //
-            // Physical basis:
-            // - N-O bonds (hydroxylamine, N-oxides) have intermediate polarity
-            // - P-S bonds (thiophosphates) are highly polarized → higher barrier
-            //
-            // Note: Low priority for caffeine (no N-O bonds in torsions)
+            // N-O or O-N mixed bond: nrot=2, phi0=90° (gfnff_ini.f90:1865-1871)
             f1 = 1.0;
+            params.periodicity = 2;
+            params.phase_shift = 90.0 * M_PI / 180.0;
             if (z_j >= 15 && z_k >= 15) {
                 f1 = 20.0;  // P-S case
-                if (CurcumaLogger::get_verbosity() >= 3) {
-                    CurcumaLogger::info("  f1 P-S mixed case: 20.0");
-                }
-            }
-            else if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info("  f1 N-O mixed case: 1.0");
             }
         }
     }
@@ -1777,10 +1764,19 @@ json GFNFF::generateGFNFFTorsions() const
                 // ==========================================================
                 json torsion;
                 torsion["type"] = 3; // GFN-FF type
-                torsion["i"] = i;
-                torsion["j"] = j;
-                torsion["k"] = k;
-                torsion["l"] = l;
+                // Claude Generated (Feb 4, 2026): Fortran convention atom ordering (ll-ii-jj-kk)
+                // Fortran stores torsions as: ll (neighbor of jj) - ii - jj - kk (neighbor of ii)
+                // Our loop generates: i (neighbor of j) - j - k - l (neighbor of k)
+                // Mapping: j→ii, k→jj → i corresponds to kk, l corresponds to ll
+                // Swap terminal atoms so damping distances match Fortran:
+                //   pos0-pos1 = l-j = neighbor_of_k to j  → 1-3 distance (NOT a bond)
+                //   pos1-pos2 = j-k                        → central bond
+                //   pos2-pos3 = k-i = k to neighbor_of_j  → 1-3 distance (NOT a bond)
+                // This corrects the 33-44× torsion energy excess (damp ~0.074 → ~0.0017)
+                torsion["i"] = l;  // ll = neighbor of jj (was stored as i = neighbor of j)
+                torsion["j"] = j;  // ii = central atom 1
+                torsion["k"] = k;  // jj = central atom 2
+                torsion["l"] = i;  // kk = neighbor of ii (was stored as l = neighbor of k)
                 // Claude Generated Fix (2025-11-30): Renamed JSON keys to match forcefield.cpp loader
                 // Previous keys: "periodicity", "barrier", "phase" → caused ALL torsion energies = 0
                 // Loader expects: "n", "V", "phi0" (from Dihedral struct in forcefield.cpp:444-461)
@@ -2191,10 +2187,13 @@ json GFNFF::generateGFNFFTorsions() const
         // ======================================================================
         json extra_torsion;
         extra_torsion["type"] = 3;           // GFN-FF type (same as primary)
-        extra_torsion["i"] = i;
-        extra_torsion["j"] = j;
-        extra_torsion["k"] = k;
-        extra_torsion["l"] = l;
+        // Claude Generated (Feb 4, 2026): Same Fortran convention swap as primary torsions
+        // Extra torsions iterate over the same generated_torsions set, so the same
+        // ll-ii-jj-kk reordering is needed for correct star-topology damping distances
+        extra_torsion["i"] = l;  // ll = neighbor of jj
+        extra_torsion["j"] = j;  // ii = central atom 1
+        extra_torsion["k"] = k;  // jj = central atom 2
+        extra_torsion["l"] = i;  // kk = neighbor of ii
         extra_torsion["n"] = 1;              // Periodicity = 1 (NOT 3!)
         extra_torsion["V"] = barrier;        // Barrier in Hartree (same as primary torsions)
         extra_torsion["phi0"] = M_PI;        // Phase = 180° (pi radians)

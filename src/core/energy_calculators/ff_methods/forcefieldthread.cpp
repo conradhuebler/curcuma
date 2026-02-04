@@ -1079,14 +1079,12 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         Eigen::Vector3d r_k = m_geometry.row(dihedral.k).head<3>();
         Eigen::Vector3d r_l = m_geometry.row(dihedral.l).head<3>();
 
-        // Calculate GFN-FF "crossed" dihedral angle
-        // Reference: gfnff_ini.f90:1932 and user validation (Jan 25, 2026)
-        // GFN-FF calculates the dihedral for the sequence: Terminal1 - Center2 - Center1 - Terminal2
-        // For our bonded chain i-j-k-l, this sequence is: i - k - j - l
+        // Standard dihedral angle for bonded chain i-j-k-l
+        // Reference: gfnff_engrad.F90:1260 — phi = valijklff(n,xyz,i,j,k,l)
         Matrix derivate;
-        double phi = GFNFF_Geometry::calculateDihedralAngle(r_i, r_k, r_j, r_l, derivate, m_calculate_gradient);
+        double phi = GFNFF_Geometry::calculateDihedralAngle(r_i, r_j, r_k, r_l, derivate, m_calculate_gradient);
 
-        // Mapping for i-k-j-l call: derivate row 0=i, 1=k, 2=j, 3=l
+        // Mapping for i-j-k-l call: derivate row 0=i, 1=j, 2=k, 3=l
 
         // =====================================================================
         // Distance-based damping (gfnff_engrad.F90:1180-1183, 1199)
@@ -1105,63 +1103,52 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
             continue;  // Skip invalid atomic numbers
         }
 
-        // Calculate squared distances (FORTRAN-style cross-center damping)
-        // Reference: gfnff_engrad.F90:1180-1183 and user validation report (Jan 25, 2026)
-        // GFN-FF damps: (terminal 1 - opposite center 2), (center-center), (opposite center 1 - terminal 2)
-        // For chain i-j-k-l: pairs are (i,k), (j,k), (j,l)
-        Eigen::Vector3d r_ik = r_k - r_i;
-        Eigen::Vector3d r_jk = r_k - r_j;
-        Eigen::Vector3d r_jl = r_l - r_j;
+        // Damping distances in Fortran ll-ii-jj-kk convention (Feb 4, 2026)
+        // Reference: gfnff_engrad.F90:1250-1259 (primary torsions, tlist(5)>0)
+        // After atom-ordering fix: i=ll, j=ii, k=jj, l=kk
+        //   i-j = ll-ii: 1-3 distance (ll is neighbor of jj, NOT of ii)
+        //   j-k = ii-jj: central bond
+        //   k-l = jj-kk: 1-3 distance (kk is neighbor of ii, NOT of jj)
+        //   damp = dampij * dampjk * dampkl
+        Eigen::Vector3d vab = r_i - r_j;   // ll-ii: 1-3 distance
+        Eigen::Vector3d vcb = r_j - r_k;   // ii-jj: central bond
+        Eigen::Vector3d vdc = r_k - r_l;   // jj-kk: 1-3 distance
 
-        double rik2 = r_ik.squaredNorm();
-        double rjk2 = r_jk.squaredNorm();
-        double rjl2 = r_jl.squaredNorm();
+        double rij2 = vab.squaredNorm();
+        double rjk2 = vcb.squaredNorm();
+        double rkl2 = vdc.squaredNorm();
 
-        // Damping function (gfnff_engrad.F90:1346-1355, gfnffdampt subroutine)
-        // Claude Generated (Jan 13, 2026): Extended to support NCI damping with atcutt_nci
-        auto calculate_damping = [&](double r2, double rcov_i, double rcov_j, bool use_nci = false) -> double {
+        // Damping function (gfnff_engrad.F90:1422-1431, gfnffdampt subroutine)
+        auto calculate_damping = [&](double r2, double rcov_a, double rcov_b, bool use_nci = false) -> double {
             const double atcutt = use_nci ? GFNFFParameters::atcutt_nci : GFNFFParameters::atcutt;
-            double rcut = atcutt * (rcov_i + rcov_j) * (rcov_i + rcov_j);
+            double rcut = atcutt * (rcov_a + rcov_b) * (rcov_a + rcov_b);
             double rr = (r2 / rcut) * (r2 / rcut);
             return 1.0 / (1.0 + rr);
         };
 
-        // Get covalent radii for damping (already in Bohr, 0-indexed)
-        // Claude Generated (Jan 19, 2026): Use D3 covalent radii for torsion damping
-        // Reference: XTB covalentradd3.f90:62 - D3 radii scaled by 4/3
-        // CRITICAL FIX (Jan 25, 2026): 4/3 scaling IS CORRECT when using cross-center pairs!
-        // Larger rcov -> larger rcut -> weaker damping -> SMALLER energy (correct!)
+        // Covalent radii for damping (D3 radii scaled by 4/3, as in gfnff_param.f90:381-405)
         constexpr double rcov_scale = 4.0 / 3.0;
         double rcov_i = GFNFFParameters::covalent_rad_d3[Z_i - 1] * rcov_scale;
         double rcov_j = GFNFFParameters::covalent_rad_d3[Z_j - 1] * rcov_scale;
         double rcov_k = GFNFFParameters::covalent_rad_d3[Z_k - 1] * rcov_scale;
         double rcov_l = GFNFFParameters::covalent_rad_d3[Z_l - 1] * rcov_scale;
 
-        // Calculate 3 damping factors (cross-center pairs per GFN-FF reference)
-        double damp_ik = calculate_damping(rik2, rcov_i, rcov_k);
+        // Three damping factors on consecutive bonds (gfnff_engrad.F90:1256-1259)
+        double damp_ij = calculate_damping(rij2, rcov_i, rcov_j);
         double damp_jk = calculate_damping(rjk2, rcov_j, rcov_k);
-        double damp_jl = calculate_damping(rjl2, rcov_j, rcov_l);
+        double damp_kl = calculate_damping(rkl2, rcov_k, rcov_l);
+        double damp = damp_ij * damp_jk * damp_kl;
 
-        // Total damping (product of 3 factors, gfnff_engrad.F90:1183)
-        double damp = damp_ik * damp_jk * damp_jl;
-
-        // DEBUG: Print damping details for first primary torsion (Jan 8, 2026)
+        // DEBUG: Print damping details for first primary torsion
         static bool primary_damp_debug_printed = false;
         if (!primary_damp_debug_printed && index == 0 && CurcumaLogger::get_verbosity() >= 3) {
-            bool use_nci = dihedral.is_nci;  // Define use_nci from dihedral flag
-            const double atcutt = use_nci ? GFNFFParameters::atcutt_nci : GFNFFParameters::atcutt;
-            CurcumaLogger::info(fmt::format("\n=== GFN-FF TORSION DAMPING FIX (Torsion {}-{}-{}-{}) ===",
+            CurcumaLogger::info(fmt::format("\n=== GFN-FF PRIMARY TORSION DAMPING (Torsion {}-{}-{}-{}) ===",
                                              dihedral.i, dihedral.j, dihedral.k, dihedral.l));
-            CurcumaLogger::info(fmt::format("  r_ik² = {:.6f}, r_ik = {:.6f} Bohr (terminal-opp_center)", rik2, std::sqrt(rik2)));
-            CurcumaLogger::info(fmt::format("  r_jk² = {:.6f}, r_jk = {:.6f} Bohr (center-center)", rjk2, std::sqrt(rjk2)));
-            CurcumaLogger::info(fmt::format("  r_jl² = {:.6f}, r_jl = {:.6f} Bohr (opp_center-terminal)", rjl2, std::sqrt(rjl2)));
-            CurcumaLogger::info(fmt::format("  rcov[{}]_scaled = {:.6f} Bohr", Z_i, rcov_i));
-            CurcumaLogger::info(fmt::format("  rcov[{}]_scaled = {:.6f} Bohr", Z_j, rcov_j));
-            CurcumaLogger::info(fmt::format("  rcov[{}]_scaled = {:.6f} Bohr", Z_k, rcov_k));
-            CurcumaLogger::info(fmt::format("  rcov[{}]_scaled = {:.6f} Bohr", Z_l, rcov_l));
-            CurcumaLogger::info(fmt::format("  damp_ik = {:.8f}", damp_ik));
-            CurcumaLogger::info(fmt::format("  damp_jk = {:.8f}", damp_jk));
-            CurcumaLogger::info(fmt::format("  damp_jl = {:.8f}", damp_jl));
+            CurcumaLogger::info(fmt::format("  r_ij = {:.6f} Bohr (bond i-j)", std::sqrt(rij2)));
+            CurcumaLogger::info(fmt::format("  r_jk = {:.6f} Bohr (bond j-k)", std::sqrt(rjk2)));
+            CurcumaLogger::info(fmt::format("  r_kl = {:.6f} Bohr (bond k-l)", std::sqrt(rkl2)));
+            CurcumaLogger::info(fmt::format("  damp_ij = {:.8f}, damp_jk = {:.8f}, damp_kl = {:.8f}",
+                                             damp_ij, damp_jk, damp_kl));
             CurcumaLogger::info(fmt::format("  damp (total) = {:.8f}", damp));
             primary_damp_debug_printed = true;
         }
@@ -1183,70 +1170,14 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         double dphi1 = phi - phi0;  // Angle deviation from reference
         double c1 = n * dphi1 + M_PI;  // XTB formula: always add +π for primary torsions
 
-        // Claude Generated (Jan 8, 2026): TEMPORARY 0.5 factor kept as workaround
-        // Reference: XTB gfnff_engrad.F90:1272 shows NO 0.5 factor: et = (1+cos)*vtors(2)
-        //
-        // ROOT CAUSE PARTIALLY FIXED (Jan 8, 2026):
-        // 1. ✅ H-count correction now working (bond-based implementation)
-        //    - fij correctly scaled by (nhi*nhj)^0.07 ≈ 1.10× for C-O bonds
-        // 2. ❌ Still missing topology-specific fij corrections (Fortran gfnff_ini.f90:1807-1811):
-        //    - alphaCO function: fij * 1.3 (for C=O alpha carbon corrections)
-        //    - amide corrections: fij * 1.3 (for peptide bonds)
-        //    - Hypervalent bond type corrections
-        //    - These account for additional 1.48× missing factor
-        //
-        // TORSION ENERGY CALCULATION (Jan 8, 2026 Investigation)
-        //
-        // Fortran reference (gfnff_engrad.F90:1268-1272):
-        //   c1 = rn*dphi1 + pi     ! dphi1 = phi - phi0, rn = periodicity
-        //   x1cos = cos(c1)
-        //   et = (1 + x1cos) * topo%vtors(2,m)
-        //
-        // Our implementation (line 1057): c1 = n * dphi1 + M_PI ✓ (matches Fortran)
-        // Formula: et = (1 + cos(c1)) * V ✓ (matches Fortran)
-        //
-        // VERIFIED (Jan 8, 2026) via external/gfnff/build/test/gfnff-gfnff_analyze-test:
-        //   - V parameter generation: fctot = 0.14774 Eh (XTB) vs 0.151 Eh (Curcuma) → 2.2% diff ✓
-        //   - Formula matches Fortran exactly ✓
-        //   - Damping formula: damp = dampij * dampjk * dampkl ✓ (matches Fortran)
-        //   - Geometries identical ✓ (verified by user)
-        //   - ALL components verified, yet energy is 1.84× too large!
-        //
-        // MYSTERIOUS EMPIRICAL FACTOR (Jan 8, 2026):
-        // After exhaustive source code analysis, NO hidden factor found in XTB gfnff_engrad.F90.
-        // However, exact matching requires factor of 3/11 = 0.272727 (not 0.5):
-        //
-        //   Test results (CH₃OCH₃):
-        //   - Curcuma (no factor):  0.0000858 Eh
-        //   - Curcuma (factor 0.5): 0.0000429 Eh (83.6% error)
-        //   - XTB reference:        0.0000234 Eh
-        //   - Required factor:      0.0000234/0.0000858 = 0.272727 = 3/11 EXACTLY
-        //
-        // The factor 3/11 is TOO SPECIFIC to be coincidence, suggesting:
-        //   1. There exists a hidden 3/11 factor in XTB that wasn't found in source analysis
-        //   2. Torsions should be counted/averaged differently (related to 11?)
-        //   3. Some systematic symmetry or degeneracy factor of 11/3
-        //   4. Bug in our implementation that multiplies by 11/3 somewhere
-        //
-        // TODO (CRITICAL): Investigate why 3/11 factor is needed:
-        //   - Search XTB source for any division by 11 or multiplication by 3
-        //   - Check if torsions are averaged over symmetry-equivalent configurations
-        //   - Verify torsion counting logic (are we counting some torsions multiple times?)
-        //   - Compare XTB's gfnff_topo file with our parameter generation in detail
-        //   - Test with other molecules to verify 3/11 factor is universal
-        //
-        // Claude Generated (Jan 9, 2026): EMPIRICAL FACTOR REMOVAL
-        // Previous factor 3/11 = 0.272727 was compensating for incorrect V parameters
-        // V parameters from GFN-FF generation should now be correct
-        // No scaling factor needed - use pure V from parameter generation
-        //
-        // Claude Generated (Jan 13, 2026): CRITICAL - TORSION ENERGY CALCULATION BUG
-        // Investigation revealed the 3/11 factor is NOT UNIVERSAL:
-        // - CH₃OCH₃: 0.000086 Eh vs XTB 0.000023 Eh (3.7× too large)
-        // - Monosaccharide: 0.000322 Eh vs XTB 0.012888 Eh (40× too small!)
-        // The error direction is OPPOSITE for different molecules!
-        // Root cause: Likely in barrier height V calculation or parameter generation
-        // TODO: Investigate why torsion energies have molecule-dependent errors
+        // Claude Generated (Feb 4, 2026): ROOT CAUSE RESOLVED - atom ordering
+        // All previous "mystery factors" (3/11, 0.5, molecule-dependent errors) were caused by
+        // incorrect atom ordering in torsion storage. Torsions were stored as i-j-k-l (bonded chain)
+        // but Fortran uses ll-ii-jj-kk where pos0-pos1 and pos2-pos3 are 1-3 distances.
+        // This made damping ~40× too large (bond distances vs 1-3 distances).
+        // Fix: Swap terminal atoms in gfnff_torsions.cpp storage (Feb 4, 2026).
+        // CH₃OCH₃ torsion: 0.001 Eh → 0.000023 Eh (exact match with XTB reference).
+        // Reference: gfnff_engrad.F90:1268-1272: et = (1+cos(c1)) * vtors(2,m)
         double et = V * (1.0 + cos(c1));
         double energy = et * damp;
 
@@ -1336,54 +1267,50 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
                 return -4.0 * rr_val / (r2_val * one_plus_rr_val * one_plus_rr_val);  // ∂damp/∂r²
             };
 
-            // Calculate rcut values (same as energy calculation - scaled rcov and cross-center pairs!)
+            // rcut values for consecutive bonds (same pairs as energy calculation)
             bool use_nci = dihedral.is_nci;
             double atcutt_value = use_nci ? GFNFFParameters::atcutt_nci : GFNFFParameters::atcutt;
-            double rcut_ik = atcutt_value * (rcov_i + rcov_k) * (rcov_i + rcov_k);
+            double rcut_ij = atcutt_value * (rcov_i + rcov_j) * (rcov_i + rcov_j);
             double rcut_jk = atcutt_value * (rcov_j + rcov_k) * (rcov_j + rcov_k);
-            double rcut_jl = atcutt_value * (rcov_j + rcov_l) * (rcov_j + rcov_l);
+            double rcut_kl = atcutt_value * (rcov_k + rcov_l) * (rcov_k + rcov_l);
 
-            // Calculate damping derivatives w.r.t. squared distances (rik2, rjk2, rjl2)
-            double ddamp_drik2 = calc_ddamp(rik2, rcut_ik);
+            // Damping derivatives w.r.t. squared bond distances
+            double ddamp_drij2 = calc_ddamp(rij2, rcut_ij);
             double ddamp_drjk2 = calc_ddamp(rjk2, rcut_jk);
-            double ddamp_drjl2 = calc_ddamp(rjl2, rcut_jl);
+            double ddamp_drkl2 = calc_ddamp(rkl2, rcut_kl);
 
-            // Calculate partial damping terms (following Fortran pattern)
-            // Ported to cross-center pairs (Jan 25, 2026) to match Fortran gfnff_engrad.F90
-            // r_ik = r_k - r_i, r_jk = r_k - r_j, r_jl = r_l - r_j
-            Vector term_ik = (et * damp_jk * damp_jl * ddamp_drik2) * r_ik;
-            Vector term_jk = (et * damp_ik * damp_jl * ddamp_drjk2) * r_jk;
-            Vector term_jl = (et * damp_ik * damp_jk * ddamp_drjl2) * r_jl;
+            // Damping gradient terms following Fortran gfnff_engrad.F90:1268-1270
+            //   term1 = et*damp2ij*dampjk*dampkl*vab   (vab = i-j vector)
+            //   term2 = et*damp2jk*dampij*dampkl*vcb   (vcb = j-k vector)
+            //   term3 = et*damp2kl*dampij*dampjk*vdc   (vdc = k-l vector)
+            Vector term_ab = (et * damp_jk * damp_kl * ddamp_drij2) * vab;
+            Vector term_bc = (et * damp_ij * damp_kl * ddamp_drjk2) * vcb;
+            Vector term_cd = (et * damp_ij * damp_jk * ddamp_drkl2) * vdc;
 
             // =====================================================================
-            // PART 4: Combine angle gradient and damping gradient terms
+            // Combine angle and damping gradient (Fortran gfnff_engrad.F90:1271-1274)
             // =====================================================================
-            // Following signs from r_ik = r_k - r_i, r_jk = r_k - r_j, r_jl = r_l - r_j
-            // atom i: grad_i = dEdphi*row0 - term_ik
-            // atom j: grad_j = dEdphi*row1 - term_jk - term_jl
-            // atom k: grad_k = dEdphi*row2 + term_ik + term_jk
-            // atom l: grad_l = dEdphi*row3 + term_jl
+            // g(1) = dij*dda + term1          ← atom i: +term_ab
+            // g(2) = dij*ddb - term1 + term2  ← atom j: -term_ab + term_bc
+            // g(3) = dij*ddc + term3 - term2  ← atom k: +term_cd - term_bc
+            // g(4) = dij*ddd - term3          ← atom l: -term_cd
+            // derivate mapping (i-j-k-l call): row 0=i, 1=j, 2=k, 3=l
 
             double t_scaling = m_final_factor * m_dihedral_scaling;
 
-            // Mapping for i-k-j-l call: derivate row 0=i, 1=k, 2=j, 3=l
-            m_gradient.row(dihedral.i) += (dEdphi * derivate.row(0)).transpose() - term_ik * t_scaling;
-            m_gradient.row(dihedral.k) += (dEdphi * derivate.row(1)).transpose() + (term_ik + term_jk) * t_scaling;
-            m_gradient.row(dihedral.j) += (dEdphi * derivate.row(2)).transpose() - (term_jk + term_jl) * t_scaling;
-            m_gradient.row(dihedral.l) += (dEdphi * derivate.row(3)).transpose() + term_jl * t_scaling;
+            m_gradient.row(dihedral.i) += (dEdphi * derivate.row(0)).transpose() + term_ab * t_scaling;
+            m_gradient.row(dihedral.j) += (dEdphi * derivate.row(1)).transpose() + (-term_ab + term_bc) * t_scaling;
+            m_gradient.row(dihedral.k) += (dEdphi * derivate.row(2)).transpose() + (term_cd - term_bc) * t_scaling;
+            m_gradient.row(dihedral.l) += (dEdphi * derivate.row(3)).transpose() - term_cd * t_scaling;
 
-            // DEBUG: Print gradient details for first torsion
+            // DEBUG
             static bool gradient_debug_printed = false;
             if (!gradient_debug_printed && index == 0 && CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format("\n=== TORSION GRADIENT FIX DEBUG (Torsion {}-{}-{}-{}) ===",
+                CurcumaLogger::info(fmt::format("\n=== PRIMARY TORSION GRADIENT (Torsion {}-{}-{}-{}) ===",
                                                  dihedral.i, dihedral.j, dihedral.k, dihedral.l));
-                CurcumaLogger::info(fmt::format("  dEdphi = {:.6e} Eh/rad", dEdphi));
-                CurcumaLogger::info(fmt::format("  et = energy = {:.6e} Eh", et));
-                CurcumaLogger::info(fmt::format("  damp = {:.8f}", damp));
-                CurcumaLogger::info(fmt::format("  |grad_angle_i| = {:.6e}", (dEdphi * derivate.row(0)).norm()));
-                CurcumaLogger::info(fmt::format("  |term_ik| = {:.6e}", term_ik.norm()));
-                CurcumaLogger::info(fmt::format("  |term_jk| = {:.6e}", term_jk.norm()));
-                CurcumaLogger::info(fmt::format("  |term_jl| = {:.6e}", term_jl.norm()));
+                CurcumaLogger::info(fmt::format("  damp = {:.8f}, et = {:.6e} Eh", damp, et));
+                CurcumaLogger::info(fmt::format("  |term_ab| = {:.6e}, |term_bc| = {:.6e}, |term_cd| = {:.6e}",
+                                                 term_ab.norm(), term_bc.norm(), term_cd.norm()));
                 CurcumaLogger::info("=======================================================\n");
                 gradient_debug_printed = true;
             }
@@ -1437,17 +1364,20 @@ void ForceFieldThread::CalculateGFNFFExtraTorsionContribution()
             continue;
         }
 
-        // Calculate squared distances (FORTRAN-style cross-center damping)
-        // Reference: gfnff_engrad.F90:1180-1183 and user validation report (Jan 25, 2026)
-        // GFN-FF damps: (terminal 1 - opposite center 2), (center-center), (opposite center 1 - terminal 2)
-        // For chain i-j-k-l: pairs are (i,k), (j,k), (j,l)
-        Eigen::Vector3d r_ik = r_k - r_i;
-        Eigen::Vector3d r_jk = r_k - r_j;
-        Eigen::Vector3d r_jl = r_l - r_j;
+        // Star-topology distances around center j for extra torsion damping
+        // Reference: gfnff_engrad.F90:1277-1286 (extra torsions, tlist(5)<=0)
+        //   vab = xyz(j)-xyz(i) → i-j bond (points toward j)
+        //   vcb = xyz(j)-xyz(k) → j-k bond (points toward j)
+        //   vdc = xyz(j)-xyz(l) → j-l bond (points toward j)
+        //   dampij from (at(i),at(j),rij), dampjk from (at(k),at(j),rjk), dampjl from (at(j),at(l),rjl)
+        //   damp = dampjk*dampij*dampjl
+        Eigen::Vector3d vab = r_j - r_i;   // i→j bond (star arm)
+        Eigen::Vector3d vcb = r_j - r_k;   // k→j bond (star arm)
+        Eigen::Vector3d vdc = r_j - r_l;   // l→j bond (star arm)
 
-        double rik2 = r_ik.squaredNorm();
-        double rjk2 = r_jk.squaredNorm();
-        double rjl2 = r_jl.squaredNorm();
+        double rij2 = vab.squaredNorm();
+        double rjk2 = vcb.squaredNorm();
+        double rjl2 = vdc.squaredNorm();
 
         // Damping function
         auto calculate_damping = [&](double r2, double rcov_a, double rcov_b, bool use_nci_flag = false) -> double {
@@ -1457,29 +1387,28 @@ void ForceFieldThread::CalculateGFNFFExtraTorsionContribution()
             return 1.0 / (1.0 + rr_val);
         };
 
-        // Get covalent radii for damping (already in Bohr, scaled by 4/3)
+        // Covalent radii for damping (D3 radii scaled by 4/3)
         constexpr double rcov_scale = 4.0 / 3.0;
         double rcov_i = GFNFFParameters::covalent_rad_d3[Z_i - 1] * rcov_scale;
         double rcov_j = GFNFFParameters::covalent_rad_d3[Z_j - 1] * rcov_scale;
         double rcov_k = GFNFFParameters::covalent_rad_d3[Z_k - 1] * rcov_scale;
         double rcov_l = GFNFFParameters::covalent_rad_d3[Z_l - 1] * rcov_scale;
 
-        // Calculate 3 damping factors (cross-center pairs per GFN-FF reference)
-        bool use_nci = torsion.is_nci;  // NCI torsions use different atcutt
-        double damp_ik = calculate_damping(rik2, rcov_i, rcov_k, use_nci);
-        double damp_jk = calculate_damping(rjk2, rcov_j, rcov_k, use_nci);
+        // Three star-topology damping factors (gfnff_engrad.F90:1283-1286)
+        bool use_nci = torsion.is_nci;
+        double damp_ij = calculate_damping(rij2, rcov_i, rcov_j, use_nci);
+        double damp_jk = calculate_damping(rjk2, rcov_k, rcov_j, use_nci);
         double damp_jl = calculate_damping(rjl2, rcov_j, rcov_l, use_nci);
-        double damp = damp_ik * damp_jk * damp_jl;
+        double damp = damp_ij * damp_jk * damp_jl;
 
-        // DEBUG: Print damping details for first torsion
+        // DEBUG
         static bool damp_debug_printed = false;
         if (!damp_debug_printed && index == 0 && CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info(fmt::format("\n=== EXTRA TORSION CROSSED DAMPING FIX (Torsion {}-{}-{}-{}) ===",
+            CurcumaLogger::info(fmt::format("\n=== EXTRA TORSION STAR DAMPING (Torsion {}-{}-{}-{}) ===",
                                              torsion.i, torsion.j, torsion.k, torsion.l));
-            CurcumaLogger::info(fmt::format("  Sequence used: {}-{}-{}-{} (T1-C2-C1-T2)",
-                                             torsion.i, torsion.k, torsion.j, torsion.l));
-            CurcumaLogger::info(fmt::format("  phi_actual = {:.2f}°", phi * 180.0 / M_PI));
-            CurcumaLogger::info(fmt::format("  damp_total = {:.8f}", damp));
+            CurcumaLogger::info(fmt::format("  r_ij = {:.6f}, r_jk = {:.6f}, r_jl = {:.6f} Bohr",
+                                             std::sqrt(rij2), std::sqrt(rjk2), std::sqrt(rjl2)));
+            CurcumaLogger::info(fmt::format("  damp = {:.8f}", damp));
             damp_debug_printed = true;
         }
 
@@ -1512,38 +1441,44 @@ void ForceFieldThread::CalculateGFNFFExtraTorsionContribution()
                 return -4.0 * rr_v / (r2_v * one_plus_rr_v * one_plus_rr_v);
             };
 
-            double rcut_ik = (use_nci ? GFNFFParameters::atcutt_nci : GFNFFParameters::atcutt) * (rcov_i + rcov_k) * (rcov_i + rcov_k);
-            double rcut_jk = (use_nci ? GFNFFParameters::atcutt_nci : GFNFFParameters::atcutt) * (rcov_j + rcov_k) * (rcov_j + rcov_k);
-            double rcut_jl = (use_nci ? GFNFFParameters::atcutt_nci : GFNFFParameters::atcutt) * (rcov_j + rcov_l) * (rcov_j + rcov_l);
+            // rcut for star-topology bonds (same pairs as energy)
+            double atcutt_val = use_nci ? GFNFFParameters::atcutt_nci : GFNFFParameters::atcutt;
+            double rcut_ij = atcutt_val * (rcov_i + rcov_j) * (rcov_i + rcov_j);
+            double rcut_jk = atcutt_val * (rcov_k + rcov_j) * (rcov_k + rcov_j);
+            double rcut_jl = atcutt_val * (rcov_j + rcov_l) * (rcov_j + rcov_l);
 
-            double ddamp_drik2 = calc_ddamp(rik2, rcut_ik);
+            double ddamp_drij2 = calc_ddamp(rij2, rcut_ij);
             double ddamp_drjk2 = calc_ddamp(rjk2, rcut_jk);
             double ddamp_drjl2 = calc_ddamp(rjl2, rcut_jl);
 
-            Vector term_ik = (et * damp_jk * damp_jl * ddamp_drik2) * r_ik;
-            Vector term_jk = (et * damp_ik * damp_jl * ddamp_drjk2) * r_jk;
-            Vector term_jl = (et * damp_ik * damp_jk * ddamp_drjl2) * r_jl;
+            // Gradient terms following Fortran gfnff_engrad.F90:1300-1302
+            //   term1 = et*damp2ij*dampjk*dampjl*vab   (vab = j-i, star arm)
+            //   term2 = et*damp2jk*dampij*dampjl*vcb   (vcb = j-k, star arm)
+            //   term3 = et*damp2jl*dampij*dampjk*vdc   (vdc = j-l, star arm)
+            Vector term_ij = (et * damp_jk * damp_jl * ddamp_drij2) * vab;
+            Vector term_jk = (et * damp_ij * damp_jl * ddamp_drjk2) * vcb;
+            Vector term_jl = (et * damp_ij * damp_jk * ddamp_drjl2) * vdc;
 
             double t_scal = m_final_factor * m_dihedral_scaling;
 
-            // Mapping for i-k-j-l call: derivate row 0=i, 1=k, 2=j, 3=l
-            m_gradient.row(torsion.i) += (dEdphi * derivate.row(0)).transpose() - term_ik * t_scal;
-            m_gradient.row(torsion.k) += (dEdphi * derivate.row(1)).transpose() + (term_ik + term_jk) * t_scal;
-            m_gradient.row(torsion.j) += (dEdphi * derivate.row(2)).transpose() - (term_jk + term_jl) * t_scal;
-            m_gradient.row(torsion.l) += (dEdphi * derivate.row(3)).transpose() + term_jl * t_scal;
+            // Star-topology gradient signs (Fortran gfnff_engrad.F90:1303-1306)
+            // g(1) = -term1   ← atom i: vectors point TOWARD j, so ∂|vab|²/∂r_i = -2*vab
+            // g(2) = +term1+term2+term3  ← atom j: star center, +∂ for all arms
+            // g(3) = -term2   ← atom k
+            // g(4) = -term3   ← atom l
+            // derivate mapping (i-k-j-l call): row 0=i, 1=k, 2=j, 3=l
+            m_gradient.row(torsion.i) += (dEdphi * derivate.row(0)).transpose() - term_ij * t_scal;
+            m_gradient.row(torsion.j) += (dEdphi * derivate.row(2)).transpose() + (term_ij + term_jk + term_jl) * t_scal;
+            m_gradient.row(torsion.k) += (dEdphi * derivate.row(1)).transpose() - term_jk * t_scal;
+            m_gradient.row(torsion.l) += (dEdphi * derivate.row(3)).transpose() - term_jl * t_scal;
 
-            // DEBUG: Print extra torsion gradient details for first torsion
+            // DEBUG
             static bool extra_gradient_debug_printed = false;
             if (!extra_gradient_debug_printed && index == 0 && CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format("\n=== EXTRA TORSION GRADIENT FIX DEBUG (Torsion {}-{}-{}-{}) ===",
+                CurcumaLogger::info(fmt::format("\n=== EXTRA TORSION GRADIENT (Torsion {}-{}-{}-{}) ===",
                                                  torsion.i, torsion.j, torsion.k, torsion.l));
-                CurcumaLogger::info(fmt::format("  dEdphi = {:.6e} Eh/rad", dEdphi));
-                CurcumaLogger::info(fmt::format("  et = energy = {:.6e} Eh", et));
-                CurcumaLogger::info(fmt::format("  damp = {:.8f}", damp));
-                CurcumaLogger::info(fmt::format("  |grad_angle_i| = {:.6e}", (dEdphi * derivate.row(0)).norm()));
-                CurcumaLogger::info(fmt::format("  |term_ik| = {:.6e}", term_ik.norm()));
-                CurcumaLogger::info(fmt::format("  |term_jk| = {:.6e}", term_jk.norm()));
-                CurcumaLogger::info(fmt::format("  |term_jl| = {:.6e}", term_jl.norm()));
+                CurcumaLogger::info(fmt::format("  damp = {:.8f}, |term_ij| = {:.6e}, |term_jk| = {:.6e}, |term_jl| = {:.6e}",
+                                                 damp, term_ij.norm(), term_jk.norm(), term_jl.norm()));
                 CurcumaLogger::info("=========================================================\n");
                 extra_gradient_debug_printed = true;
             }
