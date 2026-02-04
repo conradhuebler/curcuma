@@ -164,3 +164,19 @@ charges
 energy
 gradient
 release2/
+
+# Test output and analysis artifacts
+benzene_test.xyz
+caffeine_*.txt
+curcuma_*.txt
+curcuma_*.json
+curcuma_*.log
+curcuma_*.out
+curcuma_complex_debug.out
+current_*.txt
+current_extra_grad.txt
+d3_reference_energies.json
+dispersion_test_results.csv
+extra_torsion_full.txt
+xtb_*.log
+xtbrestart
