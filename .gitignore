@@ -115,3 +115,25 @@ external/stb_image_write.h
 # global_config.h is auto-generated from global_config.h.in during cmake configuration
 src/global_config.h
 node_modules
+
+# GFN-FF Generated files (topology, charges, adjacency) - Claude Generated Feb 2026
+# These are generated during test runs and should not be committed
+gfnff_topo
+gfnff_charges
+gfnff_adjacency
+gfnff_validate.py
+gfnff_validation_results.json
+gfnff_comparison_results.csv
+*.engrad
+*.trj.t*.xyz
+
+# Debug/Analysis documentation (private investigation files)
+ATM_GRADIENT_BUG.md
+BENZENE_GRADIENT_INVESTIGATION.md
+CHARGE_DATAFLOW.md
+D3_WEIGHT_CACHING_OPTIMIZATION.md
+GFNFF_1E6_ACCURACY_ROADMAP.md
+GFNFF_TORSION_FIXES_PHASE1.md
+GRADIENT_FIX_SUMMARY.md
+PHASE2_VALIDATION_REPORT.md
+TORSION_DEBUGGING_SUMMARY.md
