@@ -137,3 +137,30 @@ GFNFF_TORSION_FIXES_PHASE1.md
 GRADIENT_FIX_SUMMARY.md
 PHASE2_VALIDATION_REPORT.md
 TORSION_DEBUGGING_SUMMARY.md
+docs/GFNFF_ALPHA_PARAMETER_ISSUE.md
+docs/GFNFF_MISSING_FEATURES.md
+docs/VERBOSITY_SYSTEM_ANALYSIS.md
+docs/GFNFF_CH_R0_DEVIATION.md
+docs/EEQ_PHASE2_CNF_FIX.md
+
+# German analysis documentation (private investigation)
+gfnff_coordination_number_exact_source_references.md
+gfnff_goal.md
+gfnff_ladungstypen_analyse.md
+gfnff_subtile_parameter_generierung.md
+
+# Misc test/debug files
+2026-01-21-implement-the-following-plan.txt
+compare_*.py
+compare_*.sh
+*_test.py
+test_*.py
+test_*.cpp
+test_benzene_md.xyz
+test_ch3och3.py
+temp_*.cpp
+wbo
+charges
+energy
+gradient
+release2/
