@@ -270,11 +270,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/ff_methods/forcefieldgenerator.cpp
         src/core/energy_calculators/ff_methods/d3param_generator.cpp
         src/core/energy_calculators/ff_methods/cn_calculator.cpp
-        test_cases/reference_data/d3_reference_cn.cpp
-        test_cases/reference_data/d3_reference_c6.cpp
         src/core/energy_calculators/ff_methods/d4param_generator.cpp
-        test_cases/reference_data/d4_alphaiw_data.cpp
-        test_cases/reference_data/d4_corrections_data.cpp
         src/core/energy_calculators/ff_methods/cg_potentials.cpp
         src/core/curcuma_logger.cpp
         src/tools/formats.h

@@ -8,9 +8,11 @@
 
 #include "d4param_generator.h"
 #include "gfnff_par.h"
-#include "../../../../test_cases/reference_data/d4_reference_data_fixed.cpp"  // D4 reference data (365 lines)
-#include "../../../../test_cases/reference_data/d4_reference_cn_fortran.cpp"  // D4 reference CN data (Fortran dftd3param.f90 - January 2026)
-#include "src/core/curcuma_logger.h"
+#include "d4_reference_data_fixed.cpp"  // D4 reference data (365 lines)
+#include "d4_reference_cn_fortran.cpp"  // D4 reference CN data (Fortran dftd3param.f90 - January 2026)
+#include "d4_alphaiw_data.cpp"  // D4 alphaiw polarizability data
+#include "d4_corrections_data.cpp"  // D4 correction factors
+#include "../../curcuma_logger.h"
 
 #include <algorithm>
 #include <cmath>

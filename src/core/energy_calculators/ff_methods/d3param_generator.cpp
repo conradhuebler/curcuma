@@ -20,7 +20,7 @@
 
 #include "d3param_generator.h"
 #include "cn_calculator.h"
-#include "src/core/curcuma_logger.h"
+#include "../../curcuma_logger.h"
 
 #include <stdexcept>
 #include <cctype>
@@ -31,7 +31,7 @@
 // - test_cases/reference_data/d3_reference_cn.cpp (721 CN values)
 // - test_cases/reference_data/d3_reference_c6.cpp (262,444 C6 values)
 // Include declarations for automatic linking
-#include "../../../test_cases/reference_data/d3_reference_data.h"
+#include "d3_reference_data.h"
 
 #include <algorithm>
 #include <cmath>
