@@ -163,24 +163,6 @@ set_tests_properties(test_gfnff_stepwise PROPERTIES TIMEOUT 60 LABELS "gfnff;val
 # # Not a CTest - manual execution only for debugging
 # # Run from release/test_cases/ directory
 
-# Claude Generated (December 2025): CN Unit Conversion Fix Test
-# Purpose: Quick validation of Angstrom->Bohr conversion for CN calculation
-add_executable(test_cn_fix
-        test_cn_fix.cpp)
-
-target_link_libraries(test_cn_fix curcuma_core test_molecule_registry)
-
-if(USE_PCH)
-        target_precompile_headers(test_cn_fix REUSE_FROM curcuma_core)
-endif()
-
-# Register with CTest
-add_test(NAME test_cn_fix
-         COMMAND test_cn_fix
-         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test_cases)
-
-set_tests_properties(test_cn_fix PROPERTIES TIMEOUT 10 LABELS "gfnff;cn")
-
 # Claude Generated (December 2025): C-O Bond Fix Test
 # Purpose: Validate that CN unit conversion fixes C-O bond distances
 #add_executable(test_cobond_fix
@@ -278,35 +260,6 @@ if(NOT USE_D3 AND NOT USE_D4)
     set_tests_properties(test_dispersion PROPERTIES DISABLED TRUE)
 endif()
 
-# Claude Generated (December 2025): D3 Debug Test
-# Simple test for debugging D3 parameter generation
-add_executable(test_d3_debug
-        test_d3_debug.cpp)
-
-target_link_libraries(test_d3_debug curcuma_core)
-
-if(USE_PCH)
-    target_precompile_headers(test_d3_debug REUSE_FROM curcuma_core)
-endif()
-
-add_test(NAME test_d3_debug
-         COMMAND test_d3_debug
-         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
-
-# Claude Generated (December 2025): D3 Diagnostic Test
-# Compares Curcuma D3 implementation against validated formula
-add_executable(test_d3_diagnostic
-        test_d3_diagnostic.cpp)
-
-target_link_libraries(test_d3_diagnostic curcuma_core)
-
-if(USE_PCH)
-    target_precompile_headers(test_d3_diagnostic REUSE_FROM curcuma_core)
-endif()
-
-add_test(NAME test_d3_diagnostic
-         COMMAND test_d3_diagnostic
-         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
 # Claude Generated (December 2025): GFN-FF D3 Integration Validation Test
 # Verifies that GFN-FF correctly uses the native D3 implementation
