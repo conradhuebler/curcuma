@@ -628,6 +628,8 @@ static inline int detectElementSpecificHybridization(int Z, double cn,
 // ===== Test Function for Element-Specific Hybridization =====
 // Simple test to verify the element-specific hybridization logic
 // Claude Generated - December 2025 (Phase 2 Validation)
+// NOTE: This test function is currently unused but kept for future validation
+// If needed, it can be called with proper verbosity guard in main code
 static void testElementSpecificHybridizationLogic() {
     std::vector<int> dummy_atoms = {0};
     int passed = 0;
@@ -647,33 +649,36 @@ static void testElementSpecificHybridizationLogic() {
         {9, 2.0, 1, "Fluorine CN=2 (should be sp)"}
     };
 
-    std::cout << "\n=== Element-Specific Hybridization Validation ===" << std::endl;
+    // Guarded by verbosity check - disabled by default
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        std::cout << "\n=== Element-Specific Hybridization Validation ===" << std::endl;
 
-    for (const auto& test_case : test_cases) {
-        int Z = std::get<0>(test_case);
-        double cn = std::get<1>(test_case);
-        int expected = std::get<2>(test_case);
-        std::string desc = std::get<3>(test_case);
+        for (const auto& test_case : test_cases) {
+            int Z = std::get<0>(test_case);
+            double cn = std::get<1>(test_case);
+            int expected = std::get<2>(test_case);
+            std::string desc = std::get<3>(test_case);
 
-        int actual = detectElementSpecificHybridization(Z, cn, dummy_atoms, std::nullopt, 0);
+            int actual = detectElementSpecificHybridization(Z, cn, dummy_atoms, std::nullopt, 0);
 
-        if (actual == expected) {
-            std::cout << "✅ " << desc << " → " << actual << " (PASS)" << std::endl;
-            passed++;
-        } else {
-            std::cout << "❌ " << desc << " → " << actual << " (FAIL, expected " << expected << ")" << std::endl;
-            failed++;
+            if (actual == expected) {
+                std::cout << "✅ " << desc << " → " << actual << " (PASS)" << std::endl;
+                passed++;
+            } else {
+                std::cout << "❌ " << desc << " → " << actual << " (FAIL, expected " << expected << ")" << std::endl;
+                failed++;
+            }
         }
-    }
 
-    std::cout << "\n=== Test Results ===" << std::endl;
-    std::cout << "Passed: " << passed << "/" << test_cases.size() << std::endl;
-    std::cout << "Failed: " << failed << "/" << test_cases.size() << std::endl;
+        std::cout << "\n=== Test Results ===" << std::endl;
+        std::cout << "Passed: " << passed << "/" << test_cases.size() << std::endl;
+        std::cout << "Failed: " << failed << "/" << test_cases.size() << std::endl;
 
-    if (failed == 0) {
-        std::cout << "🎉 All element-specific hybridization tests passed!" << std::endl;
-    } else {
-        std::cout << "⚠️  Some tests failed. Review implementation." << std::endl;
+        if (failed == 0) {
+            std::cout << "🎉 All element-specific hybridization tests passed!" << std::endl;
+        } else {
+            std::cout << "⚠️  Some tests failed. Review implementation." << std::endl;
+        }
     }
 }
 
@@ -815,10 +820,6 @@ Vector EEQSolver::calculateCharges(
 
     // PHASE 1: Initial solve for topology charges (qa)
     {
-        // TEMPORARY DEBUG: Force verbosity to 3 for investigation
-        int saved_verbosity = m_verbosity;
-        m_verbosity = 3;
-
         // CRITICAL FIX (Phase 1 Charge Synchronization - January 26, 2026):
         // Reference: XTB gfnff_ini.f90:589 (call goedeckera) and 411 (topo%chieeq)
         // Phase 1 (topological solve) MUST include dxi electronegativity corrections
@@ -838,9 +839,6 @@ Vector EEQSolver::calculateCharges(
         if (m_verbosity >= 1) {
             CurcumaLogger::info("EEQSolver: Phase 1 base solve complete");
         }
-
-        // Restore original verbosity
-        m_verbosity = saved_verbosity;
     }
 
     // PHASE 2: Final energy charges with ALL corrections (matching Fortran reference)
@@ -860,11 +858,13 @@ Vector EEQSolver::calculateCharges(
         std::vector<bool> is_amide = detectAmideNitrogens(atoms, hybridization, is_pi_atom, topology, cn);
         Vector dgam = calculateDgam(atoms, topology_charges, hybridization, is_pi_atom, is_amide);
 
-        // DEBUG: Print correction values
-        std::cout << "\n=== Phase 2: Single Solve WITH corrections (matching Fortran) ===" << std::endl;
-        for (int i = 0; i < std::min(3, natoms); ++i) {
-            std::cout << fmt::format("Atom {} (Z={}): dxi = {:.6f}, dgam = {:.6f}",
-                                    i, atoms[i], dxi(i), dgam(i)) << std::endl;
+        // DEBUG: Print correction values (verbosity 3 only)
+        if (m_verbosity >= 3) {
+            CurcumaLogger::info("Phase 2: Single Solve WITH corrections (matching Fortran)");
+            for (int i = 0; i < std::min(3, natoms); ++i) {
+                CurcumaLogger::info(fmt::format("  Atom {} (Z={}): dxi = {:.6f}, dgam = {:.6f}",
+                                        i, atoms[i], dxi(i), dgam(i)));
+            }
         }
 
         // Build matrix WITH corrections (matching Fortran gfnff_ini.f90:693-707)
