@@ -229,13 +229,14 @@ add_test(NAME test_eeq_two_phase
 # Claude Generated (December 2025): DFT-D3/D4 Dispersion Energy Test Suite
 # Tests dispersion corrections with various functionals and parameter combinations
 
-# Copy test molecules to build directory
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/validation/benzene.xyz
-          ${CMAKE_CURRENT_SOURCE_DIR}/validation/ethene.xyz
-          ${CMAKE_CURRENT_SOURCE_DIR}/validation/butane.xyz
-          ${CMAKE_CURRENT_SOURCE_DIR}/validation/HCl.xyz
-          ${CMAKE_CURRENT_SOURCE_DIR}/validation/OH.xyz
-     DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/test_cases/validation/)
+# Copy test molecules to build directory (only versioned files)
+# Note: HCl.xyz, OH.xyz are not in git, use available validation files
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/validation/benzene.xyz)
+    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/validation/benzene.xyz
+              ${CMAKE_CURRENT_SOURCE_DIR}/validation/ethene.xyz
+              ${CMAKE_CURRENT_SOURCE_DIR}/validation/butane.xyz
+         DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/test_cases/validation/)
+endif()
 
 # Create test executable
 add_executable(test_dispersion
