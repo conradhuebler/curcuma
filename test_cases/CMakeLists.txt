@@ -90,7 +90,6 @@ endif()
 # Claude Generated: Unified GFN-FF Test Suite
 # Combines regression, parameter, and comprehensive validation tests (Dec 2025)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/molecules/dimers/HH.xyz
-          ${CMAKE_CURRENT_SOURCE_DIR}/molecules/dimers/HH.opt.xyz
           ${CMAKE_CURRENT_SOURCE_DIR}/molecules/dimers/OH.xyz
           ${CMAKE_CURRENT_SOURCE_DIR}/molecules/dimers/HCl.xyz
           DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/molecules/dimers/)
@@ -102,8 +101,6 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/CH4.xyz
           ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/CH3OCH3.xyz
           ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/CH3OH.xyz
           ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/C6H6.xyz
-          ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/monosaccharide.xyz
-          ${CMAKE_CURRENT_SOURCE_DIR}/molecules/larger/CH3OCH3.log
           DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/molecules/larger/)
 
 add_executable(test_gfnff_unified
@@ -233,8 +230,7 @@ add_test(NAME test_eeq_two_phase
 # Tests dispersion corrections with various functionals and parameter combinations
 
 # Copy test molecules to build directory
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/validation/HH.xyz
-          ${CMAKE_CURRENT_SOURCE_DIR}/validation/benzene.xyz
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/validation/benzene.xyz
           ${CMAKE_CURRENT_SOURCE_DIR}/validation/ethene.xyz
           ${CMAKE_CURRENT_SOURCE_DIR}/validation/butane.xyz
           ${CMAKE_CURRENT_SOURCE_DIR}/validation/HCl.xyz
