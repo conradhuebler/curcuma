@@ -2063,11 +2063,6 @@ double ForceField::Calculate(bool gradient)
     // Level 1+: Final energy result
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::energy_abs(energy, "Force Field Energy");
-
-        // GFN-FF Coulomb energy (always show for validation)
-        if (m_coulomb_energy != 0.0) {
-            std::cout << fmt::format("  → Coulomb: {:.12f} Eh", m_coulomb_energy) << std::endl;
-        }
     }
 
     // Level 2+: Energy decomposition
