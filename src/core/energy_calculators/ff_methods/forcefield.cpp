@@ -200,10 +200,6 @@ void ForceField::setParameter(const json& parameters)
         CurcumaLogger::param("method", method_name);
     }
 
-    for (auto it = parameters.begin(); it != parameters.end(); ++it) {
-        CurcumaLogger::error(fmt::format("DEBUG setParameter: Key '{}'", it.key()));
-    }
-
     if (!loaded_from_cache) {
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("Cache miss - generating new force field parameters");
@@ -876,7 +872,6 @@ void ForceField::setGFNFFHydrogenBonds(const json& hbonds)
     }
 
     m_gfnff_hbonds.clear();
-    CurcumaLogger::error(fmt::format("DEBUG setGFNFFHydrogenBonds: count={}", hbonds.size()));
     for (const auto& hb : hbonds) {
         GFNFFHydrogenBond bond;
 

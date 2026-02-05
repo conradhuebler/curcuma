@@ -332,7 +332,6 @@ void ForceFieldThread::assignAtomsForSelfEnergy(const std::vector<int>& atom_ind
 
 void ForceFieldThread::addGFNFFHydrogenBond(const GFNFFHydrogenBond& hbond)
 {
-    CurcumaLogger::error(fmt::format("Thread {} DEBUG addGFNFFHydrogenBond: A={} H={} B={}", m_thread, hbond.i, hbond.j, hbond.k));
     m_gfnff_hbonds.push_back(hbond);
 }
 

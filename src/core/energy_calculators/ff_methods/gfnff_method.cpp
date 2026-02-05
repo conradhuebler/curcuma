@@ -4353,11 +4353,6 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
                 if (case_type == 3) hb["acceptor_parent"] = acceptor_parent;
 
                 hbonds.push_back(hb);
-
-                CurcumaLogger::error(fmt::format(
-                    "DEBUG: HB detected: A={} ({}) H={} B={} ({}) r_AB={:.3f} Bohr, Case={}",
-                    A, Elements::ElementAbbr[m_atoms[A]], H, B,
-                    Elements::ElementAbbr[m_atoms[B]], std::sqrt(r_AB_sq), case_type));
             }
         }
     }
