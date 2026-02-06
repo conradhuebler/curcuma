@@ -28,6 +28,7 @@
 #include "src/core/energy_calculators/ff_methods/d3param_generator.h"
 #include "src/core/energy_calculators/ff_methods/d4param_generator.h"
 #include "src/core/energy_calculators/ff_methods/cn_calculator.h"
+#include "src/core/energy_calculators/ff_methods/param_generator_thread.h"  // Claude Generated (Feb 2026): Parallel parameter generation
 #include "src/core/config_manager.h"
 #include <cmath>
 #include <fstream>
@@ -690,49 +691,115 @@ json GFNFF::generateGFNFFParameters()
         // Torsions need m_charges for fqq correction factor
         m_charges = topo_info.eeq_charges;
 
-        // Generate advanced parameters
+        // Phase 1A: Bonds (sequential - prerequisite for all other phases)
         // CRITICAL FIX (Claude Generated Jan 15, 2026): Pass full topo_info to include pi_bond_orders!
         json bonds = generateTopologyAwareBonds(topo_info);
-        json angles = generateTopologyAwareAngles(topo_info.coordination_numbers,
-            topo_info.hybridization,
-            topo_info.eeq_charges,
-            topo_info.ring_sizes);
-
         parameters["bonds"] = bonds;
-        parameters["angles"] = angles;
-        parameters["dihedrals"] = generateGFNFFTorsions(); // ✅ Phase 1.1 implemented
-        parameters["inversions"] = generateGFNFFInversions(); // ✅ Phase 1.2 implemented
+
+        // Claude Generated (Feb 2026): Parallel parameter generation
+        // After bonds, 6 phases are independent and can run in parallel:
+        //   angles, torsions, inversions, coulomb, repulsion, dispersion
+        int thread_count = m_parameters.value("threads", 1);
+
+        if (thread_count > 1) {
+            // Parallel path: use CxxThreadPool for inter-phase parallelism
+            auto parallel_start = std::chrono::high_resolution_clock::now();
+
+            CxxThreadPool pool;
+            pool.setProgressBar(CxxThreadPool::ProgressBarType::None);
+            pool.setActiveThreadCount(std::min(thread_count, 6));  // Max 6 independent phases
+
+            // Create one thread per independent generation phase
+            auto* t_angles = new ParameterGeneratorThread("angles", [this, &topo_info]() {
+                return generateTopologyAwareAngles(topo_info.coordination_numbers,
+                    topo_info.hybridization, topo_info.eeq_charges, topo_info.ring_sizes);
+            });
+            auto* t_torsions = new ParameterGeneratorThread("torsions", [this]() {
+                return generateGFNFFTorsions();
+            });
+            auto* t_inversions = new ParameterGeneratorThread("inversions", [this]() {
+                return generateGFNFFInversions();
+            });
+            auto* t_coulomb = new ParameterGeneratorThread("coulomb", [this]() {
+                return generateGFNFFCoulombPairs();
+            });
+            auto* t_repulsion = new ParameterGeneratorThread("repulsion", [this]() {
+                return generateGFNFFRepulsionPairs();
+            });
+            auto* t_dispersion = new ParameterGeneratorThread("dispersion", [this]() {
+                return generateGFNFFDispersionPairs();
+            });
+
+            pool.addThread(t_angles);
+            pool.addThread(t_torsions);
+            pool.addThread(t_inversions);
+            pool.addThread(t_coulomb);
+            pool.addThread(t_repulsion);
+            pool.addThread(t_dispersion);
+
+            pool.StartAndWait();
+
+            // Collect results from threads
+            parameters["angles"] = t_angles->getResult();
+            parameters["dihedrals"] = t_torsions->getResult();
+            parameters["inversions"] = t_inversions->getResult();
+            parameters["gfnff_coulombs"] = t_coulomb->getResult();
+
+            json repulsion_data = t_repulsion->getResult();
+            parameters["gfnff_bonded_repulsions"] = repulsion_data["bonded"];
+            parameters["gfnff_nonbonded_repulsions"] = repulsion_data["nonbonded"];
+
+            json dispersions = t_dispersion->getResult();
+
+            // Per-phase timing at verbosity >= 2
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                auto parallel_end = std::chrono::high_resolution_clock::now();
+                auto parallel_ms = std::chrono::duration_cast<std::chrono::milliseconds>(parallel_end - parallel_start);
+                CurcumaLogger::result_fmt("  Parallel phases ({} threads): {} ms", std::min(thread_count, 6), parallel_ms.count());
+                CurcumaLogger::param("    angles", fmt::format("{} ms", t_angles->getExecutionTime()));
+                CurcumaLogger::param("    torsions", fmt::format("{} ms", t_torsions->getExecutionTime()));
+                CurcumaLogger::param("    inversions", fmt::format("{} ms", t_inversions->getExecutionTime()));
+                CurcumaLogger::param("    coulomb", fmt::format("{} ms", t_coulomb->getExecutionTime()));
+                CurcumaLogger::param("    repulsion", fmt::format("{} ms", t_repulsion->getExecutionTime()));
+                CurcumaLogger::param("    dispersion", fmt::format("{} ms", t_dispersion->getExecutionTime()));
+            }
+
+            // Threads cleaned up by CxxThreadPool destructor (AutoDelete=true)
+
+            // Route dispersion to correct parameter key
+            if (dispersions.size() > 0 && dispersions[0].contains("dispersion_method") &&
+                dispersions[0]["dispersion_method"] == "d4") {
+                parameters["d4_dispersion_pairs"] = dispersions;
+            } else {
+                parameters["gfnff_dispersions"] = dispersions;
+            }
+
+        } else {
+            // Sequential path: single-threaded (no ThreadPool overhead)
+            parameters["angles"] = generateTopologyAwareAngles(topo_info.coordination_numbers,
+                topo_info.hybridization, topo_info.eeq_charges, topo_info.ring_sizes);
+            parameters["dihedrals"] = generateGFNFFTorsions();
+            parameters["inversions"] = generateGFNFFInversions();
+            parameters["gfnff_coulombs"] = generateGFNFFCoulombPairs();
+
+            json repulsion_data = generateGFNFFRepulsionPairs();
+            parameters["gfnff_bonded_repulsions"] = repulsion_data["bonded"];
+            parameters["gfnff_nonbonded_repulsions"] = repulsion_data["nonbonded"];
+
+            json dispersions = generateGFNFFDispersionPairs();
+            if (dispersions.size() > 0 && dispersions[0].contains("dispersion_method") &&
+                dispersions[0]["dispersion_method"] == "d4") {
+                parameters["d4_dispersion_pairs"] = dispersions;
+            } else {
+                parameters["gfnff_dispersions"] = dispersions;
+            }
+        }
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info(fmt::format("DEBUG: generateGFNFFParameters returning {} bonds", parameters["bonds"].size()));
         }
 
-        // Phase 4.2: Generate pairwise non-bonded parameters
-        parameters["gfnff_coulombs"] = generateGFNFFCoulombPairs();
-        json repulsion_data = generateGFNFFRepulsionPairs();
-        parameters["gfnff_bonded_repulsions"] = repulsion_data["bonded"];
-        parameters["gfnff_nonbonded_repulsions"] = repulsion_data["nonbonded"];
-        json dispersions = generateGFNFFDispersionPairs();
-
-        // Claude Generated - Dec 25, 2025: Store D4 as "d4_dispersion_pairs" to route to CalculateD4DispersionContribution()
-        // Check what type of dispersion was generated (D4 or D3 or fallback)
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param("dispersions.size() ", static_cast<int>(dispersions.size()));
-            if (dispersions.size() > 0) {
-                CurcumaLogger::param("dispersions[0] contains dispersion_method", dispersions[0].contains("dispersion_method"));
-                if (dispersions[0].contains("dispersion_method"))
-                    CurcumaLogger::param("dispersions[0][dispersion_method]", std::string(dispersions[0]["dispersion_method"]));
-            }
-        }
-
-        if (dispersions.size() > 0 && dispersions[0].contains("dispersion_method") &&
-            dispersions[0]["dispersion_method"] == "d4") {
-            parameters["d4_dispersion_pairs"] = dispersions;  // Native D4 charge-weighted C6
-        } else {
-            parameters["gfnff_dispersions"] = dispersions;  // Native GFN-FF or D3 fallback
-        }
-
-        // Add ATM triples if generated from D3/D4 (Claude Generated Jan 2025)
+        // Add ATM triples if generated from D3/D4 (set by generateGFNFFDispersionPairs)
         if (!m_atm_triples.is_null() && m_atm_triples.is_array() && !m_atm_triples.empty()) {
             parameters["atm_triples"] = m_atm_triples;
             if (CurcumaLogger::get_verbosity() >= 2) {
