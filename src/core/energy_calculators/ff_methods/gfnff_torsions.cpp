@@ -53,6 +53,7 @@
 #include <array>
 #include <set>
 #include <map>
+#include <chrono>  // Claude Generated (February 2026): For torsion generation timing
 
 using namespace GFNFFParameters;
 
@@ -1500,6 +1501,9 @@ void GFNFF::calculateDihedralGradient(
  */
 json GFNFF::generateGFNFFTorsions() const
 {
+    // Claude Generated (February 2026): Timing for parameter generation breakdown
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     const TopologyInfo& topo = getCachedTopology();
     json torsions = json::array();
 
@@ -2320,6 +2324,13 @@ json GFNFF::generateGFNFFTorsions() const
     //
     // **Impact**: Energy differences of 1-3 kcal/mol compared to full GFN-FF
     // for complex molecules with rings/conjugation. Acceptable for Phase 1.
+
+    // Claude Generated (February 2026): Report timing at verbosity 1+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::result_fmt("GFN-FF torsion generation: {} ms", duration.count());
+    }
 
     return torsions;
 }

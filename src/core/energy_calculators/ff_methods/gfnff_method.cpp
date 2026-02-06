@@ -313,6 +313,9 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
 
 double GFNFF::Calculation(bool gradient)
 {
+    // Claude Generated (February 2026): Start total calculation timer for verbosity 1+
+    auto calc_start = std::chrono::high_resolution_clock::now();
+
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("=== GFNFF::Calculation() START ===");
         CurcumaLogger::param("gradient_requested", gradient ? "true" : "false");
@@ -403,6 +406,14 @@ double GFNFF::Calculation(bool gradient)
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::energy_abs(m_energy_total, "GFN-FF Energy");
         CurcumaLogger::param("energy_hartree", fmt::format("{:.10f}", energy_hartree));
+    }
+
+    // Claude Generated (February 2026): Total GFN-FF calculation timing at verbosity 1+
+    auto calc_end = std::chrono::high_resolution_clock::now();
+    auto calc_duration = std::chrono::duration_cast<std::chrono::milliseconds>(calc_end - calc_start);
+
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::result_fmt("GFN-FF total calculation time: {} ms", calc_duration.count());
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -3959,6 +3970,9 @@ double GFNFF::calculateEEQEnergy(const Vector& charges, const Vector& cn) const
 // OVERLOAD 1: New signature (Claude Generated Jan 15, 2026) - accepts full TopologyInfo with pi_bond_orders
 json GFNFF::generateTopologyAwareBonds(const TopologyInfo& topo_info) const
 {
+    // Claude Generated (February 2026): Timing for parameter generation breakdown
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     json bonds = json::array();
 
     // Phase 2: Topology-aware bond parameter generation
@@ -4011,6 +4025,13 @@ json GFNFF::generateTopologyAwareBonds(const TopologyInfo& topo_info) const
         }
     }
 
+    // Claude Generated (February 2026): Report timing at verbosity 1+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::result_fmt("GFN-FF topology-aware bond generation: {} ms", duration.count());
+    }
+
     return bonds;
 }
 
@@ -4033,6 +4054,9 @@ json GFNFF::generateTopologyAwareBonds(const Vector& cn, const std::vector<int>&
 json GFNFF::generateTopologyAwareAngles(const Vector& cn, const std::vector<int>& hyb,
     const Vector& charges, const std::vector<int>& rings) const
 {
+    // Claude Generated (February 2026): Timing for parameter generation breakdown
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     json angles = json::array();
 
     // Phase 2: Topology-aware angle parameter generation
@@ -4163,11 +4187,21 @@ json GFNFF::generateTopologyAwareAngles(const Vector& cn, const std::vector<int>
         }
     }
 
+    // Claude Generated (February 2026): Report timing at verbosity 1+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::result_fmt("GFN-FF topology-aware angle generation: {} ms", duration.count());
+    }
+
     return angles;
 }
 
 json GFNFF::detectHydrogenBonds(const Vector& charges) const
 {
+    // Claude Generated (February 2026): Timing for parameter generation breakdown
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     using namespace GFNFFParameters;
 
     json hbonds = json::array();
@@ -4369,11 +4403,21 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
         CurcumaLogger::info(fmt::format("Detected {} hydrogen bonds", hbonds.size()));
     }
 
+    // Claude Generated (February 2026): Report timing at verbosity 1+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::result_fmt("GFN-FF hydrogen bond detection: {} ms", duration.count());
+    }
+
     return hbonds;
 }
 
 json GFNFF::detectHalogenBonds(const Vector& charges) const
 {
+    // Claude Generated (February 2026): Timing for parameter generation breakdown
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     using namespace GFNFFParameters;
 
     json xbonds = json::array();
@@ -4541,6 +4585,13 @@ json GFNFF::detectHalogenBonds(const Vector& charges) const
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info(fmt::format("Detected {} halogen bonds", xbonds.size()));
+    }
+
+    // Claude Generated (February 2026): Report timing at verbosity 1+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::result_fmt("GFN-FF halogen bond detection: {} ms", duration.count());
     }
 
     return xbonds;
@@ -6041,6 +6092,22 @@ double GFNFF::D4Energy() const {
 double GFNFF::BatmEnergy() const {
     if (!m_forcefield) return 0.0;
     return m_forcefield->BatmEnergy();
+}
+
+// Claude Generated (Dec 2025): H-bond, X-bond, and ATM energy accessors via ForceField
+double GFNFF::HydrogenBondEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->HydrogenBondEnergy();
+}
+
+double GFNFF::HalogenBondEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->HalogenBondEnergy();
+}
+
+double GFNFF::ATMEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->ATMEnergy();
 }
 
 // =================================================================================

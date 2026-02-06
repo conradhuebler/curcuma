@@ -60,6 +60,7 @@
 
 #include "src/core/curcuma_logger.h"  // For logging
 #include <cmath>                       // For sin, cos, asin, etc.
+#include <chrono>                      // Claude Generated (February 2026): For inversion generation timing
 
 using json = nlohmann::json;
 
@@ -746,6 +747,9 @@ GFNFF::GFNFFInversionParams GFNFF::getGFNFFInversionParameters(
  */
 json GFNFF::generateGFNFFInversions() const
 {
+    // Claude Generated (February 2026): Timing for parameter generation breakdown
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     json inversions = json::array();
 
     // ==========================================================================
@@ -894,6 +898,13 @@ json GFNFF::generateGFNFFInversions() const
     //
     // **Impact**: Energy differences of 0.5-2 kcal/mol for aromatic/conjugated
     // systems. Simple sp² centers (ethene, formaldehyde) should be accurate.
+
+    // Claude Generated (February 2026): Report timing at verbosity 1+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::result_fmt("GFN-FF inversion generation: {} ms", duration.count());
+    }
 
     return inversions;
 }

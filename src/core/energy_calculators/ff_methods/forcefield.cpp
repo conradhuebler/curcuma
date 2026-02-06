@@ -27,6 +27,8 @@
 #include "cg_potentials.h"
 #include "forcefieldfunctions.h"
 
+#include <chrono>  // Claude Generated (February 2026): For energy calculation timing
+#include <unordered_map>  // Claude Generated (February 2026): For term timing aggregation
 #include <fmt/core.h>
 #include <fmt/format.h>
 
@@ -1856,6 +1858,9 @@ double ForceField::Calculate(bool gradient)
         return 0.0;
     }
 
+    // Claude Generated (February 2026): Start energy calculation timer for verbosity 1+
+    auto energy_calc_start = std::chrono::high_resolution_clock::now();
+
     // Level 3+: Calculation debug info
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Starting force field calculation");
@@ -1934,7 +1939,17 @@ double ForceField::Calculate(bool gradient)
     }
     // m_threadpool->setWakeUp(m_threadpool->WakeUp() / 2);
 
+    // Claude Generated (February 2026): Accumulate individual term timings from all threads
+    std::unordered_map<std::string, long long> total_term_timings;
+
     for (int i = 0; i < m_stored_threads.size(); ++i) {
+        // Accumulate timing data
+        const auto& thread_timings = m_stored_threads[i]->getTermTimings();
+        for (const auto& [term, time] : thread_timings) {
+            total_term_timings[term] += time;
+        }
+
+        // Original energy accumulation continues below
         m_bond_energy += m_stored_threads[i]->BondEnergy();
         m_angle_energy += m_stored_threads[i]->AngleEnergy();
         m_dihedral_energy += m_stored_threads[i]->DihedralEnergy();
@@ -2060,6 +2075,16 @@ double ForceField::Calculate(bool gradient)
             m_e0 + m_bond_energy + m_angle_energy + m_dihedral_energy + m_inversion_energy + m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + m_gfnff_repulsion + cg_energy));  // Claude Generated (Dec 2025): GFN-FF repulsion
     }
 
+    // Claude Generated (February 2026): Energy calculation timing at verbosity 1+
+    auto energy_calc_end = std::chrono::high_resolution_clock::now();
+    auto energy_calc_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+        energy_calc_end - energy_calc_start);
+
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::result_fmt("Force Field energy calculation: {} ms",
+                                  energy_calc_duration.count());
+    }
+
     // Level 1+: Final energy result
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::energy_abs(energy, "Force Field Energy");
@@ -2140,6 +2165,49 @@ double ForceField::Calculate(bool gradient)
         if (cg_energy != 0.0) {
             CurcumaLogger::result("  Coarse-Grained:");
             CurcumaLogger::result(fmt::format("    CG interact: {:>10.6f} Eh", cg_energy));
+        }
+
+        // Claude Generated (February 2026): Individual energy term timing breakdown at verbosity 1
+        if (!total_term_timings.empty()) {
+            CurcumaLogger::info("\nEnergy Calculation Timing Breakdown:");
+
+            // Bonded terms
+            if (total_term_timings.count("bonds"))
+                CurcumaLogger::result_fmt("  bonds:              {} ms", total_term_timings["bonds"]);
+            if (total_term_timings.count("angles"))
+                CurcumaLogger::result_fmt("  angles:             {} ms", total_term_timings["angles"]);
+            if (total_term_timings.count("torsions"))
+                CurcumaLogger::result_fmt("  torsions:           {} ms", total_term_timings["torsions"]);
+            if (total_term_timings.count("extra_torsions"))
+                CurcumaLogger::result_fmt("  extra_torsions:     {} ms", total_term_timings["extra_torsions"]);
+            if (total_term_timings.count("inversions"))
+                CurcumaLogger::result_fmt("  inversions:         {} ms", total_term_timings["inversions"]);
+
+            // Non-bonded terms
+            if (total_term_timings.count("dispersion"))
+                CurcumaLogger::result_fmt("  dispersion:         {} ms", total_term_timings["dispersion"]);
+            if (total_term_timings.count("bonded_repulsion"))
+                CurcumaLogger::result_fmt("  bonded_repulsion:   {} ms", total_term_timings["bonded_repulsion"]);
+            if (total_term_timings.count("nonbonded_repulsion"))
+                CurcumaLogger::result_fmt("  nonbonded_repulsion: {} ms", total_term_timings["nonbonded_repulsion"]);
+            if (total_term_timings.count("coulomb"))
+                CurcumaLogger::result_fmt("  coulomb:            {} ms", total_term_timings["coulomb"]);
+
+            // Non-covalent interactions
+            if (total_term_timings.count("hydrogen_bonds"))
+                CurcumaLogger::result_fmt("  hydrogen_bonds:     {} ms", total_term_timings["hydrogen_bonds"]);
+            if (total_term_timings.count("halogen_bonds"))
+                CurcumaLogger::result_fmt("  halogen_bonds:      {} ms", total_term_timings["halogen_bonds"]);
+
+            // Dispersion corrections
+            if (total_term_timings.count("d3_dispersion"))
+                CurcumaLogger::result_fmt("  d3_dispersion:      {} ms", total_term_timings["d3_dispersion"]);
+            if (total_term_timings.count("d4_dispersion"))
+                CurcumaLogger::result_fmt("  d4_dispersion:      {} ms", total_term_timings["d4_dispersion"]);
+            if (total_term_timings.count("atm_dispersion"))
+                CurcumaLogger::result_fmt("  atm_dispersion:     {} ms", total_term_timings["atm_dispersion"]);
+            if (total_term_timings.count("batm"))
+                CurcumaLogger::result_fmt("  batm:               {} ms", total_term_timings["batm"]);
         }
 
         // Gradient information

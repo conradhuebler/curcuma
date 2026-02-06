@@ -40,6 +40,8 @@
 #include <functional>
 #include <set>
 #include <vector>
+#include <unordered_map>  // Claude Generated (February 2026): For term timing storage
+#include <chrono>         // Claude Generated (February 2026): For timing measurements
 
 #include <Eigen/Dense>
 
@@ -458,6 +460,11 @@ public:
     // Claude Generated (December 2025): ATM three-body dispersion energy
     double ATMEnergy() { return m_atm_energy; }
 
+    // Claude Generated (February 2026): Accessor for individual term timings
+    inline const std::unordered_map<std::string, long long>& getTermTimings() const {
+        return m_term_timings;
+    }
+
     // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
     double BatmEnergy() { return m_batm_energy; }
 
@@ -596,6 +603,19 @@ protected:
     Vector m_cn;                              // Coordination numbers per atom
     Vector m_cnf;                             // CNF parameters per atom (cnf_eeq from gfnff_par.h)
     std::vector<Matrix> m_dcn;                // CN derivatives: dcn[dim](i,j) = dCN(j)/dr(i,dim)
+
+    // Claude Generated (February 2026): Individual energy term timing
+    std::unordered_map<std::string, long long> m_term_timings;  // milliseconds
+
+    // Claude Generated (February 2026): Helper to time energy term calculation
+    template<typename Func>
+    void timeEnergyTerm(const std::string& term_name, Func calculation) {
+        auto start = std::chrono::high_resolution_clock::now();
+        calculation();
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+        m_term_timings[term_name] = duration.count();
+    }
 
     // Phase 1.2: Cached bonded pairs for fast lookup in repulsion calculation (Claude Generated - Dec 2025)
     // Built once in execute() to avoid O(N_bonds × log(N_bonds)) overhead per energy call

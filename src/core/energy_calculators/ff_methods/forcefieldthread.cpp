@@ -112,29 +112,30 @@ int ForceFieldThread::execute()
             }
         }
 
+        // Claude Generated (February 2026): Wrap all energy term calculations with timing
         // GFN-FF bonded terms
-        CalculateGFNFFBondContribution();  // Phase 4a: ENABLED for gradient validation
-        CalculateGFNFFAngleContribution();  // Phase 4b: ENABLED for gradient validation
-        CalculateGFNFFDihedralContribution();  // ENABLED (Feb 2026): Required for MD stability
-        CalculateGFNFFExtraTorsionContribution();  // Claude Generated (Jan 2, 2026): Extra sp3-sp3 gauche torsions - ENABLED for MD
-        CalculateGFNFFInversionContribution();  // ENABLED (Feb 2026): Required for planar group stability
+        timeEnergyTerm("bonds", [this]() { CalculateGFNFFBondContribution(); });
+        timeEnergyTerm("angles", [this]() { CalculateGFNFFAngleContribution(); });
+        timeEnergyTerm("torsions", [this]() { CalculateGFNFFDihedralContribution(); });
+        timeEnergyTerm("extra_torsions", [this]() { CalculateGFNFFExtraTorsionContribution(); });
+        timeEnergyTerm("inversions", [this]() { CalculateGFNFFInversionContribution(); });
 
         // GFN-FF non-bonded pairwise parallelizable terms (Phase 4)
         if (m_dispersion_enabled) {
-            CalculateGFNFFDispersionContribution();  // D3/D4 dispersion - Phase 4: ENABLED
+            timeEnergyTerm("dispersion", [this]() { CalculateGFNFFDispersionContribution(); });
         }
         if (m_repulsion_enabled) {
-            CalculateGFNFFBondedRepulsionContribution();  // Phase 4: ENABLED
-            CalculateGFNFFNonbondedRepulsionContribution();
+            timeEnergyTerm("bonded_repulsion", [this]() { CalculateGFNFFBondedRepulsionContribution(); });
+            timeEnergyTerm("nonbonded_repulsion", [this]() { CalculateGFNFFNonbondedRepulsionContribution(); });
         }
         if (m_coulomb_enabled) {
-            CalculateGFNFFCoulombContribution();     // EEQ Coulomb electrostatics - ENABLED with full gradients (Feb 2026)
+            timeEnergyTerm("coulomb", [this]() { CalculateGFNFFCoulombContribution(); });
         }
 
         // GFN-FF hydrogen bond and halogen bond terms (Phase 5)
         if (m_hbond_enabled) {
-            CalculateGFNFFHydrogenBondContribution();  // HB three-body terms
-            CalculateGFNFFHalogenBondContribution();   // XB three-body terms
+            timeEnergyTerm("hydrogen_bonds", [this]() { CalculateGFNFFHydrogenBondContribution(); });
+            timeEnergyTerm("halogen_bonds", [this]() { CalculateGFNFFHalogenBondContribution(); });
         }
 
         // Claude Generated (December 19, 2025): Native D3/D4 dispersion calculation for GFN-FF
@@ -144,14 +145,14 @@ int ForceFieldThread::execute()
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} D3 dispersion pairs", m_thread, m_d3_dispersions.size()));
             }
-            CalculateD3DispersionContribution();
+            timeEnergyTerm("d3_dispersion", [this]() { CalculateD3DispersionContribution(); });
         }
 
         if (m_d4_dispersions.size() > 0) {
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} D4 dispersion pairs", m_thread, m_d4_dispersions.size()));
             }
-            CalculateD4DispersionContribution();  // Claude Generated - Dec 25, 2025: Native D4 energy calculation
+            timeEnergyTerm("d4_dispersion", [this]() { CalculateD4DispersionContribution(); });
         }
 
         // ATM three-body dispersion (D3/D4)
@@ -159,12 +160,13 @@ int ForceFieldThread::execute()
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} ATM triples", m_thread, m_atm_triples.size()));
             }
-            CalculateATMContribution();
-
-            // Claude Generated (2025): Calculate analytical ATM gradients
-            if (m_calculate_gradient) {
-                CalculateATMGradient();
-            }
+            timeEnergyTerm("atm_dispersion", [this]() {
+                CalculateATMContribution();
+                // Claude Generated (2025): Calculate analytical ATM gradients
+                if (m_calculate_gradient) {
+                    CalculateATMGradient();
+                }
+            });
         }
 
         // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
@@ -173,7 +175,7 @@ int ForceFieldThread::execute()
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} batm triples", m_thread, m_gfnff_batms.size()));
             }
-            CalculateGFNFFBatmContribution();
+            timeEnergyTerm("batm", [this]() { CalculateGFNFFBatmContribution(); });
         }
 
         if (CurcumaLogger::get_verbosity() >= 1) {
