@@ -692,7 +692,7 @@ json GFNFF::generateGFNFFParameters()
         parameters["dihedrals"] = generateGFNFFTorsions(); // ✅ Phase 1.1 implemented
         parameters["inversions"] = generateGFNFFInversions(); // ✅ Phase 1.2 implemented
 
-        if (CurcumaLogger::get_verbosity() >= 2) {
+        if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info(fmt::format("DEBUG: generateGFNFFParameters returning {} bonds", parameters["bonds"].size()));
         }
 
@@ -1851,7 +1851,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 
             // DEBUG: Show pibo values for first few bonds with pi-character
             static int debug_count = 0;
-            if (debug_count < 5 && CurcumaLogger::get_verbosity() >= 1 && pibo > 1e-6) {
+            if (debug_count < 5 && CurcumaLogger::get_verbosity() >= 3 && pibo > 1e-6) {
                 debug_count++;
                 CurcumaLogger::info(fmt::format("  Bond {}-{}: lin({},{}) = {}, pibo = {:.6f}",
                     atom1, atom2, atom1, atom2, pibo_idx, pibo));
@@ -2275,7 +2275,7 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     const double threshold_cn_squared = 40.0 * 40.0;  // ~40 Bohr cutoff (standard GFN-FF)
 
     // DEBUG: Before CNCalculator (Claude Generated Dec 31, 2025)
-    if (atom_j == 5 && CurcumaLogger::get_verbosity() >= 2) {
+    if (atom_j == 5 && CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("About to call CNCalculator...");
     }
 
@@ -2284,7 +2284,7 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     Vector coord_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
 
     // DEBUG: After CNCalculator (Claude Generated Dec 31, 2025)
-    if (atom_j == 5 && CurcumaLogger::get_verbosity() >= 2) {
+    if (atom_j == 5 && CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("CNCalculator returned successfully");
     }
 
@@ -2664,7 +2664,7 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     // Reference: adjacency_list is populated in calculateTopologyInfo() from bond list
 
     // DEBUG: Check if adjacency_list is populated (Dec 31, 2025)
-    if (atom_j == 5 && CurcumaLogger::get_verbosity() >= 2) {
+    if (atom_j == 5 && CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info(fmt::format("topo_info.adjacency_list.size() = {}",
                      topo_info.adjacency_list.size()));
         if (!topo_info.adjacency_list.empty() && atom_j < topo_info.adjacency_list.size()) {
@@ -5056,8 +5056,8 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         }
     }
 
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::warn(fmt::format("DEBUG: Found {} 1,4-pairs in molecule", pairs_14_count));
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("DEBUG: Found {} 1,4-pairs in molecule", pairs_14_count));
     }
 
     // bpair is same as topo_distances (topological distance matrix)

@@ -891,7 +891,7 @@ void D4ParameterGenerator::precomputeGaussianWeights()
             // KEY: CN-only Gaussian weighting (matches GFN-FF hybrid model)
             // Reference: external/gfnff/src/gfnff_gdisp0.f90:405 - cngw = exp(-wf * (cn - cnref)**2)
             double diff_cn = cni - cni_ref;
-            if (i == 0 && CurcumaLogger::get_verbosity() >= 2) {
+            if (i == 0 && CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::info(fmt::format("DEBUG: i=0 ref={} cni={:.4f} cni_ref={:.4f} diff={:.4f}", ref, cni, cni_ref, diff_cn));
             }
             weights[ref] = std::exp(-wf * diff_cn * diff_cn);

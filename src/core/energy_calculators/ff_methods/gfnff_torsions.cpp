@@ -1512,7 +1512,7 @@ json GFNFF::generateGFNFFTorsions() const
     const std::vector<int>& bond_types = topo.bond_types;
 
     // Claude Generated Debug (Jan 12, 2026): Add logging to debug why no torsions are generated
-    if (CurcumaLogger::get_verbosity() >= 1) {
+    if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info(fmt::format("generateGFNFFTorsions: Bond list size = {}", bond_list.size()));
     }
 
@@ -1534,7 +1534,7 @@ json GFNFF::generateGFNFFTorsions() const
     }
 
     // Debug: Print neighbor counts
-    if (CurcumaLogger::get_verbosity() >= 1) {
+    if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Neighbor counts:");
         for (size_t i = 0; i < neighbors.size(); ++i) {
             CurcumaLogger::info(fmt::format("  Atom {}: {} neighbors", i, neighbors[i].size()));
@@ -1826,7 +1826,7 @@ json GFNFF::generateGFNFFTorsions() const
     // ==========================================================================
 
     // Diagnostic: Per-torsion parameter summary
-    if (CurcumaLogger::get_verbosity() >= 2) {
+    if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("\n=== PRIMARY TORSION PARAMETER DIAGNOSTICS ===");
         CurcumaLogger::info(fmt::format("Total primary torsions generated: {}", torsion_count));
 
@@ -1888,7 +1888,7 @@ json GFNFF::generateGFNFFTorsions() const
     const double qfacTOR = 12.0;  // From gfnff_param.f90:742
 
     // DIAGNOSTIC (Jan 25, 2026)
-    if (CurcumaLogger::get_verbosity() >= 2) {
+    if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info(fmt::format("=== EXTRA TORSION GENERATION START ==="));
         CurcumaLogger::info(fmt::format("  Primary torsions generated: {}", generated_torsions.size()));
     }
@@ -2290,9 +2290,11 @@ json GFNFF::generateGFNFFTorsions() const
             else if (n == 3) n3_count++;
         }
 
-        CurcumaLogger::info("  Periodicity distribution: n=1 (" + std::to_string(n1_count) +
-                           "), n=2 (" + std::to_string(n2_count) +
-                           "), n=3 (" + std::to_string(n3_count) + ")");
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("  Periodicity distribution: n=1 (" + std::to_string(n1_count) +
+                               "), n=2 (" + std::to_string(n2_count) +
+                               "), n=3 (" + std::to_string(n3_count) + ")");
+        }
     }
 
     // ==========================================================================

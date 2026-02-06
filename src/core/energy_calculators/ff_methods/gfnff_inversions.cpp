@@ -874,8 +874,10 @@ json GFNFF::generateGFNFFInversions() const
             element_count[central_z]++;
         }
 
-        for (const auto& [z, count] : element_count) {
-            CurcumaLogger::info("  Element Z=" + std::to_string(z) + ": " + std::to_string(count) + " inversions");
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            for (const auto& [z, count] : element_count) {
+                CurcumaLogger::info("  Element Z=" + std::to_string(z) + ": " + std::to_string(count) + " inversions");
+            }
         }
     }
 

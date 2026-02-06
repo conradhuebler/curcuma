@@ -2666,7 +2666,7 @@ void ForceFieldThread::CalculateD4DispersionContribution()
         m_d4_energy += pair_energy;
 
         // Verbosity 2: Detailed debug output for first pair
-        if (CurcumaLogger::get_verbosity() >= 2 && index == 0) {
+        if (CurcumaLogger::get_verbosity() >= 3 && index == 0) {
             CurcumaLogger::info(fmt::format(
                 "GFN-FF D4 DEBUG: i={} j={} r={:.4f} C6={:.4f} r4r2ij={:.4f} R0²={:.4f} zetac6={:.6f} E={:.6e} Eh",
                 disp.i, disp.j, rij, disp.C6, disp.r4r2ij, disp.r0_squared, disp.zetac6, pair_energy
