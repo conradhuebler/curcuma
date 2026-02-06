@@ -2065,8 +2065,8 @@ double ForceField::Calculate(bool gradient)
         CurcumaLogger::energy_abs(energy, "Force Field Energy");
     }
 
-    // Level 2+: Energy decomposition (Claude Generated February 2026: Improved organization)
-    if (CurcumaLogger::get_verbosity() >= 2) {
+    // Level 1+: Energy decomposition (Claude Generated February 2026: Improved organization)
+    if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::info("\nForce Field Energy Decomposition:");
 
         // Baseline energy (if present)

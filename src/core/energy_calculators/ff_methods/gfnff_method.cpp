@@ -334,11 +334,11 @@ double GFNFF::Calculation(bool gradient)
         return 0.0;
     }
 
-    // Claude Generated (February 2026): General GFN-FF calculation summary at verbosity 2
-    if (CurcumaLogger::get_verbosity() >= 2) {
+    // Claude Generated (February 2026): General GFN-FF calculation summary at verbosity 1
+    if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::info("\nGFN-FF Calculation:");
         CurcumaLogger::param("atoms", std::to_string(m_atomcount));
-        CurcumaLogger::param("molecular_charge", fmt::format("{:.1f}", m_charge));
+        CurcumaLogger::param("molecular_charge", fmt::format("{}", m_charge));
         CurcumaLogger::param("gradient_requested", gradient ? "yes" : "no");
     }
 
@@ -400,7 +400,7 @@ double GFNFF::Calculation(bool gradient)
     // No unit conversion needed - already in Hartree
     m_energy_total = energy_hartree;
 
-    if (CurcumaLogger::get_verbosity() >= 2) {
+    if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::energy_abs(m_energy_total, "GFN-FF Energy");
         CurcumaLogger::param("energy_hartree", fmt::format("{:.10f}", energy_hartree));
     }
@@ -3570,7 +3570,7 @@ Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb,
 
     // Claude Generated (December 2025, Session 10): Verbosity 2 parameter table
     // Format similar to XTB's output with available parameters at this calculation stage
-    if (CurcumaLogger::get_verbosity() >= 2) {
+    if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("GFN-FF Atom Parameters:");
         fmt::print("{:>5}  {:<3}  {:>8}  {:>10}  {:>2}  {:>7}\n",
                     "atom", "Z", "CN", "sp-hybrid", "im", "q(est)");
@@ -3829,7 +3829,7 @@ std::vector<double> GFNFF::calculatePiBondOrders(
         }
 
         // DEBUG: Show first few pibo values (Claude Generated Jan 15, 2026)
-        if (CurcumaLogger::get_verbosity() >= 1) {
+        if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("=== Full Hückel: First 10 pibo values ===");
             for (size_t k = 0; k < std::min(size_t(10), pi_bond_orders.size()); k++) {
                 if (std::abs(pi_bond_orders[k]) > 1e-6) {
@@ -5049,8 +5049,8 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         for (int j = 0; j < i; ++j) {
             if (topo_info.topo_distances[i][j] == 3) {  // bpair == 3
                 pairs_14_count++;
-                if (CurcumaLogger::get_verbosity() >= 2) {
-                    CurcumaLogger::warn(fmt::format("DEBUG: Found 1,4-pair: {}-{} (bpair=3)", i, j));
+                if (CurcumaLogger::get_verbosity() >= 3) {
+                    CurcumaLogger::info(fmt::format("DEBUG: Found 1,4-pair: {}-{} (bpair=3)", i, j));
                 }
             }
         }
@@ -5255,7 +5255,7 @@ json GFNFF::generateGFNFFCoulombPairs() const
     const Vector& charges = topo_info.eeq_charges;
 
     // CRITICAL DEBUG: Print EEQ charges before Coulomb parameter generation
-    if (CurcumaLogger::get_verbosity() >= 1) {
+    if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("=== CRITICAL DEBUG: EEQ Charges Before Coulomb Generation ===");
         for (int i = 0; i < charges.size(); ++i) {
             CurcumaLogger::param(fmt::format("q_atom_{}(Z={})", i, m_atoms[i]),
