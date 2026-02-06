@@ -272,8 +272,8 @@ void ForceFieldMethod::setThreadCount(int threads) {
     // For now, store for future calculations
     
     if (threads > 1 && m_parameters.value("parameter_caching", true)) {
-        // Warn about parameter caching with threading
-        fmt::print("Warning: Consider disabling parameter caching for multi-threaded calculations\n");
+        // Warn about parameter caching with threading (always visible to user)
+        CurcumaLogger::warn("Consider disabling parameter caching for multi-threaded calculations");
     }
 }
 

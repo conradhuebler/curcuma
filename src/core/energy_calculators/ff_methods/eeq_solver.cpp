@@ -894,6 +894,36 @@ Vector EEQSolver::calculateCharges(
         CurcumaLogger::success(fmt::format("EEQSolver: Single-solve EEQ completed for {} atoms", natoms));
     }
 
+    // Claude Generated (February 2026): Per-atom charge/CN table at verbosity 2
+    if (m_verbosity >= 2 && natoms > 0) {
+        CurcumaLogger::info("\nEEQ Atomic Parameters:");
+        CurcumaLogger::result(fmt::format("{:>5} {:>4} {:>8} {:>10} {:>12}",
+                                          "Atom", "Z", "CN", "Charge", "Hyb"));
+
+        for (int i = 0; i < natoms; ++i) {
+            std::string hyb_str = "sp?";
+            if (hyb_hint != nullptr && i < hyb_hint->size()) {
+                int h = (*hyb_hint)[i];
+                if (h == 1) hyb_str = "sp";
+                else if (h == 2) hyb_str = "sp2";
+                else if (h == 3) hyb_str = "sp3";
+                else if (h == 4) hyb_str = "sp3d";
+                else if (h == 5) hyb_str = "sp3d2";
+            }
+
+            CurcumaLogger::result(fmt::format("{:>5} {:>4} {:>8.3f} {:>+10.5f} {:>12}",
+                                              i + 1,
+                                              atoms[i],
+                                              cn(i),
+                                              current_charges(i),
+                                              hyb_str));
+        }
+
+        // Show total charge
+        double total_charge_sum = current_charges.sum();
+        CurcumaLogger::param("total_charge", fmt::format("{:+.6f}", total_charge_sum));
+    }
+
     return current_charges;
 }
 

@@ -63,13 +63,13 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
 
     int picount = static_cast<int>(pi_system_ids.size());
     if (picount == 0) {
-        if (m_verbosity >= 2) {
+        if (m_verbosity >= 3) {
             CurcumaLogger::info("HuckelSolver: No π-systems found, returning zero bond orders");
         }
         return pbo;
     }
 
-    if (m_verbosity >= 1) {
+    if (m_verbosity >= 3) {
         CurcumaLogger::info(fmt::format("HuckelSolver: Processing {} π-system(s)", picount));
     }
 
@@ -108,14 +108,14 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
 
         // Skip if too small (need at least 2 atoms and 1 electron)
         if (npi < 2 || nelpi < 1) {
-            if (m_verbosity >= 2) {
+            if (m_verbosity >= 3) {
                 CurcumaLogger::info(fmt::format("HuckelSolver: Skipping π-system {} (npi={}, nel={})",
                                   pis, npi, nelpi));
             }
             continue;
         }
 
-        if (m_verbosity >= 2) {
+        if (m_verbosity >= 3) {
             CurcumaLogger::info(fmt::format("HuckelSolver: π-system {} has {} atoms, {} electrons",
                               pis, npi, nelpi));
         }
@@ -146,7 +146,7 @@ std::vector<double> HuckelSolver::calculatePiBondOrders(
 
             // Check convergence
             if (std::abs(E_new - E_old) < conv_threshold) {
-                if (m_verbosity >= 2) {
+                if (m_verbosity >= 3) {
                     CurcumaLogger::info(fmt::format("  Converged after {} iterations", iter + 1));
                 }
                 P_old = H;  // H now contains density matrix
@@ -387,7 +387,7 @@ double HuckelSolver::solveAndBuildDensity(Eigen::MatrixXd& H, int nel) const
     if (ihomo > 0 && ihomo < ndim) {
         if (std::abs(occ[ihomo - 1] - occ[ihomo]) < 1e-4) {
             // Perfect biradical detected - break symmetry
-            if (m_verbosity >= 2) {
+            if (m_verbosity >= 3) {
                 CurcumaLogger::info("  Perfect biradical detected, breaking symmetry");
             }
             std::fill(occ.begin(), occ.end(), 0.0);

@@ -2065,54 +2065,87 @@ double ForceField::Calculate(bool gradient)
         CurcumaLogger::energy_abs(energy, "Force Field Energy");
     }
 
-    // Level 2+: Energy decomposition
+    // Level 2+: Energy decomposition (Claude Generated February 2026: Improved organization)
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("Force field energy decomposition:");
+        CurcumaLogger::info("\nForce Field Energy Decomposition:");
+
+        // Baseline energy (if present)
         if (m_e0 != 0.0) {
-            CurcumaLogger::param("E0_baseline", fmt::format("{:.6f} Eh", m_e0));
-        }
-        CurcumaLogger::param("bond_energy", fmt::format("{:.6f} Eh", m_bond_energy));
-        CurcumaLogger::param("angle_energy", fmt::format("{:.6f} Eh", m_angle_energy));
-        CurcumaLogger::param("dihedral_energy", fmt::format("{:.6f} Eh", m_dihedral_energy));
-        CurcumaLogger::param("inversion_energy", fmt::format("{:.6f} Eh", m_inversion_energy));
-        CurcumaLogger::param("nonbonded_energy", fmt::format("{:.6f} Eh", m_vdw_energy + m_rep_energy));
-        if (m_d3_energy != 0.0) {
-            CurcumaLogger::param("D3_energy", fmt::format("{:.6f} Eh", m_d3_energy));
-        }
-        if (m_d4_energy != 0.0) {
-            CurcumaLogger::param("D4_energy", fmt::format("{:.6f} Eh", m_d4_energy));
-        }
-        if (h4_energy != 0.0) {
-            CurcumaLogger::param("HBond_correction", fmt::format("{:.6f} Eh", h4_energy));
-        }
-        if (m_gfnff_repulsion != 0.0) {  // Claude Generated (Dec 2025): GFN-FF repulsion output
-            CurcumaLogger::param("repulsion energy", fmt::format("{:.6f} Eh", m_gfnff_repulsion));  // Claude Generated: Match XTB terminology
-        }
-        if (m_dispersion_energy != 0.0) {
-            CurcumaLogger::param("GFNFF_dispersion", fmt::format("{:.6f} Eh", m_dispersion_energy));
-        }
-        if (m_coulomb_energy != 0.0) {
-            CurcumaLogger::param("GFNFF_coulomb", fmt::format("{:.6f} Eh", m_coulomb_energy));
-        }
-        if (m_energy_hbond != 0.0) {
-            CurcumaLogger::param("GFNFF_hydrogen_bond", fmt::format("{:.6f} Eh", m_energy_hbond));
-        }
-        if (m_energy_xbond != 0.0) {
-            CurcumaLogger::param("GFNFF_halogen_bond", fmt::format("{:.6f} Eh", m_energy_xbond));
-        }
-        if (m_atm_energy != 0.0) {  // Claude Generated (December 2025): ATM three-body dispersion
-            CurcumaLogger::param("ATM_three_body", fmt::format("{:.6e} Eh", m_atm_energy));  // Use scientific notation for small values
-        }
-        if (m_batm_energy != 0.0) {  // Claude Generated (January 2026): GFN-FF bonded ATM three-body
-            CurcumaLogger::param("GFNFF_batm", fmt::format("{:.6e} Eh", m_batm_energy));  // Use scientific notation for small values
-        }
-        if (cg_energy != 0.0) {
-            CurcumaLogger::param("CG_interactions", fmt::format("{:.6f} Eh", cg_energy));
+            CurcumaLogger::param("E0_baseline", fmt::format("{:>10.6f} Eh", m_e0));
         }
 
+        // Bonded terms (always present)
+        CurcumaLogger::result("  Bonded Terms:");
+        CurcumaLogger::param("    bonds", fmt::format("{:>10.6f} Eh", m_bond_energy));
+        CurcumaLogger::param("    angles", fmt::format("{:>10.6f} Eh", m_angle_energy));
+        CurcumaLogger::param("    dihedrals", fmt::format("{:>10.6f} Eh", m_dihedral_energy));
+        if (m_inversion_energy != 0.0) {
+            CurcumaLogger::param("    inversions", fmt::format("{:>10.6f} Eh", m_inversion_energy));
+        }
+
+        // Non-bonded repulsion/vdW
+        double total_nonbonded = m_vdw_energy + m_rep_energy;
+        if (total_nonbonded != 0.0) {
+            CurcumaLogger::result("  Non-bonded Terms:");
+            if (m_gfnff_repulsion != 0.0) {
+                CurcumaLogger::param("    repulsion", fmt::format("{:>10.6f} Eh", m_gfnff_repulsion));
+            } else if (m_rep_energy != 0.0 || m_vdw_energy != 0.0) {
+                CurcumaLogger::param("    vdW + repulsion", fmt::format("{:>10.6f} Eh", total_nonbonded));
+            }
+        }
+
+        // Dispersion corrections
+        bool has_dispersion = (m_d3_energy != 0.0 || m_d4_energy != 0.0 || m_dispersion_energy != 0.0 || m_atm_energy != 0.0 || m_batm_energy != 0.0);
+        if (has_dispersion) {
+            CurcumaLogger::result("  Dispersion:");
+            if (m_dispersion_energy != 0.0) {
+                CurcumaLogger::param("    GFN-FF dispersion", fmt::format("{:>10.6f} Eh", m_dispersion_energy));
+            }
+            if (m_d3_energy != 0.0) {
+                CurcumaLogger::param("    D3", fmt::format("{:>10.6f} Eh", m_d3_energy));
+            }
+            if (m_d4_energy != 0.0) {
+                CurcumaLogger::param("    D4", fmt::format("{:>10.6f} Eh", m_d4_energy));
+            }
+            if (m_atm_energy != 0.0) {
+                CurcumaLogger::param("    ATM (3-body)", fmt::format("{:>10.6e} Eh", m_atm_energy));
+            }
+            if (m_batm_energy != 0.0) {
+                CurcumaLogger::param("    BATM (bonded ATM)", fmt::format("{:>10.6e} Eh", m_batm_energy));
+            }
+        }
+
+        // Electrostatics
+        if (m_coulomb_energy != 0.0) {
+            CurcumaLogger::result("  Electrostatics:");
+            CurcumaLogger::param("    Coulomb", fmt::format("{:>10.6f} Eh", m_coulomb_energy));
+        }
+
+        // Non-covalent interactions
+        bool has_nci = (m_energy_hbond != 0.0 || m_energy_xbond != 0.0 || h4_energy != 0.0);
+        if (has_nci) {
+            CurcumaLogger::result("  Non-covalent Interactions:");
+            if (m_energy_hbond != 0.0) {
+                CurcumaLogger::param("    H-bonds", fmt::format("{:>10.6f} Eh", m_energy_hbond));
+            }
+            if (m_energy_xbond != 0.0) {
+                CurcumaLogger::param("    X-bonds", fmt::format("{:>10.6f} Eh", m_energy_xbond));
+            }
+            if (h4_energy != 0.0) {
+                CurcumaLogger::param("    H4 correction", fmt::format("{:>10.6f} Eh", h4_energy));
+            }
+        }
+
+        // Coarse-grained (if present)
+        if (cg_energy != 0.0) {
+            CurcumaLogger::result("  Coarse-Grained:");
+            CurcumaLogger::param("    CG interactions", fmt::format("{:>10.6f} Eh", cg_energy));
+        }
+
+        // Gradient information
         if (gradient) {
             double grad_norm = m_gradient.norm();
-            CurcumaLogger::param("gradient_norm", fmt::format("{:.6f} Eh/Bohr", grad_norm));
+            CurcumaLogger::param("\ngradient_norm", fmt::format("{:.6e} Eh/Bohr", grad_norm));
         }
     }
 

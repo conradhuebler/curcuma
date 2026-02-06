@@ -257,17 +257,17 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
             CurcumaLogger::info("GFNFF: Recalculating bond list due to geometry change");
         }
 
-        // Debug output to see if we're calculating bonds
-        if (CurcumaLogger::get_verbosity() >= 1) {
-            CurcumaLogger::info("=== Calculating new bond list ===");
+        // Summary output at verbosity 2
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info(fmt::format("Calculating bond list for {} atoms", m_atomcount));
         }
 
         // Populate bond list using same detection logic as generateGFNFFBonds but without parameters
         std::vector<std::pair<int,int>> bonds;
         double bond_threshold = 1.3;
 
-        // Debug output for bond detection
-        if (CurcumaLogger::get_verbosity() >= 1) {
+        // Detailed debug output only at verbosity 3
+        if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("=== Bond Detection Debug ===");
             CurcumaLogger::info(fmt::format("Atom count: {}", m_atomcount));
             CurcumaLogger::info(fmt::format("Geometry rows: {}, cols: {}", m_geometry_bohr.rows(), m_geometry_bohr.cols()));
@@ -284,23 +284,23 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
                 // Phase 3: Apply element-specific fat scaling factors (Claude Generated Jan 2026)
                 double threshold = bond_threshold * (rcov_i + rcov_j) * fat[m_atoms[i]] * fat[m_atoms[j]];
 
-                // Debug output for each pair
-                if (CurcumaLogger::get_verbosity() >= 1) {
+                // Debug output for each pair - only at verbosity 3
+                if (CurcumaLogger::get_verbosity() >= 3) {
                     CurcumaLogger::info(fmt::format("Pair {}-{}: dist={:.3f}, rcov_i={:.3f}, rcov_j={:.3f}, fat_i={:.3f}, fat_j={:.3f}, threshold={:.3f}",
                                           i, j, distance, rcov_i, rcov_j, fat[m_atoms[i]], fat[m_atoms[j]], threshold));
                 }
 
                 if (distance < threshold) {
                     bonds.emplace_back(i, j);
-                    if (CurcumaLogger::get_verbosity() >= 1) {
+                    if (CurcumaLogger::get_verbosity() >= 3) {
                         CurcumaLogger::info(fmt::format("  -> BONDED"));
                     }
                 }
             }
         }
 
-        if (CurcumaLogger::get_verbosity() >= 1) {
-            CurcumaLogger::info(fmt::format("Total bonds detected: {}", bonds.size()));
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::success(fmt::format("Detected {} bonds", bonds.size()));
         }
 
         m_cached_bond_list = std::move(bonds);
@@ -332,6 +332,14 @@ double GFNFF::Calculation(bool gradient)
     if (!m_forcefield) {
         CurcumaLogger::error("GFN-FF calculation failed: Force field not available");
         return 0.0;
+    }
+
+    // Claude Generated (February 2026): General GFN-FF calculation summary at verbosity 2
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("\nGFN-FF Calculation:");
+        CurcumaLogger::param("atoms", std::to_string(m_atomcount));
+        CurcumaLogger::param("molecular_charge", fmt::format("{:.1f}", m_charge));
+        CurcumaLogger::param("gradient_requested", gradient ? "yes" : "no");
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -1481,7 +1489,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     params.equilibrium_distance = (ra + rb + rabshift) * ff;
     params.rabshift = rabshift;
 
-    if (atom1 == 0 && atom2 == 1 && CurcumaLogger::get_verbosity() >= 2) {
+    if (atom1 == 0 && atom2 == 1 && CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info(fmt::format("=== N-C r0 DEBUG: Bond {}-{} ===", atom1, atom2));
         CurcumaLogger::info(fmt::format("  ra={:.6f}, rb={:.6f}, ff={:.6f}, rabshift={:.6f}", ra, rb, ff, rabshift));
         CurcumaLogger::info(fmt::format("  Formula: r0 = ({:.6f} + {:.6f} + {:.6f}) * {:.6f} = {:.6f} Bohr",
@@ -1828,7 +1836,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 
     // DEBUG: Check pibo access (Claude Generated Jan 15, 2026)
     static bool debug_once = false;
-    if (!debug_once && CurcumaLogger::get_verbosity() >= 1) {
+    if (!debug_once && CurcumaLogger::get_verbosity() >= 3) {
         debug_once = true;
         CurcumaLogger::info("=== getGFNFFBondParameters() pibo Debug (first call) ===");
         CurcumaLogger::param("pi_bond_orders.size()", std::to_string(topo.pi_bond_orders.size()));
@@ -2082,7 +2090,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
 
     // DEBUG: Complete bond parameter breakdown for 3% bond energy error investigation (Feb 2026)
     static int bond_count = 0;
-    if (bond_count < 20 && CurcumaLogger::get_verbosity() >= 2) {
+    if (bond_count < 20 && CurcumaLogger::get_verbosity() >= 3) {
         double base_product = bond_param_1 * bond_param_2;
         double full_product = base_product * bstrength * fqq * ringf * fheavy * fpi * fxh * fcn;
 
@@ -3177,7 +3185,7 @@ std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb) const
     }
 
     // DEBUG: Log pi-fragment assignments for first few atoms
-    if (m_atomcount > 5) {
+    if (m_atomcount > 5 && CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Pi-fragment assignments:");
         for (int i = 0; i < std::min(m_atomcount, 10); ++i) {
             CurcumaLogger::info(fmt::format("  Atom {} (Z={}, hyb={}): fragment {}",
