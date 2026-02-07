@@ -1,0 +1,66 @@
+{
+  "molecule": {
+    "name": "OH",
+    "geometry_file": "test_cases/molecules/dimers/OH.xyz",
+    "atoms": [
+      {
+        "element": "O",
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.225373
+      },
+      {
+        "element": "H",
+        "x": 0.0,
+        "y": 1.442313,
+        "z": -0.901488
+      }
+    ]
+  },
+  "metadata": {
+    "generator": "gfnff-analyzer-parser",
+    "date": "2026-02-07 20:48:53"
+  },
+  "topology": {
+    "coordination_numbers": [
+      0.97,
+      0.97
+    ],
+    "hybridizations": [
+      1,
+      0
+    ],
+    "charges": [
+      -0.385,
+      0.385
+    ]
+  },
+  "bonds": [
+    {
+      "atoms": [
+        1,
+        0
+      ],
+      "r0": 0.801098671227572,
+      "kbond": 0.6803299178046902,
+      "prefactor": -0.1827311149856858,
+      "energy": 0.0
+    }
+  ],
+  "angles": [],
+  "torsions": [],
+  "energy_components": {
+    "bond": -0.17091072,
+    "angle": 0.0,
+    "torsion": 0.0,
+    "repulsion": 0.01357299,
+    "electrostatic": -0.07651161,
+    "dispersion": -5.859e-05,
+    "hb": 0.0,
+    "xb": 0.0,
+    "batm": 0.0
+  },
+  "gradients": {
+    "norm": 0.079504745009
+  }
+}

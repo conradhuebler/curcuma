@@ -292,10 +292,18 @@ public:
     void setParameters(const json& parameters);
 
     /**
-     * @brief Get current parameters
-     * @return JSON configuration
+     * @brief Retrieve cached topology information, computing it once if needed
+     * @return Reference to topology information
+     *
+     * Provided for validation and testing purposes.
      */
-    json getParameters() const { return m_parameters; }
+    const TopologyInfo& getTopologyInfo() const { return getCachedTopology(); }
+
+    /**
+     * @brief Calculate full topology information for advanced parametrization
+     * @return Complete topology information
+     */
+    TopologyInfo calculateTopologyInfo() const;
 
 private:
     /**
@@ -1036,12 +1044,6 @@ private:
 
     // Advanced parameter structures (EEQParameters already defined above at line 298)
     // TopologyInfo now defined at line 51 (public section) for use in function signatures
-
-    /**
-     * @brief Calculate full topology information for advanced parametrization
-     * @return Complete topology information
-     */
-    TopologyInfo calculateTopologyInfo() const;
 
     /**
      * @brief Get EEQ parameters for specific atom with environment corrections

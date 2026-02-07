@@ -1,0 +1,96 @@
+{
+  "molecule": {
+    "name": "HCN",
+    "geometry_file": "test_cases/molecules/trimers/HCN.xyz",
+    "atoms": [
+      {
+        "element": "C",
+        "x": 0.148735,
+        "y": -0.004549,
+        "z": 0.001481
+      },
+      {
+        "element": "H",
+        "x": 0.30657,
+        "y": 1.687325,
+        "z": 1.056019
+      },
+      {
+        "element": "N",
+        "x": -0.020694,
+        "y": -1.823018,
+        "z": -1.13226
+      }
+    ]
+  },
+  "metadata": {
+    "generator": "gfnff-analyzer-parser",
+    "date": "2026-02-07 20:48:53"
+  },
+  "topology": {
+    "coordination_numbers": [
+      1.92,
+      0.98,
+      0.98
+    ],
+    "hybridizations": [
+      1,
+      0,
+      1
+    ],
+    "charges": [
+      0.08,
+      0.117,
+      -0.197
+    ]
+  },
+  "bonds": [
+    {
+      "atoms": [
+        1,
+        0
+      ],
+      "r0": 0.9774419765120657,
+      "kbond": 0.5129094124225955,
+      "prefactor": -0.21311093387465932,
+      "energy": 0.0
+    },
+    {
+      "atoms": [
+        2,
+        0
+      ],
+      "r0": 1.031613469047482,
+      "kbond": 0.588997961158041,
+      "prefactor": -0.5092231343951094,
+      "energy": 0.0
+    }
+  ],
+  "angles": [
+    {
+      "atoms": [
+        0,
+        2,
+        1
+      ],
+      "phi0": 180.0,
+      "fc": 0.07487631646147414,
+      "energy": 0.0
+    }
+  ],
+  "torsions": [],
+  "energy_components": {
+    "bond": -0.70782135,
+    "angle": 0.0,
+    "torsion": 0.0,
+    "repulsion": 0.04262098,
+    "electrostatic": -0.01995748,
+    "dispersion": -0.00039406,
+    "hb": 0.0,
+    "xb": 0.0,
+    "batm": 0.0
+  },
+  "gradients": {
+    "norm": 0.04997338284
+  }
+}

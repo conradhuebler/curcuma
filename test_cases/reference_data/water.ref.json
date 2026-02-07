@@ -1,0 +1,96 @@
+{
+  "molecule": {
+    "name": "water",
+    "geometry_file": "test_cases/molecules/trimers/water.xyz",
+    "atoms": [
+      {
+        "element": "O",
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      {
+        "element": "H",
+        "x": 1.430523,
+        "y": 1.107379,
+        "z": 0.0
+      },
+      {
+        "element": "H",
+        "x": -1.430523,
+        "y": 1.107379,
+        "z": 0.0
+      }
+    ]
+  },
+  "metadata": {
+    "generator": "gfnff-analyzer-parser",
+    "date": "2026-02-07 20:48:53"
+  },
+  "topology": {
+    "coordination_numbers": [
+      1.92,
+      0.97,
+      0.97
+    ],
+    "hybridizations": [
+      3,
+      0,
+      0
+    ],
+    "charges": [
+      -0.571,
+      0.285,
+      0.285
+    ]
+  },
+  "bonds": [
+    {
+      "atoms": [
+        1,
+        0
+      ],
+      "r0": 0.8454343975821978,
+      "kbond": 0.6497062711537528,
+      "prefactor": -0.13807700996349237,
+      "energy": 0.0
+    },
+    {
+      "atoms": [
+        2,
+        0
+      ],
+      "r0": 0.8454343975821978,
+      "kbond": 0.6497062711537528,
+      "prefactor": -0.13807700996349237,
+      "energy": 0.0
+    }
+  ],
+  "angles": [
+    {
+      "atoms": [
+        0,
+        2,
+        1
+      ],
+      "phi0": 100.0,
+      "fc": 0.29224040468978063,
+      "energy": 0.0
+    }
+  ],
+  "torsions": [],
+  "energy_components": {
+    "bond": -0.27008884,
+    "angle": 0.00046856,
+    "torsion": 0.0,
+    "repulsion": 0.03162736,
+    "electrostatic": -0.08913043,
+    "dispersion": -0.00013932,
+    "hb": 0.0,
+    "xb": 0.0,
+    "batm": 0.0
+  },
+  "gradients": {
+    "norm": 0.022037265574
+  }
+}

@@ -1,0 +1,96 @@
+{
+  "molecule": {
+    "name": "O3",
+    "geometry_file": "test_cases/molecules/trimers/O3.xyz",
+    "atoms": [
+      {
+        "element": "O",
+        "x": -0.308628,
+        "y": -0.01712,
+        "z": 0.617261
+      },
+      {
+        "element": "O",
+        "x": 0.777928,
+        "y": 2.049809,
+        "z": 0.683828
+      },
+      {
+        "element": "O",
+        "x": 0.127139,
+        "y": -1.525839,
+        "z": -1.111219
+      }
+    ]
+  },
+  "metadata": {
+    "generator": "gfnff-analyzer-parser",
+    "date": "2026-02-07 20:48:53"
+  },
+  "topology": {
+    "coordination_numbers": [
+      1.92,
+      0.98,
+      0.98
+    ],
+    "hybridizations": [
+      3,
+      2,
+      2
+    ],
+    "charges": [
+      0.099,
+      -0.049,
+      -0.049
+    ]
+  },
+  "bonds": [
+    {
+      "atoms": [
+        1,
+        0
+      ],
+      "r0": 1.1631706680197653,
+      "kbond": 0.4752924660525419,
+      "prefactor": -0.17907323962330857,
+      "energy": 0.0
+    },
+    {
+      "atoms": [
+        2,
+        0
+      ],
+      "r0": 1.1631736983014984,
+      "kbond": 0.4752924660525419,
+      "prefactor": -0.17907323962342148,
+      "energy": 0.0
+    }
+  ],
+  "angles": [
+    {
+      "atoms": [
+        0,
+        2,
+        1
+      ],
+      "phi0": 108.99999999999999,
+      "fc": 0.4740476669617983,
+      "energy": 0.0
+    }
+  ],
+  "torsions": [],
+  "energy_components": {
+    "bond": -0.35493877,
+    "angle": 0.00461599,
+    "torsion": 0.0,
+    "repulsion": 0.02339094,
+    "electrostatic": -0.00360822,
+    "dispersion": -0.00039954,
+    "hb": 0.0,
+    "xb": 0.0,
+    "batm": 0.0
+  },
+  "gradients": {
+    "norm": 0.083650849933
+  }
+}

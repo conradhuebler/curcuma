@@ -1,0 +1,66 @@
+{
+  "molecule": {
+    "name": "HCl",
+    "geometry_file": "test_cases/molecules/dimers/HCl.xyz",
+    "atoms": [
+      {
+        "element": "Cl",
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.225373
+      },
+      {
+        "element": "H",
+        "x": 0.0,
+        "y": 1.442313,
+        "z": -0.901488
+      }
+    ]
+  },
+  "metadata": {
+    "generator": "gfnff-analyzer-parser",
+    "date": "2026-02-07 20:48:53"
+  },
+  "topology": {
+    "coordination_numbers": [
+      0.98,
+      0.98
+    ],
+    "hybridizations": [
+      0,
+      0
+    ],
+    "charges": [
+      -0.118,
+      0.118
+    ]
+  },
+  "bonds": [
+    {
+      "atoms": [
+        1,
+        0
+      ],
+      "r0": 1.208816183689236,
+      "kbond": 0.5768273110633387,
+      "prefactor": -0.09573174742859676,
+      "energy": 0.0
+    }
+  ],
+  "angles": [],
+  "torsions": [],
+  "energy_components": {
+    "bond": -0.08431049,
+    "angle": 0.0,
+    "torsion": 0.0,
+    "repulsion": 0.08050574,
+    "electrostatic": -0.00809318,
+    "dispersion": -0.00014047,
+    "hb": 0.0,
+    "xb": 0.0,
+    "batm": 0.0
+  },
+  "gradients": {
+    "norm": 0.530670793006
+  }
+}
