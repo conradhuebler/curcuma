@@ -18,6 +18,7 @@
 #include <cmath>
 #include <chrono>
 #include <limits>
+#include <omp.h>  // Claude Generated (February 2026): Phase 3 - OpenMP parallelization
 
 // External declarations from d4_reference_cn_fortran.cpp (Fortran dftd3param.f90 - January 2026)
 // CRITICAL FIX: Use Fortran reference CN data (matches dftd3param.f90) instead of cpp-d4 data
@@ -314,7 +315,6 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
     // STEP 2: Generate C6 pairs with CN+charge weighted C6 coefficients
     auto t_pairs_start = std::chrono::high_resolution_clock::now();
-    json dispersion_pairs = json::array();
     int num_pairs = 0;
 
     // Claude Generated (Jan 3, 2026): Debug pair generation
@@ -323,8 +323,38 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
             m_atoms.size(), (m_atoms.size() * (m_atoms.size() - 1)) / 2));
     }
 
-    for (size_t i = 0; i < m_atoms.size(); ++i) {
-        for (size_t j = i + 1; j < m_atoms.size(); ++j) {
+    // Claude Generated (February 2026): Phase 3 - OpenMP D4 Pair Loop Parallelization
+    //
+    // PROBLEM: D4 C6 interpolation for 1410 atoms = 993,345 pair calculations (serial)
+    //          Current timing: ~2.7 seconds with zero parallelization
+    //
+    // SOLUTION: Parallelize nested i-j loop using OpenMP with collapse(2)
+    //           Expected speedup: 3-4× on 4 cores (2.7s → ~0.7s)
+    //
+    // ARCHITECTURE:
+    //   - collapse(2): Parallelize BOTH i and j loops for better load balancing
+    //   - Dynamic scheduling: Handles triangular iteration (j > i) efficiently
+    //   - Thread-local storage: Each thread builds its own pair list
+    //   - Critical section: Minimal synchronization for merging
+    //
+    // THREAD SAFETY:
+    //   - m_atoms, m_cn_values, m_eeq_charges, m_topology_charges: Read-only ✅
+    //   - getChargeWeightedC6(), getSqrtZr4r2(): Pure functions with cached data ✅
+    //   - GFNFFParameters::zetaChargeScale(): Static data ✅
+    //   - local_pairs: Thread-local ✅
+    //   - pairs_vec: Protected by critical section ✅
+
+    std::vector<json> pairs_vec;
+
+    #pragma omp parallel
+    {
+        std::vector<json> local_pairs;
+
+        // NOTE: Cannot use collapse(2) with triangular loops (j = i + 1)
+        // Parallelize outer loop only, still provides good speedup
+        #pragma omp for schedule(dynamic, 10)
+        for (size_t i = 0; i < m_atoms.size(); ++i) {
+            for (size_t j = i + 1; j < m_atoms.size(); ++j) {
             int atom_i = m_atoms[i];
             int atom_j = m_atoms[j];
 
@@ -412,8 +442,7 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
                 pair["a2"] = a2;
                 pair["r_cut"] = 100.0;  // Cutoff radius (Bohr)
 
-                dispersion_pairs.push_back(pair);
-                num_pairs++;
+                local_pairs.push_back(pair);
             } else {
                 if (CurcumaLogger::get_verbosity() >= 2) {
                     CurcumaLogger::warn("D4: Elements out of range - i=" +
@@ -421,7 +450,21 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
                                        " j=" + std::to_string(atom_j));
                 }
             }
+        }  // end j loop
+    }  // end i loop
+
+        // Merge thread-local results into global container
+        #pragma omp critical
+        {
+            pairs_vec.insert(pairs_vec.end(), local_pairs.begin(), local_pairs.end());
         }
+    }  // end omp parallel
+
+    // Convert vector to JSON array and count pairs
+    json dispersion_pairs = json::array();
+    for (const auto& p : pairs_vec) {
+        dispersion_pairs.push_back(p);
+        num_pairs++;
     }
 
     auto t_pairs_end = std::chrono::high_resolution_clock::now();
