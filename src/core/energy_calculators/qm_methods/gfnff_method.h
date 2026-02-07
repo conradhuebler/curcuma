@@ -61,6 +61,9 @@ public:
     void clearError() override;
     std::string getErrorMessage() const override;
 
+    // Energy decomposition (JSON output)
+    json getEnergyDecomposition() const override;
+
 private:
     std::unique_ptr<GFNFF> m_gfnff;
     json m_parameters;

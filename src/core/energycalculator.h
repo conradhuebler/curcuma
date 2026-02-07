@@ -247,6 +247,15 @@ public:
      */
     double getNonBondedEnergy() const;
 
+    /**
+     * @brief Get complete energy decomposition as JSON
+     * @return JSON object with all energy components in Hartree
+     *
+     * For Force Field methods (UFF, QMDFF, cgfnff) returns all applicable terms.
+     * For QM methods returns zero for all components (native implementations pending).
+     */
+    json getEnergyDecomposition() const;
+
     // =================================================================================
     // Error Handling and Status
     // =================================================================================

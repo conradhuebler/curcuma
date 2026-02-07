@@ -229,7 +229,42 @@ public:
      * @return Electrostatic energy
      */
     double getCoulombEnergy() const;
-    
+
+    /**
+     * @brief Get hydrogen bond energy component
+     * @return Hydrogen bond energy
+     */
+    double getHBondEnergy() const;
+
+    /**
+     * @brief Get halogen bond energy component
+     * @return Halogen bond energy
+     */
+    double getXBondEnergy() const;
+
+    /**
+     * @brief Get atm (three-body dispersion) energy component
+     * @return ATM energy
+     */
+    double getATMEnergy() const;
+
+    /**
+     * @brief Get batm (bonded ATM) energy component
+     * @return BATM energy
+     */
+    double getBatmEnergy() const;
+
+    /**
+     * @brief Get complete energy decomposition as JSON
+     * @return JSON object with all energy components in Hartree
+     *
+     * Returns all 10 energy terms for ForceField methods:
+     * - Bond, Angle, Torsion, Inversion (bonded terms)
+     * - Dispersion, Coulomb (non-bonded terms)
+     * - HBond, XBond, ATM, BATM (special terms)
+     */
+    json getEnergyDecomposition() const override;
+
 private:
     std::unique_ptr<ForceField> m_forcefield;      ///< Wrapped ForceField implementation
     std::string m_method_name;                     ///< ForceField method name

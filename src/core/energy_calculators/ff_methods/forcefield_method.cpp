@@ -647,6 +647,45 @@ namespace ForceFieldMethodUtils {
     }
 }
 
+// =================================================================================
+// Energy Decomposition (JSON output)
+// =================================================================================
+
+json ForceFieldMethod::getEnergyDecomposition() const {
+    json energy_json;
+
+    if (!m_forcefield) {
+        // Return zero JSON if ForceField not initialized
+        energy_json = {
+            {"Bond", 0.0},
+            {"Angle", 0.0},
+            {"Torsion", 0.0},
+            {"Inversion", 0.0},
+            {"Dispersion", 0.0},
+            {"Coulomb", 0.0},
+            {"HBond", 0.0},
+            {"XBond", 0.0},
+            {"ATM", 0.0},
+            {"BATM", 0.0}
+        };
+        return energy_json;
+    }
+
+    // Get all energy components from ForceField
+    energy_json["Bond"] = m_forcefield->BondEnergy();
+    energy_json["Angle"] = m_forcefield->AngleEnergy();
+    energy_json["Torsion"] = m_forcefield->DihedralEnergy();
+    energy_json["Inversion"] = m_forcefield->InversionEnergy();
+    energy_json["Dispersion"] = m_forcefield->DispersionEnergy();
+    energy_json["Coulomb"] = m_forcefield->CoulombEnergy();
+    energy_json["HBond"] = m_forcefield->HydrogenBondEnergy();
+    energy_json["XBond"] = m_forcefield->HalogenBondEnergy();
+    energy_json["ATM"] = m_forcefield->ATMEnergy();
+    energy_json["BATM"] = m_forcefield->BatmEnergy();
+
+    return energy_json;
+}
+
 // Claude Generated: Energy component getter methods (Nov 2025)
 double ForceFieldMethod::getBondEnergy() const {
     if (!m_forcefield) return 0.0;
@@ -686,4 +725,24 @@ double ForceFieldMethod::getDispersionEnergy() const {
 double ForceFieldMethod::getCoulombEnergy() const {
     if (!m_forcefield) return 0.0;
     return m_forcefield->CoulombEnergy();
+}
+
+double ForceFieldMethod::getHBondEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->HydrogenBondEnergy();
+}
+
+double ForceFieldMethod::getXBondEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->HalogenBondEnergy();
+}
+
+double ForceFieldMethod::getATMEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->ATMEnergy();
+}
+
+double ForceFieldMethod::getBatmEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->BatmEnergy();
 }

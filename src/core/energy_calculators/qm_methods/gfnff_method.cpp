@@ -108,6 +108,41 @@ void GFNFFComputationalMethod::clearError() {
     m_error_message.clear();
 }
 
+json GFNFFComputationalMethod::getEnergyDecomposition() const {
+    json energy_json;
+
+    if (!m_gfnff) {
+        // Return zero JSON if GFNFF not initialized
+        energy_json = {
+            {"Bond", 0.0},
+            {"Angle", 0.0},
+            {"Torsion", 0.0},
+            {"Inversion", 0.0},
+            {"Dispersion", 0.0},
+            {"Coulomb", 0.0},
+            {"HBond", 0.0},
+            {"XBond", 0.0},
+            {"ATM", 0.0},
+            {"BATM", 0.0}
+        };
+        return energy_json;
+    }
+
+    // Get all energy components from GFNFF
+    energy_json["Bond"] = m_gfnff->BondEnergy();
+    energy_json["Angle"] = m_gfnff->AngleEnergy();
+    energy_json["Torsion"] = m_gfnff->DihedralEnergy();
+    energy_json["Inversion"] = m_gfnff->InversionEnergy();
+    energy_json["Dispersion"] = m_gfnff->DispersionEnergy();
+    energy_json["Coulomb"] = m_gfnff->CoulombEnergy();
+    energy_json["HBond"] = m_gfnff->HydrogenBondEnergy();
+    energy_json["XBond"] = m_gfnff->HalogenBondEnergy();
+    energy_json["ATM"] = m_gfnff->ATMEnergy();
+    energy_json["BATM"] = m_gfnff->BatmEnergy();
+
+    return energy_json;
+}
+
 std::string GFNFFComputationalMethod::getErrorMessage() const {
     return m_error_message;
 }

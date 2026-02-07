@@ -370,6 +370,16 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, std::string& output, Vec
     interface.setMolecule(initial->getMolInfo());
     json param = interface.Parameter();
     double energy = interface.CalculateEnergy(false);
+
+    // Claude Generated (February 2026): Energy Decomposition JSON output
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        json energy_decomp = interface.getEnergyDecomposition();
+        if (!energy_decomp.empty()) {
+            CurcumaLogger::info("\nEnergy Decomposition (JSON):");
+            CurcumaLogger::info(energy_decomp.dump(2));
+        }
+    }
+
     double store = 0;
 #ifdef USE_TBLITE
     if (method.compare("gfn2") == 0) {

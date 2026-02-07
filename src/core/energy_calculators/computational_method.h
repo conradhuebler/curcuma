@@ -181,6 +181,24 @@ public:
     virtual int getNumElectrons() const { return 0; }
 
     // =================================================================================
+    // Energy Decomposition (JSON output for all methods)
+    // =================================================================================
+
+    /**
+     * @brief Get complete energy decomposition as JSON
+     * @return JSON object with all energy components in Hartree
+     *
+     * Force field methods (UFF, QMDFF, cgfnff) return all applicable terms:
+     * - Bond, Angle, Torsion, Inversion (bonded terms)
+     * - Dispersion, Coulomb (non-bonded terms)
+     * - HBond, XBond, ATM, BATM (special terms)
+     *
+     * QM methods (EHT, XTB, TBLite, Ulysses) return zero for all components
+     * as native implementations are work-in-progress.
+     */
+    virtual json getEnergyDecomposition() const = 0;
+
+    // =================================================================================
     // Force Field Energy Component Access (Claude Generated November 2025)
     // =================================================================================
 
