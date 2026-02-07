@@ -721,7 +721,7 @@ void D4ParameterGenerator::precomputeC6ReferenceMatrix()
     auto t_start = std::chrono::high_resolution_clock::now();
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("=== D4 C6 Reference Matrix Pre-computation ===");
+        CurcumaLogger::info("=== D4 C6 Reference Matrix Pre-computation (PHASE 1 OPTIMIZED) ===");
     }
 
     // Frequency grid for Casimir-Polder integration

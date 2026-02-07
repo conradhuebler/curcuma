@@ -3092,34 +3092,28 @@ std::vector<Matrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector& 
     return dcn;
 }
 
-std::vector<int> GFNFF::determineHybridization() const
+std::vector<int> GFNFF::determineHybridization(const std::vector<std::vector<int>>& adjacency_list) const
 {
     // Phase 2.3: Enhanced hybridization detection (geometry-based)
+    // PHASE 2 OPTIMIZED (Feb 7, 2026): Use pre-computed adjacency_list (eliminates O(N²) bond detection)
     // Reference: gfnff_ini.f90:400-550 (hybridization assignment)
     // Analyzes bond angles and geometry, not just neighbor count
 
     std::vector<int> hyb(m_atomcount, 3); // Default to sp3
-    double bond_threshold = 1.3;
+    const double bond_threshold = 1.3;  // Still needed for special case CO detection
 
     for (int i = 0; i < m_atomcount; ++i) {
         int z = m_atoms[i];
         Vector ri = m_geometry_bohr.row(i);
 
-        // Step 1: Find bonded neighbors
-        std::vector<int> neighbors;
+        // PHASE 2: Use pre-computed adjacency list (eliminates redundant O(N²) loop)
+        const auto& neighbors = adjacency_list[i];
         std::vector<Vector> bond_vectors;
+        bond_vectors.reserve(neighbors.size());
 
-        for (int j = 0; j < m_atomcount; ++j) {
-            if (i == j) continue;
-
+        for (int j : neighbors) {
             Vector rj = m_geometry_bohr.row(j);
-            double distance = (ri - rj).norm();
-            double rcov_sum = getCovalentRadius(z) + getCovalentRadius(m_atoms[j]);
-
-            if (distance < bond_threshold * rcov_sum) {
-                neighbors.push_back(j);
-                bond_vectors.push_back((rj - ri).normalized());
-            }
+            bond_vectors.push_back((rj - ri).normalized());
         }
 
         int neighbor_count = neighbors.size();
@@ -3231,14 +3225,15 @@ std::vector<int> GFNFF::determineHybridization() const
     return hyb;
 }
 
-std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb) const
+std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb,
+                                         const std::vector<std::vector<int>>& adjacency_list) const
 {
     // Phase 2.2: Pi-system detection (conjugated fragments)
+    // PHASE 2 OPTIMIZED (Feb 7, 2026): Use pre-computed adjacency_list (eliminates O(N²) distance calculations)
     // Reference: gfnff_ini.f90:1100-1300 (pi-system setup)
     // Identifies conjugated chains/rings and marks aromatic systems
 
     std::vector<int> pi_fragments(m_atomcount, 0); // 0 = not in pi-system
-    double bond_threshold = 1.3;
 
     // Step 1: Identify all potential pi-system members
     // Robust detection: include sp, sp2, and picon candidates (N/O/F/S with lone pair conjugation)
@@ -3256,37 +3251,33 @@ std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb) const
         }
     }
 
-    // Step 2: Build adjacency for pi-candidates only
+    // Step 2: Build adjacency for pi-candidates only (PHASE 2: using pre-computed bonds)
     std::vector<std::vector<int>> pi_neighbors(m_atomcount);
     for (int i = 0; i < m_atomcount; ++i) {
         if (!is_pi_candidate[i]) continue;
 
-        for (int j = i + 1; j < m_atomcount; ++j) {
-            if (!is_pi_candidate[j]) continue;
+        // PHASE 2 OPTIMIZED: Iterate only over bonded neighbors (not all atoms)
+        for (int j : adjacency_list[i]) {
+            if (j <= i || !is_pi_candidate[j]) continue;  // Avoid duplicates and non-pi atoms
 
-            double distance = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
-            double rcov_sum = getCovalentRadius(m_atoms[i]) + getCovalentRadius(m_atoms[j]);
+            // Verify bond has pi-character or potential for conjugation
+            bool is_pi_bond = false;
 
-            if (distance < bond_threshold * rcov_sum) {
-                // Verify bond has pi-character or potential for conjugation
-                bool is_pi_bond = false;
+            // Case 1: Both are true pi-atoms (sp/sp2)
+            if ((hyb[i] == 1 || hyb[i] == 2) && (hyb[j] == 1 || hyb[j] == 2)) {
+                is_pi_bond = true;
+            }
+            // Case 2: One is sp/sp2 and other is N/O/S with lone pair
+            else if ((hyb[i] == 1 || hyb[i] == 2) && (m_atoms[j] == 7 || m_atoms[j] == 8 || m_atoms[j] == 16)) {
+                is_pi_bond = true;
+            }
+            else if ((hyb[j] == 1 || hyb[j] == 2) && (m_atoms[i] == 7 || m_atoms[i] == 8 || m_atoms[i] == 16)) {
+                is_pi_bond = true;
+            }
 
-                // Case 1: Both are true pi-atoms (sp/sp2)
-                if ((hyb[i] == 1 || hyb[i] == 2) && (hyb[j] == 1 || hyb[j] == 2)) {
-                    is_pi_bond = true;
-                }
-                // Case 2: One is sp/sp2 and other is N/O/S with lone pair
-                else if ((hyb[i] == 1 || hyb[i] == 2) && (m_atoms[j] == 7 || m_atoms[j] == 8 || m_atoms[j] == 16)) {
-                    is_pi_bond = true;
-                }
-                else if ((hyb[j] == 1 || hyb[j] == 2) && (m_atoms[i] == 7 || m_atoms[i] == 8 || m_atoms[i] == 16)) {
-                    is_pi_bond = true;
-                }
-
-                if (is_pi_bond) {
-                    pi_neighbors[i].push_back(j);
-                    pi_neighbors[j].push_back(i);
-                }
+            if (is_pi_bond) {
+                pi_neighbors[i].push_back(j);
+                pi_neighbors[j].push_back(i);
             }
         }
     }
@@ -3329,9 +3320,10 @@ std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb) const
     return pi_fragments;
 }
 
-std::vector<int> GFNFF::findSmallestRings() const
+std::vector<int> GFNFF::findSmallestRings(const std::vector<std::vector<int>>& adjacency_list) const
 {
     // Phase 2.1: Ring detection algorithm - OPTIMIZED BFS (Claude Generated Jan 2026)
+    // PHASE 2 OPTIMIZED (Feb 7, 2026): Use pre-computed adjacency_list (eliminates O(N²) bond detection)
     // Finds the smallest ring each atom belongs to (3-6 membered rings)
     // Reference: External gfnff_helpers.f90:99-250 (getring36 subroutine)
     //
@@ -3343,33 +3335,18 @@ std::vector<int> GFNFF::findSmallestRings() const
     // When we visit a neighbor that was already visited via a different path,
     // we found a cycle. The cycle size is sum of distances from both paths + 1.
     //
-    // Expected speedup: 50-100x for molecules with 50+ atoms
+    // Expected speedup: 50-100x for molecules with 50+ atoms (PLUS Phase 2 O(N²) elimination)
 
     std::vector<int> ring_sizes(m_atomcount, 0); // 0 = not in ring
     const int MAX_RING_SIZE = 6;  // Only detect rings up to 6 members
 
-    // Step 1: Build adjacency list from bonds (same as before)
-    std::vector<std::vector<int>> neighbors(m_atomcount);
-    double bond_threshold = 1.3; // Same as bond detection
-
-    for (int i = 0; i < m_atomcount; ++i) {
-        for (int j = i + 1; j < m_atomcount; ++j) {
-            double distance = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
-            double rcov_sum = getCovalentRadius(m_atoms[i]) + getCovalentRadius(m_atoms[j]);
-
-            if (distance < bond_threshold * rcov_sum) {
-                neighbors[i].push_back(j);
-                neighbors[j].push_back(i);
-            }
-        }
-    }
-
-    // Step 2: BFS-based smallest ring detection for each atom
+    // PHASE 2 OPTIMIZED (Feb 7, 2026): Use pre-computed adjacency_list (eliminates O(N²) bond detection)
+    // Step 1: BFS-based smallest ring detection for each atom
     // For each starting atom, we do BFS and track distances from start.
     // When we find an already-visited atom via a different neighbor,
     // we've found a cycle.
     for (int start_atom = 0; start_atom < m_atomcount; ++start_atom) {
-        if (neighbors[start_atom].size() < 2) continue;  // Need at least 2 neighbors for a ring
+        if (adjacency_list[start_atom].size() < 2) continue;  // Need at least 2 neighbors for a ring
 
         // Distance from start_atom (-1 = not visited)
         std::vector<int> dist(m_atomcount, -1);
@@ -3390,7 +3367,7 @@ std::vector<int> GFNFF::findSmallestRings() const
             // any cycle found would be larger than MAX_RING_SIZE
             if (dist[current] > MAX_RING_SIZE / 2) break;
 
-            for (int neighbor : neighbors[current]) {
+            for (int neighbor : adjacency_list[current]) {
                 if (dist[neighbor] == -1) {
                     // Not visited yet - add to BFS tree
                     dist[neighbor] = dist[current] + 1;
@@ -4934,9 +4911,11 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     // Phase 2C: Migrate to shared CNCalculator for GFN-FF CN calculation
     auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
     topo_info.coordination_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
-    topo_info.hybridization = determineHybridization();         // Phase 2.3 ✅
-    topo_info.pi_fragments = detectPiSystems(topo_info.hybridization);  // Phase 2.2 ✅
-    topo_info.ring_sizes = findSmallestRings();                 // Phase 2.1 ✅
+
+    // PHASE 2 OPTIMIZED (Feb 7, 2026): Pass adjacency_list to eliminate redundant O(N²) bond detection
+    topo_info.hybridization = determineHybridization(topo_info.adjacency_list);
+    topo_info.pi_fragments = detectPiSystems(topo_info.hybridization, topo_info.adjacency_list);
+    topo_info.ring_sizes = findSmallestRings(topo_info.adjacency_list);
 
     // Build neighbor lists for topology analysis (Session 6)
     topo_info.neighbor_lists = buildNeighborLists();

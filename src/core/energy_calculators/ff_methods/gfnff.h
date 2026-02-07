@@ -823,20 +823,28 @@ private:
      * @brief Determine hybridization states for all atoms
      * @return Vector of hybridization states (1=sp, 2=sp2, 3=sp3, 4=sp3d, 5=sp3d2)
      */
-    std::vector<int> determineHybridization() const;
+    /**
+     * @brief Determine hybridization states (PHASE 2 OPTIMIZED)
+     * @param adjacency_list Pre-computed bond connectivity (eliminates O(N²) loop)
+     * @return Hybridization states (1=sp, 2=sp2, 3=sp3, etc.)
+     */
+    std::vector<int> determineHybridization(const std::vector<std::vector<int>>& adjacency_list) const;
 
     /**
-     * @brief Detect pi-systems and conjugated fragments
+     * @brief Detect pi-systems and conjugated fragments (PHASE 2 OPTIMIZED)
      * @param hyb Hybridization states
+     * @param adjacency_list Pre-computed bond connectivity (eliminates O(N²) loop)
      * @return Vector mapping atoms to pi-fragment IDs (0 = no pi-system)
      */
-    std::vector<int> detectPiSystems(const std::vector<int>& hyb) const;
+    std::vector<int> detectPiSystems(const std::vector<int>& hyb,
+                                     const std::vector<std::vector<int>>& adjacency_list) const;
 
     /**
-     * @brief Find smallest ring size for each atom
+     * @brief Find smallest ring size for each atom (PHASE 2 OPTIMIZED)
+     * @param adjacency_list Pre-computed bond connectivity (eliminates O(N²) loop)
      * @return Vector of smallest ring sizes (0 = not in ring)
      */
-    std::vector<int> findSmallestRings() const;
+    std::vector<int> findSmallestRings(const std::vector<std::vector<int>>& adjacency_list) const;
 
     /**
      * @brief Check if two atoms are in the same ring
