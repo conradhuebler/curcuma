@@ -28,7 +28,6 @@
 
 #include <Eigen/Dense>
 #include <memory>
-#include <unordered_map>
 
 #include "json.hpp"
 using json = nlohmann::json;
@@ -132,20 +131,25 @@ private:
     std::vector<std::vector<double>> m_gaussian_weights;  // [atom_idx][ref_idx]
     bool m_weights_cached = false;
 
-    // Claude Generated (Dec 27, 2025): Cached C6 reference matrix
-    // Performance optimization: Pre-compute Casimir-Polder integration ONCE per element-pair combination
-    // Key: (elem_i << 24) | (elem_j << 16) | (ref_i << 8) | ref_j
-    // Expected speedup: 50-100x for large molecules (eliminates ~340,000 integration operations)
-    std::unordered_map<uint32_t, double> m_c6_reference_cache;
+    // Claude Generated (Feb 7, 2026): Phase 7a - Dense flat array for C6 reference values
+    // Replaces unordered_map to eliminate hash overhead (40-100 cycles per find())
+    // Layout: [elem_i * MAX_ELEM * MAX_REF * MAX_REF + elem_j * MAX_REF * MAX_REF + ref_i * MAX_REF + ref_j]
+    // Size: 118 * 118 * 7 * 7 = 406,952 doubles = ~3.1 MB
+    std::vector<double> m_c6_flat_cache;
     bool m_c6_reference_cached = false;
 
-    // Helper to generate cache key
-    inline uint32_t c6CacheKey(int elem_i, int elem_j, int ref_i, int ref_j) const {
-        return (static_cast<uint32_t>(elem_i) << 24) |
-               (static_cast<uint32_t>(elem_j) << 16) |
-               (static_cast<uint32_t>(ref_i) << 8) |
-               static_cast<uint32_t>(ref_j);
+    // Dense array index for C6 reference lookup (no hash, just arithmetic)
+    inline size_t c6FlatIndex(int elem_i, int elem_j, int ref_i, int ref_j) const {
+        return static_cast<size_t>(elem_i) * MAX_ELEM * MAX_REF * MAX_REF
+             + static_cast<size_t>(elem_j) * MAX_REF * MAX_REF
+             + static_cast<size_t>(ref_i) * MAX_REF
+             + static_cast<size_t>(ref_j);
     }
+
+    // Claude Generated (Feb 7, 2026): Phase 7b - Dominant reference indices per atom
+    // Pre-computed during weight calculation: only refs with weight > threshold
+    // Eliminates near-zero weight iterations in inner loop of getChargeWeightedC6()
+    std::vector<std::vector<int>> m_dominant_refs;  // [atom_idx] → list of significant ref indices
 
     // Mathematical constants
     static constexpr double PI = 3.14159265358979323846;

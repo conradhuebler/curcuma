@@ -273,22 +273,36 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
         }
     }
 
-    // STEP 1: Calculate EEQ charges from geometry (Dec 2025 - Phase 2)
-    // Pass pre-calculated CN to avoid duplicate calculation
-    // Convert std::vector<double> to Eigen::Vector for EEQ solver
+    // STEP 1: Get EEQ charges - reuse topology charges if available, else compute fresh
+    // Claude Generated (Feb 7, 2026): Phase 5 optimization - skip redundant EEQ solve
+    // GFN-FF already computed charges during topology initialization; reuse them for D4
     auto t_eeq_start = std::chrono::high_resolution_clock::now();
-    Vector cn_eigen = Eigen::Map<const Vector>(m_cn_values.data(), m_cn_values.size());
-    m_eeq_charges = m_eeq_solver->calculateCharges(m_atoms, geometry_bohr, 0, &cn_eigen);
-    auto t_eeq_end = std::chrono::high_resolution_clock::now();
-    double t_eeq_ms = std::chrono::duration<double, std::milli>(t_eeq_end - t_eeq_start).count();
+    double t_eeq_ms = 0.0;
 
-    if (m_eeq_charges.size() != m_atoms.size()) {
-        CurcumaLogger::error("D4: EEQ charge calculation failed");
-        return;
+    if (m_topology_charges.size() == static_cast<Eigen::Index>(m_atoms.size())) {
+        // Reuse topology charges (avoids O(N³) matrix decomposition)
+        m_eeq_charges = m_topology_charges;
+        auto t_eeq_end = std::chrono::high_resolution_clock::now();
+        t_eeq_ms = std::chrono::duration<double, std::milli>(t_eeq_end - t_eeq_start).count();
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::success(fmt::format("D4: Reused topology charges in {:.2f} ms (skipped EEQ solve)", t_eeq_ms));
+        }
+    } else {
+        // Fallback: compute fresh EEQ charges
+        Vector cn_eigen = Eigen::Map<const Vector>(m_cn_values.data(), m_cn_values.size());
+        m_eeq_charges = m_eeq_solver->calculateCharges(m_atoms, geometry_bohr, 0, &cn_eigen);
+        auto t_eeq_end = std::chrono::high_resolution_clock::now();
+        t_eeq_ms = std::chrono::duration<double, std::milli>(t_eeq_end - t_eeq_start).count();
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::success(fmt::format("D4: EEQ charges calculated in {:.2f} ms", t_eeq_ms));
+        }
     }
 
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::success(fmt::format("D4: EEQ charges calculated in {:.2f} ms", t_eeq_ms));
+    if (m_eeq_charges.size() != static_cast<Eigen::Index>(m_atoms.size())) {
+        CurcumaLogger::error("D4: EEQ charge calculation failed");
+        return;
     }
 
     // Phase B debug output: Complete EEQ charges for all atoms (Dec 2025)
@@ -599,38 +613,55 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
             }
         }
         
-        for (const auto& t : unique_triplets) {
-            int i = std::get<0>(t);
-            int j = std::get<1>(t);
-            int k = std::get<2>(t);
-            
-            json triple;
-            triple["i"] = i;
-            triple["j"] = j;
-            triple["k"] = k;
+        // Claude Generated (Feb 7, 2026): Phase 6 - Convert set to vector for OpenMP indexed iteration
+        std::vector<std::tuple<int, int, int>> triplet_vec(unique_triplets.begin(), unique_triplets.end());
 
-            // C6 from charge-weighted D4 coefficients
-            int Zi = m_atoms[i];
-            int Zj = m_atoms[j];
-            int Zk = m_atoms[k];
+        // Claude Generated (Feb 7, 2026): Phase 6 - OpenMP parallelize ATM triple loop
+        // Same proven pattern as C6 pair loop above: thread-local vectors + critical merge
+        // Thread safety: m_atoms, m_gaussian_weights, m_c6_reference_cache are read-only
+        //                getChargeWeightedC6() and calculateTripleScale() are pure functions
+        #pragma omp parallel
+        {
+            std::vector<json> local_triples;
 
-            double c6_ij = getChargeWeightedC6(Zi, Zj, i, j);
-            double c6_ik = getChargeWeightedC6(Zi, Zk, i, k);
-            double c6_jk = getChargeWeightedC6(Zj, Zk, j, k);
+            #pragma omp for schedule(dynamic, 10)
+            for (size_t idx = 0; idx < triplet_vec.size(); ++idx) {
+                int i = std::get<0>(triplet_vec[idx]);
+                int j = std::get<1>(triplet_vec[idx]);
+                int k = std::get<2>(triplet_vec[idx]);
 
-            triple["C6_ij"] = c6_ij;
-            triple["C6_ik"] = c6_ik;
-            triple["C6_jk"] = c6_jk;
-            triple["s9"] = s9;
-            triple["a1"] = a1;
-            triple["a2"] = a2;
-            triple["alp"] = alp;
-            triple["atm_method"] = "d4";
+                json triple;
+                triple["i"] = i;
+                triple["j"] = j;
+                triple["k"] = k;
 
-            // Symmetry factor (same as D3)
-            triple["triple_scale"] = calculateTripleScale(i, j, k);
+                int Zi = m_atoms[i];
+                int Zj = m_atoms[j];
+                int Zk = m_atoms[k];
 
-            atm_triples.push_back(triple);
+                double c6_ij = getChargeWeightedC6(Zi, Zj, i, j);
+                double c6_ik = getChargeWeightedC6(Zi, Zk, i, k);
+                double c6_jk = getChargeWeightedC6(Zj, Zk, j, k);
+
+                triple["C6_ij"] = c6_ij;
+                triple["C6_ik"] = c6_ik;
+                triple["C6_jk"] = c6_jk;
+                triple["s9"] = s9;
+                triple["a1"] = a1;
+                triple["a2"] = a2;
+                triple["alp"] = alp;
+                triple["atm_method"] = "d4";
+                triple["triple_scale"] = calculateTripleScale(i, j, k);
+
+                local_triples.push_back(std::move(triple));
+            }
+
+            #pragma omp critical
+            {
+                for (auto& t : local_triples) {
+                    atm_triples.push_back(std::move(t));
+                }
+            }
         }
 
         if (CurcumaLogger::get_verbosity() >= 3) {
@@ -734,6 +765,11 @@ void D4ParameterGenerator::precomputeC6ReferenceMatrix()
 
     int computed_count = 0;
 
+    // Claude Generated (Feb 7, 2026): Phase 7a - Initialize flat dense array
+    // Size: MAX_ELEM * MAX_ELEM * MAX_REF * MAX_REF = 118*118*7*7 = 406,952 entries (~3.1 MB)
+    const size_t flat_size = static_cast<size_t>(MAX_ELEM) * MAX_ELEM * MAX_REF * MAX_REF;
+    m_c6_flat_cache.assign(flat_size, 0.0);
+
     // Pre-compute C6 for all element-pair combinations that have alphaiw data
     for (int elem_i = 0; elem_i < MAX_ELEM && elem_i < static_cast<int>(d4_alphaiw_data.size()); ++elem_i) {
         int nref_i = (elem_i < static_cast<int>(m_refn.size())) ? m_refn[elem_i] : 0;
@@ -752,12 +788,10 @@ void D4ParameterGenerator::precomputeC6ReferenceMatrix()
 
                     double c6 = computeC6Reference(elem_i, elem_j, ref_i, ref_j);
 
-                    // Store in cache (symmetric storage)
-                    uint32_t key_ij = c6CacheKey(elem_i, elem_j, ref_i, ref_j);
-                    uint32_t key_ji = c6CacheKey(elem_j, elem_i, ref_j, ref_i);
-                    m_c6_reference_cache[key_ij] = c6;
+                    // Store in flat array (symmetric storage)
+                    m_c6_flat_cache[c6FlatIndex(elem_i, elem_j, ref_i, ref_j)] = c6;
                     if (elem_i != elem_j || ref_i != ref_j) {
-                        m_c6_reference_cache[key_ji] = c6;
+                        m_c6_flat_cache[c6FlatIndex(elem_j, elem_i, ref_j, ref_i)] = c6;
                     }
 
                     computed_count++;
@@ -774,8 +808,8 @@ void D4ParameterGenerator::precomputeC6ReferenceMatrix()
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success(fmt::format("D4: Pre-computed {} C6 reference values in {:.2f} ms",
             computed_count, t_ms));
-        CurcumaLogger::info(fmt::format("  Cache size: {} entries (symmetric storage)",
-            m_c6_reference_cache.size()));
+        CurcumaLogger::info(fmt::format("  Cache size: {} entries (flat array, {:.1f} MB)",
+            flat_size, flat_size * sizeof(double) / (1024.0 * 1024.0)));
     }
 }
 
@@ -955,6 +989,19 @@ void D4ParameterGenerator::precomputeGaussianWeights()
         m_gaussian_weights[i] = std::move(weights);
     }
 
+    // Claude Generated (Feb 7, 2026): Phase 7b - Pre-compute dominant reference indices
+    // Only refs with weight > 0.01 contribute meaningfully to C6 interpolation
+    constexpr double WEIGHT_THRESHOLD = 0.01;
+    m_dominant_refs.resize(m_atoms.size());
+    for (size_t i = 0; i < m_atoms.size(); ++i) {
+        m_dominant_refs[i].clear();
+        for (size_t ref = 0; ref < m_gaussian_weights[i].size(); ++ref) {
+            if (m_gaussian_weights[i][ref] > WEIGHT_THRESHOLD) {
+                m_dominant_refs[i].push_back(static_cast<int>(ref));
+            }
+        }
+    }
+
     m_weights_cached = true;
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -994,91 +1041,62 @@ void D4ParameterGenerator::precomputeGaussianWeights()
  */
 double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, size_t atom_i, size_t atom_j) const
 {
-    // Claude Generated (Dec 27, 2025): Optimized C6 interpolation using pre-computed weights AND C6 matrix
-    // Reference: cpp-d4 dftd_model.h weight_cn() function
-    //
-    // Performance: NO EXP() CALLS, NO CASIMIR-POLDER INTEGRATIONS
-    // - Uses cached Gaussian weights from precomputeGaussianWeights()
-    // - Uses cached C6 reference matrix from precomputeC6ReferenceMatrix()
-    // Expected speedup: 50-100x for large molecules
-
-    if (!m_weights_cached) {
-        CurcumaLogger::error("D4: Weights not cached! Call precomputeGaussianWeights() first.");
-        return 0.0;
-    }
-
-    if (!m_c6_reference_cached) {
-        CurcumaLogger::error("D4: C6 reference not cached! Call precomputeC6ReferenceMatrix() first.");
-        return 0.0;
-    }
-
-    // Lookup pre-computed weights (NO COMPUTATION, only array access)
-    const auto& weights_i = m_gaussian_weights[atom_i];
-    const auto& weights_j = m_gaussian_weights[atom_j];
-
-    if (weights_i.empty() || weights_j.empty()) {
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::warn(fmt::format("D4: Empty weights for atoms {} {}", atom_i, atom_j));
-        }
-        return 0.0;
-    }
+    // Claude Generated (Feb 7, 2026): Phase 7a/7b/7c - Fully optimized C6 interpolation
+    // - 7a: Dense flat array (no hash lookups)
+    // - 7b: Dominant refs only (skip near-zero weights)
+    // - 7c: No debug logging in hot path (moved to caller if needed)
 
     // Convert to 0-based indexing
     int elem_i = Zi - 1;
     int elem_j = Zj - 1;
 
-    // Validate element range
+    // Validate (rare path)
     if (elem_i < 0 || elem_i >= MAX_ELEM || elem_j < 0 || elem_j >= MAX_ELEM) {
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::warn(fmt::format("D4: Invalid elements Zi={} Zj={}", Zi, Zj));
-        }
         return 0.0;
     }
 
-    // Weighted sum over reference states (ONLY lookups and multiplications, NO integrations!)
+    const auto& weights_i = m_gaussian_weights[atom_i];
+    const auto& weights_j = m_gaussian_weights[atom_j];
+
+    if (weights_i.empty() || weights_j.empty()) {
+        return 0.0;
+    }
+
+    // Phase 7b: Use dominant refs if available, else iterate all refs
+    const auto& refs_i = (atom_i < m_dominant_refs.size() && !m_dominant_refs[atom_i].empty())
+                         ? m_dominant_refs[atom_i]
+                         : std::vector<int>();  // empty = iterate all
+    const auto& refs_j = (atom_j < m_dominant_refs.size() && !m_dominant_refs[atom_j].empty())
+                         ? m_dominant_refs[atom_j]
+                         : std::vector<int>();
+
     double c6_weighted = 0.0;
 
-    for (size_t refi = 0; refi < weights_i.size(); ++refi) {
-        double wi = weights_i[refi];  // LOOKUP from Gaussian weight cache
+    // Base offset for elem_i and elem_j in flat cache
+    const size_t base_ij = static_cast<size_t>(elem_i) * MAX_ELEM * MAX_REF * MAX_REF
+                         + static_cast<size_t>(elem_j) * MAX_REF * MAX_REF;
 
-        for (size_t refj = 0; refj < weights_j.size(); ++refj) {
-            double wj = weights_j[refj];  // LOOKUP from Gaussian weight cache
-
-            // LOOKUP C6 reference value from pre-computed cache (NO INTEGRATION!)
-            uint32_t key = c6CacheKey(elem_i, elem_j, refi, refj);
-            auto it = m_c6_reference_cache.find(key);
-
-            double c6_ref = (it != m_c6_reference_cache.end()) ? it->second : 1.0;  // Cache hit or fallback
-
-            // Add weighted contribution (simple multiplication, NO integration!)
-            c6_weighted += wi * wj * c6_ref;
-        }
-    }
-
-    // Phase B debug: Reference state selection for C-O pair (Dec 2025)
-    if (CurcumaLogger::get_verbosity() >= 3 && atom_i == 0 && atom_j == 5) {
-        CurcumaLogger::info(fmt::format("D4: C6[0][5] reference weights (elem_i={}, elem_j={})", elem_i, elem_j));
-        for (size_t refi = 0; refi < weights_i.size(); ++refi) {
-            for (size_t refj = 0; refj < weights_j.size(); ++refj) {
-                double weight = weights_i[refi] * weights_j[refj];
-                if (weight > 1e-6) {  // Only significant weights
-                    uint32_t key = c6CacheKey(elem_i, elem_j, refi, refj);
-                    auto it = m_c6_reference_cache.find(key);
-                    double c6_ref = (it != m_c6_reference_cache.end()) ? it->second : 1.0;
-                    CurcumaLogger::param(fmt::format("  ref_i={} ref_j={}", refi, refj),
-                                         fmt::format("weight={:.6f} C6_ref={:.4f}", weight, c6_ref));
-                }
+    if (!refs_i.empty() && !refs_j.empty()) {
+        // Fast path: only iterate dominant references (Phase 7b)
+        for (int ri : refs_i) {
+            double wi = weights_i[ri];
+            size_t base_ri = base_ij + static_cast<size_t>(ri) * MAX_REF;
+            for (int rj : refs_j) {
+                c6_weighted += wi * weights_j[rj] * m_c6_flat_cache[base_ri + rj];
             }
         }
-    }
-
-    // Phase B enhanced output: Include CN and charges for debugging (Dec 2025)
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("D4 C6[{}][{}]: Zi={} Zj={} CN_i={:.3f} CN_j={:.3f} q_i={:.4f} q_j={:.4f} → C6={:.4f}",
-                                         atom_i, atom_j, Zi, Zj,
-                                         m_cn_values[atom_i], m_cn_values[atom_j],
-                                         m_eeq_charges(atom_i), m_eeq_charges(atom_j),
-                                         c6_weighted));
+    } else {
+        // Fallback: iterate all references
+        int nref_i = static_cast<int>(weights_i.size());
+        int nref_j = static_cast<int>(weights_j.size());
+        for (int ri = 0; ri < nref_i; ++ri) {
+            double wi = weights_i[ri];
+            if (wi < 1e-12) continue;  // Micro-optimization: skip zero weights
+            size_t base_ri = base_ij + static_cast<size_t>(ri) * MAX_REF;
+            for (int rj = 0; rj < nref_j; ++rj) {
+                c6_weighted += wi * weights_j[rj] * m_c6_flat_cache[base_ri + rj];
+            }
+        }
     }
 
     return c6_weighted;
