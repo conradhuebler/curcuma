@@ -2387,8 +2387,11 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
         hyb = topo_info.hybridization[atom_j];  // 1=sp, 2=sp2, 3=sp3, 5=sp3d
     }
 
+    // Claude Generated (Feb 2026): Use topology neighbor count (nb(20,i)) not D3 CN
     int nn_center = 0;
-    if (topo_info.coordination_numbers.size() > 0 && atom_j < topo_info.coordination_numbers.size()) {
+    if (!topo_info.adjacency_list.empty() && atom_j < static_cast<int>(topo_info.adjacency_list.size())) {
+        nn_center = static_cast<int>(topo_info.adjacency_list[atom_j].size());
+    } else if (topo_info.coordination_numbers.size() > 0 && atom_j < topo_info.coordination_numbers.size()) {
         nn_center = static_cast<int>(std::round(topo_info.coordination_numbers[atom_j]));
     }
 
@@ -2396,32 +2399,19 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
 
     // Factor 4: fn = coordination number dependence
     // Reference: gfnff_ini.f90:1612
-    // Fortran: fn = 1.0d0 - 2.36d0 / dble(nn)**2  where nn = neighbor count
-    int neighbor_count_angle = 0;
-    for (int i = 0; i < m_atomcount; ++i) {
-        if (i == atom_j) continue;
-        double distance = (m_geometry_bohr.row(atom_j) - m_geometry_bohr.row(i)).norm();
-        if (distance < 2.0) neighbor_count_angle++;  // Bond threshold
+    // Formula: fn = 1.0 - 2.36 / nn²
+    // CRITICAL: Fortran uses nb(20,i) = INTEGER bonded neighbor count from topology,
+    // NOT D3-style fractional coordination number!
+    // Example: CH₄ carbon has nb(20,C)=4 (4 bonded H), but D3 CN=3.49
+    // Using D3 CN rounds to 3 → fn=0.738 (wrong), using nb=4 → fn=0.853 (correct)
+    // Claude Generated (Feb 2026): Fix fn to use topology neighbor count
+    double nn = 1.0;
+    if (!topo_info.adjacency_list.empty() && atom_j < static_cast<int>(topo_info.adjacency_list.size())) {
+        nn = static_cast<double>(topo_info.adjacency_list[atom_j].size());
+    } else {
+        // Fallback: round D3-style CN (less accurate but safe)
+        nn = static_cast<double>(static_cast<int>(std::round(coord_numbers[atom_j])));
     }
-    // Factor 4: fn - coordination number dependence
-    // PHASE 4: Use REAL coordination number from D3-style calculation
-    // Formula (Fortran gfnff_ini.f90:1612): fn = 1.0 - 2.36 / nn²
-    // where nn = topo%nb(20,i) = Coordination number of central atom
-    // Reference: gfnff_ini.f90:1377,1612
-
-    // Claude Generated (February 2026): Phase 1 - Use pre-computed CN (eliminates 2,614 redundant calculations!)
-    // OLD CODE (DELETED):
-    //   const double threshold_cn_squared = 40.0 * 40.0;
-    //   auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, threshold_cn_squared);
-    //   Vector coord_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
-    //
-    // PROBLEM: This was called 2,614 times for 1410-atom system (once per angle)
-    //          Each call computed CN for ALL atoms (O(N²) work)
-    //          Result: 2,614 × O(N²) = ~26 seconds wasted on redundant calculations
-    //
-    // SOLUTION: CN now computed ONCE in generateGFNFFAngles() and passed as parameter
-
-    double nn = static_cast<int>(std::round(coord_numbers[atom_j]));  // Central atom coordination number
     nn = std::max(1.0, nn);  // Ensure nn >= 1
     double fn = 1.0 - 2.36 / (nn * nn);
     fn = std::max(0.05, fn);  // Ensure fn stays positive

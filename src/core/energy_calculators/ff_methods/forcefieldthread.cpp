@@ -934,13 +934,13 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
         double r_ij_sq = (i - j).squaredNorm();  // r_ij²
         double r_jk_sq = (k - j).squaredNorm();  // r_jk²
 
-        // Angle geometry logging - Claude Generated 2025-11-30
-        if (index < 2 && CurcumaLogger::get_verbosity() >= 3) {
+        // Angle geometry logging - Claude Generated 2025-11-30, extended Feb 2026
+        if (CurcumaLogger::get_verbosity() >= 3) {
             double r_ij = std::sqrt(r_ij_sq);
             double r_jk = std::sqrt(r_jk_sq);
             CurcumaLogger::info(fmt::format(
-                "Angle calculation #{}: atoms {}-{}-{} | theta={:.6f} rad ({:.2f}°), theta0={:.6f} rad ({:.2f}°) | "
-                "k_ijk={:.6f} | r_ij={:.6f}, r_jk={:.6f}",
+                "Angle #{}: atoms {}-{}-{} | theta={:.6f} rad ({:.2f}°), theta0={:.6f} rad ({:.2f}°) | "
+                "k_ijk={:.8f} | r_ij={:.6f}, r_jk={:.6f}",
                 index, angle.i, angle.j, angle.k, theta, theta*180.0/pi, theta0, theta0*180.0/pi,
                 k_ijk, r_ij, r_jk));
         }
@@ -1009,11 +1009,11 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
         double angle_contribution = energy * damp * factor;
         m_angle_energy += angle_contribution;
 
-        // DEBUG LOGGING - Claude Generated 2025-11-30
-        if (index < 2 && CurcumaLogger::get_verbosity() >= 3) {
+        // DEBUG LOGGING - Claude Generated 2025-11-30, extended Feb 2026
+        if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info(fmt::format(
-                "  → energy_raw={:.8f} Eh, damp_ij={:.6f}, damp_jk={:.6f}, damp_total={:.6f}, "
-                "factor={:.6f}, contribution={:.8f} Eh, total={:.8f} Eh",
+                "  → energy_raw={:.10f} Eh, damp_ij={:.8f}, damp_jk={:.8f}, damp_total={:.8f}, "
+                "factor={:.6f}, contribution={:.10f} Eh, cumulative={:.10f} Eh",
                 energy, damp_ij, damp_jk, damp, factor, angle_contribution, m_angle_energy));
         }
 

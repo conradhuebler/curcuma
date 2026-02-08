@@ -154,7 +154,7 @@ private:
         m_gfnff->Calculation(true);
         Geometry grad = m_gfnff->Gradient();
 
-        // Compare norm
+        // Compare total norm
         double norm = 0.0;
         for (int i = 0; i < grad.rows(); ++i) {
             norm += grad.row(i).squaredNorm();
@@ -162,7 +162,38 @@ private:
         norm = std::sqrt(norm);
 
         double ref_norm = m_ref_data["gradients"]["norm"];
-        addResult("Gradient", "Norm", std::abs(norm - ref_norm) < 1e-4, norm, ref_norm, norm - ref_norm);
+        addResult("Gradient", "TotalNorm", std::abs(norm - ref_norm) < 1e-4, norm, ref_norm, norm - ref_norm);
+
+        // Gradient Decomposition Analysis (NEW - based on user extensions)
+        if (m_ref_data.contains("gradient_decomposition")) {
+            validateGradientDecomposition();
+        }
+    }
+
+    void validateGradientDecomposition() {
+        std::cout << std::endl << "=== Gradient Decomposition Diagnostic ===" << std::endl;
+        const auto& ref_decomp = m_ref_data["gradient_decomposition"];
+
+        // We focus on the dominant components for the first atom to identify sign flips or scaling errors
+        for (auto it = ref_decomp.begin(); it != ref_decomp.end(); ++it) {
+            int atom_idx = std::stoi(it.key());
+            if (atom_idx > 0) break; // Only check first atom for brevity in summary
+
+            std::cout << "Atom " << atom_idx << " components:" << std::endl;
+            const auto& comps = it.value();
+            for (auto cit = comps.begin(); cit != comps.end(); ++cit) {
+                std::string name = cit.key();
+                if (name == "SUM" || name == "TOTAL") continue;
+
+                double rx = cit.value()["x"];
+                double ry = cit.value()["y"];
+                double rz = cit.value()["z"];
+                double r_norm = std::sqrt(rx*rx + ry*ry + rz*rz);
+
+                std::cout << std::left << std::setw(12) << name
+                          << " Ref Norm: " << std::fixed << std::setprecision(6) << r_norm << std::endl;
+            }
+        }
     }
 
     void addResult(const std::string& cat, const std::string& sub, bool passed, double val, double ref, double err) {
