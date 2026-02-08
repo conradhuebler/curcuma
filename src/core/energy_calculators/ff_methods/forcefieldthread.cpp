@@ -1579,11 +1579,12 @@ void ForceFieldThread::CalculateGFNFFDispersionContribution()
         double t8 = 1.0 / (r8 + r0_8);
 
         // GFN-FF dispersion formula: disp = (t6 + 2*r4r2ij*t8) * zetac6
-        // Energy: dE = -c6 * disp * 0.5  (0.5 for pair counting)
+        // Energy: dE = -c6 * disp (no 0.5 - Fortran accumulates to both atoms, we count once per pair)
         // Reference: gfnff_gdisp0.f90:374,377
         // Claude Generated (Jan 31, 2026): Added zetac6 charge scaling
+        // Claude Generated (Feb 8, 2026): Removed 0.5 factor - Fortran's 0.5 is cancelled by dual accumulation
         double disp_sum = t6 + 2.0 * disp.r4r2ij * t8;
-        double energy = -0.5 * disp.C6 * disp_sum * disp.zetac6 * m_final_factor;
+        double energy = -disp.C6 * disp_sum * disp.zetac6 * m_final_factor;
 
         m_dispersion_energy += energy;
         m_d4_energy += energy;  // GFN-FF dispersion reports as D4 energy
@@ -1620,8 +1621,9 @@ void ForceFieldThread::CalculateGFNFFDispersionContribution()
             //       = -C6 * zetac6 * ddisp_dr2 * r
             // Gradient direction: dE/dr * (rij_vec/rij)
             // Claude Generated (Jan 31, 2026): Added zetac6 to gradient
-            // Claude Generated (Feb 1, 2026): Fixed missing 0.5 factor (d6/d8 are 2*d(t)/d(r^2))
-            double dEdr = -0.5 * disp.C6 * disp.zetac6 * ddisp_dr2 * rij * m_final_factor;
+            // Claude Generated (Feb 1, 2026): d6/d8 are 2*d(t)/d(r^2)
+            // Claude Generated (Feb 8, 2026): Removed 0.5 factor - consistent with energy fix
+            double dEdr = -disp.C6 * disp.zetac6 * ddisp_dr2 * rij * m_final_factor;
 
             // Note: ddisp_dr2 is negative (d6, d8 are negative), so dEdr is positive
             // This means repulsion-like gradient contribution at short range (expected)
@@ -2655,11 +2657,12 @@ void ForceFieldThread::CalculateD4DispersionContribution()
         double t8 = 1.0 / (r8 + r0_8);
 
         // GFN-FF dispersion formula: disp = (t6 + 2*r4r2ij*t8) * zetac6
-        // Energy: dE = -c6 * disp * 0.5  (0.5 for pair counting)
+        // Energy: dE = -c6 * disp (no 0.5 - see line 1586 comment)
         // Reference: gfnff_gdisp0.f90:374,377
         // Claude Generated (Jan 31, 2026): Added zetac6 charge scaling
+        // Claude Generated (Feb 8, 2026): Removed 0.5 factor - consistent with energy fix
         double disp_sum = t6 + 2.0 * disp.r4r2ij * t8;
-        double pair_energy = -0.5 * disp.C6 * disp_sum * disp.zetac6 * m_final_factor;
+        double pair_energy = -disp.C6 * disp_sum * disp.zetac6 * m_final_factor;
 
         // Claude Generated (Jan 31, 2026): Fix dispersion energy reporting
         // Previously only m_d4_energy was updated, causing total_gfnff_dispersion to show 0
