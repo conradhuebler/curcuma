@@ -1324,6 +1324,11 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         CurcumaLogger::result(fmt::format("Primary torsions: {} terms, energy = {:.6e} Eh",
                                            m_gfnff_dihedrals.size(), primary_torsion_energy));
     }
+    // Temporary debug for torsion investigation
+    if (m_thread == 0) {
+        std::cerr << "DEBUG_THREAD0 primary_torsion: " << m_gfnff_dihedrals.size()
+                  << " terms, E=" << std::scientific << std::setprecision(8) << primary_torsion_energy << std::endl;
+    }
 }
 
 // Claude Generated (Jan 2, 2026): Extra sp3-sp3 gauche torsions (separate from primary torsions)
@@ -1473,36 +1478,138 @@ void ForceFieldThread::CalculateGFNFFExtraTorsionContribution()
                                            m_gfnff_extra_torsions.size(), extra_torsion_energy));
         CurcumaLogger::result(fmt::format("Total dihedral energy: {:.6e} Eh (primary + extra)", m_dihedral_energy));
     }
+    // Temporary debug for torsion investigation
+    if (m_thread == 0) {
+        std::cerr << "DEBUG_THREAD0 extra_torsion: " << m_gfnff_extra_torsions.size()
+                  << " terms, E=" << std::scientific << std::setprecision(8) << extra_torsion_energy << std::endl;
+    }
 }
 
 void ForceFieldThread::CalculateGFNFFInversionContribution()
 {
-    // GFN-FF inversion: E = k*(C0 + C1*cos(θ) + C2*cos(2θ))
-    // Claude Generated (2025): Now using correct GFNFF_Geometry::calculateOutOfPlaneAngle
+    // Claude Generated (Feb 2026): Rewritten to match Fortran egtors inversion branch
+    // Reference: gfnff_engrad.F90:1355-1387
+    //
+    // GFN-FF inversions use the omega (out-of-plane angle) function with star-topology damping.
+    // Atom convention: i=center, j/k/l=three neighbors (sorted by distance in generation)
+    //
+    // Two potential types:
+    //   potential_type=0  (tlist(5)=0): E = V*(1-cos(omega)) * damp   [planar sp2 centers]
+    //   potential_type=-1 (tlist(5)<0): E = V*(cos(omega)-cos(omega0))^2 * damp  [saturated N]
 
     for (int index = 0; index < m_gfnff_inversions.size(); ++index) {
-        const auto& inversion = m_gfnff_inversions[index];
+        const auto& inv = m_gfnff_inversions[index];
 
-        // Extract atom positions as Eigen::Vector3d
-        Eigen::Vector3d r_i = m_geometry.row(inversion.i).head<3>();  // out-of-plane atom
-        Eigen::Vector3d r_j = m_geometry.row(inversion.j).head<3>();  // plane atom 1
-        Eigen::Vector3d r_k = m_geometry.row(inversion.k).head<3>();  // plane atom 2
-        Eigen::Vector3d r_l = m_geometry.row(inversion.l).head<3>();  // central atom
+        // For UFF/QMDFF inversions (type != 3), use old formula
+        if (inv.type != 3) {
+            Eigen::Vector3d r_i = m_geometry.row(inv.i).head<3>();
+            Eigen::Vector3d r_j = m_geometry.row(inv.j).head<3>();
+            Eigen::Vector3d r_k = m_geometry.row(inv.k).head<3>();
+            Eigen::Vector3d r_l = m_geometry.row(inv.l).head<3>();
+            Matrix derivate;
+            double theta = GFNFF_Geometry::calculateOutOfPlaneAngle(r_i, r_j, r_k, r_l, derivate, m_calculate_gradient);
+            double energy = inv.fc * (inv.C0 + inv.C1 * cos(theta) + inv.C2 * cos(2 * theta));
+            m_inversion_energy += energy * m_final_factor * m_inversion_scaling;
+            if (m_calculate_gradient) {
+                double dEdtheta = inv.fc * (-inv.C1 * sin(theta) - 2 * inv.C2 * sin(2 * theta)) * m_final_factor * m_inversion_scaling;
+                m_gradient.row(inv.i) += dEdtheta * derivate.row(0);
+                m_gradient.row(inv.j) += dEdtheta * derivate.row(1);
+                m_gradient.row(inv.k) += dEdtheta * derivate.row(2);
+                m_gradient.row(inv.l) += dEdtheta * derivate.row(3);
+            }
+            continue;
+        }
 
-        // Use GFN-FF out-of-plane angle calculation (not UFF!)
+        // =====================================================================
+        // GFN-FF inversion (type == 3)
+        // =====================================================================
+        // Atom layout: i=center (3 neighbors), j=nb1, k=nb2, l=nb3
+        Eigen::Vector3d r_center = m_geometry.row(inv.i).head<3>();
+        Eigen::Vector3d r_nb1 = m_geometry.row(inv.j).head<3>();
+        Eigen::Vector3d r_nb2 = m_geometry.row(inv.k).head<3>();
+        Eigen::Vector3d r_nb3 = m_geometry.row(inv.l).head<3>();
+
+        // Out-of-plane angle (Fortran omega function, gfnff_helpers.f90:427-448)
+        // Center atom is i, calculateOutOfPlaneAngle expects i=center
         Matrix derivate;
-        double theta = GFNFF_Geometry::calculateOutOfPlaneAngle(r_i, r_j, r_k, r_l, derivate, m_calculate_gradient);
+        double omega = GFNFF_Geometry::calculateOutOfPlaneAngle(r_center, r_nb1, r_nb2, r_nb3, derivate, m_calculate_gradient);
 
-        // GFN-FF inversion energy formula
-        double energy = inversion.fc * (inversion.C0 + inversion.C1 * cos(theta) + inversion.C2 * cos(2 * theta));
+        // =====================================================================
+        // Star-topology damping (3 distances from center to each neighbor)
+        // Reference: gfnff_engrad.F90:1372-1381
+        // =====================================================================
+        int Z_center = m_atom_types[inv.i];
+        int Z_nb1 = m_atom_types[inv.j];
+        int Z_nb2 = m_atom_types[inv.k];
+        int Z_nb3 = m_atom_types[inv.l];
+
+        if (Z_center < 1 || Z_center > 86 || Z_nb1 < 1 || Z_nb1 > 86 ||
+            Z_nb2 < 1 || Z_nb2 > 86 || Z_nb3 < 1 || Z_nb3 > 86) {
+            continue;
+        }
+
+        constexpr double rcov_scale = 4.0 / 3.0;
+        double rcov_c = GFNFFParameters::covalent_rad_d3[Z_center - 1] * rcov_scale;
+        double rcov_1 = GFNFFParameters::covalent_rad_d3[Z_nb1 - 1] * rcov_scale;
+        double rcov_2 = GFNFFParameters::covalent_rad_d3[Z_nb2 - 1] * rcov_scale;
+        double rcov_3 = GFNFFParameters::covalent_rad_d3[Z_nb3 - 1] * rcov_scale;
+
+        // Fortran inversion damping (gfnff_engrad.F90:1356-1365):
+        // NOT star topology! Uses nb1 as hub for two of three distances:
+        //   vab = xyz(j) - xyz(i)  → nb1 minus center    (bond distance)
+        //   vcb = xyz(j) - xyz(k)  → nb1 minus nb2       (1-3 distance across angle)
+        //   vdc = xyz(j) - xyz(l)  → nb1 minus nb3       (1-3 distance across angle)
+        // This gives much smaller damping than star topology because 1-3 distances
+        // (~4.5 Bohr) damp much more than bond distances (~2.65 Bohr).
+        double rij_sq = (r_nb1 - r_center).squaredNorm();  // nb1-center: bond
+        double rjk_sq = (r_nb1 - r_nb2).squaredNorm();     // nb1-nb2: 1-3 distance
+        double rjl_sq = (r_nb1 - r_nb3).squaredNorm();     // nb1-nb3: 1-3 distance
+
+        auto calculate_damping = [](double r2, double rcov_a, double rcov_b) -> double {
+            double rcut = GFNFFParameters::atcutt * (rcov_a + rcov_b) * (rcov_a + rcov_b);
+            double rr = (r2 / rcut) * (r2 / rcut);
+            return 1.0 / (1.0 + rr);
+        };
+
+        // Fortran: damp = dampij * dampjk * dampjl
+        // gfnffdampt(at(i),at(j),rij) → center, nb1 pair
+        // gfnffdampt(at(k),at(j),rjk) → nb2, nb1 pair
+        // gfnffdampt(at(j),at(l),rjl) → nb1, nb3 pair
+        double damp_ij = calculate_damping(rij_sq, rcov_c, rcov_1);  // center-nb1
+        double damp_jk = calculate_damping(rjk_sq, rcov_2, rcov_1);  // nb2-nb1
+        double damp_jl = calculate_damping(rjl_sq, rcov_1, rcov_3);  // nb1-nb3
+        double damp = damp_ij * damp_jk * damp_jl;
+
+        // =====================================================================
+        // Energy calculation
+        // =====================================================================
+        double V = inv.fc;
+        double energy = 0.0;
+        double dEdomega = 0.0;
+
+        if (inv.potential_type == 0) {
+            // Planar sp2: E = V*(1 + cos(omega + pi)) * damp = V*(1 - cos(omega)) * damp
+            // Reference: gfnff_engrad.F90:1383-1385
+            energy = V * (1.0 - cos(omega)) * damp;
+            dEdomega = V * sin(omega) * damp;
+        } else {
+            // Saturated N (double minima at ±omega0):
+            // E = V*(cos(omega) - cos(omega0))^2 * damp
+            // Reference: gfnff_engrad.F90:1386-1387
+            double diff = cos(omega) - cos(inv.omega0);
+            energy = V * diff * diff * damp;
+            dEdomega = -2.0 * V * sin(omega) * diff * damp;
+        }
+
         m_inversion_energy += energy * m_final_factor * m_inversion_scaling;
 
         if (m_calculate_gradient) {
-            double dEdtheta = inversion.fc * (-inversion.C1 * sin(theta) - 2 * inversion.C2 * sin(2 * theta)) * m_final_factor * m_inversion_scaling;
-            m_gradient.row(inversion.i) += dEdtheta * derivate.row(0);
-            m_gradient.row(inversion.j) += dEdtheta * derivate.row(1);
-            m_gradient.row(inversion.k) += dEdtheta * derivate.row(2);
-            m_gradient.row(inversion.l) += dEdtheta * derivate.row(3);
+            double grad_scale = dEdomega * m_final_factor * m_inversion_scaling;
+            m_gradient.row(inv.i) += grad_scale * derivate.row(0);
+            m_gradient.row(inv.j) += grad_scale * derivate.row(1);
+            m_gradient.row(inv.k) += grad_scale * derivate.row(2);
+            m_gradient.row(inv.l) += grad_scale * derivate.row(3);
+            // Note: damping gradient terms omitted for now (second-order correction)
         }
     }
 }
@@ -1542,6 +1649,12 @@ void ForceFieldThread::CalculateGFNFFDispersionContribution()
 
     if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_dispersions.size() > 0) {
         CurcumaLogger::info(fmt::format("Thread calculating {} GFN-FF dispersion pairs", m_gfnff_dispersions.size()));
+    }
+    // Claude Generated (Feb 8, 2026): Temporary per-pair diagnostic for dispersion accuracy investigation
+    // Enable for small molecules only (< 50 pairs) to avoid excessive output
+    bool disp_diag = (m_gfnff_dispersions.size() > 0 && m_gfnff_dispersions.size() <= 50);
+    if (disp_diag) {
+        fmt::print(stderr, "DISP_CSV: idx,i,j,rij_bohr,C6,r4r2ij,r0_sq,zetac6,t6,t8,energy\n");
     }
 
     for (int index = 0; index < m_gfnff_dispersions.size(); ++index) {
@@ -1590,13 +1703,11 @@ void ForceFieldThread::CalculateGFNFFDispersionContribution()
         m_d4_energy += energy;  // GFN-FF dispersion reports as D4 energy
 
         // DEBUG: Per-pair D4 dispersion breakdown for 1e-6 accuracy (Claude Generated Jan 26, 2026)
-        if (index < 5 && CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info(fmt::format("D4 disp pair {}: i={}, j={}, rij={:.6f} Bohr, C6={:.6e}, "
-                                             "r0_squared={:.6f}, r4r2ij={:.6f}, t6={:.6e}, t8={:.6e}, "
-                                             "disp_sum={:.6e}, E_pair={:.9e} Eh",
-                                             index, disp.i, disp.j, rij, disp.C6,
-                                             disp.r0_squared, disp.r4r2ij, t6, t8,
-                                             disp_sum, energy));
+        if (disp_diag) {
+            fmt::print(stderr, "DISP_CSV: {},{},{},{:.6f},{:.6e},{:.6f},{:.6f},{:.6e},{:.6e},{:.6e},{:.10e}\n",
+                       index, disp.i, disp.j,
+                       rij, disp.C6, disp.r4r2ij, disp.r0_squared, disp.zetac6,
+                       t6, t8, energy);
         }
 
         if (m_calculate_gradient) {
@@ -2627,6 +2738,11 @@ void ForceFieldThread::CalculateD4DispersionContribution()
         CurcumaLogger::info(fmt::format("Thread {} calculating {} GFN-FF/D4 dispersion pairs",
                                         m_thread, m_d4_dispersions.size()));
     }
+    // Claude Generated (Feb 8, 2026): Temporary per-pair diagnostic for dispersion accuracy investigation
+    bool d4_disp_diag = (m_d4_dispersions.size() > 0 && m_d4_dispersions.size() <= 50);
+    if (d4_disp_diag) {
+        fmt::print(stderr, "D4_DISP_CSV: idx,i,j,rij_bohr,C6,r4r2ij,r0_sq,zetac6,t6,t8,energy\n");
+    }
 
     for (int index = 0; index < m_d4_dispersions.size(); ++index) {
         const auto& disp = m_d4_dispersions[index];
@@ -2670,12 +2786,12 @@ void ForceFieldThread::CalculateD4DispersionContribution()
         m_dispersion_energy += pair_energy;
         m_d4_energy += pair_energy;
 
-        // Verbosity 2: Detailed debug output for first pair
-        if (CurcumaLogger::get_verbosity() >= 3 && index == 0) {
-            CurcumaLogger::info(fmt::format(
-                "GFN-FF D4 DEBUG: i={} j={} r={:.4f} C6={:.4f} r4r2ij={:.4f} R0²={:.4f} zetac6={:.6f} E={:.6e} Eh",
-                disp.i, disp.j, rij, disp.C6, disp.r4r2ij, disp.r0_squared, disp.zetac6, pair_energy
-            ));
+        // Claude Generated (Feb 8, 2026): Per-pair diagnostic CSV
+        if (d4_disp_diag) {
+            fmt::print(stderr, "D4_DISP_CSV: {},{},{},{:.6f},{:.6e},{:.6f},{:.6f},{:.6e},{:.6e},{:.6e},{:.10e}\n",
+                       index, disp.i, disp.j,
+                       rij, disp.C6, disp.r4r2ij, disp.r0_squared, disp.zetac6,
+                       t6, t8, pair_energy);
         }
 
         if (m_calculate_gradient) {

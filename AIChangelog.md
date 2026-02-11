@@ -6,6 +6,7 @@ Format: One line per change, newest first.
 
 ## February 2026
 
+- **GFN-FF Inversion Damping Fix (Feb 11)**: Fixed incorrect star-topology damping in inversion energy calculation; Fortran uses nb1-hub distances (center-nb1 bond + nb1-nb2 and nb1-nb3 as 1-3 distances), not center-to-all-neighbors; complex molecule torsion+inversion error reduced from +234 mEh to -0.45 mEh (520× improvement); also added pi-sp3 torsion barrier override after ring handling block
 - **GFN-FF Test Suite Unification (Feb 7)**: Unified fragmented GFN-FF tests into a single high-precision validation runner (`test_gfnff_validation.cpp`), implemented Python reference generator (`gfnff_ref_generator.py`) to bridge Fortran analyzer and Curcuma, standardized reference data in JSON format, achieved < 1 µEh accuracy for many terms across multiple molecules, removed 8+ redundant legacy test files, integrated with CTest for automated regression testing
 - **GFN-FF Bond Energy Systematic Error Fix (Feb 1)**: Removed redundant topology_factor scaling in generateTopologyAwareBonds() that applied ring/pi corrections on top of already-computed corrections in getGFNFFBondParameters(), fixing +3% bond energy error, Complex (231 atoms): -38.16 Eh → -37.03 Eh (ref: -37.025 Eh), error reduced from 3.06% to 0.007% (456× improvement)
 

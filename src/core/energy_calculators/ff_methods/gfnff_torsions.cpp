@@ -505,12 +505,16 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     double qa_j, double qa_k,
     double cn_i, double cn_l,
     bool in_ring, int ring_size,
-    int i_atom_idx, int j_atom_idx, int k_atom_idx, int l_atom_idx) const
+    int i_atom_idx, int j_atom_idx, int k_atom_idx, int l_atom_idx,
+    int bond_type) const
 {
     GFNFFTorsionParams params;
 
     // Default: proper torsion (not improper)
     params.is_improper = false;
+    params.fij_corrected = 0.0;
+    params.fkl_corrected = 0.0;
+    params.fqq = 1.0;
 
     // ==========================================================================
     // STEP 1: Determine periodicity and phase (CORRECTED Dec 2025)
@@ -604,34 +608,12 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     // ---------------------------------------------------------------------------
     // (B) Outer atom contribution: fkl = tors2[Z_i] * tors2[Z_l]
     // ---------------------------------------------------------------------------
-    double fkl = tors2_angewChem2020[z_i - 1] * tors2_angewChem2020[z_l - 1];
+    // CORRECTED (Feb 10, 2026): Reordered to match Fortran gfnff_ini.f90:1832-1839
+    // Fortran order: base → saturated N (RESET) → threshold → CN correction
+    // Previous Curcuma order had CN correction BEFORE threshold (wrong!)
 
-    // CN-dependent scaling: fkl *= (CN_i * CN_l)^(-0.14) (gfnff_ini.f90:1809)
-    // Use actual CN values from parameters
-    double cn_product = cn_i * cn_l;
-    if (cn_product > 0.01) {  // Avoid division by zero
-        fkl *= std::pow(cn_product, -0.14);
-    }
-
-    // ---------------------------------------------------------------------------
-    // Nitrogen reduction for outer atoms (gfnff_ini.f90:1803-1804)
-    // ---------------------------------------------------------------------------
-    // Claude Generated (January 26, 2026) - CRITICAL for caffeine accuracy
-    //
-    // Reference: gfnff_ini.f90:1803-1804
-    //   if (piadr(kk) .eq. 0) fkl = fkl*0.5d0  ! outer atom not in pi-system
-    //   if (piadr(ll) .eq. 0) fkl = fkl*0.5d0
-    //
-    // Physical basis:
-    // - sp³ nitrogen (not in aromatic/conjugated systems) has lone pair electrons
-    // - Lone pair reduces torsion barrier due to orbital interactions
-    // - Example: caffeine has 3 N atoms → without this correction, torsions are 2× too high
-    //
-    // Impact on caffeine:
-    // - Reduces torsion energy error from 32.6× to <10× (expected)
-    // - Affects all 3 nitrogen atoms in the molecule
-    //
-    // Note: piadr==0 in Fortran means "not in pi-system" → use !is_in_pi_fr()
+    double fkl_base = tors2_angewChem2020[z_i - 1] * tors2_angewChem2020[z_l - 1];
+    double fkl = fkl_base;
 
     // Get topology for pi-system detection and hybridization
     const TopologyInfo& topo_outer = getCachedTopology();
@@ -646,12 +628,9 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
         hyb_l = topo_outer.hybridization[l_atom_idx];
     }
 
-    // Lambda to check if atom is sp³ nitrogen NOT in pi-system
-    auto is_sp3_nitrogen_not_pi = [&](int atom_idx, int z_atom, int hyb_atom) -> bool {
+    // Lambda to check if nitrogen atom is NOT in pi-system (piadr==0)
+    auto is_nitrogen_not_pi = [&](int atom_idx, int z_atom) -> bool {
         if (z_atom != 7) return false;  // Must be nitrogen
-        if (hyb_atom != 3) return false;  // Must be sp³
-
-        // Check if in pi-system using existing logic
         if (atom_idx < 0 || atom_idx >= m_atomcount) return false;
 
         // Condition 1: Direct bonds with significant pi-character (pibo > 0.1)
@@ -674,47 +653,48 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
             }
         }
 
-        return true;  // sp³ nitrogen NOT in pi-system
+        return true;  // nitrogen NOT in pi-system
     };
 
-    // Apply nitrogen reduction (×0.5) for outer atoms i and l
-    if (is_sp3_nitrogen_not_pi(i_atom_idx, z_i, hyb_i)) {
-        fkl *= 0.5;
+    // Nitrogen reduction: RESET fkl to base*0.5 (NOT cumulative multiply!)
+    // Reference: gfnff_ini.f90:1833-1834
+    //   if (at(kk).eq.7.and.piadr(kk).eq.0) fkl = tors2(kk)*tors2(ll)*0.5
+    //   if (at(ll).eq.7.and.piadr(ll).eq.0) fkl = tors2(kk)*tors2(ll)*0.5
+    // NOTE: Both lines reset to the SAME value (base*0.5), so double-N gives base*0.5 not base*0.25
+    if (is_nitrogen_not_pi(i_atom_idx, z_i)) {
+        fkl = fkl_base * 0.5;
         if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info(fmt::format("  fkl nitrogen reduction (atom {}): ×0.5", i_atom_idx));
+            CurcumaLogger::info(fmt::format("  fkl nitrogen RESET (atom {}): base*0.5 = {:.6f}", i_atom_idx, fkl));
+        }
+    }
+    if (is_nitrogen_not_pi(l_atom_idx, z_l)) {
+        fkl = fkl_base * 0.5;
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("  fkl nitrogen RESET (atom {}): base*0.5 = {:.6f}", l_atom_idx, fkl));
         }
     }
 
-    if (is_sp3_nitrogen_not_pi(l_atom_idx, z_l, hyb_l)) {
-        fkl *= 0.5;
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info(fmt::format("  fkl nitrogen reduction (atom {}): ×0.5", l_atom_idx));
-        }
+    // Threshold check BEFORE CN correction (gfnff_ini.f90:1835-1836)
+    // Note: Fortran checks tors(at(kk)) < 0 (central bond param of outer atoms), not tors2
+    if (fkl < fcthr || tors_angewChem2020[z_i - 1] < 0.0 || tors_angewChem2020[z_l - 1] < 0.0) {
+        params.barrier_height = 0.0;
+        return params;
     }
 
-    // ---------------------------------------------------------------------------
-    // Hypervalent enhancement for outer atoms (gfnff_ini.f90:1890)
-    // ---------------------------------------------------------------------------
-    // Reference: gfnff_ini.f90:1890
-    //   if (hyb(kk) .eq. 5.or.hyb(ll) .eq. 5) fkl = fkl*1.5d0
-    //
-    // Physical basis:
-    // - Hypervalent atoms (PF₅, SF₆) have higher coordination → stiffer torsions
-    // - Rare in organic chemistry but needed for completeness
-    //
-    // Note: Low priority for caffeine (no hypervalent atoms)
+    // CN-dependent scaling AFTER threshold (gfnff_ini.f90:1839)
+    // Uses integer neighbor count nb(20,i), not fractional D3 CN
+    double cn_product = cn_i * cn_l;
+    if (cn_product > 0.01) {  // Avoid division by zero
+        fkl *= std::pow(cn_product, -0.14);
+    }
 
+    // Hypervalent enhancement for outer atoms (gfnff_ini.f90:1920)
+    //   if (hyb(kk).eq.5.or.hyb(ll).eq.5) fkl = fkl*1.5d0
     if (hyb_i == 5 || hyb_l == 5) {
         fkl *= 1.5;
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("  fkl hypervalent enhancement: ×1.5");
         }
-    }
-
-    // Check threshold (gfnff_ini.f90:1805-1806)
-    if (fkl < fcthr || tors2_angewChem2020[z_i - 1] < 0.0 || tors2_angewChem2020[z_l - 1] < 0.0) {
-        params.barrier_height = 0.0;
-        return params;
     }
 
     // ---------------------------------------------------------------------------
@@ -1061,58 +1041,110 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
 
     using namespace GFNFFParameters;
 
-    if (in_ring && ring_size >= 3 && ring_size <= 6) {
-        // CRITICAL: Check if all 4 atoms are in the SAME ring (not just bonded atoms)
-        // This matches Fortran check: ringl == rings4 (lines 1819, 1824, 1828)
-        // We need to verify that the entire i-j-k-l quartet is in this ring
+    if (in_ring) {
+        // Claude Generated (Feb 10, 2026): Ring torsion periodicity using bond_type
+        // Reference: gfnff_ini.f90:1844-1865
+        //
+        // Fortran logic when central bond is in a ring (lring=true):
+        //   1. Default: nrot=1, phi0=0° (cis) for single bonds (btyp==1)
+        //   2. Pi-bond override: nrot=2 for btyp==2 (aromatic/conjugated)
+        //   3. Ring-specific overrides when ALL 4 atoms in same ring (rings4>0)
 
-        // For now, assume in_ring means central bond j-k is in ring
-        // TODO Phase 2: Add quartet ring membership check (requires path finding)
-        bool all_in_same_ring = in_ring;  // Simplified assumption
+        // RING DEFAULT (gfnff_ini.f90:1851-1853)
+        // Uses bond_type directly (Fortran btyp for central j-k bond)
+        params.periodicity = 1;      // Default for single bonds in rings
+        params.phase_shift = 0.0;    // cis (phi0=0°)
 
-        // Additional check: Skip if pi-conjugated system (notpicon = false in Fortran)
-        // Pi bonds have different torsional preferences even in rings
-        // Claude Generated (Jan 25, 2026): Include outer atoms in pi-system address check
-        bool notpicon = !(is_in_pi_fr(i_atom_idx, z_i) || is_in_pi_fr(l_atom_idx, z_l) ||
-                          is_in_pi_fr(j_atom_idx, z_j) || is_in_pi_fr(k_atom_idx, z_k));
+        // Pi-bond override: "if (btyp(m).eq.2) nrot = 2" (gfnff_ini.f90:1852)
+        if (bond_type == 2) {
+            params.periodicity = 2;  // Aromatic/conjugated bonds in rings
+        }
 
-        if (all_in_same_ring && notpicon) {
-            // Override periodicity, phase, and barrier based on ring size
-            switch (ring_size) {
-                case 3:
-                    // 3-ring: Nearly planar (cyclopropane)
-                    params.periodicity = 1;
-                    params.phase_shift = 0.0;     // Planar equilibrium (φ₀=0°)
-                    f1 = FR3;                      // 0.3 (flexible, small barrier)
-                    break;
+        // Ring-specific overrides when all 4 atoms are in the same ring
+        if (ring_size >= 3 && ring_size <= 6) {
+            int rings4 = smallestRingContainingAll(i_atom_idx, j_atom_idx, k_atom_idx, l_atom_idx);
+            int ringl = largestRingContainingAll(i_atom_idx, j_atom_idx, k_atom_idx, l_atom_idx);
 
-                case 4:
-                    // 4-ring: Puckered (cyclobutane butterfly)
-                    params.periodicity = 6;
-                    params.phase_shift = 30.0 * M_PI / 180.0;  // φ₀=30° puckering
-                    f1 = FR4;                      // 1.0 (moderate barrier)
-                    break;
+            bool notpicon = !(is_in_pi_fr(i_atom_idx, z_i) || is_in_pi_fr(l_atom_idx, z_l) ||
+                              is_in_pi_fr(j_atom_idx, z_j) || is_in_pi_fr(k_atom_idx, z_k));
 
-                case 5:
-                    // 5-ring: Envelope conformation (cyclopentane)
-                    params.periodicity = 6;
-                    params.phase_shift = 30.0 * M_PI / 180.0;  // φ₀=30° envelope
-                    f1 = FR5;                      // 1.5 (intermediate barrier)
-                    break;
-
-                case 6:
-                    // 6-ring: Chair preference (cyclohexane)
-                    params.periodicity = 3;
-                    params.phase_shift = 60.0 * M_PI / 180.0;  // φ₀=60° chair
-                    f1 = FR6;                      // 5.7 (STRONG chair/boat barrier!)
-                    break;
+            // Cycloalkane rules: only for single bonds (btyp==1) with all 4 atoms in same ring
+            if (rings4 > 0 && notpicon && ringl == rings4 && bond_type == 1) {
+                switch (rings4) {
+                    case 3:
+                        params.periodicity = 1;
+                        params.phase_shift = 0.0;
+                        f1 = FR3;  // 0.3
+                        break;
+                    case 4:
+                        params.periodicity = 6;
+                        params.phase_shift = 30.0 * M_PI / 180.0;
+                        f1 = FR4;  // 1.0
+                        break;
+                    case 5:
+                        params.periodicity = 6;
+                        params.phase_shift = 30.0 * M_PI / 180.0;
+                        f1 = FR5;  // 1.5
+                        break;
+                    case 6:
+                        params.periodicity = 3;
+                        params.phase_shift = 60.0 * M_PI / 180.0;
+                        f1 = FR6;  // 5.7
+                        break;
+                }
             }
+        }
 
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format(
-                    "  Ring torsion override: {}-ring → n={}, φ₀={:.1f}°, f1={:.2f}",
-                    ring_size, params.periodicity, params.phase_shift * 180.0 / M_PI, f1));
-            }
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format(
+                "  Ring torsion {}-{}-{}-{}: bond_type={}, n={}, phi0={:.1f}°",
+                i_atom_idx, j_atom_idx, k_atom_idx, l_atom_idx,
+                bond_type, params.periodicity, params.phase_shift * 180.0 / M_PI));
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // (G2) Pi-sp3 barrier reduction AFTER ring handling (gfnff_ini.f90:1873-1884)
+    // ---------------------------------------------------------------------------
+    // Claude Generated (Feb 11, 2026)
+    // Critical for aromatic-aliphatic junctions: when one central atom is in a
+    // pi-system and the other is sp3 (not in pi), reduce barrier and set acyclic
+    // periodicity. This OVERRIDES ring defaults (n=1, phi0=0) set above.
+    // Uses piadr (pi-fragment address) and raw hyb, matching Fortran exactly.
+    //
+    // Physical basis: Rotation around bonds connecting aromatic rings to
+    // aliphatic chains (e.g., phenyl-CH2) has low barriers with threefold symmetry.
+    // Nitrogen pi-atoms get even weaker barriers (f1=0.2, "important for CB7 conf.")
+
+    // Use pi_fragments (= Fortran piadr) for direct pi-system membership check
+    // This matches STEP 1 (line 541) and Fortran gfnff_ini.f90:1873
+    bool j_in_pi = (j_atom_idx >= 0 && j_atom_idx < static_cast<int>(topo.pi_fragments.size())
+                    && topo.pi_fragments[j_atom_idx] > 0);
+    bool k_in_pi = (k_atom_idx >= 0 && k_atom_idx < static_cast<int>(topo.pi_fragments.size())
+                    && topo.pi_fragments[k_atom_idx] > 0);
+
+    // Check: j in pi-system AND k is sp3 NOT in pi-system
+    if (j_in_pi && !k_in_pi && hyb_k == 3) {
+        f1 = 0.5;
+        if (z_j == 7) f1 = 0.2;  // Nitrogen in pi-system: weaker barrier
+        params.phase_shift = M_PI;  // phi0 = 180° (acyclic trans)
+        params.periodicity = 3;     // nrot = 3 (threefold)
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format(
+                "  Pi-sp3 override: atom {} (Z={}, pi) - atom {} (Z={}, sp3) -> f1={:.2f}, n=3, phi0=180",
+                j_atom_idx, z_j, k_atom_idx, z_k, f1));
+        }
+    }
+    // Check: k in pi-system AND j is sp3 NOT in pi-system
+    else if (k_in_pi && !j_in_pi && hyb_j == 3) {
+        f1 = 0.5;
+        if (z_k == 7) f1 = 0.2;  // Nitrogen in pi-system: weaker barrier
+        params.phase_shift = M_PI;  // phi0 = 180° (acyclic trans)
+        params.periodicity = 3;     // nrot = 3 (threefold)
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format(
+                "  Pi-sp3 override: atom {} (Z={}, pi) - atom {} (Z={}, sp3) -> f1={:.2f}, n=3, phi0=180",
+                k_atom_idx, z_k, j_atom_idx, z_j, f1));
         }
     }
 
@@ -1139,6 +1171,11 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
 
     // CRITICAL: barrier_height is now in HARTREE (not kcal/mol!)
     params.barrier_height = fctot;
+
+    // Store corrected factors for use by extra torsion generation (Feb 10, 2026)
+    params.fij_corrected = fij;
+    params.fkl_corrected = fkl;
+    params.fqq = fqq;
 
     // DEBUG OUTPUT (December 2025)
     if (fctot > 0.001) {  // Only print significant values
@@ -1561,6 +1598,7 @@ json GFNFF::generateGFNFFTorsions() const
     //       Create torsion i-j-k-l
 
     int torsion_count = 0;
+    int extra_torsion_count = 0;
 
     // Claude Generated Fix (2025-12-12): Add duplicate tracking to prevent torsion explosion
     // Problem: Dimethyl ether (CH3OCH3) generates 132 torsions instead of ~15 due to duplicates
@@ -1746,64 +1784,99 @@ json GFNFF::generateGFNFFTorsions() const
                     charge_debug_printed = true;
                 }
 
+                // Get bond type for central j-k bond (Fortran btyp)
+                int btyp_jk = (bond_idx < bond_types.size()) ? bond_types[bond_idx] : 1;
+
                 auto params = getGFNFFTorsionParameters(
                     m_atoms[i], m_atoms[j], m_atoms[k], m_atoms[l],
                     hybridization[j], hybridization[k],
                     qa_j, qa_k,
                     cn_i_val, cn_l_val,
-                    in_ring, ring_size, i, j, k, l
+                    in_ring, ring_size, i, j, k, l,
+                    btyp_jk
                 );
 
-                // Skip torsions with barrier below threshold
-                // Claude Generated (Jan 23, 2026): Use fcthr = 1e-3 to match XTB
-                // XTB: gfnff_param.f90:632 "gen%fcthr = 1.d-3 ! skip torsion if potential is small"
-                // Previous: 1e-10 (too permissive) → generated 732 torsions vs XTB's 569
+                // ==========================================================
+                // STEP 7: Store primary torsion if above threshold
+                // ==========================================================
                 constexpr double fcthr = 1.0e-3;  // Force constant threshold (Hartree)
-                if (std::abs(params.barrier_height) < fcthr) {
-                    continue;
+                if (std::abs(params.barrier_height) >= fcthr) {
+                    json torsion;
+                    torsion["type"] = 3; // GFN-FF type
+                    // Fortran convention atom ordering (ll-ii-jj-kk): swap terminal atoms
+                    torsion["i"] = l;  // ll = neighbor of jj
+                    torsion["j"] = j;  // ii = central atom 1
+                    torsion["k"] = k;  // jj = central atom 2
+                    torsion["l"] = i;  // kk = neighbor of ii
+                    torsion["n"] = params.periodicity;
+                    torsion["V"] = params.barrier_height;
+                    torsion["phi0"] = params.phase_shift;
+                    torsion["is_improper"] = params.is_improper;
+                    torsion["hyb_j"] = hybridization[j];
+                    torsion["hyb_k"] = hybridization[k];
+                    if (j < topo.coordination_numbers.rows()) {
+                        torsion["cn_j"] = topo.coordination_numbers(j);
+                    }
+                    if (k < topo.coordination_numbers.rows()) {
+                        torsion["cn_k"] = topo.coordination_numbers(k);
+                    }
+                    torsion["current_angle"] = phi;
+
+                    torsions.push_back(torsion);
+                    torsion_count++;
                 }
 
                 // ==========================================================
-                // STEP 7: Store in JSON format
+                // STEP 7B: Extra sp3-sp3 torsion (n=1 gauche)
                 // ==========================================================
-                json torsion;
-                torsion["type"] = 3; // GFN-FF type
-                // Claude Generated (Feb 4, 2026): Fortran convention atom ordering (ll-ii-jj-kk)
-                // Fortran stores torsions as: ll (neighbor of jj) - ii - jj - kk (neighbor of ii)
-                // Our loop generates: i (neighbor of j) - j - k - l (neighbor of k)
-                // Mapping: j→ii, k→jj → i corresponds to kk, l corresponds to ll
-                // Swap terminal atoms so damping distances match Fortran:
-                //   pos0-pos1 = l-j = neighbor_of_k to j  → 1-3 distance (NOT a bond)
-                //   pos1-pos2 = j-k                        → central bond
-                //   pos2-pos3 = k-i = k to neighbor_of_j  → 1-3 distance (NOT a bond)
-                // This corrects the 33-44× torsion energy excess (damp ~0.074 → ~0.0017)
-                torsion["i"] = l;  // ll = neighbor of jj (was stored as i = neighbor of j)
-                torsion["j"] = j;  // ii = central atom 1
-                torsion["k"] = k;  // jj = central atom 2
-                torsion["l"] = i;  // kk = neighbor of ii (was stored as l = neighbor of k)
-                // Claude Generated Fix (2025-11-30): Renamed JSON keys to match forcefield.cpp loader
-                // Previous keys: "periodicity", "barrier", "phase" → caused ALL torsion energies = 0
-                // Loader expects: "n", "V", "phi0" (from Dihedral struct in forcefield.cpp:444-461)
-                torsion["n"] = params.periodicity;          // Periodicity (was "periodicity")
-                torsion["V"] = params.barrier_height;       // Barrier height in Hartree (corrected Jan 8, 2026)
-                torsion["phi0"] = params.phase_shift;       // Phase shift in radians (was "phase")
-                torsion["is_improper"] = params.is_improper;
+                // Claude Generated (Feb 10, 2026): Merged into primary loop to match Fortran
+                // Reference: gfnff_ini.f90:1983-2001
+                // Extra torsion runs for ALL quartets meeting sp3+acyclic+btyp<5,
+                // INDEPENDENT of whether primary torsion passed fcthr threshold.
+                // Reuses CORRECTED fij/fkl/fqq from getGFNFFTorsionParameters().
+                {
+                    const double torsf_extra_C = -0.90;
+                    const double torsf_extra_N =  0.70;
+                    const double torsf_extra_O = -2.00;
 
-                // Claude Generated (Jan 9, 2026): Store hybridization for debugging
-                torsion["hyb_j"] = hybridization[j];
-                torsion["hyb_k"] = hybridization[k];
-                if (j < topo.coordination_numbers.rows()) {
-                    torsion["cn_j"] = topo.coordination_numbers(j);
+                    bool sp3_central = (hybridization[j] == 3) && (hybridization[k] == 3);
+                    bool sp3_outer = (hybridization[i] == 3) && (hybridization[l] == 3);
+                    bool acyclic = !in_ring;
+                    int btyp_val = (bond_idx < bond_types.size()) ? bond_types[bond_idx] : 0;
+
+                    if (sp3_central && sp3_outer && acyclic && btyp_val < 5
+                        && params.fij_corrected > 0.0 && params.fkl_corrected > 0.0) {
+                        double ff = torsf_extra_C;
+                        if (m_atoms[j] == 7 || m_atoms[k] == 7) ff = torsf_extra_N;
+                        if (m_atoms[j] == 8 || m_atoms[k] == 8) ff = torsf_extra_O;
+
+                        double extra_barrier = ff * params.fij_corrected * params.fkl_corrected * params.fqq;
+
+                        if (!std::isnan(extra_barrier) && !std::isinf(extra_barrier)) {
+                            json extra_torsion;
+                            extra_torsion["type"] = 3;
+                            extra_torsion["i"] = l;
+                            extra_torsion["j"] = j;
+                            extra_torsion["k"] = k;
+                            extra_torsion["l"] = i;
+                            extra_torsion["n"] = 1;
+                            extra_torsion["V"] = extra_barrier;
+                            extra_torsion["phi0"] = M_PI;
+                            extra_torsion["is_improper"] = false;
+                            extra_torsion["is_extra"] = true;
+                            extra_torsion["current_angle"] = phi;
+
+                            torsions.push_back(extra_torsion);
+                            extra_torsion_count++;
+
+                            if (CurcumaLogger::get_verbosity() >= 3) {
+                                CurcumaLogger::info(fmt::format(
+                                    "  EXTRA SP3-SP3 (inline): {}-{}-{}-{} barrier={:.6f} Eh (ff={:.2f})",
+                                    l, j, k, i, extra_barrier, ff));
+                            }
+                        }
+                    }
                 }
-                if (k < topo.coordination_numbers.rows()) {
-                    torsion["cn_k"] = topo.coordination_numbers(k);
-                }
-
-                // Store current dihedral angle for reference
-                torsion["current_angle"] = phi; // radians
-
-                torsions.push_back(torsion);
-                torsion_count++;
             }
         }
     }
@@ -1876,386 +1949,6 @@ json GFNFF::generateGFNFFTorsions() const
             }
         }
         CurcumaLogger::info("=== END TORSION DIAGNOSTICS ===\n");
-    }
-
-    // ==========================================================================
-    // STEP 7B: Generate Extra SP3-SP3 Torsions (n=1 for Gauche Conformations)
-    // ==========================================================================
-    // DISABLED (January 15, 2026): Investigation phase - these terms overcompensate
-    // Reference: gfnff_ini.f90:1952-2002
-    // "extra rot=1 torsion potential for sp3-sp3 to get gauche conf energies well"
-    //
-    // Physical meaning: Fine-tune gauche vs anti energy differences for sp3-sp3 bonds
-    // These torsions use a DIFFERENT formula and contribute separately from primary n=3 torsions
-
-    int extra_torsion_count = 0;
-    const double qfacTOR = 12.0;  // From gfnff_param.f90:742
-
-    // DIAGNOSTIC (Jan 25, 2026)
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("=== EXTRA TORSION GENERATION START ==="));
-        CurcumaLogger::info(fmt::format("  Primary torsions generated: {}", generated_torsions.size()));
-    }
-
-    // Extra sp3-sp3 torsion factors for gauche conformations
-    // Reference: gfnff_param.f90:795-797
-    // NOTE (Jan 2, 2026): Original GFN-FF parametrization values restored
-    //
-    // HISTORICAL NOTE: If torsion energy shows wrong sign/magnitude in future:
-    //   The fix is NOT to change these factors, but to ensure proper architectural separation:
-    //   1. Primary torsions (n=3, n=2) calculated in CalculateGFNFFDihedralContribution()
-    //   2. Extra torsions (n=1) calculated in CalculateGFNFFExtraTorsionContribution()
-    //   3. Both stored in separate vectors (m_gfnff_dihedrals vs m_gfnff_extra_torsions)
-    //   4. Energy accumulated separately to prevent double-counting
-    //   The root cause was mixing both in same vector, NOT wrong force constants.
-    const double torsf_extra_C = -0.90;  // Carbon sp3-sp3 (GFN-FF original)
-    const double torsf_extra_N =  0.70;  // Nitrogen sp3-sp3 (GFN-FF original)
-    const double torsf_extra_O = -2.00;  // Oxygen sp3-sp3 (GFN-FF original)
-
-    // Debug counters (Claude Generated Jan 16, 2026)
-    int debug_total_checked = 0;
-    int debug_failed_sp3 = 0;
-    int debug_failed_ring = 0;
-    int debug_failed_btyp = 0;
-    int debug_failed_bounds = 0;
-
-    for (const auto& tors_array : generated_torsions) {
-        debug_total_checked++;
-        int i = tors_array[0];
-        int j = tors_array[1];
-        int k = tors_array[2];
-        int l = tors_array[3];
-
-        // ======================================================================
-        // Condition 1: ONLY central atoms (j,k) must be sp3 (hyb==3)
-        // ======================================================================
-        // Reference: gfnff_ini.f90:1953-1954
-        // sp3ij = hyb(ii) .eq. 3.and.hyb(jj) .eq. 3  (central atoms MUST be sp3)
-        //
-        // CRITICAL FIX (Claude Generated Jan 21, 2026): Use EFFECTIVE hybridization!
-        // Same as primary torsions - atoms in pi-system should be treated as sp2.
-        // This prevents generating extra torsions for CH3-N(aromatic) bonds where
-        // N is part of an aromatic system but has CN~3.
-        //
-        // Fortran uses: piadr(ii) > 0 to exclude pi-system atoms from sp3 check
-        //
-        // Lambda to check if atom is in pi-system (same as primary torsions)
-        auto is_in_pi_system_extra = [&](int atom_idx, int z_atom) -> bool {
-            // Condition 1: Has bonds with significant pi-character
-            if (!topo.pi_bond_orders.empty()) {
-                for (int other = 0; other < m_atomcount; other++) {
-                    if (other == atom_idx) continue;
-                    int pibo_idx = lin(atom_idx, other);
-                    if (pibo_idx >= 0 && pibo_idx < static_cast<int>(topo.pi_bond_orders.size())) {
-                        if (topo.pi_bond_orders[pibo_idx] > 0.1) {
-                            return true;
-                        }
-                    }
-                }
-            }
-
-            // Condition 2: Is N/O/F/S adjacent to sp2 atoms ("picon" case)
-            if (z_atom == 7 || z_atom == 8 || z_atom == 9 || z_atom == 16) {
-                const auto& bond_list = getCachedBondList();
-                for (const auto& bond : bond_list) {
-                    int neighbor = -1;
-                    if (bond.first == atom_idx) neighbor = bond.second;
-                    else if (bond.second == atom_idx) neighbor = bond.first;
-                    else continue;
-
-                    if (neighbor >= 0 && neighbor < static_cast<int>(hybridization.size())) {
-                        int neighbor_hyb = hybridization[neighbor];
-                        if (neighbor_hyb == 1 || neighbor_hyb == 2) {
-                            return true;
-                        }
-                    }
-                }
-            }
-            return false;
-        };
-
-        // Get effective hybridization for central atoms
-        int eff_hyb_j = hybridization[j];
-        int eff_hyb_k = hybridization[k];
-
-        if (is_in_pi_system_extra(j, m_atoms[j]) && eff_hyb_j == 3) {
-            eff_hyb_j = 2;  // Treat as sp2
-        }
-        if (is_in_pi_system_extra(k, m_atoms[k]) && eff_hyb_k == 3) {
-            eff_hyb_k = 2;  // Treat as sp2
-        }
-
-        // Now check sp3-sp3 using EFFECTIVE hybridization
-        // Claude Generated Fix (Jan 23, 2026): XTB requires ALL FOUR atoms to be sp3!
-        // Reference: gfnff_ini.f90:1952-1954
-        //   sp3kl = topo%hyb(kk).eq.3.and.topo%hyb(ll).eq.3  ! Outer atoms
-        //   sp3ij = topo%hyb(ii).eq.3.and.topo%hyb(jj).eq.3  ! Central atoms
-        //   if(sp3kl.and.sp3ij...) then
-        // Previous bug: Only checked central atoms → generated too many extra torsions (243 vs ~50)
-
-        // CRITICAL FIX (Jan 25, 2026): Use EFFECTIVE hybridization for ALL atoms, not just central!
-        // Hydrogen has hyb=0 (not 3!), so sp3_il will be false for H-C-O-C quartets
-        int eff_hyb_i = hybridization[i];
-        int eff_hyb_l = hybridization[l];
-
-        // Pi-system detection for outer atoms (same logic as central atoms)
-        if (is_in_pi_system_extra(i, m_atoms[i]) && eff_hyb_i == 3) {
-            eff_hyb_i = 2;  // Treat as sp2
-        }
-        if (is_in_pi_system_extra(l, m_atoms[l]) && eff_hyb_l == 3) {
-            eff_hyb_l = 2;  // Treat as sp2
-        }
-
-        bool sp3_ij = (eff_hyb_j == 3) && (eff_hyb_k == 3);  // Central atoms j,k
-        bool sp3_il = (eff_hyb_i == 3) && (eff_hyb_l == 3);  // Outer atoms i,l (NOW with effective hyb!)
-
-        // DIAGNOSTIC (Jan 25, 2026): Debug hydrogen hybridization
-        if (CurcumaLogger::get_verbosity() >= 3 && (m_atoms[i] == 1 || m_atoms[l] == 1)) {
-            CurcumaLogger::info(fmt::format(
-                "EXTRA TORSION CHECK: {}-{}-{}-{} (Z={},{},{},{}): hyb=({},{},{},{}), eff_hyb=({},{},{},{}), sp3_ij={}, sp3_il={}",
-                i, j, k, l, m_atoms[i], m_atoms[j], m_atoms[k], m_atoms[l],
-                hybridization[i], hybridization[j], hybridization[k], hybridization[l],
-                eff_hyb_i, eff_hyb_j, eff_hyb_k, eff_hyb_l,
-                sp3_ij, sp3_il
-            ));
-        }
-
-        if (!sp3_ij || !sp3_il) {
-            debug_failed_sp3++;
-            continue;  // ALL FOUR atoms must be sp3
-        }
-
-        // ======================================================================
-        // Condition 2: Central bond (j-k) must be acyclic
-        // ======================================================================
-        int ring_size;
-        if (areAtomsInSameRing(j, k, ring_size)) {
-            debug_failed_ring++;
-            continue;  // Skip ring torsions
-        }
-
-        // ======================================================================
-        // Condition 3: Bond type must be non-metal (btyp < 5)
-        // ======================================================================
-        // Reference: Fortran gfnff_ini.f90:1954
-        // if (sp3kl.and.sp3ij.and.(.not.lring).and.btyp(m) .lt. 5) then
-        //
-        // Find bond index for central bond j-k
-        int central_bond_idx = -1;
-        for (size_t bond_idx = 0; bond_idx < bond_types.size(); ++bond_idx) {
-            const auto& [bi, bj] = topo.adjacency_list.size() > 0
-                ? std::make_pair(j, k)  // Use adjacency list if available
-                : std::make_pair(j, k);
-            // getCachedBondList() returns bonds as pairs (i,j) where i < j
-            const auto& bond = getCachedBondList()[bond_idx];
-            if ((bond.first == j && bond.second == k) || (bond.first == k && bond.second == j)) {
-                central_bond_idx = bond_idx;
-                break;
-            }
-        }
-
-        if (central_bond_idx == -1) {
-            continue;
-        }
-
-        int btyp = bond_types[central_bond_idx];
-        if (btyp >= 5) {
-            debug_failed_btyp++;
-            continue;  // Skip metal-containing bonds
-        }
-
-        // ======================================================================
-        // Condition 4: Bounds check for atomic numbers
-        // ======================================================================
-        if (m_atoms[i] < 1 || m_atoms[i] > 86 ||
-            m_atoms[j] < 1 || m_atoms[j] > 86 ||
-            m_atoms[k] < 1 || m_atoms[k] > 86 ||
-            m_atoms[l] < 1 || m_atoms[l] > 86) {
-            debug_failed_bounds++;
-            continue;  // Skip invalid atomic numbers
-        }
-
-        // ======================================================================
-        // Select heteroatom-specific force constant
-        // ======================================================================
-        // Reference: gfnff_ini.f90:1961-1963
-        // Priority: O > N > C (if both O and N, O wins)
-
-        double ff = torsf_extra_C;  // Default: Carbon
-
-        // Check CENTRAL atoms only (j and k)
-        if (m_atoms[j] == 7 || m_atoms[k] == 7) {
-            ff = torsf_extra_N;  // Nitrogen
-        }
-        if (m_atoms[j] == 8 || m_atoms[k] == 8) {
-            ff = torsf_extra_O;  // Oxygen (overrides nitrogen)
-        }
-
-        // ======================================================================
-        // Calculate barrier height (DIFFERENT formula - no f1/f2!)
-        // ======================================================================
-        // Reference: gfnff_ini.f90:1970
-        // vtors(2) = ff * fij * fkl * fqq
-
-        // Calculate fij (central bond contribution)
-        double fij = tors_angewChem2020[m_atoms[j] - 1] * tors_angewChem2020[m_atoms[k] - 1];
-
-        // Check threshold (like primary torsions)
-        const double fcthr = 1.0e-3;
-        if (fij < fcthr || tors_angewChem2020[m_atoms[j] - 1] < 0.0 || tors_angewChem2020[m_atoms[k] - 1] < 0.0) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format(
-                    "  Torsion {}-{}-{}-{}: fij threshold (fij={:.6f}, tors[{}]={:.6f}, tors[{}]={:.6f})",
-                    i, j, k, l, fij, m_atoms[j], tors_angewChem2020[m_atoms[j] - 1],
-                    m_atoms[k], tors_angewChem2020[m_atoms[k] - 1]
-                ));
-            }
-            continue;  // Skip if fij too small or negative
-        }
-
-        // Calculate fkl (outer atom contribution)
-        double fkl = tors2_angewChem2020[m_atoms[i] - 1] * tors2_angewChem2020[m_atoms[l] - 1];
-
-        // Check threshold
-        if (fkl < fcthr || tors2_angewChem2020[m_atoms[i] - 1] < 0.0 || tors2_angewChem2020[m_atoms[l] - 1] < 0.0) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format(
-                    "  Torsion {}-{}-{}-{}: fkl threshold (fkl={:.6f}, tors2[{}]={:.6f}, tors2[{}]={:.6f})",
-                    i, j, k, l, fkl, m_atoms[i], tors2_angewChem2020[m_atoms[i] - 1],
-                    m_atoms[l], tors2_angewChem2020[m_atoms[l] - 1]
-                ));
-            }
-            continue;  // Skip if fkl too small or negative
-        }
-
-        // Calculate fqq (charge correction)
-        // Claude Generated (Jan 9, 2026): Use m_charges directly instead of topo.topology_charges
-        // Fix: topo.topology_charges may be empty or 0.0 in some cases, use pre-calculated m_charges
-        double qa_j = 0.0, qa_k = 0.0;
-        if (j < m_atoms.size() && k < m_atoms.size()) {
-            // First try: Use TopologyInfo charges (filled by calculateTopologyInfo)
-            if (topo.topology_charges.rows() > 0) {
-                qa_j = (j < topo.topology_charges.rows()) ? topo.topology_charges(j) : 0.0;
-                qa_k = (k < topo.topology_charges.rows()) ? topo.topology_charges(k) : 0.0;
-                // Fallback: If topology charges are zero, use pre-calculated EEQ charges
-                if (std::abs(qa_j) < 1e-10 && std::abs(qa_k) < 1e-10) {
-                    if (m_charges.size() > 0) {
-                        qa_j = m_charges(j);
-                        qa_k = m_charges(k);
-                    }
-                }
-            }
-            // Second try: Use pre-calculated EEQ charges (m_charges in gfnff_method.h)
-            else if (m_charges.size() > 0) {
-                qa_j = (j < m_charges.size()) ? m_charges(j) : 0.0;
-                qa_k = (k < m_charges.size()) ? m_charges(k) : 0.0;
-            }
-        }
-        double fqq = 1.0 + std::abs(qa_j * qa_k) * qfacTOR;
-
-        // Final barrier (DIFFERENT from primary torsion formula!)
-        double barrier = ff * fij * fkl * fqq;
-
-        // Validate barrier is not NaN or inf
-        if (std::isnan(barrier) || std::isinf(barrier)) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::warn(fmt::format(
-                    "  Warning: Invalid barrier for torsion {}-{}-{}-{}, skipping (barrier={}, ff={}, fij={}, fkl={}, fqq={})",
-                    i, j, k, l, barrier, ff, fij, fkl, fqq
-                ));
-            }
-            continue;
-        }
-
-        // Check final barrier threshold
-        if (std::abs(barrier) < fcthr) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format(
-                    "  Torsion {}-{}-{}-{}: barrier too small (barrier={:.6f}, threshold={:.6f})",
-                    i, j, k, l, barrier, fcthr
-                ));
-            }
-            continue;  // Skip negligible barriers
-        }
-
-        // SUCCESS - this torsion will be added!
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info(fmt::format(
-                "  ✓ Torsion {}-{}-{}-{}: ACCEPTED (barrier={:.6f} Eh, ff={:.2f})",
-                i, j, k, l, barrier, ff
-            ));
-        }
-
-        // ======================================================================
-        // Store extra torsion with n=1 periodicity
-        // ======================================================================
-        json extra_torsion;
-        extra_torsion["type"] = 3;           // GFN-FF type (same as primary)
-        // Claude Generated (Feb 4, 2026): Same Fortran convention swap as primary torsions
-        // Extra torsions iterate over the same generated_torsions set, so the same
-        // ll-ii-jj-kk reordering is needed for correct star-topology damping distances
-        extra_torsion["i"] = l;  // ll = neighbor of jj
-        extra_torsion["j"] = j;  // ii = central atom 1
-        extra_torsion["k"] = k;  // jj = central atom 2
-        extra_torsion["l"] = i;  // kk = neighbor of ii
-        extra_torsion["n"] = 1;              // Periodicity = 1 (NOT 3!)
-        extra_torsion["V"] = barrier;        // Barrier in Hartree (same as primary torsions)
-        extra_torsion["phi0"] = M_PI;        // Phase = 180° (pi radians)
-        extra_torsion["is_improper"] = false;
-        extra_torsion["is_extra"] = true;    // Claude Generated (Jan 1, 2026): Mark as extra torsion
-
-        // Store current dihedral angle
-        double phi = calculateDihedralAngle(i, j, k, l);
-
-        // Validate phi is not NaN or inf
-        if (std::isnan(phi) || std::isinf(phi)) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::warn(fmt::format(
-                    "  Warning: Invalid phi angle for torsion {}-{}-{}-{}, skipping",
-                    i, j, k, l
-                ));
-            }
-            continue;
-        }
-
-        extra_torsion["current_angle"] = phi;
-
-        torsions.push_back(extra_torsion);
-        extra_torsion_count++;
-
-        // ======================================================================
-        // Debug output
-        // ======================================================================
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info(fmt::format(
-                "EXTRA SP3-SP3 TORSION: {}-{}-{}-{} (Z={},{},{},{})",
-                i, j, k, l, m_atoms[i], m_atoms[j], m_atoms[k], m_atoms[l]
-            ));
-            CurcumaLogger::info(fmt::format(
-                "  ff={:.2f} (heteroatom factor), barrier={:.6f} Eh (n=1)",
-                ff, barrier
-            ));
-        }
-    }
-
-    if (extra_torsion_count > 0) {
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info(fmt::format(
-                "GFN-FF detected {} extra sp3-sp3 torsions (n=1 gauche terms)",
-                extra_torsion_count
-            ));
-        }
-    }
-
-    // Debug statistics (Claude Generated Jan 16, 2026)
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("EXTRA TORSION DEBUG:"));
-        CurcumaLogger::info(fmt::format("  Total torsions checked: {}", debug_total_checked));
-        CurcumaLogger::info(fmt::format("  Failed sp3 check: {}", debug_failed_sp3));
-        CurcumaLogger::info(fmt::format("  Failed ring check: {}", debug_failed_ring));
-        CurcumaLogger::info(fmt::format("  Failed btyp check: {}", debug_failed_btyp));
-        CurcumaLogger::info(fmt::format("  Failed bounds check: {}", debug_failed_bounds));
-        CurcumaLogger::info(fmt::format("  Passed all checks (extra torsions): {}", extra_torsion_count));
     }
 
     // ==========================================================================

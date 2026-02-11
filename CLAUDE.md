@@ -390,6 +390,8 @@ ctest -R "cli_rmsd_01" --verbose
 
 ## Recently Resolved ✅
 
+- ✅ **GFN-FF Inversion Damping Fix** (Feb 11, 2026): Fixed incorrect star-topology damping in inversion energy calculation. Fortran uses nb1-center + nb1-nb2 + nb1-nb3 distances (1-3 distances for two of three), not center-to-all-neighbors (star). Complex molecule torsion+inversion error reduced from +234 mEh to -0.45 mEh (520× improvement).
+- ✅ **GFN-FF Pi-sp3 Torsion Override** (Feb 11, 2026): Added post-ring pi-sp3 barrier correction matching Fortran gfnff_ini.f90:1873-1884. Overrides ring periodicity/phase defaults when one central atom is pi and other is sp3.
 - ✅ **GFN-FF Coulomb Gradient Regression** (Feb 1, 2026): Fixed stale CN derivatives in gradient calculation. CN, CNF, and dCN/dx are now recalculated for current geometry in `GFNFF::Calculation()` before gradient computation. Fixes optimization failures caused by Term 1b using initial geometry's CN values.
 - ✅ **EEQ Solver Numerical Stability** (Jan 29, 2026): Replaced PartialPivLU with ColPivHouseholderQR + iterative refinement for better numerical stability on large systems. Investigation confirmed triose deviation is parameter-related, not numerical.
 - ✅ **GFN-FF Coulomb Exact Match** (Jan 29, 2026): Fixed dgam correction factors and enabled charge-corrected parameters (gameeq, alpeeq); Coulomb energy now matches Fortran reference within < 1 nEh (0.0001% error) for small systems.
