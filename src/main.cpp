@@ -22,6 +22,7 @@
 #include "src/core/fileiterator.h"
 #include "src/core/imagewriter.hpp"
 #include "src/core/molecule.h"
+#include "src/core/curcuma_logger.h"
 
 #include "src/capabilities/analysenciplot.h"
 #include "src/capabilities/analysis.h"
@@ -696,6 +697,10 @@ json CLI2Json(int argc, char** argv)
                 continue;
             } else if (current == "verbose") {
                 key["verbosity"] = 3;
+                continue;
+            } else if (current == "plain") {
+                // Claude Generated: Plain mode - no colors, no prefixes (like ORCA/Gaussian)
+                CurcumaLogger::set_plain_mode(true);
                 continue;
             } else if (current == "v") {
                 // Handle -v N syntax for verbosity level
