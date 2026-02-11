@@ -25,7 +25,8 @@ def parse_analyzer_output(output, xyz_file):
         "bonds": [],
         "angles": [],
         "torsions": [],
-        "energy_components": {}
+        "energy_components": {},
+        "gradient_decomposition": {}
     }
 
     lines = output.splitlines()
@@ -44,6 +45,7 @@ def parse_analyzer_output(output, xyz_file):
                 if len(ref_data["molecule"]["atoms"]) > 0:
                     atom_section = False
                 continue
+            # Handle the coordinates table
             match = re.match(r"^\s*(\d+)\s+([A-Z][a-z]?)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([-]?[\d.]+)\s+([-]?[\d.]+)\s+([-]?[\d.]+)\s+([-]?[\d.]+)", line)
             if match:
                 idx, element, neighbors, erfCN, metchar, hybrid, imet, pi, qest, x, y, z = match.groups()
@@ -98,7 +100,8 @@ def parse_analyzer_output(output, xyz_file):
         if "Gradient norm:" in line:
             match = re.search(r"Gradient norm:\s+([\d.]+)", line)
             if match:
-                ref_data["gradients"] = {"norm": float(match.group(1))}
+                if "gradients" not in ref_data: ref_data["gradients"] = {}
+                ref_data["gradients"]["norm"] = float(match.group(1))
 
     # 3. Parse Detailed Parameters (Bonds, Angles, Torsions)
     for i, line in enumerate(lines):
@@ -161,7 +164,6 @@ def parse_analyzer_output(output, xyz_file):
                         phi0_match = re.search(r"phi0\s*=\s*.*?" + FLOAT_PATTERN + r"\s+radians", lines[j])
                         if phi0_match: phi0 = float(phi0_match.group(1))
                     if "fctot =" in lines[j]:
-                        # Look for result line ending in a float
                         fc_match = re.search(r"=\s*" + FLOAT_PATTERN + r"\s*$", lines[j])
                         if fc_match: fctot = float(fc_match.group(1))
                     if "where n =" in lines[j]:
@@ -176,6 +178,37 @@ def parse_analyzer_output(output, xyz_file):
                         "V": fctot,
                         "energy": 0.0
                     })
+
+    # 4. Parse Gradient Decomposition (NEW)
+    grad_section = False
+    current_atom_idx = -1
+    for line in lines:
+        if "=== Force Field Component Gradient Analysis ===" in line:
+            grad_section = True
+            continue
+        if grad_section:
+            if "======" in line or "GFN-FF setup done" in line:
+                grad_section = False
+                continue
+
+            # Match atom index line
+            atom_match = re.match(r"^\s*(\d+)\s+([A-Z][a-z]?)\s+([A-Za-z]+)\s+" + FLOAT_PATTERN + r"\s+" + FLOAT_PATTERN + r"\s+" + FLOAT_PATTERN, line)
+            if atom_match:
+                current_atom_idx = int(atom_match.group(1)) - 1
+                comp = atom_match.group(3)
+                gx, gy, gz = float(atom_match.group(4)), float(atom_match.group(5)), float(atom_match.group(6))
+
+                if current_atom_idx not in ref_data["gradient_decomposition"]:
+                    ref_data["gradient_decomposition"][current_atom_idx] = {}
+                ref_data["gradient_decomposition"][current_atom_idx][comp] = {"x": gx, "y": gy, "z": gz}
+                continue
+
+            # Match component line for the same atom
+            comp_match = re.match(r"^\s+([A-Za-z]+)\s+" + FLOAT_PATTERN + r"\s+" + FLOAT_PATTERN + r"\s+" + FLOAT_PATTERN, line)
+            if comp_match and current_atom_idx != -1:
+                comp = comp_match.group(1)
+                gx, gy, gz = float(comp_match.group(2)), float(comp_match.group(3)), float(comp_match.group(4))
+                ref_data["gradient_decomposition"][current_atom_idx][comp] = {"x": gx, "y": gy, "z": gz}
 
     return ref_data
 

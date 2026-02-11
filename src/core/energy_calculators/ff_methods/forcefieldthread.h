@@ -88,9 +88,12 @@ struct Dihedral {
 };
 
 struct Inversion {
-    int type = 1; // 1 = UFF, 2 = QMDFF
+    int type = 1; // 1 = UFF, 2 = QMDFF, 3 = GFN-FF
     int i = 0, j = 0, k = 0, l = 0;
     double fc = 0, C0 = 0, C1 = 0, C2 = 0;
+    // GFN-FF specific: potential_type 0 = V*(1-cos(omega))*damp, -1 = V*(cos(omega)-cos(omega0))^2*damp
+    int potential_type = 0;
+    double omega0 = 0.0; // Equilibrium out-of-plane angle (radians), used for potential_type=-1
 };
 
 struct vdW {

@@ -1,7 +1,7 @@
 {
   "molecule": {
-    "name": "methane",
-    "geometry_file": "external/gfnff/test/methane.xyz",
+    "name": "CH4",
+    "geometry_file": "test_cases/molecules/larger/CH4.xyz",
     "atoms": [
       {
         "element": "C",
@@ -37,7 +37,7 @@
   },
   "metadata": {
     "generator": "gfnff-analyzer-parser",
-    "date": "2026-02-07 20:48:54"
+    "date": "2026-02-08 01:09:02"
   },
   "topology": {
     "coordination_numbers": [
@@ -168,16 +168,17 @@
   ],
   "torsions": [],
   "energy_components": {
-    "bond": -0.65638635,
-    "angle": 6.899e-05,
+    "bond": -0.656386349843,
+    "angle": 6.8985137e-05,
     "torsion": 0.0,
-    "repulsion": 0.02772923,
+    "repulsion": 0.027729233574,
     "electrostatic": -0.00157623,
     "dispersion": -0.0006506,
     "hb": 0.0,
     "xb": 0.0,
     "batm": 0.0
   },
+  "gradient_decomposition": {},
   "gradients": {
     "norm": 0.006300964186
   }

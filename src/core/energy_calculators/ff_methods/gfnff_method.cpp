@@ -23,6 +23,8 @@
 #include "src/core/units.h"
 #include "src/core/functional_groups.h"  // Claude Generated (January 10, 2026): Amide detection
 #include <chrono>
+#include <set>
+#include <functional>
 #include <omp.h>  // Claude Generated (February 2026): Phase 2 - OpenMP parallelization
 
 // Claude Generated (December 2025): D3/D4 dispersion integration
@@ -3310,77 +3312,101 @@ std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb,
     return pi_fragments;
 }
 
-std::vector<int> GFNFF::findSmallestRings(const std::vector<std::vector<int>>& adjacency_list) const
+std::vector<int> GFNFF::findSmallestRings(const std::vector<std::vector<int>>& adjacency_list,
+                                           TopologyInfo& topo_info) const
 {
-    // Phase 2.1: Ring detection algorithm - OPTIMIZED BFS (Claude Generated Jan 2026)
-    // PHASE 2 OPTIMIZED (Feb 7, 2026): Use pre-computed adjacency_list (eliminates O(N²) bond detection)
-    // Finds the smallest ring each atom belongs to (3-6 membered rings)
-    // Reference: External gfnff_helpers.f90:99-250 (getring36 subroutine)
+    // Claude Generated (Feb 9, 2026): Complete rewrite with full ring enumeration
+    // Enumerates ALL unique rings of size 3-6 and stores them in topology.
+    // Reference: Fortran gfnff_ini2.f90:469-497 (ringsbond) + getring36
     //
-    // PERFORMANCE OPTIMIZATION: Replaced O(N × B⁶) nested loops with O(N × B) BFS
-    // The key insight is that BFS from each atom naturally finds shortest cycles.
-    // We track which neighbor we came from to detect when two paths meet.
+    // Algorithm: For each directed edge (u→v), DFS from v back to u
+    // avoiding the direct u-v edge, finding paths of length 2-5
+    // (total ring size 3-6). Deduplicate by canonical form (sorted atom list).
     //
-    // Algorithm: For each starting atom, do BFS tracking parent edges.
-    // When we visit a neighbor that was already visited via a different path,
-    // we found a cycle. The cycle size is sum of distances from both paths + 1.
-    //
-    // Expected speedup: 50-100x for molecules with 50+ atoms (PLUS Phase 2 O(N²) elimination)
+    // Output: ring_sizes[atom] = smallest ring containing this atom (0 = acyclic)
+    // Side effect: Populates m_cached_topology->rings and atom_to_rings
 
-    std::vector<int> ring_sizes(m_atomcount, 0); // 0 = not in ring
-    const int MAX_RING_SIZE = 6;  // Only detect rings up to 6 members
+    std::vector<int> ring_sizes(m_atomcount, 0);
+    const int MAX_RING_SIZE = 6;
 
-    // PHASE 2 OPTIMIZED (Feb 7, 2026): Use pre-computed adjacency_list (eliminates O(N²) bond detection)
-    // Step 1: BFS-based smallest ring detection for each atom
-    // For each starting atom, we do BFS and track distances from start.
-    // When we find an already-visited atom via a different neighbor,
-    // we've found a cycle.
-    for (int start_atom = 0; start_atom < m_atomcount; ++start_atom) {
-        if (adjacency_list[start_atom].size() < 2) continue;  // Need at least 2 neighbors for a ring
+    // Collect all unique rings as sorted atom sets
+    std::set<std::vector<int>> unique_rings;
 
-        // Distance from start_atom (-1 = not visited)
-        std::vector<int> dist(m_atomcount, -1);
-        // Parent atom in BFS tree (-1 = none)
-        std::vector<int> parent(m_atomcount, -1);
+    // For each edge (u,v), find paths from v back to u (not using u-v directly)
+    for (int u = 0; u < m_atomcount; ++u) {
+        for (int v : adjacency_list[u]) {
+            if (v <= u) continue;  // Process each edge once
 
-        std::queue<int> queue;
-        dist[start_atom] = 0;
-        queue.push(start_atom);
+            // DFS from v looking for paths back to u of length 2 to MAX_RING_SIZE-1
+            // (total ring = path_length + 1 for the u-v edge)
+            std::vector<int> path;
+            path.push_back(u);
+            path.push_back(v);
 
-        int smallest_ring = 0;
+            std::function<void(int, int)> dfs = [&](int current, int depth) {
+                if (depth >= MAX_RING_SIZE) return;
 
-        while (!queue.empty() && smallest_ring == 0) {
-            int current = queue.front();
-            queue.pop();
-
-            // Early termination: if we're already at depth MAX_RING_SIZE/2,
-            // any cycle found would be larger than MAX_RING_SIZE
-            if (dist[current] > MAX_RING_SIZE / 2) break;
-
-            for (int neighbor : adjacency_list[current]) {
-                if (dist[neighbor] == -1) {
-                    // Not visited yet - add to BFS tree
-                    dist[neighbor] = dist[current] + 1;
-                    parent[neighbor] = current;
-                    queue.push(neighbor);
-                }
-                else if (neighbor != parent[current]) {
-                    // Found a cycle! The neighbor was already visited via different path
-                    // Cycle size = dist[current] + dist[neighbor] + 1
-                    int cycle_size = dist[current] + dist[neighbor] + 1;
-                    if (cycle_size >= 3 && cycle_size <= MAX_RING_SIZE) {
-                        if (smallest_ring == 0 || cycle_size < smallest_ring) {
-                            smallest_ring = cycle_size;
-                        }
-                        // For BFS, first cycle found is guaranteed smallest
-                        // (if we want only cycles through start_atom)
-                        if (smallest_ring == 3) break;  // Can't find smaller
+                for (int next : adjacency_list[current]) {
+                    if (next == u && depth >= 2) {
+                        // Found a ring! path contains the ring atoms
+                        std::vector<int> ring = path;
+                        std::sort(ring.begin(), ring.end());
+                        unique_rings.insert(ring);
+                        continue;
                     }
+                    // Don't revisit atoms already in path (simple cycle only)
+                    if (next == u) continue;  // Too short (depth < 2)
+                    bool in_path = false;
+                    for (int p : path) {
+                        if (p == next) { in_path = true; break; }
+                    }
+                    if (in_path) continue;
+
+                    path.push_back(next);
+                    dfs(next, depth + 1);
+                    path.pop_back();
                 }
+            };
+
+            dfs(v, 1);
+        }
+    }
+
+    // Store rings and build reverse index in topo_info
+    topo_info.rings.clear();
+    topo_info.atom_to_rings.resize(m_atomcount);
+    for (auto& v : topo_info.atom_to_rings) v.clear();
+
+    int ring_id = 0;
+    for (const auto& ring : unique_rings) {
+        topo_info.rings.push_back(ring);
+        for (int atom : ring) {
+            topo_info.atom_to_rings[atom].push_back(ring_id);
+        }
+        ring_id++;
+    }
+
+    // Compute per-atom smallest ring size
+    for (int atom = 0; atom < m_atomcount; ++atom) {
+        int smallest = 0;
+        for (int rid : topo_info.atom_to_rings[atom]) {
+            int sz = static_cast<int>(topo_info.rings[rid].size());
+            if (smallest == 0 || sz < smallest) {
+                smallest = sz;
             }
         }
+        ring_sizes[atom] = smallest;
+    }
 
-        ring_sizes[start_atom] = smallest_ring;
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("Ring enumeration: found {} unique rings (size 3-{})",
+                                         topo_info.rings.size(), MAX_RING_SIZE));
+        for (size_t i = 0; i < topo_info.rings.size(); ++i) {
+            std::string atoms_str;
+            for (int a : topo_info.rings[i]) atoms_str += std::to_string(a) + " ";
+            CurcumaLogger::info(fmt::format("  Ring {}: size={}, atoms=[{}]",
+                                             i, topo_info.rings[i].size(), atoms_str));
+        }
     }
 
     return ring_sizes;
@@ -3388,89 +3414,103 @@ std::vector<int> GFNFF::findSmallestRings(const std::vector<std::vector<int>>& a
 
 bool GFNFF::areAtomsInSameRing(int i, int j, int& ring_size) const
 {
-    // Check if two atoms are in the same ring
-    // Reference: Based on ring detection algorithm
-    //
-    // Approach: Use existing ring information from topology
-    // If either atom is not in a ring, return false
-    // If both are in rings, check if they share the same ring
+    // Claude Generated (Feb 9, 2026): O(1) ring membership lookup
+    // Uses pre-computed rings and atom_to_rings from findSmallestRings()
+    // Reference: Fortran ringsbond() uses pre-computed ring membership arrays
 
-    // Get cached topology information
     const TopologyInfo& topo = getCachedTopology();
 
-    // Check bounds
     if (i < 0 || i >= m_atomcount || j < 0 || j >= m_atomcount) {
         ring_size = 0;
         return false;
     }
 
-    // Check if either atom is not in a ring
-    int ring_i = (topo.ring_sizes.size() > i) ? topo.ring_sizes[i] : 0;
-    int ring_j = (topo.ring_sizes.size() > j) ? topo.ring_sizes[j] : 0;
-
-    if (ring_i == 0 || ring_j == 0) {
+    // Quick check: if either atom has no rings, return false
+    if (topo.atom_to_rings.size() <= static_cast<size_t>(i) ||
+        topo.atom_to_rings.size() <= static_cast<size_t>(j) ||
+        topo.atom_to_rings[i].empty() || topo.atom_to_rings[j].empty()) {
         ring_size = 0;
-        return false;  // One or both atoms not in any ring
-    }
-
-    // If both atoms are in rings of the same size, they might be in the same ring
-    // Need to check ring membership more precisely
-
-    // Build adjacency list for ring analysis
-    std::vector<std::vector<int>> neighbors(m_atomcount);
-    double bond_threshold = 1.3;
-
-    for (int k = 0; k < m_atomcount; ++k) {
-        for (int l = k + 1; l < m_atomcount; ++l) {
-            double distance = (m_geometry_bohr.row(k) - m_geometry_bohr.row(l)).norm();
-            double rcov_sum = getCovalentRadius(m_atoms[k]) + getCovalentRadius(m_atoms[l]);
-
-            if (distance < bond_threshold * rcov_sum) {
-                neighbors[k].push_back(l);
-                neighbors[l].push_back(k);
-            }
-        }
-    }
-
-    // BFS from atom i to see if we can reach atom j within ring_i steps
-    // and return to i forming a cycle of ring_i atoms
-    std::vector<bool> visited(m_atomcount, false);
-    std::vector<int> path;
-
-    std::function<bool(int, int, int)> findRingPath = [&](int current, int target, int depth) -> bool {
-        if (depth > ring_i) return false;
-        if (current == target && depth == ring_i) return true;
-        if (current == target && depth > 0) return false;
-
-        visited[current] = true;
-        path.push_back(current);
-
-        for (int neighbor : neighbors[current]) {
-            if (!visited[neighbor] || (neighbor == target && depth == ring_i - 1)) {
-                if (findRingPath(neighbor, target, depth + 1)) {
-                    return true;
-                }
-            }
-        }
-
-        path.pop_back();
-        visited[current] = false;
         return false;
-    };
-
-    // Check if atoms i and j are connected in a ring of ring_i atoms
-    path.clear();
-    std::fill(visited.begin(), visited.end(), false);
-
-    bool in_same_ring = findRingPath(i, j, 0);
-
-    if (in_same_ring) {
-        ring_size = ring_i;
-    } else {
-        ring_size = 0;
     }
 
-    return in_same_ring;
+    // Find smallest shared ring
+    int smallest = 0;
+    for (int rid : topo.atom_to_rings[i]) {
+        const auto& ring = topo.rings[rid];
+        // Check if j is in this ring
+        for (int atom : ring) {
+            if (atom == j) {
+                int sz = static_cast<int>(ring.size());
+                if (smallest == 0 || sz < smallest) {
+                    smallest = sz;
+                }
+                break;
+            }
+        }
+    }
+
+    ring_size = smallest;
+    return smallest > 0;
+}
+
+int GFNFF::smallestRingContainingAll(int i, int j, int k, int l) const
+{
+    // Claude Generated (Feb 9, 2026): Find smallest ring containing all 4 torsion atoms
+    // Equivalent to Fortran ringstors(ii,jj,kk,ll,...) → rings4
+    // Reference: gfnff_ini.f90:1846
+
+    const TopologyInfo& topo = getCachedTopology();
+
+    if (topo.atom_to_rings.empty()) return 0;
+    if (static_cast<size_t>(j) >= topo.atom_to_rings.size()) return 0;
+
+    int smallest = 0;
+    // Start from central atom j (likely in fewer rings than terminal atoms)
+    for (int rid : topo.atom_to_rings[j]) {
+        const auto& ring = topo.rings[rid];
+        bool has_i = false, has_k = false, has_l = false;
+        for (int atom : ring) {
+            if (atom == i) has_i = true;
+            else if (atom == k) has_k = true;
+            else if (atom == l) has_l = true;
+        }
+        if (has_i && has_k && has_l) {
+            int sz = static_cast<int>(ring.size());
+            if (smallest == 0 || sz < smallest) {
+                smallest = sz;
+            }
+        }
+    }
+    return smallest;
+}
+
+int GFNFF::largestRingContainingAll(int i, int j, int k, int l) const
+{
+    // Claude Generated (Feb 9, 2026): Find largest ring containing all 4 torsion atoms
+    // Used for Fortran ringl == rings4 check in torsion ring detection
+
+    const TopologyInfo& topo = getCachedTopology();
+
+    if (topo.atom_to_rings.empty()) return 0;
+    if (static_cast<size_t>(j) >= topo.atom_to_rings.size()) return 0;
+
+    int largest = 0;
+    for (int rid : topo.atom_to_rings[j]) {
+        const auto& ring = topo.rings[rid];
+        bool has_i = false, has_k = false, has_l = false;
+        for (int atom : ring) {
+            if (atom == i) has_i = true;
+            else if (atom == k) has_k = true;
+            else if (atom == l) has_l = true;
+        }
+        if (has_i && has_k && has_l) {
+            int sz = static_cast<int>(ring.size());
+            if (sz > largest) {
+                largest = sz;
+            }
+        }
+    }
+    return largest;
 }
 
 Vector GFNFF::calculateEEQCharges(const Vector& cn, const std::vector<int>& hyb, const std::vector<int>& rings) const
@@ -4905,7 +4945,7 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     // PHASE 2 OPTIMIZED (Feb 7, 2026): Pass adjacency_list to eliminate redundant O(N²) bond detection
     topo_info.hybridization = determineHybridization(topo_info.adjacency_list);
     topo_info.pi_fragments = detectPiSystems(topo_info.hybridization, topo_info.adjacency_list);
-    topo_info.ring_sizes = findSmallestRings(topo_info.adjacency_list);
+    topo_info.ring_sizes = findSmallestRings(topo_info.adjacency_list, topo_info);
 
     // Build neighbor lists for topology analysis (Session 6)
     topo_info.neighbor_lists = buildNeighborLists();
@@ -5169,8 +5209,13 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     topo_info.bond_types.resize(bond_list.size());
     for (size_t bond_idx = 0; bond_idx < bond_list.size(); ++bond_idx) {
         const auto& [atom_i, atom_j] = bond_list[bond_idx];
+        // Use pi-adjusted hybridization for bond type classification
+        // Fortran's hyb() is already pi-adjusted when btyp is assigned (gfnff_ini.f90:1154)
+        // sp3 atoms in pi-systems should be treated as sp2 for bond type purposes
         int hyb_i = topo_info.hybridization[atom_i];
         int hyb_j = topo_info.hybridization[atom_j];
+        if (hyb_i == 3 && topo_info.pi_fragments[atom_i] > 0) hyb_i = 2;
+        if (hyb_j == 3 && topo_info.pi_fragments[atom_j] > 0) hyb_j = 2;
         bool is_metal_i = topo_info.is_metal[atom_i];
         bool is_metal_j = topo_info.is_metal[atom_j];
 
@@ -6961,7 +7006,8 @@ bool GFNFF::calculateFinalCharges(TopologyInfo& topo_info, int max_iterations,
         topo_info.coordination_numbers,
         topo_info.hybridization,
         eeq_topology,
-        false  // CRITICAL (Jan 4, 2026): NO corrections (matches gfnff_final.cpp)
+        true, // ENABLE corrections to match Fortran goed_gfnff (dxi, dgam)
+        topo_info.alpeeq // Pass charge-dependent alpha (alpeeq) from Phase 1B
     );
 
     if (topo_info.eeq_charges.size() != m_atomcount) {

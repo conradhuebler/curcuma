@@ -57,6 +57,7 @@
  */
 
 #include "gfnff.h"
+#include "gfnff_par.h"
 
 #include "src/core/curcuma_logger.h"  // For logging
 #include <cmath>                       // For sin, cos, asin, etc.
@@ -747,159 +748,133 @@ GFNFF::GFNFFInversionParams GFNFF::getGFNFFInversionParameters(
  */
 json GFNFF::generateGFNFFInversions() const
 {
-    // Claude Generated (February 2026): Timing for parameter generation breakdown
-    auto start_time = std::chrono::high_resolution_clock::now();
+    // Claude Generated (Feb 2026): Complete rewrite to match Fortran gfnff_ini.f90:2046-2149
+    // Reference: Spicher/Grimme Angew. Chem. Int. Ed. 2020, 59, 15665
+    //
+    // Qualifying atoms for inversions:
+    //   1. Any atom with 3 neighbors AND pi character (piadr > 0)
+    //   2. OR saturated nitrogen: N with 3 neighbors and NO pi system
+    //
+    // Two potential types:
+    //   tlist(5)=0  → E = V*(1-cos(omega)) * damp   [planar sp2]
+    //   tlist(5)=-1 → E = V*(cos(omega)-cos(omega0))^2 * damp  [saturated N, omega0=80°]
 
+    auto start_time = std::chrono::high_resolution_clock::now();
     json inversions = json::array();
 
-    // ==========================================================================
-    // STEP 1: Build bond list from geometry
-    // ==========================================================================
-    std::vector<std::pair<int, int>> bond_list;
-    double bond_threshold = 1.3;  // Same as in generateGFNFFTorsions()
+    const auto& topo_info = getCachedTopology();
+    using namespace GFNFFParameters;
 
+    // ==========================================================================
+    // Loop over all atoms: check inversion criteria
+    // ==========================================================================
     for (int i = 0; i < m_atomcount; ++i) {
-        for (int j = i + 1; j < m_atomcount; ++j) {
-            double distance = (m_geometry.row(i) - m_geometry.row(j)).norm();
-            double rcov_sum = getCovalentRadius(m_atoms[i]) + getCovalentRadius(m_atoms[j]);
+        // CRITERION 1: Must have exactly 3 bonded neighbors (nb(20,i) == 3)
+        int nb_count = static_cast<int>(topo_info.adjacency_list[i].size());
+        if (nb_count != 3) continue;
 
-            if (distance < bond_threshold * rcov_sum) {
-                bond_list.push_back({i, j});
-            }
-        }
-    }
+        int Z_i = m_atoms[i];
 
-    if (bond_list.empty()) {
-        CurcumaLogger::warn("GFN-FF inversion generation: No bonds found, skipping inversions");
-        return inversions;
-    }
+        // CRITERION 2: Check pi character OR saturated nitrogen
+        // piadr > 0 means atom is in a pi system (sp/sp2 with pi-capable element + sp/sp2 neighbor)
+        bool has_pi = (topo_info.pi_fragments[i] > 0);
+        bool is_saturated_N = (!has_pi && Z_i == 7);
 
-    // ==========================================================================
-    // STEP 2: Build neighbor list
-    // ==========================================================================
-    std::vector<std::vector<int>> neighbors(m_atomcount);
-    for (const auto& bond : bond_list) {
-        neighbors[bond.first].push_back(bond.second);
-        neighbors[bond.second].push_back(bond.first);
-    }
+        if (!has_pi && !is_saturated_N) continue;
 
-    // ==========================================================================
-    // STEP 3: Detect hybridization
-    // ==========================================================================
-    std::vector<int> hybridization(m_atomcount, 3);  // Default sp³
+        // Get neighbors sorted by distance (Fortran: ssort by rab)
+        std::vector<int> nb_list = topo_info.adjacency_list[i];
+        std::sort(nb_list.begin(), nb_list.end(), [&](int a, int b) {
+            double dist_a = (m_geometry.row(i) - m_geometry.row(a)).squaredNorm();
+            double dist_b = (m_geometry.row(i) - m_geometry.row(b)).squaredNorm();
+            return dist_a < dist_b;
+        });
 
-    for (int i = 0; i < m_atomcount; ++i) {
-        int n_neighbors = neighbors[i].size();
+        int jj = nb_list[0]; // Closest neighbor
+        int kk = nb_list[1]; // Middle neighbor
+        int ll = nb_list[2]; // Farthest neighbor
 
-        if (n_neighbors <= 1) {
-            hybridization[i] = 1;  // Terminal → sp
-        } else if (n_neighbors == 2) {
-            hybridization[i] = 1;  // Linear → sp
-        } else if (n_neighbors == 3) {
-            hybridization[i] = 2;  // Trigonal → sp²  ← NEEDS INVERSION
-        } else {
-            hybridization[i] = 3;  // Tetrahedral+ → sp³
-        }
-    }
-
-    // ==========================================================================
-    // STEP 4: Generate inversions for sp² centers
-    // ==========================================================================
-    int inversion_count = 0;
-
-    for (int i = 0; i < m_atomcount; ++i) {
-        // Only sp² centers need inversions
-        if (hybridization[i] != 2) continue;
-
-        // sp² requires exactly 3 neighbors
-        if (neighbors[i].size() != 3) continue;
-
-        // Get the three neighbors
-        int j = neighbors[i][0];
-        int k = neighbors[i][1];
-        int l = neighbors[i][2];
-
-        // ==========================================================
-        // STEP 5: Calculate current out-of-plane angle
-        // ==========================================================
-        double omega = calculateOutOfPlaneAngle(i, j, k, l);
-
-        // ==========================================================
-        // STEP 6: Get inversion parameters
-        // ==========================================================
-        auto params = getGFNFFInversionParameters(
-            m_atoms[i], m_atoms[j], m_atoms[k], m_atoms[l],
-            hybridization[i]
-        );
-
-        // Skip if no barrier assigned (shouldn't happen for sp², but safe)
-        if (params.barrier_height < 1e-6) continue;
-
-        // ==========================================================
-        // STEP 7: Store in JSON format
-        // ==========================================================
         json inversion;
         inversion["type"] = 3;  // GFN-FF type
-        inversion["i"] = i;     // Central atom (out-of-plane)
-        inversion["j"] = j;     // Plane atom 1
-        inversion["k"] = k;     // Plane atom 2
-        inversion["l"] = l;     // Plane atom 3
-        inversion["barrier"] = params.barrier_height;       // kcal/mol
-        inversion["omega0"] = params.reference_angle;       // radians
-        inversion["potential_type"] = params.potential_type; // 0 or 1
-        inversion["current_angle"] = omega;                 // radians
+        inversion["i"] = i;     // Center atom
+        inversion["j"] = jj;    // Neighbor 1 (closest)
+        inversion["k"] = kk;    // Neighbor 2 (middle)
+        inversion["l"] = ll;    // Neighbor 3 (farthest)
+
+        if (is_saturated_N) {
+            // ==========================================================
+            // CASE A: Saturated nitrogen (tlist(5) = -1)
+            // Fortran: gfnff_ini.f90:2070-2079
+            // V = sum over 3 neighbors of: ff * sqrt(repz[at(neighbor)])
+            // omega0 = 80° (double minimum at ±80°)
+            // ==========================================================
+            double ff = 0.60;
+            double V = 0.0;
+            for (int m = 0; m < 3; ++m) {
+                int nb_z = m_atoms[nb_list[m]];
+                if (nb_z >= 1 && nb_z <= static_cast<int>(repz.size())) {
+                    V += ff * std::sqrt(repz[nb_z - 1]);
+                }
+            }
+
+            inversion["barrier"] = V;
+            inversion["omega0"] = 80.0 * M_PI / 180.0;  // 80° in radians
+            inversion["potential_type"] = -1;  // Double minimum
+        } else {
+            // ==========================================================
+            // CASE B: Pi-system center (tlist(5) = 0)
+            // Fortran: gfnff_ini.f90:2080-2100
+            // V = torsf(3) * f2 * fqq  with element-specific multipliers
+            // omega0 = 0 (planar minimum)
+            // ==========================================================
+
+            // Count special neighbor types
+            int ncarbo = 0;  // O or S neighbors
+            int nf = 0;      // Halogen neighbors (group 7)
+            for (int m = 0; m < 3; ++m) {
+                int nb_z = m_atoms[nb_list[m]];
+                if (nb_z == 8 || nb_z == 16) ncarbo++;
+                // Group 7 halogens: F(9), Cl(17), Br(35), I(53)
+                if (nb_z == 9 || nb_z == 17 || nb_z == 35 || nb_z == 53) nf++;
+            }
+
+            // Charge correction: fqq = 1 + qa(i)*5
+            double qa_i = 0.0;
+            if (topo_info.topology_charges.size() > i) {
+                qa_i = topo_info.topology_charges(i);
+            }
+            double fqq = 1.0 + qa_i * 5.0;
+
+            // Pi bond order correction: f2 = 1 - sumppi * torsf(5)
+            double sumppi = 0.0;
+            if (!topo_info.pi_bond_orders.empty()) {
+                sumppi = topo_info.pi_bond_orders[lin(i, jj)]
+                       + topo_info.pi_bond_orders[lin(i, kk)]
+                       + topo_info.pi_bond_orders[lin(i, ll)];
+            }
+            double f2 = 1.0 - sumppi * torsf_pi_improper;  // torsf(5) = 0.50
+
+            // Base barrier: V = torsf(3) * f2 * fqq
+            double V = torsf_improper * f2 * fqq;  // torsf(3) = 1.05
+
+            // Element-specific multipliers (gfnff_ini.f90:2093-2099)
+            if (Z_i == 5 && ncarbo > 0) V *= 38.0;        // B with O/S
+            if (Z_i == 6 && ncarbo > 0) V *= 38.0;        // C with O/S
+            if (Z_i == 6 && nf > 0 && ncarbo == 0) V *= 10.0;  // C with F (no O/S)
+            if (Z_i == 7 && ncarbo > 0) V *= 10.0 / f2;   // N with O/S
+
+            inversion["barrier"] = V;
+            inversion["omega0"] = 0.0;  // Planar
+            inversion["potential_type"] = 0;
+        }
 
         inversions.push_back(inversion);
-        inversion_count++;
-
-        // ==========================================================
-        // NOTE: Ordering of j, k, l
-        // ==========================================================
-        // In full GFN-FF, different orderings (j,k,l), (k,l,j), (l,j,k)
-        // might generate different inversion terms. Phase 1.2 uses
-        // only ONE ordering per sp² center for simplicity.
-        //
-        // Impact: Potential energy surface slightly less accurate,
-        // but sufficient for basic validation.
     }
 
-    // ==========================================================================
-    // STEP 8: Report results
-    // ==========================================================================
-    if (inversion_count == 0) {
-        CurcumaLogger::info("GFN-FF: No inversions detected (no sp² centers found)");
-    } else {
-        CurcumaLogger::info("GFN-FF detected " + std::to_string(inversion_count) + " inversions");
-
-        // Optional: Element distribution
-        std::map<int, int> element_count;
-        for (const auto& inv : inversions) {
-            int central_z = m_atoms[inv["i"]];
-            element_count[central_z]++;
-        }
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            for (const auto& [z, count] : element_count) {
-                CurcumaLogger::info("  Element Z=" + std::to_string(z) + ": " + std::to_string(count) + " inversions");
-            }
-        }
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("GFN-FF inversions: {} terms generated", inversions.size()));
     }
 
-    // ==========================================================================
-    // KNOWN LIMITATIONS (Phase 1.2)
-    // ==========================================================================
-    // The following features are NOT yet implemented:
-    //
-    // 1. **Ring strain corrections**: Cyclopropene should have reduced barrier
-    // 2. **Aromatic detection**: Benzene should have ~50% higher barrier
-    // 3. **Conjugation detection**: Butadiene should have enhanced planarity
-    // 4. **Multiple orderings**: Full GFN-FF uses all (j,k,l) permutations
-    // 5. **Lone pair effects**: sp² nitrogen pyramidalization in some cases
-    //
-    // **Impact**: Energy differences of 0.5-2 kcal/mol for aromatic/conjugated
-    // systems. Simple sp² centers (ethene, formaldehyde) should be accurate.
-
-    // Claude Generated (February 2026): Report timing at verbosity 1+
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
     if (CurcumaLogger::get_verbosity() >= 1) {

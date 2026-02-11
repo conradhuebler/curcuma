@@ -858,12 +858,41 @@ Vector EEQSolver::calculateCharges(
         std::vector<bool> is_amide = detectAmideNitrogens(atoms, hybridization, is_pi_atom, topology, cn);
         Vector dgam = calculateDgam(atoms, topology_charges, hybridization, is_pi_atom, is_amide);
 
-        // DEBUG: Print correction values (verbosity 3 only)
+        // Diagnostic output for comparison with Fortran goed_gfnff debug output
+        // Matches format: gfnff_engrad.F90:1581-1594
         if (m_verbosity >= 3) {
-            CurcumaLogger::info("Phase 2: Single Solve WITH corrections (matching Fortran)");
-            for (int i = 0; i < std::min(3, natoms); ++i) {
-                CurcumaLogger::info(fmt::format("  Atom {} (Z={}): dxi = {:.6f}, dgam = {:.6f}",
-                                        i, atoms[i], dxi(i), dgam(i)));
+            CurcumaLogger::info("=== Phase-2 EEQ Parameters (Curcuma) ===");
+            CurcumaLogger::info(fmt::format("{:>5} {:>4} {:>12} {:>12} {:>12} {:>10} {:>10} {:>10}",
+                "Atom", "Z", "chieeq", "gameeq", "alpeeq", "CN", "dxi", "dgam"));
+
+            for (int i = 0; i < natoms; ++i) {
+                int z_i = atoms[i];
+                EEQParameters params_i = getParameters(z_i, cn(i));
+                double chi_base = -params_i.chi + dxi(i);
+                double gam_corr = params_i.gam + dgam(i);
+
+                // Compute alpeeq using charge-dependent ff (matching gfnff_ini.f90:718-725)
+                double alpha_base = (z_i >= 1 && z_i <= 86) ? alpha_eeq[z_i - 1] : 0.903430;
+                double ff = 0.0;
+                if (z_i == 6) ff = 0.09;
+                else if (z_i == 7) ff = -0.21;
+                else if (z_i >= 1 && z_i <= 86) {
+                    int group = periodic_group[z_i - 1];
+                    if (group == 6) ff = -0.03;
+                    else if (group == 7) ff = 0.50;
+                }
+                double alpeeq = std::pow(alpha_base + ff * topology_charges(i), 2);
+
+                CurcumaLogger::info(fmt::format("{:>5} {:>4} {:>12.6f} {:>12.6f} {:>12.6f} {:>10.5f} {:>10.6f} {:>10.6f}",
+                    i+1, z_i, chi_base, gam_corr, alpeeq, cn(i), dxi(i), dgam(i)));
+            }
+
+            // Also print Phase 1 charges (qa) for comparison with Fortran topo%qa
+            CurcumaLogger::info("\n=== Phase-1 Topology Charges (qa) ===");
+            CurcumaLogger::info(fmt::format("{:>5} {:>4} {:>15}", "Atom", "Z", "qa"));
+            for (int i = 0; i < natoms; ++i) {
+                CurcumaLogger::info(fmt::format("{:>5} {:>4} {:>15.10f}",
+                    i+1, atoms[i], topology_charges(i)));
             }
         }
 
@@ -887,6 +916,18 @@ Vector EEQSolver::calculateCharges(
 
         if (m_verbosity >= 1) {
             CurcumaLogger::success("EEQSolver: Phase 2 single-solve completed with dxi/dgam corrections");
+        }
+
+        // Phase 2 charge comparison output (verbosity 3)
+        if (m_verbosity >= 3) {
+            CurcumaLogger::info("\n=== Phase-2 Final Charges (Curcuma) ===");
+            CurcumaLogger::info(fmt::format("{:>5} {:>4} {:>15} {:>15} {:>12}",
+                "Atom", "Z", "q_phase2", "q_phase1(qa)", "delta"));
+            for (int i = 0; i < natoms; ++i) {
+                CurcumaLogger::info(fmt::format("{:>5} {:>4} {:>15.10f} {:>15.10f} {:>12.6f}",
+                    i+1, atoms[i], current_charges(i), topology_charges(i),
+                    current_charges(i) - topology_charges(i)));
+            }
         }
     }
 
@@ -1175,18 +1216,20 @@ Vector EEQSolver::solveEEQ(
         // chi_corrected = -chi + dxi (always included)
         double chi_corrected = -params_i.chi + dxi(i);
 
-        // Metal Charge Shift Correction (Phase 2.8 - January 15, 2026)
-        // Reference: gfnff_ini.f90:413-418
+        // Metal Charge Shift Correction - Phase 1 ONLY
+        // Reference: gfnff_ini.f90:413-418 (Phase 1 parameter setup)
+        // Phase 2 overwrites chieeq at line 715 WITHOUT mchishift.
         // Formula: chieeq(i) = chieeq(i) - mchishift (for transition metals only)
-        // Effect: Makes transition metals more electronegative
         // Claude Generated: Metal identification based on Z value
-        bool is_transition_metal = false;
-        if (z_i >= 21 && z_i <= 30) is_transition_metal = true;  // Sc-Zn
-        else if (z_i >= 39 && z_i <= 48) is_transition_metal = true;  // Y-Cd
-        else if (z_i >= 72 && z_i <= 80) is_transition_metal = true;  // Hf-Hg
+        if (use_integer_nb) {  // Phase 1 only - Fortran applies mchishift before goedeckera
+            bool is_transition_metal = false;
+            if (z_i >= 21 && z_i <= 30) is_transition_metal = true;  // Sc-Zn
+            else if (z_i >= 39 && z_i <= 48) is_transition_metal = true;  // Y-Cd
+            else if (z_i >= 72 && z_i <= 80) is_transition_metal = true;  // Hf-Hg
 
-        if (is_transition_metal) {
-            chi_corrected -= MCHISHIFT;  // Subtracts -0.09, effectively adds +0.09
+            if (is_transition_metal) {
+                chi_corrected -= MCHISHIFT;  // Subtracts -0.09, effectively adds +0.09
+            }
         }
 
         // Amide Hydrogen Electronegativity Shift (Phase 2.9 - January 17, 2026)
@@ -1211,11 +1254,13 @@ Vector EEQSolver::solveEEQ(
             double nb_count;
 
             if (use_integer_nb && topology.has_value() && i < static_cast<int>(topology->neighbor_lists.size())) {
+                // Phase 1: integer neighbor count with cnmax cap (gfnff_ini.f90:409)
                 nb_count = static_cast<double>(topology->neighbor_lists[i].size());
                 nb_count = std::min(nb_count, CNMAX);
             } else {
-                // Use fractional CN for energy charges (Phase 2/ goed_gfnff)
-                nb_count = std::min(cn(i), CNMAX);
+                // Phase 2: fractional CN WITHOUT cnmax cap (gfnff_engrad.F90:1577)
+                // Fortran goed_gfnff uses sqrt(cn(i)) directly, no cnmax limit
+                nb_count = cn(i);
             }
             double cnf_term = params_i.cnf * std::sqrt(nb_count);
             x(i) = chi_corrected + cnf_term;

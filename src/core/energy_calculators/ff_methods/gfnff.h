@@ -179,6 +179,13 @@ public:
         std::vector<std::tuple<int,int,int>> b3list;  // Batm triples (i,j,k) for 1,4-pairs
         int nbatm = 0;  // Number of batm triples
 
+        // Ring enumeration (Claude Generated - Feb 9, 2026)
+        // Pre-computed ring membership for O(1) lookup in areAtomsInSameRing()
+        // Replaces broken ad-hoc path-finding with Fortran-equivalent ring storage
+        // Reference: Fortran gfnff_ini2.f90:469-497 (ringsbond subroutine)
+        std::vector<std::vector<int>> rings;           // rings[ring_id] = {atom0, atom1, ...}
+        std::vector<std::vector<int>> atom_to_rings;   // atom_to_rings[atom] = {ring_id0, ring_id1, ...}
+
         // Phase 10: Molecular fragments (Claude Generated - Jan 31, 2026)
         // Used for fragment-constrained EEQ charges
         int nfrag = 1;                       // Number of molecular fragments
@@ -538,10 +545,13 @@ private:
      * Reference: docs/theory/GFNFF_TORSION_THEORY.md
      */
     struct GFNFFTorsionParams {
-        double barrier_height;     ///< V_n: Energy barrier in kcal/mol (Spicher & Grimme Eq. 8)
+        double barrier_height;     ///< V_n: Energy barrier in Hartree (Spicher & Grimme Eq. 8)
         int periodicity;            ///< n: Rotational symmetry (1, 2, or 3)
         double phase_shift;         ///< φ₀: Reference angle in radians
         bool is_improper;          ///< True for out-of-plane/improper torsions
+        double fij_corrected;      ///< Central bond factor after all corrections (H-count, amide, alphaCO, CN, N-sat, hypervalent)
+        double fkl_corrected;      ///< Outer atom factor after all corrections (N-reduction, hypervalent, CN)
+        double fqq;                ///< Charge correction factor: 1 + |qa_j*qa_k| * qfacTOR
     };
 
     /**
@@ -676,7 +686,8 @@ private:
                                                   double cn_i = 2.0, double cn_l = 2.0,
                                                   bool in_ring = false, int ring_size = 0,
                                                   int i_atom_idx = -1, int j_atom_idx = -1,
-                                                  int k_atom_idx = -1, int l_atom_idx = -1) const;
+                                                  int k_atom_idx = -1, int l_atom_idx = -1,
+                                                  int bond_type = 1) const;
 
     /**
      * @brief Calculate dihedral angle for four atoms
@@ -848,20 +859,52 @@ private:
                                      const std::vector<std::vector<int>>& adjacency_list) const;
 
     /**
-     * @brief Find smallest ring size for each atom (PHASE 2 OPTIMIZED)
+     * @brief Find smallest ring size for each atom and enumerate all rings
      * @param adjacency_list Pre-computed bond connectivity (eliminates O(N²) loop)
+     * @param topo_info TopologyInfo to populate with rings and atom_to_rings
      * @return Vector of smallest ring sizes (0 = not in ring)
+     *
+     * Claude Generated (Feb 9, 2026): Also populates topo_info.rings and topo_info.atom_to_rings
      */
-    std::vector<int> findSmallestRings(const std::vector<std::vector<int>>& adjacency_list) const;
+    std::vector<int> findSmallestRings(const std::vector<std::vector<int>>& adjacency_list,
+                                       TopologyInfo& topo_info) const;
 
     /**
      * @brief Check if two atoms are in the same ring
      * @param i First atom index
      * @param j Second atom index
-     * @param ring_size Output: size of the ring they share (0 if not in same ring)
+     * @param ring_size Output: size of the smallest ring they share (0 if not in same ring)
      * @return true if atoms are in the same ring
+     *
+     * Claude Generated (Feb 9, 2026): Rewritten to use pre-computed ring membership
+     * instead of broken ad-hoc path-finding. O(1) lookup via atom_to_rings.
      */
     bool areAtomsInSameRing(int i, int j, int& ring_size) const;
+
+    /**
+     * @brief Find smallest ring containing all four atoms of a torsion quartet
+     * @param i First atom (terminal)
+     * @param j Second atom (central bond)
+     * @param k Third atom (central bond)
+     * @param l Fourth atom (terminal)
+     * @return Size of smallest ring containing all four atoms, or 0 if none
+     *
+     * Claude Generated (Feb 9, 2026): Equivalent to Fortran ringstors/rings4
+     * Reference: gfnff_ini.f90:1846 (rings4 = ringstors(ii,jj,kk,ll,...))
+     */
+    int smallestRingContainingAll(int i, int j, int k, int l) const;
+
+    /**
+     * @brief Find largest ring containing all four atoms of a torsion quartet
+     * @param i First atom (terminal)
+     * @param j Second atom (central bond)
+     * @param k Third atom (central bond)
+     * @param l Fourth atom (terminal)
+     * @return Size of largest ring containing all four atoms, or 0 if none
+     *
+     * Claude Generated (Feb 9, 2026): For Fortran ringl == rings4 check
+     */
+    int largestRingContainingAll(int i, int j, int k, int l) const;
 
     /**
      * @brief Calculate topology-dependent electronegativity corrections (dxi)

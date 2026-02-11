@@ -260,6 +260,14 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
         return;
     }
 
+    // Claude Generated (Feb 8, 2026): Temporary diagnostic for dispersion CN values
+    if (m_atoms.size() <= 10) {
+        fmt::print(stderr, "D4_CN_DIAG: Dispersion CN values (from GFNFFCN):\n");
+        for (size_t i = 0; i < m_atoms.size(); ++i) {
+            fmt::print(stderr, "D4_CN_DIAG: atom {} (Z={}) CN={:.6f}\n", i, m_atoms[i], m_cn_values[i]);
+        }
+    }
+
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success(fmt::format("D4: Molecular CN calculated in {:.2f} ms", t_cn_ms));
     }
@@ -393,6 +401,25 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
                 // CN-weighted C6 using Casimir-Polder integration (Dec 2025 Phase 2.2)
                 double c6 = getChargeWeightedC6(atom_i, atom_j, i, j);
+
+                // Claude Generated (Feb 8, 2026): C6 reference diagnostic for first few pairs
+                if (i == 0 && j == 1 && m_atoms.size() <= 10) {
+                    int nref_i = (atom_i > 0 && atom_i <= MAX_ELEM) ? m_refn[atom_i - 1] : 0;
+                    int nref_j = (atom_j > 0 && atom_j <= MAX_ELEM) ? m_refn[atom_j - 1] : 0;
+                    fmt::print(stderr, "D4_C6REF_DIAG: pair ({},{}) Z=({},{}) c6_weighted={:.6f} nref=({},{})\n",
+                               i, j, atom_i, atom_j, c6, nref_i, nref_j);
+                    for (int ri = 0; ri < std::min(nref_i, MAX_REF); ++ri) {
+                        for (int rj = 0; rj < std::min(nref_j, MAX_REF); ++rj) {
+                            double c6ref = m_c6_flat_cache[c6FlatIndex(atom_i-1, atom_j-1, ri, rj)];
+                            double wi = m_gaussian_weights[i][ri];
+                            double wj = m_gaussian_weights[j][rj];
+                            if (wi * wj > 1e-6) {
+                                fmt::print(stderr, "D4_C6REF_DIAG: ref({},{}) c6ref={:.4f} wi={:.4f} wj={:.4f} contrib={:.6f}\n",
+                                           ri, rj, c6ref, wi, wj, wi*wj*c6ref);
+                            }
+                        }
+                    }
+                }
 
                 // GFN-FF specific parameters (NOT standard D3/D4!)
                 // sqrtZr4r2 values from pre-computed m_sqrt_z_r4_r2 array
@@ -857,10 +884,12 @@ double D4ParameterGenerator::computeC6Reference(int elem_i, int elem_j, int ref_
     double sscale_i = (d4_sscale_data.find(refsys_i) != d4_sscale_data.end()) ? d4_sscale_data.at(refsys_i) : 0.0;
     double sscale_j = (d4_sscale_data.find(refsys_j) != d4_sscale_data.end()) ? d4_sscale_data.at(refsys_j) : 0.0;
 
-    // Debug output for ascale verification (Phase A - Dec 2025)
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("D4 ascale: elem_i={} ref_i={} ascale={:.4f}, elem_j={} ref_j={} ascale={:.4f}",
-                                         elem_i, ref_i, ascale_i, elem_j, ref_j, ascale_j));
+    // Debug output for ascale and hcount verification (Phase A - Dec 2025)
+    static int debug_hcount = 0;
+    if (CurcumaLogger::get_verbosity() >= 3 && debug_hcount < 5) {
+        CurcumaLogger::info(fmt::format("D4 params: elem_i={} ref_i={} ascale={:.4f} hcount={:.1f}, elem_j={} ref_j={} ascale={:.4f} hcount={:.1f}",
+                                         elem_i, ref_i, ascale_i, hcount_i, elem_j, ref_j, ascale_j, hcount_j));
+        debug_hcount++;
     }
 
     // Integrate product of CORRECTED polarizabilities using trapezoidal rule
@@ -989,6 +1018,24 @@ void D4ParameterGenerator::precomputeGaussianWeights()
         m_gaussian_weights[i] = std::move(weights);
     }
 
+    // Claude Generated (Feb 8, 2026): Temporary diagnostic for Gaussian weights
+    if (m_atoms.size() <= 10) {
+        fmt::print(stderr, "D4_GW_DIAG: Gaussian weights per atom:\n");
+        for (size_t i = 0; i < m_atoms.size(); ++i) {
+            int elem_i = m_atoms[i];
+            int nref_i = (elem_i > 0 && elem_i <= MAX_ELEM && (elem_i - 1) < static_cast<int>(m_refn.size()))
+                         ? m_refn[elem_i - 1] : 0;
+            fmt::print(stderr, "D4_GW_DIAG: atom {} (Z={}) CN={:.4f} nref={}", i, elem_i, m_cn_values[i], nref_i);
+            for (size_t ref = 0; ref < m_gaussian_weights[i].size() && ref < 7; ++ref) {
+                double cnref = ((elem_i - 1) < static_cast<int>(m_refcn.size()) &&
+                               ref < m_refcn[elem_i - 1].size())
+                              ? m_refcn[elem_i - 1][ref] : -1.0;
+                fmt::print(stderr, " w[{}]={:.4f}(cnref={:.2f})", ref, m_gaussian_weights[i][ref], cnref);
+            }
+            fmt::print(stderr, "\n");
+        }
+    }
+
     // Claude Generated (Feb 7, 2026): Phase 7b - Pre-compute dominant reference indices
     // Only refs with weight > 0.01 contribute meaningfully to C6 interpolation
     constexpr double WEIGHT_THRESHOLD = 0.01;
@@ -1072,6 +1119,15 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, size_t atom_i, 
 
     double c6_weighted = 0.0;
 
+    // Claude Generated (Feb 8, 2026): DEBUG: Log C6 computation for small molecules
+    static int debug_count = 0;
+    bool log_c6 = (atom_i == 0 && atom_j <= 1 && debug_count < 5);
+    if (log_c6) {
+        fmt::print(stderr, "C6_DEBUG: atom_i={} elem_i={} atom_j={} elem_j={} CN_i={:.4f} CN_j={:.4f}\n",
+                   atom_i, Zi, atom_j, Zj, m_cn_values[atom_i], m_cn_values[atom_j]);
+        debug_count++;
+    }
+
     // Base offset for elem_i and elem_j in flat cache
     const size_t base_ij = static_cast<size_t>(elem_i) * MAX_ELEM * MAX_REF * MAX_REF
                          + static_cast<size_t>(elem_j) * MAX_REF * MAX_REF;
@@ -1082,7 +1138,13 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, size_t atom_i, 
             double wi = weights_i[ri];
             size_t base_ri = base_ij + static_cast<size_t>(ri) * MAX_REF;
             for (int rj : refs_j) {
-                c6_weighted += wi * weights_j[rj] * m_c6_flat_cache[base_ri + rj];
+                double c6_ref = m_c6_flat_cache[base_ri + rj];
+                double contrib = wi * weights_j[rj] * c6_ref;
+                c6_weighted += contrib;
+                if (log_c6) {
+                    fmt::print(stderr, "  ref_i={} ref_j={}: w_i={:.6f} w_j={:.6f} C6_ref={:.6f} contrib={:.6f}\n",
+                               ri, rj, wi, weights_j[rj], c6_ref, contrib);
+                }
             }
         }
     } else {
@@ -1094,7 +1156,13 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, size_t atom_i, 
             if (wi < 1e-12) continue;  // Micro-optimization: skip zero weights
             size_t base_ri = base_ij + static_cast<size_t>(ri) * MAX_REF;
             for (int rj = 0; rj < nref_j; ++rj) {
-                c6_weighted += wi * weights_j[rj] * m_c6_flat_cache[base_ri + rj];
+                double c6_ref = m_c6_flat_cache[base_ri + rj];
+                double contrib = wi * weights_j[rj] * c6_ref;
+                c6_weighted += contrib;
+                if (log_c6) {
+                    fmt::print(stderr, "  ref_i={} ref_j={}: w_i={:.6f} w_j={:.6f} C6_ref={:.6f} contrib={:.6f}\n",
+                               ri, rj, wi, weights_j[rj], c6_ref, contrib);
+                }
             }
         }
     }

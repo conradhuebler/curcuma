@@ -79,7 +79,7 @@
   },
   "metadata": {
     "generator": "gfnff-analyzer-parser",
-    "date": "2026-02-07 20:48:54"
+    "date": "2026-02-08 01:09:25"
   },
   "topology": {
     "coordination_numbers": [
@@ -720,16 +720,17 @@
     }
   ],
   "energy_components": {
-    "bond": -2.50816637,
-    "angle": 0.0,
-    "torsion": 7.3e-07,
-    "repulsion": 0.15802326,
+    "bond": -2.508166368904,
+    "angle": 7.58e-10,
+    "torsion": 7.31969e-07,
+    "repulsion": 0.158023259756,
     "electrostatic": -0.00433904,
     "dispersion": -0.00629447,
     "hb": 0.0,
     "xb": 0.0,
     "batm": -0.003999588412
   },
+  "gradient_decomposition": {},
   "gradients": {
     "norm": 0.003577040245
   }

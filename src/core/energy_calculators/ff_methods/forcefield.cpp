@@ -629,13 +629,17 @@ void ForceField::setInversions(const json& inversions)
 
         // GFN-FF uses different inversion parameters (barrier, omega0) vs UFF (fc, C0, C1, C2)
         if (inversion.contains("barrier")) {
-            // GFN-FF style: use barrier and omega0
-            inv.fc = inversion["barrier"];
-            inv.C0 = inversion.value("omega0", 0.0);
+            // GFN-FF style: V and omega0 with Fortran-compatible formula
+            inv.type = 3; // GFN-FF type
+            inv.fc = inversion["barrier"]; // V (force constant in Hartree)
+            inv.potential_type = inversion.value("potential_type", 0);
+            inv.omega0 = inversion.value("omega0", 0.0);
+            inv.C0 = 0.0;
             inv.C1 = 0.0;
             inv.C2 = 0.0;
             if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::param("inversion_format", "GFN-FF (barrier/omega0)");
+                CurcumaLogger::param("inversion_format", fmt::format("GFN-FF (V={:.6f}, pot_type={}, omega0={:.4f})",
+                    inv.fc, inv.potential_type, inv.omega0));
             }
         } else {
             // UFF/QMDFF style: use Fourier coefficients

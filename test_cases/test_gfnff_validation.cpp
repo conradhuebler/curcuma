@@ -111,6 +111,8 @@ private:
 
     void validateCharges() {
         m_gfnff->Calculation(false); // Triggers EEQ
+        std::cerr << "DEBUG: After validateCharges Calculation(), Dispersion = "
+                  << std::fixed << std::setprecision(8) << m_gfnff->DispersionEnergy() << " Eh" << std::endl;
         Vector charges = m_gfnff->Charges();
         const auto& ref_charges = m_ref_data["topology"]["charges"];
 
@@ -124,6 +126,30 @@ private:
 
     void validateEnergyComponents() {
         double total = m_gfnff->Calculation(false);
+        // Dump FF parameter counts for diagnostics
+        json ff_params = m_gfnff->getForceFieldParameters();
+        if (ff_params.contains("dihedrals"))
+            std::cerr << "DEBUG COUNTS: dihedrals=" << ff_params["dihedrals"].size();
+        if (ff_params.contains("extra_dihedrals"))
+            std::cerr << " extra_dihedrals=" << ff_params["extra_dihedrals"].size();
+        if (ff_params.contains("inversions"))
+            std::cerr << " inversions=" << ff_params["inversions"].size();
+        std::cerr << std::endl;
+        // Show hybridization for first atoms
+        const auto& topo = m_gfnff->getTopologyInfo();
+        // Count hybridization by element
+        std::map<std::string, std::map<int, int>> hyb_counts;
+        for (int i = 0; i < (int)topo.hybridization.size(); ++i) {
+            std::string elem = m_ref_data["molecule"]["atoms"][i]["element"].get<std::string>();
+            hyb_counts[elem][topo.hybridization[i]]++;
+        }
+        std::cerr << "DEBUG HYB SUMMARY: ";
+        for (auto& [elem, counts] : hyb_counts) {
+            for (auto& [hyb, count] : counts) {
+                std::cerr << elem << "(hyb=" << hyb << "):" << count << " ";
+            }
+        }
+        std::cerr << std::endl;
         const auto& ref_e = m_ref_data["energy_components"];
 
         double tol_comp = 1e-6; // 1 µEh tolerance for individual terms
@@ -142,7 +168,12 @@ private:
         addResult("Energy", "Total", std::abs(total - ref_total) < tol_total, total, ref_total, total - ref_total);
         addResult("Energy", "Bond", std::abs(m_gfnff->BondEnergy() - (double)ref_e["bond"]) < tol_comp, m_gfnff->BondEnergy(), ref_e["bond"], m_gfnff->BondEnergy() - (double)ref_e["bond"]);
         addResult("Energy", "Angle", std::abs(m_gfnff->AngleEnergy() - (double)ref_e["angle"]) < tol_comp, m_gfnff->AngleEnergy(), ref_e["angle"], m_gfnff->AngleEnergy() - (double)ref_e["angle"]);
-        addResult("Energy", "Torsion", std::abs(m_gfnff->DihedralEnergy() - (double)ref_e["torsion"]) < tol_comp, m_gfnff->DihedralEnergy(), ref_e["torsion"], m_gfnff->DihedralEnergy() - (double)ref_e["torsion"]);
+        // Fortran "etors" includes both torsions AND inversions in one loop
+        double torsion_plus_inversion = m_gfnff->DihedralEnergy() + m_gfnff->InversionEnergy();
+        std::cerr << "DEBUG TORSION BREAKDOWN: Dihedral=" << std::fixed << std::setprecision(8)
+                  << m_gfnff->DihedralEnergy() << " Inversion=" << m_gfnff->InversionEnergy()
+                  << " Sum=" << torsion_plus_inversion << " Ref=" << (double)ref_e["torsion"] << std::endl;
+        addResult("Energy", "Torsion", std::abs(torsion_plus_inversion - (double)ref_e["torsion"]) < tol_comp, torsion_plus_inversion, ref_e["torsion"], torsion_plus_inversion - (double)ref_e["torsion"]);
         addResult("Energy", "Repulsion", std::abs(m_gfnff->RepulsionEnergy() - (double)ref_e["repulsion"]) < tol_comp, m_gfnff->RepulsionEnergy(), ref_e["repulsion"], m_gfnff->RepulsionEnergy() - (double)ref_e["repulsion"]);
         addResult("Energy", "Coulomb", std::abs(m_gfnff->CoulombEnergy() - (double)ref_e["electrostatic"]) < tol_comp, m_gfnff->CoulombEnergy(), ref_e["electrostatic"], m_gfnff->CoulombEnergy() - (double)ref_e["electrostatic"]);
         addResult("Energy", "Dispersion", std::abs(m_gfnff->DispersionEnergy() - (double)ref_e["dispersion"]) < tol_comp, m_gfnff->DispersionEnergy(), ref_e["dispersion"], m_gfnff->DispersionEnergy() - (double)ref_e["dispersion"]);
@@ -152,6 +183,8 @@ private:
         if (!m_ref_data.contains("gradients")) return;
 
         m_gfnff->Calculation(true);
+        std::cerr << "DEBUG: After validateGradients Calculation(true), Dispersion = "
+                  << std::fixed << std::setprecision(8) << m_gfnff->DispersionEnergy() << " Eh" << std::endl;
         Geometry grad = m_gfnff->Gradient();
 
         // Compare total norm
