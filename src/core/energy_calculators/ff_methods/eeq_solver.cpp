@@ -1376,34 +1376,18 @@ Vector EEQSolver::calculateTopologyCharges(
     Matrix A = Matrix::Zero(m, m);
     Vector x = Vector::Zero(m);
 
-    // DEBUG: Print Phase 1 parameters for first 3 atoms
+    // Phase 1 EEQ diagnostic output (Claude Generated February 2026)
+    // Format matches Fortran goedeckera debug output for direct comparison
     if (m_verbosity >= 3 && natoms >= 1) {
-        std::cerr << "\n=== Phase 1 EEQ Parameter Breakdown (Topology Charges) ===" << std::endl;
-        for (int i = 0; i < std::min(3, natoms); ++i) {
+        CurcumaLogger::info("\nEEQ_PHASE1_PARAMS: Curcuma Phase 1 EEQ parameters");
+        CurcumaLogger::info("EEQ_PHASE1_PARAMS: atom, Z, chieeq, gameeq, sqrt_alpeeq, dxi, nb_count");
+        for (int i = 0; i < natoms; ++i) {
             int z_i = atoms[i];
-            EEQParameters params_raw = getParameters(z_i, 0.0);  // Without CN correction
-            EEQParameters params_cn = getParameters(z_i, cn(i)); // With CN correction
-
-            // dxi calculation (same as above)
-            double dxi_hyb = 0.0;
-            if (cn(i) < 1.5) dxi_hyb = 0.1;
-            else if (cn(i) < 2.5) dxi_hyb = 0.05;
-            double dxi_cn_corr = -0.01 * (cn(i) - 2.0);
-            double dxi_total = dxi_hyb + dxi_cn_corr;
-            double cnf_term = params_cn.cnf * std::sqrt(cn(i));
-
-            std::cerr << "Atom " << i << " (Z=" << z_i << "):" << std::endl;
-            std::cerr << "  CN = " << cn(i) << std::endl;
-            std::cerr << "  chi_base = " << params_raw.chi << std::endl;
-            std::cerr << "  gam_base = " << params_raw.gam << std::endl;
-            std::cerr << "  alpha_base = " << std::sqrt(params_raw.alp) << " (squared: " << params_raw.alp << ")" << std::endl;
-            std::cerr << "  cnf = " << params_raw.cnf << std::endl;
-            std::cerr << "  dxi_hyb = " << dxi_hyb << ", dxi_cn = " << dxi_cn_corr << ", dxi_total = " << dxi_total << std::endl;
-            std::cerr << "  cnf_term = cnf*sqrt(CN) = " << cnf_term << std::endl;
-            std::cerr << "  chi_corrected = -chi + dxi + cnf*sqrt(CN) = " << chi(i) << std::endl;
-            std::cerr << "  NOTE: CNF term included ONCE (XTB gfnff_ini2.f90:1184)" << std::endl;
+            int nb = (topology.has_value() && i < static_cast<int>(topology->neighbor_lists.size()))
+                     ? static_cast<int>(topology->neighbor_lists[i].size()) : 0;
+            CurcumaLogger::info(fmt::format("EEQ_PHASE1_PARAMS: {:3d}, {:2d}, {:12.6f}, {:12.6f}, {:12.6f}, {:12.6f}, {:d}",
+                i, z_i, chi(i), gam(i), std::sqrt(alpha(i)), dxi(i), nb));
         }
-        std::cerr << "========================================\n" << std::endl;
     }
 
     // 1. Setup RHS and diagonal
@@ -1571,7 +1555,8 @@ Vector EEQSolver::calculateTopologyCharges(
         }
     }
 
-    // Claude Generated: Replaced PartialPivLU with ColPivHouseholderQR for numerical stability on large systems
+    // Phase 1 EEQ linear solve with iterative refinement
+    // QR decomposition gives better accuracy than LU for augmented EEQ matrices
     Eigen::ColPivHouseholderQR<Matrix> qr(A);
     Vector solution = qr.solve(x);
 
@@ -1592,23 +1577,21 @@ Vector EEQSolver::calculateTopologyCharges(
         }
     }
 
-    // Verbosity 2: Basic summary
+    // Phase 1 charge diagnostic output (Claude Generated February 2026)
     if (m_verbosity >= 2) {
         CurcumaLogger::info("Phase 1 EEQ: Topology charges calculated");
         for (int i = 0; i < std::min(5, natoms); ++i) {
             CurcumaLogger::result(fmt::format("Atom {} qa = {:.6f}", i, topology_charges(i)));
         }
     }
-
-    // Verbosity 3: Detailed ether vs hydroxyl comparison (for oxygen-containing molecules)
-    if (m_verbosity >= 3 && natoms > 5) {
-        std::cerr << "\n=== Phase 1 Topology Charges (qa) ===" << std::endl;
-        for (int i = 0; i < std::min(16, natoms); ++i) {
-            if (atoms[i] == 8) {
-                std::cerr << "    qa[" << i << "] = " << topology_charges(i) << std::endl;
-            }
+    if (m_verbosity >= 3) {
+        CurcumaLogger::info("\nEEQ_PHASE1_CHARGES: atom, Z, qa");
+        for (int i = 0; i < natoms; ++i) {
+            CurcumaLogger::info(fmt::format("EEQ_PHASE1_CHARGES: {:3d}, {:2d}, {:12.6f}",
+                i, atoms[i], topology_charges(i)));
         }
-        std::cerr << "========================================\n" << std::endl;
+        double sum_q = topology_charges.sum();
+        CurcumaLogger::info(fmt::format("EEQ_PHASE1_CHARGES: sum = {:.6f}", sum_q));
     }
 
     return topology_charges;
@@ -1638,7 +1621,6 @@ Matrix EEQSolver::computeTopologicalDistances(
     }
 
     // Debug: Verify covalent radii are in Angstrom (expected: C≈0.75, H≈0.32, O≈0.64)
-    // Claude Generated (Jan 2026): Diagnostic for EEQ unit verification
     if (m_verbosity >= 3) {
         std::cerr << "\n=== Covalent Radii Verification (expected: Angstrom) ===" << std::endl;
         for (int i = 0; i < std::min(natoms, 9); ++i) {
@@ -1647,12 +1629,11 @@ Matrix EEQSolver::computeTopologicalDistances(
                 i, z, topology.covalent_radii[i]) << std::endl;
         }
         std::cerr << "Expected: C≈0.75, H≈0.32, O≈0.64 (Angstrom)" << std::endl;
-        std::cerr << "If values are ~2x larger, radii are incorrectly in Bohr!" << std::endl;
         std::cerr << "=========================================\n" << std::endl;
     }
 
     // 3. Set bonded distances (sum of covalent radii)
-    // Reference: gfnff_ini.f90:431-442
+    // Reference: gfnff_ini.f90:438-448
     for (int i = 0; i < natoms; ++i) {
         double rad_i = topology.covalent_radii[i];
         for (int j : topology.neighbor_lists[i]) {
@@ -1663,7 +1644,7 @@ Matrix EEQSolver::computeTopologicalDistances(
     }
 
     // 4. Floyd-Warshall shortest path algorithm
-    // Reference: gfnff_ini.f90:443-453
+    // Reference: gfnff_ini.f90:462-471
     //
     // This computes the shortest path between all pairs of atoms through the bond graph.
     // Each iteration updates path(i,j) if going through k provides a shorter route.
@@ -1680,10 +1661,9 @@ Matrix EEQSolver::computeTopologicalDistances(
     }
 
     // 5. Apply cutoff and scaling
-    // Reference: gfnff_ini.f90:455-461
+    // Reference: gfnff_ini.f90:474-480
     //
-    // The XTB code stores distances in triangular array and applies scaling by RFGOED1.
-    // It also converts from Angstrom to Bohr (divide by 0.52917726).
+    // The XTB code applies scaling by RFGOED1 and converts from Angstrom to Bohr.
     for (int i = 0; i < natoms; ++i) {
         for (int j = 0; j < natoms; ++j) {
             if (rabd(i, j) > TDIST_THR) {
@@ -1694,14 +1674,21 @@ Matrix EEQSolver::computeTopologicalDistances(
     }
 
     // Debug output - Phase 1.1 Validation
-    // Claude Generated (December 2025, Session 13): Debug output for topology distance validation
     if (m_verbosity >= 3) {
         std::cerr << "\n=== Floyd-Warshall Topological Distances (Bohr) ===" << std::endl;
-        std::cerr << "Reference: Compare with XTB verbose output for validation" << std::endl;
+        // Print first few pairs and some specific pairs for validation
         for (int i = 0; i < std::min(5, natoms); ++i) {
-            for (int j = 0; j < i; ++j) {  // Only lower triangle (j < i)
+            for (int j = 0; j < i; ++j) {
                 if (rabd(i, j) < RABD_CUTOFF) {
-                    std::cerr << fmt::format("  d_topo[{},{}] = {:.4f} Bohr", i, j, rabd(i, j)) << std::endl;
+                    std::cerr << fmt::format("  d_topo[{},{}] = {:.6f} Bohr", i, j, rabd(i, j)) << std::endl;
+                }
+            }
+        }
+        // Also print distances involving atom 15 (for complex molecule debugging)
+        if (natoms > 15) {
+            for (int j = 0; j < 5 && j < natoms; ++j) {
+                if (rabd(15, j) < RABD_CUTOFF) {
+                    std::cerr << fmt::format("  d_topo[15,{}] = {:.6f} Bohr", j, rabd(15, j)) << std::endl;
                 }
             }
         }
@@ -1748,6 +1735,10 @@ Vector EEQSolver::calculateFinalCharges(
     // Claude Generated (January 17, 2026): Detect pi-system and amide nitrogens for dgam
     std::vector<bool> is_pi_atom = use_corrections ? detectPiSystem(atoms, hybridization, topology) : std::vector<bool>(natoms, false);
     std::vector<bool> is_amide = use_corrections ? detectAmideNitrogens(atoms, hybridization, is_pi_atom, topology, cn) : std::vector<bool>(natoms, false);
+    // Claude Generated (February 2026): Proper amideH detection for Phase 2 chi correction
+    // Reference: Fortran gfnff_ini.f90:717 uses amideH() function from gfnff_ini2.f90:1575
+    // Requires: H with 1 neighbor, that neighbor is amide N, amide N has exactly 1 sp3 C
+    std::vector<bool> is_amide_h = use_corrections ? detectAmideHydrogens(atoms, hybridization, is_amide, topology) : std::vector<bool>(natoms, false);
 
     Vector dgam = use_corrections ? calculateDgam(atoms, topology_charges, hybridization, is_pi_atom, is_amide) : Vector::Zero(natoms);
 
@@ -1968,17 +1959,12 @@ Vector EEQSolver::calculateFinalCharges(
             EEQParameters params_i = getParameters(z_i, cn(i));
             double chi_corrected_val = chi_corrected(i);
 
-            // Amide Hydrogen Electronegativity Shift (Phase 2.9 - January 17, 2026)
-            if (z_i == 1 && topology.has_value()) {
-                for (int neighbor : topology->neighbor_lists[i]) {
-                    if (atoms[neighbor] == 7) {
-                        int hyb_n = detectElementSpecificHybridization(atoms[neighbor], cn(neighbor), atoms, topology, neighbor);
-                        if (hyb_n == 1 || hyb_n == 2) {
-                            chi_corrected_val -= 0.02;
-                            break;
-                        }
-                    }
-                }
+            // Amide Hydrogen Electronegativity Shift (Phase 2 - February 2026)
+            // Reference: Fortran gfnff_ini.f90:717 - amideH() from gfnff_ini2.f90:1575
+            // Requires proper amide detection: H→N(amide, pi, sp3)→C(pi)→O(pi, nn=1)
+            // Previous check was too broad (any H bonded to sp/sp2 N)
+            if (z_i == 1 && is_amide_h[i]) {
+                chi_corrected_val -= 0.02;
             }
 
             x(i) = chi_corrected_val + params_i.cnf * std::sqrt(cn(i));
@@ -2195,9 +2181,9 @@ Vector EEQSolver::calculateDxi(
     // Reference: XTB defines pi atoms as (sp or sp2) AND (C,N,O,F,S)
     std::vector<bool> is_pi_atom = detectPiSystem(atoms, hyb, topology);
 
-    // Amide detection for dxi refinements (Claude Generated Jan 2026)
-    std::vector<bool> is_amide = detectAmideNitrogens(atoms, hyb, is_pi_atom, topology, cn);
-    std::vector<bool> is_amide_h = detectAmideHydrogens(atoms, hyb, is_amide, topology);
+    // NOTE (Feb 2026): amideH detection REMOVED from dxi
+    // Fortran gfnff_ini.f90:358-403 does NOT include amideH in dxi
+    // amideH is Phase 2 only (line 717: chieeq(i) = chieeq(i) - 0.02)
 
     // Debug output header (Claude Generated Dec 29, 2025 - Fixed debug visibility)
     if (m_verbosity >= 3) {
@@ -2239,14 +2225,8 @@ Vector EEQSolver::calculateDxi(
         }
 
         // ===== Element-Specific Environment Corrections (from XTB) =====
-
-        // Amide Hydrogen (Z=1 bonded to Amide N with exactly one sp3 Carbon neighbor)
-        if (ati == 1 && is_amide_h[i]) {
-            double corr = -0.02;
-            dxi_total += corr;
-            components += "amideH:-0.02 ";
-            env_desc = "amideH";
-        }
+        // Reference: Fortran gfnff_ini.f90:358-403
+        // NOTE: amideH is NOT in dxi - it's Phase 2 only (line 717)
 
         // Boron (Z=5): +0.015 per H neighbor (line 377)
         if (ati == 5 && nh > 0) {
