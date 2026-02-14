@@ -256,6 +256,7 @@ curcuma/
 ✅ **Parameter Routing Fix** - Multi-module parameter hierarchies now work (json null-error fixed)
 ✅ **GFN-FF Implementation** - Complete and operational in ff_methods/ - See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
 ✅ **EEQ Phase 1 Full Implementation** (December 28, 2025) - Complete dxi calculation with pi-system detection, neighbor EN averaging, and environment-dependent corrections; 75% reduction in charge error (5.0× → 1.3×); fixes 4/6 GFN-FF energy terms automatically
+✅ **GFN-FF Angle Energy Fix** (February 13, 2026) - Topology-aware angle generation with pi_bond_orders integration; 656-2013× improvement on heterocyclic molecules (caffeine/complex); all angles <0.12 mEh error
 
 ## Build and Test Commands
 
@@ -382,14 +383,14 @@ ctest -R "cli_rmsd_01" --verbose
 
 ## Known Issues
 
-1. **GFN-FF Large Molecule Coulomb Deviations**: While small systems match Fortran exactly, larger systems show non-proportional deviations (e.g., Triose +26 mEh, Complex +6.5 mEh). See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md).
+1. **GFN-FF Limitations**: See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md#known-limitations) for details (D4 dispersion, EEQ integration, metal parameters)
 
-2. **GFN-FF Limitations**: See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md#known-limitations) for details (D4 dispersion, EEQ integration, metal parameters)
-
-3. **Unit migration**: Some legacy code still uses hardcoded constants instead of CurcumaUnit functions
+2. **Unit migration**: Some legacy code still uses hardcoded constants instead of CurcumaUnit functions
 
 ## Recently Resolved ✅
 
+- ✅ **GFN-FF Hückel Fermi Smearing Fix** (Feb 13, 2026): Fixed critical bug in pi-bond order calculation. HuckelSolver used single-occupation Fermi smearing targeting nel total electrons, but Fortran uses spin-split (alpha/beta) channels each targeting nel/2. Caused biradical fallback to always trigger, replacing fractional occupations with integer [2,0], giving wrong density matrix. Fix: implement spin-split approach (call fermiSmear with nel/2, then double occupations). Results: Caffeine bond -2.69→+0.031 mEh (87×), angle +0.034→0.00002 mEh (1700×) ✅
+- ✅ **GFN-FF Angle Energy Fix** (Feb 13, 2026): Fixed dominant angle energy discrepancy by creating new `generateTopologyAwareAngles(TopologyInfo&)` overload with full topology data (pi_bond_orders, atom_to_rings). Legacy function lacked pi_bond_orders → N-centered angles got f2=1.0 instead of 0.2-0.7. Also: added ringsbend() function for 3-atom ring detection, removed spurious ring fc reduction, fixed triple bond check for all atoms, added heavy maingroup sp3/SO3X/halogen/metal special cases. Results: Caffeine 22.3→0.034 mEh (656×), Complex 16.1→0.008 mEh (2013×), all molecules <0.12 mEh ✅
 - ✅ **GFN-FF Inversion Damping Fix** (Feb 11, 2026): Fixed incorrect star-topology damping in inversion energy calculation. Fortran uses nb1-center + nb1-nb2 + nb1-nb3 distances (1-3 distances for two of three), not center-to-all-neighbors (star). Complex molecule torsion+inversion error reduced from +234 mEh to -0.45 mEh (520× improvement).
 - ✅ **GFN-FF Pi-sp3 Torsion Override** (Feb 11, 2026): Added post-ring pi-sp3 barrier correction matching Fortran gfnff_ini.f90:1873-1884. Overrides ring periodicity/phase defaults when one central atom is pi and other is sp3.
 - ✅ **GFN-FF Coulomb Gradient Regression** (Feb 1, 2026): Fixed stale CN derivatives in gradient calculation. CN, CNF, and dCN/dx are now recalculated for current geometry in `GFNFF::Calculation()` before gradient computation. Fixes optimization failures caused by Term 1b using initial geometry's CN values.

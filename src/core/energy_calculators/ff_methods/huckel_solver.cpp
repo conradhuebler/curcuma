@@ -349,6 +349,14 @@ Eigen::MatrixXd HuckelSolver::buildHamiltonian(
 double HuckelSolver::solveAndBuildDensity(Eigen::MatrixXd& H, int nel) const
 {
     // Port from gfnff_qm.f90:39-154
+    //
+    // CRITICAL: Fortran uses spin-split (alpha/beta) Fermi smearing:
+    //   1. occu() splits nel electrons into alpha (nel/2) and beta (nel/2)
+    //   2. fermismear() runs separately per spin channel, occupations [0,1]
+    //   3. focc = focca + foccb → total occupations [0,2] per orbital
+    //
+    // For closed-shell (nopen=0, which is always the case in GFN-FF):
+    // This is equivalent to: run Fermi with target nel/2, then double occupations.
 
     int ndim = static_cast<int>(H.rows());
 
@@ -374,18 +382,38 @@ double HuckelSolver::solveAndBuildDensity(Eigen::MatrixXd& H, int nel) const
 
     // ========================================
     // Step 3: Compute occupations via Fermi smearing
+    // Port from gfnff_qm.f90:107-118
+    //
+    // Fortran approach (closed-shell, nopen=0):
+    //   ihomoa = nel/2, ihomob = nel/2
+    //   fermismear(alpha, ihomoa, ...) → focca [0,1]
+    //   fermismear(beta,  ihomob, ...) → foccb [0,1]
+    //   focc = focca + foccb → [0,2]
+    //
+    // For closed-shell: focca == foccb, so focc = 2*focca
+    // We implement this as: Fermi target nel/2, then double.
     // ========================================
 
-    std::vector<double> occ = fermiSmear(eigenvalues, nel, fermi_temp);
+    int nel_alpha = nel / 2;  // Electrons per spin channel
+    std::vector<double> occ = fermiSmear(eigenvalues, nel_alpha, fermi_temp);
+
+    // Double occupations: focc = focca + foccb (both channels identical)
+    for (auto& o : occ) {
+        o *= 2.0;
+    }
 
     // ========================================
     // Step 4: Check for perfect biradical (anti-aromatic)
     // Port from gfnff_qm.f90:119-129
+    //
+    // Fortran checks: if abs(focc(ihomoa) - focc(ihomoa+1)) < 1e-4
+    // where ihomoa = nel/2 (1-based). In 0-based: ihomoa-1 and ihomoa.
+    // focc values are total [0,2] occupations.
     // ========================================
 
-    int ihomo = nel / 2;
-    if (ihomo > 0 && ihomo < ndim) {
-        if (std::abs(occ[ihomo - 1] - occ[ihomo]) < 1e-4) {
+    int ihomoa = nel / 2;  // 1-based HOMO index = 0-based LUMO index
+    if (ihomoa > 0 && ihomoa < ndim) {
+        if (std::abs(occ[ihomoa - 1] - occ[ihomoa]) < 1e-4) {
             // Perfect biradical detected - break symmetry
             if (m_verbosity >= 3) {
                 CurcumaLogger::info("  Perfect biradical detected, breaking symmetry");
@@ -399,7 +427,7 @@ double HuckelSolver::solveAndBuildDensity(Eigen::MatrixXd& H, int nel) const
 
     // ========================================
     // Step 5: Compute electronic energy
-    // E = Σ occ_i * ε_i
+    // E = Σ occ_i * ε_i (Fortran: focca = focc*e; eel = sum(focca))
     // ========================================
 
     double E_el = 0.0;
@@ -427,17 +455,20 @@ std::vector<double> HuckelSolver::fermiSmear(
     double temp) const
 {
     // Port from gfnff_qm.f90:157-219
+    //
+    // This function implements a SINGLE spin channel Fermi smearing.
+    // nel = number of electrons in this spin channel (e.g., nel_total/2 for closed-shell)
+    // Returns occupations in [0,1] per orbital for one spin channel.
+    // The caller is responsible for combining alpha+beta channels.
 
     int norbs = static_cast<int>(eigenvalues.size());
     std::vector<double> occ(norbs, 0.0);
 
     // If temperature is negligible, use integer occupation
+    // One electron per orbital in single spin channel
     if (temp < 1.0) {
-        for (int i = 0; i < nel / 2 && i < norbs; i++) {
-            occ[i] = 2.0;
-        }
-        if (nel % 2 != 0 && nel / 2 < norbs) {
-            occ[nel / 2] = 1.0;
+        for (int i = 0; i < nel && i < norbs; i++) {
+            occ[i] = 1.0;
         }
         return occ;
     }
@@ -445,7 +476,8 @@ std::vector<double> HuckelSolver::fermiSmear(
     // Boltzmann factor in eV
     double bkt = boltz_ev * temp;
 
-    // Initial guess for Fermi energy
+    // Initial guess for Fermi energy: midpoint between HOMO and LUMO
+    // nel is per spin channel, so HOMO is orbital nel-1, LUMO is orbital nel (0-based)
     int ihomo = std::min(nel, norbs) - 1;
     int ilumo = std::min(nel, norbs - 1);
     double e_fermi = 0.5 * (eigenvalues(ihomo) + eigenvalues(ilumo));
