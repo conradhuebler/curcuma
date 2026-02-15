@@ -1801,6 +1801,10 @@ json GFNFF::generateGFNFFTorsions() const
                 // ==========================================================
                 constexpr double fcthr = 1.0e-3;  // Force constant threshold (Hartree)
                 if (std::abs(params.barrier_height) >= fcthr) {
+                    if (CurcumaLogger::get_verbosity() >= 3) {
+                        CurcumaLogger::info(fmt::format("TORSION_DEBUG | {} | {} | {} | {} | {} | {:.2f} | {:.6f} | {:.6f}",
+                            params.periodicity, l, j, k, i, params.phase_shift * 180.0 / M_PI, params.barrier_height, phi));
+                    }
                     json torsion;
                     torsion["type"] = 3; // GFN-FF type
                     // Fortran convention atom ordering (ll-ii-jj-kk): swap terminal atoms
@@ -1853,6 +1857,10 @@ json GFNFF::generateGFNFFTorsions() const
                         double extra_barrier = ff * params.fij_corrected * params.fkl_corrected * params.fqq;
 
                         if (!std::isnan(extra_barrier) && !std::isinf(extra_barrier)) {
+                            if (CurcumaLogger::get_verbosity() >= 3) {
+                                CurcumaLogger::info(fmt::format("EXTRA_TORSION_DEBUG | 1 | {} | {} | {} | {} | 180.00 | {:.6f} | {:.6f}",
+                                    l, j, k, i, extra_barrier, phi));
+                            }
                             json extra_torsion;
                             extra_torsion["type"] = 3;
                             extra_torsion["i"] = l;

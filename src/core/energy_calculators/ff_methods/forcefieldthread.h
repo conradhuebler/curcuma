@@ -236,6 +236,11 @@ struct GFNFFHydrogenBond {
     std::vector<int> neighbors_A;  ///< Neighbor indices of donor A (for Case 2/3)
     std::vector<int> neighbors_B;  ///< Neighbor indices of acceptor B (for Case 2/3)
     int acceptor_parent_index = -1; ///< Parent of acceptor (e.g., C in C=O) for Case 3
+
+    // Claude Generated (Feb 15, 2026): Sigmoid damping for smooth HB transition in MD
+    // strength = 1/(1+exp((r-r_cut)/width)) -> smooth fade to 0 when bond breaks
+    mutable double strength = 1.0;  ///< Current strength factor (0-1), computed from geometry
+    double sigmoid_width = 0.5;     ///< Width parameter for sigmoid transition (Bohr)
 };
 
 /**
@@ -264,6 +269,10 @@ struct GFNFFHalogenBond {
 
     // Geometry thresholds
     double r_cut = 50.0;        ///< Distance cutoff (Bohr)
+
+    // Claude Generated (Feb 15, 2026): Sigmoid damping for smooth XB transition in MD
+    mutable double strength = 1.0;  ///< Current strength factor (0-1), computed from geometry
+    double sigmoid_width = 0.5;     ///< Width parameter for sigmoid transition (Bohr)
 };
 
 /**
@@ -364,6 +373,11 @@ public:
     void addGFNFFHydrogenBond(const GFNFFHydrogenBond& hbond);
     void addGFNFFHalogenBond(const GFNFFHalogenBond& xbond);
 
+    // Claude Generated (Feb 15, 2026): HB/XB bulk setters for MD dynamic updates
+    // Reference: Fortran gfnff_engrad.F90:246-260 - rebuild HB/XB lists at each energy call
+    void setGFNFFHBonds(const std::vector<GFNFFHydrogenBond>& hbonds);
+    void setGFNFFHalogenBonds(const std::vector<GFNFFHalogenBond>& xbonds);
+
     // ATM three-body dispersion (D3/D4)
     void addATMTriple(const ATMTriple& triple);
 
@@ -415,11 +429,21 @@ public:
         m_dcn = dcn;
     }
 
+    // Claude Generated (Feb 15, 2026): dEdcn accumulator for CN chain-rule gradient terms
+    // Accumulates dE/dCN contributions from bond (dr0/dCN) and dispersion (dC6/dCN) terms
+    // Applied after thread completion via dcn chain rule: gradient += dcn * dEdcn
+    const Vector& getDEdcn() const { return m_dEdcn; }
+
+    // Claude Generated (Feb 15, 2026): Set dc6dcn matrix for dispersion CN gradient
+    // Reference: Fortran gfnff_gdisp0.f90:262-305 - dc6dcn(i,j) = dC6(i,j)/dCN(i)
+    void setDispersionDC6DCN(const Matrix& dc6dcn) { m_dc6dcn = dc6dcn; }
+
     inline void UpdateGeometry(const Matrix& geometry, bool gradient)
     {
         m_geometry = geometry;
         m_calculate_gradient = gradient;
         m_gradient = Eigen::MatrixXd::Zero(m_geometry.rows(), 3);
+        m_dEdcn = Vector::Zero(m_geometry.rows());
     }
 
     inline void setGeometry(const Matrix& geometry, bool gradient)
@@ -427,6 +451,7 @@ public:
         m_geometry = geometry;
         m_calculate_gradient = gradient;
         m_gradient = Eigen::MatrixXd::Zero(m_geometry.rows(), 3);
+        m_dEdcn = Vector::Zero(m_geometry.rows());
     }
 
     inline void setMethod(int method)
@@ -606,6 +631,14 @@ protected:
     Vector m_cn;                              // Coordination numbers per atom
     Vector m_cnf;                             // CNF parameters per atom (cnf_eeq from gfnff_par.h)
     std::vector<Matrix> m_dcn;                // CN derivatives: dcn[dim](i,j) = dCN(j)/dr(i,dim)
+
+    // Claude Generated (Feb 15, 2026): dE/dCN accumulator for bond dr0/dCN and dispersion dC6/dCN
+    // After thread completion, this is summed across threads and dcn chain rule applied
+    Vector m_dEdcn;
+
+    // Claude Generated (Feb 15, 2026): dc6dcn matrix for dispersion CN gradient
+    // dc6dcn(i,j) = dC6(i,j)/dCN(i) - set from D4ParameterGenerator
+    Matrix m_dc6dcn;
 
     // Claude Generated (February 2026): Individual energy term timing
     std::unordered_map<std::string, long long> m_term_timings;  // milliseconds

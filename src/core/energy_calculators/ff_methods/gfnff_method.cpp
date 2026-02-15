@@ -377,8 +377,56 @@ double GFNFF::Calculation(bool gradient)
         std::vector<Matrix> dcn = calculateCoordinationNumberDerivatives(cn);
         m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
 
+        // Claude Generated (Feb 15, 2026): Compute and distribute dc6dcn for dispersion CN gradient
+        // Reference: Fortran gfnff_gdisp0.f90:382-395 - dc6dcn used for dispersion gradient chain rule
+        if (m_d4_generator) {
+            m_d4_generator->updateCNValuesForGradient(cn_vec);
+            m_forcefield->setDispersionDC6DCN(m_d4_generator->getDC6DCN());
+        }
+
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("CN derivatives recalculated for current geometry");
+        }
+    }
+
+    // Claude Generated (Feb 15, 2026): Dynamic HB/XB update for MD simulations
+    // Reference: Fortran gfnff_engrad.F90:246-260, gfnff_ini2.f90:700-768
+    //
+    // During MD simulations, hydrogen bonds and halogen bonds can form or break
+    // as molecular geometry changes. Fortran GFN-FF re-evaluates these lists when
+    // the per-atom RMSD from the reference geometry exceeds 0.3 Bohr.
+    //
+    // This ensures HB/XB lists remain consistent with current geometry during MD.
+    if (shouldUpdateHBXB(m_geometry_bohr)) {
+        // Store old counts for verbose output
+        int old_hb_count = m_hb_reference ? m_hb_reference->nhb_count : 0;
+        int old_xb_count = m_hb_reference ? m_hb_reference->nxb_count : 0;
+        int old_disp_count = m_forcefield->getDispersionPairCount();
+
+        // Get current topology with updated geometry
+        const TopologyInfo& topo = getCachedTopology();
+
+        // Re-detect HB/XB pairs with current geometry and charges
+        json new_hbonds = detectHydrogenBonds(topo.eeq_charges);
+        json new_xbonds = detectHalogenBonds(topo.eeq_charges);
+
+        // Update ForceField parameters
+        m_forcefield->updateGFNFFHBonds(new_hbonds);
+        m_forcefield->updateGFNFFXBonds(new_xbonds);
+
+        // Update reference geometry for next check
+        m_hb_reference = HBReferenceGeometry{};
+        m_hb_reference->reference_positions = m_geometry_bohr;
+        m_hb_reference->nhb_count = static_cast<int>(new_hbonds.size());
+        m_hb_reference->nxb_count = static_cast<int>(new_xbonds.size());
+        m_hb_reference->needs_update = false;
+
+        // Verbose output at level 2
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("GFNFF: RMSD-based re-evaluation triggered");
+            CurcumaLogger::param("HB pairs", fmt::format("{} → {}", old_hb_count, m_hb_reference->nhb_count));
+            CurcumaLogger::param("XB pairs", fmt::format("{} → {}", old_xb_count, m_hb_reference->nxb_count));
+            CurcumaLogger::param("Dispersion pairs", std::to_string(old_disp_count) + " (static)");
         }
     }
 
@@ -426,6 +474,50 @@ double GFNFF::Calculation(bool gradient)
     }
 
     return m_energy_total;
+}
+
+/**
+ * @brief Check if HB/XB lists need to be updated based on geometry change
+ *
+ * Claude Generated (Feb 15, 2026): Dynamic HB/XB update for MD simulations
+ * Reference: Fortran gfnff_ini2.f90:715-717, gfnff_engrad.F90:246-260
+ *
+ * During MD simulations, hydrogen bonds and halogen bonds can form or break
+ * as molecular geometry changes. Fortran GFN-FF re-evaluates these lists when
+ * the per-atom RMSD from the reference geometry exceeds 0.3 Bohr.
+ *
+ * @param current_geometry Current atomic positions in Bohr
+ * @return true if HB/XB lists should be rebuilt
+ */
+bool GFNFF::shouldUpdateHBXB(const Eigen::MatrixXd& current_geometry) const
+{
+    // First call: always update
+    if (!m_hb_reference || m_hb_reference->needs_update) {
+        return true;
+    }
+
+    // Check geometry size match
+    if (m_hb_reference->reference_positions.rows() != current_geometry.rows() ||
+        m_hb_reference->reference_positions.cols() != current_geometry.cols()) {
+        return true;
+    }
+
+    // RMSD check (Fortran threshold: 0.3 Bohr per atom)
+    // Formula: rmsd = sqrt(sum((xyz - hbrefgeo)^2)) / n
+    double sum_sq_diff = (current_geometry - m_hb_reference->reference_positions)
+                         .array().square().sum();
+    double rmsd = std::sqrt(sum_sq_diff) / static_cast<double>(m_atomcount);
+
+    // Update if geometry changed significantly
+    // Reference: gfnff_ini2.f90:717 - "if (rmsd .lt. 1.d-6.or.rmsd .gt. 0.3d0)"
+    if (rmsd > 0.3) {
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info(fmt::format("HB/XB update triggered: RMSD = {:.4f} Bohr (threshold: 0.3)", rmsd));
+        }
+        return true;
+    }
+
+    return false;
 }
 
 Vector GFNFF::Charges() const
@@ -6103,7 +6195,9 @@ json GFNFF::generateGFNFFDispersionPairs() const
             d4_input["d4_s9"] = 1.00;
 
             ConfigManager d4_config("d4param", d4_input);
-            D4ParameterGenerator d4_gen(d4_config);
+            // Claude Generated (Feb 15, 2026): Store D4ParameterGenerator for runtime dc6dcn access
+            // Previously was local variable d4_gen - now stored as m_d4_generator member
+            m_d4_generator = std::make_unique<D4ParameterGenerator>(d4_config);
 
             // Claude Generated (Jan 31, 2026): Pass topology charges for zeta scaling
             // Reference: Fortran gfnff_ini.f90:789 - f1 = zeta(ati, topo%qa(i))
@@ -6112,7 +6206,7 @@ json GFNFF::generateGFNFFDispersionPairs() const
             // This differs from geometry-dependent EEQ charges used for CN weighting.
             const TopologyInfo& topo_info = getCachedTopology();
             if (topo_info.topology_charges.size() > 0) {
-                d4_gen.setTopologyCharges(topo_info.topology_charges);
+                m_d4_generator->setTopologyCharges(topo_info.topology_charges);
                 if (CurcumaLogger::get_verbosity() >= 2) {
                     CurcumaLogger::info(fmt::format("D4: Using topology charges for zeta scaling ({} atoms)",
                         topo_info.topology_charges.size()));
@@ -6121,9 +6215,9 @@ json GFNFF::generateGFNFFDispersionPairs() const
 
             // Generate D4 parameters with geometry (charge-dependent)
             // Use existing m_geometry_bohr (already converted in InitialiseMolecule)
-            d4_gen.GenerateParameters(m_atoms, m_geometry_bohr);
+            m_d4_generator->GenerateParameters(m_atoms, m_geometry_bohr);
 
-            json d4_params = d4_gen.getParameters();
+            json d4_params = m_d4_generator->getParameters();
 
             if (d4_params.contains("d4_dispersion_pairs")) {
                 // Extract ATM triples from D4 (Claude Generated Jan 2025)

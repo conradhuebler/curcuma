@@ -69,6 +69,11 @@ public:
     // which are calculated with INTEGER neighbor counts, NOT fractional CN from geometry.
     void setTopologyCharges(const Vector& charges) { m_topology_charges = charges; }
 
+    // Claude Generated (Feb 15, 2026): dc6dcn computation for dispersion CN gradient
+    // Reference: Fortran gfnff_gdisp0.f90:174-210, 262-305
+    void updateCNValuesForGradient(const std::vector<double>& cn);
+    const Matrix& getDC6DCN() const { return m_dc6dcn; }
+
 private:
     void initializeReferenceData();
     void calculateFrequencyDependentPolarizabilities();
@@ -150,6 +155,17 @@ private:
     // Pre-computed during weight calculation: only refs with weight > threshold
     // Eliminates near-zero weight iterations in inner loop of getChargeWeightedC6()
     std::vector<std::vector<int>> m_dominant_refs;  // [atom_idx] → list of significant ref indices
+
+    // Claude Generated (Feb 15, 2026): dc6dcn computation helpers
+    void computeGaussianWeightDerivatives();
+    void computeDC6DCN();
+
+    // Claude Generated (Feb 15, 2026): Gaussian weight derivatives and dc6dcn matrix
+    // dgwdcn[atom_idx][ref_idx] = d(normalized_weight(ref))/d(CN(atom))
+    std::vector<std::vector<double>> m_gaussian_weight_derivatives;
+    // dc6dcn(i,j) = dC6(i,j)/dCN(i) - asymmetric matrix
+    Matrix m_dc6dcn;
+    bool m_dc6dcn_computed = false;
 
     // Mathematical constants
     static constexpr double PI = 3.14159265358979323846;

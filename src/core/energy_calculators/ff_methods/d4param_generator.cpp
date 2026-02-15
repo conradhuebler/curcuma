@@ -260,11 +260,12 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
         return;
     }
 
-    // Claude Generated (Feb 8, 2026): Temporary diagnostic for dispersion CN values
-    if (m_atoms.size() <= 10) {
-        fmt::print(stderr, "D4_CN_DIAG: Dispersion CN values (from GFNFFCN):\n");
+    // Claude Generated (Feb 8, 2026): Diagnostic for dispersion CN values (verbosity >= 3 only)
+    if (CurcumaLogger::get_verbosity() >= 3 && m_atoms.size() <= 10) {
+        CurcumaLogger::info("D4_CN_DIAG: Dispersion CN values (from GFNFFCN):");
         for (size_t i = 0; i < m_atoms.size(); ++i) {
-            fmt::print(stderr, "D4_CN_DIAG: atom {} (Z={}) CN={:.6f}\n", i, m_atoms[i], m_cn_values[i]);
+            CurcumaLogger::param(fmt::format("Atom {} (Z={})", i, m_atoms[i]),
+                                fmt::format("{:.6f}", m_cn_values[i]));
         }
     }
 
@@ -402,20 +403,20 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
                 // CN-weighted C6 using Casimir-Polder integration (Dec 2025 Phase 2.2)
                 double c6 = getChargeWeightedC6(atom_i, atom_j, i, j);
 
-                // Claude Generated (Feb 8, 2026): C6 reference diagnostic for first few pairs
-                if (i == 0 && j == 1 && m_atoms.size() <= 10) {
+                // Claude Generated (Feb 8, 2026): C6 reference diagnostic for first few pairs (verbosity >= 3 only)
+                if (CurcumaLogger::get_verbosity() >= 3 && i == 0 && j == 1 && m_atoms.size() <= 10) {
                     int nref_i = (atom_i > 0 && atom_i <= MAX_ELEM) ? m_refn[atom_i - 1] : 0;
                     int nref_j = (atom_j > 0 && atom_j <= MAX_ELEM) ? m_refn[atom_j - 1] : 0;
-                    fmt::print(stderr, "D4_C6REF_DIAG: pair ({},{}) Z=({},{}) c6_weighted={:.6f} nref=({},{})\n",
-                               i, j, atom_i, atom_j, c6, nref_i, nref_j);
+                    CurcumaLogger::info(fmt::format("D4_C6REF_DIAG: pair ({},{}) Z=({},{}) c6_weighted={:.6f} nref=({},{})",
+                                                   i, j, atom_i, atom_j, c6, nref_i, nref_j));
                     for (int ri = 0; ri < std::min(nref_i, MAX_REF); ++ri) {
                         for (int rj = 0; rj < std::min(nref_j, MAX_REF); ++rj) {
                             double c6ref = m_c6_flat_cache[c6FlatIndex(atom_i-1, atom_j-1, ri, rj)];
                             double wi = m_gaussian_weights[i][ri];
                             double wj = m_gaussian_weights[j][rj];
                             if (wi * wj > 1e-6) {
-                                fmt::print(stderr, "D4_C6REF_DIAG: ref({},{}) c6ref={:.4f} wi={:.4f} wj={:.4f} contrib={:.6f}\n",
-                                           ri, rj, c6ref, wi, wj, wi*wj*c6ref);
+                                CurcumaLogger::info(fmt::format("D4_C6REF_DIAG: ref({},{}) c6ref={:.4f} wi={:.4f} wj={:.4f} contrib={:.6f}",
+                                                               ri, rj, c6ref, wi, wj, wi*wj*c6ref));
                             }
                         }
                     }
@@ -1018,21 +1019,21 @@ void D4ParameterGenerator::precomputeGaussianWeights()
         m_gaussian_weights[i] = std::move(weights);
     }
 
-    // Claude Generated (Feb 8, 2026): Temporary diagnostic for Gaussian weights
-    if (m_atoms.size() <= 10) {
-        fmt::print(stderr, "D4_GW_DIAG: Gaussian weights per atom:\n");
+    // Claude Generated (Feb 8, 2026): Diagnostic for Gaussian weights (verbosity >= 3 only)
+    if (CurcumaLogger::get_verbosity() >= 3 && m_atoms.size() <= 10) {
+        CurcumaLogger::info("D4_GW_DIAG: Gaussian weights per atom:");
         for (size_t i = 0; i < m_atoms.size(); ++i) {
             int elem_i = m_atoms[i];
             int nref_i = (elem_i > 0 && elem_i <= MAX_ELEM && (elem_i - 1) < static_cast<int>(m_refn.size()))
                          ? m_refn[elem_i - 1] : 0;
-            fmt::print(stderr, "D4_GW_DIAG: atom {} (Z={}) CN={:.4f} nref={}", i, elem_i, m_cn_values[i], nref_i);
+            std::string gw_str = fmt::format("atom {} (Z={}) CN={:.4f} nref={}", i, elem_i, m_cn_values[i], nref_i);
             for (size_t ref = 0; ref < m_gaussian_weights[i].size() && ref < 7; ++ref) {
                 double cnref = ((elem_i - 1) < static_cast<int>(m_refcn.size()) &&
                                ref < m_refcn[elem_i - 1].size())
                               ? m_refcn[elem_i - 1][ref] : -1.0;
-                fmt::print(stderr, " w[{}]={:.4f}(cnref={:.2f})", ref, m_gaussian_weights[i][ref], cnref);
+                gw_str += fmt::format(" w[{}]={:.4f}(cnref={:.2f})", ref, m_gaussian_weights[i][ref], cnref);
             }
-            fmt::print(stderr, "\n");
+            CurcumaLogger::param("D4_GW_DIAG", gw_str);
         }
     }
 
@@ -1119,14 +1120,8 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, size_t atom_i, 
 
     double c6_weighted = 0.0;
 
-    // Claude Generated (Feb 8, 2026): DEBUG: Log C6 computation for small molecules
-    static int debug_count = 0;
-    bool log_c6 = (atom_i == 0 && atom_j <= 1 && debug_count < 5);
-    if (log_c6) {
-        fmt::print(stderr, "C6_DEBUG: atom_i={} elem_i={} atom_j={} elem_j={} CN_i={:.4f} CN_j={:.4f}\n",
-                   atom_i, Zi, atom_j, Zj, m_cn_values[atom_i], m_cn_values[atom_j]);
-        debug_count++;
-    }
+    // Claude Generated (Feb 8, 2026): DEBUG: Log C6 computation for small molecules (verbosity >= 3 only)
+    bool log_c6 = (CurcumaLogger::get_verbosity() >= 3 && atom_i == 0 && atom_j <= 1);
 
     // Base offset for elem_i and elem_j in flat cache
     const size_t base_ij = static_cast<size_t>(elem_i) * MAX_ELEM * MAX_REF * MAX_REF
@@ -1142,8 +1137,10 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, size_t atom_i, 
                 double contrib = wi * weights_j[rj] * c6_ref;
                 c6_weighted += contrib;
                 if (log_c6) {
-                    fmt::print(stderr, "  ref_i={} ref_j={}: w_i={:.6f} w_j={:.6f} C6_ref={:.6f} contrib={:.6f}\n",
-                               ri, rj, wi, weights_j[rj], c6_ref, contrib);
+                    CurcumaLogger::info(fmt::format("C6_DEBUG: atom_i={} elem_i={} atom_j={} elem_j={} CN_i={:.4f} CN_j={:.4f}"
+                                                     " ref_i={} ref_j={}: w_i={:.6f} w_j={:.6f} C6_ref={:.6f} contrib={:.6f}",
+                                                     atom_i, Zi, atom_j, Zj, m_cn_values[atom_i], m_cn_values[atom_j],
+                                                     ri, rj, wi, weights_j[rj], c6_ref, contrib));
                 }
             }
         }
@@ -1160,8 +1157,10 @@ double D4ParameterGenerator::getChargeWeightedC6(int Zi, int Zj, size_t atom_i, 
                 double contrib = wi * weights_j[rj] * c6_ref;
                 c6_weighted += contrib;
                 if (log_c6) {
-                    fmt::print(stderr, "  ref_i={} ref_j={}: w_i={:.6f} w_j={:.6f} C6_ref={:.6f} contrib={:.6f}\n",
-                               ri, rj, wi, weights_j[rj], c6_ref, contrib);
+                    CurcumaLogger::info(fmt::format("C6_DEBUG: atom_i={} elem_i={} atom_j={} elem_j={} CN_i={:.4f} CN_j={:.4f}"
+                                                     " ref_i={} ref_j={}: w_i={:.6f} w_j={:.6f} C6_ref={:.6f} contrib={:.6f}",
+                                                     atom_i, Zi, atom_j, Zj, m_cn_values[atom_i], m_cn_values[atom_j],
+                                                     ri, rj, wi, weights_j[rj], c6_ref, contrib));
                 }
             }
         }
@@ -1179,4 +1178,147 @@ double D4ParameterGenerator::calculateTripleScale(int i, int j, int k) const
     } else {
         return (i != k && j != k) ? 1.0 : 0.5;  // ijk: 1, ijj/iji: 1/2
     }
+}
+
+// Claude Generated (Feb 15, 2026): Compute derivatives of normalized Gaussian weights w.r.t. CN
+// Reference: Fortran gfnff_gdisp0.f90:174-210 (weight_references_d4 subroutine)
+//
+// For normalized weight gw(ref) = expw(ref) / norm, the derivative is:
+//   dgw/dCN = (d(expw)/dCN * norm - expw * d(norm)/dCN) / norm^2   (quotient rule)
+// where:
+//   expw(ref) = exp(-wf * (CN - CN_ref)^2)
+//   d(expw)/dCN = -2*wf*(CN - CN_ref) * expw  = 2*wf*(CN_ref - CN) * expw
+//   norm = sum_ref expw(ref)
+//   d(norm)/dCN = sum_ref d(expw(ref))/dCN
+void D4ParameterGenerator::computeGaussianWeightDerivatives()
+{
+    constexpr double wf = 4.0;  // Gaussian width (matches precomputeGaussianWeights)
+
+    m_gaussian_weight_derivatives.resize(m_atoms.size());
+
+    for (size_t i = 0; i < m_atoms.size(); ++i) {
+        int Zi = m_atoms[i];
+        int elem_i = Zi - 1;
+
+        if (elem_i < 0 || elem_i >= MAX_ELEM) {
+            m_gaussian_weight_derivatives[i].clear();
+            continue;
+        }
+
+        int nref = (elem_i < static_cast<int>(m_refn.size())) ? m_refn[elem_i] : 1;
+        if (nref == 0) {
+            m_gaussian_weight_derivatives[i].clear();
+            continue;
+        }
+
+        double cni = m_cn_values[i];
+
+        // Compute raw weights and their derivatives
+        std::vector<double> expw(nref, 0.0);
+        std::vector<double> dexpw(nref, 0.0);
+        double norm = 0.0;
+        double dnorm = 0.0;
+
+        for (int ref = 0; ref < nref && ref < MAX_REF; ++ref) {
+            double cni_ref = (elem_i < static_cast<int>(m_refcn.size()) &&
+                             ref < static_cast<int>(m_refcn[elem_i].size()))
+                            ? m_refcn[elem_i][ref] : 0.0;
+
+            double diff_cn = cni - cni_ref;
+            expw[ref] = std::exp(-wf * diff_cn * diff_cn);
+            // d(expw)/dCN = 2*wf*(CN_ref - CN) * expw (note sign: CN_ref - CN, not CN - CN_ref)
+            dexpw[ref] = 2.0 * wf * (cni_ref - cni) * expw[ref];
+            norm += expw[ref];
+            dnorm += dexpw[ref];
+        }
+
+        // Quotient rule: dgw/dCN = (dexpw * norm - expw * dnorm) / norm^2
+        std::vector<double> dgwdcn(nref, 0.0);
+        if (norm > 1e-10) {
+            double norm2 = norm * norm;
+            for (int ref = 0; ref < nref; ++ref) {
+                dgwdcn[ref] = (dexpw[ref] * norm - expw[ref] * dnorm) / norm2;
+            }
+        }
+
+        m_gaussian_weight_derivatives[i] = std::move(dgwdcn);
+    }
+}
+
+// Claude Generated (Feb 15, 2026): Compute dc6dcn matrix from weight derivatives and C6 references
+// Reference: Fortran gfnff_gdisp0.f90:262-305 (get_atomic_c6_d4 dc6dcn part)
+//
+// dc6dcn(i,j) = dC6(i,j)/dCN(i) = sum_{ri,rj} dgwdcn(ri,i) * gw(rj,j) * c6ref(ri,rj,Zi,Zj)
+// dc6dcn(j,i) = dC6(i,j)/dCN(j) = sum_{ri,rj} gw(ri,i) * dgwdcn(rj,j) * c6ref(ri,rj,Zi,Zj)
+void D4ParameterGenerator::computeDC6DCN()
+{
+    int natoms = static_cast<int>(m_atoms.size());
+    m_dc6dcn = Matrix::Zero(natoms, natoms);
+
+    for (int i = 0; i < natoms; ++i) {
+        int Zi = m_atoms[i];
+        int elem_i = Zi - 1;
+        if (elem_i < 0 || elem_i >= MAX_ELEM) continue;
+
+        const auto& gw_i = m_gaussian_weights[i];
+        const auto& dgw_i = m_gaussian_weight_derivatives[i];
+        if (gw_i.empty() || dgw_i.empty()) continue;
+
+        int nref_i = static_cast<int>(gw_i.size());
+
+        for (int j = i; j < natoms; ++j) {
+            int Zj = m_atoms[j];
+            int elem_j = Zj - 1;
+            if (elem_j < 0 || elem_j >= MAX_ELEM) continue;
+
+            const auto& gw_j = m_gaussian_weights[j];
+            const auto& dgw_j = m_gaussian_weight_derivatives[j];
+            if (gw_j.empty() || dgw_j.empty()) continue;
+
+            int nref_j = static_cast<int>(gw_j.size());
+
+            // Base offset in flat C6 cache
+            const size_t base_ij = static_cast<size_t>(elem_i) * MAX_ELEM * MAX_REF * MAX_REF
+                                 + static_cast<size_t>(elem_j) * MAX_REF * MAX_REF;
+
+            double dc6_di = 0.0;  // dC6(i,j)/dCN(i)
+            double dc6_dj = 0.0;  // dC6(i,j)/dCN(j)
+
+            for (int ri = 0; ri < nref_i && ri < MAX_REF; ++ri) {
+                size_t base_ri = base_ij + static_cast<size_t>(ri) * MAX_REF;
+                for (int rj = 0; rj < nref_j && rj < MAX_REF; ++rj) {
+                    double c6ref = m_c6_flat_cache[base_ri + rj];
+                    if (std::abs(c6ref) < 1e-20) continue;
+
+                    dc6_di += dgw_i[ri] * gw_j[rj] * c6ref;
+                    dc6_dj += gw_i[ri] * dgw_j[rj] * c6ref;
+                }
+            }
+
+            m_dc6dcn(i, j) = dc6_di;
+            m_dc6dcn(j, i) = dc6_dj;
+
+            // For diagonal: dC6(i,i)/dCN(i) needs both derivatives
+            if (i == j) {
+                m_dc6dcn(i, i) = dc6_di + dc6_dj;
+            }
+        }
+    }
+
+    m_dc6dcn_computed = true;
+}
+
+// Claude Generated (Feb 15, 2026): Update CN values and recompute weight derivatives + dc6dcn
+// Called from GFNFF::Calculation() when gradient is requested
+// Reference: Fortran gfnff_gdisp0.f90:382-395 - dc6dcn used for dispersion gradient
+void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& cn)
+{
+    m_cn_values = cn;
+
+    // Recompute gaussian weights with new CN values
+    precomputeGaussianWeights();
+
+    // Compute weight derivatives and dc6dcn matrix
+    computeGaussianWeightDerivatives();
+    computeDC6DCN();
 }

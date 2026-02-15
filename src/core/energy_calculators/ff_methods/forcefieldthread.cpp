@@ -342,6 +342,31 @@ void ForceFieldThread::addGFNFFHalogenBond(const GFNFFHalogenBond& xbond)
     m_gfnff_xbonds.push_back(xbond);
 }
 
+/**
+ * @brief Set HB list (bulk update) for dynamic MD updates
+ *
+ * Claude Generated (Feb 15, 2026): Bulk setter for HB/XB dynamic updates
+ * Reference: Fortran gfnff_engrad.F90:246-260 - rebuild HB/XB lists at each energy call
+ *
+ * @param hbonds Vector of hydrogen bond parameters (copy is efficient)
+ */
+void ForceFieldThread::setGFNFFHBonds(const std::vector<GFNFFHydrogenBond>& hbonds)
+{
+    m_gfnff_hbonds = hbonds;  // Efficient vector copy
+}
+
+/**
+ * @brief Set XB list (bulk update) for dynamic MD updates
+ *
+ * Claude Generated (Feb 15, 2026): Bulk setter for XB dynamic updates
+ *
+ * @param xbonds Vector of halogen bond parameters
+ */
+void ForceFieldThread::setGFNFFHalogenBonds(const std::vector<GFNFFHalogenBond>& xbonds)
+{
+    m_gfnff_xbonds = xbonds;  // Efficient vector copy
+}
+
 void ForceFieldThread::addATMTriple(const ATMTriple& triple)
 {
     m_atm_triples.push_back(triple);
@@ -824,29 +849,21 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
         double energy = k_b * exp_term;          // k_b already contains sign
         m_bond_energy += energy * factor;
 
-        // Claude Generated (Jan 26, 2026): Temporary debug output for 1e-6 accuracy analysis
-        if (CurcumaLogger::get_verbosity() >= 3 && index < 10) {
-            CurcumaLogger::info(fmt::format("Bond {:2d}: atoms {}-{}, rij={:.6f}, r0={:.6f}, dr={:.6f}, "
-                                             "k_b={:.6f}, alpha={:.6f}, E={:.9f} Eh",
-                                             index, bond.i, bond.j, rij, r0_ij, dr,
-                                             k_b, alpha, energy * factor));
+        // Claude Generated (Feb 14, 2026): Per-bond CSV diagnostic for parameter comparison
+        // Format matches Fortran analyzer "b" mode output for direct comparison
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            if (index == 0) {
+                CurcumaLogger::info("BOND_CSV: idx, atom_i, atom_j, Z_i, Z_j, rij, r0, fc, alpha, fqq, energy");
+            }
+            CurcumaLogger::info(fmt::format("BOND_CSV: {:3d}, {:3d}, {:3d}, {:2d}, {:2d}, {:.6f}, {:.6f}, {:.9f}, {:.9f}, {:.6f}, {:.12f}",
+                                             index, bond.i, bond.j, bond.z_i, bond.z_j,
+                                             rij, r0_ij, k_b, alpha, bond.fqq, energy * factor));
         }
 
         if (m_calculate_gradient) {
-            // CRITICAL FIX (Feb 2026): Correct sign for bond gradient
             // dE/dr = -2α * dr * E (exact chain rule formula)
-            //
-            // Physics verification:
-            //   E = k_b * exp(-α*dr²) where k_b < 0 (attractive)
-            //   dE/dr = k_b * (-2α*dr) * exp(-α*dr²) = -2α * dr * E
-            //
-            // When dr > 0 (stretched): dE/dr = -2α * (+dr) * (negative E) = positive (repulsive) ✓
-            // When dr < 0 (compressed): dE/dr = -2α * (-dr) * (negative E) = negative (attractive) ✓
-            //
-            // Previous code had +2.0 instead of -2.0, causing forces to point UPHILL!
-            // This was a misunderstanding of the derivate matrix sign convention.
-            //
-            // Note: For fully accurate gradients, we'd also need dr0/dCN * dCN/dx terms
+            // E = k_b * exp(-α*dr²) where k_b < 0 (attractive)
+            // dE/dr = k_b * (-2α*dr) * exp(-α*dr²) = -2α * dr * E
             double dEdr = -2.0 * alpha * dr * energy;  // Correct sign
             // DEBUG: Print first bond gradient details
             if (index == 0 && CurcumaLogger::get_verbosity() >= 3) {
@@ -860,6 +877,21 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
             }
             m_gradient.row(bond.i) += dEdr * factor * derivate.row(0);
             m_gradient.row(bond.j) += dEdr * factor * derivate.row(1);
+
+            // Claude Generated (Feb 15, 2026): Bond dr0/dCN chain-rule contribution
+            // Reference: Fortran gfnff_engrad.F90:973-974, gfnff_rab.f90:147-156
+            //
+            // r0 = (r0_base_i + cnfak_i*cn_i + r0_base_j + cnfak_j*cn_j + rabshift) * ff
+            // dr0/dCN_i = ff * cnfak_i, dr0/dCN_j = ff * cnfak_j
+            // dE/dr0 = -dEdr (opposite sign: stretching r increases E, stretching r0 decreases E)
+            // yy = -dEdr = 2*α*dr*E (Fortran convention: positive for stretched bond)
+            //
+            // Accumulate: dEdcn(atom) += yy * ff * cnfak
+            if (use_dynamic_r0 && bond.z_i > 0 && bond.z_j > 0) {
+                double yy = -dEdr;  // = 2*alpha*dr*energy (Fortran convention)
+                m_dEdcn(bond.i) += yy * factor * bond.ff * bond.cnfak_i;
+                m_dEdcn(bond.j) += yy * factor * bond.ff * bond.cnfak_j;
+            }
         }
     }
 }
@@ -1324,10 +1356,10 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         CurcumaLogger::result(fmt::format("Primary torsions: {} terms, energy = {:.6e} Eh",
                                            m_gfnff_dihedrals.size(), primary_torsion_energy));
     }
-    // Temporary debug for torsion investigation
-    if (m_thread == 0) {
-        std::cerr << "DEBUG_THREAD0 primary_torsion: " << m_gfnff_dihedrals.size()
-                  << " terms, E=" << std::scientific << std::setprecision(8) << primary_torsion_energy << std::endl;
+    // Debug for torsion investigation (verbosity >= 3 only)
+    if (CurcumaLogger::get_verbosity() >= 3 && m_thread == 0) {
+        CurcumaLogger::info(fmt::format("DEBUG_THREAD0 primary_torsion: {} terms, E={:.8e}",
+                                       m_gfnff_dihedrals.size(), primary_torsion_energy));
     }
 }
 
@@ -1478,10 +1510,10 @@ void ForceFieldThread::CalculateGFNFFExtraTorsionContribution()
                                            m_gfnff_extra_torsions.size(), extra_torsion_energy));
         CurcumaLogger::result(fmt::format("Total dihedral energy: {:.6e} Eh (primary + extra)", m_dihedral_energy));
     }
-    // Temporary debug for torsion investigation
-    if (m_thread == 0) {
-        std::cerr << "DEBUG_THREAD0 extra_torsion: " << m_gfnff_extra_torsions.size()
-                  << " terms, E=" << std::scientific << std::setprecision(8) << extra_torsion_energy << std::endl;
+    // Debug for torsion investigation (verbosity >= 3 only)
+    if (CurcumaLogger::get_verbosity() >= 3 && m_thread == 0) {
+        CurcumaLogger::info(fmt::format("DEBUG_THREAD0 extra_torsion: {} terms, E={:.8e}",
+                                       m_gfnff_extra_torsions.size(), extra_torsion_energy));
     }
 }
 
@@ -1650,11 +1682,11 @@ void ForceFieldThread::CalculateGFNFFDispersionContribution()
     if (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_dispersions.size() > 0) {
         CurcumaLogger::info(fmt::format("Thread calculating {} GFN-FF dispersion pairs", m_gfnff_dispersions.size()));
     }
-    // Claude Generated (Feb 8, 2026): Temporary per-pair diagnostic for dispersion accuracy investigation
+    // Claude Generated (Feb 8, 2026): Per-pair diagnostic for dispersion accuracy investigation (verbosity >= 3 only)
     // Enable for small molecules only (< 50 pairs) to avoid excessive output
-    bool disp_diag = (m_gfnff_dispersions.size() > 0 && m_gfnff_dispersions.size() <= 50);
+    bool disp_diag = (CurcumaLogger::get_verbosity() >= 3 && m_gfnff_dispersions.size() > 0 && m_gfnff_dispersions.size() <= 50);
     if (disp_diag) {
-        fmt::print(stderr, "DISP_CSV: idx,i,j,rij_bohr,C6,r4r2ij,r0_sq,zetac6,t6,t8,energy\n");
+        CurcumaLogger::info("DISP_CSV: idx,i,j,rij_bohr,C6,r4r2ij,r0_sq,zetac6,t6,t8,energy");
     }
 
     for (int index = 0; index < m_gfnff_dispersions.size(); ++index) {
@@ -1702,46 +1734,41 @@ void ForceFieldThread::CalculateGFNFFDispersionContribution()
         m_dispersion_energy += energy;
         m_d4_energy += energy;  // GFN-FF dispersion reports as D4 energy
 
-        // DEBUG: Per-pair D4 dispersion breakdown for 1e-6 accuracy (Claude Generated Jan 26, 2026)
+        // Debug: Per-pair dispersion breakdown for accuracy investigation (verbosity >= 3 only)
         if (disp_diag) {
-            fmt::print(stderr, "DISP_CSV: {},{},{},{:.6f},{:.6e},{:.6f},{:.6f},{:.6e},{:.6e},{:.6e},{:.10e}\n",
-                       index, disp.i, disp.j,
-                       rij, disp.C6, disp.r4r2ij, disp.r0_squared, disp.zetac6,
-                       t6, t8, energy);
+            CurcumaLogger::info(fmt::format("DISP_CSV: {},{},{},{:.6f},{:.6e},{:.6f},{:.6f},{:.6e},{:.6e},{:.6e},{:.10e}",
+                                           index, disp.i, disp.j,
+                                           rij, disp.C6, disp.r4r2ij, disp.r0_squared, disp.zetac6,
+                                           t6, t8, energy));
         }
 
         if (m_calculate_gradient) {
             // Analytical gradient for GFN-FF dispersion formula
-            // d/dr[E] = d/dr[-0.5 * C6 * (t6 + 2*r4r2ij*t8)]
-            //
             // Reference: gfnff_gdisp0.f90:371-372
-            // d6 = -6*r2**2*t6**2  -> derivative of t6 w.r.t. r
-            // d8 = -8*r2**3*t8**2  -> derivative of t8 w.r.t. r
-            //
-            // Chain rule: dt6/dr = dt6/d(r^2) * d(r^2)/dr = dt6/d(r^2) * 2*r
-            //             dt6/d(r^2) = -3*(r^2)^2 / (r^6 + R0^6)^2 = -3*r^4 * t6^2
-            //             dt6/dr = -6*r^5 * t6^2 / r = -6*r^4 * t6^2 (per Fortran: -6*r2**2*t6**2)
 
-            double d6 = -6.0 * r2 * r2 * t6 * t6;  // d(t6)/d(r^2) scaled appropriately
-            double d8 = -8.0 * r2 * r2 * r2 * t8 * t8;  // d(t8)/d(r^2) scaled appropriately
+            double d6 = -6.0 * r2 * r2 * t6 * t6;
+            double d8 = -8.0 * r2 * r2 * r2 * t8 * t8;
 
-            // ddisp/d(r^2) = d6 + 2*r4r2ij*d8
             double ddisp_dr2 = d6 + 2.0 * disp.r4r2ij * d8;
-
-            // dE/dr = -0.5 * C6 * zetac6 * ddisp/d(r^2) * d(r^2)/dr = -0.5 * C6 * zetac6 * ddisp_dr2 * 2*r
-            //       = -C6 * zetac6 * ddisp_dr2 * r
-            // Gradient direction: dE/dr * (rij_vec/rij)
-            // Claude Generated (Jan 31, 2026): Added zetac6 to gradient
-            // Claude Generated (Feb 1, 2026): d6/d8 are 2*d(t)/d(r^2)
-            // Claude Generated (Feb 8, 2026): Removed 0.5 factor - consistent with energy fix
             double dEdr = -disp.C6 * disp.zetac6 * ddisp_dr2 * rij * m_final_factor;
 
-            // Note: ddisp_dr2 is negative (d6, d8 are negative), so dEdr is positive
-            // This means repulsion-like gradient contribution at short range (expected)
             Eigen::Vector3d grad = dEdr * rij_vec / rij;
 
             m_gradient.row(disp.i) += grad.transpose();
             m_gradient.row(disp.j) -= grad.transpose();
+
+            // Claude Generated (Feb 15, 2026): Dispersion dC6/dCN chain-rule contribution
+            // Reference: Fortran gfnff_gdisp0.f90:382-395
+            //
+            // dEdcn(iat) -= dc6dcn(iat,jat) * disp_value
+            // dEdcn(jat) -= dc6dcn(jat,iat) * disp_value
+            // where disp_value = (t6 + 2*r4r2ij*t8) * zetac6 (the dispersion "strength")
+            if (m_dc6dcn.size() > 0 &&
+                disp.i < m_dc6dcn.rows() && disp.j < m_dc6dcn.cols()) {
+                double disp_value = disp_sum * disp.zetac6 * m_final_factor;
+                m_dEdcn(disp.i) -= m_dc6dcn(disp.i, disp.j) * disp_value;
+                m_dEdcn(disp.j) -= m_dc6dcn(disp.j, disp.i) * disp_value;
+            }
         }
     }
 
@@ -2335,11 +2362,13 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
         double E_HB;
         if (hb.case_type >= 2) {
             // Const part: acidity_A * basicity_B * qa * qb * global_scale
-            // Reference: 1913
+            // Reference: gfnff_engrad.F90:1913
+            // CRITICAL FIX (Feb 15, 2026): No sigmoid - Fortran uses simple product
             double const_val = hb.acidity_A * hb.basicity_B * Q_A * Q_B * global_scale;
             E_HB = -rdamp * qhoutl * const_val * multipl;
         } else {
             // Case 1: energy = bas * (-aci * rdamp * qhoutl)
+            // Reference: gfnff_engrad.F90:1798-1799
             E_HB = bas * (-aci) * rdamp * qhoutl;
         }
 
@@ -2443,22 +2472,31 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
                 dE_drAB = bas * aci * (-Q_H * (rdamp * ddamp_outl_drAB + dRdamp_drAB * damp_outl));
             }
 
+            // Claude Generated (Feb 15, 2026): Sigmoid strength gradient contribution for HB
+            // REMOVED: The sigmoid derivative adds an unphysical force that destabilizes MD
+            // The HB energy already has natural distance dependence through rdamp
+            // The sigmoid is only for smooth energy transition at cutoff, NOT for forces
+            // dE_drHB already includes the correct distance dependence from rdamp
+
             // --- 3. Chain Rule: Position Vector Derivatives ---
             Eigen::Vector3d grad_rAH_unit = r_AH_vec / r_AH;  // Direction A → H
             Eigen::Vector3d grad_rHB_unit = r_HB_vec / r_HB;  // Direction H → B
             Eigen::Vector3d grad_rAB_unit = r_AB_vec / r_AB;  // Direction A → B
 
             // --- 4. Accumulate Gradients on Each Atom ---
+            // CRITICAL FIX (Feb 15, 2026): No sigmoid in Fortran - use simple m_final_factor
+            double grad_scale = m_final_factor;
+
             // Atom A: influenced by r_AH (negative direction) and r_AB (negative direction)
-            Eigen::Vector3d grad_A = (-dE_drAH * grad_rAH_unit - dE_drAB * grad_rAB_unit) * m_final_factor;
+            Eigen::Vector3d grad_A = (-dE_drAH * grad_rAH_unit - dE_drAB * grad_rAB_unit) * grad_scale;
             m_gradient.row(hb.i) += grad_A.transpose();
 
             // Atom H: influenced by r_AH (positive direction) and r_HB (negative direction)
-            Eigen::Vector3d grad_H = (dE_drAH * grad_rAH_unit - dE_drHB * grad_rHB_unit) * m_final_factor;
+            Eigen::Vector3d grad_H = (dE_drAH * grad_rAH_unit - dE_drHB * grad_rHB_unit) * grad_scale;
             m_gradient.row(hb.j) += grad_H.transpose();
 
             // Atom B: influenced by r_HB (positive direction) and r_AB (positive direction)
-            Eigen::Vector3d grad_B = (dE_drHB * grad_rHB_unit + dE_drAB * grad_rAB_unit) * m_final_factor;
+            Eigen::Vector3d grad_B = (dE_drHB * grad_rHB_unit + dE_drAB * grad_rAB_unit) * grad_scale;
             m_gradient.row(hb.k) += grad_B.transpose();
 
             if (CurcumaLogger::get_verbosity() >= 3) {
@@ -2539,6 +2577,7 @@ void ForceFieldThread::CalculateGFNFFHalogenBondContribution()
 
         double E_XB = -R_damp * C_B * Q_B * C_X * Q_X;
 
+        // Reference: gfnff_engrad.F90:rbxgfnff_eg - No sigmoid in Fortran
         m_energy_xbond += E_XB * m_final_factor;
 
         if (CurcumaLogger::get_verbosity() >= 3) {
@@ -2596,12 +2635,19 @@ void ForceFieldThread::CalculateGFNFFHalogenBondContribution()
             double dE_drAX = E_prefactor * dRdamp_drAX;
             double dE_drAB = E_prefactor * dRdamp_drAB;
 
+            // Claude Generated (Feb 15, 2026): Sigmoid strength gradient contribution for XB
+            // REMOVED: The sigmoid derivative adds an unphysical force that destabilizes MD
+            // The XB energy already has natural distance dependence through rdamp
+            // The sigmoid is only for smooth energy transition at cutoff, NOT for forces
+
             // --- 3. Chain Rule: Position Vector Derivatives ---
             Eigen::Vector3d grad_rAX_unit = r_AX_vec / r_AX;  // Direction A → X
             Eigen::Vector3d grad_rXB_unit = r_XB_vec / r_XB;  // Direction X → B
             Eigen::Vector3d grad_rAB_unit = r_AB_vec / r_AB;  // Direction A → B
 
             // --- 4. Accumulate Gradients on Each Atom ---
+            // Reference: gfnff_engrad.F90 - No sigmoid in Fortran, direct gradient scaling
+
             // Atom A: influenced by r_AX (negative direction) and r_AB (negative direction)
             Eigen::Vector3d grad_A = (-dE_drAX * grad_rAX_unit - dE_drAB * grad_rAB_unit) * m_final_factor;
             m_gradient.row(xb.i) += grad_A.transpose();
@@ -2738,10 +2784,10 @@ void ForceFieldThread::CalculateD4DispersionContribution()
         CurcumaLogger::info(fmt::format("Thread {} calculating {} GFN-FF/D4 dispersion pairs",
                                         m_thread, m_d4_dispersions.size()));
     }
-    // Claude Generated (Feb 8, 2026): Temporary per-pair diagnostic for dispersion accuracy investigation
-    bool d4_disp_diag = (m_d4_dispersions.size() > 0 && m_d4_dispersions.size() <= 50);
+    // Claude Generated (Feb 8, 2026): Per-pair diagnostic for dispersion accuracy investigation (verbosity >= 3 only)
+    bool d4_disp_diag = (CurcumaLogger::get_verbosity() >= 3 && m_d4_dispersions.size() > 0 && m_d4_dispersions.size() <= 50);
     if (d4_disp_diag) {
-        fmt::print(stderr, "D4_DISP_CSV: idx,i,j,rij_bohr,C6,r4r2ij,r0_sq,zetac6,t6,t8,energy\n");
+        CurcumaLogger::info("D4_DISP_CSV: idx,i,j,rij_bohr,C6,r4r2ij,r0_sq,zetac6,t6,t8,energy");
     }
 
     for (int index = 0; index < m_d4_dispersions.size(); ++index) {
@@ -2786,12 +2832,12 @@ void ForceFieldThread::CalculateD4DispersionContribution()
         m_dispersion_energy += pair_energy;
         m_d4_energy += pair_energy;
 
-        // Claude Generated (Feb 8, 2026): Per-pair diagnostic CSV
+        // Debug: Per-pair diagnostic CSV (verbosity >= 3 only)
         if (d4_disp_diag) {
-            fmt::print(stderr, "D4_DISP_CSV: {},{},{},{:.6f},{:.6e},{:.6f},{:.6f},{:.6e},{:.6e},{:.6e},{:.10e}\n",
-                       index, disp.i, disp.j,
-                       rij, disp.C6, disp.r4r2ij, disp.r0_squared, disp.zetac6,
-                       t6, t8, pair_energy);
+            CurcumaLogger::info(fmt::format("D4_DISP_CSV: {},{},{},{:.6f},{:.6e},{:.6f},{:.6f},{:.6e},{:.6e},{:.6e},{:.10e}",
+                                           index, disp.i, disp.j,
+                                           rij, disp.C6, disp.r4r2ij, disp.r0_squared, disp.zetac6,
+                                           t6, t8, pair_energy));
         }
 
         if (m_calculate_gradient) {

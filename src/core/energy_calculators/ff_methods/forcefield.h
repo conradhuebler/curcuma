@@ -97,6 +97,11 @@ public:
     void setParameter(const json& parameter);
     void setParameterFile(const std::string& file);
 
+    // Claude Generated (Feb 15, 2026): HB/XB update methods for MD simulations
+    // Reference: Fortran gfnff_engrad.F90:246-260 - dynamic list rebuilding
+    void updateGFNFFHBonds(const json& hbonds);
+    void updateGFNFFXBonds(const json& xbonds);
+
     // Parameter caching functions for all FF methods (UFF, GFN-FF, QMDFF, etc.)
     bool saveParametersToFile(const std::string& filename) const;
     bool loadParametersFromFile(const std::string& filename);
@@ -121,6 +126,13 @@ public:
 
     // Get cached D3 CN for validation (Claude Generated Jan 18, 2026)
     const Vector& getCachedD3CN() const { return m_d3_cn; }
+
+    // Claude Generated (Feb 15, 2026): Accessor for verbose output
+    int getDispersionPairCount() const { return static_cast<int>(m_gfnff_dispersions.size()); }
+
+    // Claude Generated (Feb 15, 2026): Set dc6dcn matrix for dispersion CN gradient
+    // Reference: Fortran gfnff_gdisp0.f90:262-305 - dc6dcn(i,j) = dC6(i,j)/dCN(i)
+    void setDispersionDC6DCN(const Matrix& dc6dcn);
 
     // Claude Generated (Feb 1, 2026): Distribute CN, CNF, and CN derivatives for Coulomb gradients
     // Reference: Fortran gfnff_engrad.F90:418-422 - charge derivative via CN

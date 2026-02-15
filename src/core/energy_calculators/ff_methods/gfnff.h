@@ -27,6 +27,7 @@
 #include "src/core/energy_calculators/ff_methods/forcefield.h"
 #include "src/core/energy_calculators/ff_methods/eeq_solver.h"  // EEQ charge calculation (Dec 2025 - Phase 3)
 #include "src/core/energy_calculators/ff_methods/huckel_solver.h"  // Full Hückel calculation (Jan 2026 - Phase 1)
+#include "src/core/energy_calculators/ff_methods/d4param_generator.h"  // Claude Generated (Feb 15, 2026): D4 for dc6dcn gradient
 #include "src/core/global.h"
 #include "src/core/functional_groups.h"
 #include "src/core/periodic_table.h"
@@ -895,6 +896,18 @@ private:
     int smallestRingContainingAll(int i, int j, int k, int l) const;
 
     /**
+     * @brief Find smallest ring containing all three atoms of an angle bend
+     * @param i Center atom
+     * @param j First neighbor
+     * @param k Second neighbor
+     * @return Size of smallest ring containing all three atoms, or 0 if none
+     *
+     * Claude Generated (Feb 11, 2026): Equivalent to Fortran ringsbend(i,j,k,...)
+     * Reference: gfnff_ini2.f90:503-543
+     */
+    int smallestRingContainingBend(int i, int j, int k) const;
+
+    /**
      * @brief Find largest ring containing all four atoms of a torsion quartet
      * @param i First atom (terminal)
      * @param j Second atom (central bond)
@@ -1069,6 +1082,13 @@ private:
      */
     json generateTopologyAwareAngles(const Vector& cn, const std::vector<int>& hyb,
         const Vector& charges, const std::vector<int>& rings) const;
+
+    /**
+     * @brief Generate angle parameters with full topology info including pi-bond orders
+     * Claude Generated (Feb 11, 2026): New overload using complete TopologyInfo
+     * This ensures pi_bond_orders, atom_to_rings, and all topology data is available
+     */
+    json generateTopologyAwareAngles(const TopologyInfo& topo_info) const;
 
     /**
      * @brief Detect hydrogen bonds and set up A-H...B interactions
@@ -1530,6 +1550,44 @@ private:
 
     // ATM three-body dispersion terms (extracted from D3/D4 - Claude Generated Jan 2025)
     mutable json m_atm_triples; ///< Bonded ATM triples from D3/D4 parameter generators
+
+    // Claude Generated (Feb 15, 2026): D4ParameterGenerator kept alive for runtime dc6dcn computation
+    // Reference: Fortran gfnff_gdisp0.f90:382-395 - dc6dcn needed for dispersion CN gradient
+    mutable std::unique_ptr<D4ParameterGenerator> m_d4_generator;
+
+    /**
+     * @brief HB/XB dynamic update support for MD simulations
+     *
+     * Claude Generated (February 2026): Reference geometry tracking for HB/XB list updates
+     * Reference: Fortran gfnff_engrad.F90:246-260, gfnff_ini2.f90:715-717
+     *
+     * During MD simulations, HB/XB pairs can form or break as geometry changes.
+     * This struct tracks the reference geometry and triggers list rebuilds when
+     * per-atom RMSD exceeds 0.3 Bohr threshold.
+     */
+    struct HBReferenceGeometry {
+        Eigen::MatrixXd reference_positions;  ///< Positions when lists were built (Bohr)
+        int nhb_count = 0;    ///< Number of hydrogen bonds
+        int nxb_count = 0;    ///< Number of halogen bonds
+        bool needs_update = true;  ///< Force update on first call
+    };
+
+    mutable std::optional<HBReferenceGeometry> m_hb_reference;  ///< HB/XB reference geometry tracker
+
+    /**
+     * @brief Check if HB/XB lists need updating based on geometry change
+     *
+     * Claude Generated (February 2026)
+     * Reference: Fortran gfnff_ini2.f90:715-717
+     *
+     * Uses per-atom RMSD threshold of 0.3 Bohr to trigger list rebuild.
+     * This matches Fortran behavior where lists are rebuilt when geometry
+     * changes significantly during MD simulations.
+     *
+     * @param current_geometry Current geometry in Bohr
+     * @return true if lists should be rebuilt
+     */
+    bool shouldUpdateHBXB(const Eigen::MatrixXd& current_geometry) const;
 
     // Geometry change detection for intelligent caching
     class GeometryChangeDetector {

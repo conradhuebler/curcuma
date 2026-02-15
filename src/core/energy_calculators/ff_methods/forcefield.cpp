@@ -148,6 +148,15 @@ void ForceField::distributeCNandDerivatives(const Vector& cn, const Vector& cnf,
     }
 }
 
+// Claude Generated (Feb 15, 2026): Distribute dc6dcn matrix to all threads for dispersion CN gradient
+// Reference: Fortran gfnff_gdisp0.f90:382-395 - dEdcn accumulation from C6 derivatives
+void ForceField::setDispersionDC6DCN(const Matrix& dc6dcn)
+{
+    for (int i = 0; i < static_cast<int>(m_stored_threads.size()); ++i) {
+        m_stored_threads[i]->setDispersionDC6DCN(dc6dcn);
+    }
+}
+
 void ForceField::setParameter(const json& parameters)
 {
     std::string method_name = "unknown";
@@ -940,6 +949,110 @@ void ForceField::setGFNFFHalogenBonds(const json& xbonds)
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success(fmt::format("Loaded {} GFN-FF halogen bonds", xbonds.size()));
+    }
+}
+
+/**
+ * @brief Update hydrogen bond list for MD simulations
+ *
+ * Claude Generated (Feb 15, 2026): Dynamic HB update for MD
+ * Reference: Fortran gfnff_engrad.F90:246-260, gfnff_ini2.f90:700-768
+ *
+ * During MD simulations, HB pairs can form or break. This method
+ * allows updating the HB list without full parameter regeneration.
+ *
+ * @param hbonds New hydrogen bond parameters
+ */
+void ForceField::updateGFNFFHBonds(const json& hbonds)
+{
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("Updating HB list: {} -> {} bonds",
+                                        m_gfnff_hbonds.size(), hbonds.size()));
+    }
+
+    // Clear and repopulate (same logic as setGFNFFHydrogenBonds)
+    m_gfnff_hbonds.clear();
+    for (const auto& hb : hbonds) {
+        GFNFFHydrogenBond bond;
+
+        bond.i = hb["i"];
+        bond.j = hb["j"];
+        bond.k = hb["k"];
+
+        bond.basicity_A = hb["basicity_A"];
+        bond.basicity_B = hb["basicity_B"];
+        bond.acidity_A = hb["acidity_A"];
+        bond.acidity_B = hb["acidity_B"];
+
+        bond.q_H = hb["q_H"];
+        bond.q_A = hb["q_A"];
+        bond.q_B = hb["q_B"];
+
+        bond.case_type = hb.value("case", 1);
+
+        if (hb.contains("neighbors_A")) {
+            bond.neighbors_A = hb["neighbors_A"].get<std::vector<int>>();
+        }
+        if (hb.contains("neighbors_B")) {
+            bond.neighbors_B = hb["neighbors_B"].get<std::vector<int>>();
+        }
+        if (hb.contains("acceptor_parent")) {
+            bond.acceptor_parent_index = hb["acceptor_parent"];
+        }
+
+        m_gfnff_hbonds.push_back(bond);
+    }
+
+    // Distribute to all threads
+    for (auto* thread : m_stored_threads) {
+        thread->setGFNFFHBonds(m_gfnff_hbonds);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success(fmt::format("Updated HB list: {} bonds", m_gfnff_hbonds.size()));
+    }
+}
+
+/**
+ * @brief Update halogen bond list for MD simulations
+ *
+ * Claude Generated (Feb 15, 2026): Dynamic XB update for MD
+ * Reference: Fortran gfnff_engrad.F90:246-260, gfnff_ini2.f90:700-768
+ *
+ * @param xbonds New halogen bond parameters
+ */
+void ForceField::updateGFNFFXBonds(const json& xbonds)
+{
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("Updating XB list: {} -> {} bonds",
+                                        m_gfnff_xbonds.size(), xbonds.size()));
+    }
+
+    // Clear and repopulate (same logic as setGFNFFHalogenBonds)
+    m_gfnff_xbonds.clear();
+    for (const auto& xb : xbonds) {
+        GFNFFHalogenBond bond;
+
+        bond.i = xb["i"];
+        bond.j = xb["j"];
+        bond.k = xb["k"];
+
+        bond.basicity_B = xb["basicity_B"];
+        bond.acidity_X = xb["acidity_X"];
+
+        bond.q_X = xb["q_X"];
+        bond.q_B = xb["q_B"];
+
+        m_gfnff_xbonds.push_back(bond);
+    }
+
+    // Distribute to all threads
+    for (auto* thread : m_stored_threads) {
+        thread->setGFNFFHalogenBonds(m_gfnff_xbonds);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success(fmt::format("Updated XB list: {} bonds", m_gfnff_xbonds.size()));
     }
 }
 
@@ -2028,6 +2141,36 @@ double ForceField::Calculate(bool gradient)
         }
 
         m_gradient += m_stored_threads[i]->Gradient();
+    }
+
+    // Claude Generated (Feb 15, 2026): Apply dE/dCN chain-rule gradient for bond dr0/dCN and dispersion dC6/dCN
+    // Reference: Fortran gfnff_engrad.F90:973-974 (bond), gfnff_gdisp0.f90:393-395 (dispersion)
+    //
+    // Pattern: gradient(i,dim) += Σ_j dcn[dim](i,j) * dEdcn_total(j)
+    // where dcn[dim](i,j) = dCN(j)/dr(i,dim) and dEdcn_total(j) is accumulated from all energy terms
+    if (gradient && !m_dcn.empty() && m_dcn.size() == 3) {
+        Vector dEdcn_total = Vector::Zero(m_natoms);
+        for (int i = 0; i < static_cast<int>(m_stored_threads.size()); ++i) {
+            const Vector& thread_dEdcn = m_stored_threads[i]->getDEdcn();
+            if (thread_dEdcn.size() == m_natoms) {
+                dEdcn_total += thread_dEdcn;
+            }
+        }
+
+        // Apply chain rule: for each spatial dimension, multiply dcn matrix by dEdcn vector
+        for (int dim = 0; dim < 3; ++dim) {
+            if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
+                m_gradient.col(dim) += m_dcn[dim] * dEdcn_total;
+            }
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            double dEdcn_norm = dEdcn_total.norm();
+            if (dEdcn_norm > 1e-12) {
+                CurcumaLogger::info(fmt::format("dEdcn chain-rule: |dEdcn| = {:.6e}, max = {:.6e}",
+                    dEdcn_norm, dEdcn_total.cwiseAbs().maxCoeff()));
+            }
+        }
     }
 
     // Claude Generated: CG pair interaction calculations (spherical implementation)
