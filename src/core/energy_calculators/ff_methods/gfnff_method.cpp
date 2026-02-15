@@ -714,8 +714,7 @@ json GFNFF::generateGFNFFParameters()
 
             // Create one thread per independent generation phase
             auto* t_angles = new ParameterGeneratorThread("angles", [this, &topo_info]() {
-                return generateTopologyAwareAngles(topo_info.coordination_numbers,
-                    topo_info.hybridization, topo_info.eeq_charges, topo_info.ring_sizes);
+                return generateTopologyAwareAngles(topo_info);
             });
             auto* t_torsions = new ParameterGeneratorThread("torsions", [this]() {
                 return generateGFNFFTorsions();
@@ -779,8 +778,7 @@ json GFNFF::generateGFNFFParameters()
 
         } else {
             // Sequential path: single-threaded (no ThreadPool overhead)
-            parameters["angles"] = generateTopologyAwareAngles(topo_info.coordination_numbers,
-                topo_info.hybridization, topo_info.eeq_charges, topo_info.ring_sizes);
+            parameters["angles"] = generateTopologyAwareAngles(topo_info);
             parameters["dihedrals"] = generateGFNFFTorsions();
             parameters["inversions"] = generateGFNFFInversions();
             parameters["gfnff_coulombs"] = generateGFNFFCoulombPairs();
@@ -1727,6 +1725,20 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         bstrength = bstren[2] * 1.04;  // treat as stronger due to conjugation/charge
     }
 
+    // CO bstrength override (Fortran gfnff_ini.f90:1213-1214)
+    // Triple bond strength * 0.90 for carbon monoxide type bonds
+    if (bbtyp == 3 && ((z1 == 6 && z2 == 8) || (z1 == 8 && z2 == 6))) {
+        bstrength = bstren[3] * 0.90;  // 1.98 * 0.90 = 1.782
+    }
+
+    // bbtyp demotion (Fortran gfnff_ini.f90:1216-1218)
+    // sp-unknown → single, sp-sp3 → single, sp-sp2 → double
+    if (bbtyp == 3) {
+        if (hyb1 == 0 || hyb2 == 0) bbtyp = 1;       // sp-unknown → single
+        else if (hyb1 == 3 || hyb2 == 3) bbtyp = 1;   // sp-sp3 → single
+        else if (hyb1 == 2 || hyb2 == 2) bbtyp = 2;   // sp-sp2 → double
+    }
+
     // Bridging atoms (will be detected in Phase 6)
     bool is_bridge = false;  // Placeholder
     if (is_bridge) {
@@ -2011,7 +2023,7 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         // Update bstrength to double-bond if significant pi-character (pibo > 0.1)
         // Reference: Fortran gfnff_ini.f90:1219-1222
         // This overrides the hybridization-based bstrength for aromatic/conjugated bonds
-        if (pibo > 0.1 && hybi != 2 && hybj != 2) {  // bbtyp != 3 check
+        if (pibo > 0.1 && hybi != 2 && hybj != 2) {  // bbtyp != 3 proxy (pre-demotion)
             // Change to double-bond character
             bstrength = 1.240;  // bstren[2] = double bond value
         }
@@ -2124,6 +2136,16 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // Step 11: Force constant (9 factors)
     // Fortran gfnff_ini.f90:1285: fc = -bond(i)*bond(j) * ringf * bstrength * fqq * fheavy * fpi * fxh * fcn
     params.force_constant = -(bond_param_1 * bond_param_2 * bstrength * fqq * ringf * fheavy * fpi * fxh * fcn);
+
+    // Claude Generated (Feb 14, 2026): Per-factor diagnostic for bond fc comparison with Fortran
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format(
+            "BOND_FACTORS: {:3d}, {:3d}, bond_i={:.9f}, bond_j={:.9f}, bstr={:.4f}, fqq={:.9f}, "
+            "ringf={:.4f}, fheavy={:.4f}, fpi={:.6f}, fxh={:.4f}, fcn={:.6f}, fc={:.12f}, "
+            "qa1={:.9f}, qa2={:.9f}",
+            atom1, atom2, bond_param_1, bond_param_2, bstrength, fqq,
+            ringf, fheavy, fpi, fxh, fcn, params.force_constant, qa1, qa2));
+    }
 
     // Step 11: Alpha parameter with metal-specific sign flip (Fortran gfnff_param.f90:642-644, gfnff_ini.f90:1240)
     // CRITICAL PARAMETERS FROM FORTRAN
@@ -2504,6 +2526,25 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
         default:  r0_deg = 100.0;   // Fallback
     }
 
+    // Claude Generated (Feb 11, 2026): Heavy maingroup sp3 corrections
+    // Reference: gfnff_ini.f90:1550-1558
+    // For elements heavier than Ne (Z>10) with sp3 hybridization
+    int group_center = (z_center >= 1 && z_center <= 86) ? GFNFFParameters::periodic_group[z_center - 1] : 0;
+    if (hyb_center == 3 && z_center > 10) {
+        const double aheavy3 = 89.0;   // gfnff_param.f90:861
+        const double aheavy4 = 100.0;  // gfnff_param.f90:862
+        if (nn_center <= 3) r0_deg = aheavy3;
+        if (nn_center >= 4) r0_deg = aheavy4;
+        if (nn_center == 4 && group_center == 5) r0_deg = 109.5;          // 4-coord group 5 (P, As, etc.)
+        if (nn_center == 4 && group_center == 4 && z_center > 49) r0_deg = 109.5;  // 4-coord Sn, Pb
+        if (group_center == 4) r0_deg = r0_deg - nh * 5.0;  // XHn Si...
+        if (group_center == 5) r0_deg = r0_deg - nh * 5.0;  // XHn P...
+        if (group_center == 6) r0_deg = r0_deg - nh * 5.0;  // XHn S...
+    }
+
+    // Flag for CO2 special case: prevents triple bond section from overriding f2
+    bool co2_override = false;
+
     // Phase 2A-2B: Element-specific corrections (Claude Generated January 10, 2026)
     // Reference: gfnff_ini.f90:1486-1599
     //
@@ -2558,6 +2599,7 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
         } else if (hyb == 1) {
             // sp carbon
             if (no == 2) {
+                co2_override = true;  // Fortran: triple=.false. (line 1580)
                 f2 = 2.0;  // CO2 special case - very stiff linear molecule
             }
         }
@@ -2569,11 +2611,9 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     // Nitrogen (Z=7): Extensive CN and hybridization-dependent cases
     // Reference: gfnff_ini.f90:1602-1631
     else if (z_center == 7) {
-        // Get ring membership for nitrogen center
-        int rings_center = 0;
-        if (!topo_info.ring_sizes.empty() && atom_j < topo_info.ring_sizes.size()) {
-            rings_center = topo_info.ring_sizes[atom_j];
-        }
+        // Claude Generated (Feb 11, 2026): Use ringsbend (all 3 atoms in same ring)
+        // Fortran: call ringsbend(nat,ii,jj,kk,cring,sring,rings) at line 1527
+        int rings_center = smallestRingContainingBend(atom_j, atom_i, atom_k);
 
         // CN=2 cases (imines, nitriles, azo compounds)
         // Reference: gfnff_ini.f90:1602-1611
@@ -2712,11 +2752,10 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     // Phase 2D: Ring strain corrections (ALL elements)
     // Reference: gfnff_ini.f90:1635-1649
     // These override hybridization-based angles for small rings
+    // Claude Generated (Feb 11, 2026): Use ringsbend (smallest ring containing ALL 3 atoms)
+    // Fortran: call ringsbend(nat,ii,jj,kk,cring,sring,rings) at line 1527
 
-    int rings_center = 0;
-    if (!topo_info.ring_sizes.empty() && atom_j < topo_info.ring_sizes.size()) {
-        rings_center = topo_info.ring_sizes[atom_j];
-    }
+    int rings_center = smallestRingContainingBend(atom_j, atom_i, atom_k);
 
     if (rings_center == 3) {
         r0_deg = 82.0;  // 3-membered rings: severe strain (60° gives too little)
@@ -2729,25 +2768,40 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
     }
 
     // Special case: R-X in 3-rings (e.g., cyclopropene)
-    // If central atom NOT in ring, but neighbors ARE in 3-rings together
-    // Reference: gfnff_ini.f90:1642-1649
+    // Reference: gfnff_ini.f90:1649-1657
+    // Condition: angle is NOT fully in a ring (rings_center==0), but center IS in a 3-ring
+    // Then check: one neighbor in 3-ring, other NOT in any ring (Fortran: sum==102 = 3+99)
+    // Claude Generated (Feb 11, 2026): Fixed to match Fortran ringsatom logic
     if (rings_center == 0) {
-        // Check if neighbors are in rings
-        int rings_i = 0, rings_k = 0;
-        if (!topo_info.ring_sizes.empty()) {
-            if (atom_i < topo_info.ring_sizes.size()) rings_i = topo_info.ring_sizes[atom_i];
-            if (atom_k < topo_info.ring_sizes.size()) rings_k = topo_info.ring_sizes[atom_k];
+        // Check center atom's smallest ring (NOT the shared 3-atom ring)
+        int center_smallest_ring = 0;
+        if (!topo_info.ring_sizes.empty() && atom_j < topo_info.ring_sizes.size()) {
+            center_smallest_ring = topo_info.ring_sizes[atom_j];
         }
 
-        // If both neighbors in 3-rings (e.g., X outside cyclopropene)
-        if (rings_i == 3 && rings_k == 3) {
-            r0_deg += 4.0;  // Widen angle by 4° for ring strain relief
+        if (center_smallest_ring == 3) {
+            // Get smallest ring of each neighbor (0 = no ring, like Fortran's 99)
+            int rings_i = 0, rings_k = 0;
+            if (!topo_info.ring_sizes.empty()) {
+                if (atom_i < topo_info.ring_sizes.size()) rings_i = topo_info.ring_sizes[atom_i];
+                if (atom_k < topo_info.ring_sizes.size()) rings_k = topo_info.ring_sizes[atom_k];
+            }
+
+            // Fortran: ringsj+ringsk==102 means one is 3 (in ring), other is 99 (no ring)
+            // Curcuma equivalent: one is 3, other is 0
+            if ((rings_i == 3 && rings_k == 0) || (rings_i == 0 && rings_k == 3)) {
+                r0_deg += 4.0;  // Widen angle by 4° for ring strain relief
+            }
         }
     }
 
     // Triple bond corrections (applies to all elements)
-    // Reference: gfnff_ini.f90:1652-1659
-    bool triple = (hyb == 1);  // sp hybridization indicates triple bond
+    // Reference: gfnff_ini.f90:1528-1529, 1660-1677
+    // Claude Generated (Feb 11, 2026): Check ALL three atoms for sp, not just center
+    // Fortran: triple = (hyb(ii)==1.or.hyb(jj)==1).or.(hyb(ii)==1.or.hyb(kk)==1)
+    int hyb_i_for_triple = (atom_i < topo_info.hybridization.size()) ? topo_info.hybridization[atom_i] : 3;
+    int hyb_k_for_triple = (atom_k < topo_info.hybridization.size()) ? topo_info.hybridization[atom_k] : 3;
+    bool triple = !co2_override && (hyb == 1 || hyb_i_for_triple == 1 || hyb_k_for_triple == 1);
 
     if (triple) {
         f2 = 0.60;  // Base weakening for triple bonds
@@ -2757,50 +2811,87 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
             f2 = 1.00;
         }
 
-        // Metal-alkyne complexes: much stronger
-        // Check if neighbors are transition metals and geometry is linear
-        bool has_tm_carbon_bond = false;
-        if (!topo_info.is_metal.empty()) {
-            // Check if we have M-C≡C or M-C≡N coordination
-            if ((m_atoms[atom_i] == 6 || m_atoms[atom_k] == 6) && z_center == 6) {
-                // Carbon center with carbon neighbor
-                if (atom_i < topo_info.is_metal.size() && topo_info.is_metal[atom_i]) has_tm_carbon_bond = true;
-                if (atom_k < topo_info.is_metal.size() && topo_info.is_metal[atom_k]) has_tm_carbon_bond = true;
-            }
-            if ((m_atoms[atom_i] == 7 || m_atoms[atom_k] == 7) && z_center == 6) {
-                // Carbon center with nitrogen neighbor (M-CN)
-                if (atom_i < topo_info.is_metal.size() && topo_info.is_metal[atom_i]) has_tm_carbon_bond = true;
-                if (atom_k < topo_info.is_metal.size() && topo_info.is_metal[atom_k]) has_tm_carbon_bond = true;
-            }
-        }
-
-        // Check if angle is nearly linear (geometry-dependent)
+        // Claude Generated (Feb 11, 2026): Full metal-triple bond corrections
+        // Reference: gfnff_ini.f90:1664-1677
+        int atj_z = m_atoms[atom_i];  // Fortran atj = neighbor
+        int atk_z = m_atoms[atom_k];  // Fortran atk = neighbor
+        int imetal_i = (atj_z >= 1 && atj_z <= 86) ? GFNFFParameters::metal_type[atj_z - 1] : 0;
+        int imetal_k = (atk_z >= 1 && atk_z <= 86) ? GFNFFParameters::metal_type[atk_z - 1] : 0;
         double current_angle_deg = current_angle * 180.0 / M_PI;
         const double linear_threshold = 160.0;
 
-        if (has_tm_carbon_bond && current_angle_deg > linear_threshold) {
-            f2 = 3.0;  // Very stiff for metal-alkyne/cyanide coordination
+        if ((imetal_i == 2 || imetal_k == 2) && current_angle_deg > linear_threshold) {
+            if (z_center == 6 && atj_z == 6) f2 = 3.0;   // M-CC
+            if (z_center == 6 && atk_z == 6) f2 = 3.0;   // M-CC
+            if (z_center == 6 && atj_z == 7) f2 = 3.0;   // M-CN
+            if (z_center == 6 && atk_z == 7) f2 = 3.0;   // M-CN
+            int group_j = (atj_z >= 1 && atj_z <= 86) ? GFNFFParameters::periodic_group[atj_z - 1] : 0;
+            int group_k = (atk_z >= 1 && atk_z <= 86) ? GFNFFParameters::periodic_group[atk_z - 1] : 0;
+            if (z_center == 6 && group_j == 6) f2 = 14.0; // M-CO or M-CS
+            if (z_center == 6 && group_k == 6) f2 = 14.0; // M-CO or M-CS
+            if (z_center == 7 && atj_z == 7) f2 = 10.0;  // M-NN
+            if (z_center == 7 && atj_z == 6) f2 = 10.0;  // M-NC
+            if (z_center == 7 && atk_z == 6) f2 = 10.0;  // M-NC
+            if (z_center == 7 && atj_z == 8) { r0_deg = 180.0; f2 = 12.0; } // M-NO
+            if (z_center == 7 && atk_z == 8) { r0_deg = 180.0; f2 = 12.0; } // M-NO
         }
     }
 
-    // Calculate neighbors of central atom for element-specific corrections
-    // Claude Generated (Dec 31, 2025): CRITICAL FIX - Use adjacency list from topology!
-    // This is the exact bond list that was used to generate angles
-    // Reference: adjacency_list is populated in calculateTopologyInfo() from bond list
+    // Claude Generated (Feb 11, 2026): Additional special cases from Fortran
+    // Reference: gfnff_ini.f90:1679-1714
 
-    // DEBUG: Check if adjacency_list is populated (Dec 31, 2025)
-    if (atom_j == 5 && CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("topo_info.adjacency_list.size() = {}",
-                     topo_info.adjacency_list.size()));
-        if (!topo_info.adjacency_list.empty() && atom_j < topo_info.adjacency_list.size()) {
-            CurcumaLogger::info(fmt::format("topo_info.adjacency_list[{}].size() = {}",
-                         atom_j,
-                         topo_info.adjacency_list[atom_j].size()));
+    // SO3X: Group 6 center (S, Se, Te) with 4 neighbors and oxygen
+    // Reference: gfnff_ini.f90:1684
+    if (group_center == 6 && nn_center == 4 && no >= 1) {
+        r0_deg = 115.0;
+    }
+
+    // Halogens CN=2: Group 7 center (F, Cl, Br, I) with sp hybridization
+    // Reference: gfnff_ini.f90:1686-1693
+    if (group_center == 7 && hyb == 1) {
+        r0_deg = 90.0;
+        if (z_center > 9) {
+            double current_angle_deg = current_angle * 180.0 / M_PI;
+            if (current_angle_deg > 160.0) r0_deg = 180.0;  // GEODEP
         }
+        f2 = 0.6 / std::pow(static_cast<double>(z_center), 0.15);
+    }
+
+    // PB/Sn pyramidal: Heavy group 4 with sp3 and positive charge
+    // Reference: gfnff_ini.f90:1695-1703
+    if (hyb == 3 && group_center == 4 && z_center > 32) {
+        double qa_center_val = 0.0;
+        if (atom_j < topo_info.topology_charges.size()) {
+            qa_center_val = topo_info.topology_charges[atom_j];
+        }
+        if (qa_center_val > 0.4) {
+            double current_angle_deg = current_angle * 180.0 / M_PI;
+            if (current_angle_deg > 140.0) {
+                r0_deg = 180.0;
+            }
+            if (current_angle_deg < 100.0) {
+                r0_deg = 90.0;
+            }
+            f2 = 1.0;
+        }
+    }
+
+    // METAL center: Transition and main group metals
+    // Reference: gfnff_ini.f90:1705-1714
+    int imetal_center = (z_center >= 1 && z_center <= 86) ? GFNFFParameters::metal_type[z_center - 1] : 0;
+    if (imetal_center > 0) {
+        if (hyb == 0) {
+            r0_deg = 90.0;
+            f2 = 1.35;  // Important for metal angles
+        }
+        if (hyb == 1) r0_deg = 180.0;
+        if (hyb == 2) r0_deg = 120.0;
+        if (hyb == 3) r0_deg = 109.5;
+        double current_angle_deg = current_angle * 180.0 / M_PI;
+        if (current_angle_deg > 160.0) r0_deg = 180.0;  // GEODEP
     }
 
     // Get neighbors directly from topology adjacency list
-    // This is already calculated and contains the actual bonded neighbors
     std::vector<int> neighbors;
     if (!topo_info.adjacency_list.empty() && atom_j < topo_info.adjacency_list.size()) {
         neighbors = topo_info.adjacency_list[atom_j];
@@ -2888,23 +2979,9 @@ GFNFF::GFNFFAngleParams GFNFF::getGFNFFAngleParameters(int atom_i, int atom_j, i
                         params.force_constant, fijk, fqq, f2, fn, fbsmall, feta));
         }
 
-        // Phase 5: Ring-strain corrections (Claude Generated January 2026)
-        // Reference: gfnff_ini.f90 - small rings require reduced force constants
-        // 3-membered rings: 30% reduction, 4-membered rings: 15% reduction
-        if (!topo_info.ring_sizes.empty() && atom_j < topo_info.ring_sizes.size()) {
-            int ring_size = topo_info.ring_sizes[atom_j];
-            if (ring_size == 3) {
-                params.force_constant *= 0.7;  // 30% reduction for 3-ring
-                if (CurcumaLogger::get_verbosity() >= 3) {
-                    CurcumaLogger::info(fmt::format("Ring-strain correction: 3-ring at atom {}, fc *= 0.7", atom_j));
-                }
-            } else if (ring_size == 4) {
-                params.force_constant *= 0.85;  // 15% reduction for 4-ring
-                if (CurcumaLogger::get_verbosity() >= 3) {
-                    CurcumaLogger::info(fmt::format("Ring-strain correction: 4-ring at atom {}, fc *= 0.85", atom_j));
-                }
-            }
-        }
+        // NOTE (Feb 11, 2026): Ring fc reduction REMOVED - Fortran does NOT apply
+        // force constant scaling for small rings. It only changes equilibrium angles
+        // (r0=82° for 3-rings, r0=96° for 4-rings) which is handled in Phase 2D above.
     }
 
     return params;
@@ -3123,27 +3200,14 @@ std::vector<int> GFNFF::determineHybridization(const std::vector<std::vector<int
             if (z == 1 || (z >= 9 && z <= 17)) {  // H or halogens (F, Cl, Br, I)
                 hyb[i] = 0; // sp3 for hydrogen and halogens (matches reference implementation)
             } else if (z == 8) {
-                // CRITICAL FIX (Jan 25, 2026): Oxygen with 1 neighbor
-                // Reference: gfnff_ini2.f90:307-310
+                // Fortran gfnff_ini2.f90:307-310: Oxygen CN=1
                 // Default: sp2 (carbonyl oxygen in ketones, aldehydes, amides)
-                // Exception: sp ONLY if bonded to C with 1 neighbor (CO molecule)
+                // Exception: sp if sole neighbor also has CN=1 (CO, OH radical, etc.)
                 int neighbor_idx = neighbors[0];
-                int neighbor_CN = 0;
-                for (int j = 0; j < m_atomcount; ++j) {
-                    if (j == neighbor_idx) continue;
-                    Vector rn = m_geometry_bohr.row(neighbor_idx);
-                    Vector rj = m_geometry_bohr.row(j);
-                    double dist = (rn - rj).norm();
-                    double rcov_n = getCovalentRadius(m_atoms[neighbor_idx]) + getCovalentRadius(m_atoms[j]);
-                    if (dist < bond_threshold * rcov_n) {
-                        neighbor_CN++;
-                    }
-                }
-                // neighbor_CN doesn't include oxygen itself, so add 1
-                neighbor_CN += 1;
+                int neighbor_CN = adjacency_list[neighbor_idx].size();
 
-                if (m_atoms[neighbor_idx] == 6 && neighbor_CN == 1) {
-                    hyb[i] = 1; // sp (CO - carbon monoxide only)
+                if (neighbor_CN == 1) {
+                    hyb[i] = 1; // sp (neighbor also has CN=1)
                 } else {
                     hyb[i] = 2; // sp2 (carbonyl oxygen in organic molecules)
                 }
@@ -3481,6 +3545,74 @@ int GFNFF::smallestRingContainingAll(int i, int j, int k, int l) const
             }
         }
     }
+    return smallest;
+}
+
+int GFNFF::smallestRingContainingBend(int i, int j, int k) const
+{
+    // Claude Generated (Feb 11, 2026): Find smallest ring containing all 3 angle atoms
+    // Equivalent to Fortran ringsbend(n, i, j, k, cring, sring, rings)
+    // Reference: gfnff_ini2.f90:503-543
+    //
+    // Algorithm: For each of the three atoms, check all rings they belong to.
+    // A ring qualifies if it contains BOTH other atoms. Return smallest such ring.
+    // If no ring contains all three atoms, return 0.
+
+    const TopologyInfo& topo = getCachedTopology();
+
+    if (topo.atom_to_rings.empty()) return 0;
+    if (static_cast<size_t>(i) >= topo.atom_to_rings.size()) return 0;
+    if (static_cast<size_t>(j) >= topo.atom_to_rings.size()) return 0;
+    if (static_cast<size_t>(k) >= topo.atom_to_rings.size()) return 0;
+
+    // If any atom has no rings, return 0 (matches Fortran early return)
+    if (topo.atom_to_rings[i].empty() || topo.atom_to_rings[j].empty() || topo.atom_to_rings[k].empty())
+        return 0;
+
+    int smallest = 0;
+
+    // Check rings of atom i for both j and k
+    for (int rid : topo.atom_to_rings[i]) {
+        const auto& ring = topo.rings[rid];
+        bool has_j = false, has_k = false;
+        for (int atom : ring) {
+            if (atom == j) has_j = true;
+            else if (atom == k) has_k = true;
+        }
+        if (has_j && has_k) {
+            int sz = static_cast<int>(ring.size());
+            if (smallest == 0 || sz < smallest) smallest = sz;
+        }
+    }
+
+    // Check rings of atom j for both i and k
+    for (int rid : topo.atom_to_rings[j]) {
+        const auto& ring = topo.rings[rid];
+        bool has_i = false, has_k = false;
+        for (int atom : ring) {
+            if (atom == i) has_i = true;
+            else if (atom == k) has_k = true;
+        }
+        if (has_i && has_k) {
+            int sz = static_cast<int>(ring.size());
+            if (smallest == 0 || sz < smallest) smallest = sz;
+        }
+    }
+
+    // Check rings of atom k for both i and j
+    for (int rid : topo.atom_to_rings[k]) {
+        const auto& ring = topo.rings[rid];
+        bool has_i = false, has_j = false;
+        for (int atom : ring) {
+            if (atom == i) has_i = true;
+            else if (atom == j) has_j = true;
+        }
+        if (has_i && has_j) {
+            int sz = static_cast<int>(ring.size());
+            if (smallest == 0 || sz < smallest) smallest = sz;
+        }
+    }
+
     return smallest;
 }
 
@@ -4180,6 +4312,115 @@ json GFNFF::generateTopologyAwareBonds(const Vector& cn, const std::vector<int>&
     return generateTopologyAwareBonds(topo_info);
 }
 
+// Claude Generated (Feb 11, 2026): New overload using complete TopologyInfo
+// This ensures pi_bond_orders, atom_to_rings, and all topology data are available
+// for correct angle parameter generation (especially f2 for N pi-system angles)
+json GFNFF::generateTopologyAwareAngles(const TopologyInfo& topo_info) const
+{
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    // Build bond list from adjacency list
+    std::vector<std::pair<int, int>> bond_list;
+    for (int i = 0; i < m_atomcount; ++i) {
+        if (i < static_cast<int>(topo_info.adjacency_list.size())) {
+            for (int j : topo_info.adjacency_list[i]) {
+                if (j > i) bond_list.push_back({i, j});
+            }
+        }
+    }
+
+    // Pre-compute CN for fn factor
+    const double threshold_cn_squared = 40.0 * 40.0;
+    auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, threshold_cn_squared);
+    Vector coord_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
+
+    std::vector<json> angles_vec;
+
+    #pragma omp parallel
+    {
+        std::vector<json> local_angles;
+
+        #pragma omp for schedule(dynamic, 10)
+        for (int center = 0; center < m_atomcount; ++center) {
+            // Skip atoms with <= 1 neighbor or > 6 neighbors (Fortran: nb(20,i) > 6)
+            if (center >= static_cast<int>(topo_info.adjacency_list.size())) continue;
+            const auto& neighbors = topo_info.adjacency_list[center];
+            if (neighbors.size() <= 1 || neighbors.size() > 6) continue;
+
+            for (size_t i = 0; i < neighbors.size(); ++i) {
+                for (size_t j = i + 1; j < neighbors.size(); ++j) {
+                    int atom_i = neighbors[i];
+                    int atom_k = neighbors[j];
+
+                    // Calculate current angle
+                    Vector ri = m_geometry_bohr.row(atom_i);
+                    Vector rj = m_geometry_bohr.row(center);
+                    Vector rk = m_geometry_bohr.row(atom_k);
+
+                    Vector v1 = ri - rj;
+                    Vector v2 = rk - rj;
+                    double v1_norm = v1.norm();
+                    double v2_norm = v2.norm();
+                    if (v1_norm < 1e-10 || v2_norm < 1e-10) continue;
+
+                    double cos_angle = v1.dot(v2) / (v1_norm * v2_norm);
+                    cos_angle = std::max(-1.0, std::min(1.0, cos_angle));
+                    double current_angle = acos(cos_angle);
+
+                    // Get angle parameters using FULL topology info
+                    auto angle_params = getGFNFFAngleParameters(atom_i, center, atom_k,
+                        current_angle, topo_info, coord_numbers);
+
+                    // Skip angles with zero force constant (fijk < threshold)
+                    if (angle_params.force_constant < 1e-10) continue;
+
+                    // Fortran: skip metal eta cases with phi < 60°
+                    int z_center = m_atoms[center];
+                    if (z_center >= 1 && z_center <= 86 && GFNFFParameters::metal_type[z_center - 1] > 0) {
+                        if (current_angle * 180.0 / M_PI < 60.0) continue;
+                    }
+
+                    json angle;
+                    angle["type"] = 3;
+                    angle["i"] = atom_i;
+                    angle["j"] = center;
+                    angle["k"] = atom_k;
+                    angle["fc"] = angle_params.force_constant;
+                    angle["theta0_ijk"] = angle_params.equilibrium_angle;
+                    angle["r0_ij"] = v1_norm;
+                    angle["r0_ik"] = v2_norm;
+
+                    local_angles.push_back(angle);
+                }
+            }
+        }
+
+        #pragma omp critical
+        {
+            angles_vec.insert(angles_vec.end(), local_angles.begin(), local_angles.end());
+        }
+    }
+
+    // Sort for deterministic output
+    std::sort(angles_vec.begin(), angles_vec.end(), [](const json& a, const json& b) {
+        if (a["j"] != b["j"]) return a["j"] < b["j"];
+        if (a["i"] != b["i"]) return a["i"] < b["i"];
+        return a["k"] < b["k"];
+    });
+
+    json angles = json::array();
+    for (const auto& a : angles_vec) angles.push_back(a);
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::result_fmt("GFN-FF topology-aware angle generation: {} ms", duration.count());
+    }
+
+    return angles;
+}
+
+// Legacy overload - for backward compatibility (without pi_bond_orders)
 json GFNFF::generateTopologyAwareAngles(const Vector& cn, const std::vector<int>& hyb,
     const Vector& charges, const std::vector<int>& rings) const
 {

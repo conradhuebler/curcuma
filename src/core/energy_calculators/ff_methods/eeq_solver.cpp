@@ -552,23 +552,23 @@ static inline int detectElementSpecificHybridization(int Z, double cn,
             return hyb;
         }
 
-        // XTB gfnff_ini2.f90:308-310 - CO detection for CN=1
+        // Fortran gfnff_ini2.f90:307-310 - CN=1 oxygen hybridization
+        // Default sp2, but sp if sole neighbor also has CN=1 (covers CO, OH radical, etc.)
         if (int_cn == 1) {
             int hyb = 2; // Default sp2
 
-            // Check if bonded to carbon with CN=1 (CO)
             if (topology.has_value() && atom_index >= 0 &&
-                atom_index < topology->neighbor_lists.size() &&
+                atom_index < static_cast<int>(topology->neighbor_lists.size()) &&
                 topology->neighbor_lists[atom_index].size() == 1) {
 
                 int neighbor = topology->neighbor_lists[atom_index][0];
-                if (neighbor < atoms.size() && atoms[neighbor] == 6) { // Carbon
-                    int neighbor_CN = (neighbor < topology->neighbor_lists.size()) ?
-                                     topology->neighbor_lists[neighbor].size() : 0;
+                int neighbor_CN = (neighbor < static_cast<int>(topology->neighbor_lists.size())) ?
+                                 static_cast<int>(topology->neighbor_lists[neighbor].size()) : 0;
 
-                    if (neighbor_CN == 1) {
-                        hyb = 1; // sp (CO - carbon monoxide)
-                    }
+                // Fortran: if (nb20i==1 .and. nbdiff==0) then if (topo%nb(20,topo%nb(1,i))==1) hyb=1
+                // No element check - any neighbor with CN=1 triggers sp
+                if (neighbor_CN == 1) {
+                    hyb = 1; // sp (CO, OH radical, etc.)
                 }
             }
 
@@ -579,10 +579,11 @@ static inline int detectElementSpecificHybridization(int Z, double cn,
     }
 
     // ===== Group 7: Halogens (F, Cl, Br, I) =====
+    // Fortran gfnff_ini2.f90:313-316: CN=2 → sp, CN>2+heavy → sp3d, else unknown
     if (group == 7) { // Halogens
         if (int_cn == 2) return 1; // sp
         if (int_cn > 2 && Z > 10) return 5; // sp3d (heavy halogens)
-        return 1; // Default sp
+        return 0; // Default: unknown (CN=1 halogens like HCl)
     }
 
     // ===== Group 8: Noble Gases =====
@@ -642,6 +643,7 @@ static void testElementSpecificHybridizationLogic() {
         {7, 3.0, 3, "Nitrogen CN=3 (should be sp3)"},
         {1, 2.0, 1, "Hydrogen CN=2 (should be sp)"},
         {17, 2.0, 1, "Chlorine CN=2 (should be sp)"},
+        {17, 1.0, 0, "Chlorine CN=1 (should be unknown)"},
         {26, 4.0, 3, "Iron CN=4 (should be sp3)"},
         {8, 1.0, 2, "Oxygen CN=1 (should be sp2)"},
         {6, 3.0, 2, "Carbon CN=3 (should be sp2)"},
