@@ -110,13 +110,19 @@ add_cli_test(analysis 01_parallel_equivalence)
 set_tests_properties(cli_analysis_01_parallel_equivalence PROPERTIES TIMEOUT 120)
 
 # =============================================================================
-# Error Handling Tests (3 scenarios) - Phase 1 Implementation
+# Error Handling Tests (6 scenarios) - Phase 1-2 Implementation
 # =============================================================================
 
+# Phase 1: File Validation
 add_cli_test(errors 01_missing_file)
 add_cli_test(errors 02_invalid_xyz_format)
 add_cli_test(errors 03_permission_denied)
 
-message(STATUS "Added 32 CLI test scenarios with build directory isolation")
+# Phase 2: Method Validation
+add_cli_test(errors 04_typo_method)
+add_cli_test(errors 05_method_not_compiled)
+add_cli_test(errors 06_list_methods)
+
+message(STATUS "Added 35 CLI test scenarios with build directory isolation")
 message(STATUS "  - Tests execute from: ${CMAKE_CURRENT_BINARY_DIR}/category/test_name")
 message(STATUS "  - Source tree remains clean (all outputs in build directory)")
