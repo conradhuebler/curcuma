@@ -109,6 +109,14 @@ add_cli_test(analysis 01_parallel_equivalence)
 # 100 Frames × Scattering braucht länger als Standard-30s
 set_tests_properties(cli_analysis_01_parallel_equivalence PROPERTIES TIMEOUT 120)
 
-message(STATUS "Added 29 CLI test scenarios with build directory isolation")
+# =============================================================================
+# Error Handling Tests (3 scenarios) - Phase 1 Implementation
+# =============================================================================
+
+add_cli_test(errors 01_missing_file)
+add_cli_test(errors 02_invalid_xyz_format)
+add_cli_test(errors 03_permission_denied)
+
+message(STATUS "Added 32 CLI test scenarios with build directory isolation")
 message(STATUS "  - Tests execute from: ${CMAKE_CURRENT_BINARY_DIR}/category/test_name")
 message(STATUS "  - Source tree remains clean (all outputs in build directory)")
