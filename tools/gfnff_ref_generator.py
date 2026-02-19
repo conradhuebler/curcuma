@@ -62,6 +62,29 @@ def parse_analyzer_output(output, xyz_file):
                 if len(ref_data["molecule"]["atoms"]) > 0:
                     atom_section = False
 
+    # 1b. Parse Phase 2 energy charges from goed_gfnff output (first block only)
+    # These are the charges used for Coulomb energy evaluation (nlist%q)
+    energy_charges = []
+    in_goed_charges = False
+    natoms = len(ref_data["molecule"]["atoms"]) if ref_data["molecule"]["atoms"] else 0
+    for line in lines:
+        if "Charges computed in goed_gfnff:" in line and not energy_charges:
+            in_goed_charges = True
+            continue
+        if in_goed_charges:
+            if line.strip().startswith("---") or line.strip().startswith("Atom"):
+                continue
+            match = re.match(r"\s*\d+\s*\|\s*([-]?[\d.]+)", line)
+            if match:
+                energy_charges.append(float(match.group(1)))
+                if natoms > 0 and len(energy_charges) >= natoms:
+                    in_goed_charges = False
+            else:
+                if energy_charges:
+                    in_goed_charges = False
+    if energy_charges:
+        ref_data["energy_charges"] = energy_charges
+
     # 2. Parse Energy Components
     for line in lines:
         if "Total energy:" in line and "Eh" in line:
@@ -179,7 +202,11 @@ def parse_analyzer_output(output, xyz_file):
                         "energy": 0.0
                     })
 
-    # 4. Parse Gradient Decomposition (NEW)
+    # 4. Parse Gradient Decomposition
+    # Fortran format uses pipe-delimited table:
+    #   "    1 | C  | Bond      |      -0.00000000       0.00000000      -0.00000000  0.00000"
+    #   "      |      | Angle     |      -0.00000000       0.00000001      -0.00000000  0.00000"
+    # Claude Generated (February 2026): Fixed parser to match pipe-delimited Fortran output
     grad_section = False
     current_atom_idx = -1
     for line in lines:
@@ -187,28 +214,51 @@ def parse_analyzer_output(output, xyz_file):
             grad_section = True
             continue
         if grad_section:
-            if "======" in line or "GFN-FF setup done" in line:
-                grad_section = False
+            if line.strip().startswith("---") or line.strip().startswith("Atom"):
+                continue
+            if not line.strip() or ("======" in line) or ("GFN-FF setup done" in line):
+                if current_atom_idx >= 0:
+                    grad_section = False
+                continue
+            if "|--" in line:
                 continue
 
-            # Match atom index line
-            atom_match = re.match(r"^\s*(\d+)\s+([A-Z][a-z]?)\s+([A-Za-z]+)\s+" + FLOAT_PATTERN + r"\s+" + FLOAT_PATTERN + r"\s+" + FLOAT_PATTERN, line)
-            if atom_match:
-                current_atom_idx = int(atom_match.group(1)) - 1
-                comp = atom_match.group(3)
-                gx, gy, gz = float(atom_match.group(4)), float(atom_match.group(5)), float(atom_match.group(6))
-
-                if current_atom_idx not in ref_data["gradient_decomposition"]:
-                    ref_data["gradient_decomposition"][current_atom_idx] = {}
-                ref_data["gradient_decomposition"][current_atom_idx][comp] = {"x": gx, "y": gy, "z": gz}
+            # Split by pipe delimiter
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) < 4:
                 continue
 
-            # Match component line for the same atom
-            comp_match = re.match(r"^\s+([A-Za-z]+)\s+" + FLOAT_PATTERN + r"\s+" + FLOAT_PATTERN + r"\s+" + FLOAT_PATTERN, line)
-            if comp_match and current_atom_idx != -1:
-                comp = comp_match.group(1)
-                gx, gy, gz = float(comp_match.group(2)), float(comp_match.group(3)), float(comp_match.group(4))
-                ref_data["gradient_decomposition"][current_atom_idx][comp] = {"x": gx, "y": gy, "z": gz}
+            # First field: atom index (e.g. "1") or empty (continuation)
+            atom_field = parts[0].strip() if len(parts) > 0 else ""
+            # Second field: element type (e.g. "C") or empty
+            # Third field: component name (e.g. "Bond", "Angle")
+            comp_field = parts[2].strip() if len(parts) > 2 else ""
+            # Fourth field: gradient values (e.g. "  -0.00000000   0.00000000  -0.00000000  0.00000")
+            grad_field = parts[3].strip() if len(parts) > 3 else ""
+
+            if not comp_field or not grad_field:
+                continue
+
+            # Skip separator and header lines
+            if comp_field in ("Component", "--------"):
+                continue
+
+            # Parse atom index from first field (if present, this is a new atom)
+            if atom_field and atom_field.isdigit():
+                current_atom_idx = int(atom_field) - 1
+
+            if current_atom_idx < 0:
+                continue
+
+            # Parse gradient values from grad_field
+            floats = re.findall(FLOAT_PATTERN, grad_field)
+            if len(floats) >= 3:
+                gx, gy, gz = float(floats[0]), float(floats[1]), float(floats[2])
+                # Use string keys for JSON compatibility
+                atom_key = str(current_atom_idx)
+                if atom_key not in ref_data["gradient_decomposition"]:
+                    ref_data["gradient_decomposition"][atom_key] = {}
+                ref_data["gradient_decomposition"][atom_key][comp_field] = {"x": gx, "y": gy, "z": gz}
 
     return ref_data
 

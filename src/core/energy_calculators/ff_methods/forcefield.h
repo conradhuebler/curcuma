@@ -141,6 +141,19 @@ public:
 
     Eigen::MatrixXd NumGrad();
 
+    // Claude Generated (February 2026): Per-component gradient decomposition for validation
+    // Activates gradient component storage in all threads
+    void setStoreGradientComponents(bool store);
+    // Per-component gradient getters (summed across all threads)
+    Matrix GradientBond() const;
+    Matrix GradientAngle() const;
+    Matrix GradientTorsion() const;
+    Matrix GradientRepulsion() const;
+    Matrix GradientCoulomb() const;
+    Matrix GradientDispersion() const;
+    Matrix GradientHB() const;
+    Matrix GradientXB() const;
+
     // Claude Generated: Parameter analysis functionality
     void printParameterSummary() const;
 

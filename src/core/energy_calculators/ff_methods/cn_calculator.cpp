@@ -11,28 +11,25 @@
 #include <cmath>
 #include <algorithm>
 
-// Covalent radii from simple-dftd3 (Angstrom)
-// Reference: standard covalent radii, UNSCALED (common D3 implementations)
-// Note: previous versions used 4/3 scaled values here which caused redundant scaling
+// Covalent radii from Pyykkö & Atsumi (Chem. Eur. J. 15, 2009, 188-197) in Angstrom
+// Reference: gfnff_param.f90:381-405 (covalentRadD3 base values before *aatoau*4/3 scaling)
+// Used for D3 CN calculation (with 4/3 scaling applied in calculateGFNFFCN)
+// Claude Generated (Feb 16, 2026): Extended from 18 to 86 elements to fix Z>18 CN=0 bug
 const std::vector<double> CNCalculator::COVALENT_RADII = {
-    0.32,  // 1 H
-    0.46,  // 2 He
-    1.20,  // 3 Li
-    0.94,  // 4 Be
-    0.77,  // 5 B
-    0.75,  // 6 C
-    0.71,  // 7 N
-    0.63,  // 8 O
-    0.64,  // 9 F
-    0.67,  // 10 Ne
-    1.40,  // 11 Na
-    1.25,  // 12 Mg
-    1.13,  // 13 Al
-    1.04,  // 14 Si
-    1.10,  // 15 P
-    1.02,  // 16 S
-    0.99,  // 17 Cl
-    0.96   // 18 Ar
+    0.32, 0.46,                                                 // H, He
+    1.20, 0.94, 0.77, 0.75, 0.71, 0.63, 0.64, 0.67,           // Li-Ne
+    1.40, 1.25, 1.13, 1.04, 1.10, 1.02, 0.99, 0.96,           // Na-Ar
+    1.76, 1.54,                                                 // K, Ca
+    1.33, 1.22, 1.21, 1.10, 1.07, 1.04, 1.00, 0.99, 1.01, 1.09, // Sc-Zn
+    1.12, 1.09, 1.15, 1.10, 1.14, 1.17,                        // Ga-Kr
+    1.89, 1.67,                                                 // Rb, Sr
+    1.47, 1.39, 1.32, 1.24, 1.15, 1.13, 1.13, 1.08, 1.15, 1.23, // Y-Cd
+    1.28, 1.26, 1.26, 1.23, 1.32, 1.31,                        // In-Xe
+    2.09, 1.76,                                                 // Cs, Ba
+    1.62, 1.47, 1.58, 1.57, 1.56, 1.55, 1.51,                  // La-Eu
+    1.52, 1.51, 1.50, 1.49, 1.49, 1.48, 1.53,                  // Gd-Yb
+    1.46, 1.37, 1.31, 1.23, 1.18, 1.16, 1.11, 1.12, 1.13, 1.32, // Lu-Hg
+    1.30, 1.30, 1.36, 1.31, 1.38, 1.42                         // Tl-Rn
 };
 
 std::vector<double> CNCalculator::calculateD3CN(

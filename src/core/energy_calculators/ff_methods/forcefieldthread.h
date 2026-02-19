@@ -444,6 +444,9 @@ public:
         m_calculate_gradient = gradient;
         m_gradient = Eigen::MatrixXd::Zero(m_geometry.rows(), 3);
         m_dEdcn = Vector::Zero(m_geometry.rows());
+        if (m_store_gradient_components) {
+            initGradientComponents(m_geometry.rows());
+        }
     }
 
     inline void setGeometry(const Matrix& geometry, bool gradient)
@@ -452,6 +455,9 @@ public:
         m_calculate_gradient = gradient;
         m_gradient = Eigen::MatrixXd::Zero(m_geometry.rows(), 3);
         m_dEdcn = Vector::Zero(m_geometry.rows());
+        if (m_store_gradient_components) {
+            initGradientComponents(m_geometry.rows());
+        }
     }
 
     inline void setMethod(int method)
@@ -503,6 +509,21 @@ public:
     void setCoulombEnabled(bool enabled) { m_coulomb_enabled = enabled; }
 
     Matrix Gradient() const { return m_gradient; }
+
+    // Claude Generated (February 2026): Per-component gradient storage for validation
+    // Activated by setStoreGradientComponents(true) before calculation
+    void setStoreGradientComponents(bool store) { m_store_gradient_components = store; }
+    bool storeGradientComponents() const { return m_store_gradient_components; }
+
+    // Per-component gradient getters (only valid if m_store_gradient_components == true)
+    const Matrix& GradientBond() const { return m_gradient_bond; }
+    const Matrix& GradientAngle() const { return m_gradient_angle; }
+    const Matrix& GradientTorsion() const { return m_gradient_torsion; }
+    const Matrix& GradientRepulsion() const { return m_gradient_repulsion; }
+    const Matrix& GradientCoulomb() const { return m_gradient_coulomb; }
+    const Matrix& GradientDispersion() const { return m_gradient_dispersion; }
+    const Matrix& GradientHB() const { return m_gradient_hb; }
+    const Matrix& GradientXB() const { return m_gradient_xb; }
 
 private:
     void CalculateUFFBondContribution();
@@ -651,6 +672,23 @@ protected:
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
         m_term_timings[term_name] = duration.count();
+    }
+
+    // Claude Generated (February 2026): Per-component gradient decomposition for validation
+    bool m_store_gradient_components = false;
+    Matrix m_gradient_bond, m_gradient_angle, m_gradient_torsion;
+    Matrix m_gradient_repulsion, m_gradient_coulomb, m_gradient_dispersion;
+    Matrix m_gradient_hb, m_gradient_xb;
+
+    void initGradientComponents(int natoms) {
+        m_gradient_bond = Eigen::MatrixXd::Zero(natoms, 3);
+        m_gradient_angle = Eigen::MatrixXd::Zero(natoms, 3);
+        m_gradient_torsion = Eigen::MatrixXd::Zero(natoms, 3);
+        m_gradient_repulsion = Eigen::MatrixXd::Zero(natoms, 3);
+        m_gradient_coulomb = Eigen::MatrixXd::Zero(natoms, 3);
+        m_gradient_dispersion = Eigen::MatrixXd::Zero(natoms, 3);
+        m_gradient_hb = Eigen::MatrixXd::Zero(natoms, 3);
+        m_gradient_xb = Eigen::MatrixXd::Zero(natoms, 3);
     }
 
     // Phase 1.2: Cached bonded pairs for fast lookup in repulsion calculation (Claude Generated - Dec 2025)

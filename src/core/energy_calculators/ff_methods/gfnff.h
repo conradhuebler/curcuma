@@ -1293,6 +1293,30 @@ public:
     double ATMEnergy() const;
 
     // =================================================================================
+    // Per-Component Gradient Decomposition (Claude Generated February 2026)
+    // =================================================================================
+
+    /**
+     * @brief Enable per-component gradient storage for validation
+     * @param store true to activate component gradient accumulation
+     *
+     * When enabled, each energy term's gradient contribution is stored separately
+     * in addition to the total gradient. Adds ~15% overhead due to matrix snapshots.
+     * Only use for validation, not for production MD/optimization.
+     */
+    void setStoreGradientComponents(bool store);
+
+    /// Per-component gradient getters (Bohr units, same as ForceField internal)
+    Matrix GradientBond() const;
+    Matrix GradientAngle() const;
+    Matrix GradientTorsion() const;
+    Matrix GradientRepulsion() const;
+    Matrix GradientCoulomb() const;
+    Matrix GradientDispersion() const;
+    Matrix GradientHB() const;
+    Matrix GradientXB() const;
+
+    // =================================================================================
     // vbond Parameter Access for Verification (Claude Generated November 2025)
     // =================================================================================
 

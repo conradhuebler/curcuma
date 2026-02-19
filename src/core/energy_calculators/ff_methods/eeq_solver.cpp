@@ -1729,6 +1729,8 @@ Vector EEQSolver::calculateFinalCharges(
     const int natoms = atoms.size();
     const double TSQRT2PI = 0.797884560802866;  // sqrt(2/π)
 
+
+
     // CRITICAL FIX (Jan 4, 2026): Only use corrections if explicitly requested
     // gfnff_final.cpp achieves 0.0000025 e accuracy using ONLY base parameters (NO dxi, NO dgam)
     // Curcuma's complex corrections add noise instead of improving accuracy

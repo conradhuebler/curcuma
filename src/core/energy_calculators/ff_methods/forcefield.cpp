@@ -2372,6 +2372,37 @@ double ForceField::Calculate(bool gradient)
     return energy;
 }
 
+// Claude Generated (February 2026): Per-component gradient decomposition for validation
+void ForceField::setStoreGradientComponents(bool store)
+{
+    for (auto* thread : m_stored_threads) {
+        thread->setStoreGradientComponents(store);
+    }
+}
+
+// Helper to sum a component gradient across all threads
+static Matrix sumComponentGradient(const std::vector<ForceFieldThread*>& threads,
+                                    const Matrix& (ForceFieldThread::*getter)() const,
+                                    int natoms)
+{
+    Matrix result = Eigen::MatrixXd::Zero(natoms, 3);
+    for (const auto* thread : threads) {
+        if (thread->storeGradientComponents()) {
+            result += (thread->*getter)();
+        }
+    }
+    return result;
+}
+
+Matrix ForceField::GradientBond() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientBond, m_natoms); }
+Matrix ForceField::GradientAngle() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientAngle, m_natoms); }
+Matrix ForceField::GradientTorsion() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientTorsion, m_natoms); }
+Matrix ForceField::GradientRepulsion() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientRepulsion, m_natoms); }
+Matrix ForceField::GradientCoulomb() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientCoulomb, m_natoms); }
+Matrix ForceField::GradientDispersion() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientDispersion, m_natoms); }
+Matrix ForceField::GradientHB() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientHB, m_natoms); }
+Matrix ForceField::GradientXB() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientXB, m_natoms); }
+
 // Claude Generated: Print comprehensive parameter summary
 void ForceField::printParameterSummary() const
 {

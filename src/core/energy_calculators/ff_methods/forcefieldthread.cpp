@@ -113,46 +113,58 @@ int ForceFieldThread::execute()
         }
 
         // Claude Generated (February 2026): Wrap all energy term calculations with timing
+        // When m_store_gradient_components is active, capture gradient delta per term
+
+        // Helper lambda: run calculation and capture gradient delta into component matrix
+        // This avoids modifying every inner Calculate*() method individually
+        auto runWithGradCapture = [this](const std::string& name, auto calc_fn, Matrix& comp_grad) {
+            if (m_store_gradient_components && m_calculate_gradient) {
+                Matrix before = m_gradient;
+                timeEnergyTerm(name, calc_fn);
+                comp_grad += (m_gradient - before);
+            } else {
+                timeEnergyTerm(name, calc_fn);
+            }
+        };
+
         // GFN-FF bonded terms
-        timeEnergyTerm("bonds", [this]() { CalculateGFNFFBondContribution(); });
-        timeEnergyTerm("angles", [this]() { CalculateGFNFFAngleContribution(); });
-        timeEnergyTerm("torsions", [this]() { CalculateGFNFFDihedralContribution(); });
-        timeEnergyTerm("extra_torsions", [this]() { CalculateGFNFFExtraTorsionContribution(); });
-        timeEnergyTerm("inversions", [this]() { CalculateGFNFFInversionContribution(); });
+        runWithGradCapture("bonds", [this]() { CalculateGFNFFBondContribution(); }, m_gradient_bond);
+        runWithGradCapture("angles", [this]() { CalculateGFNFFAngleContribution(); }, m_gradient_angle);
+        runWithGradCapture("torsions", [this]() { CalculateGFNFFDihedralContribution(); }, m_gradient_torsion);
+        runWithGradCapture("extra_torsions", [this]() { CalculateGFNFFExtraTorsionContribution(); }, m_gradient_torsion);
+        runWithGradCapture("inversions", [this]() { CalculateGFNFFInversionContribution(); }, m_gradient_torsion);
 
         // GFN-FF non-bonded pairwise parallelizable terms (Phase 4)
         if (m_dispersion_enabled) {
-            timeEnergyTerm("dispersion", [this]() { CalculateGFNFFDispersionContribution(); });
+            runWithGradCapture("dispersion", [this]() { CalculateGFNFFDispersionContribution(); }, m_gradient_dispersion);
         }
         if (m_repulsion_enabled) {
-            timeEnergyTerm("bonded_repulsion", [this]() { CalculateGFNFFBondedRepulsionContribution(); });
-            timeEnergyTerm("nonbonded_repulsion", [this]() { CalculateGFNFFNonbondedRepulsionContribution(); });
+            runWithGradCapture("bonded_repulsion", [this]() { CalculateGFNFFBondedRepulsionContribution(); }, m_gradient_repulsion);
+            runWithGradCapture("nonbonded_repulsion", [this]() { CalculateGFNFFNonbondedRepulsionContribution(); }, m_gradient_repulsion);
         }
         if (m_coulomb_enabled) {
-            timeEnergyTerm("coulomb", [this]() { CalculateGFNFFCoulombContribution(); });
+            runWithGradCapture("coulomb", [this]() { CalculateGFNFFCoulombContribution(); }, m_gradient_coulomb);
         }
 
         // GFN-FF hydrogen bond and halogen bond terms (Phase 5)
         if (m_hbond_enabled) {
-            timeEnergyTerm("hydrogen_bonds", [this]() { CalculateGFNFFHydrogenBondContribution(); });
-            timeEnergyTerm("halogen_bonds", [this]() { CalculateGFNFFHalogenBondContribution(); });
+            runWithGradCapture("hydrogen_bonds", [this]() { CalculateGFNFFHydrogenBondContribution(); }, m_gradient_hb);
+            runWithGradCapture("halogen_bonds", [this]() { CalculateGFNFFHalogenBondContribution(); }, m_gradient_xb);
         }
 
         // Claude Generated (December 19, 2025): Native D3/D4 dispersion calculation for GFN-FF
-        // Note: GFN-FF uses its own dispersion (CalculateGFNFFDispersionContribution above)
-        // D3/D4 are additional corrections that can be enabled separately
         if (m_d3_dispersions.size() > 0) {
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} D3 dispersion pairs", m_thread, m_d3_dispersions.size()));
             }
-            timeEnergyTerm("d3_dispersion", [this]() { CalculateD3DispersionContribution(); });
+            runWithGradCapture("d3_dispersion", [this]() { CalculateD3DispersionContribution(); }, m_gradient_dispersion);
         }
 
         if (m_d4_dispersions.size() > 0) {
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} D4 dispersion pairs", m_thread, m_d4_dispersions.size()));
             }
-            timeEnergyTerm("d4_dispersion", [this]() { CalculateD4DispersionContribution(); });
+            runWithGradCapture("d4_dispersion", [this]() { CalculateD4DispersionContribution(); }, m_gradient_dispersion);
         }
 
         // ATM three-body dispersion (D3/D4)
@@ -160,22 +172,20 @@ int ForceFieldThread::execute()
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} ATM triples", m_thread, m_atm_triples.size()));
             }
-            timeEnergyTerm("atm_dispersion", [this]() {
+            runWithGradCapture("atm_dispersion", [this]() {
                 CalculateATMContribution();
-                // Claude Generated (2025): Calculate analytical ATM gradients
                 if (m_calculate_gradient) {
                     CalculateATMGradient();
                 }
-            });
+            }, m_gradient_dispersion);
         }
 
         // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
-        // GFN-FF bonded ATM (batm) calculation for 1,4-pairs
         if (!m_gfnff_batms.empty()) {
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} batm triples", m_thread, m_gfnff_batms.size()));
             }
-            timeEnergyTerm("batm", [this]() { CalculateGFNFFBatmContribution(); });
+            runWithGradCapture("batm", [this]() { CalculateGFNFFBatmContribution(); }, m_gradient_dispersion);
         }
 
         if (CurcumaLogger::get_verbosity() >= 1) {
@@ -865,16 +875,6 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
             // E = k_b * exp(-α*dr²) where k_b < 0 (attractive)
             // dE/dr = k_b * (-2α*dr) * exp(-α*dr²) = -2α * dr * E
             double dEdr = -2.0 * alpha * dr * energy;  // Correct sign
-            // DEBUG: Print first bond gradient details
-            if (index == 0 && CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format(
-                    "GRAD DEBUG Bond {}-{}: rij={:.6f}, r0={:.6f}, dr={:.6f}, E={:.8f}, dEdr={:.8f}",
-                    bond.i, bond.j, rij, r0_ij, dr, energy, dEdr));
-                CurcumaLogger::info(fmt::format(
-                    "  derivate[0]=[{:.4f},{:.4f},{:.4f}], derivate[1]=[{:.4f},{:.4f},{:.4f}]",
-                    derivate(0,0), derivate(0,1), derivate(0,2),
-                    derivate(1,0), derivate(1,1), derivate(1,2)));
-            }
             m_gradient.row(bond.i) += dEdr * factor * derivate.row(0);
             m_gradient.row(bond.j) += dEdr * factor * derivate.row(1);
 
@@ -1616,32 +1616,71 @@ void ForceFieldThread::CalculateGFNFFInversionContribution()
         // Energy calculation
         // =====================================================================
         double V = inv.fc;
-        double energy = 0.0;
-        double dEdomega = 0.0;
+        double et = 0.0;       // Energy before damping (needed for damping gradient)
+        double dEdomega = 0.0; // dE/domega including damp factor
 
         if (inv.potential_type == 0) {
-            // Planar sp2: E = V*(1 + cos(omega + pi)) * damp = V*(1 - cos(omega)) * damp
-            // Reference: gfnff_engrad.F90:1383-1385
-            energy = V * (1.0 - cos(omega)) * damp;
+            // Planar sp2: E = V*(1 - cos(omega)) * damp
+            // Reference: gfnff_engrad.F90:1373-1374
+            et = V * (1.0 - cos(omega));
             dEdomega = V * sin(omega) * damp;
         } else {
             // Saturated N (double minima at ±omega0):
             // E = V*(cos(omega) - cos(omega0))^2 * damp
-            // Reference: gfnff_engrad.F90:1386-1387
+            // Reference: gfnff_engrad.F90:1376-1377
             double diff = cos(omega) - cos(inv.omega0);
-            energy = V * diff * diff * damp;
+            et = V * diff * diff;
             dEdomega = -2.0 * V * sin(omega) * diff * damp;
         }
 
+        double energy = et * damp;
         m_inversion_energy += energy * m_final_factor * m_inversion_scaling;
 
         if (m_calculate_gradient) {
+            // =====================================================================
+            // PART 1: Omega derivative term (dij * dda/ddb/ddc/ddd)
+            // =====================================================================
             double grad_scale = dEdomega * m_final_factor * m_inversion_scaling;
-            m_gradient.row(inv.i) += grad_scale * derivate.row(0);
-            m_gradient.row(inv.j) += grad_scale * derivate.row(1);
-            m_gradient.row(inv.k) += grad_scale * derivate.row(2);
-            m_gradient.row(inv.l) += grad_scale * derivate.row(3);
-            // Note: damping gradient terms omitted for now (second-order correction)
+
+            // =====================================================================
+            // PART 2: Damping derivative terms (Fortran gfnff_engrad.F90:1379-1385)
+            // =====================================================================
+            // ddamp = d(damp)/d(r²) with factor of 2 built in:
+            //   ddamp = -4*rr / (r² * (1+rr)²)
+            // Matches Fortran gfnffdampt subroutine (gfnff_engrad.F90:1501-1510)
+            auto calc_ddamp = [](double r2_val, double rcov_a, double rcov_b) -> double {
+                if (r2_val < 1e-8) return 0.0;
+                double rcut_val = GFNFFParameters::atcutt * (rcov_a + rcov_b) * (rcov_a + rcov_b);
+                double rr_val = (r2_val / rcut_val) * (r2_val / rcut_val);
+                double one_plus_rr = 1.0 + rr_val;
+                return -4.0 * rr_val / (r2_val * one_plus_rr * one_plus_rr);
+            };
+
+            double ddamp_ij = calc_ddamp(rij_sq, rcov_c, rcov_1);
+            double ddamp_jk = calc_ddamp(rjk_sq, rcov_2, rcov_1);
+            double ddamp_jl = calc_ddamp(rjl_sq, rcov_1, rcov_3);
+
+            // Damping vectors (same as energy: nb1 is hub)
+            Eigen::Vector3d vab = r_nb1 - r_center;  // j - i
+            Eigen::Vector3d vcb = r_nb1 - r_nb2;     // j - k
+            Eigen::Vector3d vdc = r_nb1 - r_nb3;     // j - l
+
+            // Fortran gfnff_engrad.F90:1379-1381
+            Eigen::Vector3d term1 = (et * ddamp_ij * damp_jk * damp_jl) * vab;
+            Eigen::Vector3d term2 = (et * ddamp_jk * damp_ij * damp_jl) * vcb;
+            Eigen::Vector3d term3 = (et * ddamp_jl * damp_ij * damp_jk) * vdc;
+
+            double t_scal = m_final_factor * m_inversion_scaling;
+
+            // Fortran gfnff_engrad.F90:1382-1385 (inversion gradient distribution)
+            // g(:,1) = dij*dda - term1               ← center
+            // g(:,2) = dij*ddb + term1 + term2 + term3  ← nb1 (hub)
+            // g(:,3) = dij*ddc - term2               ← nb2
+            // g(:,4) = dij*ddd - term3               ← nb3
+            m_gradient.row(inv.i) += (grad_scale * derivate.row(0)).transpose() - term1 * t_scal;
+            m_gradient.row(inv.j) += (grad_scale * derivate.row(1)).transpose() + (term1 + term2 + term3) * t_scal;
+            m_gradient.row(inv.k) += (grad_scale * derivate.row(2)).transpose() - term2 * t_scal;
+            m_gradient.row(inv.l) += (grad_scale * derivate.row(3)).transpose() - term3 * t_scal;
         }
     }
 }

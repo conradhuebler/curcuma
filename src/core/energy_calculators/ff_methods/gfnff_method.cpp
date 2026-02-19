@@ -3152,14 +3152,24 @@ std::vector<Matrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector& 
     const double kn = -7.5;         // Error function steepness parameter
     const double cnmax = 4.4;       // Maximum coordination number cutoff
     const double sqrtpi = 1.77245385091;  // sqrt(π) for derivative formula
+    const double ANG2BOHR = 1.8897259886;
+    const double k_scaled = 4.0 / 3.0;   // Pyykkö radius scaling (gfnff_param.f90:405)
 
     // Initialize 3D tensor as vector of matrices
     // dcn[0] = ∂logCN/∂x, dcn[1] = ∂logCN/∂y, dcn[2] = ∂logCN/∂z
     std::vector<Matrix> dcn(3, Matrix::Zero(m_atomcount, m_atomcount));
 
-    // Step 1: Compute raw CN from input logCN by inverting the transformation
-    // logCN = log(1 + e^cnmax) - log(1 + e^(cnmax - cn_raw))
-    // Solving for cn_raw is complex, so we'll recalculate raw CN
+    // Pre-compute covalent radii in Bohr with 4/3 scaling (same as CN energy function)
+    // CRITICAL FIX (Feb 16, 2026): Must use covalentRadD3*4/3 (Pyykkö radii), NOT r0_gfnff (bond radii)!
+    // r0_gfnff are bond base radii from gfnff_rab.f90, completely different from CN covalent radii.
+    // For H: r0_gfnff=0.557 Bohr vs covalentRadD3=0.806 Bohr (31% error was corrupting all dCN/dx)
+    // Reference: Fortran gfnff_cn.f90:85 uses param%rcov which is covalentRadD3(1:86)
+    std::vector<double> rcov_bohr(m_atomcount);
+    for (int i = 0; i < m_atomcount; ++i) {
+        rcov_bohr[i] = k_scaled * CNCalculator::getCovalentRadius(m_atoms[i]) * ANG2BOHR;
+    }
+
+    // Step 1: Compute raw CN (recalculate from geometry, same formula as calculateGFNFFCN)
     Vector cn_raw = Vector::Zero(m_atomcount);
     for (int i = 0; i < m_atomcount; ++i) {
         double cn_i = 0.0;
@@ -3170,18 +3180,11 @@ std::vector<Matrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector& 
             Vector rj = m_geometry_bohr.row(j);
             double distance_sq = (ri - rj).squaredNorm();
 
-            // CRITICAL FIX: threshold is already squared, must compare squared distances
             if (distance_sq > threshold) continue;
 
             double distance = std::sqrt(distance_sq);
 
-            // CRITICAL FIX: Use r0_gfnff (already in Bohr), NOT covalent_radii (Angström)
-            using namespace GFNFFParameters;
-            double rcov_i = (m_atoms[i] >= 1 && m_atoms[i] <= static_cast<int>(r0_gfnff.size()))
-                            ? r0_gfnff[m_atoms[i] - 1] : 2.0;
-            double rcov_j = (m_atoms[j] >= 1 && m_atoms[j] <= static_cast<int>(r0_gfnff.size()))
-                            ? r0_gfnff[m_atoms[j] - 1] : 2.0;
-            double r_cov = rcov_i + rcov_j;
+            double r_cov = rcov_bohr[i] + rcov_bohr[j];
 
             double dr = (distance - r_cov) / r_cov;
             double erfCN = 0.5 * (1.0 + std::erf(kn * dr));
@@ -3193,35 +3196,26 @@ std::vector<Matrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector& 
     // Step 2: Calculate dlogCN/dcn for each atom (Fortran create_dlogCN)
     Vector dlogdcn = Vector::Zero(m_atomcount);
     for (int i = 0; i < m_atomcount; ++i) {
-        // dlogCN/dcn = e^cnmax / (e^cnmax + e^cn_raw)
         dlogdcn[i] = std::exp(cnmax) / (std::exp(cnmax) + std::exp(cn_raw[i]));
     }
 
     // Step 3: Calculate derivatives for all atom pairs
     for (int i = 0; i < m_atomcount; ++i) {
         Vector ri = m_geometry_bohr.row(i);
-        // CRITICAL FIX: Use r0_gfnff (already in Bohr), NOT covalent_radii (Angström)
-        using namespace GFNFFParameters;
-        double rcov_i = (m_atoms[i] >= 1 && m_atoms[i] <= static_cast<int>(r0_gfnff.size()))
-                        ? r0_gfnff[m_atoms[i] - 1] : 2.0;
         double dlogdcn_i = dlogdcn[i];
 
         for (int j = 0; j < i; ++j) {  // Only j < i to avoid double counting
             Vector rj = m_geometry_bohr.row(j);
-            // CRITICAL FIX: Use r0_gfnff (already in Bohr), NOT covalent_radii (Angström)
-            double rcov_j = (m_atoms[j] >= 1 && m_atoms[j] <= static_cast<int>(r0_gfnff.size()))
-                            ? r0_gfnff[m_atoms[j] - 1] : 2.0;
 
             // Distance and direction
             Vector r_ij_vec = rj - ri;
             double r_ij_sq = r_ij_vec.squaredNorm();
 
-            // CRITICAL FIX: threshold is already squared, must compare squared distances
             if (r_ij_sq > threshold) continue;
 
             double r_ij = std::sqrt(r_ij_sq);
 
-            double rcov_sum = rcov_i + rcov_j;
+            double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
 
             // Error function CN derivative (Fortran create_derfCN)
             // derfCN/dr = (kn / sqrt(π)) * exp(-kn² * dr²) / r0
@@ -3243,9 +3237,13 @@ std::vector<Matrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector& 
                 dcn[dim](j, j) += dlogdcn_j * rij_component;
                 dcn[dim](i, i) -= dlogdcn_i * rij_component;
 
-                // ∂logCN_j/∂r_i and ∂logCN_i/∂r_j (off-diagonal terms)
-                dcn[dim](j, i) = -dlogdcn_j * rij_component;
-                dcn[dim](i, j) = dlogdcn_i * rij_component;
+                // Off-diagonal terms: dcn(row,col) = ∂CN_col/∂x_row
+                // CRITICAL FIX (Feb 16, 2026): Off-diagonals were SWAPPED!
+                // Fortran gfnff_cn.f90:113-114:
+                //   dlogCN(:,i,j) = -dlogdcnj*rij  → dcn(i,j) = ∂CN_j/∂x_i
+                //   dlogCN(:,j,i) =  dlogdcni*rij  → dcn(j,i) = ∂CN_i/∂x_j
+                dcn[dim](i, j) = -dlogdcn_j * rij_component;  // ∂CN_j/∂x_i
+                dcn[dim](j, i) = dlogdcn_i * rij_component;   // ∂CN_i/∂x_j
             }
         }
     }
@@ -6627,6 +6625,23 @@ double GFNFF::ATMEnergy() const {
 }
 
 // =================================================================================
+// Per-Component Gradient Decomposition (Claude Generated February 2026)
+// =================================================================================
+
+void GFNFF::setStoreGradientComponents(bool store) {
+    if (m_forcefield) m_forcefield->setStoreGradientComponents(store);
+}
+
+Matrix GFNFF::GradientBond() const { return m_forcefield ? m_forcefield->GradientBond() : Matrix(); }
+Matrix GFNFF::GradientAngle() const { return m_forcefield ? m_forcefield->GradientAngle() : Matrix(); }
+Matrix GFNFF::GradientTorsion() const { return m_forcefield ? m_forcefield->GradientTorsion() : Matrix(); }
+Matrix GFNFF::GradientRepulsion() const { return m_forcefield ? m_forcefield->GradientRepulsion() : Matrix(); }
+Matrix GFNFF::GradientCoulomb() const { return m_forcefield ? m_forcefield->GradientCoulomb() : Matrix(); }
+Matrix GFNFF::GradientDispersion() const { return m_forcefield ? m_forcefield->GradientDispersion() : Matrix(); }
+Matrix GFNFF::GradientHB() const { return m_forcefield ? m_forcefield->GradientHB() : Matrix(); }
+Matrix GFNFF::GradientXB() const { return m_forcefield ? m_forcefield->GradientXB() : Matrix(); }
+
+// =================================================================================
 // Charge Injection for Testing/Validation (Claude Generated December 2025)
 // =================================================================================
 
@@ -7068,26 +7083,27 @@ bool GFNFF::calculateDxi(TopologyInfo& topo_info) const
             }
         }
 
-        // ===== Oxygen/Sulfur (Group 6): -0.005 per H neighbor (gfnff_ini.f90:394) =====
-        // This is the CRITICAL correction that distinguishes ether O (nh=0) from hydroxyl O (nh=1)
-        if (ati == 8 || ati == 16) {  // O or S
-            if (nh > 0) {
-                dxi_total -= nh * 0.005;
-            }
-            // Also: hypervalent O/S with nn > 2 (gfnff_ini.f90:393)
-            if (nn > 2) {
-                dxi_total += nn * 0.005;
-            }
-        }
-
         // ===== Boron: +0.015 per H neighbor (gfnff_ini.f90:377) =====
         if (ati == 5 && nh > 0) {
             dxi_total += nh * 0.015;
         }
 
         // ===== H2O: special case (gfnff_ini.f90:392) =====
+        // Applied BEFORE the O/S-H correction (line 394) which then adds on top
         if (ati == 8 && nn == 2 && nh == 2) {
             dxi_total = -0.02;  // Override other corrections for water
+        }
+
+        // ===== Oxygen/Sulfur (Group 6): -0.005 per H neighbor (gfnff_ini.f90:394) =====
+        // Applied AFTER H2O override (Fortran line 394 runs after line 392)
+        // Distinguishes: ether O (nh=0, dxi=0), hydroxyl O (nh=1, dxi=-0.005),
+        //                H2O (nh=2, dxi=-0.02-0.010=-0.030)
+        if (ati == 8 || ati == 16) {  // O or S
+            dxi_total -= nh * 0.005;
+            // Also: hypervalent O/S with nn > 2 (gfnff_ini.f90:393)
+            if (nn > 2) {
+                dxi_total += nn * 0.005;
+            }
         }
 
         dxi(i) = dxi_total;
