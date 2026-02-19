@@ -2423,125 +2423,203 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
         }
 
         // ========== ANALYTICAL GRADIENT CALCULATION ==========
-        // Reference: gfnff_engrad.F90 - abhgfnff_eg1() lines 1501-1557
-        // Claude Generated (2025): Phase 6 - HB analytical gradients (Updated for Case 2/3)
+        // REWRITTEN (Feb 19, 2026): Direct translation from Fortran gfnff_engrad.F90
+        //   Case 1: abhgfnff_eg1() lines 1692-1853
+        //   Case 2: abhgfnff_eg2new() lines 1856-2087
+        // Previous implementation had 3 bugs:
+        //   1. Short damping derivative sign error (positive → negative)
+        //   2. Long damping derivative magnitude error (factor rab²/longcut)
+        //   3. Missing neighbor out-of-line gradient terms (case >= 2)
         if (m_calculate_gradient) {
-            // --- 1. Compute Energy Derivative Components ---
+            // Fortran distance vectors: drab = xyz(A)-xyz(B), drah = xyz(A)-xyz(H), drbh = xyz(B)-xyz(H)
+            // Curcuma vectors: r_AH_vec = H-A, r_HB_vec = B-H, r_AB_vec = B-A
+            Eigen::Vector3d drab = -r_AB_vec;  // A - B (Fortran convention)
+            Eigen::Vector3d drah = -r_AH_vec;  // A - H (Fortran convention)
+            Eigen::Vector3d drbh =  r_HB_vec;  // B - H (same as Fortran)
 
-            // ∂B_AH/∂r_AH and ∂B_AH/∂r_HB (donor-acceptor mixing term derivatives)
-            double r_AH_3 = r_AH * r_AH * r_AH;
-            double r_HB_3 = r_HB * r_HB * r_HB;
-            double denominator = r_AH_4 + r_HB_4;
-            double denominator_sq = denominator * denominator;
+            double rab2 = r_AB * r_AB;
+            double rbh2 = r_HB * r_HB;
+            double rah2 = r_AH * r_AH;
+            double rahprbh = r_AH + r_HB + 1e-12;
 
-            double dB_drAH = 4.0 * r_AH_3 * (hb.basicity_A * r_HB_4 - hb.basicity_B * r_AH_4) / denominator_sq;
-            double dB_drHB = 4.0 * r_HB_3 * (hb.basicity_B * r_AH_4 - hb.basicity_A * r_HB_4) / denominator_sq;
+            // Recompute damping intermediates for gradient
+            // Fortran: ratio1 = (rab2/hblongcut)^hbalp, ratio3 = (shortcut/rab2)^hbalp
+            double ratio1 = std::pow(rab2 / HB_LONGCUT, HB_ALP);
+            double shortcut = HB_SCUT * r_vdw_AB;
+            double ratio3 = std::pow(shortcut / rab2, HB_ALP);
+            // ddamp = rab * d(ln(damp))/d(rab), exactly Fortran gfnff_engrad.F90:1969
+            double ddamp = (-2.0 * HB_ALP * ratio1 / (1.0 + ratio1))
+                         + ( 2.0 * HB_ALP * ratio3 / (1.0 + ratio3));
 
-            // ∂(damping)/∂r derivatives
-            double ratio_short_g = HB_SCUT * r_vdw_AB / (r_AB * r_AB);
-            double damp_short_term = std::pow(ratio_short_g, HB_ALP);
-            double ddamp_short_dr = -2.0 * HB_ALP * damp_short * damp_short_term / (r_AB * (1.0 + damp_short_term));
+            // Recompute out-of-line intermediates for gradient
+            // Fortran: expo = (hbacut/radab)*(rahprbh/rab - 1)
+            double expo = (HB_BACUT / r_vdw_AB) * (rahprbh / r_AB - 1.0);
+            double ratio2 = std::exp(expo);  // Fortran ratio2 = exp(expo) for outl
 
-            double ratio_long_g = (r_AB * r_AB) / HB_LONGCUT;
-            double damp_long_term = std::pow(ratio_long_g, HB_ALP);
-            double ddamp_long_dr = -2.0 * HB_ALP * r_AB * damp_long * damp_long_term / (HB_LONGCUT * (1.0 + damp_long_term));
-
-            // FIX (Jan 18, 2026): Use r_vdw_AB (radab) for out-of-line damping derivatives
-            // Reference: gfnff_engrad.F90:1671,1758,1764
-            double ratio_outl = (r_AH + r_HB) / r_AB;
-            double scale_outl = HB_BACUT / r_vdw_AB;  // FIX: Use radab, not r_AB
-            double exponent_outl = scale_outl * (ratio_outl - 1.0);
-            double exp_term_outl = std::exp(exponent_outl);
-            double denom_outl = 1.0 + exp_term_outl;
-
-            // Derivatives of outl = 2/(1+exp(expo)) where expo = scale_outl * ((r_AH+r_HB)/r_AB - 1)
-            // d(expo)/d(r_AH) = scale_outl / r_AB
-            // d(outl)/d(expo) = -2 * exp(expo) / (1+exp(expo))^2
-            double ddamp_outl_drAH = -2.0 * exp_term_outl * scale_outl / (r_AB * denom_outl * denom_outl);
-            double ddamp_outl_drHB = ddamp_outl_drAH;
-            // d(expo)/d(r_AB) = -scale_outl * (r_AH + r_HB) / r_AB^2
-            double ddamp_outl_drAB = 2.0 * exp_term_outl * scale_outl * (r_AH + r_HB) / (r_AB * r_AB * denom_outl * denom_outl);
-
-            // ∂aci/∂r_AH and ∂aci/∂r_HB (acidity mixing term derivatives)
-            double daci_drAH = 4.0 * r_AH_3 * (hb.acidity_B * r_HB_4 - hb.acidity_A * r_AH_4) / denominator_sq;
-            double daci_drHB = 4.0 * r_HB_3 * (hb.acidity_A * r_AH_4 - hb.acidity_B * r_HB_4) / denominator_sq;
-
-            // ∂(damping)/∂r derivatives
-            double dRdamp_drAB, dRdamp_drAH, dRdamp_drHB;
-
-            // Damping part: damp_env = damp_short * damp_long
-            double ddamp_env_drAB = ddamp_short_dr * damp_long + damp_short * ddamp_long_dr;
+            Eigen::Vector3d ga = Eigen::Vector3d::Zero();
+            Eigen::Vector3d gb = Eigen::Vector3d::Zero();
+            Eigen::Vector3d gh = Eigen::Vector3d::Zero();
 
             if (hb.case_type >= 2) {
-                // R_damp = damp_env * (1.8/r_HB^3 - 0.8/r_AB^3)
-                double term1 = 1.8 / (r_HB * r_HB * r_HB);
-                double term2 = -0.8 / (r_AB * r_AB * r_AB);
-                double diff = term1 + term2;
+                // ===== Case 2/3: abhgfnff_eg2new gradient (lines 1997-2086) =====
+                double p_bh = 1.8;   // 1 + hbabmix (hbabmix = 0.8)
+                double p_ab = -0.8;  // -hbabmix
+                double rbhdamp = damp_env * p_bh / (rbh2 * r_HB);
+                double rabdamp = damp_env * p_ab / (rab2 * r_AB);
 
-                double ddiff_drHB = -3.0 * term1 / r_HB;
-                double ddiff_drAB = -3.0 * term2 / r_AB;
+                double const_val = hb.acidity_A * hb.basicity_B * Q_A * Q_B * global_scale;
+                // Fortran terms: aterm, dterm, nbterm
+                double dterm  = -qhoutl * const_val * multipl;
+                double aterm  = -rdamp * Q_H * outl_nb_tot * const_val * multipl;
+                double nbterm = -rdamp * Q_H * damp_outl * const_val * multipl;
 
-                dRdamp_drAB = (diff * ddamp_env_drAB + ddiff_drAB * damp_env);
-                dRdamp_drAH = 0.0; // damp_env doesn't depend on r_AH
-                dRdamp_drHB = (ddiff_drHB * damp_env);
+                // --- Damping part: rab (Fortran lines 2008-2012) ---
+                double gi = ((rabdamp + rbhdamp) * ddamp - 3.0 * rabdamp) / rab2;
+                gi *= dterm;
+                Eigen::Vector3d dg = gi * drab;
+                ga = dg;
+                gb = -dg;
+
+                // --- Damping part: rbh (Fortran lines 2016-2020) ---
+                gi = -3.0 * rbhdamp / rbh2;
+                gi *= dterm;
+                dg = gi * drbh;
+                gb += dg;
+                gh = -dg;
+
+                // --- Out-of-line: rab (Fortran lines 2026-2030) ---
+                double tmp1 = -2.0 * aterm * ratio2 * expo
+                            / ((1.0 + ratio2) * (1.0 + ratio2))
+                            / (rahprbh - r_AB);
+                gi = -tmp1 * rahprbh / rab2;
+                dg = gi * drab;
+                ga += dg;
+                gb -= dg;
+
+                // --- Out-of-line: rah, rbh (Fortran lines 2033-2040) ---
+                gi = tmp1 / r_AH;
+                Eigen::Vector3d dga_outl = gi * drah;
+                ga += dga_outl;
+                gi = tmp1 / r_HB;
+                Eigen::Vector3d dgb_outl = gi * drbh;
+                gb += dgb_outl;
+                Eigen::Vector3d dgh_outl = -dga_outl - dgb_outl;
+                gh += dgh_outl;
+
+                // --- Neighbor out-of-line: rab + ranb/rbnb (Fortran lines 2047-2068) ---
+                // Previously MISSING - causes significant gradient error
+                double hbnbcut_save = (elem_B == 7 && hb.neighbors_B.size() == 1) ? 2.0 : HB_NBCUT;
+                for (size_t idx = 0; idx < hb.neighbors_B.size(); ++idx) {
+                    int nb = hb.neighbors_B[idx];
+                    Eigen::Vector3d pos_nb = m_geometry.row(nb).transpose();
+                    Eigen::Vector3d dranb = pos_A - pos_nb;  // A - nb (Fortran convention)
+                    Eigen::Vector3d drbnb = pos_B - pos_nb;  // B - nb (Fortran convention)
+                    double ranb = dranb.norm();
+                    double rbnb = drbnb.norm();
+                    double ranbprbnb = ranb + rbnb + 1e-12;
+
+                    // Recompute this neighbor's outl_nb and expo_nb
+                    double expo_nb_i = (hbnbcut_save / r_vdw_AB) * (ranbprbnb / r_AB - 1.0);
+                    double ratio2_nb_i = std::exp(-expo_nb_i);
+                    double outl_nb_i = 2.0 / (1.0 + ratio2_nb_i) - 1.0;
+
+                    // Product of all OTHER outl_nb values (Fortran: product(outl_nb, mask))
+                    double outl_nb_others = 1.0;
+                    if (std::abs(outl_nb_i) > 1e-12) {
+                        outl_nb_others = outl_nb_tot / outl_nb_i;
+                    }
+
+                    // Fortran: tmp2 = 2*nbterm*product(outl_nb,mask)*ratio2_nb*expo_nb /
+                    //                  (1+ratio2_nb)^2 / (ranbprbnb - rab)
+                    double tmp2 = 2.0 * nbterm * outl_nb_others * ratio2_nb_i * expo_nb_i
+                                / ((1.0 + ratio2_nb_i) * (1.0 + ratio2_nb_i))
+                                / (ranbprbnb - r_AB);
+
+                    // rab contribution (Fortran lines 2051-2054)
+                    double gi_nb = -tmp2 * ranbprbnb / rab2;
+                    dg = gi_nb * drab;
+                    ga += dg;
+                    gb -= dg;
+
+                    // ranb, rbnb contributions (Fortran lines 2060-2067)
+                    gi_nb = tmp2 / ranb;
+                    Eigen::Vector3d dga_nb = gi_nb * dranb;
+                    ga += dga_nb;
+                    gi_nb = tmp2 / rbnb;
+                    Eigen::Vector3d dgb_nb = gi_nb * drbnb;
+                    gb += dgb_nb;
+                    Eigen::Vector3d dgnb = -dga_nb - dgb_nb;
+                    m_gradient.row(nb) += dgnb.transpose() * m_final_factor;
+                }
             } else {
-                // R_damp = damp_env / r_AB^3
-                dRdamp_drAB = ddamp_env_drAB / (r_AB * r_AB * r_AB) - 3.0 * rdamp / r_AB;
-                dRdamp_drAH = 0.0;
-                dRdamp_drHB = 0.0;
+                // ===== Case 1: abhgfnff_eg1 gradient (lines 1795-1851) =====
+                double caa = Q_A * hb.basicity_A;   // Fortran: qa*ca(1)
+                double cbb = Q_B * hb.basicity_B;   // Fortran: qb*cb(1)
+
+                // Fortran terms
+                double rterm = -aci * rdamp * qhoutl;         // -aci*rdamp*qhoutl
+                double dterm = -aci * bas * qhoutl;           // -aci*bas*qhoutl
+                double sterm = -rdamp * bas * qhoutl;         // -rdamp*bas*qhoutl
+                double aterm = -aci * bas * rdamp * Q_H;      // -aci*bas*rdamp*qh
+
+                double denom_val = 1.0 / (r_AH_4 + r_HB_4);
+                double tmp = denom_val * denom_val * 4.0;
+                double dd24a = rah2 * r_HB_4 * tmp;  // rah²*rbh⁴*4/denom²
+                double dd24b = rbh2 * r_AH_4 * tmp;  // rbh²*rah⁴*4/denom²
+
+                // --- Donor-acceptor part: bas (Fortran lines 1809-1813) ---
+                double gi = (caa - cbb) * dd24a * rterm;
+                ga = gi * drah;
+                gi = (cbb - caa) * dd24b * rterm;
+                gb = gi * drbh;
+                gh = -ga - gb;
+
+                // --- Donor-acceptor part: aci (Fortran lines 1816-1825) ---
+                gi = (hb.acidity_B - hb.acidity_A) * dd24a;
+                Eigen::Vector3d dga_aci = gi * drah * sterm;
+                ga += dga_aci;
+                gi = (hb.acidity_A - hb.acidity_B) * dd24b;
+                Eigen::Vector3d dgb_aci = gi * drbh * sterm;
+                gb += dgb_aci;
+                Eigen::Vector3d dgh_aci = -dga_aci - dgb_aci;
+                gh += dgh_aci;
+
+                // --- Damping part: rab (Fortran line 1828) ---
+                // eg1: rdamp = damp/rab³, so d(rdamp)/d(rab) = damp*(ddamp-3)/rab⁴
+                gi = rdamp * (ddamp - 3.0) / rab2;
+                Eigen::Vector3d dg = gi * drab * dterm;
+                ga += dg;
+                gb -= dg;
+
+                // --- Out-of-line: rab (Fortran line 1834) ---
+                gi = aterm * 2.0 * ratio2 * expo * rahprbh
+                   / ((1.0 + ratio2) * (1.0 + ratio2))
+                   / (rahprbh - r_AB) / rab2;
+                dg = gi * drab;
+                ga += dg;
+                gb -= dg;
+
+                // --- Out-of-line: rah, rbh (Fortran lines 1840-1846) ---
+                double tmp_outl = -2.0 * aterm * ratio2 * expo
+                                / ((1.0 + ratio2) * (1.0 + ratio2))
+                                / (rahprbh - r_AB);
+                Eigen::Vector3d dga_outl = drah * tmp_outl / r_AH;
+                ga += dga_outl;
+                Eigen::Vector3d dgb_outl = drbh * tmp_outl / r_HB;
+                gb += dgb_outl;
+                Eigen::Vector3d dgh_outl = -dga_outl - dgb_outl;
+                gh += dgh_outl;
             }
 
-            // --- 2. Energy Derivatives w.r.t. Distances ---
-            double dE_drAH, dE_drHB, dE_drAB;
-
-            if (hb.case_type >= 2) {
-                // E = -rdamp * (QH * outl * outl_nb_tot) * const * multipl
-                // We ignore outl_nb_tot and multipl derivatives for now as they are complex angular terms
-                double E_pre_Case2 = -Q_H * outl_nb_tot * multipl * (hb.acidity_A * hb.basicity_B * Q_A * Q_B * global_scale);
-
-                dE_drAH = E_pre_Case2 * (rdamp * ddamp_outl_drAH + dRdamp_drAH * damp_outl);
-                dE_drHB = E_pre_Case2 * (rdamp * ddamp_outl_drHB + dRdamp_drHB * damp_outl);
-                dE_drAB = E_pre_Case2 * (rdamp * ddamp_outl_drAB + dRdamp_drAB * damp_outl);
-            } else {
-                // E = bas * (-aci) * rdamp * (QH * outl)
-                double E_pre_Case1 = -Q_H * rdamp * damp_outl;
-
-                dE_drAH = E_pre_Case1 * (dB_drAH * aci + bas * daci_drAH) + bas * aci * (-Q_H * (rdamp * ddamp_outl_drAH + dRdamp_drAH * damp_outl));
-                dE_drHB = E_pre_Case1 * (dB_drHB * aci + bas * daci_drHB) + bas * aci * (-Q_H * (rdamp * ddamp_outl_drHB + dRdamp_drHB * damp_outl));
-                dE_drAB = bas * aci * (-Q_H * (rdamp * ddamp_outl_drAB + dRdamp_drAB * damp_outl));
-            }
-
-            // Claude Generated (Feb 15, 2026): Sigmoid strength gradient contribution for HB
-            // REMOVED: The sigmoid derivative adds an unphysical force that destabilizes MD
-            // The HB energy already has natural distance dependence through rdamp
-            // The sigmoid is only for smooth energy transition at cutoff, NOT for forces
-            // dE_drHB already includes the correct distance dependence from rdamp
-
-            // --- 3. Chain Rule: Position Vector Derivatives ---
-            Eigen::Vector3d grad_rAH_unit = r_AH_vec / r_AH;  // Direction A → H
-            Eigen::Vector3d grad_rHB_unit = r_HB_vec / r_HB;  // Direction H → B
-            Eigen::Vector3d grad_rAB_unit = r_AB_vec / r_AB;  // Direction A → B
-
-            // --- 4. Accumulate Gradients on Each Atom ---
-            // CRITICAL FIX (Feb 15, 2026): No sigmoid in Fortran - use simple m_final_factor
-            double grad_scale = m_final_factor;
-
-            // Atom A: influenced by r_AH (negative direction) and r_AB (negative direction)
-            Eigen::Vector3d grad_A = (-dE_drAH * grad_rAH_unit - dE_drAB * grad_rAB_unit) * grad_scale;
-            m_gradient.row(hb.i) += grad_A.transpose();
-
-            // Atom H: influenced by r_AH (positive direction) and r_HB (negative direction)
-            Eigen::Vector3d grad_H = (dE_drAH * grad_rAH_unit - dE_drHB * grad_rHB_unit) * grad_scale;
-            m_gradient.row(hb.j) += grad_H.transpose();
-
-            // Atom B: influenced by r_HB (positive direction) and r_AB (positive direction)
-            Eigen::Vector3d grad_B = (dE_drHB * grad_rHB_unit + dE_drAB * grad_rAB_unit) * grad_scale;
-            m_gradient.row(hb.k) += grad_B.transpose();
+            // Accumulate gradients: A=hb.i, B=hb.k, H=hb.j
+            m_gradient.row(hb.i) += ga.transpose() * m_final_factor;
+            m_gradient.row(hb.k) += gb.transpose() * m_final_factor;
+            m_gradient.row(hb.j) += gh.transpose() * m_final_factor;
 
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::info(fmt::format(
                     "    HB Gradient: |∇A|={:.4f} |∇H|={:.4f} |∇B|={:.4f} Eh/Bohr",
-                    grad_A.norm(), grad_H.norm(), grad_B.norm()));
+                    ga.norm(), gb.norm(), gh.norm()));
             }
         }
     }
