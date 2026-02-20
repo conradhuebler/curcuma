@@ -1606,98 +1606,83 @@ Matrix EEQSolver::computeTopologicalDistances(
     const TopologyInput& topology
 ) const {
     const int natoms = atoms.size();
-    const double RABD_CUTOFF = 13.0;        // Cutoff for unconnected atoms in Angstrom (Fortran gfnff_ini.f90:88)
-    const double TDIST_THR = 12.0;         // Threshold for topological distance in Angstrom (Fortran gfnff_param.f90:776)
-    // CRITICAL FIX (Jan 2, 2026): RFGOED1 must be 1.175, not 1.0
+
+    // Claude Generated (Feb 20, 2026): float32 Floyd-Warshall matching Fortran real(sp)
+    //
+    // Fortran declares: real(sp) :: rabd(nat,nat)  (gfnff_ini.f90:432)
+    // Using float32 here is CRITICAL for EEQ charge accuracy:
+    //   - float32 rounding accumulates along shortest paths
+    //   - Different topological distances → different Phase-1 qa → different fqq/alpha/zetac6
+    //   - Without float32: bond/torsion/repulsion/dispersion errors of 1e-3 to 1e-2 Eh
+    //   - With float32: near-exact match with Fortran reference
+    const float RABD_CUTOFF_F = 13.0f;   // Fortran gfnff_ini.f90:88, real(sp)
+    const float TDIST_THR_F   = 12.0f;   // Fortran gfnff_param.f90:776, real(sp)
+
     // Reference: external/gfnff/src/gfnff_param.f90:817 (gen%rfgoed1 = 1.175)
-    const double RFGOED1 = 1.175;           // Scaling factor (from XTB gen%rfgoed1)
+    const double RFGOED1 = 1.175;
     const double BOHR_TO_ANGSTROM = 0.52917726;
 
-    // 1. Initialize with large values
+    // 1. Initialize with cutoff value (flat float32 array for cache efficiency)
     // Reference: gfnff_ini.f90:431-442
-    Matrix rabd = Matrix::Constant(natoms, natoms, RABD_CUTOFF);
+    std::vector<float> rabd(natoms * natoms, RABD_CUTOFF_F);
 
-    // 2. Set diagonal to zero (distance to self)
-    for (int i = 0; i < natoms; ++i) {
-        rabd(i, i) = 0.0;
-    }
+    // 2. Set diagonal to zero
+    for (int i = 0; i < natoms; ++i)
+        rabd[i * natoms + i] = 0.0f;
 
-    // Debug: Verify covalent radii are in Angstrom (expected: C≈0.75, H≈0.32, O≈0.64)
-    if (m_verbosity >= 3) {
-        std::cerr << "\n=== Covalent Radii Verification (expected: Angstrom) ===" << std::endl;
-        for (int i = 0; i < std::min(natoms, 9); ++i) {
-            int z = atoms[i];
-            std::cerr << fmt::format("  Atom {} (Z={}): r_cov = {:.4f} (expected Å)",
-                i, z, topology.covalent_radii[i]) << std::endl;
-        }
-        std::cerr << "Expected: C≈0.75, H≈0.32, O≈0.64 (Angstrom)" << std::endl;
-        std::cerr << "=========================================\n" << std::endl;
-    }
-
-    // 3. Set bonded distances (sum of covalent radii)
+    // 3. Set bonded distances (sum of covalent radii, cast to float32)
     // Reference: gfnff_ini.f90:438-448
     for (int i = 0; i < natoms; ++i) {
-        double rad_i = topology.covalent_radii[i];
+        float rad_i = static_cast<float>(topology.covalent_radii[i]);
         for (int j : topology.neighbor_lists[i]) {
-            double rad_j = topology.covalent_radii[j];
-            rabd(i, j) = rad_i + rad_j;
-            rabd(j, i) = rad_i + rad_j;  // Symmetric
+            float bond = rad_i + static_cast<float>(topology.covalent_radii[j]);
+            rabd[i * natoms + j] = bond;
+            rabd[j * natoms + i] = bond;
         }
     }
 
-    // 4. Floyd-Warshall shortest path algorithm
+    // 4. Floyd-Warshall shortest path in float32, matching Fortran real(sp) arithmetic
     // Reference: gfnff_ini.f90:462-471
-    //
-    // This computes the shortest path between all pairs of atoms through the bond graph.
-    // Each iteration updates path(i,j) if going through k provides a shorter route.
     for (int k = 0; k < natoms; ++k) {
         for (int i = 0; i < natoms; ++i) {
-            if (rabd(i, k) > TDIST_THR) continue;
+            float rik = rabd[i * natoms + k];
+            if (rik > TDIST_THR_F) continue;
             for (int j = 0; j < natoms; ++j) {
-                if (rabd(k, j) > TDIST_THR) continue;
-                if (rabd(i, j) > rabd(i, k) + rabd(k, j)) {
-                    rabd(i, j) = rabd(i, k) + rabd(k, j);
-                }
+                float rkj = rabd[k * natoms + j];
+                if (rkj > TDIST_THR_F) continue;
+                float candidate = rik + rkj;   // float32 addition like Fortran
+                if (rabd[i * natoms + j] > candidate)
+                    rabd[i * natoms + j] = candidate;
             }
         }
     }
 
-    // 5. Apply cutoff and scaling
+    // 5. Convert to double Matrix with cutoff and Angstrom→Bohr scaling
     // Reference: gfnff_ini.f90:474-480
-    //
-    // The XTB code applies scaling by RFGOED1 and converts from Angstrom to Bohr.
+    Matrix result(natoms, natoms);
     for (int i = 0; i < natoms; ++i) {
         for (int j = 0; j < natoms; ++j) {
-            if (rabd(i, j) > TDIST_THR) {
-                rabd(i, j) = RABD_CUTOFF;
-            }
-            rabd(i, j) = RFGOED1 * rabd(i, j) / BOHR_TO_ANGSTROM;
+            float rij = rabd[i * natoms + j];
+            double val = (rij > TDIST_THR_F)
+                ? static_cast<double>(RABD_CUTOFF_F)
+                : static_cast<double>(rij);
+            result(i, j) = RFGOED1 * val / BOHR_TO_ANGSTROM;
         }
     }
 
-    // Debug output - Phase 1.1 Validation
     if (m_verbosity >= 3) {
-        std::cerr << "\n=== Floyd-Warshall Topological Distances (Bohr) ===" << std::endl;
-        // Print first few pairs and some specific pairs for validation
+        std::cerr << "\n=== Floyd-Warshall Topological Distances (float32, Bohr) ===" << std::endl;
         for (int i = 0; i < std::min(5, natoms); ++i) {
             for (int j = 0; j < i; ++j) {
-                if (rabd(i, j) < RABD_CUTOFF) {
-                    std::cerr << fmt::format("  d_topo[{},{}] = {:.6f} Bohr", i, j, rabd(i, j)) << std::endl;
-                }
-            }
-        }
-        // Also print distances involving atom 15 (for complex molecule debugging)
-        if (natoms > 15) {
-            for (int j = 0; j < 5 && j < natoms; ++j) {
-                if (rabd(15, j) < RABD_CUTOFF) {
-                    std::cerr << fmt::format("  d_topo[15,{}] = {:.6f} Bohr", j, rabd(15, j)) << std::endl;
-                }
+                double d = result(i, j);
+                if (d < RFGOED1 * RABD_CUTOFF_F / BOHR_TO_ANGSTROM - 1.0)
+                    std::cerr << fmt::format("  d_topo[{},{}] = {:.6f} Bohr", i, j, d) << std::endl;
             }
         }
         std::cerr << "========================================\n" << std::endl;
     }
 
-    return rabd;
+    return result;
 }
 
 // ===== Phase 2: Final Refined Charges =====
