@@ -1606,8 +1606,8 @@ Matrix EEQSolver::computeTopologicalDistances(
     const TopologyInput& topology
 ) const {
     const int natoms = atoms.size();
-    const double RABD_CUTOFF = 1.0e8;      // Large value for unconnected atoms (from XTB rabd_cutoff)
-    const double TDIST_THR = 1.0e6;        // Threshold for topological distance (from XTB gen%tdist_thr)
+    const double RABD_CUTOFF = 13.0;        // Cutoff for unconnected atoms in Angstrom (Fortran gfnff_ini.f90:88)
+    const double TDIST_THR = 12.0;         // Threshold for topological distance in Angstrom (Fortran gfnff_param.f90:776)
     // CRITICAL FIX (Jan 2, 2026): RFGOED1 must be 1.175, not 1.0
     // Reference: external/gfnff/src/gfnff_param.f90:817 (gen%rfgoed1 = 1.175)
     const double RFGOED1 = 1.175;           // Scaling factor (from XTB gen%rfgoed1)

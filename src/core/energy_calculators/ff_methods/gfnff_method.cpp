@@ -353,39 +353,86 @@ double GFNFF::Calculation(bool gradient)
         CurcumaLogger::info("Calling ForceField::Calculate()...");
     }
 
-    // CRITICAL FIX (Claude Generated Feb 1, 2026): Recalculate CN derivatives for current geometry
-    // Reference: Fortran gfnff_engrad.F90:418-422
+    // Claude Generated (Feb 20, 2026): Recalculate CN and Phase-2 EEQ charges for current geometry
+    // Reference: Fortran gfnff_engrad.F90:369 calls goed_gfnff() at EVERY energy evaluation
     //
-    // CN derivatives are geometry-dependent and must be updated before gradient calculation.
-    // During optimization, the geometry changes each step, but CN derivatives were only
-    // computed during initializeForceField(). This caused the Coulomb charge derivative
-    // gradient (Term 1b: dE/dq * dq/dCN * dCN/dx) to use stale CN values, producing
-    // incorrect gradients and optimization failures.
-    //
-    // This fix follows the same pattern as D3 CN recalculation (via distributeD3CN).
-    if (gradient && m_forcefield) {
+    // CN is geometry-dependent and needed for:
+    //   1. CN derivatives for gradient (Term 1b: dE/dq * dq/dCN * dCN/dx)
+    //   2. Phase-2 EEQ charges (CNF term in RHS of linear system)
+    // Phase-1 charges (topo%qa) remain fixed (topology-dependent only).
+    if (m_forcefield) {
         auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
         Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
 
-        Vector cnf(m_atoms.size());
-        for (size_t i = 0; i < m_atoms.size(); ++i) {
-            int z = m_atoms[i];
-            cnf(i) = (z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
-                        ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
+        // CN derivatives for gradient calculation (only when gradient requested)
+        // Reference: Fortran gfnff_engrad.F90:418-422
+        if (gradient) {
+            Vector cnf(m_atoms.size());
+            for (size_t i = 0; i < m_atoms.size(); ++i) {
+                int z = m_atoms[i];
+                cnf(i) = (z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
+                            ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
+            }
+
+            std::vector<Matrix> dcn = calculateCoordinationNumberDerivatives(cn);
+            m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
+
+            // Compute and distribute dc6dcn for dispersion CN gradient
+            // Reference: Fortran gfnff_gdisp0.f90:382-395
+            if (m_d4_generator) {
+                m_d4_generator->updateCNValuesForGradient(cn_vec);
+                m_forcefield->setDispersionDC6DCN(m_d4_generator->getDC6DCN());
+            }
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info("CN derivatives recalculated for current geometry");
+            }
         }
 
-        std::vector<Matrix> dcn = calculateCoordinationNumberDerivatives(cn);
-        m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
+        // Phase-2 EEQ charge recalculation
+        // Without this, Coulomb energy uses stale charges during MD/optimization,
+        // leading to incorrect forces and unphysical dynamics.
+        if (m_eeq_solver) {
+            const TopologyInfo& topo = getCachedTopology();
 
-        // Claude Generated (Feb 15, 2026): Compute and distribute dc6dcn for dispersion CN gradient
-        // Reference: Fortran gfnff_gdisp0.f90:382-395 - dc6dcn used for dispersion gradient chain rule
-        if (m_d4_generator) {
-            m_d4_generator->updateCNValuesForGradient(cn_vec);
-            m_forcefield->setDispersionDC6DCN(m_d4_generator->getDC6DCN());
-        }
+            // Build topology input for EEQ solver (fragment constraints)
+            EEQSolver::TopologyInput eeq_topo;
+            eeq_topo.neighbor_lists = topo.neighbor_lists;
+            eeq_topo.nfrag = topo.nfrag;
+            eeq_topo.fraglist = topo.fraglist;
+            eeq_topo.qfrag = topo.qfrag;
 
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("CN derivatives recalculated for current geometry");
+            // Covalent radii for topological distance calculation
+            eeq_topo.covalent_radii.resize(m_atomcount);
+            for (int i = 0; i < m_atomcount; ++i) {
+                int z = m_atoms[i];
+                if (z >= 1 && z <= 86) {
+                    eeq_topo.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];
+                } else {
+                    eeq_topo.covalent_radii[i] = 1.0;
+                }
+            }
+
+            // Phase-2 solve: current geometry (geometric distances) + current CN
+            // Phase-1 qa (topology_charges) and alpeeq remain fixed from init
+            Vector new_charges = m_eeq_solver->calculateFinalCharges(
+                m_atoms, m_geometry_bohr, m_charge,
+                topo.topology_charges,  // Phase-1 qa (fixed)
+                cn,                     // Current CN (geometry-dependent)
+                topo.hybridization, eeq_topo,
+                true,         // Enable dxi/dgam corrections
+                topo.alpeeq   // Charge-dependent alpha from Phase 1
+            );
+
+            if (new_charges.size() == m_atomcount) {
+                m_forcefield->distributeEEQCharges(new_charges);
+                m_charges = new_charges;
+
+                if (CurcumaLogger::get_verbosity() >= 3) {
+                    CurcumaLogger::info("Phase-2 EEQ charges recalculated for current geometry");
+                    CurcumaLogger::param("charge_sum", fmt::format("{:.8f}", new_charges.sum()));
+                }
+            }
         }
     }
 
@@ -406,9 +453,11 @@ double GFNFF::Calculation(bool gradient)
         // Get current topology with updated geometry
         const TopologyInfo& topo = getCachedTopology();
 
-        // Re-detect HB/XB pairs with current geometry and charges
-        json new_hbonds = detectHydrogenBonds(topo.eeq_charges);
-        json new_xbonds = detectHalogenBonds(topo.eeq_charges);
+        // Re-detect HB/XB pairs with Phase-1 charges (topology_charges)
+        // Reference: Fortran gfnff_ini.f90:859,871 uses topo%qa (Phase-1) for HB detection
+        // Phase-2 charges (nlist%q) are used for Coulomb energy, NOT for HB/XB detection
+        json new_hbonds = detectHydrogenBonds(topo.topology_charges);
+        json new_xbonds = detectHalogenBonds(topo.topology_charges);
 
         // Update ForceField parameters
         m_forcefield->updateGFNFFHBonds(new_hbonds);
@@ -4875,7 +4924,7 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
                 hb["q_H"] = charges[H];
                 hb["q_A"] = charges[A];
                 hb["q_B"] = charges[B];
-                hb["r_cut"] = 10.0;
+                hb["r_cut"] = 14.14;  // sqrt(hbthr1=200) Bohr (Fortran gfnff_param.f90:559)
                 hb["neighbors_A"] = neighbors_A;
                 hb["neighbors_B"] = neighbors_B;
                 if (case_type == 3) hb["acceptor_parent"] = acceptor_parent;
@@ -5055,7 +5104,7 @@ json GFNFF::detectHalogenBonds(const Vector& charges) const
 
             // Cutoff radius for XB energy calculation (Claude Generated - January 17, 2026)
             // Use detection threshold (10.0 Bohr) + safety margin
-            xb["r_cut"] = 12.0;  // Bohr (conservative cutoff for energy calculation)
+            xb["r_cut"] = 20.0;  // sqrt(hbthr2=400) Bohr (Fortran gfnff_param.f90:560)
 
             xbonds.push_back(xb);
 
@@ -5987,7 +6036,7 @@ json GFNFF::generateGFNFFRepulsionPairs() const
         rep["j"] = j;
         rep["alpha"] = std::sqrt(repa_i * repa_j);  // Geometric mean
         rep["repab"] = repz_i * repz_j * REPSCALB;  // Scale = 1.7583
-        rep["r_cut"] = 1e10;  // Effectively no cutoff (Fortran uses distance-based threshold)
+        rep["r_cut"] = 20.0;  // sqrt(repthr=400) Bohr (Fortran gfnff_param.f90:561)
 
         bonded_repulsions.push_back(rep);
 
@@ -6093,7 +6142,7 @@ json GFNFF::generateGFNFFRepulsionPairs() const
             rep["j"] = j;
             rep["alpha"] = alpha_nonbonded;  // CORRECTED formula
             rep["repab"] = repz_i * repz_j * REPSCALN;  // Scale = 0.4270
-            rep["r_cut"] = 1e10;  // No cutoff
+            rep["r_cut"] = 20.0;  // sqrt(repthr=400) Bohr (Fortran gfnff_param.f90:561)
 
             nonbonded_repulsions.push_back(rep);
 
@@ -6371,7 +6420,7 @@ json GFNFF::generateD3Dispersion() const
             gfnff_pair["s8"] = s8;
             gfnff_pair["a1"] = a1;
             gfnff_pair["a2"] = a2;
-            gfnff_pair["r_cut"] = 100.0;  // Cutoff radius (Bohr)
+            gfnff_pair["r_cut"] = 38.73;  // sqrt(dispthr=1500) Bohr (Fortran gfnff_param.f90:558)
 
             // Show first 3 pairs at verbosity 3
             if (CurcumaLogger::get_verbosity() >= 3 && pair_count < 3) {
@@ -6476,7 +6525,7 @@ json GFNFF::generateFreeAtomDispersion() const
             dispersion["s8"] = s8;
             dispersion["a1"] = a1;
             dispersion["a2"] = a2;
-            dispersion["r_cut"] = 100.0; // Cutoff radius (Bohr)
+            dispersion["r_cut"] = 38.73; // sqrt(dispthr=1500) Bohr (Fortran gfnff_param.f90:558)
 
             dispersion_pairs.push_back(dispersion);
         }
