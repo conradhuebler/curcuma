@@ -265,6 +265,10 @@ void ForceField::setParameter(const json& parameters)
         if (parameters.contains("gfnff_batms"))
             setGFNFFBatms(parameters["gfnff_batms"]);
 
+        // Claude Generated (Feb 21, 2026): Bond-HB mapping for dncoord_erf
+        if (parameters.contains("bond_hb_data"))
+            loadBondHBData(parameters["bond_hb_data"]);
+
         m_parameters = parameters;
         m_method = m_parameters["method"];
         if (CurcumaLogger::get_verbosity() >= 3) {
@@ -1118,6 +1122,27 @@ void ForceField::setGFNFFBatms(const json& batms)
     }
 }
 
+// Claude Generated (Feb 21, 2026): Load bond-HB mapping for dncoord_erf
+// Reference: Fortran gfnff_data_types.f90:88,118-120 (bond_hb_AH, bond_hb_B, bond_hb_Bn)
+void ForceField::loadBondHBData(const json& bond_hb_data_json)
+{
+    m_bond_hb_data.clear();
+    for (const auto& entry : bond_hb_data_json) {
+        BondHBEntry bhe;
+        bhe.A = entry["A"].get<int>();
+        bhe.H = entry["H"].get<int>();
+        bhe.B_atoms = entry["B_atoms"].get<std::vector<int>>();
+        m_bond_hb_data.push_back(bhe);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2 && !m_bond_hb_data.empty()) {
+        int total_b = 0;
+        for (const auto& e : m_bond_hb_data) total_b += static_cast<int>(e.B_atoms.size());
+        CurcumaLogger::info(fmt::format("Loaded {} bond-HB entries ({} total B atoms) for dncoord_erf",
+                                         m_bond_hb_data.size(), total_b));
+    }
+}
+
 void ForceField::setESPs(const json& esps)
 {
     m_EQs.clear();
@@ -1212,6 +1237,13 @@ void ForceField::AutoRanges()
         } else if (m_method == "d3") {  // Claude Generated (December 21, 2025)
             thread->setMethod(5); // D3-only method
         }
+
+        // Claude Generated (Feb 21, 2026): Distribute bond-HB data to all threads for dncoord_erf
+        // Every thread needs the full set because any thread's bond may have nr_hb >= 1
+        if (!m_bond_hb_data.empty()) {
+            thread->setBondHBData(m_bond_hb_data);
+        }
+
         for (int j = int(i * m_bonds.size() / double(free_threads)); j < int((i + 1) * m_bonds.size() / double(free_threads)); ++j) {
             if (m_method == "gfnff" || m_method == "cgfnff") { // Claude Generated (2025-12-13): Support both method names
                 thread->addGFNFFBond(m_bonds[j]);
@@ -1875,6 +1907,19 @@ json ForceField::exportCurrentParameters() const
             charges.push_back(m_eeq_charges[i]);
         }
         output["eeq_charges"] = charges;
+    }
+
+    // Claude Generated (Feb 21, 2026): Export bond-HB data for dncoord_erf
+    if (!m_bond_hb_data.empty()) {
+        json bond_hb_json = json::array();
+        for (const auto& entry : m_bond_hb_data) {
+            json e;
+            e["A"] = entry.A;
+            e["H"] = entry.H;
+            e["B_atoms"] = entry.B_atoms;
+            bond_hb_json.push_back(e);
+        }
+        output["bond_hb_data"] = bond_hb_json;
     }
 
     // Add metadata

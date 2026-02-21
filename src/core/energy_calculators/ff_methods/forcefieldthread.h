@@ -48,6 +48,22 @@
 #include "json.hpp"
 using json = nlohmann::json;
 
+/**
+ * @brief Bond-HB mapping entry for dncoord_erf calculation
+ *
+ * Claude Generated (Feb 21, 2026): Stores A-H...B mapping for HB coordination number
+ * Reference: Fortran gfnff_data_types.f90:88,118-120 (bond_hb_AH, bond_hb_B, bond_hb_Bn)
+ *
+ * At runtime, dncoord_erf iterates over these entries to compute hb_cn for each H atom,
+ * counting B atoms within erf-damped covalent radius. The resulting hb_cn is used in
+ * egbond_hb to modulate the bond exponent: alpha_mod = (1 - 0.1*hb_cn_H) * alpha
+ */
+struct BondHBEntry {
+    int A = 0;                     ///< Donor atom index (bonded to H, must be N or O)
+    int H = 0;                     ///< Hydrogen atom index
+    std::vector<int> B_atoms;      ///< Acceptor atom indices (N or O atoms)
+};
+
 struct Bond {
     int type = 1; // 1 = UFF, 2 = QMDFF
     int i = 0, j = 0, k = 0, distance = 0;
@@ -429,6 +445,13 @@ public:
         m_dcn = dcn;
     }
 
+    // Claude Generated (Feb 21, 2026): Bond-HB mapping for dncoord_erf calculation
+    // Reference: Fortran gfnff_engrad.F90:1069-1120
+    // These entries define which H atoms participate in HBs and which B atoms to count
+    void setBondHBData(const std::vector<BondHBEntry>& bond_hb_data) {
+        m_bond_hb_data = bond_hb_data;
+    }
+
     // Claude Generated (Feb 15, 2026): dEdcn accumulator for CN chain-rule gradient terms
     // Accumulates dE/dCN contributions from bond (dr0/dCN) and dispersion (dC6/dCN) terms
     // Applied after thread completion via dcn chain rule: gradient += dcn * dEdcn
@@ -539,6 +562,7 @@ private:
     void CalculateESPContribution();
 
     void CalculateGFNFFBondContribution();
+    void computeHBCoordinationNumbers();   // Claude Generated (Feb 21, 2026): dncoord_erf for bond-HB CN
     void CalculateGFNFFAngleContribution();
     void CalculateGFNFFDihedralContribution();
     void CalculateGFNFFExtraTorsionContribution();  // Claude Generated (Jan 2, 2026): Extra sp3-sp3 gauche torsions
@@ -610,6 +634,9 @@ private:
     // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
     // GFN-FF bonded ATM (batm) three-body terms for 1,4-pairs
     std::vector<GFNFFBatmTriple> m_gfnff_batms;  // Batm triples
+
+    // Claude Generated (Feb 21, 2026): Bond-HB mapping for dncoord_erf calculation
+    std::vector<BondHBEntry> m_bond_hb_data;
 
 protected:
     Matrix m_geometry, m_gradient;

@@ -23,6 +23,7 @@
 #include "src/core/units.h"
 #include "src/core/functional_groups.h"  // Claude Generated (January 10, 2026): Amide detection
 #include <chrono>
+#include <map>
 #include <set>
 #include <functional>
 #include <omp.h>  // Claude Generated (February 2026): Phase 2 - OpenMP parallelization
@@ -1034,6 +1035,67 @@ json GFNFF::generateGFNFFParameters()
 
         parameters["hbonds"] = detectHydrogenBonds(topo_info.eeq_charges);  // Legacy (backward compat)
 
+        // Claude Generated (Feb 21, 2026): Populate bond nr_hb and bond_hb_data
+        // Reference: Fortran gfnff_ini2.f90:1008-1060 (bond_hb_AHB_set0/set1)
+        // Cross-reference detected HB triplets (A-H...B) with the bond list:
+        //   For each bond where one atom is H bonded to donor A, count B acceptors
+        //   and store the AH-B mapping for dncoord_erf at runtime.
+        if (parameters.contains("gfnff_hbonds") && parameters["gfnff_hbonds"].is_array()) {
+            json& bonds_json = parameters["bonds"];
+            const json& hbonds_json = parameters["gfnff_hbonds"];
+
+            // Build map: (A_atom, H_atom) -> [list of B atom indices]
+            // Only count B atoms that are N or O (Z=7 or Z=8), matching Fortran constraint
+            std::map<std::pair<int,int>, std::vector<int>> ah_to_b_atoms;
+            for (const auto& hb : hbonds_json) {
+                int A = hb["i"].get<int>();
+                int H = hb["j"].get<int>();
+                int B = hb["k"].get<int>();
+                int z_b = m_atoms[B];
+                if (z_b == 7 || z_b == 8) {
+                    ah_to_b_atoms[{A, H}].push_back(B);
+                }
+            }
+
+            // For each bond, check if it's an A-H bond participating in HBs
+            json bond_hb_data = json::array();
+            for (auto& bond : bonds_json) {
+                int bi = bond["i"].get<int>();
+                int bj = bond["j"].get<int>();
+                int z_i = m_atoms[bi];
+                int z_j = m_atoms[bj];
+
+                // Identify which atom is H and which is the donor A
+                int hbH = -1, hbA = -1;
+                if (z_i == 1) { hbH = bi; hbA = bj; }
+                else if (z_j == 1) { hbH = bj; hbA = bi; }
+                else continue;  // Not an X-H bond
+
+                // Donor must be N or O (Fortran gfnff_ini2.f90:1043)
+                int z_a = m_atoms[hbA];
+                if (z_a != 7 && z_a != 8) continue;
+
+                auto it = ah_to_b_atoms.find({hbA, hbH});
+                if (it != ah_to_b_atoms.end() && !it->second.empty()) {
+                    bond["nr_hb"] = static_cast<int>(it->second.size());
+
+                    // Store AH-B mapping for dncoord_erf runtime calculation
+                    json entry;
+                    entry["A"] = hbA;
+                    entry["H"] = hbH;
+                    entry["B_atoms"] = it->second;
+                    bond_hb_data.push_back(entry);
+                }
+            }
+            parameters["bond_hb_data"] = bond_hb_data;
+
+            if (CurcumaLogger::get_verbosity() >= 2 && !bond_hb_data.empty()) {
+                CurcumaLogger::info(fmt::format("Bond-HB coupling: {} AH pairs with {} total B atoms",
+                    bond_hb_data.size(),
+                    [&]() { int n = 0; for (const auto& e : bond_hb_data) n += e["B_atoms"].size(); return n; }()));
+            }
+        }
+
         // Store topology information for debugging
         parameters["topology_info"] = {
             { "coordination_numbers", std::vector<double>(topo_info.coordination_numbers.data(), topo_info.coordination_numbers.data() + topo_info.coordination_numbers.size()) },
@@ -1143,6 +1205,48 @@ json GFNFF::generateGFNFFParameters()
         if (m_parameters.value("hbond", true)) {
             parameters["gfnff_hbonds"] = detectHydrogenBonds(topo_info.eeq_charges);
             parameters["gfnff_xbonds"] = detectHalogenBonds(topo_info.eeq_charges);
+        }
+
+        // Claude Generated (Feb 21, 2026): Populate bond nr_hb (basic mode, same as advanced)
+        if (parameters.contains("gfnff_hbonds") && parameters["gfnff_hbonds"].is_array()) {
+            json& bonds_json = parameters["bonds"];
+            const json& hbonds_json = parameters["gfnff_hbonds"];
+
+            std::map<std::pair<int,int>, std::vector<int>> ah_to_b_atoms;
+            for (const auto& hb : hbonds_json) {
+                int A = hb["i"].get<int>();
+                int H = hb["j"].get<int>();
+                int B = hb["k"].get<int>();
+                int z_b = m_atoms[B];
+                if (z_b == 7 || z_b == 8) {
+                    ah_to_b_atoms[{A, H}].push_back(B);
+                }
+            }
+
+            json bond_hb_data = json::array();
+            for (auto& bond : bonds_json) {
+                int bi = bond["i"].get<int>();
+                int bj = bond["j"].get<int>();
+
+                int hbH = -1, hbA = -1;
+                if (m_atoms[bi] == 1) { hbH = bi; hbA = bj; }
+                else if (m_atoms[bj] == 1) { hbH = bj; hbA = bi; }
+                else continue;
+
+                int z_a = m_atoms[hbA];
+                if (z_a != 7 && z_a != 8) continue;
+
+                auto it = ah_to_b_atoms.find({hbA, hbH});
+                if (it != ah_to_b_atoms.end() && !it->second.empty()) {
+                    bond["nr_hb"] = static_cast<int>(it->second.size());
+                    json entry;
+                    entry["A"] = hbA;
+                    entry["H"] = hbH;
+                    entry["B_atoms"] = it->second;
+                    bond_hb_data.push_back(entry);
+                }
+            }
+            parameters["bond_hb_data"] = bond_hb_data;
         }
     }
 
@@ -1880,12 +1984,31 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         else if (hyb1 == 2 || hyb2 == 2) bbtyp = 2;   // sp-sp2 → double
     }
 
-    // Bridging atoms (will be detected in Phase 6)
-    bool is_bridge = false;  // Placeholder
-    if (is_bridge) {
-        // Group 7 (halogens): bstrength *= 0.50
-        // H or F bridging: bstrength *= 0.30
-        // (Will be implemented in Phase 6)
+    // Claude Generated (Feb 21, 2026): Bridging atom detection
+    // Reference: Fortran gfnff_ini.f90:1170-1177, 1196-1201
+    // A bond atom has sp hybridization AND is H or halogen (group 7)
+    bool is_bridge = false;
+    {
+        int grp1 = (z1 >= 1 && z1 <= 86) ? periodic_group[z1 - 1] : 0;
+        int grp2 = (z2 >= 1 && z2 <= 86) ? periodic_group[z2 - 1] : 0;
+
+        if ((grp1 == 7 || z1 == 1) && hyb1_value == 1) {
+            bbtyp = 3;  // linear halogen → no torsion
+            is_bridge = true;
+        }
+        if ((grp2 == 7 || z2 == 1) && hyb2_value == 1) {
+            bbtyp = 3;
+            is_bridge = true;
+        }
+
+        if (is_bridge) {
+            // Bridging halogen (group 7): bstrength = bstren[1] * 0.50
+            if (grp1 == 7) bstrength = bstren[1] * 0.50;
+            if (grp2 == 7) bstrength = bstren[1] * 0.50;
+            // Bridging H (Z=1) or F (Z=9): bstrength = bstren[1] * 0.30
+            if (z1 == 1 || z1 == 9) bstrength = bstren[1] * 0.30;
+            if (z2 == 1 || z2 == 9) bstrength = bstren[1] * 0.30;
+        }
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -1988,11 +2111,36 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // Check if this is an X-H bond (one atom is hydrogen)
     if (z1 == 1 || z2 == 1) {
         int heavy_atom = (z1 == 1) ? z2 : z1;  // The non-hydrogen atom
+        int heavy_idx = (z1 == 1) ? atom2 : atom1;  // Index of the non-hydrogen atom
 
-        // TEMPORARY: Ring and functional group detection needed for full XH corrections
-        // For now, implement element-specific corrections only
-        bool is_3ring = false;  // Placeholder (will be from ring detection in Phase 9)
-        bool is_aldehyde = false;  // Placeholder (requires functional group detection)
+        // 3-ring CH detection using ring topology
+        bool is_3ring = false;
+        if (heavy_atom == 6) {
+            int smallest_ring = 0;
+            // Check if the heavy atom is in a 3-membered ring
+            if (heavy_idx < static_cast<int>(topo.ring_sizes.size())) {
+                smallest_ring = topo.ring_sizes[heavy_idx];
+            }
+            if (smallest_ring == 3) is_3ring = true;
+        }
+
+        // Claude Generated (Feb 21, 2026): Aldehyde detection via ctype logic
+        // Reference: Fortran gfnff_ini2.f90:1497-1511
+        // ctype(atom) = 1 if: carbon, in pi system, exactly 1 pi-oxygen neighbor
+        bool is_aldehyde = false;
+        if (heavy_atom == 6 && heavy_idx < static_cast<int>(topo.pi_fragments.size())) {
+            bool carbon_in_pi = (topo.pi_fragments[heavy_idx] > 0);
+            if (carbon_in_pi && heavy_idx < static_cast<int>(topo.neighbor_lists.size())) {
+                int pi_oxygen_count = 0;
+                for (int nb : topo.neighbor_lists[heavy_idx]) {
+                    if (m_atoms[nb] == 8 && nb < static_cast<int>(topo.pi_fragments.size())
+                        && topo.pi_fragments[nb] > 0) {
+                        pi_oxygen_count++;
+                    }
+                }
+                if (pi_oxygen_count == 1) is_aldehyde = true;
+            }
+        }
 
         if (heavy_atom == 6 && is_3ring) {
             // 3-ring CH: stronger due to ring strain

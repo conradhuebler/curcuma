@@ -192,6 +192,9 @@ private:
     // GFN-FF bonded ATM (batm) parameter setter for 1,4-pairs
     void setGFNFFBatms(const json& batms);
 
+    // Claude Generated (Feb 21, 2026): Bond-HB mapping for dncoord_erf
+    void loadBondHBData(const json& bond_hb_data_json);
+
     // Claude Generated: Energy component storage for regression testing (Nov 2025)
     double m_bond_energy = 0.0;
     double m_angle_energy = 0.0;
@@ -244,6 +247,9 @@ private:
     // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
     // GFN-FF bonded ATM (batm) parameters for 1,4-pairs
     std::vector<GFNFFBatmTriple> m_gfnff_batms;
+
+    // Claude Generated (Feb 21, 2026): Bond-HB mapping for dncoord_erf at runtime
+    std::vector<BondHBEntry> m_bond_hb_data;
 
     // EEQ charges for GFN-FF (cached with parameters - Claude Generated Dec 2025)
     Vector m_eeq_charges;

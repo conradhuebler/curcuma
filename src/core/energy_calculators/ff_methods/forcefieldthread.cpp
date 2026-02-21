@@ -127,6 +127,10 @@ int ForceFieldThread::execute()
             }
         };
 
+        // Claude Generated (Feb 21, 2026): Compute HB coordination numbers before bond energy
+        // Reference: Fortran gfnff_engrad.F90:361 - called before bond loop if sum(nr_hb)>0
+        computeHBCoordinationNumbers();
+
         // GFN-FF bonded terms
         runWithGradCapture("bonds", [this]() { CalculateGFNFFBondContribution(); }, m_gradient_bond);
         runWithGradCapture("angles", [this]() { CalculateGFNFFAngleContribution(); }, m_gradient_angle);
@@ -788,6 +792,75 @@ int H4Thread::execute()
     return 0;
 }
 */
+
+// Claude Generated (Feb 21, 2026): Compute HB coordination numbers for bond-HB coupling
+// Reference: Fortran gfnff_engrad.F90:1069-1120 (dncoord_erf subroutine)
+//
+// For each A-H bond participating in hydrogen bridges, computes hb_cn_H by counting
+// B atoms within erf-damped covalent radius distance from H. This CN is then used
+// in egbond_hb to modulate the bond exponent: alpha_mod = (1 - 0.1*hb_cn_H) * alpha
+//
+// Parameters (from Fortran):
+//   kn = 27.5 (error function steepness)
+//   rcov_scal = 1.78 (covalent radius scaling)
+//   thr = 900.0 Bohr² (distance threshold)
+void ForceFieldThread::computeHBCoordinationNumbers()
+{
+    if (m_bond_hb_data.empty()) return;
+
+    // Use covalent radii from D3 (Bohr) - same as Fortran param%rcov
+    // Defined in gfnff_par.h
+    static const std::vector<double>& rcov = GFNFFParameters::covalent_rad_d3;
+
+    constexpr double kn = 27.5;
+    constexpr double rcov_scal = 1.78;
+    constexpr double thr = 900.0;  // Bohr² distance threshold
+
+    // Build map from H atom index to accumulated hb_cn
+    std::unordered_map<int, double> hb_cn_map;
+
+    for (const auto& entry : m_bond_hb_data) {
+        int H = entry.H;
+        int ati = m_atom_types[H];  // Atomic number of H (should be 1)
+
+        for (int B : entry.B_atoms) {
+            int atj = m_atom_types[B];  // Atomic number of B
+
+            // Distance H-B
+            double dx = m_geometry(B, 0) - m_geometry(H, 0);
+            double dy = m_geometry(B, 1) - m_geometry(H, 1);
+            double dz = m_geometry(B, 2) - m_geometry(H, 2);
+            double r2 = dx * dx + dy * dy + dz * dz;
+
+            if (r2 > thr) continue;
+            double r = std::sqrt(r2);
+
+            // rcov indices are 0-based (ati-1 for 1-based atomic number)
+            double rcovij = rcov_scal * (rcov[ati - 1] + rcov[atj - 1]);
+
+            // erf-based coordination number contribution
+            // Fortran: tmp = 0.5*(1 + erf(-kn*(r-rcovij)/rcovij))
+            double tmp = 0.5 * (1.0 + std::erf(-kn * (r - rcovij) / rcovij));
+
+            hb_cn_map[H] += tmp;
+        }
+    }
+
+    // Update hb_cn_H on all bonds with nr_hb >= 1
+    for (auto& bond : m_gfnff_bonds) {
+        if (bond.nr_hb < 1) continue;
+
+        // Identify which atom is H
+        int H = -1;
+        if (m_atom_types[bond.i] == 1) H = bond.i;
+        else if (m_atom_types[bond.j] == 1) H = bond.j;
+
+        if (H >= 0) {
+            auto it = hb_cn_map.find(H);
+            bond.hb_cn_H = (it != hb_cn_map.end()) ? it->second : 0.0;
+        }
+    }
+}
 
 void ForceFieldThread::CalculateGFNFFBondContribution()
 {
