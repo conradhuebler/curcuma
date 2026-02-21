@@ -214,43 +214,31 @@ inline double calculateOutOfPlaneAngle(
     Matrix& gradient,
     bool calculate_gradient = false)
 {
-    // Vectors from central atom i to plane atoms
-    Eigen::Vector3d r_ij = r_j - r_i;
-    Eigen::Vector3d r_ik = r_k - r_i;
-    Eigen::Vector3d r_il = r_l - r_i;
+    // Fortran vectors (gfnff_helpers.f90:436-440, 465-471)
+    // re = center - nb1, rd = nb2 - nb1, rv = nb3 - center
+    Eigen::Vector3d re = r_i - r_j;
+    Eigen::Vector3d rd = r_k - r_j;
+    Eigen::Vector3d rv = r_l - r_i;
 
-    // Normal vector to plane defined by atoms i, j, k
-    Eigen::Vector3d n = r_ij.cross(r_ik);
-    double n_norm = n.norm();
+    // Normal vector to plane (gfnff_helpers.f90:441)
+    Eigen::Vector3d rn = re.cross(rd);
+    double rnn = rn.norm();
+    double rvn = rv.norm();
 
     const double epsilon = 1.0e-10;
-    if (n_norm < epsilon) {
-        // Degenerate case: atoms are colinear
+    if (rnn < epsilon || rvn < epsilon) {
         if (calculate_gradient) {
             gradient = Matrix::Zero(4, 3);
         }
         return 0.0;
     }
 
-    // Normalize normal vector
-    Eigen::Vector3d n_normalized = n / n_norm;
-
-    // Calculate out-of-plane angle
-    // ω = arcsin(n̂ · r̂_il)
-    double r_il_norm = r_il.norm();
-    if (r_il_norm < epsilon) {
-        if (calculate_gradient) {
-            gradient = Matrix::Zero(4, 3);
-        }
-        return 0.0;
-    }
-
-    Eigen::Vector3d r_il_normalized = r_il / r_il_norm;
-    double sin_omega = n_normalized.dot(r_il_normalized);
-
-    // Clamp to [-1, 1] to avoid numerical issues with arcsin
+    // omega = asin(rn_hat · rv_hat) — Fortran convention (gfnff_helpers.f90:442-446)
+    // Sign-flipped vs previous C++ convention; energy unaffected (cos is even)
+    Eigen::Vector3d rn_hat = rn / rnn;
+    Eigen::Vector3d rv_hat = rv / rvn;
+    double sin_omega = rn_hat.dot(rv_hat);
     sin_omega = std::max(-1.0, std::min(1.0, sin_omega));
-
     double omega = asin(sin_omega);
 
     if (!calculate_gradient) {
@@ -258,64 +246,40 @@ inline double calculateOutOfPlaneAngle(
     }
 
     // =========================================================================
-    // ANALYTICAL GRADIENT CALCULATION
+    // ANALYTICAL GRADIENT (gfnff_helpers.f90:450-510, domegadr subroutine)
     // =========================================================================
-    // Reference: external/gfnff/src/gfnff_helpers.f90 (domegadr subroutine)
+    // Exact port of Fortran domegadr — proven translation-invariant:
+    //   Σ(dω/dr_i + dω/dr_j + dω/dr_k + dω/dr_l) = 0 (algebraically verified)
 
     gradient = Matrix::Zero(4, 3);
 
-    double cos_omega = cos(omega);
-    if (std::abs(cos_omega) < epsilon) {
-        // At extrema (ω = ±π/2), derivatives are zero
-        if (calculate_gradient) {
-            gradient.setZero();
-        }
+    double cos_omega_val = cos(omega);
+    double nenner = rnn * rvn * cos_omega_val;
+    if (std::abs(nenner) < 1e-14) {
+        gradient.setZero();
         return omega;
     }
 
-    // CRITICAL FIX (Feb 2026): Stricter threshold for aromatic systems
-    // Planar sp² carbons (benzene) have ω ≈ 0 → division risks
-    // Raised from 1e-8 to 1e-6 for safety margin
-    if (r_il_norm < 1e-6) {
-        // r_il too small for stable gradient calculation
-        if (calculate_gradient) {
-            gradient.setZero();
-        }
-        return omega;
-    }
+    double onenner = 1.0 / nenner;
+    double sin_omega_val = sin(omega);
 
-    // Gradient formula (simplified):
-    // ∂ω/∂r = (1/cosω) * d(sinω)/dr
+    Eigen::Vector3d rdme = rd - re;  // = r_k - r_i
 
-    double factor = 1.0 / cos_omega;
+    // Cross products (gfnff_helpers.f90:477-482)
+    Eigen::Vector3d rve   = rv.cross(re);
+    Eigen::Vector3d rne   = rn.cross(re);
+    Eigen::Vector3d rdv   = rd.cross(rv);
+    Eigen::Vector3d rdn   = rd.cross(rn);
+    Eigen::Vector3d rvdme = rv.cross(rdme);
+    Eigen::Vector3d rndme = rn.cross(rdme);
 
-    // CRITICAL FIX (Feb 2026): Guard against planar configurations
-    // n_norm ≈ 0 when i-j-k-l are coplanar → division by zero risk
-    if (n_norm < 1e-6) {
-        // Planar configuration: gradient undefined/zero
-        if (calculate_gradient) {
-            gradient.setZero();
-        }
-        return omega;
-    }
-
-    // Cross product derivatives
-    // ∂n/∂r_j = r_ik × I  (where I is 3×3 identity applied as cross product)
-    // ∂n/∂r_k = I × r_ij
-
-    // Simplified gradient (for numerical stability, use finite differences approach)
-    // In practice, UFF::OutOfPlane provides good gradients
-    // For now, use similar structure to UFF implementation
-
-    // Note: Full analytical gradient is complex
-    // For production use, consider numerical gradients or UFF::OutOfPlane structure
-    Eigen::Vector3d cross_jk = r_ij.cross(r_ik);
-    Eigen::Vector3d cross_il_n = r_il.cross(n_normalized);
-
-    gradient.row(0) = factor * cross_il_n / n_norm;
-    gradient.row(1) = -factor * (r_ik.cross(r_il)) / (n_norm * r_il_norm);
-    gradient.row(2) = -factor * (r_il.cross(r_ij)) / (n_norm * r_il_norm);
-    gradient.row(3) = factor * cross_jk / (n_norm * r_il_norm);
+    // Gradient formulas (gfnff_helpers.f90:489-499)
+    // row(0) = dω/dr_i (center), row(1) = dω/dr_j (nb1),
+    // row(2) = dω/dr_k (nb2),    row(3) = dω/dr_l (nb3)
+    gradient.row(0) = onenner * (rdv - rn - sin_omega_val * (rvn / rnn * rdn - rnn / rvn * rv));
+    gradient.row(1) = onenner * (rvdme - sin_omega_val * rvn / rnn * rndme);
+    gradient.row(2) = onenner * (rve   - sin_omega_val * rvn / rnn * rne);
+    gradient.row(3) = onenner * (rn    - sin_omega_val * rnn / rvn * rv);
 
     return omega;
 }
