@@ -117,6 +117,20 @@ void ForceField::distributeEEQCharges(const Vector& charges)
     }
 }
 
+// Claude Generated (Feb 21, 2026): Distribute Phase-1 topology charges for BATM
+// Reference: Fortran gfnff_engrad.F90:620 uses topo%qa (Phase-1, fixed) for BATM
+// CRITICAL: BATM must use Phase-1 charges (fixed at init), not Phase-2 EEQ charges (geometry-dependent)
+void ForceField::distributeTopologyCharges(const Vector& charges)
+{
+    // Store topology charges for caching
+    m_topology_charges = charges;
+
+    // Distribute to all threads for BATM calculation
+    for (int i = 0; i < m_stored_threads.size(); ++i) {
+        m_stored_threads[i]->setTopologyCharges(charges);
+    }
+}
+
 // Claude Generated (Jan 18, 2026): Distribute D3 coordination numbers to all threads
 // Reference: Fortran gfnff_engrad.F90:432 - CN recalculated at each energy evaluation
 void ForceField::distributeD3CN(const Vector& d3_cn)
@@ -145,6 +159,17 @@ void ForceField::distributeCNandDerivatives(const Vector& cn, const Vector& cnf,
         m_stored_threads[i]->setCN(cn);
         m_stored_threads[i]->setCNF(cnf);
         m_stored_threads[i]->setCNDerivatives(dcn);
+    }
+}
+
+// Claude Generated (Feb 22, 2026): Distribute only CN to threads for energy-only evaluations
+// This ensures bond dynamic r0 (depends on CN) uses current geometry CN, not stale gradient-time values.
+// Reference: CalculateGFNFFBondContribution uses m_cn for r0 = (r0_base + cnfak*cn_i + ...)
+void ForceField::distributeCNOnly(const Vector& cn)
+{
+    m_cn = cn;
+    for (int i = 0; i < static_cast<int>(m_stored_threads.size()); ++i) {
+        m_stored_threads[i]->setCN(cn);
     }
 }
 
@@ -869,6 +894,13 @@ void ForceField::setGFNFFCoulombs(const json& coulombs)
         coul.gamma_ij = coul_json["gamma_ij"];
         coul.chi_i = coul_json.value("chi_i", 0.0);      // Default to 0 if missing (backward compat)
         coul.chi_j = coul_json.value("chi_j", 0.0);
+        // Claude Generated (Feb 22, 2026): Dynamic Coulomb chi reconstruction fields
+        // chi_base = -chi+dxi (WITHOUT cnf*sqrt(cn)), cnf = per-atom CN correction factor
+        // Falls back to static chi_i/chi_j and cnf=0 for legacy parameter files
+        coul.chi_base_i = coul_json.value("chi_base_i", coul.chi_i);
+        coul.chi_base_j = coul_json.value("chi_base_j", coul.chi_j);
+        coul.cnf_i = coul_json.value("cnf_i", 0.0);
+        coul.cnf_j = coul_json.value("cnf_j", 0.0);
         coul.gam_i = coul_json.value("gam_i", 0.0);      // Chemical hardness
         coul.gam_j = coul_json.value("gam_j", 0.0);
         coul.alp_i = coul_json.value("alp_i", 0.0);
@@ -878,8 +910,36 @@ void ForceField::setGFNFFCoulombs(const json& coulombs)
         m_gfnff_coulombs.push_back(coul);
     }
 
+    // Claude Generated (Feb 23, 2026): Extract per-atom Coulomb parameters from pairs
+    // for parent-level TERM 2+3 (thread-count-independent self-energy computation)
+    m_coulomb_chi_base = Vector::Zero(m_natoms);
+    m_coulomb_gam = Vector::Zero(m_natoms);
+    m_coulomb_alp = Vector::Zero(m_natoms);
+    m_coulomb_cnf = Vector::Zero(m_natoms);
+    m_coulomb_chi_static = Vector::Zero(m_natoms);
+    std::vector<bool> atom_seen(m_natoms, false);
+    for (const auto& coul : m_gfnff_coulombs) {
+        if (!atom_seen[coul.i]) {
+            m_coulomb_chi_base(coul.i) = coul.chi_base_i;
+            m_coulomb_gam(coul.i) = coul.gam_i;
+            m_coulomb_alp(coul.i) = coul.alp_i;
+            m_coulomb_cnf(coul.i) = coul.cnf_i;
+            m_coulomb_chi_static(coul.i) = coul.chi_i;
+            atom_seen[coul.i] = true;
+        }
+        if (!atom_seen[coul.j]) {
+            m_coulomb_chi_base(coul.j) = coul.chi_base_j;
+            m_coulomb_gam(coul.j) = coul.gam_j;
+            m_coulomb_alp(coul.j) = coul.alp_j;
+            m_coulomb_cnf(coul.j) = coul.cnf_j;
+            m_coulomb_chi_static(coul.j) = coul.chi_j;
+            atom_seen[coul.j] = true;
+        }
+    }
+
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF Coulomb pairs", m_gfnff_coulombs.size()));
+        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF Coulomb pairs, extracted per-atom params for {} atoms",
+            m_gfnff_coulombs.size(), m_natoms));
     }
 }
 
@@ -1007,13 +1067,22 @@ void ForceField::updateGFNFFHBonds(const json& hbonds)
         m_gfnff_hbonds.push_back(bond);
     }
 
-    // Distribute to all threads
-    for (auto* thread : m_stored_threads) {
-        thread->setGFNFFHBonds(m_gfnff_hbonds);
+    // Distribute to threads using modulo-based partitioning (must match initial distribution)
+    // Claude Generated (Feb 23, 2026): Fix thread-scaling bug — was broadcasting all HBs to all threads
+    int thread_count = static_cast<int>(m_stored_threads.size());
+    for (int t = 0; t < thread_count; ++t) {
+        std::vector<GFNFFHydrogenBond> thread_hbs;
+        for (const auto& hb : m_gfnff_hbonds) {
+            if ((hb.i + hb.j + hb.k) % thread_count == t) {
+                thread_hbs.push_back(hb);
+            }
+        }
+        m_stored_threads[t]->setGFNFFHBonds(thread_hbs);
     }
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::success(fmt::format("Updated HB list: {} bonds", m_gfnff_hbonds.size()));
+        CurcumaLogger::success(fmt::format("Updated HB list: {} bonds distributed to {} threads",
+                                           m_gfnff_hbonds.size(), thread_count));
     }
 }
 
@@ -1050,13 +1119,22 @@ void ForceField::updateGFNFFXBonds(const json& xbonds)
         m_gfnff_xbonds.push_back(bond);
     }
 
-    // Distribute to all threads
-    for (auto* thread : m_stored_threads) {
-        thread->setGFNFFHalogenBonds(m_gfnff_xbonds);
+    // Distribute to threads using modulo-based partitioning (must match initial distribution)
+    // Claude Generated (Feb 23, 2026): Fix thread-scaling bug — was broadcasting all XBs to all threads
+    int thread_count = static_cast<int>(m_stored_threads.size());
+    for (int t = 0; t < thread_count; ++t) {
+        std::vector<GFNFFHalogenBond> thread_xbs;
+        for (const auto& xb : m_gfnff_xbonds) {
+            if ((xb.i + xb.j + xb.k) % thread_count == t) {
+                thread_xbs.push_back(xb);
+            }
+        }
+        m_stored_threads[t]->setGFNFFHalogenBonds(thread_xbs);
     }
 
     if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::success(fmt::format("Updated XB list: {} bonds", m_gfnff_xbonds.size()));
+        CurcumaLogger::success(fmt::format("Updated XB list: {} bonds distributed to {} threads",
+                                           m_gfnff_xbonds.size(), thread_count));
     }
 }
 
@@ -1315,21 +1393,8 @@ void ForceField::AutoRanges()
                 thread->addGFNFFCoulomb(m_gfnff_coulombs[j]);
             }
 
-            // Phase 6: Distribute atoms for self-energy calculation (Claude Generated Dec 2025)
-            // CRITICAL: Each atom assigned to EXACTLY ONE thread to avoid duplicate self-energy
-            // Distribute all atoms (0 to natoms-1) across threads
-            int start_atom = int(i * m_natoms / double(free_threads));
-            int end_atom = int((i + 1) * m_natoms / double(free_threads));
-            std::vector<int> assigned_atoms;
-            for (int atom_id = start_atom; atom_id < end_atom; ++atom_id) {
-                assigned_atoms.push_back(atom_id);
-            }
-            thread->assignAtomsForSelfEnergy(assigned_atoms);
-
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::param(fmt::format("thread_{}_atoms_for_self_energy", i),
-                    fmt::format("[{}, {}) = {} atoms", start_atom, end_atom, assigned_atoms.size()));
-            }
+            // NOTE (Feb 23, 2026): Self-energy atom assignment removed — TERM 2+3 and Term 1b
+            // are now computed sequentially in the parent reduction step (thread-count-independent).
         }
 
         // Claude Generated (December 19, 2025): UFF-D3 native D3 dispersion distribution
@@ -1789,6 +1854,10 @@ json ForceField::exportCurrentParameters() const
             c["gamma_ij"] = coul.gamma_ij;
             c["chi_i"] = coul.chi_i;
             c["chi_j"] = coul.chi_j;
+            c["chi_base_i"] = coul.chi_base_i;
+            c["chi_base_j"] = coul.chi_base_j;
+            c["cnf_i"] = coul.cnf_i;
+            c["cnf_j"] = coul.cnf_j;
             c["gam_i"] = coul.gam_i;
             c["gam_j"] = coul.gam_j;
             c["alp_i"] = coul.alp_i;
@@ -2188,6 +2257,37 @@ double ForceField::Calculate(bool gradient)
         m_gradient += m_stored_threads[i]->Gradient();
     }
 
+    // =========================================================================
+    // Claude Generated (Feb 23, 2026): TERM 2+3 Coulomb self-energy (sequential, thread-count-independent)
+    // Reference: Fortran gfnff_engrad.F90:1678-1679
+    // Moved out of threads to eliminate atom_to_params coupling with pair distribution.
+    // O(N) — negligible cost compared to O(N²) pairwise TERM 1 in threads.
+    // =========================================================================
+    if ((m_method == "gfnff" || m_method == "cgfnff") &&
+        m_coulomb_gam.size() == m_natoms && m_eeq_charges.size() == m_natoms) {
+        const double sqrt_2_over_pi = 0.797884560802865;
+        double E_en = 0.0, E_self = 0.0;
+        for (int i = 0; i < m_natoms; ++i) {
+            // Skip atoms not present in any Coulomb pair (alp==0 → division by zero)
+            if (m_coulomb_alp(i) <= 0.0) continue;
+            double q = m_eeq_charges(i);
+            if (std::isnan(q)) continue;
+            // Dynamic chi_eff = chi_base + cnf * sqrt(cn_current)
+            double chi;
+            if (m_coulomb_cnf(i) != 0.0 && m_cn.size() == m_natoms) {
+                chi = m_coulomb_chi_base(i) + m_coulomb_cnf(i) * std::sqrt(std::max(m_cn(i), 0.0));
+            } else {
+                chi = m_coulomb_chi_static(i);
+            }
+            E_en -= q * chi;
+            E_self += 0.5 * q * q * (m_coulomb_gam(i) + sqrt_2_over_pi / std::sqrt(m_coulomb_alp(i)));
+        }
+        m_coulomb_energy += E_en + E_self;
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("  Coulomb self-energy (parent): EN={:+.12f}, Self={:+.12f} Eh", E_en, E_self));
+        }
+    }
+
     // Claude Generated (Feb 15, 2026): Apply dE/dCN chain-rule gradient for bond dr0/dCN and dispersion dC6/dCN
     // Reference: Fortran gfnff_engrad.F90:973-974 (bond), gfnff_gdisp0.f90:393-395 (dispersion)
     //
@@ -2215,6 +2315,30 @@ double ForceField::Calculate(bool gradient)
                 CurcumaLogger::info(fmt::format("dEdcn chain-rule: |dEdcn| = {:.6e}, max = {:.6e}",
                     dEdcn_norm, dEdcn_total.cwiseAbs().maxCoeff()));
             }
+        }
+    }
+
+    // =========================================================================
+    // Claude Generated (Feb 23, 2026): Term 1b — Coulomb charge derivative gradient via CN (sequential)
+    // Reference: Fortran gfnff_engrad.F90:449-454: g -= dcn * qtmp
+    // where qtmp(i) = q(i) * cnf(i) / (2*sqrt(cn(i)) + 1e-16)
+    // Moved out of threads for thread-count independence (operates on all atoms).
+    // =========================================================================
+    if (gradient && (m_method == "gfnff" || m_method == "cgfnff") &&
+        !m_dcn.empty() && m_dcn.size() == 3 &&
+        m_eeq_charges.size() == m_natoms && m_cnf.size() == m_natoms && m_cn.size() == m_natoms) {
+        Vector qtmp = Vector::Zero(m_natoms);
+        for (int i = 0; i < m_natoms; ++i) {
+            double cn_i = std::max(m_cn(i), 0.0);
+            qtmp(i) = m_eeq_charges(i) * m_cnf(i) / (2.0 * std::sqrt(cn_i) + 1e-16);
+        }
+        for (int dim = 0; dim < 3; ++dim) {
+            if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
+                m_gradient.col(dim) -= m_dcn[dim] * qtmp;
+            }
+        }
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Coulomb charge derivative gradient (Term 1b) applied in parent");
         }
     }
 
@@ -2258,6 +2382,22 @@ double ForceField::Calculate(bool gradient)
              m_vdw_energy + m_rep_energy + m_eq_energy + h4_energy + m_gfnff_repulsion +
              cg_energy + m_dispersion_energy + m_coulomb_energy + m_energy_hbond +
              m_energy_xbond + m_atm_energy + m_batm_energy;
+
+    // Claude Generated (Feb 23, 2026): Per-term energy decomposition for thread-count independence check
+    if (CurcumaLogger::get_verbosity() >= 2 && (m_method == "gfnff" || m_method == "cgfnff")) {
+        CurcumaLogger::info(fmt::format(
+            "\n=== THREAD DIAGNOSTIC ({} threads) ===\n"
+            "  bond:       {:+.10f}\n  angle:      {:+.10f}\n  torsion:    {:+.10f}\n"
+            "  inversion:  {:+.10f}\n  repulsion:  {:+.10f}\n  dispersion: {:+.10f}\n"
+            "  coulomb:    {:+.10f}\n  hbond:      {:+.10f}\n  xbond:      {:+.10f}\n"
+            "  atm:        {:+.10f}\n  batm:       {:+.10f}\n  h4:         {:+.10f}\n"
+            "  e0:         {:+.10f}",
+            m_stored_threads.size(),
+            m_bond_energy, m_angle_energy, m_dihedral_energy,
+            m_inversion_energy, m_gfnff_repulsion, m_dispersion_energy,
+            m_coulomb_energy, m_energy_hbond, m_energy_xbond,
+            m_atm_energy, m_batm_energy, h4_energy, m_e0));
+    }
 
     // Claude Generated (2025): Debug total GFN-FF energies
     if (CurcumaLogger::get_verbosity() >= 3 && (m_dispersion_energy != 0.0 || m_coulomb_energy != 0.0)) {
