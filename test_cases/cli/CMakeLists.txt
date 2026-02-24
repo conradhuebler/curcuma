@@ -102,6 +102,7 @@ add_cli_test(simplemd 05_spheric_wall)
 add_cli_test(simplemd 06_alias_temperature)
 add_cli_test(simplemd 07_restart_simulation)
 add_cli_test(simplemd 08_gfnff_acetic_acid_dimer_md)
+add_cli_test(simplemd 09_xtbgfnff_acetic_acid_dimer_md)
 
 # =============================================================================
 # CG (Coarse Graining) Tests (1 scenario)

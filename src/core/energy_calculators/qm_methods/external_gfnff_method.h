@@ -45,6 +45,9 @@ public:
     void setParameters(const json& params) override;
     json getParameters() const override;
     bool hasError() const override { return false; }
+    void clearError() override {}
+    std::string getErrorMessage() const override { return ""; }
+    json getEnergyDecomposition() const override { return json{}; }
 
 private:
     std::unique_ptr<GFNFFInterface> m_interface;
