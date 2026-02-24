@@ -7,7 +7,7 @@
 Two critical fixes were implemented to align Curcuma's native GFN-FF dispersion calculations with the XTB reference implementation:
 
 1. **D4 Weighting Corrected**: Changed from CN+charge weighting to CN-only weighting (matches Fortran reference)
-2. **D4 Now Default**: Changed default dispersion method from D3 to D4 for cgfnff
+2. **D4 Now Default**: Changed default dispersion method from D3 to D4 for gfnff
 
 ## Technical Details
 
@@ -77,13 +77,13 @@ if (method_name.find("-d3") != std::string::npos) {
 ```
 
 **Impact**:
-- cgfnff now uses D4 Casimir-Polder integration by default (correct GFN-FF approach)
+- gfnff now uses D4 Casimir-Polder integration by default (correct GFN-FF approach)
 - D3 still available via `-d3` suffix for legacy compatibility and debugging
 - Matches XTB 6.6.1 GFN-FF behavior
 
 ## Breaking Changes
 
-**IMPORTANT**: All cgfnff dispersion energies will change after this fix.
+**IMPORTANT**: All gfnff dispersion energies will change after this fix.
 
 ### Before (Incorrect):
 - Default method: D3 (static lookup tables)
@@ -100,13 +100,13 @@ if (method_name.find("-d3") != std::string::npos) {
 **For users needing old behavior**:
 ```bash
 # Use explicit D3 method (legacy compatibility)
-./curcuma -sp molecule.xyz -method cgfnff-d3
+./curcuma -sp molecule.xyz -method gfnff-d3
 ```
 
 **For users wanting new correct behavior**:
 ```bash
 # Default is now D4 (no suffix needed)
-./curcuma -sp molecule.xyz -method cgfnff
+./curcuma -sp molecule.xyz -method gfnff
 ```
 
 ## Validation Results
@@ -123,7 +123,7 @@ if (method_name.find("-d3") != std::string::npos) {
 
 **CLI single point test**:
 ```bash
-./curcuma -sp CH3OCH3.xyz -method cgfnff -verbosity 3
+./curcuma -sp CH3OCH3.xyz -method gfnff -verbosity 3
 D4_energy: -0.001647 Eh
 GFNFF_dispersion: -0.001647 Eh
 ```
@@ -226,7 +226,7 @@ The fix maintains the consolidated D4 architecture:
 **Version**: January 17, 2026
 **Commits**:
 - `fix(gfnff): Correct D4 weighting to CN-only (matches Fortran reference)`
-- `feat(gfnff): Set D4 as default dispersion method for cgfnff`
+- `feat(gfnff): Set D4 as default dispersion method for gfnff`
 
 **Changes**:
 1. D4 Gaussian weighting: CN+charge → CN-only (d4param_generator.cpp:844)
@@ -234,7 +234,7 @@ The fix maintains the consolidated D4 architecture:
 3. Documentation: Added GFNFF_DISPERSION_FIX.md with technical details
 4. Updated GFNFF_STATUS.md dispersion section
 
-**Impact**: All cgfnff dispersion energies change to match Fortran reference implementation.
+**Impact**: All gfnff dispersion energies change to match Fortran reference implementation.
 
 ---
 

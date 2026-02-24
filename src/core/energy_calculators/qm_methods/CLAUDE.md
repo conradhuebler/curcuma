@@ -14,7 +14,7 @@ qm_methods/
 ├── qm_driver.cpp/h           # Base driver for matrix-based QM methods
 ├── eht.cpp/h                 # Extended Hückel Theory implementation
 ├── eht_parameters.cpp/h      # EHT parameter database
-├── gfnff.cpp/h               # Native GFN-FF implementation (cgfnff)
+├── gfnff.cpp/h               # Native GFN-FF implementation (gfnff)
 ├── gfnff_advanced.cpp/h      # Advanced GFN-FF features
 ├── xtbinterface.cpp/h        # XTB method interface
 ├── tbliteinterface.cpp/h     # TBLite method interface
@@ -51,7 +51,7 @@ Base class for matrix-based quantum methods providing:
 
 ### Native Methods
 - **Extended Hückel Theory (EHT)**: Complete semi-empirical implementation
-- **Native GFN-FF (cgfnff)**: Curcuma's own GFN-FF implementation (WORK IN PROGRESS)
+- **Native GFN-FF (gfnff)**: Curcuma's own GFN-FF implementation (WORK IN PROGRESS)
 
 ### External Interfaces
 - **XTB Interface**: Extended tight-binding methods (GFN-FF, GFN1, GFN2)
@@ -68,7 +68,7 @@ Base class for matrix-based quantum methods providing:
 
 Methods are routed via `SwitchMethod()` in energycalculator.cpp:
 ```cpp
-case 9: GFNFF (cgfnff)      // Native GFN-FF - WORK IN PROGRESS
+case 9: GFNFF (gfnff)      // Native GFN-FF - WORK IN PROGRESS
 case 6: EHT                 // Extended Hückel Theory
 case 4: DFT-D3              // Dispersion corrections
 case 3: Ulysses             // Semi-empirical methods
@@ -142,7 +142,7 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 - **✅ EHT Implementation**: Fully functional with orbital analysis and verbosity control
 - **✅ XTB/TBLite Interfaces**: Native library verbosity synchronized with CurcumaLogger
 - **✅ Ulysses Interface**: Complete CurcumaLogger integration with SCF progress
-- **🔧 Native GFN-FF (cgfnff)**: Architecture complete, parameter debugging in progress
+- **🔧 Native GFN-FF (gfnff)**: Architecture complete, parameter debugging in progress
 
 ### Verbosity Integration Status ✅
 - **✅ EHT**: Complete integration with `printOrbitalAnalysisVerbose()` for Level 2
@@ -159,7 +159,7 @@ if (CurcumaLogger::get_verbosity() >= 3) {
   - Impact: Seldom used, low priority for migration
   - Solution: Add ConfigManager overloads with delegating JSON constructors (Pattern established in Phase 3B)
 
-#### Native GFN-FF (cgfnff)
+#### Native GFN-FF (gfnff)
 - **Parameter Generation**: JSON serialization creates null values for some parameters
 - **Placeholder Parameters**: Missing real GFN-FF force field parameters from literature
 - **Validation**: Incomplete parameter consistency checks with external GFN-FF reference

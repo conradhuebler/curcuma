@@ -333,7 +333,7 @@ void ForceField::setParameter(const json& parameters)
     int method_type = 1; // default UFF
     if (m_method == "qmdff" || m_method == "quff") {
         method_type = 2;
-    } else if (m_method == "gfnff" || m_method == "cgfnff") {  // Claude Generated (Dec 2025): Accept both gfnff and cgfnff
+    } else if (m_method == "gfnff") {
         method_type = 3; // GFN-FF
     } else if (m_method == "cg" || m_method == "cg-lj") {
         method_type = 4; // CG methods
@@ -1304,7 +1304,7 @@ void ForceField::AutoRanges()
             thread->setMethod(1);
         } else if (std::find(m_qmdff_methods.begin(), m_qmdff_methods.end(), m_method) != m_qmdff_methods.end()) {
             thread->setMethod(2);
-        } else if (m_method == "gfnff" || m_method == "cgfnff") { // Claude Generated (2025-12-13): Support both method names
+        } else if (m_method == "gfnff") {
             thread->setMethod(3); // GFN-FF
 
             // Phase 2: Configure GFN-FF parameter flags (Claude Generated Dec 2025)
@@ -1329,7 +1329,7 @@ void ForceField::AutoRanges()
         }
 
         for (int j = int(i * m_bonds.size() / double(free_threads)); j < int((i + 1) * m_bonds.size() / double(free_threads)); ++j) {
-            if (m_method == "gfnff" || m_method == "cgfnff") { // Claude Generated (2025-12-13): Support both method names
+            if (m_method == "gfnff") {
                 thread->addGFNFFBond(m_bonds[j]);
             } else {
                 thread->addBond(m_bonds[j]);
@@ -1337,7 +1337,7 @@ void ForceField::AutoRanges()
         }
 
         for (int j = int(i * m_angles.size() / double(free_threads)); j < int((i + 1) * m_angles.size() / double(free_threads)); ++j) {
-            if (m_method == "gfnff" || m_method == "cgfnff") {
+            if (m_method == "gfnff") {
                 thread->addGFNFFAngle(m_angles[j]);
             } else {
                 thread->addAngle(m_angles[j]);
@@ -1345,7 +1345,7 @@ void ForceField::AutoRanges()
         }
 
         for (int j = int(i * m_dihedrals.size() / double(free_threads)); j < int((i + 1) * m_dihedrals.size() / double(free_threads)); ++j) {
-            if (m_method == "gfnff" || m_method == "cgfnff") {
+            if (m_method == "gfnff") {
                 thread->addGFNFFDihedral(m_dihedrals[j]);
             } else {
                 thread->addDihedral(m_dihedrals[j]);
@@ -1354,13 +1354,13 @@ void ForceField::AutoRanges()
 
         // Claude Generated (Jan 2, 2026): Distribute extra sp3-sp3 gauche torsions
         for (int j = int(i * m_extra_dihedrals.size() / double(free_threads)); j < int((i + 1) * m_extra_dihedrals.size() / double(free_threads)); ++j) {
-            if (m_method == "gfnff" || m_method == "cgfnff") {
+            if (m_method == "gfnff") {
                 thread->addGFNFFExtraTorsion(m_extra_dihedrals[j]);
             }
         }
 
         for (int j = int(i * m_inversions.size() / double(free_threads)); j < int((i + 1) * m_inversions.size() / double(free_threads)); ++j) {
-            if (m_method == "gfnff" || m_method == "cgfnff") {
+            if (m_method == "gfnff") {
                 thread->addGFNFFInversion(m_inversions[j]);
             } else {
                 thread->addInversion(m_inversions[j]);
@@ -1368,7 +1368,7 @@ void ForceField::AutoRanges()
         }
 
         for (int j = int(i * m_vdWs.size() / double(free_threads)); j < int((i + 1) * m_vdWs.size() / double(free_threads)); ++j) {
-            if (m_method == "gfnff" || m_method == "cgfnff") {
+            if (m_method == "gfnff") {
                 thread->addGFNFFvdW(m_vdWs[j]);
             } else {
                 thread->addvdW(m_vdWs[j]);
@@ -1377,7 +1377,7 @@ void ForceField::AutoRanges()
 
         // Phase 4.2: Distribute GFN-FF pairwise non-bonded interactions (Claude Generated 2025)
         // Phase 2.2 (December 19, 2025): Extended for UFF-D3 native dispersion
-        if (m_method == "gfnff" || m_method == "cgfnff" || m_method == "d3") { // Claude Generated (2025-12-13): Support both method names and D3 method
+        if (m_method == "gfnff" || m_method == "d3") {
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::info(fmt::format("Distributing {} GFN-FF dispersion pairs to thread {}", m_gfnff_dispersions.size(), i));
             }
@@ -1608,7 +1608,7 @@ bool ForceField::loadParametersFromFile(const std::string& filename)
 
             // Claude Generated (December 2025): Additional validation for GFN-FF/D4 parameters
             std::string method = loaded_params["method"].get<std::string>();
-            if (method == "cgfnff" || method == "gfnff") {
+            if (method == "gfnff") {
                 if (loaded_params.contains("gfnff_dispersions")) {
                     CurcumaLogger::param("gfnff_dispersions", static_cast<int>(loaded_params["gfnff_dispersions"].size()));
                 }
@@ -2148,7 +2148,7 @@ double ForceField::Calculate(bool gradient)
     // Claude Generated (Jan 18, 2026): Recalculate GFN-FF CN for dynamic r0
     // Reference: Fortran gfnff_engrad.F90:432 - CN recalculated at each energy evaluation
     // This is CRITICAL for accurate bond energies - r0 depends on current CN
-    if (m_method == "cgfnff" || m_method == "gfnff") {
+    if (m_method == "gfnff") {
         // Calculate GFN-FF CN from current geometry (Bohr)
         // Note: GFN-FF uses specific coordination numbers for radii recalculation
         std::vector<double> gfn_cn = CNCalculator::calculateGFNFFCN(m_atom_types, m_geometry);
@@ -2269,7 +2269,7 @@ double ForceField::Calculate(bool gradient)
     // Moved out of threads to eliminate atom_to_params coupling with pair distribution.
     // O(N) — negligible cost compared to O(N²) pairwise TERM 1 in threads.
     // =========================================================================
-    if ((m_method == "gfnff" || m_method == "cgfnff") &&
+    if ((m_method == "gfnff") &&
         m_coulomb_gam.size() == m_natoms && m_eeq_charges.size() == m_natoms) {
         const double sqrt_2_over_pi = 0.797884560802865;
         double E_en = 0.0, E_self = 0.0;
@@ -2330,7 +2330,7 @@ double ForceField::Calculate(bool gradient)
     // where qtmp(i) = q(i) * cnf(i) / (2*sqrt(cn(i)) + 1e-16)
     // Moved out of threads for thread-count independence (operates on all atoms).
     // =========================================================================
-    if (gradient && (m_method == "gfnff" || m_method == "cgfnff") &&
+    if (gradient && (m_method == "gfnff") &&
         !m_dcn.empty() && m_dcn.size() == 3 &&
         m_eeq_charges.size() == m_natoms && m_cnf.size() == m_natoms && m_cn.size() == m_natoms) {
         Vector qtmp = Vector::Zero(m_natoms);
@@ -2390,7 +2390,7 @@ double ForceField::Calculate(bool gradient)
              m_energy_xbond + m_atm_energy + m_batm_energy;
 
     // Claude Generated (Feb 23, 2026): Per-term energy decomposition for thread-count independence check
-    if (CurcumaLogger::get_verbosity() >= 2 && (m_method == "gfnff" || m_method == "cgfnff")) {
+    if (CurcumaLogger::get_verbosity() >= 2 && (m_method == "gfnff")) {
         CurcumaLogger::info(fmt::format(
             "\n=== THREAD DIAGNOSTIC ({} threads) ===\n"
             "  bond:       {:+.10f}\n  angle:      {:+.10f}\n  torsion:    {:+.10f}\n"

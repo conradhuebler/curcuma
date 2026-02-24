@@ -46,7 +46,7 @@ using json = nlohmann::json;
  * - Consistent parameter handling and error reporting
  * 
  * Supported methods:
- * - Force Fields: uff, uff-d3, qmdff, cgfnff (native GFN-FF)
+ * - Force Fields: uff, uff-d3, qmdff, gfnff (native GFN-FF)
  * - Quantum Methods: eht, gfn1, gfn2, ipea1
  * - External Libraries: XTB, TBLite, Ulysses methods
  * - Dispersion: d3, d4 corrections
@@ -57,7 +57,7 @@ class EnergyCalculator {
 public:
     /**
      * @brief Constructor with method and JSON configuration (backward compatible)
-     * @param method Method name (e.g., "gfn2", "uff", "eht", "cgfnff")
+     * @param method Method name (e.g., "gfn2", "uff", "eht", "gfnff")
      * @param controller JSON configuration
      */
     EnergyCalculator(const std::string& method, const json& controller);
@@ -251,7 +251,7 @@ public:
      * @brief Get complete energy decomposition as JSON
      * @return JSON object with all energy components in Hartree
      *
-     * For Force Field methods (UFF, QMDFF, cgfnff) returns all applicable terms.
+     * For Force Field methods (UFF, QMDFF, gfnff) returns all applicable terms.
      * For QM methods returns zero for all components (native implementations pending).
      */
     json getEnergyDecomposition() const;

@@ -50,7 +50,7 @@ src/
 ## Variable Section
 
 ### Current Development Focus
-- Native GFN-FF implementation (`cgfnff`) debugging in core/qm_methods/
+- Native GFN-FF implementation (`gfnff`) debugging in core/qm_methods/
 - Universal parameter caching system completed and working
 - Enhanced force field multi-threading support
 

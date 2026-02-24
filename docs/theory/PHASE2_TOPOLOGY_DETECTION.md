@@ -486,10 +486,10 @@ cd /home/user/curcuma/build
 make -j4
 
 # Test topology detection
-./curcuma -sp docs/validation/benzene.xyz -method cgfnff -verbosity 3
+./curcuma -sp docs/validation/benzene.xyz -method gfnff -verbosity 3
 # Should show: 6-membered rings, aromatic, sp2 hybridization
 
-./curcuma -sp docs/validation/cyclopropane.xyz -method cgfnff -verbosity 3
+./curcuma -sp docs/validation/cyclopropane.xyz -method gfnff -verbosity 3
 # Should show: 3-membered rings, ring strain corrections
 
 # Compare with Fortran GFN-FF

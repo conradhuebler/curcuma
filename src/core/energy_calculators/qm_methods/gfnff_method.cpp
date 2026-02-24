@@ -22,8 +22,8 @@
 
 GFNFFComputationalMethod::GFNFFComputationalMethod(const std::string& method_name, const json& config)
     : m_parameters(config)
+    , m_method_name(method_name)
 {
-    (void)method_name; // Unused parameter
     m_gfnff = std::make_unique<GFNFF>(config);
 }
 

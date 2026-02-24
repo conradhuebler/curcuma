@@ -45,15 +45,15 @@ using namespace std;
 // =================================================================================
 
 const std::vector<std::string> MethodFactory::m_ff_methods = {
-    "uff", "uff-d3", "d3", "qmdff", "cgfnff", "cgfnff-d3"  // Phase 2.1: Added cgfnff-d3
+    "uff", "uff-d3", "d3", "qmdff", "gfnff", "gfnff-d3"
 };
 
 const std::vector<std::string> MethodFactory::m_tblite_methods = { 
     "ipea1", "gfn1", "gfn2" 
 };
 
-const std::vector<std::string> MethodFactory::m_xtb_methods = { 
-    "gfnff", "xtb-gfn1", "xtb-gfn2" 
+const std::vector<std::string> MethodFactory::m_xtb_methods = {
+    "xtb-gfnff", "xtb-gfn1", "xtb-gfn2"
 };
 
 const std::vector<std::string> MethodFactory::m_ulysses_methods = {
@@ -161,15 +161,25 @@ const std::vector<MethodFactory::MethodPriority>& MethodFactory::getPriorityMeth
 #endif
             } },
 
-        // GFN-FF: Priority External GFN-FF > XTB > Native cgfnff
+        // gfnff: always native C++ implementation, no fallback to XTB
         {
             "gfnff",
-            { 
-               #ifdef USE_GFNFF 
+            {
+                { "Native", [](const json& config) { return std::make_unique<GFNFFComputationalMethod>("gfnff", config); } }
+            }
+        },
+
+        // xtb-gfnff: Fortran/external GFN-FF — Priority: external/gfnff (USE_GFNFF) > XTB (USE_XTB)
+        //   No native C++ fallback — use "gfnff" for that
+        {
+            "xtb-gfnff",
+            {
+#ifdef USE_GFNFF
                 { "External GFN-FF", [](const json& config) { return hasGFNFF() ? std::make_unique<ExternalGFNFFMethod>(config) : nullptr; } },
-                #endif
-                { "XTB", [](const json& config) { return hasXTB() ? std::make_unique<XTBMethod>("gfnff", config) : nullptr; } },
-                { "Native", [](const json& config) { return std::make_unique<GFNFFComputationalMethod>("cgfnff", config); } } } }
+#endif
+                { "XTB", [](const json& config) { return hasXTB() ? std::make_unique<XTBMethod>("gfnff", config) : nullptr; } }
+            }
+        }
     };
 
     return priority_methods;
@@ -181,8 +191,8 @@ const std::vector<MethodFactory::ExplicitMethod>& MethodFactory::getExplicitMeth
         // TODO merge GFNFF method with ForceFieldMethod later
         // Native methods (always available)
         { "eht", [](const json& config) { return std::make_unique<EHTMethod>(config); }, "Native", false, "" },
-        { "cgfnff", [](const json& config) { return std::make_unique<GFNFFComputationalMethod>("cgfnff", config); }, "Native", false, "" },
-        { "cgfnff-d3", [](const json& config) { return std::make_unique<GFNFFComputationalMethod>("cgfnff-d3", config); }, "Native", false, "" },  // Phase 2.1: D3 explicit
+        { "gfnff", [](const json& config) { return std::make_unique<GFNFFComputationalMethod>("gfnff", config); }, "Native", false, "" },
+        { "gfnff-d3", [](const json& config) { return std::make_unique<GFNFFComputationalMethod>("gfnff-d3", config); }, "Native", false, "" },
 
         // Force field methods (always available)
         { "uff", [](const json& config) { return std::make_unique<ForceFieldMethod>("uff", config); }, "ForceField", false, "" },
@@ -191,7 +201,7 @@ const std::vector<MethodFactory::ExplicitMethod>& MethodFactory::getExplicitMeth
         { "qmdff", [](const json& config) { return std::make_unique<ForceFieldMethod>("qmdff", config); }, "ForceField", false, "" },
 
         // XTB-specific methods
-        { "gfnff", [](const json& config) { return std::make_unique<XTBMethod>("gfnff", config); }, "XTB", true, "USE_XTB" },
+        { "xtb-gfnff", [](const json& config) { return std::make_unique<XTBMethod>("gfnff", config); }, "XTB", true, "USE_XTB" },
         { "xtb-gfn1", [](const json& config) { return std::make_unique<XTBMethod>("xtb-gfn1", config); }, "XTB", true, "USE_XTB" },
         { "xtb-gfn2", [](const json& config) { return std::make_unique<XTBMethod>("xtb-gfn2", config); }, "XTB", true, "USE_XTB" },
 
@@ -215,7 +225,6 @@ const std::vector<MethodFactory::ExplicitMethod>& MethodFactory::getExplicitMeth
 
         // Native methods
         { "eht", [](const json& config) { return std::make_unique<EHTMethod>(config); }, "EHT", true, "USE_EHT" },
-        { "cgfnff", [](const json& config) { return std::make_unique<GFNFFComputationalMethod>("cgfnff", config); }, "GFN-FF", true, "USE_GFNFF" },
 
         // Dispersion corrections
         { "d4", [](const json& config) { return std::make_unique<DispersionMethod>("d4", config); }, "DFT-D4", true, "USE_D4" }
@@ -235,7 +244,7 @@ const std::vector<MethodFactory::ExplicitMethod>& MethodFactory::getExplicitMeth
  * - TBLite: Modern, fastest GFN methods (gfn1, gfn2, ipea1)
  * - XTB: Established, stable implementation (gfn1, gfn2, gfnff)
  * - Ulysses: Legacy semi-empirical methods (PM3, AM1, ugfn2)
- * - Native: Educational implementations (EHT, cgfnff)
+ * - Native: Educational implementations (EHT, gfnff)
  * - Force Fields: UFF, QMDFF with performance optimizations
  *
  * DECISION: Priority-based factory with hierarchical fallbacks
@@ -254,7 +263,8 @@ const std::vector<MethodFactory::ExplicitMethod>& MethodFactory::getExplicitMeth
  * - "gfn2" → createGFN2() tries TBLite > Ulysses > XTB fallback chain
  * - "eht" → createEHT() → direct EHTMethod wrapper creation
  * - "uff" → createForceField() → ForceFieldMethod with threading support
- * - "cgfnff" → createCGFNFF() → native GFN-FF implementation
+ * - "gfnff" → GFNFFComputationalMethod → native GFN-FF implementation (always available)
+ * - "xtb-gfnff" → ExternalGFNFF or XTBMethod("gfnff") → Fortran/XTB GFN-FF
  *
  * DEBUGGING ENTRY POINTS:
  * - Set verbosity ≥ 2 to see method resolution process and fallback attempts
@@ -487,7 +497,7 @@ void MethodFactory::printAvailableMethods() {
     
     fmt::print("Core Methods (always available):\n");
     fmt::print("  - EHT: Extended Hückel Theory\n");
-    fmt::print("  - cgfnff: Native GFN-FF implementation\n");
+    fmt::print("  - gfnff: Native C++ GFN-FF implementation\n");
     fmt::print("  - ForceField: UFF, QMDFF methods\n");
     
     fmt::print("\nOptional QM Methods:\n");

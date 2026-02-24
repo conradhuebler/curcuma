@@ -34,7 +34,7 @@
  * 
  * Key Features:
  * - Maintains existing CxxThreadPool threading system for optimal performance
- * - Supports all ForceField methods: UFF, UFF-D3, QMDFF, cgfnff
+ * - Supports all ForceField methods: UFF, UFF-D3, QMDFF, gfnff
  * - Preserves universal parameter caching system (96% speedup)
  * - Thread-safe parameter caching control for concurrent calculations
  * - Analytical gradients always available
@@ -45,7 +45,7 @@ class ForceFieldMethod : public ComputationalMethod {
 public:
     /**
      * @brief Constructor with method name and configuration
-     * @param method_name ForceField method ("uff", "uff-d3", "qmdff", "cgfnff")
+     * @param method_name ForceField method ("uff", "uff-d3", "qmdff", "gfnff")
      * @param config JSON configuration (ForceField-specific parameters)
      */
     ForceFieldMethod(const std::string& method_name, const json& config = json{});

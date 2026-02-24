@@ -126,7 +126,7 @@ public:
     
     /**
      * @brief Get method name for identification
-     * @return String identifier (e.g., "eht", "gfn2-xtb", "uff", "cgfnff")
+     * @return String identifier (e.g., "eht", "gfn2-xtb", "uff", "gfnff")
      */
     virtual std::string getMethodName() const = 0;
     
@@ -205,7 +205,7 @@ public:
      * @brief Get complete energy decomposition as JSON
      * @return JSON object with all energy components in Hartree
      *
-     * Force field methods (UFF, QMDFF, cgfnff) return all applicable terms:
+     * Force field methods (UFF, QMDFF, gfnff) return all applicable terms:
      * - Bond, Angle, Torsion, Inversion (bonded terms)
      * - Dispersion, Coulomb (non-bonded terms)
      * - HBond, XBond, ATM, BATM (special terms)

@@ -834,20 +834,20 @@ std::string method = "d3";  // WRONG for GFN-FF reference
 std::string method = "d4";  // Matches Fortran reference
 ```
 
-**Impact**: All cgfnff calculations now use correct dispersion by default
+**Impact**: All gfnff calculations now use correct dispersion by default
 
 **Legacy Compatibility**: D3 still available via explicit `-d3` suffix
 ```bash
 # New default (correct):
-./curcuma -sp molecule.xyz -method cgfnff  # Uses D4
+./curcuma -sp molecule.xyz -method gfnff  # Uses D4
 
 # Legacy D3 (for debugging):
-./curcuma -sp molecule.xyz -method cgfnff-d3  # Uses D3
+./curcuma -sp molecule.xyz -method gfnff-d3  # Uses D3
 ```
 
 ### Breaking Change Notice
 
-⚠️ **BREAKING CHANGE**: All cgfnff dispersion energies will change after this fix.
+⚠️ **BREAKING CHANGE**: All gfnff dispersion energies will change after this fix.
 
 **No backward compatibility** - results change from INCORRECT to CORRECT values.
 
@@ -979,18 +979,18 @@ std::string method = "d4";  // Matches Fortran reference
 
 ### 🔴 H-Bond Dissociation: Acetic Acid Dimer O-H...O Too Weak
 - **Symptom**: O-H bridge H atom (atom 15) reaches 25 Å at ~7.9 ps (seed=42, T=298 K) → EEQ solver receives extreme geometry → NaN crash.
-- **Root Cause**: cgfnff H-bond strength insufficient for acetic acid dimer at 300 K; GFN-FF HB energy terms need investigation.
+- **Root Cause**: gfnff H-bond strength insufficient for acetic acid dimer at 300 K; GFN-FF HB energy terms need investigation.
 - **Confirmed pre-existing**: Identical crash timing in `release/` binary.
-- **Impact**: MD test `08_cgfnff_acetic_acid_dimer_md` fails with single thread; test currently expected to fail.
+- **Impact**: MD test `08_gfnff_acetic_acid_dimer_md` fails with single thread; test currently expected to fail.
 - **Debug command** (reproduce crash, threads=1):
   ```bash
-  curcuma -md external/gfnff/test/acetic_acid_dimer.xyz -method cgfnff \
+  curcuma -md external/gfnff/test/acetic_acid_dimer.xyz -method gfnff \
     -maxtime 1e4 -threads 1 -md.no_restart -md.seed 42 \
     -md.rattle_12 false -md.print_frequency 1000
   ```
 - **Debug command** (thread comparison, threads=2 or 4 — completes but energy wrong):
   ```bash
-  curcuma -md external/gfnff/test/acetic_acid_dimer.xyz -method cgfnff \
+  curcuma -md external/gfnff/test/acetic_acid_dimer.xyz -method gfnff \
     -maxtime 1e4 -threads 4 -md.no_restart -md.seed 42 \
     -md.rattle_12 false -md.print_frequency 1000
   ```

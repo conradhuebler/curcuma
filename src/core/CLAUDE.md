@@ -101,7 +101,7 @@ core/
 ## Variable Section
 
 ### Active Issues
-- cgfnff JSON parameter generation creates null values
+- gfnff JSON parameter generation creates null values
 - Missing real GFN-FF parameters (using placeholders)
 - Memory optimization for large molecular systems (>1000 atoms)
 

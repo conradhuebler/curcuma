@@ -45,7 +45,7 @@ def run_test(mol_name, mol_path):
     print('='*60)
 
     try:
-        # Run curcuma - note: cgfnff may not be recognized, try alternative names
+        # Run curcuma - note: gfnff may not be recognized, try alternative names
         cmd = ["./release/curcuma", mol_path, "-method", "uff"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         output = result.stdout + result.stderr

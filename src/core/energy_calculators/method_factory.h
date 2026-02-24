@@ -44,7 +44,7 @@ class MethodFactory {
 public:
     /**
      * @brief Create computational method based on method name and configuration
-     * @param method_name Method identifier (e.g., "gfn2", "eht", "uff", "cgfnff")
+     * @param method_name Method identifier (e.g., "gfn2", "eht", "uff", "gfnff")
      * @param config JSON configuration for the method
      * @return Unique pointer to computational method or nullptr on failure
      */
@@ -108,9 +108,9 @@ private:
     static std::unique_ptr<ComputationalMethod> createEHT(const json& config);
     
     /**
-     * @brief Create native GFN-FF method (cgfnff)
+     * @brief Create native GFN-FF method (gfnff)
      */
-    static std::unique_ptr<ComputationalMethod> createCGFNFF(const json& config);
+    static std::unique_ptr<ComputationalMethod> createGFNFF(const json& config);
     
     /**
      * @brief Create UFF/QMDFF force field methods
@@ -191,9 +191,9 @@ private:
     // Method Lists (from original EnergyCalculator)
     // =================================================================================
     
-    static const std::vector<std::string> m_ff_methods;      // {"uff", "uff-d3", "qmdff", "cgfnff"}
+    static const std::vector<std::string> m_ff_methods;      // {"uff", "uff-d3", "qmdff", "gfnff"}
     static const std::vector<std::string> m_tblite_methods;  // {"ipea1", "gfn1", "gfn2"}
-    static const std::vector<std::string> m_xtb_methods;     // {"gfnff", "xtb-gfn1", "xtb-gfn2"}
+    static const std::vector<std::string> m_xtb_methods;     // {"xtb-gfnff", "xtb-gfn1", "xtb-gfn2"}
     static const std::vector<std::string> m_ulysses_methods; // {"ugfn2", "GFN2L", "pm3", "PM3PDDG", ...}
     static const std::vector<std::string> m_d3_methods;      // {"d3"}
     static const std::vector<std::string> m_d4_methods;      // {"d4"}

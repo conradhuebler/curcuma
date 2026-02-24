@@ -553,7 +553,7 @@ def main():
     print(f"  Total:       {E_total:15.9f} Eh")
     print("="*70)
     print("\nNOTE: This is a simplified reference (no repulsion/dispersion/coulomb)")
-    print("      Compare term-by-term with Curcuma cgfnff output")
+    print("      Compare term-by-term with Curcuma gfnff output")
     print("="*70 + "\n")
 
 if __name__ == '__main__':

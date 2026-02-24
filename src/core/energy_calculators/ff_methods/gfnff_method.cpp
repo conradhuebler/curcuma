@@ -716,7 +716,7 @@ bool GFNFF::initializeForceField()
     json ff_config = {
         { "threads", m_parameters["threads"] },
         { "gradient", m_parameters["gradient"] },
-        { "method", "cgfnff" }  // Phase 3 LITE: Use "cgfnff" for caching
+        { "method", "gfnff" }
     };
 
     // Claude Generated (December 2025): Add geometry_file for automatic parameter caching
@@ -742,7 +742,7 @@ bool GFNFF::initializeForceField()
     m_forcefield->UpdateGeometry(m_geometry_bohr);
 
     // Phase 3 LITE: Enable parameter caching for 96% speedup on repeated calculations
-    // Caches parameters to molecule.cgfnff.json file for instant loading on next run
+    // Caches parameters to molecule.gfnff.json file for instant loading on next run
     m_forcefield->setParameterCaching(false);
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -752,7 +752,7 @@ bool GFNFF::initializeForceField()
     }
 
     // Claude Generated (Dec 26, 2025): Try loading from cache BEFORE expensive EEQ/topology calculation
-    // Note: Cache file stores method as "gfnff" regardless of wrapper (cgfnff/gfnff)
+    // Note: Cache file stores method as "gfnff"
     if (m_forcefield && m_forcefield->tryLoadAutoParameters("gfnff")) {
         if (CurcumaLogger::get_verbosity() >= 1) {
             CurcumaLogger::success("Loaded from cache - skipping EEQ/topology calculation");
@@ -6486,8 +6486,8 @@ json GFNFF::generateGFNFFDispersionPairs() const
 
     // Step 2: Determine dispersion method from method name
     // Phase 2.1 (January 2026): D4 as default with CN-only weighting
-    // - "cgfnff" or "gfnff" → D4 (Casimir-Polder integration, matches Fortran reference)
-    // - "cgfnff-d3" or "gfnff-d3" → D3 (static lookup tables, legacy compatibility)
+    // - "gfnff" → D4 (Casimir-Polder integration, matches Fortran reference)
+    // - "gfnff-d3" → D3 (static lookup tables, legacy compatibility)
     std::string method_name = m_parameters.value("method", "gfnff");
     std::string method = "d4";  // Default to D4 (matches GFN-FF reference with Casimir-Polder integration)
 

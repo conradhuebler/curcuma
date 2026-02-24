@@ -135,7 +135,7 @@ xtb molecule.xyz --gfn2 > molecule_gfn2.out
 ```bash
 # Using Curcuma
 ./curcuma -sp molecule.xyz -method uff > molecule_uff.out
-./curcuma -sp molecule.xyz -method cgfnff > molecule_gfnff.out
+./curcuma -sp molecule.xyz -method gfnff > molecule_gfnff.out
 ```
 
 **For Dispersion (D3, D4):**
@@ -161,14 +161,14 @@ Edit template (add to `s_molecule_registry` map):
             {"gfn1", total_energy},      // XTB GFN1
             {"gfn2", total_energy},      // XTB GFN2
             {"uff", total_energy},      // Curcuma UFF
-            {"cgfnff", total_energy},   // Curcuma native GFN-FF
+            {"gfnff", total_energy},   // Curcuma native GFN-FF
             {"d3", d3_energy},          // D3 dispersion only
         },
         .tolerances = {
             {"gfn1", 1e-6},            // Hartree tolerance
             {"gfn2", 1e-6},
             {"uff", 1e-5},            // Force field tolerance
-            {"cgfnff", 1e-6},
+            {"gfnff", 1e-6},
             {"d3", 1e-8},             // D3 tolerance
         },
         .atom_count = N
@@ -359,7 +359,7 @@ double energy = gfnff.CalculateEnergy(true, true);  // Energy, gradient
 
 **Available Methods:**
 - QM: gfn1, gfn2, gfn0, ipea1, pm3, pm6, eht
-- FF: uff, qmdff, cgfnff
+- FF: uff, qmdff, gfnff
 - Providers: tblite, ulysses, xtb
 
 **Usage:**
@@ -432,7 +432,7 @@ xtb $xyz_path --gfnff   # For force field
 
 ```cpp
 // Enable verbose output
-json config = {{"method", "cgfnff"}, {"verbosity", 3}};
+json config = {{"method", "gfnff"}, {"verbosity", 3}};
 EnergyCalculator calc(config);
 calc.setMolecule(mol);
 calc.calculateEnergy();
@@ -482,7 +482,7 @@ Matrix grad = calc.getGradient();
 xtb molecule.xyz --gfn1 > molecule_gfn1_ref.out
 xtb molecule.xyz --gfn2 > molecule_gfn2_ref.out
 ./curcuma -sp molecule.xyz -method uff > molecule_uff_ref.out
-./curcuma -sp molecule.xyz -method cgfnff > molecule_cgfnff_ref.out
+./curcuma -sp molecule.xyz -method gfnff > molecule_gfnff_ref.out
 ```
 
 ---
@@ -576,7 +576,7 @@ gfnff.CalculateEnergy(true, true);
 ### Pattern 3: Parameter Validation
 ```cpp
 // Test specific parameter combinations
-json config = {{"method", "cgfnff"}, {"dispersion", true}, {"hbond", false}};
+json config = {{"method", "gfnff"}, {"dispersion", true}, {"hbond", false}};
 EnergyCalculator calc(config);
 calc.setMolecule(mol);
 double energy = calc.calculateEnergy();
@@ -669,7 +669,7 @@ Priority-based method fallback:
 ```cpp
 "gfn2" → TBLite → Ulysses → XTB
 "gfn1" → TBLite → Ulysses → XTB
-"cgfnff" → Native (explicit)
+"gfnff" → Native (explicit)
 "uff" → ForceField → parameter generation
 ```
 

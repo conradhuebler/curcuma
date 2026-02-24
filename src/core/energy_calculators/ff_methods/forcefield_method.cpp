@@ -127,7 +127,7 @@ json ForceFieldMethod::generateForceFieldController() const {
     // Method-specific parameters
     if (m_method_name == "uff-d3") {
         controller["d3_correction"] = true;
-    } else if (m_method_name == "cgfnff") {
+    } else if (m_method_name == "gfnff") {
         controller["gfnff_mode"] = "native";
     }
     
@@ -419,7 +419,7 @@ void ForceFieldMethod::setParameterFile(const std::string& filename) {
 // =================================================================================
 
 std::vector<std::string> ForceFieldMethod::getSupportedMethods() {
-    return {"uff", "uff-d3", "d3", "qmdff", "cgfnff"};
+    return {"uff", "uff-d3", "d3", "qmdff", "gfnff"};
 }
 
 bool ForceFieldMethod::isMethodSupported(const std::string& method_name) {
@@ -471,9 +471,9 @@ json ForceFieldMethod::getDefaultConfigForMethod(const std::string& method_name)
     // Method-specific defaults
     if (method_name == "uff-d3") {
         config["d3_correction"] = true;
-    } else if (method_name == "cgfnff") {
+    } else if (method_name == "gfnff") {
         config["gfnff_mode"] = "native";
-        config["parameter_caching"] = true;  // Claude Generated (Dec 2025): Enable caching for cgfnff
+        config["parameter_caching"] = true;
     } else if (method_name == "qmdff") {
         config["qmdff_version"] = "latest";
     } else if (method_name == "d3") {

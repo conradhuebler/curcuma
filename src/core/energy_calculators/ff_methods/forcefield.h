@@ -269,7 +269,7 @@ private:
     Vector m_topology_charges;
 
     // Claude Generated (Jan 18, 2026): D3 coordination numbers for dynamic r0 calculation
-    // Recalculated from current geometry at each Calculate() call for cgfnff
+    // Recalculated from current geometry at each Calculate() call for gfnff
     Vector m_d3_cn;
 
     // Claude Generated (Feb 1, 2026): CN, CNF, and CN derivatives for Coulomb charge derivative gradients

@@ -18,7 +18,7 @@
 
 **Open MD Bugs**:
 - ✅ **Thread-safety**: FIXED — TERM 2+3 moved to sequential parent loop (`forcefield.cpp:2243`). Pending verification run.
-- 🔴 **HB dissociation**: Acetic acid dimer O-H...O bridge breaks at ~7.9 ps (seed=42, 298 K). HB formula matches Fortran exactly; likely cause: Bond-HB alpha reduction. Test `08_cgfnff_acetic_acid_dimer_md` still fails.
+- 🔴 **HB dissociation**: Acetic acid dimer O-H...O bridge breaks at ~7.9 ps (seed=42, 298 K). HB formula matches Fortran exactly; likely cause: Bond-HB alpha reduction. Test `08_gfnff_acetic_acid_dimer_md` still fails.
 
 ---
 

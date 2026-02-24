@@ -108,11 +108,11 @@
 - **TBLite Interface** - Tight-binding DFT methods (GFN1, GFN2, iPEA1)
 - **XTB Interface** - Extended tight-binding methods (GFN-FF, GFN1, GFN2)
 - **Ulysses Interface** - Various semi-empirical methods (PM3, AM1, MNDO, etc.)
-- **Native GFN-FF** - Curcuma's own implementation (`cgfnff`) - ✅ **IMPLEMENTED**
+- **Native GFN-FF** - Curcuma's own implementation (`gfnff`) - ✅ **IMPLEMENTED**
 
 ### 2. Force Field Methods
 - **Universal Force Field (UFF)** - General-purpose molecular mechanics
-- **GFN-FF** (`cgfnff`) - ✅ **FULLY IMPLEMENTED** - See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
+- **GFN-FF** (`gfnff`) - ✅ **FULLY IMPLEMENTED** - See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
 - **QMDFF** - Quantum Mechanically Derived Force Fields
 - **Universal Parameter Caching** - Automatic save/load for all FF methods
 
@@ -168,10 +168,11 @@ double energy = method->calculateEnergy();
 
 ##### **Supported Method Hierarchies**
 - **gfn2**: TBLite → Ulysses → XTB (automatic priority resolution)
-- **gfn1**: TBLite → XTB → Ulysses  
+- **gfn1**: TBLite → XTB → Ulysses
 - **uff**: ForceField wrapper with parameter generation
 - **eht**: Extended Hückel Theory (native implementation)
-- **cgfnff**: Native GFN-FF (✅ **COMPLETE**)
+- **gfnff**: Native C++ GFN-FF (always available, ✅ **COMPLETE**)
+- **xtb-gfnff**: Fortran/XTB GFN-FF — ExternalGFNFF (USE_GFNFF) → XTB (USE_XTB)
 
 #### Force Field System (`src/core/forcefield.h/cpp`)
 Modern force field engine with:

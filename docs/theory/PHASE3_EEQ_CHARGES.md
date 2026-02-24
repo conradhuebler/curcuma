@@ -474,7 +474,7 @@ A·q = b
 cd /home/user/curcuma/build
 
 # Calculate charges with native GFN-FF
-./curcuma -sp docs/validation/h2o.xyz -method cgfnff -verbosity 3 > h2o_cgfnff.out
+./curcuma -sp docs/validation/h2o.xyz -method gfnff -verbosity 3 > h2o_gfnff.out
 
 # Compare with Fortran GFN-FF
 ./curcuma -sp docs/validation/h2o.xyz -method gfnff -verbosity 3 > h2o_gfnff.out

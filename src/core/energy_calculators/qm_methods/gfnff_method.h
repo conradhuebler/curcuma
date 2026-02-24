@@ -49,7 +49,7 @@ public:
     bool updateGeometry(const Matrix& geometry) override;
     bool hasGradient() const override { return true; }
     bool isThreadSafe() const override { return false; }
-    std::string getMethodName() const override { return "cgfnff"; }
+    std::string getMethodName() const override { return m_method_name; }
 
     // Configuration
     void setThreadCount(int threads) override;
@@ -67,6 +67,7 @@ public:
 private:
     std::unique_ptr<GFNFF> m_gfnff;
     json m_parameters;
+    std::string m_method_name;
     bool m_has_error = false;
     std::string m_error_message;
     double m_last_energy = 0.0;

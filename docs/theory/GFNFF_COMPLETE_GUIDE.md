@@ -333,7 +333,7 @@ std::vector<int> GFNFF::detectPiSystems(const std::vector<int>& hyb) const {
 
 Use verbosity level 3 for term-by-term comparison:
 ```bash
-./curcuma -sp test.xyz -method cgfnff -verbosity 3
+./curcuma -sp test.xyz -method gfnff -verbosity 3
 ```
 
 Expected breakdown format:
