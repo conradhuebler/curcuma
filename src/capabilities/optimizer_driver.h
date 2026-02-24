@@ -58,6 +58,8 @@ public:
     std::vector<int> atom_constraints; // 0 = fixed, 1 = mobile
     bool use_constraints = false;
     bool use_hessian = false;
+    bool use_numerical_gradient = false; // Use numerical gradient instead of analytical (for debugging)
+    double numerical_gradient_step = 1e-5; // Step size for numerical gradient (Bohr)
     Matrix initial_hessian;
 
     // Molecular properties

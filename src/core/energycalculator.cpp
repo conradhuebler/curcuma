@@ -434,15 +434,23 @@ Eigen::MatrixXd EnergyCalculator::NumGrad() {
     if (!m_initialized || !m_method) {
         return Eigen::MatrixXd::Zero(1, 3);
     }
-    
+
     try {
         // Numerical gradient calculation using finite differences
+        // Claude Generated (Feb 21, 2026): Added verbosity output for debugging
         Eigen::MatrixXd gradient = Eigen::MatrixXd::Zero(m_atoms, 3);
-        double dx = 1e-4;
+        double dx = 1e-5; // Step size in Angstrom (更适合 Bohr units)
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("EnergyCalculator::NumGrad - Computing numerical gradient");
+            CurcumaLogger::param("step_size", fmt::format("{:.2e} Angstrom", dx));
+            CurcumaLogger::param("n_atoms", std::to_string(m_atoms));
+            CurcumaLogger::param("n_evaluations", std::to_string(2 * m_atoms * 3));
+        }
+
         double E1, E2;
-        
         Matrix current_geometry = m_mol.m_geometry;
-        
+
         for (int i = 0; i < m_atoms; ++i) {
             for (int j = 0; j < 3; ++j) {
                 // Forward step
@@ -461,12 +469,16 @@ Eigen::MatrixXd EnergyCalculator::NumGrad() {
                 gradient(i, j) = (E1 - E2) / (2 * dx);
             }
         }
-        
+
         // Restore original geometry
         updateGeometry(current_geometry);
-        
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::result_fmt("Numerical gradient computed: norm = {:.6e}", gradient.norm());
+        }
+
         return gradient;
-        
+
     } catch (const std::exception& e) {
         handleMethodError(fmt::format("numerical gradient: {}", e.what()));
         return Eigen::MatrixXd::Zero(m_atoms, 3);

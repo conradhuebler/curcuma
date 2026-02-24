@@ -1,12 +1,28 @@
 # GFN-FF Implementation Status
 
-**Last Updated**: 2026-02-21
-**Status**: ✅ **BOND-HB COUPLING IMPLEMENTED - 3 ADDITIONAL FEATURES ADDED**
+**Last Updated**: 2026-02-23
+**Status**: ✅ **DYNAMIC COULOMB CHARGES IMPLEMENTED**
 **Location**: `src/core/energy_calculators/ff_methods/`
 
 ---
 
-## Latest Major Achievement: Bond-HB Coupling + 2 Feature Completions (Feb 21, 2026) ✅
+## Latest: Dynamic Coulomb Charges (Feb 23, 2026) ✅
+
+**ALL THREE COULOMB TERMS NOW USE DYNAMIC EEQ CHARGES**:
+
+- **TERM 1 (pairwise)**: Replaced static `coul.q_i/q_j` with `m_eeq_charges(i/j)` at each step. NaN fallback to static charges.
+- **TERM 2+3 (self-energy)**: Dynamic `q = m_eeq_charges(atom_id)` and `chi_eff = chi_base + cnf*sqrt(max(cn,0))` instead of static `params->chi_i`.
+- **TERM 1b (CN gradient)**: Fixed epsilon guard — `qtmp(i) = q*cnf/(2*sqrt(max(cn,0))+1e-16)` for ALL atoms (was skipping atoms with cn ≤ 1e-10).
+- **New struct fields**: `GFNFFCoulomb.chi_base_i/j`, `cnf_i/j` stored during parameter generation and serialized to JSON.
+- **Impact**: Eliminates ~1e-3 Eh/Bohr gradient errors for polar molecules caused by static charge inconsistency.
+
+**Open MD Bugs**:
+- ✅ **Thread-safety**: FIXED — TERM 2+3 moved to sequential parent loop (`forcefield.cpp:2243`). Pending verification run.
+- 🔴 **HB dissociation**: Acetic acid dimer O-H...O bridge breaks at ~7.9 ps (seed=42, 298 K). HB formula matches Fortran exactly; likely cause: Bond-HB alpha reduction. Test `08_cgfnff_acetic_acid_dimer_md` still fails.
+
+---
+
+## Previous Achievement: Bond-HB Coupling + 2 Feature Completions (Feb 21, 2026) ✅
 
 **THREE CRITICAL BOND MODIFICATIONS NOW ACTIVE**:
 
@@ -101,7 +117,7 @@ The foundation that enabled rapid angle error debugging:
 | **Aldehyde Correction** | ✅ 100% | ctype detection for C=O carbons (Feb 21) |
 | **Bridge Detection** | ✅ 100% | sp-hybridized H/halogen modulation (Feb 21) |
 | **Angles** | ✅ 99.9% | Fixed pi_bond_orders integration; all molecules <0.12 mEh |
-| **Coulomb** | ✅ 100% | Exact match for small systems |
+| **Coulomb** | ✅ 100% | Dynamic charges + exact match; thread-safety bug open (N-fold self-energy) |
 | **Dispersion** | ⚠️ 95% | D4 with CN-only weighting, 0.4% zeta scaling error |
 | **Torsions** | ✅ 98% | Fortran matching for atom ordering, damping, inversion |
 | **Gradients** | 🔧 70% | Analytical terms active, but consistency issues |

@@ -102,7 +102,24 @@ public:
      * @return true if method can provide analytical gradients
      */
     virtual bool hasGradient() const = 0;
-    
+
+    /**
+     * @brief Compute numerical gradient by finite differences
+     * @param dx Finite difference step size (default: 1e-5 Bohr)
+     * @return Numerical gradient matrix (natoms x 3) in Hartree/Bohr
+     *
+     * Claude Generated (Feb 21, 2026): For gradient validation in MD stability diagnosis.
+     * Methods can override this for specialized numerical gradient computation
+     * that captures all geometric dependencies (e.g., EEQ charge recalculation in GFN-FF).
+     *
+     * IMPORTANT: This is O(N) times slower than analytical gradient, use only for debugging.
+     */
+    virtual Matrix NumGrad(double dx = 1e-5) {
+        // Default implementation uses finite differences via updateGeometry/calculateEnergy
+        // Subclasses (like GFNFFMethod) can override for method-specific implementations
+        return Matrix::Zero(0, 3);  // Default: not implemented
+    }
+
     // =================================================================================
     // Method Information and Configuration
     // =================================================================================

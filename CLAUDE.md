@@ -260,14 +260,12 @@ curcuma/
 
 ## Build and Test Commands
 
+**ALWAYS build and test in the `release/` directory.** This is the canonical build for regression comparisons. The `build/` directory is for development experiments only.
+
 ```bash
-# Build (use release/ for stable builds)
+# Build — always use release/
 cd release
 make -j4
-
-# Or create new build directory
-mkdir build && cd build
-cmake .. && make -j4
 
 # Run all tests (NEW: October 2025 - CLI Tests added)
 ctest --output-on-failure
@@ -389,6 +387,8 @@ ctest -R "cli_rmsd_01" --verbose
 
 ## Recently Resolved ✅
 
+- ✅ **GFN-FF HB Case 3 Gradient Fix** (Feb 24, 2026): C++ port of `abhgfnff_eg3` (carbonyl/nitro HB) was missing angle bending and torsion gradient contributions. Added `bterm_c3 * gangl_3body` (H...B=C angle) and `tterm_c3 * prod_rule * gtors_k` (D-B-C-H torsions) at atoms B, C, H, D in `forcefieldthread.cpp`. Fixed-charge gradient deviation: 3.41e-04 → 9.92e-10 Eh/Bohr (3.4×10⁵ improvement). MD test 08 (acetic acid dimer, 10 ps): was crashing with NaN at 7.9 ps, now passes all 6 checks, energy drift 0.020 Eh.
+- ✅ **GFN-FF Dynamic Coulomb Charges + Thread-Safety Fix** (Feb 23, 2026): TERM 1 (pairwise) and TERM 2+3 (self-energy) now use dynamic `m_eeq_charges` and `chi_eff = chi_base + cnf*sqrt(CN)`. TERM 2+3 moved from per-thread computation to sequential parent loop in `forcefield.cpp:2243` — eliminates N-fold self-energy counting that caused energy to scale with thread count (~+0.00462 Eh/thread). TERM 1b epsilon guard corrected: `qtmp = q*cnf/(2*sqrt(max(cn,0))+1e-16)` for ALL atoms.
 - ✅ **GFN-FF Bond-HB Coupling** (Feb 21, 2026): Implemented `egbond_hb` / `dncoord_erf` — O-H bonds in hydrogen bridges get dynamically adjusted exponent `alpha_mod = (1 - 0.1*hb_cn_H) * alpha`. Populated `nr_hb` by cross-referencing HB triplets with bond list; `dncoord_erf` erf-damped CN calculation in `computeHBCoordinationNumbers()`. Target: reduce acetic acid dimer bond error from 3.0 mEh.
 - ✅ **GFN-FF Aldehyde ctype Detection** (Feb 21, 2026): Replaced placeholder with actual pi-oxygen count check: C in pi-system + exactly 1 pi-O neighbor → `fxh=0.95`. Also activated 3-ring CH (`is_3ring` via `ring_sizes`).
 - ✅ **GFN-FF Bridge Detection** (Feb 21, 2026): Replaced placeholder with sp-hybridized H/halogen detection: group-7 or H with hyb==1 → `is_bridge=true`, `bstrength = bstren[1]*0.30` (H/F) or `*0.50` (halogen).

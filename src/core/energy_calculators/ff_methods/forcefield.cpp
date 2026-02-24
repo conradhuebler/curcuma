@@ -978,6 +978,9 @@ void ForceField::setGFNFFHydrogenBonds(const json& hbonds)
         if (hb.contains("acceptor_parent")) {
             bond.acceptor_parent_index = hb["acceptor_parent"];
         }
+        if (hb.contains("neighbors_C")) {
+            bond.neighbors_C = hb["neighbors_C"].get<std::vector<int>>();
+        }
 
         m_gfnff_hbonds.push_back(bond);
     }
@@ -1062,6 +1065,9 @@ void ForceField::updateGFNFFHBonds(const json& hbonds)
         }
         if (hb.contains("acceptor_parent")) {
             bond.acceptor_parent_index = hb["acceptor_parent"];
+        }
+        if (hb.contains("neighbors_C")) {
+            bond.neighbors_C = hb["neighbors_C"].get<std::vector<int>>();
         }
 
         m_gfnff_hbonds.push_back(bond);

@@ -256,6 +256,53 @@ public:
     bool hasGradient() const { return true; }
 
     /**
+     * @brief Calculate numerical gradient via finite differences
+     * @param dx Displacement step size (default 1e-5 Bohr)
+     * @return Gradient matrix (N_atoms x 3) in Hartree/Bohr
+     *
+     * Claude Generated (Feb 21, 2026): Diagnosis infrastructure for gradient validation.
+     * Perturbs each atom coordinate and recalculates energy including EEQ charge update.
+     * This captures the full geometric dependence (including dq/dx terms) for comparison
+     * with analytical gradient.
+     *
+     * Reference: Plan unified-baking-gizmo.md Step 1a
+     */
+    Matrix NumGrad(double dx = 1e-5);
+
+    /**
+     * @brief Numerical gradient with FIXED charges and CN (no EEQ/CN recalculation)
+     * @param dx Displacement step size (default 1e-5 Bohr)
+     * @return Gradient matrix (N_atoms x 3) in Hartree/Bohr
+     *
+     * Claude Generated (Feb 23, 2026): Isolates gradient formula bugs from missing dq/dx.
+     * Only updates geometry in ForceField, does NOT recalculate CN or EEQ charges.
+     * Comparison with analytical gradient tests ONLY the direct gradient formulas
+     * and CN chain-rule terms. Any deviation indicates a real gradient bug.
+     */
+    Matrix NumGradFixedCharges(double dx = 1e-5);
+
+    /**
+     * @brief Diagnose gradient components for validation (verbosity >= 3)
+     *
+     * Claude Generated (Feb 21, 2026): Per-term gradient diagnostics.
+     * Prints norms of each energy term's gradient contribution.
+     * Requires setStoreGradientComponents(true) before Calculation().
+     */
+    void diagnoseGradientComponents() const;
+
+    /**
+     * @brief Compare analytical vs numerical gradient (verbosity >= 3)
+     * @param dx Finite difference step size (default: 1e-5 Bohr)
+     * @return Maximum absolute deviation between analytical and numerical gradients
+     *
+     * Claude Generated (Feb 21, 2026): Gradient validation for MD stability.
+     * Prints detailed comparison and identifies worst-case atom/dimension.
+     * Enhanced Feb 23, 2026: Two-level comparison (full EEQ vs fixed-charge)
+     * to distinguish missing dq/dx from real gradient bugs.
+     */
+    double compareGradients(double dx = 1e-5);
+
+    /**
      * @brief Get atomic partial charges (Phase 2 energy charges - nlist%q)
      * @return Vector of atomic charges (final energy charges)
      *
@@ -1639,6 +1686,7 @@ private:
     };
 
     bool m_initialized; ///< Initialization status
+    bool m_comparing_gradients = false; ///< Guard to prevent recursion in compareGradients
 
     double m_energy_total; ///< Total energy in Hartree
     Vector m_charges; ///< Atomic partial charges

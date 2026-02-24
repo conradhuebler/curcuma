@@ -365,7 +365,9 @@ double GFNFF::Calculation(bool gradient)
         auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
         Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
 
-        // CN derivatives for gradient calculation (only when gradient requested)
+        // CN distribution to threads:
+        // - gradient=true:  full distribution with dcn derivatives (TERM 1b + bond dEdcn chain-rule)
+        // - gradient=false: CN-only distribution so dynamic r0 in bonds uses current geometry CN
         // Reference: Fortran gfnff_engrad.F90:418-422
         if (gradient) {
             Vector cnf(m_atoms.size());
@@ -388,6 +390,12 @@ double GFNFF::Calculation(bool gradient)
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::info("CN derivatives recalculated for current geometry");
             }
+        } else {
+            // Claude Generated (Feb 22, 2026): Energy-only evaluation needs current CN in threads.
+            // Bond r0 = (r0_base + cnfak*cn_i + r0_base_j + cnfak_j*cn_j) * ff depends on CN.
+            // Without this, NumGrad uses stale CN from last gradient call → wrong bond energies
+            // for polar molecules (O, N have large cnfak) → incorrect numerical gradient.
+            m_forcefield->distributeCNOnly(cn);
         }
 
         // Phase-2 EEQ charge recalculation
@@ -480,6 +488,12 @@ double GFNFF::Calculation(bool gradient)
         }
     }
 
+    // Claude Generated (Feb 21, 2026): Enable per-component gradient storage for invariance diagnosis
+    // Reference: Plan unified-baking-gizmo.md Step 4
+    if (gradient && CurcumaLogger::get_verbosity() >= 2) {
+        m_forcefield->setStoreGradientComponents(true);
+    }
+
     // ForceField returns energy in Hartree (m_final_factor = 1)
     double energy_hartree = m_forcefield->Calculate(gradient);
 
@@ -500,6 +514,80 @@ double GFNFF::Calculation(bool gradient)
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::param("gradient_norm", fmt::format("{:.8f}", m_gradient.norm()));
         }
+
+        // Claude Generated (Feb 21, 2026): Gradient invariance diagnostics
+        // Reference: Plan unified-baking-gizmo.md Step 1c
+        // Check translation invariance: sum of forces should be ~0
+        // Check rotation invariance: sum of torques should be ~0
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            // Translation invariance: Σ_i F_i ≈ 0
+            Eigen::Vector3d total_force = m_gradient.colwise().sum();
+            double translation_error = total_force.norm();
+
+            // Rotation invariance: Σ_i (r_i × F_i) ≈ 0
+            Eigen::Vector3d total_torque = Eigen::Vector3d::Zero();
+            Eigen::Vector3d com = Eigen::Vector3d::Zero();
+            for (int i = 0; i < m_atomcount; ++i) {
+                com += m_geometry_bohr.row(i).transpose();
+            }
+            com /= static_cast<double>(m_atomcount);
+
+            for (int i = 0; i < m_atomcount; ++i) {
+                Eigen::Vector3d r = m_geometry_bohr.row(i).transpose() - com;
+                Eigen::Vector3d f = m_gradient.row(i).transpose();
+                total_torque += r.cross(f);
+            }
+            double rotation_error = total_torque.norm();
+
+            CurcumaLogger::param("translation_invariance", fmt::format("{:.2e} Eh/Bohr", translation_error));
+            CurcumaLogger::param("rotation_invariance", fmt::format("{:.2e} Eh·Bohr/Bohr", rotation_error));
+
+            if (translation_error > 1e-8 || rotation_error > 1e-8) {
+                CurcumaLogger::warn("Gradient invariance violation detected!");
+                if (translation_error > 1e-8) {
+                    CurcumaLogger::info(fmt::format("  Total force: ({:.2e}, {:.2e}, {:.2e}) Eh/Bohr",
+                                                    total_force(0), total_force(1), total_force(2)));
+                }
+                if (rotation_error > 1e-8) {
+                    CurcumaLogger::info(fmt::format("  Total torque: ({:.2e}, {:.2e}, {:.2e}) Eh·Bohr",
+                                                    total_torque(0), total_torque(1), total_torque(2)));
+                }
+
+                // Claude Generated (Feb 21, 2026): Per-component invariance diagnosis
+                // Reference: Plan unified-baking-gizmo.md Step 4
+                // Identify which gradient term(s) violate translation invariance
+                auto checkComponentInvariance = [&](const Matrix& comp, const std::string& name) {
+                    if (comp.rows() == 0) return;
+                    double err = comp.colwise().sum().norm();
+                    if (err > 1e-8) {
+                        CurcumaLogger::warn(fmt::format("  [INVARIANCE] {} |Σ F| = {:.2e} Eh/Bohr  <<< VIOLATED",
+                                                        name, err));
+                    } else {
+                        CurcumaLogger::info(fmt::format("  [invariance] {} |Σ F| = {:.2e} Eh/Bohr  OK",
+                                                        name, err));
+                    }
+                };
+
+                checkComponentInvariance(m_forcefield->GradientBond(),       "bond      ");
+                checkComponentInvariance(m_forcefield->GradientAngle(),      "angle     ");
+                checkComponentInvariance(m_forcefield->GradientTorsion(),    "torsion   ");
+                checkComponentInvariance(m_forcefield->GradientRepulsion(),  "repulsion ");
+                checkComponentInvariance(m_forcefield->GradientCoulomb(),    "coulomb   ");
+                checkComponentInvariance(m_forcefield->GradientDispersion(), "dispersion");
+                checkComponentInvariance(m_forcefield->GradientHB(),         "hb        ");
+                checkComponentInvariance(m_forcefield->GradientXB(),         "xb        ");
+            }
+        }
+    }
+
+    // Claude Generated (Feb 22, 2026): Auto-trigger compareGradients at verbosity >= 3
+    // Reference: Plan Phase 1.1 - diagnose gradient errors via analytical vs numerical comparison
+    // m_comparing_gradients guard prevents recursion (NumGrad calls Calculation internally)
+    if (CurcumaLogger::get_verbosity() >= 3 && !m_comparing_gradients) {
+        CurcumaLogger::info("--- Gradient Numerical Verification ---");
+        m_comparing_gradients = true;
+        compareGradients(1e-5);
+        m_comparing_gradients = false;
     }
 
     // No unit conversion needed - already in Hartree
@@ -836,6 +924,18 @@ json GFNFF::generateGFNFFParameters()
         // Torsions need m_charges for fqq correction factor
         m_charges = topo_info.eeq_charges;
 
+        // Claude Generated (Feb 21, 2026): Distribute Phase-1 topology charges for BATM
+        // Reference: Fortran gfnff_engrad.F90:620 uses topo%qa (Phase-1, fixed) for BATM
+        // CRITICAL: BATM must use Phase-1 charges (fixed at init), not Phase-2 EEQ charges (geometry-dependent)
+        // This fixes energy/gradient inconsistency in MD simulations caused by missing dq/dx term in BATM gradient
+        if (m_forcefield && topo_info.topology_charges.size() > 0) {
+            m_forcefield->distributeTopologyCharges(topo_info.topology_charges);
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("Phase-1 topology charges distributed for BATM ({} atoms)",
+                                               topo_info.topology_charges.size()));
+            }
+        }
+
         // Phase 1A: Bonds (sequential - prerequisite for all other phases)
         // CRITICAL FIX (Claude Generated Jan 15, 2026): Pass full topo_info to include pi_bond_orders!
         json bonds = generateTopologyAwareBonds(topo_info);
@@ -1152,6 +1252,17 @@ json GFNFF::generateGFNFFParameters()
         // CRITICAL FIX (Claude Generated Jan 2, 2026): Set charges BEFORE generating torsions
         // Torsions need m_charges for fqq correction factor!
         m_charges = topo_info.eeq_charges;
+
+        // Claude Generated (Feb 21, 2026): Distribute Phase-1 topology charges for BATM
+        // Reference: Fortran gfnff_engrad.F90:620 uses topo%qa (Phase-1, fixed) for BATM
+        // CRITICAL: BATM must use Phase-1 charges (fixed at init), not Phase-2 EEQ charges (geometry-dependent)
+        if (m_forcefield && topo_info.topology_charges.size() > 0) {
+            m_forcefield->distributeTopologyCharges(topo_info.topology_charges);
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("Phase-1 topology charges distributed for BATM [basic mode] ({} atoms)",
+                                               topo_info.topology_charges.size()));
+            }
+        }
 
         // Generate GFN-FF bonds with real parameters
         json bonds = generateGFNFFBonds();
@@ -5075,7 +5186,15 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
                 hb["r_cut"] = 14.14;  // sqrt(hbthr1=200) Bohr (Fortran gfnff_param.f90:559)
                 hb["neighbors_A"] = neighbors_A;
                 hb["neighbors_B"] = neighbors_B;
-                if (case_type == 3) hb["acceptor_parent"] = acceptor_parent;
+                if (case_type == 3) {
+                    hb["acceptor_parent"] = acceptor_parent;
+                    // Neighbors of C (parent of B) excluding B, for torsion gradient
+                    std::vector<int> neighbors_C;
+                    for (int nb : topo_info.neighbor_lists[acceptor_parent]) {
+                        if (nb != B) neighbors_C.push_back(nb);
+                    }
+                    hb["neighbors_C"] = neighbors_C;
+                }
 
                 hbonds.push_back(hb);
             }
@@ -6074,10 +6193,20 @@ json GFNFF::generateGFNFFCoulombPairs() const
             double cnf_j = topo_info.eeq_cnf[j];
             double cn_i = topo_info.coordination_numbers(i);
             double cn_j = topo_info.coordination_numbers(j);
-            double chi_eff_i = -chi_i + dxi_i + cnf_i * std::sqrt(cn_i);
-            double chi_eff_j = -chi_j + dxi_j + cnf_j * std::sqrt(cn_j);
-            coulomb["chi_i"] = chi_eff_i;
+            double chi_base_i = -chi_i + dxi_i;  // Fortran topo%chieeq(i) = -chi+dxi (WITHOUT cnf*sqrt(cn))
+            double chi_base_j = -chi_j + dxi_j;
+            double chi_eff_i = chi_base_i + cnf_i * std::sqrt(cn_i);
+            double chi_eff_j = chi_base_j + cnf_j * std::sqrt(cn_j);
+            coulomb["chi_i"] = chi_eff_i;  // Legacy: static chi_eff at init geometry
             coulomb["chi_j"] = chi_eff_j;
+            // Claude Generated (Feb 22, 2026): Dynamic Coulomb chi reconstruction
+            // Store chi_base and cnf separately so Coulomb energy can reconstruct
+            // chi_eff = chi_base + cnf * sqrt(cn) with CURRENT cn at each evaluation
+            // Reference: Fortran gfnff_engrad.F90:1599 uses topo%chieeq + cnf*sqrt(cn)
+            coulomb["chi_base_i"] = chi_base_i;
+            coulomb["chi_base_j"] = chi_base_j;
+            coulomb["cnf_i"] = cnf_i;
+            coulomb["cnf_j"] = cnf_j;
 
             // FIX (Jan 28, 2026): Use charge-corrected gameeq and alpeeq
             // Reference: Fortran gfnff_ini.f90:714-725:
@@ -7573,3 +7702,567 @@ bool GFNFF::calculateFinalCharges(TopologyInfo& topo_info, int max_iterations,
 // DEPRECATED (Dec 2025 - Phase 3): Old calculateFinalCharges implementation (170 lines)
 // removed and replaced with delegation to EEQSolver above.
 // See eeq_solver.cpp for the extracted implementation.
+
+// =================================================================================
+// Gradient Diagnostics Infrastructure (Claude Generated Feb 21, 2026)
+// =================================================================================
+// Reference: Plan unified-baking-gizmo.md - MD energy drift diagnosis
+// Purpose: Compare analytical vs numerical gradients to identify inconsistencies
+
+/**
+ * @brief Compute numerical gradient by finite differences
+ *
+ * Claude Generated (Feb 21, 2026): Gradient validation for MD stability.
+ * Reference: Plan unified-baking-gizmo.md Step 1b
+ *
+ * This method perturbs each coordinate in Bohr (GFN-FF internal units) and
+ * recalculates the FULL energy including EEQ charge recalculation, capturing
+ * the complete geometric dependence including implicit dq/dx terms.
+ *
+ * CRITICAL: This is O(N) times slower than analytical gradient, use only for debugging.
+ */
+Matrix GFNFF::NumGrad(double dx)
+{
+    if (!m_initialized || !m_forcefield || m_atomcount == 0) {
+        CurcumaLogger::error("GFNFF::NumGrad: Not initialized");
+        return Matrix::Zero(1, 3);
+    }
+
+    // Save original geometry
+    Matrix original_geometry = m_geometry;
+    Matrix original_geometry_bohr = m_geometry_bohr;
+
+    Matrix numgrad = Matrix::Zero(m_atomcount, 3);
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Computing numerical gradient (this will take a while...)");
+        CurcumaLogger::param("step_size", fmt::format("{:.2e} Bohr", dx));
+        CurcumaLogger::param("n_atoms", std::to_string(m_atomcount));
+        CurcumaLogger::param("n_evaluations", std::to_string(2 * m_atomcount * 3));
+    }
+
+    for (int i = 0; i < m_atomcount; ++i) {
+        for (int dim = 0; dim < 3; ++dim) {
+            // Forward perturbation in Bohr
+            m_geometry_bohr(i, dim) += dx;
+            m_geometry(i, dim) = m_geometry_bohr(i, dim) * BOHR_TO_ANGSTROM;
+
+            // Update ForceField with perturbed geometry
+            m_forcefield->UpdateGeometry(m_geometry_bohr);
+
+            // Energy calculation (includes EEQ recalculation via Calculation())
+            double E_plus = Calculation(false);
+
+            // Backward perturbation
+            m_geometry_bohr(i, dim) -= 2 * dx;
+            m_geometry(i, dim) = m_geometry_bohr(i, dim) * BOHR_TO_ANGSTROM;
+            m_forcefield->UpdateGeometry(m_geometry_bohr);
+
+            double E_minus = Calculation(false);
+
+            // Central difference
+            numgrad(i, dim) = (E_plus - E_minus) / (2 * dx);
+
+            // Restore original coordinate
+            m_geometry_bohr(i, dim) = original_geometry_bohr(i, dim);
+            m_geometry(i, dim) = original_geometry(i, dim);
+        }
+
+        // Progress report at verbosity 3
+        if (CurcumaLogger::get_verbosity() >= 3 && (i + 1) % 5 == 0) {
+            CurcumaLogger::info(fmt::format("NumGrad progress: {}/{} atoms", i + 1, m_atomcount));
+        }
+    }
+
+    // Restore ForceField geometry
+    m_forcefield->UpdateGeometry(original_geometry_bohr);
+
+    // Recalculate charges for original geometry (restore state)
+    Calculation(false);
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::result_fmt("Numerical gradient computed: norm = {:.6e} Eh/Bohr", numgrad.norm());
+    }
+
+    return numgrad;
+}
+
+/**
+ * @brief Numerical gradient with FIXED charges but dynamic CN
+ *
+ * Claude Generated (Feb 23, 2026): Isolates gradient formula bugs from missing dq/dx.
+ * Updates geometry AND recalculates CN for each perturbation (so bond r0 is correct),
+ * but does NOT recalculate EEQ charges (keeps q fixed).
+ *
+ * The analytical gradient computes: direct terms + CN chain-rule (dE/dCN * dCN/dx).
+ * This numerical gradient computes: dE(x; CN(x), q_fixed)/dx via central difference.
+ * Any deviation = gradient formula bug (not missing dq/dx).
+ *
+ * Reference: Fortran gfnff_engrad.F90 gradient also uses fixed-charge approximation.
+ */
+Matrix GFNFF::NumGradFixedCharges(double dx)
+{
+    if (!m_initialized || !m_forcefield || m_atomcount == 0) {
+        CurcumaLogger::error("GFNFF::NumGradFixedCharges: Not initialized");
+        return Matrix::Zero(1, 3);
+    }
+
+    // Save original geometry
+    Matrix original_geometry = m_geometry;
+    Matrix original_geometry_bohr = m_geometry_bohr;
+
+    Matrix numgrad = Matrix::Zero(m_atomcount, 3);
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Computing fixed-charge numerical gradient (CN updated, EEQ fixed)...");
+    }
+
+    for (int i = 0; i < m_atomcount; ++i) {
+        for (int dim = 0; dim < 3; ++dim) {
+            // Forward perturbation in Bohr
+            m_geometry_bohr(i, dim) += dx;
+            m_geometry(i, dim) = m_geometry_bohr(i, dim) * BOHR_TO_ANGSTROM;
+
+            // Update geometry AND recalculate CN (but NOT EEQ charges)
+            m_forcefield->UpdateGeometry(m_geometry_bohr);
+            auto cn_vec_plus = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+            Vector cn_plus = Vector::Map(cn_vec_plus.data(), cn_vec_plus.size()).eval();
+            m_forcefield->distributeCNOnly(cn_plus);
+            double E_plus = m_forcefield->Calculate(false);
+
+            // Backward perturbation
+            m_geometry_bohr(i, dim) -= 2 * dx;
+            m_geometry(i, dim) = m_geometry_bohr(i, dim) * BOHR_TO_ANGSTROM;
+            m_forcefield->UpdateGeometry(m_geometry_bohr);
+            auto cn_vec_minus = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+            Vector cn_minus = Vector::Map(cn_vec_minus.data(), cn_vec_minus.size()).eval();
+            m_forcefield->distributeCNOnly(cn_minus);
+            double E_minus = m_forcefield->Calculate(false);
+
+            // Central difference
+            numgrad(i, dim) = (E_plus - E_minus) / (2 * dx);
+
+            // Restore original coordinate
+            m_geometry_bohr(i, dim) = original_geometry_bohr(i, dim);
+            m_geometry(i, dim) = original_geometry(i, dim);
+        }
+    }
+
+    // Restore ForceField geometry and CN
+    m_forcefield->UpdateGeometry(original_geometry_bohr);
+    auto cn_vec_orig = CNCalculator::calculateGFNFFCN(m_atoms, original_geometry_bohr);
+    Vector cn_orig = Vector::Map(cn_vec_orig.data(), cn_vec_orig.size()).eval();
+    m_forcefield->distributeCNOnly(cn_orig);
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::result_fmt("Fixed-charge numerical gradient computed: norm = {:.6e} Eh/Bohr",
+                                  numgrad.norm());
+    }
+
+    return numgrad;
+}
+
+/**
+ * @brief Diagnose gradient components (verbosity >= 3)
+ *
+ * Claude Generated (Feb 21, 2026): Per-term gradient diagnostics.
+ * Reference: Plan unified-baking-gizmo.md Step 1d
+ *
+ * Prints norms of each energy term's gradient contribution.
+ * Requires setStoreGradientComponents(true) before Calculation().
+ */
+void GFNFF::diagnoseGradientComponents() const
+{
+    if (CurcumaLogger::get_verbosity() < 3) {
+        return;
+    }
+
+    if (!m_forcefield) {
+        CurcumaLogger::warn("diagnoseGradientComponents: ForceField not available");
+        return;
+    }
+
+    CurcumaLogger::info("=== Gradient Component Norms (Eh/Bohr) ===");
+
+    double bond_norm = m_forcefield->GradientBond().norm();
+    double angle_norm = m_forcefield->GradientAngle().norm();
+    double torsion_norm = m_forcefield->GradientTorsion().norm();
+    double repulsion_norm = m_forcefield->GradientRepulsion().norm();
+    double coulomb_norm = m_forcefield->GradientCoulomb().norm();
+    double dispersion_norm = m_forcefield->GradientDispersion().norm();
+    double hb_norm = m_forcefield->GradientHB().norm();
+    double xb_norm = m_forcefield->GradientXB().norm();
+
+    CurcumaLogger::param("bond", fmt::format("{:.6e}", bond_norm));
+    CurcumaLogger::param("angle", fmt::format("{:.6e}", angle_norm));
+    CurcumaLogger::param("torsion", fmt::format("{:.6e}", torsion_norm));
+    CurcumaLogger::param("repulsion", fmt::format("{:.6e}", repulsion_norm));
+    CurcumaLogger::param("coulomb", fmt::format("{:.6e}", coulomb_norm));
+    CurcumaLogger::param("dispersion", fmt::format("{:.6e}", dispersion_norm));
+    CurcumaLogger::param("hb", fmt::format("{:.6e}", hb_norm));
+    CurcumaLogger::param("xb", fmt::format("{:.6e}", xb_norm));
+
+    // Identify dominant terms
+    double max_norm = std::max({bond_norm, angle_norm, torsion_norm, repulsion_norm,
+                                coulomb_norm, dispersion_norm, hb_norm, xb_norm});
+    std::string dominant = "unknown";
+    if (max_norm == bond_norm) dominant = "bond";
+    else if (max_norm == angle_norm) dominant = "angle";
+    else if (max_norm == torsion_norm) dominant = "torsion";
+    else if (max_norm == repulsion_norm) dominant = "repulsion";
+    else if (max_norm == coulomb_norm) dominant = "coulomb";
+    else if (max_norm == dispersion_norm) dominant = "dispersion";
+    else if (max_norm == hb_norm) dominant = "hb";
+    else if (max_norm == xb_norm) dominant = "xb";
+
+    CurcumaLogger::param("dominant_term", dominant);
+}
+
+/**
+ * @brief Compare analytical vs numerical gradient
+ *
+ * Claude Generated (Feb 21, 2026): Gradient validation for MD stability.
+ * Reference: Plan unified-baking-gizmo.md Step 1e
+ *
+ * @return Maximum absolute deviation between analytical and numerical gradients
+ */
+double GFNFF::compareGradients(double dx)
+{
+    if (CurcumaLogger::get_verbosity() < 3) {
+        // Still compute comparison but without verbose output
+        if (m_gradient.rows() == 0 || m_gradient.cols() == 0) {
+            return -1.0;  // No analytical gradient available
+        }
+        Matrix numeric = NumGrad(dx);
+        return (m_gradient - numeric).array().abs().maxCoeff();
+    }
+
+    // Claude Generated (Feb 23, 2026): Two-level gradient comparison
+    // Level 1: analytical vs fixed-charge numgrad → isolates gradient formula bugs
+    // Level 2: analytical vs full numgrad → shows total deviation including dq/dx
+    CurcumaLogger::info("=== Analytical vs Numerical Gradient Comparison ===");
+
+    // Always compute analytical gradient fresh (ensures it's up-to-date)
+    Calculation(true);
+    Matrix analytic = m_gradient;
+
+    // Save component gradients NOW, before NumGrad calls overwrite thread state
+    Matrix grad_bond       = m_forcefield->GradientBond();
+    Matrix grad_angle      = m_forcefield->GradientAngle();
+    Matrix grad_torsion    = m_forcefield->GradientTorsion();
+    Matrix grad_repulsion  = m_forcefield->GradientRepulsion();
+    Matrix grad_coulomb    = m_forcefield->GradientCoulomb();
+    Matrix grad_dispersion = m_forcefield->GradientDispersion();
+    Matrix grad_hb         = m_forcefield->GradientHB();
+    Matrix grad_xb         = m_forcefield->GradientXB();
+
+    // Level 1: Fixed-charge numerical gradient (CN updated, EEQ charges fixed)
+    // This comparison isolates REAL gradient formula bugs.
+    // The analytical gradient includes direct terms + CN chain-rule.
+    // The fixed-charge numgrad captures the same via central difference.
+    // Any deviation = gradient formula error (NOT missing dq/dx).
+    CurcumaLogger::info("--- Level 1: Fixed-Charge Comparison (gradient formula test) ---");
+    Matrix numeric_fixed = NumGradFixedCharges(dx);
+
+    double max_diff_fixed = 0.0;
+    int max_atom_fixed = -1, max_dim_fixed = -1;
+    for (int i = 0; i < m_atomcount; ++i) {
+        for (int d = 0; d < 3; ++d) {
+            double diff = std::abs(analytic(i, d) - numeric_fixed(i, d));
+            if (diff > max_diff_fixed) {
+                max_diff_fixed = diff;
+                max_atom_fixed = i;
+                max_dim_fixed = d;
+            }
+        }
+    }
+
+    CurcumaLogger::param("fixed_max_deviation", fmt::format("{:.2e} Eh/Bohr", max_diff_fixed));
+    CurcumaLogger::param("fixed_max_at_atom", std::to_string(max_atom_fixed));
+    CurcumaLogger::param("fixed_max_at_dim", std::to_string(max_dim_fixed));
+
+    if (max_diff_fixed > 1e-6) {
+        CurcumaLogger::warn(fmt::format("GRADIENT FORMULA BUG: fixed-charge deviation {:.2e} Eh/Bohr at atom {} dim {}",
+                                        max_diff_fixed, max_atom_fixed, max_dim_fixed));
+        CurcumaLogger::info(fmt::format("  Analytical: ({:.6e}, {:.6e}, {:.6e})",
+                                        analytic(max_atom_fixed, 0), analytic(max_atom_fixed, 1), analytic(max_atom_fixed, 2)));
+        CurcumaLogger::info(fmt::format("  NumFixed:   ({:.6e}, {:.6e}, {:.6e})",
+                                        numeric_fixed(max_atom_fixed, 0), numeric_fixed(max_atom_fixed, 1), numeric_fixed(max_atom_fixed, 2)));
+
+        // Per-atom deviation table for top 5 worst atoms
+        CurcumaLogger::info("  Top deviations (analytical - numeric_fixed):");
+        std::vector<std::tuple<double, int, int>> deviations;
+        for (int i = 0; i < m_atomcount; ++i) {
+            for (int d = 0; d < 3; ++d) {
+                double diff = analytic(i, d) - numeric_fixed(i, d);
+                deviations.push_back({std::abs(diff), i, d});
+            }
+        }
+        std::sort(deviations.begin(), deviations.end(), std::greater<>());
+        for (int k = 0; k < std::min(10, static_cast<int>(deviations.size())); ++k) {
+            auto [absdiff, atom, dim] = deviations[k];
+            double signed_diff = analytic(atom, dim) - numeric_fixed(atom, dim);
+            const char* dimname[] = {"x", "y", "z"};
+            CurcumaLogger::info(fmt::format("    atom {:2d} {}: ana={:+.6e} num={:+.6e} diff={:+.6e}",
+                                            atom, dimname[dim],
+                                            analytic(atom, dim), numeric_fixed(atom, dim), signed_diff));
+        }
+
+        // Per-component gradient at worst atom to identify buggy term
+        // Uses saved component gradients (captured before NumGrad overwrites thread state)
+        CurcumaLogger::info(fmt::format("  Per-component analytical gradient at atom {} (Eh/Bohr):", max_atom_fixed));
+        auto printComp = [&](const std::string& name, const Matrix& comp) {
+            if (comp.rows() > max_atom_fixed) {
+                CurcumaLogger::info(fmt::format("    {:12s}: ({:+.6e}, {:+.6e}, {:+.6e}) |norm|={:.2e}",
+                    name,
+                    comp(max_atom_fixed, 0), comp(max_atom_fixed, 1), comp(max_atom_fixed, 2),
+                    comp.row(max_atom_fixed).norm()));
+            }
+        };
+        printComp("bond",       grad_bond);
+        printComp("angle",      grad_angle);
+        printComp("torsion",    grad_torsion);
+        printComp("repulsion",  grad_repulsion);
+        printComp("coulomb",    grad_coulomb);
+        printComp("dispersion", grad_dispersion);
+        printComp("hb",         grad_hb);
+        printComp("xb",         grad_xb);
+
+        // Sum of components to verify they add up to analytical
+        Matrix comp_sum = Matrix::Zero(m_atomcount, 3);
+        comp_sum += grad_bond;
+        comp_sum += grad_angle;
+        comp_sum += grad_torsion;
+        comp_sum += grad_repulsion;
+        comp_sum += grad_coulomb;
+        comp_sum += grad_dispersion;
+        comp_sum += grad_hb;
+        comp_sum += grad_xb;
+        double residual = (analytic - comp_sum).norm();
+        CurcumaLogger::info(fmt::format("  Component sum residual: {:.2e} (should be ~0 if all components captured)", residual));
+        if (residual > 1e-6) {
+            CurcumaLogger::warn(fmt::format("  Missing gradient contribution: {:.2e} Eh/Bohr (CN chain-rule, BATM, ATM, etc.)", residual));
+            // Show what's missing at the worst atom
+            Eigen::Vector3d missing = analytic.row(max_atom_fixed) - comp_sum.row(max_atom_fixed);
+            CurcumaLogger::info(fmt::format("    missing at atom {}: ({:+.6e}, {:+.6e}, {:+.6e})",
+                                            max_atom_fixed, missing(0), missing(1), missing(2)));
+        }
+    } else {
+        CurcumaLogger::success(fmt::format("Gradient formulas OK: fixed-charge deviation {:.2e} Eh/Bohr", max_diff_fixed));
+    }
+
+    // Per-term numerical gradient at worst atom to identify buggy term
+    // Uses fixed-charge approach (CN updated, EEQ fixed) to compute per-term energy changes
+    if (max_diff_fixed > 1e-6 && max_atom_fixed >= 0) {
+        CurcumaLogger::info(fmt::format("--- Per-Term Gradient Isolation at atom {} ---", max_atom_fixed));
+
+        // Save original state
+        Matrix orig_geom = m_geometry;
+        Matrix orig_geom_bohr = m_geometry_bohr;
+
+        // For each dimension at the worst atom, compute per-term numerical gradient
+        struct TermInfo {
+            std::string name;
+            std::function<double()> getter;
+        };
+
+        // Note on gradient storage (forcefieldthread.cpp line 137-192):
+        //   GradientTorsion()    = torsion + extra_torsion + inversion
+        //   GradientDispersion() = D4 dispersion + ATM + BATM
+        // Energy terms match these combined groups for correct comparison.
+        std::vector<TermInfo> terms = {
+            {"bond",       [&]() { return m_forcefield->BondEnergy(); }},
+            {"angle",      [&]() { return m_forcefield->AngleEnergy(); }},
+            {"tors+inv",   [&]() { return m_forcefield->DihedralEnergy() + m_forcefield->InversionEnergy(); }},
+            {"repulsion",  [&]() { return m_forcefield->HHEnergy(); }},
+            {"coulomb",    [&]() { return m_forcefield->CoulombEnergy(); }},
+            {"disp+atm",   [&]() { return m_forcefield->DispersionEnergy() + m_forcefield->ATMEnergy() + m_forcefield->BatmEnergy(); }},
+            {"hb",         [&]() { return m_forcefield->HydrogenBondEnergy(); }},
+            {"xb",         [&]() { return m_forcefield->HalogenBondEnergy(); }},
+        };
+
+        // Matrix: [term_index][dim] = numerical gradient
+        std::vector<std::array<double, 3>> term_numgrad(terms.size());
+
+        // Temporarily suppress output during per-term numerical gradient
+        int saved_verbosity = CurcumaLogger::get_verbosity();
+        CurcumaLogger::set_verbosity(0);
+
+        for (int dim = 0; dim < 3; ++dim) {
+            int i = max_atom_fixed;
+
+            // Forward perturbation
+            m_geometry_bohr(i, dim) += dx;
+            m_geometry(i, dim) = m_geometry_bohr(i, dim) * BOHR_TO_ANGSTROM;
+            m_forcefield->UpdateGeometry(m_geometry_bohr);
+            auto cn_p = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+            Vector cn_plus = Vector::Map(cn_p.data(), cn_p.size()).eval();
+            m_forcefield->distributeCNOnly(cn_plus);
+            m_forcefield->Calculate(false);
+
+            std::vector<double> E_plus(terms.size());
+            for (size_t t = 0; t < terms.size(); ++t) {
+                E_plus[t] = terms[t].getter();
+            }
+
+            // Backward perturbation
+            m_geometry_bohr(i, dim) -= 2 * dx;
+            m_geometry(i, dim) = m_geometry_bohr(i, dim) * BOHR_TO_ANGSTROM;
+            m_forcefield->UpdateGeometry(m_geometry_bohr);
+            auto cn_m = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
+            Vector cn_minus = Vector::Map(cn_m.data(), cn_m.size()).eval();
+            m_forcefield->distributeCNOnly(cn_minus);
+            m_forcefield->Calculate(false);
+
+            std::vector<double> E_minus(terms.size());
+            for (size_t t = 0; t < terms.size(); ++t) {
+                E_minus[t] = terms[t].getter();
+            }
+
+            for (size_t t = 0; t < terms.size(); ++t) {
+                term_numgrad[t][dim] = (E_plus[t] - E_minus[t]) / (2 * dx);
+            }
+
+            // Restore
+            m_geometry_bohr(i, dim) = orig_geom_bohr(i, dim);
+            m_geometry(i, dim) = orig_geom(i, dim);
+        }
+
+        CurcumaLogger::set_verbosity(saved_verbosity);
+
+        // Restore geometry and CN
+        m_forcefield->UpdateGeometry(orig_geom_bohr);
+        auto cn_o = CNCalculator::calculateGFNFFCN(m_atoms, orig_geom_bohr);
+        Vector cn_orig = Vector::Map(cn_o.data(), cn_o.size()).eval();
+        m_forcefield->distributeCNOnly(cn_orig);
+
+        // Compare per-term analytical vs numerical gradient at worst atom
+        // Use name-based matching between energy terms and stored component gradients
+        // Match combined energy groups to stored gradient components
+        std::map<std::string, const Matrix*> comp_map = {
+            {"bond",       &grad_bond},
+            {"angle",      &grad_angle},
+            {"tors+inv",   &grad_torsion},     // torsion + extra_torsion + inversion
+            {"repulsion",  &grad_repulsion},
+            {"coulomb",    &grad_coulomb},
+            {"disp+atm",   &grad_dispersion},  // D4 dispersion + ATM + BATM
+            {"hb",         &grad_hb},
+            {"xb",         &grad_xb},
+        };
+
+        CurcumaLogger::info(fmt::format("  Term       |  dim |    analytical   |    numerical   |   difference"));
+        CurcumaLogger::info("  -----------+------+----------------+----------------+----------------");
+
+        // Track worst term
+        double worst_term_dev = 0.0;
+        std::string worst_term_name;
+
+        for (size_t t = 0; t < terms.size(); ++t) {
+            for (int dim = 0; dim < 3; ++dim) {
+                double num_val = term_numgrad[t][dim];
+                double ana_val = 0.0;
+                bool has_component = false;
+
+                // Match term to stored component gradient by name
+                auto it = comp_map.find(terms[t].name);
+                if (it != comp_map.end() && it->second->rows() > max_atom_fixed) {
+                    ana_val = (*it->second)(max_atom_fixed, dim);
+                    has_component = true;
+                }
+
+                double diff = has_component ? (ana_val - num_val) : 0.0;
+                const char* dimname[] = {"x", "y", "z"};
+
+                // Print all terms with significant values
+                if (std::abs(num_val) > 1e-10 || std::abs(ana_val) > 1e-10) {
+                    std::string marker = "";
+                    if (has_component && std::abs(diff) > 1e-5) marker = " <<<";
+                    else if (!has_component && std::abs(num_val) > 1e-8) marker = " (no ana)";
+                    CurcumaLogger::info(fmt::format("  {:10s} |  {}   | {:+.6e}  | {:+.6e}  | {:+.6e}{}",
+                        terms[t].name, dimname[dim],
+                        has_component ? ana_val : 0.0, num_val, diff, marker));
+                }
+
+                if (has_component && std::abs(diff) > worst_term_dev) {
+                    worst_term_dev = std::abs(diff);
+                    worst_term_name = terms[t].name;
+                }
+            }
+        }
+
+        CurcumaLogger::info(fmt::format("  WORST TERM: {} (max deviation: {:.2e} Eh/Bohr)", worst_term_name, worst_term_dev));
+    }
+
+    // Level 2: Full numerical gradient (with CN/EEQ recalculation)
+    // This comparison shows the total deviation including the missing dq/dx term.
+    CurcumaLogger::info("--- Level 2: Full Comparison (includes dq/dx charge response) ---");
+    Matrix numeric_full = NumGrad(dx);
+
+    double max_diff_full = 0.0;
+    int max_atom_full = -1, max_dim_full = -1;
+    for (int i = 0; i < m_atomcount; ++i) {
+        for (int d = 0; d < 3; ++d) {
+            double diff = std::abs(analytic(i, d) - numeric_full(i, d));
+            if (diff > max_diff_full) {
+                max_diff_full = diff;
+                max_atom_full = i;
+                max_dim_full = d;
+            }
+        }
+    }
+
+    CurcumaLogger::param("analytical_norm", fmt::format("{:.6e} Eh/Bohr", analytic.norm()));
+    CurcumaLogger::param("numerical_full_norm", fmt::format("{:.6e} Eh/Bohr", numeric_full.norm()));
+    CurcumaLogger::param("numerical_fixed_norm", fmt::format("{:.6e} Eh/Bohr", numeric_fixed.norm()));
+    CurcumaLogger::param("full_max_deviation", fmt::format("{:.2e} Eh/Bohr", max_diff_full));
+    CurcumaLogger::param("full_max_at_atom", std::to_string(max_atom_full));
+    CurcumaLogger::param("full_max_at_dim", std::to_string(max_dim_full));
+
+    // The difference between full and fixed numgrad is the dq/dx charge response
+    double charge_response_max = 0.0;
+    for (int i = 0; i < m_atomcount; ++i) {
+        for (int d = 0; d < 3; ++d) {
+            double diff = std::abs(numeric_full(i, d) - numeric_fixed(i, d));
+            if (diff > charge_response_max) charge_response_max = diff;
+        }
+    }
+    CurcumaLogger::param("charge_response_max", fmt::format("{:.2e} Eh/Bohr", charge_response_max));
+
+    if (max_diff_full > 1e-4) {
+        CurcumaLogger::warn(fmt::format("Full gradient deviation: {:.2e} Eh/Bohr at atom {} dim {}",
+                                        max_diff_full, max_atom_full, max_dim_full));
+        CurcumaLogger::info(fmt::format("  Analytical: ({:.6e}, {:.6e}, {:.6e})",
+                                        analytic(max_atom_full, 0), analytic(max_atom_full, 1), analytic(max_atom_full, 2)));
+        CurcumaLogger::info(fmt::format("  NumFull:    ({:.6e}, {:.6e}, {:.6e})",
+                                        numeric_full(max_atom_full, 0), numeric_full(max_atom_full, 1), numeric_full(max_atom_full, 2)));
+    }
+
+    // Translation invariance check: sum of forces should be ~0
+    Eigen::Vector3d total_force = analytic.colwise().sum();
+    double translation_error = total_force.norm();
+
+    // Rotation invariance check: sum of torques should be ~0
+    Eigen::Vector3d total_torque = Eigen::Vector3d::Zero();
+    Eigen::Vector3d com = Eigen::Vector3d::Zero();
+    for (int i = 0; i < m_atomcount; ++i) {
+        com += m_geometry_bohr.row(i).transpose();
+    }
+    com /= m_atomcount;
+
+    for (int i = 0; i < m_atomcount; ++i) {
+        Eigen::Vector3d r = m_geometry_bohr.row(i).transpose() - com;
+        Eigen::Vector3d f = analytic.row(i).transpose();
+        total_torque += r.cross(f);
+    }
+    double rotation_error = total_torque.norm();
+
+    CurcumaLogger::param("translation_invariance", fmt::format("{:.2e} Eh/Bohr", translation_error));
+    CurcumaLogger::param("rotation_invariance", fmt::format("{:.2e} Eh·Bohr/Bohr", rotation_error));
+
+    if (translation_error > 1e-8 || rotation_error > 1e-8) {
+        CurcumaLogger::warn("Gradient invariance violation detected!");
+    }
+
+    // Return the fixed-charge deviation (the actionable metric for gradient bugs)
+    return max_diff_fixed;
+}

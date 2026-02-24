@@ -64,6 +64,23 @@ struct BondHBEntry {
     std::vector<int> B_atoms;      ///< Acceptor atom indices (N or O atoms)
 };
 
+/**
+ * @brief HB coordination number gradient entry for egbond_hb chain-rule gradient
+ *
+ * Claude Generated (Feb 22, 2026): Stores d(hb_cn_H)/dr for each (H, B) pair.
+ * Used in CalculateGFNFFBondContribution() to apply the chain-rule gradient:
+ *   grad_H += zz * dCN_dH
+ *   grad_B += zz * dCN_dB
+ * where zz = t1 * alpha_orig * dr² * energy * factor
+ * Reference: Fortran gfnff_engrad.F90:1054-1063 (hb_dcn chain-rule in egbond_hb)
+ */
+struct HBGradEntry {
+    int H_atom = 0;                ///< Hydrogen atom index
+    int B_atom = 0;                ///< Acceptor atom index
+    Eigen::Vector3d dCN_dH;        ///< d(hb_cn_H)/dr_H for this (H, B) pair
+    Eigen::Vector3d dCN_dB;        ///< d(hb_cn_H)/dr_B for this (H, B) pair (= -dCN_dH)
+};
+
 struct Bond {
     int type = 1; // 1 = UFF, 2 = QMDFF
     int i = 0, j = 0, k = 0, distance = 0;
@@ -205,8 +222,12 @@ struct GFNFFCoulomb {
     double q_i = 0.0;           ///< EEQ charge on atom i
     double q_j = 0.0;           ///< EEQ charge on atom j
     double gamma_ij = 0.0;      ///< Damping parameter (1/sqrt(α_i + α_j))
-    double chi_i = 0.0;         ///< Electronegativity of atom i (for self-energy term)
-    double chi_j = 0.0;         ///< Electronegativity of atom j (for self-energy term)
+    double chi_i = 0.0;         ///< Electronegativity of atom i (for self-energy term, static: -chi+dxi+cnf*sqrt(cn_init))
+    double chi_j = 0.0;         ///< Electronegativity of atom j (for self-energy term, static)
+    double chi_base_i = 0.0;    ///< Base electronegativity of atom i (-chi+dxi, WITHOUT cnf*sqrt(cn))
+    double chi_base_j = 0.0;    ///< Base electronegativity of atom j (-chi+dxi, WITHOUT cnf*sqrt(cn))
+    double cnf_i = 0.0;         ///< CN correction factor for atom i (param%cnf(at(i)))
+    double cnf_j = 0.0;         ///< CN correction factor for atom j (param%cnf(at(j)))
     double gam_i = 0.0;         ///< Chemical hardness γ_i (for self-interaction term)
     double gam_j = 0.0;         ///< Chemical hardness γ_j (for self-interaction term)
     double alp_i = 0.0;         ///< Chemical softness α_i (for self-interaction term)
@@ -252,6 +273,7 @@ struct GFNFFHydrogenBond {
     std::vector<int> neighbors_A;  ///< Neighbor indices of donor A (for Case 2/3)
     std::vector<int> neighbors_B;  ///< Neighbor indices of acceptor B (for Case 2/3)
     int acceptor_parent_index = -1; ///< Parent of acceptor (e.g., C in C=O) for Case 3
+    std::vector<int> neighbors_C;   ///< Neighbors of C (parent of B) excluding B, for Case 3 torsion
 
     // Claude Generated (Feb 15, 2026): Sigmoid damping for smooth HB transition in MD
     // strength = 1/(1+exp((r-r_cut)/width)) -> smooth fade to 0 when bond breaks
@@ -416,6 +438,14 @@ public:
     void setEEQCharges(const Vector& charges)
     {
         m_eeq_charges = charges;
+    }
+
+    // Claude Generated (Feb 21, 2026): Set Phase-1 topology charges for BATM
+    // Reference: Fortran gfnff_engrad.F90:620 uses topo%qa (Phase-1, fixed) for BATM
+    // CRITICAL: BATM must use Phase-1 charges, not Phase-2 EEQ charges
+    void setTopologyCharges(const Vector& charges)
+    {
+        m_topology_charges = charges;
     }
 
     // Claude Generated (Jan 18, 2026): Set D3 coordination numbers for dynamic r0 calculation
@@ -638,6 +668,11 @@ private:
     // Claude Generated (Feb 21, 2026): Bond-HB mapping for dncoord_erf calculation
     std::vector<BondHBEntry> m_bond_hb_data;
 
+    // Claude Generated (Feb 22, 2026): HB gradient entries for chain-rule gradient
+    // Computed in computeHBCoordinationNumbers(), applied in CalculateGFNFFBondContribution()
+    // Reference: Fortran gfnff_engrad.F90:1054-1063 (hb_dcn)
+    std::vector<HBGradEntry> m_hb_grad_entries;
+
 protected:
     Matrix m_geometry, m_gradient;
     double m_energy = 0, m_bond_energy = 0.0, m_angle_energy = 0.0, m_dihedral_energy = 0.0, m_inversion_energy = 0.0, m_vdw_energy = 0.0, m_rep_energy = 0.0, m_eq_energy = 0.0;
@@ -669,6 +704,13 @@ protected:
 
     // Phase 5A: EEQ charges for fqq angle correction (Claude Generated Nov 2025)
     Vector m_eeq_charges;
+
+    // Claude Generated (Feb 21, 2026): Phase-1 topology charges for BATM
+    // Reference: Fortran gfnff_engrad.F90:620 passes topo%qa (Phase-1) to batmgfnff_eg
+    // These are FIXED charges computed once at initialization, unlike m_eeq_charges which
+    // are geometry-dependent. Using Phase-2 charges in BATM causes energy/gradient inconsistency
+    // because the BATM gradient has no dq/dx term → energy drift in MD.
+    Vector m_topology_charges;
 
     // Claude Generated (Jan 18, 2026): D3 coordination numbers for dynamic r0 calculation
     // These are recalculated from current geometry at each Calculate() call

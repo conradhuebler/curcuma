@@ -117,6 +117,11 @@ public:
     // Phase 5A: Distribute EEQ charges to all threads for fqq calculation (Claude Generated Nov 2025)
     void distributeEEQCharges(const Vector& charges);
 
+    // Claude Generated (Feb 21, 2026): Distribute Phase-1 topology charges for BATM
+    // Reference: Fortran gfnff_engrad.F90:620 uses topo%qa (Phase-1, fixed) for BATM
+    // CRITICAL: BATM must use Phase-1 charges (fixed at init), not Phase-2 EEQ charges (geometry-dependent)
+    void distributeTopologyCharges(const Vector& charges);
+
     // Get cached EEQ charges for GFN-FF cache restoration (Claude Generated Dec 2025)
     const Vector& getCachedEEQCharges() const { return m_eeq_charges; }
 
@@ -138,6 +143,10 @@ public:
     // Reference: Fortran gfnff_engrad.F90:418-422 - charge derivative via CN
     void distributeCNandDerivatives(const Vector& cn, const Vector& cnf,
                                      const std::vector<Matrix>& dcn);
+
+    // Claude Generated (Feb 22, 2026): Distribute only CN to threads for energy-only evaluations
+    // Needed so dynamic r0 in bonds uses current CN, not stale values from last gradient call
+    void distributeCNOnly(const Vector& cn);
 
     Eigen::MatrixXd NumGrad();
 
@@ -254,6 +263,11 @@ private:
     // EEQ charges for GFN-FF (cached with parameters - Claude Generated Dec 2025)
     Vector m_eeq_charges;
 
+    // Claude Generated (Feb 21, 2026): Phase-1 topology charges for BATM
+    // Reference: Fortran gfnff_engrad.F90:620 uses topo%qa (Phase-1, fixed) for BATM
+    // These are FIXED at initialization, unlike m_eeq_charges which are geometry-dependent
+    Vector m_topology_charges;
+
     // Claude Generated (Jan 18, 2026): D3 coordination numbers for dynamic r0 calculation
     // Recalculated from current geometry at each Calculate() call for cgfnff
     Vector m_d3_cn;
@@ -263,6 +277,16 @@ private:
     Vector m_cn;                    // Coordination numbers per atom
     Vector m_cnf;                   // CNF parameters per atom (for qtmp calculation)
     std::vector<Matrix> m_dcn;      // CN derivatives: dcn[dim](i,j) = dCN(j)/dr(i,dim)
+
+    // Claude Generated (Feb 23, 2026): Per-atom Coulomb self-energy parameters
+    // Extracted once from pairs at load time. Used for sequential TERM 2+3
+    // computation in parent (thread-count-independent).
+    // Fix: Eliminates coupling between pair distribution and self-energy.
+    Vector m_coulomb_chi_base;   // -chi + dxi (without cnf*sqrt(cn))
+    Vector m_coulomb_gam;        // Chemical hardness (gameeq)
+    Vector m_coulomb_alp;        // Chemical softness (alpeeq, squared)
+    Vector m_coulomb_cnf;        // CN correction factor (cnf_eeq)
+    Vector m_coulomb_chi_static; // Static chi_eff (legacy fallback)
 
     json m_parameters;
     std::string m_auto_param_file; // Auto-detected parameter file path

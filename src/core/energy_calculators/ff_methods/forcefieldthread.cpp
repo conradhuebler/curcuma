@@ -819,6 +819,12 @@ void ForceFieldThread::computeHBCoordinationNumbers()
     // Build map from H atom index to accumulated hb_cn
     std::unordered_map<int, double> hb_cn_map;
 
+    // Claude Generated (Feb 22, 2026): Clear and rebuild HB gradient entries
+    // Reference: Fortran gfnff_engrad.F90:1054-1063 (hb_dcn chain-rule)
+    m_hb_grad_entries.clear();
+
+    constexpr double inv_sqrt_pi = 0.5641895835477563;  // 1/sqrt(pi)
+
     for (const auto& entry : m_bond_hb_data) {
         int H = entry.H;
         int ati = m_atom_types[H];  // Atomic number of H (should be 1)
@@ -840,9 +846,24 @@ void ForceFieldThread::computeHBCoordinationNumbers()
 
             // erf-based coordination number contribution
             // Fortran: tmp = 0.5*(1 + erf(-kn*(r-rcovij)/rcovij))
-            double tmp = 0.5 * (1.0 + std::erf(-kn * (r - rcovij) / rcovij));
+            double arg = -kn * (r - rcovij) / rcovij;
+            double tmp = 0.5 * (1.0 + std::erf(arg));
 
             hb_cn_map[H] += tmp;
+
+            // Claude Generated (Feb 22, 2026): Gradient of erf-CN w.r.t. positions
+            // d/dr [0.5*(1 + erf(-kn*(r-rcovij)/rcovij))]
+            //   = 0.5 * (2/sqrt(pi)) * (-kn/rcovij) * exp(-arg²) * d(r)/dr_H
+            //   = inv_sqrt_pi * (-kn/rcovij) * exp(-arg²) * (r_H - r_B)/r
+            // Reference: Fortran dncoord_erf derivative (by analogy with dcn formulas)
+            double dCN_dr = inv_sqrt_pi * (-kn / rcovij) * std::exp(-arg * arg) / r;
+            Eigen::Vector3d r_HB(dx, dy, dz);  // B - H vector
+            // d(CN)/d(r_H) = dCN_dr * (r_H - r_B)/r = -dCN_dr * r_HB/r_HB
+            // Note: derivate of erf w.r.t. r_H: d(r_HB)/d(r_H) = -r_HB_unit
+            Eigen::Vector3d dCN_dH = -dCN_dr * r_HB;  // chain rule: * d(r_HB)/d(r_H) = -(r_B-r_H)/r
+            Eigen::Vector3d dCN_dB = dCN_dr * r_HB;   // d(r_HB)/d(r_B) = +(r_B-r_H)/r
+
+            m_hb_grad_entries.push_back({H, B, dCN_dH, dCN_dB});
         }
     }
 
@@ -913,7 +934,8 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
         // GFN-FF exponential bond stretching: E = k_b * exp(-α * (r-r₀)²)
         // Note: k_b is stored as NEGATIVE in gfnff.cpp:1358 for attractive bonds
         double dr = rij - r0_ij;                 // r - r₀ (dynamic or static)
-        double alpha = bond.exponent;            // α stored in exponent field
+        double alpha_orig = bond.exponent;       // α_orig before HB modification
+        double alpha = alpha_orig;               // α stored in exponent field
         double k_b = bond.fc;                    // Force constant (already negative!)
 
         // Claude Generated (Jan 24, 2026): egbond_hb - Modified exponent for HB X-H bonds
@@ -925,7 +947,7 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
         if (bond.nr_hb >= 1) {
             constexpr double VBOND_SCALE = 0.9;
             double t1 = 1.0 - VBOND_SCALE;  // = 0.1
-            alpha = (-t1 * bond.hb_cn_H + 1.0) * alpha;  // Exact Fortran formula
+            alpha = (-t1 * bond.hb_cn_H + 1.0) * alpha_orig;  // Exact Fortran formula
         }
 
         double exp_term = std::exp(-alpha * dr * dr);
@@ -950,6 +972,28 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
             double dEdr = -2.0 * alpha * dr * energy;  // Correct sign
             m_gradient.row(bond.i) += dEdr * factor * derivate.row(0);
             m_gradient.row(bond.j) += dEdr * factor * derivate.row(1);
+
+            // Claude Generated (Feb 22, 2026): HB alpha-modulation chain-rule gradient
+            // Reference: Fortran gfnff_engrad.F90:1054-1063 (egbond_hb, hb_dcn term)
+            //
+            // When alpha_mod = (1 - t1*hb_cn_H)*alpha_orig, the gradient has an extra term:
+            //   dE/d(hb_cn_H) = dE/d(alpha_mod) * d(alpha_mod)/d(hb_cn_H)
+            //                 = (-dr²*energy) * (-t1*alpha_orig) = t1*alpha_orig*dr²*energy
+            //   zz = t1 * alpha_orig * dr² * energy * factor
+            //
+            // For each (H, B) pair: grad_H += zz * dCN_dH, grad_B += zz * dCN_dB
+            if (bond.nr_hb >= 1) {
+                constexpr double t1 = 0.1;  // = 1 - VBOND_SCALE = 1 - 0.9
+                // alpha_orig already saved above (before HB modification)
+                double zz = t1 * alpha_orig * dr * dr * energy * factor;
+
+                int H = (m_atom_types[bond.i] == 1) ? bond.i : bond.j;
+                for (const auto& hbg : m_hb_grad_entries) {
+                    if (hbg.H_atom != H) continue;
+                    m_gradient.row(H) += zz * hbg.dCN_dH.transpose();
+                    m_gradient.row(hbg.B_atom) += zz * hbg.dCN_dB.transpose();
+                }
+            }
 
             // Claude Generated (Feb 15, 2026): Bond dr0/dCN chain-rule contribution
             // Reference: Fortran gfnff_engrad.F90:973-974, gfnff_rab.f90:147-156
@@ -2082,20 +2126,13 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
     }
 
     // =========================================================================
-    // COULOMB ENERGY DEBUG: Track three components separately for comparison
-    // Reference: Fortran gfnff_engrad.F90:1378-1389
-    //   - Interaction Energy: -0.020102844599 Eh (pairwise)
-    //   - Electronegativity: -0.086143530128 Eh (-q*chi)
-    //   - Self-Energy:        0.060747726300 Eh (0.5*q²*(gam+sqrt(2/π)/sqrt(α)))
-    //   - Total:             -0.045886388029 Eh
+    // TERM 1: Pairwise Coulomb interactions (distance-dependent, parallelizable)
     // =========================================================================
-    double E_interaction = 0.0;  // Pairwise: Σ q_i*q_j*erf(γ*r)/r
-    double E_electronegativity = 0.0;  // EN term: -Σ q_i*χ_i
-    double E_self_hardness = 0.0;  // Self: Σ 0.5*q_i²*(γ_i + √(2/π)/√α_i)
+    // Claude Generated (Feb 23, 2026): TERM 2+3 (self-energy) and Term 1b (CN chain-rule)
+    // moved to parent reduction in ForceField::Calculate() for thread-count independence.
+    // Reference: Fortran gfnff_engrad.F90:1670-1680 (single sequential loop)
+    double E_interaction = 0.0;
 
-    // =========================================================================
-    // TERM 1: Pairwise Coulomb interactions (distance-dependent)
-    // =========================================================================
     for (int index = 0; index < m_gfnff_coulombs.size(); ++index) {
         const auto& coul = m_gfnff_coulombs[index];
 
@@ -2106,32 +2143,39 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
 
         if (rij > coul.r_cut || rij < 1e-10) continue;
 
-        // Claude Generated (Dec 2025, Session 9): CRITICAL FIX - Coulomb is erf(γ*r)/r NOT erf(γ*r)/r²!
-        // Pairwise: E_pair = q_i * q_j * erf(γ_ij*r) / r (NOT r²!)
+        // Use dynamic EEQ charges, fall back to static if unavailable or NaN
+        double qi = coul.q_i;
+        double qj = coul.q_j;
+        if (m_eeq_charges.size() > 0) {
+            qi = m_eeq_charges(coul.i);
+            qj = m_eeq_charges(coul.j);
+            if (std::isnan(qi) || std::isnan(qj)) {
+                qi = coul.q_i;
+                qj = coul.q_j;
+            }
+        }
+
+        // Pairwise: E_pair = q_i * q_j * erf(γ_ij*r) / r
         double gamma_r = coul.gamma_ij * rij;
         double erf_term = std::erf(gamma_r);
-        double energy_pair = coul.q_i * coul.q_j * erf_term / rij;  // FIX: /r not /r²
+        double energy_pair = qi * qj * erf_term / rij;
 
         E_interaction += energy_pair;
         m_coulomb_energy += energy_pair;
 
-        // DEBUG: Per-pair Coulomb breakdown for 1e-6 accuracy (Claude Generated Jan 26, 2026)
         if (index < 5 && CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info(fmt::format("Coulomb pair {}: i={}, j={}, rij={:.6f} Bohr, gamma_ij={:.6f}, "
                                              "q_i={:.6f}, q_j={:.6f}, erf={:.6f}, E_pair={:.9f} Eh",
                                              index, coul.i, coul.j, rij, coul.gamma_ij,
-                                             coul.q_i, coul.q_j, erf_term, energy_pair));
+                                             qi, qj, erf_term, energy_pair));
         }
 
         if (m_calculate_gradient) {
-            // Claude Generated (Dec 2025, Session 9): CRITICAL FIX - Gradient for erf(γ*r)/r NOT erf(γ*r)/r²!
-            // dE_pair/dr = q_i*q_j * [d/dr(erf(γ*r)/r)]
-            //            = q_i*q_j * [γ*exp(-(γ*r)²)*(2/√π)/r - erf(γ*r)/r²]
             const double sqrt_pi = 1.772453850905516;  // √π
             double exp_term = std::exp(-gamma_r * gamma_r);
             double derf_dr = coul.gamma_ij * exp_term * (2.0 / sqrt_pi);
-            double dEdr_pair = coul.q_i * coul.q_j *
-                (derf_dr / rij - erf_term / (rij * rij));  // FIX: Correct derivative, no conversion
+            double dEdr_pair = qi * qj *
+                (derf_dr / rij - erf_term / (rij * rij));
 
             Eigen::Vector3d grad = dEdr_pair * rij_vec / rij;
 
@@ -2140,119 +2184,9 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
         }
     }
 
-    // =========================================================================
-    // TERM 1b: Charge derivative contribution via CN (geometry-dependent)
-    // =========================================================================
-    // Claude Generated (Feb 1, 2026): Coulomb charge derivative gradient
-    // Reference: Fortran gfnff_engrad.F90:418-422
-    // Formula: qtmp(i) = q(i) * cnf(i) / (2*sqrt(cn(i)))
-    //          g -= dcn^T * qtmp
-    // where dcn[dim](i,j) = dCN(j)/dr(i,dim)
-    //
-    // This term accounts for the geometry dependence of EEQ charges through CN.
-    // Without this term, the gradient is incomplete for charged/polar systems.
-    //
-    // Re-enabled (Feb 1, 2026): Issue was not in Term 1b
-    if (m_calculate_gradient && !m_dcn.empty() && m_cn.size() > 0 && m_cnf.size() > 0) {
-        int natoms = m_cn.size();
-
-        // Compute qtmp(i) = q(i) * cnf(i) / (2*sqrt(cn(i)))
-        Vector qtmp = Vector::Zero(natoms);
-        for (int i = 0; i < natoms; ++i) {
-            if (m_cn(i) > 1e-10) {  // Avoid division by zero
-                qtmp(i) = m_eeq_charges(i) * m_cnf(i) / (2.0 * std::sqrt(m_cn(i)));
-            }
-        }
-
-        // Apply gemv-like operation: g(i,dim) -= sum_j dcn[dim](i,j) * qtmp(j)
-        // Note: dcn[dim] is stored as (natoms x natoms) matrix where
-        // dcn[dim](i,j) = dCN(j)/dr(i,dim)
-        for (int dim = 0; dim < 3; ++dim) {
-            if (dim >= static_cast<int>(m_dcn.size())) continue;
-
-            // Corrected Loop: Only process atoms assigned to this thread to ensure thread-safety
-            for (int i : m_assigned_atoms_for_self_energy) {
-                double grad_contrib = 0.0;
-                for (int j = 0; j < natoms; ++j) {
-                    grad_contrib -= m_dcn[dim](i, j) * qtmp(j);
-                }
-                m_gradient(i, dim) += grad_contrib;
-            }
-        }
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("Coulomb charge derivative gradient applied (Term 1b)");
-        }
-    }
-
-    // =========================================================================
-    // TERM 2 & 3: Self-energy and Self-interaction (per-atom, distance-independent)
-    // =========================================================================
-    // Build atom-to-parameters map from Coulomb pairs for fast lookup
-    std::unordered_map<int, const GFNFFCoulomb*> atom_to_params;
-    for (const auto& coul : m_gfnff_coulombs) {
-        if (atom_to_params.find(coul.i) == atom_to_params.end()) {
-            atom_to_params[coul.i] = &coul;  // Store pointer to first occurrence
-        }
-        if (atom_to_params.find(coul.j) == atom_to_params.end()) {
-            atom_to_params[coul.j] = &coul;
-        }
-    }
-
-    // Calculate self-energy ONLY for assigned atoms (thread-safe)
-    const double sqrt_2_over_pi = 0.797884560802865;  // √(2/π)
-    for (int atom_id : m_assigned_atoms_for_self_energy) {
-        auto it = atom_to_params.find(atom_id);
-        if (it == atom_to_params.end()) continue;  // Atom not in any Coulomb pair
-
-        const GFNFFCoulomb* params = it->second;
-
-        // Determine which atom (i or j) we're processing
-        double q, chi, gam, alp;
-        if (params->i == atom_id) {
-            q = params->q_i;
-            chi = params->chi_i;
-            gam = params->gam_i;
-            alp = params->alp_i;
-        } else {
-            q = params->q_j;
-            chi = params->chi_j;
-            gam = params->gam_j;
-            alp = params->alp_j;
-        }
-
-        // TERM 2: Electronegativity energy for this atom
-        double energy_en = -q * chi;
-        E_electronegativity += energy_en;
-
-        // TERM 3: Self-interaction (hardness) for this atom
-        double selfint_term = gam + sqrt_2_over_pi / std::sqrt(alp);
-        double energy_selfint = 0.5 * q * q * selfint_term;
-        E_self_hardness += energy_selfint;
-
-        // Add both self-terms to total
-        double energy_atom = energy_en + energy_selfint;
-        m_coulomb_energy += energy_atom;
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param(fmt::format("coulomb_self_atom_{}", atom_id),
-                fmt::format("q={:.6f}, chi={:.6f}, gam={:.6f}, alp={:.6f}, E_en={:.6f}, E_self={:.6f} Eh",
-                    q, chi, gam, alp, energy_en, energy_selfint));
-        }
-    }
-
-    // =========================================================================
-    // COULOMB DEBUG SUMMARY: Show energy components
-    // =========================================================================
+    // Debug summary: pairwise interaction only (TERM 2+3 computed in parent)
     if (CurcumaLogger::get_verbosity() >= 1 && m_gfnff_coulombs.size() > 0) {
-        CurcumaLogger::info(fmt::format("  Coulomb Energy: {:+.12f} Eh", m_coulomb_energy));
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("  Components:");
-            CurcumaLogger::info(fmt::format("    Interaction:       {:+.12f} Eh", E_interaction));
-            CurcumaLogger::info(fmt::format("    Electronegativity: {:+.12f} Eh", E_electronegativity));
-            CurcumaLogger::info(fmt::format("    Self (hardness):   {:+.12f} Eh", E_self_hardness));
-        }
+        CurcumaLogger::info(fmt::format("  Coulomb pairwise (thread): {:+.12f} Eh", E_interaction));
     }
 }
 
@@ -2449,20 +2383,129 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
         // Charge scaling and out-of-line scaling (qhoutl)
         double qhoutl = Q_H * damp_outl * outl_nb_tot;
 
-        // --- Multipliers for Case 3 (Carbonyl/Nitro) ---
-        double multipl = 1.0;
-        if (hb.case_type == 3 && hb.acceptor_parent_index != -1) {
-            Eigen::Vector3d r_CO_vec = (m_geometry.row(hb.k) - m_geometry.row(hb.acceptor_parent_index)).transpose();
-            Eigen::Vector3d r_HB_vec_3 = (pos_H - pos_B).norm() > 1e-6 ? (pos_H - pos_B).transpose() : (pos_H - pos_B).transpose(); // placeholder
-            r_HB_vec_3 = r_HB_vec; // already calculated
+        // --- Case 3 eangl/etors (Carbonyl/Nitro: H...B=C<D) ---
+        // Claude Generated (Feb 24, 2026): Full Fortran abhgfnff_eg3 port
+        // Reference: gfnff_engrad.F90:2545-2583
+        // eangl = angle bending multiplier for H...B=C angle
+        // etors = product of torsion multipliers for D-B-C-H dihedral angles
+        double eangl = 1.0;
+        double etors = 1.0;
+        // gangl[atom_idx] = gradient of eangl at each atom (3-body: H=ll, B=jj, C=kk)
+        // Per-torsion energy+gradient for product rule application
+        struct TorsGrad {
+            double energy;
+            Eigen::Matrix<double, 4, 3> grad;  // rows: D,B,C,H
+            int D_idx;  // atom index of D
+        };
+        std::vector<TorsGrad> tors_data;
+        Eigen::Matrix<double, 3, 3> gangl_3body = Eigen::Matrix<double, 3, 3>::Zero();  // rows: jj(B), kk(C), ll(H)
+        int jj_idx = -1, kk_idx = -1, ll_idx = -1;  // B, C, H atom indices for gangl
 
-            double rco = r_CO_vec.norm() * m_au;
-            double rhb = r_HB_vec_3.norm() * m_au;
-            if (rco > 1e-6 && rhb > 1e-6) {
-                double cos_theta = r_CO_vec.dot(r_HB_vec_3) * m_au * m_au / (rco * rhb);
-                double theta = std::acos(std::clamp(cos_theta, -1.0, 1.0));
-                double dtheta = theta - (120.0 * M_PI / 180.0);
-                multipl = std::cos(dtheta) * std::cos(dtheta);
+        if (hb.case_type == 3 && hb.acceptor_parent_index != -1) {
+            int B_idx = hb.k;
+            int C_idx = hb.acceptor_parent_index;
+            int H_idx = hb.j;
+            jj_idx = B_idx;
+            kk_idx = C_idx;
+            ll_idx = H_idx;
+
+            // --- eangl: angle bending H...B=C ---
+            // Reference: gfnff_engrad.F90:2574-2583 (egbend_nci_mul)
+            // phi0 = 120°, fc = 1 - bend_hb, kijk = fc / (1 - cos(120°))²
+            {
+                double c0 = 120.0 * M_PI / 180.0;
+                double fc_bend = 1.0 - BEND_HB;
+                double kijk = fc_bend / ((std::cos(0.0) - std::cos(c0)) * (std::cos(0.0) - std::cos(c0)));
+
+                // Atoms: j=B (center), i=C, k=H (Fortran convention: egbend_nci_mul(jj,kk,ll,...))
+                // jj=B, kk=C, ll=H → center=B(jj), ends=C(kk) and H(ll)
+                // In Fortran egbend_nci_mul(j,i,k,...): j=center, i,k=ends
+                // So: center=jj=B, i=kk=C, k=ll=H
+                Eigen::Vector3d va = m_geometry.row(C_idx).transpose();  // atom i = C
+                Eigen::Vector3d vb = m_geometry.row(B_idx).transpose();  // atom j = B (center)
+                Eigen::Vector3d vc = m_geometry.row(H_idx).transpose();  // atom k = H
+
+                Eigen::Vector3d vab = (va - vb) * m_au;
+                Eigen::Vector3d vcb = (vc - vb) * m_au;
+                double rab2_a = vab.squaredNorm();
+                double rcb2_a = vcb.squaredNorm();
+                Eigen::Vector3d vp = vcb.cross(vab);
+                double rp = vp.norm() + 1e-14;
+
+                double cosa = vab.dot(vcb) / (std::sqrt(rab2_a) * std::sqrt(rcb2_a) + 1e-14);
+                cosa = std::clamp(cosa, -1.0, 1.0);
+                double theta_a = std::acos(cosa);
+
+                double ea, deddt;
+                if (M_PI - c0 < 1e-6) {  // linear
+                    double dt = theta_a - c0;
+                    ea = kijk * dt * dt;
+                    deddt = 2.0 * kijk * dt;
+                } else {
+                    ea = kijk * (cosa - std::cos(c0)) * (cosa - std::cos(c0));
+                    deddt = 2.0 * kijk * std::sin(theta_a) * (std::cos(c0) - cosa);
+                }
+                eangl = 1.0 - ea;
+
+                // Gradient of eangl: returns g(3,3) = [center(B), end1(C), end2(H)]
+                Eigen::Vector3d deda_v = vab.cross(vp) * (-deddt / (rab2_a * rp));
+                Eigen::Vector3d dedc_v = vcb.cross(vp) * (deddt / (rcb2_a * rp));
+                Eigen::Vector3d dedb_v = deda_v + dedc_v;
+
+                // gangl: row 0 = B (center/jj), row 1 = C (kk), row 2 = H (ll)
+                // Fortran: g(1:3,1) = dedb, g(1:3,2) = -deda, g(1:3,3) = -dedc
+                gangl_3body.row(0) = dedb_v.transpose();   // B (center)
+                gangl_3body.row(1) = -deda_v.transpose();  // C (end1)
+                gangl_3body.row(2) = -dedc_v.transpose();  // H (end2)
+            }
+
+            // --- etors: product of torsion terms D-B-C-H ---
+            // Reference: gfnff_engrad.F90:2529-2557 (egtors_nci_mul)
+            // For each D = neighbor of C (excluding B): torsion D-B-C-H
+            // Parameters: rn=2, phi0=pi/2, tshift=tors_hb, fc=(1-tshift)/2
+            for (int D_idx : hb.neighbors_C) {
+                int ii = D_idx;     // tlist(1) = D
+                int jj_t = B_idx;   // tlist(2) = B
+                int kk_t = C_idx;   // tlist(3) = C
+                int ll_t = H_idx;   // tlist(4) = H
+
+                // Compute dihedral angle and gradient
+                Matrix dihedral_grad;
+                bool calc_grad = m_calculate_gradient;
+                double phi = GFNFF_Geometry::calculateDihedralAngle(
+                    m_geometry.row(ii).transpose() * m_au,
+                    m_geometry.row(jj_t).transpose() * m_au,
+                    m_geometry.row(kk_t).transpose() * m_au,
+                    m_geometry.row(ll_t).transpose() * m_au,
+                    dihedral_grad, calc_grad);
+
+                // Fortran: fc=(1-tshift)/2, phi0=pi/2, rn=2
+                double tshift = TORS_HB;
+                double fc_tors = (1.0 - tshift) / 2.0;
+                double phi0_tors = M_PI / 2.0;
+                int rn = 2;
+                double dphi1 = phi - phi0_tors;
+                double c1 = rn * dphi1 + M_PI;
+                double et = (1.0 + std::cos(c1)) * fc_tors + tshift;
+                double dij = -rn * std::sin(c1) * fc_tors;
+
+                TorsGrad tg;
+                tg.energy = et;
+                tg.D_idx = D_idx;
+                tg.grad = Eigen::Matrix<double, 4, 3>::Zero();
+                if (calc_grad && dihedral_grad.rows() == 4) {
+                    // g(1:3,atom) = dij * dphi/dr(atom)
+                    for (int a = 0; a < 4; ++a) {
+                        tg.grad.row(a) = dij * dihedral_grad.row(a);
+                    }
+                }
+                tors_data.push_back(tg);
+            }
+
+            // etors = product of all torsion energies
+            etors = 1.0;
+            for (const auto& tg : tors_data) {
+                etors *= tg.energy;
             }
         }
 
@@ -2474,10 +2517,11 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
         double E_HB;
         if (hb.case_type >= 2) {
             // Const part: acidity_A * basicity_B * qa * qb * global_scale
-            // Reference: gfnff_engrad.F90:1913
-            // CRITICAL FIX (Feb 15, 2026): No sigmoid - Fortran uses simple product
+            // Reference: gfnff_engrad.F90:2603 (eg3) / 1913 (eg2new)
             double const_val = hb.acidity_A * hb.basicity_B * Q_A * Q_B * global_scale;
-            E_HB = -rdamp * qhoutl * const_val * multipl;
+            // Case 3: energy = -rdamp * qhoutl * eangl * etors * const
+            // Case 2: eangl = etors = 1 (no angle/torsion terms)
+            E_HB = -rdamp * qhoutl * const_val * eangl * etors;
         } else {
             // Case 1: energy = bas * (-aci * rdamp * qhoutl)
             // Reference: gfnff_engrad.F90:1798-1799
@@ -2541,10 +2585,12 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
                 double rabdamp = damp_env * p_ab / (rab2 * r_AB);
 
                 double const_val = hb.acidity_A * hb.basicity_B * Q_A * Q_B * global_scale;
-                // Fortran terms: aterm, dterm, nbterm
-                double dterm  = -qhoutl * const_val * multipl;
-                double aterm  = -rdamp * Q_H * outl_nb_tot * const_val * multipl;
-                double nbterm = -rdamp * Q_H * damp_outl * const_val * multipl;
+                // Claude Generated (Feb 24, 2026): Include eangl*etors in gradient coefficients
+                // Reference: Fortran gfnff_engrad.F90:2613-2617 (abhgfnff_eg3)
+                // For Case 2: eangl=etors=1, so these reduce to the previous form
+                double dterm  = -qhoutl * eangl * etors * const_val;
+                double aterm  = -rdamp * Q_H * outl_nb_tot * eangl * etors * const_val;
+                double nbterm = -rdamp * Q_H * damp_outl * eangl * etors * const_val;
 
                 // --- Damping part: rab (Fortran lines 2008-2012) ---
                 double gi = ((rabdamp + rbhdamp) * ddamp - 3.0 * rabdamp) / rab2;
@@ -2623,6 +2669,35 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
                     gb += dgb_nb;
                     Eigen::Vector3d dgnb = -dga_nb - dgb_nb;
                     m_gradient.row(nb) += dgnb.transpose() * m_final_factor;
+                }
+
+                // --- Case 3 only: angle bending and torsion gradient contributions ---
+                // Claude Generated (Feb 24, 2026): Fortran abhgfnff_eg3 lines 2694-2717
+                // bterm = -rdamp * qhoutl * etors * const  (d(E)/d(eangl) chain rule)
+                // tterm = -rdamp * qhoutl * eangl * const  (d(E)/d(etors) chain rule)
+                if (hb.case_type == 3 && jj_idx >= 0) {
+                    double bterm_c3 = -rdamp * qhoutl * etors * const_val;
+                    double tterm_c3 = -rdamp * qhoutl * eangl * const_val;
+
+                    // Angle bending gradient: gangl_3body stores d(eangl)/d(atom)
+                    // rows: 0=B(jj_idx), 1=C(kk_idx), 2=H(ll_idx)
+                    m_gradient.row(jj_idx) += bterm_c3 * gangl_3body.row(0) * m_final_factor;
+                    m_gradient.row(kk_idx) += bterm_c3 * gangl_3body.row(1) * m_final_factor;
+                    m_gradient.row(ll_idx) += bterm_c3 * gangl_3body.row(2) * m_final_factor;
+
+                    // Torsion gradient: product rule d(etors)/dr_atom = sum_k [prod_other_k * dtors_k/dr]
+                    for (size_t k = 0; k < tors_data.size(); ++k) {
+                        // product of all OTHER torsion energies (excluding torsion k)
+                        double factor_k = (std::abs(tors_data[k].energy) > 1e-12)
+                                        ? etors / tors_data[k].energy : 0.0;
+                        double t_k = factor_k * tterm_c3;
+
+                        // Gradient rows: 0=D, 1=B, 2=C, 3=H
+                        m_gradient.row(tors_data[k].D_idx) += t_k * tors_data[k].grad.row(0) * m_final_factor;
+                        m_gradient.row(jj_idx)             += t_k * tors_data[k].grad.row(1) * m_final_factor;
+                        m_gradient.row(kk_idx)             += t_k * tors_data[k].grad.row(2) * m_final_factor;
+                        m_gradient.row(ll_idx)             += t_k * tors_data[k].grad.row(3) * m_final_factor;
+                    }
                 }
             } else {
                 // ===== Case 1: abhgfnff_eg1 gradient (lines 1795-1851) =====
@@ -3368,15 +3443,19 @@ void ForceFieldThread::CalculateGFNFFBatmContribution()
         double angr9 = (ang + 1.0) / rav3;
 
         // Charge factor: ff = (1 - 3*q_i) * (1 - 3*q_j) * (1 - 3*q_k)
-        // Reference: Fortran uses fqq=3.0 (param%fqq)
-        // Note: m_eeq_charges are the Phase 2 energy charges
-        double fi = (1.0 - fqq * m_eeq_charges(batm.i));
+        // Reference: Fortran gfnff_engrad.F90:620 passes topo%qa (Phase-1) to batmgfnff_eg
+        // CRITICAL FIX (Feb 21, 2026): Use Phase-1 topology charges (fixed), NOT Phase-2 EEQ charges (dynamic)
+        // Phase-2 charges change with geometry, but BATM gradient has no dq/dx term → energy drift in MD
+        // Fall back to m_eeq_charges only if m_topology_charges not yet set (backward compatibility)
+        const Vector& charges_for_batm = (m_topology_charges.size() > 0) ? m_topology_charges : m_eeq_charges;
+
+        double fi = (1.0 - fqq * charges_for_batm(batm.i));
         fi = std::min(std::max(fi, -4.0), 4.0);
 
-        double fj = (1.0 - fqq * m_eeq_charges(batm.j));
+        double fj = (1.0 - fqq * charges_for_batm(batm.j));
         fj = std::min(std::max(fj, -4.0), 4.0);
 
-        double fk = (1.0 - fqq * m_eeq_charges(batm.k));
+        double fk = (1.0 - fqq * charges_for_batm(batm.k));
         fk = std::min(std::max(fk, -4.0), 4.0);
 
         double ff_charge = fi * fj * fk;

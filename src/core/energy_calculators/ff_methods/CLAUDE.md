@@ -151,6 +151,12 @@ m_gradient.row(bond.j) += dEdr * factor * derivate.row(1);
 - **Implementation**: `gfnff_method.cpp:341-368` - calls `calculateCoordinationNumberDerivatives()` and `distributeCNandDerivatives()`
 - **Reference**: Fortran gfnff_engrad.F90:418-422
 
+**Dynamic Coulomb Charges (Feb 23, 2026)**:
+- **Status**: ✅ IMPLEMENTED - TERM 1, 2+3 now use dynamic `m_eeq_charges` (previously static init charges)
+- **Problem**: TERM 1 (pairwise) and TERM 2+3 (self-energy) used static `coul.q_i/q_j` and `params->chi_i`; only TERM 1b used dynamic charges. Caused ~1e-3 Eh/Bohr gradient errors for polar molecules.
+- **Fix**: Added `chi_base_i/j` and `cnf_i/j` to `GFNFFCoulomb` struct. At runtime: `qi = m_eeq_charges(i)`, `chi_eff = chi_base + cnf*sqrt(max(cn,0))`. NaN fallback to static values.
+- **TERM 1b guard**: Fixed skip-condition bug — all atoms now use `qtmp(i) = q*cnf/(2*sqrt(max(cn,0))+1e-16)` (Fortran epsilon guard), instead of skipping atoms with `cn ≤ 1e-10`.
+
 **BATM (Bonded ATM) Gradients**:
 - **Status**: Energy calculation complete, gradients TODO
 - **Location**: CalculateGFNFFBatmContribution() line 2955
@@ -962,6 +968,32 @@ std::string method = "d4";  // Matches Fortran reference
 - Code consolidation: Eliminates duplicate D3 implementations
 - Consistency: Same D3 accuracy for both UFF-D3 and GFN-FF
 - Maintainability: Single D3 implementation to validate and update
+
+## Open Bugs (Feb 2026)
+
+### ✅ Thread-Safety Bug: Coulomb Self-Energy N-fold Counting — FIXED (Feb 23, 2026)
+- **Was**: TERM 2+3 distributed across threads via `atom_to_params` → N-fold counting with N threads (~+0.00462 Eh/extra thread)
+- **Fix**: TERM 2+3 moved to sequential O(N) loop in `forcefield.cpp:2243-2280` (parent `Calculate()`, not per-thread)
+- **`assignAtomsForSelfEnergy()`** still declared in header but never called — dead code, can be removed
+- **Verification**: Pending (new MD run with threads=1/2/4 and current build)
+
+### 🔴 H-Bond Dissociation: Acetic Acid Dimer O-H...O Too Weak
+- **Symptom**: O-H bridge H atom (atom 15) reaches 25 Å at ~7.9 ps (seed=42, T=298 K) → EEQ solver receives extreme geometry → NaN crash.
+- **Root Cause**: cgfnff H-bond strength insufficient for acetic acid dimer at 300 K; GFN-FF HB energy terms need investigation.
+- **Confirmed pre-existing**: Identical crash timing in `release/` binary.
+- **Impact**: MD test `08_cgfnff_acetic_acid_dimer_md` fails with single thread; test currently expected to fail.
+- **Debug command** (reproduce crash, threads=1):
+  ```bash
+  curcuma -md external/gfnff/test/acetic_acid_dimer.xyz -method cgfnff \
+    -maxtime 1e4 -threads 1 -md.no_restart -md.seed 42 \
+    -md.rattle_12 false -md.print_frequency 1000
+  ```
+- **Debug command** (thread comparison, threads=2 or 4 — completes but energy wrong):
+  ```bash
+  curcuma -md external/gfnff/test/acetic_acid_dimer.xyz -method cgfnff \
+    -maxtime 1e4 -threads 4 -md.no_restart -md.seed 42 \
+    -md.rattle_12 false -md.print_frequency 1000
+  ```
 
 ## References
 
