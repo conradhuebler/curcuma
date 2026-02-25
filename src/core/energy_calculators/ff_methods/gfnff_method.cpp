@@ -5079,7 +5079,8 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
 
         // Charge criterion with element-specific thresholds
         // Reference: gfnff_ini.f90:813-818
-        double q_threshold = 0.05;  // hqabthr baseline
+        // Claude Generated (Feb 25, 2026): Fix hqabthr to match Fortran gfnff_param.f90:782
+        double q_threshold = 0.01;  // hqabthr baseline (Fortran: 0.01)
 
         if (m_atoms[atom_A] > 10) q_threshold -= 0.20;  // Heavy atoms
         if (topo_info.hybridization[atom_A] == 3 && m_atoms[atom_A] == 6) {
@@ -5093,112 +5094,176 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
 
     CurcumaLogger::info(fmt::format("Found {} HB hydrogens", hb_hydrogens.size()));
 
-    // Step 2 & 3: Identify potential acceptor-donor pairs (A-B) and actual contacts
-    // Reference: gfnff_ini.f90:822-839
-    const double hbthr1 = 7.5 * 7.5;  // Squared distance threshold (Bohr²)
+    // Step 2 & 3: Identify potential acceptor-donor pairs (A-B) and actual HB contacts
+    // Claude Generated (Feb 25, 2026): Rewritten to match Fortran gfnff_ini2.f90:700-748
+    // Fortran uses accuracy=0.1 → hbthr1=250, hbthr2=450 (squared Bohr)
+    const double hbthr1 = 250.0;  // nhb2 detection: r_AB² < hbthr1 (Bohr²)
+    const double hbthr2 = 450.0;  // nhb1 detection: r_AB² + r_AH² + r_BH² < hbthr2 (Bohr²)
 
-    for (int A = 0; A < m_atomcount; ++A) {
-        for (int B = 0; B < m_atomcount; ++B) {
-            if (A == B) continue;
-            // CurcumaLogger::error(fmt::format("DEBUG: Checking A={} (Z={}) B={} (Z={})", A, m_atoms[A], B, m_atoms[B]));
+    // Pre-build bond lookup set for O(1) bonding checks
+    std::set<std::pair<int,int>> bond_set;
+    for (const auto& bond : bonds) {
+        bond_set.insert({std::min(bond.first, bond.second), std::max(bond.first, bond.second)});
+    }
+    auto is_bonded = [&bond_set](int a, int b) -> bool {
+        return bond_set.count({std::min(a, b), std::max(a, b)}) > 0;
+    };
 
-            // Skip if either is sp/sp2 carbon with pi system
-            bool A_is_pi_carbon = (m_atoms[A] == 6 &&
-                                   (topo_info.hybridization[A] == 1 || topo_info.hybridization[A] == 2) &&
-                                   topo_info.pi_fragments[A] > 0);
-            bool B_is_pi_carbon = (m_atoms[B] == 6 &&
-                                   (topo_info.hybridization[B] == 1 || topo_info.hybridization[B] == 2) &&
-                                   topo_info.pi_fragments[B] > 0);
+    // Pre-build AB pair list (each pair once, i < j) — matches Fortran gfnff_ini.f90:822-839
+    // Both atoms must be negatively charged, not pi carbons, with significant HB strength
+    struct ABPair { int i, j; };
+    std::vector<ABPair> ab_pairs;
+    for (int i = 0; i < m_atomcount; ++i) {
+        // Claude Generated (Feb 25, 2026): Fix pi-carbon filter to match Fortran
+        // Fortran gfnff_ini.f90:882: if(at(i)==6 .and. piadr2(i)==0) cycle
+        // → Skip carbons NOT in pi system; keep pi-carbons as HB acceptors
+        if (m_atoms[i] == 6 && topo_info.pi_fragments[i] == 0) continue;
 
-            if (A_is_pi_carbon || B_is_pi_carbon) continue;
+        // Claude Generated (Feb 25, 2026): Fix qabthr to match Fortran gfnff_param.f90:783
+        // Fortran: qabthr=0.10, if(at(i)>10) ff=ff+0.2 → skip if q > +0.10 (or +0.30)
+        double q_thresh_i = 0.10;
+        if (m_atoms[i] > 10) q_thresh_i += 0.2;
+        if (charges[i] > q_thresh_i) continue;
 
-            // Charge criterion for acceptor/donor atoms
-            double q_thresh_AB = -0.2;  // qabthr baseline
-            if (m_atoms[A] > 10) q_thresh_AB += 0.2;
-            if (m_atoms[B] > 10) q_thresh_AB += 0.2;
+        for (int j = 0; j < i; ++j) {
+            // Claude Generated (Feb 25, 2026): Fix pi-carbon filter for j atom
+            if (m_atoms[j] == 6 && topo_info.pi_fragments[j] == 0) continue;
 
-            if (charges[A] >= q_thresh_AB || charges[B] >= q_thresh_AB) continue;
+            // Claude Generated (Feb 25, 2026): Fix qabthr to match Fortran
+            double q_thresh_j = 0.10;
+            if (m_atoms[j] > 10) q_thresh_j += 0.2;
+            if (charges[j] > q_thresh_j) continue;
 
-            // HB strength criterion
-            if (current_basicity[B] * current_acidity[A] < 1e-6) continue;
+            // HB strength criterion (check both directions)
+            // Reference: gfnff_ini.f90:836 — hbpi(1)*hbpj(2) and hbpi(2)*hbpj(1)
+            double strength1 = current_basicity[i] * current_acidity[j];
+            double strength2 = current_basicity[j] * current_acidity[i];
+            if (strength1 < 1e-6 && strength2 < 1e-6) continue;
 
-            // Distance criterion (Donor-Acceptor)
-            Vector r_A = m_geometry_bohr.row(A);
-            Vector r_B = m_geometry_bohr.row(B);
-            double r_AB_sq = (r_A - r_B).squaredNorm();
-            if (r_AB_sq >= hbthr1) continue;
+            ab_pairs.push_back({i, j});
+        }
+    }
 
-            // Check for bonded H on A
-            for (int H : hb_hydrogens) {
-                bool h_bonded_to_a = false;
-                for (const auto& bond : bonds) {
-                    if ((bond.first == A && bond.second == H) ||
-                        (bond.first == H && bond.second == A)) {
-                        h_bonded_to_a = true;
-                        break;
-                    }
+    // Lambda to create HB JSON entry for nhb2 (Case 2 or 3)
+    auto create_nhb2_entry = [&](int donor_A, int H, int acceptor_B) {
+        // Check A-B not bonded (ijnonbond in Fortran)
+        if (is_bonded(donor_A, acceptor_B)) return;
+
+        // Determine case type — matches Fortran gfnff_engrad.F90:687-701 dispatch
+        // Case 3: Carbonyl/Nitro (O with CN=1 bonded to C or N)
+        // Case 4: N heteroaromatic (N with CN=2, virtual lone pair → eg2_rnr)
+        // Case 2: Default (eg2new)
+        int case_type = 2;
+        int acceptor_parent = -1;
+
+        if (m_atoms[acceptor_B] == 8 && topo_info.neighbor_lists[acceptor_B].size() == 1) {
+            int parent = topo_info.neighbor_lists[acceptor_B][0];
+            if (m_atoms[parent] == 6 || m_atoms[parent] == 7) {
+                case_type = 3;
+                acceptor_parent = parent;
+            }
+        } else if (m_atoms[acceptor_B] == 7 && topo_info.neighbor_lists[acceptor_B].size() == 2) {
+            // Claude Generated (Feb 25, 2026): N heteroaromatic with virtual lone pair
+            // Reference: gfnff_engrad.F90:695 — at(k)==7 and nb(20,k)==2
+            case_type = 4;
+        }
+
+        std::vector<int> neighbors_A;
+        for (int nb : topo_info.neighbor_lists[donor_A]) {
+            if (nb != H) neighbors_A.push_back(nb);
+        }
+        std::vector<int> neighbors_B = topo_info.neighbor_lists[acceptor_B];
+
+        json hb;
+        hb["type"] = "hydrogen_bond";
+        hb["case"] = case_type;
+        hb["i"] = donor_A;
+        hb["j"] = H;
+        hb["k"] = acceptor_B;
+        hb["basicity_A"] = current_basicity[donor_A];
+        hb["basicity_B"] = current_basicity[acceptor_B];
+        hb["acidity_A"] = current_acidity[donor_A];
+        hb["acidity_B"] = current_acidity[acceptor_B];
+        hb["q_H"] = charges[H];
+        hb["q_A"] = charges[donor_A];
+        hb["q_B"] = charges[acceptor_B];
+        hb["r_cut"] = 50.0;  // Generous cutoff; Fortran uses natural damping decay
+        hb["neighbors_A"] = neighbors_A;
+        hb["neighbors_B"] = neighbors_B;
+        if (case_type == 3) {
+            hb["acceptor_parent"] = acceptor_parent;
+            std::vector<int> neighbors_C;
+            for (int nb : topo_info.neighbor_lists[acceptor_parent]) {
+                if (nb != acceptor_B) neighbors_C.push_back(nb);
+            }
+            hb["neighbors_C"] = neighbors_C;
+        }
+
+        hbonds.push_back(hb);
+    };
+
+    int nhb1_count = 0, nhb2_count = 0;
+
+    // Main HB detection loop — matches Fortran gfnff_ini2.f90:721-748
+    for (const auto& ab : ab_pairs) {
+        int i = ab.i;
+        int j = ab.j;
+
+        Vector r_i = m_geometry_bohr.row(i);
+        Vector r_j = m_geometry_bohr.row(j);
+        double r_AB_sq = (r_i - r_j).squaredNorm();
+
+        if (r_AB_sq > hbthr1) continue;  // nhb2 distance check
+
+        bool ij_nonbond = !is_bonded(i, j);
+
+        for (int H : hb_hydrogens) {
+            bool h_bonded_to_i = is_bonded(i, H);
+            bool h_bonded_to_j = is_bonded(j, H);
+
+            if (h_bonded_to_i && ij_nonbond) {
+                // nhb2: H bonded to i, i is donor → (i, j, H) = (donor, acceptor, H)
+                create_nhb2_entry(i, H, j);
+                nhb2_count++;
+            } else if (h_bonded_to_j && ij_nonbond) {
+                // nhb2: H bonded to j, j is donor → (j, i, H) = (donor, acceptor, H)
+                create_nhb2_entry(j, H, i);
+                nhb2_count++;
+            } else if (!h_bonded_to_i && !h_bonded_to_j) {
+                // nhb1 candidate: H not bonded to either — sum-of-distances criterion
+                // Reference: gfnff_ini2.f90:742 — rab + sqrab(inh) + sqrab(jnh) < hbthr2
+                // All distances are squared in Fortran's sqrab array
+                Vector r_H = m_geometry_bohr.row(H);
+                double r_iH_sq = (r_i - r_H).squaredNorm();
+                double r_jH_sq = (r_j - r_H).squaredNorm();
+                if (r_AB_sq + r_iH_sq + r_jH_sq < hbthr2) {
+                    // Case 1: A...H...B (both A and B are acceptors, H is unshared)
+                    // Reference: gfnff_engrad.F90:662-666 — j=A, k=B, l=H
+                    json hb;
+                    hb["type"] = "hydrogen_bond";
+                    hb["case"] = 1;
+                    hb["i"] = i;   // Acceptor A
+                    hb["j"] = H;   // Hydrogen
+                    hb["k"] = j;   // Acceptor B
+                    hb["basicity_A"] = current_basicity[i];
+                    hb["basicity_B"] = current_basicity[j];
+                    hb["acidity_A"] = current_acidity[i];
+                    hb["acidity_B"] = current_acidity[j];
+                    hb["q_H"] = charges[H];
+                    hb["q_A"] = charges[i];
+                    hb["q_B"] = charges[j];
+                    hb["r_cut"] = 50.0;  // Generous cutoff; Fortran uses natural damping decay
+                    hb["neighbors_A"] = std::vector<int>();
+                    hb["neighbors_B"] = std::vector<int>();
+                    hbonds.push_back(hb);
+                    nhb1_count++;
                 }
-                if (!h_bonded_to_a) continue;
-
-                // Check if A and B are not bonded
-                bool a_bonded_to_b = false;
-                for (const auto& bond : bonds) {
-                    if ((bond.first == A && bond.second == B) ||
-                        (bond.first == B && bond.second == A)) {
-                        a_bonded_to_b = true;
-                        break;
-                    }
-                }
-                if (a_bonded_to_b) continue;
-
-                // Determine case type (1 = simple, 2 = case 2 orientational, 3 = case 3 carbonyl/nitro)
-                int case_type = 2;
-                std::vector<int> neighbors_A;
-                for (int nb : topo_info.neighbor_lists[A]) {
-                    if (nb != H) neighbors_A.push_back(nb);
-                }
-                std::vector<int> neighbors_B = topo_info.neighbor_lists[B];
-                int acceptor_parent = -1;
-
-                // Case 3 detection: Terminal Oxygen (CN=1) bonded to Carbon or Nitrogen
-                if (m_atoms[B] == 8 && topo_info.neighbor_lists[B].size() == 1) {
-                    int parent = topo_info.neighbor_lists[B][0];
-                    if (m_atoms[parent] == 6 || m_atoms[parent] == 7) {
-                        case_type = 3;
-                        acceptor_parent = parent;
-                    }
-                }
-
-                // Create HB parameter JSON
-                json hb;
-                hb["type"] = "hydrogen_bond";
-                hb["case"] = case_type;
-                hb["i"] = A;
-                hb["j"] = H;
-                hb["k"] = B;
-                hb["basicity_A"] = current_basicity[A];
-                hb["basicity_B"] = current_basicity[B];
-                hb["acidity_A"] = current_acidity[A];
-                hb["acidity_B"] = current_acidity[B];
-                hb["q_H"] = charges[H];
-                hb["q_A"] = charges[A];
-                hb["q_B"] = charges[B];
-                hb["r_cut"] = 14.14;  // sqrt(hbthr1=200) Bohr (Fortran gfnff_param.f90:559)
-                hb["neighbors_A"] = neighbors_A;
-                hb["neighbors_B"] = neighbors_B;
-                if (case_type == 3) {
-                    hb["acceptor_parent"] = acceptor_parent;
-                    // Neighbors of C (parent of B) excluding B, for torsion gradient
-                    std::vector<int> neighbors_C;
-                    for (int nb : topo_info.neighbor_lists[acceptor_parent]) {
-                        if (nb != B) neighbors_C.push_back(nb);
-                    }
-                    hb["neighbors_C"] = neighbors_C;
-                }
-
-                hbonds.push_back(hb);
             }
         }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::result_fmt("GFN-FF HB detection: nhb1={}, nhb2={}", nhb1_count, nhb2_count);
     }
 
     if (CurcumaLogger::get_verbosity() >= 2) {

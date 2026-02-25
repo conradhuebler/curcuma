@@ -2380,8 +2380,56 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
             rdamp = damp_env / (r_AB * r_AB * r_AB);
         }
 
+        // --- Case 4: N heteroaromatic virtual lone pair (eg2_rnr) ---
+        // Claude Generated (Feb 25, 2026): Virtual LP out-of-line damping
+        // Reference: gfnff_engrad.F90:2153-2219 (abhgfnff_eg2_rnr)
+        double outl_lp = 1.0;
+        Eigen::Vector3d lp_pos = pos_B;  // fallback if no LP computed
+        double lp_dist = 0.0;
+        int nbb_lp = 0;
+        Eigen::Vector3d lp_vector = Eigen::Vector3d::Zero();
+
+        if (hb.case_type == 4) {
+            // Compute virtual lone pair position for sp2 N with 2 neighbors
+            // lp_dist = 0.50 - 0.018 * repz(at(B))
+            int z_B = m_atom_types[hb.k];
+            double repz_B = (z_B >= 1 && z_B <= static_cast<int>(GFNFFParameters::repz.size()))
+                          ? GFNFFParameters::repz[z_B - 1] : 1.0;
+            lp_dist = 0.50 - 0.018 * repz_B;
+            static constexpr double HBLPCUT = 56.0;  // Fortran: hblpcut = 56
+
+            // Sum bond vectors from B to neighbors (in Bohr)
+            nbb_lp = static_cast<int>(hb.neighbors_B.size());
+            for (int nb_idx : hb.neighbors_B) {
+                Eigen::Vector3d pos_nb = m_geometry.row(nb_idx).transpose();
+                Eigen::Vector3d bond_vec = (pos_nb - pos_B) * m_au;  // B→nb in Bohr
+                lp_vector += bond_vec;
+            }
+            double vnorm = lp_vector.norm();
+
+            if (vnorm > 1e-10 && nbb_lp > 0) {
+                // LP sits opposite to the average bond direction
+                lp_pos = pos_B * m_au + (-lp_dist) * (lp_vector / vnorm);
+                // Note: lp_pos is now in Bohr, but we need it relative to pos_B in Bohr
+
+                // Compute LP out-of-line damping
+                double rblp = lp_dist;  // |B - LP| = lp_dist by construction
+                Eigen::Vector3d r_A_bohr = pos_A * m_au;
+                double ralp = (r_A_bohr - lp_pos).norm();
+                double ralpprblp = ralp + rblp + 1e-12;
+
+                double expo_lp_val = (HBLPCUT / r_vdw_AB) * (ralpprblp / r_AB - 1.0);
+                double ratio2_lp = std::exp(expo_lp_val);
+                outl_lp = 2.0 / (1.0 + ratio2_lp);
+            } else {
+                // Degenerate case (vnorm~0): LP at B, no damping
+                nbb_lp = 0;
+                outl_lp = 1.0;
+            }
+        }
+
         // Charge scaling and out-of-line scaling (qhoutl)
-        double qhoutl = Q_H * damp_outl * outl_nb_tot;
+        double qhoutl = Q_H * damp_outl * outl_nb_tot * outl_lp;
 
         // --- Case 3 eangl/etors (Carbonyl/Nitro: H...B=C<D) ---
         // Claude Generated (Feb 24, 2026): Full Fortran abhgfnff_eg3 port
@@ -2511,7 +2559,7 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
 
         // Global Scaling and Final Energy
         double global_scale = 1.0;
-        if (hb.case_type == 2) global_scale = XHACI_GLOBABH;
+        if (hb.case_type == 2 || hb.case_type == 4) global_scale = XHACI_GLOBABH;
         else if (hb.case_type == 3) global_scale = XHACI_COH;
 
         double E_HB;
@@ -2571,6 +2619,12 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
             // Recompute out-of-line intermediates for gradient
             // Fortran: expo = (hbacut/radab)*(rahprbh/rab - 1)
             double expo = (HB_BACUT / r_vdw_AB) * (rahprbh / r_AB - 1.0);
+
+            // Claude Generated (Feb 25, 2026): Match Fortran early return (gfnff_engrad.F90:1781)
+            // When expo > 15, outl → 0 and energy → 0; Fortran returns before gradient.
+            // Without this guard, aterm (which lacks outl factor) produces huge gradients.
+            if (expo > 15.0) continue;
+
             double ratio2 = std::exp(expo);  // Fortran ratio2 = exp(expo) for outl
 
             Eigen::Vector3d ga = Eigen::Vector3d::Zero();
@@ -2585,12 +2639,13 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
                 double rabdamp = damp_env * p_ab / (rab2 * r_AB);
 
                 double const_val = hb.acidity_A * hb.basicity_B * Q_A * Q_B * global_scale;
-                // Claude Generated (Feb 24, 2026): Include eangl*etors in gradient coefficients
-                // Reference: Fortran gfnff_engrad.F90:2613-2617 (abhgfnff_eg3)
-                // For Case 2: eangl=etors=1, so these reduce to the previous form
+                // Claude Generated (Feb 25, 2026): Include eangl*etors*outl_lp in gradient coefficients
+                // Reference: Fortran gfnff_engrad.F90:2275-2278 (eg2_rnr), 2613-2617 (eg3)
+                // For Case 2: eangl=etors=outl_lp=1, so these reduce to the previous form
+                // For Case 4: eangl=etors=1, outl_lp is the LP damping factor
                 double dterm  = -qhoutl * eangl * etors * const_val;
-                double aterm  = -rdamp * Q_H * outl_nb_tot * eangl * etors * const_val;
-                double nbterm = -rdamp * Q_H * damp_outl * eangl * etors * const_val;
+                double aterm  = -rdamp * Q_H * outl_nb_tot * outl_lp * eangl * etors * const_val;
+                double nbterm = -rdamp * Q_H * damp_outl * outl_lp * eangl * etors * const_val;
 
                 // --- Damping part: rab (Fortran lines 2008-2012) ---
                 double gi = ((rabdamp + rbhdamp) * ddamp - 3.0 * rabdamp) / rab2;
@@ -2669,6 +2724,72 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
                     gb += dgb_nb;
                     Eigen::Vector3d dgnb = -dga_nb - dgb_nb;
                     m_gradient.row(nb) += dgnb.transpose() * m_final_factor;
+                }
+
+                // --- Case 4 only: LP out-of-line gradient (eg2_rnr) ---
+                // Claude Generated (Feb 25, 2026): Fortran abhgfnff_eg2_rnr lines 2316-2387
+                if (hb.case_type == 4 && nbb_lp > 0) {
+                    // lpterm = -rdamp * qh * outl * outl_nb_tot * const (d/d(outl_lp))
+                    double lpterm = -rdamp * Q_H * damp_outl * outl_nb_tot * const_val;
+
+                    // LP coordinates relative to atom positions (all in Bohr)
+                    Eigen::Vector3d r_A_bohr = pos_A * m_au;
+                    Eigen::Vector3d r_B_bohr = pos_B * m_au;
+                    double ralp = (r_A_bohr - lp_pos).norm();
+                    double rblp = lp_dist;
+                    double ralpprblp = ralp + rblp + 1e-12;
+                    static constexpr double HBLPCUT = 56.0;
+                    double expo_lp_val = (HBLPCUT / r_vdw_AB) * (ralpprblp / r_AB - 1.0);
+                    double ratio2_lp_val = std::exp(expo_lp_val);
+
+                    // --- LP out-of-line: rab (Fortran lines 2319-2324) ---
+                    double tmp3 = -2.0 * lpterm * ratio2_lp_val * expo_lp_val
+                                / ((1.0 + ratio2_lp_val) * (1.0 + ratio2_lp_val))
+                                / (ralpprblp - r_AB);
+                    double gi_lp = -tmp3 * ralpprblp / rab2;
+                    Eigen::Vector3d dg_lp = gi_lp * drab;
+                    ga += dg_lp;
+                    gb -= dg_lp;
+
+                    // --- LP out-of-line: ralp (Fortran lines 2326-2329) ---
+                    Eigen::Vector3d dralp = (r_A_bohr - lp_pos);  // A - LP
+                    gi_lp = tmp3 / (ralp + 1e-12);
+                    Eigen::Vector3d dga_lp = gi_lp * dralp;
+                    ga += dga_lp;
+
+                    // --- LP out-of-line: rblp (Fortran lines 2330-2333) ---
+                    // Fortran: gb += -dga_lp (not dgb_lp!), glp = -dga_lp
+                    // This is because LP is a virtual point derived from B's neighbors
+                    Eigen::Vector3d drblp = (r_B_bohr - lp_pos);  // B - LP
+                    // Fortran line 2332: gb = gb - dga (note: uses dga, not dgb!)
+                    gb -= dga_lp;
+                    Eigen::Vector3d glp = -dga_lp;  // Gradient on LP
+
+                    // --- LP neighbor chain rule (Fortran lines 2336-2342, 2383-2387) ---
+                    // LP = B - lp_dist * (vector / |vector|)
+                    // d(LP)/d(nb_pos) propagated to B's neighbors
+                    double vnorm = lp_vector.norm();
+                    if (vnorm > 1e-10) {
+                        // Jacobian: gii(i,j) = d(LP_i)/d(nb_j) = -lp_dist*nbb*(delta_ij/vnorm + v_i*v_j/vnorm³)
+                        // gnb_lp = gii * glp (chain rule)
+                        Eigen::Matrix3d gii = Eigen::Matrix3d::Zero();
+                        for (int col = 0; col < 3; ++col) {
+                            Eigen::Vector3d unit_vec = Eigen::Vector3d::Zero();
+                            unit_vec(col) = -1.0;
+                            gii.col(col) = -lp_dist * static_cast<double>(nbb_lp)
+                                         * (unit_vec / vnorm + lp_vector * lp_vector(col) / std::pow(vnorm, 3.0));
+                        }
+                        Eigen::Vector3d gnb_lp = gii * glp;
+
+                        // gdr(B) += gnb_lp; gdr(nb_i) += gnb(:,i) - gnb_lp/nbb
+                        gb += gnb_lp;
+                        Eigen::Vector3d gnb_lp_share = gnb_lp / static_cast<double>(nbb_lp);
+                        for (int nb_idx : hb.neighbors_B) {
+                            // Note: gnb(nb) gradient from neighbor out-of-line already applied above
+                            // This adds the LP chain rule: -gnb_lp / nbb per neighbor
+                            m_gradient.row(nb_idx) -= gnb_lp_share.transpose() * m_final_factor;
+                        }
+                    }
                 }
 
                 // --- Case 3 only: angle bending and torsion gradient contributions ---
