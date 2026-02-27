@@ -83,7 +83,8 @@ struct HBGradEntry {
 
 struct Bond {
     int type = 1; // 1 = UFF, 2 = QMDFF
-    int i = 0, j = 0, k = 0, distance = 0;
+    int i = 0, j = 0, k = 0;
+    double distance = 0.0;
     double fc = 0, exponent = 0, r0_ij = 0, r0_ik = 0;
     double rabshift = 0.0;  // Claude Generated (Dec 2025): GFN-FF rabshift (vbond(1)) for validation
     double fqq = 1.0;       // Claude Generated (Jan 7, 2026): GFN-FF charge-dependent force constant factor
@@ -269,7 +270,7 @@ struct GFNFFHydrogenBond {
     double r_cut = 50.0;        ///< Distance cutoff (Bohr)
 
     // Case 2/3 specific (neighbor orientation)
-    int case_type = 1;          ///< 1 = simple, 2 = case 2 (oriented), 3 = case 3 (carbonyl/nitro)
+    int case_type = 1;          ///< 1 = simple (eg1), 2 = oriented (eg2new), 3 = carbonyl/nitro (eg3), 4 = N heteroaromatic (eg2_rnr)
     std::vector<int> neighbors_A;  ///< Neighbor indices of donor A (for Case 2/3)
     std::vector<int> neighbors_B;  ///< Neighbor indices of acceptor B (for Case 2/3)
     int acceptor_parent_index = -1; ///< Parent of acceptor (e.g., C in C=O) for Case 3

@@ -2420,12 +2420,12 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
         // When pibo < bzref2, fpi < 1 → weaker bond
         fpi = 1.0 - hueckelp2 * (bzref2 - pibo);
 
-        // Update bstrength to double-bond if significant pi-character (pibo > 0.1)
-        // Reference: Fortran gfnff_ini.f90:1219-1222
-        // This overrides the hybridization-based bstrength for aromatic/conjugated bonds
-        if (pibo > 0.1 && hybi != 2 && hybj != 2) {  // bbtyp != 3 proxy (pre-demotion)
-            // Change to double-bond character
-            bstrength = 1.240;  // bstren[2] = double bond value
+        // Promote bond type to double if significant pi-character (pibo > 0.1)
+        // Reference: Fortran gfnff_ini.f90:1237-1240
+        // NOTE: Only changes bbtyp (for torsion handling), NOT bstrength!
+        // Triple bonds (bbtyp==3) are excluded — they keep their bstrength from bsmat.
+        if (bbtyp != 3 && pibo > 0.1) {
+            bbtyp = 2;  // promote to double bond type (affects torsion, not force constant)
         }
 
         if (CurcumaLogger::get_verbosity() >= 3) {

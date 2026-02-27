@@ -98,6 +98,10 @@ if(USE_PCH)
         target_precompile_headers(test_gfnff_validation REUSE_FROM curcuma_core)
 endif()
 
+# Copy reference data to build tree so tests can find them
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/reference_data
+     DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+
 # Register all reference data files as individual CTests
 file(GLOB GFNFF_REF_FILES "${CMAKE_CURRENT_SOURCE_DIR}/reference_data/*.ref.json")
 foreach(REF_FILE ${GFNFF_REF_FILES})
