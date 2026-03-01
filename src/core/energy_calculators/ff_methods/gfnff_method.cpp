@@ -2024,16 +2024,16 @@ GFNFF::GFNFFBondParams GFNFF::getGFNFFBondParameters(int atom1, int atom2, int z
     // split0 = 0.67, split1 = 0.33 for mixed hybridizations
     static const double bsmat[4][4] = {
         // hyb=0 (unknown/sp3)
-        { 1.000, 1.323, 1.079, 1.000 },  // vs. hyb=0,1,2,3
+        { 1.0000, 1.3234, 1.0792, 1.0000 },  // vs. hyb=0,1,2,3
         // hyb=1 (sp)
-        { 1.323, 1.980, 1.484, 1.323 },  // vs. hyb=0,1,2,3
+        { 1.3234, 1.9800, 1.4842, 1.3234 },  // vs. hyb=0,1,2,3
         // hyb=2 (sp2)
-        { 1.079, 1.484, 1.240, 1.079 },  // vs. hyb=0,1,2,3
+        { 1.0792, 1.4842, 1.2400, 1.0792 },  // vs. hyb=0,1,2,3
         // hyb=3 (sp3)
-        { 1.000, 1.323, 1.079, 1.000 }   // vs. hyb=0,1,2,3
+        { 1.0000, 1.3234, 1.0792, 1.0000 }   // vs. hyb=0,1,2,3
     };
     // Computed as: bsmat[i][j] = split0*bstren[bond_i] + split1*bstren[bond_j]
-    // Example: bsmat[1][0] = 0.67*1.00 + 0.33*1.98 = 1.323
+    // Example: bsmat[1][0] = 0.67*1.00 + 0.33*1.98 = 1.3234
 
     // Phase 9: Use actual hybridization from topology
     // Curcuma uses hyb=1,2,3 (sp, sp2, sp3), Fortran uses hyb=0,1,2,3

@@ -323,13 +323,13 @@ static const double bstren[9] = {
 };
 
 // Hybridization-dependent bond strength matrix (4×4)
-// Formula: 0.67*bstren[bond_i] + 0.33*bstren[bond_j]
-// Reference: gfnff_param.f90:804-814
+// Formula: split0*bstren[bond_i] + split1*bstren[bond_j], split0=0.67, split1=0.33
+// Reference: gfnff_param.f90:859-874
 static const double bsmat[4][4] = {
-    { 1.000, 1.323, 1.079, 1.000 },  // hyb=0 (unknown/sp3)
-    { 1.323, 1.980, 1.484, 1.323 },  // hyb=1 (sp)
-    { 1.079, 1.484, 1.240, 1.079 },  // hyb=2 (sp2)
-    { 1.000, 1.323, 1.079, 1.000 }   // hyb=3 (sp3)
+    { 1.0000, 1.3234, 1.0792, 1.0000 },  // hyb=0 (unknown/sp3)
+    { 1.3234, 1.9800, 1.4842, 1.3234 },  // hyb=1 (sp)
+    { 1.0792, 1.4842, 1.2400, 1.0792 },  // hyb=2 (sp2)
+    { 1.0000, 1.3234, 1.0792, 1.0000 }   // hyb=3 (sp3)
 };
 
 // ============================================================================
