@@ -806,11 +806,16 @@ int H4Thread::execute()
 //   thr = 900.0 Bohr² (distance threshold)
 void ForceFieldThread::computeHBCoordinationNumbers()
 {
-    if (m_bond_hb_data.empty()) return;
+    if (m_bond_hb_data.empty())
+        return;
 
-    // Use covalent radii from D3 (Bohr) - same as Fortran param%rcov
-    // Defined in gfnff_par.h
-    static const std::vector<double>& rcov = GFNFFParameters::covalent_rad_d3;
+    // Use covalent radii from D3 (Bohr) with 4/3 scaling - matching Fortran param%rcov
+    // Reference: gfnff_param.f90:381-405 — covalentRadD3 = raw_Å * aatoau * 4/3
+    // Our covalent_rad_d3 in gfnff_par.h stores only raw_Å * aatoau (WITHOUT 4/3),
+    // so we must apply the 4/3 factor here to match Fortran's param%rcov.
+    // Claude Generated (Mar 4, 2026): Fix missing 4/3 scaling — caused hb_cn_H=0 for all bonds
+    static const std::vector<double>& rcov_base = GFNFFParameters::covalent_rad_d3;
+    constexpr double rcov_43 = 4.0 / 3.0;  // Fortran 4/3 scaling factor
 
     constexpr double kn = 27.5;
     constexpr double rcov_scal = 1.78;
@@ -832,7 +837,7 @@ void ForceFieldThread::computeHBCoordinationNumbers()
         for (int B : entry.B_atoms) {
             int atj = m_atom_types[B];  // Atomic number of B
 
-            // Distance H-B
+            // Distance H-B (both in Bohr for GFN-FF)
             double dx = m_geometry(B, 0) - m_geometry(H, 0);
             double dy = m_geometry(B, 1) - m_geometry(H, 1);
             double dz = m_geometry(B, 2) - m_geometry(H, 2);
@@ -842,7 +847,8 @@ void ForceFieldThread::computeHBCoordinationNumbers()
             double r = std::sqrt(r2);
 
             // rcov indices are 0-based (ati-1 for 1-based atomic number)
-            double rcovij = rcov_scal * (rcov[ati - 1] + rcov[atj - 1]);
+            // Apply 4/3 scaling to match Fortran param%rcov = covalentRadD3 * aatoau * 4/3
+            double rcovij = rcov_scal * rcov_43 * (rcov_base[ati - 1] + rcov_base[atj - 1]);
 
             // erf-based coordination number contribution
             // Fortran: tmp = 0.5*(1 + erf(-kn*(r-rcovij)/rcovij))
@@ -853,15 +859,12 @@ void ForceFieldThread::computeHBCoordinationNumbers()
 
             // Claude Generated (Feb 22, 2026): Gradient of erf-CN w.r.t. positions
             // d/dr [0.5*(1 + erf(-kn*(r-rcovij)/rcovij))]
-            //   = 0.5 * (2/sqrt(pi)) * (-kn/rcovij) * exp(-arg²) * d(r)/dr_H
-            //   = inv_sqrt_pi * (-kn/rcovij) * exp(-arg²) * (r_H - r_B)/r
-            // Reference: Fortran dncoord_erf derivative (by analogy with dcn formulas)
+            //   = inv_sqrt_pi * (-kn/rcovij) * exp(-arg²) / r * (r_B - r_H)
+            // Reference: Fortran dncoord_erf derivative
             double dCN_dr = inv_sqrt_pi * (-kn / rcovij) * std::exp(-arg * arg) / r;
-            Eigen::Vector3d r_HB(dx, dy, dz);  // B - H vector
-            // d(CN)/d(r_H) = dCN_dr * (r_H - r_B)/r = -dCN_dr * r_HB/r_HB
-            // Note: derivate of erf w.r.t. r_H: d(r_HB)/d(r_H) = -r_HB_unit
-            Eigen::Vector3d dCN_dH = -dCN_dr * r_HB;  // chain rule: * d(r_HB)/d(r_H) = -(r_B-r_H)/r
-            Eigen::Vector3d dCN_dB = dCN_dr * r_HB;   // d(r_HB)/d(r_B) = +(r_B-r_H)/r
+            Eigen::Vector3d r_HB(dx, dy, dz);  // B - H vector (in Bohr)
+            Eigen::Vector3d dCN_dH = -dCN_dr * r_HB;
+            Eigen::Vector3d dCN_dB = dCN_dr * r_HB;
 
             m_hb_grad_entries.push_back({H, B, dCN_dH, dCN_dB});
         }
