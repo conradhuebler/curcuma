@@ -53,6 +53,7 @@ public:
         validateTopology();
         validateCharges();
         validateEnergyComponents();
+        validateBondParameters();
         validateGradients();
 
         if (run_fd) {
@@ -185,6 +186,343 @@ private:
             double cur_hb = m_gfnff->HydrogenBondEnergy();
             addResult("Energy", "HBond", std::abs(cur_hb - ref_hb) < tol_comp, cur_hb, ref_hb, cur_hb - ref_hb);
         }
+    }
+
+    /**
+     * @brief Per-bond parameter comparison for diagnosing bond energy errors
+     *
+     * Compares per-bond fc, alpha, r0 between Curcuma and Fortran reference,
+     * then computes per-bond energy decomposition to identify error sources.
+     *
+     * Claude Generated (March 2026): Bond energy error diagnosis
+     */
+    void validateBondParameters() {
+        if (!m_ref_data.contains("bonds") || m_ref_data["bonds"].empty()) {
+            std::cout << "  [SKIP] Bond parameter validation: no reference bond data" << std::endl;
+            return;
+        }
+
+        std::cout << std::endl << "=== Per-Bond Parameter Comparison ===" << std::endl;
+
+        // Get Curcuma's bond parameters
+        json curcuma_bonds = m_gfnff->getBondParameters();
+        const auto& ref_bonds = m_ref_data["bonds"];
+
+        // Build lookup: (min_atom, max_atom) -> curcuma bond index
+        std::map<std::pair<int,int>, int> curcuma_bond_map;
+        for (int b = 0; b < (int)curcuma_bonds.size(); ++b) {
+            int ai = curcuma_bonds[b]["i"];
+            int aj = curcuma_bonds[b]["j"];
+            auto key = std::make_pair(std::min(ai, aj), std::max(ai, aj));
+            curcuma_bond_map[key] = b;
+        }
+
+        // Get D3 CN for dynamic r0 computation
+        // The GFNFF object stores these internally after Calculation()
+        // We'll use the bond's dynamic r0 parameters to compute r0
+
+        // Get current geometry for distance computation
+        // NOTE: GFN-FF works in Bohr internally, so convert Angstrom geometry
+        const auto& mol = m_molecule.getMolInfo();
+        const double BOHR_TO_ANGSTROM = 0.529177210903;
+        const double ANG_TO_BOHR = 1.0 / BOHR_TO_ANGSTROM;
+
+        double total_energy_ref = 0.0;
+        double total_energy_curcuma = 0.0;
+        double total_fc_diff = 0.0;
+        double total_r0_diff = 0.0;
+
+        int bonds_matched = 0;
+        int bonds_with_fc_diff = 0;
+        int bonds_with_r0_diff = 0;
+
+        // Header for CSV diagnostic
+        std::cout << std::setw(4) << "Bond"
+                  << std::setw(6) << "At_i"
+                  << std::setw(6) << "At_j"
+                  << std::setw(5) << "Type"
+                  << std::setw(13) << "fc_cur"
+                  << std::setw(13) << "fc_ref"
+                  << std::setw(12) << "fc_diff"
+                  << std::setw(12) << "alp_cur"
+                  << std::setw(12) << "alp_ref"
+                  << std::setw(12) << "alp_diff"
+                  << std::setw(11) << "r0_cur"
+                  << std::setw(11) << "r0_ref"
+                  << std::setw(11) << "r0_diff"
+                  << std::setw(13) << "E_diff"
+                  << std::endl;
+        std::cout << std::string(140, '-') << std::endl;
+
+        for (int rb = 0; rb < (int)ref_bonds.size(); ++rb) {
+            int ref_i = ref_bonds[rb]["atoms"][0];
+            int ref_j = ref_bonds[rb]["atoms"][1];
+            double ref_r0_ang = (double)ref_bonds[rb]["r0"];        // Å (from Fortran)
+            double ref_r0 = ref_r0_ang * ANG_TO_BOHR;               // Convert to Bohr for comparison
+            double ref_alpha = ref_bonds[rb]["kbond"];       // vbond(2) = alpha
+            double ref_fc = ref_bonds[rb]["prefactor"];      // vbond(3) = fc
+
+            auto key = std::make_pair(std::min(ref_i, ref_j), std::max(ref_i, ref_j));
+            auto it = curcuma_bond_map.find(key);
+            if (it == curcuma_bond_map.end()) {
+                std::cout << "  [MISS] Reference bond " << ref_i << "-" << ref_j << " not found in Curcuma" << std::endl;
+                continue;
+            }
+
+            int cb = it->second;
+            double cur_fc = curcuma_bonds[cb]["fc"];          // force constant (prefactor)
+            double cur_alpha = curcuma_bonds[cb]["exponent"];  // alpha
+            double cur_r0 = curcuma_bonds[cb]["r0_ij"];        // static initialization r0 (Å)
+
+            // Compute actual distance from geometry in Bohr (GFN-FF internal units)
+            int ai = curcuma_bonds[cb]["i"];
+            int aj = curcuma_bonds[cb]["j"];
+            double dx = (mol.m_geometry(ai, 0) - mol.m_geometry(aj, 0)) * ANG_TO_BOHR;
+            double dy = (mol.m_geometry(ai, 1) - mol.m_geometry(aj, 1)) * ANG_TO_BOHR;
+            double dz = (mol.m_geometry(ai, 2) - mol.m_geometry(aj, 2)) * ANG_TO_BOHR;
+            double rij = std::sqrt(dx*dx + dy*dy + dz*dz); // Bohr
+
+            // Compute per-bond energy with each set of parameters
+            double dr_cur = rij - cur_r0;
+            double E_cur = cur_fc * std::exp(-cur_alpha * dr_cur * dr_cur);
+
+            double dr_ref = rij - ref_r0;
+            double E_ref = ref_fc * std::exp(-ref_alpha * dr_ref * dr_ref);
+
+            double E_diff = E_cur - E_ref;
+            total_energy_ref += E_ref;
+            total_energy_curcuma += E_cur;
+
+            double fc_diff = cur_fc - ref_fc;
+            double alpha_diff = cur_alpha - ref_alpha;
+            double r0_diff = cur_r0 - ref_r0;
+
+            if (std::abs(fc_diff) > 1e-10) {
+                bonds_with_fc_diff++;
+                total_fc_diff += fc_diff;
+            }
+            if (std::abs(r0_diff) > 1e-6) {
+                bonds_with_r0_diff++;
+                total_r0_diff += r0_diff;
+            }
+            bonds_matched++;
+
+            // Determine bond type for display
+            int z_i = curcuma_bonds[cb]["z_i"];
+            int z_j = curcuma_bonds[cb]["z_j"];
+            std::string btype;
+            if (z_i == 1 || z_j == 1) {
+                int heavy_z = (z_i == 1) ? z_j : z_i;
+                if (heavy_z == 6) btype = "H-C";
+                else if (heavy_z == 8) btype = "H-O";
+                else btype = "H-?";
+            } else if (z_i == 6 && z_j == 6) btype = "C-C";
+            else if ((z_i == 6 && z_j == 8) || (z_i == 8 && z_j == 6)) btype = "C-O";
+            else btype = "?-?";
+
+            // Print only bonds with significant differences or all if few bonds
+            bool significant = std::abs(E_diff) > 1e-6 || std::abs(fc_diff) > 1e-8 || std::abs(r0_diff) > 1e-5;
+            if (significant || ref_bonds.size() <= 80) {
+                std::cout << std::setw(4) << rb
+                          << std::setw(6) << ref_i
+                          << std::setw(6) << ref_j
+                          << std::setw(5) << btype
+                          << std::fixed << std::setprecision(9)
+                          << std::setw(13) << cur_fc
+                          << std::setw(13) << ref_fc
+                          << std::scientific << std::setprecision(3)
+                          << std::setw(12) << fc_diff
+                          << std::fixed << std::setprecision(6)
+                          << std::setw(12) << cur_alpha
+                          << std::setw(12) << ref_alpha
+                          << std::scientific << std::setprecision(3)
+                          << std::setw(12) << alpha_diff
+                          << std::fixed << std::setprecision(6)
+                          << std::setw(11) << cur_r0
+                          << std::setw(11) << ref_r0
+                          << std::scientific << std::setprecision(3)
+                          << std::setw(11) << r0_diff
+                          << std::setw(13) << E_diff
+                          << std::endl;
+            }
+        }
+
+        // Summary
+        std::cout << std::string(140, '-') << std::endl;
+        std::cout << std::fixed << std::setprecision(9)
+                  << "Total bond energy (Curcuma params): " << total_energy_curcuma << " Eh" << std::endl
+                  << "Total bond energy (Fortran params): " << total_energy_ref << " Eh" << std::endl
+                  << "Difference (Curcuma - Fortran):     " << std::scientific << std::setprecision(6)
+                  << (total_energy_curcuma - total_energy_ref) << " Eh ("
+                  << std::fixed << std::setprecision(3) << (total_energy_curcuma - total_energy_ref) * 1000.0 << " mEh)" << std::endl;
+        std::cout << "Bonds matched: " << bonds_matched << "/" << ref_bonds.size() << std::endl;
+        std::cout << "Bonds with fc diff:  " << bonds_with_fc_diff << std::endl;
+        std::cout << "Bonds with r0 diff:  " << bonds_with_r0_diff << std::endl;
+
+        // Error attribution: compute energy with mixed parameters
+        // E_fc_only: use Curcuma fc + Fortran alpha + Fortran r0
+        // E_r0_only: use Fortran fc + Fortran alpha + Curcuma r0
+        double E_fc_attribution = 0.0;
+        double E_r0_attribution = 0.0;
+        double E_alpha_attribution = 0.0;
+
+        for (int rb = 0; rb < (int)ref_bonds.size(); ++rb) {
+            int ref_i = ref_bonds[rb]["atoms"][0];
+            int ref_j = ref_bonds[rb]["atoms"][1];
+            double ref_r0 = (double)ref_bonds[rb]["r0"] * ANG_TO_BOHR; // Convert Å→Bohr
+            double ref_alpha = ref_bonds[rb]["kbond"];
+            double ref_fc = ref_bonds[rb]["prefactor"];
+
+            auto key = std::make_pair(std::min(ref_i, ref_j), std::max(ref_i, ref_j));
+            auto it = curcuma_bond_map.find(key);
+            if (it == curcuma_bond_map.end()) continue;
+
+            int cb = it->second;
+            double cur_fc = curcuma_bonds[cb]["fc"];
+            double cur_alpha = curcuma_bonds[cb]["exponent"];
+            double cur_r0 = curcuma_bonds[cb]["r0_ij"];
+
+            int ai = curcuma_bonds[cb]["i"];
+            int aj = curcuma_bonds[cb]["j"];
+            double dx = (mol.m_geometry(ai, 0) - mol.m_geometry(aj, 0)) * ANG_TO_BOHR;
+            double dy = (mol.m_geometry(ai, 1) - mol.m_geometry(aj, 1)) * ANG_TO_BOHR;
+            double dz = (mol.m_geometry(ai, 2) - mol.m_geometry(aj, 2)) * ANG_TO_BOHR;
+            double rij = std::sqrt(dx*dx + dy*dy + dz*dz); // Bohr
+
+            double dr_ref = rij - ref_r0;
+            double dr_cur = rij - cur_r0;
+            double E_ref = ref_fc * std::exp(-ref_alpha * dr_ref * dr_ref);
+
+            // fc attribution: change only fc, keep Fortran alpha + r0
+            double E_fc_only = cur_fc * std::exp(-ref_alpha * dr_ref * dr_ref);
+            E_fc_attribution += (E_fc_only - E_ref);
+
+            // r0 attribution: change only r0, keep Fortran fc + alpha
+            double E_r0_only = ref_fc * std::exp(-ref_alpha * dr_cur * dr_cur);
+            E_r0_attribution += (E_r0_only - E_ref);
+
+            // alpha attribution: change only alpha, keep Fortran fc + r0
+            double E_alpha_only = ref_fc * std::exp(-cur_alpha * dr_ref * dr_ref);
+            E_alpha_attribution += (E_alpha_only - E_ref);
+        }
+
+        std::cout << std::endl << "Error Attribution (mEh):" << std::endl;
+        std::cout << "  fc (prefactor) contribution:   " << std::fixed << std::setprecision(4) << E_fc_attribution * 1000.0 << " mEh" << std::endl;
+        std::cout << "  alpha (exponent) contribution: " << E_alpha_attribution * 1000.0 << " mEh" << std::endl;
+        std::cout << "  r0 (eq. dist.) contribution:   " << E_r0_attribution * 1000.0 << " mEh" << std::endl;
+        std::cout << "  Total attributed:              " << (E_fc_attribution + E_alpha_attribution + E_r0_attribution) * 1000.0 << " mEh" << std::endl;
+        std::cout << "  Actual total error:            " << (total_energy_curcuma - total_energy_ref) * 1000.0 << " mEh" << std::endl;
+        std::cout << "  Cross-terms:                   "
+                  << ((total_energy_curcuma - total_energy_ref) - E_fc_attribution - E_alpha_attribution - E_r0_attribution) * 1000.0
+                  << " mEh" << std::endl;
+
+        // === CORRECTED COMPARISON ===
+        // The reference JSON r0 uses INIT formula: (ra+rb)*ff + rabshift
+        // Fortran RUNTIME uses: (ra+rb+rabshift)*ff (same as Curcuma)
+        // Correction: Fortran_runtime_r0 = ref_r0_Bohr + rabshift*(ff-1)
+        std::cout << std::endl << "=== Corrected Runtime r0 Comparison ===" << std::endl;
+        std::cout << "Init formula: r0 = (ra+rb)*ff + rabshift  [reference JSON]" << std::endl;
+        std::cout << "Runtime formula: r0 = (ra+rb+rabshift)*ff  [both Curcuma & Fortran]" << std::endl;
+        std::cout << "Correction: r0_runtime = r0_init + rabshift*(ff-1)" << std::endl;
+        std::cout << std::endl;
+
+        double total_E_corrected_ref = 0.0;
+        double total_E_curcuma_dynamic = 0.0;
+        int bonds_with_runtime_r0_diff = 0;
+
+        std::cout << std::setw(4) << "Bond" << std::setw(5) << "Type"
+                  << std::setw(12) << "r0_cur" << std::setw(12) << "r0_f_rt"
+                  << std::setw(12) << "r0_diff" << std::setw(10) << "rij"
+                  << std::setw(13) << "E_cur" << std::setw(13) << "E_f_rt"
+                  << std::setw(13) << "dE" << std::endl;
+        std::cout << std::string(105, '-') << std::endl;
+
+        for (int rb = 0; rb < (int)ref_bonds.size(); ++rb) {
+            int ref_i = ref_bonds[rb]["atoms"][0];
+            int ref_j = ref_bonds[rb]["atoms"][1];
+            double ref_r0_init_Bohr = (double)ref_bonds[rb]["r0"] * ANG_TO_BOHR;
+            double ref_alpha = ref_bonds[rb]["kbond"];
+            double ref_fc = ref_bonds[rb]["prefactor"];
+
+            auto key = std::make_pair(std::min(ref_i, ref_j), std::max(ref_i, ref_j));
+            auto it = curcuma_bond_map.find(key);
+            if (it == curcuma_bond_map.end()) continue;
+
+            int cb = it->second;
+            double cur_r0 = curcuma_bonds[cb]["r0_ij"];
+            double cur_fc = curcuma_bonds[cb]["fc"];
+            double cur_alpha = curcuma_bonds[cb]["exponent"];
+            double rabshift = curcuma_bonds[cb]["rabshift"];
+            double ff = curcuma_bonds[cb]["ff"];
+
+            // Compute corrected Fortran runtime r0
+            double ref_r0_runtime = ref_r0_init_Bohr + rabshift * (ff - 1.0);
+
+            int ai = curcuma_bonds[cb]["i"];
+            int aj = curcuma_bonds[cb]["j"];
+            double dx = (mol.m_geometry(ai, 0) - mol.m_geometry(aj, 0)) * ANG_TO_BOHR;
+            double dy = (mol.m_geometry(ai, 1) - mol.m_geometry(aj, 1)) * ANG_TO_BOHR;
+            double dz = (mol.m_geometry(ai, 2) - mol.m_geometry(aj, 2)) * ANG_TO_BOHR;
+            double rij = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+            double dr_cur = rij - cur_r0;
+            double E_cur = cur_fc * std::exp(-cur_alpha * dr_cur * dr_cur);
+
+            double dr_ref_rt = rij - ref_r0_runtime;
+            double E_ref_rt = ref_fc * std::exp(-ref_alpha * dr_ref_rt * dr_ref_rt);
+
+            total_E_curcuma_dynamic += E_cur;
+            total_E_corrected_ref += E_ref_rt;
+
+            double r0_diff = cur_r0 - ref_r0_runtime;
+            if (std::abs(r0_diff) > 1e-6) bonds_with_runtime_r0_diff++;
+
+            // Determine bond type
+            int z_i = curcuma_bonds[cb]["z_i"];
+            int z_j = curcuma_bonds[cb]["z_j"];
+            std::string btype;
+            if (z_i == 1 || z_j == 1) {
+                int heavy_z = (z_i == 1) ? z_j : z_i;
+                if (heavy_z == 6) btype = "H-C";
+                else if (heavy_z == 8) btype = "H-O";
+                else btype = "H-?";
+            } else if (z_i == 6 && z_j == 6) btype = "C-C";
+            else if ((z_i == 6 && z_j == 8) || (z_i == 8 && z_j == 6)) btype = "C-O";
+            else btype = "?-?";
+
+            double dE = E_cur - E_ref_rt;
+            bool show = std::abs(dE) > 1e-6 || std::abs(r0_diff) > 1e-5;
+            if (show || ref_bonds.size() <= 80) {
+                std::cout << std::setw(4) << rb << std::setw(5) << btype
+                          << std::fixed << std::setprecision(6)
+                          << std::setw(12) << cur_r0
+                          << std::setw(12) << ref_r0_runtime
+                          << std::scientific << std::setprecision(3)
+                          << std::setw(12) << r0_diff
+                          << std::fixed << std::setprecision(4)
+                          << std::setw(10) << rij
+                          << std::fixed << std::setprecision(9)
+                          << std::setw(13) << E_cur
+                          << std::setw(13) << E_ref_rt
+                          << std::scientific << std::setprecision(4)
+                          << std::setw(13) << dE
+                          << std::endl;
+            }
+        }
+
+        std::cout << std::string(105, '-') << std::endl;
+        std::cout << std::fixed << std::setprecision(9)
+                  << "Total E (Curcuma):          " << total_E_curcuma_dynamic << " Eh" << std::endl
+                  << "Total E (Fortran runtime):  " << total_E_corrected_ref << " Eh" << std::endl
+                  << "Difference:                 " << std::scientific << std::setprecision(6)
+                  << (total_E_curcuma_dynamic - total_E_corrected_ref) << " Eh ("
+                  << std::fixed << std::setprecision(3) << (total_E_curcuma_dynamic - total_E_corrected_ref) * 1000.0
+                  << " mEh)" << std::endl;
+        std::cout << "Actual bond energy error:   "
+                  << std::fixed << std::setprecision(3)
+                  << (m_gfnff->BondEnergy() - (double)m_ref_data["energy_components"]["bond"]) * 1000.0
+                  << " mEh" << std::endl;
+        std::cout << "Bonds with runtime r0 diff: " << bonds_with_runtime_r0_diff << std::endl;
     }
 
     void validateGradients() {

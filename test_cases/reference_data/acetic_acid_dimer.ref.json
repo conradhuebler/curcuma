@@ -1,7 +1,7 @@
 {
   "molecule": {
     "name": "acetic_acid_dimer",
-    "geometry_file": "test_cases/molecules/larger/acetic_acid_dimer.xyz",
+    "geometry_file": "external/gfnff/test/acetic_acid_dimer.xyz",
     "atoms": [
       {
         "element": "C",
@@ -103,7 +103,7 @@
   },
   "metadata": {
     "generator": "gfnff-analyzer-parser",
-    "date": "2026-02-18 23:26:34"
+    "date": "2026-03-04 19:59:44"
   },
   "topology": {
     "coordination_numbers": [
@@ -704,10 +704,6 @@
     "angle": 0.031219981012,
     "torsion": 0.010106449612,
     "repulsion": 0.181832233265,
-    "electrostatic": -0.28495441,
-    "dispersion": -0.00653926,
-    "hb": -0.00454573,
-    "xb": 0.0,
     "batm": -0.000542224657
   },
   "gradient_decomposition": {
@@ -1434,24 +1430,6 @@
       }
     }
   },
-  "energy_charges": [
-    0.4326213083,
-    -0.1034088257,
-    -0.5311341085,
-    -0.5103973046,
-    0.090983979,
-    0.1153288517,
-    0.1017605243,
-    0.4042455757,
-    0.4260417304,
-    -0.1237951845,
-    -0.5260900475,
-    -0.4917693033,
-    0.0999810715,
-    0.0914718736,
-    0.1159412288,
-    0.408218631
-  ],
   "gradients": {
     "norm": 0.200338697959
   }

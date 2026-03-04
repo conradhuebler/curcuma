@@ -1405,16 +1405,7 @@ Vector EEQSolver::calculateTopologyCharges(
         A(i, i) = gam(i) + TSQRT2PI / std::sqrt(alpha(i));
     }
 
-    // DEBUG: Print final RHS values (verbosity 3 only)
-    if (m_verbosity >= 3 && natoms >= 1) {
-        std::cerr << "\n=== Phase 1 Final RHS (comparing ether vs hydroxyl O) ===" << std::endl;
-        for (int i = 0; i < std::min(10, natoms); ++i) {
-            if (atoms[i] == 8) {  // Only print oxygens
-                std::cerr << fmt::format("  x({}) (Z=8) = {:.6f}", i, x(i)) << std::endl;
-            }
-        }
-        std::cerr << "========================================\n" << std::endl;
-    }
+    // (RHS diagnostic moved to full A-matrix diagnostic block below)
 
     // 2. Setup off-diagonal Coulomb matrix
     //
@@ -1535,26 +1526,56 @@ Vector EEQSolver::calculateTopologyCharges(
     }
 
     // 4. Solve augmented system
-    if (m_verbosity >= 3) {
-        CurcumaLogger::info("=== Phase 1 EEQ Matrix Diagnostics ===");
+    // Claude Generated (March 2026): Full A-matrix diagnostic for HCN investigation
+    if (m_verbosity >= 3 && natoms <= 10) {
+        std::cerr << "\n========== PHASE 1 EEQ FULL DIAGNOSTICS ==========" << std::endl;
 
-        Eigen::SelfAdjointEigenSolver<Matrix> eigensolver(A);
-        Vector eigenvalues = eigensolver.eigenvalues();
-
-        double max_eigenvalue = eigenvalues.maxCoeff();
-        double min_eigenvalue = eigenvalues.minCoeff();
-        double condition_number = std::abs(max_eigenvalue / min_eigenvalue);
-
-        CurcumaLogger::param("matrix_size", fmt::format("{}x{} (augmented)", m, m));
-        CurcumaLogger::param("condition_number", fmt::format("{:.6e}", condition_number));
-
-        if (condition_number > 1e12) {
-            CurcumaLogger::warn(fmt::format("Phase 1 EEQ matrix ill-conditioned (cond={:.2e})", condition_number));
-        } else if (condition_number > 1e8) {
-            CurcumaLogger::warn(fmt::format("Phase 1 EEQ matrix poorly conditioned (cond={:.2e})", condition_number));
-        } else {
-            CurcumaLogger::success(fmt::format("Phase 1 EEQ matrix well-conditioned (cond={:.2e})", condition_number));
+        // Print topological distances
+        if (topology.has_value()) {
+            std::cerr << "\nTopological distances (Bohr):" << std::endl;
+            for (int i = 0; i < natoms; ++i) {
+                for (int j = 0; j < i; ++j) {
+                    double d = topo_dist(i, j);
+                    if (d < 1e6)
+                        std::cerr << fmt::format("  d_topo[{},{}] = {:12.6f}", i, j, d) << std::endl;
+                }
+            }
         }
+
+        // Print per-atom parameter decomposition
+        std::cerr << "\nPer-atom parameters:" << std::endl;
+        for (int i = 0; i < natoms; ++i) {
+            std::cerr << fmt::format("  Atom {:2d} (Z={:2d}): gam={:12.6f}  TSQRT2PI/sqrt(alp)={:12.6f}  A(i,i)={:12.6f}",
+                i, atoms[i], gam(i), TSQRT2PI / std::sqrt(alpha(i)), A(i, i)) << std::endl;
+        }
+
+        // Print off-diagonal decomposition
+        std::cerr << "\nOff-diagonal elements:" << std::endl;
+        for (int i = 0; i < natoms; ++i) {
+            for (int j = 0; j < i; ++j) {
+                double gammij = 1.0 / std::sqrt(alpha(i) + alpha(j));
+                double r = topology.has_value() ? topo_dist(i, j) : 0.0;
+                std::cerr << fmt::format("  A[{},{}] = {:12.6f}  (gammij={:12.6f}, r={:12.6f}, erf={:12.6f})",
+                    i, j, A(i, j), gammij, r, std::erf(gammij * r)) << std::endl;
+            }
+        }
+
+        // Print complete A-matrix
+        std::cerr << "\nComplete A matrix (" << m << "x" << m << "):" << std::endl;
+        for (int i = 0; i < m; ++i) {
+            std::cerr << fmt::format("  Row {:2d}:", i);
+            for (int j = 0; j < m; ++j) {
+                std::cerr << fmt::format(" {:12.6f}", A(i, j));
+            }
+            std::cerr << std::endl;
+        }
+
+        // Print RHS vector
+        std::cerr << "\nRHS vector x:" << std::endl;
+        for (int i = 0; i < m; ++i) {
+            std::cerr << fmt::format("  x({:2d}) = {:12.6f}", i, x(i)) << std::endl;
+        }
+        std::cerr << "==================================================" << std::endl;
     }
 
     // Phase 1 EEQ linear solve with iterative refinement
@@ -1569,6 +1590,18 @@ Vector EEQSolver::calculateTopologyCharges(
 
     // Extract atomic charges
     Vector topology_charges = solution.segment(0, natoms);
+
+    // Claude Generated (March 2026): Print full solution vector including Lagrange multipliers
+    if (m_verbosity >= 3 && natoms <= 10) {
+        std::cerr << "\nPhase 1 full solution vector:" << std::endl;
+        for (int i = 0; i < m; ++i) {
+            if (i < natoms)
+                std::cerr << fmt::format("  q({:2d}) = {:12.6f}  (Z={:2d})", i, solution(i), atoms[i]) << std::endl;
+            else
+                std::cerr << fmt::format("  λ({:2d}) = {:12.6f}  (Lagrange multiplier)", i - natoms, solution(i)) << std::endl;
+        }
+        std::cerr << fmt::format("  charge sum = {:12.6f}", topology_charges.sum()) << std::endl;
+    }
 
     // Check for NaN/Inf
     for (int i = 0; i < natoms; ++i) {
@@ -1966,36 +1999,65 @@ Vector EEQSolver::calculateFinalCharges(
             x(row) = q_target;
         }
 
-        // DEBUG: Print matrix details for first iteration
-        if (m_verbosity >= 3 && iteration == 0) {
-            std::cerr << "\n=== EEQ Phase 2 DEBUG (single solve) ===" << std::endl;
-            for (int i = 0; i < std::min(3, natoms); ++i) {
-                int z_i = atoms[i];
-                std::cerr << "Atom " << i << " (Z=" << z_i << "):" << std::endl;
-                std::cerr << "  CN = " << cn(i) << std::endl;
-                std::cerr << "  topology_charge (qa) = " << topology_charges(i) << std::endl;
-                std::cerr << "  chi_corrected = " << chi_corrected(i) << std::endl;
-                std::cerr << "  gam_corrected = " << gam_corrected(i) << std::endl;
-                std::cerr << "  alpha_corrected = " << alpha_corrected(i) << std::endl;
-                std::cerr << "  x(RHS) = " << x(i) << std::endl;
-                std::cerr << "  A(i,i) diagonal = " << A(i, i) << std::endl;
+        // Claude Generated (March 2026): Full Phase 2 A-matrix diagnostic for HCN investigation
+        if (m_verbosity >= 3 && iteration == 0 && natoms <= 10) {
+            std::cerr << "\n========== PHASE 2 EEQ FULL DIAGNOSTICS ==========" << std::endl;
+
+            // Print geometric distances
+            std::cerr << "\nGeometric distances (Bohr):" << std::endl;
+            for (int i = 0; i < natoms; ++i) {
+                for (int j = 0; j < i; ++j) {
+                    std::cerr << fmt::format("  d_geom[{},{}] = {:12.6f}", i, j, distances(i, j)) << std::endl;
+                }
             }
-            std::cerr << "  x(constraint) = " << x(natoms) << std::endl;
-            std::cerr << "==========================================\n" << std::endl;
+
+            // Print per-atom parameter decomposition
+            std::cerr << "\nPer-atom Phase 2 parameters:" << std::endl;
+            for (int i = 0; i < natoms; ++i) {
+                int z_i = atoms[i];
+                EEQParameters params_i = getParameters(z_i, cn(i));
+                std::cerr << fmt::format("  Atom {:2d} (Z={:2d}): qa={:12.6f}  alpeeq={:12.6f}  gameeq={:12.6f}  chieeq={:12.6f}  CN={:8.4f}  cnf={:12.6f}",
+                    i, z_i, topology_charges(i), alpha_corrected(i), gam_corrected(i), chi_corrected(i), cn(i), params_i.cnf) << std::endl;
+                std::cerr << fmt::format("           gam_base={:12.6f}  dgam={:12.6f}  TSQRT2PI/sqrt(alp)={:12.6f}  A(i,i)={:12.6f}",
+                    params_i.gam, dgam(i), TSQRT2PI / std::sqrt(alpha_corrected(i)), A(i, i)) << std::endl;
+            }
+
+            // Print off-diagonal decomposition
+            std::cerr << "\nOff-diagonal elements:" << std::endl;
+            for (int i = 0; i < natoms; ++i) {
+                for (int j = 0; j < i; ++j) {
+                    double gammij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
+                    double r = distances(i, j);
+                    std::cerr << fmt::format("  A[{},{}] = {:12.6f}  (gammij={:12.6f}, r={:12.6f}, erf={:12.6f})",
+                        i, j, A(i, j), gammij, r, std::erf(gammij * r)) << std::endl;
+                }
+            }
+
+            // Print complete A-matrix
+            std::cerr << "\nComplete A matrix (" << m << "x" << m << "):" << std::endl;
+            for (int i = 0; i < m; ++i) {
+                std::cerr << fmt::format("  Row {:2d}:", i);
+                for (int j = 0; j < m; ++j) {
+                    std::cerr << fmt::format(" {:12.6f}", A(i, j));
+                }
+                std::cerr << std::endl;
+            }
+
+            // Print RHS vector
+            std::cerr << "\nRHS vector x:" << std::endl;
+            for (int i = 0; i < m; ++i) {
+                std::cerr << fmt::format("  x({:2d}) = {:12.6f}", i, x(i)) << std::endl;
+            }
+            std::cerr << "==================================================" << std::endl;
         }
 
         // 5. Matrix diagnostics (only for first iteration to avoid spam)
         if (m_verbosity >= 3 && iteration == 0) {
-            CurcumaLogger::info("=== Phase 2 EEQ Matrix Diagnostics ===");
-
             Eigen::SelfAdjointEigenSolver<Matrix> eigensolver(A);
             Vector eigenvalues = eigensolver.eigenvalues();
-
             double max_eigenvalue = eigenvalues.maxCoeff();
             double min_eigenvalue = eigenvalues.minCoeff();
             double condition_number = std::abs(max_eigenvalue / min_eigenvalue);
-
-            CurcumaLogger::param("condition_number", fmt::format("{:.6e}", condition_number));
 
             if (condition_number > 1e12) {
                 CurcumaLogger::warn(fmt::format("Phase 2 EEQ matrix ill-conditioned (cond={:.2e})", condition_number));
@@ -2013,6 +2075,15 @@ Vector EEQSolver::calculateFinalCharges(
         solution -= correction;
 
         Vector new_charges = solution.segment(0, natoms);
+
+        // Claude Generated (March 2026): Print Phase 2 solution charges
+        if (m_verbosity >= 3 && iteration == 0 && natoms <= 10) {
+            std::cerr << "\nPhase 2 solution charges:" << std::endl;
+            for (int i = 0; i < natoms; ++i) {
+                std::cerr << fmt::format("  q({:2d}) = {:12.6f}  (Z={:2d})", i, new_charges(i), atoms[i]) << std::endl;
+            }
+            std::cerr << fmt::format("  sum = {:12.6f}", new_charges.sum()) << std::endl;
+        }
 
         // 7. Validate solution
         bool solution_valid = true;
@@ -2226,12 +2297,38 @@ Vector EEQSolver::calculateDxi(
 
         // Carbon (Z=6): Special cases (lines 379-387)
         if (ati == 6) {
-            // Carbene (CN=2, special tag): make more negative (line 379)
-            if (nn == 2 && cn(i) < 2.5) {
-                double corr = -0.15;
-                dxi_total += corr;
-                components += "carbene:-0.15 ";
-                env_desc = "carbene";
+            // Carbene (CN=2, itag==1): make more negative (line 379)
+            // CRITICAL FIX (March 2026): Fortran checks itag(i)==1, which is only set
+            // when the bond angle < 150° (gfnff_ini2.f90:244-246).
+            // For linear molecules like HCN (angle ~180°), itag=0, so dxi=0.
+            // Previous code applied dxi=-0.15 to ALL C with nn==2, causing HCN charge error.
+            if (nn == 2) {
+                bool is_carbene = false;  // Equivalent of itag==1
+                if (topology.has_value() && topology->neighbor_lists[i].size() == 2) {
+                    int nb1 = topology->neighbor_lists[i][0];
+                    int nb2 = topology->neighbor_lists[i][1];
+                    // Calculate bond angle at atom i
+                    double dx1 = geometry_bohr(nb1, 0) - geometry_bohr(i, 0);
+                    double dy1 = geometry_bohr(nb1, 1) - geometry_bohr(i, 1);
+                    double dz1 = geometry_bohr(nb1, 2) - geometry_bohr(i, 2);
+                    double dx2 = geometry_bohr(nb2, 0) - geometry_bohr(i, 0);
+                    double dy2 = geometry_bohr(nb2, 1) - geometry_bohr(i, 1);
+                    double dz2 = geometry_bohr(nb2, 2) - geometry_bohr(i, 2);
+                    double r1 = std::sqrt(dx1*dx1 + dy1*dy1 + dz1*dz1);
+                    double r2 = std::sqrt(dx2*dx2 + dy2*dy2 + dz2*dz2);
+                    if (r1 > 1e-10 && r2 > 1e-10) {
+                        double cos_angle = (dx1*dx2 + dy1*dy2 + dz1*dz2) / (r1 * r2);
+                        cos_angle = std::max(-1.0, std::min(1.0, cos_angle));
+                        double angle_deg = std::acos(cos_angle) * 180.0 / M_PI;
+                        is_carbene = (angle_deg < 150.0);  // Fortran: phi*180/pi < 150
+                    }
+                }
+                if (is_carbene) {
+                    double corr = -0.15;
+                    dxi_total += corr;
+                    components += "carbene:-0.15 ";
+                    env_desc = "carbene";
+                }
             }
             // Free CO (C bonded to single O): make O less negative (line 387)
             if (topology.has_value() && nn == 1) {

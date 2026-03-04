@@ -411,12 +411,16 @@ double GFNFF::Calculation(bool gradient)
             eeq_topo.fraglist = topo.fraglist;
             eeq_topo.qfrag = topo.qfrag;
 
-            // Covalent radii for topological distance calculation
+            // Covalent radii for Floyd-Warshall topological distance calculation
+            // CRITICAL FIX (Mar 2026): Use Pyykko covalent radii (param%rad), NOT D3 radii
+            // Fortran: gfnff_ini.f90:438 uses param%rad(at(i)) + param%rad(at(k)) for bond lengths
+            // param%rad = Pyykko radii in Angstrom (H=0.32, C=0.75, N=0.71, O=0.64)
+            // Previous code used covalent_rad_d3*4/3*aatoau which gave 33% too large distances
             eeq_topo.covalent_radii.resize(m_atomcount);
             for (int i = 0; i < m_atomcount; ++i) {
                 int z = m_atoms[i];
-                if (z >= 1 && z <= 86) {
-                    eeq_topo.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];
+                if (z >= 1 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) {
+                    eeq_topo.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];  // Pyykko radii in Å
                 } else {
                     eeq_topo.covalent_radii[i] = 1.0;
                 }
@@ -5729,11 +5733,14 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         eeq_topology_input.nfrag = topo_info.nfrag;
         eeq_topology_input.fraglist = topo_info.fraglist;
         eeq_topology_input.qfrag = topo_info.qfrag;
+        // CRITICAL FIX (Mar 2026): Use Pyykko covalent radii (param%rad), NOT D3 radii
+        // Fortran: gfnff_ini.f90:438 uses param%rad(at(i)) for Floyd-Warshall
+        // param%rad = Pyykko radii in Angstrom (H=0.32, C=0.75, N=0.71, O=0.64)
         eeq_topology_input.covalent_radii.resize(m_atomcount);
         for (int i = 0; i < m_atomcount; ++i) {
             int z = m_atoms[i];
-            if (z >= 1 && z <= 86) {
-                eeq_topology_input.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];
+            if (z >= 1 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) {
+                eeq_topology_input.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];  // Pyykko in Å
             } else {
                 eeq_topology_input.covalent_radii[i] = 1.0;
             }
@@ -7367,19 +7374,16 @@ bool GFNFF::calculateTopologyCharges(TopologyInfo& topo_info) const
     // These are bond connectivity lists needed for shortest path computation
     eeq_topology.neighbor_lists = topo_info.neighbor_lists;
 
-    // 2. Extract covalent radii from GFNFFParameters
-    // Needed to compute bond lengths (sum of radii) in topological distance
-    // CRITICAL (Jan 2026): EEQ solver expects ANGSTROM radii, NOT Bohr!
-    // The solver converts from Angstrom to Bohr internally (eeq_solver.cpp:1549)
+    // 2. Extract covalent radii for Floyd-Warshall topological distances
+    // CRITICAL FIX (Mar 2026): Use Pyykko covalent radii (param%rad), NOT D3 radii
+    // Fortran: gfnff_ini.f90:438 uses param%rad (Pyykko radii in Angstrom)
     eeq_topology.covalent_radii.resize(m_atomcount);
     for (int i = 0; i < m_atomcount; ++i) {
         int z = m_atoms[i];
-        if (z > 0 && z <= 86) {
-            // Use covalent_radii (Angstrom), NOT rcov_bohr!
-            eeq_topology.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];
+        if (z > 0 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) {
+            eeq_topology.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];  // Pyykko in Å
         } else {
-            // Fallback radius for unknown elements (Angstrom)
-            eeq_topology.covalent_radii[i] = 0.75;  // Default ~C radius in Angstrom
+            eeq_topology.covalent_radii[i] = 0.75;
             CurcumaLogger::warn(fmt::format(
                 "GFNFF::calculateTopologyCharges: Unknown atomic number {} (using default covalent radius 0.75 Å)", z));
         }
@@ -7440,13 +7444,15 @@ bool GFNFF::calculateDxi(TopologyInfo& topo_info) const
     }
 
     // Build topology input for EEQSolver
+    // CRITICAL FIX (Mar 2026): Use D3 covalent radii with 4/3 scaling for Floyd-Warshall
+    // Also fixed off-by-one: was using covalent_radii[z] instead of [z-1]
     EEQSolver::TopologyInput eeq_topology;
     eeq_topology.neighbor_lists = topo_info.neighbor_lists;
     eeq_topology.covalent_radii.resize(m_atomcount);
     for (int i = 0; i < m_atomcount; ++i) {
         int z = m_atoms[i];
-        if (z >= 1 && z <= 86) {
-            eeq_topology.covalent_radii[i] = GFNFFParameters::covalent_radii[z];
+        if (z >= 1 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) {
+            eeq_topology.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];  // Pyykko in Å
         } else {
             eeq_topology.covalent_radii[i] = 0.75;  // Default fallback
         }
@@ -7725,16 +7731,17 @@ bool GFNFF::calculateFinalCharges(TopologyInfo& topo_info, int max_iterations,
     // 1. Extract neighbor lists from TopologyInfo (already computed)
     eeq_topology.neighbor_lists = topo_info.neighbor_lists;
 
-    // 2. Extract covalent radii from GFNFFParameters (needed for topological distances)
+    // 2. Extract covalent radii for Floyd-Warshall topological distances
+    // CRITICAL FIX (Mar 2026): Use Pyykko covalent radii (param%rad), NOT D3 radii
+    // Fortran: gfnff_ini.f90:438 uses param%rad (Pyykko radii in Angstrom)
     eeq_topology.covalent_radii.resize(m_atomcount);
     for (int i = 0; i < m_atomcount; ++i) {
         int z = m_atoms[i];
-        if (z >= 1 && z <= 86) {
-            eeq_topology.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];
+        if (z >= 1 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) {
+            eeq_topology.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];  // Pyykko in Å
         } else {
-            // Fallback covalent radius for unknown elements
-            eeq_topology.covalent_radii[i] = 1.0; // Bohr
-            CurcumaLogger::warn(fmt::format("calculateFinalCharges: Unknown atomic number {} (using default covalent radius 1.0 Bohr)", z));
+            eeq_topology.covalent_radii[i] = 0.75;
+            CurcumaLogger::warn(fmt::format("calculateFinalCharges: Unknown atomic number {} (using default covalent radius 0.75 Å)", z));
         }
     }
 

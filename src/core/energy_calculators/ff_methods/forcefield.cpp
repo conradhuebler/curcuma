@@ -951,10 +951,11 @@ void ForceField::setGFNFFHydrogenBonds(const json& hbonds)
     }
 
     m_gfnff_hbonds.clear();
+    int nhb1 = 0, nhb2 = 0;
     for (const auto& hb : hbonds) {
         GFNFFHydrogenBond bond;
 
-        bond.i = hb["i"];  // Donor atom A
+        bond.i = hb["i"];  // Donor atom A (or acceptor for case 1)
         bond.j = hb["j"];  // Hydrogen
         bond.k = hb["k"];  // Acceptor atom B
 
@@ -968,6 +969,7 @@ void ForceField::setGFNFFHydrogenBonds(const json& hbonds)
         bond.q_B = hb["q_B"];
 
         bond.case_type = hb.value("case", 1);
+        bond.r_cut = hb.value("r_cut", 50.0);
 
         if (hb.contains("neighbors_A")) {
             bond.neighbors_A = hb["neighbors_A"].get<std::vector<int>>();
@@ -982,11 +984,13 @@ void ForceField::setGFNFFHydrogenBonds(const json& hbonds)
             bond.neighbors_C = hb["neighbors_C"].get<std::vector<int>>();
         }
 
+        if (bond.case_type == 1) nhb1++; else nhb2++;
         m_gfnff_hbonds.push_back(bond);
     }
 
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF hydrogen bonds", hbonds.size()));
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::result(fmt::format("Loaded {} GFN-FF hydrogen bonds (nhb1={}, nhb2={})",
+                              hbonds.size(), nhb1, nhb2));
     }
 }
 
@@ -1056,6 +1060,7 @@ void ForceField::updateGFNFFHBonds(const json& hbonds)
         bond.q_B = hb["q_B"];
 
         bond.case_type = hb.value("case", 1);
+        bond.r_cut = hb.value("r_cut", 50.0);
 
         if (hb.contains("neighbors_A")) {
             bond.neighbors_A = hb["neighbors_A"].get<std::vector<int>>();
