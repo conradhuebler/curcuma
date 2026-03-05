@@ -844,6 +844,18 @@ bool GFNFF::initializeForceField()
         }
     }
 
+    // Claude Generated (Mar 6, 2026): Distribute Phase-1 topology charges for BATM AFTER setParameter()
+    // Reference: Fortran gfnff_engrad.F90:620 uses topo%qa (Phase-1, fixed) for BATM
+    // CRITICAL: Must happen AFTER setParameter() which creates threads via AutoRanges().
+    // Previously distributed in generateGFNFFParameters() before threads existed → topology_charges lost.
+    if (m_cached_topology.has_value() && m_cached_topology->topology_charges.size() > 0) {
+        m_forcefield->distributeTopologyCharges(m_cached_topology->topology_charges);
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("Phase-1 topology charges distributed for BATM ({} atoms)",
+                                           m_cached_topology->topology_charges.size()));
+        }
+    }
+
     // Claude Generated (Feb 1, 2026): Calculate and distribute CN, CNF, and CN derivatives
     // Reference: Fortran gfnff_engrad.F90:418-422 - for Coulomb charge derivative gradients
     // These are needed for the second term in Coulomb gradient: dE/dq * dq/dCN * dCN/dx
@@ -928,17 +940,9 @@ json GFNFF::generateGFNFFParameters()
         // Torsions need m_charges for fqq correction factor
         m_charges = topo_info.eeq_charges;
 
-        // Claude Generated (Feb 21, 2026): Distribute Phase-1 topology charges for BATM
-        // Reference: Fortran gfnff_engrad.F90:620 uses topo%qa (Phase-1, fixed) for BATM
-        // CRITICAL: BATM must use Phase-1 charges (fixed at init), not Phase-2 EEQ charges (geometry-dependent)
-        // This fixes energy/gradient inconsistency in MD simulations caused by missing dq/dx term in BATM gradient
-        if (m_forcefield && topo_info.topology_charges.size() > 0) {
-            m_forcefield->distributeTopologyCharges(topo_info.topology_charges);
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format("Phase-1 topology charges distributed for BATM ({} atoms)",
-                                               topo_info.topology_charges.size()));
-            }
-        }
+        // NOTE (Claude Generated Mar 6, 2026): Topology charge distribution for BATM moved to
+        // initializeForceField() AFTER setParameter() — threads don't exist yet at this point.
+        // See initializeForceField() line ~845 for the actual distribution.
 
         // Phase 1A: Bonds (sequential - prerequisite for all other phases)
         // CRITICAL FIX (Claude Generated Jan 15, 2026): Pass full topo_info to include pi_bond_orders!
@@ -1257,16 +1261,8 @@ json GFNFF::generateGFNFFParameters()
         // Torsions need m_charges for fqq correction factor!
         m_charges = topo_info.eeq_charges;
 
-        // Claude Generated (Feb 21, 2026): Distribute Phase-1 topology charges for BATM
-        // Reference: Fortran gfnff_engrad.F90:620 uses topo%qa (Phase-1, fixed) for BATM
-        // CRITICAL: BATM must use Phase-1 charges (fixed at init), not Phase-2 EEQ charges (geometry-dependent)
-        if (m_forcefield && topo_info.topology_charges.size() > 0) {
-            m_forcefield->distributeTopologyCharges(topo_info.topology_charges);
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format("Phase-1 topology charges distributed for BATM [basic mode] ({} atoms)",
-                                               topo_info.topology_charges.size()));
-            }
-        }
+        // NOTE (Claude Generated Mar 6, 2026): Topology charge distribution for BATM moved to
+        // initializeForceField() AFTER setParameter() — threads don't exist yet at this point.
 
         // Generate GFN-FF bonds with real parameters
         json bonds = generateGFNFFBonds();
@@ -5859,6 +5855,38 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
                                               topo_info.topology_charges[0], topo_info.topology_charges[1], topo_info.topology_charges[2]));
                 CurcumaLogger::info(fmt::format("nlist%q (energy charges) first 3: {:.6f}, {:.6f}, {:.6f}",
                                               topo_info.eeq_charges[0], topo_info.eeq_charges[1], topo_info.eeq_charges[2]));
+
+                // Claude Generated (Mar 5, 2026): Write topology charges to JSON diagnostic file
+                {
+                    json diag;
+                    diag["type"] = "topo_qa";
+                    diag["n_atoms"] = m_atomcount;
+                    diag["sum"] = topo_info.topology_charges.sum();
+                    double qa_rms = 0.0;
+                    json atoms = json::array();
+                    for (int i = 0; i < m_atomcount; ++i) {
+                        double qa = topo_info.topology_charges(i);
+                        qa_rms += qa * qa;
+                        atoms.push_back({{"idx", i}, {"Z", m_atoms[i]}, {"qa", qa}});
+                    }
+                    qa_rms = std::sqrt(qa_rms / m_atomcount);
+                    diag["rms"] = qa_rms;
+                    diag["atoms"] = atoms;
+
+                    // Also add Phase 2 (energy) charges for comparison
+                    json atoms_q = json::array();
+                    for (int i = 0; i < m_atomcount; ++i) {
+                        atoms_q.push_back({{"idx", i}, {"Z", m_atoms[i]}, {"q", topo_info.eeq_charges(i)}});
+                    }
+                    diag["energy_charges"] = atoms_q;
+
+                    std::ofstream diag_file("gfnff_diag_charges.json");
+                    if (diag_file.is_open()) {
+                        diag_file << diag.dump(2) << std::endl;
+                        diag_file.close();
+                        CurcumaLogger::info("Wrote topology charge diagnostics to gfnff_diag_charges.json");
+                    }
+                }
             }
         }
     } else {

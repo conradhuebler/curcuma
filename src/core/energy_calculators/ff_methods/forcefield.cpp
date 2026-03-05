@@ -2296,6 +2296,37 @@ double ForceField::Calculate(bool gradient)
         m_coulomb_energy += E_en + E_self;
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info(fmt::format("  Coulomb self-energy (parent): EN={:+.12f}, Self={:+.12f} Eh", E_en, E_self));
+            // Claude Generated (Mar 5, 2026): Energy decomposition diagnostics to JSON file
+            double term1 = m_coulomb_energy - E_en - E_self;  // Pairwise from threads
+            {
+                json diag;
+                diag["type"] = "energy_decomposition";
+                diag["coulomb"] = {
+                    {"term1_pairwise", term1},
+                    {"term2_EN", E_en},
+                    {"term3_self", E_self},
+                    {"total", m_coulomb_energy}
+                };
+                diag["bond"] = m_bond_energy;
+                diag["angle"] = m_angle_energy;
+                diag["torsion"] = m_dihedral_energy;
+                diag["inversion"] = m_inversion_energy;
+                diag["repulsion"] = m_gfnff_repulsion;
+                diag["dispersion"] = m_dispersion_energy;
+                diag["atm"] = m_atm_energy;
+                diag["batm"] = m_batm_energy;
+                diag["hbond"] = m_energy_hbond;
+                diag["xbond"] = m_energy_xbond;
+
+                diag["n_threads"] = static_cast<int>(m_stored_threads.size());
+
+                std::ofstream diag_file("gfnff_diag_energy.json");
+                if (diag_file.is_open()) {
+                    diag_file << diag.dump(2) << std::endl;
+                    diag_file.close();
+                    CurcumaLogger::info("Wrote energy decomposition diagnostics to gfnff_diag_energy.json");
+                }
+            }
         }
     }
 

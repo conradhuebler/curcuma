@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <chrono>
+#include <fstream>  // Claude Generated (Mar 5, 2026): For diagnostic JSON output
 #include <limits>
 #include <omp.h>  // Claude Generated (February 2026): Phase 3 - OpenMP parallelization
 
@@ -261,7 +262,8 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
     }
 
     // Claude Generated (Feb 8, 2026): Diagnostic for dispersion CN values (verbosity >= 3 only)
-    if (CurcumaLogger::get_verbosity() >= 3 && m_atoms.size() <= 10) {
+    // Claude Generated (Mar 5, 2026): Removed atom count limit for large-system diagnostics
+    if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("D4_CN_DIAG: Dispersion CN values (from GFNFFCN):");
         for (size_t i = 0; i < m_atoms.size(); ++i) {
             CurcumaLogger::param(fmt::format("Atom {} (Z={})", i, m_atoms[i]),
@@ -404,7 +406,7 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
                 double c6 = getChargeWeightedC6(atom_i, atom_j, i, j);
 
                 // Claude Generated (Feb 8, 2026): C6 reference diagnostic for first few pairs (verbosity >= 3 only)
-                if (CurcumaLogger::get_verbosity() >= 3 && i == 0 && j == 1 && m_atoms.size() <= 10) {
+                if (CurcumaLogger::get_verbosity() >= 3 && i == 0 && j == 1) {
                     int nref_i = (atom_i > 0 && atom_i <= MAX_ELEM) ? m_refn[atom_i - 1] : 0;
                     int nref_j = (atom_j > 0 && atom_j <= MAX_ELEM) ? m_refn[atom_j - 1] : 0;
                     CurcumaLogger::info(fmt::format("D4_C6REF_DIAG: pair ({},{}) Z=({},{}) c6_weighted={:.6f} nref=({},{})",
@@ -519,6 +521,42 @@ void D4ParameterGenerator::GenerateParameters(const std::vector<int>& atoms, con
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::param("Generated D4 pairs", static_cast<int>(dispersion_pairs.size()));
+
+        // Claude Generated (Mar 5, 2026): D4 diagnostics to JSON file
+        {
+            json diag;
+            diag["type"] = "d4_dispersion";
+            diag["n_pairs"] = static_cast<int>(dispersion_pairs.size());
+            double sum_c6 = 0.0, sum_zetac6 = 0.0, sum_c6_zetac6 = 0.0;
+            for (const auto& pair : dispersion_pairs) {
+                double c6 = pair["C6"];
+                double zetac6 = pair.value("zetac6", 1.0);
+                sum_c6 += c6;
+                sum_zetac6 += zetac6;
+                sum_c6_zetac6 += c6 * zetac6;
+            }
+            diag["sum_C6"] = sum_c6;
+            diag["sum_zetac6"] = sum_zetac6;
+            diag["sum_C6_x_zetac6"] = sum_c6_zetac6;
+
+            // Per-atom CN and zeta values
+            json atoms = json::array();
+            for (size_t i = 0; i < m_atoms.size(); ++i) {
+                double q_i = (i < static_cast<size_t>(m_topology_charges.size())) ? m_topology_charges(i) : 0.0;
+                double zeta_i = GFNFFParameters::zetaChargeScale(m_atoms[i], q_i);
+                double cn_i = (i < m_cn_values.size()) ? m_cn_values[i] : 0.0;
+                atoms.push_back({{"idx", static_cast<int>(i)}, {"Z", m_atoms[i]},
+                                {"qa", q_i}, {"zeta", zeta_i}, {"CN", cn_i}});
+            }
+            diag["atoms"] = atoms;
+
+            std::ofstream diag_file("gfnff_diag_d4.json");
+            if (diag_file.is_open()) {
+                diag_file << diag.dump(2) << std::endl;
+                diag_file.close();
+                CurcumaLogger::info("Wrote D4 dispersion diagnostics to gfnff_diag_d4.json");
+            }
+        }
     }
 
     // Summary of C6 distribution (verbosity 2) - Fix 2
@@ -1020,7 +1058,8 @@ void D4ParameterGenerator::precomputeGaussianWeights()
     }
 
     // Claude Generated (Feb 8, 2026): Diagnostic for Gaussian weights (verbosity >= 3 only)
-    if (CurcumaLogger::get_verbosity() >= 3 && m_atoms.size() <= 10) {
+    // Claude Generated (Mar 5, 2026): Removed atom count limit for large-system diagnostics
+    if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("D4_GW_DIAG: Gaussian weights per atom:");
         for (size_t i = 0; i < m_atoms.size(); ++i) {
             int elem_i = m_atoms[i];

@@ -3592,6 +3592,7 @@ void ForceFieldThread::CalculateGFNFFBatmContribution()
         double energy = c9 * angr9;
         m_batm_energy += energy * m_final_factor;
 
+
         // ============================
         // Analytical Gradient Calculation
         // ============================
@@ -3627,4 +3628,5 @@ void ForceFieldThread::CalculateGFNFFBatmContribution()
             m_gradient.row(batm.i) += dgij + dgik;
         }
     }
+
 }

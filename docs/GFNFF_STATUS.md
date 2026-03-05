@@ -1,12 +1,57 @@
 # GFN-FF Implementation Status
 
-**Last Updated**: 2026-02-23
-**Status**: ✅ **DYNAMIC COULOMB CHARGES IMPLEMENTED**
+**Last Updated**: 2026-03-06
+**Status**: ✅ **BATM FIX — Total error 0.4 mEh (complex.xyz 231 atoms)**
 **Location**: `src/core/energy_calculators/ff_methods/`
 
 ---
 
-## Latest: Dynamic Coulomb Charges (Feb 23, 2026) ✅
+## Latest: BATM Topology Charge Fix (Mar 6, 2026) ✅
+
+**Root cause**: `distributeTopologyCharges()` was called BEFORE `setParameter()` in `generateGFNFFParameters()`. `setParameter()` recreates threads via `AutoRanges()`, losing the distributed topology charges. BATM fell back to Phase-2 EEQ charges instead of Phase-1 topology charges.
+
+**Fix**: Moved topology charge distribution to `initializeForceField()` AFTER `setParameter()`, matching the existing pattern for EEQ charge distribution.
+
+**Impact on complex.xyz (231 atoms)**:
+
+| Term | Before (mEh) | After (mEh) | Status |
+|------|-------------|-------------|--------|
+| **BATM** | **-1.485** | **~0.000** | ✅ FIXED (743× improvement) |
+| Coulomb | -0.604 | -0.604 | Phase 2 charge precision |
+| D4+ATM | +0.409 | +0.408 | Zeta/CN differences |
+| Torsion+Inv | -0.233 | -0.233 | Damping differences |
+| Bond | +0.007 | +0.007 | Exact match |
+| Repulsion | +0.021 | +0.021 | Exact match |
+| **TOTAL** | **-1.486** | **-0.400** | **3.7× improvement** |
+
+---
+
+## Previous: Diagnostic Infrastructure + Charge Validation (Mar 5, 2026) ✅
+
+**JSON-based diagnostics** for Fortran comparison at verbosity >= 3:
+
+| File | Content |
+|------|---------|
+| `gfnff_diag_charges.json` | Per-atom Phase 1 (qa) + Phase 2 (q) charges |
+| `gfnff_diag_d4.json` | Per-atom CN, zeta, C6 sums |
+| `gfnff_diag_energy.json` | Full energy decomposition with Coulomb TERM1/2/3 |
+
+**Key finding**: Phase 1 topology charges (topo%qa) are **perfect** — RMS diff 2.9e-7 across 231 atoms of complex.xyz. All remaining energy errors come from downstream terms, not EEQ charges.
+
+**complex.xyz (231 atoms) error decomposition**:
+
+| Term | Diff (mEh) | Root Cause |
+|------|-----------|------------|
+| ~~BATM~~ | ~~-1.485~~ | ✅ FIXED (Mar 6): topology charges not distributed to threads |
+| **Coulomb** | **-0.604** | Phase 2 charge or gamma/alpha differences |
+| **D4+ATM** | **+0.409** | CN or zeta function |
+| Torsion+Inv | -0.233 | Damping differences |
+| Bond | +0.007 | Exact match |
+| Repulsion | +0.021 | Exact match |
+
+---
+
+## Previous: Dynamic Coulomb Charges (Feb 23, 2026) ✅
 
 **ALL THREE COULOMB TERMS NOW USE DYNAMIC EEQ CHARGES**:
 
@@ -95,14 +140,21 @@ The foundation that enabled rapid angle error debugging:
 
 ---
 
-## Detailed Accuracy Metrics (Feb 13, 2026 - After Angle Fix)
+## Detailed Accuracy Metrics (Mar 5, 2026 - After Diagnostic Analysis)
 
-| Molecule | Atoms | Total Error | Coulomb Error | Angle Error | Torsion Error | Status |
-|----------|-------|-------------|---------------|-------------|---------------|--------|
-| **CH4** | 5 | **0.08 µEh** ✅ | < 1 nEh | 0.1 µEh | 0 | EXCELLENT |
-| **Triose** | 66 | **2.5 mEh** ✅ | 0.15 mEh | 0.008 mEh | 2.4 mEh | GOOD |
-| **Caffeine** | 24 | **0.12 mEh** ✅ | 0.12 mEh | 0.034 mEh | 0.03 mEh | EXCELLENT |
-| **Complex** | 231 | **1.2 mEh** ✅ | 0.65 mEh | 0.008 mEh | -0.45 mEh | EXCELLENT |
+| Molecule | Atoms | Total Error | Dominant Error Source | Status |
+|----------|-------|-------------|---------------------|--------|
+| **CH4** | 5 | **0.08 µEh** ✅ | None | EXCELLENT |
+| **Caffeine** | 24 | **0.12 mEh** ✅ | Coulomb 0.12 mEh | EXCELLENT |
+| **Triose** | 66 | **2.5 mEh** ✅ | Torsion 2.4 mEh | GOOD |
+| **Complex** | 231 | **0.40 mEh** ✅ | Coulomb -0.60 mEh | EXCELLENT |
+
+**complex.xyz detailed** (Mar 5, 2026 diagnostics):
+- EEQ topo charges: RMS diff 2.9e-7 (PERFECT)
+- Bond: +0.007 mEh, Repulsion: +0.020 mEh (negligible)
+- BATM: ~0.000 mEh ✅ FIXED (Mar 6, 2026)
+- Coulomb: -0.604 mEh (TERM1=-0.916, TERM2=-1.872, TERM3=+1.852)
+- D4+ATM: +0.409 mEh
 
 ---
 
@@ -117,8 +169,9 @@ The foundation that enabled rapid angle error debugging:
 | **Aldehyde Correction** | ✅ 100% | ctype detection for C=O carbons (Feb 21) |
 | **Bridge Detection** | ✅ 100% | sp-hybridized H/halogen modulation (Feb 21) |
 | **Angles** | ✅ 99.9% | Fixed pi_bond_orders integration; all molecules <0.12 mEh |
-| **Coulomb** | ✅ 100% | Dynamic charges + exact match; thread-safety bug open (N-fold self-energy) |
-| **Dispersion** | ⚠️ 95% | D4 with CN-only weighting, 0.4% zeta scaling error |
+| **Coulomb** | ⚠️ 99% | Dynamic charges, TERM decomposition verified; -0.6 mEh on complex |
+| **Dispersion** | ⚠️ 95% | D4 with CN-only weighting, +0.4 mEh on complex |
+| **BATM** | ✅ 99.99% | Fixed: topology charges distributed after thread creation (Mar 6) |
 | **Torsions** | ✅ 98% | Fortran matching for atom ordering, damping, inversion |
 | **Gradients** | 🔧 70% | Analytical terms active, but consistency issues |
 
@@ -174,10 +227,26 @@ The foundation that enabled rapid angle error debugging:
 
 ## Next Refinement Steps
 
-1.  **Test Reference Generation** (Next Priority - Feb 21): Generate or validate reference JSON files for acetic_acid_dimer, caffeine, complex molecules to verify bond-HB coupling improvements quantitatively (expect 0.5-3 mEh error reduction).
-2.  **Polar Bond Refinement** (Follow-up): HCN, HCl, OH still show large bond energy errors (~0.18 Eh after HB/aldehyde/bridge corrections). May require additional element-specific terms or parameter tuning.
-3.  **Gradient Consistency** (High Priority): Gradient norms deviate ~30% from reference. Verify analytical derivatives match energy term definitions, especially for damped terms.
-4.  **EEQ Solver Refactoring** (Optional, Low Priority): Single-phase solver to match Fortran would fix: (a) 0.4% dispersion zeta scaling error, (b) 1.76 mEh bond energy error for complex via fqq correction, and (c) improve charge accuracy globally. Estimated effort: 8-16 hours.
+1.  ~~BATM Root Cause~~: ✅ FIXED (Mar 6, 2026) — topology charges not distributed after thread creation
+2.  **Coulomb Refinement** (High): -0.604 mEh error. Phase 2 charge differences or gamma_ij computation.
+3.  **D4 Dispersion** (Medium): +0.408 mEh error. CN values or zeta function differences.
+4.  **Gradient Consistency** (Medium): Gradient norms deviate ~30% from reference.
+
+## Diagnostic Infrastructure (Mar 5, 2026)
+
+At verbosity >= 3, three JSON diagnostic files are written to the working directory:
+
+```bash
+./curcuma -sp molecule.xyz -method gfnff -verbosity 3
+# Creates: gfnff_diag_charges.json, gfnff_diag_d4.json, gfnff_diag_energy.json
+```
+
+Compare with Fortran reference:
+```bash
+./external/gfnff/build/test/gfnff-gfnff_analyze-test molecule.xyz - 2
+```
+
+**Files modified**: `gfnff_method.cpp`, `d4param_generator.cpp`, `forcefield.cpp`
 
 ---
-*Status report updated following Bond-HB Coupling implementation (Feb 21, 2026).*
+*Status report updated following diagnostic infrastructure implementation (Mar 5, 2026).*
