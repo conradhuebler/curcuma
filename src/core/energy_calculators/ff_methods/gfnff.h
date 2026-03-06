@@ -1541,6 +1541,14 @@ public:
     void setCharges(const Vector& charges);
 
     /**
+     * @brief Skip Phase-2 EEQ charge recalculation in Calculation()
+     * Claude Generated (March 2026): Diagnostic for charge injection tests
+     * When true, Calculation() uses whatever charges are currently set (via setCharges())
+     * instead of recalculating from EEQ solver. Restore to false after diagnostic.
+     */
+    void setSkipEEQRecalc(bool skip) { m_skip_eeq_recalc = skip; }
+
+    /**
      * @brief Regenerate GFN-FF parameters using current charges (for testing/validation)
      *
      * Claude Generated (January 2025): Testing utility for charge-dependent validation
@@ -1687,6 +1695,7 @@ private:
 
     bool m_initialized; ///< Initialization status
     bool m_comparing_gradients = false; ///< Guard to prevent recursion in compareGradients
+    bool m_skip_eeq_recalc = false; ///< Skip Phase-2 EEQ recalculation (for charge injection diagnostic)
 
     double m_energy_total; ///< Total energy in Hartree
     Vector m_charges; ///< Atomic partial charges

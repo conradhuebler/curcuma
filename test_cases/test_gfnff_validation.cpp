@@ -44,7 +44,7 @@ public:
         setupMolecule();
     }
 
-    void runValidation(bool run_fd = false) {
+    void runValidation(bool run_fd = false, bool run_charge_inject = false) {
         std::cout << "=== GFN-FF Validation Runner ===" << std::endl;
         std::cout << "Molecule: " << m_ref_data["molecule"]["name"] << std::endl;
         std::cout << "Reference File: " << m_ref_path << std::endl;
@@ -58,6 +58,10 @@ public:
 
         if (run_fd) {
             validateFiniteDifference();
+        }
+
+        if (run_charge_inject) {
+            validateChargeInjection();
         }
 
         printSummary();
@@ -823,6 +827,134 @@ private:
         }
     }
 
+    /**
+     * @brief Charge injection diagnostic: compare native vs Fortran-reference charges
+     *
+     * Claude Generated (March 2026): Isolates charge-attributable errors per energy component.
+     * 1. Run Calculation() with native EEQ charges → save component energies
+     * 2. Inject Fortran reference charges, skip EEQ recalc → run Calculation() again
+     * 3. Print comparison table: native error, injected error, charge attribution
+     */
+    void validateChargeInjection() {
+        if (!m_ref_data.contains("energy_charges") || m_ref_data["energy_charges"].empty()) {
+            std::cout << "  [SKIP] Charge injection: no energy_charges in reference JSON" << std::endl;
+            return;
+        }
+
+        std::cout << std::endl << "=== Charge Injection Diagnostic ===" << std::endl;
+
+        // Step 1: Normal calculation with native EEQ charges
+        m_gfnff->Calculation(false);
+
+        struct ComponentEnergy {
+            std::string name;
+            double native;
+            double injected;
+            double reference;
+        };
+
+        const auto& ref_e = m_ref_data["energy_components"];
+
+        // Collect Fortran reference energies
+        double ref_bond = ref_e["bond"];
+        double ref_angle = ref_e["angle"];
+        double ref_torsion = ref_e["torsion"];
+        double ref_repulsion = ref_e["repulsion"];
+        double ref_coulomb = ref_e["electrostatic"];
+        double ref_dispersion = ref_e["dispersion"];
+        std::string hb_key = ref_e.contains("hbond") ? "hbond" : (ref_e.contains("hb") ? "hb" : "");
+        double ref_hb = hb_key.empty() ? 0.0 : (double)ref_e[hb_key];
+        double ref_batm = ref_e.contains("batm") ? (double)ref_e["batm"] : 0.0;
+
+        // Collect native energies
+        double torsion_native = m_gfnff->DihedralEnergy() + m_gfnff->InversionEnergy();
+        std::vector<ComponentEnergy> components = {
+            {"Bond",       m_gfnff->BondEnergy(),       0.0, ref_bond},
+            {"Angle",      m_gfnff->AngleEnergy(),      0.0, ref_angle},
+            {"Torsion",    torsion_native,               0.0, ref_torsion},
+            {"Repulsion",  m_gfnff->RepulsionEnergy(),  0.0, ref_repulsion},
+            {"Coulomb",    m_gfnff->CoulombEnergy(),     0.0, ref_coulomb},
+            {"Dispersion", m_gfnff->DispersionEnergy(), 0.0, ref_dispersion},
+            {"HBond",      m_gfnff->HydrogenBondEnergy(), 0.0, ref_hb},
+            {"BATM",       m_gfnff->BatmEnergy(),       0.0, ref_batm},
+        };
+
+        // Step 2: Inject Fortran reference charges
+        const auto& ref_charges_json = m_ref_data["energy_charges"];
+        Eigen::VectorXd ref_charges(ref_charges_json.size());
+        for (int i = 0; i < (int)ref_charges_json.size(); ++i) {
+            ref_charges(i) = ref_charges_json[i];
+        }
+
+        m_gfnff->setCharges(ref_charges);
+        m_gfnff->setSkipEEQRecalc(true);
+
+        // Step 3: Recalculate with injected charges
+        m_gfnff->Calculation(false);
+
+        double torsion_injected = m_gfnff->DihedralEnergy() + m_gfnff->InversionEnergy();
+        components[0].injected = m_gfnff->BondEnergy();
+        components[1].injected = m_gfnff->AngleEnergy();
+        components[2].injected = torsion_injected;
+        components[3].injected = m_gfnff->RepulsionEnergy();
+        components[4].injected = m_gfnff->CoulombEnergy();
+        components[5].injected = m_gfnff->DispersionEnergy();
+        components[6].injected = m_gfnff->HydrogenBondEnergy();
+        components[7].injected = m_gfnff->BatmEnergy();
+
+        // Restore normal operation
+        m_gfnff->setSkipEEQRecalc(false);
+
+        // Step 4: Print comparison table
+        std::cout << std::left
+                  << std::setw(12) << "Component"
+                  << std::right
+                  << std::setw(14) << "Native(Eh)"
+                  << std::setw(14) << "Injected(Eh)"
+                  << std::setw(14) << "Fortran(Eh)"
+                  << std::setw(16) << "Err_Nat(mEh)"
+                  << std::setw(16) << "Err_Inj(mEh)"
+                  << std::setw(16) << "ChgAttr(mEh)"
+                  << std::endl;
+        std::cout << std::string(102, '-') << std::endl;
+
+        double total_native = 0, total_injected = 0, total_ref = 0;
+        for (const auto& c : components) {
+            double err_native = (c.native - c.reference) * 1000.0;
+            double err_injected = (c.injected - c.reference) * 1000.0;
+            double charge_attr = err_native - err_injected;
+
+            std::cout << std::left << std::setw(12) << c.name
+                      << std::right << std::fixed
+                      << std::setprecision(6) << std::setw(14) << c.native
+                      << std::setw(14) << c.injected
+                      << std::setw(14) << c.reference
+                      << std::setprecision(3) << std::setw(16) << err_native
+                      << std::setw(16) << err_injected
+                      << std::setw(16) << charge_attr
+                      << std::endl;
+
+            total_native += c.native;
+            total_injected += c.injected;
+            total_ref += c.reference;
+        }
+
+        std::cout << std::string(102, '-') << std::endl;
+        double err_total_nat = (total_native - total_ref) * 1000.0;
+        double err_total_inj = (total_injected - total_ref) * 1000.0;
+        std::cout << std::left << std::setw(12) << "TOTAL"
+                  << std::right << std::fixed
+                  << std::setprecision(6) << std::setw(14) << total_native
+                  << std::setw(14) << total_injected
+                  << std::setw(14) << total_ref
+                  << std::setprecision(3) << std::setw(16) << err_total_nat
+                  << std::setw(16) << err_total_inj
+                  << std::setw(16) << (err_total_nat - err_total_inj)
+                  << std::endl;
+        std::cout << std::endl;
+        std::cout << "ChgAttr = Err_Native - Err_Injected (positive = error caused by charge differences)" << std::endl;
+    }
+
     void addResult(const std::string& cat, const std::string& sub, bool passed, double val, double ref, double err) {
         m_results.push_back({cat, sub, passed, val, ref, err, ""});
     }
@@ -856,21 +988,27 @@ private:
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " [--fd] <reference_json> [reference_json2 ...]" << std::endl;
-        std::cerr << "  --fd  Enable finite-difference gradient validation (slow)" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " [--fd] [--charge-inject] <reference_json> [reference_json2 ...]" << std::endl;
+        std::cerr << "  --fd              Enable finite-difference gradient validation (slow)" << std::endl;
+        std::cerr << "  --charge-inject   Inject Fortran reference charges to isolate charge-attributable errors" << std::endl;
         return 1;
     }
 
     bool run_fd = false;
+    bool run_charge_inject = false;
     bool all_files_passed = true;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--fd") {
             run_fd = true;
             continue;
         }
+        if (std::string(argv[i]) == "--charge-inject") {
+            run_charge_inject = true;
+            continue;
+        }
         try {
             GFNFFValidator validator(argv[i]);
-            validator.runValidation(run_fd);
+            validator.runValidation(run_fd, run_charge_inject);
             if (!validator.allPassed()) all_files_passed = false;
         } catch (const std::exception& e) {
             std::cerr << "Error processing " << argv[i] << ": " << e.what() << std::endl;

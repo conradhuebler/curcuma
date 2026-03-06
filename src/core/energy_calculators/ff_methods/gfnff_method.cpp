@@ -401,7 +401,7 @@ double GFNFF::Calculation(bool gradient)
         // Phase-2 EEQ charge recalculation
         // Without this, Coulomb energy uses stale charges during MD/optimization,
         // leading to incorrect forces and unphysical dynamics.
-        if (m_eeq_solver) {
+        if (m_eeq_solver && !m_skip_eeq_recalc) {
             const TopologyInfo& topo = getCachedTopology();
 
             // Build topology input for EEQ solver (fragment constraints)
@@ -446,6 +446,9 @@ double GFNFF::Calculation(bool gradient)
                     CurcumaLogger::param("charge_sum", fmt::format("{:.8f}", new_charges.sum()));
                 }
             }
+        }
+        if (m_skip_eeq_recalc && CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Phase-2 EEQ recalculation SKIPPED (charge injection mode)");
         }
     }
 
