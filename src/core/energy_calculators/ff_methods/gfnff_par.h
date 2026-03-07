@@ -258,32 +258,44 @@ static const double p_enpoly[6][2] = {
 // Used for bond parameter calculations
 static const std::vector<double> rcov_bohr = r0_gfnff;
 
-// DFT-D3 Covalent radii (Pyykkö & Atsumi) - Bohr
-// Claude Generated (Jan 19, 2026): For torsion damping calculations
-// Reference: gfnff_param.f90 covalentRadD3 (values in Å, converted to Bohr)
-// NOTE (Jan 23, 2026): XTB applies 4/3 scaling in covalentradd3.f90:62
-//   covalentRadD3(1:118) = [...] * aatoau * 4.0_wp / 3.0_wp
-// However, Curcuma torsion energy is already ~108× TOO LARGE, so applying
-// 4/3 scaling (which weakens damping → more energy) makes things WORSE.
-// The root cause is elsewhere (likely in fctot calculation or torsion counting).
-// Keeping original values (without 4/3) until root cause is found.
+// DFT-D3 Covalent radii (Pyykkö & Atsumi, Chem. Eur. J. 15, 2009, 188-197)
+// Values for metals decreased by 10%.
+// Reference: gfnff_param.f90:378-405
+// Stored as raw_Å × aatoau (Bohr, WITHOUT 4/3 scaling)
+// The 4/3 factor is applied at runtime in torsion/angle/HB damping functions.
+// Claude Generated (Mar 7, 2026): Exact Fortran raw values × aatoau for traceability
+static constexpr double gfnff_aatoau = 1.0 / 0.52917726; // Fortran gfnff_param.f90:380
+
 static const std::vector<double> covalent_rad_d3 = {
-    0.60392702, 0.86945142, // H, He (without 4/3 scaling)
-    2.26643422, 1.77478229, 1.45333953, 1.41731155, 1.34116514, 1.19027623, // Li-C-Ne
-    1.20788167, 1.26458288, 2.64097810, 2.36067855, 2.13177212, 1.96297420, // Na-P
-    2.07555175, 1.92490730, 1.86819168, 1.81173529, 3.32054985, 2.90629615, // S-Ca
-    2.51017939, 2.30338353, 2.28602099, 2.07555175, 2.02135057, 1.96297420, // Sc-Fe
-    1.88582236, 1.86819168, 1.90651985, 2.05733234, 2.11403355, 2.05733234, // Co-Ga
-    2.17073477, 2.07555175, 2.15310255, 2.20754546, 3.56594020, 3.15168650, // As-Sr
-    2.77387840, 2.62297027, 2.49070592, 2.34155557, 2.17073477, 2.13177212, // Y-Rh
-    2.13177212, 2.03805675, 2.17073477, 2.32122182, 2.41664091, 2.37768235, // Pd-Sn
-    2.41664091, 2.32122182, 2.49070592, 2.47280723, 3.94795890, 3.32054985, // Sb-Ba
-    3.05928569, 2.77387840, 2.98177264, 2.96386629, 2.94595994, 2.92805359, // La-Sm
-    2.85103624, 2.86853468, 2.85103624, 2.83353007, 2.81603163, 2.81603163, // Eu-Dy
-    2.79852546, 2.88779861, 2.75500402, 2.58435964, 2.47280723, 2.32122182, // Ho-Re
-    2.22750842, 2.18854577, 2.09479507, 2.13177212, 2.36067855, 2.49070592, // Os-Tl
-    2.45333719, 2.45333719, 2.56584604, 2.47280723, 2.60439593, 2.68012880, // Pb-Rn
-    3.79658336, 3.41540674, 3.15168650, 2.98177264 // Fr-U
+    0.32 * gfnff_aatoau, 0.46 * gfnff_aatoau,                                         // H, He
+    1.20 * gfnff_aatoau, 0.94 * gfnff_aatoau, 0.77 * gfnff_aatoau, 0.75 * gfnff_aatoau, // Li-C
+    0.71 * gfnff_aatoau, 0.63 * gfnff_aatoau, 0.64 * gfnff_aatoau, 0.67 * gfnff_aatoau, // N-Ne
+    1.40 * gfnff_aatoau, 1.25 * gfnff_aatoau, 1.13 * gfnff_aatoau, 1.04 * gfnff_aatoau, // Na-Si
+    1.10 * gfnff_aatoau, 1.02 * gfnff_aatoau, 0.99 * gfnff_aatoau, 0.96 * gfnff_aatoau, // P-Ar
+    1.76 * gfnff_aatoau, 1.54 * gfnff_aatoau,                                         // K, Ca
+    1.33 * gfnff_aatoau, 1.22 * gfnff_aatoau, 1.21 * gfnff_aatoau, 1.10 * gfnff_aatoau, // Sc-Cr
+    1.07 * gfnff_aatoau, 1.04 * gfnff_aatoau, 1.00 * gfnff_aatoau, 0.99 * gfnff_aatoau, // Mn-Ni
+    1.01 * gfnff_aatoau, 1.09 * gfnff_aatoau,                                         // Cu, Zn
+    1.12 * gfnff_aatoau, 1.09 * gfnff_aatoau, 1.15 * gfnff_aatoau, 1.10 * gfnff_aatoau, // Ga-Se
+    1.14 * gfnff_aatoau, 1.17 * gfnff_aatoau,                                         // Br, Kr
+    1.89 * gfnff_aatoau, 1.67 * gfnff_aatoau,                                         // Rb, Sr
+    1.47 * gfnff_aatoau, 1.39 * gfnff_aatoau, 1.32 * gfnff_aatoau, 1.24 * gfnff_aatoau, // Y-Mo
+    1.15 * gfnff_aatoau, 1.13 * gfnff_aatoau, 1.13 * gfnff_aatoau, 1.08 * gfnff_aatoau, // Tc-Pd
+    1.15 * gfnff_aatoau, 1.23 * gfnff_aatoau,                                         // Ag, Cd
+    1.28 * gfnff_aatoau, 1.26 * gfnff_aatoau, 1.26 * gfnff_aatoau, 1.23 * gfnff_aatoau, // In-Te
+    1.32 * gfnff_aatoau, 1.31 * gfnff_aatoau,                                         // I, Xe
+    2.09 * gfnff_aatoau, 1.76 * gfnff_aatoau,                                         // Cs, Ba
+    1.62 * gfnff_aatoau, 1.47 * gfnff_aatoau, 1.58 * gfnff_aatoau, 1.57 * gfnff_aatoau, // La-Nd
+    1.56 * gfnff_aatoau, 1.55 * gfnff_aatoau, 1.51 * gfnff_aatoau,                     // Pm-Eu
+    1.52 * gfnff_aatoau, 1.51 * gfnff_aatoau, 1.50 * gfnff_aatoau, 1.49 * gfnff_aatoau, // Gd-Dy
+    1.49 * gfnff_aatoau, 1.48 * gfnff_aatoau, 1.53 * gfnff_aatoau,                     // Ho-Yb
+    1.46 * gfnff_aatoau, 1.37 * gfnff_aatoau, 1.31 * gfnff_aatoau, 1.23 * gfnff_aatoau, // Lu-W
+    1.18 * gfnff_aatoau, 1.16 * gfnff_aatoau, 1.11 * gfnff_aatoau, 1.12 * gfnff_aatoau, // Re-Pt
+    1.13 * gfnff_aatoau, 1.32 * gfnff_aatoau,                                         // Au, Hg
+    1.30 * gfnff_aatoau, 1.30 * gfnff_aatoau, 1.36 * gfnff_aatoau, 1.31 * gfnff_aatoau, // Tl-Po
+    1.38 * gfnff_aatoau, 1.42 * gfnff_aatoau,                                         // At, Rn
+    2.01 * gfnff_aatoau, 1.81 * gfnff_aatoau,                                         // Fr, Ra
+    1.67 * gfnff_aatoau, 1.58 * gfnff_aatoau                                          // Ac, Th
 };
 
 // Standard covalent radii - Angström
