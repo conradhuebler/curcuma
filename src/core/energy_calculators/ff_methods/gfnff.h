@@ -1587,6 +1587,25 @@ public:
     json getAngleParameters() const;
 
     /**
+     * @brief Get current torsion parameters (primary + extra) for validation
+     *
+     * Claude Generated (March 2026): Per-torsion diagnostic infrastructure
+     * Returns JSON with "primary" (from m_dihedrals) and "extra" (from m_extra_dihedrals) arrays.
+     *
+     * @return JSON object with "primary" and "extra" arrays of torsion parameters
+     */
+    json getTorsionParameters() const;
+
+    /**
+     * @brief Get current inversion parameters for validation
+     *
+     * Claude Generated (March 2026): Per-torsion diagnostic infrastructure
+     *
+     * @return JSON array of inversion parameters including potential_type and omega0
+     */
+    json getInversionParameters() const;
+
+    /**
      * @brief Set bond parameters for testing (bypasses generation)
      *
      * Claude Generated (December 2025): Phase 3 - Parameter injection for Test 8

@@ -221,6 +221,29 @@ public:
         const Vector& cn
     );
 
+    /**
+     * @brief Calculate dgam corrections with full pi-system and amide detection
+     *
+     * Claude Generated (March 2026): Public interface for computing dgam with
+     * complete N-specific corrections (ff=-0.14 for pi-N, ff=-0.16 for amide N).
+     * Ensures Coulomb energy parameters are consistent with EEQ solver parameters.
+     * Reference: Fortran gfnff_ini.f90:697-724 computes dgam ONCE for both.
+     *
+     * @param atoms Atomic numbers
+     * @param topology_charges Phase-1 charges (qa)
+     * @param hybridization Hybridization states
+     * @param cn Coordination numbers
+     * @param topology Topology information (neighbor lists, etc.)
+     * @return Vector of dgam corrections
+     */
+    Vector calculateDgamFull(
+        const std::vector<int>& atoms,
+        const Vector& topology_charges,
+        const std::vector<int>& hybridization,
+        const Vector& cn,
+        const std::optional<TopologyInput>& topology = std::nullopt
+    );
+
 private:
     /**
      * @brief Element-specific EEQ parameters

@@ -2512,6 +2512,20 @@ Vector EEQSolver::calculateDgam(
     return dgam;
 }
 
+// Claude Generated (March 2026): Public interface for dgam with full N-specific corrections
+// Ensures Coulomb energy parameters match EEQ solver parameters
+Vector EEQSolver::calculateDgamFull(
+    const std::vector<int>& atoms,
+    const Vector& topology_charges,
+    const std::vector<int>& hybridization,
+    const Vector& cn,
+    const std::optional<TopologyInput>& topology)
+{
+    auto is_pi = detectPiSystem(atoms, hybridization, topology);
+    auto is_amide = detectAmideNitrogens(atoms, hybridization, is_pi, topology, cn);
+    return calculateDgam(atoms, topology_charges, hybridization, is_pi, is_amide);
+}
+
 // ===== Parameter Lookup =====
 // NOTE: calculateDalpha() removed - alpha now calculated with charge-dependent formula (alpha_base + ff*qa)²
 
@@ -2619,25 +2633,32 @@ std::vector<bool> EEQSolver::detectAmideNitrogens(
     if (!topology.has_value()) return is_amide;
 
     for (int i = 0; i < natoms; ++i) {
-        if (atoms[i] == 7 && is_pi_atom[i]) { // Nitrogen in pi-system
-            // Check neighbors for pi-bonded Carbon which has C=O
-            for (int neighbor : topology->neighbor_lists[i]) {
-                if (atoms[neighbor] == 6 && is_pi_atom[neighbor]) { // C in pi-system
-                    // Check if this Carbon has a Carbonyl Oxygen (O in pi-system with CN=1)
-                    for (int n2 : topology->neighbor_lists[neighbor]) {
-                        if (atoms[n2] == 8 && is_pi_atom[n2]) {
-                            // coordination check (use fractional CN or integer neighbor count)
-                            double cn_o = cn(n2);
-                            if (cn_o < 1.5) { // Terminal oxygen
-                                is_amide[i] = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                if (is_amide[i]) break;
+        // FIX (Mar 7, 2026): Match Fortran amide() from gfnff_ini2.f90:1553-1580
+        // Requires: N in pi-system, hyb==3 (sp3), exactly ONE pi-C neighbor (nc==1),
+        // and that pi-C has exactly ONE terminal pi-O neighbor.
+        if (atoms[i] != 7 || !is_pi_atom[i]) continue;
+        if (i < static_cast<int>(hybridization.size()) && hybridization[i] != 3) continue;
+
+        // Count pi-C neighbors (Fortran: nc)
+        int nc = 0;
+        int ic = -1;  // The single pi-C neighbor (if nc==1)
+        for (int neighbor : topology->neighbor_lists[i]) {
+            if (atoms[neighbor] == 6 && is_pi_atom[neighbor]) {
+                nc++;
+                ic = neighbor;
             }
         }
+        if (nc != 1) continue;  // Must have EXACTLY one pi-C neighbor
+
+        // Check if that pi-C has exactly one terminal pi-O neighbor (Fortran: no==1)
+        int no = 0;
+        for (int n2 : topology->neighbor_lists[ic]) {
+            if (atoms[n2] == 8 && is_pi_atom[n2] &&
+                static_cast<int>(topology->neighbor_lists[n2].size()) == 1) {
+                no++;
+            }
+        }
+        if (no == 1) is_amide[i] = true;
     }
     return is_amide;
 }

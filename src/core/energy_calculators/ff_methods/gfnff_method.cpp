@@ -5798,12 +5798,20 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         }
 
         // ===== PHASE 1C: Calculate dgam corrections =====
-        // FIX (Jan 28, 2026): Store dgam in topo_info for Coulomb energy calculation
-        // Reference: Fortran gfnff_ini.f90:714 topo%gameeq(i) = param%gam(at(i)) + dgam(i)
+        // FIX (Mar 7, 2026): Use EEQ solver's calculateDgam with pi-system and amide detection
+        // for consistency between Coulomb energy parameters and EEQ charge solve.
+        // Root cause: GFNFF::calculateDgam used ff=-0.13 for ALL nitrogen atoms,
+        // but EEQ solver (and Fortran gfnff_ini.f90:706-709) uses ff=-0.14 for pi-N
+        // and ff=-0.16 for amide N. This inconsistency caused -0.121 mEh Coulomb error
+        // on caffeine and -0.604 mEh on complex (231 atoms).
+        // Reference: Fortran gfnff_ini.f90:697-724 computes dgam ONCE and uses it for
+        // BOTH the EEQ solve AND the Coulomb energy formula.
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("Computing Phase 1C: Hardness corrections (dgam)");
         }
-        topo_info.dgam = calculateDgam(topo_info.topology_charges, topo_info.hybridization, topo_info.ring_sizes);
+        topo_info.dgam = m_eeq_solver->calculateDgamFull(
+            m_atoms, topo_info.topology_charges, topo_info.hybridization,
+            topo_info.coordination_numbers, eeq_topology_input);
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             std::cout << "  First 3 dgam values:" << std::endl;
@@ -7266,6 +7274,30 @@ json GFNFF::getAngleParameters() const {
     }
 
     return json::array();
+}
+
+// Claude Generated (March 2026): Per-torsion diagnostic infrastructure
+json GFNFF::getTorsionParameters() const {
+    if (!m_forcefield) {
+        CurcumaLogger::warn("GFNFF::getTorsionParameters - ForceField not initialized");
+        return json::object();
+    }
+
+    json ff_params = m_forcefield->exportCurrentParameters();
+    json result;
+    result["primary"] = ff_params.value("dihedrals", json::array());
+    result["extra"] = ff_params.value("extra_dihedrals", json::array());
+    return result;
+}
+
+json GFNFF::getInversionParameters() const {
+    if (!m_forcefield) {
+        CurcumaLogger::warn("GFNFF::getInversionParameters - ForceField not initialized");
+        return json::array();
+    }
+
+    json ff_params = m_forcefield->exportCurrentParameters();
+    return ff_params.value("inversions", json::array());
 }
 
 void GFNFF::setBondParametersForTesting(const json& bond_params) {
