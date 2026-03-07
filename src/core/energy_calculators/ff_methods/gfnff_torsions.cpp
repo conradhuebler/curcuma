@@ -1042,64 +1042,80 @@ GFNFF::GFNFFTorsionParams GFNFF::getGFNFFTorsionParameters(
     using namespace GFNFFParameters;
 
     if (in_ring) {
-        // Claude Generated (Feb 10, 2026): Ring torsion periodicity using bond_type
-        // Reference: gfnff_ini.f90:1844-1865
-        //
-        // Fortran logic when central bond is in a ring (lring=true):
-        //   1. Default: nrot=1, phi0=0° (cis) for single bonds (btyp==1)
-        //   2. Pi-bond override: nrot=2 for btyp==2 (aromatic/conjugated)
-        //   3. Ring-specific overrides when ALL 4 atoms in same ring (rings4>0)
+        // Claude Generated (Feb 10, 2026, updated Mar 6, 2026): Ring torsion periodicity
+        // Reference: gfnff_ini.f90:1859-1881
 
-        // RING DEFAULT (gfnff_ini.f90:1851-1853)
-        // Uses bond_type directly (Fortran btyp for central j-k bond)
+        // RING DEFAULT (gfnff_ini.f90:1866-1868)
         params.periodicity = 1;      // Default for single bonds in rings
         params.phase_shift = 0.0;    // cis (phi0=0°)
 
-        // Pi-bond override: "if (btyp(m).eq.2) nrot = 2" (gfnff_ini.f90:1852)
+        // Pi-bond override: "if (btyp(m).eq.2) nrot = 2" (gfnff_ini.f90:1867)
         if (bond_type == 2) {
             params.periodicity = 2;  // Aromatic/conjugated bonds in rings
         }
 
-        // Ring-specific overrides when all 4 atoms are in the same ring
-        if (ring_size >= 3 && ring_size <= 6) {
-            int rings4 = smallestRingContainingAll(i_atom_idx, j_atom_idx, k_atom_idx, l_atom_idx);
-            int ringl = largestRingContainingAll(i_atom_idx, j_atom_idx, k_atom_idx, l_atom_idx);
+        // Compute rings4 unconditionally (gfnff_ini.f90:1860-1864)
+        // Fortran: rings>3 → ringstors(), rings==3 → rings4=3 (special case)
+        int rings4 = 0;
+        int ringl = 0;
+        if (ring_size == 3) {
+            rings4 = 3;  // 3-ring special case: always applies (Fortran line 1863)
+        } else if (ring_size > 3) {
+            rings4 = smallestRingContainingAll(i_atom_idx, j_atom_idx, k_atom_idx, l_atom_idx);
+        }
 
-            bool notpicon = !(is_in_pi_fr(i_atom_idx, z_i) || is_in_pi_fr(l_atom_idx, z_l) ||
-                              is_in_pi_fr(j_atom_idx, z_j) || is_in_pi_fr(k_atom_idx, z_k));
+        // Bug fix (Mar 6, 2026): notpicon checks only OUTER atoms, not all 4
+        // Fortran gfnff_ini.f90:1871: "notpicon = piadr(kk).eq.0 .and. piadr(ll).eq.0"
+        // kk/ll are outer atoms = i_atom_idx/l_atom_idx in C++ convention
+        bool notpicon = !(is_in_pi_fr(i_atom_idx, z_i) || is_in_pi_fr(l_atom_idx, z_l));
 
-            // Cycloalkane rules: only for single bonds (btyp==1) with all 4 atoms in same ring
-            if (rings4 > 0 && notpicon && ringl == rings4 && bond_type == 1) {
-                switch (rings4) {
-                    case 3:
-                        params.periodicity = 1;
-                        params.phase_shift = 0.0;
-                        f1 = FR3;  // 0.3
-                        break;
-                    case 4:
-                        params.periodicity = 6;
-                        params.phase_shift = 30.0 * M_PI / 180.0;
-                        f1 = FR4;  // 1.0
-                        break;
-                    case 5:
-                        params.periodicity = 6;
-                        params.phase_shift = 30.0 * M_PI / 180.0;
-                        f1 = FR5;  // 1.5
-                        break;
-                    case 6:
-                        params.periodicity = 3;
-                        params.phase_shift = 60.0 * M_PI / 180.0;
-                        f1 = FR6;  // 5.7
-                        break;
-                }
+        // Cycloalkane rules: single bonds (btyp==1) with all 4 atoms in same ring
+        // (gfnff_ini.f90:1869-1876)
+        if (rings4 > 0 && bond_type == 1) {
+            if (rings4 >= 4) {
+                ringl = largestRingContainingAll(i_atom_idx, j_atom_idx, k_atom_idx, l_atom_idx);
+            }
+            if (rings4 == 3 && notpicon) {
+                params.periodicity = 1;
+                params.phase_shift = 0.0;
+                f1 = FR3;  // 0.3
+            }
+            if (rings4 == 4 && ringl == rings4 && notpicon) {
+                params.periodicity = 6;
+                params.phase_shift = 30.0 * M_PI / 180.0;
+                f1 = FR4;  // 1.0
+            }
+            if (rings4 == 5 && ringl == rings4 && notpicon) {
+                params.periodicity = 6;
+                params.phase_shift = 30.0 * M_PI / 180.0;
+                f1 = FR5;  // 1.5
+            }
+            if (rings4 == 6 && ringl == rings4 && notpicon) {
+                params.periodicity = 3;
+                params.phase_shift = 60.0 * M_PI / 180.0;
+                f1 = FR6;  // 5.7
             }
         }
 
+        // Terminal atom ring torsion (gfnff_ini.f90:1877-1878)
+        // When central bond is in ring but outer atoms are NOT in the same ring
+        // and both outer atoms are terminal (CN=1, typically H on ring atoms):
+        // 6-fold symmetry with 30° phase and reduced barrier
+        if (rings4 == 0 && bond_type == 1 &&
+            static_cast<int>(cn_i) == 1 && static_cast<int>(cn_l) == 1) {
+            params.periodicity = 6;
+            params.phase_shift = 30.0 * M_PI / 180.0;
+            f1 = 0.30;
+        }
+
+        // CB7 amide case (gfnff_ini.f90:1879-1881) - not yet implemented
+        // if (btyp==2 && rings==5 && at(ii)*at(jj)==42) then if amide → f1=5.0
+
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info(fmt::format(
-                "  Ring torsion {}-{}-{}-{}: bond_type={}, n={}, phi0={:.1f}°",
+                "  Ring torsion {}-{}-{}-{}: bond_type={}, n={}, phi0={:.1f}°, rings4={}",
                 i_atom_idx, j_atom_idx, k_atom_idx, l_atom_idx,
-                bond_type, params.periodicity, params.phase_shift * 180.0 / M_PI));
+                bond_type, params.periodicity, params.phase_shift * 180.0 / M_PI, rings4));
         }
     }
 
