@@ -1077,8 +1077,8 @@ void D4ParameterGenerator::precomputeGaussianWeights()
     }
 
     // Claude Generated (Feb 7, 2026): Phase 7b - Pre-compute dominant reference indices
-    // Only refs with weight > 0.01 contribute meaningfully to C6 interpolation
-    constexpr double WEIGHT_THRESHOLD = 0.01;
+    // All refs with nonzero weight contribute to accuracy (Fortran uses all refs)
+    constexpr double WEIGHT_THRESHOLD = 0.0;
     m_dominant_refs.resize(m_atoms.size());
     for (size_t i = 0; i < m_atoms.size(); ++i) {
         m_dominant_refs[i].clear();

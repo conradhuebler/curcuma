@@ -1,12 +1,31 @@
 # GFN-FF Implementation Status
 
-**Last Updated**: 2026-03-06
-**Status**: ✅ **BATM FIX — Total error 0.4 mEh (complex.xyz 231 atoms)**
+**Last Updated**: 2026-03-08
+**Status**: ✅ **Dispersion FIXED — All molecules < 1 µEh error**
 **Location**: `src/core/energy_calculators/ff_methods/`
 
 ---
 
-## Latest: BATM Topology Charge Fix (Mar 6, 2026) ✅
+## Latest: Dispersion WEIGHT_THRESHOLD Fix (Mar 8, 2026) ✅
+
+**Root cause**: `D4ParameterGenerator::precomputeGaussianWeights()` used `WEIGHT_THRESHOLD = 0.01` to skip Gaussian weight references below 1% during C6 interpolation. Fortran includes ALL reference states. Excluded refs (weights 0.001-0.009) accumulated over O(N²) atom pairs, causing systematically positive dispersion error scaling with system size.
+
+**Fix**: `d4param_generator.cpp:1081` → `WEIGHT_THRESHOLD = 0.0`
+
+**Results**:
+
+| Molecule | Before (mEh) | After (mEh) | Improvement |
+|----------|-------------|-------------|-------------|
+| caffeine (24 at) | +0.075 | 0.000 | ∞ |
+| triose (66 at) | +0.006 | 0.000 | ∞ |
+| complex (231 at) | +0.408 | 0.000 | ∞ |
+| polymer (1280 at) | +0.168 | -0.031 µEh | 5400× |
+
+**Diagnostic tool**: Fortran `perform_dispersion_analysis()` in `test_gfnff_analyze.F90` now dumps per-atom CN, Gaussian weights, and per-pair weighted C6. Confirmed CN and C6 reference values match exactly between C++ and Fortran.
+
+---
+
+## Previous: BATM Topology Charge Fix (Mar 6, 2026) ✅
 
 **Root cause**: `distributeTopologyCharges()` was called BEFORE `setParameter()` in `generateGFNFFParameters()`. `setParameter()` recreates threads via `AutoRanges()`, losing the distributed topology charges. BATM fell back to Phase-2 EEQ charges instead of Phase-1 topology charges.
 
