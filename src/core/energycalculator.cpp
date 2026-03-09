@@ -378,11 +378,6 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
             CurcumaLogger::info("Energy calculation completed");
         }
 
-        // Use effective verbosity to respect submodule silencing
-        if (getEffectiveVerbosity() >= 1) {
-            CurcumaLogger::energy_abs(m_energy, "Total Energy");
-        }
-
         // Check for method-specific errors
         if (m_method->hasError()) {
             CurcumaLogger::error("Method reported error after calculation");
