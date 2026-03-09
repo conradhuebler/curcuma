@@ -60,6 +60,8 @@ int ForceFieldThread::execute()
     m_bond_energy = 0.0;
     m_vdw_energy = 0;
     m_rep_energy = 0;
+    m_bonded_rep_energy = 0.0;
+    m_nonbonded_rep_energy = 0.0;
     m_inversion_energy = 0;
     m_dihedral_energy = 0;
     m_angle_energy = 0;
@@ -1980,6 +1982,7 @@ void ForceFieldThread::CalculateGFNFFBondedRepulsionContribution()
 
         double scaled_energy = base_energy * m_final_factor * m_rep_scaling;
         m_rep_energy += scaled_energy;
+        m_bonded_rep_energy += scaled_energy;
         total_rep_energy += scaled_energy;
         pairs_calculated++;
 
@@ -2049,6 +2052,7 @@ void ForceFieldThread::CalculateGFNFFNonbondedRepulsionContribution()
 
         double scaled_energy = base_energy * m_final_factor * m_rep_scaling;
         m_rep_energy += scaled_energy;
+        m_nonbonded_rep_energy += scaled_energy;
         total_rep_energy += scaled_energy;
         pairs_calculated++;
 

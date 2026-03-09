@@ -782,13 +782,36 @@ json GFNFF::generateGFNFFInversions() const
 
         if (!has_pi && !is_saturated_N) continue;
 
-        // Get neighbors sorted by distance (Fortran: ssort by rab)
+        // Sort neighbors using exact Fortran ssort algorithm (gfnff_helpers.f90:267-289)
+        // IMPORTANT: ssort has an early-exit bug — when edum(j) > edum(i) at j=ii,
+        // it exits the OUTER loop, leaving remaining elements unsorted. This is NOT
+        // a correct sort, but we must replicate it exactly to match Fortran results.
+        // The Fortran adjacency list order (nb(1..3,i)) matches C++ order because
+        // both iterate bonds in ascending atom-index order.
         std::vector<int> nb_list = topo_info.adjacency_list[i];
-        std::sort(nb_list.begin(), nb_list.end(), [&](int a, int b) {
-            double dist_a = (m_geometry.row(i) - m_geometry.row(a)).squaredNorm();
-            double dist_b = (m_geometry.row(i) - m_geometry.row(b)).squaredNorm();
-            return dist_a < dist_b;
-        });
+        {
+            // Compute distances from center to each neighbor
+            const int n = static_cast<int>(nb_list.size()); // should be 3
+            std::vector<double> sdum(n);
+            for (int m = 0; m < n; ++m) {
+                sdum[m] = (m_geometry.row(i) - m_geometry.row(nb_list[m])).norm();
+            }
+            // Port of Fortran ssort(n, sdum, ind) — gfnff_helpers.f90:267-289
+            for (int ii = 1; ii < n; ++ii) {
+                int idx = ii - 1;
+                int k = idx;
+                double pp = sdum[idx];
+                for (int j = ii; j < n; ++j) {
+                    if (sdum[j] > pp) break; // Fortran: if (edum(j) .gt. pp) exit
+                    k = j;
+                    pp = sdum[j];
+                }
+                if (k == idx) break; // Fortran: if (k .eq. i) exit — exits OUTER loop
+                sdum[k] = sdum[idx];
+                sdum[idx] = pp;
+                std::swap(nb_list[idx], nb_list[k]);
+            }
+        }
 
         int jj = nb_list[0]; // Closest neighbor
         int kk = nb_list[1]; // Middle neighbor
