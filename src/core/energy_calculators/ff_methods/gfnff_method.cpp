@@ -5813,11 +5813,21 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             m_atoms, topo_info.topology_charges, topo_info.hybridization,
             topo_info.coordination_numbers, eeq_topology_input);
 
+        // Claude Generated (March 2026): Detect amide hydrogens for Coulomb chi correction
+        // Reference: Fortran gfnff_ini.f90:717 - if(amideH(i)) chieeq(i) -= 0.02
+        // This correction is applied in Phase 2 chi (EEQ solver) AND in Coulomb chi_base
+        topo_info.is_amide_h = m_eeq_solver->detectAmideHydrogensFull(
+            m_atoms, topo_info.hybridization, topo_info.coordination_numbers, eeq_topology_input);
+
         if (CurcumaLogger::get_verbosity() >= 3) {
             std::cout << "  First 3 dgam values:" << std::endl;
             for (int i = 0; i < std::min(3, m_atomcount); ++i) {
                 std::cout << fmt::format("    Atom {} (Z={}): qa={:.6f}, dgam={:.6f}",
                                         i, m_atoms[i], topo_info.topology_charges(i), topo_info.dgam(i)) << std::endl;
+            }
+            int amide_h_count = std::count(topo_info.is_amide_h.begin(), topo_info.is_amide_h.end(), true);
+            if (amide_h_count > 0) {
+                std::cout << fmt::format("  Amide H atoms detected: {}", amide_h_count) << std::endl;
             }
         }
 
@@ -6306,6 +6316,12 @@ json GFNFF::generateGFNFFCoulombPairs() const
             double cn_j = topo_info.coordination_numbers(j);
             double chi_base_i = -chi_i + dxi_i;  // Fortran topo%chieeq(i) = -chi+dxi (WITHOUT cnf*sqrt(cn))
             double chi_base_j = -chi_j + dxi_j;
+            // Claude Generated (March 2026): amideH correction to chi_base
+            // Reference: Fortran gfnff_ini.f90:717 - if(amideH(i)) chieeq(i) = chieeq(i) - 0.02
+            if (i < static_cast<int>(topo_info.is_amide_h.size()) && topo_info.is_amide_h[i])
+                chi_base_i -= 0.02;
+            if (j < static_cast<int>(topo_info.is_amide_h.size()) && topo_info.is_amide_h[j])
+                chi_base_j -= 0.02;
             double chi_eff_i = chi_base_i + cnf_i * std::sqrt(cn_i);
             double chi_eff_j = chi_base_j + cnf_j * std::sqrt(cn_j);
             coulomb["chi_i"] = chi_eff_i;  // Legacy: static chi_eff at init geometry
@@ -6534,11 +6550,12 @@ json GFNFF::generateGFNFFRepulsionPairs() const
 
             nonbonded_repulsions.push_back(rep);
 
-            if (CurcumaLogger::get_verbosity() >= 3 && nonbonded_repulsions.size() <= 3) {
-                CurcumaLogger::param(fmt::format("nonbonded_repulsion_{}-{}", i, j),
-                    fmt::format("alpha={:.6f}, repab={:.6f} (qa_i={:.4f}, qa_j={:.4f}, cn_i={:.2f}, cn_j={:.2f}, ff={:.4f})",
-                        rep["alpha"].get<double>(), rep["repab"].get<double>(),
-                        qa_i, qa_j, cn_i, cn_j, ff));
+            if (m_rep_diag) {
+                int topo_dist = topo_info.topo_distances[i][j];
+                // 1-based indices to match Fortran output
+                fmt::print(stderr, "nb_rep {:3d}-{:3d} alpha={:.10f} repab={:.10f} qa_i={:.10f} qa_j={:.10f} cn_i={:.0f} cn_j={:.0f} ff={:.4f} bpair={}\n",
+                    i+1, j+1, rep["alpha"].get<double>(), rep["repab"].get<double>(),
+                    qa_i, qa_j, cn_i, cn_j, ff, topo_dist);
             }
         }
     }
@@ -7015,6 +7032,16 @@ double GFNFF::RepulsionEnergy() const {
     // Claude Generated (Dec 2025): GFN-FF stores repulsion in separate member (m_gfnff_repulsion)
     // This is standard exponential repulsion, not hydrogen bonding
     return m_forcefield->HHEnergy();
+}
+
+double GFNFF::BondedRepulsionEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->BondedRepulsionEnergy();
+}
+
+double GFNFF::NonbondedRepulsionEnergy() const {
+    if (!m_forcefield) return 0.0;
+    return m_forcefield->NonbondedRepulsionEnergy();
 }
 
 double GFNFF::DispersionEnergy() const {
@@ -7521,62 +7548,20 @@ bool GFNFF::calculateDxi(TopologyInfo& topo_info) const
         }
     }
 
-    // Delegate to EEQSolver for correct dxi calculation
-    // Note: We need access to the EEQSolver's private calculateDxi method
-    // So we call calculateCharges with topology, which internally computes dxi
-    // and stores it in the solver. But since we can't access that directly,
-    // let's replicate the essential Fortran logic here.
-
-    Vector dxi = Vector::Zero(m_atomcount);
-
-    for (int i = 0; i < m_atomcount; ++i) {
-        int ati = m_atoms[i];
-        double dxi_total = 0.0;
-
-        // Count hydrogen neighbors
-        int nh = 0;
-        int nn = 0;
-        if (i < topo_info.neighbor_lists.size()) {
-            nn = topo_info.neighbor_lists[i].size();
-            for (int j : topo_info.neighbor_lists[i]) {
-                if (m_atoms[j] == 1) nh++;
-            }
-        }
-
-        // ===== Boron: +0.015 per H neighbor (gfnff_ini.f90:377) =====
-        if (ati == 5 && nh > 0) {
-            dxi_total += nh * 0.015;
-        }
-
-        // ===== H2O: special case (gfnff_ini.f90:392) =====
-        // Applied BEFORE the O/S-H correction (line 394) which then adds on top
-        if (ati == 8 && nn == 2 && nh == 2) {
-            dxi_total = -0.02;  // Override other corrections for water
-        }
-
-        // ===== Oxygen/Sulfur (Group 6): -0.005 per H neighbor (gfnff_ini.f90:394) =====
-        // Applied AFTER H2O override (Fortran line 394 runs after line 392)
-        // Distinguishes: ether O (nh=0, dxi=0), hydroxyl O (nh=1, dxi=-0.005),
-        //                H2O (nh=2, dxi=-0.02-0.010=-0.030)
-        if (ati == 8 || ati == 16) {  // O or S
-            dxi_total -= nh * 0.005;
-            // Also: hypervalent O/S with nn > 2 (gfnff_ini.f90:393)
-            if (nn > 2) {
-                dxi_total += nn * 0.005;
-            }
-        }
-
-        dxi(i) = dxi_total;
-    }
-
-    topo_info.dxi = dxi;
+    // Claude Generated (March 2026): Delegate to EEQSolver::calculateDxiFull
+    // for complete Fortran-matching dxi with all corrections (carbene C, free CO,
+    // nitro O, polyvalent halogens, pi-system neighbor EN averaging, etc.).
+    // Previous simplified version only handled 3 corrections (Boron+H, H2O, O/S±H),
+    // causing -0.094 mEh Coulomb error on complex molecule.
+    topo_info.dxi = m_eeq_solver->calculateDxiFull(
+        m_atoms, m_geometry_bohr, topo_info.coordination_numbers, eeq_topology);
 
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("calculateDxi: Electronegativity corrections calculated (Fortran-matching)");
         // Show first few values for verification
         for (int i = 0; i < std::min(10, m_atomcount); ++i) {
             if (m_atoms[i] == 8) {  // Only oxygens for comparison
-                CurcumaLogger::result(fmt::format("  topo_info.dxi[{}] (Z=8) = {:.6f}", i, dxi(i)));
+                CurcumaLogger::result(fmt::format("  topo_info.dxi[{}] (Z=8) = {:.6f}", i, topo_info.dxi(i)));
             }
         }
     }

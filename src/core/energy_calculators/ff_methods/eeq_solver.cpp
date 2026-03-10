@@ -2526,6 +2526,29 @@ Vector EEQSolver::calculateDgamFull(
     return calculateDgam(atoms, topology_charges, hybridization, is_pi, is_amide);
 }
 
+// Claude Generated (March 2026): Public interface for dxi with full environment corrections
+// Ensures Coulomb energy dxi matches EEQ solver dxi exactly
+Vector EEQSolver::calculateDxiFull(
+    const std::vector<int>& atoms,
+    const Matrix& geometry_bohr,
+    const Vector& cn,
+    const std::optional<TopologyInput>& topology)
+{
+    return calculateDxi(atoms, geometry_bohr, cn, topology);
+}
+
+// Claude Generated (March 2026): Public wrapper for amide hydrogen detection
+std::vector<bool> EEQSolver::detectAmideHydrogensFull(
+    const std::vector<int>& atoms,
+    const std::vector<int>& hybridization,
+    const Vector& cn,
+    const std::optional<TopologyInput>& topology) const
+{
+    auto is_pi = detectPiSystem(atoms, hybridization, topology);
+    auto is_amide = detectAmideNitrogens(atoms, hybridization, is_pi, topology, cn);
+    return detectAmideHydrogens(atoms, hybridization, is_amide, topology);
+}
+
 // ===== Parameter Lookup =====
 // NOTE: calculateDalpha() removed - alpha now calculated with charge-dependent formula (alpha_base + ff*qa)²
 

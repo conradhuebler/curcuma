@@ -244,6 +244,48 @@ public:
         const std::optional<TopologyInput>& topology = std::nullopt
     );
 
+    /**
+     * @brief Calculate dxi corrections with full environment detection
+     *
+     * Claude Generated (March 2026): Public interface for computing dxi with
+     * complete Fortran-matching corrections (carbene C, free CO, nitro O,
+     * polyvalent halogens, pi-system neighbor EN averaging, etc.).
+     * Ensures Coulomb energy dxi is consistent with EEQ solver dxi.
+     * Reference: Fortran gfnff_ini.f90:358-403
+     *
+     * @param atoms Atomic numbers
+     * @param geometry_bohr Coordinates in Bohr
+     * @param cn Coordination numbers
+     * @param topology Topology information (neighbor lists, etc.)
+     * @return Vector of dxi corrections
+     */
+    Vector calculateDxiFull(
+        const std::vector<int>& atoms,
+        const Matrix& geometry_bohr,
+        const Vector& cn,
+        const std::optional<TopologyInput>& topology = std::nullopt
+    );
+
+    /**
+     * @brief Detect amide hydrogens (public wrapper)
+     *
+     * Claude Generated (March 2026): Public access to amide hydrogen detection
+     * for use in Coulomb chi_base correction.
+     * Reference: Fortran gfnff_ini.f90:717 - amideH correction to chieeq
+     *
+     * @param atoms Atomic numbers
+     * @param hybridization Hybridization states
+     * @param cn Coordination numbers
+     * @param topology Topology information
+     * @return Vector of amide hydrogen flags
+     */
+    std::vector<bool> detectAmideHydrogensFull(
+        const std::vector<int>& atoms,
+        const std::vector<int>& hybridization,
+        const Vector& cn,
+        const std::optional<TopologyInput>& topology = std::nullopt
+    ) const;
+
 private:
     /**
      * @brief Element-specific EEQ parameters

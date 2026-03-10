@@ -130,6 +130,10 @@ public:
         // Reference: Fortran gfnff_ini.f90:718-725, gfnff_data_types.f90:128
         Vector alpeeq;                                       // Squared alpha values, charge-corrected
 
+        // Claude Generated (March 2026): Amide hydrogen flags for Coulomb chi correction
+        // Reference: Fortran gfnff_ini.f90:717 - if(amideH(i)) chieeq(i) -= 0.02
+        std::vector<bool> is_amide_h;
+
         // Phase 2.1: Distance caching (Claude Generated - Dec 2025)
         // Computed once per geometry update to eliminate redundant sqrt() calls
         Eigen::MatrixXd distance_matrix;        // N×N distances in Bohr
@@ -1284,6 +1288,8 @@ public:
      * @return Core-core repulsion energy or 0 if not calculated
      */
     double RepulsionEnergy() const;
+    double BondedRepulsionEnergy() const;
+    double NonbondedRepulsionEnergy() const;
 
     /**
      * @brief Get dispersion energy component
@@ -1547,6 +1553,7 @@ public:
      * instead of recalculating from EEQ solver. Restore to false after diagnostic.
      */
     void setSkipEEQRecalc(bool skip) { m_skip_eeq_recalc = skip; }
+    void setRepDiag(bool diag) { m_rep_diag = diag; }
 
     /**
      * @brief Regenerate GFN-FF parameters using current charges (for testing/validation)
@@ -1715,6 +1722,7 @@ private:
     bool m_initialized; ///< Initialization status
     bool m_comparing_gradients = false; ///< Guard to prevent recursion in compareGradients
     bool m_skip_eeq_recalc = false; ///< Skip Phase-2 EEQ recalculation (for charge injection diagnostic)
+    bool m_rep_diag = false; ///< Dump repulsion alphanb diagnostic
 
     double m_energy_total; ///< Total energy in Hartree
     Vector m_charges; ///< Atomic partial charges
