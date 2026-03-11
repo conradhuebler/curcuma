@@ -1421,6 +1421,42 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    // Phase 2: List available computational methods - Claude Generated 2025
+    if (command == "methods") {
+        auto methods = MethodFactory::getAvailableMethods();
+        std::cout << "Available computational methods in this build:\n\n";
+
+        std::cout << "Quantum Methods:\n";
+        for (const auto& method : methods) {
+            if (method.find("gfn") != std::string::npos ||
+                method.find("eht") != std::string::npos ||
+                method.find("pm") != std::string::npos ||
+                method.find("am") != std::string::npos ||
+                method.find("mndo") != std::string::npos) {
+                std::cout << "  - " << method << "\n";
+            }
+        }
+
+        std::cout << "\nForce Fields:\n";
+        for (const auto& method : methods) {
+            if (method.find("uff") != std::string::npos ||
+                method.find("ff") != std::string::npos ||
+                method.find("qmdff") != std::string::npos) {
+                std::cout << "  - " << method << "\n";
+            }
+        }
+
+        std::cout << "\nDispersion Corrections:\n";
+        for (const auto& method : methods) {
+            if (method.find("d3") != std::string::npos ||
+                method.find("d4") != std::string::npos) {
+                std::cout << "  - " << method << "\n";
+            }
+        }
+
+        return 0;
+    }
+
     // Handle parameter registry commands - Claude Generated (October 2025)
     if (command == "list-modules") {
         ParameterRegistry::getInstance().printAllModules();
