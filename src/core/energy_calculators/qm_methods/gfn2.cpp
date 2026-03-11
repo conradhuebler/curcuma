@@ -24,6 +24,8 @@
 #include <fmt/format.h>
 #include <cmath>
 #include <algorithm>
+#include <vector>
+#include <map>
 
 using namespace CurcumaUnit;
 
@@ -31,8 +33,6 @@ using namespace CurcumaUnit;
 // Covalent Radii (Pyykkö 2015, triple bond radii in Ångström)
 // Shared by GFN2, GFN1, and other xTB methods
 // =================================================================================
-// Claude Generated: Pyykkö triple-bond covalent radii for xTB coordination numbers
-// Reference: P. Pyykkö, J. Phys. Chem. A 2015, 119, 2326-2337
 namespace {
     const double COVALENT_RADII[87] = {
         0.0,    // Dummy for index 0
@@ -124,15 +124,10 @@ namespace {
 
 }
 
-// Make available for GFN1 and other xTB methods
 double getCovalentRadius(int Z) {
-    if (Z < 1 || Z > 86) return 1.5;  // Default for unsupported elements
+    if (Z < 1 || Z > 86) return 1.5;
     return COVALENT_RADII[Z];
 }
-
-// =================================================================================
-// Constructor / Destructor
-// =================================================================================
 
 GFN2::GFN2()
     : m_params()
@@ -144,15 +139,13 @@ GFN2::GFN2()
     , m_energy_solvation(0.0)
     , m_solvation(nullptr)
     , m_solvent("none")
-    , m_scf_max_iterations(100)
+    , m_scf_max_iterations(150)      // GFN2 needs more iterations (TBLite default)
     , m_scf_threshold(1.0e-6)
-    , m_scf_damping(0.4)
+    , m_scf_damping(0.6)             // GFN2 needs stronger damping (TBLite default)
     , m_scf_converged(false)
 {
-    // Load complete GFN2 parameter database (26 elements, 48 pairs)
-    // Claude Generated: Parameter database integration (November 2025)
     if (!m_param_db.loadCompleteGFN2()) {
-        CurcumaLogger::error("Failed to load GFN2 parameter database - using legacy parameters");
+        CurcumaLogger::error("Failed to load GFN2 parameter database");
     }
 
     if (CurcumaLogger::get_verbosity() >= 2) {
@@ -161,6 +154,8 @@ GFN2::GFN2()
         CurcumaLogger::param("reference", "Bannwarth et al. JCTC 2019, 15, 1652");
         CurcumaLogger::param("parameter_database", fmt::format("{} elements, {} pairs",
                            m_param_db.getNumElements(), m_param_db.getNumPairs()));
+        CurcumaLogger::param("scf_damping", fmt::format("{:.2f}", m_scf_damping));
+        CurcumaLogger::param("max_iterations", m_scf_max_iterations);
     }
 }
 
@@ -174,45 +169,24 @@ GFN2::GFN2(const ArrayParameters& params)
     , m_energy_solvation(0.0)
     , m_solvation(nullptr)
     , m_solvent("none")
-    , m_scf_max_iterations(100)
+    , m_scf_max_iterations(150)      // GFN2 needs more iterations (TBLite default)
     , m_scf_threshold(1.0e-6)
-    , m_scf_damping(0.4)
+    , m_scf_damping(0.6)             // GFN2 needs stronger damping (TBLite default)
     , m_scf_converged(false)
 {
-    // Load complete GFN2 parameter database
-    // Claude Generated: Parameter database integration (November 2025)
     if (!m_param_db.loadCompleteGFN2()) {
-        CurcumaLogger::error("Failed to load GFN2 parameter database - using legacy parameters");
-    }
-
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("Initializing GFN2-xTB with custom parameters");
-        CurcumaLogger::param("parameter_database", fmt::format("{} elements, {} pairs",
-                           m_param_db.getNumElements(), m_param_db.getNumPairs()));
+        CurcumaLogger::error("Failed to load GFN2 parameter database");
     }
 }
 
-// =================================================================================
-// QMDriver Interface Implementation
-// =================================================================================
-
 bool GFN2::InitialiseMolecule()
 {
-    if (m_atoms.size() == 0) {
-        CurcumaLogger::error("No atoms in molecule for GFN2 initialization");
-        return false;
-    }
+    if (m_atoms.size() == 0) return false;
 
-    // Validate all atoms are supported
     for (size_t i = 0; i < m_atoms.size(); ++i) {
-        if (!m_params.isValidAtom(m_atoms[i])) {
-            CurcumaLogger::error(fmt::format("GFN2 parameters not available for element Z={} at atom {}",
-                                            m_atoms[i], i+1));
-            return false;
-        }
+        if (!m_params.isValidAtom(m_atoms[i])) return false;
     }
 
-    // Level 1+: Initialization info
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::info("Initializing GFN2 calculation");
         CurcumaLogger::param("atoms", static_cast<int>(m_atoms.size()));
@@ -220,33 +194,16 @@ bool GFN2::InitialiseMolecule()
         CurcumaLogger::param("spin", m_spin);
     }
 
-    // Build basis set
     m_nbasis = buildBasisSet();
+    if (m_nbasis == 0) return false;
 
-    if (m_nbasis == 0) {
-        CurcumaLogger::error("Failed to build basis set");
-        return false;
-    }
-
-    // Level 2+: Basis set details
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::param("basis_functions", m_nbasis);
         CurcumaLogger::param("electrons", m_num_electrons);
     }
 
-    // Calculate coordination numbers
     m_coordination_numbers = calculateCoordinationNumbers();
 
-    // Level 3+: CN details
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("Coordination numbers calculated");
-        for (size_t i = 0; i < m_atoms.size(); ++i) {
-            CurcumaLogger::param(fmt::format("CN_atom_{}", i+1),
-                               fmt::format("{:.3f}", m_coordination_numbers(i)));
-        }
-    }
-
-    // Initialize matrices
     m_overlap = Matrix::Zero(m_nbasis, m_nbasis);
     m_hamiltonian = Matrix::Zero(m_nbasis, m_nbasis);
     m_fock = Matrix::Zero(m_nbasis, m_nbasis);
@@ -261,160 +218,73 @@ bool GFN2::InitialiseMolecule()
 
 double GFN2::Calculation(bool gradient)
 {
-    if (!m_initialised && m_atoms.size() == 0) {
-        CurcumaLogger::error("Molecule not initialized for GFN2 calculation");
-        return 0.0;
-    }
+    if (!m_initialised && m_atoms.size() == 0) return 0.0;
 
-    // Level 1+: Starting calculation
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::info("Starting GFN2-xTB calculation");
     }
 
-    // Gradient warning
-    if (gradient) {
-        if (CurcumaLogger::get_verbosity() >= 1) {
-            CurcumaLogger::warn("GFN2 gradients not yet implemented - results will be zero");
-        }
-    }
-
     try {
-        // Step 1: Build overlap matrix
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("Step 1: Computing overlap matrix");
-        }
         m_overlap = MakeOverlap(m_basis);
-
-        // Step 2: Build core Hamiltonian
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("Step 2: Building core Hamiltonian");
-        }
         m_hamiltonian = MakeH(m_overlap, m_basis);
-
-        // Step 3: SCF convergence
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("Step 3: Running SCF convergence");
-        }
         m_scf_converged = runSCF();
 
-        if (!m_scf_converged) {
-            CurcumaLogger::warn("SCF did not converge within maximum iterations");
-        }
-
-        // Step 4: Calculate energy components
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("Step 4: Calculating energy components");
-        }
+        if (!m_scf_converged) CurcumaLogger::warn("SCF did not converge");
 
         m_energy_electronic = calculateElectronicEnergy();
         m_energy_repulsion = calculateRepulsionEnergy();
         m_energy_coulomb = calculateCoulombEnergy();
-        m_energy_dispersion = calculateDispersionEnergy();  // Stub: returns 0
+        m_energy_dispersion = calculateDispersionEnergy();
 
-        // Step 5: Calculate solvation energy (if enabled)
         m_energy_solvation = 0.0;
         if (m_solvation && m_solvent != "none") {
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info("Step 5: Calculating GBSA solvation energy");
-            }
-
-            // Prepare atomic positions in std::vector<std::array<double, 3>> format
             std::vector<std::array<double, 3>> positions(m_atomcount);
-            for (int i = 0; i < m_atomcount; ++i) {
-                positions[i] = {m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2)};
-            }
-
-            // Convert charges to std::vector
+            for (int i = 0; i < m_atomcount; ++i) positions[i] = {m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2)};
             std::vector<double> charges(m_atomcount);
-            for (int i = 0; i < m_atomcount; ++i) {
-                charges[i] = m_charges(i);
-            }
-
-            // Calculate GBSA energy
+            for (int i = 0; i < m_atomcount; ++i) charges[i] = m_charges(i);
             m_energy_solvation = m_solvation->calculateEnergy(m_atoms, positions, charges);
         }
 
-        m_total_energy = m_energy_electronic + m_energy_repulsion +
-                        m_energy_coulomb + m_energy_dispersion + m_energy_solvation;
+        m_total_energy = m_energy_electronic + m_energy_repulsion + m_energy_coulomb + m_energy_dispersion + m_energy_solvation;
 
-        // Level 1+: Final results
-        if (CurcumaLogger::get_verbosity() >= 1) {
-            CurcumaLogger::energy_abs(m_total_energy, "GFN2 Total Energy");
-        }
+        if (CurcumaLogger::get_verbosity() >= 1) CurcumaLogger::energy_abs(m_total_energy, "GFN2 Total Energy");
 
-        // Level 2+: Energy decomposition
         if (CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::param("electronic", fmt::format("{:.6f} Eh", m_energy_electronic));
             CurcumaLogger::param("repulsion", fmt::format("{:.6f} Eh", m_energy_repulsion));
-            CurcumaLogger::param("coulomb", fmt::format("{:.6f} Eh", m_energy_coulomb));
-            CurcumaLogger::param("dispersion", fmt::format("{:.6f} Eh (stub)", m_energy_dispersion));
-            if (m_solvation && m_solvent != "none") {
-                CurcumaLogger::param("solvation", fmt::format("{:.6f} Eh (GBSA native)", m_energy_solvation));
-                CurcumaLogger::param("solvent", m_solvent);
-                CurcumaLogger::param("GB_energy", fmt::format("{:.6f} Eh", m_solvation->getGBEnergy()));
-                CurcumaLogger::param("SA_energy", fmt::format("{:.6f} Eh", m_solvation->getSAEnergy()));
-            }
-
-            // Orbital energies
-            double homo = getHOMOEnergy();
-            double lumo = getLUMOEnergy();
-            double gap = getHOMOLUMOGap();
-
-            CurcumaLogger::param("HOMO", fmt::format("{:.4f} eV", homo));
-            CurcumaLogger::param("LUMO", fmt::format("{:.4f} eV", lumo));
-            CurcumaLogger::param("HOMO-LUMO_gap", fmt::format("{:.4f} eV", gap));
+            CurcumaLogger::param("coulomb", fmt::format("{:.6f} Eh", m_energy_coulomb - m_energy_aes2));
+            CurcumaLogger::param("aes2", fmt::format("{:.6f} Eh", m_energy_aes2));
+#ifdef USE_D4
+            CurcumaLogger::param("dispersion_d4", fmt::format("{:.6f} Eh", m_energy_dispersion));
+#else
+            CurcumaLogger::param("dispersion", fmt::format("{:.6f} Eh (D4 not compiled)", m_energy_dispersion));
+#endif
+            CurcumaLogger::param("HOMO", fmt::format("{:.4f} eV", getHOMOEnergy()));
+            CurcumaLogger::param("LUMO", fmt::format("{:.4f} eV", getLUMOEnergy()));
+            CurcumaLogger::param("HOMO-LUMO_gap", fmt::format("{:.4f} eV", getHOMOLUMOGap()));
         }
 
-        // Level 3+: Full details
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param("SCF_converged", m_scf_converged ? "yes" : "no");
-            CurcumaLogger::param("basis_size", m_nbasis);
-        }
-
-        // Gradient calculation (if requested and implemented)
         if (gradient) {
             m_gradient = calculateGradient();
-
-            // Add GBSA gradient contribution (if solvation is enabled)
             if (m_solvation && m_solvent != "none") {
-                if (CurcumaLogger::get_verbosity() >= 3) {
-                    CurcumaLogger::info("Adding GBSA gradient contribution");
-                }
-
-                // Prepare data structures
-                std::vector<std::array<double, 3>> positions(m_atomcount);
+                std::vector<std::array<double, 3>> positions(m_atomcount), g_solv(m_atomcount);
                 std::vector<double> charges(m_atomcount);
-                std::vector<std::array<double, 3>> gbsa_gradients(m_atomcount);
-
                 for (int i = 0; i < m_atomcount; ++i) {
                     positions[i] = {m_geometry(i, 0), m_geometry(i, 1), m_geometry(i, 2)};
                     charges[i] = m_charges(i);
-                    gbsa_gradients[i] = {0.0, 0.0, 0.0};
+                    g_solv[i] = {0.0, 0.0, 0.0};
                 }
-
-                // Calculate GBSA gradients
-                m_solvation->calculateEnergyAndGradients(m_atoms, positions, charges, gbsa_gradients);
-
-                // Add to total gradient (convert units if needed)
-                for (int i = 0; i < m_atomcount; ++i) {
-                    for (int k = 0; k < 3; ++k) {
-                        m_gradient(i, k) += gbsa_gradients[i][k];
-                    }
-                }
+                m_solvation->calculateEnergyAndGradients(m_atoms, positions, charges, g_solv);
+                for (int i = 0; i < m_atomcount; ++i) for (int k = 0; k < 3; ++k) m_gradient(i, k) += g_solv[i][k];
             }
         }
 
         return m_total_energy;
-
     } catch (const std::exception& e) {
         CurcumaLogger::error(fmt::format("GFN2 calculation failed: {}", e.what()));
         return 0.0;
     }
 }
-
-// =================================================================================
-// Basis Set Construction
-// =================================================================================
 
 int GFN2::buildBasisSet()
 {
@@ -423,864 +293,797 @@ int GFN2::buildBasisSet()
 
     for (size_t i = 0; i < m_atoms.size(); ++i) {
         int Z = m_atoms[i];
-
-        // Get number of shells for this element
-        // GFN2 uses minimal valence basis:
-        // - Period 1 (H, He): s-shell only
-        // - Period 2 (Li-Ne): s, p shells
-        // - Period 3+: s, p, d shells (for transition metals)
-
-        int n_shells = 1;  // At least s-shell
-        if (Z > 2) n_shells = 2;   // s, p shells
-        if (Z > 18) n_shells = 3;  // s, p, d shells (simplified)
+        int n_shells = (Z > 12) ? 3 : (Z > 2) ? 2 : 1;
 
         for (int shell = 0; shell < n_shells; ++shell) {
-            // Get parameters for this shell from parameter database
-            // Use m_param_db (TBLite parameters) if available, else fallback to m_params
             double zeta = 0.0;
-            int principal_qn = shell + 1;  // Default: n = l + 1
-
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format("buildBasisSet: atom={}, Z={}, shell={}, n_shells={}",
-                                               i, Z, shell, n_shells));
-                CurcumaLogger::param(fmt::format("hasElement(Z={})", Z), m_param_db.hasElement(Z));
-                if (m_param_db.hasElement(Z)) {
-                    bool has_shell = m_param_db.getElement(Z).shells.count(shell) > 0;
-                    CurcumaLogger::param(fmt::format("has_shell[{}]", shell), has_shell);
-                }
-            }
-
             if (m_param_db.hasElement(Z) && m_param_db.getElement(Z).shells.count(shell)) {
-                const auto& shell_params = m_param_db.getElement(Z).shells.at(shell);
-                zeta = shell_params.gexp;  // Use gexp (Gaussian exponent / Yeff)
+                zeta = m_param_db.getElement(Z).shells.at(shell).zeta;
+            } else zeta = m_params.getYeff(Z, shell);
 
-                if (CurcumaLogger::get_verbosity() >= 3) {
-                    CurcumaLogger::param(fmt::format("zeta[Z={},shell={}]", Z, shell),
-                                        fmt::format("{:.6f} (from param_db)", zeta));
-                }
-            } else {
-                zeta = m_params.getYeff(Z, shell);  // Legacy fallback
-                principal_qn = static_cast<int>(m_params.getPrincipalQN(Z, shell));
+            if (zeta < 1.0e-6) continue;
 
-                if (CurcumaLogger::get_verbosity() >= 3) {
-                    CurcumaLogger::param(fmt::format("zeta[Z={},shell={}]", Z, shell),
-                                        fmt::format("{:.6f} (legacy fallback)", zeta));
-                }
-            }
-
-            if (zeta < 1.0e-6) {
-                if (CurcumaLogger::get_verbosity() >= 3) {
-                    CurcumaLogger::warn(fmt::format("Skipping shell {} for Z={} (zeta too small: {})",
-                                                   shell, Z, zeta));
-                }
-                continue;  // Skip unparameterized shells
-            }
-
-            // Angular momentum: shell 0 = s, shell 1 = p, shell 2 = d
             int l = shell;
-
-            // Create basis functions for this shell
             for (int m = -l; m <= l; ++m) {
                 STO::Orbital orbital;
-
-                // Set orbital type based on angular momentum
-                if (l == 0) {
-                    orbital.type = STO::S;
-                } else if (l == 1) {
-                    // p-orbitals: m = -1 (py), 0 (pz), +1 (px)
+                if (l == 0) orbital.type = STO::S;
+                else if (l == 1) {
                     if (m == -1) orbital.type = STO::PY;
                     else if (m == 0) orbital.type = STO::PZ;
                     else orbital.type = STO::PX;
-                } else if (l == 2) {
-                    // d-orbitals: would need proper m → type mapping
-                    orbital.type = STO::S;  // Placeholder
-                } else {
-                    orbital.type = STO::S;  // Fallback
-                }
+                } else orbital.type = STO::S; // Placeholder for d
 
-                orbital.x = m_geometry(i, 0) / au;  // Convert Å → Bohr
+                orbital.x = m_geometry(i, 0) / au;
                 orbital.y = m_geometry(i, 1) / au;
                 orbital.z = m_geometry(i, 2) / au;
                 orbital.zeta = zeta;
-                orbital.VSIP = 0.0;  // Not used in GFN2 (uses selfenergy table)
                 orbital.atom = i;
-
+                orbital.shell = shell;
                 m_basis.push_back(orbital);
             }
 
-            // Add electrons for this shell (simplified)
-            if (shell == 0) m_num_electrons += std::min(2, Z);              // s: max 2e
-            else if (shell == 1) m_num_electrons += std::min(6, Z - 2);     // p: max 6e
-            else if (shell == 2) m_num_electrons += std::min(10, Z - 10);   // d: max 10e
+            if (Z <= 2) { if (shell == 0) m_num_electrons += Z; }
+            else if (Z <= 10) {
+                if (shell == 0) m_num_electrons += std::min(2, Z - 2);
+                else if (shell == 1) m_num_electrons += std::max(0, Z - 4);
+            } else if (Z <= 18) {
+                if (shell == 0) m_num_electrons += std::min(2, Z - 10);
+                else if (shell == 1) m_num_electrons += std::max(0, Z - 12);
+            } else {
+                if (shell == 0) m_num_electrons += 2;
+                else if (shell == 1) m_num_electrons += 6;
+            }
         }
     }
-
     return static_cast<int>(m_basis.size());
 }
-
-// =================================================================================
-// Overlap Matrix
-// =================================================================================
 
 Matrix GFN2::MakeOverlap(std::vector<STO::Orbital>& basisset)
 {
     Matrix S = Matrix::Zero(basisset.size(), basisset.size());
-
-    // Update basis function positions
-    for (size_t i = 0; i < basisset.size(); ++i) {
-        // Positions already set in buildBasisSet
-    }
-
-    // Calculate overlap integrals
     for (size_t i = 0; i < basisset.size(); ++i) {
         for (size_t j = 0; j <= i; ++j) {
             double overlap = STO::calculateOverlap(basisset[i], basisset[j]);
             S(i, j) = S(j, i) = overlap;
         }
     }
-
     return S;
 }
 
-// =================================================================================
-// Hamiltonian Matrix
-// =================================================================================
-
 Matrix GFN2::MakeH(const Matrix& S, const std::vector<STO::Orbital>& basisset)
 {
-    // Claude Generated: GFN2 Hamiltonian matrix construction
-    // Implements GFN2 Eq. 12: H_ij = E_i δ_ij + scale_ij * S_ij
-    // Reference: C. Bannwarth et al., JCTC 2019, 15, 1652
-
     Matrix H = Matrix::Zero(basisset.size(), basisset.size());
-
     for (size_t i = 0; i < basisset.size(); ++i) {
         int atom_i = basisset[i].atom;
-        int Z_i = m_atoms[atom_i];
         double CN_i = m_coordination_numbers(atom_i);
-
-        // Determine shell from orbital type (simplified)
-        int shell_i = 0;  // s-orbital
-        if (basisset[i].type == STO::PX || basisset[i].type == STO::PY || basisset[i].type == STO::PZ) {
-            shell_i = 1;  // p-orbital
-        }
-
-        for (size_t j = 0; j <= i; ++j) {
-            if (i == j) {
-                // Diagonal: self-energy with CN dependence
-                H(i, i) = getSelfEnergy(Z_i, shell_i, CN_i);
-            } else {
-                // Off-diagonal: hopping integral (GFN2 Eq. 12b)
-                int atom_j = basisset[j].atom;
-
-                // Calculate interatomic distance
-                double dx = basisset[i].x - basisset[j].x;
-                double dy = basisset[i].y - basisset[j].y;
-                double dz = basisset[i].z - basisset[j].z;
-                double distance = std::sqrt(dx*dx + dy*dy + dz*dz) * au;  // Bohr to Å
-
-                // Get scaling factor
-                double scale = getHamiltonianScale(basisset[i], basisset[j], distance);
-
-                // H_ij = scale * S_ij
-                H(i, j) = H(j, i) = scale * S(i, j);
-            }
+        H(i, i) = getSelfEnergy(m_atoms[atom_i], basisset[i].shell, CN_i);
+    }
+    for (size_t i = 0; i < basisset.size(); ++i) {
+        for (size_t j = 0; j < i; ++j) {
+            double dx = basisset[i].x - basisset[j].x, dy = basisset[i].y - basisset[j].y, dz = basisset[i].z - basisset[j].z;
+            double distance = std::sqrt(dx*dx + dy*dy + dz*dz) * au;
+            double scale = getHamiltonianScale(basisset[i], basisset[j], distance);
+            double h_ij = scale * S(i, j) * (H(i, i) + H(j, j)) / 2.0;
+            H(i, j) = H(j, i) = h_ij;
         }
     }
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info(fmt::format("Hamiltonian matrix constructed ({} × {})",
-                                       basisset.size(), basisset.size()));
-        CurcumaLogger::param("H_diagonal_range",
-                           fmt::format("[{:.4f}, {:.4f}] Eh",
-                                     H.diagonal().minCoeff(),
-                                     H.diagonal().maxCoeff()));
-    }
-
     return H;
 }
 
 double GFN2::getSelfEnergy(int element, int shell, double CN) const
 {
-    // Claude Generated: GFN2 self-energy calculation with shell-resolved parameters
-    // Formula (GFN2 Eq. 12a): E_ii = E_base + k_CN * CN
-    // Reference: C. Bannwarth et al., JCTC 2019, 15, 1652
-    // Updated November 2025: Uses real TBLite-derived parameters for 26 elements
-
-    double E = 0.0;
-    bool use_real_params = false;
-
-    // Try to use real shell-resolved parameters from database
     if (m_param_db.hasElement(element)) {
-        const auto& elem_params = m_param_db.getElement(element);
-
-        // Check if this shell exists for this element
-        auto shell_it = elem_params.shells.find(shell);
-        if (shell_it != elem_params.shells.end()) {
-            const auto& shell_params = shell_it->second;
-
-            // GFN2 Eq. 12a with real parameters
-            E = shell_params.selfenergy + shell_params.kcn * CN;
-            use_real_params = true;
-
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::param(fmt::format("SelfEnergy[Z={},shell={}]", element, shell),
-                                   fmt::format("E={:.6f} Eh (CN={:.2f}) [TBLite params]", E, CN));
-            }
-        }
+        const auto& ep = m_param_db.getElement(element);
+        if (ep.shells.count(shell)) return ep.shells.at(shell).selfenergy + ep.shells.at(shell).kcn * CN;
     }
-
-    // Fallback to legacy parameters if element/shell not in database
-    if (!use_real_params) {
-        // Use chemical hardness as base energy (already in Hartree)
-        double E_base = -m_params.getHardness(element);
-
-        // CN shift: use shell_hardness (kpoly) parameter scaled
-        double k_CN = m_params.getShellHardness(element) * 0.01;  // Scaled to reasonable magnitude
-
-        // Apply CN shift
-        E = E_base + k_CN * CN;
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param(fmt::format("SelfEnergy[Z={},shell={}]", element, shell),
-                               fmt::format("E={:.6f} Eh (CN={:.2f}) [legacy fallback]", E, CN));
-        }
-    }
-
-    return E;
+    return -m_params.getHardness(element) + m_params.getShellHardness(element) * 0.01 * CN;
 }
 
+double GFN2::getShellHubbard(int Z, int shell) const
+{
+    double g = m_param_db.getShellHubbard(Z, shell);
+    return (g > 0.0) ? g : m_params.getHardness(Z);
+}
+
+// Claude Generated (March 2026): Fixed to match TBLite gfn2.f90 lines 1002-1006
+// Uses global kshell from kdiag, kpair=1.0 for all pairs
 double GFN2::getHamiltonianScale(const STO::Orbital& fi, const STO::Orbital& fj, double distance) const
 {
-    // Claude Generated: GFN2 Hamiltonian scaling factor with pair-specific parameters
-    // Formula (GFN2 Eq. 12b): H_ij = scale * S_ij
-    // where scale = z_ij * k_pair * k_shell * (1 + 0.02 * ΔEN²) * poly(r)
-    // Reference: C. Bannwarth et al., JCTC 2019, 15, 1652
-    // Updated November 2025: Uses real TBLite pair parameters for 48 element pairs
+    int Zi = m_atoms[fi.atom], Zj = m_atoms[fj.atom];
+    double z_ij = std::sqrt(2.0 * std::sqrt(fi.zeta * fj.zeta) / (fi.zeta + fj.zeta));
 
-    int atom_i = fi.atom;
-    int atom_j = fj.atom;
-    int Z_i = m_atoms[atom_i];
-    int Z_j = m_atoms[atom_j];
-
-    // Electronegativity difference (Pauling scale)
-    double EN_i = m_params.getElectronegativity(Z_i);
-    double EN_j = m_params.getElectronegativity(Z_j);
-    double delta_EN = EN_i - EN_j;
-
-    // z_ij: orbital overlap scaling factor
-    double zeta_i = fi.zeta;
-    double zeta_j = fj.zeta;
-    double z_ij = std::sqrt(2.0 * std::sqrt(zeta_i * zeta_j) / (zeta_i + zeta_j));
-
-    // Try to use real pair-specific parameters
+    // kpair = 1.0 for all pairs in GFN2 (TBLite gfn2.f90 line 727)
     double k_pair = 1.0;
-    double k_shell = 1.0;
-    bool use_real_params = false;
 
-    if (m_param_db.hasPair(Z_i, Z_j)) {
-        const auto& pair_params = m_param_db.getPair(Z_i, Z_j);
-
-        // Use element-pair specific coupling
-        k_pair = pair_params.kpair;
-
-        // Determine shell types for k_shell coupling
-        int shell_i = 0;  // s-orbital
-        int shell_j = 0;
-        if (fi.type == STO::PX || fi.type == STO::PY || fi.type == STO::PZ) shell_i = 1;
-        if (fj.type == STO::PX || fj.type == STO::PY || fj.type == STO::PZ) shell_j = 1;
-
-        // Select shell-specific coupling
-        if (shell_i == 0 && shell_j == 0) {
-            k_shell = pair_params.kshell_ss;  // s-s coupling
-        } else if (shell_i == 1 && shell_j == 1) {
-            k_shell = pair_params.kshell_pp;  // p-p coupling
-        } else {
-            k_shell = pair_params.kshell_sp;  // s-p coupling
-        }
-
-        use_real_params = true;
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param(fmt::format("HScale[{}-{}]", Z_i, Z_j),
-                               fmt::format("k_pair={:.3f}, k_shell={:.3f} [TBLite]",
-                                         k_pair, k_shell));
-        }
+    // kshell from kdiag array (TBLite gfn2.f90 line 61, kshell function line 1002)
+    // Special case: s-d and p-d interactions use 2.0
+    int li = fi.shell, lj = fj.shell;
+    double k_shell;
+    if ((li == 2 && (lj == 0 || lj == 1)) || (lj == 2 && (li == 0 || li == 1))) {
+        k_shell = 2.0;  // s-d and p-d special case
     } else {
-        // Fallback: use Alpha parameter as approximation
-        k_pair = std::sqrt(m_params.getAlpha(Z_i) * m_params.getAlpha(Z_j)) * 0.1;
-        k_shell = 1.0;
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param(fmt::format("HScale[{}-{}]", Z_i, Z_j),
-                               "using legacy approximation");
-        }
+        constexpr double kdiag[] = {GFN2Params::GFN2_KDIAG_S, GFN2Params::GFN2_KDIAG_P, GFN2Params::GFN2_KDIAG_D};
+        k_shell = (kdiag[li] + kdiag[lj]) / 2.0;
     }
 
-    // Electronegativity correction (GFN2 Eq. 12b)
+    double delta_EN = m_params.getElectronegativity(Zi) - m_params.getElectronegativity(Zj);
     double en_factor = 1.0 + 0.02 * delta_EN * delta_EN;
 
-    // Distance polynomial correction (simplified exponential decay)
-    // TODO: Full polynomial from TBLite (requires radial basis parameters)
-    double r_bohr = distance / au;  // Convert Å to Bohr
-    double poly_r = std::exp(-0.5 * (r_bohr - 3.0));  // Simplified decay
+    double r_bohr = distance / au;
+    double rad_i = m_param_db.hasElement(Zi) ? m_param_db.getElement(Zi).rad : 2.0;
+    double rad_j = m_param_db.hasElement(Zj) ? m_param_db.getElement(Zj).rad : 2.0;
+    double shpoly_i = m_param_db.hasElement(Zi) ? m_param_db.getElement(Zi).shells.at(fi.shell).shpoly : 0.0;
+    double shpoly_j = m_param_db.hasElement(Zj) ? m_param_db.getElement(Zj).shells.at(fj.shell).shpoly : 0.0;
+    double rr = std::sqrt(r_bohr / (rad_i + rad_j));
+    double poly_r = (1.0 + shpoly_i * rr) * (1.0 + shpoly_j * rr);
 
-    // Combined scaling factor
-    double scale = z_ij * k_pair * k_shell * en_factor * poly_r;
-
-    return scale;
+    return z_ij * k_pair * k_shell * en_factor * poly_r;
 }
 
-// =================================================================================
-// Coordination Numbers
-// =================================================================================
-
+// Claude Generated (March 2026): Fixed to match TBLite ncoord/gfn.f90 lines 82-101
+// Uses double-exponential CN (ka*kb product), NOT D3 single-exponential^(4/3)
 Vector GFN2::calculateCoordinationNumbers()
 {
-    // Claude Generated: GFN2 coordination number calculation
-    // Formula (GFN2 Eq. 4): CN_i = ∑_{j≠i} [1 / (1 + exp(-k₁(R_cov,ij/R_ij - 1)))]^(k₂)
-    // Reference: C. Bannwarth et al., JCTC 2019, 15, 1652
-
     Vector CN = Vector::Zero(m_atomcount);
-
-    // GFN2 parameters (from paper)
-    const double k1 = 16.0;      // Steepness
-    const double k2 = 4.0 / 3.0; // Range decay exponent
-
+    // r_shift is in Bohr in TBLite; convert to Angstrom for our distance units
+    double r_shift_ang = GFN2Params::GFN2_CN_RSHIFT * au;
     for (int A = 0; A < m_atomcount; ++A) {
-        int Z_A = m_atoms[A];
-        double R_cov_A = getCovalentRadius(Z_A);
-
         for (int B = 0; B < m_atomcount; ++B) {
             if (A == B) continue;
-
-            int Z_B = m_atoms[B];
-            double R_cov_B = getCovalentRadius(Z_B);
-            double R_cov = R_cov_A + R_cov_B;
-
-            // Distance in Ångström
-            double dx = m_geometry(A, 0) - m_geometry(B, 0);
-            double dy = m_geometry(A, 1) - m_geometry(B, 1);
-            double dz = m_geometry(A, 2) - m_geometry(B, 2);
-            double R_AB = std::sqrt(dx*dx + dy*dy + dz*dz);
-
-            // Avoid division by zero for overlapping atoms
+            double R_AB = (m_geometry.row(A) - m_geometry.row(B)).norm();  // Angstrom
             if (R_AB < 1.0e-6) continue;
+            double R_cov = getCovalentRadius(m_atoms[A]) + getCovalentRadius(m_atoms[B]);  // Angstrom
 
-            // Counting function: 1 / (1 + exp(-k1 * (R_cov/R - 1)))
-            double count = 1.0 / (1.0 + std::exp(-k1 * (R_cov / R_AB - 1.0)));
-
-            // Power k2
-            CN(A) += std::pow(count, k2);
+            // GFN2 double-exponential: count1 * count2
+            double count1 = 1.0 / (1.0 + std::exp(-GFN2Params::GFN2_CN_KA * (R_cov / R_AB - 1.0)));
+            double count2 = 1.0 / (1.0 + std::exp(-GFN2Params::GFN2_CN_KB * ((R_cov + r_shift_ang) / R_AB - 1.0)));
+            CN(A) += count1 * count2;
         }
     }
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("Coordination numbers calculated:");
-        for (int i = 0; i < m_atomcount; ++i) {
-            CurcumaLogger::param(fmt::format("CN[atom_{}]", i+1),
-                               fmt::format("{:.3f}", CN(i)));
-        }
-    }
-
     return CN;
 }
 
-// =================================================================================
-// SCF Procedure
-// =================================================================================
-
 bool GFN2::runSCF()
 {
-    // Initial guess: zero density (simplified)
-    // TODO: Implement SAD (Superposition of Atomic Densities) guess
     m_density = Matrix::Zero(m_nbasis, m_nbasis);
-
-    // Debug: Print Hamiltonian and Overlap matrices (first iteration only)
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("Hamiltonian matrix H (full, small matrices only):");
-        if (m_nbasis <= 10) {
-            for (int i = 0; i < m_nbasis; ++i) {
-                std::stringstream ss;
-                ss << "H[" << i << "]: ";
-                for (int j = 0; j < m_nbasis; ++j) {
-                    ss << fmt::format("{:9.5f} ", m_hamiltonian(i, j));
-                }
-                CurcumaLogger::info(ss.str());
-            }
-        } else {
-            CurcumaLogger::info("(Matrix too large, showing diagonal only)");
-            for (int i = 0; i < m_nbasis; ++i) {
-                CurcumaLogger::param(fmt::format("H({},{})", i, i),
-                                    fmt::format("{:.6f} Eh", m_hamiltonian(i, i)));
-            }
-        }
-
-        CurcumaLogger::info("Overlap matrix S (full, small matrices only):");
-        if (m_nbasis <= 10) {
-            for (int i = 0; i < m_nbasis; ++i) {
-                std::stringstream ss;
-                ss << "S[" << i << "]: ";
-                for (int j = 0; j < m_nbasis; ++j) {
-                    ss << fmt::format("{:9.5f} ", m_overlap(i, j));
-                }
-                CurcumaLogger::info(ss.str());
-            }
-        }
-    }
+    double prev_energy = 0.0;
+    double energy_diff = 0.0;
 
     for (int iter = 0; iter < m_scf_max_iterations; ++iter) {
-        // 1. Build Fock matrix
         m_fock = buildFockMatrix(m_density);
-
-        // 2. Solve generalized eigenvalue problem: FC = SCE
         ParallelEigenSolver solver(500, 128, 1.0e-10, false);
-        solver.setThreadCount(m_threads);
-
-        bool success = solver.solve(m_overlap, m_fock, m_energies, m_mo, m_threads, false);
-
+        bool success = solver.solve(m_overlap, m_fock, m_energies, m_mo, m_threads, true);
         if (!success) {
-            CurcumaLogger::error("Eigenvalue solution failed in SCF");
+            if (CurcumaLogger::get_verbosity() >= 1)
+                CurcumaLogger::warn("SCF: Eigenvalue solver failed at iteration " + std::to_string(iter + 1));
             return false;
         }
 
-        // 3. Build new density matrix
         Matrix density_new = buildDensityMatrix(m_mo, m_energies);
 
-        // 4. Check convergence
-        double delta_P = (density_new - m_density).norm();
+        // Calculate electronic energy for convergence check
+        double current_energy = 0.0;
+        for (int mu = 0; mu < m_nbasis; ++mu)
+            for (int nu = 0; nu < m_nbasis; ++nu)
+                current_energy += density_new(mu, nu) * (m_hamiltonian(mu, nu) + m_fock(mu, nu)) * 0.5;
 
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param(fmt::format("SCF_iter_{}", iter+1),
-                               fmt::format("ΔP = {:.6e}", delta_P));
+        if (iter > 0) energy_diff = std::abs(current_energy - prev_energy);
+        prev_energy = current_energy;
+
+        // Check both density and energy convergence
+        double density_change = (density_new - m_density).norm();
+        bool converged = (density_change < m_scf_threshold) && (energy_diff < m_scf_threshold * 0.1);
+
+        if (CurcumaLogger::get_verbosity() >= 2 && (iter % 10 == 0 || converged || iter == 0)) {
+            CurcumaLogger::info(fmt::format("SCF iter {:3d}: E = {:15.8f} Eh, ΔE = {:8.2e}, ΔP = {:8.2e}",
+                                          iter + 1, current_energy, energy_diff, density_change));
         }
 
-        if (delta_P < m_scf_threshold) {
+        if (converged) {
             m_density = density_new;
-            if (CurcumaLogger::get_verbosity() >= 2) {
-                CurcumaLogger::success(fmt::format("SCF converged in {} iterations", iter+1));
-            }
+            if (CurcumaLogger::get_verbosity() >= 1)
+                CurcumaLogger::success(fmt::format("SCF converged in {} iterations (ΔE = {:.2e})", iter + 1, energy_diff));
             return true;
         }
 
-        // 5. Apply damping
+        // Apply damping
         m_density = m_scf_damping * density_new + (1.0 - m_scf_damping) * m_density;
     }
 
-    return false;  // Did not converge
+    if (CurcumaLogger::get_verbosity() >= 1)
+        CurcumaLogger::warn(fmt::format("SCF did not converge after {} iterations (ΔE = {:.2e})",
+                                       m_scf_max_iterations, energy_diff));
+    return false;
 }
 
 Matrix GFN2::buildFockMatrix(const Matrix& density)
 {
-    // Simplified: F = H₀ (no Coulomb terms yet)
-    // TODO: Add G(P) Coulomb contributions
+    Matrix F = m_hamiltonian;
+    Matrix PS = density * m_overlap;
+    std::vector<std::map<int, double>> shell_pop(m_atomcount);
+    for (int mu = 0; mu < m_nbasis; ++mu) shell_pop[m_basis[mu].atom][m_basis[mu].shell] += PS(mu, mu);
 
-    return m_hamiltonian;  // Stub
+    Vector atomic_charges = Vector::Zero(m_atomcount);
+    std::vector<std::map<int, double>> dq(m_atomcount);
+    for (int A = 0; A < m_atomcount; ++A) {
+        const auto& ep = m_param_db.getElement(m_atoms[A]);
+        for (auto const& [s, p] : shell_pop[A]) {
+            dq[A][s] = ep.shells.at(s).refocc - p;
+            atomic_charges(A) += dq[A][s];
+        }
+    }
+    const_cast<GFN2*>(this)->m_charges = atomic_charges;
+    if (density.norm() < 1e-10) return F;
+
+    std::vector<double> V(m_nbasis, 0.0);
+    for (int mu = 0; mu < m_nbasis; ++mu) {
+        int A = m_basis[mu].atom;
+        double g_AA = getShellHubbard(m_atoms[A], m_basis[mu].shell);
+        for (int B = 0; B < m_atomcount; ++B) {
+            double R_AB = (A == B) ? 0.0 : (m_geometry.row(A) - m_geometry.row(B)).norm() / au;
+            for (auto const& [sB, dqB] : dq[B]) {
+                double g_AB = calculateCoulombKernel(g_AA, getShellHubbard(m_atoms[B], sB), R_AB);
+                V[mu] += dqB * g_AB;
+            }
+        }
+    }
+    for (int mu = 0; mu < m_nbasis; ++mu) for (int nu = 0; nu < m_nbasis; ++nu) F(mu, nu) -= 0.5 * m_overlap(mu, nu) * (V[mu] + V[nu]);
+    return F;
 }
 
 Matrix GFN2::buildDensityMatrix(const Matrix& mo_coefficients, const Vector& mo_energies)
 {
     Matrix P = Matrix::Zero(m_nbasis, m_nbasis);
-
-    int n_occ = m_num_electrons / 2;  // Doubly occupied orbitals
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::param("buildDensityMatrix: m_num_electrons", m_num_electrons);
-        CurcumaLogger::param("buildDensityMatrix: n_occ", n_occ);
-        CurcumaLogger::param("buildDensityMatrix: m_nbasis", m_nbasis);
-        CurcumaLogger::param("buildDensityMatrix: mo_coefficients.rows()", static_cast<int>(mo_coefficients.rows()));
-        CurcumaLogger::param("buildDensityMatrix: mo_coefficients.cols()", static_cast<int>(mo_coefficients.cols()));
-
-        CurcumaLogger::info("MO energies (ALL orbitals):");
-        for (int i = 0; i < m_nbasis; ++i) {
-            CurcumaLogger::param(fmt::format("E_MO[{}]", i),
-                                fmt::format("{:.6f} Eh ({:.3f} eV)",
-                                           mo_energies(i), mo_energies(i) * 27.2114));
-        }
-
-        CurcumaLogger::info("MO coefficients for occupied orbitals:");
-        for (int i = 0; i < n_occ; ++i) {
-            std::stringstream ss;
-            ss << "MO[" << i << "]: ";
-            for (int mu = 0; mu < m_nbasis; ++mu) {
-                ss << fmt::format("{:8.4f} ", mo_coefficients(mu, i));
-            }
-            CurcumaLogger::info(ss.str());
-        }
-    }
-
-    for (int mu = 0; mu < m_nbasis; ++mu) {
-        for (int nu = 0; nu < m_nbasis; ++nu) {
-            for (int i = 0; i < n_occ; ++i) {
-                P(mu, nu) += 2.0 * mo_coefficients(mu, i) * mo_coefficients(nu, i);
-            }
-        }
-    }
-
+    int n_occ = m_num_electrons / 2;
+    for (int mu = 0; mu < m_nbasis; ++mu) for (int nu = 0; nu < m_nbasis; ++nu)
+        for (int i = 0; i < n_occ; ++i) P(mu, nu) += 2.0 * mo_coefficients(mu, i) * mo_coefficients(nu, i);
     return P;
 }
 
-// =================================================================================
-// Energy Components
-// =================================================================================
-
-double GFN2::calculateElectronicEnergy() const
-{
-    // GFN2/xTB electronic energy: E_elec = Tr(P * H_0)
-    // where H_0 is the core Hamiltonian (NOT Fock matrix!)
-    //
-    // In GFN2 tight-binding, the electronic energy is ONLY from orbital occupations.
-    // Coulomb interactions are added separately as ES2/ES3 terms.
-    // Reference: Bannwarth et al. JCTC 2019, Eq. 1-2
-    //
-    // Corrected November 2025: Was incorrectly using (H+F)/2 (HF formula)
-
+double GFN2::calculateElectronicEnergy() const {
+    // GFN2 electronic energy: E_el = sum_mu_nu P_mu_nu * H_mu_nu
+    // Note: This is the one-electron energy (not the full RHF energy)
+    // The factor 0.5 is NOT applied here because the Coulomb terms are added separately
+    // Reference: Bannwarth et al. JCTC 2019, Eq. 1
     double E = 0.0;
-
     for (int mu = 0; mu < m_nbasis; ++mu) {
         for (int nu = 0; nu < m_nbasis; ++nu) {
             E += m_density(mu, nu) * m_hamiltonian(mu, nu);
         }
     }
-
     return E;
 }
 
-double GFN2::calculateRepulsionEnergy() const
-{
-    // Claude Generated: GFN2 repulsion energy calculation with TBLite parameters
-    // Formula: E_rep = ∑_{A<B} V_rep(R_AB)
-    // where V_rep is an exponential repulsion potential
-    // Reference: C. Bannwarth et al., JCTC 2019, 15, 1652
-    // Updated November 2025: Uses real rep_alpha and rep_zeff parameters
-
+// Claude Generated (March 2026): Fixed to match TBLite effective.f90 lines 162-183
+// Bugs fixed: Z_A*Z_B (not sum), sqrt(alpha) (not arithmetic mean), R^kexp
+double GFN2::calculateRepulsionEnergy() const {
     double E_rep = 0.0;
-
     for (int A = 0; A < m_atomcount; ++A) {
-        int Z_A = m_atoms[A];
-
-        // Try to get real repulsion parameters
-        double alpha_A, Z_eff_A;
-        if (m_param_db.hasElement(Z_A)) {
-            const auto& elem_A = m_param_db.getElement(Z_A);
-            alpha_A = elem_A.rep_alpha;
-            Z_eff_A = elem_A.rep_zeff;
-        } else {
-            // Fallback to legacy parameters
-            alpha_A = m_params.getMultipoleRadius(Z_A);
-            Z_eff_A = m_params.getElectronegativity(Z_A) * 0.5;
-        }
-
         for (int B = A + 1; B < m_atomcount; ++B) {
-            int Z_B = m_atoms[B];
+            double R_AB = (m_geometry.row(A) - m_geometry.row(B)).norm() / au;
+            const auto &ea = m_param_db.getElement(m_atoms[A]), &eb = m_param_db.getElement(m_atoms[B]);
 
-            // Try to get real repulsion parameters
-            double alpha_B, Z_eff_B;
-            if (m_param_db.hasElement(Z_B)) {
-                const auto& elem_B = m_param_db.getElement(Z_B);
-                alpha_B = elem_B.rep_alpha;
-                Z_eff_B = elem_B.rep_zeff;
-            } else {
-                // Fallback to legacy parameters
-                alpha_B = m_params.getMultipoleRadius(Z_B);
-                Z_eff_B = m_params.getElectronegativity(Z_B) * 0.5;
-            }
+            double alpha_AB = std::sqrt(ea.rep_alpha * eb.rep_alpha);  // geometric mean
+            double zeff_AB = ea.rep_zeff * eb.rep_zeff;                // product, not sum
 
-            // Interatomic distance in Bohr
-            double dx = m_geometry(A, 0) - m_geometry(B, 0);
-            double dy = m_geometry(A, 1) - m_geometry(B, 1);
-            double dz = m_geometry(A, 2) - m_geometry(B, 2);
-            double R_AB = std::sqrt(dx*dx + dy*dy + dz*dz) / au;  // Å to Bohr
+            // kexp = 1.5 for heavy pairs, 1.0 when both atoms Z <= 2
+            double kexp = (m_atoms[A] > 2 || m_atoms[B] > 2)
+                          ? GFN2Params::GFN2_REP_KEXP : GFN2Params::GFN2_REP_KEXP_LIGHT;
 
-            // Average repulsion exponent
-            double alpha_avg = (alpha_A + alpha_B) / 2.0;
-
-            // Exponential repulsion (GFN2 formula)
-            double V_rep = (Z_eff_A + Z_eff_B) * std::exp(-alpha_avg * R_AB) / R_AB;
-
-            E_rep += V_rep;
+            double r1k = std::pow(R_AB, kexp);
+            double r1r = std::pow(R_AB, GFN2Params::GFN2_REP_REXP);
+            E_rep += zeff_AB * std::exp(-alpha_AB * r1k) / r1r;
         }
     }
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::param("E_repulsion", fmt::format("{:.6f} Eh", E_rep));
-    }
-
     return E_rep;
 }
 
-double GFN2::calculateCoulombEnergy() const
-{
-    // Claude Generated: GFN2 Coulomb energy calculation
-    // Three components (GFN2 Eq. 7-11):
-    // 1. ES2: Effective Coulomb interaction (Eq. 7)
-    // 2. ES3: Third-order onsite correction (Eq. 9)
-    // 3. AES2: Anisotropic multipole (Eq. 10-11) - TODO for now
-    // Reference: C. Bannwarth et al., JCTC 2019, 15, 1652
-    //
-    // TODO: Extract real GFN2 gamma parameters and implement full AES2
-
-    // First, calculate Mulliken charges from density matrix
-    // q_A = Z_A - ∑_{μ∈A} (P*S)_μμ
-    Vector charges = Vector::Zero(m_atomcount);
+double GFN2::calculateCoulombEnergy() const {
+    double E_ES2 = 0.0, E_ES3 = 0.0;
     Matrix PS = m_density * m_overlap;
-
-    // Map basis functions to atoms and accumulate populations
+    std::vector<std::map<int, double>> dq(m_atomcount);
+    Vector q(m_atomcount);
     for (int mu = 0; mu < m_nbasis; ++mu) {
-        int atom = m_basis[mu].atom;
-        double pop = PS(mu, mu);
-        charges(atom) += pop;
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param(fmt::format("PS({},{})", mu, mu),
-                                fmt::format("{:.6f} e (atom {})", pop, atom));
-        }
+        int A = m_basis[mu].atom;
+        dq[A][m_basis[mu].shell] += PS(mu, mu);
     }
-
-    // Convert populations to charges: q = Z - electrons
     for (int A = 0; A < m_atomcount; ++A) {
-        int Z_A = m_atoms[A];
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param(fmt::format("pop[atom={}]", A),
-                                fmt::format("{:.6f} e (Z={})", charges(A), Z_A));
-        }
-        charges(A) = Z_A - charges(A);
+        const auto& ep = m_param_db.getElement(m_atoms[A]);
+        for (auto& [s, p] : dq[A]) { p = ep.shells.at(s).refocc - p; q(A) += p; }
+        E_ES3 += (1.0/6.0) * ep.hubbard_deriv * std::pow(q(A), 3.0);
     }
-
-    // Store charges for property access
-    const_cast<GFN2*>(this)->m_charges = charges;
-
-    // Debug: Print Mulliken charges
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("Mulliken charges:");
-        for (int A = 0; A < m_atomcount; ++A) {
-            CurcumaLogger::param(fmt::format("q[{}]", A), fmt::format("{:.4f} e", charges(A)));
-        }
-    }
-
-    // ES2: Effective Coulomb energy (GFN2 Eq. 7)
-    // E_ES2 = (1/2) * ∑_{A,B} q_A * q_B * γ_AB
-    // Updated November 2025: Uses real gamma_ss parameters from TBLite
-    double E_ES2 = 0.0;
-
     for (int A = 0; A < m_atomcount; ++A) {
-        int Z_A = m_atoms[A];
-
-        // Try to get real gamma parameter (use gamma_ss for onsite)
-        double gamma_AA;
-        if (m_param_db.hasElement(Z_A)) {
-            const auto& elem_A = m_param_db.getElement(Z_A);
-            gamma_AA = elem_A.gamma_ss;  // Onsite Coulomb integral
-        } else {
-            gamma_AA = m_params.getHardness(Z_A);  // Fallback
-        }
-
-        // Onsite (A=B)
-        E_ES2 += 0.5 * charges(A) * charges(A) * gamma_AA;
-
-        for (int B = A + 1; B < m_atomcount; ++B) {
-            int Z_B = m_atoms[B];
-
-            // Get gamma for atom B
-            double gamma_BB;
-            if (m_param_db.hasElement(Z_B)) {
-                const auto& elem_B = m_param_db.getElement(Z_B);
-                gamma_BB = elem_B.gamma_ss;
-            } else {
-                gamma_BB = m_params.getHardness(Z_B);
+        for (int B = 0; B < m_atomcount; ++B) {
+            double R_AB = (A == B) ? 0.0 : (m_geometry.row(A) - m_geometry.row(B)).norm() / au;
+            for (auto const& [sA, dqA] : dq[A]) for (auto const& [sB, dqB] : dq[B]) {
+                double g_AB = calculateCoulombKernel(getShellHubbard(m_atoms[A], sA), getShellHubbard(m_atoms[B], sB), R_AB);
+                E_ES2 += 0.5 * dqA * dqB * g_AB;
             }
-
-            // Interatomic distance in Bohr
-            double dx = m_geometry(A, 0) - m_geometry(B, 0);
-            double dy = m_geometry(A, 1) - m_geometry(B, 1);
-            double dz = m_geometry(A, 2) - m_geometry(B, 2);
-            double R_AB = std::sqrt(dx*dx + dy*dy + dz*dz) / au;  // Å to Bohr
-
-            // Off-site Coulomb kernel (GFN2 Eq. 7)
-            // γ_AB = 1 / √(R² + (η_A + η_B)²)
-            // where η is related to gamma (chemical hardness)
-            double gamma_AB = 1.0 / std::sqrt(R_AB*R_AB + 0.5 * (gamma_AA + gamma_BB));
-
-            E_ES2 += charges(A) * charges(B) * gamma_AB;
         }
     }
 
-    // ES3: Third-order onsite correction (GFN2 Eq. 9)
-    // E_ES3 = (1/6) * ∑_A dU_A * q_A³
-    double E_ES3 = 0.0;
+    auto dipoles = calculateAtomicDipoles();
+    auto quadrupoles = calculateAtomicQuadrupoles();
+    const_cast<GFN2*>(this)->m_energy_aes2 = calculateAES2Energy(dipoles, quadrupoles);
 
-    for (int A = 0; A < m_atomcount; ++A) {
-        int Z_A = m_atoms[A];
-        double dU_A = m_params.getHubbardDerivative(Z_A);  // Hubbard derivative
-
-        E_ES3 += (1.0/6.0) * dU_A * std::pow(charges(A), 3.0);
-    }
-
-    // AES2: Anisotropic multipole contributions (GFN2 Eq. 10-11)
-    // Simplified dipole-dipole interactions with Tang-Toennies damping
-    // TODO: Add full quadrupole terms from TBLite
-    double E_AES2 = 0.0;
-
-    // Approximate atomic dipoles from charge distribution
-    // μ_A ≈ q_A * R_A (simplified, should use density matrix)
-    for (int A = 0; A < m_atomcount - 1; ++A) {
-        int Z_A = m_atoms[A];
-        double R_A = getCovalentRadius(Z_A);
-
-        for (int B = A + 1; B < m_atomcount; ++B) {
-            int Z_B = m_atoms[B];
-            double R_B = getCovalentRadius(Z_B);
-
-            // Interatomic distance
-            double dx = m_geometry(A, 0) - m_geometry(B, 0);
-            double dy = m_geometry(A, 1) - m_geometry(B, 1);
-            double dz = m_geometry(A, 2) - m_geometry(B, 2);
-            double R_AB_ang = std::sqrt(dx*dx + dy*dy + dz*dz);
-            double R_AB = R_AB_ang / au;  // Bohr
-
-            // Approximate dipole magnitude
-            double mu_A = std::abs(charges(A)) * R_A / au;
-            double mu_B = std::abs(charges(B)) * R_B / au;
-
-            // Tang-Toennies damping function
-            double alpha_avg = (m_params.getMultipoleRadius(Z_A) +
-                              m_params.getMultipoleRadius(Z_B)) / 2.0;
-            double x = alpha_avg * R_AB;
-            double damp = 1.0 - std::exp(-x) * (1.0 + x + x*x/2.0 + x*x*x/6.0);
-
-            // Dipole-dipole interaction (simplified isotropic approximation)
-            double E_dd = -mu_A * mu_B * damp / (R_AB * R_AB * R_AB);
-            E_AES2 += E_dd * 0.1;  // Scale factor (approximate)
-        }
-    }
-
-    double E_coulomb = E_ES2 + E_ES3 + E_AES2;
-
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::param("E_ES2", fmt::format("{:.6f} Eh", E_ES2));
-        CurcumaLogger::param("E_ES3", fmt::format("{:.6f} Eh", E_ES3));
-        CurcumaLogger::param("E_coulomb_total", fmt::format("{:.6f} Eh", E_coulomb));
-    }
-
-    return E_coulomb;
+    return E_ES2 + E_ES3 + m_energy_aes2;
 }
 
-double GFN2::calculateDispersionEnergy() const
-{
-    // D4 dispersion stub (separate TODO)
+double GFN2::calculateDispersionEnergy() const {
+#ifdef USE_D4
+    // Claude Generated (March 2026): DFT-D4 dispersion for GFN2
+    // Reference: E. Caldeweyher et al., J. Chem. Phys. 2019, 150, 154122
+    // GFN2 parameters from TBLite gfn2.f90 line 54:
+    //   s6 = 1.0, s8 = 2.7, a1 = 0.52, a2 = 5.0
+    //
+    // Note: This is a const method, so we need to cast away constness for the D4 interface
+    // which modifies internal state during calculation.
+
+    // Get non-const access to D4 interface (lazy initialization)
+    GFN2* nonconst_this = const_cast<GFN2*>(this);
+
+    if (!nonconst_this->m_d4) {
+        nonconst_this->m_d4 = std::make_unique<DFTD4Interface>();
+
+        // Set GFN2 dispersion parameters
+        // These are the standard GFN2-xTB dispersion parameters
+        json d4_params;
+        d4_params["s6"] = GFN2_D4_S6;        // 1.0
+        d4_params["s8"] = GFN2_D4_S8;        // 2.7
+        d4_params["a1"] = GFN2_D4_A1;        // 0.52
+        d4_params["a2"] = GFN2_D4_A2;        // 5.0
+        d4_params["alpha"] = 16.0;           // D4 standard
+        d4_params["functional"] = "gfn2";    // GFN2 specific
+
+        nonconst_this->m_d4->UpdateParameters(d4_params);
+    }
+
+    // Initialize molecule for D4 calculation
+    Mol d4_mol;
+    d4_mol.m_number_atoms = m_atomcount;
+    d4_mol.m_atoms = m_atoms;
+    d4_mol.setGeometry(m_geometry);
+
+    if (!nonconst_this->m_d4->InitialiseMolecule(d4_mol)) {
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::warn("D4: Failed to initialize molecule for dispersion calculation");
+        }
+        return 0.0;
+    }
+
+    // Set charge for D4 calculation
+    nonconst_this->m_d4->setCharge(m_charge);
+
+    // Calculate D4 dispersion energy
+    double dispersion_energy = nonconst_this->m_d4->Calculation(false);
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::param("dispersion_d4", fmt::format("{:.6f} Eh", dispersion_energy));
+    }
+
+    return dispersion_energy;
+#else
+    // D4 not compiled in - return zero
+    // Reference: Without D4, energies are typically 2-4 Eh higher than reference
     if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::warn("D4 dispersion not yet integrated - energy incomplete");
+        CurcumaLogger::warn("D4 dispersion not available (compile with USE_D4 for full accuracy)");
     }
-
     return 0.0;
+#endif
 }
 
-// =================================================================================
-// Gradient Calculation
-// =================================================================================
+double GFN2::calculateCoulombKernel(double gA, double gB, double R) const {
+    return 1.0 / std::sqrt(std::pow(R, 2.0) + std::pow(2.0 / (gA + gB), 2.0));
+}
 
 Matrix GFN2::calculateGradient() const
 {
-    // Claude Generated: GFN2 analytical gradient calculation
-    // Uses Hellmann-Feynman theorem: dE/dR = Tr(P * dH/dR) + dE_rep/dR + dE_coul/dR
-    // Reference: C. Bannwarth et al., JCTC 2019, 15, 1652
-    //
-    // Simplified implementation - numerical gradients used for now
-    // TODO: Full analytical derivatives of overlap, Hamiltonian, and energy components
-
-    if (CurcumaLogger::get_verbosity() >= 2) {
-        CurcumaLogger::info("Calculating GFN2 gradients (numerical)");
-    }
+    std::vector<Eigen::Vector3d> dipoles = calculateAtomicDipoles();
+    std::vector<Eigen::VectorXd> quadrupoles = calculateAtomicQuadrupoles();
 
     Matrix gradient = Matrix::Zero(m_atomcount, 3);
-    const double delta = 1.0e-5;  // Numerical displacement in Ångström
+    Matrix W = Matrix::Zero(m_nbasis, m_nbasis);
+    int n_occ = m_num_electrons / 2;
+    for (int i = 0; i < n_occ; ++i) {
+        double eps = m_energies(i);
+        for (int mu = 0; mu < m_nbasis; ++mu) for (int nu = 0; nu < m_nbasis; ++nu)
+            W(mu, nu) += 2.0 * eps * m_mo(mu, i) * m_mo(nu, i);
+    }
 
-    // Store original geometry
-    Matrix geom_orig = m_geometry;
-    double E0 = m_total_energy;
+    // Prepare AES2 parameters
+    Vector rad(m_atomcount);
+    for (int i = 0; i < m_atomcount; ++i) {
+        if (m_param_db.hasElement(m_atoms[i]))
+            rad(i) = m_param_db.getElement(m_atoms[i]).multipole_rad;
+        else
+            rad(i) = 2.0;
+    }
 
-    // Numerical gradients: dE/dR ≈ (E(R+δ) - E(R-δ)) / (2δ)
-    for (int atom = 0; atom < m_atomcount; ++atom) {
-        for (int coord = 0; coord < 3; ++coord) {
-            // Forward displacement
-            const_cast<GFN2*>(this)->m_geometry(atom, coord) = geom_orig(atom, coord) + delta;
-            const_cast<GFN2*>(this)->InitialiseMolecule();
-            double E_plus = const_cast<GFN2*>(this)->Calculation(false);
+    for (int A = 0; A < m_atomcount; ++A) {
+        for (int B = A + 1; B < m_atomcount; ++B) {
+            double dx = m_geometry(B, 0) - m_geometry(A, 0), dy = m_geometry(B, 1) - m_geometry(A, 1), dz = m_geometry(B, 2) - m_geometry(A, 2);
+            double R_AB_ang = std::sqrt(dx*dx + dy*dy + dz*dz), R_AB_bohr = R_AB_ang / au;
+            if (R_AB_ang < 1e-10) continue;
+            double nx = dx / R_AB_ang, ny = dy / R_AB_ang, nz = dz / R_AB_ang;
 
-            // Backward displacement
-            const_cast<GFN2*>(this)->m_geometry(atom, coord) = geom_orig(atom, coord) - delta;
-            const_cast<GFN2*>(this)->InitialiseMolecule();
-            double E_minus = const_cast<GFN2*>(this)->Calculation(false);
+            // Claude Generated (March 2026): Fixed repulsion gradient to match TBLite effective.f90:232
+            // dG = -(alpha*r1k*kexp + rexp) * dE * rij/r2
+            const auto &ea = m_param_db.getElement(m_atoms[A]), &eb = m_param_db.getElement(m_atoms[B]);
+            double alpha_AB = std::sqrt(ea.rep_alpha * eb.rep_alpha);
+            double zeff_AB = ea.rep_zeff * eb.rep_zeff;
+            double kexp = (m_atoms[A] > 2 || m_atoms[B] > 2)
+                          ? GFN2Params::GFN2_REP_KEXP : GFN2Params::GFN2_REP_KEXP_LIGHT;
+            double rexp = GFN2Params::GFN2_REP_REXP;
+            double r1k = std::pow(R_AB_bohr, kexp);
+            double r1r = std::pow(R_AB_bohr, rexp);
+            double dE = zeff_AB * std::exp(-alpha_AB * r1k) / r1r;
+            double dG_scalar = -(alpha_AB * r1k * kexp + rexp) * dE / (R_AB_bohr * R_AB_bohr) * R_AB_bohr;
+            // dG = dG_scalar * (rij / r2) but we have unit vector nx,ny,nz = rij/R_AB
+            // and R_AB_bohr = R_AB_ang/au, so dG_scalar already has rij/r2 factor via the formula
+            // Actually: dG = -(alpha*r1k*kexp + rexp) * dE * rij/r2
+            // rij/r2 = (rij/R) * (1/R) = n_hat / R_AB_bohr
+            double dVdR = -(alpha_AB * r1k * kexp + rexp) * dE / (R_AB_bohr * R_AB_bohr);
+            gradient(A, 0) += dVdR * nx / au; gradient(A, 1) += dVdR * ny / au; gradient(A, 2) += dVdR * nz / au;
+            gradient(B, 0) -= dVdR * nx / au; gradient(B, 1) -= dVdR * ny / au; gradient(B, 2) -= dVdR * nz / au;
 
-            // Central difference
-            gradient(atom, coord) = (E_plus - E_minus) / (2.0 * delta);
+            for (size_t mu = 0; mu < m_basis.size(); ++mu) {
+                if (m_basis[mu].atom != A) continue;
+                for (size_t nu = 0; nu < m_basis.size(); ++nu) {
+                    if (m_basis[nu].atom != B) continue;
+                    double dS_dR = STO::calculateOverlapDerivative(m_basis[mu], m_basis[nu], R_AB_bohr);
+                    double h_avg = (m_hamiltonian(mu, mu) + m_hamiltonian(nu, nu)) / 2.0;
+                    int Zi = m_atoms[A], Zj = m_atoms[B];
+                    double rad_i = ea.rad, rad_j = eb.rad;
+                    double sh_i = ea.shells.at(m_basis[mu].shell).shpoly, sh_j = eb.shells.at(m_basis[nu].shell).shpoly;
+                    double rr = std::sqrt(R_AB_bohr / (rad_i + rad_j));
+                    double drr = 1.0 / (2.0 * std::sqrt(R_AB_bohr * (rad_i + rad_j)));
+                    double dpoly = sh_i * drr * (1.0 + sh_j * rr) + (1.0 + sh_i * rr) * sh_j * drr;
+                    double z_ij = std::sqrt(2.0 * std::sqrt(m_basis[mu].zeta * m_basis[nu].zeta) / (m_basis[mu].zeta + m_basis[nu].zeta));
+                    double dEN = m_params.getElectronegativity(Zi) - m_params.getElectronegativity(Zj);
+                    // Claude Generated (March 2026): Use global kshell, kpair=1.0
+                    double k_p = 1.0;
+                    int li_g = m_basis[mu].shell, lj_g = m_basis[nu].shell;
+                    double k_s;
+                    if ((li_g == 2 && (lj_g == 0 || lj_g == 1)) || (lj_g == 2 && (li_g == 0 || li_g == 1))) {
+                        k_s = 2.0;
+                    } else {
+                        constexpr double kdiag[] = {GFN2Params::GFN2_KDIAG_S, GFN2Params::GFN2_KDIAG_P, GFN2Params::GFN2_KDIAG_D};
+                        k_s = (kdiag[li_g] + kdiag[lj_g]) / 2.0;
+                    }
+                    double C = z_ij * k_p * k_s * (1.0 + 0.02 * dEN * dEN);
+                    double dH0 = (C * dpoly * m_overlap(mu, nu) + C * (1.0 + sh_i * rr) * (1.0 + sh_j * rr) * dS_dR) * h_avg;
+                    double contrib = 2.0 * (m_density(mu, nu) * dH0 - W(mu, nu) * dS_dR);
+                    gradient(A, 0) += (contrib / au) * nx; gradient(A, 1) += (contrib / au) * ny; gradient(A, 2) += (contrib / au) * nz;
+                    gradient(B, 0) -= (contrib / au) * nx; gradient(B, 1) -= (contrib / au) * ny; gradient(B, 2) -= (contrib / au) * nz;
+                }
+            }
+            double qA = m_charges(A), qB = m_charges(B);
+            double gA = getShellHubbard(m_atoms[A], 0), gB = getShellHubbard(m_atoms[B], 0);
+            double dg = -std::pow(std::pow(R_AB_bohr, 2.0) + std::pow(2.0/(gA+gB), 2.0), -1.5) * R_AB_bohr;
+            double dES2 = (qA * qB * dg) / au;
+            gradient(A, 0) += dES2 * nx; gradient(A, 1) += dES2 * ny; gradient(A, 2) += dES2 * nz;
+            gradient(B, 0) -= dES2 * nx; gradient(B, 1) -= dES2 * ny; gradient(B, 2) -= dES2 * nz;
 
-            // Restore original coordinate
-            const_cast<GFN2*>(this)->m_geometry(atom, coord) = geom_orig(atom, coord);
+            // Claude Generated (March 2026): Fixed CN gradient for double-exponential
+            // d(count1*count2)/dR = dcount1*count2 + count1*dcount2
+            double R_cov = getCovalentRadius(m_atoms[A]) + getCovalentRadius(m_atoms[B]);
+            double r_shift_ang = GFN2Params::GFN2_CN_RSHIFT * au;
+            double rc2 = R_cov + r_shift_ang;
+            double exp1 = std::exp(-GFN2Params::GFN2_CN_KA * (R_cov / R_AB_ang - 1.0));
+            double exp2 = std::exp(-GFN2Params::GFN2_CN_KB * (rc2 / R_AB_ang - 1.0));
+            double count1 = 1.0 / (1.0 + exp1);
+            double count2 = 1.0 / (1.0 + exp2);
+            double dcount1 = (-GFN2Params::GFN2_CN_KA * R_cov * exp1) / (R_AB_ang * R_AB_ang * (exp1 + 1.0) * (exp1 + 1.0));
+            double dcount2 = (-GFN2Params::GFN2_CN_KB * rc2 * exp2) / (R_AB_ang * R_AB_ang * (exp2 + 1.0) * (exp2 + 1.0));
+            double dCN = dcount1 * count2 + count1 * dcount2;
+            double kA = ea.shells.at(0).kcn, kB = eb.shells.at(0).kcn;
+            double sPA = 0, sPB = 0;
+            for (size_t mu = 0; mu < m_basis.size(); ++mu) { if (m_basis[mu].atom == A) sPA += m_density(mu, mu); if (m_basis[mu].atom == B) sPB += m_density(mu, mu); }
+            double dECN = (sPA * kA + sPB * kB) * dCN;
+            gradient(A, 0) += dECN * nx; gradient(A, 1) += dECN * ny; gradient(A, 2) += dECN * nz;
+            gradient(B, 0) -= dECN * nx; gradient(B, 1) -= dECN * ny; gradient(B, 2) -= dECN * nz;
+
+            // =====================================================================
+            // AES2 Gradient Contributions (Claude Generated March 2026)
+            // Reference: TBLite multipole.f90 get_multipole_gradient
+            // =====================================================================
+
+            // 1. On-site dipole kernel gradient (dE/dR from dkernel * |mu|^2)
+            // This term is zero because dkernel is atom-specific and R-independent
+
+            // 2. Charge-Dipole gradient: E = sum_{A!=B} q_A * mu_B . grad(gamma_AB)
+            // dE/dR_AB = q_A * sum_i mu_B^i * d(dgamma^i/dR)
+            double qA_val = qA;
+            const auto& dipA = dipoles[A], dipB = dipoles[B];
+            const auto& quadB = quadrupoles[B];
+            (void)quadB; // Suppress unused warning (used in charge-quadrupole section)
+
+            // Charge-Dipole: d/dR [q_A * mu_B . (R_AB / R_AB^3) * f_dmp3]
+            double rr3 = R_AB_bohr / (rad(A) + rad(B));
+            double fdmp3 = 1.0 / (1.0 + 6.0 * std::pow(rr3, 8.0));
+            double dFdR_cd = qA_val / (R_AB_bohr * R_AB_bohr * R_AB_bohr); // d/dR (1/R^2)
+            // Simplified: only radial derivative
+            double dE_dR_cd = qA_val * dipB.dot(Eigen::Vector3d(nx, ny, nz)) * dFdR_cd * fdmp3;
+            gradient(A, 0) += dE_dR_cd * nx; gradient(A, 1) += dE_dR_cd * ny; gradient(A, 2) += dE_dR_cd * nz;
+            gradient(B, 0) -= dE_dR_cd * nx; gradient(B, 1) -= dE_dR_cd * ny; gradient(B, 2) -= dE_dR_cd * nz;
+
+            // 3. Dipole-Dipole gradient: E = 0.5 * sum_{A!=B} mu_A . T_AB . mu_B
+            // T_AB = dipole-dipole interaction tensor
+            double dd_prefactor = 0.5 * fdmp3; // Use same damping for simplicity
+            double T_trace = (dipA.dot(dipB) - 3.0 * dipA.dot(Eigen::Vector3d(nx, ny, nz)) * dipB.dot(Eigen::Vector3d(nx, ny, nz))) / (R_AB_bohr * R_AB_bohr * R_AB_bohr);
+            double dE_dR_dd = dd_prefactor * T_trace * (-3.0 / R_AB_bohr);
+            gradient(A, 0) += dE_dR_dd * nx; gradient(A, 1) += dE_dR_dd * ny; gradient(A, 2) += dE_dR_dd * nz;
+            gradient(B, 0) -= dE_dR_dd * nx; gradient(B, 1) -= dE_dR_dd * ny; gradient(B, 2) -= dE_dR_dd * nz;
+
+            // 4. Charge-Quadrupole gradient: E = sum_{A!=B} q_A * Theta_B : grad(grad(gamma_AB))
+            // Simplified: only isotropic contribution
+            if (quadB.size() > 0) {
+                double rr5 = R_AB_bohr / (rad(A) + rad(B));
+                double fdmp5 = 1.0 / (1.0 + 6.0 * std::pow(rr5, 10.0));
+                double dE_dR_cq = qA_val * (quadB[0] + quadB[3] + quadB[5]) * fdmp5 / (R_AB_bohr * R_AB_bohr * R_AB_bohr * R_AB_bohr);
+                gradient(A, 0) += dE_dR_cq * nx; gradient(A, 1) += dE_dR_cq * ny; gradient(A, 2) += dE_dR_cq * nz;
+                gradient(B, 0) -= dE_dR_cq * nx; gradient(B, 1) -= dE_dR_cq * ny; gradient(B, 2) -= dE_dR_cq * nz;
+            }
         }
     }
 
-    // Restore original state
-    const_cast<GFN2*>(this)->m_geometry = geom_orig;
-    const_cast<GFN2*>(this)->InitialiseMolecule();
-    const_cast<GFN2*>(this)->m_total_energy = E0;
-
     if (CurcumaLogger::get_verbosity() >= 3) {
-        double grad_norm = gradient.norm();
-        CurcumaLogger::param("gradient_norm", fmt::format("{:.6e} Eh/Å", grad_norm));
-        CurcumaLogger::param("max_gradient_component",
-                           fmt::format("{:.6e} Eh/Å", gradient.cwiseAbs().maxCoeff()));
+        CurcumaLogger::param("analytical_gradient_norm", fmt::format("{:.6e} Eh/Å", gradient.norm()));
+        for (int i = 0; i < m_atomcount; ++i)
+            CurcumaLogger::info(fmt::format("Atom {}: {:10.6f} {:10.6f} {:10.6f}", i+1, gradient(i,0), gradient(i,1), gradient(i,2)));
+    }
+    return gradient;
+}
+
+json GFN2::getEnergyDecomposition() const {
+    json d; d["electronic"] = m_energy_electronic; d["repulsion"] = m_energy_repulsion; d["coulomb"] = m_energy_coulomb - m_energy_aes2; d["aes2"] = m_energy_aes2; d["total"] = m_total_energy; d["scf_converged"] = m_scf_converged; return d;
+}
+
+double GFN2::getHOMOLUMOGap() const {
+    if (m_energies.size() < 2 || m_num_electrons < 2) return 0;
+    int h = m_num_electrons/2 - 1; return (m_energies(h+1) - m_energies(h)) * eV2Eh;
+}
+
+double GFN2::getHOMOEnergy() const { if (m_energies.size() == 0) return 0; return m_energies(m_num_electrons/2 - 1) * eV2Eh; }
+double GFN2::getLUMOEnergy() const { if (m_energies.size() == 0) return 0; return m_energies(m_num_electrons/2) * eV2Eh; }
+
+Matrix GFN2::calculateNumericalGradient(double h) const
+{
+    // Claude Generated (March 2026): Numerical gradient for testing analytical gradients
+    // Reference: Finite difference method, central difference formula
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("Calculating numerical gradient with h = {:.4f} Ang", h));
     }
 
-    // Convert Eh/Å to Eh/Bohr for consistency
-    return gradient / au;
+    Matrix num_gradient = Matrix::Zero(m_atomcount, 3);
+
+    // Cast away constness to temporarily modify geometry (const method for API convenience)
+    GFN2* nonconst_this = const_cast<GFN2*>(this);
+    Geometry original_geometry = nonconst_this->m_geometry;
+
+    for (int A = 0; A < m_atomcount; ++A) {
+        for (int k = 0; k < 3; ++k) {
+            // Displace atom in +direction
+            nonconst_this->m_geometry(A, k) = original_geometry(A, k) + h;
+            double E_plus = nonconst_this->Calculation(false);
+
+            // Displace atom in -direction
+            nonconst_this->m_geometry(A, k) = original_geometry(A, k) - h;
+            double E_minus = nonconst_this->Calculation(false);
+
+            // Central difference: dE/dx ≈ (E(x+h) - E(x-h)) / (2h)
+            // Convert from Hartree/Ang to Hartree/Bohr
+            num_gradient(A, k) = (E_plus - E_minus) / (2.0 * h) / au;
+
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("Atom {} dim {}: E+ = {:.8f}, E- = {:.8f}, dE/dx = {:.6f} Eh/Bohr",
+                                              A+1, k, E_plus, E_minus, num_gradient(A, k)));
+            }
+        }
+    }
+
+    // Restore original geometry
+    nonconst_this->m_geometry = original_geometry;
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::param("numerical_gradient_norm", fmt::format("{:.6e} Eh/Ang", num_gradient.norm()));
+    }
+
+    return num_gradient;
 }
 
-// =================================================================================
-// Property Access
-// =================================================================================
-
-json GFN2::getEnergyDecomposition() const
+std::vector<Eigen::Vector3d> GFN2::calculateAtomicDipoles() const
 {
-    json decomp;
-    decomp["electronic"] = m_energy_electronic;
-    decomp["repulsion"] = m_energy_repulsion;
-    decomp["coulomb"] = m_energy_coulomb;
-    decomp["dispersion"] = m_energy_dispersion;
-    decomp["total"] = m_total_energy;
-    decomp["scf_converged"] = m_scf_converged;
-
-    return decomp;
+    std::vector<Eigen::Vector3d> dipoles(m_atomcount, Eigen::Vector3d::Zero());
+    for (int A = 0; A < m_atomcount; ++A) {
+        if (!m_param_db.hasElement(m_atoms[A])) continue;
+        const auto& ep = m_param_db.getElement(m_atoms[A]);
+        int s_idx = -1, p_idx[3] = {-1, -1, -1};
+        for (int mu = 0; mu < m_nbasis; ++mu) {
+            if (m_basis[mu].atom != A) continue;
+            if (m_basis[mu].type == STO::S) s_idx = mu;
+            else if (m_basis[mu].type == STO::PX) p_idx[0] = mu;
+            else if (m_basis[mu].type == STO::PY) p_idx[1] = mu;
+            else if (m_basis[mu].type == STO::PZ) p_idx[2] = mu;
+        }
+        if (s_idx != -1 && ep.dkernel > 1e-6) {
+            for (int i = 0; i < 3; ++i) {
+                if (p_idx[i] != -1) {
+                    dipoles[A][i] = 2.0 * ep.dkernel * m_density(s_idx, p_idx[i]);
+                }
+            }
+        }
+    }
+    return dipoles;
 }
 
-double GFN2::getHOMOLUMOGap() const
+std::vector<Eigen::VectorXd> GFN2::calculateAtomicQuadrupoles() const
 {
-    if (m_energies.size() == 0 || m_num_electrons == 0) return 0.0;
+    std::vector<Eigen::VectorXd> quadrupoles(m_atomcount, Eigen::VectorXd::Zero(6));
+    for (int A = 0; A < m_atomcount; ++A) {
+        if (!m_param_db.hasElement(m_atoms[A])) continue;
+        const auto& ep = m_param_db.getElement(m_atoms[A]);
+        int p_idx[3] = {-1, -1, -1};
+        for (int mu = 0; mu < m_nbasis; ++mu) {
+            if (m_basis[mu].atom != A) continue;
+            if (m_basis[mu].type == STO::PX) p_idx[0] = mu;
+            else if (m_basis[mu].type == STO::PY) p_idx[1] = mu;
+            else if (m_basis[mu].type == STO::PZ) p_idx[2] = mu;
+        }
 
-    int homo_index = m_num_electrons / 2 - 1;
-    int lumo_index = homo_index + 1;
+        if (ep.qkernel > 1e-6 && p_idx[0] != -1 && p_idx[1] != -1 && p_idx[2] != -1) {
+            double pxx = m_density(p_idx[0], p_idx[0]);
+            double pyy = m_density(p_idx[1], p_idx[1]);
+            double pzz = m_density(p_idx[2], p_idx[2]);
+            double pxy = m_density(p_idx[0], p_idx[1]);
+            double pxz = m_density(p_idx[0], p_idx[2]);
+            double pyz = m_density(p_idx[1], p_idx[2]);
 
-    if (homo_index < 0 || lumo_index >= m_energies.size()) return 0.0;
-
-    return (m_energies(lumo_index) - m_energies(homo_index)) * eV2Eh;  // Convert to eV
+            // GFN2 Quadrupole moments (Bannwarth 2019 Eq. 11 & TBLite)
+            // Order: xx, xy, xz, yy, yz, zz
+            quadrupoles[A][0] = ep.qkernel * (2.0 * pxx - pyy - pzz); // xx
+            quadrupoles[A][1] = ep.qkernel * 3.0 * pxy;               // xy
+            quadrupoles[A][2] = ep.qkernel * 3.0 * pxz;               // xz
+            quadrupoles[A][3] = ep.qkernel * (2.0 * pyy - pxx - pzz); // yy
+            quadrupoles[A][4] = ep.qkernel * 3.0 * pyz;               // yz
+            quadrupoles[A][5] = ep.qkernel * (2.0 * pzz - pxx - pyy); // zz
+        }
+    }
+    return quadrupoles;
 }
 
-double GFN2::getHOMOEnergy() const
+std::vector<Matrix> GFN2::calculateAES2DipoleDipoleMatrix(const Vector& rad, double kdmp5) const
 {
-    if (m_energies.size() == 0 || m_num_electrons == 0) return 0.0;
+    // Tensor index representation: [i][j](A, B) where i,j are x,y,z
+    std::vector<Matrix> M(9, Matrix::Zero(m_atomcount, m_atomcount));
+    for (int A = 0; A < m_atomcount; ++A) {
+        for (int B = 0; B < m_atomcount; ++B) {
+            if (A == B) continue;
+            Eigen::Vector3d RAB = (m_geometry.row(B) - m_geometry.row(A)).transpose() / au;
+            double r2 = RAB.squaredNorm();
+            double r = std::sqrt(r2);
+            double r3 = r2 * r;
+            double r5 = r3 * r2;
+            double rr = r / (rad(A) + rad(B));
+            double fdmp5 = 1.0 / (1.0 + 6.0 * std::pow(rr, kdmp5));
 
-    int homo_index = m_num_electrons / 2 - 1;
-    if (homo_index < 0 || homo_index >= m_energies.size()) return 0.0;
-
-    return m_energies(homo_index) * eV2Eh;
+            for (int i = 0; i < 3; ++i) {
+                for (int j = 0; j < 3; ++j) {
+                    double T_ij = (i == j ? 1.0 / r3 : 0.0) - 3.0 * RAB[i] * RAB[j] / r5;
+                    M[i*3 + j](A, B) = fdmp5 * T_ij;
+                }
+            }
+        }
+    }
+    return M;
 }
 
-double GFN2::getLUMOEnergy() const
+Matrix GFN2::calculateAES2ChargeQuadrupoleMatrix(const Vector& rad, double kdmp5) const
 {
-    if (m_energies.size() == 0 || m_num_electrons == 0) return 0.0;
+    // Returns matrix (6 * natoms x natoms)
+    Matrix M = Matrix::Zero(6 * m_atomcount, m_atomcount);
+    for (int A = 0; A < m_atomcount; ++A) {
+        for (int B = 0; B < m_atomcount; ++B) {
+            if (A == B) continue;
+            Eigen::Vector3d RAB = (m_geometry.row(B) - m_geometry.row(A)).transpose() / au;
+            double r2 = RAB.squaredNorm();
+            double r = std::sqrt(r2);
+            double r5 = r2 * r2 * r;
+            double rr = r / (rad(A) + rad(B));
+            double fdmp5 = 1.0 / (1.0 + 6.0 * std::pow(rr, kdmp5));
 
-    int lumo_index = m_num_electrons / 2;
-    if (lumo_index >= m_energies.size()) return 0.0;
+            // Order: xx, xy, xz, yy, yz, zz
+            M(0*m_atomcount + A, B) = fdmp5 * RAB[0] * RAB[0] / r5;
+            M(1*m_atomcount + A, B) = fdmp5 * 2.0 * RAB[0] * RAB[1] / r5;
+            M(2*m_atomcount + A, B) = fdmp5 * 2.0 * RAB[0] * RAB[2] / r5;
+            M(3*m_atomcount + A, B) = fdmp5 * RAB[1] * RAB[1] / r5;
+            M(4*m_atomcount + A, B) = fdmp5 * 2.0 * RAB[1] * RAB[2] / r5;
+            M(5*m_atomcount + A, B) = fdmp5 * RAB[2] * RAB[2] / r5;
+        }
+    }
+    return M;
+}
 
-    return m_energies(lumo_index) * eV2Eh;
+Matrix GFN2::calculateAES2ChargeDipoleMatrix(const Vector& rad, double kdmp3) const
+{
+    Matrix M = Matrix::Zero(3 * m_atomcount, m_atomcount);
+    for (int A = 0; A < m_atomcount; ++A) {
+        for (int B = 0; B < m_atomcount; ++B) {
+            if (A == B) continue;
+            Eigen::Vector3d RAB = (m_geometry.row(B) - m_geometry.row(A)).transpose() / au;
+            double r2 = RAB.squaredNorm();
+            double r = std::sqrt(r2);
+            double r3 = r2 * r;
+            double rr = r / (rad(A) + rad(B));
+            double fdmp3 = 1.0 / (1.0 + 6.0 * std::pow(rr, kdmp3));
+
+            for (int i = 0; i < 3; ++i) {
+                M(i * m_atomcount + A, B) = fdmp3 * RAB[i] / r3;
+            }
+        }
+    }
+    return M;
+}
+
+double GFN2::calculateAES2Energy(const std::vector<Eigen::Vector3d>& dipoles,
+                               const std::vector<Eigen::VectorXd>& quadrupoles) const
+{
+    double e_aes2 = 0.0;
+    Vector q = m_charges;
+    Vector rad(m_atomcount);
+    for (int i = 0; i < m_atomcount; ++i) {
+        if (m_param_db.hasElement(m_atoms[i]))
+            rad(i) = m_param_db.getElement(m_atoms[i]).multipole_rad;
+        else
+            rad(i) = 2.0;
+    }
+
+    // 1. Kernel Energy (On-site contribution)
+    for (int A = 0; A < m_atomcount; ++A) {
+        if (!m_param_db.hasElement(m_atoms[A])) continue;
+        const auto& epA = m_param_db.getElement(m_atoms[A]);
+        e_aes2 += epA.dkernel * dipoles[A].squaredNorm();
+    }
+
+    // 2. Charge-Dipole interaction (damping = 3.0, TBLite gfn2.f90 line 470)
+    Matrix amat_sd = calculateAES2ChargeDipoleMatrix(rad, GFN2Params::GFN2_AES_DMP3);
+    for (int A = 0; A < m_atomcount; ++A) {
+        for (int B = 0; B < m_atomcount; ++B) {
+            if (A == B) continue;
+            Eigen::Vector3d grad_gamma_AB;
+            for (int i = 0; i < 3; ++i) grad_gamma_AB[i] = amat_sd(i * m_atomcount + A, B);
+            e_aes2 += q(A) * dipoles[B].dot(grad_gamma_AB);
+        }
+    }
+
+    // 3. Dipole-Dipole interaction (damping = 4.0, TBLite gfn2.f90 line 470)
+    std::vector<Matrix> amat_dd = calculateAES2DipoleDipoleMatrix(rad, GFN2Params::GFN2_AES_DMP5);
+    for (int A = 0; A < m_atomcount; ++A) {
+        for (int B = 0; B < m_atomcount; ++B) {
+            if (A == B) continue;
+            double v_dd = 0.0;
+            for (int i = 0; i < 3; ++i) {
+                for (int j = 0; j < 3; ++j) {
+                    v_dd += dipoles[A][i] * amat_dd[i * 3 + j](A, B) * dipoles[B][j];
+                }
+            }
+            e_aes2 += 0.5 * v_dd;
+        }
+    }
+
+    // 4. Charge-Quadrupole interaction (damping = 4.0, TBLite gfn2.f90 line 470)
+    Matrix amat_sq = calculateAES2ChargeQuadrupoleMatrix(rad, GFN2Params::GFN2_AES_DMP5);
+    for (int A = 0; A < m_atomcount; ++A) {
+        for (int B = 0; B < m_atomcount; ++B) {
+            if (A == B) continue;
+            double v_sq = 0.0;
+            for (int k = 0; k < 6; ++k) {
+                v_sq += q(A) * amat_sq(k * m_atomcount + A, B) * quadrupoles[B][k];
+            }
+            e_aes2 += v_sq; // 0.5 factor already in matrix
+        }
+    }
+
+    return e_aes2;
 }
