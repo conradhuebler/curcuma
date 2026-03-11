@@ -74,6 +74,7 @@ int ForceFieldThread::execute()
     m_coulomb_energy = 0.0;
     m_energy_hbond = 0.0;
     m_energy_xbond = 0.0;
+    m_stors_energy = 0.0; // Claude Generated (March 2026): Reset triple bond torsion energy
     m_eq_energy = 0.0;  // Also reset EQ energy for consistency
 
     // Claude Generated 2025: Reset native D3/D4 dispersion energy terms
@@ -191,7 +192,11 @@ int ForceFieldThread::execute()
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} batm triples", m_thread, m_gfnff_batms.size()));
             }
-            runWithGradCapture("batm", [this]() { CalculateGFNFFBatmContribution(); }, m_gradient_dispersion);
+            runWithGradCapture("batm", [this]() { CalculateGFNFFBatmContribution(); }, m_gradient_batm);
+        }
+
+        if (!m_gfnff_storsions.empty()) {
+            runWithGradCapture("storsions", [this]() { CalculateGFNFFSTorsionContribution(); }, m_gradient_torsion);
         }
 
         if (CurcumaLogger::get_verbosity() >= 1) {
@@ -307,6 +312,11 @@ void ForceFieldThread::addGFNFFExtraTorsion(const Dihedral& extra_torsion)
 void ForceFieldThread::addGFNFFInversion(const Inversion& inversions)
 {
     m_gfnff_inversions.push_back(inversions);
+}
+
+void ForceFieldThread::addGFNFFSTorsion(const GFNFFSTorsion& storsion)
+{
+    m_gfnff_storsions.push_back(storsion);
 }
 
 void ForceFieldThread::addGFNFFvdW(const vdW& vdWs)
@@ -1807,6 +1817,42 @@ void ForceFieldThread::CalculateGFNFFInversionContribution()
     }
 }
 
+void ForceFieldThread::CalculateGFNFFSTorsionContribution()
+{
+    /**
+     * @brief GFN-FF Triple Bond Torsion (sTors_eg)
+     *
+     * Specialized torsion for rotation around sp-sp systems (alkynes).
+     *
+     * Reference: gfnff_engrad.F90:3454 - sTors_eg()
+     * Potential: E = erefhalf * (1 - cos(2*phi))
+     */
+
+    for (const auto& stor : m_gfnff_storsions) {
+        Matrix derivate;
+        // phi in radians
+        double phi = GFNFF_Geometry::calculateDihedralAngle(
+            m_geometry.row(stor.i).transpose() * m_au,
+            m_geometry.row(stor.j).transpose() * m_au,
+            m_geometry.row(stor.k).transpose() * m_au,
+            m_geometry.row(stor.l).transpose() * m_au,
+            derivate, m_calculate_gradient);
+
+        double erefhalf = stor.erefhalf;
+        double energy = -erefhalf * std::cos(2.0 * phi) + erefhalf;
+
+        m_stors_energy += energy * m_final_factor;
+
+        if (m_calculate_gradient) {
+            double dEdphi = 2.0 * erefhalf * std::sin(2.0 * phi) * m_final_factor;
+            m_gradient.row(stor.i) += (dEdphi * derivate.row(0)).transpose();
+            m_gradient.row(stor.j) += (dEdphi * derivate.row(1)).transpose();
+            m_gradient.row(stor.k) += (dEdphi * derivate.row(2)).transpose();
+            m_gradient.row(stor.l) += (dEdphi * derivate.row(3)).transpose();
+        }
+    }
+}
+
 // DEPRECATED: Legacy vdW calculation replaced by Phase 4 pairwise terms
 // (CalculateGFNFFDispersionContribution + CalculateGFNFFRepulsionContribution)
 
@@ -2228,6 +2274,23 @@ inline double damping_out_of_line(double r_AH, double r_HB, double r_AB, double 
     double exponent = (bacut / radab) * (ratio - 1.0);
 
     // Fortran line 1672: early return if exponent too large (avoid overflow)
+    if (exponent > 15.0) return 0.0;
+
+    return 2.0 / (1.0 + std::exp(exponent));
+}
+
+/**
+ * @brief GFN-FF out-of-line damping function for halogen bonds (XB)
+ *
+ * Reference: gfnff_engrad.F90:3309 - expo = param%xbacut*((rax+rbx)/rab-1.d0)
+ * Note: XB does NOT divide xbacut by radab.
+ */
+inline double damping_out_of_line_xb(double r_AX, double r_XB, double r_AB, double bacut)
+{
+    double ratio = (r_AX + r_XB) / r_AB;
+    double exponent = bacut * (ratio - 1.0);
+
+    // Fortran line 3310: early return if exponent too large (avoid overflow)
     if (exponent > 15.0) return 0.0;
 
     return 2.0 / (1.0 + std::exp(exponent));
@@ -2949,17 +3012,18 @@ void ForceFieldThread::CalculateGFNFFHalogenBondContribution()
         double Q_B = charge_scaling(-xb.q_B, XB_ST, XB_SF);   // exp(-st*q_B) ← NEGATIVE!
 
         // --- Combined Damping R_damp ---
-        // CRITICAL FIX (January 17, 2026): covalent_radii is 0-indexed, so element_number - 1!
-        int elem_X = m_atom_types[xb.j];
+        // CRITICAL FIX (March 10, 2026): XB uses radii of donor A and acceptor B (not halogen X and B)
+        // Reference: gfnff_engrad.F90:3319 - shortcut = xbscut * (rad(A) + rad(B))
+        int elem_A = m_atom_types[xb.i];
         int elem_B_xb = m_atom_types[xb.k];
-        double r_vdw_XB = covalent_radii[elem_X - 1] + covalent_radii[elem_B_xb - 1];  // Ångström (Matches Fortran)
+        double r_vdw_AB_xb = covalent_radii[elem_A - 1] + covalent_radii[elem_B_xb - 1];  // Ångström (Matches Fortran)
 
         // XB uses different cutoff parameters
-        double damp_short = damping_short_range(r_XB, r_vdw_XB, XB_SCUT, HB_ALP);
+        double damp_short = damping_short_range(r_XB, r_vdw_AB_xb, XB_SCUT, HB_ALP);
         double damp_long = damping_long_range(r_XB, HB_LONGCUT_XB, HB_ALP);
-        // FIX (Jan 18, 2026): Pass radab in Ångström for out-of-line damping
-        // Reference: gfnff_engrad.F90:3174-3175 uses radab in Ångström for scale
-        double damp_outl = damping_out_of_line(r_AX, r_XB, r_AB, r_vdw_XB, XB_BACUT);
+        // FIX (March 10, 2026): XB does NOT divide xbacut by radab
+        // Reference: gfnff_engrad.F90:3309 - expo = xbacut * ((rax+rbx)/rab - 1)
+        double damp_outl = damping_out_of_line_xb(r_AX, r_XB, r_AB, XB_BACUT);
 
         double R_damp = damp_short * damp_long * damp_outl / (r_XB * r_XB * r_XB);
 
@@ -2987,7 +3051,7 @@ void ForceFieldThread::CalculateGFNFFHalogenBondContribution()
 
             // --- 1. Compute Damping Derivatives ---
             // Short-range damping: damp_s = 1 / (1 + (scut × r_vdw / r²)^alp)
-            double ratio_short = XB_SCUT * r_vdw_XB / (r_XB * r_XB);
+            double ratio_short = XB_SCUT * r_vdw_AB_xb / (r_XB * r_XB);
             double damp_short_term = std::pow(ratio_short, HB_ALP);
             double ddamp_short_dr = -2.0 * HB_ALP * damp_short * damp_short_term / (r_XB * (1.0 + damp_short_term));
 
@@ -2997,9 +3061,9 @@ void ForceFieldThread::CalculateGFNFFHalogenBondContribution()
             double ddamp_long_dr = -2.0 * HB_ALP * r_XB * damp_long * damp_long_term / (HB_LONGCUT_XB * (1.0 + damp_long_term));
 
             // Out-of-line damping derivatives
-            // FIX (Jan 18, 2026): Use r_vdw_XB (radab) for out-of-line damping
+            // FIX (March 10, 2026): XB does NOT divide xbacut by radab
             double ratio = (r_AX + r_XB) / r_AB;
-            double scale_outl_xb = XB_BACUT / r_vdw_XB;  // FIX: Use radab, not r_AB
+            double scale_outl_xb = XB_BACUT;
             double exponent = scale_outl_xb * (ratio - 1.0);
             double exp_term = std::exp(exponent);
             double denom_outl = 1.0 + exp_term;
@@ -3625,11 +3689,11 @@ void ForceFieldThread::CalculateGFNFFBatmContribution()
 
             // Accumulate gradients (from Fortran gfnff_engrad.F90:3324-3332)
             // Atom j: -dg_ij + dg_jk
-            m_gradient.row(batm.j) += -dgij + dgjk;
+            m_gradient.row(batm.j) += (-dgij + dgjk) * m_final_factor;
             // Atom k: -dg_ik - dg_jk
-            m_gradient.row(batm.k) += -dgik - dgjk;
+            m_gradient.row(batm.k) += (-dgik - dgjk) * m_final_factor;
             // Atom i: dg_ij + dg_ik
-            m_gradient.row(batm.i) += dgij + dgik;
+            m_gradient.row(batm.i) += (dgij + dgik) * m_final_factor;
         }
     }
 

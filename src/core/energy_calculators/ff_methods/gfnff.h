@@ -474,6 +474,16 @@ private:
     json generateGFNFFTorsions() const;
 
     /**
+     * @brief Generate GFN-FF triple bond torsion (sTors_eg) parameters
+     *
+     * Claude Generated (March 2026): specialized torsion for sp-sp systems
+     * Reference: external/gfnff/src/gfnff_ini.f90:2308 (specialTorsList)
+     *
+     * @return JSON array of triple bond torsion parameters
+     */
+    json generateGFNFFSTorsions() const;
+
+    /**
      * @brief Generate GFN-FF inversion/out-of-plane parameters
      *
      * Claude Generated (2025): Inversion term implementation
@@ -1368,6 +1378,7 @@ public:
     Matrix GradientDispersion() const;
     Matrix GradientHB() const;
     Matrix GradientXB() const;
+    Matrix GradientBATM() const;
 
     // =================================================================================
     // vbond Parameter Access for Verification (Claude Generated November 2025)

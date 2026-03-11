@@ -84,6 +84,8 @@ public:
     inline double VdWEnergy() const { return m_vdw_energy; }
     inline double RepulsionEnergy() const { return m_rep_energy; }
     inline double HHEnergy() const { return m_gfnff_repulsion; }  // Claude Generated (Dec 2025): GFN-FF repulsion energy
+    inline double BondedRepulsionEnergy() const { return m_gfnff_bonded_repulsion; }
+    inline double NonbondedRepulsionEnergy() const { return m_gfnff_nonbonded_repulsion; }
     inline double DispersionEnergy() const { return m_dispersion_energy; }
     inline double D3Energy() const { return m_d3_energy; }  // Claude Generated (Jan 2, 2026): D3 dispersion energy
     inline double D4Energy() const { return m_d4_energy; }  // Claude Generated (Jan 2, 2026): D4 dispersion energy
@@ -93,6 +95,7 @@ public:
     inline double HalogenBondEnergy() const { return m_energy_xbond; }    // Claude Generated (2025): Phase 5
     inline double ATMEnergy() const { return m_atm_energy; }        // Claude Generated (December 2025): ATM energy
     inline double BatmEnergy() const { return m_batm_energy; }       // Claude Generated (Jan 17, 2026): Batm energy
+    inline double STorsEnergy() const { return m_stors_energy; }     // Claude Generated (March 2026): Triple bond torsion energy
 
     void setParameter(const json& parameter);
     void setParameterFile(const std::string& file);
@@ -162,6 +165,7 @@ public:
     Matrix GradientDispersion() const;
     Matrix GradientHB() const;
     Matrix GradientXB() const;
+    Matrix GradientBATM() const;
 
     // Claude Generated: Parameter analysis functionality
     void printParameterSummary() const;
@@ -189,6 +193,7 @@ private:
     void setGFNFFBondedRepulsions(const json& repulsions);
     void setGFNFFNonbondedRepulsions(const json& repulsions);
     void setGFNFFCoulombs(const json& coulombs);
+    void setGFNFFSTorsions(const json& storsions); // Claude Generated (March 2026): Triple bond torsions
 
     // Phase 3: GFN-FF hydrogen bond and halogen bond parameter setters (Claude Generated 2025)
     void setGFNFFHydrogenBonds(const json& hbonds);
@@ -212,6 +217,8 @@ private:
     double m_vdw_energy = 0.0;
     double m_rep_energy = 0.0;
     double m_gfnff_repulsion = 0.0;  // Claude Generated (Dec 2025): GFN-FF repulsion energy (standard exponential repulsion)
+    double m_gfnff_bonded_repulsion = 0.0;    // Claude Generated (Mar 2026): bonded repulsion (REPSCALB=1.7583)
+    double m_gfnff_nonbonded_repulsion = 0.0; // Claude Generated (Mar 2026): non-bonded repulsion (REPSCALN=0.4270)
     double m_eq_energy = 0.0;
     double m_dispersion_energy = 0.0;
     double m_coulomb_energy = 0.0;
@@ -219,6 +226,7 @@ private:
     double m_energy_xbond = 0.0;    // Claude Generated (2025): Phase 5 - Halogen bond energy
     double m_atm_energy = 0.0;      // Claude Generated (December 2025): ATM three-body dispersion energy
     double m_batm_energy = 0.0;     // Claude Generated (January 17, 2026): Batm three-body dispersion energy
+    double m_stors_energy = 0.0;    // Claude Generated (March 2026): Triple bond torsion energy
     double m_d3_energy = 0.0;       // Claude Generated (Jan 2, 2026): D3 dispersion energy (for UFF-D3 and GFN-FF)
     double m_d4_energy = 0.0;       // Claude Generated (Jan 2, 2026): D4 dispersion energy (for GFN-FF)
 
@@ -245,6 +253,7 @@ private:
     std::vector<GFNFFRepulsion> m_gfnff_bonded_repulsions;
     std::vector<GFNFFRepulsion> m_gfnff_nonbonded_repulsions;
     std::vector<GFNFFCoulomb> m_gfnff_coulombs;
+    std::vector<GFNFFSTorsion> m_gfnff_storsions;  // Claude Generated (March 2026): Triple bond torsions
 
     // Phase 3: GFN-FF hydrogen bond and halogen bond storage (Claude Generated 2025)
     std::vector<GFNFFHydrogenBond> m_gfnff_hbonds;

@@ -281,6 +281,9 @@ void ForceField::setParameter(const json& parameters)
         if (parameters.contains("gfnff_xbonds"))
             setGFNFFHalogenBonds(parameters["gfnff_xbonds"]);
 
+        if (parameters.contains("gfnff_storsions"))
+            setGFNFFSTorsions(parameters["gfnff_storsions"]);
+
         // ATM three-body dispersion (D3/D4)
         if (parameters.contains("atm_triples"))
             setATMTriples(parameters["atm_triples"]);
@@ -943,6 +946,36 @@ void ForceField::setGFNFFCoulombs(const json& coulombs)
     }
 }
 
+void ForceField::setGFNFFSTorsions(const json& storsions)
+{
+    /**
+     * @brief Load GFN-FF triple bond torsions (sTors_eg) from JSON
+     *
+     * Claude Generated (March 2026)
+     */
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info(fmt::format("setGFNFFSTorsions: Loading {} triple bond torsions", storsions.size()));
+    }
+
+    m_gfnff_storsions.clear();
+    for (int i = 0; i < storsions.size(); ++i) {
+        json stor_json = storsions[i].get<json>();
+        GFNFFSTorsion stor;
+
+        stor.i = stor_json["i"];
+        stor.j = stor_json["j"];
+        stor.k = stor_json["k"];
+        stor.l = stor_json["l"];
+        stor.erefhalf = stor_json.value("erefhalf", 3.75e-4);
+
+        m_gfnff_storsions.push_back(stor);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success(fmt::format("Loaded {} GFN-FF triple bond torsions", m_gfnff_storsions.size()));
+    }
+}
+
 void ForceField::setGFNFFHydrogenBonds(const json& hbonds)
 {
     // Claude Generated (2025): Phase 3 - HB Parameter Setter
@@ -1522,6 +1555,13 @@ void ForceField::AutoRanges()
             }
         }
 
+        // Claude Generated (March 2026): GFN-FF triple bond torsion distribution
+        if (!m_gfnff_storsions.empty()) {
+            for (int j = int(i * m_gfnff_storsions.size() / double(free_threads)); j < int((i + 1) * m_gfnff_storsions.size() / double(free_threads)); ++j) {
+                thread->addGFNFFSTorsion(m_gfnff_storsions[j]);
+            }
+        }
+
         for (int j = int(i * m_EQs.size() / double(free_threads)); j < int((i + 1) * m_EQs.size() / double(free_threads)); ++j)
             thread->addEQ(m_EQs[j]);
     }
@@ -1746,6 +1786,22 @@ json ForceField::exportCurrentParameters() const
     }
     output["dihedrals"] = dihedrals;
 
+    // Claude Generated (March 2026): Export extra sp3-sp3 torsions for per-torsion diagnostics
+    json extra_dihedrals = json::array();
+    for (const auto& d : m_extra_dihedrals) {
+        json ed;
+        ed["type"] = d.type;
+        ed["i"] = d.i;
+        ed["j"] = d.j;
+        ed["k"] = d.k;
+        ed["l"] = d.l;
+        ed["V"] = d.V;
+        ed["n"] = d.n;
+        ed["phi0"] = d.phi0;
+        extra_dihedrals.push_back(ed);
+    }
+    output["extra_dihedrals"] = extra_dihedrals;
+
     // Export inversions
     json inversions = json::array();
     for (const auto& inversion : m_inversions) {
@@ -1759,6 +1815,8 @@ json ForceField::exportCurrentParameters() const
         inv["C0"] = inversion.C0;
         inv["C1"] = inversion.C1;
         inv["C2"] = inversion.C2;
+        inv["potential_type"] = inversion.potential_type;
+        inv["omega0"] = inversion.omega0;
         inversions.push_back(inv);
     }
     output["inversions"] = inversions;
@@ -2126,6 +2184,8 @@ double ForceField::Calculate(bool gradient)
     m_energy_hbond = 0.0;    // Claude Generated (2025): Phase 5 - Reset HB energy
     m_energy_xbond = 0.0;    // Claude Generated (2025): Phase 5 - Reset XB energy
     m_gfnff_repulsion = 0.0;  // Claude Generated (Dec 2025): Reset GFN-FF repulsion energy
+    m_gfnff_bonded_repulsion = 0.0;
+    m_gfnff_nonbonded_repulsion = 0.0;
     m_atm_energy = 0.0;      // Claude Generated (December 2025): Reset ATM three-body dispersion
     m_d3_energy = 0.0;       // Claude Generated (Jan 2, 2026): Reset D3 dispersion energy
     m_d4_energy = 0.0;       // Claude Generated (Jan 2, 2026): Reset D4 dispersion energy
@@ -2223,6 +2283,8 @@ double ForceField::Calculate(bool gradient)
                 // GFN-FF specific components
                 h4_energy += m_stored_threads[i]->VdWEnergy();
                 m_gfnff_repulsion += m_stored_threads[i]->RepEnergy();  // Claude Generated (Dec 2025): GFN-FF repulsion
+                m_gfnff_bonded_repulsion += m_stored_threads[i]->BondedRepEnergy();
+                m_gfnff_nonbonded_repulsion += m_stored_threads[i]->NonbondedRepEnergy();
                 // CRITICAL FIX (Nov 2025): Do NOT also add to m_rep_energy for GFN-FF!
                 // For GFN-FF (method==3), repulsion goes ONLY into m_gfnff_repulsion, not m_rep_energy
                 // This was causing double-counting: H2 showed 0.266 Eh instead of 0.050 Eh
@@ -2247,6 +2309,10 @@ double ForceField::Calculate(bool gradient)
             // Collect GFN-FF batm energy for 1,4-pairs
             double thread_batm = m_stored_threads[i]->BatmEnergy();
             m_batm_energy += thread_batm;
+
+            // Claude Generated (March 2026): Triple bond torsions
+            double thread_stors = m_stored_threads[i]->STorsEnergy();
+            m_stors_energy += thread_stors;
 
             // Claude Generated (2025): Debug individual energy components
             if (CurcumaLogger::get_verbosity() >= 3) {
@@ -2629,6 +2695,7 @@ Matrix ForceField::GradientCoulomb() const { return sumComponentGradient(m_store
 Matrix ForceField::GradientDispersion() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientDispersion, m_natoms); }
 Matrix ForceField::GradientHB() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientHB, m_natoms); }
 Matrix ForceField::GradientXB() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientXB, m_natoms); }
+Matrix ForceField::GradientBATM() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientBATM, m_natoms); }
 
 // Claude Generated: Print comprehensive parameter summary
 void ForceField::printParameterSummary() const

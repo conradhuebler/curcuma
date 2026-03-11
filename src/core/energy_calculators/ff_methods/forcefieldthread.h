@@ -315,6 +315,22 @@ struct GFNFFHalogenBond {
 };
 
 /**
+ * @brief GFN-FF Triple Bond Torsion (sTors_eg)
+ *
+ * Reference: gfnff_engrad.F90:3454 - sTors_eg()
+ * Potential: E = erefhalf * (1 - cos(2*phi))
+ *
+ * Claude Generated (March 2026): specialized torsion for sp-sp systems
+ */
+struct GFNFFSTorsion {
+    int i = 0; ///< Atom index 1 (c1)
+    int j = 0; ///< Atom index 2 (c2, center 1)
+    int k = 0; ///< Atom index 3 (c3, center 2)
+    int l = 0; ///< Atom index 4 (c4)
+    double erefhalf = 3.75e-4; ///< Potential height (Hartree)
+};
+
+/**
  * @brief ATM (Axilrod-Teller-Muto) three-body dispersion term
  *
  * Reference: external/cpp-d4/src/damping/atm.cpp
@@ -394,6 +410,7 @@ public:
     void addGFNFFDihedral(const Dihedral& dihedrals);
     void addGFNFFExtraTorsion(const Dihedral& extra_torsion);  // Claude Generated (Jan 2, 2026): Extra sp3-sp3 gauche torsions
     void addGFNFFInversion(const Inversion& inversions);
+    void addGFNFFSTorsion(const GFNFFSTorsion& storsion);  // Claude Generated (March 2026): Triple bond torsions
     void addGFNFFvdW(const vdW& vdWs);
 
     // Phase 4: GFN-FF pairwise non-bonded addition methods (Claude Generated 2025)
@@ -531,6 +548,8 @@ public:
     double InversionEnergy() { return m_inversion_energy; }
     double VdWEnergy() { return m_vdw_energy; }
     double RepEnergy() { return m_rep_energy; }
+    double BondedRepEnergy() { return m_bonded_rep_energy; }
+    double NonbondedRepEnergy() { return m_nonbonded_rep_energy; }
     double EQEnergy() { return m_eq_energy; }
 
     // Phase 4: GFN-FF pairwise non-bonded energy components (Claude Generated 2025)
@@ -556,6 +575,9 @@ public:
     // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
     double BatmEnergy() { return m_batm_energy; }
 
+    // Claude Generated (March 2026): Triple bond torsions
+    double STorsEnergy() { return m_stors_energy; }
+
     // Phase 2: GFN-FF parameter flag setters (Claude Generated Dec 2025)
     void setDispersionEnabled(bool enabled) { m_dispersion_enabled = enabled; }
     void setHydrogenBondEnabled(bool enabled) { m_hbond_enabled = enabled; }
@@ -578,6 +600,7 @@ public:
     const Matrix& GradientDispersion() const { return m_gradient_dispersion; }
     const Matrix& GradientHB() const { return m_gradient_hb; }
     const Matrix& GradientXB() const { return m_gradient_xb; }
+    const Matrix& GradientBATM() const { return m_gradient_batm; }
 
 private:
     void CalculateUFFBondContribution();
@@ -598,6 +621,7 @@ private:
     void CalculateGFNFFDihedralContribution();
     void CalculateGFNFFExtraTorsionContribution();  // Claude Generated (Jan 2, 2026): Extra sp3-sp3 gauche torsions
     void CalculateGFNFFInversionContribution();
+    void CalculateGFNFFSTorsionContribution();  // Claude Generated (March 2026): Triple bond torsions
     void CalculateGFNFFvdWContribution();
 
     // Phase 4: GFN-FF pairwise non-bonded calculation functions (Claude Generated 2025)
@@ -638,6 +662,7 @@ private:
     std::vector<Dihedral> m_gfnff_dihedrals;        // Primary torsions (n=3, n=2, etc.)
     std::vector<Dihedral> m_gfnff_extra_torsions;   // Extra sp3-sp3 gauche torsions (n=1) - Claude Generated (Jan 2, 2026)
     std::vector<Inversion> m_gfnff_inversions;
+    std::vector<GFNFFSTorsion> m_gfnff_storsions;  // Triple bond torsions
     std::vector<vdW> m_gfnff_vdWs;  // Legacy (will be replaced by pairwise terms below)
 
     // Phase 4: GFN-FF pairwise parallelizable non-bonded terms
@@ -687,7 +712,12 @@ protected:
     // Phase 1.2: HB/XB energy components (Claude Generated 2025)
     double m_energy_hbond = 0.0;       // Hydrogen bond energy
     double m_energy_xbond = 0.0;       // Halogen bond energy
+    double m_stors_energy = 0.0;       // Triple bond torsion energy (sTors_eg)
     double m_atm_energy = 0.0;         // ATM three-body dispersion energy (Claude Generated December 2025)
+
+    // Claude Generated (March 2026): Separate bonded/non-bonded repulsion for diagnostics
+    double m_bonded_rep_energy = 0.0;    // GFN-FF bonded repulsion (REPSCALB=1.7583)
+    double m_nonbonded_rep_energy = 0.0; // GFN-FF non-bonded repulsion (REPSCALN=0.4270)
 
     // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
     double m_batm_energy = 0.0;        // Batm three-body dispersion energy
@@ -749,6 +779,7 @@ protected:
     Matrix m_gradient_bond, m_gradient_angle, m_gradient_torsion;
     Matrix m_gradient_repulsion, m_gradient_coulomb, m_gradient_dispersion;
     Matrix m_gradient_hb, m_gradient_xb;
+    Matrix m_gradient_batm;   ///< BATM three-body gradient component (Claude Generated Mar 2026)
 
     void initGradientComponents(int natoms) {
         m_gradient_bond = Eigen::MatrixXd::Zero(natoms, 3);
@@ -759,6 +790,7 @@ protected:
         m_gradient_dispersion = Eigen::MatrixXd::Zero(natoms, 3);
         m_gradient_hb = Eigen::MatrixXd::Zero(natoms, 3);
         m_gradient_xb = Eigen::MatrixXd::Zero(natoms, 3);
+        m_gradient_batm = Eigen::MatrixXd::Zero(natoms, 3);
     }
 
     // Phase 1.2: Cached bonded pairs for fast lookup in repulsion calculation (Claude Generated - Dec 2025)

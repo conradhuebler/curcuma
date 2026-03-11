@@ -109,9 +109,10 @@ To add a new GFN-FF energy term (e.g., "CrossTerm"), you MUST modify:
 | Repulsion (bonded) | CalculateGFNFFBondedRepulsionContribution() | ✅ ACTIVE | ⚠️ Partial | engrad:467-495 |
 | Repulsion (non-bonded) | CalculateGFNFFNonbondedRepulsionContribution() | ✅ ACTIVE | ⚠️ Partial | engrad:255-276 |
 | Coulomb | CalculateGFNFFCoulombContribution() | ✅ ACTIVE | ✅ Term 1b Fixed (Feb 2026) | engrad:383-422 |
-| Hydrogen Bonds | CalculateGFNFFHydrogenBondContribution() | ✅ ACTIVE | ⚠️ Partial | abhgfnff_eg* |
-| Halogen Bonds | CalculateGFNFFHalogenBondContribution() | ✅ ACTIVE | ⚠️ Partial | rbxgfnff_eg |
-| BATM | CalculateGFNFFBatmContribution() | ✅ ACTIVE | ❌ Missing | batmgfnff_eg |
+| Hydrogen Bonds | CalculateGFNFFHydrogenBondContribution() | ✅ ACTIVE | ✅ Implemented (Feb 2026 rewrite, <1e-4) | abhgfnff_eg* |
+| Halogen Bonds | CalculateGFNFFHalogenBondContribution() | ✅ ACTIVE | ✅ Implemented (Mar 2026) | rbxgfnff_eg |
+| Triple Bond Torsions | CalculateGFNFFSTorsionContribution() | ✅ ACTIVE (Mar 2026) | ✅ Implemented | sTors_eg:3454 |
+| BATM | CalculateGFNFFBatmContribution() | ✅ ACTIVE | ✅ Implemented (Mar 2026) — GradientBATM() | batmgfnff_eg |
 | ATM (D3/D4) | CalculateATMContribution() | ✅ ACTIVE | ✅ Complete | d3_gradient |
 
 ### Implementation Details
@@ -157,21 +158,11 @@ m_gradient.row(bond.j) += dEdr * factor * derivate.row(1);
 - **Fix**: Added `chi_base_i/j` and `cnf_i/j` to `GFNFFCoulomb` struct. At runtime: `qi = m_eeq_charges(i)`, `chi_eff = chi_base + cnf*sqrt(max(cn,0))`. NaN fallback to static values.
 - **TERM 1b guard**: Fixed skip-condition bug — all atoms now use `qtmp(i) = q*cnf/(2*sqrt(max(cn,0))+1e-16)` (Fortran epsilon guard), instead of skipping atoms with `cn ≤ 1e-10`.
 
-**BATM (Bonded ATM) Gradients**:
-- **Status**: Energy calculation complete, gradients TODO
-- **Location**: CalculateGFNFFBatmContribution() line 2955
-- **Reference**: Fortran batmgfnff_eg subroutine
-- **Priority**: MEDIUM
-
 #### ⚠️ Partial Gradient Implementations
 
 **Repulsion Gradients**:
 - Non-bonded repulsion active but needs validation against Fortran
 - Bonded repulsion disabled, needs testing
-
-**HB/XB Gradients**:
-- Active in execute() but validation against Fortran incomplete
-- Complex three-body terms with angle/distance damping
 
 ### Gradient Terms Status (Feb 2026)
 
@@ -215,11 +206,8 @@ ctest -R test_gfnff_gradients --verbose
 
 ### Next Steps
 
-1. **Enable and validate** all commented-out gradient methods
-2. **Implement Coulomb gradients** (requires EEQ derivatives)
-3. **Implement BATM gradients**
-4. **Validate HB/XB gradients** against Fortran
-5. **Run full regression test** with gradients enabled
+1. **Validate Repulsion gradients** against Fortran (bonded + non-bonded)
+2. **Run full regression test** with gradients enabled
 
 ## Current Implementation Status
 
