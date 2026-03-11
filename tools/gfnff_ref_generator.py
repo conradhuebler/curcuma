@@ -25,6 +25,7 @@ def parse_analyzer_output(output, xyz_file):
         "bonds": [],
         "angles": [],
         "torsions": [],
+        "extra_torsions": [],
         "energy_components": {},
         "gradient_decomposition": {}
     }
@@ -199,6 +200,30 @@ def parse_analyzer_output(output, xyz_file):
                         "n": n,
                         "phi0": phi0,
                         "V": fctot,
+                        "energy": 0.0
+                    })
+
+        # Claude Generated (March 2026): Parse extra sp3-sp3 torsion parameters
+        elif "Detailed Parameter Calculation for Extra Torsion" in line:
+            match = re.search(r"Extra Torsion\s+(\d+)\s+-\s+(\d+)\s+-\s+(\d+)\s+-\s+(\d+)", line)
+            if match:
+                current_atoms = [int(match.group(1))-1, int(match.group(2))-1, int(match.group(3))-1, int(match.group(4))-1]
+                vtors2 = None
+                for j in range(i+1, min(i+50, len(lines))):
+                    if "Detailed Parameter Calculation" in lines[j] and j > i+1: break
+                    if "topo%vtors(2,i) =" in lines[j] and "=" in lines[j].split("topo%vtors(2,i) =")[-1]:
+                        # Parse the final computed value (last number on line)
+                        vals = re.findall(FLOAT_PATTERN, lines[j].split("topo%vtors(2,i) =")[-1])
+                        if vals:
+                            vtors2 = float(vals[-1])
+
+                if vtors2 is not None:
+                    ref_data["extra_torsions"].append({
+                        "atoms": current_atoms,
+                        "n": 1,
+                        "phi0": 3.14159265358979323846,
+                        "V": vtors2,
+                        "is_extra": True,
                         "energy": 0.0
                     })
 

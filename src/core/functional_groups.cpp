@@ -194,17 +194,16 @@ bool FunctionalGroupDetector::hasCarbonylOxygen(int carbon_atom) const
 
 bool FunctionalGroupDetector::isNitroOxygen(int atom) const
 {
-    // Pattern: O in N-O (pi-bonded)
+    // Pattern: O in N-O (terminal)
+    // Reference: gfnff_ini.f90:839
 
-    // Check element, coordination, and pi-system
+    // Check element and coordination
     if (m_atomic_numbers[atom] != 8) return false;      // Not oxygen
     if (getCoordinationNumber(atom) != 1) return false;  // CN=1 only
-    if (m_pi_fragments[atom] == 0) return false;        // Must be in pi-system
 
-    // Check neighbor: must be pi-bonded nitrogen also in pi-system
+    // Check neighbor: must be nitrogen
     int neighbor = m_neighbor_lists[atom][0];
     if (m_atomic_numbers[neighbor] != 7) return false;           // Not nitrogen
-    if (m_pi_fragments[neighbor] == 0) return false;             // Not in pi-system
 
     return true;
 }

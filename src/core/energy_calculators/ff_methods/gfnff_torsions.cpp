@@ -2052,3 +2052,95 @@ json GFNFF::generateGFNFFTorsions() const
     return torsions;
 }
 
+json GFNFF::generateGFNFFSTorsions() const
+{
+    /**
+     * @brief Generate GFN-FF triple bond torsion (sTors_eg) parameters
+     *
+     * Specialized torsion for rotation around sp-sp systems like alkynes.
+     *
+     * Reference: external/gfnff/src/gfnff_ini.f90:2308 (specialTorsList)
+     * Chain: ii(1) - jj(2) - i(3) - nbi(4) - kk(5) - ll(6)
+     * Special torsion uses atoms 1, 2, 5, 6 (ii, jj, kk, ll).
+     *
+     * Claude Generated (March 2026)
+     */
+    const TopologyInfo& topo = getCachedTopology();
+    const std::vector<std::pair<int, int>>& bond_list = getCachedBondList();
+    const std::vector<int>& hybridization = topo.hybridization;
+    json storsions = json::array();
+
+    // Build neighbor list for efficient lookup
+    std::vector<std::vector<int>> neighbors(m_atomcount);
+    for (const auto& bond : bond_list) {
+        neighbors[bond.first].push_back(bond.second);
+        neighbors[bond.second].push_back(bond.first);
+    }
+
+    for (int i = 0; i < m_atomcount; ++i) {
+        // Carbon with two neighbors (potential sp center)
+        if (m_atoms[i] == 6 && neighbors[i].size() == 2) {
+            for (int nbi : neighbors[i]) {
+                if (nbi <= i) continue; // Avoid double counting
+
+                // Other carbon with two neighbors
+                if (m_atoms[nbi] == 6 && neighbors[nbi].size() == 2) {
+                    // Check triple bond distance (r <= 2.37 Bohr)
+                    double r_inbi = (m_geometry_bohr.row(i) - m_geometry_bohr.row(nbi)).norm();
+
+                    if (r_inbi <= 2.37) {
+                        // i-nbi is a triple bond. Find jj and kk.
+                        int jj = -1;
+                        for (int nb_i : neighbors[i]) {
+                            if (nb_i != nbi && m_atoms[nb_i] == 6) jj = nb_i;
+                        }
+                        int kk = -1;
+                        for (int nb_nbi : neighbors[nbi]) {
+                            if (nb_nbi != i && m_atoms[nb_nbi] == 6) kk = nb_nbi;
+                        }
+
+                        if (jj == -1 || kk == -1) continue;
+
+                        // Check jj and kk are sp2 carbons
+                        if (hybridization[jj] == 2 && hybridization[kk] == 2 &&
+                            m_atoms[jj] == 6 && m_atoms[kk] == 6) {
+
+                            // Find ii (neighbor of jj, excluding i) and ll (neighbor of kk, excluding nbi)
+                            // Porting Fortran "last one in file" logic: take largest index
+                            int ii = -1;
+                            for (int nb_jj : neighbors[jj]) {
+                                if (nb_jj != i && hybridization[nb_jj] == 2 &&
+                                    m_atoms[nb_jj] == 6 && neighbors[nb_jj].size() == 3) {
+                                    if (nb_jj > ii) ii = nb_jj;
+                                }
+                            }
+                            int ll = -1;
+                            for (int nb_kk : neighbors[kk]) {
+                                if (nb_kk != nbi && hybridization[nb_kk] == 2 &&
+                                    m_atoms[nb_kk] == 6 && neighbors[nb_kk].size() == 3) {
+                                    if (nb_kk > ll) ll = nb_kk;
+                                }
+                            }
+
+                            if (ii != -1 && ll != -1) {
+                                json stors;
+                                stors["i"] = ii;
+                                stors["j"] = jj;
+                                stors["k"] = kk;
+                                stors["l"] = ll;
+                                stors["erefhalf"] = 3.75e-4; // 1.97 kJ/mol
+                                storsions.push_back(stors);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2 && !storsions.empty()) {
+        CurcumaLogger::success(fmt::format("Generated {} GFN-FF triple bond torsions (sTors_eg)", storsions.size()));
+    }
+
+    return storsions;
+}

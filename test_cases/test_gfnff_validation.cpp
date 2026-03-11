@@ -39,12 +39,12 @@ struct ValidationResult {
 
 class GFNFFValidator {
 public:
-    GFNFFValidator(const std::string& ref_json_path) {
+    GFNFFValidator(const std::string& ref_json_path, bool rep_diag = false) : m_rep_diag(rep_diag) {
         loadReferenceData(ref_json_path);
         setupMolecule();
     }
 
-    void runValidation(bool run_fd = false, bool run_charge_inject = false) {
+    void runValidation(bool run_fd = false, bool run_charge_inject = false, bool run_torsion_detail = false) {
         std::cout << "=== GFN-FF Validation Runner ===" << std::endl;
         std::cout << "Molecule: " << m_ref_data["molecule"]["name"] << std::endl;
         std::cout << "Reference File: " << m_ref_path << std::endl;
@@ -64,6 +64,10 @@ public:
             validateChargeInjection();
         }
 
+        if (run_torsion_detail) {
+            validateTorsionDetail();
+        }
+
         printSummary();
     }
 
@@ -73,6 +77,8 @@ public:
         }
         return true;
     }
+
+    GFNFF* getGFNFF() { return m_gfnff.get(); }
 
 private:
     void loadReferenceData(const std::string& path) {
@@ -99,6 +105,7 @@ private:
         m_molecule.setCharge(0); // Default to neutral for now
 
         m_gfnff = std::make_unique<GFNFF>();
+        if (m_rep_diag) m_gfnff->setRepDiag(true);
         m_gfnff->InitialiseMolecule(m_molecule.getMolInfo());
     }
 
@@ -180,6 +187,9 @@ private:
         double torsion_plus_inversion = m_gfnff->DihedralEnergy() + m_gfnff->InversionEnergy();
         addResult("Energy", "Torsion", std::abs(torsion_plus_inversion - (double)ref_e["torsion"]) < tol_comp, torsion_plus_inversion, ref_e["torsion"], torsion_plus_inversion - (double)ref_e["torsion"]);
         addResult("Energy", "Repulsion", std::abs(m_gfnff->RepulsionEnergy() - (double)ref_e["repulsion"]) < tol_comp, m_gfnff->RepulsionEnergy(), ref_e["repulsion"], m_gfnff->RepulsionEnergy() - (double)ref_e["repulsion"]);
+        std::cout << "  Bonded Rep:    " << std::setw(14) << std::fixed << std::setprecision(8) << m_gfnff->BondedRepulsionEnergy() << " Eh\n";
+        std::cout << "  Nonbonded Rep: " << std::setw(14) << std::fixed << std::setprecision(8) << m_gfnff->NonbondedRepulsionEnergy() << " Eh\n";
+        std::cout << "  Rep sum check: " << std::setw(14) << std::fixed << std::setprecision(8) << (m_gfnff->BondedRepulsionEnergy() + m_gfnff->NonbondedRepulsionEnergy()) << " Eh (should == RepulsionEnergy)\n";
         addResult("Energy", "Coulomb", std::abs(m_gfnff->CoulombEnergy() - (double)ref_e["electrostatic"]) < tol_comp, m_gfnff->CoulombEnergy(), ref_e["electrostatic"], m_gfnff->CoulombEnergy() - (double)ref_e["electrostatic"]);
         addResult("Energy", "Dispersion", std::abs(m_gfnff->DispersionEnergy() - (double)ref_e["dispersion"]) < tol_comp, m_gfnff->DispersionEnergy(), ref_e["dispersion"], m_gfnff->DispersionEnergy() - (double)ref_e["dispersion"]);
 
@@ -955,6 +965,214 @@ private:
         std::cout << "ChgAttr = Err_Native - Err_Injected (positive = error caused by charge differences)" << std::endl;
     }
 
+    /**
+     * @brief Per-torsion diagnostic: compare C++ vs Fortran torsion parameters
+     *
+     * Claude Generated (March 2026): Pinpoints which torsions have wrong V/n/phi0
+     * or are missing/extra between C++ and Fortran implementations.
+     */
+    void validateTorsionDetail() {
+        std::cout << std::endl << "=== Torsion Detail Diagnostic ===" << std::endl;
+
+        // Run calculation to populate parameters
+        m_gfnff->Calculation(false);
+
+        // Get C++ torsion data
+        json cpp_torsions = m_gfnff->getTorsionParameters();
+        json cpp_primary = cpp_torsions.value("primary", json::array());
+        json cpp_extra = cpp_torsions.value("extra", json::array());
+        json cpp_inversions = m_gfnff->getInversionParameters();
+
+        // Reference has all torsions (primary+extra) in "torsions" array
+        json ref_all = m_ref_data.value("torsions", json::array());
+
+        std::cout << "  C++ primary: " << cpp_primary.size()
+                  << "  C++ extra: " << cpp_extra.size()
+                  << "  C++ total: " << (cpp_primary.size() + cpp_extra.size())
+                  << "  Ref total: " << ref_all.size()
+                  << "  C++ inversions: " << cpp_inversions.size() << std::endl;
+
+        // Canonical key: sort forward/reverse to match regardless of direction
+        auto canonical_key = [](int a, int b, int c, int d) -> std::array<int,4> {
+            std::array<int,4> fwd = {a, b, c, d};
+            std::array<int,4> rev = {d, c, b, a};
+            return (fwd < rev) ? fwd : rev;
+        };
+
+        auto key_str = [](const std::array<int,4>& k) -> std::string {
+            return std::to_string(k[0]) + "-" + std::to_string(k[1]) + "-"
+                 + std::to_string(k[2]) + "-" + std::to_string(k[3]);
+        };
+
+        struct TorsionInfo {
+            double V = 0, phi0 = 0, energy = 0;
+            int n = 0, idx = -1;
+            std::array<int,4> atoms;
+            bool is_extra = false;
+        };
+
+        // Build combined C++ map (primary + extra)
+        std::map<std::array<int,4>, TorsionInfo> cpp_map;
+        for (int idx = 0; idx < (int)cpp_primary.size(); ++idx) {
+            const auto& t = cpp_primary[idx];
+            int i = t["i"].get<int>(), j = t["j"].get<int>();
+            int k = t["k"].get<int>(), l = t["l"].get<int>();
+            auto key = canonical_key(i, j, k, l);
+            TorsionInfo info;
+            info.V = t.value("V", 0.0);
+            info.n = t.value("n", 0);
+            info.phi0 = t.value("phi0", 0.0);
+            info.idx = idx;
+            info.atoms = {i, j, k, l};
+            info.is_extra = false;
+            cpp_map[key] = info;
+        }
+        for (int idx = 0; idx < (int)cpp_extra.size(); ++idx) {
+            const auto& t = cpp_extra[idx];
+            int i = t["i"].get<int>(), j = t["j"].get<int>();
+            int k = t["k"].get<int>(), l = t["l"].get<int>();
+            auto key = canonical_key(i, j, k, l);
+            TorsionInfo info;
+            info.V = t.value("V", 0.0);
+            info.n = t.value("n", 0);
+            info.phi0 = t.value("phi0", 0.0);
+            info.idx = idx;
+            info.atoms = {i, j, k, l};
+            info.is_extra = true;
+            cpp_map[key] = info;
+        }
+
+        // Build reference map
+        std::map<std::array<int,4>, TorsionInfo> ref_map;
+        for (int idx = 0; idx < (int)ref_all.size(); ++idx) {
+            const auto& t = ref_all[idx];
+            auto atoms_arr = t["atoms"];
+            int i = atoms_arr[0].get<int>(), j = atoms_arr[1].get<int>();
+            int k = atoms_arr[2].get<int>(), l = atoms_arr[3].get<int>();
+            auto key = canonical_key(i, j, k, l);
+            TorsionInfo info;
+            info.V = t.value("V", 0.0);
+            info.n = t.value("n", 0);
+            info.phi0 = t.value("phi0", 0.0);
+            info.energy = t.value("energy", 0.0);
+            info.idx = idx;
+            info.atoms = {i, j, k, l};
+            ref_map[key] = info;
+        }
+
+        // Compare
+        std::cout << std::endl << std::left << std::setw(22) << "Atoms"
+                  << std::setw(5) << "Type"
+                  << std::right
+                  << std::setw(4) << "n_C" << std::setw(4) << "n_R"
+                  << std::setw(14) << "V_C++"
+                  << std::setw(14) << "V_Ref"
+                  << std::setw(12) << "dV(mEh)"
+                  << std::setw(10) << "phi0_C"
+                  << std::setw(10) << "phi0_R"
+                  << std::endl;
+        std::cout << std::string(95, '-') << std::endl;
+
+        int matched = 0, n_mismatch = 0, phi0_mismatch = 0;
+        double sum_dV = 0.0, max_dV = 0.0;
+        std::string max_dV_key;
+
+        for (const auto& [key, cpp_info] : cpp_map) {
+            auto it = ref_map.find(key);
+            if (it != ref_map.end()) {
+                matched++;
+                const auto& ref_info = it->second;
+                double dV = (cpp_info.V - ref_info.V) * 1000.0;
+                sum_dV += dV;
+                if (std::abs(dV) > std::abs(max_dV)) {
+                    max_dV = dV;
+                    max_dV_key = key_str(key);
+                }
+                bool n_diff = (cpp_info.n != ref_info.n);
+                bool phi0_diff = (std::abs(cpp_info.phi0 - ref_info.phi0) > 0.01);
+                if (n_diff) n_mismatch++;
+                if (phi0_diff) phi0_mismatch++;
+
+                // Print entries with significant V difference, or n/phi0 mismatch
+                if (std::abs(dV) > 0.001 || n_diff || phi0_diff) {
+                    std::cout << std::left << std::setw(22) << key_str(key)
+                              << std::setw(5) << (cpp_info.is_extra ? "extra" : "prim")
+                              << std::right
+                              << std::setw(4) << cpp_info.n
+                              << std::setw(4) << ref_info.n
+                              << std::fixed << std::setprecision(6)
+                              << std::setw(14) << cpp_info.V
+                              << std::setw(14) << ref_info.V
+                              << std::setprecision(3) << std::setw(12) << dV
+                              << std::setprecision(1) << std::setw(10) << (cpp_info.phi0 * 180.0 / M_PI)
+                              << std::setw(10) << (ref_info.phi0 * 180.0 / M_PI)
+                              << std::endl;
+                }
+            }
+        }
+
+        // Unmatched
+        std::vector<std::string> unmatched_cpp, unmatched_ref;
+        for (const auto& [key, info] : cpp_map) {
+            if (ref_map.find(key) == ref_map.end()) {
+                unmatched_cpp.push_back(key_str(key) + " n=" + std::to_string(info.n)
+                    + " V=" + std::to_string(info.V) + (info.is_extra ? " [extra]" : " [prim]"));
+            }
+        }
+        for (const auto& [key, info] : ref_map) {
+            if (cpp_map.find(key) == cpp_map.end()) {
+                unmatched_ref.push_back(key_str(key) + " n=" + std::to_string(info.n)
+                    + " V=" + std::to_string(info.V));
+            }
+        }
+
+        if (!unmatched_cpp.empty()) {
+            std::cout << std::endl << "  UNMATCHED C++ (" << unmatched_cpp.size() << " not in reference):" << std::endl;
+            for (const auto& s : unmatched_cpp) std::cout << "    " << s << std::endl;
+        }
+        if (!unmatched_ref.empty()) {
+            std::cout << std::endl << "  UNMATCHED REF (" << unmatched_ref.size() << " not in C++):" << std::endl;
+            for (const auto& s : unmatched_ref) std::cout << "    " << s << std::endl;
+        }
+
+        std::cout << std::endl << "  Matched=" << matched
+                  << "  n_mismatch=" << n_mismatch
+                  << "  phi0_mismatch=" << phi0_mismatch
+                  << "  Unmatched_C++=" << unmatched_cpp.size()
+                  << "  Unmatched_Ref=" << unmatched_ref.size() << std::endl;
+        std::cout << "  Sum(dV)=" << std::fixed << std::setprecision(3) << sum_dV
+                  << " mEh  Max(|dV|)=" << std::abs(max_dV) << " mEh at " << max_dV_key << std::endl;
+
+        // Inversion summary
+        std::cout << std::endl << "=== INVERSIONS ===" << std::endl;
+        std::cout << "  C++ inversions: " << cpp_inversions.size() << std::endl;
+        for (int idx = 0; idx < (int)cpp_inversions.size(); ++idx) {
+            const auto& inv = cpp_inversions[idx];
+            std::cout << "    " << inv["i"].get<int>() << "-" << inv["j"].get<int>()
+                      << "-" << inv["k"].get<int>() << "-" << inv["l"].get<int>()
+                      << "  fc=" << std::fixed << std::setprecision(6) << inv.value("fc", 0.0)
+                      << "  type=" << inv.value("potential_type", 0)
+                      << "  omega0=" << std::setprecision(4) << inv.value("omega0", 0.0)
+                      << std::endl;
+        }
+
+        // Energy summary
+        double dihedral_energy = m_gfnff->DihedralEnergy();
+        double inversion_energy = m_gfnff->InversionEnergy();
+        double combined = dihedral_energy + inversion_energy;
+        double ref_torsion = m_ref_data.contains("energy_components")
+                           && m_ref_data["energy_components"].contains("torsion")
+                           ? (double)m_ref_data["energy_components"]["torsion"] : 0.0;
+        double diff = (combined - ref_torsion) * 1000.0;
+
+        std::cout << std::endl << "=== ENERGY SUMMARY ===" << std::endl;
+        std::cout << "  DihedralEnergy  = " << std::fixed << std::setprecision(8) << dihedral_energy << " Eh" << std::endl;
+        std::cout << "  InversionEnergy = " << inversion_energy << " Eh" << std::endl;
+        std::cout << "  Combined        = " << combined << " Eh" << std::endl;
+        std::cout << "  Ref torsion     = " << ref_torsion << " Eh" << std::endl;
+        std::cout << "  Diff            = " << std::setprecision(3) << diff << " mEh" << std::endl;
+    }
+
     void addResult(const std::string& cat, const std::string& sub, bool passed, double val, double ref, double err) {
         m_results.push_back({cat, sub, passed, val, ref, err, ""});
     }
@@ -984,34 +1202,42 @@ private:
     Molecule m_molecule;
     std::unique_ptr<GFNFF> m_gfnff;
     std::vector<ValidationResult> m_results;
+    bool m_rep_diag = false;
 };
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " [--fd] [--charge-inject] <reference_json> [reference_json2 ...]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " [--fd] [--charge-inject] [--torsion-detail] <reference_json> [reference_json2 ...]" << std::endl;
         std::cerr << "  --fd              Enable finite-difference gradient validation (slow)" << std::endl;
         std::cerr << "  --charge-inject   Inject Fortran reference charges to isolate charge-attributable errors" << std::endl;
+        std::cerr << "  --torsion-detail  Per-torsion parameter comparison between C++ and Fortran" << std::endl;
         return 1;
     }
 
+    // Two-pass argument parsing: flags first, then files
     bool run_fd = false;
     bool run_charge_inject = false;
+    bool run_torsion_detail = false;
+    bool run_rep_diag = false;
     bool all_files_passed = true;
+    std::vector<std::string> files;
+
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--fd") {
-            run_fd = true;
-            continue;
-        }
-        if (std::string(argv[i]) == "--charge-inject") {
-            run_charge_inject = true;
-            continue;
-        }
+        std::string arg(argv[i]);
+        if (arg == "--fd") run_fd = true;
+        else if (arg == "--charge-inject") run_charge_inject = true;
+        else if (arg == "--torsion-detail") run_torsion_detail = true;
+        else if (arg == "--rep-diag") run_rep_diag = true;
+        else files.push_back(arg);
+    }
+
+    for (const auto& file : files) {
         try {
-            GFNFFValidator validator(argv[i]);
-            validator.runValidation(run_fd, run_charge_inject);
+            GFNFFValidator validator(file.c_str(), run_rep_diag);
+            validator.runValidation(run_fd, run_charge_inject, run_torsion_detail);
             if (!validator.allPassed()) all_files_passed = false;
         } catch (const std::exception& e) {
-            std::cerr << "Error processing " << argv[i] << ": " << e.what() << std::endl;
+            std::cerr << "Error processing " << file << ": " << e.what() << std::endl;
             all_files_passed = false;
         }
         std::cout << std::endl;
