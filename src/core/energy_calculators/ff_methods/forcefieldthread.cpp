@@ -147,7 +147,9 @@ int ForceFieldThread::execute()
         }
         if (m_repulsion_enabled) {
             runWithGradCapture("bonded_repulsion", [this]() { CalculateGFNFFBondedRepulsionContribution(); }, m_gradient_repulsion);
-            runWithGradCapture("nonbonded_repulsion", [this]() { CalculateGFNFFNonbondedRepulsionContribution(); }, m_gradient_repulsion);
+            // Claude Generated (Mar 2026): Non-bonded repulsion goes to total gradient only, NOT g_rep
+            // Reference: Fortran gfnff_engrad.F90:280-304 uses reduction(+:erep, g) without g_rep
+            timeEnergyTerm("nonbonded_repulsion", [this]() { CalculateGFNFFNonbondedRepulsionContribution(); });
         }
         if (m_coulomb_enabled) {
             runWithGradCapture("coulomb", [this]() { CalculateGFNFFCoulombContribution(); }, m_gradient_coulomb);
@@ -1023,6 +1025,9 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
                 double yy = -dEdr;  // = 2*alpha*dr*energy (Fortran convention)
                 m_dEdcn(bond.i) += yy * factor * bond.ff * bond.cnfak_i;
                 m_dEdcn(bond.j) += yy * factor * bond.ff * bond.cnfak_j;
+                // Claude Generated (Mar 2026): Bond-specific dEdcn for component gradient attribution
+                m_dEdcn_bond(bond.i) += yy * factor * bond.ff * bond.cnfak_i;
+                m_dEdcn_bond(bond.j) += yy * factor * bond.ff * bond.cnfak_j;
             }
         }
     }

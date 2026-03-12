@@ -2424,6 +2424,27 @@ double ForceField::Calculate(bool gradient)
                     dEdcn_norm, dEdcn_total.cwiseAbs().maxCoeff()));
             }
         }
+
+        // Claude Generated (Mar 2026): Per-component CN corrections for GradComp validation
+        // Bond dEdcn goes to GradientBond(), remainder (dispersion) to GradientDispersion()
+        // Reference: Fortran applies CN chain-rule to g_bond and g_disp separately
+        if (m_store_gradient_components) {
+            Vector dEdcn_bond_total = Vector::Zero(m_natoms);
+            for (int i = 0; i < static_cast<int>(m_stored_threads.size()); ++i) {
+                const Vector& v = m_stored_threads[i]->getDEdcnBond();
+                if (v.size() == m_natoms) dEdcn_bond_total += v;
+            }
+            Vector dEdcn_disp_total = dEdcn_total - dEdcn_bond_total;
+
+            m_bond_cn_correction = Matrix::Zero(m_natoms, 3);
+            m_disp_cn_correction = Matrix::Zero(m_natoms, 3);
+            for (int dim = 0; dim < 3; ++dim) {
+                if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
+                    m_bond_cn_correction.col(dim) = m_dcn[dim] * dEdcn_bond_total;
+                    m_disp_cn_correction.col(dim) = m_dcn[dim] * dEdcn_disp_total;
+                }
+            }
+        }
     }
 
     // =========================================================================
@@ -2443,6 +2464,16 @@ double ForceField::Calculate(bool gradient)
         for (int dim = 0; dim < 3; ++dim) {
             if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
                 m_gradient.col(dim) -= m_dcn[dim] * qtmp;
+            }
+        }
+        // Claude Generated (Mar 2026): Coulomb component CN correction for GradComp
+        // Reference: Fortran gfnff_engrad.F90:453-454 applies TERM 1b to g_es
+        if (m_store_gradient_components) {
+            m_coulomb_cn_correction = Matrix::Zero(m_natoms, 3);
+            for (int dim = 0; dim < 3; ++dim) {
+                if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
+                    m_coulomb_cn_correction.col(dim) = -(m_dcn[dim] * qtmp);
+                }
             }
         }
         if (CurcumaLogger::get_verbosity() >= 3) {
@@ -2668,6 +2699,7 @@ double ForceField::Calculate(bool gradient)
 // Claude Generated (February 2026): Per-component gradient decomposition for validation
 void ForceField::setStoreGradientComponents(bool store)
 {
+    m_store_gradient_components = store;
     for (auto* thread : m_stored_threads) {
         thread->setStoreGradientComponents(store);
     }
@@ -2687,12 +2719,26 @@ static Matrix sumComponentGradient(const std::vector<ForceFieldThread*>& threads
     return result;
 }
 
-Matrix ForceField::GradientBond() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientBond, m_natoms); }
+// Claude Generated (Mar 2026): Bond/Coulomb/Dispersion getters include CN chain-rule corrections
+// Reference: Fortran applies CN chain-rule to g_bond (engrad:973), g_es (engrad:453), g_disp (gdisp0:393) separately
+Matrix ForceField::GradientBond() const {
+    auto result = sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientBond, m_natoms);
+    if (m_bond_cn_correction.rows() == m_natoms) result += m_bond_cn_correction;
+    return result;
+}
 Matrix ForceField::GradientAngle() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientAngle, m_natoms); }
 Matrix ForceField::GradientTorsion() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientTorsion, m_natoms); }
 Matrix ForceField::GradientRepulsion() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientRepulsion, m_natoms); }
-Matrix ForceField::GradientCoulomb() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientCoulomb, m_natoms); }
-Matrix ForceField::GradientDispersion() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientDispersion, m_natoms); }
+Matrix ForceField::GradientCoulomb() const {
+    auto result = sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientCoulomb, m_natoms);
+    if (m_coulomb_cn_correction.rows() == m_natoms) result += m_coulomb_cn_correction;
+    return result;
+}
+Matrix ForceField::GradientDispersion() const {
+    auto result = sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientDispersion, m_natoms);
+    if (m_disp_cn_correction.rows() == m_natoms) result += m_disp_cn_correction;
+    return result;
+}
 Matrix ForceField::GradientHB() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientHB, m_natoms); }
 Matrix ForceField::GradientXB() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientXB, m_natoms); }
 Matrix ForceField::GradientBATM() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientBATM, m_natoms); }

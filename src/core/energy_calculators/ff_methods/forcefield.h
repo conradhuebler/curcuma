@@ -297,6 +297,14 @@ private:
     Vector m_coulomb_cnf;        // CN correction factor (cnf_eeq)
     Vector m_coulomb_chi_static; // Static chi_eff (legacy fallback)
 
+    // Claude Generated (Mar 2026): Per-component CN chain-rule corrections for GradComp
+    // These are computed in Calculate() and added in the component getters
+    // Reference: Fortran applies CN chain-rule to g_bond, g_disp, g_es separately
+    Matrix m_bond_cn_correction;     // dEdcn_bond * dcn chain-rule → added to GradientBond()
+    Matrix m_disp_cn_correction;     // dEdcn_disp * dcn chain-rule → added to GradientDispersion()
+    Matrix m_coulomb_cn_correction;  // TERM 1b qtmp * dcn → added to GradientCoulomb()
+    bool m_store_gradient_components = false; // mirror of thread flag for getters
+
     json m_parameters;
     std::string m_auto_param_file; // Auto-detected parameter file path
     bool m_enable_caching = true; // Can be disabled for multi-threading

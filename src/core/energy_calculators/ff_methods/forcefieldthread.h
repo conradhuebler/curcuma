@@ -505,6 +505,10 @@ public:
     // Applied after thread completion via dcn chain rule: gradient += dcn * dEdcn
     const Vector& getDEdcn() const { return m_dEdcn; }
 
+    // Claude Generated (Mar 2026): Bond-specific dEdcn for per-component gradient attribution
+    // Separates bond dr0/dCN from dispersion dC6/dCN so CN corrections go to the right component
+    const Vector& getDEdcnBond() const { return m_dEdcn_bond; }
+
     // Claude Generated (Feb 15, 2026): Set dc6dcn matrix for dispersion CN gradient
     // Reference: Fortran gfnff_gdisp0.f90:262-305 - dc6dcn(i,j) = dC6(i,j)/dCN(i)
     void setDispersionDC6DCN(const Matrix& dc6dcn) { m_dc6dcn = dc6dcn; }
@@ -515,6 +519,7 @@ public:
         m_calculate_gradient = gradient;
         m_gradient = Eigen::MatrixXd::Zero(m_geometry.rows(), 3);
         m_dEdcn = Vector::Zero(m_geometry.rows());
+        m_dEdcn_bond = Vector::Zero(m_geometry.rows());
         if (m_store_gradient_components) {
             initGradientComponents(m_geometry.rows());
         }
@@ -526,6 +531,7 @@ public:
         m_calculate_gradient = gradient;
         m_gradient = Eigen::MatrixXd::Zero(m_geometry.rows(), 3);
         m_dEdcn = Vector::Zero(m_geometry.rows());
+        m_dEdcn_bond = Vector::Zero(m_geometry.rows());
         if (m_store_gradient_components) {
             initGradientComponents(m_geometry.rows());
         }
@@ -756,6 +762,9 @@ protected:
     // Claude Generated (Feb 15, 2026): dE/dCN accumulator for bond dr0/dCN and dispersion dC6/dCN
     // After thread completion, this is summed across threads and dcn chain rule applied
     Vector m_dEdcn;
+
+    // Claude Generated (Mar 2026): Bond-only dE/dCN for per-component gradient attribution
+    Vector m_dEdcn_bond;
 
     // Claude Generated (Feb 15, 2026): dc6dcn matrix for dispersion CN gradient
     // dc6dcn(i,j) = dC6(i,j)/dCN(i) - set from D4ParameterGenerator
