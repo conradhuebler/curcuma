@@ -519,8 +519,10 @@ double GFNFF::Calculation(bool gradient)
         Matrix grad_hartree = m_forcefield->Gradient();
         m_gradient = grad_hartree;  // No conversion needed
 
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param("gradient_norm", fmt::format("{:.8f}", m_gradient.norm()));
+        // Claude Generated (Mar 2026): Report gradient norm like XTB
+        // Reference: gfnff_engrad.F90:857 — gnorm = sqrt(sum(g**2))
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::result(fmt::format("Gradient norm: {:.8f} Eh/a0", m_gradient.norm()));
         }
 
         // Claude Generated (Feb 21, 2026): Gradient invariance diagnostics
@@ -7118,6 +7120,7 @@ Matrix GFNFF::GradientHB() const { return m_forcefield ? m_forcefield->GradientH
 Matrix GFNFF::GradientXB() const { return m_forcefield ? m_forcefield->GradientXB() : Matrix(); }
 Matrix GFNFF::GradientBATM() const { return m_forcefield ? m_forcefield->GradientBATM() : Matrix(); }
 Matrix GFNFF::GradientATM() const { return m_forcefield ? m_forcefield->GradientATM() : Matrix(); }
+Matrix GFNFF::getDispCNCorrection() const { return m_forcefield ? m_forcefield->getDispCNCorrection() : Matrix(); }
 
 // =================================================================================
 // Charge Injection for Testing/Validation (Claude Generated December 2025)

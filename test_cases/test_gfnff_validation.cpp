@@ -44,7 +44,8 @@ public:
         setupMolecule();
     }
 
-    void runValidation(bool run_fd = false, bool run_charge_inject = false, bool run_torsion_detail = false) {
+    void runValidation(bool run_fd = false, bool run_charge_inject = false,
+                       bool run_torsion_detail = false, bool run_disp_diag = false) {
         std::cout << "=== GFN-FF Validation Runner ===" << std::endl;
         std::cout << "Molecule: " << m_ref_data["molecule"]["name"] << std::endl;
         std::cout << "Reference File: " << m_ref_path << std::endl;
@@ -66,6 +67,10 @@ public:
 
         if (run_torsion_detail) {
             validateTorsionDetail();
+        }
+
+        if (run_disp_diag) {
+            validateDispersionDiagnostic();
         }
 
         printSummary();
@@ -793,6 +798,10 @@ private:
             int max_err_atom = -1;
             int atoms_checked = 0;
 
+            // Accumulate Frobenius norms: ||g_curcuma|| and ||g_ref|| for this component
+            double curcuma_norm_sq = curcuma_grad.squaredNorm();
+            double ref_norm_sq = 0.0;
+
             for (auto it = ref_decomp.begin(); it != ref_decomp.end(); ++it) {
                 int atom_idx = std::stoi(it.key());
                 if (atom_idx >= natoms) continue;
@@ -803,6 +812,7 @@ private:
                 double rx = comps[comp.fortran_name]["x"];
                 double ry = comps[comp.fortran_name]["y"];
                 double rz = comps[comp.fortran_name]["z"];
+                ref_norm_sq += rx*rx + ry*ry + rz*rz;
 
                 double cx = curcuma_grad(atom_idx, 0);
                 double cy = curcuma_grad(atom_idx, 1);
@@ -817,13 +827,25 @@ private:
                 }
             }
 
+            double curcuma_norm = std::sqrt(curcuma_norm_sq);
+            double ref_norm = std::sqrt(ref_norm_sq);
+            double norm_err = std::abs(curcuma_norm - ref_norm);
+
             bool passed = max_err < comp.tolerance;
             addResult("GradComp", comp.display_name,
                      passed, max_err, 0.0, max_err);
 
+            // Claude Generated (Mar 2026): Also validate component gradient norm
+            bool norm_passed = norm_err < comp.tolerance;
+            addResult("GradNorm", comp.display_name,
+                     norm_passed, curcuma_norm, ref_norm, norm_err);
+
             std::cout << "  " << std::left << std::setw(12) << comp.display_name
                       << " max_err=" << std::scientific << std::setprecision(4) << max_err
                       << " (atom " << max_err_atom << ")"
+                      << " |g|=" << curcuma_norm
+                      << " |g_ref|=" << ref_norm
+                      << " d|g|=" << norm_err
                       << " tol=" << comp.tolerance
                       << (passed ? " PASS" : " FAIL") << std::endl;
 
@@ -1182,6 +1204,108 @@ private:
         std::cout << "  Diff            = " << std::setprecision(3) << diff << " mEh" << std::endl;
     }
 
+    /**
+     * @brief Dispersion gradient diagnostic: split direct vs CN chain-rule
+     *
+     * Claude Generated (March 2026): Splits dispersion gradient into:
+     *   1. Direct pairwise component (from thread m_gradient_dispersion)
+     *   2. CN chain-rule correction (dEdcn_disp * dcn)
+     * Reports per-atom norms and compares against Fortran reference.
+     */
+    void validateDispersionDiagnostic() {
+        std::cout << std::endl << "=== Dispersion Gradient Diagnostic ===" << std::endl;
+
+        // Get total dispersion gradient (direct + CN chain-rule)
+        Matrix grad_disp_total = m_gfnff->GradientDispersion();
+        Matrix grad_disp_cn = m_gfnff->getDispCNCorrection();
+
+        if (grad_disp_total.rows() == 0) {
+            std::cout << "  [SKIP] No dispersion gradient available" << std::endl;
+            return;
+        }
+
+        int natoms = grad_disp_total.rows();
+
+        // Direct = Total - CN correction
+        Matrix grad_disp_direct = grad_disp_total;
+        bool has_cn_correction = (grad_disp_cn.rows() == natoms);
+        if (has_cn_correction) {
+            grad_disp_direct = grad_disp_total - grad_disp_cn;
+        }
+
+        // Compare against Fortran reference if available
+        const auto& ref_decomp = m_ref_data["gradient_decomposition"];
+
+        double max_total_err = 0.0, max_direct_err = 0.0, max_cn_norm = 0.0;
+        int max_total_atom = -1, max_direct_atom = -1, max_cn_atom = -1;
+
+        std::cout << std::left << std::setw(8) << "Atom"
+                  << std::right
+                  << std::setw(14) << "|Direct|"
+                  << std::setw(14) << "|CN_corr|"
+                  << std::setw(14) << "|Total|"
+                  << std::setw(14) << "|Ref_Disp|"
+                  << std::setw(14) << "|Err_Total|"
+                  << std::setw(14) << "|Err_Direct|"
+                  << std::endl;
+        std::cout << std::string(92, '-') << std::endl;
+
+        for (int i = 0; i < natoms; ++i) {
+            double direct_norm = grad_disp_direct.row(i).norm();
+            double cn_norm = has_cn_correction ? grad_disp_cn.row(i).norm() : 0.0;
+            double total_norm = grad_disp_total.row(i).norm();
+
+            if (cn_norm > max_cn_norm) { max_cn_norm = cn_norm; max_cn_atom = i; }
+
+            // Compare against Fortran Disp reference
+            std::string atom_key = std::to_string(i);
+            double ref_norm = 0.0;
+            double total_err = 0.0, direct_err = 0.0;
+
+            if (ref_decomp.contains(atom_key) && ref_decomp[atom_key].contains("Disp")) {
+                double rx = ref_decomp[atom_key]["Disp"]["x"];
+                double ry = ref_decomp[atom_key]["Disp"]["y"];
+                double rz = ref_decomp[atom_key]["Disp"]["z"];
+                ref_norm = std::sqrt(rx*rx + ry*ry + rz*rz);
+
+                double tx = grad_disp_total(i, 0), ty = grad_disp_total(i, 1), tz = grad_disp_total(i, 2);
+                total_err = std::sqrt((tx-rx)*(tx-rx) + (ty-ry)*(ty-ry) + (tz-rz)*(tz-rz));
+
+                double dx = grad_disp_direct(i, 0), dy = grad_disp_direct(i, 1), dz = grad_disp_direct(i, 2);
+                direct_err = std::sqrt((dx-rx)*(dx-rx) + (dy-ry)*(dy-ry) + (dz-rz)*(dz-rz));
+
+                if (total_err > max_total_err) { max_total_err = total_err; max_total_atom = i; }
+                if (direct_err > max_direct_err) { max_direct_err = direct_err; max_direct_atom = i; }
+            }
+
+            // Print atoms with significant gradients or errors
+            if (total_norm > 1e-5 || total_err > 1e-5 || cn_norm > 1e-6) {
+                std::string elem = "";
+                if (m_ref_data.contains("molecule") && m_ref_data["molecule"].contains("atoms")
+                    && i < (int)m_ref_data["molecule"]["atoms"].size()) {
+                    elem = m_ref_data["molecule"]["atoms"][i]["element"].get<std::string>();
+                }
+                std::cout << std::left << std::setw(4) << i << std::setw(4) << elem
+                          << std::right << std::scientific << std::setprecision(4)
+                          << std::setw(14) << direct_norm
+                          << std::setw(14) << cn_norm
+                          << std::setw(14) << total_norm
+                          << std::setw(14) << ref_norm
+                          << std::setw(14) << total_err
+                          << std::setw(14) << direct_err
+                          << std::endl;
+            }
+        }
+
+        std::cout << std::endl;
+        std::cout << "  Max |CN correction|: " << std::scientific << std::setprecision(4)
+                  << max_cn_norm << " (atom " << max_cn_atom << ")" << std::endl;
+        std::cout << "  Max |Total err|:     " << max_total_err << " (atom " << max_total_atom << ")" << std::endl;
+        std::cout << "  Max |Direct-only err|: " << max_direct_err << " (atom " << max_direct_atom << ")" << std::endl;
+        std::cout << "  CN correction " << (has_cn_correction ? "PRESENT" : "MISSING (all zero)")
+                  << std::endl;
+    }
+
     void addResult(const std::string& cat, const std::string& sub, bool passed, double val, double ref, double err) {
         m_results.push_back({cat, sub, passed, val, ref, err, ""});
     }
@@ -1216,10 +1340,11 @@ private:
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " [--fd] [--charge-inject] [--torsion-detail] <reference_json> [reference_json2 ...]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " [--fd] [--charge-inject] [--torsion-detail] [--disp-diag] <reference_json> [reference_json2 ...]" << std::endl;
         std::cerr << "  --fd              Enable finite-difference gradient validation (slow)" << std::endl;
         std::cerr << "  --charge-inject   Inject Fortran reference charges to isolate charge-attributable errors" << std::endl;
         std::cerr << "  --torsion-detail  Per-torsion parameter comparison between C++ and Fortran" << std::endl;
+        std::cerr << "  --disp-diag       Split dispersion gradient into direct vs CN chain-rule parts" << std::endl;
         return 1;
     }
 
@@ -1228,6 +1353,7 @@ int main(int argc, char** argv) {
     bool run_charge_inject = false;
     bool run_torsion_detail = false;
     bool run_rep_diag = false;
+    bool run_disp_diag = false;
     bool all_files_passed = true;
     std::vector<std::string> files;
 
@@ -1237,13 +1363,14 @@ int main(int argc, char** argv) {
         else if (arg == "--charge-inject") run_charge_inject = true;
         else if (arg == "--torsion-detail") run_torsion_detail = true;
         else if (arg == "--rep-diag") run_rep_diag = true;
+        else if (arg == "--disp-diag") run_disp_diag = true;
         else files.push_back(arg);
     }
 
     for (const auto& file : files) {
         try {
             GFNFFValidator validator(file.c_str(), run_rep_diag);
-            validator.runValidation(run_fd, run_charge_inject, run_torsion_detail);
+            validator.runValidation(run_fd, run_charge_inject, run_torsion_detail, run_disp_diag);
             if (!validator.allPassed()) all_files_passed = false;
         } catch (const std::exception& e) {
             std::cerr << "Error processing " << file << ": " << e.what() << std::endl;

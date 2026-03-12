@@ -168,6 +168,10 @@ public:
     Matrix GradientBATM() const;
     Matrix GradientATM() const;   ///< ATM three-body dispersion gradient (Claude Generated Mar 2026)
 
+    /// Claude Generated (Mar 2026): Expose CN chain-rule correction for dispersion diagnostic
+    /// Returns the dEdcn_disp * dcn component (zero if gradient components not stored)
+    Matrix getDispCNCorrection() const { return m_disp_cn_correction; }
+
     // Claude Generated: Parameter analysis functionality
     void printParameterSummary() const;
 

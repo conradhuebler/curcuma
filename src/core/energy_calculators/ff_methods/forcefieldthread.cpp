@@ -3328,6 +3328,17 @@ void ForceFieldThread::CalculateD4DispersionContribution()
 
             m_gradient.row(disp.i) += grad.transpose();
             m_gradient.row(disp.j) -= grad.transpose();
+
+            // Claude Generated (Mar 2026): Dispersion dC6/dCN chain-rule contribution
+            // Reference: Fortran gfnff_gdisp0.f90:382-395
+            // CRITICAL FIX: Was missing in D4 path, causing dispersion gradient errors
+            // (D3 path in CalculateGFNFFDispersionContribution already had this)
+            if (m_dc6dcn.size() > 0 &&
+                disp.i < m_dc6dcn.rows() && disp.j < m_dc6dcn.cols()) {
+                double disp_value = disp_sum * disp.zetac6 * m_final_factor;
+                m_dEdcn(disp.i) -= m_dc6dcn(disp.i, disp.j) * disp_value;
+                m_dEdcn(disp.j) -= m_dc6dcn(disp.j, disp.i) * disp_value;
+            }
         }
     }
 
