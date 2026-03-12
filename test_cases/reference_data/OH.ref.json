@@ -1,7 +1,7 @@
 {
   "molecule": {
     "name": "OH",
-    "geometry_file": "test_cases/molecules/dimers/OH.xyz",
+    "geometry_file": "../test_cases/molecules/dimers/OH.xyz",
     "atoms": [
       {
         "element": "O",
@@ -19,7 +19,7 @@
   },
   "metadata": {
     "generator": "gfnff-analyzer-parser",
-    "date": "2026-02-07 20:48:53"
+    "date": "2026-03-12 22:12:01"
   },
   "topology": {
     "coordination_numbers": [
@@ -49,17 +49,108 @@
   ],
   "angles": [],
   "torsions": [],
+  "extra_torsions": [],
   "energy_components": {
-    "bond": -0.17091072,
+    "bond": -0.170910719346,
     "angle": 0.0,
     "torsion": 0.0,
-    "repulsion": 0.01357299,
-    "electrostatic": -0.07651161,
-    "dispersion": -5.859e-05,
+    "repulsion": 0.013572992439,
+    "electrostatic": -0.076511607391,
+    "dispersion": -5.8590773e-05,
     "hb": 0.0,
     "xb": 0.0,
     "batm": 0.0
   },
+  "gradient_decomposition": {
+    "0": {
+      "Bond": {
+        "x": 0.0,
+        "y": -0.05925828,
+        "z": 0.04629775
+      },
+      "Angle": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "Torsion": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "Repulsion": {
+        "x": 0.0,
+        "y": 0.05888546,
+        "z": -0.04600647
+      },
+      "ES": {
+        "x": 0.0,
+        "y": -0.04392811,
+        "z": 0.03432048
+      },
+      "Disp": {
+        "x": 0.0,
+        "y": 3.1e-07,
+        "z": -2.4e-07
+      },
+      "SUM": {
+        "x": 0.0,
+        "y": -0.04430062,
+        "z": 0.03461152
+      },
+      "TOTAL": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      }
+    },
+    "1": {
+      "Bond": {
+        "x": 0.0,
+        "y": 0.05925828,
+        "z": -0.04629775
+      },
+      "Angle": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "Torsion": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "Repulsion": {
+        "x": 0.0,
+        "y": -0.05888546,
+        "z": 0.04600647
+      },
+      "ES": {
+        "x": 0.0,
+        "y": 0.04392811,
+        "z": -0.03432048
+      },
+      "Disp": {
+        "x": 0.0,
+        "y": -3.1e-07,
+        "z": 2.4e-07
+      },
+      "SUM": {
+        "x": 0.0,
+        "y": 0.04430062,
+        "z": -0.03461152
+      },
+      "TOTAL": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      }
+    }
+  },
+  "energy_charges": [
+    -0.385468,
+    0.385468
+  ],
   "gradients": {
     "norm": 0.079504745009
   }

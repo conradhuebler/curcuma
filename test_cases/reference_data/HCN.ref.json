@@ -1,7 +1,7 @@
 {
   "molecule": {
     "name": "HCN",
-    "geometry_file": "external/gfnff/test/HCN.xyz",
+    "geometry_file": "../external/gfnff/test/HCN.xyz",
     "atoms": [
       {
         "element": "H",
@@ -25,7 +25,7 @@
   },
   "metadata": {
     "generator": "gfnff-analyzer-parser",
-    "date": "2026-03-04 19:55:41"
+    "date": "2026-03-12 22:12:01"
   },
   "topology": {
     "coordination_numbers": [
@@ -79,11 +79,16 @@
     }
   ],
   "torsions": [],
+  "extra_torsions": [],
   "energy_components": {
     "bond": -0.702857144089,
     "angle": 0.0,
     "torsion": 0.0,
     "repulsion": 0.036729391146,
+    "electrostatic": -0.019726531931,
+    "dispersion": -0.000393881124,
+    "hb": 0.0,
+    "xb": 0.0,
     "batm": 0.0
   },
   "gradient_decomposition": {
@@ -214,6 +219,11 @@
       }
     }
   },
+  "energy_charges": [
+    0.117163,
+    0.080315,
+    -0.197478
+  ],
   "gradients": {
     "norm": 0.009354820847
   }

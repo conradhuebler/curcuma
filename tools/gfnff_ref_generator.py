@@ -83,6 +83,18 @@ def parse_analyzer_output(output, xyz_file):
             else:
                 if energy_charges:
                     in_goed_charges = False
+    # Fallback: parse "charge q_i" from EEQ Charge Analysis section if goed_gfnff section missing
+    # Reference: analyzer outputs these in verbose mode (-v 2)
+    if not energy_charges:
+        eeq_charges = []
+        for line in lines:
+            if "charge q_i" in line:
+                match = re.search(r"charge q_i\s+([-]?[\d.eE+]+)", line)
+                if match:
+                    eeq_charges.append(float(match.group(1)))
+        if natoms > 0 and len(eeq_charges) >= natoms:
+            energy_charges = eeq_charges[:natoms]
+
     if energy_charges:
         ref_data["energy_charges"] = energy_charges
 
@@ -105,17 +117,19 @@ def parse_analyzer_output(output, xyz_file):
         if "Repulsion energy:" in line:
              match = re.search(r"Repulsion energy:\s+([-]?[\d.]+)", line)
              if match: ref_data["energy_components"]["repulsion"] = float(match.group(1))
-        if "Electrostatic energy:" in line:
-             match = re.search(r"Electrostatic energy:\s+([-]?[\d.]+)", line)
+        # Energy breakdown section uses short names (without "energy:")
+        # Reference: gfnff_engrad.F90 "Energy breakdown:" section format
+        if "  Electrostatic:" in line:
+             match = re.search(r"Electrostatic:\s+([-]?[\d.eE+]+)", line)
              if match: ref_data["energy_components"]["electrostatic"] = float(match.group(1))
-        if "Dispersion energy:" in line:
-             match = re.search(r"Dispersion energy:\s+([-]?[\d.]+)", line)
+        if "  Dispersion:" in line:
+             match = re.search(r"Dispersion:\s+([-]?[\d.eE+]+)", line)
              if match: ref_data["energy_components"]["dispersion"] = float(match.group(1))
-        if "Hydrogen bond energy:" in line:
-             match = re.search(r"Hydrogen bond energy:\s+([-]?[\d.]+)", line)
+        if "  H-bond energy:" in line:
+             match = re.search(r"H-bond energy:\s+([-]?[\d.eE+]+)", line)
              if match: ref_data["energy_components"]["hb"] = float(match.group(1))
-        if "Halogen bond energy:" in line:
-             match = re.search(r"Halogen bond energy:\s+([-]?[\d.]+)", line)
+        if "  X-bond energy:" in line:
+             match = re.search(r"X-bond energy:\s+([-]?[\d.eE+]+)", line)
              if match: ref_data["energy_components"]["xb"] = float(match.group(1))
         if "Bonded atm energy:" in line:
              match = re.search(r"Bonded atm energy:\s+([-]?[\d.]+)", line)
