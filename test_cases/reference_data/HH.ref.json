@@ -61,6 +61,14 @@
     "batm": 0.0
   },
   "gradients": {
-    "norm": 1.571332012861
-  }
+    "norm": 1.571332012861,
+    "energy_charges": [
+      0.0,
+      0.0
+    ]
+  },
+  "energy_charges": [
+    0.0,
+    0.0
+  ]
 }
