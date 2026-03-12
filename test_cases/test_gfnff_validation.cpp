@@ -581,8 +581,17 @@ private:
         std::cout << std::endl << "=== Per-Atom Gradient Validation ===" << std::endl;
         const auto& ref_decomp = m_ref_data["gradient_decomposition"];
 
-        Geometry grad = m_gfnff->Gradient();
-        int natoms = grad.rows();
+        // Sum only the named components that match the Fortran SUM scope
+        // (excludes nonbonded repulsion, sTorsions, XB, BATM, ATM, CN chain-rule)
+        int natoms = m_gfnff->GradientBond().rows();
+        Matrix grad = Matrix::Zero(natoms, 3);
+        grad += m_gfnff->GradientBond();
+        grad += m_gfnff->GradientAngle();
+        grad += m_gfnff->GradientTorsion();
+        grad += m_gfnff->GradientRepulsion();
+        grad += m_gfnff->GradientCoulomb();
+        grad += m_gfnff->GradientDispersion();
+        grad += m_gfnff->GradientHB();
 
         // Use SUM (sum of all components) instead of TOTAL (Fortran analyzer bug: always [0,0,0])
         double tol_sum = 1e-4; // Eh/Bohr
