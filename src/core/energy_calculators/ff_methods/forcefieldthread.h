@@ -607,6 +607,7 @@ public:
     const Matrix& GradientHB() const { return m_gradient_hb; }
     const Matrix& GradientXB() const { return m_gradient_xb; }
     const Matrix& GradientBATM() const { return m_gradient_batm; }
+    const Matrix& GradientATM() const { return m_gradient_atm; }   ///< ATM three-body dispersion gradient (Claude Generated Mar 2026)
 
 private:
     void CalculateUFFBondContribution();
@@ -789,6 +790,7 @@ protected:
     Matrix m_gradient_repulsion, m_gradient_coulomb, m_gradient_dispersion;
     Matrix m_gradient_hb, m_gradient_xb;
     Matrix m_gradient_batm;   ///< BATM three-body gradient component (Claude Generated Mar 2026)
+    Matrix m_gradient_atm;    ///< ATM three-body dispersion gradient component (Claude Generated Mar 2026)
 
     void initGradientComponents(int natoms) {
         m_gradient_bond = Eigen::MatrixXd::Zero(natoms, 3);
@@ -800,6 +802,7 @@ protected:
         m_gradient_hb = Eigen::MatrixXd::Zero(natoms, 3);
         m_gradient_xb = Eigen::MatrixXd::Zero(natoms, 3);
         m_gradient_batm = Eigen::MatrixXd::Zero(natoms, 3);
+        m_gradient_atm = Eigen::MatrixXd::Zero(natoms, 3);
     }
 
     // Phase 1.2: Cached bonded pairs for fast lookup in repulsion calculation (Claude Generated - Dec 2025)

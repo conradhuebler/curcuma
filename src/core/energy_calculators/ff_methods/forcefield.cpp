@@ -2742,6 +2742,7 @@ Matrix ForceField::GradientDispersion() const {
 Matrix ForceField::GradientHB() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientHB, m_natoms); }
 Matrix ForceField::GradientXB() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientXB, m_natoms); }
 Matrix ForceField::GradientBATM() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientBATM, m_natoms); }
+Matrix ForceField::GradientATM() const { return sumComponentGradient(m_stored_threads, &ForceFieldThread::GradientATM, m_natoms); }
 
 // Claude Generated: Print comprehensive parameter summary
 void ForceField::printParameterSummary() const

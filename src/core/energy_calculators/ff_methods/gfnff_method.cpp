@@ -585,6 +585,7 @@ double GFNFF::Calculation(bool gradient)
                 checkComponentInvariance(m_forcefield->GradientHB(),         "hb        ");
                 checkComponentInvariance(m_forcefield->GradientXB(),         "xb        ");
                 checkComponentInvariance(m_forcefield->GradientBATM(),       "batm      ");
+                checkComponentInvariance(m_forcefield->GradientATM(),        "atm       ");
             }
         }
     }
@@ -7116,6 +7117,7 @@ Matrix GFNFF::GradientDispersion() const { return m_forcefield ? m_forcefield->G
 Matrix GFNFF::GradientHB() const { return m_forcefield ? m_forcefield->GradientHB() : Matrix(); }
 Matrix GFNFF::GradientXB() const { return m_forcefield ? m_forcefield->GradientXB() : Matrix(); }
 Matrix GFNFF::GradientBATM() const { return m_forcefield ? m_forcefield->GradientBATM() : Matrix(); }
+Matrix GFNFF::GradientATM() const { return m_forcefield ? m_forcefield->GradientATM() : Matrix(); }
 
 // =================================================================================
 // Charge Injection for Testing/Validation (Claude Generated December 2025)
@@ -8025,6 +8027,7 @@ void GFNFF::diagnoseGradientComponents() const
     double hb_norm = m_forcefield->GradientHB().norm();
     double xb_norm = m_forcefield->GradientXB().norm();
     double batm_norm = m_forcefield->GradientBATM().norm();
+    double atm_norm = m_forcefield->GradientATM().norm();
 
     CurcumaLogger::param("bond", fmt::format("{:.6e}", bond_norm));
     CurcumaLogger::param("angle", fmt::format("{:.6e}", angle_norm));
@@ -8032,13 +8035,14 @@ void GFNFF::diagnoseGradientComponents() const
     CurcumaLogger::param("repulsion", fmt::format("{:.6e}", repulsion_norm));
     CurcumaLogger::param("coulomb", fmt::format("{:.6e}", coulomb_norm));
     CurcumaLogger::param("dispersion", fmt::format("{:.6e}", dispersion_norm));
+    CurcumaLogger::param("atm", fmt::format("{:.6e}", atm_norm));
     CurcumaLogger::param("hb", fmt::format("{:.6e}", hb_norm));
     CurcumaLogger::param("xb", fmt::format("{:.6e}", xb_norm));
     CurcumaLogger::param("batm", fmt::format("{:.6e}", batm_norm));
 
     // Identify dominant terms
     double max_norm = std::max({bond_norm, angle_norm, torsion_norm, repulsion_norm,
-                                coulomb_norm, dispersion_norm, hb_norm, xb_norm, batm_norm});
+                                coulomb_norm, dispersion_norm, atm_norm, hb_norm, xb_norm, batm_norm});
     std::string dominant = "unknown";
     if (max_norm == bond_norm) dominant = "bond";
     else if (max_norm == angle_norm) dominant = "angle";
@@ -8046,6 +8050,7 @@ void GFNFF::diagnoseGradientComponents() const
     else if (max_norm == repulsion_norm) dominant = "repulsion";
     else if (max_norm == coulomb_norm) dominant = "coulomb";
     else if (max_norm == dispersion_norm) dominant = "dispersion";
+    else if (max_norm == atm_norm) dominant = "atm";
     else if (max_norm == hb_norm) dominant = "hb";
     else if (max_norm == xb_norm) dominant = "xb";
     else if (max_norm == batm_norm) dominant = "batm";
@@ -8091,6 +8096,7 @@ double GFNFF::compareGradients(double dx)
     Matrix grad_hb         = m_forcefield->GradientHB();
     Matrix grad_xb         = m_forcefield->GradientXB();
     Matrix grad_batm       = m_forcefield->GradientBATM();
+    Matrix grad_atm        = m_forcefield->GradientATM();
 
     // Level 1: Fixed-charge numerical gradient (CN updated, EEQ charges fixed)
     // This comparison isolates REAL gradient formula bugs.
@@ -8164,6 +8170,7 @@ double GFNFF::compareGradients(double dx)
         printComp("hb",         grad_hb);
         printComp("xb",         grad_xb);
         printComp("batm",       grad_batm);
+        printComp("atm",        grad_atm);
 
         // Sum of components to verify they add up to analytical
         Matrix comp_sum = Matrix::Zero(m_atomcount, 3);
@@ -8176,6 +8183,7 @@ double GFNFF::compareGradients(double dx)
         comp_sum += grad_hb;
         comp_sum += grad_xb;
         comp_sum += grad_batm;
+        comp_sum += grad_atm;
         double residual = (analytic - comp_sum).norm();
         CurcumaLogger::info(fmt::format("  Component sum residual: {:.2e} (should be ~0 if all components captured)", residual));
         if (residual > 1e-6) {
@@ -8206,15 +8214,18 @@ double GFNFF::compareGradients(double dx)
 
         // Note on gradient storage (forcefieldthread.cpp line 137-199):
         //   GradientTorsion()    = torsion + extra_torsion + inversion + storsions
-        //   GradientDispersion() = D4 dispersion + ATM (NOT BATM — captured separately in GradientBATM())
-        // Energy terms match these combined groups for correct comparison.
+        //   GradientDispersion() = D4 pairwise dispersion only
+        //   GradientATM()        = ATM three-body dispersion (separate from D4, matching Fortran g_disp scope)
+        //   GradientBATM()       = BATM bonded three-body
+        // Energy terms match these component groups for correct comparison.
         std::vector<TermInfo> terms = {
             {"bond",       [&]() { return m_forcefield->BondEnergy(); }},
             {"angle",      [&]() { return m_forcefield->AngleEnergy(); }},
             {"tors+inv",   [&]() { return m_forcefield->DihedralEnergy() + m_forcefield->InversionEnergy(); }},
             {"repulsion",  [&]() { return m_forcefield->HHEnergy(); }},
             {"coulomb",    [&]() { return m_forcefield->CoulombEnergy(); }},
-            {"disp+atm",   [&]() { return m_forcefield->DispersionEnergy() + m_forcefield->ATMEnergy(); }},
+            {"dispersion", [&]() { return m_forcefield->DispersionEnergy(); }},
+            {"atm",        [&]() { return m_forcefield->ATMEnergy(); }},
             {"batm",       [&]() { return m_forcefield->BatmEnergy(); }},
             {"hb",         [&]() { return m_forcefield->HydrogenBondEnergy(); }},
             {"xb",         [&]() { return m_forcefield->HalogenBondEnergy(); }},

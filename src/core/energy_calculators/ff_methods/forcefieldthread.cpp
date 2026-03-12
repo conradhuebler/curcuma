@@ -181,12 +181,14 @@ int ForceFieldThread::execute()
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::info(fmt::format("Thread {} calculating {} ATM triples", m_thread, m_atm_triples.size()));
             }
+            // Claude Generated (Mar 2026): ATM captured in own component for structural
+            // correctness — Fortran puts ATM outside g_disp (gfnff_gdisp0.f90:308-400)
             runWithGradCapture("atm_dispersion", [this]() {
                 CalculateATMContribution();
                 if (m_calculate_gradient) {
                     CalculateATMGradient();
                 }
-            }, m_gradient_dispersion);
+            }, m_gradient_atm);
         }
 
         // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)

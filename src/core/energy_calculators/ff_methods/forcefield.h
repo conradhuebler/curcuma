@@ -166,6 +166,7 @@ public:
     Matrix GradientHB() const;
     Matrix GradientXB() const;
     Matrix GradientBATM() const;
+    Matrix GradientATM() const;   ///< ATM three-body dispersion gradient (Claude Generated Mar 2026)
 
     // Claude Generated: Parameter analysis functionality
     void printParameterSummary() const;

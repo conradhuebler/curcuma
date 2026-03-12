@@ -1379,6 +1379,7 @@ public:
     Matrix GradientHB() const;
     Matrix GradientXB() const;
     Matrix GradientBATM() const;
+    Matrix GradientATM() const;   ///< ATM three-body dispersion gradient (Claude Generated Mar 2026)
 
     // =================================================================================
     // vbond Parameter Access for Verification (Claude Generated November 2025)
