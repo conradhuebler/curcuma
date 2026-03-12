@@ -1116,31 +1116,14 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
                 k_ijk, r_ij, r_jk));
         }
 
-        // Get covalent radii from atom types (using GFN-FF D3-style covalent radii in Bohr)
-        // CRITICAL: GFN-FF uses D3-style covalent radii, NOT the angle radii!
-        // Reference: gfnff_param.f90:381-404 (covalentRadD3 array)
-        // Format: Angström values pre-converted to Bohr with factor aatoau * 4.0 / 3.0
-        // where aatoau = 1.8897261246257702 (Angström to Bohr)
-        // CRITICAL -> why is this here and not in the parameter generator or some header file, do we need it any ways?
-        static const std::vector<double> gfnff_d3_cov_radii_bohr = {
-            0.32*1.88972612462*4.0/3.0, 0.46*1.88972612462*4.0/3.0,  // H,He
-            1.20*1.88972612462*4.0/3.0, 0.94*1.88972612462*4.0/3.0, 0.77*1.88972612462*4.0/3.0, 0.75*1.88972612462*4.0/3.0, 0.71*1.88972612462*4.0/3.0, 0.63*1.88972612462*4.0/3.0, 0.64*1.88972612462*4.0/3.0, 0.67*1.88972612462*4.0/3.0,  // Li-Ne
-            1.40*1.88972612462*4.0/3.0, 1.25*1.88972612462*4.0/3.0, 1.13*1.88972612462*4.0/3.0, 1.04*1.88972612462*4.0/3.0, 1.10*1.88972612462*4.0/3.0, 1.02*1.88972612462*4.0/3.0, 0.99*1.88972612462*4.0/3.0, 0.96*1.88972612462*4.0/3.0,  // Na-Ar
-            1.76*1.88972612462*4.0/3.0, 1.54*1.88972612462*4.0/3.0,  // K,Ca
-            1.33*1.88972612462*4.0/3.0, 1.22*1.88972612462*4.0/3.0, 1.21*1.88972612462*4.0/3.0, 1.10*1.88972612462*4.0/3.0, 1.07*1.88972612462*4.0/3.0,  // Sc-
-            1.04*1.88972612462*4.0/3.0, 1.00*1.88972612462*4.0/3.0, 0.99*1.88972612462*4.0/3.0, 1.01*1.88972612462*4.0/3.0, 1.09*1.88972612462*4.0/3.0,  // -Zn
-            1.12*1.88972612462*4.0/3.0, 1.09*1.88972612462*4.0/3.0, 1.15*1.88972612462*4.0/3.0, 1.10*1.88972612462*4.0/3.0, 1.14*1.88972612462*4.0/3.0, 1.17*1.88972612462*4.0/3.0,  // Ga-Kr
-            1.89*1.88972612462*4.0/3.0, 1.67*1.88972612462*4.0/3.0,  // Rb,Sr
-            1.47*1.88972612462*4.0/3.0, 1.39*1.88972612462*4.0/3.0, 1.32*1.88972612462*4.0/3.0, 1.24*1.88972612462*4.0/3.0, 1.15*1.88972612462*4.0/3.0,  // Y-
-            1.13*1.88972612462*4.0/3.0, 1.13*1.88972612462*4.0/3.0, 1.08*1.88972612462*4.0/3.0, 1.15*1.88972612462*4.0/3.0, 1.23*1.88972612462*4.0/3.0,  // -Cd
-            1.28*1.88972612462*4.0/3.0, 1.26*1.88972612462*4.0/3.0, 1.26*1.88972612462*4.0/3.0, 1.23*1.88972612462*4.0/3.0, 1.32*1.88972612462*4.0/3.0, 1.31*1.88972612462*4.0/3.0  // In-Xe
-        };
-
+        // Get covalent radii: D3-style (gfnff_param.f90:381-404), 4/3 scaling applied at runtime
+        // Reference: GFNFFParameters::covalent_rad_d3 stores raw_Å * aatoau (WITHOUT 4/3 factor)
+        constexpr double rcov_scale_angle = 4.0 / 3.0;
         auto get_rcov_bohr = [&](int atomic_number) -> double {
-            if (atomic_number >= 1 && atomic_number <= static_cast<int>(gfnff_d3_cov_radii_bohr.size())) {
-                return gfnff_d3_cov_radii_bohr[atomic_number - 1];
+            if (atomic_number >= 1 && atomic_number <= static_cast<int>(GFNFFParameters::covalent_rad_d3.size())) {
+                return GFNFFParameters::covalent_rad_d3[atomic_number - 1] * rcov_scale_angle;
             }
-            return 1.0 * 1.88972612462 * 4.0 / 3.0;  // Fallback for unknown elements (1.0 Å converted to Bohr)
+            return 1.0 * GFNFFParameters::gfnff_aatoau * rcov_scale_angle;  // Fallback
         };
 
         double rcov_i = get_rcov_bohr(m_atom_types[angle.i]);
