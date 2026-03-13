@@ -44,7 +44,7 @@
 #include "src/capabilities/simplemd.h"
 #include "src/capabilities/trajectory_statistics.h"
 #include "src/capabilities/trajectoryanalysis.h"
-
+#include "src/capabilities/polymerbuild.h"
 #include "src/tools/trajectory_writer.h"
 
 #include "src/tools/general.h"
@@ -1184,6 +1184,21 @@ int executeRMSDTraj(const json& controller, int argc, char** argv) {
     return 0;
 }
 
+int executePolymerBuild(const json& controller, int argc, char** argv)
+{
+    if (argc < 2) {
+        std::cerr << "Please use curcuma for polymer build as follows:\ncurcuma -polymerbuild -sequence \"(A)10-B\" -fragments '{\"A\": \"a.xyz\", \"B\": \"b.xyz\"}'" << std::endl;
+        PolymerBuild help(json::object(), true);
+        help.printHelp();
+        return 0;
+    }
+
+    auto* builder = new PolymerBuild(controller, false);
+    builder->start();
+    delete builder;
+    return 0;
+}
+
 // Capability registry - Claude Generated
 const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
     {"analysis", {"Unified molecular analysis (all formats, all properties)", "analysis",
@@ -1202,6 +1217,8 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
                   {"XYZ", "MOL2", "SDF"}, executeConfStat}},
     {"dock", {"Molecular docking calculations", "docking",
               {"XYZ", "MOL2", "SDF"}, executeDocking}},
+    {"polymerbuild", {"Iterative polymer assembly from fragments", "assembly",
+                  {"XYZ"}, executePolymerBuild}},
     {"md", {"Molecular dynamics simulation", "dynamics",
             {"XYZ", "VTF", "MOL2", "SDF"}, executeSimpleMD}},
     {"casino", {"Casino Monte Carlo simulation with enhanced sampling", "dynamics",
@@ -2865,6 +2882,7 @@ int main(int argc, char **argv) {
             std::cout << "  -confstat file.xyz      Conformational statistics" << std::endl;
             std::cout << "  -rmsd file1.xyz file2.xyz  RMSD calculation" << std::endl;
             std::cout << "  -rmsdtraj file.trj.xyz  Trajectory RMSD analysis" << std::endl;
+            std::cout << "  -polymerbuild           Iterative polymer assembly" << std::endl;
             std::cout << "  -md file.xyz            Molecular dynamics simulation" << std::endl;
             std::cout << std::endl;
             std::cout << "Other Options:" << std::endl;

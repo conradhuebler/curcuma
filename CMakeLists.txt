@@ -244,6 +244,7 @@ set(curcuma_core_SRC
         src/capabilities/casino.cpp
         src/capabilities/scnp_parser.cpp
         src/capabilities/trajectoryanalysis.cpp
+        src/capabilities/polymerbuild.cpp
         src/capabilities/tda_engine.cpp
         src/capabilities/hessian.cpp
         src/capabilities/qmdfffit.cpp
@@ -311,6 +312,7 @@ set(curcuma_cap_SRC
         src/capabilities/casino.cpp
         src/capabilities/scnp_parser.cpp
         src/capabilities/trajectoryanalysis.cpp
+        src/capabilities/polymerbuild.cpp
         src/capabilities/tda_engine.cpp
         src/capabilities/hessian.cpp
         src/capabilities/qmdfffit.cpp
