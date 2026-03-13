@@ -252,7 +252,7 @@ std::unique_ptr<ComputationalMethod> MethodFactory::createGFNFF(const json& conf
         }
     }
     CurcumaLogger::info("GFN-FF: using native implementation");
-    return std::make_unique<GFNFFMethod>(config);
+    return std::make_unique<GFNFFComputationalMethod>("gfnff", config);
 }
 
 // =================================================================================
@@ -347,7 +347,7 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
     // Native GFN-FF (currently "cgfnff", will become "gfnff" in gfnff-branch)
     if (method == "cgfnff") {
         CurcumaLogger::success("Method 'cgfnff' resolved to native GFN-FF");
-        return std::make_unique<GFNFFMethod>(config);
+        return std::make_unique<GFNFFComputationalMethod>("gfnff", config);
     }
 
     // Force field methods (always available)

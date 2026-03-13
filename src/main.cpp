@@ -45,7 +45,6 @@
 #include "src/capabilities/trajectory_statistics.h"
 #include "src/capabilities/trajectoryanalysis.h"
 
-#include "src/tools/cli_parser.h"
 #include "src/tools/trajectory_writer.h"
 
 #include "src/tools/general.h"
@@ -1243,15 +1242,6 @@ int executeConfSearch(const json& controller, int argc, char** argv) {
     return 0;
 }
 
-int executeRMSDTraj(const json& controller, int argc, char** argv) {
-    if (argc < 3) return 1;
-    RMSDTraj traj(controller, false);
-    traj.setFile(argv[2]);
-    traj.Initialise();
-    traj.start();
-    return 0;
-}
-
 int executeNEBPrep(const json& controller, int argc, char** argv) {
     if (argc < 4) return 1;
     Molecule mol1 = Files::LoadFile(argv[2]);
@@ -1341,45 +1331,6 @@ int executeDistance(const json& controller, int argc, char** argv) {
             if (!B.empty()) posB /= static_cast<double>(B.size());
 
             std::cout << "Centroid Distance: " << (posA - posB).norm() << " Å" << std::endl;
-        }
-    }
-    return 0;
-}
-
-int executeAngle(const json& controller, int argc, char** argv) {
-    if (argc < 5) {
-        std::cerr << "Please use curcuma to calculate angles as follows:\ncurcuma -angle molecule.xyz indexA indexB indexC" << std::endl;
-        return 1;
-    }
-
-    std::string atomsA_str = argc > 3 ? argv[3] : "";
-    std::string atomsB_str = argc > 4 ? argv[4] : "";
-    std::string atomsC_str = argc > 5 ? argv[5] : "";
-
-    // Check if we have atom selections in controller
-    json angle_config = controller.value("angle", json::object());
-    if (angle_config.contains("atoms_a")) atomsA_str = angle_config["atoms_a"].get<std::string>();
-    if (angle_config.contains("atoms_b")) atomsB_str = angle_config["atoms_b"].get<std::string>();
-    if (angle_config.contains("atoms_c")) atomsC_str = angle_config["atoms_c"].get<std::string>();
-
-    if (atomsA_str.empty() || atomsB_str.empty() || atomsC_str.empty()) {
-        std::cerr << "Error: Three atom selections required for angle calculation." << std::endl;
-        return 1;
-    }
-
-    std::vector<int> A = Tools::CreateList(atomsA_str);
-    std::vector<int> B = Tools::CreateList(atomsB_str);
-    std::vector<int> C = Tools::CreateList(atomsC_str);
-
-    FileIterator file(argv[2]);
-    while (!file.AtEnd()) {
-        Molecule mol = file.Next();
-        if (A.size() == 1 && B.size() == 1 && C.size() == 1) {
-            std::cout << "Angle (" << A[0] << "-" << B[0] << "-" << C[0] << "): "
-                      << mol.CalculateAngle(A[0] - 1, B[0] - 1, C[0] - 1) << " °" << std::endl;
-        } else {
-            std::cerr << "Error: Multiple atom selections for angle calculation not yet supported." << std::endl;
-            return 1;
         }
     }
     return 0;
@@ -1984,7 +1935,8 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
-    std::string command = CLIUtils::stripLeadingDashes(argv[1]);
+    std::string command = argv[1];
+    while (!command.empty() && command[0] == '-') command.erase(0, 1);
 
     // Handle help requests - Claude Generated
     if (command == "help" || command == "h") {
@@ -2068,7 +2020,7 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    json controller = CLIUtils::CLI2Json(argc, argv);
+    json controller = CLI2Json(argc, argv);
 
     // Handle config import - Claude Generated (October 2025)
     // Now global parameter, always in controller["import_config"] if present

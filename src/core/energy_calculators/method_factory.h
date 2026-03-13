@@ -87,7 +87,6 @@ private:
 
     // Explicit XTB method creation (xtb-gfn1, xtb-gfn2, gfnff)
     static std::unique_ptr<ComputationalMethod> createXTBExplicit(const std::string& method, const json& config);
-    static std::unique_ptr<ComputationalMethod> createUlyssesExplicit(const std::string& method, const json& config);
     static std::unique_ptr<ComputationalMethod> createDFTD3(const json& config);
     static std::unique_ptr<ComputationalMethod> createDFTD4(const json& config);
 

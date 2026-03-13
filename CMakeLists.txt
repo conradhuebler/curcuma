@@ -681,8 +681,9 @@ target_link_libraries(curcuma curcuma_core)
 add_executable(curcuma_helper
         src/helpers/main.cpp)
         
-add_executable(cli_helper
-        src/helpers/cli_test.cpp)
+# cli_helper disabled - requires cli_parser.h (native-gfnff WIP)
+# add_executable(cli_helper
+#         src/helpers/cli_test.cpp)
 
 add_executable(parallel_scf
         src/helpers/parallel_scf.cpp)
@@ -695,7 +696,7 @@ target_link_libraries(curcuma_helper curcuma_core)
 # Enable precompiled headers for helper executables
 if(USE_PCH)
     target_precompile_headers(curcuma_helper REUSE_FROM curcuma_core)
-    target_precompile_headers(cli_helper REUSE_FROM curcuma_core)
+    # target_precompile_headers(cli_helper REUSE_FROM curcuma_core)
     target_precompile_headers(parallel_scf REUSE_FROM curcuma_core)
 endif()
 
