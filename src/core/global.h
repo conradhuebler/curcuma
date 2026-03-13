@@ -76,6 +76,10 @@ struct Mol {
     std::vector<std::pair<int, int>> m_bonds;
     std::vector<int> m_atoms;
 
+    // Claude Generated: Persistent Topology Matrix support
+    Matrix m_topology;
+    bool m_has_topology = false;
+
     // Claude Generated: Periodic Boundary Conditions data
     Eigen::Matrix3d m_unit_cell; // 3x3 lattice vectors matrix (Angstroms)
     bool m_has_pbc = false; // PBC active flag

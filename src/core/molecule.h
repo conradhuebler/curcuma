@@ -386,8 +386,18 @@ class Molecule
      * \\return Pair of {distance_matrix, topology_matrix}
      * \\note Automatically cached - repeated calls are very fast
      * \\note Cache invalidated on geometry changes
+     * \\note If a persistent topology is set, it overrides distance-based detection
      */
     std::pair<Matrix, Matrix> DistanceMatrix() const;
+
+    /*! \brief Set a persistent topology matrix that overrides distance-based detection */
+    void setTopologyMatrix(const Matrix& topology);
+
+    /*! \brief Check if a persistent topology matrix is present */
+    inline bool hasPersistentTopology() const { return m_has_persistent_topology; }
+
+    /*! \brief Get the current topology matrix */
+    inline Matrix getTopologyMatrix() const { return m_topology_matrix; }
     /*! \brief Index-based distance matrix for selective atom analysis - Claude Generated */
     std::pair<Matrix, Matrix> DistanceMatrix(const std::vector<int>& indices) const;
 
@@ -456,6 +466,8 @@ private:
     // Future: Granular cache system (geometry, connectivity, properties, analysis)
     mutable Matrix m_distance_matrix;
     mutable Matrix m_topology_matrix;
+    mutable Matrix m_persistent_topology;
+    mutable bool m_has_persistent_topology = false;
     mutable bool m_distance_cache_valid = false;
 
     mutable bool m_dirty = true;

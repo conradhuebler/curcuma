@@ -188,7 +188,7 @@ std::unique_ptr<OptimizerInterface> OptimizerFactory::createRFO()
 
 // Claude Generated - OptimizationDispatcher implementation
 OptimizationResult OptimizationDispatcher::optimizeStructure(
-    Molecule* molecule,
+    curcuma::Molecule* molecule,
     OptimizerType optimizer_type,
     EnergyCalculator* energy_calculator,
     const json& config)
@@ -240,7 +240,7 @@ OptimizationResult OptimizationDispatcher::optimizeStructure(
 }
 
 OptimizationResult OptimizationDispatcher::optimizeStructure(
-    Molecule* molecule,
+    curcuma::Molecule* molecule,
     const std::string& method_name,
     EnergyCalculator* energy_calculator,
     const json& config)
@@ -255,7 +255,7 @@ OptimizationResult OptimizationDispatcher::optimizeStructure(
 }
 
 std::vector<OptimizationResult> OptimizationDispatcher::optimizeBatch(
-    const std::vector<Molecule>& molecules,
+    const std::vector<curcuma::Molecule>& molecules,
     OptimizerType optimizer_type,
     EnergyCalculator* energy_calculator,
     const json& config)
@@ -269,7 +269,7 @@ std::vector<OptimizationResult> OptimizationDispatcher::optimizeBatch(
     for (size_t i = 0; i < molecules.size(); ++i) {
         CurcumaLogger::info_fmt("Optimizing structure {} of {}", i + 1, molecules.size());
 
-        Molecule mol_copy = molecules[i];
+        curcuma::Molecule mol_copy = molecules[i];
         OptimizationResult result = optimizeStructure(&mol_copy, optimizer_type,
             energy_calculator, config);
         results.push_back(result);
@@ -290,7 +290,7 @@ std::vector<OptimizationResult> OptimizationDispatcher::optimizeBatch(
 }
 
 OptimizationResult OptimizationDispatcher::autoOptimize(
-    Molecule* molecule,
+    curcuma::Molecule* molecule,
     EnergyCalculator* energy_calculator,
     const json& preferences)
 {

@@ -113,7 +113,35 @@ void ForceFieldGenerator::Generate(const std::vector<std::pair<int, int>>& forme
 
     TContainer bonds;
     m_scaling = 1.4;
-    if (formed_bonds.size() == 0) {
+    if (m_mol.m_has_topology && formed_bonds.empty()) {
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("Using persistent topology matrix for force field generation");
+        }
+        for (int i = 0; i < m_atoms; ++i) {
+            m_stored_bonds.push_back(std::vector<int>());
+            m_ignored_vdw.push_back(std::set<int>({ i }));
+            m_1_4_charges.push_back(std::set<int>({ i }));
+        }
+        for (int i = 0; i < m_atoms; ++i) {
+            for (int j = i + 1; j < m_atoms; ++j) {
+                double distance = (m_geometry.row(i) - m_geometry.row(j)).norm() * m_au;
+                m_distance(i, j) = distance;
+                m_distance(j, i) = distance;
+                if (m_mol.m_topology(i, j) == 1) {
+                    if (bonds.insert({ i, j })) {
+                        m_coordination[i]++;
+                        m_coordination[j]++;
+                        m_stored_bonds[i].push_back(j);
+                        m_stored_bonds[j].push_back(i);
+                        m_ignored_vdw[i].insert(j);
+                        m_ignored_vdw[j].insert(i);
+                    }
+                    m_topo(i, j) = 1;
+                    m_topo(j, i) = 1;
+                }
+            }
+        }
+    } else if (formed_bonds.size() == 0) {
         for (int i = 0; i < m_atoms; ++i) {
             m_stored_bonds.push_back(std::vector<int>());
             m_ignored_vdw.push_back(std::set<int>({ i }));

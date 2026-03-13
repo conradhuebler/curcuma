@@ -72,7 +72,7 @@ public:
     /**
      * @brief Auto-select best optimizer for system
      */
-    static OptimizerType selectOptimalOptimizer(const Molecule& molecule,
+    static OptimizerType selectOptimalOptimizer(const curcuma::Molecule& molecule,
         const json& preferences = json{});
 
 private:
@@ -100,7 +100,7 @@ public:
      * @brief Optimize molecule with specified method
      */
     static OptimizationResult optimizeStructure(
-        Molecule* molecule,
+        curcuma::Molecule* molecule,
         OptimizerType optimizer_type,
         EnergyCalculator* energy_calculator,
         const json& config = json{});
@@ -109,7 +109,7 @@ public:
      * @brief Optimize molecule with string method name
      */
     static OptimizationResult optimizeStructure(
-        Molecule* molecule,
+        curcuma::Molecule* molecule,
         const std::string& method_name,
         EnergyCalculator* energy_calculator,
         const json& config = json{});
@@ -118,7 +118,7 @@ public:
      * @brief Optimize multiple molecules (batch processing)
      */
     static std::vector<OptimizationResult> optimizeBatch(
-        const std::vector<Molecule>& molecules,
+        const std::vector<curcuma::Molecule>& molecules,
         OptimizerType optimizer_type,
         EnergyCalculator* energy_calculator,
         const json& config = json{});
@@ -127,7 +127,7 @@ public:
      * @brief Auto-optimize with best method selection
      */
     static OptimizationResult autoOptimize(
-        Molecule* molecule,
+        curcuma::Molecule* molecule,
         EnergyCalculator* energy_calculator,
         const json& preferences = json{});
 

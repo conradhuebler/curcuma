@@ -21,17 +21,15 @@
 
 #include "json.hpp"
 #include "src/core/curcuma_logger.h"
+#include "src/core/global.h"
 #include <memory>
 #include <string>
 #include <vector>
 
 using json = nlohmann::json;
 
-// Forward declarations
-class Molecule;
-class EnergyCalculator;
-typedef Eigen::VectorXd Vector;
-typedef Eigen::Matrix<double, -1, -1> Matrix;
+namespace curcuma { class Molecule; }
+using curcuma::Molecule;
 
 namespace Optimization {
 
@@ -57,6 +55,13 @@ OptimizerType parseOptimizerType(const std::string& method_name);
  */
 std::string optimizerTypeToString(OptimizerType type);
 
+} // namespace Optimization
+
+// Need Molecule definition for the struct
+#include "src/core/molecule.h"
+
+namespace Optimization {
+
 /**
  * @brief Optimization result container - Claude Generated
  * Structured result replacing string-based output accumulation
@@ -66,7 +71,7 @@ struct OptimizationResult {
     std::string error_message;
 
     // Final state
-    Molecule final_molecule;
+    curcuma::Molecule final_molecule;
     double final_energy = 0.0;
     Vector final_gradient;
 
@@ -77,14 +82,14 @@ struct OptimizationResult {
     double final_gradient_norm = 0.0; // Eh/Bohr
 
     // Trajectory
-    std::vector<Molecule> trajectory;
+    std::vector<curcuma::Molecule> trajectory;
     std::vector<double> energy_trajectory;
 
     // Timing
     double optimization_time_seconds = 0.0;
 
     // Factory methods for common cases
-    static OptimizationResult success_result(const Molecule& final_mol, double energy,
+    static OptimizationResult success_result(const curcuma::Molecule& final_mol, double energy,
         int iterations, double time_s);
     static OptimizationResult failed_result(const std::string& error);
 };
@@ -98,12 +103,12 @@ public:
     virtual ~OptimizerInterface() = default;
 
     // Multiple initialization methods (analog to QMInterface)
-    virtual bool InitializeOptimization(const Molecule& molecule) = 0;
-    virtual bool InitializeOptimization(const Molecule* molecule) = 0;
+    virtual bool InitializeOptimization(const curcuma::Molecule& molecule) = 0;
+    virtual bool InitializeOptimization(const curcuma::Molecule* molecule) = 0;
     virtual bool InitializeOptimization(const double* coordinates, int atom_count) = 0;
 
     // Geometry updates (analog to QMInterface::UpdateMolecule)
-    virtual bool UpdateGeometry(const Molecule& molecule) = 0;
+    virtual bool UpdateGeometry(const curcuma::Molecule& molecule) = 0;
     virtual bool UpdateGeometry(const double* coordinates) = 0;
 
     // Core optimization method (analog to QMInterface::Calculation)
@@ -113,7 +118,7 @@ public:
     virtual Vector GetCurrentGradient() const = 0;
     virtual double GetCurrentEnergy() const = 0;
     virtual Matrix GetCurrentHessian() const = 0;
-    virtual std::vector<Molecule> GetTrajectory() const = 0;
+    virtual std::vector<curcuma::Molecule> GetTrajectory() const = 0;
 
     // Configuration management (analog to QMInterface)
     virtual void LoadConfiguration(const json& config) = 0;
