@@ -97,10 +97,11 @@ private:
     double calculateTripleScale(int i, int j, int k) const;
 
     // Reference data from GFN-FF Fortran implementation
-    static const int MAX_ELEM = 118;
-    static const int MAX_REF = 7;
-    static const int N_FREQ = 23;  // Frequency grid points
-    static const int N_REFQ = 17;  // Reference charge states
+    // constexpr ensures inline definition (ODR-safe for C++14 and C++17)
+    static constexpr int MAX_ELEM = 118;
+    static constexpr int MAX_REF = 7;
+    static constexpr int N_FREQ = 23;  // Frequency grid points
+    static constexpr int N_REFQ = 17;  // Reference charge states
 
     // D4 reference data from external/gfnff/src/dftd4param.f90
     std::vector<int> m_refn;    // Number of reference systems per element
