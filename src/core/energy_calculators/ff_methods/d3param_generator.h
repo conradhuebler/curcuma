@@ -153,8 +153,8 @@ private:
     int getElementPairIndex(int elem1, int elem2) const;
 
     // Reference data from s-dftd3 (COMPLETE MAX_REF=7)
-    static const int MAX_ELEM = 103;  // Updated to match s-dftd3 (103 vs 94)
-    static const int MAX_REF = 7;     // CRITICAL FIX: s-dftd3 uses 7 references
+    static constexpr int MAX_ELEM = 103;  // Updated to match s-dftd3 (103 vs 94)
+    static constexpr int MAX_REF = 7;     // CRITICAL FIX: s-dftd3 uses 7 references
 
     std::vector<std::vector<std::vector<double>>> m_reference_c6;  // Legacy structure
     std::vector<double> m_reference_c6_flat;  // Flat storage for 2375 extracted values

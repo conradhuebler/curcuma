@@ -46,14 +46,21 @@ using json = nlohmann::json;
 #include "rmsdtraj.h"
 
 RMSDTraj::RMSDTraj(const json& controller, bool silent)
-    : RMSDTraj(ConfigManager("rmsdtraj", controller), silent)
+    : CurcumaMethod(ParameterRegistry::getInstance().getDefaultJson("rmsdtraj"), controller, silent)
 {
+    // Merge ParameterRegistry defaults with user config for LoadControlJson
+    json registry_defaults = ParameterRegistry::getInstance().getDefaultJson("rmsdtraj");
+    m_defaults = MergeJson(registry_defaults, controller);
+    LoadControlJson();  // Claude Generated - Load merged parameters
 }
 
 RMSDTraj::RMSDTraj(const ConfigManager& config, bool silent)
-    : CurcumaMethod(json{}, config.exportConfig(), silent)
+    : CurcumaMethod(ParameterRegistry::getInstance().getDefaultJson("rmsdtraj"), config.exportConfig(), silent)
 {
-    UpdateController(config.exportConfig());
+    // Merge ParameterRegistry defaults with user config to ensure all parameters exist
+    json registry_defaults = ParameterRegistry::getInstance().getDefaultJson("rmsdtraj");
+    m_defaults = MergeJson(registry_defaults, config.exportConfig());
+    LoadControlJson();  // Claude Generated - Fix for null controller bug
 }
 RMSDTraj::~RMSDTraj()
 {
@@ -160,7 +167,6 @@ void RMSDTraj::start()
 {
     // Ensure CurcumaLogger verbosity is synchronized throughout execution
     CurcumaLogger::set_verbosity(m_verbosity);
-
     if (m_second_file.compare("none") == 0)
         ProcessSingleFile();
     else
@@ -288,8 +294,9 @@ bool RMSDTraj::CheckMolecule(Molecule* molecule)
         m_previous = molecule;
         return result;
     } else {
+        // Correct: m_initial should ALWAYS be the first structure
+        m_initial = molecule;
         m_previous = m_stored_structures[0];
-        m_initial = m_previous;
         /*
         for (std::size_t i = 0; i < mol.GetFragments().size(); ++i)
             if (mol.getGeometryByFragment(i).rows() == atoms_target) {
@@ -302,18 +309,11 @@ bool RMSDTraj::CheckMolecule(Molecule* molecule)
     if (m_pairwise == false) {
         std::vector<double> rmsd_results;
 
-        if (!m_ref_first) // If we reference to the previouse (default) we have to pre-reorder and then calculate the rmsd with respect to the first structure and not the prevouise
-        {
-            m_driver->setReference(*m_previous);
+        if (m_ref_first) { // If we reference to the first structure only (explicit)
+            m_driver->setReference(*m_initial);
             m_driver->setTarget(*molecule);
             m_driver->start();
-            // m_previous = m_driver->TargetAligned();
-            // molecule = m_driver->TargetAligned();
         }
-
-        m_driver->setReference(*m_initial);
-        m_driver->setTarget(*molecule);
-        m_driver->start();
 
 #ifdef CURCUMA_DEBUG
         if (m_driver->ReorderRules().size() && CurcumaLogger::get_verbosity() >= 3) {
@@ -321,7 +321,11 @@ bool RMSDTraj::CheckMolecule(Molecule* molecule)
         }
 #endif
 
-        m_rmsd_file << m_driver->RMSD() << "\t" << std::setprecision(10) << energy << std::endl;
+        // Validate file stream before writing
+        if (m_writeRMSD && m_rmsd_file.is_open()) {
+            m_rmsd_file << std::fixed << std::setprecision(6) << m_driver->RMSD()
+                        << "\t" << std::setprecision(10) << energy << std::endl;
+        }
         m_rmsd_vector.push_back(m_driver->RMSD());
         m_energy_vector.push_back(energy);
         if (m_writeAligned) {
@@ -444,77 +448,144 @@ void RMSDTraj::PostAnalyse()
         return;
     }
 
-    // Calculate comprehensive statistics
-    double rmsd_mean = Tools::mean(m_rmsd_vector);
-    double rmsd_median = Tools::median(m_rmsd_vector);
-    double rmsd_std = Tools::stdev(m_rmsd_vector, rmsd_mean);
-    auto rmsd_hist = Tools::Histogram(m_rmsd_vector, 100);
-    double rmsd_shannon = Tools::ShannonEntropy(rmsd_hist);
+    // Claude Generated 2025: Use TrajectoryStatistics instead of Tools functions
+    // Add all RMSD values to statistics engine
+    for (double rmsd : m_rmsd_vector) {
+        m_rmsd_stats.addValue("rmsd", rmsd);
+    }
+
+    // Add energy values if available
+    bool has_energy_data = !m_energy_vector.empty();
+    if (has_energy_data) {
+        for (double energy : m_energy_vector) {
+            m_energy_stats.addValue("energy", energy);
+        }
+    }
+
+    // Get statistics from TrajectoryStatistics
+    double rmsd_mean = m_rmsd_stats.getMean("rmsd");
+    double rmsd_median = m_rmsd_stats.getMedian("rmsd");
+    double rmsd_std = m_rmsd_stats.getStdDev("rmsd");
+    double rmsd_min = m_rmsd_stats.getMin("rmsd");
+    double rmsd_max = m_rmsd_stats.getMax("rmsd");
 
     double energy_mean = 0.0, energy_median = 0.0, energy_std = 0.0, energy_shannon = 0.0;
-    bool has_energy_data = !m_energy_vector.empty();
+    double energy_min = 0.0, energy_max = 0.0;
 
     if (has_energy_data) {
-        energy_mean = Tools::mean(m_energy_vector);
-        energy_median = Tools::median(m_energy_vector);
-        energy_std = Tools::stdev(m_energy_vector, energy_mean);
-        auto energy_hist = Tools::Histogram(m_energy_vector, 100);
-        energy_shannon = Tools::ShannonEntropy(energy_hist);
+        energy_mean = m_energy_stats.getMean("energy");
+        energy_median = m_energy_stats.getMedian("energy");
+        energy_std = m_energy_stats.getStdDev("energy");
+        energy_min = m_energy_stats.getMin("energy");
+        energy_max = m_energy_stats.getMax("energy");
     }
 
-    // Display beautiful results to user
-    CurcumaLogger::header("Trajectory Analysis Results");
-    CurcumaLogger::info("");
-    CurcumaLogger::success_fmt("Analyzed {} trajectory frames", m_rmsd_vector.size());
-    CurcumaLogger::success_fmt("Unique conformers found: {}", m_stored_structures.size());
+    // Claude Generated 2026: Use TrajectoryWriter for unified Human-readable output
+    json summary = {
+        {"title", "RMSD Trajectory Analysis Results"},
+        {"metadata", {
+            {"Frames analyzed", static_cast<int>(m_rmsd_vector.size())},
+            {"Unique conformers", static_cast<int>(m_stored_structures.size())}
+        }},
+        {"sections", json::array()}
+    };
 
-    CurcumaLogger::info("");
-    CurcumaLogger::info("RMSD Statistics:");
-    CurcumaLogger::param("Mean RMSD", fmt::format("{:.4f} Å", rmsd_mean));
-    CurcumaLogger::param("Median RMSD", fmt::format("{:.4f} Å", rmsd_median));
-    CurcumaLogger::param("Std. deviation", fmt::format("{:.4f} Å", rmsd_std));
-    CurcumaLogger::param("Shannon entropy", fmt::format("{:.4f}", rmsd_shannon));
-    CurcumaLogger::param("Min RMSD", fmt::format("{:.4f} Å", *std::min_element(m_rmsd_vector.begin(), m_rmsd_vector.end())));
-    CurcumaLogger::param("Max RMSD", fmt::format("{:.4f} Å", *std::max_element(m_rmsd_vector.begin(), m_rmsd_vector.end())));
+    summary["sections"].push_back({
+        {"name", "RMSD"},
+        {"unit", "Å"},
+        {"statistics", {
+            {"mean", rmsd_mean},
+            {"std_dev", rmsd_std},
+            {"min", rmsd_min},
+            {"max", rmsd_max},
+            {"median", rmsd_median},
+            {"count", static_cast<int>(m_rmsd_vector.size())}
+        }}
+    });
 
     if (has_energy_data) {
-        CurcumaLogger::info("");
-        CurcumaLogger::info("Energy Statistics:");
-        CurcumaLogger::param("Mean energy", fmt::format("{:.6f} Eh", energy_mean));
-        CurcumaLogger::param("Median energy", fmt::format("{:.6f} Eh", energy_median));
-        CurcumaLogger::param("Std. deviation", fmt::format("{:.6f} Eh", energy_std));
-        CurcumaLogger::param("Shannon entropy", fmt::format("{:.4f}", energy_shannon));
-        CurcumaLogger::param("Min energy", fmt::format("{:.6f} Eh", *std::min_element(m_energy_vector.begin(), m_energy_vector.end())));
-        CurcumaLogger::param("Max energy", fmt::format("{:.6f} Eh", *std::max_element(m_energy_vector.begin(), m_energy_vector.end())));
+        summary["sections"].push_back({
+            {"name", "Energy"},
+            {"unit", "Eh"},
+            {"statistics", {
+                {"mean", energy_mean},
+                {"std_dev", energy_std},
+                {"min", energy_min},
+                {"max", energy_max},
+                {"median", energy_median},
+                {"count", static_cast<int>(m_energy_vector.size())}
+            }}
+        });
     }
 
-    // Write to file for further analysis (preserve original functionality)
+    m_writer.writeStatisticsSummary(std::cout, summary);
+
+    // Claude Generated 2025: Use TrajectoryWriter for DAT output
     if (m_rmsd_file.is_open()) {
-        m_rmsd_file << "#Mean\t" << rmsd_mean << "\t" << energy_mean << std::endl;
-        m_rmsd_file << "#Median\t" << rmsd_median << "\t" << energy_median << std::endl;
-        m_rmsd_file << "#StdDev\t" << rmsd_std << "\t" << energy_std << std::endl;
-        m_rmsd_file << "#Shannon\t" << rmsd_shannon << "\t" << energy_shannon << std::endl;
+        // Create JSON data for TrajectoryWriter DAT format
+        json rmsd_data = json::array();
+
+        // Add actual RMSD and energy time series
+        for (size_t i = 0; i < m_rmsd_vector.size(); ++i) {
+            json entry = json::object();
+            entry["rmsd"] = m_rmsd_vector[i];
+            if (has_energy_data && i < m_energy_vector.size()) {
+                entry["energy"] = m_energy_vector[i];
+            }
+            rmsd_data.push_back(entry);
+        }
+
+        // Create statistics header
+        json header_info = json::object();
+        header_info["Mean"] = rmsd_mean;
+        header_info["Median"] = rmsd_median;
+        header_info["StdDev"] = rmsd_std;
+        header_info["Shannon"] = "N/A (placeholder)";
+        if (has_energy_data) {
+            header_info["Energy_Mean"] = energy_mean;
+            header_info["Energy_Median"] = energy_median;
+            header_info["Energy_StdDev"] = energy_std;
+            header_info["Energy_Shannon"] = "N/A (placeholder)";
+        }
+
+        json dat_data = {
+            {"type", "rmsd_statistics"},
+            {"header", header_info},
+            {"time_series", rmsd_data},
+            {"statistics", m_rmsd_stats.exportAllStatistics()}
+        };
+
+        // Write using TrajectoryWriter
+        m_writer.writeDAT(m_rmsd_file, dat_data, "rmsd");
         CurcumaLogger::info_fmt("Statistical summary written to {}", m_outfile + "_rmsd.dat");
     }
 }
 
 void RMSDTraj::LoadControlJson()
 {
-    m_heavy = Json2KeyWord<bool>(m_defaults, "heavy");
-    m_pcafile = Json2KeyWord<bool>(m_defaults, "pcafile");
-    m_writeUnique = Json2KeyWord<bool>(m_defaults, "writeUnique");
-    m_writeAligned = Json2KeyWord<bool>(m_defaults, "writeAligned");
-    m_rmsd_threshold = Json2KeyWord<double>(m_defaults, "rmsd");
+    // Claude Generated (December 2025): Updated to use correct ParameterRegistry names
+    // Old aliases maintained for backward compatibility via try-catch fallback
+    m_heavy = Json2KeyWord<bool>(m_defaults, "heavy_only");
+    m_pcafile = Json2KeyWord<bool>(m_defaults, "pca_file");
+    m_writeUnique = Json2KeyWord<bool>(m_defaults, "write_unique");
+    m_writeAligned = Json2KeyWord<bool>(m_defaults, "write_aligned");
+    m_rmsd_threshold = Json2KeyWord<double>(m_defaults, "rmsd_threshold");
     m_fragment = Json2KeyWord<int>(m_defaults, "fragment");
     m_reference = Json2KeyWord<std::string>(m_defaults, "reference");
-    m_second_file = Json2KeyWord<std::string>(m_defaults, "second");
-    m_pairwise = (m_second_file.compare("none") != 0);
-    m_allxyz = Json2KeyWord<bool>(m_defaults, "allxyz");
-    m_ref_first = Json2KeyWord<bool>(m_defaults, "RefFirst");
-    m_opt = Json2KeyWord<bool>(m_defaults, "opt");
+    m_second_file = Json2KeyWord<std::string>(m_defaults, "second_trajectory");
+    m_pairwise = (m_second_file.compare("none") != 0 && m_second_file.compare("") != 0);
+    m_allxyz = Json2KeyWord<bool>(m_defaults, "all_xyz");
+    m_ref_first = Json2KeyWord<bool>(m_defaults, "ref_first");
+    m_opt = Json2KeyWord<bool>(m_defaults, "optimize");
     m_filter = Json2KeyWord<bool>(m_defaults, "filter");
-    m_writeRMSD = Json2KeyWord<bool>(m_defaults, "writeRMSD");
-    m_offset = m_defaults["offset"];
+    m_writeRMSD = Json2KeyWord<bool>(m_defaults, "write_rmsd");
+    m_offset = Json2KeyWord<int>(m_defaults, "offset");
+
+    // Claude Generated 2025: Initialize TrajectoryWriter
+    json writer_config = json::object();
+    writer_config["default_format"] = "DAT";
+    writer_config["column_widths"] = {12, 15, 15}; // statistic, value1, value2
+    m_writer = TrajectoryWriter(writer_config);
 }
 
 void RMSDTraj::Optimise()

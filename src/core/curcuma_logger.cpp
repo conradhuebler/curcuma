@@ -59,6 +59,14 @@ void CurcumaLogger::initialize(int verbosity, bool auto_detect_colors)
 
     m_use_colors = use_colors;
     m_format = OutputFormat::TERMINAL;
+
+    // Check for plain mode (no colors, no prefixes - like ORCA/Gaussian)
+    // Claude Generated
+    if (std::getenv("CURCUMA_PLAIN")) {
+        m_format = OutputFormat::PLAIN;
+        m_use_colors = false;
+    }
+
     m_start_time = std::chrono::high_resolution_clock::now();
 }
 
@@ -323,7 +331,10 @@ void CurcumaLogger::debug_timing(const std::string& label)
 
 void CurcumaLogger::log_colored(fmt::color color, const std::string& prefix, const std::string& msg, bool force)
 {
-    if (m_use_colors || force) {
+    if (m_format == OutputFormat::PLAIN) {
+        // Plain mode: content only, no prefixes, no colors (like ORCA/Gaussian)
+        fmt::print("{}\n", msg);
+    } else if (m_use_colors || force) {
         fmt::print(fmt::fg(color), "{}{}\n", prefix, msg);
     } else {
         fmt::print("{}{}\n", prefix, msg);

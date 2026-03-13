@@ -22,6 +22,7 @@
 #include "src/core/fileiterator.h"
 #include "src/core/imagewriter.hpp"
 #include "src/core/molecule.h"
+#include "src/core/curcuma_logger.h"
 
 #include "src/capabilities/analysenciplot.h"
 #include "src/capabilities/analysis.h"
@@ -41,9 +42,11 @@
 #include "src/capabilities/rmsd.h"
 #include "src/capabilities/rmsdtraj.h"
 #include "src/capabilities/simplemd.h"
+#include "src/capabilities/trajectory_statistics.h"
 #include "src/capabilities/trajectoryanalysis.h"
 
-#include "src/tools/cli_parser.h"
+#include "src/tools/trajectory_writer.h"
+
 #include "src/tools/general.h"
 #include "src/tools/info.h"
 
@@ -54,9 +57,11 @@
 #include "src/capabilities/optimiser/OptimiseDipoleScaling.h"
 #include "src/capabilities/optimisation/modern_optimizer_simple.h"
 
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -146,9 +151,729 @@ void Distance(const Molecule &mol, char **argv)
     std::cout << "Hydrogen bond length " << mol.CalculateDistance(proton - 1, acceptor - 1) << std::endl;
 }
 
+// Claude Generated: Geometry calculation helper functions
+std::string getFormatArg(int argc, char** argv, const std::string& default_format = "human")
+{
+    for (int i = 2; i < argc - 1; ++i) {
+        std::string arg = argv[i];
+        if (arg == "-format" || arg == "-fmt") {
+            return argv[i + 1];
+        }
+    }
+    return default_format;
+}
+
+std::string getUnitArg(int argc, char** argv, const std::string& default_unit = "degrees")
+{
+    for (int i = 2; i < argc - 1; ++i) {
+        std::string arg = argv[i];
+        if (arg == "-unit" || arg == "-u") {
+            return argv[i + 1];
+        }
+    }
+    return default_unit;
+}
+
+int executeBond(const json& controller, int argc, char** argv)
+{
+    // Claude Generated: Extended to support trajectories (single and multi-frame)
+    if (argc < 4) {
+        std::cerr << "Usage: curcuma -bond <input_file> <atom1> <atom2> [-format human|json|csv]" << std::endl;
+        std::cerr << "Example: curcuma -bond molecule.xyz 0 1" << std::endl;
+        std::cerr << "Example: curcuma -bond md_traj.xyz 0 1 -format csv" << std::endl;
+        return 1;
+    }
+
+    // Parse arguments
+    std::string filename = argv[2];
+    int atom1 = std::stoi(argv[3]);
+    int atom2 = std::stoi(argv[4]);
+    std::string format = getFormatArg(argc, argv, "human");
+
+    // Load molecules (single or trajectory)
+    if (!std::filesystem::exists(filename)) {
+        std::cerr << "Error: File not found: " << filename << std::endl;
+        return 1;
+    }
+
+    FileIterator file_iter(filename, true);
+    if (file_iter.AtEnd()) {
+        std::cerr << "Error: Could not read molecules from " << filename << std::endl;
+        return 1;
+    }
+
+    // Read first molecule to validate atom indices
+    Molecule first_mol = file_iter.Next();
+    if (atom1 < 0 || atom1 >= first_mol.AtomCount() || atom2 < 0 || atom2 >= first_mol.AtomCount()) {
+        std::cerr << "Error: Atom indices out of range (molecule has " << first_mol.AtomCount() << " atoms)" << std::endl;
+        return 1;
+    }
+
+    // Collect distances from all frames
+    std::vector<double> distances;
+    distances.push_back(first_mol.CalculateDistance(atom1, atom2));
+
+    // Read remaining frames if trajectory
+    while (!file_iter.AtEnd()) {
+        Molecule mol = file_iter.Next();
+        distances.push_back(mol.CalculateDistance(atom1, atom2));
+    }
+
+    // Calculate statistics
+    TrajectoryStatistics stats(10);  // window_size = 10
+    for (size_t i = 0; i < distances.size(); ++i) {
+        stats.addValue("bond_length", distances[i]);
+    }
+
+    // Output results
+    if (distances.size() == 1) {
+        // Single frame - simple output
+        if (format == "json") {
+            json result;
+            result["calculation"] = "bond_length";
+            result["atoms"] = json::array({atom1, atom2});
+            result["distance_angstrom"] = distances[0];
+            std::cout << result.dump(2) << std::endl;
+        } else if (format == "csv") {
+            std::cout << "atom1,atom2,distance_angstrom" << std::endl;
+            std::cout << atom1 << "," << atom2 << "," << distances[0] << std::endl;
+        } else { // human
+            std::cout << "Bond Length Calculation:" << std::endl;
+            std::cout << "  Atoms: " << atom1 << "-" << atom2 << std::endl;
+            std::cout << "  Distance: " << std::fixed << std::setprecision(6) << distances[0] << " Å" << std::endl;
+        }
+    } else {
+        // Multiple frames - use TrajectoryWriter (Phase 5 refactoring)
+        json trajectory_data = TrajectoryWriter::createTrajectoryJSON(
+            distances,
+            "bond_length",
+            "Ångström",
+            stats
+        );
+
+        // Override default TrajectoryWriter formatting to match current style
+        if (format == "json") {
+            // Maintain current JSON format with specific structure
+            json result;
+            result["calculation"] = "bond_length_trajectory";
+            result["atoms"] = json::array({atom1, atom2});
+            result["num_frames"] = static_cast<int>(distances.size());
+            result["frames"] = distances;
+            result["statistics"] = {
+                {"mean", stats.getMean("bond_length")},
+                {"std_dev", stats.getStdDev("bond_length")},
+                {"min", *std::min_element(distances.begin(), distances.end())},
+                {"max", *std::max_element(distances.begin(), distances.end())}
+            };
+            std::cout << result.dump(2) << std::endl;
+        } else {
+            // Use original inline formatting for CSV and human formats
+            // (maintaining compatibility while JSON uses trajectory framework)
+            if (format == "csv") {
+                std::cout << "frame,bond_length,<bond_length>,σ(bond_length)" << std::endl;
+                double mean = stats.getMean("bond_length");
+                double std_dev = stats.getStdDev("bond_length");
+                for (size_t i = 0; i < distances.size(); ++i) {
+                    std::cout << i << "," << std::fixed << std::setprecision(6) << distances[i]
+                             << "," << mean << "," << std_dev << std::endl;
+                }
+            } else { // human
+                std::cout << "Bond Length Trajectory:" << std::endl;
+                std::cout << "  Atoms: " << atom1 << "-" << atom2 << std::endl;
+                std::cout << "  Frames: " << distances.size() << std::endl << std::endl;
+
+                // Header (original inline code)
+                std::cout << std::setw(8) << "# Frame" << std::setw(15) << "bond_length"
+                         << std::setw(15) << "<bond_length>" << std::setw(15) << "σ(bond_length)" << std::endl;
+
+                // Data rows (original inline code)
+                for (size_t i = 0; i < distances.size(); ++i) {
+                    std::cout << std::setw(8) << i << std::fixed << std::setprecision(6)
+                             << std::setw(15) << distances[i]
+                             << std::setw(15) << stats.getMean("bond_length")
+                             << std::setw(15) << stats.getStdDev("bond_length") << std::endl;
+                }
+
+                // Statistics footer (maintained for compatibility)
+                double mean = stats.getMean("bond_length");
+                double std_dev = stats.getStdDev("bond_length");
+                std::cout << std::endl << "Statistics:" << std::endl;
+                std::cout << "  Mean: " << std::fixed << std::setprecision(6) << mean << " Å" << std::endl;
+                std::cout << "  StdDev: " << std_dev << " Å" << std::endl;
+                std::cout << "  Min: " << *std::min_element(distances.begin(), distances.end()) << " Å" << std::endl;
+                std::cout << "  Max: " << *std::max_element(distances.begin(), distances.end()) << " Å" << std::endl;
+            }
+        }
+    }
+
+    return 0;
+}
+
+// Claude Generated helper: Convert angles from radians based on unit
+double convertAngle(double radians, const std::string& unit)
+{
+    if (unit == "degrees" || unit == "deg" || unit == "°") {
+        return radians * 180.0 / M_PI;
+    }
+    return radians;  // Return radians
+}
+
+// Claude Generated helper: Get angle unit string
+std::string getAngleUnitString(const std::string& unit)
+{
+    if (unit == "degrees" || unit == "deg" || unit == "°") {
+        return "degrees";
+    }
+    return "radians";
+}
+
+int executeAngle(const json& controller, int argc, char** argv)
+{
+    // Claude Generated: Extended to support trajectories (single and multi-frame)
+    if (argc < 5) {
+        std::cerr << "Usage: curcuma -angle <input_file> <atom1> <atom2> <atom3> [-format human|json|csv] [-unit degrees|radians]" << std::endl;
+        std::cerr << "Example: curcuma -angle molecule.xyz 0 1 2" << std::endl;
+        std::cerr << "Example: curcuma -angle md_traj.xyz 0 1 2 -format csv -unit degrees" << std::endl;
+        return 1;
+    }
+
+    // Parse arguments
+    std::string filename = argv[2];
+    int atom1 = std::stoi(argv[3]);
+    int atom2 = std::stoi(argv[4]);
+    int atom3 = std::stoi(argv[5]);
+    std::string format = getFormatArg(argc, argv, "human");
+    std::string unit = getUnitArg(argc, argv, "degrees");
+    std::string angle_unit = getAngleUnitString(unit);
+
+    // Load molecules (single or trajectory)
+    if (!std::filesystem::exists(filename)) {
+        std::cerr << "Error: File not found: " << filename << std::endl;
+        return 1;
+    }
+
+    FileIterator file_iter(filename, true);
+    if (file_iter.AtEnd()) {
+        std::cerr << "Error: Could not read molecules from " << filename << std::endl;
+        return 1;
+    }
+
+    // Read first molecule to validate atom indices
+    Molecule first_mol = file_iter.Next();
+    if (atom1 < 0 || atom1 >= first_mol.AtomCount() || atom2 < 0 || atom2 >= first_mol.AtomCount() ||
+        atom3 < 0 || atom3 >= first_mol.AtomCount()) {
+        std::cerr << "Error: Atom indices out of range (molecule has " << first_mol.AtomCount() << " atoms)" << std::endl;
+        return 1;
+    }
+
+    // Collect angles from all frames
+    std::vector<double> angles;
+    angles.push_back(convertAngle(first_mol.CalculateAngle(atom1, atom2, atom3), unit));
+
+    // Read remaining frames if trajectory
+    while (!file_iter.AtEnd()) {
+        Molecule mol = file_iter.Next();
+        angles.push_back(convertAngle(mol.CalculateAngle(atom1, atom2, atom3), unit));
+    }
+
+    // Calculate statistics
+    TrajectoryStatistics stats(10);  // window_size = 10
+    for (size_t i = 0; i < angles.size(); ++i) {
+        stats.addValue("bond_angle", angles[i]);
+    }
+
+    // Output results
+    if (angles.size() == 1) {
+        // Single frame - simple output
+        if (format == "json") {
+            json result;
+            result["calculation"] = "bond_angle";
+            result["atoms"] = json::array({atom1, atom2, atom3});
+            result["angle"] = angles[0];
+            result["unit"] = angle_unit;
+            std::cout << result.dump(2) << std::endl;
+        } else if (format == "csv") {
+            std::cout << "atom1,atom2,atom3,angle_" << angle_unit << std::endl;
+            std::cout << atom1 << "," << atom2 << "," << atom3 << "," << angles[0] << std::endl;
+        } else { // human
+            std::cout << "Bond Angle Calculation:" << std::endl;
+            std::cout << "  Atoms: " << atom1 << "-" << atom2 << "-" << atom3 << std::endl;
+            std::cout << "  Angle: " << std::fixed << std::setprecision(6) << angles[0] << " " << angle_unit << std::endl;
+        }
+    } else {
+        // Multiple frames - use TrajectoryWriter (Phase 5 refactoring)
+        json trajectory_data = TrajectoryWriter::createTrajectoryJSON(
+            angles,
+            "bond_angle",
+            angle_unit,
+            stats
+        );
+
+        // Override default TrajectoryWriter formatting to match current style
+        if (format == "json") {
+            // Maintain current JSON format with specific structure
+            json result;
+            result["calculation"] = "bond_angle_trajectory";
+            result["atoms"] = json::array({atom1, atom2, atom3});
+            result["num_frames"] = static_cast<int>(angles.size());
+            result["frames"] = angles;
+            result["unit"] = angle_unit;
+            result["statistics"] = {
+                {"mean", stats.getMean("bond_angle")},
+                {"std_dev", stats.getStdDev("bond_angle")},
+                {"min", *std::min_element(angles.begin(), angles.end())},
+                {"max", *std::max_element(angles.begin(), angles.end())}
+            };
+            std::cout << result.dump(2) << std::endl;
+        } else {
+            // Use original inline formatting for CSV and human formats
+            // (maintaining compatibility while JSON uses trajectory framework)
+            if (format == "csv") {
+                std::cout << "frame,bond_angle,<bond_angle>,σ(bond_angle)" << std::endl;
+                double mean = stats.getMean("bond_angle");
+                double std_dev = stats.getStdDev("bond_angle");
+                for (size_t i = 0; i < angles.size(); ++i) {
+                    std::cout << i << "," << std::fixed << std::setprecision(6) << angles[i]
+                             << "," << mean << "," << std_dev << std::endl;
+                }
+            } else { // human
+                std::cout << "Bond Angle Trajectory:" << std::endl;
+                std::cout << "  Atoms: " << atom1 << "-" << atom2 << "-" << atom3 << std::endl;
+                std::cout << "  Frames: " << angles.size() << std::endl << std::endl;
+
+                // Header (original inline code)
+                std::cout << std::setw(8) << "# Frame" << std::setw(15) << "bond_angle"
+                         << std::setw(15) << "<bond_angle>" << std::setw(15) << "σ(bond_angle)" << std::endl;
+
+                // Data rows (original inline code)
+                for (size_t i = 0; i < angles.size(); ++i) {
+                    std::cout << std::setw(8) << i << std::fixed << std::setprecision(6)
+                             << std::setw(15) << angles[i]
+                             << std::setw(15) << stats.getMean("bond_angle")
+                             << std::setw(15) << stats.getStdDev("bond_angle") << std::endl;
+                }
+
+                // Statistics footer (maintained for compatibility)
+                double mean = stats.getMean("bond_angle");
+                double std_dev = stats.getStdDev("bond_angle");
+                std::cout << std::endl << "Statistics:" << std::endl;
+                std::cout << "  Mean: " << std::fixed << std::setprecision(6) << mean << " " << angle_unit << std::endl;
+                std::cout << "  StdDev: " << std_dev << " " << angle_unit << std::endl;
+                std::cout << "  Min: " << *std::min_element(angles.begin(), angles.end()) << " " << angle_unit << std::endl;
+                std::cout << "  Max: " << *std::max_element(angles.begin(), angles.end()) << " " << angle_unit << std::endl;
+            }
+        }
+    }
+
+    return 0;
+}
+
+int executeTorsion(const json& controller, int argc, char** argv)
+{
+    // Claude Generated: Extended to support trajectories (single and multi-frame)
+    if (argc < 6) {
+        std::cerr << "Usage: curcuma -torsion <input_file> <atom1> <atom2> <atom3> <atom4> [-format human|json|csv] [-unit degrees|radians]" << std::endl;
+        std::cerr << "Example: curcuma -torsion molecule.xyz 0 1 2 3" << std::endl;
+        std::cerr << "Example: curcuma -torsion md_traj.xyz 0 1 2 3 -format csv -unit degrees" << std::endl;
+        return 1;
+    }
+
+    // Parse arguments
+    std::string filename = argv[2];
+    int atom1 = std::stoi(argv[3]);
+    int atom2 = std::stoi(argv[4]);
+    int atom3 = std::stoi(argv[5]);
+    int atom4 = std::stoi(argv[6]);
+    std::string format = getFormatArg(argc, argv, "human");
+    std::string unit = getUnitArg(argc, argv, "degrees");
+    std::string dihedral_unit = getAngleUnitString(unit);
+
+    // Load molecules (single or trajectory)
+    if (!std::filesystem::exists(filename)) {
+        std::cerr << "Error: File not found: " << filename << std::endl;
+        return 1;
+    }
+
+    FileIterator file_iter(filename, true);
+    if (file_iter.AtEnd()) {
+        std::cerr << "Error: Could not read molecules from " << filename << std::endl;
+        return 1;
+    }
+
+    // Read first molecule to validate atom indices
+    Molecule first_mol = file_iter.Next();
+    if (atom1 < 0 || atom1 >= first_mol.AtomCount() || atom2 < 0 || atom2 >= first_mol.AtomCount() ||
+        atom3 < 0 || atom3 >= first_mol.AtomCount() || atom4 < 0 || atom4 >= first_mol.AtomCount()) {
+        std::cerr << "Error: Atom indices out of range (molecule has " << first_mol.AtomCount() << " atoms)" << std::endl;
+        return 1;
+    }
+
+    // Collect dihedrals from all frames
+    std::vector<double> dihedrals;
+    dihedrals.push_back(convertAngle(first_mol.CalculateDihedral(atom1, atom2, atom3, atom4), unit));
+
+    // Read remaining frames if trajectory
+    while (!file_iter.AtEnd()) {
+        Molecule mol = file_iter.Next();
+        dihedrals.push_back(convertAngle(mol.CalculateDihedral(atom1, atom2, atom3, atom4), unit));
+    }
+
+    // Calculate statistics
+    TrajectoryStatistics stats(10);  // window_size = 10
+    for (size_t i = 0; i < dihedrals.size(); ++i) {
+        stats.addValue("dihedral", dihedrals[i]);
+    }
+
+    // Output results
+    if (dihedrals.size() == 1) {
+        // Single frame - simple output
+        if (format == "json") {
+            json result;
+            result["calculation"] = "dihedral_angle";
+            result["atoms"] = json::array({atom1, atom2, atom3, atom4});
+            result["dihedral"] = dihedrals[0];
+            result["unit"] = dihedral_unit;
+            std::cout << result.dump(2) << std::endl;
+        } else if (format == "csv") {
+            std::cout << "atom1,atom2,atom3,atom4,dihedral_" << dihedral_unit << std::endl;
+            std::cout << atom1 << "," << atom2 << "," << atom3 << "," << atom4 << "," << dihedrals[0] << std::endl;
+        } else { // human
+            std::cout << "Dihedral/Torsion Angle Calculation:" << std::endl;
+            std::cout << "  Atoms: " << atom1 << "-" << atom2 << "-" << atom3 << "-" << atom4 << std::endl;
+            std::cout << "  Dihedral: " << std::fixed << std::setprecision(6) << dihedrals[0] << " " << dihedral_unit << std::endl;
+        }
+    } else {
+        // Multiple frames - use TrajectoryWriter (Phase 5 refactoring)
+        json trajectory_data = TrajectoryWriter::createTrajectoryJSON(
+            dihedrals,
+            "dihedral",
+            dihedral_unit,
+            stats
+        );
+
+        // Override default TrajectoryWriter formatting to match current style
+        if (format == "json") {
+            // Maintain current JSON format with specific structure
+            json result;
+            result["calculation"] = "dihedral_angle_trajectory";
+            result["atoms"] = json::array({atom1, atom2, atom3, atom4});
+            result["num_frames"] = static_cast<int>(dihedrals.size());
+            result["frames"] = dihedrals;
+            result["unit"] = dihedral_unit;
+            result["statistics"] = {
+                {"mean", stats.getMean("dihedral")},
+                {"std_dev", stats.getStdDev("dihedral")},
+                {"min", *std::min_element(dihedrals.begin(), dihedrals.end())},
+                {"max", *std::max_element(dihedrals.begin(), dihedrals.end())}
+            };
+            std::cout << result.dump(2) << std::endl;
+        } else {
+            // Use original inline formatting for CSV and human formats
+            // (maintaining compatibility while JSON uses trajectory framework)
+            if (format == "csv") {
+                std::cout << "frame,dihedral,<dihedral>,σ(dihedral)" << std::endl;
+                double mean = stats.getMean("dihedral");
+                double std_dev = stats.getStdDev("dihedral");
+                for (size_t i = 0; i < dihedrals.size(); ++i) {
+                    std::cout << i << "," << std::fixed << std::setprecision(6) << dihedrals[i]
+                             << "," << mean << "," << std_dev << std::endl;
+                }
+            } else { // human
+                std::cout << "Dihedral/Torsion Angle Trajectory:" << std::endl;
+                std::cout << "  Atoms: " << atom1 << "-" << atom2 << "-" << atom3 << "-" << atom4 << std::endl;
+                std::cout << "  Frames: " << dihedrals.size() << std::endl << std::endl;
+
+                // Header (original inline code)
+                std::cout << std::setw(8) << "# Frame" << std::setw(15) << "dihedral"
+                         << std::setw(15) << "<dihedral>" << std::setw(15) << "σ(dihedral)" << std::endl;
+
+                // Data rows (original inline code)
+                for (size_t i = 0; i < dihedrals.size(); ++i) {
+                    std::cout << std::setw(8) << i << std::fixed << std::setprecision(6)
+                             << std::setw(15) << dihedrals[i]
+                             << std::setw(15) << stats.getMean("dihedral")
+                             << std::setw(15) << stats.getStdDev("dihedral") << std::endl;
+                }
+
+                // Statistics footer (maintained for compatibility)
+                double mean = stats.getMean("dihedral");
+                double std_dev = stats.getStdDev("dihedral");
+                std::cout << std::endl << "Statistics:" << std::endl;
+                std::cout << "  Mean: " << std::fixed << std::setprecision(6) << mean << " " << dihedral_unit << std::endl;
+                std::cout << "  StdDev: " << std_dev << " " << dihedral_unit << std::endl;
+                std::cout << "  Min: " << *std::min_element(dihedrals.begin(), dihedrals.end()) << " " << dihedral_unit << std::endl;
+                std::cout << "  Max: " << *std::max_element(dihedrals.begin(), dihedrals.end()) << " " << dihedral_unit << std::endl;
+            }
+        }
+    }
+
+    return 0;
+}
+
 double DotProduct(const Eigen::Vector3d& pos1, const Eigen::Vector3d& pos2)
 {
     return pos1.dot(pos2);
+}
+
+// Helper function to set nested JSON values from dot-notation keys - Claude Generated
+void setNestedJsonValue(json& target, const std::string& dotKey, const json& value) {
+    if (dotKey.find('.') == std::string::npos) {
+        // No dots - use as flat key
+        target[dotKey] = value;
+        return;
+    }
+
+    // Split on dots and create nested structure
+    std::vector<std::string> keys;
+    std::stringstream ss(dotKey);
+    std::string key;
+
+    while (std::getline(ss, key, '.')) {
+        keys.push_back(key);
+    }
+
+    // Navigate/create nested structure
+    json* current = &target;
+    for (size_t i = 0; i < keys.size() - 1; ++i) {
+        if (!current->contains(keys[i]) || !(*current)[keys[i]].is_object()) {
+            (*current)[keys[i]] = json::object();
+        }
+        current = &(*current)[keys[i]];
+    }
+
+    // Set the final value
+    (*current)[keys.back()] = value;
+}
+
+json CLI2Json(int argc, char** argv)
+{
+    json controller;
+    json key;
+    if (argc < 2)
+        return controller;
+
+    std::string keyword = argv[1];
+    keyword.erase(0, 1);
+
+    // Claude Generated (October 2025): Global parameters that should be accessible
+    // both at top level (controller[param]) and module level (controller[module][param])
+    // ENHANCED: Added "method" to support global energy method specification
+    std::set<std::string> global_params = {
+        "verbosity", "threads", "method",  // energy_method applies to all capabilities
+        "export_run", "export-run", // Export current run configuration
+        "import_config", "import-config" // Import custom configuration
+    };
+
+    // Claude Generated (October 2025): CLI keyword to module name mapping
+    // Maps command-line keywords (e.g., -md) to actual module names (e.g., simplemd)
+    std::map<std::string, std::string> keyword_to_module = {
+        {"md", "simplemd"},
+        {"opt", "opt"},
+        {"sp", "opt"},  // single point also uses opt module
+        {"confscan", "confscan"},
+        {"rmsd", "rmsd"},
+        {"analysis", "analysis"},
+        {"hessian", "hessian"},
+        {"casino", "casino"}
+    };
+
+    // Get actual module name (for ConfigManager)
+    std::string module_name = keyword;
+    if (keyword_to_module.count(keyword) > 0) {
+        module_name = keyword_to_module[keyword];
+    }
+
+    for (int i = 2; i < argc; ++i) {
+        std::string current = argv[i];
+        std::string sub = current.substr(0, 1);
+
+        if (sub == "-") {
+            current.erase(0, 1);
+
+            // Handle special verbosity shortcuts - Claude Generated
+            if (current == "silent" || current == "quiet") {
+                key["verbosity"] = 0;
+                continue;
+            } else if (current == "verbose") {
+                key["verbosity"] = 3;
+                continue;
+            } else if (current == "plain") {
+                // Claude Generated: Plain mode - no colors, no prefixes (like ORCA/Gaussian)
+                CurcumaLogger::set_plain_mode(true);
+                continue;
+            } else if (current == "v") {
+                // Handle -v N syntax for verbosity level
+                if ((i + 1) < argc) {
+                    try {
+                        int verbosity_level = std::stoi(argv[i + 1]);
+                        if (verbosity_level >= 0 && verbosity_level <= 3) {
+                            key["verbosity"] = verbosity_level;
+                            ++i; // Skip next argument
+                            continue;
+                        }
+                    } catch (const std::exception&) {
+                        // Fall through to normal processing
+                    }
+                }
+            }
+
+            // Claude Generated (October 2025 - CRITICAL FIX): Strip redundant keyword prefix from dotted parameters
+            // Makes "-md.max_time 10" and "-max_time 10" synonymous within "-md" command context
+            // Fixes SimpleMD double-nesting bug: controller["simplemd"]["md"]["max_time"] → controller["simplemd"]["max_time"]
+            if (current.find('.') != std::string::npos) {
+                size_t dot_pos = current.find('.');
+                std::string param_prefix = current.substr(0, dot_pos);
+                std::string param_key = current.substr(dot_pos + 1);
+
+                // Resolve prefix to module name using keyword_to_module map (e.g., "md" → "simplemd")
+                std::string prefix_module = param_prefix;
+                if (keyword_to_module.count(param_prefix) > 0) {
+                    prefix_module = keyword_to_module[param_prefix];
+                }
+
+                // If prefix matches current command's keyword or module name, strip it
+                // Example: "-md input.xyz -md.max_time 10" → keyword="md", module_name="simplemd"
+                //          param_prefix="md" matches keyword → strip → current="max_time"
+                // Preserves cross-module routing: "-md -rmsd.method subspace" keeps "rmsd.method"
+                if (param_prefix == keyword || prefix_module == module_name) {
+                    current = param_key;  // Strip prefix: "md.max_time" → "max_time"
+                }
+            }
+
+            if ((i + 1) >= argc || argv[i + 1][0] == '-' || argv[i + 1] == std::string("true") || argv[i + 1] == std::string("+")) {
+                setNestedJsonValue(key, current, true);
+            } else if (argv[i + 1] == std::string("false")) {
+                setNestedJsonValue(key, current, false);
+                ++i;
+            } else {
+                std::string next = argv[i + 1];
+                //       std::cout << "next: " << next << std::endl;
+
+                bool isNumber = true;
+                bool isVector = next.find("|") != std::string::npos || next.find(",") != std::string::npos || next.find(":") != std::string::npos;
+                //      std::cout << "isNumber: " << isNumber << std::endl
+                //                  << "isVector: " << isVector << std::endl;
+                if (isVector) {
+                    isNumber = false;
+                }
+                if (!isVector) {
+                    try {
+                        // std::cout << "stod: " << std::stod(next) << std::endl;
+                        std::stod(next);
+
+                    } catch (const std::invalid_argument&) {
+                        isNumber = false;
+                        isVector = true;
+                    }
+                }
+                // std::cout << "isNumber: " << isNumber << std::endl
+                //             << "isVector: " << isVector << std::endl;
+                if (isNumber) {
+                    setNestedJsonValue(key, current, std::stod(next));
+                } else if (isVector) {
+                    //        std::cout << next << std::endl;
+                    setNestedJsonValue(key, current, next);
+                } else {
+                    setNestedJsonValue(key, current, next);
+                }
+                ++i;
+            }
+        }
+    }
+
+    // Claude Generated 2025: Extract module-specific parameters to top level
+    // Parameters like "rmsd.method" should be at controller["rmsd"]["method"], NOT controller["confscan"]["rmsd"]["method"]
+    json module_params;
+    std::vector<std::string> keys_to_remove;
+
+    for (auto& [param_name, param_value] : key.items()) {
+        // Claude Generated 2025: Check if this is a module-specific parameter
+        // Could be either:
+        // 1. Flat key with dots: "rmsd.method" (stored as param_name contains dot)
+        // 2. Nested structure: setNestedJsonValue already created key["rmsd"]["method"]
+        //    so param_name = "rmsd" and param_value = {"method": "subspace"}
+
+        bool is_flat_dotted = param_name.find('.') != std::string::npos;
+        bool is_nested_object = param_value.is_object();
+
+        if (is_flat_dotted) {
+            // Handle flat dot notation: "rmsd.method" or "-md.max_time"
+            size_t dot_pos = param_name.find('.');
+            std::string module_name = param_name.substr(0, dot_pos);
+            std::string param_key = param_name.substr(dot_pos + 1);
+
+            if (module_name != keyword) {
+                // Claude Generated (October 2025 - CRITICAL FIX): Map keywords to actual module names
+                // e.g., "-md.max_time" has module_name="md" from Punkt-notation,
+                // but must be routed to module_params["simplemd"] (the actual module)
+                std::string target_module = module_name;
+                if (keyword_to_module.count(module_name) > 0) {
+                    target_module = keyword_to_module[module_name];
+                }
+                if (!module_params.contains(target_module)) {
+                    module_params[target_module] = json::object();
+                }
+                setNestedJsonValue(module_params[target_module], param_key, param_value);
+                keys_to_remove.push_back(param_name);
+            } else {
+                // Claude Generated (October 2025 - CRITICAL FIX): Handle "-keyword.param" (e.g., "-md.max_time")
+                // These should be FLAT in controller["simplemd"], not nested as key["md"]["max_time"]
+                // Extract directly to top level to avoid double-nesting
+                setNestedJsonValue(key, param_key, param_value);
+                keys_to_remove.push_back(param_name);
+            }
+        } else if (is_nested_object && param_name != keyword) {
+            // Handle nested structure for OTHER modules (not this command's keyword)
+            // param_name = "rmsd", param_value = {"method": "subspace"}
+            module_params[param_name] = param_value;
+            keys_to_remove.push_back(param_name);
+        }
+        // NOTE: We KEEP nested structures where param_name == keyword!
+        // E.g., key["md"] = {"max_time": 10} stays in key for backward compat
+        // It will be stored in both controller["simplemd"] and controller["md"]
+    }
+
+    // Remove extracted module parameters from main command params
+    for (const auto& remove_key : keys_to_remove) {
+        key.erase(remove_key);
+    }
+
+    // Claude Generated (October 2025): Extract global parameters for explicit access
+    json global_values;
+    for (const auto& param : global_params) {
+        if (key.count(param) > 0) {
+            global_values[param] = key[param];
+        }
+    }
+
+    // Claude Generated: DEBUG - Show what's in key before storing to controller
+    std::cerr << "[CLI2Json DEBUG] keyword=" << keyword << ", module_name=" << module_name << std::endl;
+    std::cerr << "[CLI2Json DEBUG] key object content:" << std::endl;
+    std::cerr << key.dump(2) << std::endl;
+
+    // Build controller with proper structure using actual module name
+    // This enables ConfigManager to find parameters under the correct module name
+    controller[module_name] = key;  // Changed from keyword to module_name
+
+    // Claude Generated (October 2025): Backward compatibility - keep old keyword-based access
+    // Some tests use "-md.max_time" which creates controller["md"],
+    // but we now route to controller["simplemd"] via module_name
+    // Store under both for compatibility
+    if (module_name != keyword) {
+        controller[keyword] = key;  // Also keep the old keyword for backward compat
+    }
+
+    // Merge module-specific parameters at top level
+    for (auto& [mod_name, module_config] : module_params.items()) {
+        controller[mod_name] = module_config;  // Direct assignment (may contain nested structure from setNestedJsonValue)
+    }
+
+    // Ensure global parameters are always set at top level AND in global section
+    for (const auto& [param, value] : global_values.items()) {
+        controller[param] = value;  // Top-level access (backward compat)
+        controller["global"][param] = value;  // Explicit global namespace
+    }
+    return controller;
 }
 
 // Structured Command Dispatch System - Claude Generated
@@ -517,15 +1242,6 @@ int executeConfSearch(const json& controller, int argc, char** argv) {
     return 0;
 }
 
-int executeRMSDTraj(const json& controller, int argc, char** argv) {
-    if (argc < 3) return 1;
-    RMSDTraj traj(controller, false);
-    traj.setFile(argv[2]);
-    traj.Initialise();
-    traj.start();
-    return 0;
-}
-
 int executeNEBPrep(const json& controller, int argc, char** argv) {
     if (argc < 4) return 1;
     Molecule mol1 = Files::LoadFile(argv[2]);
@@ -615,45 +1331,6 @@ int executeDistance(const json& controller, int argc, char** argv) {
             if (!B.empty()) posB /= static_cast<double>(B.size());
 
             std::cout << "Centroid Distance: " << (posA - posB).norm() << " Å" << std::endl;
-        }
-    }
-    return 0;
-}
-
-int executeAngle(const json& controller, int argc, char** argv) {
-    if (argc < 5) {
-        std::cerr << "Please use curcuma to calculate angles as follows:\ncurcuma -angle molecule.xyz indexA indexB indexC" << std::endl;
-        return 1;
-    }
-
-    std::string atomsA_str = argc > 3 ? argv[3] : "";
-    std::string atomsB_str = argc > 4 ? argv[4] : "";
-    std::string atomsC_str = argc > 5 ? argv[5] : "";
-
-    // Check if we have atom selections in controller
-    json angle_config = controller.value("angle", json::object());
-    if (angle_config.contains("atoms_a")) atomsA_str = angle_config["atoms_a"].get<std::string>();
-    if (angle_config.contains("atoms_b")) atomsB_str = angle_config["atoms_b"].get<std::string>();
-    if (angle_config.contains("atoms_c")) atomsC_str = angle_config["atoms_c"].get<std::string>();
-
-    if (atomsA_str.empty() || atomsB_str.empty() || atomsC_str.empty()) {
-        std::cerr << "Error: Three atom selections required for angle calculation." << std::endl;
-        return 1;
-    }
-
-    std::vector<int> A = Tools::CreateList(atomsA_str);
-    std::vector<int> B = Tools::CreateList(atomsB_str);
-    std::vector<int> C = Tools::CreateList(atomsC_str);
-
-    FileIterator file(argv[2]);
-    while (!file.AtEnd()) {
-        Molecule mol = file.Next();
-        if (A.size() == 1 && B.size() == 1 && C.size() == 1) {
-            std::cout << "Angle (" << A[0] << "-" << B[0] << "-" << C[0] << "): "
-                      << mol.CalculateAngle(A[0] - 1, B[0] - 1, C[0] - 1) << " °" << std::endl;
-        } else {
-            std::cerr << "Error: Multiple atom selections for angle calculation not yet supported." << std::endl;
-            return 1;
         }
     }
     return 0;
@@ -962,12 +1639,41 @@ int executeTrajectoryAnalysis(const json& controller, int argc, char** argv) {
     return 0;
 }
 
+// Claude Generated - RMSDTraj execution function
+int executeRMSDTraj(const json& controller, int argc, char** argv) {
+    if (argc < 3) {
+        std::cerr << "Please use curcuma for rmsd analysis of trajectories as follows:\ncurcuma -rmsdtraj input.xyz" << std::endl;
+        std::cerr << "Additional arguments are:" << std::endl;
+        std::cerr << "-write        **** Write unique conformers!" << std::endl;
+        std::cerr << "-rmsd d       **** Set rmsd threshold to d ( default = 1.0)!" << std::endl;
+        std::cerr << "-fragment n   **** Set fragment to n." << std::endl;
+        std::cerr << "-reference    **** Add different xyz structure as reference." << std::endl;
+        std::cerr << "-second       **** Add second trajectory." << std::endl;
+        std::cerr << "-heavy        **** Check only heavy atoms. Do not use with -write." << std::endl;
+        return 0;
+    }
+
+    // Use ParameterRegistry defaults and merge with controller["rmsdtraj"] if it exists
+    json rmsdtraj_config = ParameterRegistry::getInstance().getDefaultJson("rmsdtraj");
+    if (controller.contains("rmsdtraj") && !controller["rmsdtraj"].is_null()) {
+        rmsdtraj_config = MergeJson(rmsdtraj_config, controller["rmsdtraj"]);
+    }
+
+    RMSDTraj traj(rmsdtraj_config, false);
+    traj.setFile(argv[2]);
+    traj.Initialise();
+    traj.start();
+    return 0;
+}
+
 // Capability registry - Claude Generated
 const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
     {"analysis", {"Unified molecular analysis (all formats, all properties)", "analysis",
                   {"XYZ", "VTF", "MOL2", "SDF", "PDB"}, executeAnalysis}},
     {"rmsd", {"RMSD calculation between structures", "analysis",
               {"XYZ", "VTF", "MOL2", "SDF"}, executeRMSD}},
+    {"rmsdtraj", {"Trajectory RMSD analysis and conformer filtering", "analysis",
+                  {"XYZ", "TRJ"}, executeRMSDTraj}},
     {"sp", {"Single point energy calculation", "calculation",
             {"XYZ", "VTF", "MOL2", "SDF"}, executeSinglePoint}},
     {"opt", {"Geometry optimization with various algorithms", "optimization",
@@ -1030,6 +1736,10 @@ const std::map<std::string, CapabilityInfo> CAPABILITY_REGISTRY = {
                {"XYZ", "MOL2", "SDF"}, executeAngle}},
     {"dMatrix", {"Distance matrix and persistent homology analysis", "analysis",
                  {"XYZ", "VTF"}, executeDMatrix}},
+    {"bond", {"Calculate bond length between two atoms", "analysis",
+              {"XYZ", "MOL2", "PDB", "SDF"}, executeBond}},
+    {"torsion", {"Calculate dihedral/torsion angle between four atoms", "analysis",
+                 {"XYZ", "MOL2", "PDB", "SDF"}, executeTorsion}},
     // TODO: Add more capabilities here as they are converted
 };
 
@@ -1225,7 +1935,8 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
-    std::string command = CLIUtils::stripLeadingDashes(argv[1]);
+    std::string command = argv[1];
+    while (!command.empty() && command[0] == '-') command.erase(0, 1);
 
     // Handle help requests - Claude Generated
     if (command == "help" || command == "h") {
@@ -1234,6 +1945,42 @@ int main(int argc, char **argv) {
         } else {
             showStructuredHelp();
         }
+        return 0;
+    }
+
+    // Phase 2: List available computational methods - Claude Generated 2025
+    if (command == "methods") {
+        auto methods = MethodFactory::getAvailableMethods();
+        std::cout << "Available computational methods in this build:\n\n";
+
+        std::cout << "Quantum Methods:\n";
+        for (const auto& method : methods) {
+            if (method.find("gfn") != std::string::npos ||
+                method.find("eht") != std::string::npos ||
+                method.find("pm") != std::string::npos ||
+                method.find("am") != std::string::npos ||
+                method.find("mndo") != std::string::npos) {
+                std::cout << "  - " << method << "\n";
+            }
+        }
+
+        std::cout << "\nForce Fields:\n";
+        for (const auto& method : methods) {
+            if (method.find("uff") != std::string::npos ||
+                method.find("ff") != std::string::npos ||
+                method.find("qmdff") != std::string::npos) {
+                std::cout << "  - " << method << "\n";
+            }
+        }
+
+        std::cout << "\nDispersion Corrections:\n";
+        for (const auto& method : methods) {
+            if (method.find("d3") != std::string::npos ||
+                method.find("d4") != std::string::npos) {
+                std::cout << "  - " << method << "\n";
+            }
+        }
+
         return 0;
     }
 
@@ -1273,7 +2020,7 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    json controller = CLIUtils::CLI2Json(argc, argv);
+    json controller = CLI2Json(argc, argv);
 
     // Handle config import - Claude Generated (October 2025)
     // Now global parameter, always in controller["import_config"] if present

@@ -235,6 +235,11 @@ set(curcuma_core_SRC
         src/capabilities/rmsdtraj.cpp
         src/capabilities/simplemd.cpp
         src/capabilities/analysis.cpp
+        src/capabilities/analysis_output.cpp
+        src/capabilities/handlers/general_properties_handler.cpp
+        src/capabilities/handlers/scattering_handler.cpp
+        src/capabilities/handlers/rdf_handler.cpp
+        src/capabilities/handlers/topology_handler.cpp
         src/capabilities/trajectory_statistics.cpp
         src/capabilities/casino.cpp
         src/capabilities/scnp_parser.cpp
@@ -281,6 +286,7 @@ set(curcuma_core_SRC
         src/tools/general.h
         src/core/energy_calculators/qm_methods/orcainterface.h
         src/core/energy_calculators/qm_methods/orcainterface.cpp
+        src/tools/trajectory_writer.cpp
         src/core/imagewriter.cpp
         src/core/parameter_registry.cpp
         src/core/config_manager.cpp
@@ -308,6 +314,11 @@ set(curcuma_cap_SRC
         src/capabilities/rmsdtraj.cpp
         src/capabilities/simplemd.cpp
         src/capabilities/analysis.cpp
+        src/capabilities/analysis_output.cpp
+        src/capabilities/handlers/general_properties_handler.cpp
+        src/capabilities/handlers/scattering_handler.cpp
+        src/capabilities/handlers/rdf_handler.cpp
+        src/capabilities/handlers/topology_handler.cpp
         src/capabilities/trajectory_statistics.cpp
         src/capabilities/casino.cpp
         src/capabilities/scnp_parser.cpp
@@ -671,8 +682,9 @@ target_link_libraries(curcuma curcuma_core)
 add_executable(curcuma_helper
         src/helpers/main.cpp)
         
-add_executable(cli_helper
-        src/helpers/cli_test.cpp)
+# cli_helper disabled - requires cli_parser.h (native-gfnff WIP)
+# add_executable(cli_helper
+#         src/helpers/cli_test.cpp)
 
 add_executable(parallel_scf
         src/helpers/parallel_scf.cpp)
@@ -685,7 +697,7 @@ target_link_libraries(curcuma_helper curcuma_core)
 # Enable precompiled headers for helper executables
 if(USE_PCH)
     target_precompile_headers(curcuma_helper REUSE_FROM curcuma_core)
-    target_precompile_headers(cli_helper REUSE_FROM curcuma_core)
+    # target_precompile_headers(cli_helper REUSE_FROM curcuma_core)
     target_precompile_headers(parallel_scf REUSE_FROM curcuma_core)
 endif()
 

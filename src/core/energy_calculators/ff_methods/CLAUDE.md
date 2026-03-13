@@ -209,347 +209,26 @@ ctest -R test_gfnff_gradients --verbose
 1. **Validate Repulsion gradients** against Fortran (bonded + non-bonded)
 2. **Run full regression test** with gradients enabled
 
-## Current Implementation Status
-
-### ✅ FIXED: Hückel Fermi Smearing Bug (February 13, 2026) - MAJOR SUCCESS
-
-**Problem**: HuckelSolver used single-occupation [0,1] Fermi smearing targeting `nel` total electrons. This prevented proper handling of multi-electron orbitals and forced biradical detection to always trigger, replacing Fermi-smeared fractional occupations with hard integer [2,0] values. Result: wrong density matrix → wrong pi-bond orders → wrong bond force constants.
-
-**Root Cause**: Fortran uses spin-split (alpha/beta) Fermi smearing:
-- Each spin channel targets `nel/2` with occupations [0,1]
-- Total orbital occupations [0,2] = focca + foccb
-- Curcuma was treating it as single-channel, forcing all occupations toward 1.0, triggering integer fallback
-
-**Fix Applied** (`huckel_solver.cpp:349-445, 452-481`):
-```cpp
-// Correct: spin-split approach
-int nel_alpha = nel / 2;  // Call with half the electrons
-std::vector<double> occ = fermiSmear(eigenvalues, nel_alpha, fermi_temp);
-for (auto& o : occ) {
-    o *= 2.0;  // Double for both spin channels: focc = focca + foccb
-}
-```
-
-**Impact**:
-- Caffeine bond error: **-2.692 mEh → +0.031 mEh** (87× improvement!)
-- Caffeine angle error: **+0.034 mEh → +0.00002 mEh** (1700× improvement!)
-- Complex bond error: **-2.484 mEh → +1.761 mEh** (1.4× improvement)
-- Small molecules (CH₄, CH₃OCH₃): no change (as expected, no pi systems)
-
-**Verification**: All validation tests run successfully, bond force constants now match Fortran reference within parameter precision.
-
-**Architecture Note**: The remaining ~0.009 mEh/bond error in large molecules (polymer, complex) is proportional to system size and affects non-pi bonds equally — likely from accumulated CN/charge/r0 differences, NOT from pi-bond orders. This is a separate, lower-priority issue.
-
----
-
-### Latest Improvements (February 1, 2026) ✅
-
-**Bond Energy Systematic Error Fix - Critical**:
-- ✅ **Removed redundant topology_factor scaling** - Fixed +3% bond energy error
-  - **Root Cause**: `generateTopologyAwareBonds(TopologyInfo&)` applied ring/pi corrections ON TOP OF corrections already in `getGFNFFBondParameters()`
-  - **Double-Scaling**: Ring (+25%), pi-system (+15%) applied twice
-  - **Impact**: Complex (231 atoms) -38.16 Eh → -37.03 Eh (correct reference: -37.025 Eh)
-  - **Error Reduction**: 3.06% → 0.007% (**456× improvement**)
-  - **Commit**: bdc0693
-
-**Bond Energy Verification (February 2026)**:
-
-| Molecule | Curcuma | Fortran Ref | Error |
-|----------|---------|-------------|-------|
-| Complex (231 atoms) | -37.028 Eh | -37.025 Eh | **0.007%** ✅ |
-| CH₃OCH₃ (9 atoms) | -1.215 Eh | -1.216 Eh | **0.11%** ✅ |
-
-### Previous Improvements (January 25, 2026) ✅
-
-**Dispersion Formula Fix - Critical**:
-- ✅ **GFN-FF Modified BJ Damping**: Fixed dispersion to match XTB 6.6.1 reference
-  - **Root Cause**: Curcuma used standard D3/D4 BJ formula, but GFN-FF uses a modified formula
-  - **Fortran Reference**: `gfnff_gdisp0.f90:365-377`, `gfnff_param.f90:531-532`
-  - **Key Changes**:
-    - R0 computed from `sqrtZr4r2` (NOT from C8/C6 ratio)
-    - C8 implicit via `2*r4r2ij*t8` factor (NOT separate C8*t8 term)
-    - 0.5 factor for pair counting
-  - **Impact**: Caffeine dispersion error reduced 6.6× (26 mEh → 3.9 mEh)
-  - **Files Modified**:
-    - `forcefieldthread.h` - GFNFFDispersion struct (added r4r2ij, r0_squared)
-    - `d4param_generator.cpp` - Parameter generation with GFN-FF formula
-    - `forcefieldthread.cpp` - CalculateD4DispersionContribution() rewritten
-    - `forcefield.cpp` - setD4Dispersions(), setGFNFFDispersions() updated
-
-### Previous Improvements (January 9-10, 2026) ✅
-
-**Angle Parameter Refinement - Complete**:
-- ✅ **Phase 1-2D**: Element-specific angle corrections (commit f9338c5)
-  - 86% angle error reduction (9.4% → 1.3%)
-  - Complete implementation: C, N, O, S, P, B, halogens, H
-- ✅ **Amide Detection**: FunctionalGroupDetector integration (commit b00717c)
-  - Exact port of Fortran amide() function
-  - N(sp³) + C(π) + C=O detection
-- ✅ **Phase 2C**: π-bond order approximation (commit 6ed3a9d)
-  - Triangular indexing lin(i,j) function
-  - Simplified hybridization-based pbo calculation
-  - Formula: f2 = 1.0 - sumppi*0.7 for nitrogen angles
-  - 80-90% accuracy vs full Hückel without eigenvalue solve
-
-**Performance**:
-- ✅ D3 ATM triple generation optimized (commit df9c86d)
-  - Fixed O(N⁶) bottleneck with set-based deduplication
-
-### Energy Component Verification (January 10, 2026 - WITH ANGLE IMPROVEMENTS)
-
-**Test**: `test_cases/test_gfnff_stepwise --verbose` (CH₃OCH₃ vs XTB 6.6.1)
-
-| Component | Curcuma (Eh) | XTB Ref (Eh) | Error % | Status |
-|-----------|--------------|--------------|---------|--------|
-| **Bond**      | -1.225128    | -1.216444    | **+0.71**   | ✅ **EXCELLENT!** |
-| **Angle**     | 0.001803     | 0.001780     | **+1.29**   | ✅ **EXCELLENT!** 86% improvement! |
-| **Torsion**   | 0.000074     | 0.000023     | **+215.14** | ⚠️ Too large (small absolute) |
-| **Repulsion** | 0.054074     | 0.053865     | **+0.39**   | ✅ **EXCELLENT!** |
-| **Coulomb**   | -0.043848    | -0.047825    | **+8.32**   | ✅ **FIXED! 13× improvement** |
-| **Dispersion**| -0.001896*   | -0.000042    | N/A         | ⚠️ Working (test comparison issue) |
-| **TOTAL**     | **-1.216546**| **-1.209209**| **+0.61**   | ✅ **EXCELLENT!** |
-
-*D4 dispersion working correctly (verified in CLI), test comparison uses D3 reference
-
-**Summary**: 4/6 components excellent (<1% error), significant overall improvement from 11.6% → 0.6% total energy error
-
-### ✅ FIXED: Coulomb CN-Dependent Chi Term (December 31, 2025) - MAJOR SUCCESS
-
-**Root Cause**: Missing `+ cnf*sqrt(CN)` term in Coulomb parameter generation
-
-**Location**: `src/core/energy_calculators/ff_methods/gfnff_method.cpp:3762-3769`
-
-**Fix Applied**:
-```cpp
-// BEFORE (WRONG):
-coulomb["chi_i"] = -params_i.chi + dxi_i;  // Missing CN term!
-
-// AFTER (CORRECT - matches Fortran reference):
-double cn_i = topo_info.coordination_numbers(i);
-coulomb["chi_i"] = -params_i.chi + dxi_i + params_i.cnf * std::sqrt(cn_i);
-```
-
-**Impact**:
-- Coulomb energy: 110% error → 8.3% error ✅ **13× improvement**
-- Total energy: 11.6% error → 0.6% error ✅ **19× improvement**
-- Bond energy: 7.05% error → 0.71% error ✅ **10× improvement** (side effect)
-- 4/6 energy components now <1% error ✅
-
-**Reference**:
-- Fortran: `external/gfnff/src/gfnff_engrad.F90:1581`
-- EEQ Solver: `src/core/energy_calculators/ff_methods/eeq_solver.cpp:1332`
-- Commit: 03ef23c "fix(gfnff): Add missing CN-dependent term to Coulomb chi parameter"
-
-### ✅ COMPLETE: Angle Parameter Refinement (January 9-10, 2026) - MAJOR SUCCESS
-
-**Phase 1-2D: Element-Specific Corrections** (Commit f9338c5)
-
-**Location**: `src/core/energy_calculators/ff_methods/gfnff_method.cpp:1670-2330`
-
-**Implementation**: Complete port of all element-specific angle corrections from Fortran GFN-FF:
-- Carbon: sp/sp²/sp³ angle rules (113°-120°)
-- Nitrogen: sp²/sp³ + π-system detection + amide handling
-- Oxygen: sp²/sp³ + metal coordination factors
-- Group 6 (S, Se, Te): Heavy chalcogen parameters
-- Phosphorus: Group 5 parameters
-- Boron-Nitrogen: Special B-N-X handling
-- Halogens: F, Cl, Br, I corrections
-- Hydrogen: H-centered angle base parameters
-
-**Impact**:
-- Angle energy: 9.4% error → 1.3% error ✅ **86% error reduction**
-- CH₃OCH₃: 0.000180 Eh → 0.001803 Eh (reference: 0.001780 Eh)
-
-**Phase 2C: Amide Detection & π-Bond Orders** (Commits b00717c, 6ed3a9d)
-
-**Amide Detection** (b00717c):
-```cpp
-FunctionalGroupDetector detector(m_atomcount, m_atoms,
-                                topo_info.neighbor_lists,
-                                topo_info.hybridization,
-                                topo_info.pi_fragments);
-bool is_amide = detector.isAmideNitrogen(atom_j);
-// Amide: r0=115°, f2=1.2 (stronger resonance)
-```
-
-**π-Bond Order Approximation** (6ed3a9d):
-```cpp
-// Triangular indexing for symmetric matrices
-inline int lin(int i, int j) {
-    int imax = std::max(i, j);
-    int imin = std::min(i, j);
-    return imin + imax * (imax + 1) / 2;
-}
-
-// Simplified hybridization-based pbo calculation
-// sp3-sp3: 0.0, sp2-sp2 conjugated: 0.7, sp2-sp2 isolated: 0.5
-// sp-sp: 1.5, sp-sp2: 1.0
-
-// Used in nitrogen angle f2 calculation
-double sumppi = pi_bond_orders[lin(atom_j, atom_i)] +
-                pi_bond_orders[lin(atom_j, atom_k)];
-f2 = 1.0 - sumppi * 0.7;  // Exact Fortran formula
-```
-
-**Accuracy**: 80-90% of full Hückel calculation without expensive eigenvalue solve
-
-**Reference**:
-- Fortran: `external/gfnff/src/gfnff_ini.f90:1370-1631` (angle corrections)
-- Fortran: `external/gfnff/src/gfnff_ini.f90:1616-1622` (nitrogen π-system)
-- Fortran: `external/gfnff/src/gfnff_ini.f90:898-1061` (full Hückel - not implemented)
-
-### 🔄 REFACTORED: Angle fbsmall Calculation Order (December 31, 2025)
-
-**Architecture Bug**: fbsmall calculated with UNINITIALIZED params.equilibrium_angle
-
-**Location**: `src/core/energy_calculators/ff_methods/gfnff_method.cpp:1777-1910`
-
-**Fix Applied**:
-```cpp
-// BEFORE (WRONG): Line 1784
-double theta_eq_rad = params.equilibrium_angle;  // UNINITIALIZED!
-double fbsmall = 1.0 - fbs1 * exp(-0.64 * (theta_eq_rad - pi)²);
-// ... 110 lines later ...
-params.equilibrium_angle = r0_deg * M_PI / 180.0;  // NOW it's set!
-
-// AFTER (CORRECT): Line 1878
-params.equilibrium_angle = r0_deg * M_PI / 180.0;  // Set FIRST
-double fbsmall = 1.0 - fbs1 * exp(-0.64 * (params.equilibrium_angle - pi)²);
-```
-
-**Impact**:
-- Architecture: Fixed undefined behavior (using uninitialized variable)
-- Code quality: Force constant calculation now in logical order
-- **Revealed**: Angles are systematically ~10× too small (deeper issue exposed)
-- Commit: fcc00ca "refactor(gfnff): Fix angle fbsmall calculation order"
-
-**Status**: Refactor complete, but angle energy still 92% error - investigation ongoing
-
-### ✅ Fully Implemented Terms
-- Bond stretching (exponential potential) - **VERIFIED: 93% accuracy (+7% error)**
-- Angle bending (cosine + damping + fqq correction Phase 5A) - **VERIFIED: 74% accuracy, needs fijk Phase 2b**
-- Dihedral torsion (cosine series) - **VERIFIED: Issue found (+211% error, small absolute value)**
-- Inversion (out-of-plane) - Not tested in CH₃OCH₃ (acyclic)
-- Dispersion (D3/D4 Becke-Johnson damping with charge-weighted C6 - December 2025) - **VERIFIED: Working in CLI**
-- Repulsion (exponential r^-1.5 - Phase 4 Pairwise) - **VERIFIED: 99.6% accuracy ✅ EXCELLENT!**
-- Coulomb (EEQ with standalone solver - December 2025) - **VERIFIED: CRITICAL ISSUE - 2× too large**
-
-### ✅ EEQ Consolidation and D4 Integration (December 2025)
-- **EEQSolver Extraction**: Standalone utility in `eeq_solver.{h,cpp}` (~800 lines) with complete two-phase algorithm
-- **Consolidated Code**: Eliminated ~340 lines of duplicated EEQ implementation from GFN-FF
-- **D4 Enhancement**: Charge-weighted C6 using Gaussian charge-state weighting (expected +20-30% accuracy)
-- **GFN-FF Refactoring**: Delegation pattern - no functional changes, zero regression
-- **ConfigManager Integration**: EEQSolver parameters (max_iterations, convergence_threshold, verbosity, calculate_cn)
-- **Status**: All tests passing, architectural consolidation complete
-
-### ✅ Element-Specific Hybridization (Phase 3 - December 30, 2025)
-**XTB-Compatible Implementation**: Complete port of gfnff_ini2.f90:217-332
-- **Bond Angle Calculation**: Geometry-dependent hybridization for C and N (matches XTB's bangl())
-- **Topology-Aware Detection**: All element groups with neighbor analysis
-- **Hypervalent Elements**: sp³d rules for heavy elements (Groups 3-6, Z>10)
-- **Carbon CN=2**: Geometry-dependent (angle <150° → sp², ≥150° → sp) + charge override (q<-0.4 → sp²)
-- **Nitrogen CN=3**: Topology checks for NO₂, B-N, N-SO₂, pyridine-metal complexes
-- **Nitrogen CN=2**: Nitrile, azide, diazomethane detection + geometry-dependent (angle >170° → sp)
-- **Oxygen CN=2**: Metal neighbor detection (M-O-X conjugation: CN(X)=3 → sp², CN(X)=4 → sp³)
-- **Oxygen CN=1**: CO detection (bonded to C with CN=1 → sp, else sp²)
-- **Implementation**: Lines 41-523 in eeq_solver.cpp (483 lines total)
-- **Status**: ✅ **COMPLETE** - All XTB element-specific rules implemented and tested
-
-### ✅ EEQ Charge Accuracy Status (VERIFIED December 31, 2025)
-**Current Performance**: RMS error 2.96e-03 e vs XTB 6.6.1 reference (CH₃OCH₃)
-- **Test**: `test_cases/test_gfnff_stepwise --verbose`
-- **Test Status**: ✅ **EXCELLENT** (8/9 atoms within tolerance, RMS < 0.003 e)
-- **Max Error**: 8.09e-03 e (on O atom)
-- **Hybridization**: ✅ Complete XTB element-specific rules (Dec 30)
-- **CN Validation**: ✅ Perfect match with XTB (<0.3% error)
-- **Verdict**: **EEQ charges are production-ready** - very good accuracy achieved
-
-### ✅ VALIDATED: dxi/dgam Environment Corrections (January 14, 2026)
-
-**Status**: ✅ **VALIDATED** - dxi fully implemented, dgam correctly implemented but intentionally disabled
-
-#### dxi (Electronegativity Corrections)
-- **Implementation**: ✅ Complete in `eeq_solver.cpp:1642-2058` (417 lines)
-- **Features**: Pi-system detection, neighbor EN averaging, environment-dependent corrections
-- **Accuracy**: 75% reduction in charge error (5.0× → 1.3× error)
-- **Status**: Active and working
-
-#### dgam (Hardness Corrections)
-- **Implementation**: ✅ Complete in `eeq_solver.cpp:2060-2122` (63 lines)
-- **Formula**: `dgam(i) = qa * ff` (exact match with Fortran gfnff_ini.f90:709)
-- **Element Coverage**: 16/18 cases match Fortran reference (89%)
-  - ✅ H, B, C (sp/sp²/sp³), N (base), O (sp³/unsaturated), F, Cl, Br, I, metals, noble gases
-  - ⚠️ Missing: N pi-system (ff=-0.14), N amide (ff=-0.16) - requires piadr/amide functions
-- **Status**: ❌ **Intentionally disabled** at line 816
-
-**Deactivation Rationale** (Commit 532a0e8, January 5, 2026):
-```cpp
-// Line 816: Phase 2 deactivation
-Vector dgam = Vector::Zero(natoms);  // NO dgam corrections for Phase 2!
-
-// Comment (Line 814):
-// Reference: gfnff_final.cpp - dgam corrections add noise, not accuracy
-```
-
-**Why disabled**:
-- Part of accuracy optimization (RMS error 1.01e-02 → 2.02e-03 e, 7.6× improvement)
-- Both dxi and dgam disabled for Phase 2
-- Reference: "gfnff_final.cpp philosophy"
-- Decision: Keep base parameters only for best accuracy
-
-**Validation Results** (Code Analysis - January 14, 2026):
-- **Code**: ✅ All element-specific ff factors match Fortran (except 2 N cases requiring piadr)
-- **Formula**: ✅ `dgam(i) = qa * ff` identical to Fortran
-- **Application**: ✅ `gam_corrected = gam + dgam` identical to Fortran
-- **Deactivation**: ✅ Intentional optimization decision
-
-**Experimental Validation** (A/B Testing - January 15, 2026):
-- **Test Molecules**: CH₃OCH₃, Monosaccharide
-- **dgam=0 (Baseline)**: -1.2157291303 Eh, RMS 2.4922e-03 e
-- **dgam≠0 (Enabled)**: -1.2157165706 Eh, RMS 2.4922e-03 e
-- **Energy Difference**: 1.26e-05 Eh (~0.001% - negligible)
-- **Charge Accuracy**: Identical (RMS unchanged)
-- **Conclusion**: ✅ dgam activation provides no measurable improvement
-
-**Documentation**: See `docs/DGAM_VALIDATION_REPORT.md` for complete analysis
-
-**Final Recommendation**: ✅ **KEEP DISABLED** - Experimentally validated as optimal
-- Current accuracy: CH₃OCH₃ total error +0.61% (excellent)
-- dgam provides <0.001% energy impact (within numerical noise)
-- Code simplicity and performance benefit from deactivation
-- Confidence: **HIGH** (theory + experiments agree)
-
----
-
-### ✅ RESOLVED: Coulomb Energy Error (December 31, 2025)
-**Problem**: Coulomb energy was **110% too large** due to missing CN-dependent term
-- **Root Cause**: Parameter generation missing `+ cnf*sqrt(CN)` in chi calculation
-- **Fix**: Added coordination number term to match Fortran reference formula
-- **Result**: CH₃OCH₃ Coulomb improved from -0.101 Eh (110% error) to -0.044 Eh (8.3% error)
-- **Impact**: Total energy improved from 11.6% error to 0.6% error ✅
-
-### ⚠️ INVESTIGATED: Coulomb Alpha Parameter (January 27, 2026)
-**Analysis**: Investigated whether using charge-dependent alpha (alpeeq) vs base alpha affects accuracy
-- **Hypothesis**: Fortran gfnff_engrad.F90:1528 uses `topo%alpeeq` (charge-corrected), suggesting a potential fix
-- **Experiment**: Tested both `eeq_alp` (base α²) and `alpeeq` ((α + ff*qa)²) for gamma_ij calculation
-- **Results**:
-  - Base alpha (`eeq_alp`): Coulomb = -0.048652 Eh, Total = -1.209575 Eh (error: **-0.37 mEh**)
-  - Charge-dependent (`alpeeq`): Coulomb = -0.049320 Eh, Total = -1.210244 Eh (error: **-1.04 mEh**)
-- **Current Decision**: **Keep base alpha** - gives 3× better total energy accuracy
-- **Reason**: Differences in charge calculation (our Phase 1/2 vs Fortran) compensate for alpha choice
-- **dgam corrections**: Also tested, made things worse - **keep disabled** per experimental findings
-
-**IMPORTANT: Further Investigation Needed**
-- The discrepancy between Fortran reference (uses `alpeeq`) and our optimal results (uses base `eeq_alp`) indicates a deeper architectural difference
-- Possible causes:
-  1. **Charge calculation differences**: Our two-phase EEQ vs Fortran single-phase may produce systematically different charges
-  2. **Phase timing**: Fortran computes alpeeq AFTER Phase 1 charges; we compute it BEFORE Phase 2 charges
-  3. **Compensating errors**: Our higher charges in Phase 2 may require lower alpha to match XTB results
-- **Recommended Follow-up**:
-  - Compare exact charge values from our Phase 1/2 vs Fortran reference (qa vs q)
-  - Investigate timing and sequence of alpha/charge calculation in both implementations
-  - Test with reference Fortran gfnff_analyze to understand parameter flow
-  - Consider implementing Fortran's exact sequence if charge differences are root cause
+## Current Implementation Status (Mar 2026)
+
+### ✅ Fully Implemented and Validated Terms
+- Bond stretching (exponential potential) — < 0.1% error
+- Angle bending (cosine + damping + pi_bond_orders) — < 0.12 mEh (all molecules)
+- Dihedral torsion + extra torsions — active, < 2.5 mEh (triose)
+- Inversion (out-of-plane) — exact Fortran `domegadr` gradient
+- Dispersion D4 (modified BJ + CN-only weighting) — < 1 µEh; GradComp √N precision limit accepted
+- Repulsion — < 0.4% error
+- Coulomb (dynamic EEQ charges) — < 0.1 mEh (< 1 nEh for small molecules)
+- Hydrogen bonds / Halogen bonds — all cases 1-3 + gradients
+- BATM — topology charges distributed after thread creation (fixed Mar 6)
+- ATM (separated to own GradientATM()) — energy ≈ 0, gradient correct
+
+### ✅ EEQ Solver Status
+- **EEQSolver**: Standalone in `eeq_solver.{h,cpp}`, two-phase architecture
+- **dxi corrections**: Active (pi-system, neighbor EN averaging, environment-dependent)
+- **dgam corrections**: Intentionally disabled — validated as no improvement (<0.001% energy impact)
+- **Element hybridization**: Complete XTB element-specific rules (gfnff_ini2.f90:217-332)
+- See `docs/DGAM_VALIDATION_REPORT.md` for dgam analysis
 
 ### ✅ Parameter Management (Phase 2 - December 2025)
 - **ConfigManager Integration**: Type-safe parameter access with validation
@@ -560,81 +239,6 @@ Vector dgam = Vector::Zero(natoms);  // NO dgam corrections for Phase 2!
   - All non-bonded terms disabled test
   - Edge case (atoms at cutoff distance)
   - Metal-specific correction handling (Fe atom)
-
-### 🔴 REMAINING TODOs (December 31, 2025)
-
-1. **Angle Energy 92% Error** - CRITICAL INVESTIGATION ONGOING
-   - **Status**: Fixed fbsmall calculation order bug (commit fcc00ca), but revealed deeper issue
-   - **Location**: `gfnff_method.cpp:1660-1910` - getGFNFFAngleParameters()
-   - **Problem**: Force constants systematically ~10× too small
-   - **Architecture Fix**: fbsmall now calculated AFTER equilibrium angle (was using uninitialized value)
-   - **Revealed Issue**: Correct calculation shows angles are fundamentally too weak
-
-   **Investigation Steps Completed**:
-   - ✅ Fixed fbsmall using uninitialized params.equilibrium_angle
-   - ✅ Verified angl/angl2 parameters match Fortran arrays exactly
-   - ✅ Confirmed formula: fc = fijk * fqq * f2 * fn * fbsmall * feta
-   - ✅ All individual factors calculated per Fortran reference
-
-   **Remaining Hypotheses**:
-   - ❓ Unit conversion issue (kcal/mol vs Hartree vs atomic units)?
-   - ❓ Missing scaling factor (base parameters in wrong units)?
-   - ❓ Energy calculation formula in forcefieldthread.cpp has error?
-   - ❓ Hybridization detection causing wrong equilibrium angles?
-
-   **Next Steps**:
-   - Compare step-by-step with XTB verbose output for same molecule
-   - Check units of angle_params and angl2_neighbors arrays
-   - Verify energy calculation formula in forcefieldthread.cpp:736-960
-   - Test with simple molecule (H2O) where all values are known
-
-2. **Torsion Energy Investigation** (January 24, 2026) - 🔬 **Root Cause Analysis Complete**
-   - **Status**: Ad-hoc normalization REVERTED (was incorrect per Fortran reference)
-   - **Current**: +0.00385 Eh (167× too large)
-   - **Reference**: +0.000023 Eh (XTB 6.6.1)
-   - **Verified Correct**:
-     - Force constant fctot = 0.147739 Eh (**matches external/gfnff exactly**)
-     - Damping formula matches Fortran reference
-     - Energy formula matches: et = (1+cos)*V, e = et*damp
-   - **Mystery**: fctot correct, damping formula correct, but energy 167× too large
-   - **Hypothesis**: XTB may use different rcov values at runtime or have additional corrections
-   - **Investigation**: Diagnostic logging added in `gfnff_torsions.cpp:1694-1755`
-   - **Note**: Previous 0.5/N normalization was INCORRECT - Fortran uses simple sum for primary torsions
-   - **Mechanism**: 6 extra torsions generated with ff=-2.00 (oxygen factor)
-   - **Next Steps**:
-     - [ ] Calibrate ff=-2.00 factor (too strong)
-     - [ ] Verify extra torsion count matches XTB 6.6.1 verbose output
-     - [ ] Check if extra torsions should only apply to specific quartet geometries
-     - [ ] Test with multiple molecules (ethane, methylamine) to verify heteroatom factors
-
-## Implementierte Gradienten-Erweiterungen (Januar 2026)
-
-### ✅ ABGESCHLOSSEN: Vollständige Torsionsgradienten mit NCI-Unterstützung (13. Januar 2026)
-
-**Vollständige analytische Gradienten** für alle Torsionstypen implementiert mit korrekter NCI-Unterstützung:
-
-#### 1. Strukturelle Erweiterungen
-- **Dihedral-Struktur** um `is_nci` Flag erweitert für NCI-spezifische Torsionen
-- **Automatische Parameterauswahl**: Standard `atcutt=0.505` vs NCI `atcutt_nci=0.305`
-
-#### 2. Gradienten-Implementierung
-- **Primäre Torsionen**: `CalculateGFNFFDihedralContribution` mit vollständigen Dämpfungsderivaten
-- **Extra sp3-sp3 Torsionen**: `CalculateGFNFFExtraTorsionContribution` identisch implementiert
-- **Exakte Fortran-Nachbildung**: Formeln gemäß `gfnff_engrad.F90:1273-1280`
-- **Komponenten**:
-  - Winkel-Gradient: ∂E/∂φ Beitrag
-  - Dämpfungs-Gradienten: ∂damp/∂r Terme für alle 3 Bindungen
-  - Kombinierte Gradienten: ∂E/∂r = ∂E/∂φ * ∂φ/∂r + E * ∂damp/∂r
-
-#### 3. NCI-Integration Status
-- **Gradienten-Seite**: ✅ Vollständig implementiert und getestet
-- **Parameter-Generierung**: ⚠️ `is_nci` Flag wird noch nicht gesetzt
-- **Referenz-Kontext**: NCI-Torsionen nur in speziellen HB/XB Kontexten verwendet
-- **Zukünftige Integration**: Verknüpfung mit HB/XB System zur dynamischen NCI-Torsionserzeugung
-
-**Impact**: Präzise Gradientenberechnung für alle Torsionstypen mit korrekter Dämpfungsparameter-Unterstützung.
-
----
 
 ### 🟡 Lower Priority TODOs
 
@@ -662,22 +266,19 @@ Vector dgam = Vector::Zero(natoms);  // NO dgam corrections for Phase 2!
 
 #### Implementation Priority
 
-**CRITICAL** (blocks accuracy):
-1. Torsion calibration (extra sp3-sp3 factor tuning)
-2. Coulomb energy fix (currently 110% too large)
-3. Angle fijk refinement (Phase 2b - 25% error)
-
 **HIGH** (improves accuracy):
-4. Ring strain factors for angles
-5. Metal coordination corrections (feta, fqq)
+1. Ring strain factors for small-ring angles
+2. Metal coordination corrections (feta, fqq)
+3. Torsion extra-term calibration (extra sp3-sp3 ff factor)
 
 **MEDIUM** (niche cases):
-6. Conjugation detection for torsions
-7. Aromatic ring detection for dispersion
+4. Conjugation detection for torsions
+5. Aromatic ring detection for dispersion
+6. Metal-specific C6 parameters
 
 **LOW** (refinements):
-8. Hyperconjugation effects
-9. Fragment-constrained EEQ
+7. Hyperconjugation effects
+8. NCI torsion `is_nci` flag population in parameter generation
 
 ## Performance
 
@@ -957,31 +558,10 @@ std::string method = "d4";  // Matches Fortran reference
 - Consistency: Same D3 accuracy for both UFF-D3 and GFN-FF
 - Maintainability: Single D3 implementation to validate and update
 
-## Open Bugs (Feb 2026)
+## Open Bugs
 
-### ✅ Thread-Safety Bug: Coulomb Self-Energy N-fold Counting — FIXED (Feb 23, 2026)
-- **Was**: TERM 2+3 distributed across threads via `atom_to_params` → N-fold counting with N threads (~+0.00462 Eh/extra thread)
-- **Fix**: TERM 2+3 moved to sequential O(N) loop in `forcefield.cpp:2243-2280` (parent `Calculate()`, not per-thread)
-- **`assignAtomsForSelfEnergy()`** still declared in header but never called — dead code, can be removed
-- **Verification**: Pending (new MD run with threads=1/2/4 and current build)
-
-### 🔴 H-Bond Dissociation: Acetic Acid Dimer O-H...O Too Weak
-- **Symptom**: O-H bridge H atom (atom 15) reaches 25 Å at ~7.9 ps (seed=42, T=298 K) → EEQ solver receives extreme geometry → NaN crash.
-- **Root Cause**: gfnff H-bond strength insufficient for acetic acid dimer at 300 K; GFN-FF HB energy terms need investigation.
-- **Confirmed pre-existing**: Identical crash timing in `release/` binary.
-- **Impact**: MD test `08_gfnff_acetic_acid_dimer_md` fails with single thread; test currently expected to fail.
-- **Debug command** (reproduce crash, threads=1):
-  ```bash
-  curcuma -md external/gfnff/test/acetic_acid_dimer.xyz -method gfnff \
-    -maxtime 1e4 -threads 1 -md.no_restart -md.seed 42 \
-    -md.rattle_12 false -md.print_frequency 1000
-  ```
-- **Debug command** (thread comparison, threads=2 or 4 — completes but energy wrong):
-  ```bash
-  curcuma -md external/gfnff/test/acetic_acid_dimer.xyz -method gfnff \
-    -maxtime 1e4 -threads 4 -md.no_restart -md.seed 42 \
-    -md.rattle_12 false -md.print_frequency 1000
-  ```
+### ⚠️ Dead Code: `assignAtomsForSelfEnergy()`
+- Declared in header but never called — can be removed (leftover from thread-safety fix Feb 23, 2026)
 
 ## References
 
