@@ -91,7 +91,7 @@
 - **Copyright ownership**: All copyright remains with Conrad Hübler as the project owner and AI instructor
 - **Year updates**: Always update copyright year to current year when modifying files
 - **Claude contributions**: Mark Claude-generated code sections but copyright stays with Conrad
-- **Format**: `Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>`
+- **Format**: `Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>`
 - **AI acknowledgment**: Add Claude contribution notes in code comments, not copyright headers
 
 #### Code Structure Guidelines
@@ -260,10 +260,9 @@ curcuma/
 ✅ **Topological Data Analysis** - dMatrix legacy functionality integrated as TDAEngine
 ✅ **Parameter Routing Fix** - Multi-module parameter hierarchies now work (json null-error fixed)
 ✅ **GFN-FF Implementation** - Complete and operational in ff_methods/ - See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
-✅ **EEQ Phase 1 Full Implementation** (December 28, 2025) - Complete dxi calculation with pi-system detection, neighbor EN averaging, and environment-dependent corrections; 75% reduction in charge error (5.0× → 1.3×); fixes 4/6 GFN-FF energy terms automatically
-✅ **GFN-FF Angle Energy Fix** (February 13, 2026) - Topology-aware angle generation with pi_bond_orders integration; 656-2013× improvement on heterocyclic molecules (caffeine/complex); all angles <0.12 mEh error
-✅ **Scattering Analysis Enhancements** (January 2026) - Logarithmic q-spacing (default), automatic gnuplot script generation with 4-panel plots, CSV separator fix
-✅ **Analysis Parallelization** (January 2026) - Frame-level parallelization with CxxThreadPool, 3-8x speedup for trajectory analysis, thread-safe with automatic fallback
+✅ **GFN-FF Full Implementation** (2025-2026) - All energy terms, gradients, EEQ charges, D4 dispersion; sub-mEh accuracy on most molecules - See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
+✅ **Scattering Analysis Enhancements** (January 2026) - Logarithmic q-spacing (default), automatic gnuplot script generation with 4-panel plots
+✅ **Analysis Parallelization** (January 2026) - Frame-level parallelization with CxxThreadPool, 3-8x speedup for trajectory analysis
 
 ## Build and Test Commands
 
@@ -274,14 +273,14 @@ curcuma/
 cd release
 make -j4
 
-# Run all tests (NEW: October 2025 - CLI Tests added)
+# Run all tests
 ctest --output-on-failure
 
 # Run specific test categories
-ctest -R "cli_rmsd_" --output-on-failure      # RMSD CLI tests (5/6 passing)
-ctest -R "cli_confscan_" --output-on-failure  # ConfScan CLI tests (6/7 passing)
-ctest -R "cli_simplemd_" --output-on-failure  # SimpleMD CLI tests (1/7 passing - opt bug)
-ctest -R "cli_curcumaopt_" --output-on-failure # Opt CLI tests (1/6 passing - JSON bug)
+ctest -R "cli_rmsd_" --output-on-failure      # RMSD CLI tests (6/6 passing)
+ctest -R "cli_confscan_" --output-on-failure  # ConfScan CLI tests (7/7 passing)
+ctest -R "cli_simplemd_" --output-on-failure  # SimpleMD CLI tests (7/7 passing)
+ctest -R "cli_curcumaopt_" --output-on-failure # Opt CLI tests (6/6 passing)
 
 # Run individual CLI test with verbose output
 ctest -R "cli_rmsd_01" --verbose
@@ -289,18 +288,14 @@ ctest -R "cli_rmsd_01" --verbose
 # Legacy: Manual curcuma execution
 ./curcuma -sp input.xyz -method uff           # UFF single point
 ./curcuma -rmsd ref.xyz target.xyz            # RMSD calculation
-./curcuma -opt input.xyz -method gfn2         # GFN2 optimization (currently broken)
+./curcuma -opt input.xyz -method gfn2         # GFN2 optimization
 ```
 
-**Test Status** (Stand 2025-10-26):
-- **26 CLI Tests** implementiert in `test_cases/cli/`
-- **19/26 bestanden** (73%) - RMSD: 6/6 ✅, ConfScan: 7/7 ✅, Curcumaopt: 6/6 ✅, SimpleMD: 0/7 (JSON crash blocking)
+**Test Status**: 26/26 CLI Tests passing (100%) ✅
 
 ## Project Management
 
-- **Prioritized TODO List**: See [TODO.md](TODO.md) - 20 tasks extracted from documentation audit
-- **Critical**: SimpleMD JSON null crash blocks 7 tests - parameter routing needs fix (see TODO.md:CRITICAL)
-- **Test Blocking Issues**: Memory optimization for large systems
+- **Prioritized TODO List**: See [TODO.md](TODO.md)
 - **Module Docs**: Each `src/` subdirectory has CLAUDE.md with specific tasks
 - **GFN-FF Status**: See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md) for implementation details
 
@@ -370,22 +365,11 @@ ctest -R "cli_rmsd_01" --verbose
 
 ## Planned Development
 
-### 🔄 TRAJECTORY ANALYSIS CONSOLIDATION (NEW - December 2025)
-**Status**: ✅ Plan documented (see [docs/ANALYSIS_CONSOLIDATION_PLAN.md](docs/ANALYSIS_CONSOLIDATION_PLAN.md))
-**Effort**: 6 iterations, ~18 hours
-**Priority**: MEDIUM (maintenance + extensibility)
-
-- **Problem**: ~800 lines of duplicate output/statistics code across 4+ modules
-- **Solution**: Unified framework with TrajectoryWriter + extended TrajectoryStatistics + optional ProgressTracker
-- **Phases**:
-  1. ✏️ TrajectoryWriter Foundation (`src/tools/trajectory_writer.h/cpp`) - HOCH priority
-  2. ✏️ Migrate `analysis.cpp` to use TrajectoryWriter
-  3. ✏️ Extend `TrajectoryStatistics` class (Min, Max, Median)
-  4. ✏️ Migrate `trajectoryanalysis.cpp` + `rmsdtraj.cpp`
-  5. ✏️ Cleanup geometry commands in `main.cpp` (optional)
-  6. ✏️ Add ProgressTracker utility (optional)
-
-**Benefits**: Single point of change for output formats, consistent user experience, 600+ lines removed
+### TRAJECTORY ANALYSIS CONSOLIDATION
+**Status**: ✅ Phases 1-3 complete (Jan 2026) — see [docs/ANALYSIS_CONSOLIDATION_PLAN.md](docs/ANALYSIS_CONSOLIDATION_PLAN.md)
+- ✅ TrajectoryWriter, analysis.cpp migration, TrajectoryStatistics extended
+- ⏳ Phase 4: Migrate `trajectoryanalysis.cpp` + `rmsdtraj.cpp` (optional)
+- ⏳ Phase 5-6: Cleanup geometry commands, ProgressTracker (optional)
 
 ---
 
@@ -411,27 +395,3 @@ ctest -R "cli_rmsd_01" --verbose
 
 2. **Unit migration**: Some legacy code still uses hardcoded constants instead of CurcumaUnit functions
 
-## Recently Resolved ✅
-
-- ✅ **GFN-FF D4 Dispersion Gradient Fix** (Mar 12, 2026): `CalculateD4DispersionContribution()` was missing dc6dcn chain-rule accumulation (`m_dEdcn -= dc6dcn * disp_value`). The D3 path had it, but D4 (default) did not — dispersion CN correction was zero. Fix: added dc6dcn chain-rule to D4 path in `forcefieldthread.cpp`. All molecules GradComp Dispersion: 1e-4 → 1e-8 Eh/Bohr. Added `--disp-diag` flag to validation runner for direct/CN split analysis.
-- ✅ **GFN-FF HB Case 3 Gradient Fix** (Feb 24, 2026): C++ port of `abhgfnff_eg3` (carbonyl/nitro HB) was missing angle bending and torsion gradient contributions. Added `bterm_c3 * gangl_3body` (H...B=C angle) and `tterm_c3 * prod_rule * gtors_k` (D-B-C-H torsions) at atoms B, C, H, D in `forcefieldthread.cpp`. Fixed-charge gradient deviation: 3.41e-04 → 9.92e-10 Eh/Bohr (3.4×10⁵ improvement). MD test 08 (acetic acid dimer, 10 ps): was crashing with NaN at 7.9 ps, now passes all 6 checks, energy drift 0.020 Eh.
-- ✅ **GFN-FF Dynamic Coulomb Charges + Thread-Safety Fix** (Feb 23, 2026): TERM 1 (pairwise) and TERM 2+3 (self-energy) now use dynamic `m_eeq_charges` and `chi_eff = chi_base + cnf*sqrt(CN)`. TERM 2+3 moved from per-thread computation to sequential parent loop in `forcefield.cpp:2243` — eliminates N-fold self-energy counting that caused energy to scale with thread count (~+0.00462 Eh/thread). TERM 1b epsilon guard corrected: `qtmp = q*cnf/(2*sqrt(max(cn,0))+1e-16)` for ALL atoms.
-- ✅ **GFN-FF Bond-HB Coupling** (Feb 21, 2026): Implemented `egbond_hb` / `dncoord_erf` — O-H bonds in hydrogen bridges get dynamically adjusted exponent `alpha_mod = (1 - 0.1*hb_cn_H) * alpha`. Populated `nr_hb` by cross-referencing HB triplets with bond list; `dncoord_erf` erf-damped CN calculation in `computeHBCoordinationNumbers()`. Target: reduce acetic acid dimer bond error from 3.0 mEh.
-- ✅ **GFN-FF Aldehyde ctype Detection** (Feb 21, 2026): Replaced placeholder with actual pi-oxygen count check: C in pi-system + exactly 1 pi-O neighbor → `fxh=0.95`. Also activated 3-ring CH (`is_3ring` via `ring_sizes`).
-- ✅ **GFN-FF Bridge Detection** (Feb 21, 2026): Replaced placeholder with sp-hybridized H/halogen detection: group-7 or H with hyb==1 → `is_bridge=true`, `bstrength = bstren[1]*0.30` (H/F) or `*0.50` (halogen).
-- ✅ **GFN-FF Inversion Gradient Translation Invariance** (Feb 22, 2026): Replaced broken "simplified" `calculateOutOfPlaneAngle()` gradient in `gfnff_geometry.h` with exact port of Fortran `domegadr` (gfnff_helpers.f90:450-510). Translation invariance: 1.15e-02 → ~1e-16 Eh/Bohr (~10¹³× improvement). Omega convention switched to Fortran (`re×rd`); energy unaffected (cos is even).
-- ✅ **GFN-FF Hückel Fermi Smearing Fix** (Feb 13, 2026): Fixed critical bug in pi-bond order calculation. HuckelSolver used single-occupation Fermi smearing targeting nel total electrons, but Fortran uses spin-split (alpha/beta) channels each targeting nel/2. Caused biradical fallback to always trigger, replacing fractional occupations with integer [2,0], giving wrong density matrix. Fix: implement spin-split approach (call fermiSmear with nel/2, then double occupations). Results: Caffeine bond -2.69→+0.031 mEh (87×), angle +0.034→0.00002 mEh (1700×) ✅
-- ✅ **GFN-FF Angle Energy Fix** (Feb 13, 2026): Fixed dominant angle energy discrepancy by creating new `generateTopologyAwareAngles(TopologyInfo&)` overload with full topology data (pi_bond_orders, atom_to_rings). Legacy function lacked pi_bond_orders → N-centered angles got f2=1.0 instead of 0.2-0.7. Also: added ringsbend() function for 3-atom ring detection, removed spurious ring fc reduction, fixed triple bond check for all atoms, added heavy maingroup sp3/SO3X/halogen/metal special cases. Results: Caffeine 22.3→0.034 mEh (656×), Complex 16.1→0.008 mEh (2013×), all molecules <0.12 mEh ✅
-- ✅ **GFN-FF Inversion Damping Fix** (Feb 11, 2026): Fixed incorrect star-topology damping in inversion energy calculation. Fortran uses nb1-center + nb1-nb2 + nb1-nb3 distances (1-3 distances for two of three), not center-to-all-neighbors (star). Complex molecule torsion+inversion error reduced from +234 mEh to -0.45 mEh (520× improvement).
-- ✅ **GFN-FF Pi-sp3 Torsion Override** (Feb 11, 2026): Added post-ring pi-sp3 barrier correction matching Fortran gfnff_ini.f90:1873-1884. Overrides ring periodicity/phase defaults when one central atom is pi and other is sp3.
-- ✅ **GFN-FF Coulomb Gradient Regression** (Feb 1, 2026): Fixed stale CN derivatives in gradient calculation. CN, CNF, and dCN/dx are now recalculated for current geometry in `GFNFF::Calculation()` before gradient computation. Fixes optimization failures caused by Term 1b using initial geometry's CN values.
-- ✅ **EEQ Solver Numerical Stability** (Jan 29, 2026): Replaced PartialPivLU with ColPivHouseholderQR + iterative refinement for better numerical stability on large systems. Investigation confirmed triose deviation is parameter-related, not numerical.
-- ✅ **GFN-FF Coulomb Exact Match** (Jan 29, 2026): Fixed dgam correction factors and enabled charge-corrected parameters (gameeq, alpeeq); Coulomb energy now matches Fortran reference within < 1 nEh (0.0001% error) for small systems.
-- ✅ **EEQ Charge Fine-Tuning** (Jan 17, 2026): Aligned parameters with Fortran reference; 82% Coulomb energy error reduction (8.3% → 1.5%)
-- ✅ **GFN-FF HB/XB Refinement** (Jan 17, 2026): Implemented context-dependent basicity/acidity overrides for non-covalent interactions
-- ✅ **D4 Dispersion Weighting Fix** (Jan 17, 2026): Corrected to CN-only weighting for GFN-FF hybrid model; D4 set as default
-- ✅ **JSON Null-Error & Parameter Routing** (October 2025): SimpleMD/curcumaopt fixed - 11 tests now pass
-- ✅ **ForceField Inversion Bug** (October 2025): Vector bounds crash in UFF parameter generation fixed
-- ✅ **CLI Test Infrastructure** (October 2025): 26 End-to-End validation tests with scientific accuracy
-- ✅ **GFN-FF Architecture** (December 2025): Implementation complete and tests passing - [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
-- ✅ **Analysis Output Refactoring** (January 2026): Unified handler architecture with registry pattern, eliminating ~800 lines of duplicate code

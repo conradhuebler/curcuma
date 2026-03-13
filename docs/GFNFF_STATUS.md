@@ -90,9 +90,7 @@
 - **New struct fields**: `GFNFFCoulomb.chi_base_i/j`, `cnf_i/j` stored during parameter generation and serialized to JSON.
 - **Impact**: Eliminates ~1e-3 Eh/Bohr gradient errors for polar molecules caused by static charge inconsistency.
 
-**Open MD Bugs**:
-- ✅ **Thread-safety**: FIXED — TERM 2+3 moved to sequential parent loop (`forcefield.cpp:2243`). Pending verification run.
-- 🔴 **HB dissociation**: Acetic acid dimer O-H...O bridge breaks at ~7.9 ps (seed=42, 298 K). HB formula matches Fortran exactly; likely cause: Bond-HB alpha reduction. Test `08_gfnff_acetic_acid_dimer_md` still fails.
+**Open MD Bugs**: ✅ Both resolved — Thread-safety fix (Feb 23) and HB Case 3 gradient fix (Feb 24, 2026).
 
 ---
 
@@ -152,20 +150,17 @@ The foundation that enabled rapid angle error debugging:
 
 ---
 
-## Accuracy Status Report
+## Accuracy Status Report (Mar 2026)
 
-### ✅ Exzellent (< 1 µEh Error)
-*   **Winkelenergien (Angles):** Nach Korrektur des `fn`-Faktors (Nutzung der ganzzahligen Nachbaranzahl `nb(20,i)` statt fraktionaler CN) weicht Methan nur noch um **0.1 µEh** ab. Die trigonometrische Formel $k \cdot (\cos \theta - \cos \theta_0)^2$ ist damit verifiziert.
-*   **Bond Stretching:** Exakte Matches für Kohlenwasserstoffe.
-*   **Coulomb Electrostatics:** Exakter Match (< 1 nEh) nach Unit-Fix.
-*   **Repulsion:** Hochgradig akkurat.
-*   **Topology:** Integer-Nachbarn, Hybridisierung und Ring-Erkennung passen perfekt.
-*   **Dispersion:** ✅ **ROOT CAUSE IDENTIFIED (Feb 11, 2026)** - Charge-dependent zeta scaling error (+75 µEh for Caffeine = 0.41% error). Curcuma's two-phase EEQ solver produces charges 10-15% different from Fortran's single-phase solver, affecting zetac6 scaling. CN values verified accurate (< 0.5% error), confirming issue is not in C6 interpolation. See DISPERSION_ROOT_CAUSE_CONFIRMED.md for details.
-*   **EEQ Charges:** ✅ **VERIFIED ACCURATE (Feb 11, 2026)** - RMS error 5.3e-4 e for caffeine (24 atoms). Per-atom chieeq/gameeq/alpeeq match Fortran exactly. Previous claim of "10-15% charge difference" was incorrect; actual Phase 2 charges differ by < 0.7% per atom. Fixed Phase 2 cnmax cap bug and metal chi-shift bug.
-
-### ❌ Critical (High Errors)
-*   **Polar/Small Molecules (HCN, HCl, OH):** Large errors in bond energy (up to 0.18 Eh). Requires investigation into element-specific bond corrections for N, O, and halogens that might not be fully active.
-*   **Gradient Consistency:** Gradient norms often deviate by ~30% from the reference, suggesting a mismatch between the energy term and its analytical derivative (especially for damped terms).
+### ✅ Excellent (< 1 µEh Error)
+- **Angles:** CH4 deviation 0.1 µEh; trigonometric formula k·(cosθ - cosθ₀)² verified
+- **Bond Stretching:** Exact match for hydrocarbons
+- **Coulomb Electrostatics:** Exact match (< 1 nEh)
+- **Repulsion:** Highly accurate
+- **Topology:** Integer neighbors, hybridization, ring detection match perfectly
+- **Dispersion:** ✅ FIXED (Mar 8, 2026) — WEIGHT_THRESHOLD=0.0 fix; all molecules < 1 µEh
+- **EEQ Charges:** ✅ VERIFIED — RMS error 5.3e-4 e for caffeine (24 atoms)
+- **Gradients:** ✅ RESOLVED (Mar 12, 2026) — all GradComp pass; large-mol Disp = √N precision limit (accepted)
 
 ---
 
