@@ -20,10 +20,12 @@
 #pragma once
 
 #include "src/core/molecule.h"
+#include "src/core/curcuma_logger.h"
 
 #include "src/tools/formats.h"
 #include "src/tools/general.h"
 
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -37,11 +39,24 @@ FileIterator::FileIterator(bool silent)
 FileIterator::FileIterator(const std::string& filename, bool silent)
     : m_filename(filename)
 {
+    // Phase 1: File existence validation - Claude Generated 2025
+    if (!std::filesystem::exists(m_filename)) {
+        CurcumaLogger::error_fmt("File not found: {}", m_filename);
+        throw std::runtime_error(fmt::format("File not found: {}", m_filename));
+    }
+
     if (!silent)
         std::cerr << "Opening file " << m_filename << std::endl;
     m_basename = filename;
     m_basename.erase(m_basename.end() - 4, m_basename.end());
     m_file = new std::ifstream(m_filename);
+
+    // Phase 1: Stream validation - Claude Generated 2025
+    if (!m_file->is_open()) {
+        CurcumaLogger::error_fmt("Failed to open file: {} (check permissions)", m_filename);
+        throw std::runtime_error(fmt::format("Failed to open file: {}", m_filename));
+    }
+
     m_lines = CountLines();
 
     // Check if this is a VTF file - Claude Generated
@@ -57,11 +72,25 @@ FileIterator::FileIterator(const std::string& filename, bool silent)
 FileIterator::FileIterator(char* filename, bool silent)
 {
     m_filename = std::string(filename);
+
+    // Phase 1: File existence validation - Claude Generated 2025
+    if (!std::filesystem::exists(m_filename)) {
+        CurcumaLogger::error_fmt("File not found: {}", m_filename);
+        throw std::runtime_error(fmt::format("File not found: {}", m_filename));
+    }
+
     if (!silent)
         std::cerr << "Opening file " << m_filename << std::endl;
     m_basename = std::string(filename);
     m_basename.erase(m_basename.end() - 4, m_basename.end());
     m_file = new std::ifstream(m_filename);
+
+    // Phase 1: Stream validation - Claude Generated 2025
+    if (!m_file->is_open()) {
+        CurcumaLogger::error_fmt("Failed to open file: {} (check permissions)", m_filename);
+        throw std::runtime_error(fmt::format("Failed to open file: {}", m_filename));
+    }
+
     m_lines = CountLines();
 
     // Check if this is a VTF file - Claude Generated
@@ -77,9 +106,23 @@ FileIterator::FileIterator(char* filename, bool silent)
 void FileIterator::setFile(const std::string& filename)
 {
     m_filename = filename;
+
+    // Phase 1: File existence validation - Claude Generated 2025
+    if (!std::filesystem::exists(m_filename)) {
+        CurcumaLogger::error_fmt("File not found: {}", m_filename);
+        throw std::runtime_error(fmt::format("File not found: {}", m_filename));
+    }
+
     m_basename = filename;
     m_basename.erase(m_basename.end() - 4, m_basename.end());
     m_file = new std::ifstream(m_filename);
+
+    // Phase 1: Stream validation - Claude Generated 2025
+    if (!m_file->is_open()) {
+        CurcumaLogger::error_fmt("Failed to open file: {} (check permissions)", m_filename);
+        throw std::runtime_error(fmt::format("Failed to open file: {}", m_filename));
+    }
+
     m_lines = CountLines();
 
     // Check if this is a VTF file - Claude Generated
@@ -137,9 +180,12 @@ bool FileIterator::CheckNext()
                 try {
                     atoms = stoi(line);
                 } catch (const std::invalid_argument& arg) {
-                    std::cerr << "FileIterator::CheckNext() Got some error at line " << line << "\n";
-                    std::cerr << "Skipping molecules that follow after  " << m_current_mol << " molecule!" << std::endl;
-                    return false;
+                    // Phase 1: Enhanced error context - Claude Generated 2025
+                    CurcumaLogger::error_fmt(
+                        "Invalid XYZ format in {} (molecule {}, line 1): Expected atom count (integer), got: '{}'",
+                        m_filename, m_current_mol + 1, line);
+                    std::cerr << "Stopping file iteration due to parsing error!" << std::endl;
+                    return true; // Signal end of file to stop iteration
                 }
                 m_mols = m_lines / (atoms + 2);
                 mol = Molecule(atoms, 0);
@@ -152,9 +198,12 @@ bool FileIterator::CheckNext()
                     try {
                         mol.setXYZ(line, i - 2);
                     } catch (const std::invalid_argument& arg) {
-                        std::cerr << "FileIterator::CheckNext() Got some error at line " << line << "\n";
-                        std::cerr << "Skipping molecules that follow after  " << m_current_mol << " molecule!" << std::endl;
-                        return false;
+                        // Phase 1: Enhanced coordinate error context - Claude Generated 2025
+                        CurcumaLogger::error_fmt(
+                            "Invalid coordinate in {} (molecule {}, line {}): Expected 'Element X Y Z', got: '{}'",
+                            m_filename, m_current_mol, i + 1, line);
+                        std::cerr << "Stopping file iteration due to parsing error!" << std::endl;
+                        return true; // Signal end of file to stop iteration
                     }
                 }
                 if (i - 1 == atoms) {
@@ -252,7 +301,10 @@ bool FileIterator::ParseVTFTimestep()
                 new_geometry(i, 1) = y;
                 new_geometry(i, 2) = z;
             } catch (const std::invalid_argument& arg) {
-                std::cerr << "FileIterator::ParseVTFTimestep() Error parsing coordinate line: " << line << std::endl;
+                // Phase 1: Enhanced VTF error context - Claude Generated 2025
+                CurcumaLogger::error_fmt(
+                    "Invalid VTF coordinate in {} (timestep {}, atom {}): Expected 'X Y Z', got: '{}'",
+                    m_filename, m_current_mol, i + 1, line);
                 return true; // Error - end iteration
             }
         }

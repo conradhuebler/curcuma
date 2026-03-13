@@ -18,12 +18,15 @@
  */
 
 #include "analysis.h"
+#include "analysis_output.h"  // Claude Generated 2026: Output dispatcher
 #include "persistentdiagram.h"
 #include "src/core/curcuma_logger.h"
 #include "src/core/elements.h"
 #include "src/core/units.h"
 #include "src/core/parameter_registry.h"
+#include "src/core/form_factors.h"
 #include "src/tools/pbc_utils.h"
+#include "src/tools/general.h"  // For Tools::CreateList - Claude Generated 2026
 #include "trajectory_statistics.h"
 
 #include <algorithm>
@@ -34,6 +37,7 @@ UnifiedAnalysis::UnifiedAnalysis(const json& controller, bool silent)
     : CurcumaMethod(ParameterRegistry::getInstance().getDefaultJson("analysis"), controller, silent)
     , m_config("analysis", controller)  // Claude Generated 2025: ConfigManager accepts full controller
     , m_silent(silent)
+    , m_analysis_config(m_config)  // Claude Generated 2026: Initialize configuration state
 {
     // Claude Generated 2025: Analysis needs verbosity >=2 for output
     // If user didn't explicitly set verbosity, default to 2 (informative)
@@ -50,6 +54,114 @@ UnifiedAnalysis::UnifiedAnalysis(const json& controller, bool silent)
 
 UnifiedAnalysis::~UnifiedAnalysis()
 {
+}
+
+// AnalysisConfig implementation - Claude Generated 2026
+UnifiedAnalysis::AnalysisConfig::AnalysisConfig(const ConfigManager& config)
+{
+    // Frame selection parameters
+    frames_str = config.get<std::string>("frames", "");
+    stride = config.get<int>("stride", 1);
+    start_frame = config.get<int>("frame_range_start", 0);
+    end_frame = config.get<int>("frame_range_end", -1);
+
+    // Scattering parameters
+    scattering_enabled = config.get<bool>("scattering_enable", false);
+    scattering_per_frame_files = config.get<bool>("scattering_per_frame_files", false);
+    scattering_q_values = config.get<std::string>("scattering_q_values", "");
+    scattering_output_directory = config.get<std::string>("scattering_output_directory", ".");
+    scattering_file_prefix = config.get<std::string>("scattering_file_prefix", "scattering_frame");
+    scattering_stats_include_median = config.get<bool>("scattering_stats_include_median", true);
+
+    // RDF parameters
+    rdf_enabled = config.get<bool>("rdf_enable", false);
+    rdf_r_max = config.get<double>("rdf_r_max", 15.0);
+    rdf_bin_width = config.get<double>("rdf_bin_width", 0.05);
+    rdf_coordination_shells = config.get<bool>("rdf_coordination_shells", false);
+
+    // Output parameters
+    output_format = config.get<std::string>("output_format", "human");
+    output_file = config.get<std::string>("output_file", "");
+    metrics = config.get<std::string>("metrics", "gyration,rout,end2end");
+    statistics_mode = config.get<std::string>("statistics", "none");
+    window_size = config.get<int>("window", 10);
+
+    // Validate configuration
+    validateConfiguration();
+}
+
+void UnifiedAnalysis::AnalysisConfig::validateConfiguration()
+{
+    // Positive stride
+    if (stride <= 0) {
+        CurcumaLogger::warn("stride must be positive, using 1");
+        stride = 1;
+    }
+
+    // Dependency check: per_frame_files requires scattering
+    if (scattering_per_frame_files && !scattering_enabled) {
+        CurcumaLogger::warn("scattering_per_frame_files requires scattering_enable=true, disabling per_frame_files");
+        scattering_per_frame_files = false;
+    }
+
+    // Window size for moving statistics
+    if (window_size < 2 && statistics_mode.find("moving") != std::string::npos) {
+        CurcumaLogger::warn("window size must be >= 2 for moving statistics, using 10");
+        window_size = 10;
+    }
+}
+
+bool UnifiedAnalysis::AnalysisConfig::hasScatteringOutput() const
+{
+    return scattering_enabled;
+}
+
+bool UnifiedAnalysis::AnalysisConfig::hasPerFrameFiles() const
+{
+    return scattering_enabled && scattering_per_frame_files;
+}
+
+bool UnifiedAnalysis::AnalysisConfig::hasRDFOutput() const
+{
+    return rdf_enabled;
+}
+
+json UnifiedAnalysis::AnalysisConfig::toJSON() const
+{
+    json config_json;
+
+    // Frame selection
+    config_json["frames"] = frames_str;
+    config_json["stride"] = stride;
+    config_json["frame_range_start"] = start_frame;
+    config_json["frame_range_end"] = end_frame;
+
+    // Scattering
+    if (scattering_enabled) {
+        config_json["scattering_enable"] = true;
+        config_json["scattering_per_frame_files"] = scattering_per_frame_files;
+        config_json["scattering_q_values"] = scattering_q_values;
+        config_json["scattering_output_directory"] = scattering_output_directory;
+        config_json["scattering_file_prefix"] = scattering_file_prefix;
+        config_json["scattering_stats_include_median"] = scattering_stats_include_median;
+    }
+
+    // RDF
+    if (rdf_enabled) {
+        config_json["rdf_enable"] = true;
+        config_json["rdf_r_max"] = rdf_r_max;
+        config_json["rdf_bin_width"] = rdf_bin_width;
+        config_json["rdf_coordination_shells"] = rdf_coordination_shells;
+    }
+
+    // Output
+    config_json["output_format"] = output_format;
+    config_json["output_file"] = output_file;
+    config_json["metrics"] = metrics;
+    config_json["statistics"] = statistics_mode;
+    config_json["window"] = window_size;
+
+    return config_json;
 }
 
 // Helper function: Parse comma-separated metrics list - Claude Generated 2025
@@ -130,40 +242,140 @@ void UnifiedAnalysis::start()
     results["total_timesteps"] = 0; // Will be updated after loop
     results["timesteps"] = json::array();
 
-    // Parse statistics configuration - Claude Generated 2025
-    std::string metrics_str = m_config.get<std::string>("metrics");
-    std::string statistics_mode = m_config.get<std::string>("statistics");
-    int window_size = m_config.get<int>("window");
-
-    std::vector<std::string> enabled_metrics = parseMetricsList(metrics_str);
-    bool enable_cumulative = (statistics_mode == "cumulative" || statistics_mode == "all");
-    bool enable_moving = (statistics_mode == "moving" || statistics_mode == "all");
+    // Parse statistics configuration - Claude Generated 2026 (Refactored to use AnalysisConfig)
+    std::vector<std::string> enabled_metrics = parseMetricsList(m_analysis_config.metrics);
+    bool enable_cumulative = (m_analysis_config.statistics_mode == "cumulative" || m_analysis_config.statistics_mode == "all");
+    bool enable_moving = (m_analysis_config.statistics_mode == "moving" || m_analysis_config.statistics_mode == "all");
 
     // Create statistics tracker if needed
     std::unique_ptr<TrajectoryStatistics> stats;
     if (enable_cumulative || enable_moving) {
-        stats = std::make_unique<TrajectoryStatistics>(window_size);
+        stats = std::make_unique<TrajectoryStatistics>(m_analysis_config.window_size);
     }
 
     // ALWAYS store configuration in results for output formatting
     results["statistics_config"] = {
         { "metrics", enabled_metrics },
-        { "mode", statistics_mode },
-        { "window", window_size },
+        { "mode", m_analysis_config.statistics_mode },
+        { "window", m_analysis_config.window_size },
         { "enable_cumulative", enable_cumulative },
         { "enable_moving", enable_moving }
     };
 
-    // Process all structures (1 for single-structure, N for trajectory)
-    int timestep = 0;
+    // Store scattering configuration for per-frame file output - Claude Generated 2026 (Refactored)
+    if (m_analysis_config.hasPerFrameFiles()) {
+        results["config"] = {
+            { "scattering_per_frame_files", m_analysis_config.scattering_per_frame_files },
+            { "scattering_q_values", m_analysis_config.scattering_q_values }
+        };
+    }
 
-    while (!file_iter.AtEnd()) {
-        Molecule mol = file_iter.Next();
+    std::vector<int> selected_frames;
+    bool use_frame_list = false;
 
-        // Claude Generated 2025: Log PBC detection at verbosity level 2+ (first structure only)
-        if (timestep == 0 && mol.hasPBC() && CurcumaLogger::get_verbosity() >= 2) {
+    // Two-pass approach: First count total frames to resolve -1 - Claude Generated 2026
+    int total_frames = 0;
+    {
+        FileIterator counter(m_filename, true); // silent mode
+        while (!counter.AtEnd()) {
+            counter.Next();
+            total_frames++;
+        }
+    }
+
+    // Resolve end_frame for range-based selection - Claude Generated 2026
+    int end_frame = m_analysis_config.end_frame;
+    if (end_frame == -1) {
+        end_frame = total_frames;
+    }
+
+    // Resolve frame selection - Claude Generated 2026 (Refactored to use AnalysisConfig)
+    if (!m_analysis_config.frames_str.empty()) {
+        use_frame_list = true;
+
+        // Special cases: "-1" or "last" alone means only the last frame
+        if (m_analysis_config.frames_str == "-1" || m_analysis_config.frames_str == "last") {
+            selected_frames.push_back(total_frames - 1); // 0-based
+        } else {
+            // Replace -1 with actual last frame number (1-based for user) in ranges
+            std::string resolved_frames = m_analysis_config.frames_str;
+            if (resolved_frames.find("-1") != std::string::npos) {
+                size_t pos = 0;
+                std::string from = "-1";
+                std::string to = std::to_string(total_frames);
+                while ((pos = resolved_frames.find(from, pos)) != std::string::npos) {
+                    resolved_frames.replace(pos, from.length(), to);
+                    pos += to.length();
+                }
+            }
+
+            // Parse frame selection using Tools::CreateList (1-based input)
+            selected_frames = Tools::CreateList(resolved_frames);
+
+            // Convert 1-based indexing to 0-based for internal use
+            for (auto& frame : selected_frames) {
+                frame -= 1;
+            }
+        }
+    } else {
+        // Default behavior: analyze all frames in range - Claude Generated 2026
+        for (int i = m_analysis_config.start_frame; i < end_frame; ++i) {
+            selected_frames.push_back(i);
+        }
+    }
+
+    // Frame selection validation - Claude Generated 2026
+    int analyzed_frames = 0;
+
+    std::cout << "Selected frames for analysis: ";
+    for (const auto i : selected_frames) {
+        std::cout << i << " ";
+        CurcumaLogger::info_fmt("Selected frame for analysis: {}", i);
+        if (i < 0 || i >= total_frames) {
+            CurcumaLogger::error_fmt("Selected frame {} is out of bounds (0 to {})", i, total_frames - 1);
+            return;
+        }
+    }
+
+    // ========================================================================
+    // Claude Generated 2026: Selective Frame Pre-Loading
+    // Nur die Frames laden, die in selected_frames sind — übrige überspringen.
+    // FileIterator ist sequentiell ohne reset(), daher einmaliger Durchlauf.
+    // ========================================================================
+
+    std::unordered_set<int> selected_set(selected_frames.begin(), selected_frames.end());
+    std::unordered_map<int, Molecule> frames;
+    frames.reserve(selected_frames.size());
+
+    if (!m_silent) {
+        CurcumaLogger::info_fmt("Loading {}/{} frames for analysis...",
+                                selected_frames.size(), total_frames);
+    }
+
+    {
+        int current_frame = 0;
+        while (!file_iter.AtEnd()) {
+            if (selected_set.count(current_frame)) {
+                frames.emplace(current_frame, file_iter.Next());
+            } else {
+                file_iter.Next();  // Advance iterator, discard frame
+            }
+            ++current_frame;
+        }
+    }
+
+    if (frames.size() != selected_frames.size()) {
+        CurcumaLogger::error_fmt("Frame loading failed: expected {} frames, loaded {}",
+                                 selected_frames.size(), frames.size());
+        return;
+    }
+
+    // Log PBC detection at verbosity level 2+ (first selected frame)
+    {
+        auto it = frames.find(selected_frames[0]);
+        if (it != frames.end() && it->second.hasPBC() && CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info("Detected periodic boundary conditions");
-            auto params = PBCUtils::getLatticeParameters(mol.getUnitCell());
+            auto params = PBCUtils::getLatticeParameters(it->second.getUnitCell());
             CurcumaLogger::param("lattice_a", fmt::format("{:.4f} Å", params[0]));
             CurcumaLogger::param("lattice_b", fmt::format("{:.4f} Å", params[1]));
             CurcumaLogger::param("lattice_c", fmt::format("{:.4f} Å", params[2]));
@@ -171,68 +383,240 @@ void UnifiedAnalysis::start()
             CurcumaLogger::param("lattice_beta", fmt::format("{:.2f}°", params[4]));
             CurcumaLogger::param("lattice_gamma", fmt::format("{:.2f}°", params[5]));
         }
+    }
 
-        json timestep_result = analyzeMolecule(mol, timestep);
+    // Step 2: Determine threading strategy
+    int num_threads = m_config.get<int>("threads", 4);
+    int selected_frame_count = selected_frames.size();
+    bool use_threading = (selected_frame_count > 1 && num_threads > 1);
 
-        // Collect statistics for enabled metrics - Claude Generated 2025
+    // Fallback to sequential for single-frame files
+    if (selected_frame_count == 1) {
+        use_threading = false;
+        if (!m_silent) {
+            CurcumaLogger::info("Single frame detected, using sequential processing");
+        }
+    }
+
+    if (use_threading) {
+        // ========================================================================
+        // PARALLEL PATH - Frame-level parallelization with CxxThreadPool
+        // ========================================================================
+
+        // Create thread pool
+        m_threadpool = new CxxThreadPool();
+        m_threadpool->setProgressBar(CxxThreadPool::ProgressBarType::None);
+        m_threadpool->setActiveThreadCount(num_threads);
+
+        // Calculate optimal batch size
+        int frames_per_thread = (selected_frame_count + num_threads - 1) / num_threads;
+
+        // Create and configure threads
+        std::vector<AnalysisThread*> threads;
+        threads.reserve(num_threads);
+
+        for (int t = 0; t < num_threads; ++t) {
+            int start_idx = t * frames_per_thread;
+            int end_idx = std::min(start_idx + frames_per_thread, selected_frame_count);
+
+            if (start_idx >= selected_frame_count) break;
+
+            auto* thread = new AnalysisThread(
+                selected_frames,
+                frames,
+                start_idx,
+                end_idx,
+                enabled_metrics,
+                m_config_legacy,
+                m_analysis_config,
+                this
+            );
+
+            threads.push_back(thread);
+            m_threadpool->addThread(thread);
+        }
+
+        // Execute all threads (blocks until complete)
+        if (!m_silent) {
+            CurcumaLogger::info_fmt("Analyzing {} frames with {} threads...",
+                                   selected_frame_count, threads.size());
+        }
+
+        auto start_time = std::chrono::high_resolution_clock::now();
+        m_threadpool->StartAndWait();
+        auto end_time = std::chrono::high_resolution_clock::now();
+
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            end_time - start_time).count();
+
+        if (!m_silent) {
+            CurcumaLogger::info_fmt("Parallel analysis completed in {:.2f} seconds",
+                                   duration / 1000.0);
+        }
+
+        // Step 3: Aggregate results (sequential, no races)
+        std::vector<std::pair<int, json>> indexed_results;
+        for (auto* thread : threads) {
+            for (const auto& result : thread->getResults()) {
+                int frame_idx = result["frame_index"];
+                indexed_results.push_back({frame_idx, result});
+            }
+        }
+
+        // Sort by frame index to preserve temporal order
+        std::sort(indexed_results.begin(), indexed_results.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+
+        // Add to results array in order
+        for (const auto& [idx, result] : indexed_results) {
+            results["timesteps"].push_back(result);
+        }
+
+        analyzed_frames = indexed_results.size();
+
+        // Step 4: Merge statistics from all threads
         if (stats) {
-            for (const auto& metric : enabled_metrics) {
-                if (metric == "gyration") {
-                    // Track both unweighted and mass-weighted
-                    double gyr_u = extractMetricValue(timestep_result, "gyration", false);
-                    double gyr_m = extractMetricValue(timestep_result, "gyration", true);
-                    stats->addValue("gyration_unweighted", gyr_u);
-                    stats->addValue("gyration_mass", gyr_m);
-                } else {
-                    double value = extractMetricValue(timestep_result, metric);
-                    stats->addValue(metric, value);
+            for (auto* thread : threads) {
+                const auto& local_stats = thread->getStatistics();
+
+                for (const auto& metric : enabled_metrics) {
+                    if (metric == "gyration") {
+                        // Both variants
+                        for (const auto& variant : { "gyration_unweighted", "gyration_mass" }) {
+                            auto series = local_stats.getSeries(variant);
+                            for (double value : series) {
+                                stats->addValue(variant, value);
+                            }
+                        }
+                    } else {
+                        // Get full series from thread-local statistics
+                        auto series = local_stats.getSeries(metric);
+                        for (double value : series) {
+                            stats->addValue(metric, value);
+                        }
+                    }
                 }
             }
 
-            // Add statistics to timestep result
-            timestep_result["statistics"] = json::object();
+            // Add final statistics to last timestep result
+            if (!results["timesteps"].empty()) {
+                json final_stats = json::object();
+                for (const auto& metric : enabled_metrics) {
+                    if (metric == "gyration") {
+                        // Both variants
+                        for (const auto& variant : { "gyration_unweighted", "gyration_mass" }) {
+                            if (enable_cumulative) {
+                                final_stats[variant]["mean"] = stats->getMean(variant);
+                                final_stats[variant]["std"] = stats->getStdDev(variant);
+                            }
+                            if (enable_moving) {
+                                final_stats[variant]["moving_avg"] = stats->getMovingAverage(variant);
+                            }
+                        }
+                    } else {
+                        if (enable_cumulative) {
+                            final_stats[metric]["mean"] = stats->getMean(metric);
+                            final_stats[metric]["std"] = stats->getStdDev(metric);
+                        }
+                        if (enable_moving) {
+                            final_stats[metric]["moving_avg"] = stats->getMovingAverage(metric);
+                        }
+                    }
+                }
+                // Store in global results
+                results["statistics"] = final_stats;
+            }
+        }
+
+        // Cleanup: Pool zuerst löschen (iteriert noch über m_finished),
+        // dann die Threads (autoDelete=false, also nicht vom Pool gelöscht)
+        delete m_threadpool;
+        m_threadpool = nullptr;
+        for (auto* thread : threads) {
+            delete thread;
+        }
+
+    } else {
+        // ========================================================================
+        // SEQUENTIAL PATH (single-frame or threads=1)
+        // ========================================================================
+
+        if (!m_silent) {
+            CurcumaLogger::info_fmt("Analyzing {} frames sequentially...", selected_frame_count);
+        }
+
+        for (int frame_idx : selected_frames) {
+            Molecule mol = frames.at(frame_idx);
+
+            json timestep_result = analyzeMolecule(mol, frame_idx);
+            timestep_result["frame_index"] = frame_idx;
+            results["timesteps"].push_back(timestep_result);
+
+            // Collect statistics for enabled metrics
+            if (stats) {
+                for (const auto& metric : enabled_metrics) {
+                    if (metric == "gyration") {
+                        // Track both unweighted and mass-weighted
+                        double gyr_u = extractMetricValue(timestep_result, "gyration", false);
+                        double gyr_m = extractMetricValue(timestep_result, "gyration", true);
+                        stats->addValue("gyration_unweighted", gyr_u);
+                        stats->addValue("gyration_mass", gyr_m);
+                    } else {
+                        double value = extractMetricValue(timestep_result, metric);
+                        stats->addValue(metric, value);
+                    }
+                }
+            }
+
+            analyzed_frames++;
+
+            // Progress reporting (every 10 frames)
+            if (!m_silent && analyzed_frames % 10 == 0 && analyzed_frames > 0) {
+                CurcumaLogger::info_fmt("Analyzed {}/{} frames", analyzed_frames, selected_frame_count);
+            }
+        }
+
+        // Add final statistics to results
+        if (stats && !results["timesteps"].empty()) {
+            json final_stats = json::object();
             for (const auto& metric : enabled_metrics) {
                 if (metric == "gyration") {
                     // Both variants
                     for (const auto& variant : { "gyration_unweighted", "gyration_mass" }) {
                         if (enable_cumulative) {
-                            timestep_result["statistics"][variant]["mean"] = stats->getMean(variant);
-                            timestep_result["statistics"][variant]["std"] = stats->getStdDev(variant);
+                            final_stats[variant]["mean"] = stats->getMean(variant);
+                            final_stats[variant]["std"] = stats->getStdDev(variant);
                         }
                         if (enable_moving) {
-                            timestep_result["statistics"][variant]["moving_avg"] = stats->getMovingAverage(variant);
+                            final_stats[variant]["moving_avg"] = stats->getMovingAverage(variant);
                         }
                     }
                 } else {
                     if (enable_cumulative) {
-                        timestep_result["statistics"][metric]["mean"] = stats->getMean(metric);
-                        timestep_result["statistics"][metric]["std"] = stats->getStdDev(metric);
+                        final_stats[metric]["mean"] = stats->getMean(metric);
+                        final_stats[metric]["std"] = stats->getStdDev(metric);
                     }
                     if (enable_moving) {
-                        timestep_result["statistics"][metric]["moving_avg"] = stats->getMovingAverage(metric);
+                        final_stats[metric]["moving_avg"] = stats->getMovingAverage(metric);
                     }
                 }
             }
+            results["statistics"] = final_stats;
         }
-
-        results["timesteps"].push_back(timestep_result);
-
-        if (!m_silent && timestep % 10 == 0 && timestep > 0) {
-            // Only show progress for multi-structure files
-            int total = file_iter.MaxMolecules();
-            if (total > 1) {
-                CurcumaLogger::info_fmt("Analyzed timestep {}/{}", timestep, total);
-            }
-        }
-        timestep++;
     }
 
-    // Update total count after iterating - Claude Generated 2025
-    results["total_timesteps"] = timestep;
+    // Update total counts - Claude Generated 2026
+    results["total_timesteps"] = analyzed_frames;
+    results["total_frames_in_file"] = total_frames;
 
-    if (!m_silent && timestep > 1) {
-        CurcumaLogger::info_fmt("Processed {} structures with {} metrics selected",
-            timestep, enabled_metrics.size());
+    if (!m_silent && analyzed_frames > 0) {
+        if (use_frame_list) {
+            CurcumaLogger::info_fmt("Processed {} frames from {} total frames",
+                analyzed_frames, total_frames);
+        } else if (analyzed_frames > 1) {
+            CurcumaLogger::info_fmt("Processed {} structures with {} metrics selected",
+                analyzed_frames, enabled_metrics.size());
+        }
     }
 
     outputResults(results);
@@ -314,6 +698,58 @@ json UnifiedAnalysis::analyzeMolecule(const Molecule& mol, int timestep)
         }
     }
 
+    // Calculate scattering properties if enabled - Claude Generated 2025
+    // NOTE: Only skip for trajectories in non-JSON formats (Human/CSV causes crashes)
+    bool scattering_enabled = false;
+    try {
+        scattering_enabled = m_config.get<bool>("scattering_enable");
+    } catch (...) {
+        scattering_enabled = false;
+    }
+    if (scattering_enabled) {
+        bool is_trajectory = (timestep >= 0);
+        std::string output_format = "human";
+        try {
+            output_format = m_config.get<std::string>("output_format");
+        } catch (...) {
+            output_format = "human";
+        }
+        bool is_json_output = (output_format == "json");
+
+        // NOTE: With enhanced trajectory writer, scattering analysis now works for all formats
+        result["scattering"] = calculateScatteringProperties(mol);
+    }
+
+    // Calculate radial distribution function if enabled - Claude Generated 2025
+    // NOTE: Only skip for trajectories in non-JSON formats (Human/CSV causes crashes)
+    bool rdf_enabled = false;
+    try {
+        rdf_enabled = m_config.get<bool>("rdf_enable");
+    } catch (...) {
+        rdf_enabled = false;
+    }
+    if (rdf_enabled) {
+        bool is_trajectory = (timestep >= 0);
+        std::string output_format_rdf = "human";
+        try {
+            output_format_rdf = m_config.get<std::string>("output_format");
+        } catch (...) {
+            output_format_rdf = "human";
+        }
+        bool is_json_output_rdf = (output_format_rdf == "json");
+
+        // Only skip for trajectories in non-JSON formats (Human/CSV crash)
+        if (is_trajectory && !is_json_output_rdf) {
+            static bool warned_rdf = false;
+            if (!warned_rdf) {
+                CurcumaLogger::warn("RDF analysis on trajectories requires -output_format json");
+                warned_rdf = true;
+            }
+        } else {
+            result["rdf"] = calculatePairDistribution(mol);
+        }
+    }
+
     return result;
 }
 
@@ -375,6 +811,100 @@ json UnifiedAnalysis::calculateGeometricProperties(const Molecule& mol)
         };
     } catch (...) {
         // Inertia constants not available
+    }
+
+    // Extended shape descriptors - Claude Generated 2025
+    // Check if any shape parameters are enabled
+    bool calc_asphericity = false;
+    bool calc_acylindricity = false;
+    bool calc_anisotropy = false;
+
+    try {
+        calc_asphericity = m_config.get<bool>("shape_asphericity");
+        calc_acylindricity = m_config.get<bool>("shape_acylindricity");
+        calc_anisotropy = m_config.get<bool>("shape_anisotropy");
+    } catch (...) {
+        // Use defaults if parameters not available
+    }
+
+    if (calc_asphericity || calc_acylindricity || calc_anisotropy) {
+        // Compute gyration tensor: Gₐᵦ = (1/N) Σᵢ (rᵢₐ - COM_a)(rᵢᵦ - COM_b)
+        Position com = mol.MassCentroid();
+        const int N = mol.AtomCount();
+
+        Eigen::Matrix3d gyration_tensor = Eigen::Matrix3d::Zero();
+
+        for (int i = 0; i < N; ++i) {
+            Position pos = mol.Atom(i).second;
+
+            // Relative position from COM
+            double dx = pos.x() - com[0];
+            double dy = pos.y() - com[1];
+            double dz = pos.z() - com[2];
+
+            // Build symmetric tensor
+            gyration_tensor(0, 0) += dx * dx;
+            gyration_tensor(0, 1) += dx * dy;
+            gyration_tensor(0, 2) += dx * dz;
+            gyration_tensor(1, 0) += dy * dx;
+            gyration_tensor(1, 1) += dy * dy;
+            gyration_tensor(1, 2) += dy * dz;
+            gyration_tensor(2, 0) += dz * dx;
+            gyration_tensor(2, 1) += dz * dy;
+            gyration_tensor(2, 2) += dz * dz;
+        }
+
+        gyration_tensor /= N;
+
+        // Eigenvalue decomposition
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(gyration_tensor);
+        Eigen::Vector3d eigenvalues = solver.eigenvalues();
+
+        // Sort eigenvalues: λ₁ ≥ λ₂ ≥ λ₃
+        std::sort(eigenvalues.data(), eigenvalues.data() + 3, std::greater<double>());
+        double lambda1 = eigenvalues[0];
+        double lambda2 = eigenvalues[1];
+        double lambda3 = eigenvalues[2];
+
+        json shape_descriptors;
+        shape_descriptors["eigenvalues"] = {lambda1, lambda2, lambda3};
+
+        // Asphericity: b = λ₃ - 0.5(λ₁ + λ₂)
+        if (calc_asphericity) {
+            double asphericity = lambda3 - 0.5 * (lambda1 + lambda2);
+            shape_descriptors["asphericity"] = asphericity;
+
+            // Interpretation
+            if (asphericity > 0.1) {
+                shape_descriptors["shape_type"] = "prolate";  // Cigar-like
+            } else if (asphericity < -0.1) {
+                shape_descriptors["shape_type"] = "oblate";   // Disk-like
+            } else {
+                shape_descriptors["shape_type"] = "spherical";
+            }
+        }
+
+        // Acylindricity: c = λ₂ - λ₁
+        if (calc_acylindricity) {
+            double acylindricity = lambda2 - lambda1;
+            shape_descriptors["acylindricity"] = acylindricity;
+        }
+
+        // Relative shape anisotropy: κ² = 1 - 3⟨I₁I₂I₃⟩/⟨I₁+I₂+I₃⟩²
+        if (calc_anisotropy) {
+            double lambda_sum = lambda1 + lambda2 + lambda3;
+            double lambda_product = lambda1 * lambda2 * lambda3;
+
+            double anisotropy = 0.0;
+            if (lambda_sum > 0.0) {
+                anisotropy = 1.0 - 3.0 * lambda_product / (lambda_sum * lambda_sum);
+            }
+
+            shape_descriptors["relative_anisotropy"] = anisotropy;
+            // κ² ∈ [0, 1]: 0 = sphere, 1 = rod or disk
+        }
+
+        geometric["shape_descriptors"] = shape_descriptors;
     }
 
     return geometric;
@@ -701,10 +1231,25 @@ void UnifiedAnalysis::outputResults(const json& results)
     std::string output_format = m_config.get<std::string>("output_format");
     std::string output_file = m_config.get<std::string>("output_file");
 
+    // Phase 4: ALWAYS write files (derive basename from output_file OR input filename)
+    std::string basename;
     if (!output_file.empty()) {
-        outputToFile(results, output_file);
-        return;
+        // Use explicit output_file as basename
+        basename = output_file;
+    } else {
+        // Derive basename from input filename: "input.xyz" → "input"
+        basename = m_filename;
+        size_t last_dot = basename.find_last_of(".");
+        if (last_dot != std::string::npos) {
+            basename = basename.substr(0, last_dot);
+        }
     }
+
+    // ALWAYS dispatch to file handlers (write specialized files)
+    outputToFile(results, basename);
+
+    // Continue with console output for immediate feedback
+    // (no more early return - console output ADDITIONAL to files)
 
     if (output_format == "json") {
         std::cout << std::setw(2) << results << std::endl;
@@ -783,13 +1328,15 @@ void UnifiedAnalysis::outputResults(const json& results)
             CurcumaLogger::info("");
             CurcumaLogger::info("Polymer/Chain Properties:");
 
-            if (polymer.contains("end_to_end_distance")) {
+            if (polymer.contains("end_to_end_distance") && !polymer["end_to_end_distance"].is_null()) {
                 CurcumaLogger::info_fmt("  End-to-end distance: {:.3f} Å",
                     polymer["end_to_end_distance"].get<double>());
             }
 
-            CurcumaLogger::info_fmt("  Rout (COM to outermost): {:.3f} Å",
-                polymer["rout"].get<double>());
+            if (polymer.contains("rout") && !polymer["rout"].is_null()) {
+                CurcumaLogger::info_fmt("  Rout (COM to outermost): {:.3f} Å",
+                    polymer["rout"].get<double>());
+            }
         }
 
         if (display_results.contains("topology")) {
@@ -817,6 +1364,7 @@ void UnifiedAnalysis::outputResults(const json& results)
                 writer_config["enable_moving"] = results["statistics_config"]["enable_moving"];
             }
 
+            // NOTE: TrajectoryWriter now supports scattering data (2026 enhancement)
             TrajectoryWriter writer(writer_config);
             writer.writeHumanTable(std::cout, results);
 
@@ -825,38 +1373,28 @@ void UnifiedAnalysis::outputResults(const json& results)
                                   results["total_timesteps"].get<int>());
         }
     }
+
+    // Phase 4: File output already handled by outputToFile() call above
+    // No need for separate dispatcher call - handlers write directly to files
 }
 
-void UnifiedAnalysis::outputToFile(const json& results, const std::string& filename)
+void UnifiedAnalysis::outputToFile(const json& results, const std::string& basename)
 {
-    std::string output_format = m_config.get<std::string>("output_format");
+    // Phase 4: Only dispatch to handlers - no main file write
+    // Each handler creates its own specialized CSV file (general, scattering, rdf, etc.)
 
-    // Create TrajectoryWriter with appropriate config
+    // Create TrajectoryWriter with CSV config for handler use
     json writer_config;
-    writer_config["default_format"] = (output_format == "csv" ? "CSV" : output_format == "json" ? "JSON" : "HumanTable");
+    writer_config["default_format"] = "CSV";
     writer_config["precision"] = 3;
-
-    // Configure statistics for trajectory data
-    if (results.contains("statistics_config")) {
-        writer_config["enable_cumulative"] = results["statistics_config"]["enable_cumulative"];
-        writer_config["enable_moving"] = results["statistics_config"]["enable_moving"];
-    }
-
     TrajectoryWriter writer(writer_config);
 
-    // Map format strings to TrajectoryWriter::Format
-    TrajectoryWriter::Format format = TrajectoryWriter::Format::HumanTable; // default
-    if (output_format == "csv") {
-        format = TrajectoryWriter::Format::CSV;
-    } else if (output_format == "json") {
-        format = TrajectoryWriter::Format::JSON;
-    } else if (output_format == "dat") {
-        format = TrajectoryWriter::Format::DAT;
-    }
+    // Dispatch to all registered handlers
+    // Each handler writes its own file: basename.type.csv or basename.NNN.type.csv
+    AnalysisOutputDispatcher dispatcher(m_analysis_config, writer);
+    dispatcher.dispatchToFile(results, basename);
 
-    // Output using TrajectoryWriter
-    writer.writeToFile(filename, format, results);
-    CurcumaLogger::success_fmt("Analysis results saved to: {} (format: {})", filename, output_format);
+    // Handlers log their own success messages
 }
 
 void UnifiedAnalysis::printHelp() const
@@ -1010,4 +1548,557 @@ void UnifiedAnalysis::printEnhancedTDAHelp() const
     std::cout << "          -topological.save_persistence_pairs true" << std::endl;
     std::cout << "  # Automatically processes all structures in the file" << std::endl;
     std::cout << std::endl;
+}
+
+// =====================================================================
+// Scattering Analysis Implementation - Claude Generated 2025
+// =====================================================================
+
+json UnifiedAnalysis::calculateScatteringProperties(const Molecule& mol)
+{
+    json scattering;
+
+    // Get parameters with defaults - Claude Generated 2025
+    double q_min = 0.01;
+    double q_max = 2.0;
+    int q_steps = 100;
+    std::string ff_type = "auto";
+    double cg_radius = 3.0;
+    int angular_samples = 50;
+
+    try {
+        q_min = m_config.get<double>("scattering_q_min");
+        q_max = m_config.get<double>("scattering_q_max");
+        q_steps = m_config.get<int>("scattering_q_steps");
+        ff_type = m_config.get<std::string>("scattering_form_factor");
+        cg_radius = m_config.get<double>("scattering_cg_radius");
+        angular_samples = m_config.get<int>("scattering_angular_samples");
+    } catch (...) {
+        // Use defaults if parameters not available
+    }
+
+
+    // Auto-detect system type
+    bool is_cg = mol.isCGSystem();
+    if (ff_type == "auto") {
+        ff_type = is_cg ? "cg_sphere" : "cromer_mann";
+    }
+
+    scattering["system_type"] = is_cg ? "cg" : "atomic";
+    scattering["form_factor_type"] = ff_type;
+    if (is_cg) {
+        scattering["cg_radius"] = cg_radius;
+    }
+
+    // Claude Generated 2026: Build q-vector with log or linear spacing
+    std::vector<double> q_values;
+    std::string q_spacing = m_config.get<std::string>("scattering_q_spacing");
+
+    if (q_spacing == "log" || q_spacing == "logarithmic") {
+        // Logarithmic spacing: q[i] = q_min * (q_max/q_min)^(i/(N-1))
+        // Provides better resolution at low q (Guinier region)
+
+        if (q_min <= 0.0 || q_max <= 0.0) {
+            CurcumaLogger::error("Logarithmic q-spacing requires q_min > 0 and q_max > 0");
+            CurcumaLogger::warn("Falling back to linear spacing");
+            q_spacing = "linear";
+        } else if (q_max <= q_min) {
+            CurcumaLogger::error_fmt("Invalid q-range: q_max ({}) must be > q_min ({})", q_max, q_min);
+            return scattering;  // Empty result
+        } else {
+            double log_ratio = std::log(q_max / q_min);
+            for (int i = 0; i < q_steps; ++i) {
+                double exponent = static_cast<double>(i) / std::max(1, q_steps - 1);
+                q_values.push_back(q_min * std::exp(exponent * log_ratio));
+            }
+            CurcumaLogger::info_fmt("Using logarithmic q-spacing ({} points from {} to {} Å⁻¹)",
+                                    q_steps, q_min, q_max);
+        }
+    }
+
+    if (q_spacing == "linear" || q_values.empty()) {
+        // Linear spacing: q[i] = q_min + i * (q_max - q_min) / (N-1)
+        double q_step = (q_max - q_min) / std::max(1, q_steps - 1);
+        q_values.clear();
+        for (int i = 0; i < q_steps; ++i) {
+            q_values.push_back(q_min + i * q_step);
+        }
+        if (q_spacing == "linear") {
+            CurcumaLogger::info_fmt("Using linear q-spacing ({} points from {} to {} Å⁻¹)",
+                                    q_steps, q_min, q_max);
+        }
+    }
+
+    scattering["q_min"] = q_min;
+    scattering["q_max"] = q_max;
+    scattering["q_steps"] = q_steps;
+    scattering["q_values"] = q_values;
+
+    // Pre-calculate distance matrix (reuse if available)
+    const int N = mol.AtomCount();
+    std::vector<std::vector<double>> distances(N, std::vector<double>(N, 0.0));
+
+    for (int i = 0; i < N; ++i) {
+        for (int j = i + 1; j < N; ++j) {
+            double dist = mol.hasPBC()
+                ? mol.CalculateDistancePBC(i, j)
+                : mol.CalculateDistance(i, j);
+            distances[i][j] = dist;
+            distances[j][i] = dist;
+        }
+    }
+
+    // ===== FORM FACTOR P(q) - Debye Formula =====
+    // P(q) = (1/N²) Σᵢⱼ fᵢ(q)fⱼ(q) sin(qrᵢⱼ)/(qrᵢⱼ)
+
+    std::vector<double> Pq_values;
+    Pq_values.reserve(q_values.size());
+
+    for (double q : q_values) {
+        double Pq_sum = 0.0;
+
+        // Pre-compute form factors for all atoms at this q
+        std::vector<double> form_factors(N);
+        for (int i = 0; i < N; ++i) {
+            int element = mol.Atom(i).first;
+            if (ff_type == "cg_sphere") {
+                form_factors[i] = FormFactors::getCGSphereFormFactor(cg_radius, q);
+            } else {
+                form_factors[i] = FormFactors::getAtomicFormFactor(element, q);
+            }
+        }
+
+        // Debye double sum
+        for (int i = 0; i < N; ++i) {
+            for (int j = 0; j < N; ++j) {
+                double fi = form_factors[i];
+                double fj = form_factors[j];
+
+                if (i == j) {
+                    // Diagonal: sin(0)/0 = 1
+                    Pq_sum += fi * fj;
+                } else {
+                    double rij = distances[i][j];
+                    double qr = q * rij;
+
+                    // Sinc function: sin(qr)/(qr)
+                    double sinc_qr = (qr < 1e-6) ? 1.0 : std::sin(qr) / qr;
+                    Pq_sum += fi * fj * sinc_qr;
+                }
+            }
+        }
+
+        // Normalize by N²
+        double Pq = Pq_sum / (N * N);
+        Pq_values.push_back(Pq);
+    }
+
+    scattering["P_q"] = Pq_values;
+
+    // Guinier analysis: Extract Rg from P(q) at small q
+    // ln(P(q)) ≈ -(q²Rg²)/3 for qRg < 1
+    if (q_values.size() >= 5) {
+        // Use first 5 points for Guinier fit
+        double sum_q2 = 0.0, sum_lnP = 0.0, sum_q2_lnP = 0.0, sum_q4 = 0.0;
+        int guinier_points = 0;
+
+        for (int i = 0; i < std::min(5, (int)q_values.size()); ++i) {
+            if (Pq_values[i] > 0.0) {
+                double q2 = q_values[i] * q_values[i];
+                double lnP = std::log(Pq_values[i]);
+
+                sum_q2 += q2;
+                sum_lnP += lnP;
+                sum_q2_lnP += q2 * lnP;
+                sum_q4 += q2 * q2;
+                guinier_points++;
+            }
+        }
+
+        if (guinier_points >= 3) {
+            // Linear fit: ln(P) = a + b*q²
+            // b = -Rg²/3  =>  Rg = √(-3b)
+            double b = (guinier_points * sum_q2_lnP - sum_q2 * sum_lnP) /
+                      (guinier_points * sum_q4 - sum_q2 * sum_q2);
+
+            if (b < 0.0) {
+                double Rg_guinier = std::sqrt(-3.0 * b);
+                scattering["guinier_rg"] = Rg_guinier;
+            }
+        }
+    }
+
+    // ===== STRUCTURE FACTOR S(q) - Spherical Averaging =====
+    // S(q) = (1/N) |Σᵢ fᵢ(q) exp(i q·rᵢ)|²
+    // Average over many q-directions at same |q|
+
+    std::vector<double> Sq_values;
+    Sq_values.reserve(q_values.size());
+
+    // Generate Fibonacci sphere sampling for uniform angular coverage
+    std::vector<std::array<double, 3>> q_directions;
+    q_directions.reserve(angular_samples);
+
+    const double golden_ratio = (1.0 + std::sqrt(5.0)) / 2.0;
+    for (int k = 0; k < angular_samples; ++k) {
+        double theta = 2.0 * M_PI * k / golden_ratio;
+        double phi = std::acos(1.0 - 2.0 * (k + 0.5) / angular_samples);
+
+        q_directions.push_back({
+            std::sin(phi) * std::cos(theta),
+            std::sin(phi) * std::sin(theta),
+            std::cos(phi)
+        });
+    }
+
+    scattering["angular_samples"] = angular_samples;
+
+    for (double q : q_values) {
+        double Sq_avg = 0.0;
+
+        // Average over all angular samples
+        for (const auto& q_dir : q_directions) {
+            // Complex amplitude: Σᵢ fᵢ(q) exp(i q·rᵢ)
+            double real_sum = 0.0;
+            double imag_sum = 0.0;
+
+            for (int i = 0; i < N; ++i) {
+                int element = mol.Atom(i).first;
+                double fi = (ff_type == "cg_sphere")
+                    ? FormFactors::getCGSphereFormFactor(cg_radius, q)
+                    : FormFactors::getAtomicFormFactor(element, q);
+
+                // Get atom position
+                Position pos = mol.Atom(i).second;
+
+                // q·r dot product
+                double q_dot_r = q * (q_dir[0] * pos.x() +
+                                     q_dir[1] * pos.y() +
+                                     q_dir[2] * pos.z());
+
+                // exp(i q·r) = cos(q·r) + i sin(q·r)
+                real_sum += fi * std::cos(q_dot_r);
+                imag_sum += fi * std::sin(q_dot_r);
+            }
+
+            // |Σ exp(i q·r)|² = real² + imag²
+            double amplitude_sq = real_sum * real_sum + imag_sum * imag_sum;
+            Sq_avg += amplitude_sq / N;  // Normalize by N
+        }
+
+        // Average over angular samples
+        double Sq = Sq_avg / angular_samples;
+        Sq_values.push_back(Sq);
+    }
+
+    scattering["S_q"] = Sq_values;
+
+    return scattering;
+}
+
+// =====================================================================
+// Radial Distribution Function g(r) Implementation - Claude Generated 2025
+// =====================================================================
+
+json UnifiedAnalysis::calculatePairDistribution(const Molecule& mol)
+{
+    json rdf;
+
+    // Get parameters with defaults - Claude Generated 2025
+    double r_max = 15.0;
+    double bin_width = 0.05;
+    bool calc_coordination = false;
+
+    try {
+        r_max = m_config.get<double>("rdf_r_max");
+        bin_width = m_config.get<double>("rdf_bin_width");
+        calc_coordination = m_config.get<bool>("rdf_coordination_shells");
+    } catch (...) {
+        // Use defaults if parameters not available
+    }
+
+    // Setup histogram bins
+    int num_bins = static_cast<int>(std::ceil(r_max / bin_width));
+    std::vector<double> histogram(num_bins, 0.0);
+    std::vector<double> r_values(num_bins);
+
+    // Fill r_values (bin centers)
+    for (int i = 0; i < num_bins; ++i) {
+        r_values[i] = (i + 0.5) * bin_width;  // Bin center
+    }
+
+    rdf["r_max"] = r_max;
+    rdf["bin_width"] = bin_width;
+    rdf["num_bins"] = num_bins;
+    rdf["r_values"] = r_values;
+
+    // Count atom pairs and fill histogram
+    const int N = mol.AtomCount();
+    int pair_count = 0;
+
+    for (int i = 0; i < N; ++i) {
+        for (int j = i + 1; j < N; ++j) {
+            // Use PBC-aware distance if periodic boundary conditions present
+            double dist = mol.hasPBC()
+                ? mol.CalculateDistancePBC(i, j)
+                : mol.CalculateDistance(i, j);
+
+            // Only count pairs within r_max
+            if (dist < r_max) {
+                int bin_idx = static_cast<int>(dist / bin_width);
+                if (bin_idx >= 0 && bin_idx < num_bins) {
+                    histogram[bin_idx] += 2.0;  // Count both (i,j) and (j,i)
+                    pair_count += 2;
+                }
+            }
+        }
+    }
+
+    // Calculate system volume
+    double volume;
+    bool has_pbc = mol.hasPBC();
+
+    if (has_pbc) {
+        // Volume from cell matrix determinant
+        Eigen::Matrix3d cell = mol.getUnitCell();
+        volume = std::abs(cell.determinant());
+        rdf["volume_source"] = "periodic_cell";
+    } else {
+        // Estimate from Rout (spherical approximation)
+        double Rout = mol.Rout();
+        volume = (4.0 / 3.0) * M_PI * Rout * Rout * Rout;
+        rdf["volume_source"] = "spherical_estimate";
+        rdf["rout"] = Rout;
+    }
+
+    rdf["volume"] = volume;
+    rdf["has_pbc"] = has_pbc;
+
+    // Normalize histogram to g(r)
+    // g(r) = (V / (4πr²Δr N(N-1))) × histogram(r)
+    std::vector<double> gr_values(num_bins);
+    std::vector<double> coordination_number;
+
+    if (calc_coordination) {
+        coordination_number.resize(num_bins, 0.0);
+    }
+
+    double number_density = N / volume;
+    double running_coord = 0.0;
+
+    for (int i = 0; i < num_bins; ++i) {
+        double r = r_values[i];
+        double shell_volume = 4.0 * M_PI * r * r * bin_width;
+
+        // Ideal gas pair count for this shell
+        double ideal_pairs = number_density * shell_volume * (N - 1);
+
+        // g(r) = actual_pairs / ideal_pairs
+        if (ideal_pairs > 0.0) {
+            gr_values[i] = histogram[i] / ideal_pairs;
+        } else {
+            gr_values[i] = 0.0;
+        }
+
+        // Running coordination number: n(r) = 4πρ ∫₀ʳ r²g(r)dr
+        // Discrete: n(r) += 4πρ r² g(r) Δr
+        if (calc_coordination) {
+            running_coord += 4.0 * M_PI * number_density * r * r * gr_values[i] * bin_width;
+            coordination_number[i] = running_coord;
+        }
+    }
+
+    rdf["g_r"] = gr_values;
+
+    if (calc_coordination) {
+        rdf["coordination_number"] = coordination_number;
+    }
+
+    // Find first peak (important structural feature)
+    double max_gr = 0.0;
+    double peak_position = 0.0;
+
+    for (int i = 0; i < num_bins; ++i) {
+        if (gr_values[i] > max_gr) {
+            max_gr = gr_values[i];
+            peak_position = r_values[i];
+        }
+    }
+
+    rdf["first_peak_position"] = peak_position;
+    rdf["first_peak_height"] = max_gr;
+
+    return rdf;
+}
+// ========================================================================
+// Claude Generated 2026: Parallel Analysis Thread Implementation
+// ========================================================================
+
+/*! \brief Constructor for analysis worker thread - Claude Generated 2026
+ *
+ * Initializes thread with frame range and analysis configuration.
+ * Sets up thread-local statistics with same window size as parent.
+ */
+UnifiedAnalysis::AnalysisThread::AnalysisThread(
+    const std::vector<int>& selected_frames,
+    const std::unordered_map<int, Molecule>& frames,
+    int start_idx,
+    int end_idx,
+    const std::vector<std::string>& metrics,
+    const json& controller,
+    const UnifiedAnalysis::AnalysisConfig& config,
+    UnifiedAnalysis* parent)
+    : m_selected_frames(selected_frames)
+    , m_frames(frames)
+    , m_start_idx(start_idx)
+    , m_end_idx(end_idx)
+    , m_metrics(metrics)
+    , m_controller(controller)
+    , m_config(config)
+    , m_parent(parent)
+    , m_local_stats(config.window_size)
+{
+    setAutoDelete(false);  // Manual cleanup to collect results
+
+    // Enable full series storage for thread merging - Claude Generated 2026
+    m_local_stats.setStoreFullSeries(true);
+}
+
+/*! \brief Execute thread - analyze assigned frame range - Claude Generated 2026
+ *
+ * Key thread-safety measures:
+ * - Deep copy Molecule for thread-local cache isolation
+ * - Verbosity=0 to avoid logger race conditions
+ * - Thread-local result/statistics storage (lock-free)
+ */
+int UnifiedAnalysis::AnalysisThread::execute() {
+    // CRITICAL: Suppress logging in worker threads (avoid race conditions)
+    int saved_verbosity = CurcumaLogger::get_verbosity();
+    CurcumaLogger::set_verbosity(0);
+
+    try {
+        for (int i = m_start_idx; i < m_end_idx; ++i) {
+            int frame_idx = m_selected_frames[i];
+
+            // Deep copy Molecule for thread-local cache isolation
+            Molecule mol_copy = m_frames.at(frame_idx);
+
+            // Analyze frame (100% independent, no shared state)
+            json result = m_parent->analyzeMolecule(mol_copy, frame_idx);
+
+            // Store result in thread-local vector (lock-free)
+            result["frame_index"] = frame_idx;
+            m_results.push_back(result);
+
+            // Accumulate statistics thread-locally (lock-free)
+            for (const auto& metric : m_metrics) {
+                if (metric == "gyration") {
+                    // Track both unweighted and mass-weighted
+                    double gyr_u = m_parent->extractMetricValue(result, "gyration", false);
+                    double gyr_m = m_parent->extractMetricValue(result, "gyration", true);
+                    m_local_stats.addValue("gyration_unweighted", gyr_u);
+                    m_local_stats.addValue("gyration_mass", gyr_m);
+                } else {
+                    double value = m_parent->extractMetricValue(result, metric);
+                    m_local_stats.addValue(metric, value);
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        CurcumaLogger::error_fmt("Thread exception: {}", e.what());
+        CurcumaLogger::set_verbosity(saved_verbosity);
+        return -1;
+    }
+
+    // Restore verbosity on exit
+    CurcumaLogger::set_verbosity(saved_verbosity);
+    return 0;
+}
+
+/*! \brief Extract metric value from JSON result - Claude Generated 2026
+ *
+ * Supports nested keys (e.g., "gyration.radius") and special handling
+ * for mass-weighted vs unweighted variants.
+ *
+ * \param result JSON result from analyzeMolecule()
+ * \param metric Metric name to extract
+ * \param mass_weighted For gyration: extract mass-weighted variant
+ * \return Extracted numeric value or 0.0 if not found
+ */
+double UnifiedAnalysis::extractMetricValue(const json& result, const std::string& metric, bool mass_weighted) const {
+    // Special handling for gyration (has both unweighted and mass-weighted)
+    if (metric == "gyration") {
+        if (result.contains("geometric") && result["geometric"].contains("gyration_radius")) {
+            const auto& gyr = result["geometric"]["gyration_radius"];
+            if (mass_weighted && gyr.contains("mass_weighted")) {
+                return gyr["mass_weighted"].get<double>();
+            } else if (!mass_weighted && gyr.contains("unweighted")) {
+                return gyr["unweighted"].get<double>();
+            }
+        }
+        return 0.0;
+    }
+
+    // Handle nested keys (e.g., "rout" from "polymer.rout")
+    if (metric == "rout" && result.contains("polymer")) {
+        return result["polymer"].value("rout", 0.0);
+    }
+
+    if (metric == "end2end" && result.contains("polymer")) {
+        return result["polymer"].value("end_to_end_distance", 0.0);
+    }
+
+    if (metric == "com") {
+        // COM is a vector, return magnitude
+        if (result.contains("geometric") && result["geometric"].contains("center_of_mass")) {
+            const auto& com = result["geometric"]["center_of_mass"];
+            if (com.is_array() && com.size() == 3) {
+                double x = com[0].get<double>();
+                double y = com[1].get<double>();
+                double z = com[2].get<double>();
+                return std::sqrt(x*x + y*y + z*z);
+            }
+        }
+        return 0.0;
+    }
+
+    if (metric == "inertia") {
+        // Return average of principal moments
+        if (result.contains("geometric") && result["geometric"].contains("inertia")) {
+            const auto& inertia = result["geometric"]["inertia"];
+            if (inertia.is_array() && inertia.size() == 3) {
+                double sum = 0.0;
+                for (const auto& val : inertia) {
+                    sum += val.get<double>();
+                }
+                return sum / 3.0;
+            }
+        }
+        return 0.0;
+    }
+
+    if (metric == "mass") {
+        if (result.contains("basic")) {
+            return result["basic"].value("mass", 0.0);
+        }
+        return 0.0;
+    }
+
+    // Generic nested key handling (e.g., "key.subkey")
+    size_t dot_pos = metric.find('.');
+    if (dot_pos != std::string::npos) {
+        std::string parent = metric.substr(0, dot_pos);
+        std::string child = metric.substr(dot_pos + 1);
+
+        if (result.contains(parent) && result[parent].contains(child)) {
+            return result[parent][child].get<double>();
+        }
+    }
+
+    // Handle direct keys
+    if (result.contains(metric)) {
+        return result[metric].get<double>();
+    }
+
+    return 0.0;
 }

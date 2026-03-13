@@ -85,7 +85,14 @@ capabilities/
 - ✅ **COMPLETED** (Oct 29, 2025): Help System Dynamic Generation - all modules use ParameterRegistry for help
 - ✅ **COMPLETED** (Oct 30, 2025): SimpleMD CG Integration Phase 1-4 - System detection, PBC wrapping, timestep scaling
 - ✅ **COMPLETED** (Nov 2025): SimpleMD CG Integration Phase 5 - VTF trajectory output, orientational dynamics infrastructure
+- ✅ **COMPLETED** (Jan 2026): Analysis Output Refactoring - Registry-based handler architecture with unified naming schema
 - Pending: Unit system migration, RMSD Strategy pattern (Phase 3), CG Phase 6 (ellipsoidal extensions)
+
+### New Analysis Output Architecture
+- **New Analysis Output Architecture**: Handler-based system with registry pattern
+- **File Naming Schema**: basename.general.csv, basename.NNN.type.csv, basename.type_statistics.csv
+- **Extensible Design**: IAnalysisOutputHandler interface for new analysis types
+- **Benefits**: Eliminates duplication, single point of change, automatic file generation
 
 ### Known Issues
 - Memory optimization needed for large systems (>1000 atoms)

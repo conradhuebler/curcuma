@@ -8,10 +8,11 @@ The tools directory contains utility functions and header-only libraries that pr
 
 ```
 tools/
-├── formats.h     # File format handling (XYZ, MOL2, SDF, PDB)
-├── geometry.h    # Geometric calculations and transformations
-├── general.h     # General utility functions and constants
-└── info.h        # Information and metadata handling
+├── formats.h         # File format handling (XYZ, MOL2, SDF, PDB)
+├── geometry.h        # Geometric calculations and transformations
+├── general.h         # General utility functions and constants
+├── info.h            # Information and metadata handling
+└── trajectory_writer.h/cpp  # ✅ TrajectoryWriter - Unified trajectory output system
 ```
 
 ## Key Components
@@ -45,6 +46,21 @@ tools/
 - **Periodic table**: Element lookup and properties
 - **Units and conversions**: Energy, length, angle conversions
 - **Metadata**: File headers, calculation information
+
+### ✅ TrajectoryWriter (`trajectory_writer.h/cpp`)
+- **Unified output system** for Human, CSV, JSON, DAT, VTF formats
+- **JSON schema converters** for geometry command integration
+- **TrajectoryStatistics integration** for statistical analysis
+- **Multiple format support**: single and multi-frame trajectory output
+- **Custom configuration**: JSON-based format and precision settings
+- **Educational focus**: Clean separation of data formatting logic
+
+### General Utilities (`general.h`)
+- **Constants**: Physical constants, conversion factors
+- **String operations**: Parsing, formatting utilities
+- **Mathematical functions**: Vector operations, matrix utilities
+- **Memory management**: Smart pointer utilities
+- **Error handling**: Exception classes and error codes
 
 ## Design Principles
 
@@ -80,6 +96,17 @@ tools/
 - Streamlined file I/O operations
 - Enhanced coordinate transformation functions
 - Better integration with molecular data structures
+
+### Frame Selection Support (2026) - Claude Generated
+- Analysis module now supports flexible frame selection via `frames` parameter
+- Format: `"1:5,8,10:12"` (colon for ranges, comma for separators)
+- Special values: `"last"` = last frame only, `"1:-1"` = all frames, `"N:N"` = single frame N
+- **Note**: CLI parsing issue prevents `-1` alone; use `"last"` or `"20:20"` syntax instead
+- Stride parameter processes every N-th frame from selection
+- Uses existing `Tools::CreateList()` parser from general.h
+- 1-based user input automatically converted to 0-based internal indexing
+- Scattering analysis automatically filtered with frame selection
+- Bounds checking ensures selected frames are valid (0 to total_frames-1)
 
 ---
 

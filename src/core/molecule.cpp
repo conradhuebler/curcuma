@@ -1207,13 +1207,13 @@ std::pair<double, double> Molecule::GyrationRadiusPBC(double hmass, bool protons
     double gyr = 0, gyr_mass = 0;
     double total_mass = 0;
 
+    
     // Claude Generated (Oct 2025): Cache inverse matrix for bulk PBC calculations
     // Avoids 200+ expensive matrix inversions for 200-atom systems
     Eigen::Matrix3d cell_inv;
     if (m_has_pbc) {
         cell_inv = getUnitCellInverse();
     }
-    std::cout << m_unit_cell << cell_inv << std::endl;
 
     for (int i = 0; i < m_geometry.rows(); ++i) {
         // Calculate PBC-aware distance from COM

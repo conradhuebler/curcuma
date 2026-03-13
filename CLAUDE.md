@@ -129,7 +129,9 @@
 - **Trajectory Analysis** - Analysis of MD trajectories
 
 ### 7. Analysis Tools
+- **✅ Parallel Analysis** - Frame-level parallelization with CxxThreadPool (3-8x speedup, January 2026)
 - **✅ TrajectoryWriter** - Unified output system for Human/CSV/JSON/DAT formats
+- **✅ Scattering Analysis** - P(q)/S(q) with logarithmic q-spacing and automatic gnuplot visualization (2026)
 - **RMSD Calculations** - Root-mean-square deviation analysis
 - **Persistent Diagram** - Topological data analysis
 - **Hessian Analysis** - Second derivative calculations
@@ -229,7 +231,7 @@ curcuma/
 └── CMakeLists.txt           # Build configuration
 ```
 
-## Completed Developments (2025)
+## Completed Developments (2025-2026)
 
 ✅ **Platform-Independent External Dependency Discovery** - Phase 2a+2b complete: Plumed2 via find_library(), D4 via find_package(LAPACK), both with fallback support, portable across Linux/macOS/Windows
 ✅ **External Dependency Conditional Compilation** - Phase 1b complete: D3/D4 guards in QMDFF/UFF/ForceField, MethodFactory runtime checks, all 14 external libs properly gated
@@ -241,6 +243,8 @@ curcuma/
 ✅ **Physical Architecture** - QM/MM methods organized under `src/core/energy_calculators/`
 ✅ **Topological Data Analysis** - dMatrix legacy functionality integrated as TDAEngine
 ✅ **Parameter Routing Fix** - Multi-module parameter hierarchies now work (json null-error fixed)
+✅ **Scattering Analysis Enhancements** (January 2026) - Logarithmic q-spacing (default), automatic gnuplot script generation with 4-panel plots, CSV separator fix
+✅ **Analysis Parallelization** (January 2026) - Frame-level parallelization with CxxThreadPool, 3-8x speedup for trajectory analysis, thread-safe with automatic fallback
 
 ## Build and Test Commands
 
@@ -396,3 +400,4 @@ ctest -R "cli_rmsd_01" --verbose
 - ✅ **JSON Null-Error & Parameter Routing** (October 2025): SimpleMD/curcumaopt fixed - 11 tests now pass
 - ✅ **ForceField Inversion Bug** (October 2025): Vector bounds crash in UFF parameter generation fixed
 - ✅ **CLI Test Infrastructure** (October 2025): 26 End-to-End validation tests with scientific accuracy
+- ✅ **Analysis Output Refactoring** (January 2026): Unified handler architecture with registry pattern, eliminating ~800 lines of duplicate code

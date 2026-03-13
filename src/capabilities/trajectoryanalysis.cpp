@@ -544,41 +544,61 @@ void TrajectoryAnalysis::outputResults()
     if (m_output_format == "json") {
         std::cout << std::setw(2) << m_results << std::endl;
     } else {
-        // Human-readable output
-        CurcumaLogger::info("=== Trajectory Analysis Results ===");
-        CurcumaLogger::param("trajectory_file", fmt::format("{}", m_filename));
-        CurcumaLogger::param("frames_analyzed", fmt::format("{}", m_time_points.size()));
+        // Claude Generated 2026: Use TrajectoryWriter for unified Human-readable output
+        json summary = {
+            {"title", "Trajectory Analysis Results"},
+            {"metadata", {
+                {"Trajectory file", m_filename},
+                {"Frames analyzed", static_cast<int>(m_time_points.size())}
+            }},
+            {"sections", json::array()}
+        };
 
         if (!m_gyration_radius_series.empty()) {
-            CurcumaLogger::info("");
-            CurcumaLogger::info("Gyration Radius Analysis:");
-            CurcumaLogger::param("gyration_mean", fmt::format("{:.3f} ± {:.3f} Å", m_gyration_stats.getMean("gyration_radius"), m_gyration_stats.getStdDev("gyration_radius")));
-            CurcumaLogger::param("gyration_range", fmt::format("{:.3f} - {:.3f} Å", m_gyration_stats.getMin("gyration_radius"), m_gyration_stats.getMax("gyration_radius")));
-            // TODO: Implement convergence analysis
-            // if (m_gyration_stats.is_converged) {
-            //     CurcumaLogger::param("equilibration_time", fmt::format("{:.1f} frames", m_gyration_stats.equilibration_time));
-            //     CurcumaLogger::param("status", "Converged");
-            // } else {
-            //     CurcumaLogger::param("status", "Not converged");
-            // }
+            summary["sections"].push_back({
+                {"name", "Gyration Radius"},
+                {"unit", "Å"},
+                {"statistics", {
+                    {"mean", m_gyration_stats.getMean("gyration_radius")},
+                    {"std_dev", m_gyration_stats.getStdDev("gyration_radius")},
+                    {"min", m_gyration_stats.getMin("gyration_radius")},
+                    {"max", m_gyration_stats.getMax("gyration_radius")},
+                    {"count", static_cast<int>(m_gyration_radius_series.size())}
+                }}
+            });
         }
 
         if (!m_end_to_end_series.empty()) {
-            CurcumaLogger::info("");
-            CurcumaLogger::info("End-to-End Distance Analysis:");
-            CurcumaLogger::param("end_to_end_mean", fmt::format("{:.3f} ± {:.3f} Å", m_end_to_end_stats.getMean("end_to_end"), m_end_to_end_stats.getStdDev("end_to_end")));
-            CurcumaLogger::param("end_to_end_range", fmt::format("{:.3f} - {:.3f} Å", m_end_to_end_stats.getMin("end_to_end"), m_end_to_end_stats.getMax("end_to_end")));
+            summary["sections"].push_back({
+                {"name", "End-to-End Distance"},
+                {"unit", "Å"},
+                {"statistics", {
+                    {"mean", m_end_to_end_stats.getMean("end_to_end")},
+                    {"std_dev", m_end_to_end_stats.getStdDev("end_to_end")},
+                    {"min", m_end_to_end_stats.getMin("end_to_end")},
+                    {"max", m_end_to_end_stats.getMax("end_to_end")},
+                    {"count", static_cast<int>(m_end_to_end_series.size())}
+                }}
+            });
         }
 
         if (!m_rout_series.empty()) {
-            CurcumaLogger::info("");
-            CurcumaLogger::info("Rout Analysis:");
-            CurcumaLogger::param("rout_mean", fmt::format("{:.3f} ± {:.3f} Å", m_rout_stats.getMean("rout"), m_rout_stats.getStdDev("rout")));
-            CurcumaLogger::param("rout_range", fmt::format("{:.3f} - {:.3f} Å", m_rout_stats.getMin("rout"), m_rout_stats.getMax("rout")));
+            summary["sections"].push_back({
+                {"name", "Rout"},
+                {"unit", "Å"},
+                {"statistics", {
+                    {"mean", m_rout_stats.getMean("rout")},
+                    {"std_dev", m_rout_stats.getStdDev("rout")},
+                    {"min", m_rout_stats.getMin("rout")},
+                    {"max", m_rout_stats.getMax("rout")},
+                    {"count", static_cast<int>(m_rout_series.size())}
+                }}
+            });
         }
 
+        m_writer.writeStatisticsSummary(std::cout, summary);
+
         if (m_export_timeseries) {
-            CurcumaLogger::info("");
             CurcumaLogger::param("timeseries_export", fmt::format("{}_timeseries.csv", m_filename));
         }
     }

@@ -480,31 +480,45 @@ void RMSDTraj::PostAnalyse()
         energy_max = m_energy_stats.getMax("energy");
     }
 
-    // Display beautiful results to user
-    CurcumaLogger::header("Trajectory Analysis Results");
-    CurcumaLogger::info("");
-    CurcumaLogger::success_fmt("Analyzed {} trajectory frames", m_rmsd_vector.size());
-    CurcumaLogger::success_fmt("Unique conformers found: {}", m_stored_structures.size());
+    // Claude Generated 2026: Use TrajectoryWriter for unified Human-readable output
+    json summary = {
+        {"title", "RMSD Trajectory Analysis Results"},
+        {"metadata", {
+            {"Frames analyzed", static_cast<int>(m_rmsd_vector.size())},
+            {"Unique conformers", static_cast<int>(m_stored_structures.size())}
+        }},
+        {"sections", json::array()}
+    };
 
-    CurcumaLogger::info("");
-    CurcumaLogger::info("RMSD Statistics:");
-    CurcumaLogger::param("Mean RMSD", fmt::format("{:.4f} Å", rmsd_mean));
-    CurcumaLogger::param("Median RMSD", fmt::format("{:.4f} Å", rmsd_median));
-    CurcumaLogger::param("Std. deviation", fmt::format("{:.4f} Å", rmsd_std));
-    CurcumaLogger::param("Shannon entropy", "N/A (placeholder)");
-    CurcumaLogger::param("Min RMSD", fmt::format("{:.4f} Å", rmsd_min));
-    CurcumaLogger::param("Max RMSD", fmt::format("{:.4f} Å", rmsd_max));
+    summary["sections"].push_back({
+        {"name", "RMSD"},
+        {"unit", "Å"},
+        {"statistics", {
+            {"mean", rmsd_mean},
+            {"std_dev", rmsd_std},
+            {"min", rmsd_min},
+            {"max", rmsd_max},
+            {"median", rmsd_median},
+            {"count", static_cast<int>(m_rmsd_vector.size())}
+        }}
+    });
 
     if (has_energy_data) {
-        CurcumaLogger::info("");
-        CurcumaLogger::info("Energy Statistics:");
-        CurcumaLogger::param("Mean energy", fmt::format("{:.6f} Eh", energy_mean));
-        CurcumaLogger::param("Median energy", fmt::format("{:.6f} Eh", energy_median));
-        CurcumaLogger::param("Std. deviation", fmt::format("{:.6f} Eh", energy_std));
-        CurcumaLogger::param("Shannon entropy", "N/A (placeholder)");
-        CurcumaLogger::param("Min energy", fmt::format("{:.6f} Eh", energy_min));
-        CurcumaLogger::param("Max energy", fmt::format("{:.6f} Eh", energy_max));
+        summary["sections"].push_back({
+            {"name", "Energy"},
+            {"unit", "Eh"},
+            {"statistics", {
+                {"mean", energy_mean},
+                {"std_dev", energy_std},
+                {"min", energy_min},
+                {"max", energy_max},
+                {"median", energy_median},
+                {"count", static_cast<int>(m_energy_vector.size())}
+            }}
+        });
     }
+
+    m_writer.writeStatisticsSummary(std::cout, summary);
 
     // Claude Generated 2025: Use TrajectoryWriter for DAT output
     if (m_rmsd_file.is_open()) {

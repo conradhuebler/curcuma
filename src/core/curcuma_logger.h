@@ -31,9 +31,10 @@ using json = nlohmann::json;
 class CurcumaLogger {
 public:
     enum class OutputFormat {
-        TERMINAL,
-        RAW,
-        MARKDOWN
+        TERMINAL, // With colors and prefixes [PARAM], [OK], etc.
+        PLAIN,    // No colors, no prefixes - content only (like ORCA/Gaussian)
+        RAW,      // Data only (for scripting)
+        MARKDOWN  // For documentation
     };
 
 private:
@@ -49,6 +50,19 @@ public:
     static void set_format(OutputFormat fmt) { m_format = fmt; }
     static int get_verbosity() { return m_verbosity; }
     static bool colors_enabled() { return m_use_colors; }
+
+    // Plain mode convenience methods - Claude Generated
+    static void set_plain_mode(bool enable)
+    {
+        if (enable) {
+            m_format = OutputFormat::PLAIN;
+            m_use_colors = false;
+        } else {
+            m_format = OutputFormat::TERMINAL;
+            // Colors remain as configured
+        }
+    }
+    static bool plain_mode() { return m_format == OutputFormat::PLAIN; }
 
     // Initialize logger with environment detection
     static void initialize(int verbosity = 2, bool auto_detect_colors = true);

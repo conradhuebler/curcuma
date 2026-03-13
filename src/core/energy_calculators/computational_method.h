@@ -203,33 +203,3 @@ protected:
     json m_parameters;                   ///< Method parameters
 };
 
-/**
- * @brief Utility functions for ComputationalMethod implementations
- */
-namespace ComputationalMethodUtils {
-    
-    /**
-     * @brief Convert energy units (implementation-dependent)
-     * @param energy Input energy
-     * @param from_unit Source unit ("hartree", "kcal", "ev")
-     * @param to_unit Target unit
-     * @return Converted energy
-     */
-    double convertEnergy(double energy, const std::string& from_unit, const std::string& to_unit);
-    
-    /**
-     * @brief Convert gradient units
-     * @param gradient Input gradient matrix
-     * @param from_unit Source unit ("hartree/bohr", "kcal/angstrom")
-     * @param to_unit Target unit
-     * @return Converted gradient matrix
-     */
-    Matrix convertGradient(const Matrix& gradient, const std::string& from_unit, const std::string& to_unit);
-    
-    /**
-     * @brief Validate molecular structure for computational methods
-     * @param mol Molecule to validate
-     * @return true if molecule is suitable for calculations
-     */
-    bool validateMolecule(const Mol& mol);
-}
