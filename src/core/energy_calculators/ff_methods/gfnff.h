@@ -28,6 +28,7 @@
 #include "src/core/energy_calculators/ff_methods/eeq_solver.h"  // EEQ charge calculation (Dec 2025 - Phase 3)
 #include "src/core/energy_calculators/ff_methods/huckel_solver.h"  // Full Hückel calculation (Jan 2026 - Phase 1)
 #include "src/core/energy_calculators/ff_methods/d4param_generator.h"  // Claude Generated (Feb 15, 2026): D4 for dc6dcn gradient
+#include "src/core/energy_calculators/ff_methods/alpb_solvation.h"  // Claude Generated (Mar 2026): ALPB solvation
 #include "src/core/global.h"
 #include "src/core/functional_groups.h"
 #include "src/core/periodic_table.h"
@@ -1674,6 +1675,12 @@ private:
     // Claude Generated (Feb 15, 2026): D4ParameterGenerator kept alive for runtime dc6dcn computation
     // Reference: Fortran gfnff_gdisp0.f90:382-395 - dc6dcn needed for dispersion CN gradient
     mutable std::unique_ptr<D4ParameterGenerator> m_d4_generator;
+
+    // Claude Generated (Mar 2026): ALPB solvation model
+    // Reference: Fortran external/gfnff/src/gbsa/gbsa.f90
+    // Initialized when solvent != "none", called in Calculation() after EEQ charges
+    std::unique_ptr<ALPBSolvation> m_solvation;
+    std::string m_solvent = "none";  ///< Solvent name ("none" = gas phase)
 
     /**
      * @brief HB/XB dynamic update support for MD simulations

@@ -65,7 +65,8 @@ GFNFF::GFNFF()
         { "gradient", 1 },
         { "dispersion", true },  // Claude Generated: GFN-FF uses D4 dispersion (Spicher & Grimme 2020)
         { "hbond", true },
-        { "repulsion_scaling", 1.0 }
+        { "repulsion_scaling", 1.0 },
+        { "solvent", "none" }  // Claude Generated (Mar 2026): ALPB solvation, "none" = gas phase
     };
     m_parameters = default_parameters;
 
@@ -97,7 +98,8 @@ GFNFF::GFNFF(const json& parameters)
         { "gradient", 1 },
         { "dispersion", true },  // Claude Generated: GFN-FF uses D4 dispersion (Spicher & Grimme 2020)
         { "hbond", true },
-        { "repulsion_scaling", 1.0 }
+        { "repulsion_scaling", 1.0 },
+        { "solvent", "none" }  // Claude Generated (Mar 2026): ALPB solvation
     };
 
     m_parameters = MergeJson(default_parameters, parameters);
@@ -201,6 +203,19 @@ bool GFNFF::InitialiseMolecule()
     }
 
     m_initialized = true;
+
+    // Claude Generated (Mar 2026): Initialize ALPB solvation if solvent specified
+    // Reference: Fortran gbsa.f90 — newBornModel() called during init
+    if (m_parameters.contains("solvent")) {
+        m_solvent = m_parameters["solvent"].get<std::string>();
+    }
+    if (m_solvent != "none" && !m_solvent.empty()) {
+        m_solvation = std::make_unique<ALPBSolvation>();
+        if (!m_solvation->init(m_atoms, m_solvent)) {
+            CurcumaLogger::warn("ALPB solvation initialization failed for solvent '" + m_solvent + "', continuing gas-phase");
+            m_solvation.reset();
+        }
+    }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success("GFN-FF initialization complete");
@@ -509,6 +524,31 @@ double GFNFF::Calculation(bool gradient)
         CurcumaLogger::param("energy_hartree_raw", fmt::format("{:.8f}", energy_hartree));
     }
 
+    // Claude Generated (Mar 2026): ALPB solvation contribution
+    // Reference: Fortran gfnff_engrad.F90 — solvation called after force field
+    // Uses Phase-2 EEQ charges (m_charges) for Born electrostatics
+    if (m_solvation) {
+        // Update Born radii, SASA, neighbor lists for current geometry
+        m_solvation->update(m_atoms, m_geometry_bohr);
+
+        // Add solvation energy
+        ALPBEnergyParts solv_parts = m_solvation->getEnergyParts(m_charges);
+        energy_hartree += solv_parts.total();
+
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            CurcumaLogger::result(fmt::format("Solvation energy: {:.8f} Eh ({} = {})",
+                solv_parts.total(), "ALPB", m_solvent));
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::param("  gborn", fmt::format("{:.8f} Eh", solv_parts.gborn));
+                CurcumaLogger::param("  ghb",   fmt::format("{:.8f} Eh", solv_parts.ghb));
+                CurcumaLogger::param("  gsasa", fmt::format("{:.8f} Eh", solv_parts.gsasa));
+                CurcumaLogger::param("  gshift",fmt::format("{:.8f} Eh", solv_parts.gshift));
+            }
+        }
+
+        // Solvation gradient is added to m_gradient below, after ForceField gradient extraction
+    }
+
     if (gradient) {
         // CRITICAL FIX (Feb 2026): NO unit conversion needed!
         // ForceField returns gradient in Hartree/Bohr (m_final_factor = 1)
@@ -518,6 +558,11 @@ double GFNFF::Calculation(bool gradient)
         // Correct approach: Use gradient directly as returned by ForceField
         Matrix grad_hartree = m_forcefield->Gradient();
         m_gradient = grad_hartree;  // No conversion needed
+
+        // Claude Generated (Mar 2026): Add ALPB solvation gradient
+        if (m_solvation) {
+            m_solvation->addGradient(m_atoms, m_geometry_bohr, m_charges, m_gradient);
+        }
 
         // Claude Generated (Mar 2026): Report gradient norm like XTB
         // Reference: gfnff_engrad.F90:857 — gnorm = sqrt(sum(g**2))
