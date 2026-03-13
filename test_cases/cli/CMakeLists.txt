@@ -110,6 +110,28 @@ add_cli_test(simplemd 09_xtbgfnff_acetic_acid_dimer_md)
 
 add_cli_test(cg 01_single_point)
 
-message(STATUS "Added 29 CLI test scenarios with build directory isolation")
+# =============================================================================
+# Analysis Tests (1 scenario)
+# =============================================================================
+
+add_cli_test(analysis 01_parallel_equivalence)
+# 100 Frames × Scattering braucht länger als Standard-30s
+set_tests_properties(cli_analysis_01_parallel_equivalence PROPERTIES TIMEOUT 120)
+
+# =============================================================================
+# Error Handling Tests (6 scenarios) - Phase 1-2 Implementation
+# =============================================================================
+
+# Phase 1: File Validation
+add_cli_test(errors 01_missing_file)
+add_cli_test(errors 02_invalid_xyz_format)
+add_cli_test(errors 03_permission_denied)
+
+# Phase 2: Method Validation
+add_cli_test(errors 04_typo_method)
+add_cli_test(errors 05_method_not_compiled)
+add_cli_test(errors 06_list_methods)
+
+message(STATUS "Added 35+ CLI test scenarios with build directory isolation")
 message(STATUS "  - Tests execute from: ${CMAKE_CURRENT_BINARY_DIR}/category/test_name")
 message(STATUS "  - Source tree remains clean (all outputs in build directory)")

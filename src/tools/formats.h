@@ -25,6 +25,7 @@
 #include <chrono>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -35,6 +36,7 @@
 
 #include "src/core/elements.h"
 #include "src/core/molecule.h"
+#include "src/core/curcuma_logger.h"
 // #include "src/core/fileiterator.h"
 
 #include "src/tools/general.h"
@@ -122,6 +124,12 @@ inline Mol XYZString2Mol(const std::string& coord)
 
 inline Mol XYZ2Mol(const std::string& filename)
 {
+    // Phase 1: File existence validation - Claude Generated 2025
+    if (!std::filesystem::exists(filename)) {
+        CurcumaLogger::error_fmt("XYZ file not found: {}", filename);
+        throw std::runtime_error(fmt::format("File not found: {}", filename));
+    }
+
     Mol molecule;
 
     std::vector<std::string> lines;
@@ -130,6 +138,13 @@ inline Mol XYZ2Mol(const std::string& filename)
     int i = 0;
 
     auto file = new std::ifstream(filename);
+
+    // Phase 1: Stream validation - Claude Generated 2025
+    if (!file->is_open()) {
+        CurcumaLogger::error_fmt("Failed to open XYZ file: {} (check permissions)", filename);
+        throw std::runtime_error(fmt::format("Failed to open file: {}", filename));
+    }
+
     for (std::string line; getline(*file, line);) {
         if (index == 0) {
             try {
@@ -137,18 +152,32 @@ inline Mol XYZ2Mol(const std::string& filename)
                 atoms = stoi(line);
                 molecule.m_geometry = Eigen::MatrixXd::Zero(atoms, 3);
             } catch (const std::invalid_argument& arg) {
-                atoms = 0;
+                // Phase 1: Enhanced error context - Claude Generated 2025
+                CurcumaLogger::error_fmt(
+                    "Invalid XYZ format in {} (line 1): Expected atom count (integer), got: '{}'",
+                    filename, line);
+                delete file;
+                throw std::runtime_error("XYZ parsing failed: invalid atom count");
             }
         }
 
         if (i == 1)
             molecule.m_commentline = line;
         if (i > 1) {
-            auto pair = Line2Atoms(line);
-            molecule.m_atoms.push_back(pair.first);
-            // molecule.m_geometry.push_back(pair.second);
-            // molecule.m_geometry.conservativeResize(molecule.m_geometry.rows() +  1, molecule.m_geometry.cols());
-            molecule.m_geometry.row(molecule.m_atoms.size() - 1) = Eigen::Vector3d(pair.second[0], pair.second[1], pair.second[2]);
+            try {
+                auto pair = Line2Atoms(line);
+                molecule.m_atoms.push_back(pair.first);
+                // molecule.m_geometry.push_back(pair.second);
+                // molecule.m_geometry.conservativeResize(molecule.m_geometry.rows() +  1, molecule.m_geometry.cols());
+                molecule.m_geometry.row(molecule.m_atoms.size() - 1) = Eigen::Vector3d(pair.second[0], pair.second[1], pair.second[2]);
+            } catch (const std::invalid_argument& arg) {
+                // Phase 1: Enhanced coordinate error context - Claude Generated 2025
+                CurcumaLogger::error_fmt(
+                    "Invalid coordinate in {} (line {}): Expected 'Element X Y Z', got: '{}'",
+                    filename, i + 1, line);
+                delete file;
+                throw std::runtime_error(fmt::format("XYZ coordinate parsing failed at line {}", i + 1));
+            }
         }
         if (i - 1 == atoms) {
             break;
@@ -158,16 +187,32 @@ inline Mol XYZ2Mol(const std::string& filename)
         index++;
     }
 
+    delete file;
     return molecule;
 }
 
 inline Mol Coord2Mol(const std::string& filename)
 {
+    // Phase 1: File existence validation - Claude Generated 2025
+    if (!std::filesystem::exists(filename)) {
+        CurcumaLogger::error_fmt("Coord file not found: {}", filename);
+        throw std::runtime_error(fmt::format("File not found: {}", filename));
+    }
+
     Mol molecule;
     molecule.m_geometry = Eigen::MatrixXd::Zero(0, 3);
 
     auto file = new std::ifstream(filename);
+
+    // Phase 1: Stream validation - Claude Generated 2025
+    if (!file->is_open()) {
+        CurcumaLogger::error_fmt("Failed to open Coord file: {} (check permissions)", filename);
+        throw std::runtime_error(fmt::format("Failed to open file: {}", filename));
+    }
+
+    int line_number = 0;
     for (std::string line; getline(*file, line);) {
+        line_number++;
         //if (readblock) {
         auto strings = SplitString(line, " ");
         if (strings.size() == 4) {
@@ -181,17 +226,36 @@ inline Mol Coord2Mol(const std::string& filename)
                 molecule.m_geometry.conservativeResize(molecule.m_atoms.size(), molecule.m_geometry.cols());
                 molecule.m_geometry.row(molecule.m_geometry.rows() - 1) = Eigen::Vector3d(vector[0], vector[1], vector[2]);
             } catch (const std::invalid_argument& arg) {
+                // Phase 1: Enhanced coordinate error context - Claude Generated 2025
+                CurcumaLogger::error_fmt(
+                    "Invalid Coord format in {} (line {}): Expected 'X Y Z Element', got: '{}'",
+                    filename, line_number, line);
+                delete file;
+                throw std::runtime_error(fmt::format("Coord parsing failed at line {}", line_number));
             }
         }
     }
 
+    delete file;
     return molecule;
 }
 inline Mol SDF2Mol(const std::string& filename)
 {
+    // Phase 1: File existence validation - Claude Generated 2025
+    if (!std::filesystem::exists(filename)) {
+        CurcumaLogger::error_fmt("SDF file not found: {}", filename);
+        throw std::runtime_error(fmt::format("File not found: {}", filename));
+    }
+
     Mol molecule;
     int readblock = false;
     auto file = new std::ifstream(filename);
+
+    // Phase 1: Stream validation - Claude Generated 2025
+    if (!file->is_open()) {
+        CurcumaLogger::error_fmt("Failed to open SDF file: {} (check permissions)", filename);
+        throw std::runtime_error(fmt::format("Failed to open file: {}", filename));
+    }
     for (std::string line; getline(*file, line);) {
         //if (readblock) {
         auto strings = SplitString(line, " ");
@@ -214,11 +278,23 @@ inline Mol SDF2Mol(const std::string& filename)
 
 inline Mol Mol22Mol(const std::string& filename)
 {
+    // Phase 1: File existence validation - Claude Generated 2025
+    if (!std::filesystem::exists(filename)) {
+        CurcumaLogger::error_fmt("MOL2 file not found: {}", filename);
+        throw std::runtime_error(fmt::format("File not found: {}", filename));
+    }
+
     Mol molecule;
     molecule.m_geometry = Eigen::MatrixXd::Zero(0, 3);
 
     int read_atom = false, read_bond = false;
     auto file = new std::ifstream(filename);
+
+    // Phase 1: Stream validation - Claude Generated 2025
+    if (!file->is_open()) {
+        CurcumaLogger::error_fmt("Failed to open MOL2 file: {} (check permissions)", filename);
+        throw std::runtime_error(fmt::format("Failed to open file: {}", filename));
+    }
     for (std::string line; getline(*file, line);) {
         if (read_atom) {
             auto strings = SplitString(line, " ");
@@ -261,6 +337,12 @@ inline Mol Mol22Mol(const std::string& filename)
 // VTF (VMD Trajectory Format) reader for Coarse Graining - Claude Generated
 inline Mol VTF2Mol(const std::string& filename)
 {
+    // Phase 1: File existence validation - Claude Generated 2025
+    if (!std::filesystem::exists(filename)) {
+        CurcumaLogger::error_fmt("VTF file not found: {}", filename);
+        throw std::runtime_error(fmt::format("File not found: {}", filename));
+    }
+
     Mol molecule;
     molecule.m_geometry = Eigen::MatrixXd::Zero(0, 3);
 
@@ -271,6 +353,12 @@ inline Mol VTF2Mol(const std::string& filename)
     bool first_timestep_read = false;
 
     auto file = new std::ifstream(filename);
+
+    // Phase 1: Stream validation - Claude Generated 2025
+    if (!file->is_open()) {
+        CurcumaLogger::error_fmt("Failed to open VTF file: {} (check permissions)", filename);
+        throw std::runtime_error(fmt::format("Failed to open file: {}", filename));
+    }
     for (std::string line; getline(*file, line);) {
         // Remove leading/trailing whitespace
         line.erase(0, line.find_first_not_of(" \t\r\n"));

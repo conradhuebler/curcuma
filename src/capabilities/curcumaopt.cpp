@@ -180,6 +180,10 @@ void CurcumaOpt::start()
         std::multimap<double, Molecule> results;
         while (!file.AtEnd()) {
             Molecule mol = file.Next();
+            // Phase 1: Skip invalid molecules (0 atoms) - Claude Generated 2025
+            if (mol.AtomCount() == 0) {
+                continue;  // Skip molecules that failed to parse
+            }
             mol.setCharge(m_charge);
             mol.setSpin(m_spin);
             m_molecules.push_back(mol);
@@ -188,6 +192,13 @@ void CurcumaOpt::start()
             CurcumaLogger::param("molecules_loaded", std::to_string(m_molecules.size()));
         }
     }
+
+    // Phase 1: Check for empty molecule list - Claude Generated 2025
+    if (m_molecules.empty()) {
+        CurcumaLogger::error("No valid molecules loaded - cannot proceed with calculation");
+        throw std::runtime_error("No valid molecules to process");
+    }
+
     if (!m_serial)
         ProcessMolecules(m_molecules);
     else {

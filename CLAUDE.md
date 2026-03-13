@@ -126,11 +126,12 @@
 - **Multiple Convergence Criteria** - Energy, gradient, RMSD-based
 - **Constrained Optimization** - Distance, angle, and dihedral constraints
 
-### 5. Conformational Analysis
-- **ConfSearch** - Systematic conformational searching
+### 5. Conformational Analysis ✅ REFACTORED 2025
+- **ConfSearch** - Systematic conformational searching (unified trajectory framework)
 - **ConfScan** - Conformational scanning along reaction coordinates
 - **RMSD Analysis** - Structure comparison and alignment
 - **Energy-based Filtering** - Automatic conformer ranking
+- **Refactored Geometry Commands** - TrajectoryWriter for JSON format (Phase 5)
 
 ### 6. Molecular Dynamics
 - **SimpleMD** - Basic molecular dynamics simulation
@@ -138,6 +139,9 @@
 - **Trajectory Analysis** - Analysis of MD trajectories
 
 ### 7. Analysis Tools
+- **✅ Parallel Analysis** - Frame-level parallelization with CxxThreadPool (3-8x speedup, January 2026)
+- **✅ TrajectoryWriter** - Unified output system for Human/CSV/JSON/DAT formats
+- **✅ Scattering Analysis** - P(q)/S(q) with logarithmic q-spacing and automatic gnuplot visualization (2026)
 - **RMSD Calculations** - Root-mean-square deviation analysis
 - **Persistent Diagram** - Topological data analysis
 - **Hessian Analysis** - Second derivative calculations
@@ -243,7 +247,7 @@ curcuma/
 └── CMakeLists.txt           # Build configuration
 ```
 
-## Completed Developments (2025)
+## Completed Developments (2025-2026)
 
 ✅ **Platform-Independent External Dependency Discovery** - Phase 2a+2b complete: Plumed2 via find_library(), D4 via find_package(LAPACK), both with fallback support, portable across Linux/macOS/Windows
 ✅ **External Dependency Conditional Compilation** - Phase 1b complete: D3/D4 guards in QMDFF/UFF/ForceField, MethodFactory runtime checks, all 14 external libs properly gated
@@ -258,6 +262,8 @@ curcuma/
 ✅ **GFN-FF Implementation** - Complete and operational in ff_methods/ - See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
 ✅ **EEQ Phase 1 Full Implementation** (December 28, 2025) - Complete dxi calculation with pi-system detection, neighbor EN averaging, and environment-dependent corrections; 75% reduction in charge error (5.0× → 1.3×); fixes 4/6 GFN-FF energy terms automatically
 ✅ **GFN-FF Angle Energy Fix** (February 13, 2026) - Topology-aware angle generation with pi_bond_orders integration; 656-2013× improvement on heterocyclic molecules (caffeine/complex); all angles <0.12 mEh error
+✅ **Scattering Analysis Enhancements** (January 2026) - Logarithmic q-spacing (default), automatic gnuplot script generation with 4-panel plots, CSV separator fix
+✅ **Analysis Parallelization** (January 2026) - Frame-level parallelization with CxxThreadPool, 3-8x speedup for trajectory analysis, thread-safe with automatic fallback
 
 ## Build and Test Commands
 
@@ -364,6 +370,25 @@ ctest -R "cli_rmsd_01" --verbose
 
 ## Planned Development
 
+### 🔄 TRAJECTORY ANALYSIS CONSOLIDATION (NEW - December 2025)
+**Status**: ✅ Plan documented (see [docs/ANALYSIS_CONSOLIDATION_PLAN.md](docs/ANALYSIS_CONSOLIDATION_PLAN.md))
+**Effort**: 6 iterations, ~18 hours
+**Priority**: MEDIUM (maintenance + extensibility)
+
+- **Problem**: ~800 lines of duplicate output/statistics code across 4+ modules
+- **Solution**: Unified framework with TrajectoryWriter + extended TrajectoryStatistics + optional ProgressTracker
+- **Phases**:
+  1. ✏️ TrajectoryWriter Foundation (`src/tools/trajectory_writer.h/cpp`) - HOCH priority
+  2. ✏️ Migrate `analysis.cpp` to use TrajectoryWriter
+  3. ✏️ Extend `TrajectoryStatistics` class (Min, Max, Median)
+  4. ✏️ Migrate `trajectoryanalysis.cpp` + `rmsdtraj.cpp`
+  5. ✏️ Cleanup geometry commands in `main.cpp` (optional)
+  6. ✏️ Add ProgressTracker utility (optional)
+
+**Benefits**: Single point of change for output formats, consistent user experience, 600+ lines removed
+
+---
+
 ### Breaking Changes (Test-Driven)
 - **Molecule data structure refactoring**: Hybrid SOA/AOS design for better performance
   - **PHASE 1**: ✅ Comprehensive test suite with refactoring-specific validation
@@ -374,7 +399,7 @@ ctest -R "cli_rmsd_01" --verbose
   - **PHASE 2**: XYZ Comment Parser unification (eliminate 10 duplicate functions)
     - **CRITICAL**: Production comment formats must not break (ORCA, XTB, simple energy)
     - See `XYZ_COMMENT_FORMATS.md` for required format compatibility
-  - **PHASE 3**: Granular cache system (replace single m_dirty flag)  
+  - **PHASE 3**: Granular cache system (replace single m_dirty flag)
   - **PHASE 4**: Fragment system O(1) lookups (replace std::map)
   - **PHASE 5**: Type-safe ElementType enum (replace int elements)
   - **PHASE 6**: Unified atom structure with zero-copy geometry access
@@ -409,3 +434,4 @@ ctest -R "cli_rmsd_01" --verbose
 - ✅ **ForceField Inversion Bug** (October 2025): Vector bounds crash in UFF parameter generation fixed
 - ✅ **CLI Test Infrastructure** (October 2025): 26 End-to-End validation tests with scientific accuracy
 - ✅ **GFN-FF Architecture** (December 2025): Implementation complete and tests passing - [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
+- ✅ **Analysis Output Refactoring** (January 2026): Unified handler architecture with registry pattern, eliminating ~800 lines of duplicate code
