@@ -57,7 +57,7 @@ helpers/
 ## Variable Section
 
 ### Current Testing Focus
-- Native GFN-FF (cgfnff) method validation
+- Native GFN-FF (gfnff) method validation
 - Parameter caching system performance verification
 - Multi-threading correctness testing
 

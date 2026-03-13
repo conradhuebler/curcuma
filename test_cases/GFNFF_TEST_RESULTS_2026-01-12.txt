@@ -1,0 +1,2916 @@
+Unified GFN-FF Test Suite
+========================
+Configuration:
+  Energy tolerance: 1.000000e-06 Hartree
+  Parameter tolerance: 1.000000e-03
+  Verbosity level: 2
+
+================================================================================
+GFN-FF Energy Component Regression Tests
+================================================================================
+
+Testing: H2 dimer (unoptimized, r=0.47 Å)
+--------------------------------------------------
+  DEBUG: Molecule loaded successfully!
+  DEBUG: Atoms = 2
+  DEBUG: Charge = 0
+  DEBUG: Spin = 0.000000e+00
+        EEQSolver initialized with parameters:
+[38;2;100;149;237m[PARAM] max_iterations: 50
+[0m[38;2;100;149;237m[PARAM] convergence_threshold: 1.00e-06
+[0m[38;2;100;149;237m[PARAM] verbosity: 2
+[0m[38;2;100;149;237m[PARAM] calculate_cn: true
+[0m        Using advanced GFN-FF parametrization (experimental)
+        === getCachedBondList() CALLED ===
+        === Calculating new bond list ===
+        === Bond Detection Debug ===
+        Atom count: 2
+        Geometry rows: 2, cols: 3
+        Pair 0-1: dist=0.890, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+          -> BONDED
+        Total bonds detected: 1
+        === getCachedBondList() CALLED ===
+[38;2;050;205;050m[OK]    Calculated π-bond orders: 0/3 non-zero entries
+[0m        Using proper two-phase EEQ system
+        Phase 1 EEQ: Topology charges calculated
+[38;2;255;255;255m[RESULT]Atom 0 qa = 0.000000
+[0m[38;2;255;255;255m[RESULT]Atom 1 qa = 0.000000
+[0m[38;2;050;205;050m[OK]    Two-phase EEQ charge calculation completed successfully
+[0m        === getCachedBondList() CALLED ===
+[38;2;255;165;000m[WARN]  GFN-FF: No torsions detected (molecule may be too small or linear)
+[0m        GFN-FF: No inversions detected (no sp² centers found)
+        === CRITICAL DEBUG: EEQ Charges Before Coulomb Generation ===
+[38;2;100;149;237m[PARAM] q_atom_0(Z=1): 0.00000000
+[0m[38;2;100;149;237m[PARAM] q_atom_1(Z=1): 0.00000000
+[0m[38;2;255;000;000m[ERROR] 🚨 CRITICAL ISSUE: All EEQ charges are ZERO! This explains zero electrostatic energies.
+[0m        === getCachedBondList() CALLED ===
+        GFN-FF method: gfnff → Dispersion: d3
+        Using native D3ParameterGenerator (validated 10/11 <1% error)
+        === D3ParameterGenerator::GenerateParameters() START ===
+[38;2;100;149;237m[PARAM] Number of atoms: 2
+[0m        D3: CN calculation took 0.00 ms
+        D3: Weight pre-computation took 0.00 ms (2 atoms × avg 2 refs)
+        D3: C6 interpolation for 1 pairs took 0.01 ms (0.0077 ms/pair)
+[38;2;050;205;050m[OK]    D3 parameter generation completed in 0.04 ms
+[0m          └─ Breakdown: CN=0.0ms, Weights=0.0ms, C6Interp=0.0ms, ATM=0.0ms
+[38;2;050;205;050m[OK]    D3 dispersion: 1 pairs generated (validated accuracy)
+[0m        === getCachedBondList() CALLED ===
+        Detected 0 hydrogen bonds
+        === getCachedBondList() CALLED ===
+        Detected 0 halogen bonds
+        === getCachedBondList() CALLED ===
+        Detected 0 hydrogen bonds
+[38;2;100;149;237m[PARAM] loaded_from_cache: true
+[0m        Initializing force field parameters
+[38;2;100;149;237m[PARAM] method: gfnff
+[0m[38;2;100;149;237m[PARAM] angles_processed: 0
+[0m[38;2;100;149;237m[PARAM] dihedrals_processed: 0 primary, 0 extra
+[0m[38;2;100;149;237m[PARAM] inversions_processed: 0
+[0m[38;2;050;205;050m[OK]    Loaded 0 GFN-FF hydrogen bonds
+[0m[38;2;050;205;050m[OK]    Loaded 0 GFN-FF halogen bonds
+[0m        Parameter generation complete
+[38;2;100;149;237m[PARAM] method_type: 3 (GFN-FF)
+[0m        Generating parameter summary
+        Force field topology summary:
+[38;2;100;149;237m[PARAM] bonds_count: 1 bond terms
+[0m        GFN-FF pairwise interactions:
+[38;2;100;149;237m[PARAM] dispersion_pairs: 1
+[0m[38;2;100;149;237m[PARAM] bonded_repulsion_pairs: 1
+[0m[38;2;100;149;237m[PARAM] coulomb_pairs: 1
+[0m        Scaling factors:
+        Force field flags:
+        Parameter summary completed
+[38;2;050;205;050m[OK]    ForceField::setParameter() complete
+[0m[38;2;255;255;255m[RESULT]Primary torsions: 0 terms, energy = 0.000000e+00 Eh
+[0m[38;2;255;255;255m[RESULT]Extra sp3-sp3 torsions: 0 terms, energy = 0.000000e+00 Eh
+[0m[38;2;255;255;255m[RESULT]Total dihedral energy: 0.000000e+00 Eh (primary + extra)
+[0m        Thread 0 calculating 1 bonded repulsion pairs
+[38;2;100;149;237m[PARAM] thread_bonded_repulsion_energy: 0.215469 Eh (1 pairs)
+[0m        === Coulomb Energy Calculation: EEQ Charge Verification ===
+[38;2;100;149;237m[PARAM] Coulomb[0] q_i(atom0), q_j(atom1): 0.00000000, 0.00000000
+[0m[38;2;100;149;237m[PARAM] max_absolute_charge: 0.00000000e+00
+[0m        ℹ️  All EEQ partial charges near zero (typical for homonuclear molecules like H₂, Cl₂)
+[38;2;100;149;237m[ENERGY]Force Field Energy: 0.05045589 Eh
+[0m        Force field energy decomposition:
+[38;2;100;149;237m[PARAM] bond_energy: -0.164952 Eh
+[0m[38;2;100;149;237m[PARAM] angle_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] dihedral_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] inversion_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] nonbonded_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] D4_energy: -0.000031 Eh
+[0m[38;2;100;149;237m[PARAM] repulsion energy: 0.215469 Eh
+[0m[38;2;100;149;237m[PARAM] GFNFF_dispersion: -0.000031 Eh
+[0m[38;2;100;149;237m[ENERGY]GFN-FF Energy: 0.05045589 Eh
+[0m[38;2;100;149;237m[PARAM] energy_hartree: 0.0504558919
+[0m  Total energy: 0.05045589 Hartree
+  Energy components:
+    Bond:        -0.16495202 Eh
+    Angle:        0.00000000 Eh
+    Torsion:      0.00000000 Eh
+    Repulsion:    0.21546897 Eh
+    Coulomb:      0.00000000 Eh
+    Dispersion:  -0.00003053 Eh
+  ✗ Total energy: error = 1.39611719e-05 Hartree (expected 0.05046985)
+  ✓ angle energy: error = 0.00000000e+00 Eh
+  ✓ bond energy: error = 4.19927879e-09 Eh
+  ✓ coulomb energy: error = 0.00000000e+00 Eh
+  ✗ dispersion energy: error = 1.66317755e-05 Eh (got -0.00003053, expected -0.00004716)
+  ✓ repulsion energy: error = 6.05526685e-08 Eh
+  ✓ torsion energy: error = 0.00000000e+00 Eh
+
+Testing: H2 optimized (r=0.78 Å)
+--------------------------------------------------
+  DEBUG: Molecule loaded successfully!
+  DEBUG: Atoms = 0
+  DEBUG: Charge = 0
+  DEBUG: Spin = 0.00000000e+00
+        EEQSolver initialized with parameters:
+[38;2;100;149;237m[PARAM] max_iterations: 50
+[0m[38;2;100;149;237m[PARAM] convergence_threshold: 1.00e-06
+[0m[38;2;100;149;237m[PARAM] verbosity: 2
+[0m[38;2;100;149;237m[PARAM] calculate_cn: true
+[0m[38;2;255;000;000m[ERROR] GFN-FF initialization failed: No atoms in molecule
+[0m  ✗ ERROR: GFNFF initialization failed
+
+Testing: OH radical
+--------------------------------------------------
+  DEBUG: Molecule loaded successfully!
+  DEBUG: Atoms = 2
+  DEBUG: Charge = 0
+  DEBUG: Spin = 0.00000000e+00
+        EEQSolver initialized with parameters:
+[38;2;100;149;237m[PARAM] max_iterations: 50
+[0m[38;2;100;149;237m[PARAM] convergence_threshold: 1.00e-06
+[0m[38;2;100;149;237m[PARAM] verbosity: 2
+[0m[38;2;100;149;237m[PARAM] calculate_cn: true
+[0m        Using advanced GFN-FF parametrization (experimental)
+        === getCachedBondList() CALLED ===
+        === Calculating new bond list ===
+        === Bond Detection Debug ===
+        Atom count: 2
+        Geometry rows: 2, cols: 3
+        Pair 0-1: dist=1.830, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+          -> BONDED
+        Total bonds detected: 1
+        === getCachedBondList() CALLED ===
+[38;2;050;205;050m[OK]    Calculated π-bond orders: 0/3 non-zero entries
+[0m        Using proper two-phase EEQ system
+        Phase 1 EEQ: Topology charges calculated
+[38;2;255;255;255m[RESULT]Atom 0 qa = -0.379458
+[0m[38;2;255;255;255m[RESULT]Atom 1 qa = 0.379458
+[0m[38;2;050;205;050m[OK]    Two-phase EEQ charge calculation completed successfully
+[0m        === getCachedBondList() CALLED ===
+[38;2;255;165;000m[WARN]  GFN-FF: No torsions detected (molecule may be too small or linear)
+[0m        GFN-FF: No inversions detected (no sp² centers found)
+        === CRITICAL DEBUG: EEQ Charges Before Coulomb Generation ===
+[38;2;100;149;237m[PARAM] q_atom_0(Z=8): -0.46619477
+[0m[38;2;100;149;237m[PARAM] q_atom_1(Z=1): 0.46619477
+[0m[38;2;050;205;050m[OK]    ✅ EEQ charges are non-zero - electrostatics should work
+[0m        === getCachedBondList() CALLED ===
+        GFN-FF method: gfnff → Dispersion: d3
+        Using native D3ParameterGenerator (validated 10/11 <1% error)
+        === D3ParameterGenerator::GenerateParameters() START ===
+[38;2;100;149;237m[PARAM] Number of atoms: 2
+[0m        D3: CN calculation took 0.00 ms
+        D3: Weight pre-computation took 0.00 ms (2 atoms × avg 3 refs)
+        D3: C6 interpolation for 1 pairs took 0.01 ms (0.0089 ms/pair)
+[38;2;050;205;050m[OK]    D3 parameter generation completed in 0.04 ms
+[0m          └─ Breakdown: CN=0.0ms, Weights=0.0ms, C6Interp=0.0ms, ATM=0.0ms
+[38;2;050;205;050m[OK]    D3 dispersion: 1 pairs generated (validated accuracy)
+[0m        === getCachedBondList() CALLED ===
+        Detected 0 hydrogen bonds
+        === getCachedBondList() CALLED ===
+        Detected 0 halogen bonds
+        === getCachedBondList() CALLED ===
+        Detected 0 hydrogen bonds
+[38;2;100;149;237m[PARAM] loaded_from_cache: true
+[0m        Initializing force field parameters
+[38;2;100;149;237m[PARAM] method: gfnff
+[0m[38;2;100;149;237m[PARAM] angles_processed: 0
+[0m[38;2;100;149;237m[PARAM] dihedrals_processed: 0 primary, 0 extra
+[0m[38;2;100;149;237m[PARAM] inversions_processed: 0
+[0m[38;2;050;205;050m[OK]    Loaded 0 GFN-FF hydrogen bonds
+[0m[38;2;050;205;050m[OK]    Loaded 0 GFN-FF halogen bonds
+[0m        Parameter generation complete
+[38;2;100;149;237m[PARAM] method_type: 3 (GFN-FF)
+[0m        Generating parameter summary
+        Force field topology summary:
+[38;2;100;149;237m[PARAM] bonds_count: 1 bond terms
+[0m        GFN-FF pairwise interactions:
+[38;2;100;149;237m[PARAM] dispersion_pairs: 1
+[0m[38;2;100;149;237m[PARAM] bonded_repulsion_pairs: 1
+[0m[38;2;100;149;237m[PARAM] coulomb_pairs: 1
+[0m        Scaling factors:
+        Force field flags:
+        Parameter summary completed
+[38;2;050;205;050m[OK]    ForceField::setParameter() complete
+[0m[38;2;255;255;255m[RESULT]Primary torsions: 0 terms, energy = 0.000000e+00 Eh
+[0m[38;2;255;255;255m[RESULT]Extra sp3-sp3 torsions: 0 terms, energy = 0.000000e+00 Eh
+[0m[38;2;255;255;255m[RESULT]Total dihedral energy: 0.000000e+00 Eh (primary + extra)
+[0m        Thread 0 calculating 1 bonded repulsion pairs
+[38;2;100;149;237m[PARAM] thread_bonded_repulsion_energy: 0.013573 Eh (1 pairs)
+[0m        === Coulomb Energy Calculation: EEQ Charge Verification ===
+[38;2;100;149;237m[PARAM] Coulomb[0] q_i(atom0), q_j(atom1): -0.46619477, 0.46619477
+[0m[38;2;100;149;237m[PARAM] max_absolute_charge: 4.66194770e-01
+[0m[38;2;050;205;050m[OK]    ✅ Charges up to 4.66e-01 found - Coulomb energy should be non-zero
+[0m[38;2;100;149;237m[ENERGY]Force Field Energy: -0.18952328 Eh
+[0m        Force field energy decomposition:
+[38;2;100;149;237m[PARAM] bond_energy: -0.129922 Eh
+[0m[38;2;100;149;237m[PARAM] angle_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] dihedral_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] inversion_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] nonbonded_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] D4_energy: -0.000053 Eh
+[0m[38;2;100;149;237m[PARAM] repulsion energy: 0.013573 Eh
+[0m[38;2;100;149;237m[PARAM] GFNFF_dispersion: -0.000053 Eh
+[0m[38;2;100;149;237m[PARAM] GFNFF_coulomb: -0.073068 Eh
+[0m[38;2;100;149;237m[ENERGY]GFN-FF Energy: -0.18952328 Eh
+[0m[38;2;100;149;237m[PARAM] energy_hartree: -0.1895232825
+[0m  Total energy: -0.18952328 Hartree
+  Energy components:
+    Bond:        -0.12992179 Eh
+    Angle:        0.00000000 Eh
+    Torsion:      0.00000000 Eh
+    Repulsion:    0.01357298 Eh
+    Coulomb:     -0.07306769 Eh
+    Dispersion:  -0.00005339 Eh
+  ✗ Total energy: error = 4.43846426e-02 Hartree (expected -0.23390793)
+  ✓ angle energy: error = 0.00000000e+00 Eh
+  ✗ bond energy: error = 4.09889272e-02 Eh (got -0.12992179, expected -0.17091072)
+  ✗ coulomb energy: error = 3.44392022e-03 Eh (got -0.07306769, expected -0.07651161)
+  ✗ dispersion energy: error = 5.19767695e-06 Eh (got -0.00005339, expected -0.00005859)
+  ✓ repulsion energy: error = 9.43643230e-09 Eh
+  ✓ torsion energy: error = 0.00000000e+00 Eh
+
+Testing: H-Cl dimer (halogen chemistry)
+--------------------------------------------------
+  DEBUG: Molecule loaded successfully!
+  DEBUG: Atoms = 2
+  DEBUG: Charge = 0
+  DEBUG: Spin = 0.00000000e+00
+        EEQSolver initialized with parameters:
+[38;2;100;149;237m[PARAM] max_iterations: 50
+[0m[38;2;100;149;237m[PARAM] convergence_threshold: 1.00e-06
+[0m[38;2;100;149;237m[PARAM] verbosity: 2
+[0m[38;2;100;149;237m[PARAM] calculate_cn: true
+[0m        Using advanced GFN-FF parametrization (experimental)
+        === getCachedBondList() CALLED ===
+        === Calculating new bond list ===
+        === Bond Detection Debug ===
+        Atom count: 2
+        Geometry rows: 2, cols: 3
+        Pair 0-1: dist=1.830, rcov_i=1.890, rcov_j=0.605, sum=2.494, threshold_sum=3.243
+          -> BONDED
+        Total bonds detected: 1
+        === getCachedBondList() CALLED ===
+[38;2;050;205;050m[OK]    Calculated π-bond orders: 0/3 non-zero entries
+[0m        Using proper two-phase EEQ system
+        Phase 1 EEQ: Topology charges calculated
+[38;2;255;255;255m[RESULT]Atom 0 qa = -0.117893
+[0m[38;2;255;255;255m[RESULT]Atom 1 qa = 0.117893
+[0m[38;2;050;205;050m[OK]    Two-phase EEQ charge calculation completed successfully
+[0m        === getCachedBondList() CALLED ===
+[38;2;255;165;000m[WARN]  GFN-FF: No torsions detected (molecule may be too small or linear)
+[0m        GFN-FF: No inversions detected (no sp² centers found)
+        === CRITICAL DEBUG: EEQ Charges Before Coulomb Generation ===
+[38;2;100;149;237m[PARAM] q_atom_0(Z=17): -0.20489954
+[0m[38;2;100;149;237m[PARAM] q_atom_1(Z=1): 0.20489954
+[0m[38;2;050;205;050m[OK]    ✅ EEQ charges are non-zero - electrostatics should work
+[0m        === getCachedBondList() CALLED ===
+        GFN-FF method: gfnff → Dispersion: d3
+        Using native D3ParameterGenerator (validated 10/11 <1% error)
+        === D3ParameterGenerator::GenerateParameters() START ===
+[38;2;100;149;237m[PARAM] Number of atoms: 2
+[0m        D3: CN calculation took 0.00 ms
+        D3: Weight pre-computation took 0.00 ms (2 atoms × avg 2 refs)
+        D3: C6 interpolation for 1 pairs took 0.02 ms (0.0199 ms/pair)
+[38;2;050;205;050m[OK]    D3 parameter generation completed in 0.05 ms
+[0m          └─ Breakdown: CN=0.0ms, Weights=0.0ms, C6Interp=0.0ms, ATM=0.0ms
+[38;2;050;205;050m[OK]    D3 dispersion: 1 pairs generated (validated accuracy)
+[0m        === getCachedBondList() CALLED ===
+        Detected 0 hydrogen bonds
+        === getCachedBondList() CALLED ===
+        Detected 0 halogen bonds
+        === getCachedBondList() CALLED ===
+        Detected 0 hydrogen bonds
+[38;2;100;149;237m[PARAM] loaded_from_cache: true
+[0m        Initializing force field parameters
+[38;2;100;149;237m[PARAM] method: gfnff
+[0m[38;2;100;149;237m[PARAM] angles_processed: 0
+[0m[38;2;100;149;237m[PARAM] dihedrals_processed: 0 primary, 0 extra
+[0m[38;2;100;149;237m[PARAM] inversions_processed: 0
+[0m[38;2;050;205;050m[OK]    Loaded 0 GFN-FF hydrogen bonds
+[0m[38;2;050;205;050m[OK]    Loaded 0 GFN-FF halogen bonds
+[0m        Parameter generation complete
+[38;2;100;149;237m[PARAM] method_type: 3 (GFN-FF)
+[0m        Generating parameter summary
+        Force field topology summary:
+[38;2;100;149;237m[PARAM] bonds_count: 1 bond terms
+[0m        GFN-FF pairwise interactions:
+[38;2;100;149;237m[PARAM] dispersion_pairs: 1
+[0m[38;2;100;149;237m[PARAM] bonded_repulsion_pairs: 1
+[0m[38;2;100;149;237m[PARAM] coulomb_pairs: 1
+[0m        Scaling factors:
+        Force field flags:
+        Parameter summary completed
+[38;2;050;205;050m[OK]    ForceField::setParameter() complete
+[0m[38;2;255;255;255m[RESULT]Primary torsions: 0 terms, energy = 0.000000e+00 Eh
+[0m[38;2;255;255;255m[RESULT]Extra sp3-sp3 torsions: 0 terms, energy = 0.000000e+00 Eh
+[0m[38;2;255;255;255m[RESULT]Total dihedral energy: 0.000000e+00 Eh (primary + extra)
+[0m        Thread 0 calculating 1 bonded repulsion pairs
+[38;2;100;149;237m[PARAM] thread_bonded_repulsion_energy: 0.080506 Eh (1 pairs)
+[0m        === Coulomb Energy Calculation: EEQ Charge Verification ===
+[38;2;100;149;237m[PARAM] Coulomb[0] q_i(atom0), q_j(atom1): -0.20489954, 0.20489954
+[0m[38;2;100;149;237m[PARAM] max_absolute_charge: 2.04899543e-01
+[0m[38;2;050;205;050m[OK]    ✅ Charges up to 2.05e-01 found - Coulomb energy should be non-zero
+[0m[38;2;100;149;237m[ENERGY]Force Field Energy: -0.01273763 Eh
+[0m        Force field energy decomposition:
+[38;2;100;149;237m[PARAM] bond_energy: -0.084998 Eh
+[0m[38;2;100;149;237m[PARAM] angle_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] dihedral_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] inversion_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] nonbonded_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] D4_energy: -0.000090 Eh
+[0m[38;2;100;149;237m[PARAM] repulsion energy: 0.080506 Eh
+[0m[38;2;100;149;237m[PARAM] GFNFF_dispersion: -0.000090 Eh
+[0m[38;2;100;149;237m[PARAM] GFNFF_coulomb: -0.008065 Eh
+[0m[38;2;100;149;237m[ENERGY]GFN-FF Energy: -0.01273763 Eh
+[0m[38;2;100;149;237m[PARAM] energy_hartree: -0.0127376311
+[0m  Total energy: -0.01273763 Hartree
+  Energy components:
+    Bond:        -0.08499810 Eh
+    Angle:        0.00000000 Eh
+    Torsion:      0.00000000 Eh
+    Repulsion:    0.08050570 Eh
+    Coulomb:     -0.00806461 Eh
+    Dispersion:  -0.00009031 Eh
+  ✗ Total energy: error = 6.99182945e-04 Hartree (expected -0.01203845)
+  ✓ angle energy: error = 0.00000000e+00 Eh
+  ✗ bond energy: error = 6.87601082e-04 Eh (got -0.08499810, expected -0.08431050)
+  ✗ coulomb energy: error = 2.85776276e-05 Eh (got -0.00806461, expected -0.00809318)
+  ✗ dispersion energy: error = 5.01537113e-05 Eh (got -0.00009031, expected -0.00014047)
+  ✓ repulsion energy: error = 1.85360061e-12 Eh
+  ✓ torsion energy: error = 0.00000000e+00 Eh
+
+Testing: H2O trimer
+--------------------------------------------------
+  DEBUG: Molecule loaded successfully!
+  DEBUG: Atoms = 3
+  DEBUG: Charge = 0
+  DEBUG: Spin = 0.00000000e+00
+        EEQSolver initialized with parameters:
+[38;2;100;149;237m[PARAM] max_iterations: 50
+[0m[38;2;100;149;237m[PARAM] convergence_threshold: 1.00e-06
+[0m[38;2;100;149;237m[PARAM] verbosity: 2
+[0m[38;2;100;149;237m[PARAM] calculate_cn: true
+[0m        Using advanced GFN-FF parametrization (experimental)
+        === getCachedBondList() CALLED ===
+        === Calculating new bond list ===
+        === Bond Detection Debug ===
+        Atom count: 3
+        Geometry rows: 3, cols: 3
+        Pair 0-1: dist=1.809, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+          -> BONDED
+        Pair 0-2: dist=1.809, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+          -> BONDED
+        Pair 1-2: dist=2.861, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Total bonds detected: 2
+        === getCachedBondList() CALLED ===
+[38;2;050;205;050m[OK]    Calculated π-bond orders: 0/6 non-zero entries
+[0m        Using proper two-phase EEQ system
+        Phase 1 EEQ: Topology charges calculated
+[38;2;255;255;255m[RESULT]Atom 0 qa = -0.509607
+[0m[38;2;255;255;255m[RESULT]Atom 1 qa = 0.254803
+[0m[38;2;255;255;255m[RESULT]Atom 2 qa = 0.254803
+[0m[38;2;050;205;050m[OK]    Two-phase EEQ charge calculation completed successfully
+[0mgetGFNFFAngleParameters() call #1: atoms 1-0-2
+        === getCachedBondList() CALLED ===
+[38;2;255;165;000m[WARN]  GFN-FF: No torsions detected (molecule may be too small or linear)
+[0m        GFN-FF: No inversions detected (no sp² centers found)
+        === CRITICAL DEBUG: EEQ Charges Before Coulomb Generation ===
+[38;2;100;149;237m[PARAM] q_atom_0(Z=8): -0.56230157
+[0m[38;2;100;149;237m[PARAM] q_atom_1(Z=1): 0.28115079
+[0m[38;2;100;149;237m[PARAM] q_atom_2(Z=1): 0.28115079
+[0m[38;2;050;205;050m[OK]    ✅ EEQ charges are non-zero - electrostatics should work
+[0m        === getCachedBondList() CALLED ===
+        GFN-FF method: gfnff → Dispersion: d3
+        Using native D3ParameterGenerator (validated 10/11 <1% error)
+        === D3ParameterGenerator::GenerateParameters() START ===
+[38;2;100;149;237m[PARAM] Number of atoms: 3
+[0m        D3: CN calculation took 0.00 ms
+        D3: Weight pre-computation took 0.00 ms (3 atoms × avg 3 refs)
+        D3: C6 interpolation for 3 pairs took 0.02 ms (0.0059 ms/pair)
+[38;2;050;205;050m[OK]    D3 parameter generation completed in 0.05 ms
+[0m          └─ Breakdown: CN=0.0ms, Weights=0.0ms, C6Interp=0.0ms, ATM=0.0ms
+[38;2;050;205;050m[OK]    D3 dispersion: 3 pairs generated (validated accuracy)
+[0m        === getCachedBondList() CALLED ===
+        Detected 0 hydrogen bonds
+        === getCachedBondList() CALLED ===
+        Detected 0 halogen bonds
+        === getCachedBondList() CALLED ===
+        Detected 0 hydrogen bonds
+[38;2;100;149;237m[PARAM] loaded_from_cache: true
+[0m        Initializing force field parameters
+[38;2;100;149;237m[PARAM] method: gfnff
+[0m[38;2;100;149;237m[PARAM] angles_processed: 1
+[0m[38;2;100;149;237m[PARAM] dihedrals_processed: 0 primary, 0 extra
+[0m[38;2;100;149;237m[PARAM] inversions_processed: 0
+[0m[38;2;050;205;050m[OK]    Loaded 0 GFN-FF hydrogen bonds
+[0m[38;2;050;205;050m[OK]    Loaded 0 GFN-FF halogen bonds
+[0m        Parameter generation complete
+[38;2;100;149;237m[PARAM] method_type: 3 (GFN-FF)
+[0m        Generating parameter summary
+        Force field topology summary:
+[38;2;100;149;237m[PARAM] bonds_count: 2 bond terms
+[0m[38;2;100;149;237m[PARAM] angles_count: 1 angle terms
+[0m        GFN-FF pairwise interactions:
+[38;2;100;149;237m[PARAM] dispersion_pairs: 3
+[0m[38;2;100;149;237m[PARAM] bonded_repulsion_pairs: 2
+[0m[38;2;100;149;237m[PARAM] nonbonded_repulsion_pairs: 1
+[0m[38;2;100;149;237m[PARAM] coulomb_pairs: 3
+[0m        Scaling factors:
+        Force field flags:
+        Parameter summary completed
+[38;2;050;205;050m[OK]    ForceField::setParameter() complete
+[0m[38;2;255;255;255m[RESULT]Primary torsions: 0 terms, energy = 0.000000e+00 Eh
+[0m[38;2;255;255;255m[RESULT]Extra sp3-sp3 torsions: 0 terms, energy = 0.000000e+00 Eh
+[0m[38;2;255;255;255m[RESULT]Total dihedral energy: 0.000000e+00 Eh (primary + extra)
+[0m        Thread 0 calculating 2 bonded repulsion pairs
+[38;2;100;149;237m[PARAM] thread_bonded_repulsion_energy: 0.030511 Eh (2 pairs)
+[0m        Thread 0 calculating 1 non-bonded repulsion pairs
+[38;2;100;149;237m[PARAM] thread_nonbonded_repulsion_energy: 0.001180 Eh (1 pairs)
+[0m        === Coulomb Energy Calculation: EEQ Charge Verification ===
+[38;2;100;149;237m[PARAM] Coulomb[0] q_i(atom0), q_j(atom1): -0.56230157, 0.28115079
+[0m[38;2;100;149;237m[PARAM] Coulomb[1] q_i(atom0), q_j(atom2): -0.56230157, 0.28115079
+[0m[38;2;100;149;237m[PARAM] Coulomb[2] q_i(atom1), q_j(atom2): 0.28115079, 0.28115079
+[0m[38;2;100;149;237m[PARAM] max_absolute_charge: 5.62301571e-01
+[0m[38;2;050;205;050m[OK]    ✅ Charges up to 5.62e-01 found - Coulomb energy should be non-zero
+[0m[38;2;100;149;237m[ENERGY]Force Field Energy: -0.31709211 Eh
+[0m        Force field energy decomposition:
+[38;2;100;149;237m[PARAM] bond_energy: -0.268252 Eh
+[0m[38;2;100;149;237m[PARAM] angle_energy: 0.000471 Eh
+[0m[38;2;100;149;237m[PARAM] dihedral_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] inversion_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] nonbonded_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] D4_energy: -0.000116 Eh
+[0m[38;2;100;149;237m[PARAM] repulsion energy: 0.031691 Eh
+[0m[38;2;100;149;237m[PARAM] GFNFF_dispersion: -0.000116 Eh
+[0m[38;2;100;149;237m[PARAM] GFNFF_coulomb: -0.080771 Eh
+[0m[38;2;100;149;237m[ENERGY]GFN-FF Energy: -0.31709211 Eh
+[0m[38;2;100;149;237m[PARAM] energy_hartree: -0.3170921052
+[0m  Total energy: -0.31709211 Hartree
+  Energy components:
+    Bond:        -0.26825225 Eh
+    Angle:        0.00047146 Eh
+    Torsion:      0.00000000 Eh
+    Repulsion:    0.03169104 Eh
+    Coulomb:     -0.08077066 Eh
+    Dispersion:  -0.00011585 Eh
+  ✗ Total energy: error = 1.04028778e-01 Hartree (expected -0.21306333)
+  ✗ angle energy: error = 7.67808948e-04 Eh (got 0.00047146, expected 0.00123927)
+  ✗ bond energy: error = 5.23286127e-02 Eh (got -0.26825225, expected -0.21592363)
+  ✗ coulomb energy: error = 7.93716685e-02 Eh (got -0.08077066, expected -0.00139899)
+  ✗ dispersion energy: error = 4.92164295e-03 Eh (got -0.00011585, expected 0.00480580)
+  ✗ repulsion energy: error = 2.46703780e-02 Eh (got 0.03169104, expected 0.00702066)
+  ✓ torsion energy: error = 0.00000000e+00 Eh
+
+Testing: O3 ozone (bent triatomic, π-system)
+--------------------------------------------------
+  DEBUG: Molecule loaded successfully!
+  DEBUG: Atoms = 3
+  DEBUG: Charge = 0
+  DEBUG: Spin = 0.00000000e+00
+        EEQSolver initialized with parameters:
+[38;2;100;149;237m[PARAM] max_iterations: 50
+[0m[38;2;100;149;237m[PARAM] convergence_threshold: 1.00e-06
+[0m[38;2;100;149;237m[PARAM] verbosity: 2
+[0m[38;2;100;149;237m[PARAM] calculate_cn: true
+[0m        Using advanced GFN-FF parametrization (experimental)
+        === getCachedBondList() CALLED ===
+        === Calculating new bond list ===
+        === Bond Detection Debug ===
+        Atom count: 3
+        Geometry rows: 3, cols: 3
+        Pair 0-1: dist=2.336, rcov_i=1.209, rcov_j=1.209, sum=2.419, threshold_sum=3.145
+          -> BONDED
+        Pair 0-2: dist=2.335, rcov_i=1.209, rcov_j=1.209, sum=2.419, threshold_sum=3.145
+          -> BONDED
+        Pair 1-2: dist=4.054, rcov_i=1.209, rcov_j=1.209, sum=2.419, threshold_sum=3.145
+        Total bonds detected: 2
+        === getCachedBondList() CALLED ===
+[38;2;050;205;050m[OK]    Calculated π-bond orders: 0/6 non-zero entries
+[0m        Using proper two-phase EEQ system
+        Phase 1 EEQ: Topology charges calculated
+[38;2;255;255;255m[RESULT]Atom 0 qa = 0.098670
+[0m[38;2;255;255;255m[RESULT]Atom 1 qa = -0.049335
+[0m[38;2;255;255;255m[RESULT]Atom 2 qa = -0.049335
+[0m[38;2;050;205;050m[OK]    Two-phase EEQ charge calculation completed successfully
+[0mgetGFNFFAngleParameters() call #2: atoms 1-0-2
+        === getCachedBondList() CALLED ===
+[38;2;255;165;000m[WARN]  GFN-FF: No torsions detected (molecule may be too small or linear)
+[0m        GFN-FF: No inversions detected (no sp² centers found)
+        === CRITICAL DEBUG: EEQ Charges Before Coulomb Generation ===
+[38;2;100;149;237m[PARAM] q_atom_0(Z=8): 0.11923788
+[0m[38;2;100;149;237m[PARAM] q_atom_1(Z=8): -0.05960785
+[0m[38;2;100;149;237m[PARAM] q_atom_2(Z=8): -0.05963003
+[0m[38;2;050;205;050m[OK]    ✅ EEQ charges are non-zero - electrostatics should work
+[0m        === getCachedBondList() CALLED ===
+        GFN-FF method: gfnff → Dispersion: d3
+        Using native D3ParameterGenerator (validated 10/11 <1% error)
+        === D3ParameterGenerator::GenerateParameters() START ===
+[38;2;100;149;237m[PARAM] Number of atoms: 3
+[0m        D3: CN calculation took 0.00 ms
+        D3: Weight pre-computation took 0.00 ms (3 atoms × avg 3 refs)
+        D3: C6 interpolation for 3 pairs took 0.03 ms (0.0097 ms/pair)
+[38;2;050;205;050m[OK]    D3 parameter generation completed in 0.08 ms
+[0m          └─ Breakdown: CN=0.0ms, Weights=0.0ms, C6Interp=0.0ms, ATM=0.0ms
+[38;2;050;205;050m[OK]    D3 dispersion: 3 pairs generated (validated accuracy)
+[0m        === getCachedBondList() CALLED ===
+        Detected 0 hydrogen bonds
+        === getCachedBondList() CALLED ===
+        Detected 0 halogen bonds
+        === getCachedBondList() CALLED ===
+        Detected 0 hydrogen bonds
+[38;2;100;149;237m[PARAM] loaded_from_cache: true
+[0m        Initializing force field parameters
+[38;2;100;149;237m[PARAM] method: gfnff
+[0m[38;2;100;149;237m[PARAM] angles_processed: 1
+[0m[38;2;100;149;237m[PARAM] dihedrals_processed: 0 primary, 0 extra
+[0m[38;2;100;149;237m[PARAM] inversions_processed: 0
+[0m[38;2;050;205;050m[OK]    Loaded 0 GFN-FF hydrogen bonds
+[0m[38;2;050;205;050m[OK]    Loaded 0 GFN-FF halogen bonds
+[0m        Parameter generation complete
+[38;2;100;149;237m[PARAM] method_type: 3 (GFN-FF)
+[0m        Generating parameter summary
+        Force field topology summary:
+[38;2;100;149;237m[PARAM] bonds_count: 2 bond terms
+[0m[38;2;100;149;237m[PARAM] angles_count: 1 angle terms
+[0m        GFN-FF pairwise interactions:
+[38;2;100;149;237m[PARAM] dispersion_pairs: 3
+[0m[38;2;100;149;237m[PARAM] bonded_repulsion_pairs: 2
+[0m[38;2;100;149;237m[PARAM] nonbonded_repulsion_pairs: 1
+[0m[38;2;100;149;237m[PARAM] coulomb_pairs: 3
+[0m        Scaling factors:
+        Force field flags:
+        Parameter summary completed
+[38;2;050;205;050m[OK]    ForceField::setParameter() complete
+[0m[38;2;255;255;255m[RESULT]Primary torsions: 0 terms, energy = 0.000000e+00 Eh
+[0m[38;2;255;255;255m[RESULT]Extra sp3-sp3 torsions: 0 terms, energy = 0.000000e+00 Eh
+[0m[38;2;255;255;255m[RESULT]Total dihedral energy: 0.000000e+00 Eh (primary + extra)
+[0m        Thread 0 calculating 2 bonded repulsion pairs
+[38;2;100;149;237m[PARAM] thread_bonded_repulsion_energy: 0.016860 Eh (2 pairs)
+[0m        Thread 0 calculating 1 non-bonded repulsion pairs
+[38;2;100;149;237m[PARAM] thread_nonbonded_repulsion_energy: 0.006593 Eh (1 pairs)
+[0m        === Coulomb Energy Calculation: EEQ Charge Verification ===
+[38;2;100;149;237m[PARAM] Coulomb[0] q_i(atom0), q_j(atom1): 0.11923788, -0.05960785
+[0m[38;2;100;149;237m[PARAM] Coulomb[1] q_i(atom0), q_j(atom2): 0.11923788, -0.05963003
+[0m[38;2;100;149;237m[PARAM] Coulomb[2] q_i(atom1), q_j(atom2): -0.05960785, -0.05963003
+[0m[38;2;100;149;237m[PARAM] max_absolute_charge: 1.19237881e-01
+[0m[38;2;050;205;050m[OK]    ✅ Charges up to 1.19e-01 found - Coulomb energy should be non-zero
+[0m[38;2;100;149;237m[ENERGY]Force Field Energy: -0.23088903 Eh
+[0m        Force field energy decomposition:
+[38;2;100;149;237m[PARAM] bond_energy: -0.259934 Eh
+[0m[38;2;100;149;237m[PARAM] angle_energy: 0.009502 Eh
+[0m[38;2;100;149;237m[PARAM] dihedral_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] inversion_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] nonbonded_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] D4_energy: -0.000191 Eh
+[0m[38;2;100;149;237m[PARAM] repulsion energy: 0.023453 Eh
+[0m[38;2;100;149;237m[PARAM] GFNFF_dispersion: -0.000191 Eh
+[0m[38;2;100;149;237m[PARAM] GFNFF_coulomb: -0.003529 Eh
+[0m[38;2;100;149;237m[ENERGY]GFN-FF Energy: -0.23088903 Eh
+[0m[38;2;100;149;237m[PARAM] energy_hartree: -0.2308890327
+[0m  Total energy: -0.23088903 Hartree
+  Energy components:
+    Bond:        -0.25993375 Eh
+    Angle:        0.00950152 Eh
+    Torsion:      0.00000000 Eh
+    Repulsion:    0.02345278 Eh
+    Coulomb:     -0.00352855 Eh
+    Dispersion:  -0.00019052 Eh
+  ✗ Total energy: error = 1.00050565e-01 Hartree (expected -0.33093960)
+  ✗ angle energy: error = 4.88553455e-03 Eh (got 0.00950152, expected 0.00461599)
+  ✗ bond energy: error = 9.50050138e-02 Eh (got -0.25993375, expected -0.35493876)
+  ✗ coulomb energy: error = 7.96678558e-05 Eh (got -0.00352855, expected -0.00360821)
+  ✗ dispersion energy: error = 2.09017375e-04 Eh (got -0.00019052, expected -0.00039954)
+  ✗ repulsion energy: error = 6.18517125e-05 Eh (got 0.02345278, expected 0.02339092)
+  ✓ torsion energy: error = 0.00000000e+00 Eh
+
+Testing: Dimethyl ether (complex torsions)
+--------------------------------------------------
+  DEBUG: Molecule loaded successfully!
+  DEBUG: Atoms = 9
+  DEBUG: Charge = 0
+  DEBUG: Spin = 0.00000000e+00
+        EEQSolver initialized with parameters:
+[38;2;100;149;237m[PARAM] max_iterations: 50
+[0m[38;2;100;149;237m[PARAM] convergence_threshold: 1.00e-06
+[0m[38;2;100;149;237m[PARAM] verbosity: 2
+[0m[38;2;100;149;237m[PARAM] calculate_cn: true
+[0m        Using advanced GFN-FF parametrization (experimental)
+        === getCachedBondList() CALLED ===
+        === Calculating new bond list ===
+        === Bond Detection Debug ===
+        Atom count: 9
+        Geometry rows: 9, cols: 3
+        Pair 0-1: dist=4.440, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 0-2: dist=4.920, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 0-3: dist=6.209, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 0-4: dist=5.007, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 0-5: dist=2.685, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+          -> BONDED
+        Pair 0-6: dist=2.066, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 0-7: dist=2.069, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 0-8: dist=2.067, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 1-2: dist=2.068, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 1-3: dist=2.067, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 1-4: dist=2.068, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 1-5: dist=2.685, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+          -> BONDED
+        Pair 1-6: dist=6.209, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-7: dist=5.007, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-8: dist=4.920, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 2-3: dist=3.359, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 2-4: dist=3.391, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 2-5: dist=3.926, rcov_i=0.605, rcov_j=1.209, sum=1.814, threshold_sum=2.358
+        Pair 2-6: dist=6.829, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 2-7: dist=4.591, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 2-8: dist=5.555, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 3-4: dist=3.357, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 3-5: dist=3.870, rcov_i=0.605, rcov_j=1.209, sum=1.814, threshold_sum=2.358
+        Pair 3-6: dist=7.724, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 3-7: dist=6.833, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 3-8: dist=6.829, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 4-5: dist=3.917, rcov_i=0.605, rcov_j=1.209, sum=1.814, threshold_sum=2.358
+        Pair 4-6: dist=6.832, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 4-7: dist=5.845, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 4-8: dist=4.590, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 5-6: dist=3.871, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 5-7: dist=3.917, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 5-8: dist=3.925, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 6-7: dist=3.358, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 6-8: dist=3.358, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 7-8: dist=3.391, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Total bonds detected: 8
+        === getCachedBondList() CALLED ===
+[38;2;050;205;050m[OK]    Calculated π-bond orders: 0/45 non-zero entries
+[0m        Using proper two-phase EEQ system
+        Phase 1 EEQ: Topology charges calculated
+[38;2;255;255;255m[RESULT]Atom 0 qa = 0.039539
+[0m[38;2;255;255;255m[RESULT]Atom 1 qa = 0.039539
+[0m[38;2;255;255;255m[RESULT]Atom 2 qa = 0.044778
+[0m[38;2;255;255;255m[RESULT]Atom 3 qa = 0.044778
+[0m[38;2;255;255;255m[RESULT]Atom 4 qa = 0.044778
+[0m[38;2;050;205;050m[OK]    Two-phase EEQ charge calculation completed successfully
+[0m        === C-H r0 DEBUG: Bond 0-6 ===
+          CN: cn1=3.501548, cn2=0.972962
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351267, rb=0.731545
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351267 + 0.731545) * 0.973780 = 2.028201
+                   r0 = rtmp + rabshift = 2.028201 + -0.182000 = 1.846201 Bohr
+          Result: r0_bohr=1.846201, r0_angstrom=0.976967
+        === C-H r0 DEBUG: Bond 0-7 ===
+          CN: cn1=3.501548, cn2=0.972789
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351267, rb=0.731514
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351267 + 0.731514) * 0.973780 = 2.028171
+                   r0 = rtmp + rabshift = 2.028171 + -0.182000 = 1.846171 Bohr
+          Result: r0_bohr=1.846171, r0_angstrom=0.976951
+        === C-H r0 DEBUG: Bond 0-8 ===
+          CN: cn1=3.501548, cn2=0.972918
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351267, rb=0.731537
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351267 + 0.731537) * 0.973780 = 2.028194
+                   r0 = rtmp + rabshift = 2.028194 + -0.182000 = 1.846194 Bohr
+          Result: r0_bohr=1.846194, r0_angstrom=0.976963
+        === C-H r0 DEBUG: Bond 1-2 ===
+          CN: cn1=3.501550, cn2=0.972858
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351267, rb=0.731526
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351267 + 0.731526) * 0.973780 = 2.028184
+                   r0 = rtmp + rabshift = 2.028184 + -0.182000 = 1.846184 Bohr
+          Result: r0_bohr=1.846184, r0_angstrom=0.976958
+        === C-H r0 DEBUG: Bond 1-3 ===
+          CN: cn1=3.501550, cn2=0.972950
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351267, rb=0.731543
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351267 + 0.731543) * 0.973780 = 2.028200
+                   r0 = rtmp + rabshift = 2.028200 + -0.182000 = 1.846200 Bohr
+          Result: r0_bohr=1.846200, r0_angstrom=0.976966
+        === C-H r0 DEBUG: Bond 1-4 ===
+          CN: cn1=3.501550, cn2=0.972871
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351267, rb=0.731529
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351267 + 0.731529) * 0.973780 = 2.028186
+                   r0 = rtmp + rabshift = 2.028186 + -0.182000 = 1.846186 Bohr
+          Result: r0_bohr=1.846186, r0_angstrom=0.976959
+        === C-H r0 DEBUG: Bond 0-6 ===
+          CN: cn1=3.501548, cn2=0.972962
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351267, rb=0.731545
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351267 + 0.731545) * 0.973780 = 2.028201
+                   r0 = rtmp + rabshift = 2.028201 + -0.182000 = 1.846201 Bohr
+          Result: r0_bohr=1.846201, r0_angstrom=0.976967
+        === C-H r0 DEBUG: Bond 0-7 ===
+          CN: cn1=3.501548, cn2=0.972789
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351267, rb=0.731514
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351267 + 0.731514) * 0.973780 = 2.028171
+                   r0 = rtmp + rabshift = 2.028171 + -0.182000 = 1.846171 Bohr
+          Result: r0_bohr=1.846171, r0_angstrom=0.976951
+        === C-H r0 DEBUG: Bond 0-8 ===
+          CN: cn1=3.501548, cn2=0.972918
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351267, rb=0.731537
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351267 + 0.731537) * 0.973780 = 2.028194
+                   r0 = rtmp + rabshift = 2.028194 + -0.182000 = 1.846194 Bohr
+          Result: r0_bohr=1.846194, r0_angstrom=0.976963
+        === C-H r0 DEBUG: Bond 1-2 ===
+          CN: cn1=3.501550, cn2=0.972858
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351267, rb=0.731526
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351267 + 0.731526) * 0.973780 = 2.028184
+                   r0 = rtmp + rabshift = 2.028184 + -0.182000 = 1.846184 Bohr
+          Result: r0_bohr=1.846184, r0_angstrom=0.976958
+        === C-H r0 DEBUG: Bond 1-3 ===
+          CN: cn1=3.501550, cn2=0.972950
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351267, rb=0.731543
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351267 + 0.731543) * 0.973780 = 2.028200
+                   r0 = rtmp + rabshift = 2.028200 + -0.182000 = 1.846200 Bohr
+          Result: r0_bohr=1.846200, r0_angstrom=0.976966
+        === C-H r0 DEBUG: Bond 1-4 ===
+          CN: cn1=3.501550, cn2=0.972871
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351267, rb=0.731529
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351267 + 0.731529) * 0.973780 = 2.028186
+                   r0 = rtmp + rabshift = 2.028186 + -0.182000 = 1.846186 Bohr
+          Result: r0_bohr=1.846186, r0_angstrom=0.976959
+getGFNFFAngleParameters() call #3: atoms 5-0-6
+getGFNFFAngleParameters() call #4: atoms 5-0-7
+getGFNFFAngleParameters() call #5: atoms 5-0-8
+getGFNFFAngleParameters() call #6: atoms 6-0-7
+getGFNFFAngleParameters() call #7: atoms 6-0-8
+getGFNFFAngleParameters() call #8: atoms 7-0-8
+getGFNFFAngleParameters() call #9: atoms 2-1-3
+getGFNFFAngleParameters() call #10: atoms 2-1-4
+getGFNFFAngleParameters() call #11: atoms 2-1-5
+getGFNFFAngleParameters() call #12: atoms 3-1-4
+getGFNFFAngleParameters() call #13: atoms 3-1-5
+getGFNFFAngleParameters() call #14: atoms 4-1-5
+getGFNFFAngleParameters() call #15: atoms 0-5-1
+DEBUG: Processing O-centered angle!
+DEBUG: About to call CNCalculator...
+DEBUG: CNCalculator returned successfully
+DEBUG: Reached final debug block, atom_j=5
+
+=== ANGLE FORCE CONSTANT DEBUG (Atom 5 = O) ===
+Angle: 0-5-1
+Elements: 6-8-6
+
+FACTOR 1 (fijk_calc):
+  angle_param (center=8) = 2.15988900e+00
+  angl2_i (Z=6) = 7.55851000e-01
+  angl2_k (Z=6) = 7.55851000e-01
+  fijk_calc = 2.15988900e+00 × 7.55851000e-01 × 7.55851000e-01 = 1.23396777e+00
+
+FACTOR 2 (fqq - charge correction):
+  qa_center = -3.64756546e-01
+  qa_i = 2.05526377e-02
+  qa_k = 2.05320499e-02
+  fqq = 1.00000000e+00
+
+FACTOR 3 (f2 - element correction):
+  f2 = 1.00000000e+00
+
+FACTOR 4 (fn - coordination number):
+  D3_CN = 1.91095432e+00
+  nn (rounded) = 2.00000000e+00
+  fn = 1.0 - 2.36/2.00000000e+00² = 4.10000000e-01
+
+DEBUG: topo_info.adjacency_list.size() = 9
+DEBUG: topo_info.adjacency_list[5].size() = 2
+DEBUG O-angle: neighbors.size() = 2
+DEBUG O-angle: r0_deg before correction = 1.09500000e+02
+DEBUG O-angle: r0_deg after correction = 1.04500000e+02
+DEBUG O-angle: f2 = 1.00000000e+00
+FACTOR 5 (fbsmall - linear angle correction):
+  theta0 = 1.82386907e+00 rad = 1.04500000e+02°
+  fbsmall = 1.0 - 0.5 × exp(-0.64×(θ0-π)²) = 8.35433456e-01
+
+FACTOR 6 (feta - metal correction):
+  feta = 1.00000000e+00 (no metals)
+
+FINAL FORCE CONSTANT:
+  fc = fijk × fqq × f2 × fn × fbsmall × feta
+  fc = 1.23396777e+00 × 1.00000000e+00 × 1.00000000e+00 × 4.10000000e-01 × 8.35433456e-01 × 1.00000000e+00
+  fc = 4.22668163e-01 Eh
+
+COMPARISON:
+  Curcuma fc = 4.22668163e-01 Eh
+  XTB ref fc ≈ 0.407 Eh (from param file)
+  Ratio = 1.03849672e+00×
+=========================================================
+
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+[38;2;255;255;255m[RESULT]GFN-FF torsions: 6 primary (n=2,3), 0 extra sp3-sp3 (n=1)
+[0m          Periodicity distribution: n=1 (0), n=2 (0), n=3 (6)
+        GFN-FF detected 2 inversions
+          Element Z=1: 2 inversions
+        === CRITICAL DEBUG: EEQ Charges Before Coulomb Generation ===
+[38;2;100;149;237m[PARAM] q_atom_0(Z=6): 0.02055264
+[0m[38;2;100;149;237m[PARAM] q_atom_1(Z=6): 0.02053205
+[0m[38;2;100;149;237m[PARAM] q_atom_2(Z=1): 0.04900538
+[0m[38;2;100;149;237m[PARAM] q_atom_3(Z=1): 0.06258666
+[0m[38;2;100;149;237m[PARAM] q_atom_4(Z=1): 0.05025485
+[0m[38;2;100;149;237m[PARAM] q_atom_5(Z=8): -0.36475655
+[0m[38;2;100;149;237m[PARAM] q_atom_6(Z=1): 0.06257454
+[0m[38;2;100;149;237m[PARAM] q_atom_7(Z=1): 0.05025178
+[0m[38;2;100;149;237m[PARAM] q_atom_8(Z=1): 0.04899864
+[0m[38;2;050;205;050m[OK]    ✅ EEQ charges are non-zero - electrostatics should work
+[0m        === getCachedBondList() CALLED ===
+        GFN-FF method: gfnff → Dispersion: d3
+        Using native D3ParameterGenerator (validated 10/11 <1% error)
+        === D3ParameterGenerator::GenerateParameters() START ===
+[38;2;100;149;237m[PARAM] Number of atoms: 9
+[0m        D3: CN calculation took 0.00 ms
+        D3: Weight pre-computation took 0.00 ms (9 atoms × avg 5 refs)
+        D3: C6 interpolation for 36 pairs took 0.20 ms (0.0056 ms/pair)
+[38;2;050;205;050m[OK]    D3 parameter generation completed in 0.34 ms
+[0m          └─ Breakdown: CN=0.0ms, Weights=0.0ms, C6Interp=0.2ms, ATM=0.0ms
+[38;2;050;205;050m[OK]    D3 dispersion: 36 pairs generated (validated accuracy)
+[0m        === getCachedBondList() CALLED ===
+        Detected 0 hydrogen bonds
+        === getCachedBondList() CALLED ===
+        Detected 0 halogen bonds
+        === getCachedBondList() CALLED ===
+        Detected 0 hydrogen bonds
+[38;2;100;149;237m[PARAM] loaded_from_cache: true
+[0m        Initializing force field parameters
+[38;2;100;149;237m[PARAM] method: gfnff
+[0m[38;2;100;149;237m[PARAM] angles_processed: 13
+[0m[38;2;100;149;237m[PARAM] dihedrals_processed: 6 primary, 0 extra
+[0m[38;2;100;149;237m[PARAM] inversions_processed: 2
+[0m[38;2;050;205;050m[OK]    Loaded 0 GFN-FF hydrogen bonds
+[0m[38;2;050;205;050m[OK]    Loaded 0 GFN-FF halogen bonds
+[0m        Parameter generation complete
+[38;2;100;149;237m[PARAM] method_type: 3 (GFN-FF)
+[0m        Generating parameter summary
+        Force field topology summary:
+[38;2;100;149;237m[PARAM] bonds_count: 8 bond terms
+[0m[38;2;100;149;237m[PARAM] angles_count: 13 angle terms
+[0m[38;2;100;149;237m[PARAM] dihedrals_count: 6 dihedral terms
+[0m[38;2;100;149;237m[PARAM] inversions_count: 2 inversion terms
+[0m        GFN-FF pairwise interactions:
+[38;2;100;149;237m[PARAM] dispersion_pairs: 36
+[0m[38;2;100;149;237m[PARAM] bonded_repulsion_pairs: 8
+[0m[38;2;100;149;237m[PARAM] nonbonded_repulsion_pairs: 28
+[0m[38;2;100;149;237m[PARAM] coulomb_pairs: 36
+[0m        Scaling factors:
+        Force field flags:
+        Parameter summary completed
+[38;2;050;205;050m[OK]    ForceField::setParameter() complete
+[0m[38;2;255;255;255m[RESULT]Primary torsions: 6 terms, energy = 8.587449e-05 Eh
+[0m[38;2;255;255;255m[RESULT]Extra sp3-sp3 torsions: 0 terms, energy = 0.000000e+00 Eh
+[0m[38;2;255;255;255m[RESULT]Total dihedral energy: 8.587449e-05 Eh (primary + extra)
+[0m        Thread 0 calculating 8 bonded repulsion pairs
+[38;2;100;149;237m[PARAM] thread_bonded_repulsion_energy: 0.038281 Eh (8 pairs)
+[0m        Thread 0 calculating 28 non-bonded repulsion pairs
+[38;2;100;149;237m[PARAM] thread_nonbonded_repulsion_energy: 0.015769 Eh (28 pairs)
+[0m        === Coulomb Energy Calculation: EEQ Charge Verification ===
+[38;2;100;149;237m[PARAM] Coulomb[0] q_i(atom0), q_j(atom1): 0.02055264, 0.02053205
+[0m[38;2;100;149;237m[PARAM] Coulomb[1] q_i(atom0), q_j(atom2): 0.02055264, 0.04900538
+[0m[38;2;100;149;237m[PARAM] Coulomb[2] q_i(atom0), q_j(atom3): 0.02055264, 0.06258666
+[0m[38;2;100;149;237m[PARAM] Coulomb[3] q_i(atom0), q_j(atom4): 0.02055264, 0.05025485
+[0m[38;2;100;149;237m[PARAM] Coulomb[4] q_i(atom0), q_j(atom5): 0.02055264, -0.36475655
+[0m[38;2;100;149;237m[PARAM] Coulomb[5] q_i(atom0), q_j(atom6): 0.02055264, 0.06257454
+[0m[38;2;100;149;237m[PARAM] Coulomb[6] q_i(atom0), q_j(atom7): 0.02055264, 0.05025178
+[0m[38;2;100;149;237m[PARAM] Coulomb[7] q_i(atom0), q_j(atom8): 0.02055264, 0.04899864
+[0m[38;2;100;149;237m[PARAM] Coulomb[8] q_i(atom1), q_j(atom2): 0.02053205, 0.04900538
+[0m[38;2;100;149;237m[PARAM] Coulomb[9] q_i(atom1), q_j(atom3): 0.02053205, 0.06258666
+[0m[38;2;100;149;237m[PARAM] ...: 26 more coulomb pairs
+[0m[38;2;100;149;237m[PARAM] max_absolute_charge: 3.64756546e-01
+[0m[38;2;050;205;050m[OK]    ✅ Charges up to 3.65e-01 found - Coulomb energy should be non-zero
+[0m[38;2;100;149;237m[ENERGY]Force Field Energy: -1.21572867 Eh
+[0m        Force field energy decomposition:
+[38;2;100;149;237m[PARAM] bond_energy: -1.219710 Eh
+[0m[38;2;100;149;237m[PARAM] angle_energy: 0.001790 Eh
+[0m[38;2;100;149;237m[PARAM] dihedral_energy: 0.000086 Eh
+[0m[38;2;100;149;237m[PARAM] inversion_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] nonbonded_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] D4_energy: -0.001647 Eh
+[0m[38;2;100;149;237m[PARAM] repulsion energy: 0.054050 Eh
+[0m[38;2;100;149;237m[PARAM] GFNFF_dispersion: -0.001647 Eh
+[0m[38;2;100;149;237m[PARAM] GFNFF_coulomb: -0.048652 Eh
+[0m[38;2;100;149;237m[ENERGY]GFN-FF Energy: -1.21572867 Eh
+[0m[38;2;100;149;237m[PARAM] energy_hartree: -1.2157286738
+[0m  Total energy: -1.21572867 Hartree
+  Energy components:
+    Bond:        -1.21970969 Eh
+    Angle:        0.00179004 Eh
+    Torsion:      0.00008587 Eh
+    Repulsion:    0.05404994 Eh
+    Coulomb:     -0.04865168 Eh
+    Dispersion:  -0.00164658 Eh
+  ✗ Total energy: error = 6.51945221e-03 Hartree (expected -1.20920922)
+  ✗ angle energy: error = 1.05103896e-05 Eh (got 0.00179004, expected 0.00177953)
+  ✗ bond energy: error = 3.26575099e-03 Eh (got -1.21970969, expected -1.21644394)
+  ✗ coulomb energy: error = 8.26320839e-04 Eh (got -0.04865168, expected -0.04782536)
+  ✗ dispersion energy: error = 1.68852418e-03 Eh (got -0.00164658, expected 0.00004195)
+  ✗ repulsion energy: error = 1.85274966e-04 Eh (got 0.05404994, expected 0.05386466)
+  ✗ torsion energy: error = 6.24838957e-05 Eh (got 0.00008587, expected 0.00002339)
+
+Testing: Methane - sp3 tetrahedral validation
+--------------------------------------------------
+  DEBUG: Molecule loaded successfully!
+  DEBUG: Atoms = 5
+  DEBUG: Charge = 0
+  DEBUG: Spin = 0.00000000
+        EEQSolver initialized with parameters:
+[38;2;100;149;237m[PARAM] max_iterations: 50
+[0m[38;2;100;149;237m[PARAM] convergence_threshold: 1.00e-06
+[0m[38;2;100;149;237m[PARAM] verbosity: 2
+[0m[38;2;100;149;237m[PARAM] calculate_cn: true
+[0m        Using advanced GFN-FF parametrization (experimental)
+        === getCachedBondList() CALLED ===
+        === Calculating new bond list ===
+        === Bond Detection Debug ===
+        Atom count: 5
+        Geometry rows: 5, cols: 3
+        Pair 0-1: dist=2.045, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 0-2: dist=2.045, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 0-3: dist=2.045, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 0-4: dist=2.045, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 1-2: dist=3.340, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 1-3: dist=3.340, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 1-4: dist=3.340, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 2-3: dist=3.340, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 2-4: dist=3.340, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 3-4: dist=3.340, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Total bonds detected: 4
+        === getCachedBondList() CALLED ===
+[38;2;050;205;050m[OK]    Calculated π-bond orders: 0/15 non-zero entries
+[0m        Using proper two-phase EEQ system
+        Phase 1 EEQ: Topology charges calculated
+[38;2;255;255;255m[RESULT]Atom 0 qa = -0.073942
+[0m[38;2;255;255;255m[RESULT]Atom 1 qa = 0.018485
+[0m[38;2;255;255;255m[RESULT]Atom 2 qa = 0.018485
+[0m[38;2;255;255;255m[RESULT]Atom 3 qa = 0.018485
+[0m[38;2;255;255;255m[RESULT]Atom 4 qa = 0.018485
+[0m[38;2;050;205;050m[OK]    Two-phase EEQ charge calculation completed successfully
+[0m        === C-H r0 DEBUG: Bond 0-1 ===
+          CN: cn1=3.486642, cn2=0.974325
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.349700, rb=0.731790
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.349700 + 0.731790) * 0.973780 = 2.026914
+                   r0 = rtmp + rabshift = 2.026914 + -0.182000 = 1.844914 Bohr
+          Result: r0_bohr=1.844914, r0_angstrom=0.976286
+        === C-H r0 DEBUG: Bond 0-2 ===
+          CN: cn1=3.486642, cn2=0.974325
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.349700, rb=0.731790
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.349700 + 0.731790) * 0.973780 = 2.026914
+                   r0 = rtmp + rabshift = 2.026914 + -0.182000 = 1.844914 Bohr
+          Result: r0_bohr=1.844914, r0_angstrom=0.976286
+        === C-H r0 DEBUG: Bond 0-3 ===
+          CN: cn1=3.486642, cn2=0.974325
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.349700, rb=0.731790
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.349700 + 0.731790) * 0.973780 = 2.026914
+                   r0 = rtmp + rabshift = 2.026914 + -0.182000 = 1.844914 Bohr
+          Result: r0_bohr=1.844914, r0_angstrom=0.976286
+        === C-H r0 DEBUG: Bond 0-4 ===
+          CN: cn1=3.486642, cn2=0.974325
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.349700, rb=0.731790
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.349700 + 0.731790) * 0.973780 = 2.026914
+                   r0 = rtmp + rabshift = 2.026914 + -0.182000 = 1.844914 Bohr
+          Result: r0_bohr=1.844914, r0_angstrom=0.976286
+        === C-H r0 DEBUG: Bond 0-1 ===
+          CN: cn1=3.486642, cn2=0.974325
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.349700, rb=0.731790
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.349700 + 0.731790) * 0.973780 = 2.026914
+                   r0 = rtmp + rabshift = 2.026914 + -0.182000 = 1.844914 Bohr
+          Result: r0_bohr=1.844914, r0_angstrom=0.976286
+        === C-H r0 DEBUG: Bond 0-2 ===
+          CN: cn1=3.486642, cn2=0.974325
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.349700, rb=0.731790
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.349700 + 0.731790) * 0.973780 = 2.026914
+                   r0 = rtmp + rabshift = 2.026914 + -0.182000 = 1.844914 Bohr
+          Result: r0_bohr=1.844914, r0_angstrom=0.976286
+        === C-H r0 DEBUG: Bond 0-3 ===
+          CN: cn1=3.486642, cn2=0.974325
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.349700, rb=0.731790
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.349700 + 0.731790) * 0.973780 = 2.026914
+                   r0 = rtmp + rabshift = 2.026914 + -0.182000 = 1.844914 Bohr
+          Result: r0_bohr=1.844914, r0_angstrom=0.976286
+        === C-H r0 DEBUG: Bond 0-4 ===
+          CN: cn1=3.486642, cn2=0.974325
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.349700, rb=0.731790
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.349700 + 0.731790) * 0.973780 = 2.026914
+                   r0 = rtmp + rabshift = 2.026914 + -0.182000 = 1.844914 Bohr
+          Result: r0_bohr=1.844914, r0_angstrom=0.976286
+        === getCachedBondList() CALLED ===
+[38;2;255;165;000m[WARN]  GFN-FF: No torsions detected (molecule may be too small or linear)
+[0m        GFN-FF: No inversions detected (no sp² centers found)
+        === CRITICAL DEBUG: EEQ Charges Before Coulomb Generation ===
+[38;2;100;149;237m[PARAM] q_atom_0(Z=6): -0.09535033
+[0m[38;2;100;149;237m[PARAM] q_atom_1(Z=1): 0.02383758
+[0m[38;2;100;149;237m[PARAM] q_atom_2(Z=1): 0.02383758
+[0m[38;2;100;149;237m[PARAM] q_atom_3(Z=1): 0.02383758
+[0m[38;2;100;149;237m[PARAM] q_atom_4(Z=1): 0.02383758
+[0m[38;2;050;205;050m[OK]    ✅ EEQ charges are non-zero - electrostatics should work
+[0m        === getCachedBondList() CALLED ===
+        GFN-FF method: gfnff → Dispersion: d3
+        Using native D3ParameterGenerator (validated 10/11 <1% error)
+        === D3ParameterGenerator::GenerateParameters() START ===
+[38;2;100;149;237m[PARAM] Number of atoms: 5
+[0m        D3: CN calculation took 0.00 ms
+        D3: Weight pre-computation took 0.00 ms (5 atoms × avg 5 refs)
+        D3: C6 interpolation for 10 pairs took 0.05 ms (0.0045 ms/pair)
+[38;2;050;205;050m[OK]    D3 parameter generation completed in 0.10 ms
+[0m          └─ Breakdown: CN=0.0ms, Weights=0.0ms, C6Interp=0.0ms, ATM=0.0ms
+[38;2;050;205;050m[OK]    D3 dispersion: 10 pairs generated (validated accuracy)
+[0m        === getCachedBondList() CALLED ===
+        Detected 0 hydrogen bonds
+        === getCachedBondList() CALLED ===
+        Detected 0 halogen bonds
+        === getCachedBondList() CALLED ===
+        Detected 0 hydrogen bonds
+[38;2;100;149;237m[PARAM] loaded_from_cache: true
+[0m        Initializing force field parameters
+[38;2;100;149;237m[PARAM] method: gfnff
+[0m[38;2;100;149;237m[PARAM] angles_processed: 6
+[0m[38;2;100;149;237m[PARAM] dihedrals_processed: 0 primary, 0 extra
+[0m[38;2;100;149;237m[PARAM] inversions_processed: 0
+[0m[38;2;050;205;050m[OK]    Loaded 0 GFN-FF hydrogen bonds
+[0m[38;2;050;205;050m[OK]    Loaded 0 GFN-FF halogen bonds
+[0m        Parameter generation complete
+[38;2;100;149;237m[PARAM] method_type: 3 (GFN-FF)
+[0m        Generating parameter summary
+        Force field topology summary:
+[38;2;100;149;237m[PARAM] bonds_count: 4 bond terms
+[0m[38;2;100;149;237m[PARAM] angles_count: 6 angle terms
+[0m        GFN-FF pairwise interactions:
+[38;2;100;149;237m[PARAM] dispersion_pairs: 10
+[0m[38;2;100;149;237m[PARAM] bonded_repulsion_pairs: 4
+[0m[38;2;100;149;237m[PARAM] nonbonded_repulsion_pairs: 6
+[0m[38;2;100;149;237m[PARAM] coulomb_pairs: 10
+[0m        Scaling factors:
+        Force field flags:
+        Parameter summary completed
+[38;2;050;205;050m[OK]    ForceField::setParameter() complete
+[0m[38;2;255;255;255m[RESULT]Primary torsions: 0 terms, energy = 0.000000e+00 Eh
+[0m[38;2;255;255;255m[RESULT]Extra sp3-sp3 torsions: 0 terms, energy = 0.000000e+00 Eh
+[0m[38;2;255;255;255m[RESULT]Total dihedral energy: 0.000000e+00 Eh (primary + extra)
+[0m        Thread 0 calculating 4 bonded repulsion pairs
+[38;2;100;149;237m[PARAM] thread_bonded_repulsion_energy: 0.025036 Eh (4 pairs)
+[0m        Thread 0 calculating 6 non-bonded repulsion pairs
+[38;2;100;149;237m[PARAM] thread_nonbonded_repulsion_energy: 0.002721 Eh (6 pairs)
+[0m        === Coulomb Energy Calculation: EEQ Charge Verification ===
+[38;2;100;149;237m[PARAM] Coulomb[0] q_i(atom0), q_j(atom1): -0.09535033, 0.02383758
+[0m[38;2;100;149;237m[PARAM] Coulomb[1] q_i(atom0), q_j(atom2): -0.09535033, 0.02383758
+[0m[38;2;100;149;237m[PARAM] Coulomb[2] q_i(atom0), q_j(atom3): -0.09535033, 0.02383758
+[0m[38;2;100;149;237m[PARAM] Coulomb[3] q_i(atom0), q_j(atom4): -0.09535033, 0.02383758
+[0m[38;2;100;149;237m[PARAM] Coulomb[4] q_i(atom1), q_j(atom2): 0.02383758, 0.02383758
+[0m[38;2;100;149;237m[PARAM] Coulomb[5] q_i(atom1), q_j(atom3): 0.02383758, 0.02383758
+[0m[38;2;100;149;237m[PARAM] Coulomb[6] q_i(atom1), q_j(atom4): 0.02383758, 0.02383758
+[0m[38;2;100;149;237m[PARAM] Coulomb[7] q_i(atom2), q_j(atom3): 0.02383758, 0.02383758
+[0m[38;2;100;149;237m[PARAM] Coulomb[8] q_i(atom2), q_j(atom4): 0.02383758, 0.02383758
+[0m[38;2;100;149;237m[PARAM] Coulomb[9] q_i(atom3), q_j(atom4): 0.02383758, 0.02383758
+[0m[38;2;100;149;237m[PARAM] max_absolute_charge: 9.53503310e-02
+[0m[38;2;050;205;050m[OK]    ✅ Charges up to 9.54e-02 found - Coulomb energy should be non-zero
+[0m[38;2;100;149;237m[ENERGY]Force Field Energy: -0.63374029 Eh
+[0m        Force field energy decomposition:
+[38;2;100;149;237m[PARAM] bond_energy: -0.658999 Eh
+[0m[38;2;100;149;237m[PARAM] angle_energy: 0.000060 Eh
+[0m[38;2;100;149;237m[PARAM] dihedral_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] inversion_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] nonbonded_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] D4_energy: -0.000432 Eh
+[0m[38;2;100;149;237m[PARAM] repulsion energy: 0.027756 Eh
+[0m[38;2;100;149;237m[PARAM] GFNFF_dispersion: -0.000432 Eh
+[0m[38;2;100;149;237m[PARAM] GFNFF_coulomb: -0.001693 Eh
+[0m[38;2;100;149;237m[ENERGY]GFN-FF Energy: -0.63374029 Eh
+[0m[38;2;100;149;237m[PARAM] energy_hartree: -0.6337402878
+[0m  Total energy: -0.63374029 Hartree
+  Energy components:
+    Bond:        -0.65899897 Eh
+    Angle:        0.00005964 Eh
+    Torsion:      0.00000000 Eh
+    Repulsion:    0.02775613 Eh
+    Coulomb:     -0.00169264 Eh
+    Dispersion:  -0.00043223 Eh
+  ✗ Total energy: error = 2.92532010e-03 Hartree (expected -0.63081497)
+  ✗ angle energy: error = 9.34214879e-06 Eh (got 0.00005964, expected 0.00006899)
+  ✗ bond energy: error = 2.61262461e-03 Eh (got -0.65899897, expected -0.65638635)
+  ✗ coulomb energy: error = 1.16404583e-04 Eh (got -0.00169264, expected -0.00157623)
+  ✗ dispersion energy: error = 2.18376784e-04 Eh (got -0.00043223, expected -0.00065060)
+  ✗ repulsion energy: error = 2.69005943e-05 Eh (got 0.02775613, expected 0.02772923)
+  ✓ torsion energy: error = 0.00000000e+00 Eh
+
+Testing: Benzene - aromatic π-system, sp² carbons
+--------------------------------------------------
+  DEBUG: Molecule loaded successfully!
+  DEBUG: Atoms = 12
+  DEBUG: Charge = 0
+  DEBUG: Spin = 0.00000000e+00
+        EEQSolver initialized with parameters:
+[38;2;100;149;237m[PARAM] max_iterations: 50
+[0m[38;2;100;149;237m[PARAM] convergence_threshold: 1.00e-06
+[0m[38;2;100;149;237m[PARAM] verbosity: 2
+[0m[38;2;100;149;237m[PARAM] calculate_cn: true
+[0m        Using advanced GFN-FF parametrization (experimental)
+        === getCachedBondList() CALLED ===
+        === Calculating new bond list ===
+        === Bond Detection Debug ===
+        Atom count: 12
+        Geometry rows: 12, cols: 3
+        Pair 0-1: dist=2.612, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+          -> BONDED
+        Pair 0-2: dist=4.525, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 0-3: dist=5.225, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 0-4: dist=4.525, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 0-5: dist=2.612, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+          -> BONDED
+        Pair 0-6: dist=2.041, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 0-7: dist=4.040, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 0-8: dist=6.374, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 0-9: dist=7.265, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 0-10: dist=6.374, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 0-11: dist=4.040, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-2: dist=2.612, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+          -> BONDED
+        Pair 1-3: dist=4.525, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 1-4: dist=5.224, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 1-5: dist=4.524, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 1-6: dist=4.040, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-7: dist=2.041, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 1-8: dist=4.040, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-9: dist=6.374, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-10: dist=7.265, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-11: dist=6.374, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 2-3: dist=2.612, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+          -> BONDED
+        Pair 2-4: dist=4.524, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 2-5: dist=5.224, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 2-6: dist=6.374, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 2-7: dist=4.040, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 2-8: dist=2.041, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 2-9: dist=4.040, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 2-10: dist=6.374, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 2-11: dist=7.265, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 3-4: dist=2.612, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+          -> BONDED
+        Pair 3-5: dist=4.525, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 3-6: dist=7.265, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 3-7: dist=6.374, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 3-8: dist=4.040, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 3-9: dist=2.041, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 3-10: dist=4.040, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 3-11: dist=6.374, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 4-5: dist=2.612, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+          -> BONDED
+        Pair 4-6: dist=6.374, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 4-7: dist=7.265, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 4-8: dist=6.374, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 4-9: dist=4.040, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 4-10: dist=2.041, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 4-11: dist=4.040, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 5-6: dist=4.040, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 5-7: dist=6.374, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 5-8: dist=7.265, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 5-9: dist=6.374, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 5-10: dist=4.040, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 5-11: dist=2.041, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 6-7: dist=4.653, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 6-8: dist=8.059, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 6-9: dist=9.306, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 6-10: dist=8.059, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 6-11: dist=4.653, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 7-8: dist=4.653, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 7-9: dist=8.059, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 7-10: dist=9.306, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 7-11: dist=8.059, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 8-9: dist=4.653, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 8-10: dist=8.059, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 8-11: dist=9.306, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 9-10: dist=4.653, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 9-11: dist=8.059, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 10-11: dist=4.653, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Total bonds detected: 12
+        === getCachedBondList() CALLED ===
+[38;2;050;205;050m[OK]    Calculated π-bond orders: 6/78 non-zero entries
+[0m        Using proper two-phase EEQ system
+        Phase 1 EEQ: Topology charges calculated
+[38;2;255;255;255m[RESULT]Atom 0 qa = -0.034307
+[0m[38;2;255;255;255m[RESULT]Atom 1 qa = -0.034307
+[0m[38;2;255;255;255m[RESULT]Atom 2 qa = -0.034307
+[0m[38;2;255;255;255m[RESULT]Atom 3 qa = -0.034307
+[0m[38;2;255;255;255m[RESULT]Atom 4 qa = -0.034307
+[0m[38;2;050;205;050m[OK]    Two-phase EEQ charge calculation completed successfully
+[0m        === C-H r0 DEBUG: Bond 0-6 ===
+          CN: cn1=2.816189, cn2=0.974564
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.279207, rb=0.731833
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.050000, total=-0.160000
+          Hyb: hyb1=2, hyb2=0
+          Formula: rtmp = (1.279207 + 0.731833) * 0.973780 = 1.958311
+                   r0 = rtmp + rabshift = 1.958311 + -0.160000 = 1.798311 Bohr
+          Result: r0_bohr=1.798311, r0_angstrom=0.951625
+        === C-H r0 DEBUG: Bond 1-7 ===
+          CN: cn1=2.816201, cn2=0.974558
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.279208, rb=0.731832
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.050000, total=-0.160000
+          Hyb: hyb1=2, hyb2=0
+          Formula: rtmp = (1.279208 + 0.731832) * 0.973780 = 1.958311
+                   r0 = rtmp + rabshift = 1.958311 + -0.160000 = 1.798311 Bohr
+          Result: r0_bohr=1.798311, r0_angstrom=0.951625
+        === C-H r0 DEBUG: Bond 2-8 ===
+          CN: cn1=2.816200, cn2=0.974560
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.279208, rb=0.731832
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.050000, total=-0.160000
+          Hyb: hyb1=2, hyb2=0
+          Formula: rtmp = (1.279208 + 0.731832) * 0.973780 = 1.958311
+                   r0 = rtmp + rabshift = 1.958311 + -0.160000 = 1.798311 Bohr
+          Result: r0_bohr=1.798311, r0_angstrom=0.951625
+        === C-H r0 DEBUG: Bond 3-9 ===
+          CN: cn1=2.816189, cn2=0.974565
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.279207, rb=0.731833
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.050000, total=-0.160000
+          Hyb: hyb1=2, hyb2=0
+          Formula: rtmp = (1.279207 + 0.731833) * 0.973780 = 1.958311
+                   r0 = rtmp + rabshift = 1.958311 + -0.160000 = 1.798311 Bohr
+          Result: r0_bohr=1.798311, r0_angstrom=0.951625
+        === C-H r0 DEBUG: Bond 4-10 ===
+          CN: cn1=2.816201, cn2=0.974558
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.279208, rb=0.731832
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.050000, total=-0.160000
+          Hyb: hyb1=2, hyb2=0
+          Formula: rtmp = (1.279208 + 0.731832) * 0.973780 = 1.958311
+                   r0 = rtmp + rabshift = 1.958311 + -0.160000 = 1.798311 Bohr
+          Result: r0_bohr=1.798311, r0_angstrom=0.951625
+        === C-H r0 DEBUG: Bond 5-11 ===
+          CN: cn1=2.816200, cn2=0.974560
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.279208, rb=0.731832
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.050000, total=-0.160000
+          Hyb: hyb1=2, hyb2=0
+          Formula: rtmp = (1.279208 + 0.731832) * 0.973780 = 1.958311
+                   r0 = rtmp + rabshift = 1.958311 + -0.160000 = 1.798311 Bohr
+          Result: r0_bohr=1.798311, r0_angstrom=0.951625
+        === C-H r0 DEBUG: Bond 0-6 ===
+          CN: cn1=2.816189, cn2=0.974564
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.279207, rb=0.731833
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.050000, total=-0.160000
+          Hyb: hyb1=2, hyb2=0
+          Formula: rtmp = (1.279207 + 0.731833) * 0.973780 = 1.958311
+                   r0 = rtmp + rabshift = 1.958311 + -0.160000 = 1.798311 Bohr
+          Result: r0_bohr=1.798311, r0_angstrom=0.951625
+        === C-H r0 DEBUG: Bond 1-7 ===
+          CN: cn1=2.816201, cn2=0.974558
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.279208, rb=0.731832
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.050000, total=-0.160000
+          Hyb: hyb1=2, hyb2=0
+          Formula: rtmp = (1.279208 + 0.731832) * 0.973780 = 1.958311
+                   r0 = rtmp + rabshift = 1.958311 + -0.160000 = 1.798311 Bohr
+          Result: r0_bohr=1.798311, r0_angstrom=0.951625
+        === C-H r0 DEBUG: Bond 2-8 ===
+          CN: cn1=2.816200, cn2=0.974560
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.279208, rb=0.731832
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.050000, total=-0.160000
+          Hyb: hyb1=2, hyb2=0
+          Formula: rtmp = (1.279208 + 0.731832) * 0.973780 = 1.958311
+                   r0 = rtmp + rabshift = 1.958311 + -0.160000 = 1.798311 Bohr
+          Result: r0_bohr=1.798311, r0_angstrom=0.951625
+        === C-H r0 DEBUG: Bond 3-9 ===
+          CN: cn1=2.816189, cn2=0.974565
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.279207, rb=0.731833
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.050000, total=-0.160000
+          Hyb: hyb1=2, hyb2=0
+          Formula: rtmp = (1.279207 + 0.731833) * 0.973780 = 1.958311
+                   r0 = rtmp + rabshift = 1.958311 + -0.160000 = 1.798311 Bohr
+          Result: r0_bohr=1.798311, r0_angstrom=0.951625
+        === C-H r0 DEBUG: Bond 4-10 ===
+          CN: cn1=2.816201, cn2=0.974558
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.279208, rb=0.731832
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.050000, total=-0.160000
+          Hyb: hyb1=2, hyb2=0
+          Formula: rtmp = (1.279208 + 0.731832) * 0.973780 = 1.958311
+                   r0 = rtmp + rabshift = 1.958311 + -0.160000 = 1.798311 Bohr
+          Result: r0_bohr=1.798311, r0_angstrom=0.951625
+        === C-H r0 DEBUG: Bond 5-11 ===
+          CN: cn1=2.816200, cn2=0.974560
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.279208, rb=0.731832
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.050000, total=-0.160000
+          Hyb: hyb1=2, hyb2=0
+          Formula: rtmp = (1.279208 + 0.731832) * 0.973780 = 1.958311
+                   r0 = rtmp + rabshift = 1.958311 + -0.160000 = 1.798311 Bohr
+          Result: r0_bohr=1.798311, r0_angstrom=0.951625
+DEBUG: Processing O-centered angle!
+DEBUG: About to call CNCalculator...
+DEBUG: CNCalculator returned successfully
+DEBUG: Reached final debug block, atom_j=5
+
+=== ANGLE FORCE CONSTANT DEBUG (Atom 5 = O) ===
+Angle: 0-5-4
+Elements: 6-6-6
+
+FACTOR 1 (fijk_calc):
+  angle_param (center=6) = 7.71055000e-01
+  angl2_i (Z=6) = 7.55851000e-01
+  angl2_k (Z=6) = 7.55851000e-01
+  fijk_calc = 7.71055000e-01 × 7.55851000e-01 × 7.55851000e-01 = 4.40511998e-01
+
+FACTOR 2 (fqq - charge correction):
+  qa_center = -3.64043275e-02
+  qa_i = -3.64063971e-02
+  qa_k = -3.64034355e-02
+  fqq = 1.00000000e+00
+
+FACTOR 3 (f2 - element correction):
+  f2 = 1.00000000e+00
+
+FACTOR 4 (fn - coordination number):
+  D3_CN = 2.81620032e+00
+  nn (rounded) = 3.00000000e+00
+  fn = 1.0 - 2.36/3.00000000e+00² = 7.37777778e-01
+
+DEBUG: topo_info.adjacency_list.size() = 12
+DEBUG: topo_info.adjacency_list[5].size() = 3
+FACTOR 5 (fbsmall - linear angle correction):
+  theta0 = 2.09439510e+00 rad = 1.20000000e+02°
+  fbsmall = 1.0 - 0.5 × exp(-0.64×(θ0-π)²) = 7.52163423e-01
+
+FACTOR 6 (feta - metal correction):
+  feta = 1.00000000e+00 (no metals)
+
+FINAL FORCE CONSTANT:
+  fc = fijk × fqq × f2 × fn × fbsmall × feta
+  fc = 4.40511998e-01 × 1.00000000e+00 × 1.00000000e+00 × 7.37777778e-01 × 7.52163423e-01 × 1.00000000e+00
+  fc = 2.44453085e-01 Eh
+
+COMPARISON:
+  Curcuma fc = 2.44453085e-01 Eh
+  XTB ref fc ≈ 0.407 Eh (from param file)
+  Ratio = 6.00621830e-01×
+=========================================================
+
+DEBUG: Processing O-centered angle!
+DEBUG: About to call CNCalculator...
+DEBUG: CNCalculator returned successfully
+DEBUG: Reached final debug block, atom_j=5
+
+=== ANGLE FORCE CONSTANT DEBUG (Atom 5 = O) ===
+Angle: 0-5-11
+Elements: 6-6-1
+
+FACTOR 1 (fijk_calc):
+  angle_param (center=6) = 7.71055000e-01
+  angl2_i (Z=6) = 7.55851000e-01
+  angl2_k (Z=1) = 6.24197000e-01
+  fijk_calc = 7.71055000e-01 × 7.55851000e-01 × 6.24197000e-01 = 3.63783692e-01
+
+FACTOR 2 (fqq - charge correction):
+  qa_center = -3.64043275e-02
+  qa_i = -3.64063971e-02
+  qa_k = 3.64044223e-02
+  fqq = 1.00000000e+00
+
+FACTOR 3 (f2 - element correction):
+  f2 = 1.00000000e+00
+
+FACTOR 4 (fn - coordination number):
+  D3_CN = 2.81620032e+00
+  nn (rounded) = 3.00000000e+00
+  fn = 1.0 - 2.36/3.00000000e+00² = 7.37777778e-01
+
+DEBUG: topo_info.adjacency_list.size() = 12
+DEBUG: topo_info.adjacency_list[5].size() = 3
+FACTOR 5 (fbsmall - linear angle correction):
+  theta0 = 2.09439510e+00 rad = 1.20000000e+02°
+  fbsmall = 1.0 - 0.5 × exp(-0.64×(θ0-π)²) = 7.52163423e-01
+
+FACTOR 6 (feta - metal correction):
+  feta = 1.00000000e+00 (no metals)
+
+FINAL FORCE CONSTANT:
+  fc = fijk × fqq × f2 × fn × fbsmall × feta
+  fc = 3.63783692e-01 × 1.00000000e+00 × 1.00000000e+00 × 7.37777778e-01 × 7.52163423e-01 × 1.00000000e+00
+  fc = 2.01874288e-01 Eh
+
+COMPARISON:
+  Curcuma fc = 2.01874288e-01 Eh
+  XTB ref fc ≈ 0.407 Eh (from param file)
+  Ratio = 4.96005621e-01×
+=========================================================
+
+DEBUG: Processing O-centered angle!
+DEBUG: About to call CNCalculator...
+DEBUG: CNCalculator returned successfully
+DEBUG: Reached final debug block, atom_j=5
+
+=== ANGLE FORCE CONSTANT DEBUG (Atom 5 = O) ===
+Angle: 4-5-11
+Elements: 6-6-1
+
+FACTOR 1 (fijk_calc):
+  angle_param (center=6) = 7.71055000e-01
+  angl2_i (Z=6) = 7.55851000e-01
+  angl2_k (Z=1) = 6.24197000e-01
+  fijk_calc = 7.71055000e-01 × 7.55851000e-01 × 6.24197000e-01 = 3.63783692e-01
+
+FACTOR 2 (fqq - charge correction):
+  qa_center = -3.64043275e-02
+  qa_i = -3.64034355e-02
+  qa_k = 3.64044223e-02
+  fqq = 1.00000000e+00
+
+FACTOR 3 (f2 - element correction):
+  f2 = 1.00000000e+00
+
+FACTOR 4 (fn - coordination number):
+  D3_CN = 2.81620032e+00
+  nn (rounded) = 3.00000000e+00
+  fn = 1.0 - 2.36/3.00000000e+00² = 7.37777778e-01
+
+DEBUG: topo_info.adjacency_list.size() = 12
+DEBUG: topo_info.adjacency_list[5].size() = 3
+FACTOR 5 (fbsmall - linear angle correction):
+  theta0 = 2.09439510e+00 rad = 1.20000000e+02°
+  fbsmall = 1.0 - 0.5 × exp(-0.64×(θ0-π)²) = 7.52163423e-01
+
+FACTOR 6 (feta - metal correction):
+  feta = 1.00000000e+00 (no metals)
+
+FINAL FORCE CONSTANT:
+  fc = fijk × fqq × f2 × fn × fbsmall × feta
+  fc = 3.63783692e-01 × 1.00000000e+00 × 1.00000000e+00 × 7.37777778e-01 × 7.52163423e-01 × 1.00000000e+00
+  fc = 2.01874288e-01 Eh
+
+COMPARISON:
+  Curcuma fc = 2.01874288e-01 Eh
+  XTB ref fc ≈ 0.407 Eh (from param file)
+  Ratio = 4.96005621e-01×
+=========================================================
+
+        === getCachedBondList() CALLED ===
+[38;2;255;165;000m[WARN]  GFN-FF: No torsions detected (molecule may be too small or linear)
+[0m        GFN-FF detected 6 inversions
+          Element Z=1: 6 inversions
+        === CRITICAL DEBUG: EEQ Charges Before Coulomb Generation ===
+[38;2;100;149;237m[PARAM] q_atom_0(Z=6): -0.03640640
+[0m[38;2;100;149;237m[PARAM] q_atom_1(Z=6): -0.03640348
+[0m[38;2;100;149;237m[PARAM] q_atom_2(Z=6): -0.03640429
+[0m[38;2;100;149;237m[PARAM] q_atom_3(Z=6): -0.03640681
+[0m[38;2;100;149;237m[PARAM] q_atom_4(Z=6): -0.03640344
+[0m[38;2;100;149;237m[PARAM] q_atom_5(Z=6): -0.03640433
+[0m[38;2;100;149;237m[PARAM] q_atom_6(Z=1): 0.03640627
+[0m[38;2;100;149;237m[PARAM] q_atom_7(Z=1): 0.03640350
+[0m[38;2;100;149;237m[PARAM] q_atom_8(Z=1): 0.03640440
+[0m[38;2;100;149;237m[PARAM] q_atom_9(Z=1): 0.03640667
+[0m[38;2;100;149;237m[PARAM] q_atom_10(Z=1): 0.03640347
+[0m[38;2;100;149;237m[PARAM] q_atom_11(Z=1): 0.03640442
+[0m[38;2;050;205;050m[OK]    ✅ EEQ charges are non-zero - electrostatics should work
+[0m        === getCachedBondList() CALLED ===
+        GFN-FF method: gfnff → Dispersion: d3
+        Using native D3ParameterGenerator (validated 10/11 <1% error)
+        === D3ParameterGenerator::GenerateParameters() START ===
+[38;2;100;149;237m[PARAM] Number of atoms: 12
+[0m        D3: CN calculation took 0.01 ms
+        D3: Weight pre-computation took 0.00 ms (12 atoms × avg 5 refs)
+        D3: C6 interpolation for 66 pairs took 0.46 ms (0.0070 ms/pair)
+[38;2;050;205;050m[OK]    D3 parameter generation completed in 0.73 ms
+[0m          └─ Breakdown: CN=0.0ms, Weights=0.0ms, C6Interp=0.5ms, ATM=0.0ms
+[38;2;050;205;050m[OK]    D3 dispersion: 66 pairs generated (validated accuracy)
+[0m        === getCachedBondList() CALLED ===
+        Detected 0 hydrogen bonds
+        === getCachedBondList() CALLED ===
+        Detected 0 halogen bonds
+        === getCachedBondList() CALLED ===
+        Detected 0 hydrogen bonds
+[38;2;100;149;237m[PARAM] loaded_from_cache: true
+[0m        Initializing force field parameters
+[38;2;100;149;237m[PARAM] method: gfnff
+[0m[38;2;100;149;237m[PARAM] angles_processed: 18
+[0m[38;2;100;149;237m[PARAM] dihedrals_processed: 0 primary, 0 extra
+[0m[38;2;100;149;237m[PARAM] inversions_processed: 6
+[0m[38;2;050;205;050m[OK]    Loaded 0 GFN-FF hydrogen bonds
+[0m[38;2;050;205;050m[OK]    Loaded 0 GFN-FF halogen bonds
+[0m        Parameter generation complete
+[38;2;100;149;237m[PARAM] method_type: 3 (GFN-FF)
+[0m        Generating parameter summary
+        Force field topology summary:
+[38;2;100;149;237m[PARAM] bonds_count: 12 bond terms
+[0m[38;2;100;149;237m[PARAM] angles_count: 18 angle terms
+[0m[38;2;100;149;237m[PARAM] inversions_count: 6 inversion terms
+[0m        GFN-FF pairwise interactions:
+[38;2;100;149;237m[PARAM] dispersion_pairs: 66
+[0m[38;2;100;149;237m[PARAM] bonded_repulsion_pairs: 12
+[0m[38;2;100;149;237m[PARAM] nonbonded_repulsion_pairs: 54
+[0m[38;2;100;149;237m[PARAM] coulomb_pairs: 66
+[0m        Scaling factors:
+        Force field flags:
+        Parameter summary completed
+[38;2;050;205;050m[OK]    ForceField::setParameter() complete
+[0m[38;2;255;255;255m[RESULT]Primary torsions: 0 terms, energy = 0.000000e+00 Eh
+[0m[38;2;255;255;255m[RESULT]Extra sp3-sp3 torsions: 0 terms, energy = 0.000000e+00 Eh
+[0m[38;2;255;255;255m[RESULT]Total dihedral energy: 0.000000e+00 Eh (primary + extra)
+[0m        Thread 0 calculating 12 bonded repulsion pairs
+[38;2;100;149;237m[PARAM] thread_bonded_repulsion_energy: 0.076206 Eh (12 pairs)
+[0m        Thread 0 calculating 54 non-bonded repulsion pairs
+[38;2;100;149;237m[PARAM] thread_nonbonded_repulsion_energy: 0.082512 Eh (54 pairs)
+[0m        === Coulomb Energy Calculation: EEQ Charge Verification ===
+[38;2;100;149;237m[PARAM] Coulomb[0] q_i(atom0), q_j(atom1): -0.03640640, -0.03640348
+[0m[38;2;100;149;237m[PARAM] Coulomb[1] q_i(atom0), q_j(atom2): -0.03640640, -0.03640429
+[0m[38;2;100;149;237m[PARAM] Coulomb[2] q_i(atom0), q_j(atom3): -0.03640640, -0.03640681
+[0m[38;2;100;149;237m[PARAM] Coulomb[3] q_i(atom0), q_j(atom4): -0.03640640, -0.03640344
+[0m[38;2;100;149;237m[PARAM] Coulomb[4] q_i(atom0), q_j(atom5): -0.03640640, -0.03640433
+[0m[38;2;100;149;237m[PARAM] Coulomb[5] q_i(atom0), q_j(atom6): -0.03640640, 0.03640627
+[0m[38;2;100;149;237m[PARAM] Coulomb[6] q_i(atom0), q_j(atom7): -0.03640640, 0.03640350
+[0m[38;2;100;149;237m[PARAM] Coulomb[7] q_i(atom0), q_j(atom8): -0.03640640, 0.03640440
+[0m[38;2;100;149;237m[PARAM] Coulomb[8] q_i(atom0), q_j(atom9): -0.03640640, 0.03640667
+[0m[38;2;100;149;237m[PARAM] Coulomb[9] q_i(atom0), q_j(atom10): -0.03640640, 0.03640347
+[0m[38;2;100;149;237m[PARAM] ...: 56 more coulomb pairs
+[0m[38;2;100;149;237m[PARAM] max_absolute_charge: 3.64068109e-02
+[0m[38;2;050;205;050m[OK]    ✅ Charges up to 3.64e-02 found - Coulomb energy should be non-zero
+[0m[38;2;100;149;237m[ENERGY]Force Field Energy: -3.25975748 Eh
+[0m        Force field energy decomposition:
+[38;2;100;149;237m[PARAM] bond_energy: -3.406001 Eh
+[0m[38;2;100;149;237m[PARAM] angle_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] dihedral_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] inversion_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] nonbonded_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] D4_energy: -0.004037 Eh
+[0m[38;2;100;149;237m[PARAM] repulsion energy: 0.158718 Eh
+[0m[38;2;100;149;237m[PARAM] GFNFF_dispersion: -0.004037 Eh
+[0m[38;2;100;149;237m[PARAM] GFNFF_coulomb: -0.004401 Eh
+[0m[38;2;100;149;237m[ENERGY]GFN-FF Energy: -3.25975748 Eh
+[0m[38;2;100;149;237m[PARAM] energy_hartree: -3.2597574793
+[0m  Total energy: -3.25975748 Hartree
+  Energy components:
+    Bond:        -3.40600082 Eh
+    Angle:        0.00000000 Eh
+    Torsion:      0.00000000 Eh
+    Repulsion:    0.15871805 Eh
+    Coulomb:     -0.00440122 Eh
+    Dispersion:  -0.00403675 Eh
+  ✗ Total energy: error = 8.94981982e-01 Hartree (expected -2.36477550)
+  ✓ angle energy: error = 7.61650400e-11 Eh
+  ✗ bond energy: error = 8.97834531e-01 Eh (got -3.40600082, expected -2.50816628)
+  ✗ coulomb energy: error = 6.21769888e-05 Eh (got -0.00440122, expected -0.00433904)
+  ✗ dispersion energy: error = 2.25771892e-03 Eh (got -0.00403675, expected -0.00629447)
+  ✗ repulsion energy: error = 6.94899182e-04 Eh (got 0.15871805, expected 0.15802315)
+  ✓ torsion energy: error = 7.29656000e-07 Eh
+
+Testing: Butane - flexible alkane chain
+--------------------------------------------------
+  DEBUG: Molecule loaded successfully!
+  DEBUG: Atoms = 0
+  DEBUG: Charge = 0
+  DEBUG: Spin = 0.00000000e+00
+        EEQSolver initialized with parameters:
+[38;2;100;149;237m[PARAM] max_iterations: 50
+[0m[38;2;100;149;237m[PARAM] convergence_threshold: 1.00e-06
+[0m[38;2;100;149;237m[PARAM] verbosity: 2
+[0m[38;2;100;149;237m[PARAM] calculate_cn: true
+[0m[38;2;255;000;000m[ERROR] GFN-FF initialization failed: No atoms in molecule
+[0m  ✗ ERROR: GFNFF initialization failed
+
+Testing: Monosaccharide - complex sugar (27 atoms, validation anchor)
+--------------------------------------------------
+  DEBUG: Molecule loaded successfully!
+  DEBUG: Atoms = 27
+  DEBUG: Charge = 0
+  DEBUG: Spin = 0.00000000e+00
+        EEQSolver initialized with parameters:
+[38;2;100;149;237m[PARAM] max_iterations: 50
+[0m[38;2;100;149;237m[PARAM] convergence_threshold: 1.00e-06
+[0m[38;2;100;149;237m[PARAM] verbosity: 2
+[0m[38;2;100;149;237m[PARAM] calculate_cn: true
+[0m        Using advanced GFN-FF parametrization (experimental)
+        === getCachedBondList() CALLED ===
+        === Calculating new bond list ===
+        === Bond Detection Debug ===
+        Atom count: 27
+        Geometry rows: 27, cols: 3
+        Pair 0-1: dist=2.875, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+          -> BONDED
+        Pair 0-2: dist=4.716, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 0-3: dist=5.463, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 0-4: dist=4.503, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 0-5: dist=2.646, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+          -> BONDED
+        Pair 0-6: dist=4.599, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 0-7: dist=7.082, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 0-8: dist=6.645, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 0-9: dist=6.894, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 0-10: dist=7.683, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 0-11: dist=4.664, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 0-12: dist=7.378, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 0-13: dist=6.860, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 0-14: dist=4.024, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 0-15: dist=5.221, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 0-16: dist=7.264, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 0-17: dist=5.025, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 0-18: dist=7.558, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 0-19: dist=8.485, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 0-20: dist=7.413, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 0-21: dist=2.068, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 0-22: dist=2.652, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+          -> BONDED
+        Pair 0-23: dist=4.452, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 0-24: dist=5.068, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 0-25: dist=6.166, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 0-26: dist=4.919, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-2: dist=2.873, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+          -> BONDED
+        Pair 1-3: dist=4.720, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 1-4: dist=5.402, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 1-5: dist=4.553, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 1-6: dist=2.677, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+          -> BONDED
+        Pair 1-7: dist=4.565, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 1-8: dist=5.613, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 1-9: dist=7.989, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 1-10: dist=9.521, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 1-11: dist=3.638, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-12: dist=4.618, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-13: dist=9.013, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-14: dist=2.058, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 1-15: dist=4.051, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-16: dist=6.497, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-17: dist=6.156, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-18: dist=5.845, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-19: dist=9.236, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-20: dist=8.221, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-21: dist=4.102, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-22: dist=4.430, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 1-23: dist=6.901, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 1-24: dist=7.704, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-25: dist=8.236, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 1-26: dist=7.470, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 2-3: dist=2.873, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+          -> BONDED
+        Pair 2-4: dist=4.679, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 2-5: dist=5.383, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 2-6: dist=4.567, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 2-7: dist=2.679, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+          -> BONDED
+        Pair 2-8: dist=4.564, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 2-9: dist=7.270, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 2-10: dist=9.244, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 2-11: dist=5.105, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 2-12: dist=3.651, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 2-13: dist=9.294, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 2-14: dist=4.039, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 2-15: dist=2.071, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 2-16: dist=4.049, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 2-17: dist=5.167, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 2-18: dist=4.608, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 2-19: dist=7.911, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 2-20: dist=7.782, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 2-21: dist=6.526, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 2-22: dist=5.482, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 2-23: dist=8.009, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 2-24: dist=8.442, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 2-25: dist=9.042, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 2-26: dist=9.171, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 3-4: dist=2.871, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+          -> BONDED
+        Pair 3-5: dist=4.624, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 3-6: dist=7.090, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 3-7: dist=4.480, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 3-8: dist=2.670, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+          -> BONDED
+        Pair 3-9: dist=4.785, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 3-10: dist=7.135, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 3-11: dist=7.632, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 3-12: dist=6.028, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 3-13: dist=7.527, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 3-14: dist=5.204, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 3-15: dist=4.046, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 3-16: dist=2.074, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 3-17: dist=4.027, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 3-18: dist=3.626, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 3-19: dist=5.223, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 3-20: dist=5.236, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 3-21: dist=7.279, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 3-22: dist=6.601, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 3-23: dist=8.600, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 3-24: dist=8.334, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 3-25: dist=9.873, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 3-26: dist=9.857, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 4-5: dist=2.706, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+          -> BONDED
+        Pair 4-6: dist=7.869, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 4-7: dist=7.002, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 4-8: dist=4.531, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 4-9: dist=2.859, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+          -> BONDED
+        Pair 4-10: dist=4.567, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 4-11: dist=8.023, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 4-12: dist=8.268, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 4-13: dist=4.832, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 4-14: dist=6.134, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 4-15: dist=5.186, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 4-16: dist=4.030, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 4-17: dist=2.070, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 4-18: dist=6.056, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 4-19: dist=4.041, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 4-20: dist=4.038, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 4-21: dist=6.203, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 4-22: dist=5.441, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 4-23: dist=6.687, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 4-24: dist=5.924, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 4-25: dist=8.130, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 4-26: dist=7.964, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 5-6: dist=6.912, rcov_i=1.209, rcov_j=1.209, sum=2.419, threshold_sum=3.145
+        Pair 5-7: dist=7.793, rcov_i=1.209, rcov_j=1.209, sum=2.419, threshold_sum=3.145
+        Pair 5-8: dist=5.532, rcov_i=1.209, rcov_j=1.209, sum=2.419, threshold_sum=3.145
+        Pair 5-9: dist=4.430, rcov_i=1.209, rcov_j=1.417, sum=2.627, threshold_sum=3.415
+        Pair 5-10: dist=5.228, rcov_i=1.209, rcov_j=1.209, sum=2.419, threshold_sum=3.145
+        Pair 5-11: dist=7.145, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 5-12: dist=8.623, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 5-13: dist=4.477, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 5-14: dist=5.062, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 5-15: dist=6.127, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 5-16: dist=6.363, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 5-17: dist=3.905, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 5-18: dist=6.962, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 5-19: dist=6.237, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 5-20: dist=4.908, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 5-21: dist=3.763, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 5-22: dist=4.421, rcov_i=1.209, rcov_j=1.209, sum=2.419, threshold_sum=3.145
+        Pair 5-23: dist=5.419, rcov_i=1.209, rcov_j=1.417, sum=2.627, threshold_sum=3.415
+        Pair 5-24: dist=4.954, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 5-25: dist=7.281, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 5-26: dist=6.084, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 6-7: dist=5.421, rcov_i=1.209, rcov_j=1.209, sum=2.419, threshold_sum=3.145
+        Pair 6-8: dist=8.049, rcov_i=1.209, rcov_j=1.209, sum=2.419, threshold_sum=3.145
+        Pair 6-9: dist=10.571, rcov_i=1.209, rcov_j=1.417, sum=2.627, threshold_sum=3.415
+        Pair 6-10: dist=11.941, rcov_i=1.209, rcov_j=1.209, sum=2.419, threshold_sum=3.145
+        Pair 6-11: dist=1.820, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+          -> BONDED
+        Pair 6-12: dist=4.525, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 6-13: dist=11.342, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 6-14: dist=3.821, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 6-15: dist=5.030, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 6-16: dist=8.590, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 6-17: dist=8.217, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 6-18: dist=7.897, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 6-19: dist=11.758, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 6-20: dist=10.892, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 6-21: dist=5.202, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 6-22: dist=5.176, rcov_i=1.209, rcov_j=1.209, sum=2.419, threshold_sum=3.145
+        Pair 6-23: dist=7.614, rcov_i=1.209, rcov_j=1.417, sum=2.627, threshold_sum=3.415
+        Pair 6-24: dist=8.972, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 6-25: dist=8.517, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 6-26: dist=7.943, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 7-8: dist=5.161, rcov_i=1.209, rcov_j=1.209, sum=2.419, threshold_sum=3.145
+        Pair 7-9: dist=9.246, rcov_i=1.209, rcov_j=1.417, sum=2.627, threshold_sum=3.415
+        Pair 7-10: dist=11.508, rcov_i=1.209, rcov_j=1.209, sum=2.419, threshold_sum=3.145
+        Pair 7-11: dist=6.362, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 7-12: dist=1.819, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+          -> BONDED
+        Pair 7-13: dist=11.657, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 7-14: dist=4.955, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 7-15: dist=3.917, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 7-16: dist=5.049, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 7-17: dist=7.631, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 7-18: dist=4.198, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 7-19: dist=9.607, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 7-20: dist=9.427, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 7-21: dist=8.624, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 7-22: dist=7.954, rcov_i=1.209, rcov_j=1.209, sum=2.419, threshold_sum=3.145
+        Pair 7-23: dist=10.569, rcov_i=1.209, rcov_j=1.417, sum=2.627, threshold_sum=3.415
+        Pair 7-24: dist=11.111, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 7-25: dist=11.499, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 7-26: dist=11.624, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 8-9: dist=5.390, rcov_i=1.209, rcov_j=1.417, sum=2.627, threshold_sum=3.415
+        Pair 8-10: dist=7.921, rcov_i=1.209, rcov_j=1.209, sum=2.419, threshold_sum=3.145
+        Pair 8-11: dist=9.070, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 8-12: dist=6.660, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 8-13: dist=8.162, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 8-14: dist=5.039, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 8-15: dist=6.319, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 8-16: dist=3.910, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 8-17: dist=6.283, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 8-18: dist=1.820, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+          -> BONDED
+        Pair 8-19: dist=5.969, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 8-20: dist=4.758, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 8-21: dist=7.983, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 8-22: dist=8.487, rcov_i=1.209, rcov_j=1.209, sum=2.419, threshold_sum=3.145
+        Pair 8-23: dist=10.426, rcov_i=1.209, rcov_j=1.417, sum=2.627, threshold_sum=3.415
+        Pair 8-24: dist=10.111, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 8-25: dist=11.957, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 8-26: dist=11.325, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 9-10: dist=2.675, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+          -> BONDED
+        Pair 9-11: dist=10.826, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 9-12: dist=10.700, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 9-13: dist=3.635, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 9-14: dist=8.267, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 9-15: dist=7.897, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 9-16: dist=5.344, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 9-17: dist=4.040, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 9-18: dist=7.161, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 9-19: dist=2.059, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 9-20: dist=2.063, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 9-21: dist=8.186, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 9-22: dist=7.969, rcov_i=1.417, rcov_j=1.209, sum=2.627, threshold_sum=3.415
+        Pair 9-23: dist=8.601, rcov_i=1.417, rcov_j=1.417, sum=2.835, threshold_sum=3.685
+        Pair 9-24: dist=7.277, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 9-25: dist=10.091, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 9-26: dist=9.717, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+        Pair 10-11: dist=11.932, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 10-12: dist=12.814, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 10-13: dist=1.815, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+          -> BONDED
+        Pair 10-14: dist=9.962, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 10-15: dist=9.558, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 10-16: dist=7.719, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 10-17: dist=4.987, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 10-18: dist=9.715, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 10-19: dist=3.820, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 10-20: dist=3.933, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 10-21: dist=8.622, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 10-22: dist=8.368, rcov_i=1.209, rcov_j=1.209, sum=2.419, threshold_sum=3.145
+        Pair 10-23: dist=8.135, rcov_i=1.209, rcov_j=1.417, sum=2.627, threshold_sum=3.415
+        Pair 10-24: dist=6.372, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 10-25: dist=9.557, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 10-26: dist=9.103, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 11-12: dist=5.564, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 11-13: dist=11.356, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 11-14: dist=5.280, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 11-15: dist=4.830, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 11-16: dist=8.950, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 11-17: dist=7.919, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 11-18: dist=9.106, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 11-19: dist=11.961, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 11-20: dist=11.459, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 11-21: dist=5.385, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 11-22: dist=4.251, rcov_i=0.605, rcov_j=1.209, sum=1.814, threshold_sum=2.358
+        Pair 11-23: dist=6.572, rcov_i=0.605, rcov_j=1.417, sum=2.022, threshold_sum=2.629
+        Pair 11-24: dist=8.145, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 11-25: dist=7.129, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 11-26: dist=7.054, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 12-13: dist=12.782, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 12-14: dist=5.045, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 12-15: dist=4.555, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 12-16: dist=6.767, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 12-17: dist=8.787, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 12-18: dist=5.648, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 12-19: dist=11.228, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 12-20: dist=10.874, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 12-21: dist=8.677, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 12-22: dist=8.113, rcov_i=0.605, rcov_j=1.209, sum=1.814, threshold_sum=2.358
+        Pair 12-23: dist=10.793, rcov_i=0.605, rcov_j=1.417, sum=2.022, threshold_sum=2.629
+        Pair 12-24: dist=11.646, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 12-25: dist=11.613, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 12-26: dist=11.673, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 13-14: dist=9.358, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 13-15: dist=9.722, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 13-16: dist=8.529, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 13-17: dist=5.448, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 13-18: dist=9.947, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 13-19: dist=5.303, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 13-20: dist=4.380, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 13-21: dist=7.421, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 13-22: dist=7.745, rcov_i=0.605, rcov_j=1.209, sum=1.814, threshold_sum=2.358
+        Pair 13-23: dist=7.289, rcov_i=0.605, rcov_j=1.417, sum=2.022, threshold_sum=2.629
+        Pair 13-24: dist=5.596, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 13-25: dist=8.920, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 13-26: dist=7.905, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 14-15: dist=5.743, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 14-16: dist=7.132, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 14-17: dist=7.407, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 14-18: dist=5.096, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 14-19: dist=9.615, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 14-20: dist=7.976, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 14-21: dist=4.600, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 14-22: dist=6.195, rcov_i=0.605, rcov_j=1.209, sum=1.814, threshold_sum=2.358
+        Pair 14-23: dist=8.418, rcov_i=0.605, rcov_j=1.417, sum=2.022, threshold_sum=2.629
+        Pair 14-24: dist=9.042, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 14-25: dist=9.963, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 14-26: dist=8.682, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 15-16: dist=4.545, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 15-17: dist=4.810, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 15-18: dist=6.484, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 15-19: dist=8.337, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 15-20: dist=8.866, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 15-21: dist=7.160, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 15-22: dist=4.913, rcov_i=0.605, rcov_j=1.209, sum=1.814, threshold_sum=2.358
+        Pair 15-23: dist=7.362, rcov_i=0.605, rcov_j=1.417, sum=2.022, threshold_sum=2.629
+        Pair 15-24: dist=7.911, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 15-25: dist=7.967, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 15-26: dist=8.824, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 16-17: dist=4.506, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 16-18: dist=4.510, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 16-19: dist=4.952, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 16-20: dist=6.083, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 16-21: dist=9.188, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 16-22: dist=7.908, rcov_i=0.605, rcov_j=1.209, sum=1.814, threshold_sum=2.358
+        Pair 16-23: dist=9.804, rcov_i=0.605, rcov_j=1.417, sum=2.022, threshold_sum=2.629
+        Pair 16-24: dist=9.397, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 16-25: dist=10.804, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 16-26: dist=11.307, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 17-18: dist=7.599, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 17-19: dist=4.668, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 17-20: dist=5.744, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 17-21: dist=6.863, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 17-22: dist=4.868, rcov_i=0.605, rcov_j=1.209, sum=1.814, threshold_sum=2.358
+        Pair 17-23: dist=5.854, rcov_i=0.605, rcov_j=1.417, sum=2.022, threshold_sum=2.629
+        Pair 17-24: dist=5.042, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 17-25: dist=6.886, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 17-26: dist=7.531, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 18-19: dist=7.552, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 18-20: dist=6.542, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 18-21: dist=8.862, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 18-22: dist=9.338, rcov_i=0.605, rcov_j=1.209, sum=1.814, threshold_sum=2.358
+        Pair 18-23: dist=11.538, rcov_i=0.605, rcov_j=1.417, sum=2.022, threshold_sum=2.629
+        Pair 18-24: dist=11.464, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 18-25: dist=12.968, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 18-26: dist=12.417, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 19-20: dist=3.347, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 19-21: dist=9.988, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 19-22: dist=9.257, rcov_i=0.605, rcov_j=1.209, sum=1.814, threshold_sum=2.358
+        Pair 19-23: dist=9.982, rcov_i=0.605, rcov_j=1.417, sum=2.022, threshold_sum=2.629
+        Pair 19-24: dist=8.627, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 19-25: dist=11.224, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 19-26: dist=11.333, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 20-21: dist=8.412, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 20-22: dist=9.043, rcov_i=0.605, rcov_j=1.209, sum=1.814, threshold_sum=2.358
+        Pair 20-23: dist=9.834, rcov_i=0.605, rcov_j=1.417, sum=2.022, threshold_sum=2.629
+        Pair 20-24: dist=8.654, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 20-25: dist=11.522, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 20-26: dist=10.649, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 21-22: dist=3.880, rcov_i=0.605, rcov_j=1.209, sum=1.814, threshold_sum=2.358
+        Pair 21-23: dist=4.851, rcov_i=0.605, rcov_j=1.417, sum=2.022, threshold_sum=2.629
+        Pair 21-24: dist=5.644, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 21-25: dist=6.677, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 21-26: dist=4.401, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 22-23: dist=2.681, rcov_i=1.209, rcov_j=1.417, sum=2.627, threshold_sum=3.415
+          -> BONDED
+        Pair 22-24: dist=3.925, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 22-25: dist=3.822, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 22-26: dist=3.918, rcov_i=1.209, rcov_j=0.605, sum=1.814, threshold_sum=2.358
+        Pair 23-24: dist=2.061, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 23-25: dist=2.053, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 23-26: dist=2.067, rcov_i=1.417, rcov_j=0.605, sum=2.022, threshold_sum=2.629
+          -> BONDED
+        Pair 24-25: dist=3.362, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 24-26: dist=3.365, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Pair 25-26: dist=3.364, rcov_i=0.605, rcov_j=0.605, sum=1.209, threshold_sum=1.572
+        Total bonds detected: 27
+        === getCachedBondList() CALLED ===
+[38;2;050;205;050m[OK]    Calculated π-bond orders: 0/378 non-zero entries
+[0m        Using proper two-phase EEQ system
+        Phase 1 EEQ: Topology charges calculated
+[38;2;255;255;255m[RESULT]Atom 0 qa = 0.176432
+[0m[38;2;255;255;255m[RESULT]Atom 1 qa = 0.092867
+[0m[38;2;255;255;255m[RESULT]Atom 2 qa = 0.079392
+[0m[38;2;255;255;255m[RESULT]Atom 3 qa = 0.092897
+[0m[38;2;255;255;255m[RESULT]Atom 4 qa = 0.084635
+[0m[38;2;050;205;050m[OK]    Two-phase EEQ charge calculation completed successfully
+[0m        === C-H r0 DEBUG: Bond 0-21 ===
+          CN: cn1=3.517857, cn2=0.972829
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.352982, rb=0.731521
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.352982 + 0.731521) * 0.973780 = 2.029848
+                   r0 = rtmp + rabshift = 2.029848 + -0.182000 = 1.847848 Bohr
+          Result: r0_bohr=1.847848, r0_angstrom=0.977839
+        === C-H r0 DEBUG: Bond 1-14 ===
+          CN: cn1=3.488747, cn2=0.973512
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.349921, rb=0.731644
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.349921 + 0.731644) * 0.973780 = 2.026987
+                   r0 = rtmp + rabshift = 2.026987 + -0.182000 = 1.844987 Bohr
+          Result: r0_bohr=1.844987, r0_angstrom=0.976325
+        === C-H r0 DEBUG: Bond 2-15 ===
+          CN: cn1=3.490599, cn2=0.972651
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.350116, rb=0.731489
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.350116 + 0.731489) * 0.973780 = 2.027026
+                   r0 = rtmp + rabshift = 2.027026 + -0.182000 = 1.845026 Bohr
+          Result: r0_bohr=1.845026, r0_angstrom=0.976345
+        === C-H r0 DEBUG: Bond 3-16 ===
+          CN: cn1=3.488960, cn2=0.972376
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.349943, rb=0.731440
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.349943 + 0.731440) * 0.973780 = 2.026810
+                   r0 = rtmp + rabshift = 2.026810 + -0.182000 = 1.844810 Bohr
+          Result: r0_bohr=1.844810, r0_angstrom=0.976231
+        === C-H r0 DEBUG: Bond 4-17 ===
+          CN: cn1=3.500042, cn2=0.972703
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351108, rb=0.731498
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351108 + 0.731498) * 0.973780 = 2.028002
+                   r0 = rtmp + rabshift = 2.028002 + -0.182000 = 1.846002 Bohr
+          Result: r0_bohr=1.846002, r0_angstrom=0.976862
+        === C-H r0 DEBUG: Bond 9-19 ===
+          CN: cn1=3.486996, cn2=0.973469
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.349737, rb=0.731636
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.349737 + 0.731636) * 0.973780 = 2.026800
+                   r0 = rtmp + rabshift = 2.026800 + -0.182000 = 1.844800 Bohr
+          Result: r0_bohr=1.844800, r0_angstrom=0.976226
+        === C-H r0 DEBUG: Bond 9-20 ===
+          CN: cn1=3.486996, cn2=0.973224
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.349737, rb=0.731592
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.349737 + 0.731592) * 0.973780 = 2.026757
+                   r0 = rtmp + rabshift = 2.026757 + -0.182000 = 1.844757 Bohr
+          Result: r0_bohr=1.844757, r0_angstrom=0.976203
+        === C-H r0 DEBUG: Bond 23-24 ===
+          CN: cn1=3.501231, cn2=0.973316
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351233, rb=0.731608
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351233 + 0.731608) * 0.973780 = 2.028231
+                   r0 = rtmp + rabshift = 2.028231 + -0.182000 = 1.846231 Bohr
+          Result: r0_bohr=1.846231, r0_angstrom=0.976983
+        === C-H r0 DEBUG: Bond 23-25 ===
+          CN: cn1=3.501231, cn2=0.973867
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351233, rb=0.731707
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351233 + 0.731707) * 0.973780 = 2.028327
+                   r0 = rtmp + rabshift = 2.028327 + -0.182000 = 1.846327 Bohr
+          Result: r0_bohr=1.846327, r0_angstrom=0.977034
+        === C-H r0 DEBUG: Bond 23-26 ===
+          CN: cn1=3.501231, cn2=0.972941
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351233, rb=0.731541
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351233 + 0.731541) * 0.973780 = 2.028165
+                   r0 = rtmp + rabshift = 2.028165 + -0.182000 = 1.846165 Bohr
+          Result: r0_bohr=1.846165, r0_angstrom=0.976948
+        === C-H r0 DEBUG: Bond 0-21 ===
+          CN: cn1=3.517857, cn2=0.972829
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.352982, rb=0.731521
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.352982 + 0.731521) * 0.973780 = 2.029848
+                   r0 = rtmp + rabshift = 2.029848 + -0.182000 = 1.847848 Bohr
+          Result: r0_bohr=1.847848, r0_angstrom=0.977839
+        === C-H r0 DEBUG: Bond 1-14 ===
+          CN: cn1=3.488747, cn2=0.973512
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.349921, rb=0.731644
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.349921 + 0.731644) * 0.973780 = 2.026987
+                   r0 = rtmp + rabshift = 2.026987 + -0.182000 = 1.844987 Bohr
+          Result: r0_bohr=1.844987, r0_angstrom=0.976325
+        === C-H r0 DEBUG: Bond 2-15 ===
+          CN: cn1=3.490599, cn2=0.972651
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.350116, rb=0.731489
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.350116 + 0.731489) * 0.973780 = 2.027026
+                   r0 = rtmp + rabshift = 2.027026 + -0.182000 = 1.845026 Bohr
+          Result: r0_bohr=1.845026, r0_angstrom=0.976345
+        === C-H r0 DEBUG: Bond 3-16 ===
+          CN: cn1=3.488960, cn2=0.972376
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.349943, rb=0.731440
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.349943 + 0.731440) * 0.973780 = 2.026810
+                   r0 = rtmp + rabshift = 2.026810 + -0.182000 = 1.844810 Bohr
+          Result: r0_bohr=1.844810, r0_angstrom=0.976231
+        === C-H r0 DEBUG: Bond 4-17 ===
+          CN: cn1=3.500042, cn2=0.972703
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351108, rb=0.731498
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351108 + 0.731498) * 0.973780 = 2.028002
+                   r0 = rtmp + rabshift = 2.028002 + -0.182000 = 1.846002 Bohr
+          Result: r0_bohr=1.846002, r0_angstrom=0.976862
+        === C-H r0 DEBUG: Bond 9-19 ===
+          CN: cn1=3.486996, cn2=0.973469
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.349737, rb=0.731636
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.349737 + 0.731636) * 0.973780 = 2.026800
+                   r0 = rtmp + rabshift = 2.026800 + -0.182000 = 1.844800 Bohr
+          Result: r0_bohr=1.844800, r0_angstrom=0.976226
+        === C-H r0 DEBUG: Bond 9-20 ===
+          CN: cn1=3.486996, cn2=0.973224
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.349737, rb=0.731592
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.349737 + 0.731592) * 0.973780 = 2.026757
+                   r0 = rtmp + rabshift = 2.026757 + -0.182000 = 1.844757 Bohr
+          Result: r0_bohr=1.844757, r0_angstrom=0.976203
+        === C-H r0 DEBUG: Bond 23-24 ===
+          CN: cn1=3.501231, cn2=0.973316
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351233, rb=0.731608
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351233 + 0.731608) * 0.973780 = 2.028231
+                   r0 = rtmp + rabshift = 2.028231 + -0.182000 = 1.846231 Bohr
+          Result: r0_bohr=1.846231, r0_angstrom=0.976983
+        === C-H r0 DEBUG: Bond 23-25 ===
+          CN: cn1=3.501231, cn2=0.973867
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351233, rb=0.731707
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351233 + 0.731707) * 0.973780 = 2.028327
+                   r0 = rtmp + rabshift = 2.028327 + -0.182000 = 1.846327 Bohr
+          Result: r0_bohr=1.846327, r0_angstrom=0.977034
+        === C-H r0 DEBUG: Bond 23-26 ===
+          CN: cn1=3.501231, cn2=0.972941
+          Base r0: r0_1=0.983107, r0_2=0.556822
+          CN-corrected: ra=1.351233, rb=0.731541
+          EN: en1=2.496408, en2=2.300856, diff=0.195552
+          FF factor: k1=0.140699, k2=-0.033848, ff=0.973780
+          Shift: gen_rabshift=-0.110000, shift=-0.072000, total=-0.182000
+          Hyb: hyb1=3, hyb2=0
+          Formula: rtmp = (1.351233 + 0.731541) * 0.973780 = 2.028165
+                   r0 = rtmp + rabshift = 2.028165 + -0.182000 = 1.846165 Bohr
+          Result: r0_bohr=1.846165, r0_angstrom=0.976948
+DEBUG: Processing O-centered angle!
+DEBUG: About to call CNCalculator...
+DEBUG: CNCalculator returned successfully
+DEBUG: Reached final debug block, atom_j=5
+
+=== ANGLE FORCE CONSTANT DEBUG (Atom 5 = O) ===
+Angle: 0-5-4
+Elements: 6-8-6
+
+FACTOR 1 (fijk_calc):
+  angle_param (center=8) = 2.15988900e+00
+  angl2_i (Z=6) = 7.55851000e-01
+  angl2_k (Z=6) = 7.55851000e-01
+  fijk_calc = 2.15988900e+00 × 7.55851000e-01 × 7.55851000e-01 = 1.23396777e+00
+
+FACTOR 2 (fqq - charge correction):
+  qa_center = -3.70708509e-01
+  qa_i = 1.89179430e-01
+  qa_k = 7.98158739e-02
+  fqq = 1.00000000e+00
+
+FACTOR 3 (f2 - element correction):
+  f2 = 1.00000000e+00
+
+FACTOR 4 (fn - coordination number):
+  D3_CN = 1.91403437e+00
+  nn (rounded) = 2.00000000e+00
+  fn = 1.0 - 2.36/2.00000000e+00² = 4.10000000e-01
+
+DEBUG: topo_info.adjacency_list.size() = 27
+DEBUG: topo_info.adjacency_list[5].size() = 2
+DEBUG O-angle: neighbors.size() = 2
+DEBUG O-angle: r0_deg before correction = 1.09500000e+02
+DEBUG O-angle: r0_deg after correction = 1.04500000e+02
+DEBUG O-angle: f2 = 1.00000000e+00
+FACTOR 5 (fbsmall - linear angle correction):
+  theta0 = 1.82386907e+00 rad = 1.04500000e+02°
+  fbsmall = 1.0 - 0.5 × exp(-0.64×(θ0-π)²) = 8.35433456e-01
+
+FACTOR 6 (feta - metal correction):
+  feta = 1.00000000e+00 (no metals)
+
+FINAL FORCE CONSTANT:
+  fc = fijk × fqq × f2 × fn × fbsmall × feta
+  fc = 1.23396777e+00 × 1.00000000e+00 × 1.00000000e+00 × 4.10000000e-01 × 8.35433456e-01 × 1.00000000e+00
+  fc = 4.22668163e-01 Eh
+
+COMPARISON:
+  Curcuma fc = 4.22668163e-01 Eh
+  XTB ref fc ≈ 0.407 Eh (from param file)
+  Ratio = 1.03849672e+00×
+=========================================================
+
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+        === getCachedBondList() CALLED ===
+[38;2;255;255;255m[RESULT]GFN-FF torsions: 61 primary (n=2,3), 24 extra sp3-sp3 (n=1)
+[0m          Periodicity distribution: n=1 (24), n=2 (0), n=3 (61)
+        GFN-FF detected 5 inversions
+          Element Z=1: 5 inversions
+        === CRITICAL DEBUG: EEQ Charges Before Coulomb Generation ===
+[38;2;100;149;237m[PARAM] q_atom_0(Z=6): 0.18917943
+[0m[38;2;100;149;237m[PARAM] q_atom_1(Z=6): 0.07420283
+[0m[38;2;100;149;237m[PARAM] q_atom_2(Z=6): 0.07982326
+[0m[38;2;100;149;237m[PARAM] q_atom_3(Z=6): 0.08155300
+[0m[38;2;100;149;237m[PARAM] q_atom_4(Z=6): 0.07981587
+[0m[38;2;100;149;237m[PARAM] q_atom_5(Z=8): -0.37070851
+[0m[38;2;100;149;237m[PARAM] q_atom_6(Z=8): -0.47545049
+[0m[38;2;100;149;237m[PARAM] q_atom_7(Z=8): -0.47922072
+[0m[38;2;100;149;237m[PARAM] q_atom_8(Z=8): -0.46594177
+[0m[38;2;100;149;237m[PARAM] q_atom_9(Z=6): 0.05330217
+[0m[38;2;100;149;237m[PARAM] q_atom_10(Z=8): -0.46414954
+[0m[38;2;100;149;237m[PARAM] q_atom_11(Z=1): 0.31196223
+[0m[38;2;100;149;237m[PARAM] q_atom_12(Z=1): 0.31308479
+[0m[38;2;100;149;237m[PARAM] q_atom_13(Z=1): 0.31305847
+[0m[38;2;100;149;237m[PARAM] q_atom_14(Z=1): 0.10387347
+[0m[38;2;100;149;237m[PARAM] q_atom_15(Z=1): 0.07520459
+[0m[38;2;100;149;237m[PARAM] q_atom_16(Z=1): 0.06485603
+[0m[38;2;100;149;237m[PARAM] q_atom_17(Z=1): 0.07925875
+[0m[38;2;100;149;237m[PARAM] q_atom_18(Z=1): 0.32194992
+[0m[38;2;100;149;237m[PARAM] q_atom_19(Z=1): 0.07993949
+[0m[38;2;100;149;237m[PARAM] q_atom_20(Z=1): 0.10378791
+[0m[38;2;100;149;237m[PARAM] q_atom_21(Z=1): 0.07338455
+[0m[38;2;100;149;237m[PARAM] q_atom_22(Z=8): -0.38292382
+[0m[38;2;100;149;237m[PARAM] q_atom_23(Z=6): 0.02016723
+[0m[38;2;100;149;237m[PARAM] q_atom_24(Z=1): 0.08063309
+[0m[38;2;100;149;237m[PARAM] q_atom_25(Z=1): 0.07363297
+[0m[38;2;100;149;237m[PARAM] q_atom_26(Z=1): 0.06572478
+[0m[38;2;050;205;050m[OK]    ✅ EEQ charges are non-zero - electrostatics should work
+[0m        === getCachedBondList() CALLED ===
+        GFN-FF method: gfnff → Dispersion: d3
+        Using native D3ParameterGenerator (validated 10/11 <1% error)
+        === D3ParameterGenerator::GenerateParameters() START ===
+[38;2;100;149;237m[PARAM] Number of atoms: 27
+[0m        D3: CN calculation took 0.01 ms
+        D3: Weight pre-computation took 0.00 ms (27 atoms × avg 5 refs)
+        D3: C6 interpolation for 351 pairs took 1.06 ms (0.0030 ms/pair)
+[38;2;050;205;050m[OK]    D3 parameter generation completed in 1.53 ms
+[0m          └─ Breakdown: CN=0.0ms, Weights=0.0ms, C6Interp=1.1ms, ATM=0.0ms
+[38;2;050;205;050m[OK]    D3 dispersion: 351 pairs generated (validated accuracy)
+[0m        === getCachedBondList() CALLED ===
+        Detected 3 hydrogen bonds
+        === getCachedBondList() CALLED ===
+        Detected 0 halogen bonds
+        === getCachedBondList() CALLED ===
+        Detected 3 hydrogen bonds
+[38;2;100;149;237m[PARAM] loaded_from_cache: true
+[0m        Initializing force field parameters
+[38;2;100;149;237m[PARAM] method: gfnff
+[0m[38;2;100;149;237m[PARAM] angles_processed: 48
+[0m[38;2;100;149;237m[PARAM] dihedrals_processed: 61 primary, 24 extra
+[0m[38;2;100;149;237m[PARAM] inversions_processed: 5
+[0m[38;2;050;205;050m[OK]    Loaded 3 GFN-FF hydrogen bonds
+[0m[38;2;050;205;050m[OK]    Loaded 0 GFN-FF halogen bonds
+[0m        Parameter generation complete
+[38;2;100;149;237m[PARAM] method_type: 3 (GFN-FF)
+[0m        Generating parameter summary
+        Force field topology summary:
+[38;2;100;149;237m[PARAM] bonds_count: 27 bond terms
+[0m[38;2;100;149;237m[PARAM] angles_count: 48 angle terms
+[0m[38;2;100;149;237m[PARAM] dihedrals_count: 85 dihedral terms
+[0m[38;2;100;149;237m[PARAM] inversions_count: 5 inversion terms
+[0m        GFN-FF pairwise interactions:
+[38;2;100;149;237m[PARAM] dispersion_pairs: 351
+[0m[38;2;100;149;237m[PARAM] bonded_repulsion_pairs: 27
+[0m[38;2;100;149;237m[PARAM] nonbonded_repulsion_pairs: 324
+[0m[38;2;100;149;237m[PARAM] coulomb_pairs: 351
+[0m        Scaling factors:
+        Force field flags:
+        Parameter summary completed
+[38;2;050;205;050m[OK]    ForceField::setParameter() complete
+[0m[38;2;255;255;255m[RESULT]Primary torsions: 61 terms, energy = 1.584518e-03 Eh
+[0m[38;2;255;255;255m[RESULT]Extra sp3-sp3 torsions: 24 terms, energy = -1.097162e-04 Eh
+[0m[38;2;255;255;255m[RESULT]Total dihedral energy: 1.474802e-03 Eh (primary + extra)
+[0m        Thread 0 calculating 27 bonded repulsion pairs
+[38;2;100;149;237m[PARAM] thread_bonded_repulsion_energy: 0.144443 Eh (27 pairs)
+[0m        Thread 0 calculating 324 non-bonded repulsion pairs
+[38;2;100;149;237m[PARAM] thread_nonbonded_repulsion_energy: 0.146167 Eh (324 pairs)
+[0m        === Coulomb Energy Calculation: EEQ Charge Verification ===
+[38;2;100;149;237m[PARAM] Coulomb[0] q_i(atom0), q_j(atom1): 0.18917943, 0.07420283
+[0m[38;2;100;149;237m[PARAM] Coulomb[1] q_i(atom0), q_j(atom2): 0.18917943, 0.07982326
+[0m[38;2;100;149;237m[PARAM] Coulomb[2] q_i(atom0), q_j(atom3): 0.18917943, 0.08155300
+[0m[38;2;100;149;237m[PARAM] Coulomb[3] q_i(atom0), q_j(atom4): 0.18917943, 0.07981587
+[0m[38;2;100;149;237m[PARAM] Coulomb[4] q_i(atom0), q_j(atom5): 0.18917943, -0.37070851
+[0m[38;2;100;149;237m[PARAM] Coulomb[5] q_i(atom0), q_j(atom6): 0.18917943, -0.47545049
+[0m[38;2;100;149;237m[PARAM] Coulomb[6] q_i(atom0), q_j(atom7): 0.18917943, -0.47922072
+[0m[38;2;100;149;237m[PARAM] Coulomb[7] q_i(atom0), q_j(atom8): 0.18917943, -0.46594177
+[0m[38;2;100;149;237m[PARAM] Coulomb[8] q_i(atom0), q_j(atom9): 0.18917943, 0.05330217
+[0m[38;2;100;149;237m[PARAM] Coulomb[9] q_i(atom0), q_j(atom10): 0.18917943, -0.46414954
+[0m[38;2;100;149;237m[PARAM] ...: 341 more coulomb pairs
+[0m[38;2;100;149;237m[PARAM] max_absolute_charge: 4.79220721e-01
+[0m[38;2;050;205;050m[OK]    ✅ Charges up to 4.79e-01 found - Coulomb energy should be non-zero
+[0m[38;2;100;149;237m[ENERGY]Force Field Energy: -4.16593830 Eh
+[0m        Force field energy decomposition:
+[38;2;100;149;237m[PARAM] bond_energy: -4.088895 Eh
+[0m[38;2;100;149;237m[PARAM] angle_energy: 0.008353 Eh
+[0m[38;2;100;149;237m[PARAM] dihedral_energy: 0.001475 Eh
+[0m[38;2;100;149;237m[PARAM] inversion_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] nonbonded_energy: 0.000000 Eh
+[0m[38;2;100;149;237m[PARAM] D4_energy: -0.013641 Eh
+[0m[38;2;100;149;237m[PARAM] repulsion energy: 0.290609 Eh
+[0m[38;2;100;149;237m[PARAM] GFNFF_dispersion: -0.013641 Eh
+[0m[38;2;100;149;237m[PARAM] GFNFF_coulomb: -0.350197 Eh
+[0m[38;2;100;149;237m[ENERGY]GFN-FF Energy: -4.16593830 Eh
+[0m[38;2;100;149;237m[PARAM] energy_hartree: -4.1659383012
+[0m  Total energy: -4.16593830 Hartree
+  Energy components:
+    Bond:        -4.08889487 Eh
+    Angle:        0.00835266 Eh
+    Torsion:      0.00147480 Eh
+    Repulsion:    0.29060933 Eh
+    Coulomb:     -0.35019729 Eh
+    Dispersion:  -0.01364147 Eh
+  ✗ Total energy: error = 2.06414145e-01 Hartree (expected -3.95952416)
+  ✗ angle energy: error = 2.35873034e-04 Eh (got 0.00835266, expected 0.00858854)
+  ✗ bond energy: error = 1.90960916e-01 Eh (got -4.08889487, expected -3.89793395)
+  ✗ coulomb energy: error = 1.32594212e-02 Eh (got -0.35019729, expected -0.33693787)
+  ✗ dispersion energy: error = 4.80050549e-03 Eh (got -0.01364147, expected -0.01844197)
+  ✗ repulsion energy: error = 1.62047545e-03 Eh (got 0.29060933, expected 0.28898885)
+  ✗ torsion energy: error = 1.14128555e-02 Eh (got 0.00147480, expected 0.01288766)
+
+================================================================================
+GFN-FF Parameter Verification Tests
+================================================================================
+
+Testing: H-H bond
+--------------------------------------------------
+  ✓ vbond parameters: shift=-0.16000000 alpha=0.46779278 fc=-0.17882745
+    Errors: shift=0.00000000e+00 alpha=1.70000000e-08 fc=7.12115089e-11
+
+Testing: H-H bond (optimized)
+--------------------------------------------------
+[38;2;255;000;000m[ERROR] GFN-FF initialization failed: No atoms in molecule
+[0m  ✗ ERROR: Could not extract vbond parameters
+
+Testing: O-H bond
+--------------------------------------------------
+  ✓ vbond parameters: shift=-0.16000000 alpha=0.65718698 fc=-0.14898509
+    Errors: shift=0.00000000e+00 alpha=4.00002254e-12 fc=1.66222064e-10
+
+Testing: C-H bond
+--------------------------------------------------
+  ✗ vbond parameters:
+    Expected: shift=-0.16000000 alpha=0.48228577 fc=-0.16714566
+    Actual:   shift=-0.18200000 alpha=0.48228576 fc=-0.16796375
+    Errors: shift=2.20000000e-02 alpha=9.77500003e-09 fc=8.18085278e-04
+
+Testing: C-H bond (equivalent)
+--------------------------------------------------
+  ✗ vbond parameters:
+    Expected: shift=-0.16000000 alpha=0.48228577 fc=-0.16714566
+    Actual:   shift=-0.18200000 alpha=0.48228576 fc=-0.16796375
+    Errors: shift=2.20000000e-02 alpha=9.77500003e-09 fc=8.18085340e-04
+
+================================================================================
+GFN-FF Comprehensive Validation Tests
+================================================================================
+
+Testing: Methanol - comprehensive validation
+--------------------------------------------------
+  Molecule: 6 atoms
+
+  Total Energy Validation:
+  ✗ Total energy: -0.76463522 (expected=-0.76020330, error=4.43191766e-03)
+
+  Note: Detailed CN, charge, and component validation requires GFNFF interface extension
+
+================================================================================
+GFN-FF Parameter Flag Combination Tests
+================================================================================
+
+Test 1: Dispersion disabled
+----------------------------------------
+  Energy (no dispersion): -7.63272751e-01 Eh
+  ✓ PASSED
+
+Test 2: Hydrogen bond disabled
+----------------------------------------
+  Energy (no hbond): 3.30461245e+08 Eh
+  ✗ FAILED
+
+Test 3: All non-bonded terms disabled
+----------------------------------------
+  Energy (bonded only): 0.00000000e+00 Eh
+  ✗ FAILED
+
+Test 4: Edge case - atoms at cutoff distance
+----------------------------------------
+  Energy (at cutoff): -1.73327509e-08 Eh
+  ✓ PASSED
+
+Test 5: Metal-specific correction handling
+----------------------------------------
+  Energy (single Fe atom): 0.00000000e+00 Eh
+  ✓ PASSED
+
+================================================================================
+GFN-FF JSON Parameter Validation Tests (via getParameters())
+================================================================================
+
+Testing: CH4
+--------------------------------------------------
+  ✗ ERROR: Cannot open XTB JSON test_cases/molecules/larger/CH4.json
+
+Testing: CH3OH
+--------------------------------------------------
+  ✗ ERROR: Cannot open XTB JSON test_cases/molecules/larger/CH3OH.json
+
+================================================================================
+UNIFIED GFN-FF TEST SUITE SUMMARY
+================================================================================
+Total tests: 78
+Passed: 21
+Failed: 57
+Success rate: 26.9%

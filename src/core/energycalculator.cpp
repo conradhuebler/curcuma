@@ -19,6 +19,7 @@
  */
 
 #include "energycalculator.h"
+#include "energy_calculators/ff_methods/forcefield_method.h"
 #include "src/tools/general.h"
 #include "src/core/curcuma_logger.h"
 #include "config_manager.h"
@@ -153,7 +154,7 @@ bool EnergyCalculator::createMethod(const std::string& method_name, const json& 
             method_config["basename"] = m_basename;
         }
         
-        if (CurcumaLogger::get_verbosity() >= 3) {
+        if (getEffectiveVerbosity() >= 3) {
             CurcumaLogger::info("Method configuration prepared:");
             CurcumaLogger::param_table(method_config, "Method Configuration");
         }
@@ -212,7 +213,7 @@ void EnergyCalculator::setMolecule(const Mol& mol) {
         // Initialize gradient matrix
         m_gradient = Matrix::Zero(m_atoms, 3);
         
-        if (CurcumaLogger::get_verbosity() >= 3) {
+        if (getEffectiveVerbosity() >= 3) {
             CurcumaLogger::info("Calling computational method setMolecule...");
         }
         
@@ -226,7 +227,7 @@ void EnergyCalculator::setMolecule(const Mol& mol) {
         m_initialized = true;
         ClearError();
 
-        if (CurcumaLogger::get_verbosity() >= 1) {
+        if (getEffectiveVerbosity() >= 1) {
             CurcumaLogger::success(fmt::format("Molecule set: {} atoms, method: {}", m_atoms, m_method_name));
         }
 
@@ -374,7 +375,7 @@ double EnergyCalculator::CalculateEnergy(bool gradient)
         // Restore original verbosity
         CurcumaLogger::set_verbosity(original_verbosity);
 
-        if (CurcumaLogger::get_verbosity() >= 3) {
+        if (getEffectiveVerbosity() >= 3) {
             CurcumaLogger::info("Energy calculation completed");
         }
 
@@ -428,15 +429,23 @@ Eigen::MatrixXd EnergyCalculator::NumGrad() {
     if (!m_initialized || !m_method) {
         return Eigen::MatrixXd::Zero(1, 3);
     }
-    
+
     try {
         // Numerical gradient calculation using finite differences
+        // Claude Generated (Feb 21, 2026): Added verbosity output for debugging
         Eigen::MatrixXd gradient = Eigen::MatrixXd::Zero(m_atoms, 3);
-        double dx = 1e-4;
+        double dx = 1e-5; // Step size in Angstrom (更适合 Bohr units)
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::info("EnergyCalculator::NumGrad - Computing numerical gradient");
+            CurcumaLogger::param("step_size", fmt::format("{:.2e} Angstrom", dx));
+            CurcumaLogger::param("n_atoms", std::to_string(m_atoms));
+            CurcumaLogger::param("n_evaluations", std::to_string(2 * m_atoms * 3));
+        }
+
         double E1, E2;
-        
         Matrix current_geometry = m_mol.m_geometry;
-        
+
         for (int i = 0; i < m_atoms; ++i) {
             for (int j = 0; j < 3; ++j) {
                 // Forward step
@@ -455,12 +464,16 @@ Eigen::MatrixXd EnergyCalculator::NumGrad() {
                 gradient(i, j) = (E1 - E2) / (2 * dx);
             }
         }
-        
+
         // Restore original geometry
         updateGeometry(current_geometry);
-        
+
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::result_fmt("Numerical gradient computed: norm = {:.6e}", gradient.norm());
+        }
+
         return gradient;
-        
+
     } catch (const std::exception& e) {
         handleMethodError(fmt::format("numerical gradient: {}", e.what()));
         return Eigen::MatrixXd::Zero(m_atoms, 3);
@@ -723,4 +736,62 @@ void EnergyCalculator::convertCoordinates(const Eigen::VectorXd& coord, Matrix& 
         geometry(i, 1) = coord[3 * i + 1];
         geometry(i, 2) = coord[3 * i + 2];
     }
+}
+
+// Claude Generated: Energy component getter methods for regression testing (Nov 2025)
+// These delegate to the ComputationalMethod interface (which now has virtual methods)
+double EnergyCalculator::getBondEnergy() const {
+    return m_method ? m_method->getBondEnergy() : 0.0;
+}
+
+double EnergyCalculator::getAngleEnergy() const {
+    return m_method ? m_method->getAngleEnergy() : 0.0;
+}
+
+double EnergyCalculator::getDihedralEnergy() const {
+    return m_method ? m_method->getDihedralEnergy() : 0.0;
+}
+
+double EnergyCalculator::getInversionEnergy() const {
+    return m_method ? m_method->getInversionEnergy() : 0.0;
+}
+
+double EnergyCalculator::getVdWEnergy() const {
+    return m_method ? m_method->getVdWEnergy() : 0.0;
+}
+
+double EnergyCalculator::getRepulsionEnergy() const {
+    return m_method ? m_method->getRepulsionEnergy() : 0.0;
+}
+
+double EnergyCalculator::getDispersionEnergy() const {
+    return m_method ? m_method->getDispersionEnergy() : 0.0;
+}
+
+double EnergyCalculator::getCoulombEnergy() const {
+    return m_method ? m_method->getCoulombEnergy() : 0.0;
+}
+
+double EnergyCalculator::getNonBondedEnergy() const {
+    return getVdWEnergy() + getRepulsionEnergy();
+}
+
+json EnergyCalculator::getEnergyDecomposition() const {
+    if (m_method) {
+        return m_method->getEnergyDecomposition();
+    }
+    // Return zero JSON if method not initialized
+    json energy_json = {
+        {"Bond", 0.0},
+        {"Angle", 0.0},
+        {"Torsion", 0.0},
+        {"Inversion", 0.0},
+        {"Dispersion", 0.0},
+        {"Coulomb", 0.0},
+        {"HBond", 0.0},
+        {"XBond", 0.0},
+        {"ATM", 0.0},
+        {"BATM", 0.0}
+    };
+    return energy_json;
 }

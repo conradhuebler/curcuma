@@ -14,7 +14,7 @@ qm_methods/
 ├── qm_driver.cpp/h           # Base driver for matrix-based QM methods
 ├── eht.cpp/h                 # Extended Hückel Theory implementation
 ├── eht_parameters.cpp/h      # EHT parameter database
-├── gfnff.cpp/h               # Native GFN-FF implementation (cgfnff)
+├── gfnff.cpp/h               # Native GFN-FF implementation (gfnff)
 ├── gfnff_advanced.cpp/h      # Advanced GFN-FF features
 ├── xtbinterface.cpp/h        # XTB method interface
 ├── tbliteinterface.cpp/h     # TBLite method interface
@@ -51,7 +51,7 @@ Base class for matrix-based quantum methods providing:
 
 ### Native Methods
 - **Extended Hückel Theory (EHT)**: Complete semi-empirical implementation
-- **Native GFN-FF (cgfnff)**: Curcuma's own GFN-FF implementation (WORK IN PROGRESS)
+- **Native GFN-FF (gfnff)**: Curcuma's own GFN-FF implementation (WORK IN PROGRESS)
 
 ### External Interfaces
 - **XTB Interface**: Extended tight-binding methods (GFN-FF, GFN1, GFN2)
@@ -68,7 +68,7 @@ Base class for matrix-based quantum methods providing:
 
 Methods are routed via `SwitchMethod()` in energycalculator.cpp:
 ```cpp
-case 9: GFNFF (cgfnff)      // Native GFN-FF - WORK IN PROGRESS
+case 9: GFNFF (gfnff)      // Native GFN-FF - WORK IN PROGRESS
 case 6: EHT                 // Extended Hückel Theory
 case 4: DFT-D3              // Dispersion corrections
 case 3: Ulysses             // Semi-empirical methods
@@ -142,7 +142,7 @@ if (CurcumaLogger::get_verbosity() >= 3) {
 - **✅ EHT Implementation**: Fully functional with orbital analysis and verbosity control
 - **✅ XTB/TBLite Interfaces**: Native library verbosity synchronized with CurcumaLogger
 - **✅ Ulysses Interface**: Complete CurcumaLogger integration with SCF progress
-- **🔧 Native GFN-FF (cgfnff)**: Architecture complete, parameter debugging in progress
+- **🔧 Native GFN-FF (gfnff)**: Architecture complete, parameter debugging in progress
 
 ### Verbosity Integration Status ✅
 - **✅ EHT**: Complete integration with `printOrbitalAnalysisVerbose()` for Level 2
@@ -159,10 +159,34 @@ if (CurcumaLogger::get_verbosity() >= 3) {
   - Impact: Seldom used, low priority for migration
   - Solution: Add ConfigManager overloads with delegating JSON constructors (Pattern established in Phase 3B)
 
-#### Native GFN-FF (cgfnff)
+#### Native GFN-FF (gfnff)
 - **Parameter Generation**: JSON serialization creates null values for some parameters
 - **Placeholder Parameters**: Missing real GFN-FF force field parameters from literature
 - **Validation**: Incomplete parameter consistency checks with external GFN-FF reference
+
+**GFN-FF Implementation Architecture** (for complete checklist see `../ff_methods/CLAUDE.md`):
+
+- ✅ **Parameter Generation** (GFNFF class in gfnff.cpp)
+  - CN-dependent radii, EEQ charges, topology detection, hybridization
+  - Methods: generateTopologyAwareBonds(), generateGFNFFDispersionPairs(), etc.
+
+- ✅ **Term Calculation** (ForceFieldThread in ../ff_methods/forcefieldthread.cpp)
+  - Multi-threaded energy/gradient calculations
+  - Methods: CalculateGFNFFBondContribution(), CalculateGFNFFDispersionContribution(), etc.
+
+- ✅ **All 7 Terms Implemented**: Bond, Angle, Torsion, Inversion, Dispersion, Repulsion, Coulomb
+
+**GFN-FF Components** (topology-aware parameter generation):
+- ✅ CN-Berechnung (Coordination Numbers) - D3 method in `gfnff.cpp:calculateCoordinationNumbers()`
+- ✅ CN-dependent radii - `r0_gfnff[86]` and `cnfak_gfnff[86]` in `gfnff.cpp`
+- ✅ Row-dependent electronegativity - `p_enpoly[6][2]` for 6 periods
+- ✅ Hybridization detection - Topology-based in `gfnff.cpp:determineHybridization()`
+- ✅ Hybridization bond-strength matrix - `bsmat[4][4]` for mixed hybridizations
+- ✅ EEQ charges - `gfnff.cpp:calculateEEQCharges()` with angewChem2020 parameters
+- ✅ EEQ charge-dependent corrections (fqq) - Sigmoid function for bond strength
+- ✅ Ring strain (ringf) - `findSmallestRings()`, fringbo=0.020 for 3-6 membered rings
+- ✅ XH bond corrections (fxh) - Element-specific: BH(+10%), NH(+6%), OH(-7%)
+- ✅ CN-dependent heavy atom (fcn) - Coordination-based bond weakening for Z>10
 
 #### Other Issues
 - **Memory Optimization**: Needed for large basis sets (>1000 atoms)

@@ -24,6 +24,7 @@
 
 // Method implementations
 #include "ff_methods/forcefield_method.h"
+#include "ff_methods/gfnff_method.h"
 #include "qm_methods/dispersion_method.h"
 #include "qm_methods/eht_method.h"
 #include "qm_methods/external_gfnff_method.h"
@@ -43,6 +44,19 @@ using namespace std;
 // =================================================================================
 // Ulysses Method List (9 base methods x 3 correction modes = 27)
 // =================================================================================
+
+const std::vector<std::string> MethodFactory::m_ff_methods = {
+    "uff", "uff-d3", "d3", "qmdff", "gfnff", "gfnff-d3"
+};
+
+const std::vector<std::string> MethodFactory::m_tblite_methods = {
+    "ipea1", "gfn1", "gfn2"
+};
+
+const std::vector<std::string> MethodFactory::m_xtb_methods = {
+    "xtb-gfnff", "xtb-gfn1", "xtb-gfn2"
+};
+
 
 const std::vector<std::string> MethodFactory::m_ulysses_methods = {
     // Claude Generated: Complete Ulysses methods with correction mode support
@@ -238,7 +252,7 @@ std::unique_ptr<ComputationalMethod> MethodFactory::createGFNFF(const json& conf
         }
     }
     CurcumaLogger::info("GFN-FF: using native implementation");
-    return std::make_unique<GFNFFMethod>(config);
+    return std::make_unique<GFNFFComputationalMethod>("gfnff", config);
 }
 
 // =================================================================================
@@ -287,6 +301,28 @@ std::unique_ptr<ComputationalMethod> MethodFactory::createDFTD4(const json& conf
 // Main Factory Method - Direct if/else dispatch
 // =================================================================================
 
+/*
+ * ARCHITECTURAL DECISION RECORD: Computational Method Factory
+ *
+ * CONTEXT: Multiple computational method providers with overlapping capabilities
+ * - TBLite: Modern, fastest GFN methods (gfn1, gfn2, ipea1)
+ * - XTB: Established, stable implementation (gfn1, gfn2, gfnff)
+ * - Ulysses: Legacy semi-empirical methods (PM3, AM1, ugfn2)
+ * - Native: Educational implementations (EHT, gfnff)
+ * - Force Fields: UFF, QMDFF with performance optimizations
+ *
+ * DECISION: Priority-based factory with hierarchical fallbacks
+ * - Method resolution: explicit names > hierarchical priorities > error
+ * - Educational focus: clear method resolution visible in debug output
+ * - API preservation: maintains EnergyCalculator compatibility
+ *
+ * RUNTIME BEHAVIOR:
+ * - "gfn2" → createGFN2() tries TBLite > Ulysses > XTB fallback chain
+ * - "eht" → createEHT() → direct EHTMethod wrapper creation
+ * - "uff" → createForceField() → ForceFieldMethod with threading support
+ * - "gfnff" → GFNFFComputationalMethod → native GFN-FF implementation (always available)
+ * - "xtb-gfnff" → ExternalGFNFF or XTBMethod("gfnff") → Fortran/XTB GFN-FF
+ */
 std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& method_name, const json& config) {
     // Convert to lowercase for consistent matching
     std::string method = method_name;
@@ -311,7 +347,7 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
     // Native GFN-FF (currently "cgfnff", will become "gfnff" in gfnff-branch)
     if (method == "cgfnff") {
         CurcumaLogger::success("Method 'cgfnff' resolved to native GFN-FF");
-        return std::make_unique<GFNFFMethod>(config);
+        return std::make_unique<GFNFFComputationalMethod>("gfnff", config);
     }
 
     // Force field methods (always available)
@@ -473,7 +509,7 @@ void MethodFactory::printAvailableMethods() {
 
     fmt::print("Core Methods (always available):\n");
     fmt::print("  - EHT: Extended Hückel Theory\n");
-    fmt::print("  - cgfnff: Native GFN-FF implementation\n");
+    fmt::print("  - gfnff: Native C++ GFN-FF implementation\n");
     fmt::print("  - ForceField: UFF, QMDFF methods\n");
 
     fmt::print("\nOptional QM Methods:\n");

@@ -250,13 +250,17 @@ set(curcuma_core_SRC
         src/capabilities/qmdfffit.cpp
         src/core/energy_calculators/qm_methods/eht.cpp
         src/core/energy_calculators/qm_methods/eht_parameters.cpp
-        src/core/energy_calculators/qm_methods/gfnff.cpp
-        src/core/energy_calculators/qm_methods/gfnff_advanced.cpp
+        src/core/energy_calculators/qm_methods/gfnff_method.cpp
+        src/core/energy_calculators/ff_methods/gfnff_method.cpp
+        src/core/energy_calculators/ff_methods/gfnff_advanced.cpp
+        src/core/energy_calculators/ff_methods/gfnff_torsions.cpp
+        src/core/energy_calculators/ff_methods/gfnff_inversions.cpp
+        src/core/energy_calculators/ff_methods/eeq_solver.cpp
+        src/core/energy_calculators/ff_methods/huckel_solver.cpp
         src/core/energy_calculators/qm_methods/qm_driver.cpp
         src/core/energy_calculators/qm_methods/ulyssesinterface.cpp
         src/core/energy_calculators/method_factory.cpp
         src/core/energy_calculators/qm_methods/eht_method.cpp
-        src/core/energy_calculators/qm_methods/gfnff_method.cpp
         src/core/energy_calculators/qm_methods/xtb_method.cpp
         src/core/energy_calculators/qm_methods/tblite_method.cpp
         src/core/energy_calculators/qm_methods/ulysses_method.cpp
@@ -270,6 +274,11 @@ set(curcuma_core_SRC
         src/core/energy_calculators/ff_methods/forcefield.cpp
         src/core/energy_calculators/ff_methods/forcefieldfunctions.h
         src/core/energy_calculators/ff_methods/forcefieldgenerator.cpp
+        src/core/energy_calculators/ff_methods/d3param_generator.cpp
+        src/core/energy_calculators/ff_methods/d3_reference_cn.cpp
+        src/core/energy_calculators/ff_methods/d3_reference_c6.cpp
+        src/core/energy_calculators/ff_methods/cn_calculator.cpp
+        src/core/energy_calculators/ff_methods/d4param_generator.cpp
         src/core/energy_calculators/ff_methods/cg_potentials.cpp
         src/core/curcuma_logger.cpp
         src/tools/formats.h
@@ -281,6 +290,8 @@ set(curcuma_core_SRC
         src/core/imagewriter.cpp
         src/core/parameter_registry.cpp
         src/core/config_manager.cpp
+        src/core/periodic_table.cpp
+        src/core/functional_groups.cpp
 )
 
 set(curcuma_cap_SRC
@@ -672,8 +683,9 @@ target_link_libraries(curcuma curcuma_core)
 add_executable(curcuma_helper
         src/helpers/main.cpp)
         
-add_executable(cli_helper
-        src/helpers/cli_test.cpp)
+# cli_helper disabled - requires cli_parser.h (native-gfnff WIP)
+# add_executable(cli_helper
+#         src/helpers/cli_test.cpp)
 
 add_executable(parallel_scf
         src/helpers/parallel_scf.cpp)
@@ -686,7 +698,7 @@ target_link_libraries(curcuma_helper curcuma_core)
 # Enable precompiled headers for helper executables
 if(USE_PCH)
     target_precompile_headers(curcuma_helper REUSE_FROM curcuma_core)
-    target_precompile_headers(cli_helper REUSE_FROM curcuma_core)
+    # target_precompile_headers(cli_helper REUSE_FROM curcuma_core)
     target_precompile_headers(parallel_scf REUSE_FROM curcuma_core)
 endif()
 

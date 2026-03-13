@@ -301,6 +301,34 @@ private:
 
     double BondRestLength(int i, int j, double order);
 
+    // Claude Generated (December 2025): D3/D4 dispersion integration for UFF
+    /**
+     * @brief Generate D3/D4 dispersion pairwise parameters for UFF
+     * @return JSON array of dispersion pair parameters
+     *
+     * Similar to GFN-FF implementation but with UFF-specific parameters.
+     * Fallback chain: D4 → D3 → free-atom approximation
+     */
+    json generateDispersionPairs() const;
+
+    /**
+     * @brief Generate dispersion parameters using free-atom C6 approximation
+     * @return JSON array of dispersion pair parameters
+     *
+     * UFF fallback method - uses hardcoded free-atom C6 coefficients.
+     * Always available, geometry-independent.
+     */
+    json generateFreeAtomDispersion() const;
+
+    /**
+     * @brief Extract D3/D4 configuration from UFF config
+     * @param method Dispersion method: "d3" or "d4"
+     * @return ConfigManager for D3/D4 parameter generator
+     *
+     * Extracts UFF-specific dispersion parameters (s6, s8, a1, a2).
+     */
+    ConfigManager extractDispersionConfig(const std::string& method) const;
+
     std::vector<int> m_atom_types, m_uff_atom_types, m_coordination;
     std::vector<std::vector<int>> m_stored_bonds;
     std::vector<std::vector<int>> m_identified_rings;

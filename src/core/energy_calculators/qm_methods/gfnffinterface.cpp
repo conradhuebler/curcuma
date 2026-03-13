@@ -123,6 +123,9 @@ bool GFNFFInterface::InitialiseMolecule(const int* attyp, const double* coord, c
         CurcumaLogger::param("coordinates", "converted to Bohr");
     }
 
+    // Sync Fortran gff_print flag with current verbosity before init
+    c_gfnff_set_printlevel(m_printlevel);
+
     // Initialize external GFN-FF calculator (using stored Bohr coordinates)
     // Note: API returns calculator object, not status code
     double (*coord_ptr)[3] = reinterpret_cast<double (*)[3]>(m_coordinates_bohr.data());
@@ -228,8 +231,13 @@ double GFNFFInterface::Calculation(bool gradient)
         CurcumaLogger::param("grad_ptr", fmt::format("{}", (void*)grad_ptr));
     }
 
+    // Sync Fortran gff_print flag with current verbosity before singlepoint
+    c_gfnff_set_printlevel(m_printlevel);
+
     int iostat = 0;
-    CurcumaLogger::info("Calling external GFN-FF singlepoint calculation...");
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Calling external GFN-FF singlepoint calculation...");
+    }
     c_gfnff_calculator_singlepoint(&m_calculator, m_natoms, m_atom_types.data(), coord_ptr, &energy, grad_ptr, &iostat);
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -243,19 +251,21 @@ double GFNFFInterface::Calculation(bool gradient)
         return 0.0;
     }
 
+    // External GFN-FF (Fortran) returns energy in Hartree — no conversion needed
     m_energy = energy;
 
     // Level 1+: Final energy result
     if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::energy_abs(energy, "External GFN-FF Energy");
+    CurcumaLogger::energy_abs(m_energy, "External GFN-FF Energy");
     }
 
     // Handle gradient
     if (gradient && grad_ptr != nullptr) {
+        // External GFN-FF (Fortran) returns gradient in Hartree/Bohr — no conversion needed
         for (int i = 0; i < m_natoms; ++i) {
-            m_gradient(i, 0) = grad_data[3 * i + 0] * au; // Convert back to Angstrom
-            m_gradient(i, 1) = grad_data[3 * i + 1] * au;
-            m_gradient(i, 2) = grad_data[3 * i + 2] * au;
+            m_gradient(i, 0) = grad_data[3 * i + 0];
+            m_gradient(i, 1) = grad_data[3 * i + 1];
+            m_gradient(i, 2) = grad_data[3 * i + 2];
         }
 
         if (CurcumaLogger::get_verbosity() >= 2) {
@@ -272,7 +282,7 @@ double GFNFFInterface::Calculation(bool gradient)
         }
     }
 
-    return energy;
+    return m_energy;
 #else
     CurcumaLogger::error("External GFN-FF not available - USE_GFNFF not compiled");
     return 0.0;
@@ -320,4 +330,8 @@ void GFNFFInterface::updateVerbosity()
     } else {
         m_printlevel = 0;
     }
+#ifdef USE_GFNFF
+    // Sync Fortran gff_print module variable with current verbosity
+    c_gfnff_set_printlevel(m_printlevel);
+#endif
 }

@@ -73,6 +73,9 @@ public:
     void clearError() override;
     std::string getErrorMessage() const override;
 
+    // Energy decomposition (JSON output) - placeholder for native implementation
+    json getEnergyDecomposition() const override;
+
     static bool isD3Available();
     static bool isD4Available();
     static std::vector<std::string> getSupportedMethods();

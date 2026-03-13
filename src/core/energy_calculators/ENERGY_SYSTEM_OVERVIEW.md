@@ -46,7 +46,7 @@ This document provides a **comprehensive overview** of the Curcuma Energy System
 │  ├─ gfn1: TBLite → XTB → Ulysses                                       │
 │  ├─ ipea1: TBLite only                                                  │
 │  ├─ uff/qmdff: ForceField methods                                       │
-│  └─ eht/cgfnff: Native implementations                                  │
+│  └─ eht/gfnff: Native implementations                                  │
 └──────────────────────────────────┬──────────────────────────────────────┘
                                    ↓
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -355,13 +355,14 @@ The MethodFactory implements **hierarchical fallbacks** to ensure robustness:
 - `gfn2`: TBLite → Ulysses → XTB
 - `gfn1`: TBLite → XTB → Ulysses
 - `ipea1`: TBLite only
-- `gfnff`: External GFN-FF → XTB → Native cgfnff
+- `xtb-gfnff`: External GFN-FF (USE_GFNFF) → XTB (USE_XTB)
 
 **Explicit Methods** (single provider):
+- `gfnff`: Native C++ GFN-FF (always available)
 - `xtb-gfn1`, `xtb-gfn2`: XTB library explicitly
 - `ugfn2`, `pm6`, `am1`: Ulysses methods explicitly
 - `uff`, `uff-d3`, `qmdff`: Force field methods
-- `eht`, `cgfnff`: Native implementations
+- `eht`: Extended Hückel Theory
 - `d3`, `d4`: Dispersion corrections
 
 ---
@@ -560,7 +561,7 @@ if (CurcumaLogger::get_verbosity() >= 3) {
    - Effort: ~1-2 hours
 
 **Low Priority** (Functional, but incomplete):
-3. **Native GFN-FF (cgfnff) Completion**
+3. **Native GFN-FF (gfnff) Completion**
    - Status: 28 TODOs for advanced features
    - Impact: Full native implementation vs external library
    - Effort: Multi-week project (research + implementation)

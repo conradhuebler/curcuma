@@ -77,6 +77,11 @@ settings.ini
 
 # Test artifacts (CLI and unit tests) - Claude Generated October 2025
 # Build directory isolation: test outputs should be in build/test_cases/
+# Exceptions for legitimate test fixtures
+!test_cases/optimisation/makrocyclic/input.opt.xyz
+!test_cases/optimisation/makrocyclic/input.trj.xyz
+
+# Test output files (generated during test runs)
 test_cases/**/*.trj.xyz
 test_cases/**/*.opt.xyz
 test_cases/**/*.param.json
@@ -84,7 +89,88 @@ test_cases/**/curcuma_*.json
 test_cases/**/*.log
 test_cases/**/*.dat
 
+# Root-level output files (optimization and trajectory outputs)
+*.opt.xyz
+*.trj.xyz
+
+# Debug executables and analysis scripts - Claude Generated December 2025
+debug_*
+*_analysis.py
+*_analysis.md
+test_fix.py
+Testing/
+FINAL_COMMIT_MESSAGE.md
+COMMIT_MESSAGE_*.md
+
+
+# Downloaded external dependencies (should be fetched via submodules/CMake)
+external/eigen-3.4.0.zip
+external/eigen-3.4.0/
+external/ulysses.zip
+external/ulysses-main/
+external/json.hpp
+external/stb_image_write.h
+
 # CMake generated configuration - Claude Generated November 2025
 # global_config.h is auto-generated from global_config.h.in during cmake configuration
 src/global_config.h
+node_modules
 
+# GFN-FF Generated files (topology, charges, adjacency) - Claude Generated Feb 2026
+# These are generated during test runs and should not be committed
+gfnff_topo
+gfnff_charges
+gfnff_adjacency
+gfnff_validate.py
+gfnff_validation_results.json
+gfnff_comparison_results.csv
+*.engrad
+*.trj.t*.xyz
+
+# Debug/Analysis documentation (private investigation files)
+ATM_GRADIENT_BUG.md
+BENZENE_GRADIENT_INVESTIGATION.md
+CHARGE_DATAFLOW.md
+D3_WEIGHT_CACHING_OPTIMIZATION.md
+GFNFF_1E6_ACCURACY_ROADMAP.md
+GFNFF_TORSION_FIXES_PHASE1.md
+GRADIENT_FIX_SUMMARY.md
+PHASE2_VALIDATION_REPORT.md
+TORSION_DEBUGGING_SUMMARY.md
+
+# German analysis documentation (private investigation)
+gfnff_coordination_number_exact_source_references.md
+gfnff_goal.md
+gfnff_ladungstypen_analyse.md
+gfnff_subtile_parameter_generierung.md
+
+# Misc test/debug files
+2026-01-21-implement-the-following-plan.txt
+compare_*.py
+compare_*.sh
+*_test.py
+test_*.py
+test_benzene_md.xyz
+test_ch3och3.py
+temp_*.cpp
+wbo
+charges
+energy
+gradient
+release2/
+
+# Test output and analysis artifacts
+benzene_test.xyz
+caffeine_*.txt
+curcuma_*.txt
+curcuma_*.json
+curcuma_*.log
+curcuma_*.out
+curcuma_complex_debug.out
+current_*.txt
+current_extra_grad.txt
+d3_reference_energies.json
+dispersion_test_results.csv
+extra_torsion_full.txt
+xtb_*.log
+xtbrestart

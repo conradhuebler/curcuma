@@ -61,6 +61,7 @@ BEGIN_PARAMETER_DEFINITION(casino)
     PARAM(umbrella_sampling, Bool, false, "Enable umbrella sampling", "Advanced", {})
     PARAM(metadynamics, Bool, false, "Enable metadynamics", "Advanced", {})
     PARAM(verbose, Bool, true, "Detailed output", "Output", {})
+    PARAM(verbosity, Int, 2, "Verbosity level (0-3)", "Output", {})
 END_PARAMETER_DEFINITION
 
 // Enhanced move strategies for MC simulation - Claude Generated
@@ -294,7 +295,8 @@ private:
     std::string m_move_strategy;
     double m_acceptance_target;
     bool m_adaptive_step;
-    bool m_verbose;
+    bool m_verbose; // Legacy boolean verbose flag
+    int m_verbosity; // New verbosity level (0-3)
 
     // Enhanced MC parameters - Claude Generated
     bool m_pivot_moves;
