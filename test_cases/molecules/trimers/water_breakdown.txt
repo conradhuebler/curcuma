@@ -1,0 +1,326 @@
+=== Water Molecule Analysis Example
+ ===
+
+
+ entering GFN-FF setup routine... 3
+
+ ==================== Thresholds ====================
+  CN  :   150.00000
+  rep :   500.00000
+  disp:  2500.00000
+  HB1 :   250.00000
+  HB2 :   450.00000
+
+  Pauling EN used:
+  Z : 1  EN :  2.20
+  Z : 8  EN :  3.44
+  electric field strengths (au): 0.000
+
+  ------------------------------------------------- 
+ |           Force Field Initialization            |
+  ------------------------------------------------- 
+
+  distances ...
+  ----------------------------------------
+  generating topology and atomic info file ...
+  pair mat ...
+  computing topology distances matrix with Floyd-Warshall algo ...
+  making topology EEQ charges ...
+  #fragments for EEQ constrain: 1
+  fragment charges :   0.000
+  
+ === Detailed Parameter Calculation for Electrostatics ===
+  
+ 1. Electrostatic energy (E_es) calculation:
+    E_es = sum(i<j) [q(i)*q(j)*erf(gammij*r_ij)/r_ij^2] - sum(i) [q(i)*chi(i)]
+           + sum(i) [0.5*q(i)^2*(gamma(i) + sqrt(2/pi)/sqrt(alpha(i)))]
+    where:
+      q(i) = atomic charges from EEQ model
+      chi(i) = electronegativity of atom i
+      gamma(i) = chemical hardness of atom i
+      alpha(i) = chemical softness of atom i
+      gammij = 1/sqrt(alpha(i) + alpha(j))
+      erf = error function
+    E_es =   -1.3976588431692742E-002  Hartree
+  
+ Electrostatic energy: E_es =   -1.3976588431692742E-002  Hartree
+ ===================================================================
+  
+  ----------------------------------------
+  generating topology and atomic info file ...
+  pair mat ...
+  computing topology distances matrix with Floyd-Warshall algo ...
+  making topology EEQ charges ...
+  #fragments for EEQ constrain: 1
+  fragment charges :   0.000
+  
+ === Detailed Parameter Calculation for Electrostatics ===
+  
+ 1. Electrostatic energy (E_es) calculation:
+    E_es = sum(i<j) [q(i)*q(j)*erf(gammij*r_ij)/r_ij^2] - sum(i) [q(i)*chi(i)]
+           + sum(i) [0.5*q(i)^2*(gamma(i) + sqrt(2/pi)/sqrt(alpha(i)))]
+    where:
+      q(i) = atomic charges from EEQ model
+      chi(i) = electronegativity of atom i
+      gamma(i) = chemical hardness of atom i
+      alpha(i) = chemical softness of atom i
+      gammij = 1/sqrt(alpha(i) + alpha(j))
+      erf = error function
+    E_es =   -1.3976588431692742E-002  Hartree
+  
+ Electrostatic energy: E_es =   -1.3976588431692742E-002  Hartree
+ ===================================================================
+  
+  rings ...
+  # BATM   0
+  # H in HB   2
+
+  atom   neighbors  erfCN metchar sp-hybrid imet pi  qest     coordinates
+    1  O       2    1.92   0.00         3    0    0  -0.571    0.000000    0.000000    0.000000
+    2  H       1    0.97   0.00         0    0    0   0.285    1.430523    1.107379    0.000000
+    3  H       1    0.97   0.00         0    0    0   0.285   -1.430523    1.107379    0.000000
+
+molecular fragment  # atoms  topo charge
+       1    3    0.000
+
+
+ #atoms   :   3
+ #bonds   :   2
+
+ bond atoms        type  in ring    R      R0    piBO    fqq  kbond(tot)  alp
+ H  O     2    1      1    0     0.957   0.845 -99.000   1.047  -0.138   0.650
+  
+ === Detailed Parameter Calculation for Bond            2 -           1  ===
+ Atom types: H  (           1 ) - O  (           8 )
+  
+ 1. Equilibrium distance (r0) calculation:
+    r0 = (rtmp(ij) + topo%vbond(1,i)) * 0.529167
+    where:
+      rtmp(ij) =    1.7796703067714170       (Slater-Koster based distance)
+      topo%vbond(1,i) = gen%rabshift + shift =  -0.10999999940395355       +   -7.2000000625848770E-002  =  -0.18200000002980232     
+      0.529167 = conversion factor from Bohr to Angstrom
+    r0 = (   1.7796703067714170       +  -0.18200000002980232      ) * 0.529167 =   0.84543439758219785       Angstrom
+  
+ 2. Force constant (k) calculation:
+    topo%vbond(2,i) = gen%srb1 * (1.0 + fsrb2*(param%en(ia)-param%en(ja))**2 + gen%srb3*bstrength)
+    where:
+      gen%srb1 =   0.37310001254081726     
+      fsrb2 =   0.31709998846054077     
+      param%en(ia) =    2.2000000476837158       (electronegativity of atom            2 )
+      param%en(ja) =    3.4400000572204590       (electronegativity of atom            1 )
+      gen%srb3 =   0.25380000472068787     
+      bstrength =    1.0000000000000000       (bond strength based on hybridization)
+    topo%vbond(2,i) =   0.37310001254081726       * (1.0 +   0.31709998846054077       * (   2.2000000476837158       -    3.4400000572204590      )^2 +   0.25380000472068787       *    1.0000000000000000      )
+    topo%vbond(2,i) =   0.64970627115375279     
+  
+ 3. Bond energy prefactor calculation:
+    topo%vbond(3,i) = -param%bond(ia) * param%bond(ja) * ringf * bstrength * fqq * fheavy * fpi * fxh * fcn
+    where:
+      param%bond(ia) =   0.41799700000000001       (atomic bond parameter for atom            2 )
+      param%bond(ja) =   0.33924900000000002       (atomic bond parameter for atom            1 )
+      ringf =    1.0000000000000000       (ring effect factor)
+      bstrength =    1.0000000000000000       (bond strength)
+      fqq =    1.0469999983906746       (charge correlation factor)
+      fheavy =    1.0000000000000000       (heavy metal factor)
+      fpi =    1.0000000000000000       (pi orbital factor)
+      fxh =   0.93000000715255737       (X-H bond factor)
+      fcn =    1.0000000000000000       (coordination number factor)
+    topo%vbond(3,i) =  -0.13807700996349237     
+  
+ Bond stretching energy: E_bond = topo%vbond(2,i) * (r_ij - r0)^2
+ ===================================================================
+  
+ H  O     3    1      1    0     0.957   0.845 -99.000   1.047  -0.138   0.650
+  
+ === Detailed Parameter Calculation for Bond            3 -           1  ===
+ Atom types: H  (           1 ) - O  (           8 )
+  
+ 1. Equilibrium distance (r0) calculation:
+    r0 = (rtmp(ij) + topo%vbond(1,i)) * 0.529167
+    where:
+      rtmp(ij) =    1.7796703067714170       (Slater-Koster based distance)
+      topo%vbond(1,i) = gen%rabshift + shift =  -0.10999999940395355       +   -7.2000000625848770E-002  =  -0.18200000002980232     
+      0.529167 = conversion factor from Bohr to Angstrom
+    r0 = (   1.7796703067714170       +  -0.18200000002980232      ) * 0.529167 =   0.84543439758219785       Angstrom
+  
+ 2. Force constant (k) calculation:
+    topo%vbond(2,i) = gen%srb1 * (1.0 + fsrb2*(param%en(ia)-param%en(ja))**2 + gen%srb3*bstrength)
+    where:
+      gen%srb1 =   0.37310001254081726     
+      fsrb2 =   0.31709998846054077     
+      param%en(ia) =    2.2000000476837158       (electronegativity of atom            3 )
+      param%en(ja) =    3.4400000572204590       (electronegativity of atom            1 )
+      gen%srb3 =   0.25380000472068787     
+      bstrength =    1.0000000000000000       (bond strength based on hybridization)
+    topo%vbond(2,i) =   0.37310001254081726       * (1.0 +   0.31709998846054077       * (   2.2000000476837158       -    3.4400000572204590      )^2 +   0.25380000472068787       *    1.0000000000000000      )
+    topo%vbond(2,i) =   0.64970627115375279     
+  
+ 3. Bond energy prefactor calculation:
+    topo%vbond(3,i) = -param%bond(ia) * param%bond(ja) * ringf * bstrength * fqq * fheavy * fpi * fxh * fcn
+    where:
+      param%bond(ia) =   0.41799700000000001       (atomic bond parameter for atom            3 )
+      param%bond(ja) =   0.33924900000000002       (atomic bond parameter for atom            1 )
+      ringf =    1.0000000000000000       (ring effect factor)
+      bstrength =    1.0000000000000000       (bond strength)
+      fqq =    1.0469999983906746       (charge correlation factor)
+      fheavy =    1.0000000000000000       (heavy metal factor)
+      fpi =    1.0000000000000000       (pi orbital factor)
+      fxh =   0.93000000715255737       (X-H bond factor)
+      fcn =    1.0000000000000000       (coordination number factor)
+    topo%vbond(3,i) =  -0.13807700996349237     
+  
+ Bond stretching energy: E_bond = topo%vbond(2,i) * (r_ij - r0)^2
+ ===================================================================
+  
+ #angl    :   1
+
+ angle atoms        phi0    phi      FC  pi rings
+    1    3    2   100.000 104.512   0.292 F   0
+  
+ === Detailed Parameter Calculation for Angle            1 -           3 -           2  ===
+ Atom types: O -H -H 
+  
+ 1. Equilibrium angle (phi0) calculation:
+    phi0 = r0 * pi/180
+    where r0 is determined based on hybridization and atom types:
+      r0 =    100.00000000000000       degrees (based on hybridization and atom types)
+    phi0 =    100.00000000000000       * pi/180 =    1.7453292519943295       radians
+  
+ 2. Force constant (k) calculation:
+    topo%vangl(2,i) = fijk * fqq * f2 * fn * fbsmall * feta
+    where:
+      fijk = param%angl(ati) * param%angl2(atj) * param%angl2(atk) =    2.1598890000000002       *   0.62419700000000000       *   0.62419700000000000       =   0.84154004475711619     
+      fqq = 1.0 - (topo%qa(ii)*topo%qa(jj)+topo%qa(ii)*topo%qa(kk)) * gen%qfacBEN =   0.82416422164910208     
+      f2 =    1.2000000476837158       (geometry-specific factor)
+      fn = 1.0 - 2.36/nn^2 = 1.0 - 2.36/           2 ^2 =   0.41000000000000003     
+      fbsmall = 1.0 - gen%fbs1 * exp(-0.64*(phi0-pi)^2) =   0.85641959744188467     
+      feta =    1.0000000000000000       (eta coordination factor)
+    topo%vangl(2,i) =   0.29224040468978063     
+  
+ Angle bending energy: E_angle = topo%vangl(2,i) * (phi - phi0)^2
+ ===================================================================
+  
+ torsion atoms        nrot   rings    phi0    phi      FC
+ out-of-plane atoms          phi0    phi      FC
+ #tors    :   0
+ #nmol    :   1
+ #optfrag :   1
+
+ GFN-FF setup done.
+
+Atom parameters for O  (atomic number 8):
+  Covalent radius:     1.587370 Bohr (    0.840000 A)
+  Electronegativity (chi):     1.691201
+  Chemical hardness (gam):    -0.031236
+  CN factor:     0.157353
+
+Atom parameters for H  (atomic number 1):
+  Covalent radius:     0.806283 Bohr (    0.426667 A)
+  Electronegativity (chi):     1.227054
+  Chemical hardness (gam):    -0.448428
+  CN factor:     0.008904
+
+Atom parameters for H  (atomic number 1):
+  Covalent radius:     0.806283 Bohr (    0.426667 A)
+  Electronegativity (chi):     1.227054
+  Chemical hardness (gam):    -0.448428
+  CN factor:     0.008904
+
+ Bond parameters:
+Bond parameters for bond between atom 2 and atom 1
+:
+  Bond index in topology: 1
+  Equilibrium distance (r0):    -0.182000
+  Force constant (k):     0.649706
+  Bond energy prefactor:    -0.138077
+  Detailed bond parameter calculation:
+    Bond stretching energy: E_bond = k_bond * (r_ij - r0)^2
+    E_bond =     0.649706 * (    1.809056 -    -0.182000)^2
+    E_bond =     0.649706 *     3.964304 =     2.575633 Eh
+    Covalent radii sum: r_cov_i + r_cov_j
+    H :    0.806283 Bohr, O :    1.587370 Bohr
+    Sum =     2.393653 Bohr
+    Electronegativity difference: |chi_i - chi_j|
+    H :    1.227054, O :    1.691201
+    Difference =     0.464147
+
+Bond parameters for bond between atom 3 and atom 1
+:
+  Bond index in topology: 2
+  Equilibrium distance (r0):    -0.182000
+  Force constant (k):     0.649706
+  Bond energy prefactor:    -0.138077
+  Detailed bond parameter calculation:
+    Bond stretching energy: E_bond = k_bond * (r_ij - r0)^2
+    E_bond =     0.649706 * (    1.809056 -    -0.182000)^2
+    E_bond =     0.649706 *     3.964304 =     2.575633 Eh
+    Covalent radii sum: r_cov_i + r_cov_j
+    H :    0.806283 Bohr, O :    1.587370 Bohr
+    Sum =     2.393653 Bohr
+    Electronegativity difference: |chi_i - chi_j|
+    H :    1.227054, O :    1.691201
+    Difference =     0.464147
+
+ Angle parameters:
+Angle parameters for angle between atoms 1-3-2
+:
+  Angle index in topology: 1
+  Equilibrium angle (θ0):     1.745329 radians
+  Equilibrium angle (θ0):   100.000000 degrees
+  Force constant (k):     0.292240
+  Angle energy prefactor:     0.000000
+  Detailed angle parameter calculation:
+    Angle bending energy: E_angle = k_angle * (θ_ijk - θ0)^2
+    E_angle =     0.292240 * (    0.658753 -     1.745329)^2
+    E_angle =     0.292240 *     1.180649 =     0.345033 Eh
+    Covalent radii:
+    O :    1.587370 Bohr
+    H :    0.806283 Bohr
+    H :    0.806283 Bohr
+
+  
+ === Detailed Parameter Calculation for Repulsion ===
+  
+ 1. Repulsion energy (E_rep) calculation:
+    E_rep = sum(i<j) [exp(-t8) * repz(i) * repz(j) * repscaln / r_ij]
+    where:
+      t8 = r_ij^1.5 * alphanb(i,j)
+      alphanb(i,j) = (alphanb(i) + alphanb(j)) / 2
+      repz(i) = atomic repulsion parameter for atom i
+      repscaln = global scaling factor
+    E_rep =    1.1167905314506004E-003  Hartree
+  
+ Repulsion energy: E_rep =    1.1167905314506004E-003  Hartree
+ ===================================================================
+  
+  
+ === Detailed Parameter Calculation for Dispersion ===
+  
+ 1. Dispersion energy (E_disp) calculation (D3(BJ) model):
+    E_disp = -sum(i<j) [C6(i,j) * (f_damp(6) / r_ij^6 + 2*R4R2(i,j)*f_damp(8) / r_ij^8)]
+    where:
+      C6(i,j) = atomic dispersion coefficients
+      f_damp(n) = 1 / (r_ij^n + R0(i,j)^n) (Becke-Johnson damping)
+      R4R2(i,j) = (3*r4r2(i)*r4r2(j))^(1/2)
+      R0(i,j) = sqrt(R0(i)*R0(j))
+    E_disp =   -1.3931764298423451E-004  Hartree
+  
+ Dispersion energy: E_disp =   -1.3931764298423451E-004  Hartree
+ ===================================================================
+  
+Total energy:      -0.327262664409
+Gradient norm:       0.022037265574
+
+ Energy breakdown:
+  Bond energy:            -0.270088843948 Eh
+  Angle energy:            0.000468559243 Eh
+  Torsion energy:          0.000000000000 Eh
+  Repulsion energy:        0.031627364128 Eh
+  Electrostatic:          -0.089130426188 Eh
+  Dispersion:             -0.000139317643 Eh
+  H-bond energy:           0.000000000000 Eh
+  X-bond energy:           0.000000000000 Eh
+  Bonded atm energy:       0.000000000000 Eh
+  External energy:         0.000000000000 Eh
+
+       ... GFN-FF water analysis example   [PASSED]

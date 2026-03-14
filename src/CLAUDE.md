@@ -50,14 +50,9 @@ src/
 ## Variable Section
 
 ### Current Development Focus
-- Native GFN-FF implementation (`cgfnff`) debugging in core/qm_methods/
-- Universal parameter caching system completed and working
+- GFN-FF implementation complete and operational (`energy_calculators/ff_methods/`) — See [docs/GFNFF_STATUS.md](../docs/GFNFF_STATUS.md)
+- Universal parameter caching system working (96% speedup for iterative calculations)
 - Enhanced force field multi-threading support
-
-### Recent Improvements
-- Parameter caching system with 96% speedup demonstrated
-- Multi-threading safety controls for concurrent calculations
-- Automatic parameter validation and method compatibility checks
 
 ---
 

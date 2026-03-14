@@ -1,5 +1,5 @@
 /*
- * < Native GFN-FF Method Wrapper Implementation >
+ * < GFN-FF Computational Method Wrapper >
  * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -18,75 +18,131 @@
  */
 
 #include "gfnff_method.h"
-#include "src/tools/general.h"
+#include "src/core/curcuma_logger.h"
 
-// Minimal stub implementation for GFN-FF method
-GFNFFMethod::GFNFFMethod(const json& config)
-    : m_gfnff(std::make_unique<GFNFF>(config))
-    , m_calculation_done(false)
-    , m_last_energy(0.0)
+GFNFFComputationalMethod::GFNFFComputationalMethod(const std::string& method_name, const json& config)
+    : m_parameters(config)
+    , m_method_name(method_name)
 {
-    m_parameters = config;
+    m_gfnff = std::make_unique<GFNFF>(config);
 }
 
-bool GFNFFMethod::setMolecule(const Mol& mol) {
-    m_molecule = mol;
-    m_initialized = true;
-    return m_gfnff->QMInterface::InitialiseMolecule(mol);
+bool GFNFFComputationalMethod::setMolecule(const Mol& mol) {
+    if (!m_gfnff) {
+        CurcumaLogger::error("GFNFFComputationalMethod: m_gfnff is nullptr!");
+        return false;
+    }
+
+    // Cache check is now done inside GFNFF::initializeForceField()
+    // where it has access to the ForceField instance
+
+    if (!m_gfnff->InitialiseMolecule(mol)) {
+        CurcumaLogger::error("GFNFFComputationalMethod: InitialiseMolecule failed");
+        return false;
+    }
+
+    return true;
 }
 
-bool GFNFFMethod::updateGeometry(const Matrix& geometry) {
-    m_molecule.m_geometry = geometry;
-    return m_gfnff->QMInterface::UpdateMolecule(geometry);
+bool GFNFFComputationalMethod::updateGeometry(const Matrix& geometry) {
+    if (!m_gfnff) {
+        CurcumaLogger::error("GFNFFComputationalMethod: m_gfnff is nullptr!");
+        return false;
+    }
+
+    return m_gfnff->UpdateMolecule(geometry);
 }
 
-double GFNFFMethod::calculateEnergy(bool gradient)
-{
+double GFNFFComputationalMethod::calculateEnergy(bool gradient) {
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::info("=== GFNFFComputationalMethod::calculateEnergy() START ===");
+    }
+
     m_last_energy = m_gfnff->Calculation(gradient);
-    m_calculation_done = true;
+
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::success("GFNFFComputationalMethod::calculateEnergy complete");
+        CurcumaLogger::energy_abs(m_last_energy, "GFN-FF Energy");
+    }
+
     return m_last_energy;
 }
 
-Matrix GFNFFMethod::getGradient() const {
+Matrix GFNFFComputationalMethod::getGradient() const {
     return m_gfnff->Gradient();
 }
 
-Vector GFNFFMethod::getCharges() const {
+Vector GFNFFComputationalMethod::getCharges() const {
     return m_gfnff->Charges();
 }
 
-Vector GFNFFMethod::getBondOrders() const {
+Vector GFNFFComputationalMethod::getBondOrders() const {
     return m_gfnff->BondOrders();
 }
 
-Position GFNFFMethod::getDipole() const {
+Position GFNFFComputationalMethod::getDipole() const {
     return Position{0.0, 0.0, 0.0};
 }
 
-void GFNFFMethod::setThreadCount(int threads) {
-    m_thread_count = threads;
+void GFNFFComputationalMethod::setThreadCount(int threads) {
+    (void)threads; // Unused parameter - GFN-FF thread management handled internally
 }
 
-void GFNFFMethod::setParameters(const json& params) {
+void GFNFFComputationalMethod::setParameters(const json& params) {
     m_parameters = params;
     if (m_gfnff) {
         m_gfnff->setParameters(params);
     }
 }
 
-json GFNFFMethod::getParameters() const {
+json GFNFFComputationalMethod::getParameters() const {
     return m_parameters;
 }
 
-bool GFNFFMethod::hasError() const {
+bool GFNFFComputationalMethod::hasError() const {
     return m_has_error;
 }
 
-void GFNFFMethod::clearError() {
+void GFNFFComputationalMethod::clearError() {
     m_has_error = false;
     m_error_message.clear();
 }
 
-std::string GFNFFMethod::getErrorMessage() const {
+json GFNFFComputationalMethod::getEnergyDecomposition() const {
+    json energy_json;
+
+    if (!m_gfnff) {
+        // Return zero JSON if GFNFF not initialized
+        energy_json = {
+            {"Bond", 0.0},
+            {"Angle", 0.0},
+            {"Torsion", 0.0},
+            {"Inversion", 0.0},
+            {"Dispersion", 0.0},
+            {"Coulomb", 0.0},
+            {"HBond", 0.0},
+            {"XBond", 0.0},
+            {"ATM", 0.0},
+            {"BATM", 0.0}
+        };
+        return energy_json;
+    }
+
+    // Get all energy components from GFNFF
+    energy_json["Bond"] = m_gfnff->BondEnergy();
+    energy_json["Angle"] = m_gfnff->AngleEnergy();
+    energy_json["Torsion"] = m_gfnff->DihedralEnergy();
+    energy_json["Inversion"] = m_gfnff->InversionEnergy();
+    energy_json["Dispersion"] = m_gfnff->DispersionEnergy();
+    energy_json["Coulomb"] = m_gfnff->CoulombEnergy();
+    energy_json["HBond"] = m_gfnff->HydrogenBondEnergy();
+    energy_json["XBond"] = m_gfnff->HalogenBondEnergy();
+    energy_json["ATM"] = m_gfnff->ATMEnergy();
+    energy_json["BATM"] = m_gfnff->BatmEnergy();
+
+    return energy_json;
+}
+
+std::string GFNFFComputationalMethod::getErrorMessage() const {
     return m_error_message;
 }

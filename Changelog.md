@@ -1,27 +1,19 @@
-# The (incomplete) curcuma Changelog
+# Changelog
 
-### pre Alpha
+## [0.0.190] - 2025-12-13
+### Fixed
+- GFNFF torsion generation:
+  - Fixed unit mismatch in bond detection (Angstrom vs Bohr units)
+  - Fixed duplicate torsion detection algorithm to properly compare all four atoms
+  - Corrected torsion count for ethane from 36 (incorrect) to 9 (correct)
+  - Fixed neighbor list generation for accurate torsion topology
 
-- molalign can be used for reordering
-- add forked LBFGSpp for single steps in geometry optimisation
-- add tblite and forked xtb for better control of xTB calculation
-- extended centroids for docking
-- compare/analyse NCIPLOT's RDG vs rho plots
-- add parallel batch optimisation
-- add conformation statistics
-- parallel docking due to CxxThreadPool
-- add restriction for hydrogen bond patterns in conformational scan
-- add template based reorder method for rmsd calculation
-- make confscan (silently) restartable
-- docking with post-optimisation and filtering (needs XTB GFN 2)
-- add reordering for non-conformer/non-isomer structures
-- add step-wise-rmsd for two trajectories
-- find more or less unique conformers in trajectories
-- scan xyz files (trajectories) for hbonds and prints each single distance for each step
-- include optional XTB
-- prepare NEB input geometries (reordered and aligned)
-- add -led option to prepare fragment assigned xyz files (for ORCA LED calculation)
-- Add conformation filter (energy, rmsd, rank) - with automatic/forced reordering of structures
-- Reorder atom indicies in molecule, keeping methyl connectivitiy
-- Initial docking
-- Calculate RMSD for two molecules
+## [0.0.189] - 2025-12-12
+### Added
+- Initial GFNFF implementation with bond, angle, and torsion parameters
+- Support for JSON parameter files
+- Basic energy calculations for small molecules
+
+[Unreleased]: https://github.com/conradhuebler/curcuma/compare/v0.0.190...HEAD
+[0.0.190]: https://github.com/conradhuebler/curcuma/compare/v0.0.189...v0.0.190
+[0.0.189]: https://github.com/conradhuebler/curcuma/releases/tag/v0.0.189

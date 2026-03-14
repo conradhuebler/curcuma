@@ -34,7 +34,8 @@ namespace Optimization {
  */
 class LBFGSppObjectiveFunction {
 public:
-    LBFGSppObjectiveFunction(EnergyCalculator* calc, Molecule* mol, const std::vector<int>& constraints);
+    LBFGSppObjectiveFunction(EnergyCalculator* calc, Molecule* mol, const std::vector<int>& constraints,
+                              bool use_numerical_gradient = false, double numerical_gradient_step = 1e-5);
 
     // LBFGSpp required interface
     double operator()(const VectorXd& x, VectorXd& grad);
@@ -49,6 +50,8 @@ private:
     EnergyCalculator* m_energy_calculator;
     Molecule* m_molecule;
     std::vector<int> m_constraints;
+    bool m_use_numerical_gradient = false;
+    double m_numerical_gradient_step = 1e-5;
 
     double m_last_energy = 0.0;
     Vector m_last_parameters;

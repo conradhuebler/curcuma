@@ -1,37 +1,8 @@
 # Curcuma Development TODO List
 
-**Stand**: 2025-10-28 (nach SimpleMD Fixes)
+**Stand**: 2026-03-13
 **Quelle**: Extrahiert aus allen CLAUDE.md-Dateien
-**Test Status**: 26/26 CLI tests passing (100%) 🎯
-
----
-
-## ✅ RECENTLY RESOLVED (October 28, 2025)
-
-### SimpleMD Complete Fix - 3 Commits
-**Commits**: ced705d, 972559c, 284c7da
-
-#### 1. SimpleMD Spin Parameter Fix (ced705d)
-- **Problem**: Default `spin=1` caused TBLite crash for closed-shell systems
-- **Solution**: Changed default to `spin=0` in simplemd.h:372
-- **Result**: No more crashes with gfn2 method ✅
-
-#### 2. CLI2Json Parameter Routing + ConfigManager Fallback (972559c)
-- **Problem**: `-md.max_time 10` created nested JSON structure causing parameter lookup failures
-- **Solution**:
-  - CLI2Json: Strip redundant keyword prefixes (main.cpp:252-273)
-  - ConfigManager: Fallback logic for legacy/malformed JSON (config_manager.cpp:404-453)
-- **Result**: Robust parameter routing, `-md.max_time` === `-max_time` synonym ✅
-
-#### 3. SimpleMD Trajectory File Generation (284c7da)
-- **Problem**: Empty basename created `.trj.xyz` instead of `input.trj.xyz`
-- **Solution**:
-  - Added `md->setFile(argv[2])` in main.cpp:652
-  - Added final frame write in simplemd.cpp:1673
-  - Relaxed test validation for short simulations
-- **Result**: All trajectory files generated with correct names ✅
-
-**Test Impact**: SimpleMD 0/7 → 7/7, Overall 19/26 (73%) → 26/26 (100%) 🎯
+**Test Status**: 26/26 CLI tests passing (100%) ✅
 
 ---
 
@@ -41,62 +12,14 @@
 
 ---
 
-## 🟢 COARSE GRAINING DEVELOPMENT (October 2025 - PHASES 1-4 COMPLETE)
+## 🟢 COARSE GRAINING DEVELOPMENT
 
-### ✅ CG Foundation - Phase 1: Molecule Helper Functions (COMPLETE - October 2025)
-- **Status**: ✅ DONE
-- **Completion**: All methods implemented and tested in molecule.cpp:2031-2066
-- **Implemented**:
-  - `bool isCGSystem() const` - Detects CG_ELEMENT (226)
-  - `bool hasMixedSystem() const` - Detects hybrid systems
-  - `std::vector<int> getCGAtoms() const` - Returns CG atom indices
-  - `std::vector<int> getAtomicAtoms() const` - Returns atomic indices
-
-### ✅ CG Foundation - Phase 2: JSON Parameter Loading (COMPLETE - October 2025)
-- **Status**: ✅ DONE
-- **Completion**: Full implementation in forcefield.cpp:185-288
-- **Features**:
-  - Parse `cg_default`, `cg_per_atom`, `pair_interactions` sections
-  - Automatic validation of shape vectors and epsilon values
-  - Per-atom shape/orientation overrides
-  - Custom pair parameter support via `"{i}-{j}"` keys
-  - Comprehensive error handling with descriptive messages
-
-### ✅ CG Format - Phase 3: VTF Writer Implementation (COMPLETE - October 2025)
-- **Status**: ✅ DONE
-- **Completion**: Full reader/writer in formats.h:262-489
-- **Features**:
-  - `WriteVTF()` - Single structure output with CG metadata
-  - `WriteVTFTrajectory()` - Multi-frame trajectory output
-  - Automatic cell matrix angle calculations
-  - CG atom labeling and radius detection
-  - FileIterator integration for sequential reading
-
-### ✅ CG Integration - Phase 4: Testing & Validation (COMPLETE - October 2025)
-- **Status**: ✅ DONE (9 + 6 + 1 test suites)
-- **Completion**: Comprehensive test suite in test_cases/
-- **Test Coverage**:
-  - **Unit Tests** (test_cg_potentials.cpp): 9 suites (shape, LJ, rotation, effective distance)
-  - **ForceField Integration** (test_cg_forcefield_integration.cpp): 6 scenarios
-  - **CLI Test** (cli/cg/01_single_point): End-to-end single point energy
-  - **Integration Data**: simple_beads.vtf, mc_cg_chain/ with full documentation
-
-### ✅ CG Integration - Phase 5: SimpleMD CG Integration (COMPLETE - November 2025)
-- **Status**: ✅ DONE
-- **Completion**: Full integration in simplemd.cpp/h and molecule.cpp/h
-- **Features**:
-  - ✅ System type detection (CG vs atomic vs mixed)
-  - ✅ PBC wrapping for periodic boundary conditions (already implemented)
-  - ✅ Timestep scaling (10x larger for pure CG systems)
-  - ✅ Orientational dynamics infrastructure (prepared for Phase 6 ellipsoids)
-  - ✅ VTF trajectory output for CG systems
-  - ✅ CLI test: simplemd/08_cg_spheres with enhanced validation
-- **Implementation Details**:
-  - CG Parameters: `cg_write_vtf`, `cg_timestep_scaling`, `cg_timestep_factor` in PARAM block
-  - Orientational arrays: `m_cg_orientations`, `m_cg_angular_velocities` (prepared, not activated)
-  - VTF Writer: `Molecule::appendVTFFile()` with first-frame structure definition
-  - WriteGeometry() enhanced with conditional VTF trajectory output
-  - Initialization: Orientational infrastructure allocated but not used (m_cg_enable_rotation = false)
+### ✅ CG Integration - Phases 1-5 (COMPLETE - Oct/Nov 2025)
+- Phase 1: Molecule helper functions (isCGSystem, hasMixedSystem, getCGAtoms)
+- Phase 2: JSON parameter loading in forcefield.cpp
+- Phase 3: VTF reader/writer in formats.h
+- Phase 4: Testing & validation (unit tests + CLI test)
+- Phase 5: SimpleMD CG integration (PBC, 10x timestep scaling, VTF output, orientational infrastructure)
 
 ### 🔵 CG Potentials - Phase 6: Ellipsoidal Extensions (OPTIONAL - LOWEST PRIORITY)
 - **Status**: 🟡 PREPARED

@@ -1,0 +1,110 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GFN-FF Reference Data",
+  "type": "object",
+  "required": ["molecule", "metadata", "topology", "bonds", "angles", "torsions", "energy_components"],
+  "properties": {
+    "molecule": {
+      "type": "object",
+      "required": ["name", "geometry_file", "atoms"],
+      "properties": {
+        "name": { "type": "string" },
+        "geometry_file": { "type": "string" },
+        "atoms": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["element", "x", "y", "z"],
+            "properties": {
+              "element": { "type": "string" },
+              "x": { "type": "number" },
+              "y": { "type": "number" },
+              "z": { "type": "number" }
+            }
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "generator": { "type": "string" },
+        "date": { "type": "string" }
+      }
+    },
+    "topology": {
+      "type": "object",
+      "required": ["coordination_numbers", "hybridizations", "charges"],
+      "properties": {
+        "coordination_numbers": { "type": "array", "items": { "type": "number" } },
+        "hybridizations": { "type": "array", "items": { "type": "integer" } },
+        "charges": { "type": "array", "items": { "type": "number" } }
+      }
+    },
+    "bonds": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["atoms", "r0", "kbond", "prefactor", "energy"],
+        "properties": {
+          "atoms": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 },
+          "r0": { "type": "number" },
+          "kbond": { "type": "number" },
+          "prefactor": { "type": "number" },
+          "energy": { "type": "number" }
+        }
+      }
+    },
+    "angles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["atoms", "phi0", "fc", "energy"],
+        "properties": {
+          "atoms": { "type": "array", "items": { "type": "integer" }, "minItems": 3, "maxItems": 3 },
+          "phi0": { "type": "number" },
+          "fc": { "type": "number" },
+          "energy": { "type": "number" }
+        }
+      }
+    },
+    "torsions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["atoms", "n", "phi0", "V", "energy"],
+        "properties": {
+          "atoms": { "type": "array", "items": { "type": "integer" }, "minItems": 4, "maxItems": 4 },
+          "n": { "type": "integer" },
+          "phi0": { "type": "number" },
+          "V": { "type": "number" },
+          "energy": { "type": "number" },
+          "is_improper": { "type": "boolean", "default": false }
+        }
+      }
+    },
+    "energy_components": {
+      "type": "object",
+      "required": ["total", "bond", "angle", "torsion", "repulsion", "electrostatic", "dispersion"],
+      "properties": {
+        "total": { "type": "number" },
+        "bond": { "type": "number" },
+        "angle": { "type": "number" },
+        "torsion": { "type": "number" },
+        "repulsion": { "type": "number" },
+        "electrostatic": { "type": "number" },
+        "dispersion": { "type": "number" },
+        "hb": { "type": "number", "default": 0.0 },
+        "xb": { "type": "number", "default": 0.0 },
+        "batm": { "type": "number", "default": 0.0 }
+      }
+    },
+    "gradients": {
+      "type": "object",
+      "properties": {
+        "norm": { "type": "number" },
+        "atomic": { "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 } }
+      }
+    }
+  }
+}

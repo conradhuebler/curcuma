@@ -94,11 +94,28 @@ OptimizationContext OptimizationContext::fromJson(const json& config, EnergyCalc
     if (config.contains("max_energy_rise"))
         context.max_energy_rise = config["max_energy_rise"];
 
+    // Claude Generated (Feb 21, 2026): Numerical gradient option for debugging
+    if (config.contains("numgrad"))
+        context.use_numerical_gradient = config["numgrad"];
+    if (config.contains("numerical_gradient_step"))
+        context.numerical_gradient_step = config["numerical_gradient_step"];
+
     // Load output settings
     if (config.contains("write_trajectory"))
         context.write_trajectory = config["write_trajectory"];
-    if (config.contains("verbose"))
-        context.verbose = config["verbose"];
+
+    // Handle both legacy verbose and new verbosity parameters for backward compatibility
+    if (config.contains("verbosity")) {
+        context.verbosity = config["verbosity"];
+        // Validate verbosity range
+        if (context.verbosity < 0 || context.verbosity > 3) {
+            context.verbosity = 1; // Default to minimal if out of range
+        }
+    } else if (config.contains("verbose")) {
+        // Legacy boolean verbose parameter - convert to verbosity level
+        context.verbosity = config["verbose"] ? 3 : 1;
+    }
+
     if (config.contains("print_output"))
         context.print_output = config["print_output"];
 
@@ -215,12 +232,17 @@ bool OptimizerDriver::UpdateGeometry(const double* coordinates)
         m_current_energy, m_current_gradient);
 }
 
-OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, bool verbose)
+OptimizationResult OptimizerDriver::Optimize(bool write_trajectory, int verbosity)
 {
-    // Synchronize verbosity settings (analog to recent RMSDTraj fixes)
-    CurcumaLogger::set_verbosity(verbose ? 3 : 2);
+    // Synchronize verbosity settings using the new integer parameter
+    // Validate verbosity range
+    if (verbosity < 0 || verbosity > 3) {
+        verbosity = 1; // Default to minimal if out of range
+    }
+
+    CurcumaLogger::set_verbosity(verbosity);
     m_context.write_trajectory = write_trajectory;
-    m_context.verbose = verbose;
+    m_context.verbosity = verbosity;
 
     m_start_time = std::chrono::high_resolution_clock::now();
 
@@ -363,13 +385,33 @@ bool OptimizerDriver::evaluateEnergyAndGradient(const Vector& coordinates, doubl
         Tools::Coord2Mol(coordinates, m_molecule);
         m_context.energy_calculator->setMolecule(m_molecule);
 
-        energy = m_context.energy_calculator->CalculateEnergy(true);
-        if (std::isnan(energy) || std::isinf(energy)) {
-            return false;
-        }
+        // Claude Generated (Feb 21, 2026): Support for numerical gradient mode
+        // When use_numerical_gradient is true, use finite difference gradient instead of analytical
+        if (m_context.use_numerical_gradient) {
+            // Calculate energy without analytical gradient (faster)
+            energy = m_context.energy_calculator->CalculateEnergy(false);
+            if (std::isnan(energy) || std::isinf(energy)) {
+                return false;
+            }
 
-        Geometry grad_geom = m_context.energy_calculator->Gradient();
-        gradient = Vector::Map(grad_geom.data(), grad_geom.size());
+            // Get numerical gradient via finite differences
+            Geometry grad_geom = m_context.energy_calculator->NumGrad();
+            gradient = Vector::Map(grad_geom.data(), grad_geom.size());
+
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                CurcumaLogger::info("Using numerical gradient (debugging mode)");
+                CurcumaLogger::param("gradient_norm", fmt::format("{:.6e} Eh/Bohr", gradient.norm()));
+            }
+        } else {
+            // Normal mode: calculate energy with analytical gradient
+            energy = m_context.energy_calculator->CalculateEnergy(true);
+            if (std::isnan(energy) || std::isinf(energy)) {
+                return false;
+            }
+
+            Geometry grad_geom = m_context.energy_calculator->Gradient();
+            gradient = Vector::Map(grad_geom.data(), grad_geom.size());
+        }
 
         // Apply constraints if specified
         if (m_context.use_constraints && !m_context.atom_constraints.empty()) {

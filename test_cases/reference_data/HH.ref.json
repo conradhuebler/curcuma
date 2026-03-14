@@ -1,0 +1,74 @@
+{
+  "molecule": {
+    "name": "HH",
+    "geometry_file": "test_cases/molecules/dimers/HH.xyz",
+    "atoms": [
+      {
+        "element": "H",
+        "x": -0.17552,
+        "y": 0.683425,
+        "z": -0.471186
+      },
+      {
+        "element": "H",
+        "x": 0.0,
+        "y": 1.442313,
+        "z": -0.901488
+      }
+    ]
+  },
+  "metadata": {
+    "generator": "gfnff-analyzer-parser",
+    "date": "2026-02-07 20:48:53"
+  },
+  "topology": {
+    "coordination_numbers": [
+      0.98,
+      0.98
+    ],
+    "hybridizations": [
+      0,
+      0
+    ],
+    "charges": [
+      0.0,
+      0.0
+    ]
+  },
+  "bonds": [
+    {
+      "atoms": [
+        1,
+        0
+      ],
+      "r0": 0.6907705772083079,
+      "kbond": 0.4677927974849654,
+      "prefactor": -0.17882744693061964,
+      "energy": 0.0
+    }
+  ],
+  "angles": [],
+  "torsions": [],
+  "energy_components": {
+    "bond": -0.16495202,
+    "angle": 0.0,
+    "torsion": 0.0,
+    "repulsion": 0.21546903,
+    "electrostatic": 0.0,
+    "dispersion": -4.716e-05,
+    "hb": 0.0,
+    "xb": 0.0,
+    "batm": 0.0
+  },
+  "gradients": {
+    "norm": 1.571332012861,
+    "energy_charges": [
+      0.0,
+      0.0
+    ]
+  },
+  "energy_charges": [
+    0.0,
+    0.0
+  ]
+}

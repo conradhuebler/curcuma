@@ -34,7 +34,7 @@
  * 
  * Key Features:
  * - Maintains existing CxxThreadPool threading system for optimal performance
- * - Supports all ForceField methods: UFF, UFF-D3, QMDFF, cgfnff
+ * - Supports all ForceField methods: UFF, UFF-D3, QMDFF, gfnff
  * - Preserves universal parameter caching system (96% speedup)
  * - Thread-safe parameter caching control for concurrent calculations
  * - Analytical gradients always available
@@ -45,7 +45,7 @@ class ForceFieldMethod : public ComputationalMethod {
 public:
     /**
      * @brief Constructor with method name and configuration
-     * @param method_name ForceField method ("uff", "uff-d3", "qmdff", "cgfnff")
+     * @param method_name ForceField method ("uff", "uff-d3", "qmdff", "gfnff")
      * @param config JSON configuration (ForceField-specific parameters)
      */
     ForceFieldMethod(const std::string& method_name, const json& config = json{});
@@ -170,14 +170,101 @@ public:
      * @return Vector of supported method names
      */
     static std::vector<std::string> getSupportedMethods();
-    
+
     /**
      * @brief Check if method is supported by ForceField
      * @param method_name Method to check
      * @return True if method is supported
      */
     static bool isMethodSupported(const std::string& method_name);
-    
+
+    // =================================================================================
+    // Energy Component Access (Claude Generated November 2025)
+    // =================================================================================
+
+    /**
+     * @brief Get bond energy component
+     * @return Bond stretching energy
+     */
+    double getBondEnergy() const;
+
+    /**
+     * @brief Get angle energy component
+     * @return Angle bending energy
+     */
+    double getAngleEnergy() const;
+
+    /**
+     * @brief Get dihedral energy component
+     * @return Dihedral torsion energy
+     */
+    double getDihedralEnergy() const;
+
+    /**
+     * @brief Get inversion energy component
+     * @return Inversion/out-of-plane energy
+     */
+    double getInversionEnergy() const;
+
+    /**
+     * @brief Get van der Waals energy component
+     * @return Van der Waals interaction energy
+     */
+    double getVdWEnergy() const;
+
+    /**
+     * @brief Get repulsion energy component
+     * @return Core-core repulsion energy
+     */
+    double getRepulsionEnergy() const;
+
+    /**
+     * @brief Get dispersion energy component
+     * @return Dispersion correction energy
+     */
+    double getDispersionEnergy() const;
+
+    /**
+     * @brief Get Coulomb energy component
+     * @return Electrostatic energy
+     */
+    double getCoulombEnergy() const;
+
+    /**
+     * @brief Get hydrogen bond energy component
+     * @return Hydrogen bond energy
+     */
+    double getHBondEnergy() const;
+
+    /**
+     * @brief Get halogen bond energy component
+     * @return Halogen bond energy
+     */
+    double getXBondEnergy() const;
+
+    /**
+     * @brief Get atm (three-body dispersion) energy component
+     * @return ATM energy
+     */
+    double getATMEnergy() const;
+
+    /**
+     * @brief Get batm (bonded ATM) energy component
+     * @return BATM energy
+     */
+    double getBatmEnergy() const;
+
+    /**
+     * @brief Get complete energy decomposition as JSON
+     * @return JSON object with all energy components in Hartree
+     *
+     * Returns all 10 energy terms for ForceField methods:
+     * - Bond, Angle, Torsion, Inversion (bonded terms)
+     * - Dispersion, Coulomb (non-bonded terms)
+     * - HBond, XBond, ATM, BATM (special terms)
+     */
+    json getEnergyDecomposition() const override;
+
 private:
     std::unique_ptr<ForceField> m_forcefield;      ///< Wrapped ForceField implementation
     std::string m_method_name;                     ///< ForceField method name

@@ -10,6 +10,16 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/AAA-bGal/A.xyz
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/AAA-bGal/B.xyz
             DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 
+# Claude Generated: Test Molecule Registry - Central hardcoded molecule database
+# Provides zero-dependency molecule access for all test cases
+add_library(test_molecule_registry core/test_molecule_registry.cpp)
+
+target_link_libraries(test_molecule_registry curcuma_core)
+
+if(USE_PCH)
+    target_precompile_headers(test_molecule_registry REUSE_FROM curcuma_core)
+endif()
+
 add_executable(rmsd_test
         rmsd/main.cpp)
 
@@ -77,20 +87,62 @@ endif()
 # Note: test_cg_forcefield_integration removed due to complex linking with curcuma_D3
 # CG functionality will be tested via CLI integration test instead
 
-# todo restore
+# Claude Generated (February 2026): Unified GFN-FF Validation Runner
+# Purpose: High-precision validation against standardized analyzer reference data
+add_executable(test_gfnff_validation
+        test_gfnff_validation.cpp)
 
-# Claude Generated: Debug Ulysses methods test
-#file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/../release/debug_ulysses_test.cpp
-#        DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+target_link_libraries(test_gfnff_validation curcuma_core)
 
-#add_executable(debug_ulysses_test
-#        ${CMAKE_CURRENT_BINARY_DIR}/debug_ulysses_test.cpp)
+if(USE_PCH)
+        target_precompile_headers(test_gfnff_validation REUSE_FROM curcuma_core)
+endif()
 
-#target_link_libraries(debug_ulysses_test curcuma_core)
+# Copy reference data to build tree so tests can find them
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/reference_data
+     DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 
-#if(USE_PCH)
-#        target_precompile_headers(debug_ulysses_test REUSE_FROM curcuma_core)
-#endif()
+# Register all reference data files as individual CTests
+file(GLOB GFNFF_REF_FILES "${CMAKE_CURRENT_SOURCE_DIR}/reference_data/*.ref.json")
+foreach(REF_FILE ${GFNFF_REF_FILES})
+    get_filename_component(MOL_NAME ${REF_FILE} NAME_WE)
+    set(TEST_NAME "gfnff_val_${MOL_NAME}")
+
+    # Path to the reference file in the build directory
+    set(BUILD_REF_FILE "${CMAKE_CURRENT_BINARY_DIR}/reference_data/${MOL_NAME}.ref.json")
+
+    add_test(NAME ${TEST_NAME}
+             COMMAND test_gfnff_validation ${BUILD_REF_FILE}
+             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    set_tests_properties(${TEST_NAME} PROPERTIES TIMEOUT 60 LABELS "gfnff;validation")
+endforeach()
+
+# Claude Generated (Session 5): Periodic Table utility tests
+add_executable(test_periodic_table
+        test_periodic_table.cpp)
+
+target_link_libraries(test_periodic_table curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_periodic_table REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_periodic_table
+         COMMAND test_periodic_table)
+
+# Claude Generated (Session 5): Two-Phase EEQ System Tests
+# Tests Phase 1 topology charges and Phase 2 environment corrections
+add_executable(test_eeq_two_phase
+        test_eeq_two_phase.cpp)
+
+target_link_libraries(test_eeq_two_phase curcuma_core)
+
+if(USE_PCH)
+        target_precompile_headers(test_eeq_two_phase REUSE_FROM curcuma_core)
+endif()
+
+add_test(NAME test_eeq_two_phase
+         COMMAND test_eeq_two_phase)
 
 # Claude Generated: CLI argument validation test suite (October 2025)
 # Include comprehensive Bash-based CLI tests for all capabilities

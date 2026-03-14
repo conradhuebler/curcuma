@@ -1,0 +1,220 @@
+  Starting GFN-FF H2 explicit parameters   ... (4/6)
+ === H2 Explicit Parameter Test ===
+
+
+ entering GFN-FF setup routine... 2
+
+ ==================== Thresholds ====================
+  CN  :   150.00000
+  rep :   500.00000
+  disp:  2500.00000
+  HB1 :   250.00000
+  HB2 :   450.00000
+
+  Pauling EN used:
+  Z : 1  EN :  2.20
+  electric field strengths (au): 0.000
+
+  ------------------------------------------------- 
+ |           Force Field Initialization            |
+  ------------------------------------------------- 
+
+  distances ...
+  ----------------------------------------
+  generating topology and atomic info file ...
+  pair mat ...
+  computing topology distances matrix with Floyd-Warshall algo ...
+  making topology EEQ charges ...
+  #fragments for EEQ constrain: 1
+  fragment charges :   0.000
+  
+ === Detailed Parameter Calculation for Electrostatics ===
+  
+ 1. Electrostatic energy (E_es) calculation:
+    E_es = sum(i<j) [q(i)*q(j)*erf(gammij*r_ij)/r_ij^2] - sum(i) [q(i)*chi(i)]
+           + sum(i) [0.5*q(i)^2*(gamma(i) + sqrt(2/pi)/sqrt(alpha(i)))]
+    where:
+      q(i) = atomic charges from EEQ model
+      chi(i) = electronegativity of atom i
+      gamma(i) = chemical hardness of atom i
+      alpha(i) = chemical softness of atom i
+      gammij = 1/sqrt(alpha(i) + alpha(j))
+      erf = error function
+    E_es =    4.0572545323414035E-016  Hartree
+  
+ Electrostatic energy: E_es =    4.0572545323414035E-016  Hartree
+ ===================================================================
+  
+  ----------------------------------------
+  generating topology and atomic info file ...
+  pair mat ...
+  computing topology distances matrix with Floyd-Warshall algo ...
+  making topology EEQ charges ...
+  #fragments for EEQ constrain: 1
+  fragment charges :   0.000
+  
+ === Detailed Parameter Calculation for Electrostatics ===
+  
+ 1. Electrostatic energy (E_es) calculation:
+    E_es = sum(i<j) [q(i)*q(j)*erf(gammij*r_ij)/r_ij^2] - sum(i) [q(i)*chi(i)]
+           + sum(i) [0.5*q(i)^2*(gamma(i) + sqrt(2/pi)/sqrt(alpha(i)))]
+    where:
+      q(i) = atomic charges from EEQ model
+      chi(i) = electronegativity of atom i
+      gamma(i) = chemical hardness of atom i
+      alpha(i) = chemical softness of atom i
+      gammij = 1/sqrt(alpha(i) + alpha(j))
+      erf = error function
+    E_es =    4.0572545323414035E-016  Hartree
+  
+ Electrostatic energy: E_es =    4.0572545323414035E-016  Hartree
+ ===================================================================
+  
+  rings ...
+  # BATM   0
+  # H in HB   0
+
+  atom   neighbors  erfCN metchar sp-hybrid imet pi  qest     coordinates
+    1  H       1    0.98   0.00         0    0    0   0.000   -0.175520    0.683425   -0.471186
+    2  H       1    0.98   0.00         0    0    0   0.000    0.000000    1.442313   -0.901488
+
+molecular fragment  # atoms  topo charge
+       1    2    0.000
+
+
+ #atoms   :   2
+ #bonds   :   1
+
+ bond atoms        type  in ring    R      R0    piBO    fqq  kbond(tot)  alp
+ H  H     2    1      1    0     0.471   0.691 -99.000   1.023  -0.179   0.468
+  
+ === Detailed Parameter Calculation for Bond            2 -           1  ===
+ Atom types: H  (           1 ) - H  (           1 )
+  
+ 1. Equilibrium distance (r0) calculation:
+    r0 = (rtmp(ij) + topo%vbond(1,i)) * 0.529167
+    where:
+      rtmp(ij) =    1.4653924033120012       (Slater-Koster based distance)
+      topo%vbond(1,i) = gen%rabshift + shift =  -0.10999999940395355       +   -5.0000000745058060E-002  =  -0.16000000014901161     
+      0.529167 = conversion factor from Bohr to Angstrom
+    r0 = (   1.4653924033120012       +  -0.16000000014901161      ) * 0.529167 =   0.69077057720830792       Angstrom
+  
+ 2. Force constant (k) calculation:
+    topo%vbond(2,i) = gen%srb1 * (1.0 + fsrb2*(param%en(ia)-param%en(ja))**2 + gen%srb3*bstrength)
+    where:
+      gen%srb1 =   0.37310001254081726     
+      fsrb2 =   0.31709998846054077     
+      param%en(ia) =    2.2000000476837158       (electronegativity of atom            2 )
+      param%en(ja) =    2.2000000476837158       (electronegativity of atom            1 )
+      gen%srb3 =   0.25380000472068787     
+      bstrength =    1.0000000000000000       (bond strength based on hybridization)
+    topo%vbond(2,i) =   0.37310001254081726       * (1.0 +   0.31709998846054077       * (   2.2000000476837158       -    2.2000000476837158      )^2 +   0.25380000472068787       *    1.0000000000000000      )
+    topo%vbond(2,i) =   0.46779279748496538     
+  
+ 3. Bond energy prefactor calculation:
+    topo%vbond(3,i) = -param%bond(ia) * param%bond(ja) * ringf * bstrength * fqq * fheavy * fpi * fxh * fcn
+    where:
+      param%bond(ia) =   0.41799700000000001       (atomic bond parameter for atom            2 )
+      param%bond(ja) =   0.41799700000000001       (atomic bond parameter for atom            1 )
+      ringf =    1.0000000000000000       (ring effect factor)
+      bstrength =    1.0000000000000000       (bond strength)
+      fqq =    1.0234999991953373       (charge correlation factor)
+      fheavy =    1.0000000000000000       (heavy metal factor)
+      fpi =    1.0000000000000000       (pi orbital factor)
+      fxh =    1.0000000000000000       (X-H bond factor)
+      fcn =    1.0000000000000000       (coordination number factor)
+    topo%vbond(3,i) =  -0.17882744693061964     
+  
+ Bond stretching energy: E_bond = topo%vbond(2,i) * (r_ij - r0)^2
+ ===================================================================
+  
+ #angl    :   0
+
+ angle atoms        phi0    phi      FC  pi rings
+ torsion atoms        nrot   rings    phi0    phi      FC
+ out-of-plane atoms          phi0    phi      FC
+ #tors    :   0
+ #nmol    :   1
+ #optfrag :   1
+
+ GFN-FF setup done.
+
+Atom parameters for H  (atomic number 1):
+  Covalent radius:     0.806283 Bohr (    0.426667 A)
+  Electronegativity (chi):     1.227054
+  Chemical hardness (gam):    -0.448428
+  CN factor:     0.008904
+
+Distance calculation between atom 1 and atom 2:
+  Coordinates of atom 1:    -0.175520    0.683425   -0.471186 Bohr
+             in Angstrom: 1:    -0.092881    0.361653   -0.249341 A
+  Coordinates of atom 2:     0.000000    1.442313   -0.901488 Bohr
+             in Angstrom: 2:     0.000000    0.763239   -0.477047 A
+  Differences (dx,dy,dz):    -0.175520   -0.758888    0.430302 Bohr
+             in Angstrom:    -0.092881   -0.401586    0.227706 A
+  Distance = sqrt(    0.791877) =     0.889875 Bohr
+  Distance in Angstrom:     0.470901 A
+
+  
+ === Detailed Parameter Calculation for Repulsion ===
+  
+ 1. Repulsion energy (E_rep) calculation:
+    E_rep = sum(i<j) [exp(-t8) * repz(i) * repz(j) * repscaln / r_ij]
+    where:
+      t8 = r_ij^1.5 * alphanb(i,j)
+      alphanb(i,j) = (alphanb(i) + alphanb(j)) / 2
+      repz(i) = atomic repulsion parameter for atom i
+      repscaln = global scaling factor
+    E_rep =    0.0000000000000000       Hartree
+  
+ Repulsion energy: E_rep =    0.0000000000000000       Hartree
+ ===================================================================
+  
+  
+ === Detailed Parameter Calculation for Dispersion ===
+  
+ 1. Dispersion energy (E_disp) calculation (D3(BJ) model):
+    E_disp = -sum(i<j) [C6(i,j) * (f_damp(6) / r_ij^6 + 2*R4R2(i,j)*f_damp(8) / r_ij^8)]
+    where:
+      C6(i,j) = atomic dispersion coefficients
+      f_damp(n) = 1 / (r_ij^n + R0(i,j)^n) (Becke-Johnson damping)
+      R4R2(i,j) = (3*r4r2(i)*r4r2(j))^(1/2)
+      R0(i,j) = sqrt(R0(i)*R0(j))
+    E_disp =   -4.7159970571053466E-005  Hartree
+  
+ Dispersion energy: E_disp =   -4.7159970571053466E-005  Hartree
+ ===================================================================
+  
+Bond parameters for bond between atom 1 and atom 2
+:
+  Bond index in topology: 1
+  Equilibrium distance (r0):    -0.160000
+  Force constant (k):     0.467793
+  Bond energy prefactor:    -0.178827
+  Detailed bond parameter calculation:
+    Bond stretching energy: E_bond = k_bond * (r_ij - r0)^2
+    E_bond =     0.467793 * (    0.889875 -    -0.160000)^2
+    E_bond =     0.467793 *     1.102237 =     0.515619 Eh
+    Covalent radii sum: r_cov_i + r_cov_j
+    H :    0.806283 Bohr, H :    0.806283 Bohr
+    Sum =     1.612566 Bohr
+    Electronegativity difference: |chi_i - chi_j|
+    H :    1.227054, H :    1.227054
+    Difference =     0.000000
+
+Total energy:       0.050469853027
+Gradient norm:       1.571332012861
+
+ Energy breakdown:
+  Bond energy:            -0.164952020372 Eh
+  Angle energy:            0.000000000000 Eh
+  Torsion energy:          0.000000000000 Eh
+  Repulsion energy:        0.215469033370 Eh
+  Electrostatic:           0.000000000000 Eh
+  Dispersion:             -0.000047159971 Eh
+  H-bond energy:           0.000000000000 Eh
+  X-bond energy:           0.000000000000 Eh
+  Bonded atm energy:       0.000000000000 Eh
+  External energy:         0.000000000000 Eh
+
+       ... GFN-FF H2 explicit parameters   [PASSED]

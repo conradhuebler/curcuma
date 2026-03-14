@@ -108,9 +108,9 @@ private:
     static std::unique_ptr<ComputationalMethod> createEHT(const json& config);
     
     /**
-     * @brief Create native GFN-FF method (cgfnff)
+     * @brief Create native GFN-FF method
      */
-    static std::unique_ptr<ComputationalMethod> createCGFNFF(const json& config);
+    static std::unique_ptr<ComputationalMethod> createGFNFF(const json& config);
     
     /**
      * @brief Create UFF/QMDFF force field methods
@@ -147,44 +147,9 @@ private:
     static bool hasGFNFF();
     static bool hasD3();
     static bool hasD4();
+    static bool checkCompilationFlag(const std::string& flag);  // native-gfnff addition
     
-    // =================================================================================
-    // Method Registration System
-    // =================================================================================
-    
-    /**
-     * @brief Method priority entry for shared methods
-     */
-    struct MethodPriority {
-        std::string method_name;
-        std::vector<std::pair<std::string, std::function<std::unique_ptr<ComputationalMethod>(const json&)>>> priorities;
-        // Format: {{"provider_name", creation_function}, ...} in priority order
-    };
-    
-    /**
-     * @brief Explicit method entry for single-provider methods
-     */
-    struct ExplicitMethod {
-        std::string method_name;
-        std::function<std::unique_ptr<ComputationalMethod>(const json&)> creator;
-        std::string provider_name;
-        bool requires_compilation_flag;
-        std::string compilation_flag;
-    };
-    
-    /**
-     * @brief Get priority method registry
-     */
-    static const std::vector<MethodPriority>& getPriorityMethods();
-    
-    /**
-     * @brief Get explicit method registry  
-     */
-    static const std::vector<ExplicitMethod>& getExplicitMethods();
-    
-    /**
-     * @brief Check if method name matches any pattern in list
-     */
+    static bool isUlyssesMethod(const std::string& method);
     static bool matchesMethodList(const std::string& method, const std::vector<std::string>& method_list);
     
     // =================================================================================

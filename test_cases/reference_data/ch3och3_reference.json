@@ -1,0 +1,303 @@
+{
+  "molecule": "CH3OCH3",
+  "description": "Dimethyl ether - Complete GFN-FF reference data from XTB 6.6.1",
+  "topology": {
+    "coordination_numbers": [
+      3.5,
+      3.5,
+      0.97,
+      0.97,
+      0.97,
+      1.91,
+      0.97,
+      0.97,
+      0.97
+    ],
+    "hybridization": [
+      3,
+      3,
+      0,
+      0,
+      0,
+      3,
+      0,
+      0,
+      0
+    ],
+    "charges": [
+      0.02055261,
+      0.02053202,
+      0.04900542,
+      0.06258671,
+      0.05025488,
+      -0.36475672,
+      0.06257459,
+      0.05025181,
+      0.04899868
+    ],
+    "atoms": [
+      {
+        "index": 1,
+        "element": "C",
+        "neighbors": 4
+      },
+      {
+        "index": 2,
+        "element": "C",
+        "neighbors": 4
+      },
+      {
+        "index": 3,
+        "element": "H",
+        "neighbors": 1
+      },
+      {
+        "index": 4,
+        "element": "H",
+        "neighbors": 1
+      },
+      {
+        "index": 5,
+        "element": "H",
+        "neighbors": 1
+      },
+      {
+        "index": 6,
+        "element": "O",
+        "neighbors": 2
+      },
+      {
+        "index": 7,
+        "element": "H",
+        "neighbors": 1
+      },
+      {
+        "index": 8,
+        "element": "H",
+        "neighbors": 1
+      },
+      {
+        "index": 9,
+        "element": "H",
+        "neighbors": 1
+      }
+    ]
+  },
+  "bonds": [
+    {
+      "atoms": [
+        3,
+        2
+      ],
+      "elements": [
+        "H",
+        "C"
+      ],
+      "type": 1,
+      "in_ring": 0,
+      "R": 1.094,
+      "R0": 0.977,
+      "piBO": -99.0,
+      "fqq": 1.006,
+      "kbond": -0.162,
+      "alp": 0.482,
+      "intermediate_params": {
+        "rtmp_ij": 2.0281822999730474,
+        "vbond_1": -0.10999999940395355
+      }
+    },
+    {
+      "atoms": [
+        4,
+        2
+      ],
+      "elements": [
+        "H",
+        "C"
+      ],
+      "type": 1,
+      "in_ring": 0,
+      "R": 1.094,
+      "R0": 0.977,
+      "piBO": -99.0,
+      "fqq": 1.006,
+      "kbond": -0.162,
+      "alp": 0.482,
+      "intermediate_params": {
+        "rtmp_ij": 2.0281983284180654,
+        "vbond_1": -0.10999999940395355
+      }
+    },
+    {
+      "atoms": [
+        5,
+        2
+      ],
+      "elements": [
+        "H",
+        "C"
+      ],
+      "type": 1,
+      "in_ring": 0,
+      "R": 1.094,
+      "R0": 0.977,
+      "piBO": -99.0,
+      "fqq": 1.006,
+      "kbond": -0.162,
+      "alp": 0.482,
+      "intermediate_params": {
+        "rtmp_ij": 2.0281845798723106,
+        "vbond_1": -0.10999999940395355
+      }
+    },
+    {
+      "atoms": [
+        6,
+        1
+      ],
+      "elements": [
+        "O",
+        "C"
+      ],
+      "type": 1,
+      "in_ring": 0,
+      "R": 1.421,
+      "R0": 1.298,
+      "piBO": -99.0,
+      "fqq": 1.047,
+      "kbond": -0.137,
+      "alp": 0.562,
+      "intermediate_params": {
+        "rtmp_ij": 2.562390326292743,
+        "vbond_1": -0.10999999940395355
+      }
+    },
+    {
+      "atoms": [
+        6,
+        2
+      ],
+      "elements": [
+        "O",
+        "C"
+      ],
+      "type": 1,
+      "in_ring": 0,
+      "R": 1.421,
+      "R0": 1.298,
+      "piBO": -99.0,
+      "fqq": 1.047,
+      "kbond": -0.137,
+      "alp": 0.562,
+      "intermediate_params": {
+        "rtmp_ij": 2.562390552893864,
+        "vbond_1": -0.10999999940395355
+      }
+    },
+    {
+      "atoms": [
+        7,
+        1
+      ],
+      "elements": [
+        "H",
+        "C"
+      ],
+      "type": 1,
+      "in_ring": 0,
+      "R": 1.094,
+      "R0": 0.977,
+      "piBO": -99.0,
+      "fqq": 1.006,
+      "kbond": -0.162,
+      "alp": 0.482,
+      "intermediate_params": {
+        "rtmp_ij": 2.0282001911329637,
+        "vbond_1": -0.10999999940395355
+      }
+    },
+    {
+      "atoms": [
+        8,
+        1
+      ],
+      "elements": [
+        "H",
+        "C"
+      ],
+      "type": 1,
+      "in_ring": 0,
+      "R": 1.095,
+      "R0": 0.977,
+      "piBO": -99.0,
+      "fqq": 1.006,
+      "kbond": -0.162,
+      "alp": 0.482,
+      "intermediate_params": {
+        "rtmp_ij": 2.0281699909994093,
+        "vbond_1": -0.10999999940395355
+      }
+    },
+    {
+      "atoms": [
+        9,
+        1
+      ],
+      "elements": [
+        "H",
+        "C"
+      ],
+      "type": 1,
+      "in_ring": 0,
+      "R": 1.094,
+      "R0": 0.977,
+      "piBO": -99.0,
+      "fqq": 1.006,
+      "kbond": -0.162,
+      "alp": 0.482,
+      "intermediate_params": {
+        "rtmp_ij": 2.028192507426439,
+        "vbond_1": -0.10999999940395355
+      }
+    }
+  ],
+  "angles": [
+    {
+      "atoms": [
+        1,
+        7,
+        6
+      ],
+      "phi0": 108.5,
+      "phi": 108.388,
+      "FC": 0.27,
+      "pi": "F",
+      "rings": 0
+    }
+  ],
+  "torsions": [
+    {
+      "atoms": [
+        6,
+        1,
+        2,
+        7
+      ],
+      "nrot": 3,
+      "rings": 0,
+      "phi0": 180.0,
+      "phi": 176.863,
+      "FC": 0.148
+    }
+  ],
+  "energies": {
+    "E_bond": -1.21644394,
+    "E_angle": 0.00177953,
+    "E_torsion": 2.339e-05,
+    "E_repulsion": 0.05386466,
+    "E_coulomb": -0.04782536,
+    "E_dispersion": -4.195e-05,
+    "E_batm": 0.0,
+    "E_total": -1.2092092216
+  }
+}

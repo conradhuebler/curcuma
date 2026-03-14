@@ -93,37 +93,12 @@ All QM methods are wrapped to provide the same interface while preserving their 
 
 ## Integration with EnergyCalculator
 
-### Old vs New Architecture
-
-#### **Old System (Pre-January 2025)**
-```cpp
-// Complex SwitchMethod with 10+ cases
-switch(method_id) {
-    case 0: /* ForceField code */ break;
-    case 1: /* TBLite code */ break;  
-    case 2: /* XTB code */ break;
-    // ... 10+ more cases
-}
-```
-
-#### **New System (January 2025)**
 ```cpp
 // Single polymorphic method pointer
 std::unique_ptr<ComputationalMethod> m_method;
-
-// Simple method resolution
 m_method = MethodFactory::createMethod(method_name, config);
 return m_method->calculateEnergy(gradient);
 ```
-
-### Benefits of New Architecture
-
-1. **Eliminates Giant Switch**: No more 200+ line SwitchMethod function
-2. **Automatic Fallbacks**: Method hierarchies with priority resolution
-3. **Enhanced Error Handling**: Method-specific error reporting
-4. **Universal Verbosity**: Consistent CurcumaLogger integration
-5. **Educational Clarity**: Direct polymorphic calls vs complex conditionals
-6. **Maintainability**: Easy to add new methods without touching dispatcher
 
 ## ConfigManager Integration (October 2025)
 
@@ -260,28 +235,10 @@ All wrapped methods support the **4-level verbosity system**:
 
 ## Development Status
 
-### ✅ Completed (January-October 2025)
-- **Polymorphic Architecture**: Full implementation with all method wrappers
-- **MethodFactory**: Priority-based resolution with hierarchical fallbacks
-- **API Compatibility**: All existing EnergyCalculator usage preserved
-- **Universal Verbosity**: Complete integration across all computational methods
-- **Thread Safety**: Enhanced concurrency support maintained
-- **Error Handling**: Comprehensive CurcumaLogger-based error reporting
-- **ConfigManager Integration**: Complete type-safe parameter system (Phases 3A-3C)
-  - 240 parameters with PARAM macro definitions
-  - All 8 QM/FF interfaces accept ConfigManager
-  - Delegating constructors for backward compatibility
-  - End-to-end parameter flow from CLI to external libraries
+### ✅ Complete
+- Polymorphic architecture, MethodFactory, ConfigManager integration (Phases 3A-3C)
+- 240 parameters with PARAM macros, all 8 QM/FF interfaces accept ConfigManager
+- Universal verbosity, thread safety, error handling
 
 ### 🟡 Remaining TODOs
 - **DFT-D3/D4 UpdateParameters**: Migrate to ConfigManager (low priority, seldom used)
-- **Native GFN-FF Parameters**: Complete parameter validation and real force field values
-
-### 🔧 Future Enhancements
-- **Additional Methods**: Easy integration of new computational methods
-- **Performance Optimization**: Method-specific performance tuning
-- **Extended Hierarchies**: More complex fallback chains for specialized methods
-
----
-
-*This directory represents the future of computational method integration in Curcuma - providing educational clarity through polymorphism while maintaining high performance and scientific accuracy.*

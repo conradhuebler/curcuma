@@ -1,4 +1,6 @@
 #!/bin/bash
+export PROJECT_ROOT='/home/conrad/src/claude_curcuma/curcuma/test_cases/cli/../..'
+
 # SimpleMD Test - Claude Generated (FIXED)
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

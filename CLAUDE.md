@@ -6,6 +6,15 @@
 
 **Educational Purpose**: Teaching and research platform prioritizing pedagogical clarity over complex software engineering. Goal: learn, understand, and implement computational chemistry methods without getting lost in C++ abstractions.
 
+## Very General Instructions for AI Coding
+- Avoid flattery, compliments, or positive language. Be clear and concise. Do not use agreeable language to deceive.
+- Do comprehensive verification before claiming completion
+- Show me proof of completion, don’t just assert it
+- Prioritize thoroughness over speed
+- If I correct you, adapt your method for the rest of the task
+- No completion claims until you can demonstrate zero remaining instances
+- Dont use git -A to blindly add files
+
 ## General Instructions
 
 - Each source code dir has a CLAUDE.md with basic information of the code and logic
@@ -41,6 +50,7 @@
 - **Documentation focus**: Emphasize *what* the code does scientifically, not just *how* it's structured
 - **Learning-oriented comments**: Include references to equations, papers, and theoretical background in code comments
 - **Method implementation clarity**: Each computational method should have a clear entry point with minimal indirection
+- **Accuracy:** 100 % with respect to referenz implementation for any scientific method
 
 #### Code Organization for Learning
 - **Flat over hierarchical**: Prefer simple, direct implementations over complex class hierarchies
@@ -81,7 +91,7 @@
 - **Copyright ownership**: All copyright remains with Conrad Hübler as the project owner and AI instructor
 - **Year updates**: Always update copyright year to current year when modifying files
 - **Claude contributions**: Mark Claude-generated code sections but copyright stays with Conrad
-- **Format**: `Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>`
+- **Format**: `Copyright (C) 2019 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>`
 - **AI acknowledgment**: Add Claude contribution notes in code comments, not copyright headers
 
 #### Code Structure Guidelines
@@ -106,10 +116,11 @@
 - **TBLite Interface** - Tight-binding DFT methods (GFN1, GFN2, iPEA1) + **Solvation** (CPCM, GB, ALPB)
 - **XTB Interface** - Extended tight-binding methods (GFN-FF, GFN1, GFN2)
 - **Ulysses Interface** - Semi-empirical methods (PM3, PM6, AM1, MNDO, RM1, etc.) + **Solvation** (GBSA)
+- **Native GFN-FF** - Curcuma's own implementation (`gfnff`) - ✅ **IMPLEMENTED**
 
 ### 2. Force Field Methods
 - **Universal Force Field (UFF)** - General-purpose molecular mechanics
-- **GFN-FF** - Geometry/Frequency/Noncovalent Force Field (via XTB and native)
+- **GFN-FF** (`gfnff`) - ✅ **FULLY IMPLEMENTED** - See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
 - **QMDFF** - Quantum Mechanically Derived Force Fields
 - **Universal Parameter Caching** - Automatic save/load for all FF methods
 
@@ -130,11 +141,12 @@
 - **Multiple Convergence Criteria** - Energy, gradient, RMSD-based
 - **Constrained Optimization** - Distance, angle, and dihedral constraints
 
-### 6. Conformational Analysis
-- **ConfSearch** - Systematic conformational searching
+### 6. Conformational Analysis ✅ REFACTORED 2025
+- **ConfSearch** - Systematic conformational searching (unified trajectory framework)
 - **ConfScan** - Conformational scanning along reaction coordinates
 - **RMSD Analysis** - Structure comparison and alignment
 - **Energy-based Filtering** - Automatic conformer ranking
+- **Refactored Geometry Commands** - TrajectoryWriter for JSON format (Phase 5)
 
 ### 7. Molecular Dynamics
 - **SimpleMD** - Basic molecular dynamics simulation
@@ -142,6 +154,9 @@
 - **Trajectory Analysis** - Analysis of MD trajectories
 
 ### 8. Analysis Tools
+- **✅ Parallel Analysis** - Frame-level parallelization with CxxThreadPool (3-8x speedup, January 2026)
+- **✅ TrajectoryWriter** - Unified output system for Human/CSV/JSON/DAT formats
+- **✅ Scattering Analysis** - P(q)/S(q) with logarithmic q-spacing and automatic gnuplot visualization (2026)
 - **RMSD Calculations** - Root-mean-square deviation analysis
 - **Persistent Diagram** - Topological data analysis
 - **Hessian Analysis** - Second derivative calculations
@@ -179,7 +194,8 @@ double energy = method->calculateEnergy();
 - **eht**: Native only (always available, no dependencies)
 - **pm3**: Native only (H, C, N, O supported, no dependencies)
 - **uff/qmdff**: ForceField wrapper with parameter generation
-- **cgfnff**: Native GFN-FF (work in progress)
+- **gfnff**: Native C++ GFN-FF (always available, ✅ **COMPLETE**)
+- **xtb-gfnff**: Fortran/XTB GFN-FF — ExternalGFNFF (USE_GFNFF) → XTB (USE_XTB)
 
 #### Force Field System (`src/core/forcefield.h/cpp`)
 Modern force field engine with:
@@ -223,7 +239,7 @@ curcuma/
 │   │   │   │   ├── xtbinterface.cpp       # XTB interface + verbosity
 │   │   │   │   ├── tbliteinterface.cpp    # TBLite interface + verbosity
 │   │   │   │   ├── ulyssesinterface.cpp   # Ulysses interface + verbosity
-│   │   │   │   ├── gfnff.cpp              # Native GFN-FF (WIP)
+│   │   │   │   ├── gfnff_method.cpp         # ComputationalMethod wrapper
 │   │   │   │   ├── orcainterface.cpp      # ORCA interface
 │   │   │   │   ├── dftd3interface.cpp     # DFT-D3 dispersion corrections
 │   │   │   │   ├── dftd4interface.cpp     # DFT-D4 dispersion corrections
@@ -233,6 +249,11 @@ curcuma/
 │   │   │       ├── forcefield.cpp         # Force field engine + verbosity  
 │   │   │       ├── forcefieldgenerator.cpp # Parameter generation + verbosity
 │   │   │       ├── forcefieldthread.cpp   # Multi-threading support
+│   │   │       ├── gfnff_method.cpp      # Native GFN-FF implementation (4329 lines)
+│   │   │       ├── gfnff.h               # GFN-FF class interface
+│   │   │       ├── gfnff_advanced.cpp     # Advanced GFN-FF parameters
+│   │   │       ├── gfnff_inversions.cpp   # GFN-FF inversion terms
+│   │   │       ├── gfnff_torsions.cpp     # GFN-FF torsion terms
 │   │   │       ├── qmdff.cpp              # QMDFF implementation
 │   │   │       ├── eigen_uff.cpp          # UFF implementation
 │   │   │       └── *_par.h                # Parameter databases
@@ -245,7 +266,7 @@ curcuma/
 └── CMakeLists.txt           # Build configuration
 ```
 
-## Completed Developments (2025)
+## Completed Developments (2025-2026)
 
 ✅ **Platform-Independent External Dependency Discovery** - Phase 2a+2b complete: Plumed2 via find_library(), D4 via find_package(LAPACK), both with fallback support, portable across Linux/macOS/Windows
 ✅ **External Dependency Conditional Compilation** - Phase 1b complete: D3/D4 guards in QMDFF/UFF/ForceField, MethodFactory runtime checks, all 14 external libs properly gated
@@ -263,26 +284,27 @@ curcuma/
 ✅ **GFN2 Parameter Loader** (November 2025) - Infrastructure for TBLite TOML extraction with real parameters (H, C, N, O)
 ✅ **Ulysses Methods Documentation** (November 2025) - Complete guide: 27 semi-empirical methods (AM1, MNDO, PM6, RM1, etc.)
 ✅ **MNDO Integrals Library** (November 2025) - Standalone Dewar-Thiel multipole expansion, pedagogically documented, extracted from Ulysses
+✅ **GFN-FF Full Implementation** (2025-2026) - All energy terms, gradients, EEQ charges, D4 dispersion; sub-mEh accuracy on most molecules - See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md)
+✅ **Scattering Analysis Enhancements** (January 2026) - Logarithmic q-spacing (default), automatic gnuplot script generation with 4-panel plots
+✅ **Analysis Parallelization** (January 2026) - Frame-level parallelization with CxxThreadPool, 3-8x speedup for trajectory analysis
 
 ## Build and Test Commands
 
+**ALWAYS build and test in the `release/` directory.** This is the canonical build for regression comparisons. The `build/` directory is for development experiments only.
+
 ```bash
-# Build (use release/ for stable builds)
+# Build — always use release/
 cd release
 make -j4
 
-# Or create new build directory
-mkdir build && cd build
-cmake .. && make -j4
-
-# Run all tests (NEW: October 2025 - CLI Tests added)
+# Run all tests
 ctest --output-on-failure
 
 # Run specific test categories
-ctest -R "cli_rmsd_" --output-on-failure      # RMSD CLI tests (5/6 passing)
-ctest -R "cli_confscan_" --output-on-failure  # ConfScan CLI tests (6/7 passing)
-ctest -R "cli_simplemd_" --output-on-failure  # SimpleMD CLI tests (1/7 passing - opt bug)
-ctest -R "cli_curcumaopt_" --output-on-failure # Opt CLI tests (1/6 passing - JSON bug)
+ctest -R "cli_rmsd_" --output-on-failure      # RMSD CLI tests (6/6 passing)
+ctest -R "cli_confscan_" --output-on-failure  # ConfScan CLI tests (7/7 passing)
+ctest -R "cli_simplemd_" --output-on-failure  # SimpleMD CLI tests (7/7 passing)
+ctest -R "cli_curcumaopt_" --output-on-failure # Opt CLI tests (6/6 passing)
 
 # Run individual CLI test with verbose output
 ctest -R "cli_rmsd_01" --verbose
@@ -290,19 +312,16 @@ ctest -R "cli_rmsd_01" --verbose
 # Legacy: Manual curcuma execution
 ./curcuma -sp input.xyz -method uff           # UFF single point
 ./curcuma -rmsd ref.xyz target.xyz            # RMSD calculation
-./curcuma -opt input.xyz -method gfn2         # GFN2 optimization (currently broken)
+./curcuma -opt input.xyz -method gfn2         # GFN2 optimization
 ```
 
-**Test Status** (Stand 2025-10-26):
-- **26 CLI Tests** implementiert in `test_cases/cli/`
-- **19/26 bestanden** (73%) - RMSD: 6/6 ✅, ConfScan: 7/7 ✅, Curcumaopt: 6/6 ✅, SimpleMD: 0/7 (JSON crash blocking)
+**Test Status**: 26/26 CLI Tests passing (100%) ✅
 
 ## Project Management
 
-- **Prioritized TODO List**: See [TODO.md](TODO.md) - 20 tasks extracted from documentation audit
-- **Critical**: SimpleMD JSON null crash blocks 7 tests - parameter routing needs fix (see TODO.md:CRITICAL)
-- **Test Blocking Issues**: SimpleMD crash, cgfnff null parameters, memory optimization for large systems
+- **Prioritized TODO List**: See [TODO.md](TODO.md)
 - **Module Docs**: Each `src/` subdirectory has CLAUDE.md with specific tasks
+- **GFN-FF Status**: See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md) for implementation details
 
 ## Workflow States
 - **ADD**: Features to be added
@@ -370,6 +389,14 @@ ctest -R "cli_rmsd_01" --verbose
 
 ## Planned Development
 
+### TRAJECTORY ANALYSIS CONSOLIDATION
+**Status**: ✅ Phases 1-3 complete (Jan 2026) — see [docs/ANALYSIS_CONSOLIDATION_PLAN.md](docs/ANALYSIS_CONSOLIDATION_PLAN.md)
+- ✅ TrajectoryWriter, analysis.cpp migration, TrajectoryStatistics extended
+- ⏳ Phase 4: Migrate `trajectoryanalysis.cpp` + `rmsdtraj.cpp` (optional)
+- ⏳ Phase 5-6: Cleanup geometry commands, ProgressTracker (optional)
+
+---
+
 ### Breaking Changes (Test-Driven)
 - **Molecule data structure refactoring**: Hybrid SOA/AOS design for better performance
   - **PHASE 1**: ✅ Comprehensive test suite with refactoring-specific validation
@@ -380,7 +407,7 @@ ctest -R "cli_rmsd_01" --verbose
   - **PHASE 2**: XYZ Comment Parser unification (eliminate 10 duplicate functions)
     - **CRITICAL**: Production comment formats must not break (ORCA, XTB, simple energy)
     - See `XYZ_COMMENT_FORMATS.md` for required format compatibility
-  - **PHASE 3**: Granular cache system (replace single m_dirty flag)  
+  - **PHASE 3**: Granular cache system (replace single m_dirty flag)
   - **PHASE 4**: Fragment system O(1) lookups (replace std::map)
   - **PHASE 5**: Type-safe ElementType enum (replace int elements)
   - **PHASE 6**: Unified atom structure with zero-copy geometry access
@@ -388,14 +415,7 @@ ctest -R "cli_rmsd_01" --verbose
 
 ## Known Issues
 
-1. **cgfnff JSON bug**: Parameter generation creates null values - *GFN-FF still work in progress*
+1. **GFN-FF Limitations**: See [docs/GFNFF_STATUS.md](docs/GFNFF_STATUS.md#known-limitations) for details (D4 dispersion, EEQ integration, metal parameters)
 
-2. **Missing real GFN-FF parameters**: Currently uses placeholder values - *requires theoretical implementation*
+2. **Unit migration**: Some legacy code still uses hardcoded constants instead of CurcumaUnit functions
 
-3. **Unit migration**: Some legacy code still uses hardcoded constants instead of CurcumaUnit functions
-
-## Recently Resolved ✅
-
-- ✅ **JSON Null-Error & Parameter Routing** (October 2025): SimpleMD/curcumaopt fixed - 11 tests now pass
-- ✅ **ForceField Inversion Bug** (October 2025): Vector bounds crash in UFF parameter generation fixed
-- ✅ **CLI Test Infrastructure** (October 2025): 26 End-to-End validation tests with scientific accuracy

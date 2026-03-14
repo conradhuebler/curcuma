@@ -21,8 +21,13 @@
 
 #include <cmath>
 #include <deque>
+#include <limits>
 #include <map>
 #include <string>
+#include <vector>
+#include "json.hpp"
+
+using json = nlohmann::json;
 
 /*! \brief Online statistics calculator for trajectory time-series data - Claude Generated 2025
  *
@@ -87,15 +92,91 @@ public:
      */
     void setWindowSize(int size);
 
+    // -----------------
+    // Extended methods for TrajectoryWriter integration
+    // -----------------
+
+    /*! \brief Get minimum value seen for a metric
+     * \param name Metric identifier
+     * \return Minimum value observed so far
+     */
+    double getMin(const std::string& name) const;
+
+    /*! \brief Get maximum value seen for a metric
+     * \param name Metric identifier
+     * \return Maximum value observed so far
+     */
+    double getMax(const std::string& name) const;
+
+    /*! \brief Get median value (requires full series storage)
+     * \param name Metric identifier
+     * \return Median of all values seen so far
+     */
+    double getMedian(const std::string& name) const;
+
+    /*! \brief Get range of values for a metric
+     * \param name Metric identifier
+     * \return Difference between maximum and minimum
+     */
+    double getRange(const std::string& name) const;
+
+    /*! \brief Get variance for a metric
+     * \param name Metric identifier
+     * \return Population variance (M2 / count)
+     */
+    double getVariance(const std::string& name) const;
+
+    /*! \brief Export complete statistics for a metric as JSON
+     * \param name Metric identifier
+     * \return JSON with all statistics (mean, std, min, max, median, etc.)
+     */
+    json exportStatistics(const std::string& name) const;
+
+    /*! \brief Export all statistics for all metrics as JSON
+     * \return JSON with complete statistics for all metrics
+     */
+    json exportAllStatistics() const;
+
+    /*! \brief Get full time series data for a metric
+     * \param name Metric identifier
+     * \return Vector of all values seen (requires full series storage)
+     */
+    std::vector<double> getSeries(const std::string& name) const;
+
+    /*! \brief Set whether to store full time series data
+     * \param store Enable/disable full series storage
+     * \param metrics Optional list of metrics to store (empty = all)
+     */
+    void setStoreFullSeries(bool store, const std::vector<std::string>& metrics = {});
+
+    /*! \brief Check if full series storage is enabled
+     * \return True if storing complete time series
+     */
+    bool isStoringFullSeries() const;
+
+    /*! \brief Get length of stored time series for a metric
+     * \param name Metric identifier
+     * \return Number of values stored
+     */
+    size_t getSeriesLength(const std::string& name) const;
+
 private:
     /*! \brief Statistics for a single metric - Welford's algorithm state */
     struct MetricStats {
         int count = 0; ///< Number of values seen
         double mean = 0.0; ///< Cumulative mean
         double M2 = 0.0; ///< Sum of squared differences from mean
+        double min_val = std::numeric_limits<double>::max(); ///< Minimum value observed
+        double max_val = -std::numeric_limits<double>::max(); ///< Maximum value observed
         std::deque<double> window; ///< Circular buffer for moving average
+        std::vector<double> full_series; ///< Complete time series (optional, memory-intensive)
     };
 
     std::map<std::string, MetricStats> m_stats; ///< Per-metric statistics
     int m_window_size; ///< Moving average window size
+    bool m_store_full_series = false; ///< Enable full series storage
+    std::vector<std::string> m_full_series_metrics; ///< Which metrics to store fully
+
+    // Helper methods
+    static double calculateMedian(const std::vector<double>& data);
 };

@@ -25,10 +25,12 @@ namespace Optimization {
 
 // Claude Generated - LBFGSpp objective function adapter
 LBFGSppObjectiveFunction::LBFGSppObjectiveFunction(EnergyCalculator* calc, Molecule* mol,
-    const std::vector<int>& constraints)
+    const std::vector<int>& constraints, bool use_numerical_gradient, double numerical_gradient_step)
     : m_energy_calculator(calc)
     , m_molecule(mol)
     , m_constraints(constraints)
+    , m_use_numerical_gradient(use_numerical_gradient)
+    , m_numerical_gradient_step(numerical_gradient_step)
 {
     if (mol) {
         m_atom_count = mol->AtomCount();
@@ -56,18 +58,29 @@ double LBFGSppObjectiveFunction::operator()(const VectorXd& x, VectorXd& grad)
             }
         }
 
-        // Calculate energy and gradient
+        // Calculate energy
         m_energy_calculator->setMolecule(*m_molecule);
-        double energy = m_energy_calculator->CalculateEnergy(true);
 
-        if (std::isnan(energy) || std::isinf(energy)) {
-            m_error = true;
-            return 0.0;
+        double energy;
+        if (m_use_numerical_gradient) {
+            // Use numerical gradient (for debugging)
+            energy = m_energy_calculator->CalculateEnergy(false);
+            if (std::isnan(energy) || std::isinf(energy)) {
+                m_error = true;
+                return 0.0;
+            }
+            Geometry gradient_geom = m_energy_calculator->NumGrad();
+            grad = VectorXd::Map(gradient_geom.data(), gradient_geom.size());
+        } else {
+            // Use analytical gradient
+            energy = m_energy_calculator->CalculateEnergy(true);
+            if (std::isnan(energy) || std::isinf(energy)) {
+                m_error = true;
+                return 0.0;
+            }
+            Geometry gradient_geom = m_energy_calculator->Gradient();
+            grad = VectorXd::Map(gradient_geom.data(), gradient_geom.size());
         }
-
-        // Get gradient
-        Geometry gradient_geom = m_energy_calculator->Gradient();
-        grad = VectorXd::Map(gradient_geom.data(), gradient_geom.size());
 
         // Apply constraints to gradient
         for (int i = 0; i < m_atom_count && i < m_constraints.size(); ++i) {
@@ -112,8 +125,10 @@ bool LBFGSppOptimizer::InitializeOptimizerInternal()
         m_solver = std::make_unique<LBFGSSolver<double>>(*m_param);
 
         // Create objective function
+        // Claude Generated (Feb 21, 2026): Pass numerical gradient flags from context
         m_objective = std::make_unique<LBFGSppObjectiveFunction>(
-            m_context.energy_calculator, &m_molecule, m_context.atom_constraints);
+            m_context.energy_calculator, &m_molecule, m_context.atom_constraints,
+            m_context.use_numerical_gradient, m_context.numerical_gradient_step);
 
         // Initialize coordinate vector
         m_current_coordinates = Tools::Mol2Coord(m_molecule);

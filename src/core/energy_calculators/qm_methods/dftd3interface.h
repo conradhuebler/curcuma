@@ -91,6 +91,7 @@ private:
     std::string m_functional;
 
     int m_charge = 0;
+    int m_natoms = 0;  // Number of atoms (set in InitialiseMolecule)
     double* m_coord;
     int* m_attyp;
 

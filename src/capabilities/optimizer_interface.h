@@ -107,7 +107,7 @@ public:
     virtual bool UpdateGeometry(const double* coordinates) = 0;
 
     // Core optimization method (analog to QMInterface::Calculation)
-    virtual OptimizationResult Optimize(bool write_trajectory = false, bool verbose = false) = 0;
+    virtual OptimizationResult Optimize(bool write_trajectory = false, int verbosity = 1) = 0;
 
     // Property accessors (analog to QMInterface::Charges, etc.)
     virtual Vector GetCurrentGradient() const = 0;

@@ -482,7 +482,7 @@ tblite_set_calculator_max_iter(m_ctx, m_tblite_calc, m_SCFmaxiter);  // 200
 
 **🟡 Remaining TODOs**:
 - DFT-D3/D4 `UpdateParameters()` method signatures (still use JSON)
-- Native GFN-FF (cgfnff) parameter generation completeness
+- Native GFN-FF (gfnff) parameter generation completeness
 
 **See Full Migration Details**: `energy_modules_migration_guide.md`
 

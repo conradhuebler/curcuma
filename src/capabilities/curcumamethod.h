@@ -91,7 +91,11 @@ protected:
     void AppendError(const std::string& error) { m_error_list.push_back(error); }
 
     // Logging system integration - Claude Generated
-    void setVerbosity(int level) { m_verbosity = level; }
+    // Claude Generated (Updated 2025-11-03): Sync local verbosity with global logger
+    void setVerbosity(int level) {
+        m_verbosity = level;
+        CurcumaLogger::set_verbosity(level);  // Always sync to logger
+    }
     int getVerbosity() const { return m_verbosity; }
 
     //std::filebuf m_curcuma_progress;

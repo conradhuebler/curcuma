@@ -184,11 +184,25 @@ void CurcumaOpt::start()
         std::multimap<double, Molecule> results;
         while (!file.AtEnd()) {
             Molecule mol = file.Next();
+            // Phase 1: Skip invalid molecules (0 atoms) - Claude Generated 2025
+            if (mol.AtomCount() == 0) {
+                continue;  // Skip molecules that failed to parse
+            }
             mol.setCharge(m_charge);
             mol.setSpin(m_spin);
             m_molecules.push_back(mol);
         }
+        if (CurcumaLogger::get_verbosity() >= 2) {
+            CurcumaLogger::param("molecules_loaded", std::to_string(m_molecules.size()));
+        }
     }
+
+    // Phase 1: Check for empty molecule list - Claude Generated 2025
+    if (m_molecules.empty()) {
+        CurcumaLogger::error("No valid molecules loaded - cannot proceed with calculation");
+        throw std::runtime_error("No valid molecules to process");
+    }
+
     if (!m_serial)
         ProcessMolecules(m_molecules);
     else {
@@ -249,13 +263,18 @@ void CurcumaOpt::ProcessMoleculesSerial(const std::vector<Molecule>& molecules)
             scffile << scfjson;
         }
         auto end = std::chrono::system_clock::now();
-        std::cout << fmt::format("Single Point Energy = {0} Eh ({1} secs)\n", energy, std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0);
+        CurcumaLogger::result(fmt::format("Single Point Energy = {0} Eh ({1} secs)", energy, std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 1000.0));
         ++iter;
     }
 }
 
 void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
 {
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::param("molecules_to_process", std::to_string(molecules.size()));
+        CurcumaLogger::param("single_point_mode", m_singlepoint ? "true" : "false");
+    }
+
     int threads = m_threads;
 
     CxxThreadPool* pool = new CxxThreadPool;
@@ -294,11 +313,15 @@ void CurcumaOpt::ProcessMolecules(const std::vector<Molecule>& molecules)
     for (auto t : pool->getFinishedThreads()) {
         const SPThread* thread = static_cast<const SPThread*>(t);
         if (!thread->isFinished()) {
-            std::cout << " not finished " << thread->getMolecule().Energy() << std::endl;
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                std::cout << " not finished " << thread->getMolecule().Energy() << std::endl;
+            }
             continue;
         }
         // if (m_threads > 1)
-        std::cout << thread->Output();
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            std::cout << thread->Output();
+        }
 
         Molecule* mol2 = new Molecule(thread->getMolecule());
         if (m_hessian) {
@@ -350,13 +373,28 @@ double CurcumaOpt::SinglePoint(const Molecule* initial, std::string& output, Vec
         parameter(3 * i + 2) = geometry(i, 2);
     }
 
-    // Claude Generated: Silent parameter query to avoid confusing uff output when gfnff is requested
-    json silent_sp = m_controller["sp"];
-    silent_sp["verbosity"] = 0;  // Make parameter query silent
-    EnergyCalculator interface(method, silent_sp, Basename());
+    // Claude Generated (December 2025): Use actual verbosity for single point calculations
+    // For optimization, we set verbosity=0 in the iterative calculations
+    // But for single point, we want to show the energy
+    json sp_config = m_controller.contains("opt") ? m_controller["opt"] : m_controller;
+    if (!sp_config.contains("verbosity")) {
+        sp_config["verbosity"] = CurcumaLogger::get_verbosity();
+    }
+
+    EnergyCalculator interface(method, sp_config, Basename());
     interface.setMolecule(initial->getMolInfo());
     json param = interface.Parameter();
     double energy = interface.CalculateEnergy(false);
+
+    // Claude Generated (February 2026): Energy Decomposition JSON output
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        json energy_decomp = interface.getEnergyDecomposition();
+        if (!energy_decomp.empty()) {
+            CurcumaLogger::info("\nEnergy Decomposition (JSON):");
+            CurcumaLogger::info(energy_decomp.dump(2));
+        }
+    }
+
     double store = 0;
 #ifdef USE_TBLITE
     if (method.compare("gfn2") == 0) {

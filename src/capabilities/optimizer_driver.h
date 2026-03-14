@@ -49,7 +49,7 @@ public:
 
     // Output control
     bool write_trajectory = true;
-    bool verbose = false;
+    int verbosity = 1; // Default to minimal output (0=silent, 1=minimal, 2=scientific, 3=debug)
     bool print_output = true;
     std::string trajectory_filename;
     std::string output_basename;
@@ -58,6 +58,8 @@ public:
     std::vector<int> atom_constraints; // 0 = fixed, 1 = mobile
     bool use_constraints = false;
     bool use_hessian = false;
+    bool use_numerical_gradient = false; // Use numerical gradient instead of analytical (for debugging)
+    double numerical_gradient_step = 1e-5; // Step size for numerical gradient (Bohr)
     Matrix initial_hessian;
 
     // Molecular properties
@@ -135,7 +137,7 @@ public:
     bool UpdateGeometry(const double* coordinates) override;
 
     // Main optimization method (Template Method implementation)
-    OptimizationResult Optimize(bool write_trajectory = false, bool verbose = false) final override;
+    OptimizationResult Optimize(bool write_trajectory = false, int verbosity = 1) final override;
 
     // Property accessors
     Vector GetCurrentGradient() const override { return m_current_gradient; }

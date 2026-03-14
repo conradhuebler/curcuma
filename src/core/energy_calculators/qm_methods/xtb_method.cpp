@@ -89,6 +89,25 @@ bool XTBMethod::hasError() const { return m_has_error; }
 void XTBMethod::clearError() { m_has_error = false; m_error_message.clear(); }
 std::string XTBMethod::getErrorMessage() const { return m_error_message; }
 
+// Energy decomposition (JSON output) - placeholder for native implementation
+json XTBMethod::getEnergyDecomposition() const {
+    // QM methods don't have energy decomposition - return zero JSON
+    // Native implementations are work-in-progress
+    json energy_json = {
+        {"Bond", 0.0},
+        {"Angle", 0.0},
+        {"Torsion", 0.0},
+        {"Inversion", 0.0},
+        {"Dispersion", 0.0},
+        {"Coulomb", 0.0},
+        {"HBond", 0.0},
+        {"XBond", 0.0},
+        {"ATM", 0.0},
+        {"BATM", 0.0}
+    };
+    return energy_json;
+}
+
 Vector XTBMethod::getOrbitalEnergies() const {
 #ifdef USE_XTB
     return m_xtb->OrbitalEnergies();

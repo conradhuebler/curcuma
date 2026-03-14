@@ -78,7 +78,10 @@ public:
     bool hasError() const override;
     void clearError() override;
     std::string getErrorMessage() const override;
-    
+
+    // Energy decomposition (JSON output)
+    json getEnergyDecomposition() const override;
+
     // =================================================================================
     // EHT-specific Methods (additional functionality)
     // =================================================================================
