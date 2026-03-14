@@ -200,6 +200,85 @@ public:
     };
 
     /**
+     * @brief GFN-FF Results structure (matches Fortran gfnff_results)
+     *
+     * Claude Generated (Mar 2026): Unified energy and gradient decomposition
+     * Reference: external/gfnff/src/gfnff_engrad.F90:35-63 (gfnff_results type)
+     *
+     * Provides complete decomposition of energy and gradient components for:
+     * - Debugging and validation
+     * - Energy component export for external analysis
+     * - Restart file compatibility
+     * - Solvation energy decomposition (when ALPB active)
+     */
+    struct GFNFFResults {
+        // Total energy and gradient norm
+        double e_total = 0.0;      ///< Total energy in Hartree
+        double gnorm = 0.0;         ///< Gradient norm in Hartree/Bohr
+
+        // Bonded energy components (Hartree)
+        double e_bond = 0.0;        ///< Bond stretching
+        double e_angle = 0.0;      ///< Angle bending
+        double e_torsion = 0.0;    ///< Dihedral torsion (primary + extra)
+        double e_inversion = 0.0; ///< Out-of-plane bending
+        double e_storsion = 0.0;  ///< Triple bond torsions (sTors_eg)
+
+        // Non-bonded energy components (Hartree)
+        double e_repulsion = 0.0;     ///< Non-bonded repulsion (exponential)
+        double e_bonded_repulsion = 0.0; ///< Bonded repulsion (1,2/1,3 scaling)
+        double e_coulomb = 0.0;       ///< Electrostatic (EEQ charges)
+        double e_dispersion = 0.0;    ///< D3/D4 dispersion
+        double e_hb = 0.0;            ///< Hydrogen bonds
+        double e_xb = 0.0;            ///< Halogen bonds
+
+        // Three-body dispersion (Hartree)
+        double e_atm = 0.0;      ///< D3/D4 ATM three-body dispersion
+        double e_batm = 0.0;     ///< Bonded ATM (1,4-pairs)
+
+        // External contributions (future)
+        double e_ext = 0.0;      ///< External field (reserved)
+
+        // Solvation energy components (when ALPB active, in Hartree)
+        double g_born = 0.0;     ///< Born electrostatic solvation
+        double g_sasa = 0.0;     ///< Non-polar surface area
+        double g_hb_solv = 0.0;  ///< HB solvation correction
+        double g_shift = 0.0;    ///< Free energy shift
+        double g_solv = 0.0;     ///< Total solvation energy
+
+        // Dipole moment (Debye)
+        Eigen::Vector3d dipole = Eigen::Vector3d::Zero();
+
+        // Gradient components (Hartree/Bohr, 3×N matrices)
+        // Only populated when gradient calculation was requested
+        Eigen::MatrixXd g_bond;       ///< Bond gradient (3×N)
+        Eigen::MatrixXd g_angle;      ///< Angle gradient (3×N)
+        Eigen::MatrixXd g_torsion;    ///< Torsion gradient (3×N)
+        Eigen::MatrixXd g_repulsion;  ///< Repulsion gradient (3×N)
+        Eigen::MatrixXd g_coulomb;    ///< Coulomb gradient (3×N)
+        Eigen::MatrixXd g_dispersion; ///< Dispersion gradient (3×N)
+        Eigen::MatrixXd g_hb;         ///< Hydrogen bond gradient (3×N)
+        Eigen::MatrixXd g_xb;         ///< Halogen bond gradient (3×N)
+        Eigen::MatrixXd g_atm;        ///< ATM gradient (3×N)
+        Eigen::MatrixXd g_batm;       ///< BATM gradient (3×N)
+        Eigen::MatrixXd g_total;      ///< Total gradient (3×N)
+
+        // Atomic charges (EEQ)
+        Eigen::VectorXd charges;  ///< Phase-2 EEQ charges
+
+        /**
+         * @brief Export to JSON for serialization
+         * @return JSON object with all energy components
+         */
+        json toJSON() const;
+
+        /**
+         * @brief Import from JSON for restart
+         * @param j JSON object with results
+         */
+        void fromJSON(const json& j);
+    };
+
+    /**
      * @brief Default constructor
      */
     GFNFF();
@@ -346,6 +425,23 @@ public:
     Vector BondOrders() const;
 
     /**
+     * @brief Get complete GFN-FF results structure
+     * @return GFNFFResults with all energy and gradient components
+     *
+     * Claude Generated (Mar 2026): Unified energy decomposition
+     * Reference: Fortran gfnff_engrad.F90:35-63 (gfnff_results type)
+     *
+     * Provides all energy components matching Fortran output:
+     * - Bonded: bond, angle, torsion, inversion, storsion
+     * - Non-bonded: repulsion, coulomb, dispersion, hb, xb
+     * - Three-body: atm, batm
+     * - Solvation: g_born, g_sasa, g_hb, g_shift (if ALPB active)
+     *
+     * Gradient components are populated if gradient=true in Calculation().
+     */
+    GFNFFResults getResults() const;
+
+    /**
      * @brief Set calculation parameters
      * @param parameters JSON configuration
      */
@@ -358,6 +454,31 @@ public:
      * Provided for validation and testing purposes.
      */
     const TopologyInfo& getTopologyInfo() const { return getCachedTopology(); }
+
+    /**
+     * @brief Export topology information for restart/topology I/O
+     * @return JSON object with topology data (fragments, charges, hybridization, CN)
+     *
+     * Claude Generated (Mar 2026): Phase 3 - Restart/Topology I/O
+     * Reference: Fortran gfnff_restart.f90 (write_restart_gff)
+     *
+     * Exports topology information needed for MD restart:
+     * - Fragment information (nfrag, fraglist, qfrag)
+     * - Topology charges (Phase-1 EEQ)
+     * - Hybridization states
+     * - Coordination numbers
+     * - Ring membership
+     */
+    json exportTopology() const;
+
+    /**
+     * @brief Import topology information from restart file
+     * @param topo_json JSON object with topology data
+     * @return true if topology was successfully imported
+     *
+     * Claude Generated (Mar 2026): Phase 3 - Restart/Topology I/O
+     */
+    bool importTopology(const json& topo_json);
 
     /**
      * @brief Calculate full topology information for advanced parametrization

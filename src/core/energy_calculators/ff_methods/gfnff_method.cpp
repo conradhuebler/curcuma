@@ -749,6 +749,211 @@ Vector GFNFF::BondOrders() const
     return m_bond_orders;
 }
 
+// =================================================================================
+// GFNFFResults Implementation
+// =================================================================================
+
+json GFNFF::GFNFFResults::toJSON() const
+{
+    json j;
+
+    // Total energy and gradient
+    j["e_total"] = e_total;
+    j["gnorm"] = gnorm;
+
+    // Bonded energies
+    j["e_bond"] = e_bond;
+    j["e_angle"] = e_angle;
+    j["e_torsion"] = e_torsion;
+    j["e_inversion"] = e_inversion;
+    j["e_storsion"] = e_storsion;
+
+    // Non-bonded energies
+    j["e_repulsion"] = e_repulsion;
+    j["e_bonded_repulsion"] = e_bonded_repulsion;
+    j["e_coulomb"] = e_coulomb;
+    j["e_dispersion"] = e_dispersion;
+    j["e_hb"] = e_hb;
+    j["e_xb"] = e_xb;
+
+    // Three-body
+    j["e_atm"] = e_atm;
+    j["e_batm"] = e_batm;
+
+    // External (reserved)
+    j["e_ext"] = e_ext;
+
+    // Solvation (if active)
+    j["g_born"] = g_born;
+    j["g_sasa"] = g_sasa;
+    j["g_hb_solv"] = g_hb_solv;
+    j["g_shift"] = g_shift;
+    j["g_solv"] = g_solv;
+
+    // Dipole moment
+    j["dipole"] = {dipole(0), dipole(1), dipole(2)};
+
+    // Charges
+    if (charges.size() > 0) {
+        j["charges"] = std::vector<double>(charges.data(), charges.data() + charges.size());
+    }
+
+    // Gradient components (only include if non-empty)
+    if (g_total.rows() > 0 && g_total.cols() > 0) {
+        j["g_bond"] = std::vector<std::vector<double>>();
+        for (int i = 0; i < g_bond.rows(); ++i) {
+            j["g_bond"].push_back({g_bond(i, 0), g_bond(i, 1), g_bond(i, 2)});
+        }
+        // Store total gradient only (component storage optional)
+        j["g_total"] = std::vector<std::vector<double>>();
+        for (int i = 0; i < g_total.rows(); ++i) {
+            j["g_total"].push_back({g_total(i, 0), g_total(i, 1), g_total(i, 2)});
+        }
+    }
+
+    return j;
+}
+
+void GFNFF::GFNFFResults::fromJSON(const json& j)
+{
+    // Total energy and gradient
+    e_total = j.value("e_total", 0.0);
+    gnorm = j.value("gnorm", 0.0);
+
+    // Bonded energies
+    e_bond = j.value("e_bond", 0.0);
+    e_angle = j.value("e_angle", 0.0);
+    e_torsion = j.value("e_torsion", 0.0);
+    e_inversion = j.value("e_inversion", 0.0);
+    e_storsion = j.value("e_storsion", 0.0);
+
+    // Non-bonded energies
+    e_repulsion = j.value("e_repulsion", 0.0);
+    e_bonded_repulsion = j.value("e_bonded_repulsion", 0.0);
+    e_coulomb = j.value("e_coulomb", 0.0);
+    e_dispersion = j.value("e_dispersion", 0.0);
+    e_hb = j.value("e_hb", 0.0);
+    e_xb = j.value("e_xb", 0.0);
+
+    // Three-body
+    e_atm = j.value("e_atm", 0.0);
+    e_batm = j.value("e_batm", 0.0);
+
+    // External
+    e_ext = j.value("e_ext", 0.0);
+
+    // Solvation
+    g_born = j.value("g_born", 0.0);
+    g_sasa = j.value("g_sasa", 0.0);
+    g_hb_solv = j.value("g_hb_solv", 0.0);
+    g_shift = j.value("g_shift", 0.0);
+    g_solv = j.value("g_solv", 0.0);
+
+    // Dipole
+    if (j.contains("dipole") && j["dipole"].is_array() && j["dipole"].size() >= 3) {
+        dipole(0) = j["dipole"][0].get<double>();
+        dipole(1) = j["dipole"][1].get<double>();
+        dipole(2) = j["dipole"][2].get<double>();
+    }
+
+    // Charges
+    if (j.contains("charges") && j["charges"].is_array()) {
+        charges.resize(j["charges"].size());
+        for (size_t i = 0; i < j["charges"].size(); ++i) {
+            charges(i) = j["charges"][i].get<double>();
+        }
+    }
+
+    // Gradient (optional)
+    if (j.contains("g_total") && j["g_total"].is_array()) {
+        int natoms = j["g_total"].size();
+        g_total.resize(natoms, 3);
+        for (int i = 0; i < natoms; ++i) {
+            g_total(i, 0) = j["g_total"][i][0].get<double>();
+            g_total(i, 1) = j["g_total"][i][1].get<double>();
+            g_total(i, 2) = j["g_total"][i][2].get<double>();
+        }
+    }
+}
+
+GFNFF::GFNFFResults GFNFF::getResults() const
+{
+    GFNFFResults results;
+
+    if (!m_initialized || !m_forcefield) {
+        CurcumaLogger::warn("GFNFF::getResults: Not initialized or no forcefield");
+        return results;
+    }
+
+    // Total energy
+    results.e_total = m_energy_total;
+
+    // Gradient norm
+    results.gnorm = m_gradient.norm();
+
+    // Bonded energies from ForceField
+    results.e_bond = m_forcefield->BondEnergy();
+    results.e_angle = m_forcefield->AngleEnergy();
+    results.e_torsion = m_forcefield->DihedralEnergy();
+    results.e_inversion = m_forcefield->InversionEnergy();
+    results.e_storsion = m_forcefield->STorsEnergy();
+
+    // Non-bonded energies
+    results.e_repulsion = m_forcefield->HHEnergy();  // GFN-FF repulsion (HHEnergy = m_gfnff_repulsion)
+    results.e_bonded_repulsion = m_forcefield->BondedRepulsionEnergy();
+    results.e_coulomb = m_forcefield->CoulombEnergy();
+    results.e_dispersion = m_forcefield->DispersionEnergy();
+    results.e_hb = m_forcefield->HydrogenBondEnergy();
+    results.e_xb = m_forcefield->HalogenBondEnergy();
+
+    // Three-body dispersion
+    results.e_atm = m_forcefield->ATMEnergy();
+    results.e_batm = m_forcefield->BatmEnergy();
+
+    // Charges
+    results.charges = m_charges;
+
+    // Solvation (if active)
+    if (m_solvation) {
+        ALPBEnergyParts solv_parts = m_solvation->getEnergyParts(m_charges);
+        results.g_born = solv_parts.gborn;
+        results.g_sasa = solv_parts.gsasa;
+        results.g_hb_solv = solv_parts.ghb;
+        results.g_shift = solv_parts.gshift;
+        results.g_solv = solv_parts.total();
+    }
+
+    // Gradient components (if gradient was calculated)
+    if (m_gradient.rows() > 0 && m_gradient.cols() > 0) {
+        results.g_total = m_gradient;
+
+        // Per-component gradients (if stored)
+        results.g_bond = m_forcefield->GradientBond();
+        results.g_angle = m_forcefield->GradientAngle();
+        results.g_torsion = m_forcefield->GradientTorsion();
+        results.g_repulsion = m_forcefield->GradientRepulsion();
+        results.g_coulomb = m_forcefield->GradientCoulomb();
+        results.g_dispersion = m_forcefield->GradientDispersion();
+        results.g_hb = m_forcefield->GradientHB();
+        results.g_xb = m_forcefield->GradientXB();
+        results.g_atm = m_forcefield->GradientATM();
+        results.g_batm = m_forcefield->GradientBATM();
+    }
+
+    // Dipole moment calculation
+    // Formula: μ = Σ_i q_i * r_i (charge-weighted centroid)
+    // Units: Bohr·e → Debye (conversion: 1 Bohr·e = 2.541746 Debye)
+    if (m_charges.size() > 0 && m_geometry_bohr.rows() > 0) {
+        Eigen::Vector3d dipole_sum = Eigen::Vector3d::Zero();
+        for (int i = 0; i < m_atomcount; ++i) {
+            dipole_sum += m_charges(i) * m_geometry_bohr.row(i).transpose();
+        }
+        results.dipole = dipole_sum * 2.541746;  // Convert to Debye
+    }
+
+    return results;
+}
+
 void GFNFF::setParameters(const json& parameters)
 {
     m_parameters = MergeJson(m_parameters, parameters);
@@ -757,6 +962,247 @@ void GFNFF::setParameters(const json& parameters)
         json ff_params = generateGFNFFParameters();
         m_forcefield->setParameter(ff_params);
     }
+}
+
+// =================================================================================
+// Phase 3: Topology I/O for Restart (Claude Generated Mar 2026)
+// =================================================================================
+
+json GFNFF::exportTopology() const
+{
+    json topo_json;
+
+    if (!m_initialized) {
+        CurcumaLogger::warn("GFNFF::exportTopology: Not initialized, returning empty topology");
+        return topo_json;
+    }
+
+    const TopologyInfo& topo = getCachedTopology();
+
+    // Version for format compatibility
+    topo_json["version"] = 1;
+
+    // Fragment information (for multi-fragment systems)
+    topo_json["nfrag"] = topo.nfrag;
+    if (!topo.fraglist.empty()) {
+        topo_json["fraglist"] = std::vector<int>(topo.fraglist.begin(), topo.fraglist.end());
+    }
+    if (!topo.qfrag.empty()) {
+        topo_json["qfrag"] = std::vector<double>(topo.qfrag.begin(), topo.qfrag.end());
+    }
+
+    // Topology charges (Phase-1 EEQ - fixed at initialization)
+    if (topo.topology_charges.size() > 0) {
+        topo_json["topology_charges"] = std::vector<double>(
+            topo.topology_charges.data(),
+            topo.topology_charges.data() + topo.topology_charges.size()
+        );
+    }
+
+    // Coordination numbers
+    if (topo.coordination_numbers.size() > 0) {
+        topo_json["coordination_numbers"] = std::vector<double>(
+            topo.coordination_numbers.data(),
+            topo.coordination_numbers.data() + topo.coordination_numbers.size()
+        );
+    }
+
+    // Hybridization states
+    if (!topo.hybridization.empty()) {
+        topo_json["hybridization"] = topo.hybridization;
+    }
+
+    // Ring sizes per atom (0 = not in ring)
+    if (!topo.ring_sizes.empty()) {
+        topo_json["ring_sizes"] = topo.ring_sizes;
+    }
+
+    // Pi-system fragments
+    if (!topo.pi_fragments.empty()) {
+        topo_json["pi_fragments"] = topo.pi_fragments;
+    }
+
+    // Aromatic flags
+    if (!topo.is_aromatic.empty()) {
+        std::vector<int> aromatic_flags;
+        for (bool b : topo.is_aromatic) {
+            aromatic_flags.push_back(b ? 1 : 0);
+        }
+        topo_json["is_aromatic"] = aromatic_flags;
+    }
+
+    // Metal flags
+    if (!topo.is_metal.empty()) {
+        std::vector<int> metal_flags;
+        for (bool b : topo.is_metal) {
+            metal_flags.push_back(b ? 1 : 0);
+        }
+        topo_json["is_metal"] = metal_flags;
+    }
+
+    // Ring enumeration (for ring-dependent torsions)
+    if (!topo.rings.empty()) {
+        topo_json["rings"] = json::array();
+        for (const auto& ring : topo.rings) {
+            topo_json["rings"].push_back(ring);
+        }
+    }
+
+    // EEQ parameters (for charge calculation)
+    if (!topo.eeq_chi.empty()) {
+        topo_json["eeq_chi"] = topo.eeq_chi;
+        topo_json["eeq_gam"] = topo.eeq_gam;
+        topo_json["eeq_alp"] = topo.eeq_alp;
+        topo_json["eeq_cnf"] = topo.eeq_cnf;
+    }
+
+    // Amide hydrogen flags (for Coulomb chi correction)
+    if (!topo.is_amide_h.empty()) {
+        std::vector<int> amide_h_flags;
+        for (bool b : topo.is_amide_h) {
+            amide_h_flags.push_back(b ? 1 : 0);
+        }
+        topo_json["is_amide_h"] = amide_h_flags;
+    }
+
+    // Cached dxi corrections
+    if (topo.dxi.size() > 0) {
+        topo_json["dxi"] = std::vector<double>(
+            topo.dxi.data(), topo.dxi.data() + topo.dxi.size()
+        );
+    }
+
+    // Cached alpeeq (charge-corrected alpha)
+    if (topo.alpeeq.size() > 0) {
+        topo_json["alpeeq"] = std::vector<double>(
+            topo.alpeeq.data(), topo.alpeeq.data() + topo.alpeeq.size()
+        );
+    }
+
+    // Timestamp for cache validation
+    topo_json["timestamp"] = std::chrono::system_clock::now().time_since_epoch().count();
+
+    return topo_json;
+}
+
+bool GFNFF::importTopology(const json& topo_json)
+{
+    if (topo_json.empty()) {
+        CurcumaLogger::warn("GFNFF::importTopology: Empty topology JSON");
+        return false;
+    }
+
+    if (!m_initialized) {
+        CurcumaLogger::warn("GFNFF::importTopology: Not initialized, cannot import topology");
+        return false;
+    }
+
+    // Check version compatibility
+    int version = topo_json.value("version", 0);
+    if (version < 1) {
+        CurcumaLogger::warn("GFNFF::importTopology: Unknown topology format version");
+        return false;
+    }
+
+    // Import into cached topology
+    TopologyInfo& topo = m_cached_topology.emplace();
+
+    // Fragment information
+    topo.nfrag = topo_json.value("nfrag", 1);
+    if (topo_json.contains("fraglist")) {
+        topo.fraglist = topo_json["fraglist"].get<std::vector<int>>();
+    }
+    if (topo_json.contains("qfrag")) {
+        topo.qfrag = topo_json["qfrag"].get<std::vector<double>>();
+    }
+
+    // Topology charges
+    if (topo_json.contains("topology_charges")) {
+        auto charges = topo_json["topology_charges"].get<std::vector<double>>();
+        topo.topology_charges = Eigen::Map<Eigen::VectorXd>(charges.data(), charges.size());
+    }
+
+    // Coordination numbers
+    if (topo_json.contains("coordination_numbers")) {
+        auto cn = topo_json["coordination_numbers"].get<std::vector<double>>();
+        topo.coordination_numbers = Eigen::Map<Eigen::VectorXd>(cn.data(), cn.size());
+    }
+
+    // Hybridization
+    if (topo_json.contains("hybridization")) {
+        topo.hybridization = topo_json["hybridization"].get<std::vector<int>>();
+    }
+
+    // Ring sizes
+    if (topo_json.contains("ring_sizes")) {
+        topo.ring_sizes = topo_json["ring_sizes"].get<std::vector<int>>();
+    }
+
+    // Pi fragments
+    if (topo_json.contains("pi_fragments")) {
+        topo.pi_fragments = topo_json["pi_fragments"].get<std::vector<int>>();
+    }
+
+    // Aromatic flags
+    if (topo_json.contains("is_aromatic")) {
+        auto flags = topo_json["is_aromatic"].get<std::vector<int>>();
+        topo.is_aromatic.resize(flags.size());
+        for (size_t i = 0; i < flags.size(); ++i) {
+            topo.is_aromatic[i] = (flags[i] != 0);
+        }
+    }
+
+    // Metal flags
+    if (topo_json.contains("is_metal")) {
+        auto flags = topo_json["is_metal"].get<std::vector<int>>();
+        topo.is_metal.resize(flags.size());
+        for (size_t i = 0; i < flags.size(); ++i) {
+            topo.is_metal[i] = (flags[i] != 0);
+        }
+    }
+
+    // Ring enumeration
+    if (topo_json.contains("rings")) {
+        topo.rings.clear();
+        for (const auto& ring_json : topo_json["rings"]) {
+            topo.rings.push_back(ring_json.get<std::vector<int>>());
+        }
+    }
+
+    // EEQ parameters
+    if (topo_json.contains("eeq_chi")) {
+        topo.eeq_chi = topo_json["eeq_chi"].get<std::vector<double>>();
+        topo.eeq_gam = topo_json["eeq_gam"].get<std::vector<double>>();
+        topo.eeq_alp = topo_json["eeq_alp"].get<std::vector<double>>();
+        topo.eeq_cnf = topo_json["eeq_cnf"].get<std::vector<double>>();
+    }
+
+    // Amide hydrogen flags
+    if (topo_json.contains("is_amide_h")) {
+        auto flags = topo_json["is_amide_h"].get<std::vector<int>>();
+        topo.is_amide_h.resize(flags.size());
+        for (size_t i = 0; i < flags.size(); ++i) {
+            topo.is_amide_h[i] = (flags[i] != 0);
+        }
+    }
+
+    // dxi corrections
+    if (topo_json.contains("dxi")) {
+        auto dxi = topo_json["dxi"].get<std::vector<double>>();
+        topo.dxi = Eigen::Map<Eigen::VectorXd>(dxi.data(), dxi.size());
+    }
+
+    // alpeeq
+    if (topo_json.contains("alpeeq")) {
+        auto alpeeq = topo_json["alpeeq"].get<std::vector<double>>();
+        topo.alpeeq = Eigen::Map<Eigen::VectorXd>(alpeeq.data(), alpeeq.size());
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success("GFNFF: Topology imported from cache");
+    }
+
+    return true;
 }
 
 bool GFNFF::initializeForceField()
