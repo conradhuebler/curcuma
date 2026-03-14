@@ -189,6 +189,7 @@ const std::vector<MethodFactory::ExplicitMethod>& MethodFactory::getExplicitMeth
         { "am1", [](const json& config) { return std::make_unique<AM1Method>(); }, "Native", false, "" },
         { "pm6", [](const json& config) { return std::make_unique<PM6Method>(); }, "Native", false, "" },
         { "cgfnff", [](const json& config) { return std::make_unique<GFNFFMethod>(config); }, "Native", false, "" },
+        { "ngfn2", [](const json& config) { return std::make_unique<GFN2Method>(config); }, "Native", false, "" },
 
         // Force field methods (always available)
         { "uff", [](const json& config) { return std::make_unique<ForceFieldMethod>("uff", config); }, "ForceField", false, "" },

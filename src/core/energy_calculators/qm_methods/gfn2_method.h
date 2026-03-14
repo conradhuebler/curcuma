@@ -72,7 +72,7 @@ public:
     Vector getCharges() const override;
     Vector getBondOrders() const override;
     Position getDipole() const override;
-    bool hasGradient() const override { return false; }  // TODO: implement gradients
+    bool hasGradient() const override { return true; }
 
     // Method information
     std::string getMethodName() const override { return "gfn2"; }

@@ -271,6 +271,7 @@ set(curcuma_core_SRC
         src/core/energy_calculators/qm_methods/dispersion_method.cpp
         src/core/energy_calculators/ff_methods/forcefield_method.cpp
         src/core/energycalculator.cpp
+        src/core/solvation/gbsa.cpp
         src/core/molecule.cpp
         src/core/xyz_comment_parser.cpp
         src/core/fileiterator.cpp

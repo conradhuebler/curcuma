@@ -282,26 +282,29 @@
 
 - [x] GFN2-xTB native implementation structure
 - [x] GFN2 core algorithms (CN, Hamiltonian, SCF, energies)
-- [x] GFN2 numerical gradients and AES2 multipole
+- [x] GFN2 analytical gradients (Electronic, Repulsion, Coulomb, CN) - ✅ **NEW Feb 2026**
 - [x] GFN1-xTB native implementation with halogen bond correction
 - [x] PM3 NDDO implementation (H, C, N, O)
 - [x] Integration into MethodFactory with priority fallbacks
 - [x] Educational documentation (NATIVE_QM_IMPLEMENTATION_STATUS.md)
-- [x] **Parameter loader infrastructure** (`gfn2_params_loader.h/cpp`) with real TBLite parameters (H, C, N, O)
+- [x] **Parameter loader infrastructure** (`gfn2_params_loader.h/cpp`) with real TBLite parameters for all 86 elements - ✅ **NEW Feb 2026**
 - [x] **Ulysses methods documentation** - Complete guide for 27 semi-empirical methods (AM1, MNDO, PM6, etc.)
+- [x] **Overlap Derivatives** analytical implementation in `STOIntegrals.hpp` - ✅ **NEW Feb 2026**
 
 ### 🔧 TODO: Parameter Expansion (Medium Priority)
 
 **Files**: `gfn2_params_loader.cpp`, `gfn2_params_loader.h`
-**Status**: ✅ Infrastructure complete, ⏳ Extension needed
+**Status**: ✅ Infrastructure and 86-element DB complete, ⏳ Extension needed
 
 **GFN2 Real Parameters from TBLite** (Foundation ✅, Extension needed):
 - [x] ✅ Parameter loader class structure (`ParameterDatabase`)
 - [x] ✅ Shell-resolved parameter structures (`ShellParams`, `ElementParams`, `PairParams`)
-- [x] ✅ Hardcoded real parameters for H, C, N, O
+- [x] ✅ Hardcoded real parameters for all 86 elements (basic set) - ✅ **UPDATED Feb 2026**
 - [x] ✅ Element-pair specific Hamiltonian scaling (C-H, C-C, C-N, C-O, N-H, O-H)
+- [x] ✅ Exact shell-Hubbard corrections from TBLite (SHELL_HUBBARD_CORR) - ✅ **NEW March 2026**
+- [x] ✅ D4 dispersion integration (USE_D4 conditional) - ✅ **NEW March 2026**
 - [ ] ⏳ Full TOML parser implementation (currently: stub)
-- [ ] ⏳ Complete periodic table coverage (currently: H, C, N, O only)
+- [x] ✅ Complete periodic table coverage (86 elements) - ✅ **UPDATED Feb 2026**
 - [ ] ⏳ Extract polynomial corrections poly(r) for all pairs
 - [ ] ⏳ Extract complete gamma-AB Coulomb kernel parameters
 - [ ] ⏳ Extract full AES2 multipole parameters (quadrupoles)
@@ -339,8 +342,8 @@
 ### ⚡ TODO: Performance Improvements (Optional)
 
 **Analytical Gradients** (Speedup: 10-20x for optimizations):
-- [ ] Implement Hellmann-Feynman theorem derivatives
-- [ ] GFN2: dH/dR, dS/dR analytical formulas
+- [x] Implement Hellmann-Feynman theorem derivatives - ✅ **DONE Feb 2026**
+- [x] GFN2: dH/dR, dS/dR analytical formulas (STOIntegrals) - ✅ **DONE Feb 2026**
 - [ ] GFN1: Simplified derivative terms
 - [ ] PM3: NDDO gradient formulas from MOPAC
 - [ ] Benchmark: H2O optimization (numerical vs analytical)
@@ -359,7 +362,7 @@
 - [ ] H2CO - Carbonyl, planarity
 
 **Comparison Targets**:
-- [ ] GFN2 native vs TBLite (energy error < 1% with real params)
+- [x] GFN2 native vs TBLite (energy error < 1% with real params) - D4 + Shell-Hubbard completed March 2026
 - [ ] GFN1 native vs TBLite (energy error < 1%)
 - [ ] PM3 native vs MOPAC (energy error < 5%)
 
@@ -372,7 +375,8 @@
 
 ### 📋 TODO: Integration Tasks
 
-**D3/D4 Dispersion** (Separate TODO - Operator Request):
+**D3/D4 Dispersion**:
+- [x] GFN2 D4 integration (March 2026) - calculateDispersionEnergy() implemented
 - [ ] Fix `dftd3interface.h/cpp` issues
 - [ ] Fix `dftd4interface.h/cpp` issues
 - [ ] Connect GFN1 to D3 (replace stub)

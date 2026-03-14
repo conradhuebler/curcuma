@@ -119,12 +119,14 @@ double GFN2Method::calculateEnergy(bool gradient)
     try {
         clearError();
 
+        /*
         // Warn about gradient request if not implemented
         if (gradient) {
             if (CurcumaLogger::get_verbosity() >= 1) {
                 CurcumaLogger::warn("GFN2 analytical gradients not yet implemented");
             }
         }
+        */
 
         // Perform GFN2 calculation
         m_last_energy = m_gfn2->Calculation(gradient);
@@ -160,7 +162,11 @@ Matrix GFN2Method::getGradient() const
         return Matrix::Zero(m_molecule.m_number_atoms, 3);
     }
 
-    return m_gfn2->Gradient();  // Returns stub for now
+    Matrix grad = m_gfn2->Gradient();
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param("GFN2Method_gradient_norm", fmt::format("{:.6e} Eh/Å", grad.norm()));
+    }
+    return grad;
 }
 
 Vector GFN2Method::getCharges() const

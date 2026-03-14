@@ -432,8 +432,6 @@ public:
                 return false;
             }
 
-            const int n = S.rows();
-
             // Step 1: Calculate S^(-1/2) with its own thread pool
             auto s12Start = std::chrono::high_resolution_clock::now();
 

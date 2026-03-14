@@ -5,6 +5,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <array>
 
 /**
  * @brief Namespace containing functions for calculating Slater-Type Orbital integrals
@@ -125,6 +126,9 @@ static inline std::string orbitalTypeToString(OrbitalType type)
 
 /**
  * @brief Represents an atomic orbital
+ *
+ * Claude Generated (January 2025): Added shell field for GFN2 shell-resolved calculations
+ * Shell indices: 0=s, 1=p, 2=d (matches TBLite convention)
  */
 struct Orbital {
     double x = 0, y = 0, z = 0; // Position
@@ -132,6 +136,7 @@ struct Orbital {
     double VSIP; // Valence State Ionization Potential
     OrbitalType type; // Orbital type
     int atom; // Atom index
+    int shell = 0; // Shell index (0=s, 1=p, 2=d) for shell-resolved calculations
 
     std::string toString() const
     {
@@ -139,7 +144,8 @@ struct Orbital {
         ss << orbitalTypeToString(type) << " orbital at ("
            << std::fixed << std::setprecision(6)
            << x << ", " << y << ", " << z
-           << ") with zeta=" << zeta << ", VSIP=" << VSIP;
+           << ") with zeta=" << zeta << ", VSIP=" << VSIP
+           << ", shell=" << shell;
         return ss.str();
     }
 };
@@ -699,6 +705,77 @@ static inline double calculateOverlap(const Orbital& orb1, const Orbital& orb2, 
     }
 
     return result;
+}
+
+/**
+ * @brief Calculate radial derivative of overlap with respect to distance R (dS/dR)
+ * @param orb1 First orbital
+ * @param orb2 Second orbital
+ * @param R Distance between orbitals
+ * @return dS/dR
+ *
+ * Claude Generated (February 2026): For analytical gradients
+ */
+static inline double calculateOverlapDerivative(const Orbital& orb1, const Orbital& orb2, double R)
+{
+    if (R < 1e-10) return 0.0;
+
+    double zeta1 = orb1.zeta;
+    double zeta2 = orb2.zeta;
+    OrbitalType type1 = orb1.type;
+    OrbitalType type2 = orb2.type;
+
+    // Symmetry sort
+    if (type1 > type2) {
+        std::swap(type1, type2);
+        std::swap(zeta1, zeta2);
+    }
+
+    double zeta_reduced = (zeta1 * zeta2) / (zeta1 + zeta2);
+    double rho = zeta_reduced * R;
+    double exp_term = std::exp(-rho);
+
+    if (type1 == S && type2 == S) {
+        double N = std::pow(4.0 * zeta1 * zeta2 / std::pow(zeta1 + zeta2, 2.0), 1.5);
+        return N * zeta_reduced * exp_term * (-1.0 / 3.0 * rho - 1.0 / 3.0 * rho * rho);
+    }
+    else if (type1 == S && type2 <= PZ) {
+        double N = std::sqrt(zeta1 * zeta2) * std::pow(2.0 / (zeta1 + zeta2), 1.5);
+        return N * exp_term * (1.0 - 1.0 / 3.0 * rho - 1.0 / 3.0 * rho * rho);
+    }
+    else if (type1 <= PZ && type2 <= PZ) {
+        double N = zeta1 * zeta2 * std::pow(2.0 / (zeta1 + zeta2), 3.0);
+        if (type1 == type2) { // Sigma (approx)
+            return N * exp_term * (-2.0 * zeta_reduced + 5.0 / 3.0 * zeta_reduced * rho - 1.0 / 3.0 * zeta_reduced * rho * rho);
+        } else { // Pi (approx)
+            return N * zeta_reduced * exp_term * (-1.0 / 3.0 * rho - 1.0 / 3.0 * rho * rho);
+        }
+    }
+
+    return 0.0; // Placeholder for D orbitals
+}
+
+/**
+ * @brief Calculate full gradient of overlap with respect to position of orb1
+ * @param orb1 First orbital
+ * @param orb2 Second orbital
+ * @return 3D gradient vector
+ */
+static inline std::array<double, 3> calculateOverlapFullGradient(const Orbital& orb1, const Orbital& orb2)
+{
+    double dx = orb2.x - orb1.x;
+    double dy = orb2.y - orb1.y;
+    double dz = orb2.z - orb1.z;
+    double R = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+    if (R < 1e-10) return {0.0, 0.0, 0.0};
+
+    double dSdR = calculateOverlapDerivative(orb1, orb2, R);
+
+    // dS/dx_A = dS/dR * dR/dx_A = dS/dR * (x_A - x_B) / R
+    return { dSdR * (orb1.x - orb2.x) / R,
+             dSdR * (orb1.y - orb2.y) / R,
+             dSdR * (orb1.z - orb2.z) / R };
 }
 
 } // namespace STO

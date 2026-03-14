@@ -59,6 +59,10 @@ double LBFGSInterface::operator()(const VectorXd& x, VectorXd& grad)
     Geometry gradient = m_interface->Gradient();
     m_error = std::isnan(fx);
 
+    if (CurcumaLogger::get_verbosity() >= 3) {
+        CurcumaLogger::param("LBFGSInterface_gradient_norm", fmt::format("{:.6e}", gradient.norm()));
+    }
+
     for (int i = 0; i < m_atoms; ++i) {
         grad[3 * i + 0] = gradient.data()[3 * i + 0] * (m_constrains[i]);
         grad[3 * i + 1] = gradient.data()[3 * i + 1] * (m_constrains[i]);

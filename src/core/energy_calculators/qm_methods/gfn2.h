@@ -34,7 +34,12 @@
 #include "STOIntegrals.hpp"
 #include "src/core/solvation/gbsa.h"
 
+#ifdef USE_D4
+#include "dftd4interface.h"
+#endif
+
 #include <Eigen/Dense>
+#include <unsupported/Eigen/CXX11/Tensor>
 #include <memory>
 #include <vector>
 
@@ -271,6 +276,64 @@ private:
     Matrix MakeH(const Matrix& S, const std::vector<STO::Orbital>& basisset) override;
 
     /**
+     * @brief Calculate atomic dipole moments from density matrix
+     * @return Vector of atomic dipoles (natoms x 3)
+     *
+     * Claude Generated: Extracted from calculateGradient for modularity
+     */
+    std::vector<Eigen::Vector3d> calculateAtomicDipoles() const;
+
+    /**
+     * @brief Calculate atomic quadrupole moments from density matrix
+     * @return Vector of atomic quadrupoles (natoms x 6 in xx, xy, xz, yy, yz, zz order)
+     *
+     * Claude Generated: Based on TBLite multipole.f90 implementation
+     */
+    std::vector<Eigen::VectorXd> calculateAtomicQuadrupoles() const;
+
+    /**
+     * @brief Calculate AES2 anisotropic electrostatic energy
+     * @param dipoles Atomic dipole moments
+     * @param quadrupoles Atomic quadrupole moments
+     * @return AES2 energy contribution
+     *
+     * Reference: TBLite multipole.f90 get_energy (lines 188-215)
+     */
+    double calculateAES2Energy(const std::vector<Eigen::Vector3d>& dipoles,
+                               const std::vector<Eigen::VectorXd>& quadrupoles) const;
+
+    /**
+     * @brief Calculate AES2 charge-dipole interaction matrix
+     * @param rad Multipole damping radii
+     * @param kdmp3 Damping exponent for inverse quadratic
+     * @return Matrix (3 x natoms x natoms) for charge-dipole interactions
+     *
+     * Reference: TBLite multipole.f90 get_multipole_matrix_0d
+     */
+    Matrix calculateAES2ChargeDipoleMatrix(const Vector& rad, double kdmp3) const;
+
+    /**
+     * @brief Calculate AES2 dipole-dipole interaction matrix
+     * @param rad Multipole damping radii
+     * @param kdmp5 Damping exponent for inverse cubic
+     * @return Vector of matrices for dipole-dipole interactions (9 x natoms x natoms)
+     *
+     * Note: Implementation uses vector of matrices for 4D dipole-dipole interactions
+     * Reference: TBLite multipole.f90 get_multipole_matrix_0d
+     */
+    std::vector<Matrix> calculateAES2DipoleDipoleMatrix(const Vector& rad, double kdmp5) const;
+
+    /**
+     * @brief Calculate AES2 charge-quadrupole interaction matrix
+     * @param rad Multipole damping radii
+     * @param kdmp5 Damping exponent for inverse cubic
+     * @return Matrix (6 x natoms x natoms) for charge-quadrupole interactions
+     *
+     * Reference: TBLite multipole.f90 get_multipole_matrix_0d
+     */
+    Matrix calculateAES2ChargeQuadrupoleMatrix(const Vector& rad, double kdmp5) const;
+
+    /**
      * @brief Calculate self-energy for given shell
      *
      * Theoretical Background:
@@ -294,6 +357,55 @@ private:
      * @return Self-energy in Hartree
      */
     double getSelfEnergy(int element, int shell, double CN) const;
+
+    /**
+     * @brief Get shell-resolved Hubbard parameter for Coulomb calculations
+     *
+     * The Hubbard parameter γ (gamma) represents the chemical hardness or
+     * self-Coulomb repulsion of an electron in a specific shell. GFN2 uses
+     * shell-resolved Hubbard parameters:
+     *
+     * Formula: γ_shell = HUBBARD_PARAMETER[Z] * SHELL_HUBBARD_CORR[Z][shell]
+     *
+     * Parameters from TBLite gfn2.f90:
+     *   - HUBBARD_PARAMETER[Z]: Base chemical hardness (86 elements)
+     *   - SHELL_HUBBARD_CORR[Z][shell]: Shell-specific correction (s, p, d)
+     *
+     * Reference: TBLite gfn2.f90, effective.f90 (Coulomb kernel)
+     *
+     * Claude Generated (January 2025): Shell-resolved Hubbard for GFN2 SCC
+     *
+     * @param Z Atomic number (1-86)
+     * @param shell Shell index (0=s, 1=p, 2=d)
+     * @return Shell-resolved Hubbard parameter in Hartree
+     */
+    double getShellHubbard(int Z, int shell) const;
+
+    /**
+     * @brief Calculate Mulliken atomic charges from density matrix
+     *
+     * Mulliken population analysis: q_A = Z_A - Σ_{μ∈A} (P·S)_μμ
+     *
+     * Claude Generated (January 2025)
+     *
+     * @param density Density matrix P
+     * @return Vector of atomic charges (size = natoms)
+     */
+    Vector calculateMullikenCharges(const Matrix& density) const;
+
+    /**
+     * @brief Get valence electron count for GFN2 minimal basis
+     *
+     * Returns the number of valence electrons for an element based on its
+     * position in the periodic table. This is used for Mulliken charge analysis
+     * in GFN2's minimal valence basis where core electrons are not included.
+     *
+     * Claude Generated (January 2025)
+     *
+     * @param Z Atomic number (1-86)
+     * @return Number of valence electrons
+     */
+    int getValenceElectronCount(int Z) const;
 
     /**
      * @brief Calculate Hamiltonian scaling factor for off-diagonal element
@@ -389,6 +501,22 @@ private:
     Matrix buildFockMatrix(const Matrix& density);
 
     /**
+     * @brief Calculate Coulomb kernel γ_AB using Klopman-Ohno-Mataga-Nishimoto
+     *
+     * Formula (TBLite effective.f90:271-277):
+     *   γ_AB = 1 / [R_AB^gexp + (1/γ_avg)^gexp]^(1/gexp)
+     *   where γ_avg = (γ_A + γ_B) / 2, gexp = 2.0 for GFN2
+     *
+     * Claude Generated (January 2025)
+     *
+     * @param gamma_A Hubbard parameter for atom A (shell-resolved)
+     * @param gamma_B Hubbard parameter for atom B (shell-resolved)
+     * @param R_AB Distance between atoms in Bohr
+     * @return Coulomb kernel γ_AB
+     */
+    double calculateCoulombKernel(double gamma_A, double gamma_B, double R_AB) const;
+
+    /**
      * @brief Build density matrix from molecular orbital coefficients
      *
      * Closed-shell formula:
@@ -455,19 +583,19 @@ private:
     double calculateCoulombEnergy() const;
 
     /**
-     * @brief Calculate dispersion energy (D4 stub)
-     *
-     * TODO: D4 dispersion integration (separate task)
+     * @brief Calculate dispersion energy (D4)
      *
      * GFN2 uses DFT-D4 dispersion correction with parameters:
-     *   s6 = 1.0, s8 = 2.7, a1 = 0.52, a2 = 5.0, s9 = 5.0
+     *   s6 = 1.0, s8 = 2.7, a1 = 0.52, a2 = 5.0
      *
-     * For now, returns zero to allow testing of other components.
-     * Full D4 integration requires fixing dftd4interface.h/cpp separately.
+     * Claude Generated (March 2026): Integrated D4 dispersion
+     * - When USE_D4 is defined: Full D4 calculation via DFTD4Interface
+     * - When USE_D4 is not defined: Returns 0.0 with warning
+     * - Expected contribution: ~0.01-0.1 Hartree for organic molecules
      *
      * Reference: E. Caldeweyher et al., J. Chem. Phys. 2019, 150, 154122
      *
-     * @return Dispersion energy in Hartree (currently 0.0)
+     * @return Dispersion energy in Hartree
      */
     double calculateDispersionEnergy() const;
 
@@ -486,6 +614,19 @@ private:
      * @return Gradient matrix (natoms × 3) in Hartree/Bohr
      */
     Matrix calculateGradient() const;
+
+    /**
+     * @brief Calculate numerical gradient using finite differences (for testing)
+     *
+     * Uses central finite differences with step size h:
+     *   dE/dx ≈ (E(x+h) - E(x-h)) / (2h)
+     *
+     * @param h Step size in Angstrom (default: 0.001 Å)
+     * @return Numerical gradient matrix (natoms × 3) in Hartree/Bohr
+     *
+     * Claude Generated (March 2026): For validating analytical gradients
+     */
+    Matrix calculateNumericalGradient(double h = 0.001) const;
 
     // =================================================================================
     // Data Members
@@ -510,12 +651,17 @@ private:
     double m_energy_electronic;                ///< Electronic energy
     double m_energy_repulsion;                 ///< Core-core repulsion
     double m_energy_coulomb;                   ///< Coulomb interaction
+    double m_energy_aes2;                      ///< Anisotropic electrostatic energy (AES2)
     double m_energy_dispersion;                ///< D4 dispersion (stub)
     double m_energy_solvation;                 ///< GBSA solvation energy (native)
 
     // Solvation model (optional, native implementation)
     std::unique_ptr<Curcuma::Solvation::GBSA> m_solvation;  ///< GBSA solvation model
     std::string m_solvent;                     ///< Solvent name (e.g., "water", "none")
+
+#ifdef USE_D4
+    std::unique_ptr<DFTD4Interface> m_d4;      ///< D4 dispersion calculator (optional)
+#endif
 
     // SCF convergence parameters
     int m_scf_max_iterations;                  ///< Maximum SCF iterations (default: 100)

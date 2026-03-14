@@ -7,7 +7,7 @@
 
 #pragma once
 
-#include "gfn2-xtb_param.hpp"
+#include "gfn2_xtb_params.hpp"
 #include <string>
 #include <map>
 #include <vector>
@@ -32,10 +32,12 @@ namespace GFN2Params {
     struct ShellParams {
         double selfenergy;   // E_ii base energy (Hartree)
         double kcn;          // CN shift coefficient
-        double gexp;         // Gaussian exponent for STOs
+        double zeta;         // Slater exponent
+        double gexp;         // Gaussian exponent for STOs (if used)
         double refocc;       // Reference occupation
+        double shpoly;       // Hamiltonian scaling polynomial coefficient (shpoly)
 
-        ShellParams() : selfenergy(0.0), kcn(0.0), gexp(0.0), refocc(0.0) {}
+        ShellParams() : selfenergy(0.0), kcn(0.0), zeta(0.0), gexp(0.0), refocc(0.0), shpoly(0.0) {}
     };
 
     /**
@@ -51,19 +53,28 @@ namespace GFN2Params {
         // Repulsion parameters
         double rep_alpha;      // Exponential decay
         double rep_zeff;       // Effective charge
+        double rad;            // Multipole radius (for Hamiltonian scaling)
 
         // Coulomb parameters
         double gamma_ss;       // (ss|ss) integral
         double gamma_sp;       // (sp|sp) integral
         double gamma_pp;       // (pp|pp) integral
 
+        // AES2 parameters (Claude Generated January 2025)
+        double dkernel;        // Dipole exchange-correlation kernel (p_dkernel)
+        double qkernel;        // Quadrupole exchange-correlation kernel (p_qkernel)
+        double multipole_rad;  // Cutoff radius for multipole ES (p_rad)
+        double valence_cn;     // Valence coordination number (p_vcn)
+        double hubbard_deriv;  // Hubbard derivative (p_hubbard_derivs)
+
         // Dispersion (D4 - stub for now)
         double c6_base;        // Base C6 coefficient
         double r4_over_r2;     // D4 parameter
 
-        ElementParams() : atomic_number(0), rep_alpha(0.0), rep_zeff(0.0),
+        ElementParams() : atomic_number(0), rep_alpha(0.0), rep_zeff(0.0), rad(0.0),
                          gamma_ss(0.0), gamma_sp(0.0), gamma_pp(0.0),
-                         c6_base(0.0), r4_over_r2(0.0) {}
+                         dkernel(0.0), qkernel(0.0), multipole_rad(0.0), valence_cn(0.0),
+                         hubbard_deriv(0.0), c6_base(0.0), r4_over_r2(0.0) {}
     };
 
     /**
@@ -107,6 +118,20 @@ namespace GFN2Params {
 
         int getNumElements() const { return m_elements.size(); }
         int getNumPairs() const { return m_pairs.size() / 2; }  // Divide by 2 (symmetric)
+
+        /**
+         * @brief Get shell-resolved Hubbard parameter (chemical hardness)
+         *
+         * Returns γ_shell = HUBBARD_PARAMETER[Z] * SHELL_HUBBARD_CORR[Z][shell]
+         * Used for shell-resolved Coulomb interactions in GFN2 SCC.
+         *
+         * Claude Generated (January 2025)
+         *
+         * @param Z Atomic number (1-86)
+         * @param shell Shell index (0=s, 1=p, 2=d)
+         * @return Shell-resolved Hubbard parameter, or 0.0 if not available
+         */
+        double getShellHubbard(int Z, int shell) const;
 
     private:
         std::map<int, ElementParams> m_elements;
