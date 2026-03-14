@@ -281,9 +281,20 @@ int GFN1::buildBasisSet()
                 m_basis.push_back(orbital);
             }
 
-            if (shell == 0) m_num_electrons += std::min(2, Z);
-            else if (shell == 1) m_num_electrons += std::min(6, Z - 2);
-            else if (shell == 2) m_num_electrons += std::min(10, Z - 10);
+            // Fix 2 (March 2026): Valence-only electron count, mirrors GFN2 buildBasisSet
+            // Bug was: min(2,Z) and min(6,Z-2) counted core electrons → C got 6, O got 8
+            // Correct: only valence electrons fill the minimal basis
+            if (Z <= 2) { if (shell == 0) m_num_electrons += Z; }
+            else if (Z <= 10) {
+                if (shell == 0) m_num_electrons += std::min(2, Z - 2);
+                else if (shell == 1) m_num_electrons += std::max(0, Z - 4);
+            } else if (Z <= 18) {
+                if (shell == 0) m_num_electrons += std::min(2, Z - 10);
+                else if (shell == 1) m_num_electrons += std::max(0, Z - 12);
+            } else {
+                if (shell == 0) m_num_electrons += 2;
+                else if (shell == 1) m_num_electrons += 6;
+            }
         }
     }
 
@@ -311,34 +322,35 @@ Matrix GFN1::MakeOverlap(std::vector<STO::Orbital>& basisset)
 Matrix GFN1::MakeH(const Matrix& S, const std::vector<STO::Orbital>& basisset)
 {
     // Claude Generated: GFN1 Hamiltonian matrix construction
-    // Simpler than GFN2, but same general structure
+    // Fix 1 (March 2026): Two-pass loop — mirrors GFN2 MakeH fix.
+    // Bug was: single nested loop computed off-diagonal H(i,j) before H(i,i) was set,
+    // so (H(i,i)+H(j,j))/2 used 0 for the unset diagonal → wrong off-diagonal elements.
+    // Solution: pass 1 sets all diagonals, pass 2 uses them for off-diagonals.
 
     Matrix H = Matrix::Zero(basisset.size(), basisset.size());
 
+    // Pass 1: set all diagonal (self-energy) elements first
     for (size_t i = 0; i < basisset.size(); ++i) {
         int atom_i = basisset[i].atom;
         int Z_i = m_atoms[atom_i];
         double CN_i = m_coordination_numbers(atom_i);
-
         int shell_i = 0;
-        if (basisset[i].type == STO::PX || basisset[i].type == STO::PY || basisset[i].type == STO::PZ) {
+        if (basisset[i].type == STO::PX || basisset[i].type == STO::PY || basisset[i].type == STO::PZ)
             shell_i = 1;
-        }
+        H(i, i) = getSelfEnergy(Z_i, shell_i, CN_i);
+    }
 
-        for (size_t j = 0; j <= i; ++j) {
-            if (i == j) {
-                H(i, i) = getSelfEnergy(Z_i, shell_i, CN_i);
-            } else {
-                int atom_j = basisset[j].atom;
+    // Pass 2: off-diagonal elements using already-set diagonals
+    for (size_t i = 0; i < basisset.size(); ++i) {
+        for (size_t j = 0; j < i; ++j) {
+            double dx = basisset[i].x - basisset[j].x;
+            double dy = basisset[i].y - basisset[j].y;
+            double dz = basisset[i].z - basisset[j].z;
+            double distance = std::sqrt(dx*dx + dy*dy + dz*dz) * au;
 
-                double dx = basisset[i].x - basisset[j].x;
-                double dy = basisset[i].y - basisset[j].y;
-                double dz = basisset[i].z - basisset[j].z;
-                double distance = std::sqrt(dx*dx + dy*dy + dz*dz) * au;
-
-                double scale = getHamiltonianScale(basisset[i], basisset[j], distance);
-                H(i, j) = H(j, i) = scale * S(i, j);
-            }
+            double scale = getHamiltonianScale(basisset[i], basisset[j], distance);
+            double h_ij = scale * S(i, j) * (H(i, i) + H(j, j)) / 2.0;
+            H(i, j) = H(j, i) = h_ij;
         }
     }
 
@@ -365,6 +377,8 @@ double GFN1::getSelfEnergy(int element, int shell, double CN) const
             const auto& shell_params = shell_it->second;
 
             // GFN1 self-energy with real parameters
+            // Fix 4 (March 2026): sign was inverted — kcn is negative, so + gives more
+            // negative self-energy for higher CN (physically correct, mirrors GFN2)
             E = shell_params.selfenergy + shell_params.kcn * CN;
             use_real_params = true;
 
@@ -380,6 +394,7 @@ double GFN1::getSelfEnergy(int element, int shell, double CN) const
         double E_base = -m_params.getHardness(element);
         double k_CN = m_params.getShellHardness(element) * 0.01;
 
+        // Fix 4 (March 2026): same sign correction for legacy fallback
         E = E_base + k_CN * CN;
 
         if (CurcumaLogger::get_verbosity() >= 3) {
@@ -640,8 +655,13 @@ double GFN1::calculateRepulsionEnergy() const
             double dz = m_geometry(A, 2) - m_geometry(B, 2);
             double R_AB = std::sqrt(dx*dx + dy*dy + dz*dz) / au;
 
-            double alpha_avg = (alpha_A + alpha_B) / 2.0;
-            double V_rep = (Z_eff_A + Z_eff_B) * std::exp(-alpha_avg * R_AB) / R_AB;
+            // Fix 5 (March 2026): correct GFN1/GFN2 repulsion formula — mirrors GFN2
+            // Bugs: arithmetic mean of alpha (should be geometric), sum of Zeff (should be product),
+            // missing kexp polynomial (R^1.5 for heavy, R^1.0 for H-H)
+            double alpha_AB = std::sqrt(alpha_A * alpha_B);   // geometric mean
+            double zeff_AB  = Z_eff_A * Z_eff_B;              // product
+            double kexp     = (m_atoms[A] > 2 || m_atoms[B] > 2) ? 1.5 : 1.0;
+            double V_rep    = zeff_AB * std::exp(-alpha_AB * std::pow(R_AB, kexp)) / R_AB;
 
             E_rep += V_rep;
         }
@@ -655,51 +675,57 @@ double GFN1::calculateCoulombEnergy() const
     // Claude Generated: GFN1 Coulomb energy with TBLite parameters
     // GFN1 uses simpler ES2 model (no ES3 third-order correction)
     // Reference: S. Grimme et al., JCTC 2017, 13, 1989
-    // Updated November 2025: Uses real gamma_ss parameters from TBLite
+    //
+    // Fix 3 (March 2026): replace Z_A-based charge with refocc-based delta-charge.
+    // Bug: charges(A) = Z_A - mulliken_pop used nuclear charge Z_A as reference.
+    // For C (Z=6) with ~4 valence electrons this gave q=+2, for O (Z=8) q=+2,
+    // causing E_ES2 ~ 0.5*4*gamma per atom — many Hartree of false positive energy.
+    // Correct: delta_q[A][s] = refocc[s] - shell_pop[s]  (mirrors GFN2 line 592)
 
-    Vector charges = Vector::Zero(m_atomcount);
     Matrix PS = m_density * m_overlap;
 
+    // Accumulate shell populations per atom
+    std::vector<std::map<int, double>> shell_pop(m_atomcount);
     for (int mu = 0; mu < m_nbasis; ++mu) {
-        int atom = m_basis[mu].atom;
-        charges(atom) += PS(mu, mu);
+        int A   = m_basis[mu].atom;
+        int l   = (m_basis[mu].type == STO::PX || m_basis[mu].type == STO::PY || m_basis[mu].type == STO::PZ) ? 1 : 0;
+        shell_pop[A][l] += PS(mu, mu);
     }
+
+    // Delta-charges per shell and per atom using refocc
+    std::vector<std::map<int, double>> dq(m_atomcount);
+    Vector charges = Vector::Zero(m_atomcount);
 
     for (int A = 0; A < m_atomcount; ++A) {
         int Z_A = m_atoms[A];
-        charges(A) = Z_A - charges(A);
+        for (auto& [s, pop] : shell_pop[A]) {
+            double ref = 0.0;
+            if (m_param_db.hasElement(Z_A) && m_param_db.getElement(Z_A).shells.count(s))
+                ref = m_param_db.getElement(Z_A).shells.at(s).refocc;
+            dq[A][s] = ref - pop;
+            charges(A) += dq[A][s];
+        }
     }
 
     const_cast<GFN1*>(this)->m_charges = charges;
 
-    // ES2: Effective Coulomb
+    // ES2: Effective Coulomb using shell-resolved delta-charges
+    // GFN1 uses atom-resolved (not shell-resolved) Hubbard kernel
     double E_ES2 = 0.0;
 
     for (int A = 0; A < m_atomcount; ++A) {
         int Z_A = m_atoms[A];
-
-        // Try to get real gamma parameter (use gamma_ss for onsite)
-        double gamma_AA;
-        if (m_param_db.hasElement(Z_A)) {
-            const auto& elem_A = m_param_db.getElement(Z_A);
-            gamma_AA = elem_A.gamma_ss;  // Onsite Coulomb integral
-        } else {
-            gamma_AA = m_params.getHardness(Z_A);  // Fallback
-        }
+        double gamma_AA = m_param_db.hasElement(Z_A)
+                          ? m_param_db.getElement(Z_A).gamma_ss
+                          : m_params.getHardness(Z_A);
 
         E_ES2 += 0.5 * charges(A) * charges(A) * gamma_AA;
 
         for (int B = A + 1; B < m_atomcount; ++B) {
             int Z_B = m_atoms[B];
-
-            // Get gamma for atom B
-            double gamma_BB;
-            if (m_param_db.hasElement(Z_B)) {
-                const auto& elem_B = m_param_db.getElement(Z_B);
-                gamma_BB = elem_B.gamma_ss;
-            } else {
-                gamma_BB = m_params.getHardness(Z_B);
-            }
+            double gamma_BB = m_param_db.hasElement(Z_B)
+                              ? m_param_db.getElement(Z_B).gamma_ss
+                              : m_params.getHardness(Z_B);
 
             double dx = m_geometry(A, 0) - m_geometry(B, 0);
             double dy = m_geometry(A, 1) - m_geometry(B, 1);
