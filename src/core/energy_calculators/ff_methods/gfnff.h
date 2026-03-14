@@ -97,106 +97,91 @@ inline bool isMetalAtom(int atomic_number) {
 class GFNFF {
 public:
     /**
-     * @brief Phase 9: Topology information structure (moved here for use in function signatures)
+     * @brief Static topology data — computed once at initialization, never changes
      *
-     * Extended for Session 5 (December 2025): Two-phase EEQ system
-     * - neighbor_lists: Full neighbor connectivity for functional group detection
-     * - functional_groups: Classification of atoms into functional group types
-     * - topology_charges: Phase 1 EEQ charges (qa) - used for correction calculations
-     * - dxi: Electronegativity corrections per atom
-     * - dgam: Hardness corrections per atom (already computed in Phase 1)
-     * - dalpha: Polarizability corrections per atom
+     * Claude Generated (March 2026): Separated from TopologyInfo for clean
+     * distinction between one-time topology and per-step dynamic data.
+     *
+     * Contains: connectivity, hybridization, ring membership, Phase-1 EEQ charges,
+     * correction parameters, BATM topology, cached EEQ element parameters.
      */
-    struct TopologyInfo {
-        Vector coordination_numbers;
-        Vector neighbor_counts;  // Simple neighbor counts for XTB-compatible torsion CN correction
-        std::vector<int> hybridization;
-        std::vector<int> pi_fragments;
-        std::vector<int> ring_sizes;
-        Vector eeq_charges;
-        std::vector<bool> is_metal;
-        std::vector<bool> is_aromatic;
+    struct GFNFFTopology {
+        // Atom classification
+        Vector neighbor_counts;                                  // Simple neighbor counts (integer CN)
+        std::vector<int> hybridization;                          // 0=sp3, 1=sp, 2=sp2, 3=terminal, 5=hypervalent
+        std::vector<int> pi_fragments;                           // Pi fragment assignment per atom
+        std::vector<int> ring_sizes;                             // Smallest ring containing each atom
+        std::vector<bool> is_metal;                              // Metal atom flags
+        std::vector<bool> is_aromatic;                           // Aromatic atom flags
+        std::vector<bool> is_amide_h;                            // Amide hydrogen flags (Coulomb chi correction)
 
-        // NEW (Session 5): Topology and correction data
-        std::vector<std::vector<int>> neighbor_lists;        // Full neighbor connectivity
-        std::vector<FunctionalGroupType> functional_groups;  // Per-atom functional group classification
-        Vector topology_charges;                             // Phase 1 EEQ charges (qa) - base topology
-        Vector dxi;                                          // Electronegativity corrections
-        Vector dgam;                                         // Hardness corrections
-        Vector dalpha;                                       // Polarizability corrections
+        // Connectivity
+        std::vector<std::vector<int>> neighbor_lists;            // Full neighbor connectivity
+        std::vector<std::vector<int>> adjacency_list;            // Per-atom bonded neighbor list
+        std::vector<std::vector<int>> topo_distances;            // N×N shortest-path bond counts
 
-        // Claude Generated (January 2026): Charge-dependent alpha for EEQ
-        // Calculated ONCE during topology init using Phase 1 charges
-        // Formula: alpeeq(i) = (alpha_base + ff*qa(i))²
-        // Reference: Fortran gfnff_ini.f90:718-725, gfnff_data_types.f90:128
-        Vector alpeeq;                                       // Squared alpha values, charge-corrected
+        // Functional groups
+        std::vector<FunctionalGroupType> functional_groups;      // Per-atom classification
 
-        // Claude Generated (March 2026): Amide hydrogen flags for Coulomb chi correction
-        // Reference: Fortran gfnff_ini.f90:717 - if(amideH(i)) chieeq(i) -= 0.02
-        std::vector<bool> is_amide_h;
+        // Phase-1 EEQ charges and corrections (computed once, fixed)
+        Vector topology_charges;                                 // Phase 1 EEQ charges (qa)
+        Vector eeq_charges;                                      // Phase 1 EEQ charges (alias)
+        Vector dxi;                                              // Electronegativity corrections
+        Vector dgam;                                             // Hardness corrections
+        Vector dalpha;                                           // Polarizability corrections
+        Vector alpeeq;                                           // Charge-corrected alpha² values
 
-        // Phase 2.1: Distance caching (Claude Generated - Dec 2025)
-        // Computed once per geometry update to eliminate redundant sqrt() calls
-        Eigen::MatrixXd distance_matrix;        // N×N distances in Bohr
-        Eigen::MatrixXd squared_dist_matrix;    // N×N squared distances (avoids sqrt)
+        // Bond classification
+        std::vector<int> bond_types;                             // Per-bond type (1-7)
+        std::vector<double> pi_bond_orders;                      // Triangular lin(i,j) format
 
-        // Phase 2.2: Adjacency list (Claude Generated - Dec 2025)
-        // Per-atom neighbor connectivity built from bond list
-        // Used in generateGFNFFAngles() to avoid O(N_bonds) search per atom
-        std::vector<std::vector<int>> adjacency_list;
+        // Cached EEQ element parameters (performance optimization)
+        std::vector<double> eeq_chi;                             // Electronegativity per atom
+        std::vector<double> eeq_gam;                             // Chemical hardness per atom
+        std::vector<double> eeq_alp;                             // Damping parameter (squared) per atom
+        std::vector<double> eeq_cnf;                             // CN correction factor per atom
 
-        // Phase 9B: Topological distances (Claude Generated - Dec 24, 2025)
-        // N×N matrix of bond counts (shortest path) between atom pairs
-        // Used for 1,3 and 1,4 topology factors in non-bonded repulsion
-        // topo_distances[i][j] = number of bonds in shortest path between i and j
-        //   0 = same atom, 1 = bonded, 2 = separated by 1 bond, 3 = 1,3-pair, 4 = 1,4-pair, etc.
-        std::vector<std::vector<int>> topo_distances;
+        // BATM topology
+        std::vector<std::vector<int>> bpair;                     // Topological distance matrix
+        std::vector<std::tuple<int,int,int>> b3list;             // Batm triples (i,j,k)
+        int nbatm = 0;
 
-        // Bond type classification (Claude Generated - Jan 2, 2026)
-        // Per-bond type following Fortran gfnff_ini.f90:1131-1148
-        // btyp = 1: Single bond (default)
-        // btyp = 2: Pi bond (sp2-sp2)
-        // btyp = 3: Sp bond (linear, no torsion)
-        // btyp = 4: Hypervalent
-        // btyp = 5: Metal-containing bond
-        // btyp = 6: Eta-complex (special metal)
-        // btyp = 7: TM metal-metal bond
-        std::vector<int> bond_types;
+        // Ring enumeration
+        std::vector<std::vector<int>> rings;                     // rings[ring_id] = {atom0, ...}
+        std::vector<std::vector<int>> atom_to_rings;             // atom_to_rings[atom] = {ring_id0, ...}
 
-        // Phase 2C: π-bond orders (Claude Generated - January 10, 2026)
-        // Simplified approximation based on hybridization (no full Hückel calculation)
-        // Stored in triangular format using lin(i,j) indexing
-        // pbo[lin(i,j)] = π-bond order between atoms i and j
-        std::vector<double> pi_bond_orders;
+        // Molecular fragments
+        int nfrag = 1;
+        std::vector<int> fraglist;                               // Fragment ID per atom (1-indexed)
+        std::vector<double> qfrag;                               // Target charge per fragment
+    };
 
-        // PERFORMANCE OPTIMIZATION (Claude Generated - January 17, 2026)
-        // Pre-cached EEQ parameters per atom to avoid repeated lookups in O(N²) loops
-        // Individual vectors instead of struct array (struct defined later in class)
-        // Populated once during topology initialization, indexed by atom index
-        std::vector<double> eeq_chi;  // Electronegativity per atom
-        std::vector<double> eeq_gam;  // Chemical hardness per atom
-        std::vector<double> eeq_alp;  // Damping parameter (squared) per atom
-        std::vector<double> eeq_cnf;  // CN correction factor per atom
+    /**
+     * @brief Per-geometry-step dynamic data — recalculated when geometry changes
+     *
+     * Claude Generated (March 2026): Separated from TopologyInfo for clean
+     * distinction between one-time topology and per-step dynamic data.
+     *
+     * Contains: coordination numbers, distance matrices.
+     * Phase-2 EEQ charges are NOT stored here — they are managed by GFNFF::Calculation().
+     */
+    struct GFNFFDynamicState {
+        Vector coordination_numbers;                             // D3 CN (geometry-dependent)
+        Eigen::MatrixXd distance_matrix;                         // N×N distances in Bohr
+        Eigen::MatrixXd squared_dist_matrix;                     // N×N squared distances
+    };
 
-        // BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
-        // GFN-FF bonded ATM (batm) terms - D3-like 3-body dispersion for 1,4-pairs only
-        // Reference: external/gfnff/src/gfnff_ini.f90:745-779, gfnff_engrad.F90:562-603
-        std::vector<std::vector<int>> bpair;  // N×N topological distance matrix (bonds between atoms)
-        std::vector<std::tuple<int,int,int>> b3list;  // Batm triples (i,j,k) for 1,4-pairs
-        int nbatm = 0;  // Number of batm triples
-
-        // Ring enumeration (Claude Generated - Feb 9, 2026)
-        // Pre-computed ring membership for O(1) lookup in areAtomsInSameRing()
-        // Replaces broken ad-hoc path-finding with Fortran-equivalent ring storage
-        // Reference: Fortran gfnff_ini2.f90:469-497 (ringsbond subroutine)
-        std::vector<std::vector<int>> rings;           // rings[ring_id] = {atom0, atom1, ...}
-        std::vector<std::vector<int>> atom_to_rings;   // atom_to_rings[atom] = {ring_id0, ring_id1, ...}
-
-        // Phase 10: Molecular fragments (Claude Generated - Jan 31, 2026)
-        // Used for fragment-constrained EEQ charges
-        int nfrag = 1;                       // Number of molecular fragments
-        std::vector<int> fraglist;           // Fragment ID per atom (1-indexed)
-        std::vector<double> qfrag;           // Target charge per fragment
+    /**
+     * @brief Combined topology + dynamic state (backward-compatible wrapper)
+     *
+     * Inherits from both GFNFFTopology and GFNFFDynamicState so that all existing
+     * code accessing `topo_info.hybridization`, `topo_info.coordination_numbers`, etc.
+     * continues to work unchanged. New code can use the base types directly when
+     * only static or dynamic data is needed.
+     *
+     * Claude Generated (March 2026): Architecture cleanup — inheritance-based split
+     */
+    struct TopologyInfo : public GFNFFTopology, public GFNFFDynamicState {
     };
 
     /**
@@ -494,10 +479,22 @@ private:
     bool initializeForceField();
 
     /**
-     * @brief Generate GFN-FF specific force field parameters
+     * @brief Generate GFN-FF specific force field parameters (JSON)
      * @return JSON with GFN-FF parameters
+     *
+     * Delegates to generateGFNFFParameterSet() and serializes to JSON.
+     * Kept for backward compatibility with file-based parameter caching.
      */
     json generateGFNFFParameters();
+
+    /**
+     * @brief Generate GFN-FF parameters as native C++ structs (no JSON)
+     * @return GFNFFParameterSet with all interaction parameters
+     *
+     * Claude Generated (March 2026): Primary parameter generation path.
+     * Returns native structs for direct in-memory transfer to ForceField.
+     */
+    GFNFFParameterSet generateGFNFFParameterSet();
 
     /**
      * @brief Calculate topology and connectivity for GFN-FF
@@ -617,6 +614,45 @@ private:
      * @return JSON array of inversion parameters
      */
     json generateGFNFFInversions() const;
+
+    // =================================================================================
+    // NATIVE STRUCT GENERATORS (March 2026 — Phase 2 architecture cleanup)
+    // Return std::vector<StructType> directly, bypassing JSON serialization.
+    // The JSON generators above are kept as wrappers for file cache compatibility.
+    // =================================================================================
+
+    /// Generate bond parameters as native Bond structs
+    std::vector<Bond> generateBondsNative(const TopologyInfo& topo_info) const;
+
+    /// Generate angle parameters as native Angle structs
+    std::vector<Angle> generateAnglesNative(const TopologyInfo& topo_info) const;
+
+    /// Generate torsion parameters as native Dihedral structs (dihedrals + extra_dihedrals)
+    std::pair<std::vector<Dihedral>, std::vector<Dihedral>> generateTorsionsNative() const;
+
+    /// Generate inversion parameters as native Inversion structs
+    std::vector<Inversion> generateInversionsNative() const;
+
+    /// Generate triple bond torsion parameters as native GFNFFSTorsion structs
+    std::vector<GFNFFSTorsion> generateSTorsionsNative() const;
+
+    /// Generate Coulomb pair parameters as native GFNFFCoulomb structs
+    std::vector<GFNFFCoulomb> generateCoulombPairsNative() const;
+
+    /// Generate repulsion pair parameters as native GFNFFRepulsion structs (bonded + nonbonded)
+    std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> generateRepulsionPairsNative() const;
+
+    /// Generate dispersion pair parameters as native GFNFFDispersion structs
+    std::vector<GFNFFDispersion> generateDispersionPairsNative() const;
+
+    /// Detect hydrogen bonds as native GFNFFHydrogenBond structs
+    std::vector<GFNFFHydrogenBond> detectHydrogenBondsNative(const Vector& charges) const;
+
+    /// Detect halogen bonds as native GFNFFHalogenBond structs
+    std::vector<GFNFFHalogenBond> detectHalogenBondsNative(const Vector& charges) const;
+
+    /// Generate BATM triple parameters as native GFNFFBatmTriple structs
+    std::vector<GFNFFBatmTriple> generateBatmTriplesNative(const TopologyInfo& topo_info) const;
 
     // Phase 4.2: GFN-FF pairwise non-bonded parameter generation (Claude Generated 2025)
 

@@ -392,6 +392,112 @@ void ForceField::setParameterFile(const std::string& file)
     }
 }
 
+// Claude Generated (March 2026): Native struct intake — bypasses JSON round-trip entirely
+void ForceField::setGFNFFParameters(const GFNFFParameterSet& params)
+{
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info("Setting GFN-FF parameters from native structs (no JSON)");
+    }
+
+    // Direct vector assignment — no JSON parsing overhead
+    m_bonds = params.bonds;
+    m_angles = params.angles;
+    m_dihedrals = params.dihedrals;
+    m_extra_dihedrals = params.extra_dihedrals;
+    m_inversions = params.inversions;
+    m_gfnff_storsions = params.storsions;
+
+    m_gfnff_dispersions.clear();
+    m_d4_dispersions.clear();
+    if (params.dispersion_method == "d4") {
+        m_d4_dispersions = params.dispersions;
+    } else {
+        m_gfnff_dispersions = params.dispersions;
+    }
+
+    m_gfnff_bonded_repulsions = params.bonded_repulsions;
+    m_gfnff_nonbonded_repulsions = params.nonbonded_repulsions;
+    m_gfnff_coulombs = params.coulombs;
+
+    // Extract per-atom Coulomb parameters from pairs (for TERM 2+3 self-energy)
+    // Same logic as setGFNFFCoulombs() — needed for parent-level computation
+    m_coulomb_chi_base = Vector::Zero(m_natoms);
+    m_coulomb_gam = Vector::Zero(m_natoms);
+    m_coulomb_alp = Vector::Zero(m_natoms);
+    m_coulomb_cnf = Vector::Zero(m_natoms);
+    m_coulomb_chi_static = Vector::Zero(m_natoms);
+    {
+        std::vector<bool> atom_seen(m_natoms, false);
+        for (const auto& coul : m_gfnff_coulombs) {
+            if (!atom_seen[coul.i]) {
+                m_coulomb_chi_base(coul.i) = coul.chi_base_i;
+                m_coulomb_gam(coul.i) = coul.gam_i;
+                m_coulomb_alp(coul.i) = coul.alp_i;
+                m_coulomb_cnf(coul.i) = coul.cnf_i;
+                m_coulomb_chi_static(coul.i) = coul.chi_i;
+                atom_seen[coul.i] = true;
+            }
+            if (!atom_seen[coul.j]) {
+                m_coulomb_chi_base(coul.j) = coul.chi_base_j;
+                m_coulomb_gam(coul.j) = coul.gam_j;
+                m_coulomb_alp(coul.j) = coul.alp_j;
+                m_coulomb_cnf(coul.j) = coul.cnf_j;
+                m_coulomb_chi_static(coul.j) = coul.chi_j;
+                atom_seen[coul.j] = true;
+            }
+        }
+    }
+
+    m_gfnff_hbonds = params.hbonds;
+    m_gfnff_xbonds = params.xbonds;
+    m_atm_triples = params.atm_triples;
+    m_gfnff_batms = params.batm_triples;
+    m_bond_hb_data = params.bond_hb_data;
+
+    // Store EEQ charges
+    if (params.eeq_charges.size() > 0) {
+        m_eeq_charges = params.eeq_charges;
+    }
+
+    // Set method and e0
+    m_method = "gfnff";
+    m_e0 = params.e0;
+
+    // Store JSON representation for caching (only if enabled)
+    if (m_enable_caching) {
+        m_parameters = params.toJSON();
+        autoSaveParameters();
+    }
+
+    // Populate m_parameters with minimum fields needed by AutoRanges()
+    // AutoRanges reads flags like "dispersion", "hbond", "repulsion", "coulomb"
+    if (m_parameters.is_null() || m_parameters.empty()) {
+        m_parameters = json::object();
+    }
+    m_parameters["dispersion"] = params.dispersion_enabled;
+    m_parameters["hbond"] = params.hbond_enabled;
+    m_parameters["repulsion"] = params.repulsion_enabled;
+    m_parameters["coulomb"] = params.coulomb_enabled;
+    m_parameters["method"] = "gfnff";
+
+    // Create threads and distribute parameters
+    AutoRanges();
+
+    // Set method type for ForceFieldThread (GFN-FF = 3)
+    // (Already handled by AutoRanges which reads m_method)
+
+    printParameterSummary();
+
+    // Distribute EEQ charges to threads (after AutoRanges creates them)
+    if (m_eeq_charges.size() > 0) {
+        distributeEEQCharges(m_eeq_charges);
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::success("ForceField::setGFNFFParameters() complete (native path)");
+    }
+}
+
 // Claude Generated: CG parameter generation for sphere-based coarse graining
 // Prepared for future ellipsoid extension but currently implements spheres only
 void ForceField::generateCGParameters(const json& cg_config)

@@ -100,6 +100,17 @@ public:
     void setParameter(const json& parameter);
     void setParameterFile(const std::string& file);
 
+    /**
+     * @brief Set GFN-FF parameters from native structs (no JSON round-trip)
+     *
+     * Claude Generated (March 2026): Primary parameter intake for GFN-FF.
+     * Replaces the JSON serialization/deserialization path for in-memory transfer.
+     * JSON-based setParameter() is kept only for loading cached parameters from disk.
+     *
+     * @param params Complete GFN-FF parameter set as native C++ structs
+     */
+    void setGFNFFParameters(const GFNFFParameterSet& params);
+
     // Claude Generated (Feb 15, 2026): HB/XB update methods for MD simulations
     // Reference: Fortran gfnff_engrad.F90:246-260 - dynamic list rebuilding
     void updateGFNFFHBonds(const json& hbonds);

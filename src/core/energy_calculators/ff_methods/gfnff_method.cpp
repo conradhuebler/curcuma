@@ -54,6 +54,213 @@ static inline bool is_transition_metal(int Z) {
            (Z >= 72 && Z <= 80);    // 5d series
 }
 
+// =============================================================================
+// GFNFFParameterSet serialization (Claude Generated March 2026)
+// Used ONLY for file-based parameter caching, not for in-memory transfer.
+// =============================================================================
+
+json GFNFFParameterSet::toJSON() const
+{
+    json j;
+    j["method"] = "gfnff";
+    j["e0"] = e0;
+
+    // Bonds
+    json bonds_json = json::array();
+    for (const auto& b : bonds) {
+        json bj;
+        bj["type"] = b.type; bj["i"] = b.i; bj["j"] = b.j; bj["k"] = b.k;
+        bj["distance"] = b.distance; bj["fc"] = b.fc; bj["r0_ij"] = b.r0_ij;
+        bj["r0_ik"] = b.r0_ik; bj["exponent"] = b.exponent;
+        bj["rabshift"] = b.rabshift; bj["fqq"] = b.fqq;
+        bj["z_i"] = b.z_i; bj["z_j"] = b.z_j;
+        bj["r0_base_i"] = b.r0_base_i; bj["r0_base_j"] = b.r0_base_j;
+        bj["cnfak_i"] = b.cnfak_i; bj["cnfak_j"] = b.cnfak_j;
+        bj["ff"] = b.ff; bj["nr_hb"] = b.nr_hb; bj["hb_cn_H"] = b.hb_cn_H;
+        bonds_json.push_back(bj);
+    }
+    j["bonds"] = bonds_json;
+
+    // Angles
+    json angles_json = json::array();
+    for (const auto& a : angles) {
+        json aj;
+        aj["type"] = a.type; aj["i"] = a.i; aj["j"] = a.j; aj["k"] = a.k;
+        aj["fc"] = a.fc; aj["theta0_ijk"] = a.theta0_ijk;
+        aj["r0_ij"] = a.r0_ij; aj["r0_ik"] = a.r0_ik;
+        angles_json.push_back(aj);
+    }
+    j["angles"] = angles_json;
+
+    // Dihedrals (primary + extra combined with is_extra flag)
+    json dihedrals_json = json::array();
+    for (const auto& d : dihedrals) {
+        json dj;
+        dj["type"] = d.type; dj["i"] = d.i; dj["j"] = d.j; dj["k"] = d.k; dj["l"] = d.l;
+        dj["V"] = d.V; dj["n"] = d.n; dj["phi0"] = d.phi0;
+        dj["is_extra"] = d.is_extra; dj["is_nci"] = d.is_nci;
+        dihedrals_json.push_back(dj);
+    }
+    for (const auto& d : extra_dihedrals) {
+        json dj;
+        dj["type"] = d.type; dj["i"] = d.i; dj["j"] = d.j; dj["k"] = d.k; dj["l"] = d.l;
+        dj["V"] = d.V; dj["n"] = d.n; dj["phi0"] = d.phi0;
+        dj["is_extra"] = true; dj["is_nci"] = d.is_nci;
+        dihedrals_json.push_back(dj);
+    }
+    j["dihedrals"] = dihedrals_json;
+
+    // Inversions
+    json inversions_json = json::array();
+    for (const auto& inv : inversions) {
+        json ij;
+        ij["type"] = inv.type; ij["i"] = inv.i; ij["j"] = inv.j; ij["k"] = inv.k; ij["l"] = inv.l;
+        ij["fc"] = inv.fc; ij["C0"] = inv.C0; ij["C1"] = inv.C1; ij["C2"] = inv.C2;
+        ij["potential_type"] = inv.potential_type; ij["omega0"] = inv.omega0;
+        inversions_json.push_back(ij);
+    }
+    j["inversions"] = inversions_json;
+
+    // STorsions
+    json storsions_json = json::array();
+    for (const auto& s : storsions) {
+        json sj;
+        sj["i"] = s.i; sj["j"] = s.j; sj["k"] = s.k; sj["l"] = s.l;
+        sj["erefhalf"] = s.erefhalf;
+        storsions_json.push_back(sj);
+    }
+    j["gfnff_storsions"] = storsions_json;
+
+    // Dispersions
+    json disp_json = json::array();
+    for (const auto& d : dispersions) {
+        json dj;
+        dj["i"] = d.i; dj["j"] = d.j; dj["C6"] = d.C6; dj["r4r2ij"] = d.r4r2ij;
+        dj["r0_squared"] = d.r0_squared; dj["r_cut"] = d.r_cut; dj["zetac6"] = d.zetac6;
+        dj["dispersion_method"] = dispersion_method;
+        disp_json.push_back(dj);
+    }
+    if (dispersion_method == "d4")
+        j["d4_dispersion_pairs"] = disp_json;
+    else
+        j["gfnff_dispersions"] = disp_json;
+
+    // Repulsions
+    json bonded_rep_json = json::array();
+    for (const auto& r : bonded_repulsions) {
+        json rj;
+        rj["i"] = r.i; rj["j"] = r.j; rj["alpha"] = r.alpha;
+        rj["repab"] = r.repab; rj["r_cut"] = r.r_cut;
+        bonded_rep_json.push_back(rj);
+    }
+    j["gfnff_bonded_repulsions"] = bonded_rep_json;
+
+    json nonbonded_rep_json = json::array();
+    for (const auto& r : nonbonded_repulsions) {
+        json rj;
+        rj["i"] = r.i; rj["j"] = r.j; rj["alpha"] = r.alpha;
+        rj["repab"] = r.repab; rj["r_cut"] = r.r_cut;
+        nonbonded_rep_json.push_back(rj);
+    }
+    j["gfnff_nonbonded_repulsions"] = nonbonded_rep_json;
+
+    // Coulombs
+    json coul_json = json::array();
+    for (const auto& c : coulombs) {
+        json cj;
+        cj["i"] = c.i; cj["j"] = c.j; cj["q_i"] = c.q_i; cj["q_j"] = c.q_j;
+        cj["gamma_ij"] = c.gamma_ij;
+        cj["chi_i"] = c.chi_i; cj["chi_j"] = c.chi_j;
+        cj["chi_base_i"] = c.chi_base_i; cj["chi_base_j"] = c.chi_base_j;
+        cj["cnf_i"] = c.cnf_i; cj["cnf_j"] = c.cnf_j;
+        cj["gam_i"] = c.gam_i; cj["gam_j"] = c.gam_j;
+        cj["alp_i"] = c.alp_i; cj["alp_j"] = c.alp_j;
+        cj["r_cut"] = c.r_cut;
+        coul_json.push_back(cj);
+    }
+    j["gfnff_coulombs"] = coul_json;
+
+    // HBonds
+    json hb_json = json::array();
+    for (const auto& h : hbonds) {
+        json hj;
+        hj["i"] = h.i; hj["j"] = h.j; hj["k"] = h.k;
+        hj["basicity_A"] = h.basicity_A; hj["basicity_B"] = h.basicity_B;
+        hj["acidity_A"] = h.acidity_A; hj["acidity_B"] = h.acidity_B;
+        hj["q_H"] = h.q_H; hj["q_A"] = h.q_A; hj["q_B"] = h.q_B;
+        hj["r_cut"] = h.r_cut; hj["case_type"] = h.case_type;
+        hj["neighbors_A"] = h.neighbors_A; hj["neighbors_B"] = h.neighbors_B;
+        hj["acceptor_parent_index"] = h.acceptor_parent_index;
+        hj["neighbors_C"] = h.neighbors_C;
+        hb_json.push_back(hj);
+    }
+    j["gfnff_hbonds"] = hb_json;
+
+    // XBonds
+    json xb_json = json::array();
+    for (const auto& x : xbonds) {
+        json xj;
+        xj["i"] = x.i; xj["j"] = x.j; xj["k"] = x.k;
+        xj["basicity_B"] = x.basicity_B; xj["acidity_X"] = x.acidity_X;
+        xj["q_X"] = x.q_X; xj["q_B"] = x.q_B; xj["r_cut"] = x.r_cut;
+        xb_json.push_back(xj);
+    }
+    j["gfnff_xbonds"] = xb_json;
+
+    // ATM triples
+    json atm_json = json::array();
+    for (const auto& t : atm_triples) {
+        json tj;
+        tj["i"] = t.i; tj["j"] = t.j; tj["k"] = t.k;
+        tj["C6_ij"] = t.C6_ij; tj["C6_ik"] = t.C6_ik; tj["C6_jk"] = t.C6_jk;
+        tj["s9"] = t.s9; tj["a1"] = t.a1; tj["a2"] = t.a2; tj["alp"] = t.alp;
+        tj["atm_method"] = t.atm_method; tj["triple_scale"] = t.triple_scale;
+        atm_json.push_back(tj);
+    }
+    j["atm_triples"] = atm_json;
+
+    // BATM triples
+    json batm_json = json::array();
+    for (const auto& b : batm_triples) {
+        json bj;
+        bj["i"] = b.i; bj["j"] = b.j; bj["k"] = b.k;
+        bj["zb3atm_i"] = b.zb3atm_i; bj["zb3atm_j"] = b.zb3atm_j; bj["zb3atm_k"] = b.zb3atm_k;
+        batm_json.push_back(bj);
+    }
+    j["gfnff_batms"] = batm_json;
+
+    // Bond-HB data
+    json bhb_json = json::array();
+    for (const auto& e : bond_hb_data) {
+        json ej;
+        ej["A"] = e.A; ej["H"] = e.H; ej["B_atoms"] = e.B_atoms;
+        bhb_json.push_back(ej);
+    }
+    j["bond_hb_data"] = bhb_json;
+
+    // EEQ charges
+    if (eeq_charges.size() > 0) {
+        j["eeq_charges"] = std::vector<double>(eeq_charges.data(),
+            eeq_charges.data() + eeq_charges.size());
+    }
+
+    j["vdws"] = json::array(); // Legacy
+
+    return j;
+}
+
+GFNFFParameterSet GFNFFParameterSet::fromJSON(const json& j)
+{
+    // Stub: not needed yet — fromJSON will be implemented when cache-loading
+    // is routed through GFNFFParameterSet. For now, the old setParameter(json)
+    // path handles cache loading.
+    GFNFFParameterSet params;
+    // TODO: implement full deserialization when needed
+    return params;
+}
+
+// =============================================================================
+
 GFNFF::GFNFF()
     : m_forcefield(nullptr)
     , m_initialized(false)
@@ -1300,48 +1507,38 @@ bool GFNFF::initializeForceField()
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::success("Topology calculation complete (stub - always returns true)");
-        CurcumaLogger::info("About to call generateGFNFFParameters()...");
+        CurcumaLogger::info("About to call generateGFNFFParameterSet() [native path]...");
     }
 
-    json ff_params;
+    // Claude Generated (March 2026): Native parameter generation path — bypasses JSON entirely
+    GFNFFParameterSet ff_params;
     try {
-        ff_params = generateGFNFFParameters();
+        ff_params = generateGFNFFParameterSet();
     } catch (const std::exception& e) {
         CurcumaLogger::error(std::string("GFN-FF parameter generation failed: ") + e.what());
         return false;
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::success("GFN-FF parameters generated successfully");
-        CurcumaLogger::param("ff_params_size", std::to_string(ff_params.size()));
-        CurcumaLogger::param("has_bonds", ff_params.contains("bonds") ? "yes" : "no");
-        CurcumaLogger::param("bonds_count", std::to_string(ff_params.value("bonds", json::array()).size()));
-        CurcumaLogger::param("angles_count", std::to_string(ff_params.value("angles", json::array()).size()));
-        CurcumaLogger::param("torsions_count", std::to_string(ff_params.value("dihedrals", json::array()).size()));
-        CurcumaLogger::param("inversions_count", std::to_string(ff_params.value("inversions", json::array()).size()));
-        CurcumaLogger::info("About to call m_forcefield->setParameter()...");
+        CurcumaLogger::success("GFN-FF parameters generated successfully (native structs)");
+        CurcumaLogger::param("bonds_count", std::to_string(ff_params.bonds.size()));
+        CurcumaLogger::param("angles_count", std::to_string(ff_params.angles.size()));
+        CurcumaLogger::param("torsions_count", std::to_string(ff_params.dihedrals.size()));
+        CurcumaLogger::param("inversions_count", std::to_string(ff_params.inversions.size()));
+        CurcumaLogger::info("About to call m_forcefield->setGFNFFParameters()...");
     }
 
     try {
-        m_forcefield->setParameter(ff_params);
+        m_forcefield->setGFNFFParameters(ff_params);
         if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::success("m_forcefield->setParameter() completed successfully");
+            CurcumaLogger::success("m_forcefield->setGFNFFParameters() completed successfully");
         }
     } catch (const std::exception& e) {
-        CurcumaLogger::error(std::string("m_forcefield->setParameter() failed: ") + e.what());
+        CurcumaLogger::error(std::string("m_forcefield->setGFNFFParameters() failed: ") + e.what());
         return false;
     }
 
-    // CRITICAL FIX (Claude Generated Dec 2025): Distribute EEQ charges AFTER setParameter()
-    // setParameter() creates threads via AutoRanges(), so we must distribute charges AFTER
-    // Previously this was called in generateGFNFFParameters() but threads didn't exist yet
-    if (!m_charges.isZero()) {
-        m_forcefield->distributeEEQCharges(m_charges);
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("EEQ charges distributed to ForceFieldThreads after initialization");
-            CurcumaLogger::param("charge_count", std::to_string(m_charges.size()));
-        }
-    }
+    // EEQ charges already distributed by setGFNFFParameters() → no need to call distributeEEQCharges here
 
     // Claude Generated (Mar 6, 2026): Distribute Phase-1 topology charges for BATM AFTER setParameter()
     // Reference: Fortran gfnff_engrad.F90:620 uses topo%qa (Phase-1, fixed) for BATM
@@ -1886,6 +2083,224 @@ json GFNFF::generateGFNFFParameters()
     CurcumaLogger::result_fmt("GFN-FF parameter generation: {} ms", duration.count());
 
     return parameters;
+}
+
+// Claude Generated (March 2026): Native parameter set generation — bypasses JSON entirely
+// Uses native generators for bonds/angles, converts JSON for remaining terms (incremental migration)
+GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
+{
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    GFNFFParameterSet params;
+    params.e0 = 0.0;
+
+    const TopologyInfo& topo_info = getCachedTopology();
+
+    // Validate charges
+    for (int i = 0; i < topo_info.eeq_charges.size(); ++i) {
+        if (std::isnan(topo_info.eeq_charges[i]) || std::isinf(topo_info.eeq_charges[i])) {
+            throw std::runtime_error("Invalid topology: NaN or Inf detected in EEQ charges");
+        }
+    }
+
+    // Set charges before torsion generation (torsions need m_charges for fqq)
+    m_charges = topo_info.eeq_charges;
+    params.eeq_charges = topo_info.eeq_charges;
+    params.topology_charges = topo_info.topology_charges;
+
+    // Phase 1: Bonds (native — no JSON)
+    params.bonds = generateBondsNative(topo_info);
+
+    // Phase 2: Angles (native — no JSON)
+    params.angles = generateAnglesNative(topo_info);
+
+    // Phase 3+: Remaining generators still produce JSON — convert to structs
+    // This is the incremental migration path. Each can be converted to native later.
+    try {
+    json torsions_json = generateGFNFFTorsions();
+    for (const auto& dj : torsions_json) {
+        Dihedral d;
+        d.type = dj.value("type", 3);
+        d.i = dj["i"]; d.j = dj["j"]; d.k = dj["k"]; d.l = dj["l"];
+        d.V = dj["V"]; d.n = dj["n"]; d.phi0 = dj["phi0"];
+        d.is_extra = dj.value("is_extra", false);
+        d.is_nci = dj.value("is_nci", false);
+        if (d.is_extra)
+            params.extra_dihedrals.push_back(d);
+        else
+            params.dihedrals.push_back(d);
+    }
+    } catch (const std::exception& e) { throw std::runtime_error(std::string("torsions: ") + e.what()); }
+
+    try {
+    json inversions_json = generateGFNFFInversions();
+    for (const auto& ij : inversions_json) {
+        Inversion inv;
+        inv.type = ij.value("type", 3);
+        inv.i = ij["i"]; inv.j = ij["j"]; inv.k = ij["k"]; inv.l = ij["l"];
+        inv.fc = ij["barrier"];  // JSON uses "barrier", struct uses "fc"
+        inv.C0 = ij.value("C0", 0.0); inv.C1 = ij.value("C1", 0.0); inv.C2 = ij.value("C2", 0.0);
+        inv.potential_type = ij.value("potential_type", 0);
+        inv.omega0 = ij.value("omega0", 0.0);
+        params.inversions.push_back(inv);
+    }
+    } catch (const std::exception& e) { throw std::runtime_error(std::string("inversions: ") + e.what()); }
+
+    try {
+    json storsions_json = generateGFNFFSTorsions();
+    for (const auto& sj : storsions_json) {
+        GFNFFSTorsion s;
+        s.i = sj["i"]; s.j = sj["j"]; s.k = sj["k"]; s.l = sj["l"];
+        s.erefhalf = sj.value("erefhalf", 3.75e-4);
+        params.storsions.push_back(s);
+    }
+    } catch (const std::exception& e) { throw std::runtime_error(std::string("storsions: ") + e.what()); }
+
+    try {
+    json coulombs_json = generateGFNFFCoulombPairs();
+    for (const auto& cj : coulombs_json) {
+        GFNFFCoulomb c;
+        c.i = cj["i"]; c.j = cj["j"];
+        c.q_i = cj["q_i"]; c.q_j = cj["q_j"];
+        c.gamma_ij = cj["gamma_ij"];
+        c.chi_i = cj.value("chi_i", 0.0); c.chi_j = cj.value("chi_j", 0.0);
+        c.chi_base_i = cj.value("chi_base_i", 0.0); c.chi_base_j = cj.value("chi_base_j", 0.0);
+        c.cnf_i = cj.value("cnf_i", 0.0); c.cnf_j = cj.value("cnf_j", 0.0);
+        c.gam_i = cj.value("gam_i", 0.0); c.gam_j = cj.value("gam_j", 0.0);
+        c.alp_i = cj.value("alp_i", 0.0); c.alp_j = cj.value("alp_j", 0.0);
+        c.r_cut = cj.value("r_cut", 50.0);
+        params.coulombs.push_back(c);
+    }
+    } catch (const std::exception& e) { throw std::runtime_error(std::string("coulombs: ") + e.what()); }
+
+    try {
+    json repulsion_json = generateGFNFFRepulsionPairs();
+    for (const auto& rj : repulsion_json["bonded"]) {
+        GFNFFRepulsion r;
+        r.i = rj["i"]; r.j = rj["j"];
+        r.alpha = rj["alpha"]; r.repab = rj["repab"];
+        r.r_cut = rj.value("r_cut", 50.0);
+        params.bonded_repulsions.push_back(r);
+    }
+    for (const auto& rj : repulsion_json["nonbonded"]) {
+        GFNFFRepulsion r;
+        r.i = rj["i"]; r.j = rj["j"];
+        r.alpha = rj["alpha"]; r.repab = rj["repab"];
+        r.r_cut = rj.value("r_cut", 50.0);
+        params.nonbonded_repulsions.push_back(r);
+    }
+    } catch (const std::exception& e) { throw std::runtime_error(std::string("repulsion: ") + e.what()); }
+
+    try {
+    json dispersions_json = generateGFNFFDispersionPairs();
+    if (dispersions_json.size() > 0 && dispersions_json[0].contains("dispersion_method") &&
+        dispersions_json[0]["dispersion_method"] == "d4") {
+        params.dispersion_method = "d4";
+    } else {
+        params.dispersion_method = "d3";
+    }
+    for (const auto& dj : dispersions_json) {
+        GFNFFDispersion d;
+        d.i = dj["i"]; d.j = dj["j"];
+        d.C6 = dj["C6"]; d.r4r2ij = dj["r4r2ij"];
+        d.r0_squared = dj["r0_squared"];
+        d.r_cut = dj.value("r_cut", 50.0);
+        d.zetac6 = dj.value("zetac6", 1.0);
+        params.dispersions.push_back(d);
+    }
+    } catch (const std::exception& e) { throw std::runtime_error(std::string("dispersions: ") + e.what()); }
+
+    // ATM triples (stored as member variable by dispersion generator)
+    if (!m_atm_triples.is_null() && m_atm_triples.is_array()) {
+        for (const auto& tj : m_atm_triples) {
+            ATMTriple t;
+            t.i = tj["i"]; t.j = tj["j"]; t.k = tj["k"];
+            t.C6_ij = tj["C6_ij"]; t.C6_ik = tj["C6_ik"]; t.C6_jk = tj["C6_jk"];
+            t.s9 = tj.value("s9", 1.0); t.a1 = tj.value("a1", 0.0);
+            t.a2 = tj.value("a2", 0.0); t.alp = tj.value("alp", 14.0);
+            t.atm_method = tj.value("atm_method", "d3");
+            t.triple_scale = tj.value("triple_scale", 1.0);
+            params.atm_triples.push_back(t);
+        }
+    }
+
+    // BATM triples
+    if (topo_info.nbatm > 0) {
+        const double batmscal = 0.30;
+        const double batmscal_cuberoot = std::pow(batmscal, 1.0/3.0);
+        std::vector<double> zb3atm(87, 0.0);
+        for (int z = 1; z <= 86; ++z) {
+            zb3atm[z] = (z == 1) ? -0.25 * batmscal_cuberoot : -static_cast<double>(z) * batmscal_cuberoot;
+        }
+        for (const auto& [i, j, k] : topo_info.b3list) {
+            GFNFFBatmTriple bt;
+            bt.i = i; bt.j = j; bt.k = k;
+            bt.zb3atm_i = zb3atm[m_atoms[i]];
+            bt.zb3atm_j = zb3atm[m_atoms[j]];
+            bt.zb3atm_k = zb3atm[m_atoms[k]];
+            params.batm_triples.push_back(bt);
+        }
+    }
+
+    // HB/XB detection
+    if (m_parameters.value("hbond", true)) {
+        json hbonds_json = detectHydrogenBonds(topo_info.eeq_charges);
+        for (const auto& hj : hbonds_json) {
+            GFNFFHydrogenBond hb;
+            hb.i = hj["i"]; hb.j = hj["j"]; hb.k = hj["k"];
+            hb.basicity_A = hj.value("basicity_A", 0.0); hb.basicity_B = hj.value("basicity_B", 0.0);
+            hb.acidity_A = hj.value("acidity_A", 0.0); hb.acidity_B = hj.value("acidity_B", 0.0);
+            hb.q_H = hj.value("q_H", 0.0); hb.q_A = hj.value("q_A", 0.0); hb.q_B = hj.value("q_B", 0.0);
+            hb.r_cut = hj.value("r_cut", 50.0);
+            hb.case_type = hj.value("case_type", 1);
+            if (hj.contains("neighbors_A")) hb.neighbors_A = hj["neighbors_A"].get<std::vector<int>>();
+            if (hj.contains("neighbors_B")) hb.neighbors_B = hj["neighbors_B"].get<std::vector<int>>();
+            hb.acceptor_parent_index = hj.value("acceptor_parent_index", -1);
+            if (hj.contains("neighbors_C")) hb.neighbors_C = hj["neighbors_C"].get<std::vector<int>>();
+            params.hbonds.push_back(hb);
+        }
+
+        json xbonds_json = detectHalogenBonds(topo_info.eeq_charges);
+        for (const auto& xj : xbonds_json) {
+            GFNFFHalogenBond xb;
+            xb.i = xj["i"]; xb.j = xj["j"]; xb.k = xj["k"];
+            xb.basicity_B = xj.value("basicity_B", 0.0);
+            xb.acidity_X = xj.value("acidity_X", 0.0);
+            xb.q_X = xj.value("q_X", 0.0); xb.q_B = xj.value("q_B", 0.0);
+            xb.r_cut = xj.value("r_cut", 50.0);
+            params.xbonds.push_back(xb);
+        }
+
+        // Bond-HB cross-referencing (nr_hb and bond_hb_data)
+        std::map<std::pair<int,int>, std::vector<int>> ah_to_b_atoms;
+        for (const auto& hb : params.hbonds) {
+            int z_b = m_atoms[hb.k];
+            if (z_b == 7 || z_b == 8) {
+                ah_to_b_atoms[{hb.i, hb.j}].push_back(hb.k);
+            }
+        }
+        for (auto& bond : params.bonds) {
+            int hbH = -1, hbA = -1;
+            if (m_atoms[bond.i] == 1) { hbH = bond.i; hbA = bond.j; }
+            else if (m_atoms[bond.j] == 1) { hbH = bond.j; hbA = bond.i; }
+            else continue;
+            if (m_atoms[hbA] != 7 && m_atoms[hbA] != 8) continue;
+
+            auto it = ah_to_b_atoms.find({hbA, hbH});
+            if (it != ah_to_b_atoms.end() && !it->second.empty()) {
+                bond.nr_hb = static_cast<int>(it->second.size());
+                BondHBEntry entry;
+                entry.A = hbA; entry.H = hbH; entry.B_atoms = it->second;
+                params.bond_hb_data.push_back(entry);
+            }
+        }
+    }
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    CurcumaLogger::result_fmt("GFN-FF native parameter generation: {} ms", duration.count());
+
+    return params;
 }
 
 json GFNFF::generateGFNFFBonds() const
@@ -5133,16 +5548,13 @@ double GFNFF::calculateEEQEnergy(const Vector& charges, const Vector& cn) const
 }
 
 // OVERLOAD 1: New signature (Claude Generated Jan 15, 2026) - accepts full TopologyInfo with pi_bond_orders
-json GFNFF::generateTopologyAwareBonds(const TopologyInfo& topo_info) const
+// Claude Generated (March 2026): Native bond generator — returns Bond structs directly
+std::vector<Bond> GFNFF::generateBondsNative(const TopologyInfo& topo_info) const
 {
-    // Claude Generated (February 2026): Timing for parameter generation breakdown
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    json bonds = json::array();
-
-    // Phase 2: Topology-aware bond parameter generation
-    // Start with basic GFN-FF bond detection
-    double bond_threshold = 1.3; // Factor for covalent radii sum
+    std::vector<Bond> bonds;
+    double bond_threshold = 1.3;
 
     for (int i = 0; i < m_atomcount; ++i) {
         for (int j = i + 1; j < m_atomcount; ++j) {
@@ -5150,47 +5562,37 @@ json GFNFF::generateTopologyAwareBonds(const TopologyInfo& topo_info) const
             Vector rj = m_geometry_bohr.row(j);
             double distance = (ri - rj).norm();
 
-            // Get covalent radii for atoms i and j
             double rcov_i = getCovalentRadius(m_atoms[i]);
             double rcov_j = getCovalentRadius(m_atoms[j]);
 
             if (distance < bond_threshold * (rcov_i + rcov_j)) {
-                // This is a bond - generate topology-aware GFN-FF parameters
-                json bond;
-                bond["type"] = 3; // GFN-FF type
-                bond["i"] = i;
-                bond["j"] = j;
-                bond["k"] = 0;
-                bond["distance"] = distance;
-
-                // Phase 9: Get bond parameters with full topology awareness
-                // NOTE (Feb 2026): Ring strain (ringf) and pi-corrections (fpi) are already included
-                // in getGFNFFBondParameters() - DO NOT apply additional topology_factor here!
-                // Previous code had redundant ring/pi corrections causing ~15% force constant inflation.
                 auto bond_params = getGFNFFBondParameters(i, j, m_atoms[i], m_atoms[j], distance, topo_info);
 
-                bond["fc"] = bond_params.force_constant;
-                bond["r0_ij"] = bond_params.equilibrium_distance;
-                bond["r0_ik"] = 0.0;
-                bond["exponent"] = bond_params.alpha;
-                bond["rabshift"] = bond_params.rabshift;  // Claude Generated (Dec 2025): Store vbond(1) for validation
-                bond["fqq"] = bond_params.fqq;  // Claude Generated (Jan 7, 2026): Store charge-dependent factor
+                Bond b;
+                b.type = 3;
+                b.i = i;
+                b.j = j;
+                b.k = 0;
+                b.distance = distance;
+                b.fc = bond_params.force_constant;
+                b.r0_ij = bond_params.equilibrium_distance;
+                b.r0_ik = 0.0;
+                b.exponent = bond_params.alpha;
+                b.rabshift = bond_params.rabshift;
+                b.fqq = bond_params.fqq;
+                b.z_i = bond_params.z_i;
+                b.z_j = bond_params.z_j;
+                b.r0_base_i = bond_params.r0_base_i;
+                b.r0_base_j = bond_params.r0_base_j;
+                b.cnfak_i = bond_params.cnfak_i;
+                b.cnfak_j = bond_params.cnfak_j;
+                b.ff = bond_params.ff;
 
-                // Claude Generated (Jan 18, 2026): Dynamic r0 calculation parameters
-                bond["z_i"] = bond_params.z_i;
-                bond["z_j"] = bond_params.z_j;
-                bond["r0_base_i"] = bond_params.r0_base_i;
-                bond["r0_base_j"] = bond_params.r0_base_j;
-                bond["cnfak_i"] = bond_params.cnfak_i;
-                bond["cnfak_j"] = bond_params.cnfak_j;
-                bond["ff"] = bond_params.ff;
-
-                bonds.push_back(bond);
+                bonds.push_back(b);
             }
         }
     }
 
-    // Claude Generated (February 2026): Report timing at verbosity 1+
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
     if (CurcumaLogger::get_verbosity() >= 1) {
@@ -5198,6 +5600,36 @@ json GFNFF::generateTopologyAwareBonds(const TopologyInfo& topo_info) const
     }
 
     return bonds;
+}
+
+// JSON wrapper — delegates to native generator for backward compatibility
+json GFNFF::generateTopologyAwareBonds(const TopologyInfo& topo_info) const
+{
+    auto bonds = generateBondsNative(topo_info);
+    json result = json::array();
+    for (const auto& b : bonds) {
+        json bond;
+        bond["type"] = b.type;
+        bond["i"] = b.i;
+        bond["j"] = b.j;
+        bond["k"] = b.k;
+        bond["distance"] = b.distance;
+        bond["fc"] = b.fc;
+        bond["r0_ij"] = b.r0_ij;
+        bond["r0_ik"] = b.r0_ik;
+        bond["exponent"] = b.exponent;
+        bond["rabshift"] = b.rabshift;
+        bond["fqq"] = b.fqq;
+        bond["z_i"] = b.z_i;
+        bond["z_j"] = b.z_j;
+        bond["r0_base_i"] = b.r0_base_i;
+        bond["r0_base_j"] = b.r0_base_j;
+        bond["cnfak_i"] = b.cnfak_i;
+        bond["cnfak_j"] = b.cnfak_j;
+        bond["ff"] = b.ff;
+        result.push_back(bond);
+    }
+    return result;
 }
 
 // OVERLOAD 2: Legacy signature (Claude Generated Jan 15, 2026) - for backward compatibility
@@ -5219,34 +5651,23 @@ json GFNFF::generateTopologyAwareBonds(const Vector& cn, const std::vector<int>&
 // Claude Generated (Feb 11, 2026): New overload using complete TopologyInfo
 // This ensures pi_bond_orders, atom_to_rings, and all topology data are available
 // for correct angle parameter generation (especially f2 for N pi-system angles)
-json GFNFF::generateTopologyAwareAngles(const TopologyInfo& topo_info) const
+// Claude Generated (March 2026): Native angle generator — returns Angle structs directly
+std::vector<Angle> GFNFF::generateAnglesNative(const TopologyInfo& topo_info) const
 {
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    // Build bond list from adjacency list
-    std::vector<std::pair<int, int>> bond_list;
-    for (int i = 0; i < m_atomcount; ++i) {
-        if (i < static_cast<int>(topo_info.adjacency_list.size())) {
-            for (int j : topo_info.adjacency_list[i]) {
-                if (j > i) bond_list.push_back({i, j});
-            }
-        }
-    }
-
-    // Pre-compute CN for fn factor
     const double threshold_cn_squared = 40.0 * 40.0;
     auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr, threshold_cn_squared);
     Vector coord_numbers = Eigen::Map<Vector>(cn_vec.data(), cn_vec.size());
 
-    std::vector<json> angles_vec;
+    std::vector<Angle> angles_vec;
 
     #pragma omp parallel
     {
-        std::vector<json> local_angles;
+        std::vector<Angle> local_angles;
 
         #pragma omp for schedule(dynamic, 10)
         for (int center = 0; center < m_atomcount; ++center) {
-            // Skip atoms with <= 1 neighbor or > 6 neighbors (Fortran: nb(20,i) > 6)
             if (center >= static_cast<int>(topo_info.adjacency_list.size())) continue;
             const auto& neighbors = topo_info.adjacency_list[center];
             if (neighbors.size() <= 1 || neighbors.size() > 6) continue;
@@ -5256,7 +5677,6 @@ json GFNFF::generateTopologyAwareAngles(const TopologyInfo& topo_info) const
                     int atom_i = neighbors[i];
                     int atom_k = neighbors[j];
 
-                    // Calculate current angle
                     Vector ri = m_geometry_bohr.row(atom_i);
                     Vector rj = m_geometry_bohr.row(center);
                     Vector rk = m_geometry_bohr.row(atom_k);
@@ -5271,30 +5691,27 @@ json GFNFF::generateTopologyAwareAngles(const TopologyInfo& topo_info) const
                     cos_angle = std::max(-1.0, std::min(1.0, cos_angle));
                     double current_angle = acos(cos_angle);
 
-                    // Get angle parameters using FULL topology info
                     auto angle_params = getGFNFFAngleParameters(atom_i, center, atom_k,
                         current_angle, topo_info, coord_numbers);
 
-                    // Skip angles with zero force constant (fijk < threshold)
                     if (angle_params.force_constant < 1e-10) continue;
 
-                    // Fortran: skip metal eta cases with phi < 60°
                     int z_center = m_atoms[center];
                     if (z_center >= 1 && z_center <= 86 && GFNFFParameters::metal_type[z_center - 1] > 0) {
                         if (current_angle * 180.0 / M_PI < 60.0) continue;
                     }
 
-                    json angle;
-                    angle["type"] = 3;
-                    angle["i"] = atom_i;
-                    angle["j"] = center;
-                    angle["k"] = atom_k;
-                    angle["fc"] = angle_params.force_constant;
-                    angle["theta0_ijk"] = angle_params.equilibrium_angle;
-                    angle["r0_ij"] = v1_norm;
-                    angle["r0_ik"] = v2_norm;
+                    Angle a;
+                    a.type = 3;
+                    a.i = atom_i;
+                    a.j = center;
+                    a.k = atom_k;
+                    a.fc = angle_params.force_constant;
+                    a.theta0_ijk = angle_params.equilibrium_angle;
+                    a.r0_ij = v1_norm;
+                    a.r0_ik = v2_norm;
 
-                    local_angles.push_back(angle);
+                    local_angles.push_back(a);
                 }
             }
         }
@@ -5306,14 +5723,11 @@ json GFNFF::generateTopologyAwareAngles(const TopologyInfo& topo_info) const
     }
 
     // Sort for deterministic output
-    std::sort(angles_vec.begin(), angles_vec.end(), [](const json& a, const json& b) {
-        if (a["j"] != b["j"]) return a["j"] < b["j"];
-        if (a["i"] != b["i"]) return a["i"] < b["i"];
-        return a["k"] < b["k"];
+    std::sort(angles_vec.begin(), angles_vec.end(), [](const Angle& a, const Angle& b) {
+        if (a.j != b.j) return a.j < b.j;
+        if (a.i != b.i) return a.i < b.i;
+        return a.k < b.k;
     });
-
-    json angles = json::array();
-    for (const auto& a : angles_vec) angles.push_back(a);
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
@@ -5321,7 +5735,27 @@ json GFNFF::generateTopologyAwareAngles(const TopologyInfo& topo_info) const
         CurcumaLogger::result_fmt("GFN-FF topology-aware angle generation: {} ms", duration.count());
     }
 
-    return angles;
+    return angles_vec;
+}
+
+// JSON wrapper — delegates to native generator
+json GFNFF::generateTopologyAwareAngles(const TopologyInfo& topo_info) const
+{
+    auto angles = generateAnglesNative(topo_info);
+    json result = json::array();
+    for (const auto& a : angles) {
+        json angle;
+        angle["type"] = a.type;
+        angle["i"] = a.i;
+        angle["j"] = a.j;
+        angle["k"] = a.k;
+        angle["fc"] = a.fc;
+        angle["theta0_ijk"] = a.theta0_ijk;
+        angle["r0_ij"] = a.r0_ij;
+        angle["r0_ik"] = a.r0_ik;
+        result.push_back(angle);
+    }
+    return result;
 }
 
 // Legacy overload - for backward compatibility (without pi_bond_orders)
