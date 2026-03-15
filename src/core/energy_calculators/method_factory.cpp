@@ -336,7 +336,6 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
     if (method == "gfn2") return createGFN2(config);
     if (method == "gfn1") return createGFN1(config);
     if (method == "ipea1") return createIPEA1(config);
-    if (method == "gfnff") return createGFNFF(config);
 
     // Native methods (always available)
     if (method == "eht") {
@@ -344,9 +343,9 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
         return std::make_unique<EHTMethod>(config);
     }
 
-    // Native GFN-FF (currently "cgfnff", will become "gfnff" in gfnff-branch)
-    if (method == "cgfnff") {
-        CurcumaLogger::success("Method 'cgfnff' resolved to native GFN-FF");
+    // Native GFN-FF (always available, Curcuma's own implementation)
+    if (method == "gfnff") {
+        CurcumaLogger::success("Method 'gfnff' resolved to native GFN-FF");
         return std::make_unique<GFNFFComputationalMethod>("gfnff", config);
     }
 
@@ -360,6 +359,9 @@ std::unique_ptr<ComputationalMethod> MethodFactory::create(const std::string& me
     if (method == "xtb-gfn1" || method == "xtb-gfn2") {
         return createXTBExplicit(method, config);
     }
+
+    // External GFN-FF (External GFNFF > XTB, no native fallback)
+    if (method == "xtb-gfnff") return createGFNFF(config);
 
     // Ulysses methods (all 27 with one check)
     if (isUlyssesMethod(method)) {
@@ -398,7 +400,7 @@ std::vector<std::string> MethodFactory::getAvailableMethods() {
     std::vector<std::string> available;
 
     // Always available: native methods and force fields
-    available.insert(available.end(), {"eht", "cgfnff", "uff", "uff-d3", "qmdff"});
+    available.insert(available.end(), {"eht", "gfnff", "uff", "uff-d3", "qmdff"});
 
     // Priority methods: add if ANY provider is available
     if (hasTBLite() || hasUlysses() || hasXTB())
@@ -408,15 +410,15 @@ std::vector<std::string> MethodFactory::getAvailableMethods() {
     if (hasTBLite())
         available.push_back("ipea1");
 
-    // GFN-FF priority method (always has native fallback, but list if external available)
-    if (hasGFNFF() || hasXTB())
-        available.push_back("gfnff");
-
     // XTB-specific
     if (hasXTB()) {
         available.push_back("xtb-gfn1");
         available.push_back("xtb-gfn2");
     }
+
+    // External GFN-FF (available if external GFNFF or XTB present)
+    if (hasGFNFF() || hasXTB())
+        available.push_back("xtb-gfnff");
 
     // Ulysses methods
     if (hasUlysses()) {
