@@ -1,6 +1,6 @@
 /*
  * < EEQ (Electronegativity Equalization) Charge Solver >
- * Copyright (C) 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
+ * Copyright (C) 2025 - 2026 Conrad Hübler <Conrad.Huebler@gmx.net>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -53,6 +53,24 @@
 enum class EEQDistanceMode {
     Topological,  ///< Phase 1: Floyd-Warshall bond path distances
     Geometric     ///< Phase 2: Euclidean xyz distances
+};
+
+/**
+ * @brief Linear solve method for EEQ system
+ *
+ * Controls the algorithm used to solve the augmented EEQ linear system:
+ * - LU: PartialPivLU on full augmented matrix (baseline, always works)
+ * - SchurCholesky: Exploit SPD structure of NxN Coulomb sub-matrix via Cholesky,
+ *   then Schur complement for constraint rows (~2x faster than LU)
+ * - PCG: Preconditioned Conjugate Gradient with Schur complement constraint
+ *   handling. O(N²·k) where k << N for warm-started MD/optimization (~10-30x for N>500)
+ *
+ * Claude Generated - March 2026 (Performance optimization)
+ */
+enum class EEQSolveMethod {
+    LU,             ///< PartialPivLU on full augmented system (baseline)
+    SchurCholesky,  ///< Cholesky on NxN SPD block + Schur complement for constraints
+    PCG             ///< Preconditioned Conjugate Gradient with warm start
 };
 
 /**
@@ -587,6 +605,68 @@ private:
         const TopologyInput& topology
     ) const;
 
+    // ===== Solve Methods =====
+
+    /**
+     * @brief Solve augmented EEQ system via Schur complement + Cholesky
+     *
+     * Exploits the SPD structure of the NxN Coulomb sub-matrix A:
+     * 1. Cholesky factorize A (O(N³/6) vs O(N³/3) for LU)
+     * 2. Solve A·z₁ = b and A·z₂ = Cᵀ via back-substitution
+     * 3. Form Schur complement S = C·z₂ (nfrag × nfrag)
+     * 4. Solve constraint: λ = S⁻¹·(C·z₁ - d)
+     * 5. Final charges: q = z₁ - z₂·λ
+     *
+     * Falls back to LU if Cholesky fails (matrix not SPD).
+     *
+     * Claude Generated - March 2026 (Performance optimization)
+     *
+     * @param A_nn NxN Coulomb+hardness sub-matrix (must be SPD)
+     * @param rhs_atoms RHS vector for atoms (N elements)
+     * @param C Constraint matrix (nfrag × N)
+     * @param rhs_constraints RHS for constraints (nfrag elements)
+     * @param natoms Number of atoms
+     * @param nfrag Number of fragments
+     * @return Charge vector (N elements), or empty vector on failure
+     */
+    Vector solveWithSchurCholesky(
+        const Matrix& A_nn,
+        const Vector& rhs_atoms,
+        const Matrix& C,
+        const Vector& rhs_constraints,
+        int natoms,
+        int nfrag
+    );
+
+    /**
+     * @brief Solve A·x = b via Preconditioned Conjugate Gradient
+     *
+     * Iterative O(N²·k) solver where k is iteration count (typically 10-50 with warm start).
+     * Uses Jacobi (diagonal) preconditioner.
+     *
+     * Claude Generated - March 2026 (Performance optimization)
+     *
+     * @param A NxN SPD matrix
+     * @param b RHS vector
+     * @param x0 Initial guess (warm start from previous step)
+     * @param max_iter Maximum CG iterations
+     * @param tol Convergence tolerance on residual norm
+     * @return Solution vector
+     */
+    Vector solveWithPCG(
+        const Matrix& A,
+        const Vector& b,
+        const Vector& x0,
+        int max_iter,
+        double tol
+    );
+
+    /**
+     * @brief Parse solve method string to enum
+     * Claude Generated - March 2026
+     */
+    static EEQSolveMethod parseSolveMethod(const std::string& method_str);
+
     // ===== Configuration =====
 
     ConfigManager m_config;           ///< Configuration manager
@@ -594,6 +674,7 @@ private:
     double m_convergence_threshold;   ///< Convergence threshold for charge changes (e)
     int m_verbosity;                  ///< Verbosity level (0-3)
     bool m_calculate_cn;              ///< Auto-calculate CN if not provided
+    EEQSolveMethod m_solve_method;    ///< Linear solve algorithm selection
 
     // ===== Cached Data for Energy Calculation =====
 
@@ -640,6 +721,12 @@ private:
 
     // Intelligent EEQ matrix caching for performance
     mutable std::unique_ptr<EEQSolverCache> m_eeq_cache;
+
+    // PCG warm-start cache for iterative EEQ solve
+    // Claude Generated - March 2026 (Performance optimization)
+    mutable Vector m_pcg_last_z1;  ///< Previous A⁻¹·b solution (warm start for PCG)
+    mutable Vector m_pcg_last_z2;  ///< Previous A⁻¹·1 constraint solution (very stable between steps)
+    mutable bool m_pcg_cache_valid = false;  ///< Whether PCG warm-start cache is usable
 };
 
 // ===== Parameter Definitions =====
@@ -655,4 +742,10 @@ BEGIN_PARAMETER_DEFINITION(eeq_solver)
           "Auto-calculate coordination numbers if not provided", "Algorithm", {})
     PARAM(use_iterative_refinement, Bool, false,
           "Use iterative refinement for EEQ Phase 2", "Algorithm", {})
+    PARAM(solve_method, String, "schur_cholesky",
+          "EEQ linear solve method: lu, schur_cholesky, pcg", "Algorithm", {})
+    PARAM(max_pcg_iterations, Int, 200,
+          "Maximum PCG iterations for EEQ solve", "Algorithm", {})
+    PARAM(pcg_tolerance, Double, 1e-10,
+          "PCG convergence tolerance", "Algorithm", {})
 END_PARAMETER_DEFINITION

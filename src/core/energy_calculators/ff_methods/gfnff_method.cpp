@@ -317,8 +317,10 @@ GFNFF::GFNFF(const json& parameters)
     if (!eeq_params.contains("eeq_solver")) {
         eeq_params["eeq_solver"] = json::object();
     }
-    // Use global CurcumaLogger verbosity
-    eeq_params["eeq_solver"]["verbosity"] = CurcumaLogger::get_verbosity();
+    // Use global CurcumaLogger verbosity — but don't overwrite if already set by caller
+    if (!eeq_params["eeq_solver"].contains("verbosity")) {
+        eeq_params["eeq_solver"]["verbosity"] = CurcumaLogger::get_verbosity();
+    }
     ConfigManager eeq_config("eeq_solver", eeq_params);
     m_eeq_solver = std::make_unique<EEQSolver>(eeq_config);
 
