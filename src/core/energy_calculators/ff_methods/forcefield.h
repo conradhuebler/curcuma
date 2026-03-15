@@ -111,6 +111,10 @@ public:
      */
     void setGFNFFParameters(const GFNFFParameterSet& params);
 
+    /// Claude Generated (March 2026): Clear parameter data in existing threads for reuse.
+    /// Avoids thread destruction/recreation when only parameters change.
+    void clearThreadData();
+
     // Claude Generated (Feb 15, 2026): HB/XB update methods for MD simulations
     // Reference: Fortran gfnff_engrad.F90:246-260 - dynamic list rebuilding
     void updateGFNFFHBonds(const json& hbonds);

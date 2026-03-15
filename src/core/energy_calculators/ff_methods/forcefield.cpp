@@ -498,6 +498,17 @@ void ForceField::setGFNFFParameters(const GFNFFParameterSet& params)
     }
 }
 
+// Claude Generated (March 2026): Clear parameter data in existing threads for reuse
+// Avoids thread pool destruction/recreation when only parameters change (e.g. geometry opt)
+void ForceField::clearThreadData()
+{
+    for (auto* thread : m_stored_threads) {
+        if (auto* ff_thread = dynamic_cast<ForceFieldThread*>(thread)) {
+            ff_thread->clearParameterData();
+        }
+    }
+}
+
 // Claude Generated: CG parameter generation for sphere-based coarse graining
 // Prepared for future ellipsoid extension but currently implements spheres only
 void ForceField::generateCGParameters(const json& cg_config)
@@ -1400,46 +1411,40 @@ void ForceField::AutoRanges()
             CurcumaLogger::param("threads", m_threads);
         }
 
-    // Claude Generated: Clear stored threads before creating new ones
-    // This prevents thread accumulation in AutoRanges() if called multiple times
-    // FIX (December 2025): Use threadpool's clear() to avoid dangling pointers
-    if (!m_stored_threads.empty()) {
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info(fmt::format("DEBUG AutoRanges: Clearing {} old threads", m_stored_threads.size()));
-        }
-        // Use threadpool's clear() method which properly cleans ALL internal state
-        // (m_pool, m_active, m_finished, m_threads_map) AND deletes thread objects
-        m_threadpool->clear();
-        m_stored_threads.clear();
-    }
-
     int free_threads = m_threads;
-    // TEMPORARILY DISABLED - H4Thread has build errors
-    // Claude Generated Comment - 2025-11-30
-    /*
-    int h4 = false; // m_parameters["h4"];
-    if (h4) {
-        if (free_threads > 1)
-            free_threads--;
-        H4Thread* thread = new H4Thread(m_threads - 1, free_threads);
-        thread->setParamater(m_parameters);
-        thread->Initialise(m_atom_types);
-
-        m_threadpool->addThread(thread);
-        m_stored_threads.push_back(thread);
-    }
-    */
-
-    // Claude Generated: Ensure at least 1 thread is created for energy calculations
-    // (free_threads could be 0 if all threads are reserved for D3/H4 corrections)
     int thread_count = (free_threads > 0) ? free_threads : 1;
 
+    // Claude Generated (March 2026): Thread reuse — if thread count matches, clear and reuse
+    // Avoids thread pool destruction/recreation during repeated setParameter() calls
+    bool reuse_threads = (!m_stored_threads.empty()
+                          && static_cast<int>(m_stored_threads.size()) == thread_count);
+
+    if (reuse_threads) {
+        clearThreadData();
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info(fmt::format("AutoRanges: reusing {} existing threads", m_stored_threads.size()));
+        }
+    } else {
+        // Destroy old threads and create new ones
+        if (!m_stored_threads.empty()) {
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info(fmt::format("AutoRanges: clearing {} old threads (count changed)", m_stored_threads.size()));
+            }
+            m_threadpool->clear();
+            m_stored_threads.clear();
+        }
+
+        for (int i = 0; i < thread_count; ++i) {
+            ForceFieldThread* thread = new ForceFieldThread(i, thread_count);
+            thread->setGeometry(m_geometry, false);
+            thread->Initialise(m_atom_types);
+            m_threadpool->addThread(thread);
+            m_stored_threads.push_back(thread);
+        }
+    }
+
     for (int i = 0; i < thread_count; ++i) {
-        ForceFieldThread* thread = new ForceFieldThread(i, thread_count);
-        thread->setGeometry(m_geometry, false);
-        thread->Initialise(m_atom_types);  // Phase 3: Initialize atom types for covalent radius calculations
-        m_threadpool->addThread(thread);
-        m_stored_threads.push_back(thread);
+        ForceFieldThread* thread = dynamic_cast<ForceFieldThread*>(m_stored_threads[i]);
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::param("created_thread", i);
@@ -1635,7 +1640,7 @@ void ForceField::AutoRanges()
                         hb_count++;
                     }
                 }
-            CurcumaLogger::error(fmt::format("thread_{}_hbonds: count={}", i, hb_count));
+            CurcumaLogger::param(fmt::format("thread_{}_hbonds", i), hb_count);
         }
     }
 

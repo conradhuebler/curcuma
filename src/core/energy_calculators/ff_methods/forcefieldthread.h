@@ -238,6 +238,30 @@ public:
         m_bond_hb_data = bond_hb_data;
     }
 
+    /// Claude Generated (March 2026): Clear all parameter vectors without destroying the thread.
+    /// Used for thread reuse when parameters change but thread pool persists.
+    void clearParameterData() {
+        // UFF/QMDFF
+        m_uff_bonds.clear(); m_uff_angles.clear();
+        m_uff_dihedrals.clear(); m_qmdff_dihedrals.clear();
+        m_uff_inversions.clear(); m_qmdff_inversions.clear();
+        m_uff_vdWs.clear(); m_EQs.clear();
+        // GFN-FF bonded
+        m_gfnff_bonds.clear(); m_gfnff_angles.clear();
+        m_gfnff_dihedrals.clear(); m_gfnff_extra_torsions.clear();
+        m_gfnff_inversions.clear(); m_gfnff_storsions.clear();
+        m_gfnff_vdWs.clear();
+        // GFN-FF non-bonded pairwise
+        m_gfnff_dispersions.clear(); m_d3_dispersions.clear(); m_d4_dispersions.clear();
+        m_gfnff_bonded_repulsions.clear(); m_gfnff_nonbonded_repulsions.clear();
+        m_gfnff_coulombs.clear();
+        // Three-body
+        m_gfnff_hbonds.clear(); m_gfnff_xbonds.clear();
+        m_atm_triples.clear(); m_gfnff_batms.clear();
+        // Bond-HB data
+        m_bond_hb_data.clear();
+    }
+
     // Claude Generated (Feb 15, 2026): dEdcn accumulator for CN chain-rule gradient terms
     // Accumulates dE/dCN contributions from bond (dr0/dCN) and dispersion (dC6/dCN) terms
     // Applied after thread completion via dcn chain rule: gradient += dcn * dEdcn
