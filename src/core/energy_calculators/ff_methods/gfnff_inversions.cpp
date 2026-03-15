@@ -746,91 +746,68 @@ GFNFF::GFNFFInversionParams GFNFF::getGFNFFInversionParameters(
  *         Based on Fortran implementation by S. Spicher & S. Grimme
  * @copyright Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  */
-json GFNFF::generateGFNFFInversions() const
+std::vector<Inversion> GFNFF::generateInversionsNative() const
 {
-    // Claude Generated (Feb 2026): Complete rewrite to match Fortran gfnff_ini.f90:2046-2149
-    // Reference: Spicher/Grimme Angew. Chem. Int. Ed. 2020, 59, 15665
+    // Claude Generated (March 2026): Native struct version of generateGFNFFInversions
+    // Reference: Fortran gfnff_ini.f90:2046-2149, Spicher/Grimme Angew. Chem. Int. Ed. 2020, 59, 15665
     //
-    // Qualifying atoms for inversions:
-    //   1. Any atom with 3 neighbors AND pi character (piadr > 0)
-    //   2. OR saturated nitrogen: N with 3 neighbors and NO pi system
-    //
+    // Qualifying atoms: (1) 3 neighbors + pi character, or (2) saturated nitrogen (3 neighbors, no pi)
     // Two potential types:
-    //   tlist(5)=0  → E = V*(1-cos(omega)) * damp   [planar sp2]
-    //   tlist(5)=-1 → E = V*(cos(omega)-cos(omega0))^2 * damp  [saturated N, omega0=80°]
+    //   potential_type=0  → E = V*(1-cos(omega)) * damp   [planar sp2]
+    //   potential_type=-1 → E = V*(cos(omega)-cos(omega0))^2 * damp  [saturated N, omega0=80°]
 
     auto start_time = std::chrono::high_resolution_clock::now();
-    json inversions = json::array();
+    std::vector<Inversion> inversions;
 
     const auto& topo_info = getCachedTopology();
     using namespace GFNFFParameters;
 
-    // ==========================================================================
-    // Loop over all atoms: check inversion criteria
-    // ==========================================================================
     for (int i = 0; i < m_atomcount; ++i) {
-        // CRITERION 1: Must have exactly 3 bonded neighbors (nb(20,i) == 3)
         int nb_count = static_cast<int>(topo_info.adjacency_list[i].size());
         if (nb_count != 3) continue;
 
         int Z_i = m_atoms[i];
-
-        // CRITERION 2: Check pi character OR saturated nitrogen
-        // piadr > 0 means atom is in a pi system (sp/sp2 with pi-capable element + sp/sp2 neighbor)
         bool has_pi = (topo_info.pi_fragments[i] > 0);
         bool is_saturated_N = (!has_pi && Z_i == 7);
 
         if (!has_pi && !is_saturated_N) continue;
 
         // Sort neighbors using exact Fortran ssort algorithm (gfnff_helpers.f90:267-289)
-        // IMPORTANT: ssort has an early-exit bug — when edum(j) > edum(i) at j=ii,
-        // it exits the OUTER loop, leaving remaining elements unsorted. This is NOT
-        // a correct sort, but we must replicate it exactly to match Fortran results.
-        // The Fortran adjacency list order (nb(1..3,i)) matches C++ order because
-        // both iterate bonds in ascending atom-index order.
         std::vector<int> nb_list = topo_info.adjacency_list[i];
         {
-            // Compute distances from center to each neighbor
-            const int n = static_cast<int>(nb_list.size()); // should be 3
+            const int n = static_cast<int>(nb_list.size());
             std::vector<double> sdum(n);
             for (int m = 0; m < n; ++m) {
                 sdum[m] = (m_geometry.row(i) - m_geometry.row(nb_list[m])).norm();
             }
-            // Port of Fortran ssort(n, sdum, ind) — gfnff_helpers.f90:267-289
             for (int ii = 1; ii < n; ++ii) {
                 int idx = ii - 1;
                 int k = idx;
                 double pp = sdum[idx];
                 for (int j = ii; j < n; ++j) {
-                    if (sdum[j] > pp) break; // Fortran: if (edum(j) .gt. pp) exit
+                    if (sdum[j] > pp) break;
                     k = j;
                     pp = sdum[j];
                 }
-                if (k == idx) break; // Fortran: if (k .eq. i) exit — exits OUTER loop
+                if (k == idx) break;
                 sdum[k] = sdum[idx];
                 sdum[idx] = pp;
                 std::swap(nb_list[idx], nb_list[k]);
             }
         }
 
-        int jj = nb_list[0]; // Closest neighbor
-        int kk = nb_list[1]; // Middle neighbor
-        int ll = nb_list[2]; // Farthest neighbor
+        int jj = nb_list[0];
+        int kk = nb_list[1];
+        int ll = nb_list[2];
 
-        json inversion;
-        inversion["type"] = 3;  // GFN-FF type
-        inversion["i"] = i;     // Center atom
-        inversion["j"] = jj;    // Neighbor 1 (closest)
-        inversion["k"] = kk;    // Neighbor 2 (middle)
-        inversion["l"] = ll;    // Neighbor 3 (farthest)
+        Inversion inv;
+        inv.type = 3;
+        inv.i = i;
+        inv.j = jj;
+        inv.k = kk;
+        inv.l = ll;
 
         if (is_saturated_N) {
-            // ==========================================================
-            // CASE A: Saturated nitrogen (tlist(5) = -1)
-            // Fortran: gfnff_ini.f90:2070-2079
-            // V = sum over 3 neighbors of: ff * sqrt(repz[at(neighbor)])
-            // omega0 = 80° (double minimum at ±80°)
-            // ==========================================================
             double ff = 0.60;
             double V = 0.0;
             for (int m = 0; m < 3; ++m) {
@@ -839,59 +816,45 @@ json GFNFF::generateGFNFFInversions() const
                     V += ff * std::sqrt(repz[nb_z - 1]);
                 }
             }
-
-            inversion["barrier"] = V;
-            inversion["omega0"] = 80.0 * M_PI / 180.0;  // 80° in radians
-            inversion["potential_type"] = -1;  // Double minimum
+            inv.fc = V;
+            inv.omega0 = 80.0 * M_PI / 180.0;
+            inv.potential_type = -1;
         } else {
-            // ==========================================================
-            // CASE B: Pi-system center (tlist(5) = 0)
-            // Fortran: gfnff_ini.f90:2080-2100
-            // V = torsf(3) * f2 * fqq  with element-specific multipliers
-            // omega0 = 0 (planar minimum)
-            // ==========================================================
-
-            // Count special neighbor types
-            int ncarbo = 0;  // O or S neighbors
-            int nf = 0;      // Halogen neighbors (group 7)
+            int ncarbo = 0;
+            int nf = 0;
             for (int m = 0; m < 3; ++m) {
                 int nb_z = m_atoms[nb_list[m]];
                 if (nb_z == 8 || nb_z == 16) ncarbo++;
-                // Group 7 halogens: F(9), Cl(17), Br(35), I(53)
                 if (nb_z == 9 || nb_z == 17 || nb_z == 35 || nb_z == 53) nf++;
             }
 
-            // Charge correction: fqq = 1 + qa(i)*5
             double qa_i = 0.0;
             if (topo_info.topology_charges.size() > i) {
                 qa_i = topo_info.topology_charges(i);
             }
             double fqq = 1.0 + qa_i * 5.0;
 
-            // Pi bond order correction: f2 = 1 - sumppi * torsf(5)
             double sumppi = 0.0;
             if (!topo_info.pi_bond_orders.empty()) {
                 sumppi = topo_info.pi_bond_orders[lin(i, jj)]
                        + topo_info.pi_bond_orders[lin(i, kk)]
                        + topo_info.pi_bond_orders[lin(i, ll)];
             }
-            double f2 = 1.0 - sumppi * torsf_pi_improper;  // torsf(5) = 0.50
+            double f2 = 1.0 - sumppi * torsf_pi_improper;
 
-            // Base barrier: V = torsf(3) * f2 * fqq
-            double V = torsf_improper * f2 * fqq;  // torsf(3) = 1.05
+            double V = torsf_improper * f2 * fqq;
 
-            // Element-specific multipliers (gfnff_ini.f90:2093-2099)
-            if (Z_i == 5 && ncarbo > 0) V *= 38.0;        // B with O/S
-            if (Z_i == 6 && ncarbo > 0) V *= 38.0;        // C with O/S
-            if (Z_i == 6 && nf > 0 && ncarbo == 0) V *= 10.0;  // C with F (no O/S)
-            if (Z_i == 7 && ncarbo > 0) V *= 10.0 / f2;   // N with O/S
+            if (Z_i == 5 && ncarbo > 0) V *= 38.0;
+            if (Z_i == 6 && ncarbo > 0) V *= 38.0;
+            if (Z_i == 6 && nf > 0 && ncarbo == 0) V *= 10.0;
+            if (Z_i == 7 && ncarbo > 0) V *= 10.0 / f2;
 
-            inversion["barrier"] = V;
-            inversion["omega0"] = 0.0;  // Planar
-            inversion["potential_type"] = 0;
+            inv.fc = V;
+            inv.omega0 = 0.0;
+            inv.potential_type = 0;
         }
 
-        inversions.push_back(inversion);
+        inversions.push_back(inv);
     }
 
     if (CurcumaLogger::get_verbosity() >= 2) {
@@ -905,4 +868,24 @@ json GFNFF::generateGFNFFInversions() const
     }
 
     return inversions;
+}
+
+// JSON wrapper — delegates to native generator for disk-cache compatibility
+json GFNFF::generateGFNFFInversions() const
+{
+    auto inversions = generateInversionsNative();
+    json result = json::array();
+    for (const auto& inv : inversions) {
+        json inversion;
+        inversion["type"] = inv.type;
+        inversion["i"] = inv.i;
+        inversion["j"] = inv.j;
+        inversion["k"] = inv.k;
+        inversion["l"] = inv.l;
+        inversion["barrier"] = inv.fc;  // JSON uses "barrier", struct uses "fc"
+        inversion["omega0"] = inv.omega0;
+        inversion["potential_type"] = inv.potential_type;
+        result.push_back(inversion);
+    }
+    return result;
 }

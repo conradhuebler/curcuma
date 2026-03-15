@@ -32,6 +32,7 @@
 #include "src/core/global.h"
 #include "src/core/functional_groups.h"
 #include "src/core/periodic_table.h"
+#include <tuple>
 #include <utility>
 #include <optional>
 #include <vector>
@@ -642,8 +643,8 @@ private:
     /// Generate repulsion pair parameters as native GFNFFRepulsion structs (bonded + nonbonded)
     std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> generateRepulsionPairsNative() const;
 
-    /// Generate dispersion pair parameters as native GFNFFDispersion structs
-    std::vector<GFNFFDispersion> generateDispersionPairsNative() const;
+    /// Generate dispersion pair parameters as native GFNFFDispersion structs + ATM triples + method name
+    std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> generateDispersionPairsNative() const;
 
     /// Detect hydrogen bonds as native GFNFFHydrogenBond structs
     std::vector<GFNFFHydrogenBond> detectHydrogenBondsNative(const Vector& charges) const;

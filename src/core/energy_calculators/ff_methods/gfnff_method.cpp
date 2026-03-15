@@ -2114,114 +2114,31 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
     // Phase 2: Angles (native — no JSON)
     params.angles = generateAnglesNative(topo_info);
 
-    // Phase 3+: Remaining generators still produce JSON — convert to structs
-    // This is the incremental migration path. Each can be converted to native later.
-    try {
-    json torsions_json = generateGFNFFTorsions();
-    for (const auto& dj : torsions_json) {
-        Dihedral d;
-        d.type = dj.value("type", 3);
-        d.i = dj["i"]; d.j = dj["j"]; d.k = dj["k"]; d.l = dj["l"];
-        d.V = dj["V"]; d.n = dj["n"]; d.phi0 = dj["phi0"];
-        d.is_extra = dj.value("is_extra", false);
-        d.is_nci = dj.value("is_nci", false);
-        if (d.is_extra)
-            params.extra_dihedrals.push_back(d);
-        else
-            params.dihedrals.push_back(d);
-    }
-    } catch (const std::exception& e) { throw std::runtime_error(std::string("torsions: ") + e.what()); }
+    // Phase 3: Torsions (native — no JSON)
+    auto [primary_dihedrals, extra_dih] = generateTorsionsNative();
+    params.dihedrals = std::move(primary_dihedrals);
+    params.extra_dihedrals = std::move(extra_dih);
 
-    try {
-    json inversions_json = generateGFNFFInversions();
-    for (const auto& ij : inversions_json) {
-        Inversion inv;
-        inv.type = ij.value("type", 3);
-        inv.i = ij["i"]; inv.j = ij["j"]; inv.k = ij["k"]; inv.l = ij["l"];
-        inv.fc = ij["barrier"];  // JSON uses "barrier", struct uses "fc"
-        inv.C0 = ij.value("C0", 0.0); inv.C1 = ij.value("C1", 0.0); inv.C2 = ij.value("C2", 0.0);
-        inv.potential_type = ij.value("potential_type", 0);
-        inv.omega0 = ij.value("omega0", 0.0);
-        params.inversions.push_back(inv);
-    }
-    } catch (const std::exception& e) { throw std::runtime_error(std::string("inversions: ") + e.what()); }
+    // Phase 4: Inversions (native — no JSON)
+    params.inversions = generateInversionsNative();
 
-    try {
-    json storsions_json = generateGFNFFSTorsions();
-    for (const auto& sj : storsions_json) {
-        GFNFFSTorsion s;
-        s.i = sj["i"]; s.j = sj["j"]; s.k = sj["k"]; s.l = sj["l"];
-        s.erefhalf = sj.value("erefhalf", 3.75e-4);
-        params.storsions.push_back(s);
-    }
-    } catch (const std::exception& e) { throw std::runtime_error(std::string("storsions: ") + e.what()); }
+    // Phase 5: STorsions (native — no JSON)
+    params.storsions = generateSTorsionsNative();
 
-    try {
-    json coulombs_json = generateGFNFFCoulombPairs();
-    for (const auto& cj : coulombs_json) {
-        GFNFFCoulomb c;
-        c.i = cj["i"]; c.j = cj["j"];
-        c.q_i = cj["q_i"]; c.q_j = cj["q_j"];
-        c.gamma_ij = cj["gamma_ij"];
-        c.chi_i = cj.value("chi_i", 0.0); c.chi_j = cj.value("chi_j", 0.0);
-        c.chi_base_i = cj.value("chi_base_i", 0.0); c.chi_base_j = cj.value("chi_base_j", 0.0);
-        c.cnf_i = cj.value("cnf_i", 0.0); c.cnf_j = cj.value("cnf_j", 0.0);
-        c.gam_i = cj.value("gam_i", 0.0); c.gam_j = cj.value("gam_j", 0.0);
-        c.alp_i = cj.value("alp_i", 0.0); c.alp_j = cj.value("alp_j", 0.0);
-        c.r_cut = cj.value("r_cut", 50.0);
-        params.coulombs.push_back(c);
-    }
-    } catch (const std::exception& e) { throw std::runtime_error(std::string("coulombs: ") + e.what()); }
+    // Phase 6: Coulomb (native — no JSON)
+    params.coulombs = generateCoulombPairsNative();
 
-    try {
-    json repulsion_json = generateGFNFFRepulsionPairs();
-    for (const auto& rj : repulsion_json["bonded"]) {
-        GFNFFRepulsion r;
-        r.i = rj["i"]; r.j = rj["j"];
-        r.alpha = rj["alpha"]; r.repab = rj["repab"];
-        r.r_cut = rj.value("r_cut", 50.0);
-        params.bonded_repulsions.push_back(r);
-    }
-    for (const auto& rj : repulsion_json["nonbonded"]) {
-        GFNFFRepulsion r;
-        r.i = rj["i"]; r.j = rj["j"];
-        r.alpha = rj["alpha"]; r.repab = rj["repab"];
-        r.r_cut = rj.value("r_cut", 50.0);
-        params.nonbonded_repulsions.push_back(r);
-    }
-    } catch (const std::exception& e) { throw std::runtime_error(std::string("repulsion: ") + e.what()); }
+    // Phase 7: Repulsion (native — no JSON)
+    auto [bonded_rep, nonbonded_rep] = generateRepulsionPairsNative();
+    params.bonded_repulsions = std::move(bonded_rep);
+    params.nonbonded_repulsions = std::move(nonbonded_rep);
 
-    try {
-    json dispersions_json = generateGFNFFDispersionPairs();
-    if (dispersions_json.size() > 0 && dispersions_json[0].contains("dispersion_method") &&
-        dispersions_json[0]["dispersion_method"] == "d4") {
-        params.dispersion_method = "d4";
-    } else {
-        params.dispersion_method = "d3";
-    }
-    for (const auto& dj : dispersions_json) {
-        GFNFFDispersion d;
-        d.i = dj["i"]; d.j = dj["j"];
-        d.C6 = dj["C6"]; d.r4r2ij = dj["r4r2ij"];
-        d.r0_squared = dj["r0_squared"];
-        d.r_cut = dj.value("r_cut", 50.0);
-        d.zetac6 = dj.value("zetac6", 1.0);
-        params.dispersions.push_back(d);
-    }
-    } catch (const std::exception& e) { throw std::runtime_error(std::string("dispersions: ") + e.what()); }
-
-    // ATM triples (stored as member variable by dispersion generator)
-    if (!m_atm_triples.is_null() && m_atm_triples.is_array()) {
-        for (const auto& tj : m_atm_triples) {
-            ATMTriple t;
-            t.i = tj["i"]; t.j = tj["j"]; t.k = tj["k"];
-            t.C6_ij = tj["C6_ij"]; t.C6_ik = tj["C6_ik"]; t.C6_jk = tj["C6_jk"];
-            t.s9 = tj.value("s9", 1.0); t.a1 = tj.value("a1", 0.0);
-            t.a2 = tj.value("a2", 0.0); t.alp = tj.value("alp", 14.0);
-            t.atm_method = tj.value("atm_method", "d3");
-            t.triple_scale = tj.value("triple_scale", 1.0);
-            params.atm_triples.push_back(t);
-        }
+    // Phase 8: Dispersion (native — D4/D3 generators still internal JSON, converted at boundary)
+    {
+        auto [disp_pairs, atm_triples, disp_method] = generateDispersionPairsNative();
+        params.dispersions = std::move(disp_pairs);
+        params.atm_triples = std::move(atm_triples);
+        params.dispersion_method = disp_method;
     }
 
     // BATM triples
@@ -2244,32 +2161,9 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
 
     // HB/XB detection
     if (m_parameters.value("hbond", true)) {
-        json hbonds_json = detectHydrogenBonds(topo_info.eeq_charges);
-        for (const auto& hj : hbonds_json) {
-            GFNFFHydrogenBond hb;
-            hb.i = hj["i"]; hb.j = hj["j"]; hb.k = hj["k"];
-            hb.basicity_A = hj.value("basicity_A", 0.0); hb.basicity_B = hj.value("basicity_B", 0.0);
-            hb.acidity_A = hj.value("acidity_A", 0.0); hb.acidity_B = hj.value("acidity_B", 0.0);
-            hb.q_H = hj.value("q_H", 0.0); hb.q_A = hj.value("q_A", 0.0); hb.q_B = hj.value("q_B", 0.0);
-            hb.r_cut = hj.value("r_cut", 50.0);
-            hb.case_type = hj.value("case_type", 1);
-            if (hj.contains("neighbors_A")) hb.neighbors_A = hj["neighbors_A"].get<std::vector<int>>();
-            if (hj.contains("neighbors_B")) hb.neighbors_B = hj["neighbors_B"].get<std::vector<int>>();
-            hb.acceptor_parent_index = hj.value("acceptor_parent_index", -1);
-            if (hj.contains("neighbors_C")) hb.neighbors_C = hj["neighbors_C"].get<std::vector<int>>();
-            params.hbonds.push_back(hb);
-        }
+        params.hbonds = detectHydrogenBondsNative(topo_info.eeq_charges);
 
-        json xbonds_json = detectHalogenBonds(topo_info.eeq_charges);
-        for (const auto& xj : xbonds_json) {
-            GFNFFHalogenBond xb;
-            xb.i = xj["i"]; xb.j = xj["j"]; xb.k = xj["k"];
-            xb.basicity_B = xj.value("basicity_B", 0.0);
-            xb.acidity_X = xj.value("acidity_X", 0.0);
-            xb.q_X = xj.value("q_X", 0.0); xb.q_B = xj.value("q_B", 0.0);
-            xb.r_cut = xj.value("r_cut", 50.0);
-            params.xbonds.push_back(xb);
-        }
+        params.xbonds = detectHalogenBondsNative(topo_info.eeq_charges);
 
         // Bond-HB cross-referencing (nr_hb and bond_hb_data)
         std::map<std::pair<int,int>, std::vector<int>> ah_to_b_atoms;
@@ -5931,14 +5825,14 @@ json GFNFF::generateTopologyAwareAngles(const Vector& cn, const std::vector<int>
     return angles;
 }
 
-json GFNFF::detectHydrogenBonds(const Vector& charges) const
+std::vector<GFNFFHydrogenBond> GFNFF::detectHydrogenBondsNative(const Vector& charges) const
 {
-    // Claude Generated (February 2026): Timing for parameter generation breakdown
+    // Claude Generated (March 2026): Native struct version of detectHydrogenBonds
     auto start_time = std::chrono::high_resolution_clock::now();
 
     using namespace GFNFFParameters;
 
-    json hbonds = json::array();
+    std::vector<GFNFFHydrogenBond> hbonds;
 
     // Claude Generated (2025): Phase 2.1 - Hydrogen Bond Detection
     // Reference: gfnff_ini.f90:806-839 and gfnff_ini2.f90:1063-1113
@@ -6084,15 +5978,10 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
         }
     }
 
-    // Lambda to create HB JSON entry for nhb2 (Case 2 or 3)
+    // Lambda to create HB native entry for nhb2 (Case 2, 3, or 4)
     auto create_nhb2_entry = [&](int donor_A, int H, int acceptor_B) {
-        // Check A-B not bonded (ijnonbond in Fortran)
         if (is_bonded(donor_A, acceptor_B)) return;
 
-        // Determine case type — matches Fortran gfnff_engrad.F90:687-701 dispatch
-        // Case 3: Carbonyl/Nitro (O with CN=1 bonded to C or N)
-        // Case 4: N heteroaromatic (N with CN=2, virtual lone pair → eg2_rnr)
-        // Case 2: Default (eg2new)
         int case_type = 2;
         int acceptor_parent = -1;
 
@@ -6103,40 +5992,33 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
                 acceptor_parent = parent;
             }
         } else if (m_atoms[acceptor_B] == 7 && topo_info.neighbor_lists[acceptor_B].size() == 2) {
-            // Claude Generated (Feb 25, 2026): N heteroaromatic with virtual lone pair
-            // Reference: gfnff_engrad.F90:695 — at(k)==7 and nb(20,k)==2
             case_type = 4;
         }
 
-        std::vector<int> neighbors_A;
-        for (int nb : topo_info.neighbor_lists[donor_A]) {
-            if (nb != H) neighbors_A.push_back(nb);
-        }
-        std::vector<int> neighbors_B = topo_info.neighbor_lists[acceptor_B];
+        GFNFFHydrogenBond hb;
+        hb.i = donor_A;
+        hb.j = H;
+        hb.k = acceptor_B;
+        hb.basicity_A = current_basicity[donor_A];
+        hb.basicity_B = current_basicity[acceptor_B];
+        hb.acidity_A = current_acidity[donor_A];
+        hb.acidity_B = current_acidity[acceptor_B];
+        hb.q_H = charges[H];
+        hb.q_A = charges[donor_A];
+        hb.q_B = charges[acceptor_B];
+        hb.r_cut = 50.0;
+        hb.case_type = case_type;
 
-        json hb;
-        hb["type"] = "hydrogen_bond";
-        hb["case"] = case_type;
-        hb["i"] = donor_A;
-        hb["j"] = H;
-        hb["k"] = acceptor_B;
-        hb["basicity_A"] = current_basicity[donor_A];
-        hb["basicity_B"] = current_basicity[acceptor_B];
-        hb["acidity_A"] = current_acidity[donor_A];
-        hb["acidity_B"] = current_acidity[acceptor_B];
-        hb["q_H"] = charges[H];
-        hb["q_A"] = charges[donor_A];
-        hb["q_B"] = charges[acceptor_B];
-        hb["r_cut"] = 50.0;  // Generous cutoff; Fortran uses natural damping decay
-        hb["neighbors_A"] = neighbors_A;
-        hb["neighbors_B"] = neighbors_B;
+        for (int nb : topo_info.neighbor_lists[donor_A]) {
+            if (nb != H) hb.neighbors_A.push_back(nb);
+        }
+        hb.neighbors_B = topo_info.neighbor_lists[acceptor_B];
+
         if (case_type == 3) {
-            hb["acceptor_parent"] = acceptor_parent;
-            std::vector<int> neighbors_C;
+            hb.acceptor_parent_index = acceptor_parent;
             for (int nb : topo_info.neighbor_lists[acceptor_parent]) {
-                if (nb != acceptor_B) neighbors_C.push_back(nb);
+                if (nb != acceptor_B) hb.neighbors_C.push_back(nb);
             }
-            hb["neighbors_C"] = neighbors_C;
         }
 
         hbonds.push_back(hb);
@@ -6178,23 +6060,19 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
                 double r_jH_sq = (r_j - r_H).squaredNorm();
                 if (r_AB_sq + r_iH_sq + r_jH_sq < hbthr2) {
                     // Case 1: A...H...B (both A and B are acceptors, H is unshared)
-                    // Reference: gfnff_engrad.F90:662-666 — j=A, k=B, l=H
-                    json hb;
-                    hb["type"] = "hydrogen_bond";
-                    hb["case"] = 1;
-                    hb["i"] = i;   // Acceptor A
-                    hb["j"] = H;   // Hydrogen
-                    hb["k"] = j;   // Acceptor B
-                    hb["basicity_A"] = current_basicity[i];
-                    hb["basicity_B"] = current_basicity[j];
-                    hb["acidity_A"] = current_acidity[i];
-                    hb["acidity_B"] = current_acidity[j];
-                    hb["q_H"] = charges[H];
-                    hb["q_A"] = charges[i];
-                    hb["q_B"] = charges[j];
-                    hb["r_cut"] = 50.0;  // Generous cutoff; Fortran uses natural damping decay
-                    hb["neighbors_A"] = std::vector<int>();
-                    hb["neighbors_B"] = std::vector<int>();
+                    GFNFFHydrogenBond hb;
+                    hb.case_type = 1;
+                    hb.i = i;
+                    hb.j = H;
+                    hb.k = j;
+                    hb.basicity_A = current_basicity[i];
+                    hb.basicity_B = current_basicity[j];
+                    hb.acidity_A = current_acidity[i];
+                    hb.acidity_B = current_acidity[j];
+                    hb.q_H = charges[H];
+                    hb.q_A = charges[i];
+                    hb.q_B = charges[j];
+                    hb.r_cut = 50.0;
                     hbonds.push_back(hb);
                     nhb1_count++;
                 }
@@ -6220,28 +6098,49 @@ json GFNFF::detectHydrogenBonds(const Vector& charges) const
     return hbonds;
 }
 
-json GFNFF::detectHalogenBonds(const Vector& charges) const
+// JSON wrapper — delegates to native generator for disk-cache compatibility
+json GFNFF::detectHydrogenBonds(const Vector& charges) const
 {
-    // Claude Generated (February 2026): Timing for parameter generation breakdown
+    auto hbonds = detectHydrogenBondsNative(charges);
+    json result = json::array();
+    for (const auto& hb : hbonds) {
+        json j;
+        j["type"] = "hydrogen_bond";
+        j["case_type"] = hb.case_type;
+        j["i"] = hb.i; j["j"] = hb.j; j["k"] = hb.k;
+        j["basicity_A"] = hb.basicity_A; j["basicity_B"] = hb.basicity_B;
+        j["acidity_A"] = hb.acidity_A; j["acidity_B"] = hb.acidity_B;
+        j["q_H"] = hb.q_H; j["q_A"] = hb.q_A; j["q_B"] = hb.q_B;
+        j["r_cut"] = hb.r_cut;
+        j["neighbors_A"] = hb.neighbors_A;
+        j["neighbors_B"] = hb.neighbors_B;
+        if (hb.case_type == 3) {
+            j["acceptor_parent_index"] = hb.acceptor_parent_index;
+            j["neighbors_C"] = hb.neighbors_C;
+        }
+        result.push_back(j);
+    }
+    return result;
+}
+
+std::vector<GFNFFHalogenBond> GFNFF::detectHalogenBondsNative(const Vector& charges) const
+{
+    // Claude Generated (March 2026): Native struct version of detectHalogenBonds
+    // Reference: gfnff_ini.f90:841-877
     auto start_time = std::chrono::high_resolution_clock::now();
 
     using namespace GFNFFParameters;
 
-    json xbonds = json::array();
-
-    // Claude Generated (2025): Phase 2.2 - Halogen Bond Detection
-    // Reference: gfnff_ini.f90:841-877
+    std::vector<GFNFFHalogenBond> xbonds;
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("=== detectHalogenBonds() START ===");
+        CurcumaLogger::info("=== detectHalogenBondsNative() START ===");
     }
 
-    // Get cached topology
     const TopologyInfo& topo_info = getCachedTopology();
     const auto& bonds = getCachedBondList();
 
-    // Step 0: Pre-calculate atom-specific basicity with overrides (shared logic with HB)
-    // Reference: gfnff_ini.f90:815-826
+    // Pre-calculate atom-specific basicity with overrides
     std::vector<double> current_basicity(m_atomcount);
 
     FunctionalGroupDetector detector(m_atomcount, m_atoms,
@@ -6252,15 +6151,13 @@ json GFNFF::detectHalogenBonds(const Vector& charges) const
     for (int i = 0; i < m_atomcount; ++i) {
         current_basicity[i] = hb_basicity[m_atoms[i]];
 
-        // Overrides for basicity
-        if (m_atoms[i] == 8) { // Oxygen
+        if (m_atoms[i] == 8) {
             if (detector.isCarbonylOxygen(i)) {
                 current_basicity[i] = 0.68;
             } else if (detector.isNitroOxygen(i)) {
                 current_basicity[i] = 0.47;
             }
-        } else if (m_atoms[i] == 6 && topo_info.neighbor_lists[i].size() == 2) { // Carbene candidate
-            // Detect carbene: angle < 150° and charge > -0.4
+        } else if (m_atoms[i] == 6 && topo_info.neighbor_lists[i].size() == 2) {
             int n1 = topo_info.neighbor_lists[i][0];
             int n2 = topo_info.neighbor_lists[i][1];
 
@@ -6280,34 +6177,19 @@ json GFNFF::detectHalogenBonds(const Vector& charges) const
         }
     }
 
-    // Step 1: Identify halogen atoms (xatom function)
-    // Reference: gfnff_ini2.f90:1404-1410
     auto is_halogen = [](int Z) -> bool {
-        return (Z == 17 || Z == 35 || Z == 53 ||  // Cl, Br, I
-                Z == 16 || Z == 34 || Z == 52 ||  // S, Se, Te
-                Z == 15 || Z == 33 || Z == 51);   // P, As, Sb
+        return (Z == 17 || Z == 35 || Z == 53 ||
+                Z == 16 || Z == 34 || Z == 52 ||
+                Z == 15 || Z == 33 || Z == 51);
     };
 
-    // Step 2: Identify A-X bonded pairs (donor A, halogen X)
-    std::vector<std::pair<int,int>> ax_pairs;  // {A, X}
-
+    std::vector<std::pair<int,int>> ax_pairs;
     for (const auto& bond : bonds) {
-        int X = -1;
-        int A = -1;
-
-        if (is_halogen(m_atoms[bond.first])) {
-            X = bond.first;
-            A = bond.second;
-        } else if (is_halogen(m_atoms[bond.second])) {
-            X = bond.second;
-            A = bond.first;
-        }
-
+        int X = -1, A = -1;
+        if (is_halogen(m_atoms[bond.first])) { X = bond.first; A = bond.second; }
+        else if (is_halogen(m_atoms[bond.second])) { X = bond.second; A = bond.first; }
         if (X != -1) {
-            // Additional check: Sulfur must have at most 2 neighbors (no sulfoxides etc.)
-            // Reference: gfnff_ini.f90:891
             if (m_atoms[X] == 16 && topo_info.neighbor_lists[X].size() > 2) continue;
-
             ax_pairs.push_back({A, X});
         }
     }
@@ -6316,67 +6198,41 @@ json GFNFF::detectHalogenBonds(const Vector& charges) const
         CurcumaLogger::info(fmt::format("Found {} A-X halogen pairs", ax_pairs.size()));
     }
 
-    // Step 3: Find acceptor atoms B for each A-X pair
-    // Reference: gfnff_ini.f90:854-873
-    const double hbthr2 = 10.0 * 10.0;  // Squared distance threshold (Bohr²)
+    const double hbthr2 = 10.0 * 10.0;
 
     for (const auto& [A, X] : ax_pairs) {
         for (int B = 0; B < m_atomcount; ++B) {
             if (B == A || B == X) continue;
-
-            // Basicity requirement (filtering)
-            // Reference: gfnff_ini.f90:895
             if (current_basicity[B] < 1e-6) continue;
 
-            // Pi-base or charge criterion
-            // Reference: gfnff_ini.f90:896-898
-            if (m_atoms[B] == 6) { // Group 4 base
-                bool is_pi_atom = (topo_info.pi_fragments[B] > 0);
-                bool acceptable_charge = (charges[B] < 0.05);
-                if (!is_pi_atom || !acceptable_charge) continue;
+            if (m_atoms[B] == 6) {
+                if (topo_info.pi_fragments[B] == 0 || charges[B] >= 0.05) continue;
             } else {
-                // For other bases, just check charge
                 if (charges[B] > 0.05) continue;
             }
 
-            // Non-bonded requirement (A-X...B, not A-X-B)
             bool x_bonded_to_b = false;
             for (const auto& bond : bonds) {
-                if ((bond.first == X && bond.second == B) ||
-                    (bond.first == B && bond.second == X)) {
-                    x_bonded_to_b = true;
-                    break;
+                if ((bond.first == X && bond.second == B) || (bond.first == B && bond.second == X)) {
+                    x_bonded_to_b = true; break;
                 }
             }
+            if (x_bonded_to_b) continue;
 
-            if (x_bonded_to_b) continue;  // Skip bonded X-B
-
-            // Distance criterion (B...X distance)
             Vector r_X = m_geometry_bohr.row(X);
             Vector r_B = m_geometry_bohr.row(B);
             double r_BX_sq = (r_B - r_X).squaredNorm();
+            if (r_BX_sq >= hbthr2) continue;
 
-            if (r_BX_sq >= hbthr2) continue;  // Too far
-
-            // Create XB parameter JSON
-            json xb;
-            xb["type"] = "halogen_bond";
-            xb["i"] = A;  // Donor atom (bonded to X)
-            xb["j"] = X;  // Halogen atom
-            xb["k"] = B;  // Acceptor atom
-
-            // Store element-specific parameters from GFNFFParameters
-            // Reference: gfnff_engrad.F90:3172-3173
-            xb["basicity_B"] = 1.0;  // Hardcoded to 1.0 in Fortran reference
-            xb["acidity_X"] = xb_acidity[m_atoms[X]];
-
-            // Pre-computed charge factors (for performance)
-            xb["q_X"] = charges[X];
-            xb["q_B"] = charges[B];
-
-            // Cutoff radius for XB energy calculation (Claude Generated - January 17, 2026)
-            // Use detection threshold (10.0 Bohr) + safety margin
-            xb["r_cut"] = 20.0;  // sqrt(hbthr2=400) Bohr (Fortran gfnff_param.f90:560)
+            GFNFFHalogenBond xb;
+            xb.i = A;
+            xb.j = X;
+            xb.k = B;
+            xb.basicity_B = 1.0;
+            xb.acidity_X = xb_acidity[m_atoms[X]];
+            xb.q_X = charges[X];
+            xb.q_B = charges[B];
+            xb.r_cut = 20.0;
 
             xbonds.push_back(xb);
 
@@ -6394,7 +6250,6 @@ json GFNFF::detectHalogenBonds(const Vector& charges) const
         CurcumaLogger::info(fmt::format("Detected {} halogen bonds", xbonds.size()));
     }
 
-    // Claude Generated (February 2026): Report timing at verbosity 1+
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
     if (CurcumaLogger::get_verbosity() >= 1) {
@@ -6402,6 +6257,27 @@ json GFNFF::detectHalogenBonds(const Vector& charges) const
     }
 
     return xbonds;
+}
+
+// JSON wrapper — delegates to native generator for disk-cache compatibility
+json GFNFF::detectHalogenBonds(const Vector& charges) const
+{
+    auto xbonds = detectHalogenBondsNative(charges);
+    json result = json::array();
+    for (const auto& xb : xbonds) {
+        json j;
+        j["type"] = "halogen_bond";
+        j["i"] = xb.i;
+        j["j"] = xb.j;
+        j["k"] = xb.k;
+        j["basicity_B"] = xb.basicity_B;
+        j["acidity_X"] = xb.acidity_X;
+        j["q_X"] = xb.q_X;
+        j["q_B"] = xb.q_B;
+        j["r_cut"] = xb.r_cut;
+        result.push_back(j);
+    }
+    return result;
 }
 
 std::vector<std::vector<int>> GFNFF::calculateTopologyDistances(const std::vector<std::vector<int>>& adjacency_list) const
@@ -7063,363 +6939,303 @@ GFNFF::EEQParameters GFNFF::getEEQParameters(int atom_idx, const TopologyInfo& t
 // Phase 4.2: GFN-FF Pairwise Non-Bonded Parameter Generation (Claude Generated 2025)
 // ============================================================================
 
-json GFNFF::generateGFNFFCoulombPairs() const
+std::vector<GFNFFCoulomb> GFNFF::generateCoulombPairsNative() const
 {
+    // Claude Generated (March 2026): Native struct version of generateGFNFFCoulombPairs
+    // Reference: Fortran gfnff_engrad.F90:1378-1389
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    /**
-     * @brief Generate EEQ-based Coulomb electrostatics pairwise parameters
-     *
-     * Reference: Phase 3 EEQ charge calculation + Fortran gfnff_engrad.F90:1378-1389
-     * Formula: E_coul = q_i * q_j * erf(γ_ij * r_ij) / r_ij²
-     * NOTE: Denominator uses r² (not r) - critical for correct Coulomb energy
-     *
-     * Claude Generated (2025): Phase 4.2 parameter generation
-     * Phase 9 cache migration: Uses getCachedTopology() to avoid redundant CN/hyb/ring/charge calculations
-     */
-
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("=== generateGFNFFCoulombPairs() START ===");
-        CurcumaLogger::param("m_atomcount", std::to_string(m_atomcount));
+        CurcumaLogger::info("=== generateCoulombPairsNative() START ===");
     }
 
-    json coulomb_pairs = json::array();
+    std::vector<GFNFFCoulomb> coulombs;
 
-    // Use cached topology information (Phase 9 cache migration)
     const TopologyInfo& topo_info = getCachedTopology();
     const Vector& charges = topo_info.eeq_charges;
 
-    // CRITICAL DEBUG: Print EEQ charges before Coulomb parameter generation
-    if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("=== CRITICAL DEBUG: EEQ Charges Before Coulomb Generation ===");
-        for (int i = 0; i < charges.size(); ++i) {
-            CurcumaLogger::param(fmt::format("q_atom_{}(Z={})", i, m_atoms[i]),
-                                fmt::format("{:.8f}", charges[i]));
-        }
-        bool all_zero = true;
-        for (int i = 0; i < charges.size(); ++i) {
-            if (std::abs(charges[i]) > 1e-10) {
-                all_zero = false;
-                break;
-            }
-        }
-        if (all_zero) {
-            CurcumaLogger::error("🚨 CRITICAL ISSUE: All EEQ charges are ZERO! This explains zero electrostatic energies.");
-        } else {
-            CurcumaLogger::success("✅ EEQ charges are non-zero - electrostatics should work");
-        }
-    }
+    coulombs.reserve(m_atomcount * (m_atomcount - 1) / 2);
 
-    // Generate all pairwise Coulomb interactions (i<j to avoid double-counting)
     for (int i = 0; i < m_atomcount; ++i) {
         for (int j = i + 1; j < m_atomcount; ++j) {
-            json coulomb;
-            coulomb["i"] = i;
-            coulomb["j"] = j;
-            coulomb["q_i"] = charges[i];
-            coulomb["q_j"] = charges[j];
+            GFNFFCoulomb c;
+            c.i = i;
+            c.j = j;
+            c.q_i = charges[i];
+            c.q_j = charges[j];
 
-            // FIX (Jan 28, 2026): Use charge-corrected alpeeq for gamma_ij calculation
-            // Reference: Fortran gfnff_engrad.F90:1528 uses topo%alpeeq
-            // Formula: gamma_ij = 1/sqrt(alpeeq(i) + alpeeq(j))
-            double alp_i_for_gamma = topo_info.eeq_alp[i];  // Base alpha (squared)
+            // gamma_ij from charge-corrected alpeeq
+            double alp_i_for_gamma = topo_info.eeq_alp[i];
             double alp_j_for_gamma = topo_info.eeq_alp[j];
             if (topo_info.alpeeq.size() == m_atomcount) {
-                alp_i_for_gamma = topo_info.alpeeq(i);  // Charge-corrected alpha²
+                alp_i_for_gamma = topo_info.alpeeq(i);
                 alp_j_for_gamma = topo_info.alpeeq(j);
             }
-            double gamma_ij = 1.0 / std::sqrt(alp_i_for_gamma + alp_j_for_gamma);
+            c.gamma_ij = 1.0 / std::sqrt(alp_i_for_gamma + alp_j_for_gamma);
 
-            coulomb["gamma_ij"] = gamma_ij;
-
-            // Store chi, gam, and alp for self-energy and self-interaction terms
-            // Reference: Fortran gfnff_engrad.F90:1378-1389
-            // Formula includes THREE terms:
-            // 1. Pairwise: E_pair = q_i * q_j * erf(γ_ij * r_ij) / r_ij
-            // 2. Self-energy: E_self = -q_i*chi_i - q_j*chi_j  (where chi is NEGATIVE in EEQ!)
-            // 3. Self-interaction: E_selfint = 0.5*q_i²*(gam_i + sqrt(2/π)/sqrt(α_i)) + similar for j
-            //    where gam_i is chemical hardness (NOT 1/sqrt(alpha))
-            //
-            // Claude Generated (Dec 2025, Session 9): CRITICAL FIX - chi must be NEGATIVE!
-            // In EEQ solver, chi is stored as: chi(i) = -chi + dxi_total
-            // So we must also negate it here and add dxi correction!
+            // Chi: chi_base = -chi + dxi [+ amideH correction]
             double dxi_i = (i < topo_info.dxi.size()) ? topo_info.dxi(i) : 0.0;
             double dxi_j = (j < topo_info.dxi.size()) ? topo_info.dxi(j) : 0.0;
-
-            // CORRECT (Jan 27, 2026): Chi for energy = chieeq + cnf*sqrt(cn)
-            // Reference: Fortran gfnff_engrad.F90:1599 shows:
-            //   es = es-q(i)*(topo%chieeq(i)+param%cnf(at(i))*sqrt(cn(i)))
-            // where topo%chieeq was set to -chi+dxi (without CNF) at gfnff_ini.f90:716
-            // So effective chi = -chi + dxi + cnf*sqrt(cn) - same as our original formula
-            double chi_i = topo_info.eeq_chi[i];
-            double chi_j = topo_info.eeq_chi[j];
-            double cnf_i = topo_info.eeq_cnf[i];
-            double cnf_j = topo_info.eeq_cnf[j];
-            double cn_i = topo_info.coordination_numbers(i);
-            double cn_j = topo_info.coordination_numbers(j);
-            double chi_base_i = -chi_i + dxi_i;  // Fortran topo%chieeq(i) = -chi+dxi (WITHOUT cnf*sqrt(cn))
-            double chi_base_j = -chi_j + dxi_j;
-            // Claude Generated (March 2026): amideH correction to chi_base
-            // Reference: Fortran gfnff_ini.f90:717 - if(amideH(i)) chieeq(i) = chieeq(i) - 0.02
+            double chi_base_i = -topo_info.eeq_chi[i] + dxi_i;
+            double chi_base_j = -topo_info.eeq_chi[j] + dxi_j;
             if (i < static_cast<int>(topo_info.is_amide_h.size()) && topo_info.is_amide_h[i])
                 chi_base_i -= 0.02;
             if (j < static_cast<int>(topo_info.is_amide_h.size()) && topo_info.is_amide_h[j])
                 chi_base_j -= 0.02;
-            double chi_eff_i = chi_base_i + cnf_i * std::sqrt(cn_i);
-            double chi_eff_j = chi_base_j + cnf_j * std::sqrt(cn_j);
-            coulomb["chi_i"] = chi_eff_i;  // Legacy: static chi_eff at init geometry
-            coulomb["chi_j"] = chi_eff_j;
-            // Claude Generated (Feb 22, 2026): Dynamic Coulomb chi reconstruction
-            // Store chi_base and cnf separately so Coulomb energy can reconstruct
-            // chi_eff = chi_base + cnf * sqrt(cn) with CURRENT cn at each evaluation
-            // Reference: Fortran gfnff_engrad.F90:1599 uses topo%chieeq + cnf*sqrt(cn)
-            coulomb["chi_base_i"] = chi_base_i;
-            coulomb["chi_base_j"] = chi_base_j;
-            coulomb["cnf_i"] = cnf_i;
-            coulomb["cnf_j"] = cnf_j;
 
-            // FIX (Jan 28, 2026): Use charge-corrected gameeq and alpeeq
-            // Reference: Fortran gfnff_ini.f90:714-725:
-            //   topo%gameeq(i) = param%gam(at(i)) + dgam(i)
-            //   topo%alpeeq(i) = (param%alp(at(i)) + ff*qa(i))²
-            // Previous "disabled for accuracy" was masking charge errors now fixed
+            double cnf_i = topo_info.eeq_cnf[i];
+            double cnf_j = topo_info.eeq_cnf[j];
+            double cn_i = topo_info.coordination_numbers(i);
+            double cn_j = topo_info.coordination_numbers(j);
+
+            c.chi_i = chi_base_i + cnf_i * std::sqrt(cn_i);  // Legacy: static chi_eff
+            c.chi_j = chi_base_j + cnf_j * std::sqrt(cn_j);
+            c.chi_base_i = chi_base_i;
+            c.chi_base_j = chi_base_j;
+            c.cnf_i = cnf_i;
+            c.cnf_j = cnf_j;
+
+            // Gam: charge-corrected gameeq
             double gam_i = topo_info.eeq_gam[i];
             double gam_j = topo_info.eeq_gam[j];
             if (topo_info.dgam.size() == m_atomcount) {
-                gam_i += topo_info.dgam(i);  // Add dgam correction
+                gam_i += topo_info.dgam(i);
                 gam_j += topo_info.dgam(j);
             }
-            coulomb["gam_i"] = gam_i;
-            coulomb["gam_j"] = gam_j;
+            c.gam_i = gam_i;
+            c.gam_j = gam_j;
+            c.alp_i = alp_i_for_gamma;
+            c.alp_j = alp_j_for_gamma;
+            c.r_cut = 100.0;
 
-            // Use the same charge-corrected alpha for self-interaction term
-            // (already computed above for gamma_ij)
-            coulomb["alp_i"] = alp_i_for_gamma;
-            coulomb["alp_j"] = alp_j_for_gamma;
-
-            // Cutoff radius (50 Bohr ~ 26 Å, typical for electrostatics)
-            coulomb["r_cut"] = 100.0;
-
-            coulomb_pairs.push_back(coulomb);
+            coulombs.push_back(c);
 
             if (CurcumaLogger::get_verbosity() >= 3) {
                 CurcumaLogger::param(fmt::format("coulomb_{}-{}", i, j),
-                    fmt::format("q_i={:.6f}, q_j={:.6f}, γ={:.6f}, χ_i={:.6f}, χ_j={:.6f}",
-                        charges[i], charges[j], gamma_ij, chi_i, chi_j));
+                    fmt::format("q_i={:.6f}, q_j={:.6f}, gamma={:.6f}",
+                        charges[i], charges[j], c.gamma_ij));
             }
         }
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::success(fmt::format("Generated {} Coulomb pairs", coulomb_pairs.size()));
+        CurcumaLogger::success(fmt::format("Generated {} Coulomb pairs", coulombs.size()));
     }
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
     CurcumaLogger::result_fmt("GFN-FF Coulomb pair generation: {} ms", duration.count());
 
-    return coulomb_pairs;
+    return coulombs;
 }
 
-json GFNFF::generateGFNFFRepulsionPairs() const
+// JSON wrapper — delegates to native generator for disk-cache compatibility
+json GFNFF::generateGFNFFCoulombPairs() const
 {
+    auto coulombs = generateCoulombPairsNative();
+    json result = json::array();
+    for (const auto& c : coulombs) {
+        json j;
+        j["i"] = c.i; j["j"] = c.j;
+        j["q_i"] = c.q_i; j["q_j"] = c.q_j;
+        j["gamma_ij"] = c.gamma_ij;
+        j["chi_i"] = c.chi_i; j["chi_j"] = c.chi_j;
+        j["chi_base_i"] = c.chi_base_i; j["chi_base_j"] = c.chi_base_j;
+        j["cnf_i"] = c.cnf_i; j["cnf_j"] = c.cnf_j;
+        j["gam_i"] = c.gam_i; j["gam_j"] = c.gam_j;
+        j["alp_i"] = c.alp_i; j["alp_j"] = c.alp_j;
+        j["r_cut"] = c.r_cut;
+        result.push_back(j);
+    }
+    return result;
+}
+
+std::pair<std::vector<GFNFFRepulsion>, std::vector<GFNFFRepulsion>> GFNFF::generateRepulsionPairsNative() const
+{
+    // Claude Generated (March 2026): Native struct version of generateGFNFFRepulsionPairs
+    // Reference: Fortran gfnff_engrad.F90:467-495 (bonded), 255-276 (non-bonded)
     auto start_time = std::chrono::high_resolution_clock::now();
 
     using namespace GFNFFParameters;
 
-    /**
-     * @brief Generate GFN-FF bonded and non-bonded repulsion pairwise parameters
-     *
-     * Reference: Fortran gfnff_engrad.F90
-     *   - Bonded: gfnff_engrad.F90:467-495
-     *     Formula: E_rep = repab * exp(-α*r^1.5) / r
-     *     Alpha: sqrt(repa_i * repa_j) [geometric mean from repa array]
-     *     Scale: REPSCALB = 1.7583
-     *
-     *   - Non-bonded: gfnff_engrad.F90:255-276
-     *     Formula: E_rep = repab * exp(-α*r^1.5) / r
-     *     Alpha: (repan_i + repan_j) / 2.0 [arithmetic mean from repan array]
-     *     Scale: REPSCALN = 0.4270
-     *
-     * Claude Generated (Dec 2025): Phase 9 repulsion fix - separated bonded/non-bonded
-     * Uses getCachedBondList() to avoid redundant bond detection
-     */
-
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::info("=== generateGFNFFRepulsionPairs() START ===");
-        CurcumaLogger::param("m_atomcount", std::to_string(m_atomcount));
+        CurcumaLogger::info("=== generateRepulsionPairsNative() START ===");
     }
 
-    json bonded_repulsions = json::array();
-    json nonbonded_repulsions = json::array();
+    std::vector<GFNFFRepulsion> bonded_reps;
+    std::vector<GFNFFRepulsion> nonbonded_reps;
 
     const std::vector<std::pair<int,int>>& cached_bonds = getCachedBondList();
     std::set<std::pair<int, int>> bonded_set(cached_bonds.begin(), cached_bonds.end());
 
     // ===== BONDED REPULSION =====
-    // Reference: gfnff_engrad.F90:467-495
-    // Alpha: geometric mean of repa
-    // Scale: REPSCALB = 1.7583
-
     for (const auto& bond : cached_bonds) {
         int i = bond.first;
         int j = bond.second;
-
         int zi = m_atoms[i] - 1;
         int zj = m_atoms[j] - 1;
 
-        // Bounds checking for repa array
         bool valid = (zi >= 0 && zi < static_cast<int>(repa_angewChem2020.size()) &&
                       zj >= 0 && zj < static_cast<int>(repa_angewChem2020.size()));
         if (!valid) continue;
 
-        double repa_i = repa_angewChem2020[zi];
-        double repa_j = repa_angewChem2020[zj];
         double repz_i = (zi >= 0 && zi < static_cast<int>(repz.size())) ? repz[zi] : 1.0;
         double repz_j = (zj >= 0 && zj < static_cast<int>(repz.size())) ? repz[zj] : 1.0;
 
-        json rep;
-        rep["i"] = i;
-        rep["j"] = j;
-        rep["alpha"] = std::sqrt(repa_i * repa_j);  // Geometric mean
-        rep["repab"] = repz_i * repz_j * REPSCALB;  // Scale = 1.7583
-        rep["r_cut"] = 20.0;  // sqrt(repthr=400) Bohr (Fortran gfnff_param.f90:561)
+        GFNFFRepulsion r;
+        r.i = i;
+        r.j = j;
+        r.alpha = std::sqrt(repa_angewChem2020[zi] * repa_angewChem2020[zj]);
+        r.repab = repz_i * repz_j * REPSCALB;
+        r.r_cut = 20.0;
 
-        bonded_repulsions.push_back(rep);
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::param(fmt::format("bonded_repulsion_{}-{}", i, j),
-                fmt::format("repab=%.6f, alpha=%.6f", rep["repab"].get<double>(), rep["alpha"].get<double>()));
-        }
+        bonded_reps.push_back(r);
     }
 
     // ===== NON-BONDED REPULSION =====
-    // Reference: gfnff_engrad.F90:255-276 + gfnff_ini.f90 (alphanb calculation)
-    // Formula (Claude Generated Dec 24, 2025): Complete implementation with all corrections
-    //   fn = 1.0 + NREPSCAL / (1.0 + nb²)
-    //   dum1 = repan(i) * (1.0 + qa(i) * QREPSCAL) * fn
-    //   dum2 = repan(j) * (1.0 + qa(j) * QREPSCAL) * fn
-    //   ff = pair-specific factors (H-H, C-H, O-H, M-H)
-    //   alphanb = sqrt(dum1 * dum2) * ff
-    //
-    // Note: 1,3 and 1,4 topology factors (HH13REP, HH14REP) require graph traversal - TODO
-
-    // Get topology info for charges and CN
     const TopologyInfo& topo_info = getCachedTopology();
 
     for (int i = 0; i < m_atomcount; ++i) {
         for (int j = i + 1; j < m_atomcount; ++j) {
-            // Skip bonded pairs
             if (bonded_set.count({i, j}) > 0) continue;
 
-            int zi = m_atoms[i] - 1;  // 0-indexed element
+            int zi = m_atoms[i] - 1;
             int zj = m_atoms[j] - 1;
 
-            // Bounds checking
             bool valid = (zi >= 0 && zi < static_cast<int>(repan_angewChem2020.size()) &&
                           zj >= 0 && zj < static_cast<int>(repan_angewChem2020.size()));
             if (!valid) continue;
 
-            double repan_i_base = repan_angewChem2020[zi];
-            double repan_j_base = repan_angewChem2020[zj];
             double repz_i = (zi >= 0 && zi < static_cast<int>(repz.size())) ? repz[zi] : 1.0;
             double repz_j = (zj >= 0 && zj < static_cast<int>(repz.size())) ? repz[zj] : 1.0;
 
-            // Get EEQ charges (qa) and INTEGER neighbor counts (nb)
-            // CRITICAL: Use neighbor_counts (integer), NOT coordination_numbers (fractional)
-            // XTB reference: fn = 1.0 + nrepscal/(1.0 + dble(topo%nb(20,i))**2)
-            // where nb(20,i) is the INTEGER neighbor count from topology
             double qa_i = (i < topo_info.topology_charges.size()) ? topo_info.topology_charges[i] : 0.0;
             double qa_j = (j < topo_info.topology_charges.size()) ? topo_info.topology_charges[j] : 0.0;
             double cn_i = (i < topo_info.neighbor_counts.size()) ? topo_info.neighbor_counts[i] : 0.0;
             double cn_j = (j < topo_info.neighbor_counts.size()) ? topo_info.neighbor_counts[j] : 0.0;
 
-            // fn correction: neighbor-count dependent scaling
             double fn_i = 1.0 + NREPSCAL / (1.0 + cn_i * cn_i);
             double fn_j = 1.0 + NREPSCAL / (1.0 + cn_j * cn_j);
+            double dum1 = repan_angewChem2020[zi] * (1.0 + qa_i * QREPSCAL) * fn_i;
+            double dum2 = repan_angewChem2020[zj] * (1.0 + qa_j * QREPSCAL) * fn_j;
 
-            // dum1/dum2: charge-dependent and neighbor-corrected repan
-            double dum1 = repan_i_base * (1.0 + qa_i * QREPSCAL) * fn_i;
-            double dum2 = repan_j_base * (1.0 + qa_j * QREPSCAL) * fn_j;
-
-            // ff: pair-specific scaling factors
             double ff = 1.0;
-
-            int Z_i = m_atoms[i];  // 1-indexed atomic number
+            int Z_i = m_atoms[i];
             int Z_j = m_atoms[j];
 
-            // H-H pairs: special factor + topology-dependent scaling
             if (Z_i == 1 && Z_j == 1) {
-                ff = HHFAC;  // 0.6290
-
-                // Apply topology factors (Claude Generated Dec 24, 2025)
-                // Reference: gfnff_ini.f90 lines with bpair and hh13rep/hh14rep
-                // CRITICAL: topo_dist = bond count, NOT position count!
-                //   topo_dist=2 → 1,3-pair (positions 1-2-3, 2 bonds: H-C-H)
-                //   topo_dist=3 → 1,4-pair (positions 1-2-3-4, 3 bonds: H-C-C-H)
+                ff = HHFAC;
                 int topo_dist = topo_info.topo_distances[i][j];
-                if (topo_dist == 2) {
-                    // 1,3-pair (e.g., H-C-H in methane): multiply by HH13REP
-                    ff *= HH13REP;  // 0.6290 * 1.4580 = 0.9167
-                } else if (topo_dist == 3) {
-                    // 1,4-pair (e.g., H-C-C-H in ethane): multiply by HH14REP
-                    ff *= HH14REP;  // 0.6290 * 0.7080 = 0.4453
-                }
-                // topo_dist==1 means bonded (already skipped above)
-                // topo_dist>=4 means more distant pairs (ff stays at HHFAC)
+                if (topo_dist == 2) ff *= HH13REP;
+                else if (topo_dist == 3) ff *= HH14REP;
             }
-            // Metal-H pairs (M-H): Use PeriodicTable classification
-            // Reference: Fortran gfnff_ini.f90:816 - if(param%metal(atj) .gt. 0) ff = 0.85
             else if ((Z_i == 1 && PeriodicTable::getMetalType(Z_j) > 0) ||
                      (Z_j == 1 && PeriodicTable::getMetalType(Z_i) > 0)) {
                 ff = 0.85;
             }
-            // C-H pairs
             else if ((Z_i == 1 && Z_j == 6) || (Z_j == 1 && Z_i == 6)) {
                 ff = 0.91;
             }
-            // O-H pairs
             else if ((Z_i == 1 && Z_j == 8) || (Z_j == 1 && Z_i == 8)) {
                 ff = 1.04;
             }
 
-            // Final alpha: sqrt(dum1 * dum2) * ff
-            double alpha_nonbonded = std::sqrt(dum1 * dum2) * ff;
+            GFNFFRepulsion r;
+            r.i = i;
+            r.j = j;
+            r.alpha = std::sqrt(dum1 * dum2) * ff;
+            r.repab = repz_i * repz_j * REPSCALN;
+            r.r_cut = 20.0;
 
-            json rep;
-            rep["i"] = i;
-            rep["j"] = j;
-            rep["alpha"] = alpha_nonbonded;  // CORRECTED formula
-            rep["repab"] = repz_i * repz_j * REPSCALN;  // Scale = 0.4270
-            rep["r_cut"] = 20.0;  // sqrt(repthr=400) Bohr (Fortran gfnff_param.f90:561)
-
-            nonbonded_repulsions.push_back(rep);
+            nonbonded_reps.push_back(r);
 
             if (m_rep_diag) {
                 int topo_dist = topo_info.topo_distances[i][j];
-                // 1-based indices to match Fortran output
                 fmt::print(stderr, "nb_rep {:3d}-{:3d} alpha={:.10f} repab={:.10f} qa_i={:.10f} qa_j={:.10f} cn_i={:.0f} cn_j={:.0f} ff={:.4f} bpair={}\n",
-                    i+1, j+1, rep["alpha"].get<double>(), rep["repab"].get<double>(),
-                    qa_i, qa_j, cn_i, cn_j, ff, topo_dist);
+                    i+1, j+1, r.alpha, r.repab, qa_i, qa_j, cn_i, cn_j, ff, topo_dist);
             }
         }
     }
 
-    json result;
-    result["bonded"] = bonded_repulsions;
-    result["nonbonded"] = nonbonded_repulsions;
-
     if (CurcumaLogger::get_verbosity() >= 3) {
-        CurcumaLogger::success(fmt::format("Generated {} bonded + {} non-bonded repulsions (total: {})",
-            bonded_repulsions.size(), nonbonded_repulsions.size(),
-            bonded_repulsions.size() + nonbonded_repulsions.size()));
+        CurcumaLogger::success(fmt::format("Generated {} bonded + {} non-bonded repulsions",
+            bonded_reps.size(), nonbonded_reps.size()));
     }
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
     CurcumaLogger::result_fmt("GFN-FF repulsion pair generation: {} ms", duration.count());
 
+    return {std::move(bonded_reps), std::move(nonbonded_reps)};
+}
+
+// JSON wrapper — delegates to native generator for disk-cache compatibility
+json GFNFF::generateGFNFFRepulsionPairs() const
+{
+    auto [bonded, nonbonded] = generateRepulsionPairsNative();
+    json bonded_json = json::array();
+    json nonbonded_json = json::array();
+    for (const auto& r : bonded) {
+        json j;
+        j["i"] = r.i; j["j"] = r.j;
+        j["alpha"] = r.alpha; j["repab"] = r.repab;
+        j["r_cut"] = r.r_cut;
+        bonded_json.push_back(j);
+    }
+    for (const auto& r : nonbonded) {
+        json j;
+        j["i"] = r.i; j["j"] = r.j;
+        j["alpha"] = r.alpha; j["repab"] = r.repab;
+        j["r_cut"] = r.r_cut;
+        nonbonded_json.push_back(j);
+    }
+    json result;
+    result["bonded"] = bonded_json;
+    result["nonbonded"] = nonbonded_json;
     return result;
+}
+
+std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GFNFF::generateDispersionPairsNative() const
+{
+    // Claude Generated (March 2026): Native struct wrapper around generateGFNFFDispersionPairs
+    // D4/D3 generators internally still use JSON; conversion happens here at the boundary.
+    json dispersions_json = generateGFNFFDispersionPairs();
+
+    std::string disp_method = "d3";
+    if (dispersions_json.size() > 0 && dispersions_json[0].contains("dispersion_method") &&
+        dispersions_json[0]["dispersion_method"] == "d4") {
+        disp_method = "d4";
+    }
+
+    std::vector<GFNFFDispersion> dispersions;
+    dispersions.reserve(dispersions_json.size());
+    for (const auto& dj : dispersions_json) {
+        GFNFFDispersion d;
+        d.i = dj["i"]; d.j = dj["j"];
+        d.C6 = dj["C6"]; d.r4r2ij = dj["r4r2ij"];
+        d.r0_squared = dj["r0_squared"];
+        d.r_cut = dj.value("r_cut", 50.0);
+        d.zetac6 = dj.value("zetac6", 1.0);
+        dispersions.push_back(d);
+    }
+
+    // ATM triples (stored as member variable by dispersion generator)
+    std::vector<ATMTriple> atm_triples;
+    if (!m_atm_triples.is_null() && m_atm_triples.is_array()) {
+        atm_triples.reserve(m_atm_triples.size());
+        for (const auto& tj : m_atm_triples) {
+            ATMTriple t;
+            t.i = tj["i"]; t.j = tj["j"]; t.k = tj["k"];
+            t.C6_ij = tj["C6_ij"]; t.C6_ik = tj["C6_ik"]; t.C6_jk = tj["C6_jk"];
+            t.s9 = tj.value("s9", 1.0); t.a1 = tj.value("a1", 0.0);
+            t.a2 = tj.value("a2", 0.0); t.alp = tj.value("alp", 14.0);
+            t.atm_method = tj.value("atm_method", "d3");
+            t.triple_scale = tj.value("triple_scale", 1.0);
+            atm_triples.push_back(t);
+        }
+    }
+
+    return {std::move(dispersions), std::move(atm_triples), disp_method};
 }
 
 json GFNFF::generateGFNFFDispersionPairs() const

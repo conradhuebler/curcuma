@@ -1552,13 +1552,14 @@ void GFNFF::calculateDihedralGradient(
  *         Based on Fortran implementation by S. Spicher & S. Grimme
  * @copyright Copyright (C) 2019 - 2025 Conrad Hübler <Conrad.Huebler@gmx.net>
  */
-json GFNFF::generateGFNFFTorsions() const
+std::pair<std::vector<Dihedral>, std::vector<Dihedral>> GFNFF::generateTorsionsNative() const
 {
-    // Claude Generated (February 2026): Timing for parameter generation breakdown
+    // Claude Generated (March 2026): Native struct version of generateGFNFFTorsions
     auto start_time = std::chrono::high_resolution_clock::now();
 
     const TopologyInfo& topo = getCachedTopology();
-    json torsions = json::array();
+    std::vector<Dihedral> dihedrals;
+    std::vector<Dihedral> extra_dihedrals;
 
     // ==========================================================================
     // STEP 1: Get cached topology and bond list
@@ -1575,7 +1576,7 @@ json GFNFF::generateGFNFFTorsions() const
 
     if (bond_list.empty()) {
         CurcumaLogger::warn("GFN-FF torsion generation: No bonds found, skipping torsions");
-        return torsions;
+        return {dihedrals, extra_dihedrals};
     }
 
     // ==========================================================================
@@ -1821,28 +1822,20 @@ json GFNFF::generateGFNFFTorsions() const
                         CurcumaLogger::info(fmt::format("TORSION_DEBUG | {} | {} | {} | {} | {} | {:.2f} | {:.6f} | {:.6f}",
                             params.periodicity, l, j, k, i, params.phase_shift * 180.0 / M_PI, params.barrier_height, phi));
                     }
-                    json torsion;
-                    torsion["type"] = 3; // GFN-FF type
+                    Dihedral d;
+                    d.type = 3;
                     // Fortran convention atom ordering (ll-ii-jj-kk): swap terminal atoms
-                    torsion["i"] = l;  // ll = neighbor of jj
-                    torsion["j"] = j;  // ii = central atom 1
-                    torsion["k"] = k;  // jj = central atom 2
-                    torsion["l"] = i;  // kk = neighbor of ii
-                    torsion["n"] = params.periodicity;
-                    torsion["V"] = params.barrier_height;
-                    torsion["phi0"] = params.phase_shift;
-                    torsion["is_improper"] = params.is_improper;
-                    torsion["hyb_j"] = hybridization[j];
-                    torsion["hyb_k"] = hybridization[k];
-                    if (j < topo.coordination_numbers.rows()) {
-                        torsion["cn_j"] = topo.coordination_numbers(j);
-                    }
-                    if (k < topo.coordination_numbers.rows()) {
-                        torsion["cn_k"] = topo.coordination_numbers(k);
-                    }
-                    torsion["current_angle"] = phi;
+                    d.i = l;  // ll = neighbor of jj
+                    d.j = j;  // ii = central atom 1
+                    d.k = k;  // jj = central atom 2
+                    d.l = i;  // kk = neighbor of ii
+                    d.n = params.periodicity;
+                    d.V = params.barrier_height;
+                    d.phi0 = params.phase_shift;
+                    d.is_extra = false;
+                    d.is_nci = false;
 
-                    torsions.push_back(torsion);
+                    dihedrals.push_back(d);
                     torsion_count++;
                 }
 
@@ -1877,20 +1870,19 @@ json GFNFF::generateGFNFFTorsions() const
                                 CurcumaLogger::info(fmt::format("EXTRA_TORSION_DEBUG | 1 | {} | {} | {} | {} | 180.00 | {:.6f} | {:.6f}",
                                     l, j, k, i, extra_barrier, phi));
                             }
-                            json extra_torsion;
-                            extra_torsion["type"] = 3;
-                            extra_torsion["i"] = l;
-                            extra_torsion["j"] = j;
-                            extra_torsion["k"] = k;
-                            extra_torsion["l"] = i;
-                            extra_torsion["n"] = 1;
-                            extra_torsion["V"] = extra_barrier;
-                            extra_torsion["phi0"] = M_PI;
-                            extra_torsion["is_improper"] = false;
-                            extra_torsion["is_extra"] = true;
-                            extra_torsion["current_angle"] = phi;
+                            Dihedral ed;
+                            ed.type = 3;
+                            ed.i = l;
+                            ed.j = j;
+                            ed.k = k;
+                            ed.l = i;
+                            ed.n = 1;
+                            ed.V = extra_barrier;
+                            ed.phi0 = M_PI;
+                            ed.is_extra = true;
+                            ed.is_nci = false;
 
-                            torsions.push_back(extra_torsion);
+                            extra_dihedrals.push_back(ed);
                             extra_torsion_count++;
 
                             if (CurcumaLogger::get_verbosity() >= 3) {
@@ -1935,11 +1927,10 @@ json GFNFF::generateGFNFFTorsions() const
         double total_V = 0.0;
         double max_V = 0.0;
         double min_V = 1e10;
-        for (const auto& t : torsions) {
-            double V = t["V"];
-            total_V += V;
-            max_V = std::max(max_V, V);
-            min_V = std::min(min_V, V);
+        for (const auto& t : dihedrals) {
+            total_V += t.V;
+            max_V = std::max(max_V, t.V);
+            min_V = std::min(min_V, t.V);
         }
 
         CurcumaLogger::info(fmt::format("Sum of all V (barrier heights): {:.6f} Eh", total_V));
@@ -1948,10 +1939,8 @@ json GFNFF::generateGFNFFTorsions() const
 
         // Per-bond quartet counts (for reference only, not used for normalization)
         std::map<std::pair<int, int>, int> quartets_per_bond;
-        for (const auto& t : torsions) {
-            int tj = t["j"];
-            int tk = t["k"];
-            std::pair<int, int> bond_key = (tj < tk) ? std::make_pair(tj, tk) : std::make_pair(tk, tj);
+        for (const auto& t : dihedrals) {
+            std::pair<int, int> bond_key = (t.j < t.k) ? std::make_pair(t.j, t.k) : std::make_pair(t.k, t.j);
             quartets_per_bond[bond_key]++;
         }
         CurcumaLogger::info(fmt::format("Number of central bonds with torsions: {}", quartets_per_bond.size()));
@@ -1960,15 +1949,11 @@ json GFNFF::generateGFNFFTorsions() const
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("\nPer-torsion details (first 20):");
             int count = 0;
-            for (const auto& t : torsions) {
+            for (const auto& t : dihedrals) {
                 if (count >= 20) break;
-                int ti = t["i"], tj = t["j"], tk = t["k"], tl = t["l"];
-                double V = t["V"];
-                double n = t["n"];
-                double phi0 = t["phi0"];
                 CurcumaLogger::info(fmt::format(
                     "  Torsion {}-{}-{}-{}: V={:.6f} Eh, n={:.0f}, phi0={:.2f}°",
-                    ti, tj, tk, tl, V, n, phi0 * 180.0 / M_PI));
+                    t.i, t.j, t.k, t.l, t.V, static_cast<double>(t.n), t.phi0 * 180.0 / M_PI));
                 count++;
             }
         }
@@ -2004,11 +1989,10 @@ json GFNFF::generateGFNFFTorsions() const
 
         // Optional: Print summary by periodicity
         int n1_count = 0, n2_count = 0, n3_count = 0;
-        for (const auto& torsion : torsions) { // Claude Generated Fix (2025-12-13): Changed from torsions["dihedrals"] to torsions
-            int n = torsion["n"];  // Claude Generated Fix (2025-11-30): Changed from "periodicity" to "n"
-            if (n == 1) n1_count++;
-            else if (n == 2) n2_count++;
-            else if (n == 3) n3_count++;
+        for (const auto& d : dihedrals) {
+            if (d.n == 1) n1_count++;
+            else if (d.n == 2) n2_count++;
+            else if (d.n == 3) n3_count++;
         }
 
         if (CurcumaLogger::get_verbosity() >= 2) {
@@ -2049,13 +2033,32 @@ json GFNFF::generateGFNFFTorsions() const
         CurcumaLogger::result_fmt("GFN-FF torsion generation: {} ms", duration.count());
     }
 
-    return torsions;
+    return {std::move(dihedrals), std::move(extra_dihedrals)};
 }
 
-json GFNFF::generateGFNFFSTorsions() const
+// JSON wrapper — delegates to native generator for disk-cache compatibility
+json GFNFF::generateGFNFFTorsions() const
+{
+    auto [primary, extra] = generateTorsionsNative();
+    json result = json::array();
+    auto to_json = [](const Dihedral& d) {
+        json j;
+        j["type"] = d.type;
+        j["i"] = d.i; j["j"] = d.j; j["k"] = d.k; j["l"] = d.l;
+        j["n"] = d.n; j["V"] = d.V; j["phi0"] = d.phi0;
+        j["is_extra"] = d.is_extra;
+        j["is_nci"] = d.is_nci;
+        return j;
+    };
+    for (const auto& d : primary) result.push_back(to_json(d));
+    for (const auto& d : extra) result.push_back(to_json(d));
+    return result;
+}
+
+std::vector<GFNFFSTorsion> GFNFF::generateSTorsionsNative() const
 {
     /**
-     * @brief Generate GFN-FF triple bond torsion (sTors_eg) parameters
+     * @brief Generate GFN-FF triple bond torsion (sTors_eg) parameters — native struct version
      *
      * Specialized torsion for rotation around sp-sp systems like alkynes.
      *
@@ -2068,7 +2071,7 @@ json GFNFF::generateGFNFFSTorsions() const
     const TopologyInfo& topo = getCachedTopology();
     const std::vector<std::pair<int, int>>& bond_list = getCachedBondList();
     const std::vector<int>& hybridization = topo.hybridization;
-    json storsions = json::array();
+    std::vector<GFNFFSTorsion> storsions;
 
     // Build neighbor list for efficient lookup
     std::vector<std::vector<int>> neighbors(m_atomcount);
@@ -2123,13 +2126,13 @@ json GFNFF::generateGFNFFSTorsions() const
                             }
 
                             if (ii != -1 && ll != -1) {
-                                json stors;
-                                stors["i"] = ii;
-                                stors["j"] = jj;
-                                stors["k"] = kk;
-                                stors["l"] = ll;
-                                stors["erefhalf"] = 3.75e-4; // 1.97 kJ/mol
-                                storsions.push_back(stors);
+                                GFNFFSTorsion s;
+                                s.i = ii;
+                                s.j = jj;
+                                s.k = kk;
+                                s.l = ll;
+                                s.erefhalf = 3.75e-4; // 1.97 kJ/mol
+                                storsions.push_back(s);
                             }
                         }
                     }
@@ -2143,4 +2146,21 @@ json GFNFF::generateGFNFFSTorsions() const
     }
 
     return storsions;
+}
+
+// JSON wrapper — delegates to native generator for disk-cache compatibility
+json GFNFF::generateGFNFFSTorsions() const
+{
+    auto storsions = generateSTorsionsNative();
+    json result = json::array();
+    for (const auto& s : storsions) {
+        json stors;
+        stors["i"] = s.i;
+        stors["j"] = s.j;
+        stors["k"] = s.k;
+        stors["l"] = s.l;
+        stors["erefhalf"] = s.erefhalf;
+        result.push_back(stors);
+    }
+    return result;
 }
