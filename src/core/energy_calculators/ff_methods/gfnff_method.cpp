@@ -38,6 +38,7 @@
 #include <cmath>
 #include <fstream>
 #include <functional>
+#include <future>  // Claude Generated (March 2026): std::async for parallel init phases
 #include <iostream>
 #include <queue>  // Claude Generated (Dec 24, 2025): BFS for topology distances
 #include <stack>
@@ -6568,11 +6569,18 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
 
     // PHASE 2 OPTIMIZED (Feb 7, 2026): Pass adjacency_list to eliminate redundant O(N²) bond detection
     topo_info.hybridization = determineHybridization(topo_info.adjacency_list);
-    topo_info.pi_fragments = detectPiSystems(topo_info.hybridization, topo_info.adjacency_list);
-    topo_info.ring_sizes = findSmallestRings(topo_info.adjacency_list, topo_info);
 
-    // Build neighbor lists for topology analysis (Session 6)
-    topo_info.neighbor_lists = buildNeighborLists();
+    // Claude Generated (March 2026): Run pi-detection, ring-detection, and neighbor-lists in parallel
+    // All three only read hybridization+adjacency_list, write to different topo_info fields
+    auto pi_future = std::async(std::launch::async, [&]() {
+        return detectPiSystems(topo_info.hybridization, topo_info.adjacency_list);
+    });
+    auto nb_future = std::async(std::launch::async, [&]() {
+        return buildNeighborLists();
+    });
+    topo_info.ring_sizes = findSmallestRings(topo_info.adjacency_list, topo_info);
+    topo_info.pi_fragments = pi_future.get();
+    topo_info.neighbor_lists = nb_future.get();
 
     // Calculate simple neighbor counts for XTB compatibility in torsions
     // XTB uses raw neighbor count (topo%nb(20,i)) rather than effective CN for torsion correction
@@ -6731,17 +6739,17 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         // Reference: Fortran gfnff_ini.f90:697-724 computes dgam ONCE and uses it for
         // BOTH the EEQ solve AND the Coulomb energy formula.
         if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("Computing Phase 1C: Hardness corrections (dgam)");
+            CurcumaLogger::info("Computing Phase 1C: Hardness corrections (dgam) + amideH detection");
         }
+        // Claude Generated (March 2026): Run dgam and amideH detection in parallel (independent computations)
+        auto amide_future = std::async(std::launch::async, [&]() {
+            return m_eeq_solver->detectAmideHydrogensFull(
+                m_atoms, topo_info.hybridization, topo_info.coordination_numbers, eeq_topology_input);
+        });
         topo_info.dgam = m_eeq_solver->calculateDgamFull(
             m_atoms, topo_info.topology_charges, topo_info.hybridization,
             topo_info.coordination_numbers, eeq_topology_input);
-
-        // Claude Generated (March 2026): Detect amide hydrogens for Coulomb chi correction
-        // Reference: Fortran gfnff_ini.f90:717 - if(amideH(i)) chieeq(i) -= 0.02
-        // This correction is applied in Phase 2 chi (EEQ solver) AND in Coulomb chi_base
-        topo_info.is_amide_h = m_eeq_solver->detectAmideHydrogensFull(
-            m_atoms, topo_info.hybridization, topo_info.coordination_numbers, eeq_topology_input);
+        topo_info.is_amide_h = amide_future.get();
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             std::cout << "  First 3 dgam values:" << std::endl;

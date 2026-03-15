@@ -2433,7 +2433,10 @@ double ForceField::Calculate(bool gradient)
     if ((m_method == "gfnff") &&
         m_coulomb_gam.size() == m_natoms && m_eeq_charges.size() == m_natoms) {
         const double sqrt_2_over_pi = 0.797884560802865;
+        // Claude Generated (March 2026): OpenMP reduction for TERM 2+3 self-energy O(N)
         double E_en = 0.0, E_self = 0.0;
+        const bool has_cn = (m_cn.size() == m_natoms);
+        #pragma omp parallel for schedule(static) reduction(+:E_en, E_self)
         for (int i = 0; i < m_natoms; ++i) {
             // Skip atoms not present in any Coulomb pair (alp==0 → division by zero)
             if (m_coulomb_alp(i) <= 0.0) continue;
@@ -2441,7 +2444,7 @@ double ForceField::Calculate(bool gradient)
             if (std::isnan(q)) continue;
             // Dynamic chi_eff = chi_base + cnf * sqrt(cn_current)
             double chi;
-            if (m_coulomb_cnf(i) != 0.0 && m_cn.size() == m_natoms) {
+            if (m_coulomb_cnf(i) != 0.0 && has_cn) {
                 chi = m_coulomb_chi_base(i) + m_coulomb_cnf(i) * std::sqrt(std::max(m_cn(i), 0.0));
             } else {
                 chi = m_coulomb_chi_static(i);
@@ -2491,6 +2494,10 @@ double ForceField::Calculate(bool gradient)
     //
     // Pattern: gradient(i,dim) += Σ_j dcn[dim](i,j) * dEdcn_total(j)
     // where dcn[dim](i,j) = dCN(j)/dr(i,dim) and dEdcn_total(j) is accumulated from all energy terms
+    //
+    // Claude Generated (March 2026): TERM 1b (Coulomb charge derivative) merged into single pass
+    // Combined: gradient += dcn * (dEdcn_total - qtmp) instead of two separate matvec passes
+    // Saves 3 sparse matvecs per gradient evaluation for gfnff
     if (gradient && !m_dcn.empty() && m_dcn.size() == 3) {
         Vector dEdcn_total = Vector::Zero(m_natoms);
         for (int i = 0; i < static_cast<int>(m_stored_threads.size()); ++i) {
@@ -2500,10 +2507,24 @@ double ForceField::Calculate(bool gradient)
             }
         }
 
-        // Apply chain rule: for each spatial dimension, multiply dcn matrix by dEdcn vector
+        // Claude Generated (March 2026): Compute TERM 1b qtmp and combine with dEdcn
+        // Reference: Fortran gfnff_engrad.F90:449-454: g -= dcn * qtmp
+        // Combined vector: dEdcn_combined = dEdcn_total - qtmp (single matvec instead of two)
+        Vector qtmp = Vector::Zero(m_natoms);
+        bool has_term1b = (m_method == "gfnff") &&
+            m_eeq_charges.size() == m_natoms && m_cnf.size() == m_natoms && m_cn.size() == m_natoms;
+        if (has_term1b) {
+            for (int i = 0; i < m_natoms; ++i) {
+                double cn_i = std::max(m_cn(i), 0.0);
+                qtmp(i) = m_eeq_charges(i) * m_cnf(i) / (2.0 * std::sqrt(cn_i) + 1e-16);
+            }
+        }
+
+        // Combined matvec: gradient += dcn * (dEdcn_total - qtmp)
+        Vector dEdcn_combined = has_term1b ? (dEdcn_total - qtmp).eval() : dEdcn_total;
         for (int dim = 0; dim < 3; ++dim) {
             if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
-                m_gradient.col(dim) += m_dcn[dim] * dEdcn_total;
+                m_gradient.col(dim) += m_dcn[dim] * dEdcn_combined;
             }
         }
 
@@ -2513,6 +2534,9 @@ double ForceField::Calculate(bool gradient)
                 CurcumaLogger::info(fmt::format("dEdcn chain-rule: |dEdcn| = {:.6e}, max = {:.6e}",
                     dEdcn_norm, dEdcn_total.cwiseAbs().maxCoeff()));
             }
+        }
+        if (has_term1b && CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::info("Coulomb charge derivative gradient (Term 1b) applied in combined pass");
         }
 
         // Claude Generated (Mar 2026): Per-component CN corrections for GradComp validation
@@ -2534,40 +2558,16 @@ double ForceField::Calculate(bool gradient)
                     m_disp_cn_correction.col(dim) = m_dcn[dim] * dEdcn_disp_total;
                 }
             }
-        }
-    }
-
-    // =========================================================================
-    // Claude Generated (Feb 23, 2026): Term 1b — Coulomb charge derivative gradient via CN (sequential)
-    // Reference: Fortran gfnff_engrad.F90:449-454: g -= dcn * qtmp
-    // where qtmp(i) = q(i) * cnf(i) / (2*sqrt(cn(i)) + 1e-16)
-    // Moved out of threads for thread-count independence (operates on all atoms).
-    // =========================================================================
-    if (gradient && (m_method == "gfnff") &&
-        !m_dcn.empty() && m_dcn.size() == 3 &&
-        m_eeq_charges.size() == m_natoms && m_cnf.size() == m_natoms && m_cn.size() == m_natoms) {
-        Vector qtmp = Vector::Zero(m_natoms);
-        for (int i = 0; i < m_natoms; ++i) {
-            double cn_i = std::max(m_cn(i), 0.0);
-            qtmp(i) = m_eeq_charges(i) * m_cnf(i) / (2.0 * std::sqrt(cn_i) + 1e-16);
-        }
-        for (int dim = 0; dim < 3; ++dim) {
-            if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
-                m_gradient.col(dim) -= m_dcn[dim] * qtmp;
-            }
-        }
-        // Claude Generated (Mar 2026): Coulomb component CN correction for GradComp
-        // Reference: Fortran gfnff_engrad.F90:453-454 applies TERM 1b to g_es
-        if (m_store_gradient_components) {
-            m_coulomb_cn_correction = Matrix::Zero(m_natoms, 3);
-            for (int dim = 0; dim < 3; ++dim) {
-                if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
-                    m_coulomb_cn_correction.col(dim) = -(m_dcn[dim] * qtmp);
+            // Coulomb component CN correction for GradComp
+            // Reference: Fortran gfnff_engrad.F90:453-454 applies TERM 1b to g_es
+            if (has_term1b) {
+                m_coulomb_cn_correction = Matrix::Zero(m_natoms, 3);
+                for (int dim = 0; dim < 3; ++dim) {
+                    if (m_dcn[dim].rows() == m_natoms && m_dcn[dim].cols() == m_natoms) {
+                        m_coulomb_cn_correction.col(dim) = -(m_dcn[dim] * qtmp);
+                    }
                 }
             }
-        }
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("Coulomb charge derivative gradient (Term 1b) applied in parent");
         }
     }
 

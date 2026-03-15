@@ -1103,9 +1103,18 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
         }
     }
 
-    // Step 3: Build off-diagonal Coulomb matrix with corrected alpha
+    // Step 3+4: Build Coulomb matrix (off-diagonal + diagonal) with corrected alpha
+    // Claude Generated (March 2026): OpenMP parallelization matching Phase 2 pattern
     const double TSQRT2PI = 0.797884560802866;
+    #pragma omp parallel for schedule(static)
     for (int i = 0; i < natoms; ++i) {
+        // Diagonal: gam + dgam + sqrt(2/π)/sqrt(alpha)
+        int z_i = atoms[i];
+        EEQParameters params_i = getParameters(z_i, cn(i));
+        double gam_corrected = params_i.gam + dgam(i);
+        A(i, i) = gam_corrected + TSQRT2PI / std::sqrt(alpha_corrected(i));
+
+        // Off-diagonal: erf-damped Coulomb
         for (int j = 0; j < i; ++j) {
             double r = distances(i, j);
 
@@ -1123,15 +1132,6 @@ Matrix EEQSolver::buildCorrectedEEQMatrix(
                 A(j, i) = coulomb;
             }
         }
-    }
-
-    // Step 4: Build diagonal with gam + dgam and sqrt(2/π)/sqrt(alpha_corrected)
-    for (int i = 0; i < natoms; ++i) {
-        int z_i = atoms[i];
-        EEQParameters params_i = getParameters(z_i, cn(i));
-
-        double gam_corrected = params_i.gam + dgam(i);
-        A(i, i) = gam_corrected + TSQRT2PI / std::sqrt(alpha_corrected(i));
     }
 
     // Step 5: Charge constraint row and column

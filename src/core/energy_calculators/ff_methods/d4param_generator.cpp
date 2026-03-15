@@ -999,7 +999,11 @@ void D4ParameterGenerator::precomputeGaussianWeights()
 
     m_gaussian_weights.resize(m_atoms.size());
 
-    for (size_t i = 0; i < m_atoms.size(); ++i) {
+    // Claude Generated (March 2026): OpenMP parallelization for large systems
+    // Each atom's weights are independent — perfect for data-parallel execution
+    int natoms_gw = static_cast<int>(m_atoms.size());
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < natoms_gw; ++i) {
         int Zi = m_atoms[i];
         int elem_i = Zi - 1;  // Convert to 0-based
 
@@ -1020,7 +1024,6 @@ void D4ParameterGenerator::precomputeGaussianWeights()
         // Get atom properties
         // EEQ charges calculated but NOT used in GFN-FF weighting (CN-only model)
         // Charges remain available for potential future full D4 implementation
-        double qi = m_eeq_charges(i);
         double cni = m_cn_values[i];
 
         // Compute Gaussian weights for all reference states of this atom
@@ -1028,7 +1031,6 @@ void D4ParameterGenerator::precomputeGaussianWeights()
         double sum_weights = 0.0;
 
         for (int ref = 0; ref < nref && ref < MAX_REF; ++ref) {
-            double qi_ref = m_refq[elem_i][ref];
             double cni_ref = (elem_i < static_cast<int>(m_refcn.size()) &&
                              ref < static_cast<int>(m_refcn[elem_i].size()))
                             ? m_refcn[elem_i][ref] : 0.0;
@@ -1036,9 +1038,6 @@ void D4ParameterGenerator::precomputeGaussianWeights()
             // KEY: CN-only Gaussian weighting (matches GFN-FF hybrid model)
             // Reference: external/gfnff/src/gfnff_gdisp0.f90:405 - cngw = exp(-wf * (cn - cnref)**2)
             double diff_cn = cni - cni_ref;
-            if (i == 0 && CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format("DEBUG: i=0 ref={} cni={:.4f} cni_ref={:.4f} diff={:.4f}", ref, cni, cni_ref, diff_cn));
-            }
             weights[ref] = std::exp(-wf * diff_cn * diff_cn);
             sum_weights += weights[ref];
         }
@@ -1235,7 +1234,10 @@ void D4ParameterGenerator::computeGaussianWeightDerivatives()
 
     m_gaussian_weight_derivatives.resize(m_atoms.size());
 
-    for (size_t i = 0; i < m_atoms.size(); ++i) {
+    // Claude Generated (March 2026): OpenMP parallelization — each atom independent
+    int natoms_gwd = static_cast<int>(m_atoms.size());
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < natoms_gwd; ++i) {
         int Zi = m_atoms[i];
         int elem_i = Zi - 1;
 
@@ -1294,6 +1296,23 @@ void D4ParameterGenerator::computeDC6DCN()
     int natoms = static_cast<int>(m_atoms.size());
     m_dc6dcn = Matrix::Zero(natoms, natoms);
 
+    // Claude Generated (March 2026): OpenMP parallelization of O(N²) dc6dcn computation
+    // Each row i writes to m_dc6dcn(i,j) and m_dc6dcn(j,i) — but j>=i means no write conflict
+    // on the (i,j) entry. However, m_dc6dcn(j,i) could conflict with another thread processing row j.
+    // Solution: parallelize outer loop, each thread computes its row's contributions to a
+    // thread-local buffer, then merge. Simpler: since j>=i, row i writes (i,j) and (j,i) —
+    // use atomic or split into two passes. Simplest correct approach: parallel for on outer i,
+    // each thread writes (i,j) for j>=i (upper triangle), then symmetrize.
+    // Actually the original already writes both (i,j) and (j,i), so we use a temporary upper
+    // triangle storage per thread and merge after.
+
+    // Approach: Each thread computes dc6_di and dc6_dj for its rows, stores in dc6dcn directly.
+    // Since row i writes m_dc6dcn(i,j) = dc6_di (row i, safe) and m_dc6dcn(j,i) = dc6_dj
+    // (row j, could conflict). Use two separate matrices to avoid conflicts.
+    Matrix dc6dcn_upper = Matrix::Zero(natoms, natoms);  // dc6dcn(i,j) = dC6(i,j)/dCN(i) for j>=i
+    Matrix dc6dcn_lower = Matrix::Zero(natoms, natoms);  // dc6dcn(j,i) = dC6(i,j)/dCN(j) for j>=i
+
+    #pragma omp parallel for schedule(dynamic)
     for (int i = 0; i < natoms; ++i) {
         int Zi = m_atoms[i];
         int elem_i = Zi - 1;
@@ -1334,12 +1353,21 @@ void D4ParameterGenerator::computeDC6DCN()
                 }
             }
 
-            m_dc6dcn(i, j) = dc6_di;
-            m_dc6dcn(j, i) = dc6_dj;
+            dc6dcn_upper(i, j) = dc6_di;
+            dc6dcn_lower(i, j) = dc6_dj;
+        }
+    }
 
-            // For diagonal: dC6(i,i)/dCN(i) needs both derivatives
+    // Assemble final dc6dcn: m_dc6dcn(i,j) = dC6(i,j)/dCN(i)
+    // Upper triangle stored dc6_di at (i,j), dc6_dj at (i,j) in lower matrix
+    // m_dc6dcn(i,j) = dc6dcn_upper(i,j) for j>=i, dc6dcn_lower(j,i) for j<i
+    for (int i = 0; i < natoms; ++i) {
+        for (int j = i; j < natoms; ++j) {
             if (i == j) {
-                m_dc6dcn(i, i) = dc6_di + dc6_dj;
+                m_dc6dcn(i, i) = dc6dcn_upper(i, i) + dc6dcn_lower(i, i);
+            } else {
+                m_dc6dcn(i, j) = dc6dcn_upper(i, j);  // dC6(i,j)/dCN(i)
+                m_dc6dcn(j, i) = dc6dcn_lower(i, j);  // dC6(i,j)/dCN(j)
             }
         }
     }
