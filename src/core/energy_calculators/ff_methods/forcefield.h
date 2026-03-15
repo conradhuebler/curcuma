@@ -160,7 +160,7 @@ public:
     // Claude Generated (Feb 1, 2026): Distribute CN, CNF, and CN derivatives for Coulomb gradients
     // Reference: Fortran gfnff_engrad.F90:418-422 - charge derivative via CN
     void distributeCNandDerivatives(const Vector& cn, const Vector& cnf,
-                                     const std::vector<Matrix>& dcn);
+                                     const std::vector<SpMatrix>& dcn);
 
     // Claude Generated (Feb 22, 2026): Distribute only CN to threads for energy-only evaluations
     // Needed so dynamic r0 in bonds uses current CN, not stale values from last gradient call
@@ -303,9 +303,13 @@ private:
 
     // Claude Generated (Feb 1, 2026): CN, CNF, and CN derivatives for Coulomb charge derivative gradients
     // Reference: Fortran gfnff_engrad.F90:418-422 - qtmp(i) = q(i)*cnf(i)/(2*sqrt(cn(i)))
+    // Phase 1a (Mar 2026): Stored ONLY in ForceField, not copied to threads.
     Vector m_cn;                    // Coordination numbers per atom
     Vector m_cnf;                   // CNF parameters per atom (for qtmp calculation)
-    std::vector<Matrix> m_dcn;      // CN derivatives: dcn[dim](i,j) = dCN(j)/dr(i,dim)
+    std::vector<SpMatrix> m_dcn;    // CN derivatives (sparse): dcn[dim](i,j) = dCN(j)/dr(i,dim)
+
+    // Claude Generated (Mar 2026, Phase 1b): dc6dcn stored here, shared to threads via const pointer.
+    Matrix m_dc6dcn;                // dc6dcn(i,j) = dC6(i,j)/dCN(i)
 
     // Claude Generated (Feb 23, 2026): Per-atom Coulomb self-energy parameters
     // Extracted once from pairs at load time. Used for sequential TERM 2+3

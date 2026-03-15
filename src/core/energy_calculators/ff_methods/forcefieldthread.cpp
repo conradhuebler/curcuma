@@ -1960,11 +1960,11 @@ void ForceFieldThread::CalculateGFNFFDispersionContribution()
             // dEdcn(iat) -= dc6dcn(iat,jat) * disp_value
             // dEdcn(jat) -= dc6dcn(jat,iat) * disp_value
             // where disp_value = (t6 + 2*r4r2ij*t8) * zetac6 (the dispersion "strength")
-            if (m_dc6dcn.size() > 0 &&
-                disp.i < m_dc6dcn.rows() && disp.j < m_dc6dcn.cols()) {
+            if (m_dc6dcn_ptr && m_dc6dcn_ptr->size() > 0 &&
+                disp.i < m_dc6dcn_ptr->rows() && disp.j < m_dc6dcn_ptr->cols()) {
                 double disp_value = disp_sum * disp.zetac6 * m_final_factor;
-                m_dEdcn(disp.i) -= m_dc6dcn(disp.i, disp.j) * disp_value;
-                m_dEdcn(disp.j) -= m_dc6dcn(disp.j, disp.i) * disp_value;
+                m_dEdcn(disp.i) -= (*m_dc6dcn_ptr)(disp.i, disp.j) * disp_value;
+                m_dEdcn(disp.j) -= (*m_dc6dcn_ptr)(disp.j, disp.i) * disp_value;
             }
         }
     }
@@ -3316,11 +3316,11 @@ void ForceFieldThread::CalculateD4DispersionContribution()
             // Reference: Fortran gfnff_gdisp0.f90:382-395
             // CRITICAL FIX: Was missing in D4 path, causing dispersion gradient errors
             // (D3 path in CalculateGFNFFDispersionContribution already had this)
-            if (m_dc6dcn.size() > 0 &&
-                disp.i < m_dc6dcn.rows() && disp.j < m_dc6dcn.cols()) {
+            if (m_dc6dcn_ptr && m_dc6dcn_ptr->size() > 0 &&
+                disp.i < m_dc6dcn_ptr->rows() && disp.j < m_dc6dcn_ptr->cols()) {
                 double disp_value = disp_sum * disp.zetac6 * m_final_factor;
-                m_dEdcn(disp.i) -= m_dc6dcn(disp.i, disp.j) * disp_value;
-                m_dEdcn(disp.j) -= m_dc6dcn(disp.j, disp.i) * disp_value;
+                m_dEdcn(disp.i) -= (*m_dc6dcn_ptr)(disp.i, disp.j) * disp_value;
+                m_dEdcn(disp.j) -= (*m_dc6dcn_ptr)(disp.j, disp.i) * disp_value;
             }
         }
     }

@@ -211,25 +211,8 @@ public:
         m_d3_cn = d3_cn;
     }
 
-    // Claude Generated (Feb 1, 2026): Set CN and CNF for Coulomb charge derivative gradients
-    // Reference: Fortran gfnff_engrad.F90:418-422 - qtmp(i) = q(i)*cnf(i)/(2*sqrt(cn(i)))
-    void setCN(const Vector& cn)
-    {
-        m_cn = cn;
-    }
-
-    void setCNF(const Vector& cnf)
-    {
-        m_cnf = cnf;
-    }
-
-    // Claude Generated (Feb 1, 2026): Set CN derivatives for Coulomb charge derivative gradients
-    // dcn[dim](i,j) = dCN(j)/dr(i,dim) - how atom i's position affects atom j's CN
-    // Reference: Fortran gfnff_engrad.F90:422 - call gemv(dcn,qtmp,g,alpha=-1.0,beta=1.0)
-    void setCNDerivatives(const std::vector<Matrix>& dcn)
-    {
-        m_dcn = dcn;
-    }
+    // Claude Generated (Mar 2026, Phase 1a): setCN/setCNF/setCNDerivatives removed.
+    // CN, CNF, dcn are stored only in ForceField (never read in threads).
 
     // Claude Generated (Feb 21, 2026): Bond-HB mapping for dncoord_erf calculation
     // Reference: Fortran gfnff_engrad.F90:1069-1120
@@ -271,9 +254,9 @@ public:
     // Separates bond dr0/dCN from dispersion dC6/dCN so CN corrections go to the right component
     const Vector& getDEdcnBond() const { return m_dEdcn_bond; }
 
-    // Claude Generated (Feb 15, 2026): Set dc6dcn matrix for dispersion CN gradient
-    // Reference: Fortran gfnff_gdisp0.f90:262-305 - dc6dcn(i,j) = dC6(i,j)/dCN(i)
-    void setDispersionDC6DCN(const Matrix& dc6dcn) { m_dc6dcn = dc6dcn; }
+    // Claude Generated (Mar 2026, Phase 1b): Set dc6dcn as shared read-only pointer
+    // Avoids N×N matrix copy per thread. Pointer to ForceField-owned matrix.
+    void setDispersionDC6DCN(const Matrix* dc6dcn_ptr) { m_dc6dcn_ptr = dc6dcn_ptr; }
 
     inline void UpdateGeometry(const Matrix& geometry, bool gradient)
     {
@@ -516,11 +499,9 @@ protected:
     // These are recalculated from current geometry at each Calculate() call
     Vector m_d3_cn;
 
-    // Claude Generated (Feb 1, 2026): CN, CNF, and CN derivatives for Coulomb charge derivative gradients
-    // Reference: Fortran gfnff_engrad.F90:418-422 - charge derivative via CN
-    Vector m_cn;                              // Coordination numbers per atom
-    Vector m_cnf;                             // CNF parameters per atom (cnf_eeq from gfnff_par.h)
-    std::vector<Matrix> m_dcn;                // CN derivatives: dcn[dim](i,j) = dCN(j)/dr(i,dim)
+    // Claude Generated (Mar 2026, Phase 1a): CN/CNF/dcn removed from threads — never read here.
+    // They are stored only in ForceField (used after thread completion for chain-rule gradients).
+    // This saves 3×N×N×8 bytes × T threads of unnecessary copies (96 MB at 1000 atoms, 4 threads).
 
     // Claude Generated (Feb 15, 2026): dE/dCN accumulator for bond dr0/dCN and dispersion dC6/dCN
     // After thread completion, this is summed across threads and dcn chain rule applied
@@ -529,9 +510,9 @@ protected:
     // Claude Generated (Mar 2026): Bond-only dE/dCN for per-component gradient attribution
     Vector m_dEdcn_bond;
 
-    // Claude Generated (Feb 15, 2026): dc6dcn matrix for dispersion CN gradient
-    // dc6dcn(i,j) = dC6(i,j)/dCN(i) - set from D4ParameterGenerator
-    Matrix m_dc6dcn;
+    // Claude Generated (Mar 2026, Phase 1b): dc6dcn as const pointer — read-only shared data.
+    // Avoids N×N matrix copy per thread. Owned by ForceField, threads only read.
+    const Matrix* m_dc6dcn_ptr = nullptr;
 
     // Claude Generated (February 2026): Individual energy term timing
     std::unordered_map<std::string, long long> m_term_timings;  // milliseconds

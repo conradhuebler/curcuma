@@ -11,6 +11,10 @@
 #include <cmath>
 #include <algorithm>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 // Covalent radii from Pyykkö & Atsumi (Chem. Eur. J. 15, 2009, 188-197) in Angstrom
 // Reference: gfnff_param.f90:381-405 (covalentRadD3 base values before *aatoau*4/3 scaling)
 // Used for D3 CN calculation (with 4/3 scaling applied in calculateGFNFFCN)
@@ -107,65 +111,44 @@ std::vector<double> CNCalculator::calculateGFNFFCN(
 
     const double ANG2BOHR = 1.8897259886;  // 1 Angstrom = 1.8897259886 Bohr
 
-    std::vector<double> cn_values(atoms.size(), 0.0);
+    const int natoms = static_cast<int>(atoms.size());
+    std::vector<double> cn_values(natoms, 0.0);
 
-    for (size_t i = 0; i < atoms.size(); ++i) {
-        int elem_i = atoms[i] - 1;  // Convert to 0-based
+    // GFN-FF CN scaling factor (Reference: gfnff_param.f90:381-404)
+    const double k_scaled = 4.0 / 3.0;
 
-        if (elem_i < 0 || elem_i >= static_cast<int>(COVALENT_RADII.size())) {
-            if (CurcumaLogger::get_verbosity() >= 2) {
-                CurcumaLogger::warn("calculateGFNFFCN: Element " + std::to_string(atoms[i]) +
-                                   " out of range, using CN=0");
-            }
-            continue;
+    // Pre-compute scaled covalent radii in Bohr (avoids repeated lookup in inner loop)
+    std::vector<double> rcov_bohr(natoms, 0.0);
+    for (int i = 0; i < natoms; ++i) {
+        int elem = atoms[i] - 1;
+        if (elem >= 0 && elem < static_cast<int>(COVALENT_RADII.size())) {
+            rcov_bohr[i] = k_scaled * COVALENT_RADII[elem] * ANG2BOHR;
         }
+    }
 
-        double rcov_i_ang = COVALENT_RADII[elem_i];
-        double rcov_i_bohr = rcov_i_ang * ANG2BOHR;
+    // Claude Generated (Mar 2026, Phase 4): Parallelized outer loop — each atom independent
+    #pragma omp parallel for schedule(dynamic, 32)
+    for (int i = 0; i < natoms; ++i) {
+        if (rcov_bohr[i] == 0.0) continue;  // Skip unknown elements
+
         double cn_raw = 0.0;
+        Eigen::Vector3d pos_i = geometry_bohr.row(i);
 
-        // GFN-FF CN scaling factor (Reference: gfnff_param.f90:381-404)
-        // Usually 4/3 * standard covalent radius
-        const double k_scaled = 4.0 / 3.0;
-
-        for (size_t j = 0; j < atoms.size(); ++j) {
+        for (int j = 0; j < natoms; ++j) {
             if (i == j) continue;
+            if (rcov_bohr[j] == 0.0) continue;
 
-            int elem_j = atoms[j] - 1;
-            if (elem_j < 0 || elem_j >= static_cast<int>(COVALENT_RADII.size())) {
-                continue;
-            }
-
-            double rcov_j_ang = COVALENT_RADII[elem_j];
-            double rcov_j_bohr = rcov_j_ang * ANG2BOHR;
-            double rcov_ij = k_scaled * (rcov_i_bohr + rcov_j_bohr);
-
-            // Calculate distance in Bohr (geometry is in Bohr)
-            Eigen::Vector3d pos_i = geometry_bohr.row(i);
-            Eigen::Vector3d pos_j = geometry_bohr.row(j);
-            double distance_sq = (pos_i - pos_j).squaredNorm();
-
+            double distance_sq = (pos_i - geometry_bohr.row(j).transpose()).squaredNorm();
             if (distance_sq > threshold) continue;
 
             double distance = std::sqrt(distance_sq);
-
-            // GFN-FF error function coordination number
-            // dr = (r - rcov) / rcov
+            double rcov_ij = rcov_bohr[i] + rcov_bohr[j];
             double dr = (distance - rcov_ij) / rcov_ij;
-            double erfCN = 0.5 * (1.0 + std::erf(kn * dr));
-
-            cn_raw += erfCN;
+            cn_raw += 0.5 * (1.0 + std::erf(kn * dr));
         }
 
-        // Apply logarithmic transformation for numerical stability
-        // CN_final = log(1 + e^cnmax) - log(1 + e^(cnmax - CN_raw))
-        // This keeps CN in range [0, cnmax]
+        // Log transformation for numerical stability: CN in [0, cnmax]
         cn_values[i] = std::log(1.0 + std::exp(cnmax)) - std::log(1.0 + std::exp(cnmax - cn_raw));
-
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("GFNFF_CN[" + std::to_string(i) + "] (Z=" + std::to_string(atoms[i]) +
-                               "): raw=" + std::to_string(cn_raw) + " final=" + std::to_string(cn_values[i]));
-        }
     }
 
     return cn_values;

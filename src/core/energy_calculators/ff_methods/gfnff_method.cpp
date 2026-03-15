@@ -588,9 +588,25 @@ double GFNFF::Calculation(bool gradient)
     //   1. CN derivatives for gradient (Term 1b: dE/dq * dq/dCN * dCN/dx)
     //   2. Phase-2 EEQ charges (CNF term in RHS of linear system)
     // Phase-1 charges (topo%qa) remain fixed (topology-dependent only).
+
+    // Claude Generated (Mar 2026, Phase 2): Timing infrastructure for sequential sections
+    const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);
+    double t_cn = 0, t_dcn = 0, t_dc6dcn = 0, t_eeq = 0, t_threads = 0;
+
     if (m_forcefield) {
+        auto t0 = std::chrono::high_resolution_clock::now();
+
         auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
         Vector cn = Vector::Map(cn_vec.data(), cn_vec.size()).eval();
+
+        if (do_timing) {
+            auto t1 = std::chrono::high_resolution_clock::now();
+            t_cn = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        }
+
+        // Claude Generated (Mar 2026): Phase 0 — distribute D3 CN once here,
+        // eliminating the duplicate calculation that was in ForceField::Calculate().
+        m_forcefield->distributeD3CN(cn);
 
         // CN distribution to threads:
         // - gradient=true:  full distribution with dcn derivatives (TERM 1b + bond dEdcn chain-rule)
@@ -604,14 +620,24 @@ double GFNFF::Calculation(bool gradient)
                             ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
             }
 
-            std::vector<Matrix> dcn = calculateCoordinationNumberDerivatives(cn);
+            auto t_dcn_start = std::chrono::high_resolution_clock::now();
+            std::vector<SpMatrix> dcn = calculateCoordinationNumberDerivatives(cn);
             m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
+            if (do_timing) {
+                t_dcn = std::chrono::duration<double, std::milli>(
+                    std::chrono::high_resolution_clock::now() - t_dcn_start).count();
+            }
 
             // Compute and distribute dc6dcn for dispersion CN gradient
             // Reference: Fortran gfnff_gdisp0.f90:382-395
             if (m_d4_generator) {
+                auto t_dc6_start = std::chrono::high_resolution_clock::now();
                 m_d4_generator->updateCNValuesForGradient(cn_vec);
                 m_forcefield->setDispersionDC6DCN(m_d4_generator->getDC6DCN());
+                if (do_timing) {
+                    t_dc6dcn = std::chrono::duration<double, std::milli>(
+                        std::chrono::high_resolution_clock::now() - t_dc6_start).count();
+                }
             }
 
             if (CurcumaLogger::get_verbosity() >= 3) {
@@ -628,6 +654,7 @@ double GFNFF::Calculation(bool gradient)
         // Phase-2 EEQ charge recalculation
         // Without this, Coulomb energy uses stale charges during MD/optimization,
         // leading to incorrect forces and unphysical dynamics.
+        auto t_eeq_start = std::chrono::high_resolution_clock::now();
         if (m_eeq_solver && !m_skip_eeq_recalc) {
             const TopologyInfo& topo = getCachedTopology();
 
@@ -676,6 +703,10 @@ double GFNFF::Calculation(bool gradient)
         }
         if (m_skip_eeq_recalc && CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info("Phase-2 EEQ recalculation SKIPPED (charge injection mode)");
+        }
+        if (do_timing) {
+            t_eeq = std::chrono::duration<double, std::milli>(
+                std::chrono::high_resolution_clock::now() - t_eeq_start).count();
         }
     }
 
@@ -729,7 +760,12 @@ double GFNFF::Calculation(bool gradient)
     }
 
     // ForceField returns energy in Hartree (m_final_factor = 1)
+    auto t_ff_start = std::chrono::high_resolution_clock::now();
     double energy_hartree = m_forcefield->Calculate(gradient);
+    if (do_timing) {
+        t_threads = std::chrono::duration<double, std::milli>(
+            std::chrono::high_resolution_clock::now() - t_ff_start).count();
+    }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::param("energy_hartree_raw", fmt::format("{:.8f}", energy_hartree));
@@ -872,6 +908,17 @@ double GFNFF::Calculation(bool gradient)
 
     if (CurcumaLogger::get_verbosity() >= 1) {
         CurcumaLogger::result_fmt("GFN-FF total calculation time: {} ms", calc_duration.count());
+    }
+
+    // Claude Generated (Mar 2026, Phase 2): Sequential section timing breakdown
+    if (do_timing) {
+        double t_total = std::chrono::duration<double, std::milli>(calc_end - calc_start).count();
+        double t_seq = t_cn + t_dcn + t_dc6dcn + t_eeq;
+        CurcumaLogger::info(fmt::format(
+            "GFN-FF Timing: CN={:.1f}ms EEQ={:.1f}ms dCN={:.1f}ms dC6dCN={:.1f}ms "
+            "Threads={:.1f}ms Total={:.1f}ms SeqFrac={:.0f}%",
+            t_cn, t_eeq, t_dcn, t_dc6dcn, t_threads, t_total,
+            t_total > 0 ? 100.0 * t_seq / t_total : 0.0));
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -1493,7 +1540,7 @@ bool GFNFF::initializeForceField()
                 cnf(i) = (z >= 1 && z <= static_cast<int>(GFNFFParameters::cnf_eeq.size()))
                             ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
             }
-            std::vector<Matrix> dcn = calculateCoordinationNumberDerivatives(cn);
+            std::vector<SpMatrix> dcn = calculateCoordinationNumberDerivatives(cn);
             m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
         }
 
@@ -1574,7 +1621,7 @@ bool GFNFF::initializeForceField()
         }
 
         // Calculate CN derivatives for gradient calculation
-        std::vector<Matrix> dcn = calculateCoordinationNumberDerivatives(cn);
+        std::vector<SpMatrix> dcn = calculateCoordinationNumberDerivatives(cn);
 
         // Distribute to ForceField threads
         m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
@@ -4256,123 +4303,157 @@ bool GFNFF::loadGFNFFCharges()
 // Advanced GFN-FF Parameter Generation (Placeholder implementations)
 // =================================================================================
 
-std::vector<Matrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, double threshold) const
+std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, double threshold) const
 {
+    // Claude Generated (Mar 2026, Phase 3): Sparse dcn matrices
     // GFN-FF Coordination Number Derivatives using D3-style Error Function
     // Reference: external/gfnff/src/gfnff_cn.f90:94-117
     //
-    // Mathematical formulation (two-step chain rule):
-    // 1. Raw CN: cn_raw_i = Σ_j erfCN(r_ij) where erfCN = 0.5 * (1 + erf(kn * dr))
-    // 2. Log CN: logCN_i = log(1 + e^cnmax) - log(1 + e^(cnmax - cn_raw))
-    //
-    // Derivatives:
-    // ∂logCN_i/∂r_ij = (∂logCN/∂cn_raw) * (∂erfCN/∂r_ij)
-    //
-    // where:
-    // - ∂logCN/∂cn_raw = e^cnmax / (e^cnmax + e^cn_raw)  [create_dlogCN]
-    // - ∂erfCN/∂r = (kn / sqrt(π)) * exp(-kn² * dr²) / r0  [create_derfCN]
-    //
-    // NOTE: The input 'cn' vector already contains logCN values from calculateCoordinationNumbers()
-    // We need to invert the log transformation to get raw CN for the derivative calculation.
+    // Sparse format: only atom pairs within CN cutoff have non-zero entries (~2% fill at 1000 atoms).
+    // Saves O(N²) → O(N·k) memory and speeds up chain-rule MatVec.
 
-    // D3 coordination number parameters (matching calculateCoordinationNumbers)
-    const double kn = -7.5;         // Error function steepness parameter
-    const double cnmax = 4.4;       // Maximum coordination number cutoff
-    const double sqrtpi = 1.77245385091;  // sqrt(π) for derivative formula
+    const double kn = -7.5;
+    const double cnmax = 4.4;
+    const double sqrtpi = 1.77245385091;
     const double ANG2BOHR = 1.8897259886;
-    const double k_scaled = 4.0 / 3.0;   // Pyykkö radius scaling (gfnff_param.f90:405)
+    const double k_scaled = 4.0 / 3.0;
 
-    // Initialize 3D tensor as vector of matrices
-    // dcn[0] = ∂logCN/∂x, dcn[1] = ∂logCN/∂y, dcn[2] = ∂logCN/∂z
-    std::vector<Matrix> dcn(3, Matrix::Zero(m_atomcount, m_atomcount));
-
-    // Pre-compute covalent radii in Bohr with 4/3 scaling (same as CN energy function)
-    // CRITICAL FIX (Feb 16, 2026): Must use covalentRadD3*4/3 (Pyykkö radii), NOT r0_gfnff (bond radii)!
-    // r0_gfnff are bond base radii from gfnff_rab.f90, completely different from CN covalent radii.
-    // For H: r0_gfnff=0.557 Bohr vs covalentRadD3=0.806 Bohr (31% error was corrupting all dCN/dx)
-    // Reference: Fortran gfnff_cn.f90:85 uses param%rcov which is covalentRadD3(1:86)
+    // Pre-compute covalent radii in Bohr with 4/3 scaling
+    // Reference: Fortran gfnff_cn.f90:85 uses param%rcov = covalentRadD3(1:86)
     std::vector<double> rcov_bohr(m_atomcount);
     for (int i = 0; i < m_atomcount; ++i) {
         rcov_bohr[i] = k_scaled * CNCalculator::getCovalentRadius(m_atoms[i]) * ANG2BOHR;
     }
 
-    // Step 1: Compute raw CN (recalculate from geometry, same formula as calculateGFNFFCN)
+    // Step 1: Compute raw CN (same formula as calculateGFNFFCN)
+    // Claude Generated (Mar 2026, Phase 4b): Parallelized — each atom independent
     Vector cn_raw = Vector::Zero(m_atomcount);
+    #pragma omp parallel for schedule(dynamic, 32)
     for (int i = 0; i < m_atomcount; ++i) {
         double cn_i = 0.0;
+        Eigen::Vector3d pos_i = m_geometry_bohr.row(i);
         for (int j = 0; j < m_atomcount; ++j) {
             if (i == j) continue;
-
-            Vector ri = m_geometry_bohr.row(i);
-            Vector rj = m_geometry_bohr.row(j);
-            double distance_sq = (ri - rj).squaredNorm();
-
+            double distance_sq = (pos_i - m_geometry_bohr.row(j).transpose()).squaredNorm();
             if (distance_sq > threshold) continue;
-
             double distance = std::sqrt(distance_sq);
-
             double r_cov = rcov_bohr[i] + rcov_bohr[j];
-
             double dr = (distance - r_cov) / r_cov;
-            double erfCN = 0.5 * (1.0 + std::erf(kn * dr));
-            cn_i += erfCN;
+            cn_i += 0.5 * (1.0 + std::erf(kn * dr));
         }
         cn_raw[i] = cn_i;
     }
 
-    // Step 2: Calculate dlogCN/dcn for each atom (Fortran create_dlogCN)
+    // Step 2: dlogCN/dcn for each atom (Fortran create_dlogCN)
     Vector dlogdcn = Vector::Zero(m_atomcount);
     for (int i = 0; i < m_atomcount; ++i) {
         dlogdcn[i] = std::exp(cnmax) / (std::exp(cnmax) + std::exp(cn_raw[i]));
     }
 
-    // Step 3: Calculate derivatives for all atom pairs
-    for (int i = 0; i < m_atomcount; ++i) {
-        Vector ri = m_geometry_bohr.row(i);
-        double dlogdcn_i = dlogdcn[i];
+    // Step 3: Build sparse dcn via triplet lists
+    // Claude Generated (Mar 2026, Phase 4b): Parallelized with thread-local triplets
+    // Partitioned by outer index i — each thread handles unique i values, no race on diag[i]
+    // but diag[j] with j < i is shared → use atomic accumulation via reduction array
 
-        for (int j = 0; j < i; ++j) {  // Only j < i to avoid double counting
-            Vector rj = m_geometry_bohr.row(j);
+    // Accumulate diagonal terms (many pairs contribute to same diagonal)
+    // Using flat arrays for thread-safe accumulation
+    std::vector<double> diag_x(m_atomcount, 0.0);
+    std::vector<double> diag_y(m_atomcount, 0.0);
+    std::vector<double> diag_z(m_atomcount, 0.0);
 
-            // Distance and direction
-            Vector r_ij_vec = rj - ri;
-            double r_ij_sq = r_ij_vec.squaredNorm();
+    // Thread-local triplet storage to avoid contention
+    int nthreads = 1;
+    #ifdef _OPENMP
+    nthreads = omp_get_max_threads();
+    #endif
+    std::vector<std::vector<std::vector<Eigen::Triplet<double>>>> thread_triplets(
+        nthreads, std::vector<std::vector<Eigen::Triplet<double>>>(3));
 
-            if (r_ij_sq > threshold) continue;
+    #pragma omp parallel
+    {
+        int tid = 0;
+        #ifdef _OPENMP
+        tid = omp_get_thread_num();
+        #endif
+        auto& local_trips = thread_triplets[tid];
+        const int est_per_thread = (m_atomcount * 40) / nthreads + 100;
+        for (int dim = 0; dim < 3; ++dim) {
+            local_trips[dim].reserve(est_per_thread);
+        }
 
-            double r_ij = std::sqrt(r_ij_sq);
+        #pragma omp for schedule(dynamic, 16)
+        for (int i = 0; i < m_atomcount; ++i) {
+            Eigen::Vector3d ri = m_geometry_bohr.row(i);
+            double dlogdcn_i = dlogdcn[i];
 
-            double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+            for (int j = 0; j < i; ++j) {
+                Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                double r_ij_sq = r_ij_vec.squaredNorm();
+                if (r_ij_sq > threshold) continue;
 
-            // Error function CN derivative (Fortran create_derfCN)
-            // derfCN/dr = (kn / sqrt(π)) * exp(-kn² * dr²) / r0
-            double dr = (r_ij - rcov_sum) / rcov_sum;
-            double derfCN_dr = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / rcov_sum;
+                double r_ij = std::sqrt(r_ij_sq);
+                double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                double dr = (r_ij - rcov_sum) / rcov_sum;
+                double derfCN_dr = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / rcov_sum;
 
-            // Unit vector from i to j
-            Vector grad_direction = r_ij_vec / r_ij;
+                Eigen::Vector3d grad_dir = r_ij_vec / r_ij;
+                double dlogdcn_j = dlogdcn[j];
 
-            // Chain rule: d(logCN)/dr = (dlogCN/dcn) * (derfCN/dr)
-            double dlogdcn_j = dlogdcn[j];
+                double comp_x = derfCN_dr * grad_dir[0];
+                double comp_y = derfCN_dr * grad_dir[1];
+                double comp_z = derfCN_dr * grad_dir[2];
 
-            // Apply derivatives (Fortran lines 110-115)
-            // Note: Both CN_i and CN_j are affected by r_ij
-            for (int dim = 0; dim < 3; ++dim) {
-                double rij_component = derfCN_dr * grad_direction[dim];
+                // Diagonal: diag[i] is only written by thread owning i (safe)
+                // diag[j] with j < i may be written by multiple threads → atomic
+                diag_x[i] -= dlogdcn_i * comp_x;
+                diag_y[i] -= dlogdcn_i * comp_y;
+                diag_z[i] -= dlogdcn_i * comp_z;
 
-                // ∂logCN_j/∂r_j and ∂logCN_i/∂r_i (diagonal terms)
-                dcn[dim](j, j) += dlogdcn_j * rij_component;
-                dcn[dim](i, i) -= dlogdcn_i * rij_component;
+                #pragma omp atomic
+                diag_x[j] += dlogdcn_j * comp_x;
+                #pragma omp atomic
+                diag_y[j] += dlogdcn_j * comp_y;
+                #pragma omp atomic
+                diag_z[j] += dlogdcn_j * comp_z;
 
-                // Off-diagonal terms: dcn(row,col) = ∂CN_col/∂x_row
-                // CRITICAL FIX (Feb 16, 2026): Off-diagonals were SWAPPED!
-                // Fortran gfnff_cn.f90:113-114:
-                //   dlogCN(:,i,j) = -dlogdcnj*rij  → dcn(i,j) = ∂CN_j/∂x_i
-                //   dlogCN(:,j,i) =  dlogdcni*rij  → dcn(j,i) = ∂CN_i/∂x_j
-                dcn[dim](i, j) = -dlogdcn_j * rij_component;  // ∂CN_j/∂x_i
-                dcn[dim](j, i) = dlogdcn_i * rij_component;   // ∂CN_i/∂x_j
+                // Off-diagonal triplets (thread-local, no contention)
+                local_trips[0].emplace_back(i, j, -dlogdcn_j * comp_x);
+                local_trips[0].emplace_back(j, i,  dlogdcn_i * comp_x);
+                local_trips[1].emplace_back(i, j, -dlogdcn_j * comp_y);
+                local_trips[1].emplace_back(j, i,  dlogdcn_i * comp_y);
+                local_trips[2].emplace_back(i, j, -dlogdcn_j * comp_z);
+                local_trips[2].emplace_back(j, i,  dlogdcn_i * comp_z);
             }
         }
+    }
+
+    // Merge thread-local triplets
+    std::vector<std::vector<Eigen::Triplet<double>>> triplets(3);
+    for (int dim = 0; dim < 3; ++dim) {
+        size_t total = 0;
+        for (int t = 0; t < nthreads; ++t) total += thread_triplets[t][dim].size();
+        total += m_atomcount;  // diagonal entries
+        triplets[dim].reserve(total);
+        for (int t = 0; t < nthreads; ++t) {
+            auto& src = thread_triplets[t][dim];
+            triplets[dim].insert(triplets[dim].end(), std::make_move_iterator(src.begin()),
+                                                      std::make_move_iterator(src.end()));
+        }
+    }
+
+    // Add diagonal entries
+    for (int i = 0; i < m_atomcount; ++i) {
+        if (diag_x[i] != 0.0) triplets[0].emplace_back(i, i, diag_x[i]);
+        if (diag_y[i] != 0.0) triplets[1].emplace_back(i, i, diag_y[i]);
+        if (diag_z[i] != 0.0) triplets[2].emplace_back(i, i, diag_z[i]);
+    }
+
+    // Build sparse matrices
+    std::vector<SpMatrix> dcn(3);
+    for (int dim = 0; dim < 3; ++dim) {
+        dcn[dim].resize(m_atomcount, m_atomcount);
+        dcn[dim].setFromTriplets(triplets[dim].begin(), triplets[dim].end());
+        dcn[dim].makeCompressed();
     }
 
     return dcn;

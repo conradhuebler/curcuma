@@ -144,41 +144,32 @@ void ForceField::distributeD3CN(const Vector& d3_cn)
     }
 }
 
-// Claude Generated (Feb 1, 2026): Distribute CN, CNF, and CN derivatives for Coulomb gradients
-// Reference: Fortran gfnff_engrad.F90:418-422 - charge derivative via CN
+// Claude Generated (Mar 2026, Phase 1a): Store CN, CNF, dcn in ForceField only.
+// These are NOT distributed to threads (threads never read them).
+// Used after thread completion for chain-rule gradients (TERM 1b, bond/disp dEdcn).
 void ForceField::distributeCNandDerivatives(const Vector& cn, const Vector& cnf,
-                                             const std::vector<Matrix>& dcn)
+                                             const std::vector<SpMatrix>& dcn)
 {
-    // Store for caching
     m_cn = cn;
     m_cnf = cnf;
     m_dcn = dcn;
-
-    // Distribute to all threads for Coulomb charge derivative gradients
-    for (int i = 0; i < m_stored_threads.size(); ++i) {
-        m_stored_threads[i]->setCN(cn);
-        m_stored_threads[i]->setCNF(cnf);
-        m_stored_threads[i]->setCNDerivatives(dcn);
-    }
 }
 
-// Claude Generated (Feb 22, 2026): Distribute only CN to threads for energy-only evaluations
-// This ensures bond dynamic r0 (depends on CN) uses current geometry CN, not stale gradient-time values.
-// Reference: CalculateGFNFFBondContribution uses m_cn for r0 = (r0_base + cnfak*cn_i + ...)
+// Claude Generated (Mar 2026, Phase 1a): Store CN in ForceField for TERM 2+3 self-energy.
+// Threads use m_d3_cn (from distributeD3CN) for bond dynamic r0, not m_cn.
 void ForceField::distributeCNOnly(const Vector& cn)
 {
     m_cn = cn;
-    for (int i = 0; i < static_cast<int>(m_stored_threads.size()); ++i) {
-        m_stored_threads[i]->setCN(cn);
-    }
 }
 
-// Claude Generated (Feb 15, 2026): Distribute dc6dcn matrix to all threads for dispersion CN gradient
-// Reference: Fortran gfnff_gdisp0.f90:382-395 - dEdcn accumulation from C6 derivatives
+// Claude Generated (Mar 2026, Phase 1b): Store dc6dcn in ForceField, share via const pointer.
+// Threads read dc6dcn for dispersion CN gradient but never write it.
+// Eliminates N×N matrix copy per thread.
 void ForceField::setDispersionDC6DCN(const Matrix& dc6dcn)
 {
+    m_dc6dcn = dc6dcn;
     for (int i = 0; i < static_cast<int>(m_stored_threads.size()); ++i) {
-        m_stored_threads[i]->setDispersionDC6DCN(dc6dcn);
+        m_stored_threads[i]->setDispersionDC6DCN(&m_dc6dcn);
     }
 }
 
@@ -2321,21 +2312,9 @@ double ForceField::Calculate(bool gradient)
         m_stored_threads[i]->UpdateGeometry(m_geometry, gradient);
     }
 
-    // Claude Generated (Jan 18, 2026): Recalculate GFN-FF CN for dynamic r0
-    // Reference: Fortran gfnff_engrad.F90:432 - CN recalculated at each energy evaluation
-    // This is CRITICAL for accurate bond energies - r0 depends on current CN
-    if (m_method == "gfnff") {
-        // Calculate GFN-FF CN from current geometry (Bohr)
-        // Note: GFN-FF uses specific coordination numbers for radii recalculation
-        std::vector<double> gfn_cn = CNCalculator::calculateGFNFFCN(m_atom_types, m_geometry);
-
-        // Convert to Eigen vector and distribute to threads
-        Vector cn_vector(gfn_cn.size());
-        for (size_t i = 0; i < gfn_cn.size(); ++i) {
-            cn_vector(i) = gfn_cn[i];
-        }
-        distributeD3CN(cn_vector); // We use the same distribution mechanism
-    }
+    // Claude Generated (Mar 2026): Duplicate CN calculation removed — Phase 0 optimization.
+    // CN is now calculated once in GFNFF::Calculation() and distributed via distributeD3CN().
+    // Previous code here recalculated CN identically (same geometry, same function) — pure waste.
 
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("DEBUG: All thread pointers are valid");
