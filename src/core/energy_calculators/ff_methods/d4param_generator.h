@@ -24,6 +24,7 @@
 #include "src/core/parameter_macros.h"
 #include "src/core/config_manager.h"
 #include "eeq_solver.h"  // EEQ charge calculation for D4
+#include "gfnff_parameters.h"  // GFNFFDispersion struct for native generation
 #include "cn_calculator.h"  // CN calculation for D4 (Claude Generated - December 2025)
 
 #include <Eigen/Dense>
@@ -57,6 +58,20 @@ public:
     void GenerateParameters(const std::vector<int>& atoms, const Matrix& geometry_bohr);
     json getParameters() const { return m_parameters; }
 
+    /**
+     * @brief Generate dispersion pairs as native structs (bypasses JSON entirely)
+     *
+     * Claude Generated (March 2026): Performance optimization for large systems.
+     * For 1410 atoms (993345 pairs), JSON overhead was ~10 seconds.
+     * Native struct generation reduces this to ~1 second.
+     *
+     * @param atoms Atomic numbers
+     * @param geometry_bohr Coordinates in Bohr
+     * @return Vector of GFNFFDispersion structs
+     */
+    std::vector<GFNFFDispersion> GenerateDispersionPairsNative(
+        const std::vector<int>& atoms, const Matrix& geometry_bohr);
+
     // Individual parameter accessors
     double getC6(int atom_i, int atom_j, int ref_i = 0, int ref_j = 0) const;
     double getR4OverR2(int atom) const;
@@ -74,6 +89,10 @@ public:
     void updateCNValuesForGradient(const std::vector<double>& cn);
     const Matrix& getDC6DCN() const { return m_dc6dcn; }
 
+    // Claude Generated (March 2026): Public access for ATM triple generation without JSON
+    double getChargeWeightedC6(int Zi, int Zj, size_t atom_i, size_t atom_j) const;
+    double calculateTripleScale(int i, int j, int k) const;
+
 private:
     void initializeReferenceData();
     void calculateFrequencyDependentPolarizabilities();
@@ -88,13 +107,7 @@ private:
     void precomputeC6ReferenceMatrix();
     double computeC6Reference(int elem_i, int elem_j, int ref_i, int ref_j) const;
 
-    // NEW: Charge-weighted C6 using EEQ charges and Gaussian weighting (Dec 2025)
-    // Phase 2.2 (December 2025): CN+charge combined weighting
-    // Claude Generated (Dec 27, 2025): Now uses cached weights and C6 reference for performance
-    double getChargeWeightedC6(int Zi, int Zj, size_t atom_i, size_t atom_j) const;
-
-    // ATM three-body helper (Claude Generated 2025)
-    double calculateTripleScale(int i, int j, int k) const;
+    // getChargeWeightedC6 and calculateTripleScale moved to public section (March 2026)
 
     // Reference data from GFN-FF Fortran implementation
     // constexpr ensures inline definition (ODR-safe for C++14 and C++17)

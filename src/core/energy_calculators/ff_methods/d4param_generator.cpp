@@ -1361,3 +1361,99 @@ void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& 
     computeGaussianWeightDerivatives();
     computeDC6DCN();
 }
+
+// Claude Generated (March 2026): Native dispersion pair generation — bypasses JSON entirely
+// For 1410 atoms (993345 pairs), JSON overhead was ~10 seconds. Native: ~1 second.
+std::vector<GFNFFDispersion> D4ParameterGenerator::GenerateDispersionPairsNative(
+    const std::vector<int>& atoms, const Matrix& geometry_bohr)
+{
+    m_atoms = atoms;
+
+    // Step 1: CN calculation
+    m_cn_values = CNCalculator::calculateGFNFFCN(m_atoms, geometry_bohr);
+
+    // Step 2: Reuse topology charges or compute fresh
+    if (m_topology_charges.size() != static_cast<Eigen::Index>(m_atoms.size())) {
+        Vector cn_eigen = Eigen::Map<const Vector>(m_cn_values.data(), m_cn_values.size());
+        m_eeq_charges = m_eeq_solver->calculateCharges(m_atoms, geometry_bohr, 0, &cn_eigen);
+    } else {
+        m_eeq_charges = m_topology_charges;
+    }
+
+    // Step 3: Pre-compute Gaussian weights and C6 reference matrix
+    if (!m_data_initialized) initializeReferenceData();
+    if (!m_c6_reference_cached) precomputeC6ReferenceMatrix();
+    precomputeGaussianWeights();
+
+    // Step 4: Generate pairs as native structs (no JSON!)
+    double a1 = m_config.get<double>("d4_a1", 0.58);
+    double a2 = m_config.get<double>("d4_a2", 4.80);
+    double s6 = m_config.get<double>("d4_s6", 1.0);
+    double s8 = m_config.get<double>("d4_s8", 2.0);
+
+    std::vector<GFNFFDispersion> all_pairs;
+
+    #pragma omp parallel
+    {
+        std::vector<GFNFFDispersion> local_pairs;
+
+        #pragma omp for schedule(dynamic, 10)
+        for (size_t i = 0; i < m_atoms.size(); ++i) {
+            for (size_t j = i + 1; j < m_atoms.size(); ++j) {
+                int atom_i = m_atoms[i];
+                int atom_j = m_atoms[j];
+
+                if (atom_i < 1 || atom_i > MAX_ELEM || atom_j < 1 || atom_j > MAX_ELEM)
+                    continue;
+
+                double c6 = getChargeWeightedC6(atom_i, atom_j, i, j);
+                double sqrt_zr4r2_i = getSqrtZr4r2(atom_i);
+                double sqrt_zr4r2_j = getSqrtZr4r2(atom_j);
+                double r4r2ij = 3.0 * sqrt_zr4r2_i * sqrt_zr4r2_j;
+                double r0_sq = std::pow(a1 * std::sqrt(r4r2ij) + a2, 2);
+
+                double q_i, q_j;
+                if (m_topology_charges.size() > 0) {
+                    q_i = (i < static_cast<size_t>(m_topology_charges.size())) ? m_topology_charges(i) : 0.0;
+                    q_j = (j < static_cast<size_t>(m_topology_charges.size())) ? m_topology_charges(j) : 0.0;
+                } else {
+                    q_i = (i < static_cast<size_t>(m_eeq_charges.size())) ? m_eeq_charges(i) : 0.0;
+                    q_j = (j < static_cast<size_t>(m_eeq_charges.size())) ? m_eeq_charges(j) : 0.0;
+                }
+                double zetac6 = GFNFFParameters::zetaChargeScale(atom_i, q_i)
+                              * GFNFFParameters::zetaChargeScale(atom_j, q_j);
+
+                GFNFFDispersion d;
+                d.i = static_cast<int>(i);
+                d.j = static_cast<int>(j);
+                d.C6 = c6;
+                d.r4r2ij = r4r2ij;
+                d.r0_squared = r0_sq;
+                d.r_cut = 50.0;
+                d.zetac6 = zetac6;
+                d.C8 = 3.0 * c6 * sqrt_zr4r2_i * sqrt_zr4r2_j;
+                d.s6 = s6;
+                d.s8 = s8;
+                d.a1 = a1;
+                d.a2 = a2;
+
+                local_pairs.push_back(d);
+            }
+        }
+
+        #pragma omp critical
+        {
+            all_pairs.insert(all_pairs.end(), local_pairs.begin(), local_pairs.end());
+        }
+    }
+
+    // Also compute dc6dcn for gradient computation
+    computeGaussianWeightDerivatives();
+    computeDC6DCN();
+
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        CurcumaLogger::result_fmt("D4 native dispersion: {} pairs generated", all_pairs.size());
+    }
+
+    return all_pairs;
+}

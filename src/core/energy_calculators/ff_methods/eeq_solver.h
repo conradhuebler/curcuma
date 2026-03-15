@@ -568,6 +568,25 @@ private:
         const TopologyInput& topology
     ) const;
 
+    /**
+     * @brief Compute topological distances via multi-source Dijkstra (O(N·E·logN))
+     *
+     * Performance replacement for Floyd-Warshall (O(N³)). Uses per-atom Dijkstra
+     * on the sparse bond graph with early termination at TDIST_THR cutoff.
+     * OpenMP-parallelized over source atoms. Uses float32 arithmetic to match
+     * Fortran real(sp) rounding behavior.
+     *
+     * Claude Generated - March 2026 (Performance optimization)
+     *
+     * @param atoms Atomic numbers
+     * @param topology Topology information (neighbor lists, covalent radii)
+     * @return Matrix of topological distances in Bohr (identical to Floyd-Warshall output)
+     */
+    Matrix computeTopologicalDistancesSparse(
+        const std::vector<int>& atoms,
+        const TopologyInput& topology
+    ) const;
+
     // ===== Configuration =====
 
     ConfigManager m_config;           ///< Configuration manager

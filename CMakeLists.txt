@@ -664,6 +664,19 @@ endif()
 target_link_libraries(curcuma_core pthread fmt::fmt-header-only )
 target_link_libraries(curcuma_cap pthread fmt::fmt-header-only )
 
+# Claude Generated (March 2026): Link BLAS/LAPACK for curcuma_core
+# Per-file EIGEN_USE_BLAS defined in eeq_solver.cpp to avoid Eigen 3.4 complex-type conflicts
+find_package(BLAS QUIET)
+find_package(LAPACK QUIET)
+if(BLAS_FOUND)
+    target_link_libraries(curcuma_core ${BLAS_LIBRARIES})
+    message(STATUS "BLAS linked for curcuma_core (Eigen BLAS in eeq_solver only)")
+endif()
+if(LAPACK_FOUND)
+    target_link_libraries(curcuma_core ${LAPACK_LIBRARIES})
+    message(STATUS "LAPACK linked for curcuma_core (Eigen LAPACK in eeq_solver only)")
+endif()
+
 if(USE_BLAS)
     target_link_libraries(curcuma_core blas)
 endif()

@@ -501,21 +501,25 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
             CurcumaLogger::info(fmt::format("Geometry rows: {}, cols: {}", m_geometry_bohr.rows(), m_geometry_bohr.cols()));
         }
 
+        // Claude Generated (March 2026): Pre-cache per-atom covalent radii and fat factors
+        std::vector<double> rcov(m_atomcount);
+        std::vector<double> fat_val(m_atomcount);
+        for (int i = 0; i < m_atomcount; ++i) {
+            rcov[i] = getCovalentRadius(m_atoms[i]);
+            fat_val[i] = fat[m_atoms[i]];
+        }
+
         for (int i = 0; i < m_atomcount; ++i) {
             for (int j = i + 1; j < m_atomcount; ++j) {
-                Vector ri = m_geometry_bohr.row(i);
-                Vector rj = m_geometry_bohr.row(j);
-                double distance = (ri - rj).norm();
-                double rcov_i = getCovalentRadius(m_atoms[i]);
-                double rcov_j = getCovalentRadius(m_atoms[j]);
+                double distance = (m_geometry_bohr.row(i) - m_geometry_bohr.row(j)).norm();
 
                 // Phase 3: Apply element-specific fat scaling factors (Claude Generated Jan 2026)
-                double threshold = bond_threshold * (rcov_i + rcov_j) * fat[m_atoms[i]] * fat[m_atoms[j]];
+                double threshold = bond_threshold * (rcov[i] + rcov[j]) * fat_val[i] * fat_val[j];
 
                 // Debug output for each pair - only at verbosity 3
                 if (CurcumaLogger::get_verbosity() >= 3) {
                     CurcumaLogger::info(fmt::format("Pair {}-{}: dist={:.3f}, rcov_i={:.3f}, rcov_j={:.3f}, fat_i={:.3f}, fat_j={:.3f}, threshold={:.3f}",
-                                          i, j, distance, rcov_i, rcov_j, fat[m_atoms[i]], fat[m_atoms[j]], threshold));
+                                          i, j, distance, rcov[i], rcov[j], fat_val[i], fat_val[j], threshold));
                 }
 
                 if (distance < threshold) {
@@ -6421,22 +6425,31 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
 
     // Phase 2.1: Build distance matrices FIRST (Claude Generated - Dec 2025)
     // All N×N distances computed once to eliminate redundant sqrt() calls
-    if (CurcumaLogger::get_verbosity() >= 3) {
+    if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::info("Phase 2.1: Computing distance matrices");
     }
+    auto phase_timer = std::chrono::high_resolution_clock::now();
     topo_info.distance_matrix = Eigen::MatrixXd::Zero(m_atomcount, m_atomcount);
     topo_info.squared_dist_matrix = Eigen::MatrixXd::Zero(m_atomcount, m_atomcount);
 
+    // Claude Generated (March 2026): OpenMP parallelization for O(N²) distance matrix
+    #pragma omp parallel for schedule(static)
     for (int i = 0; i < m_atomcount; ++i) {
         for (int j = i + 1; j < m_atomcount; ++j) {
-            Vector rij = m_geometry_bohr.row(i) - m_geometry_bohr.row(j);
+            Eigen::Vector3d rij = m_geometry_bohr.row(i) - m_geometry_bohr.row(j);
             double dist_sq = rij.squaredNorm();
             double dist = std::sqrt(dist_sq);
 
-            // Symmetric matrices
+            // Symmetric matrices — each (i,j) pair written by exactly one thread
             topo_info.distance_matrix(i, j) = topo_info.distance_matrix(j, i) = dist;
             topo_info.squared_dist_matrix(i, j) = topo_info.squared_dist_matrix(j, i) = dist_sq;
         }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
+        CurcumaLogger::result_fmt("  distance_matrix: {} ms", dt.count());
+        phase_timer = std::chrono::high_resolution_clock::now();
     }
 
     // Phase 2.2: Build adjacency list from cached bond list (Claude Generated - Dec 2025)
@@ -6485,6 +6498,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         neighbor_counts[i] = static_cast<double>(topo_info.adjacency_list[i].size());
     }
     topo_info.neighbor_counts = Eigen::Map<Vector>(neighbor_counts.data(), neighbor_counts.size());
+
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
+        CurcumaLogger::result_fmt("  cn+hyb+pi+rings+adjacency: {} ms", dt.count());
+        phase_timer = std::chrono::high_resolution_clock::now();
+    }
 
     // PERFORMANCE OPTIMIZATION (Claude Generated - January 17, 2026)
     // Pre-cache EEQ parameters per atom to avoid repeated lookups in O(N²) loops
@@ -6559,10 +6578,13 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         }
 
         // ===== PHASE 1: Topology Charges (topo%qa) =====
-        // Compute topology charges using Floyd-Warshall topological distances
+        // Compute topology charges using Dijkstra topological distances
         // Reference: Fortran gfnff_ini.f90:589 call goedeckera()
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("Computing Phase 1: Topology charges (topo%qa)");
+        }
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            phase_timer = std::chrono::high_resolution_clock::now();
         }
 
         // CRITICAL FIX (Phase 1 Charge Synchronization - January 26, 2026):
@@ -6580,6 +6602,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         if (topo_info.topology_charges.size() != m_atomcount) {
             CurcumaLogger::error("calculateTopologyInfo: Phase 1 topology charge calculation failed");
             throw std::runtime_error("GFN-FF initialization failed: Phase 1 topology charge calculation failed.");
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
+            CurcumaLogger::result_fmt("  eeq_phase1 (topology charges): {} ms", dt.count());
+            phase_timer = std::chrono::high_resolution_clock::now();
         }
 
         // ===== PHASE 1A: Calculate dxi corrections =====
@@ -6642,6 +6670,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
             if (amide_h_count > 0) {
                 std::cout << fmt::format("  Amide H atoms detected: {}", amide_h_count) << std::endl;
             }
+        }
+
+        if (CurcumaLogger::get_verbosity() >= 1) {
+            auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
+            CurcumaLogger::result_fmt("  eeq_phase1_corrections (dxi+alpeeq+dgam): {} ms", dt.count());
+            phase_timer = std::chrono::high_resolution_clock::now();
         }
 
         // ===== PHASE 2: Energy Charges (nlist%q) =====
@@ -6735,6 +6769,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
         topo_info.topology_charges = topo_info.eeq_charges;
     }
 
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
+        CurcumaLogger::result_fmt("  eeq_phase2 (energy charges): {} ms", dt.count());
+        phase_timer = std::chrono::high_resolution_clock::now();
+    }
+
     // Phase 2C: Calculate π-bond orders for angle parameter refinement
     // Claude Generated (January 14, 2026) - Updated: Now uses full Hückel by default
     // MOVED HERE: Requires EEQ charges for charge-dependent diagonal elements
@@ -6821,6 +6861,12 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
                                         n_single, n_pi, n_sp, n_hyper, n_metal, n_eta, n_tm));
     }
 
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
+        CurcumaLogger::result_fmt("  pi_bond_orders+bond_types: {} ms", dt.count());
+        phase_timer = std::chrono::high_resolution_clock::now();
+    }
+
     // Phase 9B: Calculate topological distances for 1,3/1,4 factors (Claude Generated - Dec 24, 2025)
     if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("Phase 9B: Calculating topological distances (BFS)");
@@ -6886,6 +6932,11 @@ GFNFF::TopologyInfo GFNFF::calculateTopologyInfo() const
     if (CurcumaLogger::get_verbosity() >= 2) {
         CurcumaLogger::success(fmt::format("Generated {} batm triples for {} atoms",
                                            topo_info.nbatm, m_atomcount));
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - phase_timer);
+        CurcumaLogger::result_fmt("  topo_distances+batm: {} ms", dt.count());
     }
 
     // Claude Generated (February 2026): Report topology calculation timing
@@ -7197,42 +7248,105 @@ json GFNFF::generateGFNFFRepulsionPairs() const
 
 std::tuple<std::vector<GFNFFDispersion>, std::vector<ATMTriple>, std::string> GFNFF::generateDispersionPairsNative() const
 {
-    // Claude Generated (March 2026): Native struct wrapper around generateGFNFFDispersionPairs
-    // D4/D3 generators internally still use JSON; conversion happens here at the boundary.
-    json dispersions_json = generateGFNFFDispersionPairs();
+    auto disp_start = std::chrono::high_resolution_clock::now();
 
-    std::string disp_method = "d3";
-    if (dispersions_json.size() > 0 && dispersions_json[0].contains("dispersion_method") &&
-        dispersions_json[0]["dispersion_method"] == "d4") {
-        disp_method = "d4";
-    }
+    // Determine method
+    std::string method_name = m_parameters.value("method", "gfnff");
+    bool use_d3 = (method_name.find("-d3") != std::string::npos);
+    std::string disp_method = use_d3 ? "d3" : "d4";
 
     std::vector<GFNFFDispersion> dispersions;
-    dispersions.reserve(dispersions_json.size());
-    for (const auto& dj : dispersions_json) {
-        GFNFFDispersion d;
-        d.i = dj["i"]; d.j = dj["j"];
-        d.C6 = dj["C6"]; d.r4r2ij = dj["r4r2ij"];
-        d.r0_squared = dj["r0_squared"];
-        d.r_cut = dj.value("r_cut", 50.0);
-        d.zetac6 = dj.value("zetac6", 1.0);
-        dispersions.push_back(d);
+    std::vector<ATMTriple> atm_triples;
+
+    if (!use_d3) {
+        // Claude Generated (March 2026): Native D4 path — bypasses JSON entirely
+        // For 1410 atoms: ~1s native vs ~10s via JSON
+        json d4_input = m_parameters.value("d4param", json::object());
+        d4_input["d4_a1"] = 0.58;
+        d4_input["d4_a2"] = 4.80;
+        d4_input["d4_s8"] = 2.00;
+        d4_input["d4_s6"] = 1.00;
+        d4_input["d4_s9"] = 1.00;
+
+        ConfigManager d4_config("d4param", d4_input);
+        m_d4_generator = std::make_unique<D4ParameterGenerator>(d4_config);
+
+        const TopologyInfo& topo_info = getCachedTopology();
+        if (topo_info.topology_charges.size() > 0) {
+            m_d4_generator->setTopologyCharges(topo_info.topology_charges);
+        }
+
+        dispersions = m_d4_generator->GenerateDispersionPairsNative(m_atoms, m_geometry_bohr);
+
+        // ATM triples: Generate natively from bonded topology (O(N·bonds), fast)
+        double s9 = 1.0, atm_a1 = 0.58, atm_a2 = 4.80, atm_alp = 14.0;
+        if (s9 > 1e-10) {
+            const TopologyInfo& ti = getCachedTopology();
+            // Build unique bonded triplets
+            std::set<std::tuple<int,int,int>> unique_triplets;
+            for (int i = 0; i < m_atomcount; ++i) {
+                for (int j : ti.adjacency_list[i]) {
+                    if (j <= i) continue;
+                    for (int k : ti.adjacency_list[i]) {
+                        if (k != j) {
+                            std::array<int,3> t = {i, j, k};
+                            std::sort(t.begin(), t.end());
+                            unique_triplets.insert({t[0], t[1], t[2]});
+                        }
+                    }
+                    for (int k : ti.adjacency_list[j]) {
+                        if (k != i) {
+                            std::array<int,3> t = {i, j, k};
+                            std::sort(t.begin(), t.end());
+                            unique_triplets.insert({t[0], t[1], t[2]});
+                        }
+                    }
+                }
+            }
+            for (const auto& [ti_a, ti_b, ti_c] : unique_triplets) {
+                ATMTriple t;
+                t.i = ti_a; t.j = ti_b; t.k = ti_c;
+                t.C6_ij = m_d4_generator->getChargeWeightedC6(m_atoms[ti_a], m_atoms[ti_b], ti_a, ti_b);
+                t.C6_ik = m_d4_generator->getChargeWeightedC6(m_atoms[ti_a], m_atoms[ti_c], ti_a, ti_c);
+                t.C6_jk = m_d4_generator->getChargeWeightedC6(m_atoms[ti_b], m_atoms[ti_c], ti_b, ti_c);
+                t.s9 = s9; t.a1 = atm_a1; t.a2 = atm_a2; t.alp = atm_alp;
+                t.atm_method = "d4";
+                t.triple_scale = m_d4_generator->calculateTripleScale(ti_a, ti_b, ti_c);
+                atm_triples.push_back(t);
+            }
+        }
+    } else {
+        // D3 fallback — still via JSON (rarely used, not optimized)
+        json dispersions_json = generateGFNFFDispersionPairs();
+        dispersions.reserve(dispersions_json.size());
+        for (const auto& dj : dispersions_json) {
+            GFNFFDispersion d;
+            d.i = dj["i"]; d.j = dj["j"];
+            d.C6 = dj["C6"]; d.r4r2ij = dj["r4r2ij"];
+            d.r0_squared = dj["r0_squared"];
+            d.r_cut = dj.value("r_cut", 50.0);
+            d.zetac6 = dj.value("zetac6", 1.0);
+            dispersions.push_back(d);
+        }
+
+        if (!m_atm_triples.is_null() && m_atm_triples.is_array()) {
+            for (const auto& tj : m_atm_triples) {
+                ATMTriple t;
+                t.i = tj["i"]; t.j = tj["j"]; t.k = tj["k"];
+                t.C6_ij = tj["C6_ij"]; t.C6_ik = tj["C6_ik"]; t.C6_jk = tj["C6_jk"];
+                t.s9 = tj.value("s9", 1.0); t.a1 = tj.value("a1", 0.0);
+                t.a2 = tj.value("a2", 0.0); t.alp = tj.value("alp", 14.0);
+                t.atm_method = tj.value("atm_method", "d3");
+                t.triple_scale = tj.value("triple_scale", 1.0);
+                atm_triples.push_back(t);
+            }
+        }
     }
 
-    // ATM triples (stored as member variable by dispersion generator)
-    std::vector<ATMTriple> atm_triples;
-    if (!m_atm_triples.is_null() && m_atm_triples.is_array()) {
-        atm_triples.reserve(m_atm_triples.size());
-        for (const auto& tj : m_atm_triples) {
-            ATMTriple t;
-            t.i = tj["i"]; t.j = tj["j"]; t.k = tj["k"];
-            t.C6_ij = tj["C6_ij"]; t.C6_ik = tj["C6_ik"]; t.C6_jk = tj["C6_jk"];
-            t.s9 = tj.value("s9", 1.0); t.a1 = tj.value("a1", 0.0);
-            t.a2 = tj.value("a2", 0.0); t.alp = tj.value("alp", 14.0);
-            t.atm_method = tj.value("atm_method", "d3");
-            t.triple_scale = tj.value("triple_scale", 1.0);
-            atm_triples.push_back(t);
-        }
+    if (CurcumaLogger::get_verbosity() >= 1) {
+        auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - disp_start);
+        CurcumaLogger::result_fmt("GFN-FF dispersion generation ({}, {} pairs): {} ms",
+                                  disp_method, dispersions.size(), dt.count());
     }
 
     return {std::move(dispersions), std::move(atm_triples), disp_method};
@@ -7351,7 +7465,7 @@ json GFNFF::generateGFNFFDispersionPairs() const
                 // Claude Generated (February 2026): Add D4 timing to match other generators
                 auto end_time = std::chrono::high_resolution_clock::now();
                 auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-                if (CurcumaLogger::get_verbosity() >= 2) {
+                if (CurcumaLogger::get_verbosity() >= 1) {
                     CurcumaLogger::result_fmt("GFN-FF D4 dispersion generation: {} ms", duration.count());
                 }
 
