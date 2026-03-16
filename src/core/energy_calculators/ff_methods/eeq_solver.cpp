@@ -2103,12 +2103,11 @@ Vector EEQSolver::calculateFinalCharges(
     //   Jan 2, 2026 "fix" used topological distances → 1.53e-02 RMS error (10× WORSE!)
     //   Jan 5, 2026: Reverted to geometric distances → expect 1.5e-3 RMS error
     //
-    // Claude Generated - January 5, 2026
-    Matrix distances = Matrix::Zero(natoms, natoms);
+    // Claude Generated (Mar 2026): Pre-allocated distance buffer — avoids 13 MB alloc per step (N=1280)
+    ensurePhase2Buffers(natoms, nfrag);
+    m_phase2_distances.setZero();
 
-    // Claude Generated (March 2026): OpenMP-parallelized distance computation
     bool atoms_too_close = false;
-    #pragma omp parallel for schedule(static) reduction(||:atoms_too_close)
     for (int i = 0; i < natoms; ++i) {
         for (int j = 0; j < i; ++j) {
             double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
@@ -2120,14 +2119,16 @@ Vector EEQSolver::calculateFinalCharges(
                 atoms_too_close = true;
             }
 
-            distances(i, j) = r;
-            distances(j, i) = r;
+            m_phase2_distances(i, j) = r;
+            m_phase2_distances(j, i) = r;
         }
     }
     if (atoms_too_close) {
         CurcumaLogger::error("EEQSolver::calculateFinalCharges: atoms too close");
         return Vector::Zero(0);
     }
+    // Const reference alias for readability — no copy
+    const Matrix& distances = m_phase2_distances;
 
     if (m_verbosity >= 3) {
         CurcumaLogger::info("EEQ Phase 2: Using geometric distances from xyz coordinates (matches Fortran goed_gfnff)");
@@ -2226,12 +2227,13 @@ Vector EEQSolver::calculateFinalCharges(
         }
 
         // ===== Build A Matrix with Current Alpha =====
-        // Claude Generated (March 2026): Merged distance+Coulomb loops with OpenMP
-        Matrix A = Matrix::Zero(m, m);
-        Vector x = Vector::Zero(m);
+        // Claude Generated (Mar 2026): Pre-allocated A buffer — avoids 13 MB alloc per step
+        m_phase2_A.setZero();
+        m_phase2_rhs.setZero();
+        Matrix& A = m_phase2_A;
+        Vector& x = m_phase2_rhs;
 
-        // 1+2. Build Coulomb matrix (off-diagonal + diagonal) in single OpenMP pass
-        #pragma omp parallel for schedule(static)
+        // 1+2. Build Coulomb matrix (off-diagonal + diagonal)
         for (int i = 0; i < natoms; ++i) {
             // Diagonal: hardness + self-Coulomb
             A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));

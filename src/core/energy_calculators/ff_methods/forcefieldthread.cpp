@@ -415,8 +415,8 @@ void ForceFieldThread::CalculateUFFBondContribution()
     for (int index = 0; index < m_uff_bonds.size(); ++index) {
         const auto& bond = m_uff_bonds[index];
 
-        Vector i = m_geometry.row(bond.i);
-        Vector j = m_geometry.row(bond.j);
+        Vector i = geom().row(bond.i);
+        Vector j = geom().row(bond.j);
         Matrix derivate;
         double rij = UFF::BondStretching(i, j, derivate, m_calculate_gradient);
 
@@ -433,9 +433,9 @@ void ForceFieldThread::CalculateUFFAngleContribution()
 {
     for (int index = 0; index < m_uff_angles.size(); ++index) {
         const auto& angle = m_uff_angles[index];
-        auto i = m_geometry.row(angle.i);
-        auto j = m_geometry.row(angle.j);
-        auto k = m_geometry.row(angle.k);
+        auto i = geom().row(angle.i);
+        auto j = geom().row(angle.j);
+        auto k = geom().row(angle.k);
         Matrix derivate;
         double costheta = UFF::AngleBending(i, j, k, derivate, m_calculate_gradient);
 
@@ -456,10 +456,10 @@ void ForceFieldThread::CalculateUFFDihedralContribution()
 {
     for (int index = 0; index < m_uff_dihedrals.size(); ++index) {
         const auto& dihedral = m_uff_dihedrals[index];
-        Eigen::Vector3d i = m_geometry.row(dihedral.i);
-        Eigen::Vector3d j = m_geometry.row(dihedral.j);
-        Eigen::Vector3d k = m_geometry.row(dihedral.k);
-        Eigen::Vector3d l = m_geometry.row(dihedral.l);
+        Eigen::Vector3d i = geom().row(dihedral.i);
+        Eigen::Vector3d j = geom().row(dihedral.j);
+        Eigen::Vector3d k = geom().row(dihedral.k);
+        Eigen::Vector3d l = geom().row(dihedral.l);
         Eigen::Vector3d nijk = UFF::NormalVector(i, j, k);
         Eigen::Vector3d njkl = UFF::NormalVector(j, k, l);
         double n_ijk = (nijk).norm();
@@ -516,10 +516,10 @@ void ForceFieldThread::CalculateUFFInversionContribution()
     for (int index = 0; index < m_uff_inversions.size(); ++index) {
         const auto& inversion = m_uff_inversions[index];
 
-        Eigen::Vector3d i = m_geometry.row(inversion.i);
-        Eigen::Vector3d j = m_geometry.row(inversion.j);
-        Eigen::Vector3d k = m_geometry.row(inversion.k);
-        Eigen::Vector3d l = m_geometry.row(inversion.l);
+        Eigen::Vector3d i = geom().row(inversion.i);
+        Eigen::Vector3d j = geom().row(inversion.j);
+        Eigen::Vector3d k = geom().row(inversion.k);
+        Eigen::Vector3d l = geom().row(inversion.l);
 
         Eigen::Vector3d ail = SubVector(i, l);
         Eigen::Vector3d nijk = UFF::NormalVector(i, j, k);
@@ -601,8 +601,8 @@ void ForceFieldThread::CalculateUFFvdWContribution()
 {
     for (int index = 0; index < m_uff_vdWs.size(); ++index) {
         const auto& vdw = m_uff_vdWs[index];
-        Eigen::Vector3d i = m_geometry.row(vdw.i);
-        Eigen::Vector3d j = m_geometry.row(vdw.j);
+        Eigen::Vector3d i = geom().row(vdw.i);
+        Eigen::Vector3d j = geom().row(vdw.j);
         double ij = (i - j).norm() * m_au;
         double pow6 = pow((vdw.r0_ij / ij), 6);
 
@@ -631,8 +631,8 @@ void ForceFieldThread::CalculateQMDFFBondContribution()
     for (int index = 0; index < m_uff_bonds.size(); ++index) {
         const auto& bond = m_uff_bonds[index];
 
-        Vector i = m_geometry.row(bond.i);
-        Vector j = m_geometry.row(bond.j);
+        Vector i = geom().row(bond.i);
+        Vector j = geom().row(bond.j);
         Vector ij = i - j;
         double distance = (ij).norm();
 
@@ -716,9 +716,9 @@ void ForceFieldThread::CalculateQMDFFAngleContribution()
     for (int index = 0; index < m_uff_angles.size(); ++index) {
         const auto& angle = m_uff_angles[index];
 
-        Vector i = m_geometry.row(angle.i);
-        Vector j = m_geometry.row(angle.j);
-        Vector k = m_geometry.row(angle.k);
+        Vector i = geom().row(angle.i);
+        Vector j = geom().row(angle.j);
+        Vector k = geom().row(angle.k);
         Matrix derivate;
         double costheta0_ijk = cos(angle.theta0_ijk * pi / 180.0);
         double costheta = 0;
@@ -750,8 +750,8 @@ void ForceFieldThread::CalculateESPContribution()
 
     for (int index = 0; index < m_EQs.size(); ++index) {
         const auto& eq = m_EQs[index];
-        Vector i = m_geometry.row(eq.i);
-        Vector j = m_geometry.row(eq.j);
+        Vector i = geom().row(eq.i);
+        Vector j = geom().row(eq.j);
         Vector ij = i - j;
         double distance = (ij).norm();
         m_eq_energy += eq.epsilon * eq.q_i * eq.q_j / (distance);
@@ -784,9 +784,9 @@ int H4Thread::execute()
     std::vector<hbonds4::atom_t> geometry(m_atom_types.size());
 
     for (int i = 0; i < m_atom_types.size(); ++i) {
-        geometry[i].x = m_geometry(i, 0) * m_au;
-        geometry[i].y = m_geometry(i, 1) * m_au;
-        geometry[i].z = m_geometry(i, 2) * m_au;
+        geometry[i].x = geom()(i, 0) * m_au;
+        geometry[i].y = geom()(i, 1) * m_au;
+        geometry[i].z = geom()(i, 2) * m_au;
         geometry[i].e = m_atom_types[i];
         m_h4correction.GradientH4()[i].x = 0;
         m_h4correction.GradientH4()[i].y = 0;
@@ -854,9 +854,9 @@ void ForceFieldThread::computeHBCoordinationNumbers()
             int atj = m_atom_types[B];  // Atomic number of B
 
             // Distance H-B (both in Bohr for GFN-FF)
-            double dx = m_geometry(B, 0) - m_geometry(H, 0);
-            double dy = m_geometry(B, 1) - m_geometry(H, 1);
-            double dz = m_geometry(B, 2) - m_geometry(H, 2);
+            double dx = geom()(B, 0) - geom()(H, 0);
+            double dy = geom()(B, 1) - geom()(H, 1);
+            double dz = geom()(B, 2) - geom()(H, 2);
             double r2 = dx * dx + dy * dy + dz * dz;
 
             if (r2 > thr) continue;
@@ -916,25 +916,29 @@ void ForceFieldThread::CalculateGFNFFBondContribution()
     double factor = m_bond_scaling;
 
     // Check if we have D3 CN data for dynamic r0 calculation
-    bool use_dynamic_r0 = (m_d3_cn.size() > 0);
+    const bool have_cn_ptr = (m_d3_cn_ptr && m_d3_cn_ptr->size() > 0);
+    const bool have_cn_local = (m_d3_cn.size() > 0);
+    bool use_dynamic_r0 = have_cn_ptr || have_cn_local;
+    const int cn_size = have_cn_ptr ? static_cast<int>(m_d3_cn_ptr->size())
+                                    : static_cast<int>(m_d3_cn.size());
 
     for (int index = 0; index < m_gfnff_bonds.size(); ++index) {
         const auto& bond = m_gfnff_bonds[index];
 
-        Vector i = m_geometry.row(bond.i);
-        Vector j = m_geometry.row(bond.j);
+        Vector i = geom().row(bond.i);
+        Vector j = geom().row(bond.j);
         Matrix derivate;
         double rij = UFF::BondStretching(i, j, derivate, m_calculate_gradient);
 
         // Calculate r0 - either dynamic (using current CN) or static (from initialization)
         double r0_ij;
         if (use_dynamic_r0 && bond.z_i > 0 && bond.z_j > 0 &&
-            bond.i < m_d3_cn.size() && bond.j < m_d3_cn.size()) {
+            bond.i < cn_size && bond.j < cn_size) {
             // Dynamic r0 calculation using current D3 coordination numbers
             // Reference: gfnff_method.cpp:1381 (initialization formula)
             // Formula: r0 = (ra + rb + rabshift) * ff
-            double cn_i = m_d3_cn(bond.i);
-            double cn_j = m_d3_cn(bond.j);
+            double cn_i = d3cn(bond.i);
+            double cn_j = d3cn(bond.j);
 
             // ra = r0(ati) + cnfak(ati) * cn(i)
             // rb = r0(atj) + cnfak(atj) * cn(j)
@@ -1059,9 +1063,9 @@ void ForceFieldThread::CalculateGFNFFAngleContribution()
 
     for (int index = 0; index < m_gfnff_angles.size(); ++index) {
         const auto& angle = m_gfnff_angles[index];
-        auto i = m_geometry.row(angle.i);
-        auto j = m_geometry.row(angle.j);
-        auto k = m_geometry.row(angle.k);
+        auto i = geom().row(angle.i);
+        auto j = geom().row(angle.j);
+        auto k = geom().row(angle.k);
         Matrix derivate;
         double costheta = UFF::AngleBending(i, j, k, derivate, m_calculate_gradient);
 
@@ -1229,10 +1233,10 @@ void ForceFieldThread::CalculateGFNFFDihedralContribution()
         const auto& dihedral = m_gfnff_dihedrals[index];
 
         // Extract atom positions as Eigen::Vector3d
-        Eigen::Vector3d r_i = m_geometry.row(dihedral.i).head<3>();
-        Eigen::Vector3d r_j = m_geometry.row(dihedral.j).head<3>();
-        Eigen::Vector3d r_k = m_geometry.row(dihedral.k).head<3>();
-        Eigen::Vector3d r_l = m_geometry.row(dihedral.l).head<3>();
+        Eigen::Vector3d r_i = geom().row(dihedral.i).head<3>();
+        Eigen::Vector3d r_j = geom().row(dihedral.j).head<3>();
+        Eigen::Vector3d r_k = geom().row(dihedral.k).head<3>();
+        Eigen::Vector3d r_l = geom().row(dihedral.l).head<3>();
 
         // Standard dihedral angle for bonded chain i-j-k-l
         // Reference: gfnff_engrad.F90:1260 — phi = valijklff(n,xyz,i,j,k,l)
@@ -1500,10 +1504,10 @@ void ForceFieldThread::CalculateGFNFFExtraTorsionContribution()
         const auto& torsion = m_gfnff_extra_torsions[index];
 
         // Extract atom positions as Eigen::Vector3d
-        Eigen::Vector3d r_i = m_geometry.row(torsion.i).head<3>();
-        Eigen::Vector3d r_j = m_geometry.row(torsion.j).head<3>();
-        Eigen::Vector3d r_k = m_geometry.row(torsion.k).head<3>();
-        Eigen::Vector3d r_l = m_geometry.row(torsion.l).head<3>();
+        Eigen::Vector3d r_i = geom().row(torsion.i).head<3>();
+        Eigen::Vector3d r_j = geom().row(torsion.j).head<3>();
+        Eigen::Vector3d r_k = geom().row(torsion.k).head<3>();
+        Eigen::Vector3d r_l = geom().row(torsion.l).head<3>();
 
         // Standard dihedral angle — extra torsions have tlist(5)=1 > 0, so they
         // enter the same branch as primary torsions in gfnff_engrad.F90:1249
@@ -1656,10 +1660,10 @@ void ForceFieldThread::CalculateGFNFFInversionContribution()
 
         // For UFF/QMDFF inversions (type != 3), use old formula
         if (inv.type != 3) {
-            Eigen::Vector3d r_i = m_geometry.row(inv.i).head<3>();
-            Eigen::Vector3d r_j = m_geometry.row(inv.j).head<3>();
-            Eigen::Vector3d r_k = m_geometry.row(inv.k).head<3>();
-            Eigen::Vector3d r_l = m_geometry.row(inv.l).head<3>();
+            Eigen::Vector3d r_i = geom().row(inv.i).head<3>();
+            Eigen::Vector3d r_j = geom().row(inv.j).head<3>();
+            Eigen::Vector3d r_k = geom().row(inv.k).head<3>();
+            Eigen::Vector3d r_l = geom().row(inv.l).head<3>();
             Matrix derivate;
             double theta = GFNFF_Geometry::calculateOutOfPlaneAngle(r_i, r_j, r_k, r_l, derivate, m_calculate_gradient);
             double energy = inv.fc * (inv.C0 + inv.C1 * cos(theta) + inv.C2 * cos(2 * theta));
@@ -1678,10 +1682,10 @@ void ForceFieldThread::CalculateGFNFFInversionContribution()
         // GFN-FF inversion (type == 3)
         // =====================================================================
         // Atom layout: i=center (3 neighbors), j=nb1, k=nb2, l=nb3
-        Eigen::Vector3d r_center = m_geometry.row(inv.i).head<3>();
-        Eigen::Vector3d r_nb1 = m_geometry.row(inv.j).head<3>();
-        Eigen::Vector3d r_nb2 = m_geometry.row(inv.k).head<3>();
-        Eigen::Vector3d r_nb3 = m_geometry.row(inv.l).head<3>();
+        Eigen::Vector3d r_center = geom().row(inv.i).head<3>();
+        Eigen::Vector3d r_nb1 = geom().row(inv.j).head<3>();
+        Eigen::Vector3d r_nb2 = geom().row(inv.k).head<3>();
+        Eigen::Vector3d r_nb3 = geom().row(inv.l).head<3>();
 
         // Out-of-plane angle (Fortran omega function, gfnff_helpers.f90:427-448)
         // Center atom is i, calculateOutOfPlaneAngle expects i=center
@@ -1822,10 +1826,10 @@ void ForceFieldThread::CalculateGFNFFSTorsionContribution()
         Matrix derivate;
         // phi in radians
         double phi = GFNFF_Geometry::calculateDihedralAngle(
-            m_geometry.row(stor.i).transpose() * m_au,
-            m_geometry.row(stor.j).transpose() * m_au,
-            m_geometry.row(stor.k).transpose() * m_au,
-            m_geometry.row(stor.l).transpose() * m_au,
+            geom().row(stor.i).transpose() * m_au,
+            geom().row(stor.j).transpose() * m_au,
+            geom().row(stor.k).transpose() * m_au,
+            geom().row(stor.l).transpose() * m_au,
             derivate, m_calculate_gradient);
 
         double erefhalf = stor.erefhalf;
@@ -1889,8 +1893,8 @@ void ForceFieldThread::CalculateGFNFFDispersionContribution()
     for (int index = 0; index < m_gfnff_dispersions.size(); ++index) {
         const auto& disp = m_gfnff_dispersions[index];
 
-        Eigen::Vector3d ri = m_geometry.row(disp.i);
-        Eigen::Vector3d rj = m_geometry.row(disp.j);
+        Eigen::Vector3d ri = geom().row(disp.i);
+        Eigen::Vector3d rj = geom().row(disp.j);
         Eigen::Vector3d rij_vec = ri - rj;
         double rij = rij_vec.norm() * m_au;  // Convert to atomic units if needed
 
@@ -2001,8 +2005,8 @@ void ForceFieldThread::CalculateGFNFFBondedRepulsionContribution()
     for (int index = 0; index < m_gfnff_bonded_repulsions.size(); ++index) {
         const auto& rep = m_gfnff_bonded_repulsions[index];
 
-        Eigen::Vector3d ri = m_geometry.row(rep.i);
-        Eigen::Vector3d rj = m_geometry.row(rep.j);
+        Eigen::Vector3d ri = geom().row(rep.i);
+        Eigen::Vector3d rj = geom().row(rep.j);
         Eigen::Vector3d rij_vec = ri - rj;
         double rij = rij_vec.norm() * m_au;
 
@@ -2071,8 +2075,8 @@ void ForceFieldThread::CalculateGFNFFNonbondedRepulsionContribution()
     for (int index = 0; index < m_gfnff_nonbonded_repulsions.size(); ++index) {
         const auto& rep = m_gfnff_nonbonded_repulsions[index];
 
-        Eigen::Vector3d ri = m_geometry.row(rep.i);
-        Eigen::Vector3d rj = m_geometry.row(rep.j);
+        Eigen::Vector3d ri = geom().row(rep.i);
+        Eigen::Vector3d rj = geom().row(rep.j);
         Eigen::Vector3d rij_vec = ri - rj;
         double rij = rij_vec.norm() * m_au;
 
@@ -2179,19 +2183,20 @@ void ForceFieldThread::CalculateGFNFFCoulombContribution()
     for (int index = 0; index < m_gfnff_coulombs.size(); ++index) {
         const auto& coul = m_gfnff_coulombs[index];
 
-        Eigen::Vector3d ri = m_geometry.row(coul.i);
-        Eigen::Vector3d rj = m_geometry.row(coul.j);
+        Eigen::Vector3d ri = geom().row(coul.i);
+        Eigen::Vector3d rj = geom().row(coul.j);
         Eigen::Vector3d rij_vec = ri - rj;
         double rij = rij_vec.norm() * m_au;
 
         if (rij > coul.r_cut || rij < 1e-10) continue;
 
-        // Use dynamic EEQ charges, fall back to static if unavailable or NaN
+        // Use dynamic EEQ charges via pointer or local copy, fall back to static if unavailable or NaN
         double qi = coul.q_i;
         double qj = coul.q_j;
-        if (m_eeq_charges.size() > 0) {
-            qi = m_eeq_charges(coul.i);
-            qj = m_eeq_charges(coul.j);
+        const bool have_eeq = m_eeq_charges_ptr ? (m_eeq_charges_ptr->size() > 0) : (m_eeq_charges.size() > 0);
+        if (have_eeq) {
+            qi = eeq_q(coul.i);
+            qj = eeq_q(coul.j);
             if (std::isnan(qi) || std::isnan(qj)) {
                 qi = coul.q_i;
                 qj = coul.q_j;
@@ -2356,9 +2361,9 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
 
     for (const auto& hb : m_gfnff_hbonds) {
         // Get atom positions
-        Eigen::Vector3d pos_A = m_geometry.row(hb.i).transpose();
-        Eigen::Vector3d pos_H = m_geometry.row(hb.j).transpose();
-        Eigen::Vector3d pos_B = m_geometry.row(hb.k).transpose();
+        Eigen::Vector3d pos_A = geom().row(hb.i).transpose();
+        Eigen::Vector3d pos_H = geom().row(hb.j).transpose();
+        Eigen::Vector3d pos_B = geom().row(hb.k).transpose();
 
         // Calculate distance vectors
         Eigen::Vector3d r_AH_vec = pos_H - pos_A;
@@ -2418,7 +2423,7 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
             double hbnbcut_save = (elem_B == 7 && hb.neighbors_B.size() == 1) ? 2.0 : HB_NBCUT;
 
             for (int nb : hb.neighbors_B) {
-                Eigen::Vector3d pos_nb = m_geometry.row(nb).transpose();
+                Eigen::Vector3d pos_nb = geom().row(nb).transpose();
                 double r_Anb = (pos_nb - pos_A).norm() * m_au;
                 double r_Bnb = (pos_nb - pos_B).norm() * m_au;
 
@@ -2461,7 +2466,7 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
             // Sum bond vectors from B to neighbors (in Bohr)
             nbb_lp = static_cast<int>(hb.neighbors_B.size());
             for (int nb_idx : hb.neighbors_B) {
-                Eigen::Vector3d pos_nb = m_geometry.row(nb_idx).transpose();
+                Eigen::Vector3d pos_nb = geom().row(nb_idx).transpose();
                 Eigen::Vector3d bond_vec = (pos_nb - pos_B) * m_au;  // B→nb in Bohr
                 lp_vector += bond_vec;
             }
@@ -2529,9 +2534,9 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
                 // jj=B, kk=C, ll=H → center=B(jj), ends=C(kk) and H(ll)
                 // In Fortran egbend_nci_mul(j,i,k,...): j=center, i,k=ends
                 // So: center=jj=B, i=kk=C, k=ll=H
-                Eigen::Vector3d va = m_geometry.row(C_idx).transpose();  // atom i = C
-                Eigen::Vector3d vb = m_geometry.row(B_idx).transpose();  // atom j = B (center)
-                Eigen::Vector3d vc = m_geometry.row(H_idx).transpose();  // atom k = H
+                Eigen::Vector3d va = geom().row(C_idx).transpose();  // atom i = C
+                Eigen::Vector3d vb = geom().row(B_idx).transpose();  // atom j = B (center)
+                Eigen::Vector3d vc = geom().row(H_idx).transpose();  // atom k = H
 
                 Eigen::Vector3d vab = (va - vb) * m_au;
                 Eigen::Vector3d vcb = (vc - vb) * m_au;
@@ -2581,10 +2586,10 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
                 Matrix dihedral_grad;
                 bool calc_grad = m_calculate_gradient;
                 double phi = GFNFF_Geometry::calculateDihedralAngle(
-                    m_geometry.row(ii).transpose() * m_au,
-                    m_geometry.row(jj_t).transpose() * m_au,
-                    m_geometry.row(kk_t).transpose() * m_au,
-                    m_geometry.row(ll_t).transpose() * m_au,
+                    geom().row(ii).transpose() * m_au,
+                    geom().row(jj_t).transpose() * m_au,
+                    geom().row(kk_t).transpose() * m_au,
+                    geom().row(ll_t).transpose() * m_au,
                     dihedral_grad, calc_grad);
 
                 // Fortran: fc=(1-tshift)/2, phi0=pi/2, rn=2
@@ -2745,7 +2750,7 @@ void ForceFieldThread::CalculateGFNFFHydrogenBondContribution()
                 double hbnbcut_save = (elem_B == 7 && hb.neighbors_B.size() == 1) ? 2.0 : HB_NBCUT;
                 for (size_t idx = 0; idx < hb.neighbors_B.size(); ++idx) {
                     int nb = hb.neighbors_B[idx];
-                    Eigen::Vector3d pos_nb = m_geometry.row(nb).transpose();
+                    Eigen::Vector3d pos_nb = geom().row(nb).transpose();
                     Eigen::Vector3d dranb = pos_A - pos_nb;  // A - nb (Fortran convention)
                     Eigen::Vector3d drbnb = pos_B - pos_nb;  // B - nb (Fortran convention)
                     double ranb = dranb.norm();
@@ -2977,9 +2982,9 @@ void ForceFieldThread::CalculateGFNFFHalogenBondContribution()
 
     for (const auto& xb : m_gfnff_xbonds) {
         // Get atom positions
-        Eigen::Vector3d pos_A = m_geometry.row(xb.i).transpose();
-        Eigen::Vector3d pos_X = m_geometry.row(xb.j).transpose();
-        Eigen::Vector3d pos_B = m_geometry.row(xb.k).transpose();
+        Eigen::Vector3d pos_A = geom().row(xb.i).transpose();
+        Eigen::Vector3d pos_X = geom().row(xb.j).transpose();
+        Eigen::Vector3d pos_B = geom().row(xb.k).transpose();
 
         // Calculate distance vectors
         Eigen::Vector3d r_AX_vec = pos_X - pos_A;
@@ -3147,8 +3152,8 @@ void ForceFieldThread::CalculateD3DispersionContribution()
     for (int index = 0; index < m_d3_dispersions.size(); ++index) {
         const auto& disp = m_d3_dispersions[index];
 
-        Eigen::Vector3d ri = m_geometry.row(disp.i);
-        Eigen::Vector3d rj = m_geometry.row(disp.j);
+        Eigen::Vector3d ri = geom().row(disp.i);
+        Eigen::Vector3d rj = geom().row(disp.j);
         Eigen::Vector3d rij_vec = ri - rj;
         double rij = rij_vec.norm() * m_au;  // Convert to atomic units if needed
 
@@ -3240,8 +3245,8 @@ void ForceFieldThread::CalculateD4DispersionContribution()
     for (int index = 0; index < m_d4_dispersions.size(); ++index) {
         const auto& disp = m_d4_dispersions[index];
 
-        Eigen::Vector3d ri = m_geometry.row(disp.i);
-        Eigen::Vector3d rj = m_geometry.row(disp.j);
+        Eigen::Vector3d ri = geom().row(disp.i);
+        Eigen::Vector3d rj = geom().row(disp.j);
         Eigen::Vector3d rij_vec = ri - rj;
         double rij = rij_vec.norm() * m_au;  // Convert to atomic units if needed
 
@@ -3377,9 +3382,9 @@ void ForceFieldThread::CalculateATMContribution()
 
     for (const auto& triple : m_atm_triples) {
         // Get atom positions
-        Eigen::Vector3d pos_i = m_geometry.row(triple.i).transpose();
-        Eigen::Vector3d pos_j = m_geometry.row(triple.j).transpose();
-        Eigen::Vector3d pos_k = m_geometry.row(triple.k).transpose();
+        Eigen::Vector3d pos_i = geom().row(triple.i).transpose();
+        Eigen::Vector3d pos_j = geom().row(triple.j).transpose();
+        Eigen::Vector3d pos_k = geom().row(triple.k).transpose();
 
         // Calculate distances
         double rij = (pos_i - pos_j).norm();
@@ -3476,9 +3481,9 @@ void ForceFieldThread::CalculateATMGradient()
 
     for (const auto& triple : m_atm_triples) {
         // Get atom positions
-        Eigen::Vector3d pos_i = m_geometry.row(triple.i).transpose();
-        Eigen::Vector3d pos_j = m_geometry.row(triple.j).transpose();
-        Eigen::Vector3d pos_k = m_geometry.row(triple.k).transpose();
+        Eigen::Vector3d pos_i = geom().row(triple.i).transpose();
+        Eigen::Vector3d pos_j = geom().row(triple.j).transpose();
+        Eigen::Vector3d pos_k = geom().row(triple.k).transpose();
 
         // Calculate distance vectors (r_ij = pos_j - pos_i, etc.)
         Eigen::Vector3d rij_vec = pos_j - pos_i;
@@ -3596,9 +3601,9 @@ void ForceFieldThread::CalculateGFNFFBatmContribution()
 
     for (const auto& batm : m_gfnff_batms) {
         // Get atom positions and convert to Bohr
-        Eigen::Vector3d i_pos = m_geometry.row(batm.i).transpose() * m_au;
-        Eigen::Vector3d j_pos = m_geometry.row(batm.j).transpose() * m_au;
-        Eigen::Vector3d k_pos = m_geometry.row(batm.k).transpose() * m_au;
+        Eigen::Vector3d i_pos = geom().row(batm.i).transpose() * m_au;
+        Eigen::Vector3d j_pos = geom().row(batm.j).transpose() * m_au;
+        Eigen::Vector3d k_pos = geom().row(batm.k).transpose() * m_au;
 
         // Calculate distance vectors (in Bohr)
         Eigen::Vector3d rij_vec = j_pos - i_pos;
@@ -3639,16 +3644,14 @@ void ForceFieldThread::CalculateGFNFFBatmContribution()
         // Reference: Fortran gfnff_engrad.F90:620 passes topo%qa (Phase-1) to batmgfnff_eg
         // CRITICAL FIX (Feb 21, 2026): Use Phase-1 topology charges (fixed), NOT Phase-2 EEQ charges (dynamic)
         // Phase-2 charges change with geometry, but BATM gradient has no dq/dx term → energy drift in MD
-        // Fall back to m_eeq_charges only if m_topology_charges not yet set (backward compatibility)
-        const Vector& charges_for_batm = (m_topology_charges.size() > 0) ? m_topology_charges : m_eeq_charges;
-
-        double fi = (1.0 - fqq * charges_for_batm(batm.i));
+        // Claude Generated (Mar 2026): Use pointer-based accessor for zero-copy access
+        double fi = (1.0 - fqq * topo_q(batm.i));
         fi = std::min(std::max(fi, -4.0), 4.0);
 
-        double fj = (1.0 - fqq * charges_for_batm(batm.j));
+        double fj = (1.0 - fqq * topo_q(batm.j));
         fj = std::min(std::max(fj, -4.0), 4.0);
 
-        double fk = (1.0 - fqq * charges_for_batm(batm.k));
+        double fk = (1.0 - fqq * topo_q(batm.k));
         fk = std::min(std::max(fk, -4.0), 4.0);
 
         double ff_charge = fi * fj * fk;

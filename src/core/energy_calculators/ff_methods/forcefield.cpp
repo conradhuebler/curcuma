@@ -107,13 +107,14 @@ void ForceField::UpdateGeometry(const std::vector<std::array<double, 3>>& geomet
 
 void ForceField::distributeEEQCharges(const Vector& charges)
 {
-    // Store charges for caching (Claude Generated Dec 2025)
+    // Store charges — threads read via pointer (no per-thread copy needed for GFN-FF)
     m_eeq_charges = charges;
 
-    // Phase 5A: Distribute EEQ charges to all threads for fqq calculation
-    // Claude Generated (Nov 2025)
-    for (int i = 0; i < m_stored_threads.size(); ++i) {
-        m_stored_threads[i]->setEEQCharges(charges);
+    // Legacy path: threads without pointer still need explicit copy (UFF/QMDFF)
+    if (m_method != "gfnff") {
+        for (int i = 0; i < m_stored_threads.size(); ++i) {
+            m_stored_threads[i]->setEEQCharges(charges);
+        }
     }
 }
 
@@ -122,12 +123,14 @@ void ForceField::distributeEEQCharges(const Vector& charges)
 // CRITICAL: BATM must use Phase-1 charges (fixed at init), not Phase-2 EEQ charges (geometry-dependent)
 void ForceField::distributeTopologyCharges(const Vector& charges)
 {
-    // Store topology charges for caching
+    // Store topology charges — threads read via pointer
     m_topology_charges = charges;
 
-    // Distribute to all threads for BATM calculation
-    for (int i = 0; i < m_stored_threads.size(); ++i) {
-        m_stored_threads[i]->setTopologyCharges(charges);
+    // Legacy path: threads without pointer still need explicit copy
+    if (m_method != "gfnff") {
+        for (int i = 0; i < m_stored_threads.size(); ++i) {
+            m_stored_threads[i]->setTopologyCharges(charges);
+        }
     }
 }
 
@@ -135,12 +138,14 @@ void ForceField::distributeTopologyCharges(const Vector& charges)
 // Reference: Fortran gfnff_engrad.F90:432 - CN recalculated at each energy evaluation
 void ForceField::distributeD3CN(const Vector& d3_cn)
 {
-    // Store CN for caching
+    // Store CN — threads read via pointer
     m_d3_cn = d3_cn;
 
-    // Distribute to all threads for dynamic r0 calculation
-    for (int i = 0; i < m_stored_threads.size(); ++i) {
-        m_stored_threads[i]->setD3CN(d3_cn);
+    // Legacy path: threads without pointer still need explicit copy
+    if (m_method != "gfnff") {
+        for (int i = 0; i < m_stored_threads.size(); ++i) {
+            m_stored_threads[i]->setD3CN(d3_cn);
+        }
     }
 }
 
@@ -1447,6 +1452,13 @@ void ForceField::AutoRanges()
         } else if (m_method == "gfnff") {
             thread->setMethod(3); // GFN-FF
 
+            // Claude Generated (Mar 2026): Pointer-based data sharing — threads read from ForceField memory
+            // Eliminates per-step O(N) copies for geometry, charges, CN
+            thread->setGeometryPtr(&m_geometry);
+            thread->setEEQChargesPtr(&m_eeq_charges);
+            thread->setTopologyChargesPtr(&m_topology_charges);
+            thread->setD3CNPtr(&m_d3_cn);
+
             // Phase 2: Configure GFN-FF parameter flags (Claude Generated Dec 2025)
             // These control which energy terms are calculated to save CPU time
             bool dispersion = m_parameters.value("dispersion", true);
@@ -2308,8 +2320,16 @@ double ForceField::Calculate(bool gradient)
         }
     }
 
-    for (int i = 0; i < m_stored_threads.size(); ++i) {
-        m_stored_threads[i]->UpdateGeometry(m_geometry, gradient);
+    // Claude Generated (Mar 2026): GFN-FF threads use pointer-based sharing — only reset accumulators.
+    // UFF/QMDFF threads still copy geometry (no pointer set).
+    if (m_method == "gfnff") {
+        for (int i = 0; i < m_stored_threads.size(); ++i) {
+            m_stored_threads[i]->resetForStep(gradient);
+        }
+    } else {
+        for (int i = 0; i < m_stored_threads.size(); ++i) {
+            m_stored_threads[i]->UpdateGeometry(m_geometry, gradient);
+        }
     }
 
     // Claude Generated (Mar 2026): Duplicate CN calculation removed — Phase 0 optimization.
@@ -2433,10 +2453,9 @@ double ForceField::Calculate(bool gradient)
     if ((m_method == "gfnff") &&
         m_coulomb_gam.size() == m_natoms && m_eeq_charges.size() == m_natoms) {
         const double sqrt_2_over_pi = 0.797884560802865;
-        // Claude Generated (March 2026): OpenMP reduction for TERM 2+3 self-energy O(N)
+        // Per-step O(N): OpenMP removed (Mar 2026) — fork/join overhead exceeds benefit
         double E_en = 0.0, E_self = 0.0;
         const bool has_cn = (m_cn.size() == m_natoms);
-        #pragma omp parallel for schedule(static) reduction(+:E_en, E_self)
         for (int i = 0; i < m_natoms; ++i) {
             // Skip atoms not present in any Coulomb pair (alp==0 → division by zero)
             if (m_coulomb_alp(i) <= 0.0) continue;

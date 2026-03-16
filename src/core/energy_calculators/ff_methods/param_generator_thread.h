@@ -78,3 +78,26 @@ private:
     std::function<json()> m_generator;
     json m_result;
 };
+
+/**
+ * @brief Lightweight CxxThread for parallel per-step preparation tasks
+ *
+ * Claude Generated (March 2026): Used in GFNFF::Calculation() Phase A
+ * to run CN derivatives, dc6dcn update, and EEQ solve in parallel.
+ * Unlike ParameterGeneratorThread, executes a void task with no return value.
+ */
+class PrepTaskThread : public CxxThread {
+public:
+    PrepTaskThread(const std::string& name, std::function<void()> task)
+        : m_name(name), m_task(std::move(task))
+    {
+        setAutoDelete(false);  // Stack-allocated, not heap
+    }
+
+    int execute() override { m_task(); return 0; }
+    const std::string& getName() const { return m_name; }
+
+private:
+    std::string m_name;
+    std::function<void()> m_task;
+};

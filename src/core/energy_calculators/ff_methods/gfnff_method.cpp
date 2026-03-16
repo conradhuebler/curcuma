@@ -615,6 +615,28 @@ double GFNFF::Calculation(bool gradient)
         // - gradient=true:  full distribution with dcn derivatives (TERM 1b + bond dEdcn chain-rule)
         // - gradient=false: CN-only distribution so dynamic r0 in bonds uses current geometry CN
         // Reference: Fortran gfnff_engrad.F90:418-422
+        // Claude Generated (Mar 2026, Phase 4): Prepare EEQ topology input (needed for both paths)
+        // Prepared before parallel section so getCachedTopology() is not called from threads.
+        EEQSolver::TopologyInput eeq_topo;
+        const TopologyInfo* topo_ptr = nullptr;
+        bool do_eeq = (m_eeq_solver && !m_skip_eeq_recalc);
+        if (do_eeq) {
+            topo_ptr = &getCachedTopology();
+            eeq_topo.neighbor_lists = topo_ptr->neighbor_lists;
+            eeq_topo.nfrag = topo_ptr->nfrag;
+            eeq_topo.fraglist = topo_ptr->fraglist;
+            eeq_topo.qfrag = topo_ptr->qfrag;
+            eeq_topo.covalent_radii.resize(m_atomcount);
+            for (int i = 0; i < m_atomcount; ++i) {
+                int z = m_atoms[i];
+                if (z >= 1 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) {
+                    eeq_topo.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];
+                } else {
+                    eeq_topo.covalent_radii[i] = 1.0;
+                }
+            }
+        }
+
         if (gradient) {
             Vector cnf(m_atoms.size());
             for (size_t i = 0; i < m_atoms.size(); ++i) {
@@ -623,93 +645,85 @@ double GFNFF::Calculation(bool gradient)
                             ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
             }
 
-            auto t_dcn_start = std::chrono::high_resolution_clock::now();
-            std::vector<SpMatrix> dcn = calculateCoordinationNumberDerivatives(cn);
-            m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
+            // Claude Generated (Mar 2026, Phase 4): Run dcn, dc6dcn, EEQ in parallel via CxxThreadPool
+            // All three tasks depend only on cn/cn_vec (computed above) and are independent of each other.
+            std::vector<SpMatrix> dcn;
+            Vector new_charges;
+
+            auto t_phase_a = std::chrono::high_resolution_clock::now();
+
+            PrepTaskThread task_dcn("dcn", [&]() {
+                dcn = calculateCoordinationNumberDerivatives(cn);
+            });
+
+            PrepTaskThread task_dc6("dc6dcn", [&]() {
+                if (m_d4_generator) {
+                    m_d4_generator->updateCNValuesForGradient(cn_vec);
+                }
+            });
+
+            PrepTaskThread task_eeq("eeq", [&]() {
+                if (do_eeq) {
+                    new_charges = m_eeq_solver->calculateFinalCharges(
+                        m_atoms, m_geometry_bohr, m_charge,
+                        topo_ptr->topology_charges, cn,
+                        topo_ptr->hybridization, eeq_topo,
+                        true, topo_ptr->alpeeq);
+                }
+            });
+
+            CxxThreadPool pool;
+            pool.setProgressBar(CxxThreadPool::ProgressBarType::None);
+            pool.setActiveThreadCount(3);
+            pool.addThread(&task_dcn);
+            pool.addThread(&task_dc6);
+            pool.addThread(&task_eeq);
+            pool.StartAndWait();
+
             if (do_timing) {
-                t_dcn = std::chrono::duration<double, std::milli>(
-                    std::chrono::high_resolution_clock::now() - t_dcn_start).count();
+                auto t_now = std::chrono::high_resolution_clock::now();
+                // Phase A wall time (all three ran in parallel)
+                t_dcn = std::chrono::duration<double, std::milli>(t_now - t_phase_a).count();
+                t_dc6dcn = 0;  // Included in parallel wall time
+                t_eeq = 0;    // Included in parallel wall time
             }
 
-            // Compute and distribute dc6dcn for dispersion CN gradient
-            // Reference: Fortran gfnff_gdisp0.f90:382-395
+            // Distribute results (sequential, fast pointer operations)
+            m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
             if (m_d4_generator) {
-                auto t_dc6_start = std::chrono::high_resolution_clock::now();
-                m_d4_generator->updateCNValuesForGradient(cn_vec);
                 m_forcefield->setDispersionDC6DCN(m_d4_generator->getDC6DCN());
-                if (do_timing) {
-                    t_dc6dcn = std::chrono::duration<double, std::milli>(
-                        std::chrono::high_resolution_clock::now() - t_dc6_start).count();
-                }
+            }
+            if (do_eeq && new_charges.size() == m_atomcount) {
+                m_forcefield->distributeEEQCharges(new_charges);
+                m_charges = new_charges;
             }
 
             if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info("CN derivatives recalculated for current geometry");
+                CurcumaLogger::info("Phase A complete: dcn + dc6dcn + EEQ (parallel)");
             }
         } else {
-            // Claude Generated (Feb 22, 2026): Energy-only evaluation needs current CN in threads.
-            // Bond r0 = (r0_base + cnfak*cn_i + r0_base_j + cnfak_j*cn_j) * ff depends on CN.
-            // Without this, NumGrad uses stale CN from last gradient call → wrong bond energies
-            // for polar molecules (O, N have large cnfak) → incorrect numerical gradient.
+            // Energy-only: CN distribution + sequential EEQ
             m_forcefield->distributeCNOnly(cn);
-        }
 
-        // Phase-2 EEQ charge recalculation
-        // Without this, Coulomb energy uses stale charges during MD/optimization,
-        // leading to incorrect forces and unphysical dynamics.
-        auto t_eeq_start = std::chrono::high_resolution_clock::now();
-        if (m_eeq_solver && !m_skip_eeq_recalc) {
-            const TopologyInfo& topo = getCachedTopology();
-
-            // Build topology input for EEQ solver (fragment constraints)
-            EEQSolver::TopologyInput eeq_topo;
-            eeq_topo.neighbor_lists = topo.neighbor_lists;
-            eeq_topo.nfrag = topo.nfrag;
-            eeq_topo.fraglist = topo.fraglist;
-            eeq_topo.qfrag = topo.qfrag;
-
-            // Covalent radii for Floyd-Warshall topological distance calculation
-            // CRITICAL FIX (Mar 2026): Use Pyykko covalent radii (param%rad), NOT D3 radii
-            // Fortran: gfnff_ini.f90:438 uses param%rad(at(i)) + param%rad(at(k)) for bond lengths
-            // param%rad = Pyykko radii in Angstrom (H=0.32, C=0.75, N=0.71, O=0.64)
-            // Previous code used covalent_rad_d3*4/3*aatoau which gave 33% too large distances
-            eeq_topo.covalent_radii.resize(m_atomcount);
-            for (int i = 0; i < m_atomcount; ++i) {
-                int z = m_atoms[i];
-                if (z >= 1 && z <= static_cast<int>(GFNFFParameters::covalent_radii.size())) {
-                    eeq_topo.covalent_radii[i] = GFNFFParameters::covalent_radii[z - 1];  // Pyykko radii in Å
-                } else {
-                    eeq_topo.covalent_radii[i] = 1.0;
+            auto t_eeq_start = std::chrono::high_resolution_clock::now();
+            if (do_eeq) {
+                Vector new_charges = m_eeq_solver->calculateFinalCharges(
+                    m_atoms, m_geometry_bohr, m_charge,
+                    topo_ptr->topology_charges, cn,
+                    topo_ptr->hybridization, eeq_topo,
+                    true, topo_ptr->alpeeq);
+                if (new_charges.size() == m_atomcount) {
+                    m_forcefield->distributeEEQCharges(new_charges);
+                    m_charges = new_charges;
                 }
             }
-
-            // Phase-2 solve: current geometry (geometric distances) + current CN
-            // Phase-1 qa (topology_charges) and alpeeq remain fixed from init
-            Vector new_charges = m_eeq_solver->calculateFinalCharges(
-                m_atoms, m_geometry_bohr, m_charge,
-                topo.topology_charges,  // Phase-1 qa (fixed)
-                cn,                     // Current CN (geometry-dependent)
-                topo.hybridization, eeq_topo,
-                true,         // Enable dxi/dgam corrections
-                topo.alpeeq   // Charge-dependent alpha from Phase 1
-            );
-
-            if (new_charges.size() == m_atomcount) {
-                m_forcefield->distributeEEQCharges(new_charges);
-                m_charges = new_charges;
-
-                if (CurcumaLogger::get_verbosity() >= 3) {
-                    CurcumaLogger::info("Phase-2 EEQ charges recalculated for current geometry");
-                    CurcumaLogger::param("charge_sum", fmt::format("{:.8f}", new_charges.sum()));
-                }
+            if (do_timing) {
+                t_eeq = std::chrono::duration<double, std::milli>(
+                    std::chrono::high_resolution_clock::now() - t_eeq_start).count();
             }
         }
         if (m_skip_eeq_recalc && CurcumaLogger::get_verbosity() >= 2) {
             CurcumaLogger::info("Phase-2 EEQ recalculation SKIPPED (charge injection mode)");
-        }
-        if (do_timing) {
-            t_eeq = std::chrono::duration<double, std::milli>(
-                std::chrono::high_resolution_clock::now() - t_eeq_start).count();
         }
     }
 
@@ -4329,9 +4343,7 @@ std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector
     }
 
     // Step 1: Compute raw CN (same formula as calculateGFNFFCN)
-    // Claude Generated (Mar 2026, Phase 4b): Parallelized — each atom independent
     Vector cn_raw = Vector::Zero(m_atomcount);
-    #pragma omp parallel for schedule(dynamic, 32)
     for (int i = 0; i < m_atomcount; ++i) {
         double cn_i = 0.0;
         Eigen::Vector3d pos_i = m_geometry_bohr.row(i);
@@ -4353,94 +4365,52 @@ std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector
         dlogdcn[i] = std::exp(cnmax) / (std::exp(cnmax) + std::exp(cn_raw[i]));
     }
 
-    // Step 3: Build sparse dcn via triplet lists
-    // Claude Generated (Mar 2026, Phase 4b): Parallelized with thread-local triplets
-    // Partitioned by outer index i — each thread handles unique i values, no race on diag[i]
-    // but diag[j] with j < i is shared → use atomic accumulation via reduction array
-
-    // Accumulate diagonal terms (many pairs contribute to same diagonal)
-    // Using flat arrays for thread-safe accumulation
+    // Step 3: Build sparse dcn via triplet lists (single-threaded)
     std::vector<double> diag_x(m_atomcount, 0.0);
     std::vector<double> diag_y(m_atomcount, 0.0);
     std::vector<double> diag_z(m_atomcount, 0.0);
 
-    // Thread-local triplet storage to avoid contention
-    int nthreads = 1;
-    #ifdef _OPENMP
-    nthreads = omp_get_max_threads();
-    #endif
-    std::vector<std::vector<std::vector<Eigen::Triplet<double>>>> thread_triplets(
-        nthreads, std::vector<std::vector<Eigen::Triplet<double>>>(3));
-
-    #pragma omp parallel
-    {
-        int tid = 0;
-        #ifdef _OPENMP
-        tid = omp_get_thread_num();
-        #endif
-        auto& local_trips = thread_triplets[tid];
-        const int est_per_thread = (m_atomcount * 40) / nthreads + 100;
-        for (int dim = 0; dim < 3; ++dim) {
-            local_trips[dim].reserve(est_per_thread);
-        }
-
-        #pragma omp for schedule(dynamic, 16)
-        for (int i = 0; i < m_atomcount; ++i) {
-            Eigen::Vector3d ri = m_geometry_bohr.row(i);
-            double dlogdcn_i = dlogdcn[i];
-
-            for (int j = 0; j < i; ++j) {
-                Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
-                double r_ij_sq = r_ij_vec.squaredNorm();
-                if (r_ij_sq > threshold) continue;
-
-                double r_ij = std::sqrt(r_ij_sq);
-                double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
-                double dr = (r_ij - rcov_sum) / rcov_sum;
-                double derfCN_dr = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / rcov_sum;
-
-                Eigen::Vector3d grad_dir = r_ij_vec / r_ij;
-                double dlogdcn_j = dlogdcn[j];
-
-                double comp_x = derfCN_dr * grad_dir[0];
-                double comp_y = derfCN_dr * grad_dir[1];
-                double comp_z = derfCN_dr * grad_dir[2];
-
-                // Diagonal: diag[i] is only written by thread owning i (safe)
-                // diag[j] with j < i may be written by multiple threads → atomic
-                diag_x[i] -= dlogdcn_i * comp_x;
-                diag_y[i] -= dlogdcn_i * comp_y;
-                diag_z[i] -= dlogdcn_i * comp_z;
-
-                #pragma omp atomic
-                diag_x[j] += dlogdcn_j * comp_x;
-                #pragma omp atomic
-                diag_y[j] += dlogdcn_j * comp_y;
-                #pragma omp atomic
-                diag_z[j] += dlogdcn_j * comp_z;
-
-                // Off-diagonal triplets (thread-local, no contention)
-                local_trips[0].emplace_back(i, j, -dlogdcn_j * comp_x);
-                local_trips[0].emplace_back(j, i,  dlogdcn_i * comp_x);
-                local_trips[1].emplace_back(i, j, -dlogdcn_j * comp_y);
-                local_trips[1].emplace_back(j, i,  dlogdcn_i * comp_y);
-                local_trips[2].emplace_back(i, j, -dlogdcn_j * comp_z);
-                local_trips[2].emplace_back(j, i,  dlogdcn_i * comp_z);
-            }
-        }
+    std::vector<std::vector<Eigen::Triplet<double>>> triplets(3);
+    const int est_triplets = m_atomcount * 40 + 100;
+    for (int dim = 0; dim < 3; ++dim) {
+        triplets[dim].reserve(est_triplets);
     }
 
-    // Merge thread-local triplets
-    std::vector<std::vector<Eigen::Triplet<double>>> triplets(3);
-    for (int dim = 0; dim < 3; ++dim) {
-        size_t total = 0;
-        for (int t = 0; t < nthreads; ++t) total += thread_triplets[t][dim].size();
-        total += m_atomcount;  // diagonal entries
-        triplets[dim].reserve(total);
-        for (int t = 0; t < nthreads; ++t) {
-            auto& src = thread_triplets[t][dim];
-            triplets[dim].insert(triplets[dim].end(), std::make_move_iterator(src.begin()),
-                                                      std::make_move_iterator(src.end()));
+    for (int i = 0; i < m_atomcount; ++i) {
+        Eigen::Vector3d ri = m_geometry_bohr.row(i);
+        double dlogdcn_i = dlogdcn[i];
+
+        for (int j = 0; j < i; ++j) {
+            Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+            double r_ij_sq = r_ij_vec.squaredNorm();
+            if (r_ij_sq > threshold) continue;
+
+            double r_ij = std::sqrt(r_ij_sq);
+            double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+            double dr = (r_ij - rcov_sum) / rcov_sum;
+            double derfCN_dr = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / rcov_sum;
+
+            Eigen::Vector3d grad_dir = r_ij_vec / r_ij;
+            double dlogdcn_j = dlogdcn[j];
+
+            double comp_x = derfCN_dr * grad_dir[0];
+            double comp_y = derfCN_dr * grad_dir[1];
+            double comp_z = derfCN_dr * grad_dir[2];
+
+            diag_x[i] -= dlogdcn_i * comp_x;
+            diag_y[i] -= dlogdcn_i * comp_y;
+            diag_z[i] -= dlogdcn_i * comp_z;
+
+            diag_x[j] += dlogdcn_j * comp_x;
+            diag_y[j] += dlogdcn_j * comp_y;
+            diag_z[j] += dlogdcn_j * comp_z;
+
+            triplets[0].emplace_back(i, j, -dlogdcn_j * comp_x);
+            triplets[0].emplace_back(j, i,  dlogdcn_i * comp_x);
+            triplets[1].emplace_back(i, j, -dlogdcn_j * comp_y);
+            triplets[1].emplace_back(j, i,  dlogdcn_i * comp_y);
+            triplets[2].emplace_back(i, j, -dlogdcn_j * comp_z);
+            triplets[2].emplace_back(j, i,  dlogdcn_i * comp_z);
         }
     }
 

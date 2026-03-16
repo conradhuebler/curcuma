@@ -727,6 +727,27 @@ private:
     mutable Vector m_pcg_last_z1;  ///< Previous A⁻¹·b solution (warm start for PCG)
     mutable Vector m_pcg_last_z2;  ///< Previous A⁻¹·1 constraint solution (very stable between steps)
     mutable bool m_pcg_cache_valid = false;  ///< Whether PCG warm-start cache is usable
+
+    // ===== Pre-allocated Buffers for calculateFinalCharges (Claude Generated Mar 2026) =====
+    // Avoid ~26 MB alloc+free per gradient step for large molecules (N=1280).
+    // Buffers are allocated once and reused when atom count stays the same.
+    mutable Matrix m_phase2_distances;   ///< N×N distance buffer
+    mutable Matrix m_phase2_A;           ///< (N+nfrag)×(N+nfrag) augmented matrix buffer
+    mutable Vector m_phase2_rhs;         ///< (N+nfrag) RHS vector buffer
+    mutable int m_phase2_buf_natoms = 0; ///< Atom count for current buffer size
+    mutable int m_phase2_buf_nfrag = 0;  ///< Fragment count for current buffer size
+
+    /// Ensure buffers are large enough. Only reallocates if size changed.
+    void ensurePhase2Buffers(int natoms, int nfrag) const {
+        if (natoms != m_phase2_buf_natoms || nfrag != m_phase2_buf_nfrag) {
+            int m = natoms + nfrag;
+            m_phase2_distances.resize(natoms, natoms);
+            m_phase2_A.resize(m, m);
+            m_phase2_rhs.resize(m);
+            m_phase2_buf_natoms = natoms;
+            m_phase2_buf_nfrag = nfrag;
+        }
+    }
 };
 
 // ===== Parameter Definitions =====

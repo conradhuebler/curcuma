@@ -211,6 +211,26 @@ public:
         m_d3_cn = d3_cn;
     }
 
+    // Claude Generated (Mar 2026): Pointer-based data sharing — threads read from ForceField memory.
+    // Eliminates per-step O(N) vector copies for geometry, charges, CN.
+    // Fallback: if pointer not set, uses the local copy (for UFF/QMDFF compatibility).
+    void setGeometryPtr(const Matrix* ptr) { m_geometry_ptr = ptr; }
+    void setEEQChargesPtr(const Vector* ptr) { m_eeq_charges_ptr = ptr; }
+    void setTopologyChargesPtr(const Vector* ptr) { m_topology_charges_ptr = ptr; }
+    void setD3CNPtr(const Vector* ptr) { m_d3_cn_ptr = ptr; }
+
+    /// Reset per-step accumulators without copying geometry. Used with pointer-sharing.
+    void resetForStep(bool gradient) {
+        m_calculate_gradient = gradient;
+        int n = m_geometry_ptr ? m_geometry_ptr->rows() : m_geometry.rows();
+        m_gradient = Eigen::MatrixXd::Zero(n, 3);
+        m_dEdcn = Vector::Zero(n);
+        m_dEdcn_bond = Vector::Zero(n);
+        if (m_store_gradient_components) {
+            initGradientComponents(n);
+        }
+    }
+
     // Claude Generated (Mar 2026, Phase 1a): setCN/setCNF/setCNDerivatives removed.
     // CN, CNF, dcn are stored only in ForceField (never read in threads).
 
@@ -498,6 +518,23 @@ protected:
     // Claude Generated (Jan 18, 2026): D3 coordination numbers for dynamic r0 calculation
     // These are recalculated from current geometry at each Calculate() call
     Vector m_d3_cn;
+
+    // Claude Generated (Mar 2026): Pointer-based data sharing — read-only pointers to ForceField memory.
+    // When set, threads read directly from ForceField storage (zero-copy per step).
+    // When nullptr, threads fall back to their local copy members (UFF/QMDFF path).
+    const Matrix* m_geometry_ptr = nullptr;
+    const Vector* m_eeq_charges_ptr = nullptr;
+    const Vector* m_topology_charges_ptr = nullptr;
+    const Vector* m_d3_cn_ptr = nullptr;
+
+    /// Access geometry: prefer pointer, fall back to local copy
+    inline const Matrix& geom() const { return m_geometry_ptr ? *m_geometry_ptr : m_geometry; }
+    /// Access EEQ charge for atom i
+    inline double eeq_q(int i) const { return m_eeq_charges_ptr ? (*m_eeq_charges_ptr)(i) : m_eeq_charges(i); }
+    /// Access topology charge for atom i
+    inline double topo_q(int i) const { return m_topology_charges_ptr ? (*m_topology_charges_ptr)(i) : m_topology_charges(i); }
+    /// Access D3 CN for atom i
+    inline double d3cn(int i) const { return m_d3_cn_ptr ? (*m_d3_cn_ptr)(i) : m_d3_cn(i); }
 
     // Claude Generated (Mar 2026, Phase 1a): CN/CNF/dcn removed from threads — never read here.
     // They are stored only in ForceField (used after thread completion for chain-rule gradients).

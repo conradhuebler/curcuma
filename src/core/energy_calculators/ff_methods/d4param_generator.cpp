@@ -999,10 +999,8 @@ void D4ParameterGenerator::precomputeGaussianWeights()
 
     m_gaussian_weights.resize(m_atoms.size());
 
-    // Claude Generated (March 2026): OpenMP parallelization for large systems
-    // Each atom's weights are independent — perfect for data-parallel execution
+    // Per-step: OpenMP removed (Mar 2026) — overhead exceeds benefit for O(N×M) with M≈7
     int natoms_gw = static_cast<int>(m_atoms.size());
-    #pragma omp parallel for schedule(static)
     for (int i = 0; i < natoms_gw; ++i) {
         int Zi = m_atoms[i];
         int elem_i = Zi - 1;  // Convert to 0-based
@@ -1234,9 +1232,8 @@ void D4ParameterGenerator::computeGaussianWeightDerivatives()
 
     m_gaussian_weight_derivatives.resize(m_atoms.size());
 
-    // Claude Generated (March 2026): OpenMP parallelization — each atom independent
+    // Per-step: OpenMP removed (Mar 2026) — overhead exceeds benefit for O(N×M)
     int natoms_gwd = static_cast<int>(m_atoms.size());
-    #pragma omp parallel for schedule(static)
     for (int i = 0; i < natoms_gwd; ++i) {
         int Zi = m_atoms[i];
         int elem_i = Zi - 1;
@@ -1296,23 +1293,8 @@ void D4ParameterGenerator::computeDC6DCN()
     int natoms = static_cast<int>(m_atoms.size());
     m_dc6dcn = Matrix::Zero(natoms, natoms);
 
-    // Claude Generated (March 2026): OpenMP parallelization of O(N²) dc6dcn computation
-    // Each row i writes to m_dc6dcn(i,j) and m_dc6dcn(j,i) — but j>=i means no write conflict
-    // on the (i,j) entry. However, m_dc6dcn(j,i) could conflict with another thread processing row j.
-    // Solution: parallelize outer loop, each thread computes its row's contributions to a
-    // thread-local buffer, then merge. Simpler: since j>=i, row i writes (i,j) and (j,i) —
-    // use atomic or split into two passes. Simplest correct approach: parallel for on outer i,
-    // each thread writes (i,j) for j>=i (upper triangle), then symmetrize.
-    // Actually the original already writes both (i,j) and (j,i), so we use a temporary upper
-    // triangle storage per thread and merge after.
-
-    // Approach: Each thread computes dc6_di and dc6_dj for its rows, stores in dc6dcn directly.
-    // Since row i writes m_dc6dcn(i,j) = dc6_di (row i, safe) and m_dc6dcn(j,i) = dc6_dj
-    // (row j, could conflict). Use two separate matrices to avoid conflicts.
-    Matrix dc6dcn_upper = Matrix::Zero(natoms, natoms);  // dc6dcn(i,j) = dC6(i,j)/dCN(i) for j>=i
-    Matrix dc6dcn_lower = Matrix::Zero(natoms, natoms);  // dc6dcn(j,i) = dC6(i,j)/dCN(j) for j>=i
-
-    #pragma omp parallel for schedule(dynamic)
+    // Per-step: OpenMP removed (Mar 2026) — sequential is safe and avoids fork/join overhead.
+    // Without OpenMP, write directly to m_dc6dcn (no upper/lower split needed).
     for (int i = 0; i < natoms; ++i) {
         int Zi = m_atoms[i];
         int elem_i = Zi - 1;
@@ -1335,7 +1317,6 @@ void D4ParameterGenerator::computeDC6DCN()
 
             int nref_j = static_cast<int>(gw_j.size());
 
-            // Base offset in flat C6 cache
             const size_t base_ij = static_cast<size_t>(elem_i) * MAX_ELEM * MAX_REF * MAX_REF
                                  + static_cast<size_t>(elem_j) * MAX_REF * MAX_REF;
 
@@ -1353,21 +1334,11 @@ void D4ParameterGenerator::computeDC6DCN()
                 }
             }
 
-            dc6dcn_upper(i, j) = dc6_di;
-            dc6dcn_lower(i, j) = dc6_dj;
-        }
-    }
-
-    // Assemble final dc6dcn: m_dc6dcn(i,j) = dC6(i,j)/dCN(i)
-    // Upper triangle stored dc6_di at (i,j), dc6_dj at (i,j) in lower matrix
-    // m_dc6dcn(i,j) = dc6dcn_upper(i,j) for j>=i, dc6dcn_lower(j,i) for j<i
-    for (int i = 0; i < natoms; ++i) {
-        for (int j = i; j < natoms; ++j) {
             if (i == j) {
-                m_dc6dcn(i, i) = dc6dcn_upper(i, i) + dc6dcn_lower(i, i);
+                m_dc6dcn(i, i) = dc6_di + dc6_dj;
             } else {
-                m_dc6dcn(i, j) = dc6dcn_upper(i, j);  // dC6(i,j)/dCN(i)
-                m_dc6dcn(j, i) = dc6dcn_lower(i, j);  // dC6(i,j)/dCN(j)
+                m_dc6dcn(i, j) = dc6_di;  // dC6(i,j)/dCN(i)
+                m_dc6dcn(j, i) = dc6_dj;  // dC6(i,j)/dCN(j)
             }
         }
     }
