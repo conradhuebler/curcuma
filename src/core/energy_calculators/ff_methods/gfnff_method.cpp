@@ -645,47 +645,35 @@ double GFNFF::Calculation(bool gradient)
                             ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
             }
 
-            // Claude Generated (Mar 2026, Phase 4): Run dcn, dc6dcn, EEQ in parallel via CxxThreadPool
-            // All three tasks depend only on cn/cn_vec (computed above) and are independent of each other.
+            // Claude Generated (Mar 2026): Phase A — sequential calls, each internally multi-threaded
+            // Each function parallelises its O(N²) loops with std::thread, using all available cores.
+            // Better than 3-way CxxThreadPool: each task gets ALL threads instead of just one.
+            int total_threads = m_parameters.value("threads", 1);
+
             std::vector<SpMatrix> dcn;
             Vector new_charges;
 
             auto t_phase_a = std::chrono::high_resolution_clock::now();
 
-            PrepTaskThread task_dcn("dcn", [&]() {
-                dcn = calculateCoordinationNumberDerivatives(cn);
-            });
+            dcn = calculateCoordinationNumberDerivatives(cn, 1600.0, total_threads);
 
-            PrepTaskThread task_dc6("dc6dcn", [&]() {
-                if (m_d4_generator) {
-                    m_d4_generator->updateCNValuesForGradient(cn_vec);
-                }
-            });
+            if (m_d4_generator) {
+                m_d4_generator->updateCNValuesForGradient(cn_vec, total_threads);
+            }
 
-            PrepTaskThread task_eeq("eeq", [&]() {
-                if (do_eeq) {
-                    new_charges = m_eeq_solver->calculateFinalCharges(
-                        m_atoms, m_geometry_bohr, m_charge,
-                        topo_ptr->topology_charges, cn,
-                        topo_ptr->hybridization, eeq_topo,
-                        true, topo_ptr->alpeeq);
-                }
-            });
-
-            CxxThreadPool pool;
-            pool.setProgressBar(CxxThreadPool::ProgressBarType::None);
-            pool.setActiveThreadCount(3);
-            pool.addThread(&task_dcn);
-            pool.addThread(&task_dc6);
-            pool.addThread(&task_eeq);
-            pool.StartAndWait();
+            if (do_eeq) {
+                new_charges = m_eeq_solver->calculateFinalCharges(
+                    m_atoms, m_geometry_bohr, m_charge,
+                    topo_ptr->topology_charges, cn,
+                    topo_ptr->hybridization, eeq_topo,
+                    true, topo_ptr->alpeeq, total_threads);
+            }
 
             if (do_timing) {
                 auto t_now = std::chrono::high_resolution_clock::now();
-                // Phase A wall time (all three ran in parallel)
                 t_dcn = std::chrono::duration<double, std::milli>(t_now - t_phase_a).count();
-                t_dc6dcn = 0;  // Included in parallel wall time
-                t_eeq = 0;    // Included in parallel wall time
+                t_dc6dcn = 0;
+                t_eeq = 0;
             }
 
             // Distribute results (sequential, fast pointer operations)
@@ -699,7 +687,7 @@ double GFNFF::Calculation(bool gradient)
             }
 
             if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info("Phase A complete: dcn + dc6dcn + EEQ (parallel)");
+                CurcumaLogger::info(fmt::format("Phase A complete: dcn + dc6dcn + EEQ (sequential, {} threads internal)", total_threads));
             }
         } else {
             // Energy-only: CN distribution + sequential EEQ
@@ -4320,14 +4308,11 @@ bool GFNFF::loadGFNFFCharges()
 // Advanced GFN-FF Parameter Generation (Placeholder implementations)
 // =================================================================================
 
-std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, double threshold) const
+std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, double threshold, int num_threads) const
 {
     // Claude Generated (Mar 2026, Phase 3): Sparse dcn matrices
-    // GFN-FF Coordination Number Derivatives using D3-style Error Function
+    // Claude Generated (Mar 2026): Internal std::thread parallelisation for O(N²) loops
     // Reference: external/gfnff/src/gfnff_cn.f90:94-117
-    //
-    // Sparse format: only atom pairs within CN cutoff have non-zero entries (~2% fill at 1000 atoms).
-    // Saves O(N²) → O(N·k) memory and speeds up chain-rule MatVec.
 
     const double kn = -7.5;
     const double cnmax = 4.4;
@@ -4336,27 +4321,51 @@ std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector
     const double k_scaled = 4.0 / 3.0;
 
     // Pre-compute covalent radii in Bohr with 4/3 scaling
-    // Reference: Fortran gfnff_cn.f90:85 uses param%rcov = covalentRadD3(1:86)
     std::vector<double> rcov_bohr(m_atomcount);
     for (int i = 0; i < m_atomcount; ++i) {
         rcov_bohr[i] = k_scaled * CNCalculator::getCovalentRadius(m_atoms[i]) * ANG2BOHR;
     }
 
-    // Step 1: Compute raw CN (same formula as calculateGFNFFCN)
+    // Step 1: Compute raw CN — parallelise over atoms (each atom independent)
     Vector cn_raw = Vector::Zero(m_atomcount);
-    for (int i = 0; i < m_atomcount; ++i) {
-        double cn_i = 0.0;
-        Eigen::Vector3d pos_i = m_geometry_bohr.row(i);
-        for (int j = 0; j < m_atomcount; ++j) {
-            if (i == j) continue;
-            double distance_sq = (pos_i - m_geometry_bohr.row(j).transpose()).squaredNorm();
-            if (distance_sq > threshold) continue;
-            double distance = std::sqrt(distance_sq);
-            double r_cov = rcov_bohr[i] + rcov_bohr[j];
-            double dr = (distance - r_cov) / r_cov;
-            cn_i += 0.5 * (1.0 + std::erf(kn * dr));
+    if (num_threads > 1 && m_atomcount > 64) {
+        int T = std::min(num_threads, m_atomcount);
+        std::vector<std::thread> threads(T - 1);
+        auto cn_worker = [&](int t_id) {
+            for (int i = t_id; i < m_atomcount; i += T) {
+                double cn_i = 0.0;
+                Eigen::Vector3d pos_i = m_geometry_bohr.row(i);
+                for (int j = 0; j < m_atomcount; ++j) {
+                    if (i == j) continue;
+                    double distance_sq = (pos_i - m_geometry_bohr.row(j).transpose()).squaredNorm();
+                    if (distance_sq > threshold) continue;
+                    double distance = std::sqrt(distance_sq);
+                    double r_cov = rcov_bohr[i] + rcov_bohr[j];
+                    double dr = (distance - r_cov) / r_cov;
+                    cn_i += 0.5 * (1.0 + std::erf(kn * dr));
+                }
+                cn_raw[i] = cn_i;
+            }
+        };
+        for (int t = 1; t < T; ++t)
+            threads[t - 1] = std::thread(cn_worker, t);
+        cn_worker(0);
+        for (auto& th : threads) th.join();
+    } else {
+        for (int i = 0; i < m_atomcount; ++i) {
+            double cn_i = 0.0;
+            Eigen::Vector3d pos_i = m_geometry_bohr.row(i);
+            for (int j = 0; j < m_atomcount; ++j) {
+                if (i == j) continue;
+                double distance_sq = (pos_i - m_geometry_bohr.row(j).transpose()).squaredNorm();
+                if (distance_sq > threshold) continue;
+                double distance = std::sqrt(distance_sq);
+                double r_cov = rcov_bohr[i] + rcov_bohr[j];
+                double dr = (distance - r_cov) / r_cov;
+                cn_i += 0.5 * (1.0 + std::erf(kn * dr));
+            }
+            cn_raw[i] = cn_i;
         }
-        cn_raw[i] = cn_i;
     }
 
     // Step 2: dlogCN/dcn for each atom (Fortran create_dlogCN)
@@ -4365,7 +4374,106 @@ std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector
         dlogdcn[i] = std::exp(cnmax) / (std::exp(cnmax) + std::exp(cn_raw[i]));
     }
 
-    // Step 3: Build sparse dcn via triplet lists (single-threaded)
+    // Step 3: Build sparse dcn via triplet lists
+    // Parallelise with thread-local triplets + diag arrays, merge after join
+    if (num_threads > 1 && m_atomcount > 64) {
+        int T = std::min(num_threads, m_atomcount);
+
+        // Thread-local storage
+        struct ThreadLocalData {
+            std::vector<std::vector<Eigen::Triplet<double>>> triplets{3};
+            std::vector<double> diag_x, diag_y, diag_z;
+            ThreadLocalData(int N) : diag_x(N, 0.0), diag_y(N, 0.0), diag_z(N, 0.0) {
+                int est = N * 40 / 4 + 100;
+                for (int d = 0; d < 3; ++d) triplets[d].reserve(est);
+            }
+        };
+        std::vector<ThreadLocalData> tld;
+        tld.reserve(T);
+        for (int t = 0; t < T; ++t) tld.emplace_back(m_atomcount);
+
+        auto dcn_worker = [&](int t_id) {
+            auto& local = tld[t_id];
+            // Interleaved row assignment for triangular load-balancing
+            for (int i = t_id; i < m_atomcount; i += T) {
+                Eigen::Vector3d ri = m_geometry_bohr.row(i);
+                double dlogdcn_i = dlogdcn[i];
+
+                for (int j = 0; j < i; ++j) {
+                    Eigen::Vector3d r_ij_vec = m_geometry_bohr.row(j).transpose() - ri;
+                    double r_ij_sq = r_ij_vec.squaredNorm();
+                    if (r_ij_sq > threshold) continue;
+
+                    double r_ij = std::sqrt(r_ij_sq);
+                    double rcov_sum = rcov_bohr[i] + rcov_bohr[j];
+                    double dr = (r_ij - rcov_sum) / rcov_sum;
+                    double derfCN_dr = (kn / sqrtpi) * std::exp(-kn * kn * dr * dr) / rcov_sum;
+
+                    Eigen::Vector3d grad_dir = r_ij_vec / r_ij;
+                    double dlogdcn_j = dlogdcn[j];
+
+                    double comp_x = derfCN_dr * grad_dir[0];
+                    double comp_y = derfCN_dr * grad_dir[1];
+                    double comp_z = derfCN_dr * grad_dir[2];
+
+                    local.diag_x[i] -= dlogdcn_i * comp_x;
+                    local.diag_y[i] -= dlogdcn_i * comp_y;
+                    local.diag_z[i] -= dlogdcn_i * comp_z;
+
+                    local.diag_x[j] += dlogdcn_j * comp_x;
+                    local.diag_y[j] += dlogdcn_j * comp_y;
+                    local.diag_z[j] += dlogdcn_j * comp_z;
+
+                    local.triplets[0].emplace_back(i, j, -dlogdcn_j * comp_x);
+                    local.triplets[0].emplace_back(j, i,  dlogdcn_i * comp_x);
+                    local.triplets[1].emplace_back(i, j, -dlogdcn_j * comp_y);
+                    local.triplets[1].emplace_back(j, i,  dlogdcn_i * comp_y);
+                    local.triplets[2].emplace_back(i, j, -dlogdcn_j * comp_z);
+                    local.triplets[2].emplace_back(j, i,  dlogdcn_i * comp_z);
+                }
+            }
+        };
+
+        std::vector<std::thread> threads(T - 1);
+        for (int t = 1; t < T; ++t)
+            threads[t - 1] = std::thread(dcn_worker, t);
+        dcn_worker(0);
+        for (auto& th : threads) th.join();
+
+        // Merge: concatenate triplets, reduce diag arrays
+        std::vector<std::vector<Eigen::Triplet<double>>> merged_triplets(3);
+        std::vector<double> diag_x(m_atomcount, 0.0), diag_y(m_atomcount, 0.0), diag_z(m_atomcount, 0.0);
+
+        for (int t = 0; t < T; ++t) {
+            for (int d = 0; d < 3; ++d) {
+                merged_triplets[d].insert(merged_triplets[d].end(),
+                    tld[t].triplets[d].begin(), tld[t].triplets[d].end());
+            }
+            for (int i = 0; i < m_atomcount; ++i) {
+                diag_x[i] += tld[t].diag_x[i];
+                diag_y[i] += tld[t].diag_y[i];
+                diag_z[i] += tld[t].diag_z[i];
+            }
+        }
+
+        // Add diagonal entries
+        for (int i = 0; i < m_atomcount; ++i) {
+            if (diag_x[i] != 0.0) merged_triplets[0].emplace_back(i, i, diag_x[i]);
+            if (diag_y[i] != 0.0) merged_triplets[1].emplace_back(i, i, diag_y[i]);
+            if (diag_z[i] != 0.0) merged_triplets[2].emplace_back(i, i, diag_z[i]);
+        }
+
+        // Build sparse matrices
+        std::vector<SpMatrix> dcn(3);
+        for (int dim = 0; dim < 3; ++dim) {
+            dcn[dim].resize(m_atomcount, m_atomcount);
+            dcn[dim].setFromTriplets(merged_triplets[dim].begin(), merged_triplets[dim].end());
+            dcn[dim].makeCompressed();
+        }
+        return dcn;
+    }
+
+    // Sequential path (num_threads <= 1 or small molecule)
     std::vector<double> diag_x(m_atomcount, 0.0);
     std::vector<double> diag_y(m_atomcount, 0.0);
     std::vector<double> diag_z(m_atomcount, 0.0);

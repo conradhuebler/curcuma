@@ -86,7 +86,7 @@ public:
 
     // Claude Generated (Feb 15, 2026): dc6dcn computation for dispersion CN gradient
     // Reference: Fortran gfnff_gdisp0.f90:174-210, 262-305
-    void updateCNValuesForGradient(const std::vector<double>& cn);
+    void updateCNValuesForGradient(const std::vector<double>& cn, int num_threads = 1);
     const Matrix& getDC6DCN() const { return m_dc6dcn; }
 
     // Claude Generated (March 2026): Public access for ATM triple generation without JSON
@@ -101,7 +101,7 @@ private:
     double getEffectiveC6(int atom_i, int atom_j) const;
 
     // Claude Generated (Dec 27, 2025): Weight caching optimization
-    void precomputeGaussianWeights();
+    void precomputeGaussianWeights(int num_threads = 1);
 
     // Claude Generated (Dec 27, 2025): C6 reference matrix pre-computation
     void precomputeC6ReferenceMatrix();
@@ -171,8 +171,8 @@ private:
     std::vector<std::vector<int>> m_dominant_refs;  // [atom_idx] → list of significant ref indices
 
     // Claude Generated (Feb 15, 2026): dc6dcn computation helpers
-    void computeGaussianWeightDerivatives();
-    void computeDC6DCN();
+    void computeGaussianWeightDerivatives(int num_threads = 1);
+    void computeDC6DCN(int num_threads = 1);
 
     // Claude Generated (Feb 15, 2026): Gaussian weight derivatives and dc6dcn matrix
     // dgwdcn[atom_idx][ref_idx] = d(normalized_weight(ref))/d(CN(atom))

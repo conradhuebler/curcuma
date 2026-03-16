@@ -220,7 +220,8 @@ public:
         const std::vector<int>& hybridization,
         const std::optional<TopologyInput>& topology = std::nullopt,
         bool use_corrections = false,  // CRITICAL FIX (Jan 4, 2026): default false to match gfnff_final.cpp
-        const std::optional<Vector>& alpeeq = std::nullopt  // Claude Generated (January 2026): Charge-dependent alpha
+        const std::optional<Vector>& alpeeq = std::nullopt,  // Claude Generated (January 2026): Charge-dependent alpha
+        int num_threads = 1  // Claude Generated (Mar 2026): Internal parallelisation
     );
 
     /**

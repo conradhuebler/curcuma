@@ -1057,7 +1057,7 @@ private:
      * @param threshold Coordination number threshold (squared distance in Bohr²)
      * @return 3D tensor of CN derivatives (3 x natoms x natoms)
      */
-    std::vector<SpMatrix> calculateCoordinationNumberDerivatives(const Vector& cn, double threshold = 1600.0) const;  // 40.0² = 1600 (squared)
+    std::vector<SpMatrix> calculateCoordinationNumberDerivatives(const Vector& cn, double threshold = 1600.0, int num_threads = 1) const;  // 40.0² = 1600 (squared)
 
     /**
      * @brief Determine hybridization states for all atoms

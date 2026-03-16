@@ -39,9 +39,11 @@
 #include "src/core/elements.h"
 
 #include <Eigen/Dense>
+#include <atomic>
 #include <cmath>
 #include <algorithm>
 #include <queue>
+#include <thread>
 #include <fmt/format.h>
 
 #ifdef _OPENMP
@@ -2030,7 +2032,8 @@ Vector EEQSolver::calculateFinalCharges(
     const std::vector<int>& hybridization,
     const std::optional<TopologyInput>& topology,
     bool use_corrections,
-    const std::optional<Vector>& alpeeq)
+    const std::optional<Vector>& alpeeq,
+    int num_threads)
 {
     const int natoms = atoms.size();
     const double TSQRT2PI = 0.797884560802866;  // sqrt(2/π)
@@ -2107,20 +2110,38 @@ Vector EEQSolver::calculateFinalCharges(
     ensurePhase2Buffers(natoms, nfrag);
     m_phase2_distances.setZero();
 
-    bool atoms_too_close = false;
-    for (int i = 0; i < natoms; ++i) {
-        for (int j = 0; j < i; ++j) {
-            double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
-            double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
-            double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
-            double r = std::sqrt(dx*dx + dy*dy + dz*dz);
-
-            if (r < 1e-10) {
-                atoms_too_close = true;
+    // Claude Generated (Mar 2026): Internal std::thread parallelisation for O(N²) distance matrix
+    std::atomic<bool> atoms_too_close{false};
+    if (num_threads > 1 && natoms > 64) {
+        int T = std::min(num_threads, natoms);
+        auto dist_worker = [&](int t_id) {
+            for (int i = t_id; i < natoms; i += T) {
+                for (int j = 0; j < i; ++j) {
+                    double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
+                    double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
+                    double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
+                    double r = std::sqrt(dx*dx + dy*dy + dz*dz);
+                    if (r < 1e-10) atoms_too_close.store(true, std::memory_order_relaxed);
+                    m_phase2_distances(i, j) = r;
+                    m_phase2_distances(j, i) = r;
+                }
             }
-
-            m_phase2_distances(i, j) = r;
-            m_phase2_distances(j, i) = r;
+        };
+        std::vector<std::thread> threads(T - 1);
+        for (int t = 1; t < T; ++t) threads[t - 1] = std::thread(dist_worker, t);
+        dist_worker(0);
+        for (auto& th : threads) th.join();
+    } else {
+        for (int i = 0; i < natoms; ++i) {
+            for (int j = 0; j < i; ++j) {
+                double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
+                double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
+                double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
+                double r = std::sqrt(dx*dx + dy*dy + dz*dz);
+                if (r < 1e-10) atoms_too_close.store(true, std::memory_order_relaxed);
+                m_phase2_distances(i, j) = r;
+                m_phase2_distances(j, i) = r;
+            }
         }
     }
     if (atoms_too_close) {
@@ -2234,16 +2255,35 @@ Vector EEQSolver::calculateFinalCharges(
         Vector& x = m_phase2_rhs;
 
         // 1+2. Build Coulomb matrix (off-diagonal + diagonal)
-        for (int i = 0; i < natoms; ++i) {
-            // Diagonal: hardness + self-Coulomb
-            A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
-            // Off-diagonal: erf-damped Coulomb
-            for (int j = 0; j < i; ++j) {
-                double r = distances(i, j);
-                double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
-                double coulomb = std::erf(gamma_ij * r) / r;
-                A(i, j) = coulomb;
-                A(j, i) = coulomb;
+        // Claude Generated (Mar 2026): Internal std::thread parallelisation for O(N²) A-matrix
+        if (num_threads > 1 && natoms > 64) {
+            int T = std::min(num_threads, natoms);
+            auto amat_worker = [&](int t_id) {
+                for (int i = t_id; i < natoms; i += T) {
+                    A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
+                    for (int j = 0; j < i; ++j) {
+                        double r = distances(i, j);
+                        double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
+                        double coulomb = std::erf(gamma_ij * r) / r;
+                        A(i, j) = coulomb;
+                        A(j, i) = coulomb;
+                    }
+                }
+            };
+            std::vector<std::thread> threads(T - 1);
+            for (int t = 1; t < T; ++t) threads[t - 1] = std::thread(amat_worker, t);
+            amat_worker(0);
+            for (auto& th : threads) th.join();
+        } else {
+            for (int i = 0; i < natoms; ++i) {
+                A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
+                for (int j = 0; j < i; ++j) {
+                    double r = distances(i, j);
+                    double gamma_ij = 1.0 / std::sqrt(alpha_corrected(i) + alpha_corrected(j));
+                    double coulomb = std::erf(gamma_ij * r) / r;
+                    A(i, j) = coulomb;
+                    A(j, i) = coulomb;
+                }
             }
         }
 
