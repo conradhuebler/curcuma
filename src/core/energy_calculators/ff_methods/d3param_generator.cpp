@@ -713,6 +713,21 @@ int D3ParameterGenerator::getNumberofReferences(int atom) const
 // Claude Generated Phase 3.1: Factory Methods
 // Provide convenient creation with standard D3 parameter sets
 
+D3ParameterGenerator D3ParameterGenerator::createForGFN1()
+{
+    // Claude Generated: GFN1-xTB D3(BJ) parameters
+    // Reference: TBLite gfn1-xtb.toml, Grimme et al. JCTC 2017, 13, 1989
+    json config_json;
+    config_json["d3_s6"] = 1.0;
+    config_json["d3_s8"] = 2.4;
+    config_json["d3_a1"] = 0.63;
+    config_json["d3_a2"] = 5.0;
+    config_json["d3_alp"] = 14.0;
+
+    ConfigManager config("d3param", config_json);
+    return D3ParameterGenerator(config);
+}
+
 D3ParameterGenerator D3ParameterGenerator::createForGFNFF()
 {
     // GFN-FF D3-BJ parameters (Spicher & Grimme, J. Chem. Theory Comput. 2020)
@@ -823,7 +838,9 @@ D3ParameterGenerator D3ParameterGenerator::createForMethod(const std::string& me
     std::string lower_method = method;
     std::transform(lower_method.begin(), lower_method.end(), lower_method.begin(), ::tolower);
 
-    if (lower_method == "gfnff") {
+    if (lower_method == "gfn1" || lower_method == "gfn1-xtb") {
+        return createForGFN1();
+    } else if (lower_method == "gfnff") {
         return createForGFNFF();
     } else if (lower_method == "uff-d3" || lower_method == "uffd3") {
         return createForUFFD3();

@@ -51,6 +51,14 @@ public:
 
     // Factory methods for standard D3 parameter sets (Claude Generated Phase 3.1)
     /**
+     * Create D3ParameterGenerator with GFN1-xTB D3(BJ) parameters
+     * Parameters: s6=1.0, s8=2.4, a1=0.63, a2=5.0 (Bohr)
+     * Reference: Grimme et al. JCTC 2017, 13, 1989 (gfn1-xtb.toml)
+     * Claude Generated: Native D3 for GFN1
+     */
+    static D3ParameterGenerator createForGFN1();
+
+    /**
      * Create D3ParameterGenerator with GFN-FF parameters
      * Parameters: s6=1.0, s8=2.85, a1=0.80, a2=4.60 (Bohr)
      * Reference: Spicher & Grimme, J. Chem. Theory Comput. 2020

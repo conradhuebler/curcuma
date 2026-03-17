@@ -40,6 +40,21 @@ option(USE_BLAS
 option(USE_MKL
     "Enable MKL" OFF)
 
+# BLAS/LAPACK discovery for Eigen optimization
+# Claude Generated (March 2026): Enable BLAS/LAPACK for native QM methods
+if(USE_BLAS AND NOT USE_MKL)
+    find_package(BLAS QUIET)
+    find_package(LAPACK QUIET)
+    if(BLAS_FOUND)
+        message(STATUS "BLAS found: ${BLAS_LIBRARIES}")
+    else()
+        message(WARNING "BLAS requested via USE_BLAS but not found - using Eigen internal implementations")
+    endif()
+    if(LAPACK_FOUND)
+        message(STATUS "LAPACK found: ${LAPACK_LIBRARIES}")
+    endif()
+endif()
+
 option(CURCUMA_DEBUG
     "Enable debug output and timing" OFF)
 
@@ -372,6 +387,16 @@ if(USE_D4)
     target_compile_definitions(curcuma_core PRIVATE USE_D4)
 endif()
 
+# Claude Generated (March 2026): BLAS/MKL compile definitions for native QM methods
+# Enables EIGEN_USE_BLAS/EIGEN_USE_LAPACKE optimizations in curcuma_eigen_config.h
+if(USE_BLAS)
+    target_compile_definitions(curcuma_core PRIVATE USE_BLAS)
+endif()
+
+if(USE_MKL)
+    target_compile_definitions(curcuma_core PRIVATE USE_MKL)
+endif()
+
 add_library(curcuma_cap  ${curcuma_cap_SRC})
 
 # Enable precompiled headers for faster compilation
@@ -418,7 +443,7 @@ if(USE_ULYSSES)
 endif()
 
 if(USE_BLAS)
-    target_link_libraries(ulysses_lib blas)
+    target_link_libraries(ulysses_lib ${BLAS_LIBRARIES})
 endif()
 if(USE_MKL)
     target_link_libraries(ulysses_lib -m64 -I${MKLROOT}/include  -Wl,--no-as-needed -L${MKLROOT}/lib -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core)
@@ -679,8 +704,18 @@ endif()
 target_link_libraries(curcuma_core pthread fmt::fmt-header-only )
 target_link_libraries(curcuma_cap pthread fmt::fmt-header-only )
 
+# Claude Generated (March 2026): Link BLAS/LAPACK to curcuma_core for native QM methods
+# This enables EIGEN_USE_BLAS/EIGEN_USE_LAPACKE optimizations
 if(USE_BLAS)
-    target_link_libraries(curcuma_core blas)
+    if(BLAS_FOUND)
+        target_link_libraries(curcuma_core ${BLAS_LIBRARIES})
+        if(LAPACK_FOUND)
+            target_link_libraries(curcuma_core ${LAPACK_LIBRARIES})
+        endif()
+    else()
+        # Fallback to hardcoded library name if find_package failed but library exists
+        target_link_libraries(curcuma_core blas)
+    endif()
 endif()
 if(USE_MKL)
     target_link_libraries(curcuma_core -m64 -I${MKLROOT}/include  -Wl,--no-as-needed -L${MKLROOT}/lib -lmkl_intel_lp64 -lmkl_gnu_thread -lmkl_core)

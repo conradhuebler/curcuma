@@ -1170,4 +1170,13 @@ constexpr double GFN2_D4_S9 = 1.0;  // Three-body dispersion scaling
 
 } // namespace GFN2Params
 
+// GFN1-xTB D3(BJ) dispersion parameters
+// Reference: TBLite gfn1-xtb.toml, Grimme et al. JCTC 2017, 13, 1989
+namespace GFN1Params {
+constexpr double GFN1_D3_S6 = 1.0;
+constexpr double GFN1_D3_S8 = 2.4;
+constexpr double GFN1_D3_A1 = 0.63;
+constexpr double GFN1_D3_A2 = 5.0;
+} // namespace GFN1Params
+
 #endif // GFN2_XTB_PARAMS_HPP

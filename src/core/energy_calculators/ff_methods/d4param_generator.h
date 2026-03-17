@@ -74,6 +74,10 @@ public:
     void updateCNValuesForGradient(const std::vector<double>& cn);
     const Matrix& getDC6DCN() const { return m_dc6dcn; }
 
+    // Charge-weighted C6 using EEQ charges and Gaussian weighting (Dec 2025)
+    // Claude Generated: Made public for native D4 fallback in GFN2
+    double getChargeWeightedC6(int Zi, int Zj, size_t atom_i, size_t atom_j) const;
+
 private:
     void initializeReferenceData();
     void calculateFrequencyDependentPolarizabilities();
@@ -87,11 +91,6 @@ private:
     // Claude Generated (Dec 27, 2025): C6 reference matrix pre-computation
     void precomputeC6ReferenceMatrix();
     double computeC6Reference(int elem_i, int elem_j, int ref_i, int ref_j) const;
-
-    // NEW: Charge-weighted C6 using EEQ charges and Gaussian weighting (Dec 2025)
-    // Phase 2.2 (December 2025): CN+charge combined weighting
-    // Claude Generated (Dec 27, 2025): Now uses cached weights and C6 reference for performance
-    double getChargeWeightedC6(int Zi, int Zj, size_t atom_i, size_t atom_j) const;
 
     // ATM three-body helper (Claude Generated 2025)
     double calculateTripleScale(int i, int j, int k) const;
