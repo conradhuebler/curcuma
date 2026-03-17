@@ -33,6 +33,8 @@
 #include "qm_driver.h"
 #include "STOIntegrals.hpp"
 
+#include "src/core/energy_calculators/ff_methods/d3param_generator.h"
+
 #include <Eigen/Dense>
 #include <memory>
 #include <vector>
@@ -126,13 +128,17 @@ private:
     Matrix m_density;
     Matrix m_mo;         ///< Molecular orbital coefficients
     Vector m_energies;   ///< Orbital energies
+    Matrix m_S_inv_sqrt; ///< Cached S^(-1/2) for SCF (computed once)
 
     // Energy components
     double m_energy_electronic;
     double m_energy_repulsion;
     double m_energy_coulomb;
-    double m_energy_dispersion;   // D3 stub
+    double m_energy_dispersion;   // D3(BJ) dispersion
     double m_energy_halogen_bond;  // XB correction
+
+    // Claude Generated: Native D3(BJ) dispersion calculator
+    mutable std::unique_ptr<D3ParameterGenerator> m_d3;
 
     // SCF parameters
     int m_scf_max_iterations;

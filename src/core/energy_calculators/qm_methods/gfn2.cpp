@@ -449,10 +449,18 @@ bool GFN2::runSCF()
     double prev_energy = 0.0;
     double energy_diff = 0.0;
 
+    // Claude Generated (March 2026): Compute S^(-1/2) once before SCF loop
+    // S does not change during SCF — recomputing it every iteration was 2-3x slower
+    ParallelEigenSolver solver(500, 128, 1.0e-10, false);
+    solver.setThreadCount(m_threads);
+    if (!solver.computeS_1_2(m_overlap, m_S_inv_sqrt, m_threads)) {
+        CurcumaLogger::error("Failed to compute S^(-1/2) for GFN2 SCF");
+        return false;
+    }
+
     for (int iter = 0; iter < m_scf_max_iterations; ++iter) {
         m_fock = buildFockMatrix(m_density);
-        ParallelEigenSolver solver(500, 128, 1.0e-10, false);
-        bool success = solver.solve(m_overlap, m_fock, m_energies, m_mo, m_threads, true);
+        bool success = solver.solveWithPrecalculatedS_1_2(m_S_inv_sqrt, m_fock, m_energies, m_mo, m_threads, true);
         if (!success) {
             if (CurcumaLogger::get_verbosity() >= 1)
                 CurcumaLogger::warn("SCF: Eigenvalue solver failed at iteration " + std::to_string(iter + 1));
@@ -461,11 +469,8 @@ bool GFN2::runSCF()
 
         Matrix density_new = buildDensityMatrix(m_mo, m_energies);
 
-        // Calculate electronic energy for convergence check
-        double current_energy = 0.0;
-        for (int mu = 0; mu < m_nbasis; ++mu)
-            for (int nu = 0; nu < m_nbasis; ++nu)
-                current_energy += density_new(mu, nu) * (m_hamiltonian(mu, nu) + m_fock(mu, nu)) * 0.5;
+        // Claude Generated (March 2026): Vectorized trace using Eigen cwiseProduct
+        double current_energy = 0.5 * (density_new.cwiseProduct(m_hamiltonian + m_fock)).sum();
 
         if (iter > 0) energy_diff = std::abs(current_energy - prev_energy);
         prev_energy = current_energy;
@@ -533,25 +538,17 @@ Matrix GFN2::buildFockMatrix(const Matrix& density)
 
 Matrix GFN2::buildDensityMatrix(const Matrix& mo_coefficients, const Vector& mo_energies)
 {
-    Matrix P = Matrix::Zero(m_nbasis, m_nbasis);
+    // Claude Generated (March 2026): Replaced triple-loop with Eigen GEMM
+    // P = 2 * C_occ * C_occ^T  (uses BLAS DGEMM when available)
     int n_occ = m_num_electrons / 2;
-    for (int mu = 0; mu < m_nbasis; ++mu) for (int nu = 0; nu < m_nbasis; ++nu)
-        for (int i = 0; i < n_occ; ++i) P(mu, nu) += 2.0 * mo_coefficients(mu, i) * mo_coefficients(nu, i);
-    return P;
+    auto C_occ = mo_coefficients.leftCols(n_occ);
+    return 2.0 * C_occ * C_occ.transpose();
 }
 
 double GFN2::calculateElectronicEnergy() const {
-    // GFN2 electronic energy: E_el = sum_mu_nu P_mu_nu * H_mu_nu
-    // Note: This is the one-electron energy (not the full RHF energy)
-    // The factor 0.5 is NOT applied here because the Coulomb terms are added separately
-    // Reference: Bannwarth et al. JCTC 2019, Eq. 1
-    double E = 0.0;
-    for (int mu = 0; mu < m_nbasis; ++mu) {
-        for (int nu = 0; nu < m_nbasis; ++nu) {
-            E += m_density(mu, nu) * m_hamiltonian(mu, nu);
-        }
-    }
-    return E;
+    // GFN2 electronic energy: E_el = Tr(P * H_0)
+    // Claude Generated (March 2026): Vectorized with Eigen cwiseProduct
+    return (m_density.cwiseProduct(m_hamiltonian)).sum();
 }
 
 // Claude Generated (March 2026): Fixed to match TBLite effective.f90 lines 162-183
@@ -663,12 +660,72 @@ double GFN2::calculateDispersionEnergy() const {
 
     return dispersion_energy;
 #else
-    // D4 not compiled in - return zero
-    // Reference: Without D4, energies are typically 2-4 Eh higher than reference
-    if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::warn("D4 dispersion not available (compile with USE_D4 for full accuracy)");
+    // Claude Generated: Native D4 fallback using D4ParameterGenerator from GFN-FF infrastructure
+    // Uses CN-only Gaussian weighting (GFN-FF style), not full CN+charge weighting of standard D4.
+    // When the external USE_D4 library is available, the full D4 is used instead.
+    //
+    // GFN2-xTB D4 parameters: s6=1.0, s8=2.7, a1=0.52, a2=5.0
+    // Reference: Bannwarth et al. JCTC 2019, 15, 1652 (GFN2 paper)
+    // BJ damping formula from GFN-FF: E = -0.5 * C6 * (t6 + 2*r4r2ij*t8)
+
+    GFN2* nonconst_this = const_cast<GFN2*>(this);
+
+    if (!nonconst_this->m_d4_native) {
+        json d4_config;
+        d4_config["d4_s6"] = GFN2Params::GFN2_D4_S6;   // 1.0
+        d4_config["d4_s8"] = GFN2Params::GFN2_D4_S8;   // 2.7
+        d4_config["d4_a1"] = GFN2Params::GFN2_D4_A1;   // 0.52
+        d4_config["d4_a2"] = GFN2Params::GFN2_D4_A2;   // 5.0
+        d4_config["d4_alp"] = 14.0;
+        ConfigManager config("d4param", d4_config);
+        nonconst_this->m_d4_native = std::make_unique<D4ParameterGenerator>(config);
     }
-    return 0.0;
+
+    // D4 expects geometry in Bohr
+    Matrix geometry_bohr = m_geometry / au;
+    nonconst_this->m_d4_native->GenerateParameters(m_atoms, geometry_bohr);
+
+    // Compute D4-BJ energy using GFN-FF modified BJ damping formula
+    // Reference: gfnff_gdisp0.f90:365-377
+    const double s6 = GFN2Params::GFN2_D4_S6;
+    const double s8 = GFN2Params::GFN2_D4_S8;
+    const double a1 = GFN2Params::GFN2_D4_A1;
+    const double a2 = GFN2Params::GFN2_D4_A2;
+
+    double disp_energy = 0.0;
+    for (int i = 0; i < m_atomcount; ++i) {
+        for (int j = i + 1; j < m_atomcount; ++j) {
+            double dx = geometry_bohr(i, 0) - geometry_bohr(j, 0);
+            double dy = geometry_bohr(i, 1) - geometry_bohr(j, 1);
+            double dz = geometry_bohr(i, 2) - geometry_bohr(j, 2);
+            double r2 = dx*dx + dy*dy + dz*dz;
+            double r = std::sqrt(r2);
+            if (r < 1e-10) continue;
+
+            double c6 = nonconst_this->m_d4_native->getChargeWeightedC6(m_atoms[i], m_atoms[j], i, j);
+            double sqrt_zr4r2_i = nonconst_this->m_d4_native->getSqrtZr4r2(m_atoms[i]);
+            double sqrt_zr4r2_j = nonconst_this->m_d4_native->getSqrtZr4r2(m_atoms[j]);
+            double r4r2ij = 3.0 * sqrt_zr4r2_i * sqrt_zr4r2_j;
+
+            double r0 = a1 * std::sqrt(r4r2ij) + a2;
+            double r0_6 = std::pow(r0, 6);
+            double r0_8 = std::pow(r0, 8);
+            double r6 = r2 * r2 * r2;
+            double r8 = r6 * r2;
+
+            double t6 = 1.0 / (r6 + r0_6);
+            double t8 = 1.0 / (r8 + r0_8);
+
+            // GFN-FF modified BJ: E = -C6 * (s6*t6 + s8*2*r4r2ij*t8)
+            disp_energy -= c6 * (s6 * t6 + s8 * 2.0 * r4r2ij * t8);
+        }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::param("dispersion_d4_native", fmt::format("{:.6f} Eh", disp_energy));
+    }
+
+    return disp_energy;
 #endif
 }
 

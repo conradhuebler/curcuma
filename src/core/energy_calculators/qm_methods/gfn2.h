@@ -34,6 +34,8 @@
 #include "STOIntegrals.hpp"
 #include "src/core/solvation/gbsa.h"
 
+#include "src/core/energy_calculators/ff_methods/d4param_generator.h"
+
 #ifdef USE_D4
 #include "dftd4interface.h"
 #endif
@@ -646,6 +648,7 @@ private:
     Matrix m_density;                          ///< Density matrix P (nbasis × nbasis)
     Matrix m_mo;                               ///< Molecular orbital coefficients (nbasis × nbasis)
     Vector m_energies;                         ///< Orbital energies (nbasis)
+    Matrix m_S_inv_sqrt;                       ///< Cached S^(-1/2) for SCF (computed once)
 
     // Energy components (for decomposition analysis)
     double m_energy_electronic;                ///< Electronic energy
@@ -660,8 +663,9 @@ private:
     std::string m_solvent;                     ///< Solvent name (e.g., "water", "none")
 
 #ifdef USE_D4
-    std::unique_ptr<DFTD4Interface> m_d4;      ///< D4 dispersion calculator (optional)
+    std::unique_ptr<DFTD4Interface> m_d4;      ///< D4 dispersion calculator (external cpp-d4)
 #endif
+    mutable std::unique_ptr<D4ParameterGenerator> m_d4_native;  ///< Native D4 fallback (CN-only weighting)
 
     // SCF convergence parameters
     int m_scf_max_iterations;                  ///< Maximum SCF iterations (default: 100)

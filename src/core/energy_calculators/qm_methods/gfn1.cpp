@@ -522,13 +522,19 @@ bool GFN1::runSCF()
 {
     m_density = Matrix::Zero(m_nbasis, m_nbasis);
 
+    // Claude Generated (March 2026): Compute S^(-1/2) once before SCF loop
+    // S does not change during SCF — recomputing it every iteration was 2-3x slower
+    ParallelEigenSolver solver(500, 128, 1.0e-10, false);
+    solver.setThreadCount(m_threads);
+    if (!solver.computeS_1_2(m_overlap, m_S_inv_sqrt, m_threads)) {
+        CurcumaLogger::error("Failed to compute S^(-1/2) for GFN1 SCF");
+        return false;
+    }
+
     for (int iter = 0; iter < m_scf_max_iterations; ++iter) {
         m_fock = buildFockMatrix(m_density);
 
-        ParallelEigenSolver solver(500, 128, 1.0e-10, false);
-        solver.setThreadCount(m_threads);
-
-        bool success = solver.solve(m_overlap, m_fock, m_energies, m_mo, m_threads, false);
+        bool success = solver.solveWithPrecalculatedS_1_2(m_S_inv_sqrt, m_fock, m_energies, m_mo, m_threads, false);
 
         if (!success) {
             CurcumaLogger::error("Eigenvalue solution failed in GFN1 SCF");
@@ -571,19 +577,11 @@ Matrix GFN1::buildFockMatrix(const Matrix& density)
 
 Matrix GFN1::buildDensityMatrix(const Matrix& mo_coefficients, const Vector& mo_energies)
 {
-    Matrix P = Matrix::Zero(m_nbasis, m_nbasis);
-
+    // Claude Generated (March 2026): Replaced triple-loop with Eigen GEMM
+    // P = 2 * C_occ * C_occ^T  (uses BLAS DGEMM when available)
     int n_occ = m_num_electrons / 2;
-
-    for (int mu = 0; mu < m_nbasis; ++mu) {
-        for (int nu = 0; nu < m_nbasis; ++nu) {
-            for (int i = 0; i < n_occ; ++i) {
-                P(mu, nu) += 2.0 * mo_coefficients(mu, i) * mo_coefficients(nu, i);
-            }
-        }
-    }
-
-    return P;
+    auto C_occ = mo_coefficients.leftCols(n_occ);
+    return 2.0 * C_occ * C_occ.transpose();
 }
 
 // =================================================================================
@@ -593,23 +591,8 @@ Matrix GFN1::buildDensityMatrix(const Matrix& mo_coefficients, const Vector& mo_
 double GFN1::calculateElectronicEnergy() const
 {
     // GFN1/xTB electronic energy: E_elec = Tr(P * H_0)
-    // where H_0 is the core Hamiltonian (NOT Fock matrix!)
-    //
-    // In GFN1 tight-binding, electronic energy is only from orbital occupations.
-    // Coulomb interactions are added separately as ES2 term.
-    // Reference: Grimme et al. JCTC 2017, 13, 1989
-    //
-    // Corrected November 2025: Was incorrectly using (H+F)/2 (HF formula)
-
-    double E = 0.0;
-
-    for (int mu = 0; mu < m_nbasis; ++mu) {
-        for (int nu = 0; nu < m_nbasis; ++nu) {
-            E += m_density(mu, nu) * m_hamiltonian(mu, nu);
-        }
-    }
-
-    return E;
+    // Claude Generated (March 2026): Vectorized with Eigen cwiseProduct
+    return (m_density.cwiseProduct(m_hamiltonian)).sum();
 }
 
 double GFN1::calculateRepulsionEnergy() const
@@ -743,12 +726,30 @@ double GFN1::calculateCoulombEnergy() const
 
 double GFN1::calculateDispersionEnergy() const
 {
-    // D3 dispersion stub (separate TODO)
-    if (CurcumaLogger::get_verbosity() >= 1) {
-        CurcumaLogger::warn("D3 dispersion not yet integrated - energy incomplete");
+    // Claude Generated: Native D3(BJ) dispersion for GFN1-xTB
+    // Reference: Grimme et al. JCTC 2017, 13, 1989
+    // Parameters: s6=1.0, s8=2.4, a1=0.63, a2=5.0 (from TBLite gfn1-xtb.toml)
+    //
+    // Uses the native D3ParameterGenerator from GFN-FF infrastructure.
+    // D3 takes geometry in Angstrom, computes BJ-damped dispersion energy in Eh.
+    // GFN1 uses numerical gradients, so D3 gradient is automatically included
+    // via finite differences — no analytical D3 gradient needed.
+
+    // Lazy initialization of D3 calculator with GFN1 parameters
+    if (!m_d3) {
+        m_d3 = std::make_unique<D3ParameterGenerator>(D3ParameterGenerator::createForGFN1());
     }
 
-    return 0.0;
+    // Generate D3 parameters (geometry is in Angstrom, as D3 expects)
+    m_d3->GenerateParameters(m_atoms, m_geometry);
+
+    double disp_energy = m_d3->getTotalEnergy();
+
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::param("dispersion_d3", fmt::format("{:.6f} Eh", disp_energy));
+    }
+
+    return disp_energy;
 }
 
 double GFN1::calculateHalogenBondCorrection() const

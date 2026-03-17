@@ -1,11 +1,18 @@
 /**
  * @file ParallelEigenSolver.hpp
  * @brief Divide-and-Conquer Eigenwert-Solver für SCF-Algorithmen mit Eigen
+ *
+ * Claude Generated (March 2026): BLAS/LAPACK Optimization Notes
+ * This file benefits from EIGEN_USE_BLAS/EIGEN_USE_LAPACKE optimizations
+ * defined in curcuma_eigen_config.h (included via global.h).
+ * - SelfAdjointEigenSolver uses LAPACKE syevd/heevd when available
+ * - Matrix operations use BLAS GEMM for better performance
+ * - Compile with -DUSE_BLAS=ON or -DUSE_MKL=ON to enable
  */
 
 #pragma once
 
-#include "src/core/global.h"  // For Matrix type (RowMajor)
+#include "src/core/global.h"  // For Matrix type (RowMajor) and BLAS config
 #include <Eigen/Core>
 #include <Eigen/Eigenvalues>
 #include <algorithm>
@@ -785,24 +792,14 @@ private:
                 std::cout << "Diagonal computation completed" << std::endl;
             }
             // Step 3: Calculate S^(-1/2) = U * D^(-1/2) * U^T
-            // S_1_2 = eigenvectors * D_1_2 * eigenvectors.transpose();
-            Matrix temp;
-            if (!parallelMatrixMultiply(eigenvectors, D_1_2, temp, threadCount, m_debug)) {
-                if (m_debug)
-                    std::cerr << "Error: First matrix multiplication failed" << std::endl;
-                return false;
-            }
-
-            if (!parallelMatrixMultiply(temp, eigenvectors.transpose(), S_1_2, threadCount, m_debug)) {
-                if (m_debug)
-                    std::cerr << "Error: Second matrix multiplication failed" << std::endl;
-                return false;
-            }
+            // Claude Generated (March 2026): Use Eigen GEMM instead of custom parallel multiply
+            // Eigen's matrix multiply uses BLAS DGEMM when available and is faster than
+            // manual row-splitting with thread pool overhead for typical SCF matrix sizes
+            S_1_2 = eigenvectors * D_1_2 * eigenvectors.transpose();
 
             if (m_debug) {
-                std::cout << "S^(-1/2) computed using parallel matrix multiplication" << std::endl;
+                std::cout << "S^(-1/2) computed" << std::endl;
             }
-            std::cout << "S^(-1/2) computed" << std::endl;
             return true;
         } catch (const std::exception& e) {
             if (m_debug) {
@@ -870,76 +867,22 @@ private:
         Eigen::VectorXd& energies, Matrix& eigenvectors,
         int threadCount, bool transformMOs)
     {
+        // Claude Generated (March 2026): Replaced block diagonalization with direct solver
+        // The previous block-diagonal approach was mathematically incorrect:
+        // it diagonalized diagonal blocks independently, ignoring off-diagonal coupling.
+        // This produces wrong eigenvectors for non-block-diagonal Fock matrices.
+        // Eigen's SelfAdjointEigenSolver uses LAPACK dsyevd (divide-and-conquer)
+        // when EIGEN_USE_LAPACKE is defined, which is the correct D&C algorithm.
         try {
-            const int n = F.rows();
-
-            // For small matrices, use direct method
-            if (n < m_minSizeForParallel) {
+            Eigen::SelfAdjointEigenSolver<Matrix> es(F, Eigen::ComputeEigenvectors);
+            if (es.info() != Eigen::Success) {
                 if (m_debug)
-                    std::cout << "Using direct F matrix diagonalization" << std::endl;
-
-                Eigen::SelfAdjointEigenSolver<Matrix> es(F, Eigen::ComputeEigenvectors);
-                if (es.info() != Eigen::Success) {
-                    if (m_debug)
-                        std::cerr << "Error: Direct eigendecomposition failed" << std::endl;
-                    return false;
-                }
-
-                energies = es.eigenvalues();
-                eigenvectors = transformMOs ? S_1_2 * es.eigenvectors() : es.eigenvectors();
-                return true;
-            }
-
-            if (m_debug)
-                std::cout << "Using parallel F matrix diagonalization" << std::endl;
-
-            // Thread pool for block diagonalization
-            CxxThreadPool diagonalizationPool;
-            if (threadCount > 0) {
-                diagonalizationPool.setActiveThreadCount(threadCount);
-            }
-
-            // Create and diagonalize blocks
-            std::vector<BlockDiagonalizationThread*> blockThreads;
-            for (int i = 0; i < n; i += m_blockSize) {
-                int end = std::min(i + m_blockSize, n);
-                auto* thread = new BlockDiagonalizationThread(F, i, end);
-                diagonalizationPool.addThread(thread);
-                blockThreads.push_back(thread);
-            }
-            diagonalizationPool.setActiveThreadCount(m_threadCount);
-            diagonalizationPool.StartAndWait();
-
-            // Check if all threads were successful
-            for (auto* thread : blockThreads) {
-                if (thread->getReturnValue() != 0) {
-                    if (m_debug) {
-                        std::cerr << "Block diagonalization failed" << std::endl;
-                    }
-                    return false;
-                }
-            }
-
-            // Merge results with separate thread pool
-            CxxThreadPool mergePool;
-            mergePool.setActiveThreadCount(1); // Only need one thread for merging
-
-            ResultsMergeThread* mergeThread = new ResultsMergeThread(
-                blockThreads, S_1_2, transformMOs, n);
-
-            mergePool.addThread(mergeThread);
-            mergePool.StartAndWait();
-
-            if (mergeThread->getReturnValue() != 0) {
-                if (m_debug)
-                    std::cerr << "Error: Results merging failed" << std::endl;
+                    std::cerr << "Error: Eigendecomposition of Fock matrix failed" << std::endl;
                 return false;
             }
 
-            // Extract results
-            energies = mergeThread->getEigenvalues();
-            eigenvectors = mergeThread->getEigenvectors();
-
+            energies = es.eigenvalues();
+            eigenvectors = transformMOs ? S_1_2 * es.eigenvectors() : es.eigenvectors();
             return true;
         } catch (const std::exception& e) {
             if (m_debug) {
@@ -962,30 +905,8 @@ private:
         Matrix& F, int threadCount, bool debug = false)
     {
         try {
-            auto start = std::chrono::high_resolution_clock::now();
-
-            // Step 1: temp = H * S_1_2
-            Matrix temp;
-            if (!parallelMatrixMultiply(H, S_1_2, temp, threadCount, debug)) {
-                if (debug)
-                    std::cerr << "Error: First multiplication in Fock transformation failed" << std::endl;
-                return false;
-            }
-
-            // Step 2: F = S_1_2.transpose() * temp
-            if (!parallelMatrixMultiply(S_1_2.transpose(), temp, F, threadCount, debug)) {
-                if (debug)
-                    std::cerr << "Error: Second multiplication in Fock transformation failed" << std::endl;
-                return false;
-            }
-
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-
-            if (debug) {
-                std::cout << "Transformed Fock matrix computed in " << duration << " ms" << std::endl;
-            }
-
+            // Claude Generated (March 2026): Use Eigen GEMM instead of custom parallel multiply
+            F = S_1_2.transpose() * H * S_1_2;
             return true;
         } catch (const std::exception& e) {
             if (debug) {
