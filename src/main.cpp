@@ -1675,9 +1675,8 @@ int executePolymerBuild(const json& controller, int argc, char** argv)
         return 0;
     }
 
-    auto* builder = new PolymerBuild(controller, false);
-    builder->start();
-    delete builder;
+    PolymerBuild builder(controller, false);
+    builder.start();
     return 0;
 }
 
