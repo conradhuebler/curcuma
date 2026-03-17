@@ -2282,7 +2282,10 @@ double ForceField::Calculate(bool gradient)
         CurcumaLogger::param("stored_threads", static_cast<int>(m_stored_threads.size()));
     }
 
-    m_gradient = Eigen::MatrixXd::Zero(m_geometry.rows(), 3);
+    // Claude Generated (Mar 2026): Reuse existing allocation, avoid per-step malloc
+    if (m_gradient.rows() != m_geometry.rows() || m_gradient.cols() != 3)
+        m_gradient.resize(m_geometry.rows(), 3);
+    m_gradient.setZero();
     double energy = 0.0;
     // Claude Generated (Jan 2, 2026): Use member variables instead of local variables for D3/D4
     // Claude Generated: Reset all energy components for regression testing (Nov 2025)

@@ -223,9 +223,13 @@ public:
     void resetForStep(bool gradient) {
         m_calculate_gradient = gradient;
         int n = m_geometry_ptr ? m_geometry_ptr->rows() : m_geometry.rows();
-        m_gradient = Eigen::MatrixXd::Zero(n, 3);
-        m_dEdcn = Vector::Zero(n);
-        m_dEdcn_bond = Vector::Zero(n);
+        // Claude Generated (Mar 2026): Reuse existing allocation, avoid per-step malloc
+        if (m_gradient.rows() != n || m_gradient.cols() != 3) m_gradient.resize(n, 3);
+        m_gradient.setZero();
+        if (m_dEdcn.size() != n) m_dEdcn.resize(n);
+        m_dEdcn.setZero();
+        if (m_dEdcn_bond.size() != n) m_dEdcn_bond.resize(n);
+        m_dEdcn_bond.setZero();
         if (m_store_gradient_components) {
             initGradientComponents(n);
         }
@@ -572,17 +576,22 @@ protected:
     Matrix m_gradient_batm;   ///< BATM three-body gradient component (Claude Generated Mar 2026)
     Matrix m_gradient_atm;    ///< ATM three-body dispersion gradient component (Claude Generated Mar 2026)
 
+    // Claude Generated (Mar 2026): Reuse existing allocation, avoid per-step malloc
     void initGradientComponents(int natoms) {
-        m_gradient_bond = Eigen::MatrixXd::Zero(natoms, 3);
-        m_gradient_angle = Eigen::MatrixXd::Zero(natoms, 3);
-        m_gradient_torsion = Eigen::MatrixXd::Zero(natoms, 3);
-        m_gradient_repulsion = Eigen::MatrixXd::Zero(natoms, 3);
-        m_gradient_coulomb = Eigen::MatrixXd::Zero(natoms, 3);
-        m_gradient_dispersion = Eigen::MatrixXd::Zero(natoms, 3);
-        m_gradient_hb = Eigen::MatrixXd::Zero(natoms, 3);
-        m_gradient_xb = Eigen::MatrixXd::Zero(natoms, 3);
-        m_gradient_batm = Eigen::MatrixXd::Zero(natoms, 3);
-        m_gradient_atm = Eigen::MatrixXd::Zero(natoms, 3);
+        auto resetMat = [&](Matrix& m) {
+            if (m.rows() != natoms || m.cols() != 3) m.resize(natoms, 3);
+            m.setZero();
+        };
+        resetMat(m_gradient_bond);
+        resetMat(m_gradient_angle);
+        resetMat(m_gradient_torsion);
+        resetMat(m_gradient_repulsion);
+        resetMat(m_gradient_coulomb);
+        resetMat(m_gradient_dispersion);
+        resetMat(m_gradient_hb);
+        resetMat(m_gradient_xb);
+        resetMat(m_gradient_batm);
+        resetMat(m_gradient_atm);
     }
 
     // Phase 1.2: Cached bonded pairs for fast lookup in repulsion calculation (Claude Generated - Dec 2025)

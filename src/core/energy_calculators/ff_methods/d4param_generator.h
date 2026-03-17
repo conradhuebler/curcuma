@@ -33,6 +33,8 @@
 #include "json.hpp"
 using json = nlohmann::json;
 
+class CxxThreadPool;  // Forward declaration for pool-based parallelisation
+
 BEGIN_PARAMETER_DEFINITION(d4param)
     // D4 reference selection and scaling
     PARAM(d4_refq, Int, 2, "D4 reference charges (0=gfn2xtb, 1=gasteiger, 2=hirshfeld).", "Reference", {})
@@ -86,7 +88,7 @@ public:
 
     // Claude Generated (Feb 15, 2026): dc6dcn computation for dispersion CN gradient
     // Reference: Fortran gfnff_gdisp0.f90:174-210, 262-305
-    void updateCNValuesForGradient(const std::vector<double>& cn, int num_threads = 1);
+    void updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool = nullptr, int num_threads = 1);
     const Matrix& getDC6DCN() const { return m_dc6dcn; }
 
     // Claude Generated (March 2026): Public access for ATM triple generation without JSON
@@ -101,7 +103,7 @@ private:
     double getEffectiveC6(int atom_i, int atom_j) const;
 
     // Claude Generated (Dec 27, 2025): Weight caching optimization
-    void precomputeGaussianWeights(int num_threads = 1);
+    void precomputeGaussianWeights(CxxThreadPool* pool = nullptr, int num_threads = 1);
 
     // Claude Generated (Dec 27, 2025): C6 reference matrix pre-computation
     void precomputeC6ReferenceMatrix();
@@ -171,8 +173,8 @@ private:
     std::vector<std::vector<int>> m_dominant_refs;  // [atom_idx] → list of significant ref indices
 
     // Claude Generated (Feb 15, 2026): dc6dcn computation helpers
-    void computeGaussianWeightDerivatives(int num_threads = 1);
-    void computeDC6DCN(int num_threads = 1);
+    void computeGaussianWeightDerivatives(CxxThreadPool* pool = nullptr, int num_threads = 1);
+    void computeDC6DCN(CxxThreadPool* pool = nullptr, int num_threads = 1);
 
     // Claude Generated (Feb 15, 2026): Gaussian weight derivatives and dc6dcn matrix
     // dgwdcn[atom_idx][ref_idx] = d(normalized_weight(ref))/d(CN(atom))

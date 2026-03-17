@@ -645,20 +645,23 @@ double GFNFF::Calculation(bool gradient)
                             ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
             }
 
-            // Claude Generated (Mar 2026): Phase A — sequential calls, each internally multi-threaded
-            // Each function parallelises its O(N²) loops with std::thread, using all available cores.
-            // Better than 3-way CxxThreadPool: each task gets ALL threads instead of just one.
+            // Claude Generated (Mar 2026): Phase A — sequential calls, each using ALL pool workers internally
+            // Each function splits its O(N²) loop into T sub-tasks via pool->enqueue().
+            // At T=16, N=1280: wall ≈ (3+2+5)/16 = 0.63ms vs 5ms with 3-task dispatch.
             int total_threads = m_parameters.value("threads", 1);
+            auto* pool = m_forcefield->threadPool();
+            pool->setActiveThreadCount(total_threads);
 
             std::vector<SpMatrix> dcn;
             Vector new_charges;
 
             auto t_phase_a = std::chrono::high_resolution_clock::now();
 
-            dcn = calculateCoordinationNumberDerivatives(cn, 1600.0, total_threads);
+            // Sequential, but each function uses ALL T pool workers internally
+            dcn = calculateCoordinationNumberDerivatives(cn, 1600.0, pool, total_threads);
 
             if (m_d4_generator) {
-                m_d4_generator->updateCNValuesForGradient(cn_vec, total_threads);
+                m_d4_generator->updateCNValuesForGradient(cn_vec, pool, total_threads);
             }
 
             if (do_eeq) {
@@ -666,7 +669,7 @@ double GFNFF::Calculation(bool gradient)
                     m_atoms, m_geometry_bohr, m_charge,
                     topo_ptr->topology_charges, cn,
                     topo_ptr->hybridization, eeq_topo,
-                    true, topo_ptr->alpeeq, total_threads);
+                    true, topo_ptr->alpeeq, pool, total_threads);
             }
 
             if (do_timing) {
@@ -679,7 +682,8 @@ double GFNFF::Calculation(bool gradient)
             // Distribute results (sequential, fast pointer operations)
             m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
             if (m_d4_generator) {
-                m_forcefield->setDispersionDC6DCN(m_d4_generator->getDC6DCN());
+                // Claude Generated (Mar 2026): Zero-copy — threads point directly to D4Generator's matrix
+                m_forcefield->setDispersionDC6DCNPtr(&m_d4_generator->getDC6DCN());
             }
             if (do_eeq && new_charges.size() == m_atomcount) {
                 m_forcefield->distributeEEQCharges(new_charges);
@@ -687,7 +691,7 @@ double GFNFF::Calculation(bool gradient)
             }
 
             if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format("Phase A complete: dcn + dc6dcn + EEQ (sequential, {} threads internal)", total_threads));
+                CurcumaLogger::info(fmt::format("Phase A complete: dcn + dc6dcn + EEQ ({} pool workers)", total_threads));
             }
         } else {
             // Energy-only: CN distribution + sequential EEQ
@@ -4308,7 +4312,7 @@ bool GFNFF::loadGFNFFCharges()
 // Advanced GFN-FF Parameter Generation (Placeholder implementations)
 // =================================================================================
 
-std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, double threshold, int num_threads) const
+std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector& cn, double threshold, CxxThreadPool* pool, int num_threads) const
 {
     // Claude Generated (Mar 2026, Phase 3): Sparse dcn matrices
     // Claude Generated (Mar 2026): Internal std::thread parallelisation for O(N²) loops
@@ -4330,7 +4334,6 @@ std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector
     Vector cn_raw = Vector::Zero(m_atomcount);
     if (num_threads > 1 && m_atomcount > 64) {
         int T = std::min(num_threads, m_atomcount);
-        std::vector<std::thread> threads(T - 1);
         auto cn_worker = [&](int t_id) {
             for (int i = t_id; i < m_atomcount; i += T) {
                 double cn_i = 0.0;
@@ -4347,10 +4350,21 @@ std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector
                 cn_raw[i] = cn_i;
             }
         };
-        for (int t = 1; t < T; ++t)
-            threads[t - 1] = std::thread(cn_worker, t);
-        cn_worker(0);
-        for (auto& th : threads) th.join();
+        // Claude Generated (Mar 2026): pool->enqueue() reuses persistent workers
+        if (pool) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t)
+                futures.push_back(pool->enqueue(cn_worker, t));
+            cn_worker(0);
+            for (auto& f : futures) f.get();
+        } else {
+            std::vector<std::thread> threads(T - 1);
+            for (int t = 1; t < T; ++t)
+                threads[t - 1] = std::thread(cn_worker, t);
+            cn_worker(0);
+            for (auto& th : threads) th.join();
+        }
     } else {
         for (int i = 0; i < m_atomcount; ++i) {
             double cn_i = 0.0;
@@ -4434,11 +4448,21 @@ std::vector<SpMatrix> GFNFF::calculateCoordinationNumberDerivatives(const Vector
             }
         };
 
-        std::vector<std::thread> threads(T - 1);
-        for (int t = 1; t < T; ++t)
-            threads[t - 1] = std::thread(dcn_worker, t);
-        dcn_worker(0);
-        for (auto& th : threads) th.join();
+        // Claude Generated (Mar 2026): pool->enqueue() reuses persistent workers
+        if (pool) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t)
+                futures.push_back(pool->enqueue(dcn_worker, t));
+            dcn_worker(0);
+            for (auto& f : futures) f.get();
+        } else {
+            std::vector<std::thread> threads(T - 1);
+            for (int t = 1; t < T; ++t)
+                threads[t - 1] = std::thread(dcn_worker, t);
+            dcn_worker(0);
+            for (auto& th : threads) th.join();
+        }
 
         // Merge: concatenate triplets, reduce diag arrays
         std::vector<std::vector<Eigen::Triplet<double>>> merged_triplets(3);

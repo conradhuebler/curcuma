@@ -20,7 +20,9 @@
 #include <fstream>  // Claude Generated (Mar 5, 2026): For diagnostic JSON output
 #include <limits>
 #include <thread>
+#include <future>
 #include <omp.h>  // Claude Generated (February 2026): Phase 3 - OpenMP parallelization
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 // External declarations from d4_reference_cn_fortran.cpp (Fortran dftd3param.f90 - January 2026)
 // CRITICAL FIX: Use Fortran reference CN data (matches dftd3param.f90) instead of cpp-d4 data
@@ -981,7 +983,7 @@ double D4ParameterGenerator::computeC6Reference(int elem_i, int elem_j, int ref_
     return c6_ref;
 }
 
-void D4ParameterGenerator::precomputeGaussianWeights(int num_threads)
+void D4ParameterGenerator::precomputeGaussianWeights(CxxThreadPool* pool, int num_threads)
 {
     // Claude Generated (Dec 27, 2025): Pre-compute CN-only Gaussian weights once per atom
     // Claude Generated (Mar 2026): Internal std::thread parallelisation
@@ -1051,11 +1053,20 @@ void D4ParameterGenerator::precomputeGaussianWeights(int num_threads)
     // Dispatch: parallel if beneficial, otherwise single-threaded
     if (num_threads > 1 && natoms_gw > 64) {
         int T = std::min(num_threads, natoms_gw);
-        std::vector<std::thread> threads(T - 1);
-        for (int t = 1; t < T; ++t)
-            threads[t - 1] = std::thread(gw_worker, t, T);
-        gw_worker(0, T);
-        for (auto& th : threads) th.join();
+        if (pool) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t)
+                futures.push_back(pool->enqueue(gw_worker, t, T));
+            gw_worker(0, T);
+            for (auto& f : futures) f.get();
+        } else {
+            std::vector<std::thread> threads(T - 1);
+            for (int t = 1; t < T; ++t)
+                threads[t - 1] = std::thread(gw_worker, t, T);
+            gw_worker(0, T);
+            for (auto& th : threads) th.join();
+        }
     } else {
         gw_worker(0, 1);
     }
@@ -1231,7 +1242,7 @@ double D4ParameterGenerator::calculateTripleScale(int i, int j, int k) const
 //   d(expw)/dCN = -2*wf*(CN - CN_ref) * expw  = 2*wf*(CN_ref - CN) * expw
 //   norm = sum_ref expw(ref)
 //   d(norm)/dCN = sum_ref d(expw(ref))/dCN
-void D4ParameterGenerator::computeGaussianWeightDerivatives(int num_threads)
+void D4ParameterGenerator::computeGaussianWeightDerivatives(CxxThreadPool* pool, int num_threads)
 {
     // Claude Generated (Mar 2026): Internal std::thread parallelisation
     constexpr double wf = 4.0;  // Gaussian width (matches precomputeGaussianWeights)
@@ -1288,11 +1299,20 @@ void D4ParameterGenerator::computeGaussianWeightDerivatives(int num_threads)
 
     if (num_threads > 1 && natoms_gwd > 64) {
         int T = std::min(num_threads, natoms_gwd);
-        std::vector<std::thread> threads(T - 1);
-        for (int t = 1; t < T; ++t)
-            threads[t - 1] = std::thread(gwd_worker, t, T);
-        gwd_worker(0, T);
-        for (auto& th : threads) th.join();
+        if (pool) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t)
+                futures.push_back(pool->enqueue(gwd_worker, t, T));
+            gwd_worker(0, T);
+            for (auto& f : futures) f.get();
+        } else {
+            std::vector<std::thread> threads(T - 1);
+            for (int t = 1; t < T; ++t)
+                threads[t - 1] = std::thread(gwd_worker, t, T);
+            gwd_worker(0, T);
+            for (auto& th : threads) th.join();
+        }
     } else {
         gwd_worker(0, 1);
     }
@@ -1303,7 +1323,7 @@ void D4ParameterGenerator::computeGaussianWeightDerivatives(int num_threads)
 //
 // dc6dcn(i,j) = dC6(i,j)/dCN(i) = sum_{ri,rj} dgwdcn(ri,i) * gw(rj,j) * c6ref(ri,rj,Zi,Zj)
 // dc6dcn(j,i) = dC6(i,j)/dCN(j) = sum_{ri,rj} gw(ri,i) * dgwdcn(rj,j) * c6ref(ri,rj,Zi,Zj)
-void D4ParameterGenerator::computeDC6DCN(int num_threads)
+void D4ParameterGenerator::computeDC6DCN(CxxThreadPool* pool, int num_threads)
 {
     // Claude Generated (Mar 2026): Internal std::thread parallelisation for O(N²×M²)
     int natoms = static_cast<int>(m_atoms.size());
@@ -1366,11 +1386,20 @@ void D4ParameterGenerator::computeDC6DCN(int num_threads)
 
     if (num_threads > 1 && natoms > 64) {
         int T = std::min(num_threads, natoms);
-        std::vector<std::thread> threads(T - 1);
-        for (int t = 1; t < T; ++t)
-            threads[t - 1] = std::thread(dc6_worker, t, T);
-        dc6_worker(0, T);
-        for (auto& th : threads) th.join();
+        if (pool) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t)
+                futures.push_back(pool->enqueue(dc6_worker, t, T));
+            dc6_worker(0, T);
+            for (auto& f : futures) f.get();
+        } else {
+            std::vector<std::thread> threads(T - 1);
+            for (int t = 1; t < T; ++t)
+                threads[t - 1] = std::thread(dc6_worker, t, T);
+            dc6_worker(0, T);
+            for (auto& th : threads) th.join();
+        }
     } else {
         dc6_worker(0, 1);
     }
@@ -1381,16 +1410,16 @@ void D4ParameterGenerator::computeDC6DCN(int num_threads)
 // Claude Generated (Feb 15, 2026): Update CN values and recompute weight derivatives + dc6dcn
 // Called from GFNFF::Calculation() when gradient is requested
 // Reference: Fortran gfnff_gdisp0.f90:382-395 - dc6dcn used for dispersion gradient
-void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& cn, int num_threads)
+void D4ParameterGenerator::updateCNValuesForGradient(const std::vector<double>& cn, CxxThreadPool* pool, int num_threads)
 {
     m_cn_values = cn;
 
     // Recompute gaussian weights with new CN values
-    precomputeGaussianWeights(num_threads);
+    precomputeGaussianWeights(pool, num_threads);
 
     // Compute weight derivatives and dc6dcn matrix
-    computeGaussianWeightDerivatives(num_threads);
-    computeDC6DCN(num_threads);
+    computeGaussianWeightDerivatives(pool, num_threads);
+    computeDC6DCN(pool, num_threads);
 }
 
 // Claude Generated (March 2026): Native dispersion pair generation — bypasses JSON entirely

@@ -36,6 +36,8 @@
 #include <memory>
 #include <optional>
 
+class CxxThreadPool;  // Forward declaration for pool-based parallelisation
+
 /**
  * @brief Distance mode for EEQ matrix construction
  *
@@ -221,7 +223,8 @@ public:
         const std::optional<TopologyInput>& topology = std::nullopt,
         bool use_corrections = false,  // CRITICAL FIX (Jan 4, 2026): default false to match gfnff_final.cpp
         const std::optional<Vector>& alpeeq = std::nullopt,  // Claude Generated (January 2026): Charge-dependent alpha
-        int num_threads = 1  // Claude Generated (Mar 2026): Internal parallelisation
+        CxxThreadPool* pool = nullptr,  // Claude Generated (Mar 2026): Pool-based parallelisation
+        int num_threads = 1
     );
 
     /**

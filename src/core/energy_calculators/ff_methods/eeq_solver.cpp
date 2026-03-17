@@ -44,7 +44,9 @@
 #include <algorithm>
 #include <queue>
 #include <thread>
+#include <future>
 #include <fmt/format.h>
+#include "external/CxxThreadPool/include/CxxThreadPool.hpp"
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -2033,6 +2035,7 @@ Vector EEQSolver::calculateFinalCharges(
     const std::optional<TopologyInput>& topology,
     bool use_corrections,
     const std::optional<Vector>& alpeeq,
+    CxxThreadPool* pool,
     int num_threads)
 {
     const int natoms = atoms.size();
@@ -2127,10 +2130,19 @@ Vector EEQSolver::calculateFinalCharges(
                 }
             }
         };
-        std::vector<std::thread> threads(T - 1);
-        for (int t = 1; t < T; ++t) threads[t - 1] = std::thread(dist_worker, t);
-        dist_worker(0);
-        for (auto& th : threads) th.join();
+        // Claude Generated (Mar 2026): pool->enqueue() reuses persistent workers
+        if (pool) {
+            std::vector<std::future<void>> futures;
+            futures.reserve(T - 1);
+            for (int t = 1; t < T; ++t) futures.push_back(pool->enqueue(dist_worker, t));
+            dist_worker(0);
+            for (auto& f : futures) f.get();
+        } else {
+            std::vector<std::thread> threads(T - 1);
+            for (int t = 1; t < T; ++t) threads[t - 1] = std::thread(dist_worker, t);
+            dist_worker(0);
+            for (auto& th : threads) th.join();
+        }
     } else {
         for (int i = 0; i < natoms; ++i) {
             for (int j = 0; j < i; ++j) {
@@ -2270,10 +2282,19 @@ Vector EEQSolver::calculateFinalCharges(
                     }
                 }
             };
-            std::vector<std::thread> threads(T - 1);
-            for (int t = 1; t < T; ++t) threads[t - 1] = std::thread(amat_worker, t);
-            amat_worker(0);
-            for (auto& th : threads) th.join();
+            // Claude Generated (Mar 2026): pool->enqueue() reuses persistent workers
+            if (pool) {
+                std::vector<std::future<void>> futures;
+                futures.reserve(T - 1);
+                for (int t = 1; t < T; ++t) futures.push_back(pool->enqueue(amat_worker, t));
+                amat_worker(0);
+                for (auto& f : futures) f.get();
+            } else {
+                std::vector<std::thread> threads(T - 1);
+                for (int t = 1; t < T; ++t) threads[t - 1] = std::thread(amat_worker, t);
+                amat_worker(0);
+                for (auto& th : threads) th.join();
+            }
         } else {
             for (int i = 0; i < natoms; ++i) {
                 A(i, i) = gam_corrected(i) + TSQRT2PI / std::sqrt(alpha_corrected(i));
