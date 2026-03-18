@@ -272,14 +272,22 @@ private:
     // Optimization options
     PARAM(optimize, Bool, true, "Enable intermediate optimization steps", "Refinement", { "opt" })
     PARAM(opt_method, String, "gfnff", "Method for optimization (gfnff, uff, gfn2, etc.)", "Refinement", {})
+    PARAM(opt_max_iter, Int, 0, "Max iterations for FF optimization (0=until convergence)", "Refinement", {})
     PARAM(lm_max_iter, Int, 500, "Maximum LM iterations for fragment placement", "Refinement", {})
     PARAM(lm_tolerance, Double, 1e-6, "Convergence tolerance for LM optimization", "Refinement", {})
     PARAM(overlap_retries, Int, 3, "Max optimization retries to resolve cross-monomer overlaps", "Refinement", { "retries" })
 
     // Dynamics options
-    PARAM(dynamics, Bool, false, "Enable intermediate molecular dynamics", "Refinement", { "md" })
-    PARAM(md_steps, Int, 1000, "Number of MD steps for intermediate dynamics", "Refinement", {})
+    PARAM(dynamics, Bool, false, "Enable intermediate molecular dynamics after each fragment", "Refinement", { "md" })
+    PARAM(md_steps, Int, 1000, "Max simulation time for intermediate MD [fs]", "Refinement", {})
+    PARAM(md_temperature, Double, 300.0, "Temperature for intermediate MD [K]", "Refinement", {})
+    PARAM(md_time_step, Double, 1.0, "Integration time step for intermediate MD [fs]", "Refinement", {})
     PARAM(md_method, String, "gfnff", "Method for dynamics", "Refinement", {})
+
+    // Cold MD fallback (overlap resolution)
+    PARAM(cold_md_temperature, Double, 10.0, "Temperature for cold MD overlap resolution [K]", "Refinement", {})
+    PARAM(cold_md_time, Double, 200.0, "Max simulation time for cold MD [fs]", "Refinement", {})
+    PARAM(cold_md_time_step, Double, 0.5, "Integration time step for cold MD [fs]", "Refinement", {})
 
     // Geometric options
     PARAM(bond_distance_scaling, Double, 1.0, "Scaling factor for interface bond lengths", "Assembly", { "scaling" })

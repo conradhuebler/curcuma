@@ -1366,10 +1366,13 @@ SubchainResult PolymerBuild::buildSubchain(
                     CurcumaLogger::info(fmt::format("DEBUG: Wrote {}", debug_file));
                 }
 
+                int opt_max_iter = m_config.get<int>("opt_max_iter", 0);
                 json opt_ctrl;
                 opt_ctrl["opt"]["method"] = opt_method;
                 opt_ctrl["opt"]["printOutput"] = false;
                 opt_ctrl["opt"]["writeXYZ"] = true;
+                if (opt_max_iter > 0)
+                    opt_ctrl["opt"]["MaxIter"] = opt_max_iter;
                 if (opt_attempt == 0)
                     CurcumaLogger::info(fmt::format("Running {} optimization (after fragment {})...", opt_method, i));
                 else
@@ -1573,11 +1576,15 @@ SubchainResult PolymerBuild::buildSubchain(
                     md_mol.LoadMolecule(md_info);
                     md_mol.setCharge(0);
 
+                    double cold_T  = m_config.get<double>("cold_md_temperature", 10.0);
+                    double cold_t  = m_config.get<double>("cold_md_time", 200.0);
+                    double cold_dt = m_config.get<double>("cold_md_time_step", 0.5);
+
                     json cold_md_ctrl;
                     cold_md_ctrl["simplemd"]["method"] = opt_method;
-                    cold_md_ctrl["simplemd"]["max_time"] = 200;
-                    cold_md_ctrl["simplemd"]["temperature"] = 10.0;  // very cold (10 K)
-                    cold_md_ctrl["simplemd"]["time_step"] = 0.5;
+                    cold_md_ctrl["simplemd"]["max_time"] = cold_t;
+                    cold_md_ctrl["simplemd"]["temperature"] = cold_T;
+                    cold_md_ctrl["simplemd"]["time_step"] = cold_dt;
                     cold_md_ctrl["simplemd"]["thermostat"] = "csvr";
                     cold_md_ctrl["simplemd"]["coupling"] = 1.0;      // tight coupling
                     cold_md_ctrl["simplemd"]["verbosity"] = 0;
@@ -1649,35 +1656,64 @@ SubchainResult PolymerBuild::buildSubchain(
         if (m_config.get<bool>("dynamics", false) && should_optimize) {
             CurcumaLogger::info("Running intermediate dynamics...");
             json md_ctrl;
-            md_ctrl["md"]["max_time"] = m_config.get<int>("md_steps", 1000);
-            md_ctrl["md"]["method"] = m_config.get<std::string>("md_method", "uff");
-            md_ctrl["md"]["verbosity"] = 0;
+            md_ctrl["simplemd"]["max_time"] = m_config.get<int>("md_steps", 1000);
+            md_ctrl["simplemd"]["method"] = m_config.get<std::string>("md_method", "gfnff");
+            md_ctrl["simplemd"]["temperature"] = m_config.get<double>("md_temperature", 300.0);
+            md_ctrl["simplemd"]["time_step"] = m_config.get<double>("md_time_step", 1.0);
+            md_ctrl["simplemd"]["thermostat"] = "csvr";
+            md_ctrl["simplemd"]["coupling"] = 10.0;
+            md_ctrl["simplemd"]["verbosity"] = 0;
+            md_ctrl["simplemd"]["write_xyz"] = false;
+            md_ctrl["simplemd"]["restart"] = false;
+            md_ctrl["simplemd"]["no_center"] = true;
+
+            // Prepare molecule for MD: Xx → cap_intermediate, topology as bonds — Claude Generated
+            std::string ci_md_str = m_config.get<std::string>("cap_intermediate", "H");
+            int ci_md_elem = Elements::String2Element(ci_md_str);
+            if (ci_md_elem <= 0) ci_md_elem = 1;
+            Molecule md_mol = polymer;
+            Mol md_info = md_mol.getMolInfo();
+            for (int k = 0; k < md_mol.AtomCount(); ++k)
+                if (md_info.m_atoms[k] == 0)
+                    md_info.m_atoms[k] = ci_md_elem;
+            if (polymer.hasPersistentTopology()) {
+                const Matrix& t = polymer.getTopologyMatrix();
+                md_info.m_bonds.clear();
+                int nn = t.rows();
+                for (int ii2 = 0; ii2 < nn; ++ii2)
+                    for (int jj2 = ii2 + 1; jj2 < nn; ++jj2)
+                        if (t(ii2, jj2) > 0.5)
+                            md_info.m_bonds.push_back({ii2, jj2});
+            }
+            md_info.m_charge = 0;
+            md_mol.LoadMolecule(md_info);
+            md_mol.setCharge(0);
 
             // Save current good structure before regular MD
             Molecule polymer_before_md = polymer;
 
+            int sv = CurcumaLogger::get_verbosity();
             SimpleMD md(md_ctrl, true);
-            md.setMolecule(polymer);
+            md.setMolecule(md_mol);
             md.Initialise();
             md.start();
+            CurcumaLogger::set_verbosity(sv);
 
-            // Check if MD completed without instability (NaN/Inf in velocities)
-            // Claude Generated: wasStable() checks if simulation exited early due to NaN/Inf
+            // Check if MD completed without instability — Claude Generated
             bool md_was_stable = md.wasStable();
-            auto unique = md.UniqueMolecules();
+            Geometry md_result_geom = md.CurrentMolecule().Coords();
+            bool md_has_nan = containsNaN(md_result_geom);
 
-            if (!md_was_stable || (unique.empty() || containsNaN(unique.back()->Coords()))) {
-                // Regular MD became unstable or produced NaN coordinates - restore and abort
+            if (!md_was_stable || md_has_nan) {
                 CurcumaLogger::warn(fmt::format(
                     "step {:02d}: Regular MD {} - using last good structure",
                     i, !md_was_stable ? "became unstable (NaN/Inf velocities)" : "returned NaN coordinates"));
-                CurcumaLogger::info("Terminating polymer assembly early with last valid structure");
-                polymer = polymer_before_md;  // Restore good structure
-                break;  // Exit fragment assembly loop
+                polymer = polymer_before_md;
+                break;
             }
 
-            // MD was stable and produced valid geometry - use it
-            polymer = *unique.back();
+            // MD was stable — apply geometry back to polymer (keeps Xx elements)
+            polymer.setGeometry(md_result_geom);
         }
 
         if (m_config.get<bool>("write_intermediates", false)) {
@@ -1865,10 +1901,13 @@ void PolymerBuild::assemblePolymer(const std::vector<std::string>& sequence)
 
             CurcumaLogger::info(fmt::format("Running {} optimization after sub-chain join...", opt_method));
             int saved_verbosity = CurcumaLogger::get_verbosity();
+            int opt_max_iter = m_config.get<int>("opt_max_iter", 0);
             json opt_ctrl;
             opt_ctrl["opt"]["method"] = opt_method;
             opt_ctrl["opt"]["printOutput"] = false;
             opt_ctrl["opt"]["writeXYZ"] = true;
+            if (opt_max_iter > 0)
+                opt_ctrl["opt"]["MaxIter"] = opt_max_iter;
             CurcumaOpt opt(opt_ctrl, true);
             opt.overrideBasename(fmt::format("polymer_scjoin_{:02d}", sc));
             opt.addMolecule(polymer_opt);
