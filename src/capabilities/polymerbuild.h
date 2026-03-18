@@ -40,6 +40,15 @@ struct ConnectionResult {
     std::vector<std::pair<int, int>> interface_bonds;      ///< Bonds created at interface (for topology)
     int fragment_offset = 0;                               ///< Start index of new fragment atoms in combined polymer
     int removed_polymer_xx_idx = -1;                       ///< Index of removed interface Xx in original polymer (for atom_monomer_id update)
+    int removed_fragment_xx_idx = -1;                      ///< Index of removed interface Xx in original fragment (for D&C monomer ID mapping)
+};
+
+/// Claude Generated: Result of building a sub-chain for divide-and-conquer assembly
+struct SubchainResult {
+    Molecule molecule;
+    std::vector<std::pair<int, int>> tracked_xx;
+    std::vector<std::pair<int, int>> interface_bonds;
+    std::vector<int> atom_monomer_id;
 };
 
 /**
@@ -109,6 +118,21 @@ private:
         const std::vector<std::pair<int, int>>& prev_tracked_xx,
         const std::vector<std::pair<int, int>>& prev_interface_bonds,
         int step_number = 0);
+
+    /// Claude Generated: Core connection logic accepting a Molecule directly (used by connectFragment and D&C merge)
+    ConnectionResult connectMolecule(
+        const Molecule& current_polymer,
+        const Molecule& next_fragment,
+        const std::vector<std::pair<int, int>>& prev_tracked_xx,
+        const std::vector<std::pair<int, int>>& prev_interface_bonds,
+        int step_number = 0,
+        const std::vector<std::pair<int, int>>& fragment_internal_bonds = {});
+
+    /// Claude Generated: Build a sub-chain from a list of fragment names (for divide-and-conquer)
+    SubchainResult buildSubchain(
+        const std::vector<std::string>& fragment_names,
+        int monomer_id_offset,
+        int subchain_index);
 
     /**
      * @brief Optimize fragment placement using Levenberg-Marquardt.
@@ -196,6 +220,27 @@ private:
                          const std::string& tag) const;
 
     /**
+     * @brief Repair unbound atoms: find expected bond partner, enforce bond, move atom.
+     *
+     * For each non-Xx atom with zero bonds in the topology matrix:
+     * 1. Find the best bond partner (smallest dist/cov_sum ratio within same monomer)
+     * 2. Set the bond in the topology matrix
+     * 3. Move the atom to the correct covalent bond distance from the partner
+     *
+     * @param mol               Molecule to repair in-place
+     * @param atom_monomer_id   Per-atom monomer ID assignment
+     * @param interface_bonds   Known interface bonds (for partner search across monomers)
+     * @param tag               Label for log messages
+     * @return Number of repaired atoms
+     *
+     * Claude Generated
+     */
+    int repairUnboundAtoms(Molecule& mol,
+                           const std::vector<int>& atom_monomer_id,
+                           const std::vector<std::pair<int,int>>& interface_bonds,
+                           const std::string& tag);
+
+    /**
      * @brief Find the heavy atom bonded to an Xx via topology analysis.
      *
      * Uses distance-based topology to find the atom that Xx connects to.
@@ -239,6 +284,7 @@ private:
     // Geometric options
     PARAM(bond_distance_scaling, Double, 1.0, "Scaling factor for interface bond lengths", "Assembly", { "scaling" })
     PARAM(chunk_size, Int, 1, "Number of fragments to place before running optimization (1=after each)", "Refinement", {})
+    PARAM(subchain_size, Int, 0, "Sub-chain size for divide-and-conquer assembly (0=sequential)", "Assembly", { "scs" })
     PARAM(write_intermediates, Bool, false, "Write XYZ file after each fragment addition for debugging", "Output", { "intermediates" })
     PARAM(verbose, Bool, true, "Detailed output", "Output", {})
 

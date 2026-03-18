@@ -173,6 +173,7 @@ public:
 
     std::vector<Molecule*> UniqueMolecules() const { return m_unique_structures; }
     const Molecule& CurrentMolecule() const { return m_molecule; }  ///< Claude Generated: access final MD geometry
+    bool wasStable() const { return !m_unstable; }  ///< Claude Generated: check if MD completed without instability (NaN/Inf)
     void printHelp() const;
 
 private:
