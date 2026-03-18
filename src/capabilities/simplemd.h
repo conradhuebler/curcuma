@@ -172,6 +172,7 @@ public:
     void start() override;
 
     std::vector<Molecule*> UniqueMolecules() const { return m_unique_structures; }
+    const Molecule& CurrentMolecule() const { return m_molecule; }  ///< Claude Generated: access final MD geometry
     void printHelp() const;
 
 private:

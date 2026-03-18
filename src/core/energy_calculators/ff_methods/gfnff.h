@@ -1750,6 +1750,8 @@ private:
     mutable std::optional<TopologyInfo> m_cached_topology;
     mutable std::optional<std::vector<std::pair<int,int>>> m_cached_bond_list;
 
+    std::vector<std::pair<int,int>> m_forced_bonds; ///< External bonds merged with geometric detection
+
     // Conversion factors
     static constexpr double HARTREE_TO_KCAL = 627.5094740631;
     static constexpr double BOHR_TO_ANGSTROM = 0.5291772105638411;

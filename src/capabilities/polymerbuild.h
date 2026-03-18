@@ -38,6 +38,8 @@ struct ConnectionResult {
     Molecule polymer;                                      ///< The polymer with the new fragment added
     std::vector<std::pair<int, int>> tracked_xx;           ///< All (Xx index, active atom index) pairs for chain extension
     std::vector<std::pair<int, int>> interface_bonds;      ///< Bonds created at interface (for topology)
+    int fragment_offset = 0;                               ///< Start index of new fragment atoms in combined polymer
+    int removed_polymer_xx_idx = -1;                       ///< Index of removed interface Xx in original polymer (for atom_monomer_id update)
 };
 
 /**
@@ -179,6 +181,21 @@ private:
                        const std::vector<std::pair<int,int>>& interface_bonds = {}) const;
 
     /**
+     * @brief Validate topology: check that no spurious cross-block bonds exist.
+     *
+     * Verifies that the topology matrix contains only intra-block bonds and
+     * explicit interface bonds. Reports any spurious cross-monomer bonds.
+     *
+     * @return Number of spurious bonds found (0 = topology correct)
+     *
+     * Claude Generated
+     */
+    int validateTopology(const Molecule& mol,
+                         const std::vector<int>& atom_monomer_id,
+                         const std::vector<std::pair<int,int>>& interface_bonds,
+                         const std::string& tag) const;
+
+    /**
      * @brief Find the heavy atom bonded to an Xx via topology analysis.
      *
      * Uses distance-based topology to find the atom that Xx connects to.
@@ -212,6 +229,7 @@ private:
     PARAM(opt_method, String, "gfnff", "Method for optimization (gfnff, uff, gfn2, etc.)", "Refinement", {})
     PARAM(lm_max_iter, Int, 500, "Maximum LM iterations for fragment placement", "Refinement", {})
     PARAM(lm_tolerance, Double, 1e-6, "Convergence tolerance for LM optimization", "Refinement", {})
+    PARAM(overlap_retries, Int, 3, "Max optimization retries to resolve cross-monomer overlaps", "Refinement", { "retries" })
 
     // Dynamics options
     PARAM(dynamics, Bool, false, "Enable intermediate molecular dynamics", "Refinement", { "md" })

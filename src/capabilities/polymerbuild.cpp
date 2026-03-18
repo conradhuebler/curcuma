@@ -706,7 +706,13 @@ ConnectionResult PolymerBuild::connectFragment(
     // Set up interface bond between polymer_active and fragment_active
     // Adjust indices: polymer_active_idx in original → polymer_active_idx_lm in polymer_lm
     //                 next_active_idx in original → next_active_idx_lm in fragment_lm → +offset in combined
-    result.interface_bonds = prev_interface_bonds;
+    // Adjust previous interface bond indices for removed polymer interface Xx — Claude Generated
+    result.interface_bonds.reserve(prev_interface_bonds.size() + 1);
+    for (const auto& [a, b] : prev_interface_bonds) {
+        int adj_a = (a > polymer_xx_idx) ? a - 1 : a;
+        int adj_b = (b > polymer_xx_idx) ? b - 1 : b;
+        result.interface_bonds.push_back({adj_a, adj_b});
+    }
     result.interface_bonds.push_back({polymer_active_idx_lm, offset + next_active_idx_lm});
 
     // Build tracked_xx list for next iteration
@@ -744,6 +750,8 @@ ConnectionResult PolymerBuild::connectFragment(
     }
 
     result.polymer = combined;
+    result.fragment_offset = offset;
+    result.removed_polymer_xx_idx = polymer_xx_idx;
     return result;
 }
 
@@ -786,27 +794,95 @@ int PolymerBuild::checkDistances(const Molecule& mol,
             double r_vdw = Elements::VanDerWaalsRadius[ei] + Elements::VanDerWaalsRadius[ej];
 
             if (d < r_cov * 1.1) {
-                // Non-bonded pair at bonding distance → topology inconsistency / nuclear fusion
-                CurcumaLogger::error(fmt::format(
-                    "{}: FUSION {}{}–{}{}: {:.3f} Å (r_cov {:.3f}, not in topology)",
-                    tag, Elements::ElementAbbr[ei], i, Elements::ElementAbbr[ej], j, d, r_cov));
                 ++problems;
+                if (CurcumaLogger::get_verbosity() >= 3)
+                    CurcumaLogger::warn(fmt::format(
+                        "{}: FUSION {}{}–{}{}: {:.3f} Å (r_cov {:.3f}, not in topology)",
+                        tag, Elements::ElementAbbr[ei], i, Elements::ElementAbbr[ej], j, d, r_cov));
             } else if (d < r_vdw * 0.65) {
-                // Non-bonded pair closer than 65 % of vdW sum → significant steric clash
-                // (threshold chosen to avoid false positives for 1,3-pairs: e.g. H-C-H ~1.8 Å
-                //  vs. 0.65 * vdW(H+H) = 0.65 * 2.40 = 1.56 Å — safely below typical 1,3 distances)
-                CurcumaLogger::warn(fmt::format(
-                    "{}: clash {}{}–{}{}: {:.3f} Å (0.65·r_vdw {:.3f})",
-                    tag, Elements::ElementAbbr[ei], i, Elements::ElementAbbr[ej], j, d, r_vdw * 0.65));
                 ++problems;
+                if (CurcumaLogger::get_verbosity() >= 3)
+                    CurcumaLogger::warn(fmt::format(
+                        "{}: clash {}{}–{}{}: {:.3f} Å (0.65·r_vdw {:.3f})",
+                        tag, Elements::ElementAbbr[ei], i, Elements::ElementAbbr[ej], j, d, r_vdw * 0.65));
             }
         }
     }
-    if (problems == 0)
-        CurcumaLogger::info(fmt::format("{}: all distances OK", tag));
-    else
-        CurcumaLogger::warn(fmt::format("{}: {} problematic contact(s)", tag, problems));
+    if (CurcumaLogger::get_verbosity() >= 2) {
+        if (problems == 0)
+            CurcumaLogger::info(fmt::format("{}: all distances OK", tag));
+        else
+            CurcumaLogger::warn(fmt::format("{}: {} problematic contact(s)", tag, problems));
+    }
     return problems;
+}
+
+/// Claude Generated — Validate topology against expected structure
+int PolymerBuild::validateTopology(const Molecule& mol,
+                                    const std::vector<int>& atom_monomer_id,
+                                    const std::vector<std::pair<int,int>>& interface_bonds,
+                                    const std::string& tag) const
+{
+    if (!mol.hasPersistentTopology()) {
+        if (CurcumaLogger::get_verbosity() >= 2)
+            CurcumaLogger::warn(fmt::format("{}: no persistent topology to validate", tag));
+        return -1;
+    }
+
+    const Matrix topo = mol.getTopologyMatrix();
+    int n = mol.AtomCount();
+    int spurious = 0;
+    int intra_monomer = 0, cross_interface = 0;
+
+    // Build set of allowed cross-monomer bonds (interface bonds)
+    std::set<std::pair<int,int>> allowed_cross;
+    for (const auto& b : interface_bonds) {
+        auto canonical = b.first < b.second ? b : std::make_pair(b.second, b.first);
+        allowed_cross.insert(canonical);
+    }
+
+    // Per-atom monomer lookup — Claude Generated
+    auto get_monomer = [&](int atom_idx) -> int {
+        if (atom_idx >= 0 && atom_idx < (int)atom_monomer_id.size())
+            return atom_monomer_id[atom_idx];
+        return 0;
+    };
+
+    for (int ii = 0; ii < n; ++ii) {
+        for (int jj = ii + 1; jj < n; ++jj) {
+            if (topo(ii, jj) < 0.5) continue;
+
+            if (get_monomer(ii) == get_monomer(jj)) {
+                ++intra_monomer;
+            } else {
+                // Cross-monomer bond — must be an interface bond
+                auto canonical = std::make_pair(ii, jj);
+                if (allowed_cross.count(canonical)) {
+                    ++cross_interface;
+                } else {
+                    ++spurious;
+                    CurcumaLogger::error(fmt::format(
+                        "{}: SPURIOUS bond {}{}-{}{} (mono {}-{}, dist {:.3f} Å)",
+                        tag,
+                        Elements::ElementAbbr[mol.Atom(ii).first], ii,
+                        Elements::ElementAbbr[mol.Atom(jj).first], jj,
+                        get_monomer(ii), get_monomer(jj),
+                        (mol.Atom(ii).second - mol.Atom(jj).second).norm()));
+                }
+            }
+        }
+    }
+
+    if (CurcumaLogger::get_verbosity() >= 2 || spurious > 0) {
+        CurcumaLogger::info(fmt::format(
+            "{}: {} intra-monomer, {} interface, {} spurious bonds",
+            tag, intra_monomer, cross_interface, spurious));
+    }
+
+    if (spurious > 0)
+        CurcumaLogger::error(fmt::format("{}: {} SPURIOUS cross-monomer bond(s)!", tag, spurious));
+
+    return spurious;
 }
 
 void PolymerBuild::resolveOverlaps(Molecule& mol, int max_steps, double max_displacement)
@@ -933,6 +1009,8 @@ void PolymerBuild::assemblePolymer(const std::vector<std::string>& sequence)
     }
 
     std::vector<std::pair<int, int>> interface_bonds;
+    // Per-atom monomer ID: atom_monomer_id[i] = which monomer atom i belongs to — Claude Generated
+    std::vector<int> atom_monomer_id(polymer.AtomCount(), 0);
     int chunk_size = m_config.get<int>("chunk_size", 1);
     if (chunk_size < 1) chunk_size = 1;
     bool optimize = m_config.get<bool>("optimize", true);
@@ -955,6 +1033,14 @@ void PolymerBuild::assemblePolymer(const std::vector<std::string>& sequence)
         tracked_xx = conn_result.tracked_xx;
         interface_bonds = conn_result.interface_bonds;
 
+        // Update atom_monomer_id: remove entry for the deleted interface Xx, append new fragment — Claude Generated
+        if (conn_result.removed_polymer_xx_idx >= 0
+            && conn_result.removed_polymer_xx_idx < (int)atom_monomer_id.size())
+            atom_monomer_id.erase(atom_monomer_id.begin() + conn_result.removed_polymer_xx_idx);
+        int new_frag_atoms = polymer.AtomCount() - conn_result.fragment_offset;
+        for (int k = 0; k < new_frag_atoms; ++k)
+            atom_monomer_id.push_back(static_cast<int>(i));
+
         checkDistances(polymer,
                        fmt::format("step {:02d} post-connect", i),
                        interface_bonds);
@@ -971,7 +1057,8 @@ void PolymerBuild::assemblePolymer(const std::vector<std::string>& sequence)
             CurcumaLogger::info(fmt::format("DEBUG: Wrote {}", debug_file));
         }
 
-        // Rebuild topology
+        // Rebuild topology: intra-monomer geometric + explicit interface bonds only — Claude Generated
+        // Prevents spurious inter-monomer bonds when chain folds back on itself
         {
             int n = polymer.AtomCount();
             Matrix topo = Matrix::Zero(n, n);
@@ -981,6 +1068,7 @@ void PolymerBuild::assemblePolymer(const std::vector<std::string>& sequence)
                     int ei = polymer.Atom(ii).first;
                     int ej = polymer.Atom(jj).first;
                     if (ei == 0 || ej == 0) continue;
+                    if (atom_monomer_id[ii] != atom_monomer_id[jj]) continue;
                     double cutoff = Elements::CovalentRadius[ei] + Elements::CovalentRadius[ej];
                     if (dist(ii, jj) > 1e-3 && dist(ii, jj) <= cutoff * 1.15) {
                         topo(ii, jj) = topo(jj, ii) = 1.0;
@@ -994,79 +1082,193 @@ void PolymerBuild::assemblePolymer(const std::vector<std::string>& sequence)
             polymer.setTopologyMatrix(topo);
         }
 
-        // Optimization at chunk boundaries (but NOT for last fragment - post-capping handles that)
-        bool should_optimize = (static_cast<int>(i) % chunk_size == 0)
-                               && (i != sequence.size() - 1);
+        validateTopology(polymer, atom_monomer_id, interface_bonds,
+                         fmt::format("step {:02d} post-connect", i));
+
+        // Manual bond count verification — Claude Generated
+        {
+            int n = polymer.AtomCount();
+            auto [dist_v, _uv] = polymer.DistanceMatrix();
+
+            // Count bonds in topology matrix
+            int topo_bonds = 0;
+            const Matrix& topo_check = polymer.getTopologyMatrix();
+            for (int ii = 0; ii < n; ++ii)
+                for (int jj = ii + 1; jj < n; ++jj)
+                    if (topo_check(ii, jj) > 0.5) ++topo_bonds;
+
+            // Count ALL geometric bonds (ignoring monomer restriction)
+            int geo_bonds_all = 0;
+            for (int ii = 0; ii < n; ++ii) {
+                int ei = polymer.Atom(ii).first;
+                if (ei == 0) continue;
+                for (int jj = ii + 1; jj < n; ++jj) {
+                    int ej = polymer.Atom(jj).first;
+                    if (ej == 0) continue;
+                    double cutoff = Elements::CovalentRadius[ei] + Elements::CovalentRadius[ej];
+                    if (dist_v(ii, jj) > 1e-3 && dist_v(ii, jj) <= cutoff * 1.15)
+                        ++geo_bonds_all;
+                }
+            }
+
+            // Count per-monomer geometric bonds
+            std::map<int, int> geo_per_monomer;
+            for (int ii = 0; ii < n; ++ii) {
+                int ei = polymer.Atom(ii).first;
+                if (ei == 0) continue;
+                for (int jj = ii + 1; jj < n; ++jj) {
+                    int ej = polymer.Atom(jj).first;
+                    if (ej == 0) continue;
+                    if (atom_monomer_id[ii] != atom_monomer_id[jj]) continue;
+                    double cutoff = Elements::CovalentRadius[ei] + Elements::CovalentRadius[ej];
+                    if (dist_v(ii, jj) > 1e-3 && dist_v(ii, jj) <= cutoff * 1.15)
+                        ++geo_per_monomer[atom_monomer_id[ii]];
+                }
+            }
+
+            // Count atoms per monomer
+            std::map<int, int> atoms_per_monomer;
+            for (int ii = 0; ii < n; ++ii)
+                ++atoms_per_monomer[atom_monomer_id[ii]];
+
+            // Count cross-monomer close contacts (would-be spurious) — Claude Generated
+            // Use 1.3*cov cutoff (same as GFN-FF geometric detection) to catch all problematic contacts
+            int cross_geo = 0;
+            for (int ii = 0; ii < n; ++ii) {
+                int ei = polymer.Atom(ii).first;
+                if (ei == 0) continue;
+                for (int jj = ii + 1; jj < n; ++jj) {
+                    int ej = polymer.Atom(jj).first;
+                    if (ej == 0) continue;
+                    if (atom_monomer_id[ii] == atom_monomer_id[jj]) continue;
+                    double co = Elements::CovalentRadius[ei] + Elements::CovalentRadius[ej];
+                    if (dist_v(ii, jj) > 1e-3 && dist_v(ii, jj) <= co * 1.3) {
+                        ++cross_geo;
+                        bool is_iface = false;
+                        for (const auto& b : interface_bonds) {
+                            if ((b.first == ii && b.second == jj) || (b.first == jj && b.second == ii)) {
+                                is_iface = true; break;
+                            }
+                        }
+                        if (!is_iface && CurcumaLogger::get_verbosity() >= 2) {
+                            CurcumaLogger::warn(fmt::format(
+                                "step {:02d} BOND-CHECK: cross-monomer overlap {}{}(m{})-{}{}(m{}): {:.3f} Å ({:.2f}×cov)",
+                                i, Elements::ElementAbbr[ei], ii, atom_monomer_id[ii],
+                                Elements::ElementAbbr[ej], jj, atom_monomer_id[jj],
+                                dist_v(ii, jj), dist_v(ii, jj) / co));
+                        }
+                    }
+                }
+            }
+
+            int spurious_cross = cross_geo - (int)interface_bonds.size();
+            if (spurious_cross > 0) {
+                // Pre-optimization overlap: warn only (optimization will attempt to resolve)
+                CurcumaLogger::warn(fmt::format(
+                    "step {:02d} pre-opt: {} cross-monomer overlaps (will optimize), topo={}, geo_all={}",
+                    i, spurious_cross, topo_bonds, geo_bonds_all));
+            } else {
+                CurcumaLogger::info(fmt::format(
+                    "step {:02d} BOND-CHECK: OK — topo={}, geo_all={}, atoms={}, monomers={}",
+                    i, topo_bonds, geo_bonds_all, n, (int)atoms_per_monomer.size()));
+            }
+
+            if (CurcumaLogger::get_verbosity() >= 2) {
+                for (const auto& [mono, cnt] : atoms_per_monomer) {
+                    CurcumaLogger::info(fmt::format(
+                        "  monomer {}: {} atoms, {} geo bonds",
+                        mono, cnt, geo_per_monomer[mono]));
+                }
+            }
+        }
+
+        // Optimization at chunk boundaries (including last fragment before capping)
+        bool should_optimize = (static_cast<int>(i) % chunk_size == 0);
 
         if (optimize && should_optimize) {
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                CurcumaLogger::info(fmt::format("DEBUG: Before resolveOverlaps (fragment {}), {} atoms",
-                                                i, polymer.AtomCount()));
-            }
-
-            resolveOverlaps(polymer);
-            checkDistances(polymer,
-                           fmt::format("step {:02d} post-resolveOverlaps", i),
-                           interface_bonds);
-
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                std::string debug_file = fmt::format("{}_debug_{:02d}_postLJ_preH.xyz", polymer.Name(), i);
-                polymer.writeXYZFile(debug_file);
-                CurcumaLogger::info(fmt::format("DEBUG: Wrote {}", debug_file));
-            }
-
-            CurcumaLogger::info(fmt::format("Running UFF optimization (after fragment {})...", i));
-            json opt_ctrl;
-            opt_ctrl["opt"]["method"] = m_config.get<std::string>("opt_method", "uff");
-            opt_ctrl["opt"]["printOutput"] = false;
-            opt_ctrl["opt"]["writeXYZ"] = false;
-
-            // Replace Xx with cap_intermediate for optimization; enforce charge = 0 (GFN-FF EEQ requires it)
+            const int max_opt_retries = m_config.get<int>("overlap_retries", 3);
+            std::string opt_method = m_config.get<std::string>("opt_method", "gfnff");
             std::string ci_str = m_config.get<std::string>("cap_intermediate", "H");
             int cap_intermediate_elem = Elements::String2Element(ci_str);
             if (cap_intermediate_elem <= 0) cap_intermediate_elem = 1;
 
-            Molecule polymer_opt = polymer;
-            polymer_opt.setCharge(0);
-            std::vector<int> xx_indices;
-            Mol m_opt = polymer_opt.getMolInfo();
-            for (int k = 0; k < polymer_opt.AtomCount(); ++k) {
-                if (m_opt.m_atoms[k] == 0) {
-                    xx_indices.push_back(k);
-                    m_opt.m_atoms[k] = cap_intermediate_elem;
-                }
-            }
-            polymer_opt.LoadMolecule(m_opt);
-            polymer_opt.setCharge(0);  // LoadMolecule may overwrite from Mol, reset again
-
-            if (CurcumaLogger::get_verbosity() >= 3) {
-                std::string debug_file = fmt::format("{}_debug_{:02d}_forFF.xyz", polymer.Name(), i);
-                polymer_opt.writeXYZFile(debug_file);
-                CurcumaLogger::info(fmt::format("DEBUG: Wrote {}", debug_file));
-            }
-
-            // CurcumaOpt(silent=true) resets global CurcumaLogger verbosity → save/restore
-            int saved_verbosity = CurcumaLogger::get_verbosity();
-            CurcumaOpt opt(opt_ctrl, true);
-            opt.addMolecule(polymer_opt);
-            opt.start();
-            CurcumaLogger::set_verbosity(saved_verbosity);
-            const std::vector<Molecule>* finals = opt.Molecules();
-            if (finals && !finals->empty()) {
-                const Molecule& opt_mol = finals->back();
-                // Copy ALL optimized coordinates back, including Xx placeholder positions.
-                // Xx were replaced by H in polymer_opt; the optimized H position is a
-                // better estimate for v_out in the next LM step than the stale pre-FF position.
-                // Atom element types in polymer are NOT changed (Xx remains Xx).
-                polymer.setGeometry(opt_mol.Coords());
+            for (int opt_attempt = 0; opt_attempt < max_opt_retries; ++opt_attempt) {
 
                 if (CurcumaLogger::get_verbosity() >= 3) {
-                    std::string debug_file = fmt::format("{}_debug_{:02d}_postFF.xyz", polymer.Name(), i);
+                    CurcumaLogger::info(fmt::format("DEBUG: Before resolveOverlaps (fragment {}, attempt {}), {} atoms",
+                                                    i, opt_attempt, polymer.AtomCount()));
+                }
+
+                resolveOverlaps(polymer);
+                checkDistances(polymer,
+                               fmt::format("step {:02d} post-resolveOverlaps", i),
+                               interface_bonds);
+
+                if (CurcumaLogger::get_verbosity() >= 3) {
+                    std::string debug_file = fmt::format("{}_debug_{:02d}_postLJ_preH.xyz", polymer.Name(), i);
                     polymer.writeXYZFile(debug_file);
                     CurcumaLogger::info(fmt::format("DEBUG: Wrote {}", debug_file));
                 }
 
-                // Restore topology
+                json opt_ctrl;
+                opt_ctrl["opt"]["method"] = opt_method;
+                opt_ctrl["opt"]["printOutput"] = false;
+                opt_ctrl["opt"]["writeXYZ"] = true;
+                if (opt_attempt == 0)
+                    CurcumaLogger::info(fmt::format("Running {} optimization (after fragment {})...", opt_method, i));
+                else
+                    CurcumaLogger::info(fmt::format("Re-running {} optimization (fragment {}, attempt {})...", opt_method, i, opt_attempt + 1));
+                if (CurcumaLogger::get_verbosity() >= 2)
+                    CurcumaLogger::info(fmt::format("opt_ctrl: {}", opt_ctrl.dump()));
+
+                // Replace Xx with cap_intermediate for optimization; enforce charge = 0 (GFN-FF EEQ requires it)
+                Molecule polymer_opt = polymer;
+                polymer_opt.setCharge(0);
+                Mol m_opt = polymer_opt.getMolInfo();
+                for (int k = 0; k < polymer_opt.AtomCount(); ++k) {
+                    if (m_opt.m_atoms[k] == 0)
+                        m_opt.m_atoms[k] = cap_intermediate_elem;
+                }
+                // Pass complete bond list from topology to GFN-FF — Claude Generated
+                if (polymer.hasPersistentTopology()) {
+                    const Matrix topo = polymer.getTopologyMatrix();
+                    m_opt.m_bonds.clear();
+                    int n = topo.rows();
+                    for (int ii = 0; ii < n; ++ii)
+                        for (int jj = ii + 1; jj < n; ++jj)
+                            if (topo(ii, jj) > 0.5)
+                                m_opt.m_bonds.push_back({ii, jj});
+                    if (CurcumaLogger::get_verbosity() >= 2)
+                        CurcumaLogger::info(fmt::format("Passing {} bonds from topology to GFN-FF", m_opt.m_bonds.size()));
+                }
+                polymer_opt.LoadMolecule(m_opt);
+                polymer_opt.setCharge(0);
+
+                if (CurcumaLogger::get_verbosity() >= 3) {
+                    std::string debug_file = fmt::format("{}_debug_{:02d}_forFF.xyz", polymer.Name(), i);
+                    polymer_opt.writeXYZFile(debug_file);
+                    CurcumaLogger::info(fmt::format("DEBUG: Wrote {}", debug_file));
+                }
+
+                // CurcumaOpt(silent=true) resets global CurcumaLogger verbosity → save/restore
+                int saved_verbosity = CurcumaLogger::get_verbosity();
+                CurcumaOpt opt(opt_ctrl, true);
+                opt.overrideBasename(fmt::format("{}_opt_{:02d}", polymer.Name(), i));
+                opt.addMolecule(polymer_opt);
+                opt.start();
+                CurcumaLogger::set_verbosity(saved_verbosity);
+                const std::vector<Molecule>* finals = opt.Molecules();
+                if (finals && !finals->empty()) {
+                    polymer.setGeometry(finals->back().Coords());
+
+                    if (CurcumaLogger::get_verbosity() >= 3) {
+                        std::string debug_file = fmt::format("{}_debug_{:02d}_postFF.xyz", polymer.Name(), i);
+                        polymer.writeXYZFile(debug_file);
+                        CurcumaLogger::info(fmt::format("DEBUG: Wrote {}", debug_file));
+                    }
+                }
+
+                // Restore topology: intra-monomer geometric + interface bonds only — Claude Generated
                 int n = polymer.AtomCount();
                 Matrix topo = Matrix::Zero(n, n);
                 auto [dist2, _u2] = polymer.DistanceMatrix();
@@ -1074,6 +1276,7 @@ void PolymerBuild::assemblePolymer(const std::vector<std::string>& sequence)
                     for (int jj = ii+1; jj < n; ++jj) {
                         int ei = polymer.Atom(ii).first, ej = polymer.Atom(jj).first;
                         if (ei == 0 || ej == 0) continue;
+                        if (atom_monomer_id[ii] != atom_monomer_id[jj]) continue;
                         double co = Elements::CovalentRadius[ei] + Elements::CovalentRadius[ej];
                         if (dist2(ii,jj) > 1e-3 && dist2(ii,jj) <= co * 1.15)
                             topo(ii,jj) = topo(jj,ii) = 1.0;
@@ -1083,10 +1286,173 @@ void PolymerBuild::assemblePolymer(const std::vector<std::string>& sequence)
                         topo(b.first, b.second) = topo(b.second, b.first) = 1.0;
                 polymer.setTopologyMatrix(topo);
 
+                validateTopology(polymer, atom_monomer_id, interface_bonds,
+                                 fmt::format("step {:02d} post-FF (attempt {})", i, opt_attempt + 1));
+
                 checkDistances(polymer,
                                fmt::format("step {:02d} post-FF", i),
                                interface_bonds);
-            }
+
+                // Check for cross-monomer overlaps and displace if needed — Claude Generated
+                // Strategy: for each overlapping atom, pull it toward its own bonded neighbor
+                // (shortening the covalent bond) and push it perpendicular to the overlap plane
+                // by ~0.25 Å. This preserves monomer geometry better than pushing atoms apart.
+                int overlaps_found = 0;
+                Geometry geom = polymer.getGeometry();
+                const double perp_shift = 0.25;  // Å perpendicular displacement
+
+                // Build adjacency from topology for quick bonded-atom lookup
+                const Matrix& topo_post = polymer.getTopologyMatrix();
+
+                // Collect overlapping atoms with their overlap partner
+                // Each entry: (atom_idx, overlap_partner_idx, sign for up/down)
+                std::vector<std::tuple<int, int, double>> atoms_to_displace;
+
+                for (int ii = 0; ii < n; ++ii) {
+                    int ei = polymer.Atom(ii).first;
+                    if (ei == 0) continue;
+                    for (int jj = ii + 1; jj < n; ++jj) {
+                        int ej = polymer.Atom(jj).first;
+                        if (ej == 0) continue;
+                        if (atom_monomer_id[ii] == atom_monomer_id[jj]) continue;
+                        bool is_iface = false;
+                        for (const auto& b : interface_bonds)
+                            if ((b.first == ii && b.second == jj) || (b.first == jj && b.second == ii))
+                                { is_iface = true; break; }
+                        if (is_iface) continue;
+
+                        double d = dist2(ii, jj);
+                        double co = Elements::CovalentRadius[ei] + Elements::CovalentRadius[ej];
+                        if (d > 1e-3 && d < co * 1.3) {
+                            ++overlaps_found;
+                            atoms_to_displace.push_back({ii, jj, 1.0});
+                            atoms_to_displace.push_back({jj, ii, -1.0});
+                        }
+                    }
+                }
+
+                // Displace each overlapping atom
+                for (const auto& [atom_idx, partner_idx, sign] : atoms_to_displace) {
+                    Position r_atom = geom.row(atom_idx).transpose();
+                    Position r_partner = geom.row(partner_idx).transpose();
+
+                    // Find bonded neighbor of atom_idx from topology
+                    int bonded = -1;
+                    double best_d = 1e9;
+                    for (int kk = 0; kk < n; ++kk) {
+                        if (kk == atom_idx) continue;
+                        if (topo_post(atom_idx, kk) < 0.5) continue;
+                        double dd = (geom.row(kk).transpose() - r_atom).norm();
+                        if (dd < best_d) { best_d = dd; bonded = kk; }
+                    }
+
+                    if (bonded < 0) continue;  // no bonded atom found
+
+                    Position r_bonded = geom.row(bonded).transpose();
+                    Position bond_vec = (r_bonded - r_atom).normalized();
+                    Position overlap_vec = (r_partner - r_atom).normalized();
+
+                    // Perpendicular to the plane defined by bond and overlap vectors
+                    Position perp = bond_vec.cross(overlap_vec);
+                    if (perp.norm() < 1e-6)
+                        perp = bond_vec.cross(Position(0, 0, 1));  // fallback
+                    if (perp.norm() < 1e-6)
+                        perp = bond_vec.cross(Position(0, 1, 0));
+                    perp.normalize();
+
+                    // Pull atom toward its bonded neighbor (shorten covalent bond by 0.1 Å)
+                    // + push perpendicular by ±0.25 Å
+                    geom.row(atom_idx) += (bond_vec * 0.1 + perp * sign * perp_shift).transpose();
+                }
+
+                if (overlaps_found == 0) {
+                    if (opt_attempt > 0)
+                        CurcumaLogger::success(fmt::format("step {:02d}: overlaps resolved after {} attempts", i, opt_attempt + 1));
+                    break;  // No overlaps, done
+                }
+
+                // Apply displaced geometry and retry
+                polymer.setGeometry(geom);
+                CurcumaLogger::warn(fmt::format(
+                    "step {:02d}: {} cross-monomer overlaps after optimization, displacing atoms (attempt {}/{})",
+                    i, overlaps_found, opt_attempt + 1, max_opt_retries));
+
+                if (opt_attempt == max_opt_retries - 1 && overlaps_found > 0) {
+                    // Last resort: very cold MD to thermally resolve remaining overlaps — Claude Generated
+                    CurcumaLogger::warn(fmt::format(
+                        "step {:02d}: {} overlaps remain after {} retries, running cold MD to resolve...",
+                        i, overlaps_found, max_opt_retries));
+
+                    // Prepare molecule for MD (Xx → cap_intermediate, topology as bonds)
+                    Molecule md_mol = polymer;
+                    Mol md_info = md_mol.getMolInfo();
+                    for (int k = 0; k < md_mol.AtomCount(); ++k)
+                        if (md_info.m_atoms[k] == 0)
+                            md_info.m_atoms[k] = cap_intermediate_elem;
+                    if (polymer.hasPersistentTopology()) {
+                        const Matrix& t = polymer.getTopologyMatrix();
+                        md_info.m_bonds.clear();
+                        for (int ii2 = 0; ii2 < n; ++ii2)
+                            for (int jj2 = ii2 + 1; jj2 < n; ++jj2)
+                                if (t(ii2, jj2) > 0.5)
+                                    md_info.m_bonds.push_back({ii2, jj2});
+                    }
+                    md_info.m_charge = 0;
+                    md_mol.LoadMolecule(md_info);
+                    md_mol.setCharge(0);
+
+                    json cold_md_ctrl;
+                    cold_md_ctrl["simplemd"]["method"] = opt_method;
+                    cold_md_ctrl["simplemd"]["max_time"] = 200;
+                    cold_md_ctrl["simplemd"]["temperature"] = 10.0;  // very cold (10 K)
+                    cold_md_ctrl["simplemd"]["time_step"] = 0.5;
+                    cold_md_ctrl["simplemd"]["thermostat"] = "csvr";
+                    cold_md_ctrl["simplemd"]["coupling"] = 1.0;      // tight coupling
+                    cold_md_ctrl["simplemd"]["verbosity"] = 0;
+                    cold_md_ctrl["simplemd"]["write_xyz"] = false;
+                    cold_md_ctrl["simplemd"]["no_center"] = true;     // don't re-center
+                    cold_md_ctrl["simplemd"]["dump_frequency"] = 50;
+                    cold_md_ctrl["simplemd"]["print_frequency"] = 1000;
+
+                    int sv = CurcumaLogger::get_verbosity();
+                    SimpleMD cold_md(cold_md_ctrl, true);
+                    cold_md.setMolecule(md_mol);
+                    cold_md.Initialise();
+                    cold_md.start();
+                    CurcumaLogger::set_verbosity(sv);
+
+                    // Retrieve final MD geometry via CurrentMolecule() — Claude Generated
+                    {
+                        polymer.setGeometry(cold_md.CurrentMolecule().Coords());
+                        CurcumaLogger::info(fmt::format("step {:02d}: cold MD done, re-checking overlaps...", i));
+
+                        // Re-check overlaps after cold MD
+                        auto [dist_md, _umd] = polymer.DistanceMatrix();
+                        int remaining = 0;
+                        for (int ii2 = 0; ii2 < n; ++ii2) {
+                            int ei2 = polymer.Atom(ii2).first;
+                            if (ei2 == 0) continue;
+                            for (int jj2 = ii2 + 1; jj2 < n; ++jj2) {
+                                int ej2 = polymer.Atom(jj2).first;
+                                if (ej2 == 0) continue;
+                                if (atom_monomer_id[ii2] == atom_monomer_id[jj2]) continue;
+                                bool iface = false;
+                                for (const auto& b : interface_bonds)
+                                    if ((b.first == ii2 && b.second == jj2) || (b.first == jj2 && b.second == ii2))
+                                        { iface = true; break; }
+                                if (iface) continue;
+                                double co2 = Elements::CovalentRadius[ei2] + Elements::CovalentRadius[ej2];
+                                if (dist_md(ii2, jj2) > 1e-3 && dist_md(ii2, jj2) < co2 * 1.3)
+                                    ++remaining;
+                            }
+                        }
+                        if (remaining == 0)
+                            CurcumaLogger::success(fmt::format("step {:02d}: cold MD resolved all overlaps", i));
+                        else
+                            CurcumaLogger::error(fmt::format("step {:02d}: {} overlaps remain after cold MD", i, remaining));
+                    }
+                }
+            } // end retry loop
         }
 
         if (m_config.get<bool>("dynamics", false) && should_optimize) {
@@ -1123,73 +1489,10 @@ void PolymerBuild::assemblePolymer(const std::vector<std::string>& sequence)
 
     applyCapping(polymer);
 
-    // Post-capping optimization
-    if (m_config.get<bool>("optimize", true)) {
-        resolveOverlaps(polymer);
+    // Post-capping optimization removed — the loop now optimizes all fragments including the last
 
-        CurcumaLogger::info("Running post-capping optimization...");
-        json opt_ctrl;
-        opt_ctrl["opt"]["method"] = m_config.get<std::string>("opt_method", "uff");
-        opt_ctrl["opt"]["printOutput"] = false;
-        opt_ctrl["opt"]["writeXYZ"] = false;
-
-        Molecule polymer_opt = polymer;
-        polymer_opt.setCharge(0);
-        // cap=="none" may leave residual Xx — substitute them for the FF run
-        std::string ci_str2 = m_config.get<std::string>("cap_intermediate", "H");
-        int cap_intermediate_elem2 = Elements::String2Element(ci_str2);
-        if (cap_intermediate_elem2 <= 0) cap_intermediate_elem2 = 1;
-        std::vector<int> xx_indices;
-        Mol m_opt = polymer_opt.getMolInfo();
-        for (int i = 0; i < polymer_opt.AtomCount(); ++i) {
-            if (m_opt.m_atoms[i] == 0) {
-                xx_indices.push_back(i);
-                m_opt.m_atoms[i] = cap_intermediate_elem2;
-            }
-        }
-        polymer_opt.LoadMolecule(m_opt);
-
-        int saved_verbosity_cap = CurcumaLogger::get_verbosity();
-        CurcumaOpt opt(opt_ctrl, true);
-        opt.addMolecule(polymer_opt);
-        opt.start();
-        CurcumaLogger::set_verbosity(saved_verbosity_cap);
-        const std::vector<Molecule>* finals = opt.Molecules();
-        if (finals && !finals->empty()) {
-            const Molecule& opt_mol = finals->back();
-            Geometry opt_coords = opt_mol.Coords();
-            Geometry polymer_coords = polymer.Coords();
-            for (int i = 0; i < polymer.AtomCount() && i < opt_mol.AtomCount(); ++i) {
-                if (polymer.Atom(i).first != 0) {
-                    polymer_coords.row(i) = opt_coords.row(i);
-                }
-            }
-            polymer.setGeometry(polymer_coords);
-        }
-    }
-
-    // Final topology rebuild
-    {
-        int n = polymer.AtomCount();
-        Matrix topo = Matrix::Zero(n, n);
-        auto [dist, _unused] = polymer.DistanceMatrix();
-        for (int ii = 0; ii < n; ++ii) {
-            for (int jj = ii + 1; jj < n; ++jj) {
-                int ei = polymer.Atom(ii).first;
-                int ej = polymer.Atom(jj).first;
-                if (ei == 0 || ej == 0) continue;
-                double cutoff = Elements::CovalentRadius[ei] + Elements::CovalentRadius[ej];
-                if (dist(ii, jj) > 1e-3 && dist(ii, jj) <= cutoff * 1.15) {
-                    topo(ii, jj) = topo(jj, ii) = 1.0;
-                }
-            }
-        }
-        for (const auto& bond : interface_bonds) {
-            if (bond.first < n && bond.second < n)
-                topo(bond.first, bond.second) = topo(bond.second, bond.first) = 1.0;
-        }
-        polymer.setTopologyMatrix(topo);
-    }
+    // Final topology kept from last loop iteration (intra-monomer + interface bonds)
+    // applyCapping only changes element types, not atom count or ordering
 
     polymer.writeXYZFile(polymer.Name() + "_final.xyz");
     CurcumaLogger::success("Polymer assembly completed: " + polymer.Name() + "_final.xyz");

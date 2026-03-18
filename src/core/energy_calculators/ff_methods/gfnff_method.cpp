@@ -138,6 +138,12 @@ bool GFNFF::InitialiseMolecule(const Mol& molecule)
     m_atoms = molecule.m_atoms;
     m_gradient = Matrix::Zero(m_atomcount, 3);
 
+    // Store forced bonds from molecule (e.g. interface bonds from polymerbuild)
+    m_forced_bonds = molecule.m_bonds;
+    if (!m_forced_bonds.empty() && CurcumaLogger::get_verbosity() >= 2) {
+        CurcumaLogger::info(fmt::format("GFNFF: {} forced bonds from molecule", m_forced_bonds.size()));
+    }
+
     // Call existing initialization logic
     return InitialiseMolecule();
 }
@@ -268,38 +274,48 @@ const std::vector<std::pair<int,int>>& GFNFF::getCachedBondList() const {
             CurcumaLogger::info(fmt::format("Calculating bond list for {} atoms", m_atomcount));
         }
 
-        // Populate bond list using same detection logic as generateGFNFFBonds but without parameters
         std::vector<std::pair<int,int>> bonds;
-        double bond_threshold = 1.3;
 
-        // Detailed debug output only at verbosity 3
-        if (CurcumaLogger::get_verbosity() >= 3) {
-            CurcumaLogger::info("=== Bond Detection Debug ===");
-            CurcumaLogger::info(fmt::format("Atom count: {}", m_atomcount));
-            CurcumaLogger::info(fmt::format("Geometry rows: {}, cols: {}", m_geometry_bohr.rows(), m_geometry_bohr.cols()));
-        }
+        if (!m_forced_bonds.empty()) {
+            // Use externally provided bond list exclusively (e.g. from polymerbuild topology)
+            // This prevents spurious inter-monomer bonds from geometric detection — Claude Generated
+            for (const auto& fb : m_forced_bonds) {
+                auto canonical = fb.first < fb.second ? fb : std::make_pair(fb.second, fb.first);
+                if (canonical.first < m_atomcount && canonical.second < m_atomcount)
+                    bonds.push_back(canonical);
+            }
+            if (CurcumaLogger::get_verbosity() >= 2)
+                CurcumaLogger::info(fmt::format("GFNFF: Using {} bonds from external topology (geometric detection skipped)", bonds.size()));
+        } else {
+            // Default: geometric bond detection
+            double bond_threshold = 1.3;
 
-        for (int i = 0; i < m_atomcount; ++i) {
-            for (int j = i + 1; j < m_atomcount; ++j) {
-                Vector ri = m_geometry_bohr.row(i);
-                Vector rj = m_geometry_bohr.row(j);
-                double distance = (ri - rj).norm();
-                double rcov_i = getCovalentRadius(m_atoms[i]);
-                double rcov_j = getCovalentRadius(m_atoms[j]);
+            if (CurcumaLogger::get_verbosity() >= 3) {
+                CurcumaLogger::info("=== Bond Detection Debug ===");
+                CurcumaLogger::info(fmt::format("Atom count: {}", m_atomcount));
+                CurcumaLogger::info(fmt::format("Geometry rows: {}, cols: {}", m_geometry_bohr.rows(), m_geometry_bohr.cols()));
+            }
 
-                // Phase 3: Apply element-specific fat scaling factors (Claude Generated Jan 2026)
-                double threshold = bond_threshold * (rcov_i + rcov_j) * fat[m_atoms[i]] * fat[m_atoms[j]];
+            for (int i = 0; i < m_atomcount; ++i) {
+                for (int j = i + 1; j < m_atomcount; ++j) {
+                    Vector ri = m_geometry_bohr.row(i);
+                    Vector rj = m_geometry_bohr.row(j);
+                    double distance = (ri - rj).norm();
+                    double rcov_i = getCovalentRadius(m_atoms[i]);
+                    double rcov_j = getCovalentRadius(m_atoms[j]);
 
-                // Debug output for each pair - only at verbosity 3
-                if (CurcumaLogger::get_verbosity() >= 3) {
-                    CurcumaLogger::info(fmt::format("Pair {}-{}: dist={:.3f}, rcov_i={:.3f}, rcov_j={:.3f}, fat_i={:.3f}, fat_j={:.3f}, threshold={:.3f}",
-                                          i, j, distance, rcov_i, rcov_j, fat[m_atoms[i]], fat[m_atoms[j]], threshold));
-                }
+                    double threshold = bond_threshold * (rcov_i + rcov_j) * fat[m_atoms[i]] * fat[m_atoms[j]];
 
-                if (distance < threshold) {
-                    bonds.emplace_back(i, j);
                     if (CurcumaLogger::get_verbosity() >= 3) {
-                        CurcumaLogger::info(fmt::format("  -> BONDED"));
+                        CurcumaLogger::info(fmt::format("Pair {}-{}: dist={:.3f}, rcov_i={:.3f}, rcov_j={:.3f}, fat_i={:.3f}, fat_j={:.3f}, threshold={:.3f}",
+                                              i, j, distance, rcov_i, rcov_j, fat[m_atoms[i]], fat[m_atoms[j]], threshold));
+                    }
+
+                    if (distance < threshold) {
+                        bonds.emplace_back(i, j);
+                        if (CurcumaLogger::get_verbosity() >= 3) {
+                            CurcumaLogger::info(fmt::format("  -> BONDED"));
+                        }
                     }
                 }
             }
