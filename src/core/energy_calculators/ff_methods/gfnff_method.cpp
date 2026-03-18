@@ -567,8 +567,8 @@ double GFNFF::Calculation(bool gradient)
         return 0.0;
     }
 
-    if (!m_forcefield) {
-        CurcumaLogger::error("GFN-FF calculation failed: Force field not available");
+    if (!m_forcefield && !m_workspace) {
+        CurcumaLogger::error("GFN-FF calculation failed: Neither ForceField nor Workspace available");
         return 0.0;
     }
 
@@ -596,7 +596,7 @@ double GFNFF::Calculation(bool gradient)
     const bool do_timing = (CurcumaLogger::get_verbosity() >= 2);
     double t_cn = 0, t_dcn = 0, t_dc6dcn = 0, t_eeq = 0, t_threads = 0;
 
-    if (m_forcefield) {
+    {
         auto t0 = std::chrono::high_resolution_clock::now();
 
         auto cn_vec = CNCalculator::calculateGFNFFCN(m_atoms, m_geometry_bohr);
@@ -607,16 +607,14 @@ double GFNFF::Calculation(bool gradient)
             t_cn = std::chrono::duration<double, std::milli>(t1 - t0).count();
         }
 
-        // Claude Generated (Mar 2026): Phase 0 — distribute D3 CN once here,
-        // eliminating the duplicate calculation that was in ForceField::Calculate().
-        m_forcefield->distributeD3CN(cn);
+        // Distribute D3 CN to ForceField and workspace
+        if (m_forcefield) m_forcefield->distributeD3CN(cn);
+        if (m_workspace) {
+            m_workspace->setGeometry(m_geometry_bohr);
+            m_workspace->setD3CN(cn);
+        }
 
-        // CN distribution to threads:
-        // - gradient=true:  full distribution with dcn derivatives (TERM 1b + bond dEdcn chain-rule)
-        // - gradient=false: CN-only distribution so dynamic r0 in bonds uses current geometry CN
-        // Reference: Fortran gfnff_engrad.F90:418-422
-        // Claude Generated (Mar 2026, Phase 4): Prepare EEQ topology input (needed for both paths)
-        // Prepared before parallel section so getCachedTopology() is not called from threads.
+        // Prepare EEQ topology input (needed for both paths)
         EEQSolver::TopologyInput eeq_topo;
         const TopologyInfo* topo_ptr = nullptr;
         bool do_eeq = (m_eeq_solver && !m_skip_eeq_recalc);
@@ -645,12 +643,9 @@ double GFNFF::Calculation(bool gradient)
                             ? GFNFFParameters::cnf_eeq[z - 1] : 0.0;
             }
 
-            // Claude Generated (Mar 2026): Phase A — sequential calls, each using ALL pool workers internally
-            // Each function splits its O(N²) loop into T sub-tasks via pool->enqueue().
-            // At T=16, N=1280: wall ≈ (3+2+5)/16 = 0.63ms vs 5ms with 3-task dispatch.
             int total_threads = m_parameters.value("threads", 1);
-            auto* pool = m_forcefield->threadPool();
-            pool->setActiveThreadCount(total_threads);
+            auto* pool = m_forcefield ? m_forcefield->threadPool() : nullptr;
+            if (pool) pool->setActiveThreadCount(total_threads);
 
             std::vector<SpMatrix> dcn;
             Vector new_charges;
@@ -679,14 +674,25 @@ double GFNFF::Calculation(bool gradient)
                 t_eeq = 0;
             }
 
-            // Distribute results (sequential, fast pointer operations)
-            m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
-            if (m_d4_generator) {
-                // Claude Generated (Mar 2026): Zero-copy — threads point directly to D4Generator's matrix
-                m_forcefield->setDispersionDC6DCNPtr(&m_d4_generator->getDC6DCN());
+            // Distribute results to ForceField
+            if (m_forcefield) {
+                m_forcefield->distributeCNandDerivatives(cn, cnf, dcn);
+                if (m_d4_generator) {
+                    m_forcefield->setDispersionDC6DCNPtr(&m_d4_generator->getDC6DCN());
+                }
             }
+
+            // Distribute results to workspace
+            if (m_workspace) {
+                m_workspace->setCNDerivatives(cn, cnf, dcn);
+                if (m_d4_generator) {
+                    m_workspace->setDC6DCNPtr(&m_d4_generator->getDC6DCN());
+                }
+            }
+
             if (do_eeq && new_charges.size() == m_atomcount) {
-                m_forcefield->distributeEEQCharges(new_charges);
+                if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
+                if (m_workspace) m_workspace->setEEQCharges(new_charges);
                 m_charges = new_charges;
             }
 
@@ -695,7 +701,7 @@ double GFNFF::Calculation(bool gradient)
             }
         } else {
             // Energy-only: CN distribution + sequential EEQ
-            m_forcefield->distributeCNOnly(cn);
+            if (m_forcefield) m_forcefield->distributeCNOnly(cn);
 
             auto t_eeq_start = std::chrono::high_resolution_clock::now();
             if (do_eeq) {
@@ -705,7 +711,8 @@ double GFNFF::Calculation(bool gradient)
                     topo_ptr->hybridization, eeq_topo,
                     true, topo_ptr->alpeeq);
                 if (new_charges.size() == m_atomcount) {
-                    m_forcefield->distributeEEQCharges(new_charges);
+                    if (m_forcefield) m_forcefield->distributeEEQCharges(new_charges);
+                    if (m_workspace) m_workspace->setEEQCharges(new_charges);
                     m_charges = new_charges;
                 }
             }
@@ -731,20 +738,25 @@ double GFNFF::Calculation(bool gradient)
         // Store old counts for verbose output
         int old_hb_count = m_hb_reference ? m_hb_reference->nhb_count : 0;
         int old_xb_count = m_hb_reference ? m_hb_reference->nxb_count : 0;
-        int old_disp_count = m_forcefield->getDispersionPairCount();
+        int old_disp_count = m_forcefield ? m_forcefield->getDispersionPairCount()
+                           : (m_workspace ? m_workspace->dispersionPairCount() : 0);
 
         // Get current topology with updated geometry
         const TopologyInfo& topo = getCachedTopology();
 
         // Re-detect HB/XB pairs with Phase-1 charges (topology_charges)
-        // Reference: Fortran gfnff_ini.f90:859,871 uses topo%qa (Phase-1) for HB detection
-        // Phase-2 charges (nlist%q) are used for Coulomb energy, NOT for HB/XB detection
         json new_hbonds = detectHydrogenBonds(topo.topology_charges);
         json new_xbonds = detectHalogenBonds(topo.topology_charges);
 
         // Update ForceField parameters
-        m_forcefield->updateGFNFFHBonds(new_hbonds);
-        m_forcefield->updateGFNFFXBonds(new_xbonds);
+        if (m_forcefield) {
+            m_forcefield->updateGFNFFHBonds(new_hbonds);
+            m_forcefield->updateGFNFFXBonds(new_xbonds);
+        }
+
+        // TODO(Phase 3): Update workspace HB/XB when native structs available
+        // Workspace updateHBonds/updateXBonds takes native structs, not JSON.
+        // For now, workspace HB/XB lists remain at init values during MD.
 
         // Update reference geometry for next check
         m_hb_reference = HBReferenceGeometry{};
@@ -763,14 +775,23 @@ double GFNFF::Calculation(bool gradient)
     }
 
     // Claude Generated (Feb 21, 2026): Enable per-component gradient storage for invariance diagnosis
-    // Reference: Plan unified-baking-gizmo.md Step 4
     if (gradient && CurcumaLogger::get_verbosity() >= 2) {
-        m_forcefield->setStoreGradientComponents(true);
+        if (m_forcefield) m_forcefield->setStoreGradientComponents(true);
+        if (m_workspace) m_workspace->setStoreGradientComponents(true);
     }
 
-    // ForceField returns energy in Hartree (m_final_factor = 1)
+    // =========================================================================
+    // Phase B: Force field energy/gradient calculation
+    // Workspace path (m_use_workspace) or legacy ForceField path
+    // =========================================================================
     auto t_ff_start = std::chrono::high_resolution_clock::now();
-    double energy_hartree = m_forcefield->Calculate(gradient);
+    double energy_hartree;
+
+    if (m_use_workspace && m_workspace) {
+        energy_hartree = m_workspace->calculate(gradient);
+    } else {
+        energy_hartree = m_forcefield->Calculate(gradient);
+    }
     if (do_timing) {
         t_threads = std::chrono::duration<double, std::milli>(
             std::chrono::high_resolution_clock::now() - t_ff_start).count();
@@ -812,7 +833,12 @@ double GFNFF::Calculation(bool gradient)
         // Previous multiplication by BOHR_TO_ANGSTROM was incorrect and amplified gradients
         // Previous division by BOHR_TO_ANGSTROM was also incorrect and reduced gradients
         // Correct approach: Use gradient directly as returned by ForceField
-        Matrix grad_hartree = m_forcefield->Gradient();
+        Matrix grad_hartree;
+        if (m_use_workspace && m_workspace) {
+            grad_hartree = m_workspace->gradient();
+        } else {
+            grad_hartree = m_forcefield->Gradient();
+        }
         m_gradient = grad_hartree;  // No conversion needed
 
         // Claude Generated (Mar 2026): Add ALPB solvation gradient
@@ -879,16 +905,29 @@ double GFNFF::Calculation(bool gradient)
                     }
                 };
 
-                checkComponentInvariance(m_forcefield->GradientBond(),       "bond      ");
-                checkComponentInvariance(m_forcefield->GradientAngle(),      "angle     ");
-                checkComponentInvariance(m_forcefield->GradientTorsion(),    "torsion   ");
-                checkComponentInvariance(m_forcefield->GradientRepulsion(),  "repulsion ");
-                checkComponentInvariance(m_forcefield->GradientCoulomb(),    "coulomb   ");
-                checkComponentInvariance(m_forcefield->GradientDispersion(), "dispersion");
-                checkComponentInvariance(m_forcefield->GradientHB(),         "hb        ");
-                checkComponentInvariance(m_forcefield->GradientXB(),         "xb        ");
-                checkComponentInvariance(m_forcefield->GradientBATM(),       "batm      ");
-                checkComponentInvariance(m_forcefield->GradientATM(),        "atm       ");
+                if (m_use_workspace && m_workspace) {
+                    checkComponentInvariance(m_workspace->gradientBond(),       "bond      ");
+                    checkComponentInvariance(m_workspace->gradientAngle(),      "angle     ");
+                    checkComponentInvariance(m_workspace->gradientTorsion(),    "torsion   ");
+                    checkComponentInvariance(m_workspace->gradientRepulsion(),  "repulsion ");
+                    checkComponentInvariance(m_workspace->gradientCoulomb(),    "coulomb   ");
+                    checkComponentInvariance(m_workspace->gradientDispersion(), "dispersion");
+                    checkComponentInvariance(m_workspace->gradientHB(),         "hb        ");
+                    checkComponentInvariance(m_workspace->gradientXB(),         "xb        ");
+                    checkComponentInvariance(m_workspace->gradientBATM(),       "batm      ");
+                    checkComponentInvariance(m_workspace->gradientATM(),        "atm       ");
+                } else {
+                    checkComponentInvariance(m_forcefield->GradientBond(),       "bond      ");
+                    checkComponentInvariance(m_forcefield->GradientAngle(),      "angle     ");
+                    checkComponentInvariance(m_forcefield->GradientTorsion(),    "torsion   ");
+                    checkComponentInvariance(m_forcefield->GradientRepulsion(),  "repulsion ");
+                    checkComponentInvariance(m_forcefield->GradientCoulomb(),    "coulomb   ");
+                    checkComponentInvariance(m_forcefield->GradientDispersion(), "dispersion");
+                    checkComponentInvariance(m_forcefield->GradientHB(),         "hb        ");
+                    checkComponentInvariance(m_forcefield->GradientXB(),         "xb        ");
+                    checkComponentInvariance(m_forcefield->GradientBATM(),       "batm      ");
+                    checkComponentInvariance(m_forcefield->GradientATM(),        "atm       ");
+                }
             }
         }
     }
@@ -1637,6 +1676,35 @@ bool GFNFF::initializeForceField()
 
         if (CurcumaLogger::get_verbosity() >= 3) {
             CurcumaLogger::info("CN, CNF, and CN derivatives calculated and distributed for Coulomb gradients");
+        }
+    }
+
+    // =========================================================================
+    // Claude Generated (Mar 2026): Create FFWorkspace from same parameter set
+    // FFWorkspace replaces ForceField for GFN-FF energy/gradient calculation.
+    // Both paths coexist during Phase 2 validation.
+    // =========================================================================
+    {
+        int num_threads = m_parameters.value("threads", 1);
+        m_workspace = std::make_unique<FFWorkspace>(num_threads);
+        m_workspace->setAtomTypes(m_atoms);
+
+        // Generate a second copy of parameters for the workspace (ForceField consumed the first)
+        GFNFFParameterSet ws_params = generateGFNFFParameterSet();
+        m_workspace->setInteractionLists(std::move(ws_params));
+
+        // Set pool from ForceField (shared pool, workspace doesn't own it)
+        if (num_threads > 1 && m_forcefield->threadPool()) {
+            m_workspace->setPool(m_forcefield->threadPool());
+        }
+
+        m_workspace->partition();
+        m_use_workspace = true;
+
+        if (CurcumaLogger::get_verbosity() >= 3) {
+            CurcumaLogger::success(fmt::format("FFWorkspace created: {} bonds, {} disp, {} atoms, T={}",
+                m_workspace->bondCount(), m_workspace->dispersionPairCount(),
+                m_atomcount, num_threads));
         }
     }
 
@@ -7969,25 +8037,25 @@ ConfigManager GFNFF::extractDispersionConfig(const std::string& method) const
     return ConfigManager(method + "param", disp_config);
 }
 
-// Claude Generated: Energy component getter methods for regression testing (Nov 2025)
+// Claude Generated (Mar 2026): Energy component getters — workspace or ForceField
 double GFNFF::BondEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->BondEnergy();
+    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().bond;
+    return m_forcefield ? m_forcefield->BondEnergy() : 0.0;
 }
 
 double GFNFF::AngleEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->AngleEnergy();
+    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().angle;
+    return m_forcefield ? m_forcefield->AngleEnergy() : 0.0;
 }
 
 double GFNFF::DihedralEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->DihedralEnergy();
+    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().dihedral;
+    return m_forcefield ? m_forcefield->DihedralEnergy() : 0.0;
 }
 
 double GFNFF::InversionEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->InversionEnergy();
+    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().inversion;
+    return m_forcefield ? m_forcefield->InversionEnergy() : 0.0;
 }
 
 double GFNFF::VdWEnergy() const {
@@ -7996,64 +8064,59 @@ double GFNFF::VdWEnergy() const {
 }
 
 double GFNFF::RepulsionEnergy() const {
-    if (!m_forcefield) return 0.0;
-    // Claude Generated (Dec 2025): GFN-FF stores repulsion in separate member (m_gfnff_repulsion)
-    // This is standard exponential repulsion, not hydrogen bonding
-    return m_forcefield->HHEnergy();
+    if (m_use_workspace && m_workspace)
+        return m_workspace->energyComponents().bonded_rep + m_workspace->energyComponents().nonbonded_rep;
+    return m_forcefield ? m_forcefield->HHEnergy() : 0.0;
 }
 
 double GFNFF::BondedRepulsionEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->BondedRepulsionEnergy();
+    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().bonded_rep;
+    return m_forcefield ? m_forcefield->BondedRepulsionEnergy() : 0.0;
 }
 
 double GFNFF::NonbondedRepulsionEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->NonbondedRepulsionEnergy();
+    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().nonbonded_rep;
+    return m_forcefield ? m_forcefield->NonbondedRepulsionEnergy() : 0.0;
 }
 
 double GFNFF::DispersionEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->DispersionEnergy();
+    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().dispersion;
+    return m_forcefield ? m_forcefield->DispersionEnergy() : 0.0;
 }
 
 double GFNFF::CoulombEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->CoulombEnergy();
+    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().coulomb;
+    return m_forcefield ? m_forcefield->CoulombEnergy() : 0.0;
 }
 
-// Claude Generated (Jan 2, 2026): D3 and D4 dispersion energy accessors
 double GFNFF::D3Energy() const {
     if (!m_forcefield) return 0.0;
     return m_forcefield->D3Energy();
 }
 
 double GFNFF::D4Energy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->D4Energy();
+    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().dispersion;
+    return m_forcefield ? m_forcefield->D4Energy() : 0.0;
 }
 
-// BF (Bonded ATM/GFN-FF) - Claude Generated (January 17, 2026)
-// GFN-FF batm (bonded ATM) energy accessor for 1,4-pairs
 double GFNFF::BatmEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->BatmEnergy();
+    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().batm;
+    return m_forcefield ? m_forcefield->BatmEnergy() : 0.0;
 }
 
-// Claude Generated (Dec 2025): H-bond, X-bond, and ATM energy accessors via ForceField
 double GFNFF::HydrogenBondEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->HydrogenBondEnergy();
+    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().hbond;
+    return m_forcefield ? m_forcefield->HydrogenBondEnergy() : 0.0;
 }
 
 double GFNFF::HalogenBondEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->HalogenBondEnergy();
+    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().xbond;
+    return m_forcefield ? m_forcefield->HalogenBondEnergy() : 0.0;
 }
 
 double GFNFF::ATMEnergy() const {
-    if (!m_forcefield) return 0.0;
-    return m_forcefield->ATMEnergy();
+    if (m_use_workspace && m_workspace) return m_workspace->energyComponents().atm;
+    return m_forcefield ? m_forcefield->ATMEnergy() : 0.0;
 }
 
 // =================================================================================
@@ -8062,18 +8125,50 @@ double GFNFF::ATMEnergy() const {
 
 void GFNFF::setStoreGradientComponents(bool store) {
     if (m_forcefield) m_forcefield->setStoreGradientComponents(store);
+    if (m_workspace) m_workspace->setStoreGradientComponents(store);
 }
 
-Matrix GFNFF::GradientBond() const { return m_forcefield ? m_forcefield->GradientBond() : Matrix(); }
-Matrix GFNFF::GradientAngle() const { return m_forcefield ? m_forcefield->GradientAngle() : Matrix(); }
-Matrix GFNFF::GradientTorsion() const { return m_forcefield ? m_forcefield->GradientTorsion() : Matrix(); }
-Matrix GFNFF::GradientRepulsion() const { return m_forcefield ? m_forcefield->GradientRepulsion() : Matrix(); }
-Matrix GFNFF::GradientCoulomb() const { return m_forcefield ? m_forcefield->GradientCoulomb() : Matrix(); }
-Matrix GFNFF::GradientDispersion() const { return m_forcefield ? m_forcefield->GradientDispersion() : Matrix(); }
-Matrix GFNFF::GradientHB() const { return m_forcefield ? m_forcefield->GradientHB() : Matrix(); }
-Matrix GFNFF::GradientXB() const { return m_forcefield ? m_forcefield->GradientXB() : Matrix(); }
-Matrix GFNFF::GradientBATM() const { return m_forcefield ? m_forcefield->GradientBATM() : Matrix(); }
-Matrix GFNFF::GradientATM() const { return m_forcefield ? m_forcefield->GradientATM() : Matrix(); }
+// Claude Generated (Mar 2026): Component gradient getters — workspace or ForceField
+Matrix GFNFF::GradientBond() const {
+    if (m_use_workspace && m_workspace) return m_workspace->gradientBond();
+    return m_forcefield ? m_forcefield->GradientBond() : Matrix();
+}
+Matrix GFNFF::GradientAngle() const {
+    if (m_use_workspace && m_workspace) return m_workspace->gradientAngle();
+    return m_forcefield ? m_forcefield->GradientAngle() : Matrix();
+}
+Matrix GFNFF::GradientTorsion() const {
+    if (m_use_workspace && m_workspace) return m_workspace->gradientTorsion();
+    return m_forcefield ? m_forcefield->GradientTorsion() : Matrix();
+}
+Matrix GFNFF::GradientRepulsion() const {
+    if (m_use_workspace && m_workspace) return m_workspace->gradientRepulsion();
+    return m_forcefield ? m_forcefield->GradientRepulsion() : Matrix();
+}
+Matrix GFNFF::GradientCoulomb() const {
+    if (m_use_workspace && m_workspace) return m_workspace->gradientCoulomb();
+    return m_forcefield ? m_forcefield->GradientCoulomb() : Matrix();
+}
+Matrix GFNFF::GradientDispersion() const {
+    if (m_use_workspace && m_workspace) return m_workspace->gradientDispersion();
+    return m_forcefield ? m_forcefield->GradientDispersion() : Matrix();
+}
+Matrix GFNFF::GradientHB() const {
+    if (m_use_workspace && m_workspace) return m_workspace->gradientHB();
+    return m_forcefield ? m_forcefield->GradientHB() : Matrix();
+}
+Matrix GFNFF::GradientXB() const {
+    if (m_use_workspace && m_workspace) return m_workspace->gradientXB();
+    return m_forcefield ? m_forcefield->GradientXB() : Matrix();
+}
+Matrix GFNFF::GradientBATM() const {
+    if (m_use_workspace && m_workspace) return m_workspace->gradientBATM();
+    return m_forcefield ? m_forcefield->GradientBATM() : Matrix();
+}
+Matrix GFNFF::GradientATM() const {
+    if (m_use_workspace && m_workspace) return m_workspace->gradientATM();
+    return m_forcefield ? m_forcefield->GradientATM() : Matrix();
+}
 Matrix GFNFF::getDispCNCorrection() const { return m_forcefield ? m_forcefield->getDispCNCorrection() : Matrix(); }
 
 // =================================================================================

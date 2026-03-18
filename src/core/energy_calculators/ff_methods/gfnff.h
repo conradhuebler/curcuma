@@ -25,6 +25,7 @@
 #include "json.hpp"
 #include "src/core/config_manager.h"
 #include "src/core/energy_calculators/ff_methods/forcefield.h"
+#include "src/core/energy_calculators/ff_methods/ff_workspace.h"  // Claude Generated (Mar 2026): Unified workspace
 #include "src/core/energy_calculators/ff_methods/eeq_solver.h"  // EEQ charge calculation (Dec 2025 - Phase 3)
 #include "src/core/energy_calculators/ff_methods/huckel_solver.h"  // Full Hückel calculation (Jan 2026 - Phase 1)
 #include "src/core/energy_calculators/ff_methods/d4param_generator.h"  // Claude Generated (Feb 15, 2026): D4 for dc6dcn gradient
@@ -1818,6 +1819,8 @@ private:
     // GFN-FF specific
     json m_parameters; ///< GFN-FF parameters
     ForceField* m_forcefield; ///< Force field engine using modern structure
+    std::unique_ptr<FFWorkspace> m_workspace; ///< Claude Generated (Mar 2026): Unified workspace (replaces ForceField path)
+    bool m_use_workspace = false; ///< Use FFWorkspace path instead of ForceField
     Matrix m_geometry_bohr; ///< Geometry in Bohr (GFN-FF parameters are in Bohr)
 
     // EEQ charge calculation (Dec 2025 - Phase 3: Extraction and delegation)
