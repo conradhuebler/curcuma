@@ -1235,17 +1235,6 @@ GFNFF::GFNFFResults GFNFF::getResults() const
     results.e_repulsion = m_forcefield->HHEnergy();  // GFN-FF repulsion (HHEnergy = m_gfnff_repulsion)
     results.e_bonded_repulsion = m_forcefield->BondedRepulsionEnergy();
     results.e_coulomb = m_forcefield->CoulombEnergy();
-
-    // Claude Generated (March 2026): Compare ForceField Coulomb with EEQ-internal Coulomb
-    // If these differ, the Coulomb pair parameters are NOT consistent with the EEQ A-matrix.
-    if (m_eeq_solver && CurcumaLogger::get_verbosity() >= 1) {
-        double es_internal = m_eeq_solver->getInternalES();
-        double es_external = results.e_coulomb;
-        double diff = es_external - es_internal;
-        CurcumaLogger::result_fmt("Coulomb consistency: ForceField={:+.12f} EEQ_internal={:+.12f} diff={:+.6e} Eh",
-            es_external, es_internal, diff);
-    }
-
     results.e_dispersion = m_forcefield->DispersionEnergy();
     results.e_hb = m_forcefield->HydrogenBondEnergy();
     results.e_xb = m_forcefield->HalogenBondEnergy();

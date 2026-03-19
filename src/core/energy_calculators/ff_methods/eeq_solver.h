@@ -243,11 +243,6 @@ public:
         const Vector& cn
     );
 
-    /// Claude Generated (March 2026): Coulomb ES energy computed inside the EEQ solver
-    /// from the same A-matrix and RHS used to produce charges. Compare with ForceField's
-    /// separately computed Coulomb energy to detect parameter reconstruction bugs.
-    double getInternalES() const { return m_internal_es; }
-
     /**
      * @brief Calculate dgam corrections with full pi-system and amide detection
      *
@@ -726,7 +721,6 @@ private:
     };
 
     mutable Vector m_dxi_stored;      ///< Stored dxi corrections from last calculateCharges() call
-    mutable double m_internal_es = 0.0;  ///< Coulomb ES energy computed inside EEQ solver (for diagnostic comparison)
     mutable Matrix m_cached_topological_distances;  ///< Cached topological distances from Phase 1 for Phase 2 reuse (Jan 2, 2026)
 
     // Intelligent EEQ matrix caching for performance

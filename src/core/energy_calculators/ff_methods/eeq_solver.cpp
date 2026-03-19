@@ -2533,39 +2533,6 @@ Vector EEQSolver::calculateFinalCharges(
     // Store final result
     final_charges = current_charges;
 
-    // Claude Generated (March 2026): Compute Coulomb energy using EEQ A-matrix
-    // Reference: Fortran goed_gfnff (gfnff_engrad.F90:1709-1719) computes ES in-place
-    // ES = Σ_{i<j} q_i*q_j*A(i,j) - Σ_i q_i*x(i) + Σ_i 0.5*q_i²*A(i,i)
-    // This uses the SAME A-matrix and RHS that produced the charges — any difference
-    // vs ForceField's separate Coulomb calculation indicates a parameter reconstruction bug.
-    {
-        Matrix& A = m_phase2_A;
-        Vector& x_vec = m_phase2_rhs;
-        double es_term1 = 0.0, es_term2 = 0.0, es_term3 = 0.0;
-        for (int i = 0; i < natoms; ++i) {
-            for (int j = 0; j < i; ++j) {
-                es_term1 += final_charges(i) * final_charges(j) * A(i, j);
-            }
-            es_term2 -= final_charges(i) * x_vec(i);
-            es_term3 += 0.5 * final_charges(i) * final_charges(i) * A(i, i);
-        }
-        m_internal_es = es_term1 + es_term2 + es_term3;
-        if (m_verbosity >= 1) {
-            CurcumaLogger::result_fmt("EEQ internal ES: {:+.12f} Eh (T1={:+.12f} T2={:+.12f} T3={:+.12f})",
-                m_internal_es, es_term1, es_term2, es_term3);
-        }
-        // Claude Generated (March 2026): Dump per-atom EEQ parameters for comparison with Fortran
-        // A(i,i) = gameeq + tsqrt2pi/sqrt(alpeeq), x(i) = chieeq + cnf*sqrt(cn)
-        if (m_verbosity >= 1 && natoms <= 300) {
-            fmt::print(stderr, "=== Curcuma Phase-2 EEQ Parameters ===\n");
-            fmt::print(stderr, " Atom | Z  |   A(i,i)       |   RHS(x)        |    q\n");
-            for (int i = 0; i < natoms; ++i) {
-                fmt::print(stderr, "{:5d} | {:3d} | {:15.10f} | {:15.10f} | {:15.10f}\n",
-                    i + 1, atoms[i], A(i, i), x_vec(i), final_charges(i));
-            }
-        }
-    }
-
     // Validate charge conservation
     double total = final_charges.sum();
     if (std::abs(total - total_charge) > 1e-6) {
