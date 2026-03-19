@@ -963,6 +963,8 @@ void FFWorkspace::calcHydrogenBonds(int p)
         double r_HB_4 = r_HB * r_HB * r_HB * r_HB;
         double denom_DA = 1.0 / (r_AH_4 + r_HB_4);
 
+        // HBond uses Phase 1 topology charges from struct (same as ForceFieldThread)
+        // NOT Phase 2 EEQ charges — Fortran gfnff_engrad uses nhb1/nhb2 list charges
         double Q_H = ws_charge_scaling(hb.q_H, HB_ST, HB_SF);
         double Q_A = ws_charge_scaling(-hb.q_A, HB_ST, HB_SF);
         double Q_B = ws_charge_scaling(-hb.q_B, HB_ST, HB_SF);

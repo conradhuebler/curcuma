@@ -745,24 +745,51 @@ double GFNFF::Calculation(bool gradient)
         const TopologyInfo& topo = getCachedTopology();
 
         // Re-detect HB/XB pairs with Phase-1 charges (topology_charges)
-        json new_hbonds = detectHydrogenBonds(topo.topology_charges);
-        json new_xbonds = detectHalogenBonds(topo.topology_charges);
+        auto new_hbonds_native = detectHydrogenBondsNative(topo.topology_charges);
+        auto new_xbonds_native = detectHalogenBondsNative(topo.topology_charges);
 
-        // Update ForceField parameters
+        // Update ForceField parameters (JSON path for legacy ForceFieldThread)
         if (m_forcefield) {
-            m_forcefield->updateGFNFFHBonds(new_hbonds);
-            m_forcefield->updateGFNFFXBonds(new_xbonds);
+            json hb_json = json::array();
+            for (const auto& hb : new_hbonds_native) {
+                json j;
+                j["type"] = "hydrogen_bond"; j["case_type"] = hb.case_type;
+                j["i"] = hb.i; j["j"] = hb.j; j["k"] = hb.k;
+                j["basicity_A"] = hb.basicity_A; j["basicity_B"] = hb.basicity_B;
+                j["acidity_A"] = hb.acidity_A; j["acidity_B"] = hb.acidity_B;
+                j["q_H"] = hb.q_H; j["q_A"] = hb.q_A; j["q_B"] = hb.q_B;
+                j["r_cut"] = hb.r_cut;
+                j["neighbors_A"] = hb.neighbors_A; j["neighbors_B"] = hb.neighbors_B;
+                if (hb.case_type == 3) {
+                    j["acceptor_parent_index"] = hb.acceptor_parent_index;
+                    j["neighbors_C"] = hb.neighbors_C;
+                }
+                hb_json.push_back(j);
+            }
+            json xb_json = json::array();
+            for (const auto& xb : new_xbonds_native) {
+                json j;
+                j["type"] = "halogen_bond";
+                j["i"] = xb.i; j["j"] = xb.j; j["k"] = xb.k;
+                j["basicity_B"] = xb.basicity_B; j["acidity_X"] = xb.acidity_X;
+                j["q_X"] = xb.q_X; j["q_B"] = xb.q_B; j["r_cut"] = xb.r_cut;
+                xb_json.push_back(j);
+            }
+            m_forcefield->updateGFNFFHBonds(hb_json);
+            m_forcefield->updateGFNFFXBonds(xb_json);
         }
 
-        // TODO(Phase 3): Update workspace HB/XB when native structs available
-        // Workspace updateHBonds/updateXBonds takes native structs, not JSON.
-        // For now, workspace HB/XB lists remain at init values during MD.
+        // Update workspace HB/XB with native structs
+        if (m_workspace) {
+            m_workspace->updateHBonds(new_hbonds_native);
+            m_workspace->updateXBonds(new_xbonds_native);
+        }
 
         // Update reference geometry for next check
         m_hb_reference = HBReferenceGeometry{};
         m_hb_reference->reference_positions = m_geometry_bohr;
-        m_hb_reference->nhb_count = static_cast<int>(new_hbonds.size());
-        m_hb_reference->nxb_count = static_cast<int>(new_xbonds.size());
+        m_hb_reference->nhb_count = static_cast<int>(new_hbonds_native.size());
+        m_hb_reference->nxb_count = static_cast<int>(new_xbonds_native.size());
         m_hb_reference->needs_update = false;
 
         // Verbose output at level 2
@@ -1208,6 +1235,17 @@ GFNFF::GFNFFResults GFNFF::getResults() const
     results.e_repulsion = m_forcefield->HHEnergy();  // GFN-FF repulsion (HHEnergy = m_gfnff_repulsion)
     results.e_bonded_repulsion = m_forcefield->BondedRepulsionEnergy();
     results.e_coulomb = m_forcefield->CoulombEnergy();
+
+    // Claude Generated (March 2026): Compare ForceField Coulomb with EEQ-internal Coulomb
+    // If these differ, the Coulomb pair parameters are NOT consistent with the EEQ A-matrix.
+    if (m_eeq_solver && CurcumaLogger::get_verbosity() >= 1) {
+        double es_internal = m_eeq_solver->getInternalES();
+        double es_external = results.e_coulomb;
+        double diff = es_external - es_internal;
+        CurcumaLogger::result_fmt("Coulomb consistency: ForceField={:+.12f} EEQ_internal={:+.12f} diff={:+.6e} Eh",
+            es_external, es_internal, diff);
+    }
+
     results.e_dispersion = m_forcefield->DispersionEnergy();
     results.e_hb = m_forcefield->HydrogenBondEnergy();
     results.e_xb = m_forcefield->HalogenBondEnergy();
@@ -2317,6 +2355,11 @@ GFNFFParameterSet GFNFF::generateGFNFFParameterSet()
             }
         }
     }
+
+    // Cache the init topology so getCachedTopology() returns the same data
+    // used for HBond/XBond detection — avoids re-computation drift
+    m_cached_topology = topo_info;
+    m_geometry_tracker.updateGeometry(m_geometry_bohr);
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);

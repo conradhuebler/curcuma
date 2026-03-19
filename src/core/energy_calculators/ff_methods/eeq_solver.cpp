@@ -2533,6 +2533,39 @@ Vector EEQSolver::calculateFinalCharges(
     // Store final result
     final_charges = current_charges;
 
+    // Claude Generated (March 2026): Compute Coulomb energy using EEQ A-matrix
+    // Reference: Fortran goed_gfnff (gfnff_engrad.F90:1709-1719) computes ES in-place
+    // ES = Σ_{i<j} q_i*q_j*A(i,j) - Σ_i q_i*x(i) + Σ_i 0.5*q_i²*A(i,i)
+    // This uses the SAME A-matrix and RHS that produced the charges — any difference
+    // vs ForceField's separate Coulomb calculation indicates a parameter reconstruction bug.
+    {
+        Matrix& A = m_phase2_A;
+        Vector& x_vec = m_phase2_rhs;
+        double es_term1 = 0.0, es_term2 = 0.0, es_term3 = 0.0;
+        for (int i = 0; i < natoms; ++i) {
+            for (int j = 0; j < i; ++j) {
+                es_term1 += final_charges(i) * final_charges(j) * A(i, j);
+            }
+            es_term2 -= final_charges(i) * x_vec(i);
+            es_term3 += 0.5 * final_charges(i) * final_charges(i) * A(i, i);
+        }
+        m_internal_es = es_term1 + es_term2 + es_term3;
+        if (m_verbosity >= 1) {
+            CurcumaLogger::result_fmt("EEQ internal ES: {:+.12f} Eh (T1={:+.12f} T2={:+.12f} T3={:+.12f})",
+                m_internal_es, es_term1, es_term2, es_term3);
+        }
+        // Claude Generated (March 2026): Dump per-atom EEQ parameters for comparison with Fortran
+        // A(i,i) = gameeq + tsqrt2pi/sqrt(alpeeq), x(i) = chieeq + cnf*sqrt(cn)
+        if (m_verbosity >= 1 && natoms <= 300) {
+            fmt::print(stderr, "=== Curcuma Phase-2 EEQ Parameters ===\n");
+            fmt::print(stderr, " Atom | Z  |   A(i,i)       |   RHS(x)        |    q\n");
+            for (int i = 0; i < natoms; ++i) {
+                fmt::print(stderr, "{:5d} | {:3d} | {:15.10f} | {:15.10f} | {:15.10f}\n",
+                    i + 1, atoms[i], A(i, i), x_vec(i), final_charges(i));
+            }
+        }
+    }
+
     // Validate charge conservation
     double total = final_charges.sum();
     if (std::abs(total - total_charge) > 1e-6) {
@@ -2851,6 +2884,19 @@ Vector EEQSolver::calculateDgam(
     const int natoms = atoms.size();
     Vector dgam = Vector::Zero(natoms);
 
+    // Claude Generated (March 2026): Replicate Fortran piadr bug for N dgam
+    // Fortran gfnff_ini.f90:708 uses piadr(i) instead of piadr2(i):
+    //   piadr(k) = atom_index_of_kth_pi_atom (pi-index → atom)
+    //   piadr2(i) = pi_index_of_atom_i (atom → pi-index)
+    // piadr(i)!=0 is true for ALL i <= npiall (1-based), regardless of whether
+    // atom i is actually a pi atom. GFN-FF parameters were fit with this behavior.
+    // Line 709 passes piadr to amide() (same bug), but line 731 correctly uses piadr2 for amideH().
+    int npiall = 0;
+    for (int k = 0; k < natoms; ++k) {
+        if (!is_pi_atom.empty() && k < static_cast<int>(is_pi_atom.size()) && is_pi_atom[k])
+            npiall++;
+    }
+
     for (int i = 0; i < natoms; ++i) {
         int Z = atoms[i];
         double qa = charges(i);
@@ -2871,8 +2917,10 @@ Vector EEQSolver::calculateDgam(
             }
         } else if (Z == 7) {  // N
             ff = -0.13;  // Base N
-            if (!is_pi_atom.empty() && i < is_pi_atom.size() && is_pi_atom[i]) {
-                ff = -0.14;  // pi-system N
+            // Fortran piadr bug: piadr(i)!=0 iff i_fortran <= npiall
+            // In 0-based C++: i < npiall
+            if (i < npiall) {
+                ff = -0.14;  // "pi-system" N (Fortran piadr compatibility)
             }
             if (!is_amide.empty() && i < is_amide.size() && is_amide[i]) {
                 ff = -0.16;  // amide N
@@ -3055,18 +3103,28 @@ std::vector<bool> EEQSolver::detectAmideNitrogens(
 
     if (!topology.has_value()) return is_amide;
 
+    // Claude Generated (March 2026): Replicate Fortran piadr bug in amide() detection
+    // Fortran amide() (gfnff_ini2.f90:1553) receives piadr (NOT piadr2) as the pi array.
+    // piadr(i)!=0 is equivalent to i_fortran <= npiall, i.e. i_cpp < npiall.
+    // This means the "pi check" in amide() tests atom INDEX, not actual pi membership.
+    int npiall = 0;
+    for (int k = 0; k < natoms; ++k) {
+        if (is_pi_atom[k]) npiall++;
+    }
+
     for (int i = 0; i < natoms; ++i) {
         // FIX (Mar 7, 2026): Match Fortran amide() from gfnff_ini2.f90:1553-1580
-        // Requires: N in pi-system, hyb==3 (sp3), exactly ONE pi-C neighbor (nc==1),
-        // and that pi-C has exactly ONE terminal pi-O neighbor.
-        if (atoms[i] != 7 || !is_pi_atom[i]) continue;
+        // Updated (Mar 19, 2026): Use Fortran-compatible piadr index check
+        // Fortran: if (pi(a) .eq. 0 ...) → piadr(a)==0 → a > npiall → 0-based: i >= npiall
+        if (atoms[i] != 7 || i >= npiall) continue;
         if (i < static_cast<int>(hybridization.size()) && hybridization[i] != 3) continue;
 
         // Count pi-C neighbors (Fortran: nc)
+        // Fortran: at(j)==6 .and. pi(j).ne.0 → piadr(j)!=0 → j < npiall
         int nc = 0;
         int ic = -1;  // The single pi-C neighbor (if nc==1)
         for (int neighbor : topology->neighbor_lists[i]) {
-            if (atoms[neighbor] == 6 && is_pi_atom[neighbor]) {
+            if (atoms[neighbor] == 6 && neighbor < npiall) {
                 nc++;
                 ic = neighbor;
             }
@@ -3074,9 +3132,10 @@ std::vector<bool> EEQSolver::detectAmideNitrogens(
         if (nc != 1) continue;  // Must have EXACTLY one pi-C neighbor
 
         // Check if that pi-C has exactly one terminal pi-O neighbor (Fortran: no==1)
+        // Fortran: at(j)==8 .and. pi(j).ne.0 .and. nb(20,j)==1 → piadr(j)!=0 → j < npiall
         int no = 0;
         for (int n2 : topology->neighbor_lists[ic]) {
-            if (atoms[n2] == 8 && is_pi_atom[n2] &&
+            if (atoms[n2] == 8 && n2 < npiall &&
                 static_cast<int>(topology->neighbor_lists[n2].size()) == 1) {
                 no++;
             }

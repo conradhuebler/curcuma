@@ -1114,7 +1114,7 @@ void ForceField::setGFNFFHydrogenBonds(const json& hbonds)
         bond.q_A = hb["q_A"];
         bond.q_B = hb["q_B"];
 
-        bond.case_type = hb.value("case", 1);
+        bond.case_type = hb.value("case_type", hb.value("case", 1));
         bond.r_cut = hb.value("r_cut", 50.0);
 
         if (hb.contains("neighbors_A")) {
@@ -1123,8 +1123,8 @@ void ForceField::setGFNFFHydrogenBonds(const json& hbonds)
         if (hb.contains("neighbors_B")) {
             bond.neighbors_B = hb["neighbors_B"].get<std::vector<int>>();
         }
-        if (hb.contains("acceptor_parent")) {
-            bond.acceptor_parent_index = hb["acceptor_parent"];
+        if (hb.contains("acceptor_parent_index")) {
+            bond.acceptor_parent_index = hb["acceptor_parent_index"];
         }
         if (hb.contains("neighbors_C")) {
             bond.neighbors_C = hb["neighbors_C"].get<std::vector<int>>();
@@ -1205,7 +1205,7 @@ void ForceField::updateGFNFFHBonds(const json& hbonds)
         bond.q_A = hb["q_A"];
         bond.q_B = hb["q_B"];
 
-        bond.case_type = hb.value("case", 1);
+        bond.case_type = hb.value("case_type", hb.value("case", 1));
         bond.r_cut = hb.value("r_cut", 50.0);
 
         if (hb.contains("neighbors_A")) {
@@ -1214,8 +1214,8 @@ void ForceField::updateGFNFFHBonds(const json& hbonds)
         if (hb.contains("neighbors_B")) {
             bond.neighbors_B = hb["neighbors_B"].get<std::vector<int>>();
         }
-        if (hb.contains("acceptor_parent")) {
-            bond.acceptor_parent_index = hb["acceptor_parent"];
+        if (hb.contains("acceptor_parent_index")) {
+            bond.acceptor_parent_index = hb["acceptor_parent_index"];
         }
         if (hb.contains("neighbors_C")) {
             bond.neighbors_C = hb["neighbors_C"].get<std::vector<int>>();

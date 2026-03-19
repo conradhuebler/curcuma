@@ -6,6 +6,7 @@ export PROJECT_ROOT='/home/conrad/src/claude_curcuma/curcuma/test_cases/cli/../.
 # Claude Generated - GFN-FF performance and accuracy validation for large molecules
 
 set -e
+export LC_NUMERIC=C
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../test_utils.sh"
@@ -13,22 +14,21 @@ source "$SCRIPT_DIR/../../test_utils.sh"
 TEST_NAME="gfnff - 01: Complex Molecule GFN-FF Single Point"
 TEST_DIR="$SCRIPT_DIR"
 
-# Reference values from XTB 6.6.1 execution (gfnff_goal.md)
+# Reference values from Fortran gfnff-tools analyzer (native GFN-FF reference)
 # Test molecule: complex.xyz (231 atoms)
-REFERENCE_TOTAL_ENERGY="-37.241047037682"  # Eh
-REFERENCE_BOND_ENERGY="-37.025272932603"   # Eh
-REFERENCE_ANGLE_ENERGY="0.056188704445"    # Eh
-REFERENCE_TORSION_ENERGY="0.066781311807"  # Eh
-REFERENCE_REPULSION_ENERGY="0.893441587292" # Eh
-REFERENCE_ELECTROSTATIC_ENERGY="-0.935935235251" # Eh
-REFERENCE_DISPERSION_ENERGY="-0.254176469169" # Eh
-REFERENCE_HB_ENERGY="-0.022713449277"     # Eh
+REFERENCE_TOTAL_ENERGY="-37.240651871163"  # Eh
+REFERENCE_BOND_ENERGY="-37.025276030856"   # Eh
+REFERENCE_ANGLE_ENERGY="0.056188723147"    # Eh
+REFERENCE_TORSION_ENERGY="0.067178933292"  # Eh
+REFERENCE_REPULSION_ENERGY="0.893442291451" # Eh
+REFERENCE_ELECTROSTATIC_ENERGY="-0.935935258092" # Eh
+REFERENCE_DISPERSION_ENERGY="-0.254176506477" # Eh
+REFERENCE_HB_ENERGY="-0.022713456123"     # Eh
 
-# Tolerances - relaxed for development (Claude Generated Jan 15, 2026)
-# Current implementation has pibo corrections working, but still needs further refinement
-ENERGY_TOLERANCE="0.00001"       # 3.0 Eh tolerance (current error: ~2.6 Eh after pibo fix)
-COMPONENT_TOLERANCE="0.00001"    # 2.0 Eh for individual components
-LARGE_ERROR_TOLERANCE="0.0001"  # 5.0 Eh for detecting major regressions
+# Tolerances for 231-atom complex molecule (tightened after piadr fix, Mar 2026)
+ENERGY_TOLERANCE="0.000005"      # 5 µEh tolerance for total energy
+COMPONENT_TOLERANCE="0.000005"   # 5 µEh for individual components
+LARGE_ERROR_TOLERANCE="0.0001"   # 100 µEh for detecting major regressions
 PERFORMANCE_TIMEOUT=120      # 2 minutes maximum
 
 run_test() {
