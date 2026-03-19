@@ -5556,8 +5556,7 @@ std::vector<double> GFNFF::calculatePiBondOrders(
     // Calculate size needed for triangular storage
     int max_index = m_atomcount * (m_atomcount + 1) / 2;
 
-    // DEBUG: Check which path we're taking (Claude Generated Jan 15, 2026)
-    if (CurcumaLogger::get_verbosity() >= 1) {
+    if (CurcumaLogger::get_verbosity() >= 3) {
         CurcumaLogger::info("=== calculatePiBondOrders() Debug ===");
         CurcumaLogger::param("m_use_full_huckel", m_use_full_huckel ? "true" : "false");
         CurcumaLogger::param("m_huckel_solver", m_huckel_solver ? "exists" : "null");
