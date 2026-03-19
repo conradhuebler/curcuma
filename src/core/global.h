@@ -27,6 +27,7 @@
 #include <string>
 
 #include <Eigen/Dense>
+#include <Eigen/Sparse>
 
 #include "src/global_config.h"
 #include "src/version.h"
@@ -57,6 +58,7 @@ typedef Eigen::Vector3d Position;
 typedef Eigen::Vector4d Vector4d;
 
 typedef Eigen::VectorXd Vector;
+typedef Eigen::SparseMatrix<double> SpMatrix;  // Claude Generated (Mar 2026, Phase 3): Sparse dcn matrices
 typedef std::pair<int, int> IntPair;
 typedef std::vector<std::string> StringList;
 
