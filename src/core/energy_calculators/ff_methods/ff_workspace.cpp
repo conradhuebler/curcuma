@@ -63,10 +63,17 @@ void FFWorkspace::setInteractionLists(GFNFFParameterSet&& params)
 
     m_bond_hb_data = std::move(params.bond_hb_data);
 
+    // UFF/QMDFF non-bonded pairs
+    m_vdws = std::move(params.vdws);
+
     m_eeq_charges = std::move(params.eeq_charges);
     m_topology_charges = std::move(params.topology_charges);
 
     m_e0 = params.e0;
+
+    // Method type and distance unit factor
+    m_method_type = params.method_type;
+    m_au = (m_method_type != FFMethodType::GFN_FF) ? 1.889726125 : 1.0;
 
     m_dispersion_enabled = params.dispersion_enabled;
     m_hbond_enabled = params.hbond_enabled;
@@ -140,6 +147,7 @@ void FFWorkspace::partition()
         pr.xbonds = linearRange(m_xbonds.size(), t, T);
         pr.atm_triples = linearRange(m_atm_triples.size(), t, T);
         pr.batm_triples = linearRange(m_batm_triples.size(), t, T);
+        pr.vdws = linearRange(m_vdws.size(), t, T);
     }
 
     if (CurcumaLogger::get_verbosity() >= 3) {
@@ -196,10 +204,20 @@ double FFWorkspace::calculate(bool gradient)
 {
     m_do_gradient = gradient;
 
+    // Select execute function based on method type
+    auto executeMethod = [this](int t) {
+        if (m_method_type == FFMethodType::UFF)
+            executeUFF(t);
+        else if (m_method_type == FFMethodType::QMDFF)
+            executeQMDFF(t);
+        else
+            executeGFNFF(t);
+    };
+
     if (m_num_threads == 1) {
         // T=1: Direct call, zero pool overhead
         m_accumulators[0].reset(m_natoms, gradient, m_store_components);
-        executeGFNFF(0);
+        executeMethod(0);
 
         // acc[0] IS the result — zero-copy swap
         m_result_energy = m_accumulators[0].energy;
@@ -228,8 +246,8 @@ double FFWorkspace::calculate(bool gradient)
         std::vector<std::future<void>> futures;
         futures.reserve(m_num_threads - 1);
         for (int t = 1; t < m_num_threads; ++t)
-            futures.push_back(m_pool->enqueue([this, t]() { executeGFNFF(t); }));
-        executeGFNFF(0);  // Main thread works on partition 0
+            futures.push_back(m_pool->enqueue([this, t, &executeMethod]() { executeMethod(t); }));
+        executeMethod(0);  // Main thread works on partition 0
         for (auto& f : futures)
             f.get();
 

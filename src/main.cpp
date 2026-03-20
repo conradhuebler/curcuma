@@ -1434,7 +1434,9 @@ int executeOptimization(const json& controller, int argc, char** argv) {
     }
 
     // Parse optional optimizer parameter from controller
-    json opt_config_base = controller.contains("opt") ? controller["opt"] : json::object();
+    // Guard against null JSON (can occur when -opt is used without additional parameters)
+    json opt_config_base = (controller.contains("opt") && controller["opt"].is_object())
+                           ? controller["opt"] : json::object();
     std::string optimizer_method = opt_config_base.value("optimizer", "auto");
 
     if (optimizer_method != "auto" && optimizer_method != "") {

@@ -49,13 +49,15 @@
 struct FFEnergyComponents {
     double bond = 0, angle = 0, dihedral = 0, inversion = 0;
     double dispersion = 0;
-    double bonded_rep = 0, nonbonded_rep = 0;
+    double vdw = 0, rep = 0;                    // UFF/QMDFF LJ non-bonded (attractive/repulsive)
+    double bonded_rep = 0, nonbonded_rep = 0;   // GFN-FF exponential repulsion
     double coulomb = 0, hbond = 0, xbond = 0;
     double atm = 0, batm = 0, stors = 0;
 
     void reset() {
         bond = angle = dihedral = inversion = 0;
         dispersion = 0;
+        vdw = rep = 0;
         bonded_rep = nonbonded_rep = 0;
         coulomb = hbond = xbond = 0;
         atm = batm = stors = 0;
@@ -64,6 +66,7 @@ struct FFEnergyComponents {
     FFEnergyComponents& operator+=(const FFEnergyComponents& o) {
         bond += o.bond; angle += o.angle; dihedral += o.dihedral;
         inversion += o.inversion; dispersion += o.dispersion;
+        vdw += o.vdw; rep += o.rep;
         bonded_rep += o.bonded_rep; nonbonded_rep += o.nonbonded_rep;
         coulomb += o.coulomb; hbond += o.hbond; xbond += o.xbond;
         atm += o.atm; batm += o.batm; stors += o.stors;
@@ -72,6 +75,7 @@ struct FFEnergyComponents {
 
     double total() const {
         return bond + angle + dihedral + inversion + dispersion +
+               vdw + rep +
                bonded_rep + nonbonded_rep + coulomb + hbond + xbond +
                atm + batm + stors;
     }
@@ -142,6 +146,7 @@ struct PartitionRanges {
     std::pair<int,int> xbonds = {0,0};
     std::pair<int,int> atm_triples = {0,0};
     std::pair<int,int> batm_triples = {0,0};
+    std::pair<int,int> vdws = {0,0};            // UFF/QMDFF LJ pairs
 };
 
 /**
@@ -282,7 +287,11 @@ private:
     bool m_repulsion_enabled = true;
     bool m_coulomb_enabled = true;
 
-    // === Master interaction lists (owned, moved from GFNFFParameterSet) ===
+    // === Method type (set by setInteractionLists) ===
+    FFMethodType m_method_type = FFMethodType::GFN_FF;
+    double m_au = 1.0;  ///< Distance unit factor: 1.0 (GFN-FF/Bohr), 1.889726125 (UFF/QMDFF Å→Bohr)
+
+    // === Master interaction lists (owned, moved from ForceFieldParameterSet) ===
     std::vector<Bond> m_bonds;
     std::vector<Angle> m_angles;
     std::vector<Dihedral> m_dihedrals, m_extra_dihedrals;
@@ -297,6 +306,7 @@ private:
     std::vector<GFNFFBatmTriple> m_batm_triples;
     std::vector<BondHBEntry> m_bond_hb_data;
     std::vector<HBGradEntry> m_hb_grad_entries;
+    std::vector<vdW> m_vdws;                    ///< UFF/QMDFF LJ non-bonded pairs
 
     // Cached bonded pairs for fast repulsion lookup
     std::set<std::pair<int,int>> m_bonded_pairs;
@@ -319,6 +329,8 @@ private:
 
     // === Core execution ===
     void executeGFNFF(int partition);
+    void executeUFF(int partition);    ///< Claude Generated (March 2026): UFF energy/gradient
+    void executeQMDFF(int partition);  ///< Claude Generated (March 2026): QMDFF energy/gradient
     void postProcess(bool gradient);
     void reduce();
 
@@ -340,6 +352,15 @@ private:
     void calcATMGradient(int p);
     void calcBATM(int p);
     void computeHBCoordinationNumbers(int p);
+
+    // === UFF/QMDFF energy term calculators (Claude Generated March 2026) ===
+    void calcUFFBonds(int p);
+    void calcUFFAngles(int p);
+    void calcUFFDihedrals(int p);
+    void calcUFFInversions(int p);
+    void calcUFFvdW(int p);
+    void calcQMDFFBonds(int p);
+    void calcQMDFFAngles(int p);
 
     // === Helpers ===
 
